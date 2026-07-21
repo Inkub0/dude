@@ -1,4 +1,5 @@
 /build*
+!/build.sh
 *~
 .*.swp
 *.pyc
@@ -16,6 +17,9 @@
 
 /neo/CMakeSettings.json
 
+# harvested shader corpus (copyrighted game/mod content)
+/testdata/
+
 # Doom 3 game data — copyrighted, must never be committed.
 # base/ keeps its tracked upstream .cfg files; only the data/keys are ignored.
 *.pk4
@@ -26,3 +30,4 @@
 /d3xp/
 /d3le/
 savegames/
+*.pk4.orig
