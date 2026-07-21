@@ -85,18 +85,42 @@ none of the current shaders do.
 | generic.vert/.frag | *(new — was fixed function)* | GUI/2D/old material stages: texmatrix + vertex-color modes |
 | fog.vert/.frag | *(new — was fixed function)* | fog pass texgen planes |
 | blendlight.vert/.frag | *(new — was fixed function)* | blend-light projection |
+| portalsky.vert/.frag | d3xp portalSky.vfp | samples _currentRender at screen pos |
+| bloodorb.vert/.frag | d3xp bloodOrb1-3.vfp | screen-warp orb; 3 tints via u_localParam1 |
 
 The four *(new)* shaders replace fixed-function paths that never had ARB programs;
 their exact parameter plumbing gets verified when the Phase 3 GL 3.3 backend wires
 them up.
 
+**d3xp (RoE) customs:** portalSky and bloodOrb1-3 are hand-translated above. The
+remaining d3xp customs (`enviroSuit`, `flare`, `motionBlur`, `glasswarp`) lean on
+projective screen-warps (`TXP` / `fragment.position.w`) — deliberately left for the
+ARB→GLSL transpiler (below), which mechanizes `TXP`→`textureProj` and the `.w`
+bookkeeping uniformly rather than risking hand-translation errors on each.
+
 ## Not translated yet (tracked follow-ups)
 
 - `test.vfp` (r_testARBProgram debug aid) — low value, translate on demand.
 - `megaTexture.vfp` — not present in retail pak000; only needed for megatexture materials.
-- **d3xp customs** (`bloodOrb1-3.vfp`, `enviroSuit.vfp`, `flare.vfp`, `motionBlur.vfp`,
-  `portalSky.vfp`, `*glasswarp.txt`) — material-referenced expansion shaders; same
-  mechanical translation, do before flipping d3xp to the new backends.
+- **d3xp customs, remaining** (`enviroSuit.vfp`, `flare.vfp`, `motionBlur.vfp`,
+  `*glasswarp.txt`) — material-referenced expansion shaders with projective
+  screen-warps; slated for the transpiler, must exist before flipping d3xp to the new
+  backends. (`portalSky`, `bloodOrb1-3` already hand-translated.)
+- **Cross-verification**: `scripts/crossdiff_shaders.py` executes hand-translated and
+  transpiled shader pairs (two independent derivations of the same ARB source) as
+  Python vec-ops with identical seeded inputs and compares outputs numerically —
+  currently 11 pairs × vp+fp × 6 seeds, 120/120 matching. It caught one real hand
+  translation bug (heathaze_maskvertex: mask×vertexColor must precede the kill test,
+  fixed). Note: hand shaders number varyings sequentially while transpiled ones keep
+  ARB texcoord indices (color at loc 8) — semantically fine per pair, mapped in the
+  harness; the Phase 3 loader must never mix stages across the two conventions.
+- **Transpiler status**: the ARB→GLSL transpiler exists (renderer/ArbProgram.{h,cpp}
+  parser + renderer/ArbToGlsl.{h,cpp} codegen, `arbtool` CLI). Transpiled shaders use
+  the raw ARB parameter model via [arbparams.glsl](arbparams.glsl) (u_env[]/u_local[]
+  + state matrices) instead of RenderParams. Corpus result: 64/64 programs (base,
+  d3xp, Phobos incl. bloom suite) transpile and all 128 outputs compile as GLSL 330
+  and SPIR-V (`scripts/validate_transpiled.py`). Remaining: cross-diff vs the hand
+  translations, degrade-don't-crash wiring in the Phase 3 loader.
 - **Mod compatibility (goal: translate ARB from as many public mods as possible)**:
   materials can reference arbitrary custom ARB programs from mod pk4s. The target is a
   general **ARB assembly → GLSL transpiler** that handles the real-world corpus of

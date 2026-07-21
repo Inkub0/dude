@@ -645,6 +645,8 @@ set(src_renderer
 	renderer/Image_load.cpp
 	renderer/Image_process.cpp
 	renderer/Image_program.cpp
+	renderer/ArbProgram.cpp
+	renderer/ArbToGlsl.cpp
 	renderer/ImmediateMode.cpp
 	renderer/Interaction.cpp
 	renderer/Material.cpp
@@ -1307,6 +1309,10 @@ endif()
 
 include_directories(${CMAKE_BINARY_DIR})
 include_directories(${CMAKE_SOURCE_DIR})
+
+# standalone tester for the ARB shader parser/transpiler (std C++ only,
+# shares renderer/ArbProgram.cpp with the engine)
+add_executable(arbtool tools/arbtool/arbtool.cpp renderer/ArbProgram.cpp renderer/ArbToGlsl.cpp)
 
 add_library(idlib STATIC ${src_idlib})
 if(SDL3)

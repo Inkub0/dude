@@ -15,11 +15,12 @@ VARY(3) in vec4 var_Color;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-	vec2 mask = texture( u_maskMap, var_TexMask ).xy;
+	// NOTE: the ARB program scales the mask by the vertex color BEFORE the
+	// kill test (caught by scripts/crossdiff_shaders.py)
+	vec2 mask = texture( u_maskMap, var_TexMask ).xy * var_Color.xy;
 	if ( mask.x - 0.01 < 0.0 || mask.y - 0.01 < 0.0 ) {
 		discard;
 	}
-	mask *= var_Color.xy;
 
 	vec4 bump = texture( u_normalMap, var_TexDistort );
 	bump.x = bump.a;

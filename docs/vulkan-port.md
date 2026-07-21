@@ -168,6 +168,17 @@ does it. This retires the ARB assembly path entirely once the GL 3.3 backend lan
 As the ARB programs are not just shaders, may need to add a translation layer, to also
 keep mods compatibility (see "Mod compatibility scope" below).
 
+**Verification levels for the translations** (in order of increasing strength):
+1. glslang compile validation, both targets (done, automated via neo/shaders/validate.py);
+2. instruction-level construction review against engine bindings (done);
+3. transpiler cross-check — the ARB→GLSL transpiler is an independent second
+   derivation; machine-diff it against the hand translations;
+4. differential pixel harness — render identical inputs through the legacy ARB
+   path (GL compatibility context; the old renderer is the reference
+   implementation) and the translated GLSL 330 (core context), diff pixels;
+5. Phase 3/5 in-engine parity: same scene under r_graphicsAPI toggle + RenderDoc,
+   "perceptually equivalent captures" bar.
+
 ### Phase 2.5 - Material IR
 Convert `idMaterial` stages into a renderer-facing Material IR containing:
 - textures and resource bindings
