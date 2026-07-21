@@ -2463,12 +2463,33 @@ void idCommonLocal::InitRenderSystem( void ) {
 idCommonLocal::PrintLoadingMessage
 =================
 */
+extern idCVar r_scaleMenusTo43;	// DUDE: also used for the loading splash
+
 void idCommonLocal::PrintLoadingMessage( const char *msg ) {
 	if ( !( msg && *msg ) ) {
 		return;
 	}
 	renderSystem->BeginFrame( renderSystem->GetScreenWidth(), renderSystem->GetScreenHeight() );
-	renderSystem->DrawStretchPic( 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 1, 1, declManager->FindMaterial( "splashScreen" ) );
+
+	// DUDE: draw the 4:3 splash aspect-correct (black bars) on wide/tall windows
+	// instead of stretching it, consistent with r_scaleMenusTo43's menu behavior
+	float x = 0.0f, y = 0.0f, w = SCREEN_WIDTH, h = SCREEN_HEIGHT;
+	if ( r_scaleMenusTo43.GetBool() && renderSystem->GetScreenHeight() > 0 ) {
+		const float virtualAspect = (float)SCREEN_WIDTH / (float)SCREEN_HEIGHT;	// 4:3
+		float aspect = (float)renderSystem->GetScreenWidth() / (float)renderSystem->GetScreenHeight();
+		if ( aspect > virtualAspect + 0.01f ) {			// wider: pillarbox
+			w = SCREEN_WIDTH * ( virtualAspect / aspect );
+			x = ( SCREEN_WIDTH - w ) * 0.5f;
+		} else if ( aspect < virtualAspect - 0.01f ) {	// taller: letterbox
+			h = SCREEN_HEIGHT * ( aspect / virtualAspect );
+			y = ( SCREEN_HEIGHT - h ) * 0.5f;
+		}
+		if ( x != 0.0f || y != 0.0f ) {
+			// black out the bars
+			renderSystem->DrawStretchPic( 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 1, 1, declManager->FindMaterial( "_black" ) );
+		}
+	}
+	renderSystem->DrawStretchPic( x, y, w, h, 0, 0, 1, 1, declManager->FindMaterial( "splashScreen" ) );
 	int len = strlen( msg );
 	renderSystem->DrawSmallStringExt( ( 640 - len * SMALLCHAR_WIDTH ) / 2, 410, msg, idVec4( 0.0f, 0.81f, 0.94f, 1.0f ), true, declManager->FindMaterial( "textures/bigchars" ) );
 	renderSystem->EndFrame( NULL, NULL );
