@@ -43,6 +43,9 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #ifndef GL_INVALID_INDEX
 #define GL_INVALID_INDEX				0xFFFFFFFFu
 #endif
+#ifndef GL_TEXTURE0
+#define GL_TEXTURE0						0x84C0
+#endif
 
 // every core entry point the backend uses beyond fixed GL 1.1 (qgl covers those).
 // X-macro: GL3F( pointer-typedef, NameWithoutGlPrefix )
@@ -73,6 +76,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 	GL3F( PFNGLBUFFERDATAPROC,				BufferData ) \
 	GL3F( PFNGLBUFFERSUBDATAPROC,			BufferSubData ) \
 	GL3F( PFNGLBINDBUFFERRANGEPROC,			BindBufferRange ) \
+	/* textures */ \
+	GL3F( PFNGLACTIVETEXTUREPROC,			ActiveTexture ) \
 	/* vertex arrays */ \
 	GL3F( PFNGLGENVERTEXARRAYSPROC,			GenVertexArrays ) \
 	GL3F( PFNGLDELETEVERTEXARRAYSPROC,		DeleteVertexArrays ) \

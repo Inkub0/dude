@@ -203,6 +203,32 @@ static byte	mipBlendColors[16][4] = {
 
 /*
 ===============
+R_CoreSafeInternalFormat
+
+DUDE: core profiles removed the component-selection internal formats
+(LUMINANCE/INTENSITY/ALPHA families). The upload data is always RGBA8888
+and those formats were only chosen when the relevant channels are identical,
+so promoting to RGBA8 samples the exact same values — costs memory only.
+===============
+*/
+static GLenum R_CoreSafeInternalFormat( GLenum f ) {
+	if ( !glConfig.coreProfile ) {
+		return f;
+	}
+	switch ( f ) {
+	case GL_INTENSITY8:
+	case GL_LUMINANCE8_ALPHA8:
+	case GL_ALPHA8:
+		return GL_RGBA8;
+	case GL_LUMINANCE8:
+		return GL_RGB8;
+	default:
+		return f;
+	}
+}
+
+/*
+===============
 SelectInternalFormat
 
 This may need to scan six cube map images
@@ -559,7 +585,7 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 	qglGenTextures( 1, &texnum );
 
 	// select proper internal format before we resample
-	internalFormat = SelectInternalFormat( &pic, 1, width, height, depth );
+	internalFormat = R_CoreSafeInternalFormat( SelectInternalFormat( &pic, 1, width, height, depth ) );
 
 	// copy or resample data as appropriate for first MIP level
 	if ( ( scaled_width == width ) && ( scaled_height == height ) ) {
@@ -768,7 +794,7 @@ void idImage::Generate3DImage( const byte *pic, int width, int height, int picDe
 
 	// select proper internal format before we resample
 	// this function doesn't need to know it is 3D, so just make it very "tall"
-	internalFormat = SelectInternalFormat( &pic, 1, width, height * picDepth, minDepthParm );
+	internalFormat = R_CoreSafeInternalFormat( SelectInternalFormat( &pic, 1, width, height * picDepth, minDepthParm ) );
 
 	uploadHeight = scaled_height;
 	uploadWidth = scaled_width;
@@ -902,7 +928,7 @@ void idImage::GenerateCubeImage( const byte *pic[6], int size,
 	qglGenTextures( 1, &texnum );
 
 	// select proper internal format before we resample
-	internalFormat = SelectInternalFormat( pic, 6, width, height, depth );
+	internalFormat = R_CoreSafeInternalFormat( SelectInternalFormat( pic, 6, width, height, depth ) );
 
 	// don't bother with downsample for now
 	scaled_width = width;
@@ -1799,7 +1825,9 @@ void idImage::Bind() {
 	tmu_t			*tmu = &backEnd.glState.tmu[backEnd.glState.currenttmu];
 
 	// enable or disable apropriate texture modes
-	if ( tmu->textureType != type && ( backEnd.glState.currenttmu <	glConfig.maxTextureUnits ) ) {
+	// (DUDE: not on a core profile — texture targets are always-on there, and
+	// these glEnable/glDisable calls are invalid enums)
+	if ( !glConfig.coreProfile && tmu->textureType != type && ( backEnd.glState.currenttmu <	glConfig.maxTextureUnits ) ) {
 		if ( tmu->textureType == TT_CUBIC ) {
 			qglDisable( GL_TEXTURE_CUBE_MAP_EXT );
 		} else if ( tmu->textureType == TT_3D ) {
@@ -1836,7 +1864,7 @@ void idImage::Bind() {
 		}
 	}
 
-	if ( com_purgeAll.GetBool() ) {
+	if ( com_purgeAll.GetBool() && !glConfig.coreProfile ) {
 		GLclampf priority = 1.0f;
 		qglPrioritizeTextures( 1, &texnum, &priority );
 	}

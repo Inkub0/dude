@@ -246,6 +246,11 @@ void idVertexCache::Alloc( void *data, int size, vertCache_t **buffer, bool inde
 
 			if( !virtualMemory ) {
 				qglGenBuffersARB( 1, & block->vbo );
+			} else {
+				// DUDE: headerAllocator memory is uninitialized — without this,
+				// "if ( block->vbo )" below reads garbage and dereferences the
+				// (NULL on core profiles) ARB buffer entry points
+				block->vbo = 0;
 			}
 		}
 	}
@@ -390,6 +395,7 @@ vertCache_t	*idVertexCache::AllocFrameTemp( void *data, int size ) {
 
 		for ( int i = 0; i < EXPAND_HEADERS; i++ ) {
 			block = headerAllocator.Alloc();
+			block->vbo = 0;		// DUDE: see matching note in Alloc()
 			block->next = freeDynamicHeaders.next;
 			block->prev = &freeDynamicHeaders;
 			block->next->prev = block;

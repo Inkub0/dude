@@ -105,6 +105,12 @@ public:
 	// uniformOffset. Contents live at least until the frame is presented.
 	virtual int				AllocUniforms( const void *data, int size, BufferHandle *buffer ) = 0;
 
+	// frame-temporary geometry rings, same lifetime rules (core profiles have
+	// no client-side arrays, so dynamic geometry streams through these).
+	// Returned offsets are in bytes.
+	virtual int				AllocVertices( const void *data, int size, BufferHandle *buffer ) = 0;
+	virtual int				AllocIndices( const void *data, int size, BufferHandle *buffer ) = 0;
+
 	// ---- drawing (Chunk C+) ----
 	virtual void	BindPipeline( const PipelineDesc &desc ) = 0;
 	virtual void	Draw( const DrawArgs &args ) = 0;

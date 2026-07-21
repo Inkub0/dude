@@ -902,6 +902,17 @@ void R_InitOpenGL( void ) {
 		glConfig.ARBVertexBufferObjectAvailable = false;
 		glConfig.allowARB2Path = true;
 
+		// the image path needs compressed uploads (retail pk4s ship .dds) —
+		// glCompressedTexImage2D is core since 1.3, S3TC is an extension even
+		// on core contexts; glTexImage3D likewise core
+		qglCompressedTexImage2DARB = (PFNGLCOMPRESSEDTEXIMAGE2DARBPROC)GLimp_ExtensionPointer( "glCompressedTexImage2D" );
+		qglGetCompressedTexImageARB = (PFNGLGETCOMPRESSEDTEXIMAGEARBPROC)GLimp_ExtensionPointer( "glGetCompressedTexImage" );
+		qglTexImage3D = (void (APIENTRY *)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const GLvoid *))GLimp_ExtensionPointer( "glTexImage3D" );
+		glConfig.textureCompressionAvailable = qglCompressedTexImage2DARB != NULL
+			&& strstr( glConfig.extensions_string, "GL_EXT_texture_compression_s3tc" ) != NULL;
+		glConfig.bptcTextureCompressionAvailable = glConfig.textureCompressionAvailable
+			&& strstr( glConfig.extensions_string, "GL_ARB_texture_compression_bptc" ) != NULL;
+
 		// Phase 3 Chunk B: bring up the backend proper — core function
 		// pointers, GLSL program cache, per-draw UBO ring, VAOs. Runs again
 		// after vid_restart with the fresh context.
