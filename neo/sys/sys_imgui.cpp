@@ -317,6 +317,10 @@ void Shutdown()
 // => ProcessEvent() has already been called (probably multiple times)
 void NewFrame()
 {
+	// DUDE: Init() is skipped on the GL3 core backend; nothing to do then
+	if ( !imgui_initialized ) {
+		return;
+	}
 	D3P_ScopedCPUSample(Imgui_NewFrame);
 	// it can happen that NewFrame() is called without EndFrame() having been called
 	// after the last NewFrame() call, for example when D3Radiant is active and in

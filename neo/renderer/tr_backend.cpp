@@ -652,6 +652,13 @@ void RB_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 		return;
 	}
 
+	// DUDE: the GL 3.3 core backend has its own executor; the legacy
+	// fixed-function/ARB path below is invalid on a core context
+	if ( glConfig.coreProfile ) {
+		RB_GL3_ExecuteBackEndCommands( cmds );
+		return;
+	}
+
 	backEndStartTime = Sys_Milliseconds();
 
 	// needed for editor rendering

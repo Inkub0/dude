@@ -1083,7 +1083,11 @@ typedef struct {
 	bool		stereo;
 	int			displayHz; // TODO: SDL3 uses float
 	int			multiSamples;
+	bool		coreProfile;	// DUDE: request a GL 3.3 core context (r_graphicsAPI opengl3)
 } glimpParms_t;
+
+// DUDE GL3 backend (renderer/rhi/GL3Backend.cpp)
+void		RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds );
 
 bool		GLimp_Init( glimpParms_t parms );
 // If the desired mode can't be set satisfactorily, false will be returned.

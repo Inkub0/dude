@@ -322,6 +322,20 @@ try_again:
 		SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, (multisamples > 1) ? 1 : 0);
 		SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, multisamples);
 
+		// DUDE: GL 3.3 core context for the opengl3 backend; explicitly reset
+		// to legacy defaults otherwise so vid_restart can switch back
+		if ( parms.coreProfile ) {
+			common->Printf( "Requesting an OpenGL 3.3 Core context (r_graphicsAPI opengl3)\n" );
+			SDL_GL_SetAttribute( SDL_GL_CONTEXT_MAJOR_VERSION, 3 );
+			SDL_GL_SetAttribute( SDL_GL_CONTEXT_MINOR_VERSION, 3 );
+			SDL_GL_SetAttribute( SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE );
+		} else {
+			// SDL's defaults: 2.1 compatibility
+			SDL_GL_SetAttribute( SDL_GL_CONTEXT_MAJOR_VERSION, 2 );
+			SDL_GL_SetAttribute( SDL_GL_CONTEXT_MINOR_VERSION, 1 );
+			SDL_GL_SetAttribute( SDL_GL_CONTEXT_PROFILE_MASK, 0 );
+		}
+
 #if SDL_VERSION_ATLEAST(2, 0, 0) // SDL2 and SDL3 window creation
 
 		if ( r_glDebugContext.GetBool() ) {
@@ -810,7 +824,13 @@ try_again:
 
 #if SDL_VERSION_ATLEAST(2, 0, 0)
 	// SDL1.2 has no context, and is not supported by ImGui anyway
-	D3::ImGuiHooks::Init(window, context);
+	// DUDE: ImGui's GL2 render backend can't run on a core profile; skip it
+	// there until it's ported to the GL3 backend (Phase 3)
+	if ( !parms.coreProfile ) {
+		D3::ImGuiHooks::Init(window, context);
+	} else {
+		common->Printf( "Skipping ImGui init on the GL 3.3 core backend (not ported yet)\n" );
+	}
 #endif
 
 	return true;

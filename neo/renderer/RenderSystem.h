@@ -99,6 +99,10 @@ typedef struct glconfig_s {
 
 	bool				haveDebugContext;
 
+	// DUDE: true when running the GL 3.3 core profile backend (r_graphicsAPI
+	// opengl3); the legacy fixed-function/ARB draw paths must not run then
+	bool				coreProfile;
+
 	// For some reason people decided that we need displays with ultra small pixels,
 	// so everything rendered on them must be scaled up to be legible.
 	// unfortunately, this bullshit feature was "improved" upon by deciding that the best

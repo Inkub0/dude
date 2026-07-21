@@ -648,6 +648,7 @@ set(src_renderer
 	renderer/ArbProgram.cpp
 	renderer/ArbToGlsl.cpp
 	renderer/ImmediateMode.cpp
+	renderer/rhi/GL3Backend.cpp
 	renderer/Interaction.cpp
 	renderer/Material.cpp
 	renderer/MegaTexture.cpp

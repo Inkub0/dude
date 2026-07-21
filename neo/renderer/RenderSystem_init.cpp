@@ -62,7 +62,7 @@ idCVar r_useLightPortalFlow( "r_useLightPortalFlow", "1", CVAR_RENDERER | CVAR_B
 // (1.1 baseline) and "vulkan-rt" (modern profile + ray tracing) are in development
 // (see docs/vulkan-port.md) and require a DHEWM3_VULKAN build. Switching backends
 // needs a vid_restart (window recreate); the settings-menu selector comes later.
-idCVar r_graphicsAPI( "r_graphicsAPI", "opengl", CVAR_RENDERER | CVAR_ARCHIVE, "rendering backend: opengl, vulkan, vulkan-rt (vulkan* are in development)" );
+idCVar r_graphicsAPI( "r_graphicsAPI", "opengl", CVAR_RENDERER | CVAR_ARCHIVE, "rendering backend: opengl (legacy, default), opengl3 (GL 3.3 core, in development), vulkan, vulkan-rt (in development)" );
 idCVar r_multiSamples( "r_multiSamples", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "number of antialiasing samples" );
 idCVar r_mode( "r_mode", "5", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_INTEGER, "video mode number" );
 idCVar r_displayRefresh( "r_displayRefresh", "0", CVAR_RENDERER | CVAR_INTEGER | CVAR_NOCHEAT, "optional display refresh rate option for vid mode", 0.0f, 200.0f );
@@ -787,10 +787,13 @@ void R_InitOpenGL( void ) {
 		common->FatalError( "R_InitOpenGL called while active" );
 	}
 
-	// Backend selection groundwork (docs/vulkan-port.md). The Vulkan backend is not
-	// wired yet, so any non-"opengl" request warns and falls back to OpenGL. When the
-	// backend lands this branches to the Vulkan init path instead.
-	if ( idStr::Icmp( r_graphicsAPI.GetString(), "opengl" ) != 0 ) {
+	// Backend selection (docs/vulkan-port.md Phase 3). "opengl3" runs the new
+	// GL 3.3 core backend (in development); Vulkan values warn and fall back.
+	glConfig.coreProfile = false;
+	if ( idStr::Icmp( r_graphicsAPI.GetString(), "opengl3" ) == 0 ) {
+		glConfig.coreProfile = true;
+		common->Printf( "r_graphicsAPI opengl3: GL 3.3 core backend (IN DEVELOPMENT - incomplete)\n" );
+	} else if ( idStr::Icmp( r_graphicsAPI.GetString(), "opengl" ) != 0 ) {
 #ifdef DHEWM3_VULKAN
 		common->Warning( "r_graphicsAPI \"%s\": Vulkan backend not implemented yet, using OpenGL", r_graphicsAPI.GetString() );
 #else
@@ -818,6 +821,7 @@ void R_InitOpenGL( void ) {
 		parms.displayHz = r_displayRefresh.GetInteger();
 		parms.multiSamples = r_multiSamples.GetInteger();
 		parms.stereo = false;
+		parms.coreProfile = glConfig.coreProfile;
 
 		if ( GLimp_Init( parms ) ) {
 			// it worked
@@ -852,7 +856,25 @@ void R_InitOpenGL( void ) {
 	glConfig.vendor_string = (const char *)qglGetString(GL_VENDOR);
 	glConfig.renderer_string = (const char *)qglGetString(GL_RENDERER);
 	glConfig.version_string = (const char *)qglGetString(GL_VERSION);
-	glConfig.extensions_string = (const char *)qglGetString(GL_EXTENSIONS);
+	if ( glConfig.coreProfile ) {
+		// core profiles return NULL for glGetString(GL_EXTENSIONS); build the
+		// list via glGetStringi so nothing downstream trips over a NULL
+		static idStr coreExtensions;
+		coreExtensions.Clear();
+		typedef const GLubyte * (APIENTRYP PFNGETSTRINGI)( GLenum, GLuint );
+		PFNGETSTRINGI getStringi = (PFNGETSTRINGI)GLimp_ExtensionPointer( "glGetStringi" );
+		GLint numExt = 0;
+		qglGetIntegerv( 0x821D /* GL_NUM_EXTENSIONS */, &numExt );
+		if ( getStringi ) {
+			for ( GLint e = 0; e < numExt; e++ ) {
+				if ( e ) coreExtensions.Append( ' ' );
+				coreExtensions.Append( (const char *)getStringi( GL_EXTENSIONS, e ) );
+			}
+		}
+		glConfig.extensions_string = coreExtensions.c_str();
+	} else {
+		glConfig.extensions_string = (const char *)qglGetString(GL_EXTENSIONS);
+	}
 
 	// OpenGL driver constants
 	qglGetIntegerv( GL_MAX_TEXTURE_SIZE, &temp );
@@ -869,15 +891,26 @@ void R_InitOpenGL( void ) {
 	common->Printf("OpenGL renderer: %s\n", glConfig.renderer_string );
 	common->Printf("OpenGL version: %s\n", glConfig.version_string );
 
-	// recheck all the extensions (FIXME: this might be dangerous)
-	R_CheckPortableExtensions();
+	if ( glConfig.coreProfile ) {
+		// DUDE GL3 backend: skip the legacy extension probing and ARB program
+		// setup entirely — none of it is valid (or needed) on a core context.
+		// vertexCache falls back to system memory (no ARB VBO flag), and
+		// SetBackEndRenderer is satisfied via allowARB2Path (the legacy draw
+		// paths are gated off in RB_ExecuteBackEndCommands).
+		glConfig.multitextureAvailable = false;
+		glConfig.ARBVertexBufferObjectAvailable = false;
+		glConfig.allowARB2Path = true;
+	} else {
+		// recheck all the extensions (FIXME: this might be dangerous)
+		R_CheckPortableExtensions();
 
-	// parse our vertex and fragment programs, possibly disably support for
-	// one of the paths if there was an error
-	R_ARB2_Init();
+		// parse our vertex and fragment programs, possibly disably support for
+		// one of the paths if there was an error
+		R_ARB2_Init();
 
-	cmdSystem->AddCommand( "reloadARBprograms", R_ReloadARBPrograms_f, CMD_FL_RENDERER, "reloads ARB programs" );
-	R_ReloadARBPrograms_f( idCmdArgs() );
+		cmdSystem->AddCommand( "reloadARBprograms", R_ReloadARBPrograms_f, CMD_FL_RENDERER, "reloads ARB programs" );
+		R_ReloadARBPrograms_f( idCmdArgs() );
+	}
 
 	// allocate the vertex array range or vertex objects
 	vertexCache.Init();
