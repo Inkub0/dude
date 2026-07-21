@@ -103,6 +103,7 @@ bool GL3_LoadCoreFunctions( idStr &missing );
 void			GL3_InitShaderCache();		// (re)load boot set; called from Init, incl. after vid_restart
 void			GL3_ShutdownShaderCache();
 unsigned int	GL3_FindProgram( const char *name );	// ShaderHandle; loads on demand, 0 = failed (degrade, don't crash)
+unsigned int	GL3_FindProgramFromSource( const char *name, const char *vertBody, const char *fragBody );	// transpiled ARB (Material IR)
 unsigned int	GL3_ProgramObject( unsigned int handle );	// GL program object for a handle, 0 if failed
 
 } // namespace rhi

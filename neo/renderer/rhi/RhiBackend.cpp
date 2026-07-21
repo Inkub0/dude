@@ -26,6 +26,8 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "renderer/rhi/RHI.h"
 #include "renderer/rhi/GL3Local.h"
 #include "renderer/rhi/RenderParams.h"
+#include "renderer/rhi/ArbParamsBlock.h"
+#include "renderer/rhi/MaterialIR.h"
 
 static void RB_RHI_LogOnce( const char *what ) {
 	static idStr logged;
@@ -67,15 +69,127 @@ static void RB_RHI_BindStageImage( const shaderStage_t *pStage, const float *reg
 
 /*
 =============
+RB_RHI_RenderCustomStage
+
+newStage (custom ARB) drawn with its transpiled program pair. The ArbParams
+fill mirrors RB_SetProgramEnvironment/Space and the legacy newStage path
+(vertexParms -> program.local, fragmentProgramImages -> units).
+=============
+*/
+static void RB_RHI_RenderCustomStage( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf,
+                                      const shaderStage_t *pStage, rhi::ShaderHandle program, const float mvp[16],
+                                      rhi::BufferHandle vb, int vertOfs, rhi::BufferHandle ib, int idxOfs ) {
+	const srfTriangles_t *tri = surf->geo;
+	const newShaderStage_t *ns = pStage->newStage;
+	const float *regs = surf->shaderRegisters;
+
+	rhi::ArbParams ap;
+	memset( &ap, 0, sizeof( ap ) );
+	memcpy( ap.mvpMatrix, mvp, sizeof( ap.mvpMatrix ) );
+	memcpy( ap.modelViewMatrix, surf->space->modelViewMatrix, sizeof( ap.modelViewMatrix ) );
+	memcpy( ap.projectionMatrix, viewDef->projectionMatrix, sizeof( ap.projectionMatrix ) );
+	ap.textureMatrix[0] = ap.textureMatrix[5] = ap.textureMatrix[10] = ap.textureMatrix[15] = 1.0f;
+
+	// RB_SetProgramEnvironment: env[0] = screen POT correction (both stages),
+	// fragment env[1] = window coord scale, fragment env[22] = depth recips;
+	// vertex env[1] = global view origin. _currentRender isn't captured yet
+	// (Chunk F), so fall back to viewport size while uploadWidth is 0.
+	int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	int potW = globalImages->currentRenderImage->uploadWidth > 0 ? globalImages->currentRenderImage->uploadWidth : w;
+	int potH = globalImages->currentRenderImage->uploadHeight > 0 ? globalImages->currentRenderImage->uploadHeight : h;
+	ap.venv[0][0] = ap.fenv[0][0] = (float)w / potW;
+	ap.venv[0][1] = ap.fenv[0][1] = (float)h / potH;
+	ap.venv[0][3] = ap.fenv[0][3] = 1.0f;
+	ap.fenv[1][0] = 1.0f / w;
+	ap.fenv[1][1] = 1.0f / h;
+	ap.fenv[1][3] = 1.0f;
+	if ( globalImages->currentDepthImage->uploadWidth > 0 ) {
+		ap.fenv[22][0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
+		ap.fenv[22][1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
+		ap.fenv[22][2] = (float)potW / globalImages->currentDepthImage->uploadWidth;
+		ap.fenv[22][3] = (float)potH / globalImages->currentDepthImage->uploadHeight;
+	}
+	ap.venv[1][0] = viewDef->renderView.vieworg[0];
+	ap.venv[1][1] = viewDef->renderView.vieworg[1];
+	ap.venv[1][2] = viewDef->renderView.vieworg[2];
+	ap.venv[1][3] = 1.0f;
+
+	// RB_SetProgramEnvironmentSpace: vertex env[5] = view origin in local
+	// space, env[6-8] = model matrix rows
+	idVec3 localView;
+	R_GlobalPointToLocal( surf->space->modelMatrix, viewDef->renderView.vieworg, localView );
+	ap.venv[5][0] = localView[0];
+	ap.venv[5][1] = localView[1];
+	ap.venv[5][2] = localView[2];
+	ap.venv[5][3] = 1.0f;
+	const float *mm = surf->space->modelMatrix;
+	for ( int row = 0; row < 3; row++ ) {
+		ap.venv[6 + row][0] = mm[row];
+		ap.venv[6 + row][1] = mm[row + 4];
+		ap.venv[6 + row][2] = mm[row + 8];
+		ap.venv[6 + row][3] = mm[row + 12];
+	}
+
+	// vertexParms -> vertex program.local
+	for ( int i = 0; i < ns->numVertexParms; i++ ) {
+		ap.vlocal[i][0] = regs[ns->vertexParms[i][0]];
+		ap.vlocal[i][1] = regs[ns->vertexParms[i][1]];
+		ap.vlocal[i][2] = regs[ns->vertexParms[i][2]];
+		ap.vlocal[i][3] = regs[ns->vertexParms[i][3]];
+	}
+
+	// fragment program images by unit
+	for ( int i = 0; i < ns->numFragmentProgramImages; i++ ) {
+		if ( ns->fragmentProgramImages[i] ) {
+			rhi::gl3ActiveTexture( GL_TEXTURE0 + i );
+			backEnd.glState.currenttmu = i;
+			ns->fragmentProgramImages[i]->Bind();
+		}
+	}
+
+	rhi::BufferHandle ub;
+	int uniOfs = r->AllocUniforms( &ap, sizeof( ap ), &ub );
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = ( pStage->drawStateBits & ~GLS_ATEST_BITS );
+	if ( !viewDef->viewEntitys ) {
+		pd.stateBits |= GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	}
+	pd.shader = program;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = surf->material->GetCullType();
+	r->BindPipeline( pd );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = tri->numIndexes;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( ap );
+	r->Draw( da );
+
+	backEnd.pc.c_drawElements++;
+	backEnd.pc.c_drawIndexes += tri->numIndexes;
+	backEnd.pc.c_drawVertexes += tri->numVerts;
+}
+
+/*
+=============
 RB_RHI_RenderShaderPasses
 
-Old-style ambient stages of one surface through the generic program.
-Mirrors RB_STD_T_RenderShaderPasses stage for stage.
+Ambient stages of one surface, driven by the Material IR: old-style stages
+through the generic program, newStage customs through their transpiled ARB
+pairs. Mirrors RB_STD_T_RenderShaderPasses stage for stage.
 =============
 */
 static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf,
                                        const viewEntity_t *&currentSpace, idScreenRect &currentScissor,
-                                       float mvp[16], rhi::ShaderHandle genericShader ) {
+                                       float mvp[16] ) {
 	const srfTriangles_t *tri = surf->geo;
 	const idMaterial *shader = surf->material;
 
@@ -118,25 +232,28 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 	int vertOfs = r->AllocVertices( ac, tri->numVerts * (int)sizeof( idDrawVert ), &vb );
 	int idxOfs = r->AllocIndices( tri->indexes, tri->numIndexes * (int)sizeof( glIndex_t ), &ib );
 
-	for ( int stage = 0; stage < shader->GetNumStages(); stage++ ) {
-		const shaderStage_t *pStage = shader->GetStage( stage );
+	const rhi::MaterialIR *ir = rhi::IR_Get( shader );
+
+	for ( int k = 0; k < ir->surfaceStages.Num(); k++ ) {
+		const rhi::StageIR &si = ir->surfaceStages[k];
+		const shaderStage_t *pStage = shader->GetStage( si.stageNum );
 
 		if ( regs[pStage->conditionRegister] == 0 ) {
-			continue;
-		}
-		if ( pStage->lighting != SL_AMBIENT ) {
 			continue;
 		}
 		// skip ( GL_ZERO, GL_ONE ) stages, used for some alpha masks
 		if ( ( pStage->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) == ( GLS_SRCBLEND_ZERO | GLS_DSTBLEND_ONE ) ) {
 			continue;
 		}
-		if ( pStage->newStage ) {
-			RB_RHI_LogOnce( "custom-shader (newStage) stages" );
-			continue;
+		if ( si.kind == rhi::SK_SKIP ) {
+			continue;	// reason logged once at IR build
 		}
-		if ( pStage->texture.texgen != TG_EXPLICIT ) {
-			RB_RHI_LogOnce( "non-explicit texgen stages" );
+		if ( si.kind == rhi::SK_CUSTOM_ARB ) {
+			if ( si.needsCurrentRender ) {
+				RB_RHI_LogOnce( "_currentRender-sampling custom stages" );
+				continue;
+			}
+			RB_RHI_RenderCustomStage( r, viewDef, surf, pStage, si.program, mvp, vb, vertOfs, ib, idxOfs );
 			continue;
 		}
 
@@ -229,7 +346,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		if ( !viewDef->viewEntitys ) {
 			pd.stateBits |= GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
 		}
-		pd.shader = genericShader;
+		pd.shader = si.program;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = shader->GetCullType();
 		r->BindPipeline( pd );
@@ -294,7 +411,6 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	// 2D view (menu/console/HUD/loading): shader passes over existing contents
 	r->BeginPass( NULL );
 
-	rhi::ShaderHandle genericShader = r->LoadShader( "generic" );
 	const viewEntity_t *currentSpace = NULL;
 	idScreenRect currentScissor = viewDef->scissor;
 	float mvp[16];
@@ -304,7 +420,7 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		if ( drawSurfs[i]->material->SuppressInSubview() ) {
 			continue;
 		}
-		RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, currentScissor, mvp, genericShader );
+		RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, currentScissor, mvp );
 	}
 
 	r->EndPass();

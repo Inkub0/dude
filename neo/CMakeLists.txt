@@ -656,6 +656,7 @@ set(src_renderer
 	renderer/ImmediateMode.cpp
 	renderer/rhi/GL3Backend.cpp
 	renderer/rhi/GL3Shaders.cpp
+	renderer/rhi/MaterialIR.cpp
 	renderer/rhi/RhiBackend.cpp
 	renderer/Interaction.cpp
 	renderer/Material.cpp

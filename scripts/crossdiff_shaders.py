@@ -250,7 +250,10 @@ def seeded_ns(seed, umap):
     env[4] = Vec(env[4].x, env[4].y, env[4].z, 0.0)  # light origin: ARB assumes w=0 (shadow.vp)
     loc = [rv() for _ in range(8)]
     def rmat(): return Mat4([Vec(*[rnd.uniform(-1, 1) for _ in range(4)]) for _ in range(4)])
+    # the harness feeds both stages identical env/local values, so the split
+    # per-target arrays (u_venv/u_fenv, see arbparams.glsl) alias one set here
     ns = {"u_env": env, "u_local": loc,
+          "u_venv": env, "u_fenv": env, "u_vlocal": loc, "u_flocal": loc,
           "u_mvpMatrix": rmat(), "u_modelViewMatrix": rmat(),
           "u_projectionMatrix": rmat(), "u_textureMatrix": rmat(),
           "attr_Position": Vec(rnd.uniform(-50, 50), rnd.uniform(-50, 50), rnd.uniform(-50, 50), 1.0),

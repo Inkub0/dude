@@ -132,12 +132,16 @@ struct Gen {
 				return "vec4( " + FloatStr( r.constVal[0] ) + ", " + FloatStr( r.constVal[1] ) +
 					   ", " + FloatStr( r.constVal[2] ) + ", " + FloatStr( r.constVal[3] ) + " )";
 			case RB_Env:
+				// env/local spaces are per ARB target: the same index can mean
+				// different things in the vp and fp of one pair (e.g. vertex
+				// env[1] = view origin, fragment env[1] = window coord), so
+				// the shared ArbParams block carries separate arrays
 				if ( r.index > 31 ) { Fail( "program.env index > 31" ); return "vec4(0.0)"; }
-				snprintf( buf, sizeof( buf ), "u_env[%d]", r.index );
+				snprintf( buf, sizeof( buf ), "%s[%d]", prog.kind == PK_Vertex ? "u_venv" : "u_fenv", r.index );
 				return buf;
 			case RB_Local:
 				if ( r.index > 7 ) { Fail( "program.local index > 7" ); return "vec4(0.0)"; }
-				snprintf( buf, sizeof( buf ), "u_local[%d]", r.index );
+				snprintf( buf, sizeof( buf ), "%s[%d]", prog.kind == PK_Vertex ? "u_vlocal" : "u_flocal", r.index );
 				return buf;
 			case RB_StateMatrixRow: {
 				const char *m = "u_mvpMatrix";

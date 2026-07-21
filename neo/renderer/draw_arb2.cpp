@@ -759,6 +759,24 @@ int R_FindARBProgram( GLenum target, const char *program ) {
 
 /*
 ==================
+R_ARBProgramName
+
+DUDE: the GL3/Vulkan Material IR transpiles custom ARB programs at runtime;
+material parsing stores only the ident from R_FindARBProgram (which records
+name+ident without touching GL on core profiles), and this maps it back.
+==================
+*/
+const char *R_ARBProgramName( int ident, unsigned int target ) {
+	for ( int i = 0; progs[i].name[0]; i++ ) {
+		if ( progs[i].ident == ident && progs[i].target == (GLenum)target ) {
+			return progs[i].name;
+		}
+	}
+	return NULL;
+}
+
+/*
+==================
 R_ReloadARBPrograms_f
 ==================
 */
