@@ -1,0 +1,49 @@
+// Shared per-draw uniform block for all shaders.
+//
+// Each member documents the ARB program.env[N] / program.local[N] slot it
+// replaces. The ARB slots were overloaded with different meanings per program;
+// here every purpose gets its own named member so one block layout serves all
+// shaders. The backend fills only the members the bound shader consumes.
+
+UBO_BINDING(0) uniform RenderParams {
+	mat4 u_mvpMatrix;             // state.matrix.mvp / ARB_position_invariant
+	mat4 u_modelViewMatrix;       // state.matrix.modelview   (heatHaze)
+	mat4 u_projectionMatrix;      // state.matrix.projection  (heatHaze)
+
+	vec4 u_localLightOrigin;      // vp env[4]
+	vec4 u_localViewOrigin;       // vp env[5]
+	vec4 u_lightProjectionS;      // vp env[6]
+	vec4 u_lightProjectionT;      // vp env[7]
+	vec4 u_lightProjectionQ;      // vp env[8]
+	vec4 u_lightFalloffS;         // vp env[9]
+	vec4 u_bumpMatrixS;           // vp env[10]
+	vec4 u_bumpMatrixT;           // vp env[11]
+	vec4 u_diffuseMatrixS;        // vp env[12]
+	vec4 u_diffuseMatrixT;        // vp env[13]
+	vec4 u_specularMatrixS;       // vp env[14]
+	vec4 u_specularMatrixT;       // vp env[15]
+	vec4 u_vertexColorModulate;   // vp env[16]
+	vec4 u_vertexColorAdd;        // vp env[17]
+	vec4 u_modelMatrixRow0;       // vp env[20] (ambientLight) / env[6] (bumpyEnvironment)
+	vec4 u_modelMatrixRow1;       // vp env[21] / env[7]
+	vec4 u_modelMatrixRow2;       // vp env[22] / env[8]
+
+	vec4 u_diffuseModifier;       // fp env[0] (interaction, ambientLight)
+	vec4 u_specularModifier;      // fp env[1] (interaction)
+	vec4 u_screenCorrection;      // fp env[0] (post shaders: 1.0 -> _currentRender NPOT adjust)
+	vec4 u_windowCoord;           // fp env[1] (post shaders: fragment.position -> 0..1)
+
+	vec4 u_localParam0;           // program.local[0] (material stage parm: scroll / fraction)
+	vec4 u_localParam1;           // program.local[1] (material stage parm: magnitude / target color)
+
+	vec4 u_depthTexRecip;         // fp env[22] (soft particles: 1/currentDepth size + NPOT adjust)
+	vec4 u_particleRadius;        // fp env[23] (soft particles: radius, 1/fadeRange, 1/radius)
+	vec4 u_channelMask;           // fp env[24] (soft particles: additive vs alpha channel mask)
+
+	vec4 u_color;                 // fixed-function glColor replacement (new shaders)
+	vec4 u_alphaTest;             // x = alpha test ref, y != 0 -> test enabled (zfill/generic)
+	vec4 u_texGen0S;              // fixed-function texgen planes (fog/blendlight)
+	vec4 u_texGen0T;
+	vec4 u_texGen0Q;
+	vec4 u_texGen1S;
+};
