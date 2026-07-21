@@ -819,6 +819,7 @@ extern glconfig_t			glConfig;		// outside of TR since it shouldn't be cleared du
 //
 // cvars
 //
+extern idCVar r_graphicsAPI;			// rendering backend: opengl, vulkan, vulkan-rt (vulkan* in development)
 extern idCVar r_mode;					// video mode number
 extern idCVar r_displayRefresh;			// optional display refresh rate option for vid mode
 extern idCVar r_fullscreen;				// 0 = windowed, 1 = full screen

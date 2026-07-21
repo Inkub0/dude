@@ -58,6 +58,11 @@ const char *r_rendererArgs[] = { "best", "arb2", NULL };
 
 idCVar r_inhibitFragmentProgram( "r_inhibitFragmentProgram", "0", CVAR_RENDERER | CVAR_BOOL, "ignore the fragment program extension" );
 idCVar r_useLightPortalFlow( "r_useLightPortalFlow", "1", CVAR_RENDERER | CVAR_BOOL, "use a more precise area reference determination" );
+// Selects the rendering backend. Only "opengl" is implemented today; "vulkan"
+// (1.1 baseline) and "vulkan-rt" (modern profile + ray tracing) are in development
+// (see docs/vulkan-port.md) and require a DHEWM3_VULKAN build. Switching backends
+// needs a vid_restart (window recreate); the settings-menu selector comes later.
+idCVar r_graphicsAPI( "r_graphicsAPI", "opengl", CVAR_RENDERER | CVAR_ARCHIVE, "rendering backend: opengl, vulkan, vulkan-rt (vulkan* are in development)" );
 idCVar r_multiSamples( "r_multiSamples", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "number of antialiasing samples" );
 idCVar r_mode( "r_mode", "5", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_INTEGER, "video mode number" );
 idCVar r_displayRefresh( "r_displayRefresh", "0", CVAR_RENDERER | CVAR_INTEGER | CVAR_NOCHEAT, "optional display refresh rate option for vid mode", 0.0f, 200.0f );
@@ -779,6 +784,17 @@ void R_InitOpenGL( void ) {
 
 	if ( glConfig.isInitialized ) {
 		common->FatalError( "R_InitOpenGL called while active" );
+	}
+
+	// Backend selection groundwork (docs/vulkan-port.md). The Vulkan backend is not
+	// wired yet, so any non-"opengl" request warns and falls back to OpenGL. When the
+	// backend lands this branches to the Vulkan init path instead.
+	if ( idStr::Icmp( r_graphicsAPI.GetString(), "opengl" ) != 0 ) {
+#ifdef DHEWM3_VULKAN
+		common->Warning( "r_graphicsAPI \"%s\": Vulkan backend not implemented yet, using OpenGL", r_graphicsAPI.GetString() );
+#else
+		common->Warning( "r_graphicsAPI \"%s\" requested but this build has no Vulkan support (rebuild with -DDHEWM3_VULKAN=ON); using OpenGL", r_graphicsAPI.GetString() );
+#endif
 	}
 
 	// in case we had an error while doing a tiled rendering

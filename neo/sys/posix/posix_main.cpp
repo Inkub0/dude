@@ -269,7 +269,7 @@ Sys_Init
 */
 void Sys_Init( void ) {
 	if(consoleLog != NULL)
-		common->Printf("Logging console output to %s/dhewm3log.txt\n", Posix_GetSavePath());
+		common->Printf("Logging console output to %s/dudelog.txt\n", Posix_GetSavePath());
 
 	Posix_InitConsoleInput();
 	com_pid.SetInteger( getpid() );
@@ -604,7 +604,7 @@ static const char* crashSigNames[] = { "SIGILL", "SIGABRT", "SIGFPE", "SIGSEGV" 
 
 // unlike Sys_Printf() this doesn't call tty_Hide(); and tty_Show();
 // to minimize interaction with broken dhewm3 state
-// (but unlike regular printf() it'll also write to dhewm3log.txt)
+// (but unlike regular printf() it'll also write to dudelog.txt)
 static void CrashPrintf(const char* msg, ...)
 {
 	va_list argptr;
@@ -822,7 +822,7 @@ void Posix_InitSignalHandlers( void )
 	installSigHandler(SIGTTIN, 0, signalhandlerConsoleStuff);
 	installSigHandler(SIGTTOU, 0, signalhandlerConsoleStuff);
 
-	// this is also a good place to open dhewm3log.txt for Sys_VPrintf()
+	// this is also a good place to open dudelog.txt for Sys_VPrintf()
 
 	const char* savePath = Posix_GetSavePath();
 	size_t savePathLen = strlen(savePath);
@@ -838,18 +838,18 @@ void Posix_InitSignalHandlers( void )
 			return;
 		}
 		char logFileName[PATH_MAX] = {};
-		int fullLogLen = snprintf(logFileName, sizeof(logFileName), "%s/dhewm3log.txt", logPath);
+		int fullLogLen = snprintf(logFileName, sizeof(logFileName), "%s/dudelog.txt", logPath);
 		// cast to size_t which is unsigned and would get really big if fullLogLen < 0 (=> error in snprintf())
 		if((size_t)fullLogLen >= sizeof(logFileName)) {
-			printf("WARNING: Couldn't create dhewm3log.txt at '%s' because its length would be '%d' which is > PATH_MAX (%zd) or < 0!\n",
+			printf("WARNING: Couldn't create dudelog.txt at '%s' because its length would be '%d' which is > PATH_MAX (%zd) or < 0!\n",
 			       logPath, fullLogLen, (size_t)PATH_MAX);
 			return;
 		}
 		struct stat buf;
 		if(stat(logFileName, &buf) == 0) {
-			// logfile exists, rename to dhewm3log-old.txt
+			// logfile exists, rename to dudelog-old.txt
 			char oldLogFileName[PATH_MAX] = {};
-			if((size_t)snprintf(oldLogFileName, sizeof(oldLogFileName), "%s/dhewm3log-old.txt", logPath) < sizeof(logFileName))
+			if((size_t)snprintf(oldLogFileName, sizeof(oldLogFileName), "%s/dudelog-old.txt", logPath) < sizeof(logFileName))
 			{
 				rename(logFileName, oldLogFileName);
 			}

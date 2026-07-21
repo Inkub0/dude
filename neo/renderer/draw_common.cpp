@@ -28,6 +28,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sys/platform.h"
 #include "renderer/VertexCache.h"
+#include "renderer/ImmediateMode.h"
 
 #include "renderer/tr_local.h"
 
@@ -1930,15 +1931,16 @@ void RB_STD_LightScale( void ) {
 		if ( f > 1 ) {
 			f = 1;
 		}
-		qglColor3f( f, f, f );
+		idImmediateMode im;
+		im.Color3f( f, f, f );
 		v = v * f * 2;
 
-		qglBegin( GL_QUADS );
-		qglVertex2f( 0,0 );
-		qglVertex2f( 0,1 );
-		qglVertex2f( 1,1 );
-		qglVertex2f( 1,0 );
-		qglEnd();
+		im.Begin( GL_QUADS );
+		im.Vertex2f( 0,0 );
+		im.Vertex2f( 0,1 );
+		im.Vertex2f( 1,1 );
+		im.Vertex2f( 1,0 );
+		im.End();
 	}
 
 

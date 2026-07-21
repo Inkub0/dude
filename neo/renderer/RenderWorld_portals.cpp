@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/DemoFile.h"
 #include "framework/Session.h"
 #include "renderer/RenderWorld_local.h"
+#include "renderer/ImmediateMode.h"
 
 #include "renderer/tr_local.h"
 
@@ -1043,6 +1044,7 @@ void idRenderWorldLocal::ShowPortals() {
 	portalArea_t	*area;
 	portal_t	*p;
 	idWinding	*w;
+	idImmediateMode	im;
 
 	// flood out through portals, setting area viewCount
 	for ( i = 0 ; i < numPortalAreas ; i++ ) {
@@ -1058,17 +1060,17 @@ void idRenderWorldLocal::ShowPortals() {
 
 			if ( portalAreas[ p->intoArea ].viewCount != tr.viewCount ) {
 				// red = can't see
-				qglColor3f( 1, 0, 0 );
+				im.Color3f( 1, 0, 0 );
 			} else {
 				// green = see through
-				qglColor3f( 0, 1, 0 );
+				im.Color3f( 0, 1, 0 );
 			}
 
-			qglBegin( GL_LINE_LOOP );
+			im.Begin( GL_LINE_LOOP );
 			for ( j = 0 ; j < w->GetNumPoints() ; j++ ) {
-				qglVertex3fv( (*w)[j].ToFloatPtr() );
+				im.Vertex3fv( (*w)[j].ToFloatPtr() );
 			}
-			qglEnd();
+			im.End();
 		}
 	}
 }

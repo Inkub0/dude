@@ -38,10 +38,11 @@ If you have questions concerning this license or the applicable additional terms
 #define GAME_NAME						"ADoom3"		// appears in errors
 #define CONFIG_FILE						"adoom3.cfg"
 #else
-#define GAME_NAME						"dhewm 3"		// appears in errors
+#define GAME_NAME						"DUDE"			// appears in errors
 #endif
 
-#define ENGINE_VERSION					"dhewm3 1.5.5"	// printed in console, used for window title
+// DUDE - Doom3 Unified Development Engine (fork of dhewm3 1.5.5)
+#define ENGINE_VERSION					"DUDE 0.1"		// printed in console, used for window title
 
 #ifdef ID_REPRODUCIBLE_BUILD
 	// for reproducible builds we hardcode values that would otherwise come from __DATE__ and __TIME__
@@ -59,7 +60,7 @@ If you have questions concerning this license or the applicable additional terms
 
 // filenames
 #ifndef CONFIG_FILE
-#define CONFIG_FILE						"dhewm.cfg"
+#define CONFIG_FILE						"dude.cfg"
 #endif
 
 // base folder where the source code lives

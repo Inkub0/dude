@@ -38,6 +38,10 @@ If you have questions concerning this license or the applicable additional terms
 #endif
 
 #include "tools/compilers/dmap/dmap.h"
+#include "renderer/ImmediateMode.h"
+
+// batched replacement for the debug drawing's immediate mode calls
+static idImmediateMode im;
 
 /*
 
@@ -237,17 +241,17 @@ static	void DrawAllEdges( void ) {
 
 	Draw_ClearWindow();
 
-	qglBegin( GL_LINES );
+	im.Begin( GL_LINES );
 	for ( i = 0 ; i < numOptEdges ; i++ ) {
 		if ( optEdges[i].v1 == NULL ) {
 			continue;
 		}
-		qglColor3f( 1, 0, 0 );
-		qglVertex3fv( optEdges[i].v1->pv.ToFloatPtr() );
-		qglColor3f( 0, 0, 0 );
-		qglVertex3fv( optEdges[i].v2->pv.ToFloatPtr() );
+		im.Color3f( 1, 0, 0 );
+		im.Vertex3fv( optEdges[i].v1->pv.ToFloatPtr() );
+		im.Color3f( 0, 0, 0 );
+		im.Vertex3fv( optEdges[i].v2->pv.ToFloatPtr() );
 	}
-	qglEnd();
+	im.End();
 	qglFlush();
 
 //	GLimp_SwapBuffers();
@@ -267,13 +271,13 @@ static void DrawVerts( optIsland_t *island ) {
 
 	qglEnable( GL_BLEND );
 	qglBlendFunc( GL_ONE, GL_ONE );
-	qglColor3f( 0.3f, 0.3f, 0.3f );
+	im.Color3f( 0.3f, 0.3f, 0.3f );
 	qglPointSize( 3 );
-	qglBegin( GL_POINTS );
+	im.Begin( GL_POINTS );
 	for ( vert = island->verts ; vert ; vert = vert->islandLink ) {
-		qglVertex3fv( vert->pv.ToFloatPtr() );
+		im.Vertex3fv( vert->pv.ToFloatPtr() );
 	}
-	qglEnd();
+	im.End();
 	qglDisable( GL_BLEND );
 	qglFlush();
 }
@@ -292,17 +296,17 @@ static	void DrawEdges( optIsland_t *island ) {
 
 	Draw_ClearWindow();
 
-	qglBegin( GL_LINES );
+	im.Begin( GL_LINES );
 	for ( edge = island->edges ; edge ; edge = edge->islandLink ) {
 		if ( edge->v1 == NULL ) {
 			continue;
 		}
-		qglColor3f( 1, 0, 0 );
-		qglVertex3fv( edge->v1->pv.ToFloatPtr() );
-		qglColor3f( 0, 0, 0 );
-		qglVertex3fv( edge->v2->pv.ToFloatPtr() );
+		im.Color3f( 1, 0, 0 );
+		im.Vertex3fv( edge->v1->pv.ToFloatPtr() );
+		im.Color3f( 0, 0, 0 );
+		im.Vertex3fv( edge->v2->pv.ToFloatPtr() );
 	}
-	qglEnd();
+	im.End();
 	qglFlush();
 
 //	GLimp_SwapBuffers();
@@ -477,11 +481,11 @@ static	bool TryAddNewEdge( optVertex_t *v1, optVertex_t *v2, optIsland_t *island
 	}
 
 	if ( dmapGlobals.drawflag ) {
-		qglBegin( GL_LINES );
-		qglColor3f( 0, ( 128 + orandom.RandomInt( 127 ) )/ 255.0, 0 );
-		qglVertex3fv( v1->pv.ToFloatPtr() );
-		qglVertex3fv( v2->pv.ToFloatPtr() );
-		qglEnd();
+		im.Begin( GL_LINES );
+		im.Color3f( 0, ( 128 + orandom.RandomInt( 127 ) )/ 255.0, 0 );
+		im.Vertex3fv( v1->pv.ToFloatPtr() );
+		im.Vertex3fv( v2->pv.ToFloatPtr() );
+		im.End();
 		qglFlush();
 	}
 	// add it
@@ -684,17 +688,17 @@ static	void RemoveIfColinear( optVertex_t *ov, optIsland_t *island ) {
 	}
 
 	if ( dmapGlobals.drawflag ) {
-		qglBegin( GL_LINES );
-		qglColor3f( 1, 1, 0 );
-		qglVertex3fv( v1->pv.ToFloatPtr() );
-		qglVertex3fv( v2->pv.ToFloatPtr() );
-		qglEnd();
+		im.Begin( GL_LINES );
+		im.Color3f( 1, 1, 0 );
+		im.Vertex3fv( v1->pv.ToFloatPtr() );
+		im.Vertex3fv( v2->pv.ToFloatPtr() );
+		im.End();
 		qglFlush();
-		qglBegin( GL_LINES );
-		qglColor3f( 0, 1, 1 );
-		qglVertex3fv( v2->pv.ToFloatPtr() );
-		qglVertex3fv( v3->pv.ToFloatPtr() );
-		qglEnd();
+		im.Begin( GL_LINES );
+		im.Color3f( 0, 1, 1 );
+		im.Vertex3fv( v2->pv.ToFloatPtr() );
+		im.Vertex3fv( v3->pv.ToFloatPtr() );
+		im.End();
 		qglFlush();
 	}
 
@@ -962,17 +966,17 @@ static void CreateOptTri( optVertex_t *first, optEdge_t *e1, optEdge_t *e2, optI
 
 		// identify the third edge
 	if ( dmapGlobals.drawflag ) {
-		qglColor3f(1,1,0);
-		qglBegin( GL_LINES );
-		qglVertex3fv( e1->v1->pv.ToFloatPtr() );
-		qglVertex3fv( e1->v2->pv.ToFloatPtr() );
-		qglEnd();
+		im.Color3f(1,1,0);
+		im.Begin( GL_LINES );
+		im.Vertex3fv( e1->v1->pv.ToFloatPtr() );
+		im.Vertex3fv( e1->v2->pv.ToFloatPtr() );
+		im.End();
 		qglFlush();
-		qglColor3f(0,1,1);
-		qglBegin( GL_LINES );
-		qglVertex3fv( e2->v1->pv.ToFloatPtr() );
-		qglVertex3fv( e2->v2->pv.ToFloatPtr() );
-		qglEnd();
+		im.Color3f(0,1,1);
+		im.Begin( GL_LINES );
+		im.Vertex3fv( e2->v1->pv.ToFloatPtr() );
+		im.Vertex3fv( e2->v2->pv.ToFloatPtr() );
+		im.End();
 		qglFlush();
 	}
 
@@ -996,11 +1000,11 @@ static void CreateOptTri( optVertex_t *first, optEdge_t *e1, optEdge_t *e2, optI
 	}
 
 	if ( dmapGlobals.drawflag ) {
-		qglColor3f(1,0,1);
-		qglBegin( GL_LINES );
-		qglVertex3fv( opposite->v1->pv.ToFloatPtr() );
-		qglVertex3fv( opposite->v2->pv.ToFloatPtr() );
-		qglEnd();
+		im.Color3f(1,0,1);
+		im.Begin( GL_LINES );
+		im.Vertex3fv( opposite->v1->pv.ToFloatPtr() );
+		im.Vertex3fv( opposite->v2->pv.ToFloatPtr() );
+		im.End();
 		qglFlush();
 	}
 
@@ -1014,11 +1018,11 @@ static void CreateOptTri( optVertex_t *first, optEdge_t *e1, optEdge_t *e2, optI
 	island->tris = optTri;
 
 	if ( dmapGlobals.drawflag ) {
-		qglColor3f( 1, 1, 1 );
+		im.Color3f( 1, 1, 1 );
 		qglPointSize( 4 );
-		qglBegin( GL_POINTS );
-		qglVertex3fv( optTri->midpoint.ToFloatPtr() );
-		qglEnd();
+		im.Begin( GL_POINTS );
+		im.Vertex3fv( optTri->midpoint.ToFloatPtr() );
+		im.End();
 		qglFlush();
 	}
 
@@ -1036,21 +1040,21 @@ static void CreateOptTri( optVertex_t *first, optEdge_t *e1, optEdge_t *e2, optI
 	}
 	if ( dmapGlobals.drawflag ) {
 		if ( optTri->filled ) {
-			qglColor3f( ( 128 + orandom.RandomInt( 127 ) )/ 255.0, 0, 0 );
+			im.Color3f( ( 128 + orandom.RandomInt( 127 ) )/ 255.0, 0, 0 );
 		} else {
-			qglColor3f( 0, ( 128 + orandom.RandomInt( 127 ) ) / 255.0, 0 );
+			im.Color3f( 0, ( 128 + orandom.RandomInt( 127 ) ) / 255.0, 0 );
 		}
-		qglBegin( GL_TRIANGLES );
-		qglVertex3fv( optTri->v[0]->pv.ToFloatPtr() );
-		qglVertex3fv( optTri->v[1]->pv.ToFloatPtr() );
-		qglVertex3fv( optTri->v[2]->pv.ToFloatPtr() );
-		qglEnd();
-		qglColor3f( 1, 1, 1 );
-		qglBegin( GL_LINE_LOOP );
-		qglVertex3fv( optTri->v[0]->pv.ToFloatPtr() );
-		qglVertex3fv( optTri->v[1]->pv.ToFloatPtr() );
-		qglVertex3fv( optTri->v[2]->pv.ToFloatPtr() );
-		qglEnd();
+		im.Begin( GL_TRIANGLES );
+		im.Vertex3fv( optTri->v[0]->pv.ToFloatPtr() );
+		im.Vertex3fv( optTri->v[1]->pv.ToFloatPtr() );
+		im.Vertex3fv( optTri->v[2]->pv.ToFloatPtr() );
+		im.End();
+		im.Color3f( 1, 1, 1 );
+		im.Begin( GL_LINE_LOOP );
+		im.Vertex3fv( optTri->v[0]->pv.ToFloatPtr() );
+		im.Vertex3fv( optTri->v[1]->pv.ToFloatPtr() );
+		im.Vertex3fv( optTri->v[2]->pv.ToFloatPtr() );
+		im.End();
 		qglFlush();
 	}
 
@@ -1117,11 +1121,11 @@ static void BuildOptTriangles( optIsland_t *island ) {
 #if 0
 if ( dmapGlobals.drawflag && ov == (optVertex_t *)0x1845a60 ) {
 for ( e1 = ov->edges ; e1 ; e1 = e1Next ) {
-	qglBegin( GL_LINES );
-	qglColor3f( 0,1,0 );
-	qglVertex3fv( e1->v1->pv.ToFloatPtr() );
-	qglVertex3fv( e1->v2->pv.ToFloatPtr() );
-	qglEnd();
+	im.Begin( GL_LINES );
+	im.Color3f( 0,1,0 );
+	im.Vertex3fv( e1->v1->pv.ToFloatPtr() );
+	im.Vertex3fv( e1->v2->pv.ToFloatPtr() );
+	im.End();
 	qglFlush();
 	if ( e1->v1 == ov ) {
 		e1Next = e1->v1link;
@@ -1366,14 +1370,14 @@ static void DrawOriginalEdges( int numOriginalEdges, originalEdges_t *originalEd
 	}
 	Draw_ClearWindow();
 
-	qglBegin( GL_LINES );
+	im.Begin( GL_LINES );
 	for ( i = 0 ; i < numOriginalEdges ; i++ ) {
-		qglColor3f( 1, 0, 0 );
-		qglVertex3fv( originalEdges[i].v1->pv.ToFloatPtr() );
-		qglColor3f( 0, 0, 0 );
-		qglVertex3fv( originalEdges[i].v2->pv.ToFloatPtr() );
+		im.Color3f( 1, 0, 0 );
+		im.Vertex3fv( originalEdges[i].v1->pv.ToFloatPtr() );
+		im.Color3f( 0, 0, 0 );
+		im.Vertex3fv( originalEdges[i].v2->pv.ToFloatPtr() );
 	}
-	qglEnd();
+	im.End();
 	qglFlush();
 }
 
@@ -1492,12 +1496,12 @@ void SplitOriginalEdgesAtCrossings( optimizeGroup_t *opt ) {
 	for ( i = 0 ; i < numOriginalEdges ; i++ ) {
 		if ( dmapGlobals.drawflag ) {
 			DrawOriginalEdges( numOriginalEdges, originalEdges );
-			qglBegin( GL_LINES );
-			qglColor3f( 0, 1, 0 );
-			qglVertex3fv( originalEdges[i].v1->pv.ToFloatPtr() );
-			qglColor3f( 0, 0, 1 );
-			qglVertex3fv( originalEdges[i].v2->pv.ToFloatPtr() );
-			qglEnd();
+			im.Begin( GL_LINES );
+			im.Color3f( 0, 1, 0 );
+			im.Vertex3fv( originalEdges[i].v1->pv.ToFloatPtr() );
+			im.Color3f( 0, 0, 1 );
+			im.Vertex3fv( originalEdges[i].v2->pv.ToFloatPtr() );
+			im.End();
 			qglFlush();
 		}
 		for ( j = i+1 ; j < numOriginalEdges ; j++ ) {

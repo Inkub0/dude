@@ -27,6 +27,7 @@ If you have questions concerning this license or the applicable additional terms
 */
 
 #include "sys/platform.h"
+#include "renderer/ImmediateMode.h"
 
 #include "renderer/tr_local.h"
 
@@ -285,6 +286,7 @@ RB_DrawExpandedTriangles
 void RB_DrawExpandedTriangles( const srfTriangles_t *tri, const float radius, const idVec3 &vieworg ) {
 	int i, j, k;
 	idVec3 dir[6], normal, point;
+	idImmediateMode im;
 
 	for ( i = 0; i < tri->numIndexes; i += 3 ) {
 
@@ -308,7 +310,7 @@ void RB_DrawExpandedTriangles( const srfTriangles_t *tri, const float radius, co
 		dir[1].Normalize();
 		dir[2].Normalize();
 
-		qglBegin( GL_LINE_LOOP );
+		im.Begin( GL_LINE_LOOP );
 
 		for ( j = 0; j < 3; j++ ) {
 			k = ( j + 1 ) % 3;
@@ -323,22 +325,22 @@ void RB_DrawExpandedTriangles( const srfTriangles_t *tri, const float radius, co
 			dir[5].Normalize();
 
 			point = p[k] + dir[j] * radius;
-			qglVertex3f( point[0], point[1], point[2] );
+			im.Vertex3f( point[0], point[1], point[2] );
 
 			point = p[k] + dir[3] * radius;
-			qglVertex3f( point[0], point[1], point[2] );
+			im.Vertex3f( point[0], point[1], point[2] );
 
 			point = p[k] + dir[4] * radius;
-			qglVertex3f( point[0], point[1], point[2] );
+			im.Vertex3f( point[0], point[1], point[2] );
 
 			point = p[k] + dir[5] * radius;
-			qglVertex3f( point[0], point[1], point[2] );
+			im.Vertex3f( point[0], point[1], point[2] );
 
 			point = p[k] + dir[k] * radius;
-			qglVertex3f( point[0], point[1], point[2] );
+			im.Vertex3f( point[0], point[1], point[2] );
 		}
 
-		qglEnd();
+		im.End();
 	}
 }
 

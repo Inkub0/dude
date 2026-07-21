@@ -29,6 +29,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/platform.h"
 #include "renderer/VertexCache.h"
 #include "renderer/Cinematic.h"
+#include "renderer/ImmediateMode.h"
 
 #include "renderer/tr_local.h"
 
@@ -62,12 +63,13 @@ void RB_DrawElementsImmediate( const srfTriangles_t *tri ) {
 		}
 	}
 
-	qglBegin( GL_TRIANGLES );
+	idImmediateMode im;
+	im.Begin( GL_TRIANGLES );
 	for ( int i = 0 ; i < tri->numIndexes ; i++ ) {
-		qglTexCoord2fv( tri->verts[ tri->indexes[i] ].st.ToFloatPtr() );
-		qglVertex3fv( tri->verts[ tri->indexes[i] ].xyz.ToFloatPtr() );
+		im.TexCoord2fv( tri->verts[ tri->indexes[i] ].st.ToFloatPtr() );
+		im.Vertex3fv( tri->verts[ tri->indexes[i] ].xyz.ToFloatPtr() );
 	}
-	qglEnd();
+	im.End();
 }
 
 

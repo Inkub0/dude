@@ -1,3 +1,24 @@
+# DUDE — Doom3 Unified Development Engine
+
+**DUDE** is a fork of [dhewm3](https://github.com/dhewm/dhewm3) (itself a GPL source
+port of _DOOM 3_) that modernizes the renderer while keeping the classic _DOOM 3_ look
+and gameplay faithful. Work in progress:
+
+- A modernized **OpenGL 3.3 core** renderer and a **Vulkan** renderer (1.1 baseline for
+  wide hardware support, plus a modern `vulkan-rt` profile targeting ray tracing),
+  selectable via the `r_graphicsAPI` cvar.
+- ARB assembly shaders translated to a **shared GLSL source tree** (GL + SPIR-V).
+- Opt-in enhancements kept strictly separate from the faithful defaults (an
+  "Improvements over the classic engine" menu section).
+
+The full plan lives in [docs/vulkan-port.md](docs/vulkan-port.md). DUDE is GPLv3, like
+its base — see COPYING.txt. It runs on the same classic _DOOM 3_ / _RoE_ game data.
+
+The sections below are the upstream **dhewm3** documentation, preserved for reference
+and attribution.
+
+---
+
 # ABOUT
 
 _dhewm 3_ is a _Doom 3_ GPL source port, known to work on at least Windows, Linux, macOS and FreeBSD.

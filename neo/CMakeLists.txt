@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 2.6...3.22 FATAL_ERROR)
-project(dhewm3)
+# DUDE - Doom3 Unified Development Engine (fork of dhewm3)
+project(dude)
 
 # TODO
 
@@ -42,7 +43,7 @@ else()
 	set(CMAKE_SKIP_RPATH ON CACHE BOOL "Skip RPATH" FORCE)
 endif()
 
-set(DHEWM3BINARY "dhewm3")
+set(DHEWM3BINARY "dude")
 
 include(CheckCXXCompilerFlag)
 include(GNUInstallDirs OPTIONAL RESULT_VARIABLE GNUINSTALLDIRS)
@@ -59,6 +60,7 @@ option(ONATIVE		"Optimize for the host CPU" OFF)
 option(SDL2			"Use SDL2 instead of SDL1.2" ON)
 option(SDL3			"Use SDL3 instead of SDL2 or SDL1.2" OFF)
 option(IMGUI		"Build with Dear ImGui integration - requires SDL2/SDL3 and C++11" ON)
+option(DHEWM3_VULKAN "Build the (in-development) Vulkan renderer backend - requires Vulkan headers/loader and glslang" OFF)
 option(REPRODUCIBLE_BUILD "Replace __DATE__ and __TIME__ by hardcoded values for reproducible builds" OFF)
 
 option(TRACY		"Build and integrate the Tracy profiler, requires HARDLINK_GAME" OFF)
@@ -254,6 +256,26 @@ if(NOT IMGUI)
 	# without ImGui C++98 should suffices, preserves compatibility
 	# with vintage system like PPC Macs
 	set (CMAKE_CXX_STANDARD 98)
+endif()
+
+# Vulkan renderer backend (in development, Phase 0+ of docs/vulkan-port.md).
+# Off by default: the OpenGL build is unchanged and needs none of this.
+set(vulkan_libs "")
+if(DHEWM3_VULKAN)
+	# built-in FindVulkan: headers + loader, and locates glslangValidator/glslc
+	find_package(Vulkan REQUIRED)
+	if(NOT Vulkan_GLSLANG_VALIDATOR_EXECUTABLE AND NOT Vulkan_GLSLC_EXECUTABLE)
+		message(FATAL_ERROR "DHEWM3_VULKAN needs a GLSL->SPIR-V compiler (glslangValidator or glslc); install glslang or shaderc")
+	endif()
+	# the Vulkan backend + VMA need a modern C++ standard
+	if(CMAKE_CXX_STANDARD LESS 17)
+		set(CMAKE_CXX_STANDARD 17)
+	endif()
+	add_definitions(-DDHEWM3_VULKAN=1)
+	set(vulkan_libs Vulkan::Vulkan)
+	# VMA (VulkanMemoryAllocator) is header-only and not needed until the
+	# Phase 4 backend lands; it will be vendored under libs/vma/ then.
+	message(STATUS "Vulkan renderer backend enabled (headers: ${Vulkan_INCLUDE_DIRS})")
 endif()
 
 if(DEFINED ENV{MSYSTEM})
@@ -623,6 +645,7 @@ set(src_renderer
 	renderer/Image_load.cpp
 	renderer/Image_process.cpp
 	renderer/Image_program.cpp
+	renderer/ImmediateMode.cpp
 	renderer/Interaction.cpp
 	renderer/Material.cpp
 	renderer/MegaTexture.cpp
@@ -1350,6 +1373,7 @@ endif()
 		${CURL_LIBRARY}
 		${SDLx_LIBRARY}
 		${sys_libs}
+		${vulkan_libs}
 	)
 
 	if(NOT APPLE AND NOT WIN32)

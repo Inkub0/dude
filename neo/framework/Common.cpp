@@ -2904,7 +2904,7 @@ static bool checkForHelp(int argc, char **argv)
 				// write it to stdout
 				#define WriteString(s) fputs(s, stdout);
 #endif // _WIN32
-				WriteString(ENGINE_VERSION " - http://dhewm3.org\n");
+				WriteString(ENGINE_VERSION " - Doom3 Unified Development Engine (fork of dhewm3, http://dhewm3.org)\n");
 				WriteString("Commandline arguments:\n");
 				WriteString("-h or --help: Show this help\n");
 				WriteString("+<command> [command arguments]\n");

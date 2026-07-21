@@ -89,9 +89,9 @@ static void SetSavePath()
 {
 	const char* s = getenv("XDG_DATA_HOME");
 	if (s)
-		D3_snprintfC99(save_path, sizeof(save_path), "%s/dhewm3", s);
+		D3_snprintfC99(save_path, sizeof(save_path), "%s/dude", s);
 	else
-		D3_snprintfC99(save_path, sizeof(save_path), "%s/.local/share/dhewm3", getenv("HOME"));
+		D3_snprintfC99(save_path, sizeof(save_path), "%s/.local/share/dude", getenv("HOME"));
 }
 
 const char* Posix_GetExePath()

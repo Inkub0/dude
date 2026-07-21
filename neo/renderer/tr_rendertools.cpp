@@ -31,6 +31,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/VertexCache.h"
 #include "renderer/Cinematic.h"
 #include "renderer/RenderWorld_local.h"
+#include "renderer/ImmediateMode.h"
 
 #include "renderer/tr_local.h"
 
@@ -90,32 +91,33 @@ void RB_DrawBounds( const idBounds &bounds ) {
 		return;
 	}
 
-	qglBegin( GL_LINE_LOOP );
-	qglVertex3f( bounds[0][0], bounds[0][1], bounds[0][2] );
-	qglVertex3f( bounds[0][0], bounds[1][1], bounds[0][2] );
-	qglVertex3f( bounds[1][0], bounds[1][1], bounds[0][2] );
-	qglVertex3f( bounds[1][0], bounds[0][1], bounds[0][2] );
-	qglEnd();
-	qglBegin( GL_LINE_LOOP );
-	qglVertex3f( bounds[0][0], bounds[0][1], bounds[1][2] );
-	qglVertex3f( bounds[0][0], bounds[1][1], bounds[1][2] );
-	qglVertex3f( bounds[1][0], bounds[1][1], bounds[1][2] );
-	qglVertex3f( bounds[1][0], bounds[0][1], bounds[1][2] );
-	qglEnd();
+	idImmediateMode im;
+	im.Begin( GL_LINE_LOOP );
+	im.Vertex3f( bounds[0][0], bounds[0][1], bounds[0][2] );
+	im.Vertex3f( bounds[0][0], bounds[1][1], bounds[0][2] );
+	im.Vertex3f( bounds[1][0], bounds[1][1], bounds[0][2] );
+	im.Vertex3f( bounds[1][0], bounds[0][1], bounds[0][2] );
+	im.End();
+	im.Begin( GL_LINE_LOOP );
+	im.Vertex3f( bounds[0][0], bounds[0][1], bounds[1][2] );
+	im.Vertex3f( bounds[0][0], bounds[1][1], bounds[1][2] );
+	im.Vertex3f( bounds[1][0], bounds[1][1], bounds[1][2] );
+	im.Vertex3f( bounds[1][0], bounds[0][1], bounds[1][2] );
+	im.End();
 
-	qglBegin( GL_LINES );
-	qglVertex3f( bounds[0][0], bounds[0][1], bounds[0][2] );
-	qglVertex3f( bounds[0][0], bounds[0][1], bounds[1][2] );
+	im.Begin( GL_LINES );
+	im.Vertex3f( bounds[0][0], bounds[0][1], bounds[0][2] );
+	im.Vertex3f( bounds[0][0], bounds[0][1], bounds[1][2] );
 
-	qglVertex3f( bounds[0][0], bounds[1][1], bounds[0][2] );
-	qglVertex3f( bounds[0][0], bounds[1][1], bounds[1][2] );
+	im.Vertex3f( bounds[0][0], bounds[1][1], bounds[0][2] );
+	im.Vertex3f( bounds[0][0], bounds[1][1], bounds[1][2] );
 
-	qglVertex3f( bounds[1][0], bounds[0][1], bounds[0][2] );
-	qglVertex3f( bounds[1][0], bounds[0][1], bounds[1][2] );
+	im.Vertex3f( bounds[1][0], bounds[0][1], bounds[0][2] );
+	im.Vertex3f( bounds[1][0], bounds[0][1], bounds[1][2] );
 
-	qglVertex3f( bounds[1][0], bounds[1][1], bounds[0][2] );
-	qglVertex3f( bounds[1][0], bounds[1][1], bounds[1][2] );
-	qglEnd();
+	im.Vertex3f( bounds[1][0], bounds[1][1], bounds[0][2] );
+	im.Vertex3f( bounds[1][0], bounds[1][1], bounds[1][2] );
+	im.End();
 }
 
 
@@ -175,12 +177,13 @@ void RB_PolygonClear( void ) {
 	qglDisable( GL_DEPTH_TEST );
 	qglDisable( GL_CULL_FACE );
 	qglDisable( GL_SCISSOR_TEST );
-	qglBegin( GL_POLYGON );
-	qglVertex3f( -20, -20, -10 );
-	qglVertex3f( 20, -20, -10 );
-	qglVertex3f( 20, 20, -10 );
-	qglVertex3f( -20, 20, -10 );
-	qglEnd();
+	idImmediateMode im;
+	im.Begin( GL_POLYGON );
+	im.Vertex3f( -20, -20, -10 );
+	im.Vertex3f( 20, -20, -10 );
+	im.Vertex3f( 20, 20, -10 );
+	im.Vertex3f( -20, 20, -10 );
+	im.End();
 	qglPopAttrib();
 	qglPopMatrix();
 }
@@ -472,19 +475,20 @@ void RB_ShowDepthBuffer( void ) {
 		const float tw = float(glConfig.vidWidth) / float(globalImages->currentDepthImage->uploadWidth);
 		const float th = float(glConfig.vidHeight) / float(globalImages->currentDepthImage->uploadHeight);
 
-		qglBegin( GL_QUADS );
-			qglTexCoord2f(tx, ty);
-			qglVertex2f( x,   y   ); // ( 0,0 );
+		idImmediateMode im;
+		im.Begin( GL_QUADS );
+			im.TexCoord2f(tx, ty);
+			im.Vertex2f( x,   y   ); // ( 0,0 );
 
-			qglTexCoord2f(tx, ty+th);
-			qglVertex2f( x,   y+h ); // ( 0,1 );
+			im.TexCoord2f(tx, ty+th);
+			im.Vertex2f( x,   y+h ); // ( 0,1 );
 
-			qglTexCoord2f(tx+tw, ty+th);
-			qglVertex2f( x+w, y+h ); // ( 1,1 );
+			im.TexCoord2f(tx+tw, ty+th);
+			im.Vertex2f( x+w, y+h ); // ( 1,1 );
 
-			qglTexCoord2f(tx+tw, ty);
-			qglVertex2f( x+w, y   ); // ( 1,0 );
-		qglEnd();
+			im.TexCoord2f(tx+tw, ty);
+			im.Vertex2f( x+w, y   ); // ( 1,0 );
+		im.End();
 
 		// TODO: probably a shader transforming this to something viewable
 
@@ -638,7 +642,9 @@ void RB_ShowSilhouette( void ) {
 				const srfTriangles_t	*tri = surf->geo;
 
 				qglVertexPointer( 3, GL_FLOAT, sizeof( shadowCache_t ), vertexCache.Position( tri->shadowCache ) );
-				qglBegin( GL_LINES );
+
+				static idList<GLuint> lineIndexes;
+				lineIndexes.SetNum( 0, false );
 
 				for ( int j = 0 ; j < tri->numIndexes ; j+=3 ) {
 					int		i1 = tri->indexes[j+0];
@@ -647,15 +653,17 @@ void RB_ShowSilhouette( void ) {
 
 					if ( (i1 & 1) + (i2 & 1) + (i3 & 1) == 1 ) {
 						if ( (i1 & 1) + (i2 & 1) == 0 ) {
-							qglArrayElement( i1 );
-							qglArrayElement( i2 );
+							lineIndexes.Append( i1 );
+							lineIndexes.Append( i2 );
 						} else if ( (i1 & 1 ) + (i3 & 1) == 0 ) {
-							qglArrayElement( i1 );
-							qglArrayElement( i3 );
+							lineIndexes.Append( i1 );
+							lineIndexes.Append( i3 );
 						}
 					}
 				}
-				qglEnd();
+				if ( lineIndexes.Num() ) {
+					qglDrawElements( GL_LINES, lineIndexes.Num(), GL_UNSIGNED_INT, lineIndexes.Ptr() );
+				}
 
 			}
 		}
@@ -765,15 +773,16 @@ void RB_T_RenderTriangleSurfaceAsLines( const drawSurf_t *surf ) {
 		return;
 	}
 
-	qglBegin( GL_LINES );
+	idImmediateMode im;
+	im.Begin( GL_LINES );
 	for ( int i = 0 ; i < tri->numIndexes ; i+= 3 ) {
 		for ( int j = 0 ; j < 3 ; j++ ) {
 			int k = ( j + 1 ) % 3;
-			qglVertex3fv( tri->verts[ tri->silIndexes[i+j] ].xyz.ToFloatPtr() );
-			qglVertex3fv( tri->verts[ tri->silIndexes[i+k] ].xyz.ToFloatPtr() );
+			im.Vertex3fv( tri->verts[ tri->silIndexes[i+j] ].xyz.ToFloatPtr() );
+			im.Vertex3fv( tri->verts[ tri->silIndexes[i+k] ].xyz.ToFloatPtr() );
 		}
 	}
-	qglEnd();
+	im.End();
 }
 
 
@@ -981,7 +990,8 @@ static void RB_ShowTexturePolarity( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 
 		RB_SimpleSurfaceSetup( drawSurf );
 
-		qglBegin( GL_TRIANGLES );
+		idImmediateMode im;
+		im.Begin( GL_TRIANGLES );
 		for ( j = 0 ; j < tri->numIndexes ; j+=3 ) {
 			idDrawVert	*a, *b, *c;
 			float		d0[5], d1[5];
@@ -1001,17 +1011,17 @@ static void RB_ShowTexturePolarity( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 			area = d0[3] * d1[4] - d0[4] * d1[3];
 
 			if ( idMath::Fabs( area ) < 0.0001 ) {
-				qglColor4f( 0, 0, 1, 0.5 );
+				im.Color4f( 0, 0, 1, 0.5 );
 			} else  if ( area < 0 ) {
-				qglColor4f( 1, 0, 0, 0.5 );
+				im.Color4f( 1, 0, 0, 0.5 );
 			} else {
-				qglColor4f( 0, 1, 0, 0.5 );
+				im.Color4f( 0, 1, 0, 0.5 );
 			}
-			qglVertex3fv( a->xyz.ToFloatPtr() );
-			qglVertex3fv( b->xyz.ToFloatPtr() );
-			qglVertex3fv( c->xyz.ToFloatPtr() );
+			im.Vertex3fv( a->xyz.ToFloatPtr() );
+			im.Vertex3fv( b->xyz.ToFloatPtr() );
+			im.Vertex3fv( c->xyz.ToFloatPtr() );
 		}
-		qglEnd();
+		im.End();
 	}
 
 	GL_State( GLS_DEFAULT );
@@ -1051,7 +1061,8 @@ static void RB_ShowUnsmoothedTangents( drawSurf_t **drawSurfs, int numDrawSurfs 
 		RB_SimpleSurfaceSetup( drawSurf );
 
 		tri = drawSurf->geo;
-		qglBegin( GL_TRIANGLES );
+		idImmediateMode im;
+		im.Begin( GL_TRIANGLES );
 		for ( j = 0 ; j < tri->numIndexes ; j+=3 ) {
 			idDrawVert	*a, *b, *c;
 
@@ -1059,11 +1070,11 @@ static void RB_ShowUnsmoothedTangents( drawSurf_t **drawSurfs, int numDrawSurfs 
 			b = tri->verts + tri->indexes[j+1];
 			c = tri->verts + tri->indexes[j+2];
 
-			qglVertex3fv( a->xyz.ToFloatPtr() );
-			qglVertex3fv( b->xyz.ToFloatPtr() );
-			qglVertex3fv( c->xyz.ToFloatPtr() );
+			im.Vertex3fv( a->xyz.ToFloatPtr() );
+			im.Vertex3fv( b->xyz.ToFloatPtr() );
+			im.Vertex3fv( c->xyz.ToFloatPtr() );
 		}
-		qglEnd();
+		im.End();
 	}
 
 	GL_State( GLS_DEFAULT );
@@ -1103,25 +1114,26 @@ static void RB_ShowTangentSpace( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		if ( !tri->verts ) {
 			continue;
 		}
-		qglBegin( GL_TRIANGLES );
+		idImmediateMode im;
+		im.Begin( GL_TRIANGLES );
 		for ( j = 0 ; j < tri->numIndexes ; j++ ) {
 			const idDrawVert *v;
 
 			v = &tri->verts[tri->indexes[j]];
 
 			if ( r_showTangentSpace.GetInteger() == 1 ) {
-				qglColor4f( 0.5 + 0.5 * v->tangents[0][0],  0.5 + 0.5 * v->tangents[0][1],
+				im.Color4f( 0.5 + 0.5 * v->tangents[0][0],  0.5 + 0.5 * v->tangents[0][1],
 					0.5 + 0.5 * v->tangents[0][2], 0.5 );
 			} else if ( r_showTangentSpace.GetInteger() == 2 ) {
-				qglColor4f( 0.5 + 0.5 * v->tangents[1][0],  0.5 + 0.5 * v->tangents[1][1],
+				im.Color4f( 0.5 + 0.5 * v->tangents[1][0],  0.5 + 0.5 * v->tangents[1][1],
 					0.5 + 0.5 * v->tangents[1][2], 0.5 );
 			} else {
-				qglColor4f( 0.5 + 0.5 * v->normal[0],  0.5 + 0.5 * v->normal[1],
+				im.Color4f( 0.5 + 0.5 * v->normal[0],  0.5 + 0.5 * v->normal[1],
 					0.5 + 0.5 * v->normal[2], 0.5 );
 			}
-			qglVertex3fv( v->xyz.ToFloatPtr() );
+			im.Vertex3fv( v->xyz.ToFloatPtr() );
 		}
-		qglEnd();
+		im.End();
 	}
 
 	GL_State( GLS_DEFAULT );
@@ -1157,15 +1169,16 @@ static void RB_ShowVertexColor( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		if ( !tri->verts ) {
 			continue;
 		}
-		qglBegin( GL_TRIANGLES );
+		idImmediateMode im;
+		im.Begin( GL_TRIANGLES );
 		for ( j = 0 ; j < tri->numIndexes ; j++ ) {
 			const idDrawVert *v;
 
 			v = &tri->verts[tri->indexes[j]];
-			qglColor4ubv( v->color );
-			qglVertex3fv( v->xyz.ToFloatPtr() );
+			im.Color4ubv( v->color );
+			im.Vertex3fv( v->xyz.ToFloatPtr() );
 		}
-		qglEnd();
+		im.End();
 	}
 
 	GL_State( GLS_DEFAULT );
@@ -1221,24 +1234,25 @@ static void RB_ShowNormals( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 			continue;
 		}
 
-		qglBegin( GL_LINES );
+		idImmediateMode im;
+		im.Begin( GL_LINES );
 		for ( j = 0 ; j < tri->numVerts ; j++ ) {
-			qglColor3f( 0, 0, 1 );
-			qglVertex3fv( tri->verts[j].xyz.ToFloatPtr() );
+			im.Color3f( 0, 0, 1 );
+			im.Vertex3fv( tri->verts[j].xyz.ToFloatPtr() );
 			VectorMA( tri->verts[j].xyz, size, tri->verts[j].normal, end );
-			qglVertex3fv( end.ToFloatPtr() );
+			im.Vertex3fv( end.ToFloatPtr() );
 
-			qglColor3f( 1, 0, 0 );
-			qglVertex3fv( tri->verts[j].xyz.ToFloatPtr() );
+			im.Color3f( 1, 0, 0 );
+			im.Vertex3fv( tri->verts[j].xyz.ToFloatPtr() );
 			VectorMA( tri->verts[j].xyz, size, tri->verts[j].tangents[0], end );
-			qglVertex3fv( end.ToFloatPtr() );
+			im.Vertex3fv( end.ToFloatPtr() );
 
-			qglColor3f( 0, 1, 0 );
-			qglVertex3fv( tri->verts[j].xyz.ToFloatPtr() );
+			im.Color3f( 0, 1, 0 );
+			im.Vertex3fv( tri->verts[j].xyz.ToFloatPtr() );
 			VectorMA( tri->verts[j].xyz, size, tri->verts[j].tangents[1], end );
-			qglVertex3fv( end.ToFloatPtr() );
+			im.Vertex3fv( end.ToFloatPtr() );
 		}
-		qglEnd();
+		im.End();
 	}
 
 	if ( showNumbers ) {
@@ -1297,7 +1311,8 @@ static void RB_AltShowNormals( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		RB_SimpleSurfaceSetup( drawSurf );
 
 		tri = drawSurf->geo;
-		qglBegin( GL_LINES );
+		idImmediateMode im;
+		im.Begin( GL_LINES );
 		for ( j = 0 ; j < tri->numIndexes ; j += 3 ) {
 			const idDrawVert *v[3];
 			idVec3		mid;
@@ -1315,27 +1330,27 @@ static void RB_AltShowNormals( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 
 				pos = ( mid + v[k]->xyz * 3.0f ) * 0.25f;
 
-				qglColor3f( 0, 0, 1 );
-				qglVertex3fv( pos.ToFloatPtr() );
+				im.Color3f( 0, 0, 1 );
+				im.Vertex3fv( pos.ToFloatPtr() );
 				VectorMA( pos, r_showNormals.GetFloat(), v[k]->normal, end );
-				qglVertex3fv( end.ToFloatPtr() );
+				im.Vertex3fv( end.ToFloatPtr() );
 
-				qglColor3f( 1, 0, 0 );
-				qglVertex3fv( pos.ToFloatPtr() );
+				im.Color3f( 1, 0, 0 );
+				im.Vertex3fv( pos.ToFloatPtr() );
 				VectorMA( pos, r_showNormals.GetFloat(), v[k]->tangents[0], end );
-				qglVertex3fv( end.ToFloatPtr() );
+				im.Vertex3fv( end.ToFloatPtr() );
 
-				qglColor3f( 0, 1, 0 );
-				qglVertex3fv( pos.ToFloatPtr() );
+				im.Color3f( 0, 1, 0 );
+				im.Vertex3fv( pos.ToFloatPtr() );
 				VectorMA( pos, r_showNormals.GetFloat(), v[k]->tangents[1], end );
-				qglVertex3fv( end.ToFloatPtr() );
+				im.Vertex3fv( end.ToFloatPtr() );
 
-				qglColor3f( 1, 1, 1 );
-				qglVertex3fv( pos.ToFloatPtr() );
-				qglVertex3fv( v[k]->xyz.ToFloatPtr() );
+				im.Color3f( 1, 1, 1 );
+				im.Vertex3fv( pos.ToFloatPtr() );
+				im.Vertex3fv( v[k]->xyz.ToFloatPtr() );
 			}
 		}
-		qglEnd();
+		im.End();
 	}
 
 	qglEnable( GL_DEPTH_TEST );
@@ -1380,7 +1395,8 @@ static void RB_ShowTextureVectors( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		RB_SimpleSurfaceSetup( drawSurf );
 
 		// draw non-shared edges in yellow
-		qglBegin( GL_LINES );
+		idImmediateMode im;
+		im.Begin( GL_LINES );
 
 		for ( j = 0 ; j < tri->numIndexes ; j+= 3 ) {
 			const idDrawVert *a, *b, *c;
@@ -1428,16 +1444,16 @@ static void RB_ShowTextureVectors( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 			tangents[0] = mid + tangents[0] * r_showTextureVectors.GetFloat();
 			tangents[1] = mid + tangents[1] * r_showTextureVectors.GetFloat();
 
-			qglColor3f( 1, 0, 0 );
-			qglVertex3fv( mid.ToFloatPtr() );
-			qglVertex3fv( tangents[0].ToFloatPtr() );
+			im.Color3f( 1, 0, 0 );
+			im.Vertex3fv( mid.ToFloatPtr() );
+			im.Vertex3fv( tangents[0].ToFloatPtr() );
 
-			qglColor3f( 0, 1, 0 );
-			qglVertex3fv( mid.ToFloatPtr() );
-			qglVertex3fv( tangents[1].ToFloatPtr() );
+			im.Color3f( 0, 1, 0 );
+			im.Vertex3fv( mid.ToFloatPtr() );
+			im.Vertex3fv( tangents[1].ToFloatPtr() );
 		}
 
-		qglEnd();
+		im.End();
 	}
 }
 
@@ -1478,8 +1494,9 @@ static void RB_ShowDominantTris( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		}
 		RB_SimpleSurfaceSetup( drawSurf );
 
-		qglColor3f( 1, 1, 0 );
-		qglBegin( GL_LINES );
+		idImmediateMode im;
+		im.Color3f( 1, 1, 0 );
+		im.Begin( GL_LINES );
 
 		for ( j = 0 ; j < tri->numVerts ; j++ ) {
 			const idDrawVert *a, *b, *c;
@@ -1493,11 +1510,11 @@ static void RB_ShowDominantTris( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 
 			mid = ( a->xyz + b->xyz + c->xyz ) * ( 1.0f / 3.0f );
 
-			qglVertex3fv( mid.ToFloatPtr() );
-			qglVertex3fv( a->xyz.ToFloatPtr() );
+			im.Vertex3fv( mid.ToFloatPtr() );
+			im.Vertex3fv( a->xyz.ToFloatPtr() );
 		}
 
-		qglEnd();
+		im.End();
 	}
 	qglDisable( GL_POLYGON_OFFSET_LINE );
 }
@@ -1539,8 +1556,9 @@ static void RB_ShowEdges( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		RB_SimpleSurfaceSetup( drawSurf );
 
 		// draw non-shared edges in yellow
-		qglColor3f( 1, 1, 0 );
-		qglBegin( GL_LINES );
+		idImmediateMode im;
+		im.Color3f( 1, 1, 0 );
+		im.Begin( GL_LINES );
 
 		for ( j = 0 ; j < tri->numIndexes ; j+= 3 ) {
 			for ( k = 0 ; k < 3 ; k++ ) {
@@ -1564,14 +1582,14 @@ static void RB_ShowEdges( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 
 				// if we didn't find a backwards listing, draw it in yellow
 				if ( m == tri->numIndexes ) {
-					qglVertex3fv( ac[ i1 ].xyz.ToFloatPtr() );
-					qglVertex3fv( ac[ i2 ].xyz.ToFloatPtr() );
+					im.Vertex3fv( ac[ i1 ].xyz.ToFloatPtr() );
+					im.Vertex3fv( ac[ i2 ].xyz.ToFloatPtr() );
 				}
 
 			}
 		}
 
-		qglEnd();
+		im.End();
 
 		// draw dangling sil edges in red
 		if ( !tri->silEdges ) {
@@ -1582,9 +1600,9 @@ static void RB_ShowEdges( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		// is the dangling edge
 		danglePlane = tri->numIndexes / 3;
 
-		qglColor3f( 1, 0, 0 );
+		im.Color3f( 1, 0, 0 );
 
-		qglBegin( GL_LINES );
+		im.Begin( GL_LINES );
 		for ( j = 0 ; j < tri->numSilEdges ; j++ ) {
 			edge = tri->silEdges + j;
 
@@ -1592,10 +1610,10 @@ static void RB_ShowEdges( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 				continue;
 			}
 
-			qglVertex3fv( ac[ edge->v1 ].xyz.ToFloatPtr() );
-			qglVertex3fv( ac[ edge->v2 ].xyz.ToFloatPtr() );
+			im.Vertex3fv( ac[ edge->v1 ].xyz.ToFloatPtr() );
+			im.Vertex3fv( ac[ edge->v2 ].xyz.ToFloatPtr() );
 		}
-		qglEnd();
+		im.End();
 	}
 
 	qglEnable( GL_DEPTH_TEST );
@@ -1815,9 +1833,11 @@ static void RB_DrawText( const char *text, const idVec3 &origin, float scale, co
 	float textLen = 0.0f, spacing;
 	idVec3 org, p1, p2;
 
+	idImmediateMode im;
+
 	if ( text && *text ) {
-		qglBegin( GL_LINES );
-		qglColor3fv( color.ToFloatPtr() );
+		im.Begin( GL_LINES );
+		im.Color3fv( color.ToFloatPtr() );
 
 		if ( text[0] == '\n' ) {
 			line = 1;
@@ -1870,13 +1890,13 @@ static void RB_DrawText( const char *text, const idVec3 &origin, float scale, co
 				}
 				p2 = org + scale * simplex[charIndex][index] * -viewAxis[1] + scale * simplex[charIndex][index+1] * viewAxis[2];
 
-				qglVertex3fv( p1.ToFloatPtr() );
-				qglVertex3fv( p2.ToFloatPtr() );
+				im.Vertex3fv( p1.ToFloatPtr() );
+				im.Vertex3fv( p2.ToFloatPtr() );
 			}
 			org -= viewAxis[1] * ( spacing * scale );
 		}
 
-		qglEnd();
+		im.End();
 	}
 }
 
@@ -2019,34 +2039,35 @@ void RB_ShowDebugLines( void ) {
 		qglDisable( GL_DEPTH_TEST );
 	}
 
-	qglBegin( GL_LINES );
+	idImmediateMode im;
+	im.Begin( GL_LINES );
 
 	line = rb_debugLines;
 	for ( i = 0 ; i < rb_numDebugLines; i++, line++ ) {
 		if ( !line->depthTest ) {
-			qglColor3fv( line->rgb.ToFloatPtr() );
-			qglVertex3fv( line->start.ToFloatPtr() );
-			qglVertex3fv( line->end.ToFloatPtr() );
+			im.Color3fv( line->rgb.ToFloatPtr() );
+			im.Vertex3fv( line->start.ToFloatPtr() );
+			im.Vertex3fv( line->end.ToFloatPtr() );
 		}
 	}
-	qglEnd();
+	im.End();
 
 	if ( !r_debugLineDepthTest.GetBool() ) {
 		qglEnable( GL_DEPTH_TEST );
 	}
 
-	qglBegin( GL_LINES );
+	im.Begin( GL_LINES );
 
 	line = rb_debugLines;
 	for ( i = 0 ; i < rb_numDebugLines; i++, line++ ) {
 		if ( line->depthTest ) {
-			qglColor4fv( line->rgb.ToFloatPtr() );
-			qglVertex3fv( line->start.ToFloatPtr() );
-			qglVertex3fv( line->end.ToFloatPtr() );
+			im.Color4fv( line->rgb.ToFloatPtr() );
+			im.Vertex3fv( line->start.ToFloatPtr() );
+			im.Vertex3fv( line->end.ToFloatPtr() );
 		}
 	}
 
-	qglEnd();
+	im.End();
 
 	qglLineWidth( 1 );
 	GL_State( GLS_DEFAULT );
@@ -2134,19 +2155,20 @@ void RB_ShowDebugPolygons( void ) {
 		qglEnable( GL_POLYGON_OFFSET_LINE );
 	}
 
+	idImmediateMode im;
 	poly = rb_debugPolygons;
 	for ( i = 0 ; i < rb_numDebugPolygons; i++, poly++ ) {
 //		if ( !poly->depthTest ) {
 
-			qglColor4fv( poly->rgb.ToFloatPtr() );
+			im.Color4fv( poly->rgb.ToFloatPtr() );
 
-			qglBegin( GL_POLYGON );
+			im.Begin( GL_POLYGON );
 
 			for ( j = 0; j < poly->winding.GetNumPoints(); j++) {
-				qglVertex3fv( poly->winding[j].ToFloatPtr() );
+				im.Vertex3fv( poly->winding[j].ToFloatPtr() );
 			}
 
-			qglEnd();
+			im.End();
 //		}
 	}
 
@@ -2354,21 +2376,22 @@ void RB_TestImage( void ) {
 	qglOrtho( 0, 1, 0, 1, -1, 1 );
 
 	tr.testImage->Bind();
-	qglBegin( GL_QUADS );
+	idImmediateMode im;
+	im.Begin( GL_QUADS );
 
-	qglTexCoord2f( 0, 1 );
-	qglVertex2f( 0.5 - w, 0 );
+	im.TexCoord2f( 0, 1 );
+	im.Vertex2f( 0.5 - w, 0 );
 
-	qglTexCoord2f( 0, 0 );
-	qglVertex2f( 0.5 - w, h*2 );
+	im.TexCoord2f( 0, 0 );
+	im.Vertex2f( 0.5 - w, h*2 );
 
-	qglTexCoord2f( 1, 0 );
-	qglVertex2f( 0.5 + w, h*2 );
+	im.TexCoord2f( 1, 0 );
+	im.Vertex2f( 0.5 + w, h*2 );
 
-	qglTexCoord2f( 1, 1 );
-	qglVertex2f( 0.5 + w, 0 );
+	im.TexCoord2f( 1, 1 );
+	im.Vertex2f( 0.5 + w, 0 );
 
-	qglEnd();
+	im.End();
 
 	qglPopMatrix();
 	qglMatrixMode( GL_MODELVIEW );

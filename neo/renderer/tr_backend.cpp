@@ -29,6 +29,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/sys_imgui.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/ImmediateMode.h"
 
 static idCVar r_fillWindowAlphaChan( "r_fillWindowAlphaChan", "-1", CVAR_SYSTEM | CVAR_NOCHEAT | CVAR_ARCHIVE, "Make sure alpha channel of windows default framebuffer is completely opaque at the end of each frame. Needed at least when using Wayland with older drivers.\n 1: do this, 0: don't do it, -1: let dhewm3 decide (default)" );
 
@@ -501,16 +502,17 @@ void RB_ShowImages( void ) {
 		}
 
 		image->Bind();
-		qglBegin (GL_QUADS);
-		qglTexCoord2f( 0, 0 );
-		qglVertex2f( x, y );
-		qglTexCoord2f( 1, 0 );
-		qglVertex2f( x + w, y );
-		qglTexCoord2f( 1, 1 );
-		qglVertex2f( x + w, y + h );
-		qglTexCoord2f( 0, 1 );
-		qglVertex2f( x, y + h );
-		qglEnd();
+		idImmediateMode im;
+		im.Begin( GL_QUADS );
+		im.TexCoord2f( 0, 0 );
+		im.Vertex2f( x, y );
+		im.TexCoord2f( 1, 0 );
+		im.Vertex2f( x + w, y );
+		im.TexCoord2f( 1, 1 );
+		im.Vertex2f( x + w, y + h );
+		im.TexCoord2f( 0, 1 );
+		im.Vertex2f( x, y + h );
+		im.End();
 	}
 
 	qglFinish();
@@ -573,17 +575,18 @@ const void	RB_SwapBuffers( const void *data ) {
 
 		// draw screen-sized quad with color (0.0, 0.0, 0.0, 1.0)
 		const float x=0, y=0, w=1, h=1;
-		qglColor4f( 0.0f, 0.0f, 0.0f, 1.0f );
+		idImmediateMode im;
+		im.Color4f( 0.0f, 0.0f, 0.0f, 1.0f );
 		// debug values:
 		//const float x = 0.1, y = 0.1, w = 0.8, h = 0.8;
-		//qglColor4f( 0.0f, 0.0f, 0.5f, 1.0f );
+		//im.Color4f( 0.0f, 0.0f, 0.5f, 1.0f );
 
-		qglBegin( GL_QUADS );
-			qglVertex2f( x,   y   ); // ( 0,0 );
-			qglVertex2f( x,   y+h ); // ( 0,1 );
-			qglVertex2f( x+w, y+h ); // ( 1,1 );
-			qglVertex2f( x+w, y   ); // ( 1,0 );
-		qglEnd();
+		im.Begin( GL_QUADS );
+			im.Vertex2f( x,   y   ); // ( 0,0 );
+			im.Vertex2f( x,   y+h ); // ( 0,1 );
+			im.Vertex2f( x+w, y+h ); // ( 1,1 );
+			im.Vertex2f( x+w, y   ); // ( 1,0 );
+		im.End();
 
 		// restore previous transform matrix states
 		qglPopMatrix(); // for projection

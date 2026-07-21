@@ -29,6 +29,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/platform.h"
 #include "renderer/ModelManager.h"
 #include "renderer/tr_local.h"
+#include "renderer/ImmediateMode.h"
 
 #include "tools/compilers/compiler_public.h"
 
@@ -1468,7 +1469,8 @@ void RenderBumpFlat_f( const idCmdArgs &args ) {
 			qglClearColor(0.5,0.5,0.5,0);
 			qglClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
 
-			qglBegin( GL_TRIANGLES );
+			idImmediateMode im;
+			im.Begin( GL_TRIANGLES );
 			for ( i = 0 ; i < highPolyModel->NumSurfaces() ; i++ ) {
 				const modelSurface_t *surf = highPolyModel->Surface( i );
 
@@ -1482,9 +1484,9 @@ void RenderBumpFlat_f( const idCmdArgs &args ) {
 							float	*a;
 
 							v = mesh->indexes[j+k];
-							qglColor3ubv( mesh->verts[v].color );
+							im.Color3ubv( mesh->verts[v].color );
 							a = mesh->verts[v].xyz.ToFloatPtr();
-							qglVertex3f( a[0] + xOff, a[2] + yOff, a[1] );
+							im.Vertex3f( a[0] + xOff, a[2] + yOff, a[1] );
 						}
 					}
 				} else {
@@ -1510,14 +1512,14 @@ void RenderBumpFlat_f( const idCmdArgs &args ) {
 							// NULLNORMAL is used by the artists to force an area to reflect no
 							// light at all
 							if ( surf->shader->GetSurfaceFlags() & SURF_NULLNORMAL ) {
-								qglColor3f( 0.5, 0.5, 0.5 );
+								im.Color3f( 0.5, 0.5, 0.5 );
 							} else {
-								qglColor3f( 0.5 + 0.5*plane[0], 0.5 - 0.5*plane[2], 0.5 - 0.5*plane[1] );
+								im.Color3f( 0.5 + 0.5*plane[0], 0.5 - 0.5*plane[2], 0.5 - 0.5*plane[1] );
 							}
 
-							qglVertex3f( (*a)[0] + xOff, (*a)[2] + yOff, (*a)[1] );
-							qglVertex3f( (*b)[0] + xOff, (*b)[2] + yOff, (*b)[1] );
-							qglVertex3f( (*c)[0] + xOff, (*c)[2] + yOff, (*c)[1] );
+							im.Vertex3f( (*a)[0] + xOff, (*a)[2] + yOff, (*a)[1] );
+							im.Vertex3f( (*b)[0] + xOff, (*b)[2] + yOff, (*b)[1] );
+							im.Vertex3f( (*c)[0] + xOff, (*c)[2] + yOff, (*c)[1] );
 						} else {
 							for ( k = 0 ; k < 3 ; k++ ) {
 								int		v;
@@ -1530,21 +1532,21 @@ void RenderBumpFlat_f( const idCmdArgs &args ) {
 								// NULLNORMAL is used by the artists to force an area to reflect no
 								// light at all
 								if ( surf->shader->GetSurfaceFlags() & SURF_NULLNORMAL ) {
-									qglColor3f( 0.5, 0.5, 0.5 );
+									im.Color3f( 0.5, 0.5, 0.5 );
 								} else {
 								// we are going to flip the normal Z direction
-									qglColor3f( 0.5 + 0.5*n[0], 0.5 - 0.5*n[2], 0.5 - 0.5*n[1] );
+									im.Color3f( 0.5 + 0.5*n[0], 0.5 - 0.5*n[2], 0.5 - 0.5*n[1] );
 								}
 
 								a = mesh->verts[v].xyz.ToFloatPtr();
-								qglVertex3f( a[0] + xOff, a[2] + yOff, a[1] );
+								im.Vertex3f( a[0] + xOff, a[2] + yOff, a[1] );
 							}
 						}
 					}
 				}
 			}
 
-			qglEnd();
+			im.End();
 			qglFlush();
 			GLimp_SwapBuffers();
 			qglReadPixels( 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, buffer );
