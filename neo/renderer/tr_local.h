@@ -912,6 +912,7 @@ extern idCVar r_skipLightScale;			// don't do any post-interaction light scaling
 extern idCVar r_skipBump;				// uses a flat surface instead of the bump map
 extern idCVar r_skipSpecular;			// use black for specular
 extern idCVar r_skipDiffuse;			// use black for diffuse
+extern idCVar r_whiteWorld;				// DUDE: white diffuse everywhere, lighting-only view
 extern idCVar r_skipOverlays;			// skip overlay surfaces
 extern idCVar r_skipROQ;
 

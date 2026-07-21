@@ -219,6 +219,26 @@ Compatibility is defined by *what a mod ships*, not by intent:
   This is a game-code limitation, unrelated to the renderer.
 
 ### Phase 3 — RHI abstraction
+
+**Decisions (2026-07-21):**
+- **Parallel backend, not in-place rewrite**: legacy ARB path stays untouched as the
+  reference implementation (pixel harness needs it); new GL 3.3 backend is new code
+  behind `r_graphicsAPI opengl3` (legacy keeps `opengl` and stays default until
+  parity; then opengl3 becomes default, legacy renamed `opengl-legacy`).
+- **Material IR (Phase 2.5) co-developed as its own module**, lazily built + cached
+  per material; unknown custom ARB programs → transpiler → on failure degrade to a
+  plain generic stage.
+- **Shaders load as loose files via idFileSystem** (`shaders/` dir): moddable,
+  hot-reloadable (`reloadShaders`), install copies neo/shaders. Prelude prepending +
+  include resolution done by the loader.
+- **Uniforms**: one RenderParams/ArbParams UBO slice per draw from a ring buffer;
+  C++ struct shared with GLSL layout. VAOs on attr locations 0–5 (+ shadow layout).
+- `_currentRender`/`_currentDepth` stay CopyTexSubImage-style (faithful, no FBOs yet).
+- RHI + GL 3.3 backend stay C++11; only the Vulkan backend requires C++17.
+- **Milestone 1 = 2D/GUI/console** through the RHI, verified by eyeball + harness
+  against legacy; then depth prepass → shadows+interactions → stages/fog → post →
+  debug tools (rehearses the Phase 4 bring-up order).
+
 Minimal interface shaped by what idTech4 actually needs: Buffer, Image, Sampler,
 Pipeline (state bits + shader + vertex layout), render pass begin/end, draw with
 dynamic geometry, screen copy. Implement it first as the **modernized GL 3.3 core
@@ -326,6 +346,15 @@ fidelity-affecting toggle, each defaulting to the classic look unless noted:
 - uncapped framerate via tick interpolation (Phase 7)
 - native-resolution console font scaling (standalone QoL; the console renders in
   virtual 640×480 coords today — scaled blurry at high res. UI-only change.)
+- **film grain** (`r_postFilmGrain`, 0=off) and **chromatic aberration**
+  (`r_postChromaticAberration`, 0=off): one fullscreen post pass over
+  `_currentRender` after the 3D view, **before 2D/GUI — HUD unaffected**.
+  Shader authored (shaders/postprocess.*), wired in Phase 3 Chunk F.
+  Fidelity: look change, defaults off.
+
+Debug aids (not fidelity-relevant, console cvars): `r_whiteWorld` renders all
+diffuse maps as white to judge lighting on its own (implemented on the legacy
+path; carry into the Phase 3 IR).
 
 The section also inventories the **pre-existing dhewm3-era departures from 2004**,
 so it's the single honest list of everything non-classic:
