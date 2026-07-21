@@ -7,6 +7,7 @@
 .settings/
 
 /dhewm*
+/dude*
 /*-releases/
 /neo/.vs*
 /neo/out*
@@ -14,3 +15,14 @@
 /.vs*
 
 /neo/CMakeSettings.json
+
+# Doom 3 game data — copyrighted, must never be committed.
+# base/ keeps its tracked upstream .cfg files; only the data/keys are ignored.
+*.pk4
+/base/doomkey
+/base/xpkey
+/base/DoomConfig.cfg
+/base/*.dat
+/d3xp/
+/d3le/
+savegames/
