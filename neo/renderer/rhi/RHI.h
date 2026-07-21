@@ -76,6 +76,12 @@ class RHI {
 public:
 	virtual			~RHI() {}
 
+	// ---- lifecycle ----
+	// Init is called with a live context/device (and again after vid_restart,
+	// where all previous handles are already dead with the old context).
+	virtual bool	Init() = 0;
+	virtual void	Shutdown() = 0;
+
 	// ---- frame ----
 	virtual void	BeginFrame( int windowWidth, int windowHeight ) = 0;
 	virtual void	EndFrame() = 0;						// present handled by glimp/swapchain
@@ -93,6 +99,11 @@ public:
 	virtual ImageHandle		CreateImage( ImageFormat fmt, int w, int h, const void *pixels ) = 0;
 	virtual void			DestroyImage( ImageHandle i ) = 0;
 	virtual ShaderHandle	LoadShader( const char *name ) = 0;	// loads name.vert/.frag via VFS
+
+	// per-draw uniform ring: writes `size` bytes and returns the aligned
+	// offset (+ the ring's buffer in *buffer) for DrawArgs::uniformBuffer/
+	// uniformOffset. Contents live at least until the frame is presented.
+	virtual int				AllocUniforms( const void *data, int size, BufferHandle *buffer ) = 0;
 
 	// ---- drawing (Chunk C+) ----
 	virtual void	BindPipeline( const PipelineDesc &desc ) = 0;

@@ -261,6 +261,12 @@ endif()
 # Vulkan renderer backend (in development, Phase 0+ of docs/vulkan-port.md).
 # Off by default: the OpenGL build is unchanged and needs none of this.
 set(vulkan_libs "")
+# GL3/Vulkan shader loader dev fallback: when a shader isn't found in the VFS
+# (base/shaders/, pk4s), read it straight from the source tree so editing +
+# `reloadShaders` works without an install/copy step. Installs/releases ship
+# the shaders via VFS and never hit this path.
+add_definitions(-DDUDE_SHADER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+
 if(DHEWM3_VULKAN)
 	# built-in FindVulkan: headers + loader, and locates glslangValidator/glslc
 	find_package(Vulkan REQUIRED)
@@ -649,6 +655,7 @@ set(src_renderer
 	renderer/ArbToGlsl.cpp
 	renderer/ImmediateMode.cpp
 	renderer/rhi/GL3Backend.cpp
+	renderer/rhi/GL3Shaders.cpp
 	renderer/Interaction.cpp
 	renderer/Material.cpp
 	renderer/MegaTexture.cpp

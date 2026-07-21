@@ -39,6 +39,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "ui/UserInterface.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/rhi/RHI.h"
 
 #include "framework/GameCallbacks_local.h"
 #include "framework/Game.h"
@@ -900,6 +901,13 @@ void R_InitOpenGL( void ) {
 		glConfig.multitextureAvailable = false;
 		glConfig.ARBVertexBufferObjectAvailable = false;
 		glConfig.allowARB2Path = true;
+
+		// Phase 3 Chunk B: bring up the backend proper — core function
+		// pointers, GLSL program cache, per-draw UBO ring, VAOs. Runs again
+		// after vid_restart with the fresh context.
+		if ( !rhi::GetGL3RHI()->Init() ) {
+			common->Error( "GL3 backend initialization failed (see warnings above)" );
+		}
 	} else {
 		// recheck all the extensions (FIXME: this might be dangerous)
 		R_CheckPortableExtensions();

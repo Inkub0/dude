@@ -1,0 +1,68 @@
+/*
+===========================================================================
+Doom 3 GPL Source Code (see ArbProgram.h for license header)
+===========================================================================
+*/
+
+#ifndef __RENDERPARAMS_H__
+#define __RENDERPARAMS_H__
+
+// C++ mirror of the shared per-draw uniform block in shaders/renderparms.glsl.
+// The block is all mat4/vec4 members, so the std140 layout is trivially packed
+// (no padding anywhere) and this plain struct matches it byte for byte on
+// every backend — asserted below. Keep member order in lockstep with the GLSL.
+//
+// Member comments documenting which ARB program.env[N]/local[N] slot each
+// value replaces live in renderparms.glsl.
+
+namespace rhi {
+
+struct RenderParams {
+	float	mvpMatrix[16];
+	float	modelViewMatrix[16];
+	float	projectionMatrix[16];
+
+	float	localLightOrigin[4];
+	float	localViewOrigin[4];
+	float	lightProjectionS[4];
+	float	lightProjectionT[4];
+	float	lightProjectionQ[4];
+	float	lightFalloffS[4];
+	float	bumpMatrixS[4];
+	float	bumpMatrixT[4];
+	float	diffuseMatrixS[4];
+	float	diffuseMatrixT[4];
+	float	specularMatrixS[4];
+	float	specularMatrixT[4];
+	float	vertexColorModulate[4];
+	float	vertexColorAdd[4];
+	float	modelMatrixRow0[4];
+	float	modelMatrixRow1[4];
+	float	modelMatrixRow2[4];
+
+	float	diffuseModifier[4];
+	float	specularModifier[4];
+	float	screenCorrection[4];
+	float	windowCoord[4];
+
+	float	localParam0[4];
+	float	localParam1[4];
+
+	float	depthTexRecip[4];
+	float	particleRadius[4];
+	float	channelMask[4];
+
+	float	color[4];
+	float	alphaTest[4];
+	float	texGen0S[4];
+	float	texGen0T[4];
+	float	texGen0Q[4];
+	float	texGen1S[4];
+};
+
+// 3 mat4 (192) + 32 vec4 (512) = 704 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 704, "RenderParams must match the std140 layout of renderparms.glsl" );
+
+} // namespace rhi
+
+#endif /* !__RENDERPARAMS_H__ */
