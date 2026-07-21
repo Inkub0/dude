@@ -86,12 +86,13 @@ void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	rhi::RHI *r = rhi::GetGL3RHI();
 	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
 
-	// recognizable "new backend alive" clear (dark teal, clearly not legacy black)
+	// unmistakable "new backend alive" clear — bright magenta, the universal
+	// placeholder colour (Chunk A draws nothing; this proves the context clears)
 	rhi::ClearArgs clear;
 	clear.color = true;
 	clear.depth = true;
 	clear.stencil = true;
-	clear.rgba[0] = 0.05f; clear.rgba[1] = 0.10f; clear.rgba[2] = 0.12f; clear.rgba[3] = 1.0f;
+	clear.rgba[0] = 0.7f; clear.rgba[1] = 0.0f; clear.rgba[2] = 0.7f; clear.rgba[3] = 1.0f;
 	clear.stencilValue = 0;
 	r->BeginPass( &clear );
 	r->EndPass();
