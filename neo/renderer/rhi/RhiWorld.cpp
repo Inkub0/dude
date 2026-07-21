@@ -324,7 +324,6 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 	qglStencilFunc( GL_ALWAYS, 1, 255 );
 
 	const viewEntity_t *currentSpace = NULL;
-	idScreenRect currentScissor = viewDef->scissor;
 	float mvp[16];
 
 	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
@@ -368,12 +367,12 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 			RB_EnterModelDepthHack( surf->space->modelDepthHack );
 		}
 
-		if ( r_useScissor.GetBool() && !currentScissor.Equals( surf->scissorRect ) ) {
-			currentScissor = surf->scissorRect;
-			r->SetScissor( viewDef->viewport.x1 + currentScissor.x1,
-			               viewDef->viewport.y1 + currentScissor.y1,
-			               currentScissor.x2 + 1 - currentScissor.x1,
-			               currentScissor.y2 + 1 - currentScissor.y1 );
+		if ( r_useScissor.GetBool() && !backEnd.currentScissor.Equals( surf->scissorRect ) ) {
+			backEnd.currentScissor = surf->scissorRect;
+			r->SetScissor( viewDef->viewport.x1 + backEnd.currentScissor.x1,
+			               viewDef->viewport.y1 + backEnd.currentScissor.y1,
+			               backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
+			               backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
 		}
 
 		if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {

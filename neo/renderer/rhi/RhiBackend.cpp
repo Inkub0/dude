@@ -318,8 +318,7 @@ pairs. Mirrors RB_STD_T_RenderShaderPasses stage for stage.
 =============
 */
 static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf,
-                                       const viewEntity_t *&currentSpace, idScreenRect &currentScissor,
-                                       float mvp[16] ) {
+                                       const viewEntity_t *&currentSpace, float mvp[16] ) {
 	const srfTriangles_t *tri = surf->geo;
 	const idMaterial *shader = surf->material;
 
@@ -332,12 +331,15 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		RB_RHI_SpaceMvp( viewDef, surf->space, mvp );
 	}
 
-	if ( r_useScissor.GetBool() && !currentScissor.Equals( surf->scissorRect ) ) {
-		currentScissor = surf->scissorRect;
-		r->SetScissor( viewDef->viewport.x1 + currentScissor.x1,
-		               viewDef->viewport.y1 + currentScissor.y1,
-		               currentScissor.x2 + 1 - currentScissor.x1,
-		               currentScissor.y2 + 1 - currentScissor.y1 );
+	// track scissor state in backEnd.currentScissor like every legacy pass —
+	// split tracking desyncs from the GL state the world pass leaves behind
+	// (the last light's scissor rect), clipping every surface drawn after
+	if ( r_useScissor.GetBool() && !backEnd.currentScissor.Equals( surf->scissorRect ) ) {
+		backEnd.currentScissor = surf->scissorRect;
+		r->SetScissor( viewDef->viewport.x1 + backEnd.currentScissor.x1,
+		               viewDef->viewport.y1 + backEnd.currentScissor.y1,
+		               backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
+		               backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
 	}
 
 	if ( !tri->numIndexes ) {
@@ -550,9 +552,12 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		r->BeginPass( NULL );
 	}
 
-	// ambient/emissive shader passes (both view types)
+	// ambient/emissive shader passes (both view types); for 2D views the GL
+	// scissor was just set to the view rect, keep the tracking in sync
+	if ( !viewDef->viewEntitys ) {
+		backEnd.currentScissor = viewDef->scissor;
+	}
 	const viewEntity_t *currentSpace = NULL;
-	idScreenRect currentScissor = viewDef->scissor;
 	float mvp[16];
 
 	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
@@ -565,7 +570,7 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 			RB_RHI_LogOnce( "post-process-sort surfaces" );
 			continue;
 		}
-		RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, currentScissor, mvp );
+		RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, mvp );
 	}
 
 	// fog and blend lights (Chunk F)
