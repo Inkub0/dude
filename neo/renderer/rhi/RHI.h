@@ -111,6 +111,11 @@ public:
 	virtual int				AllocVertices( const void *data, int size, BufferHandle *buffer ) = 0;
 	virtual int				AllocIndices( const void *data, int size, BufferHandle *buffer ) = 0;
 
+	// bumped whenever a ring orphans its storage (new frame or mid-frame
+	// wrap); previously returned offsets are invalid for NEW draws once this
+	// changes — callers caching stream results must revalidate against it
+	virtual int				StreamGeneration() = 0;
+
 	// ---- drawing (Chunk C+) ----
 	virtual void	BindPipeline( const PipelineDesc &desc ) = 0;
 	virtual void	Draw( const DrawArgs &args ) = 0;

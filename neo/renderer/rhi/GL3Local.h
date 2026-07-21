@@ -108,4 +108,32 @@ unsigned int	GL3_ProgramObject( unsigned int handle );	// GL program object for 
 
 } // namespace rhi
 
+// ---- RHI command executor internals (RhiBackend.cpp / RhiWorld.cpp) ----
+struct viewDef_s;
+struct drawSurf_s;
+struct srfTriangles_s;
+
+void RB_RHI_LogOnce( const char *what );
+
+// per-frame geometry streaming with dedup: the same surface streamed once
+// per frame no matter how many passes reference it (depth fill, per-light
+// interactions, shader passes)
+void RB_RHI_StreamAmbient( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs );
+void RB_RHI_StreamShadow( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs );
+
+// MVP for a model space, including the weapon/model depth hack projection
+// tweaks (the depth range part stays in RB_Enter/LeaveDepthHack)
+void RB_RHI_SpaceMvp( const viewDef_s *viewDef, const struct viewEntity_s *space, float mvp[16] );
+
+// material cull type adjusted for mirror views
+int RB_RHI_CullFor( const viewDef_s *viewDef, int cullType );
+
+// 3D world: depth prepass + stencil shadows + light interactions (RhiWorld.cpp)
+void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef );
+
+// screenshot support: composited desktops return garbage for front-buffer
+// reads, so R_ReadTiledPixels registers a destination and the executor
+// captures GL_BACK right before the next swap (GL_RGB, pack alignment 4)
+void RB_RHI_CaptureNextSwap( unsigned char *dest );
+
 #endif /* !__GL3LOCAL_H__ */

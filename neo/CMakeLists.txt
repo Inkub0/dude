@@ -658,6 +658,7 @@ set(src_renderer
 	renderer/rhi/GL3Shaders.cpp
 	renderer/rhi/MaterialIR.cpp
 	renderer/rhi/RhiBackend.cpp
+	renderer/rhi/RhiWorld.cpp
 	renderer/Interaction.cpp
 	renderer/Material.cpp
 	renderer/MegaTexture.cpp

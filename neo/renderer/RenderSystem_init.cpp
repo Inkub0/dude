@@ -40,6 +40,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "renderer/tr_local.h"
 #include "renderer/rhi/RHI.h"
+#include "renderer/rhi/GL3Local.h"
 
 #include "framework/GameCallbacks_local.h"
 #include "framework/Game.h"
@@ -913,6 +914,19 @@ void R_InitOpenGL( void ) {
 		glConfig.bptcTextureCompressionAvailable = glConfig.textureCompressionAvailable
 			&& strstr( glConfig.extensions_string, "GL_ARB_texture_compression_bptc" ) != NULL;
 
+		// stencil shadow support: wrap ops are core since GL 1.4 and
+		// glStencilOpSeparate since 2.0 (single-pass two-sided volumes)
+		tr.stencilIncr = GL_INCR_WRAP_EXT;
+		tr.stencilDecr = GL_DECR_WRAP_EXT;
+		qglStencilOpSeparate = (PFNGLSTENCILOPSEPARATEPROC)GLimp_ExtensionPointer( "glStencilOpSeparate" );
+
+		// capabilities that are core since GL 1.3/2.0 but normally only set by
+		// the (skipped) extension probing — the image generators early-out
+		// without these (an empty _normalCubeMap kills all diffuse lighting)
+		glConfig.cubeMapAvailable = true;
+		glConfig.texture3DAvailable = qglTexImage3D != NULL;
+		glConfig.textureNonPowerOfTwoAvailable = true;
+
 		// Phase 3 Chunk B: bring up the backend proper — core function
 		// pointers, GLSL program cache, per-draw UBO ring, VAOs. Runs again
 		// after vid_restart with the fresh context.
@@ -1411,6 +1425,12 @@ void R_ReadTiledPixels( int width, int height, byte *buffer, renderView_t *ref =
 			tr.viewportOffset[0] = -xo;
 			tr.viewportOffset[1] = -yo;
 
+			// DUDE GL3 backend: capture GL_BACK at swap time — front-buffer
+			// reads below return garbage on composited desktops
+			if ( glConfig.coreProfile ) {
+				RB_RHI_CaptureNextSwap( temp );
+			}
+
 			if ( ref ) {
 				tr.BeginFrame( oldWidth, oldHeight );
 				tr.primaryWorld->RenderScene( ref );
@@ -1428,7 +1448,9 @@ void R_ReadTiledPixels( int width, int height, byte *buffer, renderView_t *ref =
 				h = height - yo;
 			}
 
-			if ( glConfig.isWayland ) {
+			if ( glConfig.coreProfile ) {
+				// already filled by the executor at swap; nothing to read here
+			} else if ( glConfig.isWayland ) {
 				// DG: Native Wayland (=> not XWayland) doesn't seem to support reading
 				//     from the front buffer - screenshot is black then..
 				//     So just read from the default (probably back-) buffer

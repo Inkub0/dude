@@ -280,6 +280,12 @@ static GLuint GL3_BuildProgramObject( const char *name, const char *vertBody = N
 		idStr stageFile = va( "%s.%s", name, stageExt[i] );
 		idList<idStr> files;
 		stageSource[i] = prelude;
+		if ( i == 0 ) {
+			// multi-pass rendering depends on every program producing bit-equal
+			// depth (zfill prepass vs interaction passes use depthFunc EQUAL);
+			// unlike ARB_position_invariant this isn't implicit in GLSL
+			stageSource[i] += "invariant gl_Position;\n";
+		}
 		bool ok;
 		if ( stageBody[i] ) {
 			ok = GL3_ExpandText( idStr( stageBody[i] ), stageFile.c_str(), stageSource[i], files, 0 );

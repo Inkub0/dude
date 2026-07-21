@@ -179,6 +179,13 @@ RB_EnterWeaponDepthHack
 void RB_EnterWeaponDepthHack() {
 	qglDepthRange( 0, 0.5 );
 
+	// DUDE: on core profiles the projection tweak is applied by the RHI
+	// backend when it builds the MVP (RB_RHI_SpaceMvp); only the depth
+	// range call above is fixed-function-free
+	if ( glConfig.coreProfile ) {
+		return;
+	}
+
 	float	matrix[16];
 
 	memcpy( matrix, backEnd.viewDef->projectionMatrix, sizeof( matrix ) );
@@ -198,6 +205,10 @@ RB_EnterModelDepthHack
 void RB_EnterModelDepthHack( float depth ) {
 	qglDepthRange( 0.0f, 1.0f );
 
+	if ( glConfig.coreProfile ) {
+		return;		// see RB_EnterWeaponDepthHack
+	}
+
 	float	matrix[16];
 
 	memcpy( matrix, backEnd.viewDef->projectionMatrix, sizeof( matrix ) );
@@ -216,6 +227,10 @@ RB_LeaveDepthHack
 */
 void RB_LeaveDepthHack() {
 	qglDepthRange( 0, 1 );
+
+	if ( glConfig.coreProfile ) {
+		return;		// see RB_EnterWeaponDepthHack
+	}
 
 	qglMatrixMode(GL_PROJECTION);
 	qglLoadMatrixf( backEnd.viewDef->projectionMatrix );
@@ -724,7 +739,9 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 	// change the matrix and light projection vectors if needed
 	if ( surf->space != backEnd.currentSpace ) {
 		backEnd.currentSpace = surf->space;
-		qglLoadMatrixf( surf->space->modelViewMatrix );
+		if ( !glConfig.coreProfile ) {	// DUDE: RHI backends carry the matrix in the per-draw UBO
+			qglLoadMatrixf( surf->space->modelViewMatrix );
+		}
 	}
 
 	// change the scissor if needed

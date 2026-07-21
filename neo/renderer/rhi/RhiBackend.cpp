@@ -29,13 +29,143 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "renderer/rhi/ArbParamsBlock.h"
 #include "renderer/rhi/MaterialIR.h"
 
-static void RB_RHI_LogOnce( const char *what ) {
+static unsigned char *rbCaptureDest = NULL;
+
+void RB_RHI_CaptureNextSwap( unsigned char *dest ) {
+	rbCaptureDest = dest;
+}
+
+void RB_RHI_LogOnce( const char *what ) {
 	static idStr logged;
 	if ( logged.Find( what ) < 0 ) {
 		logged += what;
 		logged += ";";
 		common->Printf( "RHI backend: %s (not rendered yet)\n", what );
 	}
+}
+
+/*
+=============
+RB_RHI_SpaceMvp
+
+MVP for a model space. The weapon/model depth hacks tweak the projection
+matrix; the depth range half of those hacks stays in RB_Enter/LeaveDepthHack
+(core-safe — they only call glDepthRange there).
+=============
+*/
+void RB_RHI_SpaceMvp( const viewDef_s *viewDef, const viewEntity_t *space, float mvp[16] ) {
+	if ( space->weaponDepthHack || space->modelDepthHack != 0.0f ) {
+		float proj[16];
+		memcpy( proj, viewDef->projectionMatrix, sizeof( proj ) );
+		if ( space->weaponDepthHack ) {
+			proj[14] *= 0.25f;
+		} else {
+			proj[14] -= space->modelDepthHack;
+		}
+		myGlMultMatrix( space->modelViewMatrix, proj, mvp );
+	} else {
+		myGlMultMatrix( space->modelViewMatrix, viewDef->projectionMatrix, mvp );
+	}
+}
+
+/*
+=============
+RB_RHI_CullFor
+=============
+*/
+int RB_RHI_CullFor( const viewDef_s *viewDef, int cullType ) {
+	if ( viewDef->isMirror ) {
+		if ( cullType == CT_FRONT_SIDED ) {
+			return CT_BACK_SIDED;
+		}
+		if ( cullType == CT_BACK_SIDED ) {
+			return CT_FRONT_SIDED;
+		}
+	}
+	return cullType;
+}
+
+/*
+=============
+per-frame surface streaming with dedup
+
+A surface referenced by several passes (depth fill, per-light interactions,
+shader passes) is streamed into the rings once per frame. Entries are keyed
+by the vertex-cache block and invalidated whenever a ring orphans its
+storage (StreamGeneration) — offsets into orphaned storage must not be
+reused for new draws.
+=============
+*/
+struct streamedGeo_t {
+	const void *		vertKey;	// vertex cache block
+	const void *		idxKey;		// index array — NOT redundant: per-light
+									// turbo shadow volumes share one doubled
+									// vertex cache but have their own indexes
+	rhi::BufferHandle	vb, ib;
+	int					vertOfs, idxOfs;
+};
+
+static idList<streamedGeo_t>	rbStreamed;
+static idHashIndex				rbStreamedHash;
+static int						rbStreamedGen = -1;
+
+static bool RB_RHI_StreamLookup( rhi::RHI *r, const void *vertKey, const void *idxKey, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs ) {
+	if ( r->StreamGeneration() != rbStreamedGen ) {
+		rbStreamedGen = r->StreamGeneration();
+		rbStreamed.Clear();
+		rbStreamedHash.Free();
+	}
+	int hashKey = (int)( ( ( (uintptr_t)vertKey ^ (uintptr_t)idxKey ) >> 4 ) & 0x7fffffff );
+	for ( int i = rbStreamedHash.First( hashKey ); i != -1; i = rbStreamedHash.Next( i ) ) {
+		if ( rbStreamed[i].vertKey == vertKey && rbStreamed[i].idxKey == idxKey ) {
+			vb = rbStreamed[i].vb;
+			vertOfs = rbStreamed[i].vertOfs;
+			ib = rbStreamed[i].ib;
+			idxOfs = rbStreamed[i].idxOfs;
+			return true;
+		}
+	}
+	return false;
+}
+
+static void RB_RHI_StreamStore( rhi::RHI *r, const void *vertKey, const void *idxKey, rhi::BufferHandle vb, int vertOfs, rhi::BufferHandle ib, int idxOfs ) {
+	// only cache if no ring wrapped during the writes — otherwise earlier
+	// offsets may point into orphaned storage
+	if ( r->StreamGeneration() != rbStreamedGen ) {
+		return;
+	}
+	streamedGeo_t e;
+	e.vertKey = vertKey;
+	e.idxKey = idxKey;
+	e.vb = vb;
+	e.vertOfs = vertOfs;
+	e.ib = ib;
+	e.idxOfs = idxOfs;
+	int index = rbStreamed.Append( e );
+	rbStreamedHash.Add( (int)( ( ( (uintptr_t)vertKey ^ (uintptr_t)idxKey ) >> 4 ) & 0x7fffffff ), index );
+}
+
+void RB_RHI_StreamAmbient( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs ) {
+	if ( RB_RHI_StreamLookup( r, tri->ambientCache, tri->indexes, vb, vertOfs, ib, idxOfs ) ) {
+		return;
+	}
+	// stream the whole cache block: several shadow/geometry paths put more
+	// data in the cache than tri->numVerts suggests (e.g. the shared shadow
+	// caches hold near+far vertex pairs), and the indexes address it
+	const idDrawVert *ac = (idDrawVert *)vertexCache.Position( tri->ambientCache );
+	vertOfs = r->AllocVertices( ac, tri->ambientCache->size, &vb );
+	idxOfs = r->AllocIndices( tri->indexes, tri->numIndexes * (int)sizeof( glIndex_t ), &ib );
+	RB_RHI_StreamStore( r, tri->ambientCache, tri->indexes, vb, vertOfs, ib, idxOfs );
+}
+
+void RB_RHI_StreamShadow( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs ) {
+	if ( RB_RHI_StreamLookup( r, tri->shadowCache, tri->indexes, vb, vertOfs, ib, idxOfs ) ) {
+		return;
+	}
+	const shadowCache_t *sc = (shadowCache_t *)vertexCache.Position( tri->shadowCache );
+	vertOfs = r->AllocVertices( sc, tri->shadowCache->size, &vb );
+	idxOfs = r->AllocIndices( tri->indexes, tri->numIndexes * (int)sizeof( glIndex_t ), &ib );
+	RB_RHI_StreamStore( r, tri->shadowCache, tri->indexes, vb, vertOfs, ib, idxOfs );
 }
 
 /*
@@ -158,7 +288,7 @@ static void RB_RHI_RenderCustomStage( rhi::RHI *r, const viewDef_t *viewDef, con
 	}
 	pd.shader = program;
 	pd.vertexLayout = rhi::VL_DRAWVERT;
-	pd.cullType = surf->material->GetCullType();
+	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
 	r->BindPipeline( pd );
 
 	rhi::DrawArgs da;
@@ -199,7 +329,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 
 	if ( surf->space != currentSpace ) {
 		currentSpace = surf->space;
-		myGlMultMatrix( surf->space->modelViewMatrix, viewDef->projectionMatrix, mvp );
+		RB_RHI_SpaceMvp( viewDef, surf->space, mvp );
 	}
 
 	if ( r_useScissor.GetBool() && !currentScissor.Equals( surf->scissorRect ) ) {
@@ -226,11 +356,19 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
 	}
 
+	// depth range hacks (matrix side handled by RB_RHI_SpaceMvp; these are
+	// core-safe depth range calls, mirroring RB_STD_T_RenderShaderPasses)
+	if ( surf->space->weaponDepthHack ) {
+		RB_EnterWeaponDepthHack();
+	}
+	if ( surf->space->modelDepthHack != 0.0f && !( surf->dsFlags & DSF_SOFT_PARTICLE ) ) {
+		RB_EnterModelDepthHack( surf->space->modelDepthHack );
+	}
+
 	// stream this surface's frame-temporary geometry once, draw per stage
-	const idDrawVert *ac = (idDrawVert *)vertexCache.Position( tri->ambientCache );
 	rhi::BufferHandle vb, ib;
-	int vertOfs = r->AllocVertices( ac, tri->numVerts * (int)sizeof( idDrawVert ), &vb );
-	int idxOfs = r->AllocIndices( tri->indexes, tri->numIndexes * (int)sizeof( glIndex_t ), &ib );
+	int vertOfs, idxOfs;
+	RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
 
 	const rhi::MaterialIR *ir = rhi::IR_Get( shader );
 
@@ -348,7 +486,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		}
 		pd.shader = si.program;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
-		pd.cullType = shader->GetCullType();
+		pd.cullType = RB_RHI_CullFor( viewDef, shader->GetCullType() );
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
@@ -371,6 +509,9 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
 		qglDisable( GL_POLYGON_OFFSET_FILL );
 	}
+	if ( surf->space->weaponDepthHack || ( surf->space->modelDepthHack != 0.0f && !( surf->dsFlags & DSF_SOFT_PARTICLE ) ) ) {
+		RB_LeaveDepthHack();
+	}
 }
 
 /*
@@ -392,10 +533,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	               viewDef->scissor.y2 + 1 - viewDef->scissor.y1 );
 
 	if ( viewDef->viewEntitys ) {
-		// 3D world view: not rendered until Chunk E. Clear depth/stencil like
-		// RB_BeginDrawingView but leave color alone — 3D views (including
-		// idRenderWindow menu backgrounds) must not paint over already-drawn
-		// GUI surfaces; unrendered world areas show the r_clear color.
+		// 3D world view: clear depth/stencil like RB_BeginDrawingView (color
+		// is never cleared — the r_clear pass at frame start handles that),
+		// then depth prepass + stencil shadows + interactions
 		rhi::ClearArgs clear;
 		clear.color = false;
 		clear.depth = true;
@@ -403,14 +543,14 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		clear.rgba[0] = clear.rgba[1] = clear.rgba[2] = 0.0f; clear.rgba[3] = 1.0f;
 		clear.stencilValue = (unsigned char)( 1 << ( glConfig.stencilBits - 1 ) );
 		r->BeginPass( &clear );
-		r->EndPass();
-		RB_RHI_LogOnce( "3D world views" );
-		return;
+
+		RB_RHI_DrawWorld( r, viewDef );
+	} else {
+		// 2D view (menu/console/HUD/loading): draw over existing contents
+		r->BeginPass( NULL );
 	}
 
-	// 2D view (menu/console/HUD/loading): shader passes over existing contents
-	r->BeginPass( NULL );
-
+	// ambient/emissive shader passes (both view types)
 	const viewEntity_t *currentSpace = NULL;
 	idScreenRect currentScissor = viewDef->scissor;
 	float mvp[16];
@@ -420,7 +560,22 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		if ( drawSurfs[i]->material->SuppressInSubview() ) {
 			continue;
 		}
+		if ( viewDef->viewEntitys && drawSurfs[i]->material->GetSort() >= SS_POST_PROCESS ) {
+			// needs _currentRender copies (Chunk F)
+			RB_RHI_LogOnce( "post-process-sort surfaces" );
+			continue;
+		}
 		RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, currentScissor, mvp );
+	}
+
+	// fog and blend lights (Chunk F)
+	if ( viewDef->viewEntitys ) {
+		for ( const viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
+			if ( vLight->lightShader->IsFogLight() || vLight->lightShader->IsBlendLight() ) {
+				RB_RHI_LogOnce( "fog and blend lights" );
+				break;
+			}
+		}
 	}
 
 	r->EndPass();
@@ -437,7 +592,7 @@ void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	static bool announced = false;
 	if ( !announced ) {
 		announced = true;
-		common->Printf( "GL3 backend: Chunk C - 2D/GUI/console rendering (3D views not drawn yet)\n" );
+		common->Printf( "GL3 backend: Chunk E - world rendering (fog/blend/post effects pending)\n" );
 	}
 
 	rhi::RHI *r = rhi::GetGL3RHI();
@@ -481,6 +636,13 @@ void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 			RB_RHI_LogOnce( "RC_COPY_RENDER (_currentRender copies)" );
 			break;
 		case RC_SWAP_BUFFERS:
+			if ( rbCaptureDest ) {
+				// back buffer still holds the finished frame; front-buffer
+				// reads after swap are undefined under compositors
+				qglReadPixels( 0, 0, glConfig.vidWidth, glConfig.vidHeight,
+				               GL_RGB, GL_UNSIGNED_BYTE, rbCaptureDest );
+				rbCaptureDest = NULL;
+			}
 			GLimp_SwapBuffers();
 			break;
 		default:

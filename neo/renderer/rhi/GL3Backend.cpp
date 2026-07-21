@@ -36,10 +36,12 @@ bool GL3_LoadCoreFunctions( idStr &missing ) {
 }
 
 class GL3Backend : public RHI {
-	// ring sizes; wraps orphan mid-frame, so these are throughput hints
-	static const int UBO_RING_SIZE  = 1 << 20;	// ~1400 aligned RenderParams slices
-	static const int VERT_RING_SIZE = 8 << 20;
-	static const int IDX_RING_SIZE  = 2 << 20;
+	// ring sizes; wraps orphan mid-frame, so these are throughput hints.
+	// vertex/index rings carry the whole visible world per frame until
+	// vertexCache gets real VBOs (Chunk G), so they are sized generously.
+	static const int UBO_RING_SIZE  = 4 << 20;
+	static const int VERT_RING_SIZE = 32 << 20;
+	static const int IDX_RING_SIZE  = 8 << 20;
 
 	struct ring_t {
 		GLuint	buffer;
@@ -51,6 +53,7 @@ class GL3Backend : public RHI {
 	bool			initialized;
 	ring_t			uboRing, vertRing, idxRing;
 	GLint			uboAlign;
+	int				streamGen;
 	GLuint			vaos[VL_COUNT];
 
 	PipelineDesc	currentPipeline;
@@ -65,7 +68,7 @@ class GL3Backend : public RHI {
 	int				boundBase;
 
 public:
-	GL3Backend() : initialized( false ), uboAlign( 256 ) {
+	GL3Backend() : initialized( false ), uboAlign( 256 ), streamGen( 0 ) {
 		uboRing.buffer = vertRing.buffer = idxRing.buffer = 0;
 		vaos[0] = vaos[1] = 0;
 		InvalidateCaches();
@@ -208,6 +211,10 @@ public:
 		return AllocFromRing( idxRing, data, size, 4, buffer );
 	}
 
+	virtual int StreamGeneration() {
+		return streamGen;
+	}
+
 	virtual ImageHandle CreateImage( ImageFormat, int, int, const void * )	{ return 0; }	// engine images bridge via idImage until Phase 4
 	virtual void DestroyImage( ImageHandle )								{}
 
@@ -265,6 +272,7 @@ private:
 		gl3BindBuffer( GL_ARRAY_BUFFER, ring.buffer );
 		gl3BufferData( GL_ARRAY_BUFFER, ring.size, NULL, GL_DYNAMIC_DRAW );
 		ring.offset = 0;
+		streamGen++;
 	}
 
 	int AllocFromRing( ring_t &ring, const void *data, int size, int align, BufferHandle *buffer ) {

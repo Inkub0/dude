@@ -24,7 +24,10 @@ for f in sorted(SHADER_DIR.iterdir()):
         continue
     src = f.read_text().replace('#include "renderparms.glsl"', renderparms)
     for target, prelude in preludes.items():
-        full = prelude + "\n" + src
+        # the engine loader injects this for vertex stages (multi-pass depth
+        # invariance, replacing ARB_position_invariant)
+        invariant = "invariant gl_Position;\n" if f.suffix == ".vert" else ""
+        full = prelude + "\n" + invariant + src
         with tempfile.NamedTemporaryFile("w", suffix=f.suffix, delete=False) as tmp:
             tmp.write(full)
             tmpname = tmp.name
