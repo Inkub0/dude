@@ -146,12 +146,22 @@ public:
 		if ( !clear ) {
 			return;
 		}
+		// A masked write channel makes glClear a no-op on that buffer, so
+		// force the write masks on first (legacy does GL_State(GLS_DEFAULT)
+		// before its clear for this reason). Without it a preceding subview
+		// whose last draw set GLS_DEPTHMASK (interactions/shadows/fog) leaves
+		// depthMask FALSE and the next view's depth clear silently does
+		// nothing — the "world goes black around a mirror" bug.
 		GLbitfield bits = 0;
 		if ( clear->color ) {
+			qglColorMask( 1, 1, 1, 1 );
 			qglClearColor( clear->rgba[0], clear->rgba[1], clear->rgba[2], clear->rgba[3] );
 			bits |= GL_COLOR_BUFFER_BIT;
 		}
-		if ( clear->depth )		bits |= GL_DEPTH_BUFFER_BIT;
+		if ( clear->depth ) {
+			qglDepthMask( GL_TRUE );
+			bits |= GL_DEPTH_BUFFER_BIT;
+		}
 		if ( clear->stencil ) {
 			qglStencilMask( 0xff );
 			qglClearStencil( clear->stencilValue );
@@ -159,6 +169,9 @@ public:
 		}
 		if ( bits ) {
 			qglClear( bits );
+			// write masks were forced for the clear; re-apply the bound
+			// pipeline's masks on the next draw
+			forceState = true;
 		}
 	}
 	virtual void EndPass() {}

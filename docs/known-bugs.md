@@ -4,16 +4,22 @@ Deferred until the rendering pipeline is complete — tracked here for later tri
 Hub: [vulkan-port.md](vulkan-port.md). Deliberate deviations (not bugs) are in
 [readme-changes.md](readme-changes.md).
 
-1. **Main-menu planet disappears on approach** — the 3D planet in the menu
-   background vanishes once it moves close to the camera; its atmosphere effect
-   remains visible but the model itself drops out. Likely a depth-range or
-   near-clip issue in the RHI depth prepass for GUI-embedded 3D views.
-2. **Mirrors corrupt surrounding scene** — the reflected scene inside a mirror
-   renders correctly, but geometry around the mirror shows large black regions.
-   Suggests the mirror's subview render is clobbering scissor, depth, or
-   stencil state that the outer view depends on.
+_No open bugs currently._
 
 ## Resolved
+- **World goes black around a mirror; main-menu planet disappears on approach**
+  — both were the same defect: `GL3Backend::BeginPass` forced the stencil
+  write-mask on before clearing stencil but never forced `depthMask`/`colorMask`
+  on before the depth/color clear. `glClear(GL_DEPTH_BUFFER_BIT)` is a silent
+  no-op while `glDepthMask(GL_FALSE)` is active, and a preceding subview
+  (mirror reflection, the GUI-model planet view) leaves `depthMask` FALSE
+  because its last draws use `GLS_DEPTHMASK` (interactions, stencil shadows,
+  fog). So the following view's depth clear did nothing, its geometry failed
+  the depth test, and it rendered black / dropped out — but only when a subview
+  ran first (matching "only with a mirror in view"). Fixed by forcing the write
+  masks on for whatever `BeginPass` clears (as legacy's `GL_State(GLS_DEFAULT)`
+  does) and re-syncing pipeline state afterward. Hardens all multi-view frames
+  (mirrors, portal sky, security-camera monitors, xray). Verified in base Doom 3.
 - **Portal sky "culls" geometry** — non-`TG_EXPLICIT` texgen stages were all
   skipped by the Material IR, so `textures/smf/portal_sky` (`forceOpaque` +
   `sort portalSky`, a single `map _currentRender` + `screen` = `TG_SCREEN`
