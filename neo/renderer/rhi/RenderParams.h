@@ -58,10 +58,11 @@ struct RenderParams {
 	float	texGen0T[4];
 	float	texGen0Q[4];
 	float	texGen1S[4];
+	float	texGen1T[4];
 };
 
-// 3 mat4 (192) + 32 vec4 (512) = 704 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 704, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 3 mat4 (192) + 33 vec4 (528) = 720 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 720, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

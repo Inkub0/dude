@@ -434,6 +434,26 @@ artifact); all default off, all in the "Improvements over the classic engine" me
   on z-fail paths, and decide a fallback if a target GPU lacks the feature.
 - Windows-only MFC editors are stubs on Linux — out of scope.
 
+## Known bugs (GL3 backend, pre-Chunk F)
+
+Deferred until the rendering pipeline is complete — tracked here for later triage.
+
+1. **Main-menu planet disappears on approach** — the 3D planet in the menu
+   background vanishes once it moves close to the camera; its atmosphere effect
+   remains visible but the model itself drops out. Likely a depth-range or
+   near-clip issue in the RHI depth prepass for GUI-embedded 3D views.
+2. **Mirrors corrupt surrounding scene** — the reflected scene inside a mirror
+   renders correctly, but geometry around the mirror shows large black regions.
+   Suggests the mirror's subview render is clobbering scissor, depth, or
+   stencil state that the outer view depends on.
+3. **RoE grabber gun shows black disc instead of warp effect** — the gravity
+   gun's screen-distortion effect renders as a solid black circle. Was a
+   non-functional `_currentRender`-sampling custom shader stage (the warp
+   program reads the framebuffer copy). **Chunk F wired the missing pieces**
+   (`RC_COPY_RENDER`, the SS_POST_PROCESS `_currentRender` copy, and drawing
+   `_currentRender`-sampling custom stages), so this should now render — retest
+   in RoE and remove this entry if fixed.
+
 ## Prior art
 - **fhDOOM** (eXistence/fhDOOM): GL 3.3 core modernization of Doom 3 — ARB/fixed
   function fully replaced with GLSL, per-light mixed shadow-map/stencil soft shadows

@@ -575,3 +575,330 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// shader passes run with stencil satisfied everywhere
 	qglStencilFunc( GL_ALWAYS, 128, 255 );
 }
+
+/*
+=============================================================================
+
+FOG AND BLEND LIGHTS
+
+Fog and blend lights were the last fixed-function passes in the classic
+renderer. They dual-texture straight to the framebuffer (projection/falloff
+or fog ramp/enter) instead of interacting with the surface material, driven
+by the fog/blendlight GLSL programs. This mirrors RB_STD_FogAllLights /
+RB_FogPass / RB_BlendLight state bit for state bit; the texgen planes the old
+path fed glTexGen now travel through RenderParams::texGen*.
+
+=============================================================================
+*/
+
+/*
+===================
+RB_RHI_SetSurfScissor
+===================
+*/
+static void RB_RHI_SetSurfScissor( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf ) {
+	if ( r_useScissor.GetBool() && !backEnd.currentScissor.Equals( surf->scissorRect ) ) {
+		backEnd.currentScissor = surf->scissorRect;
+		r->SetScissor( viewDef->viewport.x1 + backEnd.currentScissor.x1,
+		               viewDef->viewport.y1 + backEnd.currentScissor.y1,
+		               backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
+		               backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
+	}
+}
+
+/*
+===================
+RB_RHI_BlendLightChain
+
+One surface chain for a blend-light stage. Mirrors RB_T_BlendLight: the
+light's projection planes go to unit 0 (S/T/Q), the falloff plane to unit 1
+(S; T is the constant 0.5 baked into blendlight.vert). backEnd.vLight must be
+the current light.
+===================
+*/
+static void RB_RHI_BlendLightChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf,
+                                    rhi::ShaderHandle prog, int stateBits, const float color[4],
+                                    idImage *projectionImage, idImage *falloffImage ) {
+	for ( ; surf; surf = surf->nextOnLight ) {
+		const srfTriangles_t *tri = surf->geo;
+		if ( !tri->ambientCache ) {
+			continue;
+		}
+
+		float mvp[16];
+		RB_RHI_SpaceMvp( viewDef, surf->space, mvp );
+
+		// project the light frustum planes into this surface's local space
+		idPlane lightProject[4];
+		for ( int i = 0; i < 4; i++ ) {
+			R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[i], lightProject[i] );
+		}
+
+		rhi::RenderParams parms;
+		memset( &parms, 0, sizeof( parms ) );
+		memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
+		memcpy( parms.color, color, sizeof( parms.color ) );
+		memcpy( parms.texGen0S, lightProject[0].ToFloatPtr(), 16 );
+		memcpy( parms.texGen0T, lightProject[1].ToFloatPtr(), 16 );
+		memcpy( parms.texGen0Q, lightProject[2].ToFloatPtr(), 16 );
+		memcpy( parms.texGen1S, lightProject[3].ToFloatPtr(), 16 );
+
+		RB_RHI_SetSurfScissor( r, viewDef, surf );
+
+		rhi::BufferHandle ub;
+		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+		rhi::BufferHandle vb, ib;
+		int vertOfs, idxOfs;
+		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
+
+		RB_RHI_BindUnit( 0, projectionImage );
+		RB_RHI_BindUnit( 1, falloffImage );
+
+		rhi::PipelineDesc pd;
+		pd.stateBits = stateBits;
+		pd.shader = prog;
+		pd.vertexLayout = rhi::VL_DRAWVERT;
+		pd.cullType = RB_RHI_CullFor( viewDef, CT_FRONT_SIDED );
+		r->BindPipeline( pd );
+
+		rhi::DrawArgs da;
+		memset( &da, 0, sizeof( da ) );
+		da.vertexBuffer = vb;
+		da.vertexOffset = vertOfs;
+		da.indexBuffer = ib;
+		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+		da.indexCount = tri->numIndexes;
+		da.uniformBuffer = ub;
+		da.uniformOffset = uniOfs;
+		da.uniformSize = sizeof( parms );
+		r->Draw( da );
+
+		backEnd.pc.c_drawElements++;
+		backEnd.pc.c_drawIndexes += tri->numIndexes;
+	}
+}
+
+/*
+===================
+RB_RHI_BlendLight
+
+Mirrors RB_BlendLight: for each live stage, dual-texture the projection and
+falloff to the framebuffer over the light's interaction surfaces.
+===================
+*/
+static void RB_RHI_BlendLight( rhi::RHI *r, const viewDef_t *viewDef, viewLight_t *vLight ) {
+	if ( r_skipBlendLights.GetBool() || ( !vLight->globalInteractions && !vLight->localInteractions ) ) {
+		return;
+	}
+
+	rhi::ShaderHandle prog = r->LoadShader( "blendlight" );
+	const idMaterial *lightShader = vLight->lightShader;
+	const float *regs = vLight->shaderRegisters;
+
+	for ( int i = 0; i < lightShader->GetNumStages(); i++ ) {
+		const shaderStage_t *stage = lightShader->GetStage( i );
+
+		if ( !regs[stage->conditionRegister] ) {
+			continue;
+		}
+
+		// texture-matrix (scrolling) blend-light projections are essentially
+		// unused by stock content; drawn without the matrix until folded into
+		// the projection planes (would need RB_BakeTextureMatrixIntoTexgen)
+		if ( stage->texture.hasMatrix ) {
+			RB_RHI_LogOnce( "blend light texture matrix" );
+		}
+
+		int stateBits = GLS_DEPTHMASK | stage->drawStateBits | GLS_DEPTHFUNC_EQUAL;
+
+		// get the modulate values from the light, including alpha (unlike normal lights)
+		float color[4];
+		color[0] = regs[stage->color.registers[0]];
+		color[1] = regs[stage->color.registers[1]];
+		color[2] = regs[stage->color.registers[2]];
+		color[3] = regs[stage->color.registers[3]];
+
+		RB_RHI_BlendLightChain( r, viewDef, vLight->globalInteractions, prog, stateBits, color,
+		                        stage->texture.image, vLight->falloffImage );
+		RB_RHI_BlendLightChain( r, viewDef, vLight->localInteractions, prog, stateBits, color,
+		                        stage->texture.image, vLight->falloffImage );
+	}
+}
+
+/*
+===================
+RB_RHI_FogChain
+
+One surface chain for a fog light. Mirrors RB_T_BasicFog: unit 0 is the fog
+distance ramp (S = per-surface plane, T = constant 0.5), unit 1 the enter
+fade (S = constant per viewer, T = per-surface top plane).
+===================
+*/
+static void RB_RHI_FogChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf,
+                             rhi::ShaderHandle prog, int stateBits, int cull, const float color[4],
+                             const idPlane &fogPlane0, const idPlane &fogPlane2, float enterS ) {
+	for ( ; surf; surf = surf->nextOnLight ) {
+		const srfTriangles_t *tri = surf->geo;
+		if ( !tri->ambientCache ) {
+			continue;
+		}
+
+		float mvp[16];
+		RB_RHI_SpaceMvp( viewDef, surf->space, mvp );
+
+		rhi::RenderParams parms;
+		memset( &parms, 0, sizeof( parms ) );
+		memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
+		memcpy( parms.color, color, sizeof( parms.color ) );
+
+		idPlane local;
+		// unit 0 S: fog distance ramp (+0.5 to center the 128px ramp texture)
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, fogPlane0, local );
+		local[3] += 0.5f;
+		memcpy( parms.texGen0S, local.ToFloatPtr(), 16 );
+		// unit 0 T: constant 0.5
+		parms.texGen0T[3] = 0.5f;
+		// unit 1 T: enter fade, per-surface top plane (+FOG_ENTER)
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, fogPlane2, local );
+		local[3] += FOG_ENTER;
+		memcpy( parms.texGen1T, local.ToFloatPtr(), 16 );
+		// unit 1 S: enter fade, constant per viewer
+		parms.texGen1S[3] = enterS;
+
+		RB_RHI_SetSurfScissor( r, viewDef, surf );
+
+		rhi::BufferHandle ub;
+		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+		rhi::BufferHandle vb, ib;
+		int vertOfs, idxOfs;
+		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
+
+		RB_RHI_BindUnit( 0, globalImages->fogImage );
+		RB_RHI_BindUnit( 1, globalImages->fogEnterImage );
+
+		rhi::PipelineDesc pd;
+		pd.stateBits = stateBits;
+		pd.shader = prog;
+		pd.vertexLayout = rhi::VL_DRAWVERT;
+		pd.cullType = RB_RHI_CullFor( viewDef, cull );
+		r->BindPipeline( pd );
+
+		rhi::DrawArgs da;
+		memset( &da, 0, sizeof( da ) );
+		da.vertexBuffer = vb;
+		da.vertexOffset = vertOfs;
+		da.indexBuffer = ib;
+		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+		da.indexCount = tri->numIndexes;
+		da.uniformBuffer = ub;
+		da.uniformOffset = uniOfs;
+		da.uniformSize = sizeof( parms );
+		r->Draw( da );
+
+		backEnd.pc.c_drawElements++;
+		backEnd.pc.c_drawIndexes += tri->numIndexes;
+	}
+}
+
+/*
+===================
+RB_RHI_FogLight
+
+Mirrors RB_FogPass: dual-texture the fog ramp (unit 0) and enter fade
+(unit 1) over the light's interaction surfaces, then the light frustum with
+DEPTHFUNC_LESS so the far side of the fog volume is filled.
+===================
+*/
+static void RB_RHI_FogLight( rhi::RHI *r, viewDef_t *viewDef, viewLight_t *vLight ) {
+	const srfTriangles_t *frustumTris = vLight->frustumTris;
+	// if we ran out of vertex cache memory, skip it
+	if ( !frustumTris->ambientCache ) {
+		return;
+	}
+
+	const idMaterial *lightShader = vLight->lightShader;
+	const float *regs = vLight->shaderRegisters;
+	// assume fog shaders have only a single stage
+	const shaderStage_t *stage = lightShader->GetStage( 0 );
+
+	float lightColor[4];
+	lightColor[0] = regs[stage->color.registers[0]];
+	lightColor[1] = regs[stage->color.registers[1]];
+	lightColor[2] = regs[stage->color.registers[2]];
+	lightColor[3] = regs[stage->color.registers[3]];
+
+	// fog.frag builds alpha from the two ramps and multiplies rgb by u_color;
+	// the old path set qglColor3fv so alpha stays 1 (density lives in
+	// lightColor[3], and drives the ramp slope below — not u_color.a)
+	float color[4] = { lightColor[0], lightColor[1], lightColor[2], 1.0f };
+
+	// calculate the falloff planes
+	float a;
+	// if they left the default value on, set a fog distance of 500
+	if ( lightColor[3] <= 1.0f ) {
+		a = -0.5f / DEFAULT_FOG_DISTANCE;
+	} else {
+		// otherwise, distance = alpha color
+		a = -0.5f / lightColor[3];
+	}
+
+	// unit-0 distance plane from the eye-space Z row of the world modelview
+	const float *mv = viewDef->worldSpace.modelViewMatrix;
+	idPlane fogPlane0( a * mv[2], a * mv[6], a * mv[10], a * mv[14] );
+
+	// unit-1 enter fade: the "top" fade plane, and the eye's distance to it
+	idPlane fogPlane2( 0.001f * vLight->fogPlane[0], 0.001f * vLight->fogPlane[1],
+	                   0.001f * vLight->fogPlane[2], 0.001f * vLight->fogPlane[3] );
+	float s = viewDef->renderView.vieworg * fogPlane2.Normal() + fogPlane2[3];
+	float enterS = FOG_ENTER + s;
+
+	rhi::ShaderHandle prog = r->LoadShader( "fog" );
+
+	int stateEqual = GLS_DEPTHMASK | GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA | GLS_DEPTHFUNC_EQUAL;
+	RB_RHI_FogChain( r, viewDef, vLight->globalInteractions, prog, stateEqual, CT_FRONT_SIDED, color, fogPlane0, fogPlane2, enterS );
+	RB_RHI_FogChain( r, viewDef, vLight->localInteractions, prog, stateEqual, CT_FRONT_SIDED, color, fogPlane0, fogPlane2, enterS );
+
+	// the light frustum bounding planes aren't in the depth buffer, so use
+	// DEPTHFUNC_LESS instead of EQUAL and draw the volume's far (back) side
+	drawSurf_t ds;
+	memset( &ds, 0, sizeof( ds ) );
+	ds.space = &viewDef->worldSpace;
+	ds.geo = frustumTris;
+	ds.scissorRect = viewDef->scissor;
+	int stateLess = GLS_DEPTHMASK | GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA | GLS_DEPTHFUNC_LESS;
+	RB_RHI_FogChain( r, viewDef, &ds, prog, stateLess, CT_BACK_SIDED, color, fogPlane0, fogPlane2, enterS );
+}
+
+/*
+===================
+RB_RHI_FogAllLights
+
+Mirrors RB_STD_FogAllLights: after the interaction and ambient passes, add
+every fog and blend light. Runs with the stencil test disabled (the classic
+path guarantees no double-fogging by scissor alone).
+===================
+*/
+void RB_RHI_FogAllLights( rhi::RHI *r, viewDef_t *viewDef ) {
+	// note: r_skipFogLights skips the whole function (blend lights too) exactly
+	// as legacy RB_STD_FogAllLights; r_skipBlendLights is checked per blend light
+	if ( r_skipFogLights.GetBool() || r_showOverDraw.GetInteger() != 0 || viewDef->isXraySubview ) {
+		return;
+	}
+
+	qglDisable( GL_STENCIL_TEST );
+
+	for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
+		backEnd.vLight = vLight;
+
+		if ( vLight->lightShader->IsFogLight() ) {
+			RB_RHI_FogLight( r, viewDef, vLight );
+		} else if ( vLight->lightShader->IsBlendLight() ) {
+			RB_RHI_BlendLight( r, viewDef, vLight );
+		}
+	}
+	backEnd.vLight = NULL;
+
+	qglEnable( GL_STENCIL_TEST );
+}

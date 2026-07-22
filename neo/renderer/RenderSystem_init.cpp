@@ -262,6 +262,12 @@ idCVar r_useSoftParticles( "r_useSoftParticles", "1", CVAR_RENDERER | CVAR_ARCHI
 
 idCVar r_glDebugContext( "r_glDebugContext", "0", CVAR_RENDERER | CVAR_BOOL, "Enable OpenGL Debug context - requires vid_restart, needs SDL2" );
 
+// DUDE "improvements over the classic engine": post-process effects run as one
+// fullscreen pass over _currentRender after the 3D view, before 2D/GUI (HUD
+// unaffected). Both default off (0 = exact passthrough); GL3/Vulkan backends only.
+idCVar r_postFilmGrain( "r_postFilmGrain", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "film grain intensity (0 = off, ~0.05..0.15)", 0.0f, 1.0f );
+idCVar r_postChromaticAberration( "r_postChromaticAberration", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "chromatic aberration strength (0 = off, ~0.25..1.0)", 0.0f, 4.0f );
+
 // define qgl functions
 #define QGLPROC(name, rettype, args) rettype (APIENTRYP q##name) args;
 #include "renderer/qgl_proc.h"

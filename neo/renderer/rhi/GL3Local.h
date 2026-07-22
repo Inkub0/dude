@@ -131,6 +131,10 @@ int RB_RHI_CullFor( const viewDef_s *viewDef, int cullType );
 // 3D world: depth prepass + stencil shadows + light interactions (RhiWorld.cpp)
 void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef );
 
+// fog + blend lights: the last fixed-function passes, added after the ambient
+// shader passes (RhiWorld.cpp), mirroring RB_STD_FogAllLights
+void RB_RHI_FogAllLights( rhi::RHI *r, viewDef_s *viewDef );
+
 // screenshot support: composited desktops return garbage for front-buffer
 // reads, so R_ReadTiledPixels registers a destination and the executor
 // captures GL_BACK right before the next swap (GL_RGB, pack alignment 4)

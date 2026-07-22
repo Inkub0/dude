@@ -4,20 +4,23 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 ===========================================================================
 */
 
-// DUDE RHI command executor — Phase 3 Chunk C.
+// DUDE RHI command executor — Phase 3 Chunks C–F.
 //
 // Translates the idTech4 backend command list into RHI calls; this layer is
 // what the Vulkan backend will reuse unchanged. Current coverage:
 //   - 2D views (menu/console/HUD/loading): full old-style shader stage
 //     rendering through the generic program
-//   - 3D views: cleared to magenta placeholder (world rendering = Chunk E)
-//   - skipped with a one-time notice: custom ARB stages (Chunk F),
-//     non-explicit texgen (Chunk E/F), RC_COPY_RENDER (Chunk F)
+//   - 3D views: depth prepass + stencil shadows + interactions (RhiWorld.cpp),
+//     ambient shader passes, fog + blend lights, then _currentRender
+//     post-process surfaces (heat haze / RoE grabber warp) and the optional
+//     DUDE film-grain / chromatic-aberration fullscreen pass
+//   - RC_COPY_RENDER: explicit framebuffer-to-image copies
 //
 // Two acknowledged impurities, both bridged until Phase 4:
 //   - engine textures bind via idImage::Bind() (core-safe since the
 //     Image_load.cpp guards), not through DrawArgs::textures
-//   - polygon offset is a direct GL call (needs an RHI dynamic state)
+//   - polygon offset / framebuffer copies are direct GL calls (need RHI
+//     dynamic state / CopyFramebufferToImage in the Vulkan backend)
 
 #include "sys/platform.h"
 #include "renderer/tr_local.h"
@@ -29,10 +32,117 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "renderer/rhi/ArbParamsBlock.h"
 #include "renderer/rhi/MaterialIR.h"
 
+// DUDE post-process toggles (defined in RenderSystem_init.cpp), improvements
+// menu, default off — the fullscreen film-grain / chromatic-aberration pass
+extern idCVar r_postFilmGrain;
+extern idCVar r_postChromaticAberration;
+
 static unsigned char *rbCaptureDest = NULL;
 
 void RB_RHI_CaptureNextSwap( unsigned char *dest ) {
 	rbCaptureDest = dest;
+}
+
+/*
+=============
+RB_RHI_CopyCurrentRender
+
+Snapshot the framebuffer viewport into the oversized POT _currentRender
+texture. Direct-GL idImage copy, core-safe like the depth capture in
+RhiWorld (TODO(RHI): becomes CopyFramebufferToImage in the Vulkan backend).
+=============
+*/
+static void RB_RHI_CopyCurrentRender( const viewDef_t *viewDef ) {
+	globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1, viewDef->viewport.y1,
+		viewDef->viewport.x2 - viewDef->viewport.x1 + 1,
+		viewDef->viewport.y2 - viewDef->viewport.y1 + 1, true );
+}
+
+/*
+=============
+RB_RHI_PostProcess
+
+DUDE film grain + chromatic aberration in one fullscreen pass over
+_currentRender, run at the end of the 3D view before any 2D/GUI so the HUD is
+never touched (shaders/postprocess.*). Both effects default off; strength 0
+is an exact passthrough, so this is skipped unless a toggle is on.
+=============
+*/
+static void RB_RHI_PostProcess( rhi::RHI *r, const viewDef_t *viewDef ) {
+	float grain = r_postFilmGrain.GetFloat();
+	float chroma = r_postChromaticAberration.GetFloat();
+	if ( grain <= 0.0f && chroma <= 0.0f ) {
+		return;
+	}
+
+	rhi::ShaderHandle prog = r->LoadShader( "postprocess" );
+	if ( !prog ) {
+		return;
+	}
+
+	// snapshot the finished 3D view (after fog and post-process surfaces)
+	RB_RHI_CopyCurrentRender( viewDef );
+
+	int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	int potW = globalImages->currentRenderImage->uploadWidth;
+	int potH = globalImages->currentRenderImage->uploadHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.screenCorrection[0] = potW > 0 ? (float)w / potW : 1.0f;
+	parms.screenCorrection[1] = potH > 0 ? (float)h / potH : 1.0f;
+	parms.windowCoord[2] = 0.5f;		// aberration center in uv
+	parms.windowCoord[3] = 0.5f;
+	parms.localParam0[0] = grain;
+	parms.localParam0[1] = viewDef->floatTime;	// animated grain seed
+	parms.localParam0[2] = chroma;
+
+	// fullscreen NDC quad (identity mvp), st 0..1 with GL bottom-left origin
+	// matching the framebuffer copy
+	idDrawVert quad[4];
+	memset( quad, 0, sizeof( quad ) );
+	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
+	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
+	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
+	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
+	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
+
+	rhi::BufferHandle vb, ib, ub;
+	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
+	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	// the last surface may have left a cropped scissor; cover the whole view
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
+	globalImages->currentRenderImage->Bind();
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = CT_TWO_SIDED;
+	r->BindPipeline( pd );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = 6;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	r->Draw( da );
+
+	backEnd.pc.c_drawElements++;
 }
 
 void RB_RHI_LogOnce( const char *what ) {
@@ -389,10 +499,9 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			continue;	// reason logged once at IR build
 		}
 		if ( si.kind == rhi::SK_CUSTOM_ARB ) {
-			if ( si.needsCurrentRender ) {
-				RB_RHI_LogOnce( "_currentRender-sampling custom stages" );
-				continue;
-			}
+			// _currentRender-sampling stages (heat haze, the RoE grabber warp)
+			// are drawn in the post-process pass, after the framebuffer copy —
+			// materials referencing _currentRender auto-sort to SS_POST_PROCESS
 			RB_RHI_RenderCustomStage( r, viewDef, surf, pStage, si.program, mvp, vb, vertOfs, ib, idxOfs );
 			continue;
 		}
@@ -559,28 +668,54 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	}
 	const viewEntity_t *currentSpace = NULL;
 	float mvp[16];
+	backEnd.currentRenderCopied = false;
 
+	// non-light-dependent shading. Post-process-sort surfaces (which sample
+	// _currentRender) are deferred until after fog, matching RB_STD_DrawView;
+	// the drawSurfs are sort-ordered so the first one ends the ambient run.
 	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
-	for ( int i = 0; i < viewDef->numDrawSurfs; i++ ) {
+	int i;
+	for ( i = 0; i < viewDef->numDrawSurfs; i++ ) {
 		if ( drawSurfs[i]->material->SuppressInSubview() ) {
 			continue;
 		}
 		if ( viewDef->viewEntitys && drawSurfs[i]->material->GetSort() >= SS_POST_PROCESS ) {
-			// needs _currentRender copies (Chunk F)
-			RB_RHI_LogOnce( "post-process-sort surfaces" );
-			continue;
+			break;
 		}
 		RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, mvp );
 	}
 
-	// fog and blend lights (Chunk F)
+	// fog and blend lights
 	if ( viewDef->viewEntitys ) {
-		for ( const viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
-			if ( vLight->lightShader->IsFogLight() || vLight->lightShader->IsBlendLight() ) {
-				RB_RHI_LogOnce( "fog and blend lights" );
-				break;
-			}
+		RB_RHI_FogAllLights( r, viewDef );
+	}
+
+	// post-process-sort surfaces, now that fog is down; copy _currentRender
+	// first (only in a 3D view) so the SS_POST_PROCESS stages can sample it
+	if ( i < viewDef->numDrawSurfs && !r_skipPostProcess.GetBool() ) {
+		if ( viewDef->viewEntitys ) {
+			RB_RHI_CopyCurrentRender( viewDef );
+			backEnd.currentRenderCopied = true;
 		}
+		currentSpace = NULL;	// force an mvp reload for the first deferred surface
+		for ( ; i < viewDef->numDrawSurfs; i++ ) {
+			if ( drawSurfs[i]->material->SuppressInSubview() ) {
+				continue;
+			}
+			RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, mvp );
+		}
+	}
+
+	// DUDE film grain / chromatic aberration over the finished 3D view, before
+	// any 2D/GUI (improvements menu, default off). Fullscreen primary view only:
+	// subviews (mirrors, camera monitors) are composited into it and grained
+	// with it, and cropped GUI-renderDef models (the menu planet) aren't the
+	// scene — same fullscreen-and-not-subview test RhiWorld uses.
+	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
+		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
+		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView ) {
+		RB_RHI_PostProcess( r, viewDef );
 	}
 
 	r->EndPass();
@@ -597,7 +732,7 @@ void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	static bool announced = false;
 	if ( !announced ) {
 		announced = true;
-		common->Printf( "GL3 backend: Chunk E - world rendering (fog/blend/post effects pending)\n" );
+		common->Printf( "GL3 backend: Chunk F - fog, blend lights, _currentRender post-process\n" );
 	}
 
 	rhi::RHI *r = rhi::GetGL3RHI();
@@ -637,9 +772,15 @@ void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 			}
 			break;
 		}
-		case RC_COPY_RENDER:
-			RB_RHI_LogOnce( "RC_COPY_RENDER (_currentRender copies)" );
+		case RC_COPY_RENDER: {
+			// explicit _currentRender/_currentDepth copies (e.g. mirror/xray
+			// setup); direct-GL idImage copy like the legacy RB_CopyRender
+			const copyRenderCommand_t *cmd = (const copyRenderCommand_t *)cmds;
+			if ( cmd->image && !r_skipCopyTexture.GetBool() ) {
+				cmd->image->CopyFramebuffer( cmd->x, cmd->y, cmd->imageWidth, cmd->imageHeight, false );
+			}
 			break;
+		}
 		case RC_SWAP_BUFFERS:
 			if ( rbCaptureDest ) {
 				// back buffer still holds the finished frame; front-buffer
