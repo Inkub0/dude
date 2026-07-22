@@ -420,6 +420,185 @@ static void RB_RHI_RenderCustomStage( rhi::RHI *r, const viewDef_t *viewDef, con
 
 /*
 =============
+RB_RHI_WobbleMatrix
+
+Replicates R_WobbleskyTexGen's per-frame rotation. Returns the 3 rows the
+skybox shader dots the (vertex - localViewOrigin) direction against — i.e.
+R_LocalPointToGlobal's rows: row[k] = ( m[k], m[4+k], m[8+k] ).
+=============
+*/
+static void RB_RHI_WobbleMatrix( const drawSurf_t *surf, const viewDef_t *viewDef, float rows[3][3] ) {
+	const int *parms = surf->material->GetTexGenRegisters();
+	float wobbleDegrees = surf->shaderRegisters[parms[0]] * idMath::PI / 180.0f;
+	float wobbleSpeed = surf->shaderRegisters[parms[1]] * 2.0f * idMath::PI / 60.0f;
+	float rotateSpeed = surf->shaderRegisters[parms[2]] * 2.0f * idMath::PI / 60.0f;
+
+	float a = viewDef->floatTime * wobbleSpeed;
+	float s = sin( a ) * sin( wobbleDegrees );
+	float c = cos( a ) * sin( wobbleDegrees );
+	float z = cos( wobbleDegrees );
+
+	idVec3 axis[3];
+	axis[2][0] = c;
+	axis[2][1] = s;
+	axis[2][2] = z;
+	axis[1][0] = -sin( a * 2 ) * sin( wobbleDegrees );
+	axis[1][2] = -s * sin( wobbleDegrees );
+	axis[1][1] = sqrt( 1.0f - ( axis[1][0] * axis[1][0] + axis[1][2] * axis[1][2] ) );
+	axis[1] -= ( axis[2] * axis[1] ) * axis[2];
+	axis[1].Normalize();
+	axis[0].Cross( axis[1], axis[2] );
+
+	s = sin( rotateSpeed * viewDef->floatTime );
+	c = cos( rotateSpeed * viewDef->floatTime );
+
+	float t[16];
+	t[0] = axis[0][0] * c + axis[1][0] * s;
+	t[4] = axis[0][1] * c + axis[1][1] * s;
+	t[8] = axis[0][2] * c + axis[1][2] * s;
+	t[1] = axis[1][0] * c - axis[0][0] * s;
+	t[5] = axis[1][1] * c - axis[0][1] * s;
+	t[9] = axis[1][2] * c - axis[0][2] * s;
+	t[2] = axis[2][0];
+	t[6] = axis[2][1];
+	t[10] = axis[2][2];
+
+	rows[0][0] = t[0]; rows[0][1] = t[4]; rows[0][2] = t[8];
+	rows[1][0] = t[1]; rows[1][1] = t[5]; rows[1][2] = t[9];
+	rows[2][0] = t[2]; rows[2][1] = t[6]; rows[2][2] = t[10];
+}
+
+/*
+=============
+RB_RHI_RenderTexgenStage
+
+Fixed-function texgen stages (skybox/wobblesky/diffuse cube, cube reflection,
+portal sky) through their dedicated programs. Mirrors RB_PrepareStageTexturing:
+the texcoord generation the old path fed glTexGen / a dynamic vertex stream is
+reproduced in the shaders from these uniforms and the standard vertex layout.
+=============
+*/
+static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf,
+                                      const shaderStage_t *pStage, const rhi::StageIR &si, const float mvp[16],
+                                      rhi::BufferHandle vb, int vertOfs, rhi::BufferHandle ib, int idxOfs ) {
+	const srfTriangles_t *tri = surf->geo;
+	const float *regs = surf->shaderRegisters;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
+	parms.color[0] = regs[pStage->color.registers[0]];
+	parms.color[1] = regs[pStage->color.registers[1]];
+	parms.color[2] = regs[pStage->color.registers[2]];
+	parms.color[3] = regs[pStage->color.registers[3]];
+
+	// view origin in this surface's local space (skybox/reflection direction)
+	idVec3 localViewOrigin;
+	R_GlobalPointToLocal( surf->space->modelMatrix, viewDef->renderView.vieworg, localViewOrigin );
+	parms.localViewOrigin[0] = localViewOrigin[0];
+	parms.localViewOrigin[1] = localViewOrigin[1];
+	parms.localViewOrigin[2] = localViewOrigin[2];
+	parms.localViewOrigin[3] = 1.0f;
+
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
+
+	switch ( si.texgen ) {
+	case TG_SCREEN:
+	case TG_SCREEN2: {
+		// portal sky: blit the pre-rendered sky from _currentRender at the
+		// fragment's screen position (RB_SetProgramEnvironment env[0]/[1])
+		int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+		int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+		int potW = globalImages->currentRenderImage->uploadWidth > 0 ? globalImages->currentRenderImage->uploadWidth : w;
+		int potH = globalImages->currentRenderImage->uploadHeight > 0 ? globalImages->currentRenderImage->uploadHeight : h;
+		parms.screenCorrection[0] = (float)w / potW;
+		parms.screenCorrection[1] = (float)h / potH;
+		parms.windowCoord[0] = 1.0f / w;
+		parms.windowCoord[1] = 1.0f / h;
+		globalImages->currentRenderImage->Bind();
+		break;
+	}
+	case TG_SKYBOX_CUBE:
+	case TG_WOBBLESKY_CUBE: {
+		float rows[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+		if ( si.texgen == TG_WOBBLESKY_CUBE ) {
+			RB_RHI_WobbleMatrix( surf, viewDef, rows );
+		}
+		for ( int i = 0; i < 3; i++ ) {
+			float *dst = i == 0 ? parms.modelMatrixRow0 : ( i == 1 ? parms.modelMatrixRow1 : parms.modelMatrixRow2 );
+			dst[0] = rows[i][0]; dst[1] = rows[i][1]; dst[2] = rows[i][2]; dst[3] = 0.0f;
+		}
+		pStage->texture.image->Bind();
+		break;
+	}
+	case TG_DIFFUSE_CUBE:
+		pStage->texture.image->Bind();
+		break;
+	case TG_REFLECT_CUBE: {
+		// model matrix rows for the bumpy variant's tangent->global rotation
+		const float *mm = surf->space->modelMatrix;
+		for ( int row = 0; row < 3; row++ ) {
+			float *dst = row == 0 ? parms.modelMatrixRow0 : ( row == 1 ? parms.modelMatrixRow1 : parms.modelMatrixRow2 );
+			dst[0] = mm[row]; dst[1] = mm[row + 4]; dst[2] = mm[row + 8]; dst[3] = mm[row + 12];
+		}
+		pStage->texture.image->Bind();		// reflection cube on unit 0
+		const shaderStage_t *bumpStage = surf->material->GetBumpStage();
+		if ( bumpStage ) {
+			rhi::gl3ActiveTexture( GL_TEXTURE1 );
+			backEnd.glState.currenttmu = 1;
+			bumpStage->texture.image->Bind();
+			rhi::gl3ActiveTexture( GL_TEXTURE0 );
+			backEnd.glState.currenttmu = 0;
+		}
+		break;
+	}
+	default:
+		return;
+	}
+
+	rhi::BufferHandle ub;
+	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	const bool sky = ( si.texgen == TG_SCREEN || si.texgen == TG_SCREEN2
+		|| si.texgen == TG_SKYBOX_CUBE || si.texgen == TG_WOBBLESKY_CUBE );
+
+	rhi::PipelineDesc pd;
+	if ( sky ) {
+		// sky is pinned to the far plane by the shader; depth-LEQUAL lets all
+		// geometry occlude it and GLS_DEPTHMASK keeps it from writing depth (it
+		// was skipped in the prepass), so it fills only empty pixels
+		pd.stateBits = ( pStage->drawStateBits & ~( GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHFUNC_EQUAL | GLS_ATEST_BITS ) ) | GLS_DEPTHMASK;
+	} else {
+		pd.stateBits = ( pStage->drawStateBits & ~GLS_ATEST_BITS );
+		if ( !viewDef->viewEntitys ) {
+			pd.stateBits |= GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+		}
+	}
+	pd.shader = si.program;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
+	r->BindPipeline( pd );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = tri->numIndexes;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	r->Draw( da );
+
+	backEnd.pc.c_drawElements++;
+	backEnd.pc.c_drawIndexes += tri->numIndexes;
+	backEnd.pc.c_drawVertexes += tri->numVerts;
+}
+
+/*
+=============
 RB_RHI_RenderShaderPasses
 
 Ambient stages of one surface, driven by the Material IR: old-style stages
@@ -503,6 +682,11 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			// are drawn in the post-process pass, after the framebuffer copy —
 			// materials referencing _currentRender auto-sort to SS_POST_PROCESS
 			RB_RHI_RenderCustomStage( r, viewDef, surf, pStage, si.program, mvp, vb, vertOfs, ib, idxOfs );
+			continue;
+		}
+		if ( si.kind == rhi::SK_TEXGEN ) {
+			// fixed-function texgen (skybox / cube reflection / portal sky)
+			RB_RHI_RenderTexgenStage( r, viewDef, surf, pStage, si, mvp, vb, vertOfs, ib, idxOfs );
 			continue;
 		}
 

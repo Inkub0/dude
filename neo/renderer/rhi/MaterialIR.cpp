@@ -112,6 +112,7 @@ static MaterialIR *IR_Build( const idMaterial *material ) {
 		s.kind = SK_GENERIC;
 		s.program = generic;
 		s.needsCurrentRender = false;
+		s.texgen = TG_EXPLICIT;
 
 		if ( stage->newStage ) {
 			const newShaderStage_t *ns = stage->newStage;
@@ -136,9 +137,41 @@ static MaterialIR *IR_Build( const idMaterial *material ) {
 				}
 			}
 		} else if ( stage->texture.texgen != TG_EXPLICIT ) {
-			// cube/screen texgens arrive with the 3D world in Chunk E
-			s.kind = SK_SKIP;
-			common->Printf( "GL3 IR: %s: stage %d skipped (texgen %d)\n", material->GetName(), i, stage->texture.texgen );
+			// fixed-function texgens: each maps to a dedicated program the
+			// backend drives (RB_RHI_RenderTexgenStage). The texcoord math the
+			// old path baked (screen projection, cube directions, sky/wobble
+			// vectors) is done in those shaders / the backend uniforms.
+			s.texgen = stage->texture.texgen;
+			const char *prog = NULL;
+			switch ( stage->texture.texgen ) {
+			case TG_SCREEN:
+			case TG_SCREEN2:
+				// portal sky: blit the pre-rendered sky from _currentRender
+				prog = "portalsky";
+				s.needsCurrentRender = true;
+				break;
+			case TG_REFLECT_CUBE:
+				// per-pixel cube reflection, bumped if the material has a bump stage
+				prog = material->GetBumpStage() ? "bumpyenvironment" : "environment";
+				break;
+			case TG_SKYBOX_CUBE:
+			case TG_WOBBLESKY_CUBE:
+				prog = "skybox";
+				break;
+			case TG_DIFFUSE_CUBE:
+				prog = "diffusecube";
+				break;
+			default:
+				break;	// TG_GLASSWARP: needs scratch-image plumbing, degrade below
+			}
+			ShaderHandle prg = prog ? GL3_FindProgram( prog ) : 0;
+			if ( prg ) {
+				s.kind = SK_TEXGEN;
+				s.program = prg;
+			} else {
+				s.kind = SK_SKIP;
+				common->Printf( "GL3 IR: %s: stage %d skipped (texgen %d, no program)\n", material->GetName(), i, stage->texture.texgen );
+			}
 		}
 
 		ir->surfaceStages.Append( s );

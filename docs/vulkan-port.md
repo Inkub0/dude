@@ -434,7 +434,7 @@ artifact); all default off, all in the "Improvements over the classic engine" me
   on z-fail paths, and decide a fallback if a target GPU lacks the feature.
 - Windows-only MFC editors are stubs on Linux — out of scope.
 
-## Known bugs (GL3 backend, pre-Chunk F)
+## Known bugs (GL3 backend)
 
 Deferred until the rendering pipeline is complete — tracked here for later triage.
 
@@ -446,13 +446,23 @@ Deferred until the rendering pipeline is complete — tracked here for later tri
    renders correctly, but geometry around the mirror shows large black regions.
    Suggests the mirror's subview render is clobbering scissor, depth, or
    stencil state that the outer view depends on.
-3. **RoE grabber gun shows black disc instead of warp effect** — the gravity
-   gun's screen-distortion effect renders as a solid black circle. Was a
-   non-functional `_currentRender`-sampling custom shader stage (the warp
-   program reads the framebuffer copy). **Chunk F wired the missing pieces**
-   (`RC_COPY_RENDER`, the SS_POST_PROCESS `_currentRender` copy, and drawing
-   `_currentRender`-sampling custom stages), so this should now render — retest
-   in RoE and remove this entry if fixed.
+Resolved:
+- **Portal sky "culls" geometry** — non-`TG_EXPLICIT` texgen stages were all
+  skipped by the Material IR, so `textures/smf/portal_sky` (`forceOpaque` +
+  `sort portalSky`, a single `map _currentRender` + `screen` = `TG_SCREEN`
+  stage) sealed the depth buffer but never blitted the sky, and its seal
+  occluded geometry in front of it (RoE phobos1 "Phobos Labs Exterior"). Fixed
+  by wiring the texgen modes through the IR (`SK_TEXGEN`): `TG_SCREEN`/`SCREEN2`
+  → `portalsky`, `TG_REFLECT_CUBE` → `environment`/`bumpyenvironment`,
+  `TG_SKYBOX_CUBE`/`WOBBLESKY` → `skybox`, `TG_DIFFUSE_CUBE` → `diffusecube`
+  (`TG_GLASSWARP` still degrades — needs scratch-image plumbing). Because the
+  original's depth-exact portal-sky sealing can't be reproduced faithfully
+  without culling, the sky is drawn **at the far plane** (`z = w`), skipped in
+  the depth prepass, and drawn depth-LEQUAL + no depth write — classic skybox
+  behavior, a deliberate visual-fidelity-over-exactness choice. Verified in RoE.
+- **RoE grabber gun black disc** — the grabber's `_currentRender` warp rendered
+  as a black circle because `RC_COPY_RENDER` was stubbed and `_currentRender`
+  custom stages were skipped. Fixed in Chunk F (verified in RoE).
 
 ## Prior art
 - **fhDOOM** (eXistence/fhDOOM): GL 3.3 core modernization of Doom 3 — ARB/fixed

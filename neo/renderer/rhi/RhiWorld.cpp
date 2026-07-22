@@ -339,6 +339,13 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( shader->Coverage() == MC_TRANSLUCENT ) {
 			continue;
 		}
+		// sky surfaces (portal sky, skybox) render at the far plane and must
+		// NOT seal depth here — sealing is what makes forceOpaque portal-sky
+		// occlude the geometry in front of it (see the sky shaders' z = w)
+		texgen_t tg = shader->Texgen();
+		if ( tg == TG_SCREEN || tg == TG_SCREEN2 || tg == TG_SKYBOX_CUBE || tg == TG_WOBBLESKY_CUBE ) {
+			continue;
+		}
 		if ( !tri->numIndexes || !tri->ambientCache ) {
 			continue;
 		}

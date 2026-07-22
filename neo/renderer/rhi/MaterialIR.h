@@ -32,14 +32,17 @@ namespace rhi {
 enum stageKind_t {
 	SK_GENERIC,			// old-style stage through the generic program
 	SK_CUSTOM_ARB,		// newStage drawn with its transpiled ARB program pair
+	SK_TEXGEN,			// fixed-function texgen (skybox/reflection/portal sky),
+						// drawn through a dedicated program keyed by `texgen`
 	SK_SKIP				// not renderable yet (reason logged once at IR build)
 };
 
 struct StageIR {
 	int				stageNum;			// index into material->GetStage() — never a cached pointer
 	stageKind_t		kind;
-	ShaderHandle	program;			// generic, or the transpiled pair
-	bool			needsCurrentRender;	// samples _currentRender (deferred until Chunk F)
+	ShaderHandle	program;			// generic, transpiled pair, or texgen program
+	bool			needsCurrentRender;	// samples _currentRender (RC_COPY_RENDER, portal sky)
+	int				texgen;				// texGen_t; TG_EXPLICIT unless kind == SK_TEXGEN
 };
 
 struct MaterialIR {
