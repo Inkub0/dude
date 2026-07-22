@@ -20,23 +20,23 @@ VARY(7) in vec4 var_Color;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-	// local space surface normal, RXGB swizzle
+	// Reconstruct local normal (RXGB swizzle: bump.a -> x)
 	vec4 bump = texture( u_bumpMap, var_TexBump );
-	bump.x = bump.a;
-	vec3 localNormal = bump.xyz * 2.0 - 1.0;
+	vec3 localNormal = vec3( bump.a, bump.y, bump.z ) * 2.0 - 1.0;
 
-	// transform into ambient map space
-	vec3 globalNormal = vec3( dot( localNormal, var_ToGlobalRow0 ),
-	                          dot( localNormal, var_ToGlobalRow1 ),
-	                          dot( localNormal, var_ToGlobalRow2 ) );
+	// Transform into ambient map space using a 3x3 matrix multiply
+	mat3 toGlobal = mat3( var_ToGlobalRow0, var_ToGlobalRow1, var_ToGlobalRow2 );
+	vec3 globalNormal = toGlobal * localNormal;
 
-	vec4 light = texture( u_ambientCubeMap, globalNormal );
+	// Do all lookups as rgb-only where possible and combine multiplies
+	vec3 ambient = texture( u_ambientCubeMap, globalNormal ).rgb;
+	vec3 diff = texture( u_diffuseMap, var_TexDiffuse ).rgb;
+	vec3 falloff = texture( u_lightFalloff, var_TexFalloff ).rgb;
+	vec3 proj = textureProj( u_lightProjection, var_TexProjection ).rgb;
 
-	light *= texture( u_diffuseMap, var_TexDiffuse );
-	light *= texture( u_lightFalloff, var_TexFalloff );
-	light *= textureProj( u_lightProjection, var_TexProjection );
-	light *= u_diffuseModifier;
+	vec3 modifier = vec3( u_diffuseModifier );
+	vec3 color = var_Color.xyz;
 
-	// original wrote result.color.xyz only; alpha pinned to 1
-	fragColor = vec4( light.xyz * var_Color.xyz, 1.0 );
+	vec3 outRgb = ambient * diff * falloff * proj * modifier * color;
+	fragColor = vec4( outRgb, 1.0 );
 }

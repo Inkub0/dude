@@ -17,26 +17,16 @@ VARY(1) in vec4 var_Color;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-	const vec2 depth_consts = vec2( 0.33333333, -0.33316667 );
+	const vec2 depth_consts = vec2(0.33333333, -0.33316667);
+	 vec2 depthTc = gl_FragCoord.xy * u_depthTexRecip.xy;
+	 float sceneDepth = min(texture(u_currentDepth, depthTc).x, 0.9994);
 
-	// map the fragment to a texcoord on the depth image and fetch scene depth;
-	// clamp: 0.9995 is infinite depth (caulk sky writes no depth)
-	vec2 depthTc = gl_FragCoord.xy * u_depthTexRecip.xy;
-	float sceneDepth = min( texture( u_currentDepth, depthTc ).x, 0.9994 );
+	 float invScene = 1.0 / (sceneDepth * depth_consts.x + depth_consts.y);
+	 float particleDepth = 1.0 / (gl_FragCoord.z * depth_consts.x + depth_consts.y);
 
-	// recover view-space depth in doom units (negative: 0 at eye)
-	sceneDepth = 1.0 / ( sceneDepth * depth_consts.x + depth_consts.y );
-	float particleDepth = 1.0 / ( gl_FragCoord.z * depth_consts.x + depth_consts.y );
+	 float fade = clamp((particleDepth - sceneDepth + u_particleRadius.x) * u_particleRadius.y, 0.0, 1.0);
+	 float nearFade = clamp(particleDepth * -u_particleRadius.z, 0.0, 1.0);
 
-	// fade by how much of the particle's volume is in front of the scene
-	float fade = clamp( ( particleDepth - sceneDepth + u_particleRadius.x )
-	                    * u_particleRadius.y, 0.0, 1.0 );
-
-	// also fade near the eye so particles don't pop against the near plane
-	float nearFade = clamp( particleDepth * -u_particleRadius.z, 0.0, 1.0 );
-
-	// combine and saturate the channels that shouldn't be modified
-	vec4 fadeCol = clamp( vec4( nearFade * fade ) + u_channelMask, 0.0, 1.0 );
-
-	fragColor = texture( u_diffuseMap, var_TexCoord ) * fadeCol * var_Color;
+	 vec4 fadeCol = clamp(vec4(nearFade * fade) + u_channelMask, 0.0, 1.0);
+	 fragColor = texture(u_diffuseMap, var_TexCoord) * fadeCol * var_Color;
 }

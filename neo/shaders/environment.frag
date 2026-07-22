@@ -11,11 +11,8 @@ VARY(2) in vec4 var_Color;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-	vec3 normal = normalize( var_Normal );
-	vec3 toEye = normalize( var_ToEye );
-
-	// reflection vector: 2*(E.N)*N - E
-	vec3 r = 2.0 * dot( toEye, normal ) * normal - toEye;
-
-	fragColor = texture( u_environmentCubeMap, r ) * var_Color;
+    vec3 normal = normalize(var_Normal);
+    vec3 eye = normalize(var_ToEye);
+    vec3 r = reflect(-eye, normal);
+    fragColor = texture(u_environmentCubeMap, r) * var_Color;
 }

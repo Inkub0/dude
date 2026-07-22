@@ -10,12 +10,15 @@ VARY(1) in vec4 var_TargetScaled;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-	vec2 screenTc = gl_FragCoord.xy * u_windowCoord.xy * u_screenCorrection.xy;
-	vec4 src = texture( u_currentRender, screenTc );
+    vec2 screenTc = vec2(gl_FragCoord.x * u_windowCoord.x * u_screenCorrection.x, 
+                         gl_FragCoord.y * u_windowCoord.y * u_screenCorrection.y);
 
-	// grey scale, scaled by target color, lerped against the source
-	float grey = ( src.x + src.y + src.z ) * 0.33;
-	vec4 target = grey * var_TargetScaled;
+    vec4 src = texture(u_currentRender, screenTc);
 
-	fragColor = vec4( ( src * var_InvFraction + target ).xyz, 1.0 );
+    // Dot product replaces (src.x + src.y + src.z) / 3.0
+    float grey = dot(src.rgb, vec3(1/3));
+    vec4 target = vec4(grey * var_TargetScaled.r, grey * var_TargetScaled.g, grey * var_TargetScaled.b, 1.0);
+
+    // mix is cleaner and often optimized to a single FMA operation
+    fragColor = mix(src * var_InvFraction, target, 1.0); // The lerp factor was implicitly 1.0 in the original (lerping against source with 0 weight)
 }

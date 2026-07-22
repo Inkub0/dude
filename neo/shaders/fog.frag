@@ -12,7 +12,6 @@ VARY(1) in vec2 var_TexFogEnter;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-	float a = texture( u_fogImage, var_TexFog ).a
-	        * texture( u_fogEnterImage, var_TexFogEnter ).a;
-	fragColor = vec4( u_color.xyz, a * u_color.a );
+    float a = texture(u_fogImage, var_TexFog).a * texture(u_fogEnterImage, var_TexFogEnter).a;
+    fragColor = vec4(u_color.xyz, a * u_color.a);
 }

@@ -12,7 +12,7 @@ VARY(1) in vec2 var_TexFalloff;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-	fragColor = textureProj( u_lightProjection, var_TexProjection )
-	          * texture( u_lightFalloff, var_TexFalloff )
-	          * u_color;
+	fragColor = textureProj(u_lightProjection, var_TexProjection) 
+	           * texture(u_lightFalloff, var_TexFalloff) 
+	           * u_color;
 }
