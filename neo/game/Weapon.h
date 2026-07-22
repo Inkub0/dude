@@ -128,6 +128,7 @@ public:
 
 	// Visual presentation
 	void					PresentWeapon( bool showViewModel );
+	void					InterpolateViewWeapon( float frac );	// called every rendered frame (may be >1 per tic)
 	int						GetZoomFov( void );
 	void					GetWeaponAngleOffsets( int *average, float *scale, float *max );
 	void					GetWeaponTimeOffsets( float *time, float *scale );
@@ -201,6 +202,14 @@ private:
 	// the view weapon render entity parms
 	idVec3					viewWeaponOrigin;
 	idMat3					viewWeaponAxis;
+
+	// render interpolation (com_interpolate): the view model's final render transform from the
+	// current and previous tic, used to smooth the gun between tics (see InterpolateViewWeapon)
+	idVec3					renderWeaponOrigin;
+	idMat3					renderWeaponAxis;
+	idVec3					renderWeaponOriginPrev;
+	idMat3					renderWeaponAxisPrev;
+	bool					renderWeaponInterpolatable;
 
 	// the muzzle bone's position, used for launching projectiles and trailing smoke
 	idVec3					muzzleOrigin;

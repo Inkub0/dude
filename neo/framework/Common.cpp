@@ -114,6 +114,12 @@ idCVar com_dbgServerAdr( "com_dbgServerAdr", "localhost", CVAR_SYSTEM | CVAR_ARC
 
 idCVar com_product_lang_ext( "com_product_lang_ext", "1", CVAR_INTEGER | CVAR_SYSTEM | CVAR_ARCHIVE, "Extension to use when creating language files." );
 
+// Decouple rendering from the fixed USERCMD_HZ game tics: when set, the renderer draws as fast
+// as the display allows (paced by vsync) and the game view is interpolated between tics for
+// smooth motion above 60 fps. The simulation itself still steps at USERCMD_HZ. Off by default
+// to keep the faithful, unmodified 60 fps behavior. See idPlayer::InterpolateRenderView().
+idCVar com_interpolate( "com_interpolate", "0", CVAR_BOOL | CVAR_SYSTEM | CVAR_ARCHIVE, "render smoothly above 60fps by interpolating the view between the fixed 60Hz game tics (requires vsync to cap fps)" );
+
 // in the high-fps branch, the next three values will be set based on com_gameHz
 // here (in the old 60fps-only code) they're const and just to reduce difference to the other branch
 //const int    com_gameHzVal = 60;
@@ -200,6 +206,8 @@ public:
 	// *out_userArg will be an argument you have to pass to the function, if appropriate (else NULL)
 	// NOTE: this doesn't do anything yet, but allows to add ugly mod-specific hacks without breaking the Game interface
 	virtual bool				GetAdditionalFunction(idCommon::FunctionType ft, idCommon::FunctionPointer* out_fnptr, void** out_userArg);
+
+	virtual float				GetTicInterpolation( void );
 
 	// DG end
 
@@ -315,6 +323,41 @@ void Com_WaitForNextTicStart() {
 		Sys_SleepUntilPrecise( nextTicTime );
 	}
 	Com_UpdateFrameTime();
+}
+
+// DG: sub-tic interpolation fraction, see idCommon::GetTicInterpolation().
+//     nextTicTime is the wall-clock time (Sys_MillisecondsPrecise) at which the next tic
+//     starts, so the current tic started one (timescaled) tic-length earlier. The fraction
+//     of that interval already elapsed is the interpolation alpha between the previous and
+//     current game state.
+float idCommonLocal::GetTicInterpolation( void ) {
+	if ( nextTicTime == 0.0 ) {
+		// no tics have run yet
+		return 0.0f;
+	}
+
+	// wall-clock length of one tic, accounting for timescale (see Com_UpdateTicNumber)
+	double ticLen = com_preciseFrameLengthMS;
+	float timescale = com_timescale.GetFloat();
+	if ( timescale > 0.0f && timescale != 1.0f ) {
+		ticLen /= timescale;
+	}
+	if ( ticLen <= 0.0 ) {
+		return 0.0f;
+	}
+
+	double now = Sys_MillisecondsPrecise();
+	double frac = 1.0 - ( nextTicTime - now ) / ticLen;
+
+	// clamp to [0,1]: below 0 can happen right after a tic boundary due to timing jitter,
+	// above 1 means we're rendering slower than the sim runs (never extrapolate past the
+	// current state, just hold it)
+	if ( frac < 0.0 ) {
+		frac = 0.0;
+	} else if ( frac > 1.0 ) {
+		frac = 1.0;
+	}
+	return (float)frac;
 }
 
 /*
@@ -2581,7 +2624,14 @@ void idCommonLocal::Frame( void ) {
 		if ( com_editors == 0 )
 #endif
 		{
-			if ( com_timescale.GetFloat() == 1.0f && GLimp_GetSwapInterval() != 0
+			if ( com_interpolate.GetBool() ) {
+				// Decoupled rendering: draw as fast as the display allows and let the sim
+				// advance only when a tic is actually due (session->Frame no longer blocks
+				// for one, see idSessionLocal::Frame). Don't sleep to the next tic here;
+				// pacing comes from vsync in the frame swap. With vsync off this free-runs
+				// (uncapped fps), which is the expected behavior for an fps-unlock setting.
+			}
+			else if ( com_timescale.GetFloat() == 1.0f && GLimp_GetSwapInterval() != 0
 				&& fabsf(60.0f - GLimp_GetDisplayRefresh()) < 1.0f ) {
 				// if we're using vsync and the display is running at about 60Hz, start next tic
 				// immediately so our internal tic time and vsync don't drift apart

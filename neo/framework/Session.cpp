@@ -49,6 +49,7 @@ idCVar	idSessionLocal::com_showAngles( "com_showAngles", "0", CVAR_SYSTEM | CVAR
 idCVar	idSessionLocal::com_minTics( "com_minTics", "1", CVAR_SYSTEM, "" );
 idCVar	idSessionLocal::com_showTics( "com_showTics", "0", CVAR_SYSTEM | CVAR_BOOL, "" );
 idCVar	idSessionLocal::com_fixedTic( "com_fixedTic", "0", CVAR_SYSTEM | CVAR_INTEGER | CVAR_ARCHIVE, "", -1, 10 );
+extern idCVar com_interpolate; // declared in Common.cpp; when set, don't block waiting for the next game tic
 idCVar	idSessionLocal::com_showDemo( "com_showDemo", "0", CVAR_SYSTEM | CVAR_BOOL, "" );
 idCVar	idSessionLocal::com_skipGameDraw( "com_skipGameDraw", "0", CVAR_SYSTEM | CVAR_BOOL, "" );
 idCVar	idSessionLocal::com_aviDemoSamples( "com_aviDemoSamples", "16", CVAR_SYSTEM, "" );
@@ -2725,6 +2726,13 @@ void idSessionLocal::Frame() {
 
 	// fixedTic lets us run a forced number of usercmd each frame without timing
 	if ( com_fixedTic.GetInteger() ) {
+		minTic = latchedTicNumber;
+	}
+
+	// com_interpolate decouples rendering from the game tic rate: don't block waiting for the
+	// next tic, just run however many tics are already due (often zero) and let the caller
+	// render an interpolated frame. This is what lets us draw faster than USERCMD_HZ.
+	if ( com_interpolate.GetBool() && !writeDemo && !readDemo && !com_fixedTic.GetInteger() ) {
 		minTic = latchedTicNumber;
 	}
 

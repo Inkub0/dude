@@ -283,6 +283,13 @@ public:
 	// *out_fnptr will be the function (you'll have to cast it probably)
 	// *out_userArg will be an argument you have to pass to the function, if appropriate (else NULL)
 	virtual bool				GetAdditionalFunction(FunctionType ft, FunctionPointer* out_fnptr, void** out_userArg) = 0;
+
+	// Render interpolation: returns the sub-tic fraction [0,1] of wall-clock time elapsed
+	// since the most recent game tic, relative to the tic length (scaled by timescale).
+	// The game simulation still steps at a fixed USERCMD_HZ; this lets the renderer
+	// interpolate positions between tics so motion is smooth above 60 fps.
+	// Returns 0 when interpolation isn't meaningful (e.g. before the first tic).
+	virtual float				GetTicInterpolation( void ) = 0;
 };
 
 extern idCommon *		common;

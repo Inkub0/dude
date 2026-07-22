@@ -432,6 +432,7 @@ idEntity::idEntity() {
 
 	memset( &renderEntity, 0, sizeof( renderEntity ) );
 	modelDefHandle	= -1;
+	renderAnimTimeOffset = 0;
 	memset( &refSound, 0, sizeof( refSound ) );
 
 	mpGUIState = -1;
@@ -1454,7 +1455,9 @@ bool idEntity::UpdateRenderEntity( renderEntity_s *renderEntity, const renderVie
 
 	idAnimator *animator = GetAnimator();
 	if ( animator ) {
-		return animator->CreateFrame( gameLocal.time, false );
+		// renderAnimTimeOffset is normally 0; the view weapon sets it each rendered frame so its
+		// animation is sampled at the interpolated sub-tic instant (com_interpolate)
+		return animator->CreateFrame( gameLocal.time + renderAnimTimeOffset, false );
 	}
 
 	return false;

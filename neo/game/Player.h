@@ -325,6 +325,12 @@ public:
 	idVec3					firstPersonViewOrigin;
 	idMat3					firstPersonViewAxis;
 
+	// render interpolation (com_interpolate): firstPersonView origin/axis from the previous tic,
+	// and whether this tic's renderView is a plain first-person view that may be interpolated
+	idVec3					firstPersonViewOriginPrev;
+	idMat3					firstPersonViewAxisPrev;
+	bool					renderViewInterpolatable;
+
 	idDragEntity			dragEntity;
 
 public:
@@ -393,6 +399,8 @@ public:
 	renderView_t *			GetRenderView( void );
 	void					CalculateRenderView( void );	// called every tic by player code
 	void					CalculateFirstPersonView( void );
+	void					InterpolateRenderView( float frac );	// called every rendered frame (may be >1 per tic)
+	void					InterpolateViewWeapon( float frac );	// interpolate the view model to match the interpolated view
 
 	void					DrawHUD( idUserInterface *hud );
 

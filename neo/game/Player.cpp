@@ -1009,6 +1009,10 @@ idPlayer::idPlayer() {
 	firstPersonViewOrigin	= vec3_zero;
 	firstPersonViewAxis		= mat3_identity;
 
+	firstPersonViewOriginPrev	= vec3_zero;
+	firstPersonViewAxisPrev		= mat3_identity;
+	renderViewInterpolatable	= false;
+
 	hipJoint				= INVALID_JOINT;
 	chestJoint				= INVALID_JOINT;
 	headJoint				= INVALID_JOINT;
@@ -7282,6 +7286,11 @@ idPlayer::CalculateFirstPersonView
 ===============
 */
 void idPlayer::CalculateFirstPersonView( void ) {
+	// remember the previous tic's view origin/axis so the renderer can interpolate between
+	// tics (CalculateFirstPersonView runs exactly once per tic, from idPlayer::Think)
+	firstPersonViewOriginPrev = firstPersonViewOrigin;
+	firstPersonViewAxisPrev = firstPersonViewAxis;
+
 	if ( ( pm_modelView.GetInteger() == 1 ) || ( ( pm_modelView.GetInteger() == 2 ) && ( health <= 0 ) ) ) {
 		//	Displays the view from the point of view of the "camera" joint in the player model
 
@@ -7303,6 +7312,19 @@ void idPlayer::CalculateFirstPersonView( void ) {
 		// shakefrom sound stuff only happens in first person
 		firstPersonViewAxis = firstPersonViewAxis * playerView.ShakeAxis();
 #endif
+	}
+
+	// If the view jumped much further than normal per-tic motion (teleport, respawn, level
+	// load, camera cut), snap the previous origin/axis to the current one so we don't interpolate
+	// across the discontinuity and smear the view for a frame. The angle test also catches
+	// orientation-only jumps (e.g. scripted SetViewAngles) that don't move the origin; normal
+	// mouselook, even fast flicks, stays under this threshold and is interpolated.
+	const float interpMaxDeltaSqr = Square( 64.0f );
+	const float interpMinForwardDot = 0.7f;	// ~45 degrees of view turn in a single tic
+	if ( ( firstPersonViewOrigin - firstPersonViewOriginPrev ).LengthSqr() > interpMaxDeltaSqr
+			|| ( firstPersonViewAxis[0] * firstPersonViewAxisPrev[0] ) < interpMinForwardDot ) {
+		firstPersonViewOriginPrev = firstPersonViewOrigin;
+		firstPersonViewAxisPrev = firstPersonViewAxis;
 	}
 }
 
@@ -7347,6 +7369,10 @@ void idPlayer::CalculateRenderView( void ) {
 	renderView->height = SCREEN_HEIGHT;
 	renderView->viewID = 0;
 
+	// only a plain first-person view may be interpolated between tics; camera, cinematic
+	// and third-person views have their own motion and must be left untouched
+	renderViewInterpolatable = false;
+
 	// check if we should be drawing from a camera's POV
 	if ( !noclip && (gameLocal.GetCamera() || privateCameraView) ) {
 		// get origin, axis, and fov
@@ -7359,6 +7385,7 @@ void idPlayer::CalculateRenderView( void ) {
 		if ( g_stopTime.GetBool() ) {
 			renderView->vieworg = firstPersonViewOrigin;
 			renderView->viewaxis = firstPersonViewAxis;
+			renderViewInterpolatable = true;
 
 			if ( !pm_thirdPerson.GetBool() ) {
 				// set the viewID to the clientNum + 1, so we can suppress the right player bodies and
@@ -7373,6 +7400,7 @@ void idPlayer::CalculateRenderView( void ) {
 		} else {
 			renderView->vieworg = firstPersonViewOrigin;
 			renderView->viewaxis = firstPersonViewAxis;
+			renderViewInterpolatable = true;
 
 			// set the viewID to the clientNum + 1, so we can suppress the right player bodies and
 			// allow the right player view weapons
@@ -7389,6 +7417,47 @@ void idPlayer::CalculateRenderView( void ) {
 
 	if ( g_showviewpos.GetBool() ) {
 		gameLocal.Printf( "%s : %s\n", renderView->vieworg.ToString(), renderView->viewaxis.ToAngles().ToString() );
+	}
+}
+
+/*
+==================
+idPlayer::InterpolateRenderView
+
+Called once per *rendered* frame (which may be more often than the game tics at USERCMD_HZ).
+Nudges the cached first-person view toward the sub-tic time so player motion looks smooth above
+60 fps, while the simulation keeps stepping at the fixed tic rate. frac is the interpolation alpha
+in [0,1] between the previous and current tic (see common->GetTicInterpolation()).
+
+This interpolates between two already-simulated states, so it renders up to one tic (~16.7ms) in
+the past; it never extrapolates, avoiding overshoot on direction changes. Aim is affected too, but
+shooting is resolved from the usercmd at the game tic, so no shot latency is added.
+==================
+*/
+void idPlayer::InterpolateRenderView( float frac ) {
+	if ( !renderView || !renderViewInterpolatable ) {
+		return;
+	}
+
+	// recompute from the stable prev/current values each rendered frame so repeated calls
+	// within the same tic stay consistent (idempotent) instead of drifting
+	renderView->vieworg = firstPersonViewOriginPrev + frac * ( firstPersonViewOrigin - firstPersonViewOriginPrev );
+
+	idQuat q;
+	q.Slerp( firstPersonViewAxisPrev.ToQuat(), firstPersonViewAxis.ToQuat(), frac );
+	renderView->viewaxis = q.ToMat3();
+}
+
+/*
+==================
+idPlayer::InterpolateViewWeapon
+
+Forwards render interpolation to the view model so the gun tracks the interpolated view.
+==================
+*/
+void idPlayer::InterpolateViewWeapon( float frac ) {
+	if ( weapon.GetEntity() ) {
+		weapon.GetEntity()->InterpolateViewWeapon( frac );
 	}
 }
 

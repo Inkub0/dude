@@ -2810,6 +2810,15 @@ bool idGameLocal::Draw( int clientNum ) {
 		return false;
 	}
 
+	// nudge the cached render view (and the view model) toward the current sub-tic time so
+	// first-person motion is smooth when rendering faster than the fixed USERCMD_HZ game tics
+	// (com_interpolate, declared engine-side since it also controls the decoupled render loop)
+	if ( cvarSystem->GetCVarBool( "com_interpolate" ) ) {
+		float frac = common->GetTicInterpolation();
+		player->InterpolateRenderView( frac );
+		player->InterpolateViewWeapon( frac );
+	}
+
 	// render the scene
 	player->playerView.RenderPlayerView( player->hud );
 

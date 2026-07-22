@@ -27,6 +27,7 @@ If you have questions concerning this license or the applicable additional terms
 */
 
 #include "sys/platform.h"
+#include "idlib/math/Quat.h"
 #include "framework/DeclEntityDef.h"
 #include "framework/DeclSkin.h"
 
@@ -779,6 +780,11 @@ void idWeapon::Clear( void ) {
 	playerViewOrigin.Zero();
 	viewWeaponAxis.Identity();
 	viewWeaponOrigin.Zero();
+	renderWeaponAxis.Identity();
+	renderWeaponOrigin.Zero();
+	renderWeaponAxisPrev.Identity();
+	renderWeaponOriginPrev.Zero();
+	renderWeaponInterpolatable = false;
 	muzzleAxis.Identity();
 	muzzleOrigin.Zero();
 	pushVelocity.Zero();
@@ -2160,6 +2166,11 @@ void idWeapon::PresentWeapon( bool showViewModel ) {
 	playerViewOrigin = owner->firstPersonViewOrigin;
 	playerViewAxis = owner->firstPersonViewAxis;
 
+	// remember the previous tic's final render transform so the renderer can interpolate the
+	// view model between tics (PresentWeapon runs once per tic, from idPlayer::UpdateWeapon)
+	renderWeaponOriginPrev = renderWeaponOrigin;
+	renderWeaponAxisPrev = renderWeaponAxis;
+
 	// calculate weapon position based on player movement bobbing
 	owner->CalculateViewWeaponPos( viewWeaponOrigin, viewWeaponAxis );
 
@@ -2189,6 +2200,19 @@ void idWeapon::PresentWeapon( bool showViewModel ) {
 	GetPhysics()->SetOrigin( viewWeaponOrigin );
 	GetPhysics()->SetAxis( viewWeaponAxis );
 	UpdateVisuals();
+
+	// capture this tic's final render transform for interpolation, and suppress interpolation
+	// across large discontinuities (weapon switch, teleport) so the gun doesn't smear
+	renderWeaponOrigin = renderEntity.origin;
+	renderWeaponAxis = renderEntity.axis;
+	renderWeaponInterpolatable = showViewModel;
+	if ( ( renderWeaponOrigin - renderWeaponOriginPrev ).LengthSqr() > Square( 64.0f ) ) {
+		renderWeaponOriginPrev = renderWeaponOrigin;
+		renderWeaponAxisPrev = renderWeaponAxis;
+	}
+	// reset the render-time animation offset each tic; InterpolateViewWeapon sets it per rendered
+	// frame when com_interpolate is active, so with interpolation off it stays at the tic time
+	renderAnimTimeOffset = 0;
 
 	// update the weapon script
 	UpdateScript();
@@ -2349,6 +2373,36 @@ void idWeapon::PresentWeapon( bool showViewModel ) {
 	}
 
 	UpdateSound();
+}
+
+/*
+================
+idWeapon::InterpolateViewWeapon
+
+Called once per rendered frame (which may be more often than the game tics). Re-submits the
+view model's render entity at a transform interpolated between the previous and current tic, so
+the gun moves smoothly with the interpolated player view above 60 fps. frac is the interpolation
+alpha in [0,1] (see common->GetTicInterpolation()). Matches idPlayer::InterpolateRenderView, so
+the weapon and view stay locked together.
+================
+*/
+void idWeapon::InterpolateViewWeapon( float frac ) {
+	if ( !renderWeaponInterpolatable || modelDefHandle == -1 ) {
+		return;
+	}
+
+	renderEntity.origin = renderWeaponOriginPrev + frac * ( renderWeaponOrigin - renderWeaponOriginPrev );
+
+	idQuat q;
+	q.Slerp( renderWeaponAxisPrev.ToQuat(), renderWeaponAxis.ToQuat(), frac );
+	renderEntity.axis = q.ToMat3();
+
+	// sample the weapon animation at the same interpolated instant as the transform: frac of the
+	// way from the previous tic to the current one, i.e. up to one tic in the past. This is purely
+	// visual - firing/damage still happen at the game tic, so it adds no shooting latency.
+	renderAnimTimeOffset = -(int)( ( 1.0f - frac ) * (float)( gameLocal.time - gameLocal.previousTime ) );
+
+	gameRenderWorld->UpdateEntityDef( modelDefHandle, &renderEntity );
 }
 
 /*
