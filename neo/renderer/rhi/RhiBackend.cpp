@@ -902,6 +902,15 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		RB_RHI_PostProcess( r, viewDef );
 	}
 
+	// debug visualization (r_showTris, r_showNormals, debug lines/polygons, …)
+	// — Chunk G. Renders through idImmediateMode's core path; each sub-view
+	// early-outs on its own cvar, so this is free when nothing is enabled.
+	// (Surface-indexed views like r_showTris await the core RB_DrawElements
+	// path; the idImmediateMode-based views work now.)
+	if ( viewDef->viewEntitys ) {
+		RB_RenderDebugTools( (drawSurf_t **)&viewDef->drawSurfs[0], viewDef->numDrawSurfs );
+	}
+
 	r->EndPass();
 }
 

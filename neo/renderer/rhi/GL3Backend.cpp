@@ -17,6 +17,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "renderer/rhi/RHI.h"
 #include "renderer/rhi/GL3Local.h"
 #include "renderer/Model.h"		// shadowCache_t
+#include "renderer/rhi/RenderParams.h"	// immediate-mode UBO (Chunk G)
 
 namespace rhi {
 
@@ -56,6 +57,11 @@ class GL3Backend : public RHI {
 	int				streamGen;
 	GLuint			vaos[VL_COUNT];
 
+	// immediate-mode debug drawing (Chunk G): own VAO/VBO/UBO, generic-program
+	// vertex layout (imVert_t = xyz[3] st[2] rgba[4], 24 B)
+	GLuint			imVao, imVbo, imUbo;
+	static const int IM_STRIDE = 24;
+
 	PipelineDesc	currentPipeline;
 	int				currentStateBits;
 	int				currentCull;
@@ -71,6 +77,7 @@ public:
 	GL3Backend() : initialized( false ), uboAlign( 256 ), streamGen( 0 ) {
 		uboRing.buffer = vertRing.buffer = idxRing.buffer = 0;
 		vaos[0] = vaos[1] = 0;
+		imVao = imVbo = imUbo = 0;
 		InvalidateCaches();
 	}
 
@@ -92,6 +99,21 @@ public:
 		InitRing( idxRing,  GL_ELEMENT_ARRAY_BUFFER, IDX_RING_SIZE );
 
 		gl3GenVertexArrays( VL_COUNT, vaos );
+
+		// immediate-mode VAO/VBO/UBO (Chunk G): generic-program attribute
+		// layout — pos @0, texcoord @1, color @5 — matching imVert_t
+		gl3GenVertexArrays( 1, &imVao );
+		gl3GenBuffers( 1, &imVbo );
+		gl3GenBuffers( 1, &imUbo );
+		gl3BindVertexArray( imVao );
+		gl3BindBuffer( GL_ARRAY_BUFFER, imVbo );
+		gl3EnableVertexAttribArray( 0 );
+		gl3EnableVertexAttribArray( 1 );
+		gl3EnableVertexAttribArray( 5 );
+		gl3VertexAttribPointer( 0, 3, GL_FLOAT, GL_FALSE, IM_STRIDE, (const GLbyte *)NULL + 0 );
+		gl3VertexAttribPointer( 1, 2, GL_FLOAT, GL_FALSE, IM_STRIDE, (const GLbyte *)NULL + 12 );
+		gl3VertexAttribPointer( 5, 4, GL_UNSIGNED_BYTE, GL_TRUE, IM_STRIDE, (const GLbyte *)NULL + 20 );
+
 		InvalidateCaches();
 
 		GL3_InitShaderCache();
@@ -111,6 +133,10 @@ public:
 		gl3DeleteBuffers( 1, &vertRing.buffer );
 		gl3DeleteBuffers( 1, &idxRing.buffer );
 		gl3DeleteVertexArrays( VL_COUNT, vaos );
+		gl3DeleteVertexArrays( 1, &imVao );
+		gl3DeleteBuffers( 1, &imVbo );
+		gl3DeleteBuffers( 1, &imUbo );
+		imVao = imVbo = imUbo = 0;
 		uboRing.buffer = vertRing.buffer = idxRing.buffer = 0;
 		vaos[0] = vaos[1] = 0;
 		initialized = false;
@@ -269,6 +295,49 @@ public:
 	}
 
 	virtual void CopyFramebufferToImage( ImageHandle, int, int )			{}	// Chunk F
+
+	virtual void DrawImmediate( const void *verts, int numVerts, unsigned int primMode,
+	                            const float mvp[16], bool textured ) {
+		if ( numVerts <= 0 || !imVao ) {
+			return;
+		}
+		unsigned int prog = GL3_ProgramObject( GL3_FindProgram( "generic" ) );
+		if ( !prog ) {
+			return;
+		}
+
+		gl3BindVertexArray( imVao );
+		gl3BindBuffer( GL_ARRAY_BUFFER, imVbo );
+		gl3BufferData( GL_ARRAY_BUFFER, numVerts * IM_STRIDE, verts, GL_STREAM_DRAW );
+
+		// generic-program uniforms: identity texture matrix, straight per-vertex
+		// color (modulate 1 / add 0 / color 1), alpha test off
+		RenderParams p;
+		memset( &p, 0, sizeof( p ) );
+		memcpy( p.mvpMatrix, mvp, sizeof( p.mvpMatrix ) );
+		p.diffuseMatrixS[0] = 1.0f;
+		p.diffuseMatrixT[1] = 1.0f;
+		p.vertexColorModulate[0] = p.vertexColorModulate[1] = p.vertexColorModulate[2] = p.vertexColorModulate[3] = 1.0f;
+		p.color[0] = p.color[1] = p.color[2] = p.color[3] = 1.0f;
+
+		gl3BindBuffer( GL_UNIFORM_BUFFER, imUbo );
+		gl3BufferData( GL_UNIFORM_BUFFER, sizeof( p ), &p, GL_STREAM_DRAW );
+		gl3BindBufferRange( GL_UNIFORM_BUFFER, 0, imUbo, 0, sizeof( p ) );
+
+		gl3UseProgram( prog );
+
+		gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+		if ( !textured ) {
+			globalImages->whiteImage->Bind();		// untextured lines/points/tris
+		}
+
+		qglDrawArrays( primMode, 0, numVerts );
+
+		// bypassed the pipeline machinery (own VAO/program/UBO); force the next
+		// real Draw to re-bind everything cleanly
+		InvalidateCaches();
+	}
 
 private:
 	void InitRing( ring_t &ring, GLenum target, int size ) {

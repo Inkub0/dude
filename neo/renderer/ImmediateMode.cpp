@@ -35,7 +35,9 @@ Suite 120, Rockville, Maryland 20850 USA.
 #include "sys/platform.h"
 #include "idlib/containers/List.h"
 
+#include "renderer/tr_local.h"			// glConfig.coreProfile
 #include "renderer/ImmediateMode.h"
+#include "renderer/rhi/RHI.h"			// core-profile draw path (Chunk G)
 
 struct imVert_t {
 	float	xyz[3];
@@ -46,6 +48,14 @@ struct imVert_t {
 // shared growable batch storage; rendering is single-threaded
 static idList<imVert_t>		imVerts;
 static idList<unsigned int>	imIndexes;
+static idList<imVert_t>		imCoreTris;		// quad -> triangle expansion (core)
+
+// MVP the core-profile path transforms batches by (see SetMatrix)
+static float	imMatrix[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+
+void idImmediateMode::SetMatrix( const float mvp[16] ) {
+	memcpy( imMatrix, mvp, sizeof( imMatrix ) );
+}
 
 static ID_INLINE byte FloatColorToByte( float c ) {
 	if ( c <= 0.0f ) {
@@ -140,6 +150,36 @@ void idImmediateMode::Vertex3fv( const float *xyz ) {
 void idImmediateMode::End() {
 	const int numVerts = imVerts.Num();
 	if ( numVerts == 0 ) {
+		return;
+	}
+
+	// Core profile: no client arrays / fixed-function transform. Stream the
+	// batch through the RHI's generic program with the caller-set MVP.
+	if ( glConfig.coreProfile ) {
+		rhi::RHI *r = rhi::GetGL3RHI();
+		switch ( mode ) {
+			case GL_QUADS: {
+				// no GL_QUADS in core; expand to triangle pairs (DrawImmediate
+				// is DrawArrays-only)
+				imCoreTris.SetNum( 0, false );
+				for ( int i = 0; i + 3 < numVerts; i += 4 ) {
+					imCoreTris.Append( imVerts[i + 0] );
+					imCoreTris.Append( imVerts[i + 1] );
+					imCoreTris.Append( imVerts[i + 2] );
+					imCoreTris.Append( imVerts[i + 0] );
+					imCoreTris.Append( imVerts[i + 2] );
+					imCoreTris.Append( imVerts[i + 3] );
+				}
+				r->DrawImmediate( imCoreTris.Ptr(), imCoreTris.Num(), GL_TRIANGLES, imMatrix, texCoordUsed );
+				break;
+			}
+			case GL_POLYGON:
+				r->DrawImmediate( imVerts.Ptr(), numVerts, GL_TRIANGLE_FAN, imMatrix, texCoordUsed );
+				break;
+			default:
+				r->DrawImmediate( imVerts.Ptr(), numVerts, mode, imMatrix, texCoordUsed );
+				break;
+		}
 		return;
 	}
 

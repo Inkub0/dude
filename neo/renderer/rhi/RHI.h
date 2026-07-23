@@ -122,6 +122,16 @@ public:
 
 	// ---- screen copies (_currentRender / _currentDepth points) ----
 	virtual void	CopyFramebufferToImage( ImageHandle dst, int w, int h ) = 0;
+
+	// ---- immediate-mode debug drawing (Chunk G) ----
+	// Draws a batch of interleaved verts { float xyz[3]; float st[2];
+	// byte rgba[4]; } (24 B, = imVert_t) as `primMode` (GL_LINES/POINTS/
+	// TRIANGLES/TRIANGLE_FAN) through the generic program with the given MVP.
+	// `textured`: sample the currently-bound unit-0 image; else a white texel.
+	// State (blend/depth/cull/polygon-mode) is whatever the caller set; this
+	// invalidates the pipeline cache so the next Draw re-binds cleanly.
+	virtual void	DrawImmediate( const void *verts, int numVerts, unsigned int primMode,
+	                               const float mvp[16], bool textured ) = 0;
 };
 
 // factory: created by the active backend at renderer init

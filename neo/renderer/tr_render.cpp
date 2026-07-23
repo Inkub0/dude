@@ -148,6 +148,23 @@ Sets texcoord and vertex pointers
 ===============
 */
 void RB_RenderTriangleSurface( const srfTriangles_t *tri ) {
+	if ( glConfig.coreProfile ) {
+		// Core profile has no client arrays: expand the indexed triangles into
+		// idImmediateMode, which streams through the RHI's generic program with
+		// the MVP set by the surf-list helper. Untextured white; wireframe comes
+		// from the caller's GLS_POLYMODE_LINE. Debug-only on this path.
+		if ( !tri->verts || !tri->indexes || tri->numIndexes <= 0 ) {
+			return;
+		}
+		idImmediateMode im;
+		im.Begin( GL_TRIANGLES );
+		for ( int i = 0; i < tri->numIndexes; i++ ) {
+			im.Vertex3fv( tri->verts[ tri->indexes[i] ].xyz.ToFloatPtr() );
+		}
+		im.End();
+		return;
+	}
+
 	if ( !tri->ambientCache ) {
 		RB_DrawElementsImmediate( tri );
 		return;
@@ -260,6 +277,12 @@ void RB_RenderDrawSurfListWithFunction( drawSurf_t **drawSurfs, int numDrawSurfs
 		// change the matrix if needed
 		if ( drawSurf->space != backEnd.currentSpace ) {
 			qglLoadMatrixf( drawSurf->space->modelViewMatrix );
+			if ( glConfig.coreProfile ) {
+				// no fixed-function stack: feed the MVP to idImmediateMode (Chunk G)
+				float mvp[16];
+				myGlMultMatrix( drawSurf->space->modelViewMatrix, backEnd.viewDef->projectionMatrix, mvp );
+				idImmediateMode::SetMatrix( mvp );
+			}
 		}
 
 		if ( drawSurf->space->weaponDepthHack ) {
@@ -305,6 +328,12 @@ void RB_RenderDrawSurfChainWithFunction( const drawSurf_t *drawSurfs,
 		// change the matrix if needed
 		if ( drawSurf->space != backEnd.currentSpace ) {
 			qglLoadMatrixf( drawSurf->space->modelViewMatrix );
+			if ( glConfig.coreProfile ) {
+				// no fixed-function stack: feed the MVP to idImmediateMode (Chunk G)
+				float mvp[16];
+				myGlMultMatrix( drawSurf->space->modelViewMatrix, backEnd.viewDef->projectionMatrix, mvp );
+				idImmediateMode::SetMatrix( mvp );
+			}
 		}
 
 		if ( drawSurf->space->weaponDepthHack ) {

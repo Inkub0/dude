@@ -130,6 +130,12 @@ void RB_SimpleSurfaceSetup( const drawSurf_t *drawSurf ) {
 	// change the matrix if needed
 	if ( drawSurf->space != backEnd.currentSpace ) {
 		qglLoadMatrixf( drawSurf->space->modelViewMatrix );
+		if ( glConfig.coreProfile ) {
+			// no fixed-function stack: feed the MVP to idImmediateMode (Chunk G)
+			float mvp[16];
+			myGlMultMatrix( drawSurf->space->modelViewMatrix, backEnd.viewDef->projectionMatrix, mvp );
+			idImmediateMode::SetMatrix( mvp );
+		}
 		backEnd.currentSpace = drawSurf->space;
 	}
 
@@ -151,6 +157,11 @@ RB_SimpleWorldSetup
 void RB_SimpleWorldSetup( void ) {
 	backEnd.currentSpace = &backEnd.viewDef->worldSpace;
 	qglLoadMatrixf( backEnd.viewDef->worldSpace.modelViewMatrix );
+	if ( glConfig.coreProfile ) {
+		float mvp[16];
+		myGlMultMatrix( backEnd.viewDef->worldSpace.modelViewMatrix, backEnd.viewDef->projectionMatrix, mvp );
+		idImmediateMode::SetMatrix( mvp );
+	}
 
 	backEnd.currentScissor = backEnd.viewDef->scissor;
 	qglScissor( backEnd.viewDef->viewport.x1 + backEnd.currentScissor.x1,

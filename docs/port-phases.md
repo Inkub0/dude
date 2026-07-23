@@ -126,7 +126,9 @@ This backend is a permanent, user-selectable peer of the Vulkan one, not scaffol
 **Chunk progress (git):** A (RHI iface + GL3 bring-up), B (program cache, UBO ring,
 VAOs), C (2D/GUI/console), D (Material IR + ARB→GLSL transpile), E (3D world: depth
 prepass, stencil shadows, interactions), F (fog, blend lights, `_currentRender`
-post-process). Texgen stages (portal sky, cube reflections, skybox) followed F. See
+post-process), G (debug tools: `idImmediateMode` core path + `RB_RenderDebugTools`,
+e.g. `r_showTris` / `r_showNormals`). Texgen stages (portal sky, cube reflections,
+skybox) followed F. See
 [readme-changes.md](readme-changes.md) for where the GL3 path deliberately diverges
 from a faithful port, and [known-bugs.md](known-bugs.md) for open issues.
 

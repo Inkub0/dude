@@ -35,7 +35,7 @@ in [port-improvements.md](port-improvements.md)).
 | 1 — Narrow the funnel (immediate-mode → `idImmediateMode`) | **done** |
 | 2 — Shader modernization (shared GLSL, ARB→GLSL transpiler) | **done** |
 | 2.5 — Material IR | **done** (Chunk D) |
-| 3 — RHI abstraction + GL 3.3 core backend | **in progress** — Chunks A–F done + texgen stages; remaining: debug tools, cinematics/screenshots/ImGui, subview polish |
+| 3 — RHI abstraction + GL 3.3 core backend | **in progress** — Chunks A–G done (A–F + texgen + debug tools); remaining: cinematics/screenshots/ImGui-on-core, subview near-clip polish, then parity/flip |
 | 4 — Vulkan backend | not started |
 | 5 — Validation & polish (the Vulkan payoff) | not started |
 | 6 — Modern Vulkan device profile (`vulkan-rt`) | not started |

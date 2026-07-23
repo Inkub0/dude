@@ -71,6 +71,11 @@ public:
 	void	Vertex3fv( const float *xyz );
 	void	End();
 
+	// On a core profile there is no fixed-function matrix stack, so callers
+	// (debug tools) set the MVP the batch is transformed by. Shared across
+	// instances; rendering is single-threaded. No-op effect on legacy GL.
+	static void	SetMatrix( const float mvp[16] );
+
 private:
 	GLenum	mode;
 	float	currentSt[2];
