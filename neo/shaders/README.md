@@ -84,6 +84,7 @@ none of the current shaders do.
 | zfill.vert/.frag | *(new — was fixed function)* | depth prepass w/ optional alpha test |
 | generic.vert/.frag | *(new — was fixed function)* | GUI/2D/old material stages: texmatrix + vertex-color modes |
 | fog.vert/.frag | *(new — was fixed function)* | fog pass texgen planes |
+| gammabrightness.vert/.frag | *(new — was hardware gamma / ARB env[21])* | final r_gamma/r_brightness pass (r_gammaInShader) |
 | blendlight.vert/.frag | *(new — was fixed function)* | blend-light projection |
 | portalsky.vert/.frag | d3xp portalSky.vfp | samples _currentRender at screen pos |
 | bloodorb.vert/.frag | d3xp bloodOrb1-3.vfp | screen-warp orb; 3 tints via u_localParam1 |

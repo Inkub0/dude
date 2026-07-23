@@ -18,6 +18,9 @@
 #include "sys_imgui.h"
 
 #include "../libs/imgui/backends/imgui_impl_opengl2.h"
+// DUDE: the GL 3.3 core backend (r_graphicsAPI opengl3) can't use the
+// fixed-function GL2 renderer backend, so it uses the shader-based GL3 one
+#include "../libs/imgui/backends/imgui_impl_opengl3.h"
 
 #if SDL_VERSION_ATLEAST(3, 0, 0)
   #include "../libs/imgui/backends/imgui_impl_sdl3.h"
@@ -85,6 +88,10 @@ namespace ImGuiHooks {
 static SDL_Window* sdlWindow = NULL;
 ImGuiContext* imguiCtx = NULL;
 static bool haveNewFrame = false;
+// DUDE: which ImGui GL renderer backend is active. On the GL 3.3 core context
+// (r_graphicsAPI opengl3) the fixed-function GL2 backend is invalid, so we use
+// the shader-based GL3 backend instead. Set in Init() from glConfig.coreProfile.
+static bool useGL3Backend = false;
 static int openImguiWindows = 0; // or-ed enum D3ImGuiWindow values
 
 static ImGuiStyle userStyle;
@@ -262,7 +269,13 @@ bool Init(void* _sdlWindow, void* sdlGlContext)
 		return false;
 	}
 
-	if ( ! ImGui_ImplOpenGL2_Init() ) {
+	useGL3Backend = glConfig.coreProfile;
+	bool rendererOk = useGL3Backend
+			// the GL 3.3 core context matches "#version 150"; the backend's own
+			// GL loader pulls the shader entry points it needs, independent of qgl
+			? ImGui_ImplOpenGL3_Init( "#version 150" )
+			: ImGui_ImplOpenGL2_Init();
+	if ( ! rendererOk ) {
 		ImGui_ImplSDLx_Shutdown();
 		ImGui::DestroyContext( imguiCtx );
 		imguiCtx = NULL;
@@ -306,7 +319,11 @@ void Shutdown()
 		common->Printf( "Shutting down ImGui\n" );
 
 		// TODO: only if init was successful!
-		ImGui_ImplOpenGL2_Shutdown();
+		if ( useGL3Backend ) {
+			ImGui_ImplOpenGL3_Shutdown();
+		} else {
+			ImGui_ImplOpenGL2_Shutdown();
+		}
 		ImGui_ImplSDLx_Shutdown();
 		ImGui::DestroyContext( imguiCtx );
 		imgui_initialized = false;
@@ -317,7 +334,7 @@ void Shutdown()
 // => ProcessEvent() has already been called (probably multiple times)
 void NewFrame()
 {
-	// DUDE: Init() is skipped on the GL3 core backend; nothing to do then
+	// nothing to do until Init() succeeded (e.g. SDL1.2, or a headless run)
 	if ( !imgui_initialized ) {
 		return;
 	}
@@ -355,7 +372,11 @@ void NewFrame()
 	}
 
 	// Start the Dear ImGui frame
-	ImGui_ImplOpenGL2_NewFrame();
+	if ( useGL3Backend ) {
+		ImGui_ImplOpenGL3_NewFrame();
+	} else {
+		ImGui_ImplOpenGL2_NewFrame();
+	}
 
 	if ( ShouldShowCursor() )
 		ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
@@ -534,6 +555,17 @@ void EndFrame()
 	}
 	haveNewFrame = false;
 	ImGui::Render();
+
+	if ( useGL3Backend ) {
+		// The GL3 (shader/core) backend saves and restores all the GL state it
+		// touches on its own, so none of the legacy fixed-function/ARB juggling
+		// below applies (and those enums are invalid on a core context anyway).
+		ImGui_ImplOpenGL3_RenderDrawData( ImGui::GetDrawData() );
+
+		// reset this at the end of each frame, will be set again by ProcessEvent()
+		hadKeyDownEvent = false;
+		return;
+	}
 
 	// Doom3 uses the OpenGL ARB shader extensions, for most things it renders.
 	// disable those shaders, the OpenGL classic integration of ImGui doesn't use shaders

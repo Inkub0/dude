@@ -32,10 +32,19 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "renderer/rhi/ArbParamsBlock.h"
 #include "renderer/rhi/MaterialIR.h"
 
+#include "sys/sys_imgui.h"
+
 // DUDE post-process toggles (defined in RenderSystem_init.cpp), improvements
 // menu, default off — the fullscreen film-grain / chromatic-aberration pass
 extern idCVar r_postFilmGrain;
 extern idCVar r_postChromaticAberration;
+
+// DUDE gamma/brightness in shader (RenderSystem_init.cpp). On the core context
+// there is no fixed-function/ARB gamma and SDL3 has no hardware gamma ramp, so
+// r_gammaInShader is applied as a final fullscreen pass (RB_RHI_GammaBrightness).
+extern idCVar r_gammaInShader;
+extern idCVar r_gamma;
+extern idCVar r_brightness;
 
 static unsigned char *rbCaptureDest = NULL;
 
@@ -118,6 +127,108 @@ static void RB_RHI_PostProcess( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
 	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
 	backEnd.currentScissor = viewDef->scissor;
+
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
+	globalImages->currentRenderImage->Bind();
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = CT_TWO_SIDED;
+	r->BindPipeline( pd );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = 6;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	r->Draw( da );
+
+	backEnd.pc.c_drawElements++;
+}
+
+/*
+=============
+RB_RHI_GammaBrightness
+
+Apply r_gamma / r_brightness to the finished frame as one fullscreen pass over
+the whole default framebuffer, right before the buffers are swapped. This is the
+core-context equivalent of the legacy r_gammaInShader path: the fixed-function/
+ARB fragment programs (draw_common.cpp) are never run here, and SDL3 offers no
+hardware gamma ramp, so without this the gamma/brightness settings would do
+nothing on the opengl3 renderer.
+
+Runs after 3D + 2D/GUI/console (so the HUD and menus are corrected too, matching
+hardware gamma) but before the ImGui settings overlay, so the F10 menu itself
+stays at a stable, readable brightness while you drag the sliders. Skipped when
+r_gammaInShader is off (hardware path) or when both values are identity, which
+makes it a zero-cost no-op at the default settings.
+=============
+*/
+static void RB_RHI_GammaBrightness( rhi::RHI *r ) {
+	if ( !r_gammaInShader.GetBool() ) {
+		return;		// hardware-gamma path (GLimp_SetGamma) handles it
+	}
+
+	float gamma = r_gamma.GetFloat();
+	float brightness = r_brightness.GetFloat();
+	if ( gamma == 1.0f && brightness == 1.0f ) {
+		return;		// identity → exact passthrough, skip the copy+draw entirely
+	}
+
+	rhi::ShaderHandle prog = r->LoadShader( "gammabrightness" );
+	if ( !prog ) {
+		return;
+	}
+
+	int w = glConfig.vidWidth;
+	int h = glConfig.vidHeight;
+
+	// snapshot the finished frame (3D + 2D/GUI/console) into the oversized POT
+	// _currentRender texture, then correct it back onto the framebuffer
+	globalImages->currentRenderImage->CopyFramebuffer( 0, 0, w, h, true );
+
+	int potW = globalImages->currentRenderImage->uploadWidth;
+	int potH = globalImages->currentRenderImage->uploadHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.screenCorrection[0] = potW > 0 ? (float)w / potW : 1.0f;
+	parms.screenCorrection[1] = potH > 0 ? (float)h / potH : 1.0f;
+	// mirror R_SetColorMappings: multiply by brightness (clamped), then pow(1/gamma)
+	parms.localParam0[0] = brightness;
+	parms.localParam0[1] = 1.0f / gamma;
+
+	// fullscreen NDC quad (identity mvp), st 0..1 with GL bottom-left origin
+	// matching the framebuffer copy
+	idDrawVert quad[4];
+	memset( quad, 0, sizeof( quad ) );
+	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
+	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
+	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
+	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
+	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
+
+	rhi::BufferHandle vb, ib, ub;
+	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
+	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	// the last view left its own viewport/scissor; cover the whole framebuffer
+	r->SetViewport( 0, 0, w, h );
+	r->SetScissor( 0, 0, w, h );
+	backEnd.currentScissor.x1 = 0;
+	backEnd.currentScissor.y1 = 0;
+	backEnd.currentScissor.x2 = w - 1;
+	backEnd.currentScissor.y2 = h - 1;
 
 	rhi::gl3ActiveTexture( GL_TEXTURE0 );
 	backEnd.glState.currenttmu = 0;
@@ -975,6 +1086,10 @@ void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 			break;
 		}
 		case RC_SWAP_BUFFERS:
+			// correct the finished frame for r_gamma / r_brightness in-shader
+			// (core has no fixed-function/hardware gamma); before the capture
+			// and the ImGui overlay so screenshots match what's on screen
+			RB_RHI_GammaBrightness( r );
 			if ( rbCaptureDest ) {
 				// back buffer still holds the finished frame; front-buffer
 				// reads after swap are undefined under compositors
@@ -982,6 +1097,11 @@ void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 				               GL_RGB, GL_UNSIGNED_BYTE, rbCaptureDest );
 				rbCaptureDest = NULL;
 			}
+			// draw the ImGui menus (F10 dhewm3 settings) on top of the frame —
+			// the legacy path does this in RB_SwapBuffers, which the core
+			// executor bypasses. Drawn after the capture so it stays out of
+			// screenshots, matching the legacy behaviour.
+			D3::ImGuiHooks::EndFrame();
 			GLimp_SwapBuffers();
 			break;
 		default:

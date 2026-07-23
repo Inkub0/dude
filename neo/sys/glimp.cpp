@@ -823,14 +823,11 @@ try_again:
 	}
 
 #if SDL_VERSION_ATLEAST(2, 0, 0)
-	// SDL1.2 has no context, and is not supported by ImGui anyway
-	// DUDE: ImGui's GL2 render backend can't run on a core profile; skip it
-	// there until it's ported to the GL3 backend (Phase 3)
-	if ( !parms.coreProfile ) {
-		D3::ImGuiHooks::Init(window, context);
-	} else {
-		common->Printf( "Skipping ImGui init on the GL 3.3 core backend (not ported yet)\n" );
-	}
+	// SDL1.2 has no context, and is not supported by ImGui anyway.
+	// DUDE: works on both backends now — sys_imgui picks the fixed-function GL2
+	// ImGui renderer for the legacy context and the shader-based GL3 one for the
+	// GL 3.3 core context (r_graphicsAPI opengl3).
+	D3::ImGuiHooks::Init(window, context);
 #endif
 
 	return true;

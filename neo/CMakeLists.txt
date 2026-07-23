@@ -929,7 +929,8 @@ if(IMGUI)
 
 set(src_imgui ${src_imgui}
 	libs/imgui/backends/imgui_impl_opengl2.cpp
-	
+	libs/imgui/backends/imgui_impl_opengl3.cpp
+
 	libs/imgui/imgui.h
 	libs/imgui/imgui.cpp
 	libs/imgui/imgui_draw.cpp
