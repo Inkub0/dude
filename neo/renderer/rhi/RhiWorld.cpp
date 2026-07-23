@@ -27,6 +27,11 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 
 extern idCVar r_useCarmacksReverse;		// defined in RenderSystem_init.cpp, no tr_local decl
 
+// GL 3.0 core enum; not always pulled in by the legacy gl.h include path
+#ifndef GL_CLIP_DISTANCE0
+#define GL_CLIP_DISTANCE0 0x3000
+#endif
+
 /*
 ===================
 interaction draw context
@@ -315,16 +320,23 @@ program (opaque solid, perforated alpha-tested, subview down-modulate).
 static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::ShaderHandle zfill = r->LoadShader( "zfill" );
 
-	if ( viewDef->numClipPlanes ) {
-		// legacy uses an alpha-notch texgen trick; ours will use
-		// gl_ClipDistance when subview polish lands (Chunk G)
-		RB_RHI_LogOnce( "subview near-clip planes" );
+	// subview near-clip plane (mirror / camera views): the legacy path forces
+	// the alpha test to fail behind the plane with an alpha-notch texgen trick
+	// (RB_T_FillDepthBuffer). On core we clip geometrically with
+	// gl_ClipDistance[0], written by zfill.vert. Only the depth fill needs it:
+	// the interaction and opaque material passes are depth-EQUAL, so they
+	// inherit the clip exactly like the legacy notch. The plane is transformed
+	// into each surface's model space, matching R_GlobalPlaneToLocal() there.
+	const bool useClipPlane = viewDef->numClipPlanes > 0;
+	if ( useClipPlane ) {
+		qglEnable( GL_CLIP_DISTANCE0 );
 	}
 
 	qglStencilFunc( GL_ALWAYS, 1, 255 );
 
 	const viewEntity_t *currentSpace = NULL;
 	float mvp[16];
+	float localClipPlane[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 
 	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
 	for ( int i = 0; i < viewDef->numDrawSurfs; i++ ) {
@@ -366,6 +378,14 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( surf->space != currentSpace ) {
 			currentSpace = surf->space;
 			RB_RHI_SpaceMvp( viewDef, surf->space, mvp );
+			if ( useClipPlane ) {
+				idPlane local;
+				R_GlobalPlaneToLocal( surf->space->modelMatrix, viewDef->clipPlanes[0], local );
+				localClipPlane[0] = local[0];
+				localClipPlane[1] = local[1];
+				localClipPlane[2] = local[2];
+				localClipPlane[3] = local[3];
+			}
 		}
 		if ( surf->space->weaponDepthHack ) {
 			RB_EnterWeaponDepthHack();
@@ -439,6 +459,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 				memset( &parms, 0, sizeof( parms ) );
 				memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
 				memcpy( parms.color, color, sizeof( parms.color ) );
+				memcpy( parms.clipPlane, localClipPlane, sizeof( parms.clipPlane ) );
 				parms.alphaTest[0] = regs[pStage->alphaTestRegister];
 				parms.alphaTest[1] = 1.0f;
 				if ( pStage->texture.hasMatrix ) {
@@ -474,6 +495,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 			memset( &parms, 0, sizeof( parms ) );
 			memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
 			memcpy( parms.color, color, sizeof( parms.color ) );
+			memcpy( parms.clipPlane, localClipPlane, sizeof( parms.clipPlane ) );
 			parms.diffuseMatrixS[0] = 1.0f;
 			parms.diffuseMatrixT[1] = 1.0f;
 
@@ -495,6 +517,10 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( surf->space->weaponDepthHack || surf->space->modelDepthHack != 0.0f ) {
 			RB_LeaveDepthHack();
 		}
+	}
+
+	if ( useClipPlane ) {
+		qglDisable( GL_CLIP_DISTANCE0 );
 	}
 
 	// make the early depth pass available to shaders (soft particles etc.)

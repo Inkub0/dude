@@ -59,10 +59,13 @@ struct RenderParams {
 	float	texGen0Q[4];
 	float	texGen1S[4];
 	float	texGen1T[4];
+
+	float	clipPlane[4];	// subview near-clip plane in model-local space
+							// (zfill gl_ClipDistance; 0 when no clip plane)
 };
 
-// 3 mat4 (192) + 33 vec4 (528) = 720 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 720, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 3 mat4 (192) + 34 vec4 (544) = 736 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 736, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

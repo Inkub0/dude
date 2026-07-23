@@ -47,4 +47,7 @@ UBO_BINDING(0) uniform RenderParams {
 	vec4 u_texGen0Q;
 	vec4 u_texGen1S;
 	vec4 u_texGen1T;              // fog "enter" plane T (per-vertex fade); blendlight leaves this unused
+
+	vec4 u_clipPlane;            // subview near-clip plane in model-local space
+	                            // (zfill gl_ClipDistance[0]; 0 when unused)
 };
