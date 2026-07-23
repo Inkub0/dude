@@ -366,7 +366,32 @@ static void RB_RHI_StreamStore( rhi::RHI *r, const void *vertKey, const void *id
 	rbStreamedHash.Add( (int)( ( ( (uintptr_t)vertKey ^ (uintptr_t)idxKey ) >> 4 ) & 0x7fffffff ), index );
 }
 
+// Resolve this surface's indexes to a GPU buffer + byte offset. When the front
+// end has a resident index VBO (tri->indexCache, populated only when
+// r_useIndexBuffers is set — which the core profile forces on) draw it in
+// place; otherwise stream the CPU index array into the ring for this frame.
+static void RB_RHI_ResolveIndices( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHandle &ib, int &idxOfs ) {
+	if ( tri->indexCache && tri->indexCache->vbo ) {
+		ib = tri->indexCache->vbo;
+		idxOfs = (int)tri->indexCache->offset;
+	} else {
+		ib = 0;
+		idxOfs = r->AllocIndices( tri->indexes, tri->numIndexes * (int)sizeof( glIndex_t ), &ib );
+	}
+}
+
 void RB_RHI_StreamAmbient( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs ) {
+	// static VBO fast path: the cache block already lives on the GPU (uploaded
+	// once at level load, or by AllocFrameTemp for dynamic surfaces), so hand
+	// back its handle and offset directly — no per-frame copy.
+	if ( tri->ambientCache->vbo ) {
+		vb = tri->ambientCache->vbo;
+		vertOfs = (int)tri->ambientCache->offset;
+		RB_RHI_ResolveIndices( r, tri, ib, idxOfs );
+		return;
+	}
+	// system-memory fallback (ARB_vertex_buffer_object unavailable, or
+	// r_useVertexBuffers 0): stream into the ring, deduped per frame
 	if ( RB_RHI_StreamLookup( r, tri->ambientCache, tri->indexes, vb, vertOfs, ib, idxOfs ) ) {
 		return;
 	}
@@ -380,6 +405,13 @@ void RB_RHI_StreamAmbient( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHa
 }
 
 void RB_RHI_StreamShadow( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs ) {
+	// static VBO fast path (see RB_RHI_StreamAmbient)
+	if ( tri->shadowCache->vbo ) {
+		vb = tri->shadowCache->vbo;
+		vertOfs = (int)tri->shadowCache->offset;
+		RB_RHI_ResolveIndices( r, tri, ib, idxOfs );
+		return;
+	}
 	if ( RB_RHI_StreamLookup( r, tri->shadowCache, tri->indexes, vb, vertOfs, ib, idxOfs ) ) {
 		return;
 	}

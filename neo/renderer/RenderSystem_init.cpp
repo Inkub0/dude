@@ -902,12 +902,41 @@ void R_InitOpenGL( void ) {
 	if ( glConfig.coreProfile ) {
 		// DUDE GL3 backend: skip the legacy extension probing and ARB program
 		// setup entirely — none of it is valid (or needed) on a core context.
-		// vertexCache falls back to system memory (no ARB VBO flag), and
 		// SetBackEndRenderer is satisfied via allowARB2Path (the legacy draw
 		// paths are gated off in RB_ExecuteBackEndCommands).
 		glConfig.multitextureAvailable = false;
-		glConfig.ARBVertexBufferObjectAvailable = false;
 		glConfig.allowARB2Path = true;
+
+		// Give the vertexCache real VBOs on the core profile. Core GL has no
+		// client-side vertex/index arrays, so without persistent buffers every
+		// visible surface has to be re-streamed to the GPU each frame (the
+		// "Vertex cache is SLOW" path — a ~10x hit vs the classic backend, which
+		// uploads static geometry once and reuses it). The vertexCache's VBO
+		// machinery is written against the ARB_vertex_buffer_object entry points,
+		// which are ABI-identical to the core buffer functions guaranteed by a
+		// 3.x core context — wire the qgl*ARB pointers straight to them.
+		qglBindBufferARB           = (PFNGLBINDBUFFERARBPROC)GLimp_ExtensionPointer( "glBindBuffer" );
+		qglDeleteBuffersARB        = (PFNGLDELETEBUFFERSARBPROC)GLimp_ExtensionPointer( "glDeleteBuffers" );
+		qglGenBuffersARB           = (PFNGLGENBUFFERSARBPROC)GLimp_ExtensionPointer( "glGenBuffers" );
+		qglIsBufferARB             = (PFNGLISBUFFERARBPROC)GLimp_ExtensionPointer( "glIsBuffer" );
+		qglBufferDataARB           = (PFNGLBUFFERDATAARBPROC)GLimp_ExtensionPointer( "glBufferData" );
+		qglBufferSubDataARB        = (PFNGLBUFFERSUBDATAARBPROC)GLimp_ExtensionPointer( "glBufferSubData" );
+		qglGetBufferSubDataARB     = (PFNGLGETBUFFERSUBDATAARBPROC)GLimp_ExtensionPointer( "glGetBufferSubData" );
+		qglMapBufferARB            = (PFNGLMAPBUFFERARBPROC)GLimp_ExtensionPointer( "glMapBuffer" );
+		qglUnmapBufferARB          = (PFNGLUNMAPBUFFERARBPROC)GLimp_ExtensionPointer( "glUnmapBuffer" );
+		qglGetBufferParameterivARB = (PFNGLGETBUFFERPARAMETERIVARBPROC)GLimp_ExtensionPointer( "glGetBufferParameteriv" );
+		qglGetBufferPointervARB    = (PFNGLGETBUFFERPOINTERVARBPROC)GLimp_ExtensionPointer( "glGetBufferPointerv" );
+		glConfig.ARBVertexBufferObjectAvailable =
+			qglGenBuffersARB && qglBindBufferARB && qglBufferDataARB
+			&& qglBufferSubDataARB && qglDeleteBuffersARB;
+
+		// core GL can only source indices from a bound ELEMENT_ARRAY_BUFFER, so
+		// keep static index data resident in VBOs too (the front end fills
+		// tri->indexCache only when this is set); otherwise indices would still
+		// have to be streamed every frame.
+		if ( glConfig.ARBVertexBufferObjectAvailable ) {
+			r_useIndexBuffers.SetBool( true );
+		}
 
 		// the image path needs compressed uploads (retail pk4s ship .dds) —
 		// glCompressedTexImage2D is core since 1.3, S3TC is an extension even

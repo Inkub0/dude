@@ -75,6 +75,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 	GL3F( PFNGLBINDBUFFERPROC,				BindBuffer ) \
 	GL3F( PFNGLBUFFERDATAPROC,				BufferData ) \
 	GL3F( PFNGLBUFFERSUBDATAPROC,			BufferSubData ) \
+	GL3F( PFNGLMAPBUFFERRANGEPROC,			MapBufferRange ) \
+	GL3F( PFNGLUNMAPBUFFERPROC,				UnmapBuffer ) \
 	GL3F( PFNGLBINDBUFFERRANGEPROC,			BindBufferRange ) \
 	/* textures */ \
 	GL3F( PFNGLACTIVETEXTUREPROC,			ActiveTexture ) \

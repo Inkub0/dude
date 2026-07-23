@@ -36,19 +36,27 @@ bool GL3_LoadCoreFunctions( idStr &missing ) {
 	return missing.IsEmpty();
 }
 
+// ARB_buffer_storage (GL 4.4): immutable, persistently-mappable buffers. Optional
+// — loaded separately so a missing entry point just disables the persistent-ring
+// fast path instead of failing backend init. gl3BufferStorage stays NULL then.
+static PFNGLBUFFERSTORAGEPROC gl3BufferStorage = NULL;
+
 class GL3Backend : public RHI {
-	// ring sizes; wraps orphan mid-frame, so these are throughput hints.
-	// vertex/index rings carry the whole visible world per frame until
-	// vertexCache gets real VBOs (Chunk G), so they are sized generously.
-	static const int UBO_RING_SIZE  = 4 << 20;
-	static const int VERT_RING_SIZE = 32 << 20;
-	static const int IDX_RING_SIZE  = 8 << 20;
+	// ring sizes. Geometry now lives in the vertexCache's static VBOs, so the
+	// vertex/index rings only carry small dynamic bits (fullscreen quads, the
+	// virtual-memory fallback) and can be modest. The UBO ring takes one
+	// RenderParams per draw and is persistently mapped (advances continuously
+	// across frames, wrapping rarely), so it is sized for many frames of draws.
+	static const int UBO_RING_SIZE  = 16 << 20;
+	static const int VERT_RING_SIZE = 4 << 20;
+	static const int IDX_RING_SIZE  = 2 << 20;
 
 	struct ring_t {
 		GLuint	buffer;
 		int		offset;
 		int		size;
 		GLenum	target;
+		byte *	persist;	// non-NULL: persistently-mapped, written via this ptr
 	};
 
 	bool			initialized;
@@ -72,10 +80,12 @@ class GL3Backend : public RHI {
 	int				boundLayout;
 	GLuint			boundVBO;
 	int				boundBase;
+	unsigned int	boundProgram;	// skip redundant glUseProgram across a chain
 
 public:
 	GL3Backend() : initialized( false ), uboAlign( 256 ), streamGen( 0 ) {
 		uboRing.buffer = vertRing.buffer = idxRing.buffer = 0;
+		uboRing.persist = vertRing.persist = idxRing.persist = NULL;
 		vaos[0] = vaos[1] = 0;
 		imVao = imVbo = imUbo = 0;
 		InvalidateCaches();
@@ -94,11 +104,29 @@ public:
 			uboAlign = 256;		// spec maximum-minimum, aligns everywhere
 		}
 
-		InitRing( uboRing,  GL_UNIFORM_BUFFER,       UBO_RING_SIZE );
-		InitRing( vertRing, GL_ARRAY_BUFFER,         VERT_RING_SIZE );
-		InitRing( idxRing,  GL_ELEMENT_ARRAY_BUFFER, IDX_RING_SIZE );
+		// ARB_buffer_storage lets us persistently map the per-draw UBO ring:
+		// write straight through a CPU pointer with zero map/unmap/subdata calls
+		// per draw (only the cheap glBindBufferRange remains). This is the big
+		// win on drivers that stall when a bound buffer is re-uploaded per draw.
+		gl3BufferStorage = (PFNGLBUFFERSTORAGEPROC)GLimp_ExtensionPointer( "glBufferStorage" );
+
+		InitRing( uboRing,  GL_UNIFORM_BUFFER,       UBO_RING_SIZE,  gl3BufferStorage != NULL );
+		InitRing( vertRing, GL_ARRAY_BUFFER,         VERT_RING_SIZE, false );
+		InitRing( idxRing,  GL_ELEMENT_ARRAY_BUFFER, IDX_RING_SIZE,  false );
+		common->Printf( "GL3 backend: UBO ring is %s\n",
+		                uboRing.persist ? "persistently mapped (fast)" : "orphaned per draw" );
 
 		gl3GenVertexArrays( VL_COUNT, vaos );
+
+		// attribute enable is VAO state: set it once here so the per-draw
+		// BindVertexLayout only has to (re)specify the pointers when the bound
+		// buffer/offset changes, not re-enable every array every draw
+		gl3BindVertexArray( vaos[VL_DRAWVERT] );
+		for ( int i = 0; i <= 5; i++ ) {
+			gl3EnableVertexAttribArray( i );
+		}
+		gl3BindVertexArray( vaos[VL_SHADOW] );
+		gl3EnableVertexAttribArray( 0 );
 
 		// immediate-mode VAO/VBO/UBO (Chunk G): generic-program attribute
 		// layout — pos @0, texcoord @1, color @5 — matching imVert_t
@@ -129,6 +157,11 @@ public:
 			return;
 		}
 		GL3_ShutdownShaderCache();
+		if ( uboRing.persist ) {
+			gl3BindBuffer( GL_ARRAY_BUFFER, uboRing.buffer );
+			gl3UnmapBuffer( GL_ARRAY_BUFFER );
+			uboRing.persist = NULL;
+		}
 		gl3DeleteBuffers( 1, &uboRing.buffer );
 		gl3DeleteBuffers( 1, &vertRing.buffer );
 		gl3DeleteBuffers( 1, &idxRing.buffer );
@@ -159,8 +192,10 @@ public:
 		InvalidateCaches();
 
 		if ( initialized ) {
-			// orphan the rings: the driver keeps last frame's storage alive
-			// for in-flight draws while we write into fresh memory
+			// orphan the mutable rings: the driver keeps last frame's storage
+			// alive for in-flight draws while we write into fresh memory. The
+			// persistent UBO ring is immutable (can't be orphaned) and instead
+			// advances continuously, wrapping with a sync in AllocFromRing.
 			OrphanRing( uboRing );
 			OrphanRing( vertRing );
 			OrphanRing( idxRing );
@@ -264,8 +299,9 @@ public:
 	// ---- drawing ----
 	virtual void BindPipeline( const PipelineDesc &desc ) {
 		unsigned int program = GL3_ProgramObject( desc.shader );
-		if ( program ) {
+		if ( program && program != boundProgram ) {
 			gl3UseProgram( program );
+			boundProgram = program;
 		}
 		ApplyState( desc.stateBits );
 		ApplyCull( desc.cullType );
@@ -340,17 +376,35 @@ public:
 	}
 
 private:
-	void InitRing( ring_t &ring, GLenum target, int size ) {
+	void InitRing( ring_t &ring, GLenum target, int size, bool persistent ) {
 		ring.target = target;
 		ring.size = size;
 		ring.offset = 0;
+		ring.persist = NULL;
 		gl3GenBuffers( 1, &ring.buffer );
 		// allocate via ARRAY_BUFFER (VAO-neutral, buffers are untyped)
 		gl3BindBuffer( GL_ARRAY_BUFFER, ring.buffer );
+
+		if ( persistent && gl3BufferStorage ) {
+			const GLbitfield flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+			gl3BufferStorage( GL_ARRAY_BUFFER, size, NULL, flags );
+			ring.persist = (byte *)gl3MapBufferRange( GL_ARRAY_BUFFER, 0, size, flags );
+			if ( ring.persist ) {
+				return;		// mapped for the buffer's lifetime
+			}
+			// immutable store made but mapping failed: it can't be reused as a
+			// mutable buffer, so replace it with a fresh mutable one
+			gl3DeleteBuffers( 1, &ring.buffer );
+			gl3GenBuffers( 1, &ring.buffer );
+			gl3BindBuffer( GL_ARRAY_BUFFER, ring.buffer );
+		}
 		gl3BufferData( GL_ARRAY_BUFFER, size, NULL, GL_DYNAMIC_DRAW );
 	}
 
 	void OrphanRing( ring_t &ring ) {
+		if ( ring.persist ) {
+			return;		// immutable + persistently mapped: never orphaned
+		}
 		gl3BindBuffer( GL_ARRAY_BUFFER, ring.buffer );
 		gl3BufferData( GL_ARRAY_BUFFER, ring.size, NULL, GL_DYNAMIC_DRAW );
 		ring.offset = 0;
@@ -359,13 +413,43 @@ private:
 
 	int AllocFromRing( ring_t &ring, const void *data, int size, int align, BufferHandle *buffer ) {
 		int offset = ( ring.offset + align - 1 ) & ~( align - 1 );
+
+		if ( ring.persist ) {
+			// persistently mapped: write straight through the CPU pointer, no GL
+			// calls at all (the coherent mapping needs no flush, and only the
+			// draw's glBindBufferRange references it). Advances continuously
+			// across frames; on wrap, sync once — rare, since the ring holds many
+			// frames of draws — so we can't stomp data a draw is still reading.
+			if ( offset + size > ring.size ) {
+				qglFinish();
+				offset = 0;
+			}
+			memcpy( ring.persist + offset, data, size );
+			ring.offset = offset + size;
+			*buffer = ring.buffer;
+			return offset;
+		}
+
 		gl3BindBuffer( GL_ARRAY_BUFFER, ring.buffer );
 		if ( offset + size > ring.size ) {
 			// mid-frame wrap: orphan again, earlier draws keep the old storage
 			gl3BufferData( GL_ARRAY_BUFFER, ring.size, NULL, GL_DYNAMIC_DRAW );
 			offset = 0;
 		}
-		gl3BufferSubData( GL_ARRAY_BUFFER, offset, size, data );
+		// Write with an UNSYNCHRONIZED map instead of glBufferSubData. The ring
+		// only ever advances (and orphans each frame in BeginFrame), so we never
+		// touch a region a draw is still reading — but the driver can't know
+		// that, and glBufferSubData on a buffer that's bound for drawing makes
+		// NVIDIA stall until the in-flight draw completes, serializing CPU/GPU
+		// on every draw. INVALIDATE_RANGE|UNSYNCHRONIZED tells it not to wait.
+		void *dst = gl3MapBufferRange( GL_ARRAY_BUFFER, offset, size,
+		                               GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_UNSYNCHRONIZED_BIT );
+		if ( dst ) {
+			memcpy( dst, data, size );
+			gl3UnmapBuffer( GL_ARRAY_BUFFER );
+		} else {
+			gl3BufferSubData( GL_ARRAY_BUFFER, offset, size, data );	// map failed; safe fallback
+		}
 		ring.offset = offset + size;
 		*buffer = ring.buffer;
 		return offset;
@@ -466,11 +550,9 @@ private:
 		gl3BindBuffer( GL_ARRAY_BUFFER, vbo );
 		const GLbyte *base = (const GLbyte *)NULL + baseOffset;
 
+		// arrays are enabled once at VAO creation; only respecify pointers here
 		if ( layout == VL_DRAWVERT ) {
 			const GLsizei stride = sizeof( idDrawVert );
-			for ( int i = 0; i <= 5; i++ ) {
-				gl3EnableVertexAttribArray( i );
-			}
 			gl3VertexAttribPointer( 0, 3, GL_FLOAT, GL_FALSE, stride, base + offsetof( idDrawVert, xyz ) );
 			gl3VertexAttribPointer( 1, 2, GL_FLOAT, GL_FALSE, stride, base + offsetof( idDrawVert, st ) );
 			gl3VertexAttribPointer( 2, 3, GL_FLOAT, GL_FALSE, stride, base + offsetof( idDrawVert, normal ) );
@@ -478,7 +560,6 @@ private:
 			gl3VertexAttribPointer( 4, 3, GL_FLOAT, GL_FALSE, stride, base + offsetof( idDrawVert, tangents ) + sizeof( idVec3 ) );
 			gl3VertexAttribPointer( 5, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, base + offsetof( idDrawVert, color ) );
 		} else {
-			gl3EnableVertexAttribArray( 0 );
 			gl3VertexAttribPointer( 0, 4, GL_FLOAT, GL_FALSE, sizeof( shadowCache_t ), base );
 		}
 
@@ -491,6 +572,7 @@ private:
 		boundLayout = -1;
 		boundVBO = 0;
 		boundBase = -1;
+		boundProgram = 0;
 		currentStateBits = 0;
 		currentCull = -1;
 		forceState = true;

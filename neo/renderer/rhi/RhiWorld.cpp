@@ -57,6 +57,20 @@ RB_RHI_BindUnit
 ===================
 */
 static void RB_RHI_BindUnit( int unit, idImage *image ) {
+	// Skip the active-unit switch and rebind when this image is already bound
+	// on this unit. Under one light the normalization cube, light falloff /
+	// projection and specular-table maps are identical across every surface —
+	// only bump/diffuse/specular change — so most of the 7 per-draw binds in
+	// the interaction pass are redundant. idImage::Bind already caches the
+	// glBindTexture, but the glActiveTexture around it was issued regardless.
+	const tmu_t *tmu = &backEnd.glState.tmu[unit];
+	if ( image->texnum != idImage::TEXTURE_NOT_LOADED ) {
+		if ( ( image->type == TT_2D   && tmu->current2DMap   == image->texnum ) ||
+		     ( image->type == TT_CUBIC && tmu->currentCubeMap == image->texnum ) ||
+		     ( image->type == TT_3D   && tmu->current3DMap   == image->texnum ) ) {
+			return;
+		}
+	}
 	rhi::gl3ActiveTexture( GL_TEXTURE0 + unit );
 	backEnd.glState.currenttmu = unit;
 	image->Bind();
