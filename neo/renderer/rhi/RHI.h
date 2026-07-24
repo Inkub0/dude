@@ -24,6 +24,7 @@ typedef unsigned int BufferHandle;
 typedef unsigned int ImageHandle;
 typedef unsigned int SamplerHandle;
 typedef unsigned int ShaderHandle;		// linked vert+frag program pair
+typedef unsigned int RenderTargetHandle;	// offscreen FBO; 0 = the backbuffer
 
 enum BufferUsage {
 	BU_VERTEX,
@@ -34,7 +35,8 @@ enum BufferUsage {
 enum ImageFormat {
 	IF_RGBA8,
 	IF_DEPTH24_STENCIL8,	// backend may substitute D32S8
-	IF_RGBA16F				// Tier-3 HDR target (post stack)
+	IF_RGBA16F,				// Tier-3 HDR target (post stack)
+	IF_DEPTH24				// depth-only; shadow-map target, sampler2DShadow-ready
 };
 
 enum VertexLayout {
@@ -88,6 +90,11 @@ public:
 
 	// ---- passes (begin/end-scoped; backend decides render-pass objects) ----
 	virtual void	BeginPass( const ClearArgs *clear ) = 0;	// NULL = load existing
+	// begin a pass rendering INTO an offscreen target instead of the backbuffer.
+	// Sets the viewport to the whole target; the matching EndPass restores the
+	// backbuffer and the previous viewport. Nests one level under the main pass
+	// (a plain FBO bind/unbind in GL terms), keeping the begin/end-scoped model.
+	virtual void	BeginTargetPass( RenderTargetHandle rt, const ClearArgs *clear ) = 0;
 	virtual void	EndPass() = 0;
 	virtual void	SetViewport( int x, int y, int w, int h ) = 0;
 	virtual void	SetScissor( int x, int y, int w, int h ) = 0;
@@ -99,6 +106,17 @@ public:
 	virtual ImageHandle		CreateImage( ImageFormat fmt, int w, int h, const void *pixels ) = 0;
 	virtual void			DestroyImage( ImageHandle i ) = 0;
 	virtual ShaderHandle	LoadShader( const char *name ) = 0;	// loads name.vert/.frag via VFS
+
+	// ---- offscreen render targets (Phase 3.5 shadow maps; Phase 11 post stack) ----
+	// Create an offscreen target and its backing texture. A depth format makes a
+	// depth-only target (no color attachment) suitable for shadow maps, sampled
+	// via GetRenderTargetImage() as a sampler2DShadow-ready depth texture. Returns
+	// 0 on failure (e.g. incomplete FBO); callers must cope with an absent target.
+	virtual RenderTargetHandle	CreateRenderTarget( ImageFormat fmt, int w, int h ) = 0;
+	virtual void				DestroyRenderTarget( RenderTargetHandle rt ) = 0;
+	// the target's texture as a sampleable image handle — the same ImageHandle
+	// abstraction future material textures will use (Phase 4 image ownership).
+	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt ) = 0;
 
 	// per-draw uniform ring: writes `size` bytes and returns the aligned
 	// offset (+ the ring's buffer in *buffer) for DrawArgs::uniformBuffer/

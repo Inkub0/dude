@@ -46,6 +46,27 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #ifndef GL_TEXTURE0
 #define GL_TEXTURE0						0x84C0
 #endif
+// framebuffer objects + depth-texture / shadow-sampler state (shadow maps)
+#ifndef GL_FRAMEBUFFER
+#define GL_FRAMEBUFFER					0x8D40
+#define GL_DEPTH_ATTACHMENT				0x8D00
+#define GL_FRAMEBUFFER_COMPLETE			0x8CD5
+#endif
+#ifndef GL_DEPTH_COMPONENT24
+#define GL_DEPTH_COMPONENT24			0x81A6
+#endif
+#ifndef GL_TEXTURE_COMPARE_MODE
+#define GL_TEXTURE_COMPARE_MODE			0x884C
+#define GL_TEXTURE_COMPARE_FUNC			0x884D
+#define GL_COMPARE_REF_TO_TEXTURE		0x884E
+#endif
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE				0x812F
+#endif
+#ifndef GL_CLAMP_TO_BORDER
+#define GL_CLAMP_TO_BORDER				0x812D
+#define GL_TEXTURE_BORDER_COLOR			0x1004
+#endif
 
 // every core entry point the backend uses beyond fixed GL 1.1 (qgl covers those).
 // X-macro: GL3F( pointer-typedef, NameWithoutGlPrefix )
@@ -85,7 +106,13 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 	GL3F( PFNGLDELETEVERTEXARRAYSPROC,		DeleteVertexArrays ) \
 	GL3F( PFNGLBINDVERTEXARRAYPROC,			BindVertexArray ) \
 	GL3F( PFNGLENABLEVERTEXATTRIBARRAYPROC,	EnableVertexAttribArray ) \
-	GL3F( PFNGLVERTEXATTRIBPOINTERPROC,		VertexAttribPointer )
+	GL3F( PFNGLVERTEXATTRIBPOINTERPROC,		VertexAttribPointer ) \
+	/* framebuffer objects (shadow maps / offscreen targets) */ \
+	GL3F( PFNGLGENFRAMEBUFFERSPROC,			GenFramebuffers ) \
+	GL3F( PFNGLDELETEFRAMEBUFFERSPROC,		DeleteFramebuffers ) \
+	GL3F( PFNGLBINDFRAMEBUFFERPROC,			BindFramebuffer ) \
+	GL3F( PFNGLFRAMEBUFFERTEXTURE2DPROC,	FramebufferTexture2D ) \
+	GL3F( PFNGLCHECKFRAMEBUFFERSTATUSPROC,	CheckFramebufferStatus )
 
 namespace rhi {
 

@@ -106,6 +106,20 @@ class GL3Backend : public RHI {
 	int				gpuTimeSamples;
 	unsigned int	gpuTimeLastPrint;
 
+	// offscreen render targets (shadow maps now; Phase 11 post stack later).
+	// Handle is a 1-based index into this array (handle 0 == the backbuffer);
+	// a slot with fbo == 0 is free. FBO/draw/read-buffer state is per-FBO in
+	// GL 3.0+, so binding one never disturbs the backbuffer's state.
+	static const int MAX_RENDER_TARGETS = 16;
+	struct renderTarget_t {
+		GLuint	fbo;
+		GLuint	tex;
+		int		w, h;
+	};
+	renderTarget_t		renderTargets[MAX_RENDER_TARGETS];
+	RenderTargetHandle	activeTarget;		// 0 = backbuffer; set by BeginTargetPass
+	GLint				savedViewport[4];	// restored by EndPass after a target pass
+
 public:
 	GL3Backend() : initialized( false ), uboAlign( 256 ), streamGen( 0 ) {
 		uboRing.buffer = vertRing.buffer = idxRing.buffer = 0;
@@ -119,6 +133,9 @@ public:
 		gpuTimeAccum = 0.0;
 		gpuTimeSamples = 0;
 		gpuTimeLastPrint = 0;
+		memset( renderTargets, 0, sizeof( renderTargets ) );
+		activeTarget = 0;
+		memset( savedViewport, 0, sizeof( savedViewport ) );
 		InvalidateCaches();
 	}
 
@@ -224,6 +241,18 @@ public:
 		gl3DeleteBuffers( 1, &imVbo );
 		gl3DeleteBuffers( 1, &imUbo );
 		imVao = imVbo = imUbo = 0;
+		// tear down any live offscreen targets (their GL names die with the
+		// context on vid_restart; callers recreate them after re-init)
+		for ( int i = 0; i < MAX_RENDER_TARGETS; i++ ) {
+			if ( renderTargets[i].fbo ) {
+				gl3DeleteFramebuffers( 1, &renderTargets[i].fbo );
+			}
+			if ( renderTargets[i].tex ) {
+				qglDeleteTextures( 1, &renderTargets[i].tex );
+			}
+		}
+		memset( renderTargets, 0, sizeof( renderTargets ) );
+		activeTarget = 0;
 		uboRing.buffer = vertRing.buffer = idxRing.buffer = 0;
 		vaos[0] = vaos[1] = 0;
 		initialized = false;
@@ -261,16 +290,16 @@ public:
 		EndGpuTimer();
 	}
 
-	virtual void BeginPass( const ClearArgs *clear ) {
+	// shared clear: a masked write channel makes glClear a no-op on that buffer,
+	// so force the write masks on first (legacy does GL_State(GLS_DEFAULT) before
+	// its clear for this reason). Without it a preceding subview whose last draw
+	// set GLS_DEPTHMASK (interactions/shadows/fog) leaves depthMask FALSE and the
+	// next view's depth clear silently does nothing — the "world goes black around
+	// a mirror" bug.
+	void DoClear( const ClearArgs *clear ) {
 		if ( !clear ) {
 			return;
 		}
-		// A masked write channel makes glClear a no-op on that buffer, so
-		// force the write masks on first (legacy does GL_State(GLS_DEFAULT)
-		// before its clear for this reason). Without it a preceding subview
-		// whose last draw set GLS_DEPTHMASK (interactions/shadows/fog) leaves
-		// depthMask FALSE and the next view's depth clear silently does
-		// nothing — the "world goes black around a mirror" bug.
 		GLbitfield bits = 0;
 		if ( clear->color ) {
 			qglColorMask( 1, 1, 1, 1 );
@@ -293,7 +322,35 @@ public:
 			forceState = true;
 		}
 	}
-	virtual void EndPass() {}
+
+	virtual void BeginPass( const ClearArgs *clear ) {
+		DoClear( clear );
+	}
+
+	virtual void BeginTargetPass( RenderTargetHandle rt, const ClearArgs *clear ) {
+		if ( rt == 0 || rt >= (RenderTargetHandle)MAX_RENDER_TARGETS || !renderTargets[rt].fbo ) {
+			return;
+		}
+		const renderTarget_t &t = renderTargets[rt];
+		// remember the backbuffer viewport so EndPass can put it back
+		qglGetIntegerv( GL_VIEWPORT, savedViewport );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, t.fbo );
+		activeTarget = rt;
+		qglViewport( 0, 0, t.w, t.h );
+		qglScissor( 0, 0, t.w, t.h );
+		DoClear( clear );
+	}
+
+	virtual void EndPass() {
+		if ( activeTarget ) {
+			// return to the backbuffer and restore the view it had
+			gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
+			activeTarget = 0;
+			qglViewport( savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3] );
+			qglScissor( savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3] );
+			forceState = true;
+		}
+	}
 	virtual void SetViewport( int x, int y, int w, int h )	{ qglViewport( x, y, w, h ); }
 	virtual void SetScissor( int x, int y, int w, int h )	{ qglScissor( x, y, w, h ); }
 
@@ -352,6 +409,93 @@ public:
 
 	virtual ShaderHandle LoadShader( const char *name ) {
 		return GL3_FindProgram( name );
+	}
+
+	// ---- offscreen render targets ----
+	virtual RenderTargetHandle CreateRenderTarget( ImageFormat fmt, int w, int h ) {
+		if ( !initialized || w <= 0 || h <= 0 ) {
+			return 0;
+		}
+		// only depth-only targets so far (shadow maps); color targets arrive with
+		// the post stack. Anything else is unsupported here.
+		if ( fmt != IF_DEPTH24 ) {
+			common->Warning( "GL3 CreateRenderTarget: only IF_DEPTH24 supported so far" );
+			return 0;
+		}
+		int slot = -1;
+		for ( int i = 1; i < MAX_RENDER_TARGETS; i++ ) {	// slot 0 == the backbuffer handle
+			if ( renderTargets[i].fbo == 0 && renderTargets[i].tex == 0 ) {
+				slot = i;
+				break;
+			}
+		}
+		if ( slot < 0 ) {
+			common->Warning( "GL3 CreateRenderTarget: out of render-target slots" );
+			return 0;
+		}
+
+		GLuint tex = 0;
+		qglGenTextures( 1, &tex );
+		gl3ActiveTexture( GL_TEXTURE0 );
+		qglBindTexture( GL_TEXTURE_2D, tex );
+		qglTexImage2D( GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0,
+		               GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER );
+		// outside the shadow frustum reads as depth 1.0 (farthest) → never in
+		// shadow, so unmapped areas stay fully lit rather than black
+		const GLfloat borderLit[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+		qglTexParameterfv( GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderLit );
+		// hardware depth comparison so a sampler2DShadow returns 0..1 with 2×2 PCF
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL );
+
+		GLuint fbo = 0;
+		gl3GenFramebuffers( 1, &fbo );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, fbo );
+		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, tex, 0 );
+		qglDrawBuffer( GL_NONE );	// depth-only: no color buffer to draw/read
+		qglReadBuffer( GL_NONE );
+		GLenum status = gl3CheckFramebufferStatus( GL_FRAMEBUFFER );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
+		qglBindTexture( GL_TEXTURE_2D, 0 );
+
+		if ( status != GL_FRAMEBUFFER_COMPLETE ) {
+			common->Warning( "GL3 CreateRenderTarget: incomplete FBO (0x%x), %dx%d", status, w, h );
+			gl3DeleteFramebuffers( 1, &fbo );
+			qglDeleteTextures( 1, &tex );
+			return 0;
+		}
+
+		renderTargets[slot].fbo = fbo;
+		renderTargets[slot].tex = tex;
+		renderTargets[slot].w = w;
+		renderTargets[slot].h = h;
+		boundVBO = 0;	// binding the FBO's texture disturbed unit-0 bind tracking
+		common->Printf( "GL3: created %dx%d depth render target (handle %d)\n", w, h, slot );
+		return (RenderTargetHandle)slot;
+	}
+
+	virtual void DestroyRenderTarget( RenderTargetHandle rt ) {
+		if ( rt == 0 || rt >= (RenderTargetHandle)MAX_RENDER_TARGETS ) {
+			return;
+		}
+		if ( renderTargets[rt].fbo ) {
+			gl3DeleteFramebuffers( 1, &renderTargets[rt].fbo );
+		}
+		if ( renderTargets[rt].tex ) {
+			qglDeleteTextures( 1, &renderTargets[rt].tex );
+		}
+		memset( &renderTargets[rt], 0, sizeof( renderTargets[rt] ) );
+	}
+
+	virtual ImageHandle GetRenderTargetImage( RenderTargetHandle rt ) {
+		if ( rt == 0 || rt >= (RenderTargetHandle)MAX_RENDER_TARGETS ) {
+			return 0;
+		}
+		return (ImageHandle)renderTargets[rt].tex;	// GL texture name doubles as the ImageHandle
 	}
 
 	// ---- drawing ----
