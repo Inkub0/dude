@@ -1693,19 +1693,8 @@ static CVarOption enhancementOptions[] = {
 	CVarOption( "r_specularScale", "Specular Scale", OT_FLOAT, 0.0f, 8.0f ),
 	CVarOption( "r_specularExp", "Specular Exponent (Blinn-Phong / Phong)", OT_FLOAT, 1.0f, 128.0f ),
 
-	CVarOption( "Shadows" ),
-	CVarOption( "r_shadowMapping", []( idCVar& cvar ) {
-		bool enable = cvar.GetBool();
-		if ( ImGui::Checkbox( "Shadow Mapping", &enable ) ) {
-			cvar.SetBool( enable );
-		}
-		const char* descr = "Soft shadow maps for projected/spot lights instead of hard stencil "
-			"shadow volumes. Point and parallel lights still use stencil shadows for now, "
-			"so both techniques mix in a scene. Off = vanilla stencil shadows everywhere.";
-		AddCVarOptionTooltips( cvar, descr );
-	} ),
-	CVarOption( "r_shadowMapSize", "Shadow Map Resolution", OT_INT, 256, 4096 ),
-	CVarOption( "r_shadowMapBias", "Shadow Bias", OT_FLOAT, 0.0f, 0.02f ),
+	// NOTE: the Shadows section is hand-drawn in DrawEnhancementsMenu() (grouped
+	// under the toggle, with a fine-grained bias control), not listed here.
 
 	CVarOption( "Post-Processing" ),
 	CVarOption( "r_postFilmGrain", "Film Grain", OT_FLOAT, 0.0f, 0.25f ),
@@ -2178,12 +2167,41 @@ static void DrawEnhancementsMenu()
 
 	DrawOptions( enhancementOptions, IM_ARRAYSIZE(enhancementOptions) );
 
+	// Shadows (DUDE Phase 3.5). Hand-drawn so the sub-settings are visibly grouped
+	// under the toggle and disabled when it is off - making it clear they all take
+	// effect together. Every value is read live by the renderer (no restart).
 	ImGui::SeparatorText( "Shadows" );
-	bool shadowMapsPlaceholder = false;
-	ImGui::BeginDisabled(); // always disabled: not implemented yet
-	ImGui::Checkbox( "Shadow Mapping (coming soon)", &shadowMapsPlaceholder );
-	ImGui::EndDisabled();
-	AddTooltip( "Soft shadow-mapping is not implemented on this backend yet - planned as a future port from upstream dhewm3." );
+	{
+		bool sm = r_shadowMapping.GetBool();
+		if ( ImGui::Checkbox( "Shadow Mapping", &sm ) ) {
+			r_shadowMapping.SetBool( sm );
+		}
+		AddTooltip( "Soft shadow maps for projected/spot lights instead of hard stencil "
+			"shadow volumes. Point and parallel lights still use stencil shadows for now, "
+			"so both techniques mix in a scene. Off = vanilla stencil shadows everywhere." );
+
+		// the sub-settings only matter while shadow mapping is on
+		ImGui::BeginDisabled( !r_shadowMapping.GetBool() );
+
+		int res = r_shadowMapSize.GetInteger();
+		if ( ImGui::SliderInt( "Shadow Map Resolution", &res, 256, 4096 ) ) {
+			r_shadowMapSize.SetInteger( res );
+		}
+		AddTooltip( "Per-light shadow map resolution. Higher = sharper edges, more memory." );
+
+		// fine-grained bias control: +/- step of 0.02 as requested, and the field is
+		// editable to 4 decimals so small values can be dialled in precisely
+		float bias = r_shadowMapBias.GetFloat();
+		if ( ImGui::InputFloat( "Shadow Bias", &bias, 0.02f, 0.02f, "%.4f" ) ) {
+			bias = idMath::ClampFloat( 0.0f, 0.5f, bias );
+			r_shadowMapBias.SetFloat( bias );
+		}
+		AddTooltip( "Depth-compare bias. Raise to remove acne (stippling on lit surfaces); "
+			"lower if shadows detach from objects (peter-panning) when close. Steps of 0.02; "
+			"type an exact value for fine tuning." );
+
+		ImGui::EndDisabled();
+	}
 
 	ImGui::EndDisabled();
 }
