@@ -65,10 +65,15 @@ struct RenderParams {
 
 	float	specularParms[4];	// interaction specular tuning: x = scale, y = exponent,
 								// z = shading model (0 LUT / 1 Blinn-Phong / 2 Phong), w unused
+
+	float	shadowParms[4];		// x = shadow map enabled (0/1), y = texel size (1/res),
+								// z = depth-compare bias, w unused. The shadow lookup
+								// reuses the light-projection texgen (S/T/Q + falloff),
+								// so no separate shadow matrix is needed.
 };
 
-// 3 mat4 (192) + 35 vec4 (560) = 752 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 752, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 3 mat4 (192) + 36 vec4 (576) = 768 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 768, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

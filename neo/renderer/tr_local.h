@@ -856,6 +856,11 @@ extern idCVar r_shading;				// 0 = vanilla LUT, 1 = Blinn-Phong, 2 = Phong
 extern idCVar r_specularScale;			// scales specular contribution (1 = vanilla)
 extern idCVar r_specularExp;			// analytic specular exponent (r_shading 1/2)
 
+// DUDE Phase 3.5 shadow mapping — GL3/Vulkan only, stencil stays the default
+extern idCVar r_shadowMapping;			// 0 = stencil volumes, 1 = shadow maps where supported
+extern idCVar r_shadowMapSize;			// shadow map resolution per light
+extern idCVar r_shadowMapBias;			// depth-compare bias (acne suppression)
+
 extern idCVar r_renderer;				// arb2, etc
 
 extern idCVar r_checkBounds;			// compare all surface bounds with precalculated ones

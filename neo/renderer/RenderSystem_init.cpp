@@ -277,6 +277,14 @@ idCVar r_shading( "r_shading", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
 idCVar r_specularScale( "r_specularScale", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "scales the specular contribution (1 = vanilla)", 0.0f, 8.0f );
 idCVar r_specularExp( "r_specularExp", "16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "specular exponent for the analytic shading models (r_shading 1/2)", 1.0f, 128.0f );
 
+// DUDE Phase 3.5 shadow mapping (GL3/Vulkan only; stencil stays the faithful
+// default). Global mode for now: 0 = stencil shadow volumes (vanilla), 1 =
+// shadow maps for projected/spot lights (point + parallel lights fall back to
+// stencil until implemented). See docs/port-phases.md Phase 8.
+idCVar r_shadowMapping( "r_shadowMapping", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "shadow technique: 0 = stencil volumes (faithful), 1 = shadow maps where supported" );
+idCVar r_shadowMapSize( "r_shadowMapSize", "1024", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "shadow map resolution (per light), power of two", 256, 4096 );
+idCVar r_shadowMapBias( "r_shadowMapBias", "0.0025", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias to suppress acne", 0.0f, 0.02f );
+
 // DUDE: gate for the non-vanilla "Enhancements" (see tr_local.h). Only the GL 3.3
 // core backend qualifies today; Vulkan backends will extend this once they land.
 bool R_BackendSupportsEnhancements() {

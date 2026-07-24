@@ -1693,6 +1693,20 @@ static CVarOption enhancementOptions[] = {
 	CVarOption( "r_specularScale", "Specular Scale", OT_FLOAT, 0.0f, 8.0f ),
 	CVarOption( "r_specularExp", "Specular Exponent (Blinn-Phong / Phong)", OT_FLOAT, 1.0f, 128.0f ),
 
+	CVarOption( "Shadows" ),
+	CVarOption( "r_shadowMapping", []( idCVar& cvar ) {
+		bool enable = cvar.GetBool();
+		if ( ImGui::Checkbox( "Shadow Mapping", &enable ) ) {
+			cvar.SetBool( enable );
+		}
+		const char* descr = "Soft shadow maps for projected/spot lights instead of hard stencil "
+			"shadow volumes. Point and parallel lights still use stencil shadows for now, "
+			"so both techniques mix in a scene. Off = vanilla stencil shadows everywhere.";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
+	CVarOption( "r_shadowMapSize", "Shadow Map Resolution", OT_INT, 256, 4096 ),
+	CVarOption( "r_shadowMapBias", "Shadow Bias", OT_FLOAT, 0.0f, 0.02f ),
+
 	CVarOption( "Post-Processing" ),
 	CVarOption( "r_postFilmGrain", "Film Grain", OT_FLOAT, 0.0f, 0.25f ),
 	CVarOption( "r_postChromaticAberration", "Chromatic Aberration", OT_FLOAT, 0.0f, 0.5f ),

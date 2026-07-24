@@ -10,6 +10,7 @@ SAMPLER_BINDING(3) uniform sampler2D u_lightProjection;
 SAMPLER_BINDING(4) uniform sampler2D u_diffuseMap;
 SAMPLER_BINDING(5) uniform sampler2D u_specularMap;
 SAMPLER_BINDING(6) uniform sampler2D u_specularTable;   // specular falloff LUT
+SAMPLER_BINDING(7) uniform sampler2DShadow u_shadowMap; // depth map of a shadow-mapped light
 
 VARY(0) in vec3 var_TexLightVec;
 VARY(1) in vec2 var_TexBump;
@@ -22,6 +23,36 @@ VARY(7) in vec4 var_Color;
 VARY(8) in vec3 var_TexViewVec;
 
 layout(location = 0) out vec4 fragColor;
+
+// 0 = fully shadowed, 1 = fully lit. The lookup reuses the light-projection
+// texgen: var_TexProjection gives the same (S/Q, T/Q) UV as the light cookie, so
+// the shadow aligns exactly with the lit cone, and var_TexFalloff.x is the linear
+// distance along the light axis — the very value the caster pass wrote as depth.
+// Hardware depth-compare sampler (2x2 PCF) plus a 4-tap Poisson spread for softer
+// edges. Faithful default disables this (u_shadowParms.x == 0), so vanilla and
+// stencil-shadowed lights are untouched.
+float shadowVisibility() {
+	if ( u_shadowParms.x == 0.0 ) {
+		return 1.0;
+	}
+	if ( var_TexProjection.w <= 0.0 ) {
+		return 1.0;						// behind the light apex -> lit
+	}
+	vec2 uv = var_TexProjection.xy / var_TexProjection.w;	// == cookie UV, in [0,1]
+	if ( uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 ) {
+		return 1.0;						// outside the shadow frustum -> lit
+	}
+	float ref = var_TexFalloff.x - u_shadowParms.z;	// falloff depth, biased for acne
+
+	const vec2 poisson[4] = vec2[4](
+		vec2( -0.94201624, -0.39906216 ), vec2(  0.94558609, -0.76890725 ),
+		vec2( -0.09418410, -0.92938870 ), vec2(  0.34495938,  0.29387760 ) );
+	float sum = 0.0;
+	for ( int i = 0; i < 4; i++ ) {
+		sum += texture( u_shadowMap, vec3( uv + poisson[i] * u_shadowParms.y, ref ) );
+	}
+	return sum * 0.25;
+}
 
 void main() {
 	// half angle is normalized with math (matches the ARB program, which
@@ -42,6 +73,10 @@ void main() {
 	// modulate by the light projection and falloff
 	light *= textureProj( u_lightProjection, var_TexProjection );
 	light *= texture( u_lightFalloff, var_TexFalloff );
+
+	// shadow-mapped lights attenuate the light term by depth-map visibility;
+	// stencil-shadowed and unshadowed lights leave it at 1 (u_shadowParms.x == 0)
+	light *= shadowVisibility();
 
 	// diffuse
 	vec4 color = texture( u_diffuseMap, var_TexDiffuse ) * u_diffuseModifier;

@@ -54,4 +54,8 @@ UBO_BINDING(0) uniform RenderParams {
 	vec4 u_specularParms;        // interaction specular tuning (DUDE Phase 3.5):
 	                            // x = scale, y = exponent, z = shading model
 	                            // (0 LUT / 1 Blinn-Phong / 2 Phong), w unused
+
+	vec4 u_shadowParms;          // x = shadow map enabled (0/1), y = texel size (1/res),
+	                            // z = depth-compare bias, w unused. The shadow lookup
+	                            // reuses the light-projection texgen (S/T/Q + falloff).
 };

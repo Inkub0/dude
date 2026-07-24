@@ -49,7 +49,21 @@ static struct {
 	rhi::ShaderHandle	interactionProg;
 	rhi::ShaderHandle	ambientProg;
 	int					depthFuncBits;		// GLS_DEPTHFUNC_EQUAL, LESS for translucents
+
+	// shadow mapping (DUDE Phase 3.5). The current light either uses a shadow map
+	// (lightShadowMapped) or the stencil path. The shadow lookup reuses the light-
+	// projection texgen (S/T/Q + falloff), so no matrix is carried here.
+	// shadowImage is the depth texture bound on unit 7 for the interaction lookup.
+	bool				lightShadowMapped;
+	rhi::ImageHandle	shadowImage;
 } ictx;
+
+// Persistent shadow-map render target, kept across frames and recreated only
+// when the resolution cvar changes or the context is lost (vid_restart returns
+// a fresh backend, so a stale handle just fails GetRenderTargetImage and we
+// remake it). One target reused serially by every shadow-mapped light in a frame.
+static rhi::RenderTargetHandle rhiShadowMap = 0;
+static int rhiShadowMapSize = 0;
 
 /*
 ===================
@@ -126,6 +140,17 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	parms.specularParms[2] = (float)r_shading.GetInteger();
 	parms.specularParms[3] = 0.0f;
 
+	// shadow mapping (DUDE Phase 3.5): only the regular interaction shader samples
+	// the depth map — the ambientLight pass has no shadow term. The lookup reuses
+	// the light-projection texgen already filled above (lightProjection[]), so no
+	// extra matrix is needed here. Left zero (memset) for stencil / unshadowed
+	// lights -> u_shadowParms.x == 0 -> visibility 1.
+	if ( ictx.lightShadowMapped && !din->ambientLight ) {
+		parms.shadowParms[0] = 1.0f;
+		parms.shadowParms[1] = ( rhiShadowMapSize > 0 ) ? 1.0f / (float)rhiShadowMapSize : 0.0f;
+		parms.shadowParms[2] = r_shadowMapBias.GetFloat();
+	}
+
 	// ambientlight.vert rebuilds a tangent-to-global rotation from these
 	const float *mm = din->surf->space->modelMatrix;
 	for ( int row = 0; row < 3; row++ ) {
@@ -165,6 +190,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	da.uniformBuffer = ub;
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
+	if ( ictx.lightShadowMapped && !din->ambientLight ) {
+		da.textures[7] = ictx.shadowImage;	// depth map for u_shadowMap (unit 7)
+	}
 	ictx.r->Draw( da );
 
 	backEnd.pc.c_drawElements++;
@@ -558,6 +586,103 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 /*
 ===================
+RB_RHI_ShadowCasterChain
+
+Renders one interaction chain's depth from the light's point of view through the
+shadow_sm program. The light-projection planes are transformed into each surface's
+model space exactly like the interaction pass, so shadow_sm.vert projects to the
+same cookie UV and writes the linear falloff as depth.
+===================
+*/
+static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::ShaderHandle prog ) {
+	for ( ; surf; surf = surf->nextOnLight ) {
+		const srfTriangles_t *tri = surf->geo;
+		if ( !tri || !tri->ambientCache || !tri->numIndexes ) {
+			continue;
+		}
+
+		rhi::RenderParams parms;
+		memset( &parms, 0, sizeof( parms ) );
+		idPlane lp;
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[0], lp );
+		memcpy( parms.lightProjectionS, lp.ToFloatPtr(), 16 );
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[1], lp );
+		memcpy( parms.lightProjectionT, lp.ToFloatPtr(), 16 );
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[2], lp );
+		memcpy( parms.lightProjectionQ, lp.ToFloatPtr(), 16 );
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[3], lp );
+		memcpy( parms.lightFalloffS, lp.ToFloatPtr(), 16 );
+
+		rhi::BufferHandle vb, ib;
+		int vertOfs, idxOfs;
+		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
+
+		rhi::BufferHandle ub;
+		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+		rhi::PipelineDesc pd;
+		pd.stateBits = GLS_DEPTHFUNC_LESS;			// depth write on; color discarded (drawbuffer NONE)
+		pd.shader = prog;
+		pd.vertexLayout = rhi::VL_DRAWVERT;
+		pd.cullType = CT_TWO_SIDED;					// capture every occluder; bias handles acne
+		r->BindPipeline( pd );
+
+		rhi::DrawArgs da;
+		memset( &da, 0, sizeof( da ) );
+		da.vertexBuffer = vb;
+		da.vertexOffset = vertOfs;
+		da.indexBuffer = ib;
+		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+		da.indexCount = tri->numIndexes;
+		da.uniformBuffer = ub;
+		da.uniformOffset = uniOfs;
+		da.uniformSize = sizeof( parms );
+		r->Draw( da );
+
+		backEnd.pc.c_shadowElements++;
+	}
+}
+
+/*
+===================
+RB_RHI_ShadowMapPass
+
+Renders the current light's occluder depth into the shared shadow-map target.
+Returns false (→ caller uses the stencil path) if the target can't be created.
+===================
+*/
+static bool RB_RHI_ShadowMapPass( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderHandle prog ) {
+	const int size = idMath::ClampInt( 256, 4096, r_shadowMapSize.GetInteger() );
+	// (re)create the target on first use or a resolution change; a stale handle
+	// after vid_restart returns image 0, which also triggers a rebuild
+	if ( rhiShadowMap == 0 || rhiShadowMapSize != size || r->GetRenderTargetImage( rhiShadowMap ) == 0 ) {
+		if ( rhiShadowMap ) {
+			r->DestroyRenderTarget( rhiShadowMap );
+			rhiShadowMap = 0;
+		}
+		rhiShadowMap = r->CreateRenderTarget( rhi::IF_DEPTH24, size, size );
+		rhiShadowMapSize = size;
+	}
+	if ( rhiShadowMap == 0 ) {
+		return false;
+	}
+
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.depth = true;
+	r->BeginTargetPass( rhiShadowMap, &clear );
+
+	// no polygon offset: shadow_sm writes gl_FragDepth, which polygon offset does
+	// not affect — the depth-compare bias (r_shadowMapBias) does the acne control
+	RB_RHI_ShadowCasterChain( r, vLight->globalInteractions, prog );
+	RB_RHI_ShadowCasterChain( r, vLight->localInteractions, prog );
+
+	r->EndPass();		// restores the backbuffer + the main view's viewport
+	return true;
+}
+
+/*
+===================
 RB_RHI_DrawWorld
 
 Depth prepass + stencil shadows + per-light interactions, following the
@@ -566,6 +691,7 @@ RB_STD_DrawView / RB_ARB2_DrawInteractions pass order.
 */
 void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	rhi::ShaderHandle shadowProg = r->LoadShader( "shadow" );
+	rhi::ShaderHandle shadowMapProg = r->LoadShader( "shadow_sm" );
 
 	ictx.r = r;
 	ictx.viewDef = viewDef;
@@ -596,8 +722,25 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				continue;
 			}
 
-			// clear the stencil buffer for this light's scissor if shadowed
-			if ( vLight->globalShadows || vLight->localShadows ) {
+			// DUDE Phase 3.5: choose the shadow technique for this light. Shadow
+			// maps handle projected/spot lights that cast shadows; point and
+			// parallel lights fall back to stencil (not yet implemented), which is
+			// exactly the free per-light mixing. Reading lightDef->parms here is a
+			// read-only frontend query (no SMP in this backend path).
+			ictx.lightShadowMapped = false;
+			ictx.shadowImage = 0;
+			const bool castsShadows = ( vLight->globalShadows || vLight->localShadows );
+			if ( r_shadowMapping.GetBool() && castsShadows && vLight->lightDef
+			     && !vLight->lightDef->parms.pointLight && !vLight->lightDef->parms.parallel ) {
+				if ( RB_RHI_ShadowMapPass( r, vLight, shadowMapProg ) ) {
+					ictx.lightShadowMapped = true;
+					ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
+				}
+			}
+
+			// scissor to this light (both paths); clear stencil only for the
+			// stencil path — the shadow-map path never tests stencil
+			if ( castsShadows ) {
 				backEnd.currentScissor = vLight->scissorRect;
 				if ( r_useScissor.GetBool() ) {
 					r->SetScissor( viewDef->viewport.x1 + backEnd.currentScissor.x1,
@@ -605,16 +748,25 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 					               backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
 					               backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
 				}
-				qglClear( GL_STENCIL_BUFFER_BIT );
-			} else {
+				if ( !ictx.lightShadowMapped ) {
+					qglClear( GL_STENCIL_BUFFER_BIT );
+				}
+			}
+			if ( !castsShadows || ictx.lightShadowMapped ) {
+				// stencil always passes; visibility comes from the map (if any)
 				qglStencilFunc( GL_ALWAYS, 128, 255 );
 			}
 
 			ictx.depthFuncBits = GLS_DEPTHFUNC_EQUAL;
-			RB_RHI_StencilShadowPass( r, viewDef, vLight->globalShadows, shadowProg );
-			RB_RHI_CreateDrawInteractions( vLight->localInteractions );
-			RB_RHI_StencilShadowPass( r, viewDef, vLight->localShadows, shadowProg );
-			RB_RHI_CreateDrawInteractions( vLight->globalInteractions );
+			if ( ictx.lightShadowMapped ) {
+				RB_RHI_CreateDrawInteractions( vLight->localInteractions );
+				RB_RHI_CreateDrawInteractions( vLight->globalInteractions );
+			} else {
+				RB_RHI_StencilShadowPass( r, viewDef, vLight->globalShadows, shadowProg );
+				RB_RHI_CreateDrawInteractions( vLight->localInteractions );
+				RB_RHI_StencilShadowPass( r, viewDef, vLight->localShadows, shadowProg );
+				RB_RHI_CreateDrawInteractions( vLight->globalInteractions );
+			}
 
 			// translucent surfaces never get stencil shadowed
 			if ( r_skipTranslucent.GetBool() ) {
