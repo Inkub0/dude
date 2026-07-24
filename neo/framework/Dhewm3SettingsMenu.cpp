@@ -2200,6 +2200,15 @@ static void DrawEnhancementsMenu()
 			"lower if shadows detach from objects (peter-panning) when close. Steps of 0.02; "
 			"type an exact value for fine tuning." );
 
+		bool perf = r_shadowMapPerforated.GetBool();
+		if ( ImGui::Checkbox( "Perforated Casters (grates/fences)", &perf ) ) {
+			r_shadowMapPerforated.SetBool( perf );
+		}
+		AddTooltip( "Let alpha-tested grates, fences and foliage cast real punched-out "
+			"shadows. In vanilla these are flagged noShadows because stencil volumes can't "
+			"perforate, so they cast nothing (or a hand-faked shadow). Shadow maps can cut "
+			"the holes, so this enables their true shadow. Turn off to keep vanilla behaviour." );
+
 		ImGui::EndDisabled();
 	}
 

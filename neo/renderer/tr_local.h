@@ -862,6 +862,7 @@ extern idCVar r_shadowMapSize;			// shadow map resolution per light
 extern idCVar r_shadowMapBias;			// depth-compare bias (acne suppression)
 extern idCVar r_shadowMapDebug;			// print per-view light classification
 extern idCVar r_shadowMapCull;			// caster face culling (0 front / 1 back / 2 two-sided)
+extern idCVar r_shadowMapPerforated;	// let noShadows perforated surfaces cast punched-out shadow maps
 
 extern idCVar r_renderer;				// arb2, etc
 

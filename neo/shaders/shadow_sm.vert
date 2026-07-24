@@ -7,8 +7,10 @@
 #include "renderparms.glsl"
 
 layout(location = 0) in vec4 attr_Position;	// w defaults to 1 (vec3 attribute)
+layout(location = 1) in vec2 attr_TexCoord;
 
 VARY(0) out float var_Falloff;
+VARY(1) out vec2 var_TexCoord;			// diffuse UV for perforated (alpha-tested) casters
 
 void main() {
 	// light-projective coordinates in this surface's model space (the planes were
@@ -17,6 +19,11 @@ void main() {
 	float t = dot( attr_Position, u_lightProjectionT );
 	float q = dot( attr_Position, u_lightProjectionQ );
 	var_Falloff = dot( attr_Position, u_lightFalloffS );
+
+	// coverage lookup for grates/fences/foliage; opaque casters bind white + a
+	// disabled alpha test, so this is harmless there
+	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
+	var_TexCoord = vec2( dot( st, u_diffuseMatrixS ), dot( st, u_diffuseMatrixT ) );
 
 	// ndc.xy = 2*(s/q, t/q) - 1  → rasterize at (cookie UV * map size). z is unused
 	// (gl_FragDepth overrides it); w = q clips anything behind the light apex.

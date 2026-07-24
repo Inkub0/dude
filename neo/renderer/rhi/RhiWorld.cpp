@@ -65,6 +65,10 @@ static struct {
 static rhi::RenderTargetHandle rhiShadowMap = 0;
 static int rhiShadowMapSize = 0;
 
+// r_shadowMapDebug: perforated (grate/fence) caster surfaces drawn into the map
+// this view — confirms the alpha-tested casters are actually reaching the pass.
+static int rhiShadowPerfCasters = 0;
+
 /*
 ===================
 RB_RHI_BindUnit
@@ -601,18 +605,27 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 			continue;
 		}
 
+		// grates / fences / foliage are nearly always flagged noShadows in the base
+		// assets (e.g. textures/base_floor/sflgratetrans*, decals/fgrill3) because a
+		// solid stencil volume can't punch holes — the real shadow was dropped or
+		// faked. A shadow map *can* perforate, so when enabled we let perforated
+		// (alpha-tested) surfaces cast their true shadow, overriding the noShadows
+		// flags (material or entity) that only ever existed for the stencil path.
+		const bool perforatedOverride = r_shadowMapPerforated.GetBool()
+		    && surf->material && surf->material->Coverage() == MC_PERFORATED;
+
 		// only cast from surfaces the frontend's shadow rules allow (mirroring
 		// Interaction.cpp): the material must cast, the entity must not be
 		// noShadow, and per-view / per-light shadow suppression applies — the
 		// latter is what keeps the player's own first-person weapon from casting
 		// a shadow in the player's view (suppressShadowInViewID == this view),
 		// while it still would in a mirror
-		if ( surf->material && !surf->material->SurfaceCastsShadow() ) {
+		if ( surf->material && !surf->material->SurfaceCastsShadow() && !perforatedOverride ) {
 			continue;
 		}
 		const idRenderEntityLocal *edef = surf->space->entityDef;
 		if ( edef ) {
-			if ( edef->parms.noShadow ) {
+			if ( edef->parms.noShadow && !perforatedOverride ) {
 				continue;
 			}
 			if ( !r_skipSuppress.GetBool() ) {
@@ -640,6 +653,60 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[3], lp );
 		memcpy( parms.lightFalloffS, lp.ToFloatPtr(), 16 );
 
+		// perforated (grate / fence / foliage) casters: punch the shadow out
+		// through the diffuse alpha, exactly like the visible surface. Find the
+		// first live alpha-tested stage and route its coverage texture + threshold
+		// to shadow_sm.frag. Opaque casters leave the alpha test disabled and bind
+		// whiteImage, so the shader's discard never fires for them.
+		idImage *coverImage = globalImages->whiteImage;
+		int smCull;
+		const bool perforatedCaster = surf->material && surf->material->Coverage() == MC_PERFORATED;
+		if ( perforatedCaster ) {
+			const float *regs = surf->shaderRegisters;
+			const shaderStage_t *aStage = NULL;
+			for ( int stage = 0; regs && stage < surf->material->GetNumStages(); stage++ ) {
+				const shaderStage_t *pStage = surf->material->GetStage( stage );
+				if ( pStage->hasAlphaTest && regs[pStage->conditionRegister] != 0 ) {
+					aStage = pStage;
+					break;
+				}
+			}
+			if ( aStage ) {
+				parms.alphaTest[0] = regs[aStage->alphaTestRegister];
+				parms.alphaTest[1] = 1.0f;
+				if ( aStage->texture.hasMatrix ) {
+					parms.diffuseMatrixS[0] = regs[aStage->texture.matrix[0][0]];
+					parms.diffuseMatrixS[1] = regs[aStage->texture.matrix[0][1]];
+					parms.diffuseMatrixS[3] = regs[aStage->texture.matrix[0][2]];
+					parms.diffuseMatrixT[0] = regs[aStage->texture.matrix[1][0]];
+					parms.diffuseMatrixT[1] = regs[aStage->texture.matrix[1][1]];
+					parms.diffuseMatrixT[3] = regs[aStage->texture.matrix[1][2]];
+				} else {
+					parms.diffuseMatrixS[0] = 1.0f;
+					parms.diffuseMatrixT[1] = 1.0f;
+				}
+				if ( aStage->texture.image ) {
+					coverImage = aStage->texture.image;
+				}
+			}
+			// perforated casters are typically thin, single-sided planes; second-depth
+			// back-face culling would drop them entirely depending on which way they
+			// face the light, so always render both sides. Being thin, they have no
+			// self-shadow acne for second-depth to fix in the first place.
+			smCull = CT_TWO_SIDED;
+		} else {
+			// caster face selection (r_shadowMapCull): rendering only back faces
+			// ("second-depth") keeps directly-lit front faces out of the map, which
+			// is the standard cure for grazing-angle self-shadow acne. 0/1/2 map to
+			// front / back / two-sided so the right winding can be picked live.
+			smCull = CT_BACK_SIDED;
+			if ( r_shadowMapCull.GetInteger() == 0 ) {
+				smCull = CT_FRONT_SIDED;
+			} else if ( r_shadowMapCull.GetInteger() == 2 ) {
+				smCull = CT_TWO_SIDED;
+			}
+		}
+
 		rhi::BufferHandle vb, ib;
 		int vertOfs, idxOfs;
 		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
@@ -647,22 +714,13 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		rhi::BufferHandle ub;
 		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
-		// caster face selection (r_shadowMapCull): rendering only back faces
-		// ("second-depth") keeps directly-lit front faces out of the map, which
-		// is the standard cure for grazing-angle self-shadow acne. 0/1/2 map to
-		// front / back / two-sided so the right winding can be picked live.
-		int smCull = CT_BACK_SIDED;
-		if ( r_shadowMapCull.GetInteger() == 0 ) {
-			smCull = CT_FRONT_SIDED;
-		} else if ( r_shadowMapCull.GetInteger() == 2 ) {
-			smCull = CT_TWO_SIDED;
-		}
-
 		rhi::PipelineDesc pd;
 		pd.stateBits = GLS_DEPTHFUNC_LESS;			// depth write on; color discarded (drawbuffer NONE)
 		pd.shader = prog;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = smCull;
+
+		RB_RHI_BindUnit( 0, coverImage );
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
@@ -678,6 +736,9 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		r->Draw( da );
 
 		backEnd.pc.c_shadowElements++;
+		if ( perforatedCaster ) {
+			rhiShadowPerfCasters++;
+		}
 	}
 }
 
@@ -751,6 +812,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// r_shadowMapDebug counts how each lit light was classified this view
 	int dbgLit = 0, dbgProjected = 0, dbgShadowMapped = 0, dbgPoint = 0,
 	    dbgParallel = 0, dbgNoShadow = 0, dbgNoLightDef = 0;
+	rhiShadowPerfCasters = 0;
 	if ( !r_skipInteractions.GetBool() ) {
 		for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
 			backEnd.vLight = vLight;
@@ -783,8 +845,21 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			// read-only frontend query (no SMP in this backend path).
 			ictx.lightShadowMapped = false;
 			ictx.shadowImage = 0;
+
+			// stencil shadow volumes present for this light (built only for opaque,
+			// non-noShadows casters)
 			const bool castsShadows = ( vLight->globalShadows || vLight->localShadows );
-			if ( r_shadowMapping.GetBool() && castsShadows && vLight->lightDef
+
+			// Perforated grates/fences are flagged noShadows, so they build NO stencil
+			// shadow volumes — gating the shadow-map pass on castsShadows would skip a
+			// projected light that only illuminates a grate, defeating the whole
+			// perforated feature. Instead run the map whenever the light is permitted
+			// to cast shadows (light-level flags) and has interaction geometry to
+			// render into it; the per-surface caster rules still apply inside the pass.
+			const bool hasInteractions = ( vLight->localInteractions || vLight->globalInteractions );
+			const bool lightMayShadow = vLight->lightDef && !vLight->lightDef->parms.noShadows
+			    && vLight->lightShader->LightCastsShadows();
+			if ( r_shadowMapping.GetBool() && lightMayShadow && hasInteractions
 			     && !vLight->lightDef->parms.pointLight && !vLight->lightDef->parms.parallel ) {
 				if ( RB_RHI_ShadowMapPass( r, vLight, shadowMapProg ) ) {
 					ictx.lightShadowMapped = true;
@@ -793,9 +868,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				}
 			}
 
-			// scissor to this light (both paths); clear stencil only for the
-			// stencil path — the shadow-map path never tests stencil
-			if ( castsShadows ) {
+			// scissor + stencil-clear setup: needed for either shadow technique.
+			// Clear stencil only for the stencil path — the shadow-map path never
+			// tests stencil.
+			if ( castsShadows || ictx.lightShadowMapped ) {
 				backEnd.currentScissor = vLight->scissorRect;
 				if ( r_useScissor.GetBool() ) {
 					r->SetScissor( viewDef->viewport.x1 + backEnd.currentScissor.x1,
@@ -835,9 +911,9 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	backEnd.vLight = NULL;
 
 	if ( r_shadowMapDebug.GetBool() ) {
-		common->Printf( "shadowMap: %d lit lights | projected %d (shadow-mapped %d, no-shadow %d) | point %d | parallel %d | no-lightDef %d | r_shadowMapping %d\n",
+		common->Printf( "shadowMap: %d lit lights | projected %d (shadow-mapped %d, no-shadow %d) | point %d | parallel %d | no-lightDef %d | perforated-casters %d | r_shadowMapping %d\n",
 		                dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,
-		                dbgPoint, dbgParallel, dbgNoLightDef, r_shadowMapping.GetInteger() );
+		                dbgPoint, dbgParallel, dbgNoLightDef, rhiShadowPerfCasters, r_shadowMapping.GetInteger() );
 	}
 
 	// shader passes run with stencil satisfied everywhere
