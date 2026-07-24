@@ -6,6 +6,11 @@ For deliberate deviations already shipped on the GL3 path, see
 [readme-changes.md](readme-changes.md).
 
 ## "Improvements over the classic engine" settings section
+This section is implemented as the **Enhancements** tab in the F10 settings menu
+(GL3/Vulkan-gated) and is the deliverable of **Phase 3.5** — every toggle below is
+built on the GL 3.3 `opengl3` backend first, then ported to Vulkan together in
+Phase 4 (see [port-phases.md](port-phases.md)).
+
 A dedicated section in the F10 settings menu collecting every
 fidelity-affecting toggle, each defaulting to the classic look unless noted:
 - soft particles (`r_useSoftParticles` — already in dhewm3, default on)

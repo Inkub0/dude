@@ -41,6 +41,18 @@ bool GL3_LoadCoreFunctions( idStr &missing ) {
 // fast path instead of failing backend init. gl3BufferStorage stays NULL then.
 static PFNGLBUFFERSTORAGEPROC gl3BufferStorage = NULL;
 
+// ARB_timer_query (core GL 3.3): GPU-side frame timing for r_gl3GpuTime. Loaded
+// optionally like buffer_storage — a driver missing these just leaves the cvar inert.
+static PFNGLGENQUERIESPROC			gl3GenQueries = NULL;
+static PFNGLDELETEQUERIESPROC		gl3DeleteQueries = NULL;
+static PFNGLBEGINQUERYPROC			gl3BeginQuery = NULL;
+static PFNGLENDQUERYPROC			gl3EndQuery = NULL;
+static PFNGLGETQUERYOBJECTIVPROC	gl3GetQueryObjectiv = NULL;
+static PFNGLGETQUERYOBJECTUI64VPROC	gl3GetQueryObjectui64v = NULL;
+
+static idCVar r_gl3GpuTime( "r_gl3GpuTime", "0", CVAR_RENDERER | CVAR_BOOL,
+                            "opengl3 backend: print GPU frame time (ms), averaged once per second" );
+
 class GL3Backend : public RHI {
 	// ring sizes. Geometry now lives in the vertexCache's static VBOs, so the
 	// vertex/index rings only carry small dynamic bits (fullscreen quads, the
@@ -82,12 +94,31 @@ class GL3Backend : public RHI {
 	int				boundBase;
 	unsigned int	boundProgram;	// skip redundant glUseProgram across a chain
 
+	// GPU frame timing (r_gl3GpuTime) — a ring of GL_TIME_ELAPSED queries. Each
+	// frame's result is read back a full ring later, by when it has always
+	// finished, so the read never blocks the GPU.
+	static const int GPU_TIMER_RING = 4;
+	GLuint			gpuTimers[GPU_TIMER_RING];
+	bool			gpuTimerBusy[GPU_TIMER_RING];
+	int				gpuTimerFrame;
+	bool			gpuTimerActive;		// a query is open this frame
+	double			gpuTimeAccum;		// ms summed since the last print
+	int				gpuTimeSamples;
+	unsigned int	gpuTimeLastPrint;
+
 public:
 	GL3Backend() : initialized( false ), uboAlign( 256 ), streamGen( 0 ) {
 		uboRing.buffer = vertRing.buffer = idxRing.buffer = 0;
 		uboRing.persist = vertRing.persist = idxRing.persist = NULL;
 		vaos[0] = vaos[1] = 0;
 		imVao = imVbo = imUbo = 0;
+		memset( gpuTimers, 0, sizeof( gpuTimers ) );
+		memset( gpuTimerBusy, 0, sizeof( gpuTimerBusy ) );
+		gpuTimerFrame = 0;
+		gpuTimerActive = false;
+		gpuTimeAccum = 0.0;
+		gpuTimeSamples = 0;
+		gpuTimeLastPrint = 0;
 		InvalidateCaches();
 	}
 
@@ -109,6 +140,23 @@ public:
 		// per draw (only the cheap glBindBufferRange remains). This is the big
 		// win on drivers that stall when a bound buffer is re-uploaded per draw.
 		gl3BufferStorage = (PFNGLBUFFERSTORAGEPROC)GLimp_ExtensionPointer( "glBufferStorage" );
+
+		// GPU timer queries (r_gl3GpuTime). All-or-nothing: if any entry point is
+		// absent, timing stays off (gpuTimers left 0). Regenerated here so it also
+		// re-arms after vid_restart, where the old query names died with the context.
+		gl3GenQueries          = (PFNGLGENQUERIESPROC)GLimp_ExtensionPointer( "glGenQueries" );
+		gl3DeleteQueries       = (PFNGLDELETEQUERIESPROC)GLimp_ExtensionPointer( "glDeleteQueries" );
+		gl3BeginQuery          = (PFNGLBEGINQUERYPROC)GLimp_ExtensionPointer( "glBeginQuery" );
+		gl3EndQuery            = (PFNGLENDQUERYPROC)GLimp_ExtensionPointer( "glEndQuery" );
+		gl3GetQueryObjectiv    = (PFNGLGETQUERYOBJECTIVPROC)GLimp_ExtensionPointer( "glGetQueryObjectiv" );
+		gl3GetQueryObjectui64v = (PFNGLGETQUERYOBJECTUI64VPROC)GLimp_ExtensionPointer( "glGetQueryObjectui64v" );
+		memset( gpuTimers, 0, sizeof( gpuTimers ) );
+		memset( gpuTimerBusy, 0, sizeof( gpuTimerBusy ) );
+		gpuTimerActive = false;
+		if ( gl3GenQueries && gl3DeleteQueries && gl3BeginQuery && gl3EndQuery
+		     && gl3GetQueryObjectiv && gl3GetQueryObjectui64v ) {
+			gl3GenQueries( GPU_TIMER_RING, gpuTimers );
+		}
 
 		InitRing( uboRing,  GL_UNIFORM_BUFFER,       UBO_RING_SIZE,  gl3BufferStorage != NULL );
 		InitRing( vertRing, GL_ARRAY_BUFFER,         VERT_RING_SIZE, false );
@@ -157,6 +205,12 @@ public:
 			return;
 		}
 		GL3_ShutdownShaderCache();
+		if ( gpuTimers[0] && gl3DeleteQueries ) {
+			gl3DeleteQueries( GPU_TIMER_RING, gpuTimers );
+		}
+		memset( gpuTimers, 0, sizeof( gpuTimers ) );
+		memset( gpuTimerBusy, 0, sizeof( gpuTimerBusy ) );
+		gpuTimerActive = false;
 		if ( uboRing.persist ) {
 			gl3BindBuffer( GL_ARRAY_BUFFER, uboRing.buffer );
 			gl3UnmapBuffer( GL_ARRAY_BUFFER );
@@ -200,8 +254,12 @@ public:
 			OrphanRing( vertRing );
 			OrphanRing( idxRing );
 		}
+
+		BeginGpuTimer();
 	}
-	virtual void EndFrame() {}
+	virtual void EndFrame() {
+		EndGpuTimer();
+	}
 
 	virtual void BeginPass( const ClearArgs *clear ) {
 		if ( !clear ) {
@@ -376,6 +434,53 @@ public:
 	}
 
 private:
+	// Opens this frame's GL_TIME_ELAPSED query and, before reusing the slot,
+	// reads back the result it held from GPU_TIMER_RING frames ago (always
+	// finished by now, so no GPU stall). No-op unless r_gl3GpuTime and the
+	// query entry points are both available.
+	void BeginGpuTimer() {
+		gpuTimerActive = false;
+		if ( !gpuTimers[0] || !r_gl3GpuTime.GetBool() ) {
+			return;
+		}
+		int slot = gpuTimerFrame % GPU_TIMER_RING;
+		if ( gpuTimerBusy[slot] ) {
+			GLint available = 0;
+			gl3GetQueryObjectiv( gpuTimers[slot], GL_QUERY_RESULT_AVAILABLE, &available );
+			if ( available ) {
+				GLuint64 ns = 0;
+				gl3GetQueryObjectui64v( gpuTimers[slot], GL_QUERY_RESULT, &ns );
+				AccumGpuTime( (double)ns / 1000000.0 );
+			}
+			gpuTimerBusy[slot] = false;
+		}
+		gl3BeginQuery( GL_TIME_ELAPSED, gpuTimers[slot] );
+		gpuTimerActive = true;
+	}
+
+	void EndGpuTimer() {
+		if ( !gpuTimerActive ) {
+			return;
+		}
+		gl3EndQuery( GL_TIME_ELAPSED );
+		gpuTimerBusy[gpuTimerFrame % GPU_TIMER_RING] = true;
+		gpuTimerFrame++;
+		gpuTimerActive = false;
+	}
+
+	void AccumGpuTime( double ms ) {
+		gpuTimeAccum += ms;
+		gpuTimeSamples++;
+		unsigned int now = Sys_Milliseconds();
+		if ( now - gpuTimeLastPrint >= 1000 ) {
+			common->Printf( "GL3 GPU: %.2f ms (%d samples)\n",
+			                gpuTimeAccum / gpuTimeSamples, gpuTimeSamples );
+			gpuTimeAccum = 0.0;
+			gpuTimeSamples = 0;
+			gpuTimeLastPrint = now;
+		}
+	}
+
 	void InitRing( ring_t &ring, GLenum target, int size, bool persistent ) {
 		ring.target = target;
 		ring.size = size;

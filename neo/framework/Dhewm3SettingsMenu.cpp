@@ -1665,6 +1665,27 @@ static CVarOption videoOptionsImmediately[] = {
 	} ),
 	CVarOption( "r_screenshotPngCompression", "Compression level for PNG screenshots", OT_INT, 0, 9 ),
 	CVarOption( "r_screenshotJpgQuality", "Quality level for JPG screenshots", OT_INT, 1, 100 ),
+	// NOTE: Soft Particles and Depth Buffer Capture are non-vanilla enhancements
+	// and now live in the GL3/Vulkan-only "Enhancements" tab (enhancementOptions[]).
+
+	CVarOption( "Advanced Options" ),
+	CVarOption( "r_skipNewAmbient", "Disable High Quality Special Effects", OT_BOOL ),
+	CVarOption( "r_shadows", "Enable Shadows", OT_BOOL ),
+	CVarOption( "r_skipSpecular", "Disable Specular", OT_BOOL ),
+	CVarOption( "r_skipBump", "Disable Bump Maps", OT_BOOL ),
+
+};
+
+// Non-vanilla graphical enhancements. This tab (and everything in it) is only
+// shown/active on backends that support it (GL3/Vulkan) - see
+// R_BackendSupportsEnhancements(). The legacy ARB2 renderer stays faithful to
+// vanilla Doom 3, so none of these effects run there.
+static CVarOption enhancementOptions[] = {
+	CVarOption( "Post-Processing" ),
+	CVarOption( "r_postFilmGrain", "Film Grain", OT_FLOAT, 0.0f, 0.25f ),
+	CVarOption( "r_postChromaticAberration", "Chromatic Aberration", OT_FLOAT, 0.0f, 0.5f ),
+
+	CVarOption( "Particles" ),
 	CVarOption( "r_useSoftParticles", []( idCVar& cvar ) {
 		bool enable = cvar.GetBool();
 		if ( ImGui::Checkbox( "Use Soft Particles", &enable ) ) {
@@ -1677,8 +1698,6 @@ static CVarOption videoOptionsImmediately[] = {
 		const char* descr = "! Can slow down rendering !\nSoften particle transitions when player walks through them or they cross solid geometry. Needs r_enableDepthCapture.";
 		AddCVarOptionTooltips( cvar, descr );
 	} ),
-
-	CVarOption( "Advanced Options" ),
 	CVarOption( "r_enableDepthCapture", []( idCVar& cvar ) {
 			int sel = idMath::ClampInt( -1, 1, cvar.GetInteger() ) + 1; // +1 for -1..1 to 0..2
 			if ( ImGui::Combo( "Capture Depth Buffer to Texture", &sel, "Auto (enable if needed for Soft Particles)\0Disabled\0Always Enabled\0" ) ) {
@@ -1691,11 +1710,6 @@ static CVarOption videoOptionsImmediately[] = {
 			}
 			AddCVarOptionTooltips( cvar );
 		}),
-	CVarOption( "r_skipNewAmbient", "Disable High Quality Special Effects", OT_BOOL ),
-	CVarOption( "r_shadows", "Enable Shadows", OT_BOOL ),
-	CVarOption( "r_skipSpecular", "Disable Specular", OT_BOOL ),
-	CVarOption( "r_skipBump", "Disable Bump Maps", OT_BOOL ),
-
 };
 
 idList<VidMode> vidModes;
@@ -1837,6 +1851,7 @@ static void VideoResetChanges()
 static void InitVideoOptionsMenu()
 {
 	InitOptions( videoOptionsImmediately, IM_ARRAYSIZE(videoOptionsImmediately) );
+	InitOptions( enhancementOptions, IM_ARRAYSIZE(enhancementOptions) );
 
 	vidModes.SetNum(0, false);
 
@@ -1864,6 +1879,52 @@ static void InitVideoOptionsMenu()
 static void DrawVideoOptionsMenu()
 {
 	ImGui::Spacing();
+
+	// Renderer backend selection (DUDE). Changing this only takes effect after a
+	// vid_restart. "opengl" is the legacy, vanilla-faithful ARB2 path; "opengl3"
+	// is the GL 3.3 core backend that enables the Enhancements tab. Vulkan is not
+	// implemented yet.
+	ImGui::SeparatorText( "Renderer Backend" );
+	{
+		const char* curAPI = r_graphicsAPI.GetString();
+		int backendSel = 0; // 0 = legacy opengl, 1 = opengl3, 2 = vulkan
+		if ( idStr::Icmp( curAPI, "opengl3" ) == 0 ) {
+			backendSel = 1;
+		} else if ( idStr::Icmp( curAPI, "vulkan" ) == 0 || idStr::Icmp( curAPI, "vulkan-rt" ) == 0 ) {
+			backendSel = 2;
+		}
+		const int oldSel = backendSel;
+
+		ImGui::RadioButton( "Legacy (OpenGL / ARB2)", &backendSel, 0 );
+		AddTooltip( "Faithful to vanilla Doom 3. Graphical enhancements are disabled." );
+		ImGui::SameLine();
+		ImGui::RadioButton( "OpenGL 3.3 Core", &backendSel, 1 );
+		AddTooltip( "Modern GL 3.3 core backend (in development). Enables the Enhancements tab." );
+		ImGui::SameLine();
+		ImGui::BeginDisabled();
+		ImGui::RadioButton( "Vulkan (coming soon)", &backendSel, 2 );
+		ImGui::EndDisabled();
+
+		if ( backendSel != oldSel ) {
+			// only legacy and opengl3 are selectable; vulkan radio is disabled
+			r_graphicsAPI.SetString( backendSel == 1 ? "opengl3" : "opengl" );
+		}
+
+		// if the selected backend differs from the one currently running, offer to
+		// apply it (a full renderer restart). glConfig.coreProfile reflects reality.
+		const bool runningIsCore = glConfig.coreProfile;
+		const bool selectedIsCore = ( idStr::Icmp( r_graphicsAPI.GetString(), "opengl3" ) == 0 );
+		if ( runningIsCore != selectedIsCore ) {
+			ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
+				"Backend change pending - restart the renderer to apply it." );
+			if ( ImGui::Button( "Apply Backend (restart renderer)" ) ) {
+				cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "vid_restart\n" );
+			}
+			AddTooltip( "Runs 'vid_restart' to recreate the renderer with the selected backend." );
+		}
+	}
+
+	ImGui::SeparatorText( "Quality Preset" );
 	ImGui::Combo( "##qualPresets", &qualityPreset, "Low Quality\0Medium Quality\0High Quality\0Ultra Quality\0" );
 	AddTooltip( "com_machineSpec" );
 	ImGui::SameLine();
@@ -2068,6 +2129,37 @@ static void DrawVideoOptionsMenu()
 	} else {
 		AddTooltip( "Click to show information about the currently used Graphics Card (GPU)" );
 	}
+}
+
+static void DrawEnhancementsMenu()
+{
+	ImGui::Spacing();
+	ImGui::TextDisabled( "Enhancements that deviate from vanilla Doom 3." );
+	ImGui::Spacing();
+
+	const bool supported = R_BackendSupportsEnhancements();
+	if ( !supported ) {
+		ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
+			"These settings don't apply on the current (legacy) backend." );
+		ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
+			"Choose OpenGL 3.3 as the Renderer Backend in Video Options to enable them." );
+		ImGui::Spacing();
+	}
+
+	// grey everything out (and make it non-interactive) when the running backend
+	// can't use these effects - they simply don't apply then.
+	ImGui::BeginDisabled( !supported );
+
+	DrawOptions( enhancementOptions, IM_ARRAYSIZE(enhancementOptions) );
+
+	ImGui::SeparatorText( "Shadows" );
+	bool shadowMapsPlaceholder = false;
+	ImGui::BeginDisabled(); // always disabled: not implemented yet
+	ImGui::Checkbox( "Shadow Mapping (coming soon)", &shadowMapsPlaceholder );
+	ImGui::EndDisabled();
+	AddTooltip( "Soft shadow-mapping is not implemented on this backend yet - planned as a future port from upstream dhewm3." );
+
+	ImGui::EndDisabled();
 }
 
 static idStrList alDevices;
@@ -2551,6 +2643,17 @@ void Com_DrawDhewm3SettingsMenu()
 		{
 			BeginTabChild( "vidchild" );
 			DrawVideoOptionsMenu();
+			ImGui::EndChild();
+			ImGui::EndTabItem();
+		}
+		// non-vanilla graphical enhancements. Always visible, but the controls are
+		// greyed out unless the running backend supports them (see
+		// DrawEnhancementsMenu). The legacy ARB2 renderer stays faithful to vanilla
+		// Doom 3, so these effects don't apply there.
+		if ( ImGui::BeginTabItem("Enhancements") )
+		{
+			BeginTabChild( "enhancementschild" );
+			DrawEnhancementsMenu();
 			ImGui::EndChild();
 			ImGui::EndTabItem();
 		}

@@ -847,6 +847,10 @@ extern idCVar r_gamma;					// changes gamma tables
 extern idCVar r_brightness;				// changes gamma tables
 extern idCVar r_gammaInShader;			// set gamma+brightness in shader instead of modifying system gamma tables
 
+// DUDE non-vanilla post-process effects — GL3/Vulkan backends only, default off
+extern idCVar r_postFilmGrain;			// film grain intensity (0 = off)
+extern idCVar r_postChromaticAberration;	// chromatic aberration strength (0 = off)
+
 extern idCVar r_renderer;				// arb2, etc
 
 extern idCVar r_checkBounds;			// compare all surface bounds with precalculated ones
@@ -1088,6 +1092,13 @@ typedef struct {
 
 // DUDE GL3 backend (renderer/rhi/GL3Backend.cpp)
 void		RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds );
+
+// DUDE: true when the active backend supports the non-vanilla "Enhancements"
+// (film grain, chromatic aberration, soft particles, future shadow mapping...).
+// Only the GL 3.3 core backend qualifies today; Vulkan will OR-in its own flag
+// here. The legacy ARB2 path must stay faithful to vanilla Doom 3, so these
+// effects are suppressed whenever this returns false.
+bool		R_BackendSupportsEnhancements();
 
 bool		GLimp_Init( glimpParms_t parms );
 // If the desired mode can't be set satisfactorily, false will be returned.

@@ -559,8 +559,11 @@ void RB_STD_FillDepthBuffer( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	RB_RenderDrawSurfListWithFunction( drawSurfs, numDrawSurfs, RB_T_FillDepthBuffer );
 
 	// Make the early depth pass available to shaders. #3877
-	bool getDepthCapture = r_enableDepthCapture.GetInteger() == 1
-		|| (r_enableDepthCapture.GetInteger() == -1 && r_useSoftParticles.GetBool());
+	// DUDE: depth capture only serves the non-vanilla soft-particles path, which
+	// is GL3/Vulkan only. Keep the legacy ARB2 backend faithful to vanilla Doom 3.
+	bool getDepthCapture = R_BackendSupportsEnhancements()
+		&& ( r_enableDepthCapture.GetInteger() == 1
+			|| (r_enableDepthCapture.GetInteger() == -1 && r_useSoftParticles.GetBool()) );
 
 	if ( getDepthCapture && backEnd.viewDef->renderView.viewID >= 0 ) // Suppress for lightgem rendering passes
 	{

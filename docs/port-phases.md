@@ -132,6 +132,74 @@ skybox) followed F. See
 [readme-changes.md](readme-changes.md) for where the GL3 path deliberately diverges
 from a faithful port, and [known-bugs.md](known-bugs.md) for open issues.
 
+**Remaining GL3 perf work (measurement-driven only).** Core-GL modernization is
+already done — program cache, RenderParams/ArbParams UBOs, VAOs, redundant-state
+dedup (`ApplyState` diff mask + `boundProgram`/`boundVBO`/`boundLayout` caches),
+static vertexCache VBOs, and the persistent-mapped UBO ring (the one measured win so
+far, a ~10× NVIDIA per-draw stall — see the divergence catalog). The rest of the old
+`opengl3_renderer_improvements.md` checklist is either already covered above or
+actively wrong for a faithful port (texture atlasing breaks the material system and
+mod compat; instancing/16-bit indices don't fit idTech4's drawSurf replay; async
+texture streaming isn't a frame bottleneck — Doom 3 loads up front). What's left is a
+short, evidence-gated list; **do not chase these without a profile showing they
+matter:**
+
+1. **Profiling first — DONE.** `r_gl3GpuTime` wraps each frame's command stream in a
+   ring of GL_TIME_ELAPSED queries (ARB_timer_query, core 3.3, optional-loaded like
+   buffer_storage), reads each result back a ring later so it never stalls the GPU,
+   and prints averaged GPU ms once per second
+   ([GL3Backend.cpp](../neo/renderer/rhi/GL3Backend.cpp), `BeginGpuTimer`/`EndGpuTimer`).
+   This is the gate: measure with it before touching anything below.
+2. **Dedup the per-draw UBO bind — dropped after inspection.** Every draw is preceded
+   by its own `AllocUniforms`, so the ring offset advances each draw and the
+   (buffer, offset, size) triple is unique — a redundancy guard would essentially
+   never fire. Not worth the code under the current one-slice-per-draw design; only a
+   different uniform strategy (dynamic-offset rebinds) could change that, and that's
+   speculative until the profiler says UBO binds cost anything.
+3. **Dedup texture binds — deferred to Phase 4.** The 8-unit loop in `Draw` is inert
+   today: `DrawArgs::textures` is never populated (RHI owns no images yet —
+   `CreateImage` returns 0), and the live engine binds go through `idImage::Bind`,
+   which *already* dedups via `backEnd.glState.tmu[].current2DMap`. Revisit only when
+   Phase 4 moves image ownership into the RHI.
+
+### Phase 3.5 — OpenGL 3.3 enhancement suite (pre-Vulkan) **[NEW — added 2026-07-24]**
+Intermediate phase: implement and validate **all GL 3.3-feasible non-vanilla
+enhancements on the `opengl3` backend *before* starting Vulkan**, so the Vulkan port
+(Phase 4) carries the whole suite over in one pass (SPIR-V equivalents) instead of
+re-deriving each feature. Everything is opt-in via the ImGui **Enhancements** tab,
+defaults to vanilla behavior, and is gated off on the legacy ARB2 path via
+`R_BackendSupportsEnhancements()`.
+
+Rationale: **fhDOOM proves every one of these runs on a GL 3.3 core context** (it
+dropped ARB/fixed-function entirely), so none need GL 4.x. Iterating on GL3 is faster
+than on Vulkan, and a stable GL3 reference gives the Vulkan versions something to be
+validated against (RenderDoc side-by-side, Phase 5).
+
+**Already shipped (Enhancements tab, this branch):**
+- Soft particles (`r_useSoftParticles`) — GL3-gated, removed from the legacy path.
+- Film grain (`r_postFilmGrain`) + chromatic aberration (`r_postChromaticAberration`).
+- Gamma/brightness in shader (`r_gammaInShader`).
+
+**To implement on GL 3.3, ranked by value/effort:**
+1. **Specular tuning** (easy) — `r_specularScale`, `r_specularExp`, `r_shading`
+   (Blinn-Phong vs Phong). Shader-uniform tweaks; default values reproduce vanilla.
+   fhDOOM reference.
+2. **Shadow mapping** (large, high payoff) — full technique design in **Phase 8**
+   below; already specified as an RHI feature ("GL 3.3 and Vulkan share it").
+   Default stays stencil (faithful); soft shadow maps are the opt-in. **Includes
+   alpha-tested casters** (specifically wanted — perforated shadows from
+   grates/fences/foliage), which is only possible on the shadow-map path, not with
+   stencil volumes.
+3. **Parallax occlusion mapping** (marginal) — full design in **Phase 9** below.
+   Height from specular-alpha; near-useless on stock art, needs HD packs. Default off.
+
+**Stays Vulkan-only:** curved-geometry tessellation (Phase 9.5) needs GPU tessellation
+shaders (GL 4.0+), which the 3.3 core context doesn't have.
+
+**Handoff to Phase 4:** each feature lands once here against the RHI, so the Vulkan
+backend inherits the cvars + Enhancements-tab UI unchanged and only needs SPIR-V shader
+equivalents and pipeline wiring — the suite moves to Vulkan together.
+
 ### Phase 4 — Vulkan backend
 Instance/device/swapchain via SDL_Vulkan, VMA memory, N frames in flight, descriptor
 management, pipeline cache keyed by (stateBits, shader, vertex layout, pass).
@@ -144,6 +212,12 @@ final milestone:
 4. RenderDoc shows: depth pass, stencil pass, and interaction pass
 Important: The Vulkan renderer is considered correct when it produces perceptually 
 equivalent captures, not when individual API calls match.
+
+**Enhancement suite port:** the Phase 3.5 features (shadow mapping, specular tuning,
+POM, plus the already-shipped soft particles / film grain / chromatic aberration /
+gamma-in-shader) come across to Vulkan **together** here — same cvars and
+Enhancements-tab UI, only new SPIR-V shader equivalents + pipeline wiring. Because
+they were built once on the RHI in Phase 3.5, this is a port, not a re-derivation.
 
 ### Phase 5 — Validation & polish
 Validation-layer clean, RenderDoc side-by-side parity captures GL vs VK, performance
@@ -165,13 +239,22 @@ Fixed-tick + interpolation is safe at any fps (500+) since logic never sees a
 variable timestep. Frontend/game-interface work, independent of the backend port.
 
 ### Phase 8 — Shadow mapping (optional, per-light)
+**[Scheduled in Phase 3.5 — implemented on the GL 3.3 `opengl3` backend first, then
+ported to Vulkan in Phase 4. This section is the detailed technique design.]**
+
 RBDOOM-style feature set, built **on the RHI** so GL 3.3 and Vulkan share it —
 deliberately not attempted on the legacy ARB backend (throwaway work) and not part
 of Phase 1 (which guarantees zero behavior change):
 - soft shadows via shadow maps, `r_shadowMapping` cvar + settings toggle;
   stencil volumes stay the default faithful look
-- alpha-tested casters (sample material alpha in the shadow pass — impossible
-  with stencil volumes)
+- **alpha-tested casters** *(specifically wanted — grates/fences/foliage cast
+  correctly perforated shadows)*: sample the material's alpha/coverage in the
+  depth-only shadow pass and `discard` below the alpha test threshold, mirroring the
+  main-pass alpha test. **Impossible with stencil volumes** (they extrude the opaque
+  silhouette), so this capability rides entirely on the shadow-map path — it is not a
+  standalone toggle. Inherent to shadow-mapped lights; no separate cvar needed
+  (optionally `r_smAlphaTestedShadows` to force-disable for perf). Cost: bind the
+  diffuse/coverage texture in the shadow pass for alpha-tested materials only.
 - per-light choice of shadow maps vs stencil, freely mixed in a frame
 - Poisson-disk PCF filtering as part of the soft-shadow shader
 - parallel lights: single map first; cascades only if the few outdoor scenes
@@ -194,8 +277,11 @@ shadows, cascades) and also exposes `r_shading` (Blinn-Phong vs Phong) — a can
 improvements toggle.
 
 ### Phase 9 — Parallax occlusion mapping (experimental)
-Moved after the core Vulkan port (was Phase 4) — experimental fidelity feature, not
-a blocker for the renderer. Doom 3 ships no height maps; derive height fields by
+**[Scheduled in Phase 3.5 — implemented on the GL 3.3 `opengl3` backend first, then
+ported to Vulkan in Phase 4. This section is the detailed technique design.]**
+
+Experimental fidelity feature, not a blocker for the renderer. Doom 3 ships no height
+maps; derive height fields by
 integrating the normal maps (Frankot–Chellappa / Poisson) at load time into the
 `generated/` cache. Needs the GLSL backends (Phase 3+); best evaluated on the Vulkan
 renderer. Normals baked from high-poly models aren't always integrable →
@@ -210,9 +296,90 @@ on Doom 3 art is marginal regardless of height source. Our normal-integration ro
 is more ambitious than fhDOOM's (stock content has no specular-alpha height at all),
 so treat it as research, not a guaranteed win.
 
+### Phase 9.5 — Curved-geometry tessellation (Vulkan / GPU) **[DEFERRED here 2026-07-24]**
+Smooth low-poly silhouettes (character heads, rounded props) via **PN-triangle /
+Phong tessellation** — curve each triangle using its per-vertex normals. Exposed as
+a **tessellation-factor slider** in the "Enhancements" tab (opengl3/Vulkan gate,
+default off / factor 1 = no change).
+
+**Why not on the opengl3 (GL 3.3) backend:** hardware tess (TCS/TES + `GL_PATCHES`)
+needs **GL 4.0**; the core context is 3.3 ([glimp.cpp:329](../neo/sys/glimp.cpp)).
+CPU subdivision *is* possible on 3.3 but was rejected: it doesn't help the marquee
+cases (the main-menu "planet" is a 2D GUI element, not model geometry; character
+heads are **skinned MD5** meshes that would need per-frame CPU re-subdivision or
+joint-weight interpolation onto a densified mesh — heavy + invasive), and the CPU
+code is **throwaway** vs the GPU path. Only the cvar + slider UI would carry over.
+
+**Vulkan plan:** SPIR-V tessellation-control/evaluation stages; skin in the vertex
+shader, then tessellate — so skinned characters get subdivided **on-GPU** for free.
+Scope: **character (MD5) + static model** surfaces only. Explicitly skip the BSP
+world (flat, wastes perf, cracks lightmaps/shadows), GUI, particles, decals.
+Watch-outs: UV/normal seams crack under tessellation → per-material opt-out; hard-
+surface/mechanical models can look wrong when rounded. **Fidelity: opt-in, default
+off.** Reuse the Enhancements-tab slider cvar (e.g. `r_tessFactor`) across backends.
+
 ### Phase 10 — Ray tracing path
 BLAS for static world + dynamic models, TLAS rebuilt/refit per frame, ray-query RT
 shadows replacing stencil volumes as the first visible payoff; RT reflections after.
 Full RT-pipeline/SBT work only if a use case demands it. More realistically,
 development timeline could be: 1. ray query visibility test, 2. RT shadows, 
 3. reflection probes, 4. glossy reflections, 5. full path tracing experiment
+
+---
+
+## "Enhancements" tab — non-faithful graphical toggles (GL3/Vulkan only)
+
+Goal: an ImGui **Enhancements** settings tab, shown **only on GL3/Vulkan** backends,
+housing non-vanilla graphical toggles. The **legacy ARB2 path stays vanilla-faithful**.
+
+Key finding: this fork (`DUDE 0.1`) is based on an **older dhewm3 that predates the
+GLSL backend**, so upstream's `r_useShadowMapping` shadow mapping **does not exist
+here** — bringing it in is a fresh port into the RHI (see Follow-up below), not a
+relocation. The one non-vanilla feature that currently *does* run in the legacy path
+is **soft particles** (`r_useSoftParticles`, default ON, ported from TDM #3878).
+
+### Backend gating
+- `glConfig.coreProfile` is `true` only for the GL3 core backend and is already used
+  in `Dhewm3SettingsMenu.cpp`. Wrap it in a helper `R_BackendSupportsEnhancements()`
+  (returns `glConfig.coreProfile` for now) so Vulkan can OR-in its own flag in one
+  place later.
+
+### Change set
+1. **New Enhancements tab** — `Dhewm3SettingsMenu.cpp` tab bar (after "Video
+   Options"): `if ( R_BackendSupportsEnhancements() && ImGui::BeginTabItem(...) )`.
+   On legacy the tab isn't created; optionally add a greyed note in Video Options.
+2. **Move existing non-vanilla toggles** Video → Enhancements: `r_useSoftParticles`
+   (+ `r_enableDepthCapture` companion), `r_postFilmGrain` (add slider), 
+   `r_postChromaticAberration` (add slider), `r_gammaInShader` (the in-shader
+   reimplementation; `r_gamma`/`r_brightness` sliders stay in Video — gamma is
+   vanilla). Add a disabled **"Shadow Mapping — coming soon"** placeholder row.
+3. **Gate soft particles to non-legacy backends** — add `&& glConfig.coreProfile`
+   (via the helper) at the two decision points: `tr_light.cpp:1447` and the
+   `getDepthCapture` decision in `draw_common.cpp:562`. Legacy then renders vanilla
+   particles (no depth-capture pass). Cvar keeps its `"1"` default (harmless when
+   gated); code stays in place for the RHI path.
+4. **Helper wiring** — declare `R_BackendSupportsEnhancements()` in `tr_local.h`,
+   define in `RenderSystem_init.cpp`; ensure post-FX cvars are reachable (`extern`)
+   from the menu.
+
+### Explicitly NOT touched
+`com_interpolate` (sim-level, backend-agnostic); `r_gamma`/`r_brightness` sliders
+(vanilla); ARB2 rendering math (only the soft-particle gate); shadow mapping.
+
+### Files
+`neo/framework/Dhewm3SettingsMenu.cpp`, `neo/renderer/tr_local.h`,
+`neo/renderer/RenderSystem_init.cpp`, `neo/renderer/tr_light.cpp`,
+`neo/renderer/draw_common.cpp`.
+
+### Follow-up — now part of Phase 3.5
+The Enhancements tab is the delivery surface for the **Phase 3.5** OpenGL 3.3
+enhancement suite. Remaining work, in order:
+1. **Specular tuning** sliders (`r_specularScale`, `r_specularExp`, `r_shading`) —
+   quick, low-risk shader-uniform toggles (fhDOOM reference).
+2. **Shadow mapping** (Phase 8 design) on the GL3 RHI — flip the "Shadow Mapping
+   (coming soon)" placeholder row into a live per-light toggle; stencil stays default.
+3. **Parallax occlusion mapping** (Phase 9 design) — opt-in, default off, marginal
+   without HD texture packs.
+
+Each is built once on the RHI so Phase 4 ports the whole suite to Vulkan together.
+Tessellation (Phase 9.5) stays Vulkan-only (needs GL 4.0+ tess shaders).
