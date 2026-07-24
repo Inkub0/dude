@@ -851,6 +851,11 @@ extern idCVar r_gammaInShader;			// set gamma+brightness in shader instead of mo
 extern idCVar r_postFilmGrain;			// film grain intensity (0 = off)
 extern idCVar r_postChromaticAberration;	// chromatic aberration strength (0 = off)
 
+// DUDE Phase 3.5 specular tuning — GL3/Vulkan interaction shader only, vanilla at default
+extern idCVar r_shading;				// 0 = vanilla LUT, 1 = Blinn-Phong, 2 = Phong
+extern idCVar r_specularScale;			// scales specular contribution (1 = vanilla)
+extern idCVar r_specularExp;			// analytic specular exponent (r_shading 1/2)
+
 extern idCVar r_renderer;				// arb2, etc
 
 extern idCVar r_checkBounds;			// compare all surface bounds with precalculated ones

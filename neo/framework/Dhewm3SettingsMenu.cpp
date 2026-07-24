@@ -1681,6 +1681,18 @@ static CVarOption videoOptionsImmediately[] = {
 // R_BackendSupportsEnhancements(). The legacy ARB2 renderer stays faithful to
 // vanilla Doom 3, so none of these effects run there.
 static CVarOption enhancementOptions[] = {
+	CVarOption( "Lighting" ),
+	CVarOption( "r_shading", []( idCVar& cvar ) {
+		int sel = idMath::ClampInt( 0, 2, cvar.GetInteger() );
+		if ( ImGui::Combo( "Specular Shading Model", &sel, "Vanilla (lookup table)\0Blinn-Phong\0Phong\0" ) ) {
+			cvar.SetInteger( sel );
+		}
+		const char* descr = "Vanilla reproduces the classic Doom 3 specular highlight exactly.\nBlinn-Phong and Phong are analytic models tuned by Specular Exponent.";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
+	CVarOption( "r_specularScale", "Specular Scale", OT_FLOAT, 0.0f, 8.0f ),
+	CVarOption( "r_specularExp", "Specular Exponent (Blinn-Phong / Phong)", OT_FLOAT, 1.0f, 128.0f ),
+
 	CVarOption( "Post-Processing" ),
 	CVarOption( "r_postFilmGrain", "Film Grain", OT_FLOAT, 0.0f, 0.25f ),
 	CVarOption( "r_postChromaticAberration", "Chromatic Aberration", OT_FLOAT, 0.0f, 0.5f ),

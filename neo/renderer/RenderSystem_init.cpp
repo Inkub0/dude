@@ -268,6 +268,15 @@ idCVar r_glDebugContext( "r_glDebugContext", "0", CVAR_RENDERER | CVAR_BOOL, "En
 idCVar r_postFilmGrain( "r_postFilmGrain", "0.04", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "film grain intensity (0 = off, ~0.05..0.15, max 0.25)", 0.0f, 0.25f );
 idCVar r_postChromaticAberration( "r_postChromaticAberration", "0.2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "chromatic aberration strength (0 = off, ~0.1..0.35, max 0.5)", 0.0f, 0.5f );
 
+// DUDE Phase 3.5 "specular tuning" enhancement (GL3/Vulkan interaction shader
+// only; inert on the legacy ARB2 path). Defaults reproduce vanilla exactly:
+// r_shading 0 keeps the original N.H specular lookup table, r_specularScale 1
+// leaves the specular contribution untouched. r_specularExp only applies to the
+// analytic shading models (1 = Blinn-Phong, 2 = Phong). fhDOOM reference.
+idCVar r_shading( "r_shading", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "specular shading model: 0 = vanilla lookup table (faithful), 1 = Blinn-Phong, 2 = Phong", 0, 2 );
+idCVar r_specularScale( "r_specularScale", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "scales the specular contribution (1 = vanilla)", 0.0f, 8.0f );
+idCVar r_specularExp( "r_specularExp", "16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "specular exponent for the analytic shading models (r_shading 1/2)", 1.0f, 128.0f );
+
 // DUDE: gate for the non-vanilla "Enhancements" (see tr_local.h). Only the GL 3.3
 // core backend qualifies today; Vulkan backends will extend this once they land.
 bool R_BackendSupportsEnhancements() {

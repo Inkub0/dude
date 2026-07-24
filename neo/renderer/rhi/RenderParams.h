@@ -62,10 +62,13 @@ struct RenderParams {
 
 	float	clipPlane[4];	// subview near-clip plane in model-local space
 							// (zfill gl_ClipDistance; 0 when no clip plane)
+
+	float	specularParms[4];	// interaction specular tuning: x = scale, y = exponent,
+								// z = shading model (0 LUT / 1 Blinn-Phong / 2 Phong), w unused
 };
 
-// 3 mat4 (192) + 34 vec4 (544) = 736 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 736, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 3 mat4 (192) + 35 vec4 (560) = 752 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 752, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

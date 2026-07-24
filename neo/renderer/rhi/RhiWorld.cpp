@@ -118,6 +118,14 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	memcpy( parms.diffuseModifier, din->diffuseColor.ToFloatPtr(), 16 );
 	memcpy( parms.specularModifier, din->specularColor.ToFloatPtr(), 16 );
 
+	// DUDE Phase 3.5 specular tuning (interaction.frag). Defaults reproduce
+	// vanilla: scale 1, shading model 0 (the N.H lookup table). Only consumed by
+	// the regular interaction shader; the ambientLight shader ignores it.
+	parms.specularParms[0] = r_specularScale.GetFloat();
+	parms.specularParms[1] = r_specularExp.GetFloat();
+	parms.specularParms[2] = (float)r_shading.GetInteger();
+	parms.specularParms[3] = 0.0f;
+
 	// ambientlight.vert rebuilds a tangent-to-global rotation from these
 	const float *mm = din->surf->space->modelMatrix;
 	for ( int row = 0; row < 3; row++ ) {

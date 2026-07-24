@@ -18,6 +18,7 @@ VARY(4) out vec2 var_TexDiffuse;    // texcoord[4]
 VARY(5) out vec2 var_TexSpecular;   // texcoord[5]
 VARY(6) out vec3 var_TexHalfVec;    // texcoord[6]: half-angle vector in tangent space
 VARY(7) out vec4 var_Color;
+VARY(8) out vec3 var_TexViewVec;    // view vector in tangent space (Phong shading only)
 
 void main() {
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
@@ -48,6 +49,11 @@ void main() {
 	var_TexHalfVec = vec3( dot( attr_Tangent, halfV ),
 	                       dot( attr_Bitangent, halfV ),
 	                       dot( attr_Normal, halfV ) );
+
+	// same view vector in tangent space, kept separate for the Phong R.V term
+	var_TexViewVec = vec3( dot( attr_Tangent, toView ),
+	                       dot( attr_Bitangent, toView ),
+	                       dot( attr_Normal, toView ) );
 
 	// 1.0, color, or 1.0 - color, selected by modulate/add
 	var_Color = attr_Color * u_vertexColorModulate + u_vertexColorAdd;

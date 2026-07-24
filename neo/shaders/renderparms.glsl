@@ -50,4 +50,8 @@ UBO_BINDING(0) uniform RenderParams {
 
 	vec4 u_clipPlane;            // subview near-clip plane in model-local space
 	                            // (zfill gl_ClipDistance[0]; 0 when unused)
+
+	vec4 u_specularParms;        // interaction specular tuning (DUDE Phase 3.5):
+	                            // x = scale, y = exponent, z = shading model
+	                            // (0 LUT / 1 Blinn-Phong / 2 Phong), w unused
 };
