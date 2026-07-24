@@ -179,11 +179,13 @@ validated against (RenderDoc side-by-side, Phase 5).
 - Soft particles (`r_useSoftParticles`) — GL3-gated, removed from the legacy path.
 - Film grain (`r_postFilmGrain`) + chromatic aberration (`r_postChromaticAberration`).
 - Gamma/brightness in shader (`r_gammaInShader`).
+- **Specular tuning** (`r_shading` 0 vanilla-LUT / 1 Blinn-Phong / 2 Phong,
+  `r_specularScale`, `r_specularExp`) — new `u_specularParms` UBO member@736;
+  `interaction.vert`/`.frag` updated (Phong uses a tangent-space view-vector
+  varying). Defaults reproduce vanilla specular exactly. Legacy ARB2 untouched.
 
 **To implement on GL 3.3, ranked by value/effort:**
-1. **Specular tuning** (easy) — `r_specularScale`, `r_specularExp`, `r_shading`
-   (Blinn-Phong vs Phong). Shader-uniform tweaks; default values reproduce vanilla.
-   fhDOOM reference.
+1. **Specular tuning** — **DONE** (see above).
 2. **Shadow mapping** (large, high payoff) — full technique design in **Phase 8**
    below; already specified as an RHI feature ("GL 3.3 and Vulkan share it").
    Default stays stencil (faithful); soft shadow maps are the opt-in. **Includes
@@ -265,6 +267,39 @@ Additions: **simplified occluder meshes** for the depth-only caster passes
 (conservative simplification; raw-geometry path kept — aggressive settings can
 alter shadow silhouettes), cached in a **`generated/` directory** keyed by model
 hash, **generated at load time** (pure derived-data cache, no fidelity impact).
+
+**First milestone (in progress) — one projected/spot light, hard edges.** Control
+surface starts as a **global mode only** (`r_shadowMapping` cvar + Enhancements-tab
+row: Stencil default / Shadow Maps); per-light material-keyword override deferred.
+In Shadow-Maps mode, projected lights take the SM path and point/parallel lights
+**fall back to stencil** until implemented — that automatic fallback *is* the
+free-mixing behavior. Build order:
+1. **Minimal depth render-target in the RHI** (currently absent — `CreateImage`
+   returns 0, only `BeginPass` on the default framebuffer + `CopyFramebufferToImage`
+   exist). Depth-only offscreen target: create depth texture + FBO, `BeginPass` able
+   to target it, bind it as a sampler for a later pass. Foundational — Vulkan and any
+   future FBO post-process reuse it.
+2. Light view-projection matrix for projected lights (derived from existing
+   `light_target/right/up/start` data).
+3. Depth-only caster shader (`shadow_sm.vert/.frag`).
+4. Interaction-shader shadow term: sample the map, depth-compare, multiply the light
+   contribution. Start with hardware `sampler2DShadow` 2×2 PCF; Poisson soft tier and
+   alpha-tested casters follow.
+5. `r_shadowMapping` cvar + Enhancements-tab row; per-light branch in
+   `RB_RHI_DrawWorld`.
+
+**Two texture-architecture guardrails (decided 2026-07-24)** so shadow work advances
+the texture/material system rather than boxing it in for Phase 4:
+- **The depth target is the first RHI-owned image.** Route it through the same
+  `ImageHandle` + sampler abstraction future material textures (HD packs, RHI-owned
+  images) will use — this *starts* the Phase 4 image-ownership story cleanly instead
+  of being a one-off. Shadowing and normal mapping stay orthogonal layers in the
+  interaction shader (`visibility × normal-mapped shading`), so shadow maps neither
+  disturb nor depend on the bump/normal path.
+- **The caster pass carries a material-texture bind hook from day one** (milestone 1
+  is opaque-only, but the hook is present): alpha-tested/perforated shadows need the
+  diffuse/coverage texture bound in the depth pass, so leaving the seam in makes that
+  an extension, not a redesign.
 
 **Occluder generation decision (chosen): load-time, not offline.** Deliberately
 avoids the dmap route for now so the occlusion algorithm can be improved and tested
