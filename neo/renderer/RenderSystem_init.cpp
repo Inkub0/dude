@@ -284,6 +284,8 @@ idCVar r_specularExp( "r_specularExp", "16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR
 idCVar r_shadowMapping( "r_shadowMapping", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "shadow technique: 0 = stencil volumes (faithful), 1 = shadow maps where supported" );
 idCVar r_shadowMapSize( "r_shadowMapSize", "1024", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "shadow map resolution (per light), power of two", 256, 4096 );
 idCVar r_shadowMapBias( "r_shadowMapBias", "0.0025", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias to suppress acne", 0.0f, 0.02f );
+idCVar r_shadowMapDebug( "r_shadowMapDebug", "0", CVAR_RENDERER | CVAR_BOOL, "print per-view shadow-map light classification (projected vs stencil-fallback)" );
+idCVar r_shadowMapCull( "r_shadowMapCull", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "shadow caster faces: 0 = front, 1 = back (second-depth, less acne), 2 = two-sided", 0, 2 );
 
 // DUDE: gate for the non-vanilla "Enhancements" (see tr_local.h). Only the GL 3.3
 // core backend qualifies today; Vulkan backends will extend this once they land.

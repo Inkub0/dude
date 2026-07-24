@@ -601,6 +601,33 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 			continue;
 		}
 
+		// only cast from surfaces the frontend's shadow rules allow (mirroring
+		// Interaction.cpp): the material must cast, the entity must not be
+		// noShadow, and per-view / per-light shadow suppression applies — the
+		// latter is what keeps the player's own first-person weapon from casting
+		// a shadow in the player's view (suppressShadowInViewID == this view),
+		// while it still would in a mirror
+		if ( surf->material && !surf->material->SurfaceCastsShadow() ) {
+			continue;
+		}
+		const idRenderEntityLocal *edef = surf->space->entityDef;
+		if ( edef ) {
+			if ( edef->parms.noShadow ) {
+				continue;
+			}
+			if ( !r_skipSuppress.GetBool() ) {
+				if ( edef->parms.suppressShadowInViewID
+				     && edef->parms.suppressShadowInViewID == backEnd.viewDef->renderView.viewID ) {
+					continue;
+				}
+				if ( backEnd.vLight->lightDef
+				     && edef->parms.suppressShadowInLightID
+				     && edef->parms.suppressShadowInLightID == backEnd.vLight->lightDef->parms.lightId ) {
+					continue;
+				}
+			}
+		}
+
 		rhi::RenderParams parms;
 		memset( &parms, 0, sizeof( parms ) );
 		idPlane lp;
@@ -620,11 +647,22 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		rhi::BufferHandle ub;
 		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
+		// caster face selection (r_shadowMapCull): rendering only back faces
+		// ("second-depth") keeps directly-lit front faces out of the map, which
+		// is the standard cure for grazing-angle self-shadow acne. 0/1/2 map to
+		// front / back / two-sided so the right winding can be picked live.
+		int smCull = CT_BACK_SIDED;
+		if ( r_shadowMapCull.GetInteger() == 0 ) {
+			smCull = CT_FRONT_SIDED;
+		} else if ( r_shadowMapCull.GetInteger() == 2 ) {
+			smCull = CT_TWO_SIDED;
+		}
+
 		rhi::PipelineDesc pd;
 		pd.stateBits = GLS_DEPTHFUNC_LESS;			// depth write on; color discarded (drawbuffer NONE)
 		pd.shader = prog;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
-		pd.cullType = CT_TWO_SIDED;					// capture every occluder; bias handles acne
+		pd.cullType = smCull;
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
@@ -710,6 +748,9 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	RB_RHI_FillDepthBuffer( r, viewDef );
 
 	// per-light shadowing and adding (matches RB_ARB2_DrawInteractions)
+	// r_shadowMapDebug counts how each lit light was classified this view
+	int dbgLit = 0, dbgProjected = 0, dbgShadowMapped = 0, dbgPoint = 0,
+	    dbgParallel = 0, dbgNoShadow = 0, dbgNoLightDef = 0;
 	if ( !r_skipInteractions.GetBool() ) {
 		for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
 			backEnd.vLight = vLight;
@@ -720,6 +761,19 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			}
 			if ( !vLight->localInteractions && !vLight->globalInteractions && !vLight->translucentInteractions ) {
 				continue;
+			}
+			dbgLit++;
+			if ( !vLight->lightDef ) {
+				dbgNoLightDef++;
+			} else if ( vLight->lightDef->parms.parallel ) {
+				dbgParallel++;
+			} else if ( vLight->lightDef->parms.pointLight ) {
+				dbgPoint++;
+			} else {
+				dbgProjected++;
+				if ( !( vLight->globalShadows || vLight->localShadows ) ) {
+					dbgNoShadow++;
+				}
 			}
 
 			// DUDE Phase 3.5: choose the shadow technique for this light. Shadow
@@ -735,6 +789,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				if ( RB_RHI_ShadowMapPass( r, vLight, shadowMapProg ) ) {
 					ictx.lightShadowMapped = true;
 					ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
+					dbgShadowMapped++;
 				}
 			}
 
@@ -778,6 +833,12 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 		}
 	}
 	backEnd.vLight = NULL;
+
+	if ( r_shadowMapDebug.GetBool() ) {
+		common->Printf( "shadowMap: %d lit lights | projected %d (shadow-mapped %d, no-shadow %d) | point %d | parallel %d | no-lightDef %d | r_shadowMapping %d\n",
+		                dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,
+		                dbgPoint, dbgParallel, dbgNoLightDef, r_shadowMapping.GetInteger() );
+	}
 
 	// shader passes run with stencil satisfied everywhere
 	qglStencilFunc( GL_ALWAYS, 128, 255 );
