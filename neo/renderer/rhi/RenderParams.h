@@ -66,10 +66,12 @@ struct RenderParams {
 	float	specularParms[4];	// interaction specular tuning: x = scale, y = exponent,
 								// z = shading model (0 LUT / 1 Blinn-Phong / 2 Phong), w unused
 
-	float	shadowParms[4];		// x = shadow map enabled (0/1), y = texel size (1/res),
-								// z = depth-compare bias, w unused. The shadow lookup
-								// reuses the light-projection texgen (S/T/Q + falloff),
-								// so no separate shadow matrix is needed.
+	float	shadowParms[4];		// x = shadow technique (0 none / 1 projected-2D /
+								// 2 point-cube), y = texel size (1/res), z = depth-
+								// compare bias, w = light range (point-cube radial
+								// normalizer; unused for the 2D path). The 2D lookup
+								// reuses the light-projection texgen (S/T/Q + falloff);
+								// the cube lookup uses the world-space light->frag dir.
 };
 
 // 3 mat4 (192) + 36 vec4 (576) = 768 bytes, zero padding

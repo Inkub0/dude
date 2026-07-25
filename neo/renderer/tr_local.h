@@ -336,6 +336,13 @@ typedef struct viewLight_s {
 	const struct drawSurf_s	*localShadows;				// don't shadow local Surfaces
 	const struct drawSurf_s	*globalInteractions;		// get shadows from everything
 	const struct drawSurf_s	*translucentInteractions;	// get shadows from everything
+
+	// DUDE Phase 3.5: shadow-casting occluders that are NOT view-visible this frame
+	// (behind/beside the camera) and therefore never made it into globalInteractions/
+	// localInteractions. Shadow maps must still render them so the shadow they throw
+	// onto a receiver that IS in view doesn't blink out when you turn away from the
+	// caster. Populated only while r_shadowMapping is on; unused by the stencil path.
+	const struct drawSurf_s	*shadowMapCasters;
 } viewLight_t;
 
 
@@ -859,10 +866,17 @@ extern idCVar r_specularExp;			// analytic specular exponent (r_shading 1/2)
 // DUDE Phase 3.5 shadow mapping — GL3/Vulkan only, stencil stays the default
 extern idCVar r_shadowMapping;			// 0 = stencil volumes, 1 = shadow maps where supported
 extern idCVar r_shadowMapSize;			// shadow map resolution per light
-extern idCVar r_shadowMapBias;			// depth-compare bias (acne suppression)
+extern idCVar r_shadowMapBias;			// depth-compare bias, world/perforated receivers
+extern idCVar r_shadowMapModelBias;		// depth-compare bias, model (non-world) receivers
 extern idCVar r_shadowMapDebug;			// print per-view light classification
 extern idCVar r_shadowMapCull;			// caster face culling (0 front / 1 back / 2 two-sided)
 extern idCVar r_shadowMapPerforated;	// let noShadows perforated surfaces cast punched-out shadow maps
+extern idCVar r_shadowMapPointSize;		// point-light cube shadow map resolution per face
+extern idCVar r_shadowMapPointLimit;	// max point lights cube-shadowed per view (importance budget)
+extern idCVar r_shadowMapPointRangeScale;	// scale point-light cube shadow range (far plane + depth normalizer)
+extern idCVar r_shadowMapSizeScale;			// scale per-light shadow resolution with light radius
+extern idCVar r_shadowMapSizeScaleRadius;	// light radius mapped to the base shadow resolution
+extern idCVar r_shadowMapFaceCull;			// skip cube faces outside the view frustum
 
 extern idCVar r_renderer;				// arb2, etc
 

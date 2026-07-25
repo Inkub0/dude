@@ -51,11 +51,16 @@ static struct {
 	int					depthFuncBits;		// GLS_DEPTHFUNC_EQUAL, LESS for translucents
 
 	// shadow mapping (DUDE Phase 3.5). The current light either uses a shadow map
-	// (lightShadowMapped) or the stencil path. The shadow lookup reuses the light-
-	// projection texgen (S/T/Q + falloff), so no matrix is carried here.
-	// shadowImage is the depth texture bound on unit 7 for the interaction lookup.
+	// (lightShadowMapped) or the stencil path. For a projected/spot light the lookup
+	// reuses the light-projection texgen (S/T/Q + falloff) and a 2D depth map on unit
+	// 7 (shadowImage). For a point light (lightShadowCube) it uses a cube depth map on
+	// unit 8 (shadowCubeImage) indexed by the world-space light->frag direction, with
+	// lightRange normalizing the stored radial distance.
 	bool				lightShadowMapped;
 	rhi::ImageHandle	shadowImage;
+	bool				lightShadowCube;
+	rhi::ImageHandle	shadowCubeImage;
+	float				lightRange;
 } ictx;
 
 // Persistent shadow-map render target, kept across frames and recreated only
@@ -65,9 +70,137 @@ static struct {
 static rhi::RenderTargetHandle rhiShadowMap = 0;
 static int rhiShadowMapSize = 0;
 
+// Persistent point-light cube depth target, reused serially by every cube-shadowed
+// point light in a frame (one allocation, like the 2D map). Recreated on a size
+// change or context loss.
+static rhi::RenderTargetHandle rhiShadowCube = 0;
+static int rhiShadowCubeSize = 0;
+
 // r_shadowMapDebug: perforated (grate/fence) caster surfaces drawn into the map
 // this view — confirms the alpha-tested casters are actually reaching the pass.
 static int rhiShadowPerfCasters = 0;
+// r_shadowMapDebug: point lights that got a cube shadow map this view.
+static int rhiShadowCubeLights = 0;
+// r_shadowMapDebug: caster draws submitted into cube faces this view (after per-face
+// culling) — 0 means nothing reached the cube (culled / empty), so no shadow.
+static int rhiShadowCubeCasters = 0;
+// r_shadowMapDebug: cube faces rasterized vs skipped by the view-frustum face cull.
+static int rhiShadowCubeFaces = 0;
+static int rhiShadowCubeFacesCulled = 0;
+
+// Adaptive shadow resolution (r_shadowMapSizeScale). A light's radius decides a
+// resolution "tier": each tier doubles/halves the base cvar size so a texel maps to
+// roughly the same world distance regardless of how far the shadow reaches — big
+// lights get more resolution (fewer jaggies), small ones get less (cheaper). Tiers
+// are power-of-two shifts around the base; the range below keeps VRAM bounded.
+static const int SHADOW_TIER_MIN = -1;		// one step below base
+static const int SHADOW_TIER_MAX =  2;		// up to 4x base
+static const int SHADOW_NTIERS   = SHADOW_TIER_MAX - SHADOW_TIER_MIN + 1;
+
+static void RB_RHI_ForgetTexBinds();		// defined below; used by the pool allocator
+
+// One render target per tier, allocated lazily and kept across frames. Serial reuse
+// within a frame is unchanged; the pool only prevents destroy/recreate thrash when
+// consecutive lights land in different tiers. A lost context (GetRenderTargetImage
+// == 0 after vid_restart) invalidates the slot and it rebuilds on next use.
+struct shadowRtSlot_t {
+	rhi::RenderTargetHandle	rt;
+	int						size;
+};
+static shadowRtSlot_t rhiShadowMapPool[SHADOW_NTIERS];	// 2D (projected/spot)
+static shadowRtSlot_t rhiShadowCubePool[SHADOW_NTIERS];	// cube (point/omni)
+
+// Map a light radius to a tier index in [0, SHADOW_NTIERS). Tier for the reference
+// radius (r_shadowMapSizeScaleRadius) is the base size; each doubling of radius adds
+// a tier. With scaling off, everything lands on the base tier.
+static int RB_RHI_ShadowTier( float radius ) {
+	if ( !r_shadowMapSizeScale.GetBool() ) {
+		return -SHADOW_TIER_MIN;			// index of shift 0 (the base)
+	}
+	float ref = r_shadowMapSizeScaleRadius.GetFloat();
+	if ( ref < 1.0f ) {
+		ref = 1.0f;
+	}
+	float f = radius / ref;
+	if ( f < 1e-4f ) {
+		f = 1e-4f;
+	}
+	const float log2f_ = idMath::Log( f ) / idMath::Log( 2.0f );			// log base 2
+	int shift = idMath::Ftoi( floorf( log2f_ + 0.5f ) );				// round(log2(f))
+	shift = idMath::ClampInt( SHADOW_TIER_MIN, SHADOW_TIER_MAX, shift );
+	return shift - SHADOW_TIER_MIN;			// -> [0, SHADOW_NTIERS)
+}
+
+// Base size scaled by a tier's power-of-two shift, clamped to [lo, hi].
+static int RB_RHI_TierSize( int base, int tierIdx, int lo, int hi ) {
+	const int shift = tierIdx + SHADOW_TIER_MIN;
+	int size = ( shift >= 0 ) ? ( base << shift ) : ( base >> ( -shift ) );
+	return idMath::ClampInt( lo, hi, size );
+}
+
+// Fetch (or lazily create) the pooled render target for a tier at the given size.
+// Dedupes clamp collisions: if another live slot already holds this size, reuse it
+// so the [lo,hi] clamp never allocates two identical targets. isCube picks the pool
+// and the create call. Returns 0 only if creation failed.
+static rhi::RenderTargetHandle RB_RHI_ShadowPoolTarget( rhi::RHI *r, bool isCube, int tierIdx, int size ) {
+	shadowRtSlot_t *pool = isCube ? rhiShadowCubePool : rhiShadowMapPool;
+	shadowRtSlot_t &slot = pool[tierIdx];
+
+	// live and correct already?
+	if ( slot.rt && slot.size == size && r->GetRenderTargetImage( slot.rt ) != 0 ) {
+		return slot.rt;
+	}
+	// reuse an identical-size live slot (clamp collision) instead of allocating twice
+	for ( int i = 0; i < SHADOW_NTIERS; i++ ) {
+		if ( i != tierIdx && pool[i].rt && pool[i].size == size
+		     && r->GetRenderTargetImage( pool[i].rt ) != 0 ) {
+			slot = pool[i];
+			return slot.rt;
+		}
+	}
+	// (re)create this slot; drop a stale/wrong-size handle first, but not if another
+	// slot is sharing it (clamp collision) — only destroy handles this slot owns
+	if ( slot.rt ) {
+		bool shared = false;
+		for ( int i = 0; i < SHADOW_NTIERS; i++ ) {
+			if ( i != tierIdx && pool[i].rt == slot.rt ) {
+				shared = true;
+				break;
+			}
+		}
+		if ( !shared ) {
+			r->DestroyRenderTarget( slot.rt );
+		}
+		slot.rt = 0;
+	}
+	slot.rt = isCube ? r->CreateRenderTargetCube( rhi::IF_DEPTH24, size )
+	                 : r->CreateRenderTarget( rhi::IF_DEPTH24, size, size );
+	slot.size = size;
+	RB_RHI_ForgetTexBinds();				// create() disturbed unit 0's cached bind
+	return slot.rt;
+}
+
+// r_shadowMapDebug >= 2: count a nextOnLight drawSurf chain (occluders / receivers).
+static int RB_RHI_CountLightChain( const drawSurf_t *surf ) {
+	int n = 0;
+	for ( ; surf; surf = surf->nextOnLight ) {
+		n++;
+	}
+	return n;
+}
+
+// Creating a render target binds a texture on unit 0 directly (bypassing the
+// RB_RHI_BindUnit cache in backEnd.glState.tmu), then unbinds it. Afterwards that
+// cache disagrees with GL, so the next interaction can skip a needed rebind and later
+// lights sample an absent unit-0 texture — the "changing a shadow setting breaks all
+// lights" symptom on a live resolution change. Forget the cached binds so they re-issue.
+static void RB_RHI_ForgetTexBinds() {
+	for ( int i = 0; i < MAX_MULTITEXTURE_UNITS; i++ ) {
+		backEnd.glState.tmu[i].current2DMap = -1;
+		backEnd.glState.tmu[i].current3DMap = -1;
+		backEnd.glState.tmu[i].currentCubeMap = -1;
+	}
+}
 
 /*
 ===================
@@ -149,10 +282,30 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// the light-projection texgen already filled above (lightProjection[]), so no
 	// extra matrix is needed here. Left zero (memset) for stencil / unshadowed
 	// lights -> u_shadowParms.x == 0 -> visibility 1.
-	if ( ictx.lightShadowMapped && !din->ambientLight ) {
-		parms.shadowParms[0] = 1.0f;
-		parms.shadowParms[1] = ( rhiShadowMapSize > 0 ) ? 1.0f / (float)rhiShadowMapSize : 0.0f;
-		parms.shadowParms[2] = r_shadowMapBias.GetFloat();
+	if ( ( ictx.lightShadowMapped || ictx.lightShadowCube ) && !din->ambientLight ) {
+		// Receiver-dependent acne bias: flat world/BSP surfaces tolerate the tight
+		// world bias; models (non-static-world entities) have curved, high-slope
+		// geometry that self-shadows and needs a larger bias. Perforated world
+		// geometry (grates, fences) already falls in the world group via the static
+		// world model, so it must NOT be keyed on material coverage -- doing so would
+		// also drag in alpha-tested character skins, which are models and want the
+		// model bias.
+		const idRenderEntityLocal *redef = din->surf->space->entityDef;
+		const bool worldReceiver = redef && redef->parms.hModel
+		    && redef->parms.hModel->IsStaticWorldModel();
+		const float bias = worldReceiver
+		    ? r_shadowMapBias.GetFloat() : r_shadowMapModelBias.GetFloat();
+
+		if ( ictx.lightShadowMapped ) {
+			parms.shadowParms[0] = 1.0f;		// projected/spot: 2D map on unit 7
+			parms.shadowParms[1] = ( rhiShadowMapSize > 0 ) ? 1.0f / (float)rhiShadowMapSize : 0.0f;
+			parms.shadowParms[2] = bias;
+		} else {
+			parms.shadowParms[0] = 2.0f;		// point/omni: cube map on unit 8
+			parms.shadowParms[1] = ( rhiShadowCubeSize > 0 ) ? 1.0f / (float)rhiShadowCubeSize : 0.0f;
+			parms.shadowParms[2] = bias;
+			parms.shadowParms[3] = ictx.lightRange;	// radial-distance normalizer
+		}
 	}
 
 	// ambientlight.vert rebuilds a tangent-to-global rotation from these
@@ -195,7 +348,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
 	if ( ictx.lightShadowMapped && !din->ambientLight ) {
-		da.textures[7] = ictx.shadowImage;	// depth map for u_shadowMap (unit 7)
+		da.textures[7] = ictx.shadowImage;	// 2D depth map for u_shadowMap (unit 7)
+	} else if ( ictx.lightShadowCube && !din->ambientLight ) {
+		da.shadowCube = ictx.shadowCubeImage;	// cube depth map for u_shadowCube (unit 8)
 	}
 	ictx.r->Draw( da );
 
@@ -590,12 +745,115 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 /*
 ===================
+RB_RHI_ShadowCasterAllowed
+
+Shared caster filter for the 2D and cube shadow passes. Mirrors Interaction.cpp's
+shadow rules (material casts, entity not noShadow, per-view/per-light suppression)
+plus the perforated override that lets noShadows grates/fences cast. The suppression
+check is what keeps the player's own first-person weapon out of the map in his view.
+===================
+*/
+static bool RB_RHI_ShadowCasterAllowed( const drawSurf_t *surf ) {
+	// grates / fences / foliage are nearly always flagged noShadows in the base
+	// assets (textures/base_floor/sflgratetrans*, decals/fgrill3) because a solid
+	// stencil volume can't punch holes. A shadow map can, so the perforated override
+	// lets them cast, ignoring the noShadows flags that only ever served the stencil path.
+	const bool perforatedOverride = r_shadowMapPerforated.GetBool()
+	    && surf->material && surf->material->Coverage() == MC_PERFORATED;
+
+	if ( surf->material && !surf->material->SurfaceCastsShadow() && !perforatedOverride ) {
+		return false;
+	}
+	const idRenderEntityLocal *edef = surf->space->entityDef;
+	if ( edef ) {
+		if ( edef->parms.noShadow && !perforatedOverride ) {
+			return false;
+		}
+		if ( !r_skipSuppress.GetBool() ) {
+			if ( edef->parms.suppressShadowInViewID
+			     && edef->parms.suppressShadowInViewID == backEnd.viewDef->renderView.viewID ) {
+				return false;
+			}
+			if ( backEnd.vLight->lightDef
+			     && edef->parms.suppressShadowInLightID
+			     && edef->parms.suppressShadowInLightID == backEnd.vLight->lightDef->parms.lightId ) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+/*
+===================
+RB_RHI_SetupCasterCoverage
+
+Shared perforated-caster setup for the 2D and cube passes. Routes the first live
+alpha-tested stage's coverage texture + threshold + matrix into parms (so the caster
+shader punches the shadow out exactly like the visible surface), picks the caster
+cull mode, sets *perforated for the debug counter, and returns the coverage image to
+bind on unit 0 (whiteImage for opaque casters, whose disabled alpha test never fires).
+===================
+*/
+static idImage *RB_RHI_SetupCasterCoverage( const drawSurf_t *surf, rhi::RenderParams &parms,
+                                            int &smCull, bool &perforated ) {
+	idImage *coverImage = globalImages->whiteImage;
+	perforated = surf->material && surf->material->Coverage() == MC_PERFORATED;
+	if ( perforated ) {
+		const float *regs = surf->shaderRegisters;
+		const shaderStage_t *aStage = NULL;
+		for ( int stage = 0; regs && stage < surf->material->GetNumStages(); stage++ ) {
+			const shaderStage_t *pStage = surf->material->GetStage( stage );
+			if ( pStage->hasAlphaTest && regs[pStage->conditionRegister] != 0 ) {
+				aStage = pStage;
+				break;
+			}
+		}
+		if ( aStage ) {
+			parms.alphaTest[0] = regs[aStage->alphaTestRegister];
+			parms.alphaTest[1] = 1.0f;
+			if ( aStage->texture.hasMatrix ) {
+				parms.diffuseMatrixS[0] = regs[aStage->texture.matrix[0][0]];
+				parms.diffuseMatrixS[1] = regs[aStage->texture.matrix[0][1]];
+				parms.diffuseMatrixS[3] = regs[aStage->texture.matrix[0][2]];
+				parms.diffuseMatrixT[0] = regs[aStage->texture.matrix[1][0]];
+				parms.diffuseMatrixT[1] = regs[aStage->texture.matrix[1][1]];
+				parms.diffuseMatrixT[3] = regs[aStage->texture.matrix[1][2]];
+			} else {
+				parms.diffuseMatrixS[0] = 1.0f;
+				parms.diffuseMatrixT[1] = 1.0f;
+			}
+			if ( aStage->texture.image ) {
+				coverImage = aStage->texture.image;
+			}
+		}
+		// perforated casters are typically thin, single-sided planes; second-depth
+		// back-face culling would drop them entirely depending on which way they face
+		// the light, so always render both sides. Being thin, they have no self-shadow
+		// acne for second-depth to fix in the first place.
+		smCull = CT_TWO_SIDED;
+	} else {
+		// caster face selection (r_shadowMapCull): rendering only back faces
+		// ("second-depth") keeps directly-lit front faces out of the map, which is the
+		// standard cure for grazing-angle self-shadow acne. 0/1/2 = front/back/two-sided.
+		smCull = CT_BACK_SIDED;
+		if ( r_shadowMapCull.GetInteger() == 0 ) {
+			smCull = CT_FRONT_SIDED;
+		} else if ( r_shadowMapCull.GetInteger() == 2 ) {
+			smCull = CT_TWO_SIDED;
+		}
+	}
+	return coverImage;
+}
+
+/*
+===================
 RB_RHI_ShadowCasterChain
 
-Renders one interaction chain's depth from the light's point of view through the
-shadow_sm program. The light-projection planes are transformed into each surface's
-model space exactly like the interaction pass, so shadow_sm.vert projects to the
-same cookie UV and writes the linear falloff as depth.
+Renders one interaction chain's depth from a projected light's point of view through
+the shadow_sm program. The light-projection planes are transformed into each surface's
+model space exactly like the interaction pass, so shadow_sm.vert projects to the same
+cookie UV and writes the linear falloff as depth.
 ===================
 */
 static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::ShaderHandle prog ) {
@@ -604,41 +862,8 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		if ( !tri || !tri->ambientCache || !tri->numIndexes ) {
 			continue;
 		}
-
-		// grates / fences / foliage are nearly always flagged noShadows in the base
-		// assets (e.g. textures/base_floor/sflgratetrans*, decals/fgrill3) because a
-		// solid stencil volume can't punch holes — the real shadow was dropped or
-		// faked. A shadow map *can* perforate, so when enabled we let perforated
-		// (alpha-tested) surfaces cast their true shadow, overriding the noShadows
-		// flags (material or entity) that only ever existed for the stencil path.
-		const bool perforatedOverride = r_shadowMapPerforated.GetBool()
-		    && surf->material && surf->material->Coverage() == MC_PERFORATED;
-
-		// only cast from surfaces the frontend's shadow rules allow (mirroring
-		// Interaction.cpp): the material must cast, the entity must not be
-		// noShadow, and per-view / per-light shadow suppression applies — the
-		// latter is what keeps the player's own first-person weapon from casting
-		// a shadow in the player's view (suppressShadowInViewID == this view),
-		// while it still would in a mirror
-		if ( surf->material && !surf->material->SurfaceCastsShadow() && !perforatedOverride ) {
+		if ( !RB_RHI_ShadowCasterAllowed( surf ) ) {
 			continue;
-		}
-		const idRenderEntityLocal *edef = surf->space->entityDef;
-		if ( edef ) {
-			if ( edef->parms.noShadow && !perforatedOverride ) {
-				continue;
-			}
-			if ( !r_skipSuppress.GetBool() ) {
-				if ( edef->parms.suppressShadowInViewID
-				     && edef->parms.suppressShadowInViewID == backEnd.viewDef->renderView.viewID ) {
-					continue;
-				}
-				if ( backEnd.vLight->lightDef
-				     && edef->parms.suppressShadowInLightID
-				     && edef->parms.suppressShadowInLightID == backEnd.vLight->lightDef->parms.lightId ) {
-					continue;
-				}
-			}
 		}
 
 		rhi::RenderParams parms;
@@ -653,59 +878,9 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[3], lp );
 		memcpy( parms.lightFalloffS, lp.ToFloatPtr(), 16 );
 
-		// perforated (grate / fence / foliage) casters: punch the shadow out
-		// through the diffuse alpha, exactly like the visible surface. Find the
-		// first live alpha-tested stage and route its coverage texture + threshold
-		// to shadow_sm.frag. Opaque casters leave the alpha test disabled and bind
-		// whiteImage, so the shader's discard never fires for them.
-		idImage *coverImage = globalImages->whiteImage;
 		int smCull;
-		const bool perforatedCaster = surf->material && surf->material->Coverage() == MC_PERFORATED;
-		if ( perforatedCaster ) {
-			const float *regs = surf->shaderRegisters;
-			const shaderStage_t *aStage = NULL;
-			for ( int stage = 0; regs && stage < surf->material->GetNumStages(); stage++ ) {
-				const shaderStage_t *pStage = surf->material->GetStage( stage );
-				if ( pStage->hasAlphaTest && regs[pStage->conditionRegister] != 0 ) {
-					aStage = pStage;
-					break;
-				}
-			}
-			if ( aStage ) {
-				parms.alphaTest[0] = regs[aStage->alphaTestRegister];
-				parms.alphaTest[1] = 1.0f;
-				if ( aStage->texture.hasMatrix ) {
-					parms.diffuseMatrixS[0] = regs[aStage->texture.matrix[0][0]];
-					parms.diffuseMatrixS[1] = regs[aStage->texture.matrix[0][1]];
-					parms.diffuseMatrixS[3] = regs[aStage->texture.matrix[0][2]];
-					parms.diffuseMatrixT[0] = regs[aStage->texture.matrix[1][0]];
-					parms.diffuseMatrixT[1] = regs[aStage->texture.matrix[1][1]];
-					parms.diffuseMatrixT[3] = regs[aStage->texture.matrix[1][2]];
-				} else {
-					parms.diffuseMatrixS[0] = 1.0f;
-					parms.diffuseMatrixT[1] = 1.0f;
-				}
-				if ( aStage->texture.image ) {
-					coverImage = aStage->texture.image;
-				}
-			}
-			// perforated casters are typically thin, single-sided planes; second-depth
-			// back-face culling would drop them entirely depending on which way they
-			// face the light, so always render both sides. Being thin, they have no
-			// self-shadow acne for second-depth to fix in the first place.
-			smCull = CT_TWO_SIDED;
-		} else {
-			// caster face selection (r_shadowMapCull): rendering only back faces
-			// ("second-depth") keeps directly-lit front faces out of the map, which
-			// is the standard cure for grazing-angle self-shadow acne. 0/1/2 map to
-			// front / back / two-sided so the right winding can be picked live.
-			smCull = CT_BACK_SIDED;
-			if ( r_shadowMapCull.GetInteger() == 0 ) {
-				smCull = CT_FRONT_SIDED;
-			} else if ( r_shadowMapCull.GetInteger() == 2 ) {
-				smCull = CT_TWO_SIDED;
-			}
-		}
+		bool perforatedCaster;
+		idImage *coverImage = RB_RHI_SetupCasterCoverage( surf, parms, smCull, perforatedCaster );
 
 		rhi::BufferHandle vb, ib;
 		int vertOfs, idxOfs;
@@ -751,17 +926,18 @@ Returns false (→ caller uses the stencil path) if the target can't be created.
 ===================
 */
 static bool RB_RHI_ShadowMapPass( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderHandle prog ) {
-	const int size = idMath::ClampInt( 256, 4096, r_shadowMapSize.GetInteger() );
-	// (re)create the target on first use or a resolution change; a stale handle
-	// after vid_restart returns image 0, which also triggers a rebuild
-	if ( rhiShadowMap == 0 || rhiShadowMapSize != size || r->GetRenderTargetImage( rhiShadowMap ) == 0 ) {
-		if ( rhiShadowMap ) {
-			r->DestroyRenderTarget( rhiShadowMap );
-			rhiShadowMap = 0;
-		}
-		rhiShadowMap = r->CreateRenderTarget( rhi::IF_DEPTH24, size, size );
-		rhiShadowMapSize = size;
-	}
+	// cap at the GL context's 2D texture limit so large requests degrade gracefully
+	const int mapHi = idMath::ClampInt( 256, 4096, glConfig.maxTextureSize );
+	const int base = idMath::ClampInt( 256, mapHi, r_shadowMapSize.GetInteger() );
+	// adaptive per-light resolution from the light radius (RB_RHI_ShadowTier); the
+	// pool keeps one target per tier so alternating light sizes don't thrash. The
+	// rhiShadowMap/Size globals track the selected slot because DrawInteraction reads
+	// rhiShadowMapSize for the texel size and the caller samples GetRenderTargetImage.
+	const float radius = vLight->lightDef->parms.lightRadius.Length();
+	const int tier = RB_RHI_ShadowTier( radius );
+	const int size = RB_RHI_TierSize( base, tier, 256, mapHi );
+	rhiShadowMap = RB_RHI_ShadowPoolTarget( r, false, tier, size );
+	rhiShadowMapSize = size;
 	if ( rhiShadowMap == 0 ) {
 		return false;
 	}
@@ -773,11 +949,336 @@ static bool RB_RHI_ShadowMapPass( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderH
 
 	// no polygon offset: shadow_sm writes gl_FragDepth, which polygon offset does
 	// not affect — the depth-compare bias (r_shadowMapBias) does the acne control
-	RB_RHI_ShadowCasterChain( r, vLight->globalInteractions, prog );
-	RB_RHI_ShadowCasterChain( r, vLight->localInteractions, prog );
+	// single complete occluder set (full ambientTris, view-independent) built in
+	// idInteraction::AddActiveInteraction — see the shadowMapCasters comment there
+	RB_RHI_ShadowCasterChain( r, vLight->shadowMapCasters, prog );
 
 	r->EndPass();		// restores the backbuffer + the main view's viewport
 	return true;
+}
+
+/*
+===================
+Point-light (omni) cube shadow maps
+===================
+*/
+
+// The six cube faces in the standard GL convention: (forward, up) pairs for a camera
+// at the light looking along each axis. Rendering GL face N with this basis makes the
+// depth we store line up with the face GL selects when interaction.frag samples with
+// the world-space light->frag direction — so no coordinate juggling is needed.
+static const idVec3 cubeFaceForward[6] = {
+	idVec3(  1,  0,  0 ), idVec3( -1,  0,  0 ),
+	idVec3(  0,  1,  0 ), idVec3(  0, -1,  0 ),
+	idVec3(  0,  0,  1 ), idVec3(  0,  0, -1 ) };
+static const idVec3 cubeFaceUp[6] = {
+	idVec3(  0, -1,  0 ), idVec3(  0, -1,  0 ),
+	idVec3(  0,  0,  1 ), idVec3(  0,  0, -1 ),
+	idVec3(  0, -1,  0 ), idVec3(  0, -1,  0 ) };
+
+// column-major (GL) 4x4 multiply: out = a * b
+static void RB_RHI_Mat4Mul( const float a[16], const float b[16], float out[16] ) {
+	for ( int c = 0; c < 4; c++ ) {
+		for ( int rr = 0; rr < 4; rr++ ) {
+			out[c * 4 + rr] = a[0 * 4 + rr] * b[c * 4 + 0] + a[1 * 4 + rr] * b[c * 4 + 1]
+			                + a[2 * 4 + rr] * b[c * 4 + 2] + a[3 * 4 + rr] * b[c * 4 + 3];
+		}
+	}
+}
+
+// 90-degree perspective * look-at-from-origin for one cube face. Geometry fed to this
+// is already in light-relative, world-oriented space (shadow_sm_cube.vert). gl_FragDepth
+// overrides depth, so near/far only bound clipping.
+static void RB_RHI_CubeFaceViewProj( int face, float range, float m[16] ) {
+	const idVec3 &f = cubeFaceForward[face];
+	idVec3 s = f.Cross( cubeFaceUp[face] );
+	s.Normalize();
+	idVec3 u = s.Cross( f );
+
+	// view (world->view), eye at origin, looking down -z along f
+	float V[16];
+	V[0] = s.x;  V[4] = s.y;  V[8]  = s.z;  V[12] = 0.0f;
+	V[1] = u.x;  V[5] = u.y;  V[9]  = u.z;  V[13] = 0.0f;
+	V[2] = -f.x; V[6] = -f.y; V[10] = -f.z; V[14] = 0.0f;
+	V[3] = 0.0f; V[7] = 0.0f; V[11] = 0.0f; V[15] = 1.0f;
+
+	const float n = 1.0f;
+	const float fr = ( range > n + 1.0f ) ? range : ( n + 1.0f );
+	float P[16];
+	memset( P, 0, sizeof( P ) );
+	P[0]  = 1.0f;						// 1/tan(45) : 90-degree horizontal fov
+	P[5]  = 1.0f;						// 90-degree vertical fov (aspect 1)
+	P[10] = -( fr + n ) / ( fr - n );
+	P[11] = -1.0f;
+	P[14] = -( 2.0f * fr * n ) / ( fr - n );
+
+	RB_RHI_Mat4Mul( P, V, m );			// m = P * V
+}
+
+// Gribb-Hartmann frustum planes from a light-relative view-projection, translated into
+// world space (origin at the light). R_CullLocalBox uses OUTWARD-pointing planes — it
+// culls when a box's corners are all on the positive (outside) side, or its sphere
+// center is farther than its radius on the positive side — so we negate the standard
+// (inward) Gribb-Hartmann planes to match. Normalized so the radius test is correct.
+static void RB_RHI_ExtractWorldFrustum( const float m[16], const idVec3 &lightOrigin, idPlane out[6] ) {
+	// rows of the column-major matrix
+	float row[4][4];
+	for ( int i = 0; i < 4; i++ ) {
+		row[i][0] = m[0 + i]; row[i][1] = m[4 + i]; row[i][2] = m[8 + i]; row[i][3] = m[12 + i];
+	}
+	static const int   axis[6] = { 0, 0, 1, 1, 2, 2 };		// left/right, bottom/top, near/far
+	static const float sign[6] = { 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f };
+	for ( int p = 0; p < 6; p++ ) {
+		idPlane pl;
+		// negated (outward): the interior is the negative half-space, as R_CullLocalBox expects
+		for ( int k = 0; k < 4; k++ ) {
+			pl[k] = -( row[3][k] + sign[p] * row[axis[p]][k] );
+		}
+		// normalize all four components (idPlane::Normalize leaves d unscaled, which
+		// would break the radius test in R_CullLocalBox)
+		float inv = idMath::InvSqrt( pl[0] * pl[0] + pl[1] * pl[1] + pl[2] * pl[2] );
+		pl[0] *= inv; pl[1] *= inv; pl[2] *= inv; pl[3] *= inv;
+		out[p] = pl.Translate( lightOrigin );	// light-relative -> world
+	}
+}
+
+// One cube face of a point light's occluder depth. Same caster rules + perforated
+// coverage as the 2D pass; adds a per-face frustum cull so a face only pays for the
+// geometry actually inside its 90-degree cone.
+static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, rhi::ShaderHandle prog,
+                                          const float faceViewProj[16], const idPlane facePlanes[6],
+                                          const idVec3 &globalLightOrigin, float range ) {
+	for ( ; surf; surf = surf->nextOnLight ) {
+		const srfTriangles_t *tri = surf->geo;
+		if ( !tri || !tri->ambientCache || !tri->numIndexes ) {
+			continue;
+		}
+		if ( !RB_RHI_ShadowCasterAllowed( surf ) ) {
+			continue;
+		}
+		// per-face cull: skip casters whose world bounds miss this face's cone
+		if ( R_CullLocalBox( tri->bounds, surf->space->modelMatrix, 6, facePlanes ) ) {
+			continue;
+		}
+
+		rhi::RenderParams parms;
+		memset( &parms, 0, sizeof( parms ) );
+		memcpy( parms.mvpMatrix, faceViewProj, sizeof( parms.mvpMatrix ) );
+
+		idVec3 localLight;
+		R_GlobalPointToLocal( surf->space->modelMatrix, globalLightOrigin, localLight );
+		parms.localLightOrigin[0] = localLight.x;
+		parms.localLightOrigin[1] = localLight.y;
+		parms.localLightOrigin[2] = localLight.z;
+
+		const float *mm = surf->space->modelMatrix;
+		for ( int rowi = 0; rowi < 3; rowi++ ) {
+			float *dst = rowi == 0 ? parms.modelMatrixRow0 : ( rowi == 1 ? parms.modelMatrixRow1 : parms.modelMatrixRow2 );
+			dst[0] = mm[rowi]; dst[1] = mm[rowi + 4]; dst[2] = mm[rowi + 8]; dst[3] = mm[rowi + 12];
+		}
+		parms.shadowParms[3] = range;		// radial-distance normalizer
+
+		int smCull;
+		bool perforatedCaster;
+		idImage *coverImage = RB_RHI_SetupCasterCoverage( surf, parms, smCull, perforatedCaster );
+		// the cube face view-projections rasterize the opposite winding to the
+		// projected 2D pass, so front/back are reversed here: swap them back so
+		// r_shadowMapCull's "second-depth" (back) still means faces facing away
+		// from the light (verified: cull 1 showed nothing, 0/2 worked).
+		if ( smCull == CT_FRONT_SIDED ) {
+			smCull = CT_BACK_SIDED;
+		} else if ( smCull == CT_BACK_SIDED ) {
+			smCull = CT_FRONT_SIDED;
+		}
+
+		rhi::BufferHandle vb, ib;
+		int vertOfs, idxOfs;
+		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
+
+		rhi::BufferHandle ub;
+		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+		rhi::PipelineDesc pd;
+		pd.stateBits = GLS_DEPTHFUNC_LESS;
+		pd.shader = prog;
+		pd.vertexLayout = rhi::VL_DRAWVERT;
+		pd.cullType = smCull;
+
+		RB_RHI_BindUnit( 0, coverImage );
+		r->BindPipeline( pd );
+
+		rhi::DrawArgs da;
+		memset( &da, 0, sizeof( da ) );
+		da.vertexBuffer = vb;
+		da.vertexOffset = vertOfs;
+		da.indexBuffer = ib;
+		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+		da.indexCount = tri->numIndexes;
+		da.uniformBuffer = ub;
+		da.uniformOffset = uniOfs;
+		da.uniformSize = sizeof( parms );
+		r->Draw( da );
+
+		backEnd.pc.c_shadowElements++;
+		rhiShadowCubeCasters++;
+		if ( perforatedCaster ) {
+			rhiShadowPerfCasters++;
+		}
+	}
+}
+
+// TEMP live-tuning knob to test the point-light cube shadow dead-zone: scales the
+// radial-depth normalizer AND the cube far plane together. If cranking this up makes
+// far/floor shadows reappear, `range` was clipping/clamping distant occluders.
+idCVar r_shadowMapPointRangeScale( "r_shadowMapPointRangeScale", "1", CVAR_RENDERER | CVAR_FLOAT,
+	"scale point-light cube shadow range (far plane + depth normalizer)", 0.1f, 32.0f );
+
+// Skip rasterizing occluders into cube faces whose 90-degree cone can't overlap the
+// camera view frustum: such a face is never sampled by a visible receiver, so its
+// geometry is pure waste. The face is still cleared (seamless cube sampling can bleed
+// one texel across an edge), just not drawn into. Off = render all 6 faces always.
+idCVar r_shadowMapFaceCull( "r_shadowMapFaceCull", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL,
+	"cull cube-shadow faces that fall outside the view frustum (big win at high resolution)" );
+
+// True when the whole view frustum (its 8 corners) lies on the outside of one of the
+// outward-pointing face-cone planes -> the face and the view are provably disjoint, so
+// nothing the player can see samples this face. Conservative: never culls a face the
+// view actually overlaps, so no visible shadow is lost.
+static bool RB_RHI_ViewOutsideFaceCone( const idPlane facePlanes[6], const idVec3 corners[8] ) {
+	for ( int p = 0; p < 6; p++ ) {
+		int c = 0;
+		for ( ; c < 8; c++ ) {
+			if ( facePlanes[p].Distance( corners[c] ) <= 0.0f ) {
+				break;			// this corner is inside -> plane doesn't separate
+			}
+		}
+		if ( c == 8 ) {
+			return true;		// all 8 corners outside this plane -> disjoint
+		}
+	}
+	return false;
+}
+
+// distance used to normalize radial depth: the light's box reach plus any lightCenter
+// offset, so every lit caster maps into [0,1].
+static float RB_RHI_PointLightRange( const viewLight_t *vLight ) {
+	float range = vLight->lightDef->parms.lightRadius.Length()
+	            + vLight->lightDef->parms.lightCenter.Length();
+	range *= r_shadowMapPointRangeScale.GetFloat();
+	return range < 1.0f ? 1.0f : range;
+}
+
+/*
+===================
+RB_RHI_ShadowMapPassCube
+
+Renders a point light's occluder depth into the shared cube target, one 90-degree
+face at a time with per-face culling. Returns false (→ stencil fallback) if the cube
+target can't be created.
+===================
+*/
+static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderHandle prog, float range ) {
+	// cap the upper bound at what the GL context actually supports for cube maps, so
+	// an 8192 request degrades gracefully on cards reporting less (GL 3.3 only
+	// guarantees 1024). maxCubeMapSize is queried once at init.
+	const int cubeHi = idMath::ClampInt( 128, 4096, glConfig.maxCubeMapSize );
+	const int base = idMath::ClampInt( 128, cubeHi, r_shadowMapPointSize.GetInteger() );
+	// adaptive per-light resolution from the light radius, pooled per tier (see the
+	// 2D pass). rhiShadowCube/Size track the selected slot for the texel size and the
+	// caller's GetRenderTargetImage sample.
+	const float radius = vLight->lightDef->parms.lightRadius.Length();
+	const int tier = RB_RHI_ShadowTier( radius );
+	const int size = RB_RHI_TierSize( base, tier, 128, cubeHi );
+	rhiShadowCube = RB_RHI_ShadowPoolTarget( r, true, tier, size );
+	rhiShadowCubeSize = size;
+	if ( rhiShadowCube == 0 ) {
+		return false;
+	}
+
+	const idVec3 &L = vLight->globalLightOrigin;
+
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.depth = true;
+
+	// whole-face view-frustum cull: fetch the camera frustum corners once, then skip
+	// the (expensive) occluder rasterization on any face whose cone can't reach the
+	// view. The face is still cleared to far depth so seamless cube sampling reads it
+	// as "lit" at shared edges — only the geometry, the dominant cost, is skipped.
+	idVec3 viewCorners[8];
+	const bool faceCull = r_shadowMapFaceCull.GetBool() && backEnd.viewDef;
+	if ( faceCull ) {
+		backEnd.viewDef->viewFrustum.ToPoints( viewCorners );
+	}
+
+	for ( int face = 0; face < 6; face++ ) {
+		float vp[16];
+		RB_RHI_CubeFaceViewProj( face, range, vp );
+		idPlane planes[6];
+		RB_RHI_ExtractWorldFrustum( vp, L, planes );
+
+		const bool cullFace = faceCull && RB_RHI_ViewOutsideFaceCone( planes, viewCorners );
+
+		r->BeginCubeFacePass( rhiShadowCube, face, &clear );
+		if ( !cullFace ) {
+			// single complete occluder set (full ambientTris, view-independent); see the
+			// shadowMapCasters comment in idInteraction::AddActiveInteraction
+			RB_RHI_ShadowCasterChainCube( r, vLight->shadowMapCasters, prog, vp, planes, L, range );
+			rhiShadowCubeFaces++;
+		} else {
+			rhiShadowCubeFacesCulled++;
+		}
+		r->EndPass();
+	}
+	return true;
+}
+
+// A point light may cube-shadow if it casts shadows at all and has interaction
+// geometry — same rule as the projected path, minus the projected-vs-point test.
+static bool RB_RHI_PointLightShadowEligible( const viewLight_t *vLight ) {
+	if ( !vLight->lightDef || !vLight->lightDef->parms.pointLight || vLight->lightDef->parms.parallel ) {
+		return false;
+	}
+	if ( !( vLight->localInteractions || vLight->globalInteractions ) ) {
+		return false;
+	}
+	if ( vLight->lightDef->parms.noShadows || !vLight->lightShader->LightCastsShadows() ) {
+		return false;
+	}
+	return true;
+}
+
+// on-screen importance proxy: the light's scissor-rect area (bigger/closer lights
+// score higher). Used to spend the point-light shadow budget on what matters most.
+static int RB_RHI_LightScore( const viewLight_t *vLight ) {
+	const idScreenRect &s = vLight->scissorRect;
+	const int w = s.x2 - s.x1 + 1;
+	const int h = s.y2 - s.y1 + 1;
+	return ( w > 0 && h > 0 ) ? w * h : 0;
+}
+
+// Budget: cube-shadow only the r_shadowMapPointLimit highest-scoring point lights this
+// view; while r_shadowMapping is on the rest render unshadowed (stencil is off entirely),
+// so this bounds the cube-map cost. 0 = all point lights. O(lights^2) but the light count
+// per view is small.
+static bool RB_RHI_PointLightInBudget( const viewDef_t *viewDef, const viewLight_t *self ) {
+	const int limit = r_shadowMapPointLimit.GetInteger();
+	if ( limit <= 0 ) {
+		return true;
+	}
+	const int myScore = RB_RHI_LightScore( self );
+	int better = 0;
+	for ( viewLight_t *vl = viewDef->viewLights; vl; vl = vl->next ) {
+		if ( vl == self || !RB_RHI_PointLightShadowEligible( vl ) ) {
+			continue;
+		}
+		const int sc = RB_RHI_LightScore( vl );
+		// strict score, ties broken by address so the set is stable and disjoint
+		if ( sc > myScore || ( sc == myScore && vl < self ) ) {
+			better++;
+		}
+	}
+	return better < limit;
 }
 
 /*
@@ -791,6 +1292,7 @@ RB_STD_DrawView / RB_ARB2_DrawInteractions pass order.
 void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	rhi::ShaderHandle shadowProg = r->LoadShader( "shadow" );
 	rhi::ShaderHandle shadowMapProg = r->LoadShader( "shadow_sm" );
+	rhi::ShaderHandle shadowCubeProg = r->LoadShader( "shadow_sm_cube" );
 
 	ictx.r = r;
 	ictx.viewDef = viewDef;
@@ -813,6 +1315,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	int dbgLit = 0, dbgProjected = 0, dbgShadowMapped = 0, dbgPoint = 0,
 	    dbgParallel = 0, dbgNoShadow = 0, dbgNoLightDef = 0;
 	rhiShadowPerfCasters = 0;
+	rhiShadowCubeLights = 0;
+	rhiShadowCubeCasters = 0;
+	rhiShadowCubeFaces = 0;
+	rhiShadowCubeFacesCulled = 0;
 	if ( !r_skipInteractions.GetBool() ) {
 		for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
 			backEnd.vLight = vLight;
@@ -838,13 +1344,15 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				}
 			}
 
-			// DUDE Phase 3.5: choose the shadow technique for this light. Shadow
-			// maps handle projected/spot lights that cast shadows; point and
-			// parallel lights fall back to stencil (not yet implemented), which is
-			// exactly the free per-light mixing. Reading lightDef->parms here is a
-			// read-only frontend query (no SMP in this backend path).
+			// DUDE Phase 3.5: choose the shadow technique for this light. Shadow maps
+			// handle projected/spot lights (2D) and the budgeted top point lights
+			// (cube); everything else — parallel lights, out-of-budget point lights —
+			// falls back to stencil. That mix is exactly the free per-light selection.
+			// Reading lightDef->parms here is a read-only frontend query.
 			ictx.lightShadowMapped = false;
 			ictx.shadowImage = 0;
+			ictx.lightShadowCube = false;
+			ictx.shadowCubeImage = 0;
 
 			// stencil shadow volumes present for this light (built only for opaque,
 			// non-noShadows casters)
@@ -852,26 +1360,82 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 
 			// Perforated grates/fences are flagged noShadows, so they build NO stencil
 			// shadow volumes — gating the shadow-map pass on castsShadows would skip a
-			// projected light that only illuminates a grate, defeating the whole
-			// perforated feature. Instead run the map whenever the light is permitted
-			// to cast shadows (light-level flags) and has interaction geometry to
-			// render into it; the per-surface caster rules still apply inside the pass.
+			// light that only illuminates a grate, defeating the whole perforated
+			// feature. Instead run the map whenever the light is permitted to cast
+			// shadows (light-level flags) and has interaction geometry to render into
+			// it; the per-surface caster rules still apply inside the pass.
 			const bool hasInteractions = ( vLight->localInteractions || vLight->globalInteractions );
 			const bool lightMayShadow = vLight->lightDef && !vLight->lightDef->parms.noShadows
 			    && vLight->lightShader->LightCastsShadows();
-			if ( r_shadowMapping.GetBool() && lightMayShadow && hasInteractions
-			     && !vLight->lightDef->parms.pointLight && !vLight->lightDef->parms.parallel ) {
-				if ( RB_RHI_ShadowMapPass( r, vLight, shadowMapProg ) ) {
-					ictx.lightShadowMapped = true;
-					ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
-					dbgShadowMapped++;
+			const bool isPoint = vLight->lightDef && vLight->lightDef->parms.pointLight;
+			const bool isParallel = vLight->lightDef && vLight->lightDef->parms.parallel;
+			const bool smEnabled = r_shadowMapping.GetBool();
+
+			if ( smEnabled && lightMayShadow && hasInteractions ) {
+				if ( !isPoint && !isParallel ) {
+					// projected / spot light: single 2D depth map
+					if ( RB_RHI_ShadowMapPass( r, vLight, shadowMapProg ) ) {
+						ictx.lightShadowMapped = true;
+						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
+						dbgShadowMapped++;
+					}
+				} else if ( isPoint && !isParallel && RB_RHI_PointLightInBudget( viewDef, vLight ) ) {
+					// point / omni light: 6-face cube map, budgeted by on-screen
+					// importance (r_shadowMapPointLimit) so a busy room stays bounded
+					const float range = RB_RHI_PointLightRange( vLight );
+					if ( RB_RHI_ShadowMapPassCube( r, vLight, shadowCubeProg, range ) ) {
+						ictx.lightShadowCube = true;
+						ictx.shadowCubeImage = r->GetRenderTargetImage( rhiShadowCube );
+						ictx.lightRange = range;
+						rhiShadowCubeLights++;
+					}
 				}
 			}
+
+			// either shadow-map technique replaces the stencil test for this light
+			const bool shadowMapped = ictx.lightShadowMapped || ictx.lightShadowCube;
+
+			// r_shadowMapDebug 2: per-light readout so we can see, when a shadow blinks
+			// out, exactly what changed — is the light even here, did it get a map, and
+			// how many occluders reached it (interactions + off-screen casters)?
+			if ( r_shadowMapDebug.GetInteger() >= 2 && vLight->lightDef ) {
+				const idVec3 lorg = vLight->globalLightOrigin;
+				const idVec3 dv = lorg - viewDef->renderView.vieworg;
+				const float dist = dv.Length();
+				const float radius = vLight->lightDef->parms.lightRadius.Length();
+				// litG/litL = lit (receiver) surface counts; casters = occluders drawn
+				// into the shadow map. range = cube depth normalizer / far plane.
+				const float effRange = isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
+				// adaptive resolution this light would/did use, so the tier picks show up
+				const int dbgLo = isPoint ? 128 : 256;
+				const int dbgHi = isPoint ? idMath::ClampInt( 128, 4096, glConfig.maxCubeMapSize )
+				                          : idMath::ClampInt( 256, 4096, glConfig.maxTextureSize );
+				const int dbgBase = idMath::ClampInt( dbgLo, dbgHi,
+				    isPoint ? r_shadowMapPointSize.GetInteger() : r_shadowMapSize.GetInteger() );
+				const int dbgRes = RB_RHI_TierSize( dbgBase, RB_RHI_ShadowTier( radius ), dbgLo, dbgHi );
+				common->Printf( "  light %d: %s%s map=%s res=%d litG=%d litL=%d casters=%d dist=%.0f radius=%.0f range=%.0f\n",
+				                vLight->lightDef->index,
+				                isPoint ? "point" : ( isParallel ? "parallel" : "projected" ),
+				                lightMayShadow ? "" : " (noShadow)",
+				                ictx.lightShadowCube ? "cube" : ( ictx.lightShadowMapped ? "2D" : "none" ),
+				                dbgRes,
+				                RB_RHI_CountLightChain( vLight->globalInteractions ),
+				                RB_RHI_CountLightChain( vLight->localInteractions ),
+				                RB_RHI_CountLightChain( vLight->shadowMapCasters ),
+				                dist, radius, effRange );
+			}
+
+			// While shadow mapping is enabled, stencil shadows are OFF entirely: a
+			// light either gets a shadow map or renders unshadowed. This keeps the
+			// frame a pure shadow-map cost so drops can be pinned on the map passes,
+			// rather than a stencil/shadow-map mix. Only when r_shadowMapping is off
+			// do we take the vanilla stencil path.
+			const bool useStencil = castsShadows && !shadowMapped && !smEnabled;
 
 			// scissor + stencil-clear setup: needed for either shadow technique.
 			// Clear stencil only for the stencil path — the shadow-map path never
 			// tests stencil.
-			if ( castsShadows || ictx.lightShadowMapped ) {
+			if ( castsShadows || shadowMapped || smEnabled ) {
 				backEnd.currentScissor = vLight->scissorRect;
 				if ( r_useScissor.GetBool() ) {
 					r->SetScissor( viewDef->viewport.x1 + backEnd.currentScissor.x1,
@@ -879,17 +1443,19 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 					               backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
 					               backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
 				}
-				if ( !ictx.lightShadowMapped ) {
+				if ( useStencil ) {
 					qglClear( GL_STENCIL_BUFFER_BIT );
 				}
 			}
-			if ( !castsShadows || ictx.lightShadowMapped ) {
+			if ( !useStencil ) {
 				// stencil always passes; visibility comes from the map (if any)
 				qglStencilFunc( GL_ALWAYS, 128, 255 );
 			}
 
 			ictx.depthFuncBits = GLS_DEPTHFUNC_EQUAL;
-			if ( ictx.lightShadowMapped ) {
+			if ( !useStencil ) {
+				// shadow-mapped, or shadow mapping on but this light isn't mapped
+				// (out-of-budget point, parallel, failed pass): draw unshadowed
 				RB_RHI_CreateDrawInteractions( vLight->localInteractions );
 				RB_RHI_CreateDrawInteractions( vLight->globalInteractions );
 			} else {
@@ -911,9 +1477,11 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	backEnd.vLight = NULL;
 
 	if ( r_shadowMapDebug.GetBool() ) {
-		common->Printf( "shadowMap: %d lit lights | projected %d (shadow-mapped %d, no-shadow %d) | point %d | parallel %d | no-lightDef %d | perforated-casters %d | r_shadowMapping %d\n",
+		common->Printf( "shadowMap: %d lit | projected %d (2D-mapped %d, no-shadow %d) | point %d (cube-mapped %d, cube-casters %d, faces %d drawn/%d culled) | parallel %d | no-lightDef %d | perforated-casters %d | r_shadowMapping %d\n",
 		                dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,
-		                dbgPoint, dbgParallel, dbgNoLightDef, rhiShadowPerfCasters, r_shadowMapping.GetInteger() );
+		                dbgPoint, rhiShadowCubeLights, rhiShadowCubeCasters,
+		                rhiShadowCubeFaces, rhiShadowCubeFacesCulled, dbgParallel, dbgNoLightDef,
+		                rhiShadowPerfCasters, r_shadowMapping.GetInteger() );
 	}
 
 	// shader passes run with stencil satisfied everywhere

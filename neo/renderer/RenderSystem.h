@@ -54,6 +54,7 @@ typedef struct glconfig_s {
 
 
 	int					maxTextureSize;			// queried from GL
+	int					maxCubeMapSize;			// GL_MAX_CUBE_MAP_TEXTURE_SIZE (>=1024 in GL 3.3)
 	int					maxTextureUnits;
 	int					maxTextureCoords;
 	int					maxTextureImageUnits;

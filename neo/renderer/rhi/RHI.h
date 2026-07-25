@@ -66,6 +66,8 @@ struct DrawArgs {
 	int				uniformSize;
 	ImageHandle		textures[8];	// by unit, 0 = unbound
 	SamplerHandle	samplers[8];
+	ImageHandle		shadowCube;		// point-light cube depth map; bound to unit 8
+									// as a GL_TEXTURE_CUBE_MAP (0 = unbound)
 };
 
 struct ClearArgs {
@@ -113,7 +115,14 @@ public:
 	// via GetRenderTargetImage() as a sampler2DShadow-ready depth texture. Returns
 	// 0 on failure (e.g. incomplete FBO); callers must cope with an absent target.
 	virtual RenderTargetHandle	CreateRenderTarget( ImageFormat fmt, int w, int h ) = 0;
+	// Cube depth target for point-light (omni) shadow maps: six square depth faces
+	// sampled as a samplerCubeShadow. Render each face with BeginCubeFacePass();
+	// DestroyRenderTarget / GetRenderTargetImage work the same as the 2D target.
+	virtual RenderTargetHandle	CreateRenderTargetCube( ImageFormat fmt, int size ) = 0;
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt ) = 0;
+	// begin a pass into one face (0..5 = +X,-X,+Y,-Y,+Z,-Z) of a cube target.
+	// EndPass restores the backbuffer + viewport exactly like BeginTargetPass.
+	virtual void				BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear ) = 0;
 	// the target's texture as a sampleable image handle — the same ImageHandle
 	// abstraction future material textures will use (Phase 4 image ownership).
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt ) = 0;

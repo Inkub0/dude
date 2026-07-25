@@ -115,6 +115,7 @@ class GL3Backend : public RHI {
 		GLuint	fbo;
 		GLuint	tex;
 		int		w, h;
+		bool	cube;		// tex is a GL_TEXTURE_CUBE_MAP (point-light shadow map)
 	};
 	renderTarget_t		renderTargets[MAX_RENDER_TARGETS];
 	RenderTargetHandle	activeTarget;		// 0 = backbuffer; set by BeginTargetPass
@@ -182,6 +183,9 @@ public:
 		                uboRing.persist ? "persistently mapped (fast)" : "orphaned per draw" );
 
 		gl3GenVertexArrays( VL_COUNT, vaos );
+
+		// seamless cube filtering so shadow-cube PCF taps don't seam at face edges
+		qglEnable( GL_TEXTURE_CUBE_MAP_SEAMLESS );
 
 		// attribute enable is VAO state: set it once here so the per-draw
 		// BindVertexLayout only has to (re)specify the pointers when the bound
@@ -341,6 +345,23 @@ public:
 		DoClear( clear );
 	}
 
+	virtual void BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear ) {
+		if ( rt == 0 || rt >= (RenderTargetHandle)MAX_RENDER_TARGETS || !renderTargets[rt].fbo
+		     || !renderTargets[rt].cube || face < 0 || face > 5 ) {
+			return;
+		}
+		const renderTarget_t &t = renderTargets[rt];
+		qglGetIntegerv( GL_VIEWPORT, savedViewport );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, t.fbo );
+		activeTarget = rt;
+		// point the depth attachment at this cube face, then clear + draw into it
+		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+		                         GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, t.tex, 0 );
+		qglViewport( 0, 0, t.w, t.h );
+		qglScissor( 0, 0, t.w, t.h );
+		DoClear( clear );
+	}
+
 	virtual void EndPass() {
 		if ( activeTarget ) {
 			// return to the backbuffer and restore the view it had
@@ -473,8 +494,79 @@ public:
 		renderTargets[slot].tex = tex;
 		renderTargets[slot].w = w;
 		renderTargets[slot].h = h;
+		renderTargets[slot].cube = false;
 		boundVBO = 0;	// binding the FBO's texture disturbed unit-0 bind tracking
 		common->Printf( "GL3: created %dx%d depth render target (handle %d)\n", w, h, slot );
+		return (RenderTargetHandle)slot;
+	}
+
+	// Cube depth target for omni (point-light) shadow maps: one GL_TEXTURE_CUBE_MAP
+	// with six DEPTH_COMPONENT24 faces, hardware depth-compare so a samplerCubeShadow
+	// returns 0..1. One FBO whose depth attachment is re-pointed per face by
+	// BeginCubeFacePass(). CLAMP_TO_EDGE + seamless filtering keeps PCF taps from
+	// seaming at face borders.
+	virtual RenderTargetHandle CreateRenderTargetCube( ImageFormat fmt, int size ) {
+		if ( !initialized || size <= 0 ) {
+			return 0;
+		}
+		if ( fmt != IF_DEPTH24 ) {
+			common->Warning( "GL3 CreateRenderTargetCube: only IF_DEPTH24 supported" );
+			return 0;
+		}
+		int slot = -1;
+		for ( int i = 1; i < MAX_RENDER_TARGETS; i++ ) {
+			if ( renderTargets[i].fbo == 0 && renderTargets[i].tex == 0 ) {
+				slot = i;
+				break;
+			}
+		}
+		if ( slot < 0 ) {
+			common->Warning( "GL3 CreateRenderTargetCube: out of render-target slots" );
+			return 0;
+		}
+
+		GLuint tex = 0;
+		qglGenTextures( 1, &tex );
+		gl3ActiveTexture( GL_TEXTURE0 );
+		qglBindTexture( GL_TEXTURE_CUBE_MAP, tex );
+		for ( int face = 0; face < 6; face++ ) {
+			qglTexImage2D( GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_DEPTH_COMPONENT24,
+			               size, size, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL );
+		}
+		qglTexParameteri( GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+		qglTexParameteri( GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+		qglTexParameteri( GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+		qglTexParameteri( GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+		qglTexParameteri( GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE );
+		qglTexParameteri( GL_TEXTURE_CUBE_MAP, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE );
+		qglTexParameteri( GL_TEXTURE_CUBE_MAP, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL );
+
+		GLuint fbo = 0;
+		gl3GenFramebuffers( 1, &fbo );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, fbo );
+		// attach face 0 for the completeness check; BeginCubeFacePass re-points it
+		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+		                         GL_TEXTURE_CUBE_MAP_POSITIVE_X, tex, 0 );
+		qglDrawBuffer( GL_NONE );
+		qglReadBuffer( GL_NONE );
+		GLenum status = gl3CheckFramebufferStatus( GL_FRAMEBUFFER );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
+		qglBindTexture( GL_TEXTURE_CUBE_MAP, 0 );
+
+		if ( status != GL_FRAMEBUFFER_COMPLETE ) {
+			common->Warning( "GL3 CreateRenderTargetCube: incomplete FBO (0x%x), %d^2x6", status, size );
+			gl3DeleteFramebuffers( 1, &fbo );
+			qglDeleteTextures( 1, &tex );
+			return 0;
+		}
+
+		renderTargets[slot].fbo = fbo;
+		renderTargets[slot].tex = tex;
+		renderTargets[slot].w = size;
+		renderTargets[slot].h = size;
+		renderTargets[slot].cube = true;
+		boundVBO = 0;
+		common->Printf( "GL3: created %d^2 cube depth render target (handle %d)\n", size, slot );
 		return (RenderTargetHandle)slot;
 	}
 
@@ -526,6 +618,13 @@ public:
 				gl3ActiveTexture( GL_TEXTURE0 + i );
 				qglBindTexture( GL_TEXTURE_2D, args.textures[i] );
 			}
+		}
+		// unit 8: point-light cube shadow map (samplerCubeShadow in interaction.frag).
+		// Only bound for cube-shadowed lights; like the 2D shadow on unit 7, other
+		// draws simply don't sample it (u_shadowParms.x selects the path).
+		if ( args.shadowCube ) {
+			gl3ActiveTexture( GL_TEXTURE0 + 8 );
+			qglBindTexture( GL_TEXTURE_CUBE_MAP, args.shadowCube );
 		}
 
 		qglDrawElements( GL_TRIANGLES, args.indexCount, GL_UNSIGNED_INT,

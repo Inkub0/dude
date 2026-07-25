@@ -283,10 +283,15 @@ idCVar r_specularExp( "r_specularExp", "16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR
 // stencil until implemented). See docs/port-phases.md Phase 8.
 idCVar r_shadowMapping( "r_shadowMapping", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "shadow technique: 0 = stencil volumes (faithful), 1 = shadow maps where supported" );
 idCVar r_shadowMapSize( "r_shadowMapSize", "1024", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "shadow map resolution (per light), power of two", 256, 4096 );
-idCVar r_shadowMapBias( "r_shadowMapBias", "0.0025", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias to suppress acne", 0.0f, 0.5f );
-idCVar r_shadowMapDebug( "r_shadowMapDebug", "0", CVAR_RENDERER | CVAR_BOOL, "print per-view shadow-map light classification (projected vs stencil-fallback)" );
+idCVar r_shadowMapBias( "r_shadowMapBias", "0.0025", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for world/perforated receivers (acne suppression)", 0.0f, 0.5f );
+idCVar r_shadowMapModelBias( "r_shadowMapModelBias", "0.005", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for model (non-world) receivers; models usually need more", 0.0f, 0.5f );
+idCVar r_shadowMapDebug( "r_shadowMapDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "shadow-map debug: 1 = per-view light classification summary, 2 = also per-light readout (technique, occluder counts, dist/radius)", 0, 2 );
 idCVar r_shadowMapCull( "r_shadowMapCull", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "shadow caster faces: 0 = front, 1 = back (second-depth, less acne), 2 = two-sided", 0, 2 );
 idCVar r_shadowMapPerforated( "r_shadowMapPerforated", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "let perforated (alpha-tested) grates/fences cast real punched-out shadow maps even when flagged noShadows (that flag exists only because stencil couldn't perforate)" );
+idCVar r_shadowMapPointSize( "r_shadowMapPointSize", "2048", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "point-light cube shadow map resolution per face (6 faces); lower than the 2D map since faces cover more", 128, 4096 );
+idCVar r_shadowMapPointLimit( "r_shadowMapPointLimit", "64", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "max point lights that get a cube shadow map per view (by on-screen importance); out-of-budget point lights are left unshadowed while r_shadowMapping is on. 0 = all point lights", 0, 128 );
+idCVar r_shadowMapSizeScale( "r_shadowMapSizeScale", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "scale each light's shadow-map resolution with its radius so texel-to-world size (shadow-edge sharpness) stays roughly constant; large lights get more resolution, small lights less" );
+idCVar r_shadowMapSizeScaleRadius( "r_shadowMapSizeScaleRadius", "380", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "light radius that maps to the base shadow resolution (r_shadowMapSize / r_shadowMapPointSize); lights larger than this get proportionally more resolution, smaller ones less", 16.0f, 8192.0f );
 
 // DUDE: gate for the non-vanilla "Enhancements" (see tr_local.h). Only the GL 3.3
 // core backend qualifies today; Vulkan backends will extend this once they land.
@@ -918,6 +923,12 @@ void R_InitOpenGL( void ) {
 	if ( glConfig.maxTextureSize <= 0 ) {
 		glConfig.maxTextureSize = 256;
 	}
+
+	// cube-map limit, used to clamp shadow-map cube resolution (GL 3.3 guarantees
+	// at least 1024; real cards report 8192-32768). core since GL 1.3.
+	temp = 0;
+	qglGetIntegerv( GL_MAX_CUBE_MAP_TEXTURE_SIZE, &temp );
+	glConfig.maxCubeMapSize = temp > 0 ? temp : 1024;
 
 	glConfig.isInitialized = true;
 
@@ -2179,6 +2190,7 @@ static void GfxInfo_f( const idCmdArgs &args ) {
 	common->Printf( "GL_VERSION: %s\n", glConfig.version_string );
 	common->Printf( "GL_EXTENSIONS: %s\n", glConfig.extensions_string );
 	common->Printf( "GL_MAX_TEXTURE_SIZE: %d\n", glConfig.maxTextureSize );
+	common->Printf( "GL_MAX_CUBE_MAP_TEXTURE_SIZE: %d\n", glConfig.maxCubeMapSize );
 	common->Printf( "GL_MAX_TEXTURE_UNITS_ARB: %d\n", glConfig.maxTextureUnits );
 	common->Printf( "GL_MAX_TEXTURE_COORDS_ARB: %d\n", glConfig.maxTextureCoords );
 	common->Printf( "GL_MAX_TEXTURE_IMAGE_UNITS_ARB: %d\n", glConfig.maxTextureImageUnits );

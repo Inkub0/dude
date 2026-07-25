@@ -63,6 +63,17 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE				0x812F
 #endif
+// cube-map depth targets (point-light shadow maps)
+#ifndef GL_TEXTURE_CUBE_MAP
+#define GL_TEXTURE_CUBE_MAP				0x8513
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_X	0x8515
+#endif
+#ifndef GL_TEXTURE_WRAP_R
+#define GL_TEXTURE_WRAP_R				0x8072
+#endif
+#ifndef GL_TEXTURE_CUBE_MAP_SEAMLESS
+#define GL_TEXTURE_CUBE_MAP_SEAMLESS	0x884F
+#endif
 #ifndef GL_CLAMP_TO_BORDER
 #define GL_CLAMP_TO_BORDER				0x812D
 #define GL_TEXTURE_BORDER_COLOR			0x1004

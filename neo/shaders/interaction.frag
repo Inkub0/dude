@@ -10,7 +10,8 @@ SAMPLER_BINDING(3) uniform sampler2D u_lightProjection;
 SAMPLER_BINDING(4) uniform sampler2D u_diffuseMap;
 SAMPLER_BINDING(5) uniform sampler2D u_specularMap;
 SAMPLER_BINDING(6) uniform sampler2D u_specularTable;   // specular falloff LUT
-SAMPLER_BINDING(7) uniform sampler2DShadow u_shadowMap; // depth map of a shadow-mapped light
+SAMPLER_BINDING(7) uniform sampler2DShadow u_shadowMap; // 2D depth map (projected/spot light)
+SAMPLER_BINDING(8) uniform samplerCubeShadow u_shadowCube; // cube depth map (point light)
 
 VARY(0) in vec3 var_TexLightVec;
 VARY(1) in vec2 var_TexBump;
@@ -21,19 +22,26 @@ VARY(5) in vec2 var_TexSpecular;
 VARY(6) in vec3 var_TexHalfVec;
 VARY(7) in vec4 var_Color;
 VARY(8) in vec3 var_TexViewVec;
+VARY(9) in vec3 var_ShadowCubeVec;
 
 layout(location = 0) out vec4 fragColor;
 
-// 0 = fully shadowed, 1 = fully lit. The lookup reuses the light-projection
-// texgen: var_TexProjection gives the same (S/Q, T/Q) UV as the light cookie, so
-// the shadow aligns exactly with the lit cone, and var_TexFalloff.x is the linear
-// distance along the light axis — the very value the caster pass wrote as depth.
-// Hardware depth-compare sampler (2x2 PCF) plus a 4-tap Poisson spread for softer
-// edges. Faithful default disables this (u_shadowParms.x == 0), so vanilla and
-// stencil-shadowed lights are untouched.
+// 0 = fully shadowed, 1 = fully lit. u_shadowParms.x selects the technique:
+//   0 = none (stencil / unshadowed) -> always lit, vanilla untouched
+//   1 = projected/spot: 2D map, reusing the light-projection texgen
+//       (var_TexProjection gives the cookie UV, var_TexFalloff.x the axial depth)
+//   2 = point/omni: cube map, indexed by the world-space light->frag direction
+//       (var_ShadowCubeVec), reference = radial distance / range
+// Hardware depth-compare sampler (2x2 PCF); the 2D path adds a 4-tap Poisson spread.
 float shadowVisibility() {
 	if ( u_shadowParms.x == 0.0 ) {
 		return 1.0;
+	}
+	if ( u_shadowParms.x > 1.5 ) {
+		// point light: the caster stored linear radial distance/range as depth, so
+		// compare the same quantity here. Single hardware-PCF tap (2x2, seamless).
+		float ref = length( var_ShadowCubeVec ) / max( u_shadowParms.w, 1.0 ) - u_shadowParms.z;
+		return texture( u_shadowCube, vec4( var_ShadowCubeVec, ref ) );
 	}
 	if ( var_TexProjection.w <= 0.0 ) {
 		return 1.0;						// behind the light apex -> lit

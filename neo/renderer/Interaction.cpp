@@ -1172,6 +1172,53 @@ void idInteraction::AddActiveInteraction( void ) {
 			}
 		}
 
+		// DUDE Phase 3.5: build the light's COMPLETE shadow-map occluder set here, once,
+		// view-independently. This is the single source the shadow-map pass renders from
+		// (it does NOT use globalInteractions/localInteractions): those carry the light-
+		// clipped "lightTris" geometry, which only covers what the camera sees and does
+		// not reliably reproduce the shadow, whereas this list carries each caster's full
+		// original surface (ambientTris) — so shadows stay put as you turn, and every
+		// caster is drawn exactly once.
+		//
+		// A surface qualifies if its material casts shadows (normal casters) OR it is a
+		// perforated grate/fence/ceiling under the perforated override — those are flagged
+		// noShadows (so SurfaceCastsShadow()/HasShadows() reject them) yet must still punch
+		// a real shadow. Mirrors the backend's RB_RHI_ShadowCasterAllowed.
+		const bool lightCastsShadows = !lightDef->parms.noShadows
+			&& lightDef->lightShader->LightCastsShadows();
+		const bool perforatedOverride = r_shadowMapPerforated.GetBool()
+			&& sint->shader && sint->shader->Coverage() == MC_PERFORATED;
+		const bool normalCaster = HasShadows()
+			&& sint->shader && sint->shader->SurfaceCastsShadow();
+		if ( r_shadowMapping.GetBool() && sint->ambientTris && lightCastsShadows
+				&& ( normalCaster || perforatedOverride ) ) {
+
+			bool suppressed = false;
+			if ( !r_skipSuppress.GetBool() ) {
+				suppressed = ( entityDef->parms.suppressShadowInViewID
+						&& entityDef->parms.suppressShadowInViewID == tr.viewDef->renderView.viewID )
+					|| ( entityDef->parms.suppressShadowInLightID
+						&& entityDef->parms.suppressShadowInLightID == lightDef->parms.lightId );
+			}
+
+			if ( !suppressed ) {
+				srfTriangles_t *castTri = sint->ambientTris;
+				bool haveCache = ( castTri->ambientCache != NULL )
+					|| R_CreateAmbientCache( castTri, sint->shader->ReceivesLighting() );
+				if ( haveCache ) {
+					vertexCache.Touch( castTri->ambientCache );
+					if ( r_useIndexBuffers.GetBool() && !castTri->indexCache ) {
+						vertexCache.Alloc( castTri->indexes, castTri->numIndexes * sizeof( castTri->indexes[0] ), &castTri->indexCache, true );
+					}
+					if ( castTri->indexCache ) {
+						vertexCache.Touch( castTri->indexCache );
+					}
+					R_LinkLightSurf( &vLight->shadowMapCasters, castTri, vEntity,
+						lightDef, sint->shader, vLight->scissorRect, false );
+				}
+			}
+		}
+
 		srfTriangles_t *shadowTris = sint->shadowTris;
 
 		// the shadows will always have to be added, unless we can tell they

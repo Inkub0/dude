@@ -55,7 +55,9 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // x = scale, y = exponent, z = shading model
 	                            // (0 LUT / 1 Blinn-Phong / 2 Phong), w unused
 
-	vec4 u_shadowParms;          // x = shadow map enabled (0/1), y = texel size (1/res),
-	                            // z = depth-compare bias, w unused. The shadow lookup
-	                            // reuses the light-projection texgen (S/T/Q + falloff).
+	vec4 u_shadowParms;          // x = technique (0 none / 1 projected-2D / 2 point-cube),
+	                            // y = texel size (1/res), z = depth-compare bias,
+	                            // w = light range (point-cube radial normalizer). The 2D
+	                            // path reuses the light-projection texgen (S/T/Q + falloff);
+	                            // the cube path uses the world-space light->frag direction.
 };

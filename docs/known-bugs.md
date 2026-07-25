@@ -4,7 +4,14 @@ Deferred until the rendering pipeline is complete — tracked here for later tri
 Hub: [vulkan-port.md](vulkan-port.md). Deliberate deviations (not bugs) are in
 [readme-changes.md](readme-changes.md).
 
-_No open bugs currently._
+- **Sometimes transparent surfaces such as windows render with an iridescent fade.**
+- This seems to be happening randomly and usually closing the game and 
+relaunching it fixes the problem.
+
+- **Shadow bias needs to be different for flashlight**
+as generally a shadow bias of 1 seems to work with some lights such as 
+shadow casting fans across the game, the flashlight needs to be at 0.0001
+to 0.005. a good value should be hardcoded for the flashlight.
 
 ## Resolved
 - **World goes black around a mirror; main-menu planet disappears on approach**
