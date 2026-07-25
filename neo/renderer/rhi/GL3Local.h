@@ -78,6 +78,13 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #define GL_CLAMP_TO_BORDER				0x812D
 #define GL_TEXTURE_BORDER_COLOR			0x1004
 #endif
+// vendor VRAM-size queries (used to auto-size the shadow cache budget)
+#ifndef GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX
+#define GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX			0x9047	// total dedicated VRAM, KB
+#endif
+#ifndef GL_TEXTURE_FREE_MEMORY_ATI
+#define GL_TEXTURE_FREE_MEMORY_ATI						0x87FC	// [0] = total texture pool, KB
+#endif
 
 // every core entry point the backend uses beyond fixed GL 1.1 (qgl covers those).
 // X-macro: GL3F( pointer-typedef, NameWithoutGlPrefix )

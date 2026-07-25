@@ -877,6 +877,8 @@ extern idCVar r_shadowMapPointRangeScale;	// scale point-light cube shadow range
 extern idCVar r_shadowMapSizeScale;			// scale per-light shadow resolution with light radius
 extern idCVar r_shadowMapSizeScaleRadius;	// light radius mapped to the base shadow resolution
 extern idCVar r_shadowMapFaceCull;			// skip cube faces outside the view frustum
+extern idCVar r_shadowMapCache;				// cache static point-light cube maps across frames
+extern idCVar r_shadowMapCacheMB;			// VRAM budget for the shadow-map cache (MB; -1 auto, 0 unlimited)
 
 extern idCVar r_renderer;				// arb2, etc
 

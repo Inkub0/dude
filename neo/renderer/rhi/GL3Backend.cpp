@@ -110,7 +110,9 @@ class GL3Backend : public RHI {
 	// Handle is a 1-based index into this array (handle 0 == the backbuffer);
 	// a slot with fbo == 0 is free. FBO/draw/read-buffer state is per-FBO in
 	// GL 3.0+, so binding one never disturbs the backbuffer's state.
-	static const int MAX_RENDER_TARGETS = 16;
+	// Sized to hold the static shadow-map cache (up to MAX_SHADOW_CUBE_CACHE = 128
+	// persistent cubes) plus the scratch resolution pools and the 2D map, with margin.
+	static const int MAX_RENDER_TARGETS = 160;
 	struct renderTarget_t {
 		GLuint	fbo;
 		GLuint	tex;

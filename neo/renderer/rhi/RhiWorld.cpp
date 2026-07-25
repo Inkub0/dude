@@ -1170,6 +1170,230 @@ static float RB_RHI_PointLightRange( const viewLight_t *vLight ) {
 
 /*
 ===================
+Static point-light cube shadow cache (r_shadowMapCache)
+
+Profiling showed cube-map *generation* dominated the frame (re-rendering ~60
+static lights every frame). Most point lights and their casters never move, so
+their cube never changes. Each cached light keeps its own persistent cube target;
+each frame we hash the light + its caster set into a token and, if it matches the
+stored one, skip the entire 6-face render and just sample the cube. VRAM is bounded
+by r_shadowMapCacheMB (uncached lights fall back to the shared scratch pool and
+regenerate every frame, exactly as before).
+===================
+*/
+// Bounded by the point-light budget (r_shadowMapPointLimit maxes at 128) and by the
+// backend's render-target table (GL3 MAX_RENDER_TARGETS). VRAM caps live usage lower.
+#define MAX_SHADOW_CUBE_CACHE 128
+
+struct shadowCubeCache_t {
+	int						lightIndex;		// idRenderLightLocal::index; -1 = free slot
+	rhi::RenderTargetHandle	rt;
+	int						size;			// face resolution of rt
+	unsigned long long		token;			// invalidation hash of light + casters
+	int						lastFrame;		// for LRU eviction
+	size_t					bytes;			// VRAM cost estimate
+};
+static shadowCubeCache_t rhiCubeCache[MAX_SHADOW_CUBE_CACHE];
+static size_t rhiCubeCacheBytes = 0;		// sum of live entries' bytes
+static int rhiCubeCacheFrameNo = 0;			// bumped once per view
+// r_shadowMapDebug: cache hits (render skipped) vs misses (rendered) this view.
+static int rhiCubeCacheHits = 0;
+static int rhiCubeCacheMiss = 0;
+// r_shadowMapDebug diagnostics: lights whose caster set contains an animated (non
+// DM_STATIC) occluder, and lights that fell back to the scratch pool (budget/off/full).
+static int rhiCubeCacheDynamic = 0;
+static int rhiCubeCacheScratch = 0;
+
+// depth24 cube cost: 6 faces, 4 bytes/texel (GL pads DEPTH_COMPONENT24 to 32-bit).
+static size_t RB_RHI_CubeBytes( int size ) {
+	return (size_t)6 * (size_t)size * (size_t)size * 4;
+}
+
+// resolved VRAM budget in bytes: -1 = half of detected video memory (2 GB fallback
+// when the vendor query is unavailable), 0 = unlimited.
+static size_t RB_RHI_CacheBudgetBytes() {
+	int mb = r_shadowMapCacheMB.GetInteger();
+	if ( mb < 0 ) {
+		const int vram = glConfig.vidMemMB > 0 ? glConfig.vidMemMB : 2048;
+		mb = vram / 2;
+	}
+	if ( mb <= 0 ) {
+		return (size_t)-1;					// unlimited
+	}
+	return (size_t)mb * 1024 * 1024;
+}
+
+// FNV-1a over a byte range, folded into an accumulator.
+static unsigned long long RB_RHI_HashBytes( unsigned long long h, const void *data, size_t n ) {
+	const unsigned char *p = (const unsigned char *)data;
+	for ( size_t i = 0; i < n; i++ ) {
+		h = ( h ^ p[i] ) * 1099511628211ULL;
+	}
+	return h;
+}
+
+// Invalidation token: the light pose/reach plus every caster's identity and
+// transform. A moving light, a swinging door (modelMatrix), or an animating monster
+// (regenerated geometry / cache handle) all change the token and force a re-render;
+// a fully static light hashes identically every frame and stays cached. The caster
+// contributions are summed so frame-to-frame reordering of the list doesn't matter.
+static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float range, int size,
+                                            bool *outDynamic ) {
+	unsigned long long h = 1469598103934665603ULL;			// FNV offset basis
+	h = RB_RHI_HashBytes( h, vLight->globalLightOrigin.ToFloatPtr(), 3 * sizeof( float ) );
+	h = RB_RHI_HashBytes( h, vLight->lightDef->parms.lightCenter.ToFloatPtr(), 3 * sizeof( float ) );
+	h = RB_RHI_HashBytes( h, &vLight->lightDef->parms.axis, sizeof( idMat3 ) );
+	h = RB_RHI_HashBytes( h, &range, sizeof( range ) );
+	h = RB_RHI_HashBytes( h, &size, sizeof( size ) );
+
+	bool dynamic = false;
+	unsigned long long casters = 0;
+	for ( const drawSurf_t *surf = vLight->shadowMapCasters; surf; surf = surf->nextOnLight ) {
+		unsigned long long c = 1469598103934665603ULL;
+		const idRenderEntityLocal *edef = surf->space ? surf->space->entityDef : NULL;
+		const int idx = edef ? edef->index : -1;
+		c = RB_RHI_HashBytes( c, &idx, sizeof( idx ) );
+		c = RB_RHI_HashBytes( c, surf->space->modelMatrix, 16 * sizeof( float ) );
+		// geometry identity: pointer + index count + cache handle (dynamic models get
+		// a fresh ambient cache each frame, so this flips and invalidates them)
+		const void *geo = surf->geo;
+		c = RB_RHI_HashBytes( c, &geo, sizeof( geo ) );
+		if ( surf->geo ) {
+			c = RB_RHI_HashBytes( c, &surf->geo->numIndexes, sizeof( surf->geo->numIndexes ) );
+			c = RB_RHI_HashBytes( c, &surf->geo->ambientCache, sizeof( surf->geo->ambientCache ) );
+		}
+		casters += c;
+		// animated/particle casters (monsters, ragdolls) change every frame, so a light
+		// touching one can never cache-hit; flag it so the caller keeps it on the scratch
+		// path instead of wasting a persistent slot + VRAM on it.
+		if ( edef && edef->parms.hModel && edef->parms.hModel->IsDynamicModel() != DM_STATIC ) {
+			dynamic = true;
+		}
+	}
+	if ( outDynamic ) {
+		*outDynamic = dynamic;
+	}
+	return h ^ casters;
+}
+
+// Pick the render target for this light's cube. On a cache hit, returns the stored
+// target and sets hit=true so the caller skips the render. On a miss it returns a
+// persistent target to render into (token stored for next frame), evicting least-
+// recently-used entries to stay under budget. Returns 0 when caching is off or the
+// light can't fit the budget -> caller uses the shared scratch pool instead.
+static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightIndex, int size,
+                                                         unsigned long long token, bool &hit ) {
+	hit = false;
+	if ( !r_shadowMapCache.GetBool() ) {
+		return 0;
+	}
+
+	// existing slot for this light? A slot is free when it holds no target (rt == 0);
+	// this is the canonical test because the static array is zero-initialized, so a
+	// fresh slot has rt == 0 and lightIndex == 0 (a valid index) — keying "free" off
+	// lightIndex would never see the startup slots as available.
+	shadowCubeCache_t *e = NULL;
+	int firstFree = -1;
+	for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
+		if ( rhiCubeCache[i].rt && rhiCubeCache[i].lightIndex == lightIndex ) {
+			e = &rhiCubeCache[i];
+			break;
+		}
+		if ( firstFree < 0 && rhiCubeCache[i].rt == 0 ) {
+			firstFree = i;
+		}
+	}
+
+	if ( e ) {
+		// context lost after vid_restart -> stored handle no longer valid
+		if ( r->GetRenderTargetImage( e->rt ) == 0 ) {
+			rhiCubeCacheBytes -= e->bytes;
+			if ( firstFree < 0 ) {
+				firstFree = (int)( e - rhiCubeCache );	// this slot is now reusable
+			}
+			e->lightIndex = -1; e->rt = 0; e->bytes = 0; e->token = 0;
+			e = NULL;
+		} else if ( e->size == size ) {
+			e->lastFrame = rhiCubeCacheFrameNo;
+			if ( e->token == token ) {
+				hit = true;						// reuse -> skip the whole render
+				return e->rt;
+			}
+			e->token = token;					// miss: re-render into the same target
+			return e->rt;
+		} else {
+			// resolution changed (adaptive tier): drop and reallocate below
+			r->DestroyRenderTarget( e->rt );
+			rhiCubeCacheBytes -= e->bytes;
+			e->lightIndex = -1; e->rt = 0; e->bytes = 0;
+			if ( firstFree < 0 ) {
+				firstFree = (int)( e - rhiCubeCache );
+			}
+			e = NULL;
+		}
+	}
+
+	// need a new target: enforce the VRAM budget by evicting LRU entries (never one
+	// touched this frame) until the newcomer fits.
+	const size_t need = RB_RHI_CubeBytes( size );
+	const size_t budget = RB_RHI_CacheBudgetBytes();
+	while ( rhiCubeCacheBytes + need > budget ) {
+		int victim = -1;
+		for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
+			if ( rhiCubeCache[i].rt && rhiCubeCache[i].lastFrame != rhiCubeCacheFrameNo
+			     && ( victim < 0 || rhiCubeCache[i].lastFrame < rhiCubeCache[victim].lastFrame ) ) {
+				victim = i;
+			}
+		}
+		if ( victim < 0 ) {
+			return 0;			// nothing evictable this frame -> use scratch, no caching
+		}
+		r->DestroyRenderTarget( rhiCubeCache[victim].rt );
+		rhiCubeCacheBytes -= rhiCubeCache[victim].bytes;
+		rhiCubeCache[victim].lightIndex = -1;
+		rhiCubeCache[victim].rt = 0;
+		rhiCubeCache[victim].bytes = 0;
+		if ( firstFree < 0 ) {
+			firstFree = victim;
+		}
+	}
+	if ( firstFree < 0 ) {
+		return 0;				// slot table full (rare) -> scratch
+	}
+
+	rhi::RenderTargetHandle rt = r->CreateRenderTargetCube( rhi::IF_DEPTH24, size );
+	if ( rt == 0 ) {
+		return 0;
+	}
+	RB_RHI_ForgetTexBinds();	// create() disturbed unit 0's cached bind
+	shadowCubeCache_t &slot = rhiCubeCache[firstFree];
+	slot.lightIndex = lightIndex;
+	slot.rt = rt;
+	slot.size = size;
+	slot.token = token;			// we are about to render this token's geometry
+	slot.lastFrame = rhiCubeCacheFrameNo;
+	slot.bytes = need;
+	rhiCubeCacheBytes += need;
+	return rt;					// hit stays false -> caller renders
+}
+
+// Drop every cached cube (context loss / explicit reset). Handles may already be
+// dead after vid_restart, so only destroy live ones the backend still knows.
+static void RB_RHI_ResetCubeCache( rhi::RHI *r ) {
+	for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
+		if ( rhiCubeCache[i].rt && r && r->GetRenderTargetImage( rhiCubeCache[i].rt ) != 0 ) {
+			r->DestroyRenderTarget( rhiCubeCache[i].rt );
+		}
+		rhiCubeCache[i].lightIndex = -1;
+		rhiCubeCache[i].rt = 0;
+		rhiCubeCache[i].bytes = 0;
+		rhiCubeCache[i].token = 0;
+	}
+	rhiCubeCacheBytes = 0;
+}
+
+/*
+===================
 RB_RHI_ShadowMapPassCube
 
 Renders a point light's occluder depth into the shared cube target, one 90-degree
@@ -1189,10 +1413,42 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	const float radius = vLight->lightDef->parms.lightRadius.Length();
 	const int tier = RB_RHI_ShadowTier( radius );
 	const int size = RB_RHI_TierSize( base, tier, 128, cubeHi );
-	rhiShadowCube = RB_RHI_ShadowPoolTarget( r, true, tier, size );
+
+	// static cache lookup: on a hit the stored cube is unchanged, so we sample it and
+	// skip the whole render. On a miss AcquireCubeTarget hands back a persistent target
+	// (token stored); if caching is off or the light won't fit the budget it returns 0
+	// and we fall back to the shared scratch pool that regenerates every frame.
+	const int lightIndex = vLight->lightDef->index;
+	bool dynamic = false;
+	const unsigned long long token = RB_RHI_CubeToken( vLight, range, size, &dynamic );
+	bool hit = false;
+	// A light with an animated (non DM_STATIC) caster changes every frame, so it can
+	// never cache-hit. Skip the cache entirely and use the shared scratch pool, which
+	// costs no persistent VRAM slot and still gets per-face view-frustum culling.
+	rhi::RenderTargetHandle target = 0;
+	if ( dynamic ) {
+		rhiCubeCacheDynamic++;
+	} else {
+		target = RB_RHI_AcquireCubeTarget( r, lightIndex, size, token, hit );
+	}
+	const bool cached = ( target != 0 );
+	if ( !cached ) {
+		if ( !dynamic ) {
+			rhiCubeCacheScratch++;		// static light that didn't fit the VRAM budget
+		}
+		target = RB_RHI_ShadowPoolTarget( r, true, tier, size );
+	}
+	rhiShadowCube = target;
 	rhiShadowCubeSize = size;
-	if ( rhiShadowCube == 0 ) {
+	if ( target == 0 ) {
 		return false;
+	}
+	if ( hit ) {
+		rhiCubeCacheHits++;
+		return true;			// unchanged since last frame — nothing to render
+	}
+	if ( cached ) {
+		rhiCubeCacheMiss++;
 	}
 
 	const idVec3 &L = vLight->globalLightOrigin;
@@ -1205,8 +1461,10 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	// the (expensive) occluder rasterization on any face whose cone can't reach the
 	// view. The face is still cleared to far depth so seamless cube sampling reads it
 	// as "lit" at shared edges — only the geometry, the dominant cost, is skipped.
+	// Only for scratch (throwaway) renders: a cached cube is sampled from arbitrary
+	// future camera angles, so it must contain all six faces.
 	idVec3 viewCorners[8];
-	const bool faceCull = r_shadowMapFaceCull.GetBool() && backEnd.viewDef;
+	const bool faceCull = !cached && r_shadowMapFaceCull.GetBool() && backEnd.viewDef;
 	if ( faceCull ) {
 		backEnd.viewDef->viewFrustum.ToPoints( viewCorners );
 	}
@@ -1319,6 +1577,15 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	rhiShadowCubeCasters = 0;
 	rhiShadowCubeFaces = 0;
 	rhiShadowCubeFacesCulled = 0;
+	rhiCubeCacheHits = 0;
+	rhiCubeCacheMiss = 0;
+	rhiCubeCacheDynamic = 0;
+	rhiCubeCacheScratch = 0;
+	rhiCubeCacheFrameNo++;			// bump before the light loop so lastFrame == "this view"
+	// free the whole cache when it's switched off, so its VRAM doesn't linger
+	if ( !r_shadowMapCache.GetBool() && rhiCubeCacheBytes > 0 ) {
+		RB_RHI_ResetCubeCache( r );
+	}
 	if ( !r_skipInteractions.GetBool() ) {
 		for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
 			backEnd.vLight = vLight;
@@ -1477,10 +1744,13 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	backEnd.vLight = NULL;
 
 	if ( r_shadowMapDebug.GetBool() ) {
-		common->Printf( "shadowMap: %d lit | projected %d (2D-mapped %d, no-shadow %d) | point %d (cube-mapped %d, cube-casters %d, faces %d drawn/%d culled) | parallel %d | no-lightDef %d | perforated-casters %d | r_shadowMapping %d\n",
+		common->Printf( "shadowMap: %d lit | projected %d (2D-mapped %d, no-shadow %d) | point %d (cube-mapped %d, cube-casters %d, faces %d drawn/%d culled) | cache %d hit/%d rendered/%d scratch, %d dynamic (%zu MB) | parallel %d | no-lightDef %d | perforated-casters %d | r_shadowMapping %d\n",
 		                dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,
 		                dbgPoint, rhiShadowCubeLights, rhiShadowCubeCasters,
-		                rhiShadowCubeFaces, rhiShadowCubeFacesCulled, dbgParallel, dbgNoLightDef,
+		                rhiShadowCubeFaces, rhiShadowCubeFacesCulled,
+		                rhiCubeCacheHits, rhiCubeCacheMiss, rhiCubeCacheScratch, rhiCubeCacheDynamic,
+		                rhiCubeCacheBytes / ( 1024 * 1024 ),
+		                dbgParallel, dbgNoLightDef,
 		                rhiShadowPerfCasters, r_shadowMapping.GetInteger() );
 	}
 

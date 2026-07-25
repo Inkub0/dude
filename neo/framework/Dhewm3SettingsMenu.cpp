@@ -2386,6 +2386,49 @@ static void DrawShadowDebugMenu()
 		r_shadowMapPointRangeScale.SetFloat( 1.0f );
 	}
 
+	ImGui::SeparatorText( "Static cache (skip regenerating unchanged lights)" );
+
+	bool cache = r_shadowMapCache.GetBool();
+	if ( ImGui::Checkbox( "Cache Static Point Lights", &cache ) ) {
+		r_shadowMapCache.SetBool( cache );
+	}
+	AddTooltip( "Keep each point light's cube map across frames and only re-render it when the "
+		"light or one of its shadow casters moves. In mostly-static scenes this is the single "
+		"biggest shadow-map speedup. r_shadowMapDebug 1 shows cache hit/rendered and MB used." );
+
+	ImGui::BeginDisabled( !cache );
+	const int vram = glConfig.vidMemMB;					// 0 if the vendor query failed
+	const int cacheCvar = r_shadowMapCacheMB.GetInteger();
+	bool autoBudget = ( cacheCvar < 0 );
+	const int autoMB = ( vram > 0 ? vram / 2 : 1024 );
+	const int sliderMax = ( vram > 0 ? vram : 16384 );
+
+	if ( ImGui::Checkbox( "Auto Budget (half of VRAM)", &autoBudget ) ) {
+		r_shadowMapCacheMB.SetInteger( autoBudget ? -1 : ( cacheCvar < 0 ? autoMB : cacheCvar ) );
+	}
+	if ( vram > 0 ) {
+		AddTooltip( "Auto uses half of the detected video memory as the cache budget." );
+	} else {
+		AddTooltip( "Video-memory size couldn't be detected on this driver; auto falls back to 1024 MB." );
+	}
+
+	ImGui::BeginDisabled( autoBudget );
+	int budget = ( cacheCvar < 0 ) ? autoMB : cacheCvar;
+	if ( ImGui::SliderInt( "Cache Budget", &budget, 0, sliderMax, budget == 0 ? "unlimited" : "%d MB" ) ) {
+		r_shadowMapCacheMB.SetInteger( budget );
+	}
+	AddTooltip( "VRAM the shadow cache may use. 0 = unlimited (cache every static light). Lights "
+		"that don't fit fall back to per-frame regeneration, so lowering this never breaks shadows, "
+		"it just caches fewer of them." );
+	ImGui::EndDisabled();	// auto budget
+
+	if ( vram > 0 ) {
+		ImGui::TextDisabled( "Detected VRAM: %d MB   (effective budget: %s)",
+			vram, autoBudget ? va( "%d MB (auto)", autoMB )
+			                 : ( budget == 0 ? "unlimited" : va( "%d MB", budget ) ) );
+	}
+	ImGui::EndDisabled();	// cache on
+
 	ImGui::EndDisabled();	// shadow mapping on
 	ImGui::EndDisabled();	// backend supported
 }

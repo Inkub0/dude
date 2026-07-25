@@ -292,6 +292,8 @@ idCVar r_shadowMapPointSize( "r_shadowMapPointSize", "2048", CVAR_RENDERER | CVA
 idCVar r_shadowMapPointLimit( "r_shadowMapPointLimit", "64", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "max point lights that get a cube shadow map per view (by on-screen importance); out-of-budget point lights are left unshadowed while r_shadowMapping is on. 0 = all point lights", 0, 128 );
 idCVar r_shadowMapSizeScale( "r_shadowMapSizeScale", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "scale each light's shadow-map resolution with its radius so texel-to-world size (shadow-edge sharpness) stays roughly constant; large lights get more resolution, small lights less" );
 idCVar r_shadowMapSizeScaleRadius( "r_shadowMapSizeScaleRadius", "380", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "light radius that maps to the base shadow resolution (r_shadowMapSize / r_shadowMapPointSize); lights larger than this get proportionally more resolution, smaller ones less", 16.0f, 8192.0f );
+idCVar r_shadowMapCache( "r_shadowMapCache", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "cache static point-light cube shadow maps across frames; a light is only regenerated when it or one of its shadow casters moves. Huge win in static scenes" );
+idCVar r_shadowMapCacheMB( "r_shadowMapCacheMB", "-1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "VRAM budget for the shadow-map cache, in MB. -1 = auto (half of detected video memory), 0 = unlimited", -1, 32768 );
 
 // DUDE: gate for the non-vanilla "Enhancements" (see tr_local.h). Only the GL 3.3
 // core backend qualifies today; Vulkan backends will extend this once they land.
@@ -929,6 +931,27 @@ void R_InitOpenGL( void ) {
 	temp = 0;
 	qglGetIntegerv( GL_MAX_CUBE_MAP_TEXTURE_SIZE, &temp );
 	glConfig.maxCubeMapSize = temp > 0 ? temp : 1024;
+
+	// total VRAM via vendor extensions, used to auto-size the shadow-map cache
+	// budget (r_shadowMapCacheMB -1 = half of this). No core query exists, so we
+	// try NVIDIA then AMD and leave 0 (unknown) if neither is present.
+	glConfig.vidMemMB = 0;
+	if ( R_CheckExtension( "GL_NVX_gpu_memory_info" ) ) {
+		GLint kb = 0;
+		qglGetError();
+		qglGetIntegerv( GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX, &kb );
+		if ( qglGetError() == GL_NO_ERROR && kb > 0 ) {
+			glConfig.vidMemMB = kb / 1024;
+		}
+	}
+	if ( glConfig.vidMemMB == 0 && R_CheckExtension( "GL_ATI_meminfo" ) ) {
+		GLint info[4] = { 0, 0, 0, 0 };		// [0] = total free texture pool, KB
+		qglGetError();
+		qglGetIntegerv( GL_TEXTURE_FREE_MEMORY_ATI, info );
+		if ( qglGetError() == GL_NO_ERROR && info[0] > 0 ) {
+			glConfig.vidMemMB = info[0] / 1024;	// free (not total), but a usable proxy
+		}
+	}
 
 	glConfig.isInitialized = true;
 
@@ -2191,6 +2214,9 @@ static void GfxInfo_f( const idCmdArgs &args ) {
 	common->Printf( "GL_EXTENSIONS: %s\n", glConfig.extensions_string );
 	common->Printf( "GL_MAX_TEXTURE_SIZE: %d\n", glConfig.maxTextureSize );
 	common->Printf( "GL_MAX_CUBE_MAP_TEXTURE_SIZE: %d\n", glConfig.maxCubeMapSize );
+	if ( glConfig.vidMemMB > 0 ) {
+		common->Printf( "video memory: %d MB\n", glConfig.vidMemMB );
+	}
 	common->Printf( "GL_MAX_TEXTURE_UNITS_ARB: %d\n", glConfig.maxTextureUnits );
 	common->Printf( "GL_MAX_TEXTURE_COORDS_ARB: %d\n", glConfig.maxTextureCoords );
 	common->Printf( "GL_MAX_TEXTURE_IMAGE_UNITS_ARB: %d\n", glConfig.maxTextureImageUnits );
