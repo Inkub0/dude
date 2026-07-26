@@ -1415,27 +1415,28 @@ static void R_BuildEmissiveRenderLight( const emissiveReq_t &req, renderLight_t 
 
 	const float R = req.radius;
 
-	if ( r_emissiveLightProjected.GetBool() ) {
-		const float back     = R * 0.6f;					// apex pulled this far behind the screen
-		const float range    = back + R;					// far cap this far from the apex
-		const float coneHalf = R * r_emissiveLightSpread.GetFloat();	// far-cap half-extent; wide = soft hemisphere-like glow
+	// Always a forward-facing projected cone: its apex sits a little behind the screen so it
+	// lights the surrounding wall and the space in front but spills nothing through to the far
+	// side of the mount (fixes the leak on recessed screens). The old omnidirectional point-light
+	// mode was dropped — it leaked through walls and none of the tuning knobs shaped it.
+	const float back     = R * 0.6f;					// apex pulled this far behind the screen
+	const float range    = back + R;					// far cap this far from the apex
+	const float coneHalf = R * r_emissiveLightSpread.GetFloat();	// far-cap half-extent; wide = soft hemisphere-like glow
 
-		idVec3 rightUnit, upUnit;
-		req.normal.NormalVectors( rightUnit, upUnit );
+	idVec3 rightUnit, upUnit;
+	req.normal.NormalVectors( rightUnit, upUnit );
 
-		rl.pointLight = false;
-		rl.origin = req.center - req.normal * back;			// apex, behind the screen
-		rl.target = req.normal * range;						// far-cap centre (rel. origin)
-		rl.right  = rightUnit * coneHalf;					// far-cap half-width
-		rl.up     = upUnit * coneHalf;						// far-cap half-height
-		rl.start  = req.normal * ( back * 0.5f );			// falloff near
-		rl.end    = req.normal * range;						// falloff far
-	} else {
-		// legacy point light: sit it a little in front of the screen so its sphere leans outward
-		rl.pointLight = true;
-		rl.origin = req.center + req.normal * ( req.surfRadius * 0.35f + 2.0f );
-		rl.lightRadius[0] = rl.lightRadius[1] = rl.lightRadius[2] = R;
-	}
+	rl.pointLight = false;
+	rl.origin = req.center - req.normal * back;			// apex, behind the screen
+	rl.target = req.normal * range;						// far-cap centre (rel. origin)
+	rl.right  = rightUnit * coneHalf;					// far-cap half-width
+	rl.up     = upUnit * coneHalf;						// far-cap half-height
+	// fade-off: slide the near-falloff plane along the cone. 0.5 reproduces the shipped
+	// back*0.5 tuning; lower pushes the plane toward the far cap (short ramp -> sharp edge),
+	// higher pulls it toward the apex (long ramp -> gentle fade almost from the screen).
+	const float fade = r_emissiveLightFalloff.GetFloat();
+	rl.start  = req.normal * ( back * ( 0.9f - 0.8f * fade ) );	// falloff near
+	rl.end    = req.normal * range;						// falloff far
 }
 
 /*
@@ -1473,12 +1474,18 @@ static void R_UpdateEmissiveLights( void ) {
 		return;
 	}
 
-	// projected/specular/spread are baked into each light at creation, so changing them won't
-	// propagate through the move/colour comparison below — rebuild the whole set when they change
+	// These knobs are baked into each light at creation, so changing them won't propagate
+	// through the move/colour comparison below (fade-off isn't compared at all, and small
+	// saturation nudges fall under the colour threshold) — force a full rebuild when any of
+	// them changes. The signature only shifts while a slider is dragged, so steady-state cost
+	// is zero; each value gets a well-separated weight so a single-knob change is always seen.
 	static float lastStyleSig = -1.0f;
-	const float styleSig = ( r_emissiveLightProjected.GetBool() ? 1.0f : 0.0f )
-	                     + ( r_emissiveLightSpecular.GetBool() ? 2.0f : 0.0f )
-	                     + r_emissiveLightSpread.GetFloat() * 8.0f;
+	const float styleSig = ( r_emissiveLightSpecular.GetBool() ? 2.0f : 0.0f )
+	                     + r_emissiveLightSpread.GetFloat()     * 8.0f
+	                     + r_emissiveLightFalloff.GetFloat()    * 16.0f
+	                     + r_emissiveLightScale.GetFloat()      * 64.0f
+	                     + r_emissiveLightRadius.GetFloat()     * 256.0f
+	                     + r_emissiveLightSaturation.GetFloat() * 1024.0f;
 	if ( styleSig != lastStyleSig ) {
 		R_FreeAllEmissiveLights( world );
 		lastStyleSig = styleSig;
@@ -1516,7 +1523,7 @@ static void R_UpdateEmissiveLights( void ) {
 	// projected fill light stops abruptly instead of fading. Borrow the point light's falloff
 	// (the soft radial ramp) and stamp it on each projected fill light so it eases to nothing.
 	idImage *fadeFalloff = NULL;
-	if ( r_emissiveLightProjected.GetBool() ) {
+	{
 		const idMaterial *pl = declManager->FindMaterial( "lights/defaultPointLight" );
 		if ( pl != NULL ) {
 			fadeFalloff = pl->LightFalloffImage();

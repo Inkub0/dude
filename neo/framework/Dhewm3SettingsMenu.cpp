@@ -2507,12 +2507,50 @@ static void DrawShadowDebugMenu()
 
 	ImGui::BeginDisabled( !r_emissiveSurfaces.GetBool() );
 
-	bool emProjected = r_emissiveLightProjected.GetBool();
-	if ( ImGui::Checkbox( "Projected Cone (no back-leak)", &emProjected ) ) {
-		r_emissiveLightProjected.SetBool( emProjected );
+	float emScale = r_emissiveLightScale.GetFloat();
+	if ( ImGui::SliderFloat( "Intensity", &emScale, 0.0f, 4.0f, "%.2f" ) ) {
+		r_emissiveLightScale.SetFloat( emScale );
 	}
-	AddTooltip( "On: a forward-facing cone that can't spill through the mount wall (fixes recessed "
-		"screens like health stations). Off: an omnidirectional point light that bleeds every way." );
+	AddTooltip( "Brightness of the fill light a glowing screen casts. 0 = off, 0.50 = default, higher = a strong glow." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##emscale" ) ) { r_emissiveLightScale.SetFloat( 0.50f ); }
+
+	float emRadius = r_emissiveLightRadius.GetFloat();
+	if ( ImGui::SliderFloat( "Reach (distance)", &emRadius, 0.25f, 16.0f, "%.2f" ) ) {
+		r_emissiveLightRadius.SetFloat( emRadius );
+	}
+	AddTooltip( "How far the fill light reaches, as a multiple of the screen's own size (clamped to 24-200 world units). Default 1.80." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##emradius" ) ) { r_emissiveLightRadius.SetFloat( 1.80f ); }
+
+	float emFalloff = r_emissiveLightFalloff.GetFloat();
+	if ( ImGui::SliderFloat( "Fade-off", &emFalloff, 0.0f, 1.0f, "%.2f" ) ) {
+		r_emissiveLightFalloff.SetFloat( emFalloff );
+	}
+	AddTooltip( "How gradually the light fades along its cone. 0 = bright, then a sharp edge near its reach; "
+		"1 = a gentle fade almost from the screen. Default 0.5." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##emfalloff" ) ) { r_emissiveLightFalloff.SetFloat( 0.5f ); }
+
+	float emSpread = r_emissiveLightSpread.GetFloat();
+	if ( ImGui::SliderFloat( "Beam Spread", &emSpread, 0.5f, 3.5f, "%.2f" ) ) {
+		r_emissiveLightSpread.SetFloat( emSpread );
+	}
+	AddTooltip( "Width of the fill cone. 0.5 = a tight beam, 1.60 = default, 3.5 = a wide near-hemisphere "
+		"that wraps around the screen (but still clipped behind the mount)." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##emspread" ) ) { r_emissiveLightSpread.SetFloat( 1.60f ); }
+
+	float emSat = r_emissiveLightSaturation.GetFloat();
+	if ( ImGui::SliderFloat( "Colour saturation", &emSat, 0.0f, 1.0f, "%.2f" ) ) {
+		r_emissiveLightSaturation.SetFloat( emSat );
+	}
+	AddTooltip( "How much of the screen's own colour the bleed keeps. 0 = white, 0.75 = default tint, "
+		"1 = full screen hue (a coloured spotlight)." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##emsat" ) ) { r_emissiveLightSaturation.SetFloat( 0.75f ); }
+
+	ImGui::Spacing();
 
 	bool emSpecular = r_emissiveLightSpecular.GetBool();
 	if ( ImGui::Checkbox( "Specular Highlights", &emSpecular ) ) {

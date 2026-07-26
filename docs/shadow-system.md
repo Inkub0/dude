@@ -134,16 +134,23 @@ answer to "switch off the fake grate shadow": enable the real one.
 
 Interactive GUI screens (monitors, keypads, panels) glow but cast no light in Doom 3,
 so they read as decals on an unlit wall. `r_emissiveSurfaces` (default off) spawns a
-small, shadowless fill light per visible GUI surface:
+small, shadowless fill light per visible GUI surface. Each light is a **forward-facing
+projected cone** whose apex sits behind the screen, so it lights the wall and the space
+in front but never leaks through to the far side of the mount (the recessed-screen fix).
+The old omnidirectional point-light mode was removed — it leaked through walls and none of
+the tuning knobs shaped it. Tuning (all live-updating via the Developer tab):
 
 - brightness / reach / per-view budget: `r_emissiveLightScale`, `…Radius`, `…Limit`
+- `r_emissiveLightSpread` sets the cone width (tight beam … wide near-hemisphere)
+- `r_emissiveLightFalloff` (default 0.5) slides the cone's near-falloff plane: 0 =
+  full-bright then a sharp edge at its reach, 1 = a long gentle fade almost from the screen
 - colour = alpha-weighted mean RGB sampled per image (`idImage::averageColor`),
   desaturated toward white by `r_emissiveLightSaturation` so it reads as bleed
-- `r_emissiveLightProjected` (default 1) uses a forward-facing cone so a recessed
-  screen doesn't leak through its mount wall; `r_emissiveLightSpread` widens it;
-  `r_emissiveLightSpecular` toggles highlights.
+- `r_emissiveLightSpecular` toggles specular highlights vs diffuse-only fill
 
-See also the private design note `emissive-gui-lights` in the agent memory.
+Changing any baked-in knob (spread, fade-off, scale, radius, saturation, specular) bumps a
+signature that forces a one-frame rebuild of the fill-light set, so slider edits take effect
+immediately. See also the private design note `emissive-gui-lights` in the agent memory.
 
 ---
 
@@ -168,12 +175,12 @@ See also the private design note `emissive-gui-lights` in the agent memory.
 | `r_shadowMapPerforated` | 1 | 0/1 | perforated grates/fences cast punched-out maps |
 | `r_shadowMapDebug` | 0 | 0–2 | 1 = per-view summary, 2 = per-light readout |
 | `r_emissiveSurfaces` | 0 | 0/1 | GUI screens cast a fill light |
-| `r_emissiveLightScale` | 0.33 | 0–4 | fill-light brightness |
-| `r_emissiveLightRadius` | 3.75 | 0.25–16 | fill reach × screen size |
-| `r_emissiveLightSaturation` | 0.65 | 0–1 | keep 0 = white … 1 = full screen hue |
+| `r_emissiveLightScale` | 0.50 | 0–4 | fill-light brightness |
+| `r_emissiveLightRadius` | 1.80 | 0.25–16 | fill reach × screen size |
+| `r_emissiveLightFalloff` | 0.5 | 0–1 | cone fade: 0 = sharp edge, 1 = long soft fade |
+| `r_emissiveLightSaturation` | 0.75 | 0–1 | keep 0 = white … 1 = full screen hue |
 | `r_emissiveLightLimit` | 24 | 0–256 | max fill lights per view; 0 = unlimited |
-| `r_emissiveLightProjected` | 1 | 0/1 | forward cone (no back-leak) vs point light |
-| `r_emissiveLightSpread` | 3.0 | 0.5–3.5 | projected cone width |
+| `r_emissiveLightSpread` | 1.60 | 0.5–3.5 | fill cone width (tight beam … wide hemisphere) |
 | `r_emissiveLightSpecular` | 1 | 0/1 | fill lights add specular vs diffuse-only |
 
 ## 11. Debugging
