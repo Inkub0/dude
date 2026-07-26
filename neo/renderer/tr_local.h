@@ -891,6 +891,19 @@ extern idCVar r_emissiveLightLimit;		// per-view budget cap on fill lights (0=un
 extern idCVar r_emissiveLightSpread;	// projected cone width (low=beam, high=near-hemisphere)
 extern idCVar r_emissiveLightSpecular;	// fill lights cast specular (1) or diffuse-only (0)
 
+// DUDE: GTAO screen-space ambient occlusion (enhancement backends only; see docs/ssao-gtao.md)
+extern idCVar r_ssao;					// master toggle (AO on the ambient term)
+extern idCVar r_ssaoIntensity;			// occlusion darkening strength
+extern idCVar r_ssaoFloor;				// min ambient visibility (anti-crush floor)
+extern idCVar r_ssaoDirectLight;		// AO strength on direct-light diffuse (0..1)
+extern idCVar r_ssaoRadius;				// world-space sampling radius
+extern idCVar r_ssaoSlices;				// horizon-search directions per pixel (1..8)
+extern idCVar r_ssaoSteps;				// samples marched per direction (1..12)
+extern idCVar r_ssaoResScale;			// AO buffer resolution fraction (0.5 half .. 1.0 full)
+extern idCVar r_ssaoBentNormal;			// shade ambient along the bent normal
+extern idCVar r_ssaoSpecular;			// also attenuate specular in occluded areas
+extern idCVar r_ssaoDebug;				// 1=show AO buffer, 2=show bent normals
+
 extern idCVar r_renderer;				// arb2, etc
 
 extern idCVar r_checkBounds;			// compare all surface bounds with precalculated ones

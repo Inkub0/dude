@@ -439,10 +439,11 @@ public:
 		if ( !initialized || w <= 0 || h <= 0 ) {
 			return 0;
 		}
-		// only depth-only targets so far (shadow maps); color targets arrive with
-		// the post stack. Anything else is unsupported here.
-		if ( fmt != IF_DEPTH24 ) {
-			common->Warning( "GL3 CreateRenderTarget: only IF_DEPTH24 supported so far" );
+		// depth-only targets (shadow maps) and single RGBA8 color targets (the SSAO /
+		// post buffers). HDR (IF_RGBA16F) color targets arrive with the full post stack.
+		const bool colorTarget = ( fmt == IF_RGBA8 );
+		if ( fmt != IF_DEPTH24 && !colorTarget ) {
+			common->Warning( "GL3 CreateRenderTarget: unsupported format %d (want IF_DEPTH24 or IF_RGBA8)", (int)fmt );
 			return 0;
 		}
 		int slot = -1;
@@ -461,26 +462,41 @@ public:
 		qglGenTextures( 1, &tex );
 		gl3ActiveTexture( GL_TEXTURE0 );
 		qglBindTexture( GL_TEXTURE_2D, tex );
-		qglTexImage2D( GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0,
-		               GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL );
-		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
-		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
-		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER );
-		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER );
-		// outside the shadow frustum reads as depth 1.0 (farthest) → never in
-		// shadow, so unmapped areas stay fully lit rather than black
-		const GLfloat borderLit[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-		qglTexParameterfv( GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderLit );
-		// hardware depth comparison so a sampler2DShadow returns 0..1 with 2×2 PCF
-		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE );
-		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL );
+		if ( colorTarget ) {
+			qglTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0,
+			               GL_RGBA, GL_UNSIGNED_BYTE, NULL );
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+			// clamp so bilateral/upsample taps at the screen edge don't wrap around
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+		} else {
+			qglTexImage2D( GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0,
+			               GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL );
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER );
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER );
+			// outside the shadow frustum reads as depth 1.0 (farthest) → never in
+			// shadow, so unmapped areas stay fully lit rather than black
+			const GLfloat borderLit[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+			qglTexParameterfv( GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderLit );
+			// hardware depth comparison so a sampler2DShadow returns 0..1 with 2×2 PCF
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE );
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL );
+		}
 
 		GLuint fbo = 0;
 		gl3GenFramebuffers( 1, &fbo );
 		gl3BindFramebuffer( GL_FRAMEBUFFER, fbo );
-		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, tex, 0 );
-		qglDrawBuffer( GL_NONE );	// depth-only: no color buffer to draw/read
-		qglReadBuffer( GL_NONE );
+		if ( colorTarget ) {
+			gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0 );
+			// leave this FBO's draw/read buffer at its per-FBO default (COLOR_ATTACHMENT0)
+		} else {
+			gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, tex, 0 );
+			qglDrawBuffer( GL_NONE );	// depth-only: no color buffer to draw/read
+			qglReadBuffer( GL_NONE );
+		}
 		GLenum status = gl3CheckFramebufferStatus( GL_FRAMEBUFFER );
 		gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
 		qglBindTexture( GL_TEXTURE_2D, 0 );
@@ -498,7 +514,7 @@ public:
 		renderTargets[slot].h = h;
 		renderTargets[slot].cube = false;
 		boundVBO = 0;	// binding the FBO's texture disturbed unit-0 bind tracking
-		common->Printf( "GL3: created %dx%d depth render target (handle %d)\n", w, h, slot );
+		common->Printf( "GL3: created %dx%d %s render target (handle %d)\n", w, h, colorTarget ? "color" : "depth", slot );
 		return (RenderTargetHandle)slot;
 	}
 

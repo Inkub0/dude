@@ -12,6 +12,7 @@ SAMPLER_BINDING(5) uniform sampler2D u_specularMap;
 SAMPLER_BINDING(6) uniform sampler2D u_specularTable;   // specular falloff LUT
 SAMPLER_BINDING(7) uniform sampler2DShadow u_shadowMap; // 2D depth map (projected/spot light)
 SAMPLER_BINDING(8) uniform samplerCubeShadow u_shadowCube; // cube depth map (point light)
+SAMPLER_BINDING(9) uniform sampler2D u_ssao;            // DUDE GTAO buffer (R = ambient visibility)
 
 VARY(0) in vec3 var_TexLightVec;
 VARY(1) in vec2 var_TexBump;
@@ -87,7 +88,7 @@ void main() {
 	light *= shadowVisibility();
 
 	// diffuse
-	vec4 color = texture( u_diffuseMap, var_TexDiffuse ) * u_diffuseModifier;
+	vec4 diffuse = texture( u_diffuseMap, var_TexDiffuse ) * u_diffuseModifier;
 
 	// specular term. Shading model selected by u_specularParms.z:
 	//   0 = vanilla dependent LUT read on N.H (faithful default)
@@ -114,7 +115,25 @@ void main() {
 	}
 	spec *= u_specularModifier * u_specularParms.x;
 	vec4 specMap = texture( u_specularMap, var_TexSpecular ) * 2.0;
-	color = spec * specMap + color;
+
+	// DUDE GTAO on direct light (docs/ssao-gtao.md Phase C). Doom 3 is almost all dynamic
+	// light with ~no ambient, so occluding the ambient pass alone is invisible; this
+	// grounds direct-lit surfaces too. Applied to the diffuse term (and, with specular
+	// occlusion on, the specular), scaled by r_ssaoDirectLight -- a light moving into a
+	// crease can't re-light AO that's baked into the surface, so keeping it below full is
+	// safer. u_localParam0 = (enable, floor, 1/viewW, 1/viewH); u_localParam1 = (direct
+	// strength, specular-occlusion toggle). The AO term is floored so it never blackens.
+	if ( u_localParam0.x > 0.5 ) {
+		float ao = texture( u_ssao, gl_FragCoord.xy * u_localParam0.zw ).r;
+		ao = mix( u_localParam0.y, 1.0, ao );
+		float aoDirect = mix( 1.0, ao, u_localParam1.x );
+		diffuse.rgb *= aoDirect;
+		if ( u_localParam1.y > 0.5 ) {
+			spec.rgb *= aoDirect;
+		}
+	}
+
+	vec4 color = spec * specMap + diffuse;
 
 	fragColor = light * color * var_Color;
 }

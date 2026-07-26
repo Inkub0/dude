@@ -227,6 +227,18 @@ static void RB_RHI_BindUnit( int unit, idImage *image ) {
 	image->Bind();
 }
 
+// GTAO render targets (docs/ssao-gtao.md). Two RGBA8 screen-space buffers: the raw
+// horizon-search output and the bilaterally-blurred result the ambient pass / debug
+// overlay consume. R = ambient visibility, GBA = view-space bent normal. Rebuilt on
+// resolution change and invalidated on a lost context (vid_restart). Declared up here
+// because the ambient pass (RB_RHI_DrawInteraction, below) samples the result.
+static rhi::RenderTargetHandle rhiSsaoRT     = 0;	// raw AO, then the separable-blur ping-pong
+static rhi::RenderTargetHandle rhiSsaoBlurRT = 0;	// the other ping-pong buffer
+static rhi::RenderTargetHandle rhiSsaoResultRT = 0;	// whichever holds the finished AO this frame
+static int  rhiSsaoW = 0, rhiSsaoH = 0;				// AO buffer size (may be < view for half-res)
+static int  rhiSsaoViewW = 0, rhiSsaoViewH = 0;		// full view size the AO covers
+static bool rhiSsaoAppliedThisView = false;			// AO was produced for the view being drawn
+
 /*
 ===================
 RB_RHI_DrawInteraction
@@ -316,6 +328,28 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		dst[1] = mm[row + 4];
 		dst[2] = mm[row + 8];
 		dst[3] = mm[row + 12];
+	}
+
+	// DUDE SSAO (docs/ssao-gtao.md Phase C). Occlude the ambient term always, and the
+	// direct-light diffuse by r_ssaoDirectLight -- Doom 3 has ~no ambient, so darkening
+	// only the ambient pass is invisible in normal scenes; the direct-light term is what
+	// actually makes AO show. r_ssaoDirectLight 0 = ambient-only (most faithful). Both
+	// shaders sample the AO buffer bound once on unit 9 (see RB_RHI_DrawWorld); neither
+	// path uses localParam0/localParam1 otherwise. localParam0 = (enable, floor, 1/viewW,
+	// 1/viewH); localParam1 (direct lights only) = (direct strength, specular-occlusion).
+	if ( rhiSsaoAppliedThisView && rhiSsaoResultRT != 0 ) {
+		const float directStrength = din->ambientLight
+			? 1.0f : idMath::ClampFloat( 0.0f, 1.0f, r_ssaoDirectLight.GetFloat() );
+		if ( din->ambientLight || directStrength > 0.0f ) {
+			parms.localParam0[0] = 1.0f;
+			parms.localParam0[1] = idMath::ClampFloat( 0.0f, 1.0f, r_ssaoFloor.GetFloat() );
+			parms.localParam0[2] = ( rhiSsaoViewW > 0 ) ? 1.0f / rhiSsaoViewW : 0.0f;
+			parms.localParam0[3] = ( rhiSsaoViewH > 0 ) ? 1.0f / rhiSsaoViewH : 0.0f;
+			if ( !din->ambientLight ) {
+				parms.localParam1[0] = directStrength;
+				parms.localParam1[1] = r_ssaoSpecular.GetBool() ? 1.0f : 0.0f;
+			}
+		}
 	}
 
 	// texture units exactly as RB_ARB2_DrawInteraction / the README table
@@ -732,9 +766,11 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		qglDisable( GL_CLIP_DISTANCE0 );
 	}
 
-	// make the early depth pass available to shaders (soft particles etc.)
+	// make the early depth pass available to shaders (soft particles, SSAO, etc.)
 	bool getDepthCapture = r_enableDepthCapture.GetInteger() == 1
-		|| ( r_enableDepthCapture.GetInteger() == -1 && r_useSoftParticles.GetBool() );
+		|| ( r_enableDepthCapture.GetInteger() == -1
+		     && ( r_useSoftParticles.GetBool()
+		          || ( r_ssao.GetBool() && R_BackendSupportsEnhancements() ) ) );
 	if ( getDepthCapture && viewDef->renderView.viewID >= 0 ) {
 		globalImages->currentDepthImage->CopyDepthbuffer( viewDef->viewport.x1,
 			viewDef->viewport.y1,
@@ -1560,6 +1596,226 @@ static bool RB_RHI_PointLightInBudget( const viewDef_t *viewDef, const viewLight
 	return better < limit;
 }
 
+static bool RB_RHI_EnsureSsaoTargets( rhi::RHI *r, int w, int h ) {
+	// a lost context (vid_restart) leaves the handle set but its texture gone
+	if ( rhiSsaoRT && r->GetRenderTargetImage( rhiSsaoRT ) == 0 ) {
+		rhiSsaoRT = rhiSsaoBlurRT = 0;
+		rhiSsaoW = rhiSsaoH = 0;
+	}
+	if ( rhiSsaoRT && rhiSsaoBlurRT && rhiSsaoW == w && rhiSsaoH == h ) {
+		return true;
+	}
+	if ( rhiSsaoRT )     { r->DestroyRenderTarget( rhiSsaoRT );     rhiSsaoRT = 0; }
+	if ( rhiSsaoBlurRT ) { r->DestroyRenderTarget( rhiSsaoBlurRT ); rhiSsaoBlurRT = 0; }
+	rhiSsaoRT     = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+	rhiSsaoBlurRT = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+	if ( !rhiSsaoRT || !rhiSsaoBlurRT ) {
+		if ( rhiSsaoRT )     { r->DestroyRenderTarget( rhiSsaoRT );     rhiSsaoRT = 0; }
+		if ( rhiSsaoBlurRT ) { r->DestroyRenderTarget( rhiSsaoBlurRT ); rhiSsaoBlurRT = 0; }
+		rhiSsaoW = rhiSsaoH = 0;
+		return false;
+	}
+	rhiSsaoW = w;
+	rhiSsaoH = h;
+	return true;
+}
+
+// One fullscreen NDC quad (identity mvp, st 0..1) through a post shader. Any engine
+// (idImage) inputs must already be bound by the caller; rtInput0 (0 = none) is an
+// RHI render-target texture bound on unit 0.
+static void RB_RHI_DrawFullscreen( rhi::RHI *r, rhi::ShaderHandle prog,
+                                   const rhi::RenderParams &parms, rhi::ImageHandle rtInput0 ) {
+	idDrawVert quad[4];
+	memset( quad, 0, sizeof( quad ) );
+	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
+	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
+	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
+	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
+	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
+
+	rhi::BufferHandle vb, ib, ub;
+	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
+	int idxOfs  = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int uniOfs  = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = CT_TWO_SIDED;
+	r->BindPipeline( pd );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = 6;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	da.textures[0] = rtInput0;		// 0 = leave unit 0 as the caller bound it
+	r->Draw( da );
+
+	backEnd.pc.c_drawElements++;
+}
+
+/*
+===================
+RB_RHI_SSAOPass
+
+GTAO screen-space ambient occlusion (docs/ssao-gtao.md). Runs right after the depth
+prepass, once globalImages->currentDepthImage holds this view's depth, and before the
+ambient/interaction passes that consume the AO buffer. Two fullscreen passes: the
+horizon search (ssao) then a bilateral denoise (ssao_blur). Only ever active with
+r_ssao on an enhancement backend, and only for the fullscreen primary view (the depth
+capture and screen mapping assume the whole framebuffer at the origin).
+===================
+*/
+static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !r_ssao.GetBool() || !R_BackendSupportsEnhancements() ) {
+		return;
+	}
+	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
+		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
+		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
+		return;
+	}
+	if ( globalImages->currentDepthImage->uploadWidth <= 0 ) {
+		return;		// no depth captured yet (shouldn't happen after the prepass)
+	}
+
+	rhi::ShaderHandle ssaoProg = r->LoadShader( "ssao" );
+	rhi::ShaderHandle blurProg = r->LoadShader( "ssao_blur" );
+	if ( !ssaoProg || !blurProg ) {
+		return;
+	}
+
+	const int   fullW    = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int   fullH    = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	const float resScale = idMath::ClampFloat( 0.25f, 1.0f, r_ssaoResScale.GetFloat() );
+	int aoW = (int)( fullW * resScale + 0.5f );
+	int aoH = (int)( fullH * resScale + 0.5f );
+	if ( aoW < 1 ) aoW = 1;
+	if ( aoH < 1 ) aoH = 1;
+	if ( !RB_RHI_EnsureSsaoTargets( r, aoW, aoH ) ) {
+		return;
+	}
+
+	// horizon-search sample budget (clamped to the shader's MAX_SLICES / MAX_STEPS)
+	const int slices = idMath::ClampInt( 1, 8,  r_ssaoSlices.GetInteger() );
+	const int steps  = idMath::ClampInt( 1, 12, r_ssaoSteps.GetInteger() );
+
+	const float *proj  = viewDef->projectionMatrix;
+	const float invP00 = ( proj[0] != 0.0f ) ? 1.0f / proj[0] : 1.0f;
+	const float invP11 = ( proj[5] != 0.0f ) ? 1.0f / proj[5] : 1.0f;
+	const float radius = r_ssaoRadius.GetFloat();
+	// a world length maps to AO-target pixels at depth d as radiusPixFactor / d
+	const float radiusPixFactor = 0.5f * radius * proj[5] * (float)aoH;
+
+	const int uploadW = globalImages->currentDepthImage->uploadWidth;
+	const int uploadH = globalImages->currentDepthImage->uploadHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.depthTexRecip[0]    = ( (float)fullW / aoW ) / uploadW;	// gl_FragCoord (AO) -> depth tc
+	parms.depthTexRecip[1]    = ( (float)fullH / aoH ) / uploadH;
+	parms.screenCorrection[0] = 1.0f / aoW;				// gl_FragCoord -> [0,1] uv
+	parms.screenCorrection[1] = 1.0f / aoH;
+	parms.localParam0[0] = invP00;
+	parms.localParam0[1] = invP11;
+	parms.localParam0[2] = radius;
+	parms.localParam0[3] = r_ssaoIntensity.GetFloat();
+	parms.localParam1[0] = radiusPixFactor;
+	parms.localParam1[1] = (float)steps;
+	parms.localParam1[2] = (float)slices;
+	parms.localParam1[3] = r_ssaoBentNormal.GetBool() ? 1.0f : 0.0f;
+
+	// horizon search: _currentDepth -> raw AO + bent normal (into rhiSsaoRT)
+	r->BeginTargetPass( rhiSsaoRT, NULL );
+	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	RB_RHI_DrawFullscreen( r, ssaoProg, parms, 0 );
+	r->EndPass();
+
+	// separable bilateral denoise: horizontal (rhiSsaoRT -> rhiSsaoBlurRT) then vertical
+	// (rhiSsaoBlurRT -> rhiSsaoRT), so the finished AO lands back in rhiSsaoRT. Half the
+	// tap count of the old NxN box for the same reach. localParam0.x picks the axis; the
+	// AO texture is unit 0 (via DrawFullscreen), depth is unit 1.
+	rhi::RenderParams blurParms = parms;
+	blurParms.localParam0[0] = 0.0f;	// horizontal
+	r->BeginTargetPass( rhiSsaoBlurRT, NULL );
+	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	RB_RHI_DrawFullscreen( r, blurProg, blurParms, r->GetRenderTargetImage( rhiSsaoRT ) );
+	r->EndPass();
+
+	blurParms.localParam0[0] = 1.0f;	// vertical
+	r->BeginTargetPass( rhiSsaoRT, NULL );
+	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	RB_RHI_DrawFullscreen( r, blurProg, blurParms, r->GetRenderTargetImage( rhiSsaoBlurRT ) );
+	r->EndPass();
+
+	rhiSsaoResultRT = rhiSsaoRT;		// finished AO the ambient/interaction passes sample
+
+	// tell the ambient pass (RB_RHI_DrawInteraction) an AO buffer is ready for this
+	// view; the screen->AO uv mapping needs the full view size
+	rhiSsaoViewW = fullW;
+	rhiSsaoViewH = fullH;
+	rhiSsaoAppliedThisView = true;
+
+	// our fullscreen draws bind textures directly (da.textures + RB_RHI_BindUnit),
+	// leaving the tmu cache disagreeing with GL; forget them so the per-light binds
+	// that follow re-issue instead of skipping a needed unit-0 rebind
+	RB_RHI_ForgetTexBinds();
+
+	// EndPass restored the pre-pass viewport/scissor; keep the CPU scissor cache
+	// in step for the per-light passes that follow
+	backEnd.currentScissor = viewDef->scissor;
+}
+
+/*
+===================
+RB_RHI_SSAODebugOverlay
+
+r_ssaoDebug visualization: blit the finished AO buffer over the scene (1 = AO scalar,
+2 = bent normal). Called at the end of the 3D view, after the scene is drawn, so it
+isn't overwritten by the light passes. No-op unless SSAO and the debug cvar are on.
+===================
+*/
+void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( r_ssaoDebug.GetInteger() <= 0 || !r_ssao.GetBool() || !R_BackendSupportsEnhancements() ) {
+		return;
+	}
+	if ( !rhiSsaoResultRT || r->GetRenderTargetImage( rhiSsaoResultRT ) == 0 ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "ssao_debug" );
+	if ( !prog ) {
+		return;
+	}
+
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.localParam0[0] = (float)r_ssaoDebug.GetInteger();		// 1 = AO, 2 = bent normal
+
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
+	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	RB_RHI_DrawFullscreen( r, prog, parms, r->GetRenderTargetImage( rhiSsaoResultRT ) );
+
+	// direct bind above; forget the tmu cache so later 2D/GUI binds re-issue
+	RB_RHI_ForgetTexBinds();
+}
+
 /*
 ===================
 RB_RHI_DrawWorld
@@ -1588,6 +1844,23 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	backEnd.currentScissor = viewDef->scissor;
 
 	RB_RHI_FillDepthBuffer( r, viewDef );
+
+	// SSAO (GTAO) builds the AO buffer from the just-captured scene depth, before
+	// the ambient/interaction passes that consume it (docs/ssao-gtao.md). Each view
+	// starts with no AO; the pass sets rhiSsaoAppliedThisView when it produces one.
+	rhiSsaoAppliedThisView = false;
+	RB_RHI_SSAOPass( r, viewDef );
+
+	// Bind the AO buffer on unit 9 for the whole per-light loop: both the ambient and
+	// interaction shaders sample u_ssao there, and nothing in the loop touches unit 9
+	// (Draw binds 0-8). Bound once here rather than per draw; the enable flag in
+	// localParam0.x (set per surface) decides whether a shader actually reads it.
+	if ( rhiSsaoAppliedThisView ) {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 9 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiSsaoResultRT ) );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+	}
 
 	// per-light shadowing and adding (matches RB_ARB2_DrawInteractions)
 	// r_shadowMapDebug counts how each lit light was classified this view

@@ -2181,6 +2181,43 @@ static void DrawEnhancementsMenu()
 
 	DrawOptions( enhancementOptions, IM_ARRAYSIZE(enhancementOptions) );
 
+	// Ambient Occlusion (DUDE Phase 3.5). Master toggle only; the tuning sliders live
+	// in the Developer tab (Settings > Developer > Ambient Occlusion), like the shadow
+	// maps and emissive surfaces. Read live by the renderer (no restart).
+	ImGui::SeparatorText( "Ambient Occlusion" );
+	{
+		bool ssao = r_ssao.GetBool();
+		if ( ImGui::Checkbox( "SSAO (GTAO ambient occlusion)", &ssao ) ) {
+			r_ssao.SetBool( ssao );
+		}
+		AddTooltip( "Screen-space ambient occlusion (GTAO): darkens creases, corners and contact "
+			"points in the ambient light only, so models look grounded instead of flat/plastic. It "
+			"never touches direct/dynamic lights, so it stays correct as lighting changes. Tuning "
+			"sliders are in the Developer tab. Non-vanilla; opengl3 only." );
+
+		// Resolution: discrete quality/perf stops from half to full screen resolution.
+		ImGui::BeginDisabled( !r_ssao.GetBool() );
+		const float ssaoResStops[]  = { 0.5f, 0.75f, 0.8f, 1.0f };
+		const char *ssaoResLabels[] = { "Half (1/2)", "Three-quarter (3/4)", "Four-fifths (4/5)", "Full" };
+		const int ssaoNumStops = IM_ARRAYSIZE( ssaoResStops );
+		const float curScale = r_ssaoResScale.GetFloat();
+		int ssaoResIdx = 0;
+		float ssaoResBest = 1e9f;
+		for ( int i = 0; i < ssaoNumStops; i++ ) {
+			const float d = idMath::Fabs( curScale - ssaoResStops[i] );
+			if ( d < ssaoResBest ) { ssaoResBest = d; ssaoResIdx = i; }
+		}
+		if ( ImGui::SliderInt( "Resolution", &ssaoResIdx, 0, ssaoNumStops - 1,
+				ssaoResLabels[ssaoResIdx], ImGuiSliderFlags_NoInput ) ) {
+			ssaoResIdx = ssaoResIdx < 0 ? 0 : ( ssaoResIdx >= ssaoNumStops ? ssaoNumStops - 1 : ssaoResIdx );
+			r_ssaoResScale.SetFloat( ssaoResStops[ssaoResIdx] );
+		}
+		AddTooltip( "Resolution the AO buffer is computed at, as a fraction of the screen. Half is "
+			"~4x cheaper and a little softer; Full is sharpest and most expensive; 3/4 and 4/5 sit "
+			"between. Lower this first if SSAO costs too much." );
+		ImGui::EndDisabled();
+	}
+
 	// Shadows (DUDE Phase 3.5). Hand-drawn so the sub-settings are visibly grouped
 	// under the toggle and disabled when it is off - making it clear they all take
 	// effect together. Every value is read live by the renderer (no restart).
@@ -2560,6 +2597,103 @@ static void DrawShadowDebugMenu()
 		"Off: diffuse-only, a calmer soft fill." );
 
 	ImGui::EndDisabled();	// emissive surfaces on
+
+	// --- Ambient Occlusion (SSAO/GTAO). Master toggle is in Enhancements; full tuning here. ---
+	ImGui::Spacing();
+	ImGui::SeparatorText( "Ambient Occlusion (SSAO)" );
+	ImGui::TextDisabled( "GTAO horizon-based ambient occlusion on the ambient term. Enable in Enhancements > Ambient Occlusion." );
+	ImGui::Spacing();
+
+	bool ssao = r_ssao.GetBool();
+	if ( ImGui::Checkbox( "SSAO (master)", &ssao ) ) {
+		r_ssao.SetBool( ssao );
+	}
+	AddTooltip( "Master toggle (same cvar as Enhancements > Ambient Occlusion). On = occlude the "
+		"ambient term in creases/contacts; Off = vanilla flat ambient." );
+
+	int ssaoDbg = r_ssaoDebug.GetInteger();
+	const char *ssaoDbgItems[] = { "off (feed lighting)", "show AO buffer", "show bent normals" };
+	if ( ImGui::Combo( "Debug View (r_ssaoDebug)", &ssaoDbg, ssaoDbgItems, IM_ARRAYSIZE( ssaoDbgItems ) ) ) {
+		r_ssaoDebug.SetInteger( ssaoDbg );
+	}
+	AddTooltip( "Visualize the AO pass over the scene. 1 = the occlusion buffer (white = lit, dark "
+		"= occluded); 2 = the bent normals as RGB (should look like a smooth normal map). Best "
+		"sanity check while tuning; set back to 0 to feed the ambient lighting." );
+
+	ImGui::BeginDisabled( !r_ssao.GetBool() );
+
+	float ssaoInt = r_ssaoIntensity.GetFloat();
+	if ( ImGui::SliderFloat( "AO Intensity", &ssaoInt, 0.0f, 4.0f, "%.2f" ) ) {
+		r_ssaoIntensity.SetFloat( ssaoInt );
+	}
+	AddTooltip( "Strength of the darkening. 0 = none, 1.3 = default, higher pushes the occlusion deeper." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##ssaoint" ) ) { r_ssaoIntensity.SetFloat( 1.3f ); }
+
+	float ssaoDirect = r_ssaoDirectLight.GetFloat();
+	if ( ImGui::SliderFloat( "Direct Light AO", &ssaoDirect, 0.0f, 1.0f, "%.2f" ) ) {
+		r_ssaoDirectLight.SetFloat( ssaoDirect );
+	}
+	AddTooltip( "How strongly AO darkens direct (dynamic) light's diffuse. Doom 3 has almost no "
+		"ambient, so THIS is what makes AO visible in normal gameplay. 1 = full (default), 0 = "
+		"ambient-only (most faithful, but usually invisible here). Lower it if AO looks baked-in "
+		"when lights move." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##ssaodirect" ) ) { r_ssaoDirectLight.SetFloat( 1.0f ); }
+
+	float ssaoFloor = r_ssaoFloor.GetFloat();
+	if ( ImGui::SliderFloat( "Floor (min visibility)", &ssaoFloor, 0.0f, 1.0f, "%.2f" ) ) {
+		r_ssaoFloor.SetFloat( ssaoFloor );
+	}
+	AddTooltip( "Anti-crush floor: how dark a fully-occluded spot may get. 0 = can reach black, "
+		"0.15 = default, 1 = no darkening. Raise it if AO makes dark areas too murky to read." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##ssaofloor" ) ) { r_ssaoFloor.SetFloat( 0.15f ); }
+
+	float ssaoRad = r_ssaoRadius.GetFloat();
+	if ( ImGui::SliderFloat( "Radius (world units)", &ssaoRad, 1.0f, 256.0f, "%.0f" ) ) {
+		r_ssaoRadius.SetFloat( ssaoRad );
+	}
+	AddTooltip( "How far the occlusion samples reach, in world units. Small = tight contact creases "
+		"only; large = broad, softer occlusion (and more expensive). Default 32." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##ssaorad" ) ) { r_ssaoRadius.SetFloat( 32.0f ); }
+
+	int ssaoSlices = r_ssaoSlices.GetInteger();
+	if ( ImGui::SliderInt( "Directions (slices)", &ssaoSlices, 1, 8 ) ) {
+		r_ssaoSlices.SetInteger( ssaoSlices );
+	}
+	AddTooltip( "How many horizon-search directions per pixel. More = smoother, less directional "
+		"noise. This is the bigger cost knob. Default 3. Check the cost with r_gl3GpuTime 1." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##ssaoslices" ) ) { r_ssaoSlices.SetInteger( 3 ); }
+
+	int ssaoSteps = r_ssaoSteps.GetInteger();
+	if ( ImGui::SliderInt( "Steps per direction", &ssaoSteps, 1, 12 ) ) {
+		r_ssaoSteps.SetInteger( ssaoSteps );
+	}
+	AddTooltip( "How many samples are marched along each direction (how finely each horizon is "
+		"found). More = more accurate occlusion at range. Default 4." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##ssaosteps" ) ) { r_ssaoSteps.SetInteger( 4 ); }
+
+	// Resolution is exposed in Enhancements > Ambient Occlusion (as a slider).
+
+	bool ssaoBent = r_ssaoBentNormal.GetBool();
+	if ( ImGui::Checkbox( "Bent Normals", &ssaoBent ) ) {
+		r_ssaoBentNormal.SetBool( ssaoBent );
+	}
+	AddTooltip( "Compute the average unoccluded direction (bent normal) so the ambient can be shaded "
+		"directionally rather than by a flat scalar. Visible in Debug View 2. Off = scalar AO only." );
+
+	bool ssaoSpec = r_ssaoSpecular.GetBool();
+	if ( ImGui::Checkbox( "Specular Occlusion", &ssaoSpec ) ) {
+		r_ssaoSpecular.SetBool( ssaoSpec );
+	}
+	AddTooltip( "Also dim specular highlights in occluded areas on direct lights (stronger "
+		"anti-plastic look; a mild deviation from vanilla). Scaled by Direct Light AO. Off by default." );
+
+	ImGui::EndDisabled();	// ssao on
 
 	ImGui::EndDisabled();	// backend supported
 }

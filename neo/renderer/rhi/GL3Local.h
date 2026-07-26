@@ -50,7 +50,11 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #ifndef GL_FRAMEBUFFER
 #define GL_FRAMEBUFFER					0x8D40
 #define GL_DEPTH_ATTACHMENT				0x8D00
+#define GL_COLOR_ATTACHMENT0			0x8CE0
 #define GL_FRAMEBUFFER_COMPLETE			0x8CD5
+#endif
+#ifndef GL_RGBA8
+#define GL_RGBA8						0x8058
 #endif
 #ifndef GL_DEPTH_COMPONENT24
 #define GL_DEPTH_COMPONENT24			0x81A6
@@ -181,6 +185,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef );
 // fog + blend lights: the last fixed-function passes, added after the ambient
 // shader passes (RhiWorld.cpp), mirroring RB_STD_FogAllLights
 void RB_RHI_FogAllLights( rhi::RHI *r, viewDef_s *viewDef );
+
+// GTAO debug overlay (r_ssaoDebug): blit the AO buffer over the finished 3D view.
+// Called at end-of-view so the scene passes don't overwrite it (RhiWorld.cpp).
+void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
 
 // screenshot support: composited desktops return garbage for front-buffer
 // reads, so R_ReadTiledPixels registers a destination and the executor

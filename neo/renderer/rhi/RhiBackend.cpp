@@ -1197,6 +1197,8 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
 	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView ) {
 		RB_RHI_PostProcess( r, viewDef );
+		// r_ssaoDebug: overlay the AO buffer on top of the finished view
+		RB_RHI_SSAODebugOverlay( r, viewDef );
 	}
 
 	// debug visualization (r_showTris, r_showNormals, debug lines/polygons, …)

@@ -7,6 +7,7 @@ SAMPLER_BINDING(1) uniform sampler2D u_bumpMap;
 SAMPLER_BINDING(2) uniform sampler2D u_lightFalloff;
 SAMPLER_BINDING(3) uniform sampler2D u_lightProjection;
 SAMPLER_BINDING(4) uniform sampler2D u_diffuseMap;
+SAMPLER_BINDING(9) uniform sampler2D u_ssao;   // DUDE GTAO buffer (R = ambient visibility)
 
 VARY(0) in vec2 var_TexBump;
 VARY(1) in vec2 var_TexDiffuse;
@@ -38,5 +39,17 @@ void main() {
 	vec3 color = var_Color.xyz;
 
 	vec3 outRgb = ambient * diff * falloff * proj * modifier * color;
+
+	// DUDE GTAO (docs/ssao-gtao.md Phase C): occlude the ambient term only. This pass
+	// is additive (one of possibly several ambient lights), so scaling each ambient
+	// contribution is equivalent to scaling their sum. u_localParam0.x enables it;
+	// .y is the floor (fully-occluded darkens to this, never to black — the anti-crush
+	// countermeasure for a dark game); .zw map gl_FragCoord to the AO buffer's uv.
+	if ( u_localParam0.x > 0.5 ) {
+		float ao = texture( u_ssao, gl_FragCoord.xy * u_localParam0.zw ).r;
+		ao = mix( u_localParam0.y, 1.0, ao );
+		outRgb *= ao;
+	}
+
 	fragColor = vec4( outRgb, 1.0 );
 }

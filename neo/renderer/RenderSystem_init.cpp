@@ -309,6 +309,22 @@ idCVar r_emissiveLightLimit( "r_emissiveLightLimit", "24", CVAR_RENDERER | CVAR_
 idCVar r_emissiveLightSpread( "r_emissiveLightSpread", "1.60", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "width of the projected fill cone as a multiple of its reach: low = a tight beam, high = a wide near-hemisphere that wraps around the screen (but still clipped behind the mount)", 0.5f, 3.5f );
 idCVar r_emissiveLightSpecular( "r_emissiveLightSpecular", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "screen fill lights add specular highlights (1, more visible on the weapon) or diffuse-only soft fill (0, calmer)" );
 
+// DUDE: GTAO screen-space ambient occlusion. Darkens only the ambient light term
+// (not direct/dynamic lights), so it stays correct as lighting changes and fixes
+// Doom 3's flat/plastic model look. Non-vanilla; enhancement backends only.
+// See docs/ssao-gtao.md.
+idCVar r_ssao( "r_ssao", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "screen-space ambient occlusion (GTAO) applied to the ambient light term; adds contact shadowing and depth to models (non-vanilla; opengl3/Vulkan only)" );
+idCVar r_ssaoIntensity( "r_ssaoIntensity", "1.3", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO strength: scales the occlusion darkening (0 = none, 1.3 = default, higher = deeper creases)", 0.0f, 4.0f );
+idCVar r_ssaoFloor( "r_ssaoFloor", "0.15", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO minimum ambient visibility: fully-occluded areas darken to at most this (0 = can reach black, 1 = no darkening). Keeps creases from crushing to black in dark scenes", 0.0f, 1.0f );
+idCVar r_ssaoDirectLight( "r_ssaoDirectLight", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how strongly SSAO darkens direct (dynamic) light's diffuse, 0..1. Doom 3 has almost no ambient, so this is what makes AO visible in normal scenes. Lower it if AO looks baked-in under moving lights; 0 = ambient-only (most faithful)", 0.0f, 1.0f );
+idCVar r_ssaoRadius( "r_ssaoRadius", "32", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO sampling radius in world units; larger reaches for broad occlusion, smaller keeps it to tight contact creases", 1.0f, 256.0f );
+idCVar r_ssaoSlices( "r_ssaoSlices", "3", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "SSAO horizon-search directions (slices) per pixel; more = smoother, less directional noise, more GPU cost", 1, 8 );
+idCVar r_ssaoSteps( "r_ssaoSteps", "4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "SSAO samples marched along each direction; more = more accurate horizons at range, more GPU cost", 1, 12 );
+idCVar r_ssaoResScale( "r_ssaoResScale", "0.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO buffer resolution as a fraction of the screen (0.5 = half ... 1.0 = full); lower is faster and softer, upsampled bilaterally", 0.25f, 1.0f );
+idCVar r_ssaoBentNormal( "r_ssaoBentNormal", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "shade the ambient along the bent (average unoccluded) normal for directional occlusion, instead of a flat darkening" );
+idCVar r_ssaoSpecular( "r_ssaoSpecular", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "also attenuate specular highlights in occluded areas (stronger anti-plastic, mild fidelity departure); helps in scenes with little ambient fill" );
+idCVar r_ssaoDebug( "r_ssaoDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "SSAO debug view: 0 = off, 1 = show the AO buffer, 2 = show bent normals", 0, 2 );
+
 // DUDE: gate for the non-vanilla "Enhancements" (see tr_local.h). Only the GL 3.3
 // core backend qualifies today; Vulkan backends will extend this once they land.
 bool R_BackendSupportsEnhancements() {
