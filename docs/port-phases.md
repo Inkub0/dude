@@ -242,7 +242,10 @@ variable timestep. Frontend/game-interface work, independent of the backend port
 
 ### Phase 8 — Shadow mapping (optional, per-light)
 **[Scheduled in Phase 3.5 — implemented on the GL 3.3 `opengl3` backend first, then
-ported to Vulkan in Phase 4. This section is the detailed technique design.]**
+ported to Vulkan in Phase 4. This section is the detailed technique *design*; for what
+actually shipped on GL3 (projected 2D + point cube maps, adaptive resolution, static
+cache, perforated casters, oversize→stencil fallback, full cvar list) see the as-built
+reference [shadow-system.md](shadow-system.md).]**
 
 RBDOOM-style feature set, built **on the RHI** so GL 3.3 and Vulkan share it —
 deliberately not attempted on the legacy ARB backend (throwaway work) and not part
@@ -273,7 +276,9 @@ surface starts as a **global mode only** (`r_shadowMapping` cvar + Enhancements-
 row: Stencil default / Shadow Maps); per-light material-keyword override deferred.
 In Shadow-Maps mode, projected lights take the SM path and point/parallel lights
 **fall back to stencil** until implemented — that automatic fallback *is* the
-free-mixing behavior. Build order:
+free-mixing behavior. *(As-built update: point lights are now cube-mapped; parallel
+lights and deliberately-oversize point lights are what fall back to stencil — see
+[shadow-system.md](shadow-system.md).)* Build order:
 1. **Minimal depth render-target in the RHI** (currently absent — `CreateImage`
    returns 0, only `BeginPass` on the default framebuffer + `CopyFramebufferToImage`
    exist). Depth-only offscreen target: create depth texture + FBO, `BeginPass` able

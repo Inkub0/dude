@@ -13,6 +13,7 @@ This is the hub. The plan is split across focused documents so each can be loade
 | [port-architecture.md](port-architecture.md) | Code survey, hardware baseline & backend switch, `vulkan-rt` profile, known risks, prior art |
 | [port-phases.md](port-phases.md) | Detailed Phase 0–10 plan, Material IR, mod compatibility scope |
 | [port-improvements.md](port-improvements.md) | "Improvements over the classic engine" toggles + Phase 11 post-process stack |
+| [shadow-system.md](shadow-system.md) | **As-built** shadow-mapping + emissive-lighting reference (Phase 3.5, GL3) |
 | [known-bugs.md](known-bugs.md) | Open GL3-backend bugs + resolved log |
 | [readme-changes.md](readme-changes.md) | Deliberate divergences from a faithful port (e.g. the far-plane sky) |
 
@@ -40,7 +41,7 @@ in [port-improvements.md](port-improvements.md)).
 | 5 — Validation & polish (the Vulkan payoff) | not started |
 | 6 — Modern Vulkan device profile (`vulkan-rt`) | not started |
 | 7 — Uncapped framerate (fixed-tick + interpolation) | not started |
-| 8 — Shadow mapping (optional, per-light) | not started |
+| 8 — Shadow mapping (optional, per-light) | **substantially built on GL3 in Phase 3.5** (projected 2D + point cube maps, adaptive res, static cache, perforated casters, oversize→stencil) — see [shadow-system.md](shadow-system.md); Vulkan port + Poisson/cascades pending |
 | 9 — Parallax occlusion mapping (experimental) | not started |
 | 10 — Ray tracing path | not started |
 | 11 — DUDE post-process & screen-space effect stack | Chunk F seeded (film grain, chromatic aberration) |
