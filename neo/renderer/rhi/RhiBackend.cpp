@@ -742,6 +742,147 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 
 /*
 =============
+RB_RHI_RenderSoftParticleStage
+
+SteveL #3878 particle softening, ported to the GL3 backend. Fades a particle
+quad where it approaches solid scene geometry (sampled from _currentDepth) and
+where it gets too close to the eye, so smoke/fog no longer show a hard
+intersection seam against walls and floors. Mirrors the soft-particle branch of
+RB_STD_T_RenderShaderPasses (draw_common.cpp): the depth test is forced off so
+the quad overdraws and the shader does the clipping instead.
+
+Only reached for DSF_SOFT_PARTICLE surfaces with a positive radius and an
+additive or src-alpha blend; the front-end (R_AddDrawSurf) already gates the
+flag to the GL3/Vulkan backends and to r_useSoftParticles + r_enableDepthCapture.
+Returns false (leaving nothing drawn) if the softparticle program failed to
+build, so the caller can fall through to the generic path.
+=============
+*/
+static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf,
+                                            const shaderStage_t *pStage, const float *regs, int src_blend,
+                                            const float color[4], const float mvp[16], const srfTriangles_t *tri,
+                                            rhi::BufferHandle vb, int vertOfs, rhi::BufferHandle ib, int idxOfs ) {
+	rhi::ShaderHandle prog = rhi::GL3_FindProgram( "softparticle" );
+	if ( !prog ) {
+		return false;	// shader unavailable: let the caller draw it generically
+	}
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
+
+	// diffuse (texture) matrix — identical reg evaluation to the generic path
+	if ( pStage->texture.hasMatrix ) {
+		parms.diffuseMatrixS[0] = regs[pStage->texture.matrix[0][0]];
+		parms.diffuseMatrixS[1] = regs[pStage->texture.matrix[0][1]];
+		parms.diffuseMatrixS[2] = 0.0f;
+		parms.diffuseMatrixS[3] = regs[pStage->texture.matrix[0][2]];
+		parms.diffuseMatrixT[0] = regs[pStage->texture.matrix[1][0]];
+		parms.diffuseMatrixT[1] = regs[pStage->texture.matrix[1][1]];
+		parms.diffuseMatrixT[2] = 0.0f;
+		parms.diffuseMatrixT[3] = regs[pStage->texture.matrix[1][2]];
+		if ( parms.diffuseMatrixS[3] < -40.0f || parms.diffuseMatrixS[3] > 40.0f ) {
+			parms.diffuseMatrixS[3] -= (int)parms.diffuseMatrixS[3];
+		}
+		if ( parms.diffuseMatrixT[3] < -40.0f || parms.diffuseMatrixT[3] > 40.0f ) {
+			parms.diffuseMatrixT[3] -= (int)parms.diffuseMatrixT[3];
+		}
+	} else {
+		parms.diffuseMatrixS[0] = 1.0f;
+		parms.diffuseMatrixT[1] = 1.0f;
+	}
+
+	// Particle colour. softparticle.vert computes
+	// var_Color = (attr_Color*modulate + add) * u_color. The particle system
+	// fades particles through the per-vertex colour, so use it raw; SVC_IGNORE
+	// particles (rare, discouraged) carry the fade in the stage colour instead,
+	// matching the old-style fallback in the legacy soft path.
+	if ( pStage->vertexColor == SVC_IGNORE ) {
+		parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
+		parms.color[0] = color[0]; parms.color[1] = color[1]; parms.color[2] = color[2]; parms.color[3] = color[3];
+	} else {
+		parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = 1.0f;
+		parms.color[0] = parms.color[1] = parms.color[2] = parms.color[3] = 1.0f;
+	}
+
+	// env[23]: { radius, 1/fadeRange, 1/radius }. fadeRange is the particle
+	// diameter for alpha blends (smoke is half as opaque with a wall mid-volume)
+	// but the radius for additive blends (glares lose nothing to overdraw).
+	float fadeRange = surf->particle_radius;
+	if ( src_blend == GLS_SRCBLEND_SRC_ALPHA ) {
+		fadeRange = surf->particle_radius * 2.0f;
+	}
+	parms.particleRadius[0] = surf->particle_radius;
+	parms.particleRadius[1] = 1.0f / fadeRange;
+	parms.particleRadius[2] = 1.0f / surf->particle_radius;
+
+	// env[24]: colour-channel mask added to the fade multiplier. Additive blends
+	// fade their RGB; alpha blends fade their alpha (leave the rest at 1).
+	if ( src_blend == GLS_SRCBLEND_SRC_ALPHA ) {
+		parms.channelMask[0] = parms.channelMask[1] = parms.channelMask[2] = 1.0f;
+		parms.channelMask[3] = 0.0f;
+	} else {	// GLS_SRCBLEND_ONE
+		parms.channelMask[0] = parms.channelMask[1] = parms.channelMask[2] = 0.0f;
+		parms.channelMask[3] = 1.0f;
+	}
+
+	// env[22].xy: reciprocal of the (power-of-two) _currentDepth size, mapping
+	// gl_FragCoord to a depth texcoord (RB_SetProgramEnvironment / #3877).
+	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
+	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
+
+	rhi::BufferHandle ub;
+	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	// unit 0 = particle diffuse, unit 1 = _currentDepth
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
+	if ( pStage->texture.image ) {
+		pStage->texture.image->Bind();
+	}
+	rhi::gl3ActiveTexture( GL_TEXTURE1 );
+	backEnd.glState.currenttmu = 1;
+	globalImages->currentDepthImage->Bind();
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
+
+	// depth test off (the shader fades against captured depth); strip alpha-test
+	// bits, which the soft-particle shader doesn't implement
+	rhi::PipelineDesc pd;
+	pd.stateBits = ( pStage->drawStateBits & ~GLS_ATEST_BITS ) | GLS_DEPTHFUNC_ALWAYS;
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
+	r->BindPipeline( pd );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = tri->numIndexes;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	r->Draw( da );
+
+	// unbind _currentDepth so later stages expecting only unit 0 aren't fed a
+	// stale depth binding
+	rhi::gl3ActiveTexture( GL_TEXTURE1 );
+	backEnd.glState.currenttmu = 1;
+	globalImages->BindNull();
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
+
+	backEnd.pc.c_drawElements++;
+	backEnd.pc.c_drawIndexes += tri->numIndexes;
+	backEnd.pc.c_drawVertexes += tri->numVerts;
+	return true;
+}
+
+/*
+=============
 RB_RHI_RenderShaderPasses
 
 Ambient stages of one surface, driven by the Material IR: old-style stages
@@ -847,6 +988,19 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		if ( ( pStage->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) == ( GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA )
 			&& color[3] <= 0 ) {
 			continue;
+		}
+
+		// soft particles (#3878): fade this quad against captured scene depth
+		// instead of drawing it as a hard billboard. The front-end flags the
+		// surface + radius (GL3/Vulkan only); we only soften additive / src-alpha
+		// blends, and only once _currentDepth has actually been captured.
+		const int src_blend = pStage->drawStateBits & GLS_SRCBLEND_BITS;
+		if ( ( surf->dsFlags & DSF_SOFT_PARTICLE ) && surf->particle_radius > 0.0f
+			&& ( src_blend == GLS_SRCBLEND_ONE || src_blend == GLS_SRCBLEND_SRC_ALPHA )
+			&& globalImages->currentDepthImage->uploadWidth > 0 ) {
+			if ( RB_RHI_RenderSoftParticleStage( r, viewDef, surf, pStage, regs, src_blend, color, mvp, tri, vb, vertOfs, ib, idxOfs ) ) {
+				continue;
+			}
 		}
 
 		rhi::RenderParams parms;
