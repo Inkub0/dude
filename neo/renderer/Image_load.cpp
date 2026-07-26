@@ -538,6 +538,38 @@ There is no way to specify explicit mip map levels
 
 ================
 */
+/*
+================
+R_ImageAverageColorRGBA
+
+DUDE: alpha-weighted mean RGB (0..1) of an RGBA byte buffer, strided so large textures
+stay cheap. Used to tint emissive GUI fill lights toward the screen's actual content.
+Leaves out[] untouched when there's nothing meaningful to sample (NULL / fully transparent).
+================
+*/
+static void R_ImageAverageColorRGBA( const byte *pic, int numTexels, float out[3] ) {
+	if ( pic == NULL || numTexels <= 0 ) {
+		return;
+	}
+	const int stride = ( numTexels > 4096 ) ? ( numTexels / 4096 ) : 1;
+	double sum[3] = { 0.0, 0.0, 0.0 };
+	double wsum = 0.0;
+	for ( int i = 0; i < numTexels; i += stride ) {
+		const byte *p = pic + i * 4;
+		const double a = p[3] * ( 1.0 / 255.0 );
+		sum[0] += p[0] * a;
+		sum[1] += p[1] * a;
+		sum[2] += p[2] * a;
+		wsum += a;
+	}
+	if ( wsum > 0.0 ) {
+		const double inv = 1.0 / ( wsum * 255.0 );
+		out[0] = (float)( sum[0] * inv );
+		out[1] = (float)( sum[1] * inv );
+		out[2] = (float)( sum[2] * inv );
+	}
+}
+
 void idImage::GenerateImage( const byte *pic, int width, int height,
 					   textureFilter_t filterParm, bool allowDownSizeParm,
 					   textureRepeat_t repeatParm, textureDepth_t depthParm ) {
@@ -575,6 +607,9 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 	if ( scaled_width != width || scaled_height != height ) {
 		common->Error( "R_CreateImage: not a power of 2 image" );
 	}
+
+	// DUDE: capture a mean RGB of the source pixels for emissive GUI fill-light tinting
+	R_ImageAverageColorRGBA( pic, width * height, averageColor );
 
 	// Optionally modify our width/height based on options/hardware
 	GetDownsize( scaled_width, scaled_height );
@@ -2094,6 +2129,10 @@ void idImage::UploadScratch( const byte *data, int cols, int rows ) {
 			type = TT_2D;
 			uploadWidth = -1;	// for a non-sub upload
 		}
+
+		// DUDE: keep the mean colour current for cinematic/video screens so their
+		// emissive fill light tracks what's actually playing
+		R_ImageAverageColorRGBA( data, cols * rows, averageColor );
 
 		Bind();
 

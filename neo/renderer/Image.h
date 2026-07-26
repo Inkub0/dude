@@ -274,6 +274,8 @@ public:
 	int					uploadWidth, uploadHeight, uploadDepth;	// after power of two, downsample, and MAX_TEXTURE_SIZE
 	int					internalFormat;
 
+	float				averageColor[3];		// DUDE: mean RGB (0..1) of the source pixels, sampled at GenerateImage; used to tint emissive GUI fill lights. Defaults to white.
+
 	idImage				*cacheUsagePrev, *cacheUsageNext;	// for dynamic cache purging of old images
 
 	idImage *			hashNext;				// for hash chains to speed lookup
@@ -307,6 +309,7 @@ ID_INLINE idImage::idImage() {
 	bindCount = 0;
 	uploadWidth = uploadHeight = uploadDepth = 0;
 	internalFormat = 0;
+	averageColor[0] = averageColor[1] = averageColor[2] = 1.0f;
 	cacheUsagePrev = cacheUsageNext = NULL;
 	hashNext = NULL;
 	refCount = 0;

@@ -120,6 +120,10 @@ void R_SurfaceToTextureAxis( const srfTriangles_t *tri, idVec3 &origin, idVec3 a
 	VectorMA( origin, boundsOrg[1] - a->st[1], axis[1], origin );
 }
 
+// DUDE: filled in by R_RenderGuiSurf, consumed by the emissive fill-light queue
+idVec3	tr_guiEmissiveColor( 1.0f, 1.0f, 1.0f );
+bool	tr_guiEmissiveColorValid = false;
+
 /*
 =================
 R_RenderGuiSurf
@@ -177,6 +181,14 @@ void R_RenderGuiSurf( idUserInterface *gui, drawSurf_t *drawSurf ) {
 	// call the gui, which will call the 2D drawing functions
 	tr.guiModel->Clear();
 	gui->Redraw( tr.viewDef->renderView.time );
+
+	// DUDE: sample the screen's dominant colour for its emissive fill light while the
+	// guiModel is still populated (before EmitToCurrentView clears it)
+	tr_guiEmissiveColorValid = false;
+	if ( r_emissiveSurfaces.GetBool() && R_BackendSupportsEnhancements() ) {
+		tr_guiEmissiveColorValid = tr.guiModel->EmissiveAverageColor( tr_guiEmissiveColor );
+	}
+
 	tr.guiModel->EmitToCurrentView( modelMatrix, drawSurf->space->weaponDepthHack );
 	tr.guiModel->Clear();
 

@@ -161,7 +161,7 @@ idCVar r_testGammaBias( "r_testGammaBias", "0", CVAR_RENDERER | CVAR_FLOAT, "if 
 idCVar r_testStepGamma( "r_testStepGamma", "0", CVAR_RENDERER | CVAR_FLOAT, "if > 0 draw a grid pattern to test gamma levels" );
 idCVar r_lightScale( "r_lightScale", "2", CVAR_RENDERER | CVAR_FLOAT, "all light intensities are multiplied by this" );
 idCVar r_lightSourceRadius( "r_lightSourceRadius", "0", CVAR_RENDERER | CVAR_FLOAT, "for soft-shadow sampling" );
-idCVar r_flareSize( "r_flareSize", "1", CVAR_RENDERER | CVAR_FLOAT, "scale the flare deforms from the material def" );
+idCVar r_flareSize( "r_flareSize", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "size of light flares/glares from the material deform (1 = vanilla Doom 3, lower to dampen, 0 = off)" );
 
 idCVar r_useExternalShadows( "r_useExternalShadows", "1", CVAR_RENDERER | CVAR_INTEGER, "1 = skip drawing caps when outside the light volume, 2 = force to no caps for testing", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
 idCVar r_useOptimizedShadows( "r_useOptimizedShadows", "1", CVAR_RENDERER | CVAR_BOOL, "use the dmap generated static shadow volumes" );
@@ -294,6 +294,20 @@ idCVar r_shadowMapSizeScale( "r_shadowMapSizeScale", "1", CVAR_RENDERER | CVAR_A
 idCVar r_shadowMapSizeScaleRadius( "r_shadowMapSizeScaleRadius", "380", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "light radius that maps to the base shadow resolution (r_shadowMapSize / r_shadowMapPointSize); lights larger than this get proportionally more resolution, smaller ones less", 16.0f, 8192.0f );
 idCVar r_shadowMapCache( "r_shadowMapCache", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "cache static point-light cube shadow maps across frames; a light is only regenerated when it or one of its shadow casters moves. Huge win in static scenes" );
 idCVar r_shadowMapCacheMB( "r_shadowMapCacheMB", "-1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "VRAM budget for the shadow-map cache, in MB. -1 = auto (half of detected video memory), 0 = unlimited", -1, 32768 );
+idCVar r_shadowMapStencilRadius( "r_shadowMapStencilRadius", "250", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "lights whose largest light_radius axis exceeds this (world units) fall back to Carmack stencil shadows instead of a shadow map. Large 'sun replacement' lights look better as stencil (no cube-map pixelation on distant shadows) and cost no shadow-map VRAM. 0 = every light uses shadow maps", 0.0f, 16384.0f );
+
+// DUDE: emissive fill lights — interactive GUI screens (monitors, keypads, wall
+// panels) glow but cast no light in Doom 3's model, so they read as decals pasted
+// onto an unlit wall. These spawn a small shadowless point light per visible screen
+// to ground it. Non-vanilla; enhancement backends only. See tr_light.cpp.
+idCVar r_emissiveSurfaces( "r_emissiveSurfaces", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "let emissive surfaces (GUI screens, monitors, video panels) cast a small fill light onto nearby geometry so they don't look detached (non-vanilla; opengl3/Vulkan only)" );
+idCVar r_emissiveLightScale( "r_emissiveLightScale", "0.33", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "brightness of emissive-surface fill lights (0 = off, 1 = a full-strength light); keep low for subtle bleed", 0.0f, 4.0f );
+idCVar r_emissiveLightRadius( "r_emissiveLightRadius", "3.75", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "reach of GUI-screen fill lights, as a multiple of the screen's own size", 0.25f, 16.0f );
+idCVar r_emissiveLightSaturation( "r_emissiveLightSaturation", "0.65", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how much of a screen fill light's sampled colour to keep: 0 = white, 1 = full screen hue. Lower reads as natural bleed, higher as a coloured spotlight", 0.0f, 1.0f );
+idCVar r_emissiveLightLimit( "r_emissiveLightLimit", "24", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "max screen fill lights kept per view (nearest/biggest win); extras reap on the normal timeout. 0 = unlimited", 0, 256 );
+idCVar r_emissiveLightProjected( "r_emissiveLightProjected", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "screen fill lights use a forward-facing projected cone (1) so nothing spills through the mount wall — fixes recessed-screen leak; 0 = old point light (bleeds in all directions)" );
+idCVar r_emissiveLightSpread( "r_emissiveLightSpread", "3.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "width of the projected fill cone as a multiple of its reach: low = a tight beam, high = a wide near-hemisphere that wraps around the screen like a point light (but still clipped behind the mount)", 0.5f, 3.5f );
+idCVar r_emissiveLightSpecular( "r_emissiveLightSpecular", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "screen fill lights add specular highlights (1, more visible on the weapon) or diffuse-only soft fill (0, calmer)" );
 
 // DUDE: gate for the non-vanilla "Enhancements" (see tr_local.h). Only the GL 3.3
 // core backend qualifies today; Vulkan backends will extend this once they land.

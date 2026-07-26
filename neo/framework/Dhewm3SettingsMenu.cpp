@@ -1692,6 +1692,20 @@ static CVarOption enhancementOptions[] = {
 	} ),
 	CVarOption( "r_specularScale", "Specular Scale", OT_FLOAT, 0.0f, 8.0f ),
 	CVarOption( "r_specularExp", "Specular Exponent (Blinn-Phong / Phong)", OT_FLOAT, 1.0f, 128.0f ),
+	// light flare/glare deform sprites (the "bloom" around some lights). Vanilla
+	// value is 1.0; lower to dampen, 0 to switch them off. Works on all backends
+	// but lives here as the deviate-from-vanilla knob.
+	CVarOption( "r_flareSize", "Light Flare / Glare Size", OT_FLOAT, 0.0f, 2.0f ),
+	CVarOption( "r_emissiveSurfaces", []( idCVar& cvar ) {
+		bool enable = cvar.GetBool();
+		if ( ImGui::Checkbox( "Emissive Surfaces Cast Light", &enable ) ) {
+			cvar.SetBool( enable );
+		}
+		const char* descr = "GUI screens, monitors and video panels glow but cast no light in vanilla Doom 3,\n"
+			"so they read as decals pasted on an unlit wall. This lets them bleed a small,\n"
+			"content-tinted fill light onto nearby geometry. Fine-tuning lives in the Debugging tab.";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
 
 	// NOTE: the Shadows section is hand-drawn in DrawEnhancementsMenu() (grouped
 	// under the toggle, with a fine-grained bias control), not listed here.
@@ -2430,6 +2444,31 @@ static void DrawShadowDebugMenu()
 	ImGui::EndDisabled();	// cache on
 
 	ImGui::EndDisabled();	// shadow mapping on
+
+	// --- Emissive surfaces (independent of shadow mapping; master toggle is in Enhancements > Lighting) ---
+	ImGui::Spacing();
+	ImGui::SeparatorText( "Emissive Surfaces" );
+	ImGui::TextDisabled( "Fill-light behaviour for glowing screens/monitors. Enable in Enhancements > Lighting." );
+	ImGui::Spacing();
+
+	ImGui::BeginDisabled( !r_emissiveSurfaces.GetBool() );
+
+	bool emProjected = r_emissiveLightProjected.GetBool();
+	if ( ImGui::Checkbox( "Projected Cone (no back-leak)", &emProjected ) ) {
+		r_emissiveLightProjected.SetBool( emProjected );
+	}
+	AddTooltip( "On: a forward-facing cone that can't spill through the mount wall (fixes recessed "
+		"screens like health stations). Off: an omnidirectional point light that bleeds every way." );
+
+	bool emSpecular = r_emissiveLightSpecular.GetBool();
+	if ( ImGui::Checkbox( "Specular Highlights", &emSpecular ) ) {
+		r_emissiveLightSpecular.SetBool( emSpecular );
+	}
+	AddTooltip( "On: fill lights add a specular glint (more visible on your weapon). "
+		"Off: diffuse-only, a calmer soft fill." );
+
+	ImGui::EndDisabled();	// emissive surfaces on
+
 	ImGui::EndDisabled();	// backend supported
 }
 

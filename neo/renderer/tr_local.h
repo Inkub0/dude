@@ -879,6 +879,17 @@ extern idCVar r_shadowMapSizeScaleRadius;	// light radius mapped to the base sha
 extern idCVar r_shadowMapFaceCull;			// skip cube faces outside the view frustum
 extern idCVar r_shadowMapCache;				// cache static point-light cube maps across frames
 extern idCVar r_shadowMapCacheMB;			// VRAM budget for the shadow-map cache (MB; -1 auto, 0 unlimited)
+extern idCVar r_shadowMapStencilRadius;		// lights bigger than this (max radius axis) fall back to stencil shadows
+
+// DUDE: emissive fill lights for interactive GUI screens (enhancement backends only)
+extern idCVar r_emissiveSurfaces;		// master toggle (emissive surfaces cast fill light)
+extern idCVar r_emissiveLightScale;		// fill-light brightness
+extern idCVar r_emissiveLightRadius;	// reach as a multiple of the screen's size
+extern idCVar r_emissiveLightSaturation;	// desaturate tint toward white (0=white, 1=full hue)
+extern idCVar r_emissiveLightLimit;		// per-view budget cap on fill lights (0=unlimited)
+extern idCVar r_emissiveLightProjected;	// forward cone (1, no back-leak) vs point light (0)
+extern idCVar r_emissiveLightSpread;	// projected cone width (low=beam, high=near-hemisphere)
+extern idCVar r_emissiveLightSpecular;	// fill lights cast specular (1) or diffuse-only (0)
 
 extern idCVar r_renderer;				// arb2, etc
 
@@ -1690,6 +1701,11 @@ TR_GUISURF
 
 void R_SurfaceToTextureAxis( const srfTriangles_t *tri, idVec3 &origin, idVec3 axis[3] );
 void R_RenderGuiSurf( idUserInterface *gui, drawSurf_t *drawSurf );
+
+// DUDE: dominant colour of the GUI surface most recently rendered by R_RenderGuiSurf,
+// handed to the emissive fill-light queue in R_AddDrawSurf. Only meaningful when valid.
+extern idVec3 tr_guiEmissiveColor;
+extern bool   tr_guiEmissiveColorValid;
 
 /*
 =============================================================

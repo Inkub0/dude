@@ -53,6 +53,10 @@ public:
 	void	EmitToCurrentView( float modelMatrix[16], bool depthHack );
 	void	EmitFullScreen();
 
+	// DUDE: area/luminance-weighted dominant colour of the content just emitted, for
+	// tinting emissive GUI fill lights. Returns false if nothing usable was drawn.
+	bool	EmissiveAverageColor( idVec3 &out ) const;
+
 	// these calls are forwarded from the renderer
 	void	SetColor( float r, float g, float b, float a );
 	void	DrawStretchPic( const idDrawVert *verts, const glIndex_t *indexes, int vertCount, int indexCount, const idMaterial *hShader,

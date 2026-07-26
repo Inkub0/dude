@@ -1189,6 +1189,406 @@ idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def ) {
 }
 
 /*
+==========================================================================================
+
+EMISSIVE FILL LIGHTS (DUDE enhancement)
+
+Interactive GUI screens (monitors, keypads, wall panels) are drawn purely as self-lit
+ambient surfaces: they glow, but in Doom 3's unified lighting model they cast no light
+on anything around them, so they read as bright decals pasted onto an unlit wall. To
+ground them we spawn a small, shadowless point light per visible GUI surface, sitting
+just in front of the screen. These are real world light defs, so all the normal
+interaction / backend machinery (including the enhancement backends' shadow maps, which
+we disable here) lights the neighbours for free.
+
+Cheapest-viable version: constant tint, size/reach derived from the surface, lights
+cached per (entity, material) and reused across frames, garbage-collected a couple of
+seconds after a screen stops being drawn. Tinting the light from the screen's actual
+content colour is the obvious next improvement.
+
+Only real player views (viewID > 0) manage the set; mirrors/xray/lightgem subviews see
+the same world lights for free. Enhancement-only and off by default.
+==========================================================================================
+*/
+
+struct emissiveReq_t {
+	int			entityIndex;	// owning entityDef index, -1 for world geometry
+	const void *surfKey;		// material ptr — disambiguates several screens on one entity
+	idVec3		center;			// screen centre, world space
+	idVec3		normal;			// screen outward normal, world space (unit)
+	float		radius;			// reach (world units)
+	float		surfRadius;		// screen half-size (for the point-light forward offset)
+	idVec3		color;			// final light colour (hue * scale, desaturated)
+};
+
+struct emissiveLight_t {
+	int			entityIndex;
+	const void *surfKey;
+	qhandle_t	handle;
+	int			lastSeen;		// renderView.time (ms) the screen was last drawn
+	idVec3		center;
+	idVec3		normal;
+	float		radius;
+	idVec3		color;
+};
+
+static const int				EMISSIVE_LIGHT_TIMEOUT_MS = 2000;
+static idList<emissiveReq_t>	r_emissiveReqs;
+static idList<emissiveLight_t>	r_emissiveLightList;
+static idRenderWorldLocal *		r_emissiveWorld = NULL;
+
+// scratch for the per-view budget selection (r_emissiveLightLimit)
+struct emReqScore_t {
+	int		idx;
+	float	score;	// bigger + nearer = more important
+};
+static int R_CmpEmReqScore( const void *pa, const void *pb ) {
+	const float a = ( (const emReqScore_t *)pa )->score;
+	const float b = ( (const emReqScore_t *)pb )->score;
+	if ( a < b ) return 1;		// descending: higher score first
+	if ( a > b ) return -1;
+	return 0;
+}
+
+/*
+=================
+R_MaterialHasCinematic
+
+DUDE: true if the material draws a video/cinematic (a "screen" with no gui). Cheap —
+walks the (usually one or two) stages. Only called when emissive lights are enabled.
+=================
+*/
+static bool R_MaterialHasCinematic( const idMaterial *shader ) {
+	if ( shader == NULL ) {
+		return false;
+	}
+	const int n = shader->GetNumStages();
+	for ( int i = 0; i < n; i++ ) {
+		if ( shader->GetStage( i )->texture.cinematic != NULL ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+=================
+R_QueueEmissiveLight
+
+Called from R_AddDrawSurf for every visible "screen" surface (gui or cinematic). Derives
+a world-space fill-light request from the surface geometry, tinted by the caller-supplied
+content colour, and queues it; the actual light defs are reconciled once per view in
+R_UpdateEmissiveLights.
+=================
+*/
+static void R_QueueEmissiveLight( const srfTriangles_t *tri, const viewEntity_t *space, const idMaterial *shader, const idVec3 &tint ) {
+	if ( !tri || !tri->verts || tri->numIndexes < 3 || !space ) {
+		return;
+	}
+
+	// NPCs and other skeletal characters hold screens (tablets, PDAs) right against their own
+	// body, where a point-blank fill light blasts their mesh — and a hand-held device isn't an
+	// environment light anyway. Skip emissive lights on animated/skeletal models; world and
+	// static-model screens have no joints, so they're unaffected.
+	if ( space->entityDef != NULL && space->entityDef->parms.numJoints > 0 ) {
+		return;
+	}
+
+	// local-space centre, size and face normal (entity matrices are rigid, so world size == local size)
+	const idVec3 localCenter = ( tri->bounds[0] + tri->bounds[1] ) * 0.5f;
+	const float  surfRadius  = ( tri->bounds[1] - tri->bounds[0] ).Length() * 0.5f;
+	if ( surfRadius < 1.0f ) {
+		return;		// degenerate / tiny
+	}
+
+	// use the authored surface normal (points out of the visible/emitting face); the
+	// winding-derived face normal can point into the wall, which fires the cone backwards
+	idVec3 localNormal = tri->verts[tri->indexes[0]].normal
+	                   + tri->verts[tri->indexes[1]].normal
+	                   + tri->verts[tri->indexes[2]].normal;
+	if ( localNormal.Normalize() == 0.0f ) {
+		const idVec3 &a = tri->verts[tri->indexes[0]].xyz;
+		const idVec3 &b = tri->verts[tri->indexes[1]].xyz;
+		const idVec3 &c = tri->verts[tri->indexes[2]].xyz;
+		localNormal = ( b - a ).Cross( c - a );
+		if ( localNormal.Normalize() == 0.0f ) {
+			localNormal.Set( 0.0f, 0.0f, 1.0f );
+		}
+	}
+
+	idVec3 worldCenter, worldNormal;
+	R_LocalPointToGlobal( space->modelMatrix, localCenter, worldCenter );
+	R_LocalVectorToGlobal( space->modelMatrix, localNormal, worldNormal );
+	worldNormal.Normalize();
+
+	// safety net: orient toward the room we're viewing the screen from, so the cone can never
+	// fire into the mount (the authored normal is occasionally inverted on decal-style screens)
+	if ( tr.viewDef != NULL ) {
+		const idVec3 toView = tr.viewDef->renderView.vieworg - worldCenter;
+		if ( ( worldNormal * toView ) < 0.0f ) {
+			worldNormal = -worldNormal;
+		}
+	}
+
+	emissiveReq_t &req = r_emissiveReqs.Alloc();
+	req.entityIndex = space->entityDef ? space->entityDef->index : -1;
+	req.surfKey     = shader;
+	req.center      = worldCenter;
+	req.normal      = worldNormal;
+	req.surfRadius  = surfRadius;
+
+	float radius = surfRadius * r_emissiveLightRadius.GetFloat();
+	if ( radius < 24.0f )  radius = 24.0f;
+	if ( radius > 200.0f ) radius = 200.0f;
+	req.radius = radius;
+
+	// normalise to a pure hue (brightness comes from r_emissiveLightScale), then desaturate
+	// toward white by (1 - saturation) so the bleed reads as a tint, not a coloured spotlight.
+	// This also gives the raw cinematic tint the same hue/brightness behaviour as the gui path.
+	idVec3 hue = tint;
+	float m = hue.x;
+	if ( hue.y > m ) m = hue.y;
+	if ( hue.z > m ) m = hue.z;
+	if ( m > 0.001f ) {
+		hue /= m;
+	} else {
+		hue.Set( 1.0f, 1.0f, 1.0f );
+	}
+	const float sat = r_emissiveLightSaturation.GetFloat();
+	hue.x = 1.0f + ( hue.x - 1.0f ) * sat;
+	hue.y = 1.0f + ( hue.y - 1.0f ) * sat;
+	hue.z = 1.0f + ( hue.z - 1.0f ) * sat;
+
+	req.color = hue * r_emissiveLightScale.GetFloat();
+}
+
+/*
+=================
+R_FindEmissiveLight
+=================
+*/
+static emissiveLight_t *R_FindEmissiveLight( int entityIndex, const void *surfKey ) {
+	for ( int i = 0; i < r_emissiveLightList.Num(); i++ ) {
+		if ( r_emissiveLightList[i].entityIndex == entityIndex && r_emissiveLightList[i].surfKey == surfKey ) {
+			return &r_emissiveLightList[i];
+		}
+	}
+	return NULL;
+}
+
+/*
+=================
+R_FreeAllEmissiveLights
+=================
+*/
+static void R_FreeAllEmissiveLights( idRenderWorldLocal *world ) {
+	if ( world ) {
+		for ( int i = 0; i < r_emissiveLightList.Num(); i++ ) {
+			if ( r_emissiveLightList[i].handle != -1 ) {
+				world->FreeLightDef( r_emissiveLightList[i].handle );
+			}
+		}
+	}
+	r_emissiveLightList.Clear();
+}
+
+/*
+=================
+R_BuildEmissiveRenderLight
+
+DUDE: fills a renderLight_t for one screen from its request, honouring the projected/
+specular/shadow style cvars. Projected (default) is a forward-facing cone whose apex sits
+a little behind the screen: it lights the surrounding wall and the space in front, but —
+unlike a point light's sphere — spills nothing through to the far side of the mount, which
+is what fixes the leak on recessed screens (health stations etc.).
+=================
+*/
+static void R_BuildEmissiveRenderLight( const emissiveReq_t &req, renderLight_t &rl ) {
+	memset( &rl, 0, sizeof( rl ) );
+	rl.axis = mat3_identity;
+	rl.noShadows  = true;		// fill light; shadows here would only fight the real lights
+	rl.noSpecular = !r_emissiveLightSpecular.GetBool();
+	rl.shaderParms[0] = req.color[0];
+	rl.shaderParms[1] = req.color[1];
+	rl.shaderParms[2] = req.color[2];
+	rl.shaderParms[3] = 1.0f;
+
+	const float R = req.radius;
+
+	if ( r_emissiveLightProjected.GetBool() ) {
+		const float back     = R * 0.6f;					// apex pulled this far behind the screen
+		const float range    = back + R;					// far cap this far from the apex
+		const float coneHalf = R * r_emissiveLightSpread.GetFloat();	// far-cap half-extent; wide = soft hemisphere-like glow
+
+		idVec3 rightUnit, upUnit;
+		req.normal.NormalVectors( rightUnit, upUnit );
+
+		rl.pointLight = false;
+		rl.origin = req.center - req.normal * back;			// apex, behind the screen
+		rl.target = req.normal * range;						// far-cap centre (rel. origin)
+		rl.right  = rightUnit * coneHalf;					// far-cap half-width
+		rl.up     = upUnit * coneHalf;						// far-cap half-height
+		rl.start  = req.normal * ( back * 0.5f );			// falloff near
+		rl.end    = req.normal * range;						// falloff far
+	} else {
+		// legacy point light: sit it a little in front of the screen so its sphere leans outward
+		rl.pointLight = true;
+		rl.origin = req.center + req.normal * ( req.surfRadius * 0.35f + 2.0f );
+		rl.lightRadius[0] = rl.lightRadius[1] = rl.lightRadius[2] = R;
+	}
+}
+
+/*
+=================
+R_UpdateEmissiveLights
+
+Reconciles this view's queued GUI-screen light requests against the persistent set of
+fill lights: creates new ones, follows moved screens, and reaps lights whose screen
+hasn't been drawn for a couple of seconds. Called once at the end of R_AddModelSurfaces.
+=================
+*/
+static void R_UpdateEmissiveLights( void ) {
+	idRenderWorldLocal *world = tr.viewDef ? tr.viewDef->renderWorld : NULL;
+
+	// only real player views own the set; subviews/lightgem see the same world lights for free
+	if ( !tr.viewDef || tr.viewDef->renderView.viewID <= 0 ) {
+		r_emissiveReqs.SetNum( 0, false );
+		return;
+	}
+
+	// a new map means our cached handles belong to a world that's already been torn down —
+	// drop them without touching the (freed) light defs
+	if ( world != r_emissiveWorld ) {
+		r_emissiveLightList.Clear();
+		r_emissiveWorld = world;
+	}
+
+	const bool enabled = r_emissiveSurfaces.GetBool() && R_BackendSupportsEnhancements();
+
+	if ( !enabled || !world ) {
+		if ( r_emissiveLightList.Num() > 0 ) {
+			R_FreeAllEmissiveLights( world );
+		}
+		r_emissiveReqs.SetNum( 0, false );
+		return;
+	}
+
+	// projected/specular/spread are baked into each light at creation, so changing them won't
+	// propagate through the move/colour comparison below — rebuild the whole set when they change
+	static float lastStyleSig = -1.0f;
+	const float styleSig = ( r_emissiveLightProjected.GetBool() ? 1.0f : 0.0f )
+	                     + ( r_emissiveLightSpecular.GetBool() ? 2.0f : 0.0f )
+	                     + r_emissiveLightSpread.GetFloat() * 8.0f;
+	if ( styleSig != lastStyleSig ) {
+		R_FreeAllEmissiveLights( world );
+		lastStyleSig = styleSig;
+	}
+
+	const int now = tr.viewDef->renderView.time;
+
+	// budget: when more screens want a fill light than the cap allows, keep the most
+	// important (big and near); the rest simply aren't refreshed this frame and reap on the
+	// normal timeout, which bounds the steady-state count without flicker (cf. r_shadowMapPointLimit)
+	static idList<int>			order;
+	static idList<emReqScore_t>	scores;
+	order.SetNum( 0, false );
+	const int limit = r_emissiveLightLimit.GetInteger();
+	if ( limit > 0 && r_emissiveReqs.Num() > limit ) {
+		const idVec3 viewer = tr.viewDef->renderView.vieworg;
+		scores.SetNum( 0, false );
+		for ( int i = 0; i < r_emissiveReqs.Num(); i++ ) {
+			emReqScore_t &s = scores.Alloc();
+			s.idx = i;
+			const float dist = ( r_emissiveReqs[i].center - viewer ).Length();
+			s.score = r_emissiveReqs[i].radius / ( dist + 1.0f );
+		}
+		qsort( scores.Ptr(), scores.Num(), sizeof( emReqScore_t ), R_CmpEmReqScore );
+		for ( int i = 0; i < limit; i++ ) {
+			order.Append( scores[i].idx );
+		}
+	} else {
+		for ( int i = 0; i < r_emissiveReqs.Num(); i++ ) {
+			order.Append( i );
+		}
+	}
+
+	// The default projected-light falloff holds flat then hard-clips at the far plane, so a
+	// projected fill light stops abruptly instead of fading. Borrow the point light's falloff
+	// (the soft radial ramp) and stamp it on each projected fill light so it eases to nothing.
+	idImage *fadeFalloff = NULL;
+	if ( r_emissiveLightProjected.GetBool() ) {
+		const idMaterial *pl = declManager->FindMaterial( "lights/defaultPointLight" );
+		if ( pl != NULL ) {
+			fadeFalloff = pl->LightFalloffImage();
+		}
+	}
+
+	for ( int oi = 0; oi < order.Num(); oi++ ) {
+		const emissiveReq_t &req = r_emissiveReqs[ order[oi] ];
+
+		renderLight_t rl;
+		R_BuildEmissiveRenderLight( req, rl );
+
+		qhandle_t handle = -1;
+		emissiveLight_t *el = R_FindEmissiveLight( req.entityIndex, req.surfKey );
+		if ( el ) {
+			// only re-issue the (interaction-invalidating) update when the screen actually
+			// moved/rotated or its colour shifted meaningfully — loose thresholds keep
+			// flickering/animated screens from rebuilding interactions every frame
+			if ( ( el->center - req.center ).LengthSqr() > 1.0f
+				|| ( el->normal * req.normal ) < 0.999f
+				|| idMath::Fabs( el->radius - req.radius ) > 0.5f
+				|| ( el->color - req.color ).LengthSqr() > 0.01f ) {
+				world->UpdateLightDef( el->handle, &rl );
+				el->center = req.center;
+				el->normal = req.normal;
+				el->radius = req.radius;
+				el->color  = req.color;
+			}
+			el->lastSeen = now;
+			handle = el->handle;
+		} else {
+			qhandle_t h = world->AddLightDef( &rl );
+			if ( h != -1 ) {
+				emissiveLight_t &nl = r_emissiveLightList.Alloc();
+				nl.entityIndex = req.entityIndex;
+				nl.surfKey     = req.surfKey;
+				nl.handle      = h;
+				nl.lastSeen    = now;
+				nl.center      = req.center;
+				nl.normal      = req.normal;
+				nl.radius      = req.radius;
+				nl.color       = req.color;
+				handle = h;
+			}
+		}
+
+		// stamp the fading falloff onto the derived light (re-applied every frame because
+		// AddLightDef/UpdateLightDef re-derive it from the light's shader). The viewLight copies
+		// light->falloffImage each frame (see R_SetLightDefViewLight), so this takes effect next frame.
+		if ( fadeFalloff != NULL && handle >= 0 && handle < world->lightDefs.Num() ) {
+			idRenderLightLocal *ldef = world->lightDefs[handle];
+			if ( ldef != NULL ) {
+				ldef->falloffImage = fadeFalloff;
+			}
+		}
+	}
+
+	// reap fill lights for screens we haven't drawn recently (destroyed, hidden, or long out of view)
+	for ( int i = r_emissiveLightList.Num() - 1; i >= 0; i-- ) {
+		const int age = now - r_emissiveLightList[i].lastSeen;
+		if ( age > EMISSIVE_LIGHT_TIMEOUT_MS || age < 0 ) {
+			if ( r_emissiveLightList[i].handle != -1 ) {
+				world->FreeLightDef( r_emissiveLightList[i].handle );
+			}
+			r_emissiveLightList.RemoveIndex( i );
+		}
+	}
+
+	r_emissiveReqs.SetNum( 0, false );
+}
+
+/*
 =================
 R_AddDrawSurf
 =================
@@ -1337,10 +1737,35 @@ void R_AddDrawSurf( const srfTriangles_t *tri, const viewEntity_t *space, const 
 			// did we ever use this to forward an entity color to a gui that didn't set color?
 //			memcpy( tr.guiShaderParms, shaderParms, sizeof( tr.guiShaderParms ) );
 			R_RenderGuiSurf( gui, drawSurf );
+
+			// DUDE: queue a small fill light so this screen bleeds onto its surroundings
+			// (right after the redraw, while its sampled content colour is fresh)
+			if ( r_emissiveSurfaces.GetBool() && tr.viewDef->renderView.viewID > 0 && R_BackendSupportsEnhancements() ) {
+				idVec3 tint( 1.0f, 1.0f, 1.0f );
+				if ( tr_guiEmissiveColorValid ) {
+					tint = tr_guiEmissiveColor;
+				}
+				R_QueueEmissiveLight( tri, space, shader, tint );
+			}
 		}
 
 		tr.viewDef->floatTime = oldFloatTime;
 		tr.viewDef->renderView.time = oldTime;
+	}
+
+	// DUDE: cinematic/video-material screens carry no gui but are clearly "screens" — give
+	// them the same fill light, tinted (best-effort) from the shared cinematic image, which
+	// our UploadScratch hook keeps averaged. Multiple different cinematics in view share that
+	// image, so the tint is approximate for the rarer multi-screen case.
+	if ( gui == NULL && r_emissiveSurfaces.GetBool() && tr.viewDef->renderView.viewID > 0
+			&& R_BackendSupportsEnhancements() && R_MaterialHasCinematic( shader ) ) {
+		idVec3 tint( 1.0f, 1.0f, 1.0f );
+		if ( globalImages->cinematicImage != NULL ) {
+			tint.Set( globalImages->cinematicImage->averageColor[0],
+					  globalImages->cinematicImage->averageColor[1],
+					  globalImages->cinematicImage->averageColor[2] );
+		}
+		R_QueueEmissiveLight( tri, space, shader, tint );
 	}
 
 	// we can't add subviews at this point, because that would
@@ -1607,6 +2032,9 @@ void R_AddModelSurfaces( void ) {
 		}
 
 	}
+
+	// DUDE: reconcile the GUI-screen fill lights collected during the surface pass
+	R_UpdateEmissiveLights();
 }
 
 /*

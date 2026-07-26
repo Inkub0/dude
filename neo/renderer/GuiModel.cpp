@@ -359,6 +359,80 @@ void idGuiModel::SetColor( float r, float g, float b, float a ) {
 }
 
 /*
+================
+idGuiModel::EmissiveAverageColor
+
+DUDE: dominant colour of what this GUI just drew, for tinting its emissive fill light.
+Each emitted surface contributes (its material's mean texel colour * the GUI modulation
+colour), weighted by on-screen area and luminance so a bright readout dominates a dark
+background instead of averaging into mud. Normalised to its max channel, so the result
+is a hue and r_emissiveLightScale stays the single brightness knob (matching the original
+flat-white behaviour). Returns false if nothing usable was drawn.
+================
+*/
+bool idGuiModel::EmissiveAverageColor( idVec3 &out ) const {
+	idVec3	accum( 0.0f, 0.0f, 0.0f );
+	double	wsum = 0.0;
+
+	for ( int s = 0; s < surfaces.Num(); s++ ) {
+		const guiModelSurface_t &gs = surfaces[s];
+		if ( gs.numVerts < 3 || gs.material == NULL ) {
+			continue;
+		}
+
+		// representative mean colour of this material: first stage that has an image
+		idVec3 img( 1.0f, 1.0f, 1.0f );
+		for ( int st = 0; st < gs.material->GetNumStages(); st++ ) {
+			const shaderStage_t *stage = gs.material->GetStage( st );
+			if ( stage->texture.image ) {
+				img.Set( stage->texture.image->averageColor[0],
+						 stage->texture.image->averageColor[1],
+						 stage->texture.image->averageColor[2] );
+				break;
+			}
+		}
+
+		const idVec3 col( img.x * gs.color[0], img.y * gs.color[1], img.z * gs.color[2] );
+
+		// on-screen bounding-box area (guiModel verts live in 640x480 gui space)
+		float minx = idMath::INFINITY, miny = idMath::INFINITY;
+		float maxx = -idMath::INFINITY, maxy = -idMath::INFINITY;
+		for ( int v = gs.firstVert; v < gs.firstVert + gs.numVerts; v++ ) {
+			const idVec3 &p = verts[v].xyz;
+			if ( p.x < minx ) minx = p.x;
+			if ( p.x > maxx ) maxx = p.x;
+			if ( p.y < miny ) miny = p.y;
+			if ( p.y > maxy ) maxy = p.y;
+		}
+		float area = ( maxx - minx ) * ( maxy - miny );
+		if ( area <= 0.0f ) {
+			area = (float)gs.numVerts;
+		}
+
+		const float lum = col.x * 0.299f + col.y * 0.587f + col.z * 0.114f;
+		const double w = (double)area * ( lum + 0.02f );	// small floor so a near-black element still counts a hair
+
+		accum += col * (float)w;
+		wsum += w;
+	}
+
+	if ( wsum <= 0.0 ) {
+		return false;
+	}
+	out = accum / (float)wsum;
+
+	// normalise to the brightest channel -> hue only; brightness comes from r_emissiveLightScale
+	float m = out.x;
+	if ( out.y > m ) m = out.y;
+	if ( out.z > m ) m = out.z;
+	if ( m <= 0.001f ) {
+		return false;
+	}
+	out /= m;
+	return true;
+}
+
+/*
 =============
 DrawStretchPic
 =============
