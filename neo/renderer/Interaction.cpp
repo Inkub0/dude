@@ -1201,8 +1201,14 @@ void idInteraction::AddActiveInteraction( void ) {
 						&& entityDef->parms.suppressShadowInLightID == lightDef->parms.lightId );
 			}
 
-			if ( !suppressed ) {
-				srfTriangles_t *castTri = sint->ambientTris;
+			srfTriangles_t *castTri = suppressed ? NULL : sint->ambientTris;
+			// Unlike the lightTris/shadowTris paths (whose generators, R_CreateLightTris /
+			// R_CreateShadowVolume, reject empty input) this uses the raw ambient surface,
+			// which for a dynamic model — e.g. a particle emitter with no live particles
+			// this frame — can be empty. R_CreateAmbientCache and the index upload both call
+			// vertexCache.Alloc, which fatals ("size = 0") on a zero-sized allocation, so
+			// skip casters with no drawable geometry.
+			if ( castTri && castTri->verts && castTri->numVerts > 0 && castTri->numIndexes >= 3 ) {
 				bool haveCache = ( castTri->ambientCache != NULL )
 					|| R_CreateAmbientCache( castTri, sint->shader->ReceivesLighting() );
 				if ( haveCache ) {

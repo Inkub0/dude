@@ -2252,16 +2252,53 @@ static void DrawEnhancementsMenu()
 	ImGui::EndDisabled();
 }
 
-// Live tuning surface for the shadow-map system. Every knob that affects shadow-
-// casting lights and their (2D / cube) maps, so settings can be dialled in-game and
-// the good values reported back. Not a "faithful" tab — purely for development.
+// Developer tab: live render-debug toggles, shadow-map tuning and emissive-surface
+// controls. Not a "faithful" tab — purely for dialling values in-game during development.
 static void DrawShadowDebugMenu()
 {
+	ImGui::TextDisabled( "Developer tools for inspecting and tuning the renderer live: general debug "
+		"views, shadow maps, and emissive surfaces. Dial values in, then report the good ones back." );
+	ImGui::Spacing();
+
+	// General render-debug toggles — core cvars that work on every backend (not
+	// enhancement-gated), so they stay live even on the legacy renderer.
+	ImGui::SeparatorText( "Render Debugging" );
+
+	bool whiteWorld = r_whiteWorld.GetBool();
+	if ( ImGui::Checkbox( "White World (diffuse = white, lighting only)", &whiteWorld ) ) {
+		r_whiteWorld.SetBool( whiteWorld );
+	}
+	AddTooltip( "Render every diffuse map as white so you can read lighting and shadows in isolation." );
+
+	int showTris = r_showTris.GetInteger();
+	if ( ImGui::SliderInt( "Wireframe", &showTris, 0, 3 ) ) {
+		r_showTris.SetInteger( showTris );
+	}
+	AddTooltip( "r_showTris: 0 = off, 1 = visible triangles, 2 = all front-facing, 3 = all." );
+
+	bool lights = !r_skipInteractions.GetBool();
+	if ( ImGui::Checkbox( "Lights (dynamic lighting)", &lights ) ) {
+		r_skipInteractions.SetBool( !lights );
+	}
+	AddTooltip( "Off skips all light/surface interaction drawing (r_skipInteractions); the scene keeps "
+		"only its ambient/emissive passes." );
+
+	bool shadows = r_shadows.GetBool();
+	if ( ImGui::Checkbox( "Stencil Shadows", &shadows ) ) {
+		r_shadows.SetBool( shadows );
+	}
+	AddTooltip( "Toggles stencil shadow volumes (the vanilla technique) and self-shadowing (r_shadows). "
+		"On opengl3/Vulkan with Shadow Mapping enabled, shadows come from the shadow maps below instead, "
+		"so this only affects the stencil path." );
+
+	ImGui::Spacing();
+	ImGui::SeparatorText( "Shadow Maps" );
+
 	const bool supported = R_BackendSupportsEnhancements();
 	if ( !supported ) {
 		ImGui::TextDisabled( "Shadow mapping needs the GL 3.3 (opengl3) backend. Switch to it in Video Options." );
 	}
-	ImGui::TextDisabled( "Live shadow-map tuning. Find good values here, then report them back." );
+	ImGui::TextDisabled( "Per-light tuning for the shadow-map system (2D and cube maps)." );
 	ImGui::Spacing();
 
 	ImGui::BeginDisabled( !supported );
@@ -2398,6 +2435,23 @@ static void DrawShadowDebugMenu()
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##range" ) ) {
 		r_shadowMapPointRangeScale.SetFloat( 1.0f );
+	}
+
+	ImGui::SeparatorText( "Large lights (sun replacements) -> stencil" );
+
+	float stencilRadius = r_shadowMapStencilRadius.GetFloat();
+	if ( ImGui::SliderFloat( "Stencil Fallback Radius", &stencilRadius, 0.0f, 512.0f,
+			stencilRadius <= 0.0f ? "off" : "%.0f" ) ) {
+		r_shadowMapStencilRadius.SetFloat( stencilRadius );
+	}
+	AddTooltip( "Lights whose largest radius axis exceeds this (world units) skip the shadow map and "
+		"cast Carmack stencil shadows instead. Large 'sun' lights (Phobos fakes its sky with omni lights "
+		"up to radius 5000) pixelate badly as one cube map and waste VRAM; stencil is pixel-exact at any "
+		"distance and free of map memory. 0 = every light uses shadow maps. r_shadowMapDebug 1 shows the "
+		"stencil-big count. (Console can set values above the slider max if you ever need them.)" );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##stencilradius" ) ) {
+		r_shadowMapStencilRadius.SetFloat( 250.0f );
 	}
 
 	ImGui::SeparatorText( "Static cache (skip regenerating unchanged lights)" );
@@ -2967,8 +3021,8 @@ void Com_DrawDhewm3SettingsMenu()
 			ImGui::EndChild();
 			ImGui::EndTabItem();
 		}
-		// developer live-tuning surface for the shadow-map system
-		if ( ImGui::BeginTabItem("Shadow Debugging") )
+		// developer live-tuning surface for shadow maps + emissive surfaces
+		if ( ImGui::BeginTabItem("Debugging") )
 		{
 			BeginTabChild( "shadowdbgchild" );
 			DrawShadowDebugMenu();

@@ -441,6 +441,12 @@ void idRenderWorldLocal::FreeDefs() {
 
 	generateAllInteractionsCalled = false;
 
+	// drop cached shadow-map cubes: they are keyed to the light indices freed just
+	// below, so a reloaded/new map would otherwise reuse those indices against stale
+	// cubes (and leak their VRAM until eviction). This covers both world teardown and
+	// the same-map reload path in InitFromMap, which frees the defs without FreeWorld.
+	RB_RHI_FreeShadowCubeCache();
+
 	if ( interactionTable ) {
 		R_StaticFree( interactionTable );
 		interactionTable = NULL;

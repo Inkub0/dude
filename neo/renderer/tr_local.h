@@ -1283,6 +1283,10 @@ void R_RemoveUnecessaryViewLights( void );
 void R_FreeDerivedData( void );
 void R_ReCreateWorldReferences( void );
 
+// RHI/GL3 shadow-map cube cache reset (defined in rhi/RhiWorld.cpp); called on
+// world teardown so cached cubes can't outlive the light defs they were keyed to.
+void RB_RHI_FreeShadowCubeCache( void );
+
 void R_CreateEntityRefs( idRenderEntityLocal *def );
 void R_CreateLightRefs( idRenderLightLocal *light );
 

@@ -1394,6 +1394,27 @@ static void RB_RHI_ResetCubeCache( rhi::RHI *r ) {
 
 /*
 ===================
+RB_RHI_FreeShadowCubeCache
+
+Public reset, called from idRenderWorldLocal::FreeDefs. A map change or world
+teardown frees every light def, so any cached cube keyed to those light indices is
+stale (and the next map will reuse those indices). Drop the whole cache here so a
+new level can't sample a previous level's cube, and reclaim the VRAM immediately
+instead of waiting for LRU eviction. No-op when the backend isn't up or the cache
+is already empty. The GL resource deletes run on the main thread between frames,
+where the context is current — the same place image purges and R_FreeDerivedData
+already free GL objects.
+===================
+*/
+void RB_RHI_FreeShadowCubeCache() {
+	if ( !glConfig.isInitialized ) {
+		return;
+	}
+	RB_RHI_ResetCubeCache( rhi::GetGL3RHI() );
+}
+
+/*
+===================
 RB_RHI_ShadowMapPassCube
 
 Renders a point light's occluder depth into the shared cube target, one 90-degree
@@ -1571,7 +1592,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// per-light shadowing and adding (matches RB_ARB2_DrawInteractions)
 	// r_shadowMapDebug counts how each lit light was classified this view
 	int dbgLit = 0, dbgProjected = 0, dbgShadowMapped = 0, dbgPoint = 0,
-	    dbgParallel = 0, dbgNoShadow = 0, dbgNoLightDef = 0;
+	    dbgParallel = 0, dbgNoShadow = 0, dbgNoLightDef = 0, dbgStencilBig = 0;
 	rhiShadowPerfCasters = 0;
 	rhiShadowCubeLights = 0;
 	rhiShadowCubeCasters = 0;
@@ -1638,7 +1659,22 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			const bool isParallel = vLight->lightDef && vLight->lightDef->parms.parallel;
 			const bool smEnabled = r_shadowMapping.GetBool();
 
-			if ( smEnabled && lightMayShadow && hasInteractions ) {
+			// DUDE Phase 3.5: giant "sun replacement" lights (Phobos fakes its sky
+			// with omni lights up to radius 5000) look poor as a single shadow map —
+			// one cube can't resolve a shadow thrown thousands of units, so its edges
+			// pixelate, and the map wastes VRAM. Above r_shadowMapStencilRadius (largest
+			// light_radius axis, world units) we skip the map and let Carmack's stencil
+			// volumes handle it: pixel-exact and distance-independent. 0 disables.
+			const float smStencilRadius = r_shadowMapStencilRadius.GetFloat();
+			float lightMaxAxis = 0.0f;
+			if ( vLight->lightDef ) {
+				const idVec3 &lr = vLight->lightDef->parms.lightRadius;
+				lightMaxAxis = Max( lr.x, Max( lr.y, lr.z ) );
+			}
+			const bool oversize = smEnabled && smStencilRadius > 0.0f
+			    && lightMaxAxis > smStencilRadius;
+
+			if ( smEnabled && lightMayShadow && hasInteractions && !oversize ) {
 				if ( !isPoint && !isParallel ) {
 					// projected / spot light: single 2D depth map
 					if ( RB_RHI_ShadowMapPass( r, vLight, shadowMapProg ) ) {
@@ -1684,7 +1720,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				                vLight->lightDef->index,
 				                isPoint ? "point" : ( isParallel ? "parallel" : "projected" ),
 				                lightMayShadow ? "" : " (noShadow)",
-				                ictx.lightShadowCube ? "cube" : ( ictx.lightShadowMapped ? "2D" : "none" ),
+				                ictx.lightShadowCube ? "cube" : ( ictx.lightShadowMapped ? "2D" : ( oversize ? "stencil" : "none" ) ),
 				                dbgRes,
 				                RB_RHI_CountLightChain( vLight->globalInteractions ),
 				                RB_RHI_CountLightChain( vLight->localInteractions ),
@@ -1692,12 +1728,16 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				                dist, radius, effRange );
 			}
 
-			// While shadow mapping is enabled, stencil shadows are OFF entirely: a
-			// light either gets a shadow map or renders unshadowed. This keeps the
-			// frame a pure shadow-map cost so drops can be pinned on the map passes,
-			// rather than a stencil/shadow-map mix. Only when r_shadowMapping is off
-			// do we take the vanilla stencil path.
-			const bool useStencil = castsShadows && !shadowMapped && !smEnabled;
+			// A light draws stencil shadow volumes when shadow mapping is fully off
+			// (the vanilla path), OR when shadow mapping is on but this particular
+			// light is an oversize "sun" routed to stencil (r_shadowMapStencilRadius).
+			// That per-light mix is the free selection the interaction loop allows.
+			// Everything else with a map draws unshadowed off the map; a light with
+			// neither (out-of-budget point, parallel) still renders unshadowed.
+			const bool useStencil = castsShadows && !shadowMapped && ( !smEnabled || oversize );
+			if ( oversize && useStencil ) {
+				dbgStencilBig++;
+			}
 
 			// scissor + stencil-clear setup: needed for either shadow technique.
 			// Clear stencil only for the stencil path — the shadow-map path never
@@ -1744,13 +1784,13 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	backEnd.vLight = NULL;
 
 	if ( r_shadowMapDebug.GetBool() ) {
-		common->Printf( "shadowMap: %d lit | projected %d (2D-mapped %d, no-shadow %d) | point %d (cube-mapped %d, cube-casters %d, faces %d drawn/%d culled) | cache %d hit/%d rendered/%d scratch, %d dynamic (%zu MB) | parallel %d | no-lightDef %d | perforated-casters %d | r_shadowMapping %d\n",
+		common->Printf( "shadowMap: %d lit | projected %d (2D-mapped %d, no-shadow %d) | point %d (cube-mapped %d, cube-casters %d, faces %d drawn/%d culled) | cache %d hit/%d rendered/%d scratch, %d dynamic (%zu MB) | stencil-big %d | parallel %d | no-lightDef %d | perforated-casters %d | r_shadowMapping %d\n",
 		                dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,
 		                dbgPoint, rhiShadowCubeLights, rhiShadowCubeCasters,
 		                rhiShadowCubeFaces, rhiShadowCubeFacesCulled,
 		                rhiCubeCacheHits, rhiCubeCacheMiss, rhiCubeCacheScratch, rhiCubeCacheDynamic,
 		                rhiCubeCacheBytes / ( 1024 * 1024 ),
-		                dbgParallel, dbgNoLightDef,
+		                dbgStencilBig, dbgParallel, dbgNoLightDef,
 		                rhiShadowPerfCasters, r_shadowMapping.GetInteger() );
 	}
 
