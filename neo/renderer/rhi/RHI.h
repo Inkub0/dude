@@ -119,6 +119,10 @@ public:
 	// sampled as a samplerCubeShadow. Render each face with BeginCubeFacePass();
 	// DestroyRenderTarget / GetRenderTargetImage work the same as the 2D target.
 	virtual RenderTargetHandle	CreateRenderTargetCube( ImageFormat fmt, int size ) = 0;
+	// Color target WITH a depth attachment, for a depth-tested offscreen geometry pass
+	// (the SSAO normal G-buffer). Color is a sampleable RGBA8 texture (GetRenderTargetImage);
+	// the depth attachment is written/tested but not sampled. 0 on failure.
+	virtual RenderTargetHandle	CreateRenderTargetColorDepth( ImageFormat fmt, int w, int h ) = 0;
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt ) = 0;
 	// begin a pass into one face (0..5 = +X,-X,+Y,-Y,+Z,-Z) of a cube target.
 	// EndPass restores the backbuffer + viewport exactly like BeginTargetPass.

@@ -13,12 +13,14 @@
 #include "renderparms.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
+SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;   // DUDE normal G-buffer (view-space, encoded)
 
 VARY(0) in vec2 var_TexCoord;
 
 layout(location = 0) out vec4 fragColor;
 
 #define M_PI       3.14159265358979
+#define M_HALF_PI  1.57079632679490
 #define MAX_SLICES 8
 #define MAX_STEPS  12
 
@@ -30,20 +32,23 @@ float rawDepth( vec2 frag ) {
 	return texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
 }
 
-// view-space position at a fragment (eye looks down -z, so returned z is negative)
-vec3 viewPos( vec2 frag ) {
-	float raw = min( rawDepth( frag ), 0.9994 );
-	float vz  = 1.0 / ( raw * depth_consts.x + depth_consts.y );   // negative
-	vec2  uv  = frag * u_screenCorrection.xy;
-	vec2  ndc = uv * 2.0 - 1.0;
-	float d   = -vz;                                               // positive depth
+// view-space position from a fragment + its (raw) depth. Eye looks down -z, so the
+// returned z is negative. Split from rawDepth so the center pixel can reuse the depth
+// it already fetched instead of sampling twice.
+vec3 viewPosFromRaw( vec2 frag, float raw ) {
+	float vz  = 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y );   // negative
+	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
+	float d   = -vz;                                                              // positive depth
 	return vec3( ndc.x * d * u_localParam0.x, ndc.y * d * u_localParam0.y, vz );
 }
 
-// Reconstruct a view-space normal from depth. THE SWAPPABLE SEAM: a future normal
-// G-buffer (normal mapping / POM / displacement) replaces just this function and
-// everything downstream, incl. the bent normal, inherits it (docs/ssao-gtao.md §4).
-// Uses the closer of each neighbour pair to avoid bleeding across silhouettes.
+vec3 viewPos( vec2 frag ) {
+	return viewPosFromRaw( frag, rawDepth( frag ) );
+}
+
+// Reconstruct a view-space normal from depth — the FALLBACK used when the normal
+// G-buffer is off (main() reads the G-buffer directly when it's on, docs §4). Uses the
+// closer of each neighbour pair to avoid bleeding across silhouettes.
 vec3 sampleViewNormal( vec2 frag, vec3 P ) {
 	vec3 Pr = viewPos( frag + vec2( 1.0, 0.0 ) );
 	vec3 Pl = viewPos( frag - vec2( 1.0, 0.0 ) );
@@ -71,20 +76,38 @@ void main() {
 		return;
 	}
 
-	vec3 P = viewPos( frag );
-	vec3 N = sampleViewNormal( frag, P );
+	vec3 P = viewPosFromRaw( frag, raw );        // reuse the depth we just fetched
+
+	vec3 N;
+	if ( u_windowCoord.x > 0.5 ) {
+		// normal G-buffer: xyz = bump-mapped view normal, a = AO mask. The mask is 0 on
+		// the view weapon, whose depth-hacked depth confuses the horizon search into
+		// reading far background geometry — skip SSAO there (leave it fully unoccluded).
+		vec4 nt = texture( u_normalBuffer, frag * u_screenCorrection.xy );
+		if ( nt.a < 0.5 ) {
+			fragColor = vec4( 1.0, 0.5, 0.5, 1.0 );
+			return;
+		}
+		N = normalize( nt.xyz * 2.0 - 1.0 );
+	} else {
+		N = sampleViewNormal( frag, P );         // depth-reconstruct fallback
+	}
 	vec3 V = normalize( -P );                    // toward the eye
 
 	int   numSlices = int( u_localParam1.z );
 	int   numSteps  = int( u_localParam1.y );
 	float radius    = u_localParam0.z;
 	float invR2     = 1.0 / ( radius * radius );
+	bool  bentOn    = u_localParam1.w >= 0.5;    // coherent across the draw
 
 	float pixelRadius = u_localParam1.x / max( -P.z, 1e-3 );   // radiusPixFactor / d
 	pixelRadius = clamp( pixelRadius, 2.0, 512.0 );
 	float stepPix = pixelRadius / float( numSteps );
 
-	float noise = ign( frag );
+	// hoisted loop invariants
+	float sliceStep = M_PI / float( numSlices );
+	float noise     = ign( frag );
+	float noise05   = noise + 0.5;
 
 	float visibility = 0.0;
 	vec3  bentN      = vec3( 0.0 );
@@ -94,14 +117,15 @@ void main() {
 		if ( s >= numSlices ) {
 			break;
 		}
-		float phi = ( float( s ) + noise ) * ( M_PI / float( numSlices ) );
+		float phi = ( float( s ) + noise ) * sliceStep;
 		vec2  dir = vec2( cos( phi ), sin( phi ) );
 
-		// slice plane spanned by V and the screen-space direction; an in-plane
-		// tangent (perpendicular to V, roughly toward +dir)
+		// slice plane spanned by V and the screen-space direction; an in-plane tangent
+		// (perpendicular to V, toward +dir). planeN is unit and perpendicular to V, so
+		// cross(planeN, V) is already unit — no normalize needed.
 		vec3 sliceDir = vec3( dir, 0.0 );
 		vec3 planeN   = normalize( cross( V, sliceDir ) );
-		vec3 tangent  = normalize( cross( planeN, V ) );
+		vec3 tangent  = cross( planeN, V );
 
 		// horizon cosines relative to V on each side, distance-attenuated so far
 		// occluders raise the horizon less than near ones
@@ -110,16 +134,16 @@ void main() {
 			if ( t >= numSteps ) {
 				break;
 			}
-			float off = ( float( t ) + 0.5 + noise ) * stepPix;
+			vec2 duv = dir * ( ( float( t ) + noise05 ) * stepPix );
 
-			vec3  Dp  = viewPos( frag + dir * off ) - P;
+			vec3  Dp  = viewPos( frag + duv ) - P;
 			float l2p = dot( Dp, Dp );
 			if ( l2p > 1e-6 ) {
 				float ca = dot( Dp, V ) * inversesqrt( l2p );
 				float fo = clamp( 1.0 - l2p * invR2, 0.0, 1.0 );
 				cH_pos = max( cH_pos, ca * fo );
 			}
-			vec3  Dn  = viewPos( frag - dir * off ) - P;
+			vec3  Dn  = viewPos( frag - duv ) - P;
 			float l2n = dot( Dn, Dn );
 			if ( l2n > 1e-6 ) {
 				float ca = dot( Dn, V ) * inversesqrt( l2n );
@@ -128,44 +152,51 @@ void main() {
 			}
 		}
 
-		// signed horizon angles from V within the slice plane
-		float hPos =  acos( clamp( cH_pos, -1.0, 1.0 ) );    // +tangent side
-		float hNeg = -acos( clamp( cH_neg, -1.0, 1.0 ) );    // -tangent side
-
-		// projected normal in the slice plane; signed angle n from V
-		vec3  projN   = N - planeN * dot( N, planeN );
-		float projLen = length( projN );
-		if ( projLen < 1e-4 ) {
+		// projected normal in the slice plane
+		vec3  projN = N - planeN * dot( N, planeN );
+		float pl2   = dot( projN, projN );
+		if ( pl2 < 1e-8 ) {
 			continue;
 		}
-		vec3  projNn = projN / projLen;
-		float n = atan( dot( projNn, tangent ), dot( projNn, V ) );
+		float invPl   = inversesqrt( pl2 );
+		vec3  projNn  = projN * invPl;
+		float projLen = pl2 * invPl;                 // == length( projN )
 
-		// clamp horizons to the hemisphere around the normal
-		hPos = n + min( hPos - n,  0.5 * M_PI );
-		hNeg = n + max( hNeg - n, -0.5 * M_PI );
+		// cos/sin of the projected-normal angle n are just its components in the
+		// orthonormal (V, tangent) basis — projNn is unit and lies in that plane, so no
+		// separate cos()/sin() calls are needed (atan still gives the angle for the clamp)
+		float cosN = dot( projNn, V );
+		float sinN = dot( projNn, tangent );
+		float n    = atan( sinN, cosN );
+
+		// signed horizon angles from V, clamped to the hemisphere around the normal
+		float hPos = acos( clamp( cH_pos, -1.0, 1.0 ) );
+		float hNeg = -acos( clamp( cH_neg, -1.0, 1.0 ) );
+		hPos = n + min( hPos - n,  M_HALF_PI );
+		hNeg = n + max( hNeg - n, -M_HALF_PI );
 
 		// GTAO analytic inner integral (cosine-weighted visibility), summed per side
-		float cosN = cos( n );
-		float sinN = sin( n );
 		float a = 0.25 * ( -cos( 2.0 * hPos - n ) + cosN + 2.0 * hPos * sinN )
 		        + 0.25 * ( -cos( 2.0 * hNeg - n ) + cosN + 2.0 * hNeg * sinN );
 
 		visibility += projLen * a;
 		totalW     += projLen;
 
-		// bent normal: the mid-horizon direction in the slice plane
-		float bAng = 0.5 * ( hPos + hNeg );
-		bentN += ( V * cos( bAng ) + tangent * sin( bAng ) ) * projLen;
+		// bent normal: mid-horizon direction (only computed if it will be used)
+		if ( bentOn ) {
+			float bAng = 0.5 * ( hPos + hNeg );
+			bentN += ( V * cos( bAng ) + tangent * sin( bAng ) ) * projLen;
+		}
 	}
 
 	float vis = ( totalW > 1e-4 ) ? ( visibility / totalW ) : 1.0;
 	vis = clamp( vis, 0.0, 1.0 );
 	vis = pow( vis, max( u_localParam0.w, 0.0 ) );      // intensity
 
-	vec3 bn = ( length( bentN ) > 1e-4 ) ? normalize( bentN ) : N;
-	if ( u_localParam1.w < 0.5 ) {
-		bn = N;                                          // bent normal disabled
+	vec3 bn = N;
+	if ( bentOn ) {
+		float bl2 = dot( bentN, bentN );
+		bn = ( bl2 > 1e-8 ) ? ( bentN * inversesqrt( bl2 ) ) : N;
 	}
 
 	fragColor = vec4( vis, bn * 0.5 + 0.5 );

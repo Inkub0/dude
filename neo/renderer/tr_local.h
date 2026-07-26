@@ -901,6 +901,8 @@ extern idCVar r_ssaoSlices;				// horizon-search directions per pixel (1..8)
 extern idCVar r_ssaoSteps;				// samples marched per direction (1..12)
 extern idCVar r_ssaoResScale;			// AO buffer resolution fraction (0.5 half .. 1.0 full)
 extern idCVar r_ssaoBentNormal;			// shade ambient along the bent normal
+extern idCVar r_ssaoBentStrength;		// blend toward the bent normal for the ambient lookup (C.2)
+extern idCVar r_ssaoNormalBuffer;		// SSAO reads a bump-mapped normal G-buffer vs depth reconstruct
 extern idCVar r_ssaoSpecular;			// also attenuate specular in occluded areas
 extern idCVar r_ssaoDebug;				// 1=show AO buffer, 2=show bent normals
 

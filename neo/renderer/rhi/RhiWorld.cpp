@@ -239,6 +239,12 @@ static int  rhiSsaoW = 0, rhiSsaoH = 0;				// AO buffer size (may be < view for 
 static int  rhiSsaoViewW = 0, rhiSsaoViewH = 0;		// full view size the AO covers
 static bool rhiSsaoAppliedThisView = false;			// AO was produced for the view being drawn
 
+// Normal G-buffer (Option B): bump-mapped view-space normals written by an extra opaque
+// geometry pass, so SSAO uses real per-pixel normals instead of reconstructing from depth.
+static rhi::RenderTargetHandle rhiNormalRT = 0;		// RGBA8 view-normal + depth (color+depth target)
+static int  rhiNormalW = 0, rhiNormalH = 0;			// full view resolution
+static bool rhiNormalReadyThisView = false;			// the normal buffer was produced for this view
+
 /*
 ===================
 RB_RHI_DrawInteraction
@@ -348,6 +354,14 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			if ( !din->ambientLight ) {
 				parms.localParam1[0] = directStrength;
 				parms.localParam1[1] = r_ssaoSpecular.GetBool() ? 1.0f : 0.0f;
+			} else {
+				// C.2: bias the ambient cube lookup toward the bent normal. The bent
+				// normal is view-space in the AO buffer; the shader rotates it to world
+				// with the inverse view rotation, so pass the world->eye view matrix.
+				parms.localParam1[0] = r_ssaoBentNormal.GetBool()
+					? idMath::ClampFloat( 0.0f, 1.0f, r_ssaoBentStrength.GetFloat() ) : 0.0f;
+				memcpy( parms.modelViewMatrix, ictx.viewDef->worldSpace.modelViewMatrix,
+				        sizeof( parms.modelViewMatrix ) );
 			}
 		}
 	}
@@ -1596,6 +1610,202 @@ static bool RB_RHI_PointLightInBudget( const viewDef_t *viewDef, const viewLight
 	return better < limit;
 }
 
+static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h ) {
+	if ( rhiNormalRT && r->GetRenderTargetImage( rhiNormalRT ) == 0 ) {
+		rhiNormalRT = 0;					// lost context (vid_restart)
+		rhiNormalW = rhiNormalH = 0;
+	}
+	if ( rhiNormalRT && rhiNormalW == w && rhiNormalH == h ) {
+		return true;
+	}
+	if ( rhiNormalRT ) { r->DestroyRenderTarget( rhiNormalRT ); rhiNormalRT = 0; }
+	rhiNormalRT = r->CreateRenderTargetColorDepth( rhi::IF_RGBA8, w, h );
+	if ( !rhiNormalRT ) {
+		rhiNormalW = rhiNormalH = 0;
+		return false;
+	}
+	rhiNormalW = w;
+	rhiNormalH = h;
+	return true;
+}
+
+/*
+===================
+RB_RHI_NormalPrepass
+
+Renders opaque geometry into the normal G-buffer, writing bump-mapped view-space normals
+for SSAO to sample instead of reconstructing flat normals from depth (docs/ssao-gtao.md,
+Option B). One extra opaque geometry pass; only runs with SSAO + r_ssaoNormalBuffer on, for
+the fullscreen primary view. Simplified vs the depth prepass: no subview down-modulate /
+clip planes (primary-view only) and perforated surfaces are treated as solid for now (their
+alpha punch-through into the normal buffer is a refinement).
+===================
+*/
+static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !r_ssao.GetBool() || !R_BackendSupportsEnhancements() ) {
+		return;
+	}
+	// build the buffer when it feeds SSAO, or when it's being inspected (r_ssaoDebug 3) even
+	// if SSAO is set to reconstruct normals from depth — so the debug view always has data
+	if ( !r_ssaoNormalBuffer.GetBool() && r_ssaoDebug.GetInteger() != 3 ) {
+		return;
+	}
+	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
+		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
+		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
+		return;
+	}
+
+	rhi::ShaderHandle gbufProg = r->LoadShader( "gbuffer" );
+	if ( !gbufProg ) {
+		return;
+	}
+
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	if ( !RB_RHI_EnsureNormalTarget( r, w, h ) ) {
+		return;
+	}
+
+	// clear to a flat camera-facing normal (0.5,0.5,1) and the far plane
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.color = true;
+	clear.depth = true;
+	clear.rgba[0] = 0.5f; clear.rgba[1] = 0.5f; clear.rgba[2] = 1.0f; clear.rgba[3] = 1.0f;
+	r->BeginTargetPass( rhiNormalRT, &clear );
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_LESS;
+	pd.shader = gbufProg;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = RB_RHI_CullFor( viewDef, CT_FRONT_SIDED );
+
+	const viewEntity_t *currentSpace = NULL;
+	float mvp[16];
+
+	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
+	for ( int i = 0; i < viewDef->numDrawSurfs; i++ ) {
+		const drawSurf_t *surf = drawSurfs[i];
+		const srfTriangles_t *tri = surf->geo;
+		const idMaterial *shader = surf->material;
+
+		if ( !shader->IsDrawn() || shader->Coverage() == MC_TRANSLUCENT ) {
+			continue;
+		}
+		texgen_t tg = shader->Texgen();
+		if ( tg == TG_SCREEN || tg == TG_SCREEN2 || tg == TG_SKYBOX_CUBE || tg == TG_WOBBLESKY_CUBE ) {
+			continue;					// sky must not seal the normal/depth buffer
+		}
+		if ( !tri->numIndexes || !tri->ambientCache ) {
+			continue;
+		}
+		// skip materials with every stage conditioned off (mirror the depth prepass)
+		const float *regs = surf->shaderRegisters;
+		int stage;
+		for ( stage = 0; stage < shader->GetNumStages(); stage++ ) {
+			if ( regs[shader->GetStage( stage )->conditionRegister] != 0 ) {
+				break;
+			}
+		}
+		if ( stage == shader->GetNumStages() ) {
+			continue;
+		}
+
+		if ( surf->space != currentSpace ) {
+			currentSpace = surf->space;
+			RB_RHI_SpaceMvp( viewDef, surf->space, mvp );
+		}
+
+		// bump image + texture matrix for this surface, matching the interaction/specular
+		// path (din->bumpImage / din->bumpMatrix; see R_SetDrawInteraction) so the G-buffer's
+		// bump detail lands at the SAME scale as the lit surface. Using identity here tiled
+		// scaled-bump materials wrong (bumps came out double-size). Flat normal if no bump stage.
+		const shaderStage_t *bumpStage = shader->GetBumpStage();
+		idImage *bumpImg = globalImages->flatNormalMap;
+		float bumpS[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+		float bumpT[4] = { 0.0f, 1.0f, 0.0f, 0.0f };
+		if ( bumpStage && bumpStage->texture.image ) {
+			bumpImg = bumpStage->texture.image;
+			if ( bumpStage->texture.hasMatrix ) {
+				bumpS[0] = regs[bumpStage->texture.matrix[0][0]];
+				bumpS[1] = regs[bumpStage->texture.matrix[0][1]];
+				bumpS[3] = regs[bumpStage->texture.matrix[0][2]];
+				bumpT[0] = regs[bumpStage->texture.matrix[1][0]];
+				bumpT[1] = regs[bumpStage->texture.matrix[1][1]];
+				bumpT[3] = regs[bumpStage->texture.matrix[1][2]];
+				// keep scrolls bounded (mirrors R_SetDrawInteraction)
+				if ( bumpS[3] < -40.0f || bumpS[3] > 40.0f ) bumpS[3] -= (int)bumpS[3];
+				if ( bumpT[3] < -40.0f || bumpT[3] > 40.0f ) bumpT[3] -= (int)bumpT[3];
+			}
+		}
+
+		rhi::RenderParams parms;
+		memset( &parms, 0, sizeof( parms ) );
+		memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
+		memcpy( parms.modelViewMatrix, surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
+		memcpy( parms.bumpMatrixS, bumpS, sizeof( bumpS ) );
+		memcpy( parms.bumpMatrixT, bumpT, sizeof( bumpT ) );
+		// AO mask (gbuffer.frag alpha): 0 on the view weapon so SSAO skips it — its
+		// depth-hacked depth makes the horizon search read far geometry (desk edges etc.)
+		parms.localParam0[0] = surf->space->weaponDepthHack ? 0.0f : 1.0f;
+
+		rhi::BufferHandle vb, ib, ub;
+		int vertOfs, idxOfs;
+		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
+		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+		// Layered surfaces (decals, signs, details) sit coplanar on walls and rely on
+		// polygon offset to win the depth test — same as the depth prepass. Without it
+		// they z-fight in the normal buffer and their normals flicker against the wall's.
+		const bool polyOffset = shader->TestMaterialFlag( MF_POLYGONOFFSET );
+		if ( polyOffset ) {
+			qglEnable( GL_POLYGON_OFFSET_FILL );
+			qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+		}
+
+		// Depth hacks (view weapon / depth-hacked models) so the geometry rasterizes into
+		// the normal buffer exactly as in the main view — same coverage + depth ordering,
+		// which keeps the weapon's AO mask reliable even when it overlaps close walls. The
+		// projection tweak is already in the MVP (RB_RHI_SpaceMvp); this sets the depth range.
+		const bool depthHack = surf->space->weaponDepthHack || surf->space->modelDepthHack != 0.0f;
+		if ( surf->space->weaponDepthHack ) {
+			RB_EnterWeaponDepthHack();
+		}
+		if ( surf->space->modelDepthHack != 0.0f ) {
+			RB_EnterModelDepthHack( surf->space->modelDepthHack );
+		}
+
+		RB_RHI_BindUnit( 0, bumpImg );
+		r->BindPipeline( pd );
+
+		rhi::DrawArgs da;
+		memset( &da, 0, sizeof( da ) );
+		da.vertexBuffer = vb;
+		da.vertexOffset = vertOfs;
+		da.indexBuffer = ib;
+		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+		da.indexCount = tri->numIndexes;
+		da.uniformBuffer = ub;
+		da.uniformOffset = uniOfs;
+		da.uniformSize = sizeof( parms );
+		r->Draw( da );
+		backEnd.pc.c_drawElements++;
+
+		if ( depthHack ) {
+			RB_LeaveDepthHack();
+		}
+		if ( polyOffset ) {
+			qglDisable( GL_POLYGON_OFFSET_FILL );
+		}
+	}
+
+	r->EndPass();
+	RB_RHI_ForgetTexBinds();
+	rhiNormalReadyThisView = true;
+}
+
 static bool RB_RHI_EnsureSsaoTargets( rhi::RHI *r, int w, int h ) {
 	// a lost context (vid_restart) leaves the handle set but its texture gone
 	if ( rhiSsaoRT && r->GetRenderTargetImage( rhiSsaoRT ) == 0 ) {
@@ -1733,10 +1943,22 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[1] = (float)steps;
 	parms.localParam1[2] = (float)slices;
 	parms.localParam1[3] = r_ssaoBentNormal.GetBool() ? 1.0f : 0.0f;
+	// use the bump-mapped normal G-buffer (unit 1) if the normal prepass produced one this
+	// view; otherwise ssao.frag reconstructs the normal from depth (windowCoord.x = flag)
+	const bool useNormalBuf = rhiNormalReadyThisView && rhiNormalRT != 0 && r_ssaoNormalBuffer.GetBool();
+	parms.windowCoord[0] = useNormalBuf ? 1.0f : 0.0f;
 
-	// horizon search: _currentDepth -> raw AO + bent normal (into rhiSsaoRT)
+	// horizon search: _currentDepth (unit 0) [+ normal G-buffer on unit 1] -> raw AO
 	r->BeginTargetPass( rhiSsaoRT, NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	if ( useNormalBuf ) {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 1 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+		// direct bind bypassed the tmu cache; forget unit 1 so the blur's depth bind re-issues
+		backEnd.glState.tmu[1].current2DMap = -1;
+	}
 	RB_RHI_DrawFullscreen( r, ssaoProg, parms, 0 );
 	r->EndPass();
 
@@ -1785,10 +2007,13 @@ isn't overwritten by the light passes. No-op unless SSAO and the debug cvar are 
 ===================
 */
 void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
-	if ( r_ssaoDebug.GetInteger() <= 0 || !r_ssao.GetBool() || !R_BackendSupportsEnhancements() ) {
+	const int mode = r_ssaoDebug.GetInteger();
+	if ( mode <= 0 || !r_ssao.GetBool() || !R_BackendSupportsEnhancements() ) {
 		return;
 	}
-	if ( !rhiSsaoResultRT || r->GetRenderTargetImage( rhiSsaoResultRT ) == 0 ) {
+	// mode 3 shows the raw normal G-buffer; 1/2 show the AO result
+	rhi::RenderTargetHandle srcRT = ( mode >= 3 ) ? rhiNormalRT : rhiSsaoResultRT;
+	if ( !srcRT || r->GetRenderTargetImage( srcRT ) == 0 ) {
 		return;
 	}
 	rhi::ShaderHandle prog = r->LoadShader( "ssao_debug" );
@@ -1802,7 +2027,7 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
-	parms.localParam0[0] = (float)r_ssaoDebug.GetInteger();		// 1 = AO, 2 = bent normal
+	parms.localParam0[0] = (float)mode;		// 1 = AO, 2 = bent normal, 3 = normal G-buffer
 
 	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
 	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
@@ -1810,7 +2035,7 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
 	backEnd.currentScissor = viewDef->scissor;
 
-	RB_RHI_DrawFullscreen( r, prog, parms, r->GetRenderTargetImage( rhiSsaoResultRT ) );
+	RB_RHI_DrawFullscreen( r, prog, parms, r->GetRenderTargetImage( srcRT ) );
 
 	// direct bind above; forget the tmu cache so later 2D/GUI binds re-issue
 	RB_RHI_ForgetTexBinds();
@@ -1844,6 +2069,11 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	backEnd.currentScissor = viewDef->scissor;
 
 	RB_RHI_FillDepthBuffer( r, viewDef );
+
+	// normal G-buffer (Option B): render bump-mapped view normals for SSAO to sample
+	// instead of reconstructing from depth. Runs before the SSAO pass that consumes it.
+	rhiNormalReadyThisView = false;
+	RB_RHI_NormalPrepass( r, viewDef );
 
 	// SSAO (GTAO) builds the AO buffer from the just-captured scene depth, before
 	// the ambient/interaction passes that consume it (docs/ssao-gtao.md). Each view

@@ -41,10 +41,10 @@ void main() {
 		float fi = float( i );
 		vec4  s  = texture( u_ssao, var_TexCoord + uvStep * fi );
 		float z  = linDepth( frag + pixStep * fi );
-		// edge-stopping: relative depth difference (scale-free), plus a mild
-		// spatial falloff along the axis
+		// edge-stopping: relative depth difference (scale-free), plus a mild spatial
+		// falloff along the axis. exp(a)*exp(b) folded into one exp(a+b).
 		float dzr = ( z - centerZ ) / max( abs( centerZ ), 1.0 );
-		float w   = exp( -dzr * dzr * 800.0 ) * exp( -fi * fi * 0.25 );
+		float w   = exp( -( dzr * dzr * 800.0 + fi * fi * 0.25 ) );
 		sum  += s * w;
 		wsum += w;
 	}

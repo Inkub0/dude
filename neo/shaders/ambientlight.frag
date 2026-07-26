@@ -29,8 +29,21 @@ void main() {
 	mat3 toGlobal = mat3( var_ToGlobalRow0, var_ToGlobalRow1, var_ToGlobalRow2 );
 	vec3 globalNormal = toGlobal * localNormal;
 
+	// DUDE GTAO C.2 (docs/ssao-gtao.md): bias the ambient sampling direction toward the
+	// bent normal (average unoccluded direction) so the ambient responds to macro
+	// occlusion, not just the surface normal. The bent normal is view-space in the AO
+	// buffer's GBA; rotate it to world with the inverse view rotation (v * M == Mᵀ * v,
+	// M = world->eye view matrix), then blend by u_localParam1.x. u_localParam0.zw give
+	// the AO uv (shared with the C.1 occlusion multiply below).
+	vec3 shadeNormal = globalNormal;
+	if ( u_localParam1.x > 0.0 ) {
+		vec3 bentView  = texture( u_ssao, gl_FragCoord.xy * u_localParam0.zw ).gba * 2.0 - 1.0;
+		vec3 bentWorld = bentView * mat3( u_modelViewMatrix );
+		shadeNormal = normalize( mix( globalNormal, bentWorld, u_localParam1.x ) );
+	}
+
 	// Do all lookups as rgb-only where possible and combine multiplies
-	vec3 ambient = texture( u_ambientCubeMap, globalNormal ).rgb;
+	vec3 ambient = texture( u_ambientCubeMap, shadeNormal ).rgb;
 	vec3 diff = texture( u_diffuseMap, var_TexDiffuse ).rgb;
 	vec3 falloff = texture( u_lightFalloff, var_TexFalloff ).rgb;
 	vec3 proj = textureProj( u_lightProjection, var_TexProjection ).rgb;

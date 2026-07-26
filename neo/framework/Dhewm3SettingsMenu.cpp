@@ -2612,13 +2612,13 @@ static void DrawShadowDebugMenu()
 		"ambient term in creases/contacts; Off = vanilla flat ambient." );
 
 	int ssaoDbg = r_ssaoDebug.GetInteger();
-	const char *ssaoDbgItems[] = { "off (feed lighting)", "show AO buffer", "show bent normals" };
+	const char *ssaoDbgItems[] = { "off (feed lighting)", "show AO buffer", "show bent normals", "show normal G-buffer" };
 	if ( ImGui::Combo( "Debug View (r_ssaoDebug)", &ssaoDbg, ssaoDbgItems, IM_ARRAYSIZE( ssaoDbgItems ) ) ) {
 		r_ssaoDebug.SetInteger( ssaoDbg );
 	}
-	AddTooltip( "Visualize the AO pass over the scene. 1 = the occlusion buffer (white = lit, dark "
-		"= occluded); 2 = the bent normals as RGB (should look like a smooth normal map). Best "
-		"sanity check while tuning; set back to 0 to feed the ambient lighting." );
+	AddTooltip( "Visualize an SSAO buffer over the scene. 1 = the occlusion buffer (white = lit, "
+		"dark = occluded); 2 = the bent normals as RGB; 3 = the raw normal G-buffer (needs Normal "
+		"Buffer on) — here you should see the surface bump detail. Set back to 0 to feed lighting." );
 
 	ImGui::BeginDisabled( !r_ssao.GetBool() );
 
@@ -2679,12 +2679,33 @@ static void DrawShadowDebugMenu()
 
 	// Resolution is exposed in Enhancements > Ambient Occlusion (as a slider).
 
+	bool ssaoNormalBuf = r_ssaoNormalBuffer.GetBool();
+	if ( ImGui::Checkbox( "Normal Buffer (bump-mapped)", &ssaoNormalBuf ) ) {
+		r_ssaoNormalBuffer.SetBool( ssaoNormalBuf );
+	}
+	AddTooltip( "Feed SSAO from a real bump-mapped normal G-buffer (an extra opaque geometry pass) "
+		"instead of normals reconstructed from depth. Picks up normal-map surface detail and removes "
+		"faceting (see Debug View 3), at the cost of one geometry pass. Off = reconstruct from depth "
+		"(cheaper). Foundation for parallax-occlusion / displacement later." );
+
 	bool ssaoBent = r_ssaoBentNormal.GetBool();
 	if ( ImGui::Checkbox( "Bent Normals", &ssaoBent ) ) {
 		r_ssaoBentNormal.SetBool( ssaoBent );
 	}
-	AddTooltip( "Compute the average unoccluded direction (bent normal) so the ambient can be shaded "
-		"directionally rather than by a flat scalar. Visible in Debug View 2. Off = scalar AO only." );
+	AddTooltip( "Shade the AMBIENT light along the bent normal (average unoccluded direction) so it "
+		"responds to macro occlusion, not just the surface normal. Visible in Debug View 2. Note: "
+		"only bites where there IS ambient light, which is sparse in Doom 3, so the effect is subtle." );
+
+	ImGui::BeginDisabled( !r_ssaoBentNormal.GetBool() );
+	float ssaoBentStr = r_ssaoBentStrength.GetFloat();
+	if ( ImGui::SliderFloat( "Bent Strength", &ssaoBentStr, 0.0f, 1.0f, "%.2f" ) ) {
+		r_ssaoBentStrength.SetFloat( ssaoBentStr );
+	}
+	AddTooltip( "How far the ambient lookup bends from the surface normal toward the bent normal. "
+		"0 = surface normal (no effect), 1 = fully bent. Default 0.5." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##ssaobentstr" ) ) { r_ssaoBentStrength.SetFloat( 0.5f ); }
+	ImGui::EndDisabled();
 
 	bool ssaoSpec = r_ssaoSpecular.GetBool();
 	if ( ImGui::Checkbox( "Specular Occlusion", &ssaoSpec ) ) {

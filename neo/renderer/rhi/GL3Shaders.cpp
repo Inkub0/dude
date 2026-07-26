@@ -50,6 +50,7 @@ static const char *gl3BootPrograms[] = {
 	"environment",
 	"fog",
 	"gammabrightness",
+	"gbuffer",
 	"generic",
 	"heathaze",
 	"heathaze_mask",

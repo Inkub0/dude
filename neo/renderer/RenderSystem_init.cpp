@@ -322,8 +322,10 @@ idCVar r_ssaoSlices( "r_ssaoSlices", "3", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_IN
 idCVar r_ssaoSteps( "r_ssaoSteps", "4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "SSAO samples marched along each direction; more = more accurate horizons at range, more GPU cost", 1, 12 );
 idCVar r_ssaoResScale( "r_ssaoResScale", "0.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO buffer resolution as a fraction of the screen (0.5 = half ... 1.0 = full); lower is faster and softer, upsampled bilaterally", 0.25f, 1.0f );
 idCVar r_ssaoBentNormal( "r_ssaoBentNormal", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "shade the ambient along the bent (average unoccluded) normal for directional occlusion, instead of a flat darkening" );
+idCVar r_ssaoBentStrength( "r_ssaoBentStrength", "0.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how far to bias the ambient cube lookup from the surface normal toward the bent normal (0 = surface normal, 1 = fully bent). Only matters where there is ambient light; needs r_ssaoBentNormal", 0.0f, 1.0f );
+idCVar r_ssaoNormalBuffer( "r_ssaoNormalBuffer", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "feed SSAO from a real bump-mapped normal G-buffer (an extra opaque geometry pass) instead of normals reconstructed from depth; picks up normal-map detail and removes faceting, at the cost of one geometry pass. 0 = reconstruct from depth (cheaper)" );
 idCVar r_ssaoSpecular( "r_ssaoSpecular", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "also attenuate specular highlights in occluded areas (stronger anti-plastic, mild fidelity departure); helps in scenes with little ambient fill" );
-idCVar r_ssaoDebug( "r_ssaoDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "SSAO debug view: 0 = off, 1 = show the AO buffer, 2 = show bent normals", 0, 2 );
+idCVar r_ssaoDebug( "r_ssaoDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "SSAO debug view: 0 = off, 1 = show the AO buffer, 2 = show bent normals, 3 = show the normal G-buffer", 0, 3 );
 
 // DUDE: gate for the non-vanilla "Enhancements" (see tr_local.h). Only the GL 3.3
 // core backend qualifies today; Vulkan backends will extend this once they land.

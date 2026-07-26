@@ -116,6 +116,7 @@ class GL3Backend : public RHI {
 	struct renderTarget_t {
 		GLuint	fbo;
 		GLuint	tex;
+		GLuint	depthTex;	// companion depth attachment for a color+depth target (0 = none)
 		int		w, h;
 		bool	cube;		// tex is a GL_TEXTURE_CUBE_MAP (point-light shadow map)
 	};
@@ -588,6 +589,77 @@ public:
 		return (RenderTargetHandle)slot;
 	}
 
+	// Color + depth target for a depth-tested offscreen geometry pass (the SSAO normal
+	// G-buffer). RGBA8 sampleable color + a DEPTH_COMPONENT24 depth texture (used only
+	// as the depth attachment, not sampled). GetRenderTargetImage returns the color.
+	virtual RenderTargetHandle CreateRenderTargetColorDepth( ImageFormat fmt, int w, int h ) {
+		if ( !initialized || w <= 0 || h <= 0 ) {
+			return 0;
+		}
+		if ( fmt != IF_RGBA8 ) {
+			common->Warning( "GL3 CreateRenderTargetColorDepth: only IF_RGBA8 supported" );
+			return 0;
+		}
+		int slot = -1;
+		for ( int i = 1; i < MAX_RENDER_TARGETS; i++ ) {
+			if ( renderTargets[i].fbo == 0 && renderTargets[i].tex == 0 ) {
+				slot = i;
+				break;
+			}
+		}
+		if ( slot < 0 ) {
+			common->Warning( "GL3 CreateRenderTargetColorDepth: out of render-target slots" );
+			return 0;
+		}
+
+		GLuint tex = 0;
+		qglGenTextures( 1, &tex );
+		gl3ActiveTexture( GL_TEXTURE0 );
+		qglBindTexture( GL_TEXTURE_2D, tex );
+		qglTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+
+		GLuint depthTex = 0;
+		qglGenTextures( 1, &depthTex );
+		qglBindTexture( GL_TEXTURE_2D, depthTex );
+		qglTexImage2D( GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0,
+		               GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+
+		GLuint fbo = 0;
+		gl3GenFramebuffers( 1, &fbo );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, fbo );
+		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0 );
+		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTex, 0 );
+		GLenum status = gl3CheckFramebufferStatus( GL_FRAMEBUFFER );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
+		qglBindTexture( GL_TEXTURE_2D, 0 );
+
+		if ( status != GL_FRAMEBUFFER_COMPLETE ) {
+			common->Warning( "GL3 CreateRenderTargetColorDepth: incomplete FBO (0x%x), %dx%d", status, w, h );
+			gl3DeleteFramebuffers( 1, &fbo );
+			qglDeleteTextures( 1, &tex );
+			qglDeleteTextures( 1, &depthTex );
+			return 0;
+		}
+
+		renderTargets[slot].fbo = fbo;
+		renderTargets[slot].tex = tex;
+		renderTargets[slot].depthTex = depthTex;
+		renderTargets[slot].w = w;
+		renderTargets[slot].h = h;
+		renderTargets[slot].cube = false;
+		boundVBO = 0;
+		common->Printf( "GL3: created %dx%d color+depth render target (handle %d)\n", w, h, slot );
+		return (RenderTargetHandle)slot;
+	}
+
 	virtual void DestroyRenderTarget( RenderTargetHandle rt ) {
 		if ( rt == 0 || rt >= (RenderTargetHandle)MAX_RENDER_TARGETS ) {
 			return;
@@ -597,6 +669,9 @@ public:
 		}
 		if ( renderTargets[rt].tex ) {
 			qglDeleteTextures( 1, &renderTargets[rt].tex );
+		}
+		if ( renderTargets[rt].depthTex ) {
+			qglDeleteTextures( 1, &renderTargets[rt].depthTex );
 		}
 		memset( &renderTargets[rt], 0, sizeof( renderTargets[rt] ) );
 	}

@@ -90,13 +90,15 @@ between the depth prepass and the interaction/ambient loop.
 
 - **Depth:** `currentDepthImage`, reconstructed to view-space position with the
   projection constants already in the RenderParams block.
-- **Normals: reconstructed from depth**, behind a single shader function
-  `vec3 sampleViewNormal(vec2 uv)`. This is the **seam**: today it derives the normal
-  from depth derivatives (screen-space partials, plus a best-of-3 tap to reduce edge
-  bleeding); when a normal G-buffer later lands (for normal mapping / parallax-occlusion
-  / displacement), that one function becomes a texture fetch and everything downstream —
-  including the bent normal — inherits the higher-quality input with no rework. Keeping
-  this seam clean is a stated design constraint.
+- **Normals: a bump-mapped normal G-buffer (default), or reconstructed from depth**, both
+  behind the single shader function `sampleViewNormal` in `ssao.frag`. This was the
+  designed **seam**, and the G-buffer now fills it (Option B / §13): when `r_ssaoNormalBuffer`
+  is on, a `RB_RHI_NormalPrepass` renders opaque geometry through the `gbuffer` shader,
+  writing the bump-mapped view-space normal into an RGBA8 colour+depth target; `sampleViewNormal`
+  becomes a texture fetch of that. Everything downstream — the AO hemisphere and the bent
+  normal — inherits the normal-map detail. With `r_ssaoNormalBuffer 0` it falls back to the
+  depth-derivative reconstruction (screen-space partials, best-of-3 tap). The G-buffer is
+  also the foundation for parallax-occlusion / displacement later.
 
 Reconstructed normals are faceted and slightly noisier than mesh normals, but adequate
 for a first cut; GTAO's horizon search is fundamentally depth-driven and uses the normal
@@ -184,6 +186,11 @@ full-res; the per-fragment direct-light sample in `interaction.frag` is ~0.03 ms
 Defaults were dropped from 4/6 to **3/4** on this basis (the look the user validated as
 "medium"), ~40% cheaper.
 
+The **normal G-buffer pass** (Option B) measured **~0.08 ms** (within noise) — the extra
+opaque geometry pass is effectively free (Doom 3 geometry is low-poly, the gbuffer shader
+is trivial). So the mooted optimizations (half-res normal buffer, MRT-merge into the depth
+prepass) are **not worth doing** — the pass isn't a measurable cost.
+
 ## 9. Cvar reference (proposed)
 
 | cvar | default | range | purpose |
@@ -197,8 +204,10 @@ Defaults were dropped from 4/6 to **3/4** on this basis (the look the user valid
 | `r_ssaoSteps` | 4 | 1–12 | samples marched per direction |
 | `r_ssaoResScale` | 0.5 | 0.25–1.0 | AO buffer resolution fraction (0.5 half … 1.0 full) |
 | `r_ssaoBentNormal` | 1 | 0/1 | shade ambient along the bent normal (§6.2) vs scalar only |
+| `r_ssaoBentStrength` | 0.5 | 0–1 | blend toward the bent normal for the ambient cube lookup (C.2) |
+| `r_ssaoNormalBuffer` | 1 | 0/1 | bump-mapped normal G-buffer (extra geom pass) vs depth reconstruct |
 | `r_ssaoSpecular` | 0 | 0/1 | also attenuate specular in occluded areas (§7) |
-| `r_ssaoDebug` | 0 | 0–? | visualise the AO buffer / bent normals |
+| `r_ssaoDebug` | 0 | 0–3 | visualise AO (1) / bent normal (2) / normal G-buffer (3) |
 
 `r_ssaoSlices` / `r_ssaoSteps` were set to 3/4 after the Phase-D profiling pass (§8
 Measured cost); `r_ssaoRadius` is still a first cut, retune to taste.
@@ -241,9 +250,22 @@ Measured cost); `r_ssaoRadius` is still a first cut, retune to taste.
   gated on `rhiSsaoAppliedThisView`. Direct-light application is what makes AO visible at
   all in Doom 3 (§2). Added `r_ssaoFloor` + `r_ssaoDirectLight` (cvars + Developer sliders);
   `r_ssaoSpecular` now actually drives direct-light specular occlusion.
-- [ ] **Phase C.2 — bent-normal directional shading.** Shade the ambient cube lookup along
-  the bent normal (needs the view→world transform for the stored view-space bent normal);
-  best done with visual iteration once C.1 is validated.
+- [x] **Normal G-buffer (Option B, landed).** `r_ssaoNormalBuffer` (default on):
+  `RB_RHI_NormalPrepass` renders opaque geometry through the `gbuffer` shader into an RGBA8
+  colour+depth target (new backend `CreateRenderTargetColorDepth`), writing bump-mapped
+  view-space normals; `ssao.frag` samples them on unit 1 (via the `u_windowCoord.x` flag) in
+  place of depth reconstruction. Removes faceting and picks up normal-map detail (Debug View
+  3 / `r_ssaoDebug 3`), at the cost of one extra opaque geometry pass. Bump image per surface
+  via `idMaterial::GetBumpStage()`; TBN from the per-surface `modelViewMatrix`. The seam
+  (§4) is now filled; foundation for parallax-occlusion / displacement.
+- [x] **Phase C.2 — bent-normal directional shading (landed).** `ambientlight.frag` blends
+  the ambient cube lookup direction from the surface normal toward the bent normal by
+  `r_ssaoBentStrength` (default 0.5, gated on `r_ssaoBentNormal`). The bent normal (AO
+  buffer GBA, view space) is rotated to world with the inverse view rotation
+  (`bentView * mat3(u_modelViewMatrix)`, `u_modelViewMatrix` = `worldSpace.modelViewMatrix`
+  set on the ambient path). **Caveat (as predicted):** only bites where there is ambient
+  light, which is sparse in Doom 3, so the effect is subtle — a polish, not a headline.
+  Developer-tab strength slider added.
 - [~] **Phase D — profile & tune (in progress).** Profiled with `r_gl3GpuTime` (§8
   Measured cost): SSAO ≈ 0.75 ms at the new 3/4 default (half-res), cost linear in
   slices × steps, ~3.2× for full-res, direct-light sampling ~free. Landed: defaults
@@ -269,6 +291,42 @@ Measured cost); `r_ssaoRadius` is still a first cut, retune to taste.
   Deferred because it needs a history buffer + reprojection and risks ghosting on fast
   motion / disocclusion (needs a depth-based rejection clamp); the backend also has no TAA
   to share history with. Revisit if AO needs to run on low-end hardware.
+- **View weapon excluded from SSAO.** The view weapon renders with a depth hack (compressed
+  depth range so it never clips walls), so its `_currentDepth` depth doesn't reflect its true
+  position and the horizon search reads far background geometry (desk edges) as false
+  occluders on the hand/gun. Fix: the normal prepass writes an **AO mask** in the G-buffer
+  alpha (0 for `weaponDepthHack` surfaces, 1 otherwise) and applies the weapon/model depth
+  hack so the weapon rasterizes with the same coverage as the main view; `ssao.frag` skips
+  the horizon search where the mask is 0 (leaves it fully unoccluded). Requires the normal
+  G-buffer (`r_ssaoNormalBuffer`, default on); with it off, the weapon artifact returns.
+
+## 13. Future / nice-to-have
+
+- **Correct self-occlusion on the view weapon (parked).** The weapon is currently *excluded*
+  from SSAO (§12) rather than shaded — so the hand/gun get no contact shadowing of their own.
+  Doing it *correctly* is possible and not a dead end; the key opening is that **the depth
+  hack only modifies the projection, not the modelview**, so `modelViewMatrix · position`
+  still yields the weapon's true eye-space position — we just don't store it today. The clean
+  approach is a small dedicated weapon-only pass:
+  1. Store the weapon's **true view-space depth** (from the un-hacked modelview) alongside its
+     normal — needs one more channel/attachment (the RGBA8 normal buffer is full: RGB normal
+     + A mask), e.g. an MRT second target or an R32F/RG16F weapon-depth buffer.
+  2. Run GTAO on the weapon **in isolation** — reject non-weapon horizon samples via the mask
+     so it can only self-occlude (finger creases, gun detailing) and can't read the background;
+     use the true depth so the radius is at the right world scale.
+  3. **Composite** that onto the weapon pixels in place of the current "fully unoccluded" output.
+  Cheap (weapon is tiny geometry over a small screen area); moderate complexity (weapon-depth
+  channel + a masked SSAO variant + composite). Subtle payoff — do it during a nice-to-have pass.
+- **MRT-merge the normal pass into the depth prepass** — see §8; not worth it (the pass is
+  ~free) but noted for completeness, and it would also give a natural home for the weapon-depth
+  channel above.
+- **Temporal accumulation** — see §12; the real lever only if AO is ever wanted on low-end GPUs.
+- **Normal G-buffer simplifications (refinements).** The normal prepass treats perforated
+  (alpha-tested grates/fences) surfaces as solid — they write full-quad normals rather than
+  punched-out, so their AO is slightly off. Polygon offset, the per-surface bump texture
+  matrix, and the weapon/model depth hack ARE handled (matching the depth prepass). It is a
+  full second opaque geometry pass — mergeable into the depth prepass via MRT later (blocked
+  on the backbuffer-depth / MSAA-blit question, hence the standalone pass for now).
 - **Transparencies / decals** are not in the depth prepass the same way; AO is a
   world-surface effect and does not apply to them — matches how the depth capture is
   already used.
