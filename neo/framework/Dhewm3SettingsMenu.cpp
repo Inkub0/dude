@@ -2197,6 +2197,162 @@ static void DrawVideoOptionsMenu()
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Enhancement quality presets (DUDE Phase 3.5)
+//
+// One-click tiers that set the whole GL3 enhancement suite as a group instead of
+// dialling every slider by hand. Separate from Video Options' vanilla "Quality
+// Preset" (com_machineSpec, which drives image/texture quality): this one only
+// touches the non-vanilla enhancement cvars (SSAO, shadow maps, emissive fill,
+// soft particles, post-FX).
+//
+// Anchor: "High" reproduces the shipped tuned defaults (calibrated on a
+// GTX-1070-class card, ~12 ms/frame in a busy scene). Tiers below scale the cost
+// down for weaker GL 3.3 hardware; tiers above push modern GPUs. "Potato" is the
+// faithful floor - every enhancement off, which is both the cheapest and an exact
+// vanilla look - so a source-accurate frame is always one click away.
+//
+// Presets move the *performance* levers only (on/off, resolution, sample counts,
+// budgets). The artistic-calibration cvars the user tuned (SSAO radius/intensity/
+// floor, emissive reach/tint, shadow biases) are left untouched so every tier
+// shares one look, just at different cost.
+enum {
+	PRESET_POTATO = 0,
+	PRESET_LOW,
+	PRESET_MEDIUM,
+	PRESET_HIGH,
+	PRESET_ULTRA,
+	PRESET_NIGHTMARE,
+	PRESET_COUNT
+};
+
+struct EnhancementPreset {
+	const char* name;
+	// master toggles
+	bool  softParticles;
+	bool  smokeDarkBlend;
+	bool  emissiveSurfaces;
+	bool  ssao;
+	bool  shadowMapping;
+	// SSAO cost levers
+	float ssaoResScale;
+	int   ssaoSlices;
+	int   ssaoSteps;
+	bool  ssaoNormalBuffer;
+	bool  ssaoBentNormal;
+	// shadow-map cost levers
+	int   shadowMapSize;      // 2D / spot-projected map
+	int   shadowMapPointSize; // point-light cube, per face
+	int   shadowMapCubePcf;
+	int   shadowMapPointLimit;
+	// misc
+	int   emissiveLightLimit;
+	float filmGrain;
+	float chromaticAberration;
+	float reflectionScale;    // 1.0 vanilla / 0.7 dampened for the brighter enhanced scene
+	int   shading;            // r_shading: 0 vanilla LUT (Potato only) / 1 Blinn-Phong (enhanced tiers)
+	float specularScale;      // r_specularScale: scales the specular contribution (applies to all models)
+	float specularExp;        // r_specularExp: Blinn-Phong/Phong exponent (ignored by the vanilla LUT)
+	// shadow-map size scaling (logically part of the shadow levers above; kept here
+	// so the table's positional initializers stay append-only). Inert on Potato/Low,
+	// which use stencil shadows, but carried for determinism.
+	bool  shadowMapSizeScale;       // r_shadowMapSizeScale: scale each light's res with its radius
+	float shadowMapSizeScaleRadius; // r_shadowMapSizeScaleRadius: pivot radius that gets the base res
+};
+
+// Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
+// flipping a feature on by hand from those tiers stays affordable and detection
+// stays unambiguous. High == shipped defaults (see anchor note above).
+static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad
+	{ "Potato",       false, false, false, false, false,  0.5f, 4,   1,   false, true,  512,  512,  2,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f },
+	{ "Low",          true,  false, false, false, false,  0.5f, 4,   1,   false, true,  512,  512,  2,  16,   16,   0.0f,  0.0f,  1.0f, 1,  1.8f, 62.0f, true, 380.0f },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 4,   1,   false, true,  512,  512,  2,  16,   16,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 380.0f },
+	{ "High",         true,  false, true,  true,  true,   0.5f, 6,   1,   true,  true,  1024, 1200, 6,  64,   24,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 380.0f },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 8,   2,   true,  true,  2048, 2048, 8,  96,   32,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 340.0f },
+	{ "Ultra Nightmare", true, true, true, true,  true,   1.0f, 8,   4,   true,  true,  2048, 2048, 12, 128,  48,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 300.0f },
+};
+
+static void ApplyEnhancementPreset( int idx )
+{
+	if ( idx < 0 || idx >= PRESET_COUNT ) {
+		return;
+	}
+	const EnhancementPreset& p = enhancementPresets[idx];
+
+	r_useSoftParticles.SetBool( p.softParticles );
+	// soft particles and smoke-darkness blend both need the depth-capture pass;
+	// mirror the per-checkbox auto-enable so a preset can't leave them broken.
+	if ( ( p.softParticles || p.smokeDarkBlend ) && r_enableDepthCapture.GetInteger() == 0 ) {
+		r_enableDepthCapture.SetInteger( -1 );
+	}
+	r_smokeDarkBlend.SetBool( p.smokeDarkBlend );
+	r_emissiveSurfaces.SetBool( p.emissiveSurfaces );
+	r_ssao.SetBool( p.ssao );
+	r_shadowMapping.SetBool( p.shadowMapping );
+
+	r_ssaoResScale.SetFloat( p.ssaoResScale );
+	r_ssaoSlices.SetInteger( p.ssaoSlices );
+	r_ssaoSteps.SetInteger( p.ssaoSteps );
+	r_ssaoNormalBuffer.SetBool( p.ssaoNormalBuffer );
+	r_ssaoBentNormal.SetBool( p.ssaoBentNormal );
+
+	r_shadowMapSize.SetInteger( p.shadowMapSize );
+	r_shadowMapPointSize.SetInteger( p.shadowMapPointSize );
+	r_shadowMapCubePcf.SetInteger( p.shadowMapCubePcf );
+	r_shadowMapPointLimit.SetInteger( p.shadowMapPointLimit );
+	r_shadowMapSizeScale.SetBool( p.shadowMapSizeScale );
+	r_shadowMapSizeScaleRadius.SetFloat( p.shadowMapSizeScaleRadius );
+
+	r_emissiveLightLimit.SetInteger( p.emissiveLightLimit );
+	r_postFilmGrain.SetFloat( p.filmGrain );
+	r_postChromaticAberration.SetFloat( p.chromaticAberration );
+	r_gl3ReflectionScale.SetFloat( p.reflectionScale );
+	// specular look: model + scale + exponent, as a group. Potato stays vanilla LUT
+	// at scale 1.0; enhanced tiers use Blinn-Phong at a punchier scale/exponent.
+	r_shading.SetInteger( p.shading );
+	r_specularScale.SetFloat( p.specularScale );
+	r_specularExp.SetFloat( p.specularExp );
+}
+
+// Return the preset whose full cvar vector the live cvars currently match, or -1
+// for "Custom" (any hand-tweak since a preset was last applied). Every row is a
+// unique vector, so a match is unambiguous.
+static int DetectEnhancementPreset()
+{
+	for ( int i = 0; i < PRESET_COUNT; i++ ) {
+		const EnhancementPreset& p = enhancementPresets[i];
+		const bool match =
+			r_useSoftParticles.GetBool()       == p.softParticles &&
+			r_smokeDarkBlend.GetBool()         == p.smokeDarkBlend &&
+			r_emissiveSurfaces.GetBool()       == p.emissiveSurfaces &&
+			r_ssao.GetBool()                   == p.ssao &&
+			r_shadowMapping.GetBool()          == p.shadowMapping &&
+			idMath::Fabs( r_ssaoResScale.GetFloat() - p.ssaoResScale ) < 0.01f &&
+			r_ssaoSlices.GetInteger()          == p.ssaoSlices &&
+			r_ssaoSteps.GetInteger()           == p.ssaoSteps &&
+			r_ssaoNormalBuffer.GetBool()       == p.ssaoNormalBuffer &&
+			r_ssaoBentNormal.GetBool()         == p.ssaoBentNormal &&
+			r_shadowMapSize.GetInteger()       == p.shadowMapSize &&
+			r_shadowMapPointSize.GetInteger()  == p.shadowMapPointSize &&
+			r_shadowMapCubePcf.GetInteger()    == p.shadowMapCubePcf &&
+			r_shadowMapPointLimit.GetInteger() == p.shadowMapPointLimit &&
+			r_shadowMapSizeScale.GetBool()     == p.shadowMapSizeScale &&
+			idMath::Fabs( r_shadowMapSizeScaleRadius.GetFloat() - p.shadowMapSizeScaleRadius ) < 0.5f &&
+			r_emissiveLightLimit.GetInteger()  == p.emissiveLightLimit &&
+			idMath::Fabs( r_postFilmGrain.GetFloat() - p.filmGrain ) < 0.005f &&
+			idMath::Fabs( r_postChromaticAberration.GetFloat() - p.chromaticAberration ) < 0.005f &&
+			idMath::Fabs( r_gl3ReflectionScale.GetFloat() - p.reflectionScale ) < 0.01f &&
+			r_shading.GetInteger()             == p.shading &&
+			idMath::Fabs( r_specularScale.GetFloat() - p.specularScale ) < 0.01f &&
+			idMath::Fabs( r_specularExp.GetFloat() - p.specularExp ) < 0.5f;
+		if ( match ) {
+			return i;
+		}
+	}
+	return -1;
+}
+
 static void DrawEnhancementsMenu()
 {
 	ImGui::Spacing();
@@ -2215,6 +2371,40 @@ static void DrawEnhancementsMenu()
 	// grey everything out (and make it non-interactive) when the running backend
 	// can't use these effects - they simply don't apply then.
 	ImGui::BeginDisabled( !supported );
+
+	// One-click quality presets for the whole enhancement suite. The combo is the
+	// user's target; the status line reflects the live cvars (so hand-tweaking any
+	// slider below reads back as "Custom"). Nothing is applied until "Apply".
+	ImGui::SeparatorText( "Quality Preset" );
+	{
+		static int selPreset = -1;
+		if ( selPreset < 0 ) {
+			const int d = DetectEnhancementPreset();
+			selPreset = ( d >= 0 ) ? d : PRESET_HIGH;
+		}
+
+		ImGui::SetNextItemWidth( 220.0f );
+		ImGui::Combo( "##enhPreset", &selPreset,
+			"Potato\0Low\0Medium\0High (defaults)\0Ultra\0Ultra Nightmare\0" );
+		ImGui::SameLine();
+		if ( ImGui::Button( "Apply Preset" ) ) {
+			ApplyEnhancementPreset( selPreset );
+		}
+		AddTooltip( "One-click tiers for the whole enhancement suite (SSAO, shadow maps, emissive "
+			"fill light, soft particles, post-FX, Blinn-Phong specular). 'High' matches the shipped "
+			"defaults; 'Potato' is the vanilla-faithful floor (everything off, vanilla specular) and "
+			"the fastest. Presets set the shading look and the performance levers; your fine-tuning "
+			"(SSAO radii, emissive reach/tint, shadow biases) is left alone. Tweaking any slider "
+			"afterwards shows 'Custom'. Separate from the image-quality preset in Video Options." );
+
+		const int detected = DetectEnhancementPreset();
+		if ( detected < 0 ) {
+			ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ), "Current: Custom (hand-tuned)" );
+		} else {
+			ImGui::TextDisabled( "Current: %s", enhancementPresets[detected].name );
+		}
+	}
+	ImGui::Spacing();
 
 	DrawOptions( enhancementOptions, IM_ARRAYSIZE(enhancementOptions) );
 
