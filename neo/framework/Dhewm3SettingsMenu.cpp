@@ -2273,21 +2273,24 @@ static void DrawEnhancementsMenu()
 		ImGui::BeginDisabled( !r_shadowMapping.GetBool() );
 
 		int res = r_shadowMapSize.GetInteger();
-		if ( ImGui::SliderInt( "Shadow Map Resolution", &res, 256, 4096 ) ) {
+		if ( ImGui::SliderInt( "Spot / Projected Map Resolution", &res, 256, 4096 ) ) {
 			r_shadowMapSize.SetInteger( res );
 		}
-		AddTooltip( "Per-light shadow map resolution. Higher = sharper edges, more memory." );
+		AddTooltip( "Resolution of the 2D depth map used only by projected / spot lights. "
+			"Point (omni) lights are the bulk of Doom 3's shadows and use the separate Point / "
+			"Cube Map Resolution slider below instead — so on maps with no shadow-casting "
+			"spotlight this has no visible effect (r_shadowMapDebug 1 shows the '2D-mapped' "
+			"count). Higher = sharper spot-shadow edges, more memory." );
 
-		// fine-grained bias control: +/- step of 0.02 as requested, and the field is
-		// editable to 4 decimals so small values can be dialled in precisely
-		float bias = r_shadowMapBias.GetFloat();
-		if ( ImGui::InputFloat( "Shadow Bias", &bias, 0.02f, 0.02f, "%.4f" ) ) {
-			bias = idMath::ClampFloat( 0.0f, 0.5f, bias );
-			r_shadowMapBias.SetFloat( bias );
+		int pres = r_shadowMapPointSize.GetInteger();
+		if ( ImGui::SliderInt( "Point / Cube Map Resolution", &pres, 128, 4096 ) ) {
+			r_shadowMapPointSize.SetInteger( pres );
 		}
-		AddTooltip( "Depth-compare bias. Raise to remove acne (stippling on lit surfaces); "
-			"lower if shadows detach from objects (peter-panning) when close. Steps of 0.02; "
-			"type an exact value for fine tuning." );
+		AddTooltip( "Per-face resolution of the point-light cube map — this is the one that "
+			"affects most Doom 3 shadows. Six faces cover the whole sphere, so it can be lower "
+			"than the spot/projected map for similar quality. Higher = sharper, more memory and "
+			"fill (6 faces). Pair with Cube Edge Softness (Developer tab) to smooth edges without "
+			"raising resolution." );
 
 		bool perf = r_shadowMapPerforated.GetBool();
 		if ( ImGui::Checkbox( "Perforated Casters (grates/fences)", &perf ) ) {
@@ -2311,14 +2314,6 @@ static void DrawEnhancementsMenu()
 			"on-screen importance. While shadow mapping is on, out-of-budget point lights "
 			"render unshadowed (stencil shadows are fully off). Lower = faster in crowded "
 			"scenes. 0 = all point lights (default; most consistent, slowest)." );
-
-		int pres = r_shadowMapPointSize.GetInteger();
-		if ( ImGui::SliderInt( "Point Map Resolution", &pres, 128, 4096 ) ) {
-			r_shadowMapPointSize.SetInteger( pres );
-		}
-		AddTooltip( "Per-face resolution of the point-light cube map. Six faces cover the "
-			"whole sphere, so this can be lower than the projected map for similar quality. "
-			"Higher = sharper, more memory and fill." );
 
 		ImGui::EndDisabled();
 	}
@@ -2451,7 +2446,7 @@ static void DrawShadowDebugMenu()
 	AddTooltip( "Give bigger lights more shadow resolution and smaller lights less, so a "
 		"shadow texel maps to roughly the same world distance for every light. Cuts jagged "
 		"edges on large/far lights. Tiers step in powers of two around the base resolutions "
-		"below (-1x to +4x), clamped to each map's own range." );
+		"on the main Shadows page (-1x to +4x), clamped to each map's own range." );
 
 	ImGui::BeginDisabled( !sizeScale );
 	float refRadius = r_shadowMapSizeScaleRadius.GetFloat();
@@ -2467,29 +2462,26 @@ static void DrawShadowDebugMenu()
 	}
 	ImGui::EndDisabled();
 
-	ImGui::SeparatorText( "2D map (projected / spot lights)" );
-
-	int res = r_shadowMapSize.GetInteger();
-	if ( ImGui::SliderInt( "2D Map Resolution", &res, 256, 4096 ) ) {
-		r_shadowMapSize.SetInteger( res );
-	}
-	AddTooltip( "Resolution of the 2D depth map used by projected/spot lights." );
-
 	ImGui::SeparatorText( "Cube map (point / omni lights)" );
 
-	int limit = r_shadowMapPointLimit.GetInteger();
-	if ( ImGui::SliderInt( "Point Light Budget", &limit, 0, 128 ) ) {
-		r_shadowMapPointLimit.SetInteger( limit );
-	}
-	AddTooltip( "How many point lights get a cube map per view (by importance). 0 = all. "
-		"Set to 1 and use Isolate Light to study a single cube map." );
+	// Base 2D/cube resolutions and the point-light budget are owned by the main Shadows
+	// page (one canonical control each) — only the dev-only cube tuning lives here.
+	ImGui::TextDisabled( "Map resolutions and the point-light budget are on the main Shadows page." );
+	ImGui::Spacing();
 
-	int pres = r_shadowMapPointSize.GetInteger();
-	if ( ImGui::SliderInt( "Cube Face Resolution", &pres, 128, 4096 ) ) {
-		r_shadowMapPointSize.SetInteger( pres );
+	int cubePcf = r_shadowMapCubePcf.GetInteger();
+	if ( ImGui::SliderInt( "Cube Edge Softness (PCF taps)", &cubePcf, 1, 16 ) ) {
+		r_shadowMapCubePcf.SetInteger( cubePcf );
 	}
-	AddTooltip( "Per-face resolution of the point-light cube map (6 faces). Cost scales with "
-		"resolution squared per rendered face, so high values lean hard on Face Culling below." );
+	AddTooltip( "Point-light cube shadows soften their edge by averaging this many disc-offset "
+		"depth taps. 1 = a single hardware tap (hardest, blockiest, cheapest); 4 matches the "
+		"2D/spot path; 6 (default) is a soft, well-filtered edge; higher smooths stair-stepping "
+		"at low resolution but costs more per lit point-light fragment. Free on VRAM (filtering "
+		"only)." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##cubepcf" ) ) {
+		r_shadowMapCubePcf.SetInteger( 6 );
+	}
 
 	bool faceCull = r_shadowMapFaceCull.GetBool();
 	if ( ImGui::Checkbox( "Cull Off-Screen Faces", &faceCull ) ) {

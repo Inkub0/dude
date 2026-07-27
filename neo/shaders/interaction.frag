@@ -40,9 +40,41 @@ float shadowVisibility() {
 	}
 	if ( u_shadowParms.x > 1.5 ) {
 		// point light: the caster stored linear radial distance/range as depth, so
-		// compare the same quantity here. Single hardware-PCF tap (2x2, seamless).
-		float ref = length( var_ShadowCubeVec ) / max( u_shadowParms.w, 1.0 ) - u_shadowParms.z;
-		return texture( u_shadowCube, vec4( var_ShadowCubeVec, ref ) );
+		// compare the same quantity here.
+		vec3 L = var_ShadowCubeVec;
+		float dist = length( L );
+		float ref = dist / max( u_shadowParms.w, 1.0 ) - u_shadowParms.z;
+
+		int taps = int( u_specularParms.w + 0.5 );		// cube PCF tap count (r_shadowMapCubePcf)
+		if ( taps <= 1 ) {
+			return texture( u_shadowCube, vec4( L, ref ) );	// single hardware 2x2 tap
+		}
+
+		// Disc PCF: the cube is sampled by direction, so perturb L within its tangent
+		// plane by a few texels' worth of angle and average the hardware taps. One cube
+		// texel spans ~2*dist/res in world tangent units (a face covers +/-dist at its
+		// edge); spread ~2 texels to soften the stair-stepped edge without leaking.
+		vec3 up = abs( L.y ) < 0.99 ? vec3( 0.0, 1.0, 0.0 ) : vec3( 1.0, 0.0, 0.0 );
+		vec3 tx = normalize( cross( up, L ) );
+		vec3 ty = normalize( cross( L, tx ) );
+		float r = ( 2.0 * dist * u_shadowParms.y ) * 2.0;	// one cube texel * ~2 texels spread
+
+		const vec2 disc16[16] = vec2[16](
+			vec2( -0.94201624, -0.39906216 ), vec2(  0.94558609, -0.76890725 ),
+			vec2( -0.09418410, -0.92938870 ), vec2(  0.34495938,  0.29387760 ),
+			vec2( -0.91588581,  0.45771432 ), vec2( -0.81544232, -0.87912464 ),
+			vec2( -0.38277543,  0.27676845 ), vec2(  0.97484398,  0.75648379 ),
+			vec2(  0.44323325, -0.97511554 ), vec2(  0.53742981, -0.47373420 ),
+			vec2( -0.26496911, -0.41893023 ), vec2(  0.79197514,  0.19090188 ),
+			vec2( -0.24188840,  0.99706507 ), vec2( -0.81409955,  0.91437590 ),
+			vec2(  0.19984126,  0.78641367 ), vec2(  0.14383161, -0.14100790 ) );
+
+		float sum = 0.0;
+		for ( int i = 0; i < taps; i++ ) {
+			vec3 off = tx * disc16[i].x * r + ty * disc16[i].y * r;
+			sum += texture( u_shadowCube, vec4( L + off, ref ) );
+		}
+		return sum / float( taps );
 	}
 	if ( var_TexProjection.w <= 0.0 ) {
 		return 1.0;						// behind the light apex -> lit

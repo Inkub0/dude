@@ -873,6 +873,7 @@ extern idCVar r_shadowMapDebug;			// print per-view light classification
 extern idCVar r_shadowMapCull;			// caster face culling (0 front / 1 back / 2 two-sided)
 extern idCVar r_shadowMapPerforated;	// let noShadows perforated surfaces cast punched-out shadow maps
 extern idCVar r_shadowMapPointSize;		// point-light cube shadow map resolution per face
+extern idCVar r_shadowMapCubePcf;		// point-light cube shadow PCF tap count (1 = single hardware tap)
 extern idCVar r_shadowMapPointLimit;	// max point lights cube-shadowed per view (importance budget)
 extern idCVar r_shadowMapPointRangeScale;	// scale point-light cube shadow range (far plane + depth normalizer)
 extern idCVar r_shadowMapSizeScale;			// scale per-light shadow resolution with light radius

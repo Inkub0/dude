@@ -515,7 +515,7 @@ public:
 		renderTargets[slot].h = h;
 		renderTargets[slot].cube = false;
 		boundVBO = 0;	// binding the FBO's texture disturbed unit-0 bind tracking
-		common->Printf( "GL3: created %dx%d %s render target (handle %d)\n", w, h, colorTarget ? "color" : "depth", slot );
+		common->DPrintf( "GL3: created %dx%d %s render target (handle %d)\n", w, h, colorTarget ? "color" : "depth", slot );
 		return (RenderTargetHandle)slot;
 	}
 
@@ -585,7 +585,7 @@ public:
 		renderTargets[slot].h = size;
 		renderTargets[slot].cube = true;
 		boundVBO = 0;
-		common->Printf( "GL3: created %d^2 cube depth render target (handle %d)\n", size, slot );
+		common->DPrintf( "GL3: created %d^2 cube depth render target (handle %d)\n", size, slot );
 		return (RenderTargetHandle)slot;
 	}
 
@@ -656,7 +656,7 @@ public:
 		renderTargets[slot].h = h;
 		renderTargets[slot].cube = false;
 		boundVBO = 0;
-		common->Printf( "GL3: created %dx%d color+depth render target (handle %d)\n", w, h, slot );
+		common->DPrintf( "GL3: created %dx%d color+depth render target (handle %d)\n", w, h, slot );
 		return (RenderTargetHandle)slot;
 	}
 

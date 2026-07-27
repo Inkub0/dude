@@ -70,9 +70,10 @@ static struct {
 static rhi::RenderTargetHandle rhiShadowMap = 0;
 static int rhiShadowMapSize = 0;
 
-// Persistent point-light cube depth target, reused serially by every cube-shadowed
-// point light in a frame (one allocation, like the 2D map). Recreated on a size
-// change or context loss.
+// The cube depth target currently selected for this light's render/sample. It comes
+// from either the static cube cache (rhiCubeCache, keyed per light — see
+// RB_RHI_AcquireCubeTarget) or the per-tier scratch pool (RB_RHI_ShadowPoolTarget), not
+// a single persistent allocation. rhiShadowCubeSize is its face resolution.
 static rhi::RenderTargetHandle rhiShadowCube = 0;
 static int rhiShadowCubeSize = 0;
 
@@ -293,7 +294,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	parms.specularParms[0] = r_specularScale.GetFloat();
 	parms.specularParms[1] = r_specularExp.GetFloat();
 	parms.specularParms[2] = (float)r_shading.GetInteger();
-	parms.specularParms[3] = 0.0f;
+	// w carries the point-light cube PCF tap count (the interaction shader's cube
+	// branch reads it; the free specularParms slot avoids growing u_shadowParms past 4).
+	parms.specularParms[3] = (float)r_shadowMapCubePcf.GetInteger();
 
 	// shadow mapping (DUDE Phase 3.5): only the regular interaction shader samples
 	// the depth map — the ambientLight pass has no shadow term. The lookup reuses
@@ -967,6 +970,14 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 	}
 }
 
+// Forward decls: the 2D shadow-map cache (RB_RHI_Acquire2DTarget) and the shared token
+// hash (RB_RHI_CubeToken) live further down with the point-cube cache, but this 2D pass
+// uses them. r_shadowMapDebug counters: 2D cache hits vs maps actually rendered.
+static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float range, int size, bool *outDynamic );
+static rhi::RenderTargetHandle RB_RHI_Acquire2DTarget( rhi::RHI *r, int lightIndex, int size, unsigned long long token, bool &hit );
+static int rhiMapCacheHits = 0;
+static int rhiMapCacheRendered = 0;
+
 /*
 ===================
 RB_RHI_ShadowMapPass
@@ -986,11 +997,29 @@ static bool RB_RHI_ShadowMapPass( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderH
 	const float radius = vLight->lightDef->parms.lightRadius.Length();
 	const int tier = RB_RHI_ShadowTier( radius );
 	const int size = RB_RHI_TierSize( base, tier, 256, mapHi );
-	rhiShadowMap = RB_RHI_ShadowPoolTarget( r, false, tier, size );
+	// static cache (the 2D analogue of the point-cube cache, section 5): a projected light
+	// whose pose and casters are unchanged since last frame samples the stored map and
+	// skips the render. Reuses the cube token (range is meaningless for 2D -- pass 0);
+	// pose + axis + caster set + size fully key a static projected light's depth map. A
+	// light with an animated caster reports dynamic and stays on the scratch pool (never
+	// hits). rhiShadowMap/Size track the selected target; the caller samples it right away.
+	const int lightIndex = vLight->lightDef->index;
+	bool dynamic = false;
+	const unsigned long long token = RB_RHI_CubeToken( vLight, 0.0f, size, &dynamic );
+	bool hit = false;
+	rhiShadowMap = dynamic ? 0 : RB_RHI_Acquire2DTarget( r, lightIndex, size, token, hit );
+	if ( rhiShadowMap == 0 ) {
+		rhiShadowMap = RB_RHI_ShadowPoolTarget( r, false, tier, size );		// scratch fallback
+	}
 	rhiShadowMapSize = size;
 	if ( rhiShadowMap == 0 ) {
 		return false;
 	}
+	if ( hit ) {
+		rhiMapCacheHits++;
+		return true;		// unchanged since last frame -- sample the stored map, skip render
+	}
+	rhiMapCacheRendered++;
 
 	rhi::ClearArgs clear;
 	memset( &clear, 0, sizeof( clear ) );
@@ -1442,6 +1471,111 @@ static void RB_RHI_ResetCubeCache( rhi::RHI *r ) {
 	rhiCubeCacheBytes = 0;
 }
 
+// ---- Static 2D (projected/spot) shadow-map cache ---------------------------------
+// The 2D analogue of the point-cube cache above. Projected depth maps are small (a
+// 1024^2 DEPTH24 map is ~4 MB), so this skips the VRAM budget/byte accounting the cube
+// cache needs: a small fixed slot table keyed by light index, LRU-evicted only when the
+// table is full. Same hit/skip semantics -- a static projected light re-renders its map
+// only when it or a caster moves. Gated on r_shadowMapCache (shared with the cube cache).
+#define MAX_SHADOW_2D_CACHE 32
+struct shadow2DCache_t {
+	int						lightIndex;		// idRenderLightLocal::index; -1 = free slot
+	rhi::RenderTargetHandle	rt;
+	int						size;			// map resolution of rt
+	unsigned long long		token;			// invalidation hash of light + casters
+	int						lastFrame;		// LRU key; shares rhiCubeCacheFrameNo
+};
+static shadow2DCache_t rhiMapCache[MAX_SHADOW_2D_CACHE];
+
+// Pick the 2D target for this projected light. On a hit returns the stored map and sets
+// hit=true so the caller skips the render; on a miss returns a persistent target to
+// render into (token stored for next frame). Returns 0 (caching off, or every slot
+// already used this frame) so the caller drops to the shared scratch pool, exactly as
+// the pre-cache code always did.
+static rhi::RenderTargetHandle RB_RHI_Acquire2DTarget( rhi::RHI *r, int lightIndex, int size,
+                                                       unsigned long long token, bool &hit ) {
+	hit = false;
+	if ( !r_shadowMapCache.GetBool() ) {
+		return 0;
+	}
+	shadow2DCache_t *e = NULL;
+	int firstFree = -1;
+	for ( int i = 0; i < MAX_SHADOW_2D_CACHE; i++ ) {
+		if ( rhiMapCache[i].rt && rhiMapCache[i].lightIndex == lightIndex ) {
+			e = &rhiMapCache[i];
+			break;
+		}
+		if ( firstFree < 0 && rhiMapCache[i].rt == 0 ) {
+			firstFree = i;
+		}
+	}
+	if ( e ) {
+		if ( r->GetRenderTargetImage( e->rt ) == 0 ) {		// context lost (vid_restart)
+			if ( firstFree < 0 ) {
+				firstFree = (int)( e - rhiMapCache );
+			}
+			e->lightIndex = -1; e->rt = 0; e->token = 0;
+			e = NULL;
+		} else if ( e->size == size ) {
+			e->lastFrame = rhiCubeCacheFrameNo;
+			if ( e->token == token ) {
+				hit = true;						// unchanged -- skip the render
+				return e->rt;
+			}
+			e->token = token;					// moved: re-render into the same target
+			return e->rt;
+		} else {
+			r->DestroyRenderTarget( e->rt );	// tier/resolution changed: reallocate
+			e->lightIndex = -1; e->rt = 0;
+			if ( firstFree < 0 ) {
+				firstFree = (int)( e - rhiMapCache );
+			}
+			e = NULL;
+		}
+	}
+	// need a slot: evict the least-recently-used entry not touched this frame
+	if ( firstFree < 0 ) {
+		int victim = -1;
+		for ( int i = 0; i < MAX_SHADOW_2D_CACHE; i++ ) {
+			if ( rhiMapCache[i].rt && rhiMapCache[i].lastFrame != rhiCubeCacheFrameNo
+			     && ( victim < 0 || rhiMapCache[i].lastFrame < rhiMapCache[victim].lastFrame ) ) {
+				victim = i;
+			}
+		}
+		if ( victim < 0 ) {
+			return 0;						// every slot in use this frame -> scratch
+		}
+		r->DestroyRenderTarget( rhiMapCache[victim].rt );
+		rhiMapCache[victim].lightIndex = -1;
+		rhiMapCache[victim].rt = 0;
+		firstFree = victim;
+	}
+	rhi::RenderTargetHandle rt = r->CreateRenderTarget( rhi::IF_DEPTH24, size, size );
+	if ( rt == 0 ) {
+		return 0;
+	}
+	RB_RHI_ForgetTexBinds();				// create() disturbed unit 0's cached bind
+	shadow2DCache_t &slot = rhiMapCache[firstFree];
+	slot.lightIndex = lightIndex;
+	slot.rt = rt;
+	slot.size = size;
+	slot.token = token;
+	slot.lastFrame = rhiCubeCacheFrameNo;
+	return rt;							// hit stays false -> caller renders
+}
+
+// Drop every cached 2D map (context loss / cache toggled off / world teardown).
+static void RB_RHI_Reset2DCache( rhi::RHI *r ) {
+	for ( int i = 0; i < MAX_SHADOW_2D_CACHE; i++ ) {
+		if ( rhiMapCache[i].rt && r && r->GetRenderTargetImage( rhiMapCache[i].rt ) != 0 ) {
+			r->DestroyRenderTarget( rhiMapCache[i].rt );
+		}
+		rhiMapCache[i].lightIndex = -1;
+		rhiMapCache[i].rt = 0;
+		rhiMapCache[i].token = 0;
+	}
+}
+
 /*
 ===================
 RB_RHI_FreeShadowCubeCache
@@ -1461,6 +1595,7 @@ void RB_RHI_FreeShadowCubeCache() {
 		return;
 	}
 	RB_RHI_ResetCubeCache( rhi::GetGL3RHI() );
+	RB_RHI_Reset2DCache( rhi::GetGL3RHI() );
 }
 
 /*
@@ -2105,10 +2240,15 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	rhiCubeCacheMiss = 0;
 	rhiCubeCacheDynamic = 0;
 	rhiCubeCacheScratch = 0;
+	rhiMapCacheHits = 0;
+	rhiMapCacheRendered = 0;
 	rhiCubeCacheFrameNo++;			// bump before the light loop so lastFrame == "this view"
 	// free the whole cache when it's switched off, so its VRAM doesn't linger
-	if ( !r_shadowMapCache.GetBool() && rhiCubeCacheBytes > 0 ) {
-		RB_RHI_ResetCubeCache( r );
+	if ( !r_shadowMapCache.GetBool() ) {
+		if ( rhiCubeCacheBytes > 0 ) {
+			RB_RHI_ResetCubeCache( r );
+		}
+		RB_RHI_Reset2DCache( r );		// 2D maps are tiny; a no-op once already empty
 	}
 	if ( !r_skipInteractions.GetBool() ) {
 		for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
@@ -2287,8 +2427,8 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	backEnd.vLight = NULL;
 
 	if ( r_shadowMapDebug.GetBool() ) {
-		common->Printf( "shadowMap: %d lit | projected %d (2D-mapped %d, no-shadow %d) | point %d (cube-mapped %d, cube-casters %d, faces %d drawn/%d culled) | cache %d hit/%d rendered/%d scratch, %d dynamic (%zu MB) | stencil-big %d | parallel %d | no-lightDef %d | perforated-casters %d | r_shadowMapping %d\n",
-		                dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,
+		common->Printf( "shadowMap: %d lit | projected %d (2D-mapped %d [%d hit/%d rendered], no-shadow %d) | point %d (cube-mapped %d, cube-casters %d, faces %d drawn/%d culled) | cache %d hit/%d rendered/%d scratch, %d dynamic (%zu MB) | stencil-big %d | parallel %d | no-lightDef %d | perforated-casters %d | r_shadowMapping %d\n",
+		                dbgLit, dbgProjected, dbgShadowMapped, rhiMapCacheHits, rhiMapCacheRendered, dbgNoShadow,
 		                dbgPoint, rhiShadowCubeLights, rhiShadowCubeCasters,
 		                rhiShadowCubeFaces, rhiShadowCubeFacesCulled,
 		                rhiCubeCacheHits, rhiCubeCacheMiss, rhiCubeCacheScratch, rhiCubeCacheDynamic,

@@ -69,7 +69,14 @@ range = (lightRadius.Length() + lightCenter.Length()) × r_shadowMapPointRangeSc
   90° cone can't overlap the view frustum (faces are still cleared for seamless
   sampling). Big win at high resolution; a cached cube renders all 6 faces since it may
   be sampled from any later angle.
-- Per-face resolution: `r_shadowMapPointSize` (default 2048, × adaptive scale).
+- Per-face resolution: `r_shadowMapPointSize` (default 1024, × adaptive scale).
+- **Edge filtering:** `r_shadowMapCubePcf` (default 6) averages that many disc-offset
+  `samplerCubeShadow` taps (each a hardware 2×2), perturbing the sample **direction** in
+  its tangent plane by ~2 texels. `1` = a single hardware tap (hardest, blockiest edge,
+  cheapest — the old behaviour); higher softens the stair-stepping that the 1024 cut made
+  visible. Costs frame time (∝ taps × on-screen point lights), **zero VRAM**. Mirrors the
+  2D path's 4-tap Poisson so point lights are no longer the worst-filtered case. Tap count
+  is passed in the spare `u_specularParms.w`.
 
 ## 4. Adaptive resolution
 
@@ -161,7 +168,7 @@ immediately. See also the private design note `emissive-gui-lights` in the agent
 | `r_shadowMapping` | 0 | 0/1 | 0 = stencil (faithful), 1 = shadow maps where supported |
 | `r_shadowMapStencilRadius` | 250 | 0–16384 | lights bigger than this (max radius axis) fall back to stencil; 0 = off |
 | `r_shadowMapSize` | 1024 | 256–4096 | 2D map resolution (projected/spot) |
-| `r_shadowMapPointSize` | 2048 | 128–4096 | cube face resolution (point/omni) |
+| `r_shadowMapPointSize` | 1024 | 128–4096 | cube face resolution (point/omni) |
 | `r_shadowMapPointLimit` | 64 | 0–128 | max cube-mapped point lights per view; 0 = all |
 | `r_shadowMapPointRangeScale` | 1 | 0.1–32 | scale cube far plane + depth normalizer |
 | `r_shadowMapSizeScale` | 1 | 0/1 | scale resolution with light radius |
@@ -203,3 +210,37 @@ time: `r_gl3GpuTime 1`.
   stencil (§7), which still can't perforate a grate, so it stays shadowless. Accepted.
 - **Parallel/ortho shadow maps** — intentionally not built (no parallel lights in the
   target content; sun is giant point lights).
+
+### Perf / VRAM / pacing audit (2026-07-27)
+
+- [x] **Point-cube base 2048 → 1024.** Because the oversize→stencil fallback (§7,
+  radius > 250) removes every light big enough to reach an upper adaptive tier, point
+  cubes are in practice always tier 0 (= base) or −1, so the base *is* the per-cube cost.
+  A 2048² cube is ~96 MB (6 faces × 4 B); 1024² is ~24 MB. Cuts ~4× the cube VRAM, ~4×
+  the shadow-map fill when a cube actually re-renders (dynamic / scratch / cache-miss
+  lights → frame time), and ~4× each allocation's cost (smaller warm-up / eviction
+  hitches → pacing). `r_shadowMapPointSize` is `CVAR_ARCHIVE`, so an existing config
+  overrides the new default — set it to 1024 (or clear the line) to pick it up.
+- [x] **2D (projected/spot) shadow-map cache (frame time).** Lifted the cube cache's
+  token/LRU to the 2D path (`RB_RHI_Acquire2DTarget`, `rhiMapCache[32]`): a static
+  projected light now samples its stored map and skips the re-render, keyed by the shared
+  `RB_RHI_CubeToken` (range 0). No VRAM budget (2D maps are ~4 MB); LRU-evicted only when
+  the 32-slot table fills; dropped on world teardown and `r_shadowMapCache 0`. Bounded
+  value — the view-attached flashlight moves every frame and never hits. `r_shadowMapDebug
+  2` now reports `2D-mapped N [hit/rendered]`.
+- [ ] **Face-cull skips cached cubes.** `faceCull = !cached`, so a cached light that moves
+  re-renders all six faces on the miss frame even if one is visible. Correct (cached cubes
+  are sampled from any angle), just a 6× face cost on moving cached lights. Low priority.
+- [x] **Duplicate resolution controls (UX, no metric impact).** `r_shadowMapSize`,
+  `r_shadowMapPointSize` and `r_shadowMapPointLimit` were each exposed under two menu
+  labels (main tab + Developer tab). The Developer-tab dupes ("2D Map Resolution",
+  "Cube Face Resolution", "Point Light Budget") were dropped; the main Shadows page is now
+  the single canonical home for each, and the Developer tab keeps only its unique tuning
+  (adaptive-scale, caster faces/bias, face-cull, cube range scale) with a pointer note.
+- [x] **Cube-shadow disc PCF (quality; the blocky-edge fix).** The point-light cube path
+  took a single hardware 2×2 tap while the 2D path already spread a 4-tap Poisson, so
+  point lights — the bulk of Doom 3's shadows — had the hardest, most stair-stepped edges,
+  made worse by the 1024 point-size cut. Added `r_shadowMapCubePcf` (default 6, 1–16):
+  averages that many disc-offset cube taps in the sample direction's tangent plane. Softens
+  edges with **zero VRAM** cost (filtering only; frame time ∝ taps). `1` restores the old
+  single-tap look. Natural quality-preset knob (Potato = 1 … Ultra Nightmare = 16).
