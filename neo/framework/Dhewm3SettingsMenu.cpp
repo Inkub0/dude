@@ -2635,6 +2635,25 @@ static void DrawShadowDebugMenu()
 
 	ImGui::EndDisabled();	// emissive surfaces on
 
+	// --- Glass reflections (opengl3/Vulkan only) ---
+	ImGui::Spacing();
+	ImGui::SeparatorText( "Glass Reflections" );
+	ImGui::TextDisabled( "Cube-map reflection (\"sheen\") brightness on glass. opengl3/Vulkan only." );
+	ImGui::Spacing();
+
+	ImGui::BeginDisabled( !supported );
+
+	float reflScale = r_gl3ReflectionScale.GetFloat();
+	if ( ImGui::SliderFloat( "Reflection brightness", &reflScale, 0.0f, 1.5f, "%.2f" ) ) {
+		r_gl3ReflectionScale.SetFloat( reflScale );
+	}
+	AddTooltip( "Brightness of the environment-map reflection on glass. 1.00 = the untouched cube; "
+		"0.70 = default, dampened 30% so the sheen matches legacy against the brighter enhanced scene." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##reflscale" ) ) { r_gl3ReflectionScale.SetFloat( 0.7f ); }
+
+	ImGui::EndDisabled();	// glass reflections (backend supported)
+
 	// --- Ambient Occlusion (SSAO/GTAO). Master toggle is in Enhancements; full tuning here. ---
 	ImGui::Spacing();
 	ImGui::SeparatorText( "Ambient Occlusion (SSAO)" );

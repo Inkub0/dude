@@ -336,6 +336,11 @@ idCVar r_ssaoNormalBuffer( "r_ssaoNormalBuffer", "1", CVAR_RENDERER | CVAR_ARCHI
 idCVar r_ssaoSpecular( "r_ssaoSpecular", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "also attenuate specular highlights in occluded areas (stronger anti-plastic, mild fidelity departure); helps in scenes with little ambient fill" );
 idCVar r_ssaoDebug( "r_ssaoDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "SSAO debug view: 0 = off, 1 = show the AO buffer, 2 = show bent normals, 3 = show the normal G-buffer", 0, 3 );
 
+// DUDE: dampen the cube-map ("sheen") reflection on glass etc. The enhancement
+// backends light the scene brighter than the original renderer, so the environment
+// reflection reads too strong; 0.7 (-30%) matches the legacy look, 1.0 is untouched.
+idCVar r_gl3ReflectionScale( "r_gl3ReflectionScale", "0.7", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "GL3: brightness of cube-map glass reflections (1 = untouched; 0.7 compensates for the brighter enhanced scene; non-vanilla, opengl3/Vulkan only)", 0.0f, 2.0f );
+
 // DUDE: gate for the non-vanilla "Enhancements" (see tr_local.h). Only the GL 3.3
 // core backend qualifies today; Vulkan backends will extend this once they land.
 bool R_BackendSupportsEnhancements() {

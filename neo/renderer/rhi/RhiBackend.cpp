@@ -46,6 +46,12 @@ extern idCVar r_gammaInShader;
 extern idCVar r_gamma;
 extern idCVar r_brightness;
 
+// DUDE: brightness scale for cube-map ("sheen") reflections on glass etc.
+// (r_gl3ReflectionScale, defined in RenderSystem_init.cpp) — the enhancement
+// backends light the scene brighter than the original renderer, so the
+// environment-map reflection reads too strong; 0.7 (-30%) matches the legacy
+// look, 1.0 leaves the cube untouched. Applied in RB_RHI_RenderTexgenStage.
+
 static unsigned char *rbCaptureDest = NULL;
 
 void RB_RHI_CaptureNextSwap( unsigned char *dest ) {
@@ -634,6 +640,38 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 	parms.color[1] = regs[pStage->color.registers[1]];
 	parms.color[2] = regs[pStage->color.registers[2]];
 	parms.color[3] = regs[pStage->color.registers[3]];
+
+	// vertex-colour mode -> modulate/add, exactly as the generic path (and the
+	// old fixed-function/ARB reflect stage) does, so environment.vert can fold the
+	// stage colour (u_color) into the reflection. SVC_IGNORE zeroes attr_Color and
+	// keeps u_color; without this the cube reflection ignored the (dimming) stage
+	// colour and washed the surface with a tint.
+	switch ( pStage->vertexColor ) {
+	case SVC_IGNORE:
+		parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
+		break;
+	case SVC_MODULATE:
+		parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = 1.0f;
+		break;
+	case SVC_INVERSE_MODULATE:
+		parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = -1.0f;
+		parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
+		break;
+	}
+
+	// DUDE: dampen cube-reflection ("sheen") brightness. On the enhancement
+	// backends the scene behind glass is lit brighter than the original renderer
+	// (SSAO, emissive fill lights, ambient), so the environment-map sheen — which
+	// the reflection modulates by the stage colour (u_color) — reads stronger than
+	// on legacy. r_gl3ReflectionScale (default 0.7 = -30%) compensates; 1.0 restores
+	// the untouched cube. Only the TG_REFLECT_CUBE (glass etc.) stages are affected.
+	// See docs/readme-changes.md.
+	if ( si.texgen == TG_REFLECT_CUBE ) {
+		const float s = r_gl3ReflectionScale.GetFloat();
+		parms.color[0] *= s;
+		parms.color[1] *= s;
+		parms.color[2] *= s;
+	}
 
 	// view origin in this surface's local space (skybox/reflection direction)
 	idVec3 localViewOrigin;

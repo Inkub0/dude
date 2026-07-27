@@ -59,6 +59,24 @@ fidelity impact.
   distortion.
 - **Files:** `neo/renderer/rhi/MaterialIR.cpp`.
 
+### 1.4 Cube-map ("sheen") reflections dampened 30% on glass
+- **Legacy:** the cube-reflection stage of glass (`textures/glass/*`,
+  `blend gl_dst_alpha, gl_one`, `cubeMap env/genN`, `texgen reflect`) draws the
+  environment map at its stage-colour brightness.
+- **Ours:** the reflection is scaled by `r_gl3ReflectionScale` (default **0.7**,
+  i.e. −30%) in `RB_RHI_RenderTexgenStage`. `1.0` restores the untouched cube.
+- **Why:** the reflection itself is a faithful, correct port (same static cube,
+  same stage-colour modulation, same `dst_alpha` mask — all verified). But the
+  glass *also* refracts the live scene through its heatHaze stage, and the
+  enhancement backend lights that scene brighter than the original renderer
+  (SSAO, emissive fill lights, ambient). Against that brighter backdrop the sheen
+  reads noticeably stronger than on legacy `opengl`. Rather than chase an exact
+  match through the (correct) reflection path, we apply a flat compensation.
+- **Fidelity impact:** glass looks marginally clearer/less mirror-y than a pure
+  faithful port; tune or disable with `r_gl3ReflectionScale 1`. Only affects
+  `TG_REFLECT_CUBE` stages (glass, some reflective decals).
+- **Files:** `neo/renderer/rhi/RhiBackend.cpp` (`RB_RHI_RenderTexgenStage`).
+
 ---
 
 ## 2. Equivalent result, different mechanism

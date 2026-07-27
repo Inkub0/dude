@@ -907,6 +907,8 @@ extern idCVar r_ssaoNormalBuffer;		// SSAO reads a bump-mapped normal G-buffer v
 extern idCVar r_ssaoSpecular;			// also attenuate specular in occluded areas
 extern idCVar r_ssaoDebug;				// 1=show AO buffer, 2=show bent normals
 
+extern idCVar r_gl3ReflectionScale;		// GL3: cube-map glass reflection brightness (1=untouched, 0.7=-30%)
+
 extern idCVar r_renderer;				// arb2, etc
 
 extern idCVar r_checkBounds;			// compare all surface bounds with precalculated ones

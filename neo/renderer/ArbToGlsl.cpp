@@ -413,6 +413,16 @@ struct Gen {
 		out << "\nvoid main() {\n";
 		for ( size_t i = 0; i < prog.tempNames.size(); i++ )
 			out << "\tvec4 t_" << prog.tempNames[i] << " = vec4( 0.0 );\n";
+		// Give the color output a defined value: several stock fragment programs
+		// (heatHaze*, colorProcess, the environment/reflection set) write only
+		// result.color.xyz and never touch .w, which leaves the framebuffer alpha
+		// undefined under their replace/blend. Doom 3 glass then reads that alpha
+		// as the mask for its "blend gl_dst_alpha" env-cube reflection, so garbage
+		// alpha washes the pane with a coloured tint (docs/known-bugs.md). Zeroing
+		// it here makes any unwritten channel a defined 0 — RGB is still fully set
+		// by the program, and an unset alpha now reads 0 (reflection contributes
+		// nothing) instead of undefined.
+		if ( !isVp )					out << "\tfragColor = vec4( 0.0 );\n";
 		if ( isVp && writesPosition )	out << "\tvec4 r_position = vec4( 0.0 );\n";
 		if ( isVp && writesPointSize )	out << "\tvec4 r_pointSize = vec4( 0.0 );\n";
 		if ( isVp ) {
