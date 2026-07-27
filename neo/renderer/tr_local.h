@@ -668,6 +668,7 @@ typedef struct {
 											// A high dynamic range card will have this set to 1.0.
 
 	bool				currentRenderCopied;	// true if any material has already referenced _currentRender
+	bool				smokeBackgroundCaptured;	// DUDE: _currentRender snapshotted this view for smoke-darkness blend
 
 	// our OpenGL state deltas
 	glstate_t			glState;
@@ -1053,6 +1054,9 @@ extern idCVar r_debugRenderToTexture;
 extern idCVar r_glDebugContext; // DG: use debug context to call logging callbacks on GL errors
 extern idCVar r_enableDepthCapture; // DG: disable capturing depth buffer, used for soft particles
 extern idCVar r_useSoftParticles;
+extern idCVar r_smokeDarkBlend;			// DUDE: fade alpha-blended smoke into scene darkness (opengl3/Vulkan)
+extern idCVar r_smokeDarkBlendFloor;	// smoke opacity over a black background (0..1)
+extern idCVar r_smokeDarkBlendKnee;		// background luminance at which smoke reaches full opacity
 
 /*
 ====================================================================

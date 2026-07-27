@@ -1739,6 +1739,43 @@ static CVarOption enhancementOptions[] = {
 			}
 			AddCVarOptionTooltips( cvar );
 		}),
+	// Smoke darkness blend: fade alpha-blended smoke/fog into scene darkness.
+	// Builds on soft particles (same captured-scene path), so enabling it turns
+	// them on too. The two curve knobs are grouped and greyed out while it's off.
+	CVarOption( "r_smokeDarkBlend", []( idCVar& cvar ) {
+		bool enable = cvar.GetBool();
+		if ( ImGui::Checkbox( "Smoke Blends Into Darkness", &enable ) ) {
+			cvar.SetBool( enable );
+			if ( enable && !r_useSoftParticles.GetBool() ) {
+				r_useSoftParticles.SetBool( true );
+				if ( r_enableDepthCapture.GetInteger() == 0 ) {
+					r_enableDepthCapture.SetInteger( -1 );
+				}
+				D3::ImGuiHooks::ShowWarningOverlay( "Enabled Soft Particles (and depth capture).\nSmoke darkness blend builds on them." );
+			}
+		}
+		const char* descr = "Fade smoke, steam and dust into shadow: where the scene behind a puff is black it shows\n"
+			"at only the 'Darkness Floor' opacity below, ramping to fully visible once the background\n"
+			"reaches the 'Full-opacity Light Level'. Covers both alpha-blended and additive smoke (e.g.\n"
+			"Doom 3's smokepuff steam); fire, sparks and glares are left bright (matched by material name).\n"
+			"Builds on Soft Particles (turned on automatically). opengl3/Vulkan only.";
+		AddCVarOptionTooltips( cvar, descr );
+
+		ImGui::BeginDisabled( !cvar.GetBool() );
+		float floorPct = r_smokeDarkBlendFloor.GetFloat() * 100.0f;
+		if ( ImGui::SliderFloat( "Darkness Floor", &floorPct, 0.0f, 100.0f, "%.0f%%" ) ) {
+			r_smokeDarkBlendFloor.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, floorPct / 100.0f ) );
+		}
+		AddTooltip( "How visible smoke stays over a fully black background, as a percentage of its normal "
+			"opacity. 15% is barely visible; 100% = no dimming." );
+		float kneePct = r_smokeDarkBlendKnee.GetFloat() * 100.0f;
+		if ( ImGui::SliderFloat( "Full-opacity Light Level", &kneePct, 5.0f, 100.0f, "%.0f%%" ) ) {
+			r_smokeDarkBlendKnee.SetFloat( idMath::ClampFloat( 0.05f, 1.0f, kneePct / 100.0f ) );
+		}
+		AddTooltip( "Background brightness at which smoke returns to full opacity. Lower = smoke recovers "
+			"quickly with just a little light; higher = stays dim except in bright areas." );
+		ImGui::EndDisabled();
+	} ),
 };
 
 idList<VidMode> vidModes;

@@ -742,6 +742,39 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 
 /*
 =============
+RB_RHI_ParticleLooksLikeSmoke
+
+Heuristic for the smoke-darkness blend: does this particle material read as
+smoke/steam/dust rather than a self-lit effect (fire, sparks, glares, energy)?
+Doom 3 draws both with the same additive "blend add" and both span the whole
+colour/brightness range, so pixels can't tell them apart - but the material
+names can. Doom 3's smoke/steam/dust stages carry those words in the material
+name (e.g. textures/particles/smokepuff) while flames use firestrip, pfirebig,
+flamesparks, spark3 etc. So additive particles are only dimmed when their
+material name matches this allow-list; everything else stays bright. Alpha-
+blended particles are dimmed regardless (fire/sparks are additive, so alpha
+is safe).
+=============
+*/
+static bool RB_RHI_ParticleLooksLikeSmoke( const idMaterial *mat ) {
+	if ( !mat ) {
+		return false;
+	}
+	idStr name = mat->GetName();
+	static const char * const kw[] = {
+		"smoke", "steam", "dust", "fog", "mist", "vapor", "vapour",
+		"haze", "smog", "cloud", "fume", "exhaust"
+	};
+	for ( int i = 0; i < (int)( sizeof( kw ) / sizeof( kw[0] ) ); i++ ) {
+		if ( name.Find( kw[i], false ) != -1 ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+=============
 RB_RHI_RenderSoftParticleStage
 
 SteveL #3878 particle softening, ported to the GL3 backend. Fades a particle
@@ -831,6 +864,45 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
 	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
 
+	// DUDE smoke-darkness blend: dim smoke/steam/dust where the scene behind it is
+	// dark, so puffs fade into shadow instead of reading as grey blobs. Snapshot the
+	// lit scene into _currentRender once per view — particles sort back-to-front, so
+	// opaque geometry, sky and emissive fills are already down when the first smoke
+	// draws — then feed the shader the blend params (localParam0) and the render-
+	// target size (localParam1) so it can sample the background luminance.
+	// localParam0/1 are otherwise unused here.
+	//
+	// Alpha-blended particles ('blend blend') are dimmed unconditionally — smoke/fog/
+	// dust; fire and sparks are additive, so alpha is safe. Additive particles
+	// ('blend add', e.g. the common textures/particles/smokepuff steam) are dimmed
+	// only when the material name reads as smoke, so additive flames/glares stay
+	// bright. The shader branches alpha vs additive on channelMask.a.
+	bool smokeDark = false;
+	if ( r_smokeDarkBlend.GetBool() ) {
+		if ( src_blend == GLS_SRCBLEND_SRC_ALPHA ) {
+			smokeDark = true;
+		} else if ( src_blend == GLS_SRCBLEND_ONE ) {
+			smokeDark = RB_RHI_ParticleLooksLikeSmoke( surf->material );
+		}
+	}
+	if ( smokeDark ) {
+		if ( !backEnd.smokeBackgroundCaptured ) {
+			rhi::gl3ActiveTexture( GL_TEXTURE2 );
+			backEnd.glState.currenttmu = 2;
+			RB_RHI_CopyCurrentRender( viewDef );	// binds + fills _currentRender on unit 2
+			rhi::gl3ActiveTexture( GL_TEXTURE0 );
+			backEnd.glState.currenttmu = 0;
+			backEnd.smokeBackgroundCaptured = true;
+		}
+		parms.localParam0[0] = 1.0f;								// enable
+		parms.localParam0[1] = r_smokeDarkBlendFloor.GetFloat();	// opacity on a black background
+		parms.localParam0[2] = idMath::ClampFloat( 0.05f, 1.0f, r_smokeDarkBlendKnee.GetFloat() );	// knee luma -> full
+		const float rw = (float)globalImages->currentRenderImage->uploadWidth;
+		const float rh = (float)globalImages->currentRenderImage->uploadHeight;
+		parms.localParam1[0] = rw > 0.0f ? 1.0f / rw : 0.0f;
+		parms.localParam1[1] = rh > 0.0f ? 1.0f / rh : 0.0f;
+	}
+
 	rhi::BufferHandle ub;
 	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
@@ -843,6 +915,12 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	rhi::gl3ActiveTexture( GL_TEXTURE1 );
 	backEnd.glState.currenttmu = 1;
 	globalImages->currentDepthImage->Bind();
+	if ( smokeDark ) {
+		// unit 2 = _currentRender (captured lit scene) for the darkness blend
+		rhi::gl3ActiveTexture( GL_TEXTURE2 );
+		backEnd.glState.currenttmu = 2;
+		globalImages->currentRenderImage->Bind();
+	}
 	rhi::gl3ActiveTexture( GL_TEXTURE0 );
 	backEnd.glState.currenttmu = 0;
 
@@ -867,11 +945,16 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	da.uniformSize = sizeof( parms );
 	r->Draw( da );
 
-	// unbind _currentDepth so later stages expecting only unit 0 aren't fed a
-	// stale depth binding
+	// unbind _currentDepth (and _currentRender) so later stages expecting only
+	// unit 0 aren't fed a stale binding
 	rhi::gl3ActiveTexture( GL_TEXTURE1 );
 	backEnd.glState.currenttmu = 1;
 	globalImages->BindNull();
+	if ( smokeDark ) {
+		rhi::gl3ActiveTexture( GL_TEXTURE2 );
+		backEnd.glState.currenttmu = 2;
+		globalImages->BindNull();
+	}
 	rhi::gl3ActiveTexture( GL_TEXTURE0 );
 	backEnd.glState.currenttmu = 0;
 
@@ -1150,6 +1233,7 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	const viewEntity_t *currentSpace = NULL;
 	float mvp[16];
 	backEnd.currentRenderCopied = false;
+	backEnd.smokeBackgroundCaptured = false;
 
 	// non-light-dependent shading. Post-process-sort surfaces (which sample
 	// _currentRender) are deferred until after fog, matching RB_STD_DrawView;

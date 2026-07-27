@@ -10,6 +10,7 @@
 
 SAMPLER_BINDING(0) uniform sampler2D u_diffuseMap;   // particle diffuse
 SAMPLER_BINDING(1) uniform sampler2D u_currentDepth; // _currentDepth copy
+SAMPLER_BINDING(2) uniform sampler2D u_sceneColor;   // _currentRender copy (smoke-darkness blend)
 
 VARY(0) in vec2 var_TexCoord;
 VARY(1) in vec4 var_Color;
@@ -33,4 +34,27 @@ void main() {
 
 	 vec4 fadeCol = clamp(vec4(nearFade * fade) + u_channelMask, 0.0, 1.0);
 	 fragColor = texture(u_diffuseMap, var_TexCoord) * fadeCol * var_Color;
+
+	 // DUDE smoke-darkness blend: dim smoke/steam/dust where the scene behind it is
+	 // dark, so puffs fade into shadow instead of reading as grey blobs. Enabled by
+	 // the backend (u_localParam0.x) for alpha-blended smoke and for additive
+	 // particles whose material reads as smoke; additive fire/sparks/glares keep it
+	 // at 0 and are left bright. Params: localParam0 (x = enable, y = floor opacity
+	 // on black, z = knee luminance -> full), localParam1.xy (1/_currentRender size).
+	 // See RB_RHI_RenderSoftParticleStage.
+	 if (u_localParam0.x > 0.5) {
+		 vec2 sceneTc = gl_FragCoord.xy * u_localParam1.xy;
+		 vec3 bg = texture(u_sceneColor, sceneTc).rgb;
+		 float bgLum = dot(bg, vec3(0.299, 0.587, 0.114));
+		 float lit = clamp(bgLum / u_localParam0.z, 0.0, 1.0);   // 0 on black -> 1 at knee
+		 float opacity = mix(u_localParam0.y, 1.0, lit);          // floor..1
+		 // additive smoke ('blend add') carries its visibility in RGB; alpha-blended
+		 // smoke carries it in alpha. channelMask.a marks additive (backend sets
+		 // additive -> (0,0,0,1), alpha -> (1,1,1,0)).
+		 if (u_channelMask.a > 0.5) {
+			 fragColor.rgb *= opacity;
+		 } else {
+			 fragColor.a *= opacity;
+		 }
+	 }
 }
