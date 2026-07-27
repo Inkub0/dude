@@ -1219,6 +1219,7 @@ struct emissiveReq_t {
 	float		radius;			// reach (world units)
 	float		surfRadius;		// screen half-size (for the point-light forward offset)
 	idVec3		color;			// final light colour (hue * scale, desaturated)
+	bool		freshTint;		// true = colour sampled from the drawn screen this frame; false = culled-surface fallback
 };
 
 struct emissiveLight_t {
@@ -1281,7 +1282,7 @@ content colour, and queues it; the actual light defs are reconciled once per vie
 R_UpdateEmissiveLights.
 =================
 */
-static void R_QueueEmissiveLight( const srfTriangles_t *tri, const viewEntity_t *space, const idMaterial *shader, const idVec3 &tint ) {
+static void R_QueueEmissiveLight( const srfTriangles_t *tri, const viewEntity_t *space, const idMaterial *shader, const idVec3 &tint, bool freshTint = true ) {
 	if ( !tri || !tri->verts || tri->numIndexes < 3 || !space ) {
 		return;
 	}
@@ -1321,9 +1322,11 @@ static void R_QueueEmissiveLight( const srfTriangles_t *tri, const viewEntity_t 
 	R_LocalVectorToGlobal( space->modelMatrix, localNormal, worldNormal );
 	worldNormal.Normalize();
 
-	// safety net: orient toward the room we're viewing the screen from, so the cone can never
-	// fire into the mount (the authored normal is occasionally inverted on decal-style screens)
-	if ( tr.viewDef != NULL ) {
+	// safety net: when we're actually looking at the screen (fresh sample), orient the cone toward
+	// the viewer so it can never fire into the mount (the authored normal is occasionally inverted on
+	// decal-style screens). Skip this for culled/fallback discovery — there the viewer may be *behind*
+	// the screen, and flipping toward them would light its back side; trust the authored outward normal.
+	if ( freshTint && tr.viewDef != NULL ) {
 		const idVec3 toView = tr.viewDef->renderView.vieworg - worldCenter;
 		if ( ( worldNormal * toView ) < 0.0f ) {
 			worldNormal = -worldNormal;
@@ -1336,10 +1339,25 @@ static void R_QueueEmissiveLight( const srfTriangles_t *tri, const viewEntity_t 
 	req.center      = worldCenter;
 	req.normal      = worldNormal;
 	req.surfRadius  = surfRadius;
+	req.freshTint   = freshTint;
 
-	float radius = surfRadius * r_emissiveLightRadius.GetFloat();
-	if ( radius < 24.0f )  radius = 24.0f;
-	if ( radius > 200.0f ) radius = 200.0f;
+	// Reach scales with screen size, but *sub-linearly* so a big hanging sign doesn't cast light
+	// across the whole room. Small/medium screens stay exactly linear (reach == size * multiplier);
+	// past a knee the growth rolls off and saturates toward r_emissiveLightMaxReach. The knee tracks
+	// the cap (0.45x) so the whole size-response scales when the cap is changed — raise the cap toward
+	// 512 for near-linear scaling, lower it to rein big signs in harder.
+	const float lin      = surfRadius * r_emissiveLightRadius.GetFloat();	// the old linear reach
+	const float maxReach = r_emissiveLightMaxReach.GetFloat();				// asymptote for the biggest screens
+	const float knee     = maxReach * 0.45f;								// linear below this, compress above
+	float radius;
+	if ( lin <= knee ) {
+		radius = lin;
+	} else {
+		const float span   = maxReach - knee;			// > 0 (knee is 0.45x the cap)
+		const float excess = lin - knee;
+		radius = knee + span * ( excess / ( excess + span ) );	// reciprocal soft-clip: -> maxReach as size grows
+	}
+	if ( radius < 24.0f )  radius = 24.0f;				// floor so tiny screens still reach the near weapon
 	req.radius = radius;
 
 	// normalise to a pure hue (brightness comes from r_emissiveLightScale), then desaturate
@@ -1360,6 +1378,48 @@ static void R_QueueEmissiveLight( const srfTriangles_t *tri, const viewEntity_t 
 	hue.z = 1.0f + ( hue.z - 1.0f ) * sat;
 
 	req.color = hue * r_emissiveLightScale.GetFloat();
+}
+
+/*
+=================
+R_QueueEmissiveScreenFallback
+
+DUDE: discovery path for a screen whose surface is culled this frame (off-frustum, behind us, or
+back-facing). Detects a gui/cinematic "screen" the same way R_AddDrawSurf does, but WITHOUT
+re-rendering the gui, and queues a fill-light request marked non-fresh with a best-effort tint. This
+is what lets a screen light its surroundings before we've looked straight at it, and keep doing so
+after we look away. R_UpdateEmissiveLights preserves an already-sampled colour for these (so a
+glimpsed screen never flashes to the white fallback), and R_QueueEmissiveLight skips the viewer
+normal-flip for them (so a screen discovered from behind still fires out of its front face).
+=================
+*/
+static void R_QueueEmissiveScreenFallback( const srfTriangles_t *tri, const viewEntity_t *space, const idMaterial *shader ) {
+	idUserInterface *gui = NULL;
+	if ( space->entityDef == NULL ) {
+		gui = shader->GlobalGui();
+	} else {
+		const int guiNum = shader->GetEntityGui() - 1;
+		if ( guiNum >= 0 && guiNum < MAX_RENDERENTITY_GUI ) {
+			gui = space->entityDef->parms.gui[ guiNum ];
+		}
+		if ( gui == NULL ) {
+			gui = shader->GlobalGui();
+		}
+	}
+
+	idVec3 tint( 1.0f, 1.0f, 1.0f );
+	if ( gui == NULL ) {
+		if ( !R_MaterialHasCinematic( shader ) ) {
+			return;		// not a screen — nothing to light
+		}
+		if ( globalImages->cinematicImage != NULL ) {
+			tint.Set( globalImages->cinematicImage->averageColor[0],
+					  globalImages->cinematicImage->averageColor[1],
+					  globalImages->cinematicImage->averageColor[2] );
+		}
+	}
+
+	R_QueueEmissiveLight( tri, space, shader, tint, false /* fallback: not a fresh sample */ );
 }
 
 /*
@@ -1415,28 +1475,33 @@ static void R_BuildEmissiveRenderLight( const emissiveReq_t &req, renderLight_t 
 
 	const float R = req.radius;
 
-	// Always a forward-facing projected cone: its apex sits a little behind the screen so it
-	// lights the surrounding wall and the space in front but spills nothing through to the far
-	// side of the mount (fixes the leak on recessed screens). The old omnidirectional point-light
-	// mode was dropped — it leaked through walls and none of the tuning knobs shaped it.
-	const float back     = R * 0.6f;					// apex pulled this far behind the screen
-	const float range    = back + R;					// far cap this far from the apex
+	// Forward-facing projected cone. The apex sits a little behind the screen so the cone already
+	// has width at the screen plane and lights the wall *around* a flush-mounted panel. The near
+	// clip plane, however, is pinned to just behind the screen plane: close enough to catch a wall
+	// the screen is mounted flush against, but not the deep back face of a free-standing monitor or
+	// the underside of a table/panel. The old tuning slid the near plane 7-13 units behind the
+	// screen — that is what lit thin free-standing screens on their back side. Since a projected
+	// light's near clip == its falloff-ramp start, the near plane can't be pulled back for a softer
+	// ramp without re-opening that leak, so the fade knob now shapes the *far* plane instead.
+	const float back     = R * 0.6f;					// apex pulled this far behind the screen (cone spread)
+	const float nearBack = 4.0f;						// near clip only this far behind the screen plane
 	const float coneHalf = R * r_emissiveLightSpread.GetFloat();	// far-cap half-extent; wide = soft hemisphere-like glow
 
 	idVec3 rightUnit, upUnit;
 	req.normal.NormalVectors( rightUnit, upUnit );
 
+	// fade-off: slide the *far* falloff/clip plane. 0.5 reproduces the shipped reach (~R); lower is
+	// a tighter, brighter pool that drops off sharply, higher a gentle glow that reaches further.
+	const float fade  = r_emissiveLightFalloff.GetFloat();
+	const float reach = R * ( 0.5f + fade );			// 0.5R (sharp) .. 1.5R (gentle); 0.5 -> R
+
 	rl.pointLight = false;
 	rl.origin = req.center - req.normal * back;			// apex, behind the screen
-	rl.target = req.normal * range;						// far-cap centre (rel. origin)
+	rl.target = req.normal * ( back + R );				// far-cap centre (rel. origin) -> sets the cone half-angle
 	rl.right  = rightUnit * coneHalf;					// far-cap half-width
 	rl.up     = upUnit * coneHalf;						// far-cap half-height
-	// fade-off: slide the near-falloff plane along the cone. 0.5 reproduces the shipped
-	// back*0.5 tuning; lower pushes the plane toward the far cap (short ramp -> sharp edge),
-	// higher pulls it toward the apex (long ramp -> gentle fade almost from the screen).
-	const float fade = r_emissiveLightFalloff.GetFloat();
-	rl.start  = req.normal * ( back * ( 0.9f - 0.8f * fade ) );	// falloff near
-	rl.end    = req.normal * range;						// falloff far
+	rl.start  = req.normal * ( back - nearBack );		// near clip / falloff start: just behind the screen plane
+	rl.end    = req.normal * ( back + reach );			// far clip / falloff end
 }
 
 /*
@@ -1533,40 +1598,49 @@ static void R_UpdateEmissiveLights( void ) {
 	for ( int oi = 0; oi < order.Num(); oi++ ) {
 		const emissiveReq_t &req = r_emissiveReqs[ order[oi] ];
 
-		renderLight_t rl;
-		R_BuildEmissiveRenderLight( req, rl );
-
 		qhandle_t handle = -1;
 		emissiveLight_t *el = R_FindEmissiveLight( req.entityIndex, req.surfKey );
-		if ( el ) {
-			// only re-issue the (interaction-invalidating) update when the screen actually
-			// moved/rotated or its colour shifted meaningfully — loose thresholds keep
-			// flickering/animated screens from rebuilding interactions every frame
-			if ( ( el->center - req.center ).LengthSqr() > 1.0f
-				|| ( el->normal * req.normal ) < 0.999f
-				|| idMath::Fabs( el->radius - req.radius ) > 0.5f
-				|| ( el->color - req.color ).LengthSqr() > 0.01f ) {
-				world->UpdateLightDef( el->handle, &rl );
-				el->center = req.center;
-				el->normal = req.normal;
-				el->radius = req.radius;
-				el->color  = req.color;
-			}
+
+		if ( el != NULL && !req.freshTint ) {
+			// culled-surface fallback for a screen we already have a (properly sampled) light for:
+			// leave it exactly as-is and just keep it alive. Its geometry/colour were captured while
+			// we were facing it, which is more reliable than anything derivable without re-rendering.
 			el->lastSeen = now;
 			handle = el->handle;
 		} else {
-			qhandle_t h = world->AddLightDef( &rl );
-			if ( h != -1 ) {
-				emissiveLight_t &nl = r_emissiveLightList.Alloc();
-				nl.entityIndex = req.entityIndex;
-				nl.surfKey     = req.surfKey;
-				nl.handle      = h;
-				nl.lastSeen    = now;
-				nl.center      = req.center;
-				nl.normal      = req.normal;
-				nl.radius      = req.radius;
-				nl.color       = req.color;
-				handle = h;
+			renderLight_t rl;
+			R_BuildEmissiveRenderLight( req, rl );
+
+			if ( el ) {
+				// only re-issue the (interaction-invalidating) update when the screen actually
+				// moved/rotated or its colour shifted meaningfully — loose thresholds keep
+				// flickering/animated screens from rebuilding interactions every frame
+				if ( ( el->center - req.center ).LengthSqr() > 1.0f
+					|| ( el->normal * req.normal ) < 0.999f
+					|| idMath::Fabs( el->radius - req.radius ) > 0.5f
+					|| ( el->color - req.color ).LengthSqr() > 0.01f ) {
+					world->UpdateLightDef( el->handle, &rl );
+					el->center = req.center;
+					el->normal = req.normal;
+					el->radius = req.radius;
+					el->color  = req.color;
+				}
+				el->lastSeen = now;
+				handle = el->handle;
+			} else {
+				qhandle_t h = world->AddLightDef( &rl );
+				if ( h != -1 ) {
+					emissiveLight_t &nl = r_emissiveLightList.Alloc();
+					nl.entityIndex = req.entityIndex;
+					nl.surfKey     = req.surfKey;
+					nl.handle      = h;
+					nl.lastSeen    = now;
+					nl.center      = req.center;
+					nl.normal      = req.normal;
+					nl.radius      = req.radius;
+					nl.color       = req.color;
+					handle = h;
+				}
 			}
 		}
 
@@ -1581,12 +1655,25 @@ static void R_UpdateEmissiveLights( void ) {
 		}
 	}
 
-	// reap fill lights for screens we haven't drawn recently (destroyed, hidden, or long out of view)
+	// Reap fill lights for screens we haven't drawn recently. A screen surface stops being queued
+	// the instant it's frustum- or back-face-culled, but its glow on the surrounding wall can still
+	// be in full view — so before ageing a light out, keep it alive whenever its projected volume
+	// still overlaps the view frustum. Only screens whose light has genuinely left the view (or been
+	// destroyed) then reap on the timeout. Cheap: one box/frustum test per fill light (a handful),
+	// no occlusion query — a light hidden behind a wall stays cheap and is culled at render time.
 	for ( int i = r_emissiveLightList.Num() - 1; i >= 0; i-- ) {
-		const int age = now - r_emissiveLightList[i].lastSeen;
+		emissiveLight_t &el = r_emissiveLightList[i];
+		if ( el.handle >= 0 && el.handle < world->lightDefs.Num() ) {
+			const idRenderLightLocal *ldef = world->lightDefs[el.handle];
+			if ( ldef != NULL && ldef->frustumTris != NULL
+					&& !R_CullLocalBox( ldef->frustumTris->bounds, tr.viewDef->worldSpace.modelMatrix, 5, tr.viewDef->frustum ) ) {
+				el.lastSeen = now;		// its illumination is still on-screen -> keep it lit
+			}
+		}
+		const int age = now - el.lastSeen;
 		if ( age > EMISSIVE_LIGHT_TIMEOUT_MS || age < 0 ) {
-			if ( r_emissiveLightList[i].handle != -1 ) {
-				world->FreeLightDef( r_emissiveLightList[i].handle );
+			if ( el.handle != -1 ) {
+				world->FreeLightDef( el.handle );
 			}
 			r_emissiveLightList.RemoveIndex( i );
 		}
@@ -1754,6 +1841,12 @@ void R_AddDrawSurf( const srfTriangles_t *tri, const viewEntity_t *space, const 
 				}
 				R_QueueEmissiveLight( tri, space, shader, tint );
 			}
+		} else if ( r_emissiveSurfaces.GetBool() && tr.viewDef->renderView.viewID > 0 && R_BackendSupportsEnhancements() ) {
+			// DUDE: gui is inside the frustum but back-facing/edge-on, so it wasn't re-rendered — still
+			// queue its fill light (non-fresh: white fallback for a never-seen screen, or the cached tint
+			// preserved in R_UpdateEmissiveLights) so a screen we've turned away from keeps lighting the
+			// wall in front of it instead of switching off.
+			R_QueueEmissiveLight( tri, space, shader, idVec3( 1.0f, 1.0f, 1.0f ), false );
 		}
 
 		tr.viewDef->floatTime = oldFloatTime;
@@ -1894,6 +1987,13 @@ static void R_AddAmbientDrawsurfs( viewEntity_t *vEntity ) {
 			// ambientViewCount is used to allow light interactions to be rejected
 			// if the ambient surface isn't visible at all
 			tri->ambientViewCount = tr.viewCount;
+		} else if ( r_emissiveSurfaces.GetBool() && tr.viewDef->renderView.viewID > 0
+				&& R_BackendSupportsEnhancements() ) {
+			// DUDE: this surface is off-screen/behind us this frame, so it never reaches R_AddDrawSurf.
+			// If it's a screen, still queue its fill light (best-effort, no gui re-render) so emissive
+			// surfaces light their surroundings before/without us looking straight at them. Lights whose
+			// glow truly leaves the view still reap on the normal timeout (see R_UpdateEmissiveLights).
+			R_QueueEmissiveScreenFallback( tri, vEntity, shader );
 		}
 	}
 

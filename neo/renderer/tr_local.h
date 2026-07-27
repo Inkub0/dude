@@ -887,6 +887,7 @@ extern idCVar r_shadowMapStencilRadius;		// lights bigger than this (max radius 
 extern idCVar r_emissiveSurfaces;		// master toggle (emissive surfaces cast fill light)
 extern idCVar r_emissiveLightScale;		// fill-light brightness
 extern idCVar r_emissiveLightRadius;	// reach as a multiple of the screen's size
+extern idCVar r_emissiveLightMaxReach;	// soft cap: reach rolls off toward this for very large screens
 extern idCVar r_emissiveLightFalloff;	// projected-cone fade softness (0=sharp edge, 1=long soft fade)
 extern idCVar r_emissiveLightSaturation;	// desaturate tint toward white (0=white, 1=full hue)
 extern idCVar r_emissiveLightLimit;		// per-view budget cap on fill lights (0=unlimited)

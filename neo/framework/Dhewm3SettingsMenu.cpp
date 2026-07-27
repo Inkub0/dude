@@ -2585,16 +2585,26 @@ static void DrawShadowDebugMenu()
 	if ( ImGui::SliderFloat( "Reach (distance)", &emRadius, 0.25f, 16.0f, "%.2f" ) ) {
 		r_emissiveLightRadius.SetFloat( emRadius );
 	}
-	AddTooltip( "How far the fill light reaches, as a multiple of the screen's own size (clamped to 24-200 world units). Default 1.80." );
+	AddTooltip( "How far the fill light reaches, as a multiple of the screen's own size. Small/medium screens "
+		"scale linearly; large ones roll off toward the Max Reach cap below. Default 1.80." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##emradius" ) ) { r_emissiveLightRadius.SetFloat( 1.80f ); }
+
+	float emMaxReach = r_emissiveLightMaxReach.GetFloat();
+	if ( ImGui::SliderFloat( "Max Reach (big signs)", &emMaxReach, 32.0f, 512.0f, "%.0f" ) ) {
+		r_emissiveLightMaxReach.SetFloat( emMaxReach );
+	}
+	AddTooltip( "Soft cap (world units) that reach saturates toward, so a big hanging sign doesn't cast across "
+		"the whole room. Lower = big signs reined in harder; raise toward 512 for near-linear scaling. Default 120." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##emmaxreach" ) ) { r_emissiveLightMaxReach.SetFloat( 120.0f ); }
 
 	float emFalloff = r_emissiveLightFalloff.GetFloat();
 	if ( ImGui::SliderFloat( "Fade-off", &emFalloff, 0.0f, 1.0f, "%.2f" ) ) {
 		r_emissiveLightFalloff.SetFloat( emFalloff );
 	}
-	AddTooltip( "How gradually the light fades along its cone. 0 = bright, then a sharp edge near its reach; "
-		"1 = a gentle fade almost from the screen. Default 0.5." );
+	AddTooltip( "How far the glow reaches and how gently it fades. 0 = a tight, bright pool with a sharp edge; "
+		"1 = a soft glow that reaches further out. Default 0.5." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##emfalloff" ) ) { r_emissiveLightFalloff.SetFloat( 0.5f ); }
 
