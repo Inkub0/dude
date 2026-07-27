@@ -56,7 +56,7 @@ Because Phase 3.5 shadow mapping now handles direct occlusion well, ambient-only
 lights almost everything with dynamic lights over a near-zero ambient, so there is no
 ambient term to darken. Confirmed on real maps — AO on the ambient pass alone shows
 nothing in normal play. So the shipped behaviour also applies AO to **direct-light
-diffuse** in `interaction.frag`, scaled by `r_ssaoDirectLight` (default 1.0; set 0 for the
+diffuse** in `interaction.frag`, scaled by `r_ssaoDirectLight` (default 0.9; set 0 for the
 purist ambient-only mode). This trades a little correctness under *moving* lights (a light
 sweeping into a crease can't fully re-light the AO baked into the surface) for AO that is
 actually visible — an acceptable trade since most Doom 3 lights are static, and the floor
@@ -132,7 +132,7 @@ against the screen-space AO buffer:
 
 1. **Scalar multiply (Phase C.1, landed):** `outRgb *= mix(r_ssaoFloor, 1.0, ao)`. This is
    the whole of the essential directionality guarantee (§2.1) — the ambient term is the
-   only thing touched. The **floor** (`r_ssaoFloor`, default 0.15) is the anti-crush
+   only thing touched. The **floor** (`r_ssaoFloor`, default 0.03) is the anti-crush
    countermeasure: a fully-occluded texel darkens only to the floor, never to pure black,
    so AO can't blacken already-dark scenes. Wired in `RB_RHI_DrawInteraction`: for ambient
    lights only, `localParam0` carries enable/floor/uv-scale and the blurred AO binds on
@@ -178,13 +178,23 @@ full-res; the per-fragment direct-light sample in `interaction.frag` is ~0.03 ms
 
 | config (half-res) | SSAO cost |
 |---|---|
-| 3 slices / 4 steps (**default**) | ~0.75 ms |
+| 6 slices / 1 step (**default**) | ~0.53 ms |
 | 4 / 6 (old default) | 1.29 ms |
 | 8 / 6 | 2.25 ms |
 | 4 / 6 at full-res | 4.12 ms |
 
-Defaults were dropped from 4/6 to **3/4** on this basis (the look the user validated as
-"medium"), ~40% cheaper.
+Defaults were dropped from 4/6 to 3/4 on this basis (the look the user validated as
+"medium"), ~40% cheaper. Later **retuned to 6 slices / 2 steps** — the same 12 sample-groups
+(so the same ~0.75 ms) but reallocated toward angular coverage: ~16 well-distributed
+directions instead of 6 clustered ones, which reads smoother on thin geometry (handrails,
+pipes). Alongside it: radius 32→48, intensity 1.3→2.4, floor 0.15→0.03, direct-light
+1.0→0.9 — a stronger, broader, more grounded look, further from source-faithful and firmly
+opt-in.
+
+A later GPU-time pass (SSAO measured ~35% of frame on a GTX-1070-class GPU, dominated by
+the wide-radius horizon reads) trimmed it to the **current defaults**: steps 2→1 (the
+1-step look was already validated as near-identical) and radius 48→36 for cache locality —
+~6 sample-groups, roughly halving the horizon cost while keeping the tuned look.
 
 The **normal G-buffer pass** (Option B) measured **~0.08 ms** (within noise) — the extra
 opaque geometry pass is effectively free (Doom 3 geometry is low-poly, the gbuffer shader
@@ -196,12 +206,12 @@ prepass) are **not worth doing** — the pass isn't a measurable cost.
 | cvar | default | range | purpose |
 |---|---|---|---|
 | `r_ssao` | 0 | 0/1 | master toggle (GL3/Vulkan only; non-vanilla) |
-| `r_ssaoIntensity` | 1.3 | 0–4 | AO strength (power/scale on the occlusion term) |
-| `r_ssaoFloor` | 0.15 | 0–1 | min visibility when fully occluded (anti-crush floor) |
-| `r_ssaoDirectLight` | 1.0 | 0–1 | AO strength on direct-light diffuse (0 = ambient-only) |
-| `r_ssaoRadius` | 32 | 1–256 | world-space sampling radius |
-| `r_ssaoSlices` | 3 | 1–8 | horizon-search directions per pixel |
-| `r_ssaoSteps` | 4 | 1–12 | samples marched per direction |
+| `r_ssaoIntensity` | 2.4 | 0–4 | AO strength (power/scale on the occlusion term) |
+| `r_ssaoFloor` | 0.03 | 0–1 | min visibility when fully occluded (anti-crush floor) |
+| `r_ssaoDirectLight` | 0.9 | 0–1 | AO strength on direct-light diffuse (0 = ambient-only) |
+| `r_ssaoRadius` | 36 | 1–256 | world-space sampling radius |
+| `r_ssaoSlices` | 6 | 1–8 | horizon-search directions per pixel |
+| `r_ssaoSteps` | 1 | 1–12 | samples marched per direction |
 | `r_ssaoResScale` | 0.5 | 0.25–1.0 | AO buffer resolution fraction (0.5 half … 1.0 full) |
 | `r_ssaoBentNormal` | 1 | 0/1 | shade ambient along the bent normal (§6.2) vs scalar only |
 | `r_ssaoBentStrength` | 0.5 | 0–1 | blend toward the bent normal for the ambient cube lookup (C.2) |
@@ -267,9 +277,10 @@ Measured cost); `r_ssaoRadius` is still a first cut, retune to taste.
   light, which is sparse in Doom 3, so the effect is subtle — a polish, not a headline.
   Developer-tab strength slider added.
 - [~] **Phase D — profile & tune (in progress).** Profiled with `r_gl3GpuTime` (§8
-  Measured cost): SSAO ≈ 0.75 ms at the new 3/4 default (half-res), cost linear in
-  slices × steps, ~3.2× for full-res, direct-light sampling ~free. Landed: defaults
-  dropped to 3/4, and the denoise made **separable** (H+V) for ~2.5× fewer taps.
+  Measured cost): SSAO ≈ 0.53 ms at the 6/1 default (half-res, ~6 sample-groups; a later
+  GPU-time pass dropped steps 2→1), cost linear in slices × steps, ~3.2× for full-res,
+  direct-light sampling ~free. Landed: defaults retuned to 6/1 (via 3/4 → 6/2), and the denoise made
+  **separable** (H+V) for ~2.5× fewer taps.
   Remaining: temporal accumulation (§12) if AO is ever wanted on weak hardware.
 
 ## 12. Open items / risks

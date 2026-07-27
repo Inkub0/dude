@@ -2684,56 +2684,56 @@ static void DrawShadowDebugMenu()
 	if ( ImGui::SliderFloat( "AO Intensity", &ssaoInt, 0.0f, 4.0f, "%.2f" ) ) {
 		r_ssaoIntensity.SetFloat( ssaoInt );
 	}
-	AddTooltip( "Strength of the darkening. 0 = none, 1.3 = default, higher pushes the occlusion deeper." );
+	AddTooltip( "Strength of the darkening. 0 = none, 2.4 = default, higher pushes the occlusion deeper." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaoint" ) ) { r_ssaoIntensity.SetFloat( 1.3f ); }
+	if ( ImGui::SmallButton( "reset##ssaoint" ) ) { r_ssaoIntensity.SetFloat( 2.4f ); }
 
 	float ssaoDirect = r_ssaoDirectLight.GetFloat();
 	if ( ImGui::SliderFloat( "Direct Light AO", &ssaoDirect, 0.0f, 1.0f, "%.2f" ) ) {
 		r_ssaoDirectLight.SetFloat( ssaoDirect );
 	}
 	AddTooltip( "How strongly AO darkens direct (dynamic) light's diffuse. Doom 3 has almost no "
-		"ambient, so THIS is what makes AO visible in normal gameplay. 1 = full (default), 0 = "
+		"ambient, so THIS is what makes AO visible in normal gameplay. 1 = full, 0.9 = default, 0 = "
 		"ambient-only (most faithful, but usually invisible here). Lower it if AO looks baked-in "
 		"when lights move." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaodirect" ) ) { r_ssaoDirectLight.SetFloat( 1.0f ); }
+	if ( ImGui::SmallButton( "reset##ssaodirect" ) ) { r_ssaoDirectLight.SetFloat( 0.9f ); }
 
 	float ssaoFloor = r_ssaoFloor.GetFloat();
 	if ( ImGui::SliderFloat( "Floor (min visibility)", &ssaoFloor, 0.0f, 1.0f, "%.2f" ) ) {
 		r_ssaoFloor.SetFloat( ssaoFloor );
 	}
 	AddTooltip( "Anti-crush floor: how dark a fully-occluded spot may get. 0 = can reach black, "
-		"0.15 = default, 1 = no darkening. Raise it if AO makes dark areas too murky to read." );
+		"0.03 = default, 1 = no darkening. Raise it if AO makes dark areas too murky to read." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaofloor" ) ) { r_ssaoFloor.SetFloat( 0.15f ); }
+	if ( ImGui::SmallButton( "reset##ssaofloor" ) ) { r_ssaoFloor.SetFloat( 0.03f ); }
 
 	float ssaoRad = r_ssaoRadius.GetFloat();
 	if ( ImGui::SliderFloat( "Radius (world units)", &ssaoRad, 1.0f, 256.0f, "%.0f" ) ) {
 		r_ssaoRadius.SetFloat( ssaoRad );
 	}
 	AddTooltip( "How far the occlusion samples reach, in world units. Small = tight contact creases "
-		"only; large = broad, softer occlusion (and more expensive). Default 32." );
+		"only; large = broad, softer occlusion (and more expensive). Default 36." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaorad" ) ) { r_ssaoRadius.SetFloat( 32.0f ); }
+	if ( ImGui::SmallButton( "reset##ssaorad" ) ) { r_ssaoRadius.SetFloat( 36.0f ); }
 
 	int ssaoSlices = r_ssaoSlices.GetInteger();
 	if ( ImGui::SliderInt( "Directions (slices)", &ssaoSlices, 1, 8 ) ) {
 		r_ssaoSlices.SetInteger( ssaoSlices );
 	}
 	AddTooltip( "How many horizon-search directions per pixel. More = smoother, less directional "
-		"noise. This is the bigger cost knob. Default 3. Check the cost with r_gl3GpuTime 1." );
+		"noise. This is the bigger cost knob. Default 6. Check the cost with r_gl3GpuTime 1." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaoslices" ) ) { r_ssaoSlices.SetInteger( 3 ); }
+	if ( ImGui::SmallButton( "reset##ssaoslices" ) ) { r_ssaoSlices.SetInteger( 6 ); }
 
 	int ssaoSteps = r_ssaoSteps.GetInteger();
 	if ( ImGui::SliderInt( "Steps per direction", &ssaoSteps, 1, 12 ) ) {
 		r_ssaoSteps.SetInteger( ssaoSteps );
 	}
 	AddTooltip( "How many samples are marched along each direction (how finely each horizon is "
-		"found). More = more accurate occlusion at range. Default 4." );
+		"found). More = more accurate occlusion at range. Default 1." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaosteps" ) ) { r_ssaoSteps.SetInteger( 4 ); }
+	if ( ImGui::SmallButton( "reset##ssaosteps" ) ) { r_ssaoSteps.SetInteger( 1 ); }
 
 	// Resolution is exposed in Enhancements > Ambient Occlusion (as a slider).
 
