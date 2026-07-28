@@ -5,8 +5,11 @@
 - **FXAA — IMPLEMENTED** as the first filter on the post-resolve rails. Cvar `r_rhiAA`
   (0 = off, 1 = FXAA), default off, archived, opengl3/Vulkan only. Pass `RB_RHI_AAPass`
   (`neo/renderer/rhi/RhiBackend.cpp`) runs over the finished 3D view before grain/chroma and
-  2D/GUI; shaders `neo/shaders/fxaa.{vert,frag}` (registered in `gl3BootPrograms[]`); menu combo in
-  the Enhancements tab. Self-contained (no external LUTs), validated + builds.
+  2D/GUI; shaders `neo/shaders/fxaa.{vert,frag}` (registered in `gl3BootPrograms[]`). A strength knob
+  `r_fxaaStrength` (0 = edge-only .. 1 = max subpixel smoothing, default 0.75) drives a subpixel
+  low-pass term — the part that actually reduces specular/normal-map shimmer, at some texture
+  softening. Both the AA combo and the strength slider sit at the top of the Enhancements tab, just
+  under the Quality Preset. Self-contained (no external LUTs), glslang-validated + builds.
 - **SMAA 1x — PENDING.** Needs the AreaTex/SearchTex LUT assets; drops onto the same rails as a
   higher `r_rhiAA` value (see below).
 - **TAA — PENDING.** Reuses the temporal-SSAO machinery; blocked on per-object motion vectors (below).

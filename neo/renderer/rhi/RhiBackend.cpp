@@ -39,6 +39,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 extern idCVar r_postFilmGrain;
 extern idCVar r_postChromaticAberration;
 extern idCVar r_rhiAA;
+extern idCVar r_fxaaStrength;
 
 // DUDE gamma/brightness in shader (RenderSystem_init.cpp). On the core context
 // there is no fixed-function/ARB gamma and SDL3 has no hardware gamma ramp, so
@@ -113,6 +114,8 @@ static void RB_RHI_AAPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// one screen texel in that same uv space, for the neighbour taps
 	parms.localParam1[0] = potW > 0 ? 1.0f / potW : 0.0f;
 	parms.localParam1[1] = potH > 0 ? 1.0f / potH : 0.0f;
+	// subpixel smoothing amount (r_fxaaStrength); 0 = edge-only FXAA
+	parms.localParam0[0] = r_fxaaStrength.GetFloat();
 
 	// fullscreen NDC quad (identity mvp), st 0..1 with GL bottom-left origin
 	// matching the framebuffer copy

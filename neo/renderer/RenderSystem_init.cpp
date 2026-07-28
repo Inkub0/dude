@@ -282,6 +282,9 @@ idCVar r_postChromaticAberration( "r_postChromaticAberration", "0.2", CVAR_RENDE
 // the specular/normal-map shimmer MSAA can't touch. GL3/Vulkan backends only.
 // 0 = off, 1 = FXAA. Higher values reserved for SMAA/TAA (docs/antialiasing.md).
 idCVar r_rhiAA( "r_rhiAA", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "post-resolve antialiasing on the opengl3/Vulkan backend (0 = off, 1 = FXAA)", 0, 1 );
+// FXAA subpixel smoothing amount: 0 = edge-only (sharpest), 1 = max subpixel blur (most
+// shimmer reduction, softens textures). Only used when r_rhiAA selects FXAA.
+idCVar r_fxaaStrength( "r_fxaaStrength", "0.75", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "FXAA subpixel smoothing amount (0 = edge-only, 1 = strongest)", 0.0f, 1.0f );
 
 // DUDE Phase 3.5 "specular tuning" enhancement (GL3/Vulkan interaction shader
 // only; inert on the legacy ARB2 path). Defaults reproduce vanilla exactly:

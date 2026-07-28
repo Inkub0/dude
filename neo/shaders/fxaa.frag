@@ -10,6 +10,9 @@
 // u_screenCorrection.xy = content extent in the oversized POT _currentRender
 //                         (w/potW, h/potH) — the sampleable region is [0, this].
 // u_localParam1.xy       = one screen texel in that same uv space (1/potW, 1/potH).
+// u_localParam0.x        = subpixel smoothing amount (r_fxaaStrength): 0 = edge-only,
+//                          up to 1 = blend subpixel detail toward its neighbourhood
+//                          (chases specular/normal-map shimmer, softens texture a little).
 
 #include "renderparms.glsl"
 
@@ -72,6 +75,19 @@ void main() {
 	                                + sampleScene( uv + dir *  0.5, lo, hi ) );
 
 	float lumaB = dot( rgbB, LUMA );
-	vec3 result = ( lumaB < lumaMin || lumaB > lumaMax ) ? rgbA : rgbB;
+	vec3 edge = ( lumaB < lumaMin || lumaB > lumaMax ) ? rgbA : rgbB;
+
+	// subpixel aliasing removal — the part that actually chases shimmer. Blend the
+	// edge result toward the local low-pass, but only where the centre luma departs
+	// from its neighbourhood (i.e. subpixel detail), so flat textures aren't softened.
+	// Scaled by u_localParam0.x (r_fxaaStrength); 0 leaves the edge-only result.
+	float strength = u_localParam0.x;
+	vec3  rgbLowpass = ( rgbNW + rgbNE + rgbSW + rgbSE + rgbM ) * ( 1.0 / 5.0 );
+	float lumaAvg    = ( lumaNW + lumaNE + lumaSW + lumaSE ) * 0.25;
+	float lumaRange  = max( lumaMax - lumaMin, FXAA_REDUCE_MIN );
+	float subpix     = clamp( abs( lumaAvg - lumaM ) / lumaRange, 0.0, 1.0 );
+	subpix = subpix * subpix * ( 3.0 - 2.0 * subpix );		// smoothstep ramp
+	vec3 result = mix( edge, rgbLowpass, subpix * strength );
+
 	fragColor = vec4( result, 1.0 );
 }

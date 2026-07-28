@@ -2412,11 +2412,10 @@ static void DrawEnhancementsMenu()
 	}
 	ImGui::Spacing();
 
-	DrawOptions( enhancementOptions, IM_ARRAYSIZE(enhancementOptions) );
-
-	// Post-resolve antialiasing (DUDE). Separate from the hardware "Antialiasing (MSAA)"
-	// slider in Video Options: that only smooths backbuffer geometry edges, while this
-	// runs over the finished 3D view and also tackles specular/normal-map shimmer.
+	// Post-resolve antialiasing (DUDE) — kept high, right under the preset, since it's
+	// the most visible image-quality control. Separate from the hardware "Antialiasing
+	// (MSAA)" slider in Video Options: that only smooths backbuffer geometry edges, while
+	// this runs over the finished 3D view and also tackles specular/normal-map shimmer.
 	// opengl3/Vulkan only; read live by the renderer (no restart). docs/antialiasing.md
 	ImGui::SeparatorText( "Antialiasing (post-process)" );
 	{
@@ -2430,8 +2429,24 @@ static void DrawEnhancementsMenu()
 			"the specular/normal-map shimmer MSAA can't touch, at the cost of a slight overall "
 			"softening. HUD and menus are never affected. Non-vanilla; opengl3 only. "
 			"(SMAA/TAA planned - see docs/antialiasing.md.)" );
+
+		// Strength drives the subpixel term (the part that actually chases shimmer): 0 =
+		// edge-only FXAA (sharpest), higher = more subpixel smoothing at some texture softening.
+		ImGui::BeginDisabled( r_rhiAA.GetInteger() <= 0 );
+		float fxaaStrength = r_fxaaStrength.GetFloat();
+		ImGui::SetNextItemWidth( 220.0f );
+		if ( ImGui::SliderFloat( "FXAA Strength", &fxaaStrength, 0.0f, 1.0f, "%.2f" ) ) {
+			r_fxaaStrength.SetFloat( fxaaStrength );
+		}
+		AddTooltip( "How aggressively FXAA smooths subpixel detail. 0 antialiases edges only (sharpest, "
+			"least shimmer reduction); higher values blend fine subpixel detail toward its neighbourhood, "
+			"cutting more of the specular/normal-map crawl but softening textures slightly. ~0.75 is a "
+			"good balance." );
+		ImGui::EndDisabled();
 	}
 	ImGui::Spacing();
+
+	DrawOptions( enhancementOptions, IM_ARRAYSIZE(enhancementOptions) );
 
 	// Ambient Occlusion (DUDE Phase 3.5). Master toggle only; the tuning sliders live
 	// in the Developer tab (Settings > Developer > Ambient Occlusion), like the shadow
