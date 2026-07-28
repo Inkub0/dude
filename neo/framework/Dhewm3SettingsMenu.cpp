@@ -2269,12 +2269,12 @@ struct EnhancementPreset {
 // stays unambiguous. High == shipped defaults (see anchor note above).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl
-	{ "Potato",       false, false, false, false, false,  0.5f, 4,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false },
-	{ "Low",          true,  false, false, false, false,  0.5f, 4,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 1,  1.8f, 62.0f, true, 380.0f, true  },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 4,   1,   false, true,  512,  512,  5,  16,   16,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 380.0f, true  },
-	{ "High",         true,  false, true,  true,  true,   0.5f, 6,   1,   true,  true,  1024, 1200, 6,  64,   24,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 380.0f, true  },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 8,   2,   true,  true,  2048, 2048, 8,  96,   32,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 340.0f, true  },
-	{ "Ultra Nightmare", true, true, true, true,  true,   1.0f, 8,   4,   true,  true,  2048, 2048, 12, 128,  48,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 300.0f, true  },
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 1,  1.8f, 62.0f, true, 380.0f, true  },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 3,   2,   false, true,  512,  512,  5,  16,   16,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 380.0f, true  },
+	{ "High",         true,  false, true,  true,  true,   0.75f, 3,   3,   true,  true,  1024, 1200, 6,  64,   24,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 380.0f, true  },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 6,   4,   true,  true,  2048, 2048, 8,  96,   32,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 340.0f, true  },
+	{ "Ultra Nightmare", true, true, true, true,  true,   1.0f, 7,   5,   true,  true,  2048, 2048, 12, 128,  48,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 340.0f, true  },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2448,6 +2448,17 @@ static void DrawEnhancementsMenu()
 		AddTooltip( "Resolution the AO buffer is computed at, as a fraction of the screen. Half is "
 			"~4x cheaper and a little softer; Full is sharpest and most expensive; 3/4 and 4/5 sit "
 			"between. Lower this first if SSAO costs too much." );
+
+		// Temporal accumulation: reuse the previous frame's AO (reprojected by camera
+		// motion) so the horizon-search noise settles and slices/steps can run lower.
+		bool ssaoTemporal = r_ssaoTemporal.GetBool();
+		if ( ImGui::Checkbox( "Temporal Accumulation", &ssaoTemporal ) ) {
+			r_ssaoTemporal.SetBool( ssaoTemporal );
+		}
+		AddTooltip( "Blend AO across frames (reprojected as the camera moves) instead of recomputing "
+			"it fresh each frame. Smooths the AO and lets the Directions/Steps run lower for the same "
+			"look, so it's cheaper on weaker GPUs. Ghosting on fast motion is clamped automatically; "
+			"the Feedback strength lives in the Developer tab. Non-vanilla; opengl3 only." );
 		ImGui::EndDisabled();
 
 		// Baked occlusion maps: independent of SSAO (works with it off). Inert unless a
@@ -2894,20 +2905,20 @@ static void DrawShadowDebugMenu()
 	if ( ImGui::SliderFloat( "AO Intensity", &ssaoInt, 0.0f, 4.0f, "%.2f" ) ) {
 		r_ssaoIntensity.SetFloat( ssaoInt );
 	}
-	AddTooltip( "Strength of the darkening. 0 = none, 2.4 = default, higher pushes the occlusion deeper." );
+	AddTooltip( "Strength of the darkening. 0 = none, 1.2 = default, higher pushes the occlusion deeper." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaoint" ) ) { r_ssaoIntensity.SetFloat( 2.4f ); }
+	if ( ImGui::SmallButton( "reset##ssaoint" ) ) { r_ssaoIntensity.SetFloat( 1.2f ); }
 
 	float ssaoDirect = r_ssaoDirectLight.GetFloat();
 	if ( ImGui::SliderFloat( "Direct Light AO", &ssaoDirect, 0.0f, 1.0f, "%.2f" ) ) {
 		r_ssaoDirectLight.SetFloat( ssaoDirect );
 	}
 	AddTooltip( "How strongly AO darkens direct (dynamic) light's diffuse. Doom 3 has almost no "
-		"ambient, so THIS is what makes AO visible in normal gameplay. 1 = full, 0.9 = default, 0 = "
+		"ambient, so THIS is what makes AO visible in normal gameplay. 1 = full, 0.75 = default, 0 = "
 		"ambient-only (most faithful, but usually invisible here). Lower it if AO looks baked-in "
 		"when lights move." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaodirect" ) ) { r_ssaoDirectLight.SetFloat( 0.9f ); }
+	if ( ImGui::SmallButton( "reset##ssaodirect" ) ) { r_ssaoDirectLight.SetFloat( 0.75f ); }
 
 	float ssaoFloor = r_ssaoFloor.GetFloat();
 	if ( ImGui::SliderFloat( "Floor (min visibility)", &ssaoFloor, 0.0f, 1.0f, "%.2f" ) ) {
@@ -2923,27 +2934,48 @@ static void DrawShadowDebugMenu()
 		r_ssaoRadius.SetFloat( ssaoRad );
 	}
 	AddTooltip( "How far the occlusion samples reach, in world units. Small = tight contact creases "
-		"only; large = broad, softer occlusion (and more expensive). Default 36." );
+		"only; large = broad, softer occlusion (and more expensive). Default 72." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaorad" ) ) { r_ssaoRadius.SetFloat( 36.0f ); }
+	if ( ImGui::SmallButton( "reset##ssaorad" ) ) { r_ssaoRadius.SetFloat( 72.0f ); }
 
 	int ssaoSlices = r_ssaoSlices.GetInteger();
 	if ( ImGui::SliderInt( "Directions (slices)", &ssaoSlices, 1, 8 ) ) {
 		r_ssaoSlices.SetInteger( ssaoSlices );
 	}
 	AddTooltip( "How many horizon-search directions per pixel. More = smoother, less directional "
-		"noise. This is the bigger cost knob. Default 6. Check the cost with r_gl3GpuTime 1." );
+		"noise. This is the bigger cost knob. Default 3. Check the cost with r_gl3GpuTime 1." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaoslices" ) ) { r_ssaoSlices.SetInteger( 6 ); }
+	if ( ImGui::SmallButton( "reset##ssaoslices" ) ) { r_ssaoSlices.SetInteger( 3 ); }
 
 	int ssaoSteps = r_ssaoSteps.GetInteger();
 	if ( ImGui::SliderInt( "Steps per direction", &ssaoSteps, 1, 12 ) ) {
 		r_ssaoSteps.SetInteger( ssaoSteps );
 	}
 	AddTooltip( "How many samples are marched along each direction (how finely each horizon is "
-		"found). More = more accurate occlusion at range. Default 1." );
+		"found). More = more accurate occlusion at range. Default 3." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaosteps" ) ) { r_ssaoSteps.SetInteger( 1 ); }
+	if ( ImGui::SmallButton( "reset##ssaosteps" ) ) { r_ssaoSteps.SetInteger( 3 ); }
+
+	bool ssaoTemporalDev = r_ssaoTemporal.GetBool();
+	if ( ImGui::Checkbox( "Temporal Accumulation", &ssaoTemporalDev ) ) {
+		r_ssaoTemporal.SetBool( ssaoTemporalDev );
+	}
+	AddTooltip( "Reuse the previous frame's AO (reprojected by camera motion) to amortize the "
+		"horizon search across frames: smooths the per-pixel noise and lets Directions/Steps run "
+		"lower for the same look. Ghosting on fast motion / disocclusion is bounded by a "
+		"neighbourhood clamp. Same toggle as Enhancements > Ambient Occlusion." );
+
+	ImGui::BeginDisabled( !r_ssaoTemporal.GetBool() );
+	float ssaoFeedback = r_ssaoTemporalFeedback.GetFloat();
+	if ( ImGui::SliderFloat( "Temporal Feedback", &ssaoFeedback, 0.0f, 0.97f, "%.2f" ) ) {
+		r_ssaoTemporalFeedback.SetFloat( ssaoFeedback );
+	}
+	AddTooltip( "Fraction of the reprojected previous-frame AO kept each frame. Higher = smoother "
+		"and steadier (and effectively cheaper) but more latency/ghosting; 0 = no accumulation. "
+		"Default 0.90." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##ssaofeedback" ) ) { r_ssaoTemporalFeedback.SetFloat( 0.9f ); }
+	ImGui::EndDisabled();
 
 	// Resolution is exposed in Enhancements > Ambient Occlusion (as a slider).
 

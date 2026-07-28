@@ -56,7 +56,7 @@ Because Phase 3.5 shadow mapping now handles direct occlusion well, ambient-only
 lights almost everything with dynamic lights over a near-zero ambient, so there is no
 ambient term to darken. Confirmed on real maps — AO on the ambient pass alone shows
 nothing in normal play. So the shipped behaviour also applies AO to **direct-light
-diffuse** in `interaction.frag`, scaled by `r_ssaoDirectLight` (default 0.9; set 0 for the
+diffuse** in `interaction.frag`, scaled by `r_ssaoDirectLight` (default 0.75; set 0 for the
 purist ambient-only mode). This trades a little correctness under *moving* lights (a light
 sweeping into a crease can't fully re-light the AO baked into the surface) for AO that is
 actually visible — an acceptable trade since most Doom 3 lights are static, and the floor
@@ -174,9 +174,12 @@ sourced from a texture stage instead of the screen-space buffer. They stack with
 - `r_ssaoRadius` — larger radius = wider depth reads = worse cache behaviour; tune for
   look, not just cost.
 - **Separable bilateral blur** (horizontal + vertical), depth-aware — 2·(2R+1) taps
-  instead of (2R+1)², for the same reach at ~2.5× fewer taps. **No temporal accumulation**
-  yet — a deliberate choice to avoid a dependency on TAA (which the backend does not have)
-  and the ghosting it brings; see §12 for the temporal plan. Cost via `r_gl3GpuTime 1`.
+  instead of (2R+1)², for the same reach at ~2.5× fewer taps. Cost via `r_gl3GpuTime 1`.
+- **Temporal accumulation** (`r_ssaoTemporal`, opt-in, off by default) — reprojects the
+  previous frame's AO by camera motion and blends it in, amortizing the horizon search
+  across frames so slices/steps can run lower for the same look. Own history buffers, no
+  dependency on a TAA history; ghosting bounded by a neighbourhood clamp rather than a
+  motion-vector history-depth reject (§12). See §12 for the design.
 
 **Measured cost** (2026-07-26, GTX-class GPU, half-res; whole-frame GPU time via the
 A/B-difference method against a 2.10 ms no-SSAO baseline). Cost is linear in
@@ -199,9 +202,16 @@ pipes). Alongside it: radius 32→48, intensity 1.3→2.4, floor 0.15→0.03, di
 opt-in.
 
 A later GPU-time pass (SSAO measured ~35% of frame on a GTX-1070-class GPU, dominated by
-the wide-radius horizon reads) trimmed it to the **current defaults**: steps 2→1 (the
-1-step look was already validated as near-identical) and radius 48→36 for cache locality —
-~6 sample-groups, roughly halving the horizon cost while keeping the tuned look.
+the wide-radius horizon reads) trimmed it to steps 2→1 (the 1-step look was already
+validated as near-identical) and radius 48→36 for cache locality — ~6 sample-groups,
+roughly halving the horizon cost while keeping the tuned look. Radius was later raised
+back to the **current default of 72**: at the small radii the silhouette **halos** (dark
+arcs where the horizon search crosses a depth discontinuity onto a foreground object) were
+more pronounced; the wider radius spreads the occlusion into a smoother, more grounded
+falloff that reads better on real maps (validated by the user). **Intensity** was likewise
+softened from 2.4 to the **current default of 1.2** — with the broader radius, 2.4 over-darkened,
+and 1.2 blends the AO into the scene more subtly. Both radius and intensity are artistic
+cvars, not preset levers (§ presets leave those alone), so these defaults apply under every tier.
 
 The **normal G-buffer pass** (Option B) measured **~0.08 ms** (within noise) — the extra
 opaque geometry pass is effectively free (Doom 3 geometry is low-poly, the gbuffer shader
@@ -213,10 +223,10 @@ prepass) are **not worth doing** — the pass isn't a measurable cost.
 | cvar | default | range | purpose |
 |---|---|---|---|
 | `r_ssao` | 0 | 0/1 | master toggle (GL3/Vulkan only; non-vanilla) |
-| `r_ssaoIntensity` | 2.4 | 0–4 | AO strength (power/scale on the occlusion term) |
+| `r_ssaoIntensity` | 1.2 | 0–4 | AO strength (power/scale on the occlusion term) |
 | `r_ssaoFloor` | 0.03 | 0–1 | min visibility when fully occluded (anti-crush floor) |
-| `r_ssaoDirectLight` | 0.9 | 0–1 | AO strength on direct-light diffuse (0 = ambient-only) |
-| `r_ssaoRadius` | 36 | 1–256 | world-space sampling radius |
+| `r_ssaoDirectLight` | 0.75 | 0–1 | AO strength on direct-light diffuse (0 = ambient-only) |
+| `r_ssaoRadius` | 72 | 1–256 | world-space sampling radius |
 | `r_ssaoSlices` | 6 | 1–8 | horizon-search directions per pixel |
 | `r_ssaoSteps` | 1 | 1–12 | samples marched per direction |
 | `r_ssaoResScale` | 0.5 | 0.25–1.0 | AO buffer resolution fraction (0.5 half … 1.0 full) |
@@ -224,6 +234,8 @@ prepass) are **not worth doing** — the pass isn't a measurable cost.
 | `r_ssaoBentStrength` | 0.5 | 0–1 | blend toward the bent normal for the ambient cube lookup (C.2) |
 | `r_ssaoNormalBuffer` | 1 | 0/1 | bump-mapped normal G-buffer (extra geom pass) vs depth reconstruct |
 | `r_ssaoSpecular` | 0 | 0/1 | also attenuate specular in occluded areas (§7) |
+| `r_ssaoTemporal` | 0 | 0/1 | accumulate AO across frames via camera reprojection (§12) |
+| `r_ssaoTemporalFeedback` | 0.9 | 0–0.97 | history weight kept per frame (higher = smoother/steadier, more latency) |
 | `r_ssaoDebug` | 0 | 0–3 | visualise AO (1) / bent normal (2) / normal G-buffer (3) |
 
 `r_ssaoSlices` / `r_ssaoSteps` were set to 3/4 after the Phase-D profiling pass (§8
@@ -232,15 +244,16 @@ Measured cost); `r_ssaoRadius` is still a first cut, retune to taste.
 ## 10. UI (landed)
 
 `Dhewm3SettingsMenu.cpp`, following the shadow-map / emissive-light pattern:
-- **Enhancements tab** — an "Ambient Occlusion" section with the `r_ssao` master toggle
-  and a **Resolution** slider (`r_ssaoResScale`: Half / 3-4 / 4-5 / Full)
-  (`DrawEnhancementsMenu`).
+- **Enhancements tab** — an "Ambient Occlusion" section with the `r_ssao` master toggle,
+  a **Resolution** slider (`r_ssaoResScale`: Half / 3-4 / 4-5 / Full), and a **Temporal
+  Accumulation** checkbox (`r_ssaoTemporal`) (`DrawEnhancementsMenu`).
 - **Developer tab** — an "Ambient Occlusion (SSAO)" section (`DrawShadowDebugMenu`) with
   the master toggle, a **Debug View** combo (`r_ssaoDebug`: off / AO buffer / bent
   normals), and, gated on `r_ssao`, AO Intensity + Direct Light AO + Floor + Radius
-  sliders (with reset buttons), Directions (slices) + Steps sliders, and Bent-Normals /
-  Specular-Occlusion checkboxes. All live-updating; the tab is disabled on the legacy
-  backend.
+  sliders (with reset buttons), Directions (slices) + Steps sliders, a **Temporal
+  Accumulation** toggle + **Temporal Feedback** slider (`r_ssaoTemporalFeedback`, gated on
+  `r_ssaoTemporal`), and Bent-Normals / Specular-Occlusion checkboxes. All live-updating;
+  the tab is disabled on the legacy backend.
 
 ## 11. Status / phasing
 
@@ -288,7 +301,21 @@ Measured cost); `r_ssaoRadius` is still a first cut, retune to taste.
   GPU-time pass dropped steps 2→1), cost linear in slices × steps, ~3.2× for full-res,
   direct-light sampling ~free. Landed: defaults retuned to 6/1 (via 3/4 → 6/2), and the denoise made
   **separable** (H+V) for ~2.5× fewer taps.
-  Remaining: temporal accumulation (§12) if AO is ever wanted on weak hardware.
+- [x] **Phase D — temporal accumulation (landed, opt-in).** `r_ssaoTemporal` (off by
+  default) + `r_ssaoTemporalFeedback` (0.9). `ssao_temporal.*` reprojects the previous
+  frame's AO+bent by camera motion (a single `reproj` matrix = `prevViewProj ·
+  invView_cur`, so the shader turns the current-frame view-space position straight into a
+  previous-frame uv) and blends it into a double-buffered history target that then feeds
+  the lighting (`rhiSsaoResultRT` is repointed at the history slot). A **neighbourhood
+  clamp** of the reprojected AO scalar to the local 3×3 current-frame range bounds ghosting
+  without a motion-vector history-depth buffer. History is invalidated on resize / lost
+  context / temporal toggle so a re-enable never blends stale data. Lets slices/steps run
+  lower for the same look; the history-depth disocclusion reject (§12) is the remaining
+  refinement. **Essential companion:** `ssao.frag`'s horizon jitter (`ign(gl_FragCoord)`)
+  is purely *spatial*, so without a per-frame rotation every frame is identical and
+  accumulation is a no-op — the pass advances a golden-ratio **jitter phase**
+  (`u_windowCoord.y`, 0 when temporal is off) so each frame samples different
+  directions/steps for accumulation to actually average.
 
 ## 12. Open items / risks
 
@@ -299,16 +326,20 @@ Measured cost); `r_ssaoRadius` is still a first cut, retune to taste.
   the blur and the future normal G-buffer (§4 seam) are the mitigations.
 - **Half-res edges:** bilateral upsample can leak across silhouettes; depth-aware
   weights and a full-res fallback (`r_ssaoResScale 1.0`) cover it.
-- **Temporal accumulation (planned optimization).** The real way to cut SSAO cost is to
-  amortize samples across frames: reproject the previous frame's AO by depth (no motion
-  vectors needed for a static world; camera reprojection from the view matrices) and blend
-  with the current few-sample AO, so effective quality rises without more samples/frame.
-  This is the modern GTAO approach and would let slices/steps drop further (or weak GPUs
-  run AO cheaply). It is **not** a cache — screen-space AO is view-dependent and recomputes
-  every camera move, so frame-to-frame "skip if unchanged" only helps a static camera.
-  Deferred because it needs a history buffer + reprojection and risks ghosting on fast
-  motion / disocclusion (needs a depth-based rejection clamp); the backend also has no TAA
-  to share history with. Revisit if AO needs to run on low-end hardware.
+- **Temporal accumulation (landed, opt-in — `r_ssaoTemporal`).** Amortizes samples across
+  frames: reprojects the previous frame's AO by camera motion (no motion vectors — a static
+  world only moves under the camera, so one `reproj = prevViewProj · invView_cur` matrix
+  maps a current view-space position to a previous-frame uv) and blends with the current
+  few-sample AO (`r_ssaoTemporalFeedback`), so effective quality rises without more
+  samples/frame and slices/steps can drop (or weak GPUs run AO cheaply). It is **not** a
+  cache — screen-space AO is view-dependent and recomputes every camera move. Its own
+  double-buffered history (no shared TAA history). **Ghosting/disocclusion is bounded by a
+  neighbourhood clamp** (the reprojected AO scalar is clamped to the local 3×3 current-frame
+  min/max) rather than a depth-based reject — cheap, no extra history-depth buffer, and
+  adequate for the low-frequency, already-blurred AO signal. The clamp softens some ghosting
+  on fast-moving *objects* (the reprojection is world-static, so a walking monster's AO
+  reprojects wrong) — the fuller **history-depth disocclusion reject** (§13) is the follow-up
+  if that proves visible in play.
 - **View weapon excluded from SSAO.** The view weapon renders with a depth hack (compressed
   depth range so it never clips walls), so its `_currentDepth` depth doesn't reflect its true
   position and the horizon search reads far background geometry (desk edges) as false
@@ -338,7 +369,12 @@ Measured cost); `r_ssaoRadius` is still a first cut, retune to taste.
 - **MRT-merge the normal pass into the depth prepass** — see §8; not worth it (the pass is
   ~free) but noted for completeness, and it would also give a natural home for the weapon-depth
   channel above.
-- **Temporal accumulation** — see §12; the real lever only if AO is ever wanted on low-end GPUs.
+- **Temporal history-depth disocclusion reject (refinement).** The shipped temporal path
+  (§12) bounds ghosting with a neighbourhood clamp and needs no extra target. The fuller fix
+  keeps a persistent copy of the previous frame's linear depth, samples it at the reprojected
+  uv, and rejects (or down-weights) history when the reprojected point's expected previous
+  depth disagrees — proper disocclusion / thin-geometry handling, at the cost of one more
+  persistent buffer + a pack/unpack. Do it if the clamp proves too soft on fast-moving objects.
 - **Normal G-buffer simplifications (refinements).** The normal prepass treats perforated
   (alpha-tested grates/fences) surfaces as solid — they write full-quad normals rather than
   punched-out, so their AO is slightly off. Polygon offset, the per-surface bump texture

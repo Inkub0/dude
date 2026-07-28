@@ -243,6 +243,19 @@ static int  rhiSsaoW = 0, rhiSsaoH = 0;				// AO buffer size (may be < view for 
 static int  rhiSsaoViewW = 0, rhiSsaoViewH = 0;		// full view size the AO covers
 static bool rhiSsaoAppliedThisView = false;			// AO was produced for the view being drawn
 
+// GTAO temporal accumulation (docs/ssao-gtao.md, r_ssaoTemporal). Two ping-ponged history
+// buffers hold the accumulated AO+bent so we can read last frame's result while writing
+// this one; the resolve reprojects it by camera motion (rhiSsaoPrevViewProj) and clamps
+// to the local current-frame range. History is invalidated on resize / lost context /
+// temporal toggle so a re-enable never blends stale data.
+static rhi::RenderTargetHandle rhiSsaoHistRT[2] = { 0, 0 };
+static int  rhiSsaoHistIdx  = 0;					// which history slot receives this frame's resolve
+static int  rhiSsaoHistW = 0, rhiSsaoHistH = 0;		// history buffer size (matches the AO buffer)
+static bool rhiSsaoHistValid = false;				// the read slot holds a usable previous frame
+static bool rhiSsaoHavePrevVP = false;				// rhiSsaoPrevViewProj holds a previous view-proj
+static float rhiSsaoPrevViewProj[16];				// previous frame's world->clip (proj * view)
+static float rhiSsaoJitterPhase = 0.0f;				// per-frame noise rotation (golden-ratio walk in [0,1))
+
 // Normal G-buffer (Option B): bump-mapped view-space normals written by an extra opaque
 // geometry pass, so SSAO uses real per-pixel normals instead of reconstructing from depth.
 static rhi::RenderTargetHandle rhiNormalRT = 0;		// RGBA8 view-normal + depth (color+depth target)
@@ -2161,6 +2174,58 @@ static bool RB_RHI_EnsureSsaoTargets( rhi::RHI *r, int w, int h ) {
 	return true;
 }
 
+// Ensure the two ping-ponged temporal-history buffers exist at the AO size. Any
+// (re)create -- first use, resolution change, or a lost context -- invalidates the
+// history so the resolve falls back to the current frame rather than blending stale
+// or garbage data. Only called while r_ssaoTemporal is on.
+static bool RB_RHI_EnsureSsaoHistory( rhi::RHI *r, int w, int h ) {
+	if ( rhiSsaoHistRT[0] && r->GetRenderTargetImage( rhiSsaoHistRT[0] ) == 0 ) {
+		rhiSsaoHistRT[0] = rhiSsaoHistRT[1] = 0;	// lost context (vid_restart)
+		rhiSsaoHistW = rhiSsaoHistH = 0;
+	}
+	if ( rhiSsaoHistRT[0] && rhiSsaoHistRT[1] && rhiSsaoHistW == w && rhiSsaoHistH == h ) {
+		return true;
+	}
+	for ( int i = 0; i < 2; ++i ) {
+		if ( rhiSsaoHistRT[i] ) { r->DestroyRenderTarget( rhiSsaoHistRT[i] ); rhiSsaoHistRT[i] = 0; }
+	}
+	rhiSsaoHistRT[0] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+	rhiSsaoHistRT[1] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+	rhiSsaoHistValid = false;	// freshly (re)allocated: nothing to reproject yet
+	if ( !rhiSsaoHistRT[0] || !rhiSsaoHistRT[1] ) {
+		for ( int i = 0; i < 2; ++i ) {
+			if ( rhiSsaoHistRT[i] ) { r->DestroyRenderTarget( rhiSsaoHistRT[i] ); rhiSsaoHistRT[i] = 0; }
+		}
+		rhiSsaoHistW = rhiSsaoHistH = 0;
+		return false;
+	}
+	rhiSsaoHistW = w;
+	rhiSsaoHistH = h;
+	return true;
+}
+
+// Invert a GL column-major 4x4 (float[16]) into out (also GL column-major). idMat4 is
+// row-major, so transpose the array in and back out; the algorithm is layout-agnostic
+// as long as read/write are consistent. Returns false on a singular matrix.
+static bool R_InvertGLMatrix( const float in[16], float out[16] ) {
+	float m[4][4];
+	for ( int c = 0; c < 4; ++c ) {
+		for ( int rr = 0; rr < 4; ++rr ) {
+			m[rr][c] = in[c * 4 + rr];		// GL(col,row) -> row-major [row][col]
+		}
+	}
+	idMat4 mat( m );
+	if ( !mat.InverseSelf() ) {
+		return false;
+	}
+	for ( int c = 0; c < 4; ++c ) {
+		for ( int rr = 0; rr < 4; ++rr ) {
+			out[c * 4 + rr] = mat[rr][c];	// back to GL column-major
+		}
+	}
+	return true;
+}
+
 // One fullscreen NDC quad (identity mvp, st 0..1) through a post shader. Any engine
 // (idImage) inputs must already be bound by the caller; rtInput0 (0 = none) is an
 // RHI render-target texture bound on unit 0.
@@ -2278,6 +2343,14 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// view; otherwise ssao.frag reconstructs the normal from depth (windowCoord.x = flag)
 	const bool useNormalBuf = rhiNormalReadyThisView && rhiNormalRT != 0 && r_ssaoNormalBuffer.GetBool();
 	parms.windowCoord[0] = useNormalBuf ? 1.0f : 0.0f;
+	// per-frame noise rotation for temporal accumulation: advance a golden-ratio walk so
+	// each frame's horizon search jitters differently, giving the temporal pass distinct
+	// samples to average. 0 when temporal is off -> ssao.frag falls back to the plain dither.
+	if ( r_ssaoTemporal.GetBool() ) {
+		rhiSsaoJitterPhase += 0.61803399f;
+		rhiSsaoJitterPhase -= (float)(int)rhiSsaoJitterPhase;	// keep in [0,1)
+		parms.windowCoord[1] = rhiSsaoJitterPhase;
+	}
 
 	// horizon search: _currentDepth (unit 0) [+ normal G-buffer on unit 1] -> raw AO
 	r->BeginTargetPass( rhiSsaoRT, NULL );
@@ -2311,6 +2384,60 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->EndPass();
 
 	rhiSsaoResultRT = rhiSsaoRT;		// finished AO the ambient/interaction passes sample
+
+	// temporal accumulation (docs/ssao-gtao.md, r_ssaoTemporal): blend this frame's
+	// denoised AO (in rhiSsaoRT) with the previous frame's result reprojected by camera
+	// motion, into a ping-ponged history buffer that then feeds the lighting. Static
+	// world -> the only motion is the camera, so a single reproj matrix (current view
+	// space -> previous clip) suffices; the shader neighbourhood-clamps to kill ghosting.
+	if ( r_ssaoTemporal.GetBool() && RB_RHI_EnsureSsaoHistory( r, aoW, aoH ) ) {
+		rhi::ShaderHandle tempProg = r->LoadShader( "ssao_temporal" );
+		if ( tempProg ) {
+			// current world->clip; kept for next frame as its "previous" reprojection
+			float curViewProj[16];
+			myGlMultMatrix( viewDef->worldSpace.modelViewMatrix, viewDef->projectionMatrix, curViewProj );
+
+			// reproj = (view space this frame -> world) then (world -> previous clip)
+			float invViewCur[16], reproj[16];
+			const bool haveInv = R_InvertGLMatrix( viewDef->worldSpace.modelViewMatrix, invViewCur );
+			if ( haveInv ) {
+				myGlMultMatrix( invViewCur, rhiSsaoPrevViewProj, reproj );
+			}
+			const bool historyUsable = rhiSsaoHistValid && rhiSsaoHavePrevVP && haveInv;
+
+			const int writeIdx = rhiSsaoHistIdx;
+			const int readIdx  = 1 - rhiSsaoHistIdx;
+
+			rhi::RenderParams tempParms = parms;
+			if ( haveInv ) {
+				memcpy( tempParms.modelViewMatrix, reproj, sizeof( reproj ) );
+			}
+			tempParms.localParam0[2] = idMath::ClampFloat( 0.0f, 0.97f, r_ssaoTemporalFeedback.GetFloat() );
+			tempParms.localParam0[3] = historyUsable ? 1.0f : 0.0f;
+
+			// unit 0 = current AO (rhiSsaoRT, via DrawFullscreen), unit 1 = history read
+			// slot (a render target, direct-bound like the normal buffer), unit 2 = depth
+			r->BeginTargetPass( rhiSsaoHistRT[writeIdx], NULL );
+			RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
+			rhi::gl3ActiveTexture( GL_TEXTURE0 + 1 );
+			qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiSsaoHistRT[readIdx] ) );
+			rhi::gl3ActiveTexture( GL_TEXTURE0 );
+			backEnd.glState.currenttmu = 0;
+			backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
+			RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiSsaoRT ) );
+			r->EndPass();
+
+			rhiSsaoResultRT = rhiSsaoHistRT[writeIdx];	// accumulated AO the lighting samples
+			rhiSsaoHistIdx  = readIdx;					// next frame writes the other slot
+			memcpy( rhiSsaoPrevViewProj, curViewProj, sizeof( curViewProj ) );
+			rhiSsaoHavePrevVP = true;
+			rhiSsaoHistValid  = true;					// the write slot now holds a usable history
+		}
+	} else {
+		// temporal off (or history alloc failed): use the plain denoised AO and drop any
+		// stale history so a later re-enable starts clean instead of blending garbage
+		rhiSsaoHistValid = false;
+	}
 
 	// tell the ambient pass (RB_RHI_DrawInteraction) an AO buffer is ready for this
 	// view; the screen->AO uv mapping needs the full view size

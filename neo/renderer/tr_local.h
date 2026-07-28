@@ -913,6 +913,8 @@ extern idCVar r_ssaoBentStrength;		// blend toward the bent normal for the ambie
 extern idCVar r_ssaoNormalBuffer;		// SSAO reads a bump-mapped normal G-buffer vs depth reconstruct
 extern idCVar r_ssaoSpecular;			// also attenuate specular in occluded areas
 extern idCVar r_ssaoDebug;				// 1=show AO buffer, 2=show bent normals
+extern idCVar r_ssaoTemporal;			// accumulate AO across frames via camera reprojection
+extern idCVar r_ssaoTemporalFeedback;	// temporal history weight (0..0.97)
 
 // DUDE: baked ambient-occlusion (occlusion) maps (enhancement backends only; docs/occlusion-maps.md)
 extern idCVar r_occlusionMaps;			// master toggle: use per-material baked AO maps

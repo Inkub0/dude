@@ -63,6 +63,15 @@ vec3 sampleViewNormal( vec2 frag, vec3 P ) {
 	return N;
 }
 
+// True if this fragment is the view weapon, per the AO mask stored in the normal
+// G-buffer's alpha (gbuffer.frag writes 0 there, 1 elsewhere). Used to drop the weapon
+// as an OCCLUDER during the horizon search: the gun's depth-hacked, pulled-close depth
+// otherwise casts a false AO halo on the world behind it that slides/jitters as the
+// weapon sways. Only meaningful when the normal buffer is bound (useNormalBuffer).
+bool weaponTexel( vec2 frag ) {
+	return texture( u_normalBuffer, frag * u_screenCorrection.xy ).a < 0.5;
+}
+
 // interleaved gradient noise — cheap per-pixel dither for slice/step jitter
 float ign( vec2 p ) {
 	return fract( 52.9829189 * fract( dot( p, vec2( 0.06711056, 0.00583715 ) ) ) );
@@ -78,8 +87,10 @@ void main() {
 
 	vec3 P = viewPosFromRaw( frag, raw );        // reuse the depth we just fetched
 
+	bool useNormalBuffer = u_windowCoord.x > 0.5;
+
 	vec3 N;
-	if ( u_windowCoord.x > 0.5 ) {
+	if ( useNormalBuffer ) {
 		// normal G-buffer: xyz = bump-mapped view normal, a = AO mask. The mask is 0 on
 		// the view weapon, whose depth-hacked depth confuses the horizon search into
 		// reading far background geometry — skip SSAO there (leave it fully unoccluded).
@@ -104,9 +115,13 @@ void main() {
 	pixelRadius = clamp( pixelRadius, 2.0, 512.0 );
 	float stepPix = pixelRadius / float( numSteps );
 
-	// hoisted loop invariants
+	// hoisted loop invariants. u_windowCoord.y is a per-frame jitter phase (0 when
+	// temporal accumulation is off): rotating the noise each frame makes the horizon
+	// search sample different directions/steps, giving the temporal pass distinct
+	// frames to average into a higher-quality result (docs/ssao-gtao.md §12). With it
+	// 0 this is exactly the old ign() dither, so the non-temporal path is unchanged.
 	float sliceStep = M_PI / float( numSlices );
-	float noise     = ign( frag );
+	float noise     = fract( ign( frag ) + u_windowCoord.y );
 	float noise05   = noise + 0.5;
 
 	float visibility = 0.0;
@@ -136,19 +151,29 @@ void main() {
 			}
 			vec2 duv = dir * ( ( float( t ) + noise05 ) * stepPix );
 
-			vec3  Dp  = viewPos( frag + duv ) - P;
-			float l2p = dot( Dp, Dp );
-			if ( l2p > 1e-6 ) {
-				float ca = dot( Dp, V ) * inversesqrt( l2p );
-				float fo = clamp( 1.0 - l2p * invR2, 0.0, 1.0 );
-				cH_pos = max( cH_pos, ca * fo );
+			// Drop occluders that land on the view weapon so the depth-hacked gun never
+			// darkens the world behind it (the source of the sway/move jitter). Only the
+			// normal-buffer path has a weapon mask; the depth-reconstruct fallback can't
+			// tell, so it keeps the old behaviour (weaponTexel is never evaluated then).
+			vec2  sp  = frag + duv;
+			if ( !useNormalBuffer || !weaponTexel( sp ) ) {
+				vec3  Dp  = viewPos( sp ) - P;
+				float l2p = dot( Dp, Dp );
+				if ( l2p > 1e-6 ) {
+					float ca = dot( Dp, V ) * inversesqrt( l2p );
+					float fo = clamp( 1.0 - l2p * invR2, 0.0, 1.0 );
+					cH_pos = max( cH_pos, ca * fo );
+				}
 			}
-			vec3  Dn  = viewPos( frag - duv ) - P;
-			float l2n = dot( Dn, Dn );
-			if ( l2n > 1e-6 ) {
-				float ca = dot( Dn, V ) * inversesqrt( l2n );
-				float fo = clamp( 1.0 - l2n * invR2, 0.0, 1.0 );
-				cH_neg = max( cH_neg, ca * fo );
+			vec2  sn  = frag - duv;
+			if ( !useNormalBuffer || !weaponTexel( sn ) ) {
+				vec3  Dn  = viewPos( sn ) - P;
+				float l2n = dot( Dn, Dn );
+				if ( l2n > 1e-6 ) {
+					float ca = dot( Dn, V ) * inversesqrt( l2n );
+					float fo = clamp( 1.0 - l2n * invR2, 0.0, 1.0 );
+					cH_neg = max( cH_neg, ca * fo );
+				}
 			}
 		}
 

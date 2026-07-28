@@ -63,6 +63,7 @@ static const char *gl3BootPrograms[] = {
 	"ssao",
 	"ssao_blur",
 	"ssao_debug",
+	"ssao_temporal",
 	"zfill",
 };
 static const int GL3_NUM_BOOT_PROGRAMS = sizeof( gl3BootPrograms ) / sizeof( gl3BootPrograms[0] );
