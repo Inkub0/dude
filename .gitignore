@@ -31,3 +31,8 @@
 /d3le/
 savegames/
 *.pk4.orig
+
+# stray/personal files at the repo root (not project content)
+/-l
+/Modelfile
+/tfphobos
