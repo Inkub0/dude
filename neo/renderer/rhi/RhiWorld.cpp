@@ -1491,6 +1491,10 @@ static int rhiCubeCacheMiss = 0;
 // DM_STATIC) occluder, and lights that fell back to the scratch pool (budget/off/full).
 static int rhiCubeCacheDynamic = 0;
 static int rhiCubeCacheScratch = 0;
+// r_shadowMapMaxUpdates: cube re-renders spent this view (cold misses + serviced stale
+// misses), and stale misses deferred to a later frame because the budget was spent.
+static int rhiCubeUpdatesSpent = 0;
+static int rhiCubeCacheDeferred = 0;
 
 // depth24 cube cost: 6 faces, 4 bytes/texel (GL pads DEPTH_COMPONENT24 to 32-bit).
 static size_t RB_RHI_CubeBytes( int size ) {
@@ -1569,9 +1573,19 @@ static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float ran
 // persistent target to render into (token stored for next frame), evicting least-
 // recently-used entries to stay under budget. Returns 0 when caching is off or the
 // light can't fit the budget -> caller uses the shared scratch pool instead.
+//
+// 'stale' is set true only for a warm miss: an existing slot that already holds this
+// light's previous cube (a moving rigid caster changed the token). Such a light can be
+// deferred by r_shadowMapMaxUpdates -- its old cube is still sampleable for a frame.
+// For that case the new token is NOT committed here; the caller writes it via *pendingSlot
+// once it commits to re-rendering, so a deferred light stays a miss and is retried next
+// frame. A cold miss (fresh slot, no prior contents) leaves stale=false and must render.
 static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightIndex, int size,
-                                                         unsigned long long token, bool &hit ) {
+                                                         unsigned long long token, bool &hit,
+                                                         bool &stale, shadowCubeCache_t **pendingSlot ) {
 	hit = false;
+	stale = false;
+	*pendingSlot = NULL;
 	if ( !r_shadowMapCache.GetBool() ) {
 		return 0;
 	}
@@ -1602,12 +1616,16 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 			e->lightIndex = -1; e->rt = 0; e->bytes = 0; e->token = 0;
 			e = NULL;
 		} else if ( e->size == size ) {
-			e->lastFrame = rhiCubeCacheFrameNo;
+			e->lastFrame = rhiCubeCacheFrameNo;	// touched this view -> not LRU-evictable
 			if ( e->token == token ) {
 				hit = true;						// reuse -> skip the whole render
 				return e->rt;
 			}
-			e->token = token;					// miss: re-render into the same target
+			// warm miss: the old cube is still valid to sample, so leave the stored token
+			// alone and let the caller decide whether to re-render now or defer a frame
+			// (r_shadowMapMaxUpdates). The caller commits the new token via *pendingSlot.
+			stale = true;
+			*pendingSlot = e;
 			return e->rt;
 		} else {
 			// resolution changed (adaptive tier): drop and reallocate below
@@ -1799,12 +1817,17 @@ where the context is current — the same place image purges and R_FreeDerivedDa
 already free GL objects.
 ===================
 */
+static void RB_RHI_ResetLightBudgetHyst();		// defined with the hysteresis helpers below
+
 void RB_RHI_FreeShadowCubeCache() {
 	if ( !glConfig.isInitialized ) {
 		return;
 	}
 	RB_RHI_ResetCubeCache( rhi::GetGL3RHI() );
 	RB_RHI_Reset2DCache( rhi::GetGL3RHI() );
+	// light indices are reused by the next map; drop stale incumbency so a new level's
+	// lights don't inherit a phantom budget bonus from the old one.
+	RB_RHI_ResetLightBudgetHyst();
 }
 
 /*
@@ -1837,6 +1860,8 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	bool dynamic = false;
 	const unsigned long long token = RB_RHI_CubeToken( vLight, range, size, &dynamic );
 	bool hit = false;
+	bool stale = false;
+	shadowCubeCache_t *pendingSlot = NULL;
 	// A light with an animated (non DM_STATIC) caster changes every frame, so it can
 	// never cache-hit. Skip the cache entirely and use the shared scratch pool, which
 	// costs no persistent VRAM slot and still gets per-face view-frustum culling.
@@ -1844,7 +1869,7 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	if ( dynamic ) {
 		rhiCubeCacheDynamic++;
 	} else {
-		target = RB_RHI_AcquireCubeTarget( r, lightIndex, size, token, hit );
+		target = RB_RHI_AcquireCubeTarget( r, lightIndex, size, token, hit, stale, &pendingSlot );
 	}
 	const bool cached = ( target != 0 );
 	if ( !cached ) {
@@ -1863,7 +1888,19 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 		return true;			// unchanged since last frame — nothing to render
 	}
 	if ( cached ) {
+		// Update budget (r_shadowMapMaxUpdates): a warm miss can be deferred — its old cube
+		// is still on the slot, so sample that this view and retry next frame. Cold misses
+		// (stale == false) have no prior contents and must render regardless of budget.
+		const int maxUpdates = r_shadowMapMaxUpdates.GetInteger();
+		if ( stale && maxUpdates > 0 && rhiCubeUpdatesSpent >= maxUpdates ) {
+			rhiCubeCacheDeferred++;
+			return true;		// reuse last frame's cube; token left stale -> retried next view
+		}
 		rhiCubeCacheMiss++;
+		rhiCubeUpdatesSpent++;
+		if ( pendingSlot ) {
+			pendingSlot->token = token;		// committing to the re-render: adopt the new token
+		}
 	}
 
 	const idVec3 &L = vLight->globalLightOrigin;
@@ -1930,28 +1967,118 @@ static int RB_RHI_LightScore( const viewLight_t *vLight ) {
 	return ( w > 0 && h > 0 ) ? w * h : 0;
 }
 
+// ---- Budget hysteresis (r_shadowMapBudgetHysteresis) -----------------------------
+// The raw score above is the instantaneous on-screen size, so two similarly-sized
+// lights (or one hovering at the frustum edge) can trade places at the rank-limit
+// boundary frame to frame — each swap regenerates a cube and pops a shadow on/off. To
+// stabilize the shadowed set we remember which lights recently held a cube and give
+// those incumbents a small score bonus, so a marginally bigger newcomer can't displace
+// them. Keyed by light index (viewLight_t is rebuilt every frame; the state must
+// persist), a tiny linear-probe table sized well above any plausible simultaneous
+// point-light count. Reset with the cube cache on world teardown.
+#define MAX_LIGHT_BUDGET_HYST 256
+// How long (in views) an incumbent keeps its bonus after last being budgeted. Only needs
+// to bridge brief drop-outs (an occluder flicks in front for a frame); a light that
+// leaves the view entirely stops being evaluated and ages out on its own.
+#define SHADOW_BUDGET_HYST_WINDOW 120
+struct lightBudgetHyst_t {
+	int		lightIndex;		// idRenderLightLocal::index
+	int		lastFrame;		// last view this light was granted a cube; 0 = empty slot
+	bool	incumbent;		// snapshot (taken at view start) of "recently budgeted"
+};
+static lightBudgetHyst_t rhiLightBudgetHyst[MAX_LIGHT_BUDGET_HYST];
+
+// True if the light was a recent incumbent as of the start of this view. Reads the
+// snapshot bit, not lastFrame, so grants made during this view's light loop can't change
+// the answer mid-loop — the in-budget decision stays independent of the order lights are
+// evaluated in (grants only affect the NEXT view's snapshot). See RB_RHI_SnapshotLightBudgetHyst.
+static bool RB_RHI_LightRecentlyBudgeted( int lightIndex ) {
+	for ( int i = 0; i < MAX_LIGHT_BUDGET_HYST; i++ ) {
+		if ( rhiLightBudgetHyst[i].lastFrame != 0 && rhiLightBudgetHyst[i].lightIndex == lightIndex ) {
+			return rhiLightBudgetHyst[i].incumbent;
+		}
+	}
+	return false;
+}
+
+// Fold each entry's grant timestamp into an order-stable incumbency bit for this view.
+// Called once, before the light loop, right after rhiCubeCacheFrameNo is bumped: at that
+// point lastFrame still reflects grants only through PREVIOUS views (this view hasn't
+// marked anything yet), so an entry granted 1..window views ago reads as an incumbent.
+static void RB_RHI_SnapshotLightBudgetHyst() {
+	for ( int i = 0; i < MAX_LIGHT_BUDGET_HYST; i++ ) {
+		const int lf = rhiLightBudgetHyst[i].lastFrame;
+		const int age = rhiCubeCacheFrameNo - lf;
+		rhiLightBudgetHyst[i].incumbent = ( lf != 0 && age >= 1 && age <= SHADOW_BUDGET_HYST_WINDOW );
+	}
+}
+
+// Record that this light got a cube this view (refreshes its grant timestamp). Does not
+// touch the snapshot bit, so it has no effect until the next view's snapshot.
+static void RB_RHI_MarkLightBudgeted( int lightIndex ) {
+	int free = -1, oldest = -1;
+	for ( int i = 0; i < MAX_LIGHT_BUDGET_HYST; i++ ) {
+		if ( rhiLightBudgetHyst[i].lastFrame != 0 && rhiLightBudgetHyst[i].lightIndex == lightIndex ) {
+			rhiLightBudgetHyst[i].lastFrame = rhiCubeCacheFrameNo;
+			return;
+		}
+		if ( rhiLightBudgetHyst[i].lastFrame == 0 ) {
+			if ( free < 0 ) { free = i; }
+		} else if ( oldest < 0 || rhiLightBudgetHyst[i].lastFrame < rhiLightBudgetHyst[oldest].lastFrame ) {
+			oldest = i;			// fall back to evicting the stalest incumbent if the table is full
+		}
+	}
+	const int slot = ( free >= 0 ) ? free : oldest;
+	if ( slot < 0 ) {
+		return;					// table full of same-frame entries (>256 point lights): skip, harmless
+	}
+	rhiLightBudgetHyst[slot].lightIndex = lightIndex;
+	rhiLightBudgetHyst[slot].lastFrame = rhiCubeCacheFrameNo;
+	rhiLightBudgetHyst[slot].incumbent = false;		// new grant this view: no bonus until next snapshot
+}
+
+static void RB_RHI_ResetLightBudgetHyst() {
+	memset( rhiLightBudgetHyst, 0, sizeof( rhiLightBudgetHyst ) );
+}
+
+// Effective ranking score: raw on-screen size, scaled up for a recent incumbent so it
+// resists being bumped out of the r_shadowMapPointLimit set (see hysteresis note above).
+static double RB_RHI_LightEffectiveScore( const viewLight_t *vLight ) {
+	double s = (double)RB_RHI_LightScore( vLight );
+	const int hyst = r_shadowMapBudgetHysteresis.GetInteger();
+	if ( hyst > 0 && vLight->lightDef && RB_RHI_LightRecentlyBudgeted( vLight->lightDef->index ) ) {
+		s *= 1.0 + (double)hyst / 100.0;
+	}
+	return s;
+}
+
 // Budget: cube-shadow only the r_shadowMapPointLimit highest-scoring point lights this
 // view; while r_shadowMapping is on the rest render unshadowed (stencil is off entirely),
 // so this bounds the cube-map cost. 0 = all point lights. O(lights^2) but the light count
-// per view is small.
+// per view is small. Ranks by the hysteresis-adjusted score so the set stays stable frame
+// to frame; a light granted budget is marked so it earns the incumbency bonus next view.
 static bool RB_RHI_PointLightInBudget( const viewDef_t *viewDef, const viewLight_t *self ) {
 	const int limit = r_shadowMapPointLimit.GetInteger();
 	if ( limit <= 0 ) {
-		return true;
+		return true;			// unlimited: score/incumbency irrelevant, nothing to stabilize
 	}
-	const int myScore = RB_RHI_LightScore( self );
+	const double myScore = RB_RHI_LightEffectiveScore( self );
 	int better = 0;
 	for ( viewLight_t *vl = viewDef->viewLights; vl; vl = vl->next ) {
 		if ( vl == self || !RB_RHI_PointLightShadowEligible( vl ) ) {
 			continue;
 		}
-		const int sc = RB_RHI_LightScore( vl );
+		const double sc = RB_RHI_LightEffectiveScore( vl );
 		// strict score, ties broken by address so the set is stable and disjoint
 		if ( sc > myScore || ( sc == myScore && vl < self ) ) {
 			better++;
 		}
 	}
-	return better < limit;
+	const bool inBudget = better < limit;
+	if ( inBudget && self->lightDef ) {
+		RB_RHI_MarkLightBudgeted( self->lightDef->index );
+	}
+	return inBudget;
 }
 
 static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h ) {
@@ -2563,9 +2690,12 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	rhiCubeCacheMiss = 0;
 	rhiCubeCacheDynamic = 0;
 	rhiCubeCacheScratch = 0;
+	rhiCubeUpdatesSpent = 0;
+	rhiCubeCacheDeferred = 0;
 	rhiMapCacheHits = 0;
 	rhiMapCacheRendered = 0;
 	rhiCubeCacheFrameNo++;			// bump before the light loop so lastFrame == "this view"
+	RB_RHI_SnapshotLightBudgetHyst();	// freeze incumbency for this view (order-stable ranking)
 	// free the whole cache when it's switched off, so its VRAM doesn't linger
 	if ( !r_shadowMapCache.GetBool() ) {
 		if ( rhiCubeCacheBytes > 0 ) {
@@ -2750,11 +2880,11 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	backEnd.vLight = NULL;
 
 	if ( r_shadowMapDebug.GetBool() ) {
-		common->Printf( "shadowMap: %d lit | projected %d (2D-mapped %d [%d hit/%d rendered], no-shadow %d) | point %d (cube-mapped %d, cube-casters %d, faces %d drawn/%d culled) | cache %d hit/%d rendered/%d scratch, %d dynamic (%zu MB) | stencil-big %d | parallel %d | no-lightDef %d | perforated-casters %d | r_shadowMapping %d\n",
+		common->Printf( "shadowMap: %d lit | projected %d (2D-mapped %d [%d hit/%d rendered], no-shadow %d) | point %d (cube-mapped %d, cube-casters %d, faces %d drawn/%d culled) | cache %d hit/%d rendered/%d scratch, %d dynamic, %d deferred (%zu MB) | stencil-big %d | parallel %d | no-lightDef %d | perforated-casters %d | r_shadowMapping %d\n",
 		                dbgLit, dbgProjected, dbgShadowMapped, rhiMapCacheHits, rhiMapCacheRendered, dbgNoShadow,
 		                dbgPoint, rhiShadowCubeLights, rhiShadowCubeCasters,
 		                rhiShadowCubeFaces, rhiShadowCubeFacesCulled,
-		                rhiCubeCacheHits, rhiCubeCacheMiss, rhiCubeCacheScratch, rhiCubeCacheDynamic,
+		                rhiCubeCacheHits, rhiCubeCacheMiss, rhiCubeCacheScratch, rhiCubeCacheDynamic, rhiCubeCacheDeferred,
 		                rhiCubeCacheBytes / ( 1024 * 1024 ),
 		                dbgStencilBig, dbgParallel, dbgNoLightDef,
 		                rhiShadowPerfCasters, r_shadowMapping.GetInteger() );

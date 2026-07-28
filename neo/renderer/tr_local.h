@@ -888,6 +888,8 @@ extern idCVar r_shadowMapSizeScaleRadius;	// light radius mapped to the base sha
 extern idCVar r_shadowMapFaceCull;			// skip cube faces outside the view frustum
 extern idCVar r_shadowMapCache;				// cache static point-light cube maps across frames
 extern idCVar r_shadowMapCacheMB;			// VRAM budget for the shadow-map cache (MB; -1 auto, 0 unlimited)
+extern idCVar r_shadowMapBudgetHysteresis;	// point-light budget stickiness (percent score bonus for recent incumbents)
+extern idCVar r_shadowMapMaxUpdates;		// max cached cube maps re-rendered per view (stagger update bursts; 0 = unlimited)
 extern idCVar r_shadowMapStencilRadius;		// lights bigger than this (max radius axis) fall back to stencil shadows
 
 // DUDE: emissive fill lights for interactive GUI screens (enhancement backends only)
