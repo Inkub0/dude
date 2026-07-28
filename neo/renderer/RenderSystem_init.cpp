@@ -70,6 +70,7 @@ idCVar r_mode( "r_mode", "5", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_INTEGER, "vide
 idCVar r_displayRefresh( "r_displayRefresh", "0", CVAR_RENDERER | CVAR_INTEGER | CVAR_NOCHEAT, "optional display refresh rate option for vid mode", 0.0f, 200.0f );
 idCVar r_fullscreen( "r_fullscreen", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "0 = windowed, 1 = full screen" );
 idCVar r_fullscreenDesktop( "r_fullscreenDesktop", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "0: 'real' fullscreen mode 1: keep resolution 'desktop' fullscreen mode" );
+idCVar r_fullscreenDisplay( "r_fullscreenDisplay", "-1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "which monitor to open the (fullscreen) window on. -1 = auto (the display the mouse cursor is on at launch). On a multi-monitor setup with mixed refresh rates, set this to your high-refresh display's index (see the 'SDL detected N displays' list printed at startup). Needs a full vid_restart", -1, 16 );
 idCVar r_customWidth( "r_customWidth", "720", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "custom screen width. set r_mode to -1 to activate" );
 idCVar r_customHeight( "r_customHeight", "486", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "custom screen height. set r_mode to -1 to activate" );
 idCVar r_singleTriangle( "r_singleTriangle", "0", CVAR_RENDERER | CVAR_BOOL, "only draw a single triangle per primitive" );

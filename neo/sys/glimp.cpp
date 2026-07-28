@@ -174,6 +174,33 @@ static void SetSDLIcon()
 }
 #endif // SDL2 and SDL1.2
 
+#if !SDL_VERSION_ATLEAST(3, 0, 0)
+/*
+===================
+GLimp_ClosestFullscreenMode
+
+SDL2: build a fully-specified SDL_DisplayMode for a real-fullscreen window, snapped to
+the closest mode the display actually offers. Passing SDL_SetWindowDisplayMode() a mode
+with only w/h set (refresh_rate == 0) makes SDL pick the driver's *default* mode for that
+size — commonly 60 Hz even on a 144 Hz panel, which forces the whole engine to 60 Hz.
+SDL_GetClosestDisplayMode() instead scans the real mode list: displayHz (r_displayRefresh)
+is honored when non-zero, and 0 defaults to the desktop refresh, which is what a high-
+refresh user expects. Falls back to the bare w/h request if no mode matches.
+===================
+*/
+static SDL_DisplayMode GLimp_ClosestFullscreenMode( int w, int h, int displayHz, int displayIndex ) {
+	SDL_DisplayMode want = {};
+	want.w = w;
+	want.h = h;
+	want.refresh_rate = displayHz;			// 0 -> SDL treats as the desktop refresh
+	SDL_DisplayMode closest = {};
+	if ( SDL_GetClosestDisplayMode( displayIndex, &want, &closest ) != NULL ) {
+		return closest;
+	}
+	return want;							// no match: keep at least the resolution
+}
+#endif // SDL2
+
 /*
 ===================
 GLimp_Init
@@ -386,8 +413,12 @@ try_again:
 		#else // SDL2
 				int displayId_x = j;
 				if (SDL_GetDisplayBounds(displayId_x, &rect) == 0) {
-					common->Printf(" %d: %dx%d at (%d, %d) to (%d, %d)\n", j, rect.w, rect.h,
-					               rect.x, rect.y, rect.x+rect.w, rect.y+rect.h);
+					// include the desktop refresh so mixed-rate multi-monitor users can tell
+					// which index is their high-refresh panel (see r_fullscreenDisplay)
+					SDL_DisplayMode ddm = {};
+					int ddHz = ( SDL_GetDesktopDisplayMode(j, &ddm) == 0 ) ? ddm.refresh_rate : 0;
+					common->Printf(" %d: %dx%d at (%d, %d) to (%d, %d) @ %d Hz\n", j, rect.w, rect.h,
+					               rect.x, rect.y, rect.x+rect.w, rect.y+rect.h, ddHz);
 		#endif
 					if ( !found && x >= rect.x && x < rect.x + rect.w
 						&& y >= rect.y && y < rect.y + rect.h )
@@ -397,17 +428,30 @@ try_again:
 					}
 				}
 			}
+			// explicit monitor override (r_fullscreenDisplay): pin the window to a chosen
+			// display index regardless of where the mouse is, so a mixed-refrsh multi-monitor
+			// user can force their high-refresh panel instead of a 60 Hz primary display.
+			const int wantDisplay = r_fullscreenDisplay.GetInteger();
+			if ( wantDisplay >= 0 ) {
+				if ( wantDisplay < numDisplays ) {
+					selectedDisplay = wantDisplay;
+				} else {
+					common->Warning("r_fullscreenDisplay %d is out of range (%d displays); using auto-selected %u\n",
+					                wantDisplay, numDisplays, selectedDisplay);
+				}
+			}
+
 		#if SDL_VERSION_ATLEAST(3, 0, 0)
 			if(displayIDs != NULL) {
 				SDL_DisplayID displayID = displayIDs[selectedDisplay];
-				common->Printf("Will use display %u (%u) because mouse cursor is at (%g, %g).\n",
-				               selectedDisplay, displayID, x, y);
+				common->Printf("Will use display %u (%u)%s.\n", selectedDisplay, displayID,
+				               wantDisplay >= 0 ? " (forced by r_fullscreenDisplay)" : " (mouse cursor's display)");
 				selectedDisplay = displayID;
 				SDL_free(displayIDs);
 			}
 		#else // SDL2
-			common->Printf("Will use display %u because mouse cursor is at (%d, %d).\n",
-			               selectedDisplay, x, y);
+			common->Printf("Will use display %u%s.\n", selectedDisplay,
+			               wantDisplay >= 0 ? " (forced by r_fullscreenDisplay)" : " (mouse cursor's display)");
 		#endif
 		}
 	#endif // SDL_VERSION_ATLEAST(2, 0, 4)
@@ -517,6 +561,17 @@ try_again:
 			r_multiSamples.SetInteger(multisamples);
 		}
 
+		// A real-fullscreen window is created at SDL's default mode for the resolution
+		// (often 60 Hz); pin it to the closest mode honoring the requested/desktop refresh
+		// so a 144 Hz panel isn't dropped to 60 Hz. Harmless if the closest mode is the
+		// same one SDL already chose.
+		if ((flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) == SDL_WINDOW_FULLSCREEN)
+		{
+			SDL_DisplayMode fsmode = GLimp_ClosestFullscreenMode( parms.width, parms.height,
+			                                                      parms.displayHz, selectedDisplay );
+			SDL_SetWindowDisplayMode( window, &fsmode );
+		}
+
 		/* Check if we're really in the requested display mode. There is
 		   (or was) an SDL bug were SDL switched into the wrong mode
 		   without giving an error code. See the bug report for details:
@@ -541,10 +596,8 @@ try_again:
 				}
 
 				/* Mkay, try to hack around that. */
-				SDL_DisplayMode wanted_mode = {};
-
-				wanted_mode.w = parms.width;
-				wanted_mode.h = parms.height;
+				SDL_DisplayMode wanted_mode = GLimp_ClosestFullscreenMode( parms.width, parms.height,
+				                                                           parms.displayHz, selectedDisplay );
 
 				if (SDL_SetWindowDisplayMode(window, &wanted_mode) != 0)
 				{
@@ -938,12 +991,12 @@ bool GLimp_SetScreenParms(glimpParms_t parms) {
 				return false;
 			}
 		} else { // want real fullscreen
-			SDL_DisplayMode wanted_mode = {};
-
-			wanted_mode.w = parms.width;
-			wanted_mode.h = parms.height;
-
-			// TODO: refresh rate? parms.displayHz should probably try to get most similar mode before trying to set it?
+			// snap to the closest real mode honoring parms.displayHz (r_displayRefresh); a
+			// bare w/h request leaves refresh_rate 0 and SDL picks its default (often 60 Hz),
+			// which is what pinned high-refresh panels to 60 (see GLimp_ClosestFullscreenMode).
+			int dispIdx = SDL_GetWindowDisplayIndex( window );
+			SDL_DisplayMode wanted_mode = GLimp_ClosestFullscreenMode( parms.width, parms.height,
+			                                                           parms.displayHz, dispIdx < 0 ? 0 : dispIdx );
 
 			if ( SDL_SetWindowDisplayMode( window, &wanted_mode ) != 0 )
 			{
