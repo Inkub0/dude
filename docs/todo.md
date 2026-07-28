@@ -41,8 +41,8 @@ Design decisions taken:
 | specular shading | vanilla LUT | Blinn-Phong | Blinn-Phong | Blinn-Phong | Blinn-Phong | Blinn-Phong |
 | specular scale | 1.0 | 1.8 | 1.8 | 1.8 | 1.8 | 1.8 |
 | specular exponent | (n/a, LUT) | 62 | 62 | 62 | 62 | 62 |
-| SSAO res scale | — | — | 0.5 | 0.5 | 0.8 | 1.0 |
-| SSAO slices / steps | — | — | 4 / 1 | 6 / 1 | 8 / 2 | 8 / 4 |
+| SSAO res scale | — | — | 0.5 | 0.75 | 0.8 | 1.0 |
+| SSAO slices / steps | — | — | 3 / 2 | 3 / 3 | 6 / 4 | 7 / 5 |
 | SSAO normal G-buffer | — | — | off | on | on | on |
 | shadow 2D / cube res | — | — | 512 / 512 | 1024 / 1200 | 2048 / 2048 | 2048 / 2048 |
 | cube PCF taps | — | — | 5 | 6 | 8 | 12 |
@@ -185,3 +185,24 @@ Keep in mind:
 
 Not urgent: the CPU baker already covers the shipped asset set. This is an iteration-speed (and,
 via RT, potentially higher-ray-count quality) investment for when the Vulkan backend matures.
+
+---
+
+## Antialiasing (post-resolve SMAA now, TAA later)
+
+See **docs/antialiasing.md** for the full sketch. Summary:
+
+- The built-in "Antialiasing" slider = `r_multiSamples` = backbuffer MSAA. It IS active in the RHI
+  path (scene renders to backbuffer 0), but only fixes silhouette edges — never the specular/normal-map
+  shimmer that is Doom 3's signature aliasing.
+- **Plan:** keep MSAA for legacy OpenGL; reuse the same `r_multiSamples` value as an AA-quality knob
+  for an RHI-native post-resolve pass.
+- **SMAA 1x first** — cheap, no temporal risk, no ghosting. 3 fullscreen passes (edges/weights/blend)
+  reusing `RB_RHI_DrawFullscreen` + `CreateRenderTarget`/`BeginTargetPass`, scene captured via
+  `CopyFramebuffer`, run before the 2D/GUI composite. Needs SMAA AreaTex/SearchTex LUTs + 3 new
+  shaders registered in `gl3BootPrograms[]`.
+- **TAA later** — the specular-shimmer fix. ~80% wired via the temporal-SSAO path (ping-pong history,
+  camera reprojection, neighborhood clamp in `ssao_temporal.*`). Adds sub-pixel projection jitter +
+  a color resolve pass. **Real prerequisite: per-object motion vectors** — SSAO reprojection is
+  camera-only, so moving geometry/weapon will ghost without them. Keep SMAA 1x as the non-temporal
+  menu alternative.
