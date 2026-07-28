@@ -2414,6 +2414,25 @@ static void DrawEnhancementsMenu()
 
 	DrawOptions( enhancementOptions, IM_ARRAYSIZE(enhancementOptions) );
 
+	// Post-resolve antialiasing (DUDE). Separate from the hardware "Antialiasing (MSAA)"
+	// slider in Video Options: that only smooths backbuffer geometry edges, while this
+	// runs over the finished 3D view and also tackles specular/normal-map shimmer.
+	// opengl3/Vulkan only; read live by the renderer (no restart). docs/antialiasing.md
+	ImGui::SeparatorText( "Antialiasing (post-process)" );
+	{
+		int aa = r_rhiAA.GetInteger();
+		ImGui::SetNextItemWidth( 220.0f );
+		if ( ImGui::Combo( "Post Antialiasing", &aa, "Off\0FXAA\0" ) ) {
+			r_rhiAA.SetInteger( aa );
+		}
+		AddTooltip( "Post-process antialiasing over the finished 3D view, on top of (and independent "
+			"from) the hardware MSAA in Video Options. FXAA is a cheap edge smooth that also softens "
+			"the specular/normal-map shimmer MSAA can't touch, at the cost of a slight overall "
+			"softening. HUD and menus are never affected. Non-vanilla; opengl3 only. "
+			"(SMAA/TAA planned - see docs/antialiasing.md.)" );
+	}
+	ImGui::Spacing();
+
 	// Ambient Occlusion (DUDE Phase 3.5). Master toggle only; the tuning sliders live
 	// in the Developer tab (Settings > Developer > Ambient Occlusion), like the shadow
 	// maps and emissive surfaces. Read live by the renderer (no restart).

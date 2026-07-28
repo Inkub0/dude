@@ -277,6 +277,12 @@ idCVar r_glDebugContext( "r_glDebugContext", "0", CVAR_RENDERER | CVAR_BOOL, "En
 idCVar r_postFilmGrain( "r_postFilmGrain", "0.04", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "film grain intensity (0 = off, ~0.05..0.15, max 0.25)", 0.0f, 0.25f );
 idCVar r_postChromaticAberration( "r_postChromaticAberration", "0.2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "chromatic aberration strength (0 = off, ~0.1..0.35, max 0.5)", 0.0f, 0.5f );
 
+// DUDE post-resolve antialiasing over the finished 3D view (before 2D/GUI, HUD
+// unaffected). Separate from the hardware MSAA in r_multiSamples: FXAA also smooths
+// the specular/normal-map shimmer MSAA can't touch. GL3/Vulkan backends only.
+// 0 = off, 1 = FXAA. Higher values reserved for SMAA/TAA (docs/antialiasing.md).
+idCVar r_rhiAA( "r_rhiAA", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "post-resolve antialiasing on the opengl3/Vulkan backend (0 = off, 1 = FXAA)", 0, 1 );
+
 // DUDE Phase 3.5 "specular tuning" enhancement (GL3/Vulkan interaction shader
 // only; inert on the legacy ARB2 path). Defaults reproduce vanilla exactly:
 // r_shading 0 keeps the original N.H specular lookup table, r_specularScale 1

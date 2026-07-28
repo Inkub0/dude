@@ -863,6 +863,7 @@ extern idCVar r_gammaInShader;			// set gamma+brightness in shader instead of mo
 // DUDE non-vanilla post-process effects — GL3/Vulkan backends only, default off
 extern idCVar r_postFilmGrain;			// film grain intensity (0 = off)
 extern idCVar r_postChromaticAberration;	// chromatic aberration strength (0 = off)
+extern idCVar r_rhiAA;					// post-resolve antialiasing (0 = off, 1 = FXAA)
 
 // DUDE Phase 3.5 specular tuning — GL3/Vulkan interaction shader only, vanilla at default
 extern idCVar r_shading;				// 0 = vanilla LUT, 1 = Blinn-Phong, 2 = Phong

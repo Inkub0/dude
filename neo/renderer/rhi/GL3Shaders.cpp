@@ -49,6 +49,7 @@ static const char *gl3BootPrograms[] = {
 	"colorprocess",
 	"environment",
 	"fog",
+	"fxaa",
 	"gammabrightness",
 	"gbuffer",
 	"generic",

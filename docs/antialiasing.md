@@ -1,4 +1,20 @@
-# Antialiasing — post-resolve SMAA (now) + TAA (later)
+# Antialiasing — post-resolve AA (FXAA now, SMAA/TAA later)
+
+## Status
+
+- **FXAA — IMPLEMENTED** as the first filter on the post-resolve rails. Cvar `r_rhiAA`
+  (0 = off, 1 = FXAA), default off, archived, opengl3/Vulkan only. Pass `RB_RHI_AAPass`
+  (`neo/renderer/rhi/RhiBackend.cpp`) runs over the finished 3D view before grain/chroma and
+  2D/GUI; shaders `neo/shaders/fxaa.{vert,frag}` (registered in `gl3BootPrograms[]`); menu combo in
+  the Enhancements tab. Self-contained (no external LUTs), validated + builds.
+- **SMAA 1x — PENDING.** Needs the AreaTex/SearchTex LUT assets; drops onto the same rails as a
+  higher `r_rhiAA` value (see below).
+- **TAA — PENDING.** Reuses the temporal-SSAO machinery; blocked on per-object motion vectors (below).
+
+The sections below are the original design sketch; SMAA/TAA remain the planned upgrades.
+
+---
+
 
 ## Background: what the built-in "Antialiasing" option is
 

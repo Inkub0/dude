@@ -38,6 +38,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 // menu, default off — the fullscreen film-grain / chromatic-aberration pass
 extern idCVar r_postFilmGrain;
 extern idCVar r_postChromaticAberration;
+extern idCVar r_rhiAA;
 
 // DUDE gamma/brightness in shader (RenderSystem_init.cpp). On the core context
 // there is no fixed-function/ARB gamma and SDL3 has no hardware gamma ramp, so
@@ -71,6 +72,92 @@ static void RB_RHI_CopyCurrentRender( const viewDef_t *viewDef ) {
 	globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1, viewDef->viewport.y1,
 		viewDef->viewport.x2 - viewDef->viewport.x1 + 1,
 		viewDef->viewport.y2 - viewDef->viewport.y1 + 1, true );
+}
+
+/*
+=============
+RB_RHI_AAPass
+
+DUDE post-resolve antialiasing (FXAA) over the finished 3D view, run before any
+2D/GUI so the HUD/menus stay crisp (shaders/fxaa.*). Opt-in via r_rhiAA; separate
+from the hardware MSAA in r_multiSamples (which only covers backbuffer geometry
+edges) — FXAA also smooths the specular/normal-map shimmer, at a slight softening.
+Runs before RB_RHI_PostProcess so grain/chroma sit on top of the resolved image.
+Same _currentRender snapshot + fullscreen-quad path as RB_RHI_PostProcess.
+=============
+*/
+static void RB_RHI_AAPass( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( r_rhiAA.GetInteger() <= 0 ) {
+		return;		// off → exact passthrough, skip the copy+draw entirely
+	}
+
+	rhi::ShaderHandle prog = r->LoadShader( "fxaa" );
+	if ( !prog ) {
+		return;
+	}
+
+	// snapshot the finished 3D view (after fog and post-process surfaces)
+	RB_RHI_CopyCurrentRender( viewDef );
+
+	int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	int potW = globalImages->currentRenderImage->uploadWidth;
+	int potH = globalImages->currentRenderImage->uploadHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	// content extent in the oversized POT texture; fxaa.frag samples st * screenCorrection
+	parms.screenCorrection[0] = potW > 0 ? (float)w / potW : 1.0f;
+	parms.screenCorrection[1] = potH > 0 ? (float)h / potH : 1.0f;
+	// one screen texel in that same uv space, for the neighbour taps
+	parms.localParam1[0] = potW > 0 ? 1.0f / potW : 0.0f;
+	parms.localParam1[1] = potH > 0 ? 1.0f / potH : 0.0f;
+
+	// fullscreen NDC quad (identity mvp), st 0..1 with GL bottom-left origin
+	// matching the framebuffer copy
+	idDrawVert quad[4];
+	memset( quad, 0, sizeof( quad ) );
+	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
+	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
+	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
+	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
+	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
+
+	rhi::BufferHandle vb, ib, ub;
+	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
+	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	// the last surface may have left a cropped scissor; cover the whole view
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
+	globalImages->currentRenderImage->Bind();
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = CT_TWO_SIDED;
+	r->BindPipeline( pd );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = 6;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	r->Draw( da );
+
+	backEnd.pc.c_drawElements++;
 }
 
 /*
@@ -1318,6 +1405,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
 		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
 	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView ) {
+		// post-resolve antialiasing (FXAA) first, so film grain / chromatic
+		// aberration are applied on top of the resolved image rather than smoothed
+		RB_RHI_AAPass( r, viewDef );
 		RB_RHI_PostProcess( r, viewDef );
 		// r_ssaoDebug: overlay the AO buffer on top of the finished view
 		RB_RHI_SSAODebugOverlay( r, viewDef );
