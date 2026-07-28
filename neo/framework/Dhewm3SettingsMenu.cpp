@@ -27,6 +27,7 @@ extern idCVar imgui_style;
 
 extern idCVar r_customWidth;
 extern idCVar r_customHeight;
+extern idCVar com_maxFPS;
 
 extern bool R_GetModeInfo( int *width, int *height, int mode );
 
@@ -2090,6 +2091,19 @@ static void DrawVideoOptionsMenu()
 		ImGui::TextDisabled( "Current Resolution: %d x %d", glConfig.vidWidth, glConfig.vidHeight );
 		ImGui::TextDisabled( "Display Size: %d x %d", displayRect.w, displayRect.h );
 	}
+
+	// Frame Rate Cap (com_maxFPS). Read live by the frame loop, so this applies immediately —
+	// no vid_restart. 0 shows as "Uncapped". Most useful with VSync disabled, where it provides
+	// the frame pacing VSync would otherwise give (and sidesteps multi-monitor VSync clamping).
+	int maxFps = com_maxFPS.GetInteger();
+	if ( ImGui::SliderInt( "Frame Rate Cap", &maxFps, 0, 360,
+	                       maxFps <= 0 ? "Uncapped" : "%d FPS", ImGuiSliderFlags_AlwaysClamp ) ) {
+		com_maxFPS.SetInteger( idMath::ClampInt( 0, 1000, maxFps ) );
+	}
+	AddCVarOptionTooltips( com_maxFPS, "0 = uncapped. Paces frames evenly without relying on VSync. "
+	                       "Pair it with VSync disabled — especially on a multi-monitor setup where VSync "
+	                       "locks to the wrong refresh rate. Set it to your monitor's refresh, or a clean "
+	                       "divisor of it (e.g. 72 on a 144 Hz panel)." );
 
 	// MSAA
 	static const char* msaaLevels[] = { "No Antialiasing", "2x", "4x", "8x", "16x" };

@@ -119,6 +119,11 @@ idCVar com_product_lang_ext( "com_product_lang_ext", "1", CVAR_INTEGER | CVAR_SY
 // smooth motion above 60 fps. The simulation itself still steps at USERCMD_HZ. Off by default
 // to keep the faithful, unmodified 60 fps behavior. See idPlayer::InterpolateRenderView().
 idCVar com_interpolate( "com_interpolate", "0", CVAR_BOOL | CVAR_SYSTEM | CVAR_ARCHIVE, "render smoothly above 60fps by interpolating the view between the fixed 60Hz game tics (requires vsync to cap fps)" );
+// DG/DUDE: render-side frame-rate cap. Paces each frame to an even wall-clock interval so
+// motion stays smooth even without a clean vsync — the intended companion to running vsync
+// off (r_swapInterval 0) on a multi-monitor X11 setup where vsync clamps to the wrong
+// (lowest) refresh. 0 = uncapped. Only ever adds delay, never speeds anything up.
+idCVar com_maxFPS( "com_maxFPS", "0", CVAR_INTEGER | CVAR_SYSTEM | CVAR_ARCHIVE, "cap the render frame rate (0 = uncapped). Best paired with vsync off; set it to your monitor's refresh or a clean divisor of it for even, tear-minimized pacing", 0, 1000 );
 
 // in the high-fps branch, the next three values will be set based on com_gameHz
 // here (in the old 60fps-only code) they're const and just to reduce difference to the other branch
@@ -2646,6 +2651,27 @@ void idCommonLocal::Frame( void ) {
 				Com_WaitForNextTicStart();
 			}
 			// else the com_ticNumber has already been updated and it's past time to start the next frame
+		}
+
+		// com_maxFPS: hard upper bound on the render rate. Runs last, after the tic-sync
+		// sleep above, so it can only *add* delay. Paced to an absolute target time (not a
+		// per-frame "sleep N ms") so frames land at even intervals regardless of how long
+		// this frame's work took — that even cadence is what actually looks smooth. Most
+		// useful with vsync off, where nothing else bounds the rate.
+		if ( com_maxFPS.GetInteger() > 0 ) {
+			static double nextFrameStart = 0.0;
+			const double interval = 1000.0 / com_maxFPS.GetFloat();
+			const double now = Sys_MillisecondsPrecise();
+			nextFrameStart += interval;
+			if ( now < nextFrameStart ) {
+				// ahead of schedule: sleep the remainder so frames land on an even cadence
+				Sys_SleepUntilPrecise( nextFrameStart );
+			} else if ( nextFrameStart < now - interval ) {
+				// first frame, or already slower than the cap (a hitch, or vsync / the tic
+				// wait is pacing below com_maxFPS): resync the baseline so we neither add
+				// delay this frame nor sprint through a burst of catch-up frames next.
+				nextFrameStart = now;
+			}
 		}
 
 		D3P_FRAMEMARK // tell profiler (tracy) that this is the end of a frame
