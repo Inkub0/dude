@@ -72,10 +72,15 @@ struct RenderParams {
 								// normalizer; unused for the 2D path). The 2D lookup
 								// reuses the light-projection texgen (S/T/Q + falloff);
 								// the cube lookup uses the world-space light->frag dir.
+
+	float	occlusionParms[4];	// DUDE material AO map (docs/occlusion-maps.md): x = enable
+								// (this surface has an occlusion stage and r_occlusionMaps is
+								// on), y = ambient-term strength, z = direct-diffuse strength,
+								// w unused. The map is sampled on unit 10 with the diffuse UV.
 };
 
-// 3 mat4 (192) + 36 vec4 (576) = 768 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 768, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 3 mat4 (192) + 37 vec4 (592) = 784 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 784, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

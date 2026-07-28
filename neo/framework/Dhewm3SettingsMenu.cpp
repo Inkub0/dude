@@ -2258,19 +2258,23 @@ struct EnhancementPreset {
 	// which use stencil shadows, but carried for determinism.
 	bool  shadowMapSizeScale;       // r_shadowMapSizeScale: scale each light's res with its radius
 	float shadowMapSizeScaleRadius; // r_shadowMapSizeScaleRadius: pivot radius that gets the base res
+	// baked ambient-occlusion maps (r_occlusionMaps). Appended (see note above) to keep the
+	// table's positional initializers stable. On for every tier except Potato; inert on stock
+	// assets and on the legacy backend, so it only shows where baked maps exist (chars, props).
+	bool  occlusionMaps;            // r_occlusionMaps
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
 // flipping a feature on by hand from those tiers stays affordable and detection
 // stays unambiguous. High == shipped defaults (see anchor note above).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad
-	{ "Potato",       false, false, false, false, false,  0.5f, 4,   1,   false, true,  512,  512,  2,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f },
-	{ "Low",          true,  false, false, false, false,  0.5f, 4,   1,   false, true,  512,  512,  2,  16,   16,   0.0f,  0.0f,  1.0f, 1,  1.8f, 62.0f, true, 380.0f },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 4,   1,   false, true,  512,  512,  2,  16,   16,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 380.0f },
-	{ "High",         true,  false, true,  true,  true,   0.5f, 6,   1,   true,  true,  1024, 1200, 6,  64,   24,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 380.0f },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 8,   2,   true,  true,  2048, 2048, 8,  96,   32,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 340.0f },
-	{ "Ultra Nightmare", true, true, true, true,  true,   1.0f, 8,   4,   true,  true,  2048, 2048, 12, 128,  48,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 300.0f },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl
+	{ "Potato",       false, false, false, false, false,  0.5f, 4,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false },
+	{ "Low",          true,  false, false, false, false,  0.5f, 4,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 1,  1.8f, 62.0f, true, 380.0f, true  },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 4,   1,   false, true,  512,  512,  5,  16,   16,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 380.0f, true  },
+	{ "High",         true,  false, true,  true,  true,   0.5f, 6,   1,   true,  true,  1024, 1200, 6,  64,   24,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 380.0f, true  },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 8,   2,   true,  true,  2048, 2048, 8,  96,   32,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 340.0f, true  },
+	{ "Ultra Nightmare", true, true, true, true,  true,   1.0f, 8,   4,   true,  true,  2048, 2048, 12, 128,  48,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 300.0f, true  },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2303,6 +2307,7 @@ static void ApplyEnhancementPreset( int idx )
 	r_shadowMapPointLimit.SetInteger( p.shadowMapPointLimit );
 	r_shadowMapSizeScale.SetBool( p.shadowMapSizeScale );
 	r_shadowMapSizeScaleRadius.SetFloat( p.shadowMapSizeScaleRadius );
+	r_occlusionMaps.SetBool( p.occlusionMaps );
 
 	r_emissiveLightLimit.SetInteger( p.emissiveLightLimit );
 	r_postFilmGrain.SetFloat( p.filmGrain );
@@ -2339,6 +2344,7 @@ static int DetectEnhancementPreset()
 			r_shadowMapPointLimit.GetInteger() == p.shadowMapPointLimit &&
 			r_shadowMapSizeScale.GetBool()     == p.shadowMapSizeScale &&
 			idMath::Fabs( r_shadowMapSizeScaleRadius.GetFloat() - p.shadowMapSizeScaleRadius ) < 0.5f &&
+			r_occlusionMaps.GetBool()          == p.occlusionMaps &&
 			r_emissiveLightLimit.GetInteger()  == p.emissiveLightLimit &&
 			idMath::Fabs( r_postFilmGrain.GetFloat() - p.filmGrain ) < 0.005f &&
 			idMath::Fabs( r_postChromaticAberration.GetFloat() - p.chromaticAberration ) < 0.005f &&
@@ -2443,6 +2449,20 @@ static void DrawEnhancementsMenu()
 			"~4x cheaper and a little softer; Full is sharpest and most expensive; 3/4 and 4/5 sit "
 			"between. Lower this first if SSAO costs too much." );
 		ImGui::EndDisabled();
+
+		// Baked occlusion maps: independent of SSAO (works with it off). Inert unless a
+		// material ships an occlusionmap stage, which no stock Doom 3 asset does. Strength
+		// sliders live in the Developer tab, like the SSAO tuning.
+		bool oclMaps = r_occlusionMaps.GetBool();
+		if ( ImGui::Checkbox( "Baked Occlusion Maps", &oclMaps ) ) {
+			r_occlusionMaps.SetBool( oclMaps );
+		}
+		AddTooltip( "Use per-material baked ambient-occlusion textures (the `occlusionmap` material "
+			"stage) to darken creases in the ambient and direct-light diffuse, the same way SSAO "
+			"does but from art-authored maps. Only affects materials that ship an occlusion map "
+			"(no stock Doom 3 asset does, so this is inert on the base game and aimed at mods / "
+			"custom art). Complements SSAO; strength sliders are in the Developer tab. Non-vanilla; "
+			"opengl3 only." );
 	}
 
 	// Shadows (DUDE Phase 3.5). Hand-drawn so the sub-settings are visibly grouped
@@ -2963,6 +2983,41 @@ static void DrawShadowDebugMenu()
 		"anti-plastic look; a mild deviation from vanilla). Scaled by Direct Light AO. Off by default." );
 
 	ImGui::EndDisabled();	// ssao on
+
+	// Baked occlusion maps (docs/occlusion-maps.md). Independent of SSAO (works with it off);
+	// still enhancement-backend only, covered by the outer BeginDisabled. Mirrors the
+	// Enhancements-tab toggle and adds the two strength sliders.
+	ImGui::SeparatorText( "Occlusion Maps" );
+	{
+		bool oclMaps = r_occlusionMaps.GetBool();
+		if ( ImGui::Checkbox( "Baked Occlusion Maps (r_occlusionMaps)", &oclMaps ) ) {
+			r_occlusionMaps.SetBool( oclMaps );
+		}
+		AddTooltip( "Per-material baked ambient-occlusion textures (the `occlusionmap` material "
+			"stage), applied to the ambient and direct-light diffuse like SSAO. Inert unless a "
+			"material ships an occlusion map; no stock Doom 3 asset does, so this targets mods." );
+
+		ImGui::BeginDisabled( !r_occlusionMaps.GetBool() );
+		float oclScale = r_occlusionMapScale.GetFloat();
+		if ( ImGui::SliderFloat( "AO Map Strength", &oclScale, 0.0f, 1.0f, "%.2f" ) ) {
+			r_occlusionMapScale.SetFloat( oclScale );
+		}
+		AddTooltip( "How strongly the occlusion map darkens the ambient term. 0 = off, 1 = the map "
+			"at full darkening. Default 1.0." );
+		ImGui::SameLine();
+		if ( ImGui::SmallButton( "reset##oclscale" ) ) { r_occlusionMapScale.SetFloat( 1.0f ); }
+
+		float oclDirect = r_occlusionMapDirect.GetFloat();
+		if ( ImGui::SliderFloat( "Direct Light AO (map)", &oclDirect, 0.0f, 1.0f, "%.2f" ) ) {
+			r_occlusionMapDirect.SetFloat( oclDirect );
+		}
+		AddTooltip( "How strongly the occlusion map darkens direct (dynamic) light's diffuse, as a "
+			"fraction of AO Map Strength. Doom 3 is mostly dynamic light, so this is what makes the "
+			"map visible; lower it if AO looks baked-in under moving lights. 0 = ambient-only. Default 0.9." );
+		ImGui::SameLine();
+		if ( ImGui::SmallButton( "reset##ocldirect" ) ) { r_occlusionMapDirect.SetFloat( 0.9f ); }
+		ImGui::EndDisabled();
+	}
 
 	ImGui::EndDisabled();	// backend supported
 }

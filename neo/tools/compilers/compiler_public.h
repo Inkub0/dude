@@ -46,6 +46,10 @@ void Dmap_f( const idCmdArgs &args );
 void RenderBump_f( const idCmdArgs &args );
 void RenderBumpFlat_f( const idCmdArgs &args );
 
+// DUDE: ambient-occlusion map baking (docs/occlusion-maps.md)
+void BakeAO_f( const idCmdArgs &args );
+void BakeAOFolder_f( const idCmdArgs &args );
+
 // AAS file compiler
 void RunAAS_f( const idCmdArgs &args );
 void RunAASDir_f( const idCmdArgs &args );

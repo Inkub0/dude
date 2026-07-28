@@ -825,6 +825,13 @@ set(src_renderbump
 
 add_globbed_headers(src_renderbump "tools/compilers/renderbump")
 
+# DUDE: ambient-occlusion map baker (docs/occlusion-maps.md)
+set(src_aobake
+	tools/compilers/aobake/aobake.cpp
+)
+
+add_globbed_headers(src_aobake "tools/compilers/aobake")
+
 set(src_snd
 	sound/snd_cache.cpp
 	sound/snd_decoder.cpp
@@ -1117,6 +1124,7 @@ set(src_core
 	${src_aas}
 	${src_roq}
 	${src_renderbump}
+	${src_aobake}
 	${src_snd}
 	${src_ui}
 	${src_tools}
@@ -1385,6 +1393,10 @@ endif()
 	set_target_properties(${DHEWM3BINARY} PROPERTIES LINK_FLAGS "${ldflags}")
 	set_target_properties(${DHEWM3BINARY} PROPERTIES MACOSX_BUNDLE_INFO_PLIST ${PROJECT_SOURCE_DIR}/sys/osx/Info.plist)
 
+	# std::thread in the offline AO baker needs a threading runtime linked (Threads::Threads maps to
+	# -pthread where required; a no-op on glibc >= 2.34 where pthread is folded into libc).
+	find_package(Threads REQUIRED)
+
 	target_link_libraries(${DHEWM3BINARY}
 		idlib
 		${OPENAL_LIBRARY}
@@ -1392,6 +1404,7 @@ endif()
 		${SDLx_LIBRARY}
 		${sys_libs}
 		${vulkan_libs}
+		Threads::Threads
 	)
 
 	if(NOT APPLE AND NOT WIN32)

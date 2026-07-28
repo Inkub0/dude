@@ -13,6 +13,7 @@ SAMPLER_BINDING(6) uniform sampler2D u_specularTable;   // specular falloff LUT
 SAMPLER_BINDING(7) uniform sampler2DShadow u_shadowMap; // 2D depth map (projected/spot light)
 SAMPLER_BINDING(8) uniform samplerCubeShadow u_shadowCube; // cube depth map (point light)
 SAMPLER_BINDING(9) uniform sampler2D u_ssao;            // DUDE GTAO buffer (R = ambient visibility)
+SAMPLER_BINDING(10) uniform sampler2D u_occlusionMap;   // DUDE baked AO map (R = visibility)
 
 VARY(0) in vec3 var_TexLightVec;
 VARY(1) in vec2 var_TexBump;
@@ -163,6 +164,15 @@ void main() {
 		if ( u_localParam1.y > 0.5 ) {
 			spec.rgb *= aoDirect;
 		}
+	}
+
+	// DUDE baked ambient-occlusion map (docs/occlusion-maps.md). Same rationale as SSAO on
+	// direct light: a baked-dark crease can't be re-lit by a moving light, so the map's pull
+	// on direct diffuse is scaled (u_occlusionParms.z, from r_occlusionMapScale * direct) and
+	// stays below full by default. Sampled with the diffuse UV; stacks with SSAO when both on.
+	if ( u_occlusionParms.x > 0.5 ) {
+		float aoMap = texture( u_occlusionMap, var_TexDiffuse ).r;
+		diffuse.rgb *= mix( 1.0, aoMap, u_occlusionParms.z );
 	}
 
 	vec4 color = spec * specMap + diffuse;

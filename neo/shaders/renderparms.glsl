@@ -61,4 +61,8 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // w = light range (point-cube radial normalizer). The 2D
 	                            // path reuses the light-projection texgen (S/T/Q + falloff);
 	                            // the cube path uses the world-space light->frag direction.
+
+	vec4 u_occlusionParms;       // DUDE material AO map (docs/occlusion-maps.md):
+	                            // x = enable, y = ambient strength, z = direct-diffuse
+	                            // strength, w unused. Map sampled on unit 10 (diffuse UV).
 };

@@ -8,6 +8,7 @@ SAMPLER_BINDING(2) uniform sampler2D u_lightFalloff;
 SAMPLER_BINDING(3) uniform sampler2D u_lightProjection;
 SAMPLER_BINDING(4) uniform sampler2D u_diffuseMap;
 SAMPLER_BINDING(9) uniform sampler2D u_ssao;   // DUDE GTAO buffer (R = ambient visibility)
+SAMPLER_BINDING(10) uniform sampler2D u_occlusionMap; // DUDE baked AO map (R = visibility)
 
 VARY(0) in vec2 var_TexBump;
 VARY(1) in vec2 var_TexDiffuse;
@@ -62,6 +63,15 @@ void main() {
 		float ao = texture( u_ssao, gl_FragCoord.xy * u_localParam0.zw ).r;
 		ao = mix( u_localParam0.y, 1.0, ao );
 		outRgb *= ao;
+	}
+
+	// DUDE baked ambient-occlusion map (docs/occlusion-maps.md). A per-material AO texture
+	// (from the surface's occlusionmap stage), applied to the ambient term exactly like the
+	// screen-space SSAO above; the two stack multiplicatively when both are on. Sampled with
+	// the diffuse UV. u_occlusionParms.x gates it, .y is the strength (mix toward the map).
+	if ( u_occlusionParms.x > 0.5 ) {
+		float aoMap = texture( u_occlusionMap, var_TexDiffuse ).r;
+		outRgb *= mix( 1.0, aoMap, u_occlusionParms.y );
 	}
 
 	fragColor = vec4( outRgb, 1.0 );

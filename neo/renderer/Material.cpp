@@ -855,6 +855,13 @@ void idMaterial::ParseBlend( idLexer &src, shaderStage_t *stage ) {
 		stage->lighting = SL_SPECULAR;
 		return;
 	}
+	// DUDE: baked ambient-occlusion map (non-vanilla enhancement). Tagged as its own
+	// lighting stage so the ambient/interaction passes can ignore it the same way they
+	// ignore the other lighting maps; only the GL3/Vulkan backends actually sample it.
+	if ( !token.Icmp( "occlusionmap" ) ) {
+		stage->lighting = SL_OCCLUSION;
+		return;
+	}
 
 	srcBlend = NameToSrcBlendMode( token );
 
@@ -2041,6 +2048,18 @@ void idMaterial::ParseMaterial( idLexer &src ) {
 			newSrc.FreeSource();
 			continue;
 		}
+		// DUDE: occlusionmap shortcut (non-vanilla enhancement; baked ambient occlusion).
+		// Mirrors the diffuse/specular shortcuts above. Inert on the legacy backend and
+		// on stock assets, which never declare it (docs/occlusion-maps.md).
+		else if ( !token.Icmp( "occlusionmap" ) ) {
+			str = R_ParsePastImageProgram( src );
+			idStr::snPrintf( buffer, sizeof( buffer ), "blend occlusionmap\nmap %s\n}\n", str );
+			newSrc.LoadMemory( buffer, strlen(buffer), "occlusionmap" );
+			newSrc.SetFlags( LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_NOSTRINGESCAPECHARS | LEXFL_ALLOWPATHNAMES );
+			ParseStage( newSrc, trpDefault );
+			newSrc.FreeSource();
+			continue;
+		}
 		// DECAL_MACRO for backwards compatibility with the preprocessor macros
 		else if ( !token.Icmp( "DECAL_MACRO" ) ) {
 			// polygonOffset
@@ -2713,6 +2732,25 @@ idMaterial::GetBumpStage
 const shaderStage_t *idMaterial::GetBumpStage( void ) const {
 	for ( int i = 0 ; i < numStages ; i++ ) {
 		if ( stages[i].lighting == SL_BUMP ) {
+			return &stages[i];
+		}
+	}
+	return NULL;
+}
+
+/*
+===================
+idMaterial::GetOcclusionStage
+
+DUDE: first baked ambient-occlusion (SL_OCCLUSION) stage, or NULL. Non-vanilla; the
+GL3/Vulkan interaction+ambient passes multiply the ambient (and, scaled, direct-light
+diffuse) by this map, reusing the SSAO application path. Returns NULL on every stock
+material, so the feature is inert on the base game (docs/occlusion-maps.md).
+===================
+*/
+const shaderStage_t *idMaterial::GetOcclusionStage( void ) const {
+	for ( int i = 0 ; i < numStages ; i++ ) {
+		if ( stages[i].lighting == SL_OCCLUSION ) {
 			return &stages[i];
 		}
 	}

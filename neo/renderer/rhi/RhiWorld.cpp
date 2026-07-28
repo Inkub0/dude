@@ -24,6 +24,9 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "renderer/rhi/RHI.h"
 #include "renderer/rhi/GL3Local.h"
 #include "renderer/rhi/RenderParams.h"
+#include "framework/FileSystem.h"
+#include "framework/DeclSkin.h"					// idDeclSkin (entity skin -> AO name for lazy bake)
+#include "tools/compilers/aobake/aobake.h"		// AO_BakeModelToCache (lazy occlusion-map baking)
 
 extern idCVar r_useCarmacksReverse;		// defined in RenderSystem_init.cpp, no tr_local decl
 
@@ -246,6 +249,150 @@ static rhi::RenderTargetHandle rhiNormalRT = 0;		// RGBA8 view-normal + depth (c
 static int  rhiNormalW = 0, rhiNormalH = 0;			// full view resolution
 static bool rhiNormalReadyThisView = false;			// the normal buffer was produced for this view
 
+// ---- per-surface occlusion-map auto-load cache (docs/occlusion-maps.md) ----
+// Keyed by (render model, surface index) -- stable per model surface and shared across every
+// instance, so it is immune to skins and to materials shared across different models (the
+// whack-a-mole the material-name scheme hit). NOTE: the draw-time surf->geo is a per-light
+// culled copy (lightTris), NOT the model surface geometry, so we identify the surface by
+// matching the (skin-remapped) draw material back to a model surface instead. Each entry
+// caches the resolved AO idImage (NULL = "checked, none"); idImage objects persist across
+// vid_restart, so caching the pointer is safe. bakeAO* clears this via R_ResetOcclusionMapCache.
+struct rhiAoCacheEntry_t { const void *model; int surfIndex; idImage *img; };
+static idList<rhiAoCacheEntry_t> rhiAoCache;
+static idHashIndex               rhiAoCacheHash;
+static idStrList                 rhiAoBakedModels;	// model|skin the lazy path already attempted
+
+void R_ResetOcclusionMapCache( void ) {
+	rhiAoCache.Clear();
+	rhiAoCacheHash.Free();
+	rhiAoBakedModels.Clear();
+}
+
+static bool RB_RHI_AoFileExists( const char *path ) {
+	ID_TIME_T ts;
+	return fileSystem->ReadFile( path, NULL, &ts ) >= 0;
+}
+
+// Load a resolved (extensionless) AO image name, treating the default checkerboard as "none".
+static idImage *RB_RHI_LoadAo( const char *name ) {
+	idImage *img = globalImages->ImageFromFile( name, TF_DEFAULT, true, TR_CLAMP, TD_HIGH_QUALITY );
+	return ( img == globalImages->defaultImage ) ? NULL : img;
+}
+
+// Mod-friendly "_ao" naming convention (docs/occlusion-maps.md): if the surface's diffuse map
+// is textures/x/foo (or foo_d), and a sibling textures/x/foo_ao (.tga/.dds) exists, use it.
+// Lets a modpack drop in AO textures without editing materials. Returns NULL if none found.
+static idImage *RB_RHI_ModAoConvention( const idMaterial *mat ) {
+	const char *diffuse = NULL;
+	for ( int i = 0; i < mat->GetNumStages(); i++ ) {
+		const shaderStage_t *st = mat->GetStage( i );
+		if ( st->lighting == SL_DIFFUSE && st->texture.image ) {
+			diffuse = st->texture.image->imgName.c_str();
+			break;
+		}
+	}
+	if ( !diffuse || !diffuse[0] || strchr( diffuse, '(' ) ) {
+		return NULL;		// no plain diffuse (image programs like addnormals() are skipped)
+	}
+
+	idStr base = diffuse;
+	base.StripFileExtension();
+	idStr candidates[2];
+	int n = 0;
+	candidates[n++] = base + "_ao";			// foo -> foo_ao
+	if ( base.Length() > 2 && idStr::Icmp( base.Right( 2 ).c_str(), "_d" ) == 0 ) {
+		candidates[n++] = base.Left( base.Length() - 2 ) + "_ao";	// foo_d -> foo_ao
+	}
+	for ( int c = 0; c < n; c++ ) {
+		if ( RB_RHI_AoFileExists( ( candidates[c] + ".tga" ).c_str() )
+		  || RB_RHI_AoFileExists( ( candidates[c] + ".dds" ).c_str() ) ) {
+			return RB_RHI_LoadAo( candidates[c].c_str() );
+		}
+	}
+	return NULL;
+}
+
+// Resolve (and cache) this surface's occlusion map. Order: a mod-supplied <diffuse>_ao texture,
+// else our generated per-model-surface bake (generated/aomaps/<model>_sN), optionally lazily
+// baked when r_occlusionMapsAutoBake is on. An explicit occlusionmap material stage is handled
+// by the caller and takes priority. Returns NULL when none.
+//
+// `mat` is the draw material (already skin/customShader remapped). We find which model surface
+// it came from by remapping each surface's material the same way and matching -- reliable at
+// draw time, where surf->geo is a per-light culled copy that never matches model geometry.
+//
+// `model` is the base model (stable, names the generated path); `snapshot` is the entity's
+// instantiated dynamic model when `model` is dynamic (an MD5 character), else NULL. The base
+// MD5 model exposes no surfaces, so for it we walk the snapshot and key by each surface's
+// persistent id (== mesh index) -- exactly what AO_BakeModelToCache wrote for the bind pose.
+// Static models are walked directly and keyed by surface position, as before.
+static idImage *RB_RHI_SurfaceOcclusion( const idRenderModel *model, const idRenderModel *snapshot,
+                                         const idMaterial *mat,
+                                         const idDeclSkin *skin, const idMaterial *customShader ) {
+	if ( !model || !mat ) {
+		return NULL;
+	}
+	const idRenderModel *enumModel = model;
+	bool keyById = false;
+	if ( model->IsDynamicModel() != DM_STATIC && snapshot ) {
+		enumModel = snapshot;		// base MD5 model has no surfaces; the snapshot carries them
+		keyById = true;
+	}
+	int surfIndex = -1;
+	for ( int s = 0; s < enumModel->NumSurfaces(); s++ ) {
+		const modelSurface_t *ms = enumModel->Surface( s );
+		const idMaterial *sm = ms->shader;
+		if ( !sm ) {
+			continue;
+		}
+		sm = R_RemapShaderBySkin( sm, skin, customShader );
+		if ( sm && idStr::Icmp( sm->GetName(), mat->GetName() ) == 0 ) {
+			surfIndex = keyById ? ms->id : s;
+			break;
+		}
+	}
+	if ( surfIndex < 0 ) {
+		return NULL;
+	}
+
+	const int key = rhiAoCacheHash.GenerateKey( (int)( ( (size_t)model >> 4 ) & 0x7fffffff ), surfIndex );
+	for ( int i = rhiAoCacheHash.First( key ); i != -1; i = rhiAoCacheHash.Next( i ) ) {
+		if ( rhiAoCache[i].model == model && rhiAoCache[i].surfIndex == surfIndex ) {
+			return rhiAoCache[i].img;
+		}
+	}
+
+	idImage *img = RB_RHI_ModAoConvention( mat );	// (2) modpack _ao override
+
+	if ( !img ) {									// (3) our generated per-model-surface bake
+		idStr path;
+		AO_GeneratedPathForSurface( model->Name(), surfIndex, path );
+		bool exists = RB_RHI_AoFileExists( path.c_str() );
+
+		// lazy bake (dev, r_occlusionMapsAutoBake): bake the whole model once per model+skin
+		// (through the entity's skin, for the cavity bump), then re-probe. CPU + filesystem
+		// only, so it's safe here; the one-time hitch is the documented cost of the toggle.
+		idStr bakedKey = idStr( model->Name() ) + "|" + ( skin ? skin->GetName() : "" );
+		if ( !exists && r_occlusionMapsAutoBake.GetBool()
+		     && rhiAoBakedModels.FindIndex( bakedKey ) < 0 ) {
+			rhiAoBakedModels.Append( bakedKey );
+			AO_BakeModelToCache( model, skin );
+			exists = RB_RHI_AoFileExists( path.c_str() );
+		}
+		if ( exists ) {
+			img = RB_RHI_LoadAo( path.c_str() );
+		}
+	}
+
+	rhiAoCacheEntry_t e;
+	e.model = model;
+	e.surfIndex = surfIndex;
+	e.img = img;
+	const int idx = rhiAoCache.Append( e );
+	rhiAoCacheHash.Add( key, idx );
+	return img;
+}
+
 /*
 ===================
 RB_RHI_DrawInteraction
@@ -369,6 +516,49 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		}
 	}
 
+	// DUDE material AO map (docs/occlusion-maps.md). A per-surface baked occlusion texture
+	// (the material's `occlusionmap` stage) darkens the ambient term, and -- scaled by
+	// r_occlusionMapDirect -- the direct-light diffuse, reusing the SSAO application path in
+	// ambientlight.frag / interaction.frag. Independent of SSAO (works with it off). Bound on
+	// unit 10 below; u_occlusionParms = (enable, ambient strength, direct strength, unused).
+	// GetOcclusionStage() is NULL on every stock material, so this stays inert on the base game.
+	idImage *occlusionImage = NULL;
+	if ( r_occlusionMaps.GetBool() && R_BackendSupportsEnhancements() && din->surf->material ) {
+		const idMaterial *mat = din->surf->material;
+		const shaderStage_t *ocl = mat->GetOcclusionStage();
+		if ( ocl && ocl->texture.image ) {
+			// explicit occlusionmap stage (modpack-authored) always wins
+			const float *regs = din->surf->shaderRegisters;
+			if ( !regs || regs[ocl->conditionRegister] != 0.0f ) {
+				occlusionImage = ocl->texture.image;
+			}
+		} else {
+			// no explicit stage: auto-load a baked map from generated/aomaps, but only for
+			// model-entity surfaces (props/NPCs) -- never the static world BSP, matching the
+			// "give kick to objects, not map geometry" intent (docs/occlusion-maps.md). This
+			// also contains the material-name keying's blast radius to non-world surfaces.
+			const idRenderEntityLocal *redef = din->surf->space ? din->surf->space->entityDef : NULL;
+			const bool worldSurf = redef && redef->parms.hModel
+			    && redef->parms.hModel->IsStaticWorldModel();
+			if ( redef && !worldSurf ) {
+				// redef->dynamicModel is this frame's instantiated snapshot for MD5/dynamic
+				// entities (NULL for static models); the resolver needs it to enumerate the
+				// surfaces the base MD5 model doesn't expose.
+				occlusionImage = RB_RHI_SurfaceOcclusion( redef->parms.hModel, redef->dynamicModel,
+				                                          mat, redef->parms.customSkin,
+				                                          redef->parms.customShader );
+			}
+		}
+	}
+	if ( occlusionImage ) {
+		const float scale = idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapScale.GetFloat() );
+		parms.occlusionParms[0] = 1.0f;
+		parms.occlusionParms[1] = scale;	// ambient-term strength (ambientlight.frag reads .y)
+		// direct-diffuse strength (interaction.frag reads .z); left 0 on the ambient pass
+		parms.occlusionParms[2] = din->ambientLight ? 0.0f
+			: scale * idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapDirect.GetFloat() );
+	}
+
 	// texture units exactly as RB_ARB2_DrawInteraction / the README table
 	RB_RHI_BindUnit( 0, din->ambientLight ? globalImages->ambientNormalMap : globalImages->normalCubeMapImage );
 	RB_RHI_BindUnit( 1, din->bumpImage );
@@ -377,6 +567,12 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	RB_RHI_BindUnit( 4, din->diffuseImage );
 	RB_RHI_BindUnit( 5, din->specularImage );
 	RB_RHI_BindUnit( 6, globalImages->specularTableImage );
+	// unit 10: per-material baked occlusion map (u_occlusionMap). Only bound when this
+	// surface has one and r_occlusionMaps is on; the shader gates on u_occlusionParms.x,
+	// so other draws simply don't sample it. (Unit 9 = SSAO is bound once in DrawWorld.)
+	if ( occlusionImage ) {
+		RB_RHI_BindUnit( 10, occlusionImage );
+	}
 
 	rhi::BufferHandle ub;
 	int uniOfs = ictx.r->AllocUniforms( &parms, sizeof( parms ), &ub );

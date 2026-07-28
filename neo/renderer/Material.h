@@ -174,11 +174,16 @@ typedef struct {
 } textureStage_t;
 
 // the order BUMP / DIFFUSE / SPECULAR is necessary for interactions to draw correctly on low end cards
+// SL_OCCLUSION must stay last: SortInteractionStages() bubble-sorts a bump group by this
+// enum's value, so a higher number keeps the occlusion stage after specular and leaves the
+// low-end BUMP/DIFFUSE/SPECULAR ordering untouched. It's a non-vanilla enhancement stage
+// (baked ambient-occlusion map); the legacy interaction/ambient passes ignore it (docs/occlusion-maps.md).
 typedef enum {
 	SL_AMBIENT,						// execute after lighting
 	SL_BUMP,
 	SL_DIFFUSE,
-	SL_SPECULAR
+	SL_SPECULAR,
+	SL_OCCLUSION					// DUDE: baked AO map, consumed only by the enhancement backends
 } stageLighting_t;
 
 // cross-blended terrain textures need to modulate the color by
@@ -374,6 +379,11 @@ public:
 						// get the first bump map stage, or NULL if not present.
 						// used for bumpy-specular
 	const shaderStage_t *GetBumpStage( void ) const;
+
+						// DUDE: first baked ambient-occlusion (SL_OCCLUSION) stage, or NULL.
+						// A non-vanilla enhancement; only the GL3/Vulkan interaction+ambient
+						// passes read it (docs/occlusion-maps.md). NULL on all stock assets.
+	const shaderStage_t *GetOcclusionStage( void ) const;
 
 						// returns true if the material will draw anything at all.  Triggers, portals,
 						// etc, will not have anything to draw.  A not drawn surface can still castShadow,

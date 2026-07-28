@@ -36,6 +36,7 @@ Design decisions taken:
 | smoke dark-blend | off | off | off | off | on | on |
 | emissive surfaces | off | off | on | on | on | on |
 | SSAO | off | off | on | on | on | on |
+| baked AO maps | off | on | on | on | on | on |
 | shadow mapping | off (stencil) | off (stencil) | on | on | on | on |
 | specular shading | vanilla LUT | Blinn-Phong | Blinn-Phong | Blinn-Phong | Blinn-Phong | Blinn-Phong |
 | specular scale | 1.0 | 1.8 | 1.8 | 1.8 | 1.8 | 1.8 |
@@ -44,7 +45,7 @@ Design decisions taken:
 | SSAO slices / steps | — | — | 4 / 1 | 6 / 1 | 8 / 2 | 8 / 4 |
 | SSAO normal G-buffer | — | — | off | on | on | on |
 | shadow 2D / cube res | — | — | 512 / 512 | 1024 / 1200 | 2048 / 2048 | 2048 / 2048 |
-| cube PCF taps | — | — | 2 | 6 | 8 | 12 |
+| cube PCF taps | — | — | 5 | 6 | 8 | 12 |
 | point-light budget | — | — | 16 | 64 | 96 | 128 (all) |
 | shadow size-scale | on* | on* | on | on | on | on |
 | size-scale pivot radius | 380* | 380* | 380 | 380 | 340 | 300 |
@@ -103,3 +104,84 @@ Notes: shadow **mapping** is a net win here (~1.3 ms cheaper than the stencil fa
 it isn't a cost to cut. SSAO is the most preset-sensitive knob — half-res 6/1 vs full-res
 with more samples spans a wide range, so it should drive most of the difference between
 tiers.
+
+## Bake AO for every possible asset  **[DONE — characters/props/weapons shipped 2026-07-28]**
+
+Shipped as three loadable pk4s in the base dir: `z_baked_ao.pk4` (characters/monsters, 346 maps),
+`z_baked_ao_props.pk4` (mapobjects props, 1724), `z_baked_ao_weapons.pk4` (weapons view+world+static,
+149) — ~2219 8-bit-grayscale maps, ~98 MB total. Baked via the now-multithreaded baker through
+`./bake_ao.sh` (isolates fs_configpath so the headless run never clobbers video/sound cvars). The
+original plan/considerations kept below for reference.
+
+
+The occlusion-map baker (docs/occlusion-maps.md) is proven on individual props (file cabinet,
+barrels). Next, do a **mass bake** so the generated/aomaps tree covers everything, rather than
+baking assets one at a time as they come up.
+
+Goal: one command (e.g. `bakeAOAll`, or `bakeAOFolder models/mapobjects`) that walks every
+bakeable static model and writes `generated/aomaps/<model>_s<N>.tga` for each drawn surface.
+Because keying is per model+surface (skin/material independent), one pass covers all skins and
+all instances — no per-map or per-skin work.
+
+Scope / considerations when we do it:
+- **Include:** static props under `models/mapobjects/**` (`.lwo`/`.ase`). These are the win.
+- **Exclude:** MD5 characters (needs bind-pose support — separate TODO), the static world BSP
+  (gated off at runtime anyway), and anything with only tiling/overlapping UVs (bake is inert
+  there — the modular furniture; harmless but wasted files).
+- **Uppercase `.ASE` — NO fix needed (verified 2026-07-28):** an earlier note claimed
+  `bakeAOFolder` misses uppercase `.ASE`. Not true — `GetFileList` matches extensions with
+  `idStr::Icmp` (case-insensitive) for pk4 files, and the engine lowercases the model name, so
+  `turinal.ASE` bakes fine → `turinal_s0.tga` (empirical: `bakeAOFolder models/mapobjects/washroom`
+  reported "baked 14 of 14" including the one `.ASE`). Do **not** add `"ASE"` to the exts array —
+  it would double-list (hence double-bake) every `.ase`/`.ASE` file.
+- **Cost:** was ~10–35 s per model at 256 rays. **Baker is now multithreaded** (per-texel across
+  all HW threads, `r_occlusionMapBakeThreads`, ~16.5× on a 24-thread Zen 5), so the full
+  `models/mapobjects` pass at 128 rays is ~10 min, not an afternoon.
+- **Shipping:** decide whether to commit/ship the generated tree (pk4) or leave it to users /
+  the lazy `r_occlusionMapsAutoBake` path. A shipped tree = zero first-load hitch.
+- **Dedup:** a folder may hold model variants sharing geometry; per-model keying still gives each
+  its own file (fine, just disk). No correctness issue.
+
+Not urgent — the runtime auto-loads whatever exists and falls back cleanly, so this can be a
+single batch session whenever we want full coverage.
+
+## Phase 4 — investigate Vulkan / GPU-accelerated AO baking  **[FUTURE — investigate]**
+
+The CPU baker is now multithreaded (`r_occlusionMapBakeThreads`, ~16.5× on a 24-thread Zen 5), but
+it still ray-casts on the CPU — the full props pass is ~16 min, characters were ~80 min. A GPU path
+could drop that to seconds / tens of seconds and make iterative re-bakes (tuning rays/contrast/detail)
+painless. Tie this to the Vulkan raster port (docs/vulkan-port.md) — do it once that backend's
+device/allocator/pipeline infra exists to reuse.
+
+Approaches, in rough order of payoff vs. effort:
+- **Vulkan compute port of the current grid ray-cast.** Upload the triangle soup + uniform grid (or a
+  BVH) to SSBOs, dispatch one invocation per covered texel, and port `AO_TraceNearest`, the
+  cosine-weighted Hammersley hemisphere, distance falloff, contrast, and the bump-map cavity term to
+  GLSL. Runs on any Vulkan 1.1 GPU. Most reuse of the existing algorithm.
+- **Hardware ray tracing** (`VK_KHR_acceleration_structure` + `rayQueryEXT` in a compute shader): build
+  a BVH over the model's triangles and trace the hemisphere rays in hardware. Ideal on RT-capable GPUs
+  (the dev box is an RTX 30-series / GA102). Keep the compute or CPU path as the fallback for non-RT
+  hardware.
+- **Texture-space rasterization for the per-texel setup:** render the mesh with position = UV to emit
+  object-space position + normal into a G-buffer (the classic GPU lightmap/AO-bake trick), then the
+  compute/RT pass integrates visibility per texel — replaces the CPU UV rasterizer in `AO_BakeSurface`.
+
+Why it fits Phase 4 specifically:
+- Reuses the Vulkan device/allocator/pipeline plumbing from the raster port instead of standing up a
+  second GPU stack.
+- A Vulkan **compute** baker can run **truly headless** (offscreen compute queue, no window/surface),
+  which is cleaner than today's `xvfb` + GL-client hack — and it sidesteps the config-clobber gotcha
+  entirely (no full client startup writing `dude.cfg`). It could finally become the standalone
+  display-free `aobake` tool that was deferred (see docs/occlusion-maps.md).
+
+Keep in mind:
+- **Determinism:** the CPU baker is byte-deterministic (verified: serial == 24-thread, even SSE2 vs
+  `-march=native`). GPU FP + parallel-reduction ordering may not be bit-identical run-to-run or vs the
+  CPU. Fine for shipped assets (bake once), but note it if reproducibility ever matters.
+- **Keep the CPU baker** as the portable fallback (non-Vulkan / non-RT users, and the lazy
+  `r_occlusionMapsAutoBake` path).
+- **No format/keying/runtime changes:** same `generated/aomaps/<model>_s<N>.tga` output, same resolver.
+  This is purely a faster *producer* — the consumer side is untouched.
+
+Not urgent: the CPU baker already covers the shipped asset set. This is an iteration-speed (and,
+via RT, potentially higher-ray-count quality) investment for when the Vulkan backend matures.

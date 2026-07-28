@@ -157,6 +157,13 @@ to direct-light specular is a mild fidelity departure and is the reason it is a 
 off-by-default flag. Left stubbed through Phases A–C, enabled only if ambient-only
 validation (§11 Phase D) shows it is needed.
 
+### Sibling: baked occlusion maps
+
+Art-authored per-material AO textures are a complementary feature that **reuses this same
+application path** (multiply the ambient + scaled direct-diffuse by an occlusion scalar), just
+sourced from a texture stage instead of the screen-space buffer. They stack with SSAO. See
+[occlusion-maps.md](occlusion-maps.md) (`r_occlusionMaps`, the `occlusionmap` material keyword).
+
 ## 8. Performance levers (3.3 hardware)
 
 - `r_ssaoSlices` × `r_ssaoSteps` — directions × steps-per-direction; the primary

@@ -609,7 +609,12 @@ typedef struct {
 	textureType_t	textureType;
 } tmu_t;
 
-const int MAX_MULTITEXTURE_UNITS =	8;
+// Sizes the tmu[] bind cache. Historically 8 (the fixed-function multitexture limit).
+// DUDE: raised to 16 so the enhancement backends can cache-bind sampler units past 8
+// (unit 9 = SSAO, unit 10 = the baked occlusion map). The legacy cap on reported
+// fixed-function units (glConfig.maxTextureUnits, from GL_MAX_TEXTURE_UNITS_ARB) is
+// clamped to this too, but that value is <= 8 on real hardware, so legacy is unaffected.
+const int MAX_MULTITEXTURE_UNITS =	16;
 typedef struct {
 	tmu_t		tmu[MAX_MULTITEXTURE_UNITS];
 	int			currenttmu;
@@ -908,6 +913,16 @@ extern idCVar r_ssaoBentStrength;		// blend toward the bent normal for the ambie
 extern idCVar r_ssaoNormalBuffer;		// SSAO reads a bump-mapped normal G-buffer vs depth reconstruct
 extern idCVar r_ssaoSpecular;			// also attenuate specular in occluded areas
 extern idCVar r_ssaoDebug;				// 1=show AO buffer, 2=show bent normals
+
+// DUDE: baked ambient-occlusion (occlusion) maps (enhancement backends only; docs/occlusion-maps.md)
+extern idCVar r_occlusionMaps;			// master toggle: use per-material baked AO maps
+extern idCVar r_occlusionMapScale;		// AO-map strength on the ambient term (0..1)
+extern idCVar r_occlusionMapDirect;		// AO-map strength on direct-light diffuse (0..1 of scale)
+extern idCVar r_occlusionMapsAutoBake;	// DEV: lazily bake missing model AO maps on first sight
+
+// clears the per-material generated-AO lookup cache (RhiWorld.cpp) so freshly baked maps
+// are picked up without a vid_restart; called by the bakeAO* commands
+void R_ResetOcclusionMapCache( void );
 
 extern idCVar r_gl3ReflectionScale;		// GL3: cube-map glass reflection brightness (1=untouched, 0.7=-30%)
 

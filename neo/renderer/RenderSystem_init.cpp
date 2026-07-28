@@ -338,6 +338,15 @@ idCVar r_ssaoNormalBuffer( "r_ssaoNormalBuffer", "1", CVAR_RENDERER | CVAR_ARCHI
 idCVar r_ssaoSpecular( "r_ssaoSpecular", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "also attenuate specular highlights in occluded areas (stronger anti-plastic, mild fidelity departure); helps in scenes with little ambient fill" );
 idCVar r_ssaoDebug( "r_ssaoDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "SSAO debug view: 0 = off, 1 = show the AO buffer, 2 = show bent normals, 3 = show the normal G-buffer", 0, 3 );
 
+// DUDE: baked ambient-occlusion (occlusion) maps. Per-material AO textures declared with
+// the `occlusionmap` material keyword, multiplied into the ambient (and, scaled, direct-
+// light diffuse) exactly like SSAO. Non-vanilla; enhancement backends only. Inert on stock
+// assets, which never declare an occlusion stage. See docs/occlusion-maps.md.
+idCVar r_occlusionMaps( "r_occlusionMaps", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use per-material baked ambient-occlusion maps (the `occlusionmap` material stage) to darken creases in the ambient and direct-light diffuse. Complements SSAO; only affects materials that ship an occlusion map (none in stock Doom 3). Non-vanilla; opengl3/Vulkan only" );
+idCVar r_occlusionMapScale( "r_occlusionMapScale", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "strength of baked occlusion maps on the ambient term, 0..1 (0 = off, 1 = the map at full darkening)", 0.0f, 1.0f );
+idCVar r_occlusionMapDirect( "r_occlusionMapDirect", "0.9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how strongly baked occlusion maps darken direct (dynamic) light's diffuse, 0..1, as a fraction of r_occlusionMapScale. Doom 3 is mostly dynamic light, so this is what makes the map visible; lower it if AO looks baked-in under moving lights, 0 = ambient-only", 0.0f, 1.0f );
+idCVar r_occlusionMapsAutoBake( "r_occlusionMapsAutoBake", "0", CVAR_RENDERER | CVAR_BOOL, "DEV: when a model-entity surface has no explicit or cached occlusion map, bake one on first sight (writes generated/aomaps, one-time hitch per model). Off by default; use the bakeAO/bakeAOFolder commands for offline baking" );
+
 // DUDE: dampen the cube-map ("sheen") reflection on glass etc. The enhancement
 // backends light the scene brighter than the original renderer, so the environment
 // reflection reads too strong; 0.7 (-30%) matches the legacy look, 1.0 is untouched.
