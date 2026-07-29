@@ -123,7 +123,15 @@ public:
 	// (the SSAO normal G-buffer). Color is a sampleable RGBA8 texture (GetRenderTargetImage);
 	// the depth attachment is written/tested but not sampled. 0 on failure.
 	virtual RenderTargetHandle	CreateRenderTargetColorDepth( ImageFormat fmt, int w, int h ) = 0;
+	// Color target (IF_RGBA8 or IF_RGBA16F) with a combined DEPTH24_STENCIL8 attachment,
+	// for the HDR scene buffer: an offscreen geometry pass that needs stencil (stencil
+	// shadows) and a sampleable float color. GetRenderTargetImage returns the color. 0 on failure.
+	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h ) = 0;
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt ) = 0;
+	// Route the whole frame into an offscreen target (the HDR scene buffer): BeginPass
+	// clears into it and EndPass returns to it after nested target passes (shadow maps,
+	// SSAO). rt == 0 restores the backbuffer. BeginFrame resets this to 0.
+	virtual void				SetFrameTarget( RenderTargetHandle rt ) = 0;
 	// begin a pass into one face (0..5 = +X,-X,+Y,-Y,+Z,-Z) of a cube target.
 	// EndPass restores the backbuffer + viewport exactly like BeginTargetPass.
 	virtual void				BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear ) = 0;

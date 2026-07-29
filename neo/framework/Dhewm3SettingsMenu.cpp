@@ -1713,6 +1713,31 @@ static CVarOption enhancementOptions[] = {
 	// under the toggle, with a fine-grained bias control), not listed here.
 
 	CVarOption( "Post-Processing" ),
+	// HDR rendering: accumulate the scene into a float (RGBA16F) buffer instead of the
+	// 8-bit backbuffer, then resolve back. Removes fog/gradient banding. The dither knob
+	// is grouped under it (breaks up the residual banding the final 8-bit step leaves) and
+	// greyed out while HDR is off, since the dither lives in the resolve pass.
+	CVarOption( "r_hdr", []( idCVar& cvar ) {
+		bool enable = cvar.GetBool();
+		if ( ImGui::Checkbox( "HDR Rendering", &enable ) ) {
+			cvar.SetBool( enable );
+		}
+		const char* descr = "Render the scene into a float (RGBA16F) buffer instead of the 8-bit framebuffer.\n"
+			"Removes the colour banding visible in fog, skies and other smooth gradients.\n"
+			"Look-neutral (no tone change); note it currently bypasses hardware MSAA - use FXAA instead.";
+		AddCVarOptionTooltips( cvar, descr );
+
+		ImGui::BeginDisabled( !enable );
+		ImGui::Indent();
+		float dither = r_hdrDither.GetFloat();
+		if ( ImGui::SliderFloat( "Dither Resolve (steps)", &dither, 0.0f, 4.0f, "%.1f" ) ) {
+			r_hdrDither.SetFloat( dither );
+		}
+		AddCVarOptionTooltips( r_hdrDither, "Blue-noise-style dither on the HDR->8-bit resolve, strength in 8-bit steps.\n"
+			"1 is the textbook amount (subtle); raise to 2-3 if you can still see bands.\n0 turns it off." );
+		ImGui::Unindent();
+		ImGui::EndDisabled();
+	} ),
 	CVarOption( "r_postFilmGrain", "Film Grain", OT_FLOAT, 0.0f, 0.25f ),
 	CVarOption( "r_postChromaticAberration", "Chromatic Aberration", OT_FLOAT, 0.0f, 0.5f ),
 

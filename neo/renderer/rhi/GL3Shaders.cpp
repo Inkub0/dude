@@ -52,6 +52,7 @@ static const char *gl3BootPrograms[] = {
 	"fxaa",
 	"gammabrightness",
 	"gbuffer",
+	"hdrresolve",
 	"generic",
 	"heathaze",
 	"heathaze_mask",

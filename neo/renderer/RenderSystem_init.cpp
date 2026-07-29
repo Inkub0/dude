@@ -286,6 +286,15 @@ idCVar r_rhiAA( "r_rhiAA", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "po
 // FXAA subpixel smoothing amount: 0 = edge-only (sharpest), 1 = max subpixel blur (most
 // shimmer reduction, softens textures). Only used when r_rhiAA selects FXAA.
 idCVar r_fxaaStrength( "r_fxaaStrength", "0.75", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "FXAA subpixel smoothing amount (0 = edge-only, 1 = strongest)", 0.0f, 1.0f );
+// HDR render pipeline (docs/hdr-pipeline.md): accumulate the scene into an RGBA16F float
+// buffer instead of the 8-bit backbuffer, then resolve back. Phase A is look-neutral —
+// it removes fog/gradient banding without changing the image. GL3/Vulkan backends only.
+idCVar r_hdr( "r_hdr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "render the scene into a float (RGBA16F) buffer to remove banding (non-vanilla; opengl3/Vulkan only)" );
+// Dither the HDR->8-bit resolve to break up the residual banding the final quantization
+// leaves behind. Value is the strength in 8-bit steps (LSBs): 1 = the textbook amount for
+// pure quantization (subtle), 2-4 = stronger, visibly grainy, covers wider bands. 0 = off.
+// Blue-noise-like triangular-PDF noise. Only active while r_hdr is on (lives in the resolve).
+idCVar r_hdrDither( "r_hdrDither", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR resolve dither strength in 8-bit steps; 0 = off (needs r_hdr)", 0.0f, 8.0f );
 
 // DUDE Phase 3.5 "specular tuning" enhancement (GL3/Vulkan interaction shader
 // only; inert on the legacy ARB2 path). Defaults reproduce vanilla exactly:

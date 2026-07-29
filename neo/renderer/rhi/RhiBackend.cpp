@@ -352,6 +352,210 @@ static void RB_RHI_GammaBrightness( rhi::RHI *r ) {
 	backEnd.pc.c_drawElements++;
 }
 
+/*
+=============
+RB_RHI_HdrBeginFrame / RB_RHI_HdrResolve
+
+HDR render pipeline (r_hdr, docs/hdr-pipeline.md). When enabled, the whole frame
+accumulates into a screen-sized RGBA16F scene buffer (with a depth-stencil attachment
+for stencil shadows) instead of the 8-bit backbuffer, removing fog/gradient banding.
+HdrBeginFrame routes rendering there right after BeginFrame; HdrResolve copies it back
+onto the backbuffer at swap time, just before the gamma pass. Phase A is a straight
+passthrough resolve (shaders/hdrresolve.*); Phase B folds exposure + tonemap into it.
+=============
+*/
+static rhi::RenderTargetHandle	rhiHdrRT = 0;		// scene buffer (RGBA16F + depth-stencil)
+static rhi::RenderTargetHandle	rhiHdrAaRT = 0;		// FXAA output ping (RGBA16F, color only)
+static int						rhiHdrW = 0, rhiHdrH = 0;
+static bool						rbHdrActiveThisFrame = false;
+
+static void RB_RHI_HdrBeginFrame( rhi::RHI *r ) {
+	rbHdrActiveThisFrame = false;
+	if ( !r_hdr.GetBool() || !R_BackendSupportsEnhancements() ) {
+		return;		// off → the frame stays on the backbuffer exactly as before
+	}
+
+	int w = glConfig.vidWidth;
+	int h = glConfig.vidHeight;
+
+	// (re)create on resolution change or a lost context (vid_restart wipes the
+	// backend's targets, so a stale handle reports a null image) — same idiom as
+	// the SSAO targets in RhiWorld
+	if ( rhiHdrRT && ( rhiHdrW != w || rhiHdrH != h || r->GetRenderTargetImage( rhiHdrRT ) == 0 ) ) {
+		r->DestroyRenderTarget( rhiHdrRT );
+		rhiHdrRT = 0;
+	}
+	if ( !rhiHdrRT ) {
+		rhiHdrRT = r->CreateRenderTargetColorDepthStencil( rhi::IF_RGBA16F, w, h );
+		rhiHdrW = w;
+		rhiHdrH = h;
+	}
+	if ( !rhiHdrRT ) {
+		return;		// creation failed (no RGBA16F support?) → fall back to the backbuffer
+	}
+
+	// FXAA scratch: a float ping buffer so FXAA (r_rhiAA) also stays in HDR instead of
+	// round-tripping the 8-bit _currentRender. Only allocated while FXAA is on; freed when
+	// it turns off, on resize, or on context loss.
+	const bool wantAa = ( r_rhiAA.GetInteger() > 0 );
+	if ( rhiHdrAaRT && ( !wantAa || rhiHdrW != w || rhiHdrH != h || r->GetRenderTargetImage( rhiHdrAaRT ) == 0 ) ) {
+		r->DestroyRenderTarget( rhiHdrAaRT );
+		rhiHdrAaRT = 0;
+	}
+	if ( wantAa && !rhiHdrAaRT ) {
+		rhiHdrAaRT = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+	}
+
+	r->SetFrameTarget( rhiHdrRT );
+	rbHdrActiveThisFrame = true;
+}
+
+// FXAA as a float->float pass (rhiHdrRT color -> rhiHdrAaRT), so the anti-aliased image
+// stays in HDR and the resolve's chroma re-samples the AA'd result. Reuses fxaa.frag as-is:
+// it samples whatever is bound to unit 0, with screenCorrection/texel set for an exact-size
+// (non-POT) source. No-op unless FXAA is on and its scratch buffer exists.
+static void RB_RHI_HdrFxaa( rhi::RHI *r ) {
+	rhi::ShaderHandle prog = r->LoadShader( "fxaa" );
+	if ( !prog || !rhiHdrRT || !rhiHdrAaRT ) {
+		return;
+	}
+	int w = glConfig.vidWidth;
+	int h = glConfig.vidHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	// exact-size float source: content fills the whole [0,1], one texel = 1/dim
+	parms.screenCorrection[0] = 1.0f;
+	parms.screenCorrection[1] = 1.0f;
+	parms.localParam1[0] = 1.0f / w;
+	parms.localParam1[1] = 1.0f / h;
+	parms.localParam0[0] = r_fxaaStrength.GetFloat();
+
+	idDrawVert quad[4];
+	memset( quad, 0, sizeof( quad ) );
+	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
+	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
+	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
+	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
+	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
+
+	rhi::BufferHandle vb, ib, ub;
+	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
+	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	r->BeginTargetPass( rhiHdrAaRT, NULL );		// bind the float ping, viewport = its size
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = CT_TWO_SIDED;
+	r->BindPipeline( pd );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = 6;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	da.textures[0] = r->GetRenderTargetImage( rhiHdrRT );
+	r->Draw( da );
+
+	r->EndPass();		// back to the frame target (rhiHdrRT)
+	backEnd.pc.c_drawElements++;
+}
+
+static void RB_RHI_HdrResolve( rhi::RHI *r ) {
+	if ( !rbHdrActiveThisFrame ) {
+		return;
+	}
+	rbHdrActiveThisFrame = false;
+
+	rhi::ShaderHandle prog = r->LoadShader( "hdrresolve" );
+	if ( !prog || !rhiHdrRT ) {
+		r->SetFrameTarget( 0 );		// give up on HDR this frame, back to the backbuffer
+		return;
+	}
+
+	int w = glConfig.vidWidth;
+	int h = glConfig.vidHeight;
+
+	// FXAA first (float->float into rhiHdrAaRT), so chroma below re-samples the anti-aliased
+	// image; the resolve then reads the AA buffer instead of the raw scene buffer. Off → the
+	// scratch buffer doesn't exist and we read the scene buffer directly.
+	rhi::RenderTargetHandle sourceRT = rhiHdrRT;
+	if ( r_rhiAA.GetInteger() > 0 && rhiHdrAaRT ) {
+		RB_RHI_HdrFxaa( r );
+		sourceRT = rhiHdrAaRT;
+	}
+
+	// back to the backbuffer, then blit the float scene buffer onto it
+	r->SetFrameTarget( 0 );
+	r->SetViewport( 0, 0, w, h );
+	r->SetScissor( 0, 0, w, h );
+	backEnd.currentScissor.x1 = 0;
+	backEnd.currentScissor.y1 = 0;
+	backEnd.currentScissor.x2 = w - 1;
+	backEnd.currentScissor.y2 = h - 1;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	// dither amount in LSBs (1 = ~1 8-bit step, textbook TPDF; higher = stronger/grainier);
+	// 0 disables it in-shader
+	parms.localParam0[0] = r_hdrDither.GetFloat();
+	// film grain + chromatic aberration are folded into the resolve here (RB_RHI_PostProcess
+	// is skipped in HDR mode) so they sample the smooth float buffer instead of the 8-bit
+	// _currentRender round-trip that was re-banding the image before the dither
+	parms.localParam0[1] = r_postFilmGrain.GetFloat();
+	parms.localParam0[2] = (float)( Sys_Milliseconds() & 0xffff ) * 0.001f;	// animated grain seed
+	parms.localParam0[3] = r_postChromaticAberration.GetFloat();
+	parms.windowCoord[2] = 0.5f;	// aberration center in uv
+	parms.windowCoord[3] = 0.5f;
+
+	// fullscreen NDC quad, st 0..1 (the HDR target is exact screen size, so no NPOT correction)
+	idDrawVert quad[4];
+	memset( quad, 0, sizeof( quad ) );
+	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
+	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
+	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
+	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
+	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
+
+	rhi::BufferHandle vb, ib, ub;
+	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
+	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = CT_TWO_SIDED;
+	r->BindPipeline( pd );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = 6;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	da.textures[0] = r->GetRenderTargetImage( sourceRT );
+	r->Draw( da );
+
+	backEnd.pc.c_drawElements++;
+}
+
 void RB_RHI_LogOnce( const char *what ) {
 	static idStr logged;
 	if ( logged.Find( what ) < 0 ) {
@@ -1408,10 +1612,16 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
 		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
 	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView ) {
-		// post-resolve antialiasing (FXAA) first, so film grain / chromatic
-		// aberration are applied on top of the resolved image rather than smoothed
-		RB_RHI_AAPass( r, viewDef );
-		RB_RHI_PostProcess( r, viewDef );
+		// In HDR mode FXAA + film grain + chromatic aberration are all folded into the
+		// resolve chain (RB_RHI_HdrResolve / RB_RHI_HdrFxaa), sampling the float scene
+		// buffer instead of the 8-bit _currentRender copy that was re-banding the image
+		// ahead of the dither. Off HDR, they run here on the backbuffer exactly as before.
+		if ( !rbHdrActiveThisFrame ) {
+			// post-resolve antialiasing (FXAA) first, so film grain / chromatic
+			// aberration are applied on top of the resolved image rather than smoothed
+			RB_RHI_AAPass( r, viewDef );
+			RB_RHI_PostProcess( r, viewDef );
+		}
 		// r_ssaoDebug: overlay the AO buffer on top of the finished view
 		RB_RHI_SSAODebugOverlay( r, viewDef );
 	}
@@ -1444,6 +1654,10 @@ void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 
 	rhi::RHI *r = rhi::GetGL3RHI();
 	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
+
+	// route the whole frame into the RGBA16F scene buffer (r_hdr) before any clear
+	// or view command lands; a no-op that stays on the backbuffer when r_hdr is off
+	RB_RHI_HdrBeginFrame( r );
 
 	for ( ; cmds; cmds = (const emptyCommand_t *)cmds->next ) {
 		switch ( cmds->commandId ) {
@@ -1489,6 +1703,10 @@ void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 			break;
 		}
 		case RC_SWAP_BUFFERS:
+			// resolve the RGBA16F scene buffer back onto the backbuffer (r_hdr);
+			// no-op when HDR is off. Must precede gamma + capture so both operate
+			// on the finished LDR image on the backbuffer.
+			RB_RHI_HdrResolve( r );
 			// correct the finished frame for r_gamma / r_brightness in-shader
 			// (core has no fixed-function/hardware gamma); before the capture
 			// and the ImGui overlay so screenshots match what's on screen

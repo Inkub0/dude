@@ -122,6 +122,7 @@ class GL3Backend : public RHI {
 	};
 	renderTarget_t		renderTargets[MAX_RENDER_TARGETS];
 	RenderTargetHandle	activeTarget;		// 0 = backbuffer; set by BeginTargetPass
+	RenderTargetHandle	frameTarget;		// frame default (HDR scene buffer); 0 = backbuffer
 	GLint				savedViewport[4];	// restored by EndPass after a target pass
 
 public:
@@ -139,6 +140,7 @@ public:
 		gpuTimeLastPrint = 0;
 		memset( renderTargets, 0, sizeof( renderTargets ) );
 		activeTarget = 0;
+		frameTarget = 0;
 		memset( savedViewport, 0, sizeof( savedViewport ) );
 		InvalidateCaches();
 	}
@@ -260,6 +262,7 @@ public:
 		}
 		memset( renderTargets, 0, sizeof( renderTargets ) );
 		activeTarget = 0;
+		frameTarget = 0;
 		uboRing.buffer = vertRing.buffer = idxRing.buffer = 0;
 		vaos[0] = vaos[1] = 0;
 		initialized = false;
@@ -267,6 +270,11 @@ public:
 
 	// ---- frame ----
 	virtual void BeginFrame( int windowWidth, int windowHeight ) {
+		// each frame starts on the backbuffer; RB_RHI_HdrBeginFrame re-routes to
+		// the HDR scene buffer via SetFrameTarget after this, if r_hdr is on
+		gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
+		activeTarget = 0;
+		frameTarget = 0;
 		qglViewport( 0, 0, windowWidth, windowHeight );
 
 		// baseline state the pipeline bits build on (mirrors RB_SetDefaultGLState)
@@ -366,10 +374,14 @@ public:
 	}
 
 	virtual void EndPass() {
-		if ( activeTarget ) {
-			// return to the backbuffer and restore the view it had
-			gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
-			activeTarget = 0;
+		// return to the frame default (the backbuffer normally, or the HDR scene
+		// buffer when frameTarget is set) and restore the view the nested target
+		// pass interrupted. When activeTarget already IS frameTarget (the main
+		// view's own EndPass) this is a no-op — matching the old behaviour exactly
+		// when frameTarget == 0.
+		if ( activeTarget != frameTarget ) {
+			gl3BindFramebuffer( GL_FRAMEBUFFER, frameTarget ? renderTargets[frameTarget].fbo : 0 );
+			activeTarget = frameTarget;
 			qglViewport( savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3] );
 			qglScissor( savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3] );
 			forceState = true;
@@ -377,6 +389,21 @@ public:
 	}
 	virtual void SetViewport( int x, int y, int w, int h )	{ qglViewport( x, y, w, h ); }
 	virtual void SetScissor( int x, int y, int w, int h )	{ qglScissor( x, y, w, h ); }
+
+	virtual void SetFrameTarget( RenderTargetHandle rt ) {
+		if ( rt >= (RenderTargetHandle)MAX_RENDER_TARGETS
+		     || ( rt != 0 && !renderTargets[rt].fbo ) ) {
+			return;
+		}
+		frameTarget = rt;
+		activeTarget = rt;
+		gl3BindFramebuffer( GL_FRAMEBUFFER, rt ? renderTargets[rt].fbo : 0 );
+		if ( rt ) {
+			qglViewport( 0, 0, renderTargets[rt].w, renderTargets[rt].h );
+			qglScissor( 0, 0, renderTargets[rt].w, renderTargets[rt].h );
+		}
+		forceState = true;
+	}
 
 	// ---- resources ----
 	// handles are the GL object names themselves (0 = invalid, matching GL)
@@ -440,11 +467,11 @@ public:
 		if ( !initialized || w <= 0 || h <= 0 ) {
 			return 0;
 		}
-		// depth-only targets (shadow maps) and single RGBA8 color targets (the SSAO /
-		// post buffers). HDR (IF_RGBA16F) color targets arrive with the full post stack.
-		const bool colorTarget = ( fmt == IF_RGBA8 );
+		// depth-only targets (shadow maps) and single color targets: RGBA8 (SSAO / post
+		// buffers) or RGBA16F (the HDR post-chain scratch buffer, e.g. FXAA output).
+		const bool colorTarget = ( fmt == IF_RGBA8 || fmt == IF_RGBA16F );
 		if ( fmt != IF_DEPTH24 && !colorTarget ) {
-			common->Warning( "GL3 CreateRenderTarget: unsupported format %d (want IF_DEPTH24 or IF_RGBA8)", (int)fmt );
+			common->Warning( "GL3 CreateRenderTarget: unsupported format %d (want IF_DEPTH24, IF_RGBA8 or IF_RGBA16F)", (int)fmt );
 			return 0;
 		}
 		int slot = -1;
@@ -464,8 +491,8 @@ public:
 		gl3ActiveTexture( GL_TEXTURE0 );
 		qglBindTexture( GL_TEXTURE_2D, tex );
 		if ( colorTarget ) {
-			qglTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0,
-			               GL_RGBA, GL_UNSIGNED_BYTE, NULL );
+			qglTexImage2D( GL_TEXTURE_2D, 0, fmt == IF_RGBA16F ? GL_RGBA16F : GL_RGBA8, w, h, 0,
+			               GL_RGBA, fmt == IF_RGBA16F ? GL_HALF_FLOAT : GL_UNSIGNED_BYTE, NULL );
 			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
 			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
 			// clamp so bilateral/upsample taps at the screen edge don't wrap around
@@ -657,6 +684,81 @@ public:
 		renderTargets[slot].cube = false;
 		boundVBO = 0;
 		common->DPrintf( "GL3: created %dx%d color+depth render target (handle %d)\n", w, h, slot );
+		return (RenderTargetHandle)slot;
+	}
+
+	// Color (RGBA8 or RGBA16F) + combined DEPTH24_STENCIL8, for the HDR scene buffer.
+	// Unlike CreateRenderTargetColorDepth this attaches a stencil (stencil shadows need
+	// it) and allows a float color format so the scene accumulates without the 8-bit clamp.
+	virtual RenderTargetHandle CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h ) {
+		if ( !initialized || w <= 0 || h <= 0 ) {
+			return 0;
+		}
+		if ( fmt != IF_RGBA8 && fmt != IF_RGBA16F ) {
+			common->Warning( "GL3 CreateRenderTargetColorDepthStencil: only IF_RGBA8/IF_RGBA16F supported" );
+			return 0;
+		}
+		int slot = -1;
+		for ( int i = 1; i < MAX_RENDER_TARGETS; i++ ) {
+			if ( renderTargets[i].fbo == 0 && renderTargets[i].tex == 0 ) {
+				slot = i;
+				break;
+			}
+		}
+		if ( slot < 0 ) {
+			common->Warning( "GL3 CreateRenderTargetColorDepthStencil: out of render-target slots" );
+			return 0;
+		}
+
+		const GLint  internalFmt = ( fmt == IF_RGBA16F ) ? GL_RGBA16F : GL_RGBA8;
+		const GLenum pixelType   = ( fmt == IF_RGBA16F ) ? GL_HALF_FLOAT : GL_UNSIGNED_BYTE;
+
+		GLuint tex = 0;
+		qglGenTextures( 1, &tex );
+		gl3ActiveTexture( GL_TEXTURE0 );
+		qglBindTexture( GL_TEXTURE_2D, tex );
+		qglTexImage2D( GL_TEXTURE_2D, 0, internalFmt, w, h, 0, GL_RGBA, pixelType, NULL );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+
+		GLuint depthTex = 0;
+		qglGenTextures( 1, &depthTex );
+		qglBindTexture( GL_TEXTURE_2D, depthTex );
+		qglTexImage2D( GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, w, h, 0,
+		               GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+
+		GLuint fbo = 0;
+		gl3GenFramebuffers( 1, &fbo );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, fbo );
+		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0 );
+		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depthTex, 0 );
+		GLenum status = gl3CheckFramebufferStatus( GL_FRAMEBUFFER );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, frameTarget ? renderTargets[frameTarget].fbo : 0 );
+		qglBindTexture( GL_TEXTURE_2D, 0 );
+
+		if ( status != GL_FRAMEBUFFER_COMPLETE ) {
+			common->Warning( "GL3 CreateRenderTargetColorDepthStencil: incomplete FBO (0x%x), %dx%d", status, w, h );
+			gl3DeleteFramebuffers( 1, &fbo );
+			qglDeleteTextures( 1, &tex );
+			qglDeleteTextures( 1, &depthTex );
+			return 0;
+		}
+
+		renderTargets[slot].fbo = fbo;
+		renderTargets[slot].tex = tex;
+		renderTargets[slot].depthTex = depthTex;
+		renderTargets[slot].w = w;
+		renderTargets[slot].h = h;
+		renderTargets[slot].cube = false;
+		boundVBO = 0;
+		common->DPrintf( "GL3: created %dx%d %s color+depth-stencil render target (handle %d)\n",
+		                 w, h, fmt == IF_RGBA16F ? "RGBA16F" : "RGBA8", slot );
 		return (RenderTargetHandle)slot;
 	}
 

@@ -59,6 +59,25 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #ifndef GL_DEPTH_COMPONENT24
 #define GL_DEPTH_COMPONENT24			0x81A6
 #endif
+// HDR scene target (RGBA16F color) + combined depth-stencil attachment
+#ifndef GL_RGBA16F
+#define GL_RGBA16F						0x881A
+#endif
+#ifndef GL_HALF_FLOAT
+#define GL_HALF_FLOAT					0x140B
+#endif
+#ifndef GL_DEPTH24_STENCIL8
+#define GL_DEPTH24_STENCIL8				0x88F0
+#endif
+#ifndef GL_DEPTH_STENCIL
+#define GL_DEPTH_STENCIL				0x84F9
+#endif
+#ifndef GL_UNSIGNED_INT_24_8
+#define GL_UNSIGNED_INT_24_8			0x84FA
+#endif
+#ifndef GL_DEPTH_STENCIL_ATTACHMENT
+#define GL_DEPTH_STENCIL_ATTACHMENT		0x821A
+#endif
 #ifndef GL_TEXTURE_COMPARE_MODE
 #define GL_TEXTURE_COMPARE_MODE			0x884C
 #define GL_TEXTURE_COMPARE_FUNC			0x884D
