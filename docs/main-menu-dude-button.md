@@ -88,3 +88,44 @@ Notes:
 Unpack `guis/mainmenu.gui` from the pak, replace the `windowDef dhewm3set1 { ... }`
 block with the "Ours" version above, then update that single entry back into the pak
 (`zip -X <pak> guis/mainmenu.gui`).
+
+## Button-label vertical nudge (all buttons +2)
+
+Beyond the settings button, every **button/tab label** in `mainmenu.gui` was moved
+**down 2 points** so the text sits better on its button graphic. This is a rule, not
+a hand-edit of ~80 blocks:
+
+1. **+2 to `textaligny`** on every text `windowDef` whose name contains `Btn`,
+   `Button`, or `Tab` (73 buttons + 5 LAN tabs). Where a block had no `textaligny`,
+   insert `textaligny 2` (absent == 0).
+2. **Exclusions:** the `dhewm3set1` DUDE-Settings button (positioned separately,
+   above), and pure titles (`*TitleText`), tooltips (`ToolTip*`/`*Tip`), credits
+   (`Credits*`), column headers, and dialog body text.
+3. The four main nav buttons (`NewGameBtnText`, `LoadBtnText`, `MultiplayerBtnText`,
+   `OptionsBtnText`) got the same +2 first, so they're already at the target.
+4. **Settings-list rows** (the `*Title` entries inside option lists — control binds,
+   video/audio/system settings, ~100 of them) were **left as-is** — they're list
+   content, not buttons.
+5. **Difficulty selectors** then nudged back **−1** (net +1 vs. stock): `NGBtnText1`
+   (Recruit), `NGBtnText2` (Marine), `NGBtnText3` (Veteran), `NGBtnText4` +
+   `NGBtnText4Alt` (Nightmare). The `NGBtnText0` "LEVEL OF DIFFICULTY" header keeps
+   the +2.
+
+Apply it with a brace-aware pass that only touches each block's **own-level**
+`textaligny` (never `textaligny` inside nested `onAction`/`set` handlers), e.g. the
+`shift.py`/`ng.py` transformers used during this work.
+
+## Loose-file override (alternative to editing the pak)
+
+None of the above requires touching `zWideGuis_D3.pk4`. Doom 3 inserts each search
+**directory ahead of its pak files** (`neo/framework/FileSystem.cpp` `AddGameDirectory`),
+so a **loose `base/guis/mainmenu.gui` overrides the pak's copy**. Caveats:
+
+- It's **whole-file** — GUIs have no partial/patch merge, so the loose file is a full
+  copy of `mainmenu.gui` with the edits, and it shadows the pak's version entirely.
+- It must sit in the **winning** game dir. With `run.sh`
+  (`fs_savepath == fs_basepath == repo`), `repo/base/guis/mainmenu.gui` wins; under the
+  old launch (`fs_savepath = ~/.local/share/dude`) it must go there instead. Editing the
+  pak(s) directly (as done here) is launch-method-agnostic.
+- Either way this file is derived from a third-party/community GUI, so it stays
+  git-ignored (see the `*.pk4` / `/base/…` rules in `.gitignore`).
