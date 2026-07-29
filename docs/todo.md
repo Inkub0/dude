@@ -206,3 +206,14 @@ See **docs/antialiasing.md** for the full sketch. Summary:
   a color resolve pass. **Real prerequisite: per-object motion vectors** — SSAO reprojection is
   camera-only, so moving geometry/weapon will ghost without them. Keep SMAA 1x as the non-temporal
   menu alternative.
+
+---
+
+## Codebase independence  **[planned]**
+
+A small phase to break free from third-party content and stale identity so a clean
+DUDE build stands on its own — engine-side settings-menu entry point (no community
+GUI mod), DUDE-authored widescreen GUIs (the anchor system is already in-engine),
+unified `dude` config/save dirs, and a renamed `dudeSettings` command (aliased).
+
+Full plan: **[codebase-independence.md](codebase-independence.md)**.
