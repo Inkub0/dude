@@ -1656,6 +1656,7 @@ static CVarOption videoOptionsImmediately[] = {
 	CVarOption( "r_gamma", "Gamma", OT_FLOAT, 0.5f, 3.0f ),
 	CVarOption( "r_gammaInShader", "Apply gamma and brightness in shaders", OT_BOOL ),
 	CVarOption( "r_scaleMenusTo43", "Scale fullscreen menus to 4:3", OT_BOOL ),
+	CVarOption( "gui_hiResFonts", "High-resolution GUI fonts (displays taller than 720p)", OT_BOOL ),
 	CVarOption( "r_screenshotFormat", []( idCVar& cvar ) {
 		// "Screenshot format. 0 = TGA (default), 1 = BMP, 2 = PNG, 3 = JPG"
 		int curFormat = idMath::ClampInt( 0, 3, cvar.GetInteger() );

@@ -44,6 +44,9 @@ idVec4 idDeviceContext::colorNone;
 
 idCVar gui_smallFontLimit( "gui_smallFontLimit", "0.30", CVAR_GUI | CVAR_ARCHIVE, "" );
 idCVar gui_mediumFontLimit( "gui_mediumFontLimit", "0.60", CVAR_GUI | CVAR_ARCHIVE, "" );
+// DUDE: bias GUI font atlas selection (12/24/48px) toward higher-res sheets on
+// displays taller than 720p. Same on-screen size, just more texels -> crisper text.
+idCVar gui_hiResFonts( "gui_hiResFonts", "1", CVAR_GUI | CVAR_ARCHIVE | CVAR_BOOL, "Use higher-resolution font atlases on displays taller than 720p (crisper GUI text, same size). 0 = vanilla scale-based selection" );
 
 
 idList<fontInfoEx_t> idDeviceContext::fonts;
@@ -787,6 +790,19 @@ void idDeviceContext::PaintChar(float x,float y,float width,float height,float s
 
 
 void idDeviceContext::SetFontByScale(float scale) {
+	// DUDE: the GUI is authored for 640x480 and upscaled to the display, so a fixed
+	// scale samples the same atlas regardless of resolution. Above a 720p baseline,
+	// scale the (local) selection value by the vertical resolution so hi-dpi displays
+	// pull the crisper 24/48px sheets. 'scale' is by value; the caller derives the
+	// displayed size from its own scale * the picked sheet's glyphScale, so size is
+	// unchanged - this only affects which atlas is chosen.
+	if ( gui_hiResFonts.GetBool() ) {
+		const float baseHeight = 720.0f;
+		float h = renderSystem->GetScreenHeight();
+		if ( h > baseHeight ) {
+			scale *= h / baseHeight;
+		}
+	}
 	if (scale <= gui_smallFontLimit.GetFloat()) {
 		useFont = &activeFont->fontInfoSmall;
 		activeFont->maxHeight = activeFont->maxHeightSmall;
