@@ -115,6 +115,32 @@ Apply it with a brace-aware pass that only touches each block's **own-level**
 `textaligny` (never `textaligny` inside nested `onAction`/`set` handlers), e.g. the
 `shift.py`/`ng.py` transformers used during this work.
 
+## Main-menu logo swap (higher-res DOOM 3 logo)
+
+The menu logo (`windowDef DoomLogo` / `DoomLogo1`, drawn at 256×128 / 300×150, 2:1)
+originally used material `gui/mainmenu/doom3` → `guis/assets/mainmenu/doom3.tga`
+(256×128, alpha). Swapped for a higher-res source (`logo.webp`, 704×365, **no alpha**):
+
+1. **Key out the white background** (flood-fill from the 4 corners so interior metallic
+   highlights are preserved), fuzz ~12%:
+   `magick logo.webp -alpha set -fuzz 12% -fill none -floodfill +0+0 white … (all corners) keyed.png`
+2. **Fit to a 2:1 power-of-two canvas** with transparent margins, write an uncompressed
+   32-bit TGA:
+   `magick keyed.png -resize 980x508 -background none -gravity center -extent 1024x512 -compress none -type TrueColorAlpha base/guis/assets/mainmenu/dude_logo.tga`
+3. **Point the GUI at it** — in the loose `mainmenu.gui`, change both `DoomLogo` /
+   `DoomLogo1` `background "gui/mainmenu/doom3"` → `"guis/assets/mainmenu/dude_logo"`
+   (an *implicit* material: the name maps straight to the `.tga`, sidestepping the pak's
+   material + its DDS variant). The fade in/out is GUI `matcolor` animation, so it's
+   preserved. Engine loads only `.tga`/`.jpg` for materials, so it must be TGA (JPG has
+   no alpha).
+
+Source kept at `base/guis/assets/mainmenu/dude_logo.src.webp`. If the implicit material
+ever shows picmip blur or wrong blending, define an explicit `nopicmip` + `blend blend`
+material of the same name in a loose `base/materials/*.mtr`.
+
+**Licensing:** the DOOM 3 logo is id Software's trademark/asset; this swap assumes
+personal/non-commercial use — same caveat as the rest of the (git-ignored) GUI content.
+
 ## Loose-file override (alternative to editing the pak)
 
 None of the above requires touching `zWideGuis_D3.pk4`. Doom 3 inserts each search
