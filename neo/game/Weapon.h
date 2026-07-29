@@ -232,6 +232,10 @@ private:
 	// view weapon gui light
 	renderLight_t			guiLight;
 	int						guiLightHandle;
+	// render interpolation (com_interpolate): the gui light's origin/axis from the previous tic, so
+	// the glow tracks the interpolated display each rendered frame instead of lagging a tic behind
+	idVec3					guiLightOriginPrev;
+	idMat3					guiLightAxisPrev;
 
 	// muzzle flash
 	renderLight_t			muzzleFlash;		// positioned on view weapon bone

@@ -2029,7 +2029,19 @@ void idWeapon::PresentWeapon( bool showViewModel ) {
 
 	// update the gui light
 	if ( guiLight.lightRadius[0] && guiLightJointView != INVALID_JOINT ) {
+		// remember the previous tic's light transform so InterpolateViewWeapon can move the glow
+		// smoothly with the interpolated display (com_interpolate); otherwise the tiny radius-3
+		// light lags up to a tic behind and the display slips out of it, flickering the glow
+		guiLightOriginPrev = guiLight.origin;
+		guiLightAxisPrev = guiLight.axis;
+
 		GetGlobalJointTransform( true, guiLightJointView, guiLight.origin, guiLight.axis );
+
+		// suppress interpolation across large discontinuities (weapon switch, teleport)
+		if ( ( guiLight.origin - guiLightOriginPrev ).LengthSqr() > Square( 64.0f ) ) {
+			guiLightOriginPrev = guiLight.origin;
+			guiLightAxisPrev = guiLight.axis;
+		}
 
 		if ( ( guiLightHandle != -1 ) ) {
 			gameRenderWorld->UpdateLightDef( guiLightHandle, &guiLight );
@@ -2057,15 +2069,61 @@ the weapon and view stay locked together. Purely visual - firing/damage happen a
 ================
 */
 void idWeapon::InterpolateViewWeapon( float frac ) {
-	if ( !renderWeaponInterpolatable || modelDefHandle == -1 ) {
+	if ( !renderWeaponInterpolatable || modelDefHandle == -1 || owner == NULL ) {
 		return;
 	}
 
-	renderEntity.origin = renderWeaponOriginPrev + frac * ( renderWeaponOrigin - renderWeaponOriginPrev );
+	// Interpolate the view model *relative to the interpolated eye*, not as an independent world
+	// transform. The gun sits inches from the camera, so interpolating its world origin/axis on its
+	// own lets its orientation-relative-to-the-eye drift a fraction of a degree between rendered
+	// frames (a slerp of the composite weapon axis is not the same as the eye slerp plus a fixed
+	// offset). That drift is invisible on the gun body but enough to make a raked, near-edge-on
+	// weapon-display GUI (machinegun ammo screen, etc.) cross R_PreciseCullSurface's back-face test
+	// on and off at render rate, so the display and its glow flicker - worst while strafing. By
+	// expressing the gun in eye space at each tic, interpolating that eye-relative offset, and
+	// recomposing onto the interpolated eye, the display's angle-to-eye stays a clean blend of the
+	// two (both front-facing) tic poses and never dips behind the cull threshold. See
+	// docs/known-bugs.md.
 
-	idQuat q;
-	q.Slerp( renderWeaponAxisPrev.ToQuat(), renderWeaponAxis.ToQuat(), frac );
-	renderEntity.axis = q.ToMat3();
+	// eye (first-person view) transform at the previous and current tic
+	const idVec3 &eyeOrgPrev  = owner->firstPersonViewOriginPrev;
+	const idMat3 &eyeAxisPrev = owner->firstPersonViewAxisPrev;
+	const idVec3 &eyeOrgCur   = owner->firstPersonViewOrigin;
+	const idMat3 &eyeAxisCur  = owner->firstPersonViewAxis;
+
+	// weapon transform expressed in eye space at each tic (world->local: (p - o) * axis^T)
+	const idMat3 eyeAxisPrevT = eyeAxisPrev.Transpose();
+	const idMat3 eyeAxisCurT  = eyeAxisCur.Transpose();
+	const idVec3 localOrgPrev  = ( renderWeaponOriginPrev - eyeOrgPrev ) * eyeAxisPrevT;
+	const idMat3 localAxisPrev = renderWeaponAxisPrev * eyeAxisPrevT;
+	const idVec3 localOrgCur   = ( renderWeaponOrigin - eyeOrgCur ) * eyeAxisCurT;
+	const idMat3 localAxisCur  = renderWeaponAxis * eyeAxisCurT;
+
+	// interpolate the eye-relative offset
+	const idVec3 localOrg = localOrgPrev + frac * ( localOrgCur - localOrgPrev );
+	idQuat localQ;
+	localQ.Slerp( localAxisPrev.ToQuat(), localAxisCur.ToQuat(), frac );
+	const idMat3 localAxis = localQ.ToMat3();
+
+	// interpolate the eye exactly as idPlayer::InterpolateRenderView does (same inputs, same frac),
+	// so the recomposed gun is locked to the rendered view; fall back to the current tic's eye when
+	// the view itself is not being interpolated
+	idVec3 eyeOrg;
+	idMat3 eyeAxis;
+	if ( owner->renderViewInterpolatable ) {
+		eyeOrg = eyeOrgPrev + frac * ( eyeOrgCur - eyeOrgPrev );
+		idQuat eyeQ;
+		eyeQ.Slerp( eyeAxisPrev.ToQuat(), eyeAxisCur.ToQuat(), frac );
+		eyeAxis = eyeQ.ToMat3();
+	} else {
+		eyeOrg  = eyeOrgCur;
+		eyeAxis = eyeAxisCur;
+	}
+
+	// recompose the world transform: eye-relative offset applied to the interpolated eye
+	// (local->world: o + p * axis)
+	renderEntity.axis   = localAxis * eyeAxis;
+	renderEntity.origin = eyeOrg + localOrg * eyeAxis;
 
 	// sample the weapon animation at the same interpolated instant as the transform: frac of the
 	// way from the previous tic to the current one, i.e. up to one tic in the past. This is purely
@@ -2073,6 +2131,18 @@ void idWeapon::InterpolateViewWeapon( float frac ) {
 	renderAnimTimeOffset = -(int)( ( 1.0f - frac ) * (float)( gameLocal.time - gameLocal.previousTime ) );
 
 	gameRenderWorld->UpdateEntityDef( modelDefHandle, &renderEntity );
+
+	// move the gui display glow light with the interpolated display. The light is a tiny radius-3
+	// point light on the display; left at its once-per-tic position it lags the interpolated gun,
+	// the display slips out of it during motion, and the glow flickers (see docs/known-bugs.md).
+	if ( guiLightHandle != -1 && guiLight.lightRadius[0] ) {
+		renderLight_t lerped = guiLight;	// keep shader / radius / ids; override the transform
+		lerped.origin = guiLightOriginPrev + frac * ( guiLight.origin - guiLightOriginPrev );
+		idQuat lq;
+		lq.Slerp( guiLightAxisPrev.ToQuat(), guiLight.axis.ToQuat(), frac );
+		lerped.axis = lq.ToMat3();
+		gameRenderWorld->UpdateLightDef( guiLightHandle, &lerped );
+	}
 }
 
 /*

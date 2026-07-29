@@ -110,6 +110,35 @@ as generally a shadow bias of 1 seems to work with some lights such as
 shadow casting fans across the game, the flashlight needs to be at 0.0001
 to 0.005. a good value should be hardcoded for the flashlight.
 
+- **[RESOLVED 2026-07-29] Weapon-display glow flickered while moving (com_interpolate).**
+  Reported 2026-07-29. Holding a weapon with a lit display panel (machinegun ammo screen —
+  any weapon with a display), the display's glow flickered while moving, worst while
+  sidestepping. Reproduced even at Potato settings, so not an enhancement regression.
+  **Root cause (confirmed by bisection with the user):** the "glow" is a real dynamic
+  light — `lights/viewWeaponGuiLight`, a tiny **radius-3** point light on the gun's
+  `guilight` joint, updated only *once per tic* in `idWeapon::PresentWeapon`. The render
+  interpolation feature (`com_interpolate`) moves the *display* every rendered frame but
+  left this light at its tic position, so during motion the light lagged the display by up
+  to a full tic; because the light is so small, the display slipped in and out of it and
+  the glow flickered. Sidestepping was worst (max lag). The interp commit only ever touched
+  game-side code and this fork otherwise caps rendering to 60 fps, so `com_interpolate 0`
+  hid it (the display and its light are both at the same tic pose). Diagnosis path (kept as
+  a warning against theory-first fixes): first-blamed the weapon-transform-vs-eye angle
+  tripping `R_PreciseCullSurface`'s back-face test — wrong (an eye-relative transform fix
+  changed nothing); then a GUI-cull bypass (`r_skipGuiCull`) — no effect (content was
+  redrawn but still blinked); then a coplanar z-fight vs the backing surface
+  (`r_guiDepthBias` polygon offset, ±16) — no effect. The confirming test was
+  `g_weaponGuiLight 0` (disable just the light): the flicker vanished.
+  **Fix:** `idWeapon::PresentWeapon` now records the gui light's previous-tic origin/axis
+  (with a 64-unit discontinuity snap), and `idWeapon::InterpolateViewWeapon` lerps/slerps
+  the light to the same sub-tic `frac` as the weapon and re-submits it via `UpdateLightDef`
+  — so the glow tracks the interpolated display. Also kept a secondary correctness
+  improvement made along the way: the view weapon now interpolates in *eye-relative* space
+  (interpolate the eye→weapon offset, recompose onto the interpolated eye) so it stays
+  locked to the rendered view. The diagnosis-only cvars (`g_weaponGuiLight`,
+  `com_interpolateApply`/`View`/`Weapon`) were removed once the fix was confirmed. Applied
+  to both `neo/game/` and `neo/d3xp/`. See [[render-interpolation-feature]].
+
 ## Resolved
 - **World goes black around a mirror; main-menu planet disappears on approach**
   — both were the same defect: `GL3Backend::BeginPass` forced the stencil
