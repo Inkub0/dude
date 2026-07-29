@@ -36,6 +36,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/KeyInput.h"
 #include "framework/EventLoop.h"
 #include "renderer/RenderSystem.h"
+#include "ui/DeviceContext.h"
 #include "sound/sound.h"
 
 #include "framework/Console.h"
@@ -194,6 +195,29 @@ SCR_DrawFPS
 ==================
 */
 #define	FPS_FRAMES	64
+// DUDE: draw the FPS / stats overlay with the crisp scalable GUI font
+// (fonts/bank) instead of the low-res bitmap charset. A dedicated device context
+// keeps it isolated from menu rendering (the font list is shared/static, so no
+// font is duplicated); it also benefits from gui_hiResFonts. Returns false until
+// fonts/materials are ready, so callers fall back to the bitmap charset.
+static bool Con_GetDebugFont( idDeviceContext **dcOut, int *fontOut ) {
+	static idDeviceContext debugDC;
+	static int bankFont = -2; // -2: not looked up yet, -1: not found
+
+	if ( !debugDC.Initialized() ) {
+		debugDC.Init();
+	}
+	if ( bankFont == -2 && debugDC.Initialized() ) {
+		bankFont = debugDC.FindFont( "fonts/bank" );
+	}
+	if ( !debugDC.Initialized() || bankFont < 0 ) {
+		return false;
+	}
+	*dcOut = &debugDC;
+	*fontOut = bankFont;
+	return true;
+}
+
 float SCR_DrawFPS( float y ) {
 	static float previousTimes[FPS_FRAMES];
 	static int	index;
@@ -224,6 +248,31 @@ float SCR_DrawFPS( float y ) {
 		float fps = (1000.0f * FPS_FRAMES) / total;
 
 		char* s = va( "%.2ffps", fps );
+
+		idDeviceContext *dc = NULL;
+		int font = -1;
+		if ( Con_GetDebugFont( &dc, &font ) ) {
+			const float scale = 0.2f; // ~50% of the old 16px bitmap size (tune here)
+			dc->SetFont( font );
+			const int lineH = dc->MaxCharHeight( scale );
+			// right-aligned to x=635; rect.y is ~the text top
+			dc->DrawText( s, scale, idDeviceContext::ALIGN_RIGHT, colorWhite,
+			              idRectangle( 0, idMath::FtoiFast( y ) + 2, 635, lineH + 8 ), false );
+
+			if ( com_showFPS.GetInteger() > 1 ) {
+				const float statScale = 0.1f; // frame-time line: 50% smaller than the fps number
+				const int statH = dc->MaxCharHeight( statScale );
+				y += lineH + 4;
+				s = va( "avg %.2fms min %.2f max %.2f", total * (1.0f / FPS_FRAMES), minTime, maxTime );
+				dc->DrawText( s, statScale, idDeviceContext::ALIGN_RIGHT, colorWhite,
+				              idRectangle( 0, idMath::FtoiFast( y ) + 2, 635, statH + 8 ), false );
+				return y + statH + 4;
+			}
+
+			return y + lineH + 4;
+		}
+
+		// fallback: original low-res bitmap charset
 		int w = strlen( s ) * BIGCHAR_WIDTH;
 
 		renderSystem->DrawBigStringExt( 635 - w, idMath::FtoiFast( y ) + 2, s, colorWhite, true, localConsole.charSetShader);
