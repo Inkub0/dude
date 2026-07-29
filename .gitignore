@@ -30,7 +30,11 @@
 /d3xp/
 /d3le/
 savegames/
+/base/generated/
+/base/screenshots/
 *.pk4.orig
+*.pk4.bak
+*.pkZZ
 
 # stray/personal files at the repo root (not project content)
 /-l
