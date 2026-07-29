@@ -20,6 +20,11 @@ if [ ! -x "$BIN" ]; then
 	exit 1
 fi
 
+# NVIDIA: pace vblank sync to the DP-0 output (frame-pacing win on this GPU).
+# Harmless on other drivers; override by exporting these before running run.sh.
+export __GL_SYNC_DISPLAY_DEVICE="${__GL_SYNC_DISPLAY_DEVICE:-DP-0}"
+export __GL_SYNC_TO_VBLANK="${__GL_SYNC_TO_VBLANK:-1}"
+
 exec "$BIN" \
 	+set fs_basepath "$DIR" \
 	+set fs_savepath "$DIR" \
