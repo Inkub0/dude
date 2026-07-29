@@ -123,9 +123,12 @@ so a **loose `base/guis/mainmenu.gui` overrides the pak's copy**. Caveats:
 
 - It's **whole-file** — GUIs have no partial/patch merge, so the loose file is a full
   copy of `mainmenu.gui` with the edits, and it shadows the pak's version entirely.
-- It must sit in the **winning** game dir. With `run.sh`
-  (`fs_savepath == fs_basepath == repo`), `repo/base/guis/mainmenu.gui` wins; under the
-  old launch (`fs_savepath = ~/.local/share/dude`) it must go there instead. Editing the
-  pak(s) directly (as done here) is launch-method-agnostic.
-- Either way this file is derived from a third-party/community GUI, so it stays
-  git-ignored (see the `*.pk4` / `/base/…` rules in `.gitignore`).
+- It must sit in the **winning** game dir. `fs_savepath` outranks `fs_basepath`, so a
+  loose file in `fs_basepath` alone is shadowed by any pak in `fs_savepath`. Two ways
+  it wins: (a) `run.sh` sets `fs_savepath == fs_basepath == repo`; or (b) the engine
+  **auto-installs** it — `InstallGuiOverrides()` in `neo/framework/FileSystem.cpp`
+  mirrors loose `base/guis/*.gui` from `fs_basepath` into `fs_savepath` at startup
+  (newer-only), so *any* launch picks it up. Toggle with `fs_installGuiOverrides` (default 1).
+- This file is derived from a third-party/community GUI, so it stays git-ignored
+  (see the `*.pk4` / `/base/…` rules in `.gitignore`). The reproducible recipe above
+  is the version-controlled source of truth.

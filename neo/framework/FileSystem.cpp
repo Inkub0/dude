@@ -450,6 +450,7 @@ private:
 	pack_t *				LoadZipFile( const char *zipfile );
 	void					AddGameDirectory( const char *path, const char *dir );
 	void					SetupGameDirectories( const char *gameName );
+	void					InstallGuiOverrides( const char *gameName );
 	void					Startup( void );
 							// some files can be obtained from directories without compromising si_pure
 	bool					FileAllowedFromDir( const char *path );
@@ -484,6 +485,9 @@ idCVar	idFileSystemLocal::fs_caseSensitiveOS( "fs_caseSensitiveOS", "0", CVAR_SY
 idCVar	idFileSystemLocal::fs_caseSensitiveOS( "fs_caseSensitiveOS", "1", CVAR_SYSTEM | CVAR_BOOL, "" );
 #endif
 idCVar	idFileSystemLocal::fs_searchAddons( "fs_searchAddons", "0", CVAR_SYSTEM | CVAR_BOOL, "search all addon pk4s ( disables addon functionality )" );
+// DUDE: mirror loose base/<game>/guis/*.gui overrides into fs_savepath at startup so
+// they win regardless of launch method (fs_savepath outranks fs_basepath).
+idCVar	fs_installGuiOverrides( "fs_installGuiOverrides", "1", CVAR_SYSTEM | CVAR_BOOL | CVAR_ARCHIVE, "copy loose guis/ overrides from fs_basepath into fs_savepath so they always take effect (fs_savepath outranks fs_basepath)" );
 
 idCVar idFileSystemLocal::fs_gameDllPath( "fs_gameDllPath", "", CVAR_SYSTEM | CVAR_INIT, "additional directory to search the game .dll (.so/.dylib/...) in; searched before all other places (if set)" );
 
@@ -2151,7 +2155,62 @@ idFileSystemLocal::SetupGameDirectories
   Takes care of the correct search order.
 ================
 */
+/*
+================
+idFileSystemLocal::InstallGuiOverrides
+
+DUDE: loose GUI overrides live in fs_basepath/<game>/guis, but fs_savepath outranks
+fs_basepath in the search order, so a pak sitting in savepath would shadow them.
+Mirror the loose top-level *.gui overrides from basepath into savepath (when the two
+differ) so they take effect no matter how the game is launched. Newer-only, so it's
+cheap and won't clobber unchanged files. Disable with fs_installGuiOverrides 0.
+================
+*/
+void idFileSystemLocal::InstallGuiOverrides( const char *gameName ) {
+	if ( !fs_installGuiOverrides.GetBool() ) {
+		return;
+	}
+	const char *base = fs_basepath.GetString();
+	const char *save = fs_savepath.GetString();
+	if ( !base[0] || !save[0] || idStr::Icmp( base, save ) == 0 ) {
+		return; // nothing to do (e.g. run.sh sets fs_savepath == fs_basepath)
+	}
+
+	idStr srcDir = BuildOSPath( base, gameName, "guis" );
+	idStrList guis;
+	ListOSFiles( srcDir, ".gui", guis );
+
+	for ( int i = 0; i < guis.Num(); i++ ) {
+		idStr rel = idStr( "guis/" ) + guis[i];
+		idStr from = BuildOSPath( base, gameName, rel.c_str() );
+		idStr to   = BuildOSPath( save, gameName, rel.c_str() );
+
+		FILE *sf = OpenOSFile( from.c_str(), "rb" );
+		if ( !sf ) {
+			continue;
+		}
+		ID_TIME_T srcTime = Sys_FileTimeStamp( sf );
+		fclose( sf );
+
+		ID_TIME_T dstTime = FILE_NOT_FOUND_TIMESTAMP;
+		FILE *df = OpenOSFile( to.c_str(), "rb" );
+		if ( df ) {
+			dstTime = Sys_FileTimeStamp( df );
+			fclose( df );
+		}
+
+		if ( dstTime == FILE_NOT_FOUND_TIMESTAMP || srcTime > dstTime ) {
+			common->Printf( "installing GUI override into savepath: %s/%s\n", gameName, rel.c_str() );
+			CopyFile( from.c_str(), to.c_str() );
+		}
+	}
+}
+
 void idFileSystemLocal::SetupGameDirectories( const char *gameName ) {
+	// DUDE: mirror loose guis/ overrides from basepath into savepath first, so they
+	// win even though the savepath search dir (added below) outranks basepath.
+	InstallGuiOverrides( gameName );
+
 	// setup cdpath
 	if ( fs_cdpath.GetString()[0] ) {
 		AddGameDirectory( fs_cdpath.GetString(), gameName );
