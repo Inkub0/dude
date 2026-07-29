@@ -249,7 +249,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw)
 		FreeLibrary(handle);
 	}
 
-#if 0 // DG: output redirection is now done in dhewm3's main() aka SDL_main()
+#if 0 // DG: output redirection is now done in DUDE's main() aka SDL_main()
 	/* Check for stdio redirect settings and do the redirection */
 	if ((env_str = SDL_getenv("SDL_STDIO_REDIRECT"))) {
 		if (SDL_atoi(env_str)) {

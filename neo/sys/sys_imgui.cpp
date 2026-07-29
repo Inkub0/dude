@@ -49,7 +49,7 @@ extern void Com_OpenCloseDhewm3SettingsMenu( bool open ); // ditto
 
 static idCVar imgui_scale( "imgui_scale", "-1.0", CVAR_SYSTEM|CVAR_FLOAT|CVAR_ARCHIVE, "factor to scale ImGUI menus by (-1: auto)" ); // TODO: limit values?
 
-idCVar imgui_style( "imgui_style", "0", CVAR_SYSTEM|CVAR_INTEGER|CVAR_ARCHIVE, "Which ImGui style to use. 0: Dhewm3 theme, 1: Default ImGui theme, 2: User theme", 0.0f, 2.0f );
+idCVar imgui_style( "imgui_style", "0", CVAR_SYSTEM|CVAR_INTEGER|CVAR_ARCHIVE, "Which ImGui style to use. 0: DUDE theme, 1: Default ImGui theme, 2: User theme", 0.0f, 2.0f );
 
 extern idCVar r_scaleMenusTo43;
 
@@ -244,7 +244,7 @@ bool Init(void* _sdlWindow, void* sdlGlContext)
 
   // Setup styles
 	SetImGuiStyle( Style::Dhewm3 );
-	userStyle = ImGui::GetStyle(); // set dhewm3 style as default, in case the user style is missing values
+	userStyle = ImGui::GetStyle(); // set DUDE style as default, in case the user style is missing values
 	if ( DG::ReadImGuiStyle( userStyle, GetUserStyleFilename() ) && imgui_style.GetInteger() == 2 ) {
 		ImGui::GetStyle() = userStyle;
 	} else if ( imgui_style.GetInteger() == 1 ) {
@@ -303,7 +303,7 @@ bool Init(void* _sdlWindow, void* sdlGlContext)
 	if ( f10bind && f10bind[0] != '\0' ) {
 		if ( idStr::Icmp( f10bind, "dhewm3Settings" ) != 0 ) {
 			// if F10 is already bound, but not to dhewm3Settings, show a message
-			common->Printf( "... the F10 key is already bound to '%s', otherwise it could be used to open the dhewm3 Settings Menu\n" , f10bind );
+			common->Printf( "... the F10 key is already bound to '%s', otherwise it could be used to open the DUDE Settings Menu\n" , f10bind );
 		}
 	} else {
 		idKeyInput::SetBinding( K_F10, "dhewm3Settings" );
@@ -491,19 +491,19 @@ bool ShouldShowCursor()
 {
 	if ( sessLocal.GetActiveMenu() == nullptr ) {
 		// when ingame, render the ImGui/SDL/system cursor if an ImGui window is open
-		// because dhewm3 does *not* render its own cursor outside ImGui windows.
+		// because DUDE does *not* render its own cursor outside ImGui windows.
 		// additionally, only show it if an ImGui window has focus - this allows you
 		// to click outside the ImGui window to give Doom3 focus and look around.
 		// You can get focus on the ImGui window again by clicking while the invisible
 		//  cursor is over the window (things in it still get highlighted), or by
-		// opening the main (Esc) or by opening the Dhewm3 Settings window (F10, usually),
+		// opening the main (Esc) or by opening the DUDE Settings window (F10, usually),
 		// which will either open it focused or give an ImGui window focus if it
 		// was open but unfocused.
 		// TODO: Might be nice to have a keyboard shortcut to give focus to any open
 		//       ImGui window, maybe Pause?
 		return openImguiWindows != 0 && ImGui::IsWindowFocused( ImGuiFocusedFlags_AnyWindow );
 	} else {
-		// if we're in a menu (probably main menu), dhewm3 renders a cursor for it,
+		// if we're in a menu (probably main menu), DUDE renders a cursor for it,
 		// so only show the ImGui cursor when the mouse cursor is over an ImGui window
 		// or in one of the black bars where Doom3's cursor isn't rendered in
 		// non 4:3 resolutions

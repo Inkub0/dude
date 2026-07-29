@@ -1500,7 +1500,7 @@ void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 				               GL_RGB, GL_UNSIGNED_BYTE, rbCaptureDest );
 				rbCaptureDest = NULL;
 			}
-			// draw the ImGui menus (F10 dhewm3 settings) on top of the frame —
+			// draw the ImGui menus (F10 DUDE settings) on top of the frame —
 			// the legacy path does this in RB_SwapBuffers, which the core
 			// executor bypasses. Drawn after the capture so it stays out of
 			// screenshots, matching the legacy behaviour.

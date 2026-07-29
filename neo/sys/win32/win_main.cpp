@@ -58,7 +58,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/sys_sdl.h"
 
 #ifdef D3_SDL3
-  #define SDL_MAIN_HANDLED // dhewm3 implements WinMain() itself
+  #define SDL_MAIN_HANDLED // DUDE implements WinMain() itself
   #include <SDL3/SDL_main.h>
 #else // SDL1.2 or SDL2
   #include <SDL_main.h>
@@ -660,7 +660,7 @@ uintptr_t Sys_DLL_Load( const char *dllName ) {
 			// "[193 (0xC1)] is not a valid Win32 application"
 			// probably going to be common. Lets try to be less cryptic.
 			common->Warning( "LoadLibrary( \"%s\" ) Failed ! [%i (0x%X)]\tprobably the DLL is of the wrong architecture, "
-			                 "like x64 instead of x86 (this build of dhewm3 expects %s)",
+			                 "like x64 instead of x86 (this build of DUDE expects %s)",
 			                 dllName, e, e, D3_ARCH );
 			return 0;
 		}
@@ -1513,7 +1513,7 @@ void idSysLocal::StartProcess( const char *exePath, bool doexit ) {
 
 // the actual WinMain(), based on SDL2_main and SDL3's SDL_main_impl.h + SDL_RunApp()
 // but modified to pass ANSI strings to SDL_main() instead of UTF-8,
-// because dhewm3 doesn't use Unicode internally (except for Dear ImGui,
+// because DUDE doesn't use Unicode internally (except for Dear ImGui,
 // which doesn't use commandline arguments)
 // for SDL1.2, SDL_win32_main.c is still used instead
 #if SDL_VERSION_ATLEAST(2, 0, 0)

@@ -12,7 +12,7 @@ namespace ImGuiHooks {
 
 enum D3ImGuiWindow {
 	D3_ImGuiWin_None        = 0,
-	D3_ImGuiWin_Settings    = 1, // advanced dhewm3 settings menu
+	D3_ImGuiWin_Settings    = 1, // advanced DUDE settings menu
 	D3_ImGuiWin_Demo        = 2, // ImGui demo window
 	// next should be 4, then 8, etc so a bitmask can be used
 };
@@ -43,7 +43,7 @@ extern int GetOpenWindowsMask();
 // returns true if ImGui has handled the event (so it shouldn't be handled by D3)
 extern bool ProcessEvent(const void* sdlEvent);
 
-// for binding keys from an ImGui-based menu: send input events to dhewm3
+// for binding keys from an ImGui-based menu: send input events to DUDE
 // even if ImGui window has focus
 extern void SetKeyBindMode( bool enable );
 
@@ -75,7 +75,7 @@ enum Style {
 // set the overall style for ImGui: Both shape (sizes, roundings, etc) and colors
 extern void SetImGuiStyle( Style style );
 
-// set the default dhewm3 imgui style colors
+// set the default DUDE imgui style colors
 extern void SetDhewm3StyleColors( ImGuiStyle* dst = nullptr );
 extern void SetUserStyleColors();
 

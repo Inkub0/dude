@@ -425,7 +425,7 @@ const char* Sys_GetLocalizedJoyKeyName( int key ) {
 
 		// the labels for the remaining keys are the same for SDL2 and SDL3 (and all controllers)
 		switch(key) {
-			case K_JOY_BTN_GUIDE: // can't be used in dhewm3, because it opens steam on some systems
+			case K_JOY_BTN_GUIDE: // can't be used in DUDE, because it opens steam on some systems
 			case K_JOY_BTN_START: // can't be used for bindings, because it's hardcoded to generate Esc
 				return NULL;
 
@@ -1047,7 +1047,7 @@ static void initConsoleKeyMapping() {
 		// auto-detection (SDL2-only)
 		int keycode = SDL_GetKeyFromScancode( SDL_SCANCODE_GRAVE );
 		if ( keycode > 0 && keycode <= 0xFF ) {
-			// the SDL keycode and dhewm3 keycode should be identical for the mappings,
+			// the SDL keycode and DUDE keycode should be identical for the mappings,
 			// as it's ISO-8859-1 ("High ASCII") chars
 			for( int i=1; i<numMappings; ++i ) {
 				if ( consoleKeyMappings[i].key == keycode ) {

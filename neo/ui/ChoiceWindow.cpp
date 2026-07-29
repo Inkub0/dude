@@ -364,9 +364,9 @@ void idChoiceWindow::PostParse() {
 	bool injectCustomMode = true;
 
 	/*
-	 * Mods that have their own video settings menu can tell dhewm3 to replace the
+	 * Mods that have their own video settings menu can tell DUDE to replace the
 	 * "choices" and "values" entries in their choiceDef with the resolutions supported by
-	 * dhewm3 (and corresponding modes). So if we add new video modes to dhewm3,
+	 * DUDE (and corresponding modes). So if we add new video modes to DUDE,
 	 * they'll automatically appear in the menu without changing the .gui
 	 * To enable this, the mod authors only need to add an "injectResolutions 1" entry
 	 * to their resolution choiceDef. By default, the first entry will be "r_custom*"

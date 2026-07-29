@@ -59,7 +59,7 @@ If you have questions concerning this license or the applicable additional terms
     #error "CMake (which sets D3_IS_BIG_ENDIAN) and SDL disagree about the endianess! CMake says big, SDL says little"
   #endif
 #else
-  #error "According to SDL, endianess is neither Big nor Little - dhewm3 doesn't support other byteorders!"
+  #error "According to SDL, endianess is neither Big nor Little - DUDE doesn't support other byteorders!"
 #endif
 
 #include "sys/platform.h"

@@ -564,7 +564,7 @@ static void loadMod ( const idStr& modName ) {
 	// add special case for mods known to need fs_game_base d3xp
 	static const char* d3xpMods[] = {
 		// TODO: if there are more mods that need d3xp as base
-		// (and that are supported by dhewm3), add them here
+		// (and that are supported by DUDE), add them here
 		"bloodmod_roe",
 		"d3le", // The Lost Mission
 		"librecoopd3xp",

@@ -59,7 +59,7 @@
 #pragma clang diagnostic ignored "-Wnonportable-system-include-path"
 #endif
 
-// DG: use qgl instead of GL/gl.h for dhewm3 (where D3_OSTYPE is always defined by CMake)
+// DG: use qgl instead of GL/gl.h for DUDE (where D3_OSTYPE is always defined by CMake)
 #ifndef D3_OSTYPE
 
 // Include OpenGL header (without an OpenGL loader) requires a bit of fiddling

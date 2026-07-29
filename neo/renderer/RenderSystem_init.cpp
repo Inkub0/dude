@@ -426,7 +426,7 @@ PFNGLDEBUGMESSAGECALLBACKARBPROC        qglDebugMessageCallbackARB;
 
 // eez: This is a slight hack for letting us select the desired screenshot format in other functions
 //  This is a hack to avoid adding another function parameter to idRenderSystem::TakeScreenshot(),
-//  which would break the API of the dhewm3 SDK for mods.
+//  which would break the API of the DUDE SDK for mods.
 //  Note that this is reset to -1 (which means: use value of r_screenshotFormat) at the end of
 //  idRenderSystemLocal::TakeScreenshot(), so if your code wants to enforce a specific format,
 //  it must set g_screenshotFormat accordingly before each call to TakeScreenshot().

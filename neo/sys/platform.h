@@ -38,7 +38,7 @@ If you have questions concerning this license or the applicable additional terms
 #endif
 
 // NOTE: By default Win32 uses a 1MB stack. Doom3 1.3.1 uses 4MB (probably set after compiling with EDITBIN /STACK
-// dhewm3 now uses a 8MB stack, set with a linker flag in CMakeLists.txt (/STACK:8388608 for MSVC, -Wl,--stack,8388608 for mingw)
+// DUDE now uses a 8MB stack, set with a linker flag in CMakeLists.txt (/STACK:8388608 for MSVC, -Wl,--stack,8388608 for mingw)
 // Linux has a 8MB stack by default, and so does macOS, at least for the main thread.
 // Anyway, a 1MB limit for _alloca() should be safe even when using it multiple times
 // in the same function or callstack.
@@ -149,7 +149,7 @@ If you have questions concerning this license or the applicable additional terms
   // to find out how to detect yours and add it here - and please send a patch :)
   #error "Unknown CPU architecture!"
   // (for a quick and dirty solution, comment out the previous line, but keep in mind
-  //  that savegames may not be compatible with other builds of dhewm3)
+  //  that savegames may not be compatible with other builds of DUDE)
   #define D3_ARCH "UNKNOWN"
 #endif // _M_X64 etc
 

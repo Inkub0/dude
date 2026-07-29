@@ -603,7 +603,7 @@ static const char* crashSigNames[] = { "SIGILL", "SIGABRT", "SIGFPE", "SIGSEGV" 
 #endif
 
 // unlike Sys_Printf() this doesn't call tty_Hide(); and tty_Show();
-// to minimize interaction with broken dhewm3 state
+// to minimize interaction with broken DUDE state
 // (but unlike regular printf() it'll also write to dudelog.txt)
 static void CrashPrintf(const char* msg, ...)
 {
@@ -746,7 +746,7 @@ static bool disableTTYinput = false;
 static void signalhandlerConsoleStuff(int sig)
 {
 	if(sig == SIGTTIN) {
-		// we get this if dhewm3 was started in foreground, then put to sleep with ctrl-z
+		// we get this if DUDE was started in foreground, then put to sleep with ctrl-z
 		// and afterwards set to background..
 		// as it's in background now, disable console input
 		// (if someone uses fg afterwards that's their problem, this is already obscure enough)
@@ -918,7 +918,7 @@ void Posix_InitConsoleInput( void ) {
 		tc.c_cc[VTIME] = 0;
 		if ( tcsetattr( 0, TCSADRAIN, &tc ) == -1 ) {
 			if(disableTTYinput) {
-				// got SIGTTOU => running in the background (started with `./dhewm3 &` or similar)
+				// got SIGTTOU => running in the background (started with `./dude &` or similar)
 				// so we shouldn't take any console input
 				Sys_Printf( "Running in background, disabling terminal support.\n" );
 				in_tty.SetBool( false );

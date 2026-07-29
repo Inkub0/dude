@@ -1277,7 +1277,7 @@ bool idGameLocal::InitFromSaveGame( const char *mapName, idRenderWorld *renderWo
 	{
 		savegame.ReadInternalSavegameVersion();
 		if( savegame.GetInternalSavegameVersion() > INTERNAL_SAVEGAME_VERSION ) {
-			Warning( "Savegame from newer dhewm3 version, don't know how to load! (its version is %d, only up to %d supported)",
+			Warning( "Savegame from newer DUDE version, don't know how to load! (its version is %d, only up to %d supported)",
 			         savegame.GetInternalSavegameVersion(), INTERNAL_SAVEGAME_VERSION );
 			return false;
 		}

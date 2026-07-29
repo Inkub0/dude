@@ -879,7 +879,7 @@ idSoundSystemLocal::AsyncUpdateWrite
 DG: using this now for 60Hz sound updates
 called from async sound thread when com_asyncSound is 3 or 1
 also called from main thread if com_asyncSound == 0
-(those were the default values used in dhewm3 on unix-likes (except mac) or rest)
+(those were the default values used in DUDE on unix-likes (except mac) or rest)
 with this, once every async tic new sounds are started and existing ones updated,
 instead of once every ~100ms.
 ===================

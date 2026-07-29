@@ -206,7 +206,7 @@ public:
 	// and userArg = NULL to remove a callback manually (e.g. if userArg refers to an object you deleted)
 	virtual bool				SetCallback(idCommon::CallbackType cbt, idCommon::FunctionPointer cb, void* userArg);
 
-	// returns true if that function is available in this version of dhewm3
+	// returns true if that function is available in this version of DUDE
 	// *out_fnptr will be the function (you'll have to cast it probably)
 	// *out_userArg will be an argument you have to pass to the function, if appropriate (else NULL)
 	// NOTE: this doesn't do anything yet, but allows to add ugly mod-specific hacks without breaking the Game interface
@@ -2433,7 +2433,7 @@ void idCommonLocal::InitCommands( void ) {
 	cmdSystem->AddCommand( "setMachineSpec", Com_SetMachineSpec_f, CMD_FL_SYSTEM, "detects system capabilities and sets com_machineSpec to appropriate value" );
 	cmdSystem->AddCommand( "execMachineSpec", Com_ExecMachineSpec_f, CMD_FL_SYSTEM, "execs the appropriate config files and sets cvars based on com_machineSpec" );
 
-	cmdSystem->AddCommand( "dhewm3Settings", Com_Dhewm3Settings_f, CMD_FL_SYSTEM, "Toggles (opens/closes) the (advanced) dhewm3 settings menu" );
+	cmdSystem->AddCommand( "dhewm3Settings", Com_Dhewm3Settings_f, CMD_FL_SYSTEM, "Toggles (opens/closes) the (advanced) DUDE settings menu" );
 
 #if	!defined( ID_DEDICATED )
 	// compilers
@@ -3558,7 +3558,7 @@ static bool updateDebugger( idInterpreter *interpreter, idProgram *program, int 
 	return false;
 }
 
-// returns true if that function is available in this version of dhewm3
+// returns true if that function is available in this version of DUDE
 // *out_fnptr will be the function (you'll have to cast it probably)
 // *out_userArg will be an argument you have to pass to the function, if appropriate (else NULL)
 bool idCommonLocal::GetAdditionalFunction(idCommon::FunctionType ft, idCommon::FunctionPointer* out_fnptr, void** out_userArg)

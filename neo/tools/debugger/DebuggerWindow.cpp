@@ -170,7 +170,7 @@ bool rvDebuggerWindow::Create ( HINSTANCE instance )
 
 	UpdateTitle ( );
 
-	Printf ( "Dhewm3 Script Debugger v1.1\n\n" );
+	Printf ( "DUDE Script Debugger v1.1\n\n" );
 
 	ShowWindow ( mWnd, SW_SHOW );
 	UpdateWindow ( mWnd );
@@ -531,7 +531,7 @@ void rvDebuggerWindow::UpdateTitle ( void )
 {
 	idStr title;
 
-	title = "Dhewm3 Script Debugger - ";
+	title = "DUDE Script Debugger - ";
 
 	if ( mClient->IsConnected ( ) )
 	{
@@ -1843,7 +1843,7 @@ LRESULT CALLBACK rvDebuggerWindow::WndProc ( HWND wnd, UINT msg, WPARAM wparam, 
 		case WM_CLOSE:
 			if ( window->mClient->IsConnected ( ) )
 			{
-				if ( IDNO == MessageBox ( wnd, "The debugger is currently connected to a running version of the game.  Are you sure you want to close now?", "Dhewm3 Script Debugger", MB_YESNO|MB_ICONQUESTION ) )
+				if ( IDNO == MessageBox ( wnd, "The debugger is currently connected to a running version of the game.  Are you sure you want to close now?", "DUDE Script Debugger", MB_YESNO|MB_ICONQUESTION ) )
 				{
 					return 0;
 				}

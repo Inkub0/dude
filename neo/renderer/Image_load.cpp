@@ -1497,7 +1497,7 @@ bool idImage::CheckPrecompressedImage( bool fullLoad ) {
 		if ( dxgiFormat == 98 ) {
 			isBC7 = true;
 		} else {
-			common->Warning( "Image file '%s' has unsupported dxgiFormat %d - dhewm3 only supports DXGI_FORMAT_BC7_UNORM (98)!",
+			common->Warning( "Image file '%s' has unsupported dxgiFormat %d - DUDE only supports DXGI_FORMAT_BC7_UNORM (98)!",
 			                 filename, dxgiFormat);
 			R_StaticFree( data );
 			return false;

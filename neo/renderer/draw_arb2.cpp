@@ -379,7 +379,7 @@ const char* softpartVShader = "!!ARBvp1.0  \n"
 
 const char* softpartFShader = "!!ARBfp1.0  \n"
 	"# == Fragment Program == \n"
-	"# taken from The Dark Mod 2.04, adjusted for dhewm3 \n"
+	"# taken from The Dark Mod 2.04, adjusted for DUDE \n"
 	"# (C) 2005-2016 Broken Glass Studios (The Dark Mod Team) \n"
 	"# \n"
 	"# Input textures \n"
@@ -403,7 +403,7 @@ const char* softpartFShader = "!!ARBfp1.0  \n"
 	"#    it implements a \"nearly-infinite\" zFar. The matrix is hard-coded in the engine, so we use hard-coded \n"
 	"#    constants here for efficiency. depth_consts is derived from the numbers in that matrix. \n"
 	"# \n"
-	"# next line: prevent dhewm3 from injecting gamma in shader code into this shader,  \n"
+	"# next line: prevent DUDE from injecting gamma in shader code into this shader,  \n"
 	"#            because that looks bad when rendered with additive blending (gets too bright) \n"
 	"# nodhewm3gammahack \n"
 	"\n"
@@ -577,13 +577,13 @@ void R_LoadARBProgram( int progIndex ) {
 	{
 
 		// note that strlen("dhewm3tmpres") == strlen("result.color")
-		const char* tmpres = "TEMP dhewm3tmpres; # injected by dhewm3 for gamma correction\n";
+		const char* tmpres = "TEMP dhewm3tmpres; # injected by DUDE for gamma correction\n";
 
 		// Note: program.env[21].xyz = r_brightness; program.env[21].w = 1.0/r_gamma
 		// outColor.rgb = pow(dhewm3tmpres.rgb*r_brightness, vec3(1.0/r_gamma))
 		// outColor.a = dhewm3tmpres.a;
 		const char* extraLines =
-			"# gamma correction in shader, injected by dhewm3 \n"
+			"# gamma correction in shader, injected by DUDE \n"
 			// MUL_SAT clamps the result to [0, 1] - it must not be negative because
 			// POW might not work with a negative base (it looks wrong with intel's Linux driver)
 			// and clamping values >1 to 1 is ok because when writing to result.color

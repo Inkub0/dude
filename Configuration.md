@@ -1,32 +1,32 @@
 # Configuration
 
-This document explains some dhewm3-specific configuration options.
+This document explains some DUDE-specific configuration options.
 
 For general Doom3 configuration see for example [this list of CVars](https://modwiki.dhewm3.org/CVars_%28Doom_3%29)
 and [this list of Console Commands](https://modwiki.dhewm3.org/Commands_%28Doom_3%29).
 
 **CVars** are set by entering `cvarName value` in the console, for example `com_showFPS 1`.  
-They can also be set as commandline arguments when starting dhewm3, for example `./dhewm3 +set r_fullscreen 0`.
+They can also be set as commandline arguments when starting DUDE, for example `./dude +set r_fullscreen 0`.
 
 Just entering a CVar's name (without a value) will show its current value, its default value
 and a short description of what it does.
 
-Starting dhewm3 with the commandline argument `-h` (for example `dhewm3.exe -h`) will show some
-useful commandline arguments, for example how to tell dhewm3 where the game data can be found on your system.
+Starting DUDE with the commandline argument `-h` (for example `dude.exe -h`) will show some
+useful commandline arguments, for example how to tell DUDE where the game data can be found on your system.
 
-## dhewm3 Settings Menu
+## DUDE Settings Menu
 
 When built with [Dear ImGui](https://github.com/ocornut/imgui) integration (which is the default
-when using SDL2), dhewm3 has an advanced settings menu with many settings that the main menu doesn't
+when using SDL2), DUDE has an advanced settings menu with many settings that the main menu doesn't
 offer, including a *Control Bindings* menu that supports as many keys per command as you want and is
 fully navigable with keyboard or gamepad (or mouse, of course).
 
 Unless you have already bound your `F10` key to something else, it will open this menu.  
 If you `F10` key is already in use, you can either unbind it (in the old Options -> Controls menu),
-or open the dhewm3 settings menu by entering `dhewm3Settings` in the console - within that menu,
+or open the DUDE settings menu by entering `dhewm3Settings` in the console - within that menu,
 you can also bind opening it to any other key.
 
-*By the way:* An especially nice feature of the dhewm3 Settings Menu is that you can **open it while
+*By the way:* An especially nice feature of the DUDE Settings Menu is that you can **open it while
 your're in the game**. The game is be paused (if you're playing Single Player) but is still on the
 screen, so you **when you modify *Video Options* like *brightness* you can see the effect in realtime**!
 Is this cool or what? B-)
@@ -47,7 +47,7 @@ Like most id Software games from Quake 1 on, Doom3 has a console that allows ent
 and setting Console Variables ("CVars"), often for advanced configuration or to aid development,
 see also https://modwiki.dhewm3.org/Console.  
 
-Unlike in original Doom3, in dhewm3 the console is always available (no need to set `com_allowconsole 1`
+Unlike in original Doom3, in DUDE the console is always available (no need to set `com_allowconsole 1`
 or similar), and **can be opened with the key combination `Shift + Esc`**.  
 The classic "console key" (the one between `Esc`, `Tab` and `1`) should also still work with
 most keyboard layouts. However you can disable that, so you can bind that key like any other key
@@ -71,7 +71,7 @@ Some notes:
 * The `Start` button (`+` on Nintendo gamepads, `Options` on Playstation 4/5 controllers) acts
   like the Escape key, so it will **open/close the menu** and can not be bound.  
   The other buttons, axes and triggers can be bound to arbitrary actions in the Controls menu,
-  except for the Home button, which can't be used by dhewm3 at all (because it opens Steam when that is running).
+  except for the Home button, which can't be used by DUDE at all (because it opens Steam when that is running).
 * In **menus**, either stick will move the cursor, and the button you assign to *attack* (fire) acts
   like the left mouse button, and so does the lower face button (`A` on XBox controllers, `B` on Nintendo
   controllers, `Cross` on PS controllers) and the upper face button (`Y` on XBox, `X` on Nintendo, `Triangle` on PS).
@@ -210,12 +210,12 @@ This can be configured with the following CVars:
 - `r_fullscreenDesktop` configures fullscreen windows (when `r_fullscreen` is `1`).  
   `0`: "real"/"exclusive" fullscreen mode, might switch screen resolution  
   `1`: "desktop" fullscreen mode, which keeps desktop resolution and is more like a borderless fullscreen window
-- `r_windowResizable` if set to `1` (the default), the dhewm3 window (when in windowed mode..)
+- `r_windowResizable` if set to `1` (the default), the DUDE window (when in windowed mode..)
    can be freely resized. Needs SDL2; with 2.0.5 and newer it's applied immediately, otherwise when
    creating the window (startup or `vid_restart`).
 - `r_fillWindowAlphaChan` Make sure alpha channel of windows default framebuffer is completely opaque
   at the end of each frame. Needed at least when using Wayland.  
-  `1`: do this, `0`: don't do it, `-1`: let dhewm3 decide (default)
+  `1`: do this, `0`: don't do it, `-1`: let DUDE decide (default)
 
 - `r_useSoftParticles` Soften particle transitions when player walks through them or they cross solid geometry.
    Needs r_enableDepthCapture. Can slow down rendering! `1`: enable (default), `0`: disable
@@ -268,7 +268,7 @@ This can be configured with the following CVars:
    *Note* that OpenAL may automatically enable HRTF when it detects headphones, and it can happen that
    it detects regular stereo speakers as headphones (when they're plugged into a jack that's somehow
    labeled as headphone jack) - in that case you'll want to explicitly disable it.
-   The *Audio Options* tab of the [dhewm3 Settings Menu](#dhewm3-settings-menu) shows OpenAL Info,
+   The *Audio Options* tab of the [DUDE Settings Menu](#dude-settings-menu) shows OpenAL Info,
    including the current HRTF state (if supported by your OpenAL version).
 - `s_alOutputLimiter` Configure OpenAL's output-limiter which temporarily reduces the overall volume
   when too many too loud sounds play at once, to avoid issues like clipping. `0`: Disable, `1`: Enable, `-1`: Let OpenAL decide (default)
@@ -276,5 +276,5 @@ This can be configured with the following CVars:
   downscaling by OpenAL's output limiter (default `1`)
 
 - `imgui_scale` Factor to scale ImGui menus by (especially relevant for HighDPI displays).
-  Should be a positive factor like `1.5` or `2`; or `-1` (the default) to let dhewm3 automatically
+  Should be a positive factor like `1.5` or `2`; or `-1` (the default) to let DUDE automatically
   detect an appropriate factor.

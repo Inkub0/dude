@@ -233,23 +233,23 @@ public:
 	 *                        (void*)argForFunctionToCall );
 	 *
 	 * (the Mod needs to check if SetCallback() returned true; if it didn't the used version
-	 *  of dhewm3 doesn't support the given CallBackType and the Mod must either error out
+	 *  of DUDE doesn't support the given CallBackType and the Mod must either error out
 	 *  or handle the case that the callback doesn't work)
 	 *
-	 * Of course this means that for every new SourceHook hack a Mod (that's ported to dhewm3)
+	 * Of course this means that for every new SourceHook hack a Mod (that's ported to DUDE)
 	 * uses, a corresponding entry must be added to enum CallbackType and it must be handled,
-	 * which implies that the Mod will only properly work with the latest dhewm3 git code
+	 * which implies that the Mod will only properly work with the latest DUDE git code
 	 * or the next release..
 	 * I guess most mods don't need this hack though, so I think it's feasible.
 	 *
 	 * Note that this allows adding new types of callbacks without breaking the API and ABI
-	 * between dhewm3 and the Game DLLs; the alternative would be something like
+	 * between DUDE and the Game DLLs; the alternative would be something like
 	 * idCommon::RegisterReloadImagesCallback(), and maybe other similar methods later, which
 	 * would break the ABI and API each time and all Mods would have to be adjusted, even if
 	 * they don't even need that functionality (because they never needed SourceHook or similar).
 	 *
 	 * Similar to SetCallback() I've also added GetAdditionalFunction() to get a function pointer
-	 * from dhewm3 that Mods can call (and that's not exported via the normal interface classes).
+	 * from DUDE that Mods can call (and that's not exported via the normal interface classes).
 	 * Right now it's only used for a Doom3 Demo specific hack only relevant for base.dll (not for Mods)
 	 */
 
@@ -279,7 +279,7 @@ public:
 		FT_UpdateDebugger,
 	};
 
-	// returns true if that function is available in this version of dhewm3
+	// returns true if that function is available in this version of DUDE
 	// *out_fnptr will be the function (you'll have to cast it probably)
 	// *out_userArg will be an argument you have to pass to the function, if appropriate (else NULL)
 	virtual bool				GetAdditionalFunction(FunctionType ft, FunctionPointer* out_fnptr, void** out_userArg) = 0;

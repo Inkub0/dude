@@ -251,7 +251,7 @@ bool GLimp_Init(glimpParms_t parms) {
 	 * work for Doom3, as it needs a functioning alpha chan for blending operations, see above.
 	 * See also: https://gitlab.freedesktop.org/mesa/mesa/-/issues/5886
 	 *
-	 * So to make sure dhewm3 (finally) works as expected on Wayland, we tell SDL2 to
+	 * So to make sure DUDE (finally) works as expected on Wayland, we tell SDL2 to
 	 * allow transparency and then fill the alpha-chan ourselves in RB_SwapBuffers()
 	 * (unless the user disables that with r_fillWindowAlphaChan 0)
 	 *
@@ -703,7 +703,7 @@ try_again:
 #if defined(_WIN32) && defined(ID_ALLOW_TOOLS)
 
 #if ! SDL_VERSION_ATLEAST(2, 0, 0)
-	#error "dhewm3 only supports the tools with SDL2, not SDL1!"
+	#error "DUDE only supports the tools with SDL2, not SDL1!"
 #endif
 
 		// The tools are Win32 specific.  If building the tools
@@ -1229,7 +1229,7 @@ GLimp_SetGamma
 void GLimp_SetGamma(unsigned short red[256], unsigned short green[256], unsigned short blue[256]) {
 #if SDL_VERSION_ATLEAST(3, 0, 0)
 	if ( ! r_gammaInShader.GetBool() ) {
-		common->Warning( "This build of dhewm3 uses SDL3, which does not support hardware gamma." );
+		common->Warning( "This build of DUDE uses SDL3, which does not support hardware gamma." );
 		common->Warning( "If you want to adjust gamma or brightness, enable r_gammaInShader" );
 	}
 #else // SDL2 and SDL1.2
@@ -1392,7 +1392,7 @@ bool GLimp_SetWindowResizable( bool enableResizable )
 	SDL_SetWindowResizable( window, (SDL_bool)enableResizable );
 	return true;
 #else
-	common->Warning( "dhewm3 must be built with SDL 2.0.5 or newer to change resizability of existing windows!" );
+	common->Warning( "DUDE must be built with SDL 2.0.5 or newer to change resizability of existing windows!" );
 	return false;
 #endif
 }

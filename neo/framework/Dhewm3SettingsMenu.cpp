@@ -77,7 +77,7 @@ static void AddDescrTooltip( const char* description )
 
 struct BindingEntry;
 static BindingEntry* FindBindingEntryForKey( int keyNum );
-static idCVar imgui_numBindingColumns( "imgui_numBindingColumns", "3", CVAR_ARCHIVE|CVAR_SYSTEM|CVAR_INTEGER, "Number of columns with bindings in Dhewm3SettingsMenu's Bindings tab", 1, 10 );
+static idCVar imgui_numBindingColumns( "imgui_numBindingColumns", "3", CVAR_ARCHIVE|CVAR_SYSTEM|CVAR_INTEGER, "Number of columns with bindings in DUDE settings menu's Bindings tab", 1, 10 );
 
 static int rebindKeyNum = -1; // only used for HandleRebindPopup()
 static BindingEntry* rebindOtherEntry = nullptr; // ditto
@@ -105,7 +105,7 @@ static bool IsCancelKeyPressed() {
 	// binding case, there only Esc and Start work (so gamepad B can be bound),
 	// but the binding popup doesn't use this function anyway
 
-	// Note: In Doom3, Escape opens/closes the main menu, so in dhewm3 the gamepad Start button
+	// Note: In Doom3, Escape opens/closes the main menu, so in DUDE the gamepad Start button
 	//       behaves the same, incl. the specialty that it can't be bound by the user
 	return IsKeyPressed( ImGuiKey_Escape ) || IsKeyPressed( ImGuiKey_GamepadFaceRight )
 	       || IsKeyPressed( ImGuiKey_GamepadStart );
@@ -141,7 +141,7 @@ const char* GetKeyName( int keyNum, bool localized = true )
 		oneChar[0] = keyNum - 32; // to uppercase
 		return oneChar;
 	}
-	// handle scancodes separately, because ImGui uses UTF-8, while dhewm3 uses ISO8859-1
+	// handle scancodes separately, because ImGui uses UTF-8, while DUDE uses ISO8859-1
 	if ( keyNum >= K_FIRST_SCANCODE && keyNum <= K_LAST_SCANCODE ) {
 		const char* scName = NULL;
 		if ( localized ) {
@@ -847,7 +847,7 @@ struct BindingEntry {
 			float buttonOffset = (windowWidth - dialogButtonWidth) * 0.5f;
 			ImGui::SetCursorPosX( buttonOffset );
 
-			// Note: gamepad Start also generates K_ESCAPE in dhewm3
+			// Note: gamepad Start also generates K_ESCAPE in DUDE
 			if ( ImGui::Button( "Cancel", ImVec2(dialogButtonWidth, 0) ) || idKeyInput::IsDown( K_ESCAPE ) ) {
 				ImGui::CloseCurrentPopup();
 				ret = BESS_Selected;
@@ -1112,7 +1112,7 @@ static void InitBindingEntries()
 		{ nullptr,          "Other"          , "#str_04064" }, // TODO: or "#str_02406"	"Misc"
 
 		{ "_impulse19",     "PDA / Score"    , "#str_04066" },
-		{ "dhewm3Settings", "dhewm3 settings menu", nullptr },
+		{ "dhewm3Settings", "DUDE settings menu", nullptr },
 		{ "savegame quick", "Quick Save"     , "#str_04067" },
 		{ "loadgame quick", "Quick Load"     , "#str_04068" },
 		{ "screenshot",     "Screenshot"     , "#str_04069" },
@@ -1319,7 +1319,7 @@ static void DrawBindingsMenu()
 	int tableNum = 1;
 
 	const ImVec2 defFramePadding = ImGui::GetStyle().FramePadding;
-	const float commandColumnWidth = ImGui::CalcTextSize( "dhewm3 settings menu" ).x + defFramePadding.x * 2.0f;
+	const float commandColumnWidth = ImGui::CalcTextSize( "DUDE settings menu" ).x + defFramePadding.x * 2.0f;
 	const float overflowColumnWidth = ImGui::CalcTextSize( "++" ).x + defFramePadding.x * 2.0f;
 
 	// this handles the "regular" binding entries, i.e. everything but the "obscure" impulses list
@@ -1651,7 +1651,7 @@ static CVarOption videoOptionsImmediately[] = {
 		}
 		AddCVarOptionTooltips( cvar, descr );
 	} ),
-	CVarOption( "r_windowResizable", "Make dhewm3 window resizable", OT_BOOL ),
+	CVarOption( "r_windowResizable", "Make DUDE window resizable", OT_BOOL ),
 	CVarOption( "r_brightness", "Brightness", OT_FLOAT, 0.5f, 2.0f ),
 	CVarOption( "r_gamma", "Gamma", OT_FLOAT, 0.5f, 3.0f ),
 	CVarOption( "r_gammaInShader", "Apply gamma and brightness in shaders", OT_BOOL ),
@@ -2022,7 +2022,7 @@ static void DrawVideoOptionsMenu()
 		r_fullscreenDesktop.SetBool( fullscreenDesktop );
 	}
 	AddTooltip( "r_fullscreenDesktop" );
-	AddDescrTooltip( "ignores the resolution configured in dhewm3, doesn't switch the display resolution, can prevent issues like desktop icons being rearranged after running the game" );
+	AddDescrTooltip( "ignores the resolution configured in DUDE, doesn't switch the display resolution, can prevent issues like desktop icons being rearranged after running the game" );
 
 	// Video Mode / Resolution
 	static int selModeIdx = -1; // index within our vidModes array
@@ -3152,7 +3152,7 @@ static void DrawAudioOptionsMenu()
 		return;
 	}
 
-	ImGui::SeparatorText( "Settings that require restarting dhewm3" );
+	ImGui::SeparatorText( "Settings that require restarting DUDE" );
 
 	if ( ImGui::Combo( "Sound Device", &selAlDevice, [](void* data, int idx) -> const char* {
 			const idStrList& devs = *static_cast< const idStrList* >(data);
@@ -3164,7 +3164,7 @@ static void DrawAudioOptionsMenu()
 		} else {
 			idSoundSystemLocal::s_device.SetString( alDevices[selAlDevice] );
 		}
-		D3::ImGuiHooks::ShowWarningOverlay( "Changing the sound device only takes effect after restarting dhewm3!" );
+		D3::ImGuiHooks::ShowWarningOverlay( "Changing the sound device only takes effect after restarting DUDE!" );
 	}
 	AddTooltip( "s_device" );
 
@@ -3179,7 +3179,7 @@ static void DrawAudioOptionsMenu()
 		if ( ImGui::Checkbox( "Use EAX/EFX Reverb Effects", &useReverb ) ) {
 			idSoundSystemLocal::s_useEAXReverb.SetBool( useReverb );
 			if ( useReverb != idSoundSystemLocal::useEFXReverb ) {
-				D3::ImGuiHooks::ShowWarningOverlay( "Enabling/disabling EFX only takes effect after restarting dhewm3!" );
+				D3::ImGuiHooks::ShowWarningOverlay( "Enabling/disabling EFX only takes effect after restarting DUDE!" );
 			}
 		}
 		AddTooltip( "s_useEAXReverb" );
@@ -3459,7 +3459,7 @@ static void DrawOtherOptionsMenu()
 	}
 
 	int style_idx = imgui_style.GetInteger();
-	if ( ImGui::Combo( "ImGui Style", &style_idx, "dhewm3\0ImGui Default\0Userstyle\0") )
+	if ( ImGui::Combo( "ImGui Style", &style_idx, "DUDE\0ImGui Default\0Userstyle\0") )
 	{
 		switch( style_idx )
 		{
@@ -3557,10 +3557,10 @@ void Com_DrawDhewm3SettingsMenu()
 	// user is respected)
 	ImGui::SetNextWindowSize( settingsMenuDefaultSize, ImGuiCond_FirstUseEver );
 	// set a sane default pos first time each session (if the window somehow gets "lost" after
-	// switching to a lower resolution, restarting dhewm3 will fix it)
+	// switching to a lower resolution, restarting DUDE will fix it)
 	ImGui::SetNextWindowPos( settingsMenuDefaultPos, ImGuiCond_Once );
 
-	ImGui::Begin("dhewm3 Settings", &showSettingsWindow);
+	ImGui::Begin("DUDE Settings", &showSettingsWindow);
 
 	ImGuiTabBarFlags tab_bar_flags = ImGuiTabBarFlags_None;
 	if (ImGui::BeginTabBar("SettingsTabBar", tab_bar_flags))
@@ -3698,7 +3698,7 @@ void Com_Dhewm3Settings_f( const idCmdArgs &args )
 
 void Com_Dhewm3Settings_f( const idCmdArgs &args )
 {
-	common->Warning( "Dear ImGui is disabled in this build, so the dhewm3 settings menu is not available!" );
+	common->Warning( "Dear ImGui is disabled in this build, so the DUDE settings menu is not available!" );
 }
 
 #endif
