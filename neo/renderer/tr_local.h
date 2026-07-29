@@ -1334,6 +1334,15 @@ void R_ReCreateWorldReferences( void );
 // world teardown so cached cubes can't outlive the light defs they were keyed to.
 void RB_RHI_FreeShadowCubeCache( void );
 
+// HDR (r_hdr) capture signals for the shared idImage::CopyFramebuffer (defined in
+// rhi/RhiBackend.cpp). HdrCaptureActive: the float scene FBO is the bound read source
+// right now (view pass) → read GL_COLOR_ATTACHMENT0 vs GL_BACK. HdrFrameActive: this is
+// an HDR frame for its whole duration → capture _currentRender as RGBA16F (so the format
+// doesn't thrash-realloc between the view and gamma passes). Both false on the legacy
+// backend / when r_hdr is off.
+bool RB_RHI_HdrCaptureActive( void );
+bool RB_RHI_HdrFrameActive( void );
+
 void R_CreateEntityRefs( idRenderEntityLocal *def );
 void R_CreateLightRefs( idRenderLightLocal *light );
 

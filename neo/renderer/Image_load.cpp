@@ -32,6 +32,18 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "renderer/Image.h"
 
+// DUDE: modern GL enums for the RGBA16F _currentRender capture (r_hdr). The legacy
+// renderer pulls SDL_opengl.h, which may predate GL3, so guard like rhi/GL3Local.h does.
+#ifndef GL_RGBA16F
+#define GL_RGBA16F  0x881A
+#endif
+#ifndef GL_HALF_FLOAT
+#define GL_HALF_FLOAT  0x140B
+#endif
+#ifndef GL_COLOR_ATTACHMENT0
+#define GL_COLOR_ATTACHMENT0  0x8CE0
+#endif
+
 /*
 PROBLEM: compressed textures may break the zero clamp rule!
 */
@@ -79,6 +91,8 @@ int idImage::BitsForInternalFormat( int internalFormat ) const {
 		return 32;
 	case GL_RGB8:
 		return 32;		// on some future hardware, this may actually be 24, but be conservative
+	case GL_RGBA16F:
+		return 64;		// DUDE: _currentRender float capture while r_hdr is active
 	case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
 		return 4;
 	case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
@@ -1986,16 +2000,32 @@ void idImage::CopyFramebuffer( int x, int y, int imageWidth, int imageHeight, bo
 	GetDownsize( imageWidth, imageHeight );
 	GetDownsize( potWidth, potHeight );
 
-	qglReadBuffer( GL_BACK );
+	// DUDE: in an HDR frame (r_hdr) capture _currentRender as RGBA16F so refraction/heat-haze
+	// surfaces sample the un-clamped, un-banded scene instead of an 8-bit copy. The *format* is
+	// keyed to the whole frame (HdrFrameActive) so it never flips between the view's float capture
+	// and the post-resolve gamma pass' capture — a flip forces a full-screen realloc, and thrashing
+	// it every frame was a heavy stall. The *read source* is keyed to what's bound right now
+	// (HdrCaptureActive): the float FBO's color attachment during the view, else the backbuffer.
+	// Off HDR (and on the legacy backend) both are false → the vanilla GL_RGB8 / GL_BACK path
+	// (GL_RGB8 for both realloc branches so the tracked format is coherent; vanilla used GL_RGB in
+	// the POT branch, functionally identical 8-bit RGB).
+	const GLint	captureFormat = RB_RHI_HdrFrameActive() ? GL_RGBA16F : GL_RGB8;
+
+	qglReadBuffer( RB_RHI_HdrCaptureActive() ? GL_COLOR_ATTACHMENT0 : GL_BACK );
+
+	// a format flip (toggling r_hdr at runtime) forces a full reallocation even at the same
+	// size, since qglCopyTexSubImage2D can't change a texture's internal format
+	const bool	formatChanged = ( internalFormat != captureFormat );
 
 	// only resize if the current dimensions can't hold it at all,
 	// otherwise subview renderings could thrash this
-	if ( ( useOversizedBuffer && ( uploadWidth < potWidth || uploadHeight < potHeight ) )
-		|| ( !useOversizedBuffer && ( uploadWidth != potWidth || uploadHeight != potHeight ) ) ) {
+	if ( ( useOversizedBuffer && ( uploadWidth < potWidth || uploadHeight < potHeight || formatChanged ) )
+		|| ( !useOversizedBuffer && ( uploadWidth != potWidth || uploadHeight != potHeight || formatChanged ) ) ) {
 		uploadWidth = potWidth;
 		uploadHeight = potHeight;
+		internalFormat = captureFormat;
 		if ( potWidth == imageWidth && potHeight == imageHeight ) {
-			qglCopyTexImage2D( GL_TEXTURE_2D, 0, GL_RGB8, x, y, imageWidth, imageHeight, 0 );
+			qglCopyTexImage2D( GL_TEXTURE_2D, 0, captureFormat, x, y, imageWidth, imageHeight, 0 );
 		} else {
 			byte	*junk;
 			// we need to create a dummy image with power of two dimensions,
@@ -2008,7 +2038,9 @@ void idImage::CopyFramebuffer( int x, int y, int imageWidth, int imageHeight, bo
 				junk[i+1] = 255;
 			}
 #endif
-			qglTexImage2D( GL_TEXTURE_2D, 0, GL_RGB, potWidth, potHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, junk );
+			// ubyte junk uploads fine into an RGBA16F texture (GL converts); the real content
+			// is copied in by qglCopyTexSubImage2D below, so only the padding uses this fill
+			qglTexImage2D( GL_TEXTURE_2D, 0, captureFormat, potWidth, potHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, junk );
 			Mem_Free( junk );
 
 			qglCopyTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, x, y, imageWidth, imageHeight );

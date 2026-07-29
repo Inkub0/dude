@@ -88,10 +88,31 @@ stays half-float until the single resolve write, and the dither is the last thin
   in [`GL3Shaders.cpp`](../neo/renderer/rhi/GL3Shaders.cpp).
 - Cvar: `r_hdr` in [`RenderSystem_init.cpp`](../neo/renderer/RenderSystem_init.cpp).
 
+**`_currentRender` is float in HDR mode (implemented).** Refraction, heat-haze and every
+`SS_POST_PROCESS`-sort surface sample the `_currentRender` image, which the shared
+[`idImage::CopyFramebuffer`](../neo/renderer/Image_load.cpp) snapshots from the framebuffer.
+Left at RGBA8 it re-clamped and re-banded the float scene the moment a glass/refraction pane
+sampled it — e.g. glass in front of fog banded even with `r_hdr` on. Fix: in an HDR frame
+`CopyFramebuffer` captures into **RGBA16F**, reading `GL_COLOR_ATTACHMENT0` during the view (the
+backbuffer isn't bound then) and `GL_BACK` afterwards. Off HDR (and on the legacy ARB2 backend)
+it's the bit-for-bit vanilla `GL_RGB8` / `GL_BACK` path. Smoke-dark-blend and in-game camera
+captures ride the same path for free.
+
+Two separate signals keep this correct **and** cheap — `RB_RHI_HdrFrameActive()` (this is an HDR
+frame, true its whole duration) picks the *format*; `RB_RHI_HdrCaptureActive()` (float FBO bound
+right now, cleared at resolve) picks the *read source*. They must be separate: a format flip
+forces a full-screen POT texture realloc, so if one signal drove both, any scene with a per-frame
+`_currentRender` copy (heat-haze, smoke-dark-blend) *plus* the per-frame 8-bit gamma/brightness
+capture would flip the format and realloc that texture **twice every frame** — a multi-ms stall
+(this regressed a Potato frame from ~1.2ms to ~20ms before the split). Keying the format to the
+whole frame means `_currentRender` holds one format all frame; the post-resolve gamma pass
+captures the 8-bit backbuffer into the RGBA16F texture (a harmless upconvert) instead of forcing
+it back. A realloc now happens only on the first HDR frame and on an `r_hdr` toggle — so toggling
+still needs no `vid_restart`. Caveat: materials sampling `_currentRender.a` now read real
+framebuffer alpha rather than the implicit 1.0 of an RGB8 texture — no stock material does, but
+it's a behaviour change gated behind `r_hdr`.
+
 **Known limitations (acceptable for A, addressed later):**
-- **`_currentRender` is still RGBA8.** Refraction/heat-haze/postprocess-sort surfaces
-  snapshot into the 8-bit `_currentRender` image, so values `>1.0` clamp there. These are
-  LDR effects; correctness is unaffected, only their input is tone-limited.
 - **Hardware MSAA (`r_multiSamples`) is bypassed** while `r_hdr` is on — the scene renders
   into a single-sample HDR FBO, not the multisampled backbuffer. Use `r_rhiAA` (FXAA) for
   edge AA meanwhile; a multisampled RGBA16F target + resolve blit is a follow-up.

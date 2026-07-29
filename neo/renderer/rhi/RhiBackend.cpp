@@ -367,10 +367,43 @@ passthrough resolve (shaders/hdrresolve.*); Phase B folds exposure + tonemap int
 static rhi::RenderTargetHandle	rhiHdrRT = 0;		// scene buffer (RGBA16F + depth-stencil)
 static rhi::RenderTargetHandle	rhiHdrAaRT = 0;		// FXAA output ping (RGBA16F, color only)
 static int						rhiHdrW = 0, rhiHdrH = 0;
-static bool						rbHdrActiveThisFrame = false;
+static bool						rbHdrActiveThisFrame = false;	// float FBO bound *right now* (view pass)
+static bool						rbHdrFrameActive = false;		// this whole frame is an HDR frame
+
+/*
+=============
+RB_RHI_HdrCaptureActive / RB_RHI_HdrFrameActive
+
+Two separate signals the shared idImage::CopyFramebuffer needs to snapshot
+_currentRender correctly in HDR mode — kept apart so the capture format never flips
+mid-frame (a format flip forces a full-screen texture realloc; flipping it every
+frame between the view's float capture and the post-resolve gamma pass' 8-bit capture
+was a ~18ms/frame stall):
+
+  HdrCaptureActive - the float scene FBO is the bound *read source* right now (view
+    pass, between HdrBeginFrame and HdrResolve). Selects the read buffer:
+    GL_COLOR_ATTACHMENT0 while true, GL_BACK once the backbuffer is rebound. Cleared
+    at resolve. False on the legacy backend / when target creation failed, where the
+    backbuffer is bound and GL_COLOR_ATTACHMENT0 would be invalid.
+
+  HdrFrameActive - this is an HDR frame, true for its *entire* duration including the
+    post-resolve gamma/screenshot passes. Selects the capture *format* (RGBA16F), so
+    _currentRender stays one format all frame and doesn't thrash-realloc. The gamma
+    pass captures the 8-bit backbuffer into that RGBA16F texture (a harmless upconvert)
+    rather than forcing it back to RGBA8.
+=============
+*/
+bool RB_RHI_HdrCaptureActive( void ) {
+	return rbHdrActiveThisFrame;
+}
+
+bool RB_RHI_HdrFrameActive( void ) {
+	return rbHdrFrameActive;
+}
 
 static void RB_RHI_HdrBeginFrame( rhi::RHI *r ) {
 	rbHdrActiveThisFrame = false;
+	rbHdrFrameActive = false;
 	if ( !r_hdr.GetBool() || !R_BackendSupportsEnhancements() ) {
 		return;		// off → the frame stays on the backbuffer exactly as before
 	}
@@ -408,6 +441,7 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r ) {
 
 	r->SetFrameTarget( rhiHdrRT );
 	rbHdrActiveThisFrame = true;
+	rbHdrFrameActive = true;	// stays true past HdrResolve so _currentRender keeps one format all frame
 }
 
 // FXAA as a float->float pass (rhiHdrRT color -> rhiHdrAaRT), so the anti-aliased image
