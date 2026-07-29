@@ -32,6 +32,7 @@
 savegames/
 /base/generated/
 /base/screenshots/
+/base/maps/
 *.pk4.orig
 *.pk4.bak
 *.pkZZ
