@@ -1684,16 +1684,49 @@ static CVarOption videoOptionsImmediately[] = {
 // vanilla Doom 3, so none of these effects run there.
 static CVarOption enhancementOptions[] = {
 	CVarOption( "Lighting" ),
+	CVarOption( "r_pbr", []( idCVar& cvar ) {
+		bool enable = cvar.GetBool();
+		if ( ImGui::Checkbox( "PBR Materials (GGX)", &enable ) ) {
+			cvar.SetBool( enable );
+		}
+		const char* descr = "Physically based specular (GGX) with energy-conserving diffuse. Replaces the\n"
+			"specular shading model below while enabled (those settings are kept, just\n"
+			"inactive). Currently uses global roughness defaults; per-material values arrive\n"
+			"with the material classifier. Pairs well with HDR (recommended, not required).\n"
+			"The strongest deviation from the vanilla look in this tab.";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
+	// the three specular-model controls below are superseded by the PBR path, so
+	// they grey out while r_pbr is on; their values are preserved untouched so
+	// toggling PBR back off restores the exact previous look.
 	CVarOption( "r_shading", []( idCVar& cvar ) {
+		ImGui::BeginDisabled( r_pbr.GetBool() );
 		int sel = idMath::ClampInt( 0, 2, cvar.GetInteger() );
 		if ( ImGui::Combo( "Specular Shading Model", &sel, "Vanilla (lookup table)\0Blinn-Phong\0Phong\0" ) ) {
 			cvar.SetInteger( sel );
 		}
 		const char* descr = "Vanilla reproduces the classic Doom 3 specular highlight exactly.\nBlinn-Phong and Phong are analytic models tuned by Specular Exponent.";
 		AddCVarOptionTooltips( cvar, descr );
+		ImGui::EndDisabled();
 	} ),
-	CVarOption( "r_specularScale", "Specular Scale", OT_FLOAT, 0.0f, 8.0f ),
-	CVarOption( "r_specularExp", "Specular Exponent (Blinn-Phong / Phong)", OT_FLOAT, 1.0f, 128.0f ),
+	CVarOption( "r_specularScale", []( idCVar& cvar ) {
+		ImGui::BeginDisabled( r_pbr.GetBool() );
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Specular Scale", &f, 0.0f, 8.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( f );
+		}
+		AddCVarOptionTooltips( cvar );
+		ImGui::EndDisabled();
+	} ),
+	CVarOption( "r_specularExp", []( idCVar& cvar ) {
+		ImGui::BeginDisabled( r_pbr.GetBool() );
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Specular Exponent (Blinn-Phong / Phong)", &f, 1.0f, 128.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( f );
+		}
+		AddCVarOptionTooltips( cvar );
+		ImGui::EndDisabled();
+	} ),
 	// light flare/glare deform sprites (the "bloom" around some lights). Vanilla
 	// value is 1.0; lower to dampen, 0 to switch them off. Works on all backends
 	// but lives here as the deviate-from-vanilla knob.
@@ -2268,7 +2301,9 @@ struct EnhancementPreset {
 	float filmGrain;
 	float chromaticAberration;
 	float reflectionScale;    // 1.0 vanilla / 0.7 dampened for the brighter enhanced scene
-	int   shading;            // r_shading: 0 vanilla LUT (Potato only) / 1 Blinn-Phong (enhanced tiers)
+	int   shading;            // r_shading: 0 vanilla LUT (Potato only) / 1 Blinn-Phong (enhanced tiers).
+	                          // Dormant (still applied, just not read) while r_pbr supersedes the
+	                          // specular model; presets deliberately don't touch r_pbr itself.
 	float specularScale;      // r_specularScale: scales the specular contribution (applies to all models)
 	float specularExp;        // r_specularExp: Blinn-Phong/Phong exponent (ignored by the vanilla LUT)
 	// shadow-map size scaling (logically part of the shadow levers above; kept here
@@ -2632,6 +2667,158 @@ static void DrawShadowDebugMenu()
 	AddTooltip( "Toggles stencil shadow volumes (the vanilla technique) and self-shadowing (r_shadows). "
 		"On opengl3/Vulkan with Shadow Mapping enabled, shadows come from the shadow maps below instead, "
 		"so this only affects the stencil path." );
+
+	// DUDE PBR materials (docs/pbr-materials.md): every live tuning knob for the
+	// GGX interaction path in one place, so the look can be dialled in-game.
+	// All values apply instantly (per-draw uniforms, no reloadShaders needed).
+	ImGui::Spacing();
+	ImGui::SeparatorText( "PBR Materials (GGX)" );
+
+	if ( !r_pbr.GetBool() ) {
+		ImGui::TextDisabled( "PBR is off — enable \"PBR Materials (GGX)\" in the Enhancements tab first." );
+	}
+	ImGui::BeginDisabled( !r_pbr.GetBool() );
+
+	float pbrRough = r_pbrRoughness.GetFloat();
+	if ( ImGui::SliderFloat( "Fallback Roughness", &pbrRough, 0.03f, 1.0f, "%.2f" ) ) {
+		r_pbrRoughness.SetFloat( pbrRough );
+	}
+	AddTooltip( "r_pbrRoughness: roughness for materials without a pbr-table entry (0.03 = mirror, 1 = matte). "
+		"0.58 matches the Blinn-Phong exponent-16 highlight width. Per-material values come from "
+		"pbr/pbr_materials.cfg and override this." );
+
+	float pbrSpec = r_pbrSpecScale.GetFloat();
+	if ( ImGui::SliderFloat( "Specular Energy (dielectrics)", &pbrSpec, 0.0f, 8.0f, "%.2f" ) ) {
+		r_pbrSpecScale.SetFloat( pbrSpec );
+	}
+	AddTooltip( "r_pbrSpecScale: artistic boost on the GGX lobe for dielectrics/painted surfaces (fades to 1 "
+		"on bare metal, whose albedo-derived reflectance is already bright). The physical 4% dielectric "
+		"reflectance reads dim in Doom 3's display-space shading; this compensates." );
+
+	float pbrMetalMax = r_pbrMetalnessMax.GetFloat();
+	if ( ImGui::SliderFloat( "Metalness Cap", &pbrMetalMax, 0.0f, 1.0f, "%.2f" ) ) {
+		r_pbrMetalnessMax.SetFloat( pbrMetalMax );
+	}
+	AddTooltip( "r_pbrMetalnessMax: upper clamp on how metallic any surface can get. Metalness kills diffuse, "
+		"and without an environment to reflect (planned Phase C), full metals go black between lights — "
+		"this keeps a sliver of diffuse. Raise toward 1 for harder metals, lower if metal areas read too dark." );
+
+	float pbrToksvig = r_pbrToksvigBase.GetFloat();
+	if ( ImGui::SliderFloat( "Highlight Tightness (Toksvig base)", &pbrToksvig, 0.0f, 0.6f, "%.2f" ) ) {
+		r_pbrToksvigBase.SetFloat( pbrToksvig );
+	}
+	AddTooltip( "r_pbrToksvigBase: how much normal-map variance is ignored before it widens (softens) the "
+		"highlight. LOWER = softer highlights but strong anti-firefly filtering; HIGHER = tighter, punchier "
+		"highlights but white pixel spikes creep back on panel seams. 0.2 = calibrated split." );
+
+	float pbrClamp = r_pbrFireflyClamp.GetFloat();
+	if ( ImGui::SliderFloat( "Highlight Ceiling (firefly clamp)", &pbrClamp, 1.0f, 16.0f, "%.1f" ) ) {
+		r_pbrFireflyClamp.SetFloat( pbrClamp );
+	}
+	AddTooltip( "r_pbrFireflyClamp: upper bound on the specular lobe. Stops isolated texels clipping to pure "
+		"white; also the ceiling that skin/tight highlights ride at. Raise for hotter cores (pairs well "
+		"with HDR), lower to flatten everything." );
+
+	// live per-category values: these drive every material the classifier tagged
+	// with the matching category (the bulk of the game); hand-written
+	// pbr_overrides.cfg entries are exempt and always keep their own numbers.
+	ImGui::Spacing();
+	ImGui::TextDisabled( "Material categories (live; overrides file still wins per material):" );
+
+	float skinRough = r_pbrSkinRoughness.GetFloat();
+	if ( ImGui::SliderFloat( "Skin Roughness (heads/faces)", &skinRough, 0.03f, 1.0f, "%.2f" ) ) {
+		r_pbrSkinRoughness.SetFloat( skinRough );
+	}
+	AddTooltip( "r_pbrSkinRoughness: human heads and faces. Low = tight oily sheen that makes facial "
+		"detail pop; the Highlight Ceiling above bounds the core so faces can't burn out." );
+
+	float skinWet = r_pbrSkinWetness.GetFloat();
+	if ( ImGui::SliderFloat( "Skin Wetness (specular film)", &skinWet, 0.0f, 4.0f, "%.2f" ) ) {
+		r_pbrSkinWetness.SetFloat( skinWet );
+	}
+	AddTooltip( "r_pbrSkinWetness: boost on the specular energy of skin, eyes and teeth, modelling the "
+		"sweat/water film (1 = dry baseline, 0 = dead-matte). For a properly wet look, raise this AND "
+		"lower Skin Roughness — wetness is not metalness; metallic skin would just tint like bronze." );
+
+	float eyesRough = r_pbrEyesRoughness.GetFloat();
+	if ( ImGui::SliderFloat( "Eye/Teeth Roughness", &eyesRough, 0.03f, 1.0f, "%.2f" ) ) {
+		r_pbrEyesRoughness.SetFloat( eyesRough );
+	}
+	AddTooltip( "r_pbrEyesRoughness: cornea and enamel — the hardest, wettest surfaces on a face. Low "
+		"values give tiny hot catchlights when the flashlight crosses a face in the dark." );
+
+	float fleshRough = r_pbrFleshRoughness.GetFloat();
+	if ( ImGui::SliderFloat( "Flesh Roughness (bodies/gore)", &fleshRough, 0.03f, 1.0f, "%.2f" ) ) {
+		r_pbrFleshRoughness.SetFloat( fleshRough );
+	}
+	AddTooltip( "r_pbrFleshRoughness: body flesh, meat, hell-growth." );
+
+	float fleshWet = r_pbrFleshWetness.GetFloat();
+	if ( ImGui::SliderFloat( "Flesh Wetness (slime film)", &fleshWet, 0.0f, 4.0f, "%.2f" ) ) {
+		r_pbrFleshWetness.SetFloat( fleshWet );
+	}
+	AddTooltip( "r_pbrFleshWetness: the slime/gore film on demons, viscera and hell-growth (1 = dry "
+		"baseline). Raise it with Flesh Roughness lowered for glistening horror flesh in the "
+		"flashlight beam." );
+
+	float metalRough = r_pbrMetalRoughness.GetFloat();
+	if ( ImGui::SliderFloat( "Bare Metal Roughness", &metalRough, 0.03f, 1.0f, "%.2f" ) ) {
+		r_pbrMetalRoughness.SetFloat( metalRough );
+	}
+	AddTooltip( "r_pbrMetalRoughness: grates, pipes, machined steel, chrome — surfaces with exposed metal "
+		"(metalness 1, subject to the Metalness Cap above)." );
+
+	float paintRough = r_pbrPaintedRoughness.GetFloat();
+	if ( ImGui::SliderFloat( "Painted Metal Roughness", &paintRough, 0.03f, 1.0f, "%.2f" ) ) {
+		r_pbrPaintedRoughness.SetFloat( paintRough );
+	}
+	AddTooltip( "r_pbrPaintedRoughness: the station's painted panelling — the bulk of the game's surfaces." );
+
+	float paintMetal = r_pbrPaintedMetalness.GetFloat();
+	if ( ImGui::SliderFloat( "Painted Metal Metalness", &paintMetal, 0.0f, 1.0f, "%.2f" ) ) {
+		r_pbrPaintedMetalness.SetFloat( paintMetal );
+	}
+	AddTooltip( "r_pbrPaintedMetalness: paint is a dielectric, so keep this low — it models metal showing "
+		"through scuffs. Raising it tints highlights toward the surface color but darkens the diffuse body. "
+		"Shared by walls and floors." );
+
+	float ceramicRough = r_pbrCeramicRoughness.GetFloat();
+	if ( ImGui::SliderFloat( "Ceramic Sheen Roughness", &ceramicRough, 0.03f, 1.0f, "%.2f" ) ) {
+		r_pbrCeramicRoughness.SetFloat( ceramicRough );
+	}
+	AddTooltip( "r_pbrCeramicRoughness: glossy hard surfaces — painted floors plus ceramic tile on floors "
+		"and walls (e.g. the washroom). Tighter than Painted Metal Roughness stretches every light into a "
+		"streak — the wet-floor / glazed-tile look. Grate floors are bare metal and unaffected." );
+
+	float rustRough = r_pbrRustRoughness.GetFloat();
+	if ( ImGui::SliderFloat( "Rusted Metal Roughness", &rustRough, 0.03f, 1.0f, "%.2f" ) ) {
+		r_pbrRustRoughness.SetFloat( rustRough );
+	}
+	AddTooltip( "r_pbrRustRoughness: materials explicitly named rusty/corroded/dirty/stained. Note: most of "
+		"the game's rusty *look* is painted into the diffuse art of plain panels — the Painted Metal "
+		"sliders above are the mass lever for that; this one drives the named-rust set." );
+
+	float rustMetal = r_pbrRustMetalness.GetFloat();
+	if ( ImGui::SliderFloat( "Rusted Metal Metalness", &rustMetal, 0.0f, 1.0f, "%.2f" ) ) {
+		r_pbrRustMetalness.SetFloat( rustMetal );
+	}
+	AddTooltip( "r_pbrRustMetalness: rust itself is a dielectric oxide, so mid values model the patchy "
+		"bare-metal/oxide mix. Higher = more metallic glint through the rust." );
+
+	float stoneRough = r_pbrStoneRoughness.GetFloat();
+	if ( ImGui::SliderFloat( "Stone Roughness", &stoneRough, 0.03f, 1.0f, "%.2f" ) ) {
+		r_pbrStoneRoughness.SetFloat( stoneRough );
+	}
+	AddTooltip( "r_pbrStoneRoughness: rock, concrete, brick, plaster (caves, hell, outdoor Mars)." );
+
+	if ( ImGui::Button( "Reload PBR Table" ) ) {
+		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "reloadPbrTable\n" );
+	}
+	AddTooltip( "Re-reads pbr/pbr_materials.cfg and pbr/pbr_overrides.cfg and re-applies them to all loaded "
+		"materials. Workflow for a single surface: r_showSurfaceInfo 1 to read its material name, add a "
+		"\"<material> <metalness> <roughness>\" line to base/pbr/pbr_overrides.cfg, then press this." );
+
+	ImGui::EndDisabled();
 
 	ImGui::Spacing();
 	ImGui::SeparatorText( "Shadow Maps" );

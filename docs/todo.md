@@ -188,6 +188,26 @@ via RT, potentially higher-ray-count quality) investment for when the Vulkan bac
 
 ---
 
+## PBR materials (roughness / metalness)  **[planned]**
+
+See **docs/pbr-materials.md** for the full design. Summary:
+
+- Opt-in `r_pbr` GGX/Cook-Torrance path in `interaction.frag` (metalness workflow,
+  Schlick Fresnel, Toksvig per-texel roughness from the already-unnormalized normals).
+  Vanilla `r_shading` paths untouched; Potato stays an exact vanilla frame.
+- **No per-texel conversion of stock assets** — a Doom 3 specular map can't be uniquely
+  converted to roughness. Instead: per-material *scalars* from an offline classifier
+  (`tools/pbr_classify.py`) over material names/paths + declared surftypes (sparse:
+  ~537 of ~5,148 stock materials declare one) + normal-variance/specular-luminance
+  estimates clamped to per-category bands; hand-override file on top; ships as an
+  optional pk4 overlay.
+- Phases: **A** GGX branch w/ defaults (testable on stock assets immediately) → **B**
+  classifier + table → **C** environment specular so metals read as metal (metalness
+  clamped until then) → **D** optional `roughnessmap`/`rmamap` keywords for authored packs.
+- Pairs with `r_hdr` (GGX highlights are the >1 energy the RGBA16F buffer exists for).
+
+---
+
 ## Antialiasing (post-resolve SMAA now, TAA later)
 
 See **docs/antialiasing.md** for the full sketch. Summary:

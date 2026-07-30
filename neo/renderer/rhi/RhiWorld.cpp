@@ -458,6 +458,69 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// branch reads it; the free specularParms slot avoids growing u_shadowParms past 4).
 	parms.specularParms[3] = (float)r_shadowMapCubePcf.GetInteger();
 
+	// DUDE PBR (docs/pbr-materials.md): opt-in GGX interaction path. z gates the
+	// shader branch; x/y resolve in priority order: live per-category cvars (the
+	// Developer-tab sliders) for the main material classes > the material's baked
+	// table values (which is what override-file entries and the long-tail
+	// categories report) > globals (metalness 0, r_pbrRoughness). Metalness is
+	// clamped so metals keep a sliver of diffuse until the Phase C
+	// environment-specular term exists. Ambient interactions keep the vanilla
+	// fill path (left zero by the memset).
+	bool pbrOrganicSpecFallback = false;
+	if ( r_pbr.GetBool() && !din->ambientLight ) {
+		const idMaterial *pbrMat = din->surf->material;
+		const int pbrCat = pbrMat ? pbrMat->GetPbrCategory() : PBR_CAT_NONE;
+		const float tblMetal = pbrMat ? pbrMat->GetPbrMetalness() : -1.0f;
+		const float tblRough = pbrMat ? pbrMat->GetPbrRoughness() : -1.0f;
+		float metal = tblMetal >= 0.0f ? tblMetal : 0.0f;
+		float rough = tblRough >= 0.0f ? tblRough : r_pbrRoughness.GetFloat();
+		float specScale = r_pbrSpecScale.GetFloat();
+		switch ( pbrCat ) {
+		case PBR_CAT_SKIN:    metal = 0.0f; rough = r_pbrSkinRoughness.GetFloat();
+		                      // wetness = the water/sweat film: boosts the specular
+		                      // energy on skin only (deliberately not metalness, which
+		                      // would tint and darken the face like bronze)
+		                      specScale *= r_pbrSkinWetness.GetFloat(); break;
+		case PBR_CAT_EYES:    metal = 0.0f; rough = r_pbrEyesRoughness.GetFloat();
+		                      // cornea/enamel share the face's wetness film
+		                      specScale *= r_pbrSkinWetness.GetFloat(); break;
+		case PBR_CAT_FLESH:   metal = 0.0f; rough = r_pbrFleshRoughness.GetFloat();
+		                      // slime/gore film on demons and hell-growth
+		                      specScale *= r_pbrFleshWetness.GetFloat(); break;
+		case PBR_CAT_METAL:   metal = 1.0f; rough = r_pbrMetalRoughness.GetFloat(); break;
+		case PBR_CAT_PAINTED: metal = r_pbrPaintedMetalness.GetFloat();
+		                      rough = r_pbrPaintedRoughness.GetFloat(); break;
+		case PBR_CAT_CERAMIC: metal = r_pbrPaintedMetalness.GetFloat();
+		                      rough = r_pbrCeramicRoughness.GetFloat(); break;
+		case PBR_CAT_RUST:    metal = r_pbrRustMetalness.GetFloat();
+		                      rough = r_pbrRustRoughness.GetFloat(); break;
+		case PBR_CAT_STONE:   metal = 0.0f; rough = r_pbrStoneRoughness.GetFloat(); break;
+		default: break;		// PBR_CAT_NONE: baked/override values stand
+		}
+		parms.pbrParms[0] = idMath::ClampFloat( 0.0f, r_pbrMetalnessMax.GetFloat(), metal );
+		parms.pbrParms[1] = rough;
+		parms.pbrParms[2] = 1.0f;
+		parms.pbrParms[3] = specScale;
+		// PBR tuning knobs (Developer tab) ride localParam1.zw — the SSAO block
+		// below only writes .xy on this (non-ambient) path, so no clash.
+		parms.localParam1[2] = r_pbrToksvigBase.GetFloat();
+		parms.localParam1[3] = r_pbrFireflyClamp.GetFloat();
+
+		// organic materials authored without a specular stage (most blood decals
+		// — bloodpool01 — and the gibs) would zero the GGX lobe through the
+		// black spec mask, leaving the wetness sliders inert on exactly the
+		// surfaces they exist for. Substitute the material's own diffuse as the
+		// mask (the gleam then follows the blood shape and density, tinting
+		// dark red like real blood) with a neutral white modifier; the actual
+		// image swap happens at the bind below.
+		if ( ( pbrCat == PBR_CAT_FLESH || pbrCat == PBR_CAT_SKIN || pbrCat == PBR_CAT_EYES )
+		     && din->specularImage == globalImages->blackImage ) {
+			pbrOrganicSpecFallback = true;
+			parms.specularModifier[0] = parms.specularModifier[1] =
+			parms.specularModifier[2] = parms.specularModifier[3] = 1.0f;
+		}
+	}
+
 	// shadow mapping (DUDE Phase 3.5): only the regular interaction shader samples
 	// the depth map — the ambientLight pass has no shadow term. The lookup reuses
 	// the light-projection texgen already filled above (lightProjection[]), so no
@@ -578,7 +641,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	RB_RHI_BindUnit( 2, din->lightFalloffImage );
 	RB_RHI_BindUnit( 3, din->lightImage );
 	RB_RHI_BindUnit( 4, din->diffuseImage );
-	RB_RHI_BindUnit( 5, din->specularImage );
+	RB_RHI_BindUnit( 5, pbrOrganicSpecFallback ? din->diffuseImage : din->specularImage );
 	RB_RHI_BindUnit( 6, globalImages->specularTableImage );
 	// unit 10: per-material baked occlusion map (u_occlusionMap). Only bound when this
 	// surface has one and r_occlusionMaps is on; the shader gates on u_occlusionParms.x,

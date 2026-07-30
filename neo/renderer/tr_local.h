@@ -873,6 +873,27 @@ extern idCVar r_shading;				// 0 = vanilla LUT, 1 = Blinn-Phong, 2 = Phong
 extern idCVar r_specularScale;			// scales specular contribution (1 = vanilla)
 extern idCVar r_specularExp;			// analytic specular exponent (r_shading 1/2)
 
+// DUDE PBR materials (docs/pbr-materials.md) — GL3/Vulkan interaction shader only
+void R_PbrTableInvalidate( void );		// drop the cached per-material table (reloadPbrTable)
+extern idCVar r_pbr;					// GGX interaction path; supersedes r_shading while on
+extern idCVar r_pbrRoughness;			// Phase A global fallback roughness (per-material in Phase B)
+extern idCVar r_pbrSpecScale;			// artistic energy scale on the GGX lobe (1.2 = calibrated look)
+extern idCVar r_pbrMetalnessMax;		// metal diffuse-kill clamp until Phase C env specular
+extern idCVar r_pbrToksvigBase;			// Toksvig variance baseline (anti-firefly vs highlight tightness)
+extern idCVar r_pbrFireflyClamp;		// GGX lobe ceiling (spike suppression / highlight-core cap)
+extern idCVar r_pbrSkinWetness;			// skin+eyes specular boost (sweat/water film; NOT metalness)
+extern idCVar r_pbrSkinRoughness;		// live per-category values (supersede baked table numbers
+extern idCVar r_pbrEyesRoughness;		// for entries tagged with the matching category column;
+extern idCVar r_pbrFleshRoughness;		// hand-authored pbr_overrides.cfg entries always win)
+extern idCVar r_pbrFleshWetness;		// slime/gore film on demons + hell-growth
+extern idCVar r_pbrMetalRoughness;
+extern idCVar r_pbrPaintedRoughness;
+extern idCVar r_pbrPaintedMetalness;
+extern idCVar r_pbrCeramicRoughness;	// ceramic sheen: painted floors + tile, floors and walls
+extern idCVar r_pbrRustRoughness;
+extern idCVar r_pbrRustMetalness;
+extern idCVar r_pbrStoneRoughness;
+
 // DUDE Phase 3.5 shadow mapping — GL3/Vulkan only, stencil stays the default
 extern idCVar r_shadowMapping;			// 0 = stencil volumes, 1 = shadow maps where supported
 extern idCVar r_shadowMapSize;			// shadow map resolution per light

@@ -77,10 +77,16 @@ struct RenderParams {
 								// (this surface has an occlusion stage and r_occlusionMaps is
 								// on), y = ambient-term strength, z = direct-diffuse strength,
 								// w unused. The map is sampled on unit 10 with the diffuse UV.
+
+	float	pbrParms[4];		// DUDE PBR interaction path (docs/pbr-materials.md): x =
+								// metalness (pre-clamped by r_pbrMetalnessMax), y = roughness,
+								// z = enable (r_pbr, non-ambient interactions only), w =
+								// specular energy scale (r_pbrSpecScale). Phase A fills global
+								// fallbacks; Phase B swaps in per-material values.
 };
 
-// 3 mat4 (192) + 37 vec4 (592) = 784 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 784, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 3 mat4 (192) + 38 vec4 (608) = 800 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 800, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

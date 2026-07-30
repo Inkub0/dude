@@ -300,6 +300,37 @@ idCVar r_shading( "r_shading", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
 idCVar r_specularScale( "r_specularScale", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "scales the specular contribution (1 = vanilla)", 0.0f, 8.0f );
 idCVar r_specularExp( "r_specularExp", "16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "specular exponent for the analytic shading models (r_shading 1/2)", 1.0f, 128.0f );
 
+// DUDE PBR materials (docs/pbr-materials.md; GL3/Vulkan interaction shader only,
+// inert on the legacy ARB2 path). r_pbr switches the per-light interaction pass to
+// an energy-conserving GGX specular with a metalness workflow; while on it
+// supersedes r_shading / r_specularScale / r_specularExp (their values are
+// preserved for toggling back). Works with r_hdr on or off (HDR recommended for
+// the >1 highlight energy). Phase A: global fallback parameters only; the Phase B
+// classifier table supplies per-material values.
+idCVar r_pbr( "r_pbr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "physically based (GGX/Cook-Torrance) specular + energy-conserving diffuse in the per-light interaction pass. Supersedes r_shading and the specular scale/exponent while on. Non-vanilla; opengl3/Vulkan only" );
+idCVar r_pbrRoughness( "r_pbrRoughness", "0.58", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "global fallback roughness for r_pbr until the per-material classifier table exists (docs/pbr-materials.md Phase B). 0.58 matches the Blinn-Phong exponent-16 highlight width via alpha = sqrt(2/(n+2)); in-game A/B put the perceptual match between 0.5 and 0.58", 0.03f, 1.0f );
+idCVar r_pbrSpecScale( "r_pbrSpecScale", "1.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "artistic energy scale on the r_pbr specular lobe (the PBR path's counterpart to r_specularScale, which it deliberately doesn't read). Dielectric-weighted: fades to 1 as metalness rises. 1.5 is the in-game perceptual match to the calibrated Blinn-Phong look now that the Toksvig baseline keeps lobes tight (the earlier 3 was calibrated against flattened lobes)", 0.0f, 8.0f );
+idCVar r_pbrMetalnessMax( "r_pbrMetalnessMax", "0.8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "upper clamp on effective metalness so metals keep a sliver of diffuse until the Phase C environment-specular term lands (docs/pbr-materials.md sec. 5)", 0.0f, 1.0f );
+idCVar r_pbrToksvigBase( "r_pbrToksvigBase", "0.2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "normal-variance baseline subtracted before the Toksvig specular widening. Low = more anti-firefly widening but softer highlights; high = tighter highlights but white pixel spikes on seams return. 0.2 = calibrated split (docs/pbr-materials.md sec. 4)", 0.0f, 0.6f );
+idCVar r_pbrFireflyClamp( "r_pbrFireflyClamp", "6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "upper bound on the GGX specular lobe. Prevents isolated normal-map texels from spiking to clipped white; also the ceiling that skin/tight-roughness highlight cores ride at. Raise for hotter highlight cores (pairs well with r_hdr), lower to flatten", 1.0f, 16.0f );
+
+// live per-category material values (Developer-tab sliders). These supersede the
+// baked numbers in pbr/pbr_materials.cfg for entries tagged with the matching
+// category column; hand-written pbr_overrides.cfg entries always win instead.
+// Defaults mirror the classifier's CATEGORIES table (tools/pbr_classify.py).
+idCVar r_pbrSkinRoughness( "r_pbrSkinRoughness", "0.4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for human heads/faces (the `skin` category). Low = tight oily sheen that makes facial detail pop (the firefly clamp bounds the core so it can't burn out)", 0.03f, 1.0f );
+idCVar r_pbrSkinWetness( "r_pbrSkinWetness", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "skin-only multiplier on the specular energy, modelling the water/sweat film on faces (1 = dry baseline). Wetness is NOT metalness — metallic skin would tint and darken like bronze; a wet look pairs this raised with Skin Roughness lowered", 0.0f, 4.0f );
+idCVar r_pbrEyesRoughness( "r_pbrEyesRoughness", "0.15", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for eyes and teeth (the `eyes` category): cornea and enamel are the hardest, wettest surfaces on a face — low values give flashlight catchlights. Shares the skin wetness film", 0.03f, 1.0f );
+idCVar r_pbrFleshRoughness( "r_pbrFleshRoughness", "0.55", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for body flesh, meat and hell-growth (the `flesh` category)", 0.03f, 1.0f );
+idCVar r_pbrFleshWetness( "r_pbrFleshWetness", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "flesh-only multiplier on the specular energy: the slime/gore film on demons, viscera and hell-growth (1 = dry baseline). For glistening horror flesh raise this and lower flesh roughness", 0.0f, 4.0f );
+idCVar r_pbrCeramicRoughness( "r_pbrCeramicRoughness", "0.45", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for the `ceramic_sheen` category: painted floors plus ceramic tile on floors and walls (e.g. the washroom). Tighter than the wall panelling so lights stretch into streaks — the wet-floor / glazed-tile look. Metalness is shared with painted metal", 0.03f, 1.0f );
+idCVar r_pbrMetalRoughness( "r_pbrMetalRoughness", "0.32", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for bare metal — grates, pipes, machined steel, chrome (the `metal` category, metalness 1)", 0.03f, 1.0f );
+idCVar r_pbrPaintedRoughness( "r_pbrPaintedRoughness", "0.55", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for painted/coated metal — the station panelling bulk (the `metal_painted` category)", 0.03f, 1.0f );
+idCVar r_pbrPaintedMetalness( "r_pbrPaintedMetalness", "0.2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "metalness for painted/coated metal: paint is a dielectric, so keep this low — it models scuff-through to the metal beneath. Also subject to r_pbrMetalnessMax", 0.0f, 1.0f );
+idCVar r_pbrRustRoughness( "r_pbrRustRoughness", "0.78", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for rusted/corroded metal (the `metal_rust` category — materials named rust/oxid/corro/dirty/stain)", 0.03f, 1.0f );
+idCVar r_pbrRustMetalness( "r_pbrRustMetalness", "0.4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "metalness for rusted metal: rust itself is a dielectric oxide, so this models the patchy mix of bare metal and oxide. Also subject to r_pbrMetalnessMax", 0.0f, 1.0f );
+idCVar r_pbrStoneRoughness( "r_pbrStoneRoughness", "0.9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for rock, concrete, brick and plaster (the `stone` category)", 0.03f, 1.0f );
+
 // DUDE Phase 3.5 shadow mapping (GL3/Vulkan only; stencil stays the faithful
 // default). Global mode for now: 0 = stencil shadow volumes (vanilla), 1 =
 // shadow maps for projected/spot lights (point + parallel lights fall back to
@@ -1229,6 +1260,29 @@ static void R_ReloadSurface_f( const idCmdArgs &args ) {
 
 	// reload any images used by the decl
 	mt.material->ReloadImages( false );
+}
+
+/*
+=====================
+R_ReloadPbrTable_f
+
+DUDE PBR (docs/pbr-materials.md Phase B): re-read the pbr table files and
+re-apply the lookup to every already-parsed material, so entries in
+pbr/pbr_overrides.cfg can be tuned live in-game without a decl reload.
+=====================
+*/
+static void R_ReloadPbrTable_f( const idCmdArgs &args ) {
+	R_PbrTableInvalidate();
+	int applied = 0;
+	const int n = declManager->GetNumDecls( DECL_MATERIAL );
+	for ( int i = 0; i < n; i++ ) {
+		const idMaterial *m = declManager->MaterialByIndex( i, false );
+		if ( m && m->IsValid() ) {
+			const_cast<idMaterial *>( m )->ApplyPbrTable();
+			applied++;
+		}
+	}
+	common->Printf( "reloadPbrTable: re-applied to %d parsed materials\n", applied );
 }
 
 
@@ -2567,6 +2621,7 @@ void R_InitCommands( void ) {
 	cmdSystem->AddCommand( "listRenderLightDefs", R_ListRenderLightDefs_f, CMD_FL_RENDERER, "lists the light defs" );
 	cmdSystem->AddCommand( "listModes", R_ListModes_f, CMD_FL_RENDERER, "lists all video modes" );
 	cmdSystem->AddCommand( "reloadSurface", R_ReloadSurface_f, CMD_FL_RENDERER, "reloads the decl and images for selected surface" );
+	cmdSystem->AddCommand( "reloadPbrTable", R_ReloadPbrTable_f, CMD_FL_RENDERER, "re-reads pbr/pbr_materials.cfg + pbr/pbr_overrides.cfg and re-applies to loaded materials (docs/pbr-materials.md)" );
 }
 
 /*

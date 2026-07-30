@@ -66,4 +66,11 @@ UBO_BINDING(0) uniform RenderParams {
 	vec4 u_occlusionParms;       // DUDE material AO map (docs/occlusion-maps.md):
 	                            // x = enable, y = ambient strength, z = direct-diffuse
 	                            // strength, w unused. Map sampled on unit 10 (diffuse UV).
+
+	vec4 u_pbrParms;             // DUDE PBR interaction path (docs/pbr-materials.md):
+	                            // x = metalness (pre-clamped by r_pbrMetalnessMax),
+	                            // y = roughness, z = enable (r_pbr, non-ambient
+	                            // interactions only), w = specular energy scale
+	                            // (r_pbrSpecScale). Phase A fills global fallbacks;
+	                            // Phase B swaps in per-material values.
 };

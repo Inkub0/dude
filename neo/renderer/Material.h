@@ -385,6 +385,23 @@ public:
 						// passes read it (docs/occlusion-maps.md). NULL on all stock assets.
 	const shaderStage_t *GetOcclusionStage( void ) const;
 
+						// DUDE PBR (docs/pbr-materials.md Phase B): per-material metalness /
+						// roughness from the generated pbr/pbr_materials.cfg table (merged
+						// with the hand-authored pbr/pbr_overrides.cfg, which wins). -1 = no
+						// table entry -> the backend falls back to the r_pbr* globals.
+						// Only read when r_pbr is on; inert otherwise.
+	float				GetPbrMetalness( void ) const { return pbrMetalness; }
+	float				GetPbrRoughness( void ) const { return pbrRoughness; }
+						// material class from the table's category column; the backend maps
+						// the main classes to live per-category cvars (Developer tab
+						// sliders), which then supersede the baked numbers above. Entries
+						// from the override file report PBR_CAT_NONE so hand-tuned values
+						// always win over the sliders.
+	int					GetPbrCategory( void ) const { return pbrCategory; }
+						// (re)runs the table lookup for this material; called at parse time
+						// and by the reloadPbrTable console command
+	void				ApplyPbrTable( void );
+
 						// returns true if the material will draw anything at all.  Triggers, portals,
 						// etc, will not have anything to draw.  A not drawn surface can still castShadow,
 						// which can be used to make a simplified shadow hull for a complex object set
@@ -698,7 +715,30 @@ private:
 	bool				suppressInSubview;
 	bool				portalSky;
 	int					refCount;
+
+	// DUDE PBR (docs/pbr-materials.md Phase B): per-material shading parameters
+	// from the pbr table files; -1 = no entry (backend uses the r_pbr* globals)
+	float				pbrMetalness;
+	float				pbrRoughness;
+	int					pbrCategory;	// pbrCategory_t (below)
 };
+
+// DUDE PBR: the main material classes the generated table tags entries with.
+// Only these get live per-category cvars; the long tail (wood, glass, cloth,
+// liquid...) keeps its baked table values. PBR_CAT_NONE = untagged or from the
+// hand-override file (explicit values, never superseded by category sliders).
+typedef enum {
+	PBR_CAT_NONE = 0,
+	PBR_CAT_SKIN,
+	PBR_CAT_EYES,			// eyes + teeth (cornea/enamel: hardest, wettest face surfaces)
+	PBR_CAT_FLESH,
+	PBR_CAT_METAL,			// bare metal
+	PBR_CAT_PAINTED,		// painted/coated metal
+	PBR_CAT_CERAMIC,		// ceramic sheen: painted floors + tile on floors and walls
+							// (split from the wall panelling for the light-streak look)
+	PBR_CAT_RUST,			// rusted/corroded metal
+	PBR_CAT_STONE
+} pbrCategory_t;
 
 typedef idList<const idMaterial *> idMatList;
 

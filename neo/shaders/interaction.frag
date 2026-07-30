@@ -98,55 +98,138 @@ float shadowVisibility() {
 }
 
 void main() {
-	// half angle is normalized with math (matches the ARB program, which
-	// deliberately avoided the normalization cubemap here)
-	vec3 specularV = normalize( var_TexHalfVec );
-
-	// light vector through the normalization cube map, as the original did
-	vec3 lightV = texture( u_normalCubeMap, var_TexLightVec ).xyz * 2.0 - 1.0;
-
 	// RXGB (DXT5nm) swizzle: x lives in alpha; deliberately NOT renormalized,
 	// mip filtering shortens the vector and self-shadows rough surfaces less
 	vec4 bump = texture( u_bumpMap, var_TexBump );
 	bump.x = bump.a;
 	vec3 localNormal = bump.xyz * 2.0 - 1.0;
 
-	// N.L and the depth-map shadow visibility (1 for stencil-shadowed and
-	// unshadowed lights, u_shadowParms.x == 0) fold into one scalar that scales
-	// the light projection / falloff product
-	float lightScale = dot( lightV, localNormal ) * shadowVisibility();
+	// diffuse
+	vec4 diffuse = texture( u_diffuseMap, var_TexDiffuse ) * u_diffuseModifier;
+
+	// lightScale: N.L and the depth-map shadow visibility (1 for stencil-shadowed
+	// and unshadowed lights, u_shadowParms.x == 0) fold into one scalar that
+	// scales the light projection / falloff product below.
+	float lightScale;
+	vec4 spec;
+
+	if ( u_pbrParms.z > 0.5 ) {
+		// DUDE PBR path (docs/pbr-materials.md Phase A): Cook-Torrance GGX with a
+		// metalness workflow, superseding the r_shading models while r_pbr is on.
+		// Same tangent-space vectors as vanilla, but normalized analytically (the
+		// 8-bit normalization cubemap is below GGX's precision needs). Deliberate
+		// conventions:
+		//  - No 1/pi on Lambert, no pi on the NDF: both cancel against Doom 3's
+		//    non-physical light values, so diffuse brightness matches vanilla
+		//    exactly at metalness 0.
+		//  - The stock specular map has no unique PBR interpretation, so it stays
+		//    a per-texel *mask* on the lobe (spec * specMap in the shared combine
+		//    below), doubled like vanilla's "spec map * 2" convention so id's
+		//    mid-gray authoring means full strength. r_specularScale/r_specularExp
+		//    (u_specularParms.xy) are deliberately not read here.
+		//  - Toksvig: the bump fetch above is deliberately un-renormalized, so its
+		//    sub-unit length measures normal variance over the mip footprint; fold
+		//    it into GGX alpha^2 for free per-texel roughness on stock assets.
+		float nLen = clamp( length( localNormal ), 1e-4, 1.0 );
+		vec3 N = localNormal / nLen;
+		vec3 L = normalize( var_TexLightVec );
+		vec3 V = normalize( var_TexViewVec );
+		vec3 H = normalize( L + V );
+		float NdotL = max( dot( N, L ), 0.0 );
+		float NdotV = max( dot( N, V ), 1e-4 );
+		float NdotH = max( dot( N, H ), 0.0 );
+		float VdotH = max( dot( V, H ), 0.0 );
+
+		float rough = clamp( u_pbrParms.y, 0.03, 1.0 );
+		float alpha = rough * rough;
+		// Toksvig widening with a calibrated baseline (in-game A/B, 2026-07-30):
+		// on stock DXT5nm assets the normal-length variance carries a codec-noise
+		// floor (compressed normals decode short of unit even at the top mip), and
+		// full Toksvig over-widened every highlight. The baseline subtraction
+		// cancels that floor while keeping the response to *real* normal variance
+		// — seam edges, grate lips, minified detail — which is Toksvig's actual
+		// job: those texels are exactly the specular-aliasing "fireflies".
+		// The baseline lives in u_localParam1.z (r_pbrToksvigBase, default 0.2,
+		// tunable in the Developer tab). Calibration history: 0.5 disabled the
+		// mechanism -> white firefly pixels on panel seams; 0.1 killed the
+		// fireflies but widened ordinary wall texels (|N| ~0.85-0.9), halving
+		// the highlight peak ("no kick" in the Blinn A/B); 0.2 is the split —
+		// |N| > ~0.83 stays tight, seams (|N| < ~0.75) keep the widening.
+		float variance = max( ( 1.0 - nLen ) / nLen - u_localParam1.z, 0.0 );
+		float alpha2 = min( alpha * alpha + variance, 1.0 );
+
+		float metal = u_pbrParms.x;
+		vec3 F0 = mix( vec3( 0.04 ), diffuse.rgb, metal );
+		vec3 F = F0 + ( 1.0 - F0 ) * pow( 1.0 - VdotH, 5.0 );
+		float d = NdotH * NdotH * ( alpha2 - 1.0 ) + 1.0;
+		float D = alpha2 / ( d * d );				// GGX NDF, pi folded out (see above)
+		float k = 0.5 * sqrt( alpha2 );				// Schlick-GGX k for direct light, widened alpha
+		float vis = 0.25 / ( ( NdotL * ( 1.0 - k ) + k ) * ( NdotV * ( 1.0 - k ) + k ) );	// = G / (4 N.L N.V)
+
+		// firefly clamp: GGX's peak (~1/alpha^2, plus the grazing-angle vis
+		// blow-up) sits orders of magnitude above the bounded 8-bit-era energy
+		// these assets were authored against (vanilla Blinn tops out ~2.4x).
+		// Isolated normal-map texels aligning with H spike past the display
+		// range and clip to flat white — "rows of white pixels" on panel seams
+		// and grate lips. Bounding the scalar lobe restores gradation. The
+		// ceiling lives in u_localParam1.w (r_pbrFireflyClamp, default 6:
+		// leaves the calibrated dielectric peak ~2.2 at roughness 0.58
+		// untouched, tames tight/bare-metal spikes; skin at roughness 0.40
+		// rides *at* the ceiling by design — its Blinn-like bounded core).
+		float lobe = min( D * vis, u_localParam1.w );
+
+		// u_pbrParms.w = r_pbrSpecScale, the artistic energy knob for this path,
+		// folded with the vanilla "spec map * 2" convention like the branch below.
+		// Dielectric-weighted: the scale exists to compensate the gamma-space
+		// dimming of the physical 4% dielectric F0, but metal F0 comes from the
+		// albedo — already display-referred, already bright — so applying the
+		// boost there double-counts and blows out bare-metal highlights (the
+		// grate-floor screenshot, 2026-07-30). Metals fade to scale 1.
+		spec = vec4( lobe * F, 1.0 ) * u_specularModifier
+		     * ( mix( u_pbrParms.w, 1.0, metal ) * 2.0 );
+		// energy conservation: Fresnel-weighted diffuse, killed for metals
+		diffuse.rgb *= ( 1.0 - F ) * ( 1.0 - metal );
+		lightScale = NdotL * shadowVisibility();
+	} else {
+		// half angle is normalized with math (matches the ARB program, which
+		// deliberately avoided the normalization cubemap here)
+		vec3 specularV = normalize( var_TexHalfVec );
+
+		// light vector through the normalization cube map, as the original did
+		vec3 lightV = texture( u_normalCubeMap, var_TexLightVec ).xyz * 2.0 - 1.0;
+
+		lightScale = dot( lightV, localNormal ) * shadowVisibility();
+
+		// specular term. Shading model selected by u_specularParms.z:
+		//   0 = vanilla dependent LUT read on N.H (faithful default)
+		//   1 = analytic Blinn-Phong pow(N.H, exp)
+		//   2 = analytic Phong pow(R.V, exp)
+		// u_specularParms.x scales the result (1 = vanilla), .y is the exponent.
+		int shadingModel = int( u_specularParms.z + 0.5 );
+		if ( shadingModel == 0 ) {
+			float sDot = dot( specularV, localNormal );
+			spec = texture( u_specularTable, vec2( sDot, sDot ) );
+		} else {
+			// analytic models want a unit normal (localNormal is deliberately left
+			// un-renormalized above for the diffuse/LUT path)
+			vec3 nSpec = normalize( localNormal );
+			float rawDot;
+			if ( shadingModel == 2 ) {
+				vec3 R = reflect( -lightV, nSpec );
+				rawDot = max( dot( R, normalize( var_TexViewVec ) ), 0.0 );
+			} else {
+				rawDot = max( dot( specularV, nSpec ), 0.0 );
+			}
+			spec = vec4( pow( rawDot, u_specularParms.y ) );
+		}
+		// the vanilla "specular map * 2" scale is folded into the scalar factor here
+		spec *= u_specularModifier * ( u_specularParms.x * 2.0 );
+	}
+
 	vec4 light = textureProj( u_lightProjection, var_TexProjection )
 	           * texture( u_lightFalloff, var_TexFalloff )
 	           * lightScale;
 
-	// diffuse
-	vec4 diffuse = texture( u_diffuseMap, var_TexDiffuse ) * u_diffuseModifier;
-
-	// specular term. Shading model selected by u_specularParms.z:
-	//   0 = vanilla dependent LUT read on N.H (faithful default)
-	//   1 = analytic Blinn-Phong pow(N.H, exp)
-	//   2 = analytic Phong pow(R.V, exp)
-	// u_specularParms.x scales the result (1 = vanilla), .y is the exponent.
-	int shadingModel = int( u_specularParms.z + 0.5 );
-	vec4 spec;
-	if ( shadingModel == 0 ) {
-		float sDot = dot( specularV, localNormal );
-		spec = texture( u_specularTable, vec2( sDot, sDot ) );
-	} else {
-		// analytic models want a unit normal (localNormal is deliberately left
-		// un-renormalized above for the diffuse/LUT path)
-		vec3 nSpec = normalize( localNormal );
-		float rawDot;
-		if ( shadingModel == 2 ) {
-			vec3 R = reflect( -lightV, nSpec );
-			rawDot = max( dot( R, normalize( var_TexViewVec ) ), 0.0 );
-		} else {
-			rawDot = max( dot( specularV, nSpec ), 0.0 );
-		}
-		spec = vec4( pow( rawDot, u_specularParms.y ) );
-	}
-	// the vanilla "specular map * 2" scale is folded into the scalar factor here
-	spec *= u_specularModifier * ( u_specularParms.x * 2.0 );
 	vec4 specMap = texture( u_specularMap, var_TexSpecular );
 
 	// DUDE GTAO on direct light (docs/ssao-gtao.md Phase C). Doom 3 is almost all dynamic
