@@ -2563,6 +2563,21 @@ static void DrawEnhancementsMenu()
 			"opengl3 only." );
 	}
 
+	// Reflections (DUDE PBR Phase C.2, docs/ssr.md). Master toggle only; the tuning
+	// sliders live in the Developer tab next to the PBR knobs.
+	ImGui::SeparatorText( "Reflections" );
+	{
+		bool ssr = r_ssr.GetBool();
+		if ( ImGui::Checkbox( "Screen-Space Reflections", &ssr ) ) {
+			r_ssr.SetBool( ssr );
+		}
+		AddTooltip( "Glossy and metallic surfaces (polished floors, bare metal — per the PBR "
+			"material table) mirror the on-screen scene: fixtures, screens, characters. "
+			"Reflections are screen-space, so off-screen objects can't appear and rays fade at "
+			"the screen edges. Works with PBR shading on or off; tuning sliders are in the "
+			"Developer tab. Non-vanilla; opengl3 only." );
+	}
+
 	// Shadows (DUDE Phase 3.5). Hand-drawn so the sub-settings are visibly grouped
 	// under the toggle and disabled when it is off - making it clear they all take
 	// effect together. Every value is read live by the renderer (no restart).
@@ -2768,6 +2783,15 @@ static void DrawShadowDebugMenu()
 	AddTooltip( "r_pbrMetalRoughness: grates, pipes, machined steel, chrome — surfaces with exposed metal "
 		"(metalness 1, subject to the Metalness Cap above)." );
 
+	float envScale = r_pbrEnvScale.GetFloat();
+	if ( ImGui::SliderFloat( "Metal Environment Glow", &envScale, 0.0f, 2.0f, "%.2f" ) ) {
+		r_pbrEnvScale.SetFloat( envScale );
+	}
+	AddTooltip( "r_pbrEnvScale: metals reflect their surroundings, but Doom 3 has no environment probes — "
+		"this stands in by letting metal reflect a tinted share of each light's own energy, so it stops "
+		"going black where the highlight misses. Scales with light and shadow (metals stay dark in "
+		"darkness). With this up, the Metalness Cap can rise toward 1." );
+
 	float paintRough = r_pbrPaintedRoughness.GetFloat();
 	if ( ImGui::SliderFloat( "Painted Metal Roughness", &paintRough, 0.03f, 1.0f, "%.2f" ) ) {
 		r_pbrPaintedRoughness.SetFloat( paintRough );
@@ -2817,6 +2841,59 @@ static void DrawShadowDebugMenu()
 	AddTooltip( "Re-reads pbr/pbr_materials.cfg and pbr/pbr_overrides.cfg and re-applies them to all loaded "
 		"materials. Workflow for a single surface: r_showSurfaceInfo 1 to read its material name, add a "
 		"\"<material> <metalness> <roughness>\" line to base/pbr/pbr_overrides.cfg, then press this." );
+
+	ImGui::EndDisabled();
+
+	// SSR tuning (docs/ssr.md). Deliberately outside the r_pbr-disabled block: SSR
+	// reads the same material table but works with PBR shading off. Master toggle
+	// mirrors the Enhancements tab.
+	ImGui::Spacing();
+	ImGui::SeparatorText( "Screen-Space Reflections (SSR)" );
+
+	bool ssrOn = r_ssr.GetBool();
+	if ( ImGui::Checkbox( "SSR (master)", &ssrOn ) ) {
+		r_ssr.SetBool( ssrOn );
+	}
+	AddTooltip( "r_ssr: glossy/metallic surfaces mirror the on-screen scene (PBR Phase C.2). "
+		"Same toggle as Enhancements > Reflections." );
+
+	ImGui::BeginDisabled( !r_ssr.GetBool() );
+
+	float ssrIntensity = r_ssrIntensity.GetFloat();
+	if ( ImGui::SliderFloat( "Reflection Intensity", &ssrIntensity, 0.0f, 4.0f, "%.2f" ) ) {
+		r_ssrIntensity.SetFloat( ssrIntensity );
+	}
+	AddTooltip( "r_ssrIntensity: overall reflection strength on top of the physical Fresnel weight. "
+		"1 = physical; below dampens, above exaggerates the mirror look." );
+
+	float ssrMaxRough = r_ssrMaxRoughness.GetFloat();
+	if ( ImGui::SliderFloat( "Roughness Cutoff", &ssrMaxRough, 0.02f, 1.0f, "%.2f" ) ) {
+		r_ssrMaxRoughness.SetFloat( ssrMaxRough );
+	}
+	AddTooltip( "r_ssrMaxRoughness: surfaces rougher than this reflect nothing (fade starts at 70% of it). "
+		"Reflections are currently sharp-only, so keep this low — rough painted walls showing crisp mirror "
+		"images reads wrong. Raise it to let more of the world reflect." );
+
+	int ssrSteps = r_ssrSteps.GetInteger();
+	if ( ImGui::SliderInt( "March Steps", &ssrSteps, 4, 64 ) ) {
+		r_ssrSteps.SetInteger( ssrSteps );
+	}
+	AddTooltip( "r_ssrSteps: ray-march samples per pixel. More = longer, more complete reflections at "
+		"higher GPU cost (watch r_gl3GpuTime). Fewer = cheaper, reflections cut off sooner." );
+
+	float ssrDist = r_ssrMaxDistance.GetFloat();
+	if ( ImGui::SliderFloat( "Max Distance", &ssrDist, 64.0f, 4096.0f, "%.0f" ) ) {
+		r_ssrMaxDistance.SetFloat( ssrDist );
+	}
+	AddTooltip( "r_ssrMaxDistance: how far (world units) a reflection ray reaches. Rooms are ~256 units; "
+		"1000 covers a large hall. Longer rays spread the same March Steps thinner." );
+
+	float ssrThick = r_ssrThickness.GetFloat();
+	if ( ImGui::SliderFloat( "Hit Thickness", &ssrThick, 1.0f, 128.0f, "%.0f" ) ) {
+		r_ssrThickness.SetFloat( ssrThick );
+	}
+	AddTooltip( "r_ssrThickness: assumed depth of surfaces when testing ray hits. Too low leaves gaps "
+		"in reflections (rays slip behind geometry); too high smears streaks under railings and edges." );
 
 	ImGui::EndDisabled();
 

@@ -188,9 +188,9 @@ via RT, potentially higher-ray-count quality) investment for when the Vulkan bac
 
 ---
 
-## PBR materials (roughness / metalness)  **[planned]**
+## PBR materials (roughness / metalness)  **[built through Phase C]**
 
-See **docs/pbr-materials.md** for the full design. Summary:
+See **docs/pbr-materials.md** for the full design + as-built state. Summary:
 
 - Opt-in `r_pbr` GGX/Cook-Torrance path in `interaction.frag` (metalness workflow,
   Schlick Fresnel, Toksvig per-texel roughness from the already-unnormalized normals).
@@ -201,9 +201,12 @@ See **docs/pbr-materials.md** for the full design. Summary:
   ~537 of ~5,148 stock materials declare one) + normal-variance/specular-luminance
   estimates clamped to per-category bands; hand-override file on top; ships as an
   optional pk4 overlay.
-- Phases: **A** GGX branch w/ defaults (testable on stock assets immediately) → **B**
-  classifier + table → **C** environment specular so metals read as metal (metalness
-  clamped until then) → **D** optional `roughnessmap`/`rmamap` keywords for authored packs.
+- Phases: **A** GGX branch w/ defaults **[built]** → **B** classifier + table +
+  per-category Developer-tab sliders **[built]** → **C.1** light-glow env floor for
+  metals (`r_pbrEnvScale`) **[built]** → **C.2** screen-space reflections (`r_ssr`,
+  sharp-only v1, docs/ssr.md) **[built, pending verification]** → **C.2.1** glossy
+  blur + temporal → **D** optional `roughnessmap`/`rmamap` keywords + lit
+  redefinitions for splat decals/eyeballs/weapons.
 - Pairs with `r_hdr` (GGX highlights are the >1 energy the RGBA16F buffer exists for).
 
 ---

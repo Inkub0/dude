@@ -116,6 +116,7 @@ class GL3Backend : public RHI {
 	struct renderTarget_t {
 		GLuint	fbo;
 		GLuint	tex;
+		GLuint	tex2;		// second color attachment of an MRT color+depth target (0 = none)
 		GLuint	depthTex;	// companion depth attachment for a color+depth target (0 = none)
 		int		w, h;
 		bool	cube;		// tex is a GL_TEXTURE_CUBE_MAP (point-light shadow map)
@@ -619,12 +620,18 @@ public:
 	// Color + depth target for a depth-tested offscreen geometry pass (the SSAO normal
 	// G-buffer). RGBA8 sampleable color + a DEPTH_COMPONENT24 depth texture (used only
 	// as the depth attachment, not sampled). GetRenderTargetImage returns the color.
-	virtual RenderTargetHandle CreateRenderTargetColorDepth( ImageFormat fmt, int w, int h ) {
+	// colorCount 2 adds a second RGBA8 attachment (GetRenderTargetImage2) and routes
+	// fragment output 1 to it — the SSR roughness/metalness buffer (docs/ssr.md).
+	virtual RenderTargetHandle CreateRenderTargetColorDepth( ImageFormat fmt, int w, int h, int colorCount ) {
 		if ( !initialized || w <= 0 || h <= 0 ) {
 			return 0;
 		}
 		if ( fmt != IF_RGBA8 ) {
 			common->Warning( "GL3 CreateRenderTargetColorDepth: only IF_RGBA8 supported" );
+			return 0;
+		}
+		if ( colorCount < 1 || colorCount > 2 ) {
+			common->Warning( "GL3 CreateRenderTargetColorDepth: colorCount must be 1 or 2" );
 			return 0;
 		}
 		int slot = -1;
@@ -649,6 +656,18 @@ public:
 		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
 		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
 
+		// optional second color attachment (SSR material buffer); same params as the first
+		GLuint tex2 = 0;
+		if ( colorCount == 2 ) {
+			qglGenTextures( 1, &tex2 );
+			qglBindTexture( GL_TEXTURE_2D, tex2 );
+			qglTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL );
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+		}
+
 		GLuint depthTex = 0;
 		qglGenTextures( 1, &depthTex );
 		qglBindTexture( GL_TEXTURE_2D, depthTex );
@@ -664,6 +683,12 @@ public:
 		gl3BindFramebuffer( GL_FRAMEBUFFER, fbo );
 		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0 );
 		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTex, 0 );
+		if ( colorCount == 2 ) {
+			gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, tex2, 0 );
+			// draw-buffer routing is per-FBO state: set once here, never touches other targets
+			const GLenum bufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+			gl3DrawBuffers( 2, bufs );
+		}
 		GLenum status = gl3CheckFramebufferStatus( GL_FRAMEBUFFER );
 		gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
 		qglBindTexture( GL_TEXTURE_2D, 0 );
@@ -672,12 +697,16 @@ public:
 			common->Warning( "GL3 CreateRenderTargetColorDepth: incomplete FBO (0x%x), %dx%d", status, w, h );
 			gl3DeleteFramebuffers( 1, &fbo );
 			qglDeleteTextures( 1, &tex );
+			if ( tex2 ) {
+				qglDeleteTextures( 1, &tex2 );
+			}
 			qglDeleteTextures( 1, &depthTex );
 			return 0;
 		}
 
 		renderTargets[slot].fbo = fbo;
 		renderTargets[slot].tex = tex;
+		renderTargets[slot].tex2 = tex2;
 		renderTargets[slot].depthTex = depthTex;
 		renderTargets[slot].w = w;
 		renderTargets[slot].h = h;
@@ -772,6 +801,9 @@ public:
 		if ( renderTargets[rt].tex ) {
 			qglDeleteTextures( 1, &renderTargets[rt].tex );
 		}
+		if ( renderTargets[rt].tex2 ) {
+			qglDeleteTextures( 1, &renderTargets[rt].tex2 );
+		}
 		if ( renderTargets[rt].depthTex ) {
 			qglDeleteTextures( 1, &renderTargets[rt].depthTex );
 		}
@@ -783,6 +815,13 @@ public:
 			return 0;
 		}
 		return (ImageHandle)renderTargets[rt].tex;	// GL texture name doubles as the ImageHandle
+	}
+
+	virtual ImageHandle GetRenderTargetImage2( RenderTargetHandle rt ) {
+		if ( rt == 0 || rt >= (RenderTargetHandle)MAX_RENDER_TARGETS ) {
+			return 0;
+		}
+		return (ImageHandle)renderTargets[rt].tex2;	// 0 unless created with colorCount 2
 	}
 
 	// ---- drawing ----

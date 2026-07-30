@@ -121,8 +121,10 @@ public:
 	virtual RenderTargetHandle	CreateRenderTargetCube( ImageFormat fmt, int size ) = 0;
 	// Color target WITH a depth attachment, for a depth-tested offscreen geometry pass
 	// (the SSAO normal G-buffer). Color is a sampleable RGBA8 texture (GetRenderTargetImage);
-	// the depth attachment is written/tested but not sampled. 0 on failure.
-	virtual RenderTargetHandle	CreateRenderTargetColorDepth( ImageFormat fmt, int w, int h ) = 0;
+	// the depth attachment is written/tested but not sampled. colorCount 2 adds a second
+	// RGBA8 attachment (MRT, GetRenderTargetImage2) — the SSR roughness/metalness buffer
+	// riding the same geometry pass (docs/ssr.md). 0 on failure.
+	virtual RenderTargetHandle	CreateRenderTargetColorDepth( ImageFormat fmt, int w, int h, int colorCount = 1 ) = 0;
 	// Color target (IF_RGBA8 or IF_RGBA16F) with a combined DEPTH24_STENCIL8 attachment,
 	// for the HDR scene buffer: an offscreen geometry pass that needs stencil (stencil
 	// shadows) and a sampleable float color. GetRenderTargetImage returns the color. 0 on failure.
@@ -138,6 +140,8 @@ public:
 	// the target's texture as a sampleable image handle — the same ImageHandle
 	// abstraction future material textures will use (Phase 4 image ownership).
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt ) = 0;
+	// second color attachment of a colorCount-2 color+depth target (0 if absent)
+	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle rt ) = 0;
 
 	// per-draw uniform ring: writes `size` bytes and returns the aligned
 	// offset (+ the ring's buffer in *buffer) for DrawArgs::uniformBuffer/

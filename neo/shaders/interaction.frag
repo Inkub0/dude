@@ -187,6 +187,19 @@ void main() {
 		// grate-floor screenshot, 2026-07-30). Metals fade to scale 1.
 		spec = vec4( lobe * F, 1.0 ) * u_specularModifier
 		     * ( mix( u_pbrParms.w, 1.0, metal ) * 2.0 );
+
+		// Phase C.1 environment floor (docs/pbr-materials.md sec. 5): stock D3
+		// has no environment probes to reflect (the "ambient cubemap" is a
+		// constant direction, not colors), so metals with their diffuse killed
+		// went black wherever the GGX alignment missed. Approximate the
+		// environment as the current light's own energy arriving from all
+		// directions: an F0-tinted, metalness-weighted floor added under the
+		// lobe. It rides the shared `light * color` combine below, so it
+		// scales with the light's projection/falloff/shadow (metals glow near
+		// lights, stay dark in darkness — Doom 3's aesthetic preserved) and is
+		// softened by the roughness. u_occlusionParms.w = r_pbrEnvScale.
+		spec.rgb += F0 * ( metal * u_occlusionParms.w * ( 1.0 - 0.5 * rough ) );
+
 		// energy conservation: Fresnel-weighted diffuse, killed for metals
 		diffuse.rgb *= ( 1.0 - F ) * ( 1.0 - metal );
 		lightScale = NdotL * shadowVisibility();

@@ -893,6 +893,15 @@ extern idCVar r_pbrCeramicRoughness;	// ceramic sheen: painted floors + tile, fl
 extern idCVar r_pbrRustRoughness;
 extern idCVar r_pbrRustMetalness;
 extern idCVar r_pbrStoneRoughness;
+extern idCVar r_pbrEnvScale;			// Phase C.1 metal env floor (light-glow reflection stand-in)
+
+// DUDE PBR Phase C.2 screen-space reflections (docs/ssr.md) — GL3 backend only
+extern idCVar r_ssr;					// enable; reflectivity follows the PBR material table
+extern idCVar r_ssrIntensity;			// reflection strength multiplier
+extern idCVar r_ssrMaxRoughness;		// gloss cutoff (v1 is sharp-only, keep low)
+extern idCVar r_ssrSteps;				// ray-march samples per pixel
+extern idCVar r_ssrMaxDistance;			// ray reach, world units
+extern idCVar r_ssrThickness;			// assumed surface thickness for hit tests
 
 // DUDE Phase 3.5 shadow mapping — GL3/Vulkan only, stencil stays the default
 extern idCVar r_shadowMapping;			// 0 = stencil volumes, 1 = shadow maps where supported

@@ -76,7 +76,8 @@ struct RenderParams {
 	float	occlusionParms[4];	// DUDE material AO map (docs/occlusion-maps.md): x = enable
 								// (this surface has an occlusion stage and r_occlusionMaps is
 								// on), y = ambient-term strength, z = direct-diffuse strength,
-								// w unused. The map is sampled on unit 10 with the diffuse UV.
+								// w = r_pbrEnvScale (PBR Phase C.1 metal environment floor,
+								// riding the spare slot). Map sampled on unit 10, diffuse UV.
 
 	float	pbrParms[4];		// DUDE PBR interaction path (docs/pbr-materials.md): x =
 								// metalness (pre-clamped by r_pbrMetalnessMax), y = roughness,

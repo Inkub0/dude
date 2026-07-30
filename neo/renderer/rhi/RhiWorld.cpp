@@ -261,6 +261,7 @@ static float rhiSsaoJitterPhase = 0.0f;				// per-frame noise rotation (golden-r
 static rhi::RenderTargetHandle rhiNormalRT = 0;		// RGBA8 view-normal + depth (color+depth target)
 static int  rhiNormalW = 0, rhiNormalH = 0;			// full view resolution
 static bool rhiNormalReadyThisView = false;			// the normal buffer was produced for this view
+static bool rhiNormalMrt = false;					// has the SSR rough/metal attachment (docs/ssr.md)
 
 // ---- per-surface occlusion-map auto-load cache (docs/occlusion-maps.md) ----
 // Keyed by (render model, surface index) -- stable per model surface and shared across every
@@ -408,6 +409,42 @@ static idImage *RB_RHI_SurfaceOcclusion( const idRenderModel *model, const idRen
 
 /*
 ===================
+RB_RHI_ResolvePbrMaterial
+
+Resolve a material's effective PBR metalness/roughness (docs/pbr-materials.md) in
+priority order: live per-category cvars (the Developer-tab sliders) > the material's
+baked table values (override-file entries and long-tail categories) > globals
+(metalness 0, r_pbrRoughness). Metalness comes back pre-clamped by r_pbrMetalnessMax.
+Shared by the lit interaction fill and the SSR G-buffer pass so both see the same
+surface response; returns the category for callers with per-category extras (wetness).
+===================
+*/
+static int RB_RHI_ResolvePbrMaterial( const idMaterial *mat, float &metal, float &rough ) {
+	const int pbrCat = mat ? mat->GetPbrCategory() : PBR_CAT_NONE;
+	const float tblMetal = mat ? mat->GetPbrMetalness() : -1.0f;
+	const float tblRough = mat ? mat->GetPbrRoughness() : -1.0f;
+	metal = tblMetal >= 0.0f ? tblMetal : 0.0f;
+	rough = tblRough >= 0.0f ? tblRough : r_pbrRoughness.GetFloat();
+	switch ( pbrCat ) {
+	case PBR_CAT_SKIN:    metal = 0.0f; rough = r_pbrSkinRoughness.GetFloat(); break;
+	case PBR_CAT_EYES:    metal = 0.0f; rough = r_pbrEyesRoughness.GetFloat(); break;
+	case PBR_CAT_FLESH:   metal = 0.0f; rough = r_pbrFleshRoughness.GetFloat(); break;
+	case PBR_CAT_METAL:   metal = 1.0f; rough = r_pbrMetalRoughness.GetFloat(); break;
+	case PBR_CAT_PAINTED: metal = r_pbrPaintedMetalness.GetFloat();
+	                      rough = r_pbrPaintedRoughness.GetFloat(); break;
+	case PBR_CAT_CERAMIC: metal = r_pbrPaintedMetalness.GetFloat();
+	                      rough = r_pbrCeramicRoughness.GetFloat(); break;
+	case PBR_CAT_RUST:    metal = r_pbrRustMetalness.GetFloat();
+	                      rough = r_pbrRustRoughness.GetFloat(); break;
+	case PBR_CAT_STONE:   metal = 0.0f; rough = r_pbrStoneRoughness.GetFloat(); break;
+	default: break;		// PBR_CAT_NONE: baked/override values stand
+	}
+	metal = idMath::ClampFloat( 0.0f, r_pbrMetalnessMax.GetFloat(), metal );
+	return pbrCat;
+}
+
+/*
+===================
 RB_RHI_DrawInteraction
 
 Callback for RB_CreateSingleDrawInteractions; the RenderParams mapping is
@@ -459,45 +496,26 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	parms.specularParms[3] = (float)r_shadowMapCubePcf.GetInteger();
 
 	// DUDE PBR (docs/pbr-materials.md): opt-in GGX interaction path. z gates the
-	// shader branch; x/y resolve in priority order: live per-category cvars (the
-	// Developer-tab sliders) for the main material classes > the material's baked
-	// table values (which is what override-file entries and the long-tail
-	// categories report) > globals (metalness 0, r_pbrRoughness). Metalness is
-	// clamped so metals keep a sliver of diffuse until the Phase C
-	// environment-specular term exists. Ambient interactions keep the vanilla
-	// fill path (left zero by the memset).
+	// shader branch; x/y come from the shared resolve (per-category cvars > baked
+	// table > globals, metalness clamped by r_pbrMetalnessMax — see
+	// RB_RHI_ResolvePbrMaterial). Ambient interactions keep the vanilla fill path
+	// (left zero by the memset).
 	bool pbrOrganicSpecFallback = false;
 	if ( r_pbr.GetBool() && !din->ambientLight ) {
-		const idMaterial *pbrMat = din->surf->material;
-		const int pbrCat = pbrMat ? pbrMat->GetPbrCategory() : PBR_CAT_NONE;
-		const float tblMetal = pbrMat ? pbrMat->GetPbrMetalness() : -1.0f;
-		const float tblRough = pbrMat ? pbrMat->GetPbrRoughness() : -1.0f;
-		float metal = tblMetal >= 0.0f ? tblMetal : 0.0f;
-		float rough = tblRough >= 0.0f ? tblRough : r_pbrRoughness.GetFloat();
+		float metal, rough;
+		const int pbrCat = RB_RHI_ResolvePbrMaterial( din->surf->material, metal, rough );
 		float specScale = r_pbrSpecScale.GetFloat();
 		switch ( pbrCat ) {
-		case PBR_CAT_SKIN:    metal = 0.0f; rough = r_pbrSkinRoughness.GetFloat();
-		                      // wetness = the water/sweat film: boosts the specular
-		                      // energy on skin only (deliberately not metalness, which
-		                      // would tint and darken the face like bronze)
+		case PBR_CAT_SKIN:
+		case PBR_CAT_EYES:    // wetness = the water/sweat film: boosts the specular
+		                      // energy on skin/cornea/enamel only (deliberately not
+		                      // metalness, which would tint and darken like bronze)
 		                      specScale *= r_pbrSkinWetness.GetFloat(); break;
-		case PBR_CAT_EYES:    metal = 0.0f; rough = r_pbrEyesRoughness.GetFloat();
-		                      // cornea/enamel share the face's wetness film
-		                      specScale *= r_pbrSkinWetness.GetFloat(); break;
-		case PBR_CAT_FLESH:   metal = 0.0f; rough = r_pbrFleshRoughness.GetFloat();
-		                      // slime/gore film on demons and hell-growth
+		case PBR_CAT_FLESH:   // slime/gore film on demons and hell-growth
 		                      specScale *= r_pbrFleshWetness.GetFloat(); break;
-		case PBR_CAT_METAL:   metal = 1.0f; rough = r_pbrMetalRoughness.GetFloat(); break;
-		case PBR_CAT_PAINTED: metal = r_pbrPaintedMetalness.GetFloat();
-		                      rough = r_pbrPaintedRoughness.GetFloat(); break;
-		case PBR_CAT_CERAMIC: metal = r_pbrPaintedMetalness.GetFloat();
-		                      rough = r_pbrCeramicRoughness.GetFloat(); break;
-		case PBR_CAT_RUST:    metal = r_pbrRustMetalness.GetFloat();
-		                      rough = r_pbrRustRoughness.GetFloat(); break;
-		case PBR_CAT_STONE:   metal = 0.0f; rough = r_pbrStoneRoughness.GetFloat(); break;
-		default: break;		// PBR_CAT_NONE: baked/override values stand
+		default: break;
 		}
-		parms.pbrParms[0] = idMath::ClampFloat( 0.0f, r_pbrMetalnessMax.GetFloat(), metal );
+		parms.pbrParms[0] = metal;
 		parms.pbrParms[1] = rough;
 		parms.pbrParms[2] = 1.0f;
 		parms.pbrParms[3] = specScale;
@@ -505,6 +523,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		// below only writes .xy on this (non-ambient) path, so no clash.
 		parms.localParam1[2] = r_pbrToksvigBase.GetFloat();
 		parms.localParam1[3] = r_pbrFireflyClamp.GetFloat();
+		// Phase C.1 metal environment floor rides the occlusionParms spare slot
+		// (the occlusion block below only writes .xyz)
+		parms.occlusionParms[3] = r_pbrEnvScale.GetFloat();
 
 		// organic materials authored without a specular stage (most blood decals
 		// — bloodpool01 — and the gibs) would zero the GGX lobe through the
@@ -1055,11 +1076,11 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		qglDisable( GL_CLIP_DISTANCE0 );
 	}
 
-	// make the early depth pass available to shaders (soft particles, SSAO, etc.)
+	// make the early depth pass available to shaders (soft particles, SSAO, SSR, etc.)
 	bool getDepthCapture = r_enableDepthCapture.GetInteger() == 1
 		|| ( r_enableDepthCapture.GetInteger() == -1
 		     && ( r_useSoftParticles.GetBool()
-		          || ( r_ssao.GetBool() && R_BackendSupportsEnhancements() ) ) );
+		          || ( ( r_ssao.GetBool() || r_ssr.GetBool() ) && R_BackendSupportsEnhancements() ) ) );
 	if ( getDepthCapture && viewDef->renderView.viewID >= 0 ) {
 		globalImages->currentDepthImage->CopyDepthbuffer( viewDef->viewport.x1,
 			viewDef->viewport.y1,
@@ -2152,22 +2173,24 @@ static bool RB_RHI_PointLightInBudget( const viewDef_t *viewDef, const viewLight
 	return inBudget;
 }
 
-static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h ) {
+static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h, bool wantMrt ) {
 	if ( rhiNormalRT && r->GetRenderTargetImage( rhiNormalRT ) == 0 ) {
 		rhiNormalRT = 0;					// lost context (vid_restart)
 		rhiNormalW = rhiNormalH = 0;
 	}
-	if ( rhiNormalRT && rhiNormalW == w && rhiNormalH == h ) {
+	if ( rhiNormalRT && rhiNormalW == w && rhiNormalH == h && rhiNormalMrt == wantMrt ) {
 		return true;
 	}
 	if ( rhiNormalRT ) { r->DestroyRenderTarget( rhiNormalRT ); rhiNormalRT = 0; }
-	rhiNormalRT = r->CreateRenderTargetColorDepth( rhi::IF_RGBA8, w, h );
+	// wantMrt adds the SSR roughness/metalness attachment (docs/ssr.md) to the same pass
+	rhiNormalRT = r->CreateRenderTargetColorDepth( rhi::IF_RGBA8, w, h, wantMrt ? 2 : 1 );
 	if ( !rhiNormalRT ) {
 		rhiNormalW = rhiNormalH = 0;
 		return false;
 	}
 	rhiNormalW = w;
 	rhiNormalH = h;
+	rhiNormalMrt = wantMrt;
 	return true;
 }
 
@@ -2177,19 +2200,26 @@ RB_RHI_NormalPrepass
 
 Renders opaque geometry into the normal G-buffer, writing bump-mapped view-space normals
 for SSAO to sample instead of reconstructing flat normals from depth (docs/ssao-gtao.md,
-Option B). One extra opaque geometry pass; only runs with SSAO + r_ssaoNormalBuffer on, for
-the fullscreen primary view. Simplified vs the depth prepass: no subview down-modulate /
-clip planes (primary-view only). Perforated surfaces (grates, cables, foliage) punch their
-diffuse alpha out of the normal buffer, matching the coverage the depth prepass seals.
+Option B). With r_ssr the same pass also fills a second attachment with the surface's
+resolved PBR roughness/metalness (docs/ssr.md). One extra opaque geometry pass; only runs
+when SSAO or SSR wants it, for the fullscreen primary view. Simplified vs the depth
+prepass: no subview down-modulate / clip planes (primary-view only). Perforated surfaces
+(grates, cables, foliage) punch their diffuse alpha out of the normal buffer, matching
+the coverage the depth prepass seals.
 ===================
 */
 static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
-	if ( !r_ssao.GetBool() || !R_BackendSupportsEnhancements() ) {
+	if ( !R_BackendSupportsEnhancements() ) {
 		return;
 	}
-	// build the buffer when it feeds SSAO, or when it's being inspected (r_ssaoDebug 3) even
-	// if SSAO is set to reconstruct normals from depth — so the debug view always has data
-	if ( !r_ssaoNormalBuffer.GetBool() && r_ssaoDebug.GetInteger() != 3 ) {
+	// SSAO wants the buffer when it feeds the horizon search, or when it's being inspected
+	// (r_ssaoDebug 3) even if SSAO reconstructs normals from depth — so the debug view
+	// always has data. SSR needs it unconditionally (normals to reflect about + the
+	// rough/metal attachment).
+	const bool ssrWants = r_ssr.GetBool();
+	const bool ssaoWants = r_ssao.GetBool()
+		&& ( r_ssaoNormalBuffer.GetBool() || r_ssaoDebug.GetInteger() == 3 );
+	if ( !ssaoWants && !ssrWants ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
@@ -2206,7 +2236,7 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-	if ( !RB_RHI_EnsureNormalTarget( r, w, h ) ) {
+	if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants ) ) {
 		return;
 	}
 
@@ -2294,6 +2324,15 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// AO mask (gbuffer.frag alpha): 0 on the view weapon so SSAO skips it — its
 		// depth-hacked depth makes the horizon search read far geometry (desk edges etc.)
 		parms.localParam0[0] = surf->space->weaponDepthHack ? 0.0f : 1.0f;
+		// SSR material attachment (docs/ssr.md): the surface's resolved PBR response,
+		// same chain as the lit path. gbuffer.frag echoes pbrParms into MRT output 1;
+		// without the second attachment GL discards that write, so filling is free.
+		if ( ssrWants ) {
+			float metal, rough;
+			RB_RHI_ResolvePbrMaterial( shader, metal, rough );
+			parms.pbrParms[0] = metal;
+			parms.pbrParms[1] = rough;
+		}
 
 		rhi::BufferHandle vb, ib;
 		int vertOfs, idxOfs;
@@ -2474,9 +2513,11 @@ static bool R_InvertGLMatrix( const float in[16], float out[16] ) {
 
 // One fullscreen NDC quad (identity mvp, st 0..1) through a post shader. Any engine
 // (idImage) inputs must already be bound by the caller; rtInput0 (0 = none) is an
-// RHI render-target texture bound on unit 0.
+// RHI render-target texture bound on unit 0. extraStateBits ORs blend modes on top
+// of the replace-mode default (the SSR composite draws additively).
 static void RB_RHI_DrawFullscreen( rhi::RHI *r, rhi::ShaderHandle prog,
-                                   const rhi::RenderParams &parms, rhi::ImageHandle rtInput0 ) {
+                                   const rhi::RenderParams &parms, rhi::ImageHandle rtInput0,
+                                   int extraStateBits = 0 ) {
 	idDrawVert quad[4];
 	memset( quad, 0, sizeof( quad ) );
 	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
@@ -2491,7 +2532,7 @@ static void RB_RHI_DrawFullscreen( rhi::RHI *r, rhi::ShaderHandle prog,
 	int uniOfs  = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 	rhi::PipelineDesc pd;
-	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK | extraStateBits;
 	pd.shader = prog;
 	pd.vertexLayout = rhi::VL_DRAWVERT;
 	pd.cullType = CT_TWO_SIDED;
@@ -2511,6 +2552,99 @@ static void RB_RHI_DrawFullscreen( rhi::RHI *r, rhi::ShaderHandle prog,
 	r->Draw( da );
 
 	backEnd.pc.c_drawElements++;
+}
+
+/*
+===================
+RB_RHI_ScreenSpaceReflections
+
+DUDE screen-space reflections (docs/ssr.md, PBR Phase C.2). Called by RB_RHI_DrawView
+at the translucent split point: lit opaque geometry, emissive panels/screens and decals
+are already down, translucents will draw over the result. Snapshots the scene into
+_currentRender, then one additive fullscreen pass (ssr.frag) marches _currentDepth and
+adds reflections onto pixels the G-buffer's rough/metal attachment marks as glossy or
+metallic. Fullscreen primary views only — the depth capture, G-buffer and screen
+mapping all assume the whole framebuffer at the origin (same rule as SSAO).
+===================
+*/
+void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !r_ssr.GetBool() || !R_BackendSupportsEnhancements() ) {
+		return;
+	}
+	if ( !viewDef->viewEntitys || viewDef->isSubview ) {
+		return;
+	}
+	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
+		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
+		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+	if ( !fullscreenView ) {
+		return;
+	}
+	// needs this view's MRT G-buffer (normals + rough/metal) and captured depth
+	if ( !rhiNormalReadyThisView || !rhiNormalMrt || rhiNormalRT == 0 ) {
+		return;
+	}
+	const rhi::ImageHandle matImg = r->GetRenderTargetImage2( rhiNormalRT );
+	if ( matImg == 0 || globalImages->currentDepthImage->uploadWidth <= 0 ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "ssr" );
+	if ( !prog ) {
+		return;
+	}
+
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+
+	// snapshot the lit opaque scene; CopyFramebuffer leaves _currentRender bound on
+	// the active unit — exactly where ssr.frag samples it (unit 0)
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
+	globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1,
+		viewDef->viewport.y1, w, h, true );
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	// the real view->clip matrix projects march points back to screen; the inverse
+	// factors reconstruct view-space positions (same recipe as ssao.frag)
+	memcpy( parms.projectionMatrix, viewDef->projectionMatrix, sizeof( parms.projectionMatrix ) );
+	parms.localParam0[0] = 1.0f / viewDef->projectionMatrix[0];
+	parms.localParam0[1] = 1.0f / viewDef->projectionMatrix[5];
+	parms.localParam0[2] = idMath::ClampFloat( 64.0f, 8192.0f, r_ssrMaxDistance.GetFloat() );
+	parms.localParam0[3] = idMath::ClampFloat( 1.0f, 256.0f, r_ssrThickness.GetFloat() );
+	parms.localParam1[0] = (float)idMath::ClampInt( 4, 64, r_ssrSteps.GetInteger() );
+	parms.localParam1[1] = r_ssrIntensity.GetFloat();
+	parms.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
+	parms.screenCorrection[0] = 1.0f / w;
+	parms.screenCorrection[1] = 1.0f / h;
+	const int potW = globalImages->currentRenderImage->uploadWidth;
+	const int potH = globalImages->currentRenderImage->uploadHeight;
+	parms.screenCorrection[2] = potW > 0 ? (float)w / potW : 1.0f;
+	parms.screenCorrection[3] = potH > 0 ? (float)h / potH : 1.0f;
+	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
+	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
+
+	// unit 1 = depth; units 2/3 = the G-buffer attachments (raw binds — invalidate
+	// the tmu cache entries so later idImage binds on those units re-issue)
+	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
+	qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
+	rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
+	qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
+	backEnd.glState.tmu[2].current2DMap = -1;
+	backEnd.glState.tmu[3].current2DMap = -1;
+
+	// the last surface may have left a cropped scissor; cover the whole view
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	// additive composite over the lit scene
+	RB_RHI_DrawFullscreen( r, prog, parms, 0, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
+	RB_RHI_ForgetTexBinds();
 }
 
 /*

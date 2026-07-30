@@ -184,12 +184,30 @@ Metalness kills the diffuse lobe — a metal is *defined* by what it reflects �
    black between light passes. Under Doom 3's per-light additive model with the GGX
    lobe answering every dynamic light, this reads acceptably in the game's dark
    aesthetic.
-2. **Phase C — environment specular:** a roughness-attenuated env term so metals read
-   as metal even in fill light. Cheapest credible version: reuse the ambient-cubemap
-   machinery from [`ambientlight.frag`](../neo/shaders/ambientlight.frag), sampled
-   along the reflection vector with roughness biasing the mip (split-sum lite), scaled
-   by `r_pbrEnvScale`. Full IBL (prefiltered mips + BRDF LUT) only if the cheap version
-   proves insufficient. This phase decides whether the metalness clamp can be lifted.
+2. **Phase C — environment specular.** Investigation killed the original sketch:
+   the "ambient cubemap" is a 2×2 cube encoding a *constant direction vector*
+   (a normalization-cubemap substitute), not environment colors — **stock Doom 3
+   has no environment image content to reflect anywhere**. Phase C therefore
+   splits:
+   - **C.1 — light-glow environment floor (built 2026-07-30):** approximate the
+     environment a metal reflects as the current light's own energy arriving
+     omnidirectionally: `spec += F0 · metalness · r_pbrEnvScale · (1 − rough/2)`
+     inside the interaction branch, riding the shared `light × color` combine so
+     it scales with the light's projection, falloff and shadow — metals glow
+     near lights and still go dark in darkness, preserving the game's aesthetic.
+     `r_pbrEnvScale` (default 0.3, `u_occlusionParms.w`, Developer-tab "Metal
+     Environment Glow" slider). With it up, `r_pbrMetalnessMax` can rise toward 1.
+   - **C.2 — screen-space reflections (v1 built 2026-07-30, docs/ssr.md):** the
+     real feature. `r_ssr` (default off): the SSAO normal g-buffer gains a second
+     MRT attachment carrying each surface's resolved roughness/metalness (same
+     priority chain as the lit path, shared `RB_RHI_ResolvePbrMaterial`), and an
+     additive fullscreen pass at the translucent split point marches
+     `_currentDepth` along the per-pixel reflection ray and composites the
+     `_currentRender` scene copy weighted by Schlick Fresnel × gloss — mirrored
+     fixtures on the ceramic floors, corridors reflected in bare metal. v1 is
+     sharp-only (roughness dims, doesn't blur; `r_ssrMaxRoughness` gates); glossy
+     blur + temporal filtering are the C.2.1 follow-up. Works with `r_pbr` and
+     `r_hdr` each on or off. Full design, cvar table and limitations: docs/ssr.md.
 
 ## 6. Offline pipeline — classifier + table (Phase B)
 
@@ -251,7 +269,8 @@ modpack `.mtr` that redefines them with lit stages, zero engine work:
 | `r_pbrMetalnessMax` | 0.8 | metal diffuse-kill clamp until Phase C env term |
 | `r_pbrToksvigBase` | 0.2 | normal-variance baseline before Toksvig widening — the anti-firefly vs highlight-tightness trade (§4) |
 | `r_pbrFireflyClamp` | 6 | GGX lobe ceiling — spike suppression; also the bounded core skin rides at (§4) |
-| `r_pbrEnvScale` | — | Phase C env specular strength |
+| `r_pbrEnvScale` | 0.3 | Phase C.1 light-glow environment floor for metals |
+| `r_ssr*` | off | Phase C.2 screen-space reflections — own cvar family, see docs/ssr.md §4 |
 
 **Per-category live values** (same Developer-tab section): the generated table
 tags each entry with its category column, and for the five main classes the
@@ -341,8 +360,10 @@ trim-debug-cvars policy, calibration-only cvars get folded once tuned.
   `pbrMetalness/pbrRoughness` (-1 = no entry); the interaction fill uses them
   with global fallbacks; `reloadPbrTable` re-applies live. `r_pbrMetalness`
   debug global retired.
-- **Phase C — environment specular for metals**: **sketched**; decides the metalness
-  clamp's fate.
+- **Phase C — environment specular for metals**: C.1 light-glow floor **built**
+  (`r_pbrEnvScale`); C.2 screen-space reflections **v1 built** (`r_ssr`, sharp-only,
+  docs/ssr.md) — pending in-game verification; together they decide the metalness
+  clamp's fate. C.2.1 (glossy blur + temporal) is the follow-up.
 - **Phase D — per-texel map keywords / authored packs**: **optional, deferred**.
 
 Sequencing rationale: A first because it's testable immediately and de-risks the BRDF;

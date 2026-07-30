@@ -1640,8 +1640,12 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	// non-light-dependent shading. Post-process-sort surfaces (which sample
 	// _currentRender) are deferred until after fog, matching RB_STD_DrawView;
 	// the drawSurfs are sort-ordered so the first one ends the ambient run.
+	// DUDE SSR (docs/ssr.md) composites at the translucent split: once the
+	// opaque/emissive/decal surfaces (sort <= SS_DECAL) are down, reflections
+	// are added before glass and particles draw over them.
 	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
 	int i;
+	bool ssrDone = !viewDef->viewEntitys || !r_ssr.GetBool();
 	for ( i = 0; i < viewDef->numDrawSurfs; i++ ) {
 		if ( drawSurfs[i]->material->SuppressInSubview() ) {
 			continue;
@@ -1649,7 +1653,14 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		if ( viewDef->viewEntitys && drawSurfs[i]->material->GetSort() >= SS_POST_PROCESS ) {
 			break;
 		}
+		if ( !ssrDone && drawSurfs[i]->material->GetSort() > SS_DECAL ) {
+			ssrDone = true;
+			RB_RHI_ScreenSpaceReflections( r, viewDef );
+		}
 		RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, mvp );
+	}
+	if ( !ssrDone ) {
+		RB_RHI_ScreenSpaceReflections( r, viewDef );	// view had no translucent surfaces
 	}
 
 	// fog and blend lights

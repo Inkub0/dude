@@ -2,6 +2,10 @@
 // (encoded to [0,1]) that ssao.frag samples in place of depth-reconstructed normals.
 // A = AO mask: 1 for normal surfaces, 0 for the view weapon (u_localParam0.x), so SSAO
 // can skip the depth-hacked weapon whose depth confuses the horizon search.
+//
+// Output 1 (docs/ssr.md, only attached when r_ssr is on): the surface's resolved PBR
+// response for the reflection composite — R = roughness, G = metalness (u_pbrParms.yx,
+// filled by RB_RHI_NormalPrepass). Without the attachment GL discards the write.
 
 #include "renderparms.glsl"
 
@@ -15,6 +19,7 @@ VARY(3) in vec3 var_N;
 VARY(4) in vec2 var_TexCoverage;
 
 layout(location = 0) out vec4 fragColor;
+layout(location = 1) out vec4 out_Material;   // SSR: (roughness, metalness, 0, 1)
 
 void main() {
 	// Perforated surfaces (grates, cables, foliage) are flat cards whose diffuse alpha masks
@@ -39,4 +44,5 @@ void main() {
 	vec3 N = normalize( var_T * tn.x + var_B * tn.y + var_N * tn.z );
 
 	fragColor = vec4( N * 0.5 + 0.5, u_localParam0.x );   // A = AO mask (0 = weapon, skip)
+	out_Material = vec4( u_pbrParms.y, u_pbrParms.x, 0.0, 1.0 );
 }

@@ -329,7 +329,17 @@ idCVar r_pbrPaintedRoughness( "r_pbrPaintedRoughness", "0.55", CVAR_RENDERER | C
 idCVar r_pbrPaintedMetalness( "r_pbrPaintedMetalness", "0.2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "metalness for painted/coated metal: paint is a dielectric, so keep this low — it models scuff-through to the metal beneath. Also subject to r_pbrMetalnessMax", 0.0f, 1.0f );
 idCVar r_pbrRustRoughness( "r_pbrRustRoughness", "0.78", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for rusted/corroded metal (the `metal_rust` category — materials named rust/oxid/corro/dirty/stain)", 0.03f, 1.0f );
 idCVar r_pbrRustMetalness( "r_pbrRustMetalness", "0.4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "metalness for rusted metal: rust itself is a dielectric oxide, so this models the patchy mix of bare metal and oxide. Also subject to r_pbrMetalnessMax", 0.0f, 1.0f );
+idCVar r_pbrEnvScale( "r_pbrEnvScale", "0.3", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "Phase C.1 metal environment floor: stock Doom 3 has no environment probes, so metals reflect an F0-tinted share of each light's own energy instead of going black where the specular lobe misses. Scales with the light and its shadow, so metals still go dark in darkness. 0 = off (docs/pbr-materials.md sec. 5)", 0.0f, 2.0f );
 idCVar r_pbrStoneRoughness( "r_pbrStoneRoughness", "0.9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for rock, concrete, brick and plaster (the `stone` category)", 0.03f, 1.0f );
+
+// DUDE PBR Phase C.2 screen-space reflections (docs/ssr.md). Opt-in; independent of
+// r_pbr (the classifier table drives per-pixel reflectivity either way) and of r_hdr.
+idCVar r_ssr( "r_ssr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "screen-space reflections on glossy/metallic surfaces (GL3 backend). Reflection strength follows the PBR material table: polished floors and bare metal mirror the on-screen scene" );
+idCVar r_ssrIntensity( "r_ssrIntensity", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "reflection strength multiplier", 0.0f, 4.0f );
+idCVar r_ssrMaxRoughness( "r_ssrMaxRoughness", "0.55", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness cutoff: surfaces rougher than this reflect nothing (fade starts at 70% of it). Default 0.55 keeps the ceramic floors (roughness 0.45) reflecting at partial strength; 0.45 or lower excludes them. v1 reflections are sharp-only, so keep this low — rough surfaces would show implausible mirror images", 0.02f, 1.0f );
+idCVar r_ssrSteps( "r_ssrSteps", "24", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "ray-march samples per pixel; more = longer/cleaner reflections, higher GPU cost (r_gl3GpuTime)", 4, 64 );
+idCVar r_ssrMaxDistance( "r_ssrMaxDistance", "1000", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "reflection ray reach in world units", 64.0f, 8192.0f );
+idCVar r_ssrThickness( "r_ssrThickness", "16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "assumed surface thickness (world units) when testing ray hits; too low = gaps in reflections, too high = smearing behind edges", 1.0f, 256.0f );
 
 // DUDE Phase 3.5 shadow mapping (GL3/Vulkan only; stencil stays the faithful
 // default). Global mode for now: 0 = stencil shadow volumes (vanilla), 1 =

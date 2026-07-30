@@ -65,7 +65,9 @@ UBO_BINDING(0) uniform RenderParams {
 
 	vec4 u_occlusionParms;       // DUDE material AO map (docs/occlusion-maps.md):
 	                            // x = enable, y = ambient strength, z = direct-diffuse
-	                            // strength, w unused. Map sampled on unit 10 (diffuse UV).
+	                            // strength. w = r_pbrEnvScale (PBR Phase C.1 metal
+	                            // environment floor; rides the spare slot).
+	                            // Map sampled on unit 10 (diffuse UV).
 
 	vec4 u_pbrParms;             // DUDE PBR interaction path (docs/pbr-materials.md):
 	                            // x = metalness (pre-clamped by r_pbrMetalnessMax),

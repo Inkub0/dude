@@ -153,7 +153,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 	GL3F( PFNGLDELETEFRAMEBUFFERSPROC,		DeleteFramebuffers ) \
 	GL3F( PFNGLBINDFRAMEBUFFERPROC,			BindFramebuffer ) \
 	GL3F( PFNGLFRAMEBUFFERTEXTURE2DPROC,	FramebufferTexture2D ) \
-	GL3F( PFNGLCHECKFRAMEBUFFERSTATUSPROC,	CheckFramebufferStatus )
+	GL3F( PFNGLCHECKFRAMEBUFFERSTATUSPROC,	CheckFramebufferStatus ) \
+	GL3F( PFNGLDRAWBUFFERSPROC,				DrawBuffers )
 
 namespace rhi {
 
@@ -208,6 +209,11 @@ void RB_RHI_FogAllLights( rhi::RHI *r, viewDef_s *viewDef );
 // GTAO debug overlay (r_ssaoDebug): blit the AO buffer over the finished 3D view.
 // Called at end-of-view so the scene passes don't overwrite it (RhiWorld.cpp).
 void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
+
+// DUDE screen-space reflections (docs/ssr.md): additive composite over the lit
+// opaque scene. Called at the shader-pass translucent split point (RhiWorld.cpp);
+// no-op unless r_ssr produced this view's MRT G-buffer.
+void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_s *viewDef );
 
 // screenshot support: composited desktops return garbage for front-buffer
 // reads, so R_ReadTiledPixels registers a destination and the executor
