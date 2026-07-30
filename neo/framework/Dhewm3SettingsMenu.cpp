@@ -1714,30 +1714,8 @@ static CVarOption enhancementOptions[] = {
 
 	CVarOption( "Post-Processing" ),
 	// HDR rendering: accumulate the scene into a float (RGBA16F) buffer instead of the
-	// 8-bit backbuffer, then resolve back. Removes fog/gradient banding. The dither knob
-	// is grouped under it (breaks up the residual banding the final 8-bit step leaves) and
-	// greyed out while HDR is off, since the dither lives in the resolve pass.
-	CVarOption( "r_hdr", []( idCVar& cvar ) {
-		bool enable = cvar.GetBool();
-		if ( ImGui::Checkbox( "HDR Rendering", &enable ) ) {
-			cvar.SetBool( enable );
-		}
-		const char* descr = "Render the scene into a float (RGBA16F) buffer instead of the 8-bit framebuffer.\n"
-			"Removes the colour banding visible in fog, skies and other smooth gradients.\n"
-			"Look-neutral (no tone change); note it currently bypasses hardware MSAA - use FXAA instead.";
-		AddCVarOptionTooltips( cvar, descr );
-
-		ImGui::BeginDisabled( !enable );
-		ImGui::Indent();
-		float dither = r_hdrDither.GetFloat();
-		if ( ImGui::SliderFloat( "Dither Resolve (steps)", &dither, 0.0f, 4.0f, "%.1f" ) ) {
-			r_hdrDither.SetFloat( dither );
-		}
-		AddCVarOptionTooltips( r_hdrDither, "Blue-noise-style dither on the HDR->8-bit resolve, strength in 8-bit steps.\n"
-			"1 is the textbook amount (subtle); raise to 2-3 if you can still see bands.\n0 turns it off." );
-		ImGui::Unindent();
-		ImGui::EndDisabled();
-	} ),
+	// 8-bit backbuffer, then resolve back. Removes fog/gradient banding.
+	CVarOption( "r_hdr", "HDR Rendering", OT_BOOL ),
 	CVarOption( "r_postFilmGrain", "Film Grain", OT_FLOAT, 0.0f, 0.25f ),
 	CVarOption( "r_postChromaticAberration", "Chromatic Aberration", OT_FLOAT, 0.0f, 0.5f ),
 
@@ -2310,11 +2288,11 @@ struct EnhancementPreset {
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl
 	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 1,  1.8f, 62.0f, true, 380.0f, true  },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 3,   2,   false, true,  512,  512,  5,  16,   16,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 380.0f, true  },
-	{ "High",         true,  false, true,  true,  true,   0.75f, 3,   3,   true,  true,  1024, 1200, 6,  64,   24,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 380.0f, true  },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 6,   4,   true,  true,  2048, 2048, 8,  96,   32,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 340.0f, true  },
-	{ "Ultra Nightmare", true, true, true, true,  true,   1.0f, 7,   5,   true,  true,  2048, 2048, 12, 128,  48,   0.04f, 0.2f,  0.7f, 1,  1.8f, 62.0f, true, 340.0f, true  },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true  },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 3,   2,   false, true,  512,  512,  5,  16,   16,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true  },
+	{ "High",         true,  false, true,  true,  true,   0.75f, 3,   3,   true,  true,  1024, 1200, 6,  64,   24,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true  },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 6,   4,   true,  true,  2048, 2048, 8,  96,   32,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true  },
+	{ "Ultra Nightmare", true, true, true, true,  true,   1.0f, 7,   5,   true,  true,  2048, 2048, 12, 128,  48,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true  },
 };
 
 static void ApplyEnhancementPreset( int idx )

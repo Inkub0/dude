@@ -177,5 +177,12 @@ void main() {
 
 	vec4 color = spec * specMap + diffuse;
 
-	fragColor = light * color * var_Color;
+	// Floor negatives to 0 to match the 8-bit target's fixed-point clamp. N.L (the
+	// `light` term above) goes negative on pixels facing away from this light; on the
+	// SDR backbuffer that's clamped to 0 before the additive blend, but the RGBA16F
+	// HDR target doesn't clamp fragment output, so a negative would *subtract* this
+	// (often warm) light and cool-shift normal-mapped models — the r_hdr blue-tint
+	// bug. max() restores the [0, inf) floor while keeping HDR's >1 highlights; it's a
+	// no-op on the 8-bit path, which already floored here.
+	fragColor = max( light * color * var_Color, vec4( 0.0 ) );
 }

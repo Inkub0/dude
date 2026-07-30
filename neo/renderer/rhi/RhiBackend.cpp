@@ -401,11 +401,50 @@ bool RB_RHI_HdrFrameActive( void ) {
 	return rbHdrFrameActive;
 }
 
-static void RB_RHI_HdrBeginFrame( rhi::RHI *r ) {
+/*
+=============
+RB_RHI_FrameHasWorldScene
+
+True if this frame renders a real fullscreen 3D world view (gameplay, or a level
+frozen behind the in-game menu). HDR exists to de-band that scene's lighting/fog
+gradients; a worldless frame — the main menu, the load/save GUI, cinematics — has
+none of that, and its only 3D content (the cropped menu-planet renderDef) is a
+subview and not fullscreen. Routing such a frame through the float buffer + dither
+resolve lifts near-black detail (the menu planet's dark limb) into visibility
+through the translucent menu buttons, so we keep those frames on the vanilla 8-bit
+path. Same fullscreen-and-not-subview test RB_RHI_DrawView uses for the post chain.
+=============
+*/
+static bool RB_RHI_FrameHasWorldScene( const emptyCommand_t *cmds ) {
+	for ( ; cmds; cmds = (const emptyCommand_t *)cmds->next ) {
+		if ( cmds->commandId != RC_DRAW_VIEW ) {
+			continue;
+		}
+		const viewDef_t *vd = ( (const drawSurfsCommand_t *)cmds )->viewDef;
+		if ( !vd || !vd->viewEntitys || vd->isSubview ) {
+			continue;
+		}
+		if ( vd->viewport.x1 <= 0 && vd->viewport.y1 <= 0
+		     && vd->viewport.x2 >= glConfig.vidWidth - 1
+		     && vd->viewport.y2 >= glConfig.vidHeight - 1 ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	rbHdrActiveThisFrame = false;
 	rbHdrFrameActive = false;
 	if ( !r_hdr.GetBool() || !R_BackendSupportsEnhancements() ) {
 		return;		// off → the frame stays on the backbuffer exactly as before
+	}
+
+	// worldless frames (main menu, GUIs, cinematics) stay on the 8-bit path so the
+	// float+dither resolve can't reveal near-black scene detail through translucent
+	// 2D — e.g. the menu planet's dark limb showing through the LOAD GAME button
+	if ( !RB_RHI_FrameHasWorldScene( cmds ) ) {
+		return;
 	}
 
 	int w = glConfig.vidWidth;
@@ -541,12 +580,9 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
-	// dither amount in LSBs (1 = ~1 8-bit step, textbook TPDF; higher = stronger/grainier);
-	// 0 disables it in-shader
-	parms.localParam0[0] = r_hdrDither.GetFloat();
 	// film grain + chromatic aberration are folded into the resolve here (RB_RHI_PostProcess
 	// is skipped in HDR mode) so they sample the smooth float buffer instead of the 8-bit
-	// _currentRender round-trip that was re-banding the image before the dither
+	// _currentRender round-trip that was re-banding the image
 	parms.localParam0[1] = r_postFilmGrain.GetFloat();
 	parms.localParam0[2] = (float)( Sys_Milliseconds() & 0xffff ) * 0.001f;	// animated grain seed
 	parms.localParam0[3] = r_postChromaticAberration.GetFloat();
@@ -1690,8 +1726,9 @@ void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
 
 	// route the whole frame into the RGBA16F scene buffer (r_hdr) before any clear
-	// or view command lands; a no-op that stays on the backbuffer when r_hdr is off
-	RB_RHI_HdrBeginFrame( r );
+	// or view command lands; a no-op that stays on the backbuffer when r_hdr is
+	// off or the frame is worldless (menu/GUI/cinematic — see RB_RHI_HdrBeginFrame)
+	RB_RHI_HdrBeginFrame( r, cmds );
 
 	for ( ; cmds; cmds = (const emptyCommand_t *)cmds->next ) {
 		switch ( cmds->commandId ) {

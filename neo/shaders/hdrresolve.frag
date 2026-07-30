@@ -4,11 +4,8 @@
 //
 // In HDR mode the film-grain + chromatic-aberration post effects are folded in HERE
 // (not the separate postprocess pass), so they sample the smooth float buffer instead
-// of round-tripping through the 8-bit _currentRender image — which is what re-introduced
-// the banding the dither is meant to remove. Order matters: chroma and grain first (they
-// re-sample / add signal), then dither as the very last thing before the 8-bit write.
+// of round-tripping through the 8-bit _currentRender image.
 //
-// u_localParam0.x = dither strength in 8-bit steps (LSBs); 0 = off
 // u_localParam0.y = film grain intensity; 0 = off
 // u_localParam0.z = grain time/seed (seconds)
 // u_localParam0.w = chromatic aberration strength; 0 = off
@@ -21,11 +18,6 @@ SAMPLER_BINDING(0) uniform sampler2D u_hdrScene;
 VARY(0) in vec2 var_TexCoord;
 
 layout(location = 0) out vec4 fragColor;
-
-// interleaved gradient noise: high-frequency, blue-noise-like spectrum, no texture
-float IGN( vec2 p ) {
-	return fract( 52.9829189 * fract( dot( p, vec2( 0.06711056, 0.00583715 ) ) ) );
-}
 
 // small hash noise, stable per pixel per frame (matches postprocess.frag grain)
 float hash12( vec2 p ) {
@@ -52,15 +44,6 @@ void main() {
 		float grain = hash12( gl_FragCoord.xy + vec2( u_localParam0.z * 311.7, u_localParam0.z * 173.3 ) );
 		float lum = dot( color, vec3( 0.299, 0.587, 0.114 ) );
 		color += ( grain - 0.5 ) * u_localParam0.y * ( 1.0 - 0.5 * lum );
-	}
-
-	// dither LAST, right before the 8-bit write: uniform [0,1) noise -> triangular PDF
-	// in [-1,1] (single-sample remap), scaled to the requested LSB count
-	float amount = u_localParam0.x;
-	if ( amount > 0.0 ) {
-		float n = IGN( gl_FragCoord.xy ) * 2.0 - 1.0;
-		float tri = sign( n ) * ( 1.0 - sqrt( max( 0.0, 1.0 - abs( n ) ) ) );
-		color += tri * ( amount / 255.0 );
 	}
 
 	fragColor = vec4( color, 1.0 );
