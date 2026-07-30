@@ -14,10 +14,12 @@ VARY(0) out vec2 var_TexBump;
 VARY(1) out vec3 var_T;   // view-space tangent
 VARY(2) out vec3 var_B;   // view-space bitangent
 VARY(3) out vec3 var_N;   // view-space normal
+VARY(4) out vec2 var_TexCoverage;   // diffuse UV for perforated (alpha-tested) surfaces
 
 void main() {
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
 	var_TexBump = vec2( dot( st, u_bumpMatrixS ), dot( st, u_bumpMatrixT ) );
+	var_TexCoverage = vec2( dot( st, u_diffuseMatrixS ), dot( st, u_diffuseMatrixT ) );
 
 	// model -> view rotation (Doom 3 models carry no non-uniform scale, so the 3x3 is
 	// an orthonormal rotation and normals/tangents transform with it directly)

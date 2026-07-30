@@ -2108,8 +2108,8 @@ Renders opaque geometry into the normal G-buffer, writing bump-mapped view-space
 for SSAO to sample instead of reconstructing flat normals from depth (docs/ssao-gtao.md,
 Option B). One extra opaque geometry pass; only runs with SSAO + r_ssaoNormalBuffer on, for
 the fullscreen primary view. Simplified vs the depth prepass: no subview down-modulate /
-clip planes (primary-view only) and perforated surfaces are treated as solid for now (their
-alpha punch-through into the normal buffer is a refinement).
+clip planes (primary-view only). Perforated surfaces (grates, cables, foliage) punch their
+diffuse alpha out of the normal buffer, matching the coverage the depth prepass seals.
 ===================
 */
 static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
@@ -2212,6 +2212,8 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			}
 		}
 
+		// per-surface uniforms shared by every draw of this surface; the coverage draws
+		// below only override alphaTest + diffuseMatrix on top of these.
 		rhi::RenderParams parms;
 		memset( &parms, 0, sizeof( parms ) );
 		memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
@@ -2222,10 +2224,9 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// depth-hacked depth makes the horizon search read far geometry (desk edges etc.)
 		parms.localParam0[0] = surf->space->weaponDepthHack ? 0.0f : 1.0f;
 
-		rhi::BufferHandle vb, ib, ub;
+		rhi::BufferHandle vb, ib;
 		int vertOfs, idxOfs;
 		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
-		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 		// Layered surfaces (decals, signs, details) sit coplanar on walls and rely on
 		// polygon offset to win the depth test — same as the depth prepass. Without it
@@ -2258,11 +2259,58 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.indexBuffer = ib;
 		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
 		da.indexCount = tri->numIndexes;
-		da.uniformBuffer = ub;
-		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
-		r->Draw( da );
-		backEnd.pc.c_drawElements++;
+
+		// Perforated (alpha-tested) surfaces: draw one live alpha-tested stage per coverage
+		// mask, binding its diffuse map on unit 1 so gbuffer.frag discards the transparent
+		// texels. Mirrors the depth prepass (RB_RHI_FillDepthBuffer) so the normal buffer's
+		// coverage matches the sealed depth. Without it the whole card writes a flat normal.
+		bool drewCoverage = false;
+		if ( shader->Coverage() == MC_PERFORATED ) {
+			for ( int s = 0; s < shader->GetNumStages(); s++ ) {
+				const shaderStage_t *pStage = shader->GetStage( s );
+				if ( !pStage->hasAlphaTest || regs[pStage->conditionRegister] == 0 ) {
+					continue;
+				}
+				parms.alphaTest[0] = regs[pStage->alphaTestRegister];
+				parms.alphaTest[1] = 1.0f;
+				if ( pStage->texture.hasMatrix ) {
+					parms.diffuseMatrixS[0] = regs[pStage->texture.matrix[0][0]];
+					parms.diffuseMatrixS[1] = regs[pStage->texture.matrix[0][1]];
+					parms.diffuseMatrixS[3] = regs[pStage->texture.matrix[0][2]];
+					parms.diffuseMatrixT[0] = regs[pStage->texture.matrix[1][0]];
+					parms.diffuseMatrixT[1] = regs[pStage->texture.matrix[1][1]];
+					parms.diffuseMatrixT[3] = regs[pStage->texture.matrix[1][2]];
+				} else {
+					parms.diffuseMatrixS[0] = 1.0f; parms.diffuseMatrixS[1] = 0.0f; parms.diffuseMatrixS[3] = 0.0f;
+					parms.diffuseMatrixT[0] = 0.0f; parms.diffuseMatrixT[1] = 1.0f; parms.diffuseMatrixT[3] = 0.0f;
+				}
+
+				rhi::BufferHandle ub;
+				int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+				RB_RHI_BindUnit( 1, pStage->texture.image );
+				da.uniformBuffer = ub;
+				da.uniformOffset = uniOfs;
+				r->Draw( da );
+				backEnd.pc.c_drawElements++;
+				drewCoverage = true;
+			}
+		}
+
+		// Opaque surfaces (and perforated materials with no live alpha-tested stage): one
+		// solid draw with the coverage test disabled. whiteImage keeps unit 1 valid even
+		// though the disabled test short-circuits the fetch in the shader.
+		if ( !drewCoverage ) {
+			parms.alphaTest[0] = 0.0f;
+			parms.alphaTest[1] = 0.0f;
+			rhi::BufferHandle ub;
+			int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+			RB_RHI_BindUnit( 1, globalImages->whiteImage );
+			da.uniformBuffer = ub;
+			da.uniformOffset = uniOfs;
+			r->Draw( da );
+			backEnd.pc.c_drawElements++;
+		}
 
 		if ( depthHack ) {
 			RB_LeaveDepthHack();

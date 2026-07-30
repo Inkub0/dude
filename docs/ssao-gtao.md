@@ -375,12 +375,15 @@ Measured cost); `r_ssaoRadius` is still a first cut, retune to taste.
   uv, and rejects (or down-weights) history when the reprojected point's expected previous
   depth disagrees — proper disocclusion / thin-geometry handling, at the cost of one more
   persistent buffer + a pack/unpack. Do it if the clamp proves too soft on fast-moving objects.
-- **Normal G-buffer simplifications (refinements).** The normal prepass treats perforated
-  (alpha-tested grates/fences) surfaces as solid — they write full-quad normals rather than
-  punched-out, so their AO is slightly off. Polygon offset, the per-surface bump texture
-  matrix, and the weapon/model depth hack ARE handled (matching the depth prepass). It is a
-  full second opaque geometry pass — mergeable into the depth prepass via MRT later (blocked
-  on the backbuffer-depth / MSAA-blit question, hence the standalone pass for now).
+- **Normal G-buffer simplifications (refinements).** Perforated (alpha-tested
+  grates/fences/cables) surfaces now punch their diffuse alpha out of the normal buffer:
+  `gbuffer.frag` samples the coverage map on unit 1 and discards below the alpha ref, driven
+  per live alpha-tested stage exactly like `RB_RHI_FillDepthBuffer`, so the normal buffer's
+  coverage matches the sealed depth (was full-quad flat normals, which made grate/cable AO
+  read as a solid card). Polygon offset, the per-surface bump texture matrix, and the
+  weapon/model depth hack ARE handled (matching the depth prepass). It is a full second
+  opaque geometry pass — mergeable into the depth prepass via MRT later (blocked on the
+  backbuffer-depth / MSAA-blit question, hence the standalone pass for now).
 - **Transparencies / decals** are not in the depth prepass the same way; AO is a
   world-surface effect and does not apply to them — matches how the depth capture is
   already used.

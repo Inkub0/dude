@@ -6,15 +6,26 @@
 #include "renderparms.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_bumpMap;
+SAMPLER_BINDING(1) uniform sampler2D u_coverageMap;   // diffuse alpha for perforated surfaces
 
 VARY(0) in vec2 var_TexBump;
 VARY(1) in vec3 var_T;
 VARY(2) in vec3 var_B;
 VARY(3) in vec3 var_N;
+VARY(4) in vec2 var_TexCoverage;
 
 layout(location = 0) out vec4 fragColor;
 
 void main() {
+	// Perforated surfaces (grates, cables, foliage) are flat cards whose diffuse alpha masks
+	// the visible shape. Punch those texels out of the normal buffer so SSAO sees the geometry
+	// behind the card instead of the solid rectangle — the same coverage the depth prepass
+	// seals (zfill.frag). Opaque surfaces bind whiteImage with the test disabled
+	// (u_alphaTest.y == 0), so the && short-circuits the fetch away.
+	if ( u_alphaTest.y != 0.0 && texture( u_coverageMap, var_TexCoverage ).a < u_alphaTest.x ) {
+		discard;
+	}
+
 	// RXGB (DXT5nm) swizzle: x lives in alpha (matches interaction.frag / ambientlight.frag)
 	vec4 bump = texture( u_bumpMap, var_TexBump );
 	bump.x = bump.a;
