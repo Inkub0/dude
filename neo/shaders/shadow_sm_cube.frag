@@ -11,12 +11,15 @@
 
 SAMPLER_BINDING(0) uniform sampler2D u_map;
 
-VARY(0) in float var_Dist;
+VARY(0) in vec3 var_LightVec;
 VARY(1) in vec2 var_TexCoord;
 
 void main() {
 	if ( u_alphaTest.y != 0.0 && texture( u_map, var_TexCoord ).a < u_alphaTest.x ) {
 		discard;
 	}
-	gl_FragDepth = clamp( var_Dist, 0.0, 1.0 );
+	// per-fragment radial distance: length() must happen HERE, not in the vertex
+	// shader (see shadow_sm_cube.vert — interpolated lengths overestimate inside
+	// big triangles near the light). Normalizer matches interaction.frag's ref.
+	gl_FragDepth = clamp( length( var_LightVec ) / max( u_shadowParms.w, 1.0 ), 0.0, 1.0 );
 }

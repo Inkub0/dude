@@ -9,7 +9,7 @@
 layout(location = 0) in vec4 attr_Position;	// w defaults to 1 (vec3 attribute)
 layout(location = 1) in vec2 attr_TexCoord;
 
-VARY(0) out float var_Dist;			// radial distance / range -> gl_FragDepth
+VARY(0) out vec3 var_LightVec;		// light-relative position; fragment takes length()
 VARY(1) out vec2 var_TexCoord;		// diffuse UV for perforated (alpha-tested) casters
 
 void main() {
@@ -22,8 +22,14 @@ void main() {
 	                dot( u_modelMatrixRow1.xyz, d ),
 	                dot( u_modelMatrixRow2.xyz, d ) );
 
-	// linear radial depth in [0,1]; range in u_shadowParms.w (guard against 0)
-	var_Dist = length( lr ) / max( u_shadowParms.w, 1.0 );
+	// Pass the POSITION and let the fragment shader compute length(). Interpolating
+	// the scalar length() itself (a convex function) overestimates depth inside big
+	// triangles — catastrophically when the light sits close to a large caster (a
+	// grate card next to its bulb stored ~corner distance at its center), carving a
+	// shadowless dead zone around the light that no bias could close. The vector
+	// interpolates linearly (it IS the position), so per-fragment length is exact —
+	// mirroring the receiver side (interaction.frag var_ShadowCubeVec).
+	var_LightVec = lr;
 
 	// coverage lookup for grates/fences; opaque casters bind white + a disabled test
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
