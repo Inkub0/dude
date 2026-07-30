@@ -137,6 +137,21 @@ alpha/coverage texture and `discard`s below the threshold (mirroring the z-fill 
 test), and forces `CT_TWO_SIDED` (thin single-sided planes). This is the constructive
 answer to "switch off the fake grate shadow": enable the real one.
 
+### View-weapon casters
+
+The first-person view model (`weaponDepthHack`) sits at the player's world position, so
+anything it casts into a room light's shadow map lands as a gun-shaped blob on the nearby
+floor/walls. Vanilla dodged this by flagging most gun materials `noShadows`/`noSelfShadow`
+(pistol, shotgun `shotgun2`, plasmagun body, player arms `arm2`), but a few aren't — the
+alpha-tested chainsaw chain and the plasmagun ammo canister cast regardless, which reads
+as an inconsistency (only some weapons throw a shadow). A single shadow map can't
+self-shadow the weapon without also casting it on the world, so `r_shadowMapViewWeapon`
+(default 0) keeps the **whole** view model out of the map: no floor blob, and no cast
+self-shadow (the gun still gets its normal bump-mapped shading). Set it to 1 to let every
+view-weapon surface cast again (self- *and* world-shadow), overriding the material
+`noShadows` flags; `MC_TRANSLUCENT` invisibility skins never cast either way. Shadow-map
+path only — stencil (`r_shadowMapping 0`) is unchanged.
+
 ## 9. Emissive fill lights (related lighting feature)
 
 Interactive GUI screens (monitors, keypads, panels) glow but cast no light in Doom 3,
@@ -180,6 +195,7 @@ immediately. See also the private design note `emissive-gui-lights` in the agent
 | `r_shadowMapModelBias` | 0.005 | 0–0.5 | depth bias, model receivers |
 | `r_shadowMapCull` | 1 | 0–2 | caster faces: 0 front / 1 back / 2 two-sided |
 | `r_shadowMapPerforated` | 1 | 0/1 | perforated grates/fences cast punched-out maps |
+| `r_shadowMapViewWeapon` | 0 | 0/1 | view weapon casts shadows (1); default 0 keeps it out of the map (no floor blob) |
 | `r_shadowMapDebug` | 0 | 0–2 | 1 = per-view summary, 2 = per-light readout |
 | `r_emissiveSurfaces` | 0 | 0/1 | GUI screens cast a fill light |
 | `r_emissiveLightScale` | 0.50 | 0–4 | fill-light brightness |

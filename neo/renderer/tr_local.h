@@ -914,6 +914,7 @@ extern idCVar r_shadowMapModelBias;		// depth-compare bias, model (non-world) re
 extern idCVar r_shadowMapDebug;			// print per-view light classification
 extern idCVar r_shadowMapCull;			// caster face culling (0 front / 1 back / 2 two-sided)
 extern idCVar r_shadowMapPerforated;	// let noShadows perforated surfaces cast punched-out shadow maps
+extern idCVar r_shadowMapViewWeapon;	// view weapon casts shadow-map shadows (default 0 = kept out of the map, no floor blob)
 extern idCVar r_shadowMapPerforatedStrength;	// perforated shadow darkness (1 full, <1 dithered lighter)
 extern idCVar r_shadowMapPointSize;		// point-light cube shadow map resolution per face
 extern idCVar r_shadowMapCubePcf;		// point-light cube shadow PCF tap count (1 = single hardware tap)

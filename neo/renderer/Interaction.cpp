@@ -1190,8 +1190,23 @@ void idInteraction::AddActiveInteraction( void ) {
 			&& sint->shader && sint->shader->Coverage() == MC_PERFORATED;
 		const bool normalCaster = HasShadows()
 			&& sint->shader && sint->shader->SurfaceCastsShadow();
+		// The first-person view model (weaponDepthHack) sits at the player's world position,
+		// so anything it casts into a room light's shadow map lands as a gun-shaped blob on
+		// the nearby floor/walls. Vanilla dodged this by flagging most gun materials noShadows/
+		// noSelfShadow, but the chainsaw chain and plasmagun canister aren't, so they cast
+		// anyway (and forcing the rest to cast just adds more blobs). A single shadow map can't
+		// self-shadow the weapon without also casting it on the world, so keep the WHOLE view
+		// model out of the map. r_shadowMapViewWeapon (default 0) gates this; set 1 to let the
+		// weapon cast (self- and world-shadow) again. Translucent invis skins never cast.
+		const bool isViewWeapon = entityDef->parms.weaponDepthHack;
+		const bool viewWeaponCasts = r_shadowMapViewWeapon.GetBool()
+			&& !entityDef->parms.noShadow
+			&& sint->shader && sint->shader->Coverage() != MC_TRANSLUCENT;
+		const bool casterEligible = isViewWeapon
+			? viewWeaponCasts
+			: ( normalCaster || perforatedOverride );
 		if ( r_shadowMapping.GetBool() && sint->ambientTris && lightCastsShadows
-				&& ( normalCaster || perforatedOverride ) ) {
+				&& casterEligible ) {
 
 			bool suppressed = false;
 			if ( !r_skipSuppress.GetBool() ) {

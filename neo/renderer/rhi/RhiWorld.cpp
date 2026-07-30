@@ -1121,7 +1121,18 @@ static bool RB_RHI_ShadowCasterAllowed( const drawSurf_t *surf ) {
 	const bool perforatedOverride = r_shadowMapPerforated.GetBool()
 	    && surf->material && surf->material->Coverage() == MC_PERFORATED;
 
-	if ( surf->material && !surf->material->SurfaceCastsShadow() && !perforatedOverride ) {
+	// The first-person view model (weaponDepthHack) is at the player's world position, so
+	// anything it casts into a room light's shadow map lands as a gun-shaped blob on the
+	// nearby floor/walls (see Interaction.cpp). A shared shadow map can't self-shadow the
+	// weapon without also casting it on the world, so keep the whole view model out of the
+	// map. r_shadowMapViewWeapon (default 0) gates this: 0 => never cast; 1 => cast even when
+	// the material is flagged noShadows. Translucent invis skins never cast either way.
+	if ( surf->space->weaponDepthHack ) {
+		if ( !r_shadowMapViewWeapon.GetBool()
+		     || ( surf->material && surf->material->Coverage() == MC_TRANSLUCENT ) ) {
+			return false;
+		}
+	} else if ( surf->material && !surf->material->SurfaceCastsShadow() && !perforatedOverride ) {
 		return false;
 	}
 	const idRenderEntityLocal *edef = surf->space->entityDef;

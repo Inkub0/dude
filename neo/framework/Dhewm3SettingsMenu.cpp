@@ -2683,6 +2683,17 @@ static void DrawEnhancementsMenu()
 			"perforate, so they cast nothing (or a hand-faked shadow). Shadow maps can cut "
 			"the holes, so this enables their true shadow. Turn off to keep vanilla behaviour." );
 
+		bool viewWeapon = r_shadowMapViewWeapon.GetBool();
+		if ( ImGui::Checkbox( "View Weapon Casts Shadows", &viewWeapon ) ) {
+			r_shadowMapViewWeapon.SetBool( viewWeapon );
+		}
+		AddTooltip( "Let the first-person weapon (and the player's arms) cast shadow-map "
+			"shadows. Off (default) keeps the weapon out of the map, so it never throws a "
+			"gun-shaped shadow onto nearby floors/walls (a few weapons — chainsaw chain, "
+			"plasmagun canister — would otherwise cast because id didn't flag them noShadows). "
+			"On lets it cast: the gun self-shadows but also shadows the world, since one "
+			"shadow map can't separate the two." );
+
 		// Point (omni) lights use a 6-face cube map — the bulk of Doom 3's shadows.
 		// Budgeting how many get one keeps the cost bounded in busy rooms; the rest
 		// keep their vanilla stencil shadows, so there is no fidelity loss.
