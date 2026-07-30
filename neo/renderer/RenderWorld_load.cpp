@@ -441,6 +441,10 @@ void idRenderWorldLocal::FreeDefs() {
 
 	generateAllInteractionsCalled = false;
 
+	// invalidate cached def handles (emissive GUI lights): this world object survives
+	// same-map reloads, so a pointer comparison alone can't detect that the defs are gone
+	defsGeneration++;
+
 	// drop cached shadow-map cubes: they are keyed to the light indices freed just
 	// below, so a reloaded/new map would otherwise reuse those indices against stale
 	// cubes (and leak their VRAM until eviction). This covers both world teardown and

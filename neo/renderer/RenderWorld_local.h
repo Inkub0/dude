@@ -175,6 +175,10 @@ public:
 
 	bool					generateAllInteractionsCalled;
 
+	// DUDE: bumped every FreeDefs(); the world object is reused across map loads, so callers
+	// caching def handles (emissive GUI lights) must compare this, not the world pointer
+	int						defsGeneration;
+
 	//-----------------------
 	// RenderWorld_load.cpp
 

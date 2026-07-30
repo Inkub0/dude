@@ -132,6 +132,7 @@ idRenderWorldLocal::idRenderWorldLocal() {
 	mapTimeStamp = FILE_NOT_FOUND_TIMESTAMP;
 
 	generateAllInteractionsCalled = false;
+	defsGeneration = 0;
 
 	areaNodes = NULL;
 	numAreaNodes = 0;

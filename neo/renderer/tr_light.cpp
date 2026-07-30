@@ -1237,6 +1237,7 @@ static const int				EMISSIVE_LIGHT_TIMEOUT_MS = 2000;
 static idList<emissiveReq_t>	r_emissiveReqs;
 static idList<emissiveLight_t>	r_emissiveLightList;
 static idRenderWorldLocal *		r_emissiveWorld = NULL;
+static int						r_emissiveWorldGen = -1;	// world->defsGeneration our handles belong to
 
 // scratch for the per-view budget selection (r_emissiveLightLimit)
 struct emReqScore_t {
@@ -1444,8 +1445,11 @@ R_FreeAllEmissiveLights
 static void R_FreeAllEmissiveLights( idRenderWorldLocal *world ) {
 	if ( world ) {
 		for ( int i = 0; i < r_emissiveLightList.Num(); i++ ) {
-			if ( r_emissiveLightList[i].handle != -1 ) {
-				world->FreeLightDef( r_emissiveLightList[i].handle );
+			const qhandle_t h = r_emissiveLightList[i].handle;
+			// only free slots that still hold a def — a handle can go stale if the world's
+			// defs were torn down behind our back (same-map reload)
+			if ( h >= 0 && h < world->lightDefs.Num() && world->lightDefs[h] != NULL ) {
+				world->FreeLightDef( h );
 			}
 		}
 	}
@@ -1522,11 +1526,14 @@ static void R_UpdateEmissiveLights( void ) {
 		return;
 	}
 
-	// a new map means our cached handles belong to a world that's already been torn down —
-	// drop them without touching the (freed) light defs
-	if ( world != r_emissiveWorld ) {
+	// a new map means our cached handles belong to defs that have already been torn down — drop
+	// them without touching the (freed) light defs. The world *object* is reused across map loads
+	// (InitFromMap frees the defs in place), so the pointer alone can't detect a reload: compare
+	// the defs generation too, or the stale handles would double-free ~2s after every load.
+	if ( world != r_emissiveWorld || ( world && world->defsGeneration != r_emissiveWorldGen ) ) {
 		r_emissiveLightList.Clear();
 		r_emissiveWorld = world;
+		r_emissiveWorldGen = world ? world->defsGeneration : -1;
 	}
 
 	const bool enabled = r_emissiveSurfaces.GetBool() && R_BackendSupportsEnhancements();
@@ -1672,7 +1679,8 @@ static void R_UpdateEmissiveLights( void ) {
 		}
 		const int age = now - el.lastSeen;
 		if ( age > EMISSIVE_LIGHT_TIMEOUT_MS || age < 0 ) {
-			if ( el.handle != -1 ) {
+			// NULL-slot guard mirrors R_FreeAllEmissiveLights: never free a handle whose def is gone
+			if ( el.handle >= 0 && el.handle < world->lightDefs.Num() && world->lightDefs[el.handle] != NULL ) {
 				world->FreeLightDef( el.handle );
 			}
 			r_emissiveLightList.RemoveIndex( i );
