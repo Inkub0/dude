@@ -11,12 +11,13 @@
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Prefer build/dude, fall back to build-native/dude; override with DUDE_BIN=...
+# Single canonical binary: build/dude (see build.sh). No fallback dirs — a
+# stale secondary build once silently shadowed fresh changes (removed
+# 2026-07-30); override explicitly with DUDE_BIN=... if you mean another one.
 BIN="${DUDE_BIN:-$DIR/build/dude}"
-[ -x "$BIN" ] || BIN="$DIR/build-native/dude"
 if [ ! -x "$BIN" ]; then
-	echo "run.sh: no dude binary found (looked for build/dude, build-native/dude)." >&2
-	echo "        build it first, or set DUDE_BIN=/path/to/dude" >&2
+	echo "run.sh: no dude binary at build/dude — run ./build.sh first," >&2
+	echo "        or set DUDE_BIN=/path/to/dude" >&2
 	exit 1
 fi
 
