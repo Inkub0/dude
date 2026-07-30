@@ -2710,6 +2710,21 @@ static void DrawShadowDebugMenu()
 	}
 	AddTooltip( "Alpha-tested grates/fences/foliage cast punched-out shadows." );
 
+	ImGui::BeginDisabled( !perf );
+	float perfStrength = r_shadowMapPerforatedStrength.GetFloat();
+	if ( ImGui::SliderFloat( "Perforated Shadow Strength", &perfStrength, 0.0f, 1.0f, "%.2f" ) ) {
+		r_shadowMapPerforatedStrength.SetFloat( perfStrength );
+	}
+	AddTooltip( "How dark grate/fence shadows get. 1 = fully dark like solid geometry; "
+		"lower lets some light through, so a fence dims a room instead of blacking it "
+		"out — closer to how vanilla faked these with soft light textures. Only affects "
+		"perforated casters; solid-geometry shadows stay fully dark." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##perfstrength" ) ) {
+		r_shadowMapPerforatedStrength.SetFloat( 0.5f );
+	}
+	ImGui::EndDisabled();
+
 	ImGui::SeparatorText( "Adaptive resolution (radius-scaled)" );
 
 	bool sizeScale = r_shadowMapSizeScale.GetBool();

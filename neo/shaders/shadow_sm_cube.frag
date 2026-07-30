@@ -18,6 +18,20 @@ void main() {
 	if ( u_alphaTest.y != 0.0 && texture( u_map, var_TexCoord ).a < u_alphaTest.x ) {
 		discard;
 	}
+	// Perforated shadow strength (u_alphaTest.z, r_shadowMapPerforatedStrength):
+	// discard an ordered-Bayer fraction of this caster's map texels; the receiver's
+	// PCF averages hit and hole texels, lightening the shadow toward `strength`
+	// instead of full dark. Opaque casters (u_alphaTest.y == 0) are never dithered.
+	if ( u_alphaTest.y != 0.0 && u_alphaTest.z < 1.0 ) {
+		const float bayer[16] = float[16]( 0.0,  8.0,  2.0, 10.0,
+		                                  12.0,  4.0, 14.0,  6.0,
+		                                   3.0, 11.0,  1.0,  9.0,
+		                                  15.0,  7.0, 13.0,  5.0 );
+		ivec2 t = ivec2( gl_FragCoord.xy ) & 3;
+		if ( ( bayer[t.y * 4 + t.x] + 0.5 ) / 16.0 > u_alphaTest.z ) {
+			discard;
+		}
+	}
 	// per-fragment radial distance: length() must happen HERE, not in the vertex
 	// shader (see shadow_sm_cube.vert — interpolated lengths overestimate inside
 	// big triangles near the light). Normalizer matches interaction.frag's ref.

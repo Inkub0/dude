@@ -41,7 +41,8 @@ UBO_BINDING(0) uniform RenderParams {
 	vec4 u_channelMask;           // fp env[24] (soft particles: additive vs alpha channel mask)
 
 	vec4 u_color;                 // fixed-function glColor replacement (new shaders)
-	vec4 u_alphaTest;             // x = alpha test ref, y != 0 -> test enabled (zfill/generic)
+	vec4 u_alphaTest;             // x = alpha test ref, y != 0 -> test enabled (zfill/generic),
+	                             // z = perforated shadow strength (shadow_sm*.frag dither)
 	vec4 u_texGen0S;              // fixed-function texgen planes (fog/blendlight)
 	vec4 u_texGen0T;
 	vec4 u_texGen0Q;

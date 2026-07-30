@@ -1074,6 +1074,10 @@ static idImage *RB_RHI_SetupCasterCoverage( const drawSurf_t *surf, rhi::RenderP
 		if ( aStage ) {
 			parms.alphaTest[0] = regs[aStage->alphaTestRegister];
 			parms.alphaTest[1] = 1.0f;
+			// z = perforated shadow strength (r_shadowMapPerforatedStrength): < 1 makes the
+			// caster shaders dither-discard map texels so PCF lightens the shadow (grates/
+			// fences stop blacking out whole rooms; vanilla faked these with light textures)
+			parms.alphaTest[2] = idMath::ClampFloat( 0.0f, 1.0f, r_shadowMapPerforatedStrength.GetFloat() );
 			if ( aStage->texture.hasMatrix ) {
 				parms.diffuseMatrixS[0] = regs[aStage->texture.matrix[0][0]];
 				parms.diffuseMatrixS[1] = regs[aStage->texture.matrix[0][1]];
@@ -1537,6 +1541,10 @@ static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float ran
 	h = RB_RHI_HashBytes( h, &vLight->lightDef->parms.axis, sizeof( idMat3 ) );
 	h = RB_RHI_HashBytes( h, &range, sizeof( range ) );
 	h = RB_RHI_HashBytes( h, &size, sizeof( size ) );
+	// perforated shadow strength bakes a dither into the map (shadow_sm*.frag), so
+	// tuning the slider must re-render cached maps to show up
+	const float perfStrength = r_shadowMapPerforatedStrength.GetFloat();
+	h = RB_RHI_HashBytes( h, &perfStrength, sizeof( perfStrength ) );
 
 	bool dynamic = false;
 	unsigned long long casters = 0;
