@@ -102,12 +102,16 @@ TOKEN_SETS = {
                    "stone", "brick", "cement"},
                   {"concrete", "marble", "plaster", "asphalt", "gravel",
                    "boulder", "granite"}),
-    # bare metal: words that mean exposed metal at the surface
+    # bare metal: words that mean exposed metal at the surface. "sflpanel" =
+    # the base_floor "steel floor panel" family (sflpanel1..8 + variants) —
+    # dark riveted steel plates that the generic "panel" token was routing to
+    # painted->ceramic via the floor remap; user-identified as bare metal.
+    # The tie with metal_painted's "panel" hit resolves to metal by dict order.
     "metal":     ({"iron", "alum", "copper", "brass", "tin", "pipes", "grates",
                    "mesh", "vent", "vents", "duct", "rail", "railing",
                    "bolt", "rivet", "tread", "wire"},
                   {"metal", "steel", "chrome", "aluminum", "pipe", "grate",
-                   "grating", "girder"}),
+                   "grating", "girder", "sflpanel"}),
     # painted/coated metal objects: metal things whose visible surface is paint
     "metal_painted": ({"hull", "tank", "plate", "plates", "mech", "server",
                        "hatch"},
