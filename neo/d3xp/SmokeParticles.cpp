@@ -306,20 +306,26 @@ idSmokeParticles::UpdateRenderEntity
 */
 bool idSmokeParticles::UpdateRenderEntity( renderEntity_s *renderEntity, const renderView_t *renderView ) {
 
-	// FIXME: re-use model surfaces
-	renderEntity->hModel->InitEmpty( smokeParticle_SnapshotName );
-
 	// this may be triggered by a model trace or other non-view related source,
 	// to which we should look like an empty model
 	if ( !renderView ) {
+		renderEntity->hModel->InitEmpty( smokeParticle_SnapshotName );
 		return false;
 	}
 
-	// don't regenerate it if it is current
+	// Don't regenerate the model if this rendered frame is still on the same game tic we last
+	// built for. With com_interpolate the scene is drawn several times per 60Hz tic, all sharing
+	// one renderView->time; the old code emptied hModel up front and, on these in-between frames,
+	// returned before refilling it -- so every smoke/flame system (lost-soul fire, torches, etc)
+	// vanished on all but the one frame that landed on the tic, i.e. blinked at 60Hz. Returning
+	// here without touching hModel keeps the previously built geometry so the smoke holds steady.
 	if ( renderView->time == currentParticleTime && !renderView->forceUpdate ) {
 		return false;
 	}
 	currentParticleTime = renderView->time;
+
+	// FIXME: re-use model surfaces
+	renderEntity->hModel->InitEmpty( smokeParticle_SnapshotName );
 
 	particleGen_t g;
 
