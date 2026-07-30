@@ -34,11 +34,11 @@ void main() {
 	                          dot( attr_Position, u_lightProjectionQ ) );
 
 	// tangent-space normal -> global space transform rows
+	// (v * M == transpose(M) * v, so no explicit transpose is needed)
 	mat3 tbn = mat3( attr_Tangent, attr_Bitangent, attr_Normal );
-	mat3 tbnT = transpose( tbn );
-	var_ToGlobalRow0 = tbnT * u_modelMatrixRow0.xyz;
-	var_ToGlobalRow1 = tbnT * u_modelMatrixRow1.xyz;
-	var_ToGlobalRow2 = tbnT * u_modelMatrixRow2.xyz;
+	var_ToGlobalRow0 = u_modelMatrixRow0.xyz * tbn;
+	var_ToGlobalRow1 = u_modelMatrixRow1.xyz * tbn;
+	var_ToGlobalRow2 = u_modelMatrixRow2.xyz * tbn;
 
 	var_Color = attr_Color * u_vertexColorModulate + u_vertexColorAdd;
 

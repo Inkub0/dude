@@ -51,9 +51,9 @@ void main() {
 
 	vec4 avg = ( wsum > 0.0 ) ? ( sum / wsum ) : texture( u_ssao, var_TexCoord );
 
-	vec3  bn = avg.gba * 2.0 - 1.0;
-	float bl = length( bn );
-	bn = ( bl > 1e-4 ) ? ( bn / bl ) : vec3( 0.0 );
+	vec3  bn  = avg.gba * 2.0 - 1.0;
+	float bl2 = dot( bn, bn );
+	bn = ( bl2 > 1e-8 ) ? ( bn * inversesqrt( bl2 ) ) : vec3( 0.0 );
 
 	fragColor = vec4( avg.r, bn * 0.5 + 0.5 );
 }

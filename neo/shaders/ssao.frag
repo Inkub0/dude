@@ -200,9 +200,10 @@ void main() {
 		hPos = n + min( hPos - n,  M_HALF_PI );
 		hNeg = n + max( hNeg - n, -M_HALF_PI );
 
-		// GTAO analytic inner integral (cosine-weighted visibility), summed per side
-		float a = 0.25 * ( -cos( 2.0 * hPos - n ) + cosN + 2.0 * hPos * sinN )
-		        + 0.25 * ( -cos( 2.0 * hNeg - n ) + cosN + 2.0 * hNeg * sinN );
+		// GTAO analytic inner integral (cosine-weighted visibility); both sides
+		// summed with the shared cosN / sinN terms factored out
+		float a = 0.25 * ( 2.0 * cosN + 2.0 * ( hPos + hNeg ) * sinN
+		                 - cos( 2.0 * hPos - n ) - cos( 2.0 * hNeg - n ) );
 
 		visibility += projLen * a;
 		totalW     += projLen;

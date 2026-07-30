@@ -13,14 +13,7 @@ VARY(0) out vec2 var_TexFog;       // texgen S/T planes
 VARY(1) out vec2 var_TexFogEnter;  // enter fade: S constant, T per-vertex
 
 void main() {
-	var_TexFog = vec2(0);
-	var_TexFogEnter = vec2(0);
-
-	vec4 s1 = u_texGen0S;
-	vec4 t1 = u_texGen0T;
-	vec4 s2 = u_texGen1S;
-	vec4 t2 = u_texGen1T;
-	var_TexFog = vec2(dot(attr_Position, s1), dot(attr_Position, t1));
-	var_TexFogEnter = vec2(dot(attr_Position, s2), dot(attr_Position, t2));
+	var_TexFog      = vec2( dot( attr_Position, u_texGen0S ), dot( attr_Position, u_texGen0T ) );
+	var_TexFogEnter = vec2( dot( attr_Position, u_texGen1S ), dot( attr_Position, u_texGen1T ) );
 	gl_Position = u_mvpMatrix * attr_Position;
 }

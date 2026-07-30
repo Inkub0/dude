@@ -26,25 +26,30 @@ float hash12( vec2 p ) {
 
 void main() {
 	vec2 uv = var_TexCoord;
-	vec2 center = u_windowCoord.zw;
-	vec2 fromCenter = uv - center;
+	vec2 adj = u_screenCorrection.xy;
 
 	// chromatic aberration: radial RGB split, growing quadratically towards
-	// the edges so the image center stays sharp
-	float caStrength = u_localParam0.z * 0.006 * dot( fromCenter, fromCenter ) * 4.0;
-	vec2 caOffset = normalize( fromCenter + vec2( 1e-6 ) ) * caStrength;
-
-	vec2 adj = u_screenCorrection.xy;
-	float r = texture( u_currentRender, ( uv + caOffset ) * adj ).r;
-	float g = texture( u_currentRender, uv * adj ).g;
-	float b = texture( u_currentRender, ( uv - caOffset ) * adj ).b;
-	vec3 color = vec3( r, g, b );
+	// the edges so the image center stays sharp. With aberration off the offset
+	// is exactly zero and the three taps collapse to one fetch.
+	vec3 color;
+	if ( u_localParam0.z > 0.0 ) {
+		vec2  fromCenter = uv - u_windowCoord.zw;
+		float caStrength = u_localParam0.z * 0.024 * dot( fromCenter, fromCenter );
+		vec2  caOffset = normalize( fromCenter + vec2( 1e-6 ) ) * caStrength;
+		color = vec3( texture( u_currentRender, ( uv + caOffset ) * adj ).r,
+		              texture( u_currentRender, uv * adj ).g,
+		              texture( u_currentRender, ( uv - caOffset ) * adj ).b );
+	} else {
+		color = texture( u_currentRender, uv * adj ).rgb;
+	}
 
 	// film grain: luminance-weighted noise, animated by time; darker areas
-	// grain slightly more, like film stock
-	float grain = hash12( gl_FragCoord.xy + vec2( u_localParam0.y * 311.7, u_localParam0.y * 173.3 ) );
-	float lum = dot( color, vec3( 0.299, 0.587, 0.114 ) );
-	color += ( grain - 0.5 ) * u_localParam0.x * ( 1.0 - 0.5 * lum );
+	// grain slightly more, like film stock (strength 0 adds exactly zero: skip)
+	if ( u_localParam0.x > 0.0 ) {
+		float grain = hash12( gl_FragCoord.xy + vec2( u_localParam0.y * 311.7, u_localParam0.y * 173.3 ) );
+		float lum = dot( color, vec3( 0.299, 0.587, 0.114 ) );
+		color += ( grain - 0.5 ) * u_localParam0.x * ( 1.0 - 0.5 * lum );
+	}
 
 	fragColor = vec4( color, 1.0 );
 }

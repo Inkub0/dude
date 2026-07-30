@@ -63,6 +63,9 @@ void main() {
 	float aoMax  = cur.r;
 	for ( int y = -1; y <= 1; ++y ) {
 		for ( int x = -1; x <= 1; ++x ) {
+			if ( x == 0 && y == 0 ) {
+				continue;			// center tap is cur.r, already seeded above
+			}
 			float s = texture( u_curAO, var_TexCoord + vec2( x, y ) * texel ).r;
 			aoMin = min( aoMin, s );
 			aoMax = max( aoMax, s );
@@ -76,9 +79,9 @@ void main() {
 	vec4 acc = mix( cur, hist, u_localParam0.z );
 
 	// renormalize the accumulated bent normal (as ssao_blur.frag does)
-	vec3  bn = acc.gba * 2.0 - 1.0;
-	float bl = length( bn );
-	bn = ( bl > 1e-4 ) ? ( bn / bl ) : vec3( 0.0 );
+	vec3  bn  = acc.gba * 2.0 - 1.0;
+	float bl2 = dot( bn, bn );
+	bn = ( bl2 > 1e-8 ) ? ( bn * inversesqrt( bl2 ) ) : vec3( 0.0 );
 
 	fragColor = vec4( acc.r, bn * 0.5 + 0.5 );
 }

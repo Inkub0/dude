@@ -57,8 +57,8 @@ float shadowVisibility() {
 		// edge); spread ~2 texels to soften the stair-stepped edge without leaking.
 		vec3 up = abs( L.y ) < 0.99 ? vec3( 0.0, 1.0, 0.0 ) : vec3( 1.0, 0.0, 0.0 );
 		vec3 tx = normalize( cross( up, L ) );
-		vec3 ty = normalize( cross( L, tx ) );
-		float r = ( 2.0 * dist * u_shadowParms.y ) * 2.0;	// one cube texel * ~2 texels spread
+		vec3 ty = cross( L, tx ) / dist;	// tx is unit and perpendicular to L, so |cross| == dist
+		float r = 4.0 * dist * u_shadowParms.y;	// one cube texel (2*dist/res) * ~2 texels spread
 
 		const vec2 disc16[16] = vec2[16](
 			vec2( -0.94201624, -0.39906216 ), vec2(  0.94558609, -0.76890725 ),
@@ -70,10 +70,11 @@ float shadowVisibility() {
 			vec2( -0.24188840,  0.99706507 ), vec2( -0.81409955,  0.91437590 ),
 			vec2(  0.19984126,  0.78641367 ), vec2(  0.14383161, -0.14100790 ) );
 
+		vec3 txr = tx * r;
+		vec3 tyr = ty * r;
 		float sum = 0.0;
 		for ( int i = 0; i < taps; i++ ) {
-			vec3 off = tx * disc16[i].x * r + ty * disc16[i].y * r;
-			sum += texture( u_shadowCube, vec4( L + off, ref ) );
+			sum += texture( u_shadowCube, vec4( L + txr * disc16[i].x + tyr * disc16[i].y, ref ) );
 		}
 		return sum / float( taps );
 	}
@@ -110,15 +111,13 @@ void main() {
 	bump.x = bump.a;
 	vec3 localNormal = bump.xyz * 2.0 - 1.0;
 
-	vec4 light = vec4( dot( lightV, localNormal ) );
-
-	// modulate by the light projection and falloff
-	light *= textureProj( u_lightProjection, var_TexProjection );
-	light *= texture( u_lightFalloff, var_TexFalloff );
-
-	// shadow-mapped lights attenuate the light term by depth-map visibility;
-	// stencil-shadowed and unshadowed lights leave it at 1 (u_shadowParms.x == 0)
-	light *= shadowVisibility();
+	// N.L and the depth-map shadow visibility (1 for stencil-shadowed and
+	// unshadowed lights, u_shadowParms.x == 0) fold into one scalar that scales
+	// the light projection / falloff product
+	float lightScale = dot( lightV, localNormal ) * shadowVisibility();
+	vec4 light = textureProj( u_lightProjection, var_TexProjection )
+	           * texture( u_lightFalloff, var_TexFalloff )
+	           * lightScale;
 
 	// diffuse
 	vec4 diffuse = texture( u_diffuseMap, var_TexDiffuse ) * u_diffuseModifier;
@@ -146,8 +145,9 @@ void main() {
 		}
 		spec = vec4( pow( rawDot, u_specularParms.y ) );
 	}
-	spec *= u_specularModifier * u_specularParms.x;
-	vec4 specMap = texture( u_specularMap, var_TexSpecular ) * 2.0;
+	// the vanilla "specular map * 2" scale is folded into the scalar factor here
+	spec *= u_specularModifier * ( u_specularParms.x * 2.0 );
+	vec4 specMap = texture( u_specularMap, var_TexSpecular );
 
 	// DUDE GTAO on direct light (docs/ssao-gtao.md Phase C). Doom 3 is almost all dynamic
 	// light with ~no ambient, so occluding the ambient pass alone is invisible; this

@@ -30,14 +30,20 @@ void main() {
 	vec2 uv = var_TexCoord;
 
 	// chromatic aberration: radial RGB split growing quadratically toward the edges,
-	// sampling the float HDR buffer directly (same math as postprocess.frag, no NPOT adj)
-	vec2  fromCenter = uv - u_windowCoord.zw;
-	float caStrength = u_localParam0.w * 0.006 * dot( fromCenter, fromCenter ) * 4.0;
-	vec2  caOffset = normalize( fromCenter + vec2( 1e-6 ) ) * caStrength;
-	float cr = texture( u_hdrScene, uv + caOffset ).r;
-	float cg = texture( u_hdrScene, uv ).g;
-	float cb = texture( u_hdrScene, uv - caOffset ).b;
-	vec3  color = vec3( cr, cg, cb );
+	// sampling the float HDR buffer directly (same math as postprocess.frag, no NPOT adj).
+	// With aberration off the offset is exactly zero and the three taps collapse to the
+	// one fetch the plain resolve needs.
+	vec3 color;
+	if ( u_localParam0.w > 0.0 ) {
+		vec2  fromCenter = uv - u_windowCoord.zw;
+		float caStrength = u_localParam0.w * 0.024 * dot( fromCenter, fromCenter );
+		vec2  caOffset = normalize( fromCenter + vec2( 1e-6 ) ) * caStrength;
+		color = vec3( texture( u_hdrScene, uv + caOffset ).r,
+		              texture( u_hdrScene, uv ).g,
+		              texture( u_hdrScene, uv - caOffset ).b );
+	} else {
+		color = texture( u_hdrScene, uv ).rgb;
+	}
 
 	// film grain: luminance-weighted noise, animated by time; darker areas grain slightly more
 	if ( u_localParam0.y > 0.0 ) {

@@ -17,13 +17,15 @@ layout(location = 0) out vec4 fragColor;
 void main() {
     vec4 bump = texture(u_bumpMap, var_TexCoord);
     bump.x = bump.a;
-    vec3 localNormal = normalize(bump.xyz * 2.0 - 1.0);
+    // only normalized after the transform: scaling the input of a normalize
+    // can't change its direction, so pre-normalizing the local normal is redundant
+    vec3 localNormal = bump.xyz * 2.0 - 1.0;
 
     mat3 normalMatrix = mat3(var_ToGlobalRow0, var_ToGlobalRow1, var_ToGlobalRow2);
     vec3 globalNormal = normalize(normalMatrix * localNormal);
 
     vec3 globalEye = normalize(var_ToEyeGlobal);
-    vec3 r = 2.0 * dot(globalEye, globalNormal) * globalNormal - globalEye;
+    vec3 r = reflect(-globalEye, globalNormal);
 
     fragColor = vec4(texture(u_environmentCubeMap, r).xyz, 1.0);
 }

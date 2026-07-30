@@ -9,8 +9,9 @@ VARY(0) in vec2 var_TexCoord;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-	vec4 c = texture( u_map, var_TexCoord );
-	if ( u_alphaTest.y != 0.0 && c.a < u_alphaTest.x ) {
+	// the fetch only feeds the alpha test; && short-circuits on the uniform
+	// enable, so plain opaque fills (the common case) skip the texture read
+	if ( u_alphaTest.y != 0.0 && texture( u_map, var_TexCoord ).a < u_alphaTest.x ) {
 		discard;
 	}
 	fragColor = u_color;
