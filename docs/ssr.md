@@ -20,7 +20,7 @@ shader untouched; the vanilla and plain-PBR paths render bit-identically to befo
 - Works with `r_hdr` on or off, and independently of `r_pbr` (the classifier
   table and category sliders drive reflectivity either way).
 
-## 2. Architecture (v1: sharp reflections)
+## 2. Architecture (v1 sharp reflections + C.2.1 res scale / temporal)
 
 Deliberately scoped to *sharp* reflections on low-roughness surfaces:
 
@@ -37,8 +37,30 @@ Deliberately scoped to *sharp* reflections on low-roughness surfaces:
    already down; translucents (glass, particles) are not. `_currentRender` is
    copied there, so reflections contain the lit opaque scene and later
    translucents still draw *over* the reflections correctly.
-3. **March + composite in one fullscreen pass** (`ssr.frag`) — additive blend
-   onto the framebuffer at the split point:
+3. **Three-stage pipeline at the split point** (C.2.1 split the original single
+   pass so the march can run below full resolution):
+   - **march** (`ssr.frag`) into an offscreen RGBA16F buffer at `r_ssrResScale`
+     of the view (HDR reflected energy survives the intermediate). Miss = 0;
+     hit = scene color with the per-ray fades (edge/range/facing) premultiplied.
+   - **temporal accumulation** (`ssr_temporal.frag`, `r_ssrTemporal`, on by
+     default): blends against the previous frame's result reprojected by camera
+     motion (the `ssao_temporal` reprojection recipe, ping-ponged RGBA16F
+     history, `r_ssrTemporalFeedback` fraction). The march jitter rotates per
+     frame (golden-ratio walk) so successive frames sample different ray
+     offsets and the grain genuinely resolves. Because reflections are a
+     binary-ish signal (jittered rays swing thin-feature pixels between hit
+     and miss), the AO-style hard min/max neighbourhood clamp let flicker
+     through and forced feedback past 0.95 — replaced with **variance
+     clipping** (history clamped to the 3×3 mean ± 1.25σ per channel) plus
+     **hit-mask-aware feedback** (a jittered miss against an established
+     reflection keeps ≥0.96 history; real disocclusions still die because the
+     collapsed neighbourhood collapses the clip box first).
+   - **composite** (`ssr_composite.frag`) — full-resolution additive blend onto
+     the framebuffer, applying Schlick Fresnel × gloss × `r_ssrIntensity` from
+     the full-res G-buffer. Weighting at full res means a half-res march only
+     softens the reflected *image*, never the material/Fresnel edges.
+
+   March details (`ssr.frag`):
    - reconstruct view-space position from `_currentDepth` (same
      `depth_consts` recipe as ssao.frag / softparticle.frag);
    - reflect the view ray about the g-buffer normal;
@@ -54,10 +76,10 @@ Deliberately scoped to *sharp* reflections on low-roughness surfaces:
    - rejects: sky pixels, view-weapon texels (g-buffer alpha mask, both as
      source and as hit — the weapon's depth-hacked depth would smear), screen
      edges (uv fade), rays toward the camera (fade);
-   - weight = Fresnel(NdotV, F0 = mix(0.04, 0.9, metal)) × gloss fade ×
-     `r_ssrIntensity`; pixels below a threshold discard before marching.
+   - pixels whose Fresnel × gloss weight can't produce visible output discard
+     before marching.
 
-Not in v1 (see §5): glossy (blurred) reflections, temporal filtering, half-res.
+Not built yet (see §5): glossy (roughness-blurred) reflections.
 
 ## 3. Data flow
 
@@ -92,28 +114,34 @@ g-buffer.
 | `r_ssrSteps` | 24 | linear march samples per ray |
 | `r_ssrMaxDistance` | 1000 | march reach in view units |
 | `r_ssrThickness` | 16 | depth tolerance for a hit (view units) |
+| `r_ssrResScale` | 1.0 | march buffer resolution fraction (menu stops: 1/2, 2/3, 3/4, Full) |
+| `r_ssrTemporal` | 1 | accumulate across frames; resolves the march grain |
+| `r_ssrTemporalFeedback` | 0.9 | history fraction kept per frame (variance clipping handles flicker; no need to push this) |
 
-Developer-tab sliders mirror all of these; the Enhancements tab has the on/off
-toggle next to SSAO.
+Developer-tab sliders mirror the tuning knobs; the Enhancements tab has the
+on/off toggle, the Resolution stops and the Temporal checkbox next to SSAO.
 
-## 5. Known limitations / future work (Phase C.2.1)
+## 5. Known limitations / future work
 
 - **Sharp only**: roughness dims the reflection but does not blur it. Glossy
-  SSR needs a roughness-driven blur (mip chain or jittered rays) plus the
-  temporal filter to hide the noise — the SSAO temporal machinery
-  (reprojection matrix, history ping-pong, neighbourhood clamp) is the
-  template.
+  SSR needs a roughness-driven blur of the (now offscreen) march buffer before
+  the composite — the remaining C.2.1 piece, next on the list.
 - **Screen-space by nature**: off-screen content cannot appear in reflections;
   rays fade at screen edges. C.1's light-glow floor remains the fallback.
 - Reflections snapshot the scene *before* fog and translucents — a reflected
   corridor shows no fog/glass. Acceptable at Doom 3 fog densities.
 - The C.1 env glow and an SSR hit can mildly double-count on metals; both have
   independent sliders.
-- Half-res march (`r_ssrResScale`) is an obvious perf lever if full-res marching
-  shows up in `r_gl3GpuTime`; needs a bilateral upsample to avoid edge halos.
+- The low-res upsample is plain bilinear weighted by full-res material response;
+  if depth-edge halos show at Half resolution, a bilateral (depth-aware)
+  upsample in the composite is the fix.
 - Marching uses fixed view-space steps — long rays under-sample distant
   geometry; a Hi-Z march would fix reach and cost together.
 
 ## 6. Status
 
-- v1 (sharp SSR as above): built 2026-07-30, pending in-game verification.
+- v1 sharp SSR: built 2026-07-30, verified in-game (Marine Command corridor);
+  armed-crossing hit test added after the first washroom test caught the
+  bump-normal self-reflection haze.
+- C.2.1 resolution scale + temporal accumulation: built 2026-07-30, pending
+  in-game verification. Glossy blur still to come.

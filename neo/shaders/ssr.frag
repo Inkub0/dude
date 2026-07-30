@@ -1,17 +1,20 @@
-// DUDE screen-space reflections (docs/ssr.md, PBR Phase C.2). One fullscreen pass,
-// additively blended onto the lit opaque scene at the translucent split point:
-// reconstruct the view-space surface from _currentDepth + the normal G-buffer,
-// reflect the eye ray, march the depth buffer for the first thing the ray hits,
-// and add that scene color scaled by Fresnel x gloss. Sharp reflections only
-// (v1): roughness dims toward r_ssrMaxRoughness but does not blur.
+// DUDE screen-space reflections — MARCH pass (docs/ssr.md, PBR Phase C.2/C.2.1).
+// Renders into the offscreen SSR buffer at r_ssrResScale of the view: reconstruct
+// the view-space surface from _currentDepth + the normal G-buffer, reflect the eye
+// ray, march the depth buffer for the first thing the ray hits, and write that
+// scene color with the per-ray fades (edge/range/facing) premultiplied. Miss =
+// the cleared 0. The Fresnel x gloss x intensity weighting happens at FULL
+// resolution in ssr_composite.frag, so a low-res march doesn't soften the
+// material response; ssr_temporal.frag optionally accumulates between them.
 //
 // Uniform packing (RB_RHI_ScreenSpaceReflections):
 //   u_projectionMatrix    = view -> clip, for projecting march points to screen
 //   u_localParam0         = ( 1/proj00, 1/proj11, maxDistance, thickness )
-//   u_localParam1         = ( steps, intensity, maxRoughness, 0 )
-//   u_screenCorrection.xy = 1 / viewSize   (gl_FragCoord -> [0,1] screen uv)
-//   u_screenCorrection.zw = view/POT scale (screen uv -> _currentRender texcoord)
-//   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth texcoord
+//   u_localParam1         = ( steps, unused, maxRoughness, 0 )
+//   u_screenCorrection.xy = 1 / ssrTargetSize (gl_FragCoord -> [0,1] uv)
+//   u_screenCorrection.zw = view/POT scale ([0,1] uv -> _currentRender texcoord)
+//   u_depthTexRecip.xy    = ratio / depthUploadSize (gl_FragCoord -> depth tc)
+//   u_windowCoord.y       = per-frame jitter phase (temporal; 0 = static dither)
 
 #include "renderparms.glsl"
 
@@ -88,23 +91,18 @@ void main() {
 	vec3 N = normalize( nt.xyz * 2.0 - 1.0 );
 	vec3 V = normalize( -P );
 
-	// Schlick Fresnel: dielectrics (floor tiles) reflect mostly at grazing angles,
-	// metals at all angles. F0 0.9 (not albedo — no albedo buffer) keeps untinted
-	// metal reflections, which reads right on Doom 3's grey steel.
+	// Early-out on the same Schlick Fresnel the composite will apply at full res:
+	// if no visible weight can result, skip the march entirely.
 	float NdotV = clamp( dot( N, V ), 0.0, 1.0 );
 	float F0 = mix( 0.04, 0.9, metal );
 	float F  = F0 + ( 1.0 - F0 ) * pow( 1.0 - NdotV, 5.0 );
-	float weight = F * gloss * u_localParam1.y;
-	if ( weight < 0.002 ) {
-		discard;
-	}
 
 	vec3 R = reflect( -V, N );
 	// rays aimed almost straight back at the eye march through the near field and
 	// only ever produce false self-hits; fade them out (objects standing between the
 	// eye and the surface — the barrel-on-the-floor case — survive well below 0.9)
-	weight *= 1.0 - smoothstep( 0.9, 1.0, dot( R, V ) );
-	if ( weight < 0.002 ) {
+	float facing = 1.0 - smoothstep( 0.9, 1.0, dot( R, V ) );
+	if ( F * gloss * facing < 0.002 ) {
 		discard;
 	}
 
@@ -122,7 +120,9 @@ void main() {
 	// adjacent floor and smearing it across the grazing band. Overshoots beyond
 	// the thickness window keep marching so rays can pass behind thin foreground
 	// objects (railings, pipes).
-	float tPrev = stepLen * ign( frag );
+	// per-frame jitter rotation (u_windowCoord.y, golden-ratio walk) gives the
+	// temporal pass different march offsets to average; 0 = the plain static dither
+	float tPrev = stepLen * fract( ign( frag ) + u_windowCoord.y );
 	float t     = tPrev + stepLen;
 	float tHit  = -1.0;
 	bool  armed = false;
@@ -187,6 +187,7 @@ void main() {
 	float edge  = smoothstep( 0.0, 0.08, min( eDist.x, eDist.y ) );
 	float range = 1.0 - clamp( hi / maxDist, 0.0, 1.0 );
 
+	// per-ray fades premultiplied; material weighting happens in ssr_composite.frag
 	vec3 scene = texture( u_currentRender, hitUv * u_screenCorrection.zw ).rgb;
-	fragColor = vec4( scene * ( weight * edge * range ), 0.0 );
+	fragColor = vec4( scene * ( edge * range * facing ), 1.0 );
 }

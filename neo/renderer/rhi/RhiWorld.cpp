@@ -256,6 +256,20 @@ static bool rhiSsaoHavePrevVP = false;				// rhiSsaoPrevViewProj holds a previou
 static float rhiSsaoPrevViewProj[16];				// previous frame's world->clip (proj * view)
 static float rhiSsaoJitterPhase = 0.0f;				// per-frame noise rotation (golden-ratio walk in [0,1))
 
+// SSR render targets (docs/ssr.md, Phase C.2.1). RGBA16F so reflected HDR energy
+// survives the intermediate; the march renders at r_ssrResScale of the view and the
+// composite upsamples with full-res Fresnel/gloss weighting. Temporal accumulation
+// mirrors the SSAO history machinery above (own matrices — different pass timing).
+static rhi::RenderTargetHandle rhiSsrRT = 0;		// marched reflection color (a = hit mask)
+static int  rhiSsrW = 0, rhiSsrH = 0;				// march buffer size
+static rhi::RenderTargetHandle rhiSsrHistRT[2] = { 0, 0 };	// temporal history ping-pong
+static int  rhiSsrHistIdx = 0;						// which slot receives this frame's resolve
+static int  rhiSsrHistW = 0, rhiSsrHistH = 0;
+static bool rhiSsrHistValid = false;				// the read slot holds a usable previous frame
+static bool rhiSsrHavePrevVP = false;				// rhiSsrPrevViewProj holds a previous view-proj
+static float rhiSsrPrevViewProj[16];				// previous frame's world->clip (proj * view)
+static float rhiSsrJitterPhase = 0.0f;				// per-frame march jitter rotation
+
 // Normal G-buffer (Option B): bump-mapped view-space normals written by an extra opaque
 // geometry pass, so SSAO uses real per-pixel normals instead of reconstructing from depth.
 static rhi::RenderTargetHandle rhiNormalRT = 0;		// RGBA8 view-normal + depth (color+depth target)
@@ -2554,17 +2568,69 @@ static void RB_RHI_DrawFullscreen( rhi::RHI *r, rhi::ShaderHandle prog,
 	backEnd.pc.c_drawElements++;
 }
 
+static bool RB_RHI_EnsureSsrTarget( rhi::RHI *r, int w, int h ) {
+	if ( rhiSsrRT && r->GetRenderTargetImage( rhiSsrRT ) == 0 ) {
+		rhiSsrRT = 0;						// lost context (vid_restart)
+		rhiSsrW = rhiSsrH = 0;
+	}
+	if ( rhiSsrRT && rhiSsrW == w && rhiSsrH == h ) {
+		return true;
+	}
+	if ( rhiSsrRT ) { r->DestroyRenderTarget( rhiSsrRT ); rhiSsrRT = 0; }
+	rhiSsrRT = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+	if ( !rhiSsrRT ) {
+		rhiSsrW = rhiSsrH = 0;
+		return false;
+	}
+	rhiSsrW = w;
+	rhiSsrH = h;
+	return true;
+}
+
+// SSR temporal history ping-pong; resolution changes invalidate the history so a
+// re-enable / res switch starts clean instead of blending stale or mis-sized data.
+static bool RB_RHI_EnsureSsrHistory( rhi::RHI *r, int w, int h ) {
+	if ( rhiSsrHistRT[0] && r->GetRenderTargetImage( rhiSsrHistRT[0] ) == 0 ) {
+		rhiSsrHistRT[0] = rhiSsrHistRT[1] = 0;	// lost context (vid_restart)
+		rhiSsrHistW = rhiSsrHistH = 0;
+	}
+	if ( rhiSsrHistRT[0] && rhiSsrHistRT[1] && rhiSsrHistW == w && rhiSsrHistH == h ) {
+		return true;
+	}
+	for ( int i = 0; i < 2; i++ ) {
+		if ( rhiSsrHistRT[i] ) { r->DestroyRenderTarget( rhiSsrHistRT[i] ); rhiSsrHistRT[i] = 0; }
+	}
+	rhiSsrHistRT[0] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+	rhiSsrHistRT[1] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+	rhiSsrHistValid = false;	// freshly (re)allocated: nothing to reproject yet
+	if ( !rhiSsrHistRT[0] || !rhiSsrHistRT[1] ) {
+		for ( int i = 0; i < 2; i++ ) {
+			if ( rhiSsrHistRT[i] ) { r->DestroyRenderTarget( rhiSsrHistRT[i] ); rhiSsrHistRT[i] = 0; }
+		}
+		rhiSsrHistW = rhiSsrHistH = 0;
+		return false;
+	}
+	rhiSsrHistW = w;
+	rhiSsrHistH = h;
+	return true;
+}
+
 /*
 ===================
 RB_RHI_ScreenSpaceReflections
 
-DUDE screen-space reflections (docs/ssr.md, PBR Phase C.2). Called by RB_RHI_DrawView
-at the translucent split point: lit opaque geometry, emissive panels/screens and decals
-are already down, translucents will draw over the result. Snapshots the scene into
-_currentRender, then one additive fullscreen pass (ssr.frag) marches _currentDepth and
-adds reflections onto pixels the G-buffer's rough/metal attachment marks as glossy or
-metallic. Fullscreen primary views only — the depth capture, G-buffer and screen
-mapping all assume the whole framebuffer at the origin (same rule as SSAO).
+DUDE screen-space reflections (docs/ssr.md, PBR Phase C.2/C.2.1). Called by
+RB_RHI_DrawView at the translucent split point: lit opaque geometry, emissive
+panels/screens and decals are already down, translucents will draw over the result.
+Three stages:
+  1. march (ssr.frag) into an offscreen buffer at r_ssrResScale of the view;
+  2. optional temporal accumulation (ssr_temporal.frag, r_ssrTemporal) blending
+     against the camera-reprojected previous frame — resolves the march grain;
+  3. full-resolution additive composite (ssr_composite.frag) applying the
+     Fresnel/gloss/intensity weight from the G-buffer, so a low-res march only
+     softens the reflected image, never the material response.
+Fullscreen primary views only — the depth capture, G-buffer and screen mapping all
+assume the whole framebuffer at the origin (same rule as SSAO).
 ===================
 */
 void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
@@ -2588,45 +2654,71 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( matImg == 0 || globalImages->currentDepthImage->uploadWidth <= 0 ) {
 		return;
 	}
-	rhi::ShaderHandle prog = r->LoadShader( "ssr" );
-	if ( !prog ) {
+	rhi::ShaderHandle marchProg = r->LoadShader( "ssr" );
+	rhi::ShaderHandle compProg  = r->LoadShader( "ssr_composite" );
+	if ( !marchProg || !compProg ) {
 		return;
 	}
 
-	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
-	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	const int fullW = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int fullH = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	const float resScale = idMath::ClampFloat( 0.25f, 1.0f, r_ssrResScale.GetFloat() );
+	int ssrW = (int)( fullW * resScale + 0.5f );
+	int ssrH = (int)( fullH * resScale + 0.5f );
+	if ( ssrW < 1 ) ssrW = 1;
+	if ( ssrH < 1 ) ssrH = 1;
+	if ( !RB_RHI_EnsureSsrTarget( r, ssrW, ssrH ) ) {
+		return;
+	}
 
 	// snapshot the lit opaque scene; CopyFramebuffer leaves _currentRender bound on
 	// the active unit — exactly where ssr.frag samples it (unit 0)
 	rhi::gl3ActiveTexture( GL_TEXTURE0 );
 	backEnd.glState.currenttmu = 0;
 	globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1,
-		viewDef->viewport.y1, w, h, true );
+		viewDef->viewport.y1, fullW, fullH, true );
 
+	const int uploadW = globalImages->currentDepthImage->uploadWidth;
+	const int uploadH = globalImages->currentDepthImage->uploadHeight;
+	const float invP00 = ( viewDef->projectionMatrix[0] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[0] : 1.0f;
+	const float invP11 = ( viewDef->projectionMatrix[5] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[5] : 1.0f;
+
+	// ---- stage 1: march into the offscreen buffer (cleared to 0 = miss) ----
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
 	// the real view->clip matrix projects march points back to screen; the inverse
 	// factors reconstruct view-space positions (same recipe as ssao.frag)
 	memcpy( parms.projectionMatrix, viewDef->projectionMatrix, sizeof( parms.projectionMatrix ) );
-	parms.localParam0[0] = 1.0f / viewDef->projectionMatrix[0];
-	parms.localParam0[1] = 1.0f / viewDef->projectionMatrix[5];
+	parms.localParam0[0] = invP00;
+	parms.localParam0[1] = invP11;
 	parms.localParam0[2] = idMath::ClampFloat( 64.0f, 8192.0f, r_ssrMaxDistance.GetFloat() );
 	parms.localParam0[3] = idMath::ClampFloat( 1.0f, 256.0f, r_ssrThickness.GetFloat() );
 	parms.localParam1[0] = (float)idMath::ClampInt( 4, 64, r_ssrSteps.GetInteger() );
-	parms.localParam1[1] = r_ssrIntensity.GetFloat();
 	parms.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
-	parms.screenCorrection[0] = 1.0f / w;
-	parms.screenCorrection[1] = 1.0f / h;
+	parms.screenCorrection[0] = 1.0f / ssrW;
+	parms.screenCorrection[1] = 1.0f / ssrH;
 	const int potW = globalImages->currentRenderImage->uploadWidth;
 	const int potH = globalImages->currentRenderImage->uploadHeight;
-	parms.screenCorrection[2] = potW > 0 ? (float)w / potW : 1.0f;
-	parms.screenCorrection[3] = potH > 0 ? (float)h / potH : 1.0f;
-	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
-	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
+	parms.screenCorrection[2] = potW > 0 ? (float)fullW / potW : 1.0f;
+	parms.screenCorrection[3] = potH > 0 ? (float)fullH / potH : 1.0f;
+	parms.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;		// gl_FragCoord (SSR) -> depth tc
+	parms.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
+	// per-frame jitter rotation so temporal accumulation averages different march
+	// offsets (golden-ratio walk, same scheme as SSAO); 0 keeps the static dither
+	if ( r_ssrTemporal.GetBool() ) {
+		rhiSsrJitterPhase += 0.61803399f;
+		rhiSsrJitterPhase -= (float)(int)rhiSsrJitterPhase;
+		parms.windowCoord[1] = rhiSsrJitterPhase;
+	}
 
-	// unit 1 = depth; units 2/3 = the G-buffer attachments (raw binds — invalidate
-	// the tmu cache entries so later idImage binds on those units re-issue)
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.color = true;		// rgba 0 = miss everywhere the march discards
+
+	r->BeginTargetPass( rhiSsrRT, &clear );
+	// unit 0 = _currentRender (bound by the copy above); unit 1 = depth; units 2/3 =
+	// the G-buffer attachments (raw binds — tmu cache entries invalidated below)
 	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 	rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
 	qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
@@ -2636,14 +2728,92 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	backEnd.glState.currenttmu = 0;
 	backEnd.glState.tmu[2].current2DMap = -1;
 	backEnd.glState.tmu[3].current2DMap = -1;
+	RB_RHI_DrawFullscreen( r, marchProg, parms, 0 );
+	r->EndPass();
 
-	// the last surface may have left a cropped scissor; cover the whole view
+	rhi::RenderTargetHandle resultRT = rhiSsrRT;
+
+	// ---- stage 2: temporal accumulation (docs/ssr.md; mirrors the SSAO history) ----
+	if ( r_ssrTemporal.GetBool() && RB_RHI_EnsureSsrHistory( r, ssrW, ssrH ) ) {
+		rhi::ShaderHandle tempProg = r->LoadShader( "ssr_temporal" );
+		if ( tempProg ) {
+			// current world->clip; kept for next frame as its "previous" reprojection
+			float curViewProj[16];
+			myGlMultMatrix( viewDef->worldSpace.modelViewMatrix, viewDef->projectionMatrix, curViewProj );
+
+			// reproj = (view space this frame -> world) then (world -> previous clip)
+			float invViewCur[16], reproj[16];
+			const bool haveInv = R_InvertGLMatrix( viewDef->worldSpace.modelViewMatrix, invViewCur );
+			if ( haveInv ) {
+				myGlMultMatrix( invViewCur, rhiSsrPrevViewProj, reproj );
+			}
+			const bool historyUsable = rhiSsrHistValid && rhiSsrHavePrevVP && haveInv;
+
+			const int writeIdx = rhiSsrHistIdx;
+			const int readIdx  = 1 - rhiSsrHistIdx;
+
+			rhi::RenderParams tempParms = parms;
+			if ( haveInv ) {
+				memcpy( tempParms.modelViewMatrix, reproj, sizeof( reproj ) );
+			}
+			tempParms.localParam0[2] = idMath::ClampFloat( 0.0f, 0.97f, r_ssrTemporalFeedback.GetFloat() );
+			tempParms.localParam0[3] = historyUsable ? 1.0f : 0.0f;
+
+			// unit 0 = current march (via DrawFullscreen), unit 1 = history read slot,
+			// unit 2 = depth
+			r->BeginTargetPass( rhiSsrHistRT[writeIdx], NULL );
+			RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
+			rhi::gl3ActiveTexture( GL_TEXTURE0 + 1 );
+			qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiSsrHistRT[readIdx] ) );
+			rhi::gl3ActiveTexture( GL_TEXTURE0 );
+			backEnd.glState.currenttmu = 0;
+			backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
+			RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiSsrRT ) );
+			r->EndPass();
+
+			resultRT = rhiSsrHistRT[writeIdx];
+			rhiSsrHistIdx = readIdx;
+			memcpy( rhiSsrPrevViewProj, curViewProj, sizeof( curViewProj ) );
+			rhiSsrHavePrevVP = true;
+			rhiSsrHistValid  = true;
+		}
+	} else {
+		// temporal off (or history alloc failed): drop any stale history so a later
+		// re-enable starts clean instead of blending garbage
+		rhiSsrHistValid = false;
+	}
+
+	// ---- stage 3: full-res additive composite over the lit scene ----
+	rhi::RenderParams compParms;
+	memset( &compParms, 0, sizeof( compParms ) );
+	compParms.mvpMatrix[0] = compParms.mvpMatrix[5] = compParms.mvpMatrix[10] = compParms.mvpMatrix[15] = 1.0f;
+	compParms.localParam0[0] = invP00;
+	compParms.localParam0[1] = invP11;
+	compParms.localParam1[1] = r_ssrIntensity.GetFloat();
+	compParms.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
+	compParms.screenCorrection[0] = 1.0f / fullW;
+	compParms.screenCorrection[1] = 1.0f / fullH;
+	compParms.depthTexRecip[0] = 1.0f / uploadW;
+	compParms.depthTexRecip[1] = 1.0f / uploadH;
+
+	// EndPass restored the view scissor; keep the CPU cache in step, and cover the
+	// whole view in case the last surface left a crop before the target passes
 	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	               tr.viewportOffset[1] + viewDef->viewport.y1, fullW, fullH );
 	backEnd.currentScissor = viewDef->scissor;
 
-	// additive composite over the lit scene
-	RB_RHI_DrawFullscreen( r, prog, parms, 0, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
+	// unit 0 = SSR result (via DrawFullscreen), unit 1 = depth, units 2/3 = G-buffer
+	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
+	qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
+	rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
+	qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
+	backEnd.glState.tmu[2].current2DMap = -1;
+	backEnd.glState.tmu[3].current2DMap = -1;
+	RB_RHI_DrawFullscreen( r, compProg, compParms, r->GetRenderTargetImage( resultRT ),
+	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 	RB_RHI_ForgetTexBinds();
 }
 
