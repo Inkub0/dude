@@ -10,15 +10,16 @@ VARY(1) in vec4 var_TargetScaled;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-    vec2 screenTc = vec2(gl_FragCoord.x * u_windowCoord.x * u_screenCorrection.x, 
-                         gl_FragCoord.y * u_windowCoord.y * u_screenCorrection.y);
+    vec2 screenTc = gl_FragCoord.xy * u_windowCoord.xy * u_screenCorrection.xy;
 
     vec4 src = texture(u_currentRender, screenTc);
 
-    // Dot product replaces (src.x + src.y + src.z) / 3.0
-    float grey = dot(src.rgb, vec3(1/3));
-    vec4 target = vec4(grey * var_TargetScaled.r, grey * var_TargetScaled.g, grey * var_TargetScaled.b, 1.0);
+    // greyscale exactly as the ARB program: (r + g + b) * 0.33 — 0.33, not 1/3
+    float grey = ( src.x + src.y + src.z ) * 0.33;
 
-    // mix is cleaner and often optimized to a single FMA operation
-    fragColor = mix(src * var_InvFraction, target, 1.0); // The lerp factor was implicitly 1.0 in the original (lerping against source with 0 weight)
+    // lerp between the source color and the grey-scaled target color:
+    // src * (1 - fraction) + grey * (target * fraction). The ARB wrote only
+    // result.color.xyz (alpha undefined); the stage's default replace blend
+    // never reads alpha, so the source alpha is passed through.
+    fragColor = vec4( src.rgb * var_InvFraction.rgb + grey * var_TargetScaled.rgb, src.a );
 }
