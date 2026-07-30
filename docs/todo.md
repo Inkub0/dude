@@ -17,11 +17,13 @@ instead of making the user dial every slider by hand. Scale, lowest to highest:
 is touched. Separate from Video Options' vanilla `com_machineSpec` preset.
 
 Design decisions taken:
-- **Anchor: High = shipped defaults** (the GTX-1070-calibrated look), with one deliberate
-  deviation: **Blinn-Phong specular** (`r_shading 1`) is on for every tier above Potato, where
-  the shipped cvar default is the vanilla LUT (`r_shading 0`). It's effectively free (analytic
-  math replacing a texture LUT fetch), so it rides on all enhanced tiers. Two tiers scale down
-  for weaker GL 3.3 hardware, two push modern GPUs.
+- **Anchor: High = shipped defaults** (the GTX-1070-calibrated look), with deliberate
+  deviations: **Blinn-Phong specular** (`r_shading 1`) is on for every tier above Potato, where
+  the shipped cvar default is the vanilla LUT (`r_shading 0`) — effectively free (analytic
+  math replacing a texture LUT fetch) — and the **rendering-pipeline tiers** exceed the
+  off-by-default cvars: HDR from Medium up, PBR materials from High up, screen-space
+  reflections from Ultra up (docs/ssr.md; half march resolution on Ultra, two-thirds on
+  Ultra Nightmare). Two tiers scale down for weaker GL 3.3 hardware, two push modern GPUs.
 - **Potato = the faithful floor**: every enhancement off *and* vanilla specular → both the
   cheapest tier *and* an exact vanilla frame, so "source-accurate" is always one click away
   (satisfies the "keep faithful reachable" note below). Playable on any GL 3.3 card.
@@ -38,9 +40,13 @@ Design decisions taken:
 | SSAO | off | off | on | on | on | on |
 | baked AO maps | off | on | on | on | on | on |
 | shadow mapping | off (stencil) | off (stencil) | on | on | on | on |
-| specular shading | vanilla LUT | Blinn-Phong | Blinn-Phong | Blinn-Phong | Blinn-Phong | Blinn-Phong |
-| specular scale | 1.0 | 1.8 | 1.8 | 1.8 | 1.8 | 1.8 |
-| specular exponent | (n/a, LUT) | 62 | 62 | 62 | 62 | 62 |
+| specular shading | vanilla LUT | Blinn-Phong | Blinn-Phong | Blinn-Phong† | Blinn-Phong† | Blinn-Phong† |
+| specular scale | 1.0 | 1.2 | 1.2 | 1.2 | 1.2 | 1.2 |
+| specular exponent | (n/a, LUT) | 42 | 42 | 42 | 42 | 42 |
+| HDR scene buffer | off | off | on | on | on | on |
+| PBR materials (GGX) | off | off | off | on | on | on |
+| screen-space reflections | off | off | off | off | on | on |
+| SSR march resolution | — | — | — | — | 1/2 | 2/3 |
 | SSAO res scale | — | — | 0.5 | 0.75 | 0.8 | 1.0 |
 | SSAO slices / steps | — | — | 3 / 2 | 3 / 3 | 6 / 4 | 7 / 5 |
 | SSAO normal G-buffer | — | — | off | on | on | on |
@@ -48,14 +54,16 @@ Design decisions taken:
 | cube PCF taps | — | — | 5 | 6 | 8 | 12 |
 | point-light budget | — | — | 16 | 64 | 96 | 128 (all) |
 | shadow size-scale | on* | on* | on | on | on | on |
-| size-scale pivot radius | 380* | 380* | 380 | 380 | 340 | 300 |
+| size-scale pivot radius | 380* | 380* | 380 | 380 | 340 | 340 |
 | emissive light cap | — | — | 16 | 24 | 32 | 48 |
 | film grain / chroma | off | off | 0.04 / 0.2 | 0.04 / 0.2 | 0.04 / 0.2 | 0.04 / 0.2 |
 | reflection scale | 1.0 | 1.0 | 0.7 | 0.7 | 0.7 | 0.7 |
 
 (Potato/Low carry the cheap Medium SSAO/shadow sub-params under the off toggles so a
 manual feature flip from those tiers stays affordable. `*` = inert under stencil shadows
-but carried for determinism.)
+but carried for determinism. `†` = dormant while PBR supersedes the specular model on
+High and up; still applied for determinism. Sub-Ultra tiers carry SSR march resolution
+1.0 so a hand-enabled SSR runs at the full-res default.)
 
 Shadow size-scaling (`r_shadowMapSizeScale`) stays **on at every tier**: it distributes the
 per-light resolution budget by light importance (a light at the pivot radius gets the tier's

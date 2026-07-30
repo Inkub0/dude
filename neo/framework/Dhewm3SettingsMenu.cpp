@@ -2302,8 +2302,8 @@ struct EnhancementPreset {
 	float chromaticAberration;
 	float reflectionScale;    // 1.0 vanilla / 0.7 dampened for the brighter enhanced scene
 	int   shading;            // r_shading: 0 vanilla LUT (Potato only) / 1 Blinn-Phong (enhanced tiers).
-	                          // Dormant (still applied, just not read) while r_pbr supersedes the
-	                          // specular model; presets deliberately don't touch r_pbr itself.
+	                          // Dormant (still applied, just not read) on the tiers whose pbr flag
+	                          // below supersedes the specular model (High and up).
 	float specularScale;      // r_specularScale: scales the specular contribution (applies to all models)
 	float specularExp;        // r_specularExp: Blinn-Phong/Phong exponent (ignored by the vanilla LUT)
 	// shadow-map size scaling (logically part of the shadow levers above; kept here
@@ -2315,19 +2315,30 @@ struct EnhancementPreset {
 	// table's positional initializers stable. On for every tier except Potato; inert on stock
 	// assets and on the legacy backend, so it only shows where baked maps exist (chars, props).
 	bool  occlusionMaps;            // r_occlusionMaps
+	// rendering-pipeline tiers (appended, see note above): HDR scene buffer from Medium
+	// up, PBR materials from High up, screen-space reflections from Ultra up. SSR marches
+	// at reduced resolution (docs/ssr.md — the material weighting stays full-res): 1/2 on
+	// Ultra, 2/3 on Ultra Nightmare. ssrResScale carried as 1.0 on the lower tiers so a
+	// hand-enabled SSR there runs at the (full-res) default.
+	bool  hdr;                      // r_hdr
+	bool  pbr;                      // r_pbr
+	bool  ssr;                      // r_ssr
+	float ssrResScale;              // r_ssrResScale
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
 // flipping a feature on by hand from those tiers stays affordable and detection
-// stays unambiguous. High == shipped defaults (see anchor note above).
+// stays unambiguous. High == shipped defaults plus the pipeline tiers (HDR + PBR;
+// see anchor note above — the pipeline columns deliberately exceed the cvar
+// defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true  },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 3,   2,   false, true,  512,  512,  5,  16,   16,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true  },
-	{ "High",         true,  false, true,  true,  true,   0.75f, 3,   3,   true,  true,  1024, 1200, 6,  64,   24,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true  },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 6,   4,   true,  true,  2048, 2048, 8,  96,   32,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true  },
-	{ "Ultra Nightmare", true, true, true, true,  true,   1.0f, 7,   5,   true,  true,  2048, 2048, 12, 128,  48,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true  },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f   },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f   },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 3,   2,   false, true,  512,  512,  5,  16,   16,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f   },
+	{ "High",         true,  false, true,  true,  true,   0.75f, 3,   3,   true,  true,  1024, 1200, 6,  64,   24,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f   },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 6,   4,   true,  true,  2048, 2048, 8,  96,   32,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f   },
+	{ "Ultra Nightmare", true, true, true, true,  true,   1.0f, 7,   5,   true,  true,  2048, 2048, 12, 128,  48,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2371,6 +2382,13 @@ static void ApplyEnhancementPreset( int idx )
 	r_shading.SetInteger( p.shading );
 	r_specularScale.SetFloat( p.specularScale );
 	r_specularExp.SetFloat( p.specularExp );
+
+	// rendering-pipeline tiers: HDR (Medium+), PBR (High+), SSR (Ultra+, at
+	// reduced march resolution — 1/2 Ultra, 2/3 Ultra Nightmare)
+	r_hdr.SetBool( p.hdr );
+	r_pbr.SetBool( p.pbr );
+	r_ssr.SetBool( p.ssr );
+	r_ssrResScale.SetFloat( p.ssrResScale );
 }
 
 // Return the preset whose full cvar vector the live cvars currently match, or -1
@@ -2404,7 +2422,11 @@ static int DetectEnhancementPreset()
 			idMath::Fabs( r_gl3ReflectionScale.GetFloat() - p.reflectionScale ) < 0.01f &&
 			r_shading.GetInteger()             == p.shading &&
 			idMath::Fabs( r_specularScale.GetFloat() - p.specularScale ) < 0.01f &&
-			idMath::Fabs( r_specularExp.GetFloat() - p.specularExp ) < 0.5f;
+			idMath::Fabs( r_specularExp.GetFloat() - p.specularExp ) < 0.5f &&
+			r_hdr.GetBool()                    == p.hdr &&
+			r_pbr.GetBool()                    == p.pbr &&
+			r_ssr.GetBool()                    == p.ssr &&
+			idMath::Fabs( r_ssrResScale.GetFloat() - p.ssrResScale ) < 0.01f;
 		if ( match ) {
 			return i;
 		}
@@ -2444,16 +2466,18 @@ static void DrawEnhancementsMenu()
 
 		ImGui::SetNextItemWidth( 220.0f );
 		ImGui::Combo( "##enhPreset", &selPreset,
-			"Potato\0Low\0Medium\0High (defaults)\0Ultra\0Ultra Nightmare\0" );
+			"Potato\0Low\0Medium\0High\0Ultra\0Ultra Nightmare\0" );
 		ImGui::SameLine();
 		if ( ImGui::Button( "Apply Preset" ) ) {
 			ApplyEnhancementPreset( selPreset );
 		}
 		AddTooltip( "One-click tiers for the whole enhancement suite (SSAO, shadow maps, emissive "
-			"fill light, soft particles, post-FX, Blinn-Phong specular). 'High' matches the shipped "
-			"defaults; 'Potato' is the vanilla-faithful floor (everything off, vanilla specular) and "
-			"the fastest. Presets set the shading look and the performance levers; your fine-tuning "
-			"(SSAO radii, emissive reach/tint, shadow biases) is left alone. Tweaking any slider "
+			"fill light, soft particles, post-FX, specular look) plus the rendering pipeline: HDR "
+			"from Medium up, PBR materials from High up, screen-space reflections from Ultra up "
+			"(at half march resolution; two-thirds on Ultra Nightmare). 'Potato' is the "
+			"vanilla-faithful floor (everything off, vanilla specular) and the fastest. Presets set "
+			"the shading look and the performance levers; your fine-tuning (SSAO radii, emissive "
+			"reach/tint, shadow biases, PBR category sliders) is left alone. Tweaking any slider "
 			"afterwards shows 'Custom'. Separate from the image-quality preset in Video Options." );
 
 		const int detected = DetectEnhancementPreset();
@@ -2563,8 +2587,9 @@ static void DrawEnhancementsMenu()
 			"opengl3 only." );
 	}
 
-	// Reflections (DUDE PBR Phase C.2, docs/ssr.md). Master toggle only; the tuning
-	// sliders live in the Developer tab next to the PBR knobs.
+	// Reflections (DUDE PBR Phase C.2, docs/ssr.md). Master toggle + the quality/perf
+	// stops here (mirroring the SSAO block); the tuning sliders live in the Developer
+	// tab next to the PBR knobs.
 	ImGui::SeparatorText( "Reflections" );
 	{
 		bool ssr = r_ssr.GetBool();
@@ -2576,6 +2601,40 @@ static void DrawEnhancementsMenu()
 			"Reflections are screen-space, so off-screen objects can't appear and rays fade at "
 			"the screen edges. Works with PBR shading on or off; tuning sliders are in the "
 			"Developer tab. Non-vanilla; opengl3 only." );
+
+		// Resolution: discrete quality/perf stops for the reflection march buffer.
+		ImGui::BeginDisabled( !r_ssr.GetBool() );
+		const float ssrResStops[]  = { 0.5f, 0.667f, 0.75f, 1.0f };
+		const char *ssrResLabels[] = { "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Full" };
+		const int ssrNumStops = IM_ARRAYSIZE( ssrResStops );
+		const float ssrCurScale = r_ssrResScale.GetFloat();
+		int ssrResIdx = 0;
+		float ssrResBest = 1e9f;
+		for ( int i = 0; i < ssrNumStops; i++ ) {
+			const float d = idMath::Fabs( ssrCurScale - ssrResStops[i] );
+			if ( d < ssrResBest ) { ssrResBest = d; ssrResIdx = i; }
+		}
+		if ( ImGui::SliderInt( "Resolution##ssr", &ssrResIdx, 0, ssrNumStops - 1,
+				ssrResLabels[ssrResIdx], ImGuiSliderFlags_NoInput ) ) {
+			ssrResIdx = ssrResIdx < 0 ? 0 : ( ssrResIdx >= ssrNumStops ? ssrNumStops - 1 : ssrResIdx );
+			r_ssrResScale.SetFloat( ssrResStops[ssrResIdx] );
+		}
+		AddTooltip( "Resolution the reflection rays are marched at, as a fraction of the screen. "
+			"The material response (Fresnel, gloss) always applies at full resolution, so lower "
+			"stops only soften the reflected image — Half is ~4x cheaper and pairs well with "
+			"Temporal Accumulation. Lower this first if reflections cost too much." );
+
+		// Temporal accumulation: rotate the march jitter per frame and average the
+		// results (reprojected by camera motion) so the grain resolves.
+		bool ssrTemporal = r_ssrTemporal.GetBool();
+		if ( ImGui::Checkbox( "Temporal Accumulation##ssr", &ssrTemporal ) ) {
+			r_ssrTemporal.SetBool( ssrTemporal );
+		}
+		AddTooltip( "Blend reflections across frames (reprojected as the camera moves) instead of "
+			"recomputing them fresh each frame. The march's grainy sparkle settles into a clean "
+			"image; ghosting on fast motion is clamped automatically. The Feedback strength lives "
+			"in the Developer tab. Non-vanilla; opengl3 only." );
+		ImGui::EndDisabled();
 	}
 
 	// Shadows (DUDE Phase 3.5). Hand-drawn so the sub-settings are visibly grouped
@@ -2894,6 +2953,14 @@ static void DrawShadowDebugMenu()
 	}
 	AddTooltip( "r_ssrThickness: assumed depth of surfaces when testing ray hits. Too low leaves gaps "
 		"in reflections (rays slip behind geometry); too high smears streaks under railings and edges." );
+
+	float ssrFeedback = r_ssrTemporalFeedback.GetFloat();
+	if ( ImGui::SliderFloat( "Temporal Feedback##ssr", &ssrFeedback, 0.0f, 0.97f, "%.2f" ) ) {
+		r_ssrTemporalFeedback.SetFloat( ssrFeedback );
+	}
+	AddTooltip( "r_ssrTemporalFeedback: fraction of reflection history kept per frame while Temporal "
+		"Accumulation is on (Enhancements tab). Higher = smoother, converges slower and can trail "
+		"on fast motion; lower = grainier but snappier." );
 
 	ImGui::EndDisabled();
 
