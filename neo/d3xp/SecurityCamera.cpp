@@ -577,6 +577,9 @@ void idSecurityCamera::Present( void ) {
 		return;
 	}
 
+	// remember the transform committed at this tic for sub-tic render interpolation (com_interpolate)
+	SnapshotRenderTransform();
+
 	// add to refresh list
 	if ( modelDefHandle == -1 ) {
 		modelDefHandle = gameRenderWorld->AddEntityDef( &renderEntity );

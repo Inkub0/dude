@@ -198,6 +198,9 @@ void idGameLocal::Clear( void ) {
 	numEntitiesToDeactivate = 0;
 	sortPushers = false;
 	sortTeamMasters = false;
+	renderInterpEntities.Clear();
+	renderInterpFrameNum = -1;
+	renderInterpApplied = false;
 	persistentLevelInfo.Clear();
 	memset( globalShaderParms, 0, sizeof( globalShaderParms ) );
 	random.SetSeed( 0 );
@@ -2320,6 +2323,22 @@ gameReturn_t idGameLocal::RunFrame( const usercmd_t *clientCmds ) {
 		// create a merged pvs for all players
 		SetupPlayerPVS();
 
+		// com_interpolate stage 3: between the previous tic and this one, the render defs of the
+		// entities that moved were re-presented at sub-tic blended transforms; re-commit the
+		// authoritative tic state before this tic runs so entities that stop moving (or stop
+		// presenting) don't linger mid-blend, then start a fresh list for this tic
+		if ( renderInterpApplied ) {
+			for ( int interpNum = 0; interpNum < renderInterpEntities.Num(); interpNum++ ) {
+				idEntity *interpEnt = renderInterpEntities[ interpNum ].GetEntity();
+				if ( interpEnt ) {
+					interpEnt->RestoreRenderTransform();
+				}
+			}
+			renderInterpApplied = false;
+		}
+		renderInterpEntities.SetNum( 0, false );
+		renderInterpFrameNum = framenum;
+
 		// sort the active entity list
 		SortActiveEntityList();
 
@@ -2556,6 +2575,9 @@ bool idGameLocal::Draw( int clientNum ) {
 		float frac = common->GetTicInterpolation();
 		player->InterpolateRenderView( frac );
 		player->InterpolateViewWeapon( frac );
+		// stage 3: world entities that moved this tic (movers, doors, monsters, projectiles,
+		// moving lights) glide between their previous and current tic transforms
+		InterpolateRenderEntities( frac );
 	}
 
 	// render the scene
@@ -3068,6 +3090,70 @@ void idGameLocal::UnregisterEntity( idEntity *ent ) {
 		}
 		ent->entityNumber = ENTITYNUM_NONE;
 	}
+}
+
+/*
+===================
+idGameLocal::RegisterRenderInterpolation
+
+com_interpolate stage 3: called by idEntity::SnapshotRenderTransform (and the idLight light-def
+equivalent) when an entity commits its render transform in a new tic. The listed entities are
+re-presented at sub-tic blended transforms by InterpolateRenderEntities between tics.
+===================
+*/
+void idGameLocal::RegisterRenderInterpolation( idEntity *ent ) {
+	// interpolation is applied in the single-player Draw path only; network clients never run
+	// RunFrame's per-tic reset, so don't let their prediction frames grow the list
+	if ( isClient ) {
+		return;
+	}
+
+	// start a fresh list on the first commit of a new tic. Keyed on framenum rather than
+	// gameLocal.time so the reset can't fire twice within one tic (and stays in step with the
+	// d3xp version, where the time groups run one tic under two clocks).
+	if ( renderInterpFrameNum != framenum ) {
+		renderInterpEntities.SetNum( 0, false );
+		renderInterpFrameNum = framenum;
+	}
+
+	// an entity can commit both a model and a light def in the same tic; list it once
+	if ( ent->renderInterpListedFrame == framenum ) {
+		return;
+	}
+	ent->renderInterpListedFrame = framenum;
+
+	idEntityPtr<idEntity> &entPtr = renderInterpEntities.Alloc();
+	entPtr = ent;
+}
+
+/*
+===================
+idGameLocal::InterpolateRenderEntities
+
+com_interpolate stage 3: called once per rendered frame (between game tics, from Draw) to
+re-present the entities that moved during the current tic at transforms blended between the
+previous and current tic, so world entities glide instead of stepping at the fixed 60 Hz sim
+rate. frac is the interpolation alpha in [0,1], see common->GetTicInterpolation().
+===================
+*/
+void idGameLocal::InterpolateRenderEntities( float frac ) {
+	int i, num;
+
+	num = renderInterpEntities.Num();
+	if ( !num ) {
+		return;
+	}
+
+	for ( i = 0; i < num; i++ ) {
+		idEntity *ent = renderInterpEntities[ i ].GetEntity();
+		if ( ent ) {
+			ent->PresentInterpolated( frac );
+		}
+	}
+
+	// the render defs now hold sub-tic transforms; RunFrame re-commits the authoritative state
+	// at the start of the next tic
+	renderInterpApplied = true;
 }
 
 /*

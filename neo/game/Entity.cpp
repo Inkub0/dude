@@ -28,6 +28,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sys/platform.h"
 #include "idlib/geometry/JointTransform.h"
+#include "idlib/math/Quat.h"
 #include "idlib/LangDict.h"
 #include "framework/async/NetworkSystem.h"
 #include "framework/DeclEntityDef.h"
@@ -433,6 +434,12 @@ idEntity::idEntity() {
 	memset( &renderEntity, 0, sizeof( renderEntity ) );
 	modelDefHandle	= -1;
 	renderAnimTimeOffset = 0;
+	renderInterpOriginPrev.Zero();
+	renderInterpOriginCur.Zero();
+	renderInterpAxisPrev.Identity();
+	renderInterpAxisCur.Identity();
+	renderInterpSnapshotTime = -1;
+	renderInterpListedFrame = -1;
 	memset( &refSound, 0, sizeof( refSound ) );
 
 	mpGUIState = -1;
@@ -1417,10 +1424,93 @@ void idEntity::Present( void ) {
 		return;
 	}
 
+	// remember the transform committed at this tic for sub-tic render interpolation (com_interpolate)
+	SnapshotRenderTransform();
+
 	// add to refresh list
 	if ( modelDefHandle == -1 ) {
 		modelDefHandle = gameRenderWorld->AddEntityDef( &renderEntity );
 	} else {
+		gameRenderWorld->UpdateEntityDef( modelDefHandle, &renderEntity );
+	}
+}
+
+/*
+================
+idEntity::SnapshotRenderTransform
+
+com_interpolate stage 3: rotate the previous/current tic snapshots of the render transform about
+to be committed to the render world. idGameLocal::InterpolateRenderEntities uses the pair to
+re-present this entity between tics at a sub-tic blend, so world entities glide instead of
+stepping at the fixed 60 Hz sim rate when rendering faster. Idempotent within a tic: repeated
+commits in the same tic only refresh the current snapshot.
+================
+*/
+void idEntity::SnapshotRenderTransform( void ) {
+	if ( renderInterpSnapshotTime != gameLocal.time ) {
+		if ( renderInterpSnapshotTime < 0 ) {
+			// first commit (spawn or savegame restore): no previous state to blend from
+			renderInterpOriginPrev = renderEntity.origin;
+			renderInterpAxisPrev = renderEntity.axis;
+		} else {
+			renderInterpOriginPrev = renderInterpOriginCur;
+			renderInterpAxisPrev = renderInterpAxisCur;
+		}
+		renderInterpSnapshotTime = gameLocal.time;
+		gameLocal.RegisterRenderInterpolation( this );
+	}
+	renderInterpOriginCur = renderEntity.origin;
+	renderInterpAxisCur = renderEntity.axis;
+
+	// don't glide across teleports and other discontinuities
+	if ( ( renderInterpOriginCur - renderInterpOriginPrev ).LengthSqr() > Square( RENDER_INTERP_TELEPORT_DIST ) ) {
+		renderInterpOriginPrev = renderInterpOriginCur;
+		renderInterpAxisPrev = renderInterpAxisCur;
+	}
+}
+
+/*
+================
+idEntity::PresentInterpolated
+
+Called once per *rendered* frame between game tics (com_interpolate stage 3). Re-presents the
+render entity at a transform blended between the previous and current tic, matching
+idPlayer::InterpolateRenderView: renders up to one tic (~16.7ms) in the past, never extrapolates.
+Recomputes from the stable snapshots each call (idempotent) and passes a temporary copy so the
+authoritative renderEntity keeps the exact tic state (restored by RestoreRenderTransform).
+================
+*/
+void idEntity::PresentInterpolated( float frac ) {
+	// only entities whose transform was committed during the current tic have a valid pair to
+	// blend; stale entries (entity stopped presenting) keep their authoritative transform
+	if ( modelDefHandle == -1 || renderInterpSnapshotTime != gameLocal.time ) {
+		return;
+	}
+
+	// didn't move this tic
+	if ( renderInterpOriginCur.Compare( renderInterpOriginPrev ) && renderInterpAxisCur.Compare( renderInterpAxisPrev ) ) {
+		return;
+	}
+
+	renderEntity_t lerped = renderEntity;
+	lerped.origin = renderInterpOriginPrev + frac * ( renderInterpOriginCur - renderInterpOriginPrev );
+	idQuat q;
+	q.Slerp( renderInterpAxisPrev.ToQuat(), renderInterpAxisCur.ToQuat(), frac );
+	lerped.axis = q.ToMat3();
+	gameRenderWorld->UpdateEntityDef( modelDefHandle, &lerped );
+}
+
+/*
+================
+idEntity::RestoreRenderTransform
+
+Re-commits the authoritative tic-state transform after PresentInterpolated dirtied the render
+def with sub-tic blends; called by idGameLocal at the start of the next tic so entities that
+stop moving (or stop presenting) don't linger mid-blend.
+================
+*/
+void idEntity::RestoreRenderTransform( void ) {
+	if ( modelDefHandle != -1 ) {
 		gameRenderWorld->UpdateEntityDef( modelDefHandle, &renderEntity );
 	}
 }

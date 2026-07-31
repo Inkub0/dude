@@ -129,6 +129,7 @@ public:
 	// Visual presentation
 	void					PresentWeapon( bool showViewModel );
 	void					InterpolateViewWeapon( float frac );	// called every rendered frame (may be >1 per tic)
+	virtual void			PresentInterpolated( float frac );		// no-op: stage 2 (above) owns the view model
 	int						GetZoomFov( void );
 	void					GetWeaponAngleOffsets( int *average, float *scale, float *max );
 	void					GetWeaponTimeOffsets( float *time, float *scale );

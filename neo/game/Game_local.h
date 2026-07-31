@@ -238,6 +238,14 @@ public:
 	int						numEntitiesToDeactivate;// number of entities that became inactive in current frame
 	bool					sortPushers;			// true if active lists needs to be reordered to place pushers at the front
 	bool					sortTeamMasters;		// true if active lists needs to be reordered to place physics team masters before their slaves
+
+	// render interpolation stage 3 (com_interpolate): entities whose render transform was
+	// committed during the current tic; between tics InterpolateRenderEntities re-presents them
+	// at a sub-tic blend of their previous/current tic transforms (see idEntity::SnapshotRenderTransform)
+	idList< idEntityPtr<idEntity> >	renderInterpEntities;
+	int						renderInterpFrameNum;	// framenum the list belongs to
+	bool					renderInterpApplied;	// true if render defs currently hold sub-tic (not tic) transforms
+
 	idDict					persistentLevelInfo;	// contains args that are kept around between levels
 
 	// can be used to automatically effect every material in the world that references globalParms
@@ -386,6 +394,10 @@ public:
 
 	void					RegisterEntity( idEntity *ent );
 	void					UnregisterEntity( idEntity *ent );
+
+	// render interpolation stage 3 (com_interpolate)
+	void					RegisterRenderInterpolation( idEntity *ent );
+	void					InterpolateRenderEntities( float frac );
 
 	bool					RequirementMet( idEntity *activator, const idStr &requires, int removeItem );
 

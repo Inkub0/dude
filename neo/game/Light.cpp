@@ -27,6 +27,7 @@ If you have questions concerning this license or the applicable additional terms
 */
 
 #include "sys/platform.h"
+#include "idlib/math/Quat.h"
 #include "renderer/ModelManager.h"
 
 #include "gamesys/SysCvar.h"
@@ -209,6 +210,11 @@ idLight::idLight() {
 	fadeStart			= 0;
 	fadeEnd				= 0;
 	soundWasPlaying		= false;
+	renderInterpLightOriginPrev.Zero();
+	renderInterpLightOriginCur.Zero();
+	renderInterpLightAxisPrev.Identity();
+	renderInterpLightAxisCur.Identity();
+	renderInterpLightSnapshotTime = -1;
 }
 
 /*
@@ -708,6 +714,27 @@ idLight::PresentLightDefChange
 ================
 */
 void idLight::PresentLightDefChange( void ) {
+	// com_interpolate stage 3: snapshot the light transform committed at the previous/current
+	// tic so a light bound to a mover glides with it instead of stepping at the 60 Hz sim rate
+	// (mirrors idEntity::SnapshotRenderTransform for the model def)
+	if ( renderInterpLightSnapshotTime != gameLocal.time ) {
+		if ( renderInterpLightSnapshotTime < 0 ) {
+			renderInterpLightOriginPrev = renderLight.origin;
+			renderInterpLightAxisPrev = renderLight.axis;
+		} else {
+			renderInterpLightOriginPrev = renderInterpLightOriginCur;
+			renderInterpLightAxisPrev = renderInterpLightAxisCur;
+		}
+		renderInterpLightSnapshotTime = gameLocal.time;
+		gameLocal.RegisterRenderInterpolation( this );
+	}
+	renderInterpLightOriginCur = renderLight.origin;
+	renderInterpLightAxisCur = renderLight.axis;
+	if ( ( renderInterpLightOriginCur - renderInterpLightOriginPrev ).LengthSqr() > Square( RENDER_INTERP_TELEPORT_DIST ) ) {
+		renderInterpLightOriginPrev = renderInterpLightOriginCur;
+		renderInterpLightAxisPrev = renderInterpLightAxisCur;
+	}
+
 	// let the renderer apply it to the world
 	if ( ( lightDefHandle != -1 ) ) {
 		gameRenderWorld->UpdateLightDef( lightDefHandle, &renderLight );
@@ -766,6 +793,48 @@ void idLight::Present( void ) {
 	// update the renderLight and renderEntity to render the light and flare
 	PresentLightDefChange();
 	PresentModelDefChange();
+}
+
+/*
+================
+idLight::PresentInterpolated
+
+com_interpolate stage 3: in addition to the flare/fixture model (base class), re-present the
+light def itself at the sub-tic blended transform, so the lighting a moving light casts glides
+with the geometry it is bound to.
+================
+*/
+void idLight::PresentInterpolated( float frac ) {
+	idEntity::PresentInterpolated( frac );
+
+	if ( lightDefHandle == -1 || renderInterpLightSnapshotTime != gameLocal.time ) {
+		return;
+	}
+
+	// didn't move this tic
+	if ( renderInterpLightOriginCur.Compare( renderInterpLightOriginPrev ) && renderInterpLightAxisCur.Compare( renderInterpLightAxisPrev ) ) {
+		return;
+	}
+
+	renderLight_t lerped = renderLight;	// keep shader / radius / ids; override the transform
+	lerped.origin = renderInterpLightOriginPrev + frac * ( renderInterpLightOriginCur - renderInterpLightOriginPrev );
+	idQuat q;
+	q.Slerp( renderInterpLightAxisPrev.ToQuat(), renderInterpLightAxisCur.ToQuat(), frac );
+	lerped.axis = q.ToMat3();
+	gameRenderWorld->UpdateLightDef( lightDefHandle, &lerped );
+}
+
+/*
+================
+idLight::RestoreRenderTransform
+================
+*/
+void idLight::RestoreRenderTransform( void ) {
+	idEntity::RestoreRenderTransform();
+
+	if ( lightDefHandle != -1 ) {
+		gameRenderWorld->UpdateLightDef( lightDefHandle, &renderLight );
+	}
 }
 
 /*

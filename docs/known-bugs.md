@@ -110,6 +110,30 @@ as generally a shadow bias of 1 seems to work with some lights such as
 shadow casting fans across the game, the flashlight needs to be at 0.0001
 to 0.005. a good value should be hardcoded for the flashlight.
 
+- **[RESOLVED 2026-07-31] Elevator (and any ridden mover) jittered above 60 fps (com_interpolate).**
+  Reported 2026-07-31: riding an elevator, the elevator geometry visibly jittered while
+  everything else stayed smooth. **Root cause:** stage 3 of the render interpolation feature
+  (world entities) had never been built. With `com_interpolate` on, the first-person view is
+  blended between the previous and current 60 Hz tic (`idPlayer::InterpolateRenderView`,
+  gliding up to one tic in the past), but world entities still rendered at the *current* tic's
+  snapshot. Riding a mover, the eye glides while the platform steps once per tic, so the
+  eye↔platform offset sawtooths by one tic-step every 16.7 ms — the platform appears to
+  vibrate. Only visible on entities you move *with*; static world vs an interpolated camera is
+  smooth, hence "only the elevator jitters". **Fix (stage 3, world-entity interpolation):**
+  `idEntity::SnapshotRenderTransform` records the render transform committed at the
+  previous/current tic (rotated once per tic inside `Present`, 64-unit discontinuity snap for
+  teleports) and registers the entity with `idGameLocal::RegisterRenderInterpolation`; once per
+  rendered frame `idGameLocal::Draw` calls `InterpolateRenderEntities(frac)`, which re-presents
+  each listed entity at a lerp/slerp of the two tic transforms (same never-extrapolate `frac`
+  as the view, via a temp copy so the authoritative `renderEntity` keeps exact tic state);
+  at the start of the next tic `RunFrame` re-commits the authoritative transforms so entities
+  that stop moving don't rest mid-blend. `idLight` also blends its `renderLight` def (lights
+  bound to movers would otherwise cast stepping light on gliding geometry); `idWeapon`
+  overrides the hook to a no-op (stage 2 owns the view model in eye-relative space);
+  `idSecurityCamera`'s standalone `Present` got the same snapshot hook. Excluded (own render
+  defs, not worth it): `idBrittleFracture`, `idMultiModelAF`, FX/beam/shell auxiliary defs.
+  Applied to both `neo/game/` and `neo/d3xp/`. See [[render-interpolation-feature]].
+
 - **[RESOLVED 2026-07-29] Weapon-display glow flickered while moving (com_interpolate).**
   Reported 2026-07-29. Holding a weapon with a lit display panel (machinegun ammo screen —
   any weapon with a display), the display's glow flickered while moving, worst while

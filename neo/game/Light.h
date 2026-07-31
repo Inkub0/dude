@@ -61,6 +61,8 @@ public:
 	virtual void	FreeLightDef( void );
 	virtual bool	GetPhysicsToSoundTransform( idVec3 &origin, idMat3 &axis );
 	void			Present( void );
+	virtual void	PresentInterpolated( float frac );		// com_interpolate stage 3: also blends the light def
+	virtual void	RestoreRenderTransform( void );
 
 	void			SaveState( idDict *args );
 	virtual void	SetColor( float red, float green, float blue );
@@ -115,6 +117,14 @@ private:
 	int				fadeStart;
 	int				fadeEnd;
 	bool			soundWasPlaying;
+
+	// com_interpolate stage 3: renderLight transform committed at the previous/current tic, so a
+	// light bound to a mover glides with it (mirrors idEntity's renderInterp* for the model def)
+	idVec3			renderInterpLightOriginPrev;
+	idVec3			renderInterpLightOriginCur;
+	idMat3			renderInterpLightAxisPrev;
+	idMat3			renderInterpLightAxisCur;
+	int				renderInterpLightSnapshotTime;
 
 private:
 	void			PresentLightDefChange( void );

@@ -2059,6 +2059,18 @@ void idWeapon::PresentWeapon( bool showViewModel ) {
 
 /*
 ================
+idWeapon::PresentInterpolated
+
+com_interpolate stage 3 override: intentionally empty. The view model is positioned every
+rendered frame by InterpolateViewWeapon (stage 2) in eye-relative space; the generic world-space
+blend would fight it and re-introduce the near-edge-on GUI cull flicker (see docs/known-bugs.md).
+================
+*/
+void idWeapon::PresentInterpolated( float frac ) {
+}
+
+/*
+================
 idWeapon::InterpolateViewWeapon
 
 Called once per rendered frame (which may be more often than the game tics). Re-submits the

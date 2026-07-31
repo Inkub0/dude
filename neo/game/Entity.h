@@ -113,6 +113,9 @@ public:
 	idList<signal_t> signal[ NUM_SIGNALS ];
 };
 
+// com_interpolate stage 3: suppress render interpolation across per-tic jumps larger than this
+// (teleports, respawns). Legitimate mover/projectile motion stays well below this per 60 Hz tic.
+const float RENDER_INTERP_TELEPORT_DIST = 64.0f;
 
 class idEntity : public idClass {
 public:
@@ -127,6 +130,8 @@ public:
 	idLinkList<idEntity>	snapshotNode;			// for being linked into snapshotEntities list
 	int						snapshotSequence;		// last snapshot this entity was in
 	int						snapshotBits;			// number of bits this entity occupied in the last snapshot
+
+	int						renderInterpListedFrame;	// managed by idGameLocal::RegisterRenderInterpolation (com_interpolate stage 3)
 
 	idStr					name;					// name of entity
 	idDict					spawnArgs;				// key/value pairs used to spawn and initialize entity
@@ -190,6 +195,8 @@ public:
 
 	// visuals
 	virtual void			Present( void );
+	virtual void			PresentInterpolated( float frac );		// com_interpolate stage 3, see SnapshotRenderTransform()
+	virtual void			RestoreRenderTransform( void );			// re-commit the authoritative tic transform after interpolation
 	virtual renderEntity_t *GetRenderEntity( void );
 	virtual int				GetModelDefHandle( void );
 	virtual void			SetModel( const char *modelname );
@@ -371,6 +378,19 @@ protected:
 	// tics. 0 (the default) means "sample at the tic time" - i.e. no change for normal entities.
 	// Currently only set by the view weapon; see idWeapon::InterpolateViewWeapon().
 	int						renderAnimTimeOffset;
+
+	// render interpolation stage 3 (com_interpolate): the renderEntity transform as committed to
+	// the render world at the previous and current game tic. Between tics,
+	// idGameLocal::InterpolateRenderEntities re-presents entities that moved at a blend of the
+	// two, so world entities (movers, doors, monsters, projectiles) glide instead of stepping at
+	// the fixed 60 Hz sim rate when rendering faster. Maintained by SnapshotRenderTransform();
+	// purely visual state, never saved.
+	idVec3					renderInterpOriginPrev;
+	idVec3					renderInterpOriginCur;
+	idMat3					renderInterpAxisPrev;
+	idMat3					renderInterpAxisCur;
+	int						renderInterpSnapshotTime;	// gameLocal.time renderInterp*Cur belongs to, -1 = no snapshot yet
+	void					SnapshotRenderTransform( void );
 
 private:
 	idPhysics_Static		defaultPhysicsObj;					// default physics object
