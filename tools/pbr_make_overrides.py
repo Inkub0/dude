@@ -172,6 +172,33 @@ UNCLASSIFIED_HEADER = """\
 # =============================================================================
 """
 
+MATERIALS_HEADER = """\
+# DUDE PBR material config (docs/pbr-materials.md) — the main, authored table.
+#
+# Bootstrapped by tools/pbr_classify.py, then hand-tuned in-game with the material
+# editor (editPbrMaterial) and baked in here. Loaded first; the per-game
+# pbr/pbr_overrides.cfg loads on top and wins on collision. This is the shippable
+# base config — running pbr_classify.py again regenerates a fresh classifier
+# baseline and DISCARDS the hand-tuning below, so fold overrides in instead:
+#   tools/pbr_make_overrides.py --bake --table <this file> --out <overrides> ...
+#
+# Columns: <material> <metalness> <roughness> <category> <wetness> <env>
+# '*' = inherit (slider-driven categories track their live cvar); explicit numbers
+# pin. Category 'none' / long-tail (glass/wood/cloth...) carry real numbers.
+"""
+
+OVERRIDES_EMPTY_HEADER = """\
+# DUDE PBR per-game overrides (docs/pbr-materials.md).
+#
+# Loaded after pbr/pbr_materials.cfg and wins on collision — the place for
+# game-specific or experimental per-material tweaks. The in-game editor
+# (editPbrMaterial) writes here. Empty by default: the base tuning lives in
+# pbr_materials.cfg. Fold accumulated edits back down with:
+#   tools/pbr_make_overrides.py --bake --table <materials> --out <this file> ...
+#
+# Columns: <material> <metalness> <roughness> <category> <wetness> <env>; '*' = inherit.
+"""
+
 # order categories for grouped, skimmable output
 CAT_ORDER = {
     "metal": 0, "metal_painted": 1, "ceramic_sheen": 2, "metal_rust": 3,
@@ -188,6 +215,9 @@ def main():
     ap.add_argument("--root", default=None,
                     help="game root with base/, d3xp/ — enables the unclassified scan")
     ap.add_argument("--game", default="base", help="mod dir for the scan (base/d3xp)")
+    ap.add_argument("--bake", action="store_true",
+                    help="fold the merged result into --table (the main authored "
+                         "config) and reset --out to an empty per-game override")
     args = ap.parse_args()
 
     merge_path = args.merge if args.merge is not None else args.out
@@ -209,7 +239,7 @@ def main():
 
     entries = sorted(merged.values(), key=sort_key)
 
-    lines = [HEADER]
+    lines = [MATERIALS_HEADER if args.bake else HEADER]
     cur_cat = None
     for e in entries:
         cat = e["cat"]
@@ -242,10 +272,18 @@ def main():
                 pad = name if len(name) < 50 else name + "  "
                 lines.append(f"# {pad:<50} 0.00 0.58 none  *  *   # UNCLASSIFIED: {flags}")
 
-    with open(args.out, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
-    sys.stderr.write("wrote %d active + %d commented-unclassified -> %s\n"
-                     % (len(entries), len(unclassified), args.out))
+    if args.bake:
+        with open(args.table, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(OVERRIDES_EMPTY_HEADER)
+        sys.stderr.write("baked %d entries + %d unclassified -> %s ; reset %s to empty\n"
+                         % (len(entries), len(unclassified), args.table, args.out))
+    else:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        sys.stderr.write("wrote %d active + %d commented-unclassified -> %s\n"
+                         % (len(entries), len(unclassified), args.out))
     return 0
 
 

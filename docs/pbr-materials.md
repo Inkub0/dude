@@ -241,9 +241,23 @@ A standalone script (`tools/pbr_classify.py`) that:
    `textures/base_wall/cpuwall2b  metal 1.0 0.32`, plus a coverage/confidence report
    for auditing.
 
-Runtime loads the table at material-parse time (name-keyed lookup), then merges a
-**hand-override file** on top (`pbr_overrides.cfg`) — the artist-escape hatch. The
-override file is a **superset** of the generated format, one line per material:
+**File roles (reorganized 2026-07-31, user request).** The classifier only
+*bootstraps* — `pbr_materials.cfg` is now the **main authored config**: the
+classifier baseline with the in-game hand-tuning baked into it, and the shippable
+artifact. `pbr_overrides.cfg` is a **per-game delta file**, loaded second and
+winning on collision — the in-game editor writes here, and it's empty in the base
+game (the base tuning lives in `pbr_materials.cfg`); RoE/d3xp keeps its own
+`pbr_overrides.cfg` for game-specific tweaks. Re-running `pbr_classify.py`
+overwrites `pbr_materials.cfg` with a fresh baseline and **discards** the baked
+tuning, so the workflow is: bootstrap once → tune in-game (writes overrides) →
+**bake** the overrides down into `pbr_materials.cfg` and reset the override to
+empty (`tools/pbr_make_overrides.py --bake`). Since only `base/` ships and the VFS
+falls back base→ from a mod, the base `pbr_materials.cfg` doubles as the common
+config for RoE (RoE-only materials get game-fallback defaults or a d3xp override).
+
+Runtime loads `pbr_materials.cfg` at material-parse time (name-keyed lookup), then
+merges `pbr_overrides.cfg` on top. Both share one format — a **superset** of the
+original generated columns, one line per material:
 
 ```
 <material>  <metalness>  <roughness>  <category>  <wetness>  <env>
@@ -380,8 +394,12 @@ parsed material — override entries tune live in-game, no restart. Pair with
 `r_showSurfaceInfo 1` to read the material name under the crosshair.
 
 **In-game material editor** (`editPbrMaterial`, bind it to a key): traces the
-surface under the crosshair — the same pick `reloadSurface` uses
-(`R_PbrPickCrosshairMaterial`) — and opens a floating ImGui window with the
+surface under the crosshair (`R_PbrPickCrosshairMaterial`, a `reloadSurface`-style
+trace) — **skipping `SS_DECAL` overlays** so grime/scorch decals like
+`textures/decals/stainwall` (coplanar with the wall via `polygonOffset`, and not
+lit anyway) are ignored and the pick lands on the lit wall behind them; the trace
+gained a `skipDecals` flag for this, with a non-skip fallback for standalone
+decals — and opens a floating ImGui window with the
 material's name, a category dropdown, and metalness/roughness/wetness/env sliders.
 Dragging a slider previews **live** on that surface (`idMaterial::SetPbrLive`
 pushes the values straight onto the material, bypassing the table); metalness and
