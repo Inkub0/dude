@@ -57,6 +57,7 @@ if(MSVC)
 endif()
 option(DEDICATED	"Build the dedicated server" OFF)
 option(ONATIVE		"Optimize for the host CPU" OFF)
+option(SSE41		"Require SSE4.1 on x86_64 (CPUs from ~2008 on) and use it engine-wide" ON)
 option(SDL2			"Use SDL2 instead of SDL1.2" ON)
 option(SDL3			"Use SDL3 instead of SDL2 or SDL1.2" OFF)
 option(IMGUI		"Build with Dear ImGui integration - requires SDL2/SDL3 and C++11" ON)
@@ -398,6 +399,10 @@ if(D3_COMPILER_IS_GCC_OR_CLANG)
 		add_compile_options(-march=native)
 	elseif(NOT APPLE AND cpu STREQUAL "x86")
 		add_compile_options(-march=pentium3)
+	elseif(SSE41 AND cpu STREQUAL "x86_64")
+		# raise the x86_64 baseline from SSE2 to SSE4.1 (Intel Penryn 2008+ / AMD Bulldozer 2011+)
+		# so the compiler can autovectorize with the newer instructions engine-wide
+		add_compile_options(-msse3 -mssse3 -msse4.1)
 	endif()
 
 	if(FORCE_COLORED_OUTPUT)
@@ -907,6 +912,7 @@ set(src_idlib
 	idlib/math/Simd_SSE.cpp
 	idlib/math/Simd_SSE2.cpp
 	idlib/math/Simd_SSE3.cpp
+	idlib/math/Simd_SSE41.cpp
 	idlib/math/Vector.cpp
 	idlib/BitMsg.cpp
 	idlib/LangDict.cpp
