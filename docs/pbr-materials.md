@@ -224,8 +224,39 @@ A standalone script (`tools/pbr_classify.py`) that:
    for auditing.
 
 Runtime loads the table at material-parse time (name-keyed lookup), then merges a
-**hand-override file** on top (`pbr_overrides.cfg`, same format) — the artist-escape
-hatch. Both ship in an **optional pk4** so the enhanced material set is a separate
+**hand-override file** on top (`pbr_overrides.cfg`) — the artist-escape hatch. The
+override file is a **superset** of the generated format, one line per material:
+
+```
+<material>  <metalness>  <roughness>  <category>  <wetness>  <env>
+```
+
+Any numeric column may be `*` (inherit). Unlike the generated table, an override
+entry **may still carry a category** — a real category (`metal`, `metal_painted`,
+`ceramic_sheen`, `metal_rust`, `stone`, `skin`, `eyes`, `flesh`) makes the line
+*track the live Developer-tab sliders*; `none` (or an absent category) **pins** the
+explicit metalness/roughness numbers so a hand-tuned surface always wins. `wetness`
+(per-material specular-energy multiplier — the wet/sweat/slime film) and `env`
+(per-material metal env-glow multiplier over `r_pbrEnvScale`) are override-only
+per-material knobs, `*` = inherit. `tools/pbr_make_overrides.py` emits a *full
+snapshot* override (every material, current classification, `wetness`/`env` = `*`)
+from the generated table, so the whole set is hand-editable in one file; unedited
+lines can be deleted (the generated table still supplies the default).
+
+**Surfacing the no-bump gap.** With `--root`/`--game`, the generator also appends,
+as *commented* ready-to-edit lines, every **lit material the classifier left
+unclassified that has no bump map**. These are the real blind spot: Doom 3 omits
+the normal map on flat surfaces, so they miss both a table entry *and* any Toksvig
+roughness cue and sit on the matte global fallback — even when the surface is
+smooth/polished (granite counters, glass). But no-bump is *not* a reliable
+"polished" signal on its own: the same set includes flat-matte paper (magazine
+pages, post-its) and signage decals, which must stay matte. So they're surfaced
+for a human decision, not auto-glossed; the `no bump, spec` flag narrows the list
+to the shiny candidates. Bump-mapped unclassified materials render acceptably on
+the generic fallback and are left out to keep the list focused. (First pass:
+`textures/object/cabinettop_*`/`cabinetside*` hand-tuned to polished dielectric —
+metalness 0, roughness 0.30; paper/signage left commented.) Both ship in
+an **optional pk4** so the enhanced material set is a separate
 opt-in download/generation, and the base game stays untouched; with no table present,
 `r_pbr 1` still works on Phase A defaults. Note `fs_savepath` shadows `fs_basepath`
 for pk4s (see pk4-savepath notes) — document where the table pk4 must live.
@@ -272,12 +303,15 @@ modpack `.mtr` that redefines them with lit stages, zero engine work:
 | `r_pbrEnvScale` | 0.3 | Phase C.1 light-glow environment floor for metals |
 | `r_ssr*` | off | Phase C.2 screen-space reflections — own cvar family, see docs/ssr.md §4 |
 
-**Per-category live values** (same Developer-tab section): the generated table
-tags each entry with its category column, and for the five main classes the
-values come from cvars at draw time — so these sliders retune the bulk of the
-game live. Hand-written `pbr_overrides.cfg` entries are exempt (explicit values
-always win); the long-tail categories (wood, glass, cloth, liquid, rust…) keep
-their baked table numbers.
+**Per-category live values** (same Developer-tab section): each table entry is
+tagged with its category column, and for the main classes the values come from
+cvars at draw time — so these sliders retune the bulk of the game live. This now
+applies to override entries too, **when they carry a category**: an override line
+tagged `metal` follows the metal sliders, one tagged `none` (or with no category)
+pins its explicit numbers. The long-tail categories (wood, glass, cloth, liquid…)
+map to `none` internally, so they keep their baked table numbers. `wetness`/`env`
+are honored per-material when set to a number, else inherit (the per-category
+wetness cvar / `r_pbrEnvScale`).
 
 | cvar | default | category |
 |---|---|---|
@@ -359,7 +393,11 @@ trim-debug-cvars policy, calibration-only cvars get folded once tuned.
   wins) lazily at first material parse; `idMaterial` carries
   `pbrMetalness/pbrRoughness` (-1 = no entry); the interaction fill uses them
   with global fallbacks; `reloadPbrTable` re-applies live. `r_pbrMetalness`
-  debug global retired.
+  debug global retired. **Extended 2026-07-31:** override file is now a
+  category-aware superset carrying per-material `wetness`/`env` columns (`*` =
+  inherit), override entries may keep their category to track the sliders, and
+  `tools/pbr_make_overrides.py` emits a full editable snapshot
+  (`base/pbr/pbr_overrides.cfg` 3,381 / `d3xp/pbr/pbr_overrides.cfg` 3,775).
 - **Phase C — environment specular for metals**: C.1 light-glow floor **built**
   (`r_pbrEnvScale`); C.2 screen-space reflections **v1 built** (`r_ssr`, sharp-only,
   docs/ssr.md) — pending in-game verification; together they decide the metalness

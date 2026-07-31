@@ -18,15 +18,26 @@ per-category slider or r_pbr* global; wetness -> the per-category wetness cvar,
 Developer-tab sliders; 'none' pins the explicit numbers. wetness/env default to
 '*' here so the wetness sliders stay live on skin/flesh out of the box.
 
-Usage:
-    pbr_make_overrides.py <generated.cfg> <output_overrides.cfg> [existing_overrides.cfg]
+It also appends, as COMMENTED lines, every *lit* material the classifier left
+unclassified (no table entry -> global fallback). Those are invisible in the
+generated table, so they get surfaced here for discovery: uncomment + set values
+to bring one into PBR. Many carry a 'no bump' flag — Doom 3 tends to leave the
+normal map off flat surfaces, which are often smooth/polished (granite counters,
+glass) but sometimes just flat-matte (paper, signage) — so check in-game before
+glossing. Surfacing needs the pk4s: pass --root/--game (imports tools/pbr_classify).
 
-The existing override file (if given and present) is merged on top so prior
-hand corrections (e.g. the sflpanel4a steel-plate pin) survive a regen.
+Usage:
+    pbr_make_overrides.py --table base/pbr/pbr_materials.cfg \\
+        --out base/pbr/pbr_overrides.cfg [--merge FILE] [--root . --game base]
+
+--merge defaults to --out (so a regen preserves your hand edits: the current
+override file is read back and merged on top of itself). --root/--game enable the
+unclassified-lit scan; omit them to just snapshot the table.
 """
 
-import sys
+import argparse
 import os
+import sys
 
 
 def parse_num(tok):
@@ -67,6 +78,49 @@ def parse_file(path):
     return out
 
 
+def scan_unclassified_lit(root, game, have_keys):
+    """
+    Return [(name, flags_str)] for every LIT, NO-BUMP material the classifier
+    leaves genuinely unclassified (reason == 'unclassified'; skip-dirs, weapons
+    and out-of-scope are deliberately excluded) and that isn't already in
+    have_keys. These are the real gap: Doom 3 omits the normal map on flat
+    surfaces, which then miss both a table entry AND any Toksvig roughness cue, so
+    they sit on the matte global fallback even when they're smooth/polished.
+    Bump-mapped unclassified materials render acceptably on the generic fallback
+    and are left out to keep the surfaced list focused. 'flags_str' notes 'spec'.
+    Requires tools/pbr_classify importable and the pk4s under root.
+    """
+    try:
+        import pbr_classify as P
+    except Exception as e:                       # pragma: no cover
+        sys.stderr.write("scan skipped (can't import pbr_classify: %s)\n" % e)
+        return []
+    game_dirs = [os.path.join(root, "base")]
+    if game != "base":
+        game_dirs.append(os.path.join(root, game))
+    try:
+        text = P.strip_comments(P.load_mtr_sources(game_dirs))
+        head = P.load_head_materials(game_dirs)
+    except Exception as e:                       # pragma: no cover
+        sys.stderr.write("scan skipped (mtr load failed: %s)\n" % e)
+        return []
+    found = []
+    for name, body in P.iter_materials(text):
+        if name.lower() in have_keys:
+            continue
+        b = set(t.lower() for t in body)
+        hd, hs, hb = "diffusemap" in b, "specularmap" in b, "bumpmap" in b
+        if hb or not (hd or hs):                 # only lit surfaces with NO bump
+            continue
+        cat, reason = P.classify(name, body, head)
+        if cat is not None or reason != "unclassified":
+            continue                             # classified, weapon, skip-dir...
+        flags = "no bump, spec" if hs else "no bump"
+        found.append((name, flags))
+    found.sort(key=lambda t: t[0].lower())
+    return found
+
+
 def fmt_num(v, width):
     return ("*" if v is None else f"{v:.2f}").rjust(width)
 
@@ -105,6 +159,19 @@ HEADER = """\
 # you don't intend to customize — the generated table still supplies its default.
 """
 
+UNCLASSIFIED_HEADER = """\
+
+# =============================================================================
+# UNCLASSIFIED lit materials — no table entry, so they fall back to the r_pbr*
+# globals (metalness 0, roughness r_pbrRoughness). They were invisible in the
+# generated table; surfaced here so you can opt them in. Each is COMMENTED at the
+# neutral fallback (uncomment to change nothing, then tune). 'no bump' = Doom 3
+# left the normal map off: often a smooth/polished or flat surface (granite
+# counters, glass) but sometimes flat-matte (paper, signage) — check in-game
+# before lowering roughness. Uncomment (drop the leading '# ') and edit to enable.
+# =============================================================================
+"""
+
 # order categories for grouped, skimmable output
 CAT_ORDER = {
     "metal": 0, "metal_painted": 1, "ceramic_sheen": 2, "metal_rust": 3,
@@ -113,14 +180,20 @@ CAT_ORDER = {
 
 
 def main():
-    if len(sys.argv) < 3:
-        sys.stderr.write(__doc__)
-        return 1
-    gen_path, out_path = sys.argv[1], sys.argv[2]
-    existing_path = sys.argv[3] if len(sys.argv) >= 4 else None
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    ap.add_argument("--table", required=True, help="generated pbr_materials.cfg")
+    ap.add_argument("--out", required=True, help="override file to write")
+    ap.add_argument("--merge", default=None,
+                    help="prior overrides to merge on top (default: --out itself)")
+    ap.add_argument("--root", default=None,
+                    help="game root with base/, d3xp/ — enables the unclassified scan")
+    ap.add_argument("--game", default="base", help="mod dir for the scan (base/d3xp)")
+    args = ap.parse_args()
 
-    merged = parse_file(gen_path)
-    for key, e in parse_file(existing_path).items():
+    merge_path = args.merge if args.merge is not None else args.out
+
+    merged = parse_file(args.table)
+    for key, e in parse_file(merge_path).items():
         e = dict(e)
         # a prior override with no category is an explicit pin: force 'none' so the
         # generated category (which may be wrong — that's why it was overridden)
@@ -152,9 +225,19 @@ def main():
             row += f"   # {e['comment']}"
         lines.append(row)
 
-    with open(out_path, "w", encoding="utf-8") as fh:
+    unclassified = []
+    if args.root:
+        unclassified = scan_unclassified_lit(args.root, args.game, set(merged.keys()))
+        if unclassified:
+            lines.append(UNCLASSIFIED_HEADER.rstrip("\n"))
+            for name, flags in unclassified:
+                pad = name if len(name) < 50 else name + "  "
+                lines.append(f"# {pad:<50} 0.00 0.58 none  *  *   # UNCLASSIFIED: {flags}")
+
+    with open(args.out, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
-    sys.stderr.write(f"wrote {len(entries)} entries -> {out_path}\n")
+    sys.stderr.write("wrote %d active + %d commented-unclassified -> %s\n"
+                     % (len(entries), len(unclassified), args.out))
     return 0
 
 

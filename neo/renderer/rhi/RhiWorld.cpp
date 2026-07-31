@@ -516,19 +516,27 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// (left zero by the memset).
 	bool pbrOrganicSpecFallback = false;
 	if ( r_pbr.GetBool() && !din->ambientLight ) {
+		const idMaterial *mat = din->surf->material;
 		float metal, rough;
-		const int pbrCat = RB_RHI_ResolvePbrMaterial( din->surf->material, metal, rough );
-		float specScale = r_pbrSpecScale.GetFloat();
-		switch ( pbrCat ) {
-		case PBR_CAT_SKIN:
-		case PBR_CAT_EYES:    // wetness = the water/sweat film: boosts the specular
-		                      // energy on skin/cornea/enamel only (deliberately not
-		                      // metalness, which would tint and darken like bronze)
-		                      specScale *= r_pbrSkinWetness.GetFloat(); break;
-		case PBR_CAT_FLESH:   // slime/gore film on demons and hell-growth
-		                      specScale *= r_pbrFleshWetness.GetFloat(); break;
-		default: break;
+		const int pbrCat = RB_RHI_ResolvePbrMaterial( mat, metal, rough );
+		// wetness = a specular-energy multiplier (the water/sweat/slime film) —
+		// deliberately not metalness, which would tint and darken like bronze. A
+		// per-material override (pbr_overrides.cfg 5th column) wins; otherwise the
+		// per-category wetness cvar for organics (skin/cornea/enamel, demon/gore),
+		// else neutral 1.
+		const float matWet = mat ? mat->GetPbrWetness() : -1.0f;
+		float wetMul;
+		if ( matWet >= 0.0f ) {
+			wetMul = matWet;
+		} else {
+			switch ( pbrCat ) {
+			case PBR_CAT_SKIN:
+			case PBR_CAT_EYES:  wetMul = r_pbrSkinWetness.GetFloat(); break;
+			case PBR_CAT_FLESH: wetMul = r_pbrFleshWetness.GetFloat(); break;
+			default:            wetMul = 1.0f; break;
+			}
 		}
+		float specScale = r_pbrSpecScale.GetFloat() * wetMul;
 		parms.pbrParms[0] = metal;
 		parms.pbrParms[1] = rough;
 		parms.pbrParms[2] = 1.0f;
@@ -538,8 +546,10 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		parms.localParam1[2] = r_pbrToksvigBase.GetFloat();
 		parms.localParam1[3] = r_pbrFireflyClamp.GetFloat();
 		// Phase C.1 metal environment floor rides the occlusionParms spare slot
-		// (the occlusion block below only writes .xyz)
-		parms.occlusionParms[3] = r_pbrEnvScale.GetFloat();
+		// (the occlusion block below only writes .xyz). A per-material env override
+		// (6th column) scales it; default 1 keeps the global r_pbrEnvScale.
+		const float matEnv = mat ? mat->GetPbrEnv() : -1.0f;
+		parms.occlusionParms[3] = r_pbrEnvScale.GetFloat() * ( matEnv >= 0.0f ? matEnv : 1.0f );
 
 		// organic materials authored without a specular stage (most blood decals
 		// — bloodpool01 — and the gibs) would zero the GGX lobe through the

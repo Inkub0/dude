@@ -392,11 +392,18 @@ public:
 						// Only read when r_pbr is on; inert otherwise.
 	float				GetPbrMetalness( void ) const { return pbrMetalness; }
 	float				GetPbrRoughness( void ) const { return pbrRoughness; }
+						// per-material specular-energy (wetness) and metal env-glow
+						// multipliers from the override file's 5th/6th columns; -1 = inherit
+						// (wetness -> the per-category wetness cvar or 1.0; env -> 1.0). A
+						// number pins the knob for this one material. Only read under r_pbr.
+	float				GetPbrWetness( void ) const { return pbrWetness; }
+	float				GetPbrEnv( void ) const { return pbrEnv; }
 						// material class from the table's category column; the backend maps
 						// the main classes to live per-category cvars (Developer tab
-						// sliders), which then supersede the baked numbers above. Entries
-						// from the override file report PBR_CAT_NONE so hand-tuned values
-						// always win over the sliders.
+						// sliders), which then supersede the baked numbers above. An entry
+						// (generated OR override) may carry a category so it tracks the
+						// sliders; category "none" reports PBR_CAT_NONE and its explicit
+						// numbers stand, so a hand-pinned material always wins.
 	int					GetPbrCategory( void ) const { return pbrCategory; }
 						// (re)runs the table lookup for this material; called at parse time
 						// and by the reloadPbrTable console command
@@ -717,16 +724,19 @@ private:
 	int					refCount;
 
 	// DUDE PBR (docs/pbr-materials.md Phase B): per-material shading parameters
-	// from the pbr table files; -1 = no entry (backend uses the r_pbr* globals)
+	// from the pbr table files; -1 = no entry / inherit (backend uses the r_pbr*
+	// globals or the per-category cvar)
 	float				pbrMetalness;
 	float				pbrRoughness;
+	float				pbrWetness;		// specular-energy multiplier; -1 = inherit
+	float				pbrEnv;			// metal env-glow multiplier; -1 = inherit
 	int					pbrCategory;	// pbrCategory_t (below)
 };
 
 // DUDE PBR: the main material classes the generated table tags entries with.
 // Only these get live per-category cvars; the long tail (wood, glass, cloth,
-// liquid...) keeps its baked table values. PBR_CAT_NONE = untagged or from the
-// hand-override file (explicit values, never superseded by category sliders).
+// liquid...) keeps its baked table values. PBR_CAT_NONE = untagged, category
+// "none", or long-tail: explicit values that are never superseded by sliders.
 typedef enum {
 	PBR_CAT_NONE = 0,
 	PBR_CAT_SKIN,
