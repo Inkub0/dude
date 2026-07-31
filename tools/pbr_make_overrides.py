@@ -218,7 +218,15 @@ def main():
             cur_cat = cat
         name = e["name"]
         pad = name if len(name) < 52 else name + "  "
-        row = (f"{pad:<52} {fmt_num(e['metal'], 4)} {fmt_num(e['rough'], 4)}"
+        # slider-driven categories (the ones the engine maps to live cvars) ignore
+        # the metalness/roughness columns at draw time, so emit '*' (inherit) rather
+        # than a baked number that would go stale when the category default changes —
+        # matching what the in-game editor writes. Pinned 'none' and long-tail
+        # categories (glass/wood/cloth...) keep explicit numbers (they ARE used).
+        driven = cat.lower() in CAT_ORDER
+        mtok = fmt_num(None if driven else e['metal'], 4)
+        rtok = fmt_num(None if driven else e['rough'], 4)
+        row = (f"{pad:<52} {mtok} {rtok}"
                f"  {cat:<14} {'*' if e['wet'] is None else format(e['wet'], '.2f')}"
                f"  {'*' if e['env'] is None else format(e['env'], '.2f')}")
         if e["comment"]:

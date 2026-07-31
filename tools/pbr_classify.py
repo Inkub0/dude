@@ -38,7 +38,10 @@ import zipfile
 # rusted metal down to a patchy mix. Full metalness 1.0 is reserved for
 # genuinely bare-metal surfaces (grates, pipes, machined steel, chrome).
 CATEGORIES = {
-    "metal":         (1.0, 0.32),   # bare machined metal / grates / pipes
+    "metal":         (0.8, 0.32),   # bare machined metal / grates / pipes (0.8 =
+                                    # r_pbrMetalMetalness: keeps a diffuse sliver so
+                                    # metals don't go black between lights; the old
+                                    # global r_pbrMetalnessMax cap was removed)
     "metal_painted": (0.2, 0.55),   # painted station panelling, coated fixtures
     "ceramic_sheen": (0.2, 0.45),   # glossy hard surfaces: painted floors and
                                     # ceramic tile (floors AND walls, e.g. the
