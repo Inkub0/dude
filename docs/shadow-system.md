@@ -114,6 +114,12 @@ brushes, so the receiver picks the bias:
 - `r_shadowMapBias` (0.0025) — **world / perforated** receivers (`IsStaticWorldModel()`).
 - `r_shadowMapModelBias` (0.005) — **model** receivers (characters, weapons, props;
   includes alpha-tested character skins, which take the model bias).
+- `r_shadowMapFlashlightBias` (0.001) — the **player flashlight** overrides both of the
+  above regardless of receiver. Its narrow cone grazes surfaces nearly edge-on and
+  sweeps every frame, so the general-caster bias peter-panned its shadows and made
+  edges swim; it wants a much smaller bias (reported working range 0.0001–0.005).
+  Detected per-light by light-shader name (`lights/flashlight5`; case-insensitive
+  substring `"flashlight"` also covers D3XP/mod variants).
 
 Caster face selection is `r_shadowMapCull` (0 front / 1 back = second-depth, less acne
 / 2 two-sided).
@@ -193,6 +199,7 @@ immediately. See also the private design note `emissive-gui-lights` in the agent
 | `r_shadowMapCacheMB` | -1 | -1–32768 | cache VRAM budget; -1 = auto (½ VRAM), 0 = unlimited |
 | `r_shadowMapBias` | 0.0025 | 0–0.5 | depth bias, world/perforated receivers |
 | `r_shadowMapModelBias` | 0.005 | 0–0.5 | depth bias, model receivers |
+| `r_shadowMapFlashlightBias` | 0.001 | 0–0.5 | depth bias, player flashlight (overrides the two above) |
 | `r_shadowMapCull` | 1 | 0–2 | caster faces: 0 front / 1 back / 2 two-sided |
 | `r_shadowMapPerforated` | 1 | 0/1 | perforated grates/fences cast punched-out maps |
 | `r_shadowMapViewWeapon` | 0 | 0/1 | view weapon casts shadows (1); default 0 keeps it out of the map (no floor blob) |

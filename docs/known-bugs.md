@@ -105,10 +105,20 @@ Hub: [vulkan-port.md](vulkan-port.md). Deliberate deviations (not bugs) are in
   transpiler/fill changes. Keep the `fragColor` init too (real bug). Debug probes
   removed. **Awaiting user validation.**
 
-- **Shadow bias needs to be different for flashlight**
-as generally a shadow bias of 1 seems to work with some lights such as 
-shadow casting fans across the game, the flashlight needs to be at 0.0001
-to 0.005. a good value should be hardcoded for the flashlight.
+- **[RESOLVED 2026-07-31] Shadow bias needs to be different for flashlight.**
+  Reported: the world/model shadow bias (tuned for general casters like the
+  shadow-casting fans) is far too large for the player flashlight, whose narrow
+  cone grazes surfaces nearly edge-on and sweeps every frame — it peter-panned the
+  shadow off casters and made edges swim; the flashlight wanted a bias in the
+  0.0001–0.005 range instead. **Fix:** the shadow-map interaction path
+  (`neo/renderer/rhi/RhiWorld.cpp`) now detects the flashlight per-light by its
+  light shader name (base Doom 3 `lights/flashlight5`; a case-insensitive substring
+  match on `"flashlight"` also covers D3XP/mod variants) and, for its interactions,
+  substitutes a dedicated bias `r_shadowMapFlashlightBias` (new archived cvar,
+  default **0.001**, range 0–0.5) in place of the receiver-based
+  `r_shadowMapBias`/`r_shadowMapModelBias`. Non-flashlight lights are unchanged.
+  Tunable in-game since the good value is scene-dependent within the reported
+  window. See [[shadow-cache-hysteresis-stagger]], docs/shadow-system.md.
 
 - **[RESOLVED 2026-07-31] Elevator (and any ridden mover) jittered above 60 fps (com_interpolate).**
   Reported 2026-07-31: riding an elevator, the elevator geometry visibly jittered while

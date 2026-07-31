@@ -918,6 +918,7 @@ extern idCVar r_shadowMapping;			// 0 = stencil volumes, 1 = shadow maps where s
 extern idCVar r_shadowMapSize;			// shadow map resolution per light
 extern idCVar r_shadowMapBias;			// depth-compare bias, world/perforated receivers
 extern idCVar r_shadowMapModelBias;		// depth-compare bias, model (non-world) receivers
+extern idCVar r_shadowMapFlashlightBias;	// depth-compare bias, player flashlight (small)
 extern idCVar r_shadowMapDebug;			// print per-view light classification
 extern idCVar r_shadowMapCull;			// caster face culling (0 front / 1 back / 2 two-sided)
 extern idCVar r_shadowMapPerforated;	// let noShadows perforated surfaces cast punched-out shadow maps

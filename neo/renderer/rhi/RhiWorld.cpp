@@ -64,6 +64,11 @@ static struct {
 	bool				lightShadowCube;
 	rhi::ImageHandle	shadowCubeImage;
 	float				lightRange;
+	// The player flashlight (light shader "lights/flashlight5", a narrow projected
+	// spot that hugs surfaces and sweeps every frame) self-shadows badly at the
+	// world/model depth bias — it needs a much smaller compare bias to avoid
+	// peter-panning and swimming shadow edges. Detected per-light by shader name.
+	bool				lightIsFlashlight;
 } ictx;
 
 // Persistent shadow-map render target, kept across frames and recreated only
@@ -586,8 +591,13 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		const idRenderEntityLocal *redef = din->surf->space->entityDef;
 		const bool worldReceiver = redef && redef->parms.hModel
 		    && redef->parms.hModel->IsStaticWorldModel();
-		const float bias = worldReceiver
-		    ? r_shadowMapBias.GetFloat() : r_shadowMapModelBias.GetFloat();
+		// The flashlight overrides the receiver-based bias with its own small value:
+		// its narrow cone lands nearly parallel to the surfaces it grazes, so the
+		// world/model bias (tuned for shadow-casting fans etc.) pushes the shadow off
+		// the caster (peter-panning) and makes the edge swim as the light sweeps.
+		const float bias = ictx.lightIsFlashlight
+		    ? r_shadowMapFlashlightBias.GetFloat()
+		    : ( worldReceiver ? r_shadowMapBias.GetFloat() : r_shadowMapModelBias.GetFloat() );
 
 		if ( ictx.lightShadowMapped ) {
 			parms.shadowParms[0] = 1.0f;		// projected/spot: 2D map on unit 7
@@ -3185,6 +3195,13 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			ictx.shadowImage = 0;
 			ictx.lightShadowCube = false;
 			ictx.shadowCubeImage = 0;
+
+			// Flag the player flashlight so its interactions get the dedicated small
+			// shadow bias (see r_shadowMapFlashlightBias). Keyed on the light shader
+			// name: base Doom 3 uses "lights/flashlight5"; a substring match also
+			// covers D3XP/mod flashlight variants without hardcoding one path.
+			ictx.lightIsFlashlight = vLight->lightShader
+			    && idStr::FindText( vLight->lightShader->GetName(), "flashlight", false ) != -1;
 
 			// stencil shadow volumes present for this light (built only for opaque,
 			// non-noShadows casters)
