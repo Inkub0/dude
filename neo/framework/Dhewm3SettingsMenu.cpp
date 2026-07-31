@@ -2781,14 +2781,6 @@ static void DrawShadowDebugMenu()
 		"on bare metal, whose albedo-derived reflectance is already bright). The physical 4% dielectric "
 		"reflectance reads dim in Doom 3's display-space shading; this compensates." );
 
-	float pbrMetalMax = r_pbrMetalnessMax.GetFloat();
-	if ( ImGui::SliderFloat( "Metalness Cap", &pbrMetalMax, 0.0f, 1.0f, "%.2f" ) ) {
-		r_pbrMetalnessMax.SetFloat( pbrMetalMax );
-	}
-	AddTooltip( "r_pbrMetalnessMax: upper clamp on how metallic any surface can get. Metalness kills diffuse, "
-		"and without an environment to reflect (planned Phase C), full metals go black between lights — "
-		"this keeps a sliver of diffuse. Raise toward 1 for harder metals, lower if metal areas read too dark." );
-
 	float pbrToksvig = r_pbrToksvigBase.GetFloat();
 	if ( ImGui::SliderFloat( "Highlight Tightness (Toksvig base)", &pbrToksvig, 0.0f, 0.6f, "%.2f" ) ) {
 		r_pbrToksvigBase.SetFloat( pbrToksvig );
@@ -2847,12 +2839,20 @@ static void DrawShadowDebugMenu()
 		"baseline). Raise it with Flesh Roughness lowered for glistening horror flesh in the "
 		"flashlight beam." );
 
+	float metalMetal = r_pbrMetalMetalness.GetFloat();
+	if ( ImGui::SliderFloat( "Bare Metal Metalness", &metalMetal, 0.0f, 1.0f, "%.2f" ) ) {
+		r_pbrMetalMetalness.SetFloat( metalMetal );
+	}
+	AddTooltip( "r_pbrMetalMetalness: how metallic the bare-metal category is. Below 1 keeps a sliver of "
+		"diffuse so metals don't go black between lights (Doom 3 has near-zero ambient); raise toward 1 for "
+		"harder metals once Metal Environment Glow or SSR gives them something to reflect." );
+
 	float metalRough = r_pbrMetalRoughness.GetFloat();
 	if ( ImGui::SliderFloat( "Bare Metal Roughness", &metalRough, 0.03f, 1.0f, "%.2f" ) ) {
 		r_pbrMetalRoughness.SetFloat( metalRough );
 	}
 	AddTooltip( "r_pbrMetalRoughness: grates, pipes, machined steel, chrome — surfaces with exposed metal "
-		"(metalness 1, subject to the Metalness Cap above)." );
+		"(metalness set by Bare Metal Metalness above)." );
 
 	float envScale = r_pbrEnvScale.GetFloat();
 	if ( ImGui::SliderFloat( "Metal Environment Glow", &envScale, 0.0f, 2.0f, "%.2f" ) ) {
@@ -4097,74 +4097,142 @@ void Com_OpenPbrMaterialEditor( const idMaterial *mat )
 	D3::ImGuiHooks::OpenWindow( D3::ImGuiHooks::D3_ImGuiWin_PbrEditor );
 }
 
+// one line: get/slider/set for a category cvar (live; archived so it persists)
+static void PbrCvarSlider( const char *label, idCVar &cv, float mn, float mx )
+{
+	float v = cv.GetFloat();
+	if ( ImGui::SliderFloat( label, &v, mn, mx, "%.2f" ) ) {
+		cv.SetFloat( v );
+	}
+}
+
+// "Material" tab: edit the surface under the crosshair (per-material override line)
+static void PbrEditor_DrawMaterialTab()
+{
+	if ( pbrEditMat == NULL ) {
+		ImGui::TextWrapped( "Aim at a surface and run \"editPbrMaterial\" (bind it, e.g. `bind p editPbrMaterial`) to load the material under the crosshair." );
+		return;
+	}
+	ImGui::TextColored( ImVec4( 0.6f, 0.8f, 1.0f, 1.0f ), "%s", pbrEditName.c_str() );
+	if ( !r_pbr.GetBool() ) {
+		ImGui::TextColored( ImVec4( 1.0f, 0.7f, 0.3f, 1.0f ),
+			"r_pbr is 0 — enable PBR (Enhancements tab) to see edits." );
+	}
+	ImGui::Separator();
+
+	int comboIdx = 0;
+	for ( int i = 0; i < IM_ARRAYSIZE( pbrEditCatEnum ); i++ ) {
+		if ( pbrEditCatEnum[i] == pbrEditCat ) { comboIdx = i; }
+	}
+	if ( ImGui::Combo( "Category", &comboIdx, pbrEditCatNames, IM_ARRAYSIZE( pbrEditCatNames ) ) ) {
+		pbrEditCat = pbrEditCatEnum[comboIdx];
+	}
+	const bool pinned = ( pbrEditCat == PBR_CAT_NONE );
+
+	ImGui::BeginDisabled( !pinned );
+	ImGui::SliderFloat( "Metalness", &pbrEditMetal, 0.0f, 1.0f, "%.2f" );
+	ImGui::SliderFloat( "Roughness", &pbrEditRough, 0.03f, 1.0f, "%.2f" );
+	ImGui::EndDisabled();
+	if ( !pinned ) {
+		ImGui::TextDisabled( "metalness/roughness track the '%s' category sliders (Categories tab)", pbrEditCatNames[comboIdx] );
+	}
+	ImGui::SliderFloat( "Wetness (spec energy)", &pbrEditWet, 0.0f, 4.0f, "%.2f" );
+	ImGui::SliderFloat( "Env glow (metal)", &pbrEditEnv, 0.0f, 4.0f, "%.2f" );
+
+	// wetness/env at ~1.0 are the neutral default -> write as inherit ('*')
+	const float liveMetal = pinned ? pbrEditMetal : -1.0f;
+	const float liveRough = pinned ? pbrEditRough : -1.0f;
+	const float liveWet   = ( idMath::Fabs( pbrEditWet - 1.0f ) < 0.005f ) ? -1.0f : pbrEditWet;
+	const float liveEnv   = ( idMath::Fabs( pbrEditEnv - 1.0f ) < 0.005f ) ? -1.0f : pbrEditEnv;
+
+	// live preview: push the current values straight onto the material
+	const_cast<idMaterial *>( pbrEditMat )->SetPbrLive( liveMetal, liveRough, liveWet, liveEnv, pbrEditCat );
+
+	ImGui::Separator();
+	if ( ImGui::Button( "Save to pbr_overrides.cfg" ) ) {
+		R_PbrWriteOverrideLine( pbrEditMat, liveMetal, liveRough, liveWet, liveEnv, pbrEditCat );
+	}
+	ImGui::SameLine();
+	if ( ImGui::Button( "Re-pick" ) ) {
+		const idMaterial *m = R_PbrPickCrosshairMaterial();
+		if ( m ) {
+			PbrEditor_LoadFrom( m );
+		} else {
+			D3::ImGuiHooks::ShowWarningOverlay( "No surface under the crosshair" );
+		}
+	}
+	ImGui::SameLine();
+	if ( ImGui::Button( "Revert" ) ) {
+		const_cast<idMaterial *>( pbrEditMat )->ApplyPbrTable();	// restore file values
+		PbrEditor_LoadFrom( pbrEditMat );
+	}
+}
+
+// "Categories" tab: the shared per-category defaults. Every material tagged with a
+// category reads these live at draw time, so a change moves the whole class at once;
+// pinned 'none'/custom materials are unaffected. These are the same archived cvars
+// as the Developer tab, so edits persist to the config.
+static void PbrEditor_DrawCategoriesTab()
+{
+	ImGui::TextWrapped( "Shared defaults per category — change one and every material tagged with that category updates live. Pinned 'none'/custom materials keep their own values." );
+	if ( !r_pbr.GetBool() ) {
+		ImGui::TextColored( ImVec4( 1.0f, 0.7f, 0.3f, 1.0f ), "r_pbr is 0 — enable PBR to see changes." );
+	}
+
+	ImGui::SeparatorText( "Bare Metal" );
+	PbrCvarSlider( "Metalness##metal", r_pbrMetalMetalness, 0.0f, 1.0f );
+	PbrCvarSlider( "Roughness##metal", r_pbrMetalRoughness, 0.03f, 1.0f );
+
+	ImGui::SeparatorText( "Painted Metal (station panelling)" );
+	PbrCvarSlider( "Metalness##painted", r_pbrPaintedMetalness, 0.0f, 1.0f );
+	PbrCvarSlider( "Roughness##painted", r_pbrPaintedRoughness, 0.03f, 1.0f );
+
+	ImGui::SeparatorText( "Ceramic Sheen (floors / tile)" );
+	PbrCvarSlider( "Roughness##ceramic", r_pbrCeramicRoughness, 0.03f, 1.0f );
+	ImGui::TextDisabled( "metalness shared with Painted Metal" );
+
+	ImGui::SeparatorText( "Rusted Metal" );
+	PbrCvarSlider( "Metalness##rust", r_pbrRustMetalness, 0.0f, 1.0f );
+	PbrCvarSlider( "Roughness##rust", r_pbrRustRoughness, 0.03f, 1.0f );
+
+	ImGui::SeparatorText( "Stone / Concrete" );
+	PbrCvarSlider( "Roughness##stone", r_pbrStoneRoughness, 0.03f, 1.0f );
+
+	ImGui::SeparatorText( "Skin (faces)" );
+	PbrCvarSlider( "Roughness##skin", r_pbrSkinRoughness, 0.03f, 1.0f );
+	PbrCvarSlider( "Wetness##skin", r_pbrSkinWetness, 0.0f, 4.0f );
+
+	ImGui::SeparatorText( "Eyes / Teeth" );
+	PbrCvarSlider( "Roughness##eyes", r_pbrEyesRoughness, 0.03f, 1.0f );
+	ImGui::TextDisabled( "wetness shared with Skin" );
+
+	ImGui::SeparatorText( "Flesh / Gore" );
+	PbrCvarSlider( "Roughness##flesh", r_pbrFleshRoughness, 0.03f, 1.0f );
+	PbrCvarSlider( "Wetness##flesh", r_pbrFleshWetness, 0.0f, 4.0f );
+}
+
 // called from D3::ImGuiHooks::NewFrame() (if this window is enabled)
 void Com_DrawPbrMaterialEditor()
 {
 	bool show = true;
 	ImGui::SetNextWindowSize( ImVec2( 470.0f, 0.0f ), ImGuiCond_FirstUseEver );
 	if ( ImGui::Begin( "PBR Material Editor", &show ) ) {
-		if ( pbrEditMat == NULL ) {
-			ImGui::TextWrapped( "Aim at a surface and run \"editPbrMaterial\" (bind it, e.g. `bind p editPbrMaterial`) to load the material under the crosshair." );
-		} else {
-			ImGui::TextColored( ImVec4( 0.6f, 0.8f, 1.0f, 1.0f ), "%s", pbrEditName.c_str() );
-			if ( !r_pbr.GetBool() ) {
-				ImGui::TextColored( ImVec4( 1.0f, 0.7f, 0.3f, 1.0f ),
-					"r_pbr is 0 — enable PBR (Enhancements tab) to see edits." );
+		if ( ImGui::BeginTabBar( "PbrEditorTabs" ) ) {
+			if ( ImGui::BeginTabItem( "Material" ) ) {
+				PbrEditor_DrawMaterialTab();
+				ImGui::EndTabItem();
 			}
-			ImGui::Separator();
-
-			int comboIdx = 0;
-			for ( int i = 0; i < IM_ARRAYSIZE( pbrEditCatEnum ); i++ ) {
-				if ( pbrEditCatEnum[i] == pbrEditCat ) { comboIdx = i; }
+			if ( ImGui::BeginTabItem( "Categories" ) ) {
+				PbrEditor_DrawCategoriesTab();
+				ImGui::EndTabItem();
 			}
-			if ( ImGui::Combo( "Category", &comboIdx, pbrEditCatNames, IM_ARRAYSIZE( pbrEditCatNames ) ) ) {
-				pbrEditCat = pbrEditCatEnum[comboIdx];
-			}
-			const bool pinned = ( pbrEditCat == PBR_CAT_NONE );
-
-			ImGui::BeginDisabled( !pinned );
-			ImGui::SliderFloat( "Metalness", &pbrEditMetal, 0.0f, 1.0f, "%.2f" );
-			ImGui::SliderFloat( "Roughness", &pbrEditRough, 0.03f, 1.0f, "%.2f" );
-			ImGui::EndDisabled();
-			if ( !pinned ) {
-				ImGui::TextDisabled( "metalness/roughness track the '%s' category sliders", pbrEditCatNames[comboIdx] );
-			}
-			ImGui::SliderFloat( "Wetness (spec energy)", &pbrEditWet, 0.0f, 4.0f, "%.2f" );
-			ImGui::SliderFloat( "Env glow (metal)", &pbrEditEnv, 0.0f, 4.0f, "%.2f" );
-
-			// wetness/env at ~1.0 are the neutral default -> write as inherit ('*')
-			const float liveMetal = pinned ? pbrEditMetal : -1.0f;
-			const float liveRough = pinned ? pbrEditRough : -1.0f;
-			const float liveWet   = ( idMath::Fabs( pbrEditWet - 1.0f ) < 0.005f ) ? -1.0f : pbrEditWet;
-			const float liveEnv   = ( idMath::Fabs( pbrEditEnv - 1.0f ) < 0.005f ) ? -1.0f : pbrEditEnv;
-
-			// live preview: push the current values straight onto the material
-			const_cast<idMaterial *>( pbrEditMat )->SetPbrLive( liveMetal, liveRough, liveWet, liveEnv, pbrEditCat );
-
-			ImGui::Separator();
-			if ( ImGui::Button( "Save to pbr_overrides.cfg" ) ) {
-				R_PbrWriteOverrideLine( pbrEditMat, liveMetal, liveRough, liveWet, liveEnv, pbrEditCat );
-			}
-			ImGui::SameLine();
-			if ( ImGui::Button( "Re-pick" ) ) {
-				const idMaterial *m = R_PbrPickCrosshairMaterial();
-				if ( m ) {
-					PbrEditor_LoadFrom( m );
-				} else {
-					D3::ImGuiHooks::ShowWarningOverlay( "No surface under the crosshair" );
-				}
-			}
-			ImGui::SameLine();
-			if ( ImGui::Button( "Revert" ) ) {
-				const_cast<idMaterial *>( pbrEditMat )->ApplyPbrTable();	// restore file values
-				PbrEditor_LoadFrom( pbrEditMat );
-			}
+			ImGui::EndTabBar();
 		}
 	}
 	ImGui::End();
 	if ( !show ) {
 		if ( pbrEditMat ) {
-			// discard unsaved live edits on close
+			// discard unsaved live per-material edits on close (category cvars persist)
 			const_cast<idMaterial *>( pbrEditMat )->ApplyPbrTable();
 		}
 		D3::ImGuiHooks::CloseWindow( D3::ImGuiHooks::D3_ImGuiWin_PbrEditor );

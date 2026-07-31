@@ -70,7 +70,7 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // Map sampled on unit 10 (diffuse UV).
 
 	vec4 u_pbrParms;             // DUDE PBR interaction path (docs/pbr-materials.md):
-	                            // x = metalness (pre-clamped by r_pbrMetalnessMax),
+	                            // x = metalness (sanity-clamped to [0,1]),
 	                            // y = roughness, z = enable (r_pbr, non-ambient
 	                            // interactions only), w = specular energy scale
 	                            // (r_pbrSpecScale). Phase A fills global fallbacks;

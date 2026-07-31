@@ -428,7 +428,7 @@ RB_RHI_ResolvePbrMaterial
 Resolve a material's effective PBR metalness/roughness (docs/pbr-materials.md) in
 priority order: live per-category cvars (the Developer-tab sliders) > the material's
 baked table values (override-file entries and long-tail categories) > globals
-(metalness 0, r_pbrRoughness). Metalness comes back pre-clamped by r_pbrMetalnessMax.
+(metalness 0, r_pbrRoughness). Metalness comes back sanity-clamped to [0,1].
 Shared by the lit interaction fill and the SSR G-buffer pass so both see the same
 surface response; returns the category for callers with per-category extras (wetness).
 ===================
@@ -443,7 +443,7 @@ static int RB_RHI_ResolvePbrMaterial( const idMaterial *mat, float &metal, float
 	case PBR_CAT_SKIN:    metal = 0.0f; rough = r_pbrSkinRoughness.GetFloat(); break;
 	case PBR_CAT_EYES:    metal = 0.0f; rough = r_pbrEyesRoughness.GetFloat(); break;
 	case PBR_CAT_FLESH:   metal = 0.0f; rough = r_pbrFleshRoughness.GetFloat(); break;
-	case PBR_CAT_METAL:   metal = 1.0f; rough = r_pbrMetalRoughness.GetFloat(); break;
+	case PBR_CAT_METAL:   metal = r_pbrMetalMetalness.GetFloat(); rough = r_pbrMetalRoughness.GetFloat(); break;
 	case PBR_CAT_PAINTED: metal = r_pbrPaintedMetalness.GetFloat();
 	                      rough = r_pbrPaintedRoughness.GetFloat(); break;
 	case PBR_CAT_CERAMIC: metal = r_pbrPaintedMetalness.GetFloat();
@@ -453,7 +453,7 @@ static int RB_RHI_ResolvePbrMaterial( const idMaterial *mat, float &metal, float
 	case PBR_CAT_STONE:   metal = 0.0f; rough = r_pbrStoneRoughness.GetFloat(); break;
 	default: break;		// PBR_CAT_NONE: baked/override values stand
 	}
-	metal = idMath::ClampFloat( 0.0f, r_pbrMetalnessMax.GetFloat(), metal );
+	metal = idMath::ClampFloat( 0.0f, 1.0f, metal );
 	return pbrCat;
 }
 
@@ -511,7 +511,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 
 	// DUDE PBR (docs/pbr-materials.md): opt-in GGX interaction path. z gates the
 	// shader branch; x/y come from the shared resolve (per-category cvars > baked
-	// table > globals, metalness clamped by r_pbrMetalnessMax — see
+	// table > globals, metalness sanity-clamped to [0,1] — see
 	// RB_RHI_ResolvePbrMaterial). Ambient interactions keep the vanilla fill path
 	// (left zero by the memset).
 	bool pbrOrganicSpecFallback = false;

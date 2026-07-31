@@ -179,11 +179,16 @@ values untouched so switching `r_pbr` back off restores the exact previous look.
 Metalness kills the diffuse lobe — a metal is *defined* by what it reflects — and Doom
 3 has near-zero ambient; it's all dynamic lights. Two mitigations, in order:
 
-1. **Phase A safety valve:** effective metalness is clamped
-   (`r_pbrMetalnessMax` ~0.8) so metals keep a sliver of diffuse and never go fully
+1. **Phase A safety valve:** the bare-metal category's metalness is set below 1
+   (`r_pbrMetalMetalness` 0.8) so metals keep a sliver of diffuse and never go fully
    black between light passes. Under Doom 3's per-light additive model with the GGX
    lobe answering every dynamic light, this reads acceptably in the game's dark
-   aesthetic.
+   aesthetic. **(Simplification, 2026-07-31, user request):** this replaced an
+   earlier *global* `r_pbrMetalnessMax` clamp that capped every surface's metalness.
+   That cross-cutting cap was unnecessary complexity — the metal category now just
+   carries a direct sub-1 value like painted/rust carry theirs, and no other
+   material is silently clamped. Pinned per-material metalness (table/override/editor)
+   now reaches its authored value.
 2. **Phase C — environment specular.** Investigation killed the original sketch:
    the "ambient cubemap" is a 2×2 cube encoding a *constant direction vector*
    (a normalization-cubemap substitute), not environment colors — **stock Doom 3
@@ -196,7 +201,7 @@ Metalness kills the diffuse lobe — a metal is *defined* by what it reflects �
      it scales with the light's projection, falloff and shadow — metals glow
      near lights and still go dark in darkness, preserving the game's aesthetic.
      `r_pbrEnvScale` (default 0.3, `u_occlusionParms.w`, Developer-tab "Metal
-     Environment Glow" slider). With it up, `r_pbrMetalnessMax` can rise toward 1.
+     Environment Glow" slider). With it up, `r_pbrMetalMetalness` can rise toward 1.
    - **C.2 — screen-space reflections (v1 built 2026-07-30, docs/ssr.md):** the
      real feature. `r_ssr` (default off): the SSAO normal g-buffer gains a second
      MRT attachment carrying each surface's resolved roughness/metalness (same
@@ -241,7 +246,13 @@ explicit metalness/roughness numbers so a hand-tuned surface always wins. `wetne
 per-material knobs, `*` = inherit. `tools/pbr_make_overrides.py` emits a *full
 snapshot* override (every material, current classification, `wetness`/`env` = `*`)
 from the generated table, so the whole set is hand-editable in one file; unedited
-lines can be deleted (the generated table still supplies the default).
+lines can be deleted (the generated table still supplies the default). Lines in a
+**slider-driven category** (metal, painted, ceramic, rust, stone, skin, eyes,
+flesh) get `*` for metalness/roughness too — those columns are ignored at draw time
+(the category cvar wins), so writing `*` keeps them from going stale when a category
+default changes and matches what the in-game editor writes. Only pinned `none` and
+long-tail categories (glass/wood/cloth…) carry explicit numbers, because those
+*are* read.
 
 **Surfacing the no-bump gap.** With `--root`/`--game`, the generator also appends,
 as *commented* ready-to-edit lines, every **lit material the classifier left
@@ -297,7 +308,7 @@ modpack `.mtr` that redefines them with lit stages, zero engine work:
 | `r_pbr` | 0 | master toggle, GGX path + table lookup |
 | `r_pbrRoughness` | 0.58 | fallback roughness (no table entry); Blinn-Phong exp-16 width via `α = √(2/(n+2))`, confirmed by in-game A/B (perceptual match sits between 0.5 and 0.58) |
 | `r_pbrSpecScale` | 1.5 | artistic energy scale on the GGX lobe — the PBR counterpart to `r_specularScale` (deliberately not shared with it). **Dielectric-weighted**: fades to 1 as metalness rises, because metal F0 comes from the already-bright albedo and boosting it again blew out bare-metal highlights (grate-floor finding, 2026-07-30). Calibration history: 3 matched the Blinn look while full/near-full Toksvig flattened every lobe; once the 0.2 baseline restored tight peaks, 1.5 became the perceptual match (provisional — user still testing) |
-| `r_pbrMetalnessMax` | 0.8 | metal diffuse-kill clamp until Phase C env term |
+| `r_pbrMetalMetalness` | 0.8 | metalness of the bare-metal category (below 1 keeps a diffuse sliver; no global cap) |
 | `r_pbrToksvigBase` | 0.2 | normal-variance baseline before Toksvig widening — the anti-firefly vs highlight-tightness trade (§4) |
 | `r_pbrFireflyClamp` | 6 | GGX lobe ceiling — spike suppression; also the bounded core skin rides at (§4) |
 | `r_pbrEnvScale` | 0.3 | Phase C.1 light-glow environment floor for metals |
@@ -320,7 +331,7 @@ wetness cvar / `r_pbrEnvScale`).
 | `r_pbrEyesRoughness` | 0.15 | eyes + teeth (`eyes` category: `left*`/`right*`/`teeth*` from the head meshes + eye-prefixed names under `models/`). **Caveat found in-game:** stock eyeballs are unlit `deform eyeBall` filter decals with no interaction stages, so this effectively drives **teeth only** (plus any lit monster-eye materials); a true eye glint needs Phase-D edits to the eye materials themselves |
 | `r_pbrFleshRoughness` | 0.55 | body flesh / gore / hell-growth |
 | `r_pbrFleshWetness` | 1.0 | flesh-only specular boost: the slime/gore film on demons, viscera, hell-growth — **and blood**: blood/gore/gib-named materials (including decals, rescued from the skip list) route to flesh so stains glisten. Since most blood decals and all gibs ship with **no specular map** (which would zero the lobe), organic categories (flesh/skin/eyes) with a black spec image get an **organic spec fallback**: the material's own diffuse binds as the spec mask, so the gleam follows the blood shape and density and tints dark red |
-| `r_pbrMetalRoughness` | 0.32 | bare metal (metalness 1) |
+| `r_pbrMetalRoughness` | 0.32 | bare metal (metalness from `r_pbrMetalMetalness`, 0.8) |
 | `r_pbrPaintedRoughness` | 0.55 | painted station panelling (walls) |
 | `r_pbrPaintedMetalness` | 0.2 | scuff-through on painted metal; shared by walls and floors |
 | `r_pbrCeramicRoughness` | 0.45 | the `ceramic_sheen` category (renamed from `painted_floor` when the washroom tiles joined): painted floors (`base_floor`/`recyc_floor`) **plus ceramic tile on floors and walls** (`washroom`). Tighter than the wall panelling so lights streak — the wet-floor / glazed-tile look; grate floors stay bare metal |
@@ -366,7 +377,13 @@ the edit lands in the version-controlled file; a shadowing `fs_savepath` copy, i
 any, is not consulted), replacing the material's existing active *or* commented
 entry in place — or appending to a "live edits" section — then reloads the table.
 **Revert**/close discards unsaved live edits (`ApplyPbrTable` restores the file
-values). Window wiring: `D3_ImGuiWin_PbrEditor` in
+values). The window has two tabs: **Material** (the per-material editor above) and
+**Categories** — sliders for the shared per-category cvars (bare-metal metalness/
+roughness, painted, ceramic, rust, stone, skin, eyes, flesh, and the skin/flesh
+wetness). Changing one moves *every* material tagged with that category at once
+(they read the cvars live at draw time), while pinned `none`/custom materials are
+untouched; those are the same archived cvars as the Developer tab, so edits persist.
+Window wiring: `D3_ImGuiWin_PbrEditor` in
 [`sys_imgui.cpp`](../neo/sys/sys_imgui.cpp); UI + command in
 [`Dhewm3SettingsMenu.cpp`](../neo/framework/Dhewm3SettingsMenu.cpp).
 
