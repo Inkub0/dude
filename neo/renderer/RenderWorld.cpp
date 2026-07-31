@@ -1183,7 +1183,7 @@ const char* playerMaterialExcludeList[] = {
 	NULL
 };
 
-bool idRenderWorldLocal::Trace( modelTrace_t &trace, const idVec3 &start, const idVec3 &end, const float radius, bool skipDynamic, bool skipPlayer /*_D3XP*/ ) const {
+bool idRenderWorldLocal::Trace( modelTrace_t &trace, const idVec3 &start, const idVec3 &end, const float radius, bool skipDynamic, bool skipPlayer /*_D3XP*/, bool skipDecals ) const {
 	areaReference_t * ref;
 	idRenderEntityLocal *def;
 	portalArea_t * area;
@@ -1268,6 +1268,13 @@ bool idRenderWorldLocal::Trace( modelTrace_t &trace, const idVec3 &start, const 
 
 				// if no geometry or no shader
 				if ( !surf->geometry || !shader ) {
+					continue;
+				}
+
+				// skip decal overlays (grime/scorch, coplanar with the wall via
+				// polygonOffset) so the closest non-decal surface wins even when the
+				// decal sorts first — DUDE PBR material-editor picker (skipDecals).
+				if ( skipDecals && (int)shader->GetSort() == SS_DECAL ) {
 					continue;
 				}
 

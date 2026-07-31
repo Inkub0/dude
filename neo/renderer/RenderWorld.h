@@ -383,7 +383,9 @@ public:
 	virtual bool			ModelTrace( modelTrace_t &trace, qhandle_t entityHandle, const idVec3 &start, const idVec3 &end, const float radius ) const = 0;
 
 	// Traces vs the whole rendered world. FIXME: we need some kind of material flags.
-	virtual bool			Trace( modelTrace_t &trace, const idVec3 &start, const idVec3 &end, const float radius, bool skipDynamic = true, bool skipPlayer = false ) const = 0;
+	// skipDecals ignores SS_DECAL surfaces (grime/scorch overlays coplanar with the
+	// wall) so a picker lands on the surface behind them (DUDE PBR material editor).
+	virtual bool			Trace( modelTrace_t &trace, const idVec3 &start, const idVec3 &end, const float radius, bool skipDynamic = true, bool skipPlayer = false, bool skipDecals = false ) const = 0;
 
 	// Traces vs the world model bsp tree.
 	virtual bool			FastWorldTrace( modelTrace_t &trace, const idVec3 &start, const idVec3 &end ) const = 0;
