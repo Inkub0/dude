@@ -68,6 +68,8 @@ If you have questions concerning this license or the applicable additional terms
 
 // DG: implemented in Dhewm3SettingsMenu.cpp (the only Com_*_f() function not implemented in this file)
 extern void Com_Dhewm3Settings_f( const idCmdArgs &args );
+// DUDE: in-game PBR material editor, also implemented in Dhewm3SettingsMenu.cpp
+extern void Com_EditPbrMaterial_f( const idCmdArgs &args );
 
 typedef enum {
 	ERP_NONE,
@@ -2434,6 +2436,8 @@ void idCommonLocal::InitCommands( void ) {
 	cmdSystem->AddCommand( "execMachineSpec", Com_ExecMachineSpec_f, CMD_FL_SYSTEM, "execs the appropriate config files and sets cvars based on com_machineSpec" );
 
 	cmdSystem->AddCommand( "dhewm3Settings", Com_Dhewm3Settings_f, CMD_FL_SYSTEM, "Toggles (opens/closes) the (advanced) DUDE settings menu" );
+
+	cmdSystem->AddCommand( "editPbrMaterial", Com_EditPbrMaterial_f, CMD_FL_SYSTEM, "opens the in-game PBR material editor for the surface under the crosshair (docs/pbr-materials.md); bind it to a key" );
 
 #if	!defined( ID_DEDICATED )
 	// compilers

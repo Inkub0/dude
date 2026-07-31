@@ -46,6 +46,7 @@
 
 extern void Com_DrawDhewm3SettingsMenu(); // in framework/dhewm3SettingsMenu.cpp
 extern void Com_OpenCloseDhewm3SettingsMenu( bool open ); // ditto
+extern void Com_DrawPbrMaterialEditor(); // in framework/Dhewm3SettingsMenu.cpp
 
 static idCVar imgui_scale( "imgui_scale", "-1.0", CVAR_SYSTEM|CVAR_FLOAT|CVAR_ARCHIVE, "factor to scale ImGUI menus by (-1: auto)" ); // TODO: limit values?
 
@@ -391,6 +392,10 @@ void NewFrame()
 
 	if (openImguiWindows & D3_ImGuiWin_Settings) {
 		Com_DrawDhewm3SettingsMenu();
+	}
+
+	if (openImguiWindows & D3_ImGuiWin_PbrEditor) {
+		Com_DrawPbrMaterialEditor();
 	}
 
 	if (openImguiWindows & D3_ImGuiWin_Demo) {

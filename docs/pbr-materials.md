@@ -354,6 +354,22 @@ Console: **`reloadPbrTable`** re-reads both table files and re-applies to every
 parsed material — override entries tune live in-game, no restart. Pair with
 `r_showSurfaceInfo 1` to read the material name under the crosshair.
 
+**In-game material editor** (`editPbrMaterial`, bind it to a key): traces the
+surface under the crosshair — the same pick `reloadSurface` uses
+(`R_PbrPickCrosshairMaterial`) — and opens a floating ImGui window with the
+material's name, a category dropdown, and metalness/roughness/wetness/env sliders.
+Dragging a slider previews **live** on that surface (`idMaterial::SetPbrLive`
+pushes the values straight onto the material, bypassing the table); metalness and
+roughness grey out when a real category drives them. **Save** writes the line into
+`base/pbr/pbr_overrides.cfg` (`R_PbrWriteOverrideLine` → the `fs_basepath` copy, so
+the edit lands in the version-controlled file; a shadowing `fs_savepath` copy, if
+any, is not consulted), replacing the material's existing active *or* commented
+entry in place — or appending to a "live edits" section — then reloads the table.
+**Revert**/close discards unsaved live edits (`ApplyPbrTable` restores the file
+values). Window wiring: `D3_ImGuiWin_PbrEditor` in
+[`sys_imgui.cpp`](../neo/sys/sys_imgui.cpp); UI + command in
+[`Dhewm3SettingsMenu.cpp`](../neo/framework/Dhewm3SettingsMenu.cpp).
+
 Enhancements tab: one "PBR materials" toggle (+ advanced sliders in Developer section).
 When it's on, the superseded controls grey out via the existing
 `ImGui::BeginDisabled()` pattern (see the AA-quality selector in

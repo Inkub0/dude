@@ -19,6 +19,7 @@
 #include "../libs/imgui/imgui_internal.h"
 
 #include "renderer/tr_local.h" // render cvars
+#include "renderer/Material.h" // idMaterial + pbrCategory_t (PBR material editor)
 #include "sound/snd_local.h" // sound cvars
 
 extern const char* D3_GetGamepadStartButtonName();
@@ -4053,6 +4054,132 @@ void Com_Dhewm3Settings_f( const idCmdArgs &args )
 	}
 }
 
+// ===========================================================================
+// PBR material editor (docs/pbr-materials.md) — a floating ImGui window that
+// edits the surface under the crosshair live and writes an override line.
+// ===========================================================================
+
+// combo order (friendly) mapped to pbrCategory_t values
+static const char *pbrEditCatNames[] = {
+	"none (pinned)", "metal", "metal_painted", "ceramic_sheen",
+	"metal_rust", "stone", "skin", "eyes", "flesh"
+};
+static const int pbrEditCatEnum[] = {
+	PBR_CAT_NONE, PBR_CAT_METAL, PBR_CAT_PAINTED, PBR_CAT_CERAMIC,
+	PBR_CAT_RUST, PBR_CAT_STONE, PBR_CAT_SKIN, PBR_CAT_EYES, PBR_CAT_FLESH
+};
+
+static const idMaterial *pbrEditMat = NULL;	// material under edit (NULL = none picked)
+static idStr pbrEditName;
+static int   pbrEditCat = 0;
+static float pbrEditMetal = 0.0f, pbrEditRough = 0.58f, pbrEditWet = 1.0f, pbrEditEnv = 1.0f;
+
+static void PbrEditor_LoadFrom( const idMaterial *mat )
+{
+	pbrEditMat = mat;
+	pbrEditName = mat ? mat->GetName() : "";
+	if ( !mat ) {
+		return;
+	}
+	pbrEditCat   = mat->GetPbrCategory();
+	pbrEditMetal = mat->GetPbrMetalness() >= 0.0f ? mat->GetPbrMetalness() : 0.0f;
+	pbrEditRough = mat->GetPbrRoughness() >= 0.0f ? mat->GetPbrRoughness() : r_pbrRoughness.GetFloat();
+	pbrEditWet   = mat->GetPbrWetness()   >= 0.0f ? mat->GetPbrWetness()   : 1.0f;
+	pbrEditEnv   = mat->GetPbrEnv()       >= 0.0f ? mat->GetPbrEnv()       : 1.0f;
+}
+
+// called by the editPbrMaterial command once it has traced a material
+void Com_OpenPbrMaterialEditor( const idMaterial *mat )
+{
+	if ( mat ) {
+		PbrEditor_LoadFrom( mat );
+	}
+	D3::ImGuiHooks::OpenWindow( D3::ImGuiHooks::D3_ImGuiWin_PbrEditor );
+}
+
+// called from D3::ImGuiHooks::NewFrame() (if this window is enabled)
+void Com_DrawPbrMaterialEditor()
+{
+	bool show = true;
+	ImGui::SetNextWindowSize( ImVec2( 470.0f, 0.0f ), ImGuiCond_FirstUseEver );
+	if ( ImGui::Begin( "PBR Material Editor", &show ) ) {
+		if ( pbrEditMat == NULL ) {
+			ImGui::TextWrapped( "Aim at a surface and run \"editPbrMaterial\" (bind it, e.g. `bind p editPbrMaterial`) to load the material under the crosshair." );
+		} else {
+			ImGui::TextColored( ImVec4( 0.6f, 0.8f, 1.0f, 1.0f ), "%s", pbrEditName.c_str() );
+			if ( !r_pbr.GetBool() ) {
+				ImGui::TextColored( ImVec4( 1.0f, 0.7f, 0.3f, 1.0f ),
+					"r_pbr is 0 — enable PBR (Enhancements tab) to see edits." );
+			}
+			ImGui::Separator();
+
+			int comboIdx = 0;
+			for ( int i = 0; i < IM_ARRAYSIZE( pbrEditCatEnum ); i++ ) {
+				if ( pbrEditCatEnum[i] == pbrEditCat ) { comboIdx = i; }
+			}
+			if ( ImGui::Combo( "Category", &comboIdx, pbrEditCatNames, IM_ARRAYSIZE( pbrEditCatNames ) ) ) {
+				pbrEditCat = pbrEditCatEnum[comboIdx];
+			}
+			const bool pinned = ( pbrEditCat == PBR_CAT_NONE );
+
+			ImGui::BeginDisabled( !pinned );
+			ImGui::SliderFloat( "Metalness", &pbrEditMetal, 0.0f, 1.0f, "%.2f" );
+			ImGui::SliderFloat( "Roughness", &pbrEditRough, 0.03f, 1.0f, "%.2f" );
+			ImGui::EndDisabled();
+			if ( !pinned ) {
+				ImGui::TextDisabled( "metalness/roughness track the '%s' category sliders", pbrEditCatNames[comboIdx] );
+			}
+			ImGui::SliderFloat( "Wetness (spec energy)", &pbrEditWet, 0.0f, 4.0f, "%.2f" );
+			ImGui::SliderFloat( "Env glow (metal)", &pbrEditEnv, 0.0f, 4.0f, "%.2f" );
+
+			// wetness/env at ~1.0 are the neutral default -> write as inherit ('*')
+			const float liveMetal = pinned ? pbrEditMetal : -1.0f;
+			const float liveRough = pinned ? pbrEditRough : -1.0f;
+			const float liveWet   = ( idMath::Fabs( pbrEditWet - 1.0f ) < 0.005f ) ? -1.0f : pbrEditWet;
+			const float liveEnv   = ( idMath::Fabs( pbrEditEnv - 1.0f ) < 0.005f ) ? -1.0f : pbrEditEnv;
+
+			// live preview: push the current values straight onto the material
+			const_cast<idMaterial *>( pbrEditMat )->SetPbrLive( liveMetal, liveRough, liveWet, liveEnv, pbrEditCat );
+
+			ImGui::Separator();
+			if ( ImGui::Button( "Save to pbr_overrides.cfg" ) ) {
+				R_PbrWriteOverrideLine( pbrEditMat, liveMetal, liveRough, liveWet, liveEnv, pbrEditCat );
+			}
+			ImGui::SameLine();
+			if ( ImGui::Button( "Re-pick" ) ) {
+				const idMaterial *m = R_PbrPickCrosshairMaterial();
+				if ( m ) {
+					PbrEditor_LoadFrom( m );
+				} else {
+					D3::ImGuiHooks::ShowWarningOverlay( "No surface under the crosshair" );
+				}
+			}
+			ImGui::SameLine();
+			if ( ImGui::Button( "Revert" ) ) {
+				const_cast<idMaterial *>( pbrEditMat )->ApplyPbrTable();	// restore file values
+				PbrEditor_LoadFrom( pbrEditMat );
+			}
+		}
+	}
+	ImGui::End();
+	if ( !show ) {
+		if ( pbrEditMat ) {
+			// discard unsaved live edits on close
+			const_cast<idMaterial *>( pbrEditMat )->ApplyPbrTable();
+		}
+		D3::ImGuiHooks::CloseWindow( D3::ImGuiHooks::D3_ImGuiWin_PbrEditor );
+	}
+}
+
+void Com_EditPbrMaterial_f( const idCmdArgs &args )
+{
+	const idMaterial *m = R_PbrPickCrosshairMaterial();
+	if ( m == NULL ) {
+		common->Printf( "editPbrMaterial: no surface under the crosshair (aim at one and retry)\n" );
+	}
+	Com_OpenPbrMaterialEditor( m );
+}
+
 #else // IMGUI_DISABLE - just a stub function
 
 #include "Common.h"
@@ -4060,6 +4187,11 @@ void Com_Dhewm3Settings_f( const idCmdArgs &args )
 void Com_Dhewm3Settings_f( const idCmdArgs &args )
 {
 	common->Warning( "Dear ImGui is disabled in this build, so the DUDE settings menu is not available!" );
+}
+
+void Com_EditPbrMaterial_f( const idCmdArgs &args )
+{
+	common->Warning( "Dear ImGui is disabled in this build, so the PBR material editor is not available!" );
 }
 
 #endif

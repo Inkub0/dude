@@ -200,6 +200,21 @@ static int PBR_CategoryForName( const char *cat ) {
 	return PBR_CAT_NONE;
 }
 
+// enum -> table token, for the material editor's write-back (inverse of the above)
+static const char *PBR_NameForCategory( int cat ) {
+	switch ( cat ) {
+	case PBR_CAT_SKIN:    return "skin";
+	case PBR_CAT_EYES:    return "eyes";
+	case PBR_CAT_FLESH:   return "flesh";
+	case PBR_CAT_METAL:   return "metal";
+	case PBR_CAT_PAINTED: return "metal_painted";
+	case PBR_CAT_CERAMIC: return "ceramic_sheen";
+	case PBR_CAT_RUST:    return "metal_rust";
+	case PBR_CAT_STONE:   return "stone";
+	default:              return "none";
+	}
+}
+
 static void PBR_LoadTableFile( const char *path ) {
 	char *buf = NULL;
 	int len = fileSystem->ReadFile( path, (void **)&buf, NULL );
@@ -263,6 +278,126 @@ static void PBR_EnsureTableLoaded( void ) {
 // drops the cached table so the next lookup re-reads the files (reloadPbrTable)
 void R_PbrTableInvalidate( void ) {
 	pbrTableLoaded = false;
+}
+
+// invalidate the cache and re-apply the lookup to every parsed material; shared by
+// the reloadPbrTable command and the material editor's save. Returns the count.
+int R_PbrTableReloadApply( void ) {
+	R_PbrTableInvalidate();
+	int applied = 0;
+	const int n = declManager->GetNumDecls( DECL_MATERIAL );
+	for ( int i = 0; i < n; i++ ) {
+		const idMaterial *m = declManager->MaterialByIndex( i, false );
+		if ( m && m->IsValid() ) {
+			const_cast<idMaterial *>( m )->ApplyPbrTable();
+			applied++;
+		}
+	}
+	return applied;
+}
+
+// first whitespace-delimited token of a table line, skipping a leading '#'
+// (so commented UNCLASSIFIED entries match too and get promoted to active)
+static idStr PBR_LineKey( const char *s ) {
+	while ( *s == ' ' || *s == '\t' ) s++;
+	if ( *s == '#' ) { s++; while ( *s == ' ' || *s == '\t' ) s++; }
+	idStr key;
+	while ( *s && *s != ' ' && *s != '\t' && *s != '\r' && *s != '\n' ) {
+		key += *s++;
+	}
+	return key;
+}
+
+/*
+=============
+R_PbrWriteOverrideLine
+
+Material-editor save (docs/pbr-materials.md): rewrite this material's line in
+pbr/pbr_overrides.cfg in place — replacing an existing active OR commented entry,
+or appending to a live-edits section if new — then re-apply the table live. Reads
+and writes the fs_basepath copy explicitly so the edit lands in the file the user
+version-controls (a shadowing fs_savepath copy, if one exists, is not consulted).
+-1 in any numeric arg writes '*' (inherit); a real category writes '*' for
+metalness/roughness so the line tracks the sliders.
+=============
+*/
+bool R_PbrWriteOverrideLine( const idMaterial *mat, float metal, float rough,
+                             float wet, float env, int category ) {
+	if ( !mat ) {
+		return false;
+	}
+	idStr name = mat->GetName();
+
+	idStr mTok, rTok, wTok, eTok;
+	const bool pinned = ( category == PBR_CAT_NONE );
+	mTok = ( pinned && metal >= 0.0f ) ? idStr( va( "%.2f", metal ) ) : idStr( "*" );
+	rTok = ( pinned && rough >= 0.0f ) ? idStr( va( "%.2f", rough ) ) : idStr( "*" );
+	wTok = ( wet  >= 0.0f ) ? idStr( va( "%.2f", wet ) )  : idStr( "*" );
+	eTok = ( env  >= 0.0f ) ? idStr( va( "%.2f", env ) )  : idStr( "*" );
+	idStr line = va( "%s %s %s %s %s %s", name.c_str(), mTok.c_str(), rTok.c_str(),
+	                 PBR_NameForCategory( category ), wTok.c_str(), eTok.c_str() );
+
+	// copy out of the rotating static buffer RelativePathToOSPath returns
+	idStr osPath = fileSystem->RelativePathToOSPath( "pbr/pbr_overrides.cfg", "fs_basepath" );
+
+	// read current contents (explicit basepath, matching the write below)
+	idStr content;
+	idFile *rf = fileSystem->OpenExplicitFileRead( osPath.c_str() );
+	if ( rf ) {
+		int l = rf->Length();
+		if ( l > 0 ) {
+			char *tmp = (char *)Mem_Alloc( l + 1 );
+			rf->Read( tmp, l );
+			tmp[l] = '\0';
+			content = tmp;
+			Mem_Free( tmp );
+		}
+		fileSystem->CloseFile( rf );
+	}
+
+	// walk lines, replacing the material's entry in place (active or commented)
+	idStr out;
+	bool replaced = false;
+	const char *p = content.c_str();
+	while ( *p ) {
+		const char *ls = p;
+		while ( *p && *p != '\n' ) {
+			p++;
+		}
+		idStr raw( ls, 0, (int)( p - ls ) );		// one line, no '\n'
+		if ( *p == '\n' ) {
+			p++;
+		}
+		if ( !replaced && PBR_LineKey( raw.c_str() ).Icmp( name ) == 0 ) {
+			out += line;
+			replaced = true;
+		} else {
+			out += raw;
+		}
+		out += "\n";
+	}
+
+	if ( !replaced ) {
+		const char *hdr = "\n# ---- live edits (PBR material editor) ----\n";
+		if ( content.Find( "live edits (PBR material editor)" ) < 0 ) {
+			out += hdr;
+		}
+		out += line;
+		out += "\n";
+	}
+
+	idFile *wf = fileSystem->OpenExplicitFileWrite( osPath.c_str() );
+	if ( !wf ) {
+		common->Warning( "PBR editor: could not open %s for writing", osPath.c_str() );
+		return false;
+	}
+	wf->Write( out.c_str(), out.Length() );
+	fileSystem->CloseFile( wf );
+	common->Printf( "PBR editor: %s '%s' in %s\n",
+	                replaced ? "updated" : "added", name.c_str(), osPath.c_str() );
+
+	R_PbrTableReloadApply();
+	return true;
 }
 
 /*

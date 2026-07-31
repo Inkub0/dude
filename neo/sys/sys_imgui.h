@@ -14,7 +14,8 @@ enum D3ImGuiWindow {
 	D3_ImGuiWin_None        = 0,
 	D3_ImGuiWin_Settings    = 1, // advanced DUDE settings menu
 	D3_ImGuiWin_Demo        = 2, // ImGui demo window
-	// next should be 4, then 8, etc so a bitmask can be used
+	D3_ImGuiWin_PbrEditor   = 4, // in-game PBR material editor (docs/pbr-materials.md)
+	// next should be 8, then 16, etc so a bitmask can be used
 };
 
 #ifndef IMGUI_DISABLE

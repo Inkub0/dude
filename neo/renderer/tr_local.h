@@ -875,6 +875,12 @@ extern idCVar r_specularExp;			// analytic specular exponent (r_shading 1/2)
 
 // DUDE PBR materials (docs/pbr-materials.md) — GL3/Vulkan interaction shader only
 void R_PbrTableInvalidate( void );		// drop the cached per-material table (reloadPbrTable)
+int  R_PbrTableReloadApply( void );		// invalidate + re-apply to all materials, returns count
+// in-game material editor (Com_DrawPbrMaterialEditor): pick the crosshair material
+// and persist an override line to pbr/pbr_overrides.cfg (fs_basepath), then reload
+const idMaterial *R_PbrPickCrosshairMaterial( void );
+bool R_PbrWriteOverrideLine( const idMaterial *mat, float metal, float rough,
+                             float wet, float env, int category );
 extern idCVar r_pbr;					// GGX interaction path; supersedes r_shading while on
 extern idCVar r_pbrRoughness;			// Phase A global fallback roughness (per-material in Phase B)
 extern idCVar r_pbrSpecScale;			// artistic energy scale on the GGX lobe (1.2 = calibrated look)

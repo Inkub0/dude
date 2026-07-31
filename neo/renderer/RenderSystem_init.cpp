@@ -1286,17 +1286,30 @@ pbr/pbr_overrides.cfg can be tuned live in-game without a decl reload.
 =====================
 */
 static void R_ReloadPbrTable_f( const idCmdArgs &args ) {
-	R_PbrTableInvalidate();
-	int applied = 0;
-	const int n = declManager->GetNumDecls( DECL_MATERIAL );
-	for ( int i = 0; i < n; i++ ) {
-		const idMaterial *m = declManager->MaterialByIndex( i, false );
-		if ( m && m->IsValid() ) {
-			const_cast<idMaterial *>( m )->ApplyPbrTable();
-			applied++;
-		}
-	}
+	int applied = R_PbrTableReloadApply();
 	common->Printf( "reloadPbrTable: re-applied to %d parsed materials\n", applied );
+}
+
+/*
+=====================
+R_PbrPickCrosshairMaterial
+
+Trace from the primary view and return the material under the crosshair — the same
+pick r_showSurfaceInfo / reloadSurface use — for the in-game PBR material editor
+(Com_DrawPbrMaterialEditor). NULL if there's no view yet or the trace misses.
+=====================
+*/
+const idMaterial *R_PbrPickCrosshairMaterial( void ) {
+	if ( !tr.primaryView || !tr.primaryWorld ) {
+		return NULL;
+	}
+	modelTrace_t mt;
+	idVec3 start = tr.primaryView->renderView.vieworg + tr.primaryView->renderView.viewaxis[0] * 16;
+	idVec3 end = start + tr.primaryView->renderView.viewaxis[0] * 1000.0f;
+	if ( !tr.primaryWorld->Trace( mt, start, end, 0.0f, false ) ) {
+		return NULL;
+	}
+	return mt.material;
 }
 
 

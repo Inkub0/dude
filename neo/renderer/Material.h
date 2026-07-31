@@ -408,6 +408,13 @@ public:
 						// (re)runs the table lookup for this material; called at parse time
 						// and by the reloadPbrTable console command
 	void				ApplyPbrTable( void );
+						// in-game material editor (Com_DrawPbrMaterialEditor): push params
+						// straight onto the material for real-time preview, bypassing the
+						// table. -1 = inherit, as in the table.
+	void				SetPbrLive( float metal, float rough, float wet, float env, int cat ) {
+							pbrMetalness = metal; pbrRoughness = rough;
+							pbrWetness = wet; pbrEnv = env; pbrCategory = cat;
+						}
 
 						// returns true if the material will draw anything at all.  Triggers, portals,
 						// etc, will not have anything to draw.  A not drawn surface can still castShadow,
