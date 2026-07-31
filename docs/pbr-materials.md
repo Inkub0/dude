@@ -141,13 +141,13 @@ diffuse energy, and specular-map interpretation, not just the highlight shape):
   via temporary `r_pbrToksvig`/`r_pbrToksvigBase` debug cvars, folded to constants
   and removed per the trim-debug-cvars policy.)
 - **Defaults with no table entry:** metalness 0, roughness `r_pbrRoughness` 0.58
-  with `r_pbrSpecScale` 1.5 — calibrated in-game against the enhanced-tier
+  with `r_pbrSpecScale` 1.66 — calibrated in-game against the enhanced-tier
   Blinn-Phong look (exp 16, `r_specularScale` 1.2) on 2026-07-30. Roughness 0.58
   is also what the analytic `α = √(2/(n+2))` power-to-roughness mapping predicts
   for exp 16; the A/B put the perceptual match between 0.5 and 0.58, and theory
   won the tie. The energy scale moved with the Toksvig tuning (see below): ×3
   matched while near-full Toksvig flattened every lobe; with the final 0.2
-  baseline keeping lobes tight, ×1.5 is the match (provisional). Either way the
+  baseline keeping lobes tight, ×1.66 is the confirmed match. Either way the
   physical 4%-F0 dielectric lobe needs boosting against the ×1.2 the Blinn path
   uses — Doom 3's stylized specular is overdriven relative to physical dielectrics.
   Not an exact Blinn match by design — GGX keeps its longer tail and Fresnel
@@ -342,7 +342,7 @@ modpack `.mtr` that redefines them with lit stages, zero engine work:
 |---|---|---|
 | `r_pbr` | 0 | master toggle, GGX path + table lookup |
 | `r_pbrRoughness` | 0.58 | fallback roughness (no table entry); Blinn-Phong exp-16 width via `α = √(2/(n+2))`, confirmed by in-game A/B (perceptual match sits between 0.5 and 0.58) |
-| `r_pbrSpecScale` | 1.5 | artistic energy scale on the GGX lobe — the PBR counterpart to `r_specularScale` (deliberately not shared with it). **Dielectric-weighted**: fades to 1 as metalness rises, because metal F0 comes from the already-bright albedo and boosting it again blew out bare-metal highlights (grate-floor finding, 2026-07-30). Calibration history: 3 matched the Blinn look while full/near-full Toksvig flattened every lobe; once the 0.2 baseline restored tight peaks, 1.5 became the perceptual match (provisional — user still testing) |
+| `r_pbrSpecScale` | 1.66 | artistic energy scale on the GGX lobe — the PBR counterpart to `r_specularScale` (deliberately not shared with it). **Dielectric-weighted**: fades to 1 as metalness rises, because metal F0 comes from the already-bright albedo and boosting it again blew out bare-metal highlights (grate-floor finding, 2026-07-30). Calibration history: 3 matched the Blinn look while full/near-full Toksvig flattened every lobe; once the 0.2 baseline restored tight peaks, 1.66 became the confirmed perceptual match |
 | `r_pbrMetalMetalness` | 0.8 | metalness of the bare-metal category (below 1 keeps a diffuse sliver; no global cap) |
 | `r_pbrMetalDiffuse` | 0.75 | metal albedo-colour retention: relaxes the physical diffuse-kill so metals keep their painted colour (1 = keep all, 0 = physical) |
 | `r_pbrToksvigBase` | 0.2 | normal-variance baseline before Toksvig widening — the anti-firefly vs highlight-tightness trade (§4) |

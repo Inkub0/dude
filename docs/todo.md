@@ -212,8 +212,9 @@ See **docs/pbr-materials.md** for the full design + as-built state. Summary:
 - Phases: **A** GGX branch w/ defaults **[built]** → **B** classifier + table +
   per-category Developer-tab sliders **[built]** → **C.1** light-glow env floor for
   metals (`r_pbrEnvScale`) **[built]** → **C.2** screen-space reflections (`r_ssr`,
-  sharp-only v1, docs/ssr.md) **[built, pending verification]** → **C.2.1** glossy
-  blur + temporal → **D** optional `roughnessmap`/`rmamap` keywords + lit
+  sharp-only v1, docs/ssr.md) **[built, pending verification]** → **C.2.1**
+  temporal accumulation **[built]** + glossy blur **[deferred — gated on a real
+  sighting, see docs/ssr.md §5]** → **D** optional `roughnessmap`/`rmamap` keywords + lit
   redefinitions for splat decals/eyeballs/weapons.
 - Pairs with `r_hdr` (GGX highlights are the >1 energy the RGBA16F buffer exists for).
 

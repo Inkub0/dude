@@ -123,9 +123,20 @@ on/off toggle, the Resolution stops and the Temporal checkbox next to SSAO.
 
 ## 5. Known limitations / future work
 
-- **Sharp only**: roughness dims the reflection but does not blur it. Glossy
-  SSR needs a roughness-driven blur of the (now offscreen) march buffer before
-  the composite — the remaining C.2.1 piece, next on the list.
+- **Sharp only** (glossy blur *deferred — gated on a real sighting*): roughness
+  dims the reflection but does not blur it. Glossy SSR needs a roughness-driven
+  blur of the (now offscreen) march buffer before the composite. **Decision
+  2026-07-31: not worth chasing proactively for Doom 3.** The surfaces where SSR
+  is most visible (wet floors, glass, polished panels) *should* stay fairly sharp
+  and already look right; the grimy medium-rough surfaces that would want blur
+  already have their reflection dimmed hard by roughness, so blurring a
+  near-invisible contribution is a subtle win in a dark, low-contrast game. The
+  artifact it fixes — a too-clean mirror ghost on a dirty floor — only bites in a
+  narrow roughness band when the scene is bright enough to show it. Revisit only
+  if playtesting turns up a specific surface reading as too clean; the cheap first
+  move then is a single roughness-weighted blur pass at the already-low SSR
+  resolution (the Half-res upsample softens a little already). No fidelity cost to
+  skipping it — `r_ssr` is fully opt-in and vanilla has no SSR at all.
 - **Screen-space by nature**: off-screen content cannot appear in reflections;
   rays fade at screen edges. C.1's light-glow floor remains the fallback.
 - Reflections snapshot the scene *before* fog and translucents — a reflected
@@ -144,4 +155,5 @@ on/off toggle, the Resolution stops and the Temporal checkbox next to SSAO.
   armed-crossing hit test added after the first washroom test caught the
   bump-normal self-reflection haze.
 - C.2.1 resolution scale + temporal accumulation: built 2026-07-30, pending
-  in-game verification. Glossy blur still to come.
+  in-game verification. Glossy blur deferred (see §5) — gated on a real sighting,
+  not on the active roadmap.
