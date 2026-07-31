@@ -189,6 +189,19 @@ Metalness kills the diffuse lobe — a metal is *defined* by what it reflects �
    carries a direct sub-1 value like painted/rust carry theirs, and no other
    material is silently clamped. Pinned per-material metalness (table/override/editor)
    now reaches its authored value.
+
+   **Diffuse retention (`r_pbrMetalDiffuse`, added 2026-07-31, user request):**
+   the deeper fix for the "metals read dark and off-colour" problem. Physical PBR
+   kills the diffuse lobe on metals (`diffuse *= 1 - metal`), moving all the colour
+   into reflections stock Doom 3 has no environment to supply — so a metal's
+   authored albedo colour mostly disappears. This lever relaxes the kill:
+   `diffuse *= 1 - metal·kd` with `kd = 1 - r_pbrMetalDiffuse`, so at retention 0.75
+   a metalness-0.8 surface keeps ~80% of its painted colour while the metallic
+   specular (F0 = albedo) still rides on top — the colour then shows up *twice*
+   (retained diffuse + specular tint) and reads convincingly metallic without going
+   dark. Deliberately energy-relaxed (non-physical); `kd`/`r_pbrMetalDiffuse` ride
+   the new `u_pbrParms2.x` slot, default retention 0.75. Slider: "Metal Color
+   Retention" (Developer tab + the editor's Categories → Bare Metal).
 2. **Phase C — environment specular.** Investigation killed the original sketch:
    the "ambient cubemap" is a 2×2 cube encoding a *constant direction vector*
    (a normalization-cubemap substitute), not environment colors — **stock Doom 3
@@ -309,6 +322,7 @@ modpack `.mtr` that redefines them with lit stages, zero engine work:
 | `r_pbrRoughness` | 0.58 | fallback roughness (no table entry); Blinn-Phong exp-16 width via `α = √(2/(n+2))`, confirmed by in-game A/B (perceptual match sits between 0.5 and 0.58) |
 | `r_pbrSpecScale` | 1.5 | artistic energy scale on the GGX lobe — the PBR counterpart to `r_specularScale` (deliberately not shared with it). **Dielectric-weighted**: fades to 1 as metalness rises, because metal F0 comes from the already-bright albedo and boosting it again blew out bare-metal highlights (grate-floor finding, 2026-07-30). Calibration history: 3 matched the Blinn look while full/near-full Toksvig flattened every lobe; once the 0.2 baseline restored tight peaks, 1.5 became the perceptual match (provisional — user still testing) |
 | `r_pbrMetalMetalness` | 0.8 | metalness of the bare-metal category (below 1 keeps a diffuse sliver; no global cap) |
+| `r_pbrMetalDiffuse` | 0.75 | metal albedo-colour retention: relaxes the physical diffuse-kill so metals keep their painted colour (1 = keep all, 0 = physical) |
 | `r_pbrToksvigBase` | 0.2 | normal-variance baseline before Toksvig widening — the anti-firefly vs highlight-tightness trade (§4) |
 | `r_pbrFireflyClamp` | 6 | GGX lobe ceiling — spike suppression; also the bounded core skin rides at (§4) |
 | `r_pbrEnvScale` | 0.3 | Phase C.1 light-glow environment floor for metals |

@@ -200,8 +200,13 @@ void main() {
 		// softened by the roughness. u_occlusionParms.w = r_pbrEnvScale.
 		spec.rgb += F0 * ( metal * u_occlusionParms.w * ( 1.0 - 0.5 * rough ) );
 
-		// energy conservation: Fresnel-weighted diffuse, killed for metals
-		diffuse.rgb *= ( 1.0 - F ) * ( 1.0 - metal );
+		// Fresnel-weighted diffuse. Physical PBR kills diffuse entirely on metals
+		// (metal 1 -> factor 0), but that pushes the asset's painted colour into
+		// reflections stock Doom 3 can't supply, so metals read dark and off-colour.
+		// u_pbrParms2.x = kd (= 1 - r_pbrMetalDiffuse) relaxes the kill: kd < 1 keeps
+		// that fraction of the albedo colour while the metallic specular still rides
+		// on top. kd 1 = physical, kd 0 = full albedo retained (docs sec. 5).
+		diffuse.rgb *= ( 1.0 - F ) * ( 1.0 - metal * u_pbrParms2.x );
 		lightScale = NdotL * shadowVisibility();
 	} else {
 		// half angle is normalized with math (matches the ARB program, which

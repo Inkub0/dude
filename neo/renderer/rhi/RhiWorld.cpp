@@ -541,6 +541,10 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		parms.pbrParms[1] = rough;
 		parms.pbrParms[2] = 1.0f;
 		parms.pbrParms[3] = specScale;
+		// metal diffuse-kill strength kd: 1 = physical (metals lose all diffuse
+		// colour), <1 keeps that share of the asset albedo so metals aren't dark
+		// and off-colour where stock D3 has no environment to reflect (sec. 5).
+		parms.pbrParms2[0] = 1.0f - r_pbrMetalDiffuse.GetFloat();
 		// PBR tuning knobs (Developer tab) ride localParam1.zw — the SSAO block
 		// below only writes .xy on this (non-ambient) path, so no clash.
 		parms.localParam1[2] = r_pbrToksvigBase.GetFloat();

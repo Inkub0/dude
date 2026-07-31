@@ -2854,6 +2854,15 @@ static void DrawShadowDebugMenu()
 	AddTooltip( "r_pbrMetalRoughness: grates, pipes, machined steel, chrome — surfaces with exposed metal "
 		"(metalness set by Bare Metal Metalness above)." );
 
+	float metalDiffuse = r_pbrMetalDiffuse.GetFloat();
+	if ( ImGui::SliderFloat( "Metal Color Retention", &metalDiffuse, 0.0f, 1.0f, "%.2f" ) ) {
+		r_pbrMetalDiffuse.SetFloat( metalDiffuse );
+	}
+	AddTooltip( "r_pbrMetalDiffuse: how much of a metal's painted albedo color survives. Physical PBR kills "
+		"diffuse on metals (0) and pushes the color into reflections Doom 3 can't supply, so metals read dark "
+		"and off-color; raise this to keep the asset look while the metallic specular still rides on top "
+		"(1 = keep all, 0 = physical). Weighted by metalness, so it mainly affects bare metal." );
+
 	float envScale = r_pbrEnvScale.GetFloat();
 	if ( ImGui::SliderFloat( "Metal Environment Glow", &envScale, 0.0f, 2.0f, "%.2f" ) ) {
 		r_pbrEnvScale.SetFloat( envScale );
@@ -4182,6 +4191,8 @@ static void PbrEditor_DrawCategoriesTab()
 	ImGui::SeparatorText( "Bare Metal" );
 	PbrCvarSlider( "Metalness##metal", r_pbrMetalMetalness, 0.0f, 1.0f );
 	PbrCvarSlider( "Roughness##metal", r_pbrMetalRoughness, 0.03f, 1.0f );
+	PbrCvarSlider( "Color Retention##metal", r_pbrMetalDiffuse, 0.0f, 1.0f );
+	ImGui::TextDisabled( "keeps the asset's painted color on metals (0 = physical kill, 1 = full)" );
 
 	ImGui::SeparatorText( "Painted Metal (station panelling)" );
 	PbrCvarSlider( "Metalness##painted", r_pbrPaintedMetalness, 0.0f, 1.0f );

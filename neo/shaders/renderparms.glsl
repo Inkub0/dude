@@ -75,4 +75,8 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // interactions only), w = specular energy scale
 	                            // (r_pbrSpecScale). Phase A fills global fallbacks;
 	                            // Phase B swaps in per-material values.
+	vec4 u_pbrParms2;            // DUDE PBR extras: x = metal diffuse-kill strength
+	                            // kd (= 1 - r_pbrMetalDiffuse). diffuse *= 1 - metal*kd,
+	                            // so kd < 1 keeps the asset's albedo colour on metals
+	                            // instead of the physical full kill. yzw spare.
 };

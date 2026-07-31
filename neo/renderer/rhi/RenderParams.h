@@ -84,10 +84,13 @@ struct RenderParams {
 								// z = enable (r_pbr, non-ambient interactions only), w =
 								// specular energy scale (r_pbrSpecScale). Phase A fills global
 								// fallbacks; Phase B swaps in per-material values.
+	float	pbrParms2[4];		// DUDE PBR extras: x = metal diffuse-kill strength kd
+								// (= 1 - r_pbrMetalDiffuse); diffuse *= 1 - metal*kd, so
+								// kd < 1 retains the asset albedo colour on metals. yzw spare.
 };
 
-// 3 mat4 (192) + 38 vec4 (608) = 800 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 800, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 3 mat4 (192) + 39 vec4 (624) = 816 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 816, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

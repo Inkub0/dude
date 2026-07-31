@@ -885,6 +885,7 @@ extern idCVar r_pbr;					// GGX interaction path; supersedes r_shading while on
 extern idCVar r_pbrRoughness;			// Phase A global fallback roughness (per-material in Phase B)
 extern idCVar r_pbrSpecScale;			// artistic energy scale on the GGX lobe (1.2 = calibrated look)
 extern idCVar r_pbrMetalMetalness;		// metalness for the bare-metal category (0.8 = a sliver of diffuse)
+extern idCVar r_pbrMetalDiffuse;		// how much albedo colour metals keep (1 = all, 0 = physical kill)
 extern idCVar r_pbrToksvigBase;			// Toksvig variance baseline (anti-firefly vs highlight tightness)
 extern idCVar r_pbrFireflyClamp;		// GGX lobe ceiling (spike suppression / highlight-core cap)
 extern idCVar r_pbrSkinWetness;			// skin+eyes specular boost (sweat/water film; NOT metalness)
