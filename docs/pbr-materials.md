@@ -246,14 +246,22 @@ A standalone script (`tools/pbr_classify.py`) that:
 classifier baseline with the in-game hand-tuning baked into it, and the shippable
 artifact. `pbr_overrides.cfg` is a **per-game delta file**, loaded second and
 winning on collision — the in-game editor writes here, and it's empty in the base
-game (the base tuning lives in `pbr_materials.cfg`); RoE/d3xp keeps its own
-`pbr_overrides.cfg` for game-specific tweaks. Re-running `pbr_classify.py`
+game (the base tuning lives in `pbr_materials.cfg`). Re-running `pbr_classify.py`
 overwrites `pbr_materials.cfg` with a fresh baseline and **discards** the baked
 tuning, so the workflow is: bootstrap once → tune in-game (writes overrides) →
 **bake** the overrides down into `pbr_materials.cfg` and reset the override to
-empty (`tools/pbr_make_overrides.py --bake`). Since only `base/` ships and the VFS
-falls back base→ from a mod, the base `pbr_materials.cfg` doubles as the common
-config for RoE (RoE-only materials get game-fallback defaults or a d3xp override).
+empty (`tools/pbr_make_overrides.py --bake`).
+
+**RoE / mods — one common config, DRY (option 2).** Only `base/` is the shipped
+config, and a mod's file search falls back to `base/`, so **RoE keeps no
+`pbr_materials.cfg` of its own** — it inherits `base/pbr/pbr_materials.cfg`. Its
+`d3xp/pbr/pbr_overrides.cfg` is a **slim delta**: only game-only materials plus
+deliberate per-game edits, never a copy of the base table. Regenerate it against
+the parent with `tools/pbr_make_overrides.py --parent base/pbr/pbr_materials.cfg
+--table <game classifier baseline> --out d3xp/pbr/pbr_overrides.cfg`, which keeps
+an entry only if the parent lacks it *or* it's a genuine edit differing from both
+the game's classifier baseline and the parent's value. (d3xp files stay local /
+gitignored; base is the shipped common config.)
 
 Runtime loads `pbr_materials.cfg` at material-parse time (name-keyed lookup), then
 merges `pbr_overrides.cfg` on top. Both share one format — a **superset** of the

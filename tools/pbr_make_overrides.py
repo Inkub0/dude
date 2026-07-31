@@ -121,6 +121,19 @@ def scan_unclassified_lit(root, game, have_keys):
     return found
 
 
+def entries_equiv(a, b):
+    """Semantic equality for the --parent diff: same category, wetness and env;
+    metalness/roughness compared only for non-slider categories (slider-driven ones
+    ignore those columns at draw time, so '*' vs a baked number is the same look)."""
+    if a["cat"].lower() != b["cat"].lower():
+        return False
+    if a["wet"] != b["wet"] or a["env"] != b["env"]:
+        return False
+    if a["cat"].lower() in CAT_ORDER:      # slider-driven -> metal/rough ignored
+        return True
+    return a["metal"] == b["metal"] and a["rough"] == b["rough"]
+
+
 def fmt_num(v, width):
     return ("*" if v is None else f"{v:.2f}").rjust(width)
 
@@ -199,6 +212,19 @@ OVERRIDES_EMPTY_HEADER = """\
 # Columns: <material> <metalness> <roughness> <category> <wetness> <env>; '*' = inherit.
 """
 
+SLIM_PARENT_HEADER = """\
+# DUDE PBR per-game override (docs/pbr-materials.md) — DELTA over the shared base.
+#
+# This game has NO pbr_materials.cfg of its own: it inherits
+# base/pbr/pbr_materials.cfg through the VFS fallback (mod dir searched first, then
+# base). This file carries only what differs — game-only materials plus deliberate
+# per-game edits — so the base tuning is not duplicated (DRY). The in-game editor
+# writes here; regenerate the delta with:
+#   tools/pbr_make_overrides.py --parent base/pbr/pbr_materials.cfg --table <game baseline> ...
+#
+# Columns: <material> <metalness> <roughness> <category> <wetness> <env>; '*' = inherit.
+"""
+
 # order categories for grouped, skimmable output
 CAT_ORDER = {
     "metal": 0, "metal_painted": 1, "ceramic_sheen": 2, "metal_rust": 3,
@@ -218,6 +244,11 @@ def main():
     ap.add_argument("--bake", action="store_true",
                     help="fold the merged result into --table (the main authored "
                          "config) and reset --out to an empty per-game override")
+    ap.add_argument("--parent", default=None,
+                    help="a parent config (e.g. base/pbr/pbr_materials.cfg) the game "
+                         "inherits via VFS fallback: emit only entries missing from it "
+                         "or that differ (DRY per-game override; drops the unclassified "
+                         "section). Incompatible with --bake.")
     args = ap.parse_args()
 
     merge_path = args.merge if args.merge is not None else args.out
@@ -239,7 +270,28 @@ def main():
 
     entries = sorted(merged.values(), key=sort_key)
 
-    lines = [MATERIALS_HEADER if args.bake else HEADER]
+    # DRY: the game inherits --parent (e.g. base) via VFS fallback, so keep only
+    # (a) materials the parent lacks (game-only) and (b) genuine hand-edits — entries
+    # that differ from THIS game's classifier baseline (--table). A shared material
+    # the parent tuned but this game never edited matches its own baseline, so it's
+    # dropped and the parent's tuned value shows through (not the classifier default).
+    if args.parent:
+        parent = parse_file(args.parent)
+        baseline = parse_file(args.table)
+        def is_delta(e):
+            k = e["name"].lower()
+            if k not in parent:
+                return True                                  # game-only material
+            # inheritable from the parent: keep only a genuine hand-edit (differs
+            # from this game's own classifier baseline) whose value also differs
+            # from what the parent already supplies (else the parent covers it).
+            b = baseline.get(k)
+            edited = b is None or not entries_equiv(e, b)
+            return edited and not entries_equiv(e, parent[k])
+        entries = [e for e in entries if is_delta(e)]
+
+    lines = [MATERIALS_HEADER if args.bake else
+             (SLIM_PARENT_HEADER if args.parent else HEADER)]
     cur_cat = None
     for e in entries:
         cat = e["cat"]
@@ -264,7 +316,7 @@ def main():
         lines.append(row)
 
     unclassified = []
-    if args.root:
+    if args.root and not args.parent:
         unclassified = scan_unclassified_lit(args.root, args.game, set(merged.keys()))
         if unclassified:
             lines.append(UNCLASSIFIED_HEADER.rstrip("\n"))
