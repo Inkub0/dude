@@ -2110,8 +2110,13 @@ void R_EnvShot_f( const idCmdArgs &args ) {
 		ref = primary.renderView;
 		ref.x = ref.y = 0;
 		ref.fov_x = ref.fov_y = 90;
-		ref.width = glConfig.vidWidth;
-		ref.height = glConfig.vidHeight;
+		// DUDE: virtual 640x480 units, NOT pixels — RenderViewToViewport scales
+		// by crop/640 x crop/480. The old glConfig.vidWidth/Height here only
+		// worked on 4:3 windows; on widescreen the viewport overshot the square
+		// capture target and every face saved a crop of its 90-degree view, so
+		// the resulting cubemap seams never matched (see R_BakeGlassProbe_f).
+		ref.width = SCREEN_WIDTH;
+		ref.height = SCREEN_HEIGHT;
 		ref.viewaxis = axis[i];
 		sprintf( fullname, "env/%s%s", baseName, extensions[i] );
 		g_screenshotFormat = 0;
@@ -2202,8 +2207,14 @@ void R_BakeGlassProbe_f( const idCmdArgs &args ) {
 		ref = primary.renderView;
 		ref.x = ref.y = 0;
 		ref.fov_x = ref.fov_y = 90;
-		ref.width = glConfig.vidWidth;
-		ref.height = glConfig.vidHeight;
+		// renderView sizes are VIRTUAL 640x480 units: RenderViewToViewport
+		// scales them by crop/640 x crop/480, so the full virtual screen maps
+		// exactly onto the square tiled capture target. Passing real pixel
+		// sizes here (the vanilla envshot recipe) breaks on widescreen windows:
+		// the viewport overshoots the target and each face saves only a crop of
+		// its 90-degree view, so the cube faces can't tile (seam mismatch).
+		ref.width = SCREEN_WIDTH;
+		ref.height = SCREEN_HEIGHT;
 		ref.viewaxis = axis[i];
 		fullname = va( "%s%s", base.c_str(), extensions[i] );
 		g_screenshotFormat = 0;		// probes are always TGA (the cube loader's format)
