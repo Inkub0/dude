@@ -1484,7 +1484,7 @@ static bool R_ItemGlowColor( const idMaterial *shader, const renderEntity_t *par
 // r_itemGlow == 1 maps to this light colour scale — "faint": in a lit area the
 // contribution disappears into the existing light, only near-total darkness shows it
 static const float ITEM_GLOW_MAX_SCALE = 0.10f;
-static const float ITEM_GLOW_RADIUS    = 40.0f;		// world units, per-axis point light radius
+static const float ITEM_GLOW_RADIUS    = 30.0f;		// world units, per-axis point light radius (user calibration)
 
 /*
 =================
