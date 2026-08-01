@@ -184,7 +184,7 @@ g-buffer.
 | `r_ssrGlassProbes` | 1 | glass reflects baked per-area room cubemaps instead of env/gen* (§2.1); inert while `r_ssr` is 0 |
 | `r_ssrGlassProbeBake` | 1 | auto-capture missing probes for the viewer's area (one-time hitch, cached to disk) |
 | `r_ssrGlassProbeSize` | 256 | probe face resolution; `bakeGlassProbe force` re-captures |
-| `r_ssrGlassProbeScale` | 1.0 | glass-only probe brightness (Developer-tab slider), on top of stage colour + `r_gl3ReflectionScale` |
+| `r_ssrGlassProbeScale` | 0.5 | glass-only probe brightness (Developer-tab slider), on top of stage colour, `r_gl3ReflectionScale` and the energy normalization |
 
 Developer-tab sliders mirror the tuning knobs; the Enhancements tab has the
 on/off toggle, the Resolution stops and the Temporal checkbox next to SSAO.
@@ -237,3 +237,7 @@ on/off toggle, the Resolution stops and the Temporal checkbox next to SSAO.
   `r_ssrGlassProbeScale` added as the glass-only brightness knob.
 - Defaults retuned from in-game calibration 2026-08-01: intensity 0.5,
   cutoff 0.56, steps 26, distance 1024, thickness 26, feedback 0.96.
+- Probe scope/energy normalization (env/gen*-only swap + envAvg/probeAvg
+  scaling) verified in-game 2026-08-01 after the chiglass1blue armory door
+  read overpowered; user settled `r_ssrGlassProbeScale` 0.5 → new default.
+  Glass reflections feature-complete pending merge.
