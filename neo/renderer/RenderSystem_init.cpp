@@ -295,10 +295,12 @@ idCVar r_hdr( "r_hdr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "render th
 // only; inert on the legacy ARB2 path). Defaults reproduce vanilla exactly:
 // r_shading 0 keeps the original N.H specular lookup table, r_specularScale 1
 // leaves the specular contribution untouched. r_specularExp only applies to the
-// analytic shading models (1 = Blinn-Phong, 2 = Phong). fhDOOM reference.
-idCVar r_shading( "r_shading", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "specular shading model: 0 = vanilla lookup table (faithful), 1 = Blinn-Phong, 2 = Phong", 0, 2 );
+// analytic Blinn-Phong model. fhDOOM reference. (A third mode, classic Phong
+// R.V, was removed 2026-08-01: redundant — Blinn-Phong is both the closer match
+// to the vanilla LUT and the better-looking analytic model.)
+idCVar r_shading( "r_shading", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "specular shading model: 0 = vanilla lookup table (faithful), 1 = Blinn-Phong", 0, 1 );
 idCVar r_specularScale( "r_specularScale", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "scales the specular contribution (1 = vanilla)", 0.0f, 8.0f );
-idCVar r_specularExp( "r_specularExp", "16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "specular exponent for the analytic shading models (r_shading 1/2)", 1.0f, 128.0f );
+idCVar r_specularExp( "r_specularExp", "16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "specular exponent for the analytic shading model (r_shading 1)", 1.0f, 128.0f );
 
 // DUDE PBR materials (docs/pbr-materials.md; GL3/Vulkan interaction shader only,
 // inert on the legacy ARB2 path). r_pbr switches the per-light interaction pass to

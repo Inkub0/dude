@@ -221,23 +221,16 @@ void main() {
 		// specular term. Shading model selected by u_specularParms.z:
 		//   0 = vanilla dependent LUT read on N.H (faithful default)
 		//   1 = analytic Blinn-Phong pow(N.H, exp)
-		//   2 = analytic Phong pow(R.V, exp)
 		// u_specularParms.x scales the result (1 = vanilla), .y is the exponent.
 		int shadingModel = int( u_specularParms.z + 0.5 );
 		if ( shadingModel == 0 ) {
 			float sDot = dot( specularV, localNormal );
 			spec = texture( u_specularTable, vec2( sDot, sDot ) );
 		} else {
-			// analytic models want a unit normal (localNormal is deliberately left
-			// un-renormalized above for the diffuse/LUT path)
+			// the analytic model wants a unit normal (localNormal is deliberately
+			// left un-renormalized above for the diffuse/LUT path)
 			vec3 nSpec = normalize( localNormal );
-			float rawDot;
-			if ( shadingModel == 2 ) {
-				vec3 R = reflect( -lightV, nSpec );
-				rawDot = max( dot( R, normalize( var_TexViewVec ) ), 0.0 );
-			} else {
-				rawDot = max( dot( specularV, nSpec ), 0.0 );
-			}
+			float rawDot = max( dot( specularV, nSpec ), 0.0 );
 			spec = vec4( pow( rawDot, u_specularParms.y ) );
 		}
 		// the vanilla "specular map * 2" scale is folded into the scalar factor here

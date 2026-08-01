@@ -18,9 +18,10 @@ fidelity-affecting toggle, each defaulting to the classic look unless noted:
 - parallax occlusion mapping (Phase 9, default off)
 - specular model (`r_shading`, fhDOOM-style): **default = the original Doom 3
   specular-falloff LUT** (baked half-angle curve, faithful — see interaction.frag).
-  Opt-in live alternatives: Blinn-Phong (close approximation of the LUT) and Phong
-  (bigger departure: reflection-vector, tighter highlights, wrong for Doom 3's
-  half-angle model). Both alter highlight shape/size — a look change, not free.
+  Opt-in live alternative: Blinn-Phong (close approximation of the LUT). It
+  alters highlight shape/size — a look change, not free. (A classic-Phong mode
+  was also shipped, then removed 2026-08-01: reflection-vector, wrong for
+  Doom 3's half-angle model, redundant with Blinn-Phong.)
 - uncapped framerate via tick interpolation (Phase 7)
 - native-resolution console font scaling (standalone QoL; the console renders in
   virtual 640×480 coords today — scaled blurry at high res. UI-only change.)

@@ -11,7 +11,7 @@ Like everything in the enhancement suite it is **opt-in and enhancement-gated**
 backend), and **off by default** (`r_pbr 0`). This one deserves the strongest fidelity
 flag in the suite so far: an energy-conserving GGX BRDF with Fresnel visibly changes
 *every lit surface*, not just adds detail on top. The vanilla LUT/Blinn paths
-(`r_shading 0/1/2`) remain byte-identical and reachable; the Potato preset stays an
+(`r_shading 0/1`) remain byte-identical and reachable; the Potato preset stays an
 exact vanilla frame.
 
 Primary code (planned): BRDF branch in
@@ -169,7 +169,7 @@ already handles the HDR-target sign issue for any new term added there. HDR rema
 the >1 highlight energy is what the RGBA16F buffer exists for.
 
 **Relation to `r_shading` (decided):** when `r_pbr 1`, the GGX path **supersedes** the
-specular shading model — `r_shading` (LUT/Blinn-Phong/Phong) and its tunables
+specular shading model — `r_shading` (LUT/Blinn-Phong) and its tunables
 `r_specularScale` / `r_specularExp` are simply not read by the PBR branch. The shader
 branches on the PBR enable before the `shadingModel` switch; the cvars keep their
 values untouched so switching `r_pbr` back off restores the exact previous look.

@@ -870,9 +870,9 @@ extern idCVar r_hdr;					// HDR float scene buffer (removes banding); opengl3/Vu
 extern idCVar r_fxaaStrength;			// FXAA subpixel smoothing amount (0 = edge-only .. 1)
 
 // DUDE Phase 3.5 specular tuning — GL3/Vulkan interaction shader only, vanilla at default
-extern idCVar r_shading;				// 0 = vanilla LUT, 1 = Blinn-Phong, 2 = Phong
+extern idCVar r_shading;				// 0 = vanilla LUT, 1 = Blinn-Phong
 extern idCVar r_specularScale;			// scales specular contribution (1 = vanilla)
-extern idCVar r_specularExp;			// analytic specular exponent (r_shading 1/2)
+extern idCVar r_specularExp;			// analytic specular exponent (r_shading 1)
 
 // DUDE PBR materials (docs/pbr-materials.md) — GL3/Vulkan interaction shader only
 void R_PbrTableInvalidate( void );		// drop the cached per-material table (reloadPbrTable)

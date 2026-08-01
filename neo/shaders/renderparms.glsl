@@ -54,7 +54,7 @@ UBO_BINDING(0) uniform RenderParams {
 
 	vec4 u_specularParms;        // interaction specular tuning (DUDE Phase 3.5):
 	                            // x = scale, y = exponent, z = shading model
-	                            // (0 LUT / 1 Blinn-Phong / 2 Phong),
+	                            // (0 LUT / 1 Blinn-Phong),
 	                            // w = point-light cube shadow PCF tap count (1..16)
 
 	vec4 u_shadowParms;          // x = technique (0 none / 1 projected-2D / 2 point-cube),
