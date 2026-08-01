@@ -1439,7 +1439,13 @@ materials (plain diffuse item shells included).
 =================
 */
 static bool R_ItemGlowColor( const idMaterial *shader, const renderEntity_t *parms, idVec3 &out ) {
-	if ( shader == NULL || idStr::Icmpn( shader->GetName(), "models/items/", 13 ) != 0 ) {
+	if ( shader == NULL ) {
+		return false;
+	}
+	// weapon-folder pickups glow too (plasma cell pl_can_blue/green, soul cube...); the view
+	// weapon and monster-held copies never get here (depth-hack / skeletal guards in the caller)
+	if ( idStr::Icmpn( shader->GetName(), "models/items/", 13 ) != 0
+			&& idStr::Icmpn( shader->GetName(), "models/weapons/", 15 ) != 0 ) {
 		return false;
 	}
 
