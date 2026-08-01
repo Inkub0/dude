@@ -1183,6 +1183,25 @@ void GLimp_Shutdown() {
 	common->Printf("Shutting down OpenGL subsystem\n");
 
 #if SDL_VERSION_ATLEAST(2, 0, 0)
+	// Release any mouse capture / relative-mouse mode and keyboard grab, then flush
+	// pending events, *before* tearing the window down. SDL's X11 backend restores the
+	// cursor when relative-mouse/grab is active, and doing that against a window that is
+	// mid-destruction intermittently throws BadWindow (X_TranslateCoords) on a vid_restart,
+	// which cascades into a crash. Restoring the cursor now — while the window is still
+	// fully valid — keeps that request on a live window, and the pump lets SDL settle the
+	// state change before the destroy. (docs/known-bugs.md: intermittent vid_restart crash.)
+	if (window) {
+	#if SDL_VERSION_ATLEAST(3, 0, 0)
+		SDL_SetWindowRelativeMouseMode(window, false);
+		SDL_SetWindowMouseGrab(window, false);
+		SDL_SetWindowKeyboardGrab(window, false);
+	#else
+		SDL_SetRelativeMouseMode(SDL_FALSE);
+		SDL_SetWindowGrab(window, SDL_FALSE);
+	#endif
+		SDL_PumpEvents();
+	}
+
 	if (context) {
 		SDL_GL_DeleteContext(context);
 		context = NULL;

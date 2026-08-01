@@ -4,19 +4,20 @@ Deferred until the rendering pipeline is complete — tracked here for later tri
 Hub: [vulkan-port.md](vulkan-port.md). Deliberate deviations (not bugs) are in
 [readme-changes.md](readme-changes.md).
 
-- **[OPEN] Intermittent crash on repeated `vid_restart` (SDL3/X11 window teardown).**
-  Independent of the backend-switch fix below — confirmed 2026-07-31 to reproduce on the
-  **legacy** backend (where `RB_RHI_Shutdown` is a hard no-op), on the 2nd–3rd `vid_restart`
-  with a world loaded. `GLimp_Shutdown` → `SDL_DestroyWindow` intermittently throws
-  `X Error BadWindow (X_TranslateCoords)` — SDL3's X11 backend restoring the cursor against a
-  window that is mid-teardown — which cascades into the game DLL's cleanup
-  (`idClipModel::FreeTraceModel: tried to free uncached trace model`, then an
-  `idStrPool::FreeString` assert → SIGABRT). The intermittency is the signature of an async X11
-  teardown race. Pre-existing, in the windowing / game-teardown layer, **not** the renderer GPU
-  teardown. Matters for the Vulkan port (heavy backend re-init). Mitigation under test: release
-  relative-mouse/grab + flush pending events immediately before `SDL_DestroyWindow` in
-  `GLimp_Shutdown`. Needs runtime iteration to confirm (can't be self-verified); intermittent, so
-  validate by hammering `vid_restart` 10–20×.
+- **[MITIGATED 2026-08-01] Intermittent crash on repeated `vid_restart` (SDL3/X11 window teardown).**
+  Independent of the backend-switch fix below — reproduced 2026-07-31 on the **legacy** backend
+  (where `RB_RHI_Shutdown` is a hard no-op), on the 2nd–3rd `vid_restart` with a world loaded.
+  `GLimp_Shutdown` → `SDL_DestroyWindow` intermittently threw `X Error BadWindow (X_TranslateCoords)`
+  — SDL's X11 backend restoring the cursor against a window that is mid-teardown — which cascaded
+  into the game DLL's cleanup (`idClipModel::FreeTraceModel: tried to free uncached trace model`,
+  then an `idStrPool::FreeString` assert → SIGABRT). The intermittency is the signature of an async
+  X11 teardown race. Pre-existing, in the windowing / game-teardown layer, **not** the renderer GPU
+  teardown. Note this fork runs SDL through `sdl2-compat` → SDL3 on modern distros, so the teardown
+  path is SDL3's. **Mitigation (applied):** `GLimp_Shutdown` now drops relative-mouse mode + mouse
+  and keyboard grab and pumps events *before* `SDL_DestroyWindow`, so the cursor restore lands on a
+  still-valid window. After this the reporter could no longer reproduce the crash across repeated
+  `vid_restart`s. Kept tracked (not "resolved") because it is an intermittent async race — re-verify
+  on a native-SDL3 build and under the Vulkan backend's heavier re-init.
 
 - **[RESOLVED 2026-07-31] Garbled image / white screen when switching renderer backend (legacy ↔ opengl3).**
   Switching backends in Video Options — or any `vid_restart` while on the GL3 core backend —
