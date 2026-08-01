@@ -106,7 +106,10 @@ into the G-buffer, the `TG_REFLECT_CUBE` shader-pass stage marches for itself:
   binary refinement, weapon-mask and backface rejects) from the glass
   fragment's own view-space position/normal (interpolated varyings — glass is
   in neither the G-buffer nor the depth buffer, which also means the ray can
-  never self-hit and arms naturally). Hit confidence = edge x range x facing
+  never self-hit and arms naturally). Twosided panes (glass1 etc.) get their
+  normal flipped toward the viewer before the reflect — the geometry normal
+  faces one side only, and unflipped the whole back side marched to nonsense
+  (vanilla's cube lookup hid that). Hit confidence = edge x range x facing
   fades; the result is `mix(cube, scene x r_ssrIntensity, confidence)`, so the
   cubemap takes back over smoothly where screen-space data runs out, and the
   stage colour (and `r_gl3ReflectionScale`) modulates the result either way.

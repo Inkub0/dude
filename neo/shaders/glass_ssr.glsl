@@ -66,6 +66,13 @@ vec3 GlassProjectToFrag( vec3 viewPos ) {
 // arms naturally on the first samples.
 vec4 GlassSsrMarch( vec3 P, vec3 N ) {
 	vec3 V = normalize( -P );
+	// twosided glass (glass1 etc.): the geometry normal faces one side only but
+	// the pane is viewed from both. A normal facing away from the eye reflects
+	// the ray to nonsense and every march misses — vanilla's cube lookup hid
+	// this because a cubemap reads plausibly either way. Flip toward the viewer.
+	if ( dot( N, V ) < 0.0 ) {
+		N = -N;
+	}
 	vec3 R = reflect( -V, N );
 
 	// rays aimed almost straight back at the eye only ever produce false
