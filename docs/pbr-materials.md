@@ -345,8 +345,8 @@ modpack `.mtr` that redefines them with lit stages, zero engine work:
 | `r_pbrSpecScale` | 1.66 | artistic energy scale on the GGX lobe — the PBR counterpart to `r_specularScale` (deliberately not shared with it). **Dielectric-weighted**: fades to 1 as metalness rises, because metal F0 comes from the already-bright albedo and boosting it again blew out bare-metal highlights (grate-floor finding, 2026-07-30). Calibration history: 3 matched the Blinn look while full/near-full Toksvig flattened every lobe; once the 0.2 baseline restored tight peaks, 1.66 became the confirmed perceptual match |
 | `r_pbrMetalMetalness` | 0.8 | metalness of the bare-metal category (below 1 keeps a diffuse sliver; no global cap) |
 | `r_pbrMetalDiffuse` | 0.75 | metal albedo-colour retention: relaxes the physical diffuse-kill so metals keep their painted colour (1 = keep all, 0 = physical) |
-| `r_pbrToksvigBase` | 0.2 | normal-variance baseline before Toksvig widening — the anti-firefly vs highlight-tightness trade (§4) |
-| `r_pbrFireflyClamp` | 6 | GGX lobe ceiling — spike suppression; also the bounded core skin rides at (§4) |
+| `r_pbrToksvigBase` | 0.08 | normal-variance baseline before Toksvig widening — the anti-firefly vs highlight-tightness trade (§4). Recalibrated 0.2 → 0.08 in the 2026-08-01 reflection retune: with SSR intensity halved and glass on probes, the softer widening reads right and the extra spike energy is absorbed by the raised firefly clamp |
+| `r_pbrFireflyClamp` | 12 | GGX lobe ceiling — spike suppression; also the bounded core skin rides at (§4). Raised 6 → 12 with the 0.08 baseline (same retune): hotter highlight cores, spikes still bounded |
 | `r_pbrEnvScale` | 0.3 | Phase C.1 light-glow environment floor for metals |
 | `r_ssr*` | off | Phase C.2 screen-space reflections — own cvar family, see docs/ssr.md §4 |
 
