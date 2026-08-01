@@ -344,6 +344,7 @@ idCVar r_ssrThickness( "r_ssrThickness", "16", CVAR_RENDERER | CVAR_ARCHIVE | CV
 idCVar r_ssrResScale( "r_ssrResScale", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "resolution the reflection march runs at, as a fraction of the screen. The Fresnel/material weighting stays full-res (ssr_composite), so lowering this only softens the reflected image — half res is ~4x cheaper", 0.25f, 1.0f );
 idCVar r_ssrTemporal( "r_ssrTemporal", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "accumulate reflections across frames (reprojected by camera motion) so the march's jitter grain resolves into a clean image. Neighbourhood-clamped to limit ghosting" );
 idCVar r_ssrTemporalFeedback( "r_ssrTemporalFeedback", "0.9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "fraction of reflection history kept per frame with r_ssrTemporal: higher = smoother but slower to react, lower = noisier but snappier. Flicker suppression is handled by variance clipping + hit-aware blending, so this shouldn't need pushing past ~0.9", 0.0f, 0.97f );
+idCVar r_ssrGlass( "r_ssrGlass", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "with r_ssr: glass (cube-reflection) surfaces mirror the on-screen scene instead of their static cubemap, falling back to the cubemap where the reflected ray leaves the screen or misses. No effect while r_ssr is 0" );
 
 // DUDE Phase 3.5 shadow mapping (GL3/Vulkan only; stencil stays the faithful
 // default). Global mode for now: 0 = stencil shadow volumes (vanilla), 1 =

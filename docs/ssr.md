@@ -14,6 +14,10 @@ shader untouched; the vanilla and plain-PBR paths render bit-identically to befo
 
 - Polished floors (ceramic_sheen), bare metal and low-roughness table entries
   reflect on-screen geometry: fixtures, screens, characters, lights.
+- Glass and other cube-reflection surfaces (`r_ssrGlass`, on by default with
+  `r_ssr`) mirror the on-screen scene instead of Doom 3's static generic
+  cubemap, falling back to the cubemap where the ray leaves the screen or
+  misses (see §2.1).
 - Reflection strength follows the PBR material system: Schlick Fresnel per pixel
   (dielectrics reflect mostly at grazing angles — the classic wet-floor look;
   metals reflect at all angles), faded out toward `r_ssrMaxRoughness`.
@@ -81,6 +85,35 @@ Deliberately scoped to *sharp* reflections on low-roughness surfaces:
 
 Not built yet (see §5): glossy (roughness-blurred) reflections.
 
+### 2.1 Glass (translucent cube-reflection stages)
+
+The three-stage pipeline above never touches glass: translucent materials are
+excluded from the G-buffer prepass, and the composite runs at the split point
+*before* translucents draw — so glass kept reflecting its static default
+cubemap (first sighted on the Mars City hall windows). Rather than force glass
+into the G-buffer, the `TG_REFLECT_CUBE` shader-pass stage marches for itself:
+
+- Glass draws after the split, so `_currentRender` already holds the lit
+  opaque scene snapshot and `_currentDepth` this view's opaque depth — exactly
+  the data the march needs, at no extra capture cost.
+- While the view's SSR pass has completed (`RB_RHI_SsrSceneValid`, compared
+  per-viewDef so subviews/2D views never match), `RB_RHI_RenderTexgenStage`
+  swaps `environment`/`bumpyenvironment` for `environment_ssr`/
+  `bumpyenvironment_ssr` per draw — the material IR is untouched, so `r_ssr 0`
+  or `r_ssrGlass 0` keeps the vanilla path bit-identical.
+- The variants (shared march in `glass_ssr.glsl`) compute the cube reflection
+  exactly as the base shaders, then march the ssr.frag recipe (armed crossing +
+  binary refinement, weapon-mask and backface rejects) from the glass
+  fragment's own view-space position/normal (interpolated varyings — glass is
+  in neither the G-buffer nor the depth buffer, which also means the ray can
+  never self-hit and arms naturally). Hit confidence = edge x range x facing
+  fades; the result is `mix(cube, scene x r_ssrIntensity, confidence)`, so the
+  cubemap takes back over smoothly where screen-space data runs out, and the
+  stage colour (and `r_gl3ReflectionScale`) modulates the result either way.
+- Full-resolution, no temporal accumulation: glass pixels are few, the surface
+  is smooth (no roughness jitter to resolve), and the static interleaved-
+  gradient dither hides the march banding.
+
 ## 3. Data flow
 
 ```
@@ -117,6 +150,7 @@ g-buffer.
 | `r_ssrResScale` | 1.0 | march buffer resolution fraction (menu stops: 1/2, 2/3, 3/4, Full) |
 | `r_ssrTemporal` | 1 | accumulate across frames; resolves the march grain |
 | `r_ssrTemporalFeedback` | 0.9 | history fraction kept per frame (variance clipping handles flicker; no need to push this) |
+| `r_ssrGlass` | 1 | glass/cube-reflection stages march the scene too (§2.1); inert while `r_ssr` is 0 |
 
 Developer-tab sliders mirror the tuning knobs; the Enhancements tab has the
 on/off toggle, the Resolution stops and the Temporal checkbox next to SSAO.
@@ -157,3 +191,6 @@ on/off toggle, the Resolution stops and the Temporal checkbox next to SSAO.
 - C.2.1 resolution scale + temporal accumulation: built 2026-07-30, pending
   in-game verification. Glossy blur deferred (see §5) — gated on a real sighting,
   not on the active roadmap.
+- Glass extension (§2.1, `r_ssrGlass`): built 2026-08-01 after the Mars City
+  hall windows were still showing the default cubemap with SSR on; pending
+  in-game verification.

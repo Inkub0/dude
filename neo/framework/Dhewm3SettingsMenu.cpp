@@ -2635,6 +2635,15 @@ static void DrawEnhancementsMenu()
 			"recomputing them fresh each frame. The march's grainy sparkle settles into a clean "
 			"image; ghosting on fast motion is clamped automatically. The Feedback strength lives "
 			"in the Developer tab. Non-vanilla; opengl3 only." );
+
+		// Glass: cube-reflection stages march the real scene too (docs/ssr.md).
+		bool ssrGlass = r_ssrGlass.GetBool();
+		if ( ImGui::Checkbox( "Glass Reflections##ssr", &ssrGlass ) ) {
+			r_ssrGlass.SetBool( ssrGlass );
+		}
+		AddTooltip( "Glass and other cube-mapped reflective surfaces mirror the on-screen scene "
+			"instead of Doom 3's static generic cubemap, falling back to the cubemap where the "
+			"reflected ray leaves the screen or misses. Non-vanilla; opengl3 only." );
 		ImGui::EndDisabled();
 	}
 

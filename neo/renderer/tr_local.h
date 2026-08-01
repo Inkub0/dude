@@ -912,6 +912,7 @@ extern idCVar r_ssrThickness;			// assumed surface thickness for hit tests
 extern idCVar r_ssrResScale;			// march buffer resolution as a fraction of the view
 extern idCVar r_ssrTemporal;			// accumulate across frames (resolves the march grain)
 extern idCVar r_ssrTemporalFeedback;	// history fraction kept per frame
+extern idCVar r_ssrGlass;				// glass cube-reflection stages march the scene too
 
 // DUDE Phase 3.5 shadow mapping — GL3/Vulkan only, stencil stays the default
 extern idCVar r_shadowMapping;			// 0 = stencil volumes, 1 = shadow maps where supported
