@@ -2636,27 +2636,16 @@ static void DrawEnhancementsMenu()
 			"image; ghosting on fast motion is clamped automatically. The Feedback strength lives "
 			"in the Developer tab. Non-vanilla; opengl3 only." );
 
-		// Glass: cube-reflection stages march the real scene too (docs/ssr.md).
-		bool ssrGlass = r_ssrGlass.GetBool();
-		if ( ImGui::Checkbox( "Glass Reflections##ssr", &ssrGlass ) ) {
-			r_ssrGlass.SetBool( ssrGlass );
-		}
-		AddTooltip( "Glass and other cube-mapped reflective surfaces mirror the on-screen scene "
-			"instead of Doom 3's static generic cubemap, falling back to the cubemap where the "
-			"reflected ray leaves the screen or misses. Non-vanilla; opengl3 only." );
-
-		// Baked room probes: the any-angle fallback behind the screen-space hits.
-		ImGui::BeginDisabled( !r_ssrGlass.GetBool() );
+		// Glass: baked room probes replace the generic env/gen* cubemap (docs/ssr.md).
 		bool ssrProbes = r_ssrGlassProbes.GetBool();
-		if ( ImGui::Checkbox( "Baked Room Probes##ssr", &ssrProbes ) ) {
+		if ( ImGui::Checkbox( "Glass Reflections##ssr", &ssrProbes ) ) {
 			r_ssrGlassProbes.SetBool( ssrProbes );
 		}
-		AddTooltip( "Screen-space reflections can only mirror what's on screen, so a window you "
-			"face head-on falls back to a cubemap. With this on, that fallback is a snapshot of "
-			"the actual room (captured automatically the first time you enter an area, cached to "
-			"disk) instead of Doom 3's generic blur - glass reflects the real room at any angle. "
-			"Re-capture an area with the bakeGlassProbe console command. Non-vanilla; opengl3 only." );
-		ImGui::EndDisabled();
+		AddTooltip( "Glass reflects a snapshot of the actual room (captured automatically the "
+			"first time you enter an area, cached to disk) instead of Doom 3's generic blurry "
+			"cubemap - panes mirror the real room at any viewing angle. Re-capture an area with "
+			"the bakeGlassProbe console command; brightness slider in the Developer tab. "
+			"Non-vanilla; opengl3 only." );
 		ImGui::EndDisabled();
 	}
 
@@ -3004,6 +2993,14 @@ static void DrawShadowDebugMenu()
 	AddTooltip( "r_ssrTemporalFeedback: fraction of reflection history kept per frame while Temporal "
 		"Accumulation is on (Enhancements tab). Higher = smoother, converges slower and can trail "
 		"on fast motion; lower = grainier but snappier." );
+
+	float glassProbeScale = r_ssrGlassProbeScale.GetFloat();
+	if ( ImGui::SliderFloat( "Glass Probe Intensity", &glassProbeScale, 0.0f, 4.0f, "%.2f" ) ) {
+		r_ssrGlassProbeScale.SetFloat( glassProbeScale );
+	}
+	AddTooltip( "r_ssrGlassProbeScale: brightness of the baked room cubemap on glass only "
+		"(Enhancements > Glass Reflections). Applied on top of the material's own reflection "
+		"colour and the global Reflection Brightness; other reflective surfaces are unaffected." );
 
 	ImGui::EndDisabled();
 

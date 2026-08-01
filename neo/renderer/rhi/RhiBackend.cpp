@@ -1132,27 +1132,6 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 	const srfTriangles_t *tri = surf->geo;
 	const float *regs = surf->shaderRegisters;
 
-	// DUDE glass SSR (docs/ssr.md): while _currentRender holds this view's
-	// split-point opaque scene snapshot (the SSR pass completed), cube-reflection
-	// stages swap to a marching shader variant that mirrors the real scene and
-	// falls back to the cube on miss. Per-draw program swap — the material IR is
-	// untouched, so r_ssr / r_ssrGlass off keeps the vanilla path bit-identical.
-	rhi::ShaderHandle program = si.program;
-	bool glassSsr = false;
-	rhi::ImageHandle glassSsrNormalImg = 0;
-	if ( si.texgen == TG_REFLECT_CUBE && r_ssr.GetBool() && r_ssrGlass.GetBool()
-	     && RB_RHI_SsrSceneValid( viewDef ) ) {
-		glassSsrNormalImg = RB_RHI_SsrNormalImage( r );
-		if ( glassSsrNormalImg != 0 && globalImages->currentDepthImage->uploadWidth > 0 ) {
-			rhi::ShaderHandle p = r->LoadShader( surf->material->GetBumpStage()
-				? "bumpyenvironment_ssr" : "environment_ssr" );
-			if ( p ) {
-				program = p;
-				glassSsr = true;
-			}
-		}
-	}
-
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
@@ -1243,14 +1222,21 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 			float *dst = row == 0 ? parms.modelMatrixRow0 : ( row == 1 ? parms.modelMatrixRow1 : parms.modelMatrixRow2 );
 			dst[0] = mm[row]; dst[1] = mm[row + 4]; dst[2] = mm[row + 8]; dst[3] = mm[row + 12];
 		}
-		// reflection cube on unit 0; with glass SSR on, a baked room probe
-		// (docs/ssr.md) replaces the generic env/gen* cube so the miss/fallback
-		// shows the actual room at any angle
+		// reflection cube on unit 0; with glass probes on, a baked room probe
+		// (docs/ssr.md) replaces the generic env/gen* cube so panes reflect the
+		// actual room at any angle. r_ssrGlassProbeScale is the glass-only
+		// intensity knob, folded into the stage colour like r_gl3ReflectionScale
+		// (the bumpy variant takes no stage colour — vanilla behaviour — so the
+		// scale only reaches unbumped glass).
 		idImage *cubeImg = pStage->texture.image;
-		if ( r_ssr.GetBool() && r_ssrGlass.GetBool() ) {
+		if ( r_ssr.GetBool() && r_ssrGlassProbes.GetBool() ) {
 			idImage *probe = RB_RHI_GlassProbeForSurface( viewDef, surf );
 			if ( probe ) {
 				cubeImg = probe;
+				const float ps = r_ssrGlassProbeScale.GetFloat();
+				parms.color[0] *= ps;
+				parms.color[1] *= ps;
+				parms.color[2] *= ps;
 			}
 		}
 		cubeImg->Bind();
@@ -1259,41 +1245,6 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 			rhi::gl3ActiveTexture( GL_TEXTURE1 );
 			backEnd.glState.currenttmu = 1;
 			bumpStage->texture.image->Bind();
-			rhi::gl3ActiveTexture( GL_TEXTURE0 );
-			backEnd.glState.currenttmu = 0;
-		}
-		if ( glassSsr ) {
-			// march data on units 2/3/4 + the uniform packing documented in
-			// shaders/glass_ssr.glsl (same recipes as RB_RHI_ScreenSpaceReflections,
-			// full-res fragcoords like ssr_composite)
-			memcpy( parms.modelViewMatrix, surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
-			memcpy( parms.projectionMatrix, viewDef->projectionMatrix, sizeof( parms.projectionMatrix ) );
-			parms.localParam0[2] = idMath::ClampFloat( 64.0f, 8192.0f, r_ssrMaxDistance.GetFloat() );
-			parms.localParam0[3] = idMath::ClampFloat( 1.0f, 256.0f, r_ssrThickness.GetFloat() );
-			parms.localParam1[0] = (float)idMath::ClampInt( 4, 64, r_ssrSteps.GetInteger() );
-			parms.localParam1[1] = r_ssrIntensity.GetFloat();
-			const int fullW = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
-			const int fullH = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-			parms.screenCorrection[0] = 1.0f / fullW;
-			parms.screenCorrection[1] = 1.0f / fullH;
-			const int potW = globalImages->currentRenderImage->uploadWidth;
-			const int potH = globalImages->currentRenderImage->uploadHeight;
-			parms.screenCorrection[2] = potW > 0 ? (float)fullW / potW : 1.0f;
-			parms.screenCorrection[3] = potH > 0 ? (float)fullH / potH : 1.0f;
-			parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
-			parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
-
-			rhi::gl3ActiveTexture( GL_TEXTURE2 );
-			backEnd.glState.currenttmu = 2;
-			globalImages->currentRenderImage->Bind();
-			rhi::gl3ActiveTexture( GL_TEXTURE3 );
-			backEnd.glState.currenttmu = 3;
-			globalImages->currentDepthImage->Bind();
-			// the normal G-buffer is an RHI target, not an idImage: raw bind and
-			// invalidate that unit's cache entry (same idiom as the SSR passes)
-			rhi::gl3ActiveTexture( GL_TEXTURE0 + 4 );
-			qglBindTexture( GL_TEXTURE_2D, (GLuint)glassSsrNormalImg );
-			backEnd.glState.tmu[4].current2DMap = -1;
 			rhi::gl3ActiveTexture( GL_TEXTURE0 );
 			backEnd.glState.currenttmu = 0;
 		}
@@ -1321,7 +1272,7 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 			pd.stateBits |= GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
 		}
 	}
-	pd.shader = program;
+	pd.shader = si.program;
 	pd.vertexLayout = rhi::VL_DRAWVERT;
 	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
 	r->BindPipeline( pd );

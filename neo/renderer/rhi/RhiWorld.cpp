@@ -274,9 +274,6 @@ static bool rhiSsrHistValid = false;				// the read slot holds a usable previous
 static bool rhiSsrHavePrevVP = false;				// rhiSsrPrevViewProj holds a previous view-proj
 static float rhiSsrPrevViewProj[16];				// previous frame's world->clip (proj * view)
 static float rhiSsrJitterPhase = 0.0f;				// per-frame march jitter rotation
-static const viewDef_t *rhiSsrSceneViewDef = NULL;	// view whose split-point scene snapshot is
-													// in _currentRender (glass SSR gate; only ever
-													// compared, never dereferenced)
 
 // Normal G-buffer (Option B): bump-mapped view-space normals written by an extra opaque
 // geometry pass, so SSAO uses real per-pixel normals instead of reconstructing from depth.
@@ -1991,7 +1988,6 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsrHistRT[0] = rhiSsrHistRT[1] = 0;
 	rhiSsrHistIdx = 0;			rhiSsrHistW = rhiSsrHistH = 0;
 	rhiSsrHistValid = false;	rhiSsrHavePrevVP = false;
-	rhiSsrSceneViewDef = NULL;
 
 	rhiNormalRT = 0;			rhiNormalW = rhiNormalH = 0;
 	rhiNormalReadyThisView = false;	rhiNormalMrt = false;
@@ -2706,7 +2702,6 @@ assume the whole framebuffer at the origin (same rule as SSAO).
 ===================
 */
 void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
-	rhiSsrSceneViewDef = NULL;		// no usable snapshot until this view completes the pass
 	if ( !r_ssr.GetBool() || !R_BackendSupportsEnhancements() ) {
 		return;
 	}
@@ -2888,29 +2883,6 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_DrawFullscreen( r, compProg, compParms, r->GetRenderTargetImage( resultRT ),
 	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 	RB_RHI_ForgetTexBinds();
-
-	// glass SSR (docs/ssr.md): the translucent TG_REFLECT_CUBE stages that draw
-	// after this point may now march _currentRender/_currentDepth themselves
-	rhiSsrSceneViewDef = viewDef;
-}
-
-/*
-===================
-RB_RHI_SsrSceneValid / RB_RHI_SsrNormalImage
-
-Glass SSR support (docs/ssr.md): RB_RHI_RenderTexgenStage only swaps a cube-
-reflection stage to the marching shader variant while the CURRENT view's SSR
-pass has run — that guarantees _currentRender holds the split-point opaque
-scene snapshot, _currentDepth this view's opaque depth, and the normal G-buffer
-(weapon mask for hit rejects) is populated. Subviews and 2D views never match.
-===================
-*/
-bool RB_RHI_SsrSceneValid( const viewDef_t *viewDef ) {
-	return rhiSsrSceneViewDef != NULL && rhiSsrSceneViewDef == viewDef;
-}
-
-rhi::ImageHandle RB_RHI_SsrNormalImage( rhi::RHI *r ) {
-	return rhiNormalRT ? r->GetRenderTargetImage( rhiNormalRT ) : 0;
 }
 
 /*

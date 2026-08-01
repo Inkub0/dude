@@ -14,10 +14,9 @@ shader untouched; the vanilla and plain-PBR paths render bit-identically to befo
 
 - Polished floors (ceramic_sheen), bare metal and low-roughness table entries
   reflect on-screen geometry: fixtures, screens, characters, lights.
-- Glass and other cube-reflection surfaces (`r_ssrGlass`, on by default with
-  `r_ssr`) mirror the on-screen scene instead of Doom 3's static generic
-  cubemap, falling back to the cubemap where the ray leaves the screen or
-  misses (see §2.1).
+- Glass and other cube-reflection surfaces (`r_ssrGlassProbes`, on by default
+  with `r_ssr`) reflect a baked cubemap of the actual room instead of Doom 3's
+  static generic `env/gen*` cubemap, at any viewing angle (see §2.1).
 - Reflection strength follows the PBR material system: Schlick Fresnel per pixel
   (dielectrics reflect mostly at grazing angles — the classic wet-floor look;
   metals reflect at all angles), faded out toward `r_ssrMaxRoughness`.
@@ -85,47 +84,29 @@ Deliberately scoped to *sharp* reflections on low-roughness surfaces:
 
 Not built yet (see §5): glossy (roughness-blurred) reflections.
 
-### 2.1 Glass (translucent cube-reflection stages)
+### 2.1 Glass (baked room probes)
 
 The three-stage pipeline above never touches glass: translucent materials are
 excluded from the G-buffer prepass, and the composite runs at the split point
 *before* translucents draw — so glass kept reflecting its static default
-cubemap (first sighted on the Mars City hall windows). Rather than force glass
-into the G-buffer, the `TG_REFLECT_CUBE` shader-pass stage marches for itself:
+cubemap (first sighted on the Mars City hall windows). Glass gets its own
+mechanism instead (`r_ssrGlassProbes`, on by default with `r_ssr`): the
+`TG_REFLECT_CUBE` stage binds a **baked cubemap of the actual room** in place
+of the generic `env/gen*` image. No shader change — the stage colour,
+`r_gl3ReflectionScale` and the vanilla reflection math all apply unchanged,
+plus a glass-only brightness knob (`r_ssrGlassProbeScale`, folded into the
+stage colour; the bumpy variant takes no stage colour — vanilla behaviour —
+so the knob only reaches unbumped glass).
 
-- Glass draws after the split, so `_currentRender` already holds the lit
-  opaque scene snapshot and `_currentDepth` this view's opaque depth — exactly
-  the data the march needs, at no extra capture cost.
-- While the view's SSR pass has completed (`RB_RHI_SsrSceneValid`, compared
-  per-viewDef so subviews/2D views never match), `RB_RHI_RenderTexgenStage`
-  swaps `environment`/`bumpyenvironment` for `environment_ssr`/
-  `bumpyenvironment_ssr` per draw — the material IR is untouched, so `r_ssr 0`
-  or `r_ssrGlass 0` keeps the vanilla path bit-identical.
-- The variants (shared march in `glass_ssr.glsl`) compute the cube reflection
-  exactly as the base shaders, then march the ssr.frag recipe (armed crossing +
-  binary refinement, weapon-mask and backface rejects) from the glass
-  fragment's own view-space position/normal (interpolated varyings — glass is
-  in neither the G-buffer nor the depth buffer, which also means the ray can
-  never self-hit and arms naturally). Twosided panes (glass1 etc.) get their
-  normal flipped toward the viewer before the reflect — the geometry normal
-  faces one side only, and unflipped the whole back side marched to nonsense
-  (vanilla's cube lookup hid that). Hit confidence = edge x range x facing
-  fades; the result is `mix(cube, scene x r_ssrIntensity, confidence)`, so the
-  cubemap takes back over smoothly where screen-space data runs out, and the
-  stage colour (and `r_gl3ReflectionScale`) modulates the result either way.
-- Full-resolution, no temporal accumulation: glass pixels are few, the surface
-  is smooth (no roughness jitter to resolve), and the static interleaved-
-  gradient dither hides the march banding.
-
-### 2.2 Baked room probes (the any-angle fallback)
-
-Screen-space reflections can only mirror content that is on screen. A pane
-viewed head-on reflects the room *behind the camera* — never rendered this
-frame — so the march correctly misses and the fallback shows. Glass therefore
-only visibly mirrored the scene at oblique/grazing angles (user finding,
-2026-08-01). Rather than pay for planar mirror subviews (a second scene render
-per pane), the fallback itself gets upgraded (`r_ssrGlassProbes`, on by
-default with glass SSR):
+**Why not screen-space on glass?** A marching variant was built first
+(environment_ssr/bumpyenvironment_ssr, the ssr.frag recipe from the glass
+fragment's own varyings, twosided normals flipped toward the viewer). It
+worked, but screen-space can only mirror what is on screen, and a pane viewed
+head-on reflects the room *behind the camera* — so the march only visibly
+contributed at grazing angles, while the probe covers every angle. Dropped
+2026-08-01 (user decision): probe-only is simpler, cheaper (no per-pixel march
+on glass at all), and loses almost nothing visually. The march variants live
+in git history at 7cfec811 if a hybrid is ever wanted again.
 
 - **Capture**: `bakeGlassProbe` renders six 90° views from the current eye
   position — the envshot recipe, same native cube layout (`_px.tga` …) the
@@ -142,14 +123,18 @@ default with glass SSR):
   before `PointInArea` (panes sit on window portals; the viewer's side is the
   room the reflection should show). Probes load lazily in the backend, keyed
   per map, and simply replace the `env/gen*` image bound on unit 0 of the
-  cube-reflection stage — no shader change; stage colour, `r_gl3ReflectionScale`
-  and the SSR mix all apply unchanged, and the march's screen-space hits still
-  draw over the probe.
+  cube-reflection stage.
 - The probe is a static LDR snapshot from one point: no characters/dynamic
-  objects in the fallback, and parallax is approximate (standard env-map
-  assumption). SSR supplies the dynamic/accurate layer at grazing angles.
+  objects in it, and parallax is approximate (standard env-map assumption).
 - Re-capture a bad vantage with `bakeGlassProbe force`; probes are plain TGAs,
   deletable per map under the save path.
+- The capture pipeline fixed a **vanilla envshot widescreen bug** on the way:
+  `renderView_t` width/height are virtual 640x480 units, but envshot passed
+  real pixels — harmless on 4:3 (ratios cancel), but on widescreen each face
+  saved only a crop of its 90° view so the cube seams never matched. Both the
+  probe bake and `envshot` itself now pass `SCREEN_WIDTH/HEIGHT`. (The odd
+  rolled envshot axes are *correct*: they're mirrored cameras that emit
+  native-layout faces directly from top-down screenshots.)
 
 ## 3. Data flow
 
@@ -179,18 +164,18 @@ g-buffer.
 | cvar | default | meaning |
 |---|---|---|
 | `r_ssr` | 0 | enable screen-space reflections |
-| `r_ssrIntensity` | 1.0 | reflection strength multiplier |
-| `r_ssrMaxRoughness` | 0.55 | roughness cutoff (fade starts at 70% of it); 0.55 keeps the 0.45-rough ceramic floors partially reflective — 0.45 or lower excludes them entirely |
-| `r_ssrSteps` | 24 | linear march samples per ray |
-| `r_ssrMaxDistance` | 1000 | march reach in view units |
-| `r_ssrThickness` | 16 | depth tolerance for a hit (view units) |
+| `r_ssrIntensity` | 0.5 | reflection strength multiplier |
+| `r_ssrMaxRoughness` | 0.56 | roughness cutoff (fade starts at 70% of it); 0.56 keeps the 0.45-rough ceramic floors partially reflective — 0.45 or lower excludes them entirely |
+| `r_ssrSteps` | 26 | linear march samples per ray |
+| `r_ssrMaxDistance` | 1024 | march reach in view units |
+| `r_ssrThickness` | 26 | depth tolerance for a hit (view units) |
 | `r_ssrResScale` | 1.0 | march buffer resolution fraction (menu stops: 1/2, 2/3, 3/4, Full) |
 | `r_ssrTemporal` | 1 | accumulate across frames; resolves the march grain |
-| `r_ssrTemporalFeedback` | 0.9 | history fraction kept per frame (variance clipping handles flicker; no need to push this) |
-| `r_ssrGlass` | 1 | glass/cube-reflection stages march the scene too (§2.1); inert while `r_ssr` is 0 |
-| `r_ssrGlassProbes` | 1 | baked per-area room cubemaps replace the env/gen* glass fallback (§2.2) |
+| `r_ssrTemporalFeedback` | 0.96 | history fraction kept per frame (variance clipping + hit-aware blending keep ghosting bounded even this high) |
+| `r_ssrGlassProbes` | 1 | glass reflects baked per-area room cubemaps instead of env/gen* (§2.1); inert while `r_ssr` is 0 |
 | `r_ssrGlassProbeBake` | 1 | auto-capture missing probes for the viewer's area (one-time hitch, cached to disk) |
 | `r_ssrGlassProbeSize` | 256 | probe face resolution; `bakeGlassProbe force` re-captures |
+| `r_ssrGlassProbeScale` | 1.0 | glass-only probe brightness (Developer-tab slider), on top of stage colour + `r_gl3ReflectionScale` |
 
 Developer-tab sliders mirror the tuning knobs; the Enhancements tab has the
 on/off toggle, the Resolution stops and the Temporal checkbox next to SSAO.
@@ -231,12 +216,15 @@ on/off toggle, the Resolution stops and the Temporal checkbox next to SSAO.
 - C.2.1 resolution scale + temporal accumulation: built 2026-07-30, pending
   in-game verification. Glossy blur deferred (see §5) — gated on a real sighting,
   not on the active roadmap.
-- Glass extension (§2.1, `r_ssrGlass`): built 2026-08-01 after the Mars City
-  hall windows were still showing the default cubemap with SSR on. First
-  in-game round: worked only at grazing angles — twosided backside normals
-  fixed (flip toward viewer), and the head-on case is the inherent
-  screen-space limit, addressed by §2.2.
-- Baked room probes (§2.2, `r_ssrGlassProbes`): built 2026-08-01, user-picked
+- Glass march (`r_ssrGlass`, environment_ssr shader variants): built and then
+  **dropped** 2026-08-01 — in-game it only visibly contributed at grazing
+  angles (screen-space limit; a head-on pane reflects the room behind the
+  camera), while the probes below cover every angle. Removed for simplicity
+  and cost (user decision); last full version at commit 7cfec811.
+- Baked room probes (§2.1, `r_ssrGlassProbes`): built 2026-08-01, user-picked
   over planar mirror subviews (probes: near-zero runtime cost, static content;
   mirrors: true dynamic reflections but an extra scene render per pane).
-  Pending in-game verification.
+  Verified in-game after fixing the envshot widescreen crop (seams now match).
+  `r_ssrGlassProbeScale` added as the glass-only brightness knob.
+- Defaults retuned from in-game calibration 2026-08-01: intensity 0.5,
+  cutoff 0.56, steps 26, distance 1024, thickness 26, feedback 0.96.

@@ -215,13 +215,6 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
 // no-op unless r_ssr produced this view's MRT G-buffer.
 void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_s *viewDef );
 
-// glass SSR (docs/ssr.md): true while _currentRender holds THIS view's
-// split-point opaque scene snapshot (i.e. the SSR pass above completed for it),
-// so cube-reflection stages may swap to the marching shader variants; plus the
-// normal G-buffer image the march samples for its weapon-mask/backface rejects
-bool RB_RHI_SsrSceneValid( const viewDef_s *viewDef );
-rhi::ImageHandle RB_RHI_SsrNormalImage( rhi::RHI *r );
-
 // screenshot support: composited desktops return garbage for front-buffer
 // reads, so R_ReadTiledPixels registers a destination and the executor
 // captures GL_BACK right before the next swap (GL_RGB, pack alignment 4)

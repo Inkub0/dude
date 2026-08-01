@@ -913,10 +913,10 @@ extern idCVar r_ssrThickness;			// assumed surface thickness for hit tests
 extern idCVar r_ssrResScale;			// march buffer resolution as a fraction of the view
 extern idCVar r_ssrTemporal;			// accumulate across frames (resolves the march grain)
 extern idCVar r_ssrTemporalFeedback;	// history fraction kept per frame
-extern idCVar r_ssrGlass;				// glass cube-reflection stages march the scene too
-extern idCVar r_ssrGlassProbes;			// baked per-area room cubemaps as the glass fallback
+extern idCVar r_ssrGlassProbes;			// glass reflects baked per-area room cubemaps
 extern idCVar r_ssrGlassProbeBake;		// auto-capture missing probes (one-time hitch per area)
 extern idCVar r_ssrGlassProbeSize;		// probe face resolution
+extern idCVar r_ssrGlassProbeScale;		// probe brightness on glass (glass-only intensity)
 
 // DUDE glass probes (docs/ssr.md): fs_savepath-relative extensionless base path
 // for a map area's probe faces (envprobes/<map>/area<N>; + _px.tga etc), and the
