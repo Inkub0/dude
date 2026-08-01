@@ -2644,6 +2644,19 @@ static void DrawEnhancementsMenu()
 		AddTooltip( "Glass and other cube-mapped reflective surfaces mirror the on-screen scene "
 			"instead of Doom 3's static generic cubemap, falling back to the cubemap where the "
 			"reflected ray leaves the screen or misses. Non-vanilla; opengl3 only." );
+
+		// Baked room probes: the any-angle fallback behind the screen-space hits.
+		ImGui::BeginDisabled( !r_ssrGlass.GetBool() );
+		bool ssrProbes = r_ssrGlassProbes.GetBool();
+		if ( ImGui::Checkbox( "Baked Room Probes##ssr", &ssrProbes ) ) {
+			r_ssrGlassProbes.SetBool( ssrProbes );
+		}
+		AddTooltip( "Screen-space reflections can only mirror what's on screen, so a window you "
+			"face head-on falls back to a cubemap. With this on, that fallback is a snapshot of "
+			"the actual room (captured automatically the first time you enter an area, cached to "
+			"disk) instead of Doom 3's generic blur - glass reflects the real room at any angle. "
+			"Re-capture an area with the bakeGlassProbe console command. Non-vanilla; opengl3 only." );
+		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 	}
 

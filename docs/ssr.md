@@ -117,6 +117,40 @@ into the G-buffer, the `TG_REFLECT_CUBE` shader-pass stage marches for itself:
   is smooth (no roughness jitter to resolve), and the static interleaved-
   gradient dither hides the march banding.
 
+### 2.2 Baked room probes (the any-angle fallback)
+
+Screen-space reflections can only mirror content that is on screen. A pane
+viewed head-on reflects the room *behind the camera* — never rendered this
+frame — so the march correctly misses and the fallback shows. Glass therefore
+only visibly mirrored the scene at oblique/grazing angles (user finding,
+2026-08-01). Rather than pay for planar mirror subviews (a second scene render
+per pane), the fallback itself gets upgraded (`r_ssrGlassProbes`, on by
+default with glass SSR):
+
+- **Capture**: `bakeGlassProbe` renders six 90° views from the current eye
+  position — the envshot recipe, same native cube layout (`_px.tga` …) the
+  `cubeMap` keyword loads — into `envprobes/<map>/area<N>_*.tga` under
+  `fs_savepath` (`r_ssrGlassProbeSize`, default 256). The view weapon is kept
+  out via `tr.takingEnvProbe` (R_AddModelSurfaces skips weapon-depth-hack
+  entities); the player body is already suppressed by the unchanged viewID.
+- **Auto-bake** (`r_ssrGlassProbeBake`, default on): when a glass surface's
+  area has no probe on disk, the backend buffers a `bakeGlassProbe` — a
+  one-time hitch per area, then cached on disk forever. Captures only run for
+  the area the viewer stands in (guaranteed-valid vantage); a pane looking
+  into a neighbouring area gets its probe when the player goes there.
+- **Lookup**: per portal area. The pane center is nudged toward the viewer
+  before `PointInArea` (panes sit on window portals; the viewer's side is the
+  room the reflection should show). Probes load lazily in the backend, keyed
+  per map, and simply replace the `env/gen*` image bound on unit 0 of the
+  cube-reflection stage — no shader change; stage colour, `r_gl3ReflectionScale`
+  and the SSR mix all apply unchanged, and the march's screen-space hits still
+  draw over the probe.
+- The probe is a static LDR snapshot from one point: no characters/dynamic
+  objects in the fallback, and parallax is approximate (standard env-map
+  assumption). SSR supplies the dynamic/accurate layer at grazing angles.
+- Re-capture a bad vantage with `bakeGlassProbe force`; probes are plain TGAs,
+  deletable per map under the save path.
+
 ## 3. Data flow
 
 ```
@@ -154,6 +188,9 @@ g-buffer.
 | `r_ssrTemporal` | 1 | accumulate across frames; resolves the march grain |
 | `r_ssrTemporalFeedback` | 0.9 | history fraction kept per frame (variance clipping handles flicker; no need to push this) |
 | `r_ssrGlass` | 1 | glass/cube-reflection stages march the scene too (§2.1); inert while `r_ssr` is 0 |
+| `r_ssrGlassProbes` | 1 | baked per-area room cubemaps replace the env/gen* glass fallback (§2.2) |
+| `r_ssrGlassProbeBake` | 1 | auto-capture missing probes for the viewer's area (one-time hitch, cached to disk) |
+| `r_ssrGlassProbeSize` | 256 | probe face resolution; `bakeGlassProbe force` re-captures |
 
 Developer-tab sliders mirror the tuning knobs; the Enhancements tab has the
 on/off toggle, the Resolution stops and the Temporal checkbox next to SSAO.
@@ -195,5 +232,11 @@ on/off toggle, the Resolution stops and the Temporal checkbox next to SSAO.
   in-game verification. Glossy blur deferred (see §5) — gated on a real sighting,
   not on the active roadmap.
 - Glass extension (§2.1, `r_ssrGlass`): built 2026-08-01 after the Mars City
-  hall windows were still showing the default cubemap with SSR on; pending
-  in-game verification.
+  hall windows were still showing the default cubemap with SSR on. First
+  in-game round: worked only at grazing angles — twosided backside normals
+  fixed (flip toward viewer), and the head-on case is the inherent
+  screen-space limit, addressed by §2.2.
+- Baked room probes (§2.2, `r_ssrGlassProbes`): built 2026-08-01, user-picked
+  over planar mirror subviews (probes: near-zero runtime cost, static content;
+  mirrors: true dynamic reflections but an extra scene render per pane).
+  Pending in-game verification.

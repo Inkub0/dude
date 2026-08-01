@@ -23,6 +23,9 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 //     dynamic state / CopyFramebufferToImage in the Vulkan backend)
 
 #include "sys/platform.h"
+#include "framework/FileSystem.h"
+#include "framework/CmdSystem.h"
+#include "renderer/RenderWorld_local.h"
 #include "renderer/tr_local.h"
 #include "renderer/VertexCache.h"
 #include "renderer/Cinematic.h"
@@ -1015,6 +1018,104 @@ static void RB_RHI_WobbleMatrix( const drawSurf_t *surf, const viewDef_t *viewDe
 	rows[2][0] = t[2]; rows[2][1] = t[6]; rows[2][2] = t[10];
 }
 
+// ---- DUDE glass reflection probes (docs/ssr.md) ----
+// Per portal-area baked cubemaps that replace the generic env/gen* fallback on
+// glass while glass SSR is on: head-on panes reflect the actual room (SSR can
+// only mirror on-screen content, and a window you face reflects what's behind
+// the camera). Baked by the bakeGlassProbe command (queued automatically when
+// missing) to fs_savepath envprobes/<map>/, loaded lazily here as native-layout
+// cubemaps — the same files the material cubeMap keyword could load.
+struct rhiGlassProbe_t {
+	int			area;
+	idImage *	img;		// NULL until a bake exists on disk
+	bool		checked;	// disk probed since the last invalidate
+	bool		bakeQueued;	// auto-bake buffered once (don't spam the queue)
+};
+static idList<rhiGlassProbe_t>	rhiGlassProbes;
+static idStr					rhiGlassProbeMapName;
+
+void RB_RHI_InvalidateGlassProbe( int area ) {
+	for ( int i = 0; i < rhiGlassProbes.Num(); i++ ) {
+		if ( rhiGlassProbes[i].area == area ) {
+			rhiGlassProbes[i].checked = false;
+			rhiGlassProbes[i].img = NULL;
+			rhiGlassProbes[i].bakeQueued = false;
+		}
+	}
+}
+
+static idImage *RB_RHI_GlassProbeForSurface( const viewDef_t *viewDef, const drawSurf_t *surf ) {
+	if ( !r_ssrGlassProbes.GetBool() || !tr.primaryWorld ) {
+		return NULL;
+	}
+	// new map: forget the previous map's probes
+	const char *mapName = tr.primaryWorld->mapName.c_str();
+	if ( rhiGlassProbeMapName.Icmp( mapName ) != 0 ) {
+		rhiGlassProbes.Clear();
+		rhiGlassProbeMapName = mapName;
+	}
+
+	// the pane's area — panes often sit ON an area boundary (window portals), so
+	// nudge the center toward the viewer to land on the viewer's side, which is
+	// the room the reflection should show
+	idVec3 center = surf->geo->bounds.GetCenter();
+	idVec3 world;
+	R_LocalPointToGlobal( surf->space->modelMatrix, center, world );
+	idVec3 toEye = viewDef->renderView.vieworg - world;
+	toEye.Normalize();
+	int area = tr.primaryWorld->PointInArea( world + toEye * 8.0f );
+	if ( area < 0 ) {
+		area = tr.primaryWorld->PointInArea( world );
+	}
+	if ( area < 0 ) {
+		return NULL;
+	}
+
+	int idx = -1;
+	for ( int i = 0; i < rhiGlassProbes.Num(); i++ ) {
+		if ( rhiGlassProbes[i].area == area ) {
+			idx = i;
+			break;
+		}
+	}
+	if ( idx < 0 ) {
+		rhiGlassProbe_t e;
+		e.area = area;
+		e.img = NULL;
+		e.checked = false;
+		e.bakeQueued = false;
+		idx = rhiGlassProbes.Append( e );
+	}
+	rhiGlassProbe_t &e = rhiGlassProbes[idx];
+
+	if ( !e.checked ) {
+		e.checked = true;
+		idStr base;
+		R_GlassProbeBasePath( mapName, area, base );
+		ID_TIME_T ts;
+		if ( fileSystem->ReadFile( va( "%s_px.tga", base.c_str() ), NULL, &ts ) >= 0 ) {
+			idImage *img = globalImages->ImageFromFile( base.c_str(), TF_DEFAULT, false,
+				TR_CLAMP, TD_HIGH_QUALITY, CF_NATIVE );
+			if ( img && img != globalImages->defaultImage ) {
+				e.img = img;
+			}
+		}
+	}
+
+	if ( !e.img && !e.bakeQueued && r_ssrGlassProbeBake.GetBool()
+	     && viewDef->viewEntitys && !viewDef->isSubview ) {
+		// the bake captures from the current eye position, so only queue while
+		// the viewer actually stands in this area; a pane looking into a
+		// neighbouring area gets its probe when the player goes there, and the
+		// env/gen fallback stands until then
+		if ( tr.primaryWorld->PointInArea( viewDef->renderView.vieworg ) == area ) {
+			e.bakeQueued = true;
+			cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "bakeGlassProbe\n" );
+		}
+	}
+	return e.img;
+}
+
 /*
 =============
 RB_RHI_RenderTexgenStage
@@ -1142,7 +1243,17 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 			float *dst = row == 0 ? parms.modelMatrixRow0 : ( row == 1 ? parms.modelMatrixRow1 : parms.modelMatrixRow2 );
 			dst[0] = mm[row]; dst[1] = mm[row + 4]; dst[2] = mm[row + 8]; dst[3] = mm[row + 12];
 		}
-		pStage->texture.image->Bind();		// reflection cube on unit 0
+		// reflection cube on unit 0; with glass SSR on, a baked room probe
+		// (docs/ssr.md) replaces the generic env/gen* cube so the miss/fallback
+		// shows the actual room at any angle
+		idImage *cubeImg = pStage->texture.image;
+		if ( r_ssr.GetBool() && r_ssrGlass.GetBool() ) {
+			idImage *probe = RB_RHI_GlassProbeForSurface( viewDef, surf );
+			if ( probe ) {
+				cubeImg = probe;
+			}
+		}
+		cubeImg->Bind();
 		const shaderStage_t *bumpStage = surf->material->GetBumpStage();
 		if ( bumpStage ) {
 			rhi::gl3ActiveTexture( GL_TEXTURE1 );

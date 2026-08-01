@@ -345,6 +345,9 @@ idCVar r_ssrResScale( "r_ssrResScale", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_
 idCVar r_ssrTemporal( "r_ssrTemporal", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "accumulate reflections across frames (reprojected by camera motion) so the march's jitter grain resolves into a clean image. Neighbourhood-clamped to limit ghosting" );
 idCVar r_ssrTemporalFeedback( "r_ssrTemporalFeedback", "0.9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "fraction of reflection history kept per frame with r_ssrTemporal: higher = smoother but slower to react, lower = noisier but snappier. Flicker suppression is handled by variance clipping + hit-aware blending, so this shouldn't need pushing past ~0.9", 0.0f, 0.97f );
 idCVar r_ssrGlass( "r_ssrGlass", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "with r_ssr: glass (cube-reflection) surfaces mirror the on-screen scene instead of their static cubemap, falling back to the cubemap where the reflected ray leaves the screen or misses. No effect while r_ssr is 0" );
+idCVar r_ssrGlassProbes( "r_ssrGlassProbes", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "with r_ssr + r_ssrGlass: glass falls back to a baked cubemap of the actual room (envprobes/<map>/ under fs_savepath, captured by bakeGlassProbe) instead of Doom 3's generic env/gen* cubemap, so panes reflect the real room at any viewing angle. Screen-space hits still draw on top" );
+idCVar r_ssrGlassProbeBake( "r_ssrGlassProbeBake", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "auto-capture a missing glass probe for the area the player stands in (6 offscreen renders = a one-time hitch per area, cached to disk forever). 0 = only the manual bakeGlassProbe command writes probes" );
+idCVar r_ssrGlassProbeSize( "r_ssrGlassProbeSize", "256", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "face resolution of baked glass probes; re-bake with 'bakeGlassProbe force' after changing", 64, 1024 );
 
 // DUDE Phase 3.5 shadow mapping (GL3/Vulkan only; stencil stays the faithful
 // default). Global mode for now: 0 = stencil shadow volumes (vanilla), 1 =
@@ -2118,6 +2121,100 @@ void R_EnvShot_f( const idCmdArgs &args ) {
 	common->Printf( "Wrote %s, etc\n", fullname.c_str() );
 }
 
+/*
+==================
+R_GlassProbeBasePath
+
+DUDE glass probes (docs/ssr.md): extensionless base path for a map area's probe
+faces, fs_savepath-relative — envprobes/<map>/area<N>. The bake command appends
+the native cube suffixes (_px.tga etc, the same layout envshot writes and the
+cubeMap keyword loads).
+==================
+*/
+void R_GlassProbeBasePath( const char *mapName, int area, idStr &out ) {
+	idStr clean = mapName;
+	clean.BackSlashesToSlashes();
+	clean.StripFileExtension();
+	if ( clean.Icmpn( "maps/", 5 ) == 0 ) {
+		clean = clean.Right( clean.Length() - 5 );
+	}
+	clean.Replace( "/", "_" );
+	out = va( "envprobes/%s/area%03d", clean.c_str(), area );
+}
+
+/*
+==================
+R_BakeGlassProbe_f
+
+DUDE glass probes (docs/ssr.md): bakes the environment probe of the portal area
+the viewer stands in — six envshot-style 90-degree captures from the current
+eye position, written as a native-layout cubemap under fs_savepath. Glass
+surfaces then reflect the actual room at any angle (probe as the SSR-miss
+fallback) instead of Doom 3's generic env/gen* blur. Usually queued
+automatically when a probe is missing (r_ssrGlassProbeBake); run
+"bakeGlassProbe force" to re-capture from a better vantage or after visual
+settings changes. The view weapon is kept out of the capture
+(tr.takingEnvProbe, see R_AddModelSurfaces).
+==================
+*/
+void R_BakeGlassProbe_f( const idCmdArgs &args ) {
+	const char	*extensions[6] = { "_px.tga", "_nx.tga", "_py.tga", "_ny.tga",
+		"_pz.tga", "_nz.tga" };
+
+	const bool force = args.Argc() > 1 && idStr::Icmp( args.Argv( 1 ), "force" ) == 0;
+	if ( !tr.primaryView || !tr.primaryWorld ) {
+		common->Printf( "bakeGlassProbe: no primary view\n" );
+		return;
+	}
+	const int area = tr.primaryWorld->PointInArea( tr.primaryView->renderView.vieworg );
+	if ( area < 0 ) {
+		common->Printf( "bakeGlassProbe: view origin is not in any portal area\n" );
+		return;
+	}
+	idStr base;
+	R_GlassProbeBasePath( tr.primaryWorld->mapName, area, base );
+
+	ID_TIME_T ts;
+	if ( !force && fileSystem->ReadFile( va( "%s_px.tga", base.c_str() ), NULL, &ts ) >= 0 ) {
+		// already baked (auto-queue raced a manual bake); just make sure it's loaded
+		RB_RHI_InvalidateGlassProbe( area );
+		return;
+	}
+
+	const int size = idMath::ClampInt( 64, 1024, r_ssrGlassProbeSize.GetInteger() );
+
+	// the same six axis sets envshot uses for the native cube layout
+	idMat3 axis[6];
+	memset( &axis, 0, sizeof( axis ) );
+	axis[0][0][0] = 1;	axis[0][1][2] = 1;	axis[0][2][1] = 1;
+	axis[1][0][0] = -1;	axis[1][1][2] = -1;	axis[1][2][1] = 1;
+	axis[2][0][1] = 1;	axis[2][1][0] = -1;	axis[2][2][2] = -1;
+	axis[3][0][1] = -1;	axis[3][1][0] = -1;	axis[3][2][2] = 1;
+	axis[4][0][2] = 1;	axis[4][1][0] = -1;	axis[4][2][1] = 1;
+	axis[5][0][2] = -1;	axis[5][1][0] = 1;	axis[5][2][1] = 1;
+
+	const viewDef_t primary = *tr.primaryView;
+	renderView_t ref;
+	idStr fullname;
+
+	tr.takingEnvProbe = true;
+	for ( int i = 0; i < 6; i++ ) {
+		ref = primary.renderView;
+		ref.x = ref.y = 0;
+		ref.fov_x = ref.fov_y = 90;
+		ref.width = glConfig.vidWidth;
+		ref.height = glConfig.vidHeight;
+		ref.viewaxis = axis[i];
+		fullname = va( "%s%s", base.c_str(), extensions[i] );
+		g_screenshotFormat = 0;		// probes are always TGA (the cube loader's format)
+		tr.TakeScreenshot( size, size, fullname.c_str(), 1, &ref );
+	}
+	tr.takingEnvProbe = false;
+
+	RB_RHI_InvalidateGlassProbe( area );
+	common->Printf( "bakeGlassProbe: wrote %s_*.tga\n", base.c_str() );
+}
+
 //============================================================================
 
 static idMat3		cubeAxis[6];
@@ -2648,6 +2745,7 @@ void R_InitCommands( void ) {
 	cmdSystem->AddCommand( "touchGui", R_TouchGui_f, CMD_FL_RENDERER, "touches a gui" );
 	cmdSystem->AddCommand( "screenshot", R_ScreenShot_f, CMD_FL_RENDERER, "takes a screenshot" );
 	cmdSystem->AddCommand( "envshot", R_EnvShot_f, CMD_FL_RENDERER, "takes an environment shot" );
+	cmdSystem->AddCommand( "bakeGlassProbe", R_BakeGlassProbe_f, CMD_FL_RENDERER, "bakes the current area's glass reflection probe (docs/ssr.md); 'force' re-captures" );
 	cmdSystem->AddCommand( "makeAmbientMap", R_MakeAmbientMap_f, CMD_FL_RENDERER|CMD_FL_CHEAT, "makes an ambient map" );
 	cmdSystem->AddCommand( "benchmark", R_Benchmark_f, CMD_FL_RENDERER, "benchmark" );
 	cmdSystem->AddCommand( "gfxInfo", GfxInfo_f, CMD_FL_RENDERER, "show graphics info" );
@@ -2706,6 +2804,7 @@ void idRenderSystemLocal::Clear( void ) {
 	guiModel = NULL;
 	demoGuiModel = NULL;
 	takingScreenshot = false;
+	takingEnvProbe = false;
 	allowNoSpecular = false;
 }
 

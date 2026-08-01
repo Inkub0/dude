@@ -2049,6 +2049,14 @@ void R_AddModelSurfaces( void ) {
 	// any light that intersects the view (for shadows)
 	for ( vEntity = tr.viewDef->viewEntitys; vEntity; vEntity = vEntity->next ) {
 
+		// DUDE glass probes (docs/ssr.md): keep the view weapon out of probe
+		// captures — its depth-hacked, screen-filling model would smear across
+		// the baked cubemap faces (the player body is already suppressed by the
+		// unchanged viewID)
+		if ( tr.takingEnvProbe && vEntity->weaponDepthHack ) {
+			continue;
+		}
+
 		if ( r_useEntityScissors.GetBool() ) {
 			// calculate the screen area covered by the entity
 			idScreenRect scissorRect = R_CalcEntityScissorRectangle( vEntity );

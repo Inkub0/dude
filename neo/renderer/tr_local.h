@@ -757,6 +757,7 @@ public:
 	bool					registered;		// cleared at shutdown, set at InitOpenGL
 
 	bool					takingScreenshot;
+	bool					takingEnvProbe;	// DUDE glass probes (docs/ssr.md): baking — keep the view weapon out of the capture
 
 	int						frameCount;		// incremented every frame
 	int						viewCount;		// incremented every view (twice a scene if subviewed)
@@ -913,6 +914,15 @@ extern idCVar r_ssrResScale;			// march buffer resolution as a fraction of the v
 extern idCVar r_ssrTemporal;			// accumulate across frames (resolves the march grain)
 extern idCVar r_ssrTemporalFeedback;	// history fraction kept per frame
 extern idCVar r_ssrGlass;				// glass cube-reflection stages march the scene too
+extern idCVar r_ssrGlassProbes;			// baked per-area room cubemaps as the glass fallback
+extern idCVar r_ssrGlassProbeBake;		// auto-capture missing probes (one-time hitch per area)
+extern idCVar r_ssrGlassProbeSize;		// probe face resolution
+
+// DUDE glass probes (docs/ssr.md): fs_savepath-relative extensionless base path
+// for a map area's probe faces (envprobes/<map>/area<N>; + _px.tga etc), and the
+// backend cache invalidation the bake command calls after writing new faces
+void R_GlassProbeBasePath( const char *mapName, int area, idStr &out );
+void RB_RHI_InvalidateGlassProbe( int area );
 
 // DUDE Phase 3.5 shadow mapping — GL3/Vulkan only, stencil stays the default
 extern idCVar r_shadowMapping;			// 0 = stencil volumes, 1 = shadow maps where supported
