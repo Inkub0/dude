@@ -1797,7 +1797,11 @@ static void R_UpdateEmissiveLights( void ) {
 	// no occlusion query — a light hidden behind a wall stays cheap and is culled at render time.
 	for ( int i = r_emissiveLightList.Num() - 1; i >= 0; i-- ) {
 		emissiveLight_t &el = r_emissiveLightList[i];
-		if ( el.handle >= 0 && el.handle < world->lightDefs.Num() ) {
+		// owner entity gone entirely (picked-up item, removed entity): free its light right
+		// away — the frustum keep-alive below would otherwise hold the orphaned glow forever
+		const bool ownerGone = el.entityIndex >= 0
+			&& ( el.entityIndex >= world->entityDefs.Num() || world->entityDefs[el.entityIndex] == NULL );
+		if ( !ownerGone && el.handle >= 0 && el.handle < world->lightDefs.Num() ) {
 			const idRenderLightLocal *ldef = world->lightDefs[el.handle];
 			if ( ldef != NULL && ldef->frustumTris != NULL
 					&& !R_CullLocalBox( ldef->frustumTris->bounds, tr.viewDef->worldSpace.modelMatrix, 5, tr.viewDef->frustum ) ) {
@@ -1805,7 +1809,7 @@ static void R_UpdateEmissiveLights( void ) {
 			}
 		}
 		const int age = now - el.lastSeen;
-		if ( age > EMISSIVE_LIGHT_TIMEOUT_MS || age < 0 ) {
+		if ( ownerGone || age > EMISSIVE_LIGHT_TIMEOUT_MS || age < 0 ) {
 			// NULL-slot guard mirrors R_FreeAllEmissiveLights: never free a handle whose def is gone
 			if ( el.handle >= 0 && el.handle < world->lightDefs.Num() && world->lightDefs[el.handle] != NULL ) {
 				world->FreeLightDef( el.handle );
