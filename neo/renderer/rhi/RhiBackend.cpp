@@ -1028,23 +1028,70 @@ static void RB_RHI_WobbleMatrix( const drawSurf_t *surf, const viewDef_t *viewDe
 struct rhiGlassProbe_t {
 	int			area;
 	idImage *	img;		// NULL until a bake exists on disk
+	float		avg;		// mean face brightness [0,1] for energy normalization
 	bool		checked;	// disk probed since the last invalidate
 	bool		bakeQueued;	// auto-bake buffered once (don't spam the queue)
 };
 static idList<rhiGlassProbe_t>	rhiGlassProbes;
 static idStr					rhiGlassProbeMapName;
 
+// mean RGB brightness [0,1] of a native-layout cube's six faces, or -1 if the
+// files can't be loaded. Used to match the probe's energy to the env/gen* cube
+// it replaces: materials tuned their stage math for that image's darkness
+// (chiglass adds env/gen1 at full vertex colour and stays subtle only because
+// gen1 is nearly black), so the swap must not change the average energy.
+static float RB_RHI_CubeFilesAvg( const char *base ) {
+	byte *pics[6];
+	int size = 0;
+	ID_TIME_T ts;
+	if ( !R_LoadCubeImages( base, CF_NATIVE, pics, &size, &ts ) || size <= 0 ) {
+		return -1.0f;
+	}
+	double sum = 0.0;
+	const int pixels = size * size;
+	for ( int f = 0; f < 6; f++ ) {
+		const byte *p = pics[f];
+		for ( int i = 0; i < pixels; i++, p += 4 ) {
+			sum += p[0] + p[1] + p[2];
+		}
+	}
+	for ( int f = 0; f < 6; f++ ) {
+		R_StaticFree( pics[f] );
+	}
+	return (float)( sum / ( 6.0 * pixels * 3.0 * 255.0 ) );
+}
+
+// cached average brightness of the original env/gen* cubemaps (tiny, loaded once)
+struct rhiCubeAvg_t { idStr name; float avg; };
+static idList<rhiCubeAvg_t> rhiEnvCubeAvgs;
+
+static float RB_RHI_EnvCubeAvg( const char *name ) {
+	for ( int i = 0; i < rhiEnvCubeAvgs.Num(); i++ ) {
+		if ( rhiEnvCubeAvgs[i].name.Icmp( name ) == 0 ) {
+			return rhiEnvCubeAvgs[i].avg;
+		}
+	}
+	rhiCubeAvg_t e;
+	e.name = name;
+	e.avg = RB_RHI_CubeFilesAvg( name );
+	rhiEnvCubeAvgs.Append( e );
+	return e.avg;
+}
+
 void RB_RHI_InvalidateGlassProbe( int area ) {
 	for ( int i = 0; i < rhiGlassProbes.Num(); i++ ) {
 		if ( rhiGlassProbes[i].area == area ) {
 			rhiGlassProbes[i].checked = false;
 			rhiGlassProbes[i].img = NULL;
+			rhiGlassProbes[i].avg = -1.0f;
 			rhiGlassProbes[i].bakeQueued = false;
 		}
 	}
 }
 
-static idImage *RB_RHI_GlassProbeForSurface( const viewDef_t *viewDef, const drawSurf_t *surf ) {
+static idImage *RB_RHI_GlassProbeForSurface( const viewDef_t *viewDef, const drawSurf_t *surf,
+                                             float *probeAvg ) {
+	*probeAvg = -1.0f;
 	if ( !r_ssrGlassProbes.GetBool() || !tr.primaryWorld ) {
 		return NULL;
 	}
@@ -1082,6 +1129,7 @@ static idImage *RB_RHI_GlassProbeForSurface( const viewDef_t *viewDef, const dra
 		rhiGlassProbe_t e;
 		e.area = area;
 		e.img = NULL;
+		e.avg = -1.0f;
 		e.checked = false;
 		e.bakeQueued = false;
 		idx = rhiGlassProbes.Append( e );
@@ -1098,6 +1146,7 @@ static idImage *RB_RHI_GlassProbeForSurface( const viewDef_t *viewDef, const dra
 				TR_CLAMP, TD_HIGH_QUALITY, CF_NATIVE );
 			if ( img && img != globalImages->defaultImage ) {
 				e.img = img;
+				e.avg = RB_RHI_CubeFilesAvg( base.c_str() );
 			}
 		}
 	}
@@ -1113,6 +1162,7 @@ static idImage *RB_RHI_GlassProbeForSurface( const viewDef_t *viewDef, const dra
 			cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "bakeGlassProbe\n" );
 		}
 	}
+	*probeAvg = e.avg;
 	return e.img;
 }
 
@@ -1223,17 +1273,29 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 			dst[0] = mm[row]; dst[1] = mm[row + 4]; dst[2] = mm[row + 8]; dst[3] = mm[row + 12];
 		}
 		// reflection cube on unit 0; with glass probes on, a baked room probe
-		// (docs/ssr.md) replaces the generic env/gen* cube so panes reflect the
-		// actual room at any angle. r_ssrGlassProbeScale is the glass-only
-		// intensity knob, folded into the stage colour like r_gl3ReflectionScale
-		// (the bumpy variant takes no stage colour — vanilla behaviour — so the
-		// scale only reaches unbumped glass).
+		// (docs/ssr.md) replaces the cube so panes reflect the actual room at
+		// any angle. Only the generic grey env/gen* cubes are swapped — other
+		// cubemaps are authored content (machine chrome, tinted effects) that a
+		// room capture shouldn't override. The probe's brightness is normalized
+		// to the replaced cube's average energy: materials tune their stage
+		// math around that image's darkness (chiglass1blue ADDS env/gen1 at
+		// full vertex colour and reads subtle only because gen1 is nearly
+		// black), so swapping content must not change the energy budget.
+		// r_ssrGlassProbeScale then applies as the glass-only intensity knob
+		// (bump-mapped glass ignores stage colour — vanilla behaviour).
 		idImage *cubeImg = pStage->texture.image;
-		if ( r_ssr.GetBool() && r_ssrGlassProbes.GetBool() ) {
-			idImage *probe = RB_RHI_GlassProbeForSurface( viewDef, surf );
+		if ( r_ssr.GetBool() && r_ssrGlassProbes.GetBool() && !surf->material->GetBumpStage()
+		     && idStr::Icmpn( cubeImg->imgName, "env/gen", 7 ) == 0 ) {
+			float probeAvg = -1.0f;
+			idImage *probe = RB_RHI_GlassProbeForSurface( viewDef, surf, &probeAvg );
 			if ( probe ) {
 				cubeImg = probe;
-				const float ps = r_ssrGlassProbeScale.GetFloat();
+				float norm = 1.0f;
+				const float envAvg = RB_RHI_EnvCubeAvg( pStage->texture.image->imgName );
+				if ( envAvg > 0.0f && probeAvg > 0.001f ) {
+					norm = idMath::ClampFloat( 0.02f, 4.0f, envAvg / probeAvg );
+				}
+				const float ps = norm * r_ssrGlassProbeScale.GetFloat();
 				parms.color[0] *= ps;
 				parms.color[1] *= ps;
 				parms.color[2] *= ps;
