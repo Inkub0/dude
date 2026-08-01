@@ -2515,6 +2515,12 @@ void R_VidRestart_f( const idCmdArgs &args ) {
 	soundSystem->ShutdownHW();
 	Sys_ShutdownInput();
 	globalImages->PurgeAllImages();
+	// strong teardown of the GL3 core backend while its context is still current, so
+	// nothing survives the window recreate: delete its GPU objects and forget the
+	// cached render-target handles (HDR/SSAO/SSR/shadow). Without this, switching
+	// backends from Video Options left a dead framebuffer bound and the frame came up
+	// white/garbled. No-op on the legacy backend. See RB_RHI_Shutdown.
+	RB_RHI_Shutdown();
 	// free the context and close the window
 	GLimp_Shutdown();
 	glConfig.isInitialized = false;
@@ -2861,6 +2867,11 @@ void idRenderSystemLocal::ShutdownOpenGL( void ) {
 	// as the input is tied to the window, it should be shut down when the window
 	// is destroyed (relevant when starting a mod which also recreates window)
 	Sys_ShutdownInput();
+
+	// release the GL3 core backend's GPU objects while the context is still current
+	// (no-op on the legacy backend). Keeps the teardown clean on full shutdown / mod
+	// restart, matching the vid_restart path. See RB_RHI_Shutdown.
+	RB_RHI_Shutdown();
 
 	// free the context and close the window
 	GLimp_Shutdown();

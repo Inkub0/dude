@@ -626,6 +626,40 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	backEnd.pc.c_drawElements++;
 }
 
+/*
+========================
+RB_RHI_Shutdown
+
+Strong teardown of the GL 3.3 core backend, called from the renderer while the GL
+context is still current (vid_restart, before GLimp_Shutdown; and full renderer
+shutdown). Switching backends via the Video-Options selector runs a vid_restart, and
+without this the GL3 backend left residue: GL3Backend::Shutdown() was never called, so
+its render-target table kept dead FBO/texture names from the destroyed context while the
+cached client handles (HDR scene buffer, SSAO, SSR, shadow maps) still pointed at them.
+A same-resolution switch then reused a dead framebuffer and the frame came up white or
+garbled — intermittent because a differing resolution happened to force recreation.
+
+Order matters: free the shadow caches and forget all client-side handles first (plain
+CPU-side resets, no GL), then GL3Backend::Shutdown() deletes every GPU object in one
+sweep over its table and marks itself uninitialised. Safe to call when the GL3 backend
+was never brought up (legacy session): the cache free and GL3Backend::Shutdown() both
+self-guard, and zeroing already-zero handles is a no-op.
+========================
+*/
+void RB_RHI_Shutdown( void ) {
+	RB_RHI_FreeShadowCubeCache();		// cube + 2D shadow caches, budget hysteresis (self-guards on context)
+	RB_RHI_ResetWorldTargets();			// shadow map/pool + SSAO + SSR + normal handles
+
+	// HDR scene buffer + FXAA float ping (this file's statics)
+	rhiHdrRT = 0;
+	rhiHdrAaRT = 0;
+	rhiHdrW = rhiHdrH = 0;
+
+	// deletes rings, VAOs, shader cache and every render target, then clears the
+	// backend's table so any stale handle now resolves to a null image
+	rhi::GetGL3RHI()->Shutdown();
+}
+
 void RB_RHI_LogOnce( const char *what ) {
 	static idStr logged;
 	if ( logged.Find( what ) < 0 ) {

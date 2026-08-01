@@ -1376,6 +1376,12 @@ void R_ReCreateWorldReferences( void );
 // world teardown so cached cubes can't outlive the light defs they were keyed to.
 void RB_RHI_FreeShadowCubeCache( void );
 
+// RHI/GL3 strong backend teardown (defined in rhi/RhiBackend.cpp); called from the
+// renderer while the GL context is still current (vid_restart before GLimp_Shutdown,
+// and full renderer shutdown) so switching backends leaves no residue — deletes all
+// GPU objects and forgets every cached render-target handle. No-op on a legacy session.
+void RB_RHI_Shutdown( void );
+
 // HDR (r_hdr) capture signals for the shared idImage::CopyFramebuffer (defined in
 // rhi/RhiBackend.cpp). HdrCaptureActive: the float scene FBO is the bound read source
 // right now (view pass) → read GL_COLOR_ATTACHMENT0 vs GL_BACK. HdrFrameActive: this is

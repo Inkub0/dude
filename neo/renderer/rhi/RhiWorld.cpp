@@ -1960,6 +1960,39 @@ already free GL objects.
 */
 static void RB_RHI_ResetLightBudgetHyst();		// defined with the hysteresis helpers below
 
+// Drop every CPU-side render-target handle the world backend caches across frames
+// (shadow map/cube + adaptive pools, SSAO + its temporal history, SSR + its history,
+// and the normal G-buffer). These handles are indices into the backend's render-target
+// table; after a vid_restart that table is torn down and rebuilt from scratch, so a
+// surviving handle would alias a freshly-allocated, unrelated target and paint garbage
+// (or reuse a dead GL name from the destroyed context). The matching GPU objects are
+// freed by GL3Backend::Shutdown in one sweep over the whole table — this only forgets
+// the handles + their cached sizes/validity so each buffer is lazily recreated against
+// the new context. Driven by RB_RHI_Shutdown (RhiBackend.cpp).
+void RB_RHI_ResetWorldTargets( void ) {
+	rhiShadowMap = 0;			rhiShadowMapSize = 0;
+	rhiShadowCube = 0;			rhiShadowCubeSize = 0;
+	for ( int i = 0; i < SHADOW_NTIERS; i++ ) {
+		rhiShadowMapPool[i].rt  = 0;	rhiShadowMapPool[i].size  = 0;
+		rhiShadowCubePool[i].rt = 0;	rhiShadowCubePool[i].size = 0;
+	}
+
+	rhiSsaoRT = rhiSsaoBlurRT = rhiSsaoResultRT = 0;
+	rhiSsaoW = rhiSsaoH = rhiSsaoViewW = rhiSsaoViewH = 0;
+	rhiSsaoAppliedThisView = false;
+	rhiSsaoHistRT[0] = rhiSsaoHistRT[1] = 0;
+	rhiSsaoHistIdx = 0;			rhiSsaoHistW = rhiSsaoHistH = 0;
+	rhiSsaoHistValid = false;	rhiSsaoHavePrevVP = false;
+
+	rhiSsrRT = 0;				rhiSsrW = rhiSsrH = 0;
+	rhiSsrHistRT[0] = rhiSsrHistRT[1] = 0;
+	rhiSsrHistIdx = 0;			rhiSsrHistW = rhiSsrHistH = 0;
+	rhiSsrHistValid = false;	rhiSsrHavePrevVP = false;
+
+	rhiNormalRT = 0;			rhiNormalW = rhiNormalH = 0;
+	rhiNormalReadyThisView = false;	rhiNormalMrt = false;
+}
+
 void RB_RHI_FreeShadowCubeCache() {
 	if ( !glConfig.isInitialized ) {
 		return;

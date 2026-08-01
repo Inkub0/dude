@@ -220,4 +220,9 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_s *viewDef );
 // captures GL_BACK right before the next swap (GL_RGB, pack alignment 4)
 void RB_RHI_CaptureNextSwap( unsigned char *dest );
 
+// vid_restart / renderer teardown: forget the world backend's cached render-target
+// handles (shadow/SSAO/SSR/normal) so they rebuild against the fresh GL context.
+// Part of the strong shutdown orchestrated by RB_RHI_Shutdown (RhiBackend.cpp).
+void RB_RHI_ResetWorldTargets( void );
+
 #endif /* !__GL3LOCAL_H__ */

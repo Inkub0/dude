@@ -4,6 +4,36 @@ Deferred until the rendering pipeline is complete — tracked here for later tri
 Hub: [vulkan-port.md](vulkan-port.md). Deliberate deviations (not bugs) are in
 [readme-changes.md](readme-changes.md).
 
+- **[OPEN] Intermittent crash on repeated `vid_restart` (SDL3/X11 window teardown).**
+  Independent of the backend-switch fix below — confirmed 2026-07-31 to reproduce on the
+  **legacy** backend (where `RB_RHI_Shutdown` is a hard no-op), on the 2nd–3rd `vid_restart`
+  with a world loaded. `GLimp_Shutdown` → `SDL_DestroyWindow` intermittently throws
+  `X Error BadWindow (X_TranslateCoords)` — SDL3's X11 backend restoring the cursor against a
+  window that is mid-teardown — which cascades into the game DLL's cleanup
+  (`idClipModel::FreeTraceModel: tried to free uncached trace model`, then an
+  `idStrPool::FreeString` assert → SIGABRT). The intermittency is the signature of an async X11
+  teardown race. Pre-existing, in the windowing / game-teardown layer, **not** the renderer GPU
+  teardown. Matters for the Vulkan port (heavy backend re-init). Mitigation under test: release
+  relative-mouse/grab + flush pending events immediately before `SDL_DestroyWindow` in
+  `GLimp_Shutdown`. Needs runtime iteration to confirm (can't be self-verified); intermittent, so
+  validate by hammering `vid_restart` 10–20×.
+
+- **[RESOLVED 2026-07-31] Garbled image / white screen when switching renderer backend (legacy ↔ opengl3).**
+  Switching backends in Video Options — or any `vid_restart` while on the GL3 core backend —
+  sometimes came up white or garbled. Root cause: `GL3Backend::Shutdown()` existed but was **never
+  called**. On a `vid_restart` the GL context is destroyed and recreated, but the backend's
+  render-target table kept dead FBO/texture names from the old context while the cached client
+  handles (HDR scene buffer, SSAO, SSR, shadow maps) still pointed at them. The HDR guard detects a
+  lost context via `GetRenderTargetImage(handle) == 0`, but the never-wiped table returned the
+  stale *non-zero* name, so it reused a dead framebuffer and the whole scene rendered into it.
+  Intermittent because a *differing* resolution across the restart tripped the `w/h` check and
+  forced recreation, hiding it. **Fix:** a strong teardown `RB_RHI_Shutdown()` (RhiBackend.cpp),
+  called from `R_VidRestart_f` and `ShutdownOpenGL` while the context is still current — frees the
+  shadow caches, forgets every cached render-target handle (`RB_RHI_ResetWorldTargets`, RhiWorld.cpp),
+  resets the HDR statics, then calls `GL3Backend::Shutdown()` to delete all GPU objects and wipe the
+  table (making the existing `GetRenderTargetImage == 0` lost-context checks work as designed).
+  Self-guards to a no-op on the legacy backend. Verified: the toggle no longer garbles.
+
 - **[RESOLVED 2026-07-26] Transparent surfaces (glass) rendered with wrong/iridescent tints.**
   Root cause: `environment.vert` multiplied the cube reflection by the raw geometry
   vertex colour instead of the stage colour (`u_color` + SVC mode), so glass reflections
