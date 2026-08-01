@@ -39,8 +39,9 @@ If you have questions concerning this license or the applicable additional terms
 	Unlike the older SSE/SSE2/SSE3 processors, whose x86 assembly only
 	compiles on 32 bit MSVC, this one is written with compiler intrinsics
 	and covers the routines that are hot on modern 64 bit builds:
-	skeletal animation, vertex skinning, tangent derivation, point culling
-	and sound mixing.
+	skeletal animation, vertex skinning, tangent derivation, point culling,
+	bounds computation, shadow volume caches, the idMatX kernels behind the
+	LCP/articulated-figure physics solvers, and sound mixing.
 
 ===============================================================================
 */
@@ -55,13 +56,32 @@ public:
 	virtual void VPCALL UntransformJoints( idJointMat *jointMats, const int *parents, const int firstJoint, const int lastJoint );
 	virtual void VPCALL TransformVerts( idDrawVert *verts, const int numVerts, const idJointMat *joints, const idVec4 *weights, const int *index, const int numWeights );
 
+	using idSIMD_SSE3::MinMax;	// the float / idVec2 overloads stay inherited
+	virtual void VPCALL MinMax( idVec3 &min, idVec3 &max, const idVec3 *src, const int count );
+	virtual void VPCALL MinMax( idVec3 &min, idVec3 &max, const idDrawVert *src, const int count );
+	virtual void VPCALL MinMax( idVec3 &min, idVec3 &max, const idDrawVert *src, const int *indexes, const int count );
+
+	virtual void VPCALL MatX_MultiplyVecX( idVecX &dst, const idMatX &mat, const idVecX &vec );
+	virtual void VPCALL MatX_MultiplyAddVecX( idVecX &dst, const idMatX &mat, const idVecX &vec );
+	virtual void VPCALL MatX_MultiplySubVecX( idVecX &dst, const idMatX &mat, const idVecX &vec );
+	virtual void VPCALL MatX_TransposeMultiplyVecX( idVecX &dst, const idMatX &mat, const idVecX &vec );
+	virtual void VPCALL MatX_TransposeMultiplyAddVecX( idVecX &dst, const idMatX &mat, const idVecX &vec );
+	virtual void VPCALL MatX_TransposeMultiplySubVecX( idVecX &dst, const idMatX &mat, const idVecX &vec );
+	virtual void VPCALL MatX_LowerTriangularSolve( const idMatX &L, float *x, const float *b, const int n, int skip = 0 );
+	virtual void VPCALL MatX_LowerTriangularSolveTranspose( const idMatX &L, float *x, const float *b, const int n );
+	virtual bool VPCALL MatX_LDLTFactor( idMatX &mat, idVecX &invDiag, const int n );
+
 	virtual void VPCALL TracePointCull( byte *cullBits, byte &totalOr, const float radius, const idPlane *planes, const idDrawVert *verts, const int numVerts );
 	virtual void VPCALL DecalPointCull( byte *cullBits, const idPlane *planes, const idDrawVert *verts, const int numVerts );
 	virtual void VPCALL OverlayPointCull( byte *cullBits, idVec2 *texCoords, const idPlane *planes, const idDrawVert *verts, const int numVerts );
 
 	virtual void VPCALL DeriveTriPlanes( idPlane *planes, const idDrawVert *verts, const int numVerts, const int *indexes, const int numIndexes );
 	virtual void VPCALL DeriveTangents( idPlane *planes, idDrawVert *verts, const int numVerts, const int *indexes, const int numIndexes );
+	virtual void VPCALL DeriveUnsmoothedTangents( idDrawVert *verts, const dominantTri_s *dominantTris, const int numVerts );
 	virtual void VPCALL NormalizeTangents( idDrawVert *verts, const int numVerts );
+
+	virtual int  VPCALL CreateShadowCache( idVec4 *vertexCache, int *vertRemap, const idVec3 &lightOrigin, const idDrawVert *verts, const int numVerts );
+	virtual int  VPCALL CreateVertexProgramShadowCache( idVec4 *vertexCache, const idDrawVert *verts, const int numVerts );
 
 	virtual void VPCALL MixSoundTwoSpeakerMono( float *mixBuffer, const float *samples, const int numSamples, const float lastV[2], const float currentV[2] );
 	virtual void VPCALL MixSoundTwoSpeakerStereo( float *mixBuffer, const float *samples, const int numSamples, const float lastV[2], const float currentV[2] );
