@@ -1220,6 +1220,7 @@ struct emissiveReq_t {
 	float		surfRadius;		// screen half-size (for the point-light forward offset)
 	idVec3		color;			// final light colour (hue * scale, desaturated)
 	bool		freshTint;		// true = colour sampled from the drawn screen this frame; false = culled-surface fallback
+	bool		pointLight;		// item glow: plain faint point light instead of the screen cone
 };
 
 struct emissiveLight_t {
@@ -1341,6 +1342,7 @@ static void R_QueueEmissiveLight( const srfTriangles_t *tri, const viewEntity_t 
 	req.normal      = worldNormal;
 	req.surfRadius  = surfRadius;
 	req.freshTint   = freshTint;
+	req.pointLight  = false;
 
 	// Reach scales with screen size, but *sub-linearly* so a big hanging sign doesn't cast light
 	// across the whole room. Small/medium screens stay exactly linear (reach == size * multiplier);
@@ -1425,6 +1427,121 @@ static void R_QueueEmissiveScreenFallback( const srfTriangles_t *tri, const view
 
 /*
 =================
+R_ItemGlowColor
+
+DUDE: derives the glow colour of a self-lit pickup-item surface. Item models keep their
+glowing bits (medkit cross light, armor shard fx, powerup blite spheres...) on separate
+surfaces whose materials live under models/items/ and consist of additive ambient stages,
+so the detection is: material name prefix + at least one enabled add-blend ambient stage.
+The colour is the stage colour (register-evaluated, so pulsing rgb tables track) times the
+glow texture's mean colour, summed over the glow stages. Returns false for non-glow
+materials (plain diffuse item shells included).
+=================
+*/
+static bool R_ItemGlowColor( const idMaterial *shader, const renderEntity_t *parms, idVec3 &out ) {
+	if ( shader == NULL || idStr::Icmpn( shader->GetName(), "models/items/", 13 ) != 0 ) {
+		return false;
+	}
+
+	static float scratchRegs[MAX_EXPRESSION_REGISTERS];	// keep off the stack (cf. R_AddDrawSurf)
+	const float *regs = shader->ConstantRegisters();
+
+	out.Zero();
+	bool found = false;
+	const int n = shader->GetNumStages();
+	for ( int i = 0; i < n; i++ ) {
+		const shaderStage_t *stage = shader->GetStage( i );
+		if ( stage->lighting != SL_AMBIENT ) {
+			continue;
+		}
+		const int blend = stage->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS );
+		if ( blend != ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE ) ) {
+			continue;		// only "blend add" stages emit
+		}
+		if ( regs == NULL ) {
+			// non-constant material (rgb tables, translates): evaluate once with the entity's parms
+			shader->EvaluateRegisters( scratchRegs, parms->shaderParms, tr.viewDef, parms->referenceSound );
+			regs = scratchRegs;
+		}
+		if ( !regs[ stage->conditionRegister ] ) {
+			continue;
+		}
+		idVec3 c( regs[ stage->color.registers[0] ],
+				  regs[ stage->color.registers[1] ],
+				  regs[ stage->color.registers[2] ] );
+		if ( stage->texture.image != NULL ) {
+			c.x *= stage->texture.image->averageColor[0];
+			c.y *= stage->texture.image->averageColor[1];
+			c.z *= stage->texture.image->averageColor[2];
+		}
+		out += c;
+		found = true;
+	}
+
+	return found && out.LengthSqr() > 1e-6f;
+}
+
+// r_itemGlow == 1 maps to this light colour scale — "faint": in a lit area the
+// contribution disappears into the existing light, only near-total darkness shows it
+static const float ITEM_GLOW_MAX_SCALE = 0.10f;
+static const float ITEM_GLOW_RADIUS    = 40.0f;		// world units, per-axis point light radius
+
+/*
+=================
+R_QueueItemGlowLight
+
+DUDE: queues a faint point light centred on a self-lit item surface (armor, medkits,
+ammo lights, powerups) so the glowing bit actually gives off light in the dark. Reuses
+the emissive fill-light reconcile/reap machinery; keyed by (entity, material) like the
+screens. Colour is always freshly derivable (no gui render needed), so culled surfaces
+queue through the exact same path and keep glowing when we look away.
+=================
+*/
+static void R_QueueItemGlowLight( const srfTriangles_t *tri, const viewEntity_t *space, const idMaterial *shader ) {
+	if ( !tri || !tri->verts || tri->numIndexes < 3 || !space || !space->entityDef ) {
+		return;
+	}
+	const renderEntity_t &parms = space->entityDef->parms;
+	// skip carried copies: the view weapon (flashlight) and items held by skeletal
+	// characters (lanterns, belt flashlights) — a point light inside a mesh only blasts it
+	if ( parms.numJoints > 0 || parms.weaponDepthHack || parms.modelDepthHack != 0.0f ) {
+		return;
+	}
+
+	idVec3 tint;
+	if ( !R_ItemGlowColor( shader, &parms, tint ) ) {
+		return;
+	}
+
+	const idVec3 localCenter = ( tri->bounds[0] + tri->bounds[1] ) * 0.5f;
+	idVec3 worldCenter;
+	R_LocalPointToGlobal( space->modelMatrix, localCenter, worldCenter );
+
+	// normalise to a pure hue: brightness comes from the slider, the texture only sets colour
+	idVec3 hue = tint;
+	float m = hue.x;
+	if ( hue.y > m ) m = hue.y;
+	if ( hue.z > m ) m = hue.z;
+	if ( m > 0.001f ) {
+		hue /= m;
+	} else {
+		hue.Set( 1.0f, 1.0f, 1.0f );
+	}
+
+	emissiveReq_t &req = r_emissiveReqs.Alloc();
+	req.entityIndex = space->entityDef->index;
+	req.surfKey     = shader;
+	req.center      = worldCenter;
+	req.normal.Set( 0.0f, 0.0f, 1.0f );	// unused for point lights
+	req.surfRadius  = 0.0f;
+	req.radius      = ITEM_GLOW_RADIUS;
+	req.freshTint   = true;
+	req.pointLight  = true;
+	req.color       = hue * ( r_itemGlow.GetFloat() * ITEM_GLOW_MAX_SCALE );
+}
+
+/*
+=================
 R_FindEmissiveLight
 =================
 */
@@ -1476,6 +1593,14 @@ static void R_BuildEmissiveRenderLight( const emissiveReq_t &req, renderLight_t 
 	rl.shaderParms[1] = req.color[1];
 	rl.shaderParms[2] = req.color[2];
 	rl.shaderParms[3] = 1.0f;
+
+	// DUDE item glow: a plain faint point light centred on the item's glowing surface
+	if ( req.pointLight ) {
+		rl.pointLight = true;
+		rl.origin = req.center;
+		rl.lightRadius.Set( req.radius, req.radius, req.radius );
+		return;
+	}
 
 	const float R = req.radius;
 
@@ -1536,7 +1661,8 @@ static void R_UpdateEmissiveLights( void ) {
 		r_emissiveWorldGen = world ? world->defsGeneration : -1;
 	}
 
-	const bool enabled = r_emissiveSurfaces.GetBool() && R_BackendSupportsEnhancements();
+	const bool enabled = ( r_emissiveSurfaces.GetBool() || r_itemGlow.GetFloat() > 0.0f )
+	                     && R_BackendSupportsEnhancements();
 
 	if ( !enabled || !world ) {
 		if ( r_emissiveLightList.Num() > 0 ) {
@@ -1557,7 +1683,8 @@ static void R_UpdateEmissiveLights( void ) {
 	                     + r_emissiveLightFalloff.GetFloat()    * 16.0f
 	                     + r_emissiveLightScale.GetFloat()      * 64.0f
 	                     + r_emissiveLightRadius.GetFloat()     * 256.0f
-	                     + r_emissiveLightSaturation.GetFloat() * 1024.0f;
+	                     + r_emissiveLightSaturation.GetFloat() * 1024.0f
+	                     + r_itemGlow.GetFloat()               * 4096.0f;
 	if ( styleSig != lastStyleSig ) {
 		R_FreeAllEmissiveLights( world );
 		lastStyleSig = styleSig;
@@ -1992,16 +2119,28 @@ static void R_AddAmbientDrawsurfs( viewEntity_t *vEntity ) {
 			// add the surface for drawing
 			R_AddDrawSurf( tri, vEntity, &vEntity->entityDef->parms, shader, vEntity->scissorRect, particle_radius );
 
+			// DUDE: self-lit item bits (armor, medkits, powerups) give off a faint glow
+			if ( r_itemGlow.GetFloat() > 0.0f && tr.viewDef->renderView.viewID > 0
+					&& R_BackendSupportsEnhancements() ) {
+				R_QueueItemGlowLight( tri, vEntity, shader );
+			}
+
 			// ambientViewCount is used to allow light interactions to be rejected
 			// if the ambient surface isn't visible at all
 			tri->ambientViewCount = tr.viewCount;
-		} else if ( r_emissiveSurfaces.GetBool() && tr.viewDef->renderView.viewID > 0
-				&& R_BackendSupportsEnhancements() ) {
+		} else if ( tr.viewDef->renderView.viewID > 0 && R_BackendSupportsEnhancements()
+				&& ( r_emissiveSurfaces.GetBool() || r_itemGlow.GetFloat() > 0.0f ) ) {
 			// DUDE: this surface is off-screen/behind us this frame, so it never reaches R_AddDrawSurf.
 			// If it's a screen, still queue its fill light (best-effort, no gui re-render) so emissive
 			// surfaces light their surroundings before/without us looking straight at them. Lights whose
 			// glow truly leaves the view still reap on the normal timeout (see R_UpdateEmissiveLights).
-			R_QueueEmissiveScreenFallback( tri, vEntity, shader );
+			if ( r_emissiveSurfaces.GetBool() ) {
+				R_QueueEmissiveScreenFallback( tri, vEntity, shader );
+			}
+			// same for item glow: the colour needs no gui render, so the culled path is identical
+			if ( r_itemGlow.GetFloat() > 0.0f ) {
+				R_QueueItemGlowLight( tri, vEntity, shader );
+			}
 		}
 	}
 

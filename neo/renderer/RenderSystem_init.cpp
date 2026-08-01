@@ -388,6 +388,12 @@ idCVar r_emissiveLightLimit( "r_emissiveLightLimit", "24", CVAR_RENDERER | CVAR_
 idCVar r_emissiveLightSpread( "r_emissiveLightSpread", "1.60", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "width of the projected fill cone as a multiple of its reach: low = a tight beam, high = a wide near-hemisphere that wraps around the screen (but still clipped behind the mount)", 0.5f, 3.5f );
 idCVar r_emissiveLightSpecular( "r_emissiveLightSpecular", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "screen fill lights add specular highlights (1, more visible on the weapon) or diffuse-only soft fill (0, calmer)" );
 
+// DUDE: self-lit pickup items (armor, medkits, ammo lights, powerups) glow via additive
+// material stages but cast no light in vanilla. This gives each one a very faint point
+// light tinted from its glow texture — only noticeable in near-total darkness. Rides the
+// emissive fill-light machinery above. Non-vanilla; enhancement backends only.
+idCVar r_itemGlow( "r_itemGlow", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "self-lit pickup items (armor, medkits, ammo, powerups) cast a faint glow of their light's colour; 0 = vanilla (off), 1 = full faint glow, only visible in near darkness (non-vanilla; opengl3/Vulkan only)", 0.0f, 1.0f );
+
 // DUDE: GTAO screen-space ambient occlusion. Darkens only the ambient light term
 // (not direct/dynamic lights), so it stays correct as lighting changes and fixes
 // Doom 3's flat/plastic model look. Non-vanilla; enhancement backends only.

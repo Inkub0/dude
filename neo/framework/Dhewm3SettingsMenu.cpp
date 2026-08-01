@@ -1742,6 +1742,16 @@ static CVarOption enhancementOptions[] = {
 			"content-tinted fill light onto nearby geometry. Fine-tuning lives in the Debugging tab.";
 		AddCVarOptionTooltips( cvar, descr );
 	} ),
+	CVarOption( "r_itemGlow", []( idCVar& cvar ) {
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Self-lit Items Glow", &f, 0.0f, 1.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, f ) );
+		}
+		const char* descr = "Pickups with glowing parts (armor, medkits, ammo lights, powerups) give off a very\n"
+			"faint light of their glow's colour, so they're findable in pitch-black rooms.\n"
+			"0 = vanilla (no light), 1 = full faint glow. Only noticeable in near-total darkness.";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
 
 	// NOTE: the Shadows section is hand-drawn in DrawEnhancementsMenu() (grouped
 	// under the toggle, with a fine-grained bias control), not listed here.
