@@ -1761,12 +1761,6 @@ RHI-based replacement for RB_ExecuteBackEndCommands (legacy path untouched).
 =============
 */
 void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
-	static bool announced = false;
-	if ( !announced ) {
-		announced = true;
-		common->Printf( "GL3 backend: Chunk F - fog, blend lights, _currentRender post-process\n" );
-	}
-
 	rhi::RHI *r = rhi::GetGL3RHI();
 	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
 

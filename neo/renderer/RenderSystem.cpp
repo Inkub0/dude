@@ -548,7 +548,18 @@ void idRenderSystemLocal::SetBackEndRenderer() {
 
 	switch( backEndRenderer ) {
 	case BE_ARB2:
-		common->Printf( "using ARB2 renderSystem\n" );
+		// BE_ARB2 is the only surviving legacy interaction path, so backEndRenderer
+		// always lands here. It says how interactions are *modelled* (Doom 3's ARB2
+		// path), not which GL API executes them — that's r_graphicsAPI. On the GL3
+		// core backend the same ARB2 model is translated to viable OpenGL 3.3: the
+		// original ARB2 vertex/fragment programs are transpiled to GLSL 330 (ArbToGlsl)
+		// and the fixed-function stages run through the RHI. Report that so the log
+		// isn't mistaken for the legacy fixed-function path.
+		if ( glConfig.coreProfile ) {
+			common->Printf( "Applying ARB2 renderSystem (translated to OpenGL 3.3 core by the GL3/RHI backend)\n" );
+		} else {
+			common->Printf( "Applying ARB2 renderSystem (native ARB vertex/fragment programs)\n" );
+		}
 		backEndRendererHasVertexPrograms = true;
 		backEndRendererMaxLight = 999;
 		break;
