@@ -122,8 +122,17 @@ in git history at 7cfec811 if a hybrid is ever wanted again.
 - **Lookup**: per portal area. The pane center is nudged toward the viewer
   before `PointInArea` (panes sit on window portals; the viewer's side is the
   room the reflection should show). Probes load lazily in the backend, keyed
-  per map, and simply replace the `env/gen*` image bound on unit 0 of the
-  cube-reflection stage.
+  per map, and replace the image bound on unit 0 of the cube-reflection stage.
+- **Scope + energy normalization**: only the generic grey `env/gen*` images
+  are swapped (custom-authored cubemaps keep their content) and only on
+  unbumped materials (the bumpy shader takes no stage colour, so a probe
+  there would be uncontrollable). The probe's mean face brightness is
+  measured at load and the stage colour scaled by `envAvg/probeAvg` — the
+  swap upgrades the *content* but preserves each material's authored energy
+  budget. This matters enormously: `env/gen1` averages 0.022 brightness
+  (chiglass1blue ADDS it at full vertex colour and is subtle only because of
+  that near-blackness) while `env/gen2` averages 0.295 — a 13x spread the
+  stage math is tuned around.
 - The probe is a static LDR snapshot from one point: no characters/dynamic
   objects in it, and parallax is approximate (standard env-map assumption).
 - Re-capture a bad vantage with `bakeGlassProbe force`; probes are plain TGAs,
