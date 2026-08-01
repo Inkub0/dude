@@ -958,6 +958,7 @@ extern idCVar r_emissiveLightSaturation;	// desaturate tint toward white (0=whit
 extern idCVar r_emissiveLightLimit;		// per-view budget cap on fill lights (0=unlimited)
 extern idCVar r_emissiveLightSpread;	// projected cone width (low=beam, high=near-hemisphere)
 extern idCVar r_emissiveLightSpecular;	// fill lights cast specular (1) or diffuse-only (0)
+extern idCVar r_itemGlow;				// self-lit pickup items cast a faint glow (0 = vanilla .. 1 = faint)
 
 // DUDE: GTAO screen-space ambient occlusion (enhancement backends only; see docs/ssao-gtao.md)
 extern idCVar r_ssao;					// master toggle (AO on the ambient term)
