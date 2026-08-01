@@ -200,6 +200,20 @@ endif()
 find_package(OpenAL REQUIRED)
 include_directories(${OPENAL_INCLUDE_DIR})
 
+# SDL backend auto-fallback. SDL2 is the preferred, maximally-portable base (and on
+# modern distros it transparently rides sdl2-compat -> SDL3). If SDL2 is requested (the
+# default) but genuinely isn't installed -- e.g. a system that ships only SDL3 with no
+# sdl2-compat -- switch to SDL3 automatically instead of failing the configure. An
+# explicit -DSDL3=ON still forces native SDL3; SDL1.2 stays an explicit opt-in (both OFF).
+if (SDL2 AND NOT SDL3)
+	find_package(SDL2 QUIET)
+	if (NOT SDL2_FOUND)
+		message(STATUS "SDL2 requested but not found -- falling back to SDL3")
+		set(SDL2 OFF CACHE BOOL "Use SDL2 instead of SDL1.2" FORCE)
+		set(SDL3 ON  CACHE BOOL "Use SDL3 instead of SDL2 or SDL1.2" FORCE)
+	endif()
+endif()
+
 if (SDL3)
 	if(SDL2)
 		message(WARNING "You enabled both SDL2 and SDL3. Only one can be used at a time, disabling SDL2")
