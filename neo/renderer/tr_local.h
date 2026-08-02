@@ -1233,17 +1233,25 @@ typedef struct {
 	bool		coreProfile;	// DUDE: request a GL 3.3 core context (r_graphicsAPI opengl3)
 } glimpParms_t;
 
-// DUDE GL3 backend (renderer/rhi/GL3Backend.cpp)
-void		RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds );
+// DUDE RHI executor (renderer/rhi/RhiBackend.cpp) — idTech4 command list →
+// rhi::GetRHI() calls; shared by the opengl3 and (Phase 4) vulkan backends
+void		RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds );
 
 // DUDE: true when the active backend supports the non-vanilla "Enhancements"
-// (film grain, chromatic aberration, soft particles, future shadow mapping...).
-// Only the GL 3.3 core backend qualifies today; Vulkan will OR-in its own flag
-// here. The legacy ARB2 path must stay faithful to vanilla Doom 3, so these
-// effects are suppressed whenever this returns false.
+// (film grain, chromatic aberration, soft particles, shadow mapping, SSAO...).
+// True for the RHI backends (opengl3, later vulkan). The legacy ARB2 path must
+// stay faithful to vanilla Doom 3, so these effects are suppressed whenever
+// this returns false.
 bool		R_BackendSupportsEnhancements();
 
 bool		GLimp_Init( glimpParms_t parms );
+#ifdef DHEWM3_VULKAN
+// Phase 4 M0 scaffolding (docs/vulkan-backend.md): prove SDL can create a
+// Vulkan-capable window and list instance extensions, without touching the GL
+// path. Logs findings; returns false if the system can't do SDL+Vulkan.
+// M1 grows this into the real Vulkan window bring-up.
+bool		GLimp_VulkanProbe( void );
+#endif
 // If the desired mode can't be set satisfactorily, false will be returned.
 // The renderer will then reset the glimpParms to "safe mode" of 640x480
 // fullscreen and try again.  If that also fails, the error will be fatal.

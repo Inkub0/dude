@@ -201,6 +201,83 @@ static SDL_DisplayMode GLimp_ClosestFullscreenMode( int w, int h, int displayHz,
 }
 #endif // SDL2
 
+#ifdef DHEWM3_VULKAN
+
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+  #include <SDL3/SDL_vulkan.h>
+#elif SDL_VERSION_ATLEAST(2, 0, 0)
+  #include <SDL_vulkan.h>
+#endif
+
+/*
+===================
+GLimp_VulkanProbe
+
+Phase 4 M0 scaffolding (docs/vulkan-backend.md): prove SDL can create a
+Vulkan-capable window (no SDL_WINDOW_OPENGL, no GL context, loads the Vulkan
+library) and hand us the instance extension list, without touching the GL path.
+At M1 this grows into the real window bring-up: the game window itself is
+created with SDL_WINDOW_VULKAN and qgl loading is skipped.
+===================
+*/
+bool GLimp_VulkanProbe( void ) {
+#if SDL_VERSION_ATLEAST(2, 0, 0)
+	assert( SDL_WasInit( SDL_INIT_VIDEO ) );
+
+	// creating the window is the real test: it loads the Vulkan library and
+	// verifies the video driver can do Vulkan surfaces at all
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+	SDL_Window *probe = SDL_CreateWindow( "dude-vulkan-probe", 64, 64,
+	                                      SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN );
+#else
+	SDL_Window *probe = SDL_CreateWindow( "dude-vulkan-probe",
+	                                      SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+	                                      64, 64, SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN );
+#endif
+	if ( probe == NULL ) {
+		common->Warning( "Vulkan probe: SDL can't create a Vulkan-capable window: %s", SDL_GetError() );
+		return false;
+	}
+
+	bool ok = false;
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+	Uint32 extCount = 0;
+	const char * const * exts = SDL_Vulkan_GetInstanceExtensions( &extCount );
+	if ( exts != NULL ) {
+		ok = true;
+		common->Printf( "Vulkan probe: window OK, %u instance extensions:\n", (unsigned)extCount );
+		for ( Uint32 i = 0; i < extCount; i++ ) {
+			common->Printf( "  %s\n", exts[i] );
+		}
+	}
+#else
+	unsigned int extCount = 0;
+	if ( SDL_Vulkan_GetInstanceExtensions( probe, &extCount, NULL ) ) {
+		const char *exts[32] = {};
+		unsigned int n = extCount < 32 ? extCount : 32;
+		if ( SDL_Vulkan_GetInstanceExtensions( probe, &n, exts ) ) {
+			ok = true;
+			common->Printf( "Vulkan probe: window OK, %u instance extensions:\n", extCount );
+			for ( unsigned int i = 0; i < n; i++ ) {
+				common->Printf( "  %s\n", exts[i] );
+			}
+		}
+	}
+#endif
+	if ( !ok ) {
+		common->Warning( "Vulkan probe: SDL_Vulkan_GetInstanceExtensions failed: %s", SDL_GetError() );
+	}
+
+	SDL_DestroyWindow( probe );
+	return ok;
+#else // SDL1.2
+	common->Warning( "Vulkan probe: the SDL 1.2 build has no Vulkan support" );
+	return false;
+#endif
+}
+
+#endif // DHEWM3_VULKAN
+
 /*
 ===================
 GLimp_Init

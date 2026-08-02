@@ -2003,8 +2003,8 @@ void RB_RHI_FreeShadowCubeCache() {
 	if ( !glConfig.isInitialized ) {
 		return;
 	}
-	RB_RHI_ResetCubeCache( rhi::GetGL3RHI() );
-	RB_RHI_Reset2DCache( rhi::GetGL3RHI() );
+	RB_RHI_ResetCubeCache( rhi::GetRHI() );
+	RB_RHI_Reset2DCache( rhi::GetRHI() );
 	// light indices are reused by the next map; drop stale incumbency so a new level's
 	// lights don't inherit a phantom budget bonus from the old one.
 	RB_RHI_ResetLightBudgetHyst();

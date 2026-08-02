@@ -294,9 +294,43 @@ if(DHEWM3_VULKAN)
 	endif()
 	add_definitions(-DDHEWM3_VULKAN=1)
 	set(vulkan_libs Vulkan::Vulkan)
-	# VMA (VulkanMemoryAllocator) is header-only and not needed until the
-	# Phase 4 backend lands; it will be vendored under libs/vma/ then.
-	message(STATUS "Vulkan renderer backend enabled (headers: ${Vulkan_INCLUDE_DIRS})")
+
+	# VMA (VulkanMemoryAllocator), header-only, vendored under libs/vma/
+	# (first used by the M1 backend; warn early if the vendored copy is missing)
+	if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/libs/vma/vk_mem_alloc.h)
+		include_directories(libs/vma)
+	else()
+		message(WARNING "libs/vma/vk_mem_alloc.h missing - vendor VMA before the M1 backend work")
+	endif()
+
+	# Build-time SPIR-V (docs/vulkan-backend.md, decided 2026-08-02): compile
+	# every shader with the Vulkan prelude exactly the way validate.py checks
+	# them. Outputs land in the build tree; the shader loader's dev fallback
+	# will pick them up from DUDE_SHADER_SPV_DIR (M2); installs/releases will
+	# ship them via VFS once the backend can consume them.
+	find_package(Python3 REQUIRED COMPONENTS Interpreter)
+	if(Vulkan_GLSLANG_VALIDATOR_EXECUTABLE)
+		set(spv_compiler ${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE})
+	else()
+		set(spv_compiler ${Vulkan_GLSLC_EXECUTABLE})
+	endif()
+	set(spv_dir ${CMAKE_BINARY_DIR}/shaders/spv)
+	add_definitions(-DDUDE_SHADER_SPV_DIR="${spv_dir}")
+	file(GLOB shader_spv_sources
+		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.vert
+		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.frag
+		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.glsl)
+	add_custom_command(
+		OUTPUT ${spv_dir}/.stamp
+		COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/compile_spv.py
+		        --compiler ${spv_compiler} --out ${spv_dir}
+		COMMAND ${CMAKE_COMMAND} -E touch ${spv_dir}/.stamp
+		DEPENDS ${shader_spv_sources} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/compile_spv.py
+		COMMENT "Compiling shaders to SPIR-V (shaders/spv)"
+		VERBATIM)
+	add_custom_target(shaders_spv ALL DEPENDS ${spv_dir}/.stamp)
+
+	message(STATUS "Vulkan renderer backend enabled (headers: ${Vulkan_INCLUDE_DIRS}; SPIR-V via ${spv_compiler})")
 endif()
 
 if(DEFINED ENV{MSYSTEM})
@@ -725,6 +759,12 @@ set(src_renderer
 	renderer/stblib_impls.c
 )
 
+if(DHEWM3_VULKAN)
+	# Phase 4 (docs/vulkan-backend.md): the Vulkan backend lives in rhi/vk/,
+	# compiled only under the option (needs Vulkan headers + C++17)
+	list(APPEND src_renderer renderer/rhi/vk/VulkanBackend.cpp)
+endif()
+
 always_optimize_sourcefile(renderer/stblib_impls.c)
 
 # I'm a bit sloppy with headers and just glob them in..
@@ -952,6 +992,12 @@ if(IMGUI)
 		set(src_imgui libs/imgui/backends/imgui_impl_sdl3.cpp)
 	else()
 		set(src_imgui libs/imgui/backends/imgui_impl_sdl2.cpp)
+	endif()
+
+	if(DHEWM3_VULKAN)
+		# Phase 4 M6 uses the vendored Vulkan renderer impl; compiling it from
+		# M0 on keeps it building alongside the backend work
+		list(APPEND src_imgui libs/imgui/backends/imgui_impl_vulkan.cpp)
 	endif()
 
 set(src_imgui ${src_imgui}
