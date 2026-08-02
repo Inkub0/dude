@@ -95,13 +95,22 @@ Compatibility is defined by *what a mod ships*, not by intent:
   these mods (e.g. Doom 3: Phobos): run **vanilla Doom 3 + the mod under Wine/Proton**.
   This is a game-code limitation, unrelated to the renderer.
 
-### Phase 3 — RHI abstraction
+### Phase 3 — RHI abstraction  **[DONE — 2026-08-02; default flip deferred]**
+
+Everything below shipped: chunks A–G, plus the tail items that were still open at the
+July survey — cinematics, screenshots and ImGui all run on the core backend
+(RhiBackend.cpp), and the subview depth bug is resolved ([known-bugs.md](known-bugs.md)).
+The one deliberately unfinished piece is the **default flip** (opengl3 default, legacy
+renamed `opengl-legacy`): deferred until after the Phase 4 Vulkan bring-up, so the
+legacy reference stays one cvar away during parity work. `r_graphicsAPI` keeps
+`opengl` as default for now.
 
 **Decisions (2026-07-21):**
 - **Parallel backend, not in-place rewrite**: legacy ARB path stays untouched as the
   reference implementation (pixel harness needs it); new GL 3.3 backend is new code
   behind `r_graphicsAPI opengl3` (legacy keeps `opengl` and stays default until
-  parity; then opengl3 becomes default, legacy renamed `opengl-legacy`).
+  parity; then opengl3 becomes default, legacy renamed `opengl-legacy` — *flip
+  deferred to post-Phase-4, see above*).
 - **Material IR (Phase 2.5) co-developed as its own module**, lazily built + cached
   per material; unknown custom ARB programs → transpiler → on failure degrade to a
   plain generic stage.
@@ -162,7 +171,21 @@ matter:**
    which *already* dedups via `backEnd.glState.tmu[].current2DMap`. Revisit only when
    Phase 4 moves image ownership into the RHI.
 
-### Phase 3.5 — OpenGL 3.3 enhancement suite (pre-Vulkan) **[NEW — added 2026-07-24]**
+### Phase 3.5 — OpenGL 3.3 enhancement suite (pre-Vulkan) **[DONE — 2026-08-02; POM deferred to Phase 9]**
+
+**As-built:** the suite grew far past the original three-item list. Shipped on the GL3
+backend, all opt-in via the Enhancements tab + quality presets (Potato→Nightmare,
+docs/todo.md): specular tuning, shadow mapping (projected 2D + point cube maps, static
+cache, perforated casters — [shadow-system.md](shadow-system.md)), SSAO/GTAO
+([ssao-gtao.md](ssao-gtao.md)), baked AO maps ([occlusion-maps.md](occlusion-maps.md)),
+HDR pipeline ([hdr-pipeline.md](hdr-pipeline.md)), PBR/GGX materials
+([pbr-materials.md](pbr-materials.md)), SSR ([ssr.md](ssr.md)), FXAA/SMAA
+([antialiasing.md](antialiasing.md)), film grain/chromatic aberration, emissive GUI
+surfaces, item glow, smoke dark-blend, soft particles. **POM (item 3) was deliberately
+not built** — it stays in its Phase 9 slot (experimental, marginal on stock art).
+The handoff below is now live: Phase 4 M7 ports the suite to Vulkan together.
+
+*Original phase text kept for context:*  **[added 2026-07-24]**
 Intermediate phase: implement and validate **all GL 3.3-feasible non-vanilla
 enhancements on the `opengl3` backend *before* starting Vulkan**, so the Vulkan port
 (Phase 4) carries the whole suite over in one pass (SPIR-V equivalents) instead of
@@ -204,24 +227,36 @@ shaders (GL 4.0+), which the 3.3 core context doesn't have.
 backend inherits the cvars + Enhancements-tab UI unchanged and only needs SPIR-V shader
 equivalents and pipeline wiring — the suite moves to Vulkan together.
 
-### Phase 4 — Vulkan backend
+### Phase 4 — Vulkan backend  **[PLANNED IN DETAIL — see [vulkan-backend.md](vulkan-backend.md)]**
+
+**The full milestone plan (M0–M7, planned 2026-08-02 from a fresh code survey) lives in
+[vulkan-backend.md](vulkan-backend.md)** — inherited assets, the two structural gaps
+(RHI image ownership; the GL-assuming init/window path), recorded decisions (build-time
+SPIR-V, always-offscreen scene image, clip-space handling, descriptor model, 2 frames
+in flight), and the risk list. Summary kept here:
+
 Instance/device/swapchain via SDL_Vulkan, VMA memory, N frames in flight, descriptor
 management, pipeline cache keyed by (stateBits, shader, vertex layout, pass).
 Bring-up milestones, each independently verifiable:
-1. clear screen → 2. 2D GUI/console/menu → 3. depth prepass → 4. stencil shadows +
+0. seams & scaffolding (GL-only refactor: `rhi::GetRHI()` selector, glimp Vulkan
+window path, SPIR-V build step) → 1. clear screen → 2. rings/pipelines + 2D
+GUI/console/menu (image ownership begins) → 3. depth prepass → 4. stencil shadows +
 interactions (the big one) → 5. translucents + `_currentRender`/`_currentDepth`
-effects → 6. debug tools → 7. cinematics, screenshots, ImGui.
+effects → 6. debug tools, screenshots, ImGui (cinematic uploads land with M5's
+scratch-texture path) → 7. enhancement-suite port.
 final milestone:
 1. Mars city loads, 2. identical light/shadow behaviour, 3. no missing interactions
 4. RenderDoc shows: depth pass, stencil pass, and interaction pass
 Important: The Vulkan renderer is considered correct when it produces perceptually 
 equivalent captures, not when individual API calls match.
 
-**Enhancement suite port:** the Phase 3.5 features (shadow mapping, specular tuning,
-POM, plus the already-shipped soft particles / film grain / chromatic aberration /
-gamma-in-shader) come across to Vulkan **together** here — same cvars and
-Enhancements-tab UI, only new SPIR-V shader equivalents + pipeline wiring. Because
-they were built once on the RHI in Phase 3.5, this is a port, not a re-derivation.
+**Enhancement suite port (= milestone M7):** the as-built Phase 3.5 suite (shadow
+mapping, specular tuning, SSAO, HDR, PBR, SSR, SMAA/FXAA, soft particles, film
+grain/chromatic aberration, gamma-in-shader, presets) comes across to Vulkan
+**together** here — same cvars and Enhancements-tab UI, only pipeline wiring; the
+shaders already compile to SPIR-V (validate.py, 144/144). Because the suite was built
+once on the RHI in Phase 3.5, this is a port, not a re-derivation. (POM is not in the
+suite — unbuilt, Phase 9.)
 
 ### Phase 5 — Validation & polish
 Validation-layer clean, RenderDoc side-by-side parity captures GL vs VK, performance
