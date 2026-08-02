@@ -2256,9 +2256,11 @@ static void DrawVideoOptionsMenu()
 // vanilla look - so a source-accurate frame is always one click away.
 //
 // Presets move the *performance* levers only (on/off, resolution, sample counts,
-// budgets). The artistic-calibration cvars the user tuned (SSAO radius/intensity/
-// floor, emissive reach/tint, shadow biases) are left untouched so every tier
-// shares one look, just at different cost.
+// budgets). The artistic-calibration cvars the user tuned (SSAO intensity/floor,
+// emissive reach/tint, shadow biases) are left untouched so every tier shares one
+// look, just at different cost. The one exception is SSAO radius, which is
+// tier-scaled (32 world units at Medium up to 128 at Nightmare) — the
+// occlusion reach is treated as a cost/scope lever, not a fixed look.
 enum {
 	PRESET_POTATO = 0,
 	PRESET_LOW,
@@ -2310,7 +2312,7 @@ struct EnhancementPreset {
 	// rendering-pipeline tiers (appended, see note above): HDR scene buffer from Medium
 	// up, PBR materials from High up, screen-space reflections from Ultra up. SSR marches
 	// at reduced resolution (docs/ssr.md — the material weighting stays full-res): 1/2 on
-	// Ultra, 2/3 on Ultra Nightmare. ssrResScale carried as 1.0 on the lower tiers so a
+	// Ultra, 2/3 on Nightmare. ssrResScale carried as 1.0 on the lower tiers so a
 	// hand-enabled SSR there runs at the (full-res) default.
 	bool  hdr;                      // r_hdr
 	bool  pbr;                      // r_pbr
@@ -2323,6 +2325,17 @@ struct EnhancementPreset {
 	// above Potato. FXAA (1) is reachable by hand only — its niche is the
 	// subpixel shimmer damping SMAA doesn't do, moot on the PBR tiers.
 	int   rhiAA;                    // r_rhiAA: 0 = off, 1 = FXAA, 2 = SMAA
+	// SSAO world-space sampling radius (appended, see note above). Unlike the
+	// other calibration cvars this one is tier-scaled: tight contact creases on
+	// the cheaper tiers, broad ambient occlusion on the expensive ones. Carried
+	// as the Medium value on Potato/Low (inert there — SSAO is off).
+	float ssaoRadius;               // r_ssaoRadius: 32 Medium .. 128 Nightmare
+	// SSAO temporal accumulation (appended, see note above). On for Medium only:
+	// it denoises the low slice/step march so Medium's cheap AO looks clean, a
+	// small frame-time win over brute-forcing samples. Redundant on the higher
+	// tiers (their per-frame AO is already clean) and inert on Potato/Low (SSAO
+	// off), so it stays off everywhere else.
+	bool  ssaoTemporal;             // r_ssaoTemporal
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2331,13 +2344,13 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0 },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2 },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 3,   2,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2 },
-	{ "High",         true,  false, true,  true,  true,   0.75f, 3,   3,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2 },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 6,   4,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f,   1.5f,   2 },
-	{ "Ultra Nightmare", true, true, true, true,  true,   1.0f, 7,   5,   true,  true,  2048, 2048, 12, 128,  48,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f, 1.5f,   2 },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 32.0f,  false },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 32.0f,  false },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 3,   2,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 32.0f,  true  },
+	{ "High",         true,  false, true,  true,  true,   0.75f, 3,   3,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 64.0f,  false },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 6,   4,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 96.0f,  false },
+	{ "Nightmare", true, true, true, true,  true,   1.0f, 7,   5,   true,  true,  2048, 2048, 12, 128,  48,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 128.0f, false },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2363,6 +2376,8 @@ static void ApplyEnhancementPreset( int idx )
 	r_ssaoSteps.SetInteger( p.ssaoSteps );
 	r_ssaoNormalBuffer.SetBool( p.ssaoNormalBuffer );
 	r_ssaoBentNormal.SetBool( p.ssaoBentNormal );
+	r_ssaoRadius.SetFloat( p.ssaoRadius );
+	r_ssaoTemporal.SetBool( p.ssaoTemporal );
 
 	r_shadowMapSize.SetInteger( p.shadowMapSize );
 	r_shadowMapPointSize.SetInteger( p.shadowMapPointSize );
@@ -2385,7 +2400,7 @@ static void ApplyEnhancementPreset( int idx )
 	r_specularExp.SetFloat( p.specularExp );
 
 	// rendering-pipeline tiers: HDR (Medium+), PBR (High+), SSR (Ultra+, at
-	// reduced march resolution — 1/2 Ultra, 2/3 Ultra Nightmare)
+	// reduced march resolution — 1/2 Ultra, 2/3 Nightmare)
 	r_hdr.SetBool( p.hdr );
 	r_pbr.SetBool( p.pbr );
 	r_ssr.SetBool( p.ssr );
@@ -2410,6 +2425,8 @@ static int DetectEnhancementPreset()
 			r_ssaoSteps.GetInteger()           == p.ssaoSteps &&
 			r_ssaoNormalBuffer.GetBool()       == p.ssaoNormalBuffer &&
 			r_ssaoBentNormal.GetBool()         == p.ssaoBentNormal &&
+			idMath::Fabs( r_ssaoRadius.GetFloat() - p.ssaoRadius ) < 0.5f &&
+			r_ssaoTemporal.GetBool()           == p.ssaoTemporal &&
 			r_shadowMapSize.GetInteger()       == p.shadowMapSize &&
 			r_shadowMapPointSize.GetInteger()  == p.shadowMapPointSize &&
 			r_shadowMapCubePcf.GetInteger()    == p.shadowMapCubePcf &&
@@ -2469,7 +2486,7 @@ static void DrawEnhancementsMenu()
 
 		ImGui::SetNextItemWidth( 220.0f );
 		ImGui::Combo( "##enhPreset", &selPreset,
-			"Potato\0Low\0Medium\0High\0Ultra\0Ultra Nightmare\0" );
+			"Potato\0Low\0Medium\0High\0Ultra\0Nightmare\0" );
 		ImGui::SameLine();
 		if ( ImGui::Button( "Apply Preset" ) ) {
 			ApplyEnhancementPreset( selPreset );
@@ -2477,7 +2494,7 @@ static void DrawEnhancementsMenu()
 		AddTooltip( "One-click tiers for the whole enhancement suite (SSAO, shadow maps, emissive "
 			"fill light, soft particles, post-FX, specular look) plus the rendering pipeline: HDR "
 			"from Medium up, PBR materials from High up, screen-space reflections from Ultra up "
-			"(at half march resolution; two-thirds on Ultra Nightmare). 'Potato' is the "
+			"(at half march resolution; two-thirds on Nightmare). 'Potato' is the "
 			"vanilla-faithful floor (everything off, vanilla specular) and the fastest. Presets set "
 			"the shading look and the performance levers; your fine-tuning (SSAO radii, emissive "
 			"reach/tint, shadow biases, PBR category sliders) is left alone. Tweaking any slider "
