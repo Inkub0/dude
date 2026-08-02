@@ -241,6 +241,7 @@ private:
 		int				size = 0;
 		int				offset = 0;
 		BufferHandle	handle = 0;
+		VkBufferUsageFlags	usage = 0;	// growth (GrowRing) recreates with the same usage
 	};
 	RingBuf						uboRing[FRAMES_IN_FLIGHT];
 	RingBuf						vertRing[FRAMES_IN_FLIGHT];
@@ -248,6 +249,18 @@ private:
 	int							streamGen = 0;
 	int							uboAlign = 256;
 	bool						ringOverflowWarned = false;
+	// geometry rings grow on mid-frame overflow instead of wrapping (a wrap
+	// stomps data in-flight draws still read — M4's "flying triangles"). The
+	// old buffer must outlive this slot's frame: destroyed after the slot's
+	// next fence wait in BeginFrame.
+	struct RetiredRing {
+		BufferHandle	handle;
+		VkBuffer		buffer;
+		VmaAllocation	alloc;
+	};
+	std::vector<RetiredRing>	retiredRings[FRAMES_IN_FLIGHT];
+	bool						GrowRing( RingBuf &ring, int minSize );
+	void						DrainRetiredRings( int slot );
 
 	std::vector<VkBuffer>		bufferTable;			// handle = index + 1
 
@@ -1295,6 +1308,7 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 
 	// M2: this slot's GPU work is fenced off — reset its rings (the
 	// StreamGeneration contract) and its per-draw descriptor pool
+	DrainRetiredRings( frameIndex );	// buffers replaced by GrowRing last time this slot ran
 	uboRing[frameIndex].offset = 0;
 	vertRing[frameIndex].offset = 0;
 	idxRing[frameIndex].offset = 0;
@@ -1569,6 +1583,7 @@ bool VulkanBackend::CreateM2Resources() {
 			setups[i].ring->mapped = (byte *)info.pMappedData;
 			setups[i].ring->size = setups[i].size;
 			setups[i].ring->offset = 0;
+			setups[i].ring->usage = setups[i].usage;
 			bufferTable.push_back( setups[i].ring->buffer );
 			setups[i].ring->handle = (BufferHandle)bufferTable.size();
 		}
@@ -1763,6 +1778,7 @@ void VulkanBackend::DestroyM2Resources() {
 	if ( uploadPool )  { vkDestroyCommandPool( device, uploadPool, NULL ); uploadPool = VK_NULL_HANDLE; uploadCb = VK_NULL_HANDLE; }
 
 	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
+		DrainRetiredRings( slot );		// device is idle here
 		RingBuf *rings[3] = { &uboRing[slot], &vertRing[slot], &idxRing[slot] };
 		for ( int i = 0; i < 3; i++ ) {
 			if ( rings[i]->buffer ) {
@@ -1783,6 +1799,65 @@ void VulkanBackend::DestroyM2Resources() {
 VulkanBackend::AllocFromRing
 ====================
 */
+/*
+====================
+VulkanBackend::GrowRing / DrainRetiredRings
+
+A mid-frame wrap would overwrite data draws recorded earlier this frame still
+read on the GPU (observed as scattered "flying triangle" geometry once M4's
+shadow volumes pushed a busy view past the vertex ring). Instead the ring
+doubles: the live buffer is retired — in-flight draws keep their handle to it —
+and destroyed only after this slot's next fence wait. StreamGeneration bumps so
+cached stream offsets into the retired buffer aren't reused next frame.
+====================
+*/
+bool VulkanBackend::GrowRing( RingBuf &ring, int minSize ) {
+	int newSize = ring.size * 2;
+	while ( newSize < minSize ) {
+		newSize *= 2;
+	}
+
+	VkBufferCreateInfo bci = {};
+	bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bci.size = (VkDeviceSize)newSize;
+	bci.usage = ring.usage;
+	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	VkBuffer newBuf = VK_NULL_HANDLE;
+	VmaAllocation newAlloc = NULL;
+	VmaAllocationInfo info = {};
+	if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &newBuf, &newAlloc, &info ), "vmaCreateBuffer(ring grow)" ) ) {
+		return false;
+	}
+
+	retiredRings[frameIndex].push_back( { ring.handle, ring.buffer, ring.alloc } );
+
+	ring.buffer = newBuf;
+	ring.alloc = newAlloc;
+	ring.mapped = (byte *)info.pMappedData;
+	ring.size = newSize;
+	ring.offset = 0;
+	bufferTable.push_back( newBuf );
+	ring.handle = (BufferHandle)bufferTable.size();
+	streamGen++;
+	common->Printf( "VK: geometry ring grew to %d KB (mid-frame overflow)\n", newSize >> 10 );
+	return true;
+}
+
+void VulkanBackend::DrainRetiredRings( int slot ) {
+	for ( size_t i = 0; i < retiredRings[slot].size(); i++ ) {
+		const RetiredRing &r = retiredRings[slot][i];
+		if ( r.handle >= 1 && r.handle <= (BufferHandle)bufferTable.size() ) {
+			bufferTable[r.handle - 1] = VK_NULL_HANDLE;
+		}
+		vmaDestroyBuffer( vma, r.buffer, r.alloc );
+	}
+	retiredRings[slot].clear();
+}
+
 int VulkanBackend::AllocFromRing( RingBuf &ring, const void *data, int size, int align,
                                   int wrapReserve, BufferHandle *buffer ) {
 	if ( ring.mapped == NULL || size <= 0 ) {
@@ -1791,13 +1866,19 @@ int VulkanBackend::AllocFromRing( RingBuf &ring, const void *data, int size, int
 	}
 	int offset = ( ring.offset + align - 1 ) & ~( align - 1 );
 	if ( offset + size > ring.size - wrapReserve ) {
-		// per-frame rings sized for many times a frame's worth; wrapping means
-		// stomping this frame's own live data, so warn once and start over
-		if ( !ringOverflowWarned ) {
-			ringOverflowWarned = true;
-			common->Warning( "VK: ring overflow (%d KB frame) - draws may corrupt until the ring grows", ring.size >> 10 );
+		// geometry rings grow in place (see GrowRing). The UBO ring can't — its
+		// dynamic-offset descriptor set is already bound in the recording
+		// command buffer — but at 16MB (~16k draws) it has never overflowed;
+		// wrap + warn remains the fallback for it and for a failed grow.
+		if ( ring.usage != VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT && GrowRing( ring, size ) ) {
+			offset = 0;
+		} else {
+			if ( !ringOverflowWarned ) {
+				ringOverflowWarned = true;
+				common->Warning( "VK: ring overflow (%d KB frame) - draws may corrupt until the ring grows", ring.size >> 10 );
+			}
+			offset = 0;
 		}
-		offset = 0;
 	}
 	memcpy( ring.mapped + offset, data, size );
 	ring.offset = offset + size;
