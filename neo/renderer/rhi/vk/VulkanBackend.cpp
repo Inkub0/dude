@@ -53,8 +53,12 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 
 #include <vector>
 
+#include <unordered_map>
+
+#include "framework/FileSystem.h"
 #include "renderer/tr_local.h"
 #include "renderer/rhi/RHI.h"
+#include "renderer/rhi/MaterialIR.h"		// IR_Purge on shader-cache lifecycle
 
 // dev-time validation layer (VK_LAYER_KHRONOS_validation); default on while
 // the backend is being brought up — every milestone's exit bar includes
@@ -64,6 +68,10 @@ static idCVar r_vkValidation( "r_vkValidation", "1", CVAR_RENDERER | CVAR_BOOL,
 // explicit adapter pick; -1 = auto (first discrete GPU, else first usable)
 static idCVar r_vkDevice( "r_vkDevice", "-1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
 	"Vulkan: physical device index to use (-1 = auto-select)" );
+// dev bring-up aid (seeds the M6 capture path): dump the next presented scene
+// image to vkdump.tga in fs_savepath, then self-reset. Blocks one frame.
+static idCVar r_vkDumpNextFrame( "r_vkDumpNextFrame", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan: write the next frame's scene image to vkdump.tga (dev)" );
 
 namespace rhi {
 
@@ -93,16 +101,18 @@ public:
 	virtual void	BeginPass( const ClearArgs *clear );
 	virtual void	BeginTargetPass( RenderTargetHandle rt, const ClearArgs *clear ) { if ( frameOpen ) fakePassDepth++; }
 	virtual void	EndPass();
-	virtual void	SetViewport( int x, int y, int w, int h ) {}
-	virtual void	SetScissor( int x, int y, int w, int h ) {}
+	virtual void	SetViewport( int x, int y, int w, int h );
+	virtual void	SetScissor( int x, int y, int w, int h );
 
-	// ---- resources: M2+ (returning 0 is the documented "absent" contract) ----
-	virtual BufferHandle	CreateBuffer( BufferUsage, int, const void * ) { return 0; }
+	// ---- resources ----
+	virtual BufferHandle	CreateBuffer( BufferUsage, int, const void * ) { return 0; }	// static VBOs: unused (CPU vertexCache); M3+
 	virtual void			UpdateBuffer( BufferHandle, int, int, const void * ) {}
 	virtual void			DestroyBuffer( BufferHandle ) {}
-	virtual ImageHandle		CreateImage( ImageFormat, int, int, const void * ) { return 0; }
-	virtual void			DestroyImage( ImageHandle ) {}
-	virtual ShaderHandle	LoadShader( const char * ) { return 0; }
+	virtual ImageHandle		CreateImage( ImageFormat, int, int, const void * ) { return 0; }	// render-target era API; M7
+	virtual void			DestroyImage( ImageHandle h );
+	virtual ImageHandle		CreateTexture2D( int w, int h, const void *pixels,
+	                                         int textureFilter, int textureRepeat, bool allowMips );
+	virtual ShaderHandle	LoadShader( const char *name );
 
 	virtual RenderTargetHandle	CreateRenderTarget( ImageFormat, int, int ) { return 0; }
 	virtual RenderTargetHandle	CreateRenderTargetCube( ImageFormat, int ) { return 0; }
@@ -114,16 +124,16 @@ public:
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle ) { return 0; }
 	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle ) { return 0; }
 
-	virtual int		AllocUniforms( const void *, int, BufferHandle *buffer ) { if ( buffer ) *buffer = 0; return 0; }
-	virtual int		AllocVertices( const void *, int, BufferHandle *buffer ) { if ( buffer ) *buffer = 0; return 0; }
-	virtual int		AllocIndices( const void *, int, BufferHandle *buffer ) { if ( buffer ) *buffer = 0; return 0; }
-	virtual int		StreamGeneration() { return 0; }
+	virtual int		AllocUniforms( const void *data, int size, BufferHandle *buffer );
+	virtual int		AllocVertices( const void *data, int size, BufferHandle *buffer );
+	virtual int		AllocIndices( const void *data, int size, BufferHandle *buffer );
+	virtual int		StreamGeneration() { return streamGen; }
 
-	// ---- drawing: M2+ ----
-	virtual void	BindPipeline( const PipelineDesc & ) {}
-	virtual void	Draw( const DrawArgs & ) {}
-	virtual void	CopyFramebufferToImage( ImageHandle, int, int ) {}
-	virtual void	DrawImmediate( const void *, int, unsigned int, const float[16], bool ) {}
+	// ---- drawing ----
+	virtual void	BindPipeline( const PipelineDesc &desc );
+	virtual void	Draw( const DrawArgs &args );
+	virtual void	CopyFramebufferToImage( ImageHandle, int, int ) {}		// M5
+	virtual void	DrawImmediate( const void *, int, unsigned int, const float[16], bool ) {}	// M6
 
 private:
 	bool			CreateInstance();
@@ -193,6 +203,93 @@ private:
 	bool						sceneWritten = false;
 	int							fakePassDepth = 0;			// balanced no-op target passes
 	int							presentedFrames = 0;		// session diagnostic (shutdown summary)
+
+	// ================= M2: rings / shaders / pipelines / images =================
+
+	// M2 helpers
+	struct RingBuf;					// defined below (member struct, not ::rhi::RingBuf)
+	bool			CreateM2Resources();
+	void			DestroyM2Resources();
+	void			EnsureScenePass();
+	int				AllocFromRing( RingBuf &ring, const void *data, int size, int align,
+	                               int wrapReserve, BufferHandle *buffer );
+	VkSampler		GetSampler( int textureFilter, int textureRepeat, bool hasMips );
+	VkPipeline		GetPipeline( const PipelineDesc &desc );
+	VkBuffer		LookupBuffer( BufferHandle h ) const {
+		return ( h >= 1 && h <= (BufferHandle)bufferTable.size() ) ? bufferTable[h - 1] : VK_NULL_HANDLE;
+	}
+
+	// per-draw uniform slice ceiling: ArbParams (1536 B) is the largest block;
+	// the dynamic-UBO descriptor's fixed range must cover whatever a shader
+	// reads past the dynamic offset
+	static const int MAX_UNIFORM_SLICE = 2048;
+	static const int UBO_RING_SIZE  = 16 << 20;		// per frame slot (GL3 sizes)
+	static const int VERT_RING_SIZE = 4 << 20;
+	static const int IDX_RING_SIZE  = 2 << 20;
+	static const int MAX_FRAME_SETS = 4096;			// per-draw texture sets per frame
+
+	struct RingBuf {
+		VkBuffer		buffer = VK_NULL_HANDLE;
+		VmaAllocation	alloc = NULL;
+		byte *			mapped = NULL;
+		int				size = 0;
+		int				offset = 0;
+		BufferHandle	handle = 0;
+	};
+	RingBuf						uboRing[FRAMES_IN_FLIGHT];
+	RingBuf						vertRing[FRAMES_IN_FLIGHT];
+	RingBuf						idxRing[FRAMES_IN_FLIGHT];
+	int							streamGen = 0;
+	int							uboAlign = 256;
+	bool						ringOverflowWarned = false;
+
+	std::vector<VkBuffer>		bufferTable;			// handle = index + 1
+
+	struct ImageRec {
+		VkImage			image = VK_NULL_HANDLE;
+		VmaAllocation	alloc = NULL;
+		VkImageView		view = VK_NULL_HANDLE;
+		VkSampler		sampler = VK_NULL_HANDLE;		// borrowed from the sampler cache
+		bool			live = false;
+	};
+	std::vector<ImageRec>		imageTable;				// handle = index + 1
+
+	struct ShaderRec {
+		idStr			name;
+		VkShaderModule	vert = VK_NULL_HANDLE;
+		VkShaderModule	frag = VK_NULL_HANDLE;
+		bool			failed = false;
+	};
+	std::vector<ShaderRec>		shaderTable;			// handle = index + 1
+
+	std::vector<std::pair<unsigned int, VkSampler> >	samplerCache;	// key = filter|repeat|mips
+
+	// descriptor model (prelude.vk.glsl): set 0 = per-draw UBO (dynamic
+	// offset), set 1 = combined image samplers, units 0-7 + cube at 8
+	VkDescriptorSetLayout		setLayoutUbo = VK_NULL_HANDLE;
+	VkDescriptorSetLayout		setLayoutTex = VK_NULL_HANDLE;
+	VkPipelineLayout			pipeLayout = VK_NULL_HANDLE;
+	VkDescriptorPool			persistentPool = VK_NULL_HANDLE;	// holds the per-slot set-0s
+	VkDescriptorSet				uboSet[FRAMES_IN_FLIGHT] = {};
+	VkDescriptorPool			framePool[FRAMES_IN_FLIGHT] = {};	// per-draw set-1s, reset per frame
+	bool						framePoolWarned = false;
+	ImageHandle					dummyImage = 0;			// 1x1 white for unused sampler slots
+
+	// device features actually enabled (queried before device creation)
+	bool						haveAnisotropy = false;
+	bool						haveFillModeNonSolid = false;
+
+	std::unordered_map<unsigned long long, VkPipeline>	pipelineCache;
+	PipelineDesc				currentDesc = { 0, 0, VL_DRAWVERT, 0 };
+	VkPipeline					boundPipeline = VK_NULL_HANDLE;
+	bool						dynStateDirty = true;	// (re)emit viewport+scissor before next draw
+	int							vpRect[4] = { 0, 0, 0, 0 };	// GL-convention viewport (origin bottom-left)
+	int							scRect[4] = { 0, 0, 0, 0 };
+
+	// synchronous upload plumbing (image staging at load time)
+	VkCommandPool				uploadPool = VK_NULL_HANDLE;
+	VkCommandBuffer				uploadCb = VK_NULL_HANDLE;
+	VkFence						uploadFence = VK_NULL_HANDLE;
 };
 
 static VulkanBackend vkBackend;
@@ -509,13 +606,23 @@ bool VulkanBackend::CreateDeviceAndVma() {
 
 	const char *devExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
+	// optional features the M2+ paths use when present: sampler anisotropy
+	// (TF_DEFAULT textures) and line-fill mode (GLS_POLYMODE_LINE debug draws)
+	VkPhysicalDeviceFeatures supported = {};
+	vkGetPhysicalDeviceFeatures( physical, &supported );
+	VkPhysicalDeviceFeatures enabled = {};
+	haveAnisotropy = supported.samplerAnisotropy == VK_TRUE;
+	haveFillModeNonSolid = supported.fillModeNonSolid == VK_TRUE;
+	enabled.samplerAnisotropy = haveAnisotropy ? VK_TRUE : VK_FALSE;
+	enabled.fillModeNonSolid = haveFillModeNonSolid ? VK_TRUE : VK_FALSE;
+
 	VkDeviceCreateInfo dci = {};
 	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 	dci.queueCreateInfoCount = queueCount;
 	dci.pQueueCreateInfos = queues;
 	dci.enabledExtensionCount = 1;
 	dci.ppEnabledExtensionNames = devExts;
-	// no device features needed to clear + blit (M1)
+	dci.pEnabledFeatures = &enabled;
 
 	if ( !vkCheck( vkCreateDevice( physical, &dci, NULL, &device ), "vkCreateDevice" ) ) {
 		return false;
@@ -1026,7 +1133,7 @@ bool VulkanBackend::Init() {
 		Shutdown();
 		return false;
 	}
-	if ( !CreateSwapchain() || !CreateSceneTargets() || !CreateFrameSlots() ) {
+	if ( !CreateSwapchain() || !CreateSceneTargets() || !CreateFrameSlots() || !CreateM2Resources() ) {
 		Shutdown();
 		return false;
 	}
@@ -1060,6 +1167,9 @@ void VulkanBackend::Shutdown() {
 		vkDeviceWaitIdle( device );
 	}
 
+	if ( device != VK_NULL_HANDLE ) {
+		DestroyM2Resources();
+	}
 	DestroyFrameSlots();
 	DestroySceneTargets();
 	DestroySwapchain( true );
@@ -1146,6 +1256,20 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	vkBeginCommandBuffer( f.cb, &bi );
+
+	// M2: this slot's GPU work is fenced off — reset its rings (the
+	// StreamGeneration contract) and its per-draw descriptor pool
+	uboRing[frameIndex].offset = 0;
+	vertRing[frameIndex].offset = 0;
+	idxRing[frameIndex].offset = 0;
+	streamGen++;
+	if ( framePool[frameIndex] ) {
+		vkResetDescriptorPool( device, framePool[frameIndex], 0 );
+	}
+	boundPipeline = VK_NULL_HANDLE;
+	dynStateDirty = true;
+	vpRect[0] = 0; vpRect[1] = 0; vpRect[2] = (int)swapExtent.width;  vpRect[3] = (int)swapExtent.height;
+	scRect[0] = 0; scRect[1] = 0; scRect[2] = (int)swapExtent.width;  scRect[3] = (int)swapExtent.height;
 
 	frameOpen = true;
 	skipFrame = false;
@@ -1282,6 +1406,31 @@ void VulkanBackend::EndFrame() {
 	vkCmdPipelineBarrier( f.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
 		0, 0, NULL, 0, NULL, 1, &toPresent );
 
+	// dev frame dump (r_vkDumpNextFrame): copy the scene image (still
+	// TRANSFER_SRC) into a host buffer alongside the present blit
+	VkBuffer dumpBuf = VK_NULL_HANDLE;
+	VmaAllocation dumpAlloc = NULL;
+	byte *dumpMapped = NULL;
+	if ( r_vkDumpNextFrame.GetBool() ) {
+		VkBufferCreateInfo bci = {};
+		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bci.size = (VkDeviceSize)sceneExtent.width * sceneExtent.height * 4;
+		bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		VmaAllocationCreateInfo aci = {};
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		VmaAllocationInfo info = {};
+		if ( vmaCreateBuffer( vma, &bci, &aci, &dumpBuf, &dumpAlloc, &info ) == VK_SUCCESS ) {
+			dumpMapped = (byte *)info.pMappedData;
+			VkBufferImageCopy c = {};
+			c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			c.imageSubresource.layerCount = 1;
+			c.imageExtent = { sceneExtent.width, sceneExtent.height, 1 };
+			vkCmdCopyImageToBuffer( f.cb, sceneColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dumpBuf, 1, &c );
+		}
+	}
+
 	vkEndCommandBuffer( f.cb );
 
 	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -1311,7 +1460,966 @@ void VulkanBackend::EndFrame() {
 	}
 	presentedFrames++;
 
+	if ( dumpBuf != VK_NULL_HANDLE ) {
+		r_vkDumpNextFrame.SetBool( false );
+		vkWaitForFences( device, 1, &f.fence, VK_TRUE, UINT64_MAX );
+		if ( dumpMapped != NULL ) {
+			// a Vulkan image is top-to-bottom; flipVertical=false sets the TGA
+			// top-down flag (true is for GL's bottom-up readbacks)
+			R_WriteTGA( "vkdump.tga", dumpMapped, (int)sceneExtent.width, (int)sceneExtent.height, false );
+			common->Printf( "VK: wrote vkdump.tga (%ux%u)\n", sceneExtent.width, sceneExtent.height );
+		}
+		vmaDestroyBuffer( vma, dumpBuf, dumpAlloc );
+	}
+
 	frameIndex = ( frameIndex + 1 ) % FRAMES_IN_FLIGHT;
+}
+
+/*
+===============================================================================
+
+	M2 — rings, shaders, pipelines, images (docs/vulkan-backend.md)
+
+===============================================================================
+*/
+
+/*
+====================
+VulkanBackend::CreateM2Resources
+====================
+*/
+bool VulkanBackend::CreateM2Resources() {
+	uboAlign = (int)physProps.limits.minUniformBufferOffsetAlignment;
+	if ( uboAlign < 4 ) {
+		uboAlign = 256;
+	}
+
+	// host-visible persistently-mapped rings, one set per frame slot — the
+	// slot's fence wait in BeginFrame guarantees the GPU is done with them
+	// before offsets reset (the StreamGeneration contract)
+	struct ringSetup_t {
+		RingBuf *ring;
+		int size;
+		VkBufferUsageFlags usage;
+	};
+	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
+		const ringSetup_t setups[3] = {
+			{ &uboRing[slot],  UBO_RING_SIZE,  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT },
+			{ &vertRing[slot], VERT_RING_SIZE, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT },
+			{ &idxRing[slot],  IDX_RING_SIZE,  VK_BUFFER_USAGE_INDEX_BUFFER_BIT },
+		};
+		for ( int i = 0; i < 3; i++ ) {
+			VkBufferCreateInfo bci = {};
+			bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+			bci.size = (VkDeviceSize)setups[i].size;
+			bci.usage = setups[i].usage;
+			bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			VmaAllocationCreateInfo aci = {};
+			aci.usage = VMA_MEMORY_USAGE_AUTO;
+			aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+			aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+			VmaAllocationInfo info = {};
+			if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &setups[i].ring->buffer,
+			                                &setups[i].ring->alloc, &info ), "vmaCreateBuffer(ring)" ) ) {
+				return false;
+			}
+			setups[i].ring->mapped = (byte *)info.pMappedData;
+			setups[i].ring->size = setups[i].size;
+			setups[i].ring->offset = 0;
+			bufferTable.push_back( setups[i].ring->buffer );
+			setups[i].ring->handle = (BufferHandle)bufferTable.size();
+		}
+	}
+
+	// set 0: one dynamic-offset UBO reused for every draw
+	{
+		VkDescriptorSetLayoutBinding b = {};
+		b.binding = 0;
+		b.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+		b.descriptorCount = 1;
+		b.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+		VkDescriptorSetLayoutCreateInfo li = {};
+		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		li.bindingCount = 1;
+		li.pBindings = &b;
+		if ( !vkCheck( vkCreateDescriptorSetLayout( device, &li, NULL, &setLayoutUbo ), "vkCreateDescriptorSetLayout(ubo)" ) ) {
+			return false;
+		}
+	}
+	// set 1: combined image samplers, units 0-7 + the cube slot at 8
+	{
+		VkDescriptorSetLayoutBinding b[9] = {};
+		for ( int i = 0; i < 9; i++ ) {
+			b[i].binding = (uint32_t)i;
+			b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			b[i].descriptorCount = 1;
+			b[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+		}
+		VkDescriptorSetLayoutCreateInfo li = {};
+		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		li.bindingCount = 9;
+		li.pBindings = b;
+		if ( !vkCheck( vkCreateDescriptorSetLayout( device, &li, NULL, &setLayoutTex ), "vkCreateDescriptorSetLayout(tex)" ) ) {
+			return false;
+		}
+	}
+	{
+		VkDescriptorSetLayout sets[2] = { setLayoutUbo, setLayoutTex };
+		VkPipelineLayoutCreateInfo pli = {};
+		pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		pli.setLayoutCount = 2;
+		pli.pSetLayouts = sets;
+		if ( !vkCheck( vkCreatePipelineLayout( device, &pli, NULL, &pipeLayout ), "vkCreatePipelineLayout" ) ) {
+			return false;
+		}
+	}
+
+	// per-slot set 0, pointing at that slot's UBO ring (persistent pool)
+	{
+		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, FRAMES_IN_FLIGHT };
+		VkDescriptorPoolCreateInfo pci = {};
+		pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		pci.maxSets = FRAMES_IN_FLIGHT;
+		pci.poolSizeCount = 1;
+		pci.pPoolSizes = &ps;
+		if ( !vkCheck( vkCreateDescriptorPool( device, &pci, NULL, &persistentPool ), "vkCreateDescriptorPool(persistent)" ) ) {
+			return false;
+		}
+		for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) {
+			VkDescriptorSetAllocateInfo ai = {};
+			ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+			ai.descriptorPool = persistentPool;
+			ai.descriptorSetCount = 1;
+			ai.pSetLayouts = &setLayoutUbo;
+			if ( !vkCheck( vkAllocateDescriptorSets( device, &ai, &uboSet[i] ), "vkAllocateDescriptorSets(ubo)" ) ) {
+				return false;
+			}
+			VkDescriptorBufferInfo bi = {};
+			bi.buffer = uboRing[i].buffer;
+			bi.offset = 0;
+			bi.range = MAX_UNIFORM_SLICE;
+			VkWriteDescriptorSet w = {};
+			w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			w.dstSet = uboSet[i];
+			w.dstBinding = 0;
+			w.descriptorCount = 1;
+			w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+			w.pBufferInfo = &bi;
+			vkUpdateDescriptorSets( device, 1, &w, 0, NULL );
+		}
+	}
+	// per-frame texture-set pools (reset wholesale each BeginFrame)
+	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) {
+		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * 9 };
+		VkDescriptorPoolCreateInfo pci = {};
+		pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		pci.maxSets = MAX_FRAME_SETS;
+		pci.poolSizeCount = 1;
+		pci.pPoolSizes = &ps;
+		if ( !vkCheck( vkCreateDescriptorPool( device, &pci, NULL, &framePool[i] ), "vkCreateDescriptorPool(frame)" ) ) {
+			return false;
+		}
+	}
+
+	// synchronous image-upload plumbing (level/menu load time)
+	{
+		VkCommandPoolCreateInfo pci = {};
+		pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+		pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		pci.queueFamilyIndex = gfxFamily;
+		if ( !vkCheck( vkCreateCommandPool( device, &pci, NULL, &uploadPool ), "vkCreateCommandPool(upload)" ) ) {
+			return false;
+		}
+		VkCommandBufferAllocateInfo cai = {};
+		cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		cai.commandPool = uploadPool;
+		cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		cai.commandBufferCount = 1;
+		vkAllocateCommandBuffers( device, &cai, &uploadCb );
+		VkFenceCreateInfo fci = {};
+		fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+		vkCreateFence( device, &fci, NULL, &uploadFence );
+	}
+
+	// 1x1 white dummy for descriptor slots no draw populates
+	{
+		const byte white[4] = { 255, 255, 255, 255 };
+		dummyImage = CreateTexture2D( 1, 1, white, TF_NEAREST, TR_REPEAT, false );
+		if ( !dummyImage ) {
+			common->Warning( "VK: couldn't create the dummy texture" );
+			return false;
+		}
+	}
+
+	// shader handles are per-backend: drop any Material IR built against
+	// another backend's cache (rebuilt lazily)
+	IR_Purge();
+
+	common->Printf( "VK: M2 resources up - rings %d/%d/%d KB x%d slots (ubo align %d), set0 dynamic-UBO + set1 9-sampler layout\n",
+	                UBO_RING_SIZE >> 10, VERT_RING_SIZE >> 10, IDX_RING_SIZE >> 10, FRAMES_IN_FLIGHT, uboAlign );
+	return true;
+}
+
+/*
+====================
+VulkanBackend::DestroyM2Resources
+====================
+*/
+void VulkanBackend::DestroyM2Resources() {
+	for ( auto &kv : pipelineCache ) {
+		vkDestroyPipeline( device, kv.second, NULL );
+	}
+	pipelineCache.clear();
+	boundPipeline = VK_NULL_HANDLE;
+
+	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
+		if ( shaderTable[i].vert ) { vkDestroyShaderModule( device, shaderTable[i].vert, NULL ); }
+		if ( shaderTable[i].frag ) { vkDestroyShaderModule( device, shaderTable[i].frag, NULL ); }
+	}
+	shaderTable.clear();
+
+	for ( size_t i = 0; i < imageTable.size(); i++ ) {
+		if ( imageTable[i].live ) {
+			if ( imageTable[i].view )  { vkDestroyImageView( device, imageTable[i].view, NULL ); }
+			if ( imageTable[i].image ) { vmaDestroyImage( vma, imageTable[i].image, imageTable[i].alloc ); }
+		}
+	}
+	imageTable.clear();
+	dummyImage = 0;
+
+	for ( size_t i = 0; i < samplerCache.size(); i++ ) {
+		vkDestroySampler( device, samplerCache[i].second, NULL );
+	}
+	samplerCache.clear();
+
+	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) {
+		if ( framePool[i] ) { vkDestroyDescriptorPool( device, framePool[i], NULL ); framePool[i] = VK_NULL_HANDLE; }
+		uboSet[i] = VK_NULL_HANDLE;
+	}
+	if ( persistentPool ) { vkDestroyDescriptorPool( device, persistentPool, NULL ); persistentPool = VK_NULL_HANDLE; }
+	if ( pipeLayout )     { vkDestroyPipelineLayout( device, pipeLayout, NULL ); pipeLayout = VK_NULL_HANDLE; }
+	if ( setLayoutUbo )   { vkDestroyDescriptorSetLayout( device, setLayoutUbo, NULL ); setLayoutUbo = VK_NULL_HANDLE; }
+	if ( setLayoutTex )   { vkDestroyDescriptorSetLayout( device, setLayoutTex, NULL ); setLayoutTex = VK_NULL_HANDLE; }
+
+	if ( uploadFence ) { vkDestroyFence( device, uploadFence, NULL ); uploadFence = VK_NULL_HANDLE; }
+	if ( uploadPool )  { vkDestroyCommandPool( device, uploadPool, NULL ); uploadPool = VK_NULL_HANDLE; uploadCb = VK_NULL_HANDLE; }
+
+	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
+		RingBuf *rings[3] = { &uboRing[slot], &vertRing[slot], &idxRing[slot] };
+		for ( int i = 0; i < 3; i++ ) {
+			if ( rings[i]->buffer ) {
+				vmaDestroyBuffer( vma, rings[i]->buffer, rings[i]->alloc );
+			}
+			*rings[i] = RingBuf();
+		}
+	}
+	bufferTable.clear();
+	ringOverflowWarned = false;
+	framePoolWarned = false;
+
+	IR_Purge();
+}
+
+/*
+====================
+VulkanBackend::AllocFromRing
+====================
+*/
+int VulkanBackend::AllocFromRing( RingBuf &ring, const void *data, int size, int align,
+                                  int wrapReserve, BufferHandle *buffer ) {
+	if ( ring.mapped == NULL || size <= 0 ) {
+		if ( buffer ) { *buffer = 0; }
+		return 0;
+	}
+	int offset = ( ring.offset + align - 1 ) & ~( align - 1 );
+	if ( offset + size > ring.size - wrapReserve ) {
+		// per-frame rings sized for many times a frame's worth; wrapping means
+		// stomping this frame's own live data, so warn once and start over
+		if ( !ringOverflowWarned ) {
+			ringOverflowWarned = true;
+			common->Warning( "VK: ring overflow (%d KB frame) - draws may corrupt until the ring grows", ring.size >> 10 );
+		}
+		offset = 0;
+	}
+	memcpy( ring.mapped + offset, data, size );
+	ring.offset = offset + size;
+	*buffer = ring.handle;
+	return offset;
+}
+
+int VulkanBackend::AllocUniforms( const void *data, int size, BufferHandle *buffer ) {
+	return AllocFromRing( uboRing[frameIndex], data, size, uboAlign, MAX_UNIFORM_SLICE, buffer );
+}
+int VulkanBackend::AllocVertices( const void *data, int size, BufferHandle *buffer ) {
+	return AllocFromRing( vertRing[frameIndex], data, size, 4, 0, buffer );
+}
+int VulkanBackend::AllocIndices( const void *data, int size, BufferHandle *buffer ) {
+	return AllocFromRing( idxRing[frameIndex], data, size, 4, 0, buffer );
+}
+
+/*
+====================
+VulkanBackend::LoadShader
+
+<name> -> shaders/spv/<name>.vert.spv + .frag.spv, via the VFS with the same
+build-tree dev fallback the GLSL loader uses (DUDE_SHADER_SPV_DIR).
+====================
+*/
+static bool VK_ReadSpv( const char *fileName, std::vector<byte> &out ) {
+	void *buf = NULL;
+	int len = fileSystem->ReadFile( va( "shaders/spv/%s", fileName ), &buf, NULL );
+	if ( len > 0 && buf != NULL ) {
+		out.assign( (byte *)buf, (byte *)buf + len );
+		fileSystem->FreeFile( buf );
+		return true;
+	}
+#ifdef DUDE_SHADER_SPV_DIR
+	FILE *f = fopen( va( "%s/%s", DUDE_SHADER_SPV_DIR, fileName ), "rb" );
+	if ( f != NULL ) {
+		fseek( f, 0, SEEK_END );
+		long sz = ftell( f );
+		fseek( f, 0, SEEK_SET );
+		if ( sz > 0 ) {
+			out.resize( (size_t)sz );
+			size_t rd = fread( out.data(), 1, (size_t)sz, f );
+			fclose( f );
+			return rd == (size_t)sz;
+		}
+		fclose( f );
+	}
+#endif
+	return false;
+}
+
+ShaderHandle VulkanBackend::LoadShader( const char *name ) {
+	if ( device == VK_NULL_HANDLE || name == NULL || name[0] == '\0' ) {
+		return 0;
+	}
+	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
+		if ( shaderTable[i].name.Icmp( name ) == 0 ) {
+			return shaderTable[i].failed ? 0 : (ShaderHandle)( i + 1 );
+		}
+	}
+
+	ShaderRec rec;
+	rec.name = name;
+
+	std::vector<byte> vertSpv, fragSpv;
+	if ( !VK_ReadSpv( va( "%s.vert.spv", name ), vertSpv )
+	  || !VK_ReadSpv( va( "%s.frag.spv", name ), fragSpv ) ) {
+		common->Warning( "VK shaders: missing SPIR-V pair for '%s' (shaders/spv)", name );
+		rec.failed = true;
+		shaderTable.push_back( rec );
+		return 0;
+	}
+
+	VkShaderModuleCreateInfo mi = {};
+	mi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	mi.codeSize = vertSpv.size();
+	mi.pCode = (const uint32_t *)vertSpv.data();
+	bool ok = vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.vert ), va( "vkCreateShaderModule(%s.vert)", name ) );
+	mi.codeSize = fragSpv.size();
+	mi.pCode = (const uint32_t *)fragSpv.data();
+	ok = ok && vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.frag ), va( "vkCreateShaderModule(%s.frag)", name ) );
+	if ( !ok ) {
+		if ( rec.vert ) { vkDestroyShaderModule( device, rec.vert, NULL ); rec.vert = VK_NULL_HANDLE; }
+		if ( rec.frag ) { vkDestroyShaderModule( device, rec.frag, NULL ); rec.frag = VK_NULL_HANDLE; }
+		rec.failed = true;
+	}
+	shaderTable.push_back( rec );
+	return rec.failed ? 0 : (ShaderHandle)shaderTable.size();
+}
+
+/*
+====================
+VulkanBackend::GetSampler
+
+Sampler from the engine's textureFilter_t/textureRepeat_t. The GL path's
+per-texture filter knobs (image_filter etc.) collapse to their defaults here.
+====================
+*/
+VkSampler VulkanBackend::GetSampler( int textureFilter, int textureRepeat, bool hasMips ) {
+	const unsigned int key = ( (unsigned int)textureFilter << 8 )
+	                       | ( (unsigned int)textureRepeat << 1 )
+	                       | ( hasMips ? 1u : 0u );
+	for ( size_t i = 0; i < samplerCache.size(); i++ ) {
+		if ( samplerCache[i].first == key ) {
+			return samplerCache[i].second;
+		}
+	}
+
+	VkSamplerCreateInfo si = {};
+	si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	switch ( textureFilter ) {
+	case TF_NEAREST:
+		si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+		si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+		si.maxLod = 0.0f;
+		break;
+	case TF_LINEAR:
+		si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+		si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+		si.maxLod = 0.0f;
+		break;
+	default:	// TF_DEFAULT: trilinear + anisotropy when the device has it
+		si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+		si.mipmapMode = hasMips ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+		si.maxLod = hasMips ? VK_LOD_CLAMP_NONE : 0.0f;
+		if ( haveAnisotropy && hasMips ) {
+			si.anisotropyEnable = VK_TRUE;
+			float aniso = (float)globalImages->textureAnisotropy;
+			if ( aniso < 1.0f ) { aniso = 1.0f; }
+			if ( aniso > physProps.limits.maxSamplerAnisotropy ) { aniso = physProps.limits.maxSamplerAnisotropy; }
+			si.maxAnisotropy = aniso;
+		}
+		break;
+	}
+	switch ( textureRepeat ) {
+	case TR_CLAMP:
+		si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		break;
+	case TR_CLAMP_TO_BORDER:
+	case TR_CLAMP_TO_ZERO:
+	case TR_CLAMP_TO_ZERO_ALPHA:
+		si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+		si.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+		break;
+	default:	// TR_REPEAT
+		si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		break;
+	}
+
+	VkSampler sampler = VK_NULL_HANDLE;
+	if ( !vkCheck( vkCreateSampler( device, &si, NULL, &sampler ), "vkCreateSampler" ) ) {
+		return VK_NULL_HANDLE;
+	}
+	samplerCache.push_back( std::make_pair( key, sampler ) );
+	return sampler;
+}
+
+/*
+====================
+VulkanBackend::CreateTexture2D
+
+RGBA8 upload with a CPU-built mip chain (R_MipMap, the same filter the GL
+path uses), through a staging buffer and a blocking submit — image loads
+happen at init/level load, not mid-frame.
+====================
+*/
+ImageHandle VulkanBackend::CreateTexture2D( int w, int h, const void *pixels,
+                                            int textureFilter, int textureRepeat, bool allowMips ) {
+	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 || pixels == NULL || uploadCb == VK_NULL_HANDLE ) {
+		return 0;
+	}
+
+	// build the level list (level 0 borrows the caller's pixels)
+	struct level_t { const byte *data; int w, h; };
+	std::vector<level_t> levels;
+	std::vector<byte *> owned;		// R_MipMap results to free
+	levels.push_back( { (const byte *)pixels, w, h } );
+	if ( allowMips ) {
+		const bool preserveBorder = ( textureRepeat == TR_CLAMP_TO_ZERO );
+		const byte *src = (const byte *)pixels;
+		int lw = w, lh = h;
+		while ( lw > 1 || lh > 1 ) {
+			byte *shrunk = R_MipMap( src, lw, lh, preserveBorder );
+			lw = lw > 1 ? lw >> 1 : 1;
+			lh = lh > 1 ? lh >> 1 : 1;
+			owned.push_back( shrunk );
+			levels.push_back( { shrunk, lw, lh } );
+			src = shrunk;
+		}
+	}
+
+	VkDeviceSize total = 0;
+	for ( size_t i = 0; i < levels.size(); i++ ) {
+		total += (VkDeviceSize)levels[i].w * levels[i].h * 4;
+	}
+
+	// staging buffer
+	VkBuffer staging = VK_NULL_HANDLE;
+	VmaAllocation stagingAlloc = NULL;
+	{
+		VkBufferCreateInfo bci = {};
+		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bci.size = total;
+		bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+		VmaAllocationCreateInfo aci = {};
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		VmaAllocationInfo info = {};
+		if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &staging, &stagingAlloc, &info ), "vmaCreateBuffer(staging)" ) ) {
+			for ( size_t i = 0; i < owned.size(); i++ ) { R_StaticFree( owned[i] ); }
+			return 0;
+		}
+		byte *dst = (byte *)info.pMappedData;
+		for ( size_t i = 0; i < levels.size(); i++ ) {
+			const size_t bytes = (size_t)levels[i].w * levels[i].h * 4;
+			memcpy( dst, levels[i].data, bytes );
+			dst += bytes;
+		}
+	}
+	for ( size_t i = 0; i < owned.size(); i++ ) { R_StaticFree( owned[i] ); }
+
+	// the image
+	VkImage image = VK_NULL_HANDLE;
+	VmaAllocation alloc = NULL;
+	{
+		VkImageCreateInfo ici = {};
+		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		ici.imageType = VK_IMAGE_TYPE_2D;
+		ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+		ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+		ici.mipLevels = (uint32_t)levels.size();
+		ici.arrayLayers = 1;
+		ici.samples = VK_SAMPLE_COUNT_1_BIT;
+		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+		ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		VmaAllocationCreateInfo aci = {};
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &image, &alloc, NULL ), "vmaCreateImage(texture)" ) ) {
+			vmaDestroyBuffer( vma, staging, stagingAlloc );
+			return 0;
+		}
+	}
+
+	// record + submit the upload, wait for it (load-time only)
+	{
+		vkResetCommandBuffer( uploadCb, 0 );
+		VkCommandBufferBeginInfo bi = {};
+		bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		vkBeginCommandBuffer( uploadCb, &bi );
+
+		VkImageMemoryBarrier toDst = {};
+		toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		toDst.srcAccessMask = 0;
+		toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toDst.image = image;
+		toDst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		toDst.subresourceRange.levelCount = (uint32_t)levels.size();
+		toDst.subresourceRange.layerCount = 1;
+		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			0, 0, NULL, 0, NULL, 1, &toDst );
+
+		VkDeviceSize bufOfs = 0;
+		for ( size_t i = 0; i < levels.size(); i++ ) {
+			VkBufferImageCopy c = {};
+			c.bufferOffset = bufOfs;
+			c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			c.imageSubresource.mipLevel = (uint32_t)i;
+			c.imageSubresource.layerCount = 1;
+			c.imageExtent = { (uint32_t)levels[i].w, (uint32_t)levels[i].h, 1 };
+			vkCmdCopyBufferToImage( uploadCb, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c );
+			bufOfs += (VkDeviceSize)levels[i].w * levels[i].h * 4;
+		}
+
+		VkImageMemoryBarrier toRead = toDst;
+		toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			0, 0, NULL, 0, NULL, 1, &toRead );
+
+		vkEndCommandBuffer( uploadCb );
+		VkSubmitInfo si = {};
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &uploadCb;
+		vkResetFences( device, 1, &uploadFence );
+		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	}
+	vmaDestroyBuffer( vma, staging, stagingAlloc );
+
+	ImageRec rec;
+	rec.image = image;
+	rec.alloc = alloc;
+	{
+		VkImageViewCreateInfo vi = {};
+		vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		vi.image = image;
+		vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		vi.format = VK_FORMAT_R8G8B8A8_UNORM;
+		vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		vi.subresourceRange.levelCount = (uint32_t)levels.size();
+		vi.subresourceRange.layerCount = 1;
+		if ( !vkCheck( vkCreateImageView( device, &vi, NULL, &rec.view ), "vkCreateImageView(texture)" ) ) {
+			vmaDestroyImage( vma, image, alloc );
+			return 0;
+		}
+	}
+	rec.sampler = GetSampler( textureFilter, textureRepeat, levels.size() > 1 );
+	rec.live = true;
+
+	// reuse a freed slot when one exists
+	for ( size_t i = 0; i < imageTable.size(); i++ ) {
+		if ( !imageTable[i].live ) {
+			imageTable[i] = rec;
+			return (ImageHandle)( i + 1 );
+		}
+	}
+	imageTable.push_back( rec );
+	return (ImageHandle)imageTable.size();
+}
+
+/*
+====================
+VulkanBackend::DestroyImage
+====================
+*/
+void VulkanBackend::DestroyImage( ImageHandle h ) {
+	if ( device == VK_NULL_HANDLE || h < 1 || h > (ImageHandle)imageTable.size() || !imageTable[h - 1].live ) {
+		return;
+	}
+	// frames may still reference the view via this frame's descriptor sets;
+	// image churn happens at load boundaries, where a full stop is acceptable
+	vkDeviceWaitIdle( device );
+	ImageRec &rec = imageTable[h - 1];
+	if ( rec.view )  { vkDestroyImageView( device, rec.view, NULL ); }
+	if ( rec.image ) { vmaDestroyImage( vma, rec.image, rec.alloc ); }
+	rec = ImageRec();
+}
+
+/*
+====================
+VulkanBackend::GetPipeline
+
+(stateBits, shader, vertexLayout, cullType) -> VkPipeline, created on first
+use against the scene render pass. The GLS_* decode mirrors the GL3 backend's
+ApplyState table exactly.
+====================
+*/
+VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
+	const int RELEVANT = GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS | GLS_DEPTHMASK
+	                   | GLS_REDMASK | GLS_GREENMASK | GLS_BLUEMASK | GLS_ALPHAMASK
+	                   | GLS_POLYMODE_LINE | GLS_DEPTHFUNC_EQUAL | GLS_DEPTHFUNC_LESS | GLS_DEPTHFUNC_ALWAYS;
+	const unsigned int bits = (unsigned int)( desc.stateBits & RELEVANT );
+	const unsigned long long key = (unsigned long long)bits
+		| ( (unsigned long long)( desc.shader & 0xffff ) << 32 )
+		| ( (unsigned long long)( desc.vertexLayout & 0xf ) << 48 )
+		| ( (unsigned long long)( desc.cullType & 0xf ) << 52 );
+
+	auto it = pipelineCache.find( key );
+	if ( it != pipelineCache.end() ) {
+		return it->second;
+	}
+
+	if ( desc.shader < 1 || desc.shader > (ShaderHandle)shaderTable.size()
+	     || shaderTable[desc.shader - 1].failed ) {
+		pipelineCache[key] = VK_NULL_HANDLE;
+		return VK_NULL_HANDLE;
+	}
+	const ShaderRec &sh = shaderTable[desc.shader - 1];
+
+	VkPipelineShaderStageCreateInfo stages[2] = {};
+	stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+	stages[0].module = sh.vert;
+	stages[0].pName = "main";
+	stages[1] = stages[0];
+	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	stages[1].module = sh.frag;
+
+	// vertex layouts (must match the GL3 VAO setups / shader locations)
+	VkVertexInputBindingDescription binding = {};
+	VkVertexInputAttributeDescription attrs[6] = {};
+	uint32_t attrCount = 0;
+	if ( desc.vertexLayout == VL_DRAWVERT ) {
+		binding.stride = sizeof( idDrawVert );
+		attrs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, (uint32_t)offsetof( idDrawVert, xyz ) };
+		attrs[1] = { 1, 0, VK_FORMAT_R32G32_SFLOAT,    (uint32_t)offsetof( idDrawVert, st ) };
+		attrs[2] = { 2, 0, VK_FORMAT_R32G32B32_SFLOAT, (uint32_t)offsetof( idDrawVert, normal ) };
+		attrs[3] = { 3, 0, VK_FORMAT_R32G32B32_SFLOAT, (uint32_t)offsetof( idDrawVert, tangents ) };
+		attrs[4] = { 4, 0, VK_FORMAT_R32G32B32_SFLOAT, (uint32_t)( offsetof( idDrawVert, tangents ) + sizeof( idVec3 ) ) };
+		attrs[5] = { 5, 0, VK_FORMAT_R8G8B8A8_UNORM,   (uint32_t)offsetof( idDrawVert, color ) };
+		attrCount = 6;
+	} else {
+		binding.stride = sizeof( shadowCache_t );
+		attrs[0] = { 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0 };
+		attrCount = 1;
+	}
+	binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+	VkPipelineVertexInputStateCreateInfo vin = {};
+	vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	vin.vertexBindingDescriptionCount = 1;
+	vin.pVertexBindingDescriptions = &binding;
+	vin.vertexAttributeDescriptionCount = attrCount;
+	vin.pVertexAttributeDescriptions = attrs;
+
+	VkPipelineInputAssemblyStateCreateInfo ia = {};
+	ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+	VkPipelineViewportStateCreateInfo vp = {};
+	vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	vp.viewportCount = 1;
+	vp.scissorCount = 1;
+
+	// Winding (verified empirically with the M2 frame dump, 2026-08-02): with
+	// the negative-height viewport, VK's framebuffer-space winding for a GUI
+	// quad comes out such that COUNTER_CLOCKWISE-as-front + the legacy cull
+	// mapping (front-sided culls FRONT, as GL3Backend::ApplyCull) keeps
+	// idTech4's CW-wound triangles — CLOCKWISE-as-front culled every GUI quad
+	// in the engine (all-black menu).
+	VkPipelineRasterizationStateCreateInfo rs = {};
+	rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rs.polygonMode = ( ( bits & GLS_POLYMODE_LINE ) && haveFillModeNonSolid )
+		? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+	rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+	rs.cullMode = desc.cullType == CT_TWO_SIDED ? VK_CULL_MODE_NONE
+	            : ( desc.cullType == CT_BACK_SIDED ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_FRONT_BIT );
+	rs.lineWidth = 1.0f;
+
+	VkPipelineMultisampleStateCreateInfo ms = {};
+	ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+	VkPipelineDepthStencilStateCreateInfo ds = {};
+	ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	ds.depthTestEnable = VK_TRUE;
+	ds.depthWriteEnable = ( bits & GLS_DEPTHMASK ) ? VK_FALSE : VK_TRUE;
+	ds.depthCompareOp = ( bits & GLS_DEPTHFUNC_EQUAL ) ? VK_COMPARE_OP_EQUAL
+	                  : ( ( bits & GLS_DEPTHFUNC_ALWAYS ) ? VK_COMPARE_OP_ALWAYS : VK_COMPARE_OP_LESS_OR_EQUAL );
+	// stencil state arrives with the shadow volumes (M4)
+
+	auto mapBlend = []( unsigned int b, bool isSrc ) -> VkBlendFactor {
+		if ( isSrc ) {
+			switch ( b ) {
+			case GLS_SRCBLEND_ZERO:					return VK_BLEND_FACTOR_ZERO;
+			case GLS_SRCBLEND_ONE:					return VK_BLEND_FACTOR_ONE;
+			case GLS_SRCBLEND_DST_COLOR:			return VK_BLEND_FACTOR_DST_COLOR;
+			case GLS_SRCBLEND_ONE_MINUS_DST_COLOR:	return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+			case GLS_SRCBLEND_SRC_ALPHA:			return VK_BLEND_FACTOR_SRC_ALPHA;
+			case GLS_SRCBLEND_ONE_MINUS_SRC_ALPHA:	return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+			case GLS_SRCBLEND_DST_ALPHA:			return VK_BLEND_FACTOR_DST_ALPHA;
+			case GLS_SRCBLEND_ONE_MINUS_DST_ALPHA:	return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+			case GLS_SRCBLEND_ALPHA_SATURATE:		return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+			default:								return VK_BLEND_FACTOR_ONE;
+			}
+		}
+		switch ( b ) {
+		case GLS_DSTBLEND_ZERO:					return VK_BLEND_FACTOR_ZERO;
+		case GLS_DSTBLEND_ONE:					return VK_BLEND_FACTOR_ONE;
+		case GLS_DSTBLEND_SRC_COLOR:			return VK_BLEND_FACTOR_SRC_COLOR;
+		case GLS_DSTBLEND_ONE_MINUS_SRC_COLOR:	return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+		case GLS_DSTBLEND_SRC_ALPHA:			return VK_BLEND_FACTOR_SRC_ALPHA;
+		case GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA:	return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+		case GLS_DSTBLEND_DST_ALPHA:			return VK_BLEND_FACTOR_DST_ALPHA;
+		case GLS_DSTBLEND_ONE_MINUS_DST_ALPHA:	return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+		default:								return VK_BLEND_FACTOR_ONE;
+		}
+	};
+
+	VkPipelineColorBlendAttachmentState att = {};
+	const unsigned int srcBits = bits & GLS_SRCBLEND_BITS;
+	const unsigned int dstBits = bits & GLS_DSTBLEND_BITS;
+	att.blendEnable = !( srcBits == GLS_SRCBLEND_ONE && dstBits == GLS_DSTBLEND_ZERO );
+	att.srcColorBlendFactor = att.srcAlphaBlendFactor = mapBlend( srcBits, true );
+	att.dstColorBlendFactor = att.dstAlphaBlendFactor = mapBlend( dstBits, false );
+	att.colorBlendOp = att.alphaBlendOp = VK_BLEND_OP_ADD;
+	att.colorWriteMask =
+		( ( bits & GLS_REDMASK )   ? 0 : VK_COLOR_COMPONENT_R_BIT )
+	  | ( ( bits & GLS_GREENMASK ) ? 0 : VK_COLOR_COMPONENT_G_BIT )
+	  | ( ( bits & GLS_BLUEMASK )  ? 0 : VK_COLOR_COMPONENT_B_BIT )
+	  | ( ( bits & GLS_ALPHAMASK ) ? 0 : VK_COLOR_COMPONENT_A_BIT );
+
+	VkPipelineColorBlendStateCreateInfo cb = {};
+	cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	cb.attachmentCount = 1;
+	cb.pAttachments = &att;
+
+	const VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dsi = {};
+	dsi.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dsi.dynamicStateCount = 2;
+	dsi.pDynamicStates = dyn;
+
+	VkGraphicsPipelineCreateInfo pci = {};
+	pci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	pci.stageCount = 2;
+	pci.pStages = stages;
+	pci.pVertexInputState = &vin;
+	pci.pInputAssemblyState = &ia;
+	pci.pViewportState = &vp;
+	pci.pRasterizationState = &rs;
+	pci.pMultisampleState = &ms;
+	pci.pDepthStencilState = &ds;
+	pci.pColorBlendState = &cb;
+	pci.pDynamicState = &dsi;
+	pci.layout = pipeLayout;
+	pci.renderPass = passClear;		// compatible with passLoad (same formats/samples)
+	pci.subpass = 0;
+
+	VkPipeline pipeline = VK_NULL_HANDLE;
+	if ( !vkCheck( vkCreateGraphicsPipelines( device, VK_NULL_HANDLE, 1, &pci, NULL, &pipeline ),
+	               va( "vkCreateGraphicsPipelines(%s)", sh.name.c_str() ) ) ) {
+		pipeline = VK_NULL_HANDLE;
+	}
+	pipelineCache[key] = pipeline;
+	return pipeline;
+}
+
+/*
+====================
+VulkanBackend::EnsureScenePass
+
+2D draws arrive without an explicit BeginPass (the GL executor draws straight
+onto the current framebuffer); Vulkan draws must sit inside a render pass.
+====================
+*/
+void VulkanBackend::EnsureScenePass() {
+	if ( !insideScenePass && frameOpen && !skipFrame ) {
+		BeginPass( NULL );
+	}
+}
+
+/*
+====================
+VulkanBackend::SetViewport / SetScissor
+
+GL-convention rects (origin bottom-left); converted to Vulkan's top-left
+origin here. The viewport uses the negative-height trick (core in 1.1) so
+NDC stays y-up and the matrices remain GL-identical.
+====================
+*/
+void VulkanBackend::SetViewport( int x, int y, int w, int h ) {
+	vpRect[0] = x; vpRect[1] = y; vpRect[2] = w; vpRect[3] = h;
+	dynStateDirty = true;
+}
+
+void VulkanBackend::SetScissor( int x, int y, int w, int h ) {
+	scRect[0] = x; scRect[1] = y; scRect[2] = w; scRect[3] = h;
+	dynStateDirty = true;
+}
+
+/*
+====================
+VulkanBackend::BindPipeline
+====================
+*/
+void VulkanBackend::BindPipeline( const PipelineDesc &desc ) {
+	currentDesc = desc;
+}
+
+/*
+====================
+VulkanBackend::Draw
+====================
+*/
+void VulkanBackend::Draw( const DrawArgs &args ) {
+	if ( !frameOpen || skipFrame || args.indexCount <= 0 ) {
+		return;
+	}
+	VkPipeline pipeline = GetPipeline( currentDesc );
+	if ( pipeline == VK_NULL_HANDLE ) {
+		return;		// missing shader — degrade by not drawing
+	}
+	VkBuffer vb = LookupBuffer( args.vertexBuffer );
+	VkBuffer ib = LookupBuffer( args.indexBuffer );
+	if ( vb == VK_NULL_HANDLE || ib == VK_NULL_HANDLE ) {
+		return;
+	}
+
+	EnsureScenePass();
+	if ( !insideScenePass ) {
+		return;
+	}
+	VkCommandBuffer cb = frames[frameIndex].cb;
+
+	if ( dynStateDirty ) {
+		// negative-height viewport: y-up NDC like GL; rects converted from
+		// GL's bottom-left origin to Vulkan's top-left
+		const float fbH = (float)sceneExtent.height;
+		VkViewport v = {};
+		v.x = (float)vpRect[0];
+		v.y = fbH - (float)vpRect[1];
+		v.width = (float)vpRect[2];
+		v.height = -(float)vpRect[3];
+		v.minDepth = 0.0f;
+		v.maxDepth = 1.0f;
+		vkCmdSetViewport( cb, 0, 1, &v );
+
+		VkRect2D sc = {};
+		int sx = scRect[0], sy = scRect[1], sw = scRect[2], sh = scRect[3];
+		if ( sw < 0 ) { sw = 0; }
+		if ( sh < 0 ) { sh = 0; }
+		int top = (int)sceneExtent.height - ( sy + sh );
+		if ( sx < 0 ) { sw += sx; sx = 0; }
+		if ( top < 0 ) { sh += top; top = 0; }
+		if ( sw < 0 ) { sw = 0; }
+		if ( sh < 0 ) { sh = 0; }
+		sc.offset = { sx, top };
+		sc.extent = { (uint32_t)sw, (uint32_t)sh };
+		vkCmdSetScissor( cb, 0, 1, &sc );
+		dynStateDirty = false;
+	}
+
+	if ( pipeline != boundPipeline ) {
+		vkCmdBindPipeline( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline );
+		boundPipeline = pipeline;
+	}
+
+	// set 0: the slot's dynamic-offset UBO
+	uint32_t dynOfs = (uint32_t)args.uniformOffset;
+	vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout,
+		0, 1, &uboSet[frameIndex], 1, &dynOfs );
+
+	// set 1: per-draw texture set from the frame pool (dummy in empty slots)
+	{
+		VkDescriptorSet texSet = VK_NULL_HANDLE;
+		VkDescriptorSetAllocateInfo ai = {};
+		ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		ai.descriptorPool = framePool[frameIndex];
+		ai.descriptorSetCount = 1;
+		ai.pSetLayouts = &setLayoutTex;
+		if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
+			if ( !framePoolWarned ) {
+				framePoolWarned = true;
+				common->Warning( "VK: per-frame descriptor pool exhausted (%d sets)", MAX_FRAME_SETS );
+			}
+			return;
+		}
+		VkDescriptorImageInfo infos[9];
+		VkWriteDescriptorSet writes[9];
+		const ImageRec &dummy = imageTable[dummyImage - 1];
+		for ( int i = 0; i < 9; i++ ) {
+			const ImageRec *rec = &dummy;
+			if ( i < 8 && args.textures[i] >= 1 && args.textures[i] <= (ImageHandle)imageTable.size()
+			     && imageTable[args.textures[i] - 1].live ) {
+				rec = &imageTable[args.textures[i] - 1];
+			}
+			// slot 8 (shadow cube) keeps the 2D dummy until cube images land (M4);
+			// no M2 pipeline statically uses it
+			infos[i] = {};
+			infos[i].sampler = rec->sampler;
+			infos[i].imageView = rec->view;
+			infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			writes[i] = {};
+			writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			writes[i].dstSet = texSet;
+			writes[i].dstBinding = (uint32_t)i;
+			writes[i].descriptorCount = 1;
+			writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			writes[i].pImageInfo = &infos[i];
+		}
+		vkUpdateDescriptorSets( device, 9, writes, 0, NULL );
+		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout,
+			1, 1, &texSet, 0, NULL );
+	}
+
+	VkDeviceSize vbOfs = (VkDeviceSize)args.vertexOffset;
+	vkCmdBindVertexBuffers( cb, 0, 1, &vb, &vbOfs );
+	vkCmdBindIndexBuffer( cb, ib, 0, VK_INDEX_TYPE_UINT32 );
+	vkCmdDrawIndexed( cb, (uint32_t)args.indexCount, 1, (uint32_t)args.firstIndex, 0, 0 );
 }
 
 } // namespace rhi

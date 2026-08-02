@@ -240,6 +240,8 @@ public:
 	// data commonly accessed is grouped here
 	static const int TEXTURE_NOT_LOADED = -1;
 	GLuint				texnum;					// gl texture binding, will be TEXTURE_NOT_LOADED if not loaded
+	unsigned int		rhiHandle;				// DUDE Phase 4 M2: RHI image handle under the Vulkan
+												// backend (0 = not uploaded); GL backends keep texnum
 	textureType_t		type;
 	int					frameUsed;				// for texture usage in frame statistics
 	int					bindCount;				// incremented each bind
@@ -285,6 +287,7 @@ public:
 
 ID_INLINE idImage::idImage() {
 	texnum = TEXTURE_NOT_LOADED;
+	rhiHandle = 0;
 	partialImage = NULL;
 	type = TT_DISABLED;
 	isPartialImage = false;
