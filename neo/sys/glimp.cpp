@@ -120,6 +120,11 @@ static SDL_GLContext context = NULL;
 static SDL_Surface *window = NULL;
 #define SDL_WINDOW_OPENGL SDL_OPENGL
 #define SDL_WINDOW_FULLSCREEN SDL_FULLSCREEN
+#ifdef DHEWM3_VULKAN
+// SDL1.2 can't do Vulkan windows; GLimp_VulkanProbe() already returns false
+// there, so this define only keeps the (unsupported) combo compiling
+#define SDL_WINDOW_VULKAN 0
+#endif
 #endif
 
 #if SDL_VERSION_ATLEAST(3, 0, 0)
@@ -283,12 +288,26 @@ bool GLimp_VulkanProbe( void ) {
 GLimp_Init
 ===================
 */
+// DUDE Phase 4: true while the live window is a Vulkan one (no GL context) —
+// gates the GL-only paths below (swap, gamma ramp, swap interval, ImGui-on-GL)
+static bool windowIsVulkan = false;
+
 bool GLimp_Init(glimpParms_t parms) {
 	common->Printf("Initializing OpenGL subsystem\n");
 
 	assert(SDL_WasInit(SDL_INIT_VIDEO));
 
-	My_SDL_WindowFlags flags = SDL_WINDOW_OPENGL;
+	windowIsVulkan = false;
+#ifdef DHEWM3_VULKAN
+	windowIsVulkan = parms.vulkan;
+#endif
+
+	// DUDE Phase 4: Vulkan mode reuses the whole window machinery (display
+	// pick, fullscreen modes, HighDPI) but asks for a Vulkan-capable window
+	// and never creates a GL context — presentation is the backend's
+	// swapchain. The SDL_GL_SetAttribute calls further down are inert without
+	// the OPENGL flag, so they need no guards of their own.
+	My_SDL_WindowFlags flags = windowIsVulkan ? SDL_WINDOW_VULKAN : SDL_WINDOW_OPENGL;
 
 	if (parms.fullScreen == 1)
 	{
@@ -717,10 +736,18 @@ try_again:
 		}
 	#endif // SDL2
 
-		context = SDL_GL_CreateContext(window);
+		if ( windowIsVulkan ) {
+			// DUDE Phase 4: no GL context; the Vulkan backend owns presentation
+			// and reads r_swapInterval itself (present mode). ClearModified so
+			// the GL swap-interval poll doesn't fire on the dead path.
+			context = NULL;
+			r_swapInterval.ClearModified();
+		} else {
+			context = SDL_GL_CreateContext(window);
 
-		GLimp_SetSwapInterval( r_swapInterval.GetInteger() );
-		r_swapInterval.ClearModified();
+			GLimp_SetSwapInterval( r_swapInterval.GetInteger() );
+			r_swapInterval.ClearModified();
+		}
 
 		// for HighDPI, window size and drawable size can differ
 		GLimp_UpdateWindowSize();
@@ -886,7 +913,15 @@ try_again:
 		common->Printf("Requested %d color bits per chan, %d alpha %d depth, %d stencil and %s\n",
 						channelcolorbits, talphabits, tdepthbits, tstencilbits, msaaStr.c_str());
 
-		{
+		if ( windowIsVulkan ) {
+			// no GL attributes to read back; describe the backend's scene
+			// image (RGBA8 + D24/32S8) so GfxInfo_f has sane numbers
+			glConfig.colorBits = 24;
+			glConfig.alphabits = 8;
+			glConfig.depthBits = 24;
+			glConfig.stencilBits = 8;
+			r_multiSamples.SetInteger( 0 );
+		} else {
 			int r, g, b, a, d, s, msaa;
 			SDL_GL_GetAttribute(SDL_GL_RED_SIZE, &r);
 			SDL_GL_GetAttribute(SDL_GL_GREEN_SIZE, &g);
@@ -954,10 +989,16 @@ try_again:
 
 #if SDL_VERSION_ATLEAST(2, 0, 0)
 	// SDL1.2 has no context, and is not supported by ImGui anyway.
-	// DUDE: works on both backends now — sys_imgui picks the fixed-function GL2
+	// DUDE: works on both GL backends — sys_imgui picks the fixed-function GL2
 	// ImGui renderer for the legacy context and the shader-based GL3 one for the
-	// GL 3.3 core context (r_graphicsAPI opengl3).
-	D3::ImGuiHooks::Init(window, context);
+	// GL 3.3 core context (r_graphicsAPI opengl3). Under Vulkan there is no GL
+	// context; ImGui moves to imgui_impl_vulkan at Phase 4 M6 — until then the
+	// F10 menus are unavailable on the Vulkan backend.
+	if ( windowIsVulkan ) {
+		common->Printf( "Skipping ImGui init on the Vulkan backend (arrives at Phase 4 M6)\n" );
+	} else {
+		D3::ImGuiHooks::Init(window, context);
+	}
 #endif
 
 	return true;
@@ -1289,7 +1330,25 @@ void GLimp_Shutdown() {
 		window = NULL;
 	}
 #endif
+	// note: the Vulkan backend's device/swapchain/surface are torn down by
+	// RB_RHI_Shutdown() *before* this runs (same ordering the GL3 backend
+	// relies on), so the surface never outlives the window
+	windowIsVulkan = false;
 }
+
+#ifdef DHEWM3_VULKAN
+/*
+===================
+GLimp_GetSDLWindow
+
+The live SDL window as void* (tr_local.h can't know SDL types); the Vulkan
+backend creates its VkSurfaceKHR from it.
+===================
+*/
+void *GLimp_GetSDLWindow( void ) {
+	return window;
+}
+#endif
 
 /*
 ===================
@@ -1297,6 +1356,11 @@ GLimp_SwapBuffers
 ===================
 */
 void GLimp_SwapBuffers() {
+	// DUDE Phase 4: the Vulkan backend presents via its swapchain (EndFrame);
+	// there is no GL context to swap
+	if ( windowIsVulkan ) {
+		return;
+	}
 	D3P_BeginCPUSample(SDL_GL_SwapWindow);
 #if SDL_VERSION_ATLEAST(2, 0, 0)
 	SDL_GL_SwapWindow(window);
@@ -1323,6 +1387,11 @@ GLimp_SetGamma
 =================
 */
 void GLimp_SetGamma(unsigned short red[256], unsigned short green[256], unsigned short blue[256]) {
+	// DUDE Phase 4: no hardware gamma ramps on the Vulkan path — gamma /
+	// brightness are applied in-shader there (r_gammaInShader, like SDL3)
+	if ( windowIsVulkan ) {
+		return;
+	}
 #if SDL_VERSION_ATLEAST(3, 0, 0)
 	if ( ! r_gammaInShader.GetBool() ) {
 		common->Warning( "This build of DUDE uses SDL3, which does not support hardware gamma." );
@@ -1455,6 +1524,12 @@ void GLimp_GrabInput(int flags) {
 static int cur_swapInterval = 0;
 bool GLimp_SetSwapInterval( int swapInterval )
 {
+	// DUDE Phase 4: the Vulkan backend maps r_swapInterval to a present mode
+	// itself (swapchain recreate on change); nothing to do at the GL layer
+	if ( windowIsVulkan ) {
+		cur_swapInterval = swapInterval;
+		return true;
+	}
 #if SDL_VERSION_ATLEAST(2, 0, 0)
   #if SDL_VERSION_ATLEAST(3, 0, 0)
 	if ( ! SDL_GL_SetSwapInterval( swapInterval ) ) {
@@ -1507,6 +1582,12 @@ void GLimp_UpdateWindowSize()
 		glConfig.winHeight = fullscreenMode->h;
 	}
   #else // SDL2
+	#ifdef DHEWM3_VULKAN
+	if ( windowIsVulkan ) {
+		// GL drawable queries don't apply to a Vulkan window
+		SDL_Vulkan_GetDrawableSize( window, &glConfig.vidWidth, &glConfig.vidHeight );
+	} else
+	#endif
 	SDL_GL_GetDrawableSize( window, &glConfig.vidWidth, &glConfig.vidHeight );
 	if ( (winFlags & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN ) {
 		// real fullscreen mode => must use SDL_GetWindowDisplayMode()

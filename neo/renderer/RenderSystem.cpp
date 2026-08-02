@@ -938,6 +938,12 @@ void idRenderSystemLocal::CaptureRenderToFile( const char *fileName, bool fixAlp
 	if ( !glConfig.isInitialized ) {
 		return;
 	}
+	// DUDE Phase 4 M1: no qgl under the Vulkan backend; the capture path moves
+	// to the RHI at M6 (screenshots milestone)
+	if ( qglReadPixels == NULL ) {
+		common->Warning( "CaptureRenderToFile: not supported on the Vulkan backend yet (M6)" );
+		return;
+	}
 
 	renderCrop_t *rc = &renderCrops[currentRenderCrop];
 

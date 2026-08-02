@@ -1231,6 +1231,7 @@ typedef struct {
 	int			displayHz; // TODO: SDL3 uses float
 	int			multiSamples;
 	bool		coreProfile;	// DUDE: request a GL 3.3 core context (r_graphicsAPI opengl3)
+	bool		vulkan;			// DUDE Phase 4: SDL_WINDOW_VULKAN window, no GL context/attributes
 } glimpParms_t;
 
 // DUDE RHI executor (renderer/rhi/RhiBackend.cpp) — idTech4 command list →
@@ -1246,11 +1247,15 @@ bool		R_BackendSupportsEnhancements();
 
 bool		GLimp_Init( glimpParms_t parms );
 #ifdef DHEWM3_VULKAN
-// Phase 4 M0 scaffolding (docs/vulkan-backend.md): prove SDL can create a
-// Vulkan-capable window and list instance extensions, without touching the GL
-// path. Logs findings; returns false if the system can't do SDL+Vulkan.
-// M1 grows this into the real Vulkan window bring-up.
+// Phase 4 (docs/vulkan-backend.md): prove SDL can create a Vulkan-capable
+// window and list instance extensions, without touching the GL path. Logs
+// findings; returns false if the system can't do SDL+Vulkan. Used as the
+// pre-gate before selecting the Vulkan backend, so unsupported systems fall
+// back to GL instead of wedging on the archived cvar.
 bool		GLimp_VulkanProbe( void );
+// the live SDL window (as void* to keep SDL types out of this header) — the
+// Vulkan backend creates its VkSurfaceKHR from it
+void *		GLimp_GetSDLWindow( void );
 #endif
 // If the desired mode can't be set satisfactorily, false will be returned.
 // The renderer will then reset the glimpParms to "safe mode" of 640x480

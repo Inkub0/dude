@@ -603,7 +603,9 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 	// have filled in the parms.  We must have the values set, or
 	// an image match from a shader before OpenGL starts would miss
 	// the generated texture
-	if ( !glConfig.isInitialized ) {
+	// DUDE Phase 4 M1: same story under the Vulkan backend — no GL, qgl is
+	// NULL; images stay ungenerated until M2 moves ownership into the RHI
+	if ( !glConfig.isInitialized || qglGenTextures == NULL ) {
 		return;
 	}
 
@@ -824,7 +826,8 @@ void idImage::Generate3DImage( const byte *pic, int width, int height, int picDe
 	// have filled in the parms.  We must have the values set, or
 	// an image match from a shader before OpenGL starts would miss
 	// the generated texture
-	if ( !glConfig.isInitialized ) {
+	// DUDE Phase 4 M1: also inert under the Vulkan backend (no qgl until M2)
+	if ( !glConfig.isInitialized || qglGenTextures == NULL ) {
 		return;
 	}
 
@@ -963,7 +966,8 @@ void idImage::GenerateCubeImage( const byte *pic[6], int size,
 	// have filled in the parms.  We must have the values set, or
 	// an image match from a shader before OpenGL starts would miss
 	// the generated texture
-	if ( !glConfig.isInitialized ) {
+	// DUDE Phase 4 M1: also inert under the Vulkan backend (no qgl until M2)
+	if ( !glConfig.isInitialized || qglGenTextures == NULL ) {
 		return;
 	}
 
@@ -1721,6 +1725,10 @@ void	idImage::ActuallyLoadImage( bool checkForPrecompressed, bool fromBackEnd ) 
 
 	// this is the ONLY place generatorFunction will ever be called
 	if ( generatorFunction ) {
+		// DUDE Phase 4 M1: no GL under the Vulkan backend — see idImage::Reload
+		if ( qglGenTextures == NULL ) {
+			return;
+		}
 		generatorFunction( this );
 		return;
 	}
@@ -1814,7 +1822,12 @@ PurgeImage
 */
 void idImage::PurgeImage() {
 	if ( texnum != TEXTURE_NOT_LOADED ) {
-		qglDeleteTextures( 1, &texnum );	// this should be the ONLY place it is ever called!
+		// DUDE Phase 4: after a GL→Vulkan backend switch there is no GL and
+		// qgl is NULL — the old context died with the switch, taking its
+		// texture objects with it, so only the handle needs forgetting
+		if ( qglDeleteTextures != NULL ) {
+			qglDeleteTextures( 1, &texnum );	// this should be the ONLY place it is ever called!
+		}
 		texnum = TEXTURE_NOT_LOADED;
 	}
 
@@ -1834,6 +1847,12 @@ Automatically enables 2D mapping, cube mapping, or 3D texturing if needed
 ==============
 */
 void idImage::Bind() {
+	// DUDE Phase 4 M1: no GL under the Vulkan backend; binds arrive with the
+	// RHI image path (M2). The executor gate should keep us out of here —
+	// this is defense in depth.
+	if ( qglBindTexture == NULL ) {
+		return;
+	}
 	// if this is an image that we are caching, move it to the front of the LRU chain
 	if ( partialImage ) {
 		if ( cacheUsageNext ) {
@@ -1928,6 +1947,10 @@ do any enable / disable changes
 ==============
 */
 void idImage::BindFragment() {
+	// DUDE Phase 4 M1: see Bind() — no GL under the Vulkan backend until M2
+	if ( qglBindTexture == NULL ) {
+		return;
+	}
 	// if this is an image that we are caching, move it to the front of the LRU chain
 	if ( partialImage ) {
 		if ( cacheUsageNext ) {

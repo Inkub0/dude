@@ -971,12 +971,14 @@ void R_InitOpenGL( void ) {
 		common->FatalError( "R_InitOpenGL called while active" );
 	}
 
-	// Backend selection (docs/vulkan-port.md Phase 3 / Phase 4 M0). "opengl3"
-	// runs the GL 3.3 core backend; "vulkan"/"vulkan-rt" fall back to GL until
-	// the backend lands (M1) — the cvar is archived, so never wedge the boot on
-	// it. coreProfile = "a GL core context is live"; rhiBackend = "the frontend
+	// Backend selection (docs/vulkan-port.md Phase 3 / Phase 4). "opengl3" runs
+	// the GL 3.3 core backend; "vulkan" runs the Vulkan backend (M1 bring-up)
+	// when the build has it AND the SDL probe passes — the cvar is archived, so
+	// an unsupported system falls back to GL instead of wedging the boot.
+	// coreProfile = "a GL core context is live"; rhiBackend = "the frontend
 	// routes through the RHI executor" (both for opengl3, only the latter for
-	// the future vulkan path).
+	// vulkan).
+	bool vulkanMode = false;
 	glConfig.coreProfile = false;
 	glConfig.rhiBackend = false;
 	if ( idStr::Icmp( r_graphicsAPI.GetString(), "opengl3" ) == 0 ) {
@@ -987,11 +989,14 @@ void R_InitOpenGL( void ) {
 	} else if ( idStr::Icmp( r_graphicsAPI.GetString(), "vulkan" ) == 0
 	         || idStr::Icmp( r_graphicsAPI.GetString(), "vulkan-rt" ) == 0 ) {
 #ifdef DHEWM3_VULKAN
-		// Phase 4 M0 scaffolding: prove the system can do SDL+Vulkan (the probe
-		// logs instance extensions), then run on GL — the backend arrives at M1
-		// (docs/vulkan-backend.md).
-		GLimp_VulkanProbe();
-		common->Warning( "r_graphicsAPI \"%s\": Vulkan backend is scaffolding-only (M0), using OpenGL for now", r_graphicsAPI.GetString() );
+		if ( GLimp_VulkanProbe() ) {
+			vulkanMode = true;
+			glConfig.rhiBackend = true;
+			rhi::SetActiveBackend( rhi::BT_VULKAN );
+			common->Printf( "r_graphicsAPI %s: Vulkan backend (M1 bring-up: clear + present only)\n", r_graphicsAPI.GetString() );
+		} else {
+			common->Warning( "r_graphicsAPI \"%s\": this system can't do SDL+Vulkan (see probe warnings); using OpenGL", r_graphicsAPI.GetString() );
+		}
 #else
 		common->Warning( "r_graphicsAPI \"%s\" requested but this build has no Vulkan support (rebuild with -DDHEWM3_VULKAN=ON); using OpenGL", r_graphicsAPI.GetString() );
 #endif
@@ -1020,6 +1025,7 @@ void R_InitOpenGL( void ) {
 		parms.multiSamples = r_multiSamples.GetInteger();
 		parms.stereo = false;
 		parms.coreProfile = glConfig.coreProfile;
+		parms.vulkan = vulkanMode;
 
 		if ( GLimp_Init( parms ) ) {
 			// it worked
@@ -1038,6 +1044,13 @@ void R_InitOpenGL( void ) {
 		r_multiSamples.SetInteger( 0 );
 	}
 
+#ifdef DHEWM3_VULKAN
+	// Vulkan mode: no GL context exists — skip qgl loading and every GL query;
+	// the backend's Init() fills the glConfig identity/limits fields from the
+	// VkPhysicalDevice instead.
+	if ( !vulkanMode )
+#endif
+	{
 // load qgl function pointers
 #define QGLPROC(name, rettype, args) \
 	q##name = (rettype(APIENTRYP)args)GLimp_ExtensionPointer(#name); \
@@ -1045,11 +1058,50 @@ void R_InitOpenGL( void ) {
 		common->FatalError("Unable to initialize OpenGL (%s)", #name);
 
 #include "renderer/qgl_proc.h"
+	}
 
 	// input and sound systems need to be tied to the new window
 	Sys_InitInput();
 	soundSystem->InitHW();
 
+#ifdef DHEWM3_VULKAN
+	if ( vulkanMode ) {
+		// a previous GL session (vid_restart backend switch) left the qgl
+		// pointers loaded; zero them so any stray GL call is a clean NULL
+		// crash / guardable check instead of stale-pointer UB without a context
+#define QGLPROC(name, rettype, args) q##name = NULL;
+#include "renderer/qgl_proc.h"
+
+		// nothing downstream may strstr() a NULL; the backend overwrites the
+		// identity strings and limits during Init()
+		glConfig.vendor_string = "";
+		glConfig.renderer_string = "";
+		glConfig.version_string = "";
+		glConfig.extensions_string = "";
+		glConfig.maxTextureSize = 4096;
+		glConfig.maxCubeMapSize = 1024;
+		glConfig.vidMemMB = 0;
+
+		glConfig.isInitialized = true;
+
+		// the RHI enhancement paths check these before touching the image
+		// generators; none of the GL image path is valid here yet (M2+)
+		glConfig.multitextureAvailable = false;
+		glConfig.allowARB2Path = true;
+		glConfig.cubeMapAvailable = true;
+		glConfig.texture3DAvailable = false;
+		glConfig.textureNonPowerOfTwoAvailable = true;
+		glConfig.textureCompressionAvailable = false;
+
+		if ( !rhi::GetRHI()->Init() ) {
+			common->FatalError( "Vulkan backend initialization failed (see warnings above) - start with +set r_graphicsAPI opengl3 to use GL" );
+		}
+
+		common->Printf( "Vulkan device: %s\n", glConfig.renderer_string );
+		common->Printf( "Vulkan driver: %s\n", glConfig.version_string );
+	} else
+#endif
+	{
 	// get our config strings
 	glConfig.vendor_string = (const char *)qglGetString(GL_VENDOR);
 	glConfig.renderer_string = (const char *)qglGetString(GL_RENDERER);
@@ -1196,8 +1248,10 @@ void R_InitOpenGL( void ) {
 		cmdSystem->AddCommand( "reloadARBprograms", R_ReloadARBPrograms_f, CMD_FL_RENDERER, "reloads ARB programs" );
 		R_ReloadARBPrograms_f( idCmdArgs() );
 	}
+	}	// end of the !vulkanMode GL init block
 
 	// allocate the vertex array range or vertex objects
+	// (Vulkan: ARBVertexBufferObjectAvailable stays false → CPU-side cache)
 	vertexCache.Init();
 
 	// select which renderSystem we are going to use
@@ -1248,6 +1302,12 @@ void GL_CheckErrors( void ) {
 	int		err;
 	char	s[64];
 	int		i;
+
+	// DUDE Phase 4: no GL context under the Vulkan backend — the qgl pointers
+	// were never loaded (validation layers play this role there)
+	if ( qglGetError == NULL ) {
+		return;
+	}
 
 	// check for up to 10 errors pending
 	for ( i = 0 ; i < 10 ; i++ ) {
@@ -1703,6 +1763,13 @@ If ref isn't specified, the full session UpdateScreen will be done.
 ====================
 */
 void R_ReadTiledPixels( int width, int height, byte *buffer, renderView_t *ref = NULL ) {
+	// DUDE Phase 4 M1: screenshots need the readback path, which is GL-only
+	// until M6 moves capture into the RHI; no qgl under the Vulkan backend
+	if ( qglReadPixels == NULL ) {
+		common->Warning( "screenshots are not supported on the Vulkan backend yet (M6)" );
+		memset( buffer, 0, width * height * 3 );
+		return;
+	}
 	// include extra space for OpenGL padding to word boundaries
 	byte	*temp = (byte *)R_StaticAlloc( (glConfig.vidWidth+3) * glConfig.vidHeight * 3 );
 
@@ -2028,6 +2095,11 @@ Save out a screenshot showing the stencil buffer expanded by 16x range
 ===============
 */
 void R_StencilShot( void ) {
+	// DUDE Phase 4 M1: GL readback only; nothing to read under Vulkan yet
+	if ( qglReadPixels == NULL ) {
+		common->Warning( "stencilShot is not supported on the Vulkan backend yet" );
+		return;
+	}
 	byte		*buffer;
 	int			i, c;
 
@@ -2682,10 +2754,12 @@ void R_VidRestart_f( const idCmdArgs &args ) {
 	// regenerate all necessary interactions
 	R_RegenerateWorld_f( idCmdArgs() );
 
-	// check for problems
-	err = qglGetError();
-	if ( err != GL_NO_ERROR ) {
-		common->Printf( "glGetError() = 0x%x\n", err );
+	// check for problems (DUDE Phase 4: qgl is NULL under the Vulkan backend)
+	if ( qglGetError != NULL ) {
+		err = qglGetError();
+		if ( err != GL_NO_ERROR ) {
+			common->Printf( "glGetError() = 0x%x\n", err );
+		}
 	}
 
 	// start sound playing again
@@ -2989,9 +3063,13 @@ void idRenderSystemLocal::InitOpenGL( void ) {
 
 		globalImages->ReloadAllImages();
 
-		err = qglGetError();
-		if ( err != GL_NO_ERROR ) {
-			common->Printf( "glGetError() = 0x%x\n", err );
+		// DUDE Phase 4: qgl is NULL under the Vulkan backend (validation
+		// layers replace the GL error model there)
+		if ( qglGetError != NULL ) {
+			err = qglGetError();
+			if ( err != GL_NO_ERROR ) {
+				common->Printf( "glGetError() = 0x%x\n", err );
+			}
 		}
 	}
 }
