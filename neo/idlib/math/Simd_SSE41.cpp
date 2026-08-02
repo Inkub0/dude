@@ -31,6 +31,8 @@ If you have questions concerning this license or the applicable additional terms
 #include "idlib/geometry/JointTransform.h"
 #include "idlib/math/Vector.h"
 #include "idlib/math/Plane.h"
+#include "idlib/math/Matrix.h"
+#include "renderer/Model.h"
 
 #include "idlib/math/Simd_SSE41.h"
 
@@ -631,6 +633,597 @@ void VPCALL idSIMD_SSE41::MixedSoundToSamples( short *samples, const float *mixB
 			samples[i] = (short) mixBuffer[i];
 		}
 	}
+}
+
+// loads a bare idVec3 without reading past its 12 bytes; lane3 = 0
+static ID_INLINE __m128 SSE41_LoadVec3( const float *src ) {
+	__m128 v = _mm_loadl_pi( _mm_setzero_ps(), (const __m64 *)src );
+	return _mm_insert_ps( v, _mm_load_ss( src + 2 ), 0x20 );
+}
+
+// horizontal sum of all four lanes
+static ID_INLINE float SSE41_HSum( __m128 v ) {
+	__m128 t = _mm_add_ps( v, _mm_movehl_ps( v, v ) );
+	t = _mm_add_ss( t, _mm_shuffle_ps( t, t, SHUF( 1, 1, 1, 1 ) ) );
+	return _mm_cvtss_f32( t );
+}
+
+// cross(a, b) in lanes 0-2, forming the same multiply/subtract pairs per lane
+// as the scalar expressions it replaces (lane3 is finite garbage)
+static ID_INLINE __m128 SSE41_Cross( __m128 a, __m128 b ) {
+	__m128 ayzx = _mm_shuffle_ps( a, a, SHUF( 1, 2, 0, 3 ) );
+	__m128 bzxy = _mm_shuffle_ps( b, b, SHUF( 2, 0, 1, 3 ) );
+	__m128 azxy = _mm_shuffle_ps( a, a, SHUF( 2, 0, 1, 3 ) );
+	__m128 byzx = _mm_shuffle_ps( b, b, SHUF( 1, 2, 0, 3 ) );
+	return _mm_sub_ps( _mm_mul_ps( ayzx, bzxy ), _mm_mul_ps( azxy, byzx ) );
+}
+
+/*
+============
+idSIMD_SSE41::MinMax
+============
+*/
+void VPCALL idSIMD_SSE41::MinMax( idVec3 &min, idVec3 &max, const idVec3 *src, const int count ) {
+	__m128 lo = _mm_set1_ps( idMath::INFINITY );
+	__m128 hi = _mm_set1_ps( -idMath::INFINITY );
+
+	// every element but the last is followed by more array data, so a full
+	// 16 byte load stays inside the allocation; lane3 junk never survives
+	// into the lane 0-2 results
+	int i;
+	for ( i = 0; i + 1 < count; i++ ) {
+		__m128 v = _mm_loadu_ps( src[i].ToFloatPtr() );
+		lo = _mm_min_ps( lo, v );
+		hi = _mm_max_ps( hi, v );
+	}
+	if ( i < count ) {
+		// lane3 is 0 here, but only lanes 0-2 are stored below
+		__m128 v = SSE41_LoadVec3( src[i].ToFloatPtr() );
+		lo = _mm_min_ps( lo, v );
+		hi = _mm_max_ps( hi, v );
+	}
+	SSE41_StoreVec3( min.ToFloatPtr(), lo );
+	SSE41_StoreVec3( max.ToFloatPtr(), hi );
+}
+
+/*
+============
+idSIMD_SSE41::MinMax
+============
+*/
+void VPCALL idSIMD_SSE41::MinMax( idVec3 &min, idVec3 &max, const idDrawVert *src, const int count ) {
+	__m128 lo = _mm_set1_ps( idMath::INFINITY );
+	__m128 hi = _mm_set1_ps( -idMath::INFINITY );
+
+	// xyz sits at the front of the 60 byte idDrawVert, so the 16 byte load
+	// never leaves the struct
+	for ( int i = 0; i < count; i++ ) {
+		__m128 v = _mm_loadu_ps( src[i].xyz.ToFloatPtr() );
+		lo = _mm_min_ps( lo, v );
+		hi = _mm_max_ps( hi, v );
+	}
+	SSE41_StoreVec3( min.ToFloatPtr(), lo );
+	SSE41_StoreVec3( max.ToFloatPtr(), hi );
+}
+
+/*
+============
+idSIMD_SSE41::MinMax
+============
+*/
+void VPCALL idSIMD_SSE41::MinMax( idVec3 &min, idVec3 &max, const idDrawVert *src, const int *indexes, const int count ) {
+	__m128 lo = _mm_set1_ps( idMath::INFINITY );
+	__m128 hi = _mm_set1_ps( -idMath::INFINITY );
+
+	for ( int i = 0; i < count; i++ ) {
+		__m128 v = _mm_loadu_ps( src[indexes[i]].xyz.ToFloatPtr() );
+		lo = _mm_min_ps( lo, v );
+		hi = _mm_max_ps( hi, v );
+	}
+	SSE41_StoreVec3( min.ToFloatPtr(), lo );
+	SSE41_StoreVec3( max.ToFloatPtr(), hi );
+}
+
+/*
+============
+idSIMD_SSE41::MatX_MultiplyVecX
+
+	Vertical SIMD: four matrix rows advance in the four lanes while the
+	columns are accumulated in ascending order, so every output element sees
+	the exact float operation sequence of the generic code (bitwise equal
+	results, unlike a horizontal dot product which reassociates the sum).
+============
+*/
+void VPCALL idSIMD_SSE41::MatX_MultiplyVecX( idVecX &dst, const idMatX &mat, const idVecX &vec ) {
+	assert( vec.GetSize() >= mat.GetNumColumns() );
+	assert( dst.GetSize() >= mat.GetNumRows() );
+
+	const float *mPtr = mat.ToFloatPtr();
+	const float *vPtr = vec.ToFloatPtr();
+	float *dstPtr = dst.ToFloatPtr();
+	const int numRows = mat.GetNumRows();
+	const int nc = mat.GetNumColumns();
+
+	int r = 0;
+	for ( ; r + 3 < numRows; r += 4 ) {
+		const float *m0 = mPtr + (r+0) * nc;
+		const float *m1 = mPtr + (r+1) * nc;
+		const float *m2 = mPtr + (r+2) * nc;
+		const float *m3 = mPtr + (r+3) * nc;
+		__m128 acc = _mm_mul_ps( _mm_set_ps( m3[0], m2[0], m1[0], m0[0] ), _mm_set1_ps( vPtr[0] ) );
+		for ( int c = 1; c < nc; c++ ) {
+			acc = _mm_add_ps( acc, _mm_mul_ps( _mm_set_ps( m3[c], m2[c], m1[c], m0[c] ), _mm_set1_ps( vPtr[c] ) ) );
+		}
+		_mm_storeu_ps( dstPtr + r, acc );
+	}
+	for ( ; r < numRows; r++ ) {
+		const float *m0 = mPtr + r * nc;
+		float sum = m0[0] * vPtr[0];
+		for ( int c = 1; c < nc; c++ ) {
+			sum += m0[c] * vPtr[c];
+		}
+		dstPtr[r] = sum;
+	}
+}
+
+/*
+============
+idSIMD_SSE41::MatX_MultiplyAddVecX
+============
+*/
+void VPCALL idSIMD_SSE41::MatX_MultiplyAddVecX( idVecX &dst, const idMatX &mat, const idVecX &vec ) {
+	assert( vec.GetSize() >= mat.GetNumColumns() );
+	assert( dst.GetSize() >= mat.GetNumRows() );
+
+	const float *mPtr = mat.ToFloatPtr();
+	const float *vPtr = vec.ToFloatPtr();
+	float *dstPtr = dst.ToFloatPtr();
+	const int numRows = mat.GetNumRows();
+	const int nc = mat.GetNumColumns();
+
+	int r = 0;
+	for ( ; r + 3 < numRows; r += 4 ) {
+		const float *m0 = mPtr + (r+0) * nc;
+		const float *m1 = mPtr + (r+1) * nc;
+		const float *m2 = mPtr + (r+2) * nc;
+		const float *m3 = mPtr + (r+3) * nc;
+		__m128 acc = _mm_mul_ps( _mm_set_ps( m3[0], m2[0], m1[0], m0[0] ), _mm_set1_ps( vPtr[0] ) );
+		for ( int c = 1; c < nc; c++ ) {
+			acc = _mm_add_ps( acc, _mm_mul_ps( _mm_set_ps( m3[c], m2[c], m1[c], m0[c] ), _mm_set1_ps( vPtr[c] ) ) );
+		}
+		_mm_storeu_ps( dstPtr + r, _mm_add_ps( _mm_loadu_ps( dstPtr + r ), acc ) );
+	}
+	for ( ; r < numRows; r++ ) {
+		const float *m0 = mPtr + r * nc;
+		float sum = m0[0] * vPtr[0];
+		for ( int c = 1; c < nc; c++ ) {
+			sum += m0[c] * vPtr[c];
+		}
+		dstPtr[r] += sum;
+	}
+}
+
+/*
+============
+idSIMD_SSE41::MatX_MultiplySubVecX
+============
+*/
+void VPCALL idSIMD_SSE41::MatX_MultiplySubVecX( idVecX &dst, const idMatX &mat, const idVecX &vec ) {
+	assert( vec.GetSize() >= mat.GetNumColumns() );
+	assert( dst.GetSize() >= mat.GetNumRows() );
+
+	const float *mPtr = mat.ToFloatPtr();
+	const float *vPtr = vec.ToFloatPtr();
+	float *dstPtr = dst.ToFloatPtr();
+	const int numRows = mat.GetNumRows();
+	const int nc = mat.GetNumColumns();
+
+	int r = 0;
+	for ( ; r + 3 < numRows; r += 4 ) {
+		const float *m0 = mPtr + (r+0) * nc;
+		const float *m1 = mPtr + (r+1) * nc;
+		const float *m2 = mPtr + (r+2) * nc;
+		const float *m3 = mPtr + (r+3) * nc;
+		__m128 acc = _mm_mul_ps( _mm_set_ps( m3[0], m2[0], m1[0], m0[0] ), _mm_set1_ps( vPtr[0] ) );
+		for ( int c = 1; c < nc; c++ ) {
+			acc = _mm_add_ps( acc, _mm_mul_ps( _mm_set_ps( m3[c], m2[c], m1[c], m0[c] ), _mm_set1_ps( vPtr[c] ) ) );
+		}
+		_mm_storeu_ps( dstPtr + r, _mm_sub_ps( _mm_loadu_ps( dstPtr + r ), acc ) );
+	}
+	for ( ; r < numRows; r++ ) {
+		const float *m0 = mPtr + r * nc;
+		float sum = m0[0] * vPtr[0];
+		for ( int c = 1; c < nc; c++ ) {
+			sum += m0[c] * vPtr[c];
+		}
+		dstPtr[r] -= sum;
+	}
+}
+
+/*
+============
+idSIMD_SSE41::MatX_TransposeMultiplyVecX
+
+	dst[j] = sum_i mat[i][j] * vec[i]. The output elements are contiguous, so
+	four of them ride in the lanes while the rows accumulate in ascending
+	order - again the generic operation sequence per element, with contiguous
+	row loads instead of gathers.
+============
+*/
+void VPCALL idSIMD_SSE41::MatX_TransposeMultiplyVecX( idVecX &dst, const idMatX &mat, const idVecX &vec ) {
+	assert( vec.GetSize() >= mat.GetNumRows() );
+	assert( dst.GetSize() >= mat.GetNumColumns() );
+
+	const float *mPtr = mat.ToFloatPtr();
+	const float *vPtr = vec.ToFloatPtr();
+	float *dstPtr = dst.ToFloatPtr();
+	const int numRows = mat.GetNumRows();
+	const int nc = mat.GetNumColumns();
+
+	int j = 0;
+	for ( ; j + 3 < nc; j += 4 ) {
+		__m128 acc = _mm_mul_ps( _mm_loadu_ps( mPtr + j ), _mm_set1_ps( vPtr[0] ) );
+		for ( int i = 1; i < numRows; i++ ) {
+			acc = _mm_add_ps( acc, _mm_mul_ps( _mm_loadu_ps( mPtr + i * nc + j ), _mm_set1_ps( vPtr[i] ) ) );
+		}
+		_mm_storeu_ps( dstPtr + j, acc );
+	}
+	for ( ; j < nc; j++ ) {
+		float sum = mPtr[j] * vPtr[0];
+		for ( int i = 1; i < numRows; i++ ) {
+			sum += mPtr[i * nc + j] * vPtr[i];
+		}
+		dstPtr[j] = sum;
+	}
+}
+
+/*
+============
+idSIMD_SSE41::MatX_TransposeMultiplyAddVecX
+============
+*/
+void VPCALL idSIMD_SSE41::MatX_TransposeMultiplyAddVecX( idVecX &dst, const idMatX &mat, const idVecX &vec ) {
+	assert( vec.GetSize() >= mat.GetNumRows() );
+	assert( dst.GetSize() >= mat.GetNumColumns() );
+
+	const float *mPtr = mat.ToFloatPtr();
+	const float *vPtr = vec.ToFloatPtr();
+	float *dstPtr = dst.ToFloatPtr();
+	const int numRows = mat.GetNumRows();
+	const int nc = mat.GetNumColumns();
+
+	int j = 0;
+	for ( ; j + 3 < nc; j += 4 ) {
+		__m128 acc = _mm_mul_ps( _mm_loadu_ps( mPtr + j ), _mm_set1_ps( vPtr[0] ) );
+		for ( int i = 1; i < numRows; i++ ) {
+			acc = _mm_add_ps( acc, _mm_mul_ps( _mm_loadu_ps( mPtr + i * nc + j ), _mm_set1_ps( vPtr[i] ) ) );
+		}
+		_mm_storeu_ps( dstPtr + j, _mm_add_ps( _mm_loadu_ps( dstPtr + j ), acc ) );
+	}
+	for ( ; j < nc; j++ ) {
+		float sum = mPtr[j] * vPtr[0];
+		for ( int i = 1; i < numRows; i++ ) {
+			sum += mPtr[i * nc + j] * vPtr[i];
+		}
+		dstPtr[j] += sum;
+	}
+}
+
+/*
+============
+idSIMD_SSE41::MatX_TransposeMultiplySubVecX
+============
+*/
+void VPCALL idSIMD_SSE41::MatX_TransposeMultiplySubVecX( idVecX &dst, const idMatX &mat, const idVecX &vec ) {
+	assert( vec.GetSize() >= mat.GetNumRows() );
+	assert( dst.GetSize() >= mat.GetNumColumns() );
+
+	const float *mPtr = mat.ToFloatPtr();
+	const float *vPtr = vec.ToFloatPtr();
+	float *dstPtr = dst.ToFloatPtr();
+	const int numRows = mat.GetNumRows();
+	const int nc = mat.GetNumColumns();
+
+	int j = 0;
+	for ( ; j + 3 < nc; j += 4 ) {
+		__m128 acc = _mm_mul_ps( _mm_loadu_ps( mPtr + j ), _mm_set1_ps( vPtr[0] ) );
+		for ( int i = 1; i < numRows; i++ ) {
+			acc = _mm_add_ps( acc, _mm_mul_ps( _mm_loadu_ps( mPtr + i * nc + j ), _mm_set1_ps( vPtr[i] ) ) );
+		}
+		_mm_storeu_ps( dstPtr + j, _mm_sub_ps( _mm_loadu_ps( dstPtr + j ), acc ) );
+	}
+	for ( ; j < nc; j++ ) {
+		float sum = mPtr[j] * vPtr[0];
+		for ( int i = 1; i < numRows; i++ ) {
+			sum += mPtr[i * nc + j] * vPtr[i];
+		}
+		dstPtr[j] -= sum;
+	}
+}
+
+/*
+============
+idSIMD_SSE41::MatX_LowerTriangularSolve
+
+	solves x in Lx = b for the n * n sub-matrix of L
+	if skip > 0 the first skip elements of x are assumed to be valid already
+	L has to be a lower triangular matrix with (implicit) ones on the diagonal
+	x == b is allowed
+
+	The generic code accumulates in double; this one uses a four lane float
+	dot product per row, which the LCP solvers tolerate (the testSIMD gate
+	for the solvers is a loose epsilon for exactly this reason).
+============
+*/
+void VPCALL idSIMD_SSE41::MatX_LowerTriangularSolve( const idMatX &L, float *x, const float *b, const int n, int skip ) {
+	if ( skip >= n ) {
+		return;
+	}
+
+	const float *lptr = L.ToFloatPtr();
+	const int nc = L.GetNumColumns();
+
+	// unrolled cases for n < 8, same as the generic code
+	if ( n < 8 ) {
+		#define NSKIP( n, s )	((n<<3)|(s&7))
+		switch( NSKIP( n, skip ) ) {
+			case NSKIP( 1, 0 ): x[0] = b[0];
+				return;
+			case NSKIP( 2, 0 ): x[0] = b[0];
+			case NSKIP( 2, 1 ): x[1] = b[1] - lptr[1*nc+0] * x[0];
+				return;
+			case NSKIP( 3, 0 ): x[0] = b[0];
+			case NSKIP( 3, 1 ): x[1] = b[1] - lptr[1*nc+0] * x[0];
+			case NSKIP( 3, 2 ): x[2] = b[2] - lptr[2*nc+0] * x[0] - lptr[2*nc+1] * x[1];
+				return;
+			case NSKIP( 4, 0 ): x[0] = b[0];
+			case NSKIP( 4, 1 ): x[1] = b[1] - lptr[1*nc+0] * x[0];
+			case NSKIP( 4, 2 ): x[2] = b[2] - lptr[2*nc+0] * x[0] - lptr[2*nc+1] * x[1];
+			case NSKIP( 4, 3 ): x[3] = b[3] - lptr[3*nc+0] * x[0] - lptr[3*nc+1] * x[1] - lptr[3*nc+2] * x[2];
+				return;
+			case NSKIP( 5, 0 ): x[0] = b[0];
+			case NSKIP( 5, 1 ): x[1] = b[1] - lptr[1*nc+0] * x[0];
+			case NSKIP( 5, 2 ): x[2] = b[2] - lptr[2*nc+0] * x[0] - lptr[2*nc+1] * x[1];
+			case NSKIP( 5, 3 ): x[3] = b[3] - lptr[3*nc+0] * x[0] - lptr[3*nc+1] * x[1] - lptr[3*nc+2] * x[2];
+			case NSKIP( 5, 4 ): x[4] = b[4] - lptr[4*nc+0] * x[0] - lptr[4*nc+1] * x[1] - lptr[4*nc+2] * x[2] - lptr[4*nc+3] * x[3];
+				return;
+			case NSKIP( 6, 0 ): x[0] = b[0];
+			case NSKIP( 6, 1 ): x[1] = b[1] - lptr[1*nc+0] * x[0];
+			case NSKIP( 6, 2 ): x[2] = b[2] - lptr[2*nc+0] * x[0] - lptr[2*nc+1] * x[1];
+			case NSKIP( 6, 3 ): x[3] = b[3] - lptr[3*nc+0] * x[0] - lptr[3*nc+1] * x[1] - lptr[3*nc+2] * x[2];
+			case NSKIP( 6, 4 ): x[4] = b[4] - lptr[4*nc+0] * x[0] - lptr[4*nc+1] * x[1] - lptr[4*nc+2] * x[2] - lptr[4*nc+3] * x[3];
+			case NSKIP( 6, 5 ): x[5] = b[5] - lptr[5*nc+0] * x[0] - lptr[5*nc+1] * x[1] - lptr[5*nc+2] * x[2] - lptr[5*nc+3] * x[3] - lptr[5*nc+4] * x[4];
+				return;
+			case NSKIP( 7, 0 ): x[0] = b[0];
+			case NSKIP( 7, 1 ): x[1] = b[1] - lptr[1*nc+0] * x[0];
+			case NSKIP( 7, 2 ): x[2] = b[2] - lptr[2*nc+0] * x[0] - lptr[2*nc+1] * x[1];
+			case NSKIP( 7, 3 ): x[3] = b[3] - lptr[3*nc+0] * x[0] - lptr[3*nc+1] * x[1] - lptr[3*nc+2] * x[2];
+			case NSKIP( 7, 4 ): x[4] = b[4] - lptr[4*nc+0] * x[0] - lptr[4*nc+1] * x[1] - lptr[4*nc+2] * x[2] - lptr[4*nc+3] * x[3];
+			case NSKIP( 7, 5 ): x[5] = b[5] - lptr[5*nc+0] * x[0] - lptr[5*nc+1] * x[1] - lptr[5*nc+2] * x[2] - lptr[5*nc+3] * x[3] - lptr[5*nc+4] * x[4];
+			case NSKIP( 7, 6 ): x[6] = b[6] - lptr[6*nc+0] * x[0] - lptr[6*nc+1] * x[1] - lptr[6*nc+2] * x[2] - lptr[6*nc+3] * x[3] - lptr[6*nc+4] * x[4] - lptr[6*nc+5] * x[5];
+				return;
+		}
+		#undef NSKIP
+		return;
+	}
+
+	// process first 4 rows scalar
+	switch( skip ) {
+		case 0: x[0] = b[0];
+		case 1: x[1] = b[1] - lptr[1*nc+0] * x[0];
+		case 2: x[2] = b[2] - lptr[2*nc+0] * x[0] - lptr[2*nc+1] * x[1];
+		case 3: x[3] = b[3] - lptr[3*nc+0] * x[0] - lptr[3*nc+1] * x[1] - lptr[3*nc+2] * x[2];
+				skip = 4;
+	}
+
+	lptr = L.ToFloatPtr() + skip * nc;
+
+	for ( int i = skip; i < n; i++ ) {
+		__m128 acc = _mm_setzero_ps();
+		int j;
+		for ( j = 0; j + 3 < i; j += 4 ) {
+			acc = _mm_add_ps( acc, _mm_mul_ps( _mm_loadu_ps( lptr + j ), _mm_loadu_ps( x + j ) ) );
+		}
+		float sum = SSE41_HSum( acc );
+		for ( ; j < i; j++ ) {
+			sum += lptr[j] * x[j];
+		}
+		x[i] = b[i] - sum;
+		lptr += nc;
+	}
+}
+
+/*
+============
+idSIMD_SSE41::MatX_LowerTriangularSolveTranspose
+
+	solves x in L'x = b for the n * n sub-matrix of L
+	L has to be a lower triangular matrix with (implicit) ones on the diagonal
+	x == b is allowed
+
+	Column formulation: once x[i] is final, its contribution x[i] * L[i][0..i)
+	is subtracted from the leading part of x in one contiguous vector pass,
+	instead of walking the (strided) column L[j][i] per output element.
+============
+*/
+void VPCALL idSIMD_SSE41::MatX_LowerTriangularSolveTranspose( const idMatX &L, float *x, const float *b, const int n ) {
+	if ( n <= 0 ) {
+		return;
+	}
+
+	const float *base = L.ToFloatPtr();
+	const int nc = L.GetNumColumns();
+
+	if ( x != b ) {
+		memcpy( x, b, n * sizeof( float ) );
+	}
+
+	for ( int i = n - 1; i > 0; i-- ) {
+		const float *lptr = base + i * nc;
+		__m128 xi = _mm_set1_ps( x[i] );
+		int j;
+		for ( j = 0; j + 3 < i; j += 4 ) {
+			_mm_storeu_ps( x + j, _mm_sub_ps( _mm_loadu_ps( x + j ), _mm_mul_ps( _mm_loadu_ps( lptr + j ), xi ) ) );
+		}
+		for ( ; j < i; j++ ) {
+			x[j] -= lptr[j] * x[i];
+		}
+	}
+}
+
+/*
+============
+idSIMD_SSE41::MatX_LDLTFactor
+
+	in-place factorization LDL' of the n * n sub-matrix of mat
+	the reciprocal of the diagonal elements are stored in invDiag
+
+	Same row sweep as the generic code, with the two inner loops (the diagonal
+	dot product and the per-row column update) as four lane float dots.
+============
+*/
+bool VPCALL idSIMD_SSE41::MatX_LDLTFactor( idMatX &mat, idVecX &invDiag, const int n ) {
+	if ( n <= 0 ) {
+		return true;
+	}
+
+	float *base = mat.ToFloatPtr();
+	const int nc = mat.GetNumColumns();
+	float *v = (float *) _alloca16( n * sizeof( float ) );
+	float *diag = (float *) _alloca16( n * sizeof( float ) );
+
+	for ( int i = 0; i < n; i++ ) {
+		float *mptr = base + i * nc;
+
+		// v[k] = diag[k] * mat[i][k], sum = mat[i][i] - dot( v, mat[i] ), k < i
+		__m128 acc = _mm_setzero_ps();
+		int k;
+		for ( k = 0; k + 3 < i; k += 4 ) {
+			__m128 row = _mm_loadu_ps( mptr + k );
+			__m128 vk = _mm_mul_ps( _mm_loadu_ps( diag + k ), row );
+			_mm_storeu_ps( v + k, vk );
+			acc = _mm_add_ps( acc, _mm_mul_ps( vk, row ) );
+		}
+		float sum = SSE41_HSum( acc );
+		for ( ; k < i; k++ ) {
+			v[k] = diag[k] * mptr[k];
+			sum += v[k] * mptr[k];
+		}
+		sum = mptr[i] - sum;
+
+		if ( sum == 0.0f ) {
+			return false;
+		}
+
+		diag[i] = sum;
+		mptr[i] = sum;
+		const float d = 1.0f / sum;
+		invDiag[i] = d;
+
+		// mat[j][i] = ( mat[j][i] - dot( v, mat[j][0..i) ) ) * d for the rows below
+		for ( int j = i + 1; j < n; j++ ) {
+			float *rptr = base + j * nc;
+			__m128 racc = _mm_setzero_ps();
+			int k2;
+			for ( k2 = 0; k2 + 3 < i; k2 += 4 ) {
+				racc = _mm_add_ps( racc, _mm_mul_ps( _mm_loadu_ps( v + k2 ), _mm_loadu_ps( rptr + k2 ) ) );
+			}
+			float s = SSE41_HSum( racc );
+			for ( ; k2 < i; k2++ ) {
+				s += v[k2] * rptr[k2];
+			}
+			rptr[i] = ( rptr[i] - s ) * d;
+		}
+	}
+	return true;
+}
+
+/*
+============
+idSIMD_SSE41::DeriveUnsmoothedTangents
+
+	Derives the normal and orthogonal tangent vectors for the triangle
+	vertices, each from its single dominant triangle. The cross products
+	form the same multiply/subtract pairs as the generic expressions.
+============
+*/
+void VPCALL idSIMD_SSE41::DeriveUnsmoothedTangents( idDrawVert *verts, const dominantTri_s *dominantTris, const int numVerts ) {
+	for ( int i = 0; i < numVerts; i++ ) {
+		const dominantTri_s &dt = dominantTris[i];
+		idDrawVert *a = verts + i;
+		const idDrawVert *b = verts + dt.v2;
+		const idDrawVert *c = verts + dt.v3;
+
+		// 16 byte loads stay inside the struct (st follows xyz); lane3 holds
+		// the st[0] delta, which every result discards
+		__m128 av = _mm_loadu_ps( a->xyz.ToFloatPtr() );
+		__m128 db = _mm_sub_ps( _mm_loadu_ps( b->xyz.ToFloatPtr() ), av );
+		__m128 dc = _mm_sub_ps( _mm_loadu_ps( c->xyz.ToFloatPtr() ), av );
+
+		const float d4 = b->st[1] - a->st[1];
+		const float d9 = c->st[1] - a->st[1];
+
+		__m128 n = _mm_mul_ps( _mm_set1_ps( dt.normalizationScale[2] ), SSE41_Cross( dc, db ) );
+		__m128 t = _mm_mul_ps( _mm_set1_ps( dt.normalizationScale[0] ),
+					_mm_sub_ps( _mm_mul_ps( _mm_set1_ps( d9 ), db ), _mm_mul_ps( _mm_set1_ps( d4 ), dc ) ) );
+		// unsmoothed bitangent from n x t, as the generic code derives it
+		__m128 bt = _mm_mul_ps( _mm_set1_ps( dt.normalizationScale[1] ), SSE41_Cross( t, n ) );
+
+		SSE41_StoreVec3( a->normal.ToFloatPtr(), n );
+		SSE41_StoreVec3( a->tangents[0].ToFloatPtr(), t );
+		SSE41_StoreVec3( a->tangents[1].ToFloatPtr(), bt );
+	}
+}
+
+/*
+============
+idSIMD_SSE41::CreateShadowCache
+
+	Builds the doubled (near cap / projected-to-infinity) vertex array for a
+	shadow volume: (x,y,z,1) and (x-lx, y-ly, z-lz, 0) per unique vertex.
+============
+*/
+int VPCALL idSIMD_SSE41::CreateShadowCache( idVec4 *vertexCache, int *vertRemap, const idVec3 &lightOrigin, const idDrawVert *verts, const int numVerts ) {
+	const __m128 one = _mm_set_ss( 1.0f );
+	const __m128 light = _mm_setr_ps( lightOrigin[0], lightOrigin[1], lightOrigin[2], 0.0f );
+
+	int outVerts = 0;
+	for ( int i = 0; i < numVerts; i++ ) {
+		if ( vertRemap[i] ) {
+			continue;
+		}
+		__m128 v = _mm_loadu_ps( verts[i].xyz.ToFloatPtr() );
+
+		// R_SetupProjection() builds the projection matrix with a slight crunch
+		// for depth, which keeps this w=0 division from rasterizing right at the
+		// wrap around point and causing depth fighting with the rear caps
+		_mm_storeu_ps( vertexCache[outVerts+0].ToFloatPtr(), _mm_insert_ps( v, one, 0x30 ) );
+		__m128 w = _mm_sub_ps( v, light );
+		_mm_storeu_ps( vertexCache[outVerts+1].ToFloatPtr(), _mm_insert_ps( w, w, 0x08 ) );
+
+		vertRemap[i] = outVerts;
+		outVerts += 2;
+	}
+	return outVerts;
+}
+
+/*
+============
+idSIMD_SSE41::CreateVertexProgramShadowCache
+
+	Same doubled layout, but unconditionally for every vertex; the shadow
+	vertex program does the light projection itself.
+============
+*/
+int VPCALL idSIMD_SSE41::CreateVertexProgramShadowCache( idVec4 *vertexCache, const idDrawVert *verts, const int numVerts ) {
+	const __m128 one = _mm_set_ss( 1.0f );
+
+	for ( int i = 0; i < numVerts; i++ ) {
+		__m128 v = _mm_loadu_ps( verts[i].xyz.ToFloatPtr() );
+		_mm_storeu_ps( vertexCache[i*2+0].ToFloatPtr(), _mm_insert_ps( v, one, 0x30 ) );
+		_mm_storeu_ps( vertexCache[i*2+1].ToFloatPtr(), _mm_insert_ps( v, v, 0x08 ) );
+	}
+	return numVerts * 2;
 }
 
 #endif /* GCC && SSE4.1 */

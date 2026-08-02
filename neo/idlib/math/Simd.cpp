@@ -190,6 +190,29 @@ double ticksPerNanosecond;
 #define StopRecordTime( end )				\
 	end = mach_absolute_time();
 
+#elif defined(__GNUC__) && ( defined(__x86_64__) || defined(__i386__) )
+
+// serialize with cpuid the way the MSVC path does, so the rdtsc reading
+// isn't skewed by out-of-order execution around the measured call
+#define TIME_TYPE uint64_t
+
+static ID_INLINE uint64_t Sys_SerializedRdtsc( void ) {
+	unsigned int hi, lo;
+	__asm__ __volatile__ (
+		"cpuid\n\t"
+		"rdtsc"
+		: "=a" (lo), "=d" (hi)
+		: "a" (0)
+		: "%ebx", "%ecx", "memory" );
+	return ( (uint64_t)hi << 32 ) | lo;
+}
+
+#define StartRecordTime( start )			\
+	start = Sys_SerializedRdtsc();
+
+#define StopRecordTime( end )				\
+	end = Sys_SerializedRdtsc();
+
 #else
 
 #define TIME_TYPE int
