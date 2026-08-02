@@ -1768,7 +1768,7 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
                                             const shaderStage_t *pStage, const float *regs, int src_blend,
                                             const float color[4], const float mvp[16], const srfTriangles_t *tri,
                                             rhi::BufferHandle vb, int vertOfs, rhi::BufferHandle ib, int idxOfs ) {
-	rhi::ShaderHandle prog = rhi::GL3_FindProgram( "softparticle" );
+	rhi::ShaderHandle prog = r->LoadShader( "softparticle" );
 	if ( !prog ) {
 		return false;	// shader unavailable: let the caller draw it generically
 	}
@@ -2062,7 +2062,8 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		const int src_blend = pStage->drawStateBits & GLS_SRCBLEND_BITS;
 		if ( ( surf->dsFlags & DSF_SOFT_PARTICLE ) && surf->particle_radius > 0.0f
 			&& ( src_blend == GLS_SRCBLEND_ONE || src_blend == GLS_SRCBLEND_SRC_ALPHA )
-			&& globalImages->currentDepthImage->uploadWidth > 0 ) {
+			&& globalImages->currentDepthImage->uploadWidth > 0
+			&& rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {	// M5: needs the real _currentDepth capture
 			if ( RB_RHI_RenderSoftParticleStage( r, viewDef, surf, pStage, regs, src_blend, color, mvp, tri, vb, vertOfs, ib, idxOfs ) ) {
 				continue;
 			}
@@ -2244,15 +2245,17 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		RB_RHI_ScreenSpaceReflections( r, viewDef );	// view had no translucent surfaces
 	}
 
-	// fog and blend lights
-	if ( viewDef->viewEntitys ) {
+	// fog and blend lights (Vulkan: arrive at M5 with the texgen/cube images)
+	if ( viewDef->viewEntitys && rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
 		RB_RHI_FogAllLights( r, viewDef );
 	}
 
 	// post-process-sort surfaces, now that fog is down; copy _currentRender
 	// first (only in a 3D view) so the SS_POST_PROCESS stages can sample it
 	if ( i < viewDef->numDrawSurfs && !r_skipPostProcess.GetBool() ) {
-		if ( viewDef->viewEntitys ) {
+		if ( viewDef->viewEntitys && rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+			// Vulkan: _currentRender copies arrive at M5; until then the
+			// deferred surfaces draw without the capture
 			RB_RHI_CopyCurrentRender( viewDef );
 			backEnd.currentRenderCopied = true;
 		}
@@ -2273,7 +2276,8 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
 		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
 		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
-	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView ) {
+	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView
+	     && rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
 		// In HDR mode FXAA + film grain + chromatic aberration are all folded into the
 		// resolve chain (RB_RHI_HdrResolve / RB_RHI_HdrFxaa), sampling the float scene
 		// buffer instead of the 8-bit _currentRender copy that was re-banding the image
@@ -2293,7 +2297,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	// early-outs on its own cvar, so this is free when nothing is enabled.
 	// (Surface-indexed views like r_showTris await the core RB_DrawElements
 	// path; the idImmediateMode-based views work now.)
-	if ( viewDef->viewEntitys ) {
+	if ( viewDef->viewEntitys && rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		// Vulkan: debug tools arrive at M6 (DrawImmediate + core GL_State
+		// setup are GL-only today)
 		RB_RenderDebugTools( (drawSurf_t **)&viewDef->drawSurfs[0], viewDef->numDrawSurfs );
 	}
 
@@ -2311,11 +2317,11 @@ Backend-neutral: drives whichever rhi::RHI is active (GL3 today, Vulkan later).
 void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	rhi::RHI *r = rhi::GetRHI();
 
-	// Phase 4 M2 (docs/vulkan-backend.md): the Vulkan backend draws 2D views
-	// (menu/console/HUD/loading — worldless viewDefs) through the shared
-	// shader-pass path; 3D world views arrive with M3/M4 and are skipped so
-	// the frame stays a clear. The GL-only helper passes (HDR routing, gamma,
-	// capture, ImGui-on-GL) stay off until their milestones.
+	// Phase 4 M3 (docs/vulkan-backend.md): the Vulkan backend draws 2D views
+	// and, for world views, the depth prepass + ambient shader passes
+	// (RB_RHI_DrawWorld stops before lights/shadows until M4). The GL-only
+	// helper passes (HDR routing, gamma, capture, ImGui-on-GL) stay off until
+	// their milestones.
 	const bool vkMode = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
 
 	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
@@ -2331,13 +2337,9 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 		switch ( cmds->commandId ) {
 		case RC_NOP:
 			break;
-		case RC_DRAW_VIEW: {
-			viewDef_t *vd = ((const drawSurfsCommand_t *)cmds)->viewDef;
-			if ( !vkMode || !vd->viewEntitys ) {
-				RB_RHI_DrawView( r, vd );
-			}
+		case RC_DRAW_VIEW:
+			RB_RHI_DrawView( r, ((const drawSurfsCommand_t *)cmds)->viewDef );
 			break;
-		}
 		case RC_SET_BUFFER: {
 			// single (back) buffer only; keep frame counter + clear semantics
 			// exactly matching RB_SetBuffer (r_clear defaults to 2 = black)

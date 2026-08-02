@@ -203,12 +203,28 @@ static int RB_RHI_CountLightChain( const drawSurf_t *surf ) {
 // cache disagrees with GL, so the next interaction can skip a needed rebind and later
 // lights sample an absent unit-0 texture — the "changing a shadow setting breaks all
 // lights" symptom on a live resolution change. Forget the cached binds so they re-issue.
+// Vulkan (Phase 4 M3): RB_RHI_BindUnit records image handles here instead of
+// touching GL; RB_RHI_VkTextures copies them into a draw's DrawArgs. Handles
+// persist across draws exactly like GL binds do.
+static rhi::ImageHandle rhiVkUnits[9];
+
+static void RB_RHI_VkTextures( rhi::DrawArgs &da ) {
+	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		return;
+	}
+	for ( int i = 0; i < 8; i++ ) {
+		da.textures[i] = rhiVkUnits[i];
+	}
+	da.shadowCube = rhiVkUnits[8];
+}
+
 static void RB_RHI_ForgetTexBinds() {
 	for ( int i = 0; i < MAX_MULTITEXTURE_UNITS; i++ ) {
 		backEnd.glState.tmu[i].current2DMap = -1;
 		backEnd.glState.tmu[i].current3DMap = -1;
 		backEnd.glState.tmu[i].currentCubeMap = -1;
 	}
+	memset( rhiVkUnits, 0, sizeof( rhiVkUnits ) );
 }
 
 /*
@@ -217,6 +233,16 @@ RB_RHI_BindUnit
 ===================
 */
 static void RB_RHI_BindUnit( int unit, idImage *image ) {
+	// Vulkan: demand-load and record the handle for RB_RHI_VkTextures; no GL
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		if ( unit >= 0 && unit < 9 && image != NULL ) {
+			image->Bind();		// upload trigger only under Vulkan
+			rhiVkUnits[unit] = image->rhiHandle ? image->rhiHandle
+			                                    : globalImages->whiteImage->rhiHandle;
+		}
+		return;
+	}
+
 	// Skip the active-unit switch and rebind when this image is already bound
 	// on this unit. Under one light the normalization cube, light falloff /
 	// projection and specular-table maps are identical across every surface —
@@ -925,11 +951,15 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// inherit the clip exactly like the legacy notch. The plane is transformed
 	// into each surface's model space, matching R_GlobalPlaneToLocal() there.
 	const bool useClipPlane = viewDef->numClipPlanes > 0;
-	if ( useClipPlane ) {
+	if ( useClipPlane && qglEnable != NULL ) {
+		// Vulkan needs no enable: zfill.vert always writes gl_ClipDistance[0]
+		// and the plane is zero when unused
 		qglEnable( GL_CLIP_DISTANCE0 );
 	}
 
-	qglStencilFunc( GL_ALWAYS, 1, 255 );
+	if ( qglStencilFunc != NULL ) {
+		qglStencilFunc( GL_ALWAYS, 1, 255 );
+	}
 
 	const viewEntity_t *currentSpace = NULL;
 	float mvp[16];
@@ -999,7 +1029,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 			               backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
 		}
 
-		if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+		if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) && qglEnable != NULL ) {
 			qglEnable( GL_POLYGON_OFFSET_FILL );
 			qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
 		}
@@ -1075,6 +1105,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 				int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 				RB_RHI_BindUnit( 0, pStage->texture.image );
+				RB_RHI_VkTextures( da );
 				r->BindPipeline( pd );
 				da.uniformBuffer = ub;
 				da.uniformOffset = uniOfs;
@@ -1100,6 +1131,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 			int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 			RB_RHI_BindUnit( 0, globalImages->whiteImage );
+			RB_RHI_VkTextures( da );
 			r->BindPipeline( pd );
 			da.uniformBuffer = ub;
 			da.uniformOffset = uniOfs;
@@ -1108,7 +1140,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 			backEnd.pc.c_drawElements++;
 		}
 
-		if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+		if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) && qglDisable != NULL ) {
 			qglDisable( GL_POLYGON_OFFSET_FILL );
 		}
 		if ( surf->space->weaponDepthHack || surf->space->modelDepthHack != 0.0f ) {
@@ -1116,16 +1148,17 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 	}
 
-	if ( useClipPlane ) {
+	if ( useClipPlane && qglDisable != NULL ) {
 		qglDisable( GL_CLIP_DISTANCE0 );
 	}
 
 	// make the early depth pass available to shaders (soft particles, SSAO, SSR, etc.)
+	// (GL-only: the Vulkan depth-sample path arrives with its consumers, M5+)
 	bool getDepthCapture = r_enableDepthCapture.GetInteger() == 1
 		|| ( r_enableDepthCapture.GetInteger() == -1
 		     && ( r_useSoftParticles.GetBool()
 		          || ( ( r_ssao.GetBool() || r_ssr.GetBool() ) && R_BackendSupportsEnhancements() ) ) );
-	if ( getDepthCapture && viewDef->renderView.viewID >= 0 ) {
+	if ( getDepthCapture && viewDef->renderView.viewID >= 0 && qglReadBuffer != NULL ) {
 		globalImages->currentDepthImage->CopyDepthbuffer( viewDef->viewport.x1,
 			viewDef->viewport.y1,
 			viewDef->viewport.x2 - viewDef->viewport.x1 + 1,
@@ -3147,10 +3180,22 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 
 	// depth prepass with stencil test enabled for invariance with the
 	// shadowed passes (matches RB_STD_FillDepthBuffer)
-	qglEnable( GL_STENCIL_TEST );
+	if ( qglEnable != NULL ) {
+		qglEnable( GL_STENCIL_TEST );
+	}
 	backEnd.currentScissor = viewDef->scissor;
 
 	RB_RHI_FillDepthBuffer( r, viewDef );
+
+	// Phase 4 M3 (docs/vulkan-backend.md): on Vulkan the world stops at the
+	// depth prepass — the ambient shader passes that follow depth-test EQUAL
+	// against it. Shadows + interactions (and the SSAO/normal prepasses that
+	// feed them) arrive with M4.
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		RB_RHI_LogOnce( "VK: world = depth prepass + ambient passes only; lights/shadows arrive at M4" );
+		backEnd.vLight = NULL;
+		return;
+	}
 
 	// normal G-buffer (Option B): render bump-mapped view normals for SSAO to sample
 	// instead of reconstructing from depth. Runs before the SSAO pass that consumes it.

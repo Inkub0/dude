@@ -100,6 +100,10 @@ public:
 	virtual void	EndPass() = 0;
 	virtual void	SetViewport( int x, int y, int w, int h ) = 0;
 	virtual void	SetScissor( int x, int y, int w, int h ) = 0;
+	// depth-range window (the weapon/model depth hacks): GL maps it to
+	// glDepthRange, Vulkan to the viewport's min/max depth. Reset to 0..1 by
+	// BeginFrame.
+	virtual void	SetDepthRange( float minDepth, float maxDepth ) {}
 
 	// ---- resources (Chunk B+) ----
 	virtual BufferHandle	CreateBuffer( BufferUsage usage, int size, const void *data ) = 0;

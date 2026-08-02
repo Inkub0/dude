@@ -390,6 +390,7 @@ public:
 	}
 	virtual void SetViewport( int x, int y, int w, int h )	{ qglViewport( x, y, w, h ); }
 	virtual void SetScissor( int x, int y, int w, int h )	{ qglScissor( x, y, w, h ); }
+	virtual void SetDepthRange( float minDepth, float maxDepth )	{ qglDepthRange( minDepth, maxDepth ); }
 
 	virtual void SetFrameTarget( RenderTargetHandle rt ) {
 		if ( rt >= (RenderTargetHandle)MAX_RENDER_TARGETS

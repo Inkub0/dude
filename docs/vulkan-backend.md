@@ -196,13 +196,29 @@ Original plan:
 - **Verify:** main menu, console, PDA/GUI overlays fully rendered on Vulkan — the same
   eyeball-vs-legacy bar Chunk C used on GL3.
 
-### M3 — Depth prepass
-- World traversal already reaches the backend through `RB_RHI_DrawWorld`; bring up the
-  zfill path: `zfill.vert/.frag`, depth-only pipelines, alpha-tested prepass surfaces
-  (needs the diffuse bind from M2), portal/subview scissors, the MVP clip-space
-  pre-multiply from the Decisions section.
-- **Verify:** RenderDoc depth-buffer capture matches an opengl3 capture of the same
-  scene (Mars City start).
+### M3 — Depth prepass  **[BUILT 2026-08-02 — pending the user's in-game look]**
+- **[done]** `RB_RHI_DrawWorld` runs under Vulkan up to the depth prepass and then
+  returns (lights/shadows/SSAO/normal-prepass are the M4 slice); the ambient shader
+  passes that follow depth-test `EQUAL` against the real prepass. `RB_RHI_BindUnit`
+  gained the VK handle route (`rhiVkUnits[]` + `RB_RHI_VkTextures`); zfill's
+  alpha-tested and solid draws carry their textures through `DrawArgs`.
+- **[done]** `SetDepthRange` joined the RHI (GL: `glDepthRange`, VK: viewport
+  min/max depth) — the weapon/model depth hacks route through it on RHI backends.
+- **[done]** third render-pass variant `passClearDS` (color LOAD + depth/stencil
+  CLEAR): the world-view begin clears ds only and must keep the frame's color —
+  the clear-everything variant would have wiped the 2D layer under it.
+- **[done]** `shaderClipDistance` device feature enabled (zfill.vert always writes
+  `gl_ClipDistance[0]`; zero plane when unused, no enable needed on VK).
+- **[done]** M5/M6/M7 paths gated under VK: soft particles (spuriously armed —
+  the VK GenerateImage path records upload sizes, making `_currentDepth` look
+  captured; also its program lookup was a direct `GL3_FindProgram`, now
+  backend-neutral), fog/blend lights, `_currentRender` copy, film-grain/AA tail,
+  debug tools (`RB_RenderDebugTools` does GL state setup before any cvar check).
+- **Verified headless** (r_vkDumpNextFrame): Mars City runs on Vulkan (1100+
+  frames, validation clean); the intro Traffic Monitoring GUI renders
+  pixel-perfect; the hangar world view shows correctly-occluded emissive
+  fixtures over a dark world — `EQUAL`-tested ambient stages surviving is
+  direct evidence the prepass depth is right. GL3 map regression clean.
 
 ### M4 — Stencil shadows + interactions (the big one)
 - Complete image ownership for the interaction inputs: normal/specular/diffuse stages,
