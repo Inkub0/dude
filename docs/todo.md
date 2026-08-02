@@ -56,12 +56,14 @@ Design decisions taken:
 | shadow size-scale | on* | on* | on | on | on | on |
 | size-scale pivot radius | 380* | 380* | 380 | 380 | 340 | 340 |
 | emissive light cap | — | — | 16 | 24 | 32 | 48 |
-| film grain / chroma | off | off | 0.04 / 0.2 | 0.04 / 0.2 | 0.04 / 0.2 | 0.04 / 0.2 |
+| film grain / chroma | off | 0.05 / off | 0.05 / 0.2 | 0.05 / 0.2 | 0.05 / 0.2 | 0.05 / 0.2 |
+| film grain size | 1.5* | 1.5 | 1.5 | 1.5 | 1.5 | 1.5 |
+| post antialiasing | off | SMAA | SMAA | SMAA | SMAA | SMAA |
 | reflection scale | 1.0 | 1.0 | 0.7 | 0.7 | 0.7 | 0.7 |
 
 (Potato/Low carry the cheap Medium SSAO/shadow sub-params under the off toggles so a
-manual feature flip from those tiers stays affordable. `*` = inert under stencil shadows
-but carried for determinism. `†` = dormant while PBR supersedes the specular model on
+manual feature flip from those tiers stays affordable. `*` = inert on that tier (stencil
+shadows in place of maps / grain intensity 0) but carried for determinism. `†` = dormant while PBR supersedes the specular model on
 High and up; still applied for determinism. Sub-Ultra tiers carry SSR march resolution
 1.0 so a hand-enabled SSR runs at the full-res default.)
 

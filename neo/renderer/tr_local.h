@@ -864,6 +864,7 @@ extern idCVar r_gammaInShader;			// set gamma+brightness in shader instead of mo
 
 // DUDE non-vanilla post-process effects — GL3/Vulkan backends only, default off
 extern idCVar r_postFilmGrain;			// film grain intensity (0 = off)
+extern idCVar r_postFilmGrainSize;		// grain cell size in pixels (1 = per-pixel)
 extern idCVar r_postChromaticAberration;	// chromatic aberration strength (0 = off)
 extern idCVar r_rhiAA;					// post-resolve antialiasing (0 = off, 1 = FXAA)
 extern idCVar r_hdr;					// HDR float scene buffer (removes banding); opengl3/Vulkan only

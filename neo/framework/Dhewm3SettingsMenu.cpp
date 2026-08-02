@@ -1761,6 +1761,7 @@ static CVarOption enhancementOptions[] = {
 	// 8-bit backbuffer, then resolve back. Removes fog/gradient banding.
 	CVarOption( "r_hdr", "HDR Rendering", OT_BOOL ),
 	CVarOption( "r_postFilmGrain", "Film Grain", OT_FLOAT, 0.0f, 0.25f ),
+	CVarOption( "r_postFilmGrainSize", "Film Grain Size", OT_FLOAT, 1.0f, 4.0f ),
 	CVarOption( "r_postChromaticAberration", "Chromatic Aberration", OT_FLOAT, 0.0f, 0.5f ),
 
 	CVarOption( "Particles" ),
@@ -2316,6 +2317,13 @@ struct EnhancementPreset {
 	bool  pbr;                      // r_pbr
 	bool  ssr;                      // r_ssr
 	float ssrResScale;              // r_ssrResScale
+	// filmic grain cell size (appended, see note above). Carried as the 1.5
+	// default on every tier — inert on Potato, whose grain intensity is 0.
+	float filmGrainSize;            // r_postFilmGrainSize
+	// post-resolve antialiasing (appended, see note above): SMAA on every tier
+	// above Potato. FXAA (1) is reachable by hand only — its niche is the
+	// subpixel shimmer damping SMAA doesn't do, moot on the PBR tiers.
+	int   rhiAA;                    // r_rhiAA: 0 = off, 1 = FXAA, 2 = SMAA
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2324,13 +2332,13 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f   },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f   },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 3,   2,   false, true,  512,  512,  5,  16,   16,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f   },
-	{ "High",         true,  false, true,  true,  true,   0.75f, 3,   3,   true,  true,  1024, 1200, 6,  64,   24,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f   },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 6,   4,   true,  true,  2048, 2048, 8,  96,   32,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f   },
-	{ "Ultra Nightmare", true, true, true, true,  true,   1.0f, 7,   5,   true,  true,  2048, 2048, 12, 128,  48,   0.04f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0 },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2 },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 3,   2,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2 },
+	{ "High",         true,  false, true,  true,  true,   0.75f, 3,   3,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2 },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 6,   4,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f,   1.5f,   2 },
+	{ "Ultra Nightmare", true, true, true, true,  true,   1.0f, 7,   5,   true,  true,  2048, 2048, 12, 128,  48,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f, 1.5f,   2 },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2367,7 +2375,9 @@ static void ApplyEnhancementPreset( int idx )
 
 	r_emissiveLightLimit.SetInteger( p.emissiveLightLimit );
 	r_postFilmGrain.SetFloat( p.filmGrain );
+	r_postFilmGrainSize.SetFloat( p.filmGrainSize );
 	r_postChromaticAberration.SetFloat( p.chromaticAberration );
+	r_rhiAA.SetInteger( p.rhiAA );
 	r_gl3ReflectionScale.SetFloat( p.reflectionScale );
 	// specular look: model + scale + exponent, as a group. Potato stays vanilla LUT
 	// at scale 1.0; enhanced tiers use Blinn-Phong at a punchier scale/exponent.
@@ -2410,7 +2420,9 @@ static int DetectEnhancementPreset()
 			r_occlusionMaps.GetBool()          == p.occlusionMaps &&
 			r_emissiveLightLimit.GetInteger()  == p.emissiveLightLimit &&
 			idMath::Fabs( r_postFilmGrain.GetFloat() - p.filmGrain ) < 0.005f &&
+			idMath::Fabs( r_postFilmGrainSize.GetFloat() - p.filmGrainSize ) < 0.005f &&
 			idMath::Fabs( r_postChromaticAberration.GetFloat() - p.chromaticAberration ) < 0.005f &&
+			r_rhiAA.GetInteger()               == p.rhiAA &&
 			idMath::Fabs( r_gl3ReflectionScale.GetFloat() - p.reflectionScale ) < 0.01f &&
 			r_shading.GetInteger()             == p.shading &&
 			idMath::Fabs( r_specularScale.GetFloat() - p.specularScale ) < 0.01f &&
