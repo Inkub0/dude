@@ -290,6 +290,10 @@ idSessionLocal::SetPbMenuGuiVars
 void idSessionLocal::SetPbMenuGuiVars( void ) {
 }
 
+// DUDE: current enhancement-preset index (-1 = Custom), implemented in
+// Dhewm3SettingsMenu.cpp. Used to keep the quality selector's dude_preset cvar honest.
+extern int Com_DetectDudePreset( void );
+
 /*
 ===============
 idSessionLocal::SetMainMenuGuiVars
@@ -301,6 +305,15 @@ void idSessionLocal::SetMainMenuGuiVars( void ) {
 	guiMainMenu->SetStateString( "serverlist_selid_0", "-1" );
 
 	guiMainMenu->SetStateInt( "com_machineSpec", com_machineSpec.GetInteger() );
+	// DUDE: the quality selector (choiceDef) binds to the dude_preset cvar. When the live
+	// enhancement cvars match a known tier, refresh the cvar so the selector shows reality;
+	// if they've been hand-tweaked to Custom (-1) leave the last chosen tier in place.
+	{
+		int det = Com_DetectDudePreset();
+		if ( det >= 0 ) {
+			dude_preset.SetInteger( det );
+		}
+	}
 
 	// "inetGame" will hold a hand-typed inet address, which is not archived to a cvar
 	guiMainMenu->SetStateString( "inetGame", "" );
