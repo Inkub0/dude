@@ -407,7 +407,6 @@ private:
 	static idCVar	in_yawSpeed;
 	static idCVar	in_pitchSpeed;
 	static idCVar	in_angleSpeedKey;
-	static idCVar	in_freeLook;
 	static idCVar	in_allowAlwaysRunInSP; // DG: I don't care, I'm not a cop
 	static idCVar	in_alwaysRun;
 	static idCVar	in_toggleRun;
@@ -426,7 +425,6 @@ private:
 idCVar idUsercmdGenLocal::in_yawSpeed( "in_yawspeed", "140", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_FLOAT, "yaw change speed when holding down _left or _right button" );
 idCVar idUsercmdGenLocal::in_pitchSpeed( "in_pitchspeed", "140", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_FLOAT, "pitch change speed when holding down look _lookUp or _lookDown button" );
 idCVar idUsercmdGenLocal::in_angleSpeedKey( "in_anglespeedkey", "1.5", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_FLOAT, "angle change scale when holding down _speed button" );
-idCVar idUsercmdGenLocal::in_freeLook( "in_freeLook", "1", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "look around with mouse (reverse _mlook button)" );
 idCVar idUsercmdGenLocal::in_allowAlwaysRunInSP ( "in_allowAlwaysRunInSP", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "Allow always run and toggle run in Single Player as well - keep in mind you may run out of stamina!" );
 idCVar idUsercmdGenLocal::in_alwaysRun( "in_alwaysRun", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "always run (reverse _speed button) - only in MP, unless in_allowAlwaysRunInSP is set" );
 idCVar idUsercmdGenLocal::in_toggleRun( "in_toggleRun", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "pressing _speed button toggles run on/off - only in MP, unless in_allowAlwaysRunInSP is set" );
@@ -1000,10 +998,8 @@ void idUsercmdGenLocal::CmdButtons( void ) {
 		cmd.buttons |= BUTTON_SCORES;
 	}
 
-	// check the mouse look button
-	if ( ButtonState( UB_MLOOK ) ^ in_freeLook.GetInteger() ) {
-		cmd.buttons |= BUTTON_MLOOK;
-	}
+	// mouse look is always on (free look removed)
+	cmd.buttons |= BUTTON_MLOOK;
 }
 
 /*
@@ -1018,7 +1014,7 @@ void idUsercmdGenLocal::InitCurrent( void ) {
 	cmd.flags = flags;
 	cmd.impulse = impulse;
 	cmd.buttons |= ( in_alwaysRun.GetBool() && AlwaysRunAllowed() ) ? BUTTON_RUN : 0; // DG: always run in SP
-	cmd.buttons |= in_freeLook.GetBool() ? BUTTON_MLOOK : 0;
+	cmd.buttons |= BUTTON_MLOOK; // mouse look is always on (free look removed)
 }
 
 /*

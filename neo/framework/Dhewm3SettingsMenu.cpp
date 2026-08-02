@@ -1093,7 +1093,6 @@ static void InitBindingEntries()
 		{ "_lookUp",        "Look Up"    , "#str_02116" },
 		{ "_lookDown",      "Look Down"  , "#str_02117" },
 
-		{ "_mlook",         "Mouse Look" , "#str_02118", "only really relevant if in_freeLook = 0" },
 		{ "_impulse18",     "Center View", "#str_02119" },
 
 		{ nullptr,          "Attack"     , "#str_02112" },
