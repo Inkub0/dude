@@ -1702,11 +1702,11 @@ static CVarOption enhancementOptions[] = {
 	// toggling PBR back off restores the exact previous look.
 	CVarOption( "r_shading", []( idCVar& cvar ) {
 		ImGui::BeginDisabled( r_pbr.GetBool() );
-		int sel = idMath::ClampInt( 0, 2, cvar.GetInteger() );
-		if ( ImGui::Combo( "Specular Shading Model", &sel, "Vanilla (lookup table)\0Blinn-Phong\0Phong\0" ) ) {
+		int sel = idMath::ClampInt( 0, 1, cvar.GetInteger() );
+		if ( ImGui::Combo( "Specular Shading Model", &sel, "Vanilla (lookup table)\0Blinn-Phong\0" ) ) {
 			cvar.SetInteger( sel );
 		}
-		const char* descr = "Vanilla reproduces the classic Doom 3 specular highlight exactly.\nBlinn-Phong and Phong are analytic models tuned by Specular Exponent.";
+		const char* descr = "Vanilla reproduces the classic Doom 3 specular highlight exactly.\nBlinn-Phong is an analytic model tuned by Specular Exponent.";
 		AddCVarOptionTooltips( cvar, descr );
 		ImGui::EndDisabled();
 	} ),

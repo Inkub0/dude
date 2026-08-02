@@ -179,10 +179,12 @@ validated against (RenderDoc side-by-side, Phase 5).
 - Soft particles (`r_useSoftParticles`) — GL3-gated, removed from the legacy path.
 - Film grain (`r_postFilmGrain`) + chromatic aberration (`r_postChromaticAberration`).
 - Gamma/brightness in shader (`r_gammaInShader`).
-- **Specular tuning** (`r_shading` 0 vanilla-LUT / 1 Blinn-Phong / 2 Phong,
+- **Specular tuning** (`r_shading` 0 vanilla-LUT / 1 Blinn-Phong,
   `r_specularScale`, `r_specularExp`) — new `u_specularParms` UBO member@736;
-  `interaction.vert`/`.frag` updated (Phong uses a tangent-space view-vector
-  varying). Defaults reproduce vanilla specular exactly. Legacy ARB2 untouched.
+  `interaction.vert`/`.frag` updated. Defaults reproduce vanilla specular
+  exactly. Legacy ARB2 untouched. (A classic-Phong mode 2 shipped initially but
+  was removed 2026-08-01 as redundant with Blinn-Phong; the tangent-space
+  view-vector varying it added survives for the PBR path.)
 
 **To implement on GL 3.3, ranked by value/effort:**
 1. **Specular tuning** — **DONE** (see above).
@@ -313,7 +315,7 @@ is a pure optimization — following fhDOOM's key lesson, the renderer must rend
 correctly with occluders absent ("maps without ocl file work just fine"). An offline
 dmap bake can be added later once the algorithm stabilizes. fhDOOM otherwise built
 this whole feature set on GL 3.3 (mixed per-light shadow-map/stencil, Poisson soft
-shadows, cascades) and also exposes `r_shading` (Blinn-Phong vs Phong) — a candidate
+shadows, cascades) and also exposes `r_shading` — a candidate
 improvements toggle.
 
 ### Phase 9 — Parallax occlusion mapping (experimental)
