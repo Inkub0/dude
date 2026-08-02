@@ -103,6 +103,7 @@ public:
 	virtual void	EndPass();
 	virtual void	SetViewport( int x, int y, int w, int h );
 	virtual void	SetScissor( int x, int y, int w, int h );
+	virtual void	SetDepthRange( float minDepth, float maxDepth );
 
 	// ---- resources ----
 	virtual BufferHandle	CreateBuffer( BufferUsage, int, const void * ) { return 0; }	// static VBOs: unused (CPU vertexCache); M3+
@@ -179,8 +180,9 @@ private:
 	VkImage						sceneDepth = VK_NULL_HANDLE;
 	VmaAllocation				sceneDepthAlloc = NULL;
 	VkImageView					sceneDepthView = VK_NULL_HANDLE;
-	VkRenderPass				passClear = VK_NULL_HANDLE;
-	VkRenderPass				passLoad = VK_NULL_HANDLE;
+	VkRenderPass				passClear = VK_NULL_HANDLE;	// clears color + depth/stencil
+	VkRenderPass				passLoad = VK_NULL_HANDLE;	// loads everything
+	VkRenderPass				passClearDS = VK_NULL_HANDLE;	// keeps color, clears depth/stencil (world-view begin)
 	VkFramebuffer				sceneFb = VK_NULL_HANDLE;
 	VkExtent2D					sceneExtent = {};
 	bool						sceneEverWritten = false;	// false until the first clear pass after (re)create
@@ -283,6 +285,8 @@ private:
 	PipelineDesc				currentDesc = { 0, 0, VL_DRAWVERT, 0 };
 	VkPipeline					boundPipeline = VK_NULL_HANDLE;
 	bool						dynStateDirty = true;	// (re)emit viewport+scissor before next draw
+	float						depthRangeMin = 0.0f;	// SetDepthRange window (weapon/model depth hacks)
+	float						depthRangeMax = 1.0f;
 	int							vpRect[4] = { 0, 0, 0, 0 };	// GL-convention viewport (origin bottom-left)
 	int							scRect[4] = { 0, 0, 0, 0 };
 
@@ -615,6 +619,13 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	haveFillModeNonSolid = supported.fillModeNonSolid == VK_TRUE;
 	enabled.samplerAnisotropy = haveAnisotropy ? VK_TRUE : VK_FALSE;
 	enabled.fillModeNonSolid = haveFillModeNonSolid ? VK_TRUE : VK_FALSE;
+	// zfill.vert always writes gl_ClipDistance[0] (subview near clip; zero
+	// plane when unused) — universal on desktop
+	if ( supported.shaderClipDistance ) {
+		enabled.shaderClipDistance = VK_TRUE;
+	} else {
+		common->Warning( "VK: device lacks shaderClipDistance - the depth prepass shader may fail" );
+	}
 
 	VkDeviceCreateInfo dci = {};
 	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -902,9 +913,11 @@ bool VulkanBackend::CreateSceneTargets() {
 		return false;
 	}
 
-	// render passes: clear + load variants, color ends TRANSFER_SRC for the blit
-	for ( int variant = 0; variant < 2; variant++ ) {
+	// render passes: clear-all / load-all / clear-DS-keep-color variants,
+	// color always ends TRANSFER_SRC for the present blit
+	for ( int variant = 0; variant < 3; variant++ ) {
 		const bool isClear = ( variant == 0 );
+		const bool clearDS = ( variant == 2 );
 
 		VkAttachmentDescription atts[2] = {};
 		atts[0].format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -916,13 +929,14 @@ bool VulkanBackend::CreateSceneTargets() {
 		atts[0].initialLayout = isClear ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 		atts[0].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
+		const bool dsClears = isClear || clearDS;
 		atts[1].format = sceneDepthFormat;
 		atts[1].samples = VK_SAMPLE_COUNT_1_BIT;
-		atts[1].loadOp = isClear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+		atts[1].loadOp = dsClears ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 		atts[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		atts[1].stencilLoadOp = isClear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+		atts[1].stencilLoadOp = dsClears ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 		atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-		atts[1].initialLayout = isClear ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		atts[1].initialLayout = dsClears ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 		atts[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 		VkAttachmentReference colorRef = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
@@ -959,7 +973,7 @@ bool VulkanBackend::CreateSceneTargets() {
 		rpi.dependencyCount = 2;
 		rpi.pDependencies = deps;
 
-		VkRenderPass *dst = isClear ? &passClear : &passLoad;
+		VkRenderPass *dst = isClear ? &passClear : ( clearDS ? &passClearDS : &passLoad );
 		if ( !vkCheck( vkCreateRenderPass( device, &rpi, NULL, dst ), "vkCreateRenderPass" ) ) {
 			return false;
 		}
@@ -994,6 +1008,7 @@ void VulkanBackend::DestroySceneTargets() {
 	if ( sceneFb )         { vkDestroyFramebuffer( device, sceneFb, NULL ); sceneFb = VK_NULL_HANDLE; }
 	if ( passClear )       { vkDestroyRenderPass( device, passClear, NULL ); passClear = VK_NULL_HANDLE; }
 	if ( passLoad )        { vkDestroyRenderPass( device, passLoad, NULL ); passLoad = VK_NULL_HANDLE; }
+	if ( passClearDS )     { vkDestroyRenderPass( device, passClearDS, NULL ); passClearDS = VK_NULL_HANDLE; }
 	if ( sceneColorView )  { vkDestroyImageView( device, sceneColorView, NULL ); sceneColorView = VK_NULL_HANDLE; }
 	if ( sceneDepthView )  { vkDestroyImageView( device, sceneDepthView, NULL ); sceneDepthView = VK_NULL_HANDLE; }
 	if ( sceneColor )      { vmaDestroyImage( vma, sceneColor, sceneColorAlloc ); sceneColor = VK_NULL_HANDLE; sceneColorAlloc = NULL; }
@@ -1268,6 +1283,8 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	}
 	boundPipeline = VK_NULL_HANDLE;
 	dynStateDirty = true;
+	depthRangeMin = 0.0f;
+	depthRangeMax = 1.0f;
 	vpRect[0] = 0; vpRect[1] = 0; vpRect[2] = (int)swapExtent.width;  vpRect[3] = (int)swapExtent.height;
 	scRect[0] = 0; scRect[1] = 0; scRect[2] = (int)swapExtent.width;  scRect[3] = (int)swapExtent.height;
 
@@ -1290,7 +1307,10 @@ void VulkanBackend::BeginPass( const ClearArgs *clear ) {
 	if ( !frameOpen || skipFrame || insideScenePass ) {
 		return;
 	}
-	const bool doClear = ( clear != NULL ) || !sceneEverWritten;
+	// pick the pass variant by which channels the caller wants cleared: a
+	// depth/stencil-only clear (world-view begin) must keep the frame's color
+	const bool wantColorClear = ( clear != NULL && clear->color ) || !sceneEverWritten;
+	const bool wantDsClear = ( clear != NULL && ( clear->depth || clear->stencil ) ) || !sceneEverWritten;
 
 	VkClearValue cv[2] = {};
 	if ( clear != NULL && clear->color ) {
@@ -1304,7 +1324,7 @@ void VulkanBackend::BeginPass( const ClearArgs *clear ) {
 
 	VkRenderPassBeginInfo rbi = {};
 	rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	rbi.renderPass = doClear ? passClear : passLoad;
+	rbi.renderPass = wantColorClear ? passClear : ( wantDsClear ? passClearDS : passLoad );
 	rbi.framebuffer = sceneFb;
 	rbi.renderArea.extent = sceneExtent;
 	rbi.clearValueCount = 2;
@@ -2301,6 +2321,12 @@ void VulkanBackend::SetScissor( int x, int y, int w, int h ) {
 	dynStateDirty = true;
 }
 
+void VulkanBackend::SetDepthRange( float minDepth, float maxDepth ) {
+	depthRangeMin = minDepth;
+	depthRangeMax = maxDepth;
+	dynStateDirty = true;
+}
+
 /*
 ====================
 VulkanBackend::BindPipeline
@@ -2344,8 +2370,8 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 		v.y = fbH - (float)vpRect[1];
 		v.width = (float)vpRect[2];
 		v.height = -(float)vpRect[3];
-		v.minDepth = 0.0f;
-		v.maxDepth = 1.0f;
+		v.minDepth = depthRangeMin;
+		v.maxDepth = depthRangeMax;
 		vkCmdSetViewport( cb, 0, 1, &v );
 
 		VkRect2D sc = {};

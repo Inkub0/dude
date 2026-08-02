@@ -32,6 +32,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/ImmediateMode.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/rhi/RHI.h"		// DUDE: depth hacks route through SetDepthRange
 
 /*
 
@@ -194,14 +195,14 @@ RB_EnterWeaponDepthHack
 ===============
 */
 void RB_EnterWeaponDepthHack() {
-	qglDepthRange( 0, 0.5 );
-
-	// DUDE: on core profiles the projection tweak is applied by the RHI
-	// backend when it builds the MVP (RB_RHI_SpaceMvp); only the depth
-	// range call above is fixed-function-free
+	// DUDE: on the RHI backends the projection tweak is applied when the MVP
+	// is built (RB_RHI_SpaceMvp); the depth-range window goes through the RHI
+	// (GL: glDepthRange, Vulkan: viewport min/max depth)
 	if ( glConfig.rhiBackend ) {
+		rhi::GetRHI()->SetDepthRange( 0.0f, 0.5f );
 		return;
 	}
+	qglDepthRange( 0, 0.5 );
 
 	float	matrix[16];
 
@@ -220,11 +221,11 @@ RB_EnterModelDepthHack
 ===============
 */
 void RB_EnterModelDepthHack( float depth ) {
-	qglDepthRange( 0.0f, 1.0f );
-
 	if ( glConfig.rhiBackend ) {
-		return;		// see RB_EnterWeaponDepthHack
+		rhi::GetRHI()->SetDepthRange( 0.0f, 1.0f );		// see RB_EnterWeaponDepthHack
+		return;
 	}
+	qglDepthRange( 0.0f, 1.0f );
 
 	float	matrix[16];
 
@@ -243,11 +244,11 @@ RB_LeaveDepthHack
 ===============
 */
 void RB_LeaveDepthHack() {
-	qglDepthRange( 0, 1 );
-
 	if ( glConfig.rhiBackend ) {
-		return;		// see RB_EnterWeaponDepthHack
+		rhi::GetRHI()->SetDepthRange( 0.0f, 1.0f );		// see RB_EnterWeaponDepthHack
+		return;
 	}
+	qglDepthRange( 0, 1 );
 
 	qglMatrixMode(GL_PROJECTION);
 	qglLoadMatrixf( backEnd.viewDef->projectionMatrix );
