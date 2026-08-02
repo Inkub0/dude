@@ -161,7 +161,27 @@ backends bit-identical. Order rehearsed by the GL3 bring-up (Chunks A–G).
   unchanged. **Pending:** the user's eyeball check of the clear color
   (`r_clear 1` flicker) + live resize.
 
-### M2 — Rings, pipelines, first textures: 2D GUI/console/menu
+### M2 — Rings, pipelines, first textures: 2D GUI/console/menu  **[BUILT 2026-08-02 — pending the user's visual check]**
+
+**As-built notes:** per-slot host-visible VMA rings (GL3 sizes ×2 slots); SPIR-V
+module cache (`shaders/spv` VFS + `DUDE_SHADER_SPV_DIR` dev fallback); pipelines
+keyed (GLS bits, shader, layout, cull) with the GL3 `ApplyState` decode; set 0 =
+per-slot dynamic-UBO descriptor (range 2048 covers ArbParams' 1536), set 1 =
+per-draw 9-sampler set from a per-frame pool with a 1×1 white dummy in empty
+slots; `idImage` bridge: `rhiHandle` + `GenerateImage`→`CreateTexture2D`
+(RGBA8 + CPU `R_MipMap` chain + sampler from filter/repeat), `Bind()` demand-loads
+only, executor passes handles via `DrawArgs::textures[0]`. Clip conventions as
+decided: z-remap in `RB_RHI_SpaceMvp`, negative-height viewport, GL-rect→VK-rect
+conversion; the Y-flip makes idTech4's CW winding equal VK's CLOCKWISE front, so
+the legacy cull mapping carries over unchanged. Deliberate M2 gaps: texgen stages
+skipped (need cube images, M3+), custom-ARB stages degrade to generic (**no
+runtime SPIR-V compiler** — transpiled materials need glslang/shaderc at runtime,
+planned with M5), cinematics show black (M5), precompressed .dds auto-skips via
+`textureCompressionAvailable=false` (BC formats M3), gamma-in-shader tail still
+GL-only (M5/M6). "Vertex attribute not consumed" pipeline-creation warnings are
+benign (shared vertex layout vs generic.vert) and left visible.
+
+Original plan:
 - Host-visible persistent-mapped vertex/index/uniform rings, per-slot partitioning,
   `StreamGeneration` bumps (`AllocVertices`/`AllocIndices`/`AllocUniforms`).
 - `LoadShader` → `.spv` modules; pipeline layout per the descriptor model; pipeline

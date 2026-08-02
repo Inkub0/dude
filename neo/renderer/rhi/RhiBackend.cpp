@@ -1018,6 +1018,18 @@ void RB_RHI_SpaceMvp( const viewDef_s *viewDef, const viewEntity_t *space, float
 	} else {
 		myGlMultMatrix( space->modelViewMatrix, viewDef->projectionMatrix, mvp );
 	}
+
+	// Vulkan clip conventions (docs/vulkan-backend.md, decided 2026-08-02):
+	// depth range remap z' = 0.5*(z + w) turns GL's -1..1 clip z into Vulkan's
+	// 0..1 at the single point every RHI MVP flows through; the Y flip is the
+	// backend's negative-height viewport, so the matrices stay comparable
+	// with GL3 captures. Column-major GL layout: row 2 = m[2,6,10,14],
+	// row 3 = m[3,7,11,15].
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		for ( int c = 0; c < 4; c++ ) {
+			mvp[c * 4 + 2] = 0.5f * ( mvp[c * 4 + 2] + mvp[c * 4 + 3] );
+		}
+	}
 }
 
 /*
@@ -1159,8 +1171,28 @@ RB_RHI_BindStageImage
 Binds the stage image (or current cinematic frame) on texture unit 0.
 =============
 */
-static void RB_RHI_BindStageImage( const shaderStage_t *pStage, const float *regs, const viewDef_t *viewDef ) {
+static rhi::ImageHandle RB_RHI_BindStageImage( const shaderStage_t *pStage, const float *regs, const viewDef_t *viewDef ) {
 	const textureStage_t *texture = &pStage->texture;
+
+	// Vulkan backend (Phase 4 M2): no GL binds — demand-load through Bind()
+	// (a no-op upload-trigger there) and hand the RHI image handle back for
+	// DrawArgs::textures[0]. Cinematic frame uploads arrive at M5; until then
+	// they show the legacy "no data" black.
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		if ( texture->cinematic ) {
+			globalImages->blackImage->Bind();
+			return globalImages->blackImage->rhiHandle;
+		}
+		if ( texture->image ) {
+			texture->image->Bind();
+			if ( texture->image->rhiHandle ) {
+				return texture->image->rhiHandle;
+			}
+			globalImages->defaultImage->Bind();
+			return globalImages->defaultImage->rhiHandle;
+		}
+		return 0;
+	}
 
 	rhi::gl3ActiveTexture( GL_TEXTURE0 );
 	backEnd.glState.currenttmu = 0;		// keep idImage::Bind's per-tmu cache honest
@@ -1168,7 +1200,7 @@ static void RB_RHI_BindStageImage( const shaderStage_t *pStage, const float *reg
 	if ( texture->cinematic ) {
 		if ( r_skipDynamicTextures.GetBool() ) {
 			globalImages->defaultImage->Bind();
-			return;
+			return 0;
 		}
 		cinData_t cin = texture->cinematic->ImageForTime( (int)( 1000 * ( viewDef->floatTime + viewDef->renderView.shaderParms[11] ) ) );
 		if ( cin.image ) {
@@ -1179,6 +1211,7 @@ static void RB_RHI_BindStageImage( const shaderStage_t *pStage, const float *reg
 	} else if ( texture->image ) {
 		texture->image->Bind();
 	}
+	return 0;
 }
 
 /*
@@ -1948,8 +1981,9 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 
 	const float *regs = surf->shaderRegisters;
 
-	// TODO(RHI): dynamic state; direct GL is fine for both current backends
-	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+	// TODO(RHI): dynamic state; direct GL is fine for the GL backends, the
+	// Vulkan pipeline grows a depth-bias key when decals need it (M3+)
+	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) && qglEnable != NULL ) {
 		qglEnable( GL_POLYGON_OFFSET_FILL );
 		qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
 	}
@@ -1992,6 +2026,14 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			continue;
 		}
 		if ( si.kind == rhi::SK_TEXGEN ) {
+			// Vulkan M2: texgen stages need cube-map images (and per-slot view
+			// types in the descriptor writer) that arrive with the world
+			// milestones — skip them for now instead of binding a mismatched
+			// dummy (validation error)
+			if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+				RB_RHI_LogOnce( "VK: texgen stages (skybox/reflection) skipped until cube images land (M3+)" );
+				continue;
+			}
 			// fixed-function texgen (skybox / cube reflection / portal sky)
 			RB_RHI_RenderTexgenStage( r, viewDef, surf, pStage, si, mvp, vb, vertOfs, ib, idxOfs );
 			continue;
@@ -2090,7 +2132,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		rhi::BufferHandle ub;
 		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
-		RB_RHI_BindStageImage( pStage, regs, viewDef );
+		rhi::ImageHandle stageImage = RB_RHI_BindStageImage( pStage, regs, viewDef );
 
 		// 2D views: legacy disables depth test entirely; equivalent here is
 		// depth-always + no depth writes
@@ -2114,6 +2156,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
+		da.textures[0] = stageImage;	// Vulkan path; 0 on GL3 (binds went via idImage)
 		r->Draw( da );
 
 		backEnd.pc.c_drawElements++;
@@ -2121,7 +2164,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		backEnd.pc.c_drawVertexes += tri->numVerts;
 	}
 
-	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) && qglDisable != NULL ) {
 		qglDisable( GL_POLYGON_OFFSET_FILL );
 	}
 	if ( surf->space->weaponDepthHack || ( surf->space->modelDepthHack != 0.0f && !( surf->dsFlags & DSF_SOFT_PARTICLE ) ) ) {
@@ -2268,19 +2311,19 @@ Backend-neutral: drives whichever rhi::RHI is active (GL3 today, Vulkan later).
 void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	rhi::RHI *r = rhi::GetRHI();
 
-	// Phase 4 M1 (docs/vulkan-backend.md): the Vulkan backend can clear and
-	// present, but its draw path (shaders, images, geometry) arrives at M2+.
-	// Until then run its frames as begin / clear / present only, so nothing
-	// touches idImage, qgl or the GL-only helper passes. RC_SET_BUFFER stays
-	// live — its clear is pure RHI calls and is exactly the M1 payload.
-	const bool vkClearOnly = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+	// Phase 4 M2 (docs/vulkan-backend.md): the Vulkan backend draws 2D views
+	// (menu/console/HUD/loading — worldless viewDefs) through the shared
+	// shader-pass path; 3D world views arrive with M3/M4 and are skipped so
+	// the frame stays a clear. The GL-only helper passes (HDR routing, gamma,
+	// capture, ImGui-on-GL) stay off until their milestones.
+	const bool vkMode = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
 
 	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
 
 	// route the whole frame into the RGBA16F scene buffer (r_hdr) before any clear
 	// or view command lands; a no-op that stays on the backbuffer when r_hdr is
 	// off or the frame is worldless (menu/GUI/cinematic — see RB_RHI_HdrBeginFrame)
-	if ( !vkClearOnly ) {
+	if ( !vkMode ) {
 		RB_RHI_HdrBeginFrame( r, cmds );
 	}
 
@@ -2288,11 +2331,13 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 		switch ( cmds->commandId ) {
 		case RC_NOP:
 			break;
-		case RC_DRAW_VIEW:
-			if ( !vkClearOnly ) {
-				RB_RHI_DrawView( r, ((const drawSurfsCommand_t *)cmds)->viewDef );
+		case RC_DRAW_VIEW: {
+			viewDef_t *vd = ((const drawSurfsCommand_t *)cmds)->viewDef;
+			if ( !vkMode || !vd->viewEntitys ) {
+				RB_RHI_DrawView( r, vd );
 			}
 			break;
+		}
 		case RC_SET_BUFFER: {
 			// single (back) buffer only; keep frame counter + clear semantics
 			// exactly matching RB_SetBuffer (r_clear defaults to 2 = black)
@@ -2324,15 +2369,16 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 			// explicit _currentRender/_currentDepth copies (e.g. mirror/xray
 			// setup); direct-GL idImage copy like the legacy RB_CopyRender
 			const copyRenderCommand_t *cmd = (const copyRenderCommand_t *)cmds;
-			if ( !vkClearOnly && cmd->image && !r_skipCopyTexture.GetBool() ) {
+			if ( !vkMode && cmd->image && !r_skipCopyTexture.GetBool() ) {
 				cmd->image->CopyFramebuffer( cmd->x, cmd->y, cmd->imageWidth, cmd->imageHeight, false );
 			}
 			break;
 		}
 		case RC_SWAP_BUFFERS:
-			if ( vkClearOnly ) {
+			if ( vkMode ) {
 				// present happens in the backend's EndFrame below; the GL-only
-				// resolve/gamma/capture/ImGui tail must not run
+				// resolve/gamma/capture/ImGui tail must not run (their VK
+				// equivalents arrive at M5/M6)
 				break;
 			}
 			// resolve the RGBA16F scene buffer back onto the backbuffer (r_hdr);

@@ -78,6 +78,20 @@ static ShaderHandle IR_ResolveCustomArb( const char *vpFile, const char *fpFile,
 	std::string vertGlsl, fragGlsl;
 	idStr err;
 
+	// DUDE Phase 4 M2: the Vulkan backend has no runtime GLSL→SPIR-V compiler
+	// (SPIR-V is built at build time), so transpiled custom ARB programs can't
+	// be materialized there yet — degrade to the generic stage (the caller's
+	// existing fallback). Runtime shader compilation is planned with the
+	// _currentRender effects (M5).
+	if ( GetActiveBackendType() == BT_VULKAN ) {
+		static bool warned = false;
+		if ( !warned ) {
+			warned = true;
+			common->Printf( "VK IR: custom ARB stages degrade to generic until runtime SPIR-V lands (M5)\n" );
+		}
+		return 0;
+	}
+
 	if ( !IR_TranspileSection( vpFile, "!!ARBvp", vertGlsl, err ) ) {
 		common->Warning( "GL3 IR: %s: vertex program %s: %s", materialName, vpFile, err.c_str() );
 		return 0;
@@ -99,7 +113,9 @@ static MaterialIR *IR_Build( const idMaterial *material ) {
 	MaterialIR *ir = new MaterialIR;
 	ir->material = material;
 
-	ShaderHandle generic = GL3_FindProgram( "generic" );
+	// backend-neutral (Phase 4 M2): LoadShader is GL3_FindProgram on the GL3
+	// backend and the SPIR-V module cache on Vulkan
+	ShaderHandle generic = GetRHI()->LoadShader( "generic" );
 
 	for ( int i = 0; i < material->GetNumStages(); i++ ) {
 		const shaderStage_t *stage = material->GetStage( i );
@@ -164,7 +180,7 @@ static MaterialIR *IR_Build( const idMaterial *material ) {
 			default:
 				break;	// TG_GLASSWARP: needs scratch-image plumbing, degrade below
 			}
-			ShaderHandle prg = prog ? GL3_FindProgram( prog ) : 0;
+			ShaderHandle prg = prog ? GetRHI()->LoadShader( prog ) : 0;
 			if ( prg ) {
 				s.kind = SK_TEXGEN;
 				s.program = prg;

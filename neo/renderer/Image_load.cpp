@@ -31,6 +31,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/tr_local.h"
 
 #include "renderer/Image.h"
+#include "renderer/rhi/RHI.h"		// DUDE Phase 4 M2: Vulkan-backend image uploads
 
 // DUDE: modern GL enums for the RGBA16F _currentRender capture (r_hdr). The legacy
 // renderer pulls SDL_opengl.h, which may predate GL3, so guard like rhi/GL3Local.h does.
@@ -603,9 +604,27 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 	// have filled in the parms.  We must have the values set, or
 	// an image match from a shader before OpenGL starts would miss
 	// the generated texture
-	// DUDE Phase 4 M1: same story under the Vulkan backend — no GL, qgl is
-	// NULL; images stay ungenerated until M2 moves ownership into the RHI
-	if ( !glConfig.isInitialized || qglGenTextures == NULL ) {
+	if ( !glConfig.isInitialized ) {
+		return;
+	}
+
+	// DUDE Phase 4 M2: under the Vulkan backend (no qgl) the upload goes
+	// through the RHI instead — RGBA8 + CPU mip chain + sampler derived from
+	// filter/repeat. The GL-side format shaping (compression, intensity
+	// formats, downsizing) is deliberately not replicated; pic is the
+	// full-resolution RGBA8 source here.
+	if ( qglGenTextures == NULL ) {
+		if ( glConfig.rhiBackend ) {
+			if ( rhiHandle ) {
+				rhi::GetRHI()->DestroyImage( rhiHandle );
+				rhiHandle = 0;
+			}
+			rhiHandle = rhi::GetRHI()->CreateTexture2D( width, height, pic,
+				(int)filter, (int)repeat, filter == TF_DEFAULT );
+			type = TT_2D;
+			uploadWidth = width;
+			uploadHeight = height;
+		}
 		return;
 	}
 
@@ -1725,8 +1744,9 @@ void	idImage::ActuallyLoadImage( bool checkForPrecompressed, bool fromBackEnd ) 
 
 	// this is the ONLY place generatorFunction will ever be called
 	if ( generatorFunction ) {
-		// DUDE Phase 4 M1: no GL under the Vulkan backend — see idImage::Reload
-		if ( qglGenTextures == NULL ) {
+		// DUDE Phase 4 M2: generators also run under the Vulkan backend (the
+		// RHI image path) — see idImage::Reload
+		if ( qglGenTextures == NULL && !glConfig.rhiBackend ) {
 			return;
 		}
 		generatorFunction( this );
@@ -1831,6 +1851,13 @@ void idImage::PurgeImage() {
 		texnum = TEXTURE_NOT_LOADED;
 	}
 
+	// DUDE Phase 4 M2: release the Vulkan-backend image, if any (no-op once
+	// the backend is down — it frees everything wholesale at Shutdown)
+	if ( rhiHandle ) {
+		rhi::GetRHI()->DestroyImage( rhiHandle );
+		rhiHandle = 0;
+	}
+
 	// clear all the current binding caches, so the next bind will do a real one
 	for ( int i = 0 ; i < MAX_MULTITEXTURE_UNITS ; i++ ) {
 		backEnd.glState.tmu[i].current2DMap = -1;
@@ -1847,10 +1874,16 @@ Automatically enables 2D mapping, cube mapping, or 3D texturing if needed
 ==============
 */
 void idImage::Bind() {
-	// DUDE Phase 4 M1: no GL under the Vulkan backend; binds arrive with the
-	// RHI image path (M2). The executor gate should keep us out of here —
-	// this is defense in depth.
+	// DUDE Phase 4 M2: under the Vulkan backend Bind() demand-loads only —
+	// the upload happens inside GenerateImage (RHI image path) and the
+	// executor passes rhiHandle through DrawArgs instead of binding here.
 	if ( qglBindTexture == NULL ) {
+		if ( glConfig.rhiBackend && rhiHandle == 0 && texnum == TEXTURE_NOT_LOADED && !partialImage ) {
+			// load the image on demand here, mirroring the GL path below
+			ActuallyLoadImage( true, true );
+		}
+		frameUsed = backEnd.frameCount;
+		bindCount++;
 		return;
 	}
 	// if this is an image that we are caching, move it to the front of the LRU chain

@@ -368,8 +368,9 @@ static void R_BorderClampImage( idImage *image ) {
 	image->GenerateImage( (byte *)data, BORDER_CLAMP_SIZE, BORDER_CLAMP_SIZE,
 		TF_LINEAR /* TF_NEAREST */, false, TR_CLAMP_TO_BORDER, TD_DEFAULT );
 
-	if ( !glConfig.isInitialized ) {
-		// can't call qglTexParameterfv yet
+	if ( !glConfig.isInitialized || qglTexParameterfv == NULL ) {
+		// can't call qglTexParameterfv yet (or ever, on the Vulkan backend —
+		// there the border color comes from the TR_CLAMP_TO_BORDER sampler)
 		return;
 	}
 	// explicit zero border
@@ -1041,10 +1042,10 @@ idImage::Reload
 void idImage::Reload( bool checkPrecompressed, bool force ) {
 	// always regenerate functional images
 	if ( generatorFunction ) {
-		// DUDE Phase 4 M1: several generators call raw qgl beyond
-		// GenerateImage (border clamp emulation etc.) — with no GL under the
-		// Vulkan backend nothing can be generated until the RHI image path (M2)
-		if ( qglGenTextures == NULL ) {
+		// DUDE Phase 4 M2: generators run under the Vulkan backend too —
+		// GenerateImage routes into the RHI image path there, and the few
+		// raw-qgl tails (border clamp) NULL-guard themselves
+		if ( qglGenTextures == NULL && !glConfig.rhiBackend ) {
 			return;
 		}
 		common->DPrintf( "regenerating %s.\n", imgName.c_str() );

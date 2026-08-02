@@ -107,6 +107,17 @@ public:
 	virtual void			DestroyBuffer( BufferHandle b ) = 0;
 	virtual ImageHandle		CreateImage( ImageFormat fmt, int w, int h, const void *pixels ) = 0;
 	virtual void			DestroyImage( ImageHandle i ) = 0;
+
+	// Phase 4 M2 image ownership: engine texture upload. pixels is RGBA8;
+	// textureFilter/textureRepeat carry the engine's textureFilter_t /
+	// textureRepeat_t values so the backend derives the sampler; allowMips
+	// builds a full CPU mip chain. Backends without an image path return 0
+	// (the GL3 backend keeps binding through idImage; the default below keeps
+	// it source-compatible).
+	virtual ImageHandle		CreateTexture2D( int w, int h, const void *pixels,
+	                                         int textureFilter, int textureRepeat,
+	                                         bool allowMips ) { return 0; }
+
 	virtual ShaderHandle	LoadShader( const char *name ) = 0;	// loads name.vert/.frag via VFS
 
 	// ---- offscreen render targets (Phase 3.5 shadow maps; Phase 11 post stack) ----
