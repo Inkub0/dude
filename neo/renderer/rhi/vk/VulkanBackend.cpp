@@ -104,6 +104,8 @@ public:
 	virtual void	SetViewport( int x, int y, int w, int h );
 	virtual void	SetScissor( int x, int y, int w, int h );
 	virtual void	SetDepthRange( float minDepth, float maxDepth );
+	virtual void	SetPolygonOffset( bool enable, float factor, float units );
+	virtual void	ClearStencilBuffer( int value );
 
 	// ---- resources ----
 	virtual BufferHandle	CreateBuffer( BufferUsage, int, const void * ) { return 0; }	// static VBOs: unused (CPU vertexCache); M3+
@@ -113,6 +115,8 @@ public:
 	virtual void			DestroyImage( ImageHandle h );
 	virtual ImageHandle		CreateTexture2D( int w, int h, const void *pixels,
 	                                         int textureFilter, int textureRepeat, bool allowMips );
+	virtual ImageHandle		CreateTextureCube( int size, const void * const pics[6],
+	                                           int textureFilter, bool allowMips );
 	virtual ShaderHandle	LoadShader( const char *name );
 
 	virtual RenderTargetHandle	CreateRenderTarget( ImageFormat, int, int ) { return 0; }
@@ -276,17 +280,34 @@ private:
 	VkDescriptorPool			framePool[FRAMES_IN_FLIGHT] = {};	// per-draw set-1s, reset per frame
 	bool						framePoolWarned = false;
 	ImageHandle					dummyImage = 0;			// 1x1 white for unused sampler slots
+	ImageHandle					dummyCube = 0;			// 1x1 white cube (samplerCube slots)
+
+	// M4: shaders statically use sampler2DShadow / samplerCubeShadow (unit 7/8
+	// of interaction.frag) even when the runtime path never samples them, so
+	// empty slots need depth-format views with compare-enabled samplers.
+	struct ShadowDummy {
+		VkImage			image = VK_NULL_HANDLE;
+		VmaAllocation	alloc = NULL;
+		VkImageView		view = VK_NULL_HANDLE;
+		VkSampler		sampler = VK_NULL_HANDLE;	// owned (compare sampler, not in the cache)
+	};
+	ShadowDummy					dummyShadow2D;
+	ShadowDummy					dummyShadowCube;
+	bool						CreateShadowDummy( ShadowDummy &d, bool cube );
+	void						DestroyShadowDummy( ShadowDummy &d );
 
 	// device features actually enabled (queried before device creation)
 	bool						haveAnisotropy = false;
 	bool						haveFillModeNonSolid = false;
 
 	std::unordered_map<unsigned long long, VkPipeline>	pipelineCache;
-	PipelineDesc				currentDesc = { 0, 0, VL_DRAWVERT, 0 };
+	PipelineDesc				currentDesc;
 	VkPipeline					boundPipeline = VK_NULL_HANDLE;
 	bool						dynStateDirty = true;	// (re)emit viewport+scissor before next draw
 	float						depthRangeMin = 0.0f;	// SetDepthRange window (weapon/model depth hacks)
 	float						depthRangeMax = 1.0f;
+	float						polyOfsFactor = 0.0f;	// SetPolygonOffset (shadow volumes); dynamic depth bias
+	float						polyOfsUnits = 0.0f;
 	int							vpRect[4] = { 0, 0, 0, 0 };	// GL-convention viewport (origin bottom-left)
 	int							scRect[4] = { 0, 0, 0, 0 };
 
@@ -1285,6 +1306,8 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	dynStateDirty = true;
 	depthRangeMin = 0.0f;
 	depthRangeMax = 1.0f;
+	polyOfsFactor = 0.0f;
+	polyOfsUnits = 0.0f;
 	vpRect[0] = 0; vpRect[1] = 0; vpRect[2] = (int)swapExtent.width;  vpRect[3] = (int)swapExtent.height;
 	scRect[0] = 0; scRect[1] = 0; scRect[2] = (int)swapExtent.width;  scRect[3] = (int)swapExtent.height;
 
@@ -1566,10 +1589,11 @@ bool VulkanBackend::CreateM2Resources() {
 			return false;
 		}
 	}
-	// set 1: combined image samplers, units 0-7 + the cube slot at 8
+	// set 1: combined image samplers, units 0-7, shadow cube at 8, SSAO at 9,
+	// occlusion map at 10 (interaction/ambientlight declare 9/10; dummies until M7)
 	{
-		VkDescriptorSetLayoutBinding b[9] = {};
-		for ( int i = 0; i < 9; i++ ) {
+		VkDescriptorSetLayoutBinding b[11] = {};
+		for ( int i = 0; i < 11; i++ ) {
 			b[i].binding = (uint32_t)i;
 			b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 			b[i].descriptorCount = 1;
@@ -1577,7 +1601,7 @@ bool VulkanBackend::CreateM2Resources() {
 		}
 		VkDescriptorSetLayoutCreateInfo li = {};
 		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-		li.bindingCount = 9;
+		li.bindingCount = 11;
 		li.pBindings = b;
 		if ( !vkCheck( vkCreateDescriptorSetLayout( device, &li, NULL, &setLayoutTex ), "vkCreateDescriptorSetLayout(tex)" ) ) {
 			return false;
@@ -1630,7 +1654,7 @@ bool VulkanBackend::CreateM2Resources() {
 	}
 	// per-frame texture-set pools (reset wholesale each BeginFrame)
 	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) {
-		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * 9 };
+		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * 11 };
 		VkDescriptorPoolCreateInfo pci = {};
 		pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		pci.maxSets = MAX_FRAME_SETS;
@@ -1667,6 +1691,17 @@ bool VulkanBackend::CreateM2Resources() {
 		dummyImage = CreateTexture2D( 1, 1, white, TF_NEAREST, TR_REPEAT, false );
 		if ( !dummyImage ) {
 			common->Warning( "VK: couldn't create the dummy texture" );
+			return false;
+		}
+		// M4: typed dummies for slots the interaction shaders statically use —
+		// a white cube (samplerCube fallback) and depth-compare dummies for the
+		// sampler2DShadow / samplerCubeShadow units (7/8) until M7 shadow maps
+		const void *whiteFaces[6] = { white, white, white, white, white, white };
+		dummyCube = CreateTextureCube( 1, whiteFaces, TF_NEAREST, false );
+		if ( !dummyCube
+		     || !CreateShadowDummy( dummyShadow2D, false )
+		     || !CreateShadowDummy( dummyShadowCube, true ) ) {
+			common->Warning( "VK: couldn't create the M4 dummy images" );
 			return false;
 		}
 	}
@@ -1706,6 +1741,9 @@ void VulkanBackend::DestroyM2Resources() {
 	}
 	imageTable.clear();
 	dummyImage = 0;
+	dummyCube = 0;
+	DestroyShadowDummy( dummyShadow2D );
+	DestroyShadowDummy( dummyShadowCube );
 
 	for ( size_t i = 0; i < samplerCache.size(); i++ ) {
 		vkDestroySampler( device, samplerCache[i].second, NULL );
@@ -2110,6 +2148,277 @@ void VulkanBackend::DestroyImage( ImageHandle h ) {
 
 /*
 ====================
+VulkanBackend::CreateTextureCube
+
+Six RGBA8 faces in GL_TEXTURE_CUBE_MAP_POSITIVE_X.. order, with a CPU mip
+chain per face (the same R_MipMap the GL path uses in GenerateCubeImage).
+Sampler is clamp-to-edge — the only mode that makes sense on a cube.
+====================
+*/
+ImageHandle VulkanBackend::CreateTextureCube( int size, const void * const pics[6],
+                                              int textureFilter, bool allowMips ) {
+	if ( device == VK_NULL_HANDLE || size <= 0 || pics == NULL || uploadCb == VK_NULL_HANDLE ) {
+		return 0;
+	}
+	for ( int f = 0; f < 6; f++ ) {
+		if ( pics[f] == NULL ) {
+			return 0;
+		}
+	}
+
+	// per-face level lists (level 0 borrows the caller's pixels)
+	struct level_t { const byte *data; int size; };
+	std::vector<level_t> levels[6];
+	std::vector<byte *> owned;
+	uint32_t numLevels = 1;
+	for ( int f = 0; f < 6; f++ ) {
+		levels[f].push_back( { (const byte *)pics[f], size } );
+		if ( allowMips ) {
+			const byte *src = (const byte *)pics[f];
+			int ls = size;
+			while ( ls > 1 ) {
+				byte *shrunk = R_MipMap( src, ls, ls, false );
+				ls >>= 1;
+				owned.push_back( shrunk );
+				levels[f].push_back( { shrunk, ls } );
+				src = shrunk;
+			}
+		}
+		numLevels = (uint32_t)levels[f].size();
+	}
+
+	VkDeviceSize faceBytes = 0;
+	for ( uint32_t l = 0; l < numLevels; l++ ) {
+		faceBytes += (VkDeviceSize)levels[0][l].size * levels[0][l].size * 4;
+	}
+	const VkDeviceSize total = faceBytes * 6;
+
+	// staging buffer: all levels of face 0, then face 1, ...
+	VkBuffer staging = VK_NULL_HANDLE;
+	VmaAllocation stagingAlloc = NULL;
+	{
+		VkBufferCreateInfo bci = {};
+		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bci.size = total;
+		bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+		VmaAllocationCreateInfo aci = {};
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		VmaAllocationInfo info = {};
+		if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &staging, &stagingAlloc, &info ), "vmaCreateBuffer(cube staging)" ) ) {
+			for ( size_t i = 0; i < owned.size(); i++ ) { R_StaticFree( owned[i] ); }
+			return 0;
+		}
+		byte *dst = (byte *)info.pMappedData;
+		for ( int f = 0; f < 6; f++ ) {
+			for ( uint32_t l = 0; l < numLevels; l++ ) {
+				const size_t bytes = (size_t)levels[f][l].size * levels[f][l].size * 4;
+				memcpy( dst, levels[f][l].data, bytes );
+				dst += bytes;
+			}
+		}
+	}
+	for ( size_t i = 0; i < owned.size(); i++ ) { R_StaticFree( owned[i] ); }
+
+	VkImage image = VK_NULL_HANDLE;
+	VmaAllocation alloc = NULL;
+	{
+		VkImageCreateInfo ici = {};
+		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		ici.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+		ici.imageType = VK_IMAGE_TYPE_2D;
+		ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+		ici.extent = { (uint32_t)size, (uint32_t)size, 1 };
+		ici.mipLevels = numLevels;
+		ici.arrayLayers = 6;
+		ici.samples = VK_SAMPLE_COUNT_1_BIT;
+		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+		ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		VmaAllocationCreateInfo aci = {};
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &image, &alloc, NULL ), "vmaCreateImage(cube)" ) ) {
+			vmaDestroyBuffer( vma, staging, stagingAlloc );
+			return 0;
+		}
+	}
+
+	{
+		vkResetCommandBuffer( uploadCb, 0 );
+		VkCommandBufferBeginInfo bi = {};
+		bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		vkBeginCommandBuffer( uploadCb, &bi );
+
+		VkImageMemoryBarrier toDst = {};
+		toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		toDst.srcAccessMask = 0;
+		toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toDst.image = image;
+		toDst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		toDst.subresourceRange.levelCount = numLevels;
+		toDst.subresourceRange.layerCount = 6;
+		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			0, 0, NULL, 0, NULL, 1, &toDst );
+
+		VkDeviceSize bufOfs = 0;
+		for ( int f = 0; f < 6; f++ ) {
+			for ( uint32_t l = 0; l < numLevels; l++ ) {
+				VkBufferImageCopy c = {};
+				c.bufferOffset = bufOfs;
+				c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+				c.imageSubresource.mipLevel = l;
+				c.imageSubresource.baseArrayLayer = (uint32_t)f;
+				c.imageSubresource.layerCount = 1;
+				c.imageExtent = { (uint32_t)levels[f][l].size, (uint32_t)levels[f][l].size, 1 };
+				vkCmdCopyBufferToImage( uploadCb, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c );
+				bufOfs += (VkDeviceSize)levels[f][l].size * levels[f][l].size * 4;
+			}
+		}
+
+		VkImageMemoryBarrier toRead = toDst;
+		toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			0, 0, NULL, 0, NULL, 1, &toRead );
+
+		vkEndCommandBuffer( uploadCb );
+		VkSubmitInfo si = {};
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &uploadCb;
+		vkResetFences( device, 1, &uploadFence );
+		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	}
+	vmaDestroyBuffer( vma, staging, stagingAlloc );
+
+	ImageRec rec;
+	rec.image = image;
+	rec.alloc = alloc;
+	{
+		VkImageViewCreateInfo vi = {};
+		vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		vi.image = image;
+		vi.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+		vi.format = VK_FORMAT_R8G8B8A8_UNORM;
+		vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		vi.subresourceRange.levelCount = numLevels;
+		vi.subresourceRange.layerCount = 6;
+		if ( !vkCheck( vkCreateImageView( device, &vi, NULL, &rec.view ), "vkCreateImageView(cube)" ) ) {
+			vmaDestroyImage( vma, image, alloc );
+			return 0;
+		}
+	}
+	rec.sampler = GetSampler( textureFilter, TR_CLAMP, numLevels > 1 );
+	rec.live = true;
+
+	for ( size_t i = 0; i < imageTable.size(); i++ ) {
+		if ( !imageTable[i].live ) {
+			imageTable[i] = rec;
+			return (ImageHandle)( i + 1 );
+		}
+	}
+	imageTable.push_back( rec );
+	return (ImageHandle)imageTable.size();
+}
+
+/*
+====================
+VulkanBackend::CreateShadowDummy / DestroyShadowDummy
+
+1x1 D32 image (single face or cube) in SHADER_READ_ONLY layout plus a
+compare-enabled sampler, so sampler2DShadow / samplerCubeShadow descriptor
+slots are always valid. Content is never actually sampled — the shaders gate
+the shadow lookups on u_shadowParms.x, which stays 0 until M7 shadow maps.
+====================
+*/
+bool VulkanBackend::CreateShadowDummy( ShadowDummy &d, bool cube ) {
+	VkImageCreateInfo ici = {};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_D32_SFLOAT;
+	ici.extent = { 1, 1, 1 };
+	ici.mipLevels = 1;
+	ici.arrayLayers = cube ? 6 : 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &d.image, &d.alloc, NULL ), "vmaCreateImage(shadow dummy)" ) ) {
+		return false;
+	}
+
+	// transition to SHADER_READ_ONLY (content undefined, never read)
+	vkResetCommandBuffer( uploadCb, 0 );
+	VkCommandBufferBeginInfo bi = {};
+	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer( uploadCb, &bi );
+	VkImageMemoryBarrier b = {};
+	b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	b.srcAccessMask = 0;
+	b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	b.image = d.image;
+	b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	b.subresourceRange.levelCount = 1;
+	b.subresourceRange.layerCount = cube ? 6 : 1;
+	vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		0, 0, NULL, 0, NULL, 1, &b );
+	vkEndCommandBuffer( uploadCb );
+	VkSubmitInfo si = {};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &uploadCb;
+	vkResetFences( device, 1, &uploadFence );
+	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+
+	VkImageViewCreateInfo vi = {};
+	vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vi.image = d.image;
+	vi.viewType = cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D;
+	vi.format = VK_FORMAT_D32_SFLOAT;
+	vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	vi.subresourceRange.levelCount = 1;
+	vi.subresourceRange.layerCount = cube ? 6 : 1;
+	if ( !vkCheck( vkCreateImageView( device, &vi, NULL, &d.view ), "vkCreateImageView(shadow dummy)" ) ) {
+		return false;
+	}
+
+	VkSamplerCreateInfo sci = {};
+	sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
+	sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	sci.compareEnable = VK_TRUE;
+	sci.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+	return vkCheck( vkCreateSampler( device, &sci, NULL, &d.sampler ), "vkCreateSampler(shadow dummy)" );
+}
+
+void VulkanBackend::DestroyShadowDummy( ShadowDummy &d ) {
+	if ( d.sampler ) { vkDestroySampler( device, d.sampler, NULL ); }
+	if ( d.view )    { vkDestroyImageView( device, d.view, NULL ); }
+	if ( d.image )   { vmaDestroyImage( vma, d.image, d.alloc ); }
+	d = ShadowDummy();
+}
+
+/*
+====================
 VulkanBackend::GetPipeline
 
 (stateBits, shader, vertexLayout, cullType) -> VkPipeline, created on first
@@ -2125,7 +2434,8 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	const unsigned long long key = (unsigned long long)bits
 		| ( (unsigned long long)( desc.shader & 0xffff ) << 32 )
 		| ( (unsigned long long)( desc.vertexLayout & 0xf ) << 48 )
-		| ( (unsigned long long)( desc.cullType & 0xf ) << 52 );
+		| ( (unsigned long long)( desc.cullType & 0xf ) << 52 )
+		| ( (unsigned long long)( desc.stencilState & 0xf ) << 56 );
 
 	auto it = pipelineCache.find( key );
 	if ( it != pipelineCache.end() ) {
@@ -2198,6 +2508,9 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	rs.cullMode = desc.cullType == CT_TWO_SIDED ? VK_CULL_MODE_NONE
 	            : ( desc.cullType == CT_BACK_SIDED ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_FRONT_BIT );
 	rs.lineWidth = 1.0f;
+	// depth bias always enabled + dynamic (SetPolygonOffset): (0, 0) — the
+	// BeginFrame default — is exactly "disabled"
+	rs.depthBiasEnable = VK_TRUE;
 
 	VkPipelineMultisampleStateCreateInfo ms = {};
 	ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -2209,7 +2522,63 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	ds.depthWriteEnable = ( bits & GLS_DEPTHMASK ) ? VK_FALSE : VK_TRUE;
 	ds.depthCompareOp = ( bits & GLS_DEPTHFUNC_EQUAL ) ? VK_COMPARE_OP_EQUAL
 	                  : ( ( bits & GLS_DEPTHFUNC_ALWAYS ) ? VK_COMPARE_OP_ALWAYS : VK_COMPARE_OP_LESS_OR_EQUAL );
-	// stencil state arrives with the shadow volumes (M4)
+
+	// M4 stencil: the compact StencilState enum bakes the handful of configs
+	// RB_RHI_StencilShadowPass / the light loop drive through qglStencil* on
+	// GL. "front" is GL front-facing; the CCW front-face below preserves GL's
+	// facing exactly, so the ops translate literally (mirror variants swap
+	// front/back like the firstFace/secondFace swap in the GL path).
+	if ( desc.stencilState != SS_DISABLED ) {
+		ds.stencilTestEnable = VK_TRUE;
+		VkStencilOpState front = {};
+		front.failOp = front.passOp = front.depthFailOp = VK_STENCIL_OP_KEEP;
+		front.compareOp = VK_COMPARE_OP_ALWAYS;
+		front.compareMask = 0xff;
+		front.writeMask = 0xff;
+		front.reference = 128;
+		VkStencilOpState back = front;
+
+		int vol = desc.stencilState;
+		bool mirror = false;
+		switch ( vol ) {
+		case SS_VOLUME_PRELOAD_MIRROR:	vol = SS_VOLUME_PRELOAD; mirror = true; break;
+		case SS_VOLUME_ZPASS_MIRROR:	vol = SS_VOLUME_ZPASS;   mirror = true; break;
+		case SS_VOLUME_ZFAIL_MIRROR:	vol = SS_VOLUME_ZFAIL;   mirror = true; break;
+		default: break;
+		}
+		switch ( vol ) {
+		case SS_ALWAYS:
+			break;			// ALWAYS + KEEP, ref 128 — the defaults above
+		case SS_SHADOW_TEST:
+			// qglStencilFunc( GL_GEQUAL, 128, 255 ): GL tests ref >= stored,
+			// Vulkan compareOp compares (ref & mask) OP (stored & mask)
+			front.compareOp = back.compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+			break;
+		case SS_VOLUME_PRELOAD:
+			// qglStencilOpSeparate( BACK, KEEP, DECR, DECR ) / ( FRONT, KEEP, INCR, INCR )
+			front.reference = back.reference = 1;
+			front.depthFailOp = front.passOp = VK_STENCIL_OP_INCREMENT_AND_WRAP;
+			back.depthFailOp = back.passOp = VK_STENCIL_OP_DECREMENT_AND_WRAP;
+			break;
+		case SS_VOLUME_ZPASS:
+			// qglStencilOpSeparate( BACK, KEEP, KEEP, INCR ) / ( FRONT, KEEP, KEEP, DECR )
+			front.reference = back.reference = 1;
+			front.passOp = VK_STENCIL_OP_DECREMENT_AND_WRAP;
+			back.passOp = VK_STENCIL_OP_INCREMENT_AND_WRAP;
+			break;
+		case SS_VOLUME_ZFAIL:
+			// qglStencilOpSeparate( BACK, KEEP, DECR, KEEP ) / ( FRONT, KEEP, INCR, KEEP )
+			front.reference = back.reference = 1;
+			front.depthFailOp = VK_STENCIL_OP_INCREMENT_AND_WRAP;
+			back.depthFailOp = VK_STENCIL_OP_DECREMENT_AND_WRAP;
+			break;
+		}
+		if ( mirror ) {
+			VkStencilOpState tmp = front; front = back; back = tmp;
+		}
+		ds.front = front;
+		ds.back = back;
+	}
 
 	auto mapBlend = []( unsigned int b, bool isSrc ) -> VkBlendFactor {
 		if ( isSrc ) {
@@ -2257,10 +2626,11 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	cb.attachmentCount = 1;
 	cb.pAttachments = &att;
 
-	const VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	const VkDynamicState dyn[3] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+	                                VK_DYNAMIC_STATE_DEPTH_BIAS };
 	VkPipelineDynamicStateCreateInfo dsi = {};
 	dsi.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-	dsi.dynamicStateCount = 2;
+	dsi.dynamicStateCount = 3;
 	dsi.pDynamicStates = dyn;
 
 	VkGraphicsPipelineCreateInfo pci = {};
@@ -2327,6 +2697,47 @@ void VulkanBackend::SetDepthRange( float minDepth, float maxDepth ) {
 	dynStateDirty = true;
 }
 
+// GL polygon offset -> dynamic depth bias: units maps to the constant factor
+// (minimum-resolvable-depth steps, same definition as GL), factor to the
+// slope factor. Every pipeline enables depth bias; (0, 0) is a no-op.
+void VulkanBackend::SetPolygonOffset( bool enable, float factor, float units ) {
+	polyOfsFactor = enable ? factor : 0.0f;
+	polyOfsUnits = enable ? units : 0.0f;
+	dynStateDirty = true;
+}
+
+// the per-light stencil clear (GL: scissored qglClear(GL_STENCIL_BUFFER_BIT))
+void VulkanBackend::ClearStencilBuffer( int value ) {
+	if ( !frameOpen || skipFrame ) {
+		return;
+	}
+	EnsureScenePass();
+	if ( !insideScenePass ) {
+		return;
+	}
+	VkClearAttachment att = {};
+	att.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+	att.clearValue.depthStencil.stencil = (uint32_t)value;
+	// GL's clear respects the scissor rect; replicate with the current scissor
+	// (converted from GL's bottom-left origin, clamped to the framebuffer)
+	VkClearRect rect = {};
+	int sx = scRect[0], sy = scRect[1], sw = scRect[2], sh = scRect[3];
+	if ( sw < 0 ) { sw = 0; }
+	if ( sh < 0 ) { sh = 0; }
+	int top = (int)sceneExtent.height - ( sy + sh );
+	if ( sx < 0 ) { sw += sx; sx = 0; }
+	if ( top < 0 ) { sh += top; top = 0; }
+	if ( sx + sw > (int)sceneExtent.width )  { sw = (int)sceneExtent.width - sx; }
+	if ( top + sh > (int)sceneExtent.height ) { sh = (int)sceneExtent.height - top; }
+	if ( sw <= 0 || sh <= 0 ) {
+		return;
+	}
+	rect.rect.offset = { sx, top };
+	rect.rect.extent = { (uint32_t)sw, (uint32_t)sh };
+	rect.layerCount = 1;
+	vkCmdClearAttachments( frames[frameIndex].cb, 1, &att, 1, &rect );
+}
+
 /*
 ====================
 VulkanBackend::BindPipeline
@@ -2386,6 +2797,8 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 		sc.offset = { sx, top };
 		sc.extent = { (uint32_t)sw, (uint32_t)sh };
 		vkCmdSetScissor( cb, 0, 1, &sc );
+
+		vkCmdSetDepthBias( cb, polyOfsUnits, 0.0f, polyOfsFactor );
 		dynStateDirty = false;
 	}
 
@@ -2414,20 +2827,39 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 			}
 			return;
 		}
-		VkDescriptorImageInfo infos[9];
-		VkWriteDescriptorSet writes[9];
+		// bindings 0-7 = units, 8 = shadow cube, 9 = SSAO, 10 = occlusion map.
+		// Empty slots take a dummy typed for what the shaders statically
+		// declare: unit 7 is interaction.frag's sampler2DShadow and 8 its
+		// samplerCubeShadow (depth-compare dummies until M7 shadow maps);
+		// everything else is sampler2D (white). Real handles always win.
+		VkDescriptorImageInfo infos[11];
+		VkWriteDescriptorSet writes[11];
 		const ImageRec &dummy = imageTable[dummyImage - 1];
-		for ( int i = 0; i < 9; i++ ) {
-			const ImageRec *rec = &dummy;
+		for ( int i = 0; i < 11; i++ ) {
+			VkSampler sampler = dummy.sampler;
+			VkImageView view = dummy.view;
 			if ( i < 8 && args.textures[i] >= 1 && args.textures[i] <= (ImageHandle)imageTable.size()
 			     && imageTable[args.textures[i] - 1].live ) {
-				rec = &imageTable[args.textures[i] - 1];
+				const ImageRec &rec = imageTable[args.textures[i] - 1];
+				sampler = rec.sampler;
+				view = rec.view;
+			} else if ( i == 7 ) {
+				sampler = dummyShadow2D.sampler;
+				view = dummyShadow2D.view;
+			} else if ( i == 8 ) {
+				if ( args.shadowCube >= 1 && args.shadowCube <= (ImageHandle)imageTable.size()
+				     && imageTable[args.shadowCube - 1].live ) {
+					const ImageRec &rec = imageTable[args.shadowCube - 1];
+					sampler = rec.sampler;
+					view = rec.view;
+				} else {
+					sampler = dummyShadowCube.sampler;
+					view = dummyShadowCube.view;
+				}
 			}
-			// slot 8 (shadow cube) keeps the 2D dummy until cube images land (M4);
-			// no M2 pipeline statically uses it
 			infos[i] = {};
-			infos[i].sampler = rec->sampler;
-			infos[i].imageView = rec->view;
+			infos[i].sampler = sampler;
+			infos[i].imageView = view;
 			infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			writes[i] = {};
 			writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2437,7 +2869,7 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 			writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 			writes[i].pImageInfo = &infos[i];
 		}
-		vkUpdateDescriptorSets( device, 9, writes, 0, NULL );
+		vkUpdateDescriptorSets( device, 11, writes, 0, NULL );
 		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout,
 			1, 1, &texSet, 0, NULL );
 	}

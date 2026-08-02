@@ -52,6 +52,8 @@ static struct {
 	rhi::ShaderHandle	interactionProg;
 	rhi::ShaderHandle	ambientProg;
 	int					depthFuncBits;		// GLS_DEPTHFUNC_EQUAL, LESS for translucents
+	int					stencilState;		// rhi::StencilState for interaction pipelines
+										// (Vulkan; GL keeps driving qglStencil* directly)
 
 	// shadow mapping (DUDE Phase 3.5). The current light either uses a shadow map
 	// (lightShadowMapped) or the stencil path. For a projected/spot light the lookup
@@ -237,6 +239,17 @@ static void RB_RHI_BindUnit( int unit, idImage *image ) {
 	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
 		if ( unit >= 0 && unit < 9 && image != NULL ) {
 			image->Bind();		// upload trigger only under Vulkan
+			if ( image->rhiHandle == 0 ) {
+				// a white fallback silently breaks shading (e.g. a white
+				// normalization cube map inverts the whole diffuse term), so
+				// say which image failed to bridge — once per image
+				static int warned = 0;
+				if ( warned < 16 ) {
+					warned++;
+					common->Warning( "VK: no RHI image for '%s' (unit %d) - using white",
+					                 image->imgName.c_str(), unit );
+				}
+			}
 			rhiVkUnits[unit] = image->rhiHandle ? image->rhiHandle
 			                                    : globalImages->whiteImage->rhiHandle;
 		}
@@ -749,6 +762,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	pd.shader = din->ambientLight ? ictx.ambientProg : ictx.interactionProg;
 	pd.vertexLayout = rhi::VL_DRAWVERT;
 	pd.cullType = RB_RHI_CullFor( ictx.viewDef, CT_FRONT_SIDED );
+	pd.stencilState = ictx.stencilState;
 	ictx.r->BindPipeline( pd );
 
 	rhi::DrawArgs da;
@@ -761,6 +775,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	da.uniformBuffer = ub;
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
+	RB_RHI_VkTextures( da );		// VK: units 0-6 recorded by the binds above
 	if ( ictx.lightShadowMapped && !din->ambientLight ) {
 		da.textures[7] = ictx.shadowImage;	// 2D depth map for u_shadowMap (unit 7)
 	} else if ( ictx.lightShadowCube && !din->ambientLight ) {
@@ -809,15 +824,21 @@ static void RB_RHI_StencilShadowPass( rhi::RHI *r, const viewDef_t *viewDef, con
 	}
 
 	if ( r_shadowPolygonFactor.GetFloat() || r_shadowPolygonOffset.GetFloat() ) {
-		qglPolygonOffset( r_shadowPolygonFactor.GetFloat(), -r_shadowPolygonOffset.GetFloat() );
-		qglEnable( GL_POLYGON_OFFSET_FILL );
+		if ( qglPolygonOffset != NULL ) {
+			qglPolygonOffset( r_shadowPolygonFactor.GetFloat(), -r_shadowPolygonOffset.GetFloat() );
+			qglEnable( GL_POLYGON_OFFSET_FILL );
+		}
+		r->SetPolygonOffset( true, r_shadowPolygonFactor.GetFloat(), -r_shadowPolygonOffset.GetFloat() );
 	}
 
-	qglStencilFunc( GL_ALWAYS, 1, 255 );
+	if ( qglStencilFunc != NULL ) {
+		qglStencilFunc( GL_ALWAYS, 1, 255 );
+	}
 
 	const GLenum firstFace = viewDef->isMirror ? GL_FRONT : GL_BACK;
 	const GLenum secondFace = viewDef->isMirror ? GL_BACK : GL_FRONT;
 	const bool zFail = r_useCarmacksReverse.GetBool();
+	const bool mirror = viewDef->isMirror;
 
 	rhi::PipelineDesc pd;
 	pd.stateBits = GLS_DEPTHMASK | GLS_COLORMASK | GLS_ALPHAMASK | GLS_DEPTHFUNC_LESS;
@@ -884,8 +905,6 @@ static void RB_RHI_StencilShadowPass( rhi::RHI *r, const viewDef_t *viewDef, con
 		int vertOfs, idxOfs;
 		RB_RHI_StreamShadow( r, tri, vb, vertOfs, ib, idxOfs );
 
-		r->BindPipeline( pd );
-
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
 		da.vertexBuffer = vb;
@@ -897,25 +916,43 @@ static void RB_RHI_StencilShadowPass( rhi::RHI *r, const viewDef_t *viewDef, con
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
 
+		// each stencil-op change is a pipeline on Vulkan (pd.stencilState) and
+		// free-floating qglStencilOpSeparate state on GL — both driven here
 		if ( !zFail ) {
 			// depth-pass with preload for volumes clipped by near/far planes
 			if ( !external ) {
-				qglStencilOpSeparate( firstFace, GL_KEEP, tr.stencilDecr, tr.stencilDecr );
-				qglStencilOpSeparate( secondFace, GL_KEEP, tr.stencilIncr, tr.stencilIncr );
+				if ( qglStencilOpSeparate != NULL ) {
+					qglStencilOpSeparate( firstFace, GL_KEEP, tr.stencilDecr, tr.stencilDecr );
+					qglStencilOpSeparate( secondFace, GL_KEEP, tr.stencilIncr, tr.stencilIncr );
+				}
+				pd.stencilState = mirror ? rhi::SS_VOLUME_PRELOAD_MIRROR : rhi::SS_VOLUME_PRELOAD;
+				r->BindPipeline( pd );
 				r->Draw( da );
 			}
-			qglStencilOpSeparate( firstFace, GL_KEEP, GL_KEEP, tr.stencilIncr );
-			qglStencilOpSeparate( secondFace, GL_KEEP, GL_KEEP, tr.stencilDecr );
+			if ( qglStencilOpSeparate != NULL ) {
+				qglStencilOpSeparate( firstFace, GL_KEEP, GL_KEEP, tr.stencilIncr );
+				qglStencilOpSeparate( secondFace, GL_KEEP, GL_KEEP, tr.stencilDecr );
+			}
+			pd.stencilState = mirror ? rhi::SS_VOLUME_ZPASS_MIRROR : rhi::SS_VOLUME_ZPASS;
+			r->BindPipeline( pd );
 			r->Draw( da );
 		} else {
 			// Carmack's Reverse (Z-fail) — patent expired 2019-10-13
 			if ( !external ) {
-				qglStencilOpSeparate( firstFace, GL_KEEP, tr.stencilDecr, GL_KEEP );
-				qglStencilOpSeparate( secondFace, GL_KEEP, tr.stencilIncr, GL_KEEP );
+				if ( qglStencilOpSeparate != NULL ) {
+					qglStencilOpSeparate( firstFace, GL_KEEP, tr.stencilDecr, GL_KEEP );
+					qglStencilOpSeparate( secondFace, GL_KEEP, tr.stencilIncr, GL_KEEP );
+				}
+				pd.stencilState = mirror ? rhi::SS_VOLUME_ZFAIL_MIRROR : rhi::SS_VOLUME_ZFAIL;
 			} else {
-				qglStencilOpSeparate( firstFace, GL_KEEP, GL_KEEP, tr.stencilIncr );
-				qglStencilOpSeparate( secondFace, GL_KEEP, GL_KEEP, tr.stencilDecr );
+				// external volumes render depth-pass even in z-fail mode
+				if ( qglStencilOpSeparate != NULL ) {
+					qglStencilOpSeparate( firstFace, GL_KEEP, GL_KEEP, tr.stencilIncr );
+					qglStencilOpSeparate( secondFace, GL_KEEP, GL_KEEP, tr.stencilDecr );
+				}
+				pd.stencilState = mirror ? rhi::SS_VOLUME_ZPASS_MIRROR : rhi::SS_VOLUME_ZPASS;
 			}
+			r->BindPipeline( pd );
 			r->Draw( da );
 		}
 
@@ -924,12 +961,17 @@ static void RB_RHI_StencilShadowPass( rhi::RHI *r, const viewDef_t *viewDef, con
 	}
 
 	if ( r_shadowPolygonFactor.GetFloat() || r_shadowPolygonOffset.GetFloat() ) {
-		qglDisable( GL_POLYGON_OFFSET_FILL );
+		if ( qglDisable != NULL ) {
+			qglDisable( GL_POLYGON_OFFSET_FILL );
+		}
+		r->SetPolygonOffset( false, 0.0f, 0.0f );
 	}
 
 	// interactions test against the unshadowed value
-	qglStencilFunc( GL_GEQUAL, 128, 255 );
-	qglStencilOp( GL_KEEP, GL_KEEP, GL_KEEP );
+	if ( qglStencilFunc != NULL ) {
+		qglStencilFunc( GL_GEQUAL, 128, 255 );
+		qglStencilOp( GL_KEEP, GL_KEEP, GL_KEEP );
+	}
 }
 
 /*
@@ -1029,9 +1071,13 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 			               backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
 		}
 
-		if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) && qglEnable != NULL ) {
-			qglEnable( GL_POLYGON_OFFSET_FILL );
-			qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+		if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+			if ( qglEnable != NULL ) {
+				qglEnable( GL_POLYGON_OFFSET_FILL );
+				qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+			}
+			r->SetPolygonOffset( true, r_offsetFactor.GetFloat(),
+			                     r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
 		}
 
 		// subviews down-modulate the color buffer, everything else draws black
@@ -1053,6 +1099,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		pd.shader = zfill;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = RB_RHI_CullFor( viewDef, CT_FRONT_SIDED );
+		pd.stencilState = rhi::SS_ALWAYS;	// stencil test on, always pass (GL parity)
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
@@ -1140,8 +1187,11 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 			backEnd.pc.c_drawElements++;
 		}
 
-		if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) && qglDisable != NULL ) {
-			qglDisable( GL_POLYGON_OFFSET_FILL );
+		if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+			if ( qglDisable != NULL ) {
+				qglDisable( GL_POLYGON_OFFSET_FILL );
+			}
+			r->SetPolygonOffset( false, 0.0f, 0.0f );
 		}
 		if ( surf->space->weaponDepthHack || surf->space->modelDepthHack != 0.0f ) {
 			RB_LeaveDepthHack();
@@ -3173,6 +3223,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	ictx.viewDef = viewDef;
 	ictx.interactionProg = r->LoadShader( "interaction" );
 	ictx.ambientProg = r->LoadShader( "ambientlight" );
+	ictx.stencilState = rhi::SS_ALWAYS;
 
 	// sets backEnd.lightScale/overBright, read by the reused
 	// RB_CreateSingleDrawInteractions
@@ -3187,26 +3238,29 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 
 	RB_RHI_FillDepthBuffer( r, viewDef );
 
-	// Phase 4 M3 (docs/vulkan-backend.md): on Vulkan the world stops at the
-	// depth prepass — the ambient shader passes that follow depth-test EQUAL
-	// against it. Shadows + interactions (and the SSAO/normal prepasses that
-	// feed them) arrive with M4.
-	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		RB_RHI_LogOnce( "VK: world = depth prepass + ambient passes only; lights/shadows arrive at M4" );
-		backEnd.vLight = NULL;
-		return;
+	// Phase 4 M4 (docs/vulkan-backend.md): the light loop now runs under
+	// Vulkan — stencil shadow volumes + interactions. The render-target
+	// enhancement passes (normal prepass, SSAO, SSR, shadow maps) need the
+	// VK render-target family and arrive together at M7.
+	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	if ( vkMode ) {
+		RB_RHI_LogOnce( "VK: world = depth + stencil shadows + interactions; shadow maps/SSAO/SSR arrive at M7" );
 	}
 
 	// normal G-buffer (Option B): render bump-mapped view normals for SSAO to sample
 	// instead of reconstructing from depth. Runs before the SSAO pass that consumes it.
 	rhiNormalReadyThisView = false;
-	RB_RHI_NormalPrepass( r, viewDef );
+	if ( !vkMode ) {
+		RB_RHI_NormalPrepass( r, viewDef );
+	}
 
 	// SSAO (GTAO) builds the AO buffer from the just-captured scene depth, before
 	// the ambient/interaction passes that consume it (docs/ssao-gtao.md). Each view
 	// starts with no AO; the pass sets rhiSsaoAppliedThisView when it produces one.
 	rhiSsaoAppliedThisView = false;
-	RB_RHI_SSAOPass( r, viewDef );
+	if ( !vkMode ) {
+		RB_RHI_SSAOPass( r, viewDef );
+	}
 
 	// Bind the AO buffer on unit 9 for the whole per-light loop: both the ambient and
 	// interaction shaders sample u_ssao there, and nothing in the loop touches unit 9
@@ -3302,7 +3356,12 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			    && vLight->lightShader->LightCastsShadows();
 			const bool isPoint = vLight->lightDef && vLight->lightDef->parms.pointLight;
 			const bool isParallel = vLight->lightDef && vLight->lightDef->parms.parallel;
-			const bool smEnabled = r_shadowMapping.GetBool();
+			// shadow maps need the VK render-target family (M7); until then every
+			// light takes the stencil path under Vulkan
+			const bool smEnabled = r_shadowMapping.GetBool() && !vkMode;
+			if ( vkMode && r_shadowMapping.GetBool() ) {
+				RB_RHI_LogOnce( "VK: r_shadowMapping deferred to M7 - lights use stencil shadows" );
+			}
 
 			// DUDE Phase 3.5: giant "sun replacement" lights (Phobos fakes its sky
 			// with omni lights up to radius 5000) look poor as a single shadow map —
@@ -3396,10 +3455,15 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 					               backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
 				}
 				if ( useStencil ) {
-					qglClear( GL_STENCIL_BUFFER_BIT );
+					if ( qglClear != NULL ) {
+						qglClear( GL_STENCIL_BUFFER_BIT );
+					} else {
+						// mid-pass, scissored stencil clear to the unshadowed value
+						r->ClearStencilBuffer( 1 << ( glConfig.stencilBits - 1 ) );
+					}
 				}
 			}
-			if ( !useStencil ) {
+			if ( !useStencil && qglStencilFunc != NULL ) {
 				// stencil always passes; visibility comes from the map (if any)
 				qglStencilFunc( GL_ALWAYS, 128, 255 );
 			}
@@ -3408,9 +3472,13 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			if ( !useStencil ) {
 				// shadow-mapped, or shadow mapping on but this light isn't mapped
 				// (out-of-budget point, parallel, failed pass): draw unshadowed
+				ictx.stencilState = rhi::SS_ALWAYS;
 				RB_RHI_CreateDrawInteractions( vLight->localInteractions );
 				RB_RHI_CreateDrawInteractions( vLight->globalInteractions );
 			} else {
+				// interactions depth-test EQUAL and stencil-test GEQUAL 128
+				// against the volumes (StencilShadowPass sets the GL state)
+				ictx.stencilState = rhi::SS_SHADOW_TEST;
 				RB_RHI_StencilShadowPass( r, viewDef, vLight->globalShadows, shadowProg );
 				RB_RHI_CreateDrawInteractions( vLight->localInteractions );
 				RB_RHI_StencilShadowPass( r, viewDef, vLight->localShadows, shadowProg );
@@ -3421,7 +3489,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			if ( r_skipTranslucent.GetBool() ) {
 				continue;
 			}
-			qglStencilFunc( GL_ALWAYS, 128, 255 );
+			if ( qglStencilFunc != NULL ) {
+				qglStencilFunc( GL_ALWAYS, 128, 255 );
+			}
+			ictx.stencilState = rhi::SS_ALWAYS;
 			ictx.depthFuncBits = GLS_DEPTHFUNC_LESS;
 			RB_RHI_CreateDrawInteractions( vLight->translucentInteractions );
 		}
@@ -3440,7 +3511,9 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	}
 
 	// shader passes run with stencil satisfied everywhere
-	qglStencilFunc( GL_ALWAYS, 128, 255 );
+	if ( qglStencilFunc != NULL ) {
+		qglStencilFunc( GL_ALWAYS, 128, 255 );
+	}
 }
 
 /*

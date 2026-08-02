@@ -777,10 +777,17 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 	// change the scissor if needed
 	if ( r_useScissor.GetBool() && !backEnd.currentScissor.Equals( surf->scissorRect ) ) {
 		backEnd.currentScissor = surf->scissorRect;
-		qglScissor( backEnd.viewDef->viewport.x1 + backEnd.currentScissor.x1,
-			backEnd.viewDef->viewport.y1 + backEnd.currentScissor.y1,
-			backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
-			backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
+		if ( glConfig.rhiBackend ) {	// DUDE: no qgl under Vulkan; GL3's SetScissor is the same glScissor
+			rhi::GetRHI()->SetScissor( backEnd.viewDef->viewport.x1 + backEnd.currentScissor.x1,
+				backEnd.viewDef->viewport.y1 + backEnd.currentScissor.y1,
+				backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
+				backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
+		} else {
+			qglScissor( backEnd.viewDef->viewport.x1 + backEnd.currentScissor.x1,
+				backEnd.viewDef->viewport.y1 + backEnd.currentScissor.y1,
+				backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
+				backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
+		}
 	}
 
 	// hack depth range if needed
