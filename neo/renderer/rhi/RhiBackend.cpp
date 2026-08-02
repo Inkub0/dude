@@ -40,6 +40,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 // DUDE post-process toggles (defined in RenderSystem_init.cpp), improvements
 // menu, default off — the fullscreen film-grain / chromatic-aberration pass
 extern idCVar r_postFilmGrain;
+extern idCVar r_postFilmGrainSize;
 extern idCVar r_postChromaticAberration;
 extern idCVar r_rhiAA;
 extern idCVar r_fxaaStrength;
@@ -460,6 +461,7 @@ static void RB_RHI_PostProcess( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[0] = grain;
 	parms.localParam0[1] = viewDef->floatTime;	// animated grain seed
 	parms.localParam0[2] = chroma;
+	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
 
 	// fullscreen NDC quad (identity mvp), st 0..1 with GL bottom-left origin
 	// matching the framebuffer copy
@@ -862,6 +864,7 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	parms.localParam0[1] = r_postFilmGrain.GetFloat();
 	parms.localParam0[2] = (float)( Sys_Milliseconds() & 0xffff ) * 0.001f;	// animated grain seed
 	parms.localParam0[3] = r_postChromaticAberration.GetFloat();
+	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
 	parms.windowCoord[2] = 0.5f;	// aberration center in uv
 	parms.windowCoord[3] = 0.5f;
 

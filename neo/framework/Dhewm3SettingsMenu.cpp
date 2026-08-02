@@ -1761,6 +1761,7 @@ static CVarOption enhancementOptions[] = {
 	// 8-bit backbuffer, then resolve back. Removes fog/gradient banding.
 	CVarOption( "r_hdr", "HDR Rendering", OT_BOOL ),
 	CVarOption( "r_postFilmGrain", "Film Grain", OT_FLOAT, 0.0f, 0.25f ),
+	CVarOption( "r_postFilmGrainSize", "Film Grain Size", OT_FLOAT, 1.0f, 4.0f ),
 	CVarOption( "r_postChromaticAberration", "Chromatic Aberration", OT_FLOAT, 0.0f, 0.5f ),
 
 	CVarOption( "Particles" ),

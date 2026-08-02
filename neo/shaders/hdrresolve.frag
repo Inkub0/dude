@@ -9,6 +9,7 @@
 // u_localParam0.y = film grain intensity; 0 = off
 // u_localParam0.z = grain time/seed (seconds)
 // u_localParam0.w = chromatic aberration strength; 0 = off
+// u_localParam1.x = grain cell size in pixels (1 = per-pixel, ~1.5-2 = filmic clumps)
 // u_windowCoord.zw = aberration center in uv (0.5, 0.5)
 
 #include "renderparms.glsl"
@@ -45,11 +46,17 @@ void main() {
 		color = texture( u_hdrScene, uv ).rgb;
 	}
 
-	// film grain: luminance-weighted noise, animated by time; darker areas grain slightly more
+	// film grain: triangular monochrome noise through a filmic beta-curve response —
+	// zero at pure black (no clip-lift greying of the void), peaking around 25%
+	// luminance, tapering off in highlights. Same curve as postprocess.frag; the HDR
+	// luma is clamped so >1 highlights sit at the (near-zero) white end of the curve.
 	if ( u_localParam0.y > 0.0 ) {
-		float grain = hash12( gl_FragCoord.xy + vec2( u_localParam0.z * 311.7, u_localParam0.z * 173.3 ) );
-		float lum = dot( color, vec3( 0.299, 0.587, 0.114 ) );
-		color += ( grain - 0.5 ) * u_localParam0.y * ( 1.0 - 0.5 * lum );
+		vec2 cell = floor( gl_FragCoord.xy / max( u_localParam1.x, 1.0 ) );
+		vec2 seed = vec2( u_localParam0.z * 311.7, u_localParam0.z * 173.3 );
+		float noise = 0.5 * ( hash12( cell + seed ) + hash12( cell + seed + vec2( 42.13, 59.71 ) ) ) - 0.5;
+		float l = clamp( dot( color, vec3( 0.299, 0.587, 0.114 ) ), 0.0, 1.0 );
+		float response = 2.18 * sqrt( l ) * pow( 1.0 - l, 1.5 );
+		color += noise * u_localParam0.y * response;
 	}
 
 	fragColor = vec4( color, 1.0 );
