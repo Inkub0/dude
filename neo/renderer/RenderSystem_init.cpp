@@ -279,10 +279,13 @@ idCVar r_postFilmGrain( "r_postFilmGrain", "0.04", CVAR_RENDERER | CVAR_ARCHIVE 
 idCVar r_postChromaticAberration( "r_postChromaticAberration", "0.2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "chromatic aberration strength (0 = off, ~0.1..0.35, max 0.5)", 0.0f, 0.5f );
 
 // DUDE post-resolve antialiasing over the finished 3D view (before 2D/GUI, HUD
-// unaffected). Separate from the hardware MSAA in r_multiSamples: FXAA also smooths
-// the specular/normal-map shimmer MSAA can't touch. GL3/Vulkan backends only.
-// 0 = off, 1 = FXAA. Higher values reserved for SMAA/TAA (docs/antialiasing.md).
-idCVar r_rhiAA( "r_rhiAA", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "post-resolve antialiasing on the opengl3/Vulkan backend (0 = off, 1 = FXAA)", 0, 1 );
+// unaffected). Separate from the hardware MSAA in r_multiSamples. GL3/Vulkan only.
+// 1 = FXAA: one cheap pass; its subpixel low-pass (r_fxaaStrength) also damps the
+//     specular/normal-map shimmer MSAA can't touch, at some texture softening.
+// 2 = SMAA 1x (vendored reference implementation, docs/antialiasing.md): sharper
+//     pattern-classified edge reconstruction that leaves texture interiors alone,
+//     but no shimmer damping (that's TAA's job; PBR's Toksvig covers it there).
+idCVar r_rhiAA( "r_rhiAA", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "post-resolve antialiasing on the opengl3/Vulkan backend (0 = off, 1 = FXAA, 2 = SMAA)", 0, 2 );
 // FXAA subpixel smoothing amount: 0 = edge-only (sharpest), 1 = max subpixel blur (most
 // shimmer reduction, softens textures). Only used when r_rhiAA selects FXAA.
 idCVar r_fxaaStrength( "r_fxaaStrength", "0.75", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "FXAA subpixel smoothing amount (0 = edge-only, 1 = strongest)", 0.0f, 1.0f );

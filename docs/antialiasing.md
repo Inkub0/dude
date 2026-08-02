@@ -1,20 +1,34 @@
-# Antialiasing — post-resolve AA (FXAA now, SMAA/TAA later)
+# Antialiasing — post-resolve AA (FXAA + SMAA now, TAA later)
 
 ## Status
 
 - **FXAA — IMPLEMENTED** as the first filter on the post-resolve rails. Cvar `r_rhiAA`
-  (0 = off, 1 = FXAA), default off, archived, opengl3/Vulkan only. Pass `RB_RHI_AAPass`
+  (0 = off, 1 = FXAA, 2 = SMAA), default off, archived, opengl3/Vulkan only. Pass `RB_RHI_AAPass`
   (`neo/renderer/rhi/RhiBackend.cpp`) runs over the finished 3D view before grain/chroma and
   2D/GUI; shaders `neo/shaders/fxaa.{vert,frag}` (registered in `gl3BootPrograms[]`). A strength knob
   `r_fxaaStrength` (0 = edge-only .. 1 = max subpixel smoothing, default 0.75) drives a subpixel
   low-pass term — the part that actually reduces specular/normal-map shimmer, at some texture
   softening. Both the AA combo and the strength slider sit at the top of the Enhancements tab, just
   under the Quality Preset. Self-contained (no external LUTs), glslang-validated + builds.
-- **SMAA 1x — PENDING.** Needs the AreaTex/SearchTex LUT assets; drops onto the same rails as a
-  higher `r_rhiAA` value (see below).
+- **SMAA 1x — IMPLEMENTED** (`r_rhiAA 2`). Vendored reference implementation
+  (`neo/shaders/smaa.glsl`, Jimenez et al. v2.8, compiled as GLSL 330 via `SMAA_GLSL_3`;
+  EOL backslashes in its ASCII-art header dotted out — GLSL 330 forbids line continuations).
+  The AreaTex/SearchTex constant textures ship as vendored byte arrays
+  (`neo/renderer/rhi/smaa/{AreaTex,SearchTex}.h`) uploaded once as idImages
+  (`_smaaArea` bilinear / `_smaaSearch` point, both clamped, uncompressed). Three passes
+  (`smaa_edges` → `smaa_weights` → `smaa_blend`, `SMAA_PRESET_HIGH`) over exact-size RGBA8
+  targets with the lost-context self-heal the SSR target uses. **LDR rail:** the POT
+  `_currentRender` snapshot is first de-POT'd (`smaa_copy`) into an exact-size scene target so
+  the border searches never read padding, then the chain resolves onto the backbuffer.
+  **HDR rail:** the chain samples the exact-size float scene buffer directly and resolves into
+  `rhiHdrAaRT` (the same float ping FXAA uses), keeping the AA→chroma→grain→dither order; edge
+  detection reads unclamped HDR luma, which merely over-detects on >1 highlights. Missing
+  shaders/targets fall back to FXAA. Kept alongside FXAA deliberately: FXAA's subpixel
+  low-pass is the only pre-TAA shimmer damper (moot on PBR tiers, where Toksvig covers it) —
+  re-evaluate dropping FXAA once TAA lands.
 - **TAA — PENDING.** Reuses the temporal-SSAO machinery; blocked on per-object motion vectors (below).
 
-The sections below are the original design sketch; SMAA/TAA remain the planned upgrades.
+The sections below are the original design sketch; TAA remains the planned upgrade.
 
 ---
 
