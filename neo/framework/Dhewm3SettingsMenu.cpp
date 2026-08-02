@@ -1722,7 +1722,7 @@ static CVarOption enhancementOptions[] = {
 	CVarOption( "r_specularExp", []( idCVar& cvar ) {
 		ImGui::BeginDisabled( r_pbr.GetBool() );
 		float f = cvar.GetFloat();
-		if ( ImGui::SliderFloat( "Specular Exponent (Blinn-Phong / Phong)", &f, 1.0f, 128.0f, "%.2f", 0 ) ) {
+		if ( ImGui::SliderFloat( "Specular Exponent (Blinn-Phong)", &f, 1.0f, 128.0f, "%.2f", 0 ) ) {
 			cvar.SetFloat( f );
 		}
 		AddCVarOptionTooltips( cvar );
