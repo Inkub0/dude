@@ -39,12 +39,24 @@ float shadowVisibility() {
 	if ( u_shadowParms.x == 0.0 ) {
 		return 1.0;
 	}
+	// Slope-scaled depth bias. A constant bias can't span the receiver's depth
+	// change across one shadow texel once the light grazes the surface (small
+	// angle between the light ray and the plane), so grazing floors/walls keep
+	// banded acne that only changes stripe *width* when the flat bias is retuned.
+	// Scale the bias by tan(theta) of the geometric surface-to-light angle: the
+	// tangent-space geometric normal is (0,0,1), so the normalized light vector's
+	// z is cos(theta) -- bump-map independent, keeping the added bias smooth.
+	// r_shadowMapSlopeBias (u_pbrParms2.y) is the strength; 0 restores the old
+	// constant bias. cos is floored so the tan term stays bounded at true grazing.
+	float cosT = clamp( normalize( var_TexLightVec ).z, 0.15, 1.0 );
+	float biasScale = 1.0 + u_pbrParms2.y * ( sqrt( 1.0 - cosT * cosT ) / cosT );
+	float depthBias = u_shadowParms.z * biasScale;
 	if ( u_shadowParms.x > 1.5 ) {
 		// point light: the caster stored linear radial distance/range as depth, so
 		// compare the same quantity here.
 		vec3 L = var_ShadowCubeVec;
 		float dist = length( L );
-		float ref = dist / max( u_shadowParms.w, 1.0 ) - u_shadowParms.z;
+		float ref = dist / max( u_shadowParms.w, 1.0 ) - depthBias;
 
 		int taps = int( u_specularParms.w + 0.5 );		// cube PCF tap count (r_shadowMapCubePcf)
 		if ( taps <= 1 ) {
@@ -85,7 +97,7 @@ float shadowVisibility() {
 	if ( uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 ) {
 		return 1.0;						// outside the shadow frustum -> lit
 	}
-	float ref = var_TexFalloff.x - u_shadowParms.z;	// falloff depth, biased for acne
+	float ref = var_TexFalloff.x - depthBias;	// falloff depth, slope-scaled bias for acne
 
 	const vec2 poisson[4] = vec2[4](
 		vec2( -0.94201624, -0.39906216 ), vec2(  0.94558609, -0.76890725 ),

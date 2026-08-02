@@ -78,5 +78,7 @@ UBO_BINDING(0) uniform RenderParams {
 	vec4 u_pbrParms2;            // DUDE PBR extras: x = metal diffuse-kill strength
 	                            // kd (= 1 - r_pbrMetalDiffuse). diffuse *= 1 - metal*kd,
 	                            // so kd < 1 keeps the asset's albedo colour on metals
-	                            // instead of the physical full kill. yzw spare.
+	                            // instead of the physical full kill. y = shadow
+	                            // slope-scaled bias strength (r_shadowMapSlopeBias;
+	                            // set in the shadow block, independent of r_pbr). zw spare.
 };

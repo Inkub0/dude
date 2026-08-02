@@ -599,6 +599,12 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		    ? r_shadowMapFlashlightBias.GetFloat()
 		    : ( worldReceiver ? r_shadowMapBias.GetFloat() : r_shadowMapModelBias.GetFloat() );
 
+		// Slope-scaled bias strength (interaction.frag): the shader grows the flat
+		// bias above by this * tan(surface-to-light angle) to cover the receiver's
+		// depth change across a shadow texel at grazing angles (banded acne). Rides
+		// the spare pbrParms2.y slot; 0 keeps the old constant bias.
+		parms.pbrParms2[1] = r_shadowMapSlopeBias.GetFloat();
+
 		if ( ictx.lightShadowMapped ) {
 			parms.shadowParms[0] = 1.0f;		// projected/spot: 2D map on unit 7
 			parms.shadowParms[1] = ( rhiShadowMapSize > 0 ) ? 1.0f / (float)rhiShadowMapSize : 0.0f;
