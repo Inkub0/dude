@@ -2490,18 +2490,19 @@ static void DrawEnhancementsMenu()
 	{
 		int aa = r_rhiAA.GetInteger();
 		ImGui::SetNextItemWidth( 220.0f );
-		if ( ImGui::Combo( "Post Antialiasing", &aa, "Off\0FXAA\0" ) ) {
+		if ( ImGui::Combo( "Post Antialiasing", &aa, "Off\0FXAA (fast, damps shimmer)\0SMAA (sharpest edges)\0" ) ) {
 			r_rhiAA.SetInteger( aa );
 		}
 		AddTooltip( "Post-process antialiasing over the finished 3D view, on top of (and independent "
-			"from) the hardware MSAA in Video Options. FXAA is a cheap edge smooth that also softens "
-			"the specular/normal-map shimmer MSAA can't touch, at the cost of a slight overall "
-			"softening. HUD and menus are never affected. Non-vanilla; opengl3 only. "
-			"(SMAA/TAA planned - see docs/antialiasing.md.)" );
+			"from) the hardware MSAA in Video Options. FXAA is one cheap pass whose subpixel smoothing "
+			"also damps the specular/normal-map shimmer MSAA can't touch, at a slight overall softening. "
+			"SMAA reconstructs edges much more precisely and leaves texture detail sharp, but does not "
+			"treat shimmer (with PBR materials on, Toksvig already covers most of it). HUD and menus are "
+			"never affected. Non-vanilla; opengl3 only. (TAA planned - see docs/antialiasing.md.)" );
 
-		// Strength drives the subpixel term (the part that actually chases shimmer): 0 =
+		// Strength drives FXAA's subpixel term (the part that actually chases shimmer): 0 =
 		// edge-only FXAA (sharpest), higher = more subpixel smoothing at some texture softening.
-		ImGui::BeginDisabled( r_rhiAA.GetInteger() <= 0 );
+		ImGui::BeginDisabled( r_rhiAA.GetInteger() != 1 );
 		float fxaaStrength = r_fxaaStrength.GetFloat();
 		ImGui::SetNextItemWidth( 220.0f );
 		if ( ImGui::SliderFloat( "FXAA Strength", &fxaaStrength, 0.0f, 1.0f, "%.2f" ) ) {

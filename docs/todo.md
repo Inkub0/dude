@@ -220,19 +220,19 @@ See **docs/pbr-materials.md** for the full design + as-built state. Summary:
 
 ---
 
-## Antialiasing (post-resolve SMAA now, TAA later)
+## Antialiasing (post-resolve FXAA + SMAA shipped, TAA later)
 
-See **docs/antialiasing.md** for the full sketch. Summary:
+See **docs/antialiasing.md** for status + design. Summary:
 
 - The built-in "Antialiasing" slider = `r_multiSamples` = backbuffer MSAA. It IS active in the RHI
   path (scene renders to backbuffer 0), but only fixes silhouette edges — never the specular/normal-map
   shimmer that is Doom 3's signature aliasing.
-- **Plan:** keep MSAA for legacy OpenGL; reuse the same `r_multiSamples` value as an AA-quality knob
-  for an RHI-native post-resolve pass.
-- **SMAA 1x first** — cheap, no temporal risk, no ghosting. 3 fullscreen passes (edges/weights/blend)
-  reusing `RB_RHI_DrawFullscreen` + `CreateRenderTarget`/`BeginTargetPass`, scene captured via
-  `CopyFramebuffer`, run before the 2D/GUI composite. Needs SMAA AreaTex/SearchTex LUTs + 3 new
-  shaders registered in `gl3BootPrograms[]`.
+- **FXAA — shipped** (`r_rhiAA 1` + `r_fxaaStrength`): one cheap pass whose subpixel low-pass also
+  damps shimmer, at some texture softening.
+- **SMAA 1x — shipped 2026-08-02** (`r_rhiAA 2`): vendored reference implementation, three passes on
+  both the LDR and HDR rails; sharper pattern-classified edges, texture interiors untouched, no
+  shimmer treatment (Toksvig covers that on PBR tiers). Kept alongside FXAA until TAA exists, then
+  re-evaluate dropping FXAA.
 - **TAA later** — the specular-shimmer fix. ~80% wired via the temporal-SSAO path (ping-pong history,
   camera reprojection, neighborhood clamp in `ssao_temporal.*`). Adds sub-pixel projection jitter +
   a color resolve pass. **Real prerequisite: per-object motion vectors** — SSAO reprojection is

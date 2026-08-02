@@ -78,6 +78,255 @@ static void RB_RHI_CopyCurrentRender( const viewDef_t *viewDef ) {
 		viewDef->viewport.y2 - viewDef->viewport.y1 + 1, true );
 }
 
+// ---------------------------------------------------------------------------
+// DUDE SMAA 1x (r_rhiAA 2, docs/antialiasing.md). Vendored reference
+// implementation (neo/shaders/smaa.glsl); the two constant lookup textures
+// ship as byte arrays and upload once as idImages.
+// ---------------------------------------------------------------------------
+#include "renderer/rhi/smaa/AreaTex.h"
+#include "renderer/rhi/smaa/SearchTex.h"
+
+static rhi::RenderTargetHandle	rhiSmaaEdgesRT = 0;		// RG edge mask (RGBA8)
+static rhi::RenderTargetHandle	rhiSmaaWeightsRT = 0;	// blending weights (RGBA8)
+static rhi::RenderTargetHandle	rhiSmaaSceneRT = 0;		// de-POT'd LDR scene copy (RGBA8)
+static int rhiSmaaW = 0, rhiSmaaH = 0;
+// The LUTs are raw GL textures, NOT idImages: AreaTex is 160x560 and
+// idImage::GenerateImage hard-errors on non-power-of-2 dimensions (vanilla
+// mipmap/scaling assumptions). NPOT is core GL 3.0+ and this path only runs
+// on the GL3 backend; the names ride DrawArgs::textures like render-target
+// images do. TODO(RHI): becomes rhi CreateImage on the Vulkan backend.
+static GLuint rhiSmaaAreaTex = 0;
+static GLuint rhiSmaaSearchTex = 0;
+
+// target creation and the raw target-image binds in the SMAA draws bypass the
+// idImage bind cache in backEnd.glState.tmu; invalidate it so the engine
+// re-issues its binds (same fix as RB_RHI_ForgetTexBinds in RhiWorld.cpp)
+static void RB_RHI_AAForgetTexBinds() {
+	for ( int i = 0; i < MAX_MULTITEXTURE_UNITS; i++ ) {
+		backEnd.glState.tmu[i].current2DMap = -1;
+		backEnd.glState.tmu[i].current3DMap = -1;
+		backEnd.glState.tmu[i].currentCubeMap = -1;
+	}
+}
+
+// uploads one LUT as an uncompressed, unmipped RGBA8 GL texture. Binds on the
+// current active unit, so callers must RB_RHI_AAForgetTexBinds() afterwards.
+static GLuint RB_RHI_SmaaUploadLut( const byte *src, int srcChannels, int w, int h, GLint filter ) {
+	byte *pic = (byte *)R_StaticAlloc( w * h * 4 );
+	for ( int i = 0; i < w * h; i++ ) {
+		pic[i*4+0] = src[i*srcChannels+0];
+		pic[i*4+1] = srcChannels > 1 ? src[i*srcChannels+1] : 0;
+		pic[i*4+2] = 0;
+		pic[i*4+3] = 255;
+	}
+	GLuint tex = 0;
+	qglGenTextures( 1, &tex );
+	qglBindTexture( GL_TEXTURE_2D, tex );
+	qglTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pic );
+	qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter );
+	qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter );
+	qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+	qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+	qglBindTexture( GL_TEXTURE_2D, 0 );
+	R_StaticFree( pic );
+	return tex;
+}
+
+// edges + weights targets (and the LDR scene copy when asked for), sized to the
+// view; self-heals after a lost context the same way the SSR target does
+static bool RB_RHI_EnsureSmaaTargets( rhi::RHI *r, int w, int h, bool needScene ) {
+	if ( rhiSmaaEdgesRT && r->GetRenderTargetImage( rhiSmaaEdgesRT ) == 0 ) {
+		rhiSmaaEdgesRT = rhiSmaaWeightsRT = rhiSmaaSceneRT = 0;	// lost context (vid_restart)
+		rhiSmaaW = rhiSmaaH = 0;
+		rhiSmaaAreaTex = rhiSmaaSearchTex = 0;	// the raw LUT names died with the context
+	}
+	if ( !rhiSmaaEdgesRT || rhiSmaaW != w || rhiSmaaH != h ) {
+		if ( rhiSmaaEdgesRT )   { r->DestroyRenderTarget( rhiSmaaEdgesRT );   rhiSmaaEdgesRT = 0; }
+		if ( rhiSmaaWeightsRT ) { r->DestroyRenderTarget( rhiSmaaWeightsRT ); rhiSmaaWeightsRT = 0; }
+		if ( rhiSmaaSceneRT )   { r->DestroyRenderTarget( rhiSmaaSceneRT );   rhiSmaaSceneRT = 0; }
+		rhiSmaaEdgesRT = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+		rhiSmaaWeightsRT = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+		RB_RHI_AAForgetTexBinds();		// create() disturbed unit 0's cached bind
+		if ( !rhiSmaaEdgesRT || !rhiSmaaWeightsRT ) {
+			rhiSmaaW = rhiSmaaH = 0;
+			return false;
+		}
+		rhiSmaaW = w;
+		rhiSmaaH = h;
+	}
+	if ( needScene && !rhiSmaaSceneRT ) {
+		rhiSmaaSceneRT = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+		RB_RHI_AAForgetTexBinds();
+		if ( !rhiSmaaSceneRT ) {
+			return false;
+		}
+	}
+	if ( !rhiSmaaAreaTex ) {
+		// AreaTex is RG (two packed coverage areas), bilinear — SMAA
+		// interpolates between sub-areas; SearchTex must be point-sampled
+		rhiSmaaAreaTex = RB_RHI_SmaaUploadLut( areaTexBytes, 2, AREATEX_WIDTH, AREATEX_HEIGHT, GL_LINEAR );
+		rhiSmaaSearchTex = RB_RHI_SmaaUploadLut( searchTexBytes, 1, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, GL_NEAREST );
+		RB_RHI_AAForgetTexBinds();		// the uploads disturbed the active unit's cached bind
+	}
+	return rhiSmaaAreaTex != 0 && rhiSmaaSearchTex != 0;
+}
+
+// one fullscreen NDC quad through a SMAA program; tex0..tex2 are GL texture
+// names — render-target images or the raw LUTs (0 = leave the unit alone)
+static void RB_RHI_SmaaDraw( rhi::RHI *r, rhi::ShaderHandle prog, const rhi::RenderParams &parms,
+                             rhi::ImageHandle tex0, rhi::ImageHandle tex1, rhi::ImageHandle tex2 = 0 ) {
+	idDrawVert quad[4];
+	memset( quad, 0, sizeof( quad ) );
+	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
+	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
+	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
+	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
+	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
+
+	rhi::BufferHandle vb, ib, ub;
+	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
+	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = CT_TWO_SIDED;
+	r->BindPipeline( pd );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = 6;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	da.textures[0] = tex0;
+	da.textures[1] = tex1;
+	da.textures[2] = tex2;
+	r->Draw( da );
+
+	backEnd.pc.c_drawElements++;
+}
+
+/*
+=============
+RB_RHI_SmaaChain
+
+The three SMAA 1x passes over an exact-size scene image: edge detection ->
+blending weights (AreaTex/SearchTex LUTs on units 1/2) -> neighborhood blend.
+outputRT 0 writes the resolved image to the backbuffer (LDR path; the caller
+already set viewport/scissor); otherwise into the given float target (HDR).
+The edge/weight passes discard on non-edge pixels, so both targets are
+cleared. Returns false (leaving the frame untouched) if anything is missing.
+=============
+*/
+static bool RB_RHI_SmaaChain( rhi::RHI *r, rhi::ImageHandle sceneImg, rhi::RenderTargetHandle outputRT, int w, int h ) {
+	rhi::ShaderHandle edgesProg = r->LoadShader( "smaa_edges" );
+	rhi::ShaderHandle weightsProg = r->LoadShader( "smaa_weights" );
+	rhi::ShaderHandle blendProg = r->LoadShader( "smaa_blend" );
+	if ( !edgesProg || !weightsProg || !blendProg || !sceneImg ) {
+		return false;
+	}
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	// SMAA_RT_METRICS
+	parms.localParam0[0] = 1.0f / w;
+	parms.localParam0[1] = 1.0f / h;
+	parms.localParam0[2] = (float)w;
+	parms.localParam0[3] = (float)h;
+
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.color = true;
+
+	// pass 1: luma edge detection
+	r->BeginTargetPass( rhiSmaaEdgesRT, &clear );
+	RB_RHI_SmaaDraw( r, edgesProg, parms, sceneImg, 0 );
+	r->EndPass();
+
+	// pass 2: blending weights (edge mask on 0, the two LUTs on 1/2)
+	r->BeginTargetPass( rhiSmaaWeightsRT, &clear );
+	RB_RHI_SmaaDraw( r, weightsProg, parms, r->GetRenderTargetImage( rhiSmaaEdgesRT ),
+	                 rhiSmaaAreaTex, rhiSmaaSearchTex );
+	r->EndPass();
+
+	// pass 3: neighborhood blend -> backbuffer or the HDR AA target
+	if ( outputRT ) {
+		r->BeginTargetPass( outputRT, NULL );
+		RB_RHI_SmaaDraw( r, blendProg, parms, sceneImg, r->GetRenderTargetImage( rhiSmaaWeightsRT ) );
+		r->EndPass();
+	} else {
+		RB_RHI_SmaaDraw( r, blendProg, parms, sceneImg, r->GetRenderTargetImage( rhiSmaaWeightsRT ) );
+	}
+
+	// the multi-unit draws left the GL active unit on 1/2, and idImage::Bind
+	// binds on the *active* unit while recording under currenttmu — the next
+	// CopyFramebuffer (film grain's snapshot) would land its bind on the wrong
+	// unit and then skip the "already bound" rebind on unit 0, sampling a stale
+	// SMAA target instead of _currentRender. Leave the chain on unit 0 with the
+	// bind cache invalidated so every following bind re-issues cleanly.
+	RB_RHI_AAForgetTexBinds();
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
+	return true;
+}
+
+/*
+=============
+RB_RHI_SmaaPassLDR
+
+SMAA over the finished LDR view: snapshot the backbuffer (POT _currentRender),
+de-POT it into an exact-size scene target so the SMAA texel math is clean,
+then run the chain back onto the backbuffer. Same viewport/scissor handling
+as the FXAA path below.
+=============
+*/
+static bool RB_RHI_SmaaPassLDR( rhi::RHI *r, const viewDef_t *viewDef ) {
+	rhi::ShaderHandle copyProg = r->LoadShader( "smaa_copy" );
+	if ( !copyProg ) {
+		return false;
+	}
+
+	int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	if ( !RB_RHI_EnsureSmaaTargets( r, w, h, true ) ) {
+		return false;
+	}
+
+	RB_RHI_CopyCurrentRender( viewDef );
+
+	int potW = globalImages->currentRenderImage->uploadWidth;
+	int potH = globalImages->currentRenderImage->uploadHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.screenCorrection[0] = potW > 0 ? (float)w / potW : 1.0f;
+	parms.screenCorrection[1] = potH > 0 ? (float)h / potH : 1.0f;
+
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
+	globalImages->currentRenderImage->Bind();
+
+	r->BeginTargetPass( rhiSmaaSceneRT, NULL );
+	RB_RHI_SmaaDraw( r, copyProg, parms, 0, 0 );
+	r->EndPass();
+
+	// the last surface may have left a cropped scissor; cover the whole view
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	return RB_RHI_SmaaChain( r, r->GetRenderTargetImage( rhiSmaaSceneRT ), 0, w, h );
+}
+
 /*
 =============
 RB_RHI_AAPass
@@ -93,6 +342,11 @@ Same _currentRender snapshot + fullscreen-quad path as RB_RHI_PostProcess.
 static void RB_RHI_AAPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( r_rhiAA.GetInteger() <= 0 ) {
 		return;		// off → exact passthrough, skip the copy+draw entirely
+	}
+
+	// SMAA 1x; if its shaders/targets are unavailable fall through to FXAA
+	if ( r_rhiAA.GetInteger() == 2 && RB_RHI_SmaaPassLDR( r, viewDef ) ) {
+		return;
 	}
 
 	rhi::ShaderHandle prog = r->LoadShader( "fxaa" );
@@ -547,6 +801,22 @@ static void RB_RHI_HdrFxaa( rhi::RHI *r ) {
 	backEnd.pc.c_drawElements++;
 }
 
+// SMAA as a float->float chain (rhiHdrRT color -> rhiHdrAaRT), the r_rhiAA 2
+// counterpart of RB_RHI_HdrFxaa above. The float scene buffer is exact-size,
+// so the chain samples it directly — no de-POT copy needed. Edge detection
+// reads unclamped HDR luma, which merely over-detects on >1 highlights.
+static bool RB_RHI_HdrSmaa( rhi::RHI *r ) {
+	if ( !rhiHdrRT || !rhiHdrAaRT ) {
+		return false;
+	}
+	int w = glConfig.vidWidth;
+	int h = glConfig.vidHeight;
+	if ( !RB_RHI_EnsureSmaaTargets( r, w, h, false ) ) {
+		return false;
+	}
+	return RB_RHI_SmaaChain( r, r->GetRenderTargetImage( rhiHdrRT ), rhiHdrAaRT, w, h );
+}
+
 static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	if ( !rbHdrActiveThisFrame ) {
 		return;
@@ -562,12 +832,15 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	int w = glConfig.vidWidth;
 	int h = glConfig.vidHeight;
 
-	// FXAA first (float->float into rhiHdrAaRT), so chroma below re-samples the anti-aliased
+	// AA first (float->float into rhiHdrAaRT), so chroma below re-samples the anti-aliased
 	// image; the resolve then reads the AA buffer instead of the raw scene buffer. Off → the
-	// scratch buffer doesn't exist and we read the scene buffer directly.
+	// scratch buffer doesn't exist and we read the scene buffer directly. Mode 2 = SMAA,
+	// falling back to FXAA if its shaders/targets are unavailable.
 	rhi::RenderTargetHandle sourceRT = rhiHdrRT;
 	if ( r_rhiAA.GetInteger() > 0 && rhiHdrAaRT ) {
-		RB_RHI_HdrFxaa( r );
+		if ( r_rhiAA.GetInteger() != 2 || !RB_RHI_HdrSmaa( r ) ) {
+			RB_RHI_HdrFxaa( r );
+		}
 		sourceRT = rhiHdrAaRT;
 	}
 
@@ -657,6 +930,20 @@ void RB_RHI_Shutdown( void ) {
 	rhiHdrRT = 0;
 	rhiHdrAaRT = 0;
 	rhiHdrW = rhiHdrH = 0;
+
+	// SMAA edge/weight/scene targets + raw-GL LUTs (this file's statics). The
+	// context is still current here, so the LUT names can be deleted properly;
+	// they re-upload lazily on the new context.
+	rhiSmaaEdgesRT = rhiSmaaWeightsRT = rhiSmaaSceneRT = 0;
+	rhiSmaaW = rhiSmaaH = 0;
+	if ( rhiSmaaAreaTex ) {
+		qglDeleteTextures( 1, &rhiSmaaAreaTex );
+		rhiSmaaAreaTex = 0;
+	}
+	if ( rhiSmaaSearchTex ) {
+		qglDeleteTextures( 1, &rhiSmaaSearchTex );
+		rhiSmaaSearchTex = 0;
+	}
 
 	// deletes rings, VAOs, shader cache and every render target, then clears the
 	// backend's table so any stale handle now resolves to a null image
