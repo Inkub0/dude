@@ -1171,6 +1171,12 @@ RB_RHI_BindStageImage
 Binds the stage image (or current cinematic frame) on texture unit 0.
 =============
 */
+// sentinel from RB_RHI_BindStageImage's Vulkan branch: this stage samples an
+// engine capture image (_currentRender/_scratch/...) that can't exist until
+// the M5 screen copies — the caller must skip the draw (a dummy bind renders
+// the double-vision/berserk overlays as solid white/checker)
+static const rhi::ImageHandle RHI_SKIP_STAGE_IMAGE = (rhi::ImageHandle)0xffffffffu;
+
 static rhi::ImageHandle RB_RHI_BindStageImage( const shaderStage_t *pStage, const float *regs, const viewDef_t *viewDef ) {
 	const textureStage_t *texture = &pStage->texture;
 
@@ -1182,6 +1188,13 @@ static rhi::ImageHandle RB_RHI_BindStageImage( const shaderStage_t *pStage, cons
 		if ( texture->cinematic ) {
 			globalImages->blackImage->Bind();
 			return globalImages->blackImage->rhiHandle;
+		}
+		if ( texture->image == globalImages->currentRenderImage
+		     || texture->image == globalImages->currentDepthImage
+		     || texture->image == globalImages->scratchImage
+		     || texture->image == globalImages->scratchImage2
+		     || texture->image == globalImages->accumImage ) {
+			return RHI_SKIP_STAGE_IMAGE;	// M5: no screen copies yet
 		}
 		if ( texture->image ) {
 			texture->image->Bind();
@@ -2134,6 +2147,10 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 		rhi::ImageHandle stageImage = RB_RHI_BindStageImage( pStage, regs, viewDef );
+		if ( stageImage == RHI_SKIP_STAGE_IMAGE ) {
+			RB_RHI_LogOnce( "VK: stages sampling _currentRender/_scratch skipped until the M5 screen copies" );
+			continue;
+		}
 
 		// 2D views: legacy disables depth test entirely; equivalent here is
 		// depth-always + no depth writes
