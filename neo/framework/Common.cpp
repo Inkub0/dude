@@ -70,6 +70,9 @@ If you have questions concerning this license or the applicable additional terms
 extern void Com_Dhewm3Settings_f( const idCmdArgs &args );
 // DUDE: in-game PBR material editor, also implemented in Dhewm3SettingsMenu.cpp
 extern void Com_EditPbrMaterial_f( const idCmdArgs &args );
+// DUDE: apply an enhancement quality preset by index (drives the classic quality
+// selector); implemented in Dhewm3SettingsMenu.cpp
+extern void Com_DudePreset_f( const idCmdArgs &args );
 
 typedef enum {
 	ERP_NONE,
@@ -92,6 +95,10 @@ struct version_s {
 idCVar com_version( "si_version", version.string, CVAR_SYSTEM|CVAR_ROM|CVAR_SERVERINFO, "engine version" );
 idCVar com_skipRenderer( "com_skipRenderer", "0", CVAR_BOOL|CVAR_SYSTEM, "skip the renderer completely" );
 idCVar com_machineSpec( "com_machineSpec", "-1", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "hardware classification, -1 = not detected, 0 = low quality, 1 = medium quality, 2 = high quality, 3 = ultra quality" );
+// DUDE: chosen enhancement quality tier for the in-game quality selector (choiceDef in
+// mainmenu.gui binds to this). -1 = Custom/unset, 0 = Potato .. 5 = Nightmare. The
+// "dudePreset" command applies it; see Dhewm3SettingsMenu.cpp.
+idCVar dude_preset( "dude_preset", "-1", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "DUDE enhancement quality tier: -1 = custom, 0 = Potato, 1 = Low, 2 = Medium, 3 = High, 4 = Ultra, 5 = Nightmare", -1, 5 );
 idCVar com_purgeAll( "com_purgeAll", "0", CVAR_BOOL | CVAR_ARCHIVE | CVAR_SYSTEM, "purge everything between level loads" );
 idCVar com_memoryMarker( "com_memoryMarker", "-1", CVAR_INTEGER | CVAR_SYSTEM | CVAR_INIT, "used as a marker for memory stats" );
 idCVar com_preciseTic( "com_preciseTic", "1", CVAR_BOOL|CVAR_SYSTEM, "run one game tick every async thread update" );
@@ -2438,6 +2445,8 @@ void idCommonLocal::InitCommands( void ) {
 	cmdSystem->AddCommand( "dhewm3Settings", Com_Dhewm3Settings_f, CMD_FL_SYSTEM, "Toggles (opens/closes) the (advanced) DUDE settings menu" );
 
 	cmdSystem->AddCommand( "editPbrMaterial", Com_EditPbrMaterial_f, CMD_FL_SYSTEM, "opens the in-game PBR material editor for the surface under the crosshair (docs/pbr-materials.md); bind it to a key" );
+
+	cmdSystem->AddCommand( "dudePreset", Com_DudePreset_f, CMD_FL_SYSTEM, "applies a DUDE enhancement quality preset by index (0 = Potato .. 5 = Nightmare); drives the in-game quality selector" );
 
 #if	!defined( ID_DEDICATED )
 	// compilers

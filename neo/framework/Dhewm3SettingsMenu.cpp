@@ -1658,6 +1658,8 @@ static CVarOption videoOptionsImmediately[] = {
 	CVarOption( "r_gammaInShader", "Apply gamma and brightness in shaders", OT_BOOL ),
 	CVarOption( "r_scaleMenusTo43", "Scale fullscreen menus to 4:3", OT_BOOL ),
 	CVarOption( "gui_hiResFonts", "High-resolution GUI fonts (displays taller than 720p)", OT_BOOL ),
+
+	CVarOption( "Screenshots" ),
 	CVarOption( "r_screenshotFormat", []( idCVar& cvar ) {
 		// "Screenshot format. 0 = TGA (default), 1 = BMP, 2 = PNG, 3 = JPG"
 		int curFormat = idMath::ClampInt( 0, 3, cvar.GetInteger() );
@@ -1670,13 +1672,11 @@ static CVarOption videoOptionsImmediately[] = {
 	CVarOption( "r_screenshotJpgQuality", "Quality level for JPG screenshots", OT_INT, 1, 100 ),
 	// NOTE: Soft Particles and Depth Buffer Capture are non-vanilla enhancements
 	// and now live in the GL3/Vulkan-only "Enhancements" tab (enhancementOptions[]).
-
-	CVarOption( "Advanced Options" ),
-	CVarOption( "r_skipNewAmbient", "Disable High Quality Special Effects", OT_BOOL ),
-	CVarOption( "r_shadows", "Enable Shadows", OT_BOOL ),
-	CVarOption( "r_skipSpecular", "Disable Specular", OT_BOOL ),
-	CVarOption( "r_skipBump", "Disable Bump Maps", OT_BOOL ),
-
+	//
+	// DUDE: the vanilla-quality "Advanced Options" toggles (r_skipNewAmbient, r_shadows,
+	// r_skipSpecular, r_skipBump) were removed 2026-08-02 - every supported GPU runs them
+	// on, matching the trimmed in-game Advanced page. Their cvar defaults keep them on;
+	// still reachable from the console for anyone who really needs to toggle them.
 };
 
 // Non-vanilla graphical enhancements. This tab (and everything in it) is only
@@ -1834,7 +1834,6 @@ static bool initialFullscreenDesktop = false;
 static int initialMode = 0;
 static int initialCustomVidRes[2];
 static int initialMSAAmode = 0;
-static int qualityPreset = 0;
 static int initialUsePrecomprTextures = 0;
 static int initialUseCompression = 0;
 static int initialUseNormalCompr = 0;
@@ -1857,15 +1856,6 @@ static void SetVideoStuffFromCVars()
 	initialFullscreenDesktop = r_fullscreenDesktop.GetBool();
 
 	initialMSAAmode = r_multiSamples.GetInteger();
-
-	qualityPreset = com_machineSpec.GetInteger();
-	if ( qualityPreset == -1 ) {
-		// if it's not set, most probably setMachineSpec hasn't been run yet
-		cmdSystem->BufferCommandText( CMD_EXEC_NOW, "setMachineSpec\n" );
-		qualityPreset = com_machineSpec.GetInteger();
-		if ( qualityPreset == -1 )
-			qualityPreset = 1; // default to medium Quality
-	}
 
 	initialUsePrecomprTextures = globalImages->image_usePrecompressedTextures.GetInteger();
 	initialUseCompression = globalImages->image_useCompression.GetInteger();
@@ -2039,23 +2029,10 @@ static void DrawVideoOptionsMenu()
 		}
 	}
 
-	ImGui::SeparatorText( "Quality Preset" );
-	ImGui::Combo( "##qualPresets", &qualityPreset, "Low Quality\0Medium Quality\0High Quality\0Ultra Quality\0" );
-	AddTooltip( "com_machineSpec" );
-	ImGui::SameLine();
-	if ( ImGui::Button( "Load Quality Preset" ) ) {
-		com_machineSpec.SetInteger( qualityPreset ); // TODO: or always set this even if button is not pressed?
-		// execMachineSpec might change the MSAA value, so remember the old one (that's currently used)
-		const int oldMSAA = r_multiSamples.GetInteger();
-		cmdSystem->BufferCommandText( CMD_EXEC_NOW, "execMachineSpec nores\n" );
-
-		if ( oldMSAA > 0 && qualityPreset >= 2 ) {
-			// the user already changed the MSAA at some point, and chose High or Ultra Quality,
-			// which both set MSAA to 0 - restore users setting
-			r_multiSamples.SetInteger( oldMSAA );
-		}
-	}
-	AddTooltip( "Sets lots of rendering-related CVars based on the selected quality" );
+	// DUDE: the legacy image-quality preset (com_machineSpec: Low/Medium/High/Ultra)
+	// is no longer user-selectable - every supported GPU handles Ultra, so it stays
+	// pinned there (setMachineSpec at startup + the dudePreset command). The in-game
+	// quality selector now drives the DUDE enhancement tiers instead.
 
 	ImGui::SeparatorText( "Options that must be applied" );
 
@@ -2163,6 +2140,10 @@ static void DrawVideoOptionsMenu()
 		r_multiSamples.SetInteger( msaa );
 	}
 	AddCVarOptionTooltips( r_multiSamples, "Note: Not all GPUs/drivers support all modes, esp. not 16x!" );
+
+	// Texture memory/quality trade-offs. Kept (rather than pinned to max quality) because
+	// texture-heavy mods / hi-res retexture packs benefit from compression to fit VRAM.
+	ImGui::SeparatorText( "Texture Options" );
 
 	int usePreComprTex = globalImages->image_usePrecompressedTextures.GetInteger();
 	if ( ImGui::Combo( "Use precompressed (.dds) textures", &usePreComprTex,
@@ -3902,6 +3883,49 @@ static void DrawOtherOptionsMenu()
 
 } //anon namespace
 
+// DUDE: bridge so the classic Doom 3 quality selector (base/guis/mainmenu.gui) and
+// the console can drive the enhancement presets. Defined outside the anonymous
+// namespace above so it has external linkage (Common.cpp registers the command);
+// ApplyEnhancementPreset stays visible from here.
+//
+//   dudePreset <n>   set the dude_preset cvar to tier n and apply it
+//   dudePreset       apply whatever tier dude_preset currently holds
+//
+// The no-arg form is what the in-game selector uses: its choiceDef writes dude_preset
+// live, then fires "exec dudePreset" so we apply the just-written value. Applying pins
+// com_machineSpec to Ultra (3) - the legacy image-quality classification is no longer
+// user-selectable (every GPU we support handles Ultra), so base texture/image quality
+// stays maxed rather than leaving a stale low value behind.
+void Com_DudePreset_f( const idCmdArgs &args )
+{
+	int idx;
+	if ( args.Argc() >= 2 ) {
+		idx = atoi( args.Argv( 1 ) );
+		if ( idx < 0 || idx >= PRESET_COUNT ) {
+			common->Printf( "dudePreset: index %d out of range (0..%d)\n", idx, PRESET_COUNT - 1 );
+			return;
+		}
+		dude_preset.SetInteger( idx );
+	} else {
+		idx = dude_preset.GetInteger();
+		if ( idx < 0 || idx >= PRESET_COUNT ) {
+			// -1 = Custom / unset: nothing to apply
+			return;
+		}
+	}
+	ApplyEnhancementPreset( idx );
+	// decision A: keep the base image-quality classification pinned at Ultra.
+	com_machineSpec.SetInteger( 3 );
+}
+
+// DUDE: which preset the live cvars currently match, or -1 for "Custom". Exposed so
+// the menu code (Session*.cpp) can push it into the GUI as "dude_preset" to drive
+// the classic selector's highlight.
+int Com_DetectDudePreset( void )
+{
+	return DetectEnhancementPreset();
+}
+
 static bool BeginTabChild( const char* name )
 {
 	bool ret = ImGui::BeginChild( name, ImVec2(0, 0), 0, ImGuiChildFlags_NavFlattened );
@@ -4300,6 +4324,20 @@ void Com_Dhewm3Settings_f( const idCmdArgs &args )
 void Com_EditPbrMaterial_f( const idCmdArgs &args )
 {
 	common->Warning( "Dear ImGui is disabled in this build, so the PBR material editor is not available!" );
+}
+
+// DUDE: the enhancement presets live in the ImGui section; without it there is no
+// preset table to apply. Stubs keep Common.cpp's command registration and the
+// Session menu-var sync linking (e.g. the dedicated server, which always builds
+// with IMGUI_DISABLE).
+void Com_DudePreset_f( const idCmdArgs &args )
+{
+	common->Warning( "Dear ImGui is disabled in this build, so DUDE quality presets are not available!" );
+}
+
+int Com_DetectDudePreset( void )
+{
+	return -1;
 }
 
 #endif
