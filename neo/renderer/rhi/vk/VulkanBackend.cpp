@@ -68,6 +68,10 @@ static idCVar r_vkValidation( "r_vkValidation", "1", CVAR_RENDERER | CVAR_BOOL,
 // explicit adapter pick; -1 = auto (first discrete GPU, else first usable)
 static idCVar r_vkDevice( "r_vkDevice", "-1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
 	"Vulkan: physical device index to use (-1 = auto-select)" );
+// dev bring-up aid (seeds the M6 capture path): dump the next presented scene
+// image to vkdump.tga in fs_savepath, then self-reset. Blocks one frame.
+static idCVar r_vkDumpNextFrame( "r_vkDumpNextFrame", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan: write the next frame's scene image to vkdump.tga (dev)" );
 
 namespace rhi {
 
@@ -1402,6 +1406,31 @@ void VulkanBackend::EndFrame() {
 	vkCmdPipelineBarrier( f.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
 		0, 0, NULL, 0, NULL, 1, &toPresent );
 
+	// dev frame dump (r_vkDumpNextFrame): copy the scene image (still
+	// TRANSFER_SRC) into a host buffer alongside the present blit
+	VkBuffer dumpBuf = VK_NULL_HANDLE;
+	VmaAllocation dumpAlloc = NULL;
+	byte *dumpMapped = NULL;
+	if ( r_vkDumpNextFrame.GetBool() ) {
+		VkBufferCreateInfo bci = {};
+		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bci.size = (VkDeviceSize)sceneExtent.width * sceneExtent.height * 4;
+		bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		VmaAllocationCreateInfo aci = {};
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		VmaAllocationInfo info = {};
+		if ( vmaCreateBuffer( vma, &bci, &aci, &dumpBuf, &dumpAlloc, &info ) == VK_SUCCESS ) {
+			dumpMapped = (byte *)info.pMappedData;
+			VkBufferImageCopy c = {};
+			c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			c.imageSubresource.layerCount = 1;
+			c.imageExtent = { sceneExtent.width, sceneExtent.height, 1 };
+			vkCmdCopyImageToBuffer( f.cb, sceneColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dumpBuf, 1, &c );
+		}
+	}
+
 	vkEndCommandBuffer( f.cb );
 
 	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -1430,6 +1459,18 @@ void VulkanBackend::EndFrame() {
 		vkCheck( pr, "vkQueuePresentKHR" );
 	}
 	presentedFrames++;
+
+	if ( dumpBuf != VK_NULL_HANDLE ) {
+		r_vkDumpNextFrame.SetBool( false );
+		vkWaitForFences( device, 1, &f.fence, VK_TRUE, UINT64_MAX );
+		if ( dumpMapped != NULL ) {
+			// a Vulkan image is top-to-bottom; flipVertical=false sets the TGA
+			// top-down flag (true is for GL's bottom-up readbacks)
+			R_WriteTGA( "vkdump.tga", dumpMapped, (int)sceneExtent.width, (int)sceneExtent.height, false );
+			common->Printf( "VK: wrote vkdump.tga (%ux%u)\n", sceneExtent.width, sceneExtent.height );
+		}
+		vmaDestroyBuffer( vma, dumpBuf, dumpAlloc );
+	}
 
 	frameIndex = ( frameIndex + 1 ) % FRAMES_IN_FLIGHT;
 }
@@ -2123,15 +2164,17 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	vp.viewportCount = 1;
 	vp.scissorCount = 1;
 
-	// GL frames arrive through a negative-height viewport (Y up), which makes
-	// GL's y-up window winding equal VK's framebuffer winding with CLOCKWISE
-	// as "front" for idTech4's CW-wound triangles — so the cull mapping stays
-	// the legacy one: front-sided culls FRONT (see GL3Backend::ApplyCull).
+	// Winding (verified empirically with the M2 frame dump, 2026-08-02): with
+	// the negative-height viewport, VK's framebuffer-space winding for a GUI
+	// quad comes out such that COUNTER_CLOCKWISE-as-front + the legacy cull
+	// mapping (front-sided culls FRONT, as GL3Backend::ApplyCull) keeps
+	// idTech4's CW-wound triangles — CLOCKWISE-as-front culled every GUI quad
+	// in the engine (all-black menu).
 	VkPipelineRasterizationStateCreateInfo rs = {};
 	rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
 	rs.polygonMode = ( ( bits & GLS_POLYMODE_LINE ) && haveFillModeNonSolid )
 		? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-	rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
+	rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 	rs.cullMode = desc.cullType == CT_TWO_SIDED ? VK_CULL_MODE_NONE
 	            : ( desc.cullType == CT_BACK_SIDED ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_FRONT_BIT );
 	rs.lineWidth = 1.0f;
