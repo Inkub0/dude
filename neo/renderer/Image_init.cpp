@@ -1041,6 +1041,12 @@ idImage::Reload
 void idImage::Reload( bool checkPrecompressed, bool force ) {
 	// always regenerate functional images
 	if ( generatorFunction ) {
+		// DUDE Phase 4 M1: several generators call raw qgl beyond
+		// GenerateImage (border clamp emulation etc.) — with no GL under the
+		// Vulkan backend nothing can be generated until the RHI image path (M2)
+		if ( qglGenTextures == NULL ) {
+			return;
+		}
 		common->DPrintf( "regenerating %s.\n", imgName.c_str() );
 		generatorFunction( this );
 		return;

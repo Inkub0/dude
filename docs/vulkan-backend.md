@@ -129,19 +129,37 @@ backends bit-identical. Order rehearsed by the GL3 bring-up (Chunks A–G).
   `-DDHEWM3_VULKAN=ON` builds + links (72/72 .spv compiled); `r_graphicsAPI vulkan`
   probes and falls back cleanly on both builds.
 
-### M1 — Clear screen
-- `VulkanBackend : rhi::RHI` skeleton: instance (validation layers behind a
-  `r_vkValidation` cvar, default on for dev builds), surface via
-  `SDL_Vulkan_CreateSurface`, physical-device pick (`r_vkDevice` index override),
-  device + graphics/present queues, VMA initialisation.
-- Swapchain: format/colorspace pick, present mode from `r_swapInterval`
-  (0 → IMMEDIATE, 1 → FIFO, −1/adaptive → FIFO_RELAXED, MAILBOX where it fits the
-  menu's Disabled/Enabled/Adaptive triple), recreate on resize/`vid_restart`/out-of-date.
-- 2 frames in flight: per-slot command buffer, fence, acquire/present semaphores.
-- The offscreen scene image (color + D24S8-or-D32S8) + its render pass; `BeginFrame` /
-  `BeginPass(clear)` / `EndPass` / `EndFrame` → blit to swapchain → present.
-- **Verify:** boots to the clear color on `r_graphicsAPI vulkan`; window resize,
-  `vid_restart`, and clean shutdown all validation-clean.
+### M1 — Clear screen  **[BUILT 2026-08-02 — pending the user's visual check]**
+- **[done]** `VulkanBackend : rhi::RHI` (rhi/vk/VulkanBackend.cpp, ~1000 lines):
+  instance (validation behind `r_vkValidation`, default on; loader chatter about
+  third-party implicit layers is reported but not counted against the clean bar),
+  surface via SDL, device pick (`r_vkDevice` override; auto prefers discrete —
+  picks the RTX 3080 Ti over the Raphael iGPU on the dev box), queues, VMA 3.3.0.
+- **[done]** Swapchain: BGRA8/RGBA8 UNORM, present mode from `r_swapInterval`
+  (1+ FIFO / 0 IMMEDIATE→MAILBOX / <0 FIFO_RELAXED), recreate on resize,
+  swap-interval change, OOD/suboptimal; minimized handled (skip-frames).
+- **[done]** 2 frames in flight (per-slot pool/fence/acquire-semaphore,
+  per-swapchain-image release semaphore); offscreen scene image RGBA8 +
+  D24S8-else-D32S8, clear/load render-pass pair, EndFrame blits scene → swapchain.
+  Every presented frame is defined (auto-clear if no pass ran). A
+  `presentedFrames` counter prints in the shutdown summary as the M1 diagnostic.
+- **[done]** Executor gate (`vkClearOnly` in RB_RHI_ExecuteBackEndCommands): under
+  BT_VULKAN frames run as begin / RC_SET_BUFFER-clear / present only — no draws,
+  no idImage, no GL-only helper passes, until M2.
+- **[done — the M1 war story]** the frontend touches qgl in places the plan's
+  "init path assumes GL" understated: `GL_CheckErrors` (EndFrame + InitOpenGL +
+  vid_restart), `idImage` generation at init via `ReloadAllImages` (generator
+  functions like `R_BorderClampImage` call raw qgl *beyond* GenerateImage),
+  `PurgeImage`, screenshot/stencil readbacks. All now guard on NULL qgl pointers,
+  and the Vulkan branch of `R_InitOpenGL` explicitly **zeroes the qgl table** so a
+  GL→Vulkan `vid_restart` can't leave stale callable pointers. These guards are
+  the seam list M2's image-ownership work replaces one by one.
+- **Verified headless:** boots + presents (validation clean); double `vid_restart`
+  on Vulkan = three clean up/down cycles (X11 teardown race did not reproduce);
+  cross-backend `opengl3 → vulkan → opengl3` switching in one session works
+  (29/29 GLSL programs reload after coming back); legacy + opengl3 regressions
+  unchanged. **Pending:** the user's eyeball check of the clear color
+  (`r_clear 1` flicker) + live resize.
 
 ### M2 — Rings, pipelines, first textures: 2D GUI/console/menu
 - Host-visible persistent-mapped vertex/index/uniform rings, per-slot partitioning,

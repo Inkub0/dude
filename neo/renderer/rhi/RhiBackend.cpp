@@ -2267,19 +2267,31 @@ Backend-neutral: drives whichever rhi::RHI is active (GL3 today, Vulkan later).
 */
 void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	rhi::RHI *r = rhi::GetRHI();
+
+	// Phase 4 M1 (docs/vulkan-backend.md): the Vulkan backend can clear and
+	// present, but its draw path (shaders, images, geometry) arrives at M2+.
+	// Until then run its frames as begin / clear / present only, so nothing
+	// touches idImage, qgl or the GL-only helper passes. RC_SET_BUFFER stays
+	// live — its clear is pure RHI calls and is exactly the M1 payload.
+	const bool vkClearOnly = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+
 	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
 
 	// route the whole frame into the RGBA16F scene buffer (r_hdr) before any clear
 	// or view command lands; a no-op that stays on the backbuffer when r_hdr is
 	// off or the frame is worldless (menu/GUI/cinematic — see RB_RHI_HdrBeginFrame)
-	RB_RHI_HdrBeginFrame( r, cmds );
+	if ( !vkClearOnly ) {
+		RB_RHI_HdrBeginFrame( r, cmds );
+	}
 
 	for ( ; cmds; cmds = (const emptyCommand_t *)cmds->next ) {
 		switch ( cmds->commandId ) {
 		case RC_NOP:
 			break;
 		case RC_DRAW_VIEW:
-			RB_RHI_DrawView( r, ((const drawSurfsCommand_t *)cmds)->viewDef );
+			if ( !vkClearOnly ) {
+				RB_RHI_DrawView( r, ((const drawSurfsCommand_t *)cmds)->viewDef );
+			}
 			break;
 		case RC_SET_BUFFER: {
 			// single (back) buffer only; keep frame counter + clear semantics
@@ -2312,12 +2324,17 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 			// explicit _currentRender/_currentDepth copies (e.g. mirror/xray
 			// setup); direct-GL idImage copy like the legacy RB_CopyRender
 			const copyRenderCommand_t *cmd = (const copyRenderCommand_t *)cmds;
-			if ( cmd->image && !r_skipCopyTexture.GetBool() ) {
+			if ( !vkClearOnly && cmd->image && !r_skipCopyTexture.GetBool() ) {
 				cmd->image->CopyFramebuffer( cmd->x, cmd->y, cmd->imageWidth, cmd->imageHeight, false );
 			}
 			break;
 		}
 		case RC_SWAP_BUFFERS:
+			if ( vkClearOnly ) {
+				// present happens in the backend's EndFrame below; the GL-only
+				// resolve/gamma/capture/ImGui tail must not run
+				break;
+			}
 			// resolve the RGBA16F scene buffer back onto the backbuffer (r_hdr);
 			// no-op when HDR is off. Must precede gamma + capture so both operate
 			// on the finished LDR image on the backbuffer.
