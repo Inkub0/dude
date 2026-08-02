@@ -555,7 +555,7 @@ void idRenderSystemLocal::SetBackEndRenderer() {
 		// original ARB2 vertex/fragment programs are transpiled to GLSL 330 (ArbToGlsl)
 		// and the fixed-function stages run through the RHI. Report that so the log
 		// isn't mistaken for the legacy fixed-function path.
-		if ( glConfig.coreProfile ) {
+		if ( glConfig.rhiBackend ) {
 			common->Printf( "Applying ARB2 renderSystem (translated to OpenGL 3.3 core by the GL3/RHI backend)\n" );
 		} else {
 			common->Printf( "Applying ARB2 renderSystem (native ARB vertex/fragment programs)\n" );

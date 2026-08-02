@@ -35,9 +35,9 @@ Suite 120, Rockville, Maryland 20850 USA.
 #include "sys/platform.h"
 #include "idlib/containers/List.h"
 
-#include "renderer/tr_local.h"			// glConfig.coreProfile
+#include "renderer/tr_local.h"			// glConfig.rhiBackend
 #include "renderer/ImmediateMode.h"
-#include "renderer/rhi/RHI.h"			// core-profile draw path (Chunk G)
+#include "renderer/rhi/RHI.h"			// RHI draw path (Chunk G)
 
 struct imVert_t {
 	float	xyz[3];
@@ -153,10 +153,10 @@ void idImmediateMode::End() {
 		return;
 	}
 
-	// Core profile: no client arrays / fixed-function transform. Stream the
+	// RHI backends: no client arrays / fixed-function transform. Stream the
 	// batch through the RHI's generic program with the caller-set MVP.
-	if ( glConfig.coreProfile ) {
-		rhi::RHI *r = rhi::GetGL3RHI();
+	if ( glConfig.rhiBackend ) {
+		rhi::RHI *r = rhi::GetRHI();
 		switch ( mode ) {
 			case GL_QUADS: {
 				// no GL_QUADS in core; expand to triangle pairs (DrawImmediate

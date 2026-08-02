@@ -101,26 +101,33 @@ These are the real work items the original one-liner bring-up list glossed over:
 Each is independently verifiable, lands as its own branch/merge, and leaves GL
 backends bit-identical. Order rehearsed by the GL3 bring-up (Chunks A–G).
 
-### M0 — Seams & scaffolding (GL-only refactor, no Vulkan code)
-- `rhi::GetRHI()` backend selector replacing the six direct `GetGL3RHI()` call sites;
-  GL3 keeps working through it.
-- `glConfig.rhiBackend` (or equivalent) flag distinct from `coreProfile`: "frontend
-  routes through the RHI", true for opengl3 **and** vulkan.
-  `R_BackendSupportsEnhancements()` switches to it. The scattered
-  `glConfig.coreProfile` frontend checks that actually mean "RHI path" flip to the new
-  flag; the ones that genuinely mean "GL core context" (glimp, qgl setup) stay.
-- glimp split: when `r_graphicsAPI vulkan`, create the window **without**
-  `SDL_WINDOW_OPENGL` (SDL_WINDOW_VULKAN), skip GL context creation and qgl loading,
-  query `SDL_Vulkan_GetInstanceExtensions`. Both SDL2 and sdl2-compat/SDL3 paths.
-  `vid_restart` teardown ordering mirrored from the GL path (mind the mitigated X11
-  teardown race in [known-bugs.md](known-bugs.md) — re-verify it here).
-- CMake: vendor VMA under `libs/vma/`; add `rhi/vk/` sources under the option; add the
-  SPIR-V build step; compile `imgui_impl_vulkan` under the option.
-- `R_InitOpenGL` accepts `r_graphicsAPI vulkan` when built with `DHEWM3_VULKAN`
-  (falls back with a warning otherwise, as today).
-- **Verify:** stock GL build byte-for-byte behaviour; `-DDHEWM3_VULKAN=ON` build links;
-  `r_graphicsAPI vulkan` reaches a clean "backend not yet implemented" stub without
-  touching GL.
+### M0 — Seams & scaffolding (GL-only refactor, no Vulkan code)  **[DONE 2026-08-02]**
+- **[done]** `rhi::GetRHI()` backend selector (+ `SetActiveBackend`/`BackendType` in
+  RHI.h, implemented in RhiBackend.cpp) replacing the six direct `GetGL3RHI()` call
+  sites; GL3 runs through it.
+- **[done]** `glConfig.rhiBackend` flag distinct from `coreProfile`;
+  `R_BackendSupportsEnhancements()` returns it. 17 frontend checks that meant "RHI
+  path" flipped (tr_render ×7, tr_backend, tr_rendertools ×2, RenderSystem.cpp,
+  RenderSystem_init ×3 + gate, ImmediateMode); 13 that genuinely mean "GL core
+  context" stayed (glimp/qgl, fixed-function image enables, GL3's GL init, ImGui GL
+  impl pick, settings-menu restart logic). Executor renamed
+  `RB_GL3_ExecuteBackEndCommands` → `RB_RHI_ExecuteBackEndCommands`.
+- **[done, scoped]** glimp: `GLimp_VulkanProbe()` creates a hidden
+  `SDL_WINDOW_VULKAN` window (no GL context, loads the Vulkan library) and logs
+  `SDL_Vulkan_GetInstanceExtensions`, SDL2 + SDL3 paths. *Scope note:* making the
+  real game window Vulkan-mode moved to M1 — with no backend to present, that path
+  would be untestable dead code; the probe is the verifiable M0 slice. Verified on
+  the target system: `VK_KHR_surface` + `VK_KHR_xlib_surface` via sdl2-compat.
+- **[done]** CMake: VMA 3.3.0 vendored at `libs/vma/`; `rhi/vk/VulkanBackend.cpp`
+  skeleton (GetVulkanRHI → NULL until M1) under the option; build-time SPIR-V step
+  (`shaders/compile_spv.py`, mtime-incremental, mirrors validate.py; outputs to
+  `<build>/shaders/spv`, dev-fallback define `DUDE_SHADER_SPV_DIR`);
+  `imgui_impl_vulkan` compiled under the option.
+- **[done]** `R_InitOpenGL`: `vulkan`/`vulkan-rt` values probe + warn + fall back to
+  GL (archived cvar never wedges the boot); unknown values get their own warning.
+- **Verified:** stock build boots legacy (default) and opengl3 unchanged;
+  `-DDHEWM3_VULKAN=ON` builds + links (72/72 .spv compiled); `r_graphicsAPI vulkan`
+  probes and falls back cleanly on both builds.
 
 ### M1 — Clear screen
 - `VulkanBackend : rhi::RHI` skeleton: instance (validation layers behind a

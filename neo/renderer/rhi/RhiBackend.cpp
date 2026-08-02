@@ -37,6 +37,40 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 
 #include "sys/sys_imgui.h"
 
+// ---------------------------------------------------------------------------
+// Active-backend selection (Phase 4 M0, docs/vulkan-backend.md). R_InitOpenGL
+// records which RHI backend it brought up; the executor and every helper ask
+// GetRHI() instead of naming one. Defaults to GL3 so tool code that runs before
+// selection (and is already gated on glConfig.rhiBackend) can't dereference NULL.
+// ---------------------------------------------------------------------------
+namespace rhi {
+
+static BackendType rhiActiveBackend = BT_GL3;
+
+void SetActiveBackend( BackendType type ) {
+	rhiActiveBackend = type;
+}
+
+BackendType GetActiveBackendType() {
+	return rhiActiveBackend;
+}
+
+RHI *GetRHI() {
+#ifdef DHEWM3_VULKAN
+	if ( rhiActiveBackend == BT_VULKAN ) {
+		RHI *vk = GetVulkanRHI();
+		if ( vk ) {
+			return vk;
+		}
+		// M0: the Vulkan backend doesn't exist yet; R_InitOpenGL never selects
+		// BT_VULKAN, so this is a defensive fallback, not a live path.
+	}
+#endif
+	return GetGL3RHI();
+}
+
+} // namespace rhi
+
 // DUDE post-process toggles (defined in RenderSystem_init.cpp), improvements
 // menu, default off — the fullscreen film-grain / chromatic-aberration pass
 extern idCVar r_postFilmGrain;
@@ -950,7 +984,7 @@ void RB_RHI_Shutdown( void ) {
 
 	// deletes rings, VAOs, shader cache and every render target, then clears the
 	// backend's table so any stale handle now resolves to a null image
-	rhi::GetGL3RHI()->Shutdown();
+	rhi::GetRHI()->Shutdown();
 }
 
 void RB_RHI_LogOnce( const char *what ) {
@@ -2225,13 +2259,14 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 
 /*
 =============
-RB_GL3_ExecuteBackEndCommands
+RB_RHI_ExecuteBackEndCommands
 
 RHI-based replacement for RB_ExecuteBackEndCommands (legacy path untouched).
+Backend-neutral: drives whichever rhi::RHI is active (GL3 today, Vulkan later).
 =============
 */
-void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
-	rhi::RHI *r = rhi::GetGL3RHI();
+void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
+	rhi::RHI *r = rhi::GetRHI();
 	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
 
 	// route the whole frame into the RGBA16F scene buffer (r_hdr) before any clear
@@ -2306,7 +2341,7 @@ void RB_GL3_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 			GLimp_SwapBuffers();
 			break;
 		default:
-			common->Error( "RB_GL3_ExecuteBackEndCommands: bad commandId" );
+			common->Error( "RB_RHI_ExecuteBackEndCommands: bad commandId" );
 			break;
 		}
 	}

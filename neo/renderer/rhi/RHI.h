@@ -177,8 +177,21 @@ public:
 	                               const float mvp[16], bool textured ) = 0;
 };
 
-// factory: created by the active backend at renderer init
+// backend factories
 RHI *		GetGL3RHI();
+RHI *		GetVulkanRHI();		// NULL until Phase 4 M1 (rhi/vk/, DHEWM3_VULKAN builds)
+
+// active-backend selection (Phase 4 M0). R_InitOpenGL records the backend it
+// brought up; everything else asks GetRHI() instead of naming a backend.
+// Callers must still gate on glConfig.rhiBackend — on the legacy GL path no
+// RHI backend is initialized and GetRHI() must not be used to draw.
+enum BackendType {
+	BT_GL3,
+	BT_VULKAN
+};
+void		SetActiveBackend( BackendType type );
+BackendType	GetActiveBackendType();
+RHI *		GetRHI();
 
 } // namespace rhi
 

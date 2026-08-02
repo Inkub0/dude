@@ -148,7 +148,7 @@ Sets texcoord and vertex pointers
 ===============
 */
 void RB_RenderTriangleSurface( const srfTriangles_t *tri ) {
-	if ( glConfig.coreProfile ) {
+	if ( glConfig.rhiBackend ) {
 		// Core profile has no client arrays: expand the indexed triangles into
 		// idImmediateMode, which streams through the RHI's generic program with
 		// the MVP set by the surf-list helper. Untextured white; wireframe comes
@@ -199,7 +199,7 @@ void RB_EnterWeaponDepthHack() {
 	// DUDE: on core profiles the projection tweak is applied by the RHI
 	// backend when it builds the MVP (RB_RHI_SpaceMvp); only the depth
 	// range call above is fixed-function-free
-	if ( glConfig.coreProfile ) {
+	if ( glConfig.rhiBackend ) {
 		return;
 	}
 
@@ -222,7 +222,7 @@ RB_EnterModelDepthHack
 void RB_EnterModelDepthHack( float depth ) {
 	qglDepthRange( 0.0f, 1.0f );
 
-	if ( glConfig.coreProfile ) {
+	if ( glConfig.rhiBackend ) {
 		return;		// see RB_EnterWeaponDepthHack
 	}
 
@@ -245,7 +245,7 @@ RB_LeaveDepthHack
 void RB_LeaveDepthHack() {
 	qglDepthRange( 0, 1 );
 
-	if ( glConfig.coreProfile ) {
+	if ( glConfig.rhiBackend ) {
 		return;		// see RB_EnterWeaponDepthHack
 	}
 
@@ -277,7 +277,7 @@ void RB_RenderDrawSurfListWithFunction( drawSurf_t **drawSurfs, int numDrawSurfs
 		// change the matrix if needed
 		if ( drawSurf->space != backEnd.currentSpace ) {
 			qglLoadMatrixf( drawSurf->space->modelViewMatrix );
-			if ( glConfig.coreProfile ) {
+			if ( glConfig.rhiBackend ) {
 				// no fixed-function stack: feed the MVP to idImmediateMode (Chunk G)
 				float mvp[16];
 				myGlMultMatrix( drawSurf->space->modelViewMatrix, backEnd.viewDef->projectionMatrix, mvp );
@@ -328,7 +328,7 @@ void RB_RenderDrawSurfChainWithFunction( const drawSurf_t *drawSurfs,
 		// change the matrix if needed
 		if ( drawSurf->space != backEnd.currentSpace ) {
 			qglLoadMatrixf( drawSurf->space->modelViewMatrix );
-			if ( glConfig.coreProfile ) {
+			if ( glConfig.rhiBackend ) {
 				// no fixed-function stack: feed the MVP to idImmediateMode (Chunk G)
 				float mvp[16];
 				myGlMultMatrix( drawSurf->space->modelViewMatrix, backEnd.viewDef->projectionMatrix, mvp );
@@ -768,7 +768,7 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 	// change the matrix and light projection vectors if needed
 	if ( surf->space != backEnd.currentSpace ) {
 		backEnd.currentSpace = surf->space;
-		if ( !glConfig.coreProfile ) {	// DUDE: RHI backends carry the matrix in the per-draw UBO
+		if ( !glConfig.rhiBackend ) {	// DUDE: RHI backends carry the matrix in the per-draw UBO
 			qglLoadMatrixf( surf->space->modelViewMatrix );
 		}
 	}

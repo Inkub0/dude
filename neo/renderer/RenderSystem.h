@@ -105,6 +105,12 @@ typedef struct glconfig_s {
 	// opengl3); the legacy fixed-function/ARB draw paths must not run then
 	bool				coreProfile;
 
+	// DUDE: true when the frontend routes through the RHI executor
+	// (RB_RHI_ExecuteBackEndCommands) — opengl3 today, vulkan later. Distinct
+	// from coreProfile, which specifically means "a GL core context is live";
+	// under Vulkan rhiBackend is true while coreProfile stays false.
+	bool				rhiBackend;
+
 	// For some reason people decided that we need displays with ultra small pixels,
 	// so everything rendered on them must be scaled up to be legible.
 	// unfortunately, this bullshit feature was "improved" upon by deciding that the best

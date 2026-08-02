@@ -437,10 +437,11 @@ idCVar r_occlusionMapsAutoBake( "r_occlusionMapsAutoBake", "0", CVAR_RENDERER | 
 // reflection reads too strong; 0.7 (-30%) matches the legacy look, 1.0 is untouched.
 idCVar r_gl3ReflectionScale( "r_gl3ReflectionScale", "0.7", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "GL3: brightness of cube-map glass reflections (1 = untouched; 0.7 compensates for the brighter enhanced scene; non-vanilla, opengl3/Vulkan only)", 0.0f, 2.0f );
 
-// DUDE: gate for the non-vanilla "Enhancements" (see tr_local.h). Only the GL 3.3
-// core backend qualifies today; Vulkan backends will extend this once they land.
+// DUDE: gate for the non-vanilla "Enhancements" (see tr_local.h). True for the
+// RHI backends — opengl3 today, vulkan once it lands (Phase 4); the legacy ARB2
+// path stays vanilla-faithful.
 bool R_BackendSupportsEnhancements() {
-	return glConfig.coreProfile;
+	return glConfig.rhiBackend;
 }
 
 // define qgl functions
@@ -970,18 +971,32 @@ void R_InitOpenGL( void ) {
 		common->FatalError( "R_InitOpenGL called while active" );
 	}
 
-	// Backend selection (docs/vulkan-port.md Phase 3). "opengl3" runs the new
-	// GL 3.3 core backend (in development); Vulkan values warn and fall back.
+	// Backend selection (docs/vulkan-port.md Phase 3 / Phase 4 M0). "opengl3"
+	// runs the GL 3.3 core backend; "vulkan"/"vulkan-rt" fall back to GL until
+	// the backend lands (M1) — the cvar is archived, so never wedge the boot on
+	// it. coreProfile = "a GL core context is live"; rhiBackend = "the frontend
+	// routes through the RHI executor" (both for opengl3, only the latter for
+	// the future vulkan path).
 	glConfig.coreProfile = false;
+	glConfig.rhiBackend = false;
 	if ( idStr::Icmp( r_graphicsAPI.GetString(), "opengl3" ) == 0 ) {
 		glConfig.coreProfile = true;
-		common->Printf( "r_graphicsAPI opengl3: GL 3.3 core backend (IN DEVELOPMENT - incomplete)\n" );
-	} else if ( idStr::Icmp( r_graphicsAPI.GetString(), "opengl" ) != 0 ) {
+		glConfig.rhiBackend = true;
+		rhi::SetActiveBackend( rhi::BT_GL3 );
+		common->Printf( "r_graphicsAPI opengl3: GL 3.3 core backend\n" );
+	} else if ( idStr::Icmp( r_graphicsAPI.GetString(), "vulkan" ) == 0
+	         || idStr::Icmp( r_graphicsAPI.GetString(), "vulkan-rt" ) == 0 ) {
 #ifdef DHEWM3_VULKAN
-		common->Warning( "r_graphicsAPI \"%s\": Vulkan backend not implemented yet, using OpenGL", r_graphicsAPI.GetString() );
+		// Phase 4 M0 scaffolding: prove the system can do SDL+Vulkan (the probe
+		// logs instance extensions), then run on GL — the backend arrives at M1
+		// (docs/vulkan-backend.md).
+		GLimp_VulkanProbe();
+		common->Warning( "r_graphicsAPI \"%s\": Vulkan backend is scaffolding-only (M0), using OpenGL for now", r_graphicsAPI.GetString() );
 #else
 		common->Warning( "r_graphicsAPI \"%s\" requested but this build has no Vulkan support (rebuild with -DDHEWM3_VULKAN=ON); using OpenGL", r_graphicsAPI.GetString() );
 #endif
+	} else if ( idStr::Icmp( r_graphicsAPI.GetString(), "opengl" ) != 0 ) {
+		common->Warning( "r_graphicsAPI \"%s\": unknown backend, using OpenGL (opengl / opengl3 / vulkan / vulkan-rt)", r_graphicsAPI.GetString() );
 	}
 
 	// in case we had an error while doing a tiled rendering
@@ -1167,7 +1182,7 @@ void R_InitOpenGL( void ) {
 		// Phase 3 Chunk B: bring up the backend proper — core function
 		// pointers, GLSL program cache, per-draw UBO ring, VAOs. Runs again
 		// after vid_restart with the fresh context.
-		if ( !rhi::GetGL3RHI()->Init() ) {
+		if ( !rhi::GetRHI()->Init() ) {
 			common->Error( "GL3 backend initialization failed (see warnings above)" );
 		}
 	} else {
@@ -1707,7 +1722,7 @@ void R_ReadTiledPixels( int width, int height, byte *buffer, renderView_t *ref =
 
 			// DUDE GL3 backend: capture GL_BACK at swap time — front-buffer
 			// reads below return garbage on composited desktops
-			if ( glConfig.coreProfile ) {
+			if ( glConfig.rhiBackend ) {
 				RB_RHI_CaptureNextSwap( temp );
 			}
 
@@ -1728,7 +1743,7 @@ void R_ReadTiledPixels( int width, int height, byte *buffer, renderView_t *ref =
 				h = height - yo;
 			}
 
-			if ( glConfig.coreProfile ) {
+			if ( glConfig.rhiBackend ) {
 				// already filled by the executor at swap; nothing to read here
 			} else if ( glConfig.isWayland ) {
 				// DG: Native Wayland (=> not XWayland) doesn't seem to support reading
