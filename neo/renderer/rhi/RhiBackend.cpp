@@ -1573,14 +1573,6 @@ void RB_RHI_InvalidateGlassProbe( int area ) {
 static idImage *RB_RHI_GlassProbeForSurface( const viewDef_t *viewDef, const drawSurf_t *surf,
                                              float *probeAvg ) {
 	*probeAvg = -1.0f;
-	// Vulkan: probes are inert until M6 — the bake path captures through
-	// TakeScreenshot, which can't read the VK scene image yet, so auto-bakes
-	// would write black cubemaps into fs_savepath and poison glass on every
-	// backend. Glass keeps the vanilla env/gen* cube reflection instead.
-	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		RB_RHI_LogOnce( "VK: glass room probes disabled until the M6 capture path (vanilla env cube instead)" );
-		return NULL;
-	}
 	if ( !r_ssrGlassProbes.GetBool() || !tr.primaryWorld ) {
 		return NULL;
 	}
@@ -2621,4 +2613,14 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	}
 
 	r->EndFrame();
+
+	// M6: Vulkan swap capture (screenshots / tiled captures) — the GL path
+	// reads the back buffer in the RC_SWAP_BUFFERS case above; here the scene
+	// image still holds the completed frame after present, so read it back now
+	if ( vkMode && rbCaptureDest ) {
+		if ( !r->ReadPixelsRGB( rbCaptureDest, 0, 0, glConfig.vidWidth, glConfig.vidHeight ) ) {
+			RB_RHI_LogOnce( "VK: swap capture readback failed" );
+		}
+		rbCaptureDest = NULL;
+	}
 }

@@ -37,6 +37,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/RenderWorld_local.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/rhi/RHI.h"		// DUDE Phase 4 M6: capture readback on the Vulkan backend
 
 idRenderSystemLocal	tr;
 idRenderSystem	*renderSystem = &tr;
@@ -938,26 +939,25 @@ void idRenderSystemLocal::CaptureRenderToFile( const char *fileName, bool fixAlp
 	if ( !glConfig.isInitialized ) {
 		return;
 	}
-	// DUDE Phase 4 M1: no qgl under the Vulkan backend; the capture path moves
-	// to the RHI at M6 (screenshots milestone)
-	if ( qglReadPixels == NULL ) {
-		common->Warning( "CaptureRenderToFile: not supported on the Vulkan backend yet (M6)" );
-		return;
-	}
-
 	renderCrop_t *rc = &renderCrops[currentRenderCrop];
 
 	guiModel->EmitFullScreen();
 	guiModel->Clear();
 	R_IssueRenderCommands();
 
-	qglReadBuffer( GL_BACK );
-
 	// include extra space for OpenGL padding to word boundaries
 	int	c = ( rc->width + 3 ) * rc->height;
 	byte *data = (byte *)R_StaticAlloc( c * 3 );
 
-	qglReadPixels( rc->x, rc->y, rc->width, rc->height, GL_RGB, GL_UNSIGNED_BYTE, data );
+	if ( qglReadPixels != NULL ) {
+		qglReadBuffer( GL_BACK );
+		qglReadPixels( rc->x, rc->y, rc->width, rc->height, GL_RGB, GL_UNSIGNED_BYTE, data );
+	} else if ( !rhi::GetRHI()->ReadPixelsRGB( data, rc->x, rc->y, rc->width, rc->height ) ) {
+		// M6: the Vulkan backend reads the scene image back through the RHI
+		common->Warning( "CaptureRenderToFile: readback failed" );
+		R_StaticFree( data );
+		return;
+	}
 
 	byte *data2 = (byte *)R_StaticAlloc( c * 4 );
 

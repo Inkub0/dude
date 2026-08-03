@@ -240,6 +240,15 @@ public:
 	// command stream, ordered against this frame's earlier samples.
 	virtual void	UpdateTexture2D( ImageHandle dst, int w, int h, const void *pixels ) {}
 
+	// ---- readback (Phase 4 M6: screenshots / capture-to-file) ----
+	// Read an RGB rect of the last completed frame into dest, matching the
+	// glReadPixels(GL_RGB) contract the callers were written against: GL
+	// window coordinates (origin bottom-left), rows bottom-up and padded to
+	// 4-byte boundaries. Synchronous (screenshot-grade stall is fine).
+	// Default false = unsupported; the GL backends keep their literal
+	// glReadPixels paths.
+	virtual bool	ReadPixelsRGB( unsigned char *dest, int x, int y, int w, int h ) { return false; }
+
 	// ---- immediate-mode debug drawing (Chunk G) ----
 	// Draws a batch of interleaved verts { float xyz[3]; float st[2];
 	// byte rgba[4]; } (24 B, = imVert_t) as `primMode` (GL_LINES/POINTS/

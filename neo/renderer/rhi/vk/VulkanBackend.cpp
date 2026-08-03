@@ -142,6 +142,7 @@ public:
 	                                        int srcX, int srcY, int w, int h, bool depth );
 	virtual void	RetireImage( ImageHandle img );
 	virtual void	UpdateTexture2D( ImageHandle dst, int w, int h, const void *pixels );
+	virtual bool	ReadPixelsRGB( unsigned char *dest, int x, int y, int w, int h );
 	virtual void	DrawImmediate( const void *, int, unsigned int, const float[16], bool ) {}	// M6
 
 private:
@@ -2556,6 +2557,106 @@ void VulkanBackend::UpdateTexture2D( ImageHandle dst, int w, int h, const void *
 	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 		0, 0, NULL, 0, NULL, 1, &toRead );
 	rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+
+/*
+====================
+VulkanBackend::ReadPixelsRGB
+
+M6 screenshots: read a rect of the last completed frame out of the scene
+image (it keeps the frame between passes/frames, layout TRANSFER_SRC) into
+the glReadPixels(GL_RGB) layout the callers expect — GL window coords, rows
+bottom-up, padded to 4-byte boundaries. Synchronous by design: waits the
+queue idle, one-off copy through the upload command buffer, fence wait.
+====================
+*/
+bool VulkanBackend::ReadPixelsRGB( unsigned char *dest, int x, int y, int w, int h ) {
+	if ( device == VK_NULL_HANDLE || sceneColor == VK_NULL_HANDLE || !sceneEverWritten
+	     || dest == NULL || uploadCb == VK_NULL_HANDLE ) {
+		return false;
+	}
+	const int sceneW = (int)sceneExtent.width;
+	const int sceneH = (int)sceneExtent.height;
+	if ( x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > sceneW || y + h > sceneH ) {
+		// clamp like glReadPixels would; out-of-range rows stay untouched
+		if ( x < 0 ) { w += x; x = 0; }
+		if ( y < 0 ) { h += y; y = 0; }
+		if ( x + w > sceneW ) { w = sceneW - x; }
+		if ( y + h > sceneH ) { h = sceneH - y; }
+		if ( w <= 0 || h <= 0 ) {
+			return false;
+		}
+	}
+
+	// all rendering that wrote the image must be complete before we copy
+	vkQueueWaitIdle( gfxQueue );
+
+	VkBuffer buf = VK_NULL_HANDLE;
+	VmaAllocation alloc = NULL;
+	byte *mapped = NULL;
+	{
+		VkBufferCreateInfo bci = {};
+		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bci.size = (VkDeviceSize)w * h * 4;
+		bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		VmaAllocationCreateInfo aci = {};
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		VmaAllocationInfo info = {};
+		if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &buf, &alloc, &info ), "vmaCreateBuffer(readback)" ) ) {
+			return false;
+		}
+		mapped = (byte *)info.pMappedData;
+	}
+
+	vkResetCommandBuffer( uploadCb, 0 );
+	VkCommandBufferBeginInfo bi = {};
+	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer( uploadCb, &bi );
+
+	// make the color writes available to transfer reads (queue is idle, so
+	// this is a memory barrier, not an execution race)
+	VkMemoryBarrier mb = {};
+	mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+	mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	vkCmdPipelineBarrier( uploadCb,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL );
+
+	// GL bottom-left rect -> VK top-left row
+	VkBufferImageCopy c = {};
+	c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	c.imageSubresource.layerCount = 1;
+	c.imageOffset = { x, sceneH - y - h, 0 };
+	c.imageExtent = { (uint32_t)w, (uint32_t)h, 1 };
+	vkCmdCopyImageToBuffer( uploadCb, sceneColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &c );
+
+	vkEndCommandBuffer( uploadCb );
+	VkSubmitInfo si = {};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &uploadCb;
+	vkResetFences( device, 1, &uploadFence );
+	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+
+	// RGBA top-down -> RGB bottom-up with 4-byte row padding (the GL contract)
+	const int dstRow = ( w * 3 + 3 ) & ~3;
+	for ( int r = 0; r < h; r++ ) {
+		const byte *src = mapped + (size_t)( h - 1 - r ) * w * 4;
+		byte *dst = dest + (size_t)r * dstRow;
+		for ( int i = 0; i < w; i++ ) {
+			dst[i * 3 + 0] = src[i * 4 + 0];
+			dst[i * 3 + 1] = src[i * 4 + 1];
+			dst[i * 3 + 2] = src[i * 4 + 2];
+		}
+	}
+
+	vmaDestroyBuffer( vma, buf, alloc );
+	return true;
 }
 
 /*
