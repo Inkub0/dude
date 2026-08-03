@@ -32,6 +32,10 @@ namespace rhi {
 enum stageKind_t {
 	SK_GENERIC,			// old-style stage through the generic program
 	SK_CUSTOM_ARB,		// newStage drawn with its transpiled ARB program pair
+	SK_BUILTIN_ARB,		// newStage drawn with a hand-translated builtin (Vulkan,
+						// Phase 4 M5): the stock heatHaze/colorProcess programs
+						// map to their crossdiff-verified GLSL translations
+						// (RenderParams model) since there is no runtime SPIR-V
 	SK_TEXGEN,			// fixed-function texgen (skybox/reflection/portal sky),
 						// drawn through a dedicated program keyed by `texgen`
 	SK_SKIP				// not renderable yet (reason logged once at IR build)

@@ -137,7 +137,11 @@ public:
 	// ---- drawing ----
 	virtual void	BindPipeline( const PipelineDesc &desc );
 	virtual void	Draw( const DrawArgs &args );
-	virtual void	CopyFramebufferToImage( ImageHandle, int, int ) {}		// M5
+	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth );
+	virtual void	CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
+	                                        int srcX, int srcY, int w, int h, bool depth );
+	virtual void	RetireImage( ImageHandle img );
+	virtual void	UpdateTexture2D( ImageHandle dst, int w, int h, const void *pixels );
 	virtual void	DrawImmediate( const void *, int, unsigned int, const float[16], bool ) {}	// M6
 
 private:
@@ -232,6 +236,7 @@ private:
 	static const int UBO_RING_SIZE  = 16 << 20;		// per frame slot (GL3 sizes)
 	static const int VERT_RING_SIZE = 4 << 20;
 	static const int IDX_RING_SIZE  = 2 << 20;
+	static const int STAGING_RING_SIZE = 2 << 20;	// mid-frame texture updates (cinematics)
 	static const int MAX_FRAME_SETS = 4096;			// per-draw texture sets per frame
 
 	struct RingBuf {
@@ -246,6 +251,10 @@ private:
 	RingBuf						uboRing[FRAMES_IN_FLIGHT];
 	RingBuf						vertRing[FRAMES_IN_FLIGHT];
 	RingBuf						idxRing[FRAMES_IN_FLIGHT];
+	// M5: transfer-source ring for mid-frame texture updates (cinematic
+	// frames); grows like the geometry rings. A 512x512 RGB video frame is
+	// 1 MB, so 2 MB covers the common case without growth.
+	RingBuf						stagingRing[FRAMES_IN_FLIGHT];
 	int							streamGen = 0;
 	int							uboAlign = 256;
 	bool						ringOverflowWarned = false;
@@ -270,8 +279,25 @@ private:
 		VkImageView		view = VK_NULL_HANDLE;
 		VkSampler		sampler = VK_NULL_HANDLE;		// borrowed from the sampler cache
 		bool			live = false;
+		// M5 capture/cinematic images transition between transfer-dst and
+		// shader-read mid-frame; regular textures stay SHADER_READ_ONLY.
+		// UNDEFINED means never written (first transition discards).
+		VkImageLayout	layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		bool			isDepth = false;				// capture: scene depth format
+		int				width = 0, height = 0;
 	};
 	std::vector<ImageRec>		imageTable;				// handle = index + 1
+
+	// M5: mid-frame image destruction (capture/cinematic reallocation). The
+	// handle's slot is cleared immediately; the Vulkan objects live until this
+	// frame slot's next fence wait (same lifetime rule as retiredRings).
+	struct RetiredImage {
+		VkImage			image;
+		VmaAllocation	alloc;
+		VkImageView		view;
+	};
+	std::vector<RetiredImage>	retiredImages[FRAMES_IN_FLIGHT];
+	void						DrainRetiredImages( int slot );
 
 	struct ShaderRec {
 		idStr			name;
@@ -934,9 +960,9 @@ bool VulkanBackend::CreateSceneTargets() {
 		return false;
 	}
 
-	// depth-stencil image
+	// depth-stencil image (TRANSFER_SRC: the M5 _currentDepth capture copy)
 	ici.format = sceneDepthFormat;
-	ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+	ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	if ( !vkCheck( vmaCreateImage( vma, &ici, &vci, &sceneDepth, &sceneDepthAlloc, NULL ), "vmaCreateImage(scene depth)" ) ) {
 		return false;
 	}
@@ -1309,9 +1335,11 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	// M2: this slot's GPU work is fenced off — reset its rings (the
 	// StreamGeneration contract) and its per-draw descriptor pool
 	DrainRetiredRings( frameIndex );	// buffers replaced by GrowRing last time this slot ran
+	DrainRetiredImages( frameIndex );	// capture/cinematic images replaced by RetireImage
 	uboRing[frameIndex].offset = 0;
 	vertRing[frameIndex].offset = 0;
 	idxRing[frameIndex].offset = 0;
+	stagingRing[frameIndex].offset = 0;
 	streamGen++;
 	if ( framePool[frameIndex] ) {
 		vkResetDescriptorPool( device, framePool[frameIndex], 0 );
@@ -1560,12 +1588,13 @@ bool VulkanBackend::CreateM2Resources() {
 		VkBufferUsageFlags usage;
 	};
 	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
-		const ringSetup_t setups[3] = {
+		const ringSetup_t setups[4] = {
 			{ &uboRing[slot],  UBO_RING_SIZE,  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT },
 			{ &vertRing[slot], VERT_RING_SIZE, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT },
 			{ &idxRing[slot],  IDX_RING_SIZE,  VK_BUFFER_USAGE_INDEX_BUFFER_BIT },
+			{ &stagingRing[slot], STAGING_RING_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT },
 		};
-		for ( int i = 0; i < 3; i++ ) {
+		for ( int i = 0; i < 4; i++ ) {
 			VkBufferCreateInfo bci = {};
 			bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 			bci.size = (VkDeviceSize)setups[i].size;
@@ -1779,8 +1808,9 @@ void VulkanBackend::DestroyM2Resources() {
 
 	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
 		DrainRetiredRings( slot );		// device is idle here
-		RingBuf *rings[3] = { &uboRing[slot], &vertRing[slot], &idxRing[slot] };
-		for ( int i = 0; i < 3; i++ ) {
+		DrainRetiredImages( slot );
+		RingBuf *rings[4] = { &uboRing[slot], &vertRing[slot], &idxRing[slot], &stagingRing[slot] };
+		for ( int i = 0; i < 4; i++ ) {
 			if ( rings[i]->buffer ) {
 				vmaDestroyBuffer( vma, rings[i]->buffer, rings[i]->alloc );
 			}
@@ -2197,6 +2227,8 @@ ImageHandle VulkanBackend::CreateTexture2D( int w, int h, const void *pixels,
 	}
 	rec.sampler = GetSampler( textureFilter, textureRepeat, levels.size() > 1 );
 	rec.live = true;
+	rec.width = w;
+	rec.height = h;
 
 	// reuse a freed slot when one exists
 	for ( size_t i = 0; i < imageTable.size(); i++ ) {
@@ -2225,6 +2257,302 @@ void VulkanBackend::DestroyImage( ImageHandle h ) {
 	if ( rec.view )  { vkDestroyImageView( device, rec.view, NULL ); }
 	if ( rec.image ) { vmaDestroyImage( vma, rec.image, rec.alloc ); }
 	rec = ImageRec();
+}
+
+/*
+====================
+VulkanBackend::RetireImage / DrainRetiredImages
+
+Mid-frame image destruction (capture/cinematic size changes): the slot is
+freed immediately, the Vulkan objects wait for this frame slot's fence —
+descriptor sets recorded earlier this frame still reference the old view.
+====================
+*/
+void VulkanBackend::RetireImage( ImageHandle h ) {
+	if ( device == VK_NULL_HANDLE || h < 1 || h > (ImageHandle)imageTable.size() || !imageTable[h - 1].live ) {
+		return;
+	}
+	ImageRec &rec = imageTable[h - 1];
+	retiredImages[frameIndex].push_back( { rec.image, rec.alloc, rec.view } );
+	rec = ImageRec();
+}
+
+void VulkanBackend::DrainRetiredImages( int slot ) {
+	for ( size_t i = 0; i < retiredImages[slot].size(); i++ ) {
+		const RetiredImage &r = retiredImages[slot][i];
+		if ( r.view )  { vkDestroyImageView( device, r.view, NULL ); }
+		if ( r.image ) { vmaDestroyImage( vma, r.image, r.alloc ); }
+	}
+	retiredImages[slot].clear();
+}
+
+/*
+====================
+VulkanBackend::CreateCaptureImage
+
+Sampleable copy target for the M5 screen captures: RGBA8 (linear/clamp — the
+filtering GL sets after every capture) or the scene's depth-stencil format
+(nearest, sampled through a depth-aspect view). Contents are undefined until
+the first CopyFramebufferToImage.
+====================
+*/
+ImageHandle VulkanBackend::CreateCaptureImage( int w, int h, bool depth ) {
+	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
+		return 0;
+	}
+	if ( depth && sceneDepthFormat == VK_FORMAT_UNDEFINED ) {
+		return 0;
+	}
+
+	VkImageCreateInfo ici = {};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = depth ? sceneDepthFormat : VK_FORMAT_R8G8B8A8_UNORM;
+	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	VkImage image = VK_NULL_HANDLE;
+	VmaAllocation alloc = NULL;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &image, &alloc, NULL ), "vmaCreateImage(capture)" ) ) {
+		return 0;
+	}
+
+	ImageRec rec;
+	rec.image = image;
+	rec.alloc = alloc;
+	{
+		VkImageViewCreateInfo vi = {};
+		vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		vi.image = image;
+		vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		vi.format = ici.format;
+		vi.subresourceRange.aspectMask = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+		vi.subresourceRange.levelCount = 1;
+		vi.subresourceRange.layerCount = 1;
+		if ( !vkCheck( vkCreateImageView( device, &vi, NULL, &rec.view ), "vkCreateImageView(capture)" ) ) {
+			vmaDestroyImage( vma, image, alloc );
+			return 0;
+		}
+	}
+	rec.sampler = GetSampler( depth ? TF_NEAREST : TF_LINEAR, TR_CLAMP, false );
+	rec.live = true;
+	rec.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+	rec.isDepth = depth;
+	rec.width = w;
+	rec.height = h;
+
+	for ( size_t i = 0; i < imageTable.size(); i++ ) {
+		if ( !imageTable[i].live ) {
+			imageTable[i] = rec;
+			return (ImageHandle)( i + 1 );
+		}
+	}
+	imageTable.push_back( rec );
+	return (ImageHandle)imageTable.size();
+}
+
+/*
+====================
+VulkanBackend::CopyFramebufferToImage
+
+Copy a scene-image rect into a capture image, mid-pass: the render pass is
+suspended (every pass variant leaves the color image TRANSFER_SRC_OPTIMAL)
+and the next draw's EnsureScenePass resumes with the load variant.
+
+src rect arrives in GL window coordinates (origin bottom-left). Color copies
+blit with a vertical flip so the capture matches GL's bottom-up texture
+memory — explicit-texcoord consumers (the player-view _scratch warps) then
+sample identically to GL. Depth copies stay native top-down: their consumers
+address by gl_FragCoord, which is top-down here, so native orientation is the
+self-consistent one (and depth blits can't flip anyway).
+====================
+*/
+void VulkanBackend::CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
+                                            int srcX, int srcY, int w, int h, bool depth ) {
+	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame || !sceneEverWritten ) {
+		return;
+	}
+	if ( dst < 1 || dst > (ImageHandle)imageTable.size() || !imageTable[dst - 1].live ) {
+		return;
+	}
+	ImageRec &rec = imageTable[dst - 1];
+	if ( rec.isDepth != depth ) {
+		return;
+	}
+
+	const int sceneW = (int)sceneExtent.width;
+	const int sceneH = (int)sceneExtent.height;
+	// clip against the scene image (GL coords) and the destination
+	if ( srcX < 0 ) { w += srcX; dstX -= srcX; srcX = 0; }
+	if ( srcY < 0 ) { h += srcY; dstY -= srcY; srcY = 0; }
+	if ( srcX + w > sceneW ) { w = sceneW - srcX; }
+	if ( srcY + h > sceneH ) { h = sceneH - srcY; }
+	if ( dstX + w > rec.width )  { w = rec.width - dstX; }
+	if ( dstY + h > rec.height ) { h = rec.height - dstY; }
+	if ( w <= 0 || h <= 0 || dstX < 0 || dstY < 0 ) {
+		return;
+	}
+	const int vkTop = sceneH - srcY - h;	// GL bottom-left rect -> VK top-left row
+
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );
+		insideScenePass = false;
+	}
+
+	// destination -> TRANSFER_DST (orders after every prior read, this frame's
+	// recorded draws and earlier submitted frames alike)
+	VkImageMemoryBarrier toDst = {};
+	toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	toDst.srcAccessMask = rec.layout == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_READ_BIT;
+	toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	toDst.oldLayout = rec.layout;
+	toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	toDst.image = rec.image;
+	toDst.subresourceRange.aspectMask = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+	toDst.subresourceRange.levelCount = 1;
+	toDst.subresourceRange.layerCount = 1;
+	vkCmdPipelineBarrier( cb,
+		rec.layout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst );
+
+	if ( !depth ) {
+		// scene color sits in TRANSFER_SRC_OPTIMAL between passes; flip while
+		// blitting (reversed src y corners) to reach GL's bottom-up layout
+		VkImageBlit blit = {};
+		blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		blit.srcSubresource.layerCount = 1;
+		blit.srcOffsets[0] = { srcX, vkTop + h, 0 };
+		blit.srcOffsets[1] = { srcX + w, vkTop, 1 };
+		blit.dstSubresource = blit.srcSubresource;
+		blit.dstOffsets[0] = { dstX, dstY, 0 };
+		blit.dstOffsets[1] = { dstX + w, dstY + h, 1 };
+		vkCmdBlitImage( cb, sceneColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			rec.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST );
+	} else {
+		// scene depth stays DEPTH_STENCIL_ATTACHMENT_OPTIMAL between passes;
+		// round-trip it through TRANSFER_SRC for the copy
+		VkImageMemoryBarrier srcBar = {};
+		srcBar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		srcBar.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		srcBar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		srcBar.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		srcBar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		srcBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		srcBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		srcBar.image = sceneDepth;
+		srcBar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+		srcBar.subresourceRange.levelCount = 1;
+		srcBar.subresourceRange.layerCount = 1;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			0, 0, NULL, 0, NULL, 1, &srcBar );
+
+		VkImageCopy c = {};
+		c.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		c.srcSubresource.layerCount = 1;
+		c.srcOffset = { srcX, vkTop, 0 };
+		c.dstSubresource = c.srcSubresource;
+		c.dstOffset = { dstX, dstY, 0 };
+		c.extent = { (uint32_t)w, (uint32_t)h, 1 };
+		vkCmdCopyImage( cb, sceneDepth, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			rec.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c );
+
+		VkImageMemoryBarrier srcBack = srcBar;
+		srcBack.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		srcBack.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		srcBack.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		srcBack.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+			0, 0, NULL, 0, NULL, 1, &srcBack );
+	}
+
+	// destination -> SHADER_READ for the stages that sample it
+	VkImageMemoryBarrier toRead = toDst;
+	toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		0, 0, NULL, 0, NULL, 1, &toRead );
+	rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+
+/*
+====================
+VulkanBackend::UpdateTexture2D
+
+Full same-size re-upload of an RGBA8 texture inside the frame's command
+stream (cinematic frames). Staged through the per-slot transfer ring; the
+in-cb barriers order the write against this frame's earlier samples and any
+still-executing prior frame.
+====================
+*/
+void VulkanBackend::UpdateTexture2D( ImageHandle dst, int w, int h, const void *pixels ) {
+	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame || pixels == NULL ) {
+		return;
+	}
+	if ( dst < 1 || dst > (ImageHandle)imageTable.size() || !imageTable[dst - 1].live ) {
+		return;
+	}
+	ImageRec &rec = imageTable[dst - 1];
+	if ( rec.width != w || rec.height != h ) {
+		return;		// size changes recreate the image (caller's contract)
+	}
+
+	const int bytes = w * h * 4;
+	BufferHandle stagingHandle = 0;
+	int stagingOfs = AllocFromRing( stagingRing[frameIndex], pixels, bytes, 16, 0, &stagingHandle );
+	VkBuffer staging = LookupBuffer( stagingHandle );
+	if ( staging == VK_NULL_HANDLE ) {
+		return;
+	}
+
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );
+		insideScenePass = false;
+	}
+
+	VkImageMemoryBarrier toDst = {};
+	toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	toDst.srcAccessMask = rec.layout == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_READ_BIT;
+	toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	toDst.oldLayout = rec.layout;
+	toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	toDst.image = rec.image;
+	toDst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	toDst.subresourceRange.levelCount = 1;
+	toDst.subresourceRange.layerCount = 1;
+	vkCmdPipelineBarrier( cb,
+		rec.layout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst );
+
+	VkBufferImageCopy c = {};
+	c.bufferOffset = (VkDeviceSize)stagingOfs;
+	c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	c.imageSubresource.layerCount = 1;
+	c.imageExtent = { (uint32_t)w, (uint32_t)h, 1 };
+	vkCmdCopyBufferToImage( cb, staging, rec.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c );
+
+	VkImageMemoryBarrier toRead = toDst;
+	toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		0, 0, NULL, 0, NULL, 1, &toRead );
+	rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 /*

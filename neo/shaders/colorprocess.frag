@@ -10,7 +10,9 @@ VARY(1) in vec4 var_TargetScaled;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-    vec2 screenTc = gl_FragCoord.xy * u_windowCoord.xy * u_screenCorrection.xy;
+    // u_windowCoord.w flips the row on Vulkan (top-down gl_FragCoord vs the
+    // GL-layout _currentRender capture); 0 on GL, so the term is inert there
+    vec2 screenTc = ( gl_FragCoord.xy * u_windowCoord.xy + vec2( 0.0, u_windowCoord.w ) ) * u_screenCorrection.xy;
 
     vec4 src = texture(u_currentRender, screenTc);
 

@@ -43,7 +43,9 @@ void main() {
 	 // on black, z = knee luminance -> full), localParam1.xy (1/_currentRender size).
 	 // See RB_RHI_RenderSoftParticleStage.
 	 if (u_localParam0.x > 0.5) {
-		 vec2 sceneTc = gl_FragCoord.xy * u_localParam1.xy;
+		 // u_localParam1.w flips the row on Vulkan (top-down gl_FragCoord vs the
+		 // GL-layout _currentRender capture); 0 on GL, so the term is inert there
+		 vec2 sceneTc = gl_FragCoord.xy * u_localParam1.xy + vec2(0.0, u_localParam1.w);
 		 vec3 bg = texture(u_sceneColor, sceneTc).rgb;
 		 float bgLum = dot(bg, vec3(0.299, 0.587, 0.114));
 		 float lit = clamp(bgLum / u_localParam0.z, 0.0, 1.0);   // 0 on black -> 1 at knee

@@ -214,8 +214,31 @@ public:
 	virtual void	BindPipeline( const PipelineDesc &desc ) = 0;
 	virtual void	Draw( const DrawArgs &args ) = 0;
 
-	// ---- screen copies (_currentRender / _currentDepth points) ----
-	virtual void	CopyFramebufferToImage( ImageHandle dst, int w, int h ) = 0;
+	// ---- screen copies (_currentRender / _currentDepth / _scratch, Phase 4 M5) ----
+	// The GL3 backend keeps the literal qglCopyTexSubImage2D path in idImage
+	// (default no-ops here); the Vulkan backend implements captures as copies
+	// out of the offscreen scene image.
+	//
+	// CreateCaptureImage allocates a sampleable copy target: RGBA8 color
+	// (linear, clamp-to-edge — the capture filtering GL sets) or the scene's
+	// depth format (nearest). Contents are undefined until the first copy.
+	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth ) { return 0; }
+	// Copy a framebuffer rect into a capture image. src rect is in GL window
+	// coordinates (origin bottom-left, like qglCopyTexSubImage2D); dst is in
+	// texel rows from the start of the image. Color copies convert to GL's
+	// bottom-up memory layout so explicit-texcoord consumers (the player-view
+	// _scratch warps) sample identically to GL; depth copies stay in native
+	// orientation (their consumers address by gl_FragCoord, which is native
+	// per backend). Callable mid-pass — the backend suspends/resumes.
+	virtual void	CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
+	                                        int srcX, int srcY, int w, int h, bool depth ) {}
+	// Destroy that never stalls mid-frame: queued until no in-flight frame can
+	// reference the image (capture/cinematic reallocation).
+	virtual void	RetireImage( ImageHandle img ) { DestroyImage( img ); }
+	// Full re-upload of an existing same-size RGBA8 texture, mid-frame safe
+	// (cinematic frames): staged through a per-frame ring inside the frame's
+	// command stream, ordered against this frame's earlier samples.
+	virtual void	UpdateTexture2D( ImageHandle dst, int w, int h, const void *pixels ) {}
 
 	// ---- immediate-mode debug drawing (Chunk G) ----
 	// Draws a batch of interleaved verts { float xyz[3]; float st[2];

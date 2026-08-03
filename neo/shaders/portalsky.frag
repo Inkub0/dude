@@ -11,6 +11,8 @@ VARY(0) in vec2 var_TexCoord;  // unused (kept to match the VP output)
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-	vec2 screenTc = gl_FragCoord.xy * u_windowCoord.xy * u_screenCorrection.xy;
+	// u_windowCoord.w flips the row on Vulkan (top-down gl_FragCoord vs the
+	// GL-layout _currentRender capture); 0 on GL, so the term is inert there
+	vec2 screenTc = ( gl_FragCoord.xy * u_windowCoord.xy + vec2( 0.0, u_windowCoord.w ) ) * u_screenCorrection.xy;
 	fragColor = vec4( texture( u_currentRender, screenTc ).xyz, 1.0 );
 }
