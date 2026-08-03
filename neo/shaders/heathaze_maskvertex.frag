@@ -26,7 +26,9 @@ void main() {
 	bump.x = bump.a;
 	vec2 localNormal = ( bump.xy * 2.0 - 1.0 ) * mask;
 
-	vec2 screenTc = gl_FragCoord.xy * u_windowCoord.xy;
+	// u_windowCoord.w flips the row on Vulkan (top-down gl_FragCoord vs the
+	// GL-layout _currentRender capture); 0 on GL, so the term is inert there
+	vec2 screenTc = gl_FragCoord.xy * u_windowCoord.xy + vec2( 0.0, u_windowCoord.w );
 	screenTc = clamp( localNormal * var_DeformMag + screenTc, 0.0, 1.0 );
 	screenTc *= u_screenCorrection.xy;
 

@@ -866,7 +866,8 @@ public:
 		                 (const GLvoid *)( (const GLbyte *)NULL + args.firstIndex * sizeof( unsigned int ) ) );
 	}
 
-	virtual void CopyFramebufferToImage( ImageHandle, int, int )			{}	// Chunk F
+	// captures stay on the literal qglCopyTexSubImage2D path in idImage; the
+	// RHI capture entry points (M5) keep their default no-ops here
 
 	virtual void DrawImmediate( const void *verts, int numVerts, unsigned int primMode,
 	                            const float mvp[16], bool textured ) {

@@ -2268,6 +2268,14 @@ void R_BakeGlassProbe_f( const idCmdArgs &args ) {
 	const char	*extensions[6] = { "_px.tga", "_nx.tga", "_py.tga", "_ny.tga",
 		"_pz.tga", "_nz.tga" };
 
+	// Vulkan: TakeScreenshot can't read the scene image until M6 — a bake here
+	// would write black cubemaps into fs_savepath that then poison glass on
+	// every backend (they load like real probes)
+	if ( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		common->Printf( "bakeGlassProbe: not supported on the Vulkan backend yet (M6)\n" );
+		return;
+	}
+
 	const bool force = args.Argc() > 1 && idStr::Icmp( args.Argv( 1 ), "force" ) == 0;
 	if ( !tr.primaryView || !tr.primaryWorld ) {
 		common->Printf( "bakeGlassProbe: no primary view\n" );

@@ -254,16 +254,67 @@ Original plan:
   identical; Carmack's reverse (default) and z-pass both exercised; Mars City runs
   validation-clean (3000+ frames). GL3 regression clean.
 
-### M5 — Translucents, fog, texgen, screen copies
-- Blend/translucent stages (`generic`), fog + blend lights, texgen stages (skybox,
-  portal sky, cube reflections/`environment`, `bumpyenvironment`), heatHaze family.
-- `CopyFramebufferToImage` = `vkCmdCopyImage` out of the offscreen scene image
-  (`_currentRender`/`_currentDepth`); cinematic scratch textures (per-frame
-  `UploadScratch` → ring-buffered staging upload).
-- Subviews/mirrors (nested view rendering into the same scene image with scissor,
-  as GL3 does).
-- **Verify:** glass, fog volumes, sky, mirrors, in-game video screens all correct;
-  three-way spot checks vs opengl3/legacy.
+### M5 — Translucents, fog, texgen, screen copies  **[BUILT 2026-08-03 — pending the user's in-game look]**
+- **[done] Screen captures.** The RHI grew `CreateCaptureImage` / an 8-arg
+  `CopyFramebufferToImage` / `RetireImage` / `UpdateTexture2D` (GL3 keeps its
+  literal qglCopyTexSubImage2D path; the defaults no-op). On Vulkan,
+  `idImage::CopyFramebuffer/CopyDepthbuffer/UploadScratch` route to them with
+  the same POT-oversize bookkeeping as GL. **Orientation contract:** the scene
+  image is top-down (negative-height viewport keeps GL matrices), so *color*
+  captures blit with a vertical flip into GL's bottom-up memory layout —
+  explicit-texcoord consumers (the player-view `_scratch` warps: double vision,
+  berserk, tunnel vision) sample byte-identically to GL. gl_FragCoord-based
+  consumers add `u_windowCoord.w` (or `u_localParam1.w`) to the row term — 0 on
+  GL, `vidHeight/h` on VK (portalsky, heathaze_mask/maskvertex, colorprocess,
+  softparticle's smoke-dark tap). *Depth* captures stay native top-down
+  (their only consumers address by fragCoord, which is native per backend; and
+  `RB_RHI_SpaceMvp`'s `z' = 0.5(z+w)` remap makes VK window depth bit-identical
+  to GL, so softparticle's depth constants hold unchanged). Copies run mid-pass:
+  the render pass suspends (color already sits in TRANSFER_SRC between passes,
+  depth round-trips through TRANSFER_SRC), `EnsureScenePass` resumes.
+  `idImage::rhiCaptured` distinguishes "really captured" from demand-load
+  leftovers (which set uploadWidth under VK).
+- **[done] Mid-frame image lifetime:** `RetireImage` + per-slot retired-image
+  lists (the retiredRings pattern) — capture/cinematic reallocation never
+  stalls and never frees views this frame's recorded descriptor sets still use.
+- **[done] Cinematics:** first frame / size change recreates the texture
+  (blocking upload — new image, nothing references it); steady-state frames
+  restage through a new per-slot TRANSFER_SRC ring (2 MB, grows) with in-cb
+  barriers ordering against earlier samples. Cube-map cinematics warn once
+  (unused by stock content). `RB_RHI_BindStageImage` runs the full
+  `ImageForTime` → `UploadScratch` flow under VK.
+- **[done] Fog + blend lights ungated:** `RB_RHI_FogAllLights` runs under VK —
+  the chains already drove VK-aware `RB_RHI_BindUnit`; they now fill
+  `DrawArgs` via `RB_RHI_VkTextures` and the raw stencil enable/disable is
+  qgl-guarded (VK pipelines carry SS_DISABLED anyway).
+- **[done] Texgen stages ungated:** skybox/wobblesky/diffuse-cube/reflect-cube
+  bind their cube images through `DrawArgs::textures[0]` (the descriptor
+  writer uses each image's own view, cube views included; M4's
+  `CreateTextureCube` supplies them), bumpyenvironment adds the bump map on
+  unit 1. TG_SCREEN got a correctness fix **on both backends**: mirror/xray
+  stages (`mirrorRenderMap` sets TG_SCREEN + `texture.dynamic`) now sample
+  their own subview capture (`_scratch`) as legacy did, not `_currentRender`.
+- **[done] Subviews/mirrors:** `RC_COPY_RENDER` ungated (mirror/remote/xray
+  captures land through the VK copy), and the `CropRenderSize`/`UnCrop` M4
+  no-op gates are removed — cropped re-renders + captures work for real, which
+  restores the damage double-vision warp (and berserk/tunnel vision) on Vulkan.
+- **[done] Custom ARB via hand-translated builtins:** no runtime SPIR-V yet;
+  instead the stock programs map to their Phase-2 hand translations
+  (crossdiff-verified 120/120): heatHaze/WithMask/WithMaskAndVertex →
+  `heathaze*`, colorProcess → `colorprocess`. New `SK_BUILTIN_ARB` stage kind +
+  `RB_RHI_RenderBuiltinArbStage` (RenderParams model: vertexParms →
+  u_localParam0/1, fragmentProgramImages → units, capture images must be
+  rhiCaptured). Covers the base game; d3xp customs (enviroSuit, flare,
+  motionBlur, glasswarp, bloodOrb, portalSky) still skip with a warning —
+  runtime SPIR-V arrives with the d3xp backend flip.
+- **[done] Soft particles ungated** (the `_currentDepth` capture is real now);
+  the smoke-dark blend samples its GL-layout color capture through the same
+  flip term.
+- **Verified headless:** alphalabs1 lockstep A/B vs GL3 structurally identical
+  (5.2/255 vs a lossy-JPEG reference + lamp-flicker phase; M4's TGA metric was
+  0.87); mars_city1 runs validation-clean 5300+ frames with video screens and
+  cinematics live; GL3 renders normally after the shared-path edits (flip
+  terms are inert at w=0 on GL). **Pending: the user's in-game look.**
 
 ### M6 — Debug tools, screenshots, ImGui
 - `DrawImmediate` (the 24-byte imVert_t contract) for `r_showTris`/`r_showNormals`/…

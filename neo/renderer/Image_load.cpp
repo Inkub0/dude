@@ -1892,6 +1892,7 @@ void idImage::PurgeImage() {
 		rhi::GetRHI()->DestroyImage( rhiHandle );
 		rhiHandle = 0;
 	}
+	rhiCaptured = false;
 
 	// clear all the current binding caches, so the next bind will do a real one
 	for ( int i = 0 ; i < MAX_MULTITEXTURE_UNITS ; i++ ) {
@@ -2075,6 +2076,49 @@ CopyFramebuffer
 ====================
 */
 void idImage::CopyFramebuffer( int x, int y, int imageWidth, int imageHeight, bool useOversizedBuffer ) {
+	// DUDE Phase 4 M5: Vulkan captures copy out of the offscreen scene image.
+	// Same POT-oversize bookkeeping as the GL path below (the shaders' NPOT
+	// correction factors derive from uploadWidth/Height); always RGBA8 — the
+	// HDR float capture arrives with the M7 enhancement port.
+	if ( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		if ( cvarSystem->GetCVarBool( "g_lowresFullscreenFX" ) ) {
+			imageWidth = 512;
+			imageHeight = 512;
+		}
+		int	potWidth = MakePowerOfTwo( imageWidth );
+		int	potHeight = MakePowerOfTwo( imageHeight );
+		GetDownsize( imageWidth, imageHeight );
+		GetDownsize( potWidth, potHeight );
+
+		rhi::RHI *r = rhi::GetRHI();
+		const bool wrongSize = useOversizedBuffer
+			? ( uploadWidth < potWidth || uploadHeight < potHeight )
+			: ( uploadWidth != potWidth || uploadHeight != potHeight );
+		if ( rhiHandle == 0 || !rhiCaptured || wrongSize ) {
+			if ( rhiHandle ) {
+				r->RetireImage( rhiHandle );	// mid-frame safe (demand-load leftovers, resizes)
+			}
+			rhiHandle = r->CreateCaptureImage( potWidth, potHeight, false );
+			rhiCaptured = rhiHandle != 0;
+			type = TT_2D;
+			uploadWidth = potWidth;
+			uploadHeight = potHeight;
+			internalFormat = GL_RGB8;
+		}
+		if ( rhiHandle ) {
+			r->CopyFramebufferToImage( rhiHandle, 0, 0, x, y, imageWidth, imageHeight, false );
+			// duplicate an edge row/column when the content is NPOT, fixing bilerps
+			if ( imageWidth != potWidth ) {
+				r->CopyFramebufferToImage( rhiHandle, imageWidth, 0, x + imageWidth - 1, y, 1, imageHeight, false );
+			}
+			if ( imageHeight != potHeight ) {
+				r->CopyFramebufferToImage( rhiHandle, 0, imageHeight, x, y + imageHeight - 1, imageWidth, 1, false );
+			}
+		}
+		backEnd.c_copyFrameBuffer++;
+		return;
+	}
+
 	Bind();
 
 	if ( cvarSystem->GetCVarBool( "g_lowresFullscreenFX" ) ) {
@@ -2168,6 +2212,36 @@ This should just be part of copyFramebuffer once we have a proper image type fie
 */
 void idImage::CopyDepthbuffer( int x, int y, int imageWidth, int imageHeight, bool useOversizedBuffer )
 {
+	// DUDE Phase 4 M5: Vulkan depth capture — a copy of the scene depth image
+	// (native top-down orientation; its consumers address by gl_FragCoord,
+	// which is top-down on this backend, so no flip — see the RHI contract)
+	if ( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		int	potWidth = MakePowerOfTwo( imageWidth );
+		int	potHeight = MakePowerOfTwo( imageHeight );
+		GetDownsize( imageWidth, imageHeight );
+		GetDownsize( potWidth, potHeight );
+
+		rhi::RHI *r = rhi::GetRHI();
+		const bool wrongSize = useOversizedBuffer
+			? ( uploadWidth < potWidth || uploadHeight < potHeight )
+			: ( uploadWidth != potWidth || uploadHeight != potHeight );
+		if ( rhiHandle == 0 || !rhiCaptured || wrongSize ) {
+			if ( rhiHandle ) {
+				r->RetireImage( rhiHandle );
+			}
+			rhiHandle = r->CreateCaptureImage( potWidth, potHeight, true );
+			rhiCaptured = rhiHandle != 0;
+			type = TT_2D;
+			uploadWidth = potWidth;
+			uploadHeight = potHeight;
+			internalFormat = GL_DEPTH_COMPONENT24_ARB;
+		}
+		if ( rhiHandle ) {
+			r->CopyFramebufferToImage( rhiHandle, 0, 0, x, y, imageWidth, imageHeight, true );
+		}
+		return;
+	}
+
 	this->Bind();
 	// if the size isn't a power of 2, the image must be increased in size
 	int	potWidth, potHeight;
@@ -2212,6 +2286,37 @@ if rows = cols * 6, assume it is a cube map animation
 */
 void idImage::UploadScratch( const byte *data, int cols, int rows ) {
 	int			i;
+
+	// DUDE Phase 4 M5: Vulkan cinematic upload. Size changes recreate the
+	// texture (blocking upload, safe: nothing references the new image yet);
+	// steady-state frames restage inside the frame's command stream.
+	if ( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		if ( rows == cols * 6 ) {
+			static bool warned = false;
+			if ( !warned ) {
+				warned = true;
+				common->Warning( "VK: cube-map cinematics not implemented (unused by stock content)" );
+			}
+			return;
+		}
+		// keep the mean colour current for the emissive video-screen fill light
+		R_ImageAverageColorRGBA( data, cols * rows, averageColor );
+
+		rhi::RHI *r = rhi::GetRHI();
+		if ( rhiHandle == 0 || uploadWidth != cols || uploadHeight != rows || type != TT_2D ) {
+			if ( rhiHandle ) {
+				r->RetireImage( rhiHandle );
+			}
+			type = TT_2D;
+			rhiHandle = r->CreateTexture2D( cols, rows, data, TF_LINEAR, TR_REPEAT, false );
+			uploadWidth = cols;
+			uploadHeight = rows;
+			internalFormat = GL_RGB8;
+		} else {
+			r->UpdateTexture2D( rhiHandle, cols, rows, data );
+		}
+		return;
+	}
 
 	// if rows = cols * 6, assume it is a cube map animation
 	if ( rows == cols * 6 ) {

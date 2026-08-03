@@ -37,7 +37,6 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/RenderWorld_local.h"
 
 #include "renderer/tr_local.h"
-#include "renderer/rhi/RHI.h"		// DUDE Phase 4: crop gating on the Vulkan backend
 
 idRenderSystemLocal	tr;
 idRenderSystem	*renderSystem = &tr;
@@ -790,16 +789,6 @@ void	idRenderSystemLocal::CropRenderSize( int width, int height, bool makePowerO
 		return;
 	}
 
-	// DUDE Phase 4 M4: cropped renders exist to feed CaptureRenderToImage
-	// (double vision, berserk, tunnel vision), which the Vulkan backend can't
-	// serve until the M5 screen copies. Without the capture, the small cropped
-	// re-render just lands visibly in a corner of the frame (the "off-center
-	// scaled view" on taking damage) — no-op the crop instead, paired with the
-	// UnCrop gate below.
-	if ( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		return;
-	}
-
 	// close any gui drawing before changing the size
 	guiModel->EmitFullScreen();
 	guiModel->Clear();
@@ -877,11 +866,6 @@ UnCrop
 */
 void idRenderSystemLocal::UnCrop() {
 	if ( !glConfig.isInitialized ) {
-		return;
-	}
-
-	// paired with the CropRenderSize Vulkan gate above
-	if ( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
 		return;
 	}
 

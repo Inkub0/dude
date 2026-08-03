@@ -1172,9 +1172,9 @@ Binds the stage image (or current cinematic frame) on texture unit 0.
 =============
 */
 // sentinel from RB_RHI_BindStageImage's Vulkan branch: this stage samples an
-// engine capture image (_currentRender/_scratch/...) that can't exist until
-// the M5 screen copies — the caller must skip the draw (a dummy bind renders
-// the double-vision/berserk overlays as solid white/checker)
+// engine capture image (_currentRender/_scratch/...) that has never been
+// captured this session — the caller must skip the draw (a dummy bind would
+// render the double-vision/berserk overlays as solid white/checker)
 static const rhi::ImageHandle RHI_SKIP_STAGE_IMAGE = (rhi::ImageHandle)0xffffffffu;
 
 static rhi::ImageHandle RB_RHI_BindStageImage( const shaderStage_t *pStage, const float *regs, const viewDef_t *viewDef ) {
@@ -1182,10 +1182,20 @@ static rhi::ImageHandle RB_RHI_BindStageImage( const shaderStage_t *pStage, cons
 
 	// Vulkan backend (Phase 4 M2): no GL binds — demand-load through Bind()
 	// (a no-op upload-trigger there) and hand the RHI image handle back for
-	// DrawArgs::textures[0]. Cinematic frame uploads arrive at M5; until then
-	// they show the legacy "no data" black.
+	// DrawArgs::textures[0].
 	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
 		if ( texture->cinematic ) {
+			// M5: per-frame video upload through the RHI staging path
+			if ( r_skipDynamicTextures.GetBool() ) {
+				return globalImages->defaultImage->rhiHandle;
+			}
+			cinData_t cin = texture->cinematic->ImageForTime( (int)( 1000 * ( viewDef->floatTime + viewDef->renderView.shaderParms[11] ) ) );
+			if ( cin.image ) {
+				globalImages->cinematicImage->UploadScratch( cin.image, cin.imageWidth, cin.imageHeight );
+				if ( globalImages->cinematicImage->rhiHandle ) {
+					return globalImages->cinematicImage->rhiHandle;
+				}
+			}
 			globalImages->blackImage->Bind();
 			return globalImages->blackImage->rhiHandle;
 		}
@@ -1194,7 +1204,11 @@ static rhi::ImageHandle RB_RHI_BindStageImage( const shaderStage_t *pStage, cons
 		     || texture->image == globalImages->scratchImage
 		     || texture->image == globalImages->scratchImage2
 		     || texture->image == globalImages->accumImage ) {
-			return RHI_SKIP_STAGE_IMAGE;	// M5: no screen copies yet
+			// capture images (M5): valid only once something captured into them
+			if ( texture->image->rhiCaptured && texture->image->rhiHandle ) {
+				return texture->image->rhiHandle;
+			}
+			return RHI_SKIP_STAGE_IMAGE;
 		}
 		if ( texture->image ) {
 			texture->image->Bind();
@@ -1340,6 +1354,103 @@ static void RB_RHI_RenderCustomStage( rhi::RHI *r, const viewDef_t *viewDef, con
 
 /*
 =============
+RB_RHI_RenderBuiltinArbStage
+
+Vulkan (Phase 4 M5): a stock custom-ARB stage drawn with its hand-translated
+builtin program (heathaze family, colorprocess — see IR_VkBuiltinForArb).
+These use the RenderParams model: stage vertexParms land in u_localParam0/1
+and the fragmentProgramImages bind by unit, mirroring what the ARB programs
+read from program.local[0..1] and their fragment maps.
+=============
+*/
+static void RB_RHI_RenderBuiltinArbStage( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf,
+                                          const shaderStage_t *pStage, rhi::ShaderHandle program, const float mvp[16],
+                                          rhi::BufferHandle vb, int vertOfs, rhi::BufferHandle ib, int idxOfs ) {
+	const srfTriangles_t *tri = surf->geo;
+	const newShaderStage_t *ns = pStage->newStage;
+	const float *regs = surf->shaderRegisters;
+
+	// fragment program images by unit; capture images must hold a real capture
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	for ( int i = 0; i < ns->numFragmentProgramImages && i < 8; i++ ) {
+		idImage *img = ns->fragmentProgramImages[i];
+		if ( !img ) {
+			continue;
+		}
+		if ( img == globalImages->currentRenderImage || img == globalImages->currentDepthImage
+		     || img == globalImages->scratchImage || img == globalImages->scratchImage2
+		     || img == globalImages->accumImage ) {
+			if ( !img->rhiCaptured || !img->rhiHandle ) {
+				RB_RHI_LogOnce( "VK: builtin-ARB stage sampling a never-captured image skipped" );
+				return;
+			}
+			da.textures[i] = img->rhiHandle;
+		} else {
+			img->Bind();	// upload trigger only under Vulkan
+			da.textures[i] = img->rhiHandle;
+		}
+	}
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
+	memcpy( parms.modelViewMatrix, surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
+	memcpy( parms.projectionMatrix, viewDef->projectionMatrix, sizeof( parms.projectionMatrix ) );
+
+	// screen POT correction + window coords, as RB_SetProgramEnvironment feeds
+	// env[0]/env[1] to the ARB originals
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	const int potW = globalImages->currentRenderImage->uploadWidth > 0 ? globalImages->currentRenderImage->uploadWidth : w;
+	const int potH = globalImages->currentRenderImage->uploadHeight > 0 ? globalImages->currentRenderImage->uploadHeight : h;
+	parms.screenCorrection[0] = (float)w / potW;
+	parms.screenCorrection[1] = (float)h / potH;
+	parms.windowCoord[0] = 1.0f / w;
+	// this path only runs on Vulkan: top-down gl_FragCoord vs the GL-layout
+	// capture — the shaders add u_windowCoord.w to the row term (0 on GL)
+	parms.windowCoord[1] = -1.0f / h;
+	parms.windowCoord[3] = (float)glConfig.vidHeight / h;
+
+	// stage vertexParms -> u_localParam0/1 (the stock programs use locals 0/1)
+	for ( int i = 0; i < ns->numVertexParms && i < 2; i++ ) {
+		float *dst = i == 0 ? parms.localParam0 : parms.localParam1;
+		dst[0] = regs[ns->vertexParms[i][0]];
+		dst[1] = regs[ns->vertexParms[i][1]];
+		dst[2] = regs[ns->vertexParms[i][2]];
+		dst[3] = regs[ns->vertexParms[i][3]];
+	}
+
+	rhi::BufferHandle ub;
+	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = ( pStage->drawStateBits & ~GLS_ATEST_BITS );
+	if ( !viewDef->viewEntitys ) {
+		pd.stateBits |= GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	}
+	pd.shader = program;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
+	r->BindPipeline( pd );
+
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = tri->numIndexes;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	r->Draw( da );
+
+	backEnd.pc.c_drawElements++;
+	backEnd.pc.c_drawIndexes += tri->numIndexes;
+	backEnd.pc.c_drawVertexes += tri->numVerts;
+}
+
+/*
+=============
 RB_RHI_WobbleMatrix
 
 Replicates R_WobbleskyTexGen's per-frame rotation. Returns the 3 rows the
@@ -1462,6 +1573,14 @@ void RB_RHI_InvalidateGlassProbe( int area ) {
 static idImage *RB_RHI_GlassProbeForSurface( const viewDef_t *viewDef, const drawSurf_t *surf,
                                              float *probeAvg ) {
 	*probeAvg = -1.0f;
+	// Vulkan: probes are inert until M6 — the bake path captures through
+	// TakeScreenshot, which can't read the VK scene image yet, so auto-bakes
+	// would write black cubemaps into fs_savepath and poison glass on every
+	// backend. Glass keeps the vanilla env/gen* cube reflection instead.
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		RB_RHI_LogOnce( "VK: glass room probes disabled until the M6 capture path (vanilla env cube instead)" );
+		return NULL;
+	}
 	if ( !r_ssrGlassProbes.GetBool() || !tr.primaryWorld ) {
 		return NULL;
 	}
@@ -1600,23 +1719,42 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 	parms.localViewOrigin[2] = localViewOrigin[2];
 	parms.localViewOrigin[3] = 1.0f;
 
-	rhi::gl3ActiveTexture( GL_TEXTURE0 );
-	backEnd.glState.currenttmu = 0;
+	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	rhi::ImageHandle vkTex[2] = { 0, 0 };
+	if ( !vkMode ) {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+	}
 
 	switch ( si.texgen ) {
 	case TG_SCREEN:
 	case TG_SCREEN2: {
-		// portal sky: blit the pre-rendered sky from _currentRender at the
-		// fragment's screen position (RB_SetProgramEnvironment env[0]/[1])
+		// screen-position blit: portal sky samples the pre-rendered sky from
+		// _currentRender; mirror/xray stages (mirrorRenderMap sets TG_SCREEN +
+		// texture.dynamic) sample their own subview capture (_scratch), the
+		// image the legacy path bound (RB_SetProgramEnvironment env[0]/[1])
+		idImage *screenImg = ( pStage->texture.dynamic && pStage->texture.image )
+			? pStage->texture.image : globalImages->currentRenderImage;
+		if ( vkMode && !screenImg->rhiCaptured ) {
+			return;		// nothing captured yet (first frames of the subview)
+		}
 		int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 		int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-		int potW = globalImages->currentRenderImage->uploadWidth > 0 ? globalImages->currentRenderImage->uploadWidth : w;
-		int potH = globalImages->currentRenderImage->uploadHeight > 0 ? globalImages->currentRenderImage->uploadHeight : h;
+		int potW = screenImg->uploadWidth > 0 ? screenImg->uploadWidth : w;
+		int potH = screenImg->uploadHeight > 0 ? screenImg->uploadHeight : h;
 		parms.screenCorrection[0] = (float)w / potW;
 		parms.screenCorrection[1] = (float)h / potH;
 		parms.windowCoord[0] = 1.0f / w;
 		parms.windowCoord[1] = 1.0f / h;
-		globalImages->currentRenderImage->Bind();
+		if ( vkMode ) {
+			// Vulkan gl_FragCoord is top-down but the capture keeps GL's
+			// bottom-up layout; portalsky.frag adds u_windowCoord.w to the row
+			// term (0 on GL): y' = (vidHeight - fragY) / h
+			parms.windowCoord[1] = -1.0f / h;
+			parms.windowCoord[3] = (float)glConfig.vidHeight / h;
+		}
+		screenImg->Bind();
+		vkTex[0] = screenImg->rhiHandle;
 		break;
 	}
 	case TG_SKYBOX_CUBE:
@@ -1630,10 +1768,12 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 			dst[0] = rows[i][0]; dst[1] = rows[i][1]; dst[2] = rows[i][2]; dst[3] = 0.0f;
 		}
 		pStage->texture.image->Bind();
+		vkTex[0] = pStage->texture.image->rhiHandle;
 		break;
 	}
 	case TG_DIFFUSE_CUBE:
 		pStage->texture.image->Bind();
+		vkTex[0] = pStage->texture.image->rhiHandle;
 		break;
 	case TG_REFLECT_CUBE: {
 		// model matrix rows for the bumpy variant's tangent->global rotation
@@ -1672,13 +1812,29 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 			}
 		}
 		cubeImg->Bind();
+		vkTex[0] = cubeImg->rhiHandle;
+		if ( vkMode && vkTex[0] == 0 ) {
+			// a white-dummy fallback washes the pane out (additive white);
+			// say which cube failed to bridge instead of hiding it
+			static int warned = 0;
+			if ( warned < 8 ) {
+				warned++;
+				common->Warning( "VK: reflection cube '%s' has no RHI image - pane will wash out white",
+				                 cubeImg->imgName.c_str() );
+			}
+		}
 		const shaderStage_t *bumpStage = surf->material->GetBumpStage();
 		if ( bumpStage ) {
-			rhi::gl3ActiveTexture( GL_TEXTURE1 );
-			backEnd.glState.currenttmu = 1;
-			bumpStage->texture.image->Bind();
-			rhi::gl3ActiveTexture( GL_TEXTURE0 );
-			backEnd.glState.currenttmu = 0;
+			if ( vkMode ) {
+				bumpStage->texture.image->Bind();	// upload trigger only
+				vkTex[1] = bumpStage->texture.image->rhiHandle;
+			} else {
+				rhi::gl3ActiveTexture( GL_TEXTURE1 );
+				backEnd.glState.currenttmu = 1;
+				bumpStage->texture.image->Bind();
+				rhi::gl3ActiveTexture( GL_TEXTURE0 );
+				backEnd.glState.currenttmu = 0;
+			}
 		}
 		break;
 	}
@@ -1719,6 +1875,10 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 	da.uniformBuffer = ub;
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
+	if ( vkMode ) {
+		da.textures[0] = vkTex[0];
+		da.textures[1] = vkTex[1];
+	}
 	r->Draw( da );
 
 	backEnd.pc.c_drawElements++;
@@ -1871,13 +2031,18 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 			smokeDark = RB_RHI_ParticleLooksLikeSmoke( surf->material );
 		}
 	}
+	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
 	if ( smokeDark ) {
 		if ( !backEnd.smokeBackgroundCaptured ) {
-			rhi::gl3ActiveTexture( GL_TEXTURE2 );
-			backEnd.glState.currenttmu = 2;
-			RB_RHI_CopyCurrentRender( viewDef );	// binds + fills _currentRender on unit 2
-			rhi::gl3ActiveTexture( GL_TEXTURE0 );
-			backEnd.glState.currenttmu = 0;
+			if ( vkMode ) {
+				RB_RHI_CopyCurrentRender( viewDef );	// RHI copy, no GL binds
+			} else {
+				rhi::gl3ActiveTexture( GL_TEXTURE2 );
+				backEnd.glState.currenttmu = 2;
+				RB_RHI_CopyCurrentRender( viewDef );	// binds + fills _currentRender on unit 2
+				rhi::gl3ActiveTexture( GL_TEXTURE0 );
+				backEnd.glState.currenttmu = 0;
+			}
 			backEnd.smokeBackgroundCaptured = true;
 		}
 		parms.localParam0[0] = 1.0f;								// enable
@@ -1887,28 +2052,46 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 		const float rh = (float)globalImages->currentRenderImage->uploadHeight;
 		parms.localParam1[0] = rw > 0.0f ? 1.0f / rw : 0.0f;
 		parms.localParam1[1] = rh > 0.0f ? 1.0f / rh : 0.0f;
+		if ( vkMode && rh > 0.0f ) {
+			// Vulkan gl_FragCoord is top-down but the capture keeps GL's
+			// bottom-up layout: y' = (vidHeight - fragY) / rh
+			parms.localParam1[1] = -1.0f / rh;
+			parms.localParam1[3] = (float)glConfig.vidHeight / rh;
+		}
 	}
 
 	rhi::BufferHandle ub;
 	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 	// unit 0 = particle diffuse, unit 1 = _currentDepth
-	rhi::gl3ActiveTexture( GL_TEXTURE0 );
-	backEnd.glState.currenttmu = 0;
-	if ( pStage->texture.image ) {
-		pStage->texture.image->Bind();
+	rhi::ImageHandle vkTex[3] = { 0, 0, 0 };
+	if ( vkMode ) {
+		if ( pStage->texture.image ) {
+			pStage->texture.image->Bind();	// upload trigger only under Vulkan
+			vkTex[0] = pStage->texture.image->rhiHandle;
+		}
+		vkTex[1] = globalImages->currentDepthImage->rhiHandle;
+		if ( smokeDark && globalImages->currentRenderImage->rhiCaptured ) {
+			vkTex[2] = globalImages->currentRenderImage->rhiHandle;
+		}
+	} else {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+		if ( pStage->texture.image ) {
+			pStage->texture.image->Bind();
+		}
+		rhi::gl3ActiveTexture( GL_TEXTURE1 );
+		backEnd.glState.currenttmu = 1;
+		globalImages->currentDepthImage->Bind();
+		if ( smokeDark ) {
+			// unit 2 = _currentRender (captured lit scene) for the darkness blend
+			rhi::gl3ActiveTexture( GL_TEXTURE2 );
+			backEnd.glState.currenttmu = 2;
+			globalImages->currentRenderImage->Bind();
+		}
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
 	}
-	rhi::gl3ActiveTexture( GL_TEXTURE1 );
-	backEnd.glState.currenttmu = 1;
-	globalImages->currentDepthImage->Bind();
-	if ( smokeDark ) {
-		// unit 2 = _currentRender (captured lit scene) for the darkness blend
-		rhi::gl3ActiveTexture( GL_TEXTURE2 );
-		backEnd.glState.currenttmu = 2;
-		globalImages->currentRenderImage->Bind();
-	}
-	rhi::gl3ActiveTexture( GL_TEXTURE0 );
-	backEnd.glState.currenttmu = 0;
 
 	// depth test off (the shader fades against captured depth); strip alpha-test
 	// bits, which the soft-particle shader doesn't implement
@@ -1929,20 +2112,27 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	da.uniformBuffer = ub;
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
+	if ( vkMode ) {
+		da.textures[0] = vkTex[0];
+		da.textures[1] = vkTex[1];
+		da.textures[2] = vkTex[2];
+	}
 	r->Draw( da );
 
 	// unbind _currentDepth (and _currentRender) so later stages expecting only
 	// unit 0 aren't fed a stale binding
-	rhi::gl3ActiveTexture( GL_TEXTURE1 );
-	backEnd.glState.currenttmu = 1;
-	globalImages->BindNull();
-	if ( smokeDark ) {
-		rhi::gl3ActiveTexture( GL_TEXTURE2 );
-		backEnd.glState.currenttmu = 2;
+	if ( !vkMode ) {
+		rhi::gl3ActiveTexture( GL_TEXTURE1 );
+		backEnd.glState.currenttmu = 1;
 		globalImages->BindNull();
+		if ( smokeDark ) {
+			rhi::gl3ActiveTexture( GL_TEXTURE2 );
+			backEnd.glState.currenttmu = 2;
+			globalImages->BindNull();
+		}
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
 	}
-	rhi::gl3ActiveTexture( GL_TEXTURE0 );
-	backEnd.glState.currenttmu = 0;
 
 	backEnd.pc.c_drawElements++;
 	backEnd.pc.c_drawIndexes += tri->numIndexes;
@@ -2038,16 +2228,15 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			RB_RHI_RenderCustomStage( r, viewDef, surf, pStage, si.program, mvp, vb, vertOfs, ib, idxOfs );
 			continue;
 		}
+		if ( si.kind == rhi::SK_BUILTIN_ARB ) {
+			// Vulkan: stock customs through their hand-translated builtins (M5)
+			RB_RHI_RenderBuiltinArbStage( r, viewDef, surf, pStage, si.program, mvp, vb, vertOfs, ib, idxOfs );
+			continue;
+		}
 		if ( si.kind == rhi::SK_TEXGEN ) {
-			// Vulkan M2: texgen stages need cube-map images (and per-slot view
-			// types in the descriptor writer) that arrive with the world
-			// milestones — skip them for now instead of binding a mismatched
-			// dummy (validation error)
-			if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-				RB_RHI_LogOnce( "VK: texgen stages (skybox/reflection) skipped until cube images land (M3+)" );
-				continue;
-			}
-			// fixed-function texgen (skybox / cube reflection / portal sky)
+			// fixed-function texgen (skybox / cube reflection / portal sky);
+			// M5: cube images bind through DrawArgs on Vulkan (the descriptor
+			// writer uses each image's own view — cube views included)
 			RB_RHI_RenderTexgenStage( r, viewDef, surf, pStage, si, mvp, vb, vertOfs, ib, idxOfs );
 			continue;
 		}
@@ -2073,10 +2262,14 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		// surface + radius (GL3/Vulkan only); we only soften additive / src-alpha
 		// blends, and only once _currentDepth has actually been captured.
 		const int src_blend = pStage->drawStateBits & GLS_SRCBLEND_BITS;
+		// "depth captured yet": uploadWidth on GL, rhiCaptured on Vulkan (a
+		// demand-load can set uploadWidth there without a real capture)
+		const bool depthCaptured = rhi::GetActiveBackendType() == rhi::BT_VULKAN
+			? globalImages->currentDepthImage->rhiCaptured
+			: globalImages->currentDepthImage->uploadWidth > 0;
 		if ( ( surf->dsFlags & DSF_SOFT_PARTICLE ) && surf->particle_radius > 0.0f
 			&& ( src_blend == GLS_SRCBLEND_ONE || src_blend == GLS_SRCBLEND_SRC_ALPHA )
-			&& globalImages->currentDepthImage->uploadWidth > 0
-			&& rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {	// M5: needs the real _currentDepth capture
+			&& depthCaptured ) {
 			if ( RB_RHI_RenderSoftParticleStage( r, viewDef, surf, pStage, regs, src_blend, color, mvp, tri, vb, vertOfs, ib, idxOfs ) ) {
 				continue;
 			}
@@ -2148,7 +2341,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 
 		rhi::ImageHandle stageImage = RB_RHI_BindStageImage( pStage, regs, viewDef );
 		if ( stageImage == RHI_SKIP_STAGE_IMAGE ) {
-			RB_RHI_LogOnce( "VK: stages sampling _currentRender/_scratch skipped until the M5 screen copies" );
+			RB_RHI_LogOnce( "VK: stage sampling a never-captured _currentRender/_scratch skipped" );
 			continue;
 		}
 
@@ -2262,17 +2455,15 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		RB_RHI_ScreenSpaceReflections( r, viewDef );	// view had no translucent surfaces
 	}
 
-	// fog and blend lights (Vulkan: arrive at M5 with the texgen/cube images)
-	if ( viewDef->viewEntitys && rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+	// fog and blend lights
+	if ( viewDef->viewEntitys ) {
 		RB_RHI_FogAllLights( r, viewDef );
 	}
 
 	// post-process-sort surfaces, now that fog is down; copy _currentRender
 	// first (only in a 3D view) so the SS_POST_PROCESS stages can sample it
 	if ( i < viewDef->numDrawSurfs && !r_skipPostProcess.GetBool() ) {
-		if ( viewDef->viewEntitys && rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
-			// Vulkan: _currentRender copies arrive at M5; until then the
-			// deferred surfaces draw without the capture
+		if ( viewDef->viewEntitys ) {
 			RB_RHI_CopyCurrentRender( viewDef );
 			backEnd.currentRenderCopied = true;
 		}
@@ -2388,7 +2579,8 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 			// explicit _currentRender/_currentDepth copies (e.g. mirror/xray
 			// setup); direct-GL idImage copy like the legacy RB_CopyRender
 			const copyRenderCommand_t *cmd = (const copyRenderCommand_t *)cmds;
-			if ( !vkMode && cmd->image && !r_skipCopyTexture.GetBool() ) {
+			// M5: on Vulkan CopyFramebuffer routes to the RHI capture copy
+			if ( cmd->image && !r_skipCopyTexture.GetBool() ) {
 				cmd->image->CopyFramebuffer( cmd->x, cmd->y, cmd->imageWidth, cmd->imageHeight, false );
 			}
 			break;

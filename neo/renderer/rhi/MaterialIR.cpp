@@ -106,6 +106,37 @@ static ShaderHandle IR_ResolveCustomArb( const char *vpFile, const char *fpFile,
 
 /*
 =============
+IR_VkBuiltinForArb
+
+Phase 4 M5: the Vulkan backend has no runtime SPIR-V compiler, but the stock
+custom-ARB programs were hand-translated to builtin GLSL during Phase 2 and
+cross-verified against the transpiler output (scripts/crossdiff_shaders.py,
+120/120 numeric matches) — map them to those builtins instead of skipping.
+The remaining (d3xp/mod) customs still degrade to SK_SKIP until runtime
+SPIR-V lands with the d3xp backend flip.
+=============
+*/
+static const char *IR_VkBuiltinForArb( const char *vpFile, const char *fpFile ) {
+	if ( vpFile == NULL || fpFile == NULL || idStr::Icmp( vpFile, fpFile ) != 0 ) {
+		return NULL;	// all stock customs pair the same .vfp for both stages
+	}
+	if ( idStr::Icmp( vpFile, "heatHaze.vfp" ) == 0 ) {
+		return "heathaze";
+	}
+	if ( idStr::Icmp( vpFile, "heatHazeWithMask.vfp" ) == 0 ) {
+		return "heathaze_mask";
+	}
+	if ( idStr::Icmp( vpFile, "heatHazeWithMaskAndVertex.vfp" ) == 0 ) {
+		return "heathaze_maskvertex";
+	}
+	if ( idStr::Icmp( vpFile, "colorProcess.vfp" ) == 0 ) {
+		return "colorprocess";
+	}
+	return NULL;
+}
+
+/*
+=============
 IR_Build
 =============
 */
@@ -138,22 +169,34 @@ static MaterialIR *IR_Build( const idMaterial *material ) {
 			} else {
 				const char *vpFile = R_ARBProgramName( ns->vertexProgram, GL_VERTEX_PROGRAM_ARB );
 				const char *fpFile = R_ARBProgramName( ns->fragmentProgram, GL_FRAGMENT_PROGRAM_ARB );
-				ShaderHandle prog = ( vpFile && fpFile ) ? IR_ResolveCustomArb( vpFile, fpFile, material->GetName() ) : 0;
+				const bool vk = GetActiveBackendType() == BT_VULKAN;
+				const char *builtin = vk ? IR_VkBuiltinForArb( vpFile, fpFile ) : NULL;
+				ShaderHandle prog = 0;
+				if ( builtin != NULL ) {
+					prog = GetRHI()->LoadShader( builtin );
+					if ( prog ) {
+						s.kind = SK_BUILTIN_ARB;
+					}
+				} else if ( vpFile && fpFile ) {
+					prog = IR_ResolveCustomArb( vpFile, fpFile, material->GetName() );
+					if ( prog ) {
+						s.kind = SK_CUSTOM_ARB;
+					}
+				}
 				if ( prog ) {
-					s.kind = SK_CUSTOM_ARB;
 					s.program = prog;
 					for ( int img = 0; img < ns->numFragmentProgramImages; img++ ) {
 						if ( ns->fragmentProgramImages[img] == globalImages->currentRenderImage ) {
 							s.needsCurrentRender = true;	// Chunk F: RC_COPY_RENDER
 						}
 					}
-				} else if ( GetActiveBackendType() == BT_VULKAN ) {
+				} else if ( vk ) {
 					// a newStage has no stage image (its textures live in
 					// fragmentProgramImages), so the generic fallback comes out
 					// solid white — skip the stage entirely until runtime
-					// SPIR-V lands (M5); invisible beats a white square
+					// SPIR-V lands (the d3xp flip); invisible beats a white square
 					s.kind = SK_SKIP;
-					common->Printf( "VK IR: %s: stage %d custom ARB skipped until M5\n", material->GetName(), i );
+					common->Printf( "VK IR: %s: stage %d custom ARB skipped (no builtin translation, runtime SPIR-V pending)\n", material->GetName(), i );
 				} else {
 					// degrade, don't crash: draw as a plain generic stage
 					common->Printf( "GL3 IR: %s: stage %d custom ARB degraded to generic\n", material->GetName(), i );

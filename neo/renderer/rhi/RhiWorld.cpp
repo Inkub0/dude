@@ -1203,12 +1203,13 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 
 	// make the early depth pass available to shaders (soft particles, SSAO, SSR, etc.)
-	// (GL-only: the Vulkan depth-sample path arrives with its consumers, M5+)
+	// (M5: idImage::CopyDepthbuffer routes through the RHI capture on Vulkan)
 	bool getDepthCapture = r_enableDepthCapture.GetInteger() == 1
 		|| ( r_enableDepthCapture.GetInteger() == -1
 		     && ( r_useSoftParticles.GetBool()
 		          || ( ( r_ssao.GetBool() || r_ssr.GetBool() ) && R_BackendSupportsEnhancements() ) ) );
-	if ( getDepthCapture && viewDef->renderView.viewID >= 0 && qglReadBuffer != NULL ) {
+	if ( getDepthCapture && viewDef->renderView.viewID >= 0
+	     && ( qglReadBuffer != NULL || rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) {
 		globalImages->currentDepthImage->CopyDepthbuffer( viewDef->viewport.x1,
 			viewDef->viewport.y1,
 			viewDef->viewport.x2 - viewDef->viewport.x1 + 1,
@@ -3612,6 +3613,7 @@ static void RB_RHI_BlendLightChain( rhi::RHI *r, const viewDef_t *viewDef, const
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
+		RB_RHI_VkTextures( da );		// VK: units 0/1 recorded by the binds above
 		r->Draw( da );
 
 		backEnd.pc.c_drawElements++;
@@ -3735,6 +3737,7 @@ static void RB_RHI_FogChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSu
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
+		RB_RHI_VkTextures( da );		// VK: units 0/1 recorded by the binds above
 		r->Draw( da );
 
 		backEnd.pc.c_drawElements++;
@@ -3827,7 +3830,11 @@ void RB_RHI_FogAllLights( rhi::RHI *r, viewDef_t *viewDef ) {
 		return;
 	}
 
-	qglDisable( GL_STENCIL_TEST );
+	// GL: raw stencil-test disable around the pass; Vulkan pipelines carry
+	// SS_DISABLED in their PipelineDesc already (the default)
+	if ( qglDisable != NULL ) {
+		qglDisable( GL_STENCIL_TEST );
+	}
 
 	for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
 		backEnd.vLight = vLight;
@@ -3840,5 +3847,7 @@ void RB_RHI_FogAllLights( rhi::RHI *r, viewDef_t *viewDef ) {
 	}
 	backEnd.vLight = NULL;
 
-	qglEnable( GL_STENCIL_TEST );
+	if ( qglEnable != NULL ) {
+		qglEnable( GL_STENCIL_TEST );
+	}
 }
