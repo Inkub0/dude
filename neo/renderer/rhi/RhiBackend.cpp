@@ -670,11 +670,12 @@ onto the backbuffer at swap time, just before the gamma pass. Phase A is a strai
 passthrough resolve (shaders/hdrresolve.*); Phase B folds exposure + tonemap into it.
 =============
 */
-static rhi::RenderTargetHandle	rhiHdrRT = 0;		// scene buffer (RGBA16F + depth-stencil)
+static rhi::RenderTargetHandle	rhiHdrRT = 0;		// scene buffer (RGBA16F HDR, or RGBA8 for the VK off-HDR post pass) + depth-stencil
 static rhi::RenderTargetHandle	rhiHdrAaRT = 0;		// FXAA output ping (RGBA16F, color only)
 static int						rhiHdrW = 0, rhiHdrH = 0;
-static bool						rbHdrActiveThisFrame = false;	// float FBO bound *right now* (view pass)
-static bool						rbHdrFrameActive = false;		// this whole frame is an HDR frame
+static bool						rbHdrRtFloat = false;			// rhiHdrRT is RGBA16F (HDR) vs RGBA8 (off-HDR post) — recreate on change
+static bool						rbHdrActiveThisFrame = false;	// scene post-target bound *right now* (view pass)
+static bool						rbHdrFrameActive = false;		// this whole frame is a true float-HDR frame
 
 /*
 =============
@@ -742,7 +743,24 @@ static bool RB_RHI_FrameHasWorldScene( const emptyCommand_t *cmds ) {
 static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	rbHdrActiveThisFrame = false;
 	rbHdrFrameActive = false;
-	if ( !r_hdr.GetBool() || !R_BackendSupportsEnhancements() ) {
+
+	const bool wantHdr = r_hdr.GetBool() && R_BackendSupportsEnhancements();
+
+	// Off-HDR post (Vulkan only): the GL backend runs film grain / chromatic
+	// aberration per 3D view and gamma as a swap-time pass over the backbuffer, but
+	// on Vulkan the scene lives in an offscreen image that isn't sampleable in place,
+	// so those effects need the same route-the-scene-into-a-target-then-resolve flow
+	// the HDR path uses — just at RGBA8 instead of RGBA16F, and with no float AA ping
+	// (off-HDR AA arrives with the SMAA port). Engage it when any of grain / chroma /
+	// in-shader gamma is active so the resolve has somewhere to apply them. When HDR
+	// is on, the float path already covers all of these.
+	const bool vkMode = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+	const bool gammaWanted = r_gammaInShader.GetBool()
+		&& ( r_gamma.GetFloat() != 1.0f || r_brightness.GetFloat() != 1.0f );
+	const bool ldrPostWanted = vkMode && !wantHdr
+		&& ( r_postFilmGrain.GetFloat() > 0.0f || r_postChromaticAberration.GetFloat() > 0.0f || gammaWanted );
+
+	if ( !wantHdr && !ldrPostWanted ) {
 		return;		// off → the frame stays on the backbuffer exactly as before
 	}
 
@@ -756,26 +774,30 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	int w = glConfig.vidWidth;
 	int h = glConfig.vidHeight;
 
-	// (re)create on resolution change or a lost context (vid_restart wipes the
-	// backend's targets, so a stale handle reports a null image) — same idiom as
-	// the SSAO targets in RhiWorld
-	if ( rhiHdrRT && ( rhiHdrW != w || rhiHdrH != h || r->GetRenderTargetImage( rhiHdrRT ) == 0 ) ) {
+	// (re)create on resolution change, a format change (HDR toggled on/off — the
+	// off-HDR post target is RGBA8, the HDR one RGBA16F), or a lost context (vid_restart
+	// wipes the backend's targets, so a stale handle reports a null image) — same idiom
+	// as the SSAO targets in RhiWorld
+	if ( rhiHdrRT && ( rhiHdrW != w || rhiHdrH != h || rbHdrRtFloat != wantHdr
+	                   || r->GetRenderTargetImage( rhiHdrRT ) == 0 ) ) {
 		r->DestroyRenderTarget( rhiHdrRT );
 		rhiHdrRT = 0;
 	}
 	if ( !rhiHdrRT ) {
-		rhiHdrRT = r->CreateRenderTargetColorDepthStencil( rhi::IF_RGBA16F, w, h );
+		rhiHdrRT = r->CreateRenderTargetColorDepthStencil( wantHdr ? rhi::IF_RGBA16F : rhi::IF_RGBA8, w, h );
 		rhiHdrW = w;
 		rhiHdrH = h;
+		rbHdrRtFloat = wantHdr;
 	}
 	if ( !rhiHdrRT ) {
 		return;		// creation failed (no RGBA16F support?) → fall back to the backbuffer
 	}
 
 	// FXAA scratch: a float ping buffer so FXAA (r_rhiAA) also stays in HDR instead of
-	// round-tripping the 8-bit _currentRender. Only allocated while FXAA is on; freed when
-	// it turns off, on resize, or on context loss.
-	const bool wantAa = ( r_rhiAA.GetInteger() > 0 );
+	// round-tripping the 8-bit _currentRender. HDR-only (off-HDR AA arrives with the SMAA
+	// port); freed when it turns off, on resize, on a switch to the LDR target, or on
+	// context loss.
+	const bool wantAa = wantHdr && ( r_rhiAA.GetInteger() > 0 );
 	if ( rhiHdrAaRT && ( !wantAa || rhiHdrW != w || rhiHdrH != h || r->GetRenderTargetImage( rhiHdrAaRT ) == 0 ) ) {
 		r->DestroyRenderTarget( rhiHdrAaRT );
 		rhiHdrAaRT = 0;
@@ -786,7 +808,9 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 
 	r->SetFrameTarget( rhiHdrRT );
 	rbHdrActiveThisFrame = true;
-	rbHdrFrameActive = true;	// stays true past HdrResolve so _currentRender keeps one format all frame
+	// only a true float-HDR frame forces _currentRender to RGBA16F; the off-HDR post
+	// target is RGBA8, so captures (glass refraction) keep the default 8-bit format
+	rbHdrFrameActive = wantHdr;	// stays true past HdrResolve so _currentRender keeps one format all frame
 }
 
 // FXAA as a float->float pass (rhiHdrRT color -> rhiHdrAaRT), so the anti-aliased image
@@ -914,6 +938,15 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
 	parms.windowCoord[2] = 0.5f;	// aberration center in uv
 	parms.windowCoord[3] = 0.5f;
+	// gamma / brightness: folded into the resolve on Vulkan (the backend has no separate
+	// LDR gamma tail — RB_RHI_GammaBrightness only runs on GL). GL passes identity here so
+	// its standalone gammabrightness pass at swap stays the single point of correction.
+	parms.localParam1[1] = 1.0f;	// brightness (identity)
+	parms.localParam1[2] = 1.0f;	// 1/gamma (identity)
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN && r_gammaInShader.GetBool() ) {
+		parms.localParam1[1] = r_brightness.GetFloat();
+		parms.localParam1[2] = ( r_gamma.GetFloat() > 0.0f ) ? 1.0f / r_gamma.GetFloat() : 1.0f;
+	}
 
 	// fullscreen NDC quad, st 0..1 (the HDR target is exact screen size, so no NPOT correction)
 	idDrawVert quad[4];
@@ -2501,8 +2534,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
 		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
 	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView ) {
-		// The GL post chain (AA / film grain / chromatic aberration) is GL-only here;
-		// Vulkan folds those into the HDR resolve (and its off-HDR post isn't wired yet).
+		// The GL per-view post chain (AA / film grain / chromatic aberration) is GL-only
+		// here; Vulkan folds grain/chroma into the scene resolve instead (RB_RHI_HdrResolve,
+		// over the HDR float buffer or the RGBA8 off-HDR post target — see RB_RHI_HdrBeginFrame).
 		if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN && !rbHdrActiveThisFrame ) {
 			// post-resolve antialiasing (FXAA) first, so film grain / chromatic
 			// aberration are applied on top of the resolved image rather than smoothed
@@ -2602,10 +2636,13 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 		}
 		case RC_SWAP_BUFFERS:
 			if ( vkMode ) {
-				// M7: resolve the RGBA16F scene buffer back onto the scene image
-				// (r_hdr) — no-op when HDR is off. Folds in FXAA/SMAA + film grain
-				// + chroma, and must run before EndFrame blits the scene image to
-				// the swapchain. (r_gamma is still a GL-only tail on Vulkan.)
+				// M7: resolve the scene post-target back onto the scene image, then
+				// present. When HDR is on this is the RGBA16F buffer (+FXAA/SMAA); when
+				// HDR is off but grain/chroma/gamma want it, it's the RGBA8 off-HDR post
+				// target; a no-op (target never bound) when nothing wants it. Folds in
+				// film grain + chroma + r_gammaInShader gamma/brightness (the VK backend
+				// has no separate LDR gamma tail), and must run before EndFrame blits the
+				// scene image to the swapchain.
 				RB_RHI_HdrResolve( r );
 				// present happens in the backend's EndFrame below (swap capture is
 				// serviced after EndFrame). ImGui renders through the backend:
