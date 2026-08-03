@@ -42,11 +42,22 @@ float viewZFromRaw( float raw ) {
 	return 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y );   // negative
 }
 
+// Convert a GL-convention (bottom-up, clip-derived) row to the device framebuffer
+// row: identity on GL (u_windowCoord.z > 0), flipped on Vulkan where gl_FragCoord
+// and the depth / G-buffer targets are top-down. Used to project march samples onto
+// those device-oriented buffers, and again when sampling the bottom-up _currentRender
+// capture (the two flips cancel back to GL rows for that one read). Inert on GL.
+float deviceRow( float glRow ) {
+	return ( u_windowCoord.z > 0.0 ) ? glRow : ( 1.0 - glRow );
+}
+
 vec3 viewPosFromRaw( vec2 frag, float raw ) {
 	float vz  = viewZFromRaw( raw );
 	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
 	float d   = -vz;
-	return vec3( ndc.x * d * u_localParam0.x, ndc.y * d * u_localParam0.y, vz );
+	// u_windowCoord.z = view-Y sign (+1 GL / -1 Vulkan): flips the reconstructed Y so
+	// it agrees with the view-space G-buffer normal on VK's top-down framebuffer
+	return vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
 }
 
 // interleaved gradient noise — per-pixel jitter that hides the march banding
@@ -54,13 +65,16 @@ float ign( vec2 p ) {
 	return fract( 52.9829189 * fract( dot( p, vec2( 0.06711056, 0.00583715 ) ) ) );
 }
 
-// project a view-space point to fragment coordinates; w <= 0 means behind the eye
+// project a view-space point to fragment coordinates; w <= 0 means behind the eye.
+// The clip->uv is GL-convention (y-up); deviceRow re-orients the row so the returned
+// frag addresses the device-oriented depth / G-buffer (top-down on Vulkan).
 vec3 projectToFrag( vec3 viewPos ) {
 	vec4 clip = u_projectionMatrix * vec4( viewPos, 1.0 );
 	if ( clip.w <= 0.0 ) {
 		return vec3( -1.0, -1.0, -1.0 );
 	}
 	vec2 uv01 = ( clip.xy / clip.w ) * 0.5 + 0.5;
+	uv01.y = deviceRow( uv01.y );
 	return vec3( uv01 / u_screenCorrection.xy, 1.0 );
 }
 
@@ -187,7 +201,10 @@ void main() {
 	float edge  = smoothstep( 0.0, 0.08, min( eDist.x, eDist.y ) );
 	float range = 1.0 - clamp( hi / maxDist, 0.0, 1.0 );
 
-	// per-ray fades premultiplied; material weighting happens in ssr_composite.frag
-	vec3 scene = texture( u_currentRender, hitUv * u_screenCorrection.zw ).rgb;
+	// per-ray fades premultiplied; material weighting happens in ssr_composite.frag.
+	// hitUv is a device-oriented row (projectToFrag); deviceRow flips it back to the
+	// bottom-up GL layout of the _currentRender capture (inert on GL).
+	vec2 crUv = vec2( hitUv.x, deviceRow( hitUv.y ) ) * u_screenCorrection.zw;
+	vec3 scene = texture( u_currentRender, crUv ).rgb;
 	fragColor = vec4( scene * ( edge * range * facing ), 1.0 );
 }

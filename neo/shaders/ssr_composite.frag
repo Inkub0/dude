@@ -50,11 +50,13 @@ void main() {
 		discard;
 	}
 
-	// view-space position for NdotV (same reconstruction as ssr.frag)
+	// view-space position for NdotV (same reconstruction as ssr.frag). u_windowCoord.z
+	// is the view-Y sign (+1 GL / -1 Vulkan): flips the reconstructed Y so NdotV agrees
+	// with the view-space G-buffer normal on VK's top-down framebuffer.
 	float vz  = 1.0 / ( raw * depth_consts.x + depth_consts.y );      // negative
 	vec2  ndc = uv * 2.0 - 1.0;
 	float d   = -vz;
-	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * d * u_localParam0.y, vz );
+	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
 	vec3  N   = normalize( nt.xyz * 2.0 - 1.0 );
 	vec3  V   = normalize( -P );
 

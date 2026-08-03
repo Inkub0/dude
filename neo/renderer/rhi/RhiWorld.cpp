@@ -277,12 +277,13 @@ static void RB_RHI_BindUnit( int unit, idImage *image ) {
 	image->Bind();
 }
 
-// bind a render-target texture (GetRenderTargetImage handle) on a multitexture
-// unit for the post/SSAO/SSR passes. GL3: raw glActiveTexture+bind (these targets
-// aren't idImages). Vulkan: record into rhiVkUnits so RB_RHI_VkTextures carries it
-// into the next draw's DrawArgs (units 1-7 -> textures[], 9 -> ssao, 10 -> occ).
-static void RB_RHI_BindRTUnit( rhi::RHI *r, int unit, rhi::RenderTargetHandle rt ) {
-	rhi::ImageHandle img = r->GetRenderTargetImage( rt );
+// bind an already-resolved RHI image handle on a multitexture unit for the
+// post/SSAO/SSR passes. GL3: raw glActiveTexture+bind (these targets aren't
+// idImages). Vulkan: record into rhiVkUnits so RB_RHI_VkTextures carries it into
+// the next draw's DrawArgs (units 1-7 -> textures[], 9 -> ssao, 10 -> occ). Used
+// directly for an MRT second attachment (GetRenderTargetImage2), which has no
+// RenderTargetHandle of its own.
+static void RB_RHI_BindRTImage( rhi::RHI *r, int unit, rhi::ImageHandle img ) {
 	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
 		if ( unit >= 0 && unit < 11 ) {
 			rhiVkUnits[unit] = img;
@@ -293,6 +294,11 @@ static void RB_RHI_BindRTUnit( rhi::RHI *r, int unit, rhi::RenderTargetHandle rt
 	qglBindTexture( GL_TEXTURE_2D, (GLuint)img );
 	rhi::gl3ActiveTexture( GL_TEXTURE0 );
 	backEnd.glState.currenttmu = 0;
+}
+
+// bind a render-target texture (GetRenderTargetImage handle) on a multitexture unit.
+static void RB_RHI_BindRTUnit( rhi::RHI *r, int unit, rhi::RenderTargetHandle rt ) {
+	RB_RHI_BindRTImage( r, unit, r->GetRenderTargetImage( rt ) );
 }
 
 // GTAO render targets (docs/ssao-gtao.md). Two RGBA8 screen-space buffers: the raw
@@ -2412,9 +2418,9 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// (r_ssaoDebug 3) even if SSAO reconstructs normals from depth — so the debug view
 	// always has data. SSR needs it unconditionally (normals to reflect about + the
 	// rough/metal attachment).
-	// SSR is deferred on Vulkan (RB_RHI_ScreenSpaceReflections), so don't build its
-	// MRT material attachment there — the SSAO-only target stays single-color
-	const bool ssrWants = r_ssr.GetBool() && rhi::GetActiveBackendType() != rhi::BT_VULKAN;
+	// M7: SSR now runs on Vulkan too (RB_RHI_ScreenSpaceReflections), so build the
+	// MRT rough/metal attachment on both backends when r_ssr wants it
+	const bool ssrWants = r_ssr.GetBool();
 	const bool ssaoWants = r_ssao.GetBool()
 		&& ( r_ssaoNormalBuffer.GetBool() || r_ssaoDebug.GetInteger() == 3 );
 	if ( !ssaoWants && !ssrWants ) {
@@ -2832,13 +2838,17 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !r_ssr.GetBool() || !R_BackendSupportsEnhancements() ) {
 		return;
 	}
-	// SSR isn't ported to Vulkan yet: its march/temporal/composite passes bind the
-	// scene copy + G-buffer via raw GL multitexture (NULL no-ops on VK). Before the
-	// M7 color+depth target existed this bailed on missing targets; now it must gate
-	// explicitly. TODO(vk): route via RB_RHI_BindRTUnit like SSAO, then re-enable.
-	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		RB_RHI_LogOnce( "VK: SSR (r_ssr) not yet ported - deferred (SSAO is live)" );
-		return;
+	// M7: SSR runs on both backends now. On Vulkan the G-buffer / scene-copy binds
+	// route through RB_RHI_BindRTUnit/Image into rhiVkUnits (like SSAO) instead of
+	// raw GL multitexture, and the shaders carry a view-Y sign + capture row-flip
+	// for VK's top-down framebuffer vs the GL-layout _currentRender snapshot.
+	const bool vkMode = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+	if ( vkMode ) {
+		static bool ssrLiveLogged = false;
+		if ( !ssrLiveLogged ) {
+			ssrLiveLogged = true;
+			common->Printf( "RHI backend: VK SSR (r_ssr) live - G-buffer march + composite\n" );
+		}
 	}
 	if ( !viewDef->viewEntitys || viewDef->isSubview ) {
 		return;
@@ -2854,7 +2864,11 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	const rhi::ImageHandle matImg = r->GetRenderTargetImage2( rhiNormalRT );
-	if ( matImg == 0 || globalImages->currentDepthImage->uploadWidth <= 0 ) {
+	// depth capture: uploadWidth on GL; rhiCaptured on VK (a demand-load can set
+	// uploadWidth there without a real capture), matching the soft-particle idiom
+	const bool depthCaptured = vkMode ? globalImages->currentDepthImage->rhiCaptured
+	                                  : globalImages->currentDepthImage->uploadWidth > 0;
+	if ( matImg == 0 || !depthCaptured ) {
 		return;
 	}
 	rhi::ShaderHandle marchProg = r->LoadShader( "ssr" );
@@ -2874,10 +2888,14 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 
-	// snapshot the lit opaque scene; CopyFramebuffer leaves _currentRender bound on
-	// the active unit — exactly where ssr.frag samples it (unit 0)
-	rhi::gl3ActiveTexture( GL_TEXTURE0 );
-	backEnd.glState.currenttmu = 0;
+	// snapshot the lit opaque scene; on GL CopyFramebuffer leaves _currentRender bound
+	// on the active unit — exactly where ssr.frag samples it (unit 0). On VK the copy
+	// routes through the RHI capture path and unit 0 is recorded via rhiVkUnits below,
+	// so skip the raw gl3ActiveTexture (a NULL qgl pointer on the Vulkan backend).
+	if ( !vkMode ) {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+	}
 	globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1,
 		viewDef->viewport.y1, fullW, fullH, true );
 
@@ -2914,23 +2932,40 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiSsrJitterPhase -= (float)(int)rhiSsrJitterPhase;
 		parms.windowCoord[1] = rhiSsrJitterPhase;
 	}
+	// view-Y sign (u_windowCoord.z): +1 on GL (gl_FragCoord.y bottom-up, agrees with
+	// view +Y and the bottom-up _currentRender capture), -1 on Vulkan (top-down
+	// framebuffer). Flips the reconstructed view-space Y and the project-to-screen /
+	// capture-sample rows so the march matches the G-buffer normals (same idea as
+	// ssao.frag's u_windowCoord.z). Inert at +1 on GL.
+	const float viewYSign = vkMode ? -1.0f : 1.0f;
+	parms.windowCoord[2] = viewYSign;
 
 	rhi::ClearArgs clear;
 	memset( &clear, 0, sizeof( clear ) );
 	clear.color = true;		// rgba 0 = miss everywhere the march discards
 
 	r->BeginTargetPass( rhiSsrRT, &clear );
-	// unit 0 = _currentRender (bound by the copy above); unit 1 = depth; units 2/3 =
-	// the G-buffer attachments (raw binds — tmu cache entries invalidated below)
+	// unit 0 = _currentRender; unit 1 = depth; units 2/3 = the G-buffer attachments.
+	// GL: the copy above left _currentRender bound on unit 0, units 2/3 raw-bind (tmu
+	// cache entries invalidated below). VK: record all four into rhiVkUnits so
+	// RB_RHI_DrawFullscreen carries them via DrawArgs.
+	if ( vkMode ) {
+		RB_RHI_BindRTImage( r, 0, globalImages->currentRenderImage->rhiHandle );
+	}
 	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
-	rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
-	qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
-	rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
-	qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
-	rhi::gl3ActiveTexture( GL_TEXTURE0 );
-	backEnd.glState.currenttmu = 0;
-	backEnd.glState.tmu[2].current2DMap = -1;
-	backEnd.glState.tmu[3].current2DMap = -1;
+	if ( vkMode ) {
+		RB_RHI_BindRTUnit( r, 2, rhiNormalRT );
+		RB_RHI_BindRTImage( r, 3, matImg );
+	} else {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+		backEnd.glState.tmu[2].current2DMap = -1;
+		backEnd.glState.tmu[3].current2DMap = -1;
+	}
 	RB_RHI_DrawFullscreen( r, marchProg, parms, 0 );
 	r->EndPass();
 
@@ -2966,11 +3001,22 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			// unit 2 = depth
 			r->BeginTargetPass( rhiSsrHistRT[writeIdx], NULL );
 			RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
-			rhi::gl3ActiveTexture( GL_TEXTURE0 + 1 );
-			qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiSsrHistRT[readIdx] ) );
-			rhi::gl3ActiveTexture( GL_TEXTURE0 );
-			backEnd.glState.currenttmu = 0;
-			backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
+			if ( vkMode ) {
+				// First frame after (re)alloc the read slot was never rendered, so its
+				// real layout is still UNDEFINED (the color target's tracker claims
+				// SHADER_READ_ONLY only after a write). The shader early-outs on
+				// historyUsable=0, but u_history is a statically-used sampler that VK
+				// validates regardless — bind the just-marched result (a written,
+				// SHADER_READ_ONLY target) until a real history slot exists.
+				rhi::RenderTargetHandle histRT = historyUsable ? rhiSsrHistRT[readIdx] : rhiSsrRT;
+				RB_RHI_BindRTUnit( r, 1, histRT );			// history read (VK rhiVkUnits[1])
+			} else {
+				rhi::gl3ActiveTexture( GL_TEXTURE0 + 1 );
+				qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiSsrHistRT[readIdx] ) );
+				rhi::gl3ActiveTexture( GL_TEXTURE0 );
+				backEnd.glState.currenttmu = 0;
+				backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
+			}
 			RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiSsrRT ) );
 			r->EndPass();
 
@@ -2998,6 +3044,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	compParms.screenCorrection[1] = 1.0f / fullH;
 	compParms.depthTexRecip[0] = 1.0f / uploadW;
 	compParms.depthTexRecip[1] = 1.0f / uploadH;
+	compParms.windowCoord[2] = viewYSign;		// view-Y sign for the NdotV reconstruction (VK)
 
 	// EndPass restored the view scissor; keep the CPU cache in step, and cover the
 	// whole view in case the last surface left a crop before the target passes
@@ -3005,16 +3052,22 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	               tr.viewportOffset[1] + viewDef->viewport.y1, fullW, fullH );
 	backEnd.currentScissor = viewDef->scissor;
 
-	// unit 0 = SSR result (via DrawFullscreen), unit 1 = depth, units 2/3 = G-buffer
+	// unit 0 = SSR result (via DrawFullscreen, a color target -> VK cancels the scene
+	// flip), unit 1 = depth, units 2/3 = G-buffer
 	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
-	rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
-	qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
-	rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
-	qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
-	rhi::gl3ActiveTexture( GL_TEXTURE0 );
-	backEnd.glState.currenttmu = 0;
-	backEnd.glState.tmu[2].current2DMap = -1;
-	backEnd.glState.tmu[3].current2DMap = -1;
+	if ( vkMode ) {
+		RB_RHI_BindRTUnit( r, 2, rhiNormalRT );
+		RB_RHI_BindRTImage( r, 3, matImg );
+	} else {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+		backEnd.glState.tmu[2].current2DMap = -1;
+		backEnd.glState.tmu[3].current2DMap = -1;
+	}
 	RB_RHI_DrawFullscreen( r, compProg, compParms, r->GetRenderTargetImage( resultRT ),
 	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 	RB_RHI_ForgetTexBinds();
@@ -3288,7 +3341,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// VK render-target family and arrive together at M7.
 	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
 	if ( vkMode ) {
-		RB_RHI_LogOnce( "VK: world = depth + stencil + shadow maps + interactions + HDR + SSAO; SSR still deferred" );
+		RB_RHI_LogOnce( "VK: world = depth + stencil + shadow maps + interactions + HDR + SSAO (SSR composites later, in the view pass)" );
 	}
 
 	// normal G-buffer (Option B): render bump-mapped view normals for SSAO to sample
