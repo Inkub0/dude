@@ -38,6 +38,9 @@ savegames/
 *.pk4.bak
 *.pkZZ
 
+# generated at runtime (Vulkan driver pipeline cache, written to fs_savepath/base)
+vkpipelinecache.bin
+
 # stray/personal files at the repo root (not project content)
 /-l
 /Modelfile
