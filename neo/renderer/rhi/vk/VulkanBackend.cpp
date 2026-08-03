@@ -249,9 +249,13 @@ private:
 	// the dynamic-UBO descriptor's fixed range must cover whatever a shader
 	// reads past the dynamic offset
 	static const int MAX_UNIFORM_SLICE = 2048;
-	static const int UBO_RING_SIZE  = 16 << 20;		// per frame slot (GL3 sizes)
-	static const int VERT_RING_SIZE = 4 << 20;
-	static const int IDX_RING_SIZE  = 2 << 20;
+	static const int UBO_RING_SIZE  = 16 << 20;		// per frame slot
+	// geometry rings: sized so complex D3 scenes (M7 streams a lot of shadow-volume
+	// + multi-pass geometry) fit without the mid-frame doubling in GrowRing. The
+	// GL3 4MB/2MB defaults grew to 16MB on busy views; start there so the grow is a
+	// rare safety net, not a per-scene warm-up cost.
+	static const int VERT_RING_SIZE = 16 << 20;
+	static const int IDX_RING_SIZE  = 8 << 20;
 	static const int STAGING_RING_SIZE = 2 << 20;	// mid-frame texture updates (cinematics)
 	static const int MAX_FRAME_SETS = 4096;			// per-draw texture sets per frame
 
@@ -2568,19 +2572,33 @@ void VulkanBackend::DestroyImage( ImageHandle h ) {
 	if ( device == VK_NULL_HANDLE || h < 1 || h > (ImageHandle)imageTable.size() || !imageTable[h - 1].live ) {
 		return;
 	}
-	// frames may still reference the view via this frame's descriptor sets;
-	// image churn happens at load boundaries, where a full stop is acceptable
-	vkDeviceWaitIdle( device );
+	// idImage::GenerateImage destroys then recreates dynamically-updated 2D images
+	// (scratch GUIs, video, menu logos) and can do so either between frames (front
+	// end reload) or mid-frame (a recording command buffer has already bound a
+	// descriptor set sampling this view). The two cases need different lifetimes:
+	//
+	//   * no frame open  -> vkDeviceWaitIdle waits every in-flight submission, so
+	//     the objects are safe to free immediately.
+	//   * frame open      -> vkDeviceWaitIdle does NOT wait for the still-recording
+	//     command buffer, so freeing the view here would pull it out from under a
+	//     live set and the GPU would sample a dead view on submit (VK_ERROR_DEVICE_
+	//     LOST). Defer to this slot's retire list (freed after its fence, once no
+	//     in-flight cb can reference it) exactly like RetireImage.
+	//
+	// (Deferring unconditionally is wrong between frames: EndFrame has already
+	// advanced frameIndex, so the retire list would drain on the wrong slot's
+	// fence, before the just-submitted frame that used the view has completed.)
 	ImageRec &rec = imageTable[h - 1];
-	if ( rec.view )  { vkDestroyImageView( device, rec.view, NULL ); }
-	if ( rec.image ) { vmaDestroyImage( vma, rec.image, rec.alloc ); }
+	if ( frameOpen ) {
+		retiredImages[frameIndex].push_back( { rec.image, rec.alloc, rec.view } );
+	} else {
+		vkDeviceWaitIdle( device );
+		if ( rec.view )  { vkDestroyImageView( device, rec.view, NULL ); }
+		if ( rec.image ) { vmaDestroyImage( vma, rec.image, rec.alloc ); }
+	}
 	rec = ImageRec();
-	// handle h is now free for reuse (CreateTexture2D reuses freed slots). The
-	// cross-frame textureSetCache keys on ImageHandles, so any cached set that
-	// referenced h now points at the destroyed view — and once a new image
-	// takes the slot, that stale set would sample the wrong texture. Drop the
-	// cache, same as RetireImage. (This path is common: GenerateImage destroys
-	// then recreates dynamically-updated 2D images — loading bars, scratch GUIs.)
+	// drop the cross-frame texture-set cache: any cached set keyed on handle h is
+	// now stale, and reusing the slot would otherwise sample the wrong texture.
 	InvalidateTextureSets();
 }
 
@@ -3711,10 +3729,19 @@ void VulkanBackend::DestroyRenderTarget( RenderTargetHandle rt ) {
 		return;
 	}
 	// stop new draws from sampling it immediately (the ImageRec slots are freed
-	// for reuse), but defer the Vulkan-object destruction until this frame
-	// slot's GPU work is fenced off — the shadow caches evict mid-frame.
+	// for reuse). The shadow caches evict mid-frame, so when a frame is recording
+	// defer the Vulkan-object destruction to this slot's retire list (freed after
+	// its fence, once no in-flight cb can reference the sample views). Between
+	// frames frameIndex has already advanced, so the retire list would drain on
+	// the wrong fence — waitIdle + free immediately instead (same reasoning as
+	// DestroyImage).
 	ReleaseTargetSampleSlots( *t );
-	retiredTargets[frameIndex].push_back( *t );
+	if ( frameOpen ) {
+		retiredTargets[frameIndex].push_back( *t );
+	} else {
+		vkDeviceWaitIdle( device );
+		FreeTargetObjects( *t );
+	}
 	*t = RenderTarget();		// free the target-table slot
 	InvalidateTextureSets();	// a freed sample handle may be cached in a texture set (shadow unit 7/8, HDR unit 0)
 }
