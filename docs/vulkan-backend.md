@@ -317,14 +317,41 @@ Original plan:
   terms are inert at w=0 on GL). **Pending: the user's in-game look.**
 
 ### M6 — Debug tools, screenshots, ImGui
-- `DrawImmediate` (the 24-byte imVert_t contract) for `r_showTris`/`r_showNormals`/…
-- Screenshots: copy scene image to a host-visible buffer, feed the existing capture
-  path (`RB_RHI_CaptureNextSwap` analogue).
-- ImGui via the vendored `imgui_impl_vulkan` (render into the swapchain pass after the
-  scene blit), init/teardown wired in [sys_imgui.cpp](../neo/sys/sys_imgui.cpp) beside
-  the GL impls.
-- **Verify:** settings menu (incl. Enhancements tab UI) usable on Vulkan; screenshot
-  command produces correct images; debug cvars draw.
+### M6 — Debug tools, screenshots, ImGui  **[BUILT 2026-08-03 — pending the user's in-game look]**
+- **[done] Screenshots:** `ReadPixelsRGB` reads a rect of the last completed frame out
+  of the scene image (it persists between frames as `TRANSFER_SRC`) into the exact
+  `glReadPixels(GL_RGB)` contract the callers expect — GL window coords, bottom-up rows,
+  4-byte row padding — via a synchronous queue-idle + `vkCmdCopyImageToBuffer`. Wired
+  into the swap-capture path (`RB_RHI_CaptureNextSwap` serviced after `EndFrame`),
+  `CaptureRenderToFile`, and `R_ReadTiledPixels` (envshots/probes). **The glass room
+  probes are re-enabled on Vulkan** now that captures work (the M5 gate is gone).
+- **[done] ImGui** via the vendored `imgui_impl_vulkan`: a LOAD render pass on the
+  swapchain image (initialLayout `TRANSFER_DST` after the scene blit → finalLayout
+  `PRESENT`), per-image views/framebuffers rebuilt on swapchain recreation (the pass
+  object survives; a surface-format change recreates it + `CreateMainPipeline`). The
+  glue lives in [VulkanImGui.h](../neo/renderer/rhi/vk/VulkanImGui.h) (impl in
+  VulkanBackend); [sys_imgui.cpp](../neo/sys/sys_imgui.cpp) grew a `useVulkanBackend`
+  branch (`InitForVulkan` + glue) and init moved to `R_InitOpenGL` after the backend is
+  up (glimp defers when `windowIsVulkan`). `RC_SWAP_BUFFERS` → `ImGuiHooks::EndFrame`
+  hands the draw data over; the backend renders it **between the scene blit and present**,
+  so menus stay out of screenshots (which read the scene image), exactly like GL.
+- **[done] `DrawImmediate`** (24-byte `imVert_t`, locations 0/1/5): new `VL_IMMEDIATE`
+  vertex layout + per-call primitive topology baked into the pipeline key (a GL primMode;
+  -1 = triangle list for every normal draw). Non-indexed draw through the generic
+  program, fixed alpha-blend/depth-LEQUAL pipeline. `GL_LINE_LOOP` → line strip (no VK
+  analogue; open loop, cosmetic).
+- **[done] Debug tools ungated on VK:** `RB_RenderDebugTools` runs the
+  idImmediateMode-based subset (game debug lines/polygons + `r_showPortals`); the
+  surface-indexed views (`r_showTris`/`r_showNormals`/…) stay GL-only until the core
+  `RB_DrawElements` path — the **same gap the GL3 core backend has** — with a one-time
+  notice. Shared helpers made qgl-NULL-safe (`GL_State`/`GL_Cull` no-op,
+  `RB_SimpleWorldSetup`/`SurfaceSetup` route scissor through the RHI, the enabled debug
+  functions guard their bare qgl) so the debug path can't crash without a GL context.
+- **Verified headless:** in-game screenshot pixel-correct (right orientation, full
+  frame); ImGui init + settings-window render + `vid_restart` cycles validation-clean;
+  the `r_showPortals` outline renders through `DrawImmediate` (validation clean); GL3
+  regression clean. **Pending: the user's in-game look** (F10 menu interaction,
+  screenshot, glass with probes re-enabled).
 
 ### M7 — Enhancement suite port (together, as planned)
 - The render-target family on VMA images: 2D depth (projected shadow maps), cube depth

@@ -42,6 +42,7 @@ enum ImageFormat {
 enum VertexLayout {
 	VL_DRAWVERT,	// idDrawVert: pos3/st2/normal3/tangent3/bitangent3/color4ub, locations 0-5
 	VL_SHADOW,		// shadowCache_t: pos4 only, location 0
+	VL_IMMEDIATE,	// imVert_t: pos3/st2/color4ub (24 B), locations 0/1/5 — debug drawing
 	VL_COUNT
 };
 
@@ -74,6 +75,11 @@ struct PipelineDesc {
 	VertexLayout	vertexLayout = VL_DRAWVERT;
 	int				cullType = 0;		// CT_* from Material.h
 	int				stencilState = SS_DISABLED;	// StencilState (GL3 backend ignores it)
+	// primitive topology as a GL primMode (GL_LINES/POINTS/TRIANGLES/…); -1 =
+	// triangle list (the default every non-immediate draw uses). Only the
+	// Vulkan backend reads it (bakes topology into the pipeline); GL3 passes
+	// primMode straight to glDrawArrays and ignores this.
+	int				topology = -1;
 };
 
 struct DrawArgs {
@@ -239,6 +245,15 @@ public:
 	// (cinematic frames): staged through a per-frame ring inside the frame's
 	// command stream, ordered against this frame's earlier samples.
 	virtual void	UpdateTexture2D( ImageHandle dst, int w, int h, const void *pixels ) {}
+
+	// ---- readback (Phase 4 M6: screenshots / capture-to-file) ----
+	// Read an RGB rect of the last completed frame into dest, matching the
+	// glReadPixels(GL_RGB) contract the callers were written against: GL
+	// window coordinates (origin bottom-left), rows bottom-up and padded to
+	// 4-byte boundaries. Synchronous (screenshot-grade stall is fine).
+	// Default false = unsupported; the GL backends keep their literal
+	// glReadPixels paths.
+	virtual bool	ReadPixelsRGB( unsigned char *dest, int x, int y, int w, int h ) { return false; }
 
 	// ---- immediate-mode debug drawing (Chunk G) ----
 	// Draws a batch of interleaved verts { float xyz[3]; float st[2];

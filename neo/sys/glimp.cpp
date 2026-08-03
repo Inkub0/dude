@@ -991,12 +991,10 @@ try_again:
 	// SDL1.2 has no context, and is not supported by ImGui anyway.
 	// DUDE: works on both GL backends — sys_imgui picks the fixed-function GL2
 	// ImGui renderer for the legacy context and the shader-based GL3 one for the
-	// GL 3.3 core context (r_graphicsAPI opengl3). Under Vulkan there is no GL
-	// context; ImGui moves to imgui_impl_vulkan at Phase 4 M6 — until then the
-	// F10 menus are unavailable on the Vulkan backend.
-	if ( windowIsVulkan ) {
-		common->Printf( "Skipping ImGui init on the Vulkan backend (arrives at Phase 4 M6)\n" );
-	} else {
+	// GL 3.3 core context (r_graphicsAPI opengl3). Under Vulkan the renderer
+	// side needs the live backend (instance/device/swapchain), so R_InitOpenGL
+	// runs ImGuiHooks::Init after rhi Init instead (Phase 4 M6).
+	if ( !windowIsVulkan ) {
 		D3::ImGuiHooks::Init(window, context);
 	}
 #endif

@@ -41,6 +41,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/tr_local.h"
 #include "renderer/rhi/RHI.h"
 #include "renderer/rhi/GL3Local.h"
+#include "sys/sys_imgui.h"		// DUDE Phase 4 M6: ImGui init on the Vulkan backend
 
 #include "framework/GameCallbacks_local.h"
 #include "framework/Game.h"
@@ -1099,6 +1100,11 @@ void R_InitOpenGL( void ) {
 
 		common->Printf( "Vulkan device: %s\n", glConfig.renderer_string );
 		common->Printf( "Vulkan driver: %s\n", glConfig.version_string );
+
+		// M6: ImGui via imgui_impl_vulkan — needs the live backend (instance,
+		// device, swapchain render pass), so init here rather than at window
+		// creation like the GL paths (glimp defers when windowIsVulkan)
+		D3::ImGuiHooks::Init( GLimp_GetSDLWindow(), NULL );
 	} else
 #endif
 	{
@@ -1763,10 +1769,10 @@ If ref isn't specified, the full session UpdateScreen will be done.
 ====================
 */
 void R_ReadTiledPixels( int width, int height, byte *buffer, renderView_t *ref = NULL ) {
-	// DUDE Phase 4 M1: screenshots need the readback path, which is GL-only
-	// until M6 moves capture into the RHI; no qgl under the Vulkan backend
-	if ( qglReadPixels == NULL ) {
-		common->Warning( "screenshots are not supported on the Vulkan backend yet (M6)" );
+	// M6: the Vulkan backend serves RB_RHI_CaptureNextSwap through the RHI
+	// readback (rhiBackend path below); only a qgl-less legacy path is broken
+	if ( qglReadPixels == NULL && !glConfig.rhiBackend ) {
+		common->Warning( "screenshots need the readback path (no GL and no RHI backend)" );
 		memset( buffer, 0, width * height * 3 );
 		return;
 	}
@@ -2268,13 +2274,6 @@ void R_BakeGlassProbe_f( const idCmdArgs &args ) {
 	const char	*extensions[6] = { "_px.tga", "_nx.tga", "_py.tga", "_ny.tga",
 		"_pz.tga", "_nz.tga" };
 
-	// Vulkan: TakeScreenshot can't read the scene image until M6 — a bake here
-	// would write black cubemaps into fs_savepath that then poison glass on
-	// every backend (they load like real probes)
-	if ( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		common->Printf( "bakeGlassProbe: not supported on the Vulkan backend yet (M6)\n" );
-		return;
-	}
 
 	const bool force = args.Argc() > 1 && idStr::Icmp( args.Argv( 1 ), "force" ) == 0;
 	if ( !tr.primaryView || !tr.primaryWorld ) {

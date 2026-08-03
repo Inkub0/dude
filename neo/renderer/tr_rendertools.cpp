@@ -34,6 +34,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/ImmediateMode.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/rhi/RHI.h"		// DUDE Phase 4 M6: RHI scissor on the Vulkan backend
 
 #define MAX_DEBUG_LINES			16384
 
@@ -129,7 +130,9 @@ RB_SimpleSurfaceSetup
 void RB_SimpleSurfaceSetup( const drawSurf_t *drawSurf ) {
 	// change the matrix if needed
 	if ( drawSurf->space != backEnd.currentSpace ) {
-		qglLoadMatrixf( drawSurf->space->modelViewMatrix );
+		if ( qglLoadMatrixf != NULL ) {
+			qglLoadMatrixf( drawSurf->space->modelViewMatrix );
+		}
 		if ( glConfig.rhiBackend ) {
 			// no fixed-function stack: feed the MVP to idImmediateMode (Chunk G)
 			float mvp[16];
@@ -142,10 +145,15 @@ void RB_SimpleSurfaceSetup( const drawSurf_t *drawSurf ) {
 	// change the scissor if needed
 	if ( r_useScissor.GetBool() && !backEnd.currentScissor.Equals( drawSurf->scissorRect ) ) {
 		backEnd.currentScissor = drawSurf->scissorRect;
-		qglScissor( backEnd.viewDef->viewport.x1 + backEnd.currentScissor.x1,
-			backEnd.viewDef->viewport.y1 + backEnd.currentScissor.y1,
-			backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
-			backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
+		const int sx = backEnd.viewDef->viewport.x1 + backEnd.currentScissor.x1;
+		const int sy = backEnd.viewDef->viewport.y1 + backEnd.currentScissor.y1;
+		const int sw = backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1;
+		const int sh = backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1;
+		if ( qglScissor != NULL ) {
+			qglScissor( sx, sy, sw, sh );
+		} else if ( glConfig.rhiBackend ) {
+			rhi::GetRHI()->SetScissor( sx, sy, sw, sh );	// Vulkan: no qgl
+		}
 	}
 }
 
@@ -156,7 +164,9 @@ RB_SimpleWorldSetup
 */
 void RB_SimpleWorldSetup( void ) {
 	backEnd.currentSpace = &backEnd.viewDef->worldSpace;
-	qglLoadMatrixf( backEnd.viewDef->worldSpace.modelViewMatrix );
+	if ( qglLoadMatrixf != NULL ) {
+		qglLoadMatrixf( backEnd.viewDef->worldSpace.modelViewMatrix );
+	}
 	if ( glConfig.rhiBackend ) {
 		float mvp[16];
 		myGlMultMatrix( backEnd.viewDef->worldSpace.modelViewMatrix, backEnd.viewDef->projectionMatrix, mvp );
@@ -164,10 +174,15 @@ void RB_SimpleWorldSetup( void ) {
 	}
 
 	backEnd.currentScissor = backEnd.viewDef->scissor;
-	qglScissor( backEnd.viewDef->viewport.x1 + backEnd.currentScissor.x1,
-		backEnd.viewDef->viewport.y1 + backEnd.currentScissor.y1,
-		backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
-		backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
+	const int sx = backEnd.viewDef->viewport.x1 + backEnd.currentScissor.x1;
+	const int sy = backEnd.viewDef->viewport.y1 + backEnd.currentScissor.y1;
+	const int sw = backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1;
+	const int sh = backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1;
+	if ( qglScissor != NULL ) {
+		qglScissor( sx, sy, sw, sh );
+	} else if ( glConfig.rhiBackend ) {
+		rhi::GetRHI()->SetScissor( sx, sy, sw, sh );		// Vulkan: no qgl
+	}
 }
 
 /*
@@ -1724,13 +1739,17 @@ void RB_ShowPortals( void ) {
 	RB_SimpleWorldSetup();
 
 	globalImages->BindNull();
-	qglDisable( GL_DEPTH_TEST );
+	if ( qglDisable != NULL ) {
+		qglDisable( GL_DEPTH_TEST );
+	}
 
 	GL_State( GLS_DEFAULT );
 
 	((idRenderWorldLocal *)backEnd.viewDef->renderWorld)->ShowPortals();
 
-	qglEnable( GL_DEPTH_TEST );
+	if ( qglEnable != NULL ) {
+		qglEnable( GL_DEPTH_TEST );
+	}
 }
 
 /*
@@ -2044,9 +2063,14 @@ void RB_ShowDebugLines( void ) {
 
 	// draw lines
 	GL_State( GLS_POLYMODE_LINE );//| GLS_DEPTHMASK ); //| GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
-	qglLineWidth( width );
+	// qglLineWidth / qglDisable are fixed-function GL; the Vulkan DrawImmediate
+	// bakes a fixed width-1, depth-LEQUAL pipeline (no-depth-test lines are
+	// still depth-tested there — acceptable for debug overlays)
+	if ( qglLineWidth != NULL ) {
+		qglLineWidth( width );
+	}
 
-	if ( !r_debugLineDepthTest.GetBool() ) {
+	if ( !r_debugLineDepthTest.GetBool() && qglDisable != NULL ) {
 		qglDisable( GL_DEPTH_TEST );
 	}
 
@@ -2063,7 +2087,7 @@ void RB_ShowDebugLines( void ) {
 	}
 	im.End();
 
-	if ( !r_debugLineDepthTest.GetBool() ) {
+	if ( !r_debugLineDepthTest.GetBool() && qglEnable != NULL ) {
 		qglEnable( GL_DEPTH_TEST );
 	}
 
@@ -2080,7 +2104,9 @@ void RB_ShowDebugLines( void ) {
 
 	im.End();
 
-	qglLineWidth( 1 );
+	if ( qglLineWidth != NULL ) {
+		qglLineWidth( 1 );
+	}
 	GL_State( GLS_DEFAULT );
 }
 
@@ -2151,19 +2177,27 @@ void RB_ShowDebugPolygons( void ) {
 
 	globalImages->BindNull();
 
-	qglDisable( GL_TEXTURE_2D );
-	qglDisable( GL_STENCIL_TEST );
-
-	qglEnable( GL_DEPTH_TEST );
+	// fixed-function texture/stencil/polygon-offset state; the Vulkan
+	// DrawImmediate pipeline is alpha-blended depth-LEQUAL (no polygon offset),
+	// so guard the bare qgl and accept a small z-fight on filled debug polys
+	if ( qglDisable != NULL ) {
+		qglDisable( GL_TEXTURE_2D );
+		qglDisable( GL_STENCIL_TEST );
+		qglEnable( GL_DEPTH_TEST );
+	}
 
 	if ( r_debugPolygonFilled.GetBool() ) {
 		GL_State( GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA | GLS_DEPTHMASK );
-		qglPolygonOffset( -1, -2 );
-		qglEnable( GL_POLYGON_OFFSET_FILL );
+		if ( qglPolygonOffset != NULL ) {
+			qglPolygonOffset( -1, -2 );
+			qglEnable( GL_POLYGON_OFFSET_FILL );
+		}
 	} else {
 		GL_State( GLS_POLYMODE_LINE );
-		qglPolygonOffset( -1, -2 );
-		qglEnable( GL_POLYGON_OFFSET_LINE );
+		if ( qglPolygonOffset != NULL ) {
+			qglPolygonOffset( -1, -2 );
+			qglEnable( GL_POLYGON_OFFSET_LINE );
+		}
 	}
 
 	idImmediateMode im;
@@ -2185,13 +2219,14 @@ void RB_ShowDebugPolygons( void ) {
 
 	GL_State( GLS_DEFAULT );
 
-	if ( r_debugPolygonFilled.GetBool() ) {
-		qglDisable( GL_POLYGON_OFFSET_FILL );
-	} else {
-		qglDisable( GL_POLYGON_OFFSET_LINE );
+	if ( qglDisable != NULL ) {
+		if ( r_debugPolygonFilled.GetBool() ) {
+			qglDisable( GL_POLYGON_OFFSET_FILL );
+		} else {
+			qglDisable( GL_POLYGON_OFFSET_LINE );
+		}
+		qglDepthRange( 0, 1 );
 	}
-
-	qglDepthRange( 0, 1 );
 	GL_State( GLS_DEFAULT );
 }
 
@@ -2421,11 +2456,32 @@ void RB_RenderDebugTools( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 
 	GL_State( GLS_DEFAULT );
 	backEnd.currentScissor = backEnd.viewDef->scissor;
-	qglScissor( backEnd.viewDef->viewport.x1 + backEnd.currentScissor.x1,
-		backEnd.viewDef->viewport.y1 + backEnd.currentScissor.y1,
-		backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
-		backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
+	const int dbgSx = backEnd.viewDef->viewport.x1 + backEnd.currentScissor.x1;
+	const int dbgSy = backEnd.viewDef->viewport.y1 + backEnd.currentScissor.y1;
+	const int dbgSw = backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1;
+	const int dbgSh = backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1;
+	if ( qglScissor != NULL ) {
+		qglScissor( dbgSx, dbgSy, dbgSw, dbgSh );
+	} else if ( glConfig.rhiBackend ) {
+		rhi::GetRHI()->SetScissor( dbgSx, dbgSy, dbgSw, dbgSh );
+	}
 
+	// Vulkan (Phase 4 M6): only the idImmediateMode-based debug views render —
+	// the surface-indexed ones (r_showTris/Normals/…) use fixed-function vertex
+	// arrays that need the core RB_DrawElements path (GL-only, same gap as the
+	// GL3 core backend). Run the safe subset: game debug lines/polygons + portals.
+	if ( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		RB_ShowPortals();
+		RB_ShowDebugLines();
+		RB_ShowDebugPolygons();
+		static bool warned = false;
+		if ( !warned && ( r_showTris.GetInteger() || r_showNormals.GetFloat() != 0.0f
+		                  || r_showTangentSpace.GetInteger() || r_showEdges.GetBool() ) ) {
+			warned = true;
+			common->Printf( "VK: surface-indexed debug views (r_showTris/Normals/…) are GL-only until the core RB_DrawElements path\n" );
+		}
+		return;
+	}
 
 	RB_ShowLightCount();
 	RB_ShowShadowCount();

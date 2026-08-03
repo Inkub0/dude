@@ -1573,14 +1573,6 @@ void RB_RHI_InvalidateGlassProbe( int area ) {
 static idImage *RB_RHI_GlassProbeForSurface( const viewDef_t *viewDef, const drawSurf_t *surf,
                                              float *probeAvg ) {
 	*probeAvg = -1.0f;
-	// Vulkan: probes are inert until M6 — the bake path captures through
-	// TakeScreenshot, which can't read the VK scene image yet, so auto-bakes
-	// would write black cubemaps into fs_savepath and poison glass on every
-	// backend. Glass keeps the vanilla env/gen* cube reflection instead.
-	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		RB_RHI_LogOnce( "VK: glass room probes disabled until the M6 capture path (vanilla env cube instead)" );
-		return NULL;
-	}
 	if ( !r_ssrGlassProbes.GetBool() || !tr.primaryWorld ) {
 		return NULL;
 	}
@@ -2504,10 +2496,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	// — Chunk G. Renders through idImmediateMode's core path; each sub-view
 	// early-outs on its own cvar, so this is free when nothing is enabled.
 	// (Surface-indexed views like r_showTris await the core RB_DrawElements
-	// path; the idImmediateMode-based views work now.)
-	if ( viewDef->viewEntitys && rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
-		// Vulkan: debug tools arrive at M6 (DrawImmediate + core GL_State
-		// setup are GL-only today)
+	// path; the idImmediateMode-based views work now — on Vulkan too, M6, where
+	// RB_RenderDebugTools runs the qgl-safe subset.)
+	if ( viewDef->viewEntitys ) {
 		RB_RenderDebugTools( (drawSurf_t **)&viewDef->drawSurfs[0], viewDef->numDrawSurfs );
 	}
 
@@ -2587,9 +2578,12 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 		}
 		case RC_SWAP_BUFFERS:
 			if ( vkMode ) {
-				// present happens in the backend's EndFrame below; the GL-only
-				// resolve/gamma/capture/ImGui tail must not run (their VK
-				// equivalents arrive at M5/M6)
+				// present happens in the backend's EndFrame below (the GL-only
+				// resolve/gamma tail doesn't apply; swap capture is serviced
+				// after EndFrame). ImGui renders through the backend: EndFrame
+				// here runs ImGui::Render and hands the draw data over, drawn
+				// into the swapchain image between the scene blit and present.
+				D3::ImGuiHooks::EndFrame();
 				break;
 			}
 			// resolve the RGBA16F scene buffer back onto the backbuffer (r_hdr);
@@ -2621,4 +2615,14 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	}
 
 	r->EndFrame();
+
+	// M6: Vulkan swap capture (screenshots / tiled captures) — the GL path
+	// reads the back buffer in the RC_SWAP_BUFFERS case above; here the scene
+	// image still holds the completed frame after present, so read it back now
+	if ( vkMode && rbCaptureDest ) {
+		if ( !r->ReadPixelsRGB( rbCaptureDest, 0, 0, glConfig.vidWidth, glConfig.vidHeight ) ) {
+			RB_RHI_LogOnce( "VK: swap capture readback failed" );
+		}
+		rbCaptureDest = NULL;
+	}
 }

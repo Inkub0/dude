@@ -58,7 +58,14 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/FileSystem.h"
 #include "renderer/tr_local.h"
 #include "renderer/rhi/RHI.h"
+#include "renderer/rhi/RenderParams.h"	// M6: DrawImmediate fills the generic UBO
 #include "renderer/rhi/MaterialIR.h"		// IR_Purge on shader-cache lifecycle
+#include "renderer/rhi/vk/VulkanImGui.h"	// M6: ImGui glue (impl at the end of this TU)
+
+#ifndef IMGUI_DISABLE
+  #include "../../../libs/imgui/imgui.h"
+  #include "../../../libs/imgui/backends/imgui_impl_vulkan.h"
+#endif
 
 // dev-time validation layer (VK_LAYER_KHRONOS_validation); default on while
 // the backend is being brought up — every milestone's exit bar includes
@@ -142,7 +149,9 @@ public:
 	                                        int srcX, int srcY, int w, int h, bool depth );
 	virtual void	RetireImage( ImageHandle img );
 	virtual void	UpdateTexture2D( ImageHandle dst, int w, int h, const void *pixels );
-	virtual void	DrawImmediate( const void *, int, unsigned int, const float[16], bool ) {}	// M6
+	virtual bool	ReadPixelsRGB( unsigned char *dest, int x, int y, int w, int h );
+	virtual void	DrawImmediate( const void *verts, int numVerts, unsigned int primMode,
+	                               const float mvp[16], bool textured );
 
 private:
 	bool			CreateInstance();
@@ -354,6 +363,24 @@ private:
 	VkCommandPool				uploadPool = VK_NULL_HANDLE;
 	VkCommandBuffer				uploadCb = VK_NULL_HANDLE;
 	VkFence						uploadFence = VK_NULL_HANDLE;
+
+public:
+	// ================= M6: ImGui on Vulkan (VulkanImGui.h glue) =================
+	// Renders into the swapchain image between the scene blit and present, so
+	// ImGui stays out of screenshots (they read the scene image), like GL.
+	bool						ImGuiInit();
+	void						ImGuiShutdown();
+	bool						ImGuiUp() const { return imguiUp; }
+	void						ImGuiSetDrawData( void *dd ) { imguiDrawData = dd; }
+private:
+	bool						CreateImGuiTargets();	// pass + per-swap-image views/framebuffers
+	void						DestroyImGuiTargets();
+	VkRenderPass				imguiPass = VK_NULL_HANDLE;
+	VkFormat					imguiPassFormat = VK_FORMAT_UNDEFINED;
+	std::vector<VkImageView>	imguiViews;
+	std::vector<VkFramebuffer>	imguiFbs;
+	bool						imguiUp = false;
+	void *						imguiDrawData = NULL;	// ImDrawData* for this frame
 };
 
 static VulkanBackend vkBackend;
@@ -883,6 +910,11 @@ bool VulkanBackend::CreateSwapchain() {
 		presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "FIFO_RELAXED" : "FIFO";
 	common->Printf( "VK: swapchain %ux%u, %u images, %s (r_swapInterval %d)\n",
 		extent.width, extent.height, actualCount, modeStr, r_swapInterval.GetInteger() );
+
+	// M6: rebuild the ImGui swapchain targets when ImGui is (or was) up
+	if ( imguiPass != VK_NULL_HANDLE && !CreateImGuiTargets() ) {
+		return false;
+	}
 	return true;
 }
 
@@ -892,6 +924,7 @@ VulkanBackend::DestroySwapchain
 ====================
 */
 void VulkanBackend::DestroySwapchain( bool destroyHandle ) {
+	DestroyImGuiTargets();		// per-swap-image views/framebuffers (pass survives)
 	for ( size_t i = 0; i < releaseSems.size(); i++ ) {
 		vkDestroySemaphore( device, releaseSems[i], NULL );
 	}
@@ -1242,6 +1275,16 @@ void VulkanBackend::Shutdown() {
 		vkDeviceWaitIdle( device );
 	}
 
+	// M6: ImGui device objects must die before the device. Normally sys_imgui
+	// shuts down first (it calls ImGuiShutdown through the glue); this is the
+	// safety net for partial-teardown orders.
+	ImGuiShutdown();
+	if ( imguiPass != VK_NULL_HANDLE ) {
+		vkDestroyRenderPass( device, imguiPass, NULL );
+		imguiPass = VK_NULL_HANDLE;
+		imguiPassFormat = VK_FORMAT_UNDEFINED;
+	}
+
 	if ( device != VK_NULL_HANDLE ) {
 		DestroyM2Resources();
 	}
@@ -1482,14 +1525,36 @@ void VulkanBackend::EndFrame() {
 		sceneExtent.width == swapExtent.width && sceneExtent.height == swapExtent.height
 			? VK_FILTER_NEAREST : VK_FILTER_LINEAR );
 
-	// swapchain image → PRESENT
-	VkImageMemoryBarrier toPresent = toDst;
-	toPresent.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	toPresent.dstAccessMask = 0;
-	toPresent.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	toPresent.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-	vkCmdPipelineBarrier( f.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-		0, 0, NULL, 0, NULL, 1, &toPresent );
+	// M6: ImGui draws into the swapchain image after the blit, through a
+	// LOAD render pass whose finalLayout is PRESENT (screenshots read the
+	// scene image, so the menus stay out of them like on GL). Without draw
+	// data, the plain barrier transition to PRESENT stands.
+#ifndef IMGUI_DISABLE
+	if ( imguiUp && imguiDrawData != NULL && imageIndex < imguiFbs.size()
+	     && imguiFbs[imageIndex] != VK_NULL_HANDLE
+	     && ((ImDrawData *)imguiDrawData)->TotalVtxCount >= 0 ) {
+		VkRenderPassBeginInfo rbi = {};
+		rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+		rbi.renderPass = imguiPass;
+		rbi.framebuffer = imguiFbs[imageIndex];
+		rbi.renderArea.extent = swapExtent;
+		vkCmdBeginRenderPass( f.cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
+		ImGui_ImplVulkan_RenderDrawData( (ImDrawData *)imguiDrawData, f.cb );
+		vkCmdEndRenderPass( f.cb );
+		imguiDrawData = NULL;
+	} else
+#endif
+	{
+		// swapchain image → PRESENT
+		VkImageMemoryBarrier toPresent = toDst;
+		toPresent.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		toPresent.dstAccessMask = 0;
+		toPresent.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		toPresent.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		vkCmdPipelineBarrier( f.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+			0, 0, NULL, 0, NULL, 1, &toPresent );
+	}
+	imguiDrawData = NULL;
 
 	// dev frame dump (r_vkDumpNextFrame): copy the scene image (still
 	// TRANSFER_SRC) into a host buffer alongside the present blit
@@ -2560,6 +2625,106 @@ void VulkanBackend::UpdateTexture2D( ImageHandle dst, int w, int h, const void *
 
 /*
 ====================
+VulkanBackend::ReadPixelsRGB
+
+M6 screenshots: read a rect of the last completed frame out of the scene
+image (it keeps the frame between passes/frames, layout TRANSFER_SRC) into
+the glReadPixels(GL_RGB) layout the callers expect — GL window coords, rows
+bottom-up, padded to 4-byte boundaries. Synchronous by design: waits the
+queue idle, one-off copy through the upload command buffer, fence wait.
+====================
+*/
+bool VulkanBackend::ReadPixelsRGB( unsigned char *dest, int x, int y, int w, int h ) {
+	if ( device == VK_NULL_HANDLE || sceneColor == VK_NULL_HANDLE || !sceneEverWritten
+	     || dest == NULL || uploadCb == VK_NULL_HANDLE ) {
+		return false;
+	}
+	const int sceneW = (int)sceneExtent.width;
+	const int sceneH = (int)sceneExtent.height;
+	if ( x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > sceneW || y + h > sceneH ) {
+		// clamp like glReadPixels would; out-of-range rows stay untouched
+		if ( x < 0 ) { w += x; x = 0; }
+		if ( y < 0 ) { h += y; y = 0; }
+		if ( x + w > sceneW ) { w = sceneW - x; }
+		if ( y + h > sceneH ) { h = sceneH - y; }
+		if ( w <= 0 || h <= 0 ) {
+			return false;
+		}
+	}
+
+	// all rendering that wrote the image must be complete before we copy
+	vkQueueWaitIdle( gfxQueue );
+
+	VkBuffer buf = VK_NULL_HANDLE;
+	VmaAllocation alloc = NULL;
+	byte *mapped = NULL;
+	{
+		VkBufferCreateInfo bci = {};
+		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bci.size = (VkDeviceSize)w * h * 4;
+		bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		VmaAllocationCreateInfo aci = {};
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		VmaAllocationInfo info = {};
+		if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &buf, &alloc, &info ), "vmaCreateBuffer(readback)" ) ) {
+			return false;
+		}
+		mapped = (byte *)info.pMappedData;
+	}
+
+	vkResetCommandBuffer( uploadCb, 0 );
+	VkCommandBufferBeginInfo bi = {};
+	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer( uploadCb, &bi );
+
+	// make the color writes available to transfer reads (queue is idle, so
+	// this is a memory barrier, not an execution race)
+	VkMemoryBarrier mb = {};
+	mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+	mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	vkCmdPipelineBarrier( uploadCb,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL );
+
+	// GL bottom-left rect -> VK top-left row
+	VkBufferImageCopy c = {};
+	c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	c.imageSubresource.layerCount = 1;
+	c.imageOffset = { x, sceneH - y - h, 0 };
+	c.imageExtent = { (uint32_t)w, (uint32_t)h, 1 };
+	vkCmdCopyImageToBuffer( uploadCb, sceneColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &c );
+
+	vkEndCommandBuffer( uploadCb );
+	VkSubmitInfo si = {};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &uploadCb;
+	vkResetFences( device, 1, &uploadFence );
+	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+
+	// RGBA top-down -> RGB bottom-up with 4-byte row padding (the GL contract)
+	const int dstRow = ( w * 3 + 3 ) & ~3;
+	for ( int r = 0; r < h; r++ ) {
+		const byte *src = mapped + (size_t)( h - 1 - r ) * w * 4;
+		byte *dst = dest + (size_t)r * dstRow;
+		for ( int i = 0; i < w; i++ ) {
+			dst[i * 3 + 0] = src[i * 4 + 0];
+			dst[i * 3 + 1] = src[i * 4 + 1];
+			dst[i * 3 + 2] = src[i * 4 + 2];
+		}
+	}
+
+	vmaDestroyBuffer( vma, buf, alloc );
+	return true;
+}
+
+/*
+====================
 VulkanBackend::CreateTextureCube
 
 Six RGBA8 faces in GL_TEXTURE_CUBE_MAP_POSITIVE_X.. order, with a CPU mip
@@ -2847,7 +3012,8 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 		| ( (unsigned long long)( desc.shader & 0xffff ) << 32 )
 		| ( (unsigned long long)( desc.vertexLayout & 0xf ) << 48 )
 		| ( (unsigned long long)( desc.cullType & 0xf ) << 52 )
-		| ( (unsigned long long)( desc.stencilState & 0xf ) << 56 );
+		| ( (unsigned long long)( desc.stencilState & 0xf ) << 56 )
+		| ( (unsigned long long)( desc.topology & 0xf ) << 60 );
 
 	auto it = pipelineCache.find( key );
 	if ( it != pipelineCache.end() ) {
@@ -2883,6 +3049,15 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 		attrs[4] = { 4, 0, VK_FORMAT_R32G32B32_SFLOAT, (uint32_t)( offsetof( idDrawVert, tangents ) + sizeof( idVec3 ) ) };
 		attrs[5] = { 5, 0, VK_FORMAT_R8G8B8A8_UNORM,   (uint32_t)offsetof( idDrawVert, color ) };
 		attrCount = 6;
+	} else if ( desc.vertexLayout == VL_IMMEDIATE ) {
+		// imVert_t: float xyz[3] @0, float st[2] @12, byte color[4] @20 (24 B).
+		// Same locations generic.vert reads (0/1/5); the missing 2/3/4 are
+		// unconsumed (the benign "attribute not consumed" pipeline warning).
+		binding.stride = 24;
+		attrs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 };
+		attrs[1] = { 1, 0, VK_FORMAT_R32G32_SFLOAT,    12 };
+		attrs[2] = { 5, 0, VK_FORMAT_R8G8B8A8_UNORM,   20 };
+		attrCount = 3;
 	} else {
 		binding.stride = sizeof( shadowCache_t );
 		attrs[0] = { 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0 };
@@ -2900,6 +3075,18 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	VkPipelineInputAssemblyStateCreateInfo ia = {};
 	ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
 	ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	// desc.topology carries a GL primMode for immediate-mode debug draws; -1
+	// (every normal draw) stays triangle list. GL_LINE_LOOP has no VK analogue —
+	// degrade to a line strip (leaves the loop open; only debug wireframes).
+	switch ( desc.topology ) {
+	case GL_POINTS:         ia.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
+	case GL_LINES:          ia.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
+	case GL_LINE_LOOP:
+	case GL_LINE_STRIP:     ia.topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
+	case GL_TRIANGLE_STRIP: ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
+	case GL_TRIANGLE_FAN:   ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;
+	default:                ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;
+	}
 
 	VkPipelineViewportStateCreateInfo vp = {};
 	vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -3290,6 +3477,316 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 	vkCmdBindVertexBuffers( cb, 0, 1, &vb, &vbOfs );
 	vkCmdBindIndexBuffer( cb, ib, 0, VK_INDEX_TYPE_UINT32 );
 	vkCmdDrawIndexed( cb, (uint32_t)args.indexCount, 1, (uint32_t)args.firstIndex, 0, 0 );
+}
+
+/*
+====================
+VulkanBackend::DrawImmediate
+
+M6 debug drawing (idImmediateMode → the generic program). A non-indexed
+batch of imVert_t (24 B) as `primMode`, streamed through the vertex + UBO
+rings. Fixed pipeline state: alpha blend, depth-test LEQUAL, no depth write —
+debug lines/polygons/portals read over the scene. Unlike GL (which inherits
+the caller's GL_State), the state is baked here, so "depth test off" debug
+lines are still depth-tested; acceptable for the dev overlays.
+====================
+*/
+void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int primMode,
+                                   const float mvp[16], bool textured ) {
+	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame || numVerts <= 0 || verts == NULL ) {
+		return;
+	}
+
+	BufferHandle vbh = 0;
+	int vertOfs = AllocFromRing( vertRing[frameIndex], verts, numVerts * 24, 4, 0, &vbh );
+	VkBuffer vb = LookupBuffer( vbh );
+	if ( vb == VK_NULL_HANDLE ) {
+		return;
+	}
+
+	// generic-program uniforms: identity texture matrix, straight per-vertex
+	// color (modulate 1 / add 0 / color 1), alpha test off — matches the GL3 path
+	RenderParams p;
+	memset( &p, 0, sizeof( p ) );
+	memcpy( p.mvpMatrix, mvp, sizeof( p.mvpMatrix ) );
+	p.diffuseMatrixS[0] = 1.0f;
+	p.diffuseMatrixT[1] = 1.0f;
+	p.vertexColorModulate[0] = p.vertexColorModulate[1] = p.vertexColorModulate[2] = p.vertexColorModulate[3] = 1.0f;
+	p.color[0] = p.color[1] = p.color[2] = p.color[3] = 1.0f;
+	BufferHandle ubh = 0;
+	int uniOfs = AllocFromRing( uboRing[frameIndex], &p, sizeof( p ), uboAlign, MAX_UNIFORM_SLICE, &ubh );
+
+	PipelineDesc pd;
+	pd.stateBits = GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA | GLS_DEPTHMASK;
+	pd.shader = LoadShader( "generic" );
+	pd.vertexLayout = VL_IMMEDIATE;
+	pd.cullType = CT_TWO_SIDED;
+	pd.topology = (int)primMode;
+	VkPipeline pipeline = GetPipeline( pd );
+	if ( pipeline == VK_NULL_HANDLE ) {
+		return;
+	}
+	// untextured lines/points/tris: the generic program samples unit 0 and
+	// multiplies by vertex color, so the white dummy gives pure vertex color.
+	// textured debug immediate draws aren't plumbed (no bound-image state on
+	// VK) — they also fall back to the white texel.
+	if ( textured ) {
+		static bool warnedTex = false;
+		if ( !warnedTex ) {
+			warnedTex = true;
+			common->Printf( "VK: textured DrawImmediate falls back to white (no bound-image state)\n" );
+		}
+	}
+
+	EnsureScenePass();
+	if ( !insideScenePass ) {
+		return;
+	}
+	VkCommandBuffer cb = frames[frameIndex].cb;
+
+	if ( dynStateDirty ) {
+		const float fbH = (float)sceneExtent.height;
+		VkViewport v = {};
+		v.x = (float)vpRect[0];
+		v.y = fbH - (float)vpRect[1];
+		v.width = (float)vpRect[2];
+		v.height = -(float)vpRect[3];
+		v.minDepth = depthRangeMin;
+		v.maxDepth = depthRangeMax;
+		vkCmdSetViewport( cb, 0, 1, &v );
+		VkRect2D sc = {};
+		int sx = scRect[0], sy = scRect[1], sw = scRect[2], sh = scRect[3];
+		int top = (int)sceneExtent.height - ( sy + sh );
+		if ( sx < 0 ) { sw += sx; sx = 0; }
+		if ( top < 0 ) { sh += top; top = 0; }
+		if ( sw < 0 ) { sw = 0; }
+		if ( sh < 0 ) { sh = 0; }
+		sc.offset = { sx, top };
+		sc.extent = { (uint32_t)sw, (uint32_t)sh };
+		vkCmdSetScissor( cb, 0, 1, &sc );
+		vkCmdSetDepthBias( cb, polyOfsUnits, 0.0f, polyOfsFactor );
+		dynStateDirty = false;
+	}
+
+	vkCmdBindPipeline( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline );
+	boundPipeline = VK_NULL_HANDLE;		// bypassed the normal Draw path; force a rebind next
+
+	uint32_t dynOfs = (uint32_t)uniOfs;
+	vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout, 0, 1, &uboSet[frameIndex], 1, &dynOfs );
+
+	// set 1: all-dummy texture set (white on every unit) — debug draws are
+	// untextured; a white texel yields pure vertex color through generic.frag
+	{
+		VkDescriptorSet texSet = VK_NULL_HANDLE;
+		VkDescriptorSetAllocateInfo ai = {};
+		ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		ai.descriptorPool = framePool[frameIndex];
+		ai.descriptorSetCount = 1;
+		ai.pSetLayouts = &setLayoutTex;
+		if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
+			return;
+		}
+		VkDescriptorImageInfo infos[11];
+		VkWriteDescriptorSet writes[11];
+		const ImageRec &dummy = imageTable[dummyImage - 1];
+		for ( int i = 0; i < 11; i++ ) {
+			infos[i] = {};
+			infos[i].sampler = ( i == 7 ) ? dummyShadow2D.sampler : ( i == 8 ? dummyShadowCube.sampler : dummy.sampler );
+			infos[i].imageView = ( i == 7 ) ? dummyShadow2D.view : ( i == 8 ? dummyShadowCube.view : dummy.view );
+			infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			writes[i] = {};
+			writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			writes[i].dstSet = texSet;
+			writes[i].dstBinding = (uint32_t)i;
+			writes[i].descriptorCount = 1;
+			writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			writes[i].pImageInfo = &infos[i];
+		}
+		vkUpdateDescriptorSets( device, 11, writes, 0, NULL );
+		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout, 1, 1, &texSet, 0, NULL );
+	}
+
+	VkDeviceSize vbOfs = (VkDeviceSize)vertOfs;
+	vkCmdBindVertexBuffers( cb, 0, 1, &vb, &vbOfs );
+	vkCmdDraw( cb, (uint32_t)numVerts, 1, 0, 0 );
+}
+
+/*
+====================
+M6: ImGui on Vulkan — swapchain targets + init/shutdown + glue
+
+The pass loads the blitted frame (initialLayout TRANSFER_DST) and hands the
+image to present (finalLayout PRESENT_SRC); EndFrame begins it only when
+draw data is pending. The pass object survives swapchain recreation (only
+views/framebuffers rebuild); a surface-format change recreates it and asks
+the ImGui backend for a new pipeline.
+====================
+*/
+bool VulkanBackend::CreateImGuiTargets() {
+#ifndef IMGUI_DISABLE
+	if ( device == VK_NULL_HANDLE || swapImages.empty() || swapFormat == VK_FORMAT_UNDEFINED ) {
+		return false;
+	}
+
+	const bool formatChanged = imguiPass != VK_NULL_HANDLE && imguiPassFormat != swapFormat;
+	if ( formatChanged ) {
+		vkDestroyRenderPass( device, imguiPass, NULL );
+		imguiPass = VK_NULL_HANDLE;
+	}
+	if ( imguiPass == VK_NULL_HANDLE ) {
+		VkAttachmentDescription att = {};
+		att.format = swapFormat;
+		att.samples = VK_SAMPLE_COUNT_1_BIT;
+		att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		att.initialLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;	// after the scene blit
+		att.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+		VkAttachmentReference colorRef = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+		VkSubpassDescription sub = {};
+		sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		sub.colorAttachmentCount = 1;
+		sub.pColorAttachments = &colorRef;
+
+		VkSubpassDependency dep = {};
+		dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+		dep.dstSubpass = 0;
+		dep.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		dep.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+		VkRenderPassCreateInfo rpi = {};
+		rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		rpi.attachmentCount = 1;
+		rpi.pAttachments = &att;
+		rpi.subpassCount = 1;
+		rpi.pSubpasses = &sub;
+		rpi.dependencyCount = 1;
+		rpi.pDependencies = &dep;
+		if ( !vkCheck( vkCreateRenderPass( device, &rpi, NULL, &imguiPass ), "vkCreateRenderPass(imgui)" ) ) {
+			return false;
+		}
+		imguiPassFormat = swapFormat;
+
+		if ( formatChanged && imguiUp ) {
+			ImGui_ImplVulkan_PipelineInfo pi = {};
+			pi.RenderPass = imguiPass;
+			ImGui_ImplVulkan_CreateMainPipeline( &pi );
+		}
+	}
+
+	DestroyImGuiTargets();
+	imguiViews.resize( swapImages.size(), VK_NULL_HANDLE );
+	imguiFbs.resize( swapImages.size(), VK_NULL_HANDLE );
+	for ( size_t i = 0; i < swapImages.size(); i++ ) {
+		VkImageViewCreateInfo vi = {};
+		vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		vi.image = swapImages[i];
+		vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		vi.format = swapFormat;
+		vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		vi.subresourceRange.levelCount = 1;
+		vi.subresourceRange.layerCount = 1;
+		if ( !vkCheck( vkCreateImageView( device, &vi, NULL, &imguiViews[i] ), "vkCreateImageView(imgui)" ) ) {
+			return false;
+		}
+		VkFramebufferCreateInfo fbi = {};
+		fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		fbi.renderPass = imguiPass;
+		fbi.attachmentCount = 1;
+		fbi.pAttachments = &imguiViews[i];
+		fbi.width = swapExtent.width;
+		fbi.height = swapExtent.height;
+		fbi.layers = 1;
+		if ( !vkCheck( vkCreateFramebuffer( device, &fbi, NULL, &imguiFbs[i] ), "vkCreateFramebuffer(imgui)" ) ) {
+			return false;
+		}
+	}
+	return true;
+#else
+	return false;
+#endif
+}
+
+void VulkanBackend::DestroyImGuiTargets() {
+	for ( size_t i = 0; i < imguiFbs.size(); i++ ) {
+		if ( imguiFbs[i] ) { vkDestroyFramebuffer( device, imguiFbs[i], NULL ); }
+	}
+	imguiFbs.clear();
+	for ( size_t i = 0; i < imguiViews.size(); i++ ) {
+		if ( imguiViews[i] ) { vkDestroyImageView( device, imguiViews[i], NULL ); }
+	}
+	imguiViews.clear();
+}
+
+bool VulkanBackend::ImGuiInit() {
+#ifndef IMGUI_DISABLE
+	if ( device == VK_NULL_HANDLE ) {
+		return false;
+	}
+	if ( imguiUp ) {
+		return true;
+	}
+	if ( !CreateImGuiTargets() ) {
+		common->Warning( "VK ImGui: couldn't create the swapchain render targets" );
+		return false;
+	}
+
+	ImGui_ImplVulkan_InitInfo ii = {};
+	ii.ApiVersion = VK_API_VERSION_1_1;
+	ii.Instance = instance;
+	ii.PhysicalDevice = physical;
+	ii.Device = device;
+	ii.QueueFamily = gfxFamily;
+	ii.Queue = gfxQueue;
+	ii.DescriptorPoolSize = 2 * IMGUI_IMPL_VULKAN_MINIMUM_IMAGE_SAMPLER_POOL_SIZE;
+	ii.MinImageCount = 2;
+	ii.ImageCount = (uint32_t)swapImages.size();
+	ii.PipelineInfoMain.RenderPass = imguiPass;
+	if ( !ImGui_ImplVulkan_Init( &ii ) ) {
+		common->Warning( "VK ImGui: ImGui_ImplVulkan_Init failed" );
+		return false;
+	}
+	imguiUp = true;
+	return true;
+#else
+	return false;
+#endif
+}
+
+void VulkanBackend::ImGuiShutdown() {
+#ifndef IMGUI_DISABLE
+	if ( !imguiUp ) {
+		return;
+	}
+	if ( device != VK_NULL_HANDLE ) {
+		vkDeviceWaitIdle( device );
+	}
+	ImGui_ImplVulkan_Shutdown();
+	imguiUp = false;
+	imguiDrawData = NULL;
+#endif
+}
+
+// ---- VulkanImGui.h glue (called from sys_imgui.cpp / the executor) ----
+bool VK_ImGuiInit() {
+	return vkBackend.ImGuiInit();
+}
+void VK_ImGuiShutdown() {
+	vkBackend.ImGuiShutdown();
+}
+void VK_ImGuiNewFrame() {
+#ifndef IMGUI_DISABLE
+	if ( vkBackend.ImGuiUp() ) {
+		ImGui_ImplVulkan_NewFrame();
+	}
+#endif
+}
+void VK_ImGuiSetDrawData( void *imDrawData ) {
+	vkBackend.ImGuiSetDrawData( imDrawData );
 }
 
 } // namespace rhi
