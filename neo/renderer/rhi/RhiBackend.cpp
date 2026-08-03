@@ -1573,6 +1573,14 @@ void RB_RHI_InvalidateGlassProbe( int area ) {
 static idImage *RB_RHI_GlassProbeForSurface( const viewDef_t *viewDef, const drawSurf_t *surf,
                                              float *probeAvg ) {
 	*probeAvg = -1.0f;
+	// Vulkan: probes are inert until M6 — the bake path captures through
+	// TakeScreenshot, which can't read the VK scene image yet, so auto-bakes
+	// would write black cubemaps into fs_savepath and poison glass on every
+	// backend. Glass keeps the vanilla env/gen* cube reflection instead.
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		RB_RHI_LogOnce( "VK: glass room probes disabled until the M6 capture path (vanilla env cube instead)" );
+		return NULL;
+	}
 	if ( !r_ssrGlassProbes.GetBool() || !tr.primaryWorld ) {
 		return NULL;
 	}

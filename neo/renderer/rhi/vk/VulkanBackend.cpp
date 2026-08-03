@@ -2417,7 +2417,10 @@ void VulkanBackend::CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 	toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	toDst.image = rec.image;
-	toDst.subresourceRange.aspectMask = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+	// layout-transition barriers must cover every aspect of a combined
+	// depth/stencil format, even when the copy itself only touches depth
+	toDst.subresourceRange.aspectMask = depth
+		? ( VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT ) : VK_IMAGE_ASPECT_COLOR_BIT;
 	toDst.subresourceRange.levelCount = 1;
 	toDst.subresourceRange.layerCount = 1;
 	vkCmdPipelineBarrier( cb,
