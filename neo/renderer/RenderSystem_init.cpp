@@ -41,6 +41,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/tr_local.h"
 #include "renderer/rhi/RHI.h"
 #include "renderer/rhi/GL3Local.h"
+#include "sys/sys_imgui.h"		// DUDE Phase 4 M6: ImGui init on the Vulkan backend
 
 #include "framework/GameCallbacks_local.h"
 #include "framework/Game.h"
@@ -1099,6 +1100,11 @@ void R_InitOpenGL( void ) {
 
 		common->Printf( "Vulkan device: %s\n", glConfig.renderer_string );
 		common->Printf( "Vulkan driver: %s\n", glConfig.version_string );
+
+		// M6: ImGui via imgui_impl_vulkan — needs the live backend (instance,
+		// device, swapchain render pass), so init here rather than at window
+		// creation like the GL paths (glimp defers when windowIsVulkan)
+		D3::ImGuiHooks::Init( GLimp_GetSDLWindow(), NULL );
 	} else
 #endif
 	{

@@ -25,15 +25,24 @@
 #if SDL_VERSION_ATLEAST(3, 0, 0)
   #include "../libs/imgui/backends/imgui_impl_sdl3.h"
   #define ImGui_ImplSDLx_InitForOpenGL ImGui_ImplSDL3_InitForOpenGL
+  #define ImGui_ImplSDLx_InitForVulkan ImGui_ImplSDL3_InitForVulkan
   #define ImGui_ImplSDLx_Shutdown ImGui_ImplSDL3_Shutdown
   #define ImGui_ImplSDLx_NewFrame ImGui_ImplSDL3_NewFrame
   #define ImGui_ImplSDLx_ProcessEvent ImGui_ImplSDL3_ProcessEvent
 #else
   #include "../libs/imgui/backends/imgui_impl_sdl2.h"
   #define ImGui_ImplSDLx_InitForOpenGL ImGui_ImplSDL2_InitForOpenGL
+  #define ImGui_ImplSDLx_InitForVulkan ImGui_ImplSDL2_InitForVulkan
   #define ImGui_ImplSDLx_Shutdown ImGui_ImplSDL2_Shutdown
   #define ImGui_ImplSDLx_NewFrame ImGui_ImplSDL2_NewFrame
   #define ImGui_ImplSDLx_ProcessEvent ImGui_ImplSDL2_ProcessEvent
+#endif
+
+// DUDE Phase 4 M6: ImGui on the Vulkan backend (renderer side lives in
+// rhi/vk/VulkanBackend.cpp; sys_imgui keeps the context + platform layer)
+#ifdef DHEWM3_VULKAN
+  #include "renderer/rhi/RHI.h"
+  #include "renderer/rhi/vk/VulkanImGui.h"
 #endif
 
 #include "framework/Common.h"
@@ -93,6 +102,8 @@ static bool haveNewFrame = false;
 // (r_graphicsAPI opengl3) the fixed-function GL2 backend is invalid, so we use
 // the shader-based GL3 backend instead. Set in Init() from glConfig.coreProfile.
 static bool useGL3Backend = false;
+// DUDE Phase 4 M6: ImGui renderer = imgui_impl_vulkan on the Vulkan backend
+static bool useVulkanBackend = false;
 static int openImguiWindows = 0; // or-ed enum D3ImGuiWindow values
 
 static ImGuiStyle userStyle;
@@ -263,24 +274,41 @@ bool Init(void* _sdlWindow, void* sdlGlContext)
 #endif
 
 	// Setup Platform/Renderer backends
-	if ( ! ImGui_ImplSDLx_InitForOpenGL( sdlWindow, sdlGlContext ) ) {
+	useVulkanBackend = false;
+#ifdef DHEWM3_VULKAN
+	useVulkanBackend = glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+#endif
+
+	bool platformOk = useVulkanBackend
+			? ImGui_ImplSDLx_InitForVulkan( sdlWindow )
+			: ImGui_ImplSDLx_InitForOpenGL( sdlWindow, sdlGlContext );
+	if ( ! platformOk ) {
 		ImGui::DestroyContext( imguiCtx );
 		imguiCtx = NULL;
 		common->Warning( "Failed to initialize ImGui SDL platform backend!\n" );
 		return false;
 	}
 
-	useGL3Backend = glConfig.coreProfile;
-	bool rendererOk = useGL3Backend
-			// the GL 3.3 core context matches "#version 150"; the backend's own
-			// GL loader pulls the shader entry points it needs, independent of qgl
-			? ImGui_ImplOpenGL3_Init( "#version 150" )
-			: ImGui_ImplOpenGL2_Init();
+	useGL3Backend = !useVulkanBackend && glConfig.coreProfile;
+	bool rendererOk;
+	if ( useVulkanBackend ) {
+#ifdef DHEWM3_VULKAN
+		rendererOk = rhi::VK_ImGuiInit();
+#else
+		rendererOk = false;
+#endif
+	} else if ( useGL3Backend ) {
+		// the GL 3.3 core context matches "#version 150"; the backend's own
+		// GL loader pulls the shader entry points it needs, independent of qgl
+		rendererOk = ImGui_ImplOpenGL3_Init( "#version 150" );
+	} else {
+		rendererOk = ImGui_ImplOpenGL2_Init();
+	}
 	if ( ! rendererOk ) {
 		ImGui_ImplSDLx_Shutdown();
 		ImGui::DestroyContext( imguiCtx );
 		imguiCtx = NULL;
-		common->Warning( "Failed to initialize ImGui OpenGL renderer backend!\n" );
+		common->Warning( "Failed to initialize ImGui renderer backend!\n" );
 		return false;
 	}
 
@@ -320,7 +348,11 @@ void Shutdown()
 		common->Printf( "Shutting down ImGui\n" );
 
 		// TODO: only if init was successful!
-		if ( useGL3Backend ) {
+		if ( useVulkanBackend ) {
+#ifdef DHEWM3_VULKAN
+			rhi::VK_ImGuiShutdown();
+#endif
+		} else if ( useGL3Backend ) {
 			ImGui_ImplOpenGL3_Shutdown();
 		} else {
 			ImGui_ImplOpenGL2_Shutdown();
@@ -373,7 +405,11 @@ void NewFrame()
 	}
 
 	// Start the Dear ImGui frame
-	if ( useGL3Backend ) {
+	if ( useVulkanBackend ) {
+#ifdef DHEWM3_VULKAN
+		rhi::VK_ImGuiNewFrame();
+#endif
+	} else if ( useGL3Backend ) {
 		ImGui_ImplOpenGL3_NewFrame();
 	} else {
 		ImGui_ImplOpenGL2_NewFrame();
@@ -561,6 +597,16 @@ void EndFrame()
 	haveNewFrame = false;
 	ImGui::Render();
 
+	if ( useVulkanBackend ) {
+#ifdef DHEWM3_VULKAN
+		// hand the draw data to the Vulkan backend; it renders into the
+		// swapchain image between the scene blit and present (EndFrame)
+		rhi::VK_ImGuiSetDrawData( ImGui::GetDrawData() );
+#endif
+		hadKeyDownEvent = false;
+		return;
+	}
+
 	if ( useGL3Backend ) {
 		// The GL3 (shader/core) backend saves and restores all the GL state it
 		// touches on its own, so none of the legacy fixed-function/ARB juggling
@@ -615,10 +661,10 @@ void EndFrame()
 
 void OpenWindow( D3ImGuiWindow win )
 {
-	// DUDE: no ImGui context on the Vulkan backend until Phase 4 M6 — calling
-	// into ImGui without one crashes
+	// no ImGui context (headless run / init failure) — calling into ImGui
+	// without one crashes
 	if ( !imgui_initialized ) {
-		common->Printf( "ImGui is not available on this backend yet (Vulkan ImGui arrives at Phase 4 M6)\n" );
+		common->Printf( "ImGui is not available (initialization failed or headless)\n" );
 		return;
 	}
 

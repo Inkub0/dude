@@ -59,6 +59,12 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "renderer/tr_local.h"
 #include "renderer/rhi/RHI.h"
 #include "renderer/rhi/MaterialIR.h"		// IR_Purge on shader-cache lifecycle
+#include "renderer/rhi/vk/VulkanImGui.h"	// M6: ImGui glue (impl at the end of this TU)
+
+#ifndef IMGUI_DISABLE
+  #include "../../../libs/imgui/imgui.h"
+  #include "../../../libs/imgui/backends/imgui_impl_vulkan.h"
+#endif
 
 // dev-time validation layer (VK_LAYER_KHRONOS_validation); default on while
 // the backend is being brought up — every milestone's exit bar includes
@@ -355,6 +361,24 @@ private:
 	VkCommandPool				uploadPool = VK_NULL_HANDLE;
 	VkCommandBuffer				uploadCb = VK_NULL_HANDLE;
 	VkFence						uploadFence = VK_NULL_HANDLE;
+
+public:
+	// ================= M6: ImGui on Vulkan (VulkanImGui.h glue) =================
+	// Renders into the swapchain image between the scene blit and present, so
+	// ImGui stays out of screenshots (they read the scene image), like GL.
+	bool						ImGuiInit();
+	void						ImGuiShutdown();
+	bool						ImGuiUp() const { return imguiUp; }
+	void						ImGuiSetDrawData( void *dd ) { imguiDrawData = dd; }
+private:
+	bool						CreateImGuiTargets();	// pass + per-swap-image views/framebuffers
+	void						DestroyImGuiTargets();
+	VkRenderPass				imguiPass = VK_NULL_HANDLE;
+	VkFormat					imguiPassFormat = VK_FORMAT_UNDEFINED;
+	std::vector<VkImageView>	imguiViews;
+	std::vector<VkFramebuffer>	imguiFbs;
+	bool						imguiUp = false;
+	void *						imguiDrawData = NULL;	// ImDrawData* for this frame
 };
 
 static VulkanBackend vkBackend;
@@ -884,6 +908,11 @@ bool VulkanBackend::CreateSwapchain() {
 		presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "FIFO_RELAXED" : "FIFO";
 	common->Printf( "VK: swapchain %ux%u, %u images, %s (r_swapInterval %d)\n",
 		extent.width, extent.height, actualCount, modeStr, r_swapInterval.GetInteger() );
+
+	// M6: rebuild the ImGui swapchain targets when ImGui is (or was) up
+	if ( imguiPass != VK_NULL_HANDLE && !CreateImGuiTargets() ) {
+		return false;
+	}
 	return true;
 }
 
@@ -893,6 +922,7 @@ VulkanBackend::DestroySwapchain
 ====================
 */
 void VulkanBackend::DestroySwapchain( bool destroyHandle ) {
+	DestroyImGuiTargets();		// per-swap-image views/framebuffers (pass survives)
 	for ( size_t i = 0; i < releaseSems.size(); i++ ) {
 		vkDestroySemaphore( device, releaseSems[i], NULL );
 	}
@@ -1243,6 +1273,16 @@ void VulkanBackend::Shutdown() {
 		vkDeviceWaitIdle( device );
 	}
 
+	// M6: ImGui device objects must die before the device. Normally sys_imgui
+	// shuts down first (it calls ImGuiShutdown through the glue); this is the
+	// safety net for partial-teardown orders.
+	ImGuiShutdown();
+	if ( imguiPass != VK_NULL_HANDLE ) {
+		vkDestroyRenderPass( device, imguiPass, NULL );
+		imguiPass = VK_NULL_HANDLE;
+		imguiPassFormat = VK_FORMAT_UNDEFINED;
+	}
+
 	if ( device != VK_NULL_HANDLE ) {
 		DestroyM2Resources();
 	}
@@ -1483,14 +1523,36 @@ void VulkanBackend::EndFrame() {
 		sceneExtent.width == swapExtent.width && sceneExtent.height == swapExtent.height
 			? VK_FILTER_NEAREST : VK_FILTER_LINEAR );
 
-	// swapchain image → PRESENT
-	VkImageMemoryBarrier toPresent = toDst;
-	toPresent.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	toPresent.dstAccessMask = 0;
-	toPresent.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	toPresent.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-	vkCmdPipelineBarrier( f.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-		0, 0, NULL, 0, NULL, 1, &toPresent );
+	// M6: ImGui draws into the swapchain image after the blit, through a
+	// LOAD render pass whose finalLayout is PRESENT (screenshots read the
+	// scene image, so the menus stay out of them like on GL). Without draw
+	// data, the plain barrier transition to PRESENT stands.
+#ifndef IMGUI_DISABLE
+	if ( imguiUp && imguiDrawData != NULL && imageIndex < imguiFbs.size()
+	     && imguiFbs[imageIndex] != VK_NULL_HANDLE
+	     && ((ImDrawData *)imguiDrawData)->TotalVtxCount >= 0 ) {
+		VkRenderPassBeginInfo rbi = {};
+		rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+		rbi.renderPass = imguiPass;
+		rbi.framebuffer = imguiFbs[imageIndex];
+		rbi.renderArea.extent = swapExtent;
+		vkCmdBeginRenderPass( f.cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
+		ImGui_ImplVulkan_RenderDrawData( (ImDrawData *)imguiDrawData, f.cb );
+		vkCmdEndRenderPass( f.cb );
+		imguiDrawData = NULL;
+	} else
+#endif
+	{
+		// swapchain image → PRESENT
+		VkImageMemoryBarrier toPresent = toDst;
+		toPresent.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		toPresent.dstAccessMask = 0;
+		toPresent.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		toPresent.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		vkCmdPipelineBarrier( f.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+			0, 0, NULL, 0, NULL, 1, &toPresent );
+	}
+	imguiDrawData = NULL;
 
 	// dev frame dump (r_vkDumpNextFrame): copy the scene image (still
 	// TRANSFER_SRC) into a host buffer alongside the present blit
@@ -3391,6 +3453,184 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 	vkCmdBindVertexBuffers( cb, 0, 1, &vb, &vbOfs );
 	vkCmdBindIndexBuffer( cb, ib, 0, VK_INDEX_TYPE_UINT32 );
 	vkCmdDrawIndexed( cb, (uint32_t)args.indexCount, 1, (uint32_t)args.firstIndex, 0, 0 );
+}
+
+/*
+====================
+M6: ImGui on Vulkan — swapchain targets + init/shutdown + glue
+
+The pass loads the blitted frame (initialLayout TRANSFER_DST) and hands the
+image to present (finalLayout PRESENT_SRC); EndFrame begins it only when
+draw data is pending. The pass object survives swapchain recreation (only
+views/framebuffers rebuild); a surface-format change recreates it and asks
+the ImGui backend for a new pipeline.
+====================
+*/
+bool VulkanBackend::CreateImGuiTargets() {
+#ifndef IMGUI_DISABLE
+	if ( device == VK_NULL_HANDLE || swapImages.empty() || swapFormat == VK_FORMAT_UNDEFINED ) {
+		return false;
+	}
+
+	const bool formatChanged = imguiPass != VK_NULL_HANDLE && imguiPassFormat != swapFormat;
+	if ( formatChanged ) {
+		vkDestroyRenderPass( device, imguiPass, NULL );
+		imguiPass = VK_NULL_HANDLE;
+	}
+	if ( imguiPass == VK_NULL_HANDLE ) {
+		VkAttachmentDescription att = {};
+		att.format = swapFormat;
+		att.samples = VK_SAMPLE_COUNT_1_BIT;
+		att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		att.initialLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;	// after the scene blit
+		att.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+		VkAttachmentReference colorRef = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+		VkSubpassDescription sub = {};
+		sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		sub.colorAttachmentCount = 1;
+		sub.pColorAttachments = &colorRef;
+
+		VkSubpassDependency dep = {};
+		dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+		dep.dstSubpass = 0;
+		dep.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		dep.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+		VkRenderPassCreateInfo rpi = {};
+		rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		rpi.attachmentCount = 1;
+		rpi.pAttachments = &att;
+		rpi.subpassCount = 1;
+		rpi.pSubpasses = &sub;
+		rpi.dependencyCount = 1;
+		rpi.pDependencies = &dep;
+		if ( !vkCheck( vkCreateRenderPass( device, &rpi, NULL, &imguiPass ), "vkCreateRenderPass(imgui)" ) ) {
+			return false;
+		}
+		imguiPassFormat = swapFormat;
+
+		if ( formatChanged && imguiUp ) {
+			ImGui_ImplVulkan_PipelineInfo pi = {};
+			pi.RenderPass = imguiPass;
+			ImGui_ImplVulkan_CreateMainPipeline( &pi );
+		}
+	}
+
+	DestroyImGuiTargets();
+	imguiViews.resize( swapImages.size(), VK_NULL_HANDLE );
+	imguiFbs.resize( swapImages.size(), VK_NULL_HANDLE );
+	for ( size_t i = 0; i < swapImages.size(); i++ ) {
+		VkImageViewCreateInfo vi = {};
+		vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		vi.image = swapImages[i];
+		vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		vi.format = swapFormat;
+		vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		vi.subresourceRange.levelCount = 1;
+		vi.subresourceRange.layerCount = 1;
+		if ( !vkCheck( vkCreateImageView( device, &vi, NULL, &imguiViews[i] ), "vkCreateImageView(imgui)" ) ) {
+			return false;
+		}
+		VkFramebufferCreateInfo fbi = {};
+		fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		fbi.renderPass = imguiPass;
+		fbi.attachmentCount = 1;
+		fbi.pAttachments = &imguiViews[i];
+		fbi.width = swapExtent.width;
+		fbi.height = swapExtent.height;
+		fbi.layers = 1;
+		if ( !vkCheck( vkCreateFramebuffer( device, &fbi, NULL, &imguiFbs[i] ), "vkCreateFramebuffer(imgui)" ) ) {
+			return false;
+		}
+	}
+	return true;
+#else
+	return false;
+#endif
+}
+
+void VulkanBackend::DestroyImGuiTargets() {
+	for ( size_t i = 0; i < imguiFbs.size(); i++ ) {
+		if ( imguiFbs[i] ) { vkDestroyFramebuffer( device, imguiFbs[i], NULL ); }
+	}
+	imguiFbs.clear();
+	for ( size_t i = 0; i < imguiViews.size(); i++ ) {
+		if ( imguiViews[i] ) { vkDestroyImageView( device, imguiViews[i], NULL ); }
+	}
+	imguiViews.clear();
+}
+
+bool VulkanBackend::ImGuiInit() {
+#ifndef IMGUI_DISABLE
+	if ( device == VK_NULL_HANDLE ) {
+		return false;
+	}
+	if ( imguiUp ) {
+		return true;
+	}
+	if ( !CreateImGuiTargets() ) {
+		common->Warning( "VK ImGui: couldn't create the swapchain render targets" );
+		return false;
+	}
+
+	ImGui_ImplVulkan_InitInfo ii = {};
+	ii.ApiVersion = VK_API_VERSION_1_1;
+	ii.Instance = instance;
+	ii.PhysicalDevice = physical;
+	ii.Device = device;
+	ii.QueueFamily = gfxFamily;
+	ii.Queue = gfxQueue;
+	ii.DescriptorPoolSize = 2 * IMGUI_IMPL_VULKAN_MINIMUM_IMAGE_SAMPLER_POOL_SIZE;
+	ii.MinImageCount = 2;
+	ii.ImageCount = (uint32_t)swapImages.size();
+	ii.PipelineInfoMain.RenderPass = imguiPass;
+	if ( !ImGui_ImplVulkan_Init( &ii ) ) {
+		common->Warning( "VK ImGui: ImGui_ImplVulkan_Init failed" );
+		return false;
+	}
+	imguiUp = true;
+	return true;
+#else
+	return false;
+#endif
+}
+
+void VulkanBackend::ImGuiShutdown() {
+#ifndef IMGUI_DISABLE
+	if ( !imguiUp ) {
+		return;
+	}
+	if ( device != VK_NULL_HANDLE ) {
+		vkDeviceWaitIdle( device );
+	}
+	ImGui_ImplVulkan_Shutdown();
+	imguiUp = false;
+	imguiDrawData = NULL;
+#endif
+}
+
+// ---- VulkanImGui.h glue (called from sys_imgui.cpp / the executor) ----
+bool VK_ImGuiInit() {
+	return vkBackend.ImGuiInit();
+}
+void VK_ImGuiShutdown() {
+	vkBackend.ImGuiShutdown();
+}
+void VK_ImGuiNewFrame() {
+#ifndef IMGUI_DISABLE
+	if ( vkBackend.ImGuiUp() ) {
+		ImGui_ImplVulkan_NewFrame();
+	}
+#endif
+}
+void VK_ImGuiSetDrawData( void *imDrawData ) {
+	vkBackend.ImGuiSetDrawData( imDrawData );
 }
 
 } // namespace rhi

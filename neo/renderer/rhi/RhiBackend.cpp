@@ -2579,9 +2579,12 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 		}
 		case RC_SWAP_BUFFERS:
 			if ( vkMode ) {
-				// present happens in the backend's EndFrame below; the GL-only
-				// resolve/gamma/capture/ImGui tail must not run (their VK
-				// equivalents arrive at M5/M6)
+				// present happens in the backend's EndFrame below (the GL-only
+				// resolve/gamma tail doesn't apply; swap capture is serviced
+				// after EndFrame). ImGui renders through the backend: EndFrame
+				// here runs ImGui::Render and hands the draw data over, drawn
+				// into the swapchain image between the scene blit and present.
+				D3::ImGuiHooks::EndFrame();
 				break;
 			}
 			// resolve the RGBA16F scene buffer back onto the backbuffer (r_hdr);
