@@ -1813,6 +1813,16 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		}
 		cubeImg->Bind();
 		vkTex[0] = cubeImg->rhiHandle;
+		if ( vkMode && vkTex[0] == 0 ) {
+			// a white-dummy fallback washes the pane out (additive white);
+			// say which cube failed to bridge instead of hiding it
+			static int warned = 0;
+			if ( warned < 8 ) {
+				warned++;
+				common->Warning( "VK: reflection cube '%s' has no RHI image - pane will wash out white",
+				                 cubeImg->imgName.c_str() );
+			}
+		}
 		const shaderStage_t *bumpStage = surf->material->GetBumpStage();
 		if ( bumpStage ) {
 			if ( vkMode ) {
