@@ -389,12 +389,28 @@ Original plan:
   buffer is recorded once before the light loop and rides every interaction/ambient draw.
   `r_ssaoDebug 1/2` works on Vulkan. Benign validation warning: gbuffer.frag always writes
   the SSR MRT output, discarded on the SSAO-only (1-attachment) target — same as GL.
-- **SSR [explicitly deferred on Vulkan]** — `RB_RHI_ScreenSpaceReflections` early-returns on
-  BT_VULKAN (LogOnce) and NormalPrepass skips its MRT there. It was never `vkMode`-gated —
-  it used to bail because its targets returned 0; once `CreateRenderTargetColorDepth` worked
-  it proceeded into its raw-GL march/composite binds and crashed. Porting it = un-gate +
-  route those binds through `RB_RHI_BindRTUnit` like SSAO. PBR (`r_pbr`) rides the
-  interaction shaders and already runs on Vulkan (verified crash-free with dude_preset 5).
+- **SSR [BUILT]** — un-gated on Vulkan; the raw-GL march/composite binds were routed
+  through `RB_RHI_BindRTUnit` like SSAO, and NormalPrepass writes its MRT there. PBR
+  (`r_pbr`) rides the interaction shaders and already runs on Vulkan.
+- **Off-HDR post [BUILT]** — film grain / chromatic aberration / `r_gammaInShader`
+  gamma+brightness. GL runs these per-view and at swap over the backbuffer, but the VK
+  scene lives in an offscreen image, so when HDR is off they route through an RGBA8
+  post-target (`ldrPostWanted`) resolved by the shared, format-agnostic `hdrresolve`
+  shader (the VK backend has no separate LDR gamma tail). Identity params are exact
+  passthrough, so GL keeps its standalone gammabrightness pass with no double-apply.
+- **SMAA/FXAA [BUILT]** — FXAA rode the RHI from the start; SMAA is now ported. Its
+  AreaTex/SearchTex LUTs upload via `CreateTexture2D` (NPOT is fine on VK; the p-o-2 bar
+  was idImage-only) instead of raw qgl, and the GL active-unit hygiene in the chain tail
+  is guarded off (`gl3ActiveTexture` is a NULL qgl pointer on VK). AA now also runs in the
+  off-HDR post pass — the `rhiHdrAaRT` ping tracks the scene buffer's format (RGBA16F in
+  HDR, RGBA8 off-HDR), so `r_rhiAA` 1/2 works in both modes on Vulkan.
+- **Stability fixes (during M7 play-testing):** (1) *device-lost* (`VkResult -4` spam +
+  freeze) from `DestroyImage`/`DestroyRenderTarget` freeing a view mid-frame while a bound
+  descriptor set still referenced it — `vkDeviceWaitIdle` doesn't cover the still-recording
+  cb. Fixed by guarding on `frameOpen`: defer to the frame-slot retire list when a frame is
+  recording, `vkDeviceWaitIdle`+destroy between frames. (2) *pool exhaustion* (lights go
+  dark, "descriptor pool exhausted") from the unbounded cross-frame `textureSetCache`
+  filling the 16384-set pool — fixed with a high-water flush at `MAX_FRAME_SETS`.
 
 **Phase exit = the plan's final milestone:** Mars City loads; identical light/shadow
 behaviour; no missing interactions; RenderDoc shows depth, stencil, and interaction
