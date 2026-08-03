@@ -426,8 +426,12 @@ switching hardening, 1.1-profile check) takes over.
   bridge per-category as each milestone pulls it in (M2 2D → M4 cube/falloff → M5
   scratch/cinematic), never "port Image_load wholesale".
 - **Pipeline permutation warmup** — first-use `vkCreateGraphicsPipelines` stutter where
-  GL3 pays a cheaper program+state switch. Mitigation: disk-persisted VkPipelineCache
-  (decided) + optional prewarm of the known `(stateBits, shader)` set at level load.
+  GL3 pays a cheaper program+state switch. **Disk-persisted `VkPipelineCache` is DONE**
+  (`63c2539f`): a driver cache seeded at `Init` from `fs_savepath/base/vkpipelinecache.bin`,
+  fed to every pipeline build, saved back at `Shutdown`; seeding is header-checked
+  (version/vendor/device/UUID) so a GPU/driver swap starts fresh, and the whole path is
+  non-fatal. So the *cross-run* cost is now paid once. Still open (optional): prewarm of the
+  known `(stateBits, shader)` set at level load, to hide the *first-ever* compile too.
 - **The X11 teardown race** ([known-bugs.md](known-bugs.md), mitigated 2026-08-01) —
   Vulkan's heavier re-init exercises exactly that path; re-verify under repeated
   `vid_restart` early (M1), not at the end.
