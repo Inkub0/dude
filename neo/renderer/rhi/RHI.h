@@ -42,6 +42,7 @@ enum ImageFormat {
 enum VertexLayout {
 	VL_DRAWVERT,	// idDrawVert: pos3/st2/normal3/tangent3/bitangent3/color4ub, locations 0-5
 	VL_SHADOW,		// shadowCache_t: pos4 only, location 0
+	VL_IMMEDIATE,	// imVert_t: pos3/st2/color4ub (24 B), locations 0/1/5 — debug drawing
 	VL_COUNT
 };
 
@@ -74,6 +75,11 @@ struct PipelineDesc {
 	VertexLayout	vertexLayout = VL_DRAWVERT;
 	int				cullType = 0;		// CT_* from Material.h
 	int				stencilState = SS_DISABLED;	// StencilState (GL3 backend ignores it)
+	// primitive topology as a GL primMode (GL_LINES/POINTS/TRIANGLES/…); -1 =
+	// triangle list (the default every non-immediate draw uses). Only the
+	// Vulkan backend reads it (bakes topology into the pipeline); GL3 passes
+	// primMode straight to glDrawArrays and ignores this.
+	int				topology = -1;
 };
 
 struct DrawArgs {

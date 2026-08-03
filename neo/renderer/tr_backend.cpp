@@ -140,6 +140,11 @@ rendered is a mirored view.
 ====================
 */
 void GL_Cull( int cullType ) {
+	// Vulkan backend: cull is baked into each pipeline (PipelineDesc.cullType),
+	// and there is no qgl — this fixed-function state call is a no-op there.
+	if ( qglDisable == NULL ) {
+		return;
+	}
 	if ( backEnd.glState.faceCulling == cullType ) {
 		return;
 	}
@@ -219,6 +224,14 @@ This routine is responsible for setting the most commonly changed state
 */
 void GL_State( int stateBits ) {
 	int	diff;
+
+	// Vulkan backend: blend/depth/mask/polymode are baked into each pipeline
+	// (PipelineDesc.stateBits), and there is no qgl — no-op this fixed-function
+	// state call there. GL3 core keeps using it (it has a real GL context).
+	if ( qglDepthFunc == NULL ) {
+		backEnd.glState.glStateBits = stateBits;	// keep the cache coherent
+		return;
+	}
 
 	if ( !r_useStateCaching.GetBool() || backEnd.glState.forceGlState ) {
 		// make sure everything is set all the time, so we

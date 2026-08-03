@@ -2496,10 +2496,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	// — Chunk G. Renders through idImmediateMode's core path; each sub-view
 	// early-outs on its own cvar, so this is free when nothing is enabled.
 	// (Surface-indexed views like r_showTris await the core RB_DrawElements
-	// path; the idImmediateMode-based views work now.)
-	if ( viewDef->viewEntitys && rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
-		// Vulkan: debug tools arrive at M6 (DrawImmediate + core GL_State
-		// setup are GL-only today)
+	// path; the idImmediateMode-based views work now — on Vulkan too, M6, where
+	// RB_RenderDebugTools runs the qgl-safe subset.)
+	if ( viewDef->viewEntitys ) {
 		RB_RenderDebugTools( (drawSurf_t **)&viewDef->drawSurfs[0], viewDef->numDrawSurfs );
 	}
 

@@ -58,6 +58,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/FileSystem.h"
 #include "renderer/tr_local.h"
 #include "renderer/rhi/RHI.h"
+#include "renderer/rhi/RenderParams.h"	// M6: DrawImmediate fills the generic UBO
 #include "renderer/rhi/MaterialIR.h"		// IR_Purge on shader-cache lifecycle
 #include "renderer/rhi/vk/VulkanImGui.h"	// M6: ImGui glue (impl at the end of this TU)
 
@@ -149,7 +150,8 @@ public:
 	virtual void	RetireImage( ImageHandle img );
 	virtual void	UpdateTexture2D( ImageHandle dst, int w, int h, const void *pixels );
 	virtual bool	ReadPixelsRGB( unsigned char *dest, int x, int y, int w, int h );
-	virtual void	DrawImmediate( const void *, int, unsigned int, const float[16], bool ) {}	// M6
+	virtual void	DrawImmediate( const void *verts, int numVerts, unsigned int primMode,
+	                               const float mvp[16], bool textured );
 
 private:
 	bool			CreateInstance();
@@ -3010,7 +3012,8 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 		| ( (unsigned long long)( desc.shader & 0xffff ) << 32 )
 		| ( (unsigned long long)( desc.vertexLayout & 0xf ) << 48 )
 		| ( (unsigned long long)( desc.cullType & 0xf ) << 52 )
-		| ( (unsigned long long)( desc.stencilState & 0xf ) << 56 );
+		| ( (unsigned long long)( desc.stencilState & 0xf ) << 56 )
+		| ( (unsigned long long)( desc.topology & 0xf ) << 60 );
 
 	auto it = pipelineCache.find( key );
 	if ( it != pipelineCache.end() ) {
@@ -3046,6 +3049,15 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 		attrs[4] = { 4, 0, VK_FORMAT_R32G32B32_SFLOAT, (uint32_t)( offsetof( idDrawVert, tangents ) + sizeof( idVec3 ) ) };
 		attrs[5] = { 5, 0, VK_FORMAT_R8G8B8A8_UNORM,   (uint32_t)offsetof( idDrawVert, color ) };
 		attrCount = 6;
+	} else if ( desc.vertexLayout == VL_IMMEDIATE ) {
+		// imVert_t: float xyz[3] @0, float st[2] @12, byte color[4] @20 (24 B).
+		// Same locations generic.vert reads (0/1/5); the missing 2/3/4 are
+		// unconsumed (the benign "attribute not consumed" pipeline warning).
+		binding.stride = 24;
+		attrs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 };
+		attrs[1] = { 1, 0, VK_FORMAT_R32G32_SFLOAT,    12 };
+		attrs[2] = { 5, 0, VK_FORMAT_R8G8B8A8_UNORM,   20 };
+		attrCount = 3;
 	} else {
 		binding.stride = sizeof( shadowCache_t );
 		attrs[0] = { 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0 };
@@ -3063,6 +3075,18 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	VkPipelineInputAssemblyStateCreateInfo ia = {};
 	ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
 	ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	// desc.topology carries a GL primMode for immediate-mode debug draws; -1
+	// (every normal draw) stays triangle list. GL_LINE_LOOP has no VK analogue —
+	// degrade to a line strip (leaves the loop open; only debug wireframes).
+	switch ( desc.topology ) {
+	case GL_POINTS:         ia.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
+	case GL_LINES:          ia.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
+	case GL_LINE_LOOP:
+	case GL_LINE_STRIP:     ia.topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
+	case GL_TRIANGLE_STRIP: ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
+	case GL_TRIANGLE_FAN:   ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;
+	default:                ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;
+	}
 
 	VkPipelineViewportStateCreateInfo vp = {};
 	vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -3453,6 +3477,138 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 	vkCmdBindVertexBuffers( cb, 0, 1, &vb, &vbOfs );
 	vkCmdBindIndexBuffer( cb, ib, 0, VK_INDEX_TYPE_UINT32 );
 	vkCmdDrawIndexed( cb, (uint32_t)args.indexCount, 1, (uint32_t)args.firstIndex, 0, 0 );
+}
+
+/*
+====================
+VulkanBackend::DrawImmediate
+
+M6 debug drawing (idImmediateMode → the generic program). A non-indexed
+batch of imVert_t (24 B) as `primMode`, streamed through the vertex + UBO
+rings. Fixed pipeline state: alpha blend, depth-test LEQUAL, no depth write —
+debug lines/polygons/portals read over the scene. Unlike GL (which inherits
+the caller's GL_State), the state is baked here, so "depth test off" debug
+lines are still depth-tested; acceptable for the dev overlays.
+====================
+*/
+void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int primMode,
+                                   const float mvp[16], bool textured ) {
+	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame || numVerts <= 0 || verts == NULL ) {
+		return;
+	}
+
+	BufferHandle vbh = 0;
+	int vertOfs = AllocFromRing( vertRing[frameIndex], verts, numVerts * 24, 4, 0, &vbh );
+	VkBuffer vb = LookupBuffer( vbh );
+	if ( vb == VK_NULL_HANDLE ) {
+		return;
+	}
+
+	// generic-program uniforms: identity texture matrix, straight per-vertex
+	// color (modulate 1 / add 0 / color 1), alpha test off — matches the GL3 path
+	RenderParams p;
+	memset( &p, 0, sizeof( p ) );
+	memcpy( p.mvpMatrix, mvp, sizeof( p.mvpMatrix ) );
+	p.diffuseMatrixS[0] = 1.0f;
+	p.diffuseMatrixT[1] = 1.0f;
+	p.vertexColorModulate[0] = p.vertexColorModulate[1] = p.vertexColorModulate[2] = p.vertexColorModulate[3] = 1.0f;
+	p.color[0] = p.color[1] = p.color[2] = p.color[3] = 1.0f;
+	BufferHandle ubh = 0;
+	int uniOfs = AllocFromRing( uboRing[frameIndex], &p, sizeof( p ), uboAlign, MAX_UNIFORM_SLICE, &ubh );
+
+	PipelineDesc pd;
+	pd.stateBits = GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA | GLS_DEPTHMASK;
+	pd.shader = LoadShader( "generic" );
+	pd.vertexLayout = VL_IMMEDIATE;
+	pd.cullType = CT_TWO_SIDED;
+	pd.topology = (int)primMode;
+	VkPipeline pipeline = GetPipeline( pd );
+	if ( pipeline == VK_NULL_HANDLE ) {
+		return;
+	}
+	// untextured lines/points/tris: the generic program samples unit 0 and
+	// multiplies by vertex color, so the white dummy gives pure vertex color.
+	// textured debug immediate draws aren't plumbed (no bound-image state on
+	// VK) — they also fall back to the white texel.
+	if ( textured ) {
+		static bool warnedTex = false;
+		if ( !warnedTex ) {
+			warnedTex = true;
+			common->Printf( "VK: textured DrawImmediate falls back to white (no bound-image state)\n" );
+		}
+	}
+
+	EnsureScenePass();
+	if ( !insideScenePass ) {
+		return;
+	}
+	VkCommandBuffer cb = frames[frameIndex].cb;
+
+	if ( dynStateDirty ) {
+		const float fbH = (float)sceneExtent.height;
+		VkViewport v = {};
+		v.x = (float)vpRect[0];
+		v.y = fbH - (float)vpRect[1];
+		v.width = (float)vpRect[2];
+		v.height = -(float)vpRect[3];
+		v.minDepth = depthRangeMin;
+		v.maxDepth = depthRangeMax;
+		vkCmdSetViewport( cb, 0, 1, &v );
+		VkRect2D sc = {};
+		int sx = scRect[0], sy = scRect[1], sw = scRect[2], sh = scRect[3];
+		int top = (int)sceneExtent.height - ( sy + sh );
+		if ( sx < 0 ) { sw += sx; sx = 0; }
+		if ( top < 0 ) { sh += top; top = 0; }
+		if ( sw < 0 ) { sw = 0; }
+		if ( sh < 0 ) { sh = 0; }
+		sc.offset = { sx, top };
+		sc.extent = { (uint32_t)sw, (uint32_t)sh };
+		vkCmdSetScissor( cb, 0, 1, &sc );
+		vkCmdSetDepthBias( cb, polyOfsUnits, 0.0f, polyOfsFactor );
+		dynStateDirty = false;
+	}
+
+	vkCmdBindPipeline( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline );
+	boundPipeline = VK_NULL_HANDLE;		// bypassed the normal Draw path; force a rebind next
+
+	uint32_t dynOfs = (uint32_t)uniOfs;
+	vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout, 0, 1, &uboSet[frameIndex], 1, &dynOfs );
+
+	// set 1: all-dummy texture set (white on every unit) — debug draws are
+	// untextured; a white texel yields pure vertex color through generic.frag
+	{
+		VkDescriptorSet texSet = VK_NULL_HANDLE;
+		VkDescriptorSetAllocateInfo ai = {};
+		ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		ai.descriptorPool = framePool[frameIndex];
+		ai.descriptorSetCount = 1;
+		ai.pSetLayouts = &setLayoutTex;
+		if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
+			return;
+		}
+		VkDescriptorImageInfo infos[11];
+		VkWriteDescriptorSet writes[11];
+		const ImageRec &dummy = imageTable[dummyImage - 1];
+		for ( int i = 0; i < 11; i++ ) {
+			infos[i] = {};
+			infos[i].sampler = ( i == 7 ) ? dummyShadow2D.sampler : ( i == 8 ? dummyShadowCube.sampler : dummy.sampler );
+			infos[i].imageView = ( i == 7 ) ? dummyShadow2D.view : ( i == 8 ? dummyShadowCube.view : dummy.view );
+			infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			writes[i] = {};
+			writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			writes[i].dstSet = texSet;
+			writes[i].dstBinding = (uint32_t)i;
+			writes[i].descriptorCount = 1;
+			writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			writes[i].pImageInfo = &infos[i];
+		}
+		vkUpdateDescriptorSets( device, 11, writes, 0, NULL );
+		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout, 1, 1, &texSet, 0, NULL );
+	}
+
+	VkDeviceSize vbOfs = (VkDeviceSize)vertOfs;
+	vkCmdBindVertexBuffers( cb, 0, 1, &vb, &vbOfs );
+	vkCmdDraw( cb, (uint32_t)numVerts, 1, 0, 0 );
 }
 
 /*
