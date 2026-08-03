@@ -229,8 +229,11 @@ public:
 	//
 	// CreateCaptureImage allocates a sampleable copy target: RGBA8 color
 	// (linear, clamp-to-edge — the capture filtering GL sets) or the scene's
-	// depth format (nearest). Contents are undefined until the first copy.
-	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth ) { return 0; }
+	// depth format (nearest). hdrFloat makes the color target RGBA16F so an HDR
+	// frame's capture (glass refraction / heat haze) keeps the un-clamped scene
+	// instead of an 8-bit copy — mirrors GL3's GL_RGBA16F _currentRender in HDR.
+	// Contents are undefined until the first copy.
+	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth, bool hdrFloat = false ) { return 0; }
 	// Copy a framebuffer rect into a capture image. src rect is in GL window
 	// coordinates (origin bottom-left, like qglCopyTexSubImage2D); dst is in
 	// texel rows from the start of the image. Color copies convert to GL's

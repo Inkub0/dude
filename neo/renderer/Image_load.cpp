@@ -2078,8 +2078,10 @@ CopyFramebuffer
 void idImage::CopyFramebuffer( int x, int y, int imageWidth, int imageHeight, bool useOversizedBuffer ) {
 	// DUDE Phase 4 M5: Vulkan captures copy out of the offscreen scene image.
 	// Same POT-oversize bookkeeping as the GL path below (the shaders' NPOT
-	// correction factors derive from uploadWidth/Height); always RGBA8 — the
-	// HDR float capture arrives with the M7 enhancement port.
+	// correction factors derive from uploadWidth/Height). M7: in an HDR frame the
+	// capture is RGBA16F so glass refraction / heat haze sample the un-clamped float
+	// scene, matching GL3; format is keyed to the whole frame (HdrFrameActive) so it
+	// never flips mid-frame, and a change forces a realloc just like the GL path.
 	if ( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
 		if ( cvarSystem->GetCVarBool( "g_lowresFullscreenFX" ) ) {
 			imageWidth = 512;
@@ -2091,19 +2093,22 @@ void idImage::CopyFramebuffer( int x, int y, int imageWidth, int imageHeight, bo
 		GetDownsize( potWidth, potHeight );
 
 		rhi::RHI *r = rhi::GetRHI();
+		const bool	hdrFloat = RB_RHI_HdrFrameActive();
+		const GLint	captureFormat = hdrFloat ? GL_RGBA16F : GL_RGB8;
+		const bool	formatChanged = ( internalFormat != captureFormat );
 		const bool wrongSize = useOversizedBuffer
 			? ( uploadWidth < potWidth || uploadHeight < potHeight )
 			: ( uploadWidth != potWidth || uploadHeight != potHeight );
-		if ( rhiHandle == 0 || !rhiCaptured || wrongSize ) {
+		if ( rhiHandle == 0 || !rhiCaptured || wrongSize || formatChanged ) {
 			if ( rhiHandle ) {
 				r->RetireImage( rhiHandle );	// mid-frame safe (demand-load leftovers, resizes)
 			}
-			rhiHandle = r->CreateCaptureImage( potWidth, potHeight, false );
+			rhiHandle = r->CreateCaptureImage( potWidth, potHeight, false, hdrFloat );
 			rhiCaptured = rhiHandle != 0;
 			type = TT_2D;
 			uploadWidth = potWidth;
 			uploadHeight = potHeight;
-			internalFormat = GL_RGB8;
+			internalFormat = captureFormat;
 		}
 		if ( rhiHandle ) {
 			r->CopyFramebufferToImage( rhiHandle, 0, 0, x, y, imageWidth, imageHeight, false );

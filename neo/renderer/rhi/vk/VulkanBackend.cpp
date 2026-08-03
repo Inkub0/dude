@@ -151,7 +151,7 @@ public:
 	// ---- drawing ----
 	virtual void	BindPipeline( const PipelineDesc &desc );
 	virtual void	Draw( const DrawArgs &args );
-	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth );
+	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth, bool hdrFloat );
 	virtual void	CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 	                                        int srcX, int srcY, int w, int h, bool depth );
 	virtual void	RetireImage( ImageHandle img );
@@ -2663,12 +2663,13 @@ void VulkanBackend::InvalidateTextureSets() {
 VulkanBackend::CreateCaptureImage
 
 Sampleable copy target for the M5 screen captures: RGBA8 (linear/clamp — the
-filtering GL sets after every capture) or the scene's depth-stencil format
-(nearest, sampled through a depth-aspect view). Contents are undefined until
-the first CopyFramebufferToImage.
+filtering GL sets after every capture), RGBA16F when hdrFloat (an HDR frame's
+_currentRender, so refraction samples the un-clamped float scene), or the
+scene's depth-stencil format (nearest, sampled through a depth-aspect view).
+Contents are undefined until the first CopyFramebufferToImage.
 ====================
 */
-ImageHandle VulkanBackend::CreateCaptureImage( int w, int h, bool depth ) {
+ImageHandle VulkanBackend::CreateCaptureImage( int w, int h, bool depth, bool hdrFloat ) {
 	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
 		return 0;
 	}
@@ -2679,7 +2680,8 @@ ImageHandle VulkanBackend::CreateCaptureImage( int w, int h, bool depth ) {
 	VkImageCreateInfo ici = {};
 	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	ici.imageType = VK_IMAGE_TYPE_2D;
-	ici.format = depth ? sceneDepthFormat : VK_FORMAT_R8G8B8A8_UNORM;
+	ici.format = depth ? sceneDepthFormat
+	           : ( hdrFloat ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM );
 	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
 	ici.mipLevels = 1;
 	ici.arrayLayers = 1;
