@@ -378,8 +378,10 @@ Original plan:
   destination. Fullscreen post passes that *sample* a color target (resolve/FXAA/SMAA)
   cancel the negative-height flip — those targets are stored top-down, unlike the
   bottom-up M5 captures. `_currentRender`/`_currentDepth` captures follow the active frame
-  target (glass-in-HDR works; the capture is still RGBA8, an 8-bit refraction sample vs
-  GL3's RGBA16F — a minor fidelity gap to close later).
+  target (glass-in-HDR works). The color capture is **RGBA16F in an HDR frame** now
+  (`CreateCaptureImage` hdrFloat flag, keyed off `RB_RHI_HdrFrameActive()` so the format
+  can't flip mid-frame), so glass refraction / heat haze sample the un-clamped float scene
+  — parity with GL3's `GL_RGBA16F` `_currentRender`; RGBA8 off HDR as before.
 - **SSAO/GTAO [BUILT, pending in-engine check]** — `CreateRenderTargetColorDepth` (RGBA8
   color + depth, +MRT) via the same color-target machinery; normal G-buffer prepass + the
   ssao/ssao_blur/ssao_temporal fullscreen passes un-gated on Vulkan. The multitexture the
