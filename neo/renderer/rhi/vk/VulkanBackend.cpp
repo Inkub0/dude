@@ -67,11 +67,14 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
   #include "../../../libs/imgui/backends/imgui_impl_vulkan.h"
 #endif
 
-// dev-time validation layer (VK_LAYER_KHRONOS_validation); default on while
-// the backend is being brought up — every milestone's exit bar includes
-// "validation clean". Not archived: a missing layer must never stick.
-static idCVar r_vkValidation( "r_vkValidation", "1", CVAR_RENDERER | CVAR_BOOL,
-	"Vulkan: enable the Khronos validation layer if installed (dev)" );
+// dev-time validation layer (VK_LAYER_KHRONOS_validation). Default OFF: it deep-
+// checks every API call and its per-descriptor-set bookkeeping scales with draw
+// count, so it costs a large, draw-count-dependent chunk of frame time — a dev
+// tool, not something to ship on. Enable with +set r_vkValidation 1 when chasing
+// correctness (every milestone's exit bar is still "validation clean" with it on).
+// Not archived: a missing layer must never stick.
+static idCVar r_vkValidation( "r_vkValidation", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan: enable the Khronos validation layer if installed (dev; costs FPS)" );
 // explicit adapter pick; -1 = auto (first discrete GPU, else first usable)
 static idCVar r_vkDevice( "r_vkDevice", "-1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
 	"Vulkan: physical device index to use (-1 = auto-select)" );
@@ -106,7 +109,7 @@ public:
 
 	// ---- passes ----
 	virtual void	BeginPass( const ClearArgs *clear );
-	virtual void	BeginTargetPass( RenderTargetHandle rt, const ClearArgs *clear ) { if ( frameOpen ) fakePassDepth++; }
+	virtual void	BeginTargetPass( RenderTargetHandle rt, const ClearArgs *clear );
 	virtual void	EndPass();
 	virtual void	SetViewport( int x, int y, int w, int h );
 	virtual void	SetScissor( int x, int y, int w, int h );
@@ -126,14 +129,18 @@ public:
 	                                           int textureFilter, bool allowMips );
 	virtual ShaderHandle	LoadShader( const char *name );
 
-	virtual RenderTargetHandle	CreateRenderTarget( ImageFormat, int, int ) { return 0; }
-	virtual RenderTargetHandle	CreateRenderTargetCube( ImageFormat, int ) { return 0; }
+	// M7 render-target family. Depth targets (projected 2D + point-light cube
+	// shadow maps) are live; the color/color+depth(+stencil) variants that SSAO,
+	// SSR and the HDR frame target need are still deferred stubs (return 0 →
+	// those features stay off on Vulkan until their own slice lands).
+	virtual RenderTargetHandle	CreateRenderTarget( ImageFormat fmt, int w, int h );
+	virtual RenderTargetHandle	CreateRenderTargetCube( ImageFormat fmt, int size );
 	virtual RenderTargetHandle	CreateRenderTargetColorDepth( ImageFormat, int, int, int ) { return 0; }
 	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat, int, int ) { return 0; }
-	virtual void				DestroyRenderTarget( RenderTargetHandle ) {}
+	virtual void				DestroyRenderTarget( RenderTargetHandle rt );
 	virtual void				SetFrameTarget( RenderTargetHandle ) {}
-	virtual void				BeginCubeFacePass( RenderTargetHandle, int, const ClearArgs * ) { if ( frameOpen ) fakePassDepth++; }
-	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle ) { return 0; }
+	virtual void				BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear );
+	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt );
 	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle ) { return 0; }
 
 	virtual int		AllocUniforms( const void *data, int size, BufferHandle *buffer );
@@ -326,6 +333,7 @@ private:
 	VkDescriptorPool			persistentPool = VK_NULL_HANDLE;	// holds the per-slot set-0s
 	VkDescriptorSet				uboSet[FRAMES_IN_FLIGHT] = {};
 	VkDescriptorPool			framePool[FRAMES_IN_FLIGHT] = {};	// per-draw set-1s, reset per frame
+	std::unordered_map<uint64_t, VkDescriptorSet> textureSetCache[FRAMES_IN_FLIGHT];
 	bool						framePoolWarned = false;
 	ImageHandle					dummyImage = 0;			// 1x1 white for unused sampler slots
 	ImageHandle					dummyCube = 0;			// 1x1 white cube (samplerCube slots)
@@ -344,6 +352,49 @@ private:
 	bool						CreateShadowDummy( ShadowDummy &d, bool cube );
 	void						DestroyShadowDummy( ShadowDummy &d );
 
+	// ================= M7: offscreen render targets =================
+	// Depth-only targets for shadow maps: a 2D depth image (projected/spot
+	// lights) or a 6-face cube depth image (point lights). Rendered into with
+	// BeginTargetPass / BeginCubeFacePass and sampled through the ordinary
+	// DrawArgs path — GetRenderTargetImage registers a sampleable ImageRec with
+	// a depth-compare sampler (unit 7 = 2D map, unit 8 = cube map), so the
+	// descriptor writer needs no shadow-specific code. The color / color+depth
+	// (+stencil) variants that SSAO, SSR and the HDR frame target need are not
+	// built yet (their Create* methods still return 0).
+	struct RenderTarget {
+		bool			live = false;
+		bool			cube = false;
+		int				w = 0, h = 0;
+		VkFormat		depthFormat = VK_FORMAT_UNDEFINED;
+		VkImage			depthImage = VK_NULL_HANDLE;
+		VmaAllocation	depthAlloc = NULL;
+		VkImageView		sampleView = VK_NULL_HANDLE;	// 2D depth / cube view (sampled)
+		VkImageView		faceView[6] = {};				// per-face single-layer views (rendered into)
+		VkRenderPass	pass = VK_NULL_HANDLE;			// depth clear → shader-read
+		VkFramebuffer	fb[6] = {};						// [0] = 2D; [0..5] = cube faces
+		ImageHandle		sampleImage = 0;				// imageTable handle GetRenderTargetImage returns
+	};
+	std::vector<RenderTarget>	targetTable;			// handle = index + 1
+	VkSampler					shadowCompareSampler = VK_NULL_HANDLE;	// shared LINEAR + LEQUAL compare
+	// one shared depth-only render pass (D32_SFLOAT, clear→shader-read); every
+	// depth target's framebuffer and every shadow-map pipeline is built against
+	// it (2D + cube faces share the structure, so all are render-pass compatible)
+	VkRenderPass				shadowPass = VK_NULL_HANDLE;
+	bool						EnsureShadowPass();
+	// Shadow-cache eviction/reallocation destroys targets mid-frame (the cube/2D
+	// caches, RhiWorld.cpp), so target destruction is deferred to this slot's next
+	// fence wait — same lifetime rule as retiredImages/retiredRings.
+	std::vector<RenderTarget>	retiredTargets[FRAMES_IN_FLIGHT];
+	RenderTarget *				LookupTarget( RenderTargetHandle h ) {
+		return ( h >= 1 && h <= (RenderTargetHandle)targetTable.size() && targetTable[h - 1].live )
+			? &targetTable[h - 1] : NULL;
+	}
+	bool			CreateDepthTarget( RenderTarget &t, int w, int h, bool cube );
+	void			FreeTargetObjects( RenderTarget &t );	// frees VK objects only (not the imageTable slot)
+	void			DrainRetiredTargets( int slot );
+	void			DestroyAllTargets();
+	VkSampler		ShadowCompareSampler();
+
 	// device features actually enabled (queried before device creation)
 	bool						haveAnisotropy = false;
 	bool						haveFillModeNonSolid = false;
@@ -358,6 +409,14 @@ private:
 	float						polyOfsUnits = 0.0f;
 	int							vpRect[4] = { 0, 0, 0, 0 };	// GL-convention viewport (origin bottom-left)
 	int							scRect[4] = { 0, 0, 0, 0 };
+	// M7: while rendering into an offscreen target (shadow map) the viewport is
+	// NOT Y-flipped (unlike the scene pass) and uses the target's height, so the
+	// projective shadow write/read stays self-consistent — matching GL exactly.
+	bool						insideTargetPass = false;
+	int							curRenderH = 0;			// viewport/scissor height of the active pass
+	bool						curFlipY = true;		// scene = flipped; offscreen target = not
+	int							savedVpRect[4] = { 0, 0, 0, 0 };	// restored by the target's EndPass
+	int							savedScRect[4] = { 0, 0, 0, 0 };
 
 	// synchronous upload plumbing (image staging at load time)
 	VkCommandPool				uploadPool = VK_NULL_HANDLE;
@@ -445,11 +504,14 @@ bool VulkanBackend::CreateInstance() {
 		return false;
 	}
 
-	// instance-level Vulkan version — the loader must give us 1.1
+	// instance-level Vulkan version — the loader must give us 1.4. If it can't,
+	// we bail and R_InitOpenGL falls back to a GL backend (no crash); the whole
+	// backend targets a single 1.4 baseline rather than juggling older versions.
 	uint32_t instVersion = VK_API_VERSION_1_0;
 	vkEnumerateInstanceVersion( &instVersion );
-	if ( instVersion < VK_API_VERSION_1_1 ) {
-		common->Warning( "VK: instance only supports Vulkan 1.0 (baseline is 1.1)" );
+	if ( instVersion < VK_API_VERSION_1_4 ) {
+		common->Warning( "VK: loader only supports Vulkan %u.%u (baseline is 1.4) - update your Vulkan runtime/drivers",
+			VK_API_VERSION_MAJOR( instVersion ), VK_API_VERSION_MINOR( instVersion ) );
 		return false;
 	}
 
@@ -505,7 +567,7 @@ bool VulkanBackend::CreateInstance() {
 	app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
 	app.pApplicationName = "DUDE";
 	app.pEngineName = "DUDE";
-	app.apiVersion = VK_API_VERSION_1_1;
+	app.apiVersion = VK_API_VERSION_1_4;
 
 	VkInstanceCreateInfo ici = {};
 	ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -589,8 +651,8 @@ bool VulkanBackend::PickPhysicalDevice() {
 			VK_API_VERSION_MAJOR( props.apiVersion ), VK_API_VERSION_MINOR( props.apiVersion ),
 			VK_API_VERSION_PATCH( props.apiVersion ) );
 
-		if ( props.apiVersion < VK_API_VERSION_1_1 ) {
-			common->Printf( "VK:   skipped (needs Vulkan 1.1)\n" );
+		if ( props.apiVersion < VK_API_VERSION_1_4 ) {
+			common->Printf( "VK:   skipped (needs Vulkan 1.4)\n" );
 			continue;
 		}
 
@@ -714,8 +776,28 @@ bool VulkanBackend::CreateDeviceAndVma() {
 		common->Warning( "VK: device lacks shaderClipDistance - the depth prepass shader may fail" );
 	}
 
+	// discard in fragment shaders compiles to OpDemoteToHelperInvocation under
+	// the vulkan1.4 SPIR-V target (modern helper-invocation semantics rather
+	// than the old OpKill); the capability needs shaderDemoteToHelperInvocation,
+	// a core + required feature since Vulkan 1.3, so guaranteed on our 1.4 floor.
+	VkPhysicalDeviceVulkan13Features supported13 = {};
+	supported13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	VkPhysicalDeviceFeatures2 supported2 = {};
+	supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	supported2.pNext = &supported13;
+	vkGetPhysicalDeviceFeatures2( physical, &supported2 );
+
+	VkPhysicalDeviceVulkan13Features enabled13 = {};
+	enabled13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	if ( supported13.shaderDemoteToHelperInvocation ) {
+		enabled13.shaderDemoteToHelperInvocation = VK_TRUE;
+	} else {
+		common->Warning( "VK: device lacks shaderDemoteToHelperInvocation - alpha-tested (discard) shaders may fail" );
+	}
+
 	VkDeviceCreateInfo dci = {};
 	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+	dci.pNext = &enabled13;
 	dci.queueCreateInfoCount = queueCount;
 	dci.pQueueCreateInfos = queues;
 	dci.enabledExtensionCount = 1;
@@ -732,7 +814,7 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	aci.physicalDevice = physical;
 	aci.device = device;
 	aci.instance = instance;
-	aci.vulkanApiVersion = VK_API_VERSION_1_1;
+	aci.vulkanApiVersion = VK_API_VERSION_1_4;
 	if ( !vkCheck( vmaCreateAllocator( &aci, &vma ), "vmaCreateAllocator" ) ) {
 		return false;
 	}
@@ -1379,6 +1461,7 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	// StreamGeneration contract) and its per-draw descriptor pool
 	DrainRetiredRings( frameIndex );	// buffers replaced by GrowRing last time this slot ran
 	DrainRetiredImages( frameIndex );	// capture/cinematic images replaced by RetireImage
+	DrainRetiredTargets( frameIndex );	// shadow-map targets evicted by the shadow caches
 	uboRing[frameIndex].offset = 0;
 	vertRing[frameIndex].offset = 0;
 	idxRing[frameIndex].offset = 0;
@@ -1387,6 +1470,7 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	if ( framePool[frameIndex] ) {
 		vkResetDescriptorPool( device, framePool[frameIndex], 0 );
 	}
+	textureSetCache[frameIndex].clear();
 	boundPipeline = VK_NULL_HANDLE;
 	dynStateDirty = true;
 	depthRangeMin = 0.0f;
@@ -1401,6 +1485,9 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	insideScenePass = false;
 	sceneWritten = false;
 	fakePassDepth = 0;
+	insideTargetPass = false;
+	curRenderH = (int)swapExtent.height;	// scene extent; target passes override
+	curFlipY = true;
 }
 
 /*
@@ -1450,6 +1537,19 @@ VulkanBackend::EndPass
 ====================
 */
 void VulkanBackend::EndPass() {
+	if ( insideTargetPass ) {
+		// close the offscreen shadow-map pass. The scene pass resumes on the
+		// next Draw (EnsureScenePass → load variant); restore the scene viewport
+		// the target pass interrupted, exactly like GL3's savedViewport restore.
+		vkCmdEndRenderPass( frames[frameIndex].cb );
+		insideTargetPass = false;
+		curRenderH = (int)sceneExtent.height;
+		curFlipY = true;
+		memcpy( vpRect, savedVpRect, sizeof( vpRect ) );
+		memcpy( scRect, savedScRect, sizeof( scRect ) );
+		dynStateDirty = true;
+		return;
+	}
 	if ( fakePassDepth > 0 ) {
 		fakePassDepth--;		// balanced a no-op target pass
 		return;
@@ -1830,6 +1930,11 @@ VulkanBackend::DestroyM2Resources
 ====================
 */
 void VulkanBackend::DestroyM2Resources() {
+	// M7 render targets first: this frees the shadow-map images/views and clears
+	// their borrowed imageTable slots (live=false) so the imageTable sweep below
+	// doesn't double-free them. Device is idle here.
+	DestroyAllTargets();
+
 	for ( auto &kv : pipelineCache ) {
 		vkDestroyPipeline( device, kv.second, NULL );
 	}
@@ -2995,6 +3100,377 @@ void VulkanBackend::DestroyShadowDummy( ShadowDummy &d ) {
 }
 
 /*
+===============================================================================
+
+	M7 render targets — depth shadow maps (docs/vulkan-backend.md M7)
+
+	Depth-only offscreen targets, 2D (projected/spot lights) or 6-face cube
+	(point lights). shadow_sm/shadow_sm_cube write the light's linear falloff to
+	gl_FragDepth, which interaction.frag compares against — an explicit [0,1]
+	value, so the GL/VK NDC-depth difference is irrelevant here. The one VK
+	nuance: the pass renders with a plain (non-Y-flipped) viewport, so the
+	projective (s/q, t/q) write reads back self-consistently, matching GL.
+
+===============================================================================
+*/
+
+// Shared LINEAR + clamp + LEQUAL-compare sampler for every shadow map (matches
+// GL3's per-target GL_COMPARE_REF_TO_TEXTURE / GL_LEQUAL / GL_LINEAR setup).
+VkSampler VulkanBackend::ShadowCompareSampler() {
+	if ( shadowCompareSampler == VK_NULL_HANDLE ) {
+		VkSamplerCreateInfo sci = {};
+		sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
+		sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+		sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		sci.compareEnable = VK_TRUE;
+		sci.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+		sci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;	// out-of-map = depth 1 = unshadowed
+		vkCheck( vkCreateSampler( device, &sci, NULL, &shadowCompareSampler ), "vkCreateSampler(shadow compare)" );
+	}
+	return shadowCompareSampler;
+}
+
+// The single depth-only render pass every shadow target shares: clear depth →
+// draw occluders → leave the image SHADER_READ_ONLY for sampling. Cube faces
+// are single-layer depth attachments, structurally identical to the 2D map.
+bool VulkanBackend::EnsureShadowPass() {
+	if ( shadowPass != VK_NULL_HANDLE ) {
+		return true;
+	}
+	VkAttachmentDescription att = {};
+	att.format = VK_FORMAT_D32_SFLOAT;
+	att.samples = VK_SAMPLE_COUNT_1_BIT;
+	att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	VkAttachmentReference depthRef = { 0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+	VkSubpassDescription sub = {};
+	sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	sub.pDepthStencilAttachment = &depthRef;
+
+	// prior sampling of last frame's map must finish before we overwrite it;
+	// our depth writes must be visible to the interaction pass that samples it
+	VkSubpassDependency deps[2] = {};
+	deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+	deps[0].dstSubpass = 0;
+	deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+	deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	deps[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	deps[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+	deps[1].srcSubpass = 0;
+	deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+	deps[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	deps[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+	deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+	VkRenderPassCreateInfo rpi = {};
+	rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+	rpi.attachmentCount = 1;
+	rpi.pAttachments = &att;
+	rpi.subpassCount = 1;
+	rpi.pSubpasses = &sub;
+	rpi.dependencyCount = 2;
+	rpi.pDependencies = deps;
+	return vkCheck( vkCreateRenderPass( device, &rpi, NULL, &shadowPass ), "vkCreateRenderPass(shadow)" );
+}
+
+// Allocate a depth image (2D or cube), its sample view + per-face render views,
+// framebuffer(s), and register the sampleable ImageRec. Returns false (and
+// leaves t clean) on failure.
+bool VulkanBackend::CreateDepthTarget( RenderTarget &t, int w, int h, bool cube ) {
+	if ( device == VK_NULL_HANDLE || !EnsureShadowPass() ) {
+		return false;
+	}
+	const int layers = cube ? 6 : 1;
+	t.cube = cube;
+	t.w = w;
+	t.h = h;
+	t.depthFormat = VK_FORMAT_D32_SFLOAT;
+
+	VkImageCreateInfo ici = {};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = t.depthFormat;
+	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.mipLevels = 1;
+	ici.arrayLayers = (uint32_t)layers;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &t.depthImage, &t.depthAlloc, NULL ), "vmaCreateImage(shadow map)" ) ) {
+		t = RenderTarget();
+		return false;
+	}
+
+	// sampled view: cube (all 6 layers) or plain 2D
+	VkImageViewCreateInfo vwi = {};
+	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vwi.image = t.depthImage;
+	vwi.viewType = cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D;
+	vwi.format = t.depthFormat;
+	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	vwi.subresourceRange.levelCount = 1;
+	vwi.subresourceRange.layerCount = (uint32_t)layers;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &t.sampleView ), "vkCreateImageView(shadow sample)" ) ) {
+		FreeTargetObjects( t );
+		t = RenderTarget();
+		return false;
+	}
+
+	// render view(s) + framebuffer(s). 2D reuses the sample view as its
+	// attachment; the cube needs one single-layer 2D view per face.
+	for ( int f = 0; f < layers; f++ ) {
+		VkImageView renderView = t.sampleView;
+		if ( cube ) {
+			VkImageViewCreateInfo fvi = vwi;
+			fvi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			fvi.subresourceRange.baseArrayLayer = (uint32_t)f;
+			fvi.subresourceRange.layerCount = 1;
+			if ( !vkCheck( vkCreateImageView( device, &fvi, NULL, &t.faceView[f] ), "vkCreateImageView(shadow face)" ) ) {
+				FreeTargetObjects( t );
+				t = RenderTarget();
+				return false;
+			}
+			renderView = t.faceView[f];
+		}
+		VkFramebufferCreateInfo fbi = {};
+		fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		fbi.renderPass = shadowPass;
+		fbi.attachmentCount = 1;
+		fbi.pAttachments = &renderView;
+		fbi.width = (uint32_t)w;
+		fbi.height = (uint32_t)h;
+		fbi.layers = 1;
+		if ( !vkCheck( vkCreateFramebuffer( device, &fbi, NULL, &t.fb[f] ), "vkCreateFramebuffer(shadow)" ) ) {
+			FreeTargetObjects( t );
+			t = RenderTarget();
+			return false;
+		}
+	}
+
+	// register the sampleable ImageRec (borrowed image/view — freed by the RT,
+	// not the generic image path). The descriptor writer binds it at unit 7/8.
+	ImageRec rec;
+	rec.image = t.depthImage;
+	rec.alloc = NULL;					// owned by the RenderTarget
+	rec.view = t.sampleView;			// owned by the RenderTarget
+	rec.sampler = ShadowCompareSampler();
+	rec.live = true;
+	rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	rec.isDepth = true;
+	rec.width = w;
+	rec.height = h;
+	t.sampleImage = 0;
+	for ( size_t i = 0; i < imageTable.size(); i++ ) {
+		if ( !imageTable[i].live ) {
+			imageTable[i] = rec;
+			t.sampleImage = (ImageHandle)( i + 1 );
+			break;
+		}
+	}
+	if ( t.sampleImage == 0 ) {
+		imageTable.push_back( rec );
+		t.sampleImage = (ImageHandle)imageTable.size();
+	}
+
+	t.live = true;
+	return true;
+}
+
+RenderTargetHandle VulkanBackend::CreateRenderTarget( ImageFormat fmt, int w, int h ) {
+	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
+		return 0;
+	}
+	// only the depth (shadow-map) target is live; the RGBA8/RGBA16F color targets
+	// SSAO/SSR/post use arrive with their own slice (those features are still
+	// !vkMode-gated in the frontend, so this path isn't reached yet — return 0)
+	if ( fmt != IF_DEPTH24 ) {
+		return 0;
+	}
+	int slot = -1;
+	for ( size_t i = 0; i < targetTable.size(); i++ ) {
+		if ( !targetTable[i].live ) { slot = (int)i; break; }
+	}
+	if ( slot < 0 ) {
+		targetTable.push_back( RenderTarget() );
+		slot = (int)targetTable.size() - 1;
+	}
+	if ( !CreateDepthTarget( targetTable[slot], w, h, false ) ) {
+		return 0;
+	}
+	return (RenderTargetHandle)( slot + 1 );
+}
+
+RenderTargetHandle VulkanBackend::CreateRenderTargetCube( ImageFormat fmt, int size ) {
+	if ( device == VK_NULL_HANDLE || size <= 0 ) {
+		return 0;
+	}
+	if ( fmt != IF_DEPTH24 ) {
+		return 0;
+	}
+	int slot = -1;
+	for ( size_t i = 0; i < targetTable.size(); i++ ) {
+		if ( !targetTable[i].live ) { slot = (int)i; break; }
+	}
+	if ( slot < 0 ) {
+		targetTable.push_back( RenderTarget() );
+		slot = (int)targetTable.size() - 1;
+	}
+	if ( !CreateDepthTarget( targetTable[slot], size, size, true ) ) {
+		return 0;
+	}
+	return (RenderTargetHandle)( slot + 1 );
+}
+
+ImageHandle VulkanBackend::GetRenderTargetImage( RenderTargetHandle rt ) {
+	RenderTarget *t = LookupTarget( rt );
+	return t ? t->sampleImage : 0;
+}
+
+// begin an offscreen pass into a target (fbIndex 0 = 2D map, 0..5 = cube face).
+// Suspends the scene pass; the scene resumes on the next Draw's EnsureScenePass.
+void VulkanBackend::BeginTargetPass( RenderTargetHandle rt, const ClearArgs *clear ) {
+	if ( !frameOpen || skipFrame ) {
+		return;
+	}
+	RenderTarget *t = LookupTarget( rt );
+	if ( t == NULL || t->cube ) {
+		if ( frameOpen ) { fakePassDepth++; }	// invalid / wrong entry point → balance the EndPass
+		return;
+	}
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );				// suspend the scene pass
+		insideScenePass = false;
+	}
+	VkClearValue cv = {};
+	cv.depthStencil.depth = 1.0f;
+	VkRenderPassBeginInfo rbi = {};
+	rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	rbi.renderPass = shadowPass;
+	rbi.framebuffer = t->fb[0];
+	rbi.renderArea.extent = { (uint32_t)t->w, (uint32_t)t->h };
+	rbi.clearValueCount = 1;
+	rbi.pClearValues = &cv;
+	vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
+
+	memcpy( savedVpRect, vpRect, sizeof( vpRect ) );
+	memcpy( savedScRect, scRect, sizeof( scRect ) );
+	vpRect[0] = 0; vpRect[1] = 0; vpRect[2] = t->w; vpRect[3] = t->h;
+	scRect[0] = 0; scRect[1] = 0; scRect[2] = t->w; scRect[3] = t->h;
+	curRenderH = t->h;
+	curFlipY = false;
+	insideTargetPass = true;
+	dynStateDirty = true;
+}
+
+void VulkanBackend::BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear ) {
+	if ( !frameOpen || skipFrame ) {
+		return;
+	}
+	RenderTarget *t = LookupTarget( rt );
+	if ( t == NULL || !t->cube || face < 0 || face > 5 ) {
+		if ( frameOpen ) { fakePassDepth++; }
+		return;
+	}
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );
+		insideScenePass = false;
+	}
+	VkClearValue cv = {};
+	cv.depthStencil.depth = 1.0f;
+	VkRenderPassBeginInfo rbi = {};
+	rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	rbi.renderPass = shadowPass;
+	rbi.framebuffer = t->fb[face];
+	rbi.renderArea.extent = { (uint32_t)t->w, (uint32_t)t->h };
+	rbi.clearValueCount = 1;
+	rbi.pClearValues = &cv;
+	vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
+
+	memcpy( savedVpRect, vpRect, sizeof( vpRect ) );
+	memcpy( savedScRect, scRect, sizeof( scRect ) );
+	vpRect[0] = 0; vpRect[1] = 0; vpRect[2] = t->w; vpRect[3] = t->h;
+	scRect[0] = 0; scRect[1] = 0; scRect[2] = t->w; scRect[3] = t->h;
+	curRenderH = t->h;
+	curFlipY = false;
+	insideTargetPass = true;
+	dynStateDirty = true;
+}
+
+// free a target's Vulkan objects (framebuffers, views, image). Never touches
+// the imageTable slot — that is cleared eagerly by DestroyRenderTarget so no
+// new draw samples a target being torn down.
+void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
+	for ( int f = 0; f < 6; f++ ) {
+		if ( t.fb[f] )       { vkDestroyFramebuffer( device, t.fb[f], NULL ); t.fb[f] = VK_NULL_HANDLE; }
+	}
+	for ( int f = 0; f < 6; f++ ) {
+		if ( t.faceView[f] ) { vkDestroyImageView( device, t.faceView[f], NULL ); t.faceView[f] = VK_NULL_HANDLE; }
+	}
+	if ( t.sampleView )      { vkDestroyImageView( device, t.sampleView, NULL ); t.sampleView = VK_NULL_HANDLE; }
+	if ( t.depthImage )      { vmaDestroyImage( vma, t.depthImage, t.depthAlloc ); t.depthImage = VK_NULL_HANDLE; t.depthAlloc = NULL; }
+}
+
+void VulkanBackend::DestroyRenderTarget( RenderTargetHandle rt ) {
+	RenderTarget *t = LookupTarget( rt );
+	if ( t == NULL ) {
+		return;
+	}
+	// stop new draws from sampling it immediately (the ImageRec slot is freed
+	// for reuse), but defer the Vulkan-object destruction until this frame
+	// slot's GPU work is fenced off — the shadow caches evict mid-frame.
+	if ( t->sampleImage >= 1 && t->sampleImage <= (ImageHandle)imageTable.size() ) {
+		imageTable[t->sampleImage - 1] = ImageRec();
+		imageTable[t->sampleImage - 1].live = false;
+	}
+	t->sampleImage = 0;
+	retiredTargets[frameIndex].push_back( *t );
+	*t = RenderTarget();		// free the target-table slot
+}
+
+void VulkanBackend::DrainRetiredTargets( int slot ) {
+	for ( size_t i = 0; i < retiredTargets[slot].size(); i++ ) {
+		FreeTargetObjects( retiredTargets[slot][i] );
+	}
+	retiredTargets[slot].clear();
+}
+
+// teardown: device is idle. Free every retired + live target and the shared
+// pass/sampler, and clear their imageTable slots.
+void VulkanBackend::DestroyAllTargets() {
+	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
+		DrainRetiredTargets( slot );
+	}
+	for ( size_t i = 0; i < targetTable.size(); i++ ) {
+		RenderTarget &t = targetTable[i];
+		if ( !t.live ) {
+			continue;
+		}
+		if ( t.sampleImage >= 1 && t.sampleImage <= (ImageHandle)imageTable.size() ) {
+			imageTable[t.sampleImage - 1] = ImageRec();
+			imageTable[t.sampleImage - 1].live = false;
+		}
+		FreeTargetObjects( t );
+		t = RenderTarget();
+	}
+	targetTable.clear();
+	if ( shadowPass )           { vkDestroyRenderPass( device, shadowPass, NULL ); shadowPass = VK_NULL_HANDLE; }
+	if ( shadowCompareSampler ) { vkDestroySampler( device, shadowCompareSampler, NULL ); shadowCompareSampler = VK_NULL_HANDLE; }
+}
+
+/*
 ====================
 VulkanBackend::GetPipeline
 
@@ -3222,8 +3698,10 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 
 	VkPipelineColorBlendStateCreateInfo cb = {};
 	cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-	cb.attachmentCount = 1;
-	cb.pAttachments = &att;
+	// the depth-only shadow pass has no color attachment, so its pipelines carry
+	// zero blend attachments (attachmentCount must match the subpass)
+	cb.attachmentCount = insideTargetPass ? 0 : 1;
+	cb.pAttachments = insideTargetPass ? NULL : &att;
 
 	const VkDynamicState dyn[3] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
 	                                VK_DYNAMIC_STATE_DEPTH_BIAS };
@@ -3245,7 +3723,11 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	pci.pColorBlendState = &cb;
 	pci.pDynamicState = &dsi;
 	pci.layout = pipeLayout;
-	pci.renderPass = passClear;		// compatible with passLoad (same formats/samples)
+	// scene pipelines target the scene pass (passClear, compatible with passLoad);
+	// shadow-map draws (insideTargetPass) target the depth-only shadowPass. The
+	// shadow_sm/shadow_sm_cube shaders are shadow-only, so the shader handle in the
+	// cache key already keeps the two pipeline families apart.
+	pci.renderPass = insideTargetPass ? shadowPass : passClear;
 	pci.subpass = 0;
 
 	VkPipeline pipeline = VK_NULL_HANDLE;
@@ -3365,30 +3847,44 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 		return;
 	}
 
-	EnsureScenePass();
-	if ( !insideScenePass ) {
-		return;
+	if ( insideTargetPass ) {
+		// rendering into an offscreen shadow-map target: its render pass is
+		// already open (BeginTargetPass/BeginCubeFacePass); don't touch the scene pass
+	} else {
+		EnsureScenePass();
+		if ( !insideScenePass ) {
+			return;
+		}
 	}
 	VkCommandBuffer cb = frames[frameIndex].cb;
 
 	if ( dynStateDirty ) {
-		// negative-height viewport: y-up NDC like GL; rects converted from
-		// GL's bottom-left origin to Vulkan's top-left
-		const float fbH = (float)sceneExtent.height;
+		// scene pass: negative-height viewport (y-up NDC like GL) with the GL
+		// bottom-left rect converted to Vulkan's top-left. Offscreen target
+		// pass: a plain top-left viewport at the target's height — the shadow
+		// map's projective write then reads back self-consistently (matches GL).
+		const int   renderH = curRenderH;
 		VkViewport v = {};
 		v.x = (float)vpRect[0];
-		v.y = fbH - (float)vpRect[1];
 		v.width = (float)vpRect[2];
-		v.height = -(float)vpRect[3];
-		v.minDepth = depthRangeMin;
-		v.maxDepth = depthRangeMax;
+		if ( curFlipY ) {
+			v.y = (float)renderH - (float)vpRect[1];
+			v.height = -(float)vpRect[3];
+		} else {
+			v.y = (float)vpRect[1];
+			v.height = (float)vpRect[3];
+		}
+		// shadow-map passes always want the full [0,1] depth range: the weapon/
+		// model depth hack (SetDepthRange) is a scene-only concern
+		v.minDepth = insideTargetPass ? 0.0f : depthRangeMin;
+		v.maxDepth = insideTargetPass ? 1.0f : depthRangeMax;
 		vkCmdSetViewport( cb, 0, 1, &v );
 
 		VkRect2D sc = {};
 		int sx = scRect[0], sy = scRect[1], sw = scRect[2], sh = scRect[3];
 		if ( sw < 0 ) { sw = 0; }
 		if ( sh < 0 ) { sh = 0; }
-		int top = (int)sceneExtent.height - ( sy + sh );
+		int top = curFlipY ? ( renderH - ( sy + sh ) ) : sy;
 		if ( sx < 0 ) { sw += sx; sx = 0; }
 		if ( top < 0 ) { sh += top; top = 0; }
 		if ( sw < 0 ) { sw = 0; }
@@ -3414,61 +3910,75 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 	// set 1: per-draw texture set from the frame pool (dummy in empty slots)
 	{
 		VkDescriptorSet texSet = VK_NULL_HANDLE;
-		VkDescriptorSetAllocateInfo ai = {};
-		ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-		ai.descriptorPool = framePool[frameIndex];
-		ai.descriptorSetCount = 1;
-		ai.pSetLayouts = &setLayoutTex;
-		if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
-			if ( !framePoolWarned ) {
-				framePoolWarned = true;
-				common->Warning( "VK: per-frame descriptor pool exhausted (%d sets)", MAX_FRAME_SETS );
-			}
-			return;
+		uint64_t key = 0xcbf29ce484222325ull;
+		auto mixKey = []( uint64_t &seed, uint32_t value ) {
+			seed ^= (uint64_t)value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+		};
+		for ( int i = 0; i < 8; i++ ) {
+			mixKey( key, (uint32_t)args.textures[i] );
 		}
-		// bindings 0-7 = units, 8 = shadow cube, 9 = SSAO, 10 = occlusion map.
-		// Empty slots take a dummy typed for what the shaders statically
-		// declare: unit 7 is interaction.frag's sampler2DShadow and 8 its
-		// samplerCubeShadow (depth-compare dummies until M7 shadow maps);
-		// everything else is sampler2D (white). Real handles always win.
-		VkDescriptorImageInfo infos[11];
-		VkWriteDescriptorSet writes[11];
-		const ImageRec &dummy = imageTable[dummyImage - 1];
-		for ( int i = 0; i < 11; i++ ) {
-			VkSampler sampler = dummy.sampler;
-			VkImageView view = dummy.view;
-			if ( i < 8 && args.textures[i] >= 1 && args.textures[i] <= (ImageHandle)imageTable.size()
-			     && imageTable[args.textures[i] - 1].live ) {
-				const ImageRec &rec = imageTable[args.textures[i] - 1];
-				sampler = rec.sampler;
-				view = rec.view;
-			} else if ( i == 7 ) {
-				sampler = dummyShadow2D.sampler;
-				view = dummyShadow2D.view;
-			} else if ( i == 8 ) {
-				if ( args.shadowCube >= 1 && args.shadowCube <= (ImageHandle)imageTable.size()
-				     && imageTable[args.shadowCube - 1].live ) {
-					const ImageRec &rec = imageTable[args.shadowCube - 1];
+		mixKey( key, (uint32_t)args.shadowCube );
+		auto it = textureSetCache[frameIndex].find( key );
+		if ( it != textureSetCache[frameIndex].end() ) {
+			texSet = it->second;
+		} else {
+			VkDescriptorSetAllocateInfo ai = {};
+			ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+			ai.descriptorPool = framePool[frameIndex];
+			ai.descriptorSetCount = 1;
+			ai.pSetLayouts = &setLayoutTex;
+			if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
+				if ( !framePoolWarned ) {
+					framePoolWarned = true;
+					common->Warning( "VK: per-frame descriptor pool exhausted (%d sets)", MAX_FRAME_SETS );
+				}
+				return;
+			}
+			// bindings 0-7 = units, 8 = shadow cube, 9 = SSAO, 10 = occlusion map.
+			// Empty slots take a dummy typed for what the shaders statically
+			// declare: unit 7 is interaction.frag's sampler2DShadow and 8 its
+			// samplerCubeShadow (depth-compare dummies until M7 shadow maps);
+			// everything else is sampler2D (white). Real handles always win.
+			VkDescriptorImageInfo infos[11];
+			VkWriteDescriptorSet writes[11];
+			const ImageRec &dummy = imageTable[dummyImage - 1];
+			for ( int i = 0; i < 11; i++ ) {
+				VkSampler sampler = dummy.sampler;
+				VkImageView view = dummy.view;
+				if ( i < 8 && args.textures[i] >= 1 && args.textures[i] <= (ImageHandle)imageTable.size()
+				     && imageTable[args.textures[i] - 1].live ) {
+					const ImageRec &rec = imageTable[args.textures[i] - 1];
 					sampler = rec.sampler;
 					view = rec.view;
-				} else {
-					sampler = dummyShadowCube.sampler;
-					view = dummyShadowCube.view;
+				} else if ( i == 7 ) {
+					sampler = dummyShadow2D.sampler;
+					view = dummyShadow2D.view;
+				} else if ( i == 8 ) {
+					if ( args.shadowCube >= 1 && args.shadowCube <= (ImageHandle)imageTable.size()
+					     && imageTable[args.shadowCube - 1].live ) {
+						const ImageRec &rec = imageTable[args.shadowCube - 1];
+						sampler = rec.sampler;
+						view = rec.view;
+					} else {
+						sampler = dummyShadowCube.sampler;
+						view = dummyShadowCube.view;
+					}
 				}
+				infos[i] = {};
+				infos[i].sampler = sampler;
+				infos[i].imageView = view;
+				infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				writes[i] = {};
+				writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+				writes[i].dstSet = texSet;
+				writes[i].dstBinding = (uint32_t)i;
+				writes[i].descriptorCount = 1;
+				writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				writes[i].pImageInfo = &infos[i];
 			}
-			infos[i] = {};
-			infos[i].sampler = sampler;
-			infos[i].imageView = view;
-			infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			writes[i] = {};
-			writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			writes[i].dstSet = texSet;
-			writes[i].dstBinding = (uint32_t)i;
-			writes[i].descriptorCount = 1;
-			writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-			writes[i].pImageInfo = &infos[i];
+			vkUpdateDescriptorSets( device, 11, writes, 0, NULL );
+			textureSetCache[frameIndex][key] = texSet;
 		}
-		vkUpdateDescriptorSets( device, 11, writes, 0, NULL );
 		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout,
 			1, 1, &texSet, 0, NULL );
 	}
@@ -3578,31 +4088,38 @@ void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int
 	// untextured; a white texel yields pure vertex color through generic.frag
 	{
 		VkDescriptorSet texSet = VK_NULL_HANDLE;
-		VkDescriptorSetAllocateInfo ai = {};
-		ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-		ai.descriptorPool = framePool[frameIndex];
-		ai.descriptorSetCount = 1;
-		ai.pSetLayouts = &setLayoutTex;
-		if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
-			return;
+		const uint64_t key = 0;
+		auto it = textureSetCache[frameIndex].find( key );
+		if ( it != textureSetCache[frameIndex].end() ) {
+			texSet = it->second;
+		} else {
+			VkDescriptorSetAllocateInfo ai = {};
+			ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+			ai.descriptorPool = framePool[frameIndex];
+			ai.descriptorSetCount = 1;
+			ai.pSetLayouts = &setLayoutTex;
+			if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
+				return;
+			}
+			VkDescriptorImageInfo infos[11];
+			VkWriteDescriptorSet writes[11];
+			const ImageRec &dummy = imageTable[dummyImage - 1];
+			for ( int i = 0; i < 11; i++ ) {
+				infos[i] = {};
+				infos[i].sampler = ( i == 7 ) ? dummyShadow2D.sampler : ( i == 8 ? dummyShadowCube.sampler : dummy.sampler );
+				infos[i].imageView = ( i == 7 ) ? dummyShadow2D.view : ( i == 8 ? dummyShadowCube.view : dummy.view );
+				infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				writes[i] = {};
+				writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+				writes[i].dstSet = texSet;
+				writes[i].dstBinding = (uint32_t)i;
+				writes[i].descriptorCount = 1;
+				writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				writes[i].pImageInfo = &infos[i];
+			}
+			vkUpdateDescriptorSets( device, 11, writes, 0, NULL );
+			textureSetCache[frameIndex][key] = texSet;
 		}
-		VkDescriptorImageInfo infos[11];
-		VkWriteDescriptorSet writes[11];
-		const ImageRec &dummy = imageTable[dummyImage - 1];
-		for ( int i = 0; i < 11; i++ ) {
-			infos[i] = {};
-			infos[i].sampler = ( i == 7 ) ? dummyShadow2D.sampler : ( i == 8 ? dummyShadowCube.sampler : dummy.sampler );
-			infos[i].imageView = ( i == 7 ) ? dummyShadow2D.view : ( i == 8 ? dummyShadowCube.view : dummy.view );
-			infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			writes[i] = {};
-			writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			writes[i].dstSet = texSet;
-			writes[i].dstBinding = (uint32_t)i;
-			writes[i].descriptorCount = 1;
-			writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-			writes[i].pImageInfo = &infos[i];
-		}
-		vkUpdateDescriptorSets( device, 11, writes, 0, NULL );
 		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout, 1, 1, &texSet, 0, NULL );
 	}
 
@@ -3736,7 +4253,7 @@ bool VulkanBackend::ImGuiInit() {
 	}
 
 	ImGui_ImplVulkan_InitInfo ii = {};
-	ii.ApiVersion = VK_API_VERSION_1_1;
+	ii.ApiVersion = VK_API_VERSION_1_4;
 	ii.Instance = instance;
 	ii.PhysicalDevice = physical;
 	ii.Device = device;
