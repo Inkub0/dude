@@ -236,6 +236,8 @@ private:
 	struct RingBuf;					// defined below (member struct, not ::rhi::RingBuf)
 	bool			CreateM2Resources();
 	void			DestroyM2Resources();
+	void			CreatePipelineCache();		// seed the driver pipeline cache from disk
+	void			SavePipelineCache();		// write the driver pipeline cache back to disk
 	void			EnsureScenePass();
 	int				AllocFromRing( RingBuf &ring, const void *data, int size, int align,
 	                               int wrapReserve, BufferHandle *buffer );
@@ -478,6 +480,11 @@ private:
 	bool						haveFillModeNonSolid = false;
 
 	std::unordered_map<unsigned long long, VkPipeline>	pipelineCache;
+	// disk-persisted DRIVER pipeline cache (distinct from the map above, which is our
+	// CPU permutation->VkPipeline table): seeded from a blob at Init, fed to every
+	// vkCreateGraphicsPipelines, written back at Shutdown so first-use compile cost is
+	// paid once across runs, not every session.
+	VkPipelineCache				diskPipelineCache = VK_NULL_HANDLE;
 	PipelineDesc				currentDesc;
 	VkPipeline					boundPipeline = VK_NULL_HANDLE;
 	uint64_t					boundTexKey = 0;
@@ -1403,6 +1410,7 @@ bool VulkanBackend::Init() {
 		Shutdown();
 		return false;
 	}
+	CreatePipelineCache();		// non-fatal: pipelines still build cold if this fails
 	if ( !CreateSwapchain() || !CreateSceneTargets() || !CreateFrameSlots() || !CreateM2Resources() ) {
 		Shutdown();
 		return false;
@@ -1435,6 +1443,7 @@ void VulkanBackend::Shutdown() {
 	}
 	if ( device != VK_NULL_HANDLE ) {
 		vkDeviceWaitIdle( device );
+		SavePipelineCache();		// persist this session's compiles before teardown
 	}
 
 	// M6: ImGui device objects must die before the device. Normally sys_imgui
@@ -1453,6 +1462,10 @@ void VulkanBackend::Shutdown() {
 	DestroyFrameSlots();
 	DestroySceneTargets();
 	DestroySwapchain( true );
+	if ( diskPipelineCache != VK_NULL_HANDLE ) {
+		vkDestroyPipelineCache( device, diskPipelineCache, NULL );
+		diskPipelineCache = VK_NULL_HANDLE;
+	}
 	if ( vma )     { vmaDestroyAllocator( vma ); vma = NULL; }
 	if ( device )  { vkDestroyDevice( device, NULL ); device = VK_NULL_HANDLE; }
 	if ( messenger ) {
@@ -2144,6 +2157,88 @@ void VulkanBackend::DestroyM2Resources() {
 	framePoolWarned = false;
 
 	IR_Purge();
+}
+
+/*
+====================
+VulkanBackend::CreatePipelineCache
+
+Create the driver's VkPipelineCache, seeded from the blob written at the last
+Shutdown so first-use pipeline compiles are reused across runs. Non-fatal: on
+any failure diskPipelineCache stays NULL and pipelines simply build cold (the
+VK_NULL_HANDLE path). The Vulkan spec guarantees safe handling of incompatible
+initial data, but we header-check vendor/device/UUID first so a GPU or driver
+swap starts fresh (and logs it) instead of handing the driver stale bytes.
+====================
+*/
+void VulkanBackend::CreatePipelineCache() {
+	diskPipelineCache = VK_NULL_HANDLE;
+	if ( device == VK_NULL_HANDLE ) {
+		return;
+	}
+
+	void *blob = NULL;
+	const int blobLen = fileSystem->ReadFile( "vkpipelinecache.bin", &blob, NULL );
+	const void *initData = NULL;
+	size_t      initSize = 0;
+	// VkPipelineCacheHeaderVersionOne = uint32 headerSize, uint32 version,
+	// uint32 vendorID, uint32 deviceID, uint8 uuid[VK_UUID_SIZE]
+	if ( blob && blobLen >= (int)( 16 + VK_UUID_SIZE ) ) {
+		const uint8_t *h = (const uint8_t *)blob;
+		uint32_t hdrVer = 0, vendorID = 0, deviceID = 0;
+		memcpy( &hdrVer,   h + 4,  4 );
+		memcpy( &vendorID, h + 8,  4 );
+		memcpy( &deviceID, h + 12, 4 );
+		const bool match = hdrVer == VK_PIPELINE_CACHE_HEADER_VERSION_ONE
+			&& vendorID == physProps.vendorID
+			&& deviceID == physProps.deviceID
+			&& memcmp( h + 16, physProps.pipelineCacheUUID, VK_UUID_SIZE ) == 0;
+		if ( match ) {
+			initData = blob;
+			initSize = (size_t)blobLen;
+		} else {
+			common->Printf( "VK: on-disk pipeline cache is for a different device/driver - starting fresh\n" );
+		}
+	}
+
+	VkPipelineCacheCreateInfo pci = {};
+	pci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+	pci.initialDataSize = initSize;
+	pci.pInitialData = initData;
+	if ( !vkCheck( vkCreatePipelineCache( device, &pci, NULL, &diskPipelineCache ), "vkCreatePipelineCache" ) ) {
+		diskPipelineCache = VK_NULL_HANDLE;
+	} else if ( initSize ) {
+		common->Printf( "VK: pipeline cache seeded from disk (%d KB)\n", blobLen / 1024 );
+	}
+	if ( blob ) {
+		fileSystem->FreeFile( blob );		// vkCreatePipelineCache copied the initial data
+	}
+}
+
+/*
+====================
+VulkanBackend::SavePipelineCache
+
+Write the driver pipeline cache back to fs_savepath so the next run (and each
+vid_restart) reuses this session's compiles. Called with the device idle.
+====================
+*/
+void VulkanBackend::SavePipelineCache() {
+	if ( device == VK_NULL_HANDLE || diskPipelineCache == VK_NULL_HANDLE ) {
+		return;
+	}
+	size_t size = 0;
+	if ( vkGetPipelineCacheData( device, diskPipelineCache, &size, NULL ) != VK_SUCCESS || size == 0 ) {
+		return;
+	}
+	void *data = R_StaticAlloc( (int)size );
+	if ( !data ) {
+		return;
+	}
+	if ( vkGetPipelineCacheData( device, diskPipelineCache, &size, data ) == VK_SUCCESS && size > 0 ) {
+		fileSystem->WriteFile( "vkpipelinecache.bin", data, (int)size );
+	}
+	R_StaticFree( data );
 }
 
 /*
@@ -4411,7 +4506,7 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	pci.subpass = 0;
 
 	VkPipeline pipeline = VK_NULL_HANDLE;
-	if ( !vkCheck( vkCreateGraphicsPipelines( device, VK_NULL_HANDLE, 1, &pci, NULL, &pipeline ),
+	if ( !vkCheck( vkCreateGraphicsPipelines( device, diskPipelineCache, 1, &pci, NULL, &pipeline ),
 	               va( "vkCreateGraphicsPipelines(%s)", sh.name.c_str() ) ) ) {
 		pipeline = VK_NULL_HANDLE;
 	}
