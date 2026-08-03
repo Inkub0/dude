@@ -364,6 +364,26 @@ Original plan:
 - **Verify:** each feature A/B'd against its GL3 counterpart (RenderDoc side-by-side);
   presets Potato→Nightmare apply and detect correctly on Vulkan.
 
+**As-built so far:**
+- **Shadow maps [BUILT]** — 2D depth (projected/spot) + cube depth (point) targets,
+  one shared depth-only render pass, LEQUAL-compare sampler; `r_shadowMapping` no longer
+  `!vkMode`-gated (`RhiWorld.cpp`), alpha-tested casters feed unit-0 coverage.
+- **HDR pipeline [BUILT, pending in-engine check]** — the color render-target family on
+  VMA images: `CreateRenderTargetColorDepthStencil` (RGBA16F + D24S8/D32S8 scene buffer),
+  color-only `CreateRenderTarget` (RGBA16F FXAA/SMAA ping, later SSR buffers),
+  `GetRenderTargetImage2`, and `SetFrameTarget` re-routing the whole scene into the HDR
+  buffer. The pipeline cache key gained a "pass class" byte (bits 24-31) so scene shaders
+  build render-pass-compatible variants for the RGBA8 swapchain path (class 0) and the
+  RGBA16F HDR path (class 2); `BeginPass`/`EndPass`/`GetPipeline` route by the active
+  destination. Fullscreen post passes that *sample* a color target (resolve/FXAA/SMAA)
+  cancel the negative-height flip — those targets are stored top-down, unlike the
+  bottom-up M5 captures. `_currentRender`/`_currentDepth` captures follow the active frame
+  target (glass-in-HDR works; the capture is still RGBA8, an 8-bit refraction sample vs
+  GL3's RGBA16F — a minor fidelity gap to close later).
+- **Still stubbed:** `CreateRenderTargetColorDepth` (SSAO normal G-buffer / SSR MRT) → 0,
+  so SSAO/SSR stay off on Vulkan until their slice. PBR rides the interaction shaders and
+  is largely independent.
+
 **Phase exit = the plan's final milestone:** Mars City loads; identical light/shadow
 behaviour; no missing interactions; RenderDoc shows depth, stencil, and interaction
 passes; perceptual-equivalence bar met. Then Phase 5 (validation & polish, backend

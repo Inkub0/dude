@@ -186,3 +186,25 @@ render-pass builder. The RHI methods added for Phase A (`CreateRenderTargetColor
   (menus, mirrors/subviews, HUD, stencil shadows, screenshots) — headless build only so far.
 - **Phase B** — planned.
 - **Phase C** — planned.
+
+### Vulkan port (M7) — as-built
+
+Phase A now runs on the Vulkan backend too (`neo/renderer/rhi/vk/VulkanBackend.cpp`), same
+`r_hdr` cvar and frontend driver (`RB_RHI_HdrBeginFrame`/`HdrResolve`). What the port added:
+
+- `CreateRenderTargetColorDepthStencil(IF_RGBA16F)` → an RGBA16F color image + a
+  D24S8/D32S8 depth-stencil (stencil shadows need it), with clear / load / clearDS render-
+  pass variants mirroring the swapchain scene passes. Colour attachment ends each pass in
+  `SHADER_READ_ONLY` so the resolve samples it through the ordinary descriptor path.
+- Color-only `CreateRenderTarget(IF_RGBA16F/IF_RGBA8)` for the FXAA/SMAA ping (and future
+  SSR buffers); `GetRenderTargetImage2` for MRT.
+- `SetFrameTarget` re-routes `BeginPass`/`EndPass` into the HDR buffer; the pipeline cache
+  key carries a pass-class byte so the same scene shaders get RGBA8-swapchain and
+  RGBA16F-HDR pipeline variants (render-pass-incompatible colour formats).
+- **Orientation:** a color render target is stored top-down (rendered like the scene),
+  unlike the bottom-up M5 `_currentRender` captures, so any fullscreen pass sampling one
+  (resolve/FXAA/SMAA) cancels the negative-height viewport flip. Glass/heat-haze captures
+  during an HDR frame copy from the HDR buffer (with a `SHADER_READ_ONLY`↔`TRANSFER_SRC`
+  round-trip); the capture is still RGBA8 (minor: 8-bit refraction sample vs GL3's RGBA16F).
+- Default path unchanged: with `r_hdr 0` the frame target stays 0 and every scene/shadow
+  pass behaves exactly as before M7.

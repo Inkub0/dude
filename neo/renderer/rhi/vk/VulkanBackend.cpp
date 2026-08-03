@@ -129,19 +129,19 @@ public:
 	                                           int textureFilter, bool allowMips );
 	virtual ShaderHandle	LoadShader( const char *name );
 
-	// M7 render-target family. Depth targets (projected 2D + point-light cube
-	// shadow maps) are live; the color/color+depth(+stencil) variants that SSAO,
-	// SSR and the HDR frame target need are still deferred stubs (return 0 →
-	// those features stay off on Vulkan until their own slice lands).
+	// M7 render-target family. Live: depth targets (2D + cube shadow maps),
+	// color-only + color+depth-stencil targets (the HDR RGBA16F scene buffer and
+	// its FXAA ping). Still stubbed: color+depth for the SSAO normal G-buffer /
+	// SSR material buffer (return 0 → those features stay off until the SSAO slice).
 	virtual RenderTargetHandle	CreateRenderTarget( ImageFormat fmt, int w, int h );
 	virtual RenderTargetHandle	CreateRenderTargetCube( ImageFormat fmt, int size );
 	virtual RenderTargetHandle	CreateRenderTargetColorDepth( ImageFormat, int, int, int ) { return 0; }
-	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat, int, int ) { return 0; }
+	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h );
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt );
-	virtual void				SetFrameTarget( RenderTargetHandle ) {}
+	virtual void				SetFrameTarget( RenderTargetHandle rt );
 	virtual void				BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear );
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt );
-	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle ) { return 0; }
+	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle rt );
 
 	virtual int		AllocUniforms( const void *data, int size, BufferHandle *buffer );
 	virtual int		AllocVertices( const void *data, int size, BufferHandle *buffer );
@@ -300,6 +300,10 @@ private:
 		// UNDEFINED means never written (first transition discards).
 		VkImageLayout	layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		bool			isDepth = false;				// capture: scene depth format
+		// a color render target (CreateColorTarget) is stored top-down like the
+		// scene, unlike the bottom-up M5 captures — so a fullscreen pass sampling it
+		// with the shared GL quad needs the negative-height flip cancelled (Draw).
+		bool			isColorTarget = false;
 		int				width = 0, height = 0;
 	};
 	std::vector<ImageRec>		imageTable;				// handle = index + 1
@@ -333,7 +337,18 @@ private:
 	VkDescriptorPool			persistentPool = VK_NULL_HANDLE;	// holds the per-slot set-0s
 	VkDescriptorSet				uboSet[FRAMES_IN_FLIGHT] = {};
 	VkDescriptorPool			framePool[FRAMES_IN_FLIGHT] = {};	// per-draw set-1s, reset per frame
-	std::unordered_map<uint64_t, VkDescriptorSet> textureSetCache[FRAMES_IN_FLIGHT];
+	VkDescriptorPool			texturePool = VK_NULL_HANDLE;	// persistent pool for repeated texture combos
+	// Cross-frame texture-set cache, keyed on the referenced ImageHandles. Those
+	// handles are recycled (shadow-map eviction frees + reuses imageTable slots,
+	// RetireImage the same for captures/cinematics), so a set cached in an earlier
+	// frame can end up referencing a VkImageView that was destroyed and its handle
+	// reassigned. InvalidateTextureSets() drops the whole cache whenever any handle
+	// is retired; the sets themselves are deferred-freed a frame slot later (they
+	// may still be bound in in-flight command buffers, same lifetime rule as
+	// retiredImages/retiredTargets), so no live command buffer ever loses its set.
+	std::unordered_map<uint64_t, VkDescriptorSet> textureSetCache;
+	std::vector<VkDescriptorSet> retiredTexSets[FRAMES_IN_FLIGHT];
+	void						InvalidateTextureSets();
 	bool						framePoolWarned = false;
 	ImageHandle					dummyImage = 0;			// 1x1 white for unused sampler slots
 	ImageHandle					dummyCube = 0;			// 1x1 white cube (samplerCube slots)
@@ -373,6 +388,33 @@ private:
 		VkRenderPass	pass = VK_NULL_HANDLE;			// depth clear → shader-read
 		VkFramebuffer	fb[6] = {};						// [0] = 2D; [0..5] = cube faces
 		ImageHandle		sampleImage = 0;				// imageTable handle GetRenderTargetImage returns
+
+		// ---- M7 color targets (HDR scene buffer, later SSAO/SSR) ----
+		// A color target carries 1-2 sampleable color attachments (colorImage[]),
+		// each registered as a SHADER_READ_ONLY ImageRec (colorSampleImage[]), plus
+		// an optional depth(-stencil) attachment. Two usage shapes share the fields:
+		//   * frame target (SetFrameTarget): the whole scene renders into it across
+		//     several BeginPass/EndPass passes, so it needs clear/load/clearDS pass
+		//     variants + everWritten tracking, exactly like the swapchain sceneColor.
+		//   * nested target (BeginTargetPass): one begin→draw→EndPass fullscreen pass,
+		//     served by colorClearPass alone.
+		bool			colorTarget = false;
+		int				colorCount = 0;					// 1 or 2 color attachments
+		VkFormat		colorFormat = VK_FORMAT_UNDEFINED;
+		VkImage			colorImage[2] = {};
+		VmaAllocation	colorAlloc[2] = {};
+		VkImageView		colorView[2] = {};				// attachment + sample view (same view)
+		ImageHandle		colorSampleImage[2] = { 0, 0 };	// handles GetRenderTargetImage / 2 return
+		bool			hasDepth = false;				// depth or depth-stencil attachment present
+		VkImage			dsImage = VK_NULL_HANDLE;
+		VmaAllocation	dsAlloc = NULL;
+		VkImageView		dsView = VK_NULL_HANDLE;
+		VkRenderPass	colorClearPass = VK_NULL_HANDLE;	// clear color(+ds) → shader-read
+		VkRenderPass	colorLoadPass = VK_NULL_HANDLE;		// load color(+ds) → shader-read (frame target only)
+		VkRenderPass	colorClearDSPass = VK_NULL_HANDLE;	// keep color, clear depth-stencil (world-view begin)
+		VkFramebuffer	colorFb = VK_NULL_HANDLE;
+		bool			everWritten = false;			// false until this target's first clear pass this session
+		uint8_t			passClass = 0;					// pipeline-key discriminator (format signature)
 	};
 	std::vector<RenderTarget>	targetTable;			// handle = index + 1
 	VkSampler					shadowCompareSampler = VK_NULL_HANDLE;	// shared LINEAR + LEQUAL compare
@@ -389,11 +431,43 @@ private:
 		return ( h >= 1 && h <= (RenderTargetHandle)targetTable.size() && targetTable[h - 1].live )
 			? &targetTable[h - 1] : NULL;
 	}
+	int				AllocTargetSlot();			// index of a free targetTable slot (grows the table if needed)
 	bool			CreateDepthTarget( RenderTarget &t, int w, int h, bool cube );
+	// color target: colorCount 1-2 sampleable color attachments (colorFmt), plus a
+	// depth-stencil attachment when wantDepthStencil. frameCapable builds the extra
+	// load/clearDS pass variants a SetFrameTarget scene buffer needs (HDR).
+	bool			CreateColorTarget( RenderTarget &t, int w, int h, VkFormat colorFmt,
+	                                   int colorCount, bool wantDepthStencil, bool frameCapable );
+	bool			BuildColorPasses( RenderTarget &t, bool frameCapable );
 	void			FreeTargetObjects( RenderTarget &t );	// frees VK objects only (not the imageTable slot)
+	void			ReleaseTargetSampleSlots( RenderTarget &t );	// frees the imageTable slots a target lent out
+	// shared tail of BeginTargetPass / BeginCubeFacePass: retarget viewport + pipeline pass
+	void			EnterTargetPass( int w, int h, bool flipY, VkRenderPass pipePass, uint8_t passClass, int colorAtt );
 	void			DrainRetiredTargets( int slot );
 	void			DestroyAllTargets();
 	VkSampler		ShadowCompareSampler();
+	// classify a color target's format signature into the pipeline-key pass class,
+	// so scene pipelines built for the RGBA8 swapchain path and the RGBA16F HDR
+	// path stay distinct cache entries (render-pass-incompatible attachment formats)
+	uint8_t			PassClassFor( VkFormat colorFmt, bool hasDepth, int colorCount ) const;
+
+	// SetFrameTarget: 0 = the swapchain sceneColor path (default); otherwise the
+	// scene renders into this color target (the HDR RGBA16F scene buffer). BeginPass
+	// and the shadow/AA nested passes' EndPass resume route through it.
+	RenderTargetHandle			frameTarget = 0;
+	// render pass + key-class the next pipeline is built for. Updated whenever the
+	// active draw destination changes (scene target, frame target, nested target).
+	VkRenderPass				curPipelinePass = VK_NULL_HANDLE;	// canonical pass to build against
+	uint8_t						curPassClass = 0;
+	int							curColorAtt = 1;	// color attachments of the active pass (0 = depth-only shadow, 2 = MRT)
+	bool						lastEffFlipY = true;	// effective Y-flip last applied to the viewport (post passes cancel it)
+	// the color/depth images the current frame target resolves to, for the M5
+	// _currentRender / _currentDepth captures (sceneColor by default, the HDR
+	// buffer while a frame target is set). Layout differs: sceneColor sits in
+	// TRANSFER_SRC between passes, a sampled color target in SHADER_READ_ONLY.
+	VkImage			FrameColorImage() const;
+	VkImageLayout	FrameColorBetweenLayout() const;
+	VkImage			FrameDepthImage() const;
 
 	// device features actually enabled (queried before device creation)
 	bool						haveAnisotropy = false;
@@ -1464,6 +1538,13 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	DrainRetiredRings( frameIndex );	// buffers replaced by GrowRing last time this slot ran
 	DrainRetiredImages( frameIndex );	// capture/cinematic images replaced by RetireImage
 	DrainRetiredTargets( frameIndex );	// shadow-map targets evicted by the shadow caches
+	if ( texturePool && !retiredTexSets[frameIndex].empty() ) {
+		// texture sets invalidated ~FRAMES_IN_FLIGHT frames ago: this slot's fence
+		// has passed, so nothing in flight still references them — free for reuse
+		vkFreeDescriptorSets( device, texturePool, (uint32_t)retiredTexSets[frameIndex].size(),
+			retiredTexSets[frameIndex].data() );
+		retiredTexSets[frameIndex].clear();
+	}
 	uboRing[frameIndex].offset = 0;
 	vertRing[frameIndex].offset = 0;
 	idxRing[frameIndex].offset = 0;
@@ -1472,7 +1553,6 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	if ( framePool[frameIndex] ) {
 		vkResetDescriptorPool( device, framePool[frameIndex], 0 );
 	}
-	textureSetCache[frameIndex].clear();
 	boundPipeline = VK_NULL_HANDLE;
 	boundTexKey = 0;
 	boundTexSet = VK_NULL_HANDLE;
@@ -1492,6 +1572,10 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	insideTargetPass = false;
 	curRenderH = (int)swapExtent.height;	// scene extent; target passes override
 	curFlipY = true;
+	frameTarget = 0;						// SetFrameTarget re-routes each HDR frame from scratch
+	curPipelinePass = passClear;
+	curPassClass = 0;
+	curColorAtt = 1;
 }
 
 /*
@@ -1506,33 +1590,60 @@ void VulkanBackend::BeginPass( const ClearArgs *clear ) {
 	if ( !frameOpen || skipFrame || insideScenePass ) {
 		return;
 	}
+	// the scene renders into the swapchain sceneColor by default, or into the
+	// active frame target (the HDR RGBA16F buffer) when SetFrameTarget set one.
+	RenderTarget *ft = ( frameTarget != 0 ) ? LookupTarget( frameTarget ) : NULL;
+	if ( frameTarget != 0 && ( ft == NULL || !ft->colorTarget ) ) {
+		ft = NULL;			// stale/invalid handle → fall back to sceneColor
+	}
+	bool &everWritten = ft ? ft->everWritten : sceneEverWritten;
+
 	// pick the pass variant by which channels the caller wants cleared: a
 	// depth/stencil-only clear (world-view begin) must keep the frame's color
-	const bool wantColorClear = ( clear != NULL && clear->color ) || !sceneEverWritten;
-	const bool wantDsClear = ( clear != NULL && ( clear->depth || clear->stencil ) ) || !sceneEverWritten;
+	const bool wantColorClear = ( clear != NULL && clear->color ) || !everWritten;
+	const bool wantDsClear = ( clear != NULL && ( clear->depth || clear->stencil ) ) || !everWritten;
 
-	VkClearValue cv[2] = {};
+	VkClearValue cv[3] = {};
+	const int nColor = ft ? ft->colorCount : 1;
+	const bool hasDS = ft ? ft->hasDepth : true;	// sceneColor always carries depth-stencil
 	if ( clear != NULL && clear->color ) {
-		cv[0].color.float32[0] = clear->rgba[0];
-		cv[0].color.float32[1] = clear->rgba[1];
-		cv[0].color.float32[2] = clear->rgba[2];
-		cv[0].color.float32[3] = clear->rgba[3];
+		for ( int c = 0; c < nColor; c++ ) {
+			cv[c].color.float32[0] = clear->rgba[0];
+			cv[c].color.float32[1] = clear->rgba[1];
+			cv[c].color.float32[2] = clear->rgba[2];
+			cv[c].color.float32[3] = clear->rgba[3];
+		}
 	}
-	cv[1].depthStencil.depth = 1.0f;
-	cv[1].depthStencil.stencil = clear != NULL ? clear->stencilValue : 0;
+	if ( hasDS ) {
+		cv[nColor].depthStencil.depth = 1.0f;
+		cv[nColor].depthStencil.stencil = clear != NULL ? clear->stencilValue : 0;
+	}
+
+	// a frame target without the load/clearDS variants (a color-only target used
+	// as a frame target — the frontend doesn't, but stay robust) falls back to clear
+	VkRenderPass rpClear = ft ? ft->colorClearPass   : passClear;
+	VkRenderPass rpLoad  = ( ft ? ft->colorLoadPass    : passLoad )    ? ( ft ? ft->colorLoadPass : passLoad ) : rpClear;
+	VkRenderPass rpClrDS = ( ft ? ft->colorClearDSPass : passClearDS ) ? ( ft ? ft->colorClearDSPass : passClearDS ) : rpClear;
 
 	VkRenderPassBeginInfo rbi = {};
 	rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	rbi.renderPass = wantColorClear ? passClear : ( wantDsClear ? passClearDS : passLoad );
-	rbi.framebuffer = sceneFb;
-	rbi.renderArea.extent = sceneExtent;
-	rbi.clearValueCount = 2;
+	rbi.renderPass = wantColorClear ? rpClear : ( wantDsClear ? rpClrDS : rpLoad );
+	rbi.framebuffer = ft ? ft->colorFb : sceneFb;
+	rbi.renderArea.extent = ft ? VkExtent2D{ (uint32_t)ft->w, (uint32_t)ft->h } : sceneExtent;
+	rbi.clearValueCount = (uint32_t)( nColor + ( hasDS ? 1 : 0 ) );
 	rbi.pClearValues = cv;
 	vkCmdBeginRenderPass( frames[frameIndex].cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
 
+	// the pipelines drawn in this pass target its render pass / format class
+	curRenderH = ft ? ft->h : (int)sceneExtent.height;
+	curFlipY = true;
+	curPipelinePass = rpClear;
+	curPassClass = ft ? ft->passClass : 0;
+	curColorAtt = nColor;
+
 	insideScenePass = true;
 	sceneWritten = true;
-	sceneEverWritten = true;
+	everWritten = true;
 }
 
 /*
@@ -1542,12 +1653,24 @@ VulkanBackend::EndPass
 */
 void VulkanBackend::EndPass() {
 	if ( insideTargetPass ) {
-		// close the offscreen shadow-map pass. The scene pass resumes on the
-		// next Draw (EnsureScenePass → load variant); restore the scene viewport
-		// the target pass interrupted, exactly like GL3's savedViewport restore.
+		// close the offscreen nested pass (shadow map / AA ping). The scene pass
+		// resumes on the next Draw (EnsureScenePass → load variant) against the
+		// frame target it interrupted; restore that destination's viewport class,
+		// exactly like GL3's savedViewport restore.
 		vkCmdEndRenderPass( frames[frameIndex].cb );
 		insideTargetPass = false;
-		curRenderH = (int)sceneExtent.height;
+		RenderTarget *ft = ( frameTarget != 0 ) ? LookupTarget( frameTarget ) : NULL;
+		if ( ft && ft->colorTarget ) {
+			curRenderH = ft->h;
+			curPipelinePass = ft->colorClearPass;
+			curPassClass = ft->passClass;
+			curColorAtt = ft->colorCount;
+		} else {
+			curRenderH = (int)sceneExtent.height;
+			curPipelinePass = passClear;
+			curPassClass = 0;
+			curColorAtt = 1;
+		}
 		curFlipY = true;
 		memcpy( vpRect, savedVpRect, sizeof( vpRect ) );
 		memcpy( scRect, savedScRect, sizeof( scRect ) );
@@ -1865,7 +1988,23 @@ bool VulkanBackend::CreateM2Resources() {
 			vkUpdateDescriptorSets( device, 1, &w, 0, NULL );
 		}
 	}
-	// per-frame texture-set pools (reset wholesale each BeginFrame)
+	// persistent texture-set pool: reuse the same descriptor sets across frames
+	// for repeated texture combinations, which is the common case and avoids
+	// the per-frame allocation churn that otherwise stresses the pool.
+	{
+		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * 11 * 4 };
+		VkDescriptorPoolCreateInfo pci = {};
+		pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		pci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+		pci.maxSets = MAX_FRAME_SETS * 4;
+		pci.poolSizeCount = 1;
+		pci.pPoolSizes = &ps;
+		if ( !vkCheck( vkCreateDescriptorPool( device, &pci, NULL, &texturePool ), "vkCreateDescriptorPool(texture)" ) ) {
+			return false;
+		}
+	}
+	// per-frame texture-set pools (reset wholesale each BeginFrame) for fallback
+	// allocations if the persistent pool is exhausted.
 	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) {
 		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * 11 };
 		VkDescriptorPoolCreateInfo pci = {};
@@ -1972,6 +2111,11 @@ void VulkanBackend::DestroyM2Resources() {
 		if ( framePool[i] ) { vkDestroyDescriptorPool( device, framePool[i], NULL ); framePool[i] = VK_NULL_HANDLE; }
 		uboSet[i] = VK_NULL_HANDLE;
 	}
+	textureSetCache.clear();
+	// device is idle here; destroying the pool frees every set, so the pending
+	// retire lists just need their now-dangling handles dropped
+	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) { retiredTexSets[i].clear(); }
+	if ( texturePool ) { vkDestroyDescriptorPool( device, texturePool, NULL ); texturePool = VK_NULL_HANDLE; }
 	if ( persistentPool ) { vkDestroyDescriptorPool( device, persistentPool, NULL ); persistentPool = VK_NULL_HANDLE; }
 	if ( pipeLayout )     { vkDestroyPipelineLayout( device, pipeLayout, NULL ); pipeLayout = VK_NULL_HANDLE; }
 	if ( setLayoutUbo )   { vkDestroyDescriptorSetLayout( device, setLayoutUbo, NULL ); setLayoutUbo = VK_NULL_HANDLE; }
@@ -2449,6 +2593,7 @@ void VulkanBackend::RetireImage( ImageHandle h ) {
 	ImageRec &rec = imageTable[h - 1];
 	retiredImages[frameIndex].push_back( { rec.image, rec.alloc, rec.view } );
 	rec = ImageRec();
+	InvalidateTextureSets();	// handle h is now free for reuse; cached sets referencing it are stale
 }
 
 void VulkanBackend::DrainRetiredImages( int slot ) {
@@ -2458,6 +2603,34 @@ void VulkanBackend::DrainRetiredImages( int slot ) {
 		if ( r.image ) { vmaDestroyImage( vma, r.image, r.alloc ); }
 	}
 	retiredImages[slot].clear();
+}
+
+/*
+====================
+VulkanBackend::InvalidateTextureSets
+
+Drop the whole cross-frame texture-set cache. Called whenever an ImageHandle is
+retired (RetireImage) or a render target is destroyed (DestroyRenderTarget) —
+either recycles an imageTable slot, so any cached set that references it is now
+stale. The sets can't be freed here (this runs mid-frame; they may still be
+bound in this and the other in-flight command buffers), so they are queued on
+this slot's retire list and freed once its fence has passed, in BeginFrame.
+
+Coarse but correct, and never worse than the shipped baseline (which rebuilt
+every set every frame): on frames with no retirement the cache survives intact.
+====================
+*/
+void VulkanBackend::InvalidateTextureSets() {
+	if ( textureSetCache.empty() ) {
+		return;
+	}
+	for ( auto &kv : textureSetCache ) {
+		retiredTexSets[frameIndex].push_back( kv.second );
+	}
+	textureSetCache.clear();
+	// a retired set may be the one the last-bound fast path is holding; drop it
+	boundTexKey = 0;
+	boundTexSet = VK_NULL_HANDLE;
 }
 
 /*
@@ -2602,8 +2775,28 @@ void VulkanBackend::CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst );
 
 	if ( !depth ) {
-		// scene color sits in TRANSFER_SRC_OPTIMAL between passes; flip while
-		// blitting (reversed src y corners) to reach GL's bottom-up layout
+		// source = the active frame color (sceneColor, or the HDR buffer when a
+		// frame target is set). sceneColor rests in TRANSFER_SRC between passes; a
+		// sampled color target rests in SHADER_READ_ONLY, so round-trip it here.
+		VkImage       srcImg = FrameColorImage();
+		VkImageLayout between = FrameColorBetweenLayout();
+		const bool    needRT = ( between != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL );
+		if ( needRT ) {
+			VkImageMemoryBarrier b = {};
+			b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+			b.oldLayout = between;
+			b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+			b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			b.image = srcImg;
+			b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			b.subresourceRange.levelCount = 1;
+			b.subresourceRange.layerCount = 1;
+			vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+				0, 0, NULL, 0, NULL, 1, &b );
+		}
+		// flip while blitting (reversed src y corners) to reach GL's bottom-up layout
 		VkImageBlit blit = {};
 		blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		blit.srcSubresource.layerCount = 1;
@@ -2612,11 +2805,28 @@ void VulkanBackend::CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 		blit.dstSubresource = blit.srcSubresource;
 		blit.dstOffsets[0] = { dstX, dstY, 0 };
 		blit.dstOffsets[1] = { dstX + w, dstY + h, 1 };
-		vkCmdBlitImage( cb, sceneColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		vkCmdBlitImage( cb, srcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 			rec.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST );
+		if ( needRT ) {
+			VkImageMemoryBarrier b = {};
+			b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+			b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+			b.newLayout = between;
+			b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			b.image = srcImg;
+			b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			b.subresourceRange.levelCount = 1;
+			b.subresourceRange.layerCount = 1;
+			vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0, 0, NULL, 0, NULL, 1, &b );
+		}
 	} else {
-		// scene depth stays DEPTH_STENCIL_ATTACHMENT_OPTIMAL between passes;
-		// round-trip it through TRANSFER_SRC for the copy
+		// depth (sceneDepth, or the HDR buffer's depth-stencil when a frame target
+		// is set) stays DEPTH_STENCIL_ATTACHMENT_OPTIMAL between passes; round-trip
+		// it through TRANSFER_SRC for the copy
+		VkImage srcDepth = FrameDepthImage();
 		VkImageMemoryBarrier srcBar = {};
 		srcBar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		srcBar.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
@@ -2625,7 +2835,7 @@ void VulkanBackend::CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 		srcBar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 		srcBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		srcBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		srcBar.image = sceneDepth;
+		srcBar.image = srcDepth;
 		srcBar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
 		srcBar.subresourceRange.levelCount = 1;
 		srcBar.subresourceRange.layerCount = 1;
@@ -2639,7 +2849,7 @@ void VulkanBackend::CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 		c.dstSubresource = c.srcSubresource;
 		c.dstOffset = { dstX, dstY, 0 };
 		c.extent = { (uint32_t)w, (uint32_t)h, 1 };
-		vkCmdCopyImage( cb, sceneDepth, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		vkCmdCopyImage( cb, srcDepth, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 			rec.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c );
 
 		VkImageMemoryBarrier srcBack = srcBar;
@@ -3295,21 +3505,25 @@ RenderTargetHandle VulkanBackend::CreateRenderTarget( ImageFormat fmt, int w, in
 	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
 		return 0;
 	}
-	// only the depth (shadow-map) target is live; the RGBA8/RGBA16F color targets
-	// SSAO/SSR/post use arrive with their own slice (those features are still
-	// !vkMode-gated in the frontend, so this path isn't reached yet — return 0)
-	if ( fmt != IF_DEPTH24 ) {
+	// IF_DEPTH24 = a 2D shadow map (depth-only). IF_RGBA16F/IF_RGBA8 = a color-only
+	// target sampled as an ordinary texture: the HDR FXAA ping, and later the SSR
+	// march/history buffers. IF_DEPTH24_STENCIL8 (SSAO color+depth) still stubbed.
+	if ( fmt == IF_DEPTH24 ) {
+		int slot = AllocTargetSlot();
+		if ( !CreateDepthTarget( targetTable[slot], w, h, false ) ) {
+			targetTable[slot] = RenderTarget();
+			return 0;
+		}
+		return (RenderTargetHandle)( slot + 1 );
+	}
+	VkFormat cf = ( fmt == IF_RGBA16F ) ? VK_FORMAT_R16G16B16A16_SFLOAT
+	            : ( fmt == IF_RGBA8 ) ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_UNDEFINED;
+	if ( cf == VK_FORMAT_UNDEFINED ) {
 		return 0;
 	}
-	int slot = -1;
-	for ( size_t i = 0; i < targetTable.size(); i++ ) {
-		if ( !targetTable[i].live ) { slot = (int)i; break; }
-	}
-	if ( slot < 0 ) {
-		targetTable.push_back( RenderTarget() );
-		slot = (int)targetTable.size() - 1;
-	}
-	if ( !CreateDepthTarget( targetTable[slot], w, h, false ) ) {
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, cf, 1, /*ds*/false, /*frameCapable*/false ) ) {
+		targetTable[slot] = RenderTarget();
 		return 0;
 	}
 	return (RenderTargetHandle)( slot + 1 );
@@ -3338,11 +3552,36 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetCube( ImageFormat fmt, int s
 
 ImageHandle VulkanBackend::GetRenderTargetImage( RenderTargetHandle rt ) {
 	RenderTarget *t = LookupTarget( rt );
-	return t ? t->sampleImage : 0;
+	if ( t == NULL ) {
+		return 0;
+	}
+	return t->colorTarget ? t->colorSampleImage[0] : t->sampleImage;
 }
 
-// begin an offscreen pass into a target (fbIndex 0 = 2D map, 0..5 = cube face).
-// Suspends the scene pass; the scene resumes on the next Draw's EnsureScenePass.
+// stash the interrupted scene viewport, point the dynamic viewport/scissor at
+// the target, and mark the target pass open. Shared tail of every BeginTargetPass
+// / BeginCubeFacePass. flipY: shadow maps render un-flipped (projective read/write
+// self-consistency); color targets render flipped like the scene (their fullscreen
+// resolve samples them 1:1 back onto sceneColor).
+void VulkanBackend::EnterTargetPass( int w, int h, bool flipY, VkRenderPass pipePass,
+                                     uint8_t passClass, int colorAtt ) {
+	memcpy( savedVpRect, vpRect, sizeof( vpRect ) );
+	memcpy( savedScRect, scRect, sizeof( scRect ) );
+	vpRect[0] = 0; vpRect[1] = 0; vpRect[2] = w; vpRect[3] = h;
+	scRect[0] = 0; scRect[1] = 0; scRect[2] = w; scRect[3] = h;
+	curRenderH = h;
+	curFlipY = flipY;
+	curPipelinePass = pipePass;
+	curPassClass = passClass;
+	curColorAtt = colorAtt;
+	insideTargetPass = true;
+	dynStateDirty = true;
+}
+
+// begin an offscreen pass into a target. 2D depth (shadow map) and color (the HDR
+// FXAA ping, later SSAO/SSR fullscreen buffers) both route here; cube depth faces
+// go through BeginCubeFacePass. Suspends the scene pass; the scene resumes on the
+// next Draw's EnsureScenePass (or this target's EndPass).
 void VulkanBackend::BeginTargetPass( RenderTargetHandle rt, const ClearArgs *clear ) {
 	if ( !frameOpen || skipFrame ) {
 		return;
@@ -3357,25 +3596,38 @@ void VulkanBackend::BeginTargetPass( RenderTargetHandle rt, const ClearArgs *cle
 		vkCmdEndRenderPass( cb );				// suspend the scene pass
 		insideScenePass = false;
 	}
-	VkClearValue cv = {};
-	cv.depthStencil.depth = 1.0f;
+
 	VkRenderPassBeginInfo rbi = {};
 	rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	rbi.renderPass = shadowPass;
-	rbi.framebuffer = t->fb[0];
 	rbi.renderArea.extent = { (uint32_t)t->w, (uint32_t)t->h };
-	rbi.clearValueCount = 1;
-	rbi.pClearValues = &cv;
-	vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
 
-	memcpy( savedVpRect, vpRect, sizeof( vpRect ) );
-	memcpy( savedScRect, scRect, sizeof( scRect ) );
-	vpRect[0] = 0; vpRect[1] = 0; vpRect[2] = t->w; vpRect[3] = t->h;
-	scRect[0] = 0; scRect[1] = 0; scRect[2] = t->w; scRect[3] = t->h;
-	curRenderH = t->h;
-	curFlipY = false;
-	insideTargetPass = true;
-	dynStateDirty = true;
+	if ( t->colorTarget ) {
+		// clear each color attachment (fullscreen draws overwrite it anyway) + ds
+		VkClearValue cv[3] = {};
+		if ( clear != NULL && clear->color ) {
+			for ( int c = 0; c < t->colorCount; c++ ) {
+				cv[c].color.float32[0] = clear->rgba[0]; cv[c].color.float32[1] = clear->rgba[1];
+				cv[c].color.float32[2] = clear->rgba[2]; cv[c].color.float32[3] = clear->rgba[3];
+			}
+		}
+		if ( t->hasDepth ) { cv[t->colorCount].depthStencil.depth = 1.0f; }
+		rbi.renderPass = t->colorClearPass;
+		rbi.framebuffer = t->colorFb;
+		rbi.clearValueCount = (uint32_t)( t->colorCount + ( t->hasDepth ? 1 : 0 ) );
+		rbi.pClearValues = cv;
+		vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
+		EnterTargetPass( t->w, t->h, /*flipY*/true, t->colorClearPass, t->passClass, t->colorCount );
+		t->everWritten = true;
+	} else {
+		VkClearValue cv = {};
+		cv.depthStencil.depth = 1.0f;
+		rbi.renderPass = shadowPass;
+		rbi.framebuffer = t->fb[0];
+		rbi.clearValueCount = 1;
+		rbi.pClearValues = &cv;
+		vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
+		EnterTargetPass( t->w, t->h, /*flipY*/false, shadowPass, /*PC_SHADOW*/1, /*colorAtt*/0 );
+	}
 }
 
 void VulkanBackend::BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear ) {
@@ -3403,14 +3655,7 @@ void VulkanBackend::BeginCubeFacePass( RenderTargetHandle rt, int face, const Cl
 	rbi.pClearValues = &cv;
 	vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
 
-	memcpy( savedVpRect, vpRect, sizeof( vpRect ) );
-	memcpy( savedScRect, scRect, sizeof( scRect ) );
-	vpRect[0] = 0; vpRect[1] = 0; vpRect[2] = t->w; vpRect[3] = t->h;
-	scRect[0] = 0; scRect[1] = 0; scRect[2] = t->w; scRect[3] = t->h;
-	curRenderH = t->h;
-	curFlipY = false;
-	insideTargetPass = true;
-	dynStateDirty = true;
+	EnterTargetPass( t->w, t->h, /*flipY*/false, shadowPass, /*PC_SHADOW*/1, /*colorAtt*/0 );
 }
 
 // free a target's Vulkan objects (framebuffers, views, image). Never touches
@@ -3425,6 +3670,32 @@ void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
 	}
 	if ( t.sampleView )      { vkDestroyImageView( device, t.sampleView, NULL ); t.sampleView = VK_NULL_HANDLE; }
 	if ( t.depthImage )      { vmaDestroyImage( vma, t.depthImage, t.depthAlloc ); t.depthImage = VK_NULL_HANDLE; t.depthAlloc = NULL; }
+
+	// color-target resources
+	if ( t.colorFb )         { vkDestroyFramebuffer( device, t.colorFb, NULL ); t.colorFb = VK_NULL_HANDLE; }
+	if ( t.colorClearPass )  { vkDestroyRenderPass( device, t.colorClearPass, NULL ); t.colorClearPass = VK_NULL_HANDLE; }
+	if ( t.colorLoadPass )   { vkDestroyRenderPass( device, t.colorLoadPass, NULL ); t.colorLoadPass = VK_NULL_HANDLE; }
+	if ( t.colorClearDSPass ){ vkDestroyRenderPass( device, t.colorClearDSPass, NULL ); t.colorClearDSPass = VK_NULL_HANDLE; }
+	for ( int c = 0; c < 2; c++ ) {
+		if ( t.colorView[c] )  { vkDestroyImageView( device, t.colorView[c], NULL ); t.colorView[c] = VK_NULL_HANDLE; }
+		if ( t.colorImage[c] ) { vmaDestroyImage( vma, t.colorImage[c], t.colorAlloc[c] ); t.colorImage[c] = VK_NULL_HANDLE; t.colorAlloc[c] = NULL; }
+	}
+	if ( t.dsView )          { vkDestroyImageView( device, t.dsView, NULL ); t.dsView = VK_NULL_HANDLE; }
+	if ( t.dsImage )         { vmaDestroyImage( vma, t.dsImage, t.dsAlloc ); t.dsImage = VK_NULL_HANDLE; t.dsAlloc = NULL; }
+}
+
+// free every imageTable slot a target lent out (depth sample + color samples)
+void VulkanBackend::ReleaseTargetSampleSlots( RenderTarget &t ) {
+	ImageHandle handles[3] = { t.sampleImage, t.colorSampleImage[0], t.colorSampleImage[1] };
+	for ( int i = 0; i < 3; i++ ) {
+		ImageHandle h = handles[i];
+		if ( h >= 1 && h <= (ImageHandle)imageTable.size() ) {
+			imageTable[h - 1] = ImageRec();
+			imageTable[h - 1].live = false;
+		}
+	}
+	t.sampleImage = 0;
+	t.colorSampleImage[0] = t.colorSampleImage[1] = 0;
 }
 
 void VulkanBackend::DestroyRenderTarget( RenderTargetHandle rt ) {
@@ -3432,16 +3703,13 @@ void VulkanBackend::DestroyRenderTarget( RenderTargetHandle rt ) {
 	if ( t == NULL ) {
 		return;
 	}
-	// stop new draws from sampling it immediately (the ImageRec slot is freed
+	// stop new draws from sampling it immediately (the ImageRec slots are freed
 	// for reuse), but defer the Vulkan-object destruction until this frame
 	// slot's GPU work is fenced off — the shadow caches evict mid-frame.
-	if ( t->sampleImage >= 1 && t->sampleImage <= (ImageHandle)imageTable.size() ) {
-		imageTable[t->sampleImage - 1] = ImageRec();
-		imageTable[t->sampleImage - 1].live = false;
-	}
-	t->sampleImage = 0;
+	ReleaseTargetSampleSlots( *t );
 	retiredTargets[frameIndex].push_back( *t );
 	*t = RenderTarget();		// free the target-table slot
+	InvalidateTextureSets();	// a freed sample handle may be cached in a texture set (shadow unit 7/8, HDR unit 0)
 }
 
 void VulkanBackend::DrainRetiredTargets( int slot ) {
@@ -3462,16 +3730,354 @@ void VulkanBackend::DestroyAllTargets() {
 		if ( !t.live ) {
 			continue;
 		}
-		if ( t.sampleImage >= 1 && t.sampleImage <= (ImageHandle)imageTable.size() ) {
-			imageTable[t.sampleImage - 1] = ImageRec();
-			imageTable[t.sampleImage - 1].live = false;
-		}
+		ReleaseTargetSampleSlots( t );
 		FreeTargetObjects( t );
 		t = RenderTarget();
 	}
 	targetTable.clear();
 	if ( shadowPass )           { vkDestroyRenderPass( device, shadowPass, NULL ); shadowPass = VK_NULL_HANDLE; }
 	if ( shadowCompareSampler ) { vkDestroySampler( device, shadowCompareSampler, NULL ); shadowCompareSampler = VK_NULL_HANDLE; }
+}
+
+/*
+===============================================================================
+
+	M7 color render targets — HDR scene buffer (docs/hdr-pipeline.md, r_hdr)
+
+	A color target carries 1-2 sampleable color attachments (+ optional depth-
+	stencil) and, unlike the depth shadow maps, is *sampled* as an ordinary
+	texture after being rendered into. Its render passes therefore end the color
+	attachment in SHADER_READ_ONLY so the descriptor path (which assumes that
+	layout) binds it with no special case; the load-pass initialLayout is the same
+	SHADER_READ_ONLY, so the between-pass round-trip is render-pass-managed.
+
+	The HDR scene buffer is a *frame* target (SetFrameTarget): the whole scene
+	renders into an RGBA16F color + depth-stencil target across the usual
+	clear / clearDS / load pass sequence, then hdrresolve.frag samples it back
+	onto the swapchain sceneColor. Colour is float, so fog/gradient banding is
+	gone; matches the GL3 path exactly.
+
+===============================================================================
+*/
+
+// format signature -> pipeline-key pass class. Scene pipelines rendered into the
+// RGBA8 swapchain path (class 0) and the RGBA16F HDR buffer (class 2) are render-
+// pass-incompatible (different color format), so they must be distinct cache keys.
+uint8_t VulkanBackend::PassClassFor( VkFormat colorFmt, bool hasDepth, int colorCount ) const {
+	if ( colorFmt == VK_FORMAT_R16G16B16A16_SFLOAT ) {
+		return hasDepth ? 2 : 3;			// HDR scene buffer / RGBA16F color-only (AA ping, SSR)
+	}
+	// RGBA8 family (SSAO buffers later)
+	if ( !hasDepth )      { return 4; }		// color-only RGBA8
+	return colorCount >= 2 ? 6 : 5;			// color+depth (+MRT)
+}
+
+// The per-target render passes. colorClearPass always; the load/clearDS variants
+// only for a frame target (a nested one-shot target never re-loads its content).
+bool VulkanBackend::BuildColorPasses( RenderTarget &t, bool frameCapable ) {
+	const int nColor = t.colorCount;
+	const int variants = frameCapable ? 3 : 1;		// 0=clear, 1=load, 2=clearDS
+	for ( int v = 0; v < variants; v++ ) {
+		const bool clearColor = ( v == 0 );			// clear resets color; load/clearDS keep it
+		const bool clearDS    = ( v == 0 || v == 2 );
+
+		VkAttachmentDescription atts[3] = {};
+		VkAttachmentReference   colorRefs[2] = {};
+		for ( int c = 0; c < nColor; c++ ) {
+			atts[c].format = t.colorFormat;
+			atts[c].samples = VK_SAMPLE_COUNT_1_BIT;
+			atts[c].loadOp = clearColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+			atts[c].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			atts[c].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			atts[c].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			atts[c].initialLayout = clearColor ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			atts[c].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			colorRefs[c].attachment = (uint32_t)c;
+			colorRefs[c].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		}
+		VkAttachmentReference depthRef = { (uint32_t)nColor, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+		if ( t.hasDepth ) {
+			VkAttachmentDescription &d = atts[nColor];
+			d.format = sceneDepthFormat;
+			d.samples = VK_SAMPLE_COUNT_1_BIT;
+			d.loadOp = clearDS ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+			d.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			d.stencilLoadOp = clearDS ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+			d.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+			d.initialLayout = clearDS ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+			d.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		}
+
+		VkSubpassDescription sub = {};
+		sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		sub.colorAttachmentCount = (uint32_t)nColor;
+		sub.pColorAttachments = colorRefs;
+		sub.pDepthStencilAttachment = t.hasDepth ? &depthRef : NULL;
+
+		// prior sample of this target (last pass / last frame) must finish before we
+		// overwrite it; our writes must be visible to whoever samples it next
+		VkSubpassDependency deps[2] = {};
+		deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+		deps[0].dstSubpass = 0;
+		deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+		                     | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+		deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+		                     | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+		deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+		                      | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+		deps[1].srcSubpass = 0;
+		deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+		deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+		deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+
+		VkRenderPassCreateInfo rpi = {};
+		rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		rpi.attachmentCount = (uint32_t)( nColor + ( t.hasDepth ? 1 : 0 ) );
+		rpi.pAttachments = atts;
+		rpi.subpassCount = 1;
+		rpi.pSubpasses = &sub;
+		rpi.dependencyCount = 2;
+		rpi.pDependencies = deps;
+
+		VkRenderPass *dst = ( v == 0 ) ? &t.colorClearPass : ( v == 1 ? &t.colorLoadPass : &t.colorClearDSPass );
+		if ( !vkCheck( vkCreateRenderPass( device, &rpi, NULL, dst ), "vkCreateRenderPass(color target)" ) ) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat colorFmt,
+                                       int colorCount, bool wantDepthStencil, bool frameCapable ) {
+	if ( device == VK_NULL_HANDLE || colorCount < 1 || colorCount > 2 ) {
+		return false;
+	}
+	if ( wantDepthStencil && sceneDepthFormat == VK_FORMAT_UNDEFINED ) {
+		return false;
+	}
+	t.colorTarget = true;
+	t.colorCount = colorCount;
+	t.colorFormat = colorFmt;
+	t.hasDepth = wantDepthStencil;
+	t.w = w;
+	t.h = h;
+	t.passClass = PassClassFor( colorFmt, wantDepthStencil, colorCount );
+
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+
+	for ( int c = 0; c < colorCount; c++ ) {
+		VkImageCreateInfo ici = {};
+		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		ici.imageType = VK_IMAGE_TYPE_2D;
+		ici.format = colorFmt;
+		ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+		ici.mipLevels = 1;
+		ici.arrayLayers = 1;
+		ici.samples = VK_SAMPLE_COUNT_1_BIT;
+		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+		// SAMPLED: read back by the resolve/next feature; TRANSFER_SRC: the M5
+		// _currentRender capture blits from it while this is the frame target
+		ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+		          | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &t.colorImage[c], &t.colorAlloc[c], NULL ),
+		               "vmaCreateImage(color target)" ) ) {
+			FreeTargetObjects( t );
+			return false;
+		}
+		VkImageViewCreateInfo vwi = {};
+		vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		vwi.image = t.colorImage[c];
+		vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		vwi.format = colorFmt;
+		vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		vwi.subresourceRange.levelCount = 1;
+		vwi.subresourceRange.layerCount = 1;
+		if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &t.colorView[c] ), "vkCreateImageView(color target)" ) ) {
+			FreeTargetObjects( t );
+			return false;
+		}
+	}
+
+	if ( wantDepthStencil ) {
+		VkImageCreateInfo ici = {};
+		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		ici.imageType = VK_IMAGE_TYPE_2D;
+		ici.format = sceneDepthFormat;
+		ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+		ici.mipLevels = 1;
+		ici.arrayLayers = 1;
+		ici.samples = VK_SAMPLE_COUNT_1_BIT;
+		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+		ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &t.dsImage, &t.dsAlloc, NULL ), "vmaCreateImage(target ds)" ) ) {
+			FreeTargetObjects( t );
+			return false;
+		}
+		VkImageViewCreateInfo vwi = {};
+		vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		vwi.image = t.dsImage;
+		vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		vwi.format = sceneDepthFormat;
+		vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+		vwi.subresourceRange.levelCount = 1;
+		vwi.subresourceRange.layerCount = 1;
+		if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &t.dsView ), "vkCreateImageView(target ds)" ) ) {
+			FreeTargetObjects( t );
+			return false;
+		}
+	}
+
+	if ( !BuildColorPasses( t, frameCapable ) ) {
+		FreeTargetObjects( t );
+		return false;
+	}
+
+	VkImageView views[3] = {};
+	int nv = 0;
+	for ( int c = 0; c < colorCount; c++ ) { views[nv++] = t.colorView[c]; }
+	if ( wantDepthStencil ) { views[nv++] = t.dsView; }
+	VkFramebufferCreateInfo fbi = {};
+	fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+	fbi.renderPass = t.colorClearPass;		// compatible with the load/clearDS variants
+	fbi.attachmentCount = (uint32_t)nv;
+	fbi.pAttachments = views;
+	fbi.width = (uint32_t)w;
+	fbi.height = (uint32_t)h;
+	fbi.layers = 1;
+	if ( !vkCheck( vkCreateFramebuffer( device, &fbi, NULL, &t.colorFb ), "vkCreateFramebuffer(color target)" ) ) {
+		FreeTargetObjects( t );
+		return false;
+	}
+
+	// register each color attachment as a sampleable ImageRec (SHADER_READ_ONLY,
+	// linear/clamp — the resolve samples 1:1). Views/images owned by the target.
+	for ( int c = 0; c < colorCount; c++ ) {
+		ImageRec rec;
+		rec.image = t.colorImage[c];
+		rec.alloc = NULL;
+		rec.view = t.colorView[c];
+		rec.sampler = GetSampler( TF_LINEAR, TR_CLAMP, false );
+		rec.live = true;
+		rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		rec.isDepth = false;
+		rec.isColorTarget = true;
+		rec.width = w;
+		rec.height = h;
+		ImageHandle handle = 0;
+		for ( size_t i = 0; i < imageTable.size(); i++ ) {
+			if ( !imageTable[i].live ) { imageTable[i] = rec; handle = (ImageHandle)( i + 1 ); break; }
+		}
+		if ( handle == 0 ) {
+			imageTable.push_back( rec );
+			handle = (ImageHandle)imageTable.size();
+		}
+		t.colorSampleImage[c] = handle;
+	}
+
+	t.everWritten = false;
+	t.live = true;
+	return true;
+}
+
+// slot allocation shared by every Create* entry point
+int VulkanBackend::AllocTargetSlot() {
+	for ( size_t i = 0; i < targetTable.size(); i++ ) {
+		if ( !targetTable[i].live ) { return (int)i; }
+	}
+	targetTable.push_back( RenderTarget() );
+	return (int)targetTable.size() - 1;
+}
+
+RenderTargetHandle VulkanBackend::CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h ) {
+	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
+		return 0;
+	}
+	VkFormat cf = ( fmt == IF_RGBA16F ) ? VK_FORMAT_R16G16B16A16_SFLOAT
+	            : ( fmt == IF_RGBA8 ) ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_UNDEFINED;
+	if ( cf == VK_FORMAT_UNDEFINED ) {
+		common->Warning( "VK CreateRenderTargetColorDepthStencil: only IF_RGBA8/IF_RGBA16F supported" );
+		return 0;
+	}
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, cf, 1, /*ds*/true, /*frameCapable*/true ) ) {
+		targetTable[slot] = RenderTarget();
+		return 0;
+	}
+	common->DPrintf( "VK: created %dx%d %s color+depth-stencil frame target (handle %d)\n",
+		w, h, fmt == IF_RGBA16F ? "RGBA16F" : "RGBA8", slot + 1 );
+	return (RenderTargetHandle)( slot + 1 );
+}
+
+ImageHandle VulkanBackend::GetRenderTargetImage2( RenderTargetHandle rt ) {
+	RenderTarget *t = LookupTarget( rt );
+	return ( t && t->colorCount >= 2 ) ? t->colorSampleImage[1] : 0;
+}
+
+// the color/depth image the current frame target resolves to (for M5 captures)
+VkImage VulkanBackend::FrameColorImage() const {
+	if ( frameTarget != 0 ) {
+		const RenderTarget &t = targetTable[frameTarget - 1];
+		if ( t.live && t.colorTarget ) { return t.colorImage[0]; }
+	}
+	return sceneColor;
+}
+VkImageLayout VulkanBackend::FrameColorBetweenLayout() const {
+	// a sampled color target rests in SHADER_READ_ONLY between passes; the
+	// swapchain sceneColor rests in TRANSFER_SRC (its render passes' finalLayout)
+	if ( frameTarget != 0 ) {
+		const RenderTarget &t = targetTable[frameTarget - 1];
+		if ( t.live && t.colorTarget ) { return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; }
+	}
+	return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+}
+VkImage VulkanBackend::FrameDepthImage() const {
+	if ( frameTarget != 0 ) {
+		const RenderTarget &t = targetTable[frameTarget - 1];
+		if ( t.live && t.hasDepth ) { return t.dsImage; }
+	}
+	return sceneDepth;
+}
+
+// SetFrameTarget: route the whole scene into an offscreen color target (HDR), or
+// back to the swapchain sceneColor path (rt == 0). Any open scene pass is closed
+// so the next Draw re-opens against the new destination.
+void VulkanBackend::SetFrameTarget( RenderTargetHandle rt ) {
+	if ( !frameOpen || skipFrame ) {
+		frameTarget = rt;		// remembered; takes effect when a frame is open
+		return;
+	}
+	if ( rt != 0 ) {
+		RenderTarget *t = LookupTarget( rt );
+		if ( t == NULL || !t->colorTarget ) {
+			return;				// invalid handle — stay where we are
+		}
+	}
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( frames[frameIndex].cb );
+		insideScenePass = false;
+	}
+	frameTarget = rt;
+	// the resume viewport/extent tracks the new destination
+	if ( rt != 0 ) {
+		RenderTarget *t = &targetTable[rt - 1];
+		curRenderH = t->h;
+		curPipelinePass = t->colorClearPass;
+		curPassClass = t->passClass;
+		curColorAtt = t->colorCount;
+	} else {
+		curRenderH = (int)sceneExtent.height;
+		curPipelinePass = passClear;
+		curPassClass = 0;
+		curColorAtt = 1;
+	}
+	curFlipY = true;
+	dynStateDirty = true;
 }
 
 /*
@@ -3488,7 +4094,12 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	                   | GLS_REDMASK | GLS_GREENMASK | GLS_BLUEMASK | GLS_ALPHAMASK
 	                   | GLS_POLYMODE_LINE | GLS_DEPTHFUNC_EQUAL | GLS_DEPTHFUNC_LESS | GLS_DEPTHFUNC_ALWAYS;
 	const unsigned int bits = (unsigned int)( desc.stateBits & RELEVANT );
+	// curPassClass (bits 24-31, free above RELEVANT's bit 17) keeps pipelines for
+	// render-pass-incompatible destinations apart: the same shader+state built for
+	// the RGBA8 swapchain scene (class 0) and the RGBA16F HDR buffer (class 2) are
+	// distinct cache entries built against distinct render passes.
 	const unsigned long long key = (unsigned long long)bits
+		| ( (unsigned long long)( curPassClass & 0xff ) << 24 )
 		| ( (unsigned long long)( desc.shader & 0xffff ) << 32 )
 		| ( (unsigned long long)( desc.vertexLayout & 0xf ) << 48 )
 		| ( (unsigned long long)( desc.cullType & 0xf ) << 52 )
@@ -3702,10 +4313,12 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 
 	VkPipelineColorBlendStateCreateInfo cb = {};
 	cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-	// the depth-only shadow pass has no color attachment, so its pipelines carry
-	// zero blend attachments (attachmentCount must match the subpass)
-	cb.attachmentCount = insideTargetPass ? 0 : 1;
-	cb.pAttachments = insideTargetPass ? NULL : &att;
+	// blend-attachment count must match the active subpass: 0 for the depth-only
+	// shadow pass, 1 for the scene / HDR / color targets, 2 for an MRT target. The
+	// MRT attachments share one blend config (the SSR material buffer isn't blended).
+	VkPipelineColorBlendAttachmentState attArr[2] = { att, att };
+	cb.attachmentCount = (uint32_t)curColorAtt;
+	cb.pAttachments = ( curColorAtt > 0 ) ? attArr : NULL;
 
 	const VkDynamicState dyn[3] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
 	                                VK_DYNAMIC_STATE_DEPTH_BIAS };
@@ -3727,11 +4340,11 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	pci.pColorBlendState = &cb;
 	pci.pDynamicState = &dsi;
 	pci.layout = pipeLayout;
-	// scene pipelines target the scene pass (passClear, compatible with passLoad);
-	// shadow-map draws (insideTargetPass) target the depth-only shadowPass. The
-	// shadow_sm/shadow_sm_cube shaders are shadow-only, so the shader handle in the
-	// cache key already keeps the two pipeline families apart.
-	pci.renderPass = insideTargetPass ? shadowPass : passClear;
+	// curPipelinePass is the render pass of the active destination (scene passClear,
+	// the HDR buffer's colorClearPass, a shadow/AA nested pass, ...). It's compatible
+	// with that destination's load/clearDS variants (same formats), and curPassClass
+	// in the cache key keeps render-pass-incompatible destinations on separate keys.
+	pci.renderPass = curPipelinePass ? curPipelinePass : passClear;
 	pci.subpass = 0;
 
 	VkPipeline pipeline = VK_NULL_HANDLE;
@@ -3862,6 +4475,20 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 	}
 	VkCommandBuffer cb = frames[frameIndex].cb;
 
+	// A fullscreen pass sampling a color render target (HDR resolve/FXAA/SMAA) must
+	// cancel the scene's negative-height flip: those targets are stored top-down,
+	// so the shared GL fullscreen quad would otherwise sample them upside down. Only
+	// post passes ever sample a color target as unit 0, so this is precise.
+	bool effFlipY = curFlipY;
+	if ( curFlipY && args.textures[0] >= 1 && args.textures[0] <= (ImageHandle)imageTable.size()
+	     && imageTable[args.textures[0] - 1].live && imageTable[args.textures[0] - 1].isColorTarget ) {
+		effFlipY = false;
+	}
+	if ( effFlipY != lastEffFlipY ) {
+		lastEffFlipY = effFlipY;
+		dynStateDirty = true;
+	}
+
 	if ( dynStateDirty ) {
 		// scene pass: negative-height viewport (y-up NDC like GL) with the GL
 		// bottom-left rect converted to Vulkan's top-left. Offscreen target
@@ -3871,7 +4498,7 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 		VkViewport v = {};
 		v.x = (float)vpRect[0];
 		v.width = (float)vpRect[2];
-		if ( curFlipY ) {
+		if ( effFlipY ) {
 			v.y = (float)renderH - (float)vpRect[1];
 			v.height = -(float)vpRect[3];
 		} else {
@@ -3888,7 +4515,7 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 		int sx = scRect[0], sy = scRect[1], sw = scRect[2], sh = scRect[3];
 		if ( sw < 0 ) { sw = 0; }
 		if ( sh < 0 ) { sh = 0; }
-		int top = curFlipY ? ( renderH - ( sy + sh ) ) : sy;
+		int top = effFlipY ? ( renderH - ( sy + sh ) ) : sy;
 		if ( sx < 0 ) { sw += sx; sx = 0; }
 		if ( top < 0 ) { sh += top; top = 0; }
 		if ( sw < 0 ) { sw = 0; }
@@ -3927,19 +4554,19 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 			texSet = boundTexSet;
 			needsTexBind = false;
 		} else {
-			auto it = textureSetCache[frameIndex].find( key );
-			if ( it != textureSetCache[frameIndex].end() ) {
+			auto it = textureSetCache.find( key );
+			if ( it != textureSetCache.end() ) {
 				texSet = it->second;
 			} else {
 				VkDescriptorSetAllocateInfo ai = {};
 				ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-				ai.descriptorPool = framePool[frameIndex];
+				ai.descriptorPool = texturePool ? texturePool : framePool[frameIndex];
 				ai.descriptorSetCount = 1;
 				ai.pSetLayouts = &setLayoutTex;
 				if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
 					if ( !framePoolWarned ) {
 						framePoolWarned = true;
-						common->Warning( "VK: per-frame descriptor pool exhausted (%d sets)", MAX_FRAME_SETS );
+						common->Warning( "VK: descriptor pool exhausted while allocating texture set" );
 					}
 					return;
 				}
@@ -3986,7 +4613,7 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 					writes[i].pImageInfo = &infos[i];
 				}
 				vkUpdateDescriptorSets( device, 11, writes, 0, NULL );
-				textureSetCache[frameIndex][key] = texSet;
+				textureSetCache[key] = texSet;
 			}
 			boundTexSet = texSet;
 			boundTexKey = key;
@@ -4103,13 +4730,13 @@ void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int
 	{
 		VkDescriptorSet texSet = VK_NULL_HANDLE;
 		const uint64_t key = 0;
-		auto it = textureSetCache[frameIndex].find( key );
-		if ( it != textureSetCache[frameIndex].end() ) {
+		auto it = textureSetCache.find( key );
+		if ( it != textureSetCache.end() ) {
 			texSet = it->second;
 		} else {
 			VkDescriptorSetAllocateInfo ai = {};
 			ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-			ai.descriptorPool = framePool[frameIndex];
+			ai.descriptorPool = texturePool ? texturePool : framePool[frameIndex];
 			ai.descriptorSetCount = 1;
 			ai.pSetLayouts = &setLayoutTex;
 			if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
@@ -4132,7 +4759,7 @@ void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int
 				writes[i].pImageInfo = &infos[i];
 			}
 			vkUpdateDescriptorSets( device, 11, writes, 0, NULL );
-			textureSetCache[frameIndex][key] = texSet;
+			textureSetCache[key] = texSet;
 		}
 		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout, 1, 1, &texSet, 0, NULL );
 	}

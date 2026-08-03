@@ -170,6 +170,19 @@ static GLuint RB_RHI_SmaaUploadLut( const byte *src, int srcChannels, int w, int
 // edges + weights targets (and the LDR scene copy when asked for), sized to the
 // view; self-heals after a lost context the same way the SSR target does
 static bool RB_RHI_EnsureSmaaTargets( rhi::RHI *r, int w, int h, bool needScene ) {
+	// SMAA isn't ported to Vulkan yet: its AreaTex/SearchTex LUTs upload through
+	// raw qgl (NULL under VK) and ride DrawArgs as GL texture names, and the chain
+	// tail pokes gl3ActiveTexture. Bail so the caller falls back to FXAA (fully
+	// RHI-based, VK-safe). TODO(vk): upload the LUTs via CreateTexture2D + drop the
+	// GL active-unit hygiene on VK, then re-enable.
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		static bool warned = false;
+		if ( !warned ) {
+			warned = true;
+			common->Printf( "VK: SMAA not yet ported (raw-GL LUTs) - using FXAA instead\n" );
+		}
+		return false;
+	}
 	if ( rhiSmaaEdgesRT && r->GetRenderTargetImage( rhiSmaaEdgesRT ) == 0 ) {
 		rhiSmaaEdgesRT = rhiSmaaWeightsRT = rhiSmaaSceneRT = 0;	// lost context (vid_restart)
 		rhiSmaaW = rhiSmaaH = 0;
@@ -2527,9 +2540,11 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 
 	// route the whole frame into the RGBA16F scene buffer (r_hdr) before any clear
 	// or view command lands; a no-op that stays on the backbuffer when r_hdr is
-	// off or the frame is worldless (menu/GUI/cinematic — see RB_RHI_HdrBeginFrame)
-	if ( !vkMode ) {
-		RB_RHI_HdrBeginFrame( r, cmds );
+	// off or the frame is worldless (menu/GUI/cinematic — see RB_RHI_HdrBeginFrame).
+	// M7: live on Vulkan too, via the color render-target family in VulkanBackend.
+	RB_RHI_HdrBeginFrame( r, cmds );
+	if ( vkMode && r_hdr.GetBool() && RB_RHI_HdrCaptureActive() ) {
+		RB_RHI_LogOnce( "VK: HDR scene buffer active (r_hdr) - RGBA16F frame target" );
 	}
 
 	for ( ; cmds; cmds = (const emptyCommand_t *)cmds->next ) {
@@ -2578,11 +2593,15 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 		}
 		case RC_SWAP_BUFFERS:
 			if ( vkMode ) {
-				// present happens in the backend's EndFrame below (the GL-only
-				// resolve/gamma tail doesn't apply; swap capture is serviced
-				// after EndFrame). ImGui renders through the backend: EndFrame
-				// here runs ImGui::Render and hands the draw data over, drawn
-				// into the swapchain image between the scene blit and present.
+				// M7: resolve the RGBA16F scene buffer back onto the scene image
+				// (r_hdr) — no-op when HDR is off. Folds in FXAA/SMAA + film grain
+				// + chroma, and must run before EndFrame blits the scene image to
+				// the swapchain. (r_gamma is still a GL-only tail on Vulkan.)
+				RB_RHI_HdrResolve( r );
+				// present happens in the backend's EndFrame below (swap capture is
+				// serviced after EndFrame). ImGui renders through the backend:
+				// EndFrame here runs ImGui::Render and hands the draw data over,
+				// drawn into the swapchain image between the scene blit and present.
 				D3::ImGuiHooks::EndFrame();
 				break;
 			}
