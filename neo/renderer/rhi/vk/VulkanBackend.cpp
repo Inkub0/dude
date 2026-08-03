@@ -4617,6 +4617,17 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 			texSet = boundTexSet;
 			needsTexBind = false;
 		} else {
+			// The cross-frame cache has no natural eviction: wandering a large level
+			// accumulates unique (texture x light x ssao x occlusion) combos forever,
+			// and once its live set count reaches texturePool's capacity
+			// vkAllocateDescriptorSets fails, this Draw bails, and lit geometry drops
+			// out (the level goes dark, self-lit GUI screens aside). Flush the whole
+			// cache at a high-water mark well under the pool size (the sets retire
+			// behind the fence and rebuild on demand); with FRAMES_IN_FLIGHT slots the
+			// peak occupancy stays ~(FRAMES_IN_FLIGHT+1)*cap, inside the pool's 4x cap.
+			if ( texturePool && (int)textureSetCache.size() >= MAX_FRAME_SETS ) {
+				InvalidateTextureSets();
+			}
 			auto it = textureSetCache.find( key );
 			if ( it != textureSetCache.end() ) {
 				texSet = it->second;
