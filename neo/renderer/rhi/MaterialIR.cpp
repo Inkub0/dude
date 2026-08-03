@@ -147,6 +147,13 @@ static MaterialIR *IR_Build( const idMaterial *material ) {
 							s.needsCurrentRender = true;	// Chunk F: RC_COPY_RENDER
 						}
 					}
+				} else if ( GetActiveBackendType() == BT_VULKAN ) {
+					// a newStage has no stage image (its textures live in
+					// fragmentProgramImages), so the generic fallback comes out
+					// solid white — skip the stage entirely until runtime
+					// SPIR-V lands (M5); invisible beats a white square
+					s.kind = SK_SKIP;
+					common->Printf( "VK IR: %s: stage %d custom ARB skipped until M5\n", material->GetName(), i );
 				} else {
 					// degrade, don't crash: draw as a plain generic stage
 					common->Printf( "GL3 IR: %s: stage %d custom ARB degraded to generic\n", material->GetName(), i );

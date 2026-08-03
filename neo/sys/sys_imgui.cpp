@@ -615,6 +615,13 @@ void EndFrame()
 
 void OpenWindow( D3ImGuiWindow win )
 {
+	// DUDE: no ImGui context on the Vulkan backend until Phase 4 M6 — calling
+	// into ImGui without one crashes
+	if ( !imgui_initialized ) {
+		common->Printf( "ImGui is not available on this backend yet (Vulkan ImGui arrives at Phase 4 M6)\n" );
+		return;
+	}
+
 	if ( openImguiWindows & win )
 		return; // already open
 
@@ -632,6 +639,9 @@ void OpenWindow( D3ImGuiWindow win )
 
 void CloseWindow( D3ImGuiWindow win )
 {
+	if ( !imgui_initialized )
+		return;
+
 	if ( (openImguiWindows & win) == 0 )
 		return; // already closed
 

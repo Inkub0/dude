@@ -220,16 +220,39 @@ Original plan:
   fixtures over a dark world — `EQUAL`-tested ambient stages surviving is
   direct evidence the prepass depth is right. GL3 map regression clean.
 
-### M4 — Stencil shadows + interactions (the big one)
-- Complete image ownership for the interaction inputs: normal/specular/diffuse stages,
-  light projection + falloff textures, cube maps (`VL_SHADOW` layout, six-face uploads).
-- Shadow volume pipelines: two-sided stencil (core), Carmack's-reverse depth-fail
-  preserved exactly; incr/decr wrap; the `GLS_*` stencil bits translate directly.
-- Interaction pass: `interaction.vert/.frag` (already SPIR-V-clean), one pipeline per
-  state permutation, scissored per light like GL3.
-- **Verify:** the Phase 4 exit criteria from the plan largely live here — Mars City
-  lighting/shadow behaviour indistinguishable from opengl3; RenderDoc shows the
-  depth → stencil → interaction pass structure; no missing interactions.
+### M4 — Stencil shadows + interactions (the big one)  **[BUILT 2026-08-02 — pending the user's in-game look]**
+- **[done]** Stencil state entered the RHI as a compact enum (`rhi::StencilState` in
+  `PipelineDesc`): disabled / always / shadow-test (GEQUAL 128) / volume
+  preload / z-pass / z-fail, plus mirror variants that swap the faces like the
+  GL path's firstFace/secondFace swap. GL3 ignores the field (RhiWorld keeps its
+  literal, now NULL-guarded qglStencil* calls); Vulkan bakes it into the pipeline
+  key (bits 56..59) as two-sided `VkStencilOpState`. Empirically the CCW
+  front-face setup preserves GL's facing, so the ops translate literally.
+- **[done]** `SetPolygonOffset` (VK dynamic depth bias, always enabled with (0,0)
+  as "off") and `ClearStencilBuffer` (`vkCmdClearAttachments` clipped to the
+  current scissor — the per-light stencil clear) joined the RHI.
+- **[done]** `CreateTextureCube` (six RGBA8 faces + CPU mips, clamp-to-edge) and the
+  `GenerateCubeImage` bridge — the normalization/ambient cube maps sample for real.
+- **[done]** Descriptor set 1 grew to 11 bindings (units 0-7, shadow cube 8, SSAO 9,
+  occlusion 10 — interaction/ambientlight declare them all statically). Typed
+  dummies for empty slots: white 2D, white cube, and 1×1 D32 depth-compare
+  dummies for `sampler2DShadow`/`samplerCubeShadow` (units 7/8, real maps at M7).
+- **[done]** Light loop runs under VK: stencil volumes (`VL_SHADOW` input was already
+  in the pipeline path), interactions, translucent interactions. Shadow *maps* +
+  SSAO/SSR/normal prepass stay gated to M7 (LogOnce; every light takes stencil).
+  `RB_CreateSingleDrawInteractions`' scissor now routes through the RHI.
+- **War story — the RXGB swizzle:** first lit frames were bright-left/dark-right
+  with washed speculars. CPU-side interaction inputs dumped bit-identical across
+  backends, and a temporary shader visualization proved the tangent-space light
+  vectors matched too. The culprit: the shaders decode normal maps as RXGB
+  unconditionally (`bump.x = bump.a`) because the GL upload path swaps red into
+  alpha "even on tga normal maps"; the VK RGBA8 bridge uploaded plain TGA data, so
+  every normal's x read as +1 (alpha=255) and all lighting leaned +X. The bridge
+  now mirrors the swizzle for `TD_BUMP`.
+- **Verified headless:** alphalabs1 A/B at lockstep 60fps — GL3 (stencil path) vs
+  Vulkan mean abs pixel diff **0.87/255** with stencil shadows on, band means
+  identical; Carmack's reverse (default) and z-pass both exercised; Mars City runs
+  validation-clean (3000+ frames). GL3 regression clean.
 
 ### M5 — Translucents, fog, texgen, screen copies
 - Blend/translucent stages (`generic`), fog + blend lights, texgen stages (skybox,

@@ -45,14 +45,35 @@ enum VertexLayout {
 	VL_COUNT
 };
 
+// Stencil configurations the world renderer actually uses (Phase 4 M4).
+// GL keeps stencil as free-floating state (RhiWorld drives qglStencilFunc/
+// OpSeparate directly and the GL3 backend ignores this field); Vulkan bakes
+// it into the pipeline, so the same choices travel as a compact enum in
+// PipelineDesc. Ops are wrap variants; masks are 255. "front" below means
+// GL front-facing — the VK backend's CCW front-face setup preserves GL's
+// facing exactly (verified with the M2 winding work).
+enum StencilState {
+	SS_DISABLED = 0,		// stencil test off (all 2D / non-world paths)
+	SS_ALWAYS,				// test enabled, ALWAYS pass, KEEP — depth fill / unshadowed
+	SS_SHADOW_TEST,			// GEQUAL ref 128 — interactions test against the volumes
+	SS_VOLUME_PRELOAD,		// caps preload: front INCR on zfail+zpass, back DECR
+	SS_VOLUME_ZPASS,		// depth-pass volumes: front DECR on zpass, back INCR
+	SS_VOLUME_ZFAIL,		// Carmack's reverse: front INCR on zfail, back DECR
+	SS_VOLUME_PRELOAD_MIRROR,	// mirror views swap the faces
+	SS_VOLUME_ZPASS_MIRROR,
+	SS_VOLUME_ZFAIL_MIRROR,
+	SS_COUNT
+};
+
 // GLS_* state bits from Material.h travel through unchanged; a pipeline is
 // (stateBits, shader, vertexLayout) and backends cache whatever object that
 // maps to (GL: program+state apply, VK: VkPipeline keyed the same way).
 struct PipelineDesc {
-	int				stateBits;		// GLS_* blend/depth/stencil/mask bits
-	ShaderHandle	shader;
-	VertexLayout	vertexLayout;
-	int				cullType;		// CT_* from Material.h
+	int				stateBits = 0;		// GLS_* blend/depth/stencil/mask bits
+	ShaderHandle	shader = 0;
+	VertexLayout	vertexLayout = VL_DRAWVERT;
+	int				cullType = 0;		// CT_* from Material.h
+	int				stencilState = SS_DISABLED;	// StencilState (GL3 backend ignores it)
 };
 
 struct DrawArgs {
@@ -104,6 +125,14 @@ public:
 	// glDepthRange, Vulkan to the viewport's min/max depth. Reset to 0..1 by
 	// BeginFrame.
 	virtual void	SetDepthRange( float minDepth, float maxDepth ) {}
+	// polygon offset (shadow volumes, polygonOffset materials): Vulkan dynamic
+	// depth bias; the GL3 backend keeps its literal qglPolygonOffset path in
+	// RhiWorld and ignores this (default no-op). Reset (disabled) by BeginFrame.
+	virtual void	SetPolygonOffset( bool enable, float factor, float units ) {}
+	// clear the stencil buffer to `value` within the current scissor rect,
+	// mid-pass (the per-light stencil clear). GL path uses qglClear directly;
+	// Vulkan implements this as vkCmdClearAttachments.
+	virtual void	ClearStencilBuffer( int value ) {}
 
 	// ---- resources (Chunk B+) ----
 	virtual BufferHandle	CreateBuffer( BufferUsage usage, int size, const void *data ) = 0;
@@ -121,6 +150,13 @@ public:
 	virtual ImageHandle		CreateTexture2D( int w, int h, const void *pixels,
 	                                         int textureFilter, int textureRepeat,
 	                                         bool allowMips ) { return 0; }
+
+	// Phase 4 M4: cube-map upload (normalization/ambient cube maps, env maps).
+	// pics are six size×size RGBA8 faces in GL_TEXTURE_CUBE_MAP_POSITIVE_X..
+	// order; sampler is always clamp-to-edge (the only mode that makes sense
+	// on a cube). Same default-0 contract as CreateTexture2D.
+	virtual ImageHandle		CreateTextureCube( int size, const void * const pics[6],
+	                                           int textureFilter, bool allowMips ) { return 0; }
 
 	virtual ShaderHandle	LoadShader( const char *name ) = 0;	// loads name.vert/.frag via VFS
 

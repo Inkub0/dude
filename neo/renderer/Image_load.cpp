@@ -619,8 +619,28 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 				rhi::GetRHI()->DestroyImage( rhiHandle );
 				rhiHandle = 0;
 			}
-			rhiHandle = rhi::GetRHI()->CreateTexture2D( width, height, pic,
+			// normal maps: the shaders decode the RXGB layout unconditionally
+			// (interaction.frag does bump.x = bump.a), and the GL upload path
+			// swaps red into alpha "even on tga normal maps so we only have to
+			// use one fragment program" — mirror that here or every normal's x
+			// reads as +1 (the M4 bright-left/dark-right lighting bug)
+			const byte *upload = pic;
+			byte *swizzled = NULL;
+			if ( depth == TD_BUMP && globalImages->image_useNormalCompression.GetInteger() != 1 ) {
+				const int bytes = width * height * 4;
+				swizzled = (byte *)R_StaticAlloc( bytes );
+				memcpy( swizzled, pic, bytes );
+				for ( int i = 0; i < bytes; i += 4 ) {
+					swizzled[ i + 3 ] = swizzled[ i ];
+					swizzled[ i ] = 0;
+				}
+				upload = swizzled;
+			}
+			rhiHandle = rhi::GetRHI()->CreateTexture2D( width, height, upload,
 				(int)filter, (int)repeat, filter == TF_DEFAULT );
+			if ( swizzled ) {
+				R_StaticFree( swizzled );
+			}
 			type = TT_2D;
 			uploadWidth = width;
 			uploadHeight = height;
@@ -985,8 +1005,23 @@ void idImage::GenerateCubeImage( const byte *pic[6], int size,
 	// have filled in the parms.  We must have the values set, or
 	// an image match from a shader before OpenGL starts would miss
 	// the generated texture
-	// DUDE Phase 4 M1: also inert under the Vulkan backend (no qgl until M2)
-	if ( !glConfig.isInitialized || qglGenTextures == NULL ) {
+	if ( !glConfig.isInitialized ) {
+		return;
+	}
+
+	// DUDE Phase 4 M4: under the Vulkan backend (no qgl) the six faces upload
+	// through the RHI — RGBA8 + CPU mip chain, clamp-to-edge sampler.
+	if ( qglGenTextures == NULL ) {
+		if ( glConfig.rhiBackend ) {
+			if ( rhiHandle ) {
+				rhi::GetRHI()->DestroyImage( rhiHandle );
+				rhiHandle = 0;
+			}
+			rhiHandle = rhi::GetRHI()->CreateTextureCube( size, (const void * const *)pic,
+				(int)filter, true );
+			uploadWidth = size;
+			uploadHeight = size;
+		}
 		return;
 	}
 
