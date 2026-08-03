@@ -95,6 +95,8 @@ struct DrawArgs {
 	SamplerHandle	samplers[8];
 	ImageHandle		shadowCube;		// point-light cube depth map; bound to unit 8
 									// as a GL_TEXTURE_CUBE_MAP (0 = unbound)
+	ImageHandle		ssao;			// SSAO/GTAO buffer; bound to unit 9 (0 = unbound)
+	ImageHandle		occlusion;		// baked occlusion map; bound to unit 10 (0 = unbound)
 };
 
 struct ClearArgs {

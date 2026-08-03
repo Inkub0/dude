@@ -2500,19 +2500,17 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
 		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
 		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
-	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView
-	     && rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
-		// In HDR mode FXAA + film grain + chromatic aberration are all folded into the
-		// resolve chain (RB_RHI_HdrResolve / RB_RHI_HdrFxaa), sampling the float scene
-		// buffer instead of the 8-bit _currentRender copy that was re-banding the image
-		// ahead of the dither. Off HDR, they run here on the backbuffer exactly as before.
-		if ( !rbHdrActiveThisFrame ) {
+	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView ) {
+		// The GL post chain (AA / film grain / chromatic aberration) is GL-only here;
+		// Vulkan folds those into the HDR resolve (and its off-HDR post isn't wired yet).
+		if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN && !rbHdrActiveThisFrame ) {
 			// post-resolve antialiasing (FXAA) first, so film grain / chromatic
 			// aberration are applied on top of the resolved image rather than smoothed
 			RB_RHI_AAPass( r, viewDef );
 			RB_RHI_PostProcess( r, viewDef );
 		}
-		// r_ssaoDebug: overlay the AO buffer on top of the finished view
+		// r_ssaoDebug: overlay the AO buffer on top of the finished view. RHI fullscreen
+		// draw, so it works on both backends (the SSAO buffer is produced on Vulkan too).
 		RB_RHI_SSAODebugOverlay( r, viewDef );
 	}
 

@@ -39,7 +39,10 @@ vec3 viewPosFromRaw( vec2 frag, float raw ) {
 	float vz  = 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y );   // negative
 	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
 	float d   = -vz;                                                              // positive depth
-	return vec3( ndc.x * d * u_localParam0.x, ndc.y * d * u_localParam0.y, vz );
+	// u_windowCoord.z = view-Y sign: +1 on GL (gl_FragCoord.y is bottom-up, agrees with
+	// view +Y), -1 on Vulkan (gl_FragCoord.y is top-down). Without it the reconstructed
+	// position Y is flipped vs the G-buffer normal, wrecking AO on floors/ceilings.
+	return vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
 }
 
 vec3 viewPos( vec2 frag ) {
@@ -137,8 +140,9 @@ void main() {
 
 		// slice plane spanned by V and the screen-space direction; an in-plane tangent
 		// (perpendicular to V, toward +dir). planeN is unit and perpendicular to V, so
-		// cross(planeN, V) is already unit — no normalize needed.
-		vec3 sliceDir = vec3( dir, 0.0 );
+		// cross(planeN, V) is already unit — no normalize needed. dir.y carries the same
+		// view-Y sign (u_windowCoord.z) so the frag-space march maps to the right view dir.
+		vec3 sliceDir = vec3( dir.x, dir.y * u_windowCoord.z, 0.0 );
 		vec3 planeN   = normalize( cross( V, sliceDir ) );
 		vec3 tangent  = cross( planeN, V );
 

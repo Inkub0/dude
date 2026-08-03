@@ -380,9 +380,21 @@ Original plan:
   bottom-up M5 captures. `_currentRender`/`_currentDepth` captures follow the active frame
   target (glass-in-HDR works; the capture is still RGBA8, an 8-bit refraction sample vs
   GL3's RGBA16F — a minor fidelity gap to close later).
-- **Still stubbed:** `CreateRenderTargetColorDepth` (SSAO normal G-buffer / SSR MRT) → 0,
-  so SSAO/SSR stay off on Vulkan until their slice. PBR rides the interaction shaders and
-  is largely independent.
+- **SSAO/GTAO [BUILT, pending in-engine check]** — `CreateRenderTargetColorDepth` (RGBA8
+  color + depth, +MRT) via the same color-target machinery; normal G-buffer prepass + the
+  ssao/ssao_blur/ssao_temporal fullscreen passes un-gated on Vulkan. The multitexture the
+  post passes bind by raw GL on GL3 (normal/material/history buffers) is routed through a
+  new `RB_RHI_BindRTUnit` → `rhiVkUnits` (extended to 11) → `RB_RHI_VkTextures`; DrawArgs
+  gained `ssao`/`occlusion` fields bound at descriptor units 9/10 (were dummies). The AO
+  buffer is recorded once before the light loop and rides every interaction/ambient draw.
+  `r_ssaoDebug 1/2` works on Vulkan. Benign validation warning: gbuffer.frag always writes
+  the SSR MRT output, discarded on the SSAO-only (1-attachment) target — same as GL.
+- **SSR [explicitly deferred on Vulkan]** — `RB_RHI_ScreenSpaceReflections` early-returns on
+  BT_VULKAN (LogOnce) and NormalPrepass skips its MRT there. It was never `vkMode`-gated —
+  it used to bail because its targets returned 0; once `CreateRenderTargetColorDepth` worked
+  it proceeded into its raw-GL march/composite binds and crashed. Porting it = un-gate +
+  route those binds through `RB_RHI_BindRTUnit` like SSAO. PBR (`r_pbr`) rides the
+  interaction shaders and already runs on Vulkan (verified crash-free with dude_preset 5).
 
 **Phase exit = the plan's final milestone:** Mars City loads; identical light/shadow
 behaviour; no missing interactions; RenderDoc shows depth, stencil, and interaction

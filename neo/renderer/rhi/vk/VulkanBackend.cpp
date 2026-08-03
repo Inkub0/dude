@@ -135,7 +135,7 @@ public:
 	// SSR material buffer (return 0 → those features stay off until the SSAO slice).
 	virtual RenderTargetHandle	CreateRenderTarget( ImageFormat fmt, int w, int h );
 	virtual RenderTargetHandle	CreateRenderTargetCube( ImageFormat fmt, int size );
-	virtual RenderTargetHandle	CreateRenderTargetColorDepth( ImageFormat, int, int, int ) { return 0; }
+	virtual RenderTargetHandle	CreateRenderTargetColorDepth( ImageFormat fmt, int w, int h, int colorCount );
 	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h );
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt );
 	virtual void				SetFrameTarget( RenderTargetHandle rt );
@@ -4021,6 +4021,33 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetColorDepthStencil( ImageForm
 	return (RenderTargetHandle)( slot + 1 );
 }
 
+// color + depth(-stencil) target for a depth-tested offscreen geometry pass (the
+// SSAO normal G-buffer). colorCount 2 adds a second RGBA8 attachment (SSR
+// material MRT, GetRenderTargetImage2). Rendered via BeginTargetPass, single-pass,
+// the depth attachment written/tested but not sampled. Uses sceneDepthFormat
+// (carries an unused stencil vs GL's DEPTH_COMPONENT24 — harmless).
+RenderTargetHandle VulkanBackend::CreateRenderTargetColorDepth( ImageFormat fmt, int w, int h, int colorCount ) {
+	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
+		return 0;
+	}
+	if ( fmt != IF_RGBA8 ) {
+		common->Warning( "VK CreateRenderTargetColorDepth: only IF_RGBA8 supported" );
+		return 0;
+	}
+	if ( colorCount < 1 || colorCount > 2 ) {
+		common->Warning( "VK CreateRenderTargetColorDepth: colorCount must be 1 or 2" );
+		return 0;
+	}
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R8G8B8A8_UNORM, colorCount, /*ds*/true, /*frameCapable*/false ) ) {
+		targetTable[slot] = RenderTarget();
+		return 0;
+	}
+	common->DPrintf( "VK: created %dx%d RGBA8 color+depth render target (handle %d, %d color)\n",
+		w, h, slot + 1, colorCount );
+	return (RenderTargetHandle)( slot + 1 );
+}
+
 ImageHandle VulkanBackend::GetRenderTargetImage2( RenderTargetHandle rt ) {
 	RenderTarget *t = LookupTarget( rt );
 	return ( t && t->colorCount >= 2 ) ? t->colorSampleImage[1] : 0;
@@ -4556,6 +4583,8 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 			mixKey( key, (uint32_t)args.textures[i] );
 		}
 		mixKey( key, (uint32_t)args.shadowCube );
+		mixKey( key, (uint32_t)args.ssao );
+		mixKey( key, (uint32_t)args.occlusion );
 		bool needsTexBind = true;
 		if ( boundTexSet != VK_NULL_HANDLE && boundTexKey == key ) {
 			texSet = boundTexSet;
@@ -4606,6 +4635,16 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 							sampler = dummyShadowCube.sampler;
 							view = dummyShadowCube.view;
 						}
+					} else if ( i == 9 && args.ssao >= 1 && args.ssao <= (ImageHandle)imageTable.size()
+					            && imageTable[args.ssao - 1].live ) {
+						const ImageRec &rec = imageTable[args.ssao - 1];		// SSAO/GTAO buffer (else white)
+						sampler = rec.sampler;
+						view = rec.view;
+					} else if ( i == 10 && args.occlusion >= 1 && args.occlusion <= (ImageHandle)imageTable.size()
+					            && imageTable[args.occlusion - 1].live ) {
+						const ImageRec &rec = imageTable[args.occlusion - 1];	// baked occlusion map (else white)
+						sampler = rec.sampler;
+						view = rec.view;
 					}
 					infos[i] = {};
 					infos[i].sampler = sampler;

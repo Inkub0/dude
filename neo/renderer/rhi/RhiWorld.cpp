@@ -208,7 +208,7 @@ static int RB_RHI_CountLightChain( const drawSurf_t *surf ) {
 // Vulkan (Phase 4 M3): RB_RHI_BindUnit records image handles here instead of
 // touching GL; RB_RHI_VkTextures copies them into a draw's DrawArgs. Handles
 // persist across draws exactly like GL binds do.
-static rhi::ImageHandle rhiVkUnits[9];
+static rhi::ImageHandle rhiVkUnits[11];	// units 0-7 + shadow cube 8 + SSAO 9 + occlusion 10
 
 static void RB_RHI_VkTextures( rhi::DrawArgs &da ) {
 	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
@@ -218,6 +218,8 @@ static void RB_RHI_VkTextures( rhi::DrawArgs &da ) {
 		da.textures[i] = rhiVkUnits[i];
 	}
 	da.shadowCube = rhiVkUnits[8];
+	da.ssao = rhiVkUnits[9];
+	da.occlusion = rhiVkUnits[10];
 }
 
 static void RB_RHI_ForgetTexBinds() {
@@ -237,7 +239,7 @@ RB_RHI_BindUnit
 static void RB_RHI_BindUnit( int unit, idImage *image ) {
 	// Vulkan: demand-load and record the handle for RB_RHI_VkTextures; no GL
 	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		if ( unit >= 0 && unit < 9 && image != NULL ) {
+		if ( unit >= 0 && unit < 11 && image != NULL ) {
 			image->Bind();		// upload trigger only under Vulkan
 			if ( image->rhiHandle == 0 ) {
 				// a white fallback silently breaks shading (e.g. a white
@@ -273,6 +275,24 @@ static void RB_RHI_BindUnit( int unit, idImage *image ) {
 	rhi::gl3ActiveTexture( GL_TEXTURE0 + unit );
 	backEnd.glState.currenttmu = unit;
 	image->Bind();
+}
+
+// bind a render-target texture (GetRenderTargetImage handle) on a multitexture
+// unit for the post/SSAO/SSR passes. GL3: raw glActiveTexture+bind (these targets
+// aren't idImages). Vulkan: record into rhiVkUnits so RB_RHI_VkTextures carries it
+// into the next draw's DrawArgs (units 1-7 -> textures[], 9 -> ssao, 10 -> occ).
+static void RB_RHI_BindRTUnit( rhi::RHI *r, int unit, rhi::RenderTargetHandle rt ) {
+	rhi::ImageHandle img = r->GetRenderTargetImage( rt );
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		if ( unit >= 0 && unit < 11 ) {
+			rhiVkUnits[unit] = img;
+		}
+		return;
+	}
+	rhi::gl3ActiveTexture( GL_TEXTURE0 + unit );
+	qglBindTexture( GL_TEXTURE_2D, (GLuint)img );
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
 }
 
 // GTAO render targets (docs/ssao-gtao.md). Two RGBA8 screen-space buffers: the raw
@@ -2392,7 +2412,9 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// (r_ssaoDebug 3) even if SSAO reconstructs normals from depth — so the debug view
 	// always has data. SSR needs it unconditionally (normals to reflect about + the
 	// rough/metal attachment).
-	const bool ssrWants = r_ssr.GetBool();
+	// SSR is deferred on Vulkan (RB_RHI_ScreenSpaceReflections), so don't build its
+	// MRT material attachment there — the SSAO-only target stays single-color
+	const bool ssrWants = r_ssr.GetBool() && rhi::GetActiveBackendType() != rhi::BT_VULKAN;
 	const bool ssaoWants = r_ssao.GetBool()
 		&& ( r_ssaoNormalBuffer.GetBool() || r_ssaoDebug.GetInteger() == 3 );
 	if ( !ssaoWants && !ssrWants ) {
@@ -2581,6 +2603,7 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				RB_RHI_BindUnit( 1, pStage->texture.image );
 				da.uniformBuffer = ub;
 				da.uniformOffset = uniOfs;
+				RB_RHI_VkTextures( da );	// VK: units 0 (bump) + 1 (diffuse coverage) from rhiVkUnits
 				r->Draw( da );
 				backEnd.pc.c_drawElements++;
 				drewCoverage = true;
@@ -2598,6 +2621,7 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			RB_RHI_BindUnit( 1, globalImages->whiteImage );
 			da.uniformBuffer = ub;
 			da.uniformOffset = uniOfs;
+			RB_RHI_VkTextures( da );	// VK: units 0 (bump) + 1 (white) from rhiVkUnits
 			r->Draw( da );
 			backEnd.pc.c_drawElements++;
 		}
@@ -2730,6 +2754,10 @@ static void RB_RHI_DrawFullscreen( rhi::RHI *r, rhi::ShaderHandle prog,
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
 	da.textures[0] = rtInput0;		// 0 = leave unit 0 as the caller bound it
+	RB_RHI_VkTextures( da );			// VK: pull units 1-10 the caller recorded via RB_RHI_BindRTUnit
+	if ( rtInput0 != 0 ) {
+		da.textures[0] = rtInput0;	// the unit-0 param wins on both backends
+	}
 	r->Draw( da );
 
 	backEnd.pc.c_drawElements++;
@@ -2802,6 +2830,14 @@ assume the whole framebuffer at the origin (same rule as SSAO).
 */
 void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !r_ssr.GetBool() || !R_BackendSupportsEnhancements() ) {
+		return;
+	}
+	// SSR isn't ported to Vulkan yet: its march/temporal/composite passes bind the
+	// scene copy + G-buffer via raw GL multitexture (NULL no-ops on VK). Before the
+	// M7 color+depth target existed this bailed on missing targets; now it must gate
+	// explicitly. TODO(vk): route via RB_RHI_BindRTUnit like SSAO, then re-enable.
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		RB_RHI_LogOnce( "VK: SSR (r_ssr) not yet ported - deferred (SSAO is live)" );
 		return;
 	}
 	if ( !viewDef->viewEntitys || viewDef->isSubview ) {
@@ -3060,6 +3096,10 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// view; otherwise ssao.frag reconstructs the normal from depth (windowCoord.x = flag)
 	const bool useNormalBuf = rhiNormalReadyThisView && rhiNormalRT != 0 && r_ssaoNormalBuffer.GetBool();
 	parms.windowCoord[0] = useNormalBuf ? 1.0f : 0.0f;
+	// view-Y sign for ssao.frag's position reconstruction: +1 on GL (gl_FragCoord.y
+	// bottom-up), -1 on Vulkan (top-down) so reconstructed positions match the view-
+	// space G-buffer normal — otherwise AO is wrong on floors/ceilings
+	parms.windowCoord[2] = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ? -1.0f : 1.0f;
 	// per-frame noise rotation for temporal accumulation: advance a golden-ratio walk so
 	// each frame's horizon search jitters differently, giving the temporal pass distinct
 	// samples to average. 0 when temporal is off -> ssao.frag falls back to the plain dither.
@@ -3073,10 +3113,7 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->BeginTargetPass( rhiSsaoRT, NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	if ( useNormalBuf ) {
-		rhi::gl3ActiveTexture( GL_TEXTURE0 + 1 );
-		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
-		rhi::gl3ActiveTexture( GL_TEXTURE0 );
-		backEnd.glState.currenttmu = 0;
+		RB_RHI_BindRTUnit( r, 1, rhiNormalRT );	// normal G-buffer (GL raw bind / VK rhiVkUnits[1])
 		// direct bind bypassed the tmu cache; forget unit 1 so the blur's depth bind re-issues
 		backEnd.glState.tmu[1].current2DMap = -1;
 	}
@@ -3136,11 +3173,8 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			// slot (a render target, direct-bound like the normal buffer), unit 2 = depth
 			r->BeginTargetPass( rhiSsaoHistRT[writeIdx], NULL );
 			RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
-			rhi::gl3ActiveTexture( GL_TEXTURE0 + 1 );
-			qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiSsaoHistRT[readIdx] ) );
-			rhi::gl3ActiveTexture( GL_TEXTURE0 );
-			backEnd.glState.currenttmu = 0;
-			backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
+			RB_RHI_BindRTUnit( r, 1, rhiSsaoHistRT[readIdx] );	// history read (GL raw / VK rhiVkUnits[1])
+			backEnd.glState.tmu[1].current2DMap = -1;			// direct bind bypassed the tmu cache
 			RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiSsaoRT ) );
 			r->EndPass();
 
@@ -3254,33 +3288,28 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// VK render-target family and arrive together at M7.
 	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
 	if ( vkMode ) {
-		RB_RHI_LogOnce( "VK: world = depth + stencil + shadow maps + interactions; SSAO/SSR/HDR still deferred" );
+		RB_RHI_LogOnce( "VK: world = depth + stencil + shadow maps + interactions + HDR + SSAO; SSR still deferred" );
 	}
 
 	// normal G-buffer (Option B): render bump-mapped view normals for SSAO to sample
 	// instead of reconstructing from depth. Runs before the SSAO pass that consumes it.
 	rhiNormalReadyThisView = false;
-	if ( !vkMode ) {
-		RB_RHI_NormalPrepass( r, viewDef );
-	}
+	RB_RHI_NormalPrepass( r, viewDef );
 
 	// SSAO (GTAO) builds the AO buffer from the just-captured scene depth, before
 	// the ambient/interaction passes that consume it (docs/ssao-gtao.md). Each view
 	// starts with no AO; the pass sets rhiSsaoAppliedThisView when it produces one.
 	rhiSsaoAppliedThisView = false;
-	if ( !vkMode ) {
-		RB_RHI_SSAOPass( r, viewDef );
-	}
+	RB_RHI_SSAOPass( r, viewDef );
 
 	// Bind the AO buffer on unit 9 for the whole per-light loop: both the ambient and
 	// interaction shaders sample u_ssao there, and nothing in the loop touches unit 9
 	// (Draw binds 0-8). Bound once here rather than per draw; the enable flag in
 	// localParam0.x (set per surface) decides whether a shader actually reads it.
 	if ( rhiSsaoAppliedThisView ) {
-		rhi::gl3ActiveTexture( GL_TEXTURE0 + 9 );
-		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiSsaoResultRT ) );
-		rhi::gl3ActiveTexture( GL_TEXTURE0 );
-		backEnd.glState.currenttmu = 0;
+		// GL: raw-bind on unit 9. VK: record into rhiVkUnits[9] so every interaction/
+		// ambient draw's RB_RHI_VkTextures carries it as DrawArgs::ssao for the loop.
+		RB_RHI_BindRTUnit( r, 9, rhiSsaoResultRT );
 	}
 
 	// per-light shadowing and adding (matches RB_ARB2_DrawInteractions)
