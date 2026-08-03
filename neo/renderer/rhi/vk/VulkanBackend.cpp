@@ -402,6 +402,8 @@ private:
 	std::unordered_map<unsigned long long, VkPipeline>	pipelineCache;
 	PipelineDesc				currentDesc;
 	VkPipeline					boundPipeline = VK_NULL_HANDLE;
+	uint64_t					boundTexKey = 0;
+	VkDescriptorSet				boundTexSet = VK_NULL_HANDLE;
 	bool						dynStateDirty = true;	// (re)emit viewport+scissor before next draw
 	float						depthRangeMin = 0.0f;	// SetDepthRange window (weapon/model depth hacks)
 	float						depthRangeMax = 1.0f;
@@ -1472,6 +1474,8 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	}
 	textureSetCache[frameIndex].clear();
 	boundPipeline = VK_NULL_HANDLE;
+	boundTexKey = 0;
+	boundTexSet = VK_NULL_HANDLE;
 	dynStateDirty = true;
 	depthRangeMin = 0.0f;
 	depthRangeMax = 1.0f;
@@ -3918,69 +3922,79 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 			mixKey( key, (uint32_t)args.textures[i] );
 		}
 		mixKey( key, (uint32_t)args.shadowCube );
-		auto it = textureSetCache[frameIndex].find( key );
-		if ( it != textureSetCache[frameIndex].end() ) {
-			texSet = it->second;
+		bool needsTexBind = true;
+		if ( boundTexSet != VK_NULL_HANDLE && boundTexKey == key ) {
+			texSet = boundTexSet;
+			needsTexBind = false;
 		} else {
-			VkDescriptorSetAllocateInfo ai = {};
-			ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-			ai.descriptorPool = framePool[frameIndex];
-			ai.descriptorSetCount = 1;
-			ai.pSetLayouts = &setLayoutTex;
-			if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
-				if ( !framePoolWarned ) {
-					framePoolWarned = true;
-					common->Warning( "VK: per-frame descriptor pool exhausted (%d sets)", MAX_FRAME_SETS );
+			auto it = textureSetCache[frameIndex].find( key );
+			if ( it != textureSetCache[frameIndex].end() ) {
+				texSet = it->second;
+			} else {
+				VkDescriptorSetAllocateInfo ai = {};
+				ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+				ai.descriptorPool = framePool[frameIndex];
+				ai.descriptorSetCount = 1;
+				ai.pSetLayouts = &setLayoutTex;
+				if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
+					if ( !framePoolWarned ) {
+						framePoolWarned = true;
+						common->Warning( "VK: per-frame descriptor pool exhausted (%d sets)", MAX_FRAME_SETS );
+					}
+					return;
 				}
-				return;
-			}
-			// bindings 0-7 = units, 8 = shadow cube, 9 = SSAO, 10 = occlusion map.
-			// Empty slots take a dummy typed for what the shaders statically
-			// declare: unit 7 is interaction.frag's sampler2DShadow and 8 its
-			// samplerCubeShadow (depth-compare dummies until M7 shadow maps);
-			// everything else is sampler2D (white). Real handles always win.
-			VkDescriptorImageInfo infos[11];
-			VkWriteDescriptorSet writes[11];
-			const ImageRec &dummy = imageTable[dummyImage - 1];
-			for ( int i = 0; i < 11; i++ ) {
-				VkSampler sampler = dummy.sampler;
-				VkImageView view = dummy.view;
-				if ( i < 8 && args.textures[i] >= 1 && args.textures[i] <= (ImageHandle)imageTable.size()
-				     && imageTable[args.textures[i] - 1].live ) {
-					const ImageRec &rec = imageTable[args.textures[i] - 1];
-					sampler = rec.sampler;
-					view = rec.view;
-				} else if ( i == 7 ) {
-					sampler = dummyShadow2D.sampler;
-					view = dummyShadow2D.view;
-				} else if ( i == 8 ) {
-					if ( args.shadowCube >= 1 && args.shadowCube <= (ImageHandle)imageTable.size()
-					     && imageTable[args.shadowCube - 1].live ) {
-						const ImageRec &rec = imageTable[args.shadowCube - 1];
+				// bindings 0-7 = units, 8 = shadow cube, 9 = SSAO, 10 = occlusion map.
+				// Empty slots take a dummy typed for what the shaders statically
+				// declare: unit 7 is interaction.frag's sampler2DShadow and 8 its
+				// samplerCubeShadow (depth-compare dummies until M7 shadow maps);
+				// everything else is sampler2D (white). Real handles always win.
+				VkDescriptorImageInfo infos[11];
+				VkWriteDescriptorSet writes[11];
+				const ImageRec &dummy = imageTable[dummyImage - 1];
+				for ( int i = 0; i < 11; i++ ) {
+					VkSampler sampler = dummy.sampler;
+					VkImageView view = dummy.view;
+					if ( i < 8 && args.textures[i] >= 1 && args.textures[i] <= (ImageHandle)imageTable.size()
+					     && imageTable[args.textures[i] - 1].live ) {
+						const ImageRec &rec = imageTable[args.textures[i] - 1];
 						sampler = rec.sampler;
 						view = rec.view;
-					} else {
-						sampler = dummyShadowCube.sampler;
-						view = dummyShadowCube.view;
+					} else if ( i == 7 ) {
+						sampler = dummyShadow2D.sampler;
+						view = dummyShadow2D.view;
+					} else if ( i == 8 ) {
+						if ( args.shadowCube >= 1 && args.shadowCube <= (ImageHandle)imageTable.size()
+						     && imageTable[args.shadowCube - 1].live ) {
+							const ImageRec &rec = imageTable[args.shadowCube - 1];
+							sampler = rec.sampler;
+							view = rec.view;
+						} else {
+							sampler = dummyShadowCube.sampler;
+							view = dummyShadowCube.view;
+						}
 					}
+					infos[i] = {};
+					infos[i].sampler = sampler;
+					infos[i].imageView = view;
+					infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+					writes[i] = {};
+					writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+					writes[i].dstSet = texSet;
+					writes[i].dstBinding = (uint32_t)i;
+					writes[i].descriptorCount = 1;
+					writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+					writes[i].pImageInfo = &infos[i];
 				}
-				infos[i] = {};
-				infos[i].sampler = sampler;
-				infos[i].imageView = view;
-				infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-				writes[i] = {};
-				writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-				writes[i].dstSet = texSet;
-				writes[i].dstBinding = (uint32_t)i;
-				writes[i].descriptorCount = 1;
-				writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-				writes[i].pImageInfo = &infos[i];
+				vkUpdateDescriptorSets( device, 11, writes, 0, NULL );
+				textureSetCache[frameIndex][key] = texSet;
 			}
-			vkUpdateDescriptorSets( device, 11, writes, 0, NULL );
-			textureSetCache[frameIndex][key] = texSet;
+			boundTexSet = texSet;
+			boundTexKey = key;
 		}
-		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout,
-			1, 1, &texSet, 0, NULL );
+		if ( needsTexBind ) {
+			vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout,
+				1, 1, &texSet, 0, NULL );
+		}
 	}
 
 	VkDeviceSize vbOfs = (VkDeviceSize)args.vertexOffset;

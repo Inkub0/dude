@@ -77,10 +77,10 @@ def main():
             tmp.write(full)
             tmpname = tmp.name
         if is_glslang:
-            cmd = [str(compiler), "-V", "--target-env", "vulkan1.0",
+            cmd = [str(compiler), "-V", "--target-env", "vulkan1.4",
                    "-o", str(spv), tmpname]
         else:  # glslc
-            cmd = [str(compiler), "--target-env=vulkan1.0",
+            cmd = [str(compiler), "--target-env=vulkan1.4",
                    "-o", str(spv), tmpname]
         r = subprocess.run(cmd, capture_output=True, text=True)
         os.unlink(tmpname)

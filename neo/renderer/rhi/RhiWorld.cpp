@@ -1397,6 +1397,8 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
+		RB_RHI_VkTextures( da );		// VK: copy the coverage image (unit 0) into DrawArgs so
+										// shadow_sm's alpha test carves perforated casters' holes
 		r->Draw( da );
 
 		backEnd.pc.c_shadowElements++;
@@ -1632,6 +1634,8 @@ static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, r
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
+		RB_RHI_VkTextures( da );		// VK: copy the coverage image (unit 0) into DrawArgs so
+										// shadow_sm_cube's alpha test carves perforated casters' holes
 		r->Draw( da );
 
 		backEnd.pc.c_shadowElements++;
@@ -3245,7 +3249,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// VK render-target family and arrive together at M7.
 	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
 	if ( vkMode ) {
-		RB_RHI_LogOnce( "VK: world = depth + stencil shadows + interactions; shadow maps/SSAO/SSR arrive at M7" );
+		RB_RHI_LogOnce( "VK: world = depth + stencil + shadow maps + interactions; SSAO/SSR/HDR still deferred" );
 	}
 
 	// normal G-buffer (Option B): render bump-mapped view normals for SSAO to sample
@@ -3357,12 +3361,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			    && vLight->lightShader->LightCastsShadows();
 			const bool isPoint = vLight->lightDef && vLight->lightDef->parms.pointLight;
 			const bool isParallel = vLight->lightDef && vLight->lightDef->parms.parallel;
-			// shadow maps need the VK render-target family (M7); until then every
-			// light takes the stencil path under Vulkan
-			const bool smEnabled = r_shadowMapping.GetBool() && !vkMode;
-			if ( vkMode && r_shadowMapping.GetBool() ) {
-				RB_RHI_LogOnce( "VK: r_shadowMapping deferred to M7 - lights use stencil shadows" );
-			}
+			// M7: shadow maps run on Vulkan now (the RHI depth render-target family
+			// is live) — projected/spot lights get a 2D depth map, budgeted point
+			// lights a cube depth map, everything else still falls back to stencil.
+			const bool smEnabled = r_shadowMapping.GetBool();
 
 			// DUDE Phase 3.5: giant "sun replacement" lights (Phobos fakes its sky
 			// with omni lights up to radius 5000) look poor as a single shadow map —

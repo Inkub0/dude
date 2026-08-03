@@ -3,7 +3,7 @@
 
 Mimics the engine loader: prepend the target prelude, textually resolve
 #include "renderparms.glsl", then compile with glslangValidator —
-plain GLSL semantics for the GL 3.3 path, -V --target-env vulkan1.0 for SPIR-V.
+plain GLSL semantics for the GL 3.3 path, -V --target-env vulkan1.4 for SPIR-V.
 
 Usage: python3 neo/shaders/validate.py
 """
@@ -48,7 +48,7 @@ for f in sorted(SHADER_DIR.iterdir()):
             tmpname = tmp.name
         cmd = ["glslangValidator", tmpname]
         if target == "vk":
-            cmd = ["glslangValidator", "-V", "--target-env", "vulkan1.0",
+            cmd = ["glslangValidator", "-V", "--target-env", "vulkan1.4",
                    "-o", os.devnull, tmpname]
         r = subprocess.run(cmd, capture_output=True, text=True)
         checked += 1
