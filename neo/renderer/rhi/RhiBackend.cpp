@@ -125,13 +125,14 @@ static rhi::RenderTargetHandle	rhiSmaaEdgesRT = 0;		// RG edge mask (RGBA8)
 static rhi::RenderTargetHandle	rhiSmaaWeightsRT = 0;	// blending weights (RGBA8)
 static rhi::RenderTargetHandle	rhiSmaaSceneRT = 0;		// de-POT'd LDR scene copy (RGBA8)
 static int rhiSmaaW = 0, rhiSmaaH = 0;
-// The LUTs are raw GL textures, NOT idImages: AreaTex is 160x560 and
-// idImage::GenerateImage hard-errors on non-power-of-2 dimensions (vanilla
-// mipmap/scaling assumptions). NPOT is core GL 3.0+ and this path only runs
-// on the GL3 backend; the names ride DrawArgs::textures like render-target
-// images do. TODO(RHI): becomes rhi CreateImage on the Vulkan backend.
-static GLuint rhiSmaaAreaTex = 0;
-static GLuint rhiSmaaSearchTex = 0;
+// The LUTs are NOT idImages: AreaTex is 160x560 and idImage::GenerateImage
+// hard-errors on non-power-of-2 dimensions (vanilla mipmap/scaling assumptions).
+// On GL3 they upload as raw NPOT GL textures (core GL 3.0+); on Vulkan they go
+// through the RHI CreateTexture2D image path (qgl is NULL there, and VK has no
+// power-of-2 restriction). Either way the handle rides DrawArgs::textures like the
+// render-target images do — a raw GL name on GL3, an RHI ImageHandle on VK.
+static rhi::ImageHandle rhiSmaaAreaTex = 0;
+static rhi::ImageHandle rhiSmaaSearchTex = 0;
 
 // target creation and the raw target-image binds in the SMAA draws bypass the
 // idImage bind cache in backEnd.glState.tmu; invalidate it so the engine
@@ -167,22 +168,29 @@ static GLuint RB_RHI_SmaaUploadLut( const byte *src, int srcChannels, int w, int
 	return tex;
 }
 
+// Vulkan LUT upload: the same RG/R -> RGBA8 expansion as the GL path above, but
+// through the RHI CreateTexture2D image path (qgl is NULL under VK). NPOT is fine
+// (the p-o-2 restriction was idImage-only), and CreateTexture2D's blocking upload
+// runs on its own uploadCb + fence, independent of the still-recording frame command
+// buffer, so a first-use mid-frame upload is safe. Returns an RHI ImageHandle that
+// rides DrawArgs::textures like the render-target images do.
+static rhi::ImageHandle RB_RHI_SmaaUploadLutVk( rhi::RHI *r, const byte *src, int srcChannels, int w, int h, int filter ) {
+	byte *pic = (byte *)R_StaticAlloc( w * h * 4 );
+	for ( int i = 0; i < w * h; i++ ) {
+		pic[i*4+0] = src[i*srcChannels+0];
+		pic[i*4+1] = srcChannels > 1 ? src[i*srcChannels+1] : 0;
+		pic[i*4+2] = 0;
+		pic[i*4+3] = 255;
+	}
+	rhi::ImageHandle img = r->CreateTexture2D( w, h, pic, filter, TR_CLAMP, false );
+	R_StaticFree( pic );
+	return img;
+}
+
 // edges + weights targets (and the LDR scene copy when asked for), sized to the
 // view; self-heals after a lost context the same way the SSR target does
 static bool RB_RHI_EnsureSmaaTargets( rhi::RHI *r, int w, int h, bool needScene ) {
-	// SMAA isn't ported to Vulkan yet: its AreaTex/SearchTex LUTs upload through
-	// raw qgl (NULL under VK) and ride DrawArgs as GL texture names, and the chain
-	// tail pokes gl3ActiveTexture. Bail so the caller falls back to FXAA (fully
-	// RHI-based, VK-safe). TODO(vk): upload the LUTs via CreateTexture2D + drop the
-	// GL active-unit hygiene on VK, then re-enable.
-	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		static bool warned = false;
-		if ( !warned ) {
-			warned = true;
-			common->Printf( "VK: SMAA not yet ported (raw-GL LUTs) - using FXAA instead\n" );
-		}
-		return false;
-	}
+	const bool vkMode = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
 	if ( rhiSmaaEdgesRT && r->GetRenderTargetImage( rhiSmaaEdgesRT ) == 0 ) {
 		rhiSmaaEdgesRT = rhiSmaaWeightsRT = rhiSmaaSceneRT = 0;	// lost context (vid_restart)
 		rhiSmaaW = rhiSmaaH = 0;
@@ -212,9 +220,14 @@ static bool RB_RHI_EnsureSmaaTargets( rhi::RHI *r, int w, int h, bool needScene 
 	if ( !rhiSmaaAreaTex ) {
 		// AreaTex is RG (two packed coverage areas), bilinear — SMAA
 		// interpolates between sub-areas; SearchTex must be point-sampled
-		rhiSmaaAreaTex = RB_RHI_SmaaUploadLut( areaTexBytes, 2, AREATEX_WIDTH, AREATEX_HEIGHT, GL_LINEAR );
-		rhiSmaaSearchTex = RB_RHI_SmaaUploadLut( searchTexBytes, 1, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, GL_NEAREST );
-		RB_RHI_AAForgetTexBinds();		// the uploads disturbed the active unit's cached bind
+		if ( vkMode ) {
+			rhiSmaaAreaTex = RB_RHI_SmaaUploadLutVk( r, areaTexBytes, 2, AREATEX_WIDTH, AREATEX_HEIGHT, TF_LINEAR );
+			rhiSmaaSearchTex = RB_RHI_SmaaUploadLutVk( r, searchTexBytes, 1, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, TF_NEAREST );
+		} else {
+			rhiSmaaAreaTex = RB_RHI_SmaaUploadLut( areaTexBytes, 2, AREATEX_WIDTH, AREATEX_HEIGHT, GL_LINEAR );
+			rhiSmaaSearchTex = RB_RHI_SmaaUploadLut( searchTexBytes, 1, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, GL_NEAREST );
+			RB_RHI_AAForgetTexBinds();		// the uploads disturbed the active unit's cached bind
+		}
 	}
 	return rhiSmaaAreaTex != 0 && rhiSmaaSearchTex != 0;
 }
@@ -319,10 +332,14 @@ static bool RB_RHI_SmaaChain( rhi::RHI *r, rhi::ImageHandle sceneImg, rhi::Rende
 	// CopyFramebuffer (film grain's snapshot) would land its bind on the wrong
 	// unit and then skip the "already bound" rebind on unit 0, sampling a stale
 	// SMAA target instead of _currentRender. Leave the chain on unit 0 with the
-	// bind cache invalidated so every following bind re-issues cleanly.
-	RB_RHI_AAForgetTexBinds();
-	rhi::gl3ActiveTexture( GL_TEXTURE0 );
-	backEnd.glState.currenttmu = 0;
+	// bind cache invalidated so every following bind re-issues cleanly. VK has no
+	// active-unit state (each Draw fully specifies its texture set) and
+	// gl3ActiveTexture is a NULL qgl pointer there, so skip it.
+	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		RB_RHI_AAForgetTexBinds();
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+	}
 	return true;
 }
 
@@ -671,9 +688,10 @@ passthrough resolve (shaders/hdrresolve.*); Phase B folds exposure + tonemap int
 =============
 */
 static rhi::RenderTargetHandle	rhiHdrRT = 0;		// scene buffer (RGBA16F HDR, or RGBA8 for the VK off-HDR post pass) + depth-stencil
-static rhi::RenderTargetHandle	rhiHdrAaRT = 0;		// FXAA output ping (RGBA16F, color only)
+static rhi::RenderTargetHandle	rhiHdrAaRT = 0;		// FXAA/SMAA output ping (RGBA16F in HDR, RGBA8 for the VK off-HDR post pass; color only)
 static int						rhiHdrW = 0, rhiHdrH = 0;
 static bool						rbHdrRtFloat = false;			// rhiHdrRT is RGBA16F (HDR) vs RGBA8 (off-HDR post) — recreate on change
+static bool						rbHdrAaFloat = false;			// rhiHdrAaRT is RGBA16F vs RGBA8 — must track rhiHdrRT's format
 static bool						rbHdrActiveThisFrame = false;	// scene post-target bound *right now* (view pass)
 static bool						rbHdrFrameActive = false;		// this whole frame is a true float-HDR frame
 
@@ -750,15 +768,16 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	// aberration per 3D view and gamma as a swap-time pass over the backbuffer, but
 	// on Vulkan the scene lives in an offscreen image that isn't sampleable in place,
 	// so those effects need the same route-the-scene-into-a-target-then-resolve flow
-	// the HDR path uses — just at RGBA8 instead of RGBA16F, and with no float AA ping
-	// (off-HDR AA arrives with the SMAA port). Engage it when any of grain / chroma /
-	// in-shader gamma is active so the resolve has somewhere to apply them. When HDR
-	// is on, the float path already covers all of these.
+	// the HDR path uses — just at RGBA8 instead of RGBA16F. FXAA/SMAA ride the same
+	// RGBA8 ping in this mode (see the AA scratch below). Engage it when any of grain /
+	// chroma / in-shader gamma / AA is active so the resolve has somewhere to apply them.
+	// When HDR is on, the float path already covers all of these.
 	const bool vkMode = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
 	const bool gammaWanted = r_gammaInShader.GetBool()
 		&& ( r_gamma.GetFloat() != 1.0f || r_brightness.GetFloat() != 1.0f );
 	const bool ldrPostWanted = vkMode && !wantHdr
-		&& ( r_postFilmGrain.GetFloat() > 0.0f || r_postChromaticAberration.GetFloat() > 0.0f || gammaWanted );
+		&& ( r_postFilmGrain.GetFloat() > 0.0f || r_postChromaticAberration.GetFloat() > 0.0f
+		     || gammaWanted || r_rhiAA.GetInteger() > 0 );
 
 	if ( !wantHdr && !ldrPostWanted ) {
 		return;		// off → the frame stays on the backbuffer exactly as before
@@ -793,17 +812,20 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 		return;		// creation failed (no RGBA16F support?) → fall back to the backbuffer
 	}
 
-	// FXAA scratch: a float ping buffer so FXAA (r_rhiAA) also stays in HDR instead of
-	// round-tripping the 8-bit _currentRender. HDR-only (off-HDR AA arrives with the SMAA
-	// port); freed when it turns off, on resize, on a switch to the LDR target, or on
-	// context loss.
-	const bool wantAa = wantHdr && ( r_rhiAA.GetInteger() > 0 );
-	if ( rhiHdrAaRT && ( !wantAa || rhiHdrW != w || rhiHdrH != h || r->GetRenderTargetImage( rhiHdrAaRT ) == 0 ) ) {
+	// AA scratch: a ping buffer so FXAA/SMAA (r_rhiAA) run scene->scene before the
+	// resolve, keeping the anti-aliased image in the scene buffer's own format instead
+	// of round-tripping the 8-bit _currentRender. It matches rhiHdrRT's format — RGBA16F
+	// in HDR, RGBA8 in the VK off-HDR post pass — so it's recreated when that format flips.
+	// Freed when AA turns off, on resize, on a format switch, or on context loss.
+	const bool wantAa = ( wantHdr || ldrPostWanted ) && ( r_rhiAA.GetInteger() > 0 );
+	if ( rhiHdrAaRT && ( !wantAa || rhiHdrW != w || rhiHdrH != h || rbHdrAaFloat != wantHdr
+	                     || r->GetRenderTargetImage( rhiHdrAaRT ) == 0 ) ) {
 		r->DestroyRenderTarget( rhiHdrAaRT );
 		rhiHdrAaRT = 0;
 	}
 	if ( wantAa && !rhiHdrAaRT ) {
-		rhiHdrAaRT = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+		rhiHdrAaRT = r->CreateRenderTarget( wantHdr ? rhi::IF_RGBA16F : rhi::IF_RGBA8, w, h );
+		rbHdrAaFloat = wantHdr;
 	}
 
 	r->SetFrameTarget( rhiHdrRT );
@@ -905,7 +927,8 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	int w = glConfig.vidWidth;
 	int h = glConfig.vidHeight;
 
-	// AA first (float->float into rhiHdrAaRT), so chroma below re-samples the anti-aliased
+	// AA first (scene->scene into rhiHdrAaRT, in the scene buffer's own format — RGBA16F
+	// in HDR, RGBA8 in the off-HDR post pass), so chroma below re-samples the anti-aliased
 	// image; the resolve then reads the AA buffer instead of the raw scene buffer. Off → the
 	// scratch buffer doesn't exist and we read the scene buffer directly. Mode 2 = SMAA,
 	// falling back to FXAA if its shaders/targets are unavailable.
@@ -1014,19 +1037,17 @@ void RB_RHI_Shutdown( void ) {
 	rhiHdrAaRT = 0;
 	rhiHdrW = rhiHdrH = 0;
 
-	// SMAA edge/weight/scene targets + raw-GL LUTs (this file's statics). The
-	// context is still current here, so the LUT names can be deleted properly;
-	// they re-upload lazily on the new context.
+	// SMAA edge/weight/scene targets + LUTs (this file's statics). On GL3 the LUTs
+	// are raw GL names GL3Backend::Shutdown() doesn't track, so delete them here
+	// (context still current); on VK they're RHI images the backend's own table sweep
+	// below frees, so just forget the handles. They re-upload lazily next context.
 	rhiSmaaEdgesRT = rhiSmaaWeightsRT = rhiSmaaSceneRT = 0;
 	rhiSmaaW = rhiSmaaH = 0;
-	if ( rhiSmaaAreaTex ) {
-		qglDeleteTextures( 1, &rhiSmaaAreaTex );
-		rhiSmaaAreaTex = 0;
+	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		if ( rhiSmaaAreaTex )   { qglDeleteTextures( 1, &rhiSmaaAreaTex ); }
+		if ( rhiSmaaSearchTex ) { qglDeleteTextures( 1, &rhiSmaaSearchTex ); }
 	}
-	if ( rhiSmaaSearchTex ) {
-		qglDeleteTextures( 1, &rhiSmaaSearchTex );
-		rhiSmaaSearchTex = 0;
-	}
+	rhiSmaaAreaTex = rhiSmaaSearchTex = 0;
 
 	// deletes rings, VAOs, shader cache and every render target, then clears the
 	// backend's table so any stale handle now resolves to a null image
