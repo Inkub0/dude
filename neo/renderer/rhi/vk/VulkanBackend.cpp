@@ -2575,6 +2575,13 @@ void VulkanBackend::DestroyImage( ImageHandle h ) {
 	if ( rec.view )  { vkDestroyImageView( device, rec.view, NULL ); }
 	if ( rec.image ) { vmaDestroyImage( vma, rec.image, rec.alloc ); }
 	rec = ImageRec();
+	// handle h is now free for reuse (CreateTexture2D reuses freed slots). The
+	// cross-frame textureSetCache keys on ImageHandles, so any cached set that
+	// referenced h now points at the destroyed view — and once a new image
+	// takes the slot, that stale set would sample the wrong texture. Drop the
+	// cache, same as RetireImage. (This path is common: GenerateImage destroys
+	// then recreates dynamically-updated 2D images — loading bars, scratch GUIs.)
+	InvalidateTextureSets();
 }
 
 /*

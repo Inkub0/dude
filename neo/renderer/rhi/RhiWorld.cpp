@@ -2521,6 +2521,10 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( polyOffset ) {
 			qglEnable( GL_POLYGON_OFFSET_FILL );
 			qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+			// Vulkan: qglPolygonOffset is a no-op (qgl is NULL); the RHI dynamic
+			// depth bias is what actually offsets the decal in the normal buffer.
+			r->SetPolygonOffset( true, r_offsetFactor.GetFloat(),
+			                     r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
 		}
 
 		// Depth hacks (view weapon / depth-hacked models) so the geometry rasterizes into
@@ -2603,6 +2607,7 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 		if ( polyOffset ) {
 			qglDisable( GL_POLYGON_OFFSET_FILL );
+			r->SetPolygonOffset( false, 0.0f, 0.0f );
 		}
 	}
 

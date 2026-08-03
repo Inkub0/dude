@@ -2189,11 +2189,19 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 
 	const float *regs = surf->shaderRegisters;
 
-	// TODO(RHI): dynamic state; direct GL is fine for the GL backends, the
-	// Vulkan pipeline grows a depth-bias key when decals need it (M3+)
-	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) && qglEnable != NULL ) {
-		qglEnable( GL_POLYGON_OFFSET_FILL );
-		qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+	// Coplanar decals (bullet/blood hits, signs) rely on polygon offset to win
+	// the depth test against the wall they sit on. The GL path enables it via
+	// qglPolygonOffset; on Vulkan qglEnable is NULL, so the RHI dynamic depth
+	// bias (SetPolygonOffset -> vkCmdSetDepthBias) is the only thing that lands.
+	// Without it decals z-fight the wall and flicker in/out with the camera. The
+	// matching disable is at the end of this function (mirrors RB_RHI_FillDepthBuffer).
+	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+		if ( qglEnable != NULL ) {
+			qglEnable( GL_POLYGON_OFFSET_FILL );
+			qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+		}
+		r->SetPolygonOffset( true, r_offsetFactor.GetFloat(),
+		                     r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
 	}
 
 	// depth range hacks (matrix side handled by RB_RHI_SpaceMvp; these are
@@ -2380,8 +2388,11 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		backEnd.pc.c_drawVertexes += tri->numVerts;
 	}
 
-	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) && qglDisable != NULL ) {
-		qglDisable( GL_POLYGON_OFFSET_FILL );
+	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+		if ( qglDisable != NULL ) {
+			qglDisable( GL_POLYGON_OFFSET_FILL );
+		}
+		r->SetPolygonOffset( false, 0.0f, 0.0f );
 	}
 	if ( surf->space->weaponDepthHack || ( surf->space->modelDepthHack != 0.0f && !( surf->dsFlags & DSF_SOFT_PARTICLE ) ) ) {
 		RB_LeaveDepthHack();
