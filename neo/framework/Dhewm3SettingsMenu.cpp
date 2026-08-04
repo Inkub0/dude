@@ -2371,11 +2371,10 @@ struct EnhancementPreset {
 	// above Potato. FXAA (1) is reachable by hand only — its niche is the
 	// subpixel shimmer damping SMAA doesn't do, moot on the PBR tiers.
 	int   rhiAA;                    // r_rhiAA: 0 = off, 1 = FXAA, 2 = SMAA
-	// SSAO world-space sampling radius (appended, see note above). Unlike the
-	// other calibration cvars this one is tier-scaled: tight contact creases on
-	// the cheaper tiers, broad ambient occlusion on the expensive ones. Carried
-	// as the Medium value on Potato/Low (inert there — SSAO is off).
-	float ssaoRadius;               // r_ssaoRadius: 32 Medium .. 128 Nightmare
+	// SSAO world-space sampling radius (appended, see note above). Fixed at 36 world
+	// units across every tier (user-calibrated) — the contact-crease scale that looks
+	// right regardless of preset; only the slice/step budget changes with the tier.
+	float ssaoRadius;               // r_ssaoRadius: 36 on every tier
 	// SSAO temporal accumulation (appended, see note above). On for Medium only:
 	// it denoises the low slice/step march so Medium's cheap AO looks clean, a
 	// small frame-time win over brute-forcing samples. Redundant on the higher
@@ -2397,12 +2396,12 @@ struct EnhancementPreset {
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 32.0f,  false,  false, 0.0f },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 32.0f,  false,  false, 0.0f },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 3,   2,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 32.0f,  true,   false, 0.0f },
-	{ "High",         true,  false, true,  true,  true,   0.75f, 3,   3,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 64.0f,  false,  true,  0.0f },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 6,   4,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 96.0f,  false,  true,  -0.25f },
-	{ "Nightmare", true, true, true, true,  true,   1.0f, 7,   5,   true,  true,  2048, 2048, 12, 128,  48,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 128.0f, false,  true,  -0.25f },
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 36.0f,  false,  false, 0.0f },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 36.0f,  false,  false, 0.0f },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 1,   3,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 36.0f,  true,   false, 0.0f },
+	{ "High",         true,  false, true,  true,  true,   0.75f, 2,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 36.0f,  false,  true,  0.0f },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 3,   9,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 36.0f,  false,  true,  -0.25f },
+	{ "Nightmare", true, true, true, true,  true,   1.0f, 4,   12,  true,  true,  2048, 2048, 12, 128,  48,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 36.0f, false,  true,  -0.25f },
 };
 
 static void ApplyEnhancementPreset( int idx )
