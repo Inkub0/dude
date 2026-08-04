@@ -246,6 +246,19 @@ Ground-truthed with `r_tessDebug 1` + `condump` (the log now prints
   model-path gate missed. Added **`heads/`** to the gate; every `.md5mesh` whose path
   contains `heads/` is a character/zombie head (no props/world geometry), so it's safe.
 
+### SSAO normal prepass tessellates too (2026-08-04)
+SSAO (default `r_ssaoNormalBuffer 1`) reads per-pixel normals from a dedicated
+**normal-prepass G-buffer** (`RB_RHI_NormalPrepass`, shader `gbuffer`). That pass drew
+flat geometry, so on a tessellated character SSAO evaluated occlusion with the *depth* of
+the rounded silhouette (`currentDepthImage` already tessellates) but the *normals* of the
+faceted mesh — leaving faint polygonal AO hugging the old edges. Fixed by tessellating the
+prepass identically: `gbuffer.vert` emits model-space pos/normal; new `gbuffer.tesc`/
+`.tese` PN-subdivide + displace (same `tess.glsl` helpers, same bump on unit 0 with the
+matching bump matrix, so displacement is bit-identical to `zfill.tese`) and barycentrically
+interpolate the view-space tangent frame + texcoords for the fragment normal. Only active
+when `r_ssao` + `r_ssaoNormalBuffer` + tessellation are all on. Inspect with `r_ssaoDebug 3`
+(the normal buffer should read rounded, not faceted).
+
 ### Blood-overlay decals follow the mesh (2026-08-04)
 `idRenderModelOverlay` blood decals are added to the monster's model as their own
 (translucent) surfaces. They're routed through a **PN tess variant of the `generic`

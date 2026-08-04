@@ -2747,6 +2747,18 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			parms.pbrParms[1] = rough;
 		}
 
+		// DUDE tessellation: subdivide character/monster surfaces here identically to the
+		// depth prepass (same PN + displacement) so SSAO's normals follow the rounded
+		// silhouette the lit passes draw — otherwise the AO hugs the flat, un-tessellated
+		// edges (faceted shadows on a now-rounded model). The bump is already on unit 0
+		// with the matching bump matrix (var_TexBump), so gbuffer.tese displaces
+		// bit-identically to zfill.tese. pd.tessellate applies to both draws below.
+		const bool tess = RB_RHI_TessellateSurf( surf, false );
+		if ( tess ) {
+			RB_RHI_SetTessParms( parms );
+		}
+		pd.tessellate = tess;
+
 		rhi::BufferHandle vb, ib;
 		int vertOfs, idxOfs;
 		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
