@@ -2547,10 +2547,13 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// they z-fight in the normal buffer and their normals flicker against the wall's.
 		const bool polyOffset = shader->TestMaterialFlag( MF_POLYGONOFFSET );
 		if ( polyOffset ) {
-			qglEnable( GL_POLYGON_OFFSET_FILL );
-			qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
-			// Vulkan: qglPolygonOffset is a no-op (qgl is NULL); the RHI dynamic
-			// depth bias is what actually offsets the decal in the normal buffer.
+			// Vulkan: the qgl pointers are NULL — calling them segfaults, so guard
+			// like every other qgl site here. The RHI dynamic depth bias below is
+			// what actually offsets the decal in the normal buffer on Vulkan.
+			if ( qglEnable != NULL ) {
+				qglEnable( GL_POLYGON_OFFSET_FILL );
+				qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+			}
 			r->SetPolygonOffset( true, r_offsetFactor.GetFloat(),
 			                     r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
 		}
@@ -2636,7 +2639,9 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			RB_LeaveDepthHack();
 		}
 		if ( polyOffset ) {
-			qglDisable( GL_POLYGON_OFFSET_FILL );
+			if ( qglDisable != NULL ) {
+				qglDisable( GL_POLYGON_OFFSET_FILL );
+			}
 			r->SetPolygonOffset( false, 0.0f, 0.0f );
 		}
 	}
