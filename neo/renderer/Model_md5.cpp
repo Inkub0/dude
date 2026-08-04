@@ -356,6 +356,17 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		// set face planes, vertex normals, tangents
 		R_DeriveTangents( tri );
 	}
+
+	// DUDE tessellation (docs/tessellation.md): weld coincident normals so this
+	// mesh's mirror/UV seams don't pull open under PN tessellation + displacement.
+	// Must run after normals exist; if they were deferred, derive now (and mark them
+	// done) so the weld lands before R_CreateAmbientCache builds the streamed cache.
+	if ( r_tessWeldSeams.GetBool() ) {
+		if ( !tri->tangentsCalculated ) {
+			R_DeriveTangents( tri );
+		}
+		R_WeldSeamNormals( tri, r_tessWeldThreshold.GetFloat() );
+	}
 }
 
 /*

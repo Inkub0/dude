@@ -6,6 +6,8 @@
 #include "renderparms.glsl"
 #include "tess.glsl"
 
+SAMPLER_BINDING(1) uniform sampler2D u_bumpMap;	// normal map, for Phase 2 displacement
+
 layout(triangles, equal_spacing, cw) in;
 
 VARY(0) in vec2 i_TexBump[];
@@ -44,6 +46,10 @@ void main() {
 	var_ToGlobalRow1  = i_ToGlobalRow1[0]  * tc.x + i_ToGlobalRow1[1]  * tc.y + i_ToGlobalRow1[2]  * tc.z;
 	var_ToGlobalRow2  = i_ToGlobalRow2[0]  * tc.x + i_ToGlobalRow2[1]  * tc.y + i_ToGlobalRow2[2]  * tc.z;
 	var_Color         = i_Color[0]         * tc.x + i_Color[1]         * tc.y + i_Color[2]         * tc.z;
+
+	// optional normal-map displacement along the interpolated geometric normal
+	vec3 geoN = normalize( i_ModelNormal[0] * tc.x + i_ModelNormal[1] * tc.y + i_ModelNormal[2] * tc.z );
+	pos = dudeTessDisplace( pos, geoN, u_bumpMap, var_TexBump );
 
 	gl_Position = u_mvpMatrix * vec4( pos, 1.0 );
 }

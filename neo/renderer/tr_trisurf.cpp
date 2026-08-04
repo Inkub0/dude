@@ -798,6 +798,62 @@ static int *R_CreateSilRemap( const srfTriangles_t *tri ) {
 
 /*
 =================
+R_WeldSeamNormals
+
+DUDE tessellation (docs/tessellation.md): average vertex normals across coincident
+(same-position) vertices whose normals are already near-parallel (dot >= threshold),
+so a mesh split into UV / mirror halves deforms as a single piece under PN
+tessellation and displacement instead of the seam pulling open. The near-parallel
+gate leaves genuine hard-edge creases (widely divergent coincident normals) alone.
+Runs on md5 surfaces only, and only when r_tessWeldSeams is set, so vanilla lighting
+is untouched by default. Reads a snapshot of the normals so welding one vertex never
+feeds the average of the next.
+=================
+*/
+void R_WeldSeamNormals( srfTriangles_t *tri, float threshold ) {
+	if ( tri == NULL || tri->verts == NULL || tri->numVerts < 2 ) {
+		return;
+	}
+
+	idHashIndex hash( 1024, tri->numVerts );
+	for ( int i = 0; i < tri->numVerts; i++ ) {
+		hash.Add( hash.GenerateKey( tri->verts[i].xyz ), i );
+	}
+
+	idVec3 *orig = (idVec3 *)R_StaticAlloc( tri->numVerts * sizeof( idVec3 ) );
+	for ( int i = 0; i < tri->numVerts; i++ ) {
+		orig[i] = tri->verts[i].normal;
+		orig[i].Normalize();
+	}
+
+	for ( int i = 0; i < tri->numVerts; i++ ) {
+		const idVec3 &p = tri->verts[i].xyz;
+		idVec3 sum = orig[i];
+		int cnt = 1;
+		const int hashKey = hash.GenerateKey( p );
+		for ( int j = hash.First( hashKey ); j >= 0; j = hash.Next( j ) ) {
+			if ( j == i ) {
+				continue;
+			}
+			if ( tri->verts[j].xyz[0] != p[0] || tri->verts[j].xyz[1] != p[1] || tri->verts[j].xyz[2] != p[2] ) {
+				continue;	// same hash bucket, different position
+			}
+			if ( orig[j] * orig[i] >= threshold ) {
+				sum += orig[j];
+				cnt++;
+			}
+		}
+		if ( cnt > 1 ) {
+			sum.Normalize();
+			tri->verts[i].normal = sum;
+		}
+	}
+
+	R_StaticFree( orig );
+}
+
+/*
+=================
 R_CreateSilIndexes
 
 Uniquing vertexes only on xyz before creating sil edges reduces

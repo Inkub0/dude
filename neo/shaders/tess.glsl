@@ -72,4 +72,21 @@ vec3 dudeTessPN( vec3 p0, vec3 p1, vec3 p2, vec3 n0, vec3 n1, vec3 n2, vec3 tc )
 	     + b111 * ( 6.0 * a * b * c );
 }
 
+// Normal-map displacement (docs/tessellation.md Phase 2). Doom 3 ships no runtime
+// height maps, so this approximates one from the bump (normal) map: the tangent-
+// space up component (blue channel, unaffected by the RXGB swizzle the fragment
+// path uses) is ~1 on flat areas and drops on detailed slopes, so relief = 1 - z
+// pushes detail along the geometric normal. u_tessParms.z is the signed strength
+// in world units (0 = off; + raises detail, - carves it in). Sampled at an
+// explicit LOD (no derivatives in a tese) so every pass reads the same texel and
+// the displaced depth stays identical across zfill / interaction / ambient.
+vec3 dudeTessDisplace( vec3 pos, vec3 geoN, sampler2D bumpMap, vec2 uv ) {
+	if ( u_tessParms.z == 0.0 ) {
+		return pos;
+	}
+	float bz = textureLod( bumpMap, uv, 0.0 ).z * 2.0 - 1.0;
+	float relief = 1.0 - clamp( bz, 0.0, 1.0 );
+	return pos + geoN * ( relief * u_tessParms.z );
+}
+
 #endif

@@ -32,6 +32,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "renderer/rhi/RHI.h"
 #include "renderer/rhi/GL3Local.h"
 #include "renderer/rhi/RenderParams.h"
+#include "renderer/rhi/RhiTess.h"
 #include "renderer/rhi/ArbParamsBlock.h"
 #include "renderer/rhi/MaterialIR.h"
 
@@ -2421,6 +2422,15 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			break;
 		}
 
+		// DUDE tessellation: a blood-overlay decal is a translucent blend stage added
+		// to the monster's model; PN-tessellate it (forBlendPass = true) so it follows
+		// the deformed base instead of the base clipping through it. Only the "generic"
+		// shader has a tess variant, so other stage kinds fall through untessellated.
+		const bool tess = RB_RHI_TessellateSurf( surf, true );
+		if ( tess ) {
+			RB_RHI_SetTessParms( parms );
+		}
+
 		rhi::BufferHandle ub;
 		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
@@ -2440,6 +2450,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		pd.shader = si.program;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = RB_RHI_CullFor( viewDef, shader->GetCullType() );
+		pd.tessellate = tess;
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;

@@ -984,6 +984,9 @@ extern idCVar r_tessellation;			// master toggle: PN-triangle smooth enemy/prop 
 extern idCVar r_tessLevel;				// subdivision level (1 = flat .. capped by device / 32)
 extern idCVar r_tessMaxDist;			// distance the subdivision starts rolling back toward flat
 extern idCVar r_tessMinEdge;			// min triangle edge length (world units) to tessellate (anti eye-bulge)
+extern idCVar r_tessDisplace;			// normal-map displacement strength (world units; +out/-in, 0=off)
+extern idCVar r_tessWeldSeams;			// weld coincident md5 normals so seams don't open under tess/displacement
+extern idCVar r_tessWeldThreshold;		// min normal dot to weld (1=only identical .. lower=weld harder edges)
 extern idCVar r_tessDebug;				// log each material name accepted for tessellation once (diagnostic)
 
 // DUDE: baked ambient-occlusion (occlusion) maps (enhancement backends only; docs/occlusion-maps.md)
@@ -1727,6 +1730,9 @@ srfTriangles_t *	R_MergeTriangles( const srfTriangles_t *tri1, const srfTriangle
 // if the deformed verts have significant enough texture coordinate changes to reverse the texture
 // polarity of a triangle, the tangents will be incorrect
 void				R_DeriveTangents( srfTriangles_t *tri, bool allocFacePlanes = true );
+// DUDE tessellation: average coincident-vertex normals (near-parallel only) so a
+// seamed mesh deforms as one piece under PN tessellation/displacement (r_tessWeldSeams)
+void				R_WeldSeamNormals( srfTriangles_t *tri, float threshold );
 
 // deformable meshes precalculate as much as possible from a base frame, then generate
 // complete srfTriangles_t from just a new set of vertexes

@@ -1777,6 +1777,18 @@ static CVarOption enhancementOptions[] = {
 		AddCVarOptionTooltips( cvar );
 		ImGui::EndDisabled();
 	} ),
+	CVarOption( "r_tessDisplace", []( idCVar& cvar ) {
+		ImGui::BeginDisabled( !r_tessellation.GetBool() );
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Displacement", &f, -4.0f, 4.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( f );
+		}
+		const char* descr = "Normal-map displacement: push surface detail along the normal by this many world\n"
+			"units. Doom 3 has no runtime height maps, so height is approximated from the bump\n"
+			"map, positive raises detail, negative carves it in. 0 = pure PN silhouette smoothing.";
+		AddCVarOptionTooltips( cvar, descr );
+		ImGui::EndDisabled();
+	} ),
 	CVarOption( "r_tessMaxDist", []( idCVar& cvar ) {
 		ImGui::BeginDisabled( !r_tessellation.GetBool() );
 		float f = cvar.GetFloat();
@@ -2370,6 +2382,12 @@ struct EnhancementPreset {
 	// tiers (their per-frame AO is already clean) and inert on Potato/Low (SSAO
 	// off), so it stays off everywhere else.
 	bool  ssaoTemporal;             // r_ssaoTemporal
+	// DUDE GPU tessellation (appended, see note above; Vulkan-only, inert elsewhere):
+	// PN-triangle character smoothing from High up, normal-map displacement from Ultra
+	// up. tessDisplace carried as 0 on the lower tiers so tessellation there (if hand-
+	// enabled) is pure silhouette smoothing.
+	bool  tessellation;             // r_tessellation
+	float tessDisplace;             // r_tessDisplace
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2378,13 +2396,13 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 32.0f,  false },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 32.0f,  false },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 3,   2,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 32.0f,  true  },
-	{ "High",         true,  false, true,  true,  true,   0.75f, 3,   3,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 64.0f,  false },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 6,   4,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 96.0f,  false },
-	{ "Nightmare", true, true, true, true,  true,   1.0f, 7,   5,   true,  true,  2048, 2048, 12, 128,  48,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 128.0f, false },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 32.0f,  false,  false, 0.0f },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 32.0f,  false,  false, 0.0f },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 3,   2,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 32.0f,  true,   false, 0.0f },
+	{ "High",         true,  false, true,  true,  true,   0.75f, 3,   3,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 64.0f,  false,  true,  0.0f },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 6,   4,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 96.0f,  false,  true,  -0.25f },
+	{ "Nightmare", true, true, true, true,  true,   1.0f, 7,   5,   true,  true,  2048, 2048, 12, 128,  48,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 128.0f, false,  true,  -0.25f },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2439,6 +2457,11 @@ static void ApplyEnhancementPreset( int idx )
 	r_pbr.SetBool( p.pbr );
 	r_ssr.SetBool( p.ssr );
 	r_ssrResScale.SetFloat( p.ssrResScale );
+
+	// GPU tessellation (Vulkan-only; inert on GL3): character smoothing from High,
+	// normal-map displacement from Ultra.
+	r_tessellation.SetBool( p.tessellation );
+	r_tessDisplace.SetFloat( p.tessDisplace );
 }
 
 // Return the preset whose full cvar vector the live cvars currently match, or -1
@@ -2480,7 +2503,9 @@ static int DetectEnhancementPreset()
 			r_hdr.GetBool()                    == p.hdr &&
 			r_pbr.GetBool()                    == p.pbr &&
 			r_ssr.GetBool()                    == p.ssr &&
-			idMath::Fabs( r_ssrResScale.GetFloat() - p.ssrResScale ) < 0.01f;
+			idMath::Fabs( r_ssrResScale.GetFloat() - p.ssrResScale ) < 0.01f &&
+			r_tessellation.GetBool()           == p.tessellation &&
+			idMath::Fabs( r_tessDisplace.GetFloat() - p.tessDisplace ) < 0.01f;
 		if ( match ) {
 			return i;
 		}
@@ -2836,6 +2861,24 @@ static void DrawShadowDebugMenu()
 	}
 	AddTooltip( "r_tessDebug: print each material name accepted for tessellation once (with model type and "
 		"entity index) to the console, so a mis-tessellated surface can be identified. Vulkan only." );
+
+	bool tessWeld = r_tessWeldSeams.GetBool();
+	if ( ImGui::Checkbox( "Weld Seam Normals", &tessWeld ) ) {
+		r_tessWeldSeams.SetBool( tessWeld );
+	}
+	AddTooltip( "r_tessWeldSeams: average coincident vertex normals on animated meshes so a model built from "
+		"mirrored/UV-split halves deforms as one piece (no seam opening) under tessellation + displacement. "
+		"Off = vanilla normals." );
+
+	ImGui::BeginDisabled( !r_tessWeldSeams.GetBool() );
+	float tessWeldThr = r_tessWeldThreshold.GetFloat();
+	if ( ImGui::SliderFloat( "Seam Weld Threshold", &tessWeldThr, 0.0f, 1.0f, "%.2f", 0 ) ) {
+		r_tessWeldThreshold.SetFloat( tessWeldThr );
+	}
+	AddTooltip( "r_tessWeldThreshold: only coincident normals whose dot product is at least this get welded. "
+		"1 = weld only identical normals; lower also welds sharper creases (0.7 closes seams while keeping "
+		"hard edges)." );
+	ImGui::EndDisabled();
 	ImGui::EndDisabled();
 
 	// DUDE PBR materials (docs/pbr-materials.md): every live tuning knob for the

@@ -24,6 +24,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "renderer/rhi/RHI.h"
 #include "renderer/rhi/GL3Local.h"
 #include "renderer/rhi/RenderParams.h"
+#include "renderer/rhi/RhiTess.h"
 #include "framework/FileSystem.h"
 #include "framework/DeclSkin.h"					// idDeclSkin (entity skin -> AO name for lazy bake)
 #include "tools/compilers/aobake/aobake.h"		// AO_BakeModelToCache (lazy occlusion-map baking)
@@ -533,14 +534,16 @@ RB_RHI_TessellateSurf
 
 DUDE tessellation (docs/tessellation.md): should this surface route through the
 PN-triangle tessellation pipeline? True only on the Vulkan backend with
-r_tessellation on, for a movable entity's mesh — the worldspawn BSP (index 0) is
-left flat (its large coplanar tris gain nothing and would explode the patch
-count), and the first-person viewmodel (depth-hacked) is skipped. The same test
-runs in the depth prepass and the interaction pass so both agree — a surface
-tessellated in one but not the other would break the depth-EQUAL interaction.
+r_tessellation on, for a character/monster mesh — the worldspawn BSP (index 0),
+static props and the first-person viewmodel are left flat. The opaque prepass +
+interaction/ambient passes call with forBlendPass = false (they must agree under
+depth-EQUAL, so translucent / pure-emissive surfaces are excluded); the blended
+material pass calls with forBlendPass = true so blood-overlay decals — translucent,
+projected onto the monster's model — tessellate too and follow the deformed base.
 ===================
 */
-static bool RB_RHI_TessellateSurf( const drawSurf_t *surf ) {
+bool RB_RHI_TessellateSurf( const drawSurf_s *surfIn, bool forBlendPass ) {
+	const drawSurf_t *surf = surfIn;
 	if ( !r_tessellation.GetBool()
 	     || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
 		return false;
@@ -553,20 +556,38 @@ static bool RB_RHI_TessellateSurf( const drawSurf_t *surf ) {
 		return false;
 	}
 	const idMaterial *mat = surf->material;
-	if ( mat == NULL || mat->Coverage() == MC_TRANSLUCENT || mat->HasGui() ) {
+	if ( mat == NULL || mat->HasGui() ) {
+		return false;
+	}
+	// Translucent surfaces don't seal depth, so they can't tessellate in the opaque
+	// prepass/interaction passes (depth-EQUAL). The blended pass, though, draws them
+	// directly — where following the tessellated base is exactly what a blood decal
+	// needs — so allow them there.
+	if ( !forBlendPass && mat->Coverage() == MC_TRANSLUCENT ) {
 		return false;
 	}
 	const char *matName = mat->GetName();
 
-	// Characters/monsters only. PN triangles assume vertex normals encode real
-	// curvature — true for organic skinned meshes, false for hard-surface props
-	// (cabinets, crates, chairs), whose lighting-smoothed normals make PN balloon the
-	// flat panels. Rather than trust IsDynamicModel() (a knocked-over moveable becomes
-	// a dynamic AF ragdoll and slips a DM_STATIC test — that's how chair3 leaked), gate
-	// on the asset path: real actors live under models/characters/ or models/monsters/,
-	// every static prop under models/mapobjects/. (docs/tessellation.md)
-	if ( idStr::FindText( matName, "models/characters/", false ) == -1
-	  && idStr::FindText( matName, "models/monsters/", false ) == -1 ) {
+	// Characters/monsters only, gated on the ENTITY's model path rather than the
+	// surface material. A blood overlay is added to the monster's model but carries a
+	// textures/decals material — the entity's model still resolves to the monster md5,
+	// so it's recognised as monster geometry and can follow the deformed base. This is
+	// also more robust than IsDynamicModel() for props (a knocked-over moveable becomes
+	// a dynamic AF ragdoll and slipped a DM_STATIC test — that's how chair3 leaked).
+	// md5 model files live under models/md5/monsters/ (monsters), models/md5/chars/
+	// (human NPC bodies — security, marine, suit, labcoat...), models/md5/characters/
+	// (NPC def_head heads: models/md5/characters/npcs/heads|zheads/...) and
+	// models/md5/heads/ (the main-character def_heads — betruger, campbell, swann,
+	// sarge, player). Match all four substrings so every human/monster body AND head
+	// tessellates. Every md5mesh whose path contains "heads/" is a character/zombie
+	// head (verified — no props or world geometry live there), so "heads/" is safe.
+	// Props are models/mapobjects/, cutscene actors models/md5/cinematics/ (left flat).
+	const idRenderModel *entModel = space->entityDef->parms.hModel;
+	const char *modelName = entModel ? entModel->Name() : "";
+	if ( idStr::FindText( modelName, "monsters/", false ) == -1
+	  && idStr::FindText( modelName, "characters/", false ) == -1
+	  && idStr::FindText( modelName, "chars/", false ) == -1
+	  && idStr::FindText( modelName, "heads/", false ) == -1 ) {
 		return false;
 	}
 	// Small, highly convex facial sub-meshes (eyes, teeth, tongue, mouth interiors,
@@ -582,49 +603,105 @@ static bool RB_RHI_TessellateSurf( const drawSurf_t *surf ) {
 	//    (left*/right* eyes, teeth*, tongue) — all facial bits, no body geometry.
 	//  - "lashes" (not "lash") avoids matching the commando's muzzle flash (mflash).
 	// (docs/tessellation.md)
+	// Rigid headgear — helmets, goggles/visors, eyeglasses — is hard, thin, often
+	// near-flat shell geometry: PN smoothing balloons it and inward displacement
+	// cracks the visor/lens open (the security guard's goggles broke visibly). It
+	// gains nothing from tessellation (it isn't organic), so exclude it while the
+	// surrounding face skin/ears still smooth.
+	//  - "gog"      : security guard headgear when the regsec skin is applied
+	//                 (helmet+goggles+mask baked as one material,
+	//                 models/characters/male_npc/security/gog).
+	//  - "zsechead" : the security head *shell* itself (models/monsters/zsecurity/
+	//                 zsechead2/zsechead3) — the helmeted head, shared by the living
+	//                 guard and the zombie-sec (skins just pick which name shows, so
+	//                 both spellings turn up depending on the guard). The zsec zombie
+	//                 *body* is dsecurity/zsheild, not zsechead, so it still smooths.
+	//  - "gogs"/"marsec": the goggle lenses + mars-sec mask on that head
+	//                 (zsgogs/zsgogs2 also match "gog").
+	//  - "helmet"   : sarge/marine helmets (models/characters/sarge2/helmet...).
+	//  - "glasses"  : scientist eyeglasses (models/characters/scientist/head02/
+	//                 glasses2 + its glasses2_fx lens-reflection pass).
+	// (confirmed by r_tessDebug capture; docs/tessellation.md)
 	static const char * const tessSkipNames[] = {
-		"eye", "teeth", "tongue", "mouth", "jaw", "lashes", "characters/common/"
+		"eye", "teeth", "tongue", "mouth", "jaw", "lashes", "characters/common/",
+		"gog", "zsechead", "marsec", "helmet", "glasses"
 	};
 	for ( int i = 0; i < (int)( sizeof( tessSkipNames ) / sizeof( tessSkipNames[0] ) ); i++ ) {
 		if ( idStr::FindText( matName, tessSkipNames[i], false ) != -1 ) {
 			return false;
 		}
 	}
-	// Only pure lit surfaces tessellate. A material with any ambient (SL_AMBIENT)
-	// stage — emissive screens/monitors, glow, blend, texgen — is ALSO drawn flat
-	// in the depth-EQUAL ambient/material pass (RB_RHI_RenderShaderStages), and
-	// GUI surfaces in the GUI pass, neither of which is tessellated. Sealing such a
-	// surface's depth at the PN position in the prepass would drop that flat redraw
-	// (dark/shimmering panels). Lit interaction stages carry no SL_AMBIENT flag, so
-	// this leaves ordinary enemies/props tessellated. (docs/tessellation.md)
-	for ( int i = 0; i < mat->GetNumStages(); i++ ) {
-		if ( mat->GetStage( i )->lighting == SL_AMBIENT ) {
+	// For the OPAQUE passes, exclude purely emissive surfaces (no lit stage) — a
+	// monitor/screen/glow panel is drawn only in the flat depth-EQUAL ambient pass,
+	// never tessellated, so sealing its depth at the PN position would drop it
+	// (dark/shimmering panels). A lit surface that ALSO carries an ambient/blend stage
+	// (e.g. the imp's conditional "burning corpse" FX over its bump/diffuse/specular)
+	// still tessellates. In the blended pass we ARE that ambient/decal draw, so a
+	// pure-ambient surface (a blood decal) is exactly what we want to tessellate there.
+	if ( !forBlendPass ) {
+		bool hasLitStage = false;
+		for ( int i = 0; i < mat->GetNumStages(); i++ ) {
+			if ( mat->GetStage( i )->lighting != SL_AMBIENT ) {
+				hasLitStage = true;
+				break;
+			}
+		}
+		if ( !hasLitStage ) {
 			return false;
 		}
 	}
 
-	// r_tessDebug: log each material name accepted for tessellation once, so a
-	// surface that shouldn't be tessellated (a leaked eye/glasses material) can be
-	// pinned down by walking up to the offending character and reading the console.
+	// r_tessDebug: log each accepted material once, together with the model it belongs
+	// to, so a surface that shouldn't be tessellated (a leaked eye/glasses/visor
+	// material) can be pinned down by walking up to the offending character and reading
+	// the console — the model name tells us which .md5mesh (body vs def_head) it is.
 	if ( r_tessDebug.GetBool() ) {
 		static idList<idStr> tessLogged;
 		if ( tessLogged.FindIndex( idStr( matName ) ) == -1 ) {
 			tessLogged.Append( idStr( matName ) );
 			const idRenderModel *m = space->entityDef->parms.hModel;
-			common->Printf( "tess: %s (dm=%d idx=%d)\n", matName,
+			common->Printf( "tess: %s  <-  %s (dm=%d idx=%d)\n", matName,
+			                m ? m->Name() : "<null>",
 			                m ? (int)m->IsDynamicModel() : -1, space->entityDef->index );
 		}
 	}
 	return true;
 }
 
-// fill the tess params (level, LOD falloff distance) into a RenderParams the
-// tessellation stages read; global cvar values, identical in both passes.
-static void RB_RHI_SetTessParms( rhi::RenderParams &parms ) {
+// fill the tess params (level, LOD distance, displacement, min edge) into a
+// RenderParams the tessellation stages read; global cvar values, identical in
+// every pass so zfill/interaction/ambient displace to the same depth.
+void RB_RHI_SetTessParms( rhi::RenderParams &parms ) {
 	parms.tessParms[0] = r_tessLevel.GetFloat();
 	parms.tessParms[1] = r_tessMaxDist.GetFloat();
-	parms.tessParms[2] = 0.0f;	// displacement strength (Phase 2)
+	parms.tessParms[2] = r_tessDisplace.GetFloat();	// Phase 2 displacement strength
 	parms.tessParms[3] = r_tessMinEdge.GetFloat();	// min edge length to subdivide (anti eye-bulge)
+}
+
+// zfill-only: for a tessellated surface, copy the bump stage's texture matrix into
+// parms (so the depth prepass builds the SAME bump texcoord the lit passes displace
+// with) and return the bump image to bind on unit 1. Mirrors R_SetDrawInteraction /
+// the SSAO G-buffer so the displacement is bit-identical → depth-EQUAL holds.
+static idImage *RB_RHI_TessBumpForZfill( const drawSurf_t *surf, rhi::RenderParams &parms ) {
+	const shaderStage_t *bumpStage = surf->material->GetBumpStage();
+	const float *regs = surf->shaderRegisters;
+	idImage *bumpImg = globalImages->flatNormalMap;
+	parms.bumpMatrixS[0] = 1.0f;
+	parms.bumpMatrixT[1] = 1.0f;
+	if ( bumpStage && bumpStage->texture.image ) {
+		bumpImg = bumpStage->texture.image;
+		if ( bumpStage->texture.hasMatrix ) {
+			parms.bumpMatrixS[0] = regs[bumpStage->texture.matrix[0][0]];
+			parms.bumpMatrixS[1] = regs[bumpStage->texture.matrix[0][1]];
+			parms.bumpMatrixS[3] = regs[bumpStage->texture.matrix[0][2]];
+			parms.bumpMatrixT[0] = regs[bumpStage->texture.matrix[1][0]];
+			parms.bumpMatrixT[1] = regs[bumpStage->texture.matrix[1][1]];
+			parms.bumpMatrixT[3] = regs[bumpStage->texture.matrix[1][2]];
+			if ( parms.bumpMatrixS[3] < -40.0f || parms.bumpMatrixS[3] > 40.0f ) parms.bumpMatrixS[3] -= (int)parms.bumpMatrixS[3];
+			if ( parms.bumpMatrixT[3] < -40.0f || parms.bumpMatrixT[3] > 40.0f ) parms.bumpMatrixT[3] -= (int)parms.bumpMatrixT[3];
+		}
+	}
+	return bumpImg;
 }
 
 /*
@@ -884,7 +961,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// per-light interaction pass must tessellate whenever the depth prepass did,
 	// or the depth-EQUAL test drops the surface (docs/tessellation.md). The
 	// interaction and ambientlight shaders both carry a tess variant.
-	const bool tess = RB_RHI_TessellateSurf( din->surf );
+	const bool tess = RB_RHI_TessellateSurf( din->surf, false );
 	if ( tess ) {
 		RB_RHI_SetTessParms( parms );
 	}
@@ -1233,7 +1310,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// DUDE tessellation: the prepass must PN-subdivide enemy/prop surfaces
 		// with the exact factors the interaction pass uses, so the sealed depth
 		// lines up under the depth-EQUAL interactions (docs/tessellation.md).
-		const bool tess = RB_RHI_TessellateSurf( surf );
+		const bool tess = RB_RHI_TessellateSurf( surf, false );
 
 		rhi::PipelineDesc pd;
 		pd.stateBits = stateBits;
@@ -1289,14 +1366,19 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 					parms.diffuseMatrixS[0] = 1.0f;
 					parms.diffuseMatrixT[1] = 1.0f;
 				}
+				idImage *tessBump = NULL;
 				if ( tess ) {
 					RB_RHI_SetTessParms( parms );
+					tessBump = RB_RHI_TessBumpForZfill( surf, parms );
 				}
 
 				rhi::BufferHandle ub;
 				int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 				RB_RHI_BindUnit( 0, pStage->texture.image );
+				if ( tess ) {
+					RB_RHI_BindUnit( 1, tessBump );
+				}
 				RB_RHI_VkTextures( da );
 				r->BindPipeline( pd );
 				da.uniformBuffer = ub;
@@ -1318,14 +1400,19 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 			memcpy( parms.clipPlane, localClipPlane, sizeof( parms.clipPlane ) );
 			parms.diffuseMatrixS[0] = 1.0f;
 			parms.diffuseMatrixT[1] = 1.0f;
+			idImage *tessBump = NULL;
 			if ( tess ) {
 				RB_RHI_SetTessParms( parms );
+				tessBump = RB_RHI_TessBumpForZfill( surf, parms );
 			}
 
 			rhi::BufferHandle ub;
 			int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 			RB_RHI_BindUnit( 0, globalImages->whiteImage );
+			if ( tess ) {
+				RB_RHI_BindUnit( 1, tessBump );
+			}
 			RB_RHI_VkTextures( da );
 			r->BindPipeline( pd );
 			da.uniformBuffer = ub;

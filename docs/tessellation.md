@@ -144,22 +144,30 @@ displacement layer.
   `shaders/spv/<name>.tesc.spv` + `.tese.spv` exist; descriptor set layouts include
   the tess stages; `PipelineDesc::tessellate` drives a patch-list +
   `VkPipelineTessellationStateCreateInfo` variant on its own pipeline-key bit.
-- **Phase 2 (shaders) — PN only, built; displacement pending.** `tess.glsl`
-  (PN-triangle eval + crack-free per-edge factor). `interaction` / `ambientlight` /
-  `zfill` each got a `.tesc` + `.tese`; their `.vert` emit model-space pos+normal for
-  the PN net. The tese linearly interpolates the varyings (matches the flat
-  rasterizer — PN only reshapes the silhouette) and recomputes `gl_Position`
-  (`invariant`, so the three passes and the prepass agree under depth-EQUAL). All
-  passes that draw these surfaces under depth-EQUAL are covered: **zfill (prepass),
-  interaction, ambientlight.** Displacement (`u_tessParms.z`) is wired through the
-  UBO but unused (strength forced 0).
-- **Phase 3 (controls) — built.** `r_tessellation` (0) / `r_tessLevel` (4) /
-  `r_tessMinEdge` (0.72) / `r_tessMaxDist` (512) / `r_tessDebug` (0). `RB_RHI_TessellateSurf`
+- **Phase 2 (shaders) — built (PN + normal-map displacement).** `tess.glsl`
+  (PN-triangle eval + crack-free per-edge factor + `dudeTessDisplace`).
+  `interaction` / `ambientlight` / `zfill` each got a `.tesc` + `.tese`; their `.vert`
+  emit model-space pos+normal (and a bump texcoord) for the PN net. The tese linearly
+  interpolates the varyings (matches the flat rasterizer) and recomputes `gl_Position`
+  (`invariant`). **Displacement:** each tese pushes the PN position along the
+  interpolated geometric normal by `r_tessDisplace` × a pseudo-height (Doom 3 ships no
+  runtime height maps, so height ≈ `1 - bumpN.z` from the bump map's blue channel,
+  sampled with `textureLod(...,0)` so it's derivative-free and identical across passes).
+  All three depth-EQUAL passes (zfill/interaction/ambient) bind the same bump map on
+  unit 1 with the same bump matrix and apply the same displacement, so the prepass and
+  lit passes still agree bit-for-bit. `r_tessDisplace 0` = pure PN smoothing.
+- **Phase 3 (controls) — built.** `r_tessellation` (0) / `r_tessLevel` (5) /
+  `r_tessMinEdge` (0.72) / `r_tessMaxDist` (160) / `r_tessDisplace` (-0.25) / `r_tessDebug` (0). `RB_RHI_TessellateSurf`
   routes by **asset path** — only `models/characters/` and `models/monsters/` (real skinned
-  actors); worldspawn BSP, all `models/mapobjects/` props, view-model, GUI/emissive/
-  translucent, and the named facial sub-meshes are excluded. **ImGui**: Enhancements tab →
-  "Tessellation (only Vulkan)" = on/off + Level (+ Distance); Debugging tab → Min Triangle
-  Size + "Log Tessellated Materials" (`r_tessDebug`, prints `name (dm=… idx=…)` once each).
+  actors); worldspawn BSP, all `models/mapobjects/` props, view-model, translucent, GUI,
+  and the named facial sub-meshes are excluded. Emissive: only **purely** emissive surfaces
+  (no lit stage) are excluded — a lit monster that also has a glow/FX blend stage (e.g. the
+  imp's conditional "burning corpse" stages over its bump/diffuse/specular) still tessellates. **ImGui**: Enhancements tab →
+  "Tessellation (only Vulkan)" = on/off + Level + Displacement (+ Distance); Debugging tab →
+  Min Triangle Size + "Log Tessellated Materials" (`r_tessDebug`, prints `name (dm=… idx=…)`
+  once each). **Quality presets** (`enhancementPresets[]`): tessellation on from **High** up;
+  displacement (`-0.25`) from **Ultra** up. `r_tessDisplace` default is **-0.25** (so a
+  hand-enabled toggle displaces; the lower preset tiers pin it to 0).
 
 Branch: `feat/vulkan-tessellation`.
 
@@ -219,11 +227,53 @@ dropouts on lit surfaces) is still pending — needs an in-engine look.**
   `r_tessMinEdge` can stay low (default **0.66**) to catch ears/fingers while the facial
   bits stay put.
 
+### Rigid headgear excluded + main-character heads included (2026-08-04)
+Ground-truthed with `r_tessDebug 1` + `condump` (the log now prints
+`material  <-  model` so a surface can be traced to its `.md5mesh`):
+- **Rigid headgear** — helmets, goggles/visors, eyeglasses — is hard, thin, near-flat
+  shell geometry. PN balloons it and inward displacement cracks the visor/lens open (the
+  security guard's goggles broke visibly). It's not organic and gains nothing from
+  tessellation, so these material substrings join the skip list: **`gog`** (security
+  guard headgear under the regsec skin, `.../security/gog`), **`zsechead`** (the security
+  head *shell* itself — `zsecurity/zsechead2`/`zsechead3`, shared by the living guard and
+  the zombie-sec; the zsec zombie *body* is `dsecurity`/`zsheild`, not `zsechead`, so it
+  still smooths), **`marsec`** (the mars-sec mask), **`helmet`** (`sarge2/helmet`…),
+  **`glasses`** (`scientist/head02/glasses2` + its `glasses2_fx` lens pass). `zsgogs`/
+  `zsgogs2` also match `gog`. None collide with a body/face material.
+- **Main-character heads now tessellate.** NPC heads live under
+  `models/md5/characters/npcs/heads/` (matched by `characters/`), but the hero def_heads
+  (Betruger, Campbell, Swann, Sarge, player) live under `models/md5/heads/` — which the
+  model-path gate missed. Added **`heads/`** to the gate; every `.md5mesh` whose path
+  contains `heads/` is a character/zombie head (no props/world geometry), so it's safe.
+
+### Blood-overlay decals follow the mesh (2026-08-04)
+`idRenderModelOverlay` blood decals are added to the monster's model as their own
+(translucent) surfaces. They're routed through a **PN tess variant of the `generic`
+blend shader** (`generic.tesc`/`.tese`; `RB_RHI_TessellateSurf(surf, /*forBlendPass*/true)`
+in the blended stage draw, gated on the entity's **model path** so decals-on-monsters
+count as monster geometry). Overlay verts are memset to zero and never got a normal, so
+PN produced `normalize(0) = NaN` and the decal vanished — fixed in
+[`ModelOverlay.cpp`](../neo/renderer/ModelOverlay.cpp) by copying the base vertex's
+normal/tangents onto the overlay vertex. Decals now PN-follow the base (they carry no
+bump, so they ride the silhouette but not the displacement — polygon offset hides the
+small residual). Classifier gates on `models/md5/monsters/` `models/md5/characters/`
+(the md5 file paths) via the `monsters/` / `characters/` substrings.
+
+### Seam welding (2026-08-04) — `r_tessWeldSeams` (off by default)
+Doom 3 md5 meshes are built from mirrored / UV-split halves — coincident vertices that
+get independent normals, so PN + displacement pull the seam open (displacement worse,
+since the two sides also sample different UVs). `R_WeldSeamNormals`
+([tr_trisurf.cpp](../neo/renderer/tr_trisurf.cpp)) averages coincident-vertex normals
+whose normals are **near-parallel** (`dot >= r_tessWeldThreshold`, default 0.7) so the
+mesh deforms as one piece; the threshold preserves genuine hard creases. Runs in
+`idMD5Mesh::UpdateSurface` (md5 only — world lighting untouched), only when the cvar is
+on (vanilla is byte-identical off). Closes PN seams fully; displacement across a UV seam
+keeps a small residual (different heights). Threshold is a Debugging-tab slider.
+
 ### Known prototype limitations (Phase 2+ follow-ups)
-- **Displacement not yet applied** (PN silhouette smoothing only).
 - **Static props excluded** (PN is wrong for hard-surface geometry). A curvature-aware
   scheme could re-admit rounded props but won't save boxes — deferred; opt-in later.
 - **GUI / emissive / blend / fog surfaces excluded** (they draw flat in a
   non-tessellated depth-EQUAL pass).
-- **PN hard-edge cracks** at UV/smoothing seams (tiny gap at the NPC arm/hand seam).
+- **Displacement across UV seams** keeps a small residual even with seam welding.
 - **Stencil-shadow silhouettes** come from the un-tessellated base mesh (accepted).
