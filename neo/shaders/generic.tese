@@ -8,7 +8,9 @@
 #include "renderparms.glsl"
 #include "tess.glsl"
 
-layout(triangles, equal_spacing, cw) in;
+layout(triangles, fractional_odd_spacing, cw) in;	// fractional = smooth LOD:
+										// new verts slide in as the distance factor changes instead of popping.
+										// Must match in every pass (crack-free + depth-EQUAL).
 
 VARY(0) in vec2 i_TexCoord[];
 VARY(1) in vec4 i_Color[];

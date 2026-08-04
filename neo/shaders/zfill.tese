@@ -8,7 +8,9 @@
 
 SAMPLER_BINDING(1) uniform sampler2D u_bumpMap;	// normal map, for Phase 2 displacement
 
-layout(triangles, equal_spacing, cw) in;
+layout(triangles, fractional_odd_spacing, cw) in;	// fractional = smooth LOD:
+										// new verts slide in as the distance factor changes instead of popping.
+										// Must match in every pass (crack-free + depth-EQUAL).
 
 VARY(0) in vec2 i_TexCoord[];
 VARY(1) in vec3 i_ModelPos[];
