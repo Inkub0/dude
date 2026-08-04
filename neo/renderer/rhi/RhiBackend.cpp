@@ -762,6 +762,24 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	rbHdrActiveThisFrame = false;
 	rbHdrFrameActive = false;
 
+	// Baking a glass reflection probe (bakeGlassProbe, tr.takingEnvProbe): the six
+	// 90-degree faces must be the clean scene, so they stay on the straight-to-
+	// sceneColor path with no offscreen post target. Two reasons this matters:
+	//   1. Fidelity — film grain / chromatic aberration / tonemapping belong on the
+	//      final frame, not baked into a texture the live frame then samples *and*
+	//      re-posts; the probe would double up (the buggy captures literally showed
+	//      the HUD + aberration fringe of the frame behind the bake).
+	//   2. Correctness — the probe renders at the tile size (r_ssrGlassProbeSize,
+	//      e.g. 256) while the Vulkan scene image stays the swapchain size, so the
+	//      offscreen target is sized to the tile but every GL->VK y-flip still uses
+	//      sceneExtent (the window height). The scene then resolves/reads back out of
+	//      register (the validation copy/blit/clear-attachment errors) and the probe
+	//      face captured stale full-window content instead. The no-target path keeps
+	//      all coordinates on one height (sceneExtent == sceneColor), like GL.
+	if ( tr.takingEnvProbe ) {
+		return;
+	}
+
 	const bool wantHdr = r_hdr.GetBool() && R_BackendSupportsEnhancements();
 
 	// Off-HDR post (Vulkan only): the GL backend runs film grain / chromatic
