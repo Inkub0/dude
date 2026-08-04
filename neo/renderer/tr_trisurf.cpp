@@ -381,7 +381,28 @@ void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 	if ( tri->verts != NULL ) {
 		// R_CreateLightTris points tri->verts at the verts of the ambient surface
 		if ( tri->ambientSurface == NULL || tri->verts != tri->ambientSurface->verts ) {
-			triVertexAllocator.Free( tri->verts );
+			// dhewm-rt hardening for a latent, backend-agnostic stock-Doom3 double-free
+			// (still present through dhewm3 1.5.5): an idRenderModelOverlay decal surface
+			// baked onto an animated model can have its verts block freed twice when the
+			// base model is gone/changed at overlay-apply time (e.g. killing a scripted
+			// actor before a model swap). CheckMemory() returns non-NULL once the block is
+			// already back in the free-tree (that is exactly the Heap.h:839
+			// "block->node == NULL" abort). Skip the redundant free instead of aborting.
+			// One-shot event at the actor's death, so the skipped block is a single
+			// harmless leak. See docs/known-bugs.md.
+			if ( triVertexAllocator.CheckMemory( tri->verts ) != NULL ) {
+				static bool reportedVertDoubleFree = false;
+				if ( !reportedVertDoubleFree ) {
+					reportedVertDoubleFree = true;
+					common->Printf( "R_ReallyFreeStaticTriSurf: skipped a redundant verts free "
+						"(known inherited overlay/decal double-free, harmless; prints once). "
+						"surf numVerts=%d numIndexes=%d deformed=%d ambientSurf=%s silIdx=%s\n",
+						tri->numVerts, tri->numIndexes, tri->deformedSurface ? 1 : 0,
+						tri->ambientSurface ? "yes" : "no", tri->silIndexes ? "yes" : "no" );
+				}
+			} else {
+				triVertexAllocator.Free( tri->verts );
+			}
 		}
 	}
 
