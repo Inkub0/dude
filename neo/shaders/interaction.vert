@@ -20,8 +20,15 @@ VARY(6) out vec3 var_TexHalfVec;    // texcoord[6]: half-angle vector in tangent
 VARY(7) out vec4 var_Color;
 VARY(8) out vec3 var_TexViewVec;    // view vector in tangent space (PBR path only)
 VARY(9) out vec3 var_ShadowCubeVec; // world-space light->frag vector (point-light cube shadow)
+// model-space position + normal, consumed only by the tessellation stages
+// (DUDE tessellation, docs/tessellation.md) for the PN control net. Unused by
+// the fragment shader — a benign "output not consumed" in the flat pipeline.
+VARY(10) out vec3 var_ModelPos;
+VARY(11) out vec3 var_ModelNormal;
 
 void main() {
+	var_ModelPos = attr_Position.xyz;
+	var_ModelNormal = attr_Normal;
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
 
 	// vector to light in tangent space

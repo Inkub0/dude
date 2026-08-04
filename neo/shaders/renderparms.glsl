@@ -81,4 +81,10 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // instead of the physical full kill. y = shadow
 	                            // slope-scaled bias strength (r_shadowMapSlopeBias;
 	                            // set in the shadow block, independent of r_pbr). zw spare.
+
+	vec4 u_tessParms;            // DUDE tessellation (docs/tessellation.md):
+	                            // x = tess level (subdivision cap; 1 = flat),
+	                            // y = max view distance for the LOD falloff,
+	                            // z = displacement strength (0 = pure PN smoothing),
+	                            // w spare. Consumed by the .tesc / .tese stages only.
 };

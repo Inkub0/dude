@@ -329,6 +329,12 @@ private:
 		idStr			name;
 		VkShaderModule	vert = VK_NULL_HANDLE;
 		VkShaderModule	frag = VK_NULL_HANDLE;
+		// optional tessellation stages (DUDE tessellation, docs/tessellation.md).
+		// Loaded when shaders/spv/<name>.tesc.spv + .tese.spv exist; a pipeline
+		// built with PipelineDesc::tessellate appends them and switches to a
+		// patch-list topology. NULL for every shader without a tess variant.
+		VkShaderModule	tesc = VK_NULL_HANDLE;
+		VkShaderModule	tese = VK_NULL_HANDLE;
 		bool			failed = false;
 	};
 	std::vector<ShaderRec>		shaderTable;			// handle = index + 1
@@ -478,6 +484,11 @@ private:
 	// device features actually enabled (queried before device creation)
 	bool						haveAnisotropy = false;
 	bool						haveFillModeNonSolid = false;
+	// tessellationShader (optional; universal on desktop). Gates the whole DUDE
+	// tessellation feature: without it no tess pipeline is ever built and the
+	// tess shader modules are skipped. maxTessGenLevel bounds the slider.
+	bool						haveTessellation = false;
+	uint32_t					maxTessGenLevel = 64;
 
 	std::unordered_map<unsigned long long, VkPipeline>	pipelineCache;
 	// disk-persisted DRIVER pipeline cache (distinct from the map above, which is our
@@ -855,6 +866,13 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	haveFillModeNonSolid = supported.fillModeNonSolid == VK_TRUE;
 	enabled.samplerAnisotropy = haveAnisotropy ? VK_TRUE : VK_FALSE;
 	enabled.fillModeNonSolid = haveFillModeNonSolid ? VK_TRUE : VK_FALSE;
+	// DUDE tessellation (docs/tessellation.md): PN-triangle smoothing of enemy/
+	// prop meshes. Optional feature, but present on every desktop GPU we target.
+	haveTessellation = supported.tessellationShader == VK_TRUE;
+	enabled.tessellationShader = haveTessellation ? VK_TRUE : VK_FALSE;
+	if ( haveTessellation ) {
+		maxTessGenLevel = physProps.limits.maxTessellationGenerationLevel;
+	}
 	// zfill.vert always writes gl_ClipDistance[0] (subview near clip; zero
 	// plane when unused) — universal on desktop
 	if ( supported.shaderClipDistance ) {
@@ -1927,13 +1945,20 @@ bool VulkanBackend::CreateM2Resources() {
 		}
 	}
 
+	// tess stages read the same UBO (matrices, tess params, light origin) and,
+	// for displacement, the same texture set; fold the bits in only when the
+	// device supports tessellation (else the flags reference an unusable stage).
+	const VkShaderStageFlags tessStages = haveTessellation
+		? ( VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT )
+		: 0;
+
 	// set 0: one dynamic-offset UBO reused for every draw
 	{
 		VkDescriptorSetLayoutBinding b = {};
 		b.binding = 0;
 		b.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 		b.descriptorCount = 1;
-		b.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+		b.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | tessStages;
 		VkDescriptorSetLayoutCreateInfo li = {};
 		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
 		li.bindingCount = 1;
@@ -1950,7 +1975,7 @@ bool VulkanBackend::CreateM2Resources() {
 			b[i].binding = (uint32_t)i;
 			b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 			b[i].descriptorCount = 1;
-			b[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+			b[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | tessStages;
 		}
 		VkDescriptorSetLayoutCreateInfo li = {};
 		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -2104,6 +2129,8 @@ void VulkanBackend::DestroyM2Resources() {
 	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
 		if ( shaderTable[i].vert ) { vkDestroyShaderModule( device, shaderTable[i].vert, NULL ); }
 		if ( shaderTable[i].frag ) { vkDestroyShaderModule( device, shaderTable[i].frag, NULL ); }
+		if ( shaderTable[i].tesc ) { vkDestroyShaderModule( device, shaderTable[i].tesc, NULL ); }
+		if ( shaderTable[i].tese ) { vkDestroyShaderModule( device, shaderTable[i].tese, NULL ); }
 	}
 	shaderTable.clear();
 
@@ -2407,6 +2434,28 @@ ShaderHandle VulkanBackend::LoadShader( const char *name ) {
 	mi.codeSize = fragSpv.size();
 	mi.pCode = (const uint32_t *)fragSpv.data();
 	ok = ok && vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.frag ), va( "vkCreateShaderModule(%s.frag)", name ) );
+
+	// optional tessellation pair (DUDE tessellation): a shader gets a tess
+	// variant only if BOTH .tesc.spv and .tese.spv exist and the device supports
+	// tessellation. Absent = normal vert+frag shader (not an error). If one half
+	// is present without the other, treat it as no tess variant.
+	if ( ok && haveTessellation ) {
+		std::vector<byte> tescSpv, teseSpv;
+		if ( VK_ReadSpv( va( "%s.tesc.spv", name ), tescSpv )
+		  && VK_ReadSpv( va( "%s.tese.spv", name ), teseSpv ) ) {
+			mi.codeSize = tescSpv.size();
+			mi.pCode = (const uint32_t *)tescSpv.data();
+			bool tok = vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.tesc ), va( "vkCreateShaderModule(%s.tesc)", name ) );
+			mi.codeSize = teseSpv.size();
+			mi.pCode = (const uint32_t *)teseSpv.data();
+			tok = tok && vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.tese ), va( "vkCreateShaderModule(%s.tese)", name ) );
+			if ( !tok ) {
+				if ( rec.tesc ) { vkDestroyShaderModule( device, rec.tesc, NULL ); rec.tesc = VK_NULL_HANDLE; }
+				if ( rec.tese ) { vkDestroyShaderModule( device, rec.tese, NULL ); rec.tese = VK_NULL_HANDLE; }
+			}
+		}
+	}
+
 	if ( !ok ) {
 		if ( rec.vert ) { vkDestroyShaderModule( device, rec.vert, NULL ); rec.vert = VK_NULL_HANDLE; }
 		if ( rec.frag ) { vkDestroyShaderModule( device, rec.frag, NULL ); rec.frag = VK_NULL_HANDLE; }
@@ -4252,11 +4301,20 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	                   | GLS_REDMASK | GLS_GREENMASK | GLS_BLUEMASK | GLS_ALPHAMASK
 	                   | GLS_POLYMODE_LINE | GLS_DEPTHFUNC_EQUAL | GLS_DEPTHFUNC_LESS | GLS_DEPTHFUNC_ALWAYS;
 	const unsigned int bits = (unsigned int)( desc.stateBits & RELEVANT );
+	// desc.tessellate (bit 18, free between RELEVANT's bit 17 and passClass at 24)
+	// keeps the tessellated (patch-list, tesc+tese) and flat variants of the same
+	// shader on distinct cache entries. Only honoured when the shader actually
+	// carries a tess pair and the device supports tessellation.
+	const bool tessellate = desc.tessellate && haveTessellation
+		&& desc.shader >= 1 && desc.shader <= (ShaderHandle)shaderTable.size()
+		&& shaderTable[desc.shader - 1].tesc != VK_NULL_HANDLE
+		&& shaderTable[desc.shader - 1].tese != VK_NULL_HANDLE;
 	// curPassClass (bits 24-31, free above RELEVANT's bit 17) keeps pipelines for
 	// render-pass-incompatible destinations apart: the same shader+state built for
 	// the RGBA8 swapchain scene (class 0) and the RGBA16F HDR buffer (class 2) are
 	// distinct cache entries built against distinct render passes.
 	const unsigned long long key = (unsigned long long)bits
+		| ( (unsigned long long)( tessellate ? 1 : 0 ) << 18 )
 		| ( (unsigned long long)( curPassClass & 0xff ) << 24 )
 		| ( (unsigned long long)( desc.shader & 0xffff ) << 32 )
 		| ( (unsigned long long)( desc.vertexLayout & 0xf ) << 48 )
@@ -4276,7 +4334,7 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	}
 	const ShaderRec &sh = shaderTable[desc.shader - 1];
 
-	VkPipelineShaderStageCreateInfo stages[2] = {};
+	VkPipelineShaderStageCreateInfo stages[4] = {};
 	stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
 	stages[0].module = sh.vert;
@@ -4284,6 +4342,21 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	stages[1] = stages[0];
 	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 	stages[1].module = sh.frag;
+	uint32_t stageCount = 2;
+	if ( tessellate ) {
+		// tesc + tese ride alongside vert + frag; the tese re-runs the vertex
+		// body on the PN-evaluated position (docs/tessellation.md)
+		stages[stageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stages[stageCount].stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+		stages[stageCount].module = sh.tesc;
+		stages[stageCount].pName = "main";
+		stageCount++;
+		stages[stageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stages[stageCount].stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+		stages[stageCount].module = sh.tese;
+		stages[stageCount].pName = "main";
+		stageCount++;
+	}
 
 	// vertex layouts (must match the GL3 VAO setups / shader locations)
 	VkVertexInputBindingDescription binding = {};
@@ -4324,6 +4397,12 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	VkPipelineInputAssemblyStateCreateInfo ia = {};
 	ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
 	ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	// a tessellated draw feeds the tessellator triangular patches: the same
+	// indexed triangle list, reinterpreted as 3-control-point patches. Skip the
+	// GL primMode switch below (only immediate-mode debug draws set desc.topology).
+	if ( tessellate ) {
+		ia.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+	} else
 	// desc.topology carries a GL primMode for immediate-mode debug draws; -1
 	// (every normal draw) stays triangle list. GL_LINE_LOOP has no VK analogue —
 	// degrade to a line strip (leaves the loop open; only debug wireframes).
@@ -4485,12 +4564,19 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	dsi.dynamicStateCount = 3;
 	dsi.pDynamicStates = dyn;
 
+	// triangular patches carry 3 control points (the triangle's corners); the
+	// tesc/tese do PN evaluation over the barycentric domain.
+	VkPipelineTessellationStateCreateInfo ts = {};
+	ts.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+	ts.patchControlPoints = 3;
+
 	VkGraphicsPipelineCreateInfo pci = {};
 	pci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-	pci.stageCount = 2;
+	pci.stageCount = stageCount;
 	pci.pStages = stages;
 	pci.pVertexInputState = &vin;
 	pci.pInputAssemblyState = &ia;
+	pci.pTessellationState = tessellate ? &ts : NULL;
 	pci.pViewportState = &vp;
 	pci.pRasterizationState = &rs;
 	pci.pMultisampleState = &ms;

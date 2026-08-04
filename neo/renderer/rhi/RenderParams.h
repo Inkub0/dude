@@ -87,10 +87,16 @@ struct RenderParams {
 	float	pbrParms2[4];		// DUDE PBR extras: x = metal diffuse-kill strength kd
 								// (= 1 - r_pbrMetalDiffuse); diffuse *= 1 - metal*kd, so
 								// kd < 1 retains the asset albedo colour on metals. yzw spare.
+
+	float	tessParms[4];		// DUDE tessellation (docs/tessellation.md): x = tess level
+								// (subdivision cap; 1 = flat), y = max view distance for the
+								// LOD falloff (beyond it factor rolls to 1), z = displacement
+								// strength (0 = pure PN smoothing), w spare. Read by the .tesc/
+								// .tese stages only; 0 on every non-tessellated draw.
 };
 
-// 3 mat4 (192) + 39 vec4 (624) = 816 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 816, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 3 mat4 (192) + 40 vec4 (640) = 832 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 832, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

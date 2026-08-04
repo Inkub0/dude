@@ -529,6 +529,106 @@ static int RB_RHI_ResolvePbrMaterial( const idMaterial *mat, float &metal, float
 
 /*
 ===================
+RB_RHI_TessellateSurf
+
+DUDE tessellation (docs/tessellation.md): should this surface route through the
+PN-triangle tessellation pipeline? True only on the Vulkan backend with
+r_tessellation on, for a movable entity's mesh — the worldspawn BSP (index 0) is
+left flat (its large coplanar tris gain nothing and would explode the patch
+count), and the first-person viewmodel (depth-hacked) is skipped. The same test
+runs in the depth prepass and the interaction pass so both agree — a surface
+tessellated in one but not the other would break the depth-EQUAL interaction.
+===================
+*/
+static bool RB_RHI_TessellateSurf( const drawSurf_t *surf ) {
+	if ( !r_tessellation.GetBool()
+	     || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		return false;
+	}
+	const viewEntity_t *space = surf->space;
+	if ( space == NULL || space->entityDef == NULL || space->entityDef->index == 0 ) {
+		return false;
+	}
+	if ( space->weaponDepthHack || space->modelDepthHack != 0.0f ) {
+		return false;
+	}
+	const idMaterial *mat = surf->material;
+	if ( mat == NULL || mat->Coverage() == MC_TRANSLUCENT || mat->HasGui() ) {
+		return false;
+	}
+	const char *matName = mat->GetName();
+
+	// Characters/monsters only. PN triangles assume vertex normals encode real
+	// curvature — true for organic skinned meshes, false for hard-surface props
+	// (cabinets, crates, chairs), whose lighting-smoothed normals make PN balloon the
+	// flat panels. Rather than trust IsDynamicModel() (a knocked-over moveable becomes
+	// a dynamic AF ragdoll and slips a DM_STATIC test — that's how chair3 leaked), gate
+	// on the asset path: real actors live under models/characters/ or models/monsters/,
+	// every static prop under models/mapobjects/. (docs/tessellation.md)
+	if ( idStr::FindText( matName, "models/characters/", false ) == -1
+	  && idStr::FindText( matName, "models/monsters/", false ) == -1 ) {
+		return false;
+	}
+	// Small, highly convex facial sub-meshes (eyes, teeth, tongue, mouth interiors,
+	// jaws, eyelashes) get inflated by PN straight through the surrounding face.
+	// Exclude them by material name so r_tessMinEdge can stay low enough to catch
+	// ears/fingers without touching them. The head *skin* (which carries the ears) is
+	// a different material and still tessellates.
+	//  - Monsters + player name these "...eye..."/"...teeth..."/"...tongue..."/
+	//    "...mouth..."/"...jaw..." (cacoeye, cacodemon_mouth, pinky/teeth, mtongue,
+	//    zjaw01...). The only non-facial "eye" matches (skcubeyellow, hell eyeskin
+	//    walls) are static/world, already excluded above.
+	//  - Human NPC eyes/teeth/tongue are the shared models/characters/common/ folder
+	//    (left*/right* eyes, teeth*, tongue) — all facial bits, no body geometry.
+	//  - "lashes" (not "lash") avoids matching the commando's muzzle flash (mflash).
+	// (docs/tessellation.md)
+	static const char * const tessSkipNames[] = {
+		"eye", "teeth", "tongue", "mouth", "jaw", "lashes", "characters/common/"
+	};
+	for ( int i = 0; i < (int)( sizeof( tessSkipNames ) / sizeof( tessSkipNames[0] ) ); i++ ) {
+		if ( idStr::FindText( matName, tessSkipNames[i], false ) != -1 ) {
+			return false;
+		}
+	}
+	// Only pure lit surfaces tessellate. A material with any ambient (SL_AMBIENT)
+	// stage — emissive screens/monitors, glow, blend, texgen — is ALSO drawn flat
+	// in the depth-EQUAL ambient/material pass (RB_RHI_RenderShaderStages), and
+	// GUI surfaces in the GUI pass, neither of which is tessellated. Sealing such a
+	// surface's depth at the PN position in the prepass would drop that flat redraw
+	// (dark/shimmering panels). Lit interaction stages carry no SL_AMBIENT flag, so
+	// this leaves ordinary enemies/props tessellated. (docs/tessellation.md)
+	for ( int i = 0; i < mat->GetNumStages(); i++ ) {
+		if ( mat->GetStage( i )->lighting == SL_AMBIENT ) {
+			return false;
+		}
+	}
+
+	// r_tessDebug: log each material name accepted for tessellation once, so a
+	// surface that shouldn't be tessellated (a leaked eye/glasses material) can be
+	// pinned down by walking up to the offending character and reading the console.
+	if ( r_tessDebug.GetBool() ) {
+		static idList<idStr> tessLogged;
+		if ( tessLogged.FindIndex( idStr( matName ) ) == -1 ) {
+			tessLogged.Append( idStr( matName ) );
+			const idRenderModel *m = space->entityDef->parms.hModel;
+			common->Printf( "tess: %s (dm=%d idx=%d)\n", matName,
+			                m ? (int)m->IsDynamicModel() : -1, space->entityDef->index );
+		}
+	}
+	return true;
+}
+
+// fill the tess params (level, LOD falloff distance) into a RenderParams the
+// tessellation stages read; global cvar values, identical in both passes.
+static void RB_RHI_SetTessParms( rhi::RenderParams &parms ) {
+	parms.tessParms[0] = r_tessLevel.GetFloat();
+	parms.tessParms[1] = r_tessMaxDist.GetFloat();
+	parms.tessParms[2] = 0.0f;	// displacement strength (Phase 2)
+	parms.tessParms[3] = r_tessMinEdge.GetFloat();	// min edge length to subdivide (anti eye-bulge)
+}
+
+/*
+===================
 RB_RHI_DrawInteraction
 
 Callback for RB_CreateSingleDrawInteractions; the RenderParams mapping is
@@ -780,6 +880,15 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		RB_RHI_BindUnit( 10, occlusionImage );
 	}
 
+	// DUDE tessellation: PN-smooth enemy/prop meshes. Both the ambient and the
+	// per-light interaction pass must tessellate whenever the depth prepass did,
+	// or the depth-EQUAL test drops the surface (docs/tessellation.md). The
+	// interaction and ambientlight shaders both carry a tess variant.
+	const bool tess = RB_RHI_TessellateSurf( din->surf );
+	if ( tess ) {
+		RB_RHI_SetTessParms( parms );
+	}
+
 	rhi::BufferHandle ub;
 	int uniOfs = ictx.r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
@@ -789,6 +898,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	pd.vertexLayout = rhi::VL_DRAWVERT;
 	pd.cullType = RB_RHI_CullFor( ictx.viewDef, CT_FRONT_SIDED );
 	pd.stencilState = ictx.stencilState;
+	pd.tessellate = tess;
 	ictx.r->BindPipeline( pd );
 
 	rhi::DrawArgs da;
@@ -1120,12 +1230,18 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		int vertOfs, idxOfs;
 		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
 
+		// DUDE tessellation: the prepass must PN-subdivide enemy/prop surfaces
+		// with the exact factors the interaction pass uses, so the sealed depth
+		// lines up under the depth-EQUAL interactions (docs/tessellation.md).
+		const bool tess = RB_RHI_TessellateSurf( surf );
+
 		rhi::PipelineDesc pd;
 		pd.stateBits = stateBits;
 		pd.shader = zfill;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = RB_RHI_CullFor( viewDef, CT_FRONT_SIDED );
 		pd.stencilState = rhi::SS_ALWAYS;	// stencil test on, always pass (GL parity)
+		pd.tessellate = tess;
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
@@ -1173,6 +1289,9 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 					parms.diffuseMatrixS[0] = 1.0f;
 					parms.diffuseMatrixT[1] = 1.0f;
 				}
+				if ( tess ) {
+					RB_RHI_SetTessParms( parms );
+				}
 
 				rhi::BufferHandle ub;
 				int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
@@ -1199,6 +1318,9 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 			memcpy( parms.clipPlane, localClipPlane, sizeof( parms.clipPlane ) );
 			parms.diffuseMatrixS[0] = 1.0f;
 			parms.diffuseMatrixT[1] = 1.0f;
+			if ( tess ) {
+				RB_RHI_SetTessParms( parms );
+			}
 
 			rhi::BufferHandle ub;
 			int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );

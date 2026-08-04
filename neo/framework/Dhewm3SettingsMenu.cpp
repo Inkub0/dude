@@ -1755,6 +1755,40 @@ static CVarOption enhancementOptions[] = {
 	// NOTE: the Shadows section is hand-drawn in DrawEnhancementsMenu() (grouped
 	// under the toggle, with a fine-grained bias control), not listed here.
 
+	CVarOption( "Tessellation (only Vulkan)" ),
+	CVarOption( "r_tessellation", []( idCVar& cvar ) {
+		bool enable = cvar.GetBool();
+		if ( ImGui::Checkbox( "Mesh Tessellation (PN)", &enable ) ) {
+			cvar.SetBool( enable );
+		}
+		const char* descr = "GPU PN-triangle tessellation that rounds the low-poly silhouettes of animated\n"
+			"characters (enemies, NPCs). Vulkan only - the OpenGL backend's GL 3.3 context has\n"
+			"no tessellation stages, so this does nothing there. Static props are left flat on\n"
+			"purpose (PN inflates hard-surface geometry). Off = vanilla.\n"
+			"(Fine-tuning: Min Triangle Size lives in the Debugging tab.)";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
+	CVarOption( "r_tessLevel", []( idCVar& cvar ) {
+		ImGui::BeginDisabled( !r_tessellation.GetBool() );
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Tessellation Level", &f, 1.0f, 16.0f, "%.0f", 0 ) ) {
+			cvar.SetFloat( f );
+		}
+		AddCVarOptionTooltips( cvar );
+		ImGui::EndDisabled();
+	} ),
+	CVarOption( "r_tessMaxDist", []( idCVar& cvar ) {
+		ImGui::BeginDisabled( !r_tessellation.GetBool() );
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Tessellation Distance", &f, 0.0f, 2048.0f, "%.0f", 0 ) ) {
+			cvar.SetFloat( f );
+		}
+		const char* descr = "View distance (world units) beyond which tessellation rolls back toward flat,\n"
+			"an LOD/performance guard. 0 = full tessellation at any distance.";
+		AddCVarOptionTooltips( cvar, descr );
+		ImGui::EndDisabled();
+	} ),
+
 	CVarOption( "Post-Processing" ),
 	// HDR rendering: accumulate the scene into a float (RGBA16F) buffer instead of the
 	// 8-bit backbuffer, then resolve back. Removes fog/gradient banding.
@@ -2784,6 +2818,25 @@ static void DrawShadowDebugMenu()
 	AddTooltip( "Toggles stencil shadow volumes (the vanilla technique) and self-shadowing (r_shadows). "
 		"On opengl3/Vulkan with Shadow Mapping enabled, shadows come from the shadow maps below instead, "
 		"so this only affects the stencil path." );
+
+	// DUDE tessellation (docs/tessellation.md): the fine-grain size threshold + the
+	// material logger live here in Debugging; the on/off + level are in Enhancements.
+	ImGui::BeginDisabled( !r_tessellation.GetBool() );
+	float tessMinEdge = r_tessMinEdge.GetFloat();
+	if ( ImGui::SliderFloat( "Tessellation Min Triangle Size", &tessMinEdge, 0.0f, 8.0f, "%.2f", 0 ) ) {
+		r_tessMinEdge.SetFloat( tessMinEdge );
+	}
+	AddTooltip( "r_tessMinEdge: triangles with edges finer than this (world units) stay flat, so dense "
+		"detail (eye-sockets, faces) doesn't over-inflate under PN while larger silhouette triangles still "
+		"smooth. Raise if faces/fine features distort; lower to smooth more aggressively. Vulkan only." );
+
+	bool tessDebug = r_tessDebug.GetBool();
+	if ( ImGui::Checkbox( "Log Tessellated Materials", &tessDebug ) ) {
+		r_tessDebug.SetBool( tessDebug );
+	}
+	AddTooltip( "r_tessDebug: print each material name accepted for tessellation once (with model type and "
+		"entity index) to the console, so a mis-tessellated surface can be identified. Vulkan only." );
+	ImGui::EndDisabled();
 
 	// DUDE PBR materials (docs/pbr-materials.md): every live tuning knob for the
 	// GGX interaction path in one place, so the look can be dialled in-game.

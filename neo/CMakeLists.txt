@@ -319,6 +319,8 @@ if(DHEWM3_VULKAN)
 	file(GLOB shader_spv_sources
 		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.vert
 		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.frag
+		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.tesc
+		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.tese
 		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.glsl)
 	add_custom_command(
 		OUTPUT ${spv_dir}/.stamp

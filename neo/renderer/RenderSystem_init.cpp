@@ -408,6 +408,16 @@ idCVar r_itemGlow( "r_itemGlow", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT,
 // (not direct/dynamic lights), so it stays correct as lighting changes and fixes
 // Doom 3's flat/plastic model look. Non-vanilla; enhancement backends only.
 // See docs/ssao-gtao.md.
+// DUDE: GPU tessellation of enemy/prop meshes (Vulkan only; docs/tessellation.md).
+// PN-triangle smoothing rounds the low-poly silhouettes of characters and props;
+// off = bit-for-bit vanilla (no tess pipeline is built). GL3's 3.3 core context
+// has no tessellation stages, so this is inert there.
+idCVar r_tessellation( "r_tessellation", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "PN-triangle GPU tessellation that smooths enemy/prop mesh silhouettes (non-vanilla; Vulkan only)" );
+idCVar r_tessLevel( "r_tessLevel", "4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "tessellation subdivision level for enemies/props (1 = flat, higher = smoother silhouettes at more GPU cost; capped at 32 / the device limit)", 1.0f, 32.0f );
+idCVar r_tessMaxDist( "r_tessMaxDist", "512", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "view distance (world units) beyond which tessellation rolls back toward flat, an LOD/perf guard. 0 = uniform level everywhere", 0.0f, 8192.0f );
+idCVar r_tessMinEdge( "r_tessMinEdge", "0.72", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "minimum triangle edge length (world units) to tessellate; triangles finer than this stay flat, so small dense clusters (eyeballs, fine facial detail) don't over-inflate while big low-poly silhouette triangles still smooth. 0 = tessellate everything, higher = only the largest triangles", 0.0f, 64.0f );
+idCVar r_tessDebug( "r_tessDebug", "0", CVAR_RENDERER | CVAR_BOOL, "diagnostic: print each material name accepted for tessellation once. Walk up to a mis-tessellated character and read the console to find the leaked material (Vulkan)" );
+
 idCVar r_ssao( "r_ssao", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "screen-space ambient occlusion (GTAO) applied to the ambient light term; adds contact shadowing and depth to models (non-vanilla; opengl3/Vulkan only)" );
 idCVar r_ssaoIntensity( "r_ssaoIntensity", "1.2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO strength: scales the occlusion darkening (0 = none, 1.2 = default, higher = deeper creases)", 0.0f, 4.0f );
 idCVar r_ssaoFloor( "r_ssaoFloor", "0.03", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO minimum ambient visibility: fully-occluded areas darken to at most this (0 = can reach black, 1 = no darkening). Keeps creases from crushing to black in dark scenes", 0.0f, 1.0f );

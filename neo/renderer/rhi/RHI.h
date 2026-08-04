@@ -80,6 +80,12 @@ struct PipelineDesc {
 	// Vulkan backend reads it (bakes topology into the pipeline); GL3 passes
 	// primMode straight to glDrawArrays and ignores this.
 	int				topology = -1;
+	// DUDE tessellation (docs/tessellation.md): route this draw through the
+	// bound shader's tessellation-control/eval stages (patch-list topology, PN
+	// smoothing of enemy/prop meshes). Requires the shader to have a tess variant
+	// loaded and the device to support tessellation. Ignored by the GL3 backend
+	// (its GL 3.3 core context has no tessellation stages).
+	bool			tessellate = false;
 };
 
 struct DrawArgs {

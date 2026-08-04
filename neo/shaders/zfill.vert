@@ -5,10 +5,18 @@
 
 layout(location = 0) in vec4 attr_Position;
 layout(location = 1) in vec2 attr_TexCoord;
+layout(location = 2) in vec3 attr_Normal;
 
 VARY(0) out vec2 var_TexCoord;
+// model-space position + normal for the tessellation stages (DUDE tessellation,
+// docs/tessellation.md); unconsumed by zfill.frag in the flat pipeline.
+VARY(1) out vec3 var_ModelPos;
+VARY(2) out vec3 var_ModelNormal;
 
 void main() {
+	var_ModelPos = attr_Position.xyz;
+	var_ModelNormal = attr_Normal;
+
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
 	var_TexCoord = vec2( dot( st, u_diffuseMatrixS ), dot( st, u_diffuseMatrixT ) );
 

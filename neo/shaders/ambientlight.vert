@@ -19,8 +19,15 @@ VARY(4) out vec3 var_ToGlobalRow0;  // texcoord[4]
 VARY(5) out vec3 var_ToGlobalRow1;  // texcoord[5]
 VARY(6) out vec3 var_ToGlobalRow2;  // texcoord[6]
 VARY(7) out vec4 var_Color;
+// model-space position + normal for the tessellation stages (DUDE tessellation,
+// docs/tessellation.md); unconsumed by ambientlight.frag in the flat pipeline.
+VARY(8) out vec3 var_ModelPos;
+VARY(9) out vec3 var_ModelNormal;
 
 void main() {
+	var_ModelPos = attr_Position.xyz;
+	var_ModelNormal = attr_Normal;
+
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
 
 	var_TexBump    = vec2( dot( st, u_bumpMatrixS ),    dot( st, u_bumpMatrixT ) );
