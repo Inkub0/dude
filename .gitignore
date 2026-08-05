@@ -42,6 +42,7 @@ savegames/
 /base/guis/*
 !/base/guis/*.gui
 !/base/guis/*.pd
+!/base/guis/dude/
 /base/guis/mainmenu.gui
 /base/guis/mpmain.gui
 *.pk4.orig

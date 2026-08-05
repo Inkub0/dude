@@ -1,0 +1,204 @@
+// DUDE main menu — clean-authored replacement, screen 1: title-screen ambience.
+//
+// Written from scratch for DUDE (git-tracked). It references id Software's
+// stock Doom 3 materials/models/sounds at runtime (they ship in the game's
+// pk4s, same as any mod), but contains no id or CstDoom3 gui text.
+//
+// Dev harness: view with `testGUI guis/dude/mainmenu.gui` from the console.
+// This file becomes guis/mainmenu.gui only when all screens are done and
+// verified (docs/codebase-independence.md, item 2).
+//
+// Scope so far: starfield, Mars fly-in + endless spin, halo, scanlines,
+// scan pulse, DUDE logo, boot fade-in, menu music. No buttons yet.
+
+windowDef Desktop {
+	#include "guis/_dude_anchor.pd"
+	scaleto43	0
+	rect		0, 0, 640, 480
+	backcolor	0, 0, 0, 1
+	menugui		1
+
+	onActivate {
+		showcursor "1" ;
+		resetTime "bootSeq" "0" ;
+	}
+
+	onESC {
+		set "cmd" "close" ;
+	}
+
+	// ---- one-shot boot sequence: music on, mars fly-in, logo reveal ----
+	windowDef bootSeq {
+		rect		0, 0, 0, 0
+		visible		0
+		notime		1
+
+		onTime 10 {
+			set "cmd" "music guisounds_menu" ;
+			resetTime "bgMars" "0" ;
+		}
+		// loop the menu track (it is ~2:49 long)
+		onTime 169000 {
+			resetTime "10" ;
+		}
+	}
+
+	// ---- background: starfield ----
+	windowDef bgStars {
+		rect		-200, 0, 1024, 1024
+		background	"gui/mainmenu/star"
+		matcolor	0.7, 0.7, 0.7, 0.7
+		matscalex	4
+		matscaley	4
+		noevents	1
+	}
+
+	windowDef bgStarsBlink1 {
+		rect		-200, 0, 1024, 1024
+		background	"gui/mainmenu/star1"
+		matcolor	1, 1, 1, 1
+		matscalex	10
+		matscaley	10
+		noevents	1
+	}
+
+	windowDef bgStarsBlink2 {
+		rect		-200, 0, 1024, 1024
+		background	"gui/mainmenu/star3"
+		matcolor	1, 1, 1, 1
+		matscalex	4
+		matscaley	4
+		noevents	1
+	}
+
+	// ---- background: the planet, rendered live, with its arrival choreography ----
+	renderDef bgMars {
+		rect		0, 20, 640, 430
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		backcolor	0, 0, 0, 0.4
+		model		"models/wipes/planet2.lwo"
+		needsRender	1
+		modelRotate	0, time * 0.001, 0, 0
+		modelOrigin	-80, 0, -25, 0
+		viewOffset	-300, -28, 0, 0
+		lightOrigin	0, 0, 0, 0
+		lightColor	1, 1, 1, 1
+		notime		1
+
+		onTime 100 {
+			// drift in: planet swings upright while the starfield settles
+			transition "modelRotate" "-60 60 0 0" "0 0 0 0" "12000" "0" "0.9" ;
+			transition "bgStars::rect" "-100 0 1256 1256" "-205 -70 1024 1024" "12000" "0" "0.9" ;
+			transition "bgStarsBlink1::rect" "-50 0 1256 1256" "-205 -90 1024 1024" "12000" "0" "0.9" ;
+			transition "bgStarsBlink2::rect" "-30 0 1256 1256" "-205 -110 1024 1024" "12000" "0" "0.9" ;
+			transition "lightOrigin" "-60 -150 -100 0" "-120 -140 -150 0" "1000" ;
+		}
+		onTime 500 {
+			transition "bootFade::backcolor" "0 0 0 1" "0 0 0 0" "1000" ;
+		}
+		onTime 1100 {
+			set "bootFade::rect" "0 0 640 0" ;
+			transition "viewOffset" "-300 -28 0 0" "-128 0 0 0" "9500" "0" "0.9" ;
+			transition "lightOrigin" "-120 -140 -150 0" "-180 -80 0 0" "3000" "0.6" "0.2" ;
+		}
+		onTime 4100 {
+			transition "lightOrigin" "-180 -80 0 0" "-128 10 150 0" "9000" "0.1" "0.9" ;
+		}
+		onTime 10700 {
+			// sun crests the planet's rim
+			transition "bgMarsHalo::matcolor" "0 0 0 0" "0.7 0.7 0.7 0.7" "2500" ;
+		}
+		onTime 12650 {
+			resetTime "marsSpinLoop" "0" ;
+		}
+	}
+
+	// endless slow rotation once the fly-in has finished
+	windowDef marsSpinLoop {
+		rect		0, 0, 0, 0
+		visible		0
+		notime		1
+
+		onTime 0 {
+			transition "bgMars::modelRotate" "0 0 0 0" "0 -360 0 0" "500000" ;
+		}
+		onTime 500000 {
+			resetTime "0" ;
+		}
+	}
+
+	// glow on the planet's sunlit rim
+	windowDef bgMarsHalo {
+		rect		133, 57, 373, 373
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		background	"gui/mainmenu/marshighlight"
+		matcolor	0, 0, 0, 0
+		noevents	1
+	}
+
+	// bottom-up darkening gradient over planet and stars
+	windowDef bgVignette {
+		rect		0, 110, 640, -370
+		background	"gui/newpda/highlight"
+		matcolor	0, 0, 0, 0
+		noevents	1
+	}
+
+	// ---- CRT dressing ----
+	windowDef fxScanlines {
+		rect		0, 0, 640, 480
+		background	"gui/test/gui_scanlines4a"
+		matcolor	0, 0, 0, pdrasterfade [ time * .002 ] * 3
+		matscaley	3.75
+		noevents	1
+	}
+
+	// periodic full-screen scanning pulse sweeping down
+	windowDef fxScanPulse {
+		rect		0, 0, 640, 480
+		visible		1
+		noevents	1
+
+		windowDef fxScanPulseBar {
+			rect		0, 0, 640, 3000
+			background	"guis/assets/common/pulseline"
+			matcolor	1, 1, 1, 0.03
+			noevents	1
+
+			onTime 0 {
+				transition "rect" "0 -3000 640 3000" "0 0 640 3000" "5000" ;
+			}
+			onTime 5000 {
+				transition "rect" "0 0 640 3000" "0 3000 640 3000" "5000" ;
+			}
+			onTime 25000 {
+				resetTime "0" ;
+			}
+		}
+	}
+
+	// ---- title logo ----
+	windowDef titleLogo {
+		rect		212, 155, 256, 128
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		background	"guis/assets/mainmenu/dude_logo"
+		matcolor	1, 1, 1, 1
+		noevents	1
+	}
+
+	// faint animated sheen over the logo
+	windowDef titleLogoSheen {
+		rect		212, 155, 256, 128
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		background	"gui/menu/blackbars"
+		matcolor	1, 1, 1, 0.05
+		noevents	1
+	}
+
+	// ---- boot fade: modal black cover, released by the bgMars choreography ----
+	windowDef bootFade {
+		rect		0, 0, 640, 480
+		backcolor	0, 0, 0, 1
+		modal		1
+	}
+}
