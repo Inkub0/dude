@@ -76,6 +76,16 @@ Hub: [vulkan-port.md](vulkan-port.md). Deliberate deviations (not bugs) are in
   still-valid window. After this the reporter could no longer reproduce the crash across repeated
   `vid_restart`s. Kept tracked (not "resolved") because it is an intermittent async race — re-verify
   on a native-SDL3 build and under the Vulkan backend's heavier re-init.
+  **2026-08-05 recurrence + second mitigation:** reproduced once by the reporter switching
+  Vulkan → legacy from the new in-menu Renderer selector (fullscreen, direct-apply
+  `video restart`): `BadWindow (X_TranslateCoords)` right after "Shutting down OpenGL
+  subsystem", before the new window init printed. Remaining suspect: `SDL_DestroyWindow`'s
+  *implicit* leave-fullscreen/mode-restore repositioning against a mid-teardown window.
+  Mitigation applied in the same spirit as the first: `GLimp_Shutdown` now leaves fullscreen
+  explicitly (`SDL_SetWindowFullscreen` + pump) while the window is fully alive, and pumps
+  once more after `SDL_DestroyWindow` so the destroy's event fallout is drained (and dropped)
+  before the next window comes up. Headless fullscreen restart + backend-switch stress passes;
+  awaiting reporter re-test on the real X/NVIDIA setup.
 
 - **[RESOLVED 2026-07-31] Garbled image / white screen when switching renderer backend (legacy ↔ opengl3).**
   Switching backends in Video Options — or any `vid_restart` while on the GL3 core backend —
