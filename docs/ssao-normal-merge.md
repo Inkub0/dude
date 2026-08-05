@@ -57,6 +57,26 @@ that write them during the prepass and skip them during the color pass; a
 `GetFrameTargetNormalImage()` accessor. Contained to the VK backend + the RHI interface; the
 GL3 backend stubs it (keeps the separate normal pass) until its FBO/MSAA path is handled.
 
+### Implementation notes (as-mapped 2026-08-05)
+- **Scene depth is mode-dependent:** `FrameDepthImage()` resolves to the built-in `sceneDepth`
+  (HDR off) or the active HDR frame target's `dsImage` (HDR on). So the merged prepass's
+  framebuffer must be built against `FrameDepthImage()` and rebuilt when it changes (HDR
+  toggle / resize) — cache it keyed on (normalImage, depthImage). The depth image only
+  changes on mode/size change, never per-frame within a mode.
+- **`rhiNormalRT` already exists** (`CreateRenderTargetColorDepth`, RhiWorld) with its own
+  color+depth. The merge does *not* need a new normal image conceptually — it needs the
+  normal color to be written **while sealing `FrameDepthImage()`** so the second geometry pass
+  and the depth copy both disappear. The clean form: a dedicated normal color image co-attached
+  with the scene depth in a prepass render pass.
+- **Bring-up is feature-flagged:** a cvar `r_ssaoMergeNormal` (default 0) gates the whole path.
+  Each step lands inert at default; flip the flag to test. Once verified end-to-end and the
+  fps win is confirmed, the flag becomes the default (or is retired) and `RB_RHI_NormalPrepass`
+  is dropped for the primary view. This keeps every intermediate commit shippable.
+- **Step 1 (this commit series):** the flag + a dedicated scene-res normal color image
+  (allocated only when the flag is on) + a sampleable accessor, all unused. No pass wiring, no
+  visual change. Steps 2–3 add the prepass render pass/framebuffer + merged shader, then route
+  SSAO/SSR and drop the standalone pass.
+
 ## Incremental steps (each build + verify before the next)
 
 1. **RHI + VK plumbing:** scene frame target grows the normal attachment; accessor added; no
