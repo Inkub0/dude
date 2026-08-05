@@ -985,6 +985,7 @@ extern idCVar r_ssaoResScale;			// AO buffer resolution fraction (0.5 half .. 1.
 extern idCVar r_ssaoBentNormal;			// shade ambient along the bent normal
 extern idCVar r_ssaoBentStrength;		// blend toward the bent normal for the ambient lookup (C.2)
 extern idCVar r_ssaoNormalBuffer;		// SSAO reads a bump-mapped normal G-buffer vs depth reconstruct
+extern idCVar r_ssaoMergeNormal;		// VK: emit the SSAO normal inside the depth prepass (one pass) vs the standalone normal pass
 extern idCVar r_ssaoSpecular;			// also attenuate specular in occluded areas
 extern idCVar r_ssaoDebug;				// 1=show AO buffer, 2=show bent normals
 extern idCVar r_ssaoTemporal;			// accumulate AO across frames via camera reprojection

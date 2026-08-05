@@ -4694,6 +4694,14 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// normal G-buffer (Option B): render bump-mapped view normals for SSAO to sample
 	// instead of reconstructing from depth. Runs before the SSAO pass that consumes it.
 	rhiNormalReadyThisView = false;
+	// docs/ssao-normal-merge.md: r_ssaoMergeNormal folds this normal into the depth prepass
+	// (one opaque pass instead of two — the normal pass is ~69% of SSAO's cost). The merged
+	// VK path is wired in steps 2-3; until then the flag only announces itself and the
+	// standalone pass still runs, so the default (flag 0) is exactly today's behaviour.
+	if ( r_ssaoMergeNormal.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		RB_RHI_LogOnce( "VK: r_ssaoMergeNormal set - merged normal prepass not wired yet "
+		                "(docs/ssao-normal-merge.md, steps 2-3); running the standalone pass" );
+	}
 	RB_RHI_NormalPrepass( r, viewDef );
 
 	// SSAO (GTAO) builds the AO buffer from the just-captured scene depth, before
