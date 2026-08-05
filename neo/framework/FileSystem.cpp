@@ -28,6 +28,8 @@ If you have questions concerning this license or the applicable additional terms
 
 #ifdef WIN32
 	#include <io.h>	// for _read
+	#include <sys/types.h>
+	#include <sys/stat.h>	// stat()/S_ISDIR for the dude-folder probe (mingw provides these)
 #else
 	#include <sys/types.h>
 	#include <sys/stat.h>
@@ -2713,6 +2715,36 @@ void idFileSystemLocal::SetRestartChecksums( const int pureChecksums[ MAX_PURE_P
 
 /*
 ================
+DUDE path model helpers (docs/filesystem-paths.md)
+
+fs_basepath is the read-only original game data; the "dude folder" (fs_savepath)
+is the single writable home for everything that diverges from it. These probe
+where that writable folder should live. Called during path resolution, BEFORE
+Startup(), so they must not touch searchPaths / the VFS -- raw OS calls only.
+================
+*/
+static bool FS_DirExists( const char *osDir ) {
+	struct stat st;
+	return stat( osDir, &st ) != -1 && S_ISDIR( st.st_mode );
+}
+
+// true if we can create osDir (its parent already exists -- it's a leaf under an
+// existing install or user dir) and write a file in it. Uses forward slashes,
+// which fopen/stat accept on every target including Windows.
+static bool FS_DirWritable( const char *osDir ) {
+	Sys_Mkdir( osDir );					// no-op if it already exists
+	idStr probe = idStr( osDir ) + "/.dudewrite.tmp";
+	FILE *f = fopen( probe.c_str(), "wb" );
+	if ( !f ) {
+		return false;
+	}
+	fclose( f );
+	remove( probe.c_str() );
+	return true;
+}
+
+/*
+================
 idFileSystemLocal::Init
 
 Called only at inital startup, not when the filesystem
@@ -2739,8 +2771,37 @@ void idFileSystemLocal::Init( void ) {
 	if (fs_basepath.GetString()[0] == '\0' && Sys_GetPath(PATH_BASE, path))
 		fs_basepath.SetString(path);
 
-	if (fs_savepath.GetString()[0] == '\0' && Sys_GetPath(PATH_SAVE, path))
-		fs_savepath.SetString(path);
+	// DUDE "dude folder" (fs_savepath): the single writable home for everything
+	// that diverges from the read-only base data. Resolution order:
+	//   1. explicit +set fs_savepath (e.g. run.sh) always wins -- left untouched
+	//   2. an existing dude folder at the per-user OS location is kept as-is, so
+	//      we never orphan a user's saves/config by relocating them
+	//   3. otherwise, if <fs_basepath>/dude is writable, co-locate there (a
+	//      portable, self-contained install "follows" the base data)
+	//   4. otherwise fall back to the per-user OS dir (read-only base install)
+	// The choice is logged with how to override it. (Per-install keying of the
+	// fallback and Steam/GOG base autodetection come in later Phase-1 steps.)
+	if ( fs_savepath.GetString()[0] == '\0' ) {
+		idStr userDir;
+		const bool haveUserDir = Sys_GetPath( PATH_SAVE, userDir );
+		idStr chosen;
+		const char *why = "";
+		if ( haveUserDir && FS_DirExists( userDir.c_str() ) ) {
+			chosen = userDir;			why = "existing user dir";
+		} else {
+			idStr coloc = idStr( fs_basepath.GetString() ) + "/dude";
+			if ( fs_basepath.GetString()[0] != '\0' && FS_DirWritable( coloc.c_str() ) ) {
+				chosen = coloc;			why = "co-located with base data";
+			} else if ( haveUserDir ) {
+				chosen = userDir;		why = "per-user dir (base data not writable)";
+			}
+		}
+		if ( chosen.Length() ) {
+			fs_savepath.SetString( chosen.c_str() );
+			common->Printf( "dude folder (writable divergence): %s [%s]\n", chosen.c_str(), why );
+			common->Printf( "  (override with +set fs_savepath <dir>)\n" );
+		}
+	}
 
 	if (fs_configpath.GetString()[0] == '\0' && Sys_GetPath(PATH_CONFIG, path))
 		fs_configpath.SetString(path);
