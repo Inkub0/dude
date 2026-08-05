@@ -163,6 +163,7 @@ public:
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt );
 	virtual void				SetFrameTarget( RenderTargetHandle rt );
 	virtual void				BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear );
+	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear );
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt );
 	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle rt );
 
@@ -587,6 +588,24 @@ private:
 	VkImage			FrameColorImage() const;
 	VkImageLayout	FrameColorBetweenLayout() const;
 	VkImage			FrameDepthImage() const;
+	VkImageView		FrameDepthView() const;		// view backing FrameDepthImage (for the merged normal fb)
+
+	// SSAO normal-pass merge (docs/ssao-normal-merge.md): a dedicated normal color image
+	// rendered alongside the *scene* depth (FrameDepthImage) in the depth prepass. The
+	// framebuffer is rebuilt when the scene depth image changes (HDR toggle / resize).
+	// B1 uses depth storeOp DONT_CARE — it shares the depth attachment but the scene pass
+	// still clears + reseals it via zfill, so nothing here changes the scene depth.
+	VkImage			mergeNormalImage = VK_NULL_HANDLE;
+	VmaAllocation	mergeNormalAlloc = NULL;
+	VkImageView		mergeNormalView = VK_NULL_HANDLE;
+	ImageHandle		mergeNormalSampleImage = 0;
+	int				mergeNormalW = 0, mergeNormalH = 0;
+	VkRenderPass	mergeNormalPass = VK_NULL_HANDLE;	// {normal clear->shader-read, depth clear->dontcare}
+	VkFramebuffer	mergeNormalFb = VK_NULL_HANDLE;
+	VkImage			mergeNormalFbDepth = VK_NULL_HANDLE;	// depth image the fb was built against
+	RenderTargetHandle mergeNormalTarget = 0;			// wraps mergeNormalImage for GetRenderTargetImage
+	bool			EnsureMergeNormal( int w, int h );
+	void			DestroyMergeNormal();
 
 	// device features actually enabled (queried before device creation)
 	bool						haveAnisotropy = false;
@@ -2420,6 +2439,8 @@ void VulkanBackend::DestroyM2Resources() {
 		vkDestroyQueryPool( device, gpuTimerPool, NULL );
 		gpuTimerPool = VK_NULL_HANDLE;
 	}
+
+	DestroyMergeNormal();		// SSAO normal-merge image/pass/fb (before the imageTable sweep)
 
 	for ( auto &kv : pipelineCache ) {
 		vkDestroyPipeline( device, kv.second, NULL );
@@ -4722,6 +4743,9 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetCube( ImageFormat fmt, int s
 }
 
 ImageHandle VulkanBackend::GetRenderTargetImage( RenderTargetHandle rt ) {
+	if ( rt != 0 && rt == mergeNormalTarget ) {
+		return mergeNormalSampleImage;		// merged SSAO normal (no targetTable entry)
+	}
 	RenderTarget *t = LookupTarget( rt );
 	if ( t == NULL ) {
 		return 0;
@@ -5346,6 +5370,196 @@ VkImage VulkanBackend::FrameDepthImage() const {
 		if ( t.live && t.hasDepth ) { return t.dsImage; }
 	}
 	return sceneDepth;
+}
+VkImageView VulkanBackend::FrameDepthView() const {
+	if ( frameTarget != 0 ) {
+		const RenderTarget &t = targetTable[frameTarget - 1];
+		if ( t.live && t.hasDepth ) { return t.dsView; }
+	}
+	return sceneDepthView;
+}
+
+// SSAO normal-pass merge (docs/ssao-normal-merge.md). A dedicated handle special-cased
+// in GetRenderTargetImage so BindRTUnit works without a targetTable entry (the merged
+// normal owns its own image/pass/fb, freed by DestroyMergeNormal — no double-free).
+static const rhi::RenderTargetHandle MERGE_NORMAL_HANDLE = 0x7FFF0001u;
+
+void VulkanBackend::DestroyMergeNormal() {
+	if ( mergeNormalFb )    { vkDestroyFramebuffer( device, mergeNormalFb, NULL ); mergeNormalFb = VK_NULL_HANDLE; }
+	if ( mergeNormalPass )  { vkDestroyRenderPass( device, mergeNormalPass, NULL ); mergeNormalPass = VK_NULL_HANDLE; }
+	if ( mergeNormalView )  { vkDestroyImageView( device, mergeNormalView, NULL ); mergeNormalView = VK_NULL_HANDLE; }
+	if ( mergeNormalImage ) { vmaDestroyImage( vma, mergeNormalImage, mergeNormalAlloc ); mergeNormalImage = VK_NULL_HANDLE; mergeNormalAlloc = NULL; }
+	if ( mergeNormalSampleImage >= 1 && mergeNormalSampleImage <= (ImageHandle)imageTable.size() ) {
+		imageTable[mergeNormalSampleImage - 1].live = false;
+	}
+	mergeNormalSampleImage = 0;
+	mergeNormalW = mergeNormalH = 0;
+	mergeNormalFbDepth = VK_NULL_HANDLE;
+	mergeNormalTarget = 0;
+}
+
+// (re)create the normal color image, its render pass, and its sampleable ImageRec at
+// size w*h. The framebuffer (which binds the *scene* depth) is (re)built lazily in
+// BeginNormalPrepass since FrameDepthImage() changes with HDR mode.
+bool VulkanBackend::EnsureMergeNormal( int w, int h ) {
+	if ( mergeNormalImage != VK_NULL_HANDLE && mergeNormalW == w && mergeNormalH == h ) {
+		return true;
+	}
+	DestroyMergeNormal();
+	if ( sceneDepthFormat == VK_FORMAT_UNDEFINED ) {
+		return false;
+	}
+
+	VkImageCreateInfo ici = {};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &mergeNormalImage, &mergeNormalAlloc, NULL ), "vmaCreateImage(merge normal)" ) ) {
+		mergeNormalImage = VK_NULL_HANDLE; return false;
+	}
+	VkImageViewCreateInfo vwi = {};
+	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vwi.image = mergeNormalImage;
+	vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vwi.format = VK_FORMAT_R8G8B8A8_UNORM;
+	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	vwi.subresourceRange.levelCount = 1;
+	vwi.subresourceRange.layerCount = 1;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &mergeNormalView ), "vkCreateImageView(merge normal)" ) ) {
+		DestroyMergeNormal(); return false;
+	}
+
+	// render pass: normal (clear -> shader-read) + shared scene depth (clear -> DON'T CARE:
+	// B1 shares the depth attachment but the scene pass re-clears + reseals it via zfill,
+	// so we never preserve what we write here).
+	VkAttachmentDescription atts[2] = {};
+	atts[0].format = VK_FORMAT_R8G8B8A8_UNORM;
+	atts[0].samples = VK_SAMPLE_COUNT_1_BIT;
+	atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	atts[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	atts[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	atts[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	atts[1].format = sceneDepthFormat;
+	atts[1].samples = VK_SAMPLE_COUNT_1_BIT;
+	atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	atts[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	atts[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	atts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	atts[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+	VkAttachmentReference colorRef = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+	VkAttachmentReference depthRef = { 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+	VkSubpassDescription sub = {};
+	sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	sub.colorAttachmentCount = 1;
+	sub.pColorAttachments = &colorRef;
+	sub.pDepthStencilAttachment = &depthRef;
+	VkSubpassDependency deps[2] = {};
+	deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+	deps[0].dstSubpass = 0;
+	deps[0].srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+	deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+	                     | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	deps[1].srcSubpass = 0;
+	deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+	deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+	deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	VkRenderPassCreateInfo rpi = {};
+	rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+	rpi.attachmentCount = 2; rpi.pAttachments = atts;
+	rpi.subpassCount = 1; rpi.pSubpasses = &sub;
+	rpi.dependencyCount = 2; rpi.pDependencies = deps;
+	if ( !vkCheck( vkCreateRenderPass( device, &rpi, NULL, &mergeNormalPass ), "vkCreateRenderPass(merge normal)" ) ) {
+		DestroyMergeNormal(); return false;
+	}
+
+	// sampleable ImageRec so SSAO binds the normal via GetRenderTargetImage
+	ImageRec rec;
+	rec.image = mergeNormalImage;
+	rec.alloc = NULL;					// owned by mergeNormalAlloc, freed in DestroyMergeNormal
+	rec.view = mergeNormalView;
+	rec.sampler = GetSampler( TF_LINEAR, TR_CLAMP, false );
+	rec.live = true;
+	rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	rec.isDepth = false;
+	rec.isColorTarget = true;
+	rec.width = w; rec.height = h;
+	mergeNormalSampleImage = 0;
+	for ( size_t i = 0; i < imageTable.size(); i++ ) {
+		if ( !imageTable[i].live ) { imageTable[i] = rec; mergeNormalSampleImage = (ImageHandle)( i + 1 ); break; }
+	}
+	if ( mergeNormalSampleImage == 0 ) {
+		imageTable.push_back( rec );
+		mergeNormalSampleImage = (ImageHandle)imageTable.size();
+	}
+
+	mergeNormalW = w; mergeNormalH = h;
+	mergeNormalFb = VK_NULL_HANDLE;
+	mergeNormalFbDepth = VK_NULL_HANDLE;
+	mergeNormalTarget = MERGE_NORMAL_HANDLE;
+	return true;
+}
+
+RenderTargetHandle VulkanBackend::BeginNormalPrepass( int w, int h, const ClearArgs *clear ) {
+	if ( !frameOpen || skipFrame || device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
+		return 0;
+	}
+	if ( !EnsureMergeNormal( w, h ) ) {
+		return 0;
+	}
+	// (re)build the framebuffer when the scene depth image changes (HDR toggle / resize)
+	VkImage depthImg = FrameDepthImage();
+	if ( mergeNormalFb == VK_NULL_HANDLE || mergeNormalFbDepth != depthImg ) {
+		if ( mergeNormalFb ) { vkDestroyFramebuffer( device, mergeNormalFb, NULL ); mergeNormalFb = VK_NULL_HANDLE; }
+		VkImageView views[2] = { mergeNormalView, FrameDepthView() };
+		VkFramebufferCreateInfo fbi = {};
+		fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		fbi.renderPass = mergeNormalPass;
+		fbi.attachmentCount = 2; fbi.pAttachments = views;
+		fbi.width = (uint32_t)w; fbi.height = (uint32_t)h; fbi.layers = 1;
+		if ( !vkCheck( vkCreateFramebuffer( device, &fbi, NULL, &mergeNormalFb ), "vkCreateFramebuffer(merge normal)" ) ) {
+			mergeNormalFb = VK_NULL_HANDLE; return 0;
+		}
+		mergeNormalFbDepth = depthImg;
+	}
+
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );			// suspend the scene pass (like BeginTargetPass)
+		insideScenePass = false;
+	}
+	VkClearValue cv[2] = {};
+	if ( clear != NULL && clear->color ) {
+		cv[0].color.float32[0] = clear->rgba[0]; cv[0].color.float32[1] = clear->rgba[1];
+		cv[0].color.float32[2] = clear->rgba[2]; cv[0].color.float32[3] = clear->rgba[3];
+	}
+	cv[1].depthStencil.depth = 1.0f;
+	VkRenderPassBeginInfo rbi = {};
+	rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	rbi.renderPass = mergeNormalPass;
+	rbi.framebuffer = mergeNormalFb;
+	rbi.renderArea.extent = { (uint32_t)w, (uint32_t)h };
+	rbi.clearValueCount = 2;
+	rbi.pClearValues = cv;
+	vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
+	// same passClass as a colorCount-1 RGBA8+depth target so the gbuffer pipeline is shared
+	EnterTargetPass( w, h, /*flipY*/true, mergeNormalPass, PassClassFor( VK_FORMAT_R8G8B8A8_UNORM, true, 1 ), /*colorAtt*/1 );
+	return mergeNormalTarget;
 }
 
 // SetFrameTarget: route the whole scene into an offscreen color target (HDR), or

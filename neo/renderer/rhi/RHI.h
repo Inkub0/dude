@@ -266,6 +266,14 @@ public:
 	// begin a pass into one face (0..5 = +X,-X,+Y,-Y,+Z,-Z) of a cube target.
 	// EndPass restores the backbuffer + viewport exactly like BeginTargetPass.
 	virtual void				BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear ) = 0;
+	// SSAO normal-pass merge (docs/ssao-normal-merge.md): begin a prepass that renders
+	// the normal G-buffer into a dedicated color image while sharing the *scene* depth
+	// (FrameDepthImage), so the depth prepass geometry produces the normal in one pass
+	// instead of a second opaque submission. Returns a RenderTargetHandle whose
+	// GetRenderTargetImage is the normal (bind it like the standalone rhiNormalRT), or 0
+	// where unsupported (GL3 / SSR-MRT wanted) so the caller runs the standalone pass.
+	// End with EndPass. Vulkan-only; the default is a no-op returning 0.
+	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear ) { return 0; }
 	// the target's texture as a sampleable image handle — the same ImageHandle
 	// abstraction future material textures will use (Phase 4 image ownership).
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt ) = 0;

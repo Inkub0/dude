@@ -407,6 +407,9 @@ static int  rhiHelltimeLastTick = -100000;
 // Normal G-buffer (Option B): bump-mapped view-space normals written by an extra opaque
 // geometry pass, so SSAO uses real per-pixel normals instead of reconstructing from depth.
 static rhi::RenderTargetHandle rhiNormalRT = 0;		// RGBA8 view-normal + depth (color+depth target)
+// the normal buffer SSAO/debug actually sample this view: rhiNormalRT (standalone pass) or
+// the merged handle from BeginNormalPrepass (r_ssaoMergeNormal). SSR always uses rhiNormalRT.
+static rhi::RenderTargetHandle rhiNormalResultRT = 0;
 static int  rhiNormalW = 0, rhiNormalH = 0;			// full view resolution
 static bool rhiNormalReadyThisView = false;			// the normal buffer was produced for this view
 static bool rhiNormalMrt = false;					// has the SSR rough/metal attachment (docs/ssr.md)
@@ -3281,9 +3284,6 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-	if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants ) ) {
-		return;
-	}
 
 	// clear to a flat camera-facing normal (0.5,0.5,1) and the far plane
 	rhi::ClearArgs clear;
@@ -3291,7 +3291,24 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	clear.color = true;
 	clear.depth = true;
 	clear.rgba[0] = 0.5f; clear.rgba[1] = 0.5f; clear.rgba[2] = 1.0f; clear.rgba[3] = 1.0f;
-	r->BeginTargetPass( rhiNormalRT, &clear );
+
+	// r_ssaoMergeNormal (docs/ssao-normal-merge.md, step B1): on Vulkan, without the SSR
+	// MRT, render the normal into a pass that shares the *scene* depth — one geometry pass
+	// producing depth + normal instead of a standalone target. BeginNormalPrepass returns 0
+	// (→ standalone path) on GL3, when SSR wants the second attachment, or if unsupported.
+	const bool wantMerge = r_ssaoMergeNormal.GetBool()
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN && !ssrWants;
+	rhi::RenderTargetHandle activeNormalRT = 0;
+	if ( wantMerge ) {
+		activeNormalRT = r->BeginNormalPrepass( w, h, &clear );
+	}
+	if ( activeNormalRT == 0 ) {
+		if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants ) ) {
+			return;
+		}
+		r->BeginTargetPass( rhiNormalRT, &clear );
+		activeNormalRT = rhiNormalRT;
+	}
 
 	rhi::PipelineDesc pd;
 	pd.stateBits = GLS_DEPTHFUNC_LESS;
@@ -3502,6 +3519,7 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	r->EndPass();
 	RB_RHI_ForgetTexBinds();
+	rhiNormalResultRT = activeNormalRT;		// standalone rhiNormalRT or the merged handle
 	rhiNormalReadyThisView = true;
 }
 
@@ -4457,7 +4475,7 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[3] = r_ssaoBentNormal.GetBool() ? 1.0f : 0.0f;
 	// use the bump-mapped normal G-buffer (unit 1) if the normal prepass produced one this
 	// view; otherwise ssao.frag reconstructs the normal from depth (windowCoord.x = flag)
-	const bool useNormalBuf = rhiNormalReadyThisView && rhiNormalRT != 0 && r_ssaoNormalBuffer.GetBool();
+	const bool useNormalBuf = rhiNormalReadyThisView && rhiNormalResultRT != 0 && r_ssaoNormalBuffer.GetBool();
 	parms.windowCoord[0] = useNormalBuf ? 1.0f : 0.0f;
 	// view-Y sign for ssao.frag's position reconstruction: +1 on GL (gl_FragCoord.y
 	// bottom-up), -1 on Vulkan (top-down) so reconstructed positions match the view-
@@ -4504,7 +4522,7 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->BeginTargetPass( rhiSsaoRT, NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	if ( useNormalBuf ) {
-		RB_RHI_BindRTUnit( r, 1, rhiNormalRT );	// normal G-buffer (GL raw bind / VK rhiVkUnits[1])
+		RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );	// normal G-buffer (GL raw bind / VK rhiVkUnits[1])
 		// direct bind bypassed the tmu cache; forget unit 1 so the blur's depth bind re-issues
 		backEnd.glState.tmu[1].current2DMap = -1;
 	}
@@ -4621,7 +4639,7 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	// mode 3 shows the raw normal G-buffer; 1/2 show the AO result
-	rhi::RenderTargetHandle srcRT = ( mode >= 3 ) ? rhiNormalRT : rhiSsaoResultRT;
+	rhi::RenderTargetHandle srcRT = ( mode >= 3 ) ? rhiNormalResultRT : rhiSsaoResultRT;
 	if ( !srcRT || r->GetRenderTargetImage( srcRT ) == 0 ) {
 		return;
 	}
