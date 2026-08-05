@@ -77,6 +77,35 @@ GL3 backend stubs it (keeps the separate normal pass) until its FBO/MSAA path is
   visual change. Steps 2–3 add the prepass render pass/framebuffer + merged shader, then route
   SSAO/SSR and drop the standalone pass.
 
+## Step-2 findings (as-mapped 2026-08-05) — no new shader; it's pure pass structure
+
+- **The `gbuffer` fragment shader already seals depth equivalently to `zfill`.** Both use the
+  identical `u_alphaTest.y != 0.0 && texture(...).a < u_alphaTest.x → discard`; the depth value
+  is implicit from the same rasterized geometry. So the merged prepass just runs the existing
+  `gbuffer` shader — **no merged shader to author.** (Clip planes are subview-only; the merge is
+  primary-view-only, so they don't apply.) The remaining risk is only that the *pass* covers the
+  same surfaces with the same polygon-offset / depth-hack as the depth prepass —
+  `RB_RHI_NormalPrepass` already does (memory + code), so the depth it produces should equal
+  `zfill`'s. **This is the invariant to verify in-engine** (opaque interactions test depth-EQUAL
+  against it).
+- **The depth prepass draws into the already-open main scene pass** (color-masked, depth-only) —
+  it does not open its own pass. So there are two viable structures:
+  - **(A) MRT-in-scene-pass:** give the scene pass a 2nd color attachment (normal); the depth
+    prepass runs `gbuffer` writing depth + normal, interactions write only attachment 0. **Cost:**
+    ripples a per-attachment color-write-mask into *every* scene-pass pipeline (interactions,
+    ambient, translucent, fog, in-pass shadows) + the mode-dependent scene/HDR render passes.
+  - **(B) separate prepass + load-depth (chosen):** run `gbuffer` into a dedicated `{ normal +
+    FrameDepthImage() }` render pass *before* the scene pass, sealing scene depth; capture
+    `_currentDepth` from it; the scene pass then begins with a new **clear-color / load-depth-
+    stencil** variant (stencil starts 0 from the prepass clear, per-light stencil clears work as
+    today); skip `zfill`. **Cost:** one new prepass render pass + one new scene-pass render-pass
+    variant (mode-dependent) + a reorder; scene-pass pipelines unchanged. Isolated → chosen.
+
+**Correctness gate is visual, not headless.** The depth-EQUAL invariant (no vanishing / z-fighting
+opaque surfaces) can only be confirmed by looking at the running game. So step 2 is built behind
+`r_ssaoMergeNormal` (default 0, main path untouched) and verified in a build → in-engine-check loop
+with the user, not asserted from a headless run.
+
 ## Incremental steps (each build + verify before the next)
 
 1. **RHI + VK plumbing:** scene frame target grows the normal attachment; accessor added; no
