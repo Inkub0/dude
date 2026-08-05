@@ -118,9 +118,12 @@ public:
 	virtual void	ClearStencilBuffer( int value );
 
 	// ---- resources ----
-	virtual BufferHandle	CreateBuffer( BufferUsage, int, const void * ) { return 0; }	// static VBOs: unused (CPU vertexCache); M3+
-	virtual void			UpdateBuffer( BufferHandle, int, int, const void * ) {}
-	virtual void			DestroyBuffer( BufferHandle ) {}
+	// persistent static vertex/index buffers: host-visible + mapped, so the
+	// vertexCache uploads level/model geometry once instead of re-streaming every
+	// surface through the ring each frame (the old CPU-cache "SLOW" path).
+	virtual BufferHandle	CreateBuffer( BufferUsage usage, int size, const void *data );
+	virtual void			UpdateBuffer( BufferHandle b, int offset, int size, const void *data );
+	virtual void			DestroyBuffer( BufferHandle b );
 	virtual ImageHandle		CreateImage( ImageFormat, int, int, const void * ) { return 0; }	// render-target era API; M7
 	virtual void			DestroyImage( ImageHandle h );
 	virtual ImageHandle		CreateTexture2D( int w, int h, const void *pixels,
@@ -294,6 +297,31 @@ private:
 	void						DrainRetiredRings( int slot );
 
 	std::vector<VkBuffer>		bufferTable;			// handle = index + 1
+	// parallel to bufferTable, kept in lockstep at every push site. A non-NULL
+	// alloc marks a *persistent* buffer (CreateBuffer) that this backend owns and
+	// must vmaDestroy; ring slots leave these NULL (the RingBuf owns their alloc)
+	// so teardown never double-frees. bufferMapped is the persistent buffer's
+	// host pointer (host-visible storage) for UpdateBuffer.
+	std::vector<VmaAllocation>	bufferAllocs;
+	std::vector<byte *>			bufferMapped;
+	std::vector<uint32_t>		freeBufferSlots;		// DestroyBuffer'd slots, reused by CreateBuffer
+	// A DestroyBuffer'd persistent buffer can still be referenced by up to
+	// FRAMES_IN_FLIGHT in-flight command buffers (a dynamic shadow/interaction
+	// rebuilt this frame, or the whole level's geometry freed at map unload).
+	// Destroying it immediately makes the GPU read freed memory → blinking shadows
+	// / unload-time UAF. So retire it with a TTL and vmaDestroy only after that many
+	// BeginFrame fence waits: DestroyBuffer runs at arbitrary points in the frame
+	// cycle (often *between* frames, after frameIndex advanced), so a per-slot list
+	// can drain too early — a TTL counted down once per BeginFrame is correct
+	// regardless of when the free happens. TTL = FRAMES_IN_FLIGHT+1 guarantees every
+	// slot's fence has been waited at least once (all referencing frames done).
+	struct RetiredBuffer {
+		VkBuffer		buffer;
+		VmaAllocation	alloc;
+		int				ttl;
+	};
+	std::vector<RetiredBuffer>	retiredBuffers;
+	void						DrainRetiredBuffers( bool force );
 
 	struct ImageRec {
 		VkImage			image = VK_NULL_HANDLE;
@@ -1474,10 +1502,17 @@ void VulkanBackend::Shutdown() {
 		imguiPassFormat = VK_FORMAT_UNDEFINED;
 	}
 
+	// Free the frame command buffers (via their pools) BEFORE the buffer/image
+	// sweeps. After vkDeviceWaitIdle their GPU work is done, but they're still in
+	// the recorded state, holding references to this level's persistent static
+	// buffers; the validation layer only releases those on command-buffer *free*
+	// (not reset), so destroying the buffers first intermittently trips
+	// VUID-vkDestroyBuffer-buffer-00922 on a clean quit. DestroyM2Resources never
+	// touches the frame slots, so this reorder is safe.
+	DestroyFrameSlots();
 	if ( device != VK_NULL_HANDLE ) {
 		DestroyM2Resources();
 	}
-	DestroyFrameSlots();
 	DestroySceneTargets();
 	DestroySwapchain( true );
 	if ( diskPipelineCache != VK_NULL_HANDLE ) {
@@ -1571,6 +1606,7 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	// M2: this slot's GPU work is fenced off — reset its rings (the
 	// StreamGeneration contract) and its per-draw descriptor pool
 	DrainRetiredRings( frameIndex );	// buffers replaced by GrowRing last time this slot ran
+	DrainRetiredBuffers( false );		// age out static vertex/index blocks freed by the vertexCache
 	DrainRetiredImages( frameIndex );	// capture/cinematic images replaced by RetireImage
 	DrainRetiredTargets( frameIndex );	// shadow-map targets evicted by the shadow caches
 	if ( texturePool && !retiredTexSets[frameIndex].empty() ) {
@@ -1941,6 +1977,8 @@ bool VulkanBackend::CreateM2Resources() {
 			setups[i].ring->offset = 0;
 			setups[i].ring->usage = setups[i].usage;
 			bufferTable.push_back( setups[i].ring->buffer );
+			bufferAllocs.push_back( NULL );		// ring-owned; not a persistent buffer
+			bufferMapped.push_back( NULL );
 			setups[i].ring->handle = (BufferHandle)bufferTable.size();
 		}
 	}
@@ -2169,6 +2207,7 @@ void VulkanBackend::DestroyM2Resources() {
 	if ( uploadFence ) { vkDestroyFence( device, uploadFence, NULL ); uploadFence = VK_NULL_HANDLE; }
 	if ( uploadPool )  { vkDestroyCommandPool( device, uploadPool, NULL ); uploadPool = VK_NULL_HANDLE; uploadCb = VK_NULL_HANDLE; }
 
+	DrainRetiredBuffers( true );			// device idle: destroy every retired block now
 	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
 		DrainRetiredRings( slot );		// device is idle here
 		DrainRetiredImages( slot );
@@ -2180,7 +2219,18 @@ void VulkanBackend::DestroyM2Resources() {
 			*rings[i] = RingBuf();
 		}
 	}
+	// free any persistent buffers the vertexCache didn't explicitly DestroyBuffer
+	// (e.g. engine shutdown, where blocks are abandoned rather than purged). Ring
+	// slots have a NULL alloc here — already destroyed above — so they're skipped.
+	for ( size_t i = 0; i < bufferAllocs.size(); i++ ) {
+		if ( bufferAllocs[i] ) {
+			vmaDestroyBuffer( vma, bufferTable[i], bufferAllocs[i] );
+		}
+	}
 	bufferTable.clear();
+	bufferAllocs.clear();
+	bufferMapped.clear();
+	freeBufferSlots.clear();
 	ringOverflowWarned = false;
 	framePoolWarned = false;
 
@@ -2316,6 +2366,8 @@ bool VulkanBackend::GrowRing( RingBuf &ring, int minSize ) {
 	ring.size = newSize;
 	ring.offset = 0;
 	bufferTable.push_back( newBuf );
+	bufferAllocs.push_back( NULL );		// ring-owned; not a persistent buffer
+	bufferMapped.push_back( NULL );
 	ring.handle = (BufferHandle)bufferTable.size();
 	streamGen++;
 	common->Printf( "VK: geometry ring grew to %d KB (mid-frame overflow)\n", newSize >> 10 );
@@ -2369,6 +2421,110 @@ int VulkanBackend::AllocVertices( const void *data, int size, BufferHandle *buff
 }
 int VulkanBackend::AllocIndices( const void *data, int size, BufferHandle *buffer ) {
 	return AllocFromRing( idxRing[frameIndex], data, size, 4, 0, buffer );
+}
+
+/*
+====================
+VulkanBackend::CreateBuffer
+
+Persistent static geometry buffer (the vertexCache's per-surface vertex/index
+blocks). Host-visible + persistently mapped, so the upload is a plain memcpy
+with no staging copy or queue submit — thousands of these are created at level
+load, and a submit+fence-wait per block would serialize the whole load. On
+discrete GPUs this lands in system RAM (or the ReBAR window), which is fine for
+D3-sized geometry and still a large win over re-streaming every visible surface
+into the ring every frame. Returns 0 on failure; callers fall back to the ring.
+====================
+*/
+BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const void *data ) {
+	if ( size <= 0 ) {
+		return 0;
+	}
+	VkBufferUsageFlags usageBits;
+	switch ( usage ) {
+		case BU_INDEX:   usageBits = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;  break;
+		case BU_UNIFORM: usageBits = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT; break;
+		default:         usageBits = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
+	}
+
+	VkBufferCreateInfo bci = {};
+	bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bci.size = (VkDeviceSize)size;
+	bci.usage = usageBits;
+	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	VkBuffer buf = VK_NULL_HANDLE;
+	VmaAllocation alloc = NULL;
+	VmaAllocationInfo info = {};
+	if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &buf, &alloc, &info ), "vmaCreateBuffer(static)" ) ) {
+		return 0;
+	}
+	if ( data ) {
+		memcpy( info.pMappedData, data, (size_t)size );
+	}
+
+	// reuse a slot freed by DestroyBuffer, else grow the table (keeping all three
+	// parallel vectors in lockstep with bufferTable)
+	uint32_t idx;
+	if ( !freeBufferSlots.empty() ) {
+		idx = freeBufferSlots.back();
+		freeBufferSlots.pop_back();
+		bufferTable[idx] = buf;
+		bufferAllocs[idx] = alloc;
+		bufferMapped[idx] = (byte *)info.pMappedData;
+	} else {
+		idx = (uint32_t)bufferTable.size();
+		bufferTable.push_back( buf );
+		bufferAllocs.push_back( alloc );
+		bufferMapped.push_back( (byte *)info.pMappedData );
+	}
+	return (BufferHandle)( idx + 1 );
+}
+
+void VulkanBackend::UpdateBuffer( BufferHandle b, int offset, int size, const void *data ) {
+	if ( b < 1 || b > (BufferHandle)bufferMapped.size() || !data || size <= 0 ) {
+		return;
+	}
+	byte *mapped = bufferMapped[b - 1];
+	if ( mapped ) {		// persistent (host-visible) buffer; coherent, no flush needed
+		memcpy( mapped + offset, data, (size_t)size );
+	}
+}
+
+void VulkanBackend::DestroyBuffer( BufferHandle b ) {
+	if ( b < 1 || b > (BufferHandle)bufferTable.size() ) {
+		return;
+	}
+	uint32_t idx = (uint32_t)( b - 1 );
+	if ( bufferAllocs[idx] ) {		// only persistent buffers are ours to destroy
+		// defer the vmaDestroy until in-flight frames that may reference it retire
+		retiredBuffers.push_back( { bufferTable[idx], bufferAllocs[idx], FRAMES_IN_FLIGHT + 1 } );
+		// the slot/handle is free to reuse now: already-recorded command buffers
+		// hold the VkBuffer by value, and no new draw references this handle (the
+		// vertexCache cleared block->vbo alongside this call).
+		bufferTable[idx] = VK_NULL_HANDLE;
+		bufferAllocs[idx] = NULL;
+		bufferMapped[idx] = NULL;
+		freeBufferSlots.push_back( idx );
+	}
+}
+
+// Called once per BeginFrame (after the slot's fence wait): age every retired
+// buffer and destroy those whose TTL has elapsed. `force` (device idle at
+// teardown) destroys them all regardless of TTL.
+void VulkanBackend::DrainRetiredBuffers( bool force ) {
+	for ( size_t i = 0; i < retiredBuffers.size(); ) {
+		if ( force || --retiredBuffers[i].ttl <= 0 ) {
+			vmaDestroyBuffer( vma, retiredBuffers[i].buffer, retiredBuffers[i].alloc );
+			retiredBuffers[i] = retiredBuffers.back();
+			retiredBuffers.pop_back();
+		} else {
+			i++;
+		}
+	}
 }
 
 /*

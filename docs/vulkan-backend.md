@@ -441,3 +441,43 @@ switching hardening, 1.1-profile check) takes over.
 - **Stencil format portability** — D24S8 isn't universal on Vulkan (notably missing on
   AMD Windows drivers historically); the backend must fall back to D32S8
   (`IF_DEPTH24_STENCIL8` already documents "backend may substitute D32S8").
+
+## May look into (backlog — not scheduled)
+
+Ideas worth revisiting; none blocking. Low-priority unless a measurement says otherwise.
+
+- **Persistent static buffers → device-local + staging (if BAR pressure ever shows).**
+  `VulkanBackend::CreateBuffer` (the vertexCache's static vertex/index blocks, added on
+  `feat/vulkan-static-vertex-buffers`) allocates **host-visible** buffers. VMA places them
+  in the driver's host-visible **device-local BAR heap** — measured on an RTX 3080 Ti
+  (no ReBAR): the 246 MB heap, ~667 buffers ≈ 1.9 MB at the mars_city1 spawn; a full-map
+  roam is tens of MB. That heap is shared with the geometry/UBO rings (~80 MB) and is
+  *small*. For real D3 maps this is fine and actually near-optimal (write-once by CPU,
+  read from VRAM). **Only if** a level ever pressures the BAR heap (VMA then silently
+  spills to system RAM → slower GPU reads, no crash): either (a) make the ring-fallback
+  path noisy — `CreateBuffer` already returns 0 → vertexCache streams via the ring, but
+  that fallback is currently silent, so add a one-time warning; and/or (b) switch these to
+  **device-local** memory with a staging upload, moving them to the big VRAM heap with best
+  bandwidth. Cost of (b): a staging copy + submit per block at level load (avoided today
+  for fast loads); batch the uploads if pursued. Measure first with `r_showVertexCache 1`
+  (`total:…=k` is the live resident geometry) before changing anything.
+
+- **Offload CPU-bound work to the GPU for FPS** (the real Doom 3 bottleneck is the CPU
+  front-end, not GPU throughput — a modern GPU sits idle). Vulkan makes these tractable;
+  all must stay visually identical to the classic path (perf-only, fidelity-neutral).
+  Highest-value candidates, roughly in order:
+  - **GPU vertex skinning** for animated md5 meshes (enemies/NPCs). Today `idSIMD` skins
+    every animated vertex on the CPU each frame, then streams the result. Move to a vertex
+    shader: upload the bind-pose once (the new persistent-buffer path is the prerequisite)
+    + joint matrices per draw in the UBO ring. Frees a big chunk of per-frame CPU.
+  - **GPU shadow-volume extrusion / silhouette.** The vertex-program shadow cache already
+    projects to infinity in the shader (the w=0 trick), but silhouette determination and
+    cap generation are still CPU (`R_CreateShadowVolume`) — historically D3's single
+    biggest CPU cost. A geometry/compute path that builds the volume on the GPU is the
+    large prize; scope it carefully (must match the stencil result exactly, incl.
+    `DEPTHFUNC_EQUAL` zfill parity — see the tessellation note for the same constraint).
+  - **Compute-based culling / GPU-driven draw submission.** Bigger architectural change;
+    would cut CPU draw-call setup. Only worth it after the above two, and after profiling
+    shows draw submission (not shadows/skinning) is the remaining CPU cost.
+  - Prerequisite for all of the above: a GPU-time profiler for the VK backend (the GL3
+    path has `r_gl3GpuTime`) so wins are measured, not assumed. Build that first.

@@ -31,6 +31,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/tr_local.h"
 
 #include "renderer/VertexCache.h"
+#include "renderer/rhi/RHI.h"
 
 static const int	FRAME_MEMORY_BYTES = 0x200000;
 static const int	EXPAND_HEADERS = 1024;
@@ -71,7 +72,13 @@ void idVertexCache::ActuallyFree( vertCache_t *block ) {
 		staticCountTotal--;
 
 		if ( block->vbo ) {
-#if 0		// this isn't really necessary, it will be reused soon enough
+			if ( rhiStaticBuffers ) {
+				// Vulkan: this is a persistent RHI buffer we own; release it and
+				// clear the handle so a reused block allocates a fresh one.
+				rhi::GetRHI()->DestroyBuffer( block->vbo );
+				block->vbo = 0;
+			}
+#if 0		// (GL) this isn't really necessary, it will be reused soon enough
 			// filling with zero length data is the equivalent of freeing
 			qglBindBufferARB(GL_ARRAY_BUFFER_ARB, block->vbo);
 			qglBufferDataARB(GL_ARRAY_BUFFER_ARB, 0, 0, GL_DYNAMIC_DRAW_ARB);
@@ -158,10 +165,21 @@ void idVertexCache::Init() {
 	}
 
 	virtualMemory = false;
+	rhiStaticBuffers = false;
 
 	// use ARB_vertex_buffer_object unless explicitly disabled
 	if( r_useVertexBuffers.GetInteger() && glConfig.ARBVertexBufferObjectAvailable ) {
 		common->Printf( "using ARB_vertex_buffer_object memory\n" );
+	} else if ( glConfig.rhiBackend ) {
+		// Vulkan: no GL buffer objects, but the RHI provides persistent buffers.
+		// Static blocks upload once through rhi::CreateBuffer (see Alloc); only the
+		// dynamic frame-temp path uses the CPU virtual-memory arena, so keep
+		// virtualMemory set for it. Enable index buffers so the frontend fills
+		// tri->indexCache and the backend takes the cached-index fast path too.
+		virtualMemory = true;
+		rhiStaticBuffers = true;
+		r_useIndexBuffers.SetBool( true );
+		common->Printf( "using RHI persistent vertex/index buffers\n" );
 	} else {
 		virtualMemory = true;
 		r_useIndexBuffers.SetBool( false );
@@ -297,6 +315,23 @@ void idVertexCache::Alloc( void *data, int size, vertCache_t **buffer, bool inde
 			} else {
 				qglBufferDataARB( GL_ARRAY_BUFFER_ARB, (GLsizeiptrARB)size, data, GL_STATIC_DRAW_ARB );
 			}
+		}
+	} else if ( rhiStaticBuffers && !allocatingTempBuffer ) {
+		// Vulkan: back this static block with a persistent RHI buffer (uploaded
+		// once here). block->offset stays 0 — each block is its own buffer, so the
+		// backend's cached fast path binds it directly. Falls back to virtual
+		// memory if the allocation fails, so a create failure never crashes.
+		//
+		// The dynamic frame-temp arena (allocatingTempBuffer) is deliberately
+		// excluded: AllocFrameTemp copies tempBuffers[]->vbo/virtMem into its
+		// sub-blocks and the backend streams them through the ring, so those must
+		// stay in CPU virtual memory (a non-zero vbo there routes into the NULL
+		// qgl* GL path and crashes).
+		block->vbo = rhi::GetRHI()->CreateBuffer(
+			indexBuffer ? rhi::BU_INDEX : rhi::BU_VERTEX, size, data );
+		if ( !block->vbo ) {
+			block->virtMem = Mem_Alloc( size );
+			SIMDProcessor->Memcpy( block->virtMem, data, size );
 		}
 	} else {
 		block->virtMem = Mem_Alloc( size );
@@ -560,7 +595,10 @@ just for gfxinfo printing
 =============
 */
 bool idVertexCache::IsFast() {
-	if ( virtualMemory ) {
+	// virtualMemory alone isn't slow anymore: the Vulkan path keeps it set for
+	// the dynamic frame-temp arena while static geometry lives in fast persistent
+	// RHI buffers.
+	if ( virtualMemory && !rhiStaticBuffers ) {
 		return false;
 	}
 	return true;

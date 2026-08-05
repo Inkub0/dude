@@ -126,6 +126,12 @@ private:
 
 	bool			virtualMemory;			// not fast stuff
 
+	// Vulkan (RHI backend, no GL buffer objects): static blocks are backed by
+	// persistent RHI buffers via rhi::GetRHI()->CreateBuffer instead of GL VBOs
+	// or the slow CPU virtual-memory fallback. virtualMemory stays true so the
+	// dynamic frame-temp path keeps streaming, but static Alloc()s are "fast".
+	bool			rhiStaticBuffers;
+
 	bool			allocatingTempBuffer;	// force GL_STREAM_DRAW_ARB
 
 	vertCache_t		*tempBuffers[NUM_VERTEX_FRAMES];		// allocated at startup
