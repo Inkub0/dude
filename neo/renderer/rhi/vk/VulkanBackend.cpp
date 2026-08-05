@@ -83,6 +83,9 @@ static idCVar r_vkDevice( "r_vkDevice", "-1", CVAR_RENDERER | CVAR_ARCHIVE | CVA
 static idCVar r_vkDumpNextFrame( "r_vkDumpNextFrame", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan: write the next frame's scene image to vkdump.tga (dev)" );
 
+static idCVar r_vkGpuTime( "r_vkGpuTime", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: print GPU frame time (ms), averaged once per second" );
+
 namespace rhi {
 
 static const int FRAMES_IN_FLIGHT = 2;
@@ -232,6 +235,21 @@ private:
 	bool						sceneWritten = false;
 	int							fakePassDepth = 0;			// balanced no-op target passes
 	int							presentedFrames = 0;		// session diagnostic (shutdown summary)
+
+	// GPU frame timing (r_vkGpuTime) — a VK_QUERY_TYPE_TIMESTAMP pool holding two
+	// stamps (begin+end) per frame slot. Each slot's pair is read back at that
+	// slot's next BeginFrame, after its fence proves the GPU is done, so the read
+	// never stalls. Mirrors the GL3 backend's r_gl3GpuTime.
+	VkQueryPool					gpuTimerPool = VK_NULL_HANDLE;
+	bool						gpuTimerSupported = false;	// device+queue can timestamp
+	bool						gpuTimerBusy[FRAMES_IN_FLIGHT] = {};	// slot holds an unread pair
+	bool						gpuTimerActive = false;		// begin stamp written this frame
+	double						gpuTimerPeriodNs = 1.0;		// ns per timestamp tick
+	uint64_t					gpuTimerMask = ~0ULL;		// valid-bit mask (queue timestampValidBits)
+	double						gpuTimeAccumMs = 0.0;		// summed since last print
+	int							gpuTimeSamples = 0;
+	unsigned int				gpuTimeLastPrint = 0;
+	void						GpuTimerReadback( int slot );
 
 	// ================= M2: rings / shaders / pipelines / images =================
 
@@ -1547,6 +1565,38 @@ void VulkanBackend::Shutdown() {
 
 /*
 ====================
+VulkanBackend::GpuTimerReadback
+
+Reads back slot's begin/end timestamp pair (recorded the last time this slot ran,
+now guaranteed done by BeginFrame's fence wait — so no WAIT bit, no stall),
+converts the tick delta to ms, and prints a running average once per second.
+====================
+*/
+void VulkanBackend::GpuTimerReadback( int slot ) {
+	if ( !gpuTimerBusy[slot] ) {
+		return;
+	}
+	gpuTimerBusy[slot] = false;
+	uint64_t stamps[2] = { 0, 0 };
+	if ( vkGetQueryPoolResults( device, gpuTimerPool, 2 * slot, 2,
+	         sizeof( stamps ), stamps, sizeof( uint64_t ), VK_QUERY_RESULT_64_BIT ) != VK_SUCCESS ) {
+		return;		// VK_NOT_READY not expected post-fence; skip this sample
+	}
+	uint64_t delta = ( stamps[1] & gpuTimerMask ) - ( stamps[0] & gpuTimerMask );
+	gpuTimeAccumMs += ( (double)delta * gpuTimerPeriodNs ) / 1000000.0;
+	gpuTimeSamples++;
+	unsigned int now = Sys_Milliseconds();
+	if ( now - gpuTimeLastPrint >= 1000 ) {
+		common->Printf( "VK GPU: %.2f ms (%d samples)\n",
+		                gpuTimeAccumMs / gpuTimeSamples, gpuTimeSamples );
+		gpuTimeAccumMs = 0.0;
+		gpuTimeSamples = 0;
+		gpuTimeLastPrint = now;
+	}
+}
+
+/*
+====================
 VulkanBackend::BeginFrame
 ====================
 */
@@ -1602,6 +1652,19 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	vkBeginCommandBuffer( f.cb, &bi );
+
+	// GPU timer (r_vkGpuTime): read back this slot's previous pair before the
+	// reset wipes it, then — while active — reset the two queries (must be outside
+	// a render pass; the cb has none open yet) and stamp the frame's start.
+	gpuTimerActive = false;
+	if ( gpuTimerSupported ) {
+		GpuTimerReadback( frameIndex );
+		if ( r_vkGpuTime.GetBool() ) {
+			vkCmdResetQueryPool( f.cb, gpuTimerPool, 2 * frameIndex, 2 );
+			vkCmdWriteTimestamp( f.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, gpuTimerPool, 2 * frameIndex );
+			gpuTimerActive = true;
+		}
+	}
 
 	// M2: this slot's GPU work is fenced off — reset its rings (the
 	// StreamGeneration contract) and its per-draw descriptor pool
@@ -1879,6 +1942,15 @@ void VulkanBackend::EndFrame() {
 		}
 	}
 
+	// GPU timer (r_vkGpuTime): stamp the frame's end just before closing the cb;
+	// the pair reads back at this slot's next BeginFrame. BOTTOM_OF_PIPE so the
+	// stamp waits for all prior GPU work this frame to finish.
+	if ( gpuTimerActive ) {
+		vkCmdWriteTimestamp( f.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuTimerPool, 2 * frameIndex + 1 );
+		gpuTimerBusy[frameIndex] = true;
+		gpuTimerActive = false;
+	}
+
 	vkEndCommandBuffer( f.cb );
 
 	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -1941,6 +2013,34 @@ bool VulkanBackend::CreateM2Resources() {
 	if ( uboAlign < 4 ) {
 		uboAlign = 256;
 	}
+
+	// GPU timer query pool (r_vkGpuTime). Gated on the graphics queue's
+	// timestampValidBits; timestampPeriod is ns/tick. If unsupported the cvar just
+	// stays inert (like the GL3 timer without the query entry points). Recreated
+	// here so it re-arms after vid_restart too.
+	uint32_t validBits = 0;
+	{
+		uint32_t qfCount = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties( physical, &qfCount, NULL );
+		std::vector<VkQueueFamilyProperties> qfp( qfCount );
+		vkGetPhysicalDeviceQueueFamilyProperties( physical, &qfCount, qfp.data() );
+		if ( gfxFamily < qfCount ) { validBits = qfp[gfxFamily].timestampValidBits; }
+	}
+	gpuTimerSupported = physProps.limits.timestampPeriod > 0.0f && validBits > 0;
+	if ( gpuTimerSupported ) {
+		gpuTimerPeriodNs = (double)physProps.limits.timestampPeriod;
+		gpuTimerMask = ( validBits >= 64 ) ? ~0ULL : ( ( 1ULL << validBits ) - 1 );
+		VkQueryPoolCreateInfo qpi = {};
+		qpi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+		qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+		qpi.queryCount = 2 * FRAMES_IN_FLIGHT;		// begin+end per slot
+		if ( !vkCheck( vkCreateQueryPool( device, &qpi, NULL, &gpuTimerPool ), "vkCreateQueryPool(timer)" ) ) {
+			gpuTimerPool = VK_NULL_HANDLE;
+			gpuTimerSupported = false;
+		}
+	}
+	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) { gpuTimerBusy[i] = false; }
+	gpuTimerActive = false;
 
 	// host-visible persistently-mapped rings, one set per frame slot — the
 	// slot's fence wait in BeginFrame guarantees the GPU is done with them
@@ -2158,6 +2258,11 @@ void VulkanBackend::DestroyM2Resources() {
 	// their borrowed imageTable slots (live=false) so the imageTable sweep below
 	// doesn't double-free them. Device is idle here.
 	DestroyAllTargets();
+
+	if ( gpuTimerPool != VK_NULL_HANDLE ) {
+		vkDestroyQueryPool( device, gpuTimerPool, NULL );
+		gpuTimerPool = VK_NULL_HANDLE;
+	}
 
 	for ( auto &kv : pipelineCache ) {
 		vkDestroyPipeline( device, kv.second, NULL );
