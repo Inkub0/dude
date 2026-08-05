@@ -489,7 +489,7 @@ idCVar	idFileSystemLocal::fs_caseSensitiveOS( "fs_caseSensitiveOS", "1", CVAR_SY
 idCVar	idFileSystemLocal::fs_searchAddons( "fs_searchAddons", "0", CVAR_SYSTEM | CVAR_BOOL, "search all addon pk4s ( disables addon functionality )" );
 // DUDE: mirror loose base/<game>/guis/*.gui overrides into fs_savepath at startup so
 // they win regardless of launch method (fs_savepath outranks fs_basepath).
-idCVar	fs_installGuiOverrides( "fs_installGuiOverrides", "1", CVAR_SYSTEM | CVAR_BOOL | CVAR_ARCHIVE, "copy loose guis/ overrides from fs_basepath into fs_savepath so they always take effect (fs_savepath outranks fs_basepath)" );
+idCVar	fs_installGuiOverrides( "fs_installGuiOverrides", "1", CVAR_SYSTEM | CVAR_BOOL | CVAR_ARCHIVE, "mirror loose guis/ overrides (*.gui, *.pd) from fs_basepath into fs_savepath when their content differs, so they always take effect (fs_savepath outranks fs_basepath)" );
 
 idCVar idFileSystemLocal::fs_gameDllPath( "fs_gameDllPath", "", CVAR_SYSTEM | CVAR_INIT, "additional directory to search the game .dll (.so/.dylib/...) in; searched before all other places (if set)" );
 
@@ -2163,9 +2163,12 @@ idFileSystemLocal::InstallGuiOverrides
 
 DUDE: loose GUI overrides live in fs_basepath/<game>/guis, but fs_savepath outranks
 fs_basepath in the search order, so a pak sitting in savepath would shadow them.
-Mirror the loose top-level *.gui overrides from basepath into savepath (when the two
-differ) so they take effect no matter how the game is launched. Newer-only, so it's
-cheap and won't clobber unchanged files. Disable with fs_installGuiOverrides 0.
+Mirror the loose top-level *.gui overrides (and the *.pd include files they pull in)
+from basepath into savepath whenever the bytes differ, so the basepath copy takes
+effect no matter how the game is launched. Content compare, not timestamps: the
+basepath copy is canonical, and mtimes lie (git checkouts, restored backups) — a
+stale savepath copy with a newer date must still lose. Disable with
+fs_installGuiOverrides 0.
 ================
 */
 void idFileSystemLocal::InstallGuiOverrides( const char *gameName ) {
@@ -2179,31 +2182,48 @@ void idFileSystemLocal::InstallGuiOverrides( const char *gameName ) {
 	}
 
 	idStr srcDir = BuildOSPath( base, gameName, "guis" );
-	idStrList guis;
-	ListOSFiles( srcDir, ".gui", guis );
+	static const char *overrideExts[] = { ".gui", ".pd" };
 
-	for ( int i = 0; i < guis.Num(); i++ ) {
-		idStr rel = idStr( "guis/" ) + guis[i];
-		idStr from = BuildOSPath( base, gameName, rel.c_str() );
-		idStr to   = BuildOSPath( save, gameName, rel.c_str() );
+	for ( int e = 0; e < 2; e++ ) {
+		idStrList files;
+		ListOSFiles( srcDir, overrideExts[e], files );
 
-		FILE *sf = OpenOSFile( from.c_str(), "rb" );
-		if ( !sf ) {
-			continue;
-		}
-		ID_TIME_T srcTime = Sys_FileTimeStamp( sf );
-		fclose( sf );
+		for ( int i = 0; i < files.Num(); i++ ) {
+			idStr rel = idStr( "guis/" ) + files[i];
+			idStr from = BuildOSPath( base, gameName, rel.c_str() );
+			idStr to   = BuildOSPath( save, gameName, rel.c_str() );
 
-		ID_TIME_T dstTime = FILE_NOT_FOUND_TIMESTAMP;
-		FILE *df = OpenOSFile( to.c_str(), "rb" );
-		if ( df ) {
-			dstTime = Sys_FileTimeStamp( df );
-			fclose( df );
-		}
+			FILE *sf = OpenOSFile( from.c_str(), "rb" );
+			if ( !sf ) {
+				continue;
+			}
 
-		if ( dstTime == FILE_NOT_FOUND_TIMESTAMP || srcTime > dstTime ) {
-			common->Printf( "installing GUI override into savepath: %s/%s\n", gameName, rel.c_str() );
-			CopyFile( from.c_str(), to.c_str() );
+			bool same = false;
+			FILE *df = OpenOSFile( to.c_str(), "rb" );
+			if ( df ) {
+				fseek( sf, 0, SEEK_END );
+				fseek( df, 0, SEEK_END );
+				if ( ftell( sf ) == ftell( df ) ) {
+					rewind( sf );
+					rewind( df );
+					same = true;
+					byte sbuf[4096], dbuf[4096];
+					size_t n;
+					while ( ( n = fread( sbuf, 1, sizeof( sbuf ), sf ) ) > 0 ) {
+						if ( fread( dbuf, 1, n, df ) != n || memcmp( sbuf, dbuf, n ) != 0 ) {
+							same = false;
+							break;
+						}
+					}
+				}
+				fclose( df );
+			}
+			fclose( sf );
+
+			if ( !same ) {
+				common->Printf( "installing GUI override into savepath: %s/%s\n", gameName, rel.c_str() );
+				CopyFile( from.c_str(), to.c_str() );
+			}
 		}
 	}
 }

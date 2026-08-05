@@ -1,5 +1,13 @@
 # Main-menu "DUDE Settings" button (GUI patch snippet)
 
+> **Update 2026-08-05:** the canonical working menu is now the loose (untracked)
+> `base/guis/mainmenu.gui` in this repo — edit that file only. The engine mirrors
+> it into `fs_savepath` by **content** at startup, and `fs_basepath` falls back to
+> the executable's parent dir / cwd, so it wins over every pak copy no matter how
+> the game is launched. The settings button windowDef was renamed
+> `dhewm3set1` → `dudeset1` (definition + the two `::rect` wiggle transitions).
+> The recipes below remain as the reproducible history of the edits.
+
 This documents a small, reproducible edit to the main-menu button that opens the
 F10 settings menu, so the customization is version-controlled **without** committing
 any third-party/derivative game GUI into this repo.

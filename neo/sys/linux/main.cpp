@@ -208,14 +208,31 @@ bool Sys_GetPath(sysPath_t type, idStr &path) {
 			if (stat(testPath.c_str(), &st) != -1 && S_ISDIR(st.st_mode)) {
 				common->Warning("using path of executable: %s", path.c_str());
 				return true;
-			} else {
-				idStr testPath = path + "/demo/demo00.pk4";
-				if(stat(testPath.c_str(), &st) != -1 && S_ISREG(st.st_mode)) {
-					common->Warning("using path of executable (seems to contain demo game data): %s", path.c_str());
-					return true;
-				} else {
-					path.Clear();
-				}
+			}
+			testPath = path + "/demo/demo00.pk4";
+			if (stat(testPath.c_str(), &st) != -1 && S_ISREG(st.st_mode)) {
+				common->Warning("using path of executable (seems to contain demo game data): %s", path.c_str());
+				return true;
+			}
+			// DUDE: one level up from the executable — the repo/portable
+			// layout keeps the binary in build/ (or bin/) with the game data
+			// in a sibling base/, so build/dude finds ../base from any cwd.
+			path.StripFilename();
+			testPath = path + "/" BASE_GAMEDIR;
+			if (path.Length() && stat(testPath.c_str(), &st) != -1 && S_ISDIR(st.st_mode)) {
+				common->Warning("using parent of executable path: %s", path.c_str());
+				return true;
+			}
+			path.Clear();
+		}
+
+		// DUDE: current working directory (unzip-and-run portable installs)
+		if (getcwd(buf, sizeof(buf))) {
+			idStr testPath = idStr(buf) + "/" BASE_GAMEDIR;
+			if (stat(testPath.c_str(), &st) != -1 && S_ISDIR(st.st_mode)) {
+				common->Warning("using current working directory: %s", buf);
+				path = buf;
+				return true;
 			}
 		}
 

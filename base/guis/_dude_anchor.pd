@@ -1,0 +1,40 @@
+// DUDE anchor constants for widescreen-aware GUIs.
+//
+// Numeric values are fixed by the engine's cstAnchor support (see
+// neo/ui/Window.cpp, CST_ANCHOR_* handling); this file just gives them
+// readable names for .gui authors. Keep in sync with the engine enum.
+
+#define CST_ANCHOR_NONE				-1
+#define CST_ANCHOR_TOP_LEFT			0
+#define CST_ANCHOR_TOP_CENTER		1
+#define CST_ANCHOR_TOP_RIGHT		2
+#define CST_ANCHOR_CENTER_LEFT		3
+#define CST_ANCHOR_CENTER_CENTER	4
+#define CST_ANCHOR_CENTER_RIGHT		5
+#define CST_ANCHOR_BOTTOM_LEFT		6
+#define CST_ANCHOR_BOTTOM_CENTER	7
+#define CST_ANCHOR_BOTTOM_RIGHT		8
+#define CST_ANCHOR_TOP				9
+#define CST_ANCHOR_VCENTER			10
+#define CST_ANCHOR_BOTTOM			11
+#define CST_ANCHOR_LEFT				12
+#define CST_ANCHOR_HCENTER			13
+#define CST_ANCHOR_RIGHT			14
+
+// String variants (for use in "set" expressions where a quoted value is needed).
+#define CST_ANCHOR_NONE_TEXT			"-1"
+#define CST_ANCHOR_TOP_LEFT_TEXT		"0"
+#define CST_ANCHOR_TOP_CENTER_TEXT		"1"
+#define CST_ANCHOR_TOP_RIGHT_TEXT		"2"
+#define CST_ANCHOR_CENTER_LEFT_TEXT		"3"
+#define CST_ANCHOR_CENTER_CENTER_TEXT	"4"
+#define CST_ANCHOR_CENTER_RIGHT_TEXT	"5"
+#define CST_ANCHOR_BOTTOM_LEFT_TEXT		"6"
+#define CST_ANCHOR_BOTTOM_CENTER_TEXT	"7"
+#define CST_ANCHOR_BOTTOM_RIGHT_TEXT	"8"
+#define CST_ANCHOR_TOP_TEXT				"9"
+#define CST_ANCHOR_VCENTER_TEXT			"10"
+#define CST_ANCHOR_BOTTOM_TEXT			"11"
+#define CST_ANCHOR_LEFT_TEXT			"12"
+#define CST_ANCHOR_HCENTER_TEXT			"13"
+#define CST_ANCHOR_RIGHT_TEXT			"14"
