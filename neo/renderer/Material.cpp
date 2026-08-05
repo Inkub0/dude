@@ -1047,6 +1047,11 @@ void idMaterial::ClearStage( shaderStage_t *ss ) {
 	ss->color.registers[1] =
 	ss->color.registers[2] =
 	ss->color.registers[3] = GetExpressionConstant( 1 );
+	// DUDE: parseStages[] is reused across every material, and ClearStage does not memset,
+	// so the parallax fields must be reset explicitly or a stage inherits a stale height
+	// pointer from a previously parsed material (docs/parallax.md).
+	ss->parallaxImage = NULL;
+	ss->parallaxScale = 0.0f;
 }
 
 /*
@@ -1372,6 +1377,53 @@ void idMaterial::MultiplyTextureMatrix( textureStage_t *ts, int registers[2][3] 
 }
 
 /*
+===============
+R_BumpHeightScale
+
+DUDE (docs/parallax.md): read the bake magnitude N out of a `heightmap( <program>, N )`
+sub-expression in a bump stage's image program, used as the per-material parallax
+height scale. Returns false when the program carries no heightmap() operand (a plain
+normal map), in which case the caller applies a default.
+===============
+*/
+static bool R_BumpHeightScale( const char *imageProgram, float &outScale ) {
+	idLexer src;
+	src.LoadMemory( imageProgram, strlen( imageProgram ), "heightmapScan" );
+	src.SetFlags( LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_NOSTRINGESCAPECHARS | LEXFL_ALLOWPATHNAMES );
+
+	idToken token;
+	while ( src.ReadToken( &token ) ) {
+		if ( token.Icmp( "heightmap" ) ) {
+			continue;
+		}
+		// found 'heightmap' -- skip '(' <operand...> ',' then read <scale>
+		if ( !src.ExpectTokenString( "(" ) ) {
+			return false;
+		}
+		int depth = 0;
+		while ( src.ReadToken( &token ) ) {
+			if ( token == "," && depth == 0 ) {
+				break;
+			}
+			if ( token == "(" ) {
+				depth++;
+			} else if ( token == ")" ) {
+				if ( depth == 0 ) {
+					return false;		// unbalanced: ')' before the operand's comma
+				}
+				depth--;
+			}
+		}
+		if ( !src.ReadToken( &token ) ) {
+			return false;
+		}
+		outScale = token.GetFloatValue();
+		return true;
+	}
+	return false;
+}
+
+/*
 =================
 idMaterial::ParseStage
 
@@ -1398,6 +1450,7 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 	cubeFiles_t			cubeMap;
 	bool				allowPicmip;
 	char				imageName[MAX_IMAGE_NAME];
+	char				parallaxName[MAX_IMAGE_NAME];	// DUDE: explicit `parallaxmap` height override
 	int					a, b;
 	int					matrix[2][3];
 	newShaderStage_t	newStage;
@@ -1414,6 +1467,7 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 	cubeMap = CF_2D;
 
 	imageName[0] = 0;
+	parallaxName[0] = 0;
 
 	memset( &newStage, 0, sizeof( newStage ) );
 
@@ -1451,6 +1505,15 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 		if (  !token.Icmp( "map" ) ) {
 			str = R_ParsePastImageProgram( src );
 			idStr::Copynz( imageName, str, sizeof( imageName ) );
+			continue;
+		}
+
+		// DUDE: explicit parallax height override (non-vanilla; docs/parallax.md). Attaches
+		// a height map to this bump stage for parallax occlusion mapping, overriding the
+		// heightmap() auto-capture. Inert unless r_parallax is set at parse time.
+		if ( !token.Icmp( "parallaxmap" ) ) {
+			str = R_ParsePastImageProgram( src );
+			idStr::Copynz( parallaxName, str, sizeof( parallaxName ) );
 			continue;
 		}
 
@@ -1888,6 +1951,33 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 	} else if ( !ts->cinematic && !ts->dynamic && !ss->newStage ) {
 		common->Warning( "material '%s' had stage with no image", GetName() );
 		ts->image = globalImages->defaultImage;
+	}
+
+	// DUDE: parallax occlusion mapping height source (non-vanilla; Vulkan). Only resolved
+	// when r_parallax is enabled at parse time, so "off" stays bit-for-bit vanilla with no
+	// extra resident textures. The height texture is loaded uncompressed (TD_HIGH_QUALITY)
+	// to avoid the stepping a DXT'd height field would produce under the POM march. Toggling
+	// r_parallax takes effect on the next reloadDecls/map load. See docs/parallax.md.
+	if ( r_parallax.GetBool() && ss->lighting == SL_BUMP ) {
+		idImage *height = NULL;
+		if ( parallaxName[0] ) {
+			// explicit `parallaxmap` override: author-supplied height, loaded as a file
+			height = globalImages->ImageFromFile( parallaxName, TF_DEFAULT, allowPicmip, trp, TD_HIGH_QUALITY, CF_2D );
+			if ( height == globalImages->defaultImage ) {
+				height = NULL;
+			}
+		} else if ( imageName[0] ) {
+			// auto-capture: derive the height from this bump stage's *combined* normal map
+			// (the detailed map SSAO shows), not the coarse _h source (docs/parallax.md).
+			height = R_CreateParallaxHeightImage( imageName );
+		}
+		if ( height ) {
+			ss->parallaxImage = height;
+			// heightmap() bake magnitude if the bump carried one, else a sane default; the
+			// per-material knob feeding r_parallaxScale in the interaction pass.
+			float n = 0.0f;
+			ss->parallaxScale = R_BumpHeightScale( imageName, n ) ? n : 5.0f;
+		}
 	}
 }
 
@@ -3054,6 +3144,25 @@ material, so the feature is inert on the base game (docs/occlusion-maps.md).
 const shaderStage_t *idMaterial::GetOcclusionStage( void ) const {
 	for ( int i = 0 ; i < numStages ; i++ ) {
 		if ( stages[i].lighting == SL_OCCLUSION ) {
+			return &stages[i];
+		}
+	}
+	return NULL;
+}
+
+/*
+===================
+idMaterial::GetParallaxStage
+
+DUDE: first bump stage that captured a parallax height source, or NULL. Non-vanilla; the
+Vulkan interaction pass marches this height map to offset the surface UVs (parallax
+occlusion mapping). Only populated when r_parallax was set at parse time, so this returns
+NULL on stock assets and with the feature off (docs/parallax.md).
+===================
+*/
+const shaderStage_t *idMaterial::GetParallaxStage( void ) const {
+	for ( int i = 0 ; i < numStages ; i++ ) {
+		if ( stages[i].lighting == SL_BUMP && stages[i].parallaxImage ) {
 			return &stages[i];
 		}
 	}

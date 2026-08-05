@@ -446,6 +446,17 @@ idCVar r_occlusionMapScale( "r_occlusionMapScale", "1.0", CVAR_RENDERER | CVAR_A
 idCVar r_occlusionMapDirect( "r_occlusionMapDirect", "0.9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how strongly baked occlusion maps darken direct (dynamic) light's diffuse, 0..1, as a fraction of r_occlusionMapScale. Doom 3 is mostly dynamic light, so this is what makes the map visible; lower it if AO looks baked-in under moving lights, 0 = ambient-only", 0.0f, 1.0f );
 idCVar r_occlusionMapsAutoBake( "r_occlusionMapsAutoBake", "0", CVAR_RENDERER | CVAR_BOOL, "DEV: when a model-entity surface has no explicit or cached occlusion map, bake one on first sight (writes generated/aomaps, one-time hitch per model). Off by default; use the bakeAO/bakeAOFolder commands for offline baking" );
 
+// DUDE: parallax occlusion mapping (non-vanilla; Vulkan enhancement). Per-pixel surface
+// relief on materials that carry height data -- auto-captured from a `heightmap(...)` operand
+// in the bump program (the source Doom 3 bakes its normals from), or an explicit `parallaxmap`
+// stage. Off = bit-for-bit vanilla with zero extra resident textures: no height map is loaded
+// unless r_parallax is set when the material is parsed. See docs/parallax.md.
+idCVar r_parallax( "r_parallax", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "parallax occlusion mapping: per-pixel surface relief on materials that carry height data (auto-captured from `heightmap(...)` in the bump program, or an explicit `parallaxmap` stage). Non-vanilla; Vulkan only. Takes effect on the next reloadDecls/map load" );
+idCVar r_parallaxScale( "r_parallaxScale", "0.1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "global multiplier on per-material parallax height scale, 0..4 (0 = flat, higher exaggerates the relief; 0.1 = tuned default)", 0.0f, 4.0f );
+idCVar r_parallaxMinSteps( "r_parallaxMinSteps", "6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "parallax occlusion mapping: height-field march steps when viewing head-on (cheaper). Ramps up to r_parallaxMaxSteps at grazing angles", 1, 32 );
+idCVar r_parallaxMaxSteps( "r_parallaxMaxSteps", "16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "parallax occlusion mapping: height-field march steps at grazing angles (higher = fewer swimming artifacts, costlier). Loop is capped at 32", 1, 32 );
+idCVar r_parallaxShadow( "r_parallaxShadow", "0.6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "parallax self-shadowing strength, 0..1 (0 = off): the marched relief casts contact shadows from the light direction. Adds a second (half-step) march per lit pixel. Only active when r_parallax is on", 0.0f, 1.0f );
+
 // DUDE: dampen the cube-map ("sheen") reflection on glass etc. The enhancement
 // backends light the scene brighter than the original renderer, so the environment
 // reflection reads too strong; 0.7 (-30%) matches the legacy look, 1.0 is untouched.
@@ -1449,6 +1460,56 @@ static void R_ListModes_f( const idCmdArgs &args ) {
 		common->Printf( "%s\n", r_vidModes[i].description );
 	}
 	common->Printf( "\n" );
+}
+
+/*
+==============
+R_ListParallaxMaps_f
+
+DUDE (docs/parallax.md): list every material stage that captured a parallax height
+source, with its scale and the resolved height texture. Phase-A verification that
+auto-capture picked the right `_h.tga` on stock assets. Requires r_parallax to have
+been set when the materials were parsed (run `reloadDecls` after enabling it), since
+the height maps are only loaded then. Optional substring filters by material name.
+==============
+*/
+static void R_ListParallaxMaps_f( const idCmdArgs &args ) {
+	if ( !r_parallax.GetBool() ) {
+		common->Printf( "r_parallax is 0 -- no height maps are captured. Set r_parallax 1 and run reloadDecls.\n" );
+		return;
+	}
+
+	// idStr::Filter globs, so wrap a bare word in wildcards to act as a substring match
+	// (`listParallaxMaps rock` -> `*rock*`); an arg that already has wildcards is used as-is.
+	idStr filter;
+	if ( args.Argc() > 1 ) {
+		filter = args.Argv( 1 );
+		if ( filter.Find( '*' ) < 0 && filter.Find( '?' ) < 0 ) {
+			filter = idStr( "*" ) + filter + "*";
+		}
+	}
+
+	int withParallax = 0;
+	int total = declManager->GetNumDecls( DECL_MATERIAL );
+	for ( int i = 0; i < total; i++ ) {
+		const idMaterial *mat = declManager->MaterialByIndex( i, false );
+		if ( !mat ) {
+			continue;
+		}
+		if ( filter.Length() && !idStr::Filter( filter, mat->GetName(), false ) ) {
+			continue;
+		}
+		for ( int s = 0; s < mat->GetNumStages(); s++ ) {
+			const shaderStage_t *st = mat->GetStage( s );
+			if ( !st->parallaxImage ) {
+				continue;
+			}
+			common->Printf( "%-44s scale %4.1f  %s\n", mat->GetName(), st->parallaxScale,
+							st->parallaxImage->imgName.c_str() );
+			withParallax++;
+		}
+	}
+	common->Printf( "%i parallax height stage(s) across %i material(s)\n", withParallax, total );
 }
 
 
@@ -2896,6 +2957,7 @@ void R_InitCommands( void ) {
 	cmdSystem->AddCommand( "listRenderEntityDefs", R_ListRenderEntityDefs_f, CMD_FL_RENDERER, "lists the entity defs" );
 	cmdSystem->AddCommand( "listRenderLightDefs", R_ListRenderLightDefs_f, CMD_FL_RENDERER, "lists the light defs" );
 	cmdSystem->AddCommand( "listModes", R_ListModes_f, CMD_FL_RENDERER, "lists all video modes" );
+	cmdSystem->AddCommand( "listParallaxMaps", R_ListParallaxMaps_f, CMD_FL_RENDERER, "lists materials with a captured parallax height map (docs/parallax.md); needs r_parallax 1 + reloadDecls" );
 	cmdSystem->AddCommand( "reloadSurface", R_ReloadSurface_f, CMD_FL_RENDERER, "reloads the decl and images for selected surface" );
 	cmdSystem->AddCommand( "reloadPbrTable", R_ReloadPbrTable_f, CMD_FL_RENDERER, "re-reads pbr/pbr_materials.cfg + pbr/pbr_overrides.cfg and re-applies to loaded materials (docs/pbr-materials.md)" );
 }

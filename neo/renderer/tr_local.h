@@ -995,6 +995,12 @@ extern idCVar r_occlusionMapScale;		// AO-map strength on the ambient term (0..1
 extern idCVar r_occlusionMapDirect;		// AO-map strength on direct-light diffuse (0..1 of scale)
 extern idCVar r_occlusionMapsAutoBake;	// DEV: lazily bake missing model AO maps on first sight
 
+extern idCVar r_parallax;				// DUDE: master toggle for parallax occlusion mapping (Vulkan)
+extern idCVar r_parallaxScale;			// DUDE: global multiplier on per-material POM height scale
+extern idCVar r_parallaxMinSteps;		// DUDE: POM march steps head-on
+extern idCVar r_parallaxMaxSteps;		// DUDE: POM march steps at grazing angle (loop cap 32)
+extern idCVar r_parallaxShadow;			// DUDE: POM self-shadow strength (0 = off)
+
 // clears the per-material generated-AO lookup cache (RhiWorld.cpp) so freshly baked maps
 // are picked up without a vid_restart; called by the bakeAO* commands
 void R_ResetOcclusionMapCache( void );

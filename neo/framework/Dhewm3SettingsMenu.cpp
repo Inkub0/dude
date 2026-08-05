@@ -1801,6 +1801,42 @@ static CVarOption enhancementOptions[] = {
 		ImGui::EndDisabled();
 	} ),
 
+	CVarOption( "Parallax Mapping" ),
+	CVarOption( "r_parallax", []( idCVar& cvar ) {
+		bool enable = cvar.GetBool();
+		if ( ImGui::Checkbox( "Parallax Occlusion Mapping", &enable ) ) {
+			cvar.SetBool( enable );
+		}
+		const char* descr = "Per-pixel surface relief on world walls, floors and panels: a height field is\n"
+			"derived from each material's normal map and marched to fake real depth. Opaque\n"
+			"world (BSP) geometry only - props and characters are left to Tessellation, where\n"
+			"parallax would deform their curved surfaces. Takes effect on the next map load.\n"
+			"Off = vanilla.";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
+	CVarOption( "r_parallaxScale", []( idCVar& cvar ) {
+		ImGui::BeginDisabled( !r_parallax.GetBool() );
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Parallax Depth", &f, 0.0f, 2.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( idMath::ClampFloat( 0.0f, 4.0f, f ) );
+		}
+		const char* descr = "Strength of the parallax relief. 0 = flat, higher exaggerates the apparent depth.";
+		AddCVarOptionTooltips( cvar, descr );
+		ImGui::EndDisabled();
+	} ),
+	CVarOption( "r_parallaxShadow", []( idCVar& cvar ) {
+		ImGui::BeginDisabled( !r_parallax.GetBool() );
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Parallax Self-Shadow", &f, 0.0f, 1.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, f ) );
+		}
+		const char* descr = "The parallax relief casts soft contact shadows from the light direction, which is\n"
+			"what makes the fake depth read as real. 0 = off. Adds a second (half-step) march\n"
+			"per lit pixel.";
+		AddCVarOptionTooltips( cvar, descr );
+		ImGui::EndDisabled();
+	} ),
+
 	CVarOption( "Post-Processing" ),
 	// HDR rendering: accumulate the scene into a float (RGBA16F) buffer instead of the
 	// 8-bit backbuffer, then resolve back. Removes fog/gradient banding.
@@ -2387,6 +2423,11 @@ struct EnhancementPreset {
 	// enabled) is pure silhouette smoothing.
 	bool  tessellation;             // r_tessellation
 	float tessDisplace;             // r_tessDisplace
+	// DUDE parallax occlusion mapping (appended, see note above; GL3 + Vulkan): world-surface
+	// relief from Medium up. Self-shadowing (the second, half-step march) is the cost swing, so
+	// it's off on Medium and full from High up. parallaxShadow is inert where parallax is off.
+	bool  parallax;                 // r_parallax
+	float parallaxShadow;           // r_parallaxShadow
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2396,12 +2437,12 @@ struct EnhancementPreset {
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 36.0f,  false,  false, 0.0f },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 36.0f,  false,  false, 0.0f },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 1,   3,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 36.0f,  true,   false, 0.0f },
-	{ "High",         true,  false, true,  true,  true,   0.75f, 2,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 36.0f,  false,  true,  0.0f },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 3,   9,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 36.0f,  false,  true,  -0.25f },
-	{ "Nightmare", true, true, true, true,  true,   1.0f, 4,   12,  true,  true,  2048, 2048, 12, 128,  48,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 36.0f, false,  true,  -0.25f },
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 36.0f,  false,  false, 0.0f, false, 0.0f },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 36.0f,  false,  false, 0.0f, false, 0.0f },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 1,   3,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 36.0f,  true,   false, 0.0f, true, 0.0f },
+	{ "High",         true,  false, true,  true,  true,   0.75f, 2,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 36.0f,  false,  true,  0.0f, true, 1.0f },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 3,   9,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 36.0f,  false,  true,  -0.25f, true, 1.0f },
+	{ "Nightmare", true, true, true, true,  true,   1.0f, 4,   12,  true,  true,  2048, 2048, 12, 128,  48,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 36.0f, false,  true,  -0.25f, true, 1.0f },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2461,6 +2502,10 @@ static void ApplyEnhancementPreset( int idx )
 	// normal-map displacement from Ultra.
 	r_tessellation.SetBool( p.tessellation );
 	r_tessDisplace.SetFloat( p.tessDisplace );
+
+	// parallax occlusion mapping (GL3 + Vulkan): world relief from Medium, self-shadow from High.
+	r_parallax.SetBool( p.parallax );
+	r_parallaxShadow.SetFloat( p.parallaxShadow );
 }
 
 // Return the preset whose full cvar vector the live cvars currently match, or -1
@@ -2504,7 +2549,9 @@ static int DetectEnhancementPreset()
 			r_ssr.GetBool()                    == p.ssr &&
 			idMath::Fabs( r_ssrResScale.GetFloat() - p.ssrResScale ) < 0.01f &&
 			r_tessellation.GetBool()           == p.tessellation &&
-			idMath::Fabs( r_tessDisplace.GetFloat() - p.tessDisplace ) < 0.01f;
+			idMath::Fabs( r_tessDisplace.GetFloat() - p.tessDisplace ) < 0.01f &&
+			r_parallax.GetBool()               == p.parallax &&
+			idMath::Fabs( r_parallaxShadow.GetFloat() - p.parallaxShadow ) < 0.01f;
 		if ( match ) {
 			return i;
 		}

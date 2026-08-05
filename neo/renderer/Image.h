@@ -531,4 +531,8 @@ IMAGEPROGRAM
 void R_LoadImageProgram( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp, textureDepth_t *depth = NULL );
 const char *R_ParsePastImageProgram( idLexer &src );
 
+// DUDE: build a parallax height image by integrating a bump stage's combined normal-map
+// program into a scalar height field (docs/parallax.md). NULL if the program is empty.
+idImage *R_CreateParallaxHeightImage( const char *bumpProgram );
+
 #endif

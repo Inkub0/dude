@@ -87,4 +87,11 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // y = max view distance for the LOD falloff,
 	                            // z = displacement strength (0 = pure PN smoothing),
 	                            // w spare. Consumed by the .tesc / .tese stages only.
+
+	vec4 u_parallaxParms;        // DUDE parallax occlusion mapping (docs/parallax.md):
+	                            // x = enable, y = height depth in UV units,
+	                            // z = min march steps (head-on), w = max march steps
+	                            // (grazing). Height map on unit 11 (u_parallaxMap).
+	vec4 u_parallaxParms2;       // DUDE parallax extras: x = self-shadow strength
+	                            // (0 = off). yzw spare.
 };

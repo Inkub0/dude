@@ -93,10 +93,17 @@ struct RenderParams {
 								// LOD falloff (beyond it factor rolls to 1), z = displacement
 								// strength (0 = pure PN smoothing), w spare. Read by the .tesc/
 								// .tese stages only; 0 on every non-tessellated draw.
+
+	float	parallaxParms[4];	// DUDE parallax occlusion mapping (docs/parallax.md):
+								// x = enable, y = height depth in UV units, z = min march
+								// steps (head-on), w = max march steps (grazing). Height map
+								// on unit 11; 0 on every non-parallax draw.
+	float	parallaxParms2[4];	// DUDE parallax extras: x = self-shadow strength (0 = off,
+								// r_parallaxShadow). yzw spare (reserved for distance LOD).
 };
 
-// 3 mat4 (192) + 40 vec4 (640) = 832 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 832, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 3 mat4 (192) + 42 vec4 (672) = 864 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 864, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

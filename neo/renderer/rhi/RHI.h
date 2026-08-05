@@ -103,6 +103,7 @@ struct DrawArgs {
 									// as a GL_TEXTURE_CUBE_MAP (0 = unbound)
 	ImageHandle		ssao;			// SSAO/GTAO buffer; bound to unit 9 (0 = unbound)
 	ImageHandle		occlusion;		// baked occlusion map; bound to unit 10 (0 = unbound)
+	ImageHandle		parallax;		// parallax height map; bound to unit 11 (0 = unbound)
 };
 
 struct ClearArgs {

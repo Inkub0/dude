@@ -209,7 +209,7 @@ static int RB_RHI_CountLightChain( const drawSurf_t *surf ) {
 // Vulkan (Phase 4 M3): RB_RHI_BindUnit records image handles here instead of
 // touching GL; RB_RHI_VkTextures copies them into a draw's DrawArgs. Handles
 // persist across draws exactly like GL binds do.
-static rhi::ImageHandle rhiVkUnits[11];	// units 0-7 + shadow cube 8 + SSAO 9 + occlusion 10
+static rhi::ImageHandle rhiVkUnits[12];	// units 0-7 + shadow cube 8 + SSAO 9 + occlusion 10 + parallax 11
 
 static void RB_RHI_VkTextures( rhi::DrawArgs &da ) {
 	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
@@ -221,6 +221,7 @@ static void RB_RHI_VkTextures( rhi::DrawArgs &da ) {
 	da.shadowCube = rhiVkUnits[8];
 	da.ssao = rhiVkUnits[9];
 	da.occlusion = rhiVkUnits[10];
+	da.parallax = rhiVkUnits[11];
 }
 
 static void RB_RHI_ForgetTexBinds() {
@@ -240,7 +241,7 @@ RB_RHI_BindUnit
 static void RB_RHI_BindUnit( int unit, idImage *image ) {
 	// Vulkan: demand-load and record the handle for RB_RHI_VkTextures; no GL
 	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		if ( unit >= 0 && unit < 11 && image != NULL ) {
+		if ( unit >= 0 && unit < 12 && image != NULL ) {
 			image->Bind();		// upload trigger only under Vulkan
 			if ( image->rhiHandle == 0 ) {
 				// a white fallback silently breaks shading (e.g. a white
@@ -286,7 +287,7 @@ static void RB_RHI_BindUnit( int unit, idImage *image ) {
 // RenderTargetHandle of its own.
 static void RB_RHI_BindRTImage( rhi::RHI *r, int unit, rhi::ImageHandle img ) {
 	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		if ( unit >= 0 && unit < 11 ) {
+		if ( unit >= 0 && unit < 12 ) {
 			rhiVkUnits[unit] = img;
 		}
 		return;
@@ -942,6 +943,43 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			: scale * idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapDirect.GetFloat() );
 	}
 
+	// DUDE parallax occlusion mapping (docs/parallax.md). The interaction pass marches the
+	// bump stage's captured height map to offset the surface UVs, faking per-pixel relief on
+	// flat world geometry. Fragment-only (no geometry moved), so the flat depth prepass and
+	// GLS_DEPTHFUNC_EQUAL are untouched. Interaction pass only for now: the ambient pass keeps
+	// flat UVs until it gets a matching offset (Phase C). GetParallaxStage() is NULL on stock
+	// assets and with r_parallax off, so this stays inert on the base game.
+	//
+	// World (BSP) surfaces only: POM assumes a locally flat surface with a uniform tangent
+	// basis, which holds for walls/floors but not props/characters -- on those the offset
+	// smears and deforms edges. Props are the tessellation feature's job, not this one. The
+	// static-world test mirrors the occlusion-map path above.
+	//
+	// Opaque only: on alpha-tested (perforated) surfaces -- grates, fences, fans -- the UV
+	// march swims across the cut-out holes and fights the alpha test, looking worse than
+	// flat. The height-derived detail those need lives in their silhouette, not their depth.
+	idImage *parallaxImage = NULL;
+	if ( r_parallax.GetBool() && R_BackendSupportsEnhancements() && !din->ambientLight
+			&& din->surf->material && din->surf->material->Coverage() == MC_OPAQUE ) {
+		const idRenderEntityLocal *redef = din->surf->space ? din->surf->space->entityDef : NULL;
+		const bool worldSurf = redef && redef->parms.hModel
+		    && redef->parms.hModel->IsStaticWorldModel();
+		const shaderStage_t *px = worldSurf ? din->surf->material->GetParallaxStage() : NULL;
+		if ( px && px->parallaxImage ) {
+			parallaxImage = px->parallaxImage;
+			// The material's parallaxScale is the heightmap() bake magnitude (~3..10); convert
+			// to a UV displacement depth. Doom 3's height maps are low-contrast (authored only
+			// to derive normals), so the per-unit factor is generous to make the relief read;
+			// r_parallaxScale is the artist master knob on top (default 1, crank to exaggerate).
+			const float depth = px->parallaxScale * r_parallaxScale.GetFloat() * 0.015f;
+			parms.parallaxParms[0] = 1.0f;
+			parms.parallaxParms[1] = idMath::ClampFloat( 0.0f, 0.3f, depth );
+			parms.parallaxParms[2] = (float)r_parallaxMinSteps.GetInteger();
+			parms.parallaxParms[3] = (float)r_parallaxMaxSteps.GetInteger();
+			parms.parallaxParms2[0] = idMath::ClampFloat( 0.0f, 1.0f, r_parallaxShadow.GetFloat() );
+		}
+	}
+
 	// texture units exactly as RB_ARB2_DrawInteraction / the README table
 	RB_RHI_BindUnit( 0, din->ambientLight ? globalImages->ambientNormalMap : globalImages->normalCubeMapImage );
 	RB_RHI_BindUnit( 1, din->bumpImage );
@@ -955,6 +993,11 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// so other draws simply don't sample it. (Unit 9 = SSAO is bound once in DrawWorld.)
 	if ( occlusionImage ) {
 		RB_RHI_BindUnit( 10, occlusionImage );
+	}
+	// unit 11: per-material parallax height map (u_parallaxMap). Only bound when this surface
+	// carries one and r_parallax is on; the shader gates on u_parallaxParms.x (docs/parallax.md).
+	if ( parallaxImage ) {
+		RB_RHI_BindUnit( 11, parallaxImage );
 	}
 
 	// DUDE tessellation: PN-smooth enemy/prop meshes. Both the ambient and the
