@@ -142,13 +142,17 @@ void idMaterial::CommonInit() {
 
 	DUDE PBR per-material table (docs/pbr-materials.md Phase B)
 
-	Two VFS files, loaded lazily on the first material parse:
+	Two files, loaded lazily on the first material parse (both via the VFS, so a
+	writable fs_savepath copy outranks the shipped fs_basepath one):
 	  pbr/pbr_materials.cfg  — the main authored config (bootstrapped by
 	                           tools/pbr_classify.py, then hand-tuned in-game and
 	                           baked in); loaded first
 	  pbr/pbr_overrides.cfg  — per-game deltas, loaded second so they win on
-	                           collision (the editor writes here; bake folds them
-	                           into pbr_materials.cfg)
+	                           collision. The editor (R_PbrWriteOverrideLine) writes
+	                           these to fs_savepath (the "dude folder"), so edits are
+	                           deltas on the base baseline and win on the next load
+	                           regardless of launch method; bake folds them down into
+	                           pbr_materials.cfg for release.
 	Both share one column layout (the override file is a superset of the generated
 	one):
 
@@ -219,12 +223,9 @@ static const char *PBR_NameForCategory( int cat ) {
 	}
 }
 
-static void PBR_LoadTableFile( const char *path ) {
-	char *buf = NULL;
-	int len = fileSystem->ReadFile( path, (void **)&buf, NULL );
-	if ( len <= 0 || !buf ) {
-		return;
-	}
+// parse an already-loaded, NUL-terminated table buffer into pbrTable. 'label' is
+// only used for the summary print.
+static void PBR_ParseTableBuffer( const char *buf, const char *label ) {
 	int count = 0;
 	const char *p = buf;
 	while ( *p ) {
@@ -265,8 +266,21 @@ static void PBR_LoadTableFile( const char *path ) {
 			count++;
 		}
 	}
+	common->Printf( "PBR table: %d entries from %s\n", count, label );
+}
+
+// loads a table file through the VFS (search-path order, pk4-aware). fs_savepath
+// (the writable "dude folder") outranks fs_basepath, so a user's edited copy wins
+// over the shipped baseline — which is exactly the divergence model: base ships the
+// read-only defaults, the dude folder holds the user's deltas on top.
+static void PBR_LoadTableFile( const char *path ) {
+	char *buf = NULL;
+	int len = fileSystem->ReadFile( path, (void **)&buf, NULL );
+	if ( len <= 0 || !buf ) {
+		return;
+	}
+	PBR_ParseTableBuffer( buf, path );
 	fileSystem->FreeFile( buf );
-	common->Printf( "PBR table: %d entries from %s\n", count, path );
 }
 
 static void PBR_EnsureTableLoaded( void ) {
@@ -275,8 +289,8 @@ static void PBR_EnsureTableLoaded( void ) {
 	}
 	pbrTableLoaded = true;
 	pbrTable.Clear();
-	PBR_LoadTableFile( "pbr/pbr_materials.cfg" );
-	PBR_LoadTableFile( "pbr/pbr_overrides.cfg" );
+	PBR_LoadTableFile( "pbr/pbr_materials.cfg" );	// shipped table
+	PBR_LoadTableFile( "pbr/pbr_overrides.cfg" );	// baseline + dude-folder deltas (later wins)
 }
 
 // drops the cached table so the next lookup re-reads the files (reloadPbrTable)
@@ -319,10 +333,14 @@ R_PbrWriteOverrideLine
 Material-editor save (docs/pbr-materials.md): rewrite this material's line in
 pbr/pbr_overrides.cfg in place — replacing an existing active OR commented entry,
 or appending to a live-edits section if new — then re-apply the table live. Reads
-and writes the fs_basepath copy explicitly so the edit lands in the file the user
-version-controls (a shadowing fs_savepath copy, if one exists, is not consulted).
--1 in any numeric arg writes '*' (inherit); a real category writes '*' for
-metalness/roughness so the line tracks the sliders.
+and writes the fs_savepath copy (the writable "dude folder") explicitly, so the
+edit lands as a delta on top of the shipped fs_basepath baseline. fs_savepath
+outranks fs_basepath in the VFS, so the delta wins on the next load — the edit is
+launch-method-independent. Under run.sh (fs_savepath == fs_basepath == the repo)
+this resolves to the same file the developer ships. Fold accumulated deltas back
+into the baseline with tools/pbr_make_overrides.py --bake. -1 in any numeric arg
+writes '*' (inherit); a real category writes '*' for metalness/roughness so the
+line tracks the sliders.
 =============
 */
 bool R_PbrWriteOverrideLine( const idMaterial *mat, float metal, float rough,
@@ -342,9 +360,9 @@ bool R_PbrWriteOverrideLine( const idMaterial *mat, float metal, float rough,
 	                 PBR_NameForCategory( category ), wTok.c_str(), eTok.c_str() );
 
 	// copy out of the rotating static buffer RelativePathToOSPath returns
-	idStr osPath = fileSystem->RelativePathToOSPath( "pbr/pbr_overrides.cfg", "fs_basepath" );
+	idStr osPath = fileSystem->RelativePathToOSPath( "pbr/pbr_overrides.cfg", "fs_savepath" );
 
-	// read current contents (explicit basepath, matching the write below)
+	// read current contents (explicit savepath, matching the write below)
 	idStr content;
 	idFile *rf = fileSystem->OpenExplicitFileRead( osPath.c_str() );
 	if ( rf ) {
