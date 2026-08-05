@@ -1,5 +1,7 @@
 /build*
 !/build.sh
+!/build-win.sh
+/dist-win/
 *~
 .*.swp
 *.pyc
