@@ -130,7 +130,7 @@ idCVar r_skipOverlays( "r_skipOverlays", "0", CVAR_RENDERER | CVAR_BOOL, "skip o
 idCVar r_skipSpecular( "r_skipSpecular", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_CHEAT | CVAR_ARCHIVE, "use black for specular1" );
 idCVar r_skipBump( "r_skipBump", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "uses a flat surface instead of the bump map" );
 idCVar r_skipDiffuse( "r_skipDiffuse", "0", CVAR_RENDERER | CVAR_BOOL, "use black for diffuse" );
-idCVar r_whiteWorld( "r_whiteWorld", "0", CVAR_RENDERER | CVAR_BOOL, "render all diffuse maps as white to visualize lighting only (debug aid)" );
+idCVar r_whiteWorld( "r_whiteWorld", "0", CVAR_RENDERER | CVAR_INTEGER, "white-world debug: 0 = off, 1 = diffuse=white (lighting incl. light/material colour), 2 = clay (also neutralises light/material colour and forces metalness 0, so only occlusion/relief remains — SSAO + POM in grey)", 0, 2 );
 idCVar r_skipROQ( "r_skipROQ", "0", CVAR_RENDERER | CVAR_BOOL, "skip ROQ decoding" );
 
 idCVar r_ignore( "r_ignore", "0", CVAR_RENDERER, "used for random debugging without defining new vars" );
@@ -280,7 +280,7 @@ idCVar r_postFilmGrain( "r_postFilmGrain", "0.05", CVAR_RENDERER | CVAR_ARCHIVE 
 // spatial size of one grain cell: 1 = per-pixel noise (sensor-static look at high
 // resolutions), ~1.5-2 clumps the noise like scanned film stock
 idCVar r_postFilmGrainSize( "r_postFilmGrainSize", "1.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "film grain cell size in pixels (1 = per-pixel, 1.5-2 = coarser filmic clumps)", 1.0f, 4.0f );
-idCVar r_postChromaticAberration( "r_postChromaticAberration", "0.2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "chromatic aberration strength (0 = off, ~0.1..0.35, max 0.5)", 0.0f, 0.5f );
+idCVar r_postChromaticAberration( "r_postChromaticAberration", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "chromatic aberration strength (0 = off, ~0.1..0.35, max 0.5); off by default — opt-in taste effect", 0.0f, 0.5f );
 
 // DUDE post-resolve antialiasing over the finished 3D view (before 2D/GUI, HUD
 // unaffected). Separate from the hardware MSAA in r_multiSamples. GL3/Vulkan only.

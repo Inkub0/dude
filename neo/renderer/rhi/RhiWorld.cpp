@@ -744,8 +744,17 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		break;
 	}
 
-	memcpy( parms.diffuseModifier, din->diffuseColor.ToFloatPtr(), 16 );
-	memcpy( parms.specularModifier, din->specularColor.ToFloatPtr(), 16 );
+	// r_whiteWorld 2 (clay): the light+material colour is baked into din->diffuseColor, so
+	// force the modifier white to strip both — the surface then reads only occlusion/relief
+	// (SSAO + POM self-shadow) in grey, with no coloured-light tint. Metalness is zeroed below.
+	const bool clayWorld = r_whiteWorld.GetInteger() >= 2;
+	if ( clayWorld ) {
+		parms.diffuseModifier[0] = parms.diffuseModifier[1] = parms.diffuseModifier[2] = parms.diffuseModifier[3] = 1.0f;
+		parms.specularModifier[0] = parms.specularModifier[1] = parms.specularModifier[2] = parms.specularModifier[3] = 1.0f;
+	} else {
+		memcpy( parms.diffuseModifier, din->diffuseColor.ToFloatPtr(), 16 );
+		memcpy( parms.specularModifier, din->specularColor.ToFloatPtr(), 16 );
+	}
 
 	// DUDE Phase 3.5 specular tuning (interaction.frag). Defaults reproduce
 	// vanilla: scale 1, shading model 0 (the N.H lookup table). Only consumed by
@@ -785,7 +794,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			}
 		}
 		float specScale = r_pbrSpecScale.GetFloat() * wetMul;
-		parms.pbrParms[0] = metal;
+		// clay world: force dielectric so metals don't kill the white diffuse / tint the
+		// specular — the clay render should read metal and non-metal surfaces the same
+		parms.pbrParms[0] = clayWorld ? 0.0f : metal;
 		parms.pbrParms[1] = rough;
 		parms.pbrParms[2] = 1.0f;
 		parms.pbrParms[3] = specScale;

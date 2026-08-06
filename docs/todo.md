@@ -47,8 +47,9 @@ Design decisions taken:
 | PBR materials (GGX) | off | off | off | on | on | on |
 | screen-space reflections | off | off | off | off | on | on |
 | SSR march resolution | — | — | — | — | 1/2 | 2/3 |
-| SSAO res scale | — | — | 0.5 | 0.75 | 0.8 | 1.0 |
-| SSAO slices / steps | — | — | 3 / 2 | 3 / 3 | 6 / 4 | 7 / 5 |
+| SSAO res scale | — | — | 1/2 | 2/3 | 3/4 | 3/4 |
+| SSAO slices / steps | — | — | 1 / 3 | 2 / 4 | 3 / 6 | 4 / 8 |
+| SSAO normal G-buffer | — | — | off (depth reconstruct) | on | on | on |
 | SSAO normal G-buffer | — | — | off | on | on | on |
 | shadow 2D / cube res | — | — | 512 / 512 | 1024 / 1200 | 2048 / 2048 | 2048 / 2048 |
 | cube PCF taps | — | — | 5 | 6 | 8 | 12 |

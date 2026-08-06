@@ -709,8 +709,9 @@ static void RB_SubmittInteraction( drawInteraction_t *din, void (*DrawInteractio
 
 	if ( !din->diffuseImage || r_skipDiffuse.GetBool() ) {
 		din->diffuseImage = globalImages->blackImage;
-	} else if ( r_whiteWorld.GetBool() ) {
-		// DUDE: render all diffuse maps as white to judge lighting on its own
+	} else if ( r_whiteWorld.GetInteger() >= 1 ) {
+		// DUDE: render all diffuse maps as white to judge lighting/occlusion on its own
+		// (mode 2 additionally neutralises light colour + metalness — see RhiWorld)
 		din->diffuseImage = globalImages->whiteImage;
 	}
 	if ( !din->specularImage || r_skipSpecular.GetBool() || din->ambientLight ) {
