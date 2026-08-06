@@ -49,17 +49,37 @@ vec3 viewPos( vec2 frag ) {
 	return viewPosFromRaw( frag, rawDepth( frag ) );
 }
 
-// Reconstruct a view-space normal from depth — the FALLBACK used when the normal
-// G-buffer is off (main() reads the G-buffer directly when it's on, docs §4). Uses the
-// closer of each neighbour pair to avoid bleeding across silhouettes.
+// Reconstruct a view-space normal from depth — the FALLBACK used when the normal G-buffer
+// is off (main() reads the G-buffer directly when it's on, docs §4). Accurate 9-tap method
+// (atyuwen, https://atyuwen.github.io/posts/normal-reconstruction/): for each axis sample two
+// neighbours on EACH side and linearly extrapolate the near pair and the far pair toward the
+// centre; the pair whose prediction matches the centre depth is the surface the centre lies on,
+// so the derivative is taken from that side. This keeps the normal off the wrong surface at
+// silhouettes / decals / thin geometry, where the old best-of-2 pick still smeared and made the
+// reconstructed AO look faceted. Raw projection depth is affine in 1/viewZ (linear across a
+// plane in screen space), so it's a valid space for the collinearity test.
 vec3 sampleViewNormal( vec2 frag, vec3 P ) {
-	vec3 Pr = viewPos( frag + vec2( 1.0, 0.0 ) );
-	vec3 Pl = viewPos( frag - vec2( 1.0, 0.0 ) );
-	vec3 Pu = viewPos( frag + vec2( 0.0, 1.0 ) );
-	vec3 Pd = viewPos( frag - vec2( 0.0, 1.0 ) );
-	vec3 dx = ( abs( Pr.z - P.z ) < abs( Pl.z - P.z ) ) ? ( Pr - P ) : ( P - Pl );
-	vec3 dy = ( abs( Pu.z - P.z ) < abs( Pd.z - P.z ) ) ? ( Pu - P ) : ( P - Pd );
-	vec3 N = normalize( cross( dx, dy ) );
+	float c = rawDepth( frag );
+
+	float l1 = rawDepth( frag + vec2( -1.0, 0.0 ) );
+	float l2 = rawDepth( frag + vec2( -2.0, 0.0 ) );
+	float r1 = rawDepth( frag + vec2(  1.0, 0.0 ) );
+	float r2 = rawDepth( frag + vec2(  2.0, 0.0 ) );
+	float errL = abs( ( 2.0 * l1 - l2 ) - c );
+	float errR = abs( ( 2.0 * r1 - r2 ) - c );
+	vec3  dpdx = ( errL < errR ) ? ( P - viewPosFromRaw( frag + vec2( -1.0, 0.0 ), l1 ) )
+	                             : ( viewPosFromRaw( frag + vec2(  1.0, 0.0 ), r1 ) - P );
+
+	float u1 = rawDepth( frag + vec2( 0.0,  1.0 ) );
+	float u2 = rawDepth( frag + vec2( 0.0,  2.0 ) );
+	float d1 = rawDepth( frag + vec2( 0.0, -1.0 ) );
+	float d2 = rawDepth( frag + vec2( 0.0, -2.0 ) );
+	float errU = abs( ( 2.0 * u1 - u2 ) - c );
+	float errD = abs( ( 2.0 * d1 - d2 ) - c );
+	vec3  dpdy = ( errU < errD ) ? ( viewPosFromRaw( frag + vec2( 0.0,  1.0 ), u1 ) - P )
+	                             : ( P - viewPosFromRaw( frag + vec2( 0.0, -1.0 ), d1 ) );
+
+	vec3 N = normalize( cross( dpdx, dpdy ) );
 	if ( dot( N, P ) > 0.0 ) {
 		N = -N;                        // face the camera (P points away from eye)
 	}
