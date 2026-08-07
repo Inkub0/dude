@@ -354,6 +354,16 @@ static int  rhiBerserkW = 0, rhiBerserkH = 0;		// trail buffer size
 static bool rhiBerserkValid = false;				// a usable previous trail exists (history read ok)
 static int  rhiBerserkLastTick = -100000;			// Sys_Milliseconds of the last accumulation sample
 
+// DUDE hell-time / Artifact vision (D3XP FullscreenFX_Helltime, RB_RHI_HelltimeAccum). Its own
+// ping-pong pair, separate from berserk's, reproducing the stock recursive _accum zoom-feedback
+// (textures/smf/bloodorb{1,2,3}) the RHI can't accumulate — the same class of failure as _scratch.
+// Per-level tint/scale/rotation + the inverted bloodorb3 radial mask (see helltime_accum.frag).
+static rhi::RenderTargetHandle rhiHelltimeTrailRT[2] = { 0, 0 };
+static int  rhiHelltimeIdx = 0;
+static int  rhiHelltimeW = 0, rhiHelltimeH = 0;
+static bool rhiHelltimeValid = false;
+static int  rhiHelltimeLastTick = -100000;
+
 // Normal G-buffer (Option B): bump-mapped view-space normals written by an extra opaque
 // geometry pass, so SSAO uses real per-pixel normals instead of reconstructing from depth.
 static rhi::RenderTargetHandle rhiNormalRT = 0;		// RGBA8 view-normal + depth (color+depth target)
@@ -2435,6 +2445,12 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiBerserkTrailRT[0] = rhiBerserkTrailRT[1] = 0;
 	rhiBerserkIdx = 0;			rhiBerserkW = rhiBerserkH = 0;
 	rhiBerserkValid = false;	rhiBerserkLastTick = -100000;
+
+	// forget the hell-time ping-pong slots too, so a vid_restart can't leave a stale handle
+	// aliasing a reclaimed render-target slot (EnsureHelltimeTrail then reallocates cleanly).
+	rhiHelltimeTrailRT[0] = rhiHelltimeTrailRT[1] = 0;
+	rhiHelltimeIdx = 0;			rhiHelltimeW = rhiHelltimeH = 0;
+	rhiHelltimeValid = false;	rhiHelltimeLastTick = -100000;
 }
 
 void RB_RHI_FreeShadowCubeCache() {
@@ -3246,6 +3262,167 @@ rhi::ImageHandle RB_RHI_BerserkAccum( rhi::RHI *r, const viewDef_t *viewDef,
 
 	// bind it on unit 1 for the display draw that follows in the surface loop: GL keeps
 	// the binding live; the Vulkan caller re-supplies it via DrawArgs.textures[1].
+	RB_RHI_BindRTImage( r, 1, trailImg );
+	if ( !vkMode ) {
+		backEnd.glState.tmu[1].current2DMap = -1;
+	}
+	return trailImg;
+}
+
+// (re)allocate the hell-time temporal trail ping-pong (mirrors RB_RHI_EnsureBerserkTrail).
+static bool RB_RHI_EnsureHelltimeTrail( rhi::RHI *r, int w, int h ) {
+	if ( rhiHelltimeTrailRT[0] && r->GetRenderTargetImage( rhiHelltimeTrailRT[0] ) == 0 ) {
+		rhiHelltimeTrailRT[0] = rhiHelltimeTrailRT[1] = 0;	// lost context (vid_restart)
+		rhiHelltimeW = rhiHelltimeH = 0;
+	}
+	if ( rhiHelltimeTrailRT[0] && rhiHelltimeTrailRT[1] && rhiHelltimeW == w && rhiHelltimeH == h ) {
+		return true;
+	}
+	for ( int i = 0; i < 2; i++ ) {
+		if ( rhiHelltimeTrailRT[i] ) { r->DestroyRenderTarget( rhiHelltimeTrailRT[i] ); rhiHelltimeTrailRT[i] = 0; }
+	}
+	rhiHelltimeTrailRT[0] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+	rhiHelltimeTrailRT[1] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+	if ( !rhiHelltimeTrailRT[0] || !rhiHelltimeTrailRT[1] ) {
+		for ( int i = 0; i < 2; i++ ) {
+			if ( rhiHelltimeTrailRT[i] ) { r->DestroyRenderTarget( rhiHelltimeTrailRT[i] ); rhiHelltimeTrailRT[i] = 0; }
+		}
+		rhiHelltimeW = rhiHelltimeH = 0;
+		return false;
+	}
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.color = true;
+	r->BeginTargetPass( rhiHelltimeTrailRT[0], &clear ); r->EndPass();
+	r->BeginTargetPass( rhiHelltimeTrailRT[1], &clear ); r->EndPass();
+	rhiHelltimeW = w;			rhiHelltimeH = h;
+	rhiHelltimeIdx = 0;			rhiHelltimeValid = false;
+	rhiHelltimeLastTick = -100000;
+	return true;
+}
+
+/*
+===================
+RB_RHI_HelltimeAccum
+
+Advance the D3XP hell-time (Artifact) feedback buffer one frame and return it for the display
+composite in RB_RHI_RenderShaderPasses (the bloodorbN/cr_draw blit). Faithful port of the stock
+recursive _accum zoom-feedback (materials/smf.mtr) — see helltime_accum.frag. `level` selects the
+per-level look (0 = HELLTIME/Artifact, 1 = BERSERK, 2 = INVULNERABILITY), which the caller reads
+from the bloodorb1/2/3 material name. The scene input is _currentRender (captured by the fx
+manager's CaptureCurrentRender before the accum pass). Returns the trail image, or 0.
+===================
+*/
+rhi::ImageHandle RB_RHI_HelltimeAccum( rhi::RHI *r, const viewDef_t *viewDef, int level, int timeMs ) {
+	const int fullW = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int fullH = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	int tw = fullW;	if ( tw < 1 ) tw = 1;
+	int th = fullH;	if ( th < 1 ) th = 1;
+	if ( !RB_RHI_EnsureHelltimeTrail( r, tw, th ) ) {
+		return 0;
+	}
+
+	rhi::ShaderHandle accumProg = r->LoadShader( "helltime_accum" );
+	if ( !accumProg ) {
+		return 0;
+	}
+
+	// the radial gate (stock maskcolor stage = bloodorb3.tga). Cached once; clamp + linear,
+	// matching the material's `clamp`. Its alpha is ~1 at the centre, ~0 at the edges.
+	static idImage *maskImg = NULL;
+	if ( maskImg == NULL ) {
+		maskImg = globalImages->ImageFromFile( "textures/smf/bloodorb3", TF_LINEAR, false,
+		                                       TR_CLAMP, TD_HIGH_QUALITY );
+	}
+	if ( maskImg == NULL || maskImg == globalImages->defaultImage ) {
+		return 0;
+	}
+
+	// current scene is _currentRender (the fx manager captured it before this pass); if it was
+	// never captured on Vulkan, bail so the display falls back to the plain scene.
+	idImage *sceneImg = globalImages->currentRenderImage;
+	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	if ( vkMode && ( !sceneImg->rhiCaptured || !sceneImg->rhiHandle ) ) {
+		return 0;
+	}
+
+	// re-seed after a large gap (re-entry / a new powerup window) so we don't recirculate a
+	// scene from seconds ago.
+	int dt = timeMs - rhiHelltimeLastTick;
+	if ( dt > 1000 || dt < 0 ) {
+		rhiHelltimeValid = false;
+		dt = 16;
+	}
+	if ( dt < 1 ) { dt = 1; }
+	const float dtNorm = (float)dt / 16.6667f;
+
+	// per-level baked params (materials/smf.mtr bloodorb1/2/3). Scales/tints authored per-60fps
+	// frame; framerate-normalise the magnify like berserk. Rotation is a per-frame increment
+	// that accumulates through the recursion (stock `rotate 0.005` is a fixed per-frame spin).
+	float baseScale = 0.995f;
+	float rotCyclesPerFrame = 0.0f;
+	float tint[3] = { 1.0f, 1.0f, 1.0f };
+	const float sPulse = sinf( (float)timeMs * 0.001f * 0.5f * idMath::TWO_PI );	// stock sintable[time*0.5]
+	switch ( level ) {
+	default:
+	case 0:	// HELLTIME / Artifact — neutral, gentle zoom, no rotation
+		baseScale = 0.995f;
+		break;
+	case 1:	// BERSERK — warm desaturate, slow spin, subtle scale pulse
+		baseScale = 0.990f + sPulse * 0.004f;
+		rotCyclesPerFrame = 0.005f;
+		tint[0] = 1.0f; tint[1] = 0.98f - sPulse * 0.01f; tint[2] = 0.98f - sPulse * 0.01f;
+		break;
+	case 2:	// INVULNERABILITY — cool, slow spin (single-layer approximation of the 3-layer stock)
+		baseScale = 0.995f + sPulse * 0.004f;
+		rotCyclesPerFrame = 0.005f;
+		tint[0] = 1.0f - sPulse * 0.01f; tint[1] = 0.97f; tint[2] = 1.0f;
+		break;
+	}
+
+	const float scale = idMath::Pow( baseScale, dtNorm );
+	const float ang = idMath::TWO_PI * rotCyclesPerFrame * dtNorm;		// per-frame spin increment
+
+	const int writeIdx = rhiHelltimeIdx;
+	const int readIdx  = 1 - rhiHelltimeIdx;
+
+	// _currentRender is POT-oversized; the scene lives in [0..shiftScale]. Pass shiftScale so the
+	// accum un-squashes it into the full trail (helltime_accum.frag scales the scene read by it).
+	const int potW = sceneImg->uploadWidth;
+	const int potH = sceneImg->uploadHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.screenCorrection[0] = ( potW > 0 ) ? (float)fullW / potW : 1.0f;
+	parms.screenCorrection[1] = ( potH > 0 ) ? (float)fullH / potH : 1.0f;
+	parms.localParam0[0] = scale;
+	parms.localParam0[1] = 1.0f;						// feedback strength (full mask gate)
+	parms.localParam0[2] = rhiHelltimeValid ? 1.0f : 0.0f;
+	parms.localParam0[3] = 1.0f;						// maskInvert (bloodorb3 alpha is high-centre)
+	parms.localParam1[0] = cosf( ang );
+	parms.localParam1[1] = sinf( ang );
+	parms.localParam1[2] = vkMode ? 1.0f : 0.0f;		// flipY (see helltime_accum.frag)
+	parms.color[0] = tint[0];
+	parms.color[1] = tint[1];
+	parms.color[2] = tint[2];
+	parms.color[3] = 1.0f;
+
+	r->BeginTargetPass( rhiHelltimeTrailRT[writeIdx], NULL );
+	RB_RHI_BindUnit( 0, sceneImg );							// _currentRender (both backends)
+	RB_RHI_BindRTUnit( r, 1, rhiHelltimeTrailRT[readIdx] );	// previous frame
+	RB_RHI_BindUnit( 2, maskImg );							// bloodorb3 radial mask
+	if ( !vkMode ) {
+		backEnd.glState.tmu[1].current2DMap = -1;			// direct bind bypassed the tmu cache
+	}
+	RB_RHI_DrawFullscreen( r, accumProg, parms, 0 );
+	r->EndPass();
+
+	rhiHelltimeIdx  = readIdx;
+	rhiHelltimeValid = true;
+	rhiHelltimeLastTick = timeMs;
+
+	rhi::ImageHandle trailImg = r->GetRenderTargetImage( rhiHelltimeTrailRT[writeIdx] );
 	RB_RHI_BindRTImage( r, 1, trailImg );
 	if ( !vkMode ) {
 		backEnd.glState.tmu[1].current2DMap = -1;

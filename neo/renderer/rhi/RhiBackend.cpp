@@ -711,6 +711,8 @@ static bool						rbHdrAaFloat = false;			// rhiHdrAaRT is RGBA16F vs RGBA8 — m
 static bool						rbHdrActiveThisFrame = false;	// scene post-target bound *right now* (view pass)
 static bool						rbHdrFrameActive = false;		// this whole frame is a true float-HDR frame
 static bool						rbBerserkFrame = false;			// berserk material seen this frame → radial-blur the _scratch blit
+static bool						rbHelltimeFrame = false;		// bloodorbN hell-time material seen this frame
+static int						rbHelltimeLevel = 0;			// 0/1/2 = HELLTIME/BERSERK/INVULNERABILITY (from the bloodorbN name)
 
 /*
 =============
@@ -2369,6 +2371,42 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		}
 	}
 
+	// DUDE hell-time / Artifact vision (D3XP FullscreenFX_Helltime): the stock effect recursively
+	// zooms the previous frame into _accum (textures/smf/bloodorb{1,2,3}/ac_capture, masked by
+	// bloodorb3.tga) — the same cross-frame capture that can't accumulate on the RHI (like
+	// berserk's _scratch), so it shows "ghost duplicates". Suppress the broken capture/draw halves
+	// and, at the final cr_draw blit, drive a ping-pong trail (RB_RHI_HelltimeAccum) + composite.
+	// The material name carries the level (bloodorb1/2/3). The game's FxFader + Blendback fade the
+	// effect in/out automatically, so no bridge cvar is needed. Legacy keeps its own _accum path.
+	const char *hlName = shader->GetName();
+	bool isHelltimeDraw = false;
+	if ( !viewDef->viewEntitys && idStr::Cmpn( hlName, "textures/smf/bloodorb", 21 ) == 0
+	     && hlName[21] >= '1' && hlName[21] <= '3' && hlName[22] == '/' ) {
+		const int lvl = hlName[21] - '1';			// '1'/'2'/'3' -> 0/1/2
+		const char *suffix = hlName + 22;			// "/ac_capture", "/cr_draw", ...
+		rbHelltimeFrame = true;
+		rbHelltimeLevel = lvl;
+		if ( idStr::Icmp( suffix, "/cr_draw" ) == 0 ) {
+			isHelltimeDraw = true;					// the display: composite the trail here
+		} else {
+			return;	// ac_init / ac_capture / cr_capture / ac_draw: kill the broken recursion
+		}
+	}
+	rhi::ImageHandle helltimeTrail = 0;
+	float helltimeSsX = 1.0f, helltimeSsY = 1.0f;
+	if ( isHelltimeDraw && R_BackendSupportsEnhancements() ) {
+		helltimeTrail = RB_RHI_HelltimeAccum( r, viewDef, rbHelltimeLevel, Sys_Milliseconds() );
+		// cr_draw's stretchpic texcoords span only [0..shiftScale] (the _currentRender POT
+		// convention), but the trail RT is a full-viewport 0..1 buffer. Rescale the display
+		// texcoords by 1/shiftScale so the whole trail shows full-screen (centred).
+		const int potW = globalImages->currentRenderImage->uploadWidth;
+		const int potH = globalImages->currentRenderImage->uploadHeight;
+		const int vw = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+		const int vh = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+		if ( potW > 0 ) { helltimeSsX = (float)vw / potW; }
+		if ( potH > 0 ) { helltimeSsY = (float)vh / potH; }
+	}
+
 	for ( int k = 0; k < ir->surfaceStages.Num(); k++ ) {
 		const rhi::StageIR &si = ir->surfaceStages[k];
 		const shaderStage_t *pStage = shader->GetStage( si.stageNum );
@@ -2469,6 +2507,22 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		if ( isBerserkBlit ) {
 			parms.localParam0[2] = berserkTrail ? 1.0f : 0.0f;
 		}
+		// hell-time display: same `berserk` display shader — show the accumulated trail (which
+		// already folds the sharp centre + the edge zoom-trail) when present, else the plain scene.
+		if ( isHelltimeDraw ) {
+			parms.localParam0[2] = helltimeTrail ? 1.0f : 0.0f;
+			if ( helltimeTrail ) {
+				// map cr_draw's [0..shiftScale] stretchpic texcoords onto the full 0..1 trail RT
+				// (see the shiftScale computation above). Only when a trail exists; the no-trail
+				// fallback keeps cr_draw's own texcoords so it samples _currentRender correctly.
+				parms.diffuseMatrixS[0] = ( helltimeSsX > 0.0f ) ? 1.0f / helltimeSsX : 1.0f;
+				parms.diffuseMatrixS[1] = 0.0f;
+				parms.diffuseMatrixS[3] = 0.0f;
+				parms.diffuseMatrixT[0] = 0.0f;
+				parms.diffuseMatrixT[1] = ( helltimeSsY > 0.0f ) ? 1.0f / helltimeSsY : 1.0f;
+				parms.diffuseMatrixT[3] = 0.0f;
+			}
+		}
 
 		// vertex color mode: var_Color = (attr_Color*modulate + add) * u_color
 		switch ( pStage->vertexColor ) {
@@ -2530,9 +2584,15 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		if ( !viewDef->viewEntitys ) {
 			pd.stateBits |= GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
 		}
-		// berserk vision: blit the accumulated feedback buffer through the `berserk` shader
-		// instead of a plain _scratch stretch — the streak-zoom lives in that buffer.
-		pd.shader = isBerserkBlit ? r->LoadShader( "berserk" ) : si.program;
+		// hell-time display: cr_draw's stock blend is gl_dst_alpha, but the trail already folds
+		// the sharp centre + edge zoom-trail, so draw it as an opaque replace of the clean-scene
+		// framebuffer — the game's Blendback then cross-fades it in/out by the fader alpha.
+		if ( isHelltimeDraw ) {
+			pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+		}
+		// berserk / hell-time vision: blit the accumulated feedback buffer through the `berserk`
+		// display shader instead of a plain stretch — the zoom-trail lives in that buffer.
+		pd.shader = ( isBerserkBlit || isHelltimeDraw ) ? r->LoadShader( "berserk" ) : si.program;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = RB_RHI_CullFor( viewDef, shader->GetCullType() );
 		pd.tessellate = tess;
@@ -2554,6 +2614,11 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			// in RB_RHI_BerserkAccum). Without a trail, bind _scratch as a placeholder so
 			// the u_trail sampler is valid on Vulkan — the shader ignores it (hasTrail=0).
 			da.textures[1] = berserkTrail ? berserkTrail : stageImage;
+		}
+		if ( isHelltimeDraw ) {
+			// unit 1 = the hell-time trail (VK via DrawArgs; GL bound in RB_RHI_HelltimeAccum).
+			// Placeholder = the stage's _currentRender when there's no trail (hasTrail=0).
+			da.textures[1] = helltimeTrail ? helltimeTrail : stageImage;
 		}
 		r->Draw( da );
 
@@ -2723,6 +2788,7 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
 
 	rbBerserkFrame = false;	// set when the berserk material is seen (crop overlay), read at the _scratch blit
+	rbHelltimeFrame = false;	// set when a bloodorbN hell-time material is seen, read at its cr_draw blit
 
 	// route the whole frame into the RGBA16F scene buffer (r_hdr) before any clear
 	// or view command lands; a no-op that stays on the backbuffer when r_hdr is

@@ -224,6 +224,11 @@ rhi::ImageHandle RB_RHI_BerserkAccum( rhi::RHI *r, const viewDef_s *viewDef,
                                       float baseScale, float feedback, float fade,
                                       int trailDiv, int timeMs );
 
+// D3XP hell-time / Artifact vision feedback (RB_RHI_HelltimeAccum, RhiWorld.cpp): advance the
+// per-level ping-pong trail one frame and return it (bound on unit 1) for the bloodorbN/cr_draw
+// display composite. level 0/1/2 = HELLTIME/BERSERK/INVULNERABILITY. Returns 0 if unbuildable.
+rhi::ImageHandle RB_RHI_HelltimeAccum( rhi::RHI *r, const viewDef_s *viewDef, int level, int timeMs );
+
 // screenshot support: composited desktops return garbage for front-buffer
 // reads, so R_ReadTiledPixels registers a destination and the executor
 // captures GL_BACK right before the next swap (GL_RGB, pack alignment 4)

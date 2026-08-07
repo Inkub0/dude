@@ -60,6 +60,7 @@ static const char *gl3BootPrograms[] = {
 	"heathaze_mask",
 	"heathaze_maskvertex",
 	"heathaze_maskvertex_mask",
+	"helltime_accum",
 	"interaction",
 	"portalsky",
 	"postprocess",
