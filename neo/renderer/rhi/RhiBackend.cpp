@@ -87,6 +87,18 @@ extern idCVar r_gammaInShader;
 extern idCVar r_gamma;
 extern idCVar r_brightness;
 
+// DUDE berserk vision (RHI backends): the stock effect is a recursive _scratch
+// feedback (textures/decals/berserk zooms the previous frame 3% each frame). That
+// cross-frame accumulation doesn't survive on the RHI path, so we reproduce the
+// same radial "streak zoom" in a single pass — a radial zoom-blur of the captured
+// scene (the `berserk` builtin shader). Legacy keeps its original feedback path.
+idCVar r_berserkZoom( "r_berserkZoom", "0.2", CVAR_RENDERER | CVAR_FLOAT,
+	"berserk vision radial zoom reach at the screen edges (RHI backends)" );
+idCVar r_berserkFocus( "r_berserkFocus", "0.33", CVAR_RENDERER | CVAR_FLOAT,
+	"berserk vision sharp-center radius (0..1); the zoom ghosts ramp from here to the edges" );
+idCVar r_berserkGhosts( "r_berserkGhosts", "8", CVAR_RENDERER | CVAR_INTEGER,
+	"berserk vision number of discrete zoom-ghost taps (matches the ARB feedback's trailing frames)" );
+
 // DUDE: brightness scale for cube-map ("sheen") reflections on glass etc.
 // (r_gl3ReflectionScale, defined in RenderSystem_init.cpp) — the enhancement
 // backends light the scene brighter than the original renderer, so the
@@ -695,6 +707,7 @@ static bool						rbHdrRtFloat = false;			// rhiHdrRT is RGBA16F (HDR) vs RGBA8 (
 static bool						rbHdrAaFloat = false;			// rhiHdrAaRT is RGBA16F vs RGBA8 — must track rhiHdrRT's format
 static bool						rbHdrActiveThisFrame = false;	// scene post-target bound *right now* (view pass)
 static bool						rbHdrFrameActive = false;		// this whole frame is a true float-HDR frame
+static bool						rbBerserkFrame = false;			// berserk material seen this frame → radial-blur the _scratch blit
 
 /*
 =============
@@ -2293,6 +2306,20 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 
 	const rhi::MaterialIR *ir = rhi::IR_Get( shader );
 
+	// DUDE berserk vision: the stock effect is a recursive _scratch feedback
+	// (textures/decals/berserk zooms the previous frame 3% each frame) that doesn't
+	// accumulate on the RHI path. Reproduce the "streak zoom" instead as a single-pass
+	// radial zoom-blur of the *clean* captured scene: skip the broken overlay here (just
+	// note berserk is active this frame), and blur when the fullscreen _scratch is blitted
+	// back (rbBerserkFrame branch below). Legacy keeps its original feedback path.
+	if ( idStr::Icmp( shader->GetName(), "textures/decals/berserk" ) == 0 ) {
+		rbBerserkFrame = true;
+		return;	// _scratch stays the clean scene; the blur happens at the blit
+	}
+	// the fullscreen blit of the captured scene during berserk (dvMaterial == "_scratch")
+	const bool isBerserkBlit = rbBerserkFrame && !viewDef->viewEntitys
+		&& idStr::Icmp( shader->GetName(), "_scratch" ) == 0;
+
 	for ( int k = 0; k < ir->surfaceStages.Num(); k++ ) {
 		const rhi::StageIR &si = ir->surfaceStages[k];
 		const shaderStage_t *pStage = shader->GetStage( si.stageNum );
@@ -2387,6 +2414,15 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			parms.diffuseMatrixT[1] = 1.0f;
 		}
 
+		// berserk radial zoom ghosts: edge reach → u_localParam0.x, sharp-center
+		// radius → .y, ghost-tap count → .z (keeps the stage's texture matrix =
+		// the _scratch flip + centering)
+		if ( isBerserkBlit ) {
+			parms.localParam0[0] = r_berserkZoom.GetFloat();
+			parms.localParam0[1] = r_berserkFocus.GetFloat();
+			parms.localParam0[2] = (float)r_berserkGhosts.GetInteger();
+		}
+
 		// vertex color mode: var_Color = (attr_Color*modulate + add) * u_color
 		switch ( pStage->vertexColor ) {
 		case SVC_IGNORE:
@@ -2447,7 +2483,9 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		if ( !viewDef->viewEntitys ) {
 			pd.stateBits |= GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
 		}
-		pd.shader = si.program;
+		// berserk vision: blit the captured scene through the radial zoom-blur shader
+		// instead of a plain stretch — the multi-tap blur is the whole effect.
+		pd.shader = isBerserkBlit ? r->LoadShader( "berserk" ) : si.program;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = RB_RHI_CullFor( viewDef, shader->GetCullType() );
 		pd.tessellate = tess;
@@ -2630,6 +2668,8 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	const bool vkMode = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
 
 	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
+
+	rbBerserkFrame = false;	// set when the berserk material is seen (crop overlay), read at the _scratch blit
 
 	// route the whole frame into the RGBA16F scene buffer (r_hdr) before any clear
 	// or view command lands; a no-op that stays on the backbuffer when r_hdr is

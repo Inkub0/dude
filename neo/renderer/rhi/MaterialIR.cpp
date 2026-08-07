@@ -117,8 +117,19 @@ SPIR-V lands with the d3xp backend flip.
 =============
 */
 static const char *IR_VkBuiltinForArb( const char *vpFile, const char *fpFile ) {
-	if ( vpFile == NULL || fpFile == NULL || idStr::Icmp( vpFile, fpFile ) != 0 ) {
-		return NULL;	// all stock customs pair the same .vfp for both stages
+	if ( vpFile == NULL || fpFile == NULL ) {
+		return NULL;
+	}
+	// Two stock materials (textures/sfx/vppinch_bfgbolt, textures/sfx/vpsphere)
+	// split the pair: the heatHazeWithMaskAndVertex.vfp *vertex* program with
+	// the heatHazeWithMask.vfp *fragment* program. That has its own combined
+	// builtin (maskvertex VS + mask FS, vertex color emitted but unread).
+	if ( idStr::Icmp( vpFile, "heatHazeWithMaskAndVertex.vfp" ) == 0
+	  && idStr::Icmp( fpFile, "heatHazeWithMask.vfp" ) == 0 ) {
+		return "heathaze_maskvertex_mask";
+	}
+	if ( idStr::Icmp( vpFile, fpFile ) != 0 ) {
+		return NULL;	// the remaining stock customs pair the same .vfp for both stages
 	}
 	if ( idStr::Icmp( vpFile, "heatHaze.vfp" ) == 0 ) {
 		return "heathaze";

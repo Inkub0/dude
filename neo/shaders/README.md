@@ -80,9 +80,11 @@ none of the current shaders do.
 | heathaze.vert/.frag | heatHaze.vfp | screen-space refraction |
 | heathaze_mask.vert/.frag | heatHazeWithMask.vfp | + mask texture, `KIL` → `discard` |
 | heathaze_maskvertex.vert/.frag | heatHazeWithMaskAndVertex.vfp | + vertex-color fade |
+| heathaze_maskvertex_mask.vert/.frag | heatHazeWithMaskAndVertex.vfp (VS) + heatHazeWithMask.vfp (FS) | split pair — vppinch_bfgbolt, vpsphere |
 | colorprocess.vert/.frag | colorProcess.vfp | grey-lerp post effect |
 | zfill.vert/.frag | *(new — was fixed function)* | depth prepass w/ optional alpha test |
 | generic.vert/.frag | *(new — was fixed function)* | GUI/2D/old material stages: texmatrix + vertex-color modes |
+| berserk.vert/.frag | *(new — reimplements textures/decals/berserk)* | berserk-vision radial zoom ghosts; the ARB `_scratch` feedback doesn't accumulate on the RHI path (r_berserkZoom/Focus/Ghosts) |
 | fog.vert/.frag | *(new — was fixed function)* | fog pass texgen planes |
 | gammabrightness.vert/.frag | *(new — was hardware gamma / ARB env[21])* | final r_gamma/r_brightness pass (r_gammaInShader) |
 | blendlight.vert/.frag | *(new — was fixed function)* | blend-light projection |

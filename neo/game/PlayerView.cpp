@@ -583,7 +583,16 @@ idPlayerView::BerserkVision
 ===================
 */
 void idPlayerView::BerserkVision( idUserInterface *hud, const renderView_t *view ) {
-	renderSystem->CropRenderSize( 512, 256, true );
+	// The RHI backends (opengl3 / vulkan) reproduce the "streak zoom" as a
+	// full-resolution radial blur (RhiBackend.cpp), so capture at the full window
+	// size there — the 512x256 crop was a 2004 fill-rate optimisation that reads as
+	// pixelation today. Legacy keeps the original low-res crop its recursive _scratch
+	// feedback path expects, untouched.
+	if ( cvarSystem->GetCVarBool( "r_rhiActive" ) ) {
+		renderSystem->CropRenderSize( SCREEN_WIDTH, SCREEN_HEIGHT, true );
+	} else {
+		renderSystem->CropRenderSize( 512, 256, true );
+	}
 	SingleView( hud, view );
 	renderSystem->CaptureRenderToImage( "_scratch" );
 	renderSystem->UnCrop();

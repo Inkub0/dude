@@ -66,6 +66,7 @@ idCVar r_useLightPortalFlow( "r_useLightPortalFlow", "1", CVAR_RENDERER | CVAR_B
 // (see docs/vulkan-port.md) and require a DHEWM3_VULKAN build. Switching backends
 // needs a vid_restart (window recreate); the settings-menu selector comes later.
 idCVar r_graphicsAPI( "r_graphicsAPI", "opengl", CVAR_RENDERER | CVAR_ARCHIVE, "rendering backend: opengl (legacy, default), opengl3 (GL 3.3 core, in development), vulkan, vulkan-rt (in development)" );
+idCVar r_rhiActive( "r_rhiActive", "0", CVAR_RENDERER | CVAR_BOOL, "1 when the active backend routes through the RHI executor (opengl3 / vulkan); set by the renderer at init, don't change" );
 idCVar r_multiSamples( "r_multiSamples", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "number of antialiasing samples" );
 idCVar r_mode( "r_mode", "5", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_INTEGER, "video mode number" );
 idCVar r_displayRefresh( "r_displayRefresh", "0", CVAR_RENDERER | CVAR_INTEGER | CVAR_NOCHEAT, "optional display refresh rate option for vid mode", 0.0f, 200.0f );
@@ -364,8 +365,8 @@ idCVar r_ssrGlassProbeSize( "r_ssrGlassProbeSize", "256", CVAR_RENDERER | CVAR_A
 // stencil until implemented). See docs/port-phases.md Phase 8.
 idCVar r_shadowMapping( "r_shadowMapping", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "shadow technique: 0 = stencil volumes (faithful), 1 = shadow maps where supported" );
 idCVar r_shadowMapSize( "r_shadowMapSize", "1024", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "shadow map resolution (per light), power of two", 256, 4096 );
-idCVar r_shadowMapBias( "r_shadowMapBias", "0.0032", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for world/perforated receivers (acne suppression)", 0.0f, 0.5f );
-idCVar r_shadowMapModelBias( "r_shadowMapModelBias", "0.005", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for model (non-world) receivers; models usually need more", 0.0f, 0.5f );
+idCVar r_shadowMapBias( "r_shadowMapBias", "0.0050", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for world/perforated receivers (acne suppression)", 0.0f, 0.5f );
+idCVar r_shadowMapModelBias( "r_shadowMapModelBias", "0.0035", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for model (non-world) receivers; models usually need more", 0.0f, 0.5f );
 idCVar r_shadowMapFlashlightBias( "r_shadowMapFlashlightBias", "0.001", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for the player flashlight; its grazing narrow cone needs a much smaller bias than other lights (0.0001-0.005) to avoid peter-panning", 0.0f, 0.5f );
 idCVar r_shadowMapSlopeBias( "r_shadowMapSlopeBias", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map slope-scaled bias: grows the depth bias by this * tan(surface-to-light angle) to kill banded acne where light grazes a surface. 0 = flat constant bias (old behaviour)", 0.0f, 8.0f );
 idCVar r_shadowMapDebug( "r_shadowMapDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "shadow-map debug: 1 = per-view light classification summary, 2 = also per-light readout (technique, occluder counts, dist/radius)", 0, 2 );
@@ -377,12 +378,12 @@ idCVar r_shadowMapPointSize( "r_shadowMapPointSize", "1200", CVAR_RENDERER | CVA
 idCVar r_shadowMapCubePcf( "r_shadowMapCubePcf", "6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "point-light cube shadow PCF taps: 1 = single hardware 2x2 tap (hardest/blockiest edge, cheapest), higher = softer disc-filtered edge at more cost", 1, 16 );
 idCVar r_shadowMapPointLimit( "r_shadowMapPointLimit", "64", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "max point lights that get a cube shadow map per view (by on-screen importance); out-of-budget point lights are left unshadowed while r_shadowMapping is on. 0 = all point lights", 0, 128 );
 idCVar r_shadowMapSizeScale( "r_shadowMapSizeScale", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "scale each light's shadow-map resolution with its radius so texel-to-world size (shadow-edge sharpness) stays roughly constant; large lights get more resolution, small lights less" );
-idCVar r_shadowMapSizeScaleRadius( "r_shadowMapSizeScaleRadius", "380", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "light radius that maps to the base shadow resolution (r_shadowMapSize / r_shadowMapPointSize); lights larger than this get proportionally more resolution, smaller ones less", 16.0f, 8192.0f );
+idCVar r_shadowMapSizeScaleRadius( "r_shadowMapSizeScaleRadius", "192", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "light radius that maps to the base shadow resolution (r_shadowMapSize / r_shadowMapPointSize); lights larger than this get proportionally more resolution, smaller ones less", 16.0f, 8192.0f );
 idCVar r_shadowMapCache( "r_shadowMapCache", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "cache static point-light cube shadow maps across frames; a light is only regenerated when it or one of its shadow casters moves. Huge win in static scenes" );
 idCVar r_shadowMapCacheMB( "r_shadowMapCacheMB", "-1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "VRAM budget for the shadow-map cache, in MB. -1 = auto (half of detected video memory), 0 = unlimited", -1, 32768 );
 idCVar r_shadowMapBudgetHysteresis( "r_shadowMapBudgetHysteresis", "30", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "point-light shadow budget stickiness (percent). A light that was cube-shadowed in the last few frames keeps this on-screen-size score bonus, so it isn't kicked out of the r_shadowMapPointLimit set by a marginally bigger newcomer. Stops shadows flickering on/off at the budget boundary as the camera turns. 0 = off (rank purely by on-screen size)", 0, 500 );
 idCVar r_shadowMapMaxUpdates( "r_shadowMapMaxUpdates", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "max cached cube shadow maps re-rendered per view when a light or a moving rigid caster (door, lift, fan) changes. Excess lights reuse their previous (1-frame-stale) cube this view and refresh on a later one, spreading a burst of updates across frames. Only defers lights that already hold a cached cube; cold and dynamic (animated-caster) lights always render. 0 = unlimited (no staggering)", 0, 128 );
-idCVar r_shadowMapStencilRadius( "r_shadowMapStencilRadius", "250", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "lights whose largest light_radius axis exceeds this (world units) fall back to Carmack stencil shadows instead of a shadow map. Large 'sun replacement' lights look better as stencil (no cube-map pixelation on distant shadows) and cost no shadow-map VRAM. 0 = every light uses shadow maps", 0.0f, 16384.0f );
+idCVar r_shadowMapStencilRadius( "r_shadowMapStencilRadius", "255", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "lights whose largest light_radius axis exceeds this (world units) fall back to Carmack stencil shadows instead of a shadow map. Large 'sun replacement' lights look better as stencil (no cube-map pixelation on distant shadows) and cost no shadow-map VRAM. 0 = every light uses shadow maps", 0.0f, 16384.0f );
 
 // DUDE: emissive fill lights — interactive GUI screens (monitors, keypads, wall
 // panels) glow but cast no light in Doom 3's model, so they read as decals pasted
@@ -416,7 +417,7 @@ idCVar r_tessellation( "r_tessellation", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVA
 idCVar r_tessLevel( "r_tessLevel", "5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "tessellation subdivision level for enemies/props (1 = flat, higher = smoother silhouettes at more GPU cost; capped at 32 / the device limit)", 1.0f, 32.0f );
 idCVar r_tessMaxDist( "r_tessMaxDist", "160", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "view distance (world units) beyond which tessellation rolls back toward flat, an LOD/perf guard. 0 = uniform level everywhere", 0.0f, 8192.0f );
 idCVar r_tessMinEdge( "r_tessMinEdge", "0.72", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "minimum triangle edge length (world units) to tessellate; triangles finer than this stay flat, so small dense clusters (eyeballs, fine facial detail) don't over-inflate while big low-poly silhouette triangles still smooth. 0 = tessellate everything, higher = only the largest triangles", 0.0f, 64.0f );
-idCVar r_tessWeldSeams( "r_tessWeldSeams", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "weld coincident vertex normals on animated (md5) meshes so a model built from mirrored/UV-split halves deforms as one piece under tessellation + displacement, instead of the seam opening. Off = vanilla normals. Vulkan tessellation only benefits, but the weld runs in the shared model path" );
+idCVar r_tessWeldSeams( "r_tessWeldSeams", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "weld coincident vertex normals on animated (md5) meshes so a model built from mirrored/UV-split halves deforms as one piece under tessellation + displacement, instead of the seam opening. Off = vanilla normals. Only applied to meshes that actually tessellate: requires r_tessellation on and the Vulkan backend, and skips any surface the tessellator leaves flat, so non-tessellated geometry keeps vanilla normals" );
 idCVar r_tessWeldThreshold( "r_tessWeldThreshold", "0.7", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how aggressively r_tessWeldSeams welds: only coincident normals whose dot product is at least this get averaged. 1 = weld only identical normals, lower = also weld sharper creases (0.7 closes mirror/UV seams while preserving hard edges)", 0.0f, 1.0f );
 idCVar r_tessDisplace( "r_tessDisplace", "-0.25", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "normal-map displacement on tessellated characters: push detail along the surface normal by this many world units (Doom 3 has no runtime height maps, so height is approximated from the bump map's blue channel). 0 = pure PN smoothing, positive raises detail, negative carves it in. Vulkan only", -8.0f, 8.0f );
 idCVar r_tessDebug( "r_tessDebug", "0", CVAR_RENDERER | CVAR_BOOL, "diagnostic: print each material name accepted for tessellation once. Walk up to a mis-tessellated character and read the console to find the leaked material (Vulkan)" );
@@ -1028,6 +1029,11 @@ void R_InitOpenGL( void ) {
 	} else if ( idStr::Icmp( r_graphicsAPI.GetString(), "opengl" ) != 0 ) {
 		common->Warning( "r_graphicsAPI \"%s\": unknown backend, using OpenGL (opengl / opengl3 / vulkan / vulkan-rt)", r_graphicsAPI.GetString() );
 	}
+
+	// DUDE: publish the active-backend flag as a read-only cvar so game code (which
+	// can't see glConfig) can branch on it — e.g. the berserk vision captures at full
+	// resolution on the RHI backends but leaves the legacy 512x256 path untouched.
+	cvarSystem->SetCVarBool( "r_rhiActive", glConfig.rhiBackend );
 
 	// in case we had an error while doing a tiled rendering
 	tr.viewportOffset[0] = 0;

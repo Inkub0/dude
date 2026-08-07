@@ -43,6 +43,7 @@ static bool					gl3CmdRegistered = false;
 // transpiled ARB programs register lazily under their own names later
 static const char *gl3BootPrograms[] = {
 	"ambientlight",
+	"berserk",
 	"blendlight",
 	"bloodorb",
 	"bumpyenvironment",
@@ -57,6 +58,7 @@ static const char *gl3BootPrograms[] = {
 	"heathaze",
 	"heathaze_mask",
 	"heathaze_maskvertex",
+	"heathaze_maskvertex_mask",
 	"interaction",
 	"portalsky",
 	"postprocess",
