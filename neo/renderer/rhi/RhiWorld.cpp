@@ -842,10 +842,13 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	}
 
 	// shadow mapping (DUDE Phase 3.5): only the regular interaction shader samples
-	// the depth map — the ambientLight pass has no shadow term. The lookup reuses
-	// the light-projection texgen already filled above (lightProjection[]), so no
-	// extra matrix is needed here. Left zero (memset) for stencil / unshadowed
-	// lights -> u_shadowParms.x == 0 -> visibility 1.
+	// the depth map — the ambientLight pass has no shadow term. The 2D lookup uses a
+	// SEPARATE, unbaked projection texgen (shadowProjection[], filled below), NOT the
+	// cookie texgen (lightProjection[]): the cookie carries the light stage's texture
+	// matrix (rotating fan gobos etc.), but the caster renders the depth map with the
+	// raw projection, so sampling with the baked cookie UV would slide the shadow
+	// across a static depth field (the fan-shadow bug). Left zero (memset) for stencil
+	// / unshadowed lights -> u_shadowParms.x == 0 -> visibility 1.
 	if ( ( ictx.lightShadowMapped || ictx.lightShadowCube ) && !din->ambientLight ) {
 		// Receiver-dependent acne bias: flat world/BSP surfaces tolerate the tight
 		// world bias; models (non-static-world entities) have curved, high-slope
@@ -875,6 +878,20 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			parms.shadowParms[0] = 1.0f;		// projected/spot: 2D map on unit 7
 			parms.shadowParms[1] = ( rhiShadowMapSize > 0 ) ? 1.0f / (float)rhiShadowMapSize : 0.0f;
 			parms.shadowParms[2] = bias;
+
+			// UNBAKED projection for the 2D shadow lookup: the RAW light-projection
+			// planes transformed into this surface's local space, exactly as the
+			// caster does (RB_RHI_ShadowCasterChain), so the sampled UV lands in the
+			// same frame the depth was written. Equals lightProjection[] for lights
+			// without a projection texture matrix; differs (and fixes the swimming
+			// shadow) for rotating/scrolling gobos like the ceiling-fan lights.
+			idPlane rawLp;
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, backEnd.vLight->lightProject[0], rawLp );
+			memcpy( parms.shadowProjectionS, rawLp.ToFloatPtr(), 16 );
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, backEnd.vLight->lightProject[1], rawLp );
+			memcpy( parms.shadowProjectionT, rawLp.ToFloatPtr(), 16 );
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, backEnd.vLight->lightProject[2], rawLp );
+			memcpy( parms.shadowProjectionQ, rawLp.ToFloatPtr(), 16 );
 		} else {
 			parms.shadowParms[0] = 2.0f;		// point/omni: cube map on unit 8
 			parms.shadowParms[1] = ( rhiShadowCubeSize > 0 ) ? 1.0f / (float)rhiShadowCubeSize : 0.0f;

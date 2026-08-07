@@ -26,6 +26,7 @@ VARY(8)  in vec3 i_TexViewVec[];
 VARY(9)  in vec3 i_ShadowCubeVec[];
 VARY(10) in vec3 i_ModelPos[];
 VARY(11) in vec3 i_ModelNormal[];
+VARY(12) in vec4 i_ShadowProjection[];
 
 VARY(0) out vec3 var_TexLightVec;
 VARY(1) out vec2 var_TexBump;
@@ -37,6 +38,7 @@ VARY(6) out vec3 var_TexHalfVec;
 VARY(7) out vec4 var_Color;
 VARY(8) out vec3 var_TexViewVec;
 VARY(9) out vec3 var_ShadowCubeVec;
+VARY(12) out vec4 var_ShadowProjection;
 
 void main() {
 	vec3 tc = gl_TessCoord;
@@ -56,6 +58,7 @@ void main() {
 	var_Color         = i_Color[0]         * tc.x + i_Color[1]         * tc.y + i_Color[2]         * tc.z;
 	var_TexViewVec    = i_TexViewVec[0]    * tc.x + i_TexViewVec[1]    * tc.y + i_TexViewVec[2]    * tc.z;
 	var_ShadowCubeVec = i_ShadowCubeVec[0] * tc.x + i_ShadowCubeVec[1] * tc.y + i_ShadowCubeVec[2] * tc.z;
+	var_ShadowProjection = i_ShadowProjection[0] * tc.x + i_ShadowProjection[1] * tc.y + i_ShadowProjection[2] * tc.z;
 
 	// optional normal-map displacement along the interpolated geometric normal
 	vec3 geoN = normalize( i_ModelNormal[0] * tc.x + i_ModelNormal[1] * tc.y + i_ModelNormal[2] * tc.z );

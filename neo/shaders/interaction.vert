@@ -25,6 +25,7 @@ VARY(9) out vec3 var_ShadowCubeVec; // world-space light->frag vector (point-lig
 // the fragment shader — a benign "output not consumed" in the flat pipeline.
 VARY(10) out vec3 var_ModelPos;
 VARY(11) out vec3 var_ModelNormal;
+VARY(12) out vec4 var_ShadowProjection; // UNBAKED projection for the 2D shadow lookup
 
 void main() {
 	var_ModelPos = attr_Position.xyz;
@@ -50,6 +51,15 @@ void main() {
 	                          dot( attr_Position, u_lightProjectionT ),
 	                          0.0,
 	                          dot( attr_Position, u_lightProjectionQ ) );
+
+	// same projection but from the UNBAKED planes, for the 2D shadow-map lookup:
+	// var_TexProjection carries the light stage's texture matrix (rotating fan gobo),
+	// but the shadow depth map was rendered raw, so it must be sampled raw. Equal to
+	// var_TexProjection for lights without a projection texture matrix.
+	var_ShadowProjection = vec4( dot( attr_Position, u_shadowProjectionS ),
+	                             dot( attr_Position, u_shadowProjectionT ),
+	                             0.0,
+	                             dot( attr_Position, u_shadowProjectionQ ) );
 
 	// half-angle vector in tangent space (normalize both, add; length-free in fp)
 	vec3 toView = normalize( u_localViewOrigin.xyz - attr_Position.xyz );

@@ -100,10 +100,17 @@ struct RenderParams {
 								// on unit 11; 0 on every non-parallax draw.
 	float	parallaxParms2[4];	// DUDE parallax extras: x = self-shadow strength (0 = off,
 								// r_parallaxShadow). yzw spare (reserved for distance LOD).
+
+	float	shadowProjectionS[4];	// UNBAKED light-projection texgen for the 2D shadow-map
+	float	shadowProjectionT[4];	// lookup. The cookie texgen (lightProjectionS/T/Q) carries
+	float	shadowProjectionQ[4];	// the light stage's texture matrix (rotating fan gobos etc.);
+								// the shadow depth map is rendered with the RAW projection, so
+								// the shadow must be sampled raw too or it swims with the
+								// animation. Filled only on the projected-2D shadow path.
 };
 
-// 3 mat4 (192) + 42 vec4 (672) = 864 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 864, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 3 mat4 (192) + 45 vec4 (720) = 912 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 912, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

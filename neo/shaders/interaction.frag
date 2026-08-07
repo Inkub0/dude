@@ -26,6 +26,7 @@ VARY(6) in vec3 var_TexHalfVec;
 VARY(7) in vec4 var_Color;
 VARY(8) in vec3 var_TexViewVec;
 VARY(9) in vec3 var_ShadowCubeVec;
+VARY(12) in vec4 var_ShadowProjection; // UNBAKED projection for the 2D shadow lookup
 
 layout(location = 0) out vec4 fragColor;
 
@@ -91,10 +92,13 @@ float shadowVisibility() {
 		}
 		return sum / float( taps );
 	}
-	if ( var_TexProjection.w <= 0.0 ) {
+	if ( var_ShadowProjection.w <= 0.0 ) {
 		return 1.0;						// behind the light apex -> lit
 	}
-	vec2 uv = var_TexProjection.xy / var_TexProjection.w;	// == cookie UV, in [0,1]
+	// raw (unbaked) projection UV: the shadow map was rendered with the raw light
+	// projection, so sampling with var_TexProjection (which bakes in a rotating fan
+	// gobo's texture matrix) would slide the shadow across a static depth field.
+	vec2 uv = var_ShadowProjection.xy / var_ShadowProjection.w;	// in [0,1]
 	if ( uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 ) {
 		return 1.0;						// outside the shadow frustum -> lit
 	}

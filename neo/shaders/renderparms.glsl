@@ -94,4 +94,11 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // (grazing). Height map on unit 11 (u_parallaxMap).
 	vec4 u_parallaxParms2;       // DUDE parallax extras: x = self-shadow strength
 	                            // (0 = off). yzw spare.
+
+	vec4 u_shadowProjectionS;    // UNBAKED light-projection texgen for the 2D shadow-map
+	vec4 u_shadowProjectionT;    // lookup. The cookie texgen (u_lightProjectionS/T/Q) carries
+	vec4 u_shadowProjectionQ;    // the light stage's texture matrix (rotating fan gobos etc.);
+	                            // the shadow map is rendered raw, so it must be sampled raw or
+	                            // the shadow swims with the animation. Filled only on the
+	                            // projected-2D shadow path (0 otherwise).
 };
