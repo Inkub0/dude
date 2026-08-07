@@ -498,6 +498,20 @@ void R_LoadARBProgram( int progIndex ) {
 	char	*buffer;
 	char	*start = NULL, *end;
 
+	// RHI / GL 3.3-core backends have no ARB assembly programs — they run GLSL/SPIR-V and
+	// the Material IR maps custom ARB stages back to source via R_ARBProgramName. Without
+	// this guard the full path below just fails the availability check and prints
+	// "glprogs/*.vfp: GL_..._ARB not available" for every stock program at boot and on
+	// every vid_restart. Register the ident (byte-identical to the assignment further down,
+	// so R_FindARBProgram / R_ARBProgramName keep resolving) and return quietly. The legacy
+	// ARB2 path (allowARB2Path true) is unaffected and still compiles the programs.
+	if ( !glConfig.allowARB2Path ) {
+		if ( progs[progIndex].ident == 0 ) {
+			progs[progIndex].ident = PROG_USER + progIndex;
+		}
+		return;
+	}
+
 #if D3_INTEGRATE_SOFTPART_SHADERS
 	if ( progs[progIndex].ident == VPROG_SOFT_PARTICLE || progs[progIndex].ident == FPROG_SOFT_PARTICLE ) {
 		// these shaders are loaded directly from a string

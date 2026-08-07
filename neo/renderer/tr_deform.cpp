@@ -85,12 +85,28 @@ static void R_AutospriteDeform( drawSurf_t *surf ) {
 
 	tri = surf->geo;
 
-	if ( tri->numVerts & 3 ) {
-		common->Warning( "R_AutospriteDeform: shader had odd vertex count" );
-		return;
-	}
-	if ( tri->numIndexes != ( tri->numVerts >> 2 ) * 6 ) {
-		common->Warning( "R_AutospriteDeform: autosprite had odd index count" );
+	// A malformed autosprite surface (verts not a multiple of 4, or an index count that
+	// isn't 6-per-quad) can't be rebuilt into sprites, so bail. Some STOCK content ships
+	// this way — e.g. the ROE heat-haze distortion sprites textures/sfx/vp1/vp2
+	// (heatHazeWithMask) carry `deform sprite` but sit on non-quad (patch) geometry — and
+	// this deform runs every frame, which is why vanilla spams the console. Name the
+	// offending material + counts, but warn only ONCE per material (DUDE). Harmless: the
+	// surface just isn't billboarded, exactly as in vanilla.
+	const bool badVerts = ( tri->numVerts & 3 ) != 0;
+	const bool badIndexes = ( tri->numIndexes != ( tri->numVerts >> 2 ) * 6 );
+	if ( badVerts || badIndexes ) {
+		const char *deformMat = surf->material ? surf->material->GetName() : "<null>";
+		static idStrList warnedAutosprite;
+		if ( warnedAutosprite.FindIndex( deformMat ) < 0 ) {
+			warnedAutosprite.Append( deformMat );
+			if ( badVerts ) {
+				common->Warning( "R_AutospriteDeform: '%s' had odd vertex count (%d, not a multiple of 4) — not billboarded (warned once)",
+					deformMat, tri->numVerts );
+			} else {
+				common->Warning( "R_AutospriteDeform: '%s' had odd index count (%d verts -> expected %d indices, got %d) — not billboarded (warned once)",
+					deformMat, tri->numVerts, ( tri->numVerts >> 2 ) * 6, tri->numIndexes );
+			}
+		}
 		return;
 	}
 
