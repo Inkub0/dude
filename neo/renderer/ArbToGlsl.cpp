@@ -164,7 +164,7 @@ struct Gen {
 				if ( r.index == 11 ) return "vec4( attr_Normal, 1.0 )";
 				Fail( "unsupported vertex.attrib" );
 				return "vec4(0.0)";
-			case RB_FragmentPosition:	return "gl_FragCoord";
+			case RB_FragmentPosition:	return "RB_WPOS";	// gl_FragCoord, y-flipped on Vulkan (see prelude)
 			case RB_FragmentTexcoord:
 				snprintf( buf, sizeof( buf ), "var_tc%d", r.index );
 				return buf;
