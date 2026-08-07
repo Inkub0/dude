@@ -717,11 +717,33 @@ void idPlayerView::RenderPlayerView( idUserInterface *hud ) {
 	if ( g_skipViewEffects.GetBool() ) {
 		SingleView( hud, view );
 	} else {
+		// DUDE berserk vision (RHI backends only): the renderer rebuilds the "streak zoom"
+		// as a temporal ghost trail and winds it down over 2s after berserk ends, with the
+		// zoom shrinking so the ghosts contract and merge back into the sharp scene. Drive
+		// that by computing a 0..1 strength (r_berserkFade the backend reads) and keeping
+		// BerserkVision running through the fade. Legacy is unaffected: it never reads the
+		// cvar and its wind-down branch (below) is gated off.
+		const int   BERSERK_WINDDOWN_MS = 2000;
+		const bool  berserkRhi    = cvarSystem->GetCVarBool( "r_rhiActive" );
+		const bool  berserkActive = player->PowerUpActive( BERSERK );
+		const int   berserkEnd    = player->inventory.powerupEndTime[ BERSERK ];
+		float berserkFade = 0.0f;
+		if ( berserkActive ) {
+			berserkFade = 1.0f;
+		} else if ( berserkRhi && berserkEnd > 0 ) {
+			const int since = gameLocal.time - berserkEnd;		// ms since berserk expired
+			if ( since >= 0 && since < BERSERK_WINDDOWN_MS ) {
+				berserkFade = 1.0f - (float)since / (float)BERSERK_WINDDOWN_MS;
+			}
+		}
+		cvarSystem->SetCVarFloat( "r_berserkFade", berserkFade );
+
 		if ( player->GetInfluenceMaterial() || player->GetInfluenceEntity() ) {
 			InfluenceVision( hud, view );
 		} else if ( gameLocal.time < dvFinishTime ) {
 			DoubleVision( hud, view, dvFinishTime - gameLocal.time );
-		} else if ( player->PowerUpActive( BERSERK ) ) {
+		} else if ( berserkActive || berserkFade > 0.0f ) {
+			// active berserk, or the RHI temporal wind-down still merging the ghosts back
 			BerserkVision( hud, view );
 		} else {
 			SingleView( hud, view );

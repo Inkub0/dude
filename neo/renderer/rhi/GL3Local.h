@@ -215,6 +215,15 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
 // no-op unless r_ssr produced this view's MRT G-buffer.
 void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_s *viewDef );
 
+// DUDE berserk vision feedback (docs / memory berserk-vision-rhi): advance the ping-pong
+// accumulator one frame (faithful port of the stock ARB material textures/decals/berserk)
+// and return the accumulated image, bound on unit 1, for the display blit in
+// RB_RHI_RenderShaderPasses. Returns 0 if the buffer can't be built (caller shows the
+// plain scene). fade is the 0..1 wind-down strength (1 = active berserk).
+rhi::ImageHandle RB_RHI_BerserkAccum( rhi::RHI *r, const viewDef_s *viewDef,
+                                      float baseScale, float feedback, float fade,
+                                      int trailDiv, int timeMs );
+
 // screenshot support: composited desktops return garbage for front-buffer
 // reads, so R_ReadTiledPixels registers a destination and the executor
 // captures GL_BACK right before the next swap (GL_RGB, pack alignment 4)

@@ -87,17 +87,20 @@ extern idCVar r_gammaInShader;
 extern idCVar r_gamma;
 extern idCVar r_brightness;
 
-// DUDE berserk vision (RHI backends): the stock effect is a recursive _scratch
-// feedback (textures/decals/berserk zooms the previous frame 3% each frame). That
-// cross-frame accumulation doesn't survive on the RHI path, so we reproduce the
-// same radial "streak zoom" in a single pass — a radial zoom-blur of the captured
-// scene (the `berserk` builtin shader). Legacy keeps its original feedback path.
-idCVar r_berserkZoom( "r_berserkZoom", "0.2", CVAR_RENDERER | CVAR_FLOAT,
-	"berserk vision radial zoom reach at the screen edges (RHI backends)" );
-idCVar r_berserkFocus( "r_berserkFocus", "0.33", CVAR_RENDERER | CVAR_FLOAT,
-	"berserk vision sharp-center radius (0..1); the zoom ghosts ramp from here to the edges" );
-idCVar r_berserkGhosts( "r_berserkGhosts", "8", CVAR_RENDERER | CVAR_INTEGER,
-	"berserk vision number of discrete zoom-ghost taps (matches the ARB feedback's trailing frames)" );
+// DUDE berserk vision (RHI backends): a faithful port of the stock ARB material
+// textures/decals/berserk (materials/decals.mtr). That material recursively re-samples the
+// previous frame magnified ~3% about the centre (centerscale), gated by the berserk2
+// texture's radial alpha (sharp centre, feedback edges) — the "streak zoom". Its recursive
+// _scratch capture doesn't accumulate on the RHI path, so the exact same operations run
+// every frame into a ping-pong render target instead (berserk_accum), and the display blit
+// shows the accumulated buffer (the `berserk` builtin). Legacy keeps its original path.
+// The look constants (0.95 centerscale per 60fps-frame, full mask feedback, full-res trail)
+// are baked into the RB_RHI_BerserkAccum call below — tuned and locked, no user knobs.
+// game-driven strength: 1 while berserk is active, ramps 1->0 over the 2s wind-down after it
+// ends (PlayerView.cpp writes it, this backend reads it as both the intercept trigger and the
+// wind-down fade). Not a user knob — the game<->renderer bridge that drives the effect.
+idCVar r_berserkFade( "r_berserkFade", "0", CVAR_RENDERER | CVAR_FLOAT,
+	"berserk vision effect strength (set by the game: 1 active, fading to 0 as berserk ends)" );
 
 // DUDE: brightness scale for cube-map ("sheen") reflections on glass etc.
 // (r_gl3ReflectionScale, defined in RenderSystem_init.cpp) — the enhancement
@@ -1506,10 +1509,15 @@ static void RB_RHI_RenderBuiltinArbStage( rhi::RHI *r, const viewDef_t *viewDef,
 	parms.screenCorrection[0] = (float)w / potW;
 	parms.screenCorrection[1] = (float)h / potH;
 	parms.windowCoord[0] = 1.0f / w;
-	// this path only runs on Vulkan: top-down gl_FragCoord vs the GL-layout
-	// capture — the shaders add u_windowCoord.w to the row term (0 on GL)
+	// this path only runs on Vulkan: top-down gl_FragCoord vs the GL-layout capture —
+	// the shaders add u_windowCoord.w to the row term (0 on GL). The offset is 1.0:
+	// screenTc = (fragY*(-1/h) + w.w) * screenCorrection.y, and screenCorrection already
+	// carries h/potH, so w.w must be 1.0 for fragY 0..h -> V h/potH..0. The old
+	// vidHeight/h only equalled 1.0 when h==vidHeight; in a sub-window render (berserk
+	// crops the scene, h != vidHeight) it shifted the sample, so _currentRender heat-haze
+	// blood decals showed a shrunk copy of the window. 1.0 is correct at any viewport size.
 	parms.windowCoord[1] = -1.0f / h;
-	parms.windowCoord[3] = (float)glConfig.vidHeight / h;
+	parms.windowCoord[3] = 1.0f;
 
 	// stage vertexParms -> u_localParam0/1 (the stock programs use locals 0/1)
 	for ( int i = 0; i < ns->numVertexParms && i < 2; i++ ) {
@@ -1838,11 +1846,13 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		parms.windowCoord[0] = 1.0f / w;
 		parms.windowCoord[1] = 1.0f / h;
 		if ( vkMode ) {
-			// Vulkan gl_FragCoord is top-down but the capture keeps GL's
-			// bottom-up layout; portalsky.frag adds u_windowCoord.w to the row
-			// term (0 on GL): y' = (vidHeight - fragY) / h
+			// Vulkan gl_FragCoord is top-down but the capture keeps GL's bottom-up
+			// layout; portalsky.frag adds u_windowCoord.w to the row term (0 on GL).
+			// The offset is 1.0 (screenCorrection already carries h/potH); the old
+			// vidHeight/h only matched when h==vidHeight and mis-sampled sub-window
+			// (cropped) renders — same fix as the heat-haze path above.
 			parms.windowCoord[1] = -1.0f / h;
-			parms.windowCoord[3] = (float)glConfig.vidHeight / h;
+			parms.windowCoord[3] = 1.0f;
 		}
 		screenImg->Bind();
 		vkTex[0] = screenImg->rhiHandle;
@@ -2308,17 +2318,35 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 
 	// DUDE berserk vision: the stock effect is a recursive _scratch feedback
 	// (textures/decals/berserk zooms the previous frame 3% each frame) that doesn't
-	// accumulate on the RHI path. Reproduce the "streak zoom" instead as a single-pass
-	// radial zoom-blur of the *clean* captured scene: skip the broken overlay here (just
-	// note berserk is active this frame), and blur when the fullscreen _scratch is blitted
-	// back (rbBerserkFrame branch below). Legacy keeps its original feedback path.
+	// accumulate on the RHI path. Reproduce the "streak zoom" instead as a TEMPORAL ghost
+	// trail (berserk_accum ping-pong) composited under the live scene: skip the broken
+	// overlay here (note berserk is active this frame), then drive the trail + composite
+	// when the fullscreen _scratch is blitted back. Legacy keeps its original feedback path.
 	if ( idStr::Icmp( shader->GetName(), "textures/decals/berserk" ) == 0 ) {
 		rbBerserkFrame = true;
-		return;	// _scratch stays the clean scene; the blur happens at the blit
+		return;	// _scratch stays the clean scene; the effect happens at the blit
 	}
-	// the fullscreen blit of the captured scene during berserk (dvMaterial == "_scratch")
-	const bool isBerserkBlit = rbBerserkFrame && !viewDef->viewEntitys
+	// the fullscreen blit of the captured scene during berserk (dvMaterial == "_scratch").
+	// rbBerserkFrame catches the active powerup (its overlay was seen this frame);
+	// r_berserkFade (game-driven) additionally keeps the effect alive through the 2s
+	// wind-down after berserk ends, when that overlay is no longer drawn.
+	const float berserkFadeCvar = r_berserkFade.GetFloat();
+	const bool isBerserkBlit = ( rbBerserkFrame || berserkFadeCvar > 0.0f ) && !viewDef->viewEntitys
 		&& idStr::Icmp( shader->GetName(), "_scratch" ) == 0;
+
+	// advance the feedback buffer once for this blit (before the per-stage draw so it's
+	// bound for the display). rbBerserkFrame with a not-yet-updated fade cvar (SMP skew on
+	// the first active frame) falls back to full strength.
+	rhi::ImageHandle berserkTrail = 0;
+	if ( isBerserkBlit ) {
+		const float berserkFade = ( berserkFadeCvar > 0.0f ) ? berserkFadeCvar : 1.0f;
+		if ( R_BackendSupportsEnhancements() ) {
+			// baked-in look: 0.95 centerscale per 60fps-frame, full radial-mask feedback,
+			// full-res (÷1) trail. See berserk_accum.frag for the stock-faithful math.
+			berserkTrail = RB_RHI_BerserkAccum( r, viewDef, 0.95f, 1.0f, berserkFade, 1,
+			                                    Sys_Milliseconds() );
+		}
+	}
 
 	for ( int k = 0; k < ir->surfaceStages.Num(); k++ ) {
 		const rhi::StageIR &si = ir->surfaceStages[k];
@@ -2414,13 +2442,11 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			parms.diffuseMatrixT[1] = 1.0f;
 		}
 
-		// berserk radial zoom ghosts: edge reach → u_localParam0.x, sharp-center
-		// radius → .y, ghost-tap count → .z (keeps the stage's texture matrix =
-		// the _scratch flip + centering)
+		// berserk vision display (berserk.frag): show the accumulated feedback buffer when
+		// present (hasTrail → .z), else the plain captured scene. The stage's texture matrix
+		// (the _scratch V-flip) still drives var_TexCoord for both.
 		if ( isBerserkBlit ) {
-			parms.localParam0[0] = r_berserkZoom.GetFloat();
-			parms.localParam0[1] = r_berserkFocus.GetFloat();
-			parms.localParam0[2] = (float)r_berserkGhosts.GetInteger();
+			parms.localParam0[2] = berserkTrail ? 1.0f : 0.0f;
 		}
 
 		// vertex color mode: var_Color = (attr_Color*modulate + add) * u_color
@@ -2483,8 +2509,8 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		if ( !viewDef->viewEntitys ) {
 			pd.stateBits |= GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
 		}
-		// berserk vision: blit the captured scene through the radial zoom-blur shader
-		// instead of a plain stretch — the multi-tap blur is the whole effect.
+		// berserk vision: blit the accumulated feedback buffer through the `berserk` shader
+		// instead of a plain _scratch stretch — the streak-zoom lives in that buffer.
 		pd.shader = isBerserkBlit ? r->LoadShader( "berserk" ) : si.program;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = RB_RHI_CullFor( viewDef, shader->GetCullType() );
@@ -2502,6 +2528,12 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
 		da.textures[0] = stageImage;	// Vulkan path; 0 on GL3 (binds went via idImage)
+		if ( isBerserkBlit ) {
+			// unit 1 = the ghost trail (Vulkan needs it in DrawArgs; GL already bound it
+			// in RB_RHI_BerserkAccum). Without a trail, bind _scratch as a placeholder so
+			// the u_trail sampler is valid on Vulkan — the shader ignores it (hasTrail=0).
+			da.textures[1] = berserkTrail ? berserkTrail : stageImage;
+		}
 		r->Draw( da );
 
 		backEnd.pc.c_drawElements++;

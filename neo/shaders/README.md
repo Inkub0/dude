@@ -84,7 +84,8 @@ none of the current shaders do.
 | colorprocess.vert/.frag | colorProcess.vfp | grey-lerp post effect |
 | zfill.vert/.frag | *(new — was fixed function)* | depth prepass w/ optional alpha test |
 | generic.vert/.frag | *(new — was fixed function)* | GUI/2D/old material stages: texmatrix + vertex-color modes |
-| berserk.vert/.frag | *(new — reimplements textures/decals/berserk)* | berserk-vision radial zoom ghosts; the ARB `_scratch` feedback doesn't accumulate on the RHI path (r_berserkZoom/Focus/Ghosts) |
+| berserk.vert/.frag | *(new — reimplements textures/decals/berserk)* | berserk-vision display: blits the accumulated feedback buffer (or the plain scene as fallback); the effect lives in berserk_accum |
+| berserk_accum.vert/.frag | *(new — berserk feedback)* | faithful port of the stock `textures/decals/berserk` ARB material: `mix(scene, prevFrame·centerscale 0.95, berserk2.alpha)` every frame in a ping-pong RT — the reliable cross-frame feedback the recursive `_scratch` path lacks on RHI; look constants baked in (r_berserkFade is the game-driven wind-down only) |
 | fog.vert/.frag | *(new — was fixed function)* | fog pass texgen planes |
 | gammabrightness.vert/.frag | *(new — was hardware gamma / ARB env[21])* | final r_gamma/r_brightness pass (r_gammaInShader) |
 | blendlight.vert/.frag | *(new — was fixed function)* | blend-light projection |

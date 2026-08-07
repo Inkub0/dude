@@ -342,6 +342,18 @@ static bool rhiSsrHavePrevVP = false;				// rhiSsrPrevViewProj holds a previous 
 static float rhiSsrPrevViewProj[16];				// previous frame's world->clip (proj * view)
 static float rhiSsrJitterPhase = 0.0f;				// per-frame march jitter rotation
 
+// DUDE berserk vision feedback trail (docs / memory berserk-vision-rhi, RB_RHI_BerserkAccum).
+// A ping-pong RGBA8 pair reproducing the stock ARB material's recursive _scratch feedback the
+// RHI path can't accumulate: each frame folds the freshly captured scene with the previous
+// frame magnified ~3-5% about the centre, gated by the berserk2 radial mask (see
+// berserk_accum.frag), so older frames fan out as streaks. Sized to the view. Invalidated on
+// resize / lost context; a large time gap re-seeds so a re-entry starts a clean trail.
+static rhi::RenderTargetHandle rhiBerserkTrailRT[2] = { 0, 0 };
+static int  rhiBerserkIdx = 0;						// slot that received the last sample is 1 - this
+static int  rhiBerserkW = 0, rhiBerserkH = 0;		// trail buffer size
+static bool rhiBerserkValid = false;				// a usable previous trail exists (history read ok)
+static int  rhiBerserkLastTick = -100000;			// Sys_Milliseconds of the last accumulation sample
+
 // Normal G-buffer (Option B): bump-mapped view-space normals written by an extra opaque
 // geometry pass, so SSAO uses real per-pixel normals instead of reconstructing from depth.
 static rhi::RenderTargetHandle rhiNormalRT = 0;		// RGBA8 view-normal + depth (color+depth target)
@@ -2374,6 +2386,10 @@ void RB_RHI_ResetWorldTargets( void ) {
 
 	rhiNormalRT = 0;			rhiNormalW = rhiNormalH = 0;
 	rhiNormalReadyThisView = false;	rhiNormalMrt = false;
+
+	rhiBerserkTrailRT[0] = rhiBerserkTrailRT[1] = 0;
+	rhiBerserkIdx = 0;			rhiBerserkW = rhiBerserkH = 0;
+	rhiBerserkValid = false;	rhiBerserkLastTick = -100000;
 }
 
 void RB_RHI_FreeShadowCubeCache() {
@@ -3047,6 +3063,149 @@ static void RB_RHI_DrawFullscreen( rhi::RHI *r, rhi::ShaderHandle prog,
 	r->Draw( da );
 
 	backEnd.pc.c_drawElements++;
+}
+
+// (re)allocate the berserk temporal trail ping-pong. Both slots are cleared to black on
+// creation so the first history read is defined on Vulkan (an unwritten color target's
+// layout is UNDEFINED and would trip validation) and starts from nothing on GL.
+static bool RB_RHI_EnsureBerserkTrail( rhi::RHI *r, int w, int h ) {
+	if ( rhiBerserkTrailRT[0] && r->GetRenderTargetImage( rhiBerserkTrailRT[0] ) == 0 ) {
+		rhiBerserkTrailRT[0] = rhiBerserkTrailRT[1] = 0;	// lost context (vid_restart)
+		rhiBerserkW = rhiBerserkH = 0;
+	}
+	if ( rhiBerserkTrailRT[0] && rhiBerserkTrailRT[1] && rhiBerserkW == w && rhiBerserkH == h ) {
+		return true;
+	}
+	for ( int i = 0; i < 2; i++ ) {
+		if ( rhiBerserkTrailRT[i] ) { r->DestroyRenderTarget( rhiBerserkTrailRT[i] ); rhiBerserkTrailRT[i] = 0; }
+	}
+	rhiBerserkTrailRT[0] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+	rhiBerserkTrailRT[1] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+	if ( !rhiBerserkTrailRT[0] || !rhiBerserkTrailRT[1] ) {
+		for ( int i = 0; i < 2; i++ ) {
+			if ( rhiBerserkTrailRT[i] ) { r->DestroyRenderTarget( rhiBerserkTrailRT[i] ); rhiBerserkTrailRT[i] = 0; }
+		}
+		rhiBerserkW = rhiBerserkH = 0;
+		return false;
+	}
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.color = true;
+	r->BeginTargetPass( rhiBerserkTrailRT[0], &clear ); r->EndPass();
+	r->BeginTargetPass( rhiBerserkTrailRT[1], &clear ); r->EndPass();
+	rhiBerserkW = w;			rhiBerserkH = h;
+	rhiBerserkIdx = 0;			rhiBerserkValid = false;
+	rhiBerserkLastTick = -100000;
+	return true;
+}
+
+/*
+===================
+RB_RHI_BerserkAccum
+
+Advance the berserk-vision feedback buffer one frame and return it for the display blit
+in RB_RHI_RenderShaderPasses. A faithful port of the stock ARB material
+textures/decals/berserk (materials/decals.mtr): each frame folds the freshly captured
+scene with the PREVIOUS frame magnified ~3% about the centre (centerscale 0.97), gated by
+the berserk2 texture's alpha (a radial mask — sharp at the centre, feedback at the edges;
+rotated over time). The recursion runs in a ping-pong render target — the reliable flavour
+of cross-frame feedback (same as the SSAO/SSR history) — because the stock recursive
+_scratch capture doesn't accumulate on the RHI path.
+
+baseScale = per-60fps-frame centerscale (0.95 baked in the caller; stock is 0.97), feedback =
+mask/feedback strength, fade = 0..1 wind-down (1 active; as it falls the
+zoom relaxes to identity and the feedback drops, so the streaks settle and merge back into
+the sharp scene). Returns the accumulated image (bound on unit 1 for the display draw) or 0.
+===================
+*/
+rhi::ImageHandle RB_RHI_BerserkAccum( rhi::RHI *r, const viewDef_t *viewDef,
+                                      float baseScale, float feedback, float fade,
+                                      int trailDiv, int timeMs ) {
+	const int fullW = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int fullH = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	int div = ( trailDiv < 1 ) ? 1 : trailDiv;
+	int tw = fullW / div;	if ( tw < 1 ) tw = 1;
+	int th = fullH / div;	if ( th < 1 ) th = 1;
+	if ( !RB_RHI_EnsureBerserkTrail( r, tw, th ) ) {
+		return 0;
+	}
+
+	rhi::ShaderHandle accumProg = r->LoadShader( "berserk_accum" );
+	if ( !accumProg ) {
+		return 0;
+	}
+
+	// the rotating radial mask (stock stage 0 = maskcolor berserk2). Cached once; clamp
+	// addressing + linear filtering, matching the material's `clamp`.
+	static idImage *maskImg = NULL;
+	if ( maskImg == NULL ) {
+		maskImg = globalImages->ImageFromFile( "textures/decals/berserk2", TF_LINEAR, false,
+		                                       TR_CLAMP, TD_HIGH_QUALITY );
+	}
+	if ( maskImg == NULL || maskImg == globalImages->defaultImage ) {
+		return 0;
+	}
+
+	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+
+	// a large gap since the last frame means the held trail is stale — berserk was
+	// re-entered, or the wind-down ended and a new one began. Drop it so this frame
+	// re-seeds from the clean scene instead of recirculating a scene from seconds ago.
+	int dt = timeMs - rhiBerserkLastTick;
+	if ( dt > 1000 || dt < 0 ) {
+		rhiBerserkValid = false;
+		dt = 16;
+	}
+	if ( dt < 1 ) { dt = 1; }
+
+	// framerate-independent zoom: the stock effect magnified 0.97/frame at its ~60fps, so
+	// normalise to a 60fps (16.67ms) reference — otherwise it rushes outward at high fps.
+	// Wind-down (fade<1) relaxes the magnify toward identity so the streaks stop growing.
+	float frameScale = idMath::Pow( baseScale, (float)dt / 16.6667f );
+	float scale = 1.0f + ( frameScale - 1.0f ) * fade;
+
+	// mask rotation (stock `rotate time*3`, value in cycles -> radians)
+	float ang = idMath::TWO_PI * ( (float)timeMs * 0.001f * 3.0f );
+
+	const int writeIdx = rhiBerserkIdx;
+	const int readIdx  = 1 - rhiBerserkIdx;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.localParam0[0] = scale;
+	parms.localParam0[1] = feedback * fade;					// wind-down fades the feedback out
+	parms.localParam0[2] = rhiBerserkValid ? 1.0f : 0.0f;
+	parms.localParam1[0] = cosf( ang );
+	parms.localParam1[1] = sinf( ang );
+	// Vulkan writes this fullscreen pass through a flipY viewport while _scratch is captured
+	// top-down; the shader works in _scratch space so the feedback stays coherent (no per-frame
+	// vertical flip). GL has no flipY, so leave it off there.
+	parms.localParam1[2] = vkMode ? 1.0f : 0.0f;
+
+	r->BeginTargetPass( rhiBerserkTrailRT[writeIdx], NULL );
+	RB_RHI_BindUnit( 0, globalImages->scratchImage );		// current scene (both backends)
+	RB_RHI_BindRTUnit( r, 1, rhiBerserkTrailRT[readIdx] );	// previous frame (cleared -> valid on first use)
+	RB_RHI_BindUnit( 2, maskImg );							// berserk2 radial mask
+	if ( !vkMode ) {
+		backEnd.glState.tmu[1].current2DMap = -1;			// direct bind bypassed the tmu cache
+	}
+	RB_RHI_DrawFullscreen( r, accumProg, parms, 0 );
+	r->EndPass();
+
+	rhiBerserkIdx  = readIdx;		// next frame writes the other slot
+	rhiBerserkValid = true;
+	rhiBerserkLastTick = timeMs;
+
+	rhi::ImageHandle trailImg = r->GetRenderTargetImage( rhiBerserkTrailRT[writeIdx] );
+
+	// bind it on unit 1 for the display draw that follows in the surface loop: GL keeps
+	// the binding live; the Vulkan caller re-supplies it via DrawArgs.textures[1].
+	RB_RHI_BindRTImage( r, 1, trailImg );
+	if ( !vkMode ) {
+		backEnd.glState.tmu[1].current2DMap = -1;
+	}
+	return trailImg;
 }
 
 static bool RB_RHI_EnsureSsrTarget( rhi::RHI *r, int w, int h ) {

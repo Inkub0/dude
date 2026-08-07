@@ -44,6 +44,7 @@ static bool					gl3CmdRegistered = false;
 static const char *gl3BootPrograms[] = {
 	"ambientlight",
 	"berserk",
+	"berserk_accum",
 	"blendlight",
 	"bloodorb",
 	"bumpyenvironment",
