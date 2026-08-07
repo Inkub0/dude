@@ -18,16 +18,16 @@ Legend: ✅ ported · ⚠️ ported but verify against ARB · ❌ missing/degrad
 
 | # | Effect | Stock usage | Where to test | GL3 | VK | Verdict |
 |---|--------|-------------|---------------|-----|----|---------|
-| 1 | Heat haze (+ mask/vertex variants) | 65 mtr | plasma/rocket fire, imp fireballs, Alpha Labs flames, Recycling steam | ⬜ | ⬜ | |
-| 2 | colorProcess (per-frame grade) | 8 mtr | old-film/static monitors, PDA video static, damage screen overlay | ⬜ | ⬜ | |
-| 3 | Environment / bumpyEnvironment (`texgen reflect`) | 7 mtr | shiny/wet metal trim, chrome pipes | ⬜ | ⬜ | |
+| 1 | Heat haze (+ mask/vertex variants) | 65 mtr | plasma/rocket fire, imp fireballs, Alpha Labs flames, Recycling steam | ✅ | ✅ | ✅ good |
+| 2 | colorProcess (per-frame grade) | 8 mtr | old-film/static monitors, PDA video static, damage screen overlay | ✅ | ✅ | ✅ good |
+| 3 | Environment / bumpyEnvironment (`texgen reflect`) | 7 mtr | shiny/wet metal trim, chrome pipes | ✅ | ✅ | ✅ good |
 | 4 | Blend lights (projected darkening cookies) | 7 mtr | light gobos, projected gradients | ⬜ | ⬜ | |
-| 5 | wobbleSky | 9 mtr | Hell swirling sky, some Mars exteriors | ⬜ | ⬜ | |
-| 6 | mirrorRenderMap | 5 mtr | Delta Labs door gutters, reflective hell stone | ⬜ | ⬜ | |
-| 7 | fogLight | 3 mtr | Erebus/cavern/Hell fog volumes | ⬜ | ⬜ | |
-| 8 | remoteRenderMap (live cam feed) | 3 mtr (`cameraImg1/2`) | security monitor screens (Mars City / Administration) | ⬜ | ⬜ | |
-| 9 | Portal sky | `_currentRender` | sky through Mars City windows, Site-3 exteriors | ⬜ | ⬜ | |
-| 10 | Soft particles | depth-fade | steam/smoke fading against geometry (Recycling) | ⬜ | ⬜ | |
+| 5 | wobbleSky | 9 mtr | Hell sky (`textures/skies/hellsky2/3/4`): base `game/hell1` / `game/hellhole`, ROE `game/hell` | ✅ | ✅ | ✅ good (sky churns) |
+| 6 | mirrorRenderMap | 5 mtr | Delta Labs door gutters, reflective hell stone | ✅ | ✅ | ✅ good |
+| 7 | fogLight | 3 mtr | Erebus/cavern/Hell fog volumes | ✅ | ✅ | ✅ good (MD5-in-fog fixed) |
+| 8 | remoteRenderMap (live cam feed) | 3 mtr (`cameraImg1/2`) | security monitor screens (Mars City / Administration) | ✅ | ✅ | ✅ good |
+| 9 | Portal sky (`_currentRender` + `screen` texgen → `portalsky` builtin) | **ROE only** | `textures/smf/portal_sky`; **base D3 has ZERO `info_portalSky`** (mars_city1 is enclosed; its "portals" are visportals). ROE maps: **phobos1/2/3**, deltax, hell (`devmap game/phobos1`). Not gap #2 — ARB-program version is commented out, uses fixed-function `screen` texgen. | ✅ | ✅ | ✅ good (phobos3) |
+| 10 | Soft particles | depth-fade | steam/smoke fading against geometry (Recycling) | ✅ | ✅ | ✅ good |
 | 11 | Berserk vision | — | ✅ fixed (radial zoom-blur port) | ✅ | ✅ | done |
 
 ## Bugs found during testing
