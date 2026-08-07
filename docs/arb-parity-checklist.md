@@ -53,3 +53,19 @@ Legend: ✅ ported · ⚠️ ported but verify against ARB · ❌ missing/degrad
   **Why some fans looked fine already:** the bug only fires when a fan light is projected *and*
   shadow-casting (not `noShadows`) *and* wins a 2D map slot; point-light, `noShadows`, or
   un-mapped fans (e.g. mars_city1 body-scan area) show the clean gobo on both backends.
+
+- **[FIXED] MD5 models don't blend in fog (tessellation vs fog depth mismatch).** With
+  `r_tessellation 1` (Vulkan-only), a monster/character is PN-tessellated (+ normal-displaced,
+  `r_tessDisplace` default −0.25) in the zfill depth prepass and interaction passes, but the fog
+  pass drew the **flat** model. The fog interaction chains run at `DEPTHFUNC_EQUAL`, so the flat
+  fog fragments failed the depth test against the tessellated depth → the model rendered
+  **un-fogged**, reading as a dark silhouette in bright fog (Hazardous Material Control, yellow fog).
+  Confirmed: `r_tessellation 0` fixes it. The fog port itself is a faithful line-for-line copy of
+  legacy `RB_FogPass` (world geometry always fogged fine). **Fix (shipped):** the fog interaction
+  pass now tessellates identically to zfill — new `fog.tesc`/`fog.tese` mirror `zfill.tesc`/`.tese`
+  (same `dudeTessPN`+`dudeTessDisplace`, `invariant gl_Position` → bit-identical depth), `fog.vert`
+  emits the control net, `RB_RHI_FogChain` gained `allowTess` (true for the two interaction chains,
+  false for the frustum-volume fill), binds the model bump on unit 2 via the shared
+  `RB_RHI_TessBumpForZfill`. Inert when `r_tessellation` off and on GL3 (never tessellates).
+  Rule my memory already flags: **every `DEPTHFUNC_EQUAL` pass must tessellate identically to
+  zfill** — the fog pass was the one that was missed.

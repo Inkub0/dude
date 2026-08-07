@@ -49,10 +49,18 @@ is shared by *both* the `zfill` and `interaction` pipelines.
 This is an opt-in enhancement, **off by default = bit-for-bit vanilla** (no patch pipeline is
 ever built, the device feature is left disabled). When on:
 
+- **Shadow *maps* now tessellate** (2026-08-07) — the 2D and cube shadow-map caster passes
+  run the same PN + displacement as the lit passes (`shadow_sm.tesc/.tese`,
+  `shadow_sm_cube.tesc/.tese`), so a shadow-mapped character casts from its **deformed** surface
+  and the shadow hugs the smoothed body. See "Tessellated shadow maps" below.
 - **Stencil shadows are CPU-generated from the base mesh**
-  ([`tr_stencilshadow.cpp`](../neo/renderer/tr_stencilshadow.cpp)) → a tessellated/displaced
-  monster casts an **un-tessellated silhouette**. Usually hidden; visible on close silhouettes.
-  Shadow volumes are **not** tessellated initially (accepted mismatch, documented here).
+  ([`tr_stencilshadow.cpp`](../neo/renderer/tr_stencilshadow.cpp)) → under a **stencil-only** light
+  (parallel lights, out-of-budget point lights, or `r_shadowMapping 0`) a tessellated/displaced
+  monster still casts an **un-tessellated silhouette**. This is architecturally unfixable in the
+  CPU-stencil model (the shadow volume is a light-relative silhouette of the flat mesh, position-only,
+  no surface to tessellate) — the industry answer is that displaced content uses shadow maps, which
+  is exactly what the fix above does. Residual, documented; the elegant cure is the deform-once
+  architecture below.
 - **Silhouette reshaping.** PN smoothing rounds iconic monster shapes; displacement adds
   crawling relief if the pseudo-height is aggressive. Both ship with conservative defaults.
 - **Tangent basis.** The evaluation shader must re-interpolate and renormalize normal, tangent
@@ -286,7 +294,71 @@ keeps a small residual (different heights). Threshold is a Debugging-tab slider.
 ### Known prototype limitations (Phase 2+ follow-ups)
 - **Static props excluded** (PN is wrong for hard-surface geometry). A curvature-aware
   scheme could re-admit rounded props but won't save boxes — deferred; opt-in later.
-- **GUI / emissive / blend / fog surfaces excluded** (they draw flat in a
-  non-tessellated depth-EQUAL pass).
+- **GUI / emissive / blend surfaces excluded** (they draw flat in a non-tessellated pass).
 - **Displacement across UV seams** keeps a small residual even with seam welding.
-- **Stencil-shadow silhouettes** come from the un-tessellated base mesh (accepted).
+- **Stencil-shadow silhouettes** come from the un-tessellated base mesh, for stencil-only lights
+  only (shadow-mapped lights now tessellate — see below). Architecturally unfixable in stencil.
+
+### Fog surfaces now tessellate (2026-08-07)
+`RB_RHI_FogChain`'s interaction chains run at `DEPTHFUNC_EQUAL`, so a tessellated model's fog was
+depth-rejected against the tessellated zfill depth → the model rendered un-fogged (dark silhouette
+in fog). Fixed by giving the fog pass its own `fog.tesc/.tese` mirroring zfill (bit-identical
+`invariant gl_Position`); the frustum-volume fill pass never tessellates. See
+[arb-parity-checklist.md](arb-parity-checklist.md).
+
+### Tessellated shadow maps (2026-08-07)
+The 2D (`RB_RHI_ShadowCasterChain`) and cube (`RB_RHI_ShadowCasterChainCube`) shadow-map caster
+passes now tessellate. They already streamed the full `idDrawVert` (`VL_DRAWVERT`) — same data as
+zfill — so the fix was the established three-line pattern (`RB_RHI_TessellateSurf` +
+`RB_RHI_SetTessParms` + `RB_RHI_TessBumpForZfill`, bump on unit 1) plus `shadow_sm{,_cube}.tesc/.tese`
+reusing `tess.glsl`. The caster's displaced surface coincides with the receiver's lit surface by
+construction (same global tess params + bump). The cube tese keeps `var_LightVec` a *vector* so
+per-fragment radial `length()` stays exact. Fixes low-poly shadows for shadow-mapped lights on both
+2D and cube. Inert with `r_tessellation` off and on GL3.
+
+The **receiver** (`interaction.tese`) was also updated: it now recomputes the light-space projective
+quantities (falloff depth, cookie/shadow UV, cube light-vector) from the *displaced* position instead
+of barycentric-interpolating the flat values, so the receiver's shadow reference matches the displaced
+caster — otherwise the caster-displaced/receiver-flat asymmetry reintroduces self-shadow acne.
+
+**Flashlight routing fix.** The player flashlight is a narrow projected spot with `flashRadius 400`
+(`weapon_flashlight.def`), which tripped the `r_shadowMapStencilRadius` default (255) "oversize → stencil"
+cutoff — a rule meant for giant omni sun-lights. So the flashlight cast a *stencil* (un-tessellatable,
+low-poly) shadow while every other projected light was shadow-mapped. Exempted the flashlight from the
+oversize cutoff (`RhiWorld.cpp`, `!ictx.lightIsFlashlight`) so it takes the 2D-map path and its shadows
+tessellate. Side effect: the flashlight shadow is now a soft shadow-map (with `r_shadowMapFlashlightBias`)
+instead of a hard stencil edge — consistent with all other shadow-mapped lights.
+
+## Roadmap — "deform once, draw everywhere" (the elegant architecture)
+
+The current design **re-runs** PN + displacement in every pass that needs the deformed geometry
+(zfill, interaction, ambient, gbuffer, fog, blend-decal, and now the two shadow-map passes). Each is
+a `DEPTHFUNC_EQUAL`/shared-parms site that must stay bit-for-bit in lockstep — fragile (the fog and
+shadow passes were both silently low-poly until patched), and it does the deform N times per model.
+
+The stronger architecture is **deform once per frame per model, then every pass draws that one
+buffer** with a plain vertex shader — one source of truth, shadows and all passes consistent for
+free, and the per-pass replication (and its depth-EQUAL fragility) retired entirely. It also does
+the deform *once* on the GPU instead of N times, which is the CPU/GPU-offload direction the engine
+wants.
+
+**Chosen mechanism: compute-shader tessellation into a per-frame device-local buffer.** A compute
+shader reads the post-skinning `idDrawVert` ambientCache as an SSBO, runs the same PN + displacement
+math, and writes an expanded (indexed) displaced vertex+index buffer; every pass then draws it via
+`RB_RHI_StreamAmbient` handing back the deform buffer instead of the raw ambientCache. Compute is
+Khronos's endorsed replacement for transform feedback and is the natural foundation for the broader
+GPU-offload roadmap (GPU skinning, GPU culling, GPU shadow-volume extrusion all reuse the same
+compute + SSBO + barrier plumbing).
+
+**Prerequisite the RHI doesn't have yet:** the RHI is deliberately draw-only — no compute pipeline,
+no `vkCmdDispatch`, no `STORAGE_BUFFER` usage, no compute queue, no compute↔graphics barriers, and
+`CreateBuffer` makes only host-visible VERTEX/INDEX/UNIFORM buffers. Building the first **compute
+lane** (dispatch + SSBO usage + a device-local shader-writable buffer path + barrier plumbing in
+`RHI.h`/`VulkanBackend.cpp`) is the gating work. The one real algorithmic cost is re-deriving the
+crack-free PN subdivision topology in a compute kernel (fixed-function tess auto-generates it today).
+
+Transform feedback (`VK_EXT_transform_feedback`) would reuse the existing `.tese` verbatim as the
+deform kernel and is the shortest path to a *prototype* of deform-once, but it rides a deprecated
+extension and emits an unindexed triangle soup — a stepping stone toward the compute design, not the
+destination. Build this when the engine grows its first compute lane; until then, the per-pass
+tessellation (now covering shadow maps + fog) is the shipping approach.

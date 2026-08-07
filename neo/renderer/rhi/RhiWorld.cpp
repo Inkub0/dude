@@ -691,10 +691,11 @@ void RB_RHI_SetTessParms( rhi::RenderParams &parms ) {
 	parms.tessParms[3] = r_tessMinEdge.GetFloat();	// min edge length to subdivide (anti eye-bulge)
 }
 
-// zfill-only: for a tessellated surface, copy the bump stage's texture matrix into
-// parms (so the depth prepass builds the SAME bump texcoord the lit passes displace
-// with) and return the bump image to bind on unit 1. Mirrors R_SetDrawInteraction /
-// the SSAO G-buffer so the displacement is bit-identical → depth-EQUAL holds.
+// For a tessellated surface, copy the bump stage's texture matrix into parms (so the
+// pass builds the SAME bump texcoord the lit passes displace with) and return the bump
+// image to bind (unit 1 in zfill, unit 2 in the fog pass). Mirrors R_SetDrawInteraction /
+// the SSAO G-buffer so the displacement is bit-identical → depth-EQUAL holds. Shared by
+// the zfill prepass and the fog interaction pass.
 static idImage *RB_RHI_TessBumpForZfill( const drawSurf_t *surf, rhi::RenderParams &parms ) {
 	const shaderStage_t *bumpStage = surf->material->GetBumpStage();
 	const float *regs = surf->shaderRegisters;
@@ -1689,6 +1690,18 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		bool perforatedCaster;
 		idImage *coverImage = RB_RHI_SetupCasterCoverage( surf, parms, smCull, perforatedCaster );
 
+		// DUDE tessellation: a PN-tessellated + displaced character must cast from its
+		// DEFORMED surface, or its shadow keeps the low-poly silhouette while the lit
+		// body is rounded. shadow_sm.tese runs the same dudeTessPN + dudeTessDisplace as
+		// zfill, driven by the same global tess params + bump, so the occluder surface
+		// coincides with the receiver's lit surface by construction. GL3 never tessellates.
+		idImage *bumpImg = NULL;
+		const bool tess = RB_RHI_TessellateSurf( surf, false );
+		if ( tess ) {
+			RB_RHI_SetTessParms( parms );
+			bumpImg = RB_RHI_TessBumpForZfill( surf, parms );	// sets bumpMatrix; tese displaces
+		}
+
 		rhi::BufferHandle vb, ib;
 		int vertOfs, idxOfs;
 		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
@@ -1701,8 +1714,12 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		pd.shader = prog;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = smCull;
+		pd.tessellate = tess;
 
 		RB_RHI_BindUnit( 0, coverImage );
+		if ( tess ) {
+			RB_RHI_BindUnit( 1, bumpImg );	// shadow_sm.tese displacement source (unit 0 is coverage)
+		}
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
@@ -1715,8 +1732,7 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
-		RB_RHI_VkTextures( da );		// VK: copy the coverage image (unit 0) into DrawArgs so
-										// shadow_sm's alpha test carves perforated casters' holes
+		RB_RHI_VkTextures( da );		// VK: coverage (unit 0) + bump (unit 1 when tessellating) into DrawArgs
 		r->Draw( da );
 
 		backEnd.pc.c_shadowElements++;
@@ -1926,6 +1942,15 @@ static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, r
 			smCull = CT_FRONT_SIDED;
 		}
 
+		// DUDE tessellation: cast the point-light shadow from the deformed surface too
+		// (same dudeTessPN + dudeTessDisplace as zfill / the lit passes). GL3 never tessellates.
+		idImage *bumpImg = NULL;
+		const bool tess = RB_RHI_TessellateSurf( surf, false );
+		if ( tess ) {
+			RB_RHI_SetTessParms( parms );
+			bumpImg = RB_RHI_TessBumpForZfill( surf, parms );	// sets bumpMatrix; tese displaces
+		}
+
 		rhi::BufferHandle vb, ib;
 		int vertOfs, idxOfs;
 		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
@@ -1938,8 +1963,12 @@ static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, r
 		pd.shader = prog;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = smCull;
+		pd.tessellate = tess;
 
 		RB_RHI_BindUnit( 0, coverImage );
+		if ( tess ) {
+			RB_RHI_BindUnit( 1, bumpImg );	// shadow_sm_cube.tese displacement source (unit 0 is coverage)
+		}
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
@@ -1952,8 +1981,7 @@ static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, r
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
-		RB_RHI_VkTextures( da );		// VK: copy the coverage image (unit 0) into DrawArgs so
-										// shadow_sm_cube's alpha test carves perforated casters' holes
+		RB_RHI_VkTextures( da );		// VK: coverage (unit 0) + bump (unit 1 when tessellating) into DrawArgs
 		r->Draw( da );
 
 		backEnd.pc.c_shadowElements++;
@@ -3921,8 +3949,13 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				const idVec3 &lr = vLight->lightDef->parms.lightRadius;
 				lightMaxAxis = Max( lr.x, Max( lr.y, lr.z ) );
 			}
+			// The player flashlight is a narrow projected spot with flashRadius 400
+			// (weapon_flashlight.def), which trips the 255 default cutoff even though a
+			// single 2D map resolves a bounded cone perfectly — a false positive of a rule
+			// meant for giant omni suns. Exempt it so it takes the (tessellatable) 2D-map
+			// path like every other projected light instead of a low-poly stencil shadow.
 			const bool oversize = smEnabled && smStencilRadius > 0.0f
-			    && lightMaxAxis > smStencilRadius;
+			    && lightMaxAxis > smStencilRadius && !ictx.lightIsFlashlight;
 
 			if ( smEnabled && lightMayShadow && hasInteractions && !oversize ) {
 				if ( !isPoint && !isParallel ) {
@@ -4224,7 +4257,8 @@ fade (S = constant per viewer, T = per-surface top plane).
 */
 static void RB_RHI_FogChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf,
                              rhi::ShaderHandle prog, int stateBits, int cull, const float color[4],
-                             const idPlane &fogPlane0, const idPlane &fogPlane2, float enterS ) {
+                             const idPlane &fogPlane0, const idPlane &fogPlane2, float enterS,
+                             bool allowTess ) {
 	for ( ; surf; surf = surf->nextOnLight ) {
 		const srfTriangles_t *tri = surf->geo;
 		if ( !tri->ambientCache ) {
@@ -4253,6 +4287,19 @@ static void RB_RHI_FogChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSu
 		// unit 1 S: enter fade, constant per viewer
 		parms.texGen1S[3] = enterS;
 
+		// DUDE tessellation: a character/monster surface was PN-tessellated (and
+		// normal-displaced) in the depth prepass, so its z-buffer depth is the
+		// tessellated depth. This fog interaction pass runs at DEPTHFUNC_EQUAL, so
+		// it MUST tessellate the same way (fog.tesc/.tese mirror zfill) or every fog
+		// fragment fails the equal test and the model renders un-fogged — a dark
+		// silhouette in the fog. Never on the frustum-volume fill (allowTess false).
+		idImage *bumpImg = NULL;
+		const bool tess = allowTess && RB_RHI_TessellateSurf( surf, false );
+		if ( tess ) {
+			RB_RHI_SetTessParms( parms );
+			bumpImg = RB_RHI_TessBumpForZfill( surf, parms );	// sets bumpMatrix; fog.tese displaces
+		}
+
 		RB_RHI_SetSurfScissor( r, viewDef, surf );
 
 		rhi::BufferHandle ub;
@@ -4264,12 +4311,16 @@ static void RB_RHI_FogChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSu
 
 		RB_RHI_BindUnit( 0, globalImages->fogImage );
 		RB_RHI_BindUnit( 1, globalImages->fogEnterImage );
+		if ( tess ) {
+			RB_RHI_BindUnit( 2, bumpImg );	// fog.tese displacement source (unit 2; 0/1 are fog textures)
+		}
 
 		rhi::PipelineDesc pd;
 		pd.stateBits = stateBits;
 		pd.shader = prog;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = RB_RHI_CullFor( viewDef, cull );
+		pd.tessellate = tess;
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
@@ -4282,7 +4333,7 @@ static void RB_RHI_FogChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSu
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
-		RB_RHI_VkTextures( da );		// VK: units 0/1 recorded by the binds above
+		RB_RHI_VkTextures( da );		// VK: units 0/1 (+2 bump when tessellating) recorded by the binds above
 		r->Draw( da );
 
 		backEnd.pc.c_drawElements++;
@@ -4345,8 +4396,10 @@ static void RB_RHI_FogLight( rhi::RHI *r, viewDef_t *viewDef, viewLight_t *vLigh
 	rhi::ShaderHandle prog = r->LoadShader( "fog" );
 
 	int stateEqual = GLS_DEPTHMASK | GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA | GLS_DEPTHFUNC_EQUAL;
-	RB_RHI_FogChain( r, viewDef, vLight->globalInteractions, prog, stateEqual, CT_FRONT_SIDED, color, fogPlane0, fogPlane2, enterS );
-	RB_RHI_FogChain( r, viewDef, vLight->localInteractions, prog, stateEqual, CT_FRONT_SIDED, color, fogPlane0, fogPlane2, enterS );
+	// interaction chains run at DEPTHFUNC_EQUAL over real geometry -> allow tessellation
+	// so PN-tessellated models fog against their own (tessellated) depth.
+	RB_RHI_FogChain( r, viewDef, vLight->globalInteractions, prog, stateEqual, CT_FRONT_SIDED, color, fogPlane0, fogPlane2, enterS, true );
+	RB_RHI_FogChain( r, viewDef, vLight->localInteractions, prog, stateEqual, CT_FRONT_SIDED, color, fogPlane0, fogPlane2, enterS, true );
 
 	// the light frustum bounding planes aren't in the depth buffer, so use
 	// DEPTHFUNC_LESS instead of EQUAL and draw the volume's far (back) side
@@ -4356,7 +4409,8 @@ static void RB_RHI_FogLight( rhi::RHI *r, viewDef_t *viewDef, viewLight_t *vLigh
 	ds.geo = frustumTris;
 	ds.scissorRect = viewDef->scissor;
 	int stateLess = GLS_DEPTHMASK | GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA | GLS_DEPTHFUNC_LESS;
-	RB_RHI_FogChain( r, viewDef, &ds, prog, stateLess, CT_BACK_SIDED, color, fogPlane0, fogPlane2, enterS );
+	// the frustum-volume fill is a synthetic worldspace hull, never a tessellated model
+	RB_RHI_FogChain( r, viewDef, &ds, prog, stateLess, CT_BACK_SIDED, color, fogPlane0, fogPlane2, enterS, false );
 }
 
 /*

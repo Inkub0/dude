@@ -50,19 +50,32 @@ void main() {
 
 	var_TexLightVec   = i_TexLightVec[0]   * tc.x + i_TexLightVec[1]   * tc.y + i_TexLightVec[2]   * tc.z;
 	var_TexBump       = i_TexBump[0]       * tc.x + i_TexBump[1]       * tc.y + i_TexBump[2]       * tc.z;
-	var_TexFalloff    = i_TexFalloff[0]    * tc.x + i_TexFalloff[1]    * tc.y + i_TexFalloff[2]    * tc.z;
-	var_TexProjection = i_TexProjection[0] * tc.x + i_TexProjection[1] * tc.y + i_TexProjection[2] * tc.z;
 	var_TexDiffuse    = i_TexDiffuse[0]    * tc.x + i_TexDiffuse[1]    * tc.y + i_TexDiffuse[2]    * tc.z;
 	var_TexSpecular   = i_TexSpecular[0]   * tc.x + i_TexSpecular[1]   * tc.y + i_TexSpecular[2]   * tc.z;
 	var_TexHalfVec    = i_TexHalfVec[0]    * tc.x + i_TexHalfVec[1]    * tc.y + i_TexHalfVec[2]    * tc.z;
 	var_Color         = i_Color[0]         * tc.x + i_Color[1]         * tc.y + i_Color[2]         * tc.z;
 	var_TexViewVec    = i_TexViewVec[0]    * tc.x + i_TexViewVec[1]    * tc.y + i_TexViewVec[2]    * tc.z;
-	var_ShadowCubeVec = i_ShadowCubeVec[0] * tc.x + i_ShadowCubeVec[1] * tc.y + i_ShadowCubeVec[2] * tc.z;
-	var_ShadowProjection = i_ShadowProjection[0] * tc.x + i_ShadowProjection[1] * tc.y + i_ShadowProjection[2] * tc.z;
 
 	// optional normal-map displacement along the interpolated geometric normal
 	vec3 geoN = normalize( i_ModelNormal[0] * tc.x + i_ModelNormal[1] * tc.y + i_ModelNormal[2] * tc.z );
 	pos = dudeTessDisplace( pos, geoN, u_bumpMap, var_TexBump );
+
+	// Recompute the light-space projective quantities from the DISPLACED position rather
+	// than barycentric-interpolating the flat control-vertex values. The shadow-map casters
+	// (shadow_sm.tese / shadow_sm_cube.tese) now write depth from this same displaced surface,
+	// so the receiver's shadow reference (falloff depth, shadow UV, cube light-vector) must be
+	// evaluated there too — interpolating leaves them on the flat surface and the caster/receiver
+	// depths disagree by the displacement (self-shadow acne / peter-panning). All are affine in
+	// position; this mirrors fog.tese / shadow_sm.tese. The cookie (var_TexProjection) and falloff
+	// then also track the displaced surface the fragment is actually rasterized at.
+	vec4 dp = vec4( pos, 1.0 );
+	var_TexFalloff       = vec2( dot( dp, u_lightFalloffS ), 0.5 );
+	var_TexProjection    = vec4( dot( dp, u_lightProjectionS ), dot( dp, u_lightProjectionT ), 0.0, dot( dp, u_lightProjectionQ ) );
+	var_ShadowProjection = vec4( dot( dp, u_shadowProjectionS ), dot( dp, u_shadowProjectionT ), 0.0, dot( dp, u_shadowProjectionQ ) );
+	vec3 fragToLight = pos - u_localLightOrigin.xyz;
+	var_ShadowCubeVec = vec3( dot( u_modelMatrixRow0.xyz, fragToLight ),
+	                          dot( u_modelMatrixRow1.xyz, fragToLight ),
+	                          dot( u_modelMatrixRow2.xyz, fragToLight ) );
 
 	gl_Position = u_mvpMatrix * vec4( pos, 1.0 );
 }
