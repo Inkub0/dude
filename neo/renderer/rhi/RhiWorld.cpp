@@ -589,6 +589,33 @@ bool RB_RHI_TessellateSurf( const drawSurf_s *surfIn, bool forBlendPass ) {
 	if ( !forBlendPass && mat->Coverage() == MC_TRANSLUCENT ) {
 		return false;
 	}
+	// The blend pass tessellates conformal decal overlays (blood on the body) so they
+	// follow the deformed mesh. But a character entity can ALSO carry view-oriented
+	// additive glow/particle surfaces that inherit its model path — e.g. the RoE harvest
+	// "soul" aura, emitted from the corpse material via `deform particle` as
+	// textures/particles/ember_mid. Those are camera-facing sprite quads with degenerate
+	// normals; PN-tessellating + inward-displacing them collapses/clips the quads and the
+	// aura vanishes (Vulkan-only, only when r_tessellation is on — hence GL3 is unaffected).
+	// Blood decals alpha-blend and conform to the mesh; glows/particles are purely additive,
+	// so skip a surface whose ambient stages are ALL additive.
+	if ( forBlendPass ) {
+		bool anyAmbient = false, allAdditive = true;
+		for ( int i = 0; i < mat->GetNumStages(); i++ ) {
+			const shaderStage_t *st = mat->GetStage( i );
+			if ( st->lighting != SL_AMBIENT ) {
+				continue;
+			}
+			anyAmbient = true;
+			if ( ( st->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) )
+			     != ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE ) ) {
+				allAdditive = false;
+				break;
+			}
+		}
+		if ( anyAmbient && allAdditive ) {
+			return false;
+		}
+	}
 	const char *matName = mat->GetName();
 
 	// Characters/monsters only, gated on the ENTITY's model path rather than the
@@ -3359,24 +3386,26 @@ rhi::ImageHandle RB_RHI_HelltimeAccum( rhi::RHI *r, const viewDef_t *viewDef, in
 	// per-level baked params (materials/smf.mtr bloodorb1/2/3). Scales/tints authored per-60fps
 	// frame; framerate-normalise the magnify like berserk. Rotation is a per-frame increment
 	// that accumulates through the recursion (stock `rotate 0.005` is a fixed per-frame spin).
+	// tint = the stock cr_capture colour (the dominant per-level scene tint on the injected
+	// _currentRender), NOT the subtle ac_capture accum tint — that's what colours the whole view.
 	float baseScale = 0.995f;
 	float rotCyclesPerFrame = 0.0f;
 	float tint[3] = { 1.0f, 1.0f, 1.0f };
 	const float sPulse = sinf( (float)timeMs * 0.001f * 0.5f * idMath::TWO_PI );	// stock sintable[time*0.5]
 	switch ( level ) {
 	default:
-	case 0:	// HELLTIME / Artifact — neutral, gentle zoom, no rotation
+	case 0:	// HELLTIME / Artifact — neutral (bloodorb1 cr_capture 1,1,1), gentle zoom, no rotation
 		baseScale = 0.995f;
 		break;
-	case 1:	// BERSERK — warm desaturate, slow spin, subtle scale pulse
+	case 1:	// BERSERK — warm (bloodorb2 cr_capture 1,0.8,0.8), slow spin, subtle scale pulse
 		baseScale = 0.990f + sPulse * 0.004f;
 		rotCyclesPerFrame = 0.005f;
-		tint[0] = 1.0f; tint[1] = 0.98f - sPulse * 0.01f; tint[2] = 0.98f - sPulse * 0.01f;
+		tint[0] = 1.0f; tint[1] = 0.8f; tint[2] = 0.8f;
 		break;
-	case 2:	// INVULNERABILITY — cool, slow spin (single-layer approximation of the 3-layer stock)
+	case 2:	// INVULNERABILITY — red (bloodorb3 cr_capture 0.8,0.5,0.5), slow spin
 		baseScale = 0.995f + sPulse * 0.004f;
 		rotCyclesPerFrame = 0.005f;
-		tint[0] = 1.0f - sPulse * 0.01f; tint[1] = 0.97f; tint[2] = 1.0f;
+		tint[0] = 0.8f; tint[1] = 0.5f; tint[2] = 0.5f;
 		break;
 	}
 
