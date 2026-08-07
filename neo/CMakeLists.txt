@@ -332,6 +332,37 @@ if(DHEWM3_VULKAN)
 		VERBATIM)
 	add_custom_target(shaders_spv ALL DEPENDS ${spv_dir}/.stamp)
 
+	# Runtime GLSL->SPIR-V for custom (mod) ARB material stages on Vulkan. The
+	# GL3 backend gets runtime shader compilation from the driver; Vulkan has no
+	# in-driver GLSL compiler, so without shaderc a custom-ARB stage the offline
+	# builtin table doesn't cover degrades to skip (invisible). Optional so the
+	# leanest publish build can drop the dependency (stock effects then rely on
+	# the builtin table). See docs/mod-dll-compatibility.md / the ARB parity work.
+	option(DUDE_RUNTIME_ARB_COMPILER "Link shaderc for runtime custom-ARB shader compilation on Vulkan (mod shaders)" ON)
+	if(DUDE_RUNTIME_ARB_COMPILER)
+		find_package(PkgConfig QUIET)
+		if(PkgConfig_FOUND)
+			pkg_check_modules(SHADERC IMPORTED_TARGET QUIET shaderc)
+		endif()
+		if(SHADERC_FOUND)
+			list(APPEND vulkan_libs PkgConfig::SHADERC)
+			add_definitions(-DDUDE_HAVE_SHADERC=1)
+			message(STATUS "Vulkan: runtime custom-ARB shader compiler enabled (shaderc via pkg-config)")
+		else()
+			find_path(SHADERC_INCLUDE_DIR shaderc/shaderc.h)
+			find_library(SHADERC_LIBRARY NAMES shaderc_shared shaderc)
+			if(SHADERC_INCLUDE_DIR AND SHADERC_LIBRARY)
+				include_directories(${SHADERC_INCLUDE_DIR})
+				list(APPEND vulkan_libs ${SHADERC_LIBRARY})
+				add_definitions(-DDUDE_HAVE_SHADERC=1)
+				message(STATUS "Vulkan: runtime custom-ARB shader compiler enabled (shaderc: ${SHADERC_LIBRARY})")
+			else()
+				message(STATUS "Vulkan: shaderc not found; custom-ARB (mod) stages degrade to skip on Vulkan "
+				               "(set DUDE_RUNTIME_ARB_COMPILER=OFF to silence)")
+			endif()
+		endif()
+	endif()
+
 	message(STATUS "Vulkan renderer backend enabled (headers: ${Vulkan_INCLUDE_DIRS}; SPIR-V via ${spv_compiler})")
 endif()
 

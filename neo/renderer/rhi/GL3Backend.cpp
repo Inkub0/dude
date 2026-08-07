@@ -464,6 +464,11 @@ public:
 		return GL3_FindProgram( name );
 	}
 
+	// custom (mod) ARB stage: the driver compiles the transpiled GLSL live
+	virtual ShaderHandle CreateShaderFromGlsl( const char *name, const char *vertSrc, const char *fragSrc ) {
+		return GL3_FindProgramFromSource( name, vertSrc, fragSrc );
+	}
+
 	// ---- offscreen render targets ----
 	virtual RenderTargetHandle CreateRenderTarget( ImageFormat fmt, int w, int h ) {
 		if ( !initialized || w <= 0 || h <= 0 ) {

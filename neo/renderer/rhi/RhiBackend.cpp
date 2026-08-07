@@ -1415,12 +1415,35 @@ static void RB_RHI_RenderCustomStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		ap.vlocal[i][3] = regs[ns->vertexParms[i][3]];
 	}
 
-	// fragment program images by unit
-	for ( int i = 0; i < ns->numFragmentProgramImages; i++ ) {
-		if ( ns->fragmentProgramImages[i] ) {
+	// fragment program images by unit. On Vulkan the qgl* active-unit binds are
+	// NULL no-ops, so the images must reach the shader through DrawArgs.textures
+	// (with the same _currentRender capture guard the builtin-ARB path uses); on
+	// GL3 they still bind through idImage's active-unit path as before.
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	const bool vk = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	for ( int i = 0; i < ns->numFragmentProgramImages && i < 8; i++ ) {
+		idImage *img = ns->fragmentProgramImages[i];
+		if ( !img ) {
+			continue;
+		}
+		if ( vk ) {
+			if ( img == globalImages->currentRenderImage || img == globalImages->currentDepthImage
+			     || img == globalImages->scratchImage || img == globalImages->scratchImage2
+			     || img == globalImages->accumImage ) {
+				if ( !img->rhiCaptured || !img->rhiHandle ) {
+					RB_RHI_LogOnce( "VK: custom-ARB stage sampling a never-captured image skipped" );
+					return;
+				}
+				da.textures[i] = img->rhiHandle;
+			} else {
+				img->Bind();	// upload trigger only under Vulkan
+				da.textures[i] = img->rhiHandle;
+			}
+		} else {
 			rhi::gl3ActiveTexture( GL_TEXTURE0 + i );
 			backEnd.glState.currenttmu = i;
-			ns->fragmentProgramImages[i]->Bind();
+			img->Bind();
 		}
 	}
 
@@ -1437,8 +1460,6 @@ static void RB_RHI_RenderCustomStage( rhi::RHI *r, const viewDef_t *viewDef, con
 	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
 	r->BindPipeline( pd );
 
-	rhi::DrawArgs da;
-	memset( &da, 0, sizeof( da ) );
 	da.vertexBuffer = vb;
 	da.vertexOffset = vertOfs;
 	da.indexBuffer = ib;

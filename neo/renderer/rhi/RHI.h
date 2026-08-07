@@ -175,6 +175,15 @@ public:
 
 	virtual ShaderHandle	LoadShader( const char *name ) = 0;	// loads name.vert/.frag via VFS
 
+	// Compile a transpiled vertex+fragment GLSL body pair (as emitted by
+	// arb::ToGlsl — no #version/prelude line) into a linked program, cached by
+	// name. GL3 compiles through the driver (GL3_FindProgramFromSource); Vulkan
+	// through shaderc when built with DUDE_HAVE_SHADERC. Returns 0 when the
+	// backend has no runtime compiler (Vulkan without shaderc), so the caller
+	// degrades the stage. Used for custom (mod) ARB material stages the offline
+	// builtin table doesn't cover.
+	virtual ShaderHandle	CreateShaderFromGlsl( const char *name, const char *vertSrc, const char *fragSrc ) { return 0; }
+
 	// ---- offscreen render targets (Phase 3.5 shadow maps; Phase 11 post stack) ----
 	// Create an offscreen target and its backing texture. A depth format makes a
 	// depth-only target (no color attachment) suitable for shadow maps, sampled

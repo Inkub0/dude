@@ -34,6 +34,11 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 
 #include <vulkan/vulkan.h>
 
+#ifdef DUDE_HAVE_SHADERC
+// runtime GLSL->SPIR-V for custom (mod) ARB material stages (CreateShaderFromGlsl)
+#include <shaderc/shaderc.h>
+#endif
+
 // VMA implementation lives in this TU (header-only, vendored at libs/vma/).
 // We link the real loader and compile with prototypes, so VMA can call the
 // API statically. The pragmas keep its (vendored) warnings out of our build.
@@ -134,6 +139,7 @@ public:
 	virtual ImageHandle		CreateTextureCube( int size, const void * const pics[6],
 	                                           int textureFilter, bool allowMips );
 	virtual ShaderHandle	LoadShader( const char *name );
+	virtual ShaderHandle	CreateShaderFromGlsl( const char *name, const char *vertSrc, const char *fragSrc );
 
 	// M7 render-target family. Live: depth targets (2D + cube shadow maps),
 	// color-only + color+depth-stencil targets (the HDR RGBA16F scene buffer and
@@ -2725,6 +2731,184 @@ ShaderHandle VulkanBackend::LoadShader( const char *name ) {
 	}
 	shaderTable.push_back( rec );
 	return rec.failed ? 0 : (ShaderHandle)shaderTable.size();
+}
+
+/*
+====================
+VulkanBackend::CreateShaderFromGlsl
+
+Runtime GLSL->SPIR-V for custom (mod) ARB material stages: arb::ToGlsl emits
+backend-neutral GLSL (SAMPLER_BINDING/VARY/UBO_BINDING macros, #include
+"arbparams.glsl"), which this compiles for Vulkan exactly the way the offline
+compile_spv.py builds the builtins — prepend prelude.vk.glsl, inject
+`invariant gl_Position;` for the vertex stage, textually resolve #include,
+compile with shaderc (target vulkan1.4). Cached in shaderTable by name so a
+material's program is compiled once. Without DUDE_HAVE_SHADERC this returns 0
+and the caller degrades the stage (SK_SKIP) — the pre-shaderc behaviour.
+====================
+*/
+#ifdef DUDE_HAVE_SHADERC
+// Read a shader source file (prelude / #include target) the same way the GL3
+// loader does: VFS "shaders/<file>" first (moddable), then the source tree.
+static bool VK_ReadShaderSource( const char *fileName, idStr &out ) {
+	void *buf = NULL;
+	int len = fileSystem->ReadFile( va( "shaders/%s", fileName ), &buf, NULL );
+	if ( len >= 0 && buf ) {
+		out.Clear();
+		out.Append( (const char *)buf, len );
+		fileSystem->FreeFile( buf );
+		return true;
+	}
+#ifdef DUDE_SHADER_SOURCE_DIR
+	FILE *f = fopen( va( "%s/%s", DUDE_SHADER_SOURCE_DIR, fileName ), "rb" );
+	if ( f ) {
+		fseek( f, 0, SEEK_END );
+		long size = ftell( f );
+		fseek( f, 0, SEEK_SET );
+		if ( size > 0 ) {
+			char *text = (char *)malloc( size );
+			if ( text && fread( text, 1, size, f ) == (size_t)size ) {
+				out.Clear();
+				out.Append( text, size );
+				free( text );
+				fclose( f );
+				return true;
+			}
+			free( text );
+		}
+		fclose( f );
+	}
+#endif
+	return false;
+}
+
+// Textually resolve #include "file" in an in-memory body, recursively —
+// mirrors compile_spv.py's expand_includes and the GL3 loader, so a
+// runtime-compiled transpiled program sees the same arbparams.glsl the offline
+// builtins do (the driver/shaderc never sees the #include directive itself).
+static bool VK_ExpandIncludes( const char *body, idStr &out, int depth ) {
+	if ( depth > 8 ) {
+		common->Warning( "VK shaderc: #include depth > 8 (cycle?)" );
+		return false;
+	}
+	const char *p = body;
+	while ( *p ) {
+		const char *nl = strchr( p, '\n' );
+		const char *lineEnd = nl ? nl : p + strlen( p );
+		const char *s = p;
+		while ( s < lineEnd && ( *s == ' ' || *s == '\t' ) ) {
+			s++;
+		}
+		if ( lineEnd - s >= 8 && idStr::Cmpn( s, "#include", 8 ) == 0 ) {
+			const char *q1 = (const char *)memchr( s, '"', lineEnd - s );
+			const char *q2 = q1 ? (const char *)memchr( q1 + 1, '"', lineEnd - ( q1 + 1 ) ) : NULL;
+			if ( !q1 || !q2 ) {
+				common->Warning( "VK shaderc: malformed #include" );
+				return false;
+			}
+			idStr inc;
+			inc.Append( q1 + 1, (int)( q2 - q1 - 1 ) );
+			idStr incText;
+			if ( !VK_ReadShaderSource( inc.c_str(), incText ) ) {
+				common->Warning( "VK shaderc: couldn't read include shaders/%s", inc.c_str() );
+				return false;
+			}
+			if ( !VK_ExpandIncludes( incText.c_str(), out, depth + 1 ) ) {
+				return false;
+			}
+			out.Append( "\n", 1 );
+		} else {
+			out.Append( p, (int)( lineEnd - p ) );
+			if ( nl ) {
+				out.Append( "\n", 1 );
+			}
+		}
+		if ( !nl ) {
+			break;
+		}
+		p = nl + 1;
+	}
+	return true;
+}
+
+static bool VK_CompileGlslToSpv( const char *name, const char *body, shaderc_shader_kind kind, std::vector<uint32_t> &out ) {
+	idStr prelude;
+	if ( !VK_ReadShaderSource( "prelude.vk.glsl", prelude ) ) {
+		common->Warning( "VK shaderc: missing shaders/prelude.vk.glsl" );
+		return false;
+	}
+	idStr full = prelude;
+	full.Append( "\n", 1 );
+	if ( kind == shaderc_vertex_shader ) {
+		// multi-pass depth invariance, exactly as compile_spv.py injects it
+		full += "invariant gl_Position;\n";
+	}
+	if ( !VK_ExpandIncludes( body, full, 0 ) ) {
+		return false;
+	}
+
+	shaderc_compiler_t comp = shaderc_compiler_initialize();
+	shaderc_compile_options_t opts = shaderc_compile_options_initialize();
+	shaderc_compile_options_set_target_env( opts, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_4 );
+	shaderc_compile_options_set_source_language( opts, shaderc_source_language_glsl );
+	shaderc_compilation_result_t res = shaderc_compile_into_spv(
+	    comp, full.c_str(), (size_t)full.Length(), kind, name, "main", opts );
+	bool ok = shaderc_result_get_compilation_status( res ) == shaderc_compilation_status_success;
+	if ( !ok ) {
+		common->Warning( "VK shaderc: %s failed:\n%s", name, shaderc_result_get_error_message( res ) );
+	} else {
+		const uint32_t *code = (const uint32_t *)shaderc_result_get_bytes( res );
+		size_t words = shaderc_result_get_length( res ) / sizeof( uint32_t );
+		out.assign( code, code + words );
+	}
+	shaderc_result_release( res );
+	shaderc_compile_options_release( opts );
+	shaderc_compiler_release( comp );
+	return ok;
+}
+#endif	// DUDE_HAVE_SHADERC
+
+ShaderHandle VulkanBackend::CreateShaderFromGlsl( const char *name, const char *vertSrc, const char *fragSrc ) {
+#ifdef DUDE_HAVE_SHADERC
+	if ( device == VK_NULL_HANDLE || name == NULL || name[0] == '\0' || vertSrc == NULL || fragSrc == NULL ) {
+		return 0;
+	}
+	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
+		if ( shaderTable[i].name.Icmp( name ) == 0 ) {
+			return shaderTable[i].failed ? 0 : (ShaderHandle)( i + 1 );
+		}
+	}
+
+	ShaderRec rec;
+	rec.name = name;
+
+	std::vector<uint32_t> vertSpv, fragSpv;
+	if ( !VK_CompileGlslToSpv( name, vertSrc, shaderc_vertex_shader, vertSpv )
+	  || !VK_CompileGlslToSpv( name, fragSrc, shaderc_fragment_shader, fragSpv ) ) {
+		rec.failed = true;
+		shaderTable.push_back( rec );
+		return 0;
+	}
+
+	VkShaderModuleCreateInfo mi = {};
+	mi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	mi.codeSize = vertSpv.size() * sizeof( uint32_t );
+	mi.pCode = vertSpv.data();
+	bool ok = vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.vert ), va( "vkCreateShaderModule(%s.vert)", name ) );
+	mi.codeSize = fragSpv.size() * sizeof( uint32_t );
+	mi.pCode = fragSpv.data();
+	ok = ok && vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.frag ), va( "vkCreateShaderModule(%s.frag)", name ) );
+	if ( !ok ) {
+		if ( rec.vert ) { vkDestroyShaderModule( device, rec.vert, NULL ); rec.vert = VK_NULL_HANDLE; }
+		if ( rec.frag ) { vkDestroyShaderModule( device, rec.frag, NULL ); rec.frag = VK_NULL_HANDLE; }
+		rec.failed = true;
+	}
+	shaderTable.push_back( rec );
+	return rec.failed ? 0 : (ShaderHandle)shaderTable.size();
+#else
+	(void)name; (void)vertSrc; (void)fragSrc;
+	return 0;
+#endif
 }
 
 /*

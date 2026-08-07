@@ -71,37 +71,28 @@ static bool IR_TranspileSection( const char *fileName, const char *header, std::
 =============
 IR_ResolveCustomArb
 
-vp/fp glprogs file names -> linked GL3 program (cached), 0 on failure.
+vp/fp glprogs file names -> linked program (cached), 0 on failure.
+
+One path for both backends: the ARB assembly is transpiled to backend-neutral
+GLSL (arb::ToGlsl) and handed to the RHI, which compiles it — GL3 through the
+driver, Vulkan through shaderc (DUDE_HAVE_SHADERC). Vulkan without a runtime
+compiler returns 0, and the caller degrades the stage (SK_SKIP).
 =============
 */
 static ShaderHandle IR_ResolveCustomArb( const char *vpFile, const char *fpFile, const char *materialName ) {
 	std::string vertGlsl, fragGlsl;
 	idStr err;
 
-	// DUDE Phase 4 M2: the Vulkan backend has no runtime GLSL→SPIR-V compiler
-	// (SPIR-V is built at build time), so transpiled custom ARB programs can't
-	// be materialized there yet — degrade to the generic stage (the caller's
-	// existing fallback). Runtime shader compilation is planned with the
-	// _currentRender effects (M5).
-	if ( GetActiveBackendType() == BT_VULKAN ) {
-		static bool warned = false;
-		if ( !warned ) {
-			warned = true;
-			common->Printf( "VK IR: custom ARB stages degrade to generic until runtime SPIR-V lands (M5)\n" );
-		}
-		return 0;
-	}
-
 	if ( !IR_TranspileSection( vpFile, "!!ARBvp", vertGlsl, err ) ) {
-		common->Warning( "GL3 IR: %s: vertex program %s: %s", materialName, vpFile, err.c_str() );
+		common->Warning( "IR: %s: vertex program %s: %s", materialName, vpFile, err.c_str() );
 		return 0;
 	}
 	if ( !IR_TranspileSection( fpFile, "!!ARBfp", fragGlsl, err ) ) {
-		common->Warning( "GL3 IR: %s: fragment program %s: %s", materialName, fpFile, err.c_str() );
+		common->Warning( "IR: %s: fragment program %s: %s", materialName, fpFile, err.c_str() );
 		return 0;
 	}
 
-	return GL3_FindProgramFromSource( va( "arb/%s+%s", vpFile, fpFile ), vertGlsl.c_str(), fragGlsl.c_str() );
+	return GetRHI()->CreateShaderFromGlsl( va( "arb/%s+%s", vpFile, fpFile ), vertGlsl.c_str(), fragGlsl.c_str() );
 }
 
 /*
@@ -204,10 +195,12 @@ static MaterialIR *IR_Build( const idMaterial *material ) {
 				} else if ( vk ) {
 					// a newStage has no stage image (its textures live in
 					// fragmentProgramImages), so the generic fallback comes out
-					// solid white — skip the stage entirely until runtime
-					// SPIR-V lands (the d3xp flip); invisible beats a white square
+					// solid white — skip the stage entirely. Reached only when
+					// the runtime compiler is unavailable (built without
+					// DUDE_HAVE_SHADERC) or a shaderc compile failed; invisible
+					// beats a white square.
 					s.kind = SK_SKIP;
-					common->Printf( "VK IR: %s: stage %d custom ARB skipped (no builtin translation, runtime SPIR-V pending)\n", material->GetName(), i );
+					common->Printf( "VK IR: %s: stage %d custom ARB skipped (no builtin, runtime compile unavailable/failed)\n", material->GetName(), i );
 				} else {
 					// degrade, don't crash: draw as a plain generic stage
 					common->Printf( "GL3 IR: %s: stage %d custom ARB degraded to generic\n", material->GetName(), i );

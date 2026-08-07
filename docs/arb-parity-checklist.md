@@ -11,8 +11,8 @@ Legend: ✅ ported · ⚠️ ported but verify against ARB · ❌ missing/degrad
 
 | Mechanism | GL3 | VK | Notes |
 |-----------|-----|----|-------|
-| GlassWarp (`TG_GLASSWARP`) | ❌ | ❌ | `MaterialIR.cpp:242`. **0 stock materials use it** — dormant SDK path, only a mod could trigger. |
-| Custom (non-stock) ARB stages | ✅ transpiled | ❌ skip | VK has no runtime SPIR-V compiler (`MaterialIR.cpp:86`); d3xp/mod customs invisible. Stock base+ROE customs hand-translated to builtins. |
+| GlassWarp (`TG_GLASSWARP`) | ❌ | ❌ | `MaterialIR.cpp:242`. **0 stock materials use it** — dormant SDK path, only a mod could trigger. Not a custom-ARB program (it's a texgen), so the gap-#2 runtime compiler doesn't cover it. |
+| Custom (non-stock) ARB stages | ✅ transpiled | ✅ transpiled (shaderc) | **Gap #2 FIXED.** VK now runtime-compiles the transpiled ARB→GLSL via shaderc (`DUDE_RUNTIME_ARB_COMPILER`, default on). Covers stock d3xp (bloodOrb1/2/3, enviroSuit, flare, motionBlur) **and** arbitrary mod ARB shaders. Built without shaderc → degrades to skip as before. See the gap-#2 note below. |
 
 ## Verification checklist (ported — confirm it matches ARB)
 
@@ -29,6 +29,41 @@ Legend: ✅ ported · ⚠️ ported but verify against ARB · ❌ missing/degrad
 | 9 | Portal sky (`_currentRender` + `screen` texgen → `portalsky` builtin) | **ROE only** | `textures/smf/portal_sky`; **base D3 has ZERO `info_portalSky`** (mars_city1 is enclosed; its "portals" are visportals). ROE maps: **phobos1/2/3**, deltax, hell (`devmap game/phobos1`). Not gap #2 — ARB-program version is commented out, uses fixed-function `screen` texgen. | ✅ | ✅ | ✅ good (phobos3) |
 | 10 | Soft particles | depth-fade | steam/smoke fading against geometry (Recycling) | ✅ | ✅ | ✅ good |
 | 11 | Berserk vision | — | ✅ fixed (radial zoom-blur port) | ✅ | ✅ | done |
+
+## Gap #2 — custom ARB stages on Vulkan (FIXED)
+
+d3xp/mod materials with a custom `vertexProgram`/`fragmentProgram` rendered
+**invisible** on the Vulkan backend: `IR_ResolveCustomArb` returned 0 on VK (no
+runtime GLSL→SPIR-V compiler) and `IR_VkBuiltinForArb` only mapped the
+hand-translated `heatHaze`/`colorProcess` builtins, so every other custom `.vfp`
+became `SK_SKIP`. GL3 was never affected (it transpiles + driver-compiles at
+runtime).
+
+**Fix (shipped):** a runtime GLSL→SPIR-V path on the Vulkan backend via **shaderc**
+(`DUDE_RUNTIME_ARB_COMPILER`, default on; degrades to the old skip when built
+without it). It reuses the existing ARB→GLSL transpiler (`arb::ToGlsl`), which
+already emits backend-neutral GLSL (`SAMPLER_BINDING`/`VARY`/`UBO_BINDING` +
+`#include "arbparams.glsl"`), so one path now serves both backends:
+
+- `RHI::CreateShaderFromGlsl(name, vertSrc, fragSrc)` — new virtual. GL3 forwards
+  to `GL3_FindProgramFromSource` (driver compile); Vulkan compiles via shaderc with
+  the **same** preprocessing `compile_spv.py` uses (prepend `prelude.vk.glsl`,
+  inject `invariant gl_Position;` for the vertex stage, textually expand `#include`,
+  target `vulkan1.4`) and caches in `shaderTable` exactly like `LoadShader`.
+- `IR_ResolveCustomArb` is now backend-agnostic (transpile → `CreateShaderFromGlsl`);
+  the VK builtin table is still tried first, and `SK_SKIP` only remains as the
+  no-runtime-compiler fallback.
+- `RB_RHI_RenderCustomStage` binds `fragmentProgramImages` into `DrawArgs.textures[]`
+  on Vulkan (the `qgl*` active-unit binds are no-ops there) with the `_currentRender`
+  capture guard; GL3's active-unit path is unchanged.
+
+**Covers:** the stock RoE effects — Artifact/Heart-of-Hell blood-orb (`bloodOrb1/2/3`),
+hell-time directional `motionBlur`, `enviroSuit` visor warp, glass `flare` — **and**
+arbitrary mod ARB shaders. The generic `ArbParams` fill already supplies every uniform
+these programs read (`fenv[0]`, `fenv[1]`, `vlocal[1]`), so even motionBlur needs no
+per-program plumbing. **Not covered:** `TG_GLASSWARP` (a texgen, not a custom program;
+0 stock users). **Verify in-game:** ROE on the **Vulkan** backend — Artifact use
+(blood-orb + hell-time blur), an enviro-suit section, glass flares around lights.
 
 ## Bugs found during testing
 
