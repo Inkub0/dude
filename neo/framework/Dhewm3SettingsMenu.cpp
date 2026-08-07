@@ -2068,9 +2068,10 @@ static void DrawVideoOptionsMenu()
 	ImGui::Spacing();
 
 	// Renderer backend selection (DUDE). Changing this only takes effect after a
-	// vid_restart. "opengl" is the legacy, vanilla-faithful ARB2 path; "opengl3"
-	// is the GL 3.3 core backend that enables the Enhancements tab. Vulkan is not
-	// implemented yet.
+	// renderer restart. "opengl" is the legacy, vanilla-faithful ARB2 path; "opengl3"
+	// is the GL 3.3 core backend and "vulkan" is the Vulkan backend — both route through
+	// the RHI and enable the Enhancements tab (Vulkan additionally unlocks Vulkan-only
+	// features like GPU tessellation).
 	ImGui::SeparatorText( "Renderer Backend" );
 	{
 		const char* curAPI = r_graphicsAPI.GetString();
@@ -2086,28 +2087,40 @@ static void DrawVideoOptionsMenu()
 		AddTooltip( "Faithful to vanilla Doom 3. Graphical enhancements are disabled." );
 		ImGui::SameLine();
 		ImGui::RadioButton( "OpenGL 3.3 Core", &backendSel, 1 );
-		AddTooltip( "Modern GL 3.3 core backend (in development). Enables the Enhancements tab." );
+		AddTooltip( "Modern GL 3.3 core backend. Enables the Enhancements tab." );
 		ImGui::SameLine();
+#ifdef DHEWM3_VULKAN
+		ImGui::RadioButton( "Vulkan", &backendSel, 2 );
+		AddTooltip( "Vulkan backend. Enables the Enhancements tab plus Vulkan-only features (GPU tessellation)." );
+#else
+		// this build was compiled without the Vulkan backend
 		ImGui::BeginDisabled();
-		ImGui::RadioButton( "Vulkan (coming soon)", &backendSel, 2 );
+		ImGui::RadioButton( "Vulkan (not built)", &backendSel, 2 );
 		ImGui::EndDisabled();
+		AddTooltip( "This build was compiled without the Vulkan backend (-DDHEWM3_VULKAN=OFF)." );
+#endif
 
 		if ( backendSel != oldSel ) {
-			// only legacy and opengl3 are selectable; vulkan radio is disabled
-			r_graphicsAPI.SetString( backendSel == 1 ? "opengl3" : "opengl" );
+			const char* apiName = ( backendSel == 2 ) ? "vulkan"
+			                    : ( backendSel == 1 ) ? "opengl3" : "opengl";
+			r_graphicsAPI.SetString( apiName );
 		}
 
-		// if the selected backend differs from the one currently running, offer to
-		// apply it (a full renderer restart). glConfig.coreProfile reflects reality.
-		const bool runningIsCore = glConfig.coreProfile;
-		const bool selectedIsCore = ( idStr::Icmp( r_graphicsAPI.GetString(), "opengl3" ) == 0 );
-		if ( runningIsCore != selectedIsCore ) {
+		// If the selected backend differs from the one actually running, offer to apply
+		// it. Running backend from glConfig: rhiBackend is true for GL3+Vulkan, coreProfile
+		// is GL3-only (Vulkan keeps rhiBackend true with coreProfile false — RenderSystem.h).
+		const int runningSel = !glConfig.rhiBackend ? 0 : ( glConfig.coreProfile ? 1 : 2 );
+		if ( backendSel != runningSel ) {
 			ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
 				"Backend change pending - restart the renderer to apply it." );
 			if ( ImGui::Button( "Apply Backend (restart renderer)" ) ) {
 				cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "vid_restart\n" );
 			}
 			AddTooltip( "Runs 'vid_restart' to recreate the renderer with the selected backend." );
+			if ( backendSel == 2 || runningSel == 2 ) {
+				ImGui::TextDisabled( "Switching to/from Vulkan: if the UI or cursor vanishes after Apply, fully "
+					"quit and relaunch (the setting is saved)." );
+			}
 		}
 	}
 
