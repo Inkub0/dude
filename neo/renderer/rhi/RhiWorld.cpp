@@ -209,7 +209,7 @@ static int RB_RHI_CountLightChain( const drawSurf_t *surf ) {
 // Vulkan (Phase 4 M3): RB_RHI_BindUnit records image handles here instead of
 // touching GL; RB_RHI_VkTextures copies them into a draw's DrawArgs. Handles
 // persist across draws exactly like GL binds do.
-static rhi::ImageHandle rhiVkUnits[12];	// units 0-7 + shadow cube 8 + SSAO 9 + occlusion 10 + parallax 11
+static rhi::ImageHandle rhiVkUnits[13];	// units 0-7 + shadow cube 8 + SSAO 9 + occlusion 10 + parallax 11 + dynamic shadow cube 12
 
 static void RB_RHI_VkTextures( rhi::DrawArgs &da ) {
 	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
@@ -222,6 +222,7 @@ static void RB_RHI_VkTextures( rhi::DrawArgs &da ) {
 	da.ssao = rhiVkUnits[9];
 	da.occlusion = rhiVkUnits[10];
 	da.parallax = rhiVkUnits[11];
+	da.shadowCubeDyn = rhiVkUnits[12];
 }
 
 static void RB_RHI_ForgetTexBinds() {

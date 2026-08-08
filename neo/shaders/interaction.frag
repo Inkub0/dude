@@ -14,7 +14,8 @@ SAMPLER_BINDING(7) uniform sampler2DShadow u_shadowMap; // 2D depth map (project
 SAMPLER_BINDING(8) uniform samplerCubeShadow u_shadowCube; // cube depth map (point light)
 SAMPLER_BINDING(9) uniform sampler2D u_ssao;            // DUDE GTAO buffer (R = ambient visibility)
 SAMPLER_BINDING(10) uniform sampler2D u_occlusionMap;   // DUDE baked AO map (R = visibility)
-SAMPLER_BINDING(11) uniform sampler2D u_parallaxMap;    // DUDE parallax height map (R = height)
+SAMPLER_BINDING(11) uniform sampler2D u_parallaxMap;
+SAMPLER_BINDING(12) uniform samplerCubeShadow u_shadowCubeDyn; // DUDE static/dynamic split (lever B): movers-only cube    // DUDE parallax height map (R = height)
 
 VARY(0) in vec3 var_TexLightVec;
 VARY(1) in vec2 var_TexBump;
@@ -37,6 +38,39 @@ layout(location = 0) out vec4 fragColor;
 //   2 = point/omni: cube map, indexed by the world-space light->frag direction
 //       (var_ShadowCubeVec), reference = radial distance / range
 // Hardware depth-compare sampler (2x2 PCF); the 2D path adds a 4-tap Poisson spread.
+// Sample one point-light shadow cube by direction L with radial reference ref (dist = |L|).
+// Hardware 2x2 depth-compare, optionally widened to a disc PCF (u_specularParms.w taps).
+// Factored out so the static and dynamic (lever B) cubes filter identically. 0 = shadowed, 1 = lit.
+float sampleCubeShadow( samplerCubeShadow cube, vec3 L, float ref, float dist ) {
+	int taps = int( u_specularParms.w + 0.5 );
+	if ( taps <= 1 ) {
+		return texture( cube, vec4( L, ref ) );		// single hardware 2x2 tap
+	}
+	// Disc PCF: perturb L within its tangent plane by a few texels' worth of angle and average.
+	vec3 up = abs( L.y ) < 0.99 ? vec3( 0.0, 1.0, 0.0 ) : vec3( 1.0, 0.0, 0.0 );
+	vec3 tx = normalize( cross( up, L ) );
+	vec3 ty = cross( L, tx ) / dist;	// tx is unit and perpendicular to L, so |cross| == dist
+	float r = 4.0 * dist * u_shadowParms.y;	// one cube texel (2*dist/res) * ~2 texels spread
+
+	const vec2 disc16[16] = vec2[16](
+		vec2( -0.94201624, -0.39906216 ), vec2(  0.94558609, -0.76890725 ),
+		vec2( -0.09418410, -0.92938870 ), vec2(  0.34495938,  0.29387760 ),
+		vec2( -0.91588581,  0.45771432 ), vec2( -0.81544232, -0.87912464 ),
+		vec2( -0.38277543,  0.27676845 ), vec2(  0.97484398,  0.75648379 ),
+		vec2(  0.44323325, -0.97511554 ), vec2(  0.53742981, -0.47373420 ),
+		vec2( -0.26496911, -0.41893023 ), vec2(  0.79197514,  0.19090188 ),
+		vec2( -0.24188840,  0.99706507 ), vec2( -0.81409955,  0.91437590 ),
+		vec2(  0.19984126,  0.78641367 ), vec2(  0.14383161, -0.14100790 ) );
+
+	vec3 txr = tx * r;
+	vec3 tyr = ty * r;
+	float sum = 0.0;
+	for ( int i = 0; i < taps; i++ ) {
+		sum += texture( cube, vec4( L + txr * disc16[i].x + tyr * disc16[i].y, ref ) );
+	}
+	return sum / float( taps );
+}
+
 float shadowVisibility() {
 	if ( u_shadowParms.x == 0.0 ) {
 		return 1.0;
@@ -59,38 +93,14 @@ float shadowVisibility() {
 		vec3 L = var_ShadowCubeVec;
 		float dist = length( L );
 		float ref = dist / max( u_shadowParms.w, 1.0 ) - depthBias;
-
-		int taps = int( u_specularParms.w + 0.5 );		// cube PCF tap count (r_shadowMapCubePcf)
-		if ( taps <= 1 ) {
-			return texture( u_shadowCube, vec4( L, ref ) );	// single hardware 2x2 tap
+		float vis = sampleCubeShadow( u_shadowCube, L, ref, dist );
+		// DUDE static/dynamic split (lever B): when this light has a dynamic (movers-only) cube
+		// layer, min the two — the nearest occluder across both is identical to one combined cube.
+		// u_pbrParms2.z = hasDynamicLayer (0 = no dynamic layer -> the second sample is skipped).
+		if ( u_pbrParms2.z > 0.5 ) {
+			vis = min( vis, sampleCubeShadow( u_shadowCubeDyn, L, ref, dist ) );
 		}
-
-		// Disc PCF: the cube is sampled by direction, so perturb L within its tangent
-		// plane by a few texels' worth of angle and average the hardware taps. One cube
-		// texel spans ~2*dist/res in world tangent units (a face covers +/-dist at its
-		// edge); spread ~2 texels to soften the stair-stepped edge without leaking.
-		vec3 up = abs( L.y ) < 0.99 ? vec3( 0.0, 1.0, 0.0 ) : vec3( 1.0, 0.0, 0.0 );
-		vec3 tx = normalize( cross( up, L ) );
-		vec3 ty = cross( L, tx ) / dist;	// tx is unit and perpendicular to L, so |cross| == dist
-		float r = 4.0 * dist * u_shadowParms.y;	// one cube texel (2*dist/res) * ~2 texels spread
-
-		const vec2 disc16[16] = vec2[16](
-			vec2( -0.94201624, -0.39906216 ), vec2(  0.94558609, -0.76890725 ),
-			vec2( -0.09418410, -0.92938870 ), vec2(  0.34495938,  0.29387760 ),
-			vec2( -0.91588581,  0.45771432 ), vec2( -0.81544232, -0.87912464 ),
-			vec2( -0.38277543,  0.27676845 ), vec2(  0.97484398,  0.75648379 ),
-			vec2(  0.44323325, -0.97511554 ), vec2(  0.53742981, -0.47373420 ),
-			vec2( -0.26496911, -0.41893023 ), vec2(  0.79197514,  0.19090188 ),
-			vec2( -0.24188840,  0.99706507 ), vec2( -0.81409955,  0.91437590 ),
-			vec2(  0.19984126,  0.78641367 ), vec2(  0.14383161, -0.14100790 ) );
-
-		vec3 txr = tx * r;
-		vec3 tyr = ty * r;
-		float sum = 0.0;
-		for ( int i = 0; i < taps; i++ ) {
-			sum += texture( u_shadowCube, vec4( L + txr * disc16[i].x + tyr * disc16[i].y, ref ) );
-		}
-		return sum / float( taps );
+		return vis;
 	}
 	if ( var_ShadowProjection.w <= 0.0 ) {
 		return 1.0;						// behind the light apex -> lit

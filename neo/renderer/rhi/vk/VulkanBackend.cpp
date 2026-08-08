@@ -2131,8 +2131,8 @@ bool VulkanBackend::CreateM2Resources() {
 	// occlusion map at 10, parallax height map at 11 (interaction declares 9/10/11;
 	// dummies bound where a shader doesn't sample them)
 	{
-		VkDescriptorSetLayoutBinding b[12] = {};
-		for ( int i = 0; i < 12; i++ ) {
+		VkDescriptorSetLayoutBinding b[13] = {};
+		for ( int i = 0; i < 13; i++ ) {
 			b[i].binding = (uint32_t)i;
 			b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 			b[i].descriptorCount = 1;
@@ -2140,7 +2140,7 @@ bool VulkanBackend::CreateM2Resources() {
 		}
 		VkDescriptorSetLayoutCreateInfo li = {};
 		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-		li.bindingCount = 12;
+		li.bindingCount = 13;
 		li.pBindings = b;
 		if ( !vkCheck( vkCreateDescriptorSetLayout( device, &li, NULL, &setLayoutTex ), "vkCreateDescriptorSetLayout(tex)" ) ) {
 			return false;
@@ -2195,7 +2195,7 @@ bool VulkanBackend::CreateM2Resources() {
 	// for repeated texture combinations, which is the common case and avoids
 	// the per-frame allocation churn that otherwise stresses the pool.
 	{
-		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * 12 * 4 };
+		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * 13 * 4 };
 		VkDescriptorPoolCreateInfo pci = {};
 		pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		pci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
@@ -5437,6 +5437,7 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 		mixKey( key, (uint32_t)args.ssao );
 		mixKey( key, (uint32_t)args.occlusion );
 		mixKey( key, (uint32_t)args.parallax );
+		mixKey( key, (uint32_t)args.shadowCubeDyn );
 		bool needsTexBind = true;
 		if ( boundTexSet != VK_NULL_HANDLE && boundTexKey == key ) {
 			texSet = boundTexSet;
@@ -5474,10 +5475,10 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 				// shaders statically declare: unit 7 is interaction.frag's sampler2DShadow
 				// and 8 its samplerCubeShadow (depth-compare dummies until M7 shadow maps);
 				// everything else is sampler2D (white). Real handles always win.
-				VkDescriptorImageInfo infos[12];
-				VkWriteDescriptorSet writes[12];
+				VkDescriptorImageInfo infos[13];
+				VkWriteDescriptorSet writes[13];
 				const ImageRec &dummy = imageTable[dummyImage - 1];
-				for ( int i = 0; i < 12; i++ ) {
+				for ( int i = 0; i < 13; i++ ) {
 					VkSampler sampler = dummy.sampler;
 					VkImageView view = dummy.view;
 					if ( i < 8 && args.textures[i] >= 1 && args.textures[i] <= (ImageHandle)imageTable.size()
@@ -5513,6 +5514,18 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 						const ImageRec &rec = imageTable[args.parallax - 1];	// parallax height map (else white)
 						sampler = rec.sampler;
 						view = rec.view;
+					} else if ( i == 12 ) {
+						// dynamic-layer shadow cube (lever B). samplerCubeShadow -> the cube depth
+						// dummy when no movers-only layer is bound, mirroring unit 8.
+						if ( args.shadowCubeDyn >= 1 && args.shadowCubeDyn <= (ImageHandle)imageTable.size()
+						     && imageTable[args.shadowCubeDyn - 1].live ) {
+							const ImageRec &rec = imageTable[args.shadowCubeDyn - 1];
+							sampler = rec.sampler;
+							view = rec.view;
+						} else {
+							sampler = dummyShadowCube.sampler;
+							view = dummyShadowCube.view;
+						}
 					}
 					infos[i] = {};
 					infos[i].sampler = sampler;
@@ -5526,7 +5539,7 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 					writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 					writes[i].pImageInfo = &infos[i];
 				}
-				vkUpdateDescriptorSets( device, 12, writes, 0, NULL );
+				vkUpdateDescriptorSets( device, 13, writes, 0, NULL );
 				textureSetCache[key] = texSet;
 			}
 			boundTexSet = texSet;
@@ -5656,13 +5669,15 @@ void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int
 			if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
 				return;
 			}
-			VkDescriptorImageInfo infos[12];
-			VkWriteDescriptorSet writes[12];
+			VkDescriptorImageInfo infos[13];
+			VkWriteDescriptorSet writes[13];
 			const ImageRec &dummy = imageTable[dummyImage - 1];
-			for ( int i = 0; i < 12; i++ ) {
+			for ( int i = 0; i < 13; i++ ) {
+				// units 8 and 12 are samplerCubeShadow -> the cube depth dummy; 7 is the 2D shadow dummy
+				const bool cubeShadow = ( i == 8 || i == 12 );
 				infos[i] = {};
-				infos[i].sampler = ( i == 7 ) ? dummyShadow2D.sampler : ( i == 8 ? dummyShadowCube.sampler : dummy.sampler );
-				infos[i].imageView = ( i == 7 ) ? dummyShadow2D.view : ( i == 8 ? dummyShadowCube.view : dummy.view );
+				infos[i].sampler = ( i == 7 ) ? dummyShadow2D.sampler : ( cubeShadow ? dummyShadowCube.sampler : dummy.sampler );
+				infos[i].imageView = ( i == 7 ) ? dummyShadow2D.view : ( cubeShadow ? dummyShadowCube.view : dummy.view );
 				infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 				writes[i] = {};
 				writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -5672,7 +5687,7 @@ void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int
 				writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 				writes[i].pImageInfo = &infos[i];
 			}
-			vkUpdateDescriptorSets( device, 12, writes, 0, NULL );
+			vkUpdateDescriptorSets( device, 13, writes, 0, NULL );
 			textureSetCache[key] = texSet;
 		}
 		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout, 1, 1, &texSet, 0, NULL );

@@ -979,6 +979,12 @@ public:
 			gl3ActiveTexture( GL_TEXTURE0 + 8 );
 			qglBindTexture( GL_TEXTURE_CUBE_MAP, args.shadowCube );
 		}
+		// unit 12: dynamic-layer cube (static/dynamic split, lever B). Only bound for lights
+		// with a movers-only layer; interaction.frag skips it unless u_pbrParms2.z is set.
+		if ( args.shadowCubeDyn ) {
+			gl3ActiveTexture( GL_TEXTURE0 + 12 );
+			qglBindTexture( GL_TEXTURE_CUBE_MAP, args.shadowCubeDyn );
+		}
 
 		qglDrawElements( GL_TRIANGLES, args.indexCount, GL_UNSIGNED_INT,
 		                 (const GLvoid *)( (const GLbyte *)NULL + args.firstIndex * sizeof( unsigned int ) ) );
