@@ -912,6 +912,8 @@ extern idCVar r_ssrSteps;				// ray-march samples per pixel
 extern idCVar r_ssrMaxDistance;			// ray reach, world units
 extern idCVar r_ssrThickness;			// assumed surface thickness for hit tests
 extern idCVar r_ssrResScale;			// march buffer resolution as a fraction of the view
+extern idCVar r_ssrHiZ;					// min-Z depth pyramid to leap empty march span (dev A/B)
+extern idCVar r_ssrHiZLevel;			// coarse mip level the Hi-Z march leaps at
 extern idCVar r_ssrTemporal;			// accumulate across frames (resolves the march grain)
 extern idCVar r_ssrTemporalFeedback;	// history fraction kept per frame
 extern idCVar r_ssrGlassProbes;			// glass reflects baked per-area room cubemaps

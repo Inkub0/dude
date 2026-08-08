@@ -351,6 +351,12 @@ static bool rhiSsrHistValid = false;				// the read slot holds a usable previous
 static bool rhiSsrHavePrevVP = false;				// rhiSsrPrevViewProj holds a previous view-proj
 static float rhiSsrPrevViewProj[16];				// previous frame's world->clip (proj * view)
 static float rhiSsrJitterPhase = 0.0f;				// per-frame march jitter rotation
+// SSR Hi-Z (docs/ssao-perf-optimization.md, r_ssrHiZ): a min-Z (nearest-surface) linear-
+// depth mip chain at the SSR march resolution, so the march leaps provably-empty span.
+// Same machinery as the SSAO depth mip, with a MIN downsample instead of MAX.
+static rhi::RenderTargetHandle rhiSsrDepthMinRT = 0;
+static int  rhiSsrDepthMinW = 0, rhiSsrDepthMinH = 0;	// == SSR march buffer size
+static int  rhiSsrDepthMinLevels = 0;					// mip count (0 = not built)
 
 // DUDE berserk vision feedback trail (docs / memory berserk-vision-rhi, RB_RHI_BerserkAccum).
 // A ping-pong RGBA8 pair reproducing the stock ARB material's recursive _scratch feedback the
@@ -2473,6 +2479,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistValid = false;	rhiSsaoHavePrevVP = false;
 
 	rhiSsrRT = 0;				rhiSsrW = rhiSsrH = 0;
+	rhiSsrDepthMinRT = 0;		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
 	rhiSsrHistRT[0] = rhiSsrHistRT[1] = 0;
 	rhiSsrHistIdx = 0;			rhiSsrHistW = rhiSsrHistH = 0;
 	rhiSsrHistValid = false;	rhiSsrHavePrevVP = false;
@@ -3550,6 +3557,37 @@ static bool RB_RHI_EnsureSsrHistory( rhi::RHI *r, int w, int h ) {
 	return true;
 }
 
+// SSR Hi-Z (docs/ssao-perf-optimization.md, r_ssrHiZ): (re)allocate the min-Z depth pyramid
+// at the SSR march resolution. Mirrors RB_RHI_EnsureSsaoDepthMip exactly; returns false when
+// the backend has no mipped-target capability (CreateRenderTargetMipped -> 0), so the caller
+// silently falls back to the exact full-res march.
+static bool RB_RHI_EnsureSsrDepthMin( rhi::RHI *r, int w, int h ) {
+	// a lost context (vid_restart) leaves the handle set but its texture gone
+	if ( rhiSsrDepthMinRT && r->GetRenderTargetImage( rhiSsrDepthMinRT ) == 0 ) {
+		rhiSsrDepthMinRT = 0;
+		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
+	}
+	if ( rhiSsrDepthMinRT && rhiSsrDepthMinW == w && rhiSsrDepthMinH == h ) {
+		return true;
+	}
+	if ( rhiSsrDepthMinRT ) { r->DestroyRenderTarget( rhiSsrDepthMinRT ); rhiSsrDepthMinRT = 0; }
+
+	// enough levels to leap across the march radius in coarse blocks, capped so the chain
+	// (and its per-level fills) stays short — 6 levels reaches a 1/32 footprint.
+	int levels = 1;
+	for ( int d = ( w > h ? w : h ); d > 1 && levels < 6; d >>= 1 ) { levels++; }
+
+	rhiSsrDepthMinRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, levels );
+	if ( !rhiSsrDepthMinRT ) {
+		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
+		return false;
+	}
+	rhiSsrDepthMinW = w;
+	rhiSsrDepthMinH = h;
+	rhiSsrDepthMinLevels = levels;
+	return true;
+}
+
 /*
 ===================
 RB_RHI_ScreenSpaceReflections
@@ -3622,21 +3660,68 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 
+	const int uploadW = globalImages->currentDepthImage->uploadWidth;
+	const int uploadH = globalImages->currentDepthImage->uploadHeight;
+	const float invP00 = ( viewDef->projectionMatrix[0] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[0] : 1.0f;
+	const float invP11 = ( viewDef->projectionMatrix[5] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[5] : 1.0f;
+
+	// ---- Hi-Z (r_ssrHiZ, docs/ssao-perf-optimization.md): build a min-Z (nearest-surface)
+	// linear-depth pyramid at the SSR march resolution so the march can leap provably-empty
+	// span (see ssr.frag hiZMin). Mirrors the SSAO depth-mip build with a MIN downsample.
+	// Done BEFORE the scene snapshot below so the pyramid passes' unit-0 binds are then
+	// re-established as _currentRender by CopyFramebuffer (the GL march samples it on unit 0). ----
+	bool doSsrHiZ  = false;
+	int  ssrHiZLod = 0;
+	if ( r_ssrHiZ.GetBool() ) {
+		if ( RB_RHI_EnsureSsrDepthMin( r, ssrW, ssrH ) ) {
+			rhi::ShaderHandle minProg  = r->LoadShader( "ssr_depthmin" );	// linearize into level 0
+			rhi::ShaderHandle downProg = r->LoadShader( "ssr_depthdown" );	// min-downsample the chain
+			doSsrHiZ = ( minProg != 0 && downProg != 0 && rhiSsrDepthMinLevels >= 2 );
+			if ( doSsrHiZ ) {
+				rhi::RenderParams pyr;
+				memset( &pyr, 0, sizeof( pyr ) );
+				pyr.mvpMatrix[0] = pyr.mvpMatrix[5] = pyr.mvpMatrix[10] = pyr.mvpMatrix[15] = 1.0f;
+				pyr.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;	// SSR frag -> depth tc
+				pyr.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
+				// level 0: linearize _currentDepth into the min-Z target
+				r->BeginTargetPass( rhiSsrDepthMinRT, NULL );
+				RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+				RB_RHI_DrawFullscreen( r, minProg, pyr, 0 );
+				r->EndPass();
+				// levels 1..N-1: MIN (nearest) downsample from the previous level. localParam0.x
+				// = the source mip level (VK binds a single-level view -> 0; GL binds the whole
+				// texture -> the real level for texelFetch), exactly like ssao_depthdown.
+				const bool vkBackend = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+				for ( int L = 1; L < rhiSsrDepthMinLevels; L++ ) {
+					rhi::RenderParams dp = pyr;
+					dp.localParam0[0] = vkBackend ? 0.0f : (float)( L - 1 );
+					rhi::ImageHandle src = r->GetRenderTargetMipImage( rhiSsrDepthMinRT, L - 1 );
+					r->BeginTargetMipPass( rhiSsrDepthMinRT, L, NULL );
+					RB_RHI_DrawFullscreen( r, downProg, dp, src );
+					r->EndPass();
+				}
+				backEnd.glState.tmu[0].current2DMap = -1;	// direct binds bypassed the tmu cache
+				ssrHiZLod = idMath::ClampInt( 1, rhiSsrDepthMinLevels - 1, r_ssrHiZLevel.GetInteger() );
+			}
+		}
+	} else if ( rhiSsrDepthMinRT ) {
+		// toggled off: reclaim the target so it isn't left resident (mirrors SSAO)
+		r->DestroyRenderTarget( rhiSsrDepthMinRT );
+		rhiSsrDepthMinRT = 0;
+		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
+	}
+
 	// snapshot the lit opaque scene; on GL CopyFramebuffer leaves _currentRender bound
-	// on the active unit — exactly where ssr.frag samples it (unit 0). On VK the copy
-	// routes through the RHI capture path and unit 0 is recorded via rhiVkUnits below,
-	// so skip the raw gl3ActiveTexture (a NULL qgl pointer on the Vulkan backend).
+	// on the active unit — exactly where ssr.frag samples it (unit 0), and re-establishes it
+	// after the Hi-Z build above bound depth there. On VK the copy routes through the RHI
+	// capture path and unit 0 is recorded via rhiVkUnits below, so skip the raw
+	// gl3ActiveTexture (a NULL qgl pointer on the Vulkan backend).
 	if ( !vkMode ) {
 		rhi::gl3ActiveTexture( GL_TEXTURE0 );
 		backEnd.glState.currenttmu = 0;
 	}
 	globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1,
 		viewDef->viewport.y1, fullW, fullH, true );
-
-	const int uploadW = globalImages->currentDepthImage->uploadWidth;
-	const int uploadH = globalImages->currentDepthImage->uploadHeight;
-	const float invP00 = ( viewDef->projectionMatrix[0] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[0] : 1.0f;
-	const float invP11 = ( viewDef->projectionMatrix[5] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[5] : 1.0f;
 
 	// ---- stage 1: march into the offscreen buffer (cleared to 0 = miss) ----
 	rhi::RenderParams parms;
@@ -3673,6 +3758,8 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// ssao.frag's u_windowCoord.z). Inert at +1 on GL.
 	const float viewYSign = vkMode ? -1.0f : 1.0f;
 	parms.windowCoord[2] = viewYSign;
+	// Hi-Z leap LOD for ssr.frag (u_localParam1.w); 0 = feature off -> exact full-res march
+	parms.localParam1[3] = (float)ssrHiZLod;
 
 	rhi::ClearArgs clear;
 	memset( &clear, 0, sizeof( clear ) );
@@ -3699,6 +3786,17 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		backEnd.glState.currenttmu = 0;
 		backEnd.glState.tmu[2].current2DMap = -1;
 		backEnd.glState.tmu[3].current2DMap = -1;
+	}
+	// Hi-Z min-Z pyramid on unit 4 for the march's leap test. When off, bind _currentDepth
+	// as an unused dummy so the descriptor slot stays valid on VK (ssr.frag routes to the
+	// exact march via u_localParam1.w = 0 and never samples it). Mirrors the SSAO unit-2 idiom.
+	if ( doSsrHiZ ) {
+		RB_RHI_BindRTUnit( r, 4, rhiSsrDepthMinRT );
+		if ( !vkMode ) {
+			backEnd.glState.tmu[4].current2DMap = -1;	// direct bind bypassed the tmu cache
+		}
+	} else {
+		RB_RHI_BindUnit( 4, globalImages->currentDepthImage );
 	}
 	RB_RHI_DrawFullscreen( r, marchProg, parms, 0 );
 	r->EndPass();

@@ -22,6 +22,7 @@ SAMPLER_BINDING(0) uniform sampler2D u_currentRender;   // lit opaque scene snap
 SAMPLER_BINDING(1) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(2) uniform sampler2D u_normalBuffer;    // xyz = view normal, a = weapon mask
 SAMPLER_BINDING(3) uniform sampler2D u_materialBuffer;  // x = roughness, y = metalness
+SAMPLER_BINDING(4) uniform sampler2D u_hiZMinDepth;     // SSR-res min-Z pyramid (+linear eye depth); r_ssrHiZ
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -78,6 +79,16 @@ vec3 projectToFrag( vec3 viewPos ) {
 	return vec3( uv01 / u_screenCorrection.xy, 1.0 );
 }
 
+// Hi-Z (r_ssrHiZ): nearest surface (smallest +linear eye depth) over the aligned 2^lod
+// block containing frag. POINT-sampled via texelFetch — a filtered blend could over-report
+// the min and let a leap skip a real hit. Clamped to the level's extent so an odd-size
+// coarse level never reads out of range (UB). Level 0 is exact; coarser levels min-downsampled.
+float hiZMin( vec2 frag, int lod ) {
+	ivec2 c  = ivec2( frag ) >> lod;
+	ivec2 mx = textureSize( u_hiZMinDepth, lod ) - 1;
+	return texelFetch( u_hiZMinDepth, min( c, mx ), lod ).r;
+}
+
 void main() {
 	vec2  frag = gl_FragCoord.xy;
 	float raw  = rawDepth( frag );
@@ -124,6 +135,7 @@ void main() {
 	float maxDist   = u_localParam0.z;
 	float thickness = u_localParam0.w;
 	float stepLen   = maxDist / float( steps );
+	float hiZLod    = u_localParam1.w;         // r_ssrHiZ LOD to leap at (0 = feature off -> exact march)
 
 	// Jittered linear march with an ARMED crossing test: a sample only counts as a
 	// hit when (a) some earlier sample was genuinely in FRONT of the depth surface
@@ -168,8 +180,38 @@ void main() {
 		if ( dz <= 0.0 ) {
 			armed = true;                          // seen in front; a crossing can now hit
 		}
+
+		// Hi-Z safe-advance (r_ssrHiZ): after the UNCHANGED test above, leap across span that
+		// is provably in front of every surface it covers, so the tuned hit path never samples
+		// anything the exact march wouldn't. Two conditions make a leap safe: (a) DEPTH — ray
+		// depth is linear in t, so bounding the landing to nearestPos-thickness keeps the whole
+		// span in front of the block's nearest surface; (b) CONTAINMENT — the landing frag stays
+		// in the SAME coarse block. The projected ray is a straight, monotone screen segment and
+		// a block is convex, so in-block endpoints imply the whole segment is in-block and
+		// nearestPos validly bounds every surface under the leap. Receding rays only (R.z<0,
+		// depth grows with t); other rays take the exact step. adv >= stepLen always, so the
+		// iteration count can only drop -> the MAX_MARCH_STEPS bound and hit logic are preserved.
+		float adv = stepLen;
+		if ( hiZLod >= 0.5 && R.z < -1e-4 ) {
+			int   lod        = int( hiZLod );
+			float nearestPos = hiZMin( pf.xy, lod );
+			float margin     = nearestPos - thickness - ( -rayPos.z );
+			if ( margin > 0.0 ) {
+				float advCand = margin / ( -R.z );      // lands at ray depth == nearestPos - thickness
+				if ( advCand > stepLen ) {
+					vec3 land = P + R * ( t + advCand );
+					vec3 lpf  = projectToFrag( land );
+					vec2 lsuv = lpf.xy * u_screenCorrection.xy;
+					if ( land.z < -1.0 && lpf.z >= 0.0
+					     && lsuv.x >= 0.0 && lsuv.x <= 1.0 && lsuv.y >= 0.0 && lsuv.y <= 1.0
+					     && ( ivec2( pf.xy ) >> lod ) == ( ivec2( lpf.xy ) >> lod ) ) {
+						adv = advCand;                  // verified: whole leap stays in front + in block
+					}
+				}
+			}
+		}
 		tPrev = t;
-		t += stepLen;
+		t += adv;
 	}
 	if ( tHit < 0.0 ) {
 		discard;
