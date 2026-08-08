@@ -936,6 +936,7 @@ extern idCVar r_shadowMapFlashlightBias;	// depth-compare bias, player flashligh
 extern idCVar r_shadowMapSlopeBias;		// slope-scaled bias multiplier (grazing-angle acne)
 extern idCVar r_shadowMapDebug;			// print per-view light classification
 extern idCVar r_shadowMapCacheDebug;	// once/sec cube-cache breakdown (hit rate + re-render causes)
+extern idCVar r_shadowMapCachePerFace;	// warm miss re-renders only the faces an occluder moved across
 extern idCVar r_shadowMapCull;			// caster face culling (0 front / 1 back / 2 two-sided)
 extern idCVar r_shadowMapPerforated;	// let noShadows perforated surfaces cast punched-out shadow maps
 extern idCVar r_shadowMapViewWeapon;	// view weapon casts shadow-map shadows (default 0 = kept out of the map, no floor blob)

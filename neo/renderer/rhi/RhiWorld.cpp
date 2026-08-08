@@ -2109,6 +2109,7 @@ struct shadowCubeCache_t {
 	int						size;			// face resolution of rt
 	unsigned long long		token;			// invalidation hash of light + casters
 	unsigned long long		lightTok;		// light-pose-only sub-hash (r_shadowMapCacheDebug: classify a warm miss as light-moved vs caster-moved)
+	unsigned long long		faceTok[6];		// per-face token (r_shadowMapCachePerFace): re-render only the cube faces a mover dirtied
 	int						lastFrame;		// for LRU eviction
 	size_t					bytes;			// VRAM cost estimate
 };
@@ -2163,6 +2164,25 @@ static unsigned long long RB_RHI_HashBytes( unsigned long long h, const void *da
 	return h;
 }
 
+// One caster's identity+transform hash: entityDef index, model matrix, and geometry identity
+// (pointer + index count + cache handle — a dynamic model gets a fresh ambient cache each frame,
+// so this flips and invalidates it). Shared by the whole-light token and the per-face tokens so
+// the two can never disagree about what a caster contributes.
+static unsigned long long RB_RHI_CasterHash( const drawSurf_t *surf ) {
+	unsigned long long c = 1469598103934665603ULL;			// FNV offset basis
+	const idRenderEntityLocal *edef = surf->space ? surf->space->entityDef : NULL;
+	const int idx = edef ? edef->index : -1;
+	c = RB_RHI_HashBytes( c, &idx, sizeof( idx ) );
+	c = RB_RHI_HashBytes( c, surf->space->modelMatrix, 16 * sizeof( float ) );
+	const void *geo = surf->geo;
+	c = RB_RHI_HashBytes( c, &geo, sizeof( geo ) );
+	if ( surf->geo ) {
+		c = RB_RHI_HashBytes( c, &surf->geo->numIndexes, sizeof( surf->geo->numIndexes ) );
+		c = RB_RHI_HashBytes( c, &surf->geo->ambientCache, sizeof( surf->geo->ambientCache ) );
+	}
+	return c;
+}
+
 // Invalidation token: the light pose/reach plus every caster's identity and
 // transform. A moving light, a swinging door (modelMatrix), or an animating monster
 // (regenerated geometry / cache handle) all change the token and force a re-render;
@@ -2184,23 +2204,11 @@ static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float ran
 	bool dynamic = false;
 	unsigned long long casters = 0;
 	for ( const drawSurf_t *surf = vLight->shadowMapCasters; surf; surf = surf->nextOnLight ) {
-		unsigned long long c = 1469598103934665603ULL;
-		const idRenderEntityLocal *edef = surf->space ? surf->space->entityDef : NULL;
-		const int idx = edef ? edef->index : -1;
-		c = RB_RHI_HashBytes( c, &idx, sizeof( idx ) );
-		c = RB_RHI_HashBytes( c, surf->space->modelMatrix, 16 * sizeof( float ) );
-		// geometry identity: pointer + index count + cache handle (dynamic models get
-		// a fresh ambient cache each frame, so this flips and invalidates them)
-		const void *geo = surf->geo;
-		c = RB_RHI_HashBytes( c, &geo, sizeof( geo ) );
-		if ( surf->geo ) {
-			c = RB_RHI_HashBytes( c, &surf->geo->numIndexes, sizeof( surf->geo->numIndexes ) );
-			c = RB_RHI_HashBytes( c, &surf->geo->ambientCache, sizeof( surf->geo->ambientCache ) );
-		}
-		casters += c;
+		casters += RB_RHI_CasterHash( surf );
 		// animated/particle casters (monsters, ragdolls) change every frame, so a light
 		// touching one can never cache-hit; flag it so the caller keeps it on the scratch
 		// path instead of wasting a persistent slot + VRAM on it.
+		const idRenderEntityLocal *edef = surf->space ? surf->space->entityDef : NULL;
 		if ( edef && edef->parms.hModel && edef->parms.hModel->IsDynamicModel() != DM_STATIC ) {
 			dynamic = true;
 		}
@@ -2212,6 +2220,51 @@ static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float ran
 		*outLightTok = h;		// light-pose-only sub-hash (before folding in the caster set)
 	}
 	return h ^ casters;
+}
+
+// Per-face invalidation tokens (r_shadowMapCachePerFace). faceTok[f] = the light-pose hash XOR
+// the summed per-caster hashes of the occluders that actually rasterize into face f — using the
+// SAME allow + R_CullLocalBox test the render (RB_RHI_ShadowCasterChainCube) uses, so a face's
+// token can never miss a caster the render would draw there (which would leave a stale shadow).
+// The light pose is in every face's hash, so a moved light flips all six -> the whole cube
+// re-renders. Computed only on a warm miss, to find which faces a mover dirtied.
+static void RB_RHI_CubeFaceTokens( const viewLight_t *vLight, float range, int size,
+                                   unsigned long long faceTok[6] ) {
+	unsigned long long h = 1469598103934665603ULL;
+	h = RB_RHI_HashBytes( h, vLight->globalLightOrigin.ToFloatPtr(), 3 * sizeof( float ) );
+	h = RB_RHI_HashBytes( h, vLight->lightDef->parms.lightCenter.ToFloatPtr(), 3 * sizeof( float ) );
+	h = RB_RHI_HashBytes( h, &vLight->lightDef->parms.axis, sizeof( idMat3 ) );
+	h = RB_RHI_HashBytes( h, &range, sizeof( range ) );
+	h = RB_RHI_HashBytes( h, &size, sizeof( size ) );
+	const float perfStrength = r_shadowMapPerforatedStrength.GetFloat();
+	h = RB_RHI_HashBytes( h, &perfStrength, sizeof( perfStrength ) );
+
+	idPlane facePlanes[6][6];
+	for ( int f = 0; f < 6; f++ ) {
+		float vp[16];
+		RB_RHI_CubeFaceViewProj( f, range, vp );
+		RB_RHI_ExtractWorldFrustum( vp, vLight->globalLightOrigin, facePlanes[f] );
+	}
+	unsigned long long faceCasters[6] = { 0, 0, 0, 0, 0, 0 };
+	for ( const drawSurf_t *surf = vLight->shadowMapCasters; surf; surf = surf->nextOnLight ) {
+		const srfTriangles_t *tri = surf->geo;
+		if ( !tri || !tri->ambientCache || !tri->numIndexes ) {
+			continue;
+		}
+		if ( !RB_RHI_ShadowCasterAllowed( surf ) ) {
+			continue;
+		}
+		const unsigned long long c = RB_RHI_CasterHash( surf );
+		for ( int f = 0; f < 6; f++ ) {
+			// !R_CullLocalBox == the box overlaps this face's cone == the render draws it here
+			if ( !R_CullLocalBox( tri->bounds, surf->space->modelMatrix, 6, facePlanes[f] ) ) {
+				faceCasters[f] += c;
+			}
+		}
+	}
+	for ( int f = 0; f < 6; f++ ) {
+		faceTok[f] = h ^ faceCasters[f];
+	}
 }
 
 // Pick the render target for this light's cube. On a cache hit, returns the stored
@@ -2325,9 +2378,11 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 	slot.size = size;
 	slot.token = token;			// we are about to render this token's geometry
 	slot.lightTok = lightTok;	// r_shadowMapCacheDebug classification baseline
+	for ( int f = 0; f < 6; f++ ) { slot.faceTok[f] = 0; }	// per-face baseline; caller fills it after the cold render
 	slot.lastFrame = rhiCubeCacheFrameNo;
 	slot.bytes = need;
 	rhiCubeCacheBytes += need;
+	*pendingSlot = &slot;		// cold miss: hand the slot back so the caller stores per-face tokens
 	return rt;					// hit stays false -> caller renders
 }
 
@@ -2609,6 +2664,31 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 		}
 	}
 
+	// Per-face invalidation (r_shadowMapCachePerFace, lever A): on a WARM miss re-render only the
+	// faces a mover actually dirtied; clean faces keep their cached depth. A cold miss (fresh slot)
+	// renders all six and stores the baseline; scratch (uncached) is untouched (renderFace all
+	// true). Computed only here — the per-face cull is paid only when something moved near a
+	// cached light, never on the common hit that already returned above.
+	bool renderFace[6] = { true, true, true, true, true, true };
+	if ( cached && pendingSlot ) {
+		if ( r_shadowMapCachePerFace.GetBool() ) {
+			unsigned long long faceTok[6];
+			RB_RHI_CubeFaceTokens( vLight, range, size, faceTok );
+			for ( int f = 0; f < 6; f++ ) {
+				renderFace[f] = stale ? ( faceTok[f] != pendingSlot->faceTok[f] ) : true;
+				pendingSlot->faceTok[f] = faceTok[f];	// adopt the new per-face baseline
+			}
+		} else {
+			// per-face OFF: this miss re-renders all six faces but doesn't recompute the per-face
+			// tokens, so the stored baseline goes stale. Zero it so a later r_shadowMapCachePerFace
+			// 1 can't trust a frozen baseline and skip a face that has since changed (review D1) —
+			// the next per-face-on warm miss then re-renders all six once and re-baselines.
+			for ( int f = 0; f < 6; f++ ) {
+				pendingSlot->faceTok[f] = 0;
+			}
+		}
+	}
+
 	const idVec3 &L = vLight->globalLightOrigin;
 
 	rhi::ClearArgs clear;
@@ -2628,6 +2708,9 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	}
 
 	for ( int face = 0; face < 6; face++ ) {
+		if ( !renderFace[face] ) {
+			continue;			// per-face invalidation: unchanged face keeps its cached depth
+		}
 		float vp[16];
 		RB_RHI_CubeFaceViewProj( face, range, vp );
 		idPlane planes[6];
@@ -4531,7 +4614,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// per-frame spam. Hit% is over cached lookups (excludes scratch/dynamic lights, which
 	// never enter the cache). This is what says which caching lever is worth building.
 	if ( r_shadowMapCacheDebug.GetBool() ) {
-		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accFrames, accStartMs;
+		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accFaces, accFrames, accStartMs;
 		const int nowMs = Sys_Milliseconds();
 		if ( accStartMs == 0 ) { accStartMs = nowMs; }
 		accHits       += rhiCubeCacheHits;
@@ -4542,15 +4625,16 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 		accDynamic    += rhiCubeCacheDynamic;
 		accDeferred   += rhiCubeCacheDeferred;
 		accEvict      += rhiCubeEvictions;
+		accFaces      += rhiShadowCubeFaces;		// actual cube FACES rasterized -> the GPU cost per-face invalidation cuts
 		accFrames++;
 		if ( nowMs - accStartMs >= 1000 ) {
 			const int rendered = accCold + accWarmCaster + accWarmLight;
 			const int lookups  = accHits + rendered;
 			const int hitPct   = lookups > 0 ? ( 100 * accHits ) / lookups : 0;
-			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | scratch %d, dynamic %d, deferred %d, evict %d | %d frames\n",
-			                accHits, hitPct, rendered, accCold, accWarmCaster, accWarmLight,
+			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | faces %d | scratch %d, dynamic %d, deferred %d, evict %d | %d frames\n",
+			                accHits, hitPct, rendered, accCold, accWarmCaster, accWarmLight, accFaces,
 			                accScratch, accDynamic, accDeferred, accEvict, accFrames );
-			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accFrames = 0;
+			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accFaces = accFrames = 0;
 			accStartMs = nowMs;
 		}
 	}
