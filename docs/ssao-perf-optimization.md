@@ -31,12 +31,15 @@ bilateral blur → optional temporal. `ssao.frag` reconstructs view-space positi
 **Status: BUILT (feat/ssao-depth-mip), pending in-engine verify.** Behind `r_ssaoDepthMip`
 (default 1; off = the exact prior full-res raw-depth march, for an A/B) with `r_ssaoDepthMipBias`
 (0.5) tuning LOD aggressiveness. As built: a new RHI capability — `CreateRenderTargetMipped` +
-`GenerateRenderTargetMips` (GL3: per-level `glTexImage2D` + `glGenerateMipmap`; Vulkan: an
-`mipLevels`-deep image with a level-0 attachment view + an all-levels sample view + a
-`vkCmdBlitImage` down-chain, barriers mirroring `CopyFramebufferToImage`, with a cross-frame
-write-after-read barrier since the target is read every frame and rewritten the next). A new
-`ssao_depthmip` fullscreen pass linearizes `_currentDepth` (positive view-space eye depth) into
-level 0 at the AO resolution; `GenerateRenderTargetMips` box-averages the chain (6 levels max).
+`BeginTargetMipPass` + `GetRenderTargetMipImage` (GL3: per-level `glTexImage2D` + a shared FBO
+re-pointed per level; Vulkan: an `mipLevels`-deep image with a level-0 attachment view, an
+all-levels sample view, and per-level single-level views + framebuffers so each coarse level is
+*rendered*, not blitted). A new `ssao_depthmip` fullscreen pass linearizes `_currentDepth`
+(positive view-space eye depth) into level 0 at the AO resolution; then `ssao_depthdown` fills
+levels 1..N by a **max (farthest) downsample** — a box average blends fg/bg across silhouettes
+into a phantom mid-depth occluder, casting radial dark halos; the conservative farthest-surface
+filter removes that while level 0 stays exact (6 levels max). The per-level render passes'
+external dependencies serialize the cross-frame write-after-read for free (no manual barriers).
 `ssao.frag` keeps `_currentDepth` for the centre pixel + normal reconstruction (zero fidelity
 change there) and reads the mip only for the cache-bound horizon occluder taps, `textureLod`ing a
 coarser level as the step distance grows (`lod = clamp(log2(stepPix·bias), 0, maxMip)`); `maxMip`

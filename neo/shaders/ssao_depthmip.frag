@@ -1,8 +1,8 @@
 // SSAO Phase 1 (docs/ssao-perf-optimization.md): linearize the captured projection
 // depth (_currentDepth) into positive view-space eye depth, written to R of the AO-res
-// mip-chain level 0. GenerateRenderTargetMips then box-averages this down the chain.
-// Averaging is only meaningful on LINEAR depth (raw projection depth is affine in 1/z,
-// so a 2x2 average of raw depth is not a depth) — that is why this pass exists.
+// mip-chain level 0. ssao_depthdown then max-downsamples this down the chain. A linear
+// depth is required for a meaningful reduction (raw projection depth is affine in 1/z,
+// so a 2x2 reduction of raw depth is not a depth) — that is why this pass exists.
 // ssao.frag reads a coarser mip for farther horizon steps: far taps then touch a small,
 // cache-local footprint instead of scattering across full-res _currentDepth.
 

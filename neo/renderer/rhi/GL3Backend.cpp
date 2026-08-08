@@ -352,6 +352,11 @@ public:
 		// remember the backbuffer viewport so EndPass can put it back
 		qglGetIntegerv( GL_VIEWPORT, savedViewport );
 		gl3BindFramebuffer( GL_FRAMEBUFFER, t.fbo );
+		if ( t.mipLevels > 1 ) {
+			// a prior BeginTargetMipPass left the color attachment on a coarse level;
+			// re-point it at level 0 for this full-res pass (SSAO Phase 1 linearize)
+			gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0 );
+		}
 		activeTarget = rt;
 		qglViewport( 0, 0, t.w, t.h );
 		qglScissor( 0, 0, t.w, t.h );
@@ -557,8 +562,8 @@ public:
 
 	// SSAO Phase 1 (docs/ssao-perf-optimization.md): a color target with a full mip
 	// chain. Level 0 is rendered by a fullscreen pass (BeginTargetPass binds the FBO,
-	// whose color attachment is level 0); GenerateRenderTargetMips box-averages it down
-	// the chain. Sampled with an explicit textureLod (GL_LINEAR_MIPMAP_NEAREST).
+	// whose color attachment is level 0); coarser levels are rendered by a max-downsample
+	// shader via BeginTargetMipPass. Sampled with an explicit textureLod (LINEAR_MIPMAP_NEAREST).
 	virtual RenderTargetHandle CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels ) {
 		if ( !initialized || w <= 0 || h <= 0 ) {
 			return 0;
@@ -571,6 +576,7 @@ public:
 		for ( int d = ( w > h ? w : h ); d > 1; d >>= 1 ) { maxLevels++; }
 		if ( mipLevels < 1 ) { mipLevels = 1; }
 		if ( mipLevels > maxLevels ) { mipLevels = maxLevels; }
+		if ( mipLevels > 8 ) { mipLevels = 8; }		// parity with VK RenderTarget::MAX_MIP
 
 		int slot = -1;
 		for ( int i = 1; i < MAX_RENDER_TARGETS; i++ ) {
@@ -628,16 +634,31 @@ public:
 		return (RenderTargetHandle)slot;
 	}
 
-	virtual void GenerateRenderTargetMips( RenderTargetHandle rt ) {
-		if ( rt == 0 || rt >= (RenderTargetHandle)MAX_RENDER_TARGETS
-		     || renderTargets[rt].tex == 0 || renderTargets[rt].mipLevels <= 1 ) {
+	// Render into a chosen mip level for the SSAO Phase 1 max-downsample. Re-points the
+	// target's shared FBO at that level; BeginTargetPass restores level 0 next frame.
+	virtual void BeginTargetMipPass( RenderTargetHandle rt, int level, const ClearArgs *clear ) {
+		if ( rt == 0 || rt >= (RenderTargetHandle)MAX_RENDER_TARGETS || !renderTargets[rt].fbo
+		     || level < 1 || level >= renderTargets[rt].mipLevels ) {
 			return;
 		}
-		gl3ActiveTexture( GL_TEXTURE0 );
-		qglBindTexture( GL_TEXTURE_2D, renderTargets[rt].tex );
-		gl3GenerateMipmap( GL_TEXTURE_2D );		// 2x2 box average of the linear-depth level 0
-		qglBindTexture( GL_TEXTURE_2D, 0 );
-		boundVBO = 0;
+		const renderTarget_t &t = renderTargets[rt];
+		qglGetIntegerv( GL_VIEWPORT, savedViewport );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, t.fbo );
+		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, level );
+		activeTarget = rt;
+		const int lw = ( ( t.w >> level ) > 1 ) ? ( t.w >> level ) : 1;
+		const int lh = ( ( t.h >> level ) > 1 ) ? ( t.h >> level ) : 1;
+		qglViewport( 0, 0, lw, lh );
+		qglScissor( 0, 0, lw, lh );
+		DoClear( clear );
+	}
+
+	// GL3: the whole texture (the downsample shader texelFetches the given source level).
+	virtual ImageHandle GetRenderTargetMipImage( RenderTargetHandle rt, int mipLevel ) {
+		if ( rt == 0 || rt >= (RenderTargetHandle)MAX_RENDER_TARGETS || renderTargets[rt].tex == 0 ) {
+			return 0;
+		}
+		return (ImageHandle)renderTargets[rt].tex;
 	}
 
 	// Cube depth target for omni (point-light) shadow maps: one GL_TEXTURE_CUBE_MAP
