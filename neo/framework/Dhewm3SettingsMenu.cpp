@@ -2790,6 +2790,20 @@ static void DrawEnhancementsMenu()
 			"image; ghosting on fast motion is clamped automatically. The Feedback strength lives "
 			"in the Developer tab. Non-vanilla; opengl3 only." );
 
+		// Hi-Z acceleration (docs/ssao-perf-optimization.md, r_ssrHiZ). A min-Z depth pyramid
+		// lets the march leap provably-empty span instead of stepping it. Pure perf option —
+		// reflections are pixel-identical. Marginal + scene-dependent, so default-off + opt-in;
+		// leap aggressiveness is the dev cvar r_ssrHiZLevel.
+		bool ssrHiZ = r_ssrHiZ.GetBool();
+		if ( ImGui::Checkbox( "Hi-Z Acceleration##ssr", &ssrHiZ ) ) {
+			r_ssrHiZ.SetBool( ssrHiZ );
+		}
+		AddTooltip( "Speed up the reflection ray-march by leaping over empty space with a depth "
+			"pyramid instead of stepping through it. Reflections look identical — this is a pure "
+			"performance option, no visual change. The gain is scene-dependent: a few percent on "
+			"open / distant reflections, and essentially nothing on grazing reflective floors "
+			"(where the rays hug the surface). Best left off on older GPUs. Non-vanilla; opengl3/Vulkan." );
+
 		// Glass: baked room probes replace the generic env/gen* cubemap (docs/ssr.md).
 		bool ssrProbes = r_ssrGlassProbes.GetBool();
 		if ( ImGui::Checkbox( "Glass Reflections##ssr", &ssrProbes ) ) {
