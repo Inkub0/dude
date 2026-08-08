@@ -14,8 +14,8 @@ SAMPLER_BINDING(7) uniform sampler2DShadow u_shadowMap; // 2D depth map (project
 SAMPLER_BINDING(8) uniform samplerCubeShadow u_shadowCube; // cube depth map (point light)
 SAMPLER_BINDING(9) uniform sampler2D u_ssao;            // DUDE GTAO buffer (R = ambient visibility)
 SAMPLER_BINDING(10) uniform sampler2D u_occlusionMap;   // DUDE baked AO map (R = visibility)
-SAMPLER_BINDING(11) uniform sampler2D u_parallaxMap;
-SAMPLER_BINDING(12) uniform samplerCubeShadow u_shadowCubeDyn; // DUDE static/dynamic split (lever B): movers-only cube    // DUDE parallax height map (R = height)
+SAMPLER_BINDING(11) uniform sampler2D u_parallaxMap;   // DUDE parallax height map (R = height)
+SAMPLER_BINDING(12) uniform samplerCubeShadow u_shadowCubeDyn; // DUDE static/dynamic split (lever B): movers-only cube
 
 VARY(0) in vec3 var_TexLightVec;
 VARY(1) in vec2 var_TexBump;

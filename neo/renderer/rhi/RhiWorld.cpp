@@ -66,6 +66,11 @@ static struct {
 	rhi::ImageHandle	shadowImage;
 	bool				lightShadowCube;
 	rhi::ImageHandle	shadowCubeImage;
+	// static/dynamic split (r_shadowMapCacheSplit): when a cached static point light also
+	// has movers, they render into a second cube on unit 12 (shadowCubeDynImage). The
+	// interaction shader samples min(u_shadowCube, u_shadowCubeDyn) when this is set.
+	bool				lightHasDynamicLayer;
+	rhi::ImageHandle	shadowCubeDynImage;
 	float				lightRange;
 	// The player flashlight (light shader "lights/flashlight5", a narrow projected
 	// spot that hugs surfaces and sweeps every frame) self-shadows badly at the
@@ -87,6 +92,11 @@ static int rhiShadowMapSize = 0;
 // a single persistent allocation. rhiShadowCubeSize is its face resolution.
 static rhi::RenderTargetHandle rhiShadowCube = 0;
 static int rhiShadowCubeSize = 0;
+// Static/dynamic split (r_shadowMapCacheSplit, lever B): when a moving/animated caster
+// shares a static point light, the world casters render into the cached cube above and
+// the movers into this scratch cube (regenerated every frame). 0 = no dynamic layer this
+// light (the common case). The interaction pass samples min(rhiShadowCube, rhiShadowCubeDyn).
+static rhi::RenderTargetHandle rhiShadowCubeDyn = 0;
 
 // r_shadowMapDebug: perforated (grate/fence) caster surfaces drawn into the map
 // this view — confirms the alpha-tested casters are actually reaching the pass.
@@ -952,6 +962,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			parms.shadowParms[1] = ( rhiShadowCubeSize > 0 ) ? 1.0f / (float)rhiShadowCubeSize : 0.0f;
 			parms.shadowParms[2] = bias;
 			parms.shadowParms[3] = ictx.lightRange;	// radial-distance normalizer
+			// static/dynamic split: also sample the movers' cube (unit 12) and take the
+			// darker of the two. pbrParms2.z is the hasDynamicLayer flag the shader gates on.
+			parms.pbrParms2[2] = ( ictx.lightHasDynamicLayer && ictx.shadowCubeDynImage ) ? 1.0f : 0.0f;
 		}
 	}
 
@@ -1131,6 +1144,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		da.textures[7] = ictx.shadowImage;	// 2D depth map for u_shadowMap (unit 7)
 	} else if ( ictx.lightShadowCube && !din->ambientLight ) {
 		da.shadowCube = ictx.shadowCubeImage;	// cube depth map for u_shadowCube (unit 8)
+		if ( ictx.lightHasDynamicLayer && ictx.shadowCubeDynImage ) {
+			da.shadowCubeDyn = ictx.shadowCubeDynImage;	// movers' cube for u_shadowCubeDyn (unit 12)
+		}
 	}
 	ictx.r->Draw( da );
 
@@ -1590,6 +1606,19 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 }
 
+// Static/dynamic split (r_shadowMapCacheSplit): which layer a cube-shadow caster belongs
+// to. A dynamic caster is one whose model regenerates geometry every frame (animated md5s,
+// ragdolls, particles — IsDynamicModel() != DM_STATIC); it can never cache-hit, so it goes
+// into the per-frame dynamic cube. Everything else (world BSP + static-model props) is
+// static and goes into the cached cube. This is the SAME per-caster test RB_RHI_CubeToken
+// uses to raise its 'dynamic' flag, so the token classification and the render can never
+// disagree about which layer a caster lands in.
+enum casterFilter_t { CF_ALL, CF_STATIC, CF_DYNAMIC };
+static bool RB_RHI_CasterIsDynamic( const drawSurf_t *surf ) {
+	const idRenderEntityLocal *edef = surf->space ? surf->space->entityDef : NULL;
+	return edef && edef->parms.hModel && edef->parms.hModel->IsDynamicModel() != DM_STATIC;
+}
+
 /*
 ===================
 RB_RHI_ShadowCasterAllowed
@@ -1799,7 +1828,7 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 // Forward decls: the 2D shadow-map cache (RB_RHI_Acquire2DTarget) and the shared token
 // hash (RB_RHI_CubeToken) live further down with the point-cube cache, but this 2D pass
 // uses them. r_shadowMapDebug counters: 2D cache hits vs maps actually rendered.
-static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float range, int size, bool *outDynamic, unsigned long long *outLightTok = NULL );
+static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float range, int size, bool *outDynamic, unsigned long long *outLightTok = NULL, bool staticOnly = false );
 static rhi::RenderTargetHandle RB_RHI_Acquire2DTarget( rhi::RHI *r, int lightIndex, int size, unsigned long long token, bool &hit );
 static int rhiMapCacheHits = 0;
 static int rhiMapCacheRendered = 0;
@@ -1952,7 +1981,8 @@ static void RB_RHI_ExtractWorldFrustum( const float m[16], const idVec3 &lightOr
 // geometry actually inside its 90-degree cone.
 static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, rhi::ShaderHandle prog,
                                           const float faceViewProj[16], const idPlane facePlanes[6],
-                                          const idVec3 &globalLightOrigin, float range ) {
+                                          const idVec3 &globalLightOrigin, float range,
+                                          casterFilter_t filter ) {
 	for ( ; surf; surf = surf->nextOnLight ) {
 		const srfTriangles_t *tri = surf->geo;
 		if ( !tri || !tri->ambientCache || !tri->numIndexes ) {
@@ -1960,6 +1990,14 @@ static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, r
 		}
 		if ( !RB_RHI_ShadowCasterAllowed( surf ) ) {
 			continue;
+		}
+		// static/dynamic split (r_shadowMapCacheSplit): render only the layer we're
+		// filling. CF_ALL (legacy) keeps every allowed caster.
+		if ( filter != CF_ALL ) {
+			const bool dyn = RB_RHI_CasterIsDynamic( surf );
+			if ( ( filter == CF_STATIC && dyn ) || ( filter == CF_DYNAMIC && !dyn ) ) {
+				continue;
+			}
 		}
 		// per-face cull: skip casters whose world bounds miss this face's cone
 		if ( R_CullLocalBox( tri->bounds, surf->space->modelMatrix, 6, facePlanes ) ) {
@@ -2136,6 +2174,9 @@ static int rhiCubeMissCold = 0;
 static int rhiCubeMissWarmCaster = 0;
 static int rhiCubeMissWarmLight = 0;
 static int rhiCubeEvictions = 0;
+// r_shadowMapCacheDebug: point lights that used the static/dynamic split this view — a
+// moving-caster light kept CACHED for its world layer instead of bypassing the cache.
+static int rhiCubeCacheSplit = 0;
 
 // depth24 cube cost: 6 faces, 4 bytes/texel (GL pads DEPTH_COMPONENT24 to 32-bit).
 static size_t RB_RHI_CubeBytes( int size ) {
@@ -2190,7 +2231,8 @@ static unsigned long long RB_RHI_CasterHash( const drawSurf_t *surf ) {
 // a fully static light hashes identically every frame and stays cached. The caster
 // contributions are summed so frame-to-frame reordering of the list doesn't matter.
 static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float range, int size,
-                                            bool *outDynamic, unsigned long long *outLightTok ) {
+                                            bool *outDynamic, unsigned long long *outLightTok,
+                                            bool staticOnly ) {
 	unsigned long long h = 1469598103934665603ULL;			// FNV offset basis
 	h = RB_RHI_HashBytes( h, vLight->globalLightOrigin.ToFloatPtr(), 3 * sizeof( float ) );
 	h = RB_RHI_HashBytes( h, vLight->lightDef->parms.lightCenter.ToFloatPtr(), 3 * sizeof( float ) );
@@ -2205,14 +2247,20 @@ static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float ran
 	bool dynamic = false;
 	unsigned long long casters = 0;
 	for ( const drawSurf_t *surf = vLight->shadowMapCasters; surf; surf = surf->nextOnLight ) {
-		casters += RB_RHI_CasterHash( surf );
 		// animated/particle casters (monsters, ragdolls) change every frame, so a light
 		// touching one can never cache-hit; flag it so the caller keeps it on the scratch
 		// path instead of wasting a persistent slot + VRAM on it.
-		const idRenderEntityLocal *edef = surf->space ? surf->space->entityDef : NULL;
-		if ( edef && edef->parms.hModel && edef->parms.hModel->IsDynamicModel() != DM_STATIC ) {
+		const bool dyn = RB_RHI_CasterIsDynamic( surf );
+		if ( dyn ) {
 			dynamic = true;
 		}
+		// staticOnly (r_shadowMapCacheSplit): fold only the static casters into the token,
+		// so a mover walking past a static light doesn't invalidate its cached (static) cube.
+		// The movers get their own scratch cube instead. Must match CF_STATIC in the render.
+		if ( staticOnly && dyn ) {
+			continue;
+		}
+		casters += RB_RHI_CasterHash( surf );
 	}
 	if ( outDynamic ) {
 		*outDynamic = dynamic;
@@ -2230,7 +2278,7 @@ static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float ran
 // The light pose is in every face's hash, so a moved light flips all six -> the whole cube
 // re-renders. Computed only on a warm miss, to find which faces a mover dirtied.
 static void RB_RHI_CubeFaceTokens( const viewLight_t *vLight, float range, int size,
-                                   unsigned long long faceTok[6] ) {
+                                   unsigned long long faceTok[6], bool staticOnly ) {
 	unsigned long long h = 1469598103934665603ULL;
 	h = RB_RHI_HashBytes( h, vLight->globalLightOrigin.ToFloatPtr(), 3 * sizeof( float ) );
 	h = RB_RHI_HashBytes( h, vLight->lightDef->parms.lightCenter.ToFloatPtr(), 3 * sizeof( float ) );
@@ -2253,6 +2301,11 @@ static void RB_RHI_CubeFaceTokens( const viewLight_t *vLight, float range, int s
 			continue;
 		}
 		if ( !RB_RHI_ShadowCasterAllowed( surf ) ) {
+			continue;
+		}
+		// static/dynamic split: the per-face tokens gate the cached (static) cube, so on a
+		// split light they must ignore movers — exactly as the static whole-cube token does.
+		if ( staticOnly && RB_RHI_CasterIsDynamic( surf ) ) {
 			continue;
 		}
 		const unsigned long long c = RB_RHI_CasterHash( surf );
@@ -2534,7 +2587,7 @@ static void RB_RHI_ResetLightBudgetHyst();		// defined with the hysteresis helpe
 // the new context. Driven by RB_RHI_Shutdown (RhiBackend.cpp).
 void RB_RHI_ResetWorldTargets( void ) {
 	rhiShadowMap = 0;			rhiShadowMapSize = 0;
-	rhiShadowCube = 0;			rhiShadowCubeSize = 0;
+	rhiShadowCube = 0;			rhiShadowCubeSize = 0;	rhiShadowCubeDyn = 0;
 	for ( int i = 0; i < SHADOW_NTIERS; i++ ) {
 		rhiShadowMapPool[i].rt  = 0;	rhiShadowMapPool[i].size  = 0;
 		rhiShadowCubePool[i].rt = 0;	rhiShadowCubePool[i].size = 0;
@@ -2579,13 +2632,62 @@ void RB_RHI_FreeShadowCubeCache() {
 	RB_RHI_ResetLightBudgetHyst();
 }
 
+// Render a point light's occluder depth into `cubeTarget`, one 90-degree face at a time.
+// renderFace[] gates which faces to (re)draw (per-face invalidation, lever A); faceCull skips
+// faces whose cone can't reach the camera — valid only for a throwaway cube regenerated this
+// frame, never a cached cube sampled from future angles. filter picks the static/dynamic layer
+// (lever B) or CF_ALL for the whole caster set.
+static void RB_RHI_RenderCubeFaces( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderHandle prog,
+                                    rhi::RenderTargetHandle cubeTarget, float range,
+                                    const bool renderFace[6], bool faceCull, casterFilter_t filter ) {
+	const idVec3 &L = vLight->globalLightOrigin;
+
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.depth = true;
+
+	// whole-face view-frustum cull: fetch the camera frustum corners once, then skip
+	// the (expensive) occluder rasterization on any face whose cone can't reach the
+	// view. The face is still cleared to far depth so seamless cube sampling reads it
+	// as "lit" at shared edges — only the geometry, the dominant cost, is skipped.
+	idVec3 viewCorners[8];
+	const bool doCull = faceCull && r_shadowMapFaceCull.GetBool() && backEnd.viewDef;
+	if ( doCull ) {
+		backEnd.viewDef->viewFrustum.ToPoints( viewCorners );
+	}
+
+	for ( int face = 0; face < 6; face++ ) {
+		if ( !renderFace[face] ) {
+			continue;			// per-face invalidation: unchanged face keeps its cached depth
+		}
+		float vp[16];
+		RB_RHI_CubeFaceViewProj( face, range, vp );
+		idPlane planes[6];
+		RB_RHI_ExtractWorldFrustum( vp, L, planes );
+
+		const bool cullFace = doCull && RB_RHI_ViewOutsideFaceCone( planes, viewCorners );
+
+		r->BeginCubeFacePass( cubeTarget, face, &clear );
+		if ( !cullFace ) {
+			// single complete occluder set (full ambientTris, view-independent); see the
+			// shadowMapCasters comment in idInteraction::AddActiveInteraction
+			RB_RHI_ShadowCasterChainCube( r, vLight->shadowMapCasters, prog, vp, planes, L, range, filter );
+			rhiShadowCubeFaces++;
+		} else {
+			rhiShadowCubeFacesCulled++;
+		}
+		r->EndPass();
+	}
+}
+
 /*
 ===================
 RB_RHI_ShadowMapPassCube
 
-Renders a point light's occluder depth into the shared cube target, one 90-degree
-face at a time with per-face culling. Returns false (→ stencil fallback) if the cube
-target can't be created.
+Renders a point light's occluder depth into a cube target, one 90-degree face at a time
+with per-face culling. With r_shadowMapCacheSplit a moving-caster light renders its world
+occluders into the cached cube and its movers into a per-frame scratch cube (sampled as
+min of the two). Returns false (→ stencil fallback) if the cube target can't be created.
 ===================
 */
 static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderHandle prog, float range ) {
@@ -2606,19 +2708,35 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	// (token stored); if caching is off or the light won't fit the budget it returns 0
 	// and we fall back to the shared scratch pool that regenerates every frame.
 	const int lightIndex = vLight->lightDef->index;
+	// static/dynamic split (r_shadowMapCacheSplit, lever B): a light with a moving/animated
+	// caster normally bypasses the cache and regenerates the whole cube every frame. With the
+	// split on we cache the STATIC (world) casters and re-render only the movers into a small
+	// per-frame cube, sampling min(static, dynamic) in the interaction pass. The token then
+	// folds static casters only, so a monster walking past a static light no longer invalidates
+	// its cached cube.
+	const bool split = r_shadowMapCacheSplit.GetBool();
 	bool dynamic = false;
 	unsigned long long lightTok = 0;
-	const unsigned long long token = RB_RHI_CubeToken( vLight, range, size, &dynamic, &lightTok );
+	const unsigned long long token = RB_RHI_CubeToken( vLight, range, size, &dynamic, &lightTok, /*staticOnly=*/split );
 	bool hit = false;
 	bool stale = false;
 	shadowCubeCache_t *pendingSlot = NULL;
-	// A light with an animated (non DM_STATIC) caster changes every frame, so it can
-	// never cache-hit. Skip the cache entirely and use the shared scratch pool, which
-	// costs no persistent VRAM slot and still gets per-face view-frustum culling.
 	rhi::RenderTargetHandle target = 0;
-	if ( dynamic ) {
+	bool splitActive = false;		// this light rendered a cached static + scratch dynamic pair
+	if ( dynamic && split ) {
+		// try to cache the static layer (static-only token). Hit / warm-miss / eviction all
+		// behave exactly like a static light; only the render below is filtered to CF_STATIC.
+		target = RB_RHI_AcquireCubeTarget( r, lightIndex, size, token, lightTok, hit, stale, &pendingSlot );
+		splitActive = ( target != 0 );
+	}
+	if ( splitActive ) {
+		rhiCubeCacheSplit++;
+	} else if ( dynamic ) {
+		// split off, or the static layer didn't fit the budget: legacy whole-cube scratch,
+		// which costs no persistent VRAM slot and still gets per-face view-frustum culling.
 		rhiCubeCacheDynamic++;
 	} else {
+		// fully static light: unchanged cached path.
 		target = RB_RHI_AcquireCubeTarget( r, lightIndex, size, token, lightTok, hit, stale, &pendingSlot );
 	}
 	const bool cached = ( target != 0 );
@@ -2630,105 +2748,92 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	}
 	rhiShadowCube = target;
 	rhiShadowCubeSize = size;
+	rhiShadowCubeDyn = 0;			// set below only if this light renders a dynamic layer
 	if ( target == 0 ) {
 		return false;
 	}
+
+	// Does the primary (static/combined) cube need a (re)render this frame? A hit or a
+	// deferred warm miss reuses last frame's cube; a split light still re-renders its
+	// dynamic layer below regardless.
+	bool renderPrimary = true;
 	if ( hit ) {
 		rhiCubeCacheHits++;
-		return true;			// unchanged since last frame — nothing to render
-	}
-	if ( cached ) {
+		renderPrimary = false;			// unchanged since last frame
+	} else if ( cached ) {
 		// Update budget (r_shadowMapMaxUpdates): a warm miss can be deferred — its old cube
 		// is still on the slot, so sample that this view and retry next frame. Cold misses
 		// (stale == false) have no prior contents and must render regardless of budget.
 		const int maxUpdates = r_shadowMapMaxUpdates.GetInteger();
 		if ( stale && maxUpdates > 0 && rhiCubeUpdatesSpent >= maxUpdates ) {
 			rhiCubeCacheDeferred++;
-			return true;		// reuse last frame's cube; token left stale -> retried next view
-		}
-		rhiCubeCacheMiss++;
-		// r_shadowMapCacheDebug: attribute this re-render. Cold = fresh slot (light new to the
-		// cache or evicted and returned). Warm-light = the light-pose sub-hash differs from the
-		// stored one (the light moved). Warm-caster = pose held, so an occluder in the light's
-		// volume moved. Classify BEFORE the commit below overwrites the stored baseline.
-		if ( !stale ) {
-			rhiCubeMissCold++;
-		} else if ( pendingSlot && lightTok != pendingSlot->lightTok ) {
-			rhiCubeMissWarmLight++;
+			renderPrimary = false;		// reuse last frame's cube; token left stale -> retried next view
 		} else {
-			rhiCubeMissWarmCaster++;
-		}
-		rhiCubeUpdatesSpent++;
-		if ( pendingSlot ) {
-			pendingSlot->token = token;		// committing to the re-render: adopt the new token
-			pendingSlot->lightTok = lightTok;
-		}
-	}
-
-	// Per-face invalidation (r_shadowMapCachePerFace, lever A): on a WARM miss re-render only the
-	// faces a mover actually dirtied; clean faces keep their cached depth. A cold miss (fresh slot)
-	// renders all six and stores the baseline; scratch (uncached) is untouched (renderFace all
-	// true). Computed only here — the per-face cull is paid only when something moved near a
-	// cached light, never on the common hit that already returned above.
-	bool renderFace[6] = { true, true, true, true, true, true };
-	if ( cached && pendingSlot ) {
-		if ( r_shadowMapCachePerFace.GetBool() ) {
-			unsigned long long faceTok[6];
-			RB_RHI_CubeFaceTokens( vLight, range, size, faceTok );
-			for ( int f = 0; f < 6; f++ ) {
-				renderFace[f] = stale ? ( faceTok[f] != pendingSlot->faceTok[f] ) : true;
-				pendingSlot->faceTok[f] = faceTok[f];	// adopt the new per-face baseline
+			rhiCubeCacheMiss++;
+			// r_shadowMapCacheDebug: attribute this re-render. Cold = fresh slot (light new to the
+			// cache or evicted and returned). Warm-light = the light-pose sub-hash differs from the
+			// stored one (the light moved). Warm-caster = pose held, so an occluder in the light's
+			// volume moved. Classify BEFORE the commit below overwrites the stored baseline.
+			if ( !stale ) {
+				rhiCubeMissCold++;
+			} else if ( pendingSlot && lightTok != pendingSlot->lightTok ) {
+				rhiCubeMissWarmLight++;
+			} else {
+				rhiCubeMissWarmCaster++;
 			}
-		} else {
-			// per-face OFF: this miss re-renders all six faces but doesn't recompute the per-face
-			// tokens, so the stored baseline goes stale. Zero it so a later r_shadowMapCachePerFace
-			// 1 can't trust a frozen baseline and skip a face that has since changed (review D1) —
-			// the next per-face-on warm miss then re-renders all six once and re-baselines.
-			for ( int f = 0; f < 6; f++ ) {
-				pendingSlot->faceTok[f] = 0;
+			rhiCubeUpdatesSpent++;
+			if ( pendingSlot ) {
+				pendingSlot->token = token;		// committing to the re-render: adopt the new token
+				pendingSlot->lightTok = lightTok;
 			}
 		}
 	}
 
-	const idVec3 &L = vLight->globalLightOrigin;
-
-	rhi::ClearArgs clear;
-	memset( &clear, 0, sizeof( clear ) );
-	clear.depth = true;
-
-	// whole-face view-frustum cull: fetch the camera frustum corners once, then skip
-	// the (expensive) occluder rasterization on any face whose cone can't reach the
-	// view. The face is still cleared to far depth so seamless cube sampling reads it
-	// as "lit" at shared edges — only the geometry, the dominant cost, is skipped.
-	// Only for scratch (throwaway) renders: a cached cube is sampled from arbitrary
-	// future camera angles, so it must contain all six faces.
-	idVec3 viewCorners[8];
-	const bool faceCull = !cached && r_shadowMapFaceCull.GetBool() && backEnd.viewDef;
-	if ( faceCull ) {
-		backEnd.viewDef->viewFrustum.ToPoints( viewCorners );
+	// Primary layer: the cached static cube on a split light (CF_STATIC), else the whole
+	// caster set (CF_ALL). Skipped entirely on a hit / deferred warm miss.
+	if ( renderPrimary ) {
+		// Per-face invalidation (r_shadowMapCachePerFace, lever A): on a WARM miss re-render only the
+		// faces a mover actually dirtied; clean faces keep their cached depth. A cold miss (fresh slot)
+		// renders all six and stores the baseline; scratch (uncached) is untouched (renderFace all
+		// true). On a split light the per-face tokens fold static casters only, matching the render.
+		bool renderFace[6] = { true, true, true, true, true, true };
+		if ( cached && pendingSlot ) {
+			if ( r_shadowMapCachePerFace.GetBool() ) {
+				unsigned long long faceTok[6];
+				RB_RHI_CubeFaceTokens( vLight, range, size, faceTok, /*staticOnly=*/split );
+				for ( int f = 0; f < 6; f++ ) {
+					renderFace[f] = stale ? ( faceTok[f] != pendingSlot->faceTok[f] ) : true;
+					pendingSlot->faceTok[f] = faceTok[f];	// adopt the new per-face baseline
+				}
+			} else {
+				// per-face OFF: this miss re-renders all six faces but doesn't recompute the per-face
+				// tokens, so the stored baseline goes stale. Zero it so a later r_shadowMapCachePerFace
+				// 1 can't trust a frozen baseline and skip a face that has since changed (review D1) —
+				// the next per-face-on warm miss then re-renders all six once and re-baselines.
+				for ( int f = 0; f < 6; f++ ) {
+					pendingSlot->faceTok[f] = 0;
+				}
+			}
+		}
+		// a cached cube is sampled from arbitrary future camera angles, so it must hold all six
+		// faces (no view-frustum face cull); a scratch cube is regenerated this frame, so faces
+		// outside the view are safe to skip.
+		RB_RHI_RenderCubeFaces( r, vLight, prog, target, range, renderFace, /*faceCull=*/!cached,
+		                        splitActive ? CF_STATIC : CF_ALL );
 	}
 
-	for ( int face = 0; face < 6; face++ ) {
-		if ( !renderFace[face] ) {
-			continue;			// per-face invalidation: unchanged face keeps its cached depth
+	// Dynamic layer (split only): the movers, re-rendered every frame into a scratch cube.
+	// The interaction pass samples min(static, dynamic), so a mover shadows through the
+	// cached world cube without ever invalidating it. All six faces, view-frustum culled
+	// (this cube lives one frame). Failing to get a scratch target just drops the dynamic
+	// shadow this frame (the static shadow still shows); u_shadowCubeDyn stays unbound.
+	if ( splitActive ) {
+		const rhi::RenderTargetHandle dynTarget = RB_RHI_ShadowPoolTarget( r, true, tier, size );
+		if ( dynTarget != 0 && dynTarget != target ) {
+			const bool allFaces[6] = { true, true, true, true, true, true };
+			RB_RHI_RenderCubeFaces( r, vLight, prog, dynTarget, range, allFaces, /*faceCull=*/true, CF_DYNAMIC );
+			rhiShadowCubeDyn = dynTarget;
 		}
-		float vp[16];
-		RB_RHI_CubeFaceViewProj( face, range, vp );
-		idPlane planes[6];
-		RB_RHI_ExtractWorldFrustum( vp, L, planes );
-
-		const bool cullFace = faceCull && RB_RHI_ViewOutsideFaceCone( planes, viewCorners );
-
-		r->BeginCubeFacePass( rhiShadowCube, face, &clear );
-		if ( !cullFace ) {
-			// single complete occluder set (full ambientTris, view-independent); see the
-			// shadowMapCasters comment in idInteraction::AddActiveInteraction
-			RB_RHI_ShadowCasterChainCube( r, vLight->shadowMapCasters, prog, vp, planes, L, range );
-			rhiShadowCubeFaces++;
-		} else {
-			rhiShadowCubeFacesCulled++;
-		}
-		r->EndPass();
 	}
 	return true;
 }
@@ -4385,6 +4490,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	rhiCubeMissWarmCaster = 0;
 	rhiCubeMissWarmLight = 0;
 	rhiCubeEvictions = 0;
+	rhiCubeCacheSplit = 0;
 	rhiMapCacheHits = 0;
 	rhiMapCacheRendered = 0;
 	rhiCubeCacheFrameNo++;			// bump before the light loop so lastFrame == "this view"
@@ -4430,6 +4536,8 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			ictx.shadowImage = 0;
 			ictx.lightShadowCube = false;
 			ictx.shadowCubeImage = 0;
+			ictx.lightHasDynamicLayer = false;
+			ictx.shadowCubeDynImage = 0;
 
 			// Flag the player flashlight so its interactions get the dedicated small
 			// shadow bias (see r_shadowMapFlashlightBias). Keyed on the light shader
@@ -4493,6 +4601,11 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 					if ( RB_RHI_ShadowMapPassCube( r, vLight, shadowCubeProg, range ) ) {
 						ictx.lightShadowCube = true;
 						ictx.shadowCubeImage = r->GetRenderTargetImage( rhiShadowCube );
+						// static/dynamic split: a second (movers) cube to min() with the static one
+						if ( rhiShadowCubeDyn != 0 ) {
+							ictx.lightHasDynamicLayer = true;
+							ictx.shadowCubeDynImage = r->GetRenderTargetImage( rhiShadowCubeDyn );
+						}
 						ictx.lightRange = range;
 						rhiShadowCubeLights++;
 					}
@@ -4615,7 +4728,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// per-frame spam. Hit% is over cached lookups (excludes scratch/dynamic lights, which
 	// never enter the cache). This is what says which caching lever is worth building.
 	if ( r_shadowMapCacheDebug.GetBool() ) {
-		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accFaces, accFrames, accStartMs;
+		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accFaces, accSplit, accFrames, accStartMs;
 		const int nowMs = Sys_Milliseconds();
 		if ( accStartMs == 0 ) { accStartMs = nowMs; }
 		accHits       += rhiCubeCacheHits;
@@ -4627,15 +4740,16 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 		accDeferred   += rhiCubeCacheDeferred;
 		accEvict      += rhiCubeEvictions;
 		accFaces      += rhiShadowCubeFaces;		// actual cube FACES rasterized -> the GPU cost per-face invalidation cuts
+		accSplit      += rhiCubeCacheSplit;			// moving-caster lights kept cached via the static/dynamic split
 		accFrames++;
 		if ( nowMs - accStartMs >= 1000 ) {
 			const int rendered = accCold + accWarmCaster + accWarmLight;
 			const int lookups  = accHits + rendered;
 			const int hitPct   = lookups > 0 ? ( 100 * accHits ) / lookups : 0;
-			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | faces %d | scratch %d, dynamic %d, deferred %d, evict %d | %d frames\n",
+			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | faces %d | split %d, scratch %d, dynamic %d, deferred %d, evict %d | %d frames\n",
 			                accHits, hitPct, rendered, accCold, accWarmCaster, accWarmLight, accFaces,
-			                accScratch, accDynamic, accDeferred, accEvict, accFrames );
-			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accFaces = accFrames = 0;
+			                accSplit, accScratch, accDynamic, accDeferred, accEvict, accFrames );
+			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accFaces = accSplit = accFrames = 0;
 			accStartMs = nowMs;
 		}
 	}
