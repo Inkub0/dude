@@ -28,9 +28,16 @@ bilateral blur → optional temporal. `ssao.frag` reconstructs view-space positi
 
 ## Phase 1 — Prefiltered depth mip chain (biggest leverage) — GL3 + Vulkan
 
-**Status: BUILT (feat/ssao-depth-mip), pending in-engine verify.** Behind `r_ssaoDepthMip`
-(default 1; off = the exact prior full-res raw-depth march, for an A/B) with `r_ssaoDepthMipBias`
-(0.5) tuning LOD aggressiveness. As built: a new RHI capability — `CreateRenderTargetMipped` +
+**Status: BUILT (feat/ssao-depth-mip), user-tuned.** Behind `r_ssaoDepthMip` (default 1; off =
+the exact prior full-res raw-depth march, for an A/B) with `r_ssaoDepthMipBias` (default **0.2**)
+tuning LOD aggressiveness. **Silhouette-halo note:** a depth mip is a *point sample of a
+downsampled depth*, so at any depth discontinuity one coarse texel stands in for two surfaces —
+no filter (avg/min/max) can represent both, and the surviving foreground occluder still spreads
+its influence across the coarse footprint (positional quantization). The max-downsample removed
+the worst (phantom mid-depth) component; keeping steps on finer mips (`bias 0.2`) shrinks the
+residual band to near-invisible while retaining most of the speedup (measured ~100→133 fps at
+`bias 0.5`, most of it kept at 0.2). Fully eliminating the halo means not downsampling near
+edges — i.e. Phase 3 compute tiling marches full-res depth from shared memory. As built: a new RHI capability — `CreateRenderTargetMipped` +
 `BeginTargetMipPass` + `GetRenderTargetMipImage` (GL3: per-level `glTexImage2D` + a shared FBO
 re-pointed per level; Vulkan: an `mipLevels`-deep image with a level-0 attachment view, an
 all-levels sample view, and per-level single-level views + framebuffers so each coarse level is
