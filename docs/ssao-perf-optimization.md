@@ -107,25 +107,35 @@ doesn't apply: the AO buffers pack a **bent normal in `.gba`** (`ssao_blur.frag`
 AO). R8/RG16F would drop the bent normal, so `rhiSsaoRT`/`rhiSsaoBlurRT`/`rhiSsaoHistRT` stay
 RGBA8. The single-channel depth mip was the only AO-path buffer with dead channels to reclaim.
 
-**fp16 math (Vulkan-only) — staged, measure first.** GL 3.3 core has no half-float shader
-arithmetic (`mediump` is a no-op on desktop GL), so explicit fp16 math needs Vulkan +
-`GL_EXT_shader_explicit_arithmetic_types_float16` / `shaderFloat16` (VK_KHR_shader_float16_int8):
-query `VkPhysicalDeviceShaderFloat16Int8Features` chained to the features2 query, enable it at
-device creation, expose a capability flag, add a second `ssao_fp16.frag` variant (accumulate the
-visibility integral `cH_pos/cH_neg` in `float16_t`, keep position reconstruction fp32) + its own
-pipeline, and pick it at runtime on capable VK devices. **Caveat (why it's gated on a
-measurement, not shipped with the storage half):** on modern NVIDIA (incl. the RTX 3080 Ti dev
-box, Ampere) non-tensor fp16 shader ALU is at/near 1:1 with fp32, so the math half's benefit is
-mostly halved register pressure → occupancy, which for a handful of scalar accumulators is
-marginal and unpredictable. It pays off more on 2:1-fp16 parts (RDNA/GCN, Turing). It also adds a
-permanent Vulkan-only shader+pipeline variant + device-feature plumbing. Per this doc's own
-"gate → measure → fold" discipline, build it **only if the AO pass is still a measured hotspot
-after the R16F storage lands** (`r_vkGpuTime` A/B).
+**fp16 math (Vulkan-only) — RESOLVED: SKIP on the GA10x dev box.** The math half would need
+Vulkan + `GL_EXT_shader_explicit_arithmetic_types_float16` / `shaderFloat16`
+(VK_KHR_shader_float16_int8): query `VkPhysicalDeviceShaderFloat16Int8Features` chained to the
+features2 query, enable it at device creation, expose a capability flag, add a second
+`ssao_fp16.frag` variant (accumulate the visibility integral `cH_pos/cH_neg` in `float16_t`, keep
+position reconstruction fp32) + its own pipeline, and pick it at runtime. A sourced review
+(2026-08) killed it for this hardware on two independent grounds:
 
-**Gain:** storage compounds Phase 1's cache win (portable, shipped); math is 0–20% and
-GPU-dependent. **Effort:** low (storage, done) + low-moderate (VK math, behind a feature check).
-**Risk:** storage none (bit-identical `.r`); math = a VK-only maintenance surface for an
-uncertain local win.
+1. **Consumer Ampere runs scalar `float16_t` at 1:1 with FP32.** The NVIDIA GA102 whitepaper's
+   own non-Tensor throughput table lists the RTX 3080 at **FP32 29.8 TFLOPS = FP16 29.8 TFLOPS**
+   (contrast Turing RTX 2080: 10.6 vs 21.2 = 2:1). GA10x's 2:1 "double-speed HFMA" only fires
+   when the compiler packs work into `half2` SIMD pairs; the horizon integral is a chain of
+   *dependent scalar* accumulators that cannot fill both lanes, so it hits the 1:1 case. (Turing,
+   RDNA/GCN, and datacenter GA100 do get real 2:1 — the calculus differs there.)
+2. **The pass is bandwidth-bound, not ALU-bound.** The R16F *storage* change alone gave 72→98 fps
+   — direct proof the bottleneck was the depth fetches, not the arithmetic. Halving ALU precision
+   on a bandwidth-bound pass buys almost nothing.
+
+**Expected fp16-math gain on the RTX 3080 Ti: ~0–3%** (lighter register pressure/occupancy only),
+inside measurement noise — for a permanent Vulkan-only shader+pipeline+device-feature maintenance
+surface. Not worth it here. **Flip conditions:** an `r_vkGpuTime` profile showing the AO pass has
+become ALU/occupancy-bound (e.g. after further fetch cuts), OR restructuring the integral to
+expose genuine `half2` pairs, OR targeting a 2:1-fp16 GPU (Turing/RDNA/GCN/GA100) where the pass
+is ALU-bound. Sources: GA102 whitepaper v2.1; Turing architecture in-depth; A100 whitepaper; CUDA
+C++ Programming Guide compute-capabilities throughput table.
+
+**Gain:** storage compounds Phase 1's cache win (portable, shipped, measured 72→98); math ~0–3%
+on GA10x. **Effort:** low (storage, done) + low-moderate (VK math, not built). **Risk:** storage
+none (bit-identical `.r`); math = a VK-only maintenance surface for a near-noise local win.
 
 ---
 
