@@ -23,7 +23,7 @@
 //   unit 2 (u_mask)    = textures/smf/bloodorb3.tga (alpha = the radial gate)
 //   u_localParam0 = ( centerScale, feedbackStrength, historyValid, maskInvert )
 //   u_localParam1 = ( cos(rotPerFrame), sin(rotPerFrame), flipY, - )
-//   u_color.rgb   = per-level tint applied to the recirculated trail
+//   u_color.rgb   = per-level scene tint (stock cr_capture colour: neutral/warm/red)
 //
 // flipY (1 on Vulkan, 0 on GL): identical to berserk_accum — _currentRender is captured
 // top-down on Vulkan but this pass writes through a flipY viewport, so we flip the working
@@ -54,6 +54,10 @@ void main() {
 	// which puts the radial mask/zoom pivot at the true screen centre. u_history (the trail, a
 	// full-size RT) and u_mask (a normal texture) stay in plain 0..1 space.
 	vec4 cur = texture( u_scratch, q * u_screenCorrection.xy );
+	// per-level scene tint (stock cr_capture colour on the injected _currentRender): neutral for
+	// HELLTIME, warm for BERSERK, red for INVULNERABILITY. Applied to the fresh scene so it colours
+	// the whole view; the trail inherits it (its texels were fresh scene on earlier frames).
+	cur.rgb *= u_color.rgb;
 
 	// first frame after (re)allocation / re-entry: no usable history, seed with the clean scene.
 	if ( u_localParam0.z < 0.5 ) {
@@ -68,8 +72,7 @@ void main() {
 	vec2 rd = vec2( d.x * u_localParam1.x - d.y * u_localParam1.y,
 	                d.x * u_localParam1.y + d.y * u_localParam1.x );
 	vec2 zoomUV = rd * u_localParam0.x + center;
-	vec4 prev = texture( u_history, zoomUV );
-	prev.rgb *= u_color.rgb;					// per-level tint on the trail
+	vec4 prev = texture( u_history, zoomUV );	// already carries the scene tint from when it was injected
 
 	// radial gate from bloodorb3 alpha; helltime inverts it (edge feedback, sharp centre).
 	float m = texture( u_mask, q ).a;
