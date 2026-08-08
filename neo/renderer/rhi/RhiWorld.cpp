@@ -1798,7 +1798,7 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 // Forward decls: the 2D shadow-map cache (RB_RHI_Acquire2DTarget) and the shared token
 // hash (RB_RHI_CubeToken) live further down with the point-cube cache, but this 2D pass
 // uses them. r_shadowMapDebug counters: 2D cache hits vs maps actually rendered.
-static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float range, int size, bool *outDynamic );
+static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float range, int size, bool *outDynamic, unsigned long long *outLightTok = NULL );
 static rhi::RenderTargetHandle RB_RHI_Acquire2DTarget( rhi::RHI *r, int lightIndex, int size, unsigned long long token, bool &hit );
 static int rhiMapCacheHits = 0;
 static int rhiMapCacheRendered = 0;
@@ -2108,6 +2108,7 @@ struct shadowCubeCache_t {
 	rhi::RenderTargetHandle	rt;
 	int						size;			// face resolution of rt
 	unsigned long long		token;			// invalidation hash of light + casters
+	unsigned long long		lightTok;		// light-pose-only sub-hash (r_shadowMapCacheDebug: classify a warm miss as light-moved vs caster-moved)
 	int						lastFrame;		// for LRU eviction
 	size_t					bytes;			// VRAM cost estimate
 };
@@ -2125,6 +2126,14 @@ static int rhiCubeCacheScratch = 0;
 // misses), and stale misses deferred to a later frame because the budget was spent.
 static int rhiCubeUpdatesSpent = 0;
 static int rhiCubeCacheDeferred = 0;
+// r_shadowMapCacheDebug: rendered misses split by cause + LRU evictions this view. Cold =
+// fresh slot (light new to the cache or evicted and returned); warm-caster = an occluder in
+// the light's volume moved; warm-light = the light's own pose changed. These say which
+// caching lever matters (per-face / static-dynamic split vs eviction-budget tuning).
+static int rhiCubeMissCold = 0;
+static int rhiCubeMissWarmCaster = 0;
+static int rhiCubeMissWarmLight = 0;
+static int rhiCubeEvictions = 0;
 
 // depth24 cube cost: 6 faces, 4 bytes/texel (GL pads DEPTH_COMPONENT24 to 32-bit).
 static size_t RB_RHI_CubeBytes( int size ) {
@@ -2160,7 +2169,7 @@ static unsigned long long RB_RHI_HashBytes( unsigned long long h, const void *da
 // a fully static light hashes identically every frame and stays cached. The caster
 // contributions are summed so frame-to-frame reordering of the list doesn't matter.
 static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float range, int size,
-                                            bool *outDynamic ) {
+                                            bool *outDynamic, unsigned long long *outLightTok ) {
 	unsigned long long h = 1469598103934665603ULL;			// FNV offset basis
 	h = RB_RHI_HashBytes( h, vLight->globalLightOrigin.ToFloatPtr(), 3 * sizeof( float ) );
 	h = RB_RHI_HashBytes( h, vLight->lightDef->parms.lightCenter.ToFloatPtr(), 3 * sizeof( float ) );
@@ -2199,6 +2208,9 @@ static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float ran
 	if ( outDynamic ) {
 		*outDynamic = dynamic;
 	}
+	if ( outLightTok ) {
+		*outLightTok = h;		// light-pose-only sub-hash (before folding in the caster set)
+	}
 	return h ^ casters;
 }
 
@@ -2215,8 +2227,8 @@ static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float ran
 // once it commits to re-rendering, so a deferred light stays a miss and is retried next
 // frame. A cold miss (fresh slot, no prior contents) leaves stale=false and must render.
 static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightIndex, int size,
-                                                         unsigned long long token, bool &hit,
-                                                         bool &stale, shadowCubeCache_t **pendingSlot ) {
+                                                         unsigned long long token, unsigned long long lightTok,
+                                                         bool &hit, bool &stale, shadowCubeCache_t **pendingSlot ) {
 	hit = false;
 	stale = false;
 	*pendingSlot = NULL;
@@ -2293,6 +2305,7 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 		rhiCubeCache[victim].lightIndex = -1;
 		rhiCubeCache[victim].rt = 0;
 		rhiCubeCache[victim].bytes = 0;
+		rhiCubeEvictions++;			// r_shadowMapCacheDebug: VRAM-pressure churn signal
 		if ( firstFree < 0 ) {
 			firstFree = victim;
 		}
@@ -2311,6 +2324,7 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 	slot.rt = rt;
 	slot.size = size;
 	slot.token = token;			// we are about to render this token's geometry
+	slot.lightTok = lightTok;	// r_shadowMapCacheDebug classification baseline
 	slot.lastFrame = rhiCubeCacheFrameNo;
 	slot.bytes = need;
 	rhiCubeCacheBytes += need;
@@ -2537,7 +2551,8 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	// and we fall back to the shared scratch pool that regenerates every frame.
 	const int lightIndex = vLight->lightDef->index;
 	bool dynamic = false;
-	const unsigned long long token = RB_RHI_CubeToken( vLight, range, size, &dynamic );
+	unsigned long long lightTok = 0;
+	const unsigned long long token = RB_RHI_CubeToken( vLight, range, size, &dynamic, &lightTok );
 	bool hit = false;
 	bool stale = false;
 	shadowCubeCache_t *pendingSlot = NULL;
@@ -2548,7 +2563,7 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	if ( dynamic ) {
 		rhiCubeCacheDynamic++;
 	} else {
-		target = RB_RHI_AcquireCubeTarget( r, lightIndex, size, token, hit, stale, &pendingSlot );
+		target = RB_RHI_AcquireCubeTarget( r, lightIndex, size, token, lightTok, hit, stale, &pendingSlot );
 	}
 	const bool cached = ( target != 0 );
 	if ( !cached ) {
@@ -2576,9 +2591,21 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 			return true;		// reuse last frame's cube; token left stale -> retried next view
 		}
 		rhiCubeCacheMiss++;
+		// r_shadowMapCacheDebug: attribute this re-render. Cold = fresh slot (light new to the
+		// cache or evicted and returned). Warm-light = the light-pose sub-hash differs from the
+		// stored one (the light moved). Warm-caster = pose held, so an occluder in the light's
+		// volume moved. Classify BEFORE the commit below overwrites the stored baseline.
+		if ( !stale ) {
+			rhiCubeMissCold++;
+		} else if ( pendingSlot && lightTok != pendingSlot->lightTok ) {
+			rhiCubeMissWarmLight++;
+		} else {
+			rhiCubeMissWarmCaster++;
+		}
 		rhiCubeUpdatesSpent++;
 		if ( pendingSlot ) {
 			pendingSlot->token = token;		// committing to the re-render: adopt the new token
+			pendingSlot->lightTok = lightTok;
 		}
 	}
 
@@ -4270,6 +4297,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	rhiCubeCacheScratch = 0;
 	rhiCubeUpdatesSpent = 0;
 	rhiCubeCacheDeferred = 0;
+	rhiCubeMissCold = 0;
+	rhiCubeMissWarmCaster = 0;
+	rhiCubeMissWarmLight = 0;
+	rhiCubeEvictions = 0;
 	rhiMapCacheHits = 0;
 	rhiMapCacheRendered = 0;
 	rhiCubeCacheFrameNo++;			// bump before the light loop so lastFrame == "this view"
@@ -4493,6 +4524,35 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 		                rhiCubeCacheBytes / ( 1024 * 1024 ),
 		                dbgStencilBig, dbgParallel, dbgNoLightDef,
 		                rhiShadowPerfCasters, r_shadowMapping.GetInteger() );
+	}
+
+	// r_shadowMapCacheDebug: accumulate the per-view cube-cache tallies over ~1 second and
+	// print a single sustained line, so the dominant re-render cause is legible instead of
+	// per-frame spam. Hit% is over cached lookups (excludes scratch/dynamic lights, which
+	// never enter the cache). This is what says which caching lever is worth building.
+	if ( r_shadowMapCacheDebug.GetBool() ) {
+		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accFrames, accStartMs;
+		const int nowMs = Sys_Milliseconds();
+		if ( accStartMs == 0 ) { accStartMs = nowMs; }
+		accHits       += rhiCubeCacheHits;
+		accCold       += rhiCubeMissCold;
+		accWarmCaster += rhiCubeMissWarmCaster;
+		accWarmLight  += rhiCubeMissWarmLight;
+		accScratch    += rhiCubeCacheScratch;
+		accDynamic    += rhiCubeCacheDynamic;
+		accDeferred   += rhiCubeCacheDeferred;
+		accEvict      += rhiCubeEvictions;
+		accFrames++;
+		if ( nowMs - accStartMs >= 1000 ) {
+			const int rendered = accCold + accWarmCaster + accWarmLight;
+			const int lookups  = accHits + rendered;
+			const int hitPct   = lookups > 0 ? ( 100 * accHits ) / lookups : 0;
+			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | scratch %d, dynamic %d, deferred %d, evict %d | %d frames\n",
+			                accHits, hitPct, rendered, accCold, accWarmCaster, accWarmLight,
+			                accScratch, accDynamic, accDeferred, accEvict, accFrames );
+			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accFrames = 0;
+			accStartMs = nowMs;
+		}
 	}
 
 	// shader passes run with stencil satisfied everywhere
