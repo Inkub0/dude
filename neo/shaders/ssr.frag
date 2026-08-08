@@ -67,14 +67,21 @@ float ign( vec2 p ) {
 }
 
 // project a view-space point to fragment coordinates; w <= 0 means behind the eye.
-// The clip->uv is GL-convention (y-up); deviceRow re-orients the row so the returned
-// frag addresses the device-oriented depth / G-buffer (top-down on Vulkan).
+// SSR runs only on fullscreen PRIMARY views, whose projection is a standard perspective
+// matrix: every term is zero except [0][0]/[1][1] (scale), [2][0]/[2][1] (frustum-centre
+// offset), the depth row (unused here), and w = -z at [2][3]. Multiplying out just those
+// is BIT-IDENTICAL to the full u_projectionMatrix * vec4(viewPos,1.0) — the dropped terms
+// are exactly *0 — at ~5 muls instead of 16 (the compiler can't drop them: the zeros are
+// runtime uniform values). The clip->uv is GL-convention (y-up); deviceRow re-orients the
+// row so the returned frag addresses the device-oriented depth / G-buffer (top-down on VK).
 vec3 projectToFrag( vec3 viewPos ) {
-	vec4 clip = u_projectionMatrix * vec4( viewPos, 1.0 );
-	if ( clip.w <= 0.0 ) {
+	float cw = u_projectionMatrix[2][3] * viewPos.z;                                        // clip.w = -z
+	if ( cw <= 0.0 ) {
 		return vec3( -1.0, -1.0, -1.0 );
 	}
-	vec2 uv01 = ( clip.xy / clip.w ) * 0.5 + 0.5;
+	float cx = u_projectionMatrix[0][0] * viewPos.x + u_projectionMatrix[2][0] * viewPos.z;  // clip.x
+	float cy = u_projectionMatrix[1][1] * viewPos.y + u_projectionMatrix[2][1] * viewPos.z;  // clip.y
+	vec2 uv01 = ( vec2( cx, cy ) / cw ) * 0.5 + 0.5;
 	uv01.y = deviceRow( uv01.y );
 	return vec3( uv01 / u_screenCorrection.xy, 1.0 );
 }
@@ -221,8 +228,9 @@ void main() {
 	float lo = tPrev, hi = tHit;
 	for ( int i = 0; i < REFINE_STEPS; i++ ) {
 		float mid = 0.5 * ( lo + hi );
-		vec3 pf = projectToFrag( P + R * mid );
-		float dz = viewZFromRaw( rawDepth( pf.xy ) ) - ( P + R * mid ).z;
+		vec3  rp  = P + R * mid;                    // was computed twice (project + .z)
+		vec3  pf  = projectToFrag( rp );
+		float dz  = viewZFromRaw( rawDepth( pf.xy ) ) - rp.z;
 		if ( dz > 0.0 ) {
 			hi = mid;
 		} else {
