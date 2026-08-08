@@ -315,6 +315,16 @@ static int  rhiSsaoW = 0, rhiSsaoH = 0;				// AO buffer size (may be < view for 
 static int  rhiSsaoViewW = 0, rhiSsaoViewH = 0;		// full view size the AO covers
 static bool rhiSsaoAppliedThisView = false;			// AO was produced for the view being drawn
 
+// SSAO Phase 1 prefiltered depth mip chain (docs/ssao-perf-optimization.md, r_ssaoDepthMip).
+// A single AO-resolution RGBA16F target holding LINEAR view-space eye depth in R with a
+// GPU-generated mip chain: level 0 is written by ssao_depthmip.frag, coarser levels are
+// box-averages (GenerateRenderTargetMips). ssao.frag's horizon march reads a coarser mip
+// for farther steps, so far taps touch a small cache-local footprint. Rebuilt on resize /
+// lost context like the AO buffers; freed when the feature is toggled off.
+static rhi::RenderTargetHandle rhiSsaoDepthMipRT = 0;
+static int  rhiSsaoDepthMipW = 0, rhiSsaoDepthMipH = 0;	// == AO buffer size
+static int  rhiSsaoDepthMipLevels = 0;					// mip count (0 = not built)
+
 // GTAO temporal accumulation (docs/ssao-gtao.md, r_ssaoTemporal). Two ping-ponged history
 // buffers hold the accumulated AO+bent so we can read last frame's result while writing
 // this one; the resolve reprojects it by camera motion (rhiSsaoPrevViewProj) and clamps
@@ -2457,6 +2467,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoRT = rhiSsaoBlurRT = rhiSsaoResultRT = 0;
 	rhiSsaoW = rhiSsaoH = rhiSsaoViewW = rhiSsaoViewH = 0;
 	rhiSsaoAppliedThisView = false;
+	rhiSsaoDepthMipRT = 0;		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
 	rhiSsaoHistRT[0] = rhiSsaoHistRT[1] = 0;
 	rhiSsaoHistIdx = 0;			rhiSsaoHistW = rhiSsaoHistH = 0;
 	rhiSsaoHistValid = false;	rhiSsaoHavePrevVP = false;
@@ -3051,6 +3062,36 @@ static bool RB_RHI_EnsureSsaoTargets( rhi::RHI *r, int w, int h ) {
 	}
 	rhiSsaoW = w;
 	rhiSsaoH = h;
+	return true;
+}
+
+// SSAO Phase 1: (re)allocate the prefiltered linear-depth mip target at the AO size.
+// Returns false when the backend has no mipped-target capability (CreateRenderTargetMipped
+// returns 0), so the caller silently falls back to the full-res raw-depth march.
+static bool RB_RHI_EnsureSsaoDepthMip( rhi::RHI *r, int w, int h ) {
+	// a lost context (vid_restart) leaves the handle set but its texture gone
+	if ( rhiSsaoDepthMipRT && r->GetRenderTargetImage( rhiSsaoDepthMipRT ) == 0 ) {
+		rhiSsaoDepthMipRT = 0;
+		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
+	}
+	if ( rhiSsaoDepthMipRT && rhiSsaoDepthMipW == w && rhiSsaoDepthMipH == h ) {
+		return true;
+	}
+	if ( rhiSsaoDepthMipRT ) { r->DestroyRenderTarget( rhiSsaoDepthMipRT ); rhiSsaoDepthMipRT = 0; }
+
+	// enough levels to cover the horizon radius in coarse mips, capped so the chain (and
+	// its per-level blit) stays short — 6 levels already reaches a 1/32 footprint.
+	int levels = 1;
+	for ( int d = ( w > h ? w : h ); d > 1 && levels < 6; d >>= 1 ) { levels++; }
+
+	rhiSsaoDepthMipRT = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, levels );
+	if ( !rhiSsaoDepthMipRT ) {
+		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
+		return false;
+	}
+	rhiSsaoDepthMipW = w;
+	rhiSsaoDepthMipH = h;
+	rhiSsaoDepthMipLevels = levels;
 	return true;
 }
 
@@ -3806,6 +3847,23 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 
+	// SSAO Phase 1 (docs/ssao-perf-optimization.md): build the prefiltered linear-depth
+	// mip chain when enabled and the backend supports mipped targets. depthTexRecip.z
+	// carries the max LOD to ssao.frag (0 = off -> the raw full-res path).
+	bool doDepthMip = false;
+	rhi::ShaderHandle depthMipProg = 0;
+	if ( r_ssaoDepthMip.GetBool() ) {
+		if ( RB_RHI_EnsureSsaoDepthMip( r, aoW, aoH ) ) {
+			depthMipProg = r->LoadShader( "ssao_depthmip" );
+			doDepthMip = ( depthMipProg != 0 );
+		}
+	} else if ( rhiSsaoDepthMipRT ) {
+		// toggled off: reclaim the target so it isn't left resident
+		r->DestroyRenderTarget( rhiSsaoDepthMipRT );
+		rhiSsaoDepthMipRT = 0;
+		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
+	}
+
 	// horizon-search sample budget (clamped to the shader's MAX_SLICES / MAX_STEPS)
 	const int slices = idMath::ClampInt( 1, 8,  r_ssaoSlices.GetInteger() );
 	const int steps  = idMath::ClampInt( 1, 12, r_ssaoSteps.GetInteger() );
@@ -3825,6 +3883,9 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
 	parms.depthTexRecip[0]    = ( (float)fullW / aoW ) / uploadW;	// gl_FragCoord (AO) -> depth tc
 	parms.depthTexRecip[1]    = ( (float)fullH / aoH ) / uploadH;
+	// SSAO Phase 1: .z = depth-mip max LOD (0 = off, ssao.frag uses the raw path), .w = LOD bias
+	parms.depthTexRecip[2]    = doDepthMip ? (float)( rhiSsaoDepthMipLevels - 1 ) : 0.0f;
+	parms.depthTexRecip[3]    = r_ssaoDepthMipBias.GetFloat();
 	parms.screenCorrection[0] = 1.0f / aoW;				// gl_FragCoord -> [0,1] uv
 	parms.screenCorrection[1] = 1.0f / aoH;
 	parms.localParam0[0] = invP00;
@@ -3852,6 +3913,21 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.windowCoord[1] = rhiSsaoJitterPhase;
 	}
 
+	// SSAO Phase 1: linearize _currentDepth into level 0 of the depth-mip target, then
+	// box-average it down the chain. Done before the horizon search so ssao.frag can
+	// textureLod a coarser mip for its far steps (the cache win).
+	if ( doDepthMip ) {
+		r->BeginTargetPass( rhiSsaoDepthMipRT, NULL );
+		RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+		RB_RHI_DrawFullscreen( r, depthMipProg, parms, 0 );
+		r->EndPass();
+		r->GenerateRenderTargetMips( rhiSsaoDepthMipRT );
+		// GL: GenerateRenderTargetMips bound the mip texture on unit 0 to run
+		// glGenerateMipmap, leaving the tmu cache disagreeing with GL; forget unit 0 so
+		// the horizon search's cache-aware depth bind below actually re-issues.
+		backEnd.glState.tmu[0].current2DMap = -1;
+	}
+
 	// horizon search: _currentDepth (unit 0) [+ normal G-buffer on unit 1] -> raw AO
 	r->BeginTargetPass( rhiSsaoRT, NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
@@ -3859,6 +3935,15 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		RB_RHI_BindRTUnit( r, 1, rhiNormalRT );	// normal G-buffer (GL raw bind / VK rhiVkUnits[1])
 		// direct bind bypassed the tmu cache; forget unit 1 so the blur's depth bind re-issues
 		backEnd.glState.tmu[1].current2DMap = -1;
+	}
+	// SSAO Phase 1: the prefiltered depth mip on unit 2 for the far-step taps. When off,
+	// bind _currentDepth there as an unused dummy so the descriptor slot stays valid
+	// (ssao.frag routes to the raw path via depthTexRecip.z, never sampling it).
+	if ( doDepthMip ) {
+		RB_RHI_BindRTUnit( r, 2, rhiSsaoDepthMipRT );
+		backEnd.glState.tmu[2].current2DMap = -1;	// direct bind bypassed the tmu cache
+	} else {
+		RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
 	}
 	RB_RHI_DrawFullscreen( r, ssaoProg, parms, 0 );
 	r->EndPass();

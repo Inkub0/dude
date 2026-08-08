@@ -120,6 +120,7 @@ class GL3Backend : public RHI {
 		GLuint	depthTex;	// companion depth attachment for a color+depth target (0 = none)
 		int		w, h;
 		bool	cube;		// tex is a GL_TEXTURE_CUBE_MAP (point-light shadow map)
+		int		mipLevels;	// >1: tex carries a GPU-generated mip chain (SSAO Phase 1); FBO writes level 0
 	};
 	renderTarget_t		renderTargets[MAX_RENDER_TARGETS];
 	RenderTargetHandle	activeTarget;		// 0 = backbuffer; set by BeginTargetPass
@@ -548,9 +549,95 @@ public:
 		renderTargets[slot].w = w;
 		renderTargets[slot].h = h;
 		renderTargets[slot].cube = false;
+		renderTargets[slot].mipLevels = 1;
 		boundVBO = 0;	// binding the FBO's texture disturbed unit-0 bind tracking
 		common->DPrintf( "GL3: created %dx%d %s render target (handle %d)\n", w, h, colorTarget ? "color" : "depth", slot );
 		return (RenderTargetHandle)slot;
+	}
+
+	// SSAO Phase 1 (docs/ssao-perf-optimization.md): a color target with a full mip
+	// chain. Level 0 is rendered by a fullscreen pass (BeginTargetPass binds the FBO,
+	// whose color attachment is level 0); GenerateRenderTargetMips box-averages it down
+	// the chain. Sampled with an explicit textureLod (GL_LINEAR_MIPMAP_NEAREST).
+	virtual RenderTargetHandle CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels ) {
+		if ( !initialized || w <= 0 || h <= 0 ) {
+			return 0;
+		}
+		if ( fmt != IF_RGBA8 && fmt != IF_RGBA16F ) {
+			common->Warning( "GL3 CreateRenderTargetMipped: unsupported format %d (want IF_RGBA8 or IF_RGBA16F)", (int)fmt );
+			return 0;
+		}
+		int maxLevels = 1;
+		for ( int d = ( w > h ? w : h ); d > 1; d >>= 1 ) { maxLevels++; }
+		if ( mipLevels < 1 ) { mipLevels = 1; }
+		if ( mipLevels > maxLevels ) { mipLevels = maxLevels; }
+
+		int slot = -1;
+		for ( int i = 1; i < MAX_RENDER_TARGETS; i++ ) {
+			if ( renderTargets[i].fbo == 0 && renderTargets[i].tex == 0 ) { slot = i; break; }
+		}
+		if ( slot < 0 ) {
+			common->Warning( "GL3 CreateRenderTargetMipped: out of render-target slots" );
+			return 0;
+		}
+
+		const GLint  internalFmt = ( fmt == IF_RGBA16F ) ? GL_RGBA16F : GL_RGBA8;
+		const GLenum pixType     = ( fmt == IF_RGBA16F ) ? GL_HALF_FLOAT : GL_UNSIGNED_BYTE;
+
+		GLuint tex = 0;
+		qglGenTextures( 1, &tex );
+		gl3ActiveTexture( GL_TEXTURE0 );
+		qglBindTexture( GL_TEXTURE_2D, tex );
+		// allocate every level (glTexStorage2D is GL 4.2 / not loaded; a per-level
+		// glTexImage2D loop needs no new entry point)
+		for ( int i = 0; i < mipLevels; i++ ) {
+			const int lw = ( ( w >> i ) > 1 ) ? ( w >> i ) : 1;
+			const int lh = ( ( h >> i ) > 1 ) ? ( h >> i ) : 1;
+			qglTexImage2D( GL_TEXTURE_2D, i, internalFmt, lw, lh, 0, GL_RGBA, pixType, NULL );
+		}
+		// NEAREST mip selection: an explicit textureLod picks a discrete level, bilinear within
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, mipLevels - 1 );
+
+		GLuint fbo = 0;
+		gl3GenFramebuffers( 1, &fbo );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, fbo );
+		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0 );	// level 0
+		GLenum status = gl3CheckFramebufferStatus( GL_FRAMEBUFFER );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
+		qglBindTexture( GL_TEXTURE_2D, 0 );
+
+		if ( status != GL_FRAMEBUFFER_COMPLETE ) {
+			common->Warning( "GL3 CreateRenderTargetMipped: incomplete FBO (0x%x), %dx%d", status, w, h );
+			gl3DeleteFramebuffers( 1, &fbo );
+			qglDeleteTextures( 1, &tex );
+			return 0;
+		}
+
+		renderTargets[slot].fbo = fbo;
+		renderTargets[slot].tex = tex;
+		renderTargets[slot].w = w;
+		renderTargets[slot].h = h;
+		renderTargets[slot].cube = false;
+		renderTargets[slot].mipLevels = mipLevels;
+		boundVBO = 0;
+		common->DPrintf( "GL3: created %dx%d mipped color render target (%d levels, handle %d)\n", w, h, mipLevels, slot );
+		return (RenderTargetHandle)slot;
+	}
+
+	virtual void GenerateRenderTargetMips( RenderTargetHandle rt ) {
+		if ( rt == 0 || rt >= (RenderTargetHandle)MAX_RENDER_TARGETS
+		     || renderTargets[rt].tex == 0 || renderTargets[rt].mipLevels <= 1 ) {
+			return;
+		}
+		gl3ActiveTexture( GL_TEXTURE0 );
+		qglBindTexture( GL_TEXTURE_2D, renderTargets[rt].tex );
+		gl3GenerateMipmap( GL_TEXTURE_2D );		// 2x2 box average of the linear-depth level 0
+		qglBindTexture( GL_TEXTURE_2D, 0 );
+		boundVBO = 0;
 	}
 
 	// Cube depth target for omni (point-light) shadow maps: one GL_TEXTURE_CUBE_MAP

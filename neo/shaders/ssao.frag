@@ -9,11 +9,19 @@
 //   u_localParam1 = ( radiusPixelFactor, numSteps, numSlices, bentNormalEnable )
 //   u_screenCorrection.xy = 1 / aoTargetSize       (gl_FragCoord -> [0,1] screen uv)
 //   u_depthTexRecip.xy    = div / depthUploadSize  (gl_FragCoord -> _currentDepth tc)
+//   u_depthTexRecip.z     = SSAO Phase 1 depth-mip max LOD (0 = feature off, raw path)
+//   u_depthTexRecip.w     = depth-mip LOD bias (r_ssaoDepthMipBias)
 
 #include "renderparms.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;   // DUDE normal G-buffer (view-space, encoded)
+// SSAO Phase 1 (docs/ssao-perf-optimization.md): prefiltered LINEAR view-space depth
+// mip chain (level 0 = ssao_depthmip.frag, coarser = box averages). The horizon march
+// reads a coarser mip for farther steps — the cache win. R = positive linear eye depth.
+// When the feature is off (u_depthTexRecip.z < 0.5) this is bound to _currentDepth as an
+// unused dummy and the march falls back to the raw-depth path (viewPos).
+SAMPLER_BINDING(2) uniform sampler2D u_linearDepthMip;
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -47,6 +55,25 @@ vec3 viewPosFromRaw( vec2 frag, float raw ) {
 
 vec3 viewPos( vec2 frag ) {
 	return viewPosFromRaw( frag, rawDepth( frag ) );
+}
+
+// SSAO Phase 1: view-space position of a horizon-march tap from the prefiltered LINEAR
+// depth mip at an explicit LOD (coarser = farther steps). u_linearDepthMip.r holds the
+// positive linear eye depth already, so no per-tap reconstruction division is needed.
+vec3 viewPosLin( vec2 frag, float lod ) {
+	float d   = textureLod( u_linearDepthMip, frag * u_screenCorrection.xy, lod ).r;   // positive
+	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
+	return vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, -d );
+}
+
+// One horizon-march occluder tap. With the depth mip on (u_depthTexRecip.z >= 0.5) read
+// the mip at `lod`; otherwise the exact raw-depth path (an A/B toggle, r_ssaoDepthMip).
+// The branch is on a draw-coherent uniform, so it costs nothing on the GPU.
+vec3 viewPosStep( vec2 frag, float lod ) {
+	if ( u_depthTexRecip.z >= 0.5 ) {
+		return viewPosLin( frag, lod );
+	}
+	return viewPos( frag );
 }
 
 // Reconstruct a view-space normal from depth — the FALLBACK used when the normal G-buffer
@@ -173,7 +200,13 @@ void main() {
 			if ( t >= numSteps ) {
 				break;
 			}
-			vec2 duv = dir * ( ( float( t ) + noise05 ) * stepPix );
+			float distPix = ( float( t ) + noise05 ) * stepPix;
+			vec2  duv     = dir * distPix;
+
+			// SSAO Phase 1: read a coarser depth mip for farther steps (cache win). LOD
+			// grows with the tap's screen distance; near taps stay on mip 0 where the
+			// contact detail matters. depthTexRecip.z = max LOD (0 = off), .w = bias.
+			float lod = clamp( log2( max( distPix * u_depthTexRecip.w, 1.0 ) ), 0.0, u_depthTexRecip.z );
 
 			// Drop occluders that land on the view weapon so the depth-hacked gun never
 			// darkens the world behind it (the source of the sway/move jitter). Only the
@@ -181,7 +214,7 @@ void main() {
 			// tell, so it keeps the old behaviour (weaponTexel is never evaluated then).
 			vec2  sp  = frag + duv;
 			if ( !useNormalBuffer || !weaponTexel( sp ) ) {
-				vec3  Dp  = viewPos( sp ) - P;
+				vec3  Dp  = viewPosStep( sp, lod ) - P;
 				float l2p = dot( Dp, Dp );
 				if ( l2p > 1e-6 ) {
 					float ca = dot( Dp, V ) * inversesqrt( l2p );
@@ -191,7 +224,7 @@ void main() {
 			}
 			vec2  sn  = frag - duv;
 			if ( !useNormalBuffer || !weaponTexel( sn ) ) {
-				vec3  Dn  = viewPos( sn ) - P;
+				vec3  Dn  = viewPosStep( sn, lod ) - P;
 				float l2n = dot( Dn, Dn );
 				if ( l2n > 1e-6 ) {
 					float ca = dot( Dn, V ) * inversesqrt( l2n );

@@ -978,6 +978,8 @@ extern idCVar r_ssaoSpecular;			// also attenuate specular in occluded areas
 extern idCVar r_ssaoDebug;				// 1=show AO buffer, 2=show bent normals
 extern idCVar r_ssaoTemporal;			// accumulate AO across frames via camera reprojection
 extern idCVar r_ssaoTemporalFeedback;	// temporal history weight (0..0.97)
+extern idCVar r_ssaoDepthMip;			// march the horizon search over a prefiltered linear-depth mip chain (Phase 1)
+extern idCVar r_ssaoDepthMipBias;		// depth-mip LOD aggressiveness (log2(stepPix * bias))
 
 // DUDE: GPU tessellation of enemy/prop meshes (Vulkan only; docs/tessellation.md)
 extern idCVar r_tessellation;			// master toggle: PN-triangle smooth enemy/prop meshes

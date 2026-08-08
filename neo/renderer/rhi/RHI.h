@@ -204,6 +204,17 @@ public:
 	// for the HDR scene buffer: an offscreen geometry pass that needs stencil (stencil
 	// shadows) and a sampleable float color. GetRenderTargetImage returns the color. 0 on failure.
 	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h ) = 0;
+	// Color target with a GPU-generated mip chain (SSAO Phase 1 prefiltered depth,
+	// docs/ssao-perf-optimization.md): a single mipLevels-deep color image whose
+	// level 0 is rendered by a fullscreen pass (BeginTargetPass renders into level 0)
+	// and whose coarser levels are filled by GenerateRenderTargetMips(). The whole
+	// chain is sampleable through GetRenderTargetImage() with an explicit textureLod
+	// (a mip-spanning sampler). Default returns 0 so a backend without the capability
+	// degrades to the non-mipped path.
+	virtual RenderTargetHandle	CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels ) { return 0; }
+	// Box-average level 0 down the chain (glGenerateMipmap on GL3, a vkCmdBlitImage
+	// down-chain on Vulkan). Cheap; call once per view after rendering level 0.
+	virtual void				GenerateRenderTargetMips( RenderTargetHandle rt ) {}
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt ) = 0;
 	// Route the whole frame into an offscreen target (the HDR scene buffer): BeginPass
 	// clears into it and EndPass returns to it after nested target passes (shadow maps,

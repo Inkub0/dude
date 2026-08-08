@@ -149,6 +149,8 @@ public:
 	virtual RenderTargetHandle	CreateRenderTargetCube( ImageFormat fmt, int size );
 	virtual RenderTargetHandle	CreateRenderTargetColorDepth( ImageFormat fmt, int w, int h, int colorCount );
 	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h );
+	virtual RenderTargetHandle	CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels );
+	virtual void				GenerateRenderTargetMips( RenderTargetHandle rt );
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt );
 	virtual void				SetFrameTarget( RenderTargetHandle rt );
 	virtual void				BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear );
@@ -467,7 +469,13 @@ private:
 		VkFormat		colorFormat = VK_FORMAT_UNDEFINED;
 		VkImage			colorImage[2] = {};
 		VmaAllocation	colorAlloc[2] = {};
-		VkImageView		colorView[2] = {};				// attachment + sample view (same view)
+		VkImageView		colorView[2] = {};				// level-0 attachment view (framebuffer)
+		// SSAO Phase 1 mip chain: colorMipLevels > 1 makes colorImage[] a mipped image
+		// (TRANSFER_DST added, GenerateRenderTargetMips fills levels 1..N). colorView[]
+		// stays level-0-only for the framebuffer; colorSampleView[] spans every level so
+		// the sampleable ImageRec can textureLod into coarser mips. 1 = plain single-mip.
+		int				colorMipLevels = 1;
+		VkImageView		colorSampleView[2] = {};		// all-levels sample view (= colorView[] when 1 mip)
 		ImageHandle		colorSampleImage[2] = { 0, 0 };	// handles GetRenderTargetImage / 2 return
 		bool			hasDepth = false;				// depth or depth-stencil attachment present
 		VkImage			dsImage = VK_NULL_HANDLE;
@@ -501,7 +509,8 @@ private:
 	// depth-stencil attachment when wantDepthStencil. frameCapable builds the extra
 	// load/clearDS pass variants a SetFrameTarget scene buffer needs (HDR).
 	bool			CreateColorTarget( RenderTarget &t, int w, int h, VkFormat colorFmt,
-	                                   int colorCount, bool wantDepthStencil, bool frameCapable );
+	                                   int colorCount, bool wantDepthStencil, bool frameCapable,
+	                                   int mipLevels = 1 );
 	bool			BuildColorPasses( RenderTarget &t, bool frameCapable );
 	void			FreeTargetObjects( RenderTarget &t );	// frees VK objects only (not the imageTable slot)
 	void			ReleaseTargetSampleSlots( RenderTarget &t );	// frees the imageTable slots a target lent out
@@ -2939,8 +2948,11 @@ VkSampler VulkanBackend::GetSampler( int textureFilter, int textureRepeat, bool 
 		break;
 	case TF_LINEAR:
 		si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+		// NEAREST mip mode: an explicit textureLod picks the nearest discrete level
+		// (matches GL's GL_LINEAR_MIPMAP_NEAREST for the SSAO depth mip). maxLod stays
+		// 0 for non-mipped RTs; the mipped depth chain needs the whole range unclamped.
 		si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-		si.maxLod = 0.0f;
+		si.maxLod = hasMips ? VK_LOD_CLAMP_NONE : 0.0f;
 		break;
 	default:	// TF_DEFAULT: trilinear + anisotropy when the device has it
 		si.magFilter = si.minFilter = VK_FILTER_LINEAR;
@@ -4146,6 +4158,135 @@ RenderTargetHandle VulkanBackend::CreateRenderTarget( ImageFormat fmt, int w, in
 	return (RenderTargetHandle)( slot + 1 );
 }
 
+// SSAO Phase 1: a color target carrying a GPU-generated mip chain. Level 0 is a
+// normal color attachment (a fullscreen linearize pass renders into it); levels 1..N
+// are filled by GenerateRenderTargetMips (a vkCmdBlitImage down-chain). The whole
+// chain is sampled with an explicit textureLod (see CreateColorTarget's mipped path).
+RenderTargetHandle VulkanBackend::CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels ) {
+	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
+		return 0;
+	}
+	VkFormat cf = ( fmt == IF_RGBA16F ) ? VK_FORMAT_R16G16B16A16_SFLOAT
+	            : ( fmt == IF_RGBA8 ) ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_UNDEFINED;
+	if ( cf == VK_FORMAT_UNDEFINED ) {
+		return 0;
+	}
+	// clamp the request to the image's real mip count (floor(log2(max(w,h))) + 1)
+	int maxLevels = 1;
+	for ( int d = ( w > h ? w : h ); d > 1; d >>= 1 ) { maxLevels++; }
+	if ( mipLevels < 1 ) { mipLevels = 1; }
+	if ( mipLevels > maxLevels ) { mipLevels = maxLevels; }
+
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, cf, 1, /*ds*/false, /*frameCapable*/false, mipLevels ) ) {
+		targetTable[slot] = RenderTarget();
+		return 0;
+	}
+	return (RenderTargetHandle)( slot + 1 );
+}
+
+// Box-average level 0 down the chain with a vkCmdBlitImage per level (the standard
+// Vulkan mip-generation loop; the barrier shape mirrors CopyFramebufferToImage). Runs
+// outside any render pass; the color-target pass left level 0 in SHADER_READ_ONLY.
+void VulkanBackend::GenerateRenderTargetMips( RenderTargetHandle rt ) {
+	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame ) {
+		return;
+	}
+	RenderTarget *t = LookupTarget( rt );
+	if ( t == NULL || !t->colorTarget || t->colorMipLevels <= 1 ) {
+		return;
+	}
+	VkImage img = t->colorImage[0];
+	const int levels = t->colorMipLevels;
+
+	// a linear box downsample needs SAMPLED_IMAGE_FILTER_LINEAR on this format; fall
+	// back to nearest if the device lacks it (near-universal for RGBA16F on desktop).
+	VkFilter filter = VK_FILTER_LINEAR;
+	VkFormatProperties fp = {};
+	vkGetPhysicalDeviceFormatProperties( physical, t->colorFormat, &fp );
+	if ( !( fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT ) ) {
+		filter = VK_FILTER_NEAREST;
+	}
+
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );
+		insideScenePass = false;
+	}
+
+	VkImageMemoryBarrier b = {};
+	b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	b.image = img;
+	b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	b.subresourceRange.layerCount = 1;
+	b.subresourceRange.levelCount = 1;
+
+	// level 0 rests in SHADER_READ_ONLY (the color-target render pass finalLayout) -> SRC
+	b.subresourceRange.baseMipLevel = 0;
+	b.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0, 0, NULL, 0, NULL, 1, &b );
+
+	int mw = t->w, mh = t->h;
+	for ( int i = 1; i < levels; i++ ) {
+		const int dw = ( mw > 1 ) ? ( mw >> 1 ) : 1;
+		const int dh = ( mh > 1 ) ? ( mh >> 1 ) : 1;
+
+		// dst level i (untouched / last frame's SHADER_READ; discard either way) -> DST.
+		// srcStage = FRAGMENT_SHADER so the write waits for the previous frame's ssao.frag
+		// reads of this persistent target (a write-after-read the sync layer would flag);
+		// UNDEFINED oldLayout discards the stale contents (we overwrite the whole level).
+		b.subresourceRange.baseMipLevel = i;
+		b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		b.srcAccessMask = 0;
+		b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			0, 0, NULL, 0, NULL, 1, &b );
+
+		VkImageBlit blit = {};
+		blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		blit.srcSubresource.mipLevel = (uint32_t)( i - 1 );
+		blit.srcSubresource.layerCount = 1;
+		blit.srcOffsets[1] = { mw, mh, 1 };
+		blit.dstSubresource = blit.srcSubresource;
+		blit.dstSubresource.mipLevel = (uint32_t)i;
+		blit.dstOffsets[1] = { dw, dh, 1 };
+		vkCmdBlitImage( cb, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, filter );
+
+		// level i becomes the source for the next iteration
+		b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			0, 0, NULL, 0, NULL, 1, &b );
+
+		mw = dw; mh = dh;
+	}
+
+	// every level now TRANSFER_SRC -> SHADER_READ for the horizon-march sample
+	b.subresourceRange.baseMipLevel = 0;
+	b.subresourceRange.levelCount = (uint32_t)levels;
+	b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		0, 0, NULL, 0, NULL, 1, &b );
+
+	// keep the sampleable ImageRec's tracked layout in step (it now rests SHADER_READ)
+	ImageHandle sh = t->colorSampleImage[0];
+	if ( sh >= 1 && sh <= (ImageHandle)imageTable.size() ) {
+		imageTable[sh - 1].layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	}
+}
+
 RenderTargetHandle VulkanBackend::CreateRenderTargetCube( ImageFormat fmt, int size ) {
 	if ( device == VK_NULL_HANDLE || size <= 0 ) {
 		return 0;
@@ -4294,6 +4435,7 @@ void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
 	if ( t.colorLoadPass )   { vkDestroyRenderPass( device, t.colorLoadPass, NULL ); t.colorLoadPass = VK_NULL_HANDLE; }
 	if ( t.colorClearDSPass ){ vkDestroyRenderPass( device, t.colorClearDSPass, NULL ); t.colorClearDSPass = VK_NULL_HANDLE; }
 	for ( int c = 0; c < 2; c++ ) {
+		if ( t.colorSampleView[c] ) { vkDestroyImageView( device, t.colorSampleView[c], NULL ); t.colorSampleView[c] = VK_NULL_HANDLE; }
 		if ( t.colorView[c] )  { vkDestroyImageView( device, t.colorView[c], NULL ); t.colorView[c] = VK_NULL_HANDLE; }
 		if ( t.colorImage[c] ) { vmaDestroyImage( vma, t.colorImage[c], t.colorAlloc[c] ); t.colorImage[c] = VK_NULL_HANDLE; t.colorAlloc[c] = NULL; }
 	}
@@ -4477,17 +4619,21 @@ bool VulkanBackend::BuildColorPasses( RenderTarget &t, bool frameCapable ) {
 }
 
 bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat colorFmt,
-                                       int colorCount, bool wantDepthStencil, bool frameCapable ) {
+                                       int colorCount, bool wantDepthStencil, bool frameCapable,
+                                       int mipLevels ) {
 	if ( device == VK_NULL_HANDLE || colorCount < 1 || colorCount > 2 ) {
 		return false;
 	}
 	if ( wantDepthStencil && sceneDepthFormat == VK_FORMAT_UNDEFINED ) {
 		return false;
 	}
+	if ( mipLevels < 1 ) { mipLevels = 1; }
+	const bool mipped = mipLevels > 1;
 	t.colorTarget = true;
 	t.colorCount = colorCount;
 	t.colorFormat = colorFmt;
 	t.hasDepth = wantDepthStencil;
+	t.colorMipLevels = mipLevels;
 	t.w = w;
 	t.h = h;
 	t.passClass = PassClassFor( colorFmt, wantDepthStencil, colorCount );
@@ -4501,20 +4647,23 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		ici.imageType = VK_IMAGE_TYPE_2D;
 		ici.format = colorFmt;
 		ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
-		ici.mipLevels = 1;
+		ici.mipLevels = (uint32_t)mipLevels;
 		ici.arrayLayers = 1;
 		ici.samples = VK_SAMPLE_COUNT_1_BIT;
 		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
 		// SAMPLED: read back by the resolve/next feature; TRANSFER_SRC: the M5
-		// _currentRender capture blits from it while this is the frame target
+		// _currentRender capture blits from it while this is the frame target.
+		// TRANSFER_DST: the SSAO-Phase-1 mip chain is filled by a vkCmdBlitImage
+		// down-chain (GenerateRenderTargetMips) writing levels 1..N.
 		ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-		          | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		          | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | ( mipped ? VK_IMAGE_USAGE_TRANSFER_DST_BIT : 0 );
 		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &t.colorImage[c], &t.colorAlloc[c], NULL ),
 		               "vmaCreateImage(color target)" ) ) {
 			FreeTargetObjects( t );
 			return false;
 		}
+		// level-0-only view: the framebuffer attachment (fullscreen draws write level 0).
 		VkImageViewCreateInfo vwi = {};
 		vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 		vwi.image = t.colorImage[c];
@@ -4526,6 +4675,16 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &t.colorView[c] ), "vkCreateImageView(color target)" ) ) {
 			FreeTargetObjects( t );
 			return false;
+		}
+		// all-levels sample view: ssao.frag textureLods coarser mips through this.
+		// Single-mip targets reuse colorView[c] (colorSampleView stays null).
+		if ( mipped ) {
+			VkImageViewCreateInfo svi = vwi;
+			svi.subresourceRange.levelCount = (uint32_t)mipLevels;
+			if ( !vkCheck( vkCreateImageView( device, &svi, NULL, &t.colorSampleView[c] ), "vkCreateImageView(color mip sample)" ) ) {
+				FreeTargetObjects( t );
+				return false;
+			}
 		}
 	}
 
@@ -4587,8 +4746,11 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		ImageRec rec;
 		rec.image = t.colorImage[c];
 		rec.alloc = NULL;
-		rec.view = t.colorView[c];
-		rec.sampler = GetSampler( TF_LINEAR, TR_CLAMP, false );
+		// mipped targets sample the whole chain (all-levels view + a maxLod-unclamped,
+		// NEAREST-mip sampler so an explicit textureLod reaches every coarse level; the
+		// plain TF_LINEAR sampler clamps maxLod to 0 and would pin every fetch to mip 0).
+		rec.view = mipped ? t.colorSampleView[c] : t.colorView[c];
+		rec.sampler = GetSampler( TF_LINEAR, TR_CLAMP, mipped );
 		rec.live = true;
 		rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		rec.isDepth = false;

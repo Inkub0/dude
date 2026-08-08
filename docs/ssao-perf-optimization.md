@@ -28,6 +28,24 @@ bilateral blur → optional temporal. `ssao.frag` reconstructs view-space positi
 
 ## Phase 1 — Prefiltered depth mip chain (biggest leverage) — GL3 + Vulkan
 
+**Status: BUILT (feat/ssao-depth-mip), pending in-engine verify.** Behind `r_ssaoDepthMip`
+(default 1; off = the exact prior full-res raw-depth march, for an A/B) with `r_ssaoDepthMipBias`
+(0.5) tuning LOD aggressiveness. As built: a new RHI capability — `CreateRenderTargetMipped` +
+`GenerateRenderTargetMips` (GL3: per-level `glTexImage2D` + `glGenerateMipmap`; Vulkan: an
+`mipLevels`-deep image with a level-0 attachment view + an all-levels sample view + a
+`vkCmdBlitImage` down-chain, barriers mirroring `CopyFramebufferToImage`, with a cross-frame
+write-after-read barrier since the target is read every frame and rewritten the next). A new
+`ssao_depthmip` fullscreen pass linearizes `_currentDepth` (positive view-space eye depth) into
+level 0 at the AO resolution; `GenerateRenderTargetMips` box-averages the chain (6 levels max).
+`ssao.frag` keeps `_currentDepth` for the centre pixel + normal reconstruction (zero fidelity
+change there) and reads the mip only for the cache-bound horizon occluder taps, `textureLod`ing a
+coarser level as the step distance grows (`lod = clamp(log2(stepPix·bias), 0, maxMip)`); `maxMip`
+and `bias` ride the free `depthTexRecip.zw` lanes (no `RenderParams` growth). **Format:** RGBA16F
+with linear depth in `.r` — R16F single-channel storage is deferred to Phase 2 (below) to avoid
+format-enum surgery for the first cut. Verify with `r_vkGpuTime`/`r_gl3GpuTime` A/B (expect the AO
+pass to drop at High+/Nightmare where the radius is wide), a flag-on/off look (AO should be
+near-identical), and check floors/ceilings on Vulkan for any y-flip.
+
 **Idea (XeGTAO "PrefilterDepths").** Build a small mip hierarchy of **linear view-space depth**
 once per view, then have the horizon march sample a **coarser mip for farther steps**. Far taps
 then read a small, cache-local footprint instead of scattering across full-res depth. This is

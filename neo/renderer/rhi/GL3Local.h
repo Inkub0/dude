@@ -86,6 +86,16 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE				0x812F
 #endif
+// SSAO Phase 1 mipped linear-depth target (docs/ssao-perf-optimization.md)
+#ifndef GL_TEXTURE_MAX_LEVEL
+#define GL_TEXTURE_MAX_LEVEL			0x813D
+#endif
+#ifndef GL_LINEAR_MIPMAP_NEAREST
+#define GL_LINEAR_MIPMAP_NEAREST		0x2701
+#endif
+#ifndef GL_NEAREST_MIPMAP_NEAREST
+#define GL_NEAREST_MIPMAP_NEAREST		0x2700
+#endif
 // cube-map depth targets (point-light shadow maps)
 #ifndef GL_TEXTURE_CUBE_MAP
 #define GL_TEXTURE_CUBE_MAP				0x8513
@@ -154,7 +164,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 	GL3F( PFNGLBINDFRAMEBUFFERPROC,			BindFramebuffer ) \
 	GL3F( PFNGLFRAMEBUFFERTEXTURE2DPROC,	FramebufferTexture2D ) \
 	GL3F( PFNGLCHECKFRAMEBUFFERSTATUSPROC,	CheckFramebufferStatus ) \
-	GL3F( PFNGLDRAWBUFFERSPROC,				DrawBuffers )
+	GL3F( PFNGLDRAWBUFFERSPROC,				DrawBuffers ) \
+	GL3F( PFNGLGENERATEMIPMAPPROC,			GenerateMipmap )	/* SSAO Phase 1 depth mip chain */
 
 namespace rhi {
 

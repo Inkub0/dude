@@ -437,6 +437,12 @@ idCVar r_ssaoSpecular( "r_ssaoSpecular", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVA
 idCVar r_ssaoDebug( "r_ssaoDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "SSAO debug view: 0 = off, 1 = show the AO buffer, 2 = show bent normals, 3 = show the normal G-buffer", 0, 3 );
 idCVar r_ssaoTemporal( "r_ssaoTemporal", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "accumulate SSAO across frames via camera reprojection: smooths the horizon-search noise and lets slices/steps run lower for the same look. Static-world reprojection (no motion vectors); ghosting is bounded by a neighbourhood clamp. Non-vanilla; opengl3/Vulkan only" );
 idCVar r_ssaoTemporalFeedback( "r_ssaoTemporalFeedback", "0.9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO temporal history weight: fraction of the reprojected previous-frame AO kept each frame (higher = smoother/steadier but more latency and ghosting; 0 = no accumulation). Needs r_ssaoTemporal", 0.0f, 0.97f );
+// DUDE SSAO Phase 1: prefiltered linear-depth mip chain (docs/ssao-perf-optimization.md). The horizon
+// search reads a coarser mip for farther steps, so far taps touch a small cache-local footprint instead
+// of scattering across full-res _currentDepth. Visually near-identical; a GPU-time win that scales with
+// r_ssaoRadius. Adds a cheap linearize + mip-gen pass per view. On by default; toggle for an A/B.
+idCVar r_ssaoDepthMip( "r_ssaoDepthMip", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "SSAO: march the horizon search over a prefiltered linear-depth mip chain (far steps read coarse mips) instead of full-res depth. Cheaper on GPU at a wide radius, visually near-identical. 0 = full-res depth every tap (opengl3/Vulkan only)" );
+idCVar r_ssaoDepthMipBias( "r_ssaoDepthMipBias", "0.5", CVAR_RENDERER | CVAR_FLOAT, "SSAO depth-mip LOD aggressiveness: LOD = log2(stepPixels * this). Higher drops to coarser mips sooner (faster, softer); lower keeps more detail. Needs r_ssaoDepthMip", 0.05f, 4.0f );
 
 // DUDE: baked ambient-occlusion (occlusion) maps. Per-material AO textures declared with
 // the `occlusionmap` material keyword, multiplied into the ambient (and, scaled, direct-
