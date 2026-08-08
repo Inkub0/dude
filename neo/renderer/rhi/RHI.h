@@ -36,7 +36,8 @@ enum ImageFormat {
 	IF_RGBA8,
 	IF_DEPTH24_STENCIL8,	// backend may substitute D32S8
 	IF_RGBA16F,				// Tier-3 HDR target (post stack)
-	IF_DEPTH24				// depth-only; shadow-map target, sampler2DShadow-ready
+	IF_DEPTH24,				// depth-only; shadow-map target, sampler2DShadow-ready
+	IF_R16F					// single-channel half-float; SSAO linear-depth mip (Phase 2)
 };
 
 enum VertexLayout {

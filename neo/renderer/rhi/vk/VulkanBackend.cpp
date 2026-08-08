@@ -4153,6 +4153,7 @@ RenderTargetHandle VulkanBackend::CreateRenderTarget( ImageFormat fmt, int w, in
 		return (RenderTargetHandle)( slot + 1 );
 	}
 	VkFormat cf = ( fmt == IF_RGBA16F ) ? VK_FORMAT_R16G16B16A16_SFLOAT
+	            : ( fmt == IF_R16F ) ? VK_FORMAT_R16_SFLOAT
 	            : ( fmt == IF_RGBA8 ) ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_UNDEFINED;
 	if ( cf == VK_FORMAT_UNDEFINED ) {
 		return 0;
@@ -4174,6 +4175,7 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetMipped( ImageFormat fmt, int
 		return 0;
 	}
 	VkFormat cf = ( fmt == IF_RGBA16F ) ? VK_FORMAT_R16G16B16A16_SFLOAT
+	            : ( fmt == IF_R16F ) ? VK_FORMAT_R16_SFLOAT
 	            : ( fmt == IF_RGBA8 ) ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_UNDEFINED;
 	if ( cf == VK_FORMAT_UNDEFINED ) {
 		return 0;
@@ -4503,6 +4505,9 @@ void VulkanBackend::DestroyAllTargets() {
 uint8_t VulkanBackend::PassClassFor( VkFormat colorFmt, bool hasDepth, int colorCount ) const {
 	if ( colorFmt == VK_FORMAT_R16G16B16A16_SFLOAT ) {
 		return hasDepth ? 2 : 3;			// HDR scene buffer / RGBA16F color-only (AA ping, SSR)
+	}
+	if ( colorFmt == VK_FORMAT_R16_SFLOAT ) {
+		return 7;							// single-channel half-float (SSAO linear-depth mip, Phase 2)
 	}
 	// RGBA8 family (SSAO buffers later)
 	if ( !hasDepth )      { return 4; }		// color-only RGBA8

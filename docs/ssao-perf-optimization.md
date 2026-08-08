@@ -91,19 +91,41 @@ already downstream helps hide residual error.
 **Idea (XeGTAO fp16).** 16-bit float math on the horizon search + 16-bit depth/AO storage.
 XeGTAO reports **5–20%** with acceptable precision loss.
 
-**DUDE mapping:**
-- **fp16 storage (both backends):** the Phase-1 linear-depth mip as **R16F** (halves its
-  bandwidth — the whole point of Phase 1), and the AO output as R8/RG16F. GL3 and Vulkan both
-  support 16F textures, so this half is portable and lands with Phase 1.
-- **fp16 math (Vulkan-only):** GL 3.3 core has no half-float shader arithmetic (`mediump` is a
-  no-op on desktop GL), so explicit fp16 math needs Vulkan +
-  `GL_EXT_shader_explicit_arithmetic_types_float16` / `shaderFloat16` (VK_KHR_shader_float16_int8).
-  Convert the inner horizon accumulation (`cH_pos/cH_neg`, the visibility integral) to
-  `float16_t`; keep position reconstruction fp32 (precision). Gate on device support; fall back
-  to fp32 (the GL3 path and non-fp16 GPUs).
+**Storage — BUILT (both backends).** The Phase-1 linear-depth mip is now **R16F** (new
+`IF_R16F` in the RHI `ImageFormat` enum; GL3 `GL_R16F`/`GL_RED`/`GL_HALF_FLOAT`, Vulkan
+`VK_FORMAT_R16_SFLOAT` with its own pipeline `passClass` 7 so the mip's pipelines build against
+a format-correct render pass). Only `.r` was ever written/read (positive linear eye depth), and
+the RGBA16F first cut already stored that as a half-float — so R16F is **bit-identical in `.r`
+at a quarter the footprint**. Zero fidelity change; it purely shrinks the mip so more of the
+horizon march's working set stays in cache — i.e. it *compounds* the Phase-1 win rather than
+adding a new one. No shader edits (the linearize/downsample/march shaders already touch `.r`
+only).
 
-**Gain:** 5–20% (modest but nearly free). **Effort:** low (storage) + low-moderate (VK math,
-behind a feature check). **Risk:** minor banding from 16-bit depth (XeGTAO ships it as default).
+**AO-output storage — intentionally left RGBA8.** The doc's original "AO output as R8/RG16F"
+doesn't apply: the AO buffers pack a **bent normal in `.gba`** (`ssao_blur.frag` writes
+`vec4(ao, bn*0.5+0.5)`; `ambientlight.frag` and `ssao_temporal.frag` read `.gba` for directional
+AO). R8/RG16F would drop the bent normal, so `rhiSsaoRT`/`rhiSsaoBlurRT`/`rhiSsaoHistRT` stay
+RGBA8. The single-channel depth mip was the only AO-path buffer with dead channels to reclaim.
+
+**fp16 math (Vulkan-only) — staged, measure first.** GL 3.3 core has no half-float shader
+arithmetic (`mediump` is a no-op on desktop GL), so explicit fp16 math needs Vulkan +
+`GL_EXT_shader_explicit_arithmetic_types_float16` / `shaderFloat16` (VK_KHR_shader_float16_int8):
+query `VkPhysicalDeviceShaderFloat16Int8Features` chained to the features2 query, enable it at
+device creation, expose a capability flag, add a second `ssao_fp16.frag` variant (accumulate the
+visibility integral `cH_pos/cH_neg` in `float16_t`, keep position reconstruction fp32) + its own
+pipeline, and pick it at runtime on capable VK devices. **Caveat (why it's gated on a
+measurement, not shipped with the storage half):** on modern NVIDIA (incl. the RTX 3080 Ti dev
+box, Ampere) non-tensor fp16 shader ALU is at/near 1:1 with fp32, so the math half's benefit is
+mostly halved register pressure → occupancy, which for a handful of scalar accumulators is
+marginal and unpredictable. It pays off more on 2:1-fp16 parts (RDNA/GCN, Turing). It also adds a
+permanent Vulkan-only shader+pipeline variant + device-feature plumbing. Per this doc's own
+"gate → measure → fold" discipline, build it **only if the AO pass is still a measured hotspot
+after the R16F storage lands** (`r_vkGpuTime` A/B).
+
+**Gain:** storage compounds Phase 1's cache win (portable, shipped); math is 0–20% and
+GPU-dependent. **Effort:** low (storage, done) + low-moderate (VK math, behind a feature check).
+**Risk:** storage none (bit-identical `.r`); math = a VK-only maintenance surface for an
+uncertain local win.
 
 ---
 

@@ -568,8 +568,8 @@ public:
 		if ( !initialized || w <= 0 || h <= 0 ) {
 			return 0;
 		}
-		if ( fmt != IF_RGBA8 && fmt != IF_RGBA16F ) {
-			common->Warning( "GL3 CreateRenderTargetMipped: unsupported format %d (want IF_RGBA8 or IF_RGBA16F)", (int)fmt );
+		if ( fmt != IF_RGBA8 && fmt != IF_RGBA16F && fmt != IF_R16F ) {
+			common->Warning( "GL3 CreateRenderTargetMipped: unsupported format %d (want IF_RGBA8, IF_RGBA16F or IF_R16F)", (int)fmt );
 			return 0;
 		}
 		int maxLevels = 1;
@@ -587,8 +587,13 @@ public:
 			return 0;
 		}
 
-		const GLint  internalFmt = ( fmt == IF_RGBA16F ) ? GL_RGBA16F : GL_RGBA8;
-		const GLenum pixType     = ( fmt == IF_RGBA16F ) ? GL_HALF_FLOAT : GL_UNSIGNED_BYTE;
+		// IF_R16F: single-channel half-float (SSAO Phase 2 linear-depth mip). Only .r is
+		// ever written/read, so the RG/BA of the RGBA16F first cut were dead weight — R16F
+		// quarters the mip's bandwidth for the same .r bits.
+		const GLint  internalFmt = ( fmt == IF_RGBA16F ) ? GL_RGBA16F
+		                         : ( fmt == IF_R16F )    ? GL_R16F : GL_RGBA8;
+		const GLenum pixFmt      = ( fmt == IF_R16F )    ? GL_RED  : GL_RGBA;
+		const GLenum pixType     = ( fmt == IF_RGBA16F || fmt == IF_R16F ) ? GL_HALF_FLOAT : GL_UNSIGNED_BYTE;
 
 		GLuint tex = 0;
 		qglGenTextures( 1, &tex );
@@ -599,7 +604,7 @@ public:
 		for ( int i = 0; i < mipLevels; i++ ) {
 			const int lw = ( ( w >> i ) > 1 ) ? ( w >> i ) : 1;
 			const int lh = ( ( h >> i ) > 1 ) ? ( h >> i ) : 1;
-			qglTexImage2D( GL_TEXTURE_2D, i, internalFmt, lw, lh, 0, GL_RGBA, pixType, NULL );
+			qglTexImage2D( GL_TEXTURE_2D, i, internalFmt, lw, lh, 0, pixFmt, pixType, NULL );
 		}
 		// NEAREST mip selection: an explicit textureLod picks a discrete level, bilinear within
 		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST );

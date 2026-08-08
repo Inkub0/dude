@@ -96,6 +96,14 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #ifndef GL_NEAREST_MIPMAP_NEAREST
 #define GL_NEAREST_MIPMAP_NEAREST		0x2700
 #endif
+// SSAO Phase 2 (docs/ssao-perf-optimization.md): single-channel half-float storage
+// for the linear-depth mip — quarter the bandwidth of the RGBA16F first cut, same .r.
+#ifndef GL_R16F
+#define GL_R16F							0x822D
+#endif
+#ifndef GL_RED
+#define GL_RED							0x1903
+#endif
 // cube-map depth targets (point-light shadow maps)
 #ifndef GL_TEXTURE_CUBE_MAP
 #define GL_TEXTURE_CUBE_MAP				0x8513

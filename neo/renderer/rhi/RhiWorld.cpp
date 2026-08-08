@@ -3084,7 +3084,10 @@ static bool RB_RHI_EnsureSsaoDepthMip( rhi::RHI *r, int w, int h ) {
 	int levels = 1;
 	for ( int d = ( w > h ? w : h ); d > 1 && levels < 6; d >>= 1 ) { levels++; }
 
-	rhiSsaoDepthMipRT = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, levels );
+	// R16F (Phase 2): only .r is ever written/read (linear eye depth), so single-channel
+	// half-float is bit-identical to the RGBA16F first cut at a quarter the bandwidth —
+	// which directly compounds Phase 1's cache-locality win on the horizon march.
+	rhiSsaoDepthMipRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, levels );
 	if ( !rhiSsaoDepthMipRT ) {
 		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
 		return false;
