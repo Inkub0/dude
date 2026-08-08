@@ -2709,6 +2709,22 @@ static void DrawEnhancementsMenu()
 			"it fresh each frame. Smooths the AO and lets the Directions/Steps run lower for the same "
 			"look, so it's cheaper on weaker GPUs. Ghosting on fast motion is clamped automatically; "
 			"the Feedback strength lives in the Developer tab. Non-vanilla; opengl3 only." );
+
+		// Depth-mip acceleration (docs/ssao-perf-optimization.md). A prefiltered linear-depth
+		// mip chain: far horizon steps read a coarse, cache-local mip instead of scattering
+		// across full-res depth. ~40% cheaper AO at a wide radius (measured r_ssaoDepthMip
+		// 0 vs 1 = 74 -> 104 fps). Trade-off: a faint silhouette halo. Standalone preference,
+		// not preset-driven — a preset change shouldn't override the fidelity choice.
+		bool ssaoDepthMip = r_ssaoDepthMip.GetBool();
+		if ( ImGui::Checkbox( "Depth-Mip Acceleration", &ssaoDepthMip ) ) {
+			r_ssaoDepthMip.SetBool( ssaoDepthMip );
+		}
+		AddTooltip( "Speed up the AO horizon search by reading a prefiltered depth mip chain: far "
+			"samples read a coarser, cache-friendly copy of the depth buffer instead of scattering "
+			"across full-resolution depth. Big win at a wide radius (~40% cheaper AO here). "
+			"Trade-off: a faint dark halo can appear around object silhouettes, since one coarse "
+			"depth texel can't represent both surfaces at an edge. Off = the exact full-resolution "
+			"depth march (most accurate, most expensive). Recommended on. Non-vanilla; opengl3/Vulkan." );
 		ImGui::EndDisabled();
 
 		// Baked occlusion maps: independent of SSAO (works with it off). Inert unless a
