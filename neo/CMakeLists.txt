@@ -479,7 +479,14 @@ if(D3_COMPILER_IS_GCC_OR_CLANG)
 	if(NOT CMAKE_CROSSCOMPILING AND ONATIVE)
 		add_compile_options(-march=native)
 	elseif(NOT APPLE AND cpu STREQUAL "x86")
-		add_compile_options(-march=pentium3)
+		if(SSE41)
+			# same baseline as x86_64 below, so a 32 bit build keeps idSIMD_SSE41
+			# instead of falling back to the MMX & SSE processor. Pass -DSSE41=OFF
+			# to restore the old pentium3 floor for genuinely ancient hardware.
+			add_compile_options(-march=pentium4 -msse3 -mssse3 -msse4.1)
+		else()
+			add_compile_options(-march=pentium3)
+		endif()
 	elseif(SSE41 AND cpu STREQUAL "x86_64")
 		# raise the x86_64 baseline from SSE2 to SSE4.1 (Intel Penryn 2008+ / AMD Bulldozer 2011+)
 		# so the compiler can autovectorize with the newer instructions engine-wide
