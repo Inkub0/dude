@@ -91,6 +91,9 @@ static idCVar r_vkDumpNextFrame( "r_vkDumpNextFrame", "0", CVAR_RENDERER | CVAR_
 static idCVar r_vkGpuTime( "r_vkGpuTime", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: print GPU frame time (ms), averaged once per second" );
 
+static idCVar r_vkComputeTest( "r_vkComputeTest", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: run the compute-lane self-test (dispatch a kernel doubling a storage buffer, read back, verify) and print PASS/FAIL. Set to 1 to trigger (docs/gpu-offload-plan.md Phase 1)" );
+
 namespace rhi {
 
 static const int FRAMES_IN_FLIGHT = 2;
@@ -132,6 +135,7 @@ public:
 	virtual BufferHandle	CreateBuffer( BufferUsage usage, int size, const void *data );
 	virtual void			UpdateBuffer( BufferHandle b, int offset, int size, const void *data );
 	virtual void			DestroyBuffer( BufferHandle b );
+	virtual bool			ReadBuffer( BufferHandle b, void *dst, int size );
 	virtual ImageHandle		CreateImage( ImageFormat, int, int, const void * ) { return 0; }	// render-target era API; M7
 	virtual void			DestroyImage( ImageHandle h );
 	virtual ImageHandle		CreateTexture2D( int w, int h, const void *pixels,
@@ -140,6 +144,7 @@ public:
 	                                           int textureFilter, bool allowMips );
 	virtual ShaderHandle	LoadShader( const char *name );
 	virtual ShaderHandle	CreateShaderFromGlsl( const char *name, const char *vertSrc, const char *fragSrc );
+	virtual ShaderHandle	CreateComputeShader( const char *name, const char *glslSrc );
 
 	// M7 render-target family. Live: depth targets (2D + cube shadow maps),
 	// color-only + color+depth-stencil targets (the HDR RGBA16F scene buffer and
@@ -166,6 +171,7 @@ public:
 	// ---- drawing ----
 	virtual void	BindPipeline( const PipelineDesc &desc );
 	virtual void	Draw( const DrawArgs &args );
+	virtual void	Dispatch( const ComputeArgs &args );
 	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth, bool hdrFloat );
 	virtual void	CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 	                                        int srcX, int srcY, int w, int h, bool depth );
@@ -176,6 +182,11 @@ public:
 	                               const float mvp[16], bool textured );
 
 private:
+	// compute lane (docs/gpu-offload-plan.md Phase 1)
+	VkPipeline		GetComputePipeline( ShaderHandle shader );	// build/cache a VkPipeline for a compute shader
+	VkDescriptorSet	RecordDispatch( VkCommandBuffer cb, const ComputeArgs &args );	// bind+dispatch; returns the set to reclaim
+	void			ComputeSelfTest();							// r_vkComputeTest: dispatch a trivial kernel, read back, verify
+
 	bool			CreateInstance();
 	bool			PickPhysicalDevice();
 	bool			CreateDeviceAndVma();
@@ -390,6 +401,9 @@ private:
 		// patch-list topology. NULL for every shader without a tess variant.
 		VkShaderModule	tesc = VK_NULL_HANDLE;
 		VkShaderModule	tese = VK_NULL_HANDLE;
+		// compute stage (docs/gpu-offload-plan.md Phase 1). Set by CreateComputeShader;
+		// vert/frag stay NULL for a compute rec, and GetComputePipeline reads this.
+		VkShaderModule	comp = VK_NULL_HANDLE;
 		bool			failed = false;
 	};
 	std::vector<ShaderRec>		shaderTable;			// handle = index + 1
@@ -401,6 +415,15 @@ private:
 	VkDescriptorSetLayout		setLayoutUbo = VK_NULL_HANDLE;
 	VkDescriptorSetLayout		setLayoutTex = VK_NULL_HANDLE;
 	VkPipelineLayout			pipeLayout = VK_NULL_HANDLE;
+	// compute lane (docs/gpu-offload-plan.md Phase 1): one set of 8 storage-buffer
+	// bindings + a 128-byte push-constant range, its own pipeline layout, a pool for
+	// per-dispatch sets, and a shader-handle-keyed compute pipeline cache. Kept fully
+	// separate from the graphics layouts/pipelines above.
+	VkDescriptorSetLayout		setLayoutCompute = VK_NULL_HANDLE;
+	VkPipelineLayout			computePipeLayout = VK_NULL_HANDLE;
+	VkDescriptorPool			computePool = VK_NULL_HANDLE;
+	std::unordered_map<ShaderHandle, VkPipeline>	computePipelineCache;
+	std::vector<VkDescriptorSet>	retiredComputeSets[FRAMES_IN_FLIGHT];	// freed behind the frame fence
 	VkDescriptorPool			persistentPool = VK_NULL_HANDLE;	// holds the per-slot set-0s
 	VkDescriptorSet				uboSet[FRAMES_IN_FLIGHT] = {};
 	VkDescriptorPool			framePool[FRAMES_IN_FLIGHT] = {};	// per-draw set-1s, reset per frame
@@ -1629,6 +1652,15 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	FrameSlot &f = frames[frameIndex];
 	vkWaitForFences( device, 1, &f.fence, VK_TRUE, UINT64_MAX );
 
+	// compute-lane self-test (Phase 1): one-shot on the cvar toggle. Runs on the synchronous
+	// upload cb (waits idle) — a dev validation path, so gate it to the modified edge.
+	if ( r_vkComputeTest.IsModified() ) {
+		r_vkComputeTest.ClearModified();
+		if ( r_vkComputeTest.GetBool() ) {
+			ComputeSelfTest();
+		}
+	}
+
 	// vsync toggle → new present mode; window size change → new extent
 	if ( r_swapInterval.IsModified() ) {
 		r_swapInterval.ClearModified();
@@ -1700,6 +1732,13 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 		vkFreeDescriptorSets( device, texturePool, (uint32_t)retiredTexSets[frameIndex].size(),
 			retiredTexSets[frameIndex].data() );
 		retiredTexSets[frameIndex].clear();
+	}
+	if ( computePool && !retiredComputeSets[frameIndex].empty() ) {
+		// per-dispatch compute sets from this slot's previous frame; the fence above
+		// guarantees that frame's work is done, so they're safe to free (Phase 1).
+		vkFreeDescriptorSets( device, computePool, (uint32_t)retiredComputeSets[frameIndex].size(),
+			retiredComputeSets[frameIndex].data() );
+		retiredComputeSets[frameIndex].clear();
 	}
 	uboRing[frameIndex].offset = 0;
 	vertRing[frameIndex].offset = 0;
@@ -2157,6 +2196,50 @@ bool VulkanBackend::CreateM2Resources() {
 		}
 	}
 
+	// compute lane (docs/gpu-offload-plan.md Phase 1): one set of 8 STORAGE_BUFFER bindings
+	// (ComputeArgs::storage[]) + a 128-byte push-constant range for params, a dedicated
+	// pipeline layout, and a FREE-able pool for per-dispatch sets. All COMPUTE-stage, kept
+	// fully independent of the 2-set graphics layout above.
+	{
+		VkDescriptorSetLayoutBinding sb[8] = {};
+		for ( int i = 0; i < 8; i++ ) {
+			sb[i].binding = (uint32_t)i;
+			sb[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			sb[i].descriptorCount = 1;
+			sb[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		}
+		VkDescriptorSetLayoutCreateInfo li = {};
+		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		li.bindingCount = 8;
+		li.pBindings = sb;
+		if ( !vkCheck( vkCreateDescriptorSetLayout( device, &li, NULL, &setLayoutCompute ), "vkCreateDescriptorSetLayout(compute)" ) ) {
+			return false;
+		}
+		VkPushConstantRange pcr = {};
+		pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		pcr.offset = 0;
+		pcr.size = 128;			// >= the guaranteed maxPushConstantsSize floor
+		VkPipelineLayoutCreateInfo pli = {};
+		pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		pli.setLayoutCount = 1;
+		pli.pSetLayouts = &setLayoutCompute;
+		pli.pushConstantRangeCount = 1;
+		pli.pPushConstantRanges = &pcr;
+		if ( !vkCheck( vkCreatePipelineLayout( device, &pli, NULL, &computePipeLayout ), "vkCreatePipelineLayout(compute)" ) ) {
+			return false;
+		}
+		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAME_SETS * 8 };
+		VkDescriptorPoolCreateInfo pci = {};
+		pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		pci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+		pci.maxSets = MAX_FRAME_SETS;
+		pci.poolSizeCount = 1;
+		pci.pPoolSizes = &ps;
+		if ( !vkCheck( vkCreateDescriptorPool( device, &pci, NULL, &computePool ), "vkCreateDescriptorPool(compute)" ) ) {
+			return false;
+		}
+	}
+
 	// per-slot set 0, pointing at that slot's UBO ring (persistent pool)
 	{
 		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, FRAMES_IN_FLIGHT };
@@ -2292,11 +2375,19 @@ void VulkanBackend::DestroyM2Resources() {
 	pipelineCache.clear();
 	boundPipeline = VK_NULL_HANDLE;
 
+	// compute pipelines (Phase 1); the map also holds cached VK_NULL_HANDLEs for
+	// failed shaders — skip those.
+	for ( auto &kv : computePipelineCache ) {
+		if ( kv.second ) { vkDestroyPipeline( device, kv.second, NULL ); }
+	}
+	computePipelineCache.clear();
+
 	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
 		if ( shaderTable[i].vert ) { vkDestroyShaderModule( device, shaderTable[i].vert, NULL ); }
 		if ( shaderTable[i].frag ) { vkDestroyShaderModule( device, shaderTable[i].frag, NULL ); }
 		if ( shaderTable[i].tesc ) { vkDestroyShaderModule( device, shaderTable[i].tesc, NULL ); }
 		if ( shaderTable[i].tese ) { vkDestroyShaderModule( device, shaderTable[i].tese, NULL ); }
+		if ( shaderTable[i].comp ) { vkDestroyShaderModule( device, shaderTable[i].comp, NULL ); }
 	}
 	shaderTable.clear();
 
@@ -2324,12 +2415,16 @@ void VulkanBackend::DestroyM2Resources() {
 	textureSetCache.clear();
 	// device is idle here; destroying the pool frees every set, so the pending
 	// retire lists just need their now-dangling handles dropped
-	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) { retiredTexSets[i].clear(); }
+	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) { retiredTexSets[i].clear(); retiredComputeSets[i].clear(); }
 	if ( texturePool ) { vkDestroyDescriptorPool( device, texturePool, NULL ); texturePool = VK_NULL_HANDLE; }
 	if ( persistentPool ) { vkDestroyDescriptorPool( device, persistentPool, NULL ); persistentPool = VK_NULL_HANDLE; }
 	if ( pipeLayout )     { vkDestroyPipelineLayout( device, pipeLayout, NULL ); pipeLayout = VK_NULL_HANDLE; }
 	if ( setLayoutUbo )   { vkDestroyDescriptorSetLayout( device, setLayoutUbo, NULL ); setLayoutUbo = VK_NULL_HANDLE; }
 	if ( setLayoutTex )   { vkDestroyDescriptorSetLayout( device, setLayoutTex, NULL ); setLayoutTex = VK_NULL_HANDLE; }
+	// compute lane (Phase 1)
+	if ( computePool )       { vkDestroyDescriptorPool( device, computePool, NULL ); computePool = VK_NULL_HANDLE; }
+	if ( computePipeLayout ) { vkDestroyPipelineLayout( device, computePipeLayout, NULL ); computePipeLayout = VK_NULL_HANDLE; }
+	if ( setLayoutCompute )  { vkDestroyDescriptorSetLayout( device, setLayoutCompute, NULL ); setLayoutCompute = VK_NULL_HANDLE; }
 
 	if ( uploadFence ) { vkDestroyFence( device, uploadFence, NULL ); uploadFence = VK_NULL_HANDLE; }
 	if ( uploadPool )  { vkDestroyCommandPool( device, uploadPool, NULL ); uploadPool = VK_NULL_HANDLE; uploadCb = VK_NULL_HANDLE; }
@@ -2571,6 +2666,11 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 	switch ( usage ) {
 		case BU_INDEX:   usageBits = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;  break;
 		case BU_UNIFORM: usageBits = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT; break;
+		// compute storage buffer (Phase 1). TRANSFER_SRC/DST let a later device-local
+		// variant stage seed/readback; harmless on the host-visible buffer below.
+		case BU_STORAGE: usageBits = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+		                           | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+		                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT; break;
 		default:         usageBits = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
 	}
 
@@ -2581,7 +2681,13 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	VmaAllocationCreateInfo aci = {};
 	aci.usage = VMA_MEMORY_USAGE_AUTO;
-	aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	// storage buffers are read back on the host (ReadBuffer), so hint RANDOM access to keep
+	// them in cached memory; everything else is write-only-from-CPU (SEQUENTIAL_WRITE lets the
+	// allocator pick write-combined). A wrong hint doesn't break correctness on coherent memory
+	// but would make storage read-back pathologically slow on a write-combined heap.
+	aci.flags = ( usage == BU_STORAGE ? VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+	                                  : VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT )
+	          | VMA_ALLOCATION_CREATE_MAPPED_BIT;
 	aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 	VkBuffer buf = VK_NULL_HANDLE;
 	VmaAllocation alloc = NULL;
@@ -2637,6 +2743,25 @@ void VulkanBackend::DestroyBuffer( BufferHandle b ) {
 		bufferMapped[idx] = NULL;
 		freeBufferSlots.push_back( idx );
 	}
+}
+
+// Synchronous readback of a buffer (docs/gpu-offload-plan.md Phase 1). Phase-1 storage
+// buffers are host-visible+coherent+mapped, so once the GPU is idle the compute writes are
+// visible to the mapped pointer and this is a plain memcpy. A device-local storage buffer
+// (bufferMapped == NULL) needs a TRANSFER_SRC -> staging -> map copy — that's the Phase-2
+// extension; return false here so callers know the fast path wasn't taken. Stalls the GPU
+// (vkQueueWaitIdle) — a dev/validation path, never a per-frame call.
+bool VulkanBackend::ReadBuffer( BufferHandle b, void *dst, int size ) {
+	if ( device == VK_NULL_HANDLE || b < 1 || b > (BufferHandle)bufferMapped.size() || !dst || size <= 0 ) {
+		return false;
+	}
+	byte *mapped = bufferMapped[b - 1];
+	if ( !mapped ) {
+		return false;		// device-local (no host mapping) — Phase-2 staging readback
+	}
+	vkQueueWaitIdle( gfxQueue );	// all GPU writes complete + (coherent) visible to the host
+	memcpy( dst, mapped, (size_t)size );
+	return true;
 }
 
 // Called once per BeginFrame (after the slot's fence wait): age every retired
@@ -2848,19 +2973,30 @@ static bool VK_ExpandIncludes( const char *body, idStr &out, int depth ) {
 }
 
 static bool VK_CompileGlslToSpv( const char *name, const char *body, shaderc_shader_kind kind, std::vector<uint32_t> &out ) {
-	idStr prelude;
-	if ( !VK_ReadShaderSource( "prelude.vk.glsl", prelude ) ) {
-		common->Warning( "VK shaderc: missing shaders/prelude.vk.glsl" );
-		return false;
-	}
-	idStr full = prelude;
-	full.Append( "\n", 1 );
-	if ( kind == shaderc_vertex_shader ) {
-		// multi-pass depth invariance, exactly as compile_spv.py injects it
-		full += "invariant gl_Position;\n";
-	}
-	if ( !VK_ExpandIncludes( body, full, 0 ) ) {
-		return false;
+	idStr full;
+	if ( kind == shaderc_compute_shader ) {
+		// Compute units are authored standalone (their own #version, no graphics prelude):
+		// prelude.vk.glsl declares vertex/fragment layout bindings + VARY/SAMPLER_BINDING
+		// macros and the invariant gl_Position that don't belong in — and won't compile in —
+		// a compute stage. Just expand includes on the body directly.
+		if ( !VK_ExpandIncludes( body, full, 0 ) ) {
+			return false;
+		}
+	} else {
+		idStr prelude;
+		if ( !VK_ReadShaderSource( "prelude.vk.glsl", prelude ) ) {
+			common->Warning( "VK shaderc: missing shaders/prelude.vk.glsl" );
+			return false;
+		}
+		full = prelude;
+		full.Append( "\n", 1 );
+		if ( kind == shaderc_vertex_shader ) {
+			// multi-pass depth invariance, exactly as compile_spv.py injects it
+			full += "invariant gl_Position;\n";
+		}
+		if ( !VK_ExpandIncludes( body, full, 0 ) ) {
+			return false;
+		}
 	}
 
 	shaderc_compiler_t comp = shaderc_compiler_initialize();
@@ -2925,6 +3061,254 @@ ShaderHandle VulkanBackend::CreateShaderFromGlsl( const char *name, const char *
 	(void)name; (void)vertSrc; (void)fragSrc;
 	return 0;
 #endif
+}
+
+// Compile a standalone compute GLSL source into a compute shader module (Phase 1).
+// Mirrors CreateShaderFromGlsl but one stage (shaderc_compute_shader) into ShaderRec.comp.
+// Cached by name in the same shaderTable (handle = index+1); a compute rec leaves vert/frag
+// NULL. Namespace compute names (e.g. "cs_*") so they never collide with a graphics shader.
+ShaderHandle VulkanBackend::CreateComputeShader( const char *name, const char *glslSrc ) {
+#ifdef DUDE_HAVE_SHADERC
+	if ( device == VK_NULL_HANDLE || name == NULL || name[0] == '\0' || glslSrc == NULL ) {
+		return 0;
+	}
+	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
+		if ( shaderTable[i].name.Icmp( name ) == 0 ) {
+			return shaderTable[i].failed ? 0 : (ShaderHandle)( i + 1 );
+		}
+	}
+
+	ShaderRec rec;
+	rec.name = name;
+
+	std::vector<uint32_t> compSpv;
+	if ( !VK_CompileGlslToSpv( name, glslSrc, shaderc_compute_shader, compSpv ) ) {
+		rec.failed = true;
+		shaderTable.push_back( rec );
+		return 0;
+	}
+
+	VkShaderModuleCreateInfo mi = {};
+	mi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	mi.codeSize = compSpv.size() * sizeof( uint32_t );
+	mi.pCode = compSpv.data();
+	if ( !vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.comp ), va( "vkCreateShaderModule(%s.comp)", name ) ) ) {
+		rec.comp = VK_NULL_HANDLE;
+		rec.failed = true;
+	}
+	shaderTable.push_back( rec );
+	return rec.failed ? 0 : (ShaderHandle)shaderTable.size();
+#else
+	(void)name; (void)glslSrc;
+	return 0;
+#endif
+}
+
+// Build (or fetch from cache) a compute VkPipeline for a compute shader handle. Keyed by
+// ShaderHandle in a map separate from the graphics pipelineCache (whose key encodes graphics
+// state compute has none of). Caches VK_NULL_HANDLE for a missing/failed compute module so a
+// failed shaderc compile isn't retried every dispatch. Reuses diskPipelineCache. (Phase 1.)
+VkPipeline VulkanBackend::GetComputePipeline( ShaderHandle shader ) {
+	auto it = computePipelineCache.find( shader );
+	if ( it != computePipelineCache.end() ) {
+		return it->second;
+	}
+	VkPipeline pipeline = VK_NULL_HANDLE;
+	if ( shader >= 1 && shader <= (ShaderHandle)shaderTable.size()
+	     && !shaderTable[shader - 1].failed && shaderTable[shader - 1].comp != VK_NULL_HANDLE ) {
+		VkPipelineShaderStageCreateInfo stage = {};
+		stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+		stage.module = shaderTable[shader - 1].comp;
+		stage.pName = "main";
+		VkComputePipelineCreateInfo cpci = {};
+		cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		cpci.stage = stage;
+		cpci.layout = computePipeLayout;
+		if ( !vkCheck( vkCreateComputePipelines( device, diskPipelineCache, 1, &cpci, NULL, &pipeline ), "vkCreateComputePipelines" ) ) {
+			pipeline = VK_NULL_HANDLE;
+		}
+	}
+	computePipelineCache[shader] = pipeline;		// cache success AND null (don't retry)
+	return pipeline;
+}
+
+// Record a compute dispatch onto cb: bind the pipeline, allocate + write + bind a storage
+// descriptor set, push params, vkCmdDispatch. Returns the allocated set so the CALLER reclaims
+// it (free after idle for the synchronous self-test; retire behind the frame fence mid-frame).
+// VK_NULL_HANDLE = nothing recorded. Barriers are the caller's job (they know the consumer:
+// HOST for readback, VERTEX_INPUT for skinning). Must be recorded outside a render pass. (Phase 1.)
+VkDescriptorSet VulkanBackend::RecordDispatch( VkCommandBuffer cb, const ComputeArgs &args ) {
+	VkPipeline pipeline = GetComputePipeline( args.shader );
+	if ( pipeline == VK_NULL_HANDLE ) {
+		return VK_NULL_HANDLE;
+	}
+	VkDescriptorSetAllocateInfo ai = {};
+	ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	ai.descriptorPool = computePool;
+	ai.descriptorSetCount = 1;
+	ai.pSetLayouts = &setLayoutCompute;
+	VkDescriptorSet set = VK_NULL_HANDLE;
+	if ( vkAllocateDescriptorSets( device, &ai, &set ) != VK_SUCCESS ) {
+		common->Warning( "VK: compute descriptor pool exhausted" );
+		return VK_NULL_HANDLE;
+	}
+	// write only the bound storage buffers; a compute shader statically uses only what it
+	// binds, so unbound bindings need no descriptor.
+	VkDescriptorBufferInfo bi[8] = {};
+	VkWriteDescriptorSet w[8] = {};
+	int n = 0;
+	for ( int i = 0; i < 8; i++ ) {
+		if ( args.storage[i] < 1 || args.storage[i] > (BufferHandle)bufferTable.size() ) {
+			continue;
+		}
+		bi[n].buffer = bufferTable[args.storage[i] - 1];
+		bi[n].offset = 0;
+		bi[n].range = VK_WHOLE_SIZE;
+		w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		w[n].dstSet = set;
+		w[n].dstBinding = (uint32_t)i;
+		w[n].descriptorCount = 1;
+		w[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		w[n].pBufferInfo = &bi[n];
+		n++;
+	}
+	if ( n > 0 ) {
+		vkUpdateDescriptorSets( device, (uint32_t)n, w, 0, NULL );
+	}
+	vkCmdBindPipeline( cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline );
+	vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeLayout, 0, 1, &set, 0, NULL );
+	if ( args.pushConstants && args.pushConstantSize > 0 ) {
+		uint32_t pcSize = (uint32_t)( args.pushConstantSize > 128 ? 128 : args.pushConstantSize );
+		vkCmdPushConstants( cb, computePipeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pcSize, args.pushConstants );
+	}
+	vkCmdDispatch( cb, args.groupsX ? args.groupsX : 1, args.groupsY ? args.groupsY : 1, args.groupsZ ? args.groupsZ : 1 );
+	return set;
+}
+
+void VulkanBackend::Dispatch( const ComputeArgs &args ) {
+	if ( device == VK_NULL_HANDLE || computePipeLayout == VK_NULL_HANDLE || !frameOpen || skipFrame ) {
+		return;
+	}
+	// a vkCmdDispatch is illegal inside a render pass; the compute lane records in the
+	// pre-scene window on the frame cb. If a scene/target pass is already open, skip
+	// (Phase 2 sequences dispatches before the scene pass opens).
+	if ( insideScenePass || insideTargetPass ) {
+		static bool warned = false;
+		if ( !warned ) { warned = true; common->Warning( "VK: Dispatch() inside a render pass — skipped (record it pre-scene)" ); }
+		return;
+	}
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	VkDescriptorSet set = RecordDispatch( cb, args );
+	if ( set == VK_NULL_HANDLE ) {
+		return;
+	}
+	// make compute writes available to subsequent vertex fetch / shader reads this frame
+	VkMemoryBarrier mb = {};
+	mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	mb.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		0, 1, &mb, 0, NULL, 0, NULL );
+	retiredComputeSets[frameIndex].push_back( set );
+}
+
+// r_vkComputeTest: validate the whole compute lane end to end. Seeds a host-visible storage
+// buffer with 0..N-1, dispatches a kernel that doubles each element, reads it back and checks
+// data[i] == 2*i. Two staged checks isolate a failure: the raw seed round-trip (buffer create +
+// ReadBuffer, no compute) then the dispatched result. Synchronous one-shot (dev tool) — records
+// on the upload cb and waits idle, so never call it per-frame. (Phase 1.)
+void VulkanBackend::ComputeSelfTest() {
+	if ( device == VK_NULL_HANDLE || computePipeLayout == VK_NULL_HANDLE || uploadCb == VK_NULL_HANDLE ) {
+		common->Printf( "VK compute self-test: unavailable (no compute lane)\n" );
+		return;
+	}
+	static const char *kSrc =
+		"#version 450\n"
+		"layout(local_size_x = 64) in;\n"
+		"layout(std430, binding = 0) buffer B { uint v[]; };\n"
+		"layout(push_constant) uniform PC { uint count; } pc;\n"
+		"void main() {\n"
+		"    uint i = gl_GlobalInvocationID.x;\n"
+		"    if ( i < pc.count ) { v[i] = v[i] * 2u; }\n"
+		"}\n";
+	ShaderHandle sh = CreateComputeShader( "cs_selftest", kSrc );
+	if ( sh == 0 ) {
+		common->Printf( "VK compute self-test: FAIL (compute shader did not compile)\n" );
+		return;
+	}
+	const int N = 256;
+	uint32_t seed[N];
+	for ( int i = 0; i < N; i++ ) { seed[i] = (uint32_t)i; }
+	BufferHandle buf = CreateBuffer( BU_STORAGE, N * (int)sizeof( uint32_t ), seed );
+	if ( buf == 0 ) {
+		common->Printf( "VK compute self-test: FAIL (storage buffer alloc)\n" );
+		return;
+	}
+
+	// check 1: raw seed survives buffer-create + readback (isolates the buffer path from compute)
+	uint32_t back[N];
+	bool ok = ReadBuffer( buf, back, N * (int)sizeof( uint32_t ) );
+	for ( int i = 0; ok && i < N; i++ ) {
+		if ( back[i] != (uint32_t)i ) {
+			common->Printf( "VK compute self-test: FAIL (seed round-trip at i=%d: %u != %d)\n", i, back[i], i );
+			ok = false;
+		}
+	}
+	if ( !ok ) { DestroyBuffer( buf ); return; }
+
+	// check 2: dispatch the doubling kernel, read back, verify data[i] == 2*i
+	uint32_t count = (uint32_t)N;
+	ComputeArgs ca = {};
+	ca.shader = sh;
+	ca.storage[0] = buf;
+	ca.pushConstants = &count;
+	ca.pushConstantSize = (int)sizeof( count );
+	ca.groupsX = ( N + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
+
+	vkQueueWaitIdle( gfxQueue );
+	vkResetCommandBuffer( uploadCb, 0 );
+	VkCommandBufferBeginInfo bbi = {};
+	bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer( uploadCb, &bbi );
+	VkDescriptorSet set = RecordDispatch( uploadCb, ca );
+	if ( set != VK_NULL_HANDLE ) {
+		VkMemoryBarrier mb = {};
+		mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+			0, 1, &mb, 0, NULL, 0, NULL );
+	}
+	vkEndCommandBuffer( uploadCb );
+	VkSubmitInfo si = {};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &uploadCb;
+	vkResetFences( device, 1, &uploadFence );
+	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	if ( set != VK_NULL_HANDLE ) {
+		vkFreeDescriptorSets( device, computePool, 1, &set );		// cb is done -> safe
+	}
+
+	const bool readOk = ( set != VK_NULL_HANDLE ) && ReadBuffer( buf, back, N * (int)sizeof( uint32_t ) );
+	int firstBad = -1;
+	for ( int i = 0; readOk && i < N; i++ ) {
+		if ( back[i] != (uint32_t)( 2 * i ) ) { firstBad = i; break; }
+	}
+	if ( set == VK_NULL_HANDLE ) {
+		common->Printf( "VK compute self-test: FAIL (dispatch not recorded)\n" );
+	} else if ( !readOk ) {
+		common->Printf( "VK compute self-test: FAIL (readback failed)\n" );
+	} else if ( firstBad >= 0 ) {
+		common->Printf( "VK compute self-test: FAIL (result at i=%d: %u != %d)\n", firstBad, back[firstBad], 2 * firstBad );
+	} else {
+		common->Printf( "VK compute self-test: PASS (%d elements doubled on the GPU)\n", N );
+	}
+	DestroyBuffer( buf );
 }
 
 /*

@@ -27,9 +27,12 @@ typedef unsigned int ShaderHandle;		// linked vert+frag program pair
 typedef unsigned int RenderTargetHandle;	// offscreen FBO; 0 = the backbuffer
 
 enum BufferUsage {
-	BU_VERTEX,
+	BU_VERTEX,		// must stay 0 (the VK backend's switch default)
 	BU_INDEX,
-	BU_UNIFORM		// per-draw ring slices (RenderParams / ArbParams)
+	BU_UNIFORM,		// per-draw ring slices (RenderParams / ArbParams)
+	BU_STORAGE		// GPU compute storage buffer (SSBO). VK only; GL 3.3 has no compute.
+					// Phase 1: host-visible (BAR), read back via ReadBuffer; a device-local
+					// staged variant is a Phase-2 follow-up (docs/gpu-offload-plan.md).
 };
 
 enum ImageFormat {
@@ -114,6 +117,19 @@ struct ClearArgs {
 	unsigned char stencilValue;
 };
 
+// A GPU compute dispatch (docs/gpu-offload-plan.md Phase 1). The foundational
+// primitive later phases build GPU skinning / culling on. Vulkan only — the GL3
+// backend (GL 3.3 core, no compute) no-ops it. storage[] binds BU_STORAGE buffers
+// to std430 bindings 0..7; a small pushConstants blob carries params (element
+// counts etc.); groups* are the work-group counts. Recorded outside any render pass.
+struct ComputeArgs {
+	ShaderHandle	shader;				// from CreateComputeShader (0 = skip, no-op)
+	BufferHandle	storage[8];			// storage-buffer bindings 0..7 (0 = unbound)
+	const void *	pushConstants;		// params bound at push-constant offset 0 (NULL = none)
+	int				pushConstantSize;	// bytes, <= 128
+	unsigned int	groupsX, groupsY, groupsZ;
+};
+
 class RHI {
 public:
 	virtual			~RHI() {}
@@ -155,6 +171,12 @@ public:
 	virtual BufferHandle	CreateBuffer( BufferUsage usage, int size, const void *data ) = 0;
 	virtual void			UpdateBuffer( BufferHandle b, int offset, int size, const void *data ) = 0;
 	virtual void			DestroyBuffer( BufferHandle b ) = 0;
+	// Synchronous read-back of a buffer's contents into dst (GPU compute output;
+	// docs/gpu-offload-plan.md Phase 1). Stalls, so a dev/validation path — not a
+	// per-frame call. Backends without a compute lane return false. VK: memcpy of the
+	// host-visible BU_STORAGE mapping after a queue idle (device-local staging is a
+	// Phase-2 extension).
+	virtual bool			ReadBuffer( BufferHandle b, void *dst, int size ) { return false; }
 	virtual ImageHandle		CreateImage( ImageFormat fmt, int w, int h, const void *pixels ) = 0;
 	virtual void			DestroyImage( ImageHandle i ) = 0;
 
@@ -185,6 +207,12 @@ public:
 	// degrades the stage. Used for custom (mod) ARB material stages the offline
 	// builtin table doesn't cover.
 	virtual ShaderHandle	CreateShaderFromGlsl( const char *name, const char *vertSrc, const char *fragSrc ) { return 0; }
+
+	// Compile a standalone compute-shader GLSL source (its own #version, no graphics
+	// prelude) into a compute pipeline, cached by name. Returns a ShaderHandle usable
+	// as ComputeArgs::shader. Backends without a compute lane (GL 3.3) return 0.
+	// docs/gpu-offload-plan.md Phase 1.
+	virtual ShaderHandle	CreateComputeShader( const char *name, const char *glslSrc ) { return 0; }
 
 	// ---- offscreen render targets (Phase 3.5 shadow maps; Phase 11 post stack) ----
 	// Create an offscreen target and its backing texture. A depth format makes a
@@ -255,6 +283,12 @@ public:
 	// ---- drawing (Chunk C+) ----
 	virtual void	BindPipeline( const PipelineDesc &desc ) = 0;
 	virtual void	Draw( const DrawArgs &args ) = 0;
+
+	// ---- compute (docs/gpu-offload-plan.md Phase 1) ----
+	// Record a GPU compute dispatch (see ComputeArgs). Vulkan records it on the frame
+	// command buffer outside any render pass; the GL3 backend (no compute) no-ops.
+	// The foundational primitive for CPU->GPU offload (skinning / culling).
+	virtual void	Dispatch( const ComputeArgs &args ) {}
 
 	// ---- screen copies (_currentRender / _currentDepth / _scratch, Phase 4 M5) ----
 	// The GL3 backend keeps the literal qglCopyTexSubImage2D path in idImage
