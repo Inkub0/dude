@@ -1164,6 +1164,10 @@ void idInteraction::AddActiveInteraction( void ) {
 					// reference the original surface's ambient cache
 					lightTris->ambientCache = tri->ambientCache;
 
+					// Phase 2 GPU skinning: inherit the ambient surface's compute-skinned vertex
+					// buffer too, so lit interactions draw the same GPU pose as the ambient pass.
+					lightTris->gpuSkinVB = tri->gpuSkinVB;
+
 					// touch the ambient surface so it won't get purged
 					vertexCache.Touch( lightTris->ambientCache );
 

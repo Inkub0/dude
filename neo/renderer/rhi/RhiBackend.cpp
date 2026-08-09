@@ -23,6 +23,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 //     dynamic state / CopyFramebufferToImage in the Vulkan backend)
 
 #include "sys/platform.h"
+#include "idlib/geometry/JointTransform.h"
 #include "framework/FileSystem.h"
 #include "framework/CmdSystem.h"
 #include "renderer/RenderWorld_local.h"
@@ -1213,6 +1214,62 @@ static void RB_RHI_StreamStore( rhi::RHI *r, const void *vertKey, const void *id
 	rbStreamedHash.Add( (int)( ( ( (uintptr_t)vertKey ^ (uintptr_t)idxKey ) >> 4 ) & 0x7fffffff ), index );
 }
 
+// ---- Phase 2 GPU MD5 skinning (docs/gpu-offload-plan.md) ------------------------------------
+// The front end (idMD5Mesh::UpdateSurface) records one job per visible skinned surface; the
+// backend flushes them as compute dispatches in the pre-scene window, before the first pass
+// opens (so the compute-write -> vertex-read barrier lands before any draw reads the buffer).
+struct rbSkinJob_t {
+	rhi::ShaderHandle	shader;
+	rhi::BufferHandle	outVB, weights, wdesc, wstart, localTbn;
+	const void *		jointData;			// R_FrameAlloc snapshot, valid this frame
+	int					numJoints;
+	int					numOutVerts;
+	float				skinScale;
+};
+static idList<rbSkinJob_t>	rbSkinJobs;
+
+void RB_RHI_AddSkinJob( unsigned int shader, unsigned int outVB, int numOutVerts,
+                        unsigned int weightsBuf, unsigned int wdescBuf, unsigned int wstartBuf, unsigned int localTbnBuf,
+                        const void *jointData, int numJoints, float skinScale ) {
+	rbSkinJob_t j;
+	j.shader = shader; j.outVB = outVB; j.numOutVerts = numOutVerts;
+	j.weights = weightsBuf; j.wdesc = wdescBuf; j.wstart = wstartBuf; j.localTbn = localTbnBuf;
+	j.jointData = jointData; j.numJoints = numJoints; j.skinScale = skinScale;
+	rbSkinJobs.Append( j );
+}
+
+void RB_RHI_FlushSkinJobs( void ) {
+	if ( rbSkinJobs.Num() == 0 ) {
+		return;
+	}
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r ) {
+		for ( int i = 0; i < rbSkinJobs.Num(); i++ ) {
+			const rbSkinJob_t &j = rbSkinJobs[i];
+			// per-frame joint palette (small; a shared batched buffer is a later optimisation)
+			rhi::BufferHandle jointsBuf = r->CreateBuffer( rhi::BU_STORAGE, j.numJoints * (int)sizeof( idJointMat ), j.jointData );
+			if ( !jointsBuf ) {
+				continue;
+			}
+			struct { unsigned int numVerts; float skinScale; } pc = { (unsigned int)j.numOutVerts, j.skinScale };
+			rhi::ComputeArgs ca = {};
+			ca.shader = j.shader;
+			ca.storage[0] = jointsBuf;
+			ca.storage[1] = j.weights;
+			ca.storage[2] = j.wdesc;
+			ca.storage[3] = j.wstart;
+			ca.storage[4] = j.outVB;
+			ca.storage[5] = j.localTbn;
+			ca.pushConstants = &pc;
+			ca.pushConstantSize = (int)sizeof( pc );
+			ca.groupsX = ( j.numOutVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
+			r->Dispatch( ca );					// records on the frame cb + a compute->vertex barrier
+			r->DestroyBuffer( jointsBuf );		// deferred/fence-retired: safe right after recording
+		}
+	}
+	rbSkinJobs.SetNum( 0 );
+}
+
 // Resolve this surface's indexes to a GPU buffer + byte offset. When the front
 // end has a resident index VBO (tri->indexCache, populated only when
 // r_useIndexBuffers is set — which the core profile forces on) draw it in
@@ -1228,6 +1285,15 @@ static void RB_RHI_ResolveIndices( rhi::RHI *r, const srfTriangles_s *tri, rhi::
 }
 
 void RB_RHI_StreamAmbient( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs ) {
+	// Phase 2 GPU skinning: this surface (or the interaction copy that inherited it) was skinned
+	// by the compute lane into a persistent vertex buffer — bind it directly. Indexes are static,
+	// so they resolve the normal way. Preferred over ambientCache so every pass draws the GPU pose.
+	if ( tri->gpuSkinVB ) {
+		vb = tri->gpuSkinVB;
+		vertOfs = 0;
+		RB_RHI_ResolveIndices( r, tri, ib, idxOfs );
+		return;
+	}
 	// static VBO fast path: the cache block already lives on the GPU (uploaded
 	// once at level load, or by AllocFrameTemp for dynamic surfaces), so hand
 	// back its handle and offset directly — no per-frame copy.
@@ -2786,6 +2852,10 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	const bool vkMode = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
 
 	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
+
+	// Phase 2 GPU skinning: dispatch all recorded MD5 skin jobs now, in the pre-scene window
+	// (frame cb open, no render pass yet) so the compute->vertex barrier lands before any draw.
+	RB_RHI_FlushSkinJobs();
 
 	rbBerserkFrame = false;	// set when the berserk material is seen (crop overlay), read at the _scratch blit
 	rbHelltimeFrame = false;	// set when a bloodorbN hell-time material is seen, read at its cr_draw blit

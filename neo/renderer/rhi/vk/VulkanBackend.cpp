@@ -973,6 +973,15 @@ bool VulkanBackend::CreateDeviceAndVma() {
 		common->Warning( "VK: device lacks shaderClipDistance - the depth prepass shader may fail" );
 	}
 
+	// GPU-offload hardening (docs/gpu-offload-plan.md): with robustBufferAccess an out-of-bounds
+	// vertex/index/storage fetch returns 0 / is clamped instead of faulting the device. The compute
+	// offload paths (skinning, tessellate-once) hand the rasterizer buffers produced this frame, so a
+	// bug there must degrade to a visible glitch — never a GPU page fault that device-losts and hangs
+	// the machine. Universally supported on desktop and near-zero cost; enable whenever present.
+	if ( supported.robustBufferAccess ) {
+		enabled.robustBufferAccess = VK_TRUE;
+	}
+
 	// discard in fragment shaders compiles to OpDemoteToHelperInvocation under
 	// the vulkan1.4 SPIR-V target (modern helper-invocation semantics rather
 	// than the old OpKill); the capability needs shaderDemoteToHelperInvocation,

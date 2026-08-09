@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/VertexCache.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/rhi/RHI.h"
 
 /*
 ==============================================================================
@@ -374,6 +375,23 @@ This does the actual free
 void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 	if ( !tri ) {
 		return;
+	}
+
+	// Phase 2 GPU skinning: release the persistent compute-skinned vertex buffer — but ONLY the
+	// owner may destroy it. R_CreateLightTris copies the OWNING ambient surface's gpuSkinVB handle
+	// into every per-light interaction surface (so the interaction draws the GPU pose from the same
+	// buffer). Those inherited copies have ambientSurface != NULL and are freed every frame; if they
+	// destroyed the shared handle it would recycle the RHI buffer slot the still-live ambient surface
+	// is about to draw, aliasing it onto a smaller buffer -> out-of-bounds vertex fetch -> GPU page
+	// fault / device-lost. So mirror the verts/indexes ownership guards below: only free when we own
+	// it (ambientSurface == NULL); an inherited copy just drops its borrowed handle. DestroyBuffer is
+	// deferred/fence-retired in the VK backend, so the owner's free is safe even mid-flight.
+	if ( tri->gpuSkinVB ) {
+		if ( tri->ambientSurface == NULL ) {
+			rhi::RHI *r = rhi::GetRHI();
+			if ( r ) { r->DestroyBuffer( tri->gpuSkinVB ); }
+		}
+		tri->gpuSkinVB = 0;
 	}
 
 	R_FreeStaticTriSurfVertexCaches( tri );
