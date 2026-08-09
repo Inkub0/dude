@@ -160,17 +160,21 @@ stale on toggle. **Measured (Vulkan):** indoor combat (all shadow-mapped) → `b
 stencil, correctly). User-verified shadows consistent. Readout: `r_shadowMapCacheDebug` now also prints
 `shadowVol/s: built N, skipped M`. *Independent of the GPU work — shipped first, as planned.*
 
-### Phase 1 — RHI compute lane + storage buffers *(Vulkan; the foundational primitive)*
-Add to the RHI: `BU_STORAGE`, a compute `ShaderHandle`/stage, `Dispatch(x,y,z)`, storage-buffer
-binding for a dispatch, and a device-local GPU-writable buffer variant. **VK is the natural (and for
-now only) home** — the graphics queue is compute-capable by spec, so a dispatch records onto the
-existing per-frame cb and submits on `gfxQueue` with **zero new queue/sync** (insertion:
-`VulkanBackend.cpp` dispatch window `:1676→` first `BeginPass`; new `vkCreateComputePipelines` sibling
-to `GetPipeline` `:4940`; `BU_STORAGE→VK_BUFFER_USAGE_STORAGE_BUFFER_BIT` at `CreateBuffer :2571`;
-`shaderc_compute_shader` kind in `CreateShaderFromGlsl :2902`). GL3 exposes these as unsupported
-(returns 0). **Deliverable:** a trivial validated dispatch (e.g. a buffer fill) measured with the
-existing timestamp idiom (`gpuTimerPool`, `:1686/:1971`). *This is the "compute lane the RHI lacks"
-that also unblocks tessellation "deform-once" and SSAO tiling.*
+### Phase 1 — RHI compute lane + storage buffers *(Vulkan; the foundational primitive)* — ✅ SHIPPED (`cf18e615`)
+Added to the RHI: `BU_STORAGE`, `CreateComputeShader(name, glslSrc)`, `ComputeArgs` + `Dispatch()`,
+`ReadBuffer()` — all with degrading base defaults so GL3 (no compute) needed **zero changes**. Vulkan
+backend: a `BU_STORAGE` host-visible+coherent buffer (RANDOM access so read-back stays cached), runtime
+`shaderc_compute_shader` compile into `ShaderRec.comp` (the graphics prelude is skipped for compute), a
+dedicated compute descriptor-set layout (8 storage bindings) + pipeline layout (128-byte push-const) +
+FREE-able pool, a `ShaderHandle`-keyed compute-pipeline cache reusing `diskPipelineCache`, a shared
+`RecordDispatch` helper, and the mid-frame `Dispatch()` (records pre-scene on the frame cb with a
+COMPUTE→VERTEX/SHADER barrier + fence-retired sets — the path Phase 2 skinning will use). The graphics
+queue is compute-capable, so **no new queue/sync**. **Delivered:** `r_vkComputeTest` dispatches a kernel
+doubling a 256-element storage buffer, verifies the seed round-trip then `data[i]==2*i` — user-verified
+`PASS` on Vulkan; adversarial-review workflow found 0 confirmed defects. **Deferred to Phase 2** (logged):
+device-local storage + staged `ReadBuffer` (only needed when GPU-write bandwidth matters); a `STORAGE|
+VERTEX` buffer for skinning output; precompiled `.comp.spv` (runtime shaderc is fine for now). *This is
+the "compute lane the RHI lacks" that also unblocks tessellation "deform-once" and SSAO tiling.*
 
 ### Phase 2 — GPU skinning *(both backends; highest value)*
 On the Phase-1 lane (VK) and transform feedback (GL3), skin animated MD5 meshes on the GPU into a
@@ -224,7 +228,7 @@ async-compute* queue (not needed until Phase 3 overlap tuning) would extend both
 
 ```
 Phase 0 (CPU stencil-build gate) ── ✅ SHIPPED (0bf7e1dd), de-risks Phase 4
-Phase 1 (VK compute lane + BU_STORAGE) ── blocks Phase 2-VK and Phase 3
+Phase 1 (VK compute lane + BU_STORAGE) ── ✅ SHIPPED (cf18e615); unblocks Phase 2-VK and Phase 3
    ├── Phase 2 (skinning): VK on Phase 1; GL3 on a parallel transform-feedback primitive
    │        └── gives dynamic models GPU residency ── prereq for Phase 3
    └── Phase 3 (GPU culling, VK-only): needs Phase 1 + indirect draw + Phase 2 residency
