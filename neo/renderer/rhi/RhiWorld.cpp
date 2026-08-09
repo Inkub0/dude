@@ -1164,7 +1164,7 @@ the idTech4 stage decomposition runs unchanged.
 */
 static void RB_RHI_CreateDrawInteractions( const drawSurf_t *surf ) {
 	for ( ; surf; surf = surf->nextOnLight ) {
-		if ( !surf->geo || !surf->geo->ambientCache ) {
+		if ( !surf->geo || ( !surf->geo->ambientCache && !surf->geo->gpuSkinVB ) ) {
 			continue;
 		}
 		RB_RHI_SpaceMvp( ictx.viewDef, surf->space, ictx.mvp );
@@ -1394,7 +1394,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( tg == TG_SCREEN || tg == TG_SCREEN2 || tg == TG_SKYBOX_CUBE || tg == TG_WOBBLESKY_CUBE ) {
 			continue;
 		}
-		if ( !tri->numIndexes || !tri->ambientCache ) {
+		if ( !tri->numIndexes || ( !tri->ambientCache && !tri->gpuSkinVB ) ) {
 			continue;
 		}
 
@@ -1750,7 +1750,7 @@ cookie UV and writes the linear falloff as depth.
 static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::ShaderHandle prog ) {
 	for ( ; surf; surf = surf->nextOnLight ) {
 		const srfTriangles_t *tri = surf->geo;
-		if ( !tri || !tri->ambientCache || !tri->numIndexes ) {
+		if ( !tri || ( !tri->ambientCache && !tri->gpuSkinVB ) || !tri->numIndexes ) {
 			continue;
 		}
 		if ( !RB_RHI_ShadowCasterAllowed( surf ) ) {
@@ -1985,7 +1985,7 @@ static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, r
                                           casterFilter_t filter ) {
 	for ( ; surf; surf = surf->nextOnLight ) {
 		const srfTriangles_t *tri = surf->geo;
-		if ( !tri || !tri->ambientCache || !tri->numIndexes ) {
+		if ( !tri || ( !tri->ambientCache && !tri->gpuSkinVB ) || !tri->numIndexes ) {
 			continue;
 		}
 		if ( !RB_RHI_ShadowCasterAllowed( surf ) ) {
@@ -2221,6 +2221,12 @@ static unsigned long long RB_RHI_CasterHash( const drawSurf_t *surf ) {
 	if ( surf->geo ) {
 		c = RB_RHI_HashBytes( c, &surf->geo->numIndexes, sizeof( surf->geo->numIndexes ) );
 		c = RB_RHI_HashBytes( c, &surf->geo->ambientCache, sizeof( surf->geo->ambientCache ) );
+		// a GPU-skinned caster with r_gpuSkinNoUpload has no per-frame ambient-cache handle to flip,
+		// so key the invalidation off gpuSkinFrame (bumped each frame it is re-skinned) — otherwise an
+		// animating monster would cast a frozen cube shadow.
+		if ( surf->geo->gpuSkinVB ) {
+			c = RB_RHI_HashBytes( c, &surf->geo->gpuSkinFrame, sizeof( surf->geo->gpuSkinFrame ) );
+		}
 	}
 	return c;
 }
@@ -2297,7 +2303,7 @@ static void RB_RHI_CubeFaceTokens( const viewLight_t *vLight, float range, int s
 	unsigned long long faceCasters[6] = { 0, 0, 0, 0, 0, 0 };
 	for ( const drawSurf_t *surf = vLight->shadowMapCasters; surf; surf = surf->nextOnLight ) {
 		const srfTriangles_t *tri = surf->geo;
-		if ( !tri || !tri->ambientCache || !tri->numIndexes ) {
+		if ( !tri || ( !tri->ambientCache && !tri->gpuSkinVB ) || !tri->numIndexes ) {
 			continue;
 		}
 		if ( !RB_RHI_ShadowCasterAllowed( surf ) ) {
@@ -3075,7 +3081,7 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( tg == TG_SCREEN || tg == TG_SCREEN2 || tg == TG_SKYBOX_CUBE || tg == TG_WOBBLESKY_CUBE ) {
 			continue;					// sky must not seal the normal/depth buffer
 		}
-		if ( !tri->numIndexes || !tri->ambientCache ) {
+		if ( !tri->numIndexes || ( !tri->ambientCache && !tri->gpuSkinVB ) ) {
 			continue;
 		}
 		// skip materials with every stage conditioned off (mirror the depth prepass)
@@ -4805,7 +4811,7 @@ static void RB_RHI_BlendLightChain( rhi::RHI *r, const viewDef_t *viewDef, const
                                     idImage *projectionImage, idImage *falloffImage ) {
 	for ( ; surf; surf = surf->nextOnLight ) {
 		const srfTriangles_t *tri = surf->geo;
-		if ( !tri->ambientCache ) {
+		if ( !tri->ambientCache && !tri->gpuSkinVB ) {
 			continue;
 		}
 
@@ -4926,7 +4932,7 @@ static void RB_RHI_FogChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSu
                              bool allowTess ) {
 	for ( ; surf; surf = surf->nextOnLight ) {
 		const srfTriangles_t *tri = surf->geo;
-		if ( !tri->ambientCache ) {
+		if ( !tri->ambientCache && !tri->gpuSkinVB ) {
 			continue;
 		}
 

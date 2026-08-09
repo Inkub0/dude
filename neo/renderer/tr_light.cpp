@@ -72,6 +72,15 @@ void R_GpuSkinProfileAddDerive( double ms ) {
 	s_skinDeriveSurfs++;
 }
 
+// Milestone C (docs/gpu-offload-plan.md): when a surface is drawn from its compute-skinned
+// gpuSkinVB, its per-frame ambient-cache vertex upload (a fresh VK buffer + copy every frame) is
+// never drawn — skip it so the CPU stops re-streaming geometry the GPU already produced. Opt-in +
+// off by default: leaving ambientCache NULL arms ~a dozen "has geometry?" gates, so this stays an
+// A/B toggle until proven, and the OFF path is byte-for-byte unchanged. Vulkan-only in effect
+// (gpuSkinVB is only set there). NOT the tangent derive — that stays (decals/deform/weld read it).
+static idCVar r_gpuSkinNoUpload( "r_gpuSkinNoUpload", "0", CVAR_RENDERER | CVAR_BOOL,
+	"skip the redundant CPU ambient-cache upload for GPU-skinned surfaces (draw from gpuSkinVB); needs r_gpuSkinning on (Vulkan)" );
+
 /*
 ==================
 R_CreateAmbientCache
@@ -101,16 +110,25 @@ bool R_CreateAmbientCache( srfTriangles_t *tri, bool needsLighting ) {
 	if ( tri->ambientCache ) {
 		return true;
 	}
-	// the tangent derive (the Milestone-C prize) is timed at its source in R_DeriveTangents so it is
-	// caught wherever it actually fires; here we only time the redundant ambient-cache upload for
-	// gpuSkinVB surfaces (the draw takes gpuSkinVB, so this uploaded copy is never drawn).
-	const bool prof = r_gpuSkinProfile.GetBool() && tri->gpuSkinVB;
 
-	// we are going to use it for drawing, so make sure we have the tangents and normals
+	// we are going to use it for drawing, so make sure we have the tangents and normals. Kept even in
+	// the no-upload path below: decals (idRenderModelOverlay), deform materials, and the tess weld all
+	// read tri->verts normals/tangents on the CPU.
 	if ( needsLighting && !tri->tangentsCalculated ) {
 		R_DeriveTangents( tri );
 	}
 
+	// Milestone C: a GPU-skinned surface draws from tri->gpuSkinVB, so this ambient-cache upload would
+	// never be drawn — skip it and return success with ambientCache left NULL. The draw path binds
+	// gpuSkinVB (RB_RHI_StreamAmbient), the visible-pass gates accept gpuSkinVB in place of the cache,
+	// and the cube-shadow invalidation hashes gpuSkinFrame instead of the (absent) per-frame handle.
+	if ( tri->gpuSkinVB && r_gpuSkinNoUpload.GetBool() ) {
+		return true;
+	}
+
+	// the tangent derive (the Milestone-C prize) is timed at its source in R_DeriveTangents; here we
+	// only time the redundant ambient-cache upload for gpuSkinVB surfaces (never drawn once skinned).
+	const bool prof = r_gpuSkinProfile.GetBool() && tri->gpuSkinVB;
 	if ( prof ) {
 		const double t1 = Sys_MillisecondsPrecise();
 		vertexCache.Alloc( tri->verts, tri->numVerts * sizeof( tri->verts[0] ), &tri->ambientCache );
@@ -2156,8 +2174,11 @@ static void R_AddAmbientDrawsurfs( viewEntity_t *vEntity ) {
 				// don't add anything if the vertex cache was too full to give us an ambient cache
 				return;
 			}
-			// touch it so it won't get purged
-			vertexCache.Touch( tri->ambientCache );
+			// touch it so it won't get purged (GPU-skinned surfaces with r_gpuSkinNoUpload have no
+			// ambient cache — they draw from gpuSkinVB — so there is nothing to touch)
+			if ( tri->ambientCache ) {
+				vertexCache.Touch( tri->ambientCache );
+			}
 
 			if ( r_useIndexBuffers.GetBool() && !tri->indexCache ) {
 				vertexCache.Alloc( tri->indexes, tri->numIndexes * sizeof( tri->indexes[0] ), &tri->indexCache, true );

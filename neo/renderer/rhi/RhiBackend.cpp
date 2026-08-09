@@ -2367,8 +2367,9 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 	if ( !tri->numIndexes ) {
 		return;
 	}
-	if ( !tri->ambientCache ) {
-		common->Printf( "RB_RHI_RenderShaderPasses: !tri->ambientCache\n" );
+	// a GPU-skinned surface (r_gpuSkinNoUpload) has no ambient cache — it rasterizes from gpuSkinVB,
+	// which RB_RHI_StreamAmbient binds directly — so treat gpuSkinVB as satisfying this precondition.
+	if ( !tri->ambientCache && !tri->gpuSkinVB ) {
 		return;
 	}
 

@@ -1168,8 +1168,11 @@ void idInteraction::AddActiveInteraction( void ) {
 					// buffer too, so lit interactions draw the same GPU pose as the ambient pass.
 					lightTris->gpuSkinVB = tri->gpuSkinVB;
 
-					// touch the ambient surface so it won't get purged
-					vertexCache.Touch( lightTris->ambientCache );
+					// touch the ambient surface so it won't get purged (a GPU-skinned surface with
+					// r_gpuSkinNoUpload has no ambient cache — it draws from gpuSkinVB — so skip the touch)
+					if ( lightTris->ambientCache ) {
+						vertexCache.Touch( lightTris->ambientCache );
+					}
 
 					// regenerate the lighting cache (for non-vertex program cards) if it has been purged
 					if ( !lightTris->lightingCache ) {
@@ -1267,7 +1270,11 @@ void idInteraction::AddActiveInteraction( void ) {
 				bool haveCache = ( castTri->ambientCache != NULL )
 					|| R_CreateAmbientCache( castTri, sint->shader->ReceivesLighting() );
 				if ( haveCache ) {
-					vertexCache.Touch( castTri->ambientCache );
+					// GPU-skinned casters (r_gpuSkinNoUpload) have no ambient cache — R_CreateAmbientCache
+					// succeeded but left it NULL because the caster rasterizes from gpuSkinVB. Skip the touch.
+					if ( castTri->ambientCache ) {
+						vertexCache.Touch( castTri->ambientCache );
+					}
 					if ( r_useIndexBuffers.GetBool() && !castTri->indexCache ) {
 						vertexCache.Alloc( castTri->indexes, castTri->numIndexes * sizeof( castTri->indexes[0] ), &castTri->indexCache, true );
 					}
