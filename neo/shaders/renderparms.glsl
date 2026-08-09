@@ -86,7 +86,11 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // x = tess level (subdivision cap; 1 = flat),
 	                            // y = max view distance for the LOD falloff,
 	                            // z = displacement strength (0 = pure PN smoothing),
-	                            // w spare. Consumed by the .tesc / .tese stages only.
+	                            // w = min model-space edge length to subdivide.
+	                            // Consumed by the .tesc / .tese stages only.
+	vec4 u_tessParms2;           // DUDE tessellation extras: x = UV-seam displacement
+	                            // fade (1 = pin seam verts so they can't displace
+	                            // apart, 0 = displace them like any other). yzw spare.
 
 	vec4 u_parallaxParms;        // DUDE parallax occlusion mapping (docs/parallax.md):
 	                            // x = enable, y = height depth in UV units,

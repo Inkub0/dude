@@ -20,7 +20,7 @@ VARY(2) in vec3 i_B[];
 VARY(3) in vec3 i_N[];
 VARY(4) in vec2 i_TexCoverage[];
 VARY(5) in vec3 i_ModelPos[];
-VARY(6) in vec3 i_ModelNormal[];
+VARY(6) in vec4 i_ModelNormal[];
 
 VARY(0) out vec2 var_TexBump;
 VARY(1) out vec3 var_T;
@@ -31,10 +31,12 @@ VARY(4) out vec2 var_TexCoverage;
 void main() {
 	vec3 tc = gl_TessCoord;
 
-	vec3 pos = dudeTessPN( i_ModelPos[0], i_ModelPos[1], i_ModelPos[2],
-	                       normalize( i_ModelNormal[0] ),
-	                       normalize( i_ModelNormal[1] ),
-	                       normalize( i_ModelNormal[2] ), tc );
+	// PN wants unit corner normals; .w is the UV-seam displacement mask (tess.glsl)
+	vec3 n0 = normalize( i_ModelNormal[0].xyz );
+	vec3 n1 = normalize( i_ModelNormal[1].xyz );
+	vec3 n2 = normalize( i_ModelNormal[2].xyz );
+
+	vec3 pos = dudeTessPN( i_ModelPos[0], i_ModelPos[1], i_ModelPos[2], n0, n1, n2, tc );
 
 	var_TexBump     = i_TexBump[0] * tc.x + i_TexBump[1] * tc.y + i_TexBump[2] * tc.z;
 	var_TexCoverage = i_TexCoverage[0] * tc.x + i_TexCoverage[1] * tc.y + i_TexCoverage[2] * tc.z;
@@ -44,8 +46,9 @@ void main() {
 
 	// same displacement as zfill.tese (same bump texel, same interpolated geometric
 	// normal) so the normal buffer's depth/shape matches the depth prepass.
-	vec3 geoN = normalize( i_ModelNormal[0] * tc.x + i_ModelNormal[1] * tc.y + i_ModelNormal[2] * tc.z );
-	pos = dudeTessDisplace( pos, geoN, u_bumpMap, var_TexBump );
+	vec3 geoN = normalize( n0 * tc.x + n1 * tc.y + n2 * tc.z );
+	float seam = i_ModelNormal[0].w * tc.x + i_ModelNormal[1].w * tc.y + i_ModelNormal[2].w * tc.z;
+	pos = dudeTessDisplace( pos, geoN, u_bumpMap, var_TexBump, seam );
 
 	gl_Position = u_mvpMatrix * vec4( pos, 1.0 );
 }

@@ -22,11 +22,11 @@ VARY(7) out vec4 var_Color;
 // model-space position + normal for the tessellation stages (DUDE tessellation,
 // docs/tessellation.md); unconsumed by ambientlight.frag in the flat pipeline.
 VARY(8) out vec3 var_ModelPos;
-VARY(9) out vec3 var_ModelNormal;
+VARY(9) out vec4 var_ModelNormal;	// .w = UV-seam displacement mask
 
 void main() {
 	var_ModelPos = attr_Position.xyz;
-	var_ModelNormal = attr_Normal;
+	var_ModelNormal = vec4( attr_Normal, attr_Color.a );
 
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
 

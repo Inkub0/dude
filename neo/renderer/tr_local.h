@@ -994,6 +994,7 @@ extern idCVar r_tessLevel;				// subdivision level (1 = flat .. capped by device
 extern idCVar r_tessMaxDist;			// distance the subdivision starts rolling back toward flat
 extern idCVar r_tessMinEdge;			// min triangle edge length (world units) to tessellate (anti eye-bulge)
 extern idCVar r_tessDisplace;			// normal-map displacement strength (world units; +out/-in, 0=off)
+extern idCVar r_tessSeamFade;			// fade displacement out at UV-seam verts so they can't displace apart
 extern idCVar r_tessWeldSeams;			// weld coincident md5 normals so seams don't open under tess/displacement
 extern idCVar r_tessWeldThreshold;		// min normal dot to weld (1=only identical .. lower=weld harder edges)
 extern idCVar r_tessDebug;				// log each material name accepted for tessellation once (diagnostic)

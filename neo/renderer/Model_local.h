@@ -154,6 +154,10 @@ public:
 	int							NumWeights( void ) const;
 
 private:
+	// DUDE tessellation (docs/tessellation.md): mark the source verts that sit on a UV
+	// seam so the displacement stage can pin them. Writes color[3] only.
+	void						StampTessSeamMask( idDrawVert *verts ) const;
+
 	idList<idVec2>				texCoords;			// texture coordinates
 	int							numWeights;			// number of weights
 	idVec4 *					scaledWeights;		// joint weights

@@ -16,7 +16,7 @@ VARY(5) in vec3 i_ToGlobalRow1[];
 VARY(6) in vec3 i_ToGlobalRow2[];
 VARY(7) in vec4 i_Color[];
 VARY(8) in vec3 i_ModelPos[];
-VARY(9) in vec3 i_ModelNormal[];
+VARY(9) in vec4 i_ModelNormal[];
 
 VARY(0) out vec2 o_TexBump[];
 VARY(1) out vec2 o_TexDiffuse[];
@@ -27,7 +27,7 @@ VARY(5) out vec3 o_ToGlobalRow1[];
 VARY(6) out vec3 o_ToGlobalRow2[];
 VARY(7) out vec4 o_Color[];
 VARY(8) out vec3 o_ModelPos[];
-VARY(9) out vec3 o_ModelNormal[];
+VARY(9) out vec4 o_ModelNormal[];
 
 void main() {
 	o_TexBump[gl_InvocationID]       = i_TexBump[gl_InvocationID];

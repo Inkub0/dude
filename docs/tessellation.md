@@ -291,11 +291,42 @@ mesh deforms as one piece; the threshold preserves genuine hard creases. Runs in
 on (vanilla is byte-identical off). Closes PN seams fully; displacement across a UV seam
 keeps a small residual (different heights). Threshold is a Debugging-tab slider.
 
+### UV-seam displacement fade (2026-08-09) — `r_tessSeamFade` (on by default)
+The residual noted above turned out not to be small: it is what opens the visible gaps around
+hands and shoulders. `dudeTessDisplace` reads its pseudo-height **at the vertex UV**, and a UV
+seam is by definition a pair of position-coincident verts carrying *deliberately different*
+texcoords. Measured on `imp.md5mesh`: **396 of 891 source verts (44%) sit on a coincident group,
+and the UV distance inside a group is 0.36 median / 1.62 max** — the two halves of a seam sample
+opposite ends of the atlas. They were never going to agree on a height, so they displace by
+different amounts and separate. Welding the bind normals ([gpu-offload-plan.md](gpu-offload-plan.md))
+fixed the *direction* the halves move in; nothing fixed the *distance*.
+
+Fix: a per-vertex seam mask. `idMD5Mesh::StampTessSeamMask` writes 0 into `color[3]` for every
+vertex of a `dupVerts` pair and 255 elsewhere; the vertex stages forward it as `var_ModelNormal.w`
+(the varying was already tess-only, so no new attribute, no new stream, no RHI change), the tesc
+passes it through, and each tese interpolates it barycentrically and scales `relief` by it. Both
+halves of a seam therefore displace by exactly 0 and stay welded, while displacement ramps back to
+full one triangle in. Mirror-seam verts need nothing — `UpdateSurface` replicates them by copying
+the whole source vertex, texcoord included, so they already sample the same texel.
+
+The mask must be identical in every pass or depth-EQUAL breaks, so all seven displacing chains
+(`zfill` / `interaction` / `ambientlight` / `gbuffer` / `fog` / `shadow_sm` / `shadow_sm_cube`)
+carry it; `generic.{vert,tesc,tese}` is left alone because the blend pass never displaced.
+
+**Fidelity:** costs relief in a band around every UV seam, and at 44% seam verts that band is not
+narrow — `r_tessSeamFade` (0..1, default 1) dials it, 0 restoring the old un-pinned displacement.
+The alpha byte is free on md5 base surfaces: verts are `Clear()`ed to colour 0, so vertex colour
+would render them black, and no stock character material uses it (every `vertexColor` /
+`inverseVertexColor` stage is world/terrain blending, a projected `DECAL_MACRO`, or an additive
+spawn effect). RGB is untouched.
+
 ### Known prototype limitations (Phase 2+ follow-ups)
 - **Static props excluded** (PN is wrong for hard-surface geometry). A curvature-aware
   scheme could re-admit rounded props but won't save boxes — deferred; opt-in later.
 - **GUI / emissive / blend surfaces excluded** (they draw flat in a non-tessellated pass).
-- **Displacement across UV seams** keeps a small residual even with seam welding.
+- **Displacement across a boundary between two separate md5 meshes** (e.g. a `def_head` neck)
+  is still unpinned — `dupVerts` only relates verts inside one `deformInfo`. Would need a
+  model-level position hash across meshes; unmeasured, and the single-mesh imp doesn't hit it.
 - **Stencil-shadow silhouettes** come from the un-tessellated base mesh, for stencil-only lights
   only (shadow-mapped lights now tessellate — see below). Architecturally unfixable in stencil.
 

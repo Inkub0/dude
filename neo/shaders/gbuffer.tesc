@@ -14,7 +14,7 @@ VARY(2) in vec3 i_B[];
 VARY(3) in vec3 i_N[];
 VARY(4) in vec2 i_TexCoverage[];
 VARY(5) in vec3 i_ModelPos[];
-VARY(6) in vec3 i_ModelNormal[];
+VARY(6) in vec4 i_ModelNormal[];
 
 VARY(0) out vec2 o_TexBump[];
 VARY(1) out vec3 o_T[];
@@ -22,7 +22,7 @@ VARY(2) out vec3 o_B[];
 VARY(3) out vec3 o_N[];
 VARY(4) out vec2 o_TexCoverage[];
 VARY(5) out vec3 o_ModelPos[];
-VARY(6) out vec3 o_ModelNormal[];
+VARY(6) out vec4 o_ModelNormal[];
 
 void main() {
 	// per-vertex output writes must be indexed by the literal gl_InvocationID

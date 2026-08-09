@@ -24,12 +24,12 @@ VARY(9) out vec3 var_ShadowCubeVec; // world-space light->frag vector (point-lig
 // (DUDE tessellation, docs/tessellation.md) for the PN control net. Unused by
 // the fragment shader — a benign "output not consumed" in the flat pipeline.
 VARY(10) out vec3 var_ModelPos;
-VARY(11) out vec3 var_ModelNormal;
+VARY(11) out vec4 var_ModelNormal;	// .w = UV-seam displacement mask
 VARY(12) out vec4 var_ShadowProjection; // UNBAKED projection for the 2D shadow lookup
 
 void main() {
 	var_ModelPos = attr_Position.xyz;
-	var_ModelNormal = attr_Normal;
+	var_ModelNormal = vec4( attr_Normal, attr_Color.a );
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
 
 	// vector to light in tangent space

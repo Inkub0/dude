@@ -9,6 +9,10 @@
 layout(location = 0) in vec4 attr_Position;	// w defaults to 1 (vec3 attribute)
 layout(location = 1) in vec2 attr_TexCoord;
 layout(location = 2) in vec3 attr_Normal;
+// DUDE tessellation (docs/tessellation.md): the alpha channel carries the
+// per-vertex UV-seam displacement mask idMD5Mesh stamps in (see tess.glsl).
+// Unused otherwise by this stage.
+layout(location = 5) in vec4 attr_Color;
 
 VARY(0) out float var_Falloff;
 VARY(1) out vec2 var_TexCoord;			// diffuse UV for perforated (alpha-tested) casters
@@ -18,7 +22,7 @@ VARY(1) out vec2 var_TexCoord;			// diffuse UV for perforated (alpha-tested) cas
 // is rounded. shadow_sm.tese runs the same dudeTessPN + dudeTessDisplace as
 // zfill.tese. Unconsumed by shadow_sm.frag in the flat pipeline.
 VARY(2) out vec3 var_ModelPos;
-VARY(3) out vec3 var_ModelNormal;
+VARY(3) out vec4 var_ModelNormal;	// .w = UV-seam displacement mask
 VARY(4) out vec2 var_TexBump;
 
 void main() {
@@ -35,7 +39,7 @@ void main() {
 	var_TexCoord = vec2( dot( st, u_diffuseMatrixS ), dot( st, u_diffuseMatrixT ) );
 
 	var_ModelPos = attr_Position.xyz;
-	var_ModelNormal = attr_Normal;
+	var_ModelNormal = vec4( attr_Normal, attr_Color.a );
 	var_TexBump = vec2( dot( st, u_bumpMatrixS ), dot( st, u_bumpMatrixT ) );
 
 	// ndc.xy = 2*(s/q, t/q) - 1  → rasterize at (cookie UV * map size). z is unused

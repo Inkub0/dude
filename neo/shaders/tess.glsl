@@ -80,12 +80,24 @@ vec3 dudeTessPN( vec3 p0, vec3 p1, vec3 p2, vec3 n0, vec3 n1, vec3 n2, vec3 tc )
 // in world units (0 = off; + raises detail, - carves it in). Sampled at an
 // explicit LOD (no derivatives in a tese) so every pass reads the same texel and
 // the displaced depth stays identical across zfill / interaction / ambient.
-vec3 dudeTessDisplace( vec3 pos, vec3 geoN, sampler2D bumpMap, vec2 uv ) {
+//
+// seam is the interpolated per-vertex UV-seam mask (var_ModelNormal.w, stamped by
+// idMD5Mesh into the vertex alpha): 1 in the interior of a UV chart, 0 on a chart
+// boundary. It exists because the height is read AT THE UV, and the two halves of a
+// UV seam are position-coincident vertices with deliberately DIFFERENT UVs -- they
+// sample different texels, displace by different amounts and pull apart, which is
+// what opened the gaps around hands and shoulders. Welding the normals fixed the
+// direction the two halves move in; only pinning them fixes the distance. The mask
+// interpolates linearly across the patch, so displacement ramps back to full a
+// triangle away from the seam rather than stepping. u_tessParms2.x scales the whole
+// effect (r_tessSeamFade; 0 restores the un-pinned behaviour).
+vec3 dudeTessDisplace( vec3 pos, vec3 geoN, sampler2D bumpMap, vec2 uv, float seam ) {
 	if ( u_tessParms.z == 0.0 ) {
 		return pos;
 	}
 	float bz = textureLod( bumpMap, uv, 0.0 ).z * 2.0 - 1.0;
 	float relief = 1.0 - clamp( bz, 0.0, 1.0 );
+	relief *= mix( 1.0, clamp( seam, 0.0, 1.0 ), u_tessParms2.x );
 	return pos + geoN * ( relief * u_tessParms.z );
 }
 

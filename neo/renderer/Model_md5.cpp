@@ -375,6 +375,44 @@ void idMD5Mesh::ParseMesh( idLexer &parser, int numJoints, const idJointMat *joi
 
 /*
 ====================
+idMD5Mesh::StampTessSeamMask
+
+DUDE tessellation (docs/tessellation.md): stamp the per-vertex UV-seam displacement mask
+into color[3], where the tessellation vertex stages pick it up as var_ModelNormal.w.
+
+dudeTessDisplace reads its height from the bump map AT THE VERTEX UV. A UV seam is by
+definition a pair of position-coincident verts carrying DIFFERENT texcoords, so the two
+halves sample different texels, displace by different amounts, and pull apart -- the gaps
+that show around hands and shoulders, where the UV charts are cut and stretched most.
+Welding the bind normals (BuildGpuSkinData) made both halves move in the same DIRECTION;
+only pinning them equalises the DISTANCE. So: 0 on every vert of a dupVerts pair, 255
+everywhere else, and the tese interpolates between them so displacement ramps back to full
+one triangle in from the seam instead of stepping.
+
+Mirror-seam verts need nothing: UpdateSurface / BuildGpuSkinData replicate them by copying
+the whole source vertex, texcoord included, so a mirror pair samples the same texel already.
+
+FIDELITY NOTE: md5 verts are Clear()ed to color 0, so vertex colour on a base md5 surface
+would render black (SVC_MODULATE) -- and sure enough nothing uses it: every vertexColor /
+inverseVertexColor stage in the stock materials is either world/terrain blending, a projected
+DECAL_MACRO, or an additive spawn effect (alpha ignored), never an md5 body/head skin. The
+alpha byte is therefore free real estate here; RGB is left untouched, so even a mod material
+reading vertexColor sees the same rgb it does today. The real cost is a narrow band of reduced
+relief along each UV seam -- r_tessSeamFade 0 restores the un-pinned displacement.
+====================
+*/
+void idMD5Mesh::StampTessSeamMask( idDrawVert *verts ) const {
+	for ( int i = 0; i < deformInfo->numSourceVerts; i++ ) {
+		verts[i].color[3] = 255;
+	}
+	for ( int i = 0; i < deformInfo->numDupVerts; i++ ) {
+		verts[deformInfo->dupVerts[i * 2 + 0]].color[3] = 0;
+		verts[deformInfo->dupVerts[i * 2 + 1]].color[3] = 0;
+	}
+}
+
+/*
+====================
 idMD5Mesh::BuildGpuSkinData
 
 Precompute, once at load, everything the blended-LBS skinning kernel reads that stock frees.
@@ -460,6 +498,8 @@ void idMD5Mesh::BuildGpuSkinData( const idJointMat *bindJoints ) {
 		tri->verts[i].Clear();
 		tri->verts[i].st = texCoords[i];
 	}
+	// before the mirror replication below, so the mirror copies inherit it
+	StampTessSeamMask( tri->verts );
 	TransformVerts( tri->verts, bindJoints );
 	for ( int i = 0; i < numMir; i++ ) {
 		tri->verts[base + i] = tri->verts[deformInfo->mirroredVerts[i]];
@@ -945,6 +985,9 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			tri->verts[i].Clear();
 			tri->verts[i].st = texCoords[i];
 		}
+		// st + color are seeded once and survive every re-skin (TransformVerts only writes
+		// xyz); the mirror replication below copies whole verts, so it inherits the mask
+		StampTessSeamMask( tri->verts );
 	}
 
 	if ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f ) {

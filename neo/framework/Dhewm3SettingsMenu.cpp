@@ -1789,6 +1789,20 @@ static CVarOption enhancementOptions[] = {
 		AddCVarOptionTooltips( cvar, descr );
 		ImGui::EndDisabled();
 	} ),
+	CVarOption( "r_tessSeamFade", []( idCVar& cvar ) {
+		ImGui::BeginDisabled( !r_tessellation.GetBool() || r_tessDisplace.GetFloat() == 0.0f );
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Seam Fade", &f, 0.0f, 1.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( f );
+		}
+		const char* descr = "Fades displacement out at UV seams. The height is read from the bump map at the\n"
+			"vertex texcoord, and the two halves of a UV seam are coincident vertices with\n"
+			"DIFFERENT texcoords -- they sample different heights and slide apart, which is what\n"
+			"opens gaps around hands and shoulders. 1 = pin seam vertices (no gaps, slightly less\n"
+			"relief near seams), 0 = displace them like any other vertex.";
+		AddCVarOptionTooltips( cvar, descr );
+		ImGui::EndDisabled();
+	} ),
 	CVarOption( "r_tessMaxDist", []( idCVar& cvar ) {
 		ImGui::BeginDisabled( !r_tessellation.GetBool() );
 		float f = cvar.GetFloat();

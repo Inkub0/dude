@@ -10,11 +10,11 @@
 layout(vertices = 3) out;
 
 VARY(2) in vec3 i_ModelPos[];
-VARY(3) in vec3 i_ModelNormal[];
+VARY(3) in vec4 i_ModelNormal[];
 VARY(4) in vec2 i_TexBump[];
 
 VARY(2) out vec3 o_ModelPos[];
-VARY(3) out vec3 o_ModelNormal[];
+VARY(3) out vec4 o_ModelNormal[];
 VARY(4) out vec2 o_TexBump[];
 
 void main() {

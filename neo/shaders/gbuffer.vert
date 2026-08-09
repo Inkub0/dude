@@ -9,6 +9,10 @@ layout(location = 1) in vec2 attr_TexCoord;
 layout(location = 2) in vec3 attr_Normal;
 layout(location = 3) in vec3 attr_Tangent;
 layout(location = 4) in vec3 attr_Bitangent;
+// DUDE tessellation (docs/tessellation.md): the alpha channel carries the
+// per-vertex UV-seam displacement mask idMD5Mesh stamps in (see tess.glsl).
+// Unused otherwise by this stage.
+layout(location = 5) in vec4 attr_Color;
 
 VARY(0) out vec2 var_TexBump;
 VARY(1) out vec3 var_T;   // view-space tangent
@@ -19,7 +23,7 @@ VARY(4) out vec2 var_TexCoverage;   // diffuse UV for perforated (alpha-tested) 
 // docs/tessellation.md) — so the SSAO normal G-buffer subdivides on exactly the same
 // PN surface as zfill/interaction. Unconsumed by gbuffer.frag in the flat pipeline.
 VARY(5) out vec3 var_ModelPos;
-VARY(6) out vec3 var_ModelNormal;
+VARY(6) out vec4 var_ModelNormal;	// .w = UV-seam displacement mask
 
 void main() {
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
@@ -34,7 +38,7 @@ void main() {
 	var_N = mv * attr_Normal;
 
 	var_ModelPos = attr_Position.xyz;
-	var_ModelNormal = attr_Normal;
+	var_ModelNormal = vec4( attr_Normal, attr_Color.a );
 
 	gl_Position = u_mvpMatrix * attr_Position;
 }
