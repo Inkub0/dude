@@ -165,16 +165,18 @@ private:
 
 	// --- Phase 2 GPU MD5 skinning (docs/gpu-offload-plan.md; Vulkan only, opt-in r_gpuSkinning) ---
 	// Bind-pose data the compute kernel needs but the stock CPU path frees. Built once at load
-	// (BuildGpuSkinData) when the active backend is Vulkan; indexed per OUTPUT vertex (source
-	// verts [0,numSourceVerts) then appended mirror-seam duplicates). Retained CPU-side so the
-	// wire-in can upload per-mesh static SSBOs; the option-B kernel rotation-skins the stored
-	// joint-local bind TBN by each vertex's dominant joint every frame. NULL when not built.
+	// (BuildGpuSkinData) when the active backend is Vulkan. The kernel does full linear-blend
+	// skinning of position AND the TBN (option B): each output vertex walks an EXPANDED weight
+	// stream (source verts [0,numSourceVerts), then mirror-seam duplicates, each carrying its
+	// OWN per-weight joint-local N/T0/T1 so mirror handedness is preserved). Retained CPU-side
+	// so the wire-in can upload per-mesh static SSBOs. NULL when not built.
 	int							numOutputVerts;		// deformInfo->numOutputVerts, cached
-	unsigned int *				skinWeightStart;	// [numOutputVerts] first-weight index per output vert
-	unsigned int *				skinDomBase;		// [numOutputVerts] dominant joint float base (joint*12)
-	idVec4 *					skinBindTBN;		// [numOutputVerts*3] joint-local bind N,T0,T1
+	int							skinExpandCount;	// total entries in the expanded weight stream (E)
+	unsigned int *				skinWeightStart;	// [numOutputVerts] each vert's first entry in the expanded stream
+	idVec4 *					skinExpandWeights;	// [E] scaledWeights, replicated per output vert (mirror-safe)
+	int *						skinExpandWDesc;	// [E*2] {joint*12 float base, terminator flag}
+	idVec4 *					skinExpandLocalTBN;	// [E*3] joint-local bind N,T0,T1 for the OWNING output vert
 	idDrawVert *				skinTemplate;		// [numOutputVerts] static st/color the kernel preserves
-	int *						skinWeightDesc;		// [numWeights*2] weightIndex repacked {joint*12,terminator}
 
 	void						BuildGpuSkinData( const idJointMat *bindJoints );
 	void						FreeGpuSkinData( void );
