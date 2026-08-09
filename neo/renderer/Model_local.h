@@ -178,8 +178,17 @@ private:
 	idVec4 *					skinExpandLocalTBN;	// [E*3] joint-local bind N,T0,T1 for the OWNING output vert
 	idDrawVert *				skinTemplate;		// [numOutputVerts] static st/color the kernel preserves
 
+	// per-mesh static SSBOs (rhi::BufferHandle; 0 = not uploaded), shared by all entities using
+	// this model, uploaded once on the first GPU skin. The per-entity output + joints buffers
+	// live elsewhere (the srfTriangles_t / the per-frame skin job).
+	unsigned int				skinGpuWeights;
+	unsigned int				skinGpuWDesc;
+	unsigned int				skinGpuWStart;
+	unsigned int				skinGpuLocalTBN;
+
 	void						BuildGpuSkinData( const idJointMat *bindJoints );
 	void						FreeGpuSkinData( void );
+	bool						EnsureSkinBuffersUploaded( void );
 	void						GpuSkinValidate( const idJointMat *entJoints, const struct srfTriangles_s *cpuRef );
 
 	void						TransformVerts( idDrawVert *verts, const idJointMat *joints );

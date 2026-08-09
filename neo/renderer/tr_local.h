@@ -1812,6 +1812,16 @@ void *R_StaticAlloc( int bytes );		// just malloc with error checking
 void *R_ClearedStaticAlloc( int bytes );	// with memset
 void R_StaticFree( void *data );
 
+// Phase 2 GPU MD5 skinning (docs/gpu-offload-plan.md): the front end (idMD5Mesh::UpdateSurface)
+// records a skin job per visible skinned surface; the RHI backend flushes them as compute
+// dispatches in the pre-scene window (RB_RHI_ExecuteBackEndCommands, before the first pass).
+// All handles are rhi::BufferHandle (unsigned int); jointData is an R_FrameAlloc snapshot of
+// this frame's joint palette. Vulkan only; no-op on GL3. Impl in rhi/RhiBackend.cpp.
+void RB_RHI_AddSkinJob( unsigned int shader, unsigned int outVB, int numOutVerts,
+                        unsigned int weightsBuf, unsigned int wdescBuf, unsigned int wstartBuf, unsigned int localTbnBuf,
+                        const void *jointData, int numJoints, float skinScale );
+void RB_RHI_FlushSkinJobs( void );		// dispatch + clear the recorded jobs (backend, pre-scene)
+
 
 /*
 =============================================================

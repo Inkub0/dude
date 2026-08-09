@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/VertexCache.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/rhi/RHI.h"
 
 /*
 ==============================================================================
@@ -374,6 +375,14 @@ This does the actual free
 void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 	if ( !tri ) {
 		return;
+	}
+
+	// Phase 2 GPU skinning: release the persistent compute-skinned vertex buffer. DestroyBuffer
+	// is deferred/fence-retired in the VK backend, so this is safe even mid-flight.
+	if ( tri->gpuSkinVB ) {
+		rhi::RHI *r = rhi::GetRHI();
+		if ( r ) { r->DestroyBuffer( tri->gpuSkinVB ); }
+		tri->gpuSkinVB = 0;
 	}
 
 	R_FreeStaticTriSurfVertexCaches( tri );
