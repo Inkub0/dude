@@ -139,7 +139,7 @@ Vulkan-exclusive.**
 |---|---|---|---|---|
 | **Skinning** | ✅ transform feedback + TBO | ✅ compute + SSBO | high | one skin feeds 6 passes; VK path is cleaner |
 | **Skinning: normals/tangents too** | ✅ (in the TF/VS pass) | ✅ (in the dispatch) | +high | else `R_DeriveTangents` stays on CPU |
-| **Shadow-volume *build* gating** | ✅ (CPU-only, no GPU) | ✅ | med | Phase 0 — free win, do first |
+| **Shadow-volume *build* gating** | ✅ (CPU-only, no GPU) | ✅ | med | Phase 0 — ✅ SHIPPED (`0bf7e1dd`) |
 | **Shadow-volume GPU generation** | ✅ geometry shader | ✅ compute/geom | low* | *mostly neutralized by shadow maps + Phase 0 |
 | **GPU-driven culling** | ❌ impossible | ✅ compute + SSBO + indirect | **highest** | needs stable GPU residency + indirect draw |
 
@@ -147,14 +147,18 @@ Vulkan-exclusive.**
 
 ## 5. Phased build order (risk-ordered)
 
-### Phase 0 — CPU pre-win: gate the wasted stencil-volume build *(no RHI change)*
-Suppress `R_CreateShadowVolume` / the `global/localShadows` build in `AddActiveInteraction` for
-interactions on lights that will be shadow-mapped (not parallel, not oversize, in cube budget) — the
-same technique routing the backend already computes (`RhiWorld.cpp:4586–4616`), lifted to a front-end
-predicate. **Risk:** the cube-budget decision is view-dependent/backend-side, so the predicate must be
-conservative (build if unsure). **Payoff:** removes per-frame silhouette+topology+upload for every
-shadow-mapped dynamic interaction. **Validate:** `r_showPrimitives` `c_createShadowVolumes` drops in
-mapped scenes; shadows unchanged. *Independent of the GPU work; ship first.*
+### Phase 0 — CPU pre-win: gate the wasted stencil-volume build *(no RHI change)* — ✅ SHIPPED (`0bf7e1dd`)
+Skip `R_CreateShadowVolume` in `CreateInteraction` when the light will be shadow-mapped rather than
+stencil-shadowed (`r_shadowMapSkipStencilBuild`, default on) — mirroring the backend routing (shadow
+mapping on, not an oversize "sun" above `r_shadowMapStencilRadius`, flashlight exempted). Gates **all**
+casters, not just animated ones: the dominant cost turned out to be *world* casters whose interaction is
+rebuilt every frame because their **light** moved (projectile/flicker), and the map's caster path
+(`shadowMapCasters`, from `ambientTris`) shadows them independently, so it's fidelity-identical.
+`BeginFrame` `FreeInteractions()` on a change to the three routing cvars prevents a cached NULL going
+stale on toggle. **Measured (Vulkan):** indoor combat (all shadow-mapped) → `built ~0, skipped 3000–5900/s`
+≈ 100% of per-frame volume builds removed (~46 builds/frame at peak); outdoor ~70–80% (sun lights still
+stencil, correctly). User-verified shadows consistent. Readout: `r_shadowMapCacheDebug` now also prints
+`shadowVol/s: built N, skipped M`. *Independent of the GPU work — shipped first, as planned.*
 
 ### Phase 1 — RHI compute lane + storage buffers *(Vulkan; the foundational primitive)*
 Add to the RHI: `BU_STORAGE`, a compute `ShaderHandle`/stage, `Dispatch(x,y,z)`, storage-buffer
@@ -219,7 +223,7 @@ async-compute* queue (not needed until Phase 3 overlap tuning) would extend both
 ## 7. Sequencing & dependencies
 
 ```
-Phase 0 (CPU stencil-build gate) ── independent, ship first, de-risks Phase 4
+Phase 0 (CPU stencil-build gate) ── ✅ SHIPPED (0bf7e1dd), de-risks Phase 4
 Phase 1 (VK compute lane + BU_STORAGE) ── blocks Phase 2-VK and Phase 3
    ├── Phase 2 (skinning): VK on Phase 1; GL3 on a parallel transform-feedback primitive
    │        └── gives dynamic models GPU residency ── prereq for Phase 3
