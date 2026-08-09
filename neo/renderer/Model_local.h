@@ -163,6 +163,23 @@ private:
 	struct deformInfo_s *		deformInfo;			// used to create srfTriangles_t from base frames and new vertexes
 	int							surfaceNum;			// number of the static surface created for this mesh
 
+	// --- Phase 2 GPU MD5 skinning (docs/gpu-offload-plan.md; Vulkan only, opt-in r_gpuSkinning) ---
+	// Bind-pose data the compute kernel needs but the stock CPU path frees. Built once at load
+	// (BuildGpuSkinData) when the active backend is Vulkan; indexed per OUTPUT vertex (source
+	// verts [0,numSourceVerts) then appended mirror-seam duplicates). Retained CPU-side so the
+	// wire-in can upload per-mesh static SSBOs; the option-B kernel rotation-skins the stored
+	// joint-local bind TBN by each vertex's dominant joint every frame. NULL when not built.
+	int							numOutputVerts;		// deformInfo->numOutputVerts, cached
+	unsigned int *				skinWeightStart;	// [numOutputVerts] first-weight index per output vert
+	unsigned int *				skinDomBase;		// [numOutputVerts] dominant joint float base (joint*12)
+	idVec4 *					skinBindTBN;		// [numOutputVerts*3] joint-local bind N,T0,T1
+	idDrawVert *				skinTemplate;		// [numOutputVerts] static st/color the kernel preserves
+	int *						skinWeightDesc;		// [numWeights*2] weightIndex repacked {joint*12,terminator}
+
+	void						BuildGpuSkinData( const idJointMat *bindJoints );
+	void						FreeGpuSkinData( void );
+	void						GpuSkinValidate( const idJointMat *entJoints, const struct srfTriangles_s *cpuRef );
+
 	void						TransformVerts( idDrawVert *verts, const idJointMat *joints );
 	void						TransformScaledVerts( idDrawVert *verts, const idJointMat *joints, float scale );
 };

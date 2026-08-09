@@ -30,9 +30,15 @@ enum BufferUsage {
 	BU_VERTEX,		// must stay 0 (the VK backend's switch default)
 	BU_INDEX,
 	BU_UNIFORM,		// per-draw ring slices (RenderParams / ArbParams)
-	BU_STORAGE		// GPU compute storage buffer (SSBO). VK only; GL 3.3 has no compute.
+	BU_STORAGE,		// GPU compute storage buffer (SSBO). VK only; GL 3.3 has no compute.
 					// Phase 1: host-visible (BAR), read back via ReadBuffer; a device-local
 					// staged variant is a Phase-2 follow-up (docs/gpu-offload-plan.md).
+	BU_SKIN			// dual-usage STORAGE|VERTEX buffer: written by the skinning compute
+					// kernel, then bound as a vertex buffer by the draw passes (Phase 2
+					// GPU MD5 skinning). VK only; the single hard prereq tessellation
+					// composition needs (the tesc/tese read it as ordinary vertex input).
+					// Host-visible+mapped for now (lets CreateBuffer pre-fill the static
+					// st/color fields the kernel leaves alone); device-local is a follow-up.
 };
 
 enum ImageFormat {

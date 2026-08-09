@@ -40,20 +40,34 @@ If you have questions concerning this license or the applicable additional terms
 static idCVar r_gpuSkinTest( "r_gpuSkinTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"validate GPU MD5 skinning vs the CPU once/sec, printing the max position error (Vulkan; docs/gpu-offload-plan.md Phase 2)" );
 
-// position-only skinning kernel: one invocation per output vertex walks that vertex's weight
-// run (per-vertex start from md5WeightStart, terminator from the .y flag) and accumulates the
-// full affine jointMat*scaledWeight — mirroring idJointMat::operator*(idVec4) exactly (row-major
-// 3x4, base = joint*12 floats). skinScale scales the offset (xyz) not the weight (w), matching
-// TransformScaledVerts; the validation passes 1.0 to match plain TransformVerts.
-static const char *MD5_SKIN_POS_SRC =
+// GPU MD5 skinning kernel (option B, Milestone B): one invocation per OUTPUT vertex.
+//  * position — walk the vertex's weight run (per-vertex start from wstart, terminator from
+//    wi[].y) and accumulate the full affine jointMat*scaledWeight, mirroring
+//    idJointMat::operator*(idVec4) exactly (row-major 3x4, base = joint*12 floats). Bit-exact
+//    vs the CPU TransformVerts (Milestone A proved this). skinScale scales the offset (xyz) not
+//    the weight (w), matching TransformScaledVerts (fat-zombie deaths).
+//  * TBN — rigid-skin the joint-local bind-pose normal/tangents (stored once at load) by the
+//    vertex's DOMINANT joint's current rotation. This is option B: a fidelity divergence from
+//    stock (which re-derives smoothed tangents from posed positions every frame), so it is
+//    opt-in and off by default. At bind pose it reproduces the bind normal exactly.
+// The output SSBO is a raw idDrawVert float array (15 floats/vert); the kernel writes only the
+// animated fields (xyz, normal, tangents) and leaves st + color as CreateBuffer seeded them.
+static const char *MD5_SKIN_SRC =
 	"#version 450\n"
 	"layout(local_size_x = 64) in;\n"
 	"layout(std430, binding = 0) readonly buffer Joints  { float jm[]; };\n"
 	"layout(std430, binding = 1) readonly buffer Weights { vec4 sw[]; };\n"
 	"layout(std430, binding = 2) readonly buffer WIndex  { ivec2 wi[]; };\n"
 	"layout(std430, binding = 3) readonly buffer WStart  { uint wstart[]; };\n"
-	"layout(std430, binding = 4) writeonly buffer OutPos { vec4 outp[]; };\n"
+	"layout(std430, binding = 4)          buffer OutVert { float v[]; };\n"
+	"layout(std430, binding = 5) readonly buffer BindTBN { vec4 tbn[]; };\n"
+	"layout(std430, binding = 6) readonly buffer DomBase { uint domBase[]; };\n"
 	"layout(push_constant) uniform PC { uint numVerts; float skinScale; } pc;\n"
+	"vec3 jrot( uint b, vec3 n ) {\n"		// rotate n by the joint's 3x3 (rows), no translation
+	"    return vec3( dot(vec3(jm[b+0u], jm[b+1u], jm[b+2u]),  n),\n"
+	"                 dot(vec3(jm[b+4u], jm[b+5u], jm[b+6u]),  n),\n"
+	"                 dot(vec3(jm[b+8u], jm[b+9u], jm[b+10u]), n) );\n"
+	"}\n"
 	"void main() {\n"
 	"    uint i = gl_GlobalInvocationID.x;\n"
 	"    if ( i >= pc.numVerts ) return;\n"
@@ -69,102 +83,27 @@ static const char *MD5_SKIN_POS_SRC =
 	"        if ( wi[j].y == 1 ) break;\n"
 	"        j++;\n"
 	"    }\n"
-	"    outp[i] = vec4( p, 1.0 );\n"
+	"    uint db = domBase[i];\n"
+	"    vec3 nrm = normalize( jrot( db, tbn[i*3u+0u].xyz ) );\n"
+	"    vec3 t0  = normalize( jrot( db, tbn[i*3u+1u].xyz ) );\n"
+	"    vec3 t1  = normalize( jrot( db, tbn[i*3u+2u].xyz ) );\n"
+	"    uint o = i*15u;\n"
+	"    v[o+0u]=p.x;   v[o+1u]=p.y;   v[o+2u]=p.z;\n"		// st = v[o+3..4] (seeded, untouched)
+	"    v[o+5u]=nrm.x; v[o+6u]=nrm.y; v[o+7u]=nrm.z;\n"
+	"    v[o+8u]=t0.x;  v[o+9u]=t0.y;  v[o+10u]=t0.z;\n"
+	"    v[o+11u]=t1.x; v[o+12u]=t1.y; v[o+13u]=t1.z;\n"	// color = v[o+14] (seeded, untouched)
 	"}\n";
 
 static rhi::ShaderHandle r_md5SkinShader = 0;		// compiled once, shared by all meshes
 static bool r_md5SkinShaderTried = false;
 
-// Self-contained per-call validation: repack the weight tables, dispatch the GPU skin
-// synchronously, read it back, and report the max position error vs the CPU result. Creates
-// and frees its own buffers (a once/sec dev harness — Milestone B makes them persistent).
-static void R_MD5_GpuSkinTest( int numVerts, int numWeights, const idVec4 *scaledWeights,
-                               const int *weightIndex, const idJointMat *entJoints,
-                               const idDrawVert *cpuVerts ) {
-	rhi::RHI *r = rhi::GetRHI();
-	if ( !r || numVerts <= 0 || numWeights <= 0 ) {
-		return;
-	}
-	if ( !r_md5SkinShaderTried ) {
-		r_md5SkinShaderTried = true;
-		r_md5SkinShader = r->CreateComputeShader( "cs_md5skin_pos", MD5_SKIN_POS_SRC );
-		if ( r_md5SkinShader == 0 ) {
-			common->Printf( "gpuSkinTest: no compute lane (GL3, or the kernel failed to compile)\n" );
-		}
-	}
-	if ( r_md5SkinShader == 0 ) {
-		return;
-	}
-
-	// joints used: max joint index in the weight stream (weightIndex holds joint*sizeof(idJointMat))
-	int maxJoint = 0;
-	for ( int j = 0; j < numWeights; j++ ) {
-		const int ji = weightIndex[j * 2] / (int)sizeof( idJointMat );
-		if ( ji > maxJoint ) { maxJoint = ji; }
-	}
-	const int numJoints = maxJoint + 1;
-
-	// repack: weightIndex byte offset -> float-array base (joint*12); carry the terminator flag
-	int *wdesc = (int *)Mem_Alloc( numWeights * 2 * sizeof( int ) );
-	for ( int j = 0; j < numWeights; j++ ) {
-		wdesc[j * 2 + 0] = weightIndex[j * 2] / 4;		// bytes -> floats (joint*48 -> joint*12)
-		wdesc[j * 2 + 1] = weightIndex[j * 2 + 1];
-	}
-	// per-vertex first-weight index, derived from the terminator flags (the CPU walks this
-	// stream sequentially; a parallel kernel needs the random-access start).
-	unsigned int *wstart = (unsigned int *)Mem_Alloc( numVerts * sizeof( unsigned int ) );
-	{
-		int v = 0;
-		wstart[0] = 0;
-		for ( int j = 0; j < numWeights && v < numVerts; j++ ) {
-			if ( weightIndex[j * 2 + 1] == 1 ) {
-				v++;
-				if ( v < numVerts ) { wstart[v] = (unsigned int)( j + 1 ); }
-			}
-		}
-	}
-
-	rhi::BufferHandle bJoints  = r->CreateBuffer( rhi::BU_STORAGE, numJoints * (int)sizeof( idJointMat ), entJoints );
-	rhi::BufferHandle bWeights = r->CreateBuffer( rhi::BU_STORAGE, numWeights * (int)sizeof( idVec4 ), scaledWeights );
-	rhi::BufferHandle bWDesc   = r->CreateBuffer( rhi::BU_STORAGE, numWeights * 2 * (int)sizeof( int ), wdesc );
-	rhi::BufferHandle bWStart  = r->CreateBuffer( rhi::BU_STORAGE, numVerts * (int)sizeof( unsigned int ), wstart );
-	rhi::BufferHandle bOut     = r->CreateBuffer( rhi::BU_STORAGE, numVerts * 4 * (int)sizeof( float ), NULL );
-	Mem_Free( wdesc );
-	Mem_Free( wstart );
-
-	if ( bJoints && bWeights && bWDesc && bWStart && bOut ) {
-		struct { unsigned int numVerts; float skinScale; } pc = { (unsigned int)numVerts, 1.0f };
-		rhi::ComputeArgs ca = {};
-		ca.shader = r_md5SkinShader;
-		ca.storage[0] = bJoints; ca.storage[1] = bWeights; ca.storage[2] = bWDesc;
-		ca.storage[3] = bWStart; ca.storage[4] = bOut;
-		ca.pushConstants = &pc;
-		ca.pushConstantSize = (int)sizeof( pc );
-		ca.groupsX = ( numVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
-		r->DispatchSync( ca );
-
-		float *out = (float *)Mem_Alloc( numVerts * 4 * sizeof( float ) );
-		if ( r->ReadBuffer( bOut, out, numVerts * 4 * (int)sizeof( float ) ) ) {
-			float maxErr = 0.0f;
-			int worst = -1;
-			for ( int i = 0; i < numVerts; i++ ) {
-				const idVec3 g( out[i * 4 + 0], out[i * 4 + 1], out[i * 4 + 2] );
-				const float e = ( g - cpuVerts[i].xyz ).Length();
-				if ( e > maxErr ) { maxErr = e; worst = i; }
-			}
-			common->Printf( "gpuSkinTest: %d verts, %d weights, %d joints -- max pos err %.6f units (worst vert %d)\n",
-			                numVerts, numWeights, numJoints, maxErr, worst );
-		} else {
-			common->Printf( "gpuSkinTest: readback failed\n" );
-		}
-		Mem_Free( out );
-	}
-
-	if ( bJoints )  { r->DestroyBuffer( bJoints ); }
-	if ( bWeights ) { r->DestroyBuffer( bWeights ); }
-	if ( bWDesc )   { r->DestroyBuffer( bWDesc ); }
-	if ( bWStart )  { r->DestroyBuffer( bWStart ); }
-	if ( bOut )     { r->DestroyBuffer( bOut ); }
+// R^T * v : transform a bind-pose model-space vector into the joint's local space using the
+// inverse of the (orthonormal) bind rotation. idJointMat is row-major 3x4, so R[r][c]=m[r*4+c]
+// and (R^T v)[r] = sum_c m[c*4+r] v[c]. The runtime kernel undoes this with the current rotation.
+static ID_INLINE idVec3 R_MD5_InvRotate( const float *m, const idVec3 &v ) {
+	return idVec3( m[0*4+0]*v[0] + m[1*4+0]*v[1] + m[2*4+0]*v[2],
+	               m[0*4+1]*v[0] + m[1*4+1]*v[1] + m[2*4+1]*v[2],
+	               m[0*4+2]*v[0] + m[1*4+2]*v[1] + m[2*4+2]*v[2] );
 }
 
 static const char *MD5_SnapshotName = "_MD5_Snapshot_";
@@ -198,6 +137,12 @@ idMD5Mesh::idMD5Mesh() {
 	numTris			= 0;
 	deformInfo		= NULL;
 	surfaceNum		= 0;
+	numOutputVerts	= 0;
+	skinWeightStart	= NULL;
+	skinDomBase		= NULL;
+	skinBindTBN		= NULL;
+	skinTemplate	= NULL;
+	skinWeightDesc	= NULL;
 }
 
 /*
@@ -208,6 +153,7 @@ idMD5Mesh::~idMD5Mesh
 idMD5Mesh::~idMD5Mesh() {
 	Mem_Free16( scaledWeights );
 	Mem_Free16( weightIndex );
+	FreeGpuSkinData();
 	if ( deformInfo ) {
 		R_FreeDeformInfo( deformInfo );
 		deformInfo = NULL;
@@ -380,6 +326,132 @@ void idMD5Mesh::ParseMesh( idLexer &parser, int numJoints, const idJointMat *joi
 	TransformVerts( verts, joints );
 	deformInfo = R_BuildDeformInfo( texCoords.Num(), verts, tris.Num(), tris.Ptr(), shader->UseUnsmoothedTangents() );
 	Mem_FreeA( verts, onStack );
+
+	// Phase 2 (docs/gpu-offload-plan.md): retain the bind-pose data the GPU skinning kernel
+	// needs but the stock CPU path discards. Vulkan only (the sole backend with a compute
+	// lane); GL3 never pays the memory. Uses the just-built deformInfo + the bind joints.
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		BuildGpuSkinData( joints );
+	}
+}
+
+/*
+====================
+idMD5Mesh::BuildGpuSkinData
+
+Precompute, once at load, everything the option-B skinning kernel reads that stock frees:
+per-output-vertex first-weight index, dominant joint, and joint-local bind-pose TBN, plus the
+static st/color template and the repacked weight descriptor. Mirror-seam verts (appended after
+the source verts) share their source vert's weight run + dominant joint, but keep their own
+derived bind tangents (handedness). Vulkan only; see the kernel MD5_SKIN_SRC.
+====================
+*/
+void idMD5Mesh::BuildGpuSkinData( const idJointMat *bindJoints ) {
+	FreeGpuSkinData();
+	if ( !deformInfo || numWeights <= 0 ) {
+		return;
+	}
+	const int numSrc = deformInfo->numSourceVerts;
+	const int numOut = deformInfo->numOutputVerts;
+	const int numMir = deformInfo->numMirroredVerts;
+	const int base   = numOut - numMir;			// R_DuplicateMirroredVertexes appends -> base == numSrc
+	if ( numOut <= 0 || base != numSrc ) {
+		return;								// unexpected layout; leave CPU skinning as the path
+	}
+	numOutputVerts = numOut;
+
+	skinWeightStart = (unsigned int *)Mem_Alloc16( numOut * sizeof( unsigned int ) );
+	skinDomBase     = (unsigned int *)Mem_Alloc16( numOut * sizeof( unsigned int ) );
+	skinBindTBN     = (idVec4 *)      Mem_Alloc16( numOut * 3 * sizeof( idVec4 ) );
+	skinTemplate    = (idDrawVert *)  Mem_Alloc16( numOut * sizeof( idDrawVert ) );
+	skinWeightDesc  = (int *)         Mem_Alloc16( numWeights * 2 * sizeof( int ) );
+
+	// weight descriptor: byte offset -> float base (joint*48 -> joint*12), carry the terminator
+	for ( int j = 0; j < numWeights; j++ ) {
+		skinWeightDesc[j * 2 + 0] = weightIndex[j * 2 + 0] / 4;
+		skinWeightDesc[j * 2 + 1] = weightIndex[j * 2 + 1];
+	}
+
+	// per-source-vertex first-weight index (the CPU stream is sequential w/ a terminator flag;
+	// a per-vertex kernel needs random-access starts) + dominant joint (highest weight in run)
+	{
+		int v = 0;
+		skinWeightStart[0] = 0;
+		for ( int j = 0; j < numWeights && v < numSrc; j++ ) {
+			if ( weightIndex[j * 2 + 1] == 1 ) {
+				v++;
+				if ( v < numSrc ) { skinWeightStart[v] = (unsigned int)( j + 1 ); }
+			}
+		}
+	}
+	for ( int v = 0; v < numSrc; v++ ) {
+		int j = (int)skinWeightStart[v];
+		float bestW = -1.0f;
+		unsigned int bestBase = 0;
+		for ( ; ; j++ ) {
+			if ( scaledWeights[j].w > bestW ) { bestW = scaledWeights[j].w; bestBase = (unsigned int)skinWeightDesc[j * 2 + 0]; }
+			if ( weightIndex[j * 2 + 1] == 1 ) { break; }
+		}
+		skinDomBase[v] = bestBase;
+	}
+	// mirror verts inherit their source vert's weight run + dominant joint
+	for ( int i = 0; i < numMir; i++ ) {
+		const int src = deformInfo->mirroredVerts[i];
+		skinWeightStart[base + i] = skinWeightStart[src];
+		skinDomBase[base + i]     = skinDomBase[src];
+	}
+
+	// build the bind-pose OUTPUT mesh with derived tangents exactly as UpdateSurface would, then
+	// harvest per-output-vertex N/T0/T1 into joint-local space (undo the dominant bind rotation).
+	srfTriangles_t *tri = R_AllocStaticTriSurf();
+	tri->deformedSurface = true;			// protects the referenced deformInfo arrays from the free
+	tri->tangentsCalculated = false;
+	tri->numIndexes    = deformInfo->numIndexes;
+	tri->indexes       = deformInfo->indexes;
+	tri->silIndexes    = deformInfo->silIndexes;
+	tri->numMirroredVerts = deformInfo->numMirroredVerts;
+	tri->mirroredVerts = deformInfo->mirroredVerts;
+	tri->numDupVerts   = deformInfo->numDupVerts;
+	tri->dupVerts      = deformInfo->dupVerts;
+	tri->numSilEdges   = deformInfo->numSilEdges;
+	tri->silEdges      = deformInfo->silEdges;
+	tri->dominantTris  = deformInfo->dominantTris;
+	tri->numVerts      = numOut;
+	R_AllocStaticTriSurfVerts( tri, numOut );
+	for ( int i = 0; i < numSrc; i++ ) {
+		tri->verts[i].Clear();
+		tri->verts[i].st = texCoords[i];
+	}
+	TransformVerts( tri->verts, bindJoints );
+	for ( int i = 0; i < numMir; i++ ) {
+		tri->verts[base + i] = tri->verts[deformInfo->mirroredVerts[i]];
+	}
+	R_DeriveTangents( tri );
+
+	for ( int o = 0; o < numOut; o++ ) {
+		const float *m = bindJoints[skinDomBase[o] / 12].ToFloatPtr();
+		const idDrawVert &dv = tri->verts[o];
+		skinBindTBN[o * 3 + 0].ToVec3() = R_MD5_InvRotate( m, dv.normal );      skinBindTBN[o * 3 + 0].w = 0.0f;
+		skinBindTBN[o * 3 + 1].ToVec3() = R_MD5_InvRotate( m, dv.tangents[0] ); skinBindTBN[o * 3 + 1].w = 0.0f;
+		skinBindTBN[o * 3 + 2].ToVec3() = R_MD5_InvRotate( m, dv.tangents[1] ); skinBindTBN[o * 3 + 2].w = 0.0f;
+		skinTemplate[o] = dv;				// carries st + color; xyz/normal/tangents re-skinned per frame
+	}
+
+	R_FreeStaticTriSurf( tri );				// deformedSurface==true -> shared deformInfo arrays kept
+}
+
+/*
+====================
+idMD5Mesh::FreeGpuSkinData
+====================
+*/
+void idMD5Mesh::FreeGpuSkinData( void ) {
+	Mem_Free16( skinWeightStart );	skinWeightStart = NULL;
+	Mem_Free16( skinDomBase );		skinDomBase = NULL;
+	Mem_Free16( skinBindTBN );		skinBindTBN = NULL;
+	Mem_Free16( skinTemplate );		skinTemplate = NULL;
+	Mem_Free16( skinWeightDesc );	skinWeightDesc = NULL;
+	numOutputVerts = 0;
 }
 
 /*
@@ -389,17 +461,6 @@ idMD5Mesh::TransformVerts
 */
 void idMD5Mesh::TransformVerts( idDrawVert *verts, const idJointMat *entJoints ) {
 	SIMDProcessor->TransformVerts( verts, texCoords.Num(), entJoints, scaledWeights, weightIndex, numWeights );
-
-	// Phase 2 validation (r_gpuSkinTest): once/sec, skin this mesh on the GPU and compare the
-	// positions against the CPU result just computed. Rate-limited because DispatchSync stalls.
-	if ( r_gpuSkinTest.GetBool() ) {
-		static int s_lastMs = 0;
-		const int now = Sys_Milliseconds();
-		if ( now - s_lastMs >= 1000 ) {
-			s_lastMs = now;
-			R_MD5_GpuSkinTest( texCoords.Num(), numWeights, scaledWeights, weightIndex, entJoints, verts );
-		}
-	}
 }
 
 /*
@@ -423,6 +484,100 @@ void idMD5Mesh::TransformScaledVerts( idDrawVert *verts, const idJointMat *entJo
 		tmpScaledWeights[i].w = sw.w;
 	}
 	SIMDProcessor->TransformVerts( verts, texCoords.Num(), entJoints, tmpScaledWeights, weightIndex, numWeights );
+}
+
+/*
+====================
+idMD5Mesh::GpuSkinValidate
+
+Dev harness (r_gpuSkinTest): skin this mesh on the GPU with the full option-B kernel using the
+retained bind-pose data + this frame's joints, then compare the read-back result against the CPU
+reference (cpuRef, already skinned + tangent-derived). Prints the max position error (should be
+~1e-5 units, matching Milestone A) AND the normal/tangent angular divergence in degrees — the
+latter quantifies the option-B fidelity cost (rigid dominant-joint TBN vs stock re-derive).
+Rate-limited once/sec by the caller because DispatchSync stalls the GPU. Vulkan only.
+====================
+*/
+void idMD5Mesh::GpuSkinValidate( const idJointMat *entJoints, const struct srfTriangles_s *cpuRef ) {
+	rhi::RHI *r = rhi::GetRHI();
+	if ( !r || !skinBindTBN || numOutputVerts <= 0 || numWeights <= 0 ) {
+		return;
+	}
+	if ( !cpuRef || cpuRef->numVerts != numOutputVerts || cpuRef->verts == NULL ) {
+		return;
+	}
+	if ( !r_md5SkinShaderTried ) {
+		r_md5SkinShaderTried = true;
+		r_md5SkinShader = r->CreateComputeShader( "cs_md5skin", MD5_SKIN_SRC );
+		if ( r_md5SkinShader == 0 ) {
+			common->Printf( "gpuSkin: no compute lane (GL3, or the kernel failed to compile)\n" );
+		}
+	}
+	if ( r_md5SkinShader == 0 ) {
+		return;
+	}
+
+	const int numOut = numOutputVerts;
+	int maxJoint = 0;
+	for ( int j = 0; j < numWeights; j++ ) {
+		const int ji = skinWeightDesc[j * 2] / 12;
+		if ( ji > maxJoint ) { maxJoint = ji; }
+	}
+	const int numJoints = maxJoint + 1;
+
+	rhi::BufferHandle bJoints  = r->CreateBuffer( rhi::BU_STORAGE, numJoints * (int)sizeof( idJointMat ), entJoints );
+	rhi::BufferHandle bWeights = r->CreateBuffer( rhi::BU_STORAGE, numWeights * (int)sizeof( idVec4 ), scaledWeights );
+	rhi::BufferHandle bWDesc   = r->CreateBuffer( rhi::BU_STORAGE, numWeights * 2 * (int)sizeof( int ), skinWeightDesc );
+	rhi::BufferHandle bWStart  = r->CreateBuffer( rhi::BU_STORAGE, numOut * (int)sizeof( unsigned int ), skinWeightStart );
+	rhi::BufferHandle bTBN     = r->CreateBuffer( rhi::BU_STORAGE, numOut * 3 * (int)sizeof( idVec4 ), skinBindTBN );
+	rhi::BufferHandle bDom     = r->CreateBuffer( rhi::BU_STORAGE, numOut * (int)sizeof( unsigned int ), skinDomBase );
+	rhi::BufferHandle bOut     = r->CreateBuffer( rhi::BU_STORAGE, numOut * (int)sizeof( idDrawVert ), skinTemplate );
+
+	if ( bJoints && bWeights && bWDesc && bWStart && bTBN && bDom && bOut ) {
+		struct { unsigned int numVerts; float skinScale; } pc = { (unsigned int)numOut, 1.0f };
+		rhi::ComputeArgs ca = {};
+		ca.shader = r_md5SkinShader;
+		ca.storage[0] = bJoints; ca.storage[1] = bWeights; ca.storage[2] = bWDesc;
+		ca.storage[3] = bWStart; ca.storage[4] = bOut; ca.storage[5] = bTBN; ca.storage[6] = bDom;
+		ca.pushConstants = &pc;
+		ca.pushConstantSize = (int)sizeof( pc );
+		ca.groupsX = ( numOut + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
+		r->DispatchSync( ca );
+
+		idDrawVert *out = (idDrawVert *)Mem_Alloc16( numOut * sizeof( idDrawVert ) );
+		if ( r->ReadBuffer( bOut, out, numOut * (int)sizeof( idDrawVert ) ) ) {
+			float maxPos = 0.0f;
+			int worst = -1;
+			double nSum = 0.0, nMax = 0.0, tSum = 0.0, tMax = 0.0;
+			for ( int i = 0; i < numOut; i++ ) {
+				const float e = ( out[i].xyz - cpuRef->verts[i].xyz ).Length();
+				if ( e > maxPos ) { maxPos = e; worst = i; }
+
+				float nd = out[i].normal * cpuRef->verts[i].normal;
+				nd = nd < -1.0f ? -1.0f : ( nd > 1.0f ? 1.0f : nd );
+				const double na = RAD2DEG( idMath::ACos( nd ) );
+				nSum += na; if ( na > nMax ) { nMax = na; }
+
+				float td = out[i].tangents[0] * cpuRef->verts[i].tangents[0];
+				td = td < -1.0f ? -1.0f : ( td > 1.0f ? 1.0f : td );
+				const double ta = RAD2DEG( idMath::ACos( td ) );
+				tSum += ta; if ( ta > tMax ) { tMax = ta; }
+			}
+			common->Printf( "gpuSkin: %d out-verts, %d joints -- pos err %.6f (worst %d) | normal deg avg %.2f max %.2f | tangent deg avg %.2f max %.2f\n",
+			                numOut, numJoints, maxPos, worst, nSum / numOut, nMax, tSum / numOut, tMax );
+		} else {
+			common->Printf( "gpuSkin: readback failed\n" );
+		}
+		Mem_Free16( out );
+	}
+
+	if ( bJoints )  { r->DestroyBuffer( bJoints ); }
+	if ( bWeights ) { r->DestroyBuffer( bWeights ); }
+	if ( bWDesc )   { r->DestroyBuffer( bWDesc ); }
+	if ( bWStart )  { r->DestroyBuffer( bWStart ); }
+	if ( bTBN )     { r->DestroyBuffer( bTBN ); }
+	if ( bDom )     { r->DestroyBuffer( bDom ); }
+	if ( bOut )     { r->DestroyBuffer( bOut ); }
 }
 
 /*
@@ -512,6 +667,22 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			R_DeriveTangents( tri );
 		}
 		R_WeldSeamNormals( tri, r_tessWeldThreshold.GetFloat() );
+	}
+
+	// Phase 2 validation (r_gpuSkinTest): once/sec, skin this mesh on the GPU with the full
+	// option-B kernel and compare against this CPU result (positions bit-exact, TBN divergence
+	// reported in degrees). Needs derived tangents on the reference, and stalls the GPU, so it
+	// is rate-limited and dev-only. Vulkan only (skin data only built there).
+	if ( r_gpuSkinTest.GetBool() && skinBindTBN ) {
+		static int s_lastMs = 0;
+		const int now = Sys_Milliseconds();
+		if ( now - s_lastMs >= 1000 ) {
+			s_lastMs = now;
+			if ( !tri->tangentsCalculated ) {
+				R_DeriveTangents( tri );
+			}
+			GpuSkinValidate( entJoints, tri );
+		}
 	}
 }
 

@@ -2672,6 +2672,13 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 		case BU_STORAGE: usageBits = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
 		                           | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
 		                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT; break;
+		// skinning output: compute writes it (STORAGE), the draw passes fetch it as a
+		// vertex buffer (VERTEX). TRANSFER bits let CreateBuffer seed the static
+		// st/color fields and a later device-local variant stage. (Phase 2.)
+		case BU_SKIN:    usageBits = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+		                           | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+		                           | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+		                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT; break;
 		default:         usageBits = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
 	}
 
