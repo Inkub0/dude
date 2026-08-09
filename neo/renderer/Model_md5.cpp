@@ -499,6 +499,72 @@ void idMD5Mesh::TransformScaledVerts( idDrawVert *verts, const idJointMat *entJo
 
 /*
 ====================
+R_MD5_GpuSkinRunOnce
+
+Dispatches the blended-LBS skin kernel into a fresh output buffer of `outUsage`, reads it back
+on the host, and prints its divergence vs the CPU reference. GpuSkinValidate runs it twice — once
+into a BU_STORAGE control buffer, once into a BU_SKIN buffer (the exact memory type the render
+path uses) — with NO draw, so the write-combined device-read that caused the device-lost hang is
+probed at ZERO risk. Returns the read-back verts (caller Mem_Free16s) or NULL. The five read-only
+input buffers are owned + shared by the caller. Vulkan only.
+====================
+*/
+static idDrawVert *R_MD5_GpuSkinRunOnce(
+		rhi::RHI *r, const char *label, rhi::BufferUsage outUsage, rhi::ShaderHandle shader,
+		int numOut, int numJoints, const idDrawVert *seed, const struct srfTriangles_s *cpuRef,
+		rhi::BufferHandle bJoints, rhi::BufferHandle bWeights, rhi::BufferHandle bWDesc,
+		rhi::BufferHandle bWStart, rhi::BufferHandle bTBN ) {
+	rhi::BufferHandle bOut = r->CreateBuffer( outUsage, numOut * (int)sizeof( idDrawVert ), seed );
+	if ( bOut == 0 ) {
+		common->Printf( "gpuSkin[%s]: out-buffer alloc failed\n", label );
+		return NULL;
+	}
+
+	struct { unsigned int numVerts; float skinScale; } pc = { (unsigned int)numOut, 1.0f };
+	rhi::ComputeArgs ca = {};
+	ca.shader = shader;
+	ca.storage[0] = bJoints; ca.storage[1] = bWeights; ca.storage[2] = bWDesc;
+	ca.storage[3] = bWStart; ca.storage[4] = bOut; ca.storage[5] = bTBN;
+	ca.pushConstants = &pc;
+	ca.pushConstantSize = (int)sizeof( pc );
+	ca.groupsX = ( numOut + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
+	r->DispatchSync( ca );
+
+	idDrawVert *out = (idDrawVert *)Mem_Alloc16( numOut * sizeof( idDrawVert ) );
+	const bool ok = r->ReadBuffer( bOut, out, numOut * (int)sizeof( idDrawVert ) );
+	r->DestroyBuffer( bOut );
+	if ( !ok ) {
+		common->Printf( "gpuSkin[%s]: readback failed\n", label );
+		Mem_Free16( out );
+		return NULL;
+	}
+
+	float maxPos = 0.0f;
+	int worst = -1;
+	double nSum = 0.0, nMax = 0.0, tSum = 0.0, tMax = 0.0;
+	double nSumClean = 0.0; int nClean = 0, nOutliers = 0;	// >30 deg = a pathological vert
+	for ( int i = 0; i < numOut; i++ ) {
+		const float e = ( out[i].xyz - cpuRef->verts[i].xyz ).Length();
+		if ( e > maxPos ) { maxPos = e; worst = i; }
+
+		float nd = out[i].normal * cpuRef->verts[i].normal;
+		nd = nd < -1.0f ? -1.0f : ( nd > 1.0f ? 1.0f : nd );
+		const double na = RAD2DEG( idMath::ACos( nd ) );
+		nSum += na; if ( na > nMax ) { nMax = na; }
+		if ( na > 30.0 ) { nOutliers++; } else { nSumClean += na; nClean++; }
+
+		float td = out[i].tangents[0] * cpuRef->verts[i].tangents[0];
+		td = td < -1.0f ? -1.0f : ( td > 1.0f ? 1.0f : td );
+		const double ta = RAD2DEG( idMath::ACos( td ) );
+		tSum += ta; if ( ta > tMax ) { tMax = ta; }
+	}
+	common->Printf( "gpuSkin[%s]: %d out-verts, %d joints -- pos err %.6f (worst %d) | normal avg %.2f (clean %.2f, %d>30deg) max %.2f | tangent avg %.2f max %.2f\n",
+	                label, numOut, numJoints, maxPos, worst, nSum / numOut, nClean ? nSumClean / nClean : 0.0, nOutliers, nMax, tSum / numOut, tMax );
+	return out;
+}
+
+/*
+====================
 idMD5Mesh::GpuSkinValidate
 
 Dev harness (r_gpuSkinTest): skin this mesh on the GPU with the blended-LBS kernel using the
@@ -506,6 +572,13 @@ retained expanded-stream data + this frame's joints, then compare the read-back 
 the CPU reference (cpuRef, already skinned + tangent-derived). Prints the max position error
 (should be ~1e-5 units) AND the normal/tangent angular divergence in degrees — the latter
 quantifies the option-B fidelity cost (blended bind TBN vs stock's per-frame re-derive).
+
+Runs the skin TWICE: into a BU_STORAGE control buffer (the proven Phase-1 readback path) and
+into a BU_SKIN buffer (the exact STORAGE|VERTEX write-combined memory the render path uses), then
+diffs the two read-backs. This isolates the device-lost hang WITHOUT a draw: if the two match, the
+compute correctly writes BU_SKIN memory and the bug is in the vertex-fetch/draw path; if they
+diverge, the BU_SKIN buffer itself is the culprit.
+
 Rate-limited once/sec by the caller because DispatchSync stalls the GPU. Vulkan only.
 ====================
 */
@@ -542,46 +615,37 @@ void idMD5Mesh::GpuSkinValidate( const idJointMat *entJoints, const struct srfTr
 	rhi::BufferHandle bWDesc   = r->CreateBuffer( rhi::BU_STORAGE, E * 2 * (int)sizeof( int ), skinExpandWDesc );
 	rhi::BufferHandle bWStart  = r->CreateBuffer( rhi::BU_STORAGE, numOut * (int)sizeof( unsigned int ), skinWeightStart );
 	rhi::BufferHandle bTBN     = r->CreateBuffer( rhi::BU_STORAGE, E * 3 * (int)sizeof( idVec4 ), skinExpandLocalTBN );
-	rhi::BufferHandle bOut     = r->CreateBuffer( rhi::BU_STORAGE, numOut * (int)sizeof( idDrawVert ), skinTemplate );
 
-	if ( bJoints && bWeights && bWDesc && bWStart && bTBN && bOut ) {
-		struct { unsigned int numVerts; float skinScale; } pc = { (unsigned int)numOut, 1.0f };
-		rhi::ComputeArgs ca = {};
-		ca.shader = r_md5SkinShader;
-		ca.storage[0] = bJoints; ca.storage[1] = bWeights; ca.storage[2] = bWDesc;
-		ca.storage[3] = bWStart; ca.storage[4] = bOut; ca.storage[5] = bTBN;
-		ca.pushConstants = &pc;
-		ca.pushConstantSize = (int)sizeof( pc );
-		ca.groupsX = ( numOut + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
-		r->DispatchSync( ca );
+	if ( bJoints && bWeights && bWDesc && bWStart && bTBN ) {
+		// Control: skin into a BU_STORAGE buffer (the proven Phase-1 readback path).
+		idDrawVert *outStorage = R_MD5_GpuSkinRunOnce( r, "storage", rhi::BU_STORAGE, r_md5SkinShader,
+			numOut, numJoints, skinTemplate, cpuRef, bJoints, bWeights, bWDesc, bWStart, bTBN );
 
-		idDrawVert *out = (idDrawVert *)Mem_Alloc16( numOut * sizeof( idDrawVert ) );
-		if ( r->ReadBuffer( bOut, out, numOut * (int)sizeof( idDrawVert ) ) ) {
-			float maxPos = 0.0f;
-			int worst = -1;
-			double nSum = 0.0, nMax = 0.0, tSum = 0.0, tMax = 0.0;
-			double nSumClean = 0.0; int nClean = 0, nOutliers = 0;	// >30 deg = a pathological vert
+		// SAFE ISOLATION TEST: skin into a BU_SKIN buffer — the exact memory type the render path
+		// uses (STORAGE|VERTEX, host-visible write-combined). Compute writes it, we read it back on
+		// the host. There is NO draw, so the giant-triangle rasterization hang cannot occur here.
+		// If this matches the BU_STORAGE control, the compute correctly writes BU_SKIN memory and
+		// the device-lost bug lives in the DRAW/vertex-fetch path (barrier / cross-frame / async).
+		// If it diverges, the BU_SKIN buffer's memory or usage is itself the culprit.
+		idDrawVert *outSkin = R_MD5_GpuSkinRunOnce( r, "skin", rhi::BU_SKIN, r_md5SkinShader,
+			numOut, numJoints, skinTemplate, cpuRef, bJoints, bWeights, bWDesc, bWStart, bTBN );
+
+		if ( outStorage && outSkin ) {
+			float maxDelta = 0.0f;
+			int nDiff = 0;
 			for ( int i = 0; i < numOut; i++ ) {
-				const float e = ( out[i].xyz - cpuRef->verts[i].xyz ).Length();
-				if ( e > maxPos ) { maxPos = e; worst = i; }
-
-				float nd = out[i].normal * cpuRef->verts[i].normal;
-				nd = nd < -1.0f ? -1.0f : ( nd > 1.0f ? 1.0f : nd );
-				const double na = RAD2DEG( idMath::ACos( nd ) );
-				nSum += na; if ( na > nMax ) { nMax = na; }
-				if ( na > 30.0 ) { nOutliers++; } else { nSumClean += na; nClean++; }
-
-				float td = out[i].tangents[0] * cpuRef->verts[i].tangents[0];
-				td = td < -1.0f ? -1.0f : ( td > 1.0f ? 1.0f : td );
-				const double ta = RAD2DEG( idMath::ACos( td ) );
-				tSum += ta; if ( ta > tMax ) { tMax = ta; }
+				const float d = ( outSkin[i].xyz - outStorage[i].xyz ).Length();
+				if ( d > maxDelta ) { maxDelta = d; }
+				if ( d > 0.001f ) { nDiff++; }
 			}
-			common->Printf( "gpuSkin: %d out-verts, %d joints -- pos err %.6f (worst %d) | normal avg %.2f (clean %.2f, %d>30deg) max %.2f | tangent avg %.2f max %.2f\n",
-			                numOut, numJoints, maxPos, worst, nSum / numOut, nClean ? nSumClean / nClean : 0.0, nOutliers, nMax, tSum / numOut, tMax );
-		} else {
-			common->Printf( "gpuSkin: readback failed\n" );
+			common->Printf( "gpuSkin[compare]: BU_SKIN vs BU_STORAGE -- max pos delta %.6f, %d/%d verts differ => %s\n",
+			                maxDelta, nDiff, numOut,
+			                nDiff == 0 ? "IDENTICAL (BU_SKIN compute-write CORRECT; device-lost bug is in the DRAW path)"
+			                           : "DIVERGENT (BU_SKIN memory/usage is the bug)" );
 		}
-		Mem_Free16( out );
+
+		if ( outStorage ) { Mem_Free16( outStorage ); }
+		if ( outSkin )    { Mem_Free16( outSkin ); }
 	}
 
 	if ( bJoints )  { r->DestroyBuffer( bJoints ); }
@@ -589,7 +653,6 @@ void idMD5Mesh::GpuSkinValidate( const idJointMat *entJoints, const struct srfTr
 	if ( bWDesc )   { r->DestroyBuffer( bWDesc ); }
 	if ( bWStart )  { r->DestroyBuffer( bWStart ); }
 	if ( bTBN )     { r->DestroyBuffer( bTBN ); }
-	if ( bOut )     { r->DestroyBuffer( bOut ); }
 }
 
 /*
