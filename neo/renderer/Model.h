@@ -140,14 +140,6 @@ typedef struct srfTriangles_s {
 	struct vertCache_s *		ambientCache;			// idDrawVert
 	struct vertCache_s *		lightingCache;			// lightingCache_t
 	struct vertCache_s *		shadowCache;			// shadowCache_t
-
-	// Phase 2 GPU MD5 skinning (docs/gpu-offload-plan.md; Vulkan only, opt-in r_gpuSkinning):
-	// a persistent BU_SKIN (STORAGE|VERTEX) buffer the compute kernel writes each frame. When
-	// non-zero, RB_RHI_StreamAmbient binds it instead of ambientCache, so every pass (and the
-	// interaction copies that inherit it) draws the GPU-skinned verts. 0 = not GPU-skinned.
-	unsigned int				gpuSkinVB;				// rhi::BufferHandle (0 = none)
-	int							gpuSkinVerts;			// vert count the buffer was sized for (realloc on change)
-	int							gpuSkinFrame;			// tr.frameCount it was last dispatched (skin once/frame)
 } srfTriangles_t;
 
 typedef idList<srfTriangles_t *> idTriList;

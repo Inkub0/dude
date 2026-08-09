@@ -40,13 +40,6 @@ If you have questions concerning this license or the applicable additional terms
 static idCVar r_gpuSkinTest( "r_gpuSkinTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"validate GPU MD5 skinning vs the CPU once/sec, printing the max position error (Vulkan; docs/gpu-offload-plan.md Phase 2)" );
 
-// FIDELITY NOTE: GPU skinning uses option B (blended-LBS of a stored bind-pose TBN), which
-// diverges from stock's per-frame re-derive by a few degrees of surface normal on heavily
-// deforming meshes (imperceptible under normal maps in motion; see docs/gpu-offload-plan.md).
-// Opt-in, off by default; Vulkan only (the compute lane) — GL3 always keeps the CPU skinner.
-static idCVar r_gpuSkinning( "r_gpuSkinning", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE,
-	"skin animated (MD5) models on the GPU via the compute lane (Vulkan only; option-B TBN, docs/gpu-offload-plan.md Phase 2)" );
-
 // GPU MD5 skinning kernel (option B, blended-LBS): one invocation per OUTPUT vertex, walking
 // that vertex's run in the EXPANDED weight stream (per-vertex start from wstart, terminator from
 // wi[].y). In a single loop it accumulates:
@@ -105,19 +98,6 @@ static const char *MD5_SKIN_SRC =
 static rhi::ShaderHandle r_md5SkinShader = 0;		// compiled once, shared by all meshes
 static bool r_md5SkinShaderTried = false;
 
-// Lazily compile the shared skinning compute shader (once). Returns 0 if there is no compute
-// lane (GL3) or it failed to compile — callers then keep the CPU skinner.
-static rhi::ShaderHandle R_MD5_SkinShader( rhi::RHI *r ) {
-	if ( !r_md5SkinShaderTried ) {
-		r_md5SkinShaderTried = true;
-		r_md5SkinShader = r->CreateComputeShader( "cs_md5skin", MD5_SKIN_SRC );
-		if ( r_md5SkinShader == 0 ) {
-			common->Printf( "gpuSkin: no compute lane (GL3, or the kernel failed to compile)\n" );
-		}
-	}
-	return r_md5SkinShader;
-}
-
 // R^T * v : transform a bind-pose model-space vector into the joint's local space using the
 // inverse of the (orthonormal) bind rotation. idJointMat is row-major 3x4, so R[r][c]=m[r*4+c]
 // and (R^T v)[r] = sum_c m[c*4+r] v[c]. The runtime kernel undoes this with the current rotation.
@@ -165,10 +145,6 @@ idMD5Mesh::idMD5Mesh() {
 	skinExpandWDesc		= NULL;
 	skinExpandLocalTBN	= NULL;
 	skinTemplate		= NULL;
-	skinGpuWeights		= 0;
-	skinGpuWDesc		= 0;
-	skinGpuWStart		= 0;
-	skinGpuLocalTBN		= 0;
 }
 
 /*
@@ -485,52 +461,8 @@ void idMD5Mesh::FreeGpuSkinData( void ) {
 	Mem_Free16( skinExpandWDesc );		skinExpandWDesc = NULL;
 	Mem_Free16( skinExpandLocalTBN );	skinExpandLocalTBN = NULL;
 	Mem_Free16( skinTemplate );			skinTemplate = NULL;
-	rhi::RHI *r = rhi::GetRHI();
-	if ( r ) {
-		if ( skinGpuWeights )  { r->DestroyBuffer( skinGpuWeights ); }
-		if ( skinGpuWDesc )    { r->DestroyBuffer( skinGpuWDesc ); }
-		if ( skinGpuWStart )   { r->DestroyBuffer( skinGpuWStart ); }
-		if ( skinGpuLocalTBN ) { r->DestroyBuffer( skinGpuLocalTBN ); }
-	}
-	skinGpuWeights = skinGpuWDesc = skinGpuWStart = skinGpuLocalTBN = 0;
 	numOutputVerts = 0;
 	skinExpandCount = 0;
-}
-
-/*
-====================
-idMD5Mesh::EnsureSkinBuffersUploaded
-
-Upload the per-mesh static skinning SSBOs (expanded weights/descriptor/starts/local-TBN) to the
-GPU once; they never change, so all entities using this model share them. Returns false if the
-data isn't built or a buffer couldn't be created (caller falls back to the CPU skinner).
-====================
-*/
-bool idMD5Mesh::EnsureSkinBuffersUploaded( void ) {
-	if ( skinGpuWeights ) {
-		return true;						// already uploaded
-	}
-	if ( !skinExpandLocalTBN || skinExpandCount <= 0 || numOutputVerts <= 0 ) {
-		return false;
-	}
-	rhi::RHI *r = rhi::GetRHI();
-	if ( !r ) {
-		return false;
-	}
-	const int E = skinExpandCount;
-	skinGpuWeights  = r->CreateBuffer( rhi::BU_STORAGE, E * (int)sizeof( idVec4 ), skinExpandWeights );
-	skinGpuWDesc    = r->CreateBuffer( rhi::BU_STORAGE, E * 2 * (int)sizeof( int ), skinExpandWDesc );
-	skinGpuWStart   = r->CreateBuffer( rhi::BU_STORAGE, numOutputVerts * (int)sizeof( unsigned int ), skinWeightStart );
-	skinGpuLocalTBN = r->CreateBuffer( rhi::BU_STORAGE, E * 3 * (int)sizeof( idVec4 ), skinExpandLocalTBN );
-	if ( !skinGpuWeights || !skinGpuWDesc || !skinGpuWStart || !skinGpuLocalTBN ) {
-		if ( skinGpuWeights )  { r->DestroyBuffer( skinGpuWeights ); }
-		if ( skinGpuWDesc )    { r->DestroyBuffer( skinGpuWDesc ); }
-		if ( skinGpuWStart )   { r->DestroyBuffer( skinGpuWStart ); }
-		if ( skinGpuLocalTBN ) { r->DestroyBuffer( skinGpuLocalTBN ); }
-		skinGpuWeights = skinGpuWDesc = skinGpuWStart = skinGpuLocalTBN = 0;
-		return false;
-	}
-	return true;
 }
 
 /*
@@ -585,7 +517,14 @@ void idMD5Mesh::GpuSkinValidate( const idJointMat *entJoints, const struct srfTr
 	if ( !cpuRef || cpuRef->numVerts != numOutputVerts || cpuRef->verts == NULL ) {
 		return;
 	}
-	if ( R_MD5_SkinShader( r ) == 0 ) {
+	if ( !r_md5SkinShaderTried ) {
+		r_md5SkinShaderTried = true;
+		r_md5SkinShader = r->CreateComputeShader( "cs_md5skin", MD5_SKIN_SRC );
+		if ( r_md5SkinShader == 0 ) {
+			common->Printf( "gpuSkin: no compute lane (GL3, or the kernel failed to compile)\n" );
+		}
+	}
+	if ( r_md5SkinShader == 0 ) {
 		return;
 	}
 
@@ -740,39 +679,6 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			R_DeriveTangents( tri );
 		}
 		R_WeldSeamNormals( tri, r_tessWeldThreshold.GetFloat() );
-	}
-
-	// Phase 2 GPU skinning (docs/gpu-offload-plan.md): additionally skin this surface on the GPU
-	// into a persistent BU_SKIN buffer that the draw passes prefer (RB_RHI_StreamAmbient). The CPU
-	// path above stays intact as the safety net (stencil, bounds, fallback). With r_gpuSkinning
-	// off, or on GL3, or before the skin data is built, gpuSkinVB stays 0 = no behavior change.
-	if ( r_gpuSkinning.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN
-	     && skinExpandLocalTBN && R_MD5_SkinShader( rhi::GetRHI() ) != 0 && EnsureSkinBuffersUploaded() ) {
-		rhi::RHI *r = rhi::GetRHI();
-		const rhi::ShaderHandle skinShader = r_md5SkinShader;
-		const int numOut = numOutputVerts;
-		// (re)allocate the per-surface output buffer if missing or resized
-		if ( tri->gpuSkinVB && tri->gpuSkinVerts != numOut ) {
-			r->DestroyBuffer( tri->gpuSkinVB );
-			tri->gpuSkinVB = 0;
-		}
-		if ( !tri->gpuSkinVB ) {
-			tri->gpuSkinVB = r->CreateBuffer( rhi::BU_SKIN, numOut * (int)sizeof( idDrawVert ), skinTemplate );
-			tri->gpuSkinVerts = numOut;
-			tri->gpuSkinFrame = -1;
-		}
-		// one dispatch per surface per frame (an entity in several views instantiates once)
-		if ( tri->gpuSkinVB && tri->gpuSkinFrame != tr.frameCount ) {
-			tri->gpuSkinFrame = tr.frameCount;
-			const int numJoints = ent->numJoints;
-			idJointMat *jointSnap = (idJointMat *)R_FrameAlloc( numJoints * (int)sizeof( idJointMat ) );
-			memcpy( jointSnap, entJoints, numJoints * sizeof( idJointMat ) );
-			const float skinScale = ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f )
-			                      ? ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] : 1.0f;
-			RB_RHI_AddSkinJob( skinShader, tri->gpuSkinVB, numOut,
-			                   skinGpuWeights, skinGpuWDesc, skinGpuWStart, skinGpuLocalTBN,
-			                   jointSnap, numJoints, skinScale );
-		}
 	}
 
 	// Phase 2 validation (r_gpuSkinTest): once/sec, skin this mesh on the GPU with the full
