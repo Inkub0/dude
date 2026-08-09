@@ -172,6 +172,7 @@ public:
 	virtual void	BindPipeline( const PipelineDesc &desc );
 	virtual void	Draw( const DrawArgs &args );
 	virtual void	Dispatch( const ComputeArgs &args );
+	virtual void	DispatchSync( const ComputeArgs &args );
 	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth, bool hdrFloat );
 	virtual void	CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 	                                        int srcX, int srcY, int w, int h, bool depth );
@@ -3214,6 +3215,41 @@ void VulkanBackend::Dispatch( const ComputeArgs &args ) {
 	retiredComputeSets[frameIndex].push_back( set );
 }
 
+// Synchronous compute dispatch on the dedicated upload cb: record, barrier to HOST, submit,
+// wait. Leaves the result visible to a subsequent ReadBuffer. Stalls the GPU — dev/validation
+// and load-time only, never per-frame. (Phase 1/2.)
+void VulkanBackend::DispatchSync( const ComputeArgs &args ) {
+	if ( device == VK_NULL_HANDLE || computePipeLayout == VK_NULL_HANDLE || uploadCb == VK_NULL_HANDLE ) {
+		return;
+	}
+	vkQueueWaitIdle( gfxQueue );
+	vkResetCommandBuffer( uploadCb, 0 );
+	VkCommandBufferBeginInfo bbi = {};
+	bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer( uploadCb, &bbi );
+	VkDescriptorSet set = RecordDispatch( uploadCb, args );
+	if ( set != VK_NULL_HANDLE ) {
+		VkMemoryBarrier mb = {};
+		mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+			0, 1, &mb, 0, NULL, 0, NULL );
+	}
+	vkEndCommandBuffer( uploadCb );
+	VkSubmitInfo si = {};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &uploadCb;
+	vkResetFences( device, 1, &uploadFence );
+	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	if ( set != VK_NULL_HANDLE ) {
+		vkFreeDescriptorSets( device, computePool, 1, &set );		// cb done -> safe
+	}
+}
+
 // r_vkComputeTest: validate the whole compute lane end to end. Seeds a host-visible storage
 // buffer with 0..N-1, dispatches a kernel that doubles each element, reads it back and checks
 // data[i] == 2*i. Two staged checks isolate a failure: the raw seed round-trip (buffer create +
@@ -3267,43 +3303,16 @@ void VulkanBackend::ComputeSelfTest() {
 	ca.pushConstantSize = (int)sizeof( count );
 	ca.groupsX = ( N + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
 
-	vkQueueWaitIdle( gfxQueue );
-	vkResetCommandBuffer( uploadCb, 0 );
-	VkCommandBufferBeginInfo bbi = {};
-	bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer( uploadCb, &bbi );
-	VkDescriptorSet set = RecordDispatch( uploadCb, ca );
-	if ( set != VK_NULL_HANDLE ) {
-		VkMemoryBarrier mb = {};
-		mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-		mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-		mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
-			0, 1, &mb, 0, NULL, 0, NULL );
-	}
-	vkEndCommandBuffer( uploadCb );
-	VkSubmitInfo si = {};
-	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	si.commandBufferCount = 1;
-	si.pCommandBuffers = &uploadCb;
-	vkResetFences( device, 1, &uploadFence );
-	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
-	if ( set != VK_NULL_HANDLE ) {
-		vkFreeDescriptorSets( device, computePool, 1, &set );		// cb is done -> safe
-	}
-
-	const bool readOk = ( set != VK_NULL_HANDLE ) && ReadBuffer( buf, back, N * (int)sizeof( uint32_t ) );
+	DispatchSync( ca );
+	const bool readOk = ReadBuffer( buf, back, N * (int)sizeof( uint32_t ) );
 	int firstBad = -1;
 	for ( int i = 0; readOk && i < N; i++ ) {
 		if ( back[i] != (uint32_t)( 2 * i ) ) { firstBad = i; break; }
 	}
-	if ( set == VK_NULL_HANDLE ) {
-		common->Printf( "VK compute self-test: FAIL (dispatch not recorded)\n" );
-	} else if ( !readOk ) {
+	if ( !readOk ) {
 		common->Printf( "VK compute self-test: FAIL (readback failed)\n" );
 	} else if ( firstBad >= 0 ) {
+		// a no-op dispatch (null pipeline) leaves the seed untouched, so it also lands here
 		common->Printf( "VK compute self-test: FAIL (result at i=%d: %u != %d)\n", firstBad, back[firstBad], 2 * firstBad );
 	} else {
 		common->Printf( "VK compute self-test: PASS (%d elements doubled on the GPU)\n", N );

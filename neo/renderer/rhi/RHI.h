@@ -289,6 +289,10 @@ public:
 	// command buffer outside any render pass; the GL3 backend (no compute) no-ops.
 	// The foundational primitive for CPU->GPU offload (skinning / culling).
 	virtual void	Dispatch( const ComputeArgs &args ) {}
+	// Like Dispatch but on a dedicated command buffer, submitted and WAITED ON (synchronous),
+	// so the result is ready for a ReadBuffer immediately. For dev/validation and load-time
+	// GPU work; stalls the GPU, so never per-frame. GL3 no-ops.
+	virtual void	DispatchSync( const ComputeArgs &args ) {}
 
 	// ---- screen copies (_currentRender / _currentDepth / _scratch, Phase 4 M5) ----
 	// The GL3 backend keeps the literal qglCopyTexSubImage2D path in idImage
