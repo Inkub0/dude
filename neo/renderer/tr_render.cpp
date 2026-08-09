@@ -753,7 +753,11 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 	inter.specularMatrix[0].Zero();
 	inter.specularMatrix[1].Zero();
 
-	if ( r_skipInteractions.GetBool() || !surf->geo || !surf->geo->ambientCache ) {
+	// NOTE: this is the SHARED stage-decomposition, called by the RHI backend too
+	// (RB_RHI_CreateDrawInteractions). A GPU-skinned surface (r_gpuSkinNoUpload) has no ambient
+	// cache — it draws from gpuSkinVB — so accept gpuSkinVB here or the surface gets zero light
+	// interactions and renders black.
+	if ( r_skipInteractions.GetBool() || !surf->geo || ( !surf->geo->ambientCache && !surf->geo->gpuSkinVB ) ) {
 		return;
 	}
 
