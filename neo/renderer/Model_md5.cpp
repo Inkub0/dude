@@ -46,7 +46,9 @@ static idCVar r_gpuSkinTest( "r_gpuSkinTest", "0", CVAR_RENDERER | CVAR_BOOL,
 // Opt-in, off by default; Vulkan only (the compute lane) — GL3 always keeps the CPU skinner.
 // NOT archived during bring-up: this feature device-lost the GPU twice, so it must default to 0
 // on every launch and be enabled explicitly per-session (no persisted "1" can auto-enable it).
-static idCVar r_gpuSkinning( "r_gpuSkinning", "0", CVAR_RENDERER | CVAR_BOOL,
+// Global (extern in tr_local.h) so the quality-preset system can force it off — option-B TBN is a
+// fidelity divergence, so every preset that must match stock (Potato = the faithful floor) keeps it 0.
+idCVar r_gpuSkinning( "r_gpuSkinning", "0", CVAR_RENDERER | CVAR_BOOL,
 	"skin animated (MD5) models on the GPU via the compute lane (Vulkan only; option-B TBN, docs/gpu-offload-plan.md Phase 2)" );
 
 // GPU MD5 skinning kernel (option B, blended-LBS): one invocation per OUTPUT vertex, walking

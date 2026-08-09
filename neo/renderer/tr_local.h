@@ -998,6 +998,9 @@ extern idCVar r_tessWeldSeams;			// weld coincident md5 normals so seams don't o
 extern idCVar r_tessWeldThreshold;		// min normal dot to weld (1=only identical .. lower=weld harder edges)
 extern idCVar r_tessDebug;				// log each material name accepted for tessellation once (diagnostic)
 
+// DUDE: GPU MD5 skinning via the compute lane (Vulkan only; docs/gpu-offload-plan.md Phase 2)
+extern idCVar r_gpuSkinning;			// skin animated meshes on the GPU (option-B TBN; off = faithful CPU skin)
+
 // DUDE: baked ambient-occlusion (occlusion) maps (enhancement backends only; docs/occlusion-maps.md)
 extern idCVar r_occlusionMaps;			// master toggle: use per-material baked AO maps
 extern idCVar r_occlusionMapScale;		// AO-map strength on the ambient term (0..1)

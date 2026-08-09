@@ -2441,6 +2441,12 @@ struct EnhancementPreset {
 	// it's off on Medium and full from High up. parallaxShadow is inert where parallax is off.
 	bool  parallax;                 // r_parallax
 	float parallaxShadow;           // r_parallaxShadow
+	// DUDE GPU MD5 skinning (appended, see note above; Vulkan-only, inert on GL3). Option-B TBN is a
+	// small fidelity divergence from stock's per-frame re-derive, so it is OFF on every preset for now
+	// — Potato/Low stay a faithful id-render, and the higher tiers only flip it on once it is a proven
+	// perf win (Milestone C strips the redundant CPU skin). Every preset forcing it 0 keeps the faithful
+	// floor bulletproof even if it was hand-enabled before switching presets.
+	bool  gpuSkin;                  // r_gpuSkinning
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2449,13 +2455,13 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 36.0f,  false,  false, 0.0f, false, 0.0f },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 36.0f,  false,  false, 0.0f, false, 0.0f },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 1,   3,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 36.0f,  true,   false, 0.0f, true, 0.0f },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 2,   4,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 36.0f,  false,  true,  0.0f, true, 1.0f },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 3,   6,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 36.0f,  false,  true,  -0.25f, true, 1.0f },
-	{ "Nightmare", true, true, true, true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 36.0f, false,  true,  -0.25f, true, 1.0f },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 36.0f,  false,  false, 0.0f, false, 0.0f, false },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 36.0f,  false,  false, 0.0f, false, 0.0f, false },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 1,   3,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 36.0f,  true,   false, 0.0f, true, 0.0f, false },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 2,   4,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 36.0f,  false,  true,  0.0f, true, 1.0f, false },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 3,   6,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 36.0f,  false,  true,  -0.25f, true, 1.0f, false },
+	{ "Nightmare", true, true, true, true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 36.0f, false,  true,  -0.25f, true, 1.0f, false },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2519,6 +2525,11 @@ static void ApplyEnhancementPreset( int idx )
 	// parallax occlusion mapping (GL3 + Vulkan): world relief from Medium, self-shadow from High.
 	r_parallax.SetBool( p.parallax );
 	r_parallaxShadow.SetFloat( p.parallaxShadow );
+
+	// GPU MD5 skinning (Vulkan-only; inert on GL3). OFF on every preset for now — option-B TBN is a
+	// fidelity divergence, so this keeps Potato (and every tier) a faithful id-render until it is a
+	// proven perf win and deliberately flipped on for the top tiers.
+	r_gpuSkinning.SetBool( p.gpuSkin );
 }
 
 // Return the preset whose full cvar vector the live cvars currently match, or -1
@@ -2564,7 +2575,8 @@ static int DetectEnhancementPreset()
 			r_tessellation.GetBool()           == p.tessellation &&
 			idMath::Fabs( r_tessDisplace.GetFloat() - p.tessDisplace ) < 0.01f &&
 			r_parallax.GetBool()               == p.parallax &&
-			idMath::Fabs( r_parallaxShadow.GetFloat() - p.parallaxShadow ) < 0.01f;
+			idMath::Fabs( r_parallaxShadow.GetFloat() - p.parallaxShadow ) < 0.01f &&
+			r_gpuSkinning.GetBool()            == p.gpuSkin;
 		if ( match ) {
 			return i;
 		}
