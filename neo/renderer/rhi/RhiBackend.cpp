@@ -1220,7 +1220,9 @@ static void RB_RHI_StreamStore( rhi::RHI *r, const void *vertKey, const void *id
 // opens (so the compute-write -> vertex-read barrier lands before any draw reads the buffer).
 struct rbSkinJob_t {
 	rhi::ShaderHandle	shader;
+	rhi::ShaderHandle	deriveShader;		// 0 = keep the position kernel's baked-bind TBN
 	rhi::BufferHandle	outVB, weights, wdesc, wstart, localTbn;
+	rhi::BufferHandle	domIdx, domScale;	// dominantTris for the derive pass (0 = unavailable)
 	const void *		jointData;			// R_FrameAlloc snapshot, valid this frame
 	int					numJoints;
 	int					numOutVerts;
@@ -1230,11 +1232,13 @@ static idList<rbSkinJob_t>	rbSkinJobs;
 
 void RB_RHI_AddSkinJob( unsigned int shader, unsigned int outVB, int numOutVerts,
                         unsigned int weightsBuf, unsigned int wdescBuf, unsigned int wstartBuf, unsigned int localTbnBuf,
-                        const void *jointData, int numJoints, float skinScale ) {
+                        const void *jointData, int numJoints, float skinScale,
+                        unsigned int deriveShader, unsigned int domIdxBuf, unsigned int domScaleBuf ) {
 	rbSkinJob_t j;
 	j.shader = shader; j.outVB = outVB; j.numOutVerts = numOutVerts;
 	j.weights = weightsBuf; j.wdesc = wdescBuf; j.wstart = wstartBuf; j.localTbn = localTbnBuf;
 	j.jointData = jointData; j.numJoints = numJoints; j.skinScale = skinScale;
+	j.deriveShader = deriveShader; j.domIdx = domIdxBuf; j.domScale = domScaleBuf;
 	rbSkinJobs.Append( j );
 }
 
@@ -1265,6 +1269,23 @@ void RB_RHI_FlushSkinJobs( void ) {
 			ca.groupsX = ( j.numOutVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
 			r->Dispatch( ca );					// records on the frame cb + a compute->vertex barrier
 			r->DestroyBuffer( jointsBuf );		// deferred/fence-retired: safe right after recording
+
+			// Second pass: derive N/T from the posed positions the dispatch above just wrote,
+			// reproducing stock's per-frame R_DeriveUnsmoothedTangents instead of LBS-rotating a
+			// baked bind-pose TBN. Dispatch() barriers compute writes for compute reads, so the
+			// positions are visible here. Overwrites the TBN the position kernel wrote.
+			if ( j.deriveShader && j.domIdx && j.domScale ) {
+				struct { unsigned int numVerts; } dpc = { (unsigned int)j.numOutVerts };
+				rhi::ComputeArgs da = {};
+				da.shader = j.deriveShader;
+				da.storage[0] = j.outVB;
+				da.storage[1] = j.domIdx;
+				da.storage[2] = j.domScale;
+				da.pushConstants = &dpc;
+				da.pushConstantSize = (int)sizeof( dpc );
+				da.groupsX = ( j.numOutVerts + 63 ) / 64; da.groupsY = 1; da.groupsZ = 1;
+				r->Dispatch( da );
+			}
 		}
 	}
 	rbSkinJobs.SetNum( 0 );

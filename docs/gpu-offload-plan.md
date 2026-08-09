@@ -189,6 +189,32 @@ buffer reused as `ambientCache`; write xyz **and** normals/tangents to also reti
   tangent-derive for every animated actor — direct front-end relief. **Risk:** medium (bit-exact
   tangent reconstruction; mirror-seam vert handling `Model_md5.cpp:344`).
 
+#### TBN source: why the *faithful* one lost
+
+Two ways to get a skinned TBN, both built and A/B'd in-engine:
+
+1. **Per-frame GPU re-derive** (`r_gpuSkinDerive 1`) — a second compute pass porting
+   `R_DeriveUnsmoothedTangents`. Verified to reproduce `idSIMD_SSE41::DeriveUnsmoothedTangents` to
+   0.006° avg / 0.04° max. Exactly stock. **It tears animated meshes open at their seams under PN
+   tessellation** — faithfully, because stock's unsmoothed path early-returns *before* the `dupVerts`
+   weld (`tr_trisurf.cpp:1804` vs the weld at `:1927`), so coincident verts legitimately disagree.
+   Invisible in stock's rasterizer; a hole once PN patches build control points from those normals.
+2. **Pre-welded baked bind TBN + LBS** (`r_gpuSkinDerive 0`, the default) — bake welds every authored
+   coincident group (`dupVerts` + `mirroredVerts`, union-find, **no angle gate**) so the pair shares
+   one bind normal. Coincident verts share a weight run ⇒ identical bind normal ⇒ bit-identical
+   skinned normal at every pose ⇒ the seam *cannot* open. Costs a small shading divergence.
+
+Dead ends worth not repeating: `R_WeldSeamNormals`' dot gate (default `0.7` ≈ 45°) rejects precisely
+the pairs that crack — the measured offender was **49.54°**, just past it. And `r_tessWeldSeams`
+welds in `UpdateSurface`, which the derive pass then overwrites, so it appears to "do nothing"
+whenever GPU skinning is on.
+
+Method note: the GPU-vs-CPU numbers in `r_gpuSkinTest` were misleading for several rounds because
+`r_useDeferredTangents` (default 1) defers `R_DeriveTangents` to `R_CreateAmbientCache`, *after* the
+validation hook — so the reference normals were a frame stale and ~15° of "error" was really one
+frame of animation. The harness now re-derives its own reference. The choice above was still settled
+by looking at an imp, not by the metric.
+
 ### Phase 3 — GPU-driven culling *(Vulkan-only; biggest relief, most architecture)*
 Add indirect draw to the RHI (`vkCmdDrawIndexedIndirect[Count]`, swapping `vkCmdDrawIndexed :5557`).
 Upload persistent per-object bounds + matrices + sort keys; a compute pass frustum/Hi-Z-culls and
