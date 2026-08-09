@@ -93,10 +93,8 @@ struct RenderParams {
 								// LOD falloff (beyond it factor rolls to 1), z = displacement
 								// strength (0 = pure PN smoothing), w = min model-space edge
 								// length to subdivide. Read by the .tesc/.tese stages only;
-								// 0 on every non-tessellated draw.
-	float	tessParms2[4];		// DUDE tessellation extras: x = UV-seam displacement fade
-								// (r_tessSeamFade; 1 = pin seam verts, 0 = displace them like
-								// any other vertex). yzw spare.
+								// 0 on every non-tessellated draw. (The UV-seam displacement
+								// mask is per-VERTEX, not a uniform -- see tess.glsl.)
 
 	float	parallaxParms[4];	// DUDE parallax occlusion mapping (docs/parallax.md):
 								// x = enable, y = height depth in UV units, z = min march
@@ -113,8 +111,8 @@ struct RenderParams {
 								// animation. Filled only on the projected-2D shadow path.
 };
 
-// 3 mat4 (192) + 46 vec4 (736) = 928 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 928, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 3 mat4 (192) + 45 vec4 (720) = 912 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 912, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

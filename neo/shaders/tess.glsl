@@ -89,15 +89,16 @@ vec3 dudeTessPN( vec3 p0, vec3 p1, vec3 p2, vec3 n0, vec3 n1, vec3 n2, vec3 tc )
 // what opened the gaps around hands and shoulders. Welding the normals fixed the
 // direction the two halves move in; only pinning them fixes the distance. The mask
 // interpolates linearly across the patch, so displacement ramps back to full a
-// triangle away from the seam rather than stepping. u_tessParms2.x scales the whole
-// effect (r_tessSeamFade; 0 restores the un-pinned behaviour).
+// triangle away from the seam rather than stepping. Deliberately not dialable:
+// anything short of a full pin leaves a proportionally smaller gap, which is still a
+// gap, so the only useful setting is the one that closes it.
 vec3 dudeTessDisplace( vec3 pos, vec3 geoN, sampler2D bumpMap, vec2 uv, float seam ) {
 	if ( u_tessParms.z == 0.0 ) {
 		return pos;
 	}
 	float bz = textureLod( bumpMap, uv, 0.0 ).z * 2.0 - 1.0;
 	float relief = 1.0 - clamp( bz, 0.0, 1.0 );
-	relief *= mix( 1.0, clamp( seam, 0.0, 1.0 ), u_tessParms2.x );
+	relief *= clamp( seam, 0.0, 1.0 );
 	return pos + geoN * ( relief * u_tessParms.z );
 }
 

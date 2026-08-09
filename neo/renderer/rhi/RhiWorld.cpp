@@ -753,7 +753,6 @@ void RB_RHI_SetTessParms( rhi::RenderParams &parms ) {
 	parms.tessParms[1] = r_tessMaxDist.GetFloat();
 	parms.tessParms[2] = r_tessDisplace.GetFloat();	// Phase 2 displacement strength
 	parms.tessParms[3] = r_tessMinEdge.GetFloat();	// min edge length to subdivide (anti eye-bulge)
-	parms.tessParms2[0] = r_tessSeamFade.GetFloat();	// UV-seam displacement fade (see r_tessSeamFade)
 }
 
 // For a tessellated surface, copy the bump stage's texture matrix into parms (so the

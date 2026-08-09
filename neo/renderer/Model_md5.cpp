@@ -397,8 +397,9 @@ would render black (SVC_MODULATE) -- and sure enough nothing uses it: every vert
 inverseVertexColor stage in the stock materials is either world/terrain blending, a projected
 DECAL_MACRO, or an additive spawn effect (alpha ignored), never an md5 body/head skin. The
 alpha byte is therefore free real estate here; RGB is left untouched, so even a mod material
-reading vertexColor sees the same rgb it does today. The real cost is a narrow band of reduced
-relief along each UV seam -- r_tessSeamFade 0 restores the un-pinned displacement.
+reading vertexColor sees the same rgb it does today. The real cost is reduced relief in a band
+around each UV seam, which on the imp is 44% of the verts -- not narrow. Kept unconditional
+anyway: a partial pin leaves a proportionally smaller gap, which is still a gap.
 ====================
 */
 void idMD5Mesh::StampTessSeamMask( idDrawVert *verts ) const {

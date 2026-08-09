@@ -291,7 +291,7 @@ mesh deforms as one piece; the threshold preserves genuine hard creases. Runs in
 on (vanilla is byte-identical off). Closes PN seams fully; displacement across a UV seam
 keeps a small residual (different heights). Threshold is a Debugging-tab slider.
 
-### UV-seam displacement fade (2026-08-09) — `r_tessSeamFade` (on by default)
+### UV-seam displacement pinning (2026-08-09) — unconditional
 The residual noted above turned out not to be small: it is what opens the visible gaps around
 hands and shoulders. `dudeTessDisplace` reads its pseudo-height **at the vertex UV**, and a UV
 seam is by definition a pair of position-coincident verts carrying *deliberately different*
@@ -314,8 +314,9 @@ The mask must be identical in every pass or depth-EQUAL breaks, so all seven dis
 carry it; `generic.{vert,tesc,tese}` is left alone because the blend pass never displaced.
 
 **Fidelity:** costs relief in a band around every UV seam, and at 44% seam verts that band is not
-narrow — `r_tessSeamFade` (0..1, default 1) dials it, 0 restoring the old un-pinned displacement.
-The alpha byte is free on md5 base surfaces: verts are `Clear()`ed to colour 0, so vertex colour
+narrow. Shipped with no dial regardless — a partial pin leaves a proportionally smaller gap, which
+is still a gap, so the only useful setting is the one that closes it; `r_tessDisplace 0` remains
+the way to opt out of displacement entirely. The alpha byte is free on md5 base surfaces: verts are `Clear()`ed to colour 0, so vertex colour
 would render them black, and no stock character material uses it (every `vertexColor` /
 `inverseVertexColor` stage is world/terrain blending, a projected `DECAL_MACRO`, or an additive
 spawn effect). RGB is untouched.
