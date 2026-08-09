@@ -1824,8 +1824,7 @@ void R_StaticFree( void *data );
 // this frame's joint palette. Vulkan only; no-op on GL3. Impl in rhi/RhiBackend.cpp.
 void RB_RHI_AddSkinJob( unsigned int shader, unsigned int outVB, int numOutVerts,
                         unsigned int weightsBuf, unsigned int wdescBuf, unsigned int wstartBuf, unsigned int localTbnBuf,
-                        const void *jointData, int numJoints, float skinScale,
-                        unsigned int deriveShader = 0, unsigned int domIdxBuf = 0, unsigned int domScaleBuf = 0 );
+                        const void *jointData, int numJoints, float skinScale );
 void RB_RHI_FlushSkinJobs( void );		// dispatch + clear the recorded jobs (backend, pre-scene)
 
 

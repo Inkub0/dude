@@ -45,8 +45,11 @@ static idCVar r_gpuSkinTest( "r_gpuSkinTest", "0", CVAR_RENDERER | CVAR_BOOL,
 // deforming meshes (imperceptible under normal maps in motion; see docs/gpu-offload-plan.md).
 // The bind TBN is additionally seam-welded at bake (see BuildGpuSkinData), a second small
 // divergence: coincident UV/mirror pairs shade as one instead of stock's two. That is what keeps
-// animated meshes from tearing open under PN tessellation, and it was chosen over the exact
-// re-derive (r_gpuSkinDerive 1) on the strength of a side-by-side look, not a metric.
+// animated meshes from tearing open under PN tessellation, and it was chosen over an exact
+// per-frame GPU re-derive on the strength of a side-by-side look, not a metric. That re-derive was
+// built, verified against idSIMD_SSE41::DeriveUnsmoothedTangents to 0.006 deg, and REMOVED: being
+// stock-exact, it also reproduced stock's refusal to weld dupVerts, so the seams still opened.
+// See docs/gpu-offload-plan.md "TBN source: why the faithful one lost" before rebuilding it.
 // Opt-in, off by default; Vulkan only (the compute lane) — GL3 always keeps the CPU skinner.
 // NOT archived during bring-up: this feature device-lost the GPU twice, so it must default to 0
 // on every launch and be enabled explicitly per-session (no persisted "1" can auto-enable it).
@@ -54,17 +57,6 @@ static idCVar r_gpuSkinTest( "r_gpuSkinTest", "0", CVAR_RENDERER | CVAR_BOOL,
 // fidelity divergence, so every preset that must match stock (Potato = the faithful floor) keeps it 0.
 idCVar r_gpuSkinning( "r_gpuSkinning", "0", CVAR_RENDERER | CVAR_BOOL,
 	"skin animated (MD5) models on the GPU via the compute lane (Vulkan only; option-B TBN, docs/gpu-offload-plan.md Phase 2)" );
-
-// Which TBN the GPU skin path produces. DEFAULT 0 (pre-welded baked bind TBN) after a visual A/B:
-// the re-derive path tears animated meshes open at their seams under PN tessellation, because it
-// faithfully reproduces stock's UNSMOOTHED derive -- and that path deliberately never welds
-// dupVerts (tr_trisurf.cpp early-returns before the weld). Faithful, and visibly wrong here.
-//
-// 0 blends the baked bind-pose TBN by LBS instead, which the bake pre-welds below. Coincident verts
-// share a weight run, so identical bind normals stay bit-identical at every pose and the pair simply
-// cannot separate. Kept switchable because 1 is the more faithful shading when tessellation is off.
-static idCVar r_gpuSkinDerive( "r_gpuSkinDerive", "0", CVAR_RENDERER | CVAR_BOOL,
-	"GPU skinning TBN source: 0 = pre-welded baked bind TBN blended by LBS (seam-stable under tessellation, default), 1 = per-frame GPU re-derive (matches stock's unsmoothed derive, but its seams open under tessellation)" );
 
 // GPU MD5 skinning kernel (option B, blended-LBS): one invocation per OUTPUT vertex, walking
 // that vertex's run in the EXPANDED weight stream (per-vertex start from wstart, terminator from
@@ -121,46 +113,8 @@ static const char *MD5_SKIN_SRC =
 	"    v[o+11u]=t1.x; v[o+12u]=t1.y; v[o+13u]=t1.z;\n"	// color = v[o+14] (seeded, untouched)
 	"}\n";
 
-// GPU port of R_DeriveUnsmoothedTangents (tr_trisurf.cpp) — the SECOND pass of the skin, run after
-// the position pass above has written every posed xyz. Stock derives each vertex's N/T from its
-// single dominant triangle using the POSED positions, re-run every frame; baking the bind-pose TBN
-// and LBS-rotating it instead (the pass above) is a fidelity divergence that also freezes in any
-// per-vertex disagreement at UV/mirror seams, which PN tessellation then tears open into visible
-// slits. Deriving here from the posed positions reproduces the CPU result instead of approximating
-// it, so coincident vertices agree for the same reason they do on the CPU.
-//
-// Mirrors idSIMD_SSE41::DeriveUnsmoothedTangents exactly (the DERIVE_UNSMOOTHED_BITANGENT variant
-// the generic path also uses): no normalization — normalizationScale[] carries the precomputed
-// 1/len. Reads only xyz + st (neither written by this pass) and writes only normal/tangents, so
-// invocations never race even though they read their neighbours' vertices.
-static const char *MD5_DERIVE_SRC =
-	"#version 450\n"
-	"layout(local_size_x = 64) in;\n"
-	"layout(std430, binding = 0)          buffer OutVert  { float v[]; };\n"
-	"layout(std430, binding = 1) readonly buffer DomIdx   { uvec2 di[]; };\n"
-	"layout(std430, binding = 2) readonly buffer DomScale { vec4  ds[]; };\n"
-	"layout(push_constant) uniform PC { uint numVerts; } pc;\n"
-	"void main() {\n"
-	"    uint i = gl_GlobalInvocationID.x;\n"
-	"    if ( i >= pc.numVerts ) return;\n"
-	"    uint ia = i*15u, ib = di[i].x*15u, ic = di[i].y*15u;\n"	// 15 floats per idDrawVert
-	"    vec3 a = vec3( v[ia+0u], v[ia+1u], v[ia+2u] );\n"
-	"    vec3 db = vec3( v[ib+0u], v[ib+1u], v[ib+2u] ) - a;\n"
-	"    vec3 dc = vec3( v[ic+0u], v[ic+1u], v[ic+2u] ) - a;\n"
-	"    float d4 = v[ib+4u] - v[ia+4u];\n"		// st[1] deltas (st = v[o+3..4])
-	"    float d9 = v[ic+4u] - v[ia+4u];\n"
-	"    vec3 n = ds[i].z * cross( dc, db );\n"
-	"    vec3 t = ds[i].x * ( d9 * db - d4 * dc );\n"
-	"    vec3 b = ds[i].y * cross( t, n );\n"
-	"    v[ia+5u]=n.x;  v[ia+6u]=n.y;  v[ia+7u]=n.z;\n"
-	"    v[ia+8u]=t.x;  v[ia+9u]=t.y;  v[ia+10u]=t.z;\n"
-	"    v[ia+11u]=b.x; v[ia+12u]=b.y; v[ia+13u]=b.z;\n"
-	"}\n";
-
 static rhi::ShaderHandle r_md5SkinShader = 0;		// compiled once, shared by all meshes
 static bool r_md5SkinShaderTried = false;
-static rhi::ShaderHandle r_md5DeriveShader = 0;
-static bool r_md5DeriveShaderTried = false;
 
 // Lazily compile the shared skinning compute shader (once). Returns 0 if there is no compute
 // lane (GL3) or it failed to compile — callers then keep the CPU skinner.
@@ -175,18 +129,6 @@ static rhi::ShaderHandle R_MD5_SkinShader( rhi::RHI *r ) {
 	return r_md5SkinShader;
 }
 
-// Lazily compile the shared tangent-derive compute shader (once). 0 = unavailable, in which case
-// the skin falls back to the LBS-rotated bind TBN the position kernel already wrote.
-static rhi::ShaderHandle R_MD5_DeriveShader( rhi::RHI *r ) {
-	if ( !r_md5DeriveShaderTried ) {
-		r_md5DeriveShaderTried = true;
-		r_md5DeriveShader = r->CreateComputeShader( "cs_md5derive", MD5_DERIVE_SRC );
-		if ( r_md5DeriveShader == 0 ) {
-			common->Printf( "gpuSkin: tangent-derive kernel failed to compile -- falling back to baked bind TBN\n" );
-		}
-	}
-	return r_md5DeriveShader;
-}
 
 // R^T * v : transform a bind-pose model-space vector into the joint's local space using the
 // inverse of the (orthonormal) bind rotation. idJointMat is row-major 3x4, so R[r][c]=m[r*4+c]
@@ -235,14 +177,10 @@ idMD5Mesh::idMD5Mesh() {
 	skinExpandWDesc		= NULL;
 	skinExpandLocalTBN	= NULL;
 	skinTemplate		= NULL;
-	skinDomIdx			= NULL;
-	skinDomScale		= NULL;
 	skinGpuWeights		= 0;
 	skinGpuWDesc		= 0;
 	skinGpuWStart		= 0;
 	skinGpuLocalTBN		= 0;
-	skinGpuDomIdx		= 0;
-	skinGpuDomScale		= 0;
 }
 
 /*
@@ -571,22 +509,6 @@ void idMD5Mesh::BuildGpuSkinData( const idJointMat *bindJoints ) {
 		Mem_Free16( sum );
 	}
 
-	// Repack dominantTris for the GPU derive pass. R_BuildDominantTris runs after mirror
-	// duplication, so this array is sized numOutputVerts and indexes 1:1 with the skin output.
-	if ( deformInfo->dominantTris != NULL ) {
-		skinDomIdx   = (unsigned int *)Mem_Alloc16( numOut * 2 * sizeof( unsigned int ) );
-		skinDomScale = (float *)       Mem_Alloc16( numOut * 4 * sizeof( float ) );
-		for ( int o = 0; o < numOut; o++ ) {
-			const dominantTri_t &dt = deformInfo->dominantTris[o];
-			skinDomIdx[o * 2 + 0]   = (unsigned int)dt.v2;
-			skinDomIdx[o * 2 + 1]   = (unsigned int)dt.v3;
-			skinDomScale[o * 4 + 0] = dt.normalizationScale[0];
-			skinDomScale[o * 4 + 1] = dt.normalizationScale[1];
-			skinDomScale[o * 4 + 2] = dt.normalizationScale[2];
-			skinDomScale[o * 4 + 3] = 0.0f;
-		}
-	}
-
 	// emit each output vertex's run into the expanded stream
 	int e = 0;
 	for ( int o = 0; o < numOut; o++ ) {
@@ -626,19 +548,14 @@ void idMD5Mesh::FreeGpuSkinData( void ) {
 	Mem_Free16( skinExpandWDesc );		skinExpandWDesc = NULL;
 	Mem_Free16( skinExpandLocalTBN );	skinExpandLocalTBN = NULL;
 	Mem_Free16( skinTemplate );			skinTemplate = NULL;
-	Mem_Free16( skinDomIdx );			skinDomIdx = NULL;
-	Mem_Free16( skinDomScale );			skinDomScale = NULL;
 	rhi::RHI *r = rhi::GetRHI();
 	if ( r ) {
 		if ( skinGpuWeights )   { r->DestroyBuffer( skinGpuWeights ); }
 		if ( skinGpuWDesc )     { r->DestroyBuffer( skinGpuWDesc ); }
 		if ( skinGpuWStart )    { r->DestroyBuffer( skinGpuWStart ); }
 		if ( skinGpuLocalTBN )  { r->DestroyBuffer( skinGpuLocalTBN ); }
-		if ( skinGpuDomIdx )    { r->DestroyBuffer( skinGpuDomIdx ); }
-		if ( skinGpuDomScale )  { r->DestroyBuffer( skinGpuDomScale ); }
 	}
 	skinGpuWeights = skinGpuWDesc = skinGpuWStart = skinGpuLocalTBN = 0;
-	skinGpuDomIdx = skinGpuDomScale = 0;
 	numOutputVerts = 0;
 	skinExpandCount = 0;
 }
@@ -676,35 +593,7 @@ bool idMD5Mesh::EnsureSkinBuffersUploaded( void ) {
 		skinGpuWeights = skinGpuWDesc = skinGpuWStart = skinGpuLocalTBN = 0;
 		return false;
 	}
-	UploadDomBuffers();
 	return true;
-}
-
-/*
-====================
-idMD5Mesh::UploadDomBuffers
-
-Upload the dominantTris SSBOs the derive pass reads. Kept separate from the weight-buffer upload
-above (and independently guarded) so it can be reached even when those are already resident —
-otherwise the validation harness, which may run with r_gpuSkinning off, would silently measure the
-old bind-TBN pipeline. Optional: a mesh without dominantTris (or a failed upload) keeps the
-LBS-rotated bind TBN the position kernel writes, which is what shipped before.
-====================
-*/
-void idMD5Mesh::UploadDomBuffers( void ) {
-	rhi::RHI *r = rhi::GetRHI();
-	if ( !r || skinGpuDomIdx || numOutputVerts <= 0 ) {
-		return;
-	}
-	if ( skinDomIdx && skinDomScale ) {
-		skinGpuDomIdx   = r->CreateBuffer( rhi::BU_STORAGE, numOutputVerts * 2 * (int)sizeof( unsigned int ), skinDomIdx );
-		skinGpuDomScale = r->CreateBuffer( rhi::BU_STORAGE, numOutputVerts * 4 * (int)sizeof( float ), skinDomScale );
-		if ( !skinGpuDomIdx || !skinGpuDomScale ) {
-			if ( skinGpuDomIdx )   { r->DestroyBuffer( skinGpuDomIdx ); }
-			if ( skinGpuDomScale ) { r->DestroyBuffer( skinGpuDomScale ); }
-			skinGpuDomIdx = skinGpuDomScale = 0;
-		}
-	}
 }
 
 /*
@@ -788,8 +677,7 @@ static idDrawVert *R_MD5_GpuSkinRunOnce(
 		rhi::RHI *r, const char *label, rhi::BufferUsage outUsage, rhi::ShaderHandle shader,
 		int numOut, int numJoints, const idDrawVert *seed, const struct srfTriangles_s *cpuRef,
 		rhi::BufferHandle bJoints, rhi::BufferHandle bWeights, rhi::BufferHandle bWDesc,
-		rhi::BufferHandle bWStart, rhi::BufferHandle bTBN,
-		rhi::ShaderHandle deriveShader, rhi::BufferHandle bDomIdx, rhi::BufferHandle bDomScale ) {
+		rhi::BufferHandle bWStart, rhi::BufferHandle bTBN ) {
 	rhi::BufferHandle bOut = r->CreateBuffer( outUsage, numOut * (int)sizeof( idDrawVert ), seed );
 	if ( bOut == 0 ) {
 		common->Printf( "gpuSkin[%s]: out-buffer alloc failed\n", label );
@@ -805,19 +693,6 @@ static idDrawVert *R_MD5_GpuSkinRunOnce(
 	ca.pushConstantSize = (int)sizeof( pc );
 	ca.groupsX = ( numOut + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
 	r->DispatchSync( ca );
-
-	// second pass, exactly as the render path sequences it — the harness must measure the same
-	// pipeline the frame draws, or it reports on a configuration that no longer ships.
-	if ( deriveShader && bDomIdx && bDomScale ) {
-		struct { unsigned int numVerts; } dpc = { (unsigned int)numOut };
-		rhi::ComputeArgs da = {};
-		da.shader = deriveShader;
-		da.storage[0] = bOut; da.storage[1] = bDomIdx; da.storage[2] = bDomScale;
-		da.pushConstants = &dpc;
-		da.pushConstantSize = (int)sizeof( dpc );
-		da.groupsX = ( numOut + 63 ) / 64; da.groupsY = 1; da.groupsZ = 1;
-		r->DispatchSync( da );
-	}
 
 	idDrawVert *out = (idDrawVert *)Mem_Alloc16( numOut * sizeof( idDrawVert ) );
 	const bool ok = r->ReadBuffer( bOut, out, numOut * (int)sizeof( idDrawVert ) );
@@ -914,16 +789,11 @@ void idMD5Mesh::GpuSkinValidate( const idJointMat *entJoints, const struct srfTr
 	rhi::BufferHandle bWDesc   = r->CreateBuffer( rhi::BU_STORAGE, E * 2 * (int)sizeof( int ), skinExpandWDesc );
 	rhi::BufferHandle bWStart  = r->CreateBuffer( rhi::BU_STORAGE, numOut * (int)sizeof( unsigned int ), skinWeightStart );
 	rhi::BufferHandle bTBN     = r->CreateBuffer( rhi::BU_STORAGE, E * 3 * (int)sizeof( idVec4 ), skinExpandLocalTBN );
-	// the derive pass reuses the model's dominantTris SSBOs (read-only); ensure they exist even
-	// when this harness runs with r_gpuSkinning off and nothing else has uploaded them
-	UploadDomBuffers();
-	const rhi::ShaderHandle deriveShader = r_gpuSkinDerive.GetBool() ? R_MD5_DeriveShader( r ) : 0;
 
 	if ( bJoints && bWeights && bWDesc && bWStart && bTBN ) {
 		// Control: skin into a BU_STORAGE buffer (the proven Phase-1 readback path).
 		idDrawVert *outStorage = R_MD5_GpuSkinRunOnce( r, "storage", rhi::BU_STORAGE, r_md5SkinShader,
-			numOut, numJoints, skinTemplate, ref, bJoints, bWeights, bWDesc, bWStart, bTBN,
-			deriveShader, skinGpuDomIdx, skinGpuDomScale );
+			numOut, numJoints, skinTemplate, ref, bJoints, bWeights, bWDesc, bWStart, bTBN );
 
 		// SAFE ISOLATION TEST: skin into a BU_SKIN buffer — the exact memory type the render path
 		// uses (STORAGE|VERTEX, host-visible write-combined). Compute writes it, we read it back on
@@ -932,8 +802,7 @@ void idMD5Mesh::GpuSkinValidate( const idJointMat *entJoints, const struct srfTr
 		// the device-lost bug lives in the DRAW/vertex-fetch path (barrier / cross-frame / async).
 		// If it diverges, the BU_SKIN buffer's memory or usage is itself the culprit.
 		idDrawVert *outSkin = R_MD5_GpuSkinRunOnce( r, "skin", rhi::BU_SKIN, r_md5SkinShader,
-			numOut, numJoints, skinTemplate, ref, bJoints, bWeights, bWDesc, bWStart, bTBN,
-			deriveShader, skinGpuDomIdx, skinGpuDomScale );
+			numOut, numJoints, skinTemplate, ref, bJoints, bWeights, bWDesc, bWStart, bTBN );
 
 		if ( outStorage && outSkin ) {
 			float maxDelta = 0.0f;
@@ -947,36 +816,6 @@ void idMD5Mesh::GpuSkinValidate( const idJointMat *entJoints, const struct srfTr
 			                maxDelta, nDiff, numOut,
 			                nDiff == 0 ? "IDENTICAL (BU_SKIN compute-write CORRECT; device-lost bug is in the DRAW path)"
 			                           : "DIVERGENT (BU_SKIN memory/usage is the bug)" );
-		}
-
-		// KERNEL SELF-CHECK. Isolates the derive kernel's arithmetic from every other variable by
-		// re-deriving on the CPU from the GPU's OWN read-back positions and diffing against what the
-		// GPU wrote. Unlike the numbers above it cannot be perturbed by pose lag or by any difference
-		// in the skinned positions themselves — it answers only "is the ported math right".
-		if ( outStorage && deformInfo && deformInfo->dominantTris ) {
-			idDrawVert *chk = (idDrawVert *)Mem_Alloc16( numOut * sizeof( idDrawVert ) );
-			memcpy( chk, outStorage, numOut * sizeof( idDrawVert ) );
-			R_MD5_DeriveUnsmoothedRef( chk, deformInfo->dominantTris, numOut );
-
-			double nMax = 0.0, nSum = 0.0, tMax = 0.0;
-			int bad = 0;
-			for ( int i = 0; i < numOut; i++ ) {
-				idVec3 n = chk[i].normal, gn = outStorage[i].normal;
-				idVec3 t = chk[i].tangents[0], gt = outStorage[i].tangents[0];
-				n.Normalize(); t.Normalize(); gn.Normalize(); gt.Normalize();
-				float d = n * gn;
-				d = d < -1.0f ? -1.0f : ( d > 1.0f ? 1.0f : d );
-				const double ang = RAD2DEG( idMath::ACos( d ) );
-				nSum += ang; if ( ang > nMax ) { nMax = ang; }
-				if ( ang > 1.0 ) { bad++; }
-				float dtan = t * gt;
-				dtan = dtan < -1.0f ? -1.0f : ( dtan > 1.0f ? 1.0f : dtan );
-				const double at = RAD2DEG( idMath::ACos( dtan ) );
-				if ( at > tMax ) { tMax = at; }
-			}
-			Mem_Free16( chk );
-			common->Printf( "gpuSkin[kernel]: derive vs CPU-recomputed-from-GPU-positions -- normal avg %.3f max %.3f (%d/%d verts >1deg) | tangent max %.3f\n",
-			                nSum / numOut, nMax, bad, numOut, tMax );
 		}
 
 		// SEAM-SPLIT DIAGNOSTIC (the tessellation crack question). PN tessellation tears wherever
@@ -1183,9 +1022,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			                      ? ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] : 1.0f;
 			RB_RHI_AddSkinJob( skinShader, tri->gpuSkinVB, numOut,
 			                   skinGpuWeights, skinGpuWDesc, skinGpuWStart, skinGpuLocalTBN,
-			                   jointSnap, numJoints, skinScale,
-			                   r_gpuSkinDerive.GetBool() ? R_MD5_DeriveShader( rhi::GetRHI() ) : 0,
-			                   skinGpuDomIdx, skinGpuDomScale );
+			                   jointSnap, numJoints, skinScale );
 		}
 	}
 

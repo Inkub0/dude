@@ -178,11 +178,6 @@ private:
 	idVec4 *					skinExpandLocalTBN;	// [E*3] joint-local bind N,T0,T1 for the OWNING output vert
 	idDrawVert *				skinTemplate;		// [numOutputVerts] static st/color the kernel preserves
 
-	// dominantTris repacked for the GPU derive pass (the port of R_DeriveUnsmoothedTangents).
-	// deformInfo->dominantTris is allocated after mirror duplication, so it indexes 1:1 with the
-	// skin output. Static per model; NULL when the mesh carries no dominantTris.
-	unsigned int *				skinDomIdx;			// [numOutputVerts*2] {v2, v3}
-	float *						skinDomScale;		// [numOutputVerts*4] {ns0, ns1, ns2, pad}
 
 	// per-mesh static SSBOs (rhi::BufferHandle; 0 = not uploaded), shared by all entities using
 	// this model, uploaded once on the first GPU skin. The per-entity output + joints buffers
@@ -191,13 +186,10 @@ private:
 	unsigned int				skinGpuWDesc;
 	unsigned int				skinGpuWStart;
 	unsigned int				skinGpuLocalTBN;
-	unsigned int				skinGpuDomIdx;
-	unsigned int				skinGpuDomScale;
 
 	void						BuildGpuSkinData( const idJointMat *bindJoints );
 	void						FreeGpuSkinData( void );
 	bool						EnsureSkinBuffersUploaded( void );
-	void						UploadDomBuffers( void );
 	void						GpuSkinValidate( const idJointMat *entJoints, const struct srfTriangles_s *cpuRef );
 
 	void						TransformVerts( idDrawVert *verts, const idJointMat *joints );
