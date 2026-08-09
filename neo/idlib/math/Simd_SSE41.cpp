@@ -36,7 +36,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "idlib/math/Simd_SSE41.h"
 
-#if defined(__GNUC__) && defined(__SSE4_1__)
+#if defined(__GNUC__) && defined(D3_HAS_SIMD_SSE41)
 
 #include <smmintrin.h>
 

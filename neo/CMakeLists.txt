@@ -479,18 +479,26 @@ if(D3_COMPILER_IS_GCC_OR_CLANG)
 	if(NOT CMAKE_CROSSCOMPILING AND ONATIVE)
 		add_compile_options(-march=native)
 	elseif(NOT APPLE AND cpu STREQUAL "x86")
-		if(SSE41)
-			# same baseline as x86_64 below, so a 32 bit build keeps idSIMD_SSE41
-			# instead of falling back to the MMX & SSE processor. Pass -DSSE41=OFF
-			# to restore the old pentium3 floor for genuinely ancient hardware.
-			add_compile_options(-march=pentium4 -msse3 -mssse3 -msse4.1)
-		else()
-			add_compile_options(-march=pentium3)
-		endif()
+		# Pentium 4 (SSE2, 2000+) is the 32 bit floor. SSE4.1 is NOT part of the
+		# baseline here - it is confined to Simd_SSE41.cpp below and reached only
+		# through the CPUID dispatch in idSIMD::Init(), so the binary still boots
+		# on a P4 while modern CPUs get the fast processor.
+		add_compile_options(-march=pentium4)
 	elseif(SSE41 AND cpu STREQUAL "x86_64")
 		# raise the x86_64 baseline from SSE2 to SSE4.1 (Intel Penryn 2008+ / AMD Bulldozer 2011+)
 		# so the compiler can autovectorize with the newer instructions engine-wide
 		add_compile_options(-msse3 -mssse3 -msse4.1)
+	endif()
+
+	# idSIMD_SSE41 is picked at runtime by CPUID, so its implementation only needs
+	# the SSE4.1 target on its own translation unit. x86_64 already has it engine
+	# wide (above); x86 gets it per file so the baseline can stay at Pentium 4.
+	if(SSE41 AND (cpu STREQUAL "x86" OR cpu STREQUAL "x86_64"))
+		add_definitions(-DD3_HAS_SIMD_SSE41=1)
+		# also set on x86_64, where it is a harmless restatement of the global flags
+		# (and the safety net for an -DONATIVE=ON build on a pre-SSE4.1 CPU)
+		set_source_files_properties(idlib/math/Simd_SSE41.cpp PROPERTIES
+			COMPILE_OPTIONS "-msse3;-mssse3;-msse4.1")
 	endif()
 
 	if(FORCE_COLORED_OUTPUT)

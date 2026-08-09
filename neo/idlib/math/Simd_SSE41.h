@@ -48,7 +48,7 @@ If you have questions concerning this license or the applicable additional terms
 
 class idSIMD_SSE41 : public idSIMD_SSE3 {
 public:
-#if defined(__GNUC__) && defined(__SSE4_1__)
+#if defined(__GNUC__) && defined(D3_HAS_SIMD_SSE41)
 	virtual const char * VPCALL GetName( void ) const;
 
 	virtual void VPCALL ConvertJointQuatsToJointMats( idJointMat *jointMats, const idJointQuat *jointQuats, const int numJoints );
