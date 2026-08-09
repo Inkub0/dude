@@ -848,6 +848,32 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 		shadowGen = SG_STATIC;
 	}
 
+	// Phase 0 (r_shadowMapSkipStencilBuild): a CPU stencil shadow volume is only ever DRAWN
+	// when the light falls back to stencil — shadow mapping off, or an oversize "sun" light
+	// above r_shadowMapStencilRadius (this mirrors the backend technique routing in
+	// RB_RHI_DrawWorld). When the light is instead shadow-MAPPED, the volume built below is
+	// never drawn — the caster (world geometry OR an animated model, alike) instead casts
+	// through vLight->shadowMapCasters (built from ambientTris in AddActiveInteraction), so
+	// its stencil volume is pure waste. The dominant cost is world casters whose interaction
+	// is rebuilt every frame because their LIGHT moved (a projectile/flicker), so this gates
+	// every caster, not just animated ones. A cached interaction that skips its build here
+	// goes stale if the technique routing changes, so BeginFrame FreeInteractions() on a
+	// change to r_shadowMapping / r_shadowMapStencilRadius / r_shadowMapSkipStencilBuild.
+	bool skipStencilBuild = false;
+	if ( r_shadowMapSkipStencilBuild.GetBool() && r_shadowMapping.GetBool() ) {
+		const float smStencilRadius = r_shadowMapStencilRadius.GetFloat();
+		const idVec3 &lr = lightDef->parms.lightRadius;
+		float lightMaxAxis = lr.x;
+		if ( lr.y > lightMaxAxis ) { lightMaxAxis = lr.y; }
+		if ( lr.z > lightMaxAxis ) { lightMaxAxis = lr.z; }
+		// the player flashlight trips the oversize radius (flashRadius 400) but is exempted
+		// backend-side so it takes the 2D-map path — mirror that exemption here.
+		const bool isFlashlight = lightShader
+			&& idStr::FindText( lightShader->GetName(), "flashlight", false ) != -1;
+		const bool oversize = smStencilRadius > 0.0f && lightMaxAxis > smStencilRadius && !isFlashlight;
+		skipStencilBuild = !oversize;		// shadow-mapped (not oversize) -> the volume is never drawn
+	}
+
 	//
 	// create slots for each of the model's surfaces
 	//
@@ -912,17 +938,27 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 			// if the light has an optimized shadow volume, don't create shadows for any models that are part of the base areas
 			if ( lightDef->parms.prelightModel == NULL || !model->IsStaticWorldModel() || !r_useOptimizedShadows.GetBool() ) {
 
-				// this is the only place during gameplay (outside the utilities) that R_CreateShadowVolume() is called
-				sint->shadowTris = R_CreateShadowVolume( entityDef, tri, lightDef, shadowGen, sint->cullInfo );
-				if ( sint->shadowTris ) {
-					if ( shader->Coverage() != MC_OPAQUE || ( !r_skipSuppress.GetBool() && entityDef->parms.suppressSurfaceInViewID ) ) {
-						// if any surface is a shadow-casting perforated or translucent surface, or the
-						// base surface is suppressed in the view (world weapon shadows) we can't use
-						// the external shadow optimizations because we can see through some of the faces
-						sint->shadowTris->numShadowIndexesNoCaps = sint->shadowTris->numIndexes;
-						sint->shadowTris->numShadowIndexesNoFrontCaps = sint->shadowTris->numIndexes;
+				// Phase 0: skip the stencil volume build when this light will be shadow-MAPPED
+				// (skipStencilBuild, computed above) — it would be rebuilt every frame and never
+				// drawn. sint->shadowTris stays NULL, so the link/upload in AddActiveInteraction
+				// is skipped too; the shadow-map caster path handles the shadow.
+				if ( !skipStencilBuild ) {
+					// this is the only place during gameplay (outside the utilities) that R_CreateShadowVolume() is called
+					sint->shadowTris = R_CreateShadowVolume( entityDef, tri, lightDef, shadowGen, sint->cullInfo );
+					if ( sint->shadowTris ) {
+						if ( shader->Coverage() != MC_OPAQUE || ( !r_skipSuppress.GetBool() && entityDef->parms.suppressSurfaceInViewID ) ) {
+							// if any surface is a shadow-casting perforated or translucent surface, or the
+							// base surface is suppressed in the view (world weapon shadows) we can't use
+							// the external shadow optimizations because we can see through some of the faces
+							sint->shadowTris->numShadowIndexesNoCaps = sint->shadowTris->numIndexes;
+							sint->shadowTris->numShadowIndexesNoFrontCaps = sint->shadowTris->numIndexes;
+						}
 					}
+				} else {
+					tr.pc.c_shadowVolumesSkipped++;		// Phase 0 diagnostic (shadowVol/s)
 				}
+				// count the interaction as generated even when the volume was skipped, so a
+				// shadow-only caster surface isn't dropped (MakeEmpty) — it still shadow-maps.
 				interactionGenerated = true;
 			}
 		}

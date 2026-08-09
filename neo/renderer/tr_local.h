@@ -584,6 +584,7 @@ typedef struct {
 	int		c_createInteractions;	// number of calls to idInteraction::CreateInteraction
 	int		c_createLightTris;
 	int		c_createShadowVolumes;
+	int		c_shadowVolumesSkipped;	// Phase 0: builds skipped because the light will be shadow-mapped (r_shadowMapSkipStencilBuild)
 	int		c_generateMd5;
 	int		c_entityDefCallbacks;
 	int		c_alloc, c_free;	// counts for R_StaticAllc/R_StaticFree
@@ -954,6 +955,7 @@ extern idCVar r_shadowMapCacheMB;			// VRAM budget for the shadow-map cache (MB;
 extern idCVar r_shadowMapBudgetHysteresis;	// point-light budget stickiness (percent score bonus for recent incumbents)
 extern idCVar r_shadowMapMaxUpdates;		// max cached cube maps re-rendered per view (stagger update bursts; 0 = unlimited)
 extern idCVar r_shadowMapStencilRadius;		// lights bigger than this (max radius axis) fall back to stencil shadows
+extern idCVar r_shadowMapSkipStencilBuild;	// skip building CPU stencil volumes for animated casters under shadow-mapped lights
 
 // DUDE: emissive fill lights for interactive GUI screens (enhancement backends only)
 extern idCVar r_emissiveSurfaces;		// master toggle (emissive surfaces cast fill light)
