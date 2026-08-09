@@ -1000,6 +1000,8 @@ extern idCVar r_tessDebug;				// log each material name accepted for tessellatio
 
 // DUDE: GPU MD5 skinning via the compute lane (Vulkan only; docs/gpu-offload-plan.md Phase 2)
 extern idCVar r_gpuSkinning;			// skin animated meshes on the GPU (option-B TBN; off = faithful CPU skin)
+extern idCVar r_gpuSkinProfile;			// dev: size the Milestone-C prize (skinned-surface derive + ambient upload)
+void R_GpuSkinProfileAddDerive( double ms );	// accumulate one skinned-surface tangent-derive time (impl tr_light.cpp)
 
 // DUDE: baked ambient-occlusion (occlusion) maps (enhancement backends only; docs/occlusion-maps.md)
 extern idCVar r_occlusionMaps;			// master toggle: use per-material baked AO maps

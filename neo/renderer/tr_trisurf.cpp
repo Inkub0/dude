@@ -1792,7 +1792,15 @@ void R_DeriveTangents( srfTriangles_t *tri, bool allocFacePlanes ) {
 	idPlane			*planes;
 
 	if ( tri->dominantTris != NULL ) {
-		R_DeriveUnsmoothedTangents( tri );
+		// MD5 / deformed meshes take this path (they carry dominantTris). Time it for the GPU-skin
+		// profiler (r_gpuSkinProfile) so the Milestone-C prize is measured wherever the derive fires.
+		if ( tri->deformedSurface && r_gpuSkinProfile.GetBool() ) {
+			const double t0 = Sys_MillisecondsPrecise();
+			R_DeriveUnsmoothedTangents( tri );
+			R_GpuSkinProfileAddDerive( Sys_MillisecondsPrecise() - t0 );
+		} else {
+			R_DeriveUnsmoothedTangents( tri );
+		}
 		return;
 	}
 

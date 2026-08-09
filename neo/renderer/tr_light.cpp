@@ -54,15 +54,23 @@ VERTEX CACHE GENERATORS
 // sizes the Milestone-C prize before we take on the decal/deform/weld gating to actually skip it.
 // Pure instrumentation: zero behaviour change, prints per-frame averages once/sec. Use with
 // r_gpuSkinning 1 on Vulkan, in a heavy scene.
-static idCVar r_gpuSkinProfile( "r_gpuSkinProfile", "0", CVAR_RENDERER | CVAR_BOOL,
+idCVar r_gpuSkinProfile( "r_gpuSkinProfile", "0", CVAR_RENDERER | CVAR_BOOL,
 	"report the per-frame CPU ms in the skinned-surface tangent-derive + ambient upload (the Milestone-C prize); needs r_gpuSkinning on (Vulkan)" );
-static double s_skinDeriveMs = 0.0;		// summed R_DeriveTangents time on gpuSkinVB surfaces
+static double s_skinDeriveMs = 0.0;		// summed R_DeriveTangents time on deformed (skinned) surfaces
 static double s_skinUploadMs = 0.0;		// summed vertexCache.Alloc time on gpuSkinVB surfaces
 static int    s_skinDeriveSurfs = 0;	// # surfaces derived
 static int    s_skinUploadVerts = 0;	// # verts uploaded
 static int    s_skinProfFrames = 0;		// frames accumulated since last print
 static int    s_skinProfFrame = -1;		// last tr.frameCount seen (frame-edge detect)
 static double s_skinProfLastMs = 0.0;	// wall-clock of last print
+
+// Called from R_DeriveTangents (tr_trisurf.cpp) for each deformed-surface tangent derive, so the
+// profiler captures the real MD5 cost wherever it fires (the tess-weld path, the deferred ambient
+// path, etc.) rather than only the one call site R_CreateAmbientCache owns.
+void R_GpuSkinProfileAddDerive( double ms ) {
+	s_skinDeriveMs += ms;
+	s_skinDeriveSurfs++;
+}
 
 /*
 ==================
@@ -93,20 +101,14 @@ bool R_CreateAmbientCache( srfTriangles_t *tri, bool needsLighting ) {
 	if ( tri->ambientCache ) {
 		return true;
 	}
-	// time only the work a GPU-skinned surface would let us skip (derive + upload); gpuSkinVB is
-	// set by UpdateSurface before this runs, so it flags exactly the Milestone-C candidate surfaces.
+	// the tangent derive (the Milestone-C prize) is timed at its source in R_DeriveTangents so it is
+	// caught wherever it actually fires; here we only time the redundant ambient-cache upload for
+	// gpuSkinVB surfaces (the draw takes gpuSkinVB, so this uploaded copy is never drawn).
 	const bool prof = r_gpuSkinProfile.GetBool() && tri->gpuSkinVB;
 
 	// we are going to use it for drawing, so make sure we have the tangents and normals
 	if ( needsLighting && !tri->tangentsCalculated ) {
-		if ( prof ) {
-			const double t0 = Sys_MillisecondsPrecise();
-			R_DeriveTangents( tri );
-			s_skinDeriveMs += Sys_MillisecondsPrecise() - t0;
-			s_skinDeriveSurfs++;
-		} else {
-			R_DeriveTangents( tri );
-		}
+		R_DeriveTangents( tri );
 	}
 
 	if ( prof ) {
