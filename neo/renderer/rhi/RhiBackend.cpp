@@ -2650,7 +2650,16 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		rhi::PipelineDesc pd;
 		pd.stateBits = ( pStage->drawStateBits & ~GLS_ATEST_BITS );
 		if ( !viewDef->viewEntitys ) {
-			pd.stateBits |= GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+			// 2D views (menu/console/HUD/loading): force depth-always. Clear any
+			// authored depth-func first -- a stage that carries GLS_DEPTHFUNC_EQUAL
+			// (e.g. the menu idlogo cinematic) would otherwise be left with BOTH
+			// the EQUAL and ALWAYS bits set, and the compare-op translation picks
+			// EQUAL (checked first), discarding every fragment against the 2D depth
+			// buffer -> the surface renders black. (In 3D the EQUAL is legit: the
+			// depth prepass gives it something to match, which is why the same
+			// videoMap materials play fine in-game.)
+			pd.stateBits = ( pd.stateBits & ~( GLS_DEPTHFUNC_EQUAL | GLS_DEPTHFUNC_ALWAYS ) )
+				| GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
 		}
 		// hell-time display: cr_draw's stock blend is gl_dst_alpha, but the trail already folds
 		// the sharp centre + edge zoom-trail, so draw it as an opaque replace of the clean-scene
