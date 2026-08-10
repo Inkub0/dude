@@ -310,12 +310,25 @@ via a per-frame-in-flight indirect-command ring (mirrors the geometry rings), a 
 whole-scene A/B. Current draw site: `vkCmdDrawIndexed` at `VulkanBackend.cpp` (was `:5557`, now in
 `BindForDraw`). *Additive, no-op default, OFF path byte-identical.*
 
-#### Phase 3.1+ — the cull pass (not started)
-Upload persistent per-object bounds + matrices + sort keys; a compute pass frustum/Hi-Z-culls and
-compacts a `VkDrawIndexedIndirectCommand[]` + count that Phase 3.0 consumes (add a `COMPUTE→DRAW_INDIRECT`
-barrier to `Dispatch`). Requires stable GPU-resident geometry keyed by a **persistent object index** —
-NOT yet present: `gpuSkinVB`/`tessDeformVB` are keyed by `srfTriangles` pointer and drawSurfs are
-frame-arena-rebuilt, so the object table is net-new. GL3 keeps the CPU cull permanently. **Payoff:**
+#### Phase 3.1 — the cull compute pass — ✅ VALIDATED PRIMITIVE (`r_gpuCullTest`, user-verified PASS)
+The GPU frustum-cull kernel (`cs_gpucull`, `tr_main.cpp`) is built and validated in isolation against the
+CPU `R_CullLocalBox`, the standalone-primitive-first pattern Phases 1/2 and deform-once each used.
+`r_gpuCullTest` (VK, once/sec, no draw): a deterministic synthetic object set is culled on the GPU —
+8 local AABB corners transformed by the id column-major `modelMatrix` (`mat4 * vec4(p,1)` == `R_LocalPointToGlobal`,
+no transpose), radius + corner reject with the exact `>=0`-is-outside sign convention and `r_useCulling`
+gating — and atomic-compacted into a `VkDrawIndexedIndirectCommand[]` + count. The harness diffs survivor
+**sets** against the actual renderer cull (so a wrong kernel can only FAIL), buckets straddle-box FP noise
+vs genuine divergences. User-verified `PASS` (2048 objs, CPU vis == GPU vis, 0 mismatch) across view angles.
+**Proves:** per-object table upload, cull-math parity, atomic compaction into the indirect buffer.
+
+#### Phase 3.2+ — wire the cull pass live (not started)
+Swap the synthetic set for a **persistent per-object table** built from `viewDef->viewEntitys × surfaces`
+(local bounds + `modelMatrix` + `tri->numIndexes`/`firstIndex`), add the `COMPUTE→DRAW_INDIRECT` barrier to
+`Dispatch` (`VulkanBackend.cpp:~3275` — widen `dstStageMask`/`dstAccessMask` with `DRAW_INDIRECT`/
+`INDIRECT_COMMAND_READ`), and consume the compacted buffer via `DrawIndexedIndirect` per pipeline/material
+bucket. The table wants stable GPU-resident geometry keyed by a persistent object index — `gpuSkinVB`/
+`tessDeformVB` are `srfTriangles`-pointer-keyed and drawSurfs are frame-arena-rebuilt, so the index/table is
+net-new. GL3 keeps the CPU cull permanently. **Payoff:**
 attacks the per-frame `R_CullLocalBox` sweep + scalar draw loop — but only raises fps when CPU-bound
 (weak GPU / high entity counts); on the RTX 3080 Ti the frame is GPU-bound, so this is architecture +
 CPU-bound-case relief, not fps here. **Risk:** high (persistent residency for a frame-arena renderer;
