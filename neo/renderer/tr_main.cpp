@@ -38,6 +38,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/RenderWorld_local.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/rhi/RHI.h"
 
 //====================================================================
 
@@ -679,6 +680,256 @@ bool R_CullLocalBox( const idBounds &bounds, const float modelMatrix[16], int nu
 }
 
 /*
+=================
+GPU frustum-cull validation (Phase 3.1 — docs/gpu-offload-plan.md)
+
+r_gpuCullTest: once/sec, frustum-cull a deterministic synthetic object set on the GPU
+compute lane and diff the survivor set against the CPU R_CullLocalBox reference, with NO
+draw. Validates the Phase-3 cull machinery in isolation — the per-object table upload, the
+cull-math parity (radius + corner, r_useCulling-gated so GPU==CPU under every mode), and
+atomic compaction into a VkDrawIndexedIndirectCommand[] + count — before any of it is wired
+into the live draw loop. Vulkan only (GL3 has no compute lane); mirrors r_gpuSkinTest /
+r_tessDeformTest. The model matrix is id column-major (basis vectors as columns, translation
+in [12..14]), which is exactly GLSL's mat4 convention, so `m * vec4(p,1)` reproduces
+R_LocalPointToGlobal with NO transpose. idPlane test dot(pl.xyz,w)+pl.w == idPlane::Distance;
+positive side is OUT.
+=================
+*/
+static idCVar r_gpuCullTest( "r_gpuCullTest", "0", CVAR_RENDERER | CVAR_BOOL,
+	"validate GPU frustum cull vs CPU R_CullLocalBox over a synthetic object set, no draw (Vulkan; once/sec)" );
+
+static const char *GPUCULL_SRC =
+	"#version 450\n"
+	"layout(local_size_x = 64) in;\n"
+	"struct Obj { vec4 bmin; vec4 bmax; mat4 model; };\n"
+	"layout(std430, binding=0) readonly  buffer Objects  { Obj  objs[]; };\n"
+	"layout(std430, binding=1) readonly  buffer Frustum  { vec4 planes[]; };\n"
+	"layout(std430, binding=2) writeonly buffer OutCmds  { uint cmds[]; };\n"		// 5 uints/survivor = VkDrawIndexedIndirectCommand
+	"layout(std430, binding=3)           buffer OutCount { uint count; };\n"
+	"layout(std430, binding=4) readonly  buffer DrawParm { uvec2 dp[]; };\n"		// (indexCount, firstIndex==objIndex)
+	"layout(push_constant) uniform PC { uint numObjects; uint numPlanes; uint useCulling; uint pad; } pc;\n"
+	"void main() {\n"
+	"    uint i = gl_GlobalInvocationID.x;\n"
+	"    if ( i >= pc.numObjects ) return;\n"
+	"    Obj o = objs[i];\n"
+	"    vec3 mn = o.bmin.xyz, mx = o.bmax.xyz;\n"
+	"    bool culled = false;\n"
+	"    if ( pc.useCulling >= 1u ) {\n"							// R_RadiusCullLocalBox
+	"        vec3 lc = (mn + mx) * 0.5;\n"
+	"        vec3 wc = (o.model * vec4(lc,1.0)).xyz;\n"
+	"        float rad = length(mn - lc);\n"
+	"        for ( uint p = 0u; p < pc.numPlanes; p++ )\n"
+	"            if ( dot(planes[p].xyz, wc) + planes[p].w > rad ) { culled = true; break; }\n"
+	"    }\n"
+	"    if ( !culled && pc.useCulling >= 2u ) {\n"					// R_CornerCullLocalBox
+	"        vec3 cw[8];\n"
+	"        for ( uint k = 0u; k < 8u; k++ ) {\n"
+	"            vec3 lp = vec3( ((k&1u)!=0u)?mx.x:mn.x, ((k&2u)!=0u)?mx.y:mn.y, ((k&4u)!=0u)?mx.z:mn.z );\n"
+	"            cw[k] = (o.model * vec4(lp,1.0)).xyz;\n"
+	"        }\n"
+	"        for ( uint p = 0u; p < pc.numPlanes; p++ ) {\n"
+	"            bool allOut = true;\n"
+	"            for ( uint k = 0u; k < 8u; k++ )\n"
+	"                if ( dot(planes[p].xyz, cw[k]) + planes[p].w < 0.0 ) { allOut = false; break; }\n"
+	"            if ( allOut ) { culled = true; break; }\n"
+	"        }\n"
+	"    }\n"
+	"    if ( !culled ) {\n"
+	"        uint s = atomicAdd(count, 1u) * 5u;\n"
+	"        cmds[s+0u] = dp[i].x;\n"			// indexCount
+	"        cmds[s+1u] = 1u;\n"				// instanceCount
+	"        cmds[s+2u] = dp[i].y;\n"			// firstIndex == object index (survivor tag)
+	"        cmds[s+3u] = 0u;\n"				// vertexOffset
+	"        cmds[s+4u] = 0u;\n"				// firstInstance
+	"    }\n"
+	"}\n";
+
+static rhi::ShaderHandle R_GpuCullShader( rhi::RHI *r ) {
+	static rhi::ShaderHandle handle = 0;
+	static bool tried = false;
+	if ( !tried ) {
+		tried = true;
+		handle = r->CreateComputeShader( "cs_gpucull", GPUCULL_SRC );
+	}
+	return handle;
+}
+
+static void R_GpuCullValidate( void ) {
+	if ( !r_gpuCullTest.GetBool() || tr.viewDef == NULL || tr.viewDef->viewEntitys == NULL ) {
+		return;
+	}
+	static int s_lastMs = 0;
+	const int now = Sys_Milliseconds();
+	if ( now - s_lastMs < 1000 ) {
+		return;						// DispatchSync stalls; dev-only, rate-limited like the other validators
+	}
+	s_lastMs = now;
+
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r == NULL ) {
+		return;
+	}
+	rhi::ShaderHandle shader = R_GpuCullShader( r );
+	if ( shader == 0 ) {
+		common->Printf( "r_gpuCullTest: no compute lane (GL3) - Vulkan only\n" );
+		r_gpuCullTest.SetBool( false );
+		return;
+	}
+
+	const int N = 2048;
+	const int NP = 5;					// the view path uses viewDef->frustum[5]
+	const idVec3 vieworg = tr.viewDef->renderView.vieworg;
+	const idBounds localBounds( idVec3( -16.0f, -16.0f, -16.0f ), idVec3( 16.0f, 16.0f, 16.0f ) );
+
+	// vec4 bmin, vec4 bmax, mat4 model (std430 struct Obj = 96 B); a parallel matAll[] feeds the CPU ref
+	float *objBlob = (float *)Mem_Alloc16( N * 24 * (int)sizeof( float ) );
+	unsigned int *dpBlob = (unsigned int *)Mem_Alloc16( N * 2 * (int)sizeof( unsigned int ) );
+	float *matAll = (float *)Mem_Alloc16( N * 16 * (int)sizeof( float ) );
+
+	unsigned int rng = 2463534242u;		// deterministic xorshift — reproducible object set
+	for ( int i = 0; i < N; i++ ) {
+		float f[6];
+		for ( int j = 0; j < 6; j++ ) {
+			rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+			f[j] = ( ( rng >> 8 ) & 0xFFFFFF ) / (float)0x1000000;	// [0,1)
+		}
+		idVec3 origin( vieworg[0] + ( f[0] * 2.0f - 1.0f ) * 600.0f,
+		               vieworg[1] + ( f[1] * 2.0f - 1.0f ) * 600.0f,
+		               vieworg[2] + ( f[2] * 2.0f - 1.0f ) * 600.0f );
+		idAngles ang( ( f[3] * 2.0f - 1.0f ) * 180.0f, ( f[4] * 2.0f - 1.0f ) * 180.0f, ( f[5] * 2.0f - 1.0f ) * 180.0f );
+		float *m = matAll + i * 16;
+		R_AxisToModelMatrix( ang.ToMat3(), origin, m );
+
+		float *o = objBlob + i * 24;
+		o[0] = localBounds[0][0]; o[1] = localBounds[0][1]; o[2] = localBounds[0][2]; o[3] = 0.0f;
+		o[4] = localBounds[1][0]; o[5] = localBounds[1][1]; o[6] = localBounds[1][2]; o[7] = 0.0f;
+		for ( int k = 0; k < 16; k++ ) {
+			o[8 + k] = m[k];
+		}
+		dpBlob[i * 2 + 0] = (unsigned int)( i * 3 );	// placeholder indexCount (draw params are a later increment)
+		dpBlob[i * 2 + 1] = (unsigned int)i;			// firstIndex doubles as the survivor tag
+	}
+
+	// CPU reference: the actual renderer cull over the same objects + live view frustum
+	bool *cpuVis = (bool *)Mem_Alloc16( N * (int)sizeof( bool ) );
+	int cpuVisCount = 0;
+	for ( int i = 0; i < N; i++ ) {
+		cpuVis[i] = !R_CullLocalBox( localBounds, matAll + i * 16, NP, tr.viewDef->frustum );
+		if ( cpuVis[i] ) {
+			cpuVisCount++;
+		}
+	}
+
+	rhi::BufferHandle bObjs  = r->CreateBuffer( rhi::BU_STORAGE, N * 24 * (int)sizeof( float ), objBlob );
+	rhi::BufferHandle bFrust = r->CreateBuffer( rhi::BU_STORAGE, NP * 4 * (int)sizeof( float ), tr.viewDef->frustum );
+	rhi::BufferHandle bCmds  = r->CreateBuffer( rhi::BU_STORAGE, N * 5 * (int)sizeof( unsigned int ), NULL );
+	unsigned int zero = 0;
+	rhi::BufferHandle bCount = r->CreateBuffer( rhi::BU_STORAGE, (int)sizeof( unsigned int ), &zero );
+	rhi::BufferHandle bDP    = r->CreateBuffer( rhi::BU_STORAGE, N * 2 * (int)sizeof( unsigned int ), dpBlob );
+
+	struct { unsigned int numObjects, numPlanes, useCulling, pad; } pc;
+	pc.numObjects = (unsigned int)N;
+	pc.numPlanes  = (unsigned int)NP;
+	pc.useCulling = (unsigned int)r_useCulling.GetInteger();
+	pc.pad = 0;
+
+	rhi::ComputeArgs ca;
+	memset( &ca, 0, sizeof( ca ) );
+	ca.shader = shader;
+	ca.storage[0] = bObjs;
+	ca.storage[1] = bFrust;
+	ca.storage[2] = bCmds;
+	ca.storage[3] = bCount;
+	ca.storage[4] = bDP;
+	ca.pushConstants = &pc;
+	ca.pushConstantSize = (int)sizeof( pc );
+	ca.groupsX = ( N + 63 ) / 64;
+	ca.groupsY = 1;
+	ca.groupsZ = 1;
+	r->DispatchSync( ca );
+
+	unsigned int gpuCount = 0;
+	r->ReadBuffer( bCount, &gpuCount, (int)sizeof( unsigned int ) );
+	if ( (int)gpuCount > N ) {
+		gpuCount = (unsigned int)N;
+	}
+	unsigned int *cmds = (unsigned int *)Mem_Alloc16( N * 5 * (int)sizeof( unsigned int ) );
+	r->ReadBuffer( bCmds, cmds, N * 5 * (int)sizeof( unsigned int ) );
+
+	// GPU survivor set keyed by the firstIndex tag (== object index); atomic order is nondeterministic
+	bool *gpuVis = (bool *)Mem_Alloc16( N * (int)sizeof( bool ) );
+	memset( gpuVis, 0, N * (int)sizeof( bool ) );
+	int badTag = 0;
+	for ( unsigned int c = 0; c < gpuCount; c++ ) {
+		unsigned int idx = cmds[c * 5 + 2];
+		if ( (int)idx < N ) {
+			gpuVis[idx] = true;
+		} else {
+			badTag++;
+		}
+	}
+
+	// Classify each disagreement: a box straddling a frustum plane (a corner within an epsilon
+	// of dist==0) can legitimately flip between the CPU SSE path and the GPU's IEEE floats — that
+	// is FP boundary noise, not a logic bug. A mismatch whose corner-cull margin is NOT near zero
+	// is a genuine divergence. The cull decision reduces to the corner test (radius-cull is a
+	// conservative subset), so |cornerMargin| ~ 0 is the decision boundary.
+	int mismatch = 0, boundary = 0, genuine = 0, firstGenuine = -1;
+	for ( int i = 0; i < N; i++ ) {
+		if ( gpuVis[i] == cpuVis[i] ) {
+			continue;
+		}
+		mismatch++;
+		const float *m = matAll + i * 16;
+		float cornerMargin = -1e30f;			// max over planes of ( min over corners of Distance )
+		for ( int p = 0; p < NP; p++ ) {
+			const idPlane &pl = tr.viewDef->frustum[p];
+			float minCorner = 1e30f;
+			for ( int k = 0; k < 8; k++ ) {
+				idVec3 lv( ( k & 1 ) ? localBounds[1][0] : localBounds[0][0],
+				           ( k & 2 ) ? localBounds[1][1] : localBounds[0][1],
+				           ( k & 4 ) ? localBounds[1][2] : localBounds[0][2] );
+				idVec3 wv;
+				R_LocalPointToGlobal( m, lv, wv );
+				const float d = pl.Distance( wv );
+				if ( d < minCorner ) {
+					minCorner = d;
+				}
+			}
+			if ( minCorner > cornerMargin ) {
+				cornerMargin = minCorner;
+			}
+		}
+		if ( idMath::Fabs( cornerMargin ) < 0.05f ) {
+			boundary++;
+		} else {
+			genuine++;
+			if ( firstGenuine < 0 ) {
+				firstGenuine = i;
+			}
+		}
+	}
+
+	common->Printf( "r_gpuCullTest: %d objs, r_useCulling %d, CPU vis %d, GPU vis %u -- %s "
+		"(mismatch %d = %d boundary-FP + %d genuine, first genuine @%d, badTag %d)\n",
+		N, r_useCulling.GetInteger(), cpuVisCount, gpuCount,
+		( genuine == 0 && badTag == 0 ) ? "PASS" : "FAIL",
+		mismatch, boundary, genuine, firstGenuine, badTag );
+
+	r->DestroyBuffer( bObjs );
+	r->DestroyBuffer( bFrust );
+	r->DestroyBuffer( bCmds );
+	r->DestroyBuffer( bCount );
+	r->DestroyBuffer( bDP );
+	Mem_Free16( objBlob );
+	Mem_Free16( dpBlob );
+	Mem_Free16( matAll );
+	Mem_Free16( cpuVis );
+	Mem_Free16( gpuVis );
+	Mem_Free16( cmds );
+}
+
+/*
 ==========================
 R_TransformModelToClip
 ==========================
@@ -1134,6 +1385,11 @@ void R_RenderView( viewDef_t *parms ) {
 	// adds ambient surfaces and create any necessary interaction surfaces to add to the light
 	// lists
 	R_AddModelSurfaces();
+
+	// Phase 3.1 GPU cull validation (r_gpuCullTest): once/sec, frustum-cull a synthetic object
+	// set on the GPU and diff against R_CullLocalBox. No draw; front-end (tr.viewDef live, no
+	// backend pass open, so DispatchSync is safe). Vulkan only; self-gates when off.
+	R_GpuCullValidate();
 
 	// any viewLight that didn't have visible surfaces can have it's shadows removed
 	R_RemoveUnecessaryViewLights();
