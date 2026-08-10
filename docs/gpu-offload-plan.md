@@ -244,23 +244,49 @@ Retiring those means moving culling and shadow-volume construction to the GPU as
 and 4 — not flipping a flag. So "switch the CPU skinner off when GPU skinning is on" is not
 available: the front end is structurally position-dependent.
 
-**The TBN half is the redundant part — and it is the expensive half.** `TransformVerts` never
-touches normals; those come from `R_DeriveTangents` → `R_DeriveUnsmoothedTangents`
-(`tr_trisurf.cpp:1794`), a per-vertex `dominantTris` walk with three cross products and three
-normalizes, duplicated wholesale by the compute kernel and then discarded. Two things can go:
+**The TBN half is the redundant part — but it is NOT the expensive half.** `TransformVerts` never
+touches normals; those come from `R_DeriveTangents`, which the compute kernel duplicates and the CPU
+then discards. The intuitive read is that this is the costly piece. **It is not, and the numbers are
+already in** (`r_gpuSkinProfile`, commits `73a18055` / `15cb84f9`, run in a 5-enemy fight):
 
-1. **The redundant ambient-cache upload.** `tr_light.cpp:134` allocates a fresh VK buffer and copies
-   every vertex, every frame, for a surface that rasterizes from `gpuSkinVB` instead — the copy is
-   never drawn. Already built as `r_gpuSkinNoUpload`, deliberately **off by default**: leaving
-   `ambientCache` NULL arms ~a dozen "has geometry?" gates, so it stays an A/B toggle until profiled.
-2. **The tangent derive.** Needs *per-surface gating*, not a flag. `tr_light.cpp:78` lists its
-   blockers as decals (`idRenderModelOverlay`), deform materials, and the tess weld. **The tess-weld
-   blocker is gone** — `r_tessWeldSeams` was superseded by the bake weld — leaving two conditions
-   that are both testable per surface (does this surface carry an overlay; does its material deform)
-   rather than globally true.
+| | per frame |
+| --- | --- |
+| skinned-surface tangent derive | **~0.007 ms** |
+| ambient-cache upload | **~0.025 ms** |
+| **total Milestone-C prize** | **~0.03 ms** — ~0.5% of a ~6 ms frame |
 
-`r_gpuSkinProfile` (`tr_light.cpp:57`) exists precisely to size this prize before the gating work —
-it prints per-frame derive + upload ms for skinned surfaces once/sec. **Not yet run.**
+The derive is cheap for a structural reason worth remembering: **MD5 meshes carry `dominantTris`**,
+so `R_DeriveTangents` early-returns at `tr_trisurf.cpp:1793` into `R_DeriveUnsmoothedTangents` —
+an O(verts) walk over precomputed per-vertex triangle references, *not* the general smoothed path
+with its face-plane build and per-vertex accumulation. Skinned meshes never take the expensive road.
+
+**And the bottleneck is elsewhere.** `com_speeds` on the RTX 3080 Ti in realistic combat: front-end
+`rf` ~0–1 ms, backend `bk` ~0 ms, GPU **8.75 ms**. At these enemy counts the engine is **GPU-bound**,
+so CPU→GPU skinning offload relieves a bottleneck that isn't there. Phase 2's "direct front-end
+relief" claim holds only in a CPU-bound scene, which this hardware does not produce at these counts.
+
+Given that, the two remaining pieces are architectural, not performance work:
+
+1. **The redundant ambient-cache upload — already SHIPPED** (`d07c005f`, `r_gpuSkinNoUpload`,
+   opt-in, default off). `tr_light.cpp:134` allocated a fresh VK buffer and copied every vertex every
+   frame for a surface that rasterizes from `gpuSkinVB` instead — never drawn. Leaving `ambientCache`
+   NULL meant patching ~14 sites (every "has geometry?" gate to accept `gpuSkinVB`, every
+   unconditional `Touch` null-guarded, plus `RB_RHI_CasterHash` keyed on `gpuSkinFrame` so animated
+   cube shadows still invalidate). Kept behind a cvar so the OFF path stays byte-for-byte unchanged.
+   Justified as RTX alignment — the GPU becomes the sole source of drawn geometry — not as fps.
+2. **The tangent derive — deliberately NOT done.** It needs *per-surface gating*, not a flag.
+   `tr_light.cpp:78` lists its blockers as decals (`idRenderModelOverlay`), deform materials, and the
+   tess weld. **The tess-weld blocker is now gone** — `r_tessWeldSeams` was superseded by the bake
+   weld — leaving two conditions that are both testable per surface. But at ~0.007 ms it buys
+   ~0.1% of a frame while risking decal regressions, so the user's standing decision is to leave it.
+
+**Where the real leverage went instead (RTX reframe).** GPU residency of skinned geometry — the thing
+animated BLAS needs — was already delivered by Milestone B (`gpuSkinVB`); Milestone C adds none. The
+forward step is device-local, acceleration-structure-ready geometry (`SHADER_DEVICE_ADDRESS` +
+AS-build-input usage; `gpuSkinVB` and the static VBOs are host-visible today) → BLAS (static built
+once, skinned refit per frame) → TLAS → ray-query shadows/AO. That also *deletes* the stencil
+shadow-volume consumer in the table above, which is one of the two things pinning the CPU position
+skin in place.
 
 ### Phase 3 — GPU-driven culling *(Vulkan-only; biggest relief, most architecture)*
 Add indirect draw to the RHI (`vkCmdDrawIndexedIndirect[Count]`, swapping `vkCmdDrawIndexed :5557`).

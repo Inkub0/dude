@@ -1000,9 +1000,11 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	//                        (tr_light.cpp:245) -- absent for shadow-mapped lights, present for stencil ones
 	//   - surface bounds     R_BoundTriSurf, just below
 	// Retiring it therefore needs culling + shadow-volume construction on the GPU too (docs/
-	// gpu-offload-plan.md Phases 3-4), not a flag. What GPU skinning CAN retire is the other half --
-	// the TBN, which this call never touches and R_DeriveTangents recomputes; see "Milestone C" in
-	// that doc for the two gateable pieces (the never-drawn ambient upload, and the derive itself).
+	// gpu-offload-plan.md Phases 3-4), not a flag. The other half -- the TBN this call never touches
+	// and R_DeriveTangents recomputes -- IS redundant under GPU skinning, but it was measured at
+	// ~0.007 ms/frame (MD5 carries dominantTris, so it takes the cheap unsmoothed path) against a
+	// GPU-bound frame, so it is deliberately left alone. See "Milestone C" in that doc before
+	// assuming there is perf here.
 	if ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f ) {
 		TransformScaledVerts( tri->verts, entJoints, ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] );
 	} else {

@@ -82,8 +82,12 @@ void R_GpuSkinProfileAddDerive( double ms ) {
 // NOT the tangent derive — that stays. Its remaining CPU readers are decals (idRenderModelOverlay)
 // and deform materials. The third blocker this comment used to list, the tess weld, is GONE: the
 // bake weld in idMD5Mesh::BuildGpuSkinData superseded r_tessWeldSeams. Both survivors are per-SURFACE
-// conditions (does this surface carry an overlay / does its material deform), not globally-true ones,
-// so the derive is gateable rather than mandatory — see "Milestone C" in docs/gpu-offload-plan.md.
+// conditions (overlay present / material deforms), so the derive IS gateable — it is just not worth
+// gating: r_gpuSkinProfile measured it at ~0.007 ms/frame in a 5-enemy fight, because MD5 meshes
+// carry dominantTris and so take the cheap O(verts) R_DeriveUnsmoothedTangents path
+// (tr_trisurf.cpp:1793), never the expensive smoothed one. ~0.1% of a frame against a real risk of
+// decal regressions. Don't re-litigate this without new numbers — see docs/gpu-offload-plan.md
+// "Milestone C", which also records that the engine is GPU-bound at these enemy counts.
 static idCVar r_gpuSkinNoUpload( "r_gpuSkinNoUpload", "0", CVAR_RENDERER | CVAR_BOOL,
 	"skip the redundant CPU ambient-cache upload for GPU-skinned surfaces (draw from gpuSkinVB); needs r_gpuSkinning on (Vulkan)" );
 
