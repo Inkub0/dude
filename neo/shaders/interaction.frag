@@ -37,10 +37,40 @@ layout(location = 0) out vec4 fragColor;
 //       (var_TexProjection gives the cookie UV, var_TexFalloff.x the axial depth)
 //   2 = point/omni: cube map, indexed by the world-space light->frag direction
 //       (var_ShadowCubeVec), reference = radial distance / range
-// Hardware depth-compare sampler (2x2 PCF); the 2D path adds a 4-tap Poisson spread.
+// Every tap is a hardware depth-compare (2x2 bilinear PCF in the TMU); the multi-tap
+// kernels below only decide WHERE those taps land.
+//
+// Tap placement (docs/shadow-research.md item 0): a Vogel spiral rotated per pixel
+// (Jimenez, COD:AW SIGGRAPH 2014; Sterna 2018). The first N points of a Vogel spiral are
+// evenly distributed for ANY N — unlike a truncated Poisson array — so the per-preset tap
+// counts (u_specularParms.w = 1..16) all get uniform disc coverage. The per-pixel rotation
+// turns the old repeating-pattern banding (one fixed disc for every pixel) into fine
+// dither and multiplies effective sample diversity, which is what lets a lower tap count
+// match the old quality.
+//
+// The rotation source is a white-noise HASH, deliberately NOT Interleaved Gradient Noise:
+// IGN is an anisotropic gradient designed to be averaged out by TAA, and without TAA its
+// slow-varying diagonal gives stripes of near-equal rotation that beat against the shadow
+// texel grid — visible moire (user-observed). The hash is spatially decorrelated, so the
+// residual is unstructured grain instead. Deterministic per pixel: still no flicker on a
+// static frame. Same hash family as hdrresolve.frag's film grain.
+float shadowHash( vec2 p ) {
+	vec3 p3 = fract( vec3( p.xyx ) * 0.1031 );
+	p3 += dot( p3, p3.yzx + 33.33 );
+	return fract( ( p3.x + p3.y ) * p3.z );
+}
+
+// i-th of n Vogel-spiral disc points, rotated by phi. Golden angle 2.39996323.
+vec2 vogelDisc( int i, int n, float phi ) {
+	float r = sqrt( ( float( i ) + 0.5 ) / float( n ) );
+	float theta = 2.39996323 * float( i ) + phi;
+	return r * vec2( cos( theta ), sin( theta ) );
+}
+
 // Sample one point-light shadow cube by direction L with radial reference ref (dist = |L|).
-// Hardware 2x2 depth-compare, optionally widened to a disc PCF (u_specularParms.w taps).
-// Factored out so the static and dynamic (lever B) cubes filter identically. 0 = shadowed, 1 = lit.
+// Hardware 2x2 depth-compare, optionally widened to a rotated-Vogel disc PCF
+// (u_specularParms.w taps). Factored out so the static and dynamic (lever B) cubes
+// filter identically. 0 = shadowed, 1 = lit.
 float sampleCubeShadow( samplerCubeShadow cube, vec3 L, float ref, float dist ) {
 	int taps = int( u_specularParms.w + 0.5 );
 	if ( taps <= 1 ) {
@@ -52,21 +82,13 @@ float sampleCubeShadow( samplerCubeShadow cube, vec3 L, float ref, float dist ) 
 	vec3 ty = cross( L, tx ) / dist;	// tx is unit and perpendicular to L, so |cross| == dist
 	float r = 4.0 * dist * u_shadowParms.y;	// one cube texel (2*dist/res) * ~2 texels spread
 
-	const vec2 disc16[16] = vec2[16](
-		vec2( -0.94201624, -0.39906216 ), vec2(  0.94558609, -0.76890725 ),
-		vec2( -0.09418410, -0.92938870 ), vec2(  0.34495938,  0.29387760 ),
-		vec2( -0.91588581,  0.45771432 ), vec2( -0.81544232, -0.87912464 ),
-		vec2( -0.38277543,  0.27676845 ), vec2(  0.97484398,  0.75648379 ),
-		vec2(  0.44323325, -0.97511554 ), vec2(  0.53742981, -0.47373420 ),
-		vec2( -0.26496911, -0.41893023 ), vec2(  0.79197514,  0.19090188 ),
-		vec2( -0.24188840,  0.99706507 ), vec2( -0.81409955,  0.91437590 ),
-		vec2(  0.19984126,  0.78641367 ), vec2(  0.14383161, -0.14100790 ) );
-
+	float phi = 6.2831853 * shadowHash( gl_FragCoord.xy );
 	vec3 txr = tx * r;
 	vec3 tyr = ty * r;
 	float sum = 0.0;
 	for ( int i = 0; i < taps; i++ ) {
-		sum += texture( cube, vec4( L + txr * disc16[i].x + tyr * disc16[i].y, ref ) );
+		vec2 d = vogelDisc( i, taps, phi );
+		sum += texture( cube, vec4( L + txr * d.x + tyr * d.y, ref ) );
 	}
 	return sum / float( taps );
 }
@@ -114,12 +136,11 @@ float shadowVisibility() {
 	}
 	float ref = var_TexFalloff.x - depthBias;	// falloff depth, slope-scaled bias for acne
 
-	const vec2 poisson[4] = vec2[4](
-		vec2( -0.94201624, -0.39906216 ), vec2(  0.94558609, -0.76890725 ),
-		vec2( -0.09418410, -0.92938870 ), vec2(  0.34495938,  0.29387760 ) );
+	// 4-tap rotated-Vogel spread (same placement scheme as the cube path above)
+	float phi = 6.2831853 * shadowHash( gl_FragCoord.xy );
 	float sum = 0.0;
 	for ( int i = 0; i < 4; i++ ) {
-		sum += texture( u_shadowMap, vec3( uv + poisson[i] * u_shadowParms.y, ref ) );
+		sum += texture( u_shadowMap, vec3( uv + vogelDisc( i, 4, phi ) * u_shadowParms.y, ref ) );
 	}
 	return sum * 0.25;
 }

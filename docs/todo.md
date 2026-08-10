@@ -52,7 +52,7 @@ Design decisions taken:
 | SSAO normal G-buffer | — | — | off (depth reconstruct) | on | on | on |
 | SSAO normal G-buffer | — | — | off | on | on | on |
 | shadow 2D / cube res | — | — | 512 / 512 | 1024 / 1200 | 2048 / 2048 | 2048 / 2048 |
-| cube PCF taps | — | — | 5 | 6 | 8 | 12 |
+| cube PCF taps | — | — | 5 | 6 | 8 | 10 |
 | point-light budget | — | — | 16 | 64 | 96 | 128 (all) |
 | shadow size-scale | on* | on* | on | on | on | on |
 | size-scale pivot radius | 380* | 380* | 380 | 380 | 480 | 480 |

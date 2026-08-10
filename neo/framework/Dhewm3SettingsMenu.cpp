@@ -2466,7 +2466,7 @@ static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	{ "Medium",       true,  false, true,  true,  true,   0.5f, 1,   3,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 36.0f,  true,   false, 0.0f, true, 0.0f, false },
 	{ "High",         true,  false, true,  true,  true,   0.667f, 2,   4,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 36.0f,  false,  true,  0.0f, true, 1.0f, false },
 	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 3,   6,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 36.0f,  false,  true,  -0.25f, true, 1.0f, false },
-	{ "Nightmare", true, true, true, true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 36.0f, false,  true,  -0.25f, true, 1.0f, false },
+	{ "Nightmare", true, true, true, true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 36.0f, false,  true,  -0.25f, true, 1.0f, false },
 };
 
 static void ApplyEnhancementPreset( int idx )
