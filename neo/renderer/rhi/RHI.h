@@ -33,6 +33,8 @@ enum BufferUsage {
 	BU_STORAGE,		// GPU compute storage buffer (SSBO). VK only; GL 3.3 has no compute.
 					// Phase 1: host-visible (BAR), read back via ReadBuffer; a device-local
 					// staged variant is a Phase-2 follow-up (docs/gpu-offload-plan.md).
+					// Also carries INDIRECT usage so a compute pass can write a
+					// VkDrawIndexedIndirectCommand[] here for DrawIndexedIndirect (Phase 3 seed).
 	BU_SKIN			// dual-usage STORAGE|VERTEX buffer: written by the skinning compute
 					// kernel, then bound as a vertex buffer by the draw passes (Phase 2
 					// GPU MD5 skinning). VK only; the single hard prereq tessellation
@@ -289,6 +291,21 @@ public:
 	// ---- drawing (Chunk C+) ----
 	virtual void	BindPipeline( const PipelineDesc &desc ) = 0;
 	virtual void	Draw( const DrawArgs &args ) = 0;
+
+	// GPU-driven indirect indexed draw (docs/gpu-offload-plan.md Phase 3, the seed
+	// primitive). Binds the SAME pipeline / vertex+index / uniform / textures as
+	// Draw(args) — args.indexCount/firstIndex are ignored — then issues the draw(s)
+	// from a GPU-resident VkDrawIndexedIndirectCommand[] living in `argsBuffer` (a
+	// BU_STORAGE buffer, which also carries INDIRECT usage) at byte `argsOffset`:
+	// `drawCount` commands, `stride` bytes apart. When `countBuffer` is nonzero the
+	// live draw count is read from it at `countOffset` (a GPU-written count, clamped
+	// to drawCount) via vkCmdDrawIndexedIndirectCount — the form GPU culling will use
+	// once a compute pass compacts the visible commands. Vulkan only; GL3 (GL 3.3, no
+	// indirect draw) no-ops. All commands share the one bound vertex/index buffer, so
+	// multi-draw (drawCount>1) needs a single GPU-resident geometry buffer (Phase 3).
+	virtual void	DrawIndexedIndirect( const DrawArgs &args, BufferHandle argsBuffer, int argsOffset,
+	                                     int drawCount, int stride,
+	                                     BufferHandle countBuffer = 0, int countOffset = 0 ) {}
 
 	// ---- compute (docs/gpu-offload-plan.md Phase 1) ----
 	// Record a GPU compute dispatch (see ComputeArgs). Vulkan records it on the frame

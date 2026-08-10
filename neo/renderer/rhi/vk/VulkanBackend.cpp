@@ -94,6 +94,9 @@ static idCVar r_vkGpuTime( "r_vkGpuTime", "0", CVAR_RENDERER | CVAR_BOOL,
 static idCVar r_vkComputeTest( "r_vkComputeTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: run the compute-lane self-test (dispatch a kernel doubling a storage buffer, read back, verify) and print PASS/FAIL. Set to 1 to trigger (docs/gpu-offload-plan.md Phase 1)" );
 
+static idCVar r_vkIndirectTest( "r_vkIndirectTest", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: route every indexed draw through the DrawIndexedIndirect primitive (a per-draw 1-command indirect ring) instead of vkCmdDrawIndexed. A pixel-identical A/B validating the Phase-3 indirect-draw seed (docs/gpu-offload-plan.md)" );
+
 namespace rhi {
 
 static const int FRAMES_IN_FLIGHT = 2;
@@ -171,6 +174,8 @@ public:
 	// ---- drawing ----
 	virtual void	BindPipeline( const PipelineDesc &desc );
 	virtual void	Draw( const DrawArgs &args );
+	virtual void	DrawIndexedIndirect( const DrawArgs &args, BufferHandle argsBuffer, int argsOffset,
+	                                     int drawCount, int stride, BufferHandle countBuffer, int countOffset );
 	virtual void	Dispatch( const ComputeArgs &args );
 	virtual void	DispatchSync( const ComputeArgs &args );
 	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth, bool hdrFloat );
@@ -281,6 +286,11 @@ private:
 	void			CreatePipelineCache();		// seed the driver pipeline cache from disk
 	void			SavePipelineCache();		// write the driver pipeline cache back to disk
 	void			EnsureScenePass();
+	// Shared per-draw binding (viewport/scissor/bias, pipeline, descriptor sets, vertex+index
+	// buffers) for both Draw and DrawIndexedIndirect. Returns false + the caller draws nothing
+	// when the frame/pass/pipeline/buffers aren't ready. Does NOT gate on args.indexCount (the
+	// indirect path's count lives in the args buffer).
+	bool			BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut );
 	int				AllocFromRing( RingBuf &ring, const void *data, int size, int align,
 	                               int wrapReserve, BufferHandle *buffer );
 	VkSampler		GetSampler( int textureFilter, int textureRepeat, bool hasMips );
@@ -301,6 +311,7 @@ private:
 	static const int VERT_RING_SIZE = 16 << 20;
 	static const int IDX_RING_SIZE  = 8 << 20;
 	static const int STAGING_RING_SIZE = 2 << 20;	// mid-frame texture updates (cinematics)
+	static const int INDIRECT_RING_SIZE = 1 << 20;	// r_vkIndirectTest 1-command-per-draw ring (~52k draws; grows)
 	static const int MAX_FRAME_SETS = 4096;			// per-draw texture sets per frame
 
 	struct RingBuf {
@@ -319,6 +330,10 @@ private:
 	// frames); grows like the geometry rings. A 512x512 RGB video frame is
 	// 1 MB, so 2 MB covers the common case without growth.
 	RingBuf						stagingRing[FRAMES_IN_FLIGHT];
+	// r_vkIndirectTest: per-frame ring of VkDrawIndexedIndirectCommand written one-per-draw
+	// (host-visible+INDIRECT). A per-frame-in-flight partition (like the geometry rings) so a
+	// draw's command survives until its frame's fence, unread by the next frame's writes.
+	RingBuf						indirectRing[FRAMES_IN_FLIGHT];
 	int							streamGen = 0;
 	int							uboAlign = 256;
 	bool						ringOverflowWarned = false;
@@ -581,6 +596,13 @@ private:
 	// tess shader modules are skipped. maxTessGenLevel bounds the slider.
 	bool						haveTessellation = false;
 	uint32_t					maxTessGenLevel = 64;
+	// GPU-driven indirect draw (docs/gpu-offload-plan.md Phase 3). The 1.4 floor guarantees
+	// the vkCmdDrawIndexedIndirect[Count] *commands* exist, but the FEATURES are still explicit
+	// opt-in at device creation: drawIndirectCount gates the count-buffer form, multiDrawIndirect
+	// gates any drawCount>1. Universal on desktop; enabled when present, gated when not.
+	bool						haveDrawIndirectCount = false;
+	bool						haveMultiDrawIndirect = false;
+	bool						indirectFeatureWarned = false;
 
 	std::unordered_map<unsigned long long, VkPipeline>	pipelineCache;
 	// disk-persisted DRIVER pipeline cache (distinct from the map above, which is our
@@ -982,12 +1004,22 @@ bool VulkanBackend::CreateDeviceAndVma() {
 		enabled.robustBufferAccess = VK_TRUE;
 	}
 
+	// GPU-driven indirect draw (Phase 3): multiDrawIndirect gates a >1 drawCount in a single
+	// vkCmdDrawIndexedIndirect; the count-buffer form (drawIndirectCount) is a Vulkan 1.2 feature
+	// enabled below via the pNext chain. Both universal on desktop; enable when present.
+	haveMultiDrawIndirect = supported.multiDrawIndirect == VK_TRUE;
+	enabled.multiDrawIndirect = haveMultiDrawIndirect ? VK_TRUE : VK_FALSE;
+
 	// discard in fragment shaders compiles to OpDemoteToHelperInvocation under
 	// the vulkan1.4 SPIR-V target (modern helper-invocation semantics rather
 	// than the old OpKill); the capability needs shaderDemoteToHelperInvocation,
 	// a core + required feature since Vulkan 1.3, so guaranteed on our 1.4 floor.
 	VkPhysicalDeviceVulkan13Features supported13 = {};
 	supported13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	// Vulkan 1.2 feature struct: drawIndirectCount (the vkCmdDraw*IndirectCount form) lives here.
+	VkPhysicalDeviceVulkan12Features supported12 = {};
+	supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+	supported13.pNext = &supported12;
 	VkPhysicalDeviceFeatures2 supported2 = {};
 	supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 	supported2.pNext = &supported13;
@@ -1000,6 +1032,14 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	} else {
 		common->Warning( "VK: device lacks shaderDemoteToHelperInvocation - alpha-tested (discard) shaders may fail" );
 	}
+
+	// GPU-driven indirect draw (Phase 3): the count-buffer form needs drawIndirectCount enabled
+	// explicitly (the 1.4 command floor does not imply the feature). Chained after enabled13.
+	VkPhysicalDeviceVulkan12Features enabled12 = {};
+	enabled12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+	haveDrawIndirectCount = supported12.drawIndirectCount == VK_TRUE;
+	enabled12.drawIndirectCount = haveDrawIndirectCount ? VK_TRUE : VK_FALSE;
+	enabled13.pNext = &enabled12;
 
 	VkDeviceCreateInfo dci = {};
 	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -1754,6 +1794,7 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	vertRing[frameIndex].offset = 0;
 	idxRing[frameIndex].offset = 0;
 	stagingRing[frameIndex].offset = 0;
+	indirectRing[frameIndex].offset = 0;
 	streamGen++;
 	if ( framePool[frameIndex] ) {
 		vkResetDescriptorPool( device, framePool[frameIndex], 0 );
@@ -2122,13 +2163,14 @@ bool VulkanBackend::CreateM2Resources() {
 		VkBufferUsageFlags usage;
 	};
 	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
-		const ringSetup_t setups[4] = {
+		const ringSetup_t setups[5] = {
 			{ &uboRing[slot],  UBO_RING_SIZE,  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT },
 			{ &vertRing[slot], VERT_RING_SIZE, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT },
 			{ &idxRing[slot],  IDX_RING_SIZE,  VK_BUFFER_USAGE_INDEX_BUFFER_BIT },
 			{ &stagingRing[slot], STAGING_RING_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT },
+			{ &indirectRing[slot], INDIRECT_RING_SIZE, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT },
 		};
-		for ( int i = 0; i < 4; i++ ) {
+		for ( int i = 0; i < 5; i++ ) {
 			VkBufferCreateInfo bci = {};
 			bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 			bci.size = (VkDeviceSize)setups[i].size;
@@ -2443,8 +2485,8 @@ void VulkanBackend::DestroyM2Resources() {
 	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
 		DrainRetiredRings( slot );		// device is idle here
 		DrainRetiredImages( slot );
-		RingBuf *rings[4] = { &uboRing[slot], &vertRing[slot], &idxRing[slot], &stagingRing[slot] };
-		for ( int i = 0; i < 4; i++ ) {
+		RingBuf *rings[5] = { &uboRing[slot], &vertRing[slot], &idxRing[slot], &stagingRing[slot], &indirectRing[slot] };
+		for ( int i = 0; i < 5; i++ ) {
 			if ( rings[i]->buffer ) {
 				vmaDestroyBuffer( vma, rings[i]->buffer, rings[i]->alloc );
 			}
@@ -2678,7 +2720,10 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 		case BU_UNIFORM: usageBits = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT; break;
 		// compute storage buffer (Phase 1). TRANSFER_SRC/DST let a later device-local
 		// variant stage seed/readback; harmless on the host-visible buffer below.
+		// INDIRECT lets a compute pass write a VkDrawIndexedIndirectCommand[] here that
+		// DrawIndexedIndirect consumes (Phase 3 seed); harmless on the host-visible buffer.
 		case BU_STORAGE: usageBits = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+		                           | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
 		                           | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
 		                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT; break;
 		// skinning output: compute writes it (STORAGE), the draw passes fetch it as a
@@ -5750,14 +5795,108 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 	if ( !frameOpen || skipFrame || args.indexCount <= 0 ) {
 		return;
 	}
+	// r_vkIndirectTest: validate the Phase-3 indirect-draw seed by routing this exact draw
+	// through DrawIndexedIndirect — write a 1-command VkDrawIndexedIndirectCommand into the
+	// per-frame indirect ring and draw from it. Pixel-identical when the plumbing is right.
+	// vertexOffset stays 0 in the command: the vertex buffer's byte offset lives in the buffer
+	// binding (BindForDraw), matching the 0 vertexOffset vkCmdDrawIndexed uses in the direct path.
+	if ( r_vkIndirectTest.GetBool() ) {
+		VkDrawIndexedIndirectCommand cmd;
+		cmd.indexCount = (uint32_t)args.indexCount;
+		cmd.instanceCount = 1;
+		cmd.firstIndex = (uint32_t)args.firstIndex;
+		cmd.vertexOffset = 0;
+		cmd.firstInstance = 0;
+		BufferHandle ah = 0;
+		int aofs = AllocFromRing( indirectRing[frameIndex], &cmd, (int)sizeof( cmd ), 4, 0, &ah );
+		if ( ah ) {
+			DrawIndexedIndirect( args, ah, aofs, 1, (int)sizeof( cmd ), 0, 0 );
+			return;
+		}
+		// ring not ready (pre-init / overflow past a failed grow) — fall through to the direct draw
+	}
+	VkCommandBuffer cb;
+	if ( !BindForDraw( args, cb ) ) {
+		return;
+	}
+	vkCmdDrawIndexed( cb, (uint32_t)args.indexCount, 1, (uint32_t)args.firstIndex, 0, 0 );
+}
+
+/*
+====================
+VulkanBackend::DrawIndexedIndirect
+
+The Phase-3 indirect-draw seed: same bindings as Draw, but the draw parameters come
+from a GPU-resident VkDrawIndexedIndirectCommand[] (a compute cull pass will write it).
+See RHI.h. The 1.4 floor guarantees the vkCmdDraw*Indirect[Count] COMMANDS exist, but the
+count-buffer form needs the drawIndirectCount FEATURE and a >1 drawCount needs
+multiDrawIndirect — both enabled at device creation when present, gated below when absent.
+====================
+*/
+void VulkanBackend::DrawIndexedIndirect( const DrawArgs &args, BufferHandle argsBuffer, int argsOffset,
+                                         int drawCount, int stride, BufferHandle countBuffer, int countOffset ) {
+	if ( drawCount <= 0 ) {
+		return;
+	}
+	VkBuffer ab = LookupBuffer( argsBuffer );
+	if ( ab == VK_NULL_HANDLE ) {
+		return;
+	}
+	// feature gates: without the enabled feature the command is UB / a validation error, so
+	// degrade (skip + warn once) rather than issue it. Universal on desktop, so this is a net.
+	if ( countBuffer && !haveDrawIndirectCount ) {
+		if ( !indirectFeatureWarned ) {
+			indirectFeatureWarned = true;
+			common->Warning( "VK: DrawIndexedIndirect count form needs drawIndirectCount (unsupported) - skipped" );
+		}
+		return;
+	}
+	if ( drawCount > 1 && !haveMultiDrawIndirect ) {
+		if ( !indirectFeatureWarned ) {
+			indirectFeatureWarned = true;
+			common->Warning( "VK: DrawIndexedIndirect drawCount>1 needs multiDrawIndirect (unsupported) - skipped" );
+		}
+		return;
+	}
+	VkCommandBuffer cb;
+	if ( !BindForDraw( args, cb ) ) {
+		return;
+	}
+	if ( countBuffer ) {
+		VkBuffer cbuf = LookupBuffer( countBuffer );
+		if ( cbuf == VK_NULL_HANDLE ) {
+			return;
+		}
+		// GPU-written count form (Phase 3 cull output): draw min(*count, drawCount) commands
+		vkCmdDrawIndexedIndirectCount( cb, ab, (VkDeviceSize)argsOffset, cbuf, (VkDeviceSize)countOffset,
+		                               (uint32_t)drawCount, (uint32_t)stride );
+	} else {
+		vkCmdDrawIndexedIndirect( cb, ab, (VkDeviceSize)argsOffset, (uint32_t)drawCount, (uint32_t)stride );
+	}
+}
+
+/*
+====================
+VulkanBackend::BindForDraw
+
+Shared per-draw binding for Draw and DrawIndexedIndirect (viewport/scissor/depth-bias,
+pipeline, set0 UBO, set1 texture set, vertex+index buffers). Returns false + draws nothing
+when the frame/pass/pipeline/buffers aren't ready. Does not gate on args.indexCount — the
+indirect path's count lives in its args buffer.
+====================
+*/
+bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) {
+	if ( !frameOpen || skipFrame ) {
+		return false;
+	}
 	VkPipeline pipeline = GetPipeline( currentDesc );
 	if ( pipeline == VK_NULL_HANDLE ) {
-		return;		// missing shader — degrade by not drawing
+		return false;		// missing shader — degrade by not drawing
 	}
 	VkBuffer vb = LookupBuffer( args.vertexBuffer );
 	VkBuffer ib = LookupBuffer( args.indexBuffer );
 	if ( vb == VK_NULL_HANDLE || ib == VK_NULL_HANDLE ) {
-		return;
+		return false;
 	}
 
 	if ( insideTargetPass ) {
@@ -5766,7 +5905,7 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 	} else {
 		EnsureScenePass();
 		if ( !insideScenePass ) {
-			return;
+			return false;
 		}
 	}
 	VkCommandBuffer cb = frames[frameIndex].cb;
@@ -5879,7 +6018,7 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 						framePoolWarned = true;
 						common->Warning( "VK: descriptor pool exhausted while allocating texture set" );
 					}
-					return;
+					return false;
 				}
 				// bindings 0-7 = units, 8 = shadow cube, 9 = SSAO, 10 = occlusion map,
 				// 11 = parallax height map. Empty slots take a dummy typed for what the
@@ -5965,7 +6104,8 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 	VkDeviceSize vbOfs = (VkDeviceSize)args.vertexOffset;
 	vkCmdBindVertexBuffers( cb, 0, 1, &vb, &vbOfs );
 	vkCmdBindIndexBuffer( cb, ib, 0, VK_INDEX_TYPE_UINT32 );
-	vkCmdDrawIndexed( cb, (uint32_t)args.indexCount, 1, (uint32_t)args.firstIndex, 0, 0 );
+	cbOut = cb;
+	return true;
 }
 
 /*
