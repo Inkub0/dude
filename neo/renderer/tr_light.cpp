@@ -2175,7 +2175,15 @@ static void R_AddAmbientDrawsurfs( viewEntity_t *vEntity ) {
 			}
 		}
 
-		if ( !R_CullLocalBox( tri->bounds, vEntity->modelMatrix, 5, tr.viewDef->frustum ) ) {
+		const bool surfCulled = R_CullLocalBox( tri->bounds, vEntity->modelMatrix, 5, tr.viewDef->frustum );
+
+		// DUDE Phase 3.2 (r_gpuCullLive): record this candidate's real bounds/matrix + the CPU
+		// decision so R_GpuCullLive() can prove the GPU cull reproduces it. No-op unless armed.
+		if ( R_GpuCullLiveActive() ) {
+			R_GpuCull_RecordCandidate( tri->bounds, vEntity->modelMatrix, tri->numIndexes, surfCulled );
+		}
+
+		if ( !surfCulled ) {
 
 			def->visibleCount = tr.viewCount;
 
@@ -2278,6 +2286,10 @@ void R_AddModelSurfaces( void ) {
 	// clear the ambient surface list
 	tr.viewDef->numDrawSurfs = 0;
 	tr.viewDef->maxDrawSurfs = 0;	// will be set to INITIAL_DRAWSURFS on R_AddDrawSurf
+
+	// DUDE GPU-offload Phase 3.2 (r_gpuCullLive): arm the live-cull collector for this view (at
+	// most once/sec). When armed, R_AddAmbientDrawsurfs records each cull candidate below.
+	R_GpuCull_ResetLive();
 
 	// go through each entity that is either visible to the view, or to
 	// any light that intersects the view (for shadows)

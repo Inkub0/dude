@@ -1358,6 +1358,16 @@ bool R_CullLocalBox( const idBounds &bounds, const float modelMatrix[16], int nu
 bool R_RadiusCullLocalBox( const idBounds &bounds, const float modelMatrix[16], int numPlanes, const idPlane *planes );
 bool R_CornerCullLocalBox( const idBounds &bounds, const float modelMatrix[16], int numPlanes, const idPlane *planes );
 
+// DUDE GPU-offload Phase 3.2 (live GPU frustum cull validation, cvar r_gpuCullLive):
+// the front-end records every ambient-cull candidate (real local bounds + modelMatrix +
+// numIndexes + the CPU R_CullLocalBox decision) so R_GpuCullLive() can prove the GPU cull
+// reproduces R_CullLocalBox on the LIVE per-frame surface set (dynamic/animated bounds,
+// parented transforms, live frustum) — the real-data half of wiring the cull in. All are
+// cheap no-ops when the cvar is off (R_GpuCullLiveActive() returns false, so no recording).
+void R_GpuCull_ResetLive( void );					// per-view: arm at most once/sec, reset the collector
+bool R_GpuCullLiveActive( void );					// true only for the armed view this second
+void R_GpuCull_RecordCandidate( const idBounds &bounds, const float modelMatrix[16], int numIndexes, bool culled );
+
 void R_AxisToModelMatrix( const idMat3 &axis, const idVec3 &origin, float modelMatrix[16] );
 
 // note that many of these assume a normalized matrix, and will not work with scaled axis

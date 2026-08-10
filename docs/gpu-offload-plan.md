@@ -321,19 +321,43 @@ gating — and atomic-compacted into a `VkDrawIndexedIndirectCommand[]` + count.
 vs genuine divergences. User-verified `PASS` (2048 objs, CPU vis == GPU vis, 0 mismatch) across view angles.
 **Proves:** per-object table upload, cull-math parity, atomic compaction into the indirect buffer.
 
-#### Phase 3.2+ — wire the cull pass live (not started)
-Swap the synthetic set for a **persistent per-object table** built from `viewDef->viewEntitys × surfaces`
-(local bounds + `modelMatrix` + `tri->numIndexes`/`firstIndex`), add the `COMPUTE→DRAW_INDIRECT` barrier to
-`Dispatch` (`VulkanBackend.cpp:~3275` — widen `dstStageMask`/`dstAccessMask` with `DRAW_INDIRECT`/
-`INDIRECT_COMMAND_READ`), and consume the compacted buffer via `DrawIndexedIndirect` per pipeline/material
-bucket. The table wants stable GPU-resident geometry keyed by a persistent object index — `gpuSkinVB`/
-`tessDeformVB` are `srfTriangles`-pointer-keyed and drawSurfs are frame-arena-rebuilt, so the index/table is
-net-new. GL3 keeps the CPU cull permanently. **Payoff:**
-attacks the per-frame `R_CullLocalBox` sweep + scalar draw loop — but only raises fps when CPU-bound
-(weak GPU / high entity counts); on the RTX 3080 Ti the frame is GPU-bound, so this is architecture +
-CPU-bound-case relief, not fps here. **Risk:** high (persistent residency for a frame-arena renderer;
-portal visibility is genuinely data-dependent → a *hybrid*: CPU portal-area coarse pass feeds the GPU
-fine cull). Retires **one** of the three CPU-position-skin pins (light cull, `Interaction.cpp:130/405`).
+#### Phase 3.2a — cull the *live* surface set (real data, no draw) — ✅ SHIPPED (`feat/gpu-cull-live`, `r_gpuCullLive`, pending user PASS)
+The Phase 3.1 kernel is now fed the **real per-frame surface set** instead of synthetic boxes, proving the
+GPU cull reproduces the shipping `R_CullLocalBox` on live geometry — dynamic/animated bounds, parented
+transforms, the constrained view frustum. The front-end (`R_AddAmbientDrawsurfs`, `tr_light.cpp`) records
+every ambient-cull candidate — real `tri->bounds`, real `vEntity->modelMatrix`, real `tri->numIndexes`, and
+the actual CPU decision — into a grow-only collector, armed at most once/sec (`R_GpuCull_ResetLive` /
+`R_GpuCullLiveActive` / `R_GpuCull_RecordCandidate`, `tr_local.h`). `R_GpuCullLive` (`tr_main.cpp`, hooked
+after `R_AddModelSurfaces`) replays that set through `cs_gpucull` and diffs survivor **sets** vs the CPU
+decisions via the shared `R_GpuCull_RunAndReport` helper (same boundary-FP bucketing as 3.1). This de-risks
+everything downstream: it confirms the GPU decision is trustworthy on real scenes *before* anything renders
+from it, and starts flowing the real `numIndexes` into the draw-params (`dp.x`). Only the ambient cull site
+is instrumented; the light-interaction (`Interaction.cpp:1153`) and prelight-shadow (`:1118`) sites are the
+same recorder if wanted. Still no draw; still `DispatchSync` (dev-only). GL3 self-gates off.
+
+#### Phase 3.2b — consume the cull output via indirect draw (blocked on a prerequisite)
+The remaining half — actually *drawing* from the GPU-culled command buffer — is gated by a missing
+primitive the live-path recon surfaced: **there is no unified geometry buffer.** `RB_RHI_StreamAmbient`
+(`RhiWorld.cpp:1487`) hands back a *different* `(vertexBuffer, indexBuffer)` per surface (per-surface
+`ambientCache` / ring-streamed), but `vkCmdDrawIndexedIndirect` binds *one* vb/ib for the whole multi-draw.
+So a real indirect batch first needs all batched geometry in one shared vb/ib addressed by
+`firstIndex`/`vertexOffset`. On top of that, per-object state varies mid-batch and must move into an indexed
+SSBO or partition the batch: **tessellate flag** (perforated skips it, opaque may not — `RhiWorld.cpp:1492`),
+**cull type** (mirror views), **scissor**, **weapon/model depth-hack**, **polygon offset**, and **perforated
+multi-stage** (alpha-test loops per stage with per-stage textures). And the per-surface `RenderParams` UBO
+(MVP/color/alphaTest) must become an SSBO indexed by `gl_BaseInstance`/`firstInstance`. Net: 3.2b is a real
+subproject — (1) unified geometry buffer, (2) per-object SSBO + zfill shader variant that indexes it,
+(3) the `COMPUTE→DRAW_INDIRECT` barrier on `Dispatch` (`VulkanBackend.cpp:3273–3274` — widen `dstStageMask`
+with `VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT` and `dstAccessMask` with `VK_ACCESS_INDIRECT_COMMAND_READ_BIT`;
+`Draw`/`Dispatch` already share `frames[frameIndex].cb`, so no submit/fence is needed between them), (4)
+`DrawIndexedIndirect` per pipeline/material bucket. Start with the depth prepass (one shader, no material
+textures) over the world-static batch. GL3 keeps the CPU cull permanently. **Payoff:** attacks the per-frame
+`R_CullLocalBox` sweep + the scalar draw loop — but only raises fps when CPU-bound (weak GPU / high entity
+counts); on the RTX 3080 Ti the frame is GPU-bound, so this is architecture + CPU-bound-case relief, not fps
+here. **Risk:** high (persistent residency for a frame-arena renderer; portal visibility is genuinely
+data-dependent → a *hybrid*: CPU portal-area coarse pass feeds the GPU fine cull). Retires **one** of the
+three CPU-position-skin pins (light cull, `Interaction.cpp:130/405`) once the light-interaction cull also
+moves to the GPU.
 
 ### Phase 4 — GPU shadow-volume generation — ❌ STRUCK (2026-08-10, recon-confirmed)
 **Do not build.** A recon of the residual stencil cost after Phase 0 concluded a GPU stencil-volume
@@ -375,8 +399,10 @@ Phase 0 (CPU stencil-build gate) ── ✅ SHIPPED (0bf7e1dd)
 Phase 1 (VK compute lane + BU_STORAGE) ── ✅ SHIPPED (cf18e615)
 Phase 2 (GPU skinning, VK) ── ✅ SHIPPED (gpuSkinVB; Milestone C audited what it can retire)
    └── Phase 3.0 (indirect-draw primitive) ── ✅ SHIPPED (feat/rhi-indirect-draw)
-        └── Phase 3.1+ (GPU cull pass, VK-only): needs a persistent per-object table (net-new)
-                 + the compute lane (have) + indirect draw (have) → retires pin #1 (light cull)
+        └── Phase 3.1 (cull kernel, synthetic validation) ── ✅ SHIPPED (r_gpuCullTest)
+             └── Phase 3.2a (cull the live surface set, no draw) ── ✅ SHIPPED (feat/gpu-cull-live, r_gpuCullLive)
+                  └── Phase 3.2b (indirect consume, VK-only): needs a UNIFIED GEOMETRY BUFFER (net-new)
+                       + per-object SSBO + COMPUTE→DRAW_INDIRECT barrier → retires pin #1 (light cull)
 Phase 4 (GPU shadow-volume gen) ── ❌ STRUCK (subsumed by ray-query)
 Ray-query shadows (RTX pivot, after culling) ── retires pin #2 (stencil volumes); changes pixels (opt-in)
 ```
