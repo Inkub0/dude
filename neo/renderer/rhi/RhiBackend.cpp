@@ -1271,6 +1271,83 @@ void RB_RHI_FlushSkinJobs( void ) {
 	rbSkinJobs.SetNum( 0 );
 }
 
+// Roadmap B: compute deform-once tessellation jobs (docs/tessellation.md). Same record-in-front-end /
+// dispatch-in-backend pattern as the skin jobs, flushed immediately AFTER them so the skin-write ->
+// deform-read dependency is covered by the skin dispatch's trailing COMPUTE->COMPUTE barrier.
+struct rbTessJob_t {
+	rhi::ShaderHandle	shader;
+	rhi::BufferHandle	srcVB;			// GPU source (gpuSkinVB); 0 => upload srcCpu instead
+	const void *		srcCpu;			// R_FrameAlloc'd source verts (used when srcVB == 0)
+	int					numSrcVerts;
+	rhi::BufferHandle	outVB, barySeam, srcTri, height;
+	int					numOutVerts;
+	float				dispStrength;
+};
+static idList<rbTessJob_t>	rbTessJobs;
+
+void RB_RHI_AddTessJob( unsigned int shader, unsigned int srcVB, const void *srcCpu, int numSrcVerts,
+                        unsigned int outVB, unsigned int barySeam, unsigned int srcTri, unsigned int height,
+                        int numOutVerts, float dispStrength ) {
+	rbTessJob_t j;
+	j.shader = shader; j.srcVB = srcVB; j.srcCpu = srcCpu; j.numSrcVerts = numSrcVerts;
+	j.outVB = outVB; j.barySeam = barySeam; j.srcTri = srcTri; j.height = height;
+	j.numOutVerts = numOutVerts; j.dispStrength = dispStrength;
+	rbTessJobs.Append( j );
+}
+
+void RB_RHI_FlushTessJobs( void ) {
+	if ( rbTessJobs.Num() == 0 ) {
+		return;
+	}
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r ) {
+		for ( int i = 0; i < rbTessJobs.Num(); i++ ) {
+			const rbTessJob_t &j = rbTessJobs[i];
+			rhi::BufferHandle srcBuf = j.srcVB;
+			bool ownSrc = false;
+			if ( srcBuf == 0 && j.srcCpu ) {
+				// CPU source (gpuSkinning off): upload this frame's deformed verts as a storage buffer
+				srcBuf = r->CreateBuffer( rhi::BU_STORAGE, j.numSrcVerts * (int)sizeof( idDrawVert ), j.srcCpu );
+				ownSrc = true;
+			}
+			if ( srcBuf == 0 ) {
+				continue;
+			}
+			struct { unsigned int numVerts; float dispStrength; } pc = { (unsigned int)j.numOutVerts, j.dispStrength };
+			rhi::ComputeArgs ca = {};
+			ca.shader = j.shader;
+			ca.storage[0] = srcBuf;
+			ca.storage[1] = j.barySeam;
+			ca.storage[2] = j.srcTri;
+			ca.storage[3] = j.height;
+			ca.storage[4] = j.outVB;
+			ca.pushConstants = &pc;
+			ca.pushConstantSize = (int)sizeof( pc );
+			ca.groupsX = ( j.numOutVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
+			r->Dispatch( ca );					// records on the frame cb + a compute->vertex/compute barrier
+			if ( ownSrc ) {
+				r->DestroyBuffer( srcBuf );		// deferred/fence-retired: safe right after recording
+			}
+		}
+	}
+	rbTessJobs.SetNum( 0 );
+}
+
+// Roadmap B: if this surface was deformed once this frame (Roadmap B) AND it is a classifier-approved
+// tess candidate (the caller passes `tess`, from RB_RHI_TessellateSurf), rebind the draw to the
+// pre-deformed expanded buffer + its expanded index count and disable fixed-function tess. Surfaces the
+// classifier excludes (eyes/teeth/headgear/etc.) keep `tess` false here, so they NEVER draw the deformed
+// buffer even though it may have been dispatched -- they render their base geometry, exactly as today.
+void RB_RHI_ApplyDeform( const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs,
+                         rhi::BufferHandle &ib, int &idxOfs, int &idxCount, bool &tess ) {
+	if ( tess && tri->tessDeformVB && tri->tessDeformIB ) {
+		vb = tri->tessDeformVB; vertOfs = 0;
+		ib = tri->tessDeformIB; idxOfs = 0;
+		idxCount = tri->tessDeformIndexes;
+		tess = false;						// deform-once supersedes the per-pass fixed-function tess
+	}
+}
+
 // Resolve this surface's indexes to a GPU buffer + byte offset. When the front
 // end has a resident index VBO (tri->indexCache, populated only when
 // r_useIndexBuffers is set — which the core profile forces on) draw it in
@@ -2627,11 +2704,24 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			break;
 		}
 
-		// DUDE tessellation: a blood-overlay decal is a translucent blend stage added
-		// to the monster's model; PN-tessellate it (forBlendPass = true) so it follows
-		// the deformed base instead of the base clipping through it. Only the "generic"
-		// shader has a tess variant, so other stage kinds fall through untessellated.
-		const bool tess = RB_RHI_TessellateSurf( surf, true );
+		// DUDE tessellation (docs/tessellation.md): this pass draws a material's ambient/emissive
+		// stages. Two cases:
+		//  - Roadmap B deform-once: a classifier-approved BODY surface was pre-deformed into
+		//    tri->tessDeformVB this frame -- draw THAT (the same expanded, uniform-L buffer the zfill
+		//    prepass sealed from) so a DEPTHFUNC_EQUAL emissive stage (e.g. the imp burning-corpse
+		//    glow) matches the deformed depth instead of failing EQUAL against it. The deform decision
+		//    uses TessellateSurf(surf,FALSE) -- NOT the forBlendPass=true call, whose all-additive
+		//    exclusion (RhiWorld.cpp) would reject the all-additive glow and keep the ember dropped.
+		//    Gating additionally on tessDeformVB!=0 means only a surface actually deform-dispatched (the
+		//    body) takes it; a view-oriented sprite/particle glow and the blood decal have none.
+		//  - Otherwise (no deform buffer): a blood-overlay decal is a SEPARATE translucent surface that
+		//    fixed-function PN-tessellates via generic.tese (forBlendPass=true) to follow its own base.
+		bool useDeform = false;
+		bool tess = RB_RHI_TessellateSurf( surf, true );
+		if ( RB_RHI_TessellateSurf( surf, false ) && tri->tessDeformVB && tri->tessDeformIB ) {
+			useDeform = true;
+			tess = false;			// deform-once supersedes fixed-function tess for the body
+		}
 		if ( tess ) {
 			RB_RHI_SetTessParms( parms );
 		}
@@ -2677,11 +2767,11 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
-		da.vertexBuffer = vb;
-		da.vertexOffset = vertOfs;
-		da.indexBuffer = ib;
-		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
+		da.vertexOffset = useDeform ? 0 : vertOfs;
+		da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
+		da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
+		da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
@@ -2867,6 +2957,9 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	// Phase 2 GPU skinning: dispatch all recorded MD5 skin jobs now, in the pre-scene window
 	// (frame cb open, no render pass yet) so the compute->vertex barrier lands before any draw.
 	RB_RHI_FlushSkinJobs();
+	// Roadmap B: deform-once tessellation dispatches, immediately AFTER the skin jobs so a deform that
+	// reads a surface's gpuSkinVB is ordered by the skin dispatch's trailing COMPUTE->COMPUTE barrier.
+	RB_RHI_FlushTessJobs();
 
 	rbBerserkFrame = false;	// set when the berserk material is seen (crop overlay), read at the _scratch blit
 	rbHelltimeFrame = false;	// set when a bloodorbN hell-time material is seen, read at its cr_draw blit

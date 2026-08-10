@@ -589,7 +589,15 @@ static props and the first-person viewmodel are left flat. The opaque prepass +
 interaction/ambient passes call with forBlendPass = false (they must agree under
 depth-EQUAL, so translucent / pure-emissive surfaces are excluded); the blended
 material pass calls with forBlendPass = true so blood-overlay decals — translucent,
-projected onto the monster's model — tessellate too and follow the deformed base.
+projected onto the monster's model — PN-tessellate too.
+
+Under Roadmap B deform-once (r_tessDeform), the BODY is drawn from a pre-deformed
+buffer (tri->tessDeformVB), NOT this fixed-function path — RB_RHI_TessOrDeform /
+RB_RHI_ApplyDeform substitute it and clear the tess flag. The forBlendPass = true
+fixed-function path then only ever runs for a blood-overlay decal, which is a SEPARATE
+surface with no deform buffer; it follows the base mesh's (welded) normals — welded on
+tri->verts in idMD5Mesh::UpdateSurface so the decal rides the same PN surface as the
+deformed body instead of clipping through it.
 ===================
 */
 bool RB_RHI_TessellateSurf( const drawSurf_s *surfIn, bool forBlendPass ) {
@@ -780,6 +788,17 @@ static idImage *RB_RHI_TessBumpForZfill( const drawSurf_t *surf, rhi::RenderPara
 		}
 	}
 	return bumpImg;
+}
+
+// Roadmap B (docs/tessellation.md): classify a surface for the tessellated draw. Returns whether to
+// FIXED-FUNCTION tessellate (the shipping .tesc/.tese path); sets outUseDeform = draw the pre-deformed
+// expanded buffer instead (classifier-approved AND deform-once dispatched this frame). Mutually
+// exclusive; a classifier-excluded surface (eyes/teeth/headgear/etc.) gets BOTH false and draws its
+// base geometry, so deform never inflates what fixed-function tess correctly skips.
+static bool RB_RHI_TessOrDeform( const drawSurf_t *surf, const srfTriangles_t *tri, bool &outUseDeform ) {
+	const bool cand = RB_RHI_TessellateSurf( surf, false );
+	outUseDeform = cand && tri->tessDeformVB && tri->tessDeformIB;
+	return cand && !outUseDeform;
 }
 
 /*
@@ -1112,7 +1131,13 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// per-light interaction pass must tessellate whenever the depth prepass did,
 	// or the depth-EQUAL test drops the surface (docs/tessellation.md). The
 	// interaction and ambientlight shaders both carry a tess variant.
-	const bool tess = RB_RHI_TessellateSurf( din->surf, false );
+	bool tess = RB_RHI_TessellateSurf( din->surf, false );
+	// Roadmap B: if this classifier-approved surface was deform-once dispatched, draw its pre-deformed
+	// expanded buffer (rebinds vb/ib/count, clears tess) instead of fixed-function tessellating.
+	rhi::BufferHandle dvb = ictx.vb, dib = ictx.ib;
+	int dVertOfs = ictx.vertOfs, dIdxOfs = ictx.idxOfs;
+	int idxCount = din->surf->geo->numIndexes;
+	RB_RHI_ApplyDeform( din->surf->geo, dvb, dVertOfs, dib, dIdxOfs, idxCount, tess );
 	if ( tess ) {
 		RB_RHI_SetTessParms( parms );
 	}
@@ -1131,11 +1156,11 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 
 	rhi::DrawArgs da;
 	memset( &da, 0, sizeof( da ) );
-	da.vertexBuffer = ictx.vb;
-	da.vertexOffset = ictx.vertOfs;
-	da.indexBuffer = ictx.ib;
-	da.firstIndex = ictx.idxOfs / (int)sizeof( glIndex_t );
-	da.indexCount = din->surf->geo->numIndexes;
+	da.vertexBuffer = dvb;
+	da.vertexOffset = dVertOfs;
+	da.indexBuffer = dib;
+	da.firstIndex = dIdxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = idxCount;
 	da.uniformBuffer = ub;
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
@@ -1464,7 +1489,11 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// DUDE tessellation: the prepass must PN-subdivide enemy/prop surfaces
 		// with the exact factors the interaction pass uses, so the sealed depth
 		// lines up under the depth-EQUAL interactions (docs/tessellation.md).
-		const bool tess = RB_RHI_TessellateSurf( surf, false );
+		bool tess = RB_RHI_TessellateSurf( surf, false );
+		// Roadmap B: draw the pre-deformed expanded buffer if this surface was deform-once dispatched
+		// (ApplyDeform rebinds vb/ib/count + clears tess, so the tess-setup below is skipped).
+		int idxCount = tri->numIndexes;
+		RB_RHI_ApplyDeform( tri, vb, vertOfs, ib, idxOfs, idxCount, tess );
 
 		rhi::PipelineDesc pd;
 		pd.stateBits = stateBits;
@@ -1480,7 +1509,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.vertexOffset = vertOfs;
 		da.indexBuffer = ib;
 		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.indexCount = idxCount;
 
 		bool drawSolid = ( shader->Coverage() == MC_OPAQUE );
 
@@ -1779,7 +1808,8 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		// zfill, driven by the same global tess params + bump, so the occluder surface
 		// coincides with the receiver's lit surface by construction. GL3 never tessellates.
 		idImage *bumpImg = NULL;
-		const bool tess = RB_RHI_TessellateSurf( surf, false );
+		bool useDeform = false;
+		const bool tess = RB_RHI_TessOrDeform( surf, tri, useDeform );
 		if ( tess ) {
 			RB_RHI_SetTessParms( parms );
 			bumpImg = RB_RHI_TessBumpForZfill( surf, parms );	// sets bumpMatrix; tese displaces
@@ -1807,11 +1837,11 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
-		da.vertexBuffer = vb;
-		da.vertexOffset = vertOfs;
-		da.indexBuffer = ib;
-		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
+		da.vertexOffset = useDeform ? 0 : vertOfs;
+		da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
+		da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
+		da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
@@ -2037,7 +2067,8 @@ static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, r
 		// DUDE tessellation: cast the point-light shadow from the deformed surface too
 		// (same dudeTessPN + dudeTessDisplace as zfill / the lit passes). GL3 never tessellates.
 		idImage *bumpImg = NULL;
-		const bool tess = RB_RHI_TessellateSurf( surf, false );
+		bool useDeform = false;
+		const bool tess = RB_RHI_TessOrDeform( surf, tri, useDeform );
 		if ( tess ) {
 			RB_RHI_SetTessParms( parms );
 			bumpImg = RB_RHI_TessBumpForZfill( surf, parms );	// sets bumpMatrix; tese displaces
@@ -2065,11 +2096,11 @@ static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, r
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
-		da.vertexBuffer = vb;
-		da.vertexOffset = vertOfs;
-		da.indexBuffer = ib;
-		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
+		da.vertexOffset = useDeform ? 0 : vertOfs;
+		da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
+		da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
+		da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
@@ -3151,7 +3182,8 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// edges (faceted shadows on a now-rounded model). The bump is already on unit 0
 		// with the matching bump matrix (var_TexBump), so gbuffer.tese displaces
 		// bit-identically to zfill.tese. pd.tessellate applies to both draws below.
-		const bool tess = RB_RHI_TessellateSurf( surf, false );
+		bool useDeform = false;
+		const bool tess = RB_RHI_TessOrDeform( surf, tri, useDeform );
 		if ( tess ) {
 			RB_RHI_SetTessParms( parms );
 		}
@@ -3194,11 +3226,11 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
-		da.vertexBuffer = vb;
-		da.vertexOffset = vertOfs;
-		da.indexBuffer = ib;
-		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
+		da.vertexOffset = useDeform ? 0 : vertOfs;
+		da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
+		da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
+		da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
 		da.uniformSize = sizeof( parms );
 
 		// Perforated (alpha-tested) surfaces: draw one live alpha-tested stage per coverage
@@ -4841,6 +4873,10 @@ static void RB_RHI_BlendLightChain( rhi::RHI *r, const viewDef_t *viewDef, const
 		rhi::BufferHandle vb, ib;
 		int vertOfs, idxOfs;
 		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
+		// Roadmap B: a deformed surface draws its expanded buffer here too -- blend lights don't
+		// fixed-function tessellate, but must modulate the same deformed geometry / sealed depth.
+		bool useDeform = false;
+		RB_RHI_TessOrDeform( surf, tri, useDeform );
 
 		RB_RHI_BindUnit( 0, projectionImage );
 		RB_RHI_BindUnit( 1, falloffImage );
@@ -4854,11 +4890,11 @@ static void RB_RHI_BlendLightChain( rhi::RHI *r, const viewDef_t *viewDef, const
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
-		da.vertexBuffer = vb;
-		da.vertexOffset = vertOfs;
-		da.indexBuffer = ib;
-		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
+		da.vertexOffset = useDeform ? 0 : vertOfs;
+		da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
+		da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
+		da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
@@ -4965,7 +5001,8 @@ static void RB_RHI_FogChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSu
 		// fragment fails the equal test and the model renders un-fogged — a dark
 		// silhouette in the fog. Never on the frustum-volume fill (allowTess false).
 		idImage *bumpImg = NULL;
-		const bool tess = allowTess && RB_RHI_TessellateSurf( surf, false );
+		bool useDeform = false;
+		const bool tess = allowTess && RB_RHI_TessOrDeform( surf, tri, useDeform );
 		if ( tess ) {
 			RB_RHI_SetTessParms( parms );
 			bumpImg = RB_RHI_TessBumpForZfill( surf, parms );	// sets bumpMatrix; fog.tese displaces
@@ -4996,11 +5033,11 @@ static void RB_RHI_FogChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSu
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
-		da.vertexBuffer = vb;
-		da.vertexOffset = vertOfs;
-		da.indexBuffer = ib;
-		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
+		da.vertexOffset = useDeform ? 0 : vertOfs;
+		da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
+		da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
+		da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );

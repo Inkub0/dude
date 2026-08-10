@@ -394,6 +394,24 @@ void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 		tri->gpuSkinVB = 0;
 	}
 
+	// Roadmap B deform-once buffers: same ownership as gpuSkinVB -- R_CreateLightTris copies the owning
+	// ambient surface's handles into every interaction surface, so only the owner (ambientSurface==NULL)
+	// destroys them; inherited copies just drop the borrowed handles.
+	if ( tri->tessDeformVB || tri->tessDeformIB ) {
+		if ( tri->ambientSurface == NULL ) {
+			rhi::RHI *r = rhi::GetRHI();
+			if ( r ) {
+				if ( tri->tessDeformVB ) { r->DestroyBuffer( tri->tessDeformVB ); }
+				if ( tri->tessDeformIB ) { r->DestroyBuffer( tri->tessDeformIB ); }
+			}
+		}
+		tri->tessDeformVB = 0;
+		tri->tessDeformIB = 0;
+		tri->tessDeformVerts = 0;
+		tri->tessDeformIndexes = 0;
+		tri->tessDeformFrame = 0;
+	}
+
 	R_FreeStaticTriSurfVertexCaches( tri );
 
 	if ( tri->verts != NULL ) {

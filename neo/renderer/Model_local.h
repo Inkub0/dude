@@ -196,6 +196,35 @@ private:
 	bool						EnsureSkinBuffersUploaded( void );
 	void						GpuSkinValidate( const idJointMat *entJoints, const struct srfTriangles_s *cpuRef );
 
+	// --- Roadmap B: compute "deform once, draw everywhere" tessellation (docs/tessellation.md,
+	// docs/gpu-offload-plan.md; Vulkan only, opt-in r_tessDeform). Instead of re-running PN +
+	// displacement in every depth-EQUAL pass via fixed-function .tesc/.tese, bake a STATIC uniform
+	// subdivision topology once at load, then a compute kernel evaluates PN + displacement into one
+	// expanded buffer that every pass draws. The bake is uniform level L == equal_spacing (bit-exact
+	// to the shipping fractional_odd only for odd L; default r_tessLevel 5 is odd). Per source
+	// triangle it emits either the full (L+1)(L+2)/2-vertex / L*L-triangle grid or, when every
+	// bind-pose edge is below r_tessMinEdge, a single undivided triangle (crack-free needs
+	// all-three-below, not any-below). NULL when not built. B-1 is validate-only (no draw). ---
+	int							numTessOutVerts;	// generated vertices across all source triangles
+	int							numTessOutTris;		// generated triangles (expanded index count = *3)
+	int							tessBakeLevel;		// L this bake used (rebuild on r_tessLevel change)
+	float						tessBakeMinEdge;	// r_tessMinEdge this bake used (rebuild on change)
+	idVec4 *					tessBarySeam;		// [numTessOutVerts] (bary u,v,w in xyz; seam mask in w)
+	int *						tessSrcTri;			// [numTessOutVerts*3] the 3 source-corner output-vert indices
+	float *						tessHeight;			// [numTessOutVerts] CPU-sampled displacement relief scalar (pre-strength)
+	glIndex_t *					tessExpandIndexes;	// [numTessOutTris*3] expanded 32-bit index list (B-2 draw)
+
+	// per-mesh static SSBOs (rhi::BufferHandle; 0 = not uploaded), shared by all entities using this
+	// model; the per-frame source-vert + output buffers live per-surface / in the validate harness.
+	unsigned int				tessGpuBarySeam;
+	unsigned int				tessGpuSrcTri;
+	unsigned int				tessGpuHeight;
+
+	void						BuildTessTopology( const idJointMat *bindJoints );
+	void						FreeTessData( void );
+	bool						EnsureTessBuffersUploaded( void );
+	void						TessDeformValidate( const struct srfTriangles_s *cpuRef );
+
 	void						TransformVerts( idDrawVert *verts, const idJointMat *joints );
 	void						TransformScaledVerts( idDrawVert *verts, const idJointMat *joints, float scale );
 };

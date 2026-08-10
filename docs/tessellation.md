@@ -392,15 +392,140 @@ Khronos's endorsed replacement for transform feedback and is the natural foundat
 GPU-offload roadmap (GPU skinning, GPU culling, GPU shadow-volume extrusion all reuse the same
 compute + SSBO + barrier plumbing).
 
-**Prerequisite the RHI doesn't have yet:** the RHI is deliberately draw-only — no compute pipeline,
-no `vkCmdDispatch`, no `STORAGE_BUFFER` usage, no compute queue, no compute↔graphics barriers, and
-`CreateBuffer` makes only host-visible VERTEX/INDEX/UNIFORM buffers. Building the first **compute
-lane** (dispatch + SSBO usage + a device-local shader-writable buffer path + barrier plumbing in
-`RHI.h`/`VulkanBackend.cpp`) is the gating work. The one real algorithmic cost is re-deriving the
-crack-free PN subdivision topology in a compute kernel (fixed-function tess auto-generates it today).
+**Prerequisite — now satisfied.** The RHI was deliberately draw-only when this roadmap was written,
+but the **compute lane it needed already shipped** for GPU skinning (docs/gpu-offload-plan.md Phase 1
+`cf18e615` / Phase 2): `CreateComputeShader`, `ComputeArgs`/`Dispatch`/`DispatchSync`, `ReadBuffer`,
+`BU_STORAGE`, and a device-side `BU_SKIN` (STORAGE|VERTEX) buffer written by a compute kernel and
+drawn as a vertex buffer — plus the `COMPUTE→VERTEX` barrier. GPU skinning proves the exact
+bake-once/dispatch-per-frame/readback-validate pattern this feature reuses. The only remaining
+algorithmic cost is re-deriving the crack-free PN topology in a kernel, which the bake below does.
 
-Transform feedback (`VK_EXT_transform_feedback`) would reuse the existing `.tese` verbatim as the
-deform kernel and is the shortest path to a *prototype* of deform-once, but it rides a deprecated
-extension and emits an unindexed triangle soup — a stepping stone toward the compute design, not the
-destination. Build this when the engine grows its first compute lane; until then, the per-pass
-tessellation (now covering shadow maps + fog) is the shipping approach.
+Transform feedback (`VK_EXT_transform_feedback`) was the deprecated stepping-stone alternative; it is
+now moot — the compute lane exists, so the destination design is built directly.
+
+### B-1 — bake + headless validator (built, validate-only, no draw)
+
+Branch `feat/deform-once-compute-tess`. Opt-in `r_tessDeform` (default 0, Vulkan only) + a dev
+validator `r_tessDeformTest`. The fixed-function `.tesc/.tese` path is untouched and remains the
+fallback. `idMD5Mesh::BuildTessTopology` bakes, at load, a static uniform-level subdivision per mesh:
+per generated vertex a barycentric coord + interpolated UV-seam mask (`tessBarySeam`), the 3
+source-corner output-vert indices its PN control net reads (`tessSrcTri`), and a CPU-sampled
+displacement relief scalar (`tessHeight`, bump blue channel at the interpolated bump UV, seam-scaled),
+plus an expanded 32-bit index list (`tessExpandIndexes`, for B-2). A compute kernel
+(`cs_md5tessdeform`, `dudeTessPN` + geometric normal + displacement ported bit-identically from
+`tess.glsl`) evaluates the deformed vertex; `TessDeformValidate` (once/sec under `r_tessDeformTest`)
+`DispatchSync`es it into both a `BU_STORAGE` and a `BU_SKIN` buffer, reads them back, and diffs each
+against a CPU reference of the *same* math at the *same* baked bary coords, plus a `BU_SKIN`-vs-`BU_STORAGE`
+diff. **This is kernel-correctness only** (GPU vs a CPU port of the same math), not fidelity vs the
+hardware tessellator; the visual verdict is B-2's.
+
+Two deliberate design choices, both departures worth stating:
+
+- **Uniform-all subdivision — no per-triangle `r_tessMinEdge` gate.** Every source triangle subdivides
+  at the same level `L`, so a shared edge gets `L+1` coincident points from both sides and PN evaluates
+  the identical cubic there (edge control points depend only on the two shared endpoints) — **provably
+  crack-free**. A per-triangle min-edge gate (subdivide-vs-flat) is *not* crack-free: a subdivided
+  triangle sharing a *short* edge with a flattened neighbour T-junctions on that edge (the runtime
+  dodges this only because it gates per-*edge*, which a uniform grid can't represent). `r_tessMinEdge`
+  therefore stays a fixed-function-path control; the eye/dense-cluster over-inflation it guarded is
+  already handled by the classifier's name/path exclusions.
+- **Displacement height is CPU-precomputed.** The compute descriptor set is storage-only (no sampler
+  reachable by a dispatch), so the per-vertex relief is sampled from the bump map on the CPU at bake
+  (`R_LoadImageProgram` → bilinear blue channel, decode/seam-scale exactly as `dudeTessDisplace`) and
+  uploaded as a storage buffer. The bump matrix is treated as identity (character bumps carry none), so
+  the bump UV is the interpolated source `st`.
+
+**Fidelity note:** uniform integer `L` == `equal_spacing`, bit-identical to the shipping
+`fractional_odd_spacing` only for **odd** `L` (default `r_tessLevel` 5 is odd). Even `L` shifts the
+vertex distribution and drops the smooth LOD slide-in; adaptive/screen-space LOD is out of scope for
+this milestone. The bake is load-time (needs the bind pose), so `r_tessDeformTest` must be set before
+the map loads, and an `r_tessLevel` change needs a reload.
+
+### B-2 — draw substitution (built, awaiting visual verdict)
+
+Per frame, each classifier-approved tessellated surface is deformed once into a per-surface expanded
+`BU_SKIN` vertex buffer (`tessDeformVB`) + a 32-bit `BU_INDEX` buffer (`tessDeformIB`); then **every**
+pass that draws it binds those instead of the base geometry and draws **flat** (`pd.tessellate=false`,
+expanded index count). The fixed-function `.tesc/.tese` path stays intact as the fallback.
+
+- **Dispatch** (`Model_md5.cpp` `UpdateSurface`): `RB_RHI_AddTessJob` once/surface/frame; the source is
+  `gpuSkinVB` when GPU skinning is on (GPU-resident, ordered by the skin dispatch's trailing
+  `COMPUTE→COMPUTE` barrier — `RB_RHI_FlushTessJobs` runs right after `RB_RHI_FlushSkinJobs`), else a
+  per-frame `R_FrameAlloc` snapshot of the CPU-skinned verts (with current-pose tangents) uploaded by
+  the flush. Output/index buffers are (re)allocated on vert-count change; alloc failure tears down and
+  **falls back to fixed-function tess** (graceful degrade).
+- **Draw** (`RhiWorld.cpp`): `RB_RHI_TessOrDeform(surf, tri, useDeform)` returns the fixed-function
+  `tess` bool and sets `useDeform` = classifier-approved **and** deformed. All 7 monster-drawing passes
+  (interaction, ambient, zfill, gbuffer/SSAO-normal, 2D + cube shadow-map casters, fog, blend-light)
+  bind the deform buffer + expanded count when `useDeform`, so depth-EQUAL holds by construction (one
+  buffer, every pass). Classifier-excluded surfaces (eyes/teeth/headgear/facial/viewmodel/world) draw
+  **base** geometry — deform never inflates what fixed-function tess correctly skips.
+- **Ownership**: `tessDeformVB/IB` mirror `gpuSkinVB` exactly — `R_CreateLightTris` copies the owner's
+  handles into every per-light interaction surface, and only the owner (`ambientSurface==NULL`) frees
+  them (`tr_trisurf.cpp`).
+
+**Shading-varying contract (user decision, Option A):** the flat vertex shader recomputes the
+tangent-space light/half/view vectors at the true displaced vertex, where fixed-function tess
+barycentric-interpolates the flat-corner values. Positions / projective / shadow terms still match
+exactly (depth-EQUAL and shadows hold); only the lit-vector *evaluation* differs — an accepted, opt-in
+fidelity delta (arguably more correct).
+
+**v1 limitations (follow-ups):** the output buffer is **host-visible `BU_SKIN`** (the proven skinning
+memory type) — a fully-deformed enemy at `r_tessLevel 5` is ~10 MB across its meshes, so several
+enemies pressure the small ~246 MB BAR heap; **device-local** output + a per-frame budget is the next
+step (exhaustion degrades gracefully to fixed-function). Bounds are **not** inflated by `r_tessDisplace`
+(default `-0.25` carves inward, so the base bounds conservatively cover the displaced silhouette; a
+positive displace would want a `|r_tessDisplace|` expansion). Deform is dispatched for classifier-
+excluded meshes too (drawn base — minor wasted compute). `r_tessLevel` change needs a map reload.
+
+Adversarial review: B-1 = 1/10 confirmed (CPU-ref precision, fixed); B-2 = 0/5 confirmed. Visual A/B on
+a tessellated monster (imp) with `r_tessDeform 1` is the shipping verdict.
+
+### B-2 follow-up fixes (built, awaiting verdict)
+
+User A/B on an imp surfaced two gaps, both fixed:
+
+- **Blood-decal clipping.** An `idRenderModelOverlay` blood decal copies its normals straight off the
+  base mesh's CPU `tri->verts` (`ModelOverlay.cpp`), which were **unwelded**, while the body deforms
+  from `gpuSkinVB` whose bind normals are **seam-welded** (`BuildGpuSkinData`). So the decal's PN
+  silhouette and the body's diverged at seams (worst on the head after a headshot) and the body poked
+  through. Confirmed by the user's A/B: `r_gpuSkinning 0` (body also unwelded) → decal correct but model
+  seams open; `r_gpuSkinning 1` → no seams but decal clips. Fixed in two parts:
+  1. **Union-find weld** of `tri->verts` normals (bind-weld groups, no angle gate, 1e-12 guard, normal
+     only) — closed the coincident-seam-split share (~60% of the clip, user-confirmed).
+  2. **Exact LBS reconstruction** (the residual ~40%): the weld operates on *geometry-derived*
+     (`R_DeriveTangents`) normals, but the body's `gpuSkinVB` normal is an *LBS of the welded bind
+     normal* — the two drift a few degrees at multi-joint seams, and `dudeTessPN` bends the surface by
+     corner normals only, re-opening a partial clip. So when `r_gpuSkinning` is on, `UpdateSurface` now
+     reconstructs on the CPU the *identical* LBS normal the GPU kernel (`MD5_SKIN_SRC`) writes into
+     `gpuSkinVB` — walking `skinExpandLocalTBN`/`skinExpandWeights`/`skinWeightStart` with `entJoints`
+     (`jrot = idJointMat::operator*(vec3)`, joint index `= skinExpandWDesc/12`) — and stores it in
+     `tri->verts.normal`, so the decal copies the exact normal the body carries. The union-find weld
+     stays as the fallback for the `r_tessDeform`-without-`gpuSkinning` CPU-deform path.
+  Both are no-ops on the drawn body (it draws `gpuSkinVB`, not `tri->verts`) and on the always-on CPU
+  consumers (culling/shadow/bounds read xyz only); only the decal copy + the unused ambient cache change.
+  `R_DeriveTangents` runs first so `R_CreateAmbientCache` can't re-derive over the written normals.
+  Separately, `RB_RHI_RenderShaderPasses` drops stage-level `privatePolygonOffset` (a real RHI gap that
+  affects the *burning-corpse dissolve*, not this live decal which uses material-level `MF_POLYGONOFFSET`)
+  — logged as a follow-up.
+
+  **Accepted final residual (user-verified ~99% covered).** After both parts the decal tracks the body
+  through animation; the remaining ~1% is the **displacement** gap — the decal carries no bump map so
+  `generic.tese` PN-follows the body silhouette but does not apply the normal-map displacement the body
+  gets, leaving a hair of clip where displacement pushes the surface off the PN silhouette. This is
+  inherent (present in the fixed-function tess path too) and hidden by polygon offset in most spots.
+  Closing it would require the decal to sample the body's bump and displace too — not worth it for 1% on
+  a translucent splat. Left as-is.
+- **Imp death ember vanishing.** The burning-corpse glow is an all-additive `SL_AMBIENT` stage at
+  `DEPTHFUNC_EQUAL`, drawn by `RB_RHI_RenderShaderPasses` — the one lit-body pass B-2 hadn't converted.
+  It drew base/flat geometry against the deformed zfill depth, so every glow fragment failed the EQUAL
+  test. Fix: that pass now routes the body through the deform buffer (`useDeform` gated on
+  `RB_RHI_TessellateSurf(surf,false)` — **not** the forBlendPass=true call, whose all-additive exclusion
+  would reject the glow — plus `tri->tessDeformVB`), matching the sealed depth. The blood decal (separate
+  surface, no deform buffer) keeps its own fixed-function `generic.tese` path.
+
+Review: 0/5 confirmed on both. **Known remaining gap:** the four per-stage sub-draw helpers in
+`RB_RHI_RenderShaderPasses` (custom-ARB / builtin-ARB / texgen / soft-particle) still draw the base
+buffer against the deformed depth — harmless for the imp (its glow is a plain generic stage), but a
+mod/other material with such an emissive stage on a deformable body would z-fight/drop until they get
+the same deform rebind. Follow-up.

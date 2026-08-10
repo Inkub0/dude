@@ -998,6 +998,9 @@ extern idCVar r_tessWeldSeams;			// weld coincident md5 normals so seams don't o
 extern idCVar r_tessWeldThreshold;		// min normal dot to weld (1=only identical .. lower=weld harder edges)
 extern idCVar r_tessDebug;				// log each material name accepted for tessellation once (diagnostic)
 
+// DUDE: Roadmap B compute "deform once" tessellation (Vulkan only; docs/tessellation.md roadmap)
+extern idCVar r_tessDeform;				// deform tessellated meshes once/frame in a compute pass (vs per-pass .tesc/.tese)
+
 // DUDE: GPU MD5 skinning via the compute lane (Vulkan only; docs/gpu-offload-plan.md Phase 2)
 extern idCVar r_gpuSkinning;			// skin animated meshes on the GPU (option-B TBN; off = faithful CPU skin)
 extern idCVar r_gpuSkinProfile;			// dev: size the Milestone-C prize (skinned-surface derive + ambient upload)
@@ -1826,6 +1829,16 @@ void RB_RHI_AddSkinJob( unsigned int shader, unsigned int outVB, int numOutVerts
                         unsigned int weightsBuf, unsigned int wdescBuf, unsigned int wstartBuf, unsigned int localTbnBuf,
                         const void *jointData, int numJoints, float skinScale );
 void RB_RHI_FlushSkinJobs( void );		// dispatch + clear the recorded jobs (backend, pre-scene)
+
+// Roadmap B compute deform-once tessellation (docs/tessellation.md; Vulkan only, no-op on GL3). Records
+// a deform job per visible tessellated surface; flushed as compute dispatches in the pre-scene window
+// AFTER the skin jobs (so the skin-write->deform-read COMPUTE->COMPUTE barrier orders them). srcVB is
+// the GPU source (gpuSkinVB) OR 0 with srcCpu an R_FrameAlloc'd copy the flush uploads. The three
+// static topology SSBOs are the mesh's; outVB is the per-surface expanded output. Impl rhi/RhiBackend.cpp.
+void RB_RHI_AddTessJob( unsigned int shader, unsigned int srcVB, const void *srcCpu, int numSrcVerts,
+                        unsigned int outVB, unsigned int barySeam, unsigned int srcTri, unsigned int height,
+                        int numOutVerts, float dispStrength );
+void RB_RHI_FlushTessJobs( void );		// dispatch + clear the recorded deform jobs (backend, pre-scene)
 
 
 /*

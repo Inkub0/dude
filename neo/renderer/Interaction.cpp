@@ -1168,6 +1168,13 @@ void idInteraction::AddActiveInteraction( void ) {
 					// buffer too, so lit interactions draw the same GPU pose as the ambient pass.
 					lightTris->gpuSkinVB = tri->gpuSkinVB;
 
+					// Roadmap B: likewise inherit the deform-once expanded buffer + its index buffer/counts
+					// so lit interactions draw the same pre-deformed geometry (owner frees; see tr_trisurf).
+					lightTris->tessDeformVB = tri->tessDeformVB;
+					lightTris->tessDeformIB = tri->tessDeformIB;
+					lightTris->tessDeformVerts = tri->tessDeformVerts;
+					lightTris->tessDeformIndexes = tri->tessDeformIndexes;
+
 					// touch the ambient surface so it won't get purged (a GPU-skinned surface with
 					// r_gpuSkinNoUpload has no ambient cache — it draws from gpuSkinVB — so skip the touch)
 					if ( lightTris->ambientCache ) {

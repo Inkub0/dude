@@ -148,6 +148,19 @@ typedef struct srfTriangles_s {
 	unsigned int				gpuSkinVB;				// rhi::BufferHandle (0 = none)
 	int							gpuSkinVerts;			// vert count the buffer was sized for (realloc on change)
 	int							gpuSkinFrame;			// tr.frameCount it was last dispatched (skin once/frame)
+
+	// Roadmap B: compute "deform once, draw everywhere" tessellation (docs/tessellation.md; Vulkan
+	// only, r_tessDeform). When non-zero, a per-frame compute pass PN+displaced this surface into
+	// tessDeformVB (an expanded BU_SKIN vertex buffer), with tessDeformIB its expanded 32-bit index
+	// buffer; the draw passes (for classifier-approved tess surfaces) bind these instead of the base
+	// geometry and draw flat (pd.tessellate=false), retiring the per-pass fixed-function tess. Like
+	// gpuSkinVB, the OWNING ambient surface holds it and R_CreateLightTris copies the handle into each
+	// per-light interaction surface; only the owner (ambientSurface==NULL) frees it. 0 = not deformed.
+	unsigned int				tessDeformVB;			// rhi::BufferHandle, expanded deformed verts (0 = none)
+	unsigned int				tessDeformIB;			// rhi::BufferHandle, expanded 32-bit index buffer (0 = none)
+	int							tessDeformVerts;		// vert count the buffer was sized for (realloc on change)
+	int							tessDeformIndexes;		// expanded index count (the draw count)
+	int							tessDeformFrame;		// tr.frameCount it was last dispatched (deform once/frame)
 } srfTriangles_t;
 
 typedef idList<srfTriangles_t *> idTriList;

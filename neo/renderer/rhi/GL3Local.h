@@ -210,6 +210,10 @@ void RB_RHI_LogOnce( const char *what );
 // interactions, shader passes)
 void RB_RHI_StreamAmbient( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs );
 void RB_RHI_StreamShadow( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs );
+// Roadmap B (docs/tessellation.md): rebind a classifier-approved tess surface's draw to its pre-deformed
+// expanded buffer + index count and clear `tess`, when it was deform-once dispatched this frame. No-op
+// otherwise. Call after RB_RHI_StreamAmbient + RB_RHI_TessellateSurf, passing that `tess` result.
+void RB_RHI_ApplyDeform( const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs, int &idxCount, bool &tess );
 
 // MVP for a model space, including the weapon/model depth hack projection
 // tweaks (the depth range part stays in RB_Enter/LeaveDepthHack)
