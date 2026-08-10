@@ -20,12 +20,28 @@
   targets with the lost-context self-heal the SSR target uses. **LDR rail:** the POT
   `_currentRender` snapshot is first de-POT'd (`smaa_copy`) into an exact-size scene target so
   the border searches never read padding, then the chain resolves onto the backbuffer.
-  **HDR rail:** the chain samples the exact-size float scene buffer directly and resolves into
-  `rhiHdrAaRT` (the same float ping FXAA uses), keeping the AA→chroma→grain→dither order; edge
-  detection reads unclamped HDR luma, which merely over-detects on >1 highlights. Missing
-  shaders/targets fall back to FXAA. Kept alongside FXAA deliberately: FXAA's subpixel
-  low-pass is the only pre-TAA shimmer damper (moot on PBR tiers, where Toksvig covers it) —
-  re-evaluate dropping FXAA once TAA lands.
+  **HDR rail:** the chain samples the exact-size float scene buffer directly; classically the blend
+  resolves into `rhiHdrAaRT` (the same float ping FXAA uses) and a second `hdrresolve` pass reads it
+  back, keeping the AA→chroma→grain→dither order (with chromatic aberration off this blend is now folded
+  into the resolve — see the fusion entry below). Edge detection reads unclamped HDR luma, which merely
+  over-detects on >1 highlights. Missing shaders/targets fall back to FXAA. Kept alongside FXAA
+  deliberately: FXAA's subpixel low-pass is the only pre-TAA shimmer damper (moot on PBR tiers, where
+  Toksvig covers it) — re-evaluate dropping FXAA once TAA lands.
+- **SMAA-into-resolve fusion — IMPLEMENTED** (2026-08-10, `feat/smaa-resolve-fusion`). On the HDR rail,
+  SMAA's pass-3 neighborhood blend is folded into `RB_RHI_HdrResolve`: `hdrresolve_smaa.{vert,frag}` =
+  the blend (`smaa.glsl`) plus the resolve's film-grain + gamma/brightness tail, so the anti-aliased
+  float scene reaches the backbuffer in **one** pass instead of blend→`rhiHdrAaRT`→`hdrresolve`.
+  `RB_RHI_SmaaChain` was split into a reusable `RB_RHI_SmaaEdgesWeights` (+ shared
+  `RB_RHI_SmaaEndUnitState`); the fused `RB_RHI_HdrResolveSmaaFused` runs edges+weights then blends
+  straight to the backbuffer. **Gated to chromatic aberration OFF** — chroma samples the resolved image
+  at radial offsets, which a single fused pass can't provide, so the chroma-on case keeps the classic
+  AA-pass + `hdrresolve`; with chroma off the fused output is bit-identical (independent review + user
+  A/B, `mars_city1`). Param note: `localParam0` carries `SMAA_RT_METRICS` in the fused shader, so grain
+  intensity/seed move to `windowCoord.xy`. Drops one full-screen pass + one RGBA16F round-trip —
+  **fps-neutral on a GPU-bound RTX 3080 Ti** (within noise), a real bandwidth/VRAM win on weaker GPUs /
+  higher resolution and one fewer pass in the pipeline. SMAA-only for now (FXAA keeps its separate pass,
+  trivial to fold later); auto-falls back to the classic path if a shader/target is unavailable. Added
+  to `gl3BootPrograms[]` for boot-time validation.
 - **TAA — PENDING.** Reuses the temporal-SSAO machinery; blocked on per-object motion vectors (below).
 
 The sections below are the original design sketch; TAA remains the planned upgrade.

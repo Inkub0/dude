@@ -405,7 +405,10 @@ Original plan:
   was idImage-only) instead of raw qgl, and the GL active-unit hygiene in the chain tail
   is guarded off (`gl3ActiveTexture` is a NULL qgl pointer on VK). AA now also runs in the
   off-HDR post pass — the `rhiHdrAaRT` ping tracks the scene buffer's format (RGBA16F in
-  HDR, RGBA8 off-HDR), so `r_rhiAA` 1/2 works in both modes on Vulkan.
+  HDR, RGBA8 off-HDR), so `r_rhiAA` 1/2 works in both modes on Vulkan. **SMAA-into-resolve
+  fusion (2026-08):** with chromatic aberration off, SMAA's neighborhood-blend pass folds into
+  the resolve (`hdrresolve_smaa`, `RB_RHI_HdrResolveSmaaFused`), skipping the `rhiHdrAaRT`
+  round-trip; chroma-on keeps the classic separate blend+resolve. See `docs/antialiasing.md`.
 - **Stability fixes (during M7 play-testing):** (1) *device-lost* (`VkResult -4` spam +
   freeze) from `DestroyImage`/`DestroyRenderTarget` freeing a view mid-frame while a bound
   descriptor set still referenced it — `vkDeviceWaitIdle` doesn't cover the still-recording

@@ -73,8 +73,13 @@ do nothing whenever those effects were on. Fix: in HDR mode `RB_RHI_AAPass` and
   (it samples whatever is bound to unit 0; screenCorrection/texel set for an exact-size source).
 - `hdrresolve.frag` then reads the AA'd buffer (or the scene buffer if FXAA is off) and applies
   chromatic aberration → film grain → dither, in that order, writing 8-bit **once**.
+- SMAA (`r_rhiAA 2`) goes one step further when chroma is off: its neighborhood-blend pass folds
+  *into* the resolve too (`hdrresolve_smaa.frag` via `RB_RHI_HdrResolveSmaaFused`), so the
+  `rhiHdrAaRT` round-trip is skipped entirely — edges+weights, then a single blend+grain+gamma pass to
+  the backbuffer. Chroma-on falls back to the separate-blend path above (its radial offset taps need
+  the AA'd image). See [antialiasing.md](antialiasing.md).
 
-So the correct order (scene → FXAA → chroma → grain → dither → 8-bit) is preserved, everything
+So the correct order (scene → AA → chroma → grain → dither → 8-bit) is preserved, everything
 stays half-float until the single resolve write, and the dither is the last thing before it.
 
 **Key files:**
