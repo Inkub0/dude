@@ -193,27 +193,74 @@ buffer reused as `ambientCache`; write xyz **and** normals/tangents to also reti
 
 Two ways to get a skinned TBN, both built and A/B'd in-engine:
 
-1. **Per-frame GPU re-derive** (`r_gpuSkinDerive 1`) — a second compute pass porting
+1. **Per-frame GPU re-derive** (was `r_gpuSkinDerive 1`; **built, lost, then removed** in `e14dfc6a`
+   — the cvar and its kernel no longer exist) — a second compute pass porting
    `R_DeriveUnsmoothedTangents`. Verified to reproduce `idSIMD_SSE41::DeriveUnsmoothedTangents` to
    0.006° avg / 0.04° max. Exactly stock. **It tears animated meshes open at their seams under PN
    tessellation** — faithfully, because stock's unsmoothed path early-returns *before* the `dupVerts`
    weld (`tr_trisurf.cpp:1804` vs the weld at `:1927`), so coincident verts legitimately disagree.
    Invisible in stock's rasterizer; a hole once PN patches build control points from those normals.
-2. **Pre-welded baked bind TBN + LBS** (`r_gpuSkinDerive 0`, the default) — bake welds every authored
+2. **Pre-welded baked bind TBN + LBS** (the survivor, now the only path) — bake welds every authored
    coincident group (`dupVerts` + `mirroredVerts`, union-find, **no angle gate**) so the pair shares
    one bind normal. Coincident verts share a weight run ⇒ identical bind normal ⇒ bit-identical
    skinned normal at every pose ⇒ the seam *cannot* open. Costs a small shading divergence.
 
 Dead ends worth not repeating: `R_WeldSeamNormals`' dot gate (default `0.7` ≈ 45°) rejects precisely
 the pairs that crack — the measured offender was **49.54°**, just past it. And `r_tessWeldSeams`
-welds in `UpdateSurface`, which the derive pass then overwrites, so it appears to "do nothing"
-whenever GPU skinning is on.
+welds in `UpdateSurface`, which the derive pass then overwrote, so it appeared to "do nothing"
+whenever GPU skinning was on. **`r_tessWeldSeams` / `r_tessWeldThreshold` are now dead weight** —
+the bake weld supersedes them entirely, and they are still listed as a blocker for retiring the CPU
+tangent derive (see Milestone C below), so removing them is worth real points, not just tidiness.
+
+Note the *normal* weld was only half the seam story: it fixed the direction coincident verts move
+in, not the distance. Displacement pulled them apart anyway because the height is sampled at the
+vertex UV — see `docs/tessellation.md`, "UV-seam displacement pinning".
 
 Method note: the GPU-vs-CPU numbers in `r_gpuSkinTest` were misleading for several rounds because
 `r_useDeferredTangents` (default 1) defers `R_DeriveTangents` to `R_CreateAmbientCache`, *after* the
 validation hook — so the reference normals were a frame stale and ~15° of "error" was really one
 frame of animation. The harness now re-derives its own reference. The choice above was still settled
 by looking at an imp, not by the metric.
+
+#### Milestone C — what GPU skinning can actually retire *(audit 2026-08-10)*
+
+Phase 2's stated payoff ("eliminates per-frame CPU skin + tangent-derive") is only **half**
+achievable, and it is worth being exact about which half. The CPU skin splits cleanly in two, and
+only one part is redundant. **As shipped today, GPU skinning *adds* the compute pass on top of the
+CPU one rather than replacing it.**
+
+**Position skinning is load-bearing and has to stay.** `TransformVerts`
+(`Model_md5.cpp:950` → `SIMDProcessor->TransformVerts`) writes **only `xyz`**. Three front-end
+consumers read those positions every frame, and none of them can see `gpuSkinVB` — it is a GPU-side
+buffer with no CPU mapping:
+
+| Consumer | Site | Frequency |
+| --- | --- | --- |
+| Light culling (`R_CalcInteractionCullBits`, `R_ClipTriangleToLight`) | `Interaction.cpp:130`, `:405` | per interaction, **per light** |
+| Stencil shadow volumes (`R_CreateShadowVolume`, `R_CreateVertexProgramShadowCache`) | `Interaction.cpp:947`, `tr_light.cpp:245` | per shadowing stencil light — **absent** for shadow-mapped lights |
+| Surface bounds (`R_BoundTriSurf`) | `Model_md5.cpp:962` | once per surface |
+
+Retiring those means moving culling and shadow-volume construction to the GPU as well — Phases 3
+and 4 — not flipping a flag. So "switch the CPU skinner off when GPU skinning is on" is not
+available: the front end is structurally position-dependent.
+
+**The TBN half is the redundant part — and it is the expensive half.** `TransformVerts` never
+touches normals; those come from `R_DeriveTangents` → `R_DeriveUnsmoothedTangents`
+(`tr_trisurf.cpp:1794`), a per-vertex `dominantTris` walk with three cross products and three
+normalizes, duplicated wholesale by the compute kernel and then discarded. Two things can go:
+
+1. **The redundant ambient-cache upload.** `tr_light.cpp:134` allocates a fresh VK buffer and copies
+   every vertex, every frame, for a surface that rasterizes from `gpuSkinVB` instead — the copy is
+   never drawn. Already built as `r_gpuSkinNoUpload`, deliberately **off by default**: leaving
+   `ambientCache` NULL arms ~a dozen "has geometry?" gates, so it stays an A/B toggle until profiled.
+2. **The tangent derive.** Needs *per-surface gating*, not a flag. `tr_light.cpp:78` lists its
+   blockers as decals (`idRenderModelOverlay`), deform materials, and the tess weld. **The tess-weld
+   blocker is gone** — `r_tessWeldSeams` was superseded by the bake weld — leaving two conditions
+   that are both testable per surface (does this surface carry an overlay; does its material deform)
+   rather than globally true.
+
+`r_gpuSkinProfile` (`tr_light.cpp:57`) exists precisely to size this prize before the gating work —
+it prints per-frame derive + upload ms for skinned surfaces once/sec. **Not yet run.**
 
 ### Phase 3 — GPU-driven culling *(Vulkan-only; biggest relief, most architecture)*
 Add indirect draw to the RHI (`vkCmdDrawIndexedIndirect[Count]`, swapping `vkCmdDrawIndexed :5557`).

@@ -991,6 +991,18 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		StampTessSeamMask( tri->verts );
 	}
 
+	// This CPU skin runs even when the GPU skinner below is active, and that is deliberate, not an
+	// oversight: it writes ONLY xyz, and three front-end consumers read those positions every frame
+	// with no way to see gpuSkinVB (a GPU-side buffer with no CPU mapping):
+	//   - light culling      R_CalcInteractionCullBits / R_ClipTriangleToLight (Interaction.cpp:130, :405)
+	//                        -- per interaction, PER LIGHT; decides what gets lit at all
+	//   - stencil shadows    R_CreateShadowVolume (Interaction.cpp:947), R_CreateVertexProgramShadowCache
+	//                        (tr_light.cpp:245) -- absent for shadow-mapped lights, present for stencil ones
+	//   - surface bounds     R_BoundTriSurf, just below
+	// Retiring it therefore needs culling + shadow-volume construction on the GPU too (docs/
+	// gpu-offload-plan.md Phases 3-4), not a flag. What GPU skinning CAN retire is the other half --
+	// the TBN, which this call never touches and R_DeriveTangents recomputes; see "Milestone C" in
+	// that doc for the two gateable pieces (the never-drawn ambient upload, and the derive itself).
 	if ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f ) {
 		TransformScaledVerts( tri->verts, entJoints, ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] );
 	} else {

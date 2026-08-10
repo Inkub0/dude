@@ -77,7 +77,13 @@ void R_GpuSkinProfileAddDerive( double ms ) {
 // never drawn — skip it so the CPU stops re-streaming geometry the GPU already produced. Opt-in +
 // off by default: leaving ambientCache NULL arms ~a dozen "has geometry?" gates, so this stays an
 // A/B toggle until proven, and the OFF path is byte-for-byte unchanged. Vulkan-only in effect
-// (gpuSkinVB is only set there). NOT the tangent derive — that stays (decals/deform/weld read it).
+// (gpuSkinVB is only set there).
+//
+// NOT the tangent derive — that stays. Its remaining CPU readers are decals (idRenderModelOverlay)
+// and deform materials. The third blocker this comment used to list, the tess weld, is GONE: the
+// bake weld in idMD5Mesh::BuildGpuSkinData superseded r_tessWeldSeams. Both survivors are per-SURFACE
+// conditions (does this surface carry an overlay / does its material deform), not globally-true ones,
+// so the derive is gateable rather than mandatory — see "Milestone C" in docs/gpu-offload-plan.md.
 static idCVar r_gpuSkinNoUpload( "r_gpuSkinNoUpload", "0", CVAR_RENDERER | CVAR_BOOL,
 	"skip the redundant CPU ambient-cache upload for GPU-skinned surfaces (draw from gpuSkinVB); needs r_gpuSkinning on (Vulkan)" );
 
