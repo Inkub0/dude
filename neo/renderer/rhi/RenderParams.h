@@ -109,10 +109,16 @@ struct RenderParams {
 								// the shadow depth map is rendered with the RAW projection, so
 								// the shadow must be sampled raw too or it swims with the
 								// animation. Filled only on the projected-2D shadow path.
+	float	shadowFalloffS[4];	// DUDE sun shadow maps (docs/shadow-research.md item 1): the
+								// virtual projection's DEPTH plane. Oversize-omni/parallel "sun"
+								// lights render their map through a per-view fitted virtual
+								// frustum whose linear depth is this plane — the light's own
+								// falloff texgen (a point light's falloff) can't serve as the
+								// compare reference there. Filled only on the sun path (mode 3).
 };
 
-// 3 mat4 (192) + 45 vec4 (720) = 912 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 912, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 3 mat4 (192) + 46 vec4 (736) = 928 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 928, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

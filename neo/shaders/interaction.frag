@@ -37,6 +37,9 @@ layout(location = 0) out vec4 fragColor;
 //       (var_TexProjection gives the cookie UV, var_TexFalloff.x the axial depth)
 //   2 = point/omni: cube map, indexed by the world-space light->frag direction
 //       (var_ShadowCubeVec), reference = radial distance / range
+//   3 = sun (oversize-omni / parallel light): 2D map through a per-view fitted
+//       virtual projection; UV like mode 1 but the compare reference is the
+//       virtual depth plane (var_ShadowProjection.z) instead of the light falloff
 // Every tap is a hardware depth-compare (2x2 bilinear PCF in the TMU); the multi-tap
 // kernels below only decide WHERE those taps land.
 //
@@ -109,7 +112,7 @@ float shadowVisibility() {
 	float cosT = clamp( normalize( var_TexLightVec ).z, 0.15, 1.0 );
 	float biasScale = 1.0 + u_pbrParms2.y * ( sqrt( 1.0 - cosT * cosT ) / cosT );
 	float depthBias = u_shadowParms.z * biasScale;
-	if ( u_shadowParms.x > 1.5 ) {
+	if ( u_shadowParms.x > 1.5 && u_shadowParms.x < 2.5 ) {
 		// point light: the caster stored linear radial distance/range as depth, so
 		// compare the same quantity here.
 		vec3 L = var_ShadowCubeVec;
@@ -134,7 +137,17 @@ float shadowVisibility() {
 	if ( uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 ) {
 		return 1.0;						// outside the shadow frustum -> lit
 	}
-	float ref = var_TexFalloff.x - depthBias;	// falloff depth, slope-scaled bias for acne
+	// compare reference: the ordinary 2D path reuses the light's falloff texgen (the
+	// caster wrote the same plane as depth); the sun path (mode 3 — a per-view virtual
+	// projection over an oversize-omni/parallel light) has no usable light falloff, so
+	// its reference is the virtual projection's own depth plane (var_ShadowProjection.z,
+	// from u_shadowFalloffS — again the exact plane its caster pass wrote). The sun ref
+	// is CLAMPED to the map's depth range: receivers beyond the fitted region get ref 1
+	// ("lit unless a real in-range caster is nearer"). VK shadow targets are float depth,
+	// which the spec compares UNCLAMPED — without this, everything past the far plane
+	// reads ref > 1 vs a cleared 1.0 map and turns into a false shadow curtain (GL3's
+	// unorm depth clamps implicitly, masking the bug on that backend).
+	float ref = ( ( u_shadowParms.x > 2.5 ) ? clamp( var_ShadowProjection.z, 0.0, 1.0 ) : var_TexFalloff.x ) - depthBias;
 
 	// 4-tap rotated-Vogel spread (same placement scheme as the cube path above)
 	float phi = 6.2831853 * shadowHash( gl_FragCoord.xy );

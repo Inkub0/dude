@@ -64,6 +64,11 @@ static struct {
 	// lightRange normalizing the stored radial distance.
 	bool				lightShadowMapped;
 	rhi::ImageHandle	shadowImage;
+	// DUDE sun shadow maps (r_shadowMapSun): the 2D map on unit 7 was rendered through a
+	// per-view fitted VIRTUAL projection (rhiSunPlanes), not the light's own texgen — the
+	// receiver must sample with those planes and take its compare depth from the virtual
+	// falloff plane (shader mode 3). Only meaningful while lightShadowMapped is set.
+	bool				lightSunShadow;
 	bool				lightShadowCube;
 	rhi::ImageHandle	shadowCubeImage;
 	// static/dynamic split (r_shadowMapCacheSplit): when a cached static point light also
@@ -85,6 +90,11 @@ static struct {
 // remake it). One target reused serially by every shadow-mapped light in a frame.
 static rhi::RenderTargetHandle rhiShadowMap = 0;
 static int rhiShadowMapSize = 0;
+
+// DUDE sun shadow maps (r_shadowMapSun): the current sun light's fitted virtual
+// projection — world-space S, T, Q, depth planes. Written by RB_RHI_ShadowMapPassSun,
+// read by the receiver parms fill (mode 3) while ictx.lightSunShadow is set.
+static idPlane rhiSunPlanes[4];
 
 // The cube depth target currently selected for this light's render/sample. It comes
 // from either the static cube cache (rhiCubeCache, keyed per light — see
@@ -958,7 +968,26 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		// the spare pbrParms2.y slot; 0 keeps the old constant bias.
 		parms.pbrParms2[1] = r_shadowMapSlopeBias.GetFloat();
 
-		if ( ictx.lightShadowMapped ) {
+		if ( ictx.lightShadowMapped && ictx.lightSunShadow ) {
+			// DUDE sun shadow map (mode 3): the map was rendered through the per-view
+			// fitted VIRTUAL projection (rhiSunPlanes), so the lookup must use those
+			// same planes — the light's own texgen never saw this map. The compare
+			// reference is the virtual depth plane (shadowFalloffS -> var_ShadowProjection.z);
+			// the sun map's depth unit spans the whole fitted region, so the bias has
+			// its own (smaller) cvar. Slope-scaling still applies via pbrParms2.y.
+			parms.shadowParms[0] = 3.0f;		// sun: virtual-projection 2D map on unit 7
+			parms.shadowParms[1] = ( rhiShadowMapSize > 0 ) ? 1.0f / (float)rhiShadowMapSize : 0.0f;
+			parms.shadowParms[2] = r_shadowMapSunBias.GetFloat();
+			idPlane rawLp;
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, rhiSunPlanes[0], rawLp );
+			memcpy( parms.shadowProjectionS, rawLp.ToFloatPtr(), 16 );
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, rhiSunPlanes[1], rawLp );
+			memcpy( parms.shadowProjectionT, rawLp.ToFloatPtr(), 16 );
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, rhiSunPlanes[2], rawLp );
+			memcpy( parms.shadowProjectionQ, rawLp.ToFloatPtr(), 16 );
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, rhiSunPlanes[3], rawLp );
+			memcpy( parms.shadowFalloffS, rawLp.ToFloatPtr(), 16 );
+		} else if ( ictx.lightShadowMapped ) {
 			parms.shadowParms[0] = 1.0f;		// projected/spot: 2D map on unit 7
 			parms.shadowParms[1] = ( rhiShadowMapSize > 0 ) ? 1.0f / (float)rhiShadowMapSize : 0.0f;
 			parms.shadowParms[2] = bias;
@@ -1774,9 +1803,17 @@ Renders one interaction chain's depth from a projected light's point of view thr
 the shadow_sm program. The light-projection planes are transformed into each surface's
 model space exactly like the interaction pass, so shadow_sm.vert projects to the same
 cookie UV and writes the linear falloff as depth.
+
+projPlanes overrides the projection: 4 world-space planes (S, T, Q, falloff/depth) —
+the sun pass (RB_RHI_ShadowMapPassSun) renders through a per-view fitted VIRTUAL
+projection instead of the light's own texgen. NULL = the light's lightProject[0..3].
 ===================
 */
-static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::ShaderHandle prog ) {
+static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::ShaderHandle prog,
+                                      const idPlane *projPlanes = NULL ) {
+	if ( projPlanes == NULL ) {
+		projPlanes = backEnd.vLight->lightProject;		// idPlane[4]: S, T, Q, falloff
+	}
 	for ( ; surf; surf = surf->nextOnLight ) {
 		const srfTriangles_t *tri = surf->geo;
 		if ( !tri || ( !tri->ambientCache && !tri->gpuSkinVB ) || !tri->numIndexes ) {
@@ -1789,13 +1826,13 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		rhi::RenderParams parms;
 		memset( &parms, 0, sizeof( parms ) );
 		idPlane lp;
-		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[0], lp );
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, projPlanes[0], lp );
 		memcpy( parms.lightProjectionS, lp.ToFloatPtr(), 16 );
-		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[1], lp );
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, projPlanes[1], lp );
 		memcpy( parms.lightProjectionT, lp.ToFloatPtr(), 16 );
-		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[2], lp );
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, projPlanes[2], lp );
 		memcpy( parms.lightProjectionQ, lp.ToFloatPtr(), 16 );
-		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[3], lp );
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, projPlanes[3], lp );
 		memcpy( parms.lightFalloffS, lp.ToFloatPtr(), 16 );
 
 		int smCull;
@@ -1860,6 +1897,7 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 // uses them. r_shadowMapDebug counters: 2D cache hits vs maps actually rendered.
 static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float range, int size, bool *outDynamic, unsigned long long *outLightTok = NULL, bool staticOnly = false );
 static rhi::RenderTargetHandle RB_RHI_Acquire2DTarget( rhi::RHI *r, int lightIndex, int size, unsigned long long token, bool &hit );
+static unsigned long long RB_RHI_HashBytes( unsigned long long h, const void *data, size_t n );
 static int rhiMapCacheHits = 0;
 static int rhiMapCacheRendered = 0;
 
@@ -1918,6 +1956,158 @@ static bool RB_RHI_ShadowMapPass( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderH
 	RB_RHI_ShadowCasterChain( r, vLight->shadowMapCasters, prog );
 
 	r->EndPass();		// restores the backbuffer + the main view's viewport
+	return true;
+}
+
+/*
+===================
+Sun shadow maps (r_shadowMapSun — docs/shadow-research.md item 1, milestone 1)
+
+Oversize "sun replacement" omni lights and parallel lights can't use the per-light
+shadow paths — a cube can't resolve a shadow thrown thousands of units, and there is
+no directional projection — so they used to fall back to Carmack stencil volumes
+(fill-rate heavy, low-poly silhouettes, the CPU volume build). Instead, render their
+occluders through a per-view fitted VIRTUAL projection into the ordinary 2D pass:
+
+ - The covered region is the view frustum's bounding sphere out to r_shadowMapSunRange
+   (a sphere, so the fit's SIZE is rotation-invariant — no wobble as the camera turns).
+ - An oversize omni gets a perspective frustum from the light origin subtending that
+   sphere (a virtual spot light aimed at the view); a parallel light gets an ortho
+   projection along its direction (Q plane == constant 1 runs through the same
+   shadow_sm math unchanged: ndc = 2*s - q with q == 1).
+ - The projection is expressed as the same 4 texgen planes (S, T, Q, depth) the whole
+   2D pipeline already speaks; shadow_sm renders the casters, and the receiver samples
+   with the same planes in shader mode 3 (compare ref = the virtual depth plane).
+ - The fit is quantized (sphere center snapped to a texel-scale grid) so an idle view
+   produces bit-identical planes and a stable cache token — the static 2D cache then
+   skips the re-render entirely while nothing moves.
+
+The fitted planes are stashed in rhiSunPlanes (declared with the shadow globals up top)
+for the receiver fill; a successful pass sets ictx.lightShadowMapped + lightSunShadow,
+which suppresses the stencil draw for this light (useStencil sees shadowMapped) — that
+is the fps win.
+===================
+*/
+static bool RB_RHI_ShadowMapPassSun( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderHandle prog ) {
+	const viewDef_t *viewDef = backEnd.viewDef;
+	if ( !vLight->shadowMapCasters || !vLight->lightDef ) {
+		return false;
+	}
+
+	// ---- fit: bounding sphere of the view frustum out to r_shadowMapSunRange ----
+	const float range = r_shadowMapSunRange.GetFloat();
+	const idVec3 org = viewDef->renderView.vieworg;
+	const idVec3 fwd = viewDef->renderView.viewaxis[0];
+	const float tx = idMath::Tan( DEG2RAD( viewDef->renderView.fov_x * 0.5f ) );
+	const float ty = idMath::Tan( DEG2RAD( viewDef->renderView.fov_y * 0.5f ) );
+	// sphere centered halfway out on the view axis; radius reaches the far corners
+	// (and trivially contains the near end). Not minimal, but stable and simple.
+	idVec3 C = org + fwd * ( 0.5f * range );
+	const float R = idMath::Sqrt( 0.25f + tx * tx + ty * ty ) * range;
+
+	// quantize the center so a stationary view yields identical planes + cache token
+	const float grid = R / 32.0f;
+	for ( int i = 0; i < 3; i++ ) {
+		C[i] = idMath::Rint( C[i] / grid ) * grid;
+	}
+
+	// ---- virtual projection planes (world space) ----
+	const bool isParallel = vLight->lightDef->parms.parallel;
+	idVec3 n;			// projection axis, pointing away from the light
+	float zNear, zFar;	// depth-plane span along n (world units)
+	if ( isParallel ) {
+		// parallel: shadows travel opposite the (normalized) lightCenter direction
+		n = vLight->lightDef->parms.lightCenter;
+		if ( n.Normalize() == 0.0f ) {
+			n.Set( 0.0f, 0.0f, 1.0f );		// same default as R_DeriveLightData
+		}
+		n = -n;
+		// pancake: catch casters far toward the light (ceilings, skylights, terrain)
+		zNear = C * n - 8192.0f;
+		zFar  = C * n + R;
+	} else {
+		// oversize omni: perspective from the light origin, subtending the sphere
+		const idVec3 O = vLight->globalLightOrigin;
+		n = C - O;
+		const float dist = n.Normalize();
+		if ( dist <= R * 1.05f ) {
+			return false;		// light inside/near the covered region: no usable frustum -> stencil
+		}
+		// depth-plane span in ABSOLUTE n·P terms (n·C == n·O + dist), matching the
+		// depth plane below which dots world positions directly
+		zNear = C * n - R;
+		zFar  = C * n + R;
+		// build the S/T planes about the light origin below; fall through with n set
+	}
+
+	idVec3 rightV = ( idMath::Fabs( n.z ) < 0.99f ) ? ( n.Cross( idVec3( 0, 0, 1 ) ) ) : ( n.Cross( idVec3( 1, 0, 0 ) ) );
+	rightV.Normalize();
+	idVec3 upV = rightV.Cross( n );
+
+	// planes in the a*x+b*y+c*z+d form shadow_sm consumes: s=dot(P,S), t=dot(P,T),
+	// q=dot(P,Q), depth=dot(P,F); ndc = (2s-q, 2t-q, ., q)
+	if ( isParallel ) {
+		// ortho: s = 0.5 + (P-C)·right/(2R); q = 1; depth spans [zNear, zFar] along n
+		rhiSunPlanes[0].SetNormal( rightV / ( 2.0f * R ) );
+		rhiSunPlanes[0][3] = 0.5f - ( C * rightV ) / ( 2.0f * R );
+		rhiSunPlanes[1].SetNormal( upV / ( 2.0f * R ) );
+		rhiSunPlanes[1][3] = 0.5f - ( C * upV ) / ( 2.0f * R );
+		rhiSunPlanes[2].SetNormal( vec3_origin );
+		rhiSunPlanes[2][3] = 1.0f;
+	} else {
+		// perspective from O: with p = P - O, z = p·n, tanT covering the sphere:
+		// s/q = 0.5 + (p·right)/(2 z tanT), q = z  ->  S = 0.5*n + right/(2 tanT)
+		const idVec3 O = vLight->globalLightOrigin;
+		const float dist = ( C - O ).Length();
+		const float tanT = R / idMath::Sqrt( dist * dist - R * R );
+		idVec3 sN = 0.5f * n + rightV / ( 2.0f * tanT );
+		rhiSunPlanes[0].SetNormal( sN );
+		rhiSunPlanes[0][3] = -( sN * O );
+		idVec3 tN = 0.5f * n + upV / ( 2.0f * tanT );
+		rhiSunPlanes[1].SetNormal( tN );
+		rhiSunPlanes[1][3] = -( tN * O );
+		rhiSunPlanes[2].SetNormal( n );
+		rhiSunPlanes[2][3] = -( n * O );
+	}
+	// depth plane: 0..1 over [zNear, zFar] along n (both species)
+	rhiSunPlanes[3].SetNormal( n / ( zFar - zNear ) );
+	rhiSunPlanes[3][3] = -zNear / ( zFar - zNear );
+
+	// ---- target + cache ----
+	const int mapHi = idMath::ClampInt( 256, 4096, glConfig.maxTextureSize );
+	const int size = idMath::ClampInt( 256, mapHi, r_shadowMapSize.GetInteger() );	// base res; no radius tiering (the fit IS the sizing)
+	const int lightIndex = vLight->lightDef->index;
+	bool dynamic = false;
+	unsigned long long token = RB_RHI_CubeToken( vLight, 0.0f, size, &dynamic );
+	// fold the quantized fit into the token: a moved view = new planes = re-render;
+	// an idle view = identical planes = static-cache hit. R rides along because every
+	// plane scales with it and it changes with fov (scripted zooms, g_fov) even while
+	// C and range hold still — without it a fov change would sample a stale map
+	// through mismatched planes.
+	token = RB_RHI_HashBytes( token, C.ToFloatPtr(), 3 * (int)sizeof( float ) );
+	token = RB_RHI_HashBytes( token, &range, (int)sizeof( range ) );
+	token = RB_RHI_HashBytes( token, &R, (int)sizeof( R ) );
+	bool hit = false;
+	rhiShadowMap = dynamic ? 0 : RB_RHI_Acquire2DTarget( r, lightIndex, size, token, hit );
+	if ( rhiShadowMap == 0 ) {
+		rhiShadowMap = RB_RHI_ShadowPoolTarget( r, false, -SHADOW_TIER_MIN, size );	// scratch fallback (base tier)
+	}
+	rhiShadowMapSize = size;
+	if ( rhiShadowMap == 0 ) {
+		return false;
+	}
+	if ( hit ) {
+		rhiMapCacheHits++;
+		return true;		// planes re-derived above are bit-identical to the cached render
+	}
+	rhiMapCacheRendered++;
+
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.depth = true;
+	r->BeginTargetPass( rhiShadowMap, &clear );
+	RB_RHI_ShadowCasterChain( r, vLight->shadowMapCasters, prog, rhiSunPlanes );
+	r->EndPass();
 	return true;
 }
 
@@ -4571,6 +4761,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			// falls back to stencil. That mix is exactly the free per-light selection.
 			// Reading lightDef->parms here is a read-only frontend query.
 			ictx.lightShadowMapped = false;
+			ictx.lightSunShadow = false;
 			ictx.shadowImage = 0;
 			ictx.lightShadowCube = false;
 			ictx.shadowCubeImage = 0;
@@ -4624,15 +4815,36 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			const bool oversize = smEnabled && smStencilRadius > 0.0f
 			    && lightMaxAxis > smStencilRadius && !ictx.lightIsFlashlight;
 
-			if ( smEnabled && lightMayShadow && hasInteractions && !oversize ) {
-				if ( !isPoint && !isParallel ) {
+			if ( smEnabled && lightMayShadow && hasInteractions ) {
+				if ( ( oversize || isParallel ) && r_shadowMapSun.GetBool() ) {
+					// DUDE sun shadow maps (docs/shadow-research.md item 1): oversize
+					// "sun replacement" omnis and parallel lights render a per-view
+					// fitted virtual 2D map instead of the stencil fallback. The fit
+					// requires the light to sit OUTSIDE the fitted view sphere (a
+					// projection from the light toward the view) — a distant sky sun
+					// qualifies; a big omni you stand next to does not, and declines.
+					if ( RB_RHI_ShadowMapPassSun( r, vLight, shadowMapProg ) ) {
+						ictx.lightShadowMapped = true;
+						ictx.lightSunShadow = true;
+						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
+						dbgShadowMapped++;
+					}
+				}
+				if ( !ictx.lightShadowMapped && !oversize && !isPoint && !isParallel ) {
 					// projected / spot light: single 2D depth map
 					if ( RB_RHI_ShadowMapPass( r, vLight, shadowMapProg ) ) {
 						ictx.lightShadowMapped = true;
 						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
 						dbgShadowMapped++;
 					}
-				} else if ( isPoint && !isParallel && RB_RHI_PointLightInBudget( viewDef, vLight ) ) {
+				} else if ( !ictx.lightShadowMapped && isPoint && !isParallel
+				            // an oversize point light reaches the cube path only when the sun
+				            // fit declined it (light inside the fitted region = a big indoor
+				            // omni, not a distant sun): the adaptive tiers give it a usable
+				            // cube, and stencil stays the last resort. With r_shadowMapSun
+				            // off, oversize keeps the old direct-to-stencil routing for A/B.
+				            && ( !oversize || r_shadowMapSun.GetBool() )
+				            && RB_RHI_PointLightInBudget( viewDef, vLight ) ) {
 					// point / omni light: 6-face cube map, budgeted by on-screen
 					// importance (r_shadowMapPointLimit) so a busy room stays bounded
 					const float range = RB_RHI_PointLightRange( vLight );
@@ -4675,7 +4887,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				                vLight->lightDef->index,
 				                isPoint ? "point" : ( isParallel ? "parallel" : "projected" ),
 				                lightMayShadow ? "" : " (noShadow)",
-				                ictx.lightShadowCube ? "cube" : ( ictx.lightShadowMapped ? "2D" : ( oversize ? "stencil" : "none" ) ),
+				                ictx.lightShadowCube ? "cube" : ( ictx.lightSunShadow ? "sun" : ( ictx.lightShadowMapped ? "2D" : ( oversize ? "stencil" : "none" ) ) ),
 				                dbgRes,
 				                RB_RHI_CountLightChain( vLight->globalInteractions ),
 				                RB_RHI_CountLightChain( vLight->localInteractions ),

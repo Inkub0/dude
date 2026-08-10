@@ -871,7 +871,12 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 		const bool isFlashlight = lightShader
 			&& idStr::FindText( lightShader->GetName(), "flashlight", false ) != -1;
 		const bool oversize = smStencilRadius > 0.0f && lightMaxAxis > smStencilRadius && !isFlashlight;
-		skipStencilBuild = !oversize;		// shadow-mapped (not oversize) -> the volume is never drawn
+		// shadow-mapped (not oversize) -> the volume is never drawn. With sun shadow maps on
+		// (r_shadowMapSun), oversize lights are ALSO mapped — a distant sun gets the fitted
+		// virtual 2D map, a big indoor omni falls through to a cube — so their volumes can be
+		// skipped too; stencil then only ever draws if every map path failed, and such a light
+		// simply goes unshadowed for that frame instead of paying this build every frame.
+		skipStencilBuild = !oversize || r_shadowMapSun.GetBool();
 	}
 
 	//

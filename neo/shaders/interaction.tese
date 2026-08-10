@@ -74,7 +74,9 @@ void main() {
 	vec4 dp = vec4( pos, 1.0 );
 	var_TexFalloff       = vec2( dot( dp, u_lightFalloffS ), 0.5 );
 	var_TexProjection    = vec4( dot( dp, u_lightProjectionS ), dot( dp, u_lightProjectionT ), 0.0, dot( dp, u_lightProjectionQ ) );
-	var_ShadowProjection = vec4( dot( dp, u_shadowProjectionS ), dot( dp, u_shadowProjectionT ), 0.0, dot( dp, u_shadowProjectionQ ) );
+	// .z = the sun path's (mode 3) compare depth — recomputed at the displaced position
+	// like its neighbors, or tessellated receivers would never take sun shadows
+	var_ShadowProjection = vec4( dot( dp, u_shadowProjectionS ), dot( dp, u_shadowProjectionT ), dot( dp, u_shadowFalloffS ), dot( dp, u_shadowProjectionQ ) );
 	vec3 fragToLight = pos - u_localLightOrigin.xyz;
 	var_ShadowCubeVec = vec3( dot( u_modelMatrixRow0.xyz, fragToLight ),
 	                          dot( u_modelMatrixRow1.xyz, fragToLight ),

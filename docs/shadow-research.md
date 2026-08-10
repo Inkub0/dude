@@ -26,6 +26,14 @@ Ray-query (RTX) is the long-horizon endgame but is gated on a prerequisite we la
 ## Ranked shortlist (value : effort : fit)
 
 ### 1. Cascaded Shadow Maps (CSM) — closes the stencil-for-sun gap · MED effort · GL3 + VK
+> **Milestone 1 SHIPPED (`r_shadowMapSun`, 2026-08-10)** — a single per-view fitted virtual
+> projection per "sun" light, not yet cascades: a distant oversize-omni/parallel sun renders a
+> fitted 2D map (perspective-from-light subtending the view sphere / ortho along the light dir,
+> quantized for cache stability, `r_shadowMapSunRange`); a big walk-around omni the fit declines
+> falls through to the **cube** path (adaptive tiers make it crisp) — so stencil is now the last
+> resort on every routing, its CPU volume build skipped for mapped oversize lights too.
+> User-verified: "looks even better", +2–3% fps. Cascades (below) remain the milestone-2 option
+> if single-map sun quality ever wants more.
 The unanimous #1. N stacked ortho 2D maps over view-frustum depth slices, selected per-pixel by depth.
 Reuses DUDE's existing 2D-map path, PCF, and static/dynamic cache — **no new RHI primitives**, works on
 both backends. Modern best-practice checklist:

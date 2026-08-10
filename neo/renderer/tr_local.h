@@ -956,6 +956,9 @@ extern idCVar r_shadowMapBudgetHysteresis;	// point-light budget stickiness (per
 extern idCVar r_shadowMapMaxUpdates;		// max cached cube maps re-rendered per view (stagger update bursts; 0 = unlimited)
 extern idCVar r_shadowMapStencilRadius;		// lights bigger than this (max radius axis) fall back to stencil shadows
 extern idCVar r_shadowMapSkipStencilBuild;	// skip building CPU stencil volumes for animated casters under shadow-mapped lights
+extern idCVar r_shadowMapSun;				// oversize/parallel "sun" lights: per-view fitted 2D map instead of stencil
+extern idCVar r_shadowMapSunBias;			// sun map depth-compare bias
+extern idCVar r_shadowMapSunRange;			// how far ahead of the camera the sun map covers (world units)
 
 // DUDE: emissive fill lights for interactive GUI screens (enhancement backends only)
 extern idCVar r_emissiveSurfaces;		// master toggle (emissive surfaces cast fill light)

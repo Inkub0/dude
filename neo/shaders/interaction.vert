@@ -56,9 +56,12 @@ void main() {
 	// var_TexProjection carries the light stage's texture matrix (rotating fan gobo),
 	// but the shadow depth map was rendered raw, so it must be sampled raw. Equal to
 	// var_TexProjection for lights without a projection texture matrix.
+	// .z = the sun path's (mode 3) compare depth along the virtual projection's
+	// falloff plane; zero-filled (harmless) on the ordinary 2D path, which takes its
+	// reference from the light falloff instead.
 	var_ShadowProjection = vec4( dot( attr_Position, u_shadowProjectionS ),
 	                             dot( attr_Position, u_shadowProjectionT ),
-	                             0.0,
+	                             dot( attr_Position, u_shadowFalloffS ),
 	                             dot( attr_Position, u_shadowProjectionQ ) );
 
 	// half-angle vector in tangent space (normalize both, add; length-free in fp)

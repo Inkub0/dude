@@ -102,4 +102,7 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // the shadow map is rendered raw, so it must be sampled raw or
 	                            // the shadow swims with the animation. Filled only on the
 	                            // projected-2D shadow path (0 otherwise).
+	vec4 u_shadowFalloffS;       // DUDE sun shadows: the virtual projection's depth plane —
+	                            // the compare reference for the mode-3 (sun) shadow lookup.
+	                            // Filled only on the sun path (0 otherwise).
 };

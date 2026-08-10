@@ -631,10 +631,11 @@ void idRenderSystemLocal::BeginFrame( int windowWidth, int windowHeight ) {
 	// with the volume built (or skipped) to match. Mirrors the FreeInteractions() reset the
 	// vertex-program-state switch already uses.
 	if ( r_shadowMapSkipStencilBuild.IsModified() || r_shadowMapping.IsModified()
-			|| r_shadowMapStencilRadius.IsModified() ) {
+			|| r_shadowMapStencilRadius.IsModified() || r_shadowMapSun.IsModified() ) {
 		r_shadowMapSkipStencilBuild.ClearModified();
 		r_shadowMapping.ClearModified();
 		r_shadowMapStencilRadius.ClearModified();
+		r_shadowMapSun.ClearModified();		// sun maps change the oversize skip decision too
 		if ( primaryWorld ) {
 			primaryWorld->FreeInteractions();
 		}
