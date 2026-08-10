@@ -74,10 +74,20 @@ void main() {
 	vec4 dp = vec4( pos, 1.0 );
 	var_TexFalloff       = vec2( dot( dp, u_lightFalloffS ), 0.5 );
 	var_TexProjection    = vec4( dot( dp, u_lightProjectionS ), dot( dp, u_lightProjectionT ), 0.0, dot( dp, u_lightProjectionQ ) );
+	// Normal-offset shadow bias at the displaced position (mirrors interaction.vert:
+	// u_pbrParms2.w in texels; sun texel world size in u_shadowParms.w, cube face
+	// texel = 2*dist/res). Only the shadow lookups use the offset position.
+	vec4 shadowDp = dp;
+	if ( u_pbrParms2.w > 0.0 && u_shadowParms.x > 2.5 ) {
+		shadowDp.xyz += geoN * ( u_pbrParms2.w * u_shadowParms.w );
+	}
 	// .z = the sun path's (mode 3) compare depth — recomputed at the displaced position
 	// like its neighbors, or tessellated receivers would never take sun shadows
-	var_ShadowProjection = vec4( dot( dp, u_shadowProjectionS ), dot( dp, u_shadowProjectionT ), dot( dp, u_shadowFalloffS ), dot( dp, u_shadowProjectionQ ) );
+	var_ShadowProjection = vec4( dot( shadowDp, u_shadowProjectionS ), dot( shadowDp, u_shadowProjectionT ), dot( shadowDp, u_shadowFalloffS ), dot( shadowDp, u_shadowProjectionQ ) );
 	vec3 fragToLight = pos - u_localLightOrigin.xyz;
+	if ( u_pbrParms2.w > 0.0 && u_shadowParms.x > 1.5 && u_shadowParms.x < 2.5 ) {
+		fragToLight += geoN * ( u_pbrParms2.w * 2.0 * length( fragToLight ) * u_shadowParms.y );
+	}
 	var_ShadowCubeVec = vec3( dot( u_modelMatrixRow0.xyz, fragToLight ),
 	                          dot( u_modelMatrixRow1.xyz, fragToLight ),
 	                          dot( u_modelMatrixRow2.xyz, fragToLight ) );

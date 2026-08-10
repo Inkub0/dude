@@ -959,6 +959,7 @@ extern idCVar r_shadowMapSkipStencilBuild;	// skip building CPU stencil volumes 
 extern idCVar r_shadowMapSun;				// oversize/parallel "sun" lights: per-view fitted 2D map instead of stencil
 extern idCVar r_shadowMapSunBias;			// sun map depth-compare bias
 extern idCVar r_shadowMapSunRange;			// how far ahead of the camera the sun map covers (world units)
+extern idCVar r_shadowMapNormalOffset;		// normal-offset shadow bias in texels (cube + sun lookups; 0 = off)
 
 // DUDE: emissive fill lights for interactive GUI screens (enhancement backends only)
 extern idCVar r_emissiveSurfaces;		// master toggle (emissive surfaces cast fill light)

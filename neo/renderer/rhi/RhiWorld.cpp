@@ -94,7 +94,10 @@ static int rhiShadowMapSize = 0;
 // DUDE sun shadow maps (r_shadowMapSun): the current sun light's fitted virtual
 // projection — world-space S, T, Q, depth planes. Written by RB_RHI_ShadowMapPassSun,
 // read by the receiver parms fill (mode 3) while ictx.lightSunShadow is set.
+// rhiSunTexelWorld = one sun-map texel's world size at the fit center, for the
+// normal-offset bias (r_shadowMapNormalOffset).
 static idPlane rhiSunPlanes[4];
+static float rhiSunTexelWorld = 0.0f;
 
 // The cube depth target currently selected for this light's render/sample. It comes
 // from either the static cube cache (rhiCubeCache, keyed per light — see
@@ -978,6 +981,10 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			parms.shadowParms[0] = 3.0f;		// sun: virtual-projection 2D map on unit 7
 			parms.shadowParms[1] = ( rhiShadowMapSize > 0 ) ? 1.0f / (float)rhiShadowMapSize : 0.0f;
 			parms.shadowParms[2] = r_shadowMapSunBias.GetFloat();
+			// normal-offset bias (interaction.vert/.tese): w = one sun texel's world
+			// size at the fit center; pbrParms2.w = the offset strength in texels
+			parms.shadowParms[3] = rhiSunTexelWorld;
+			parms.pbrParms2[3] = r_shadowMapNormalOffset.GetFloat();
 			idPlane rawLp;
 			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, rhiSunPlanes[0], rawLp );
 			memcpy( parms.shadowProjectionS, rawLp.ToFloatPtr(), 16 );
@@ -1013,6 +1020,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			// static/dynamic split: also sample the movers' cube (unit 12) and take the
 			// darker of the two. pbrParms2.z is the hasDynamicLayer flag the shader gates on.
 			parms.pbrParms2[2] = ( ictx.lightHasDynamicLayer && ictx.shadowCubeDynImage ) ? 1.0f : 0.0f;
+			// normal-offset bias (interaction.vert/.tese): strength in texels; the shader
+			// derives the world size per texel from 2*dist/res (exact for a cube face)
+			parms.pbrParms2[3] = r_shadowMapNormalOffset.GetFloat();
 		}
 	}
 
@@ -2046,6 +2056,7 @@ static bool RB_RHI_ShadowMapPassSun( rhi::RHI *r, viewLight_t *vLight, rhi::Shad
 
 	// planes in the a*x+b*y+c*z+d form shadow_sm consumes: s=dot(P,S), t=dot(P,T),
 	// q=dot(P,Q), depth=dot(P,F); ndc = (2s-q, 2t-q, ., q)
+	float fitWidth = 2.0f * R;		// world width the map spans at the fit center (ortho exact)
 	if ( isParallel ) {
 		// ortho: s = 0.5 + (P-C)·right/(2R); q = 1; depth spans [zNear, zFar] along n
 		rhiSunPlanes[0].SetNormal( rightV / ( 2.0f * R ) );
@@ -2060,6 +2071,7 @@ static bool RB_RHI_ShadowMapPassSun( rhi::RHI *r, viewLight_t *vLight, rhi::Shad
 		const idVec3 O = vLight->globalLightOrigin;
 		const float dist = ( C - O ).Length();
 		const float tanT = R / idMath::Sqrt( dist * dist - R * R );
+		fitWidth = 2.0f * dist * tanT;		// frustum width at the fit center
 		idVec3 sN = 0.5f * n + rightV / ( 2.0f * tanT );
 		rhiSunPlanes[0].SetNormal( sN );
 		rhiSunPlanes[0][3] = -( sN * O );
@@ -2093,6 +2105,7 @@ static bool RB_RHI_ShadowMapPassSun( rhi::RHI *r, viewLight_t *vLight, rhi::Shad
 		rhiShadowMap = RB_RHI_ShadowPoolTarget( r, false, -SHADOW_TIER_MIN, size );	// scratch fallback (base tier)
 	}
 	rhiShadowMapSize = size;
+	rhiSunTexelWorld = fitWidth / (float)size;	// for the normal-offset bias (set on cache hits too)
 	if ( rhiShadowMap == 0 ) {
 		return false;
 	}

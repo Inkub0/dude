@@ -367,8 +367,8 @@ idCVar r_ssrGlassProbeSize( "r_ssrGlassProbeSize", "256", CVAR_RENDERER | CVAR_A
 // stencil until implemented). See docs/port-phases.md Phase 8.
 idCVar r_shadowMapping( "r_shadowMapping", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "shadow technique: 0 = stencil volumes (faithful), 1 = shadow maps where supported" );
 idCVar r_shadowMapSize( "r_shadowMapSize", "1024", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "shadow map resolution (per light), power of two", 256, 4096 );
-idCVar r_shadowMapBias( "r_shadowMapBias", "0.0050", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for world/perforated receivers (acne suppression)", 0.0f, 0.5f );
-idCVar r_shadowMapModelBias( "r_shadowMapModelBias", "0.0035", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for model (non-world) receivers; models usually need more", 0.0f, 0.5f );
+idCVar r_shadowMapBias( "r_shadowMapBias", "0.0008", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for world/perforated receivers (acne suppression). Tuned tight against r_shadowMapNormalOffset, which now carries most of the anti-acne load geometrically", 0.0f, 0.5f );
+idCVar r_shadowMapModelBias( "r_shadowMapModelBias", "0.0012", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for model (non-world) receivers; models usually need more. Tuned tight against r_shadowMapNormalOffset", 0.0f, 0.5f );
 idCVar r_shadowMapFlashlightBias( "r_shadowMapFlashlightBias", "0.001", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for the player flashlight; its grazing narrow cone needs a much smaller bias than other lights (0.0001-0.005) to avoid peter-panning", 0.0f, 0.5f );
 idCVar r_shadowMapSlopeBias( "r_shadowMapSlopeBias", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map slope-scaled bias: grows the depth bias by this * tan(surface-to-light angle) to kill banded acne where light grazes a surface. 0 = flat constant bias (old behaviour)", 0.0f, 8.0f );
 idCVar r_shadowMapDebug( "r_shadowMapDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "shadow-map debug: 1 = per-view light classification summary, 2 = also per-light readout (technique, occluder counts, dist/radius)", 0, 2 );
@@ -393,8 +393,9 @@ idCVar r_shadowMapSkipStencilBuild( "r_shadowMapSkipStencilBuild", "1", CVAR_REN
 // DUDE sun shadow maps (docs/shadow-research.md item 1): oversize-omni / parallel "sun"
 // lights get a per-view fitted virtual 2D shadow map instead of Carmack stencil volumes.
 idCVar r_shadowMapSun( "r_shadowMapSun", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "oversize 'sun replacement' omni lights and parallel lights render a per-view fitted 2D shadow map instead of falling back to stencil volumes (needs r_shadowMapping). 0 = old stencil fallback" );
-idCVar r_shadowMapSunBias( "r_shadowMapSunBias", "0.0015", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "depth-compare bias for sun shadow maps; the sun map's depth unit spans the whole fitted view region, so this is smaller than the per-light biases", 0.0f, 0.1f );
+idCVar r_shadowMapSunBias( "r_shadowMapSunBias", "0.0008", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "depth-compare bias for sun shadow maps; the sun map's depth unit spans the whole fitted view region, so this is smaller than the per-light biases. Tuned tight against r_shadowMapNormalOffset", 0.0f, 0.1f );
 idCVar r_shadowMapSunRange( "r_shadowMapSunRange", "3000", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how far ahead of the camera (world units) the sun shadow map covers; bigger = longer shadow reach but coarser texels", 512.0f, 16384.0f );
+idCVar r_shadowMapNormalOffset( "r_shadowMapNormalOffset", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "normal-offset shadow bias in shadow texels: the cube and sun shadow lookups sample from a point pushed along the surface normal by about this many texels' world size, killing grazing-angle acne geometrically instead of with a large depth bias. 0 = off", 0.0f, 8.0f );
 
 // DUDE: emissive fill lights — interactive GUI screens (monitors, keypads, wall
 // panels) glow but cast no light in Doom 3's model, so they read as decals pasted

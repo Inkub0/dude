@@ -86,7 +86,11 @@ struct RenderParams {
 								// fallbacks; Phase B swaps in per-material values.
 	float	pbrParms2[4];		// DUDE PBR extras: x = metal diffuse-kill strength kd
 								// (= 1 - r_pbrMetalDiffuse); diffuse *= 1 - metal*kd, so
-								// kd < 1 retains the asset albedo colour on metals. yzw spare.
+								// kd < 1 retains the asset albedo colour on metals.
+								// Shadow riders: y = slope-scaled bias strength
+								// (r_shadowMapSlopeBias), z = static/dynamic split
+								// hasDynamicLayer flag, w = normal-offset bias in texels
+								// (r_shadowMapNormalOffset; cube + sun lookups).
 
 	float	tessParms[4];		// DUDE tessellation (docs/tessellation.md): x = tess level
 								// (subdivision cap; 1 = flat), y = max view distance for the
