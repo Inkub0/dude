@@ -2443,19 +2443,31 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 =============
 RB_RHI_StagePolyOffset{Begin,End}
 
-Per-stage polygon offset (Material privatePolygonOffset): the dissolving/burning
-corpse and some weapon stages carry their own offset on top of any material-level
-MF_POLYGONOFFSET. Stock GL applies it in RB_PrepareStageTexturing / disables it in
-RB_FinishStageTexturing (draw_common.cpp:87,260); the RHI stage path never ported
-it, so those stages z-fight on both backends (VK doubly so — qgl* are NULL no-ops,
-only r->SetPolygonOffset -> vkCmdSetDepthBias lands). Mirrors the material-level
-dual pattern at the top of RB_RHI_RenderShaderPasses. End restores the material-level
-offset (or none) rather than leaving the stage's value latched, because on VK the
-dynamic depth bias persists per-draw and would bleed into the following stages.
+Per-stage polygon offset (Material privatePolygonOffset): some weapon/decal stages
+carry their own offset on top of any material-level MF_POLYGONOFFSET. Stock GL applies
+it in RB_PrepareStageTexturing / disables it in RB_FinishStageTexturing
+(draw_common.cpp:87,260); the RHI stage path never ported it (VK doubly so — qgl* are
+NULL no-ops, only r->SetPolygonOffset -> vkCmdSetDepthBias lands). Mirrors the
+material-level dual pattern at the top of RB_RHI_RenderShaderPasses. End restores the
+material-level offset (or none) rather than leaving the stage's value latched, because
+on VK the dynamic depth bias persists per-draw and would bleed into the following stages.
+
+CRUCIAL EXCLUSION: skip DEPTHFUNC_EQUAL stages. Polygon offset only orders geometry
+under an *inequality* depth test; at EQUAL a stage must match the zfill prepass depth
+exactly, and the prepass carries no per-stage offset, so any bias makes the stage FAIL
+EQUAL and vanish. The imp "burning corpse" fire stage is exactly this — privatePolygonOffset
+-1 AND drawn at EQUAL (against the deform-once zfill, docs/tessellation.md) — so applying
+the offset drops the ember. (Material-level MF_POLYGONOFFSET is fine at EQUAL: the RHI zfill
+applies that same offset, so prepass and stage still match.)
 =============
 */
+static bool RB_RHI_StageWantsPolyOffset( const shaderStage_t *pStage ) {
+	return pStage->privatePolygonOffset != 0.0f
+	    && ( pStage->drawStateBits & GLS_DEPTHFUNC_EQUAL ) == 0;
+}
+
 static void RB_RHI_StagePolyOffsetBegin( rhi::RHI *r, const shaderStage_t *pStage ) {
-	if ( pStage->privatePolygonOffset == 0.0f ) {
+	if ( !RB_RHI_StageWantsPolyOffset( pStage ) ) {
 		return;
 	}
 	if ( qglEnable != NULL ) {
@@ -2466,7 +2478,7 @@ static void RB_RHI_StagePolyOffsetBegin( rhi::RHI *r, const shaderStage_t *pStag
 }
 
 static void RB_RHI_StagePolyOffsetEnd( rhi::RHI *r, const shaderStage_t *pStage, const idMaterial *shader ) {
-	if ( pStage->privatePolygonOffset == 0.0f ) {
+	if ( !RB_RHI_StageWantsPolyOffset( pStage ) ) {
 		return;
 	}
 	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
