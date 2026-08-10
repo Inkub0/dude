@@ -42,7 +42,16 @@
   higher resolution and one fewer pass in the pipeline. SMAA-only for now (FXAA keeps its separate pass,
   trivial to fold later); auto-falls back to the classic path if a shader/target is unavailable. Added
   to `gl3BootPrograms[]` for boot-time validation.
-- **TAA — PENDING.** Reuses the temporal-SSAO machinery; blocked on per-object motion vectors (below).
+- **TAA — SUPERSEDED BY FSR2 (planned).** The hand-rolled TAA sketched below is replaced by
+  integrating **AMD FSR2+ in Native-AA mode** (render scale 1.0) as roadmap item R1 in
+  [rtx-shadow-roadmap.md](rtx-shadow-roadmap.md): FSR2 *is* a production TAA (temporal accumulation
+  + RCAS sharpening) with the render-scale upscaling knob for free — one integration instead of two.
+  Same prerequisites as TAA (per-object motion vectors, sub-pixel jitter) plus reactive masks for
+  Doom 3's additive particles (the real work) and a resolve reorder (FSR2 before grain/HUD at
+  display res). MIT-licensed pure compute — runs on any VK-capable GPU, no vendor lock; **VK-only**
+  (GL3.3 keeps SMAA/FXAA), cvar + preset gated so off = today's renderer. FSR3.1 frame generation
+  deliberately parked: `com_interpolate` already renders real >60Hz frames. The TAA notes below are
+  kept as design reference for the shared prerequisites.
 
 The sections below are the original design sketch; TAA remains the planned upgrade.
 

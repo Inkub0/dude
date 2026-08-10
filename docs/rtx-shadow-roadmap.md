@@ -25,11 +25,34 @@ can remove it — and they are **not** both needed.
 
 ## Track 1 — the RTX line (build this)
 
-### R1. Per-object motion vectors — the keystone · MED · both backends · anytime
-Prev-frame MVP per surface → a velocity target during zfill. Unlocks **TAA** (~80% wired via the
-temporal-SSAO machinery) *and* temporal RT-shadow denoising (SIGMA temporal / A-SVGF) — one
-structural investment, two features. No dependency on anything below; do it in parallel whenever.
-(Until it lands, the RT soft tier runs spatial-only with mild flicker — acceptable, not final.)
+### R1. Temporal pipeline: motion vectors + jitter + FSR2 — the keystone · LARGE · anytime
+Grown from "per-object motion vectors" into the full temporal pipeline, superseding the old
+hand-rolled-TAA plan (docs/antialiasing.md):
+- **Motion vectors** (prev-frame MVP per surface → velocity target during zfill; camera-derived for
+  static world) — both backends benefit (SSAO temporal), and they feed everything temporal below.
+- **Sub-pixel projection jitter** + the pipeline reorder: scene renders at render-res into the HDR
+  buffer (already the pre-tonemap RGBA16F input FSR2 wants) → FSR2 → grain/chroma/dither/HUD at
+  display res (the resolve currently folds grain in early — bounded reordering work).
+- **FSR2 in Native-AA mode first** (render scale 1.0): a production-grade TAA that resolves the
+  specular/normal-map shimmer SMAA structurally can't — then the **render-scale knob for free**
+  (67% scale ≈ half the per-pixel ray budget when the RT tiers land; today it's banked headroom,
+  since the 3080 Ti frame is CPU-front-end-bound).
+- **The real integration work is reactive masks**: Doom 3 is drenched in additive particles/muzzle
+  flashes, the classic temporal-upscaler ghosting case. Budget most of the effort there, not in the
+  API hookup.
+- **Hardware/licensing:** FSR2 is MIT-licensed pure compute — no vendor blob, no tensor cores; it
+  runs on ANY GPU our Vulkan backend already supports (needs compute → **VK-only**; GL3.3 keeps
+  SMAA/FXAA; the legacy backend stays byte-faithful). Gated behind a cvar + preset tier like every
+  enhancement, it restricts no hardware: off = today's renderer, bit for bit. Keep the inputs
+  (MVs, depth, jitter, exposure) vendor-neutral so a DLSS path could slot in later without
+  committing the GPL repo to a proprietary blob.
+- Also unlocks temporal RT-shadow denoising (SIGMA temporal / A-SVGF) for R5, and makes IGN-seeded
+  noise usable again (the moiré lesson inverts under temporal accumulation).
+- **Frame generation (FSR3.1 FG) is deliberately parked**: `com_interpolate` already renders REAL
+  frames above the 60 Hz sim — better than interpolated ones on both quality and latency. FG only
+  pays if the RT endgame becomes GPU-bound below display rate; revisit then, mindful of input
+  latency and HUD compositing.
+(Until R1 lands, the RT soft tier runs spatial-only with mild flicker — acceptable, not final.)
 
 ### R2. Ray-query foundation · LARGE · VK-only, RT-gated
 The minimum stack is `VK_KHR_acceleration_structure` + `VK_KHR_ray_query` only — **skip the
@@ -105,17 +128,20 @@ Worth doing opportunistically; not on the RTX critical path.
 ## Sequencing
 
 ```
-R1 motion vectors ──────────────┐  (parallel track, any time — also unlocks TAA)
-                                ▼
+R1 temporal pipeline (MVs + jitter + FSR2) ──┐  (parallel track — TAA-class AA now,
+                                             ▼   render-scale headroom for the RT tiers)
 R2 ray-query foundation ──► R3 RT hard shadows ──► R4 hybrid ──► R5 soft (STBN+SIGMA)
       (AS API, BLAS/TLAS,        (sun first,           (maps stay     (temporal once
        deform-once refit,         then cubes;           as base        R1 lands)
        r_rayQueryTest)            "Ultra Nightmare")    tier)
 
+FSR3.1 frame generation — PARKED behind com_interpolate; revisit only if R5-era GPU-bound
 T1 unified-buffer caster pass — DEFERRED: only as Phase-3.2b pilot or for non-RT perf
 T2 cube scheduling — opportunistic, low priority
 ```
 
-**Recommended next big step: R2.** It is the only item everything RTX hangs off, our deform-once
-buffer removes its hardest prerequisite, and the validator-first pattern lets it land without
-touching a pixel until proven. R1 can interleave whenever a structural slot opens.
+**Recommended next big steps: R2 or R1, either order.** R2 is the item everything RTX hangs off
+(deform-once removes its hardest prerequisite; validator-first lets it land without touching a
+pixel). R1 now carries immediate user-visible value of its own (FSR2 Native-AA beats SMAA on the
+shimmer Doom 3 actually suffers from) and pre-pays the render-scale headroom the RT tiers will
+spend — a legitimate first pick if AA quality is the itch.
