@@ -1348,6 +1348,31 @@ void RB_RHI_ApplyDeform( const srfTriangles_s *tri, rhi::BufferHandle &vb, int &
 	}
 }
 
+/*
+=============
+RB_RHI_DeformSubStage
+
+The custom-ARB / builtin-ARB / texgen sub-stage helpers below draw a single
+material stage with no tesc/tese pipeline, so they cannot fixed-function
+tessellate. But a mod's emissive stage (self-illum add, reflective cube, etc.)
+on a deform-once BODY still has to track the SAME displaced silhouette the zfill
+prepass + interactions drew from, or a DEPTHFUNC_EQUAL emissive fails EQUAL
+against the deformed depth and drops out (and a cube/skybox texgen samples the
+wrong surface). So redirect these draws to tri->tessDeformVB exactly like the
+generic stage path and every other RHI pass. GPU skinning (gpuSkinVB) is already
+handled upstream by RB_RHI_StreamAmbient, so this only adds the tess-deform case.
+Returns the index count to draw (tessDeformIndexes when redirected, else numIndexes).
+=============
+*/
+static int RB_RHI_DeformSubStage( const drawSurf_t *surf, rhi::BufferHandle &vb, int &vertOfs,
+                                  rhi::BufferHandle &ib, int &idxOfs ) {
+	const srfTriangles_t *tri = surf->geo;
+	int idxCount = tri->numIndexes;
+	bool tess = RB_RHI_TessellateSurf( surf, false );	// deform-once uses the non-blend classify
+	RB_RHI_ApplyDeform( tri, vb, vertOfs, ib, idxOfs, idxCount, tess );
+	return idxCount;
+}
+
 // Resolve this surface's indexes to a GPU buffer + byte offset. When the front
 // end has a resident index VBO (tri->indexCache, populated only when
 // r_useIndexBuffers is set — which the core profile forces on) draw it in
@@ -1606,11 +1631,12 @@ static void RB_RHI_RenderCustomStage( rhi::RHI *r, const viewDef_t *viewDef, con
 	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
 	r->BindPipeline( pd );
 
+	int idxCount = RB_RHI_DeformSubStage( surf, vb, vertOfs, ib, idxOfs );
 	da.vertexBuffer = vb;
 	da.vertexOffset = vertOfs;
 	da.indexBuffer = ib;
 	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-	da.indexCount = tri->numIndexes;
+	da.indexCount = idxCount;
 	da.uniformBuffer = ub;
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( ap );
@@ -1708,11 +1734,12 @@ static void RB_RHI_RenderBuiltinArbStage( rhi::RHI *r, const viewDef_t *viewDef,
 	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
 	r->BindPipeline( pd );
 
+	int idxCount = RB_RHI_DeformSubStage( surf, vb, vertOfs, ib, idxOfs );
 	da.vertexBuffer = vb;
 	da.vertexOffset = vertOfs;
 	da.indexBuffer = ib;
 	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-	da.indexCount = tri->numIndexes;
+	da.indexCount = idxCount;
 	da.uniformBuffer = ub;
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
@@ -2135,11 +2162,12 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 
 	rhi::DrawArgs da;
 	memset( &da, 0, sizeof( da ) );
+	int idxCount = RB_RHI_DeformSubStage( surf, vb, vertOfs, ib, idxOfs );
 	da.vertexBuffer = vb;
 	da.vertexOffset = vertOfs;
 	da.indexBuffer = ib;
 	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-	da.indexCount = tri->numIndexes;
+	da.indexCount = idxCount;
 	da.uniformBuffer = ub;
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
@@ -2370,6 +2398,9 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
 	r->BindPipeline( pd );
 
+	// No RB_RHI_DeformSubStage redirect (unlike the ARB/texgen helpers): a soft particle
+	// is a view-oriented, all-additive/alpha sprite, never a classifier-approved tess body,
+	// so tri->tessDeformVB is always 0 here and the deform would be a no-op anyway.
 	rhi::DrawArgs da;
 	memset( &da, 0, sizeof( da ) );
 	da.vertexBuffer = vb;
@@ -2406,6 +2437,51 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	backEnd.pc.c_drawIndexes += tri->numIndexes;
 	backEnd.pc.c_drawVertexes += tri->numVerts;
 	return true;
+}
+
+/*
+=============
+RB_RHI_StagePolyOffset{Begin,End}
+
+Per-stage polygon offset (Material privatePolygonOffset): the dissolving/burning
+corpse and some weapon stages carry their own offset on top of any material-level
+MF_POLYGONOFFSET. Stock GL applies it in RB_PrepareStageTexturing / disables it in
+RB_FinishStageTexturing (draw_common.cpp:87,260); the RHI stage path never ported
+it, so those stages z-fight on both backends (VK doubly so — qgl* are NULL no-ops,
+only r->SetPolygonOffset -> vkCmdSetDepthBias lands). Mirrors the material-level
+dual pattern at the top of RB_RHI_RenderShaderPasses. End restores the material-level
+offset (or none) rather than leaving the stage's value latched, because on VK the
+dynamic depth bias persists per-draw and would bleed into the following stages.
+=============
+*/
+static void RB_RHI_StagePolyOffsetBegin( rhi::RHI *r, const shaderStage_t *pStage ) {
+	if ( pStage->privatePolygonOffset == 0.0f ) {
+		return;
+	}
+	if ( qglEnable != NULL ) {
+		qglEnable( GL_POLYGON_OFFSET_FILL );
+		qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * pStage->privatePolygonOffset );
+	}
+	r->SetPolygonOffset( true, r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * pStage->privatePolygonOffset );
+}
+
+static void RB_RHI_StagePolyOffsetEnd( rhi::RHI *r, const shaderStage_t *pStage, const idMaterial *shader ) {
+	if ( pStage->privatePolygonOffset == 0.0f ) {
+		return;
+	}
+	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+		// a material-level offset wraps the whole stage loop — restore it (matches
+		// draw_common.cpp:260 leaving MF_POLYGONOFFSET's offset in place)
+		if ( qglEnable != NULL ) {
+			qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+		}
+		r->SetPolygonOffset( true, r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+	} else {
+		if ( qglDisable != NULL ) {
+			qglDisable( GL_POLYGON_OFFSET_FILL );
+		}
+		r->SetPolygonOffset( false, 0.0f, 0.0f );
+	}
 }
 
 /*
@@ -2453,12 +2529,15 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 
 	const float *regs = surf->shaderRegisters;
 
-	// Coplanar decals (bullet/blood hits, signs) rely on polygon offset to win
-	// the depth test against the wall they sit on. The GL path enables it via
-	// qglPolygonOffset; on Vulkan qglEnable is NULL, so the RHI dynamic depth
-	// bias (SetPolygonOffset -> vkCmdSetDepthBias) is the only thing that lands.
-	// Without it decals z-fight the wall and flicker in/out with the camera. The
-	// matching disable is at the end of this function (mirrors RB_RHI_FillDepthBuffer).
+	// MATERIAL-level polygon offset (MF_POLYGONOFFSET): coplanar decals (bullet/blood
+	// hits, signs) rely on it to win the depth test against the wall they sit on. The
+	// GL path enables it via qglPolygonOffset; on Vulkan qglEnable is NULL, so the RHI
+	// dynamic depth bias (SetPolygonOffset -> vkCmdSetDepthBias) is the only thing that
+	// lands. Without it decals z-fight the wall and flicker in/out with the camera. This
+	// offset wraps the WHOLE stage loop; the matching disable is at the end of this
+	// function (mirrors RB_RHI_FillDepthBuffer). The separate PER-STAGE offset
+	// (privatePolygonOffset: dissolve/weapon stages) is bracketed per draw inside the
+	// loop by RB_RHI_StagePolyOffset{Begin,End}, which restore this material offset.
 	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
 		if ( qglEnable != NULL ) {
 			qglEnable( GL_POLYGON_OFFSET_FILL );
@@ -2570,19 +2649,25 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			// _currentRender-sampling stages (heat haze, the RoE grabber warp)
 			// are drawn in the post-process pass, after the framebuffer copy —
 			// materials referencing _currentRender auto-sort to SS_POST_PROCESS
+			RB_RHI_StagePolyOffsetBegin( r, pStage );
 			RB_RHI_RenderCustomStage( r, viewDef, surf, pStage, si.program, mvp, vb, vertOfs, ib, idxOfs );
+			RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 			continue;
 		}
 		if ( si.kind == rhi::SK_BUILTIN_ARB ) {
 			// Vulkan: stock customs through their hand-translated builtins (M5)
+			RB_RHI_StagePolyOffsetBegin( r, pStage );
 			RB_RHI_RenderBuiltinArbStage( r, viewDef, surf, pStage, si.program, mvp, vb, vertOfs, ib, idxOfs );
+			RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 			continue;
 		}
 		if ( si.kind == rhi::SK_TEXGEN ) {
 			// fixed-function texgen (skybox / cube reflection / portal sky);
 			// M5: cube images bind through DrawArgs on Vulkan (the descriptor
 			// writer uses each image's own view — cube views included)
+			RB_RHI_StagePolyOffsetBegin( r, pStage );
 			RB_RHI_RenderTexgenStage( r, viewDef, surf, pStage, si, mvp, vb, vertOfs, ib, idxOfs );
+			RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 			continue;
 		}
 
@@ -2602,6 +2687,12 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			continue;
 		}
 
+		// per-stage polygon offset (privatePolygonOffset: dissolve/burning corpse,
+		// some weapon stages) wraps the actual draw below — the soft-particle helper
+		// or the generic stage. Restored at each exit so it never latches into the
+		// next stage on Vulkan's persistent dynamic depth bias.
+		RB_RHI_StagePolyOffsetBegin( r, pStage );
+
 		// soft particles (#3878): fade this quad against captured scene depth
 		// instead of drawing it as a hard billboard. The front-end flags the
 		// surface + radius (GL3/Vulkan only); we only soften additive / src-alpha
@@ -2616,6 +2707,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			&& ( src_blend == GLS_SRCBLEND_ONE || src_blend == GLS_SRCBLEND_SRC_ALPHA )
 			&& depthCaptured ) {
 			if ( RB_RHI_RenderSoftParticleStage( r, viewDef, surf, pStage, regs, src_blend, color, mvp, tri, vb, vertOfs, ib, idxOfs ) ) {
+				RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 				continue;
 			}
 		}
@@ -2732,6 +2824,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		rhi::ImageHandle stageImage = RB_RHI_BindStageImage( pStage, regs, viewDef );
 		if ( stageImage == RHI_SKIP_STAGE_IMAGE ) {
 			RB_RHI_LogOnce( "VK: stage sampling a never-captured _currentRender/_scratch skipped" );
+			RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 			continue;
 		}
 
@@ -2792,6 +2885,8 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		backEnd.pc.c_drawElements++;
 		backEnd.pc.c_drawIndexes += tri->numIndexes;
 		backEnd.pc.c_drawVertexes += tri->numVerts;
+
+		RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 	}
 
 	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
