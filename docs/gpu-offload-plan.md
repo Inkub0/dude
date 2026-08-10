@@ -140,7 +140,7 @@ Vulkan-exclusive.**
 | **Skinning** | ✅ transform feedback + TBO | ✅ compute + SSBO | high | one skin feeds 6 passes; VK path is cleaner |
 | **Skinning: normals/tangents too** | ✅ (in the TF/VS pass) | ✅ (in the dispatch) | +high | else `R_DeriveTangents` stays on CPU |
 | **Shadow-volume *build* gating** | ✅ (CPU-only, no GPU) | ✅ | med | Phase 0 — ✅ SHIPPED (`0bf7e1dd`) |
-| **Shadow-volume GPU generation** | ✅ geometry shader | ✅ compute/geom | low* | *mostly neutralized by shadow maps + Phase 0 |
+| **Shadow-volume GPU generation** | — | — | — | ❌ STRUCK — subsumed by ray-query (Phase 4) |
 | **GPU-driven culling** | ❌ impossible | ✅ compute + SSBO + indirect | **highest** | needs stable GPU residency + indirect draw |
 
 ---
@@ -240,9 +240,15 @@ buffer with no CPU mapping:
 | Stencil shadow volumes (`R_CreateShadowVolume`, `R_CreateVertexProgramShadowCache`) | `Interaction.cpp:947`, `tr_light.cpp:245` | per shadowing stencil light — **absent** for shadow-mapped lights |
 | Surface bounds (`R_BoundTriSurf`) | `Model_md5.cpp:962` | once per surface |
 
-Retiring those means moving culling and shadow-volume construction to the GPU as well — Phases 3
-and 4 — not flipping a flag. So "switch the CPU skinner off when GPU skinning is on" is not
-available: the front end is structurally position-dependent.
+Retiring those means moving culling and shadow-volume construction to the GPU as well — Phase 3
+and ray-query (Phase 4 is struck) — not flipping a flag. So "switch the CPU skinner off when GPU
+skinning is on" is not available: the front end is structurally position-dependent.
+
+**And even both do not fully unpin it (recon 2026-08-10).** Phase 3 retires consumer 1 (light cull)
+and ray-query retires consumer 2 (stencil volumes), but consumer 3 — `R_BoundTriSurf` surface bounds
+(`tr_trisurf.cpp:783`) — has **no retirement path** short of a GPU min/max reduction or accepting a
+one-frame-stale CPU bound. So "finally remove the CPU position-skin" is Phase 3 + ray-query + a bounds
+solution, three pieces, not two — and on GPU-bound hardware it buys architecture (RTX alignment), not fps.
 
 **The TBN half is the redundant part — but it is NOT the expensive half.** `TransformVerts` never
 touches normals; those come from `R_DeriveTangents`, which the compute kernel duplicates and the CPU
@@ -289,18 +295,44 @@ shadow-volume consumer in the table above, which is one of the two things pinnin
 skin in place.
 
 ### Phase 3 — GPU-driven culling *(Vulkan-only; biggest relief, most architecture)*
-Add indirect draw to the RHI (`vkCmdDrawIndexedIndirect[Count]`, swapping `vkCmdDrawIndexed :5557`).
-Upload persistent per-object bounds + matrices + sort keys; a compute pass frustum/Hi-Z-culls and
-compacts a `VkDrawIndexedIndirectCommand[]` + count. Requires stable GPU-resident geometry keyed by a
-persistent object index (static-VBO work is a partial prereq; Phase-2 skinning gives dynamic models
-GPU residency). GL3 keeps the CPU cull permanently. **Payoff:** attacks the actual bottleneck — the
-per-frame `R_CullLocalBox` sweep + scalar draw loop. **Risk:** high (persistent residency for a
-frame-arena-oriented renderer; portal visibility is hard to fully GPU-port — likely a *hybrid*: CPU
-portal-area coarse pass feeds GPU fine cull).
 
-### Phase 4 *(optional)* — GPU shadow-volume generation
-Only if Phase 0 leaves meaningful stencil-build cost. Geometry-shader silhouette (GL 3.2 + VK) or a
-compute builder (VK) writing the doubled `shadowCache` + cap-sorted indices. Low priority.
+#### Phase 3.0 — the indirect-draw RHI primitive — ✅ SHIPPED (`feat/rhi-indirect-draw`, pending user A/B)
+The seed the rest of Phase 3 writes into. `RHI::DrawIndexedIndirect(args, argsBuffer, argsOffset,
+drawCount, stride, countBuffer, countOffset)` (no-op default, GL3 inherits it) + a Vulkan impl that
+issues `vkCmdDrawIndexedIndirect` (or `vkCmdDrawIndexedIndirectCount` when `countBuffer` is set — the
+GPU-count form the cull pass will use). `VulkanBackend::Draw` was refactored into a shared `BindForDraw`
+(the ~200-line pipeline/descriptor/vertex-index bind) + thin `Draw`/`DrawIndexedIndirect`. `BU_STORAGE`
+gains `INDIRECT` usage so a compute pass can write commands straight into a storage buffer. The
+`drawIndirectCount` + `multiDrawIndirect` **features** are enabled at device creation when present (the
+1.4 command floor does *not* imply them — an adversarial review caught this) and the count/multi paths
+gate on the flags. Validated by `r_vkIndirectTest`: routes **every** indexed draw through the primitive
+via a per-frame-in-flight indirect-command ring (mirrors the geometry rings), a pixel-identical
+whole-scene A/B. Current draw site: `vkCmdDrawIndexed` at `VulkanBackend.cpp` (was `:5557`, now in
+`BindForDraw`). *Additive, no-op default, OFF path byte-identical.*
+
+#### Phase 3.1+ — the cull pass (not started)
+Upload persistent per-object bounds + matrices + sort keys; a compute pass frustum/Hi-Z-culls and
+compacts a `VkDrawIndexedIndirectCommand[]` + count that Phase 3.0 consumes (add a `COMPUTE→DRAW_INDIRECT`
+barrier to `Dispatch`). Requires stable GPU-resident geometry keyed by a **persistent object index** —
+NOT yet present: `gpuSkinVB`/`tessDeformVB` are keyed by `srfTriangles` pointer and drawSurfs are
+frame-arena-rebuilt, so the object table is net-new. GL3 keeps the CPU cull permanently. **Payoff:**
+attacks the per-frame `R_CullLocalBox` sweep + scalar draw loop — but only raises fps when CPU-bound
+(weak GPU / high entity counts); on the RTX 3080 Ti the frame is GPU-bound, so this is architecture +
+CPU-bound-case relief, not fps here. **Risk:** high (persistent residency for a frame-arena renderer;
+portal visibility is genuinely data-dependent → a *hybrid*: CPU portal-area coarse pass feeds the GPU
+fine cull). Retires **one** of the three CPU-position-skin pins (light cull, `Interaction.cpp:130/405`).
+
+### Phase 4 — GPU shadow-volume generation — ❌ STRUCK (2026-08-10, recon-confirmed)
+**Do not build.** A recon of the residual stencil cost after Phase 0 concluded a GPU stencil-volume
+builder is not worth it and is a *dead-end vs ray-query*: (1) Phase 0 already removed ~100% indoor /
+70–80% outdoor of the build; the residual fires only for oversize "sun" lights and is dominated by
+*static* world casters (cacheable CPU-side, not a GPU job). (2) The machine is GPU-bound at realistic
+counts (Milestone C), so moving the build to the GPU relieves a non-bottleneck *and* adds GPU load —
+potentially net-negative fps. (3) The forward direction (ray-query shadows) **deletes** the stencil
+consumer entirely, so a GPU stencil builder is throwaway code. It also needs indirect draw (Phase 3.0,
+now shipped) to avoid a readback stall — but there is no independent reason to spend it here. The
+stencil shadow-volume pin on the CPU position-skin (`tr_light.cpp:244`, `Interaction.cpp:947`) is
+retired by **ray-query**, not by this phase.
 
 ---
 
@@ -314,7 +346,7 @@ compute builder (VK) writing the doubled `shadowCache` + cap-sorted indices. Low
 | Transform-feedback capture pass | 2 | ✅ | (VK uses compute) | `glTransformFeedbackVaryings` `GL3Shaders.cpp:325`; discard pass near `GL3Backend.cpp:958` |
 | TBO bind (joint palette) | 2 | ✅ `glTexBuffer` | ✅ SSBO/UBO | GL3 texture loop `:969–987` |
 | Geometry stage (opt) | 4 | ✅ | ✅ | GL3 2-stage loop `GL3Shaders.cpp:290`; VK stage assembly `:4980` |
-| Indirect draw + instancing | 3 | ❌ | ✅ | `DrawArgs`/`Draw` `RHI.h:92`; VK `:5557`; GL3 `:989` (instancing only) |
+| Indirect draw (`DrawIndexedIndirect`) | 3.0 | ❌ (no-op) | ✅ SHIPPED | `RHI.h` `DrawIndexedIndirect`; VK `BindForDraw`+`vkCmdDrawIndexedIndirect[Count]`; `r_vkIndirectTest` |
 
 VK enablers already in place: Vulkan 1.4 floor (all core compute guaranteed, no extension gating),
 runtime shaderc compiler, VMA, a timestamp-query idiom to measure any new pass. The `queues[]` array
@@ -326,13 +358,19 @@ async-compute* queue (not needed until Phase 3 overlap tuning) would extend both
 ## 7. Sequencing & dependencies
 
 ```
-Phase 0 (CPU stencil-build gate) ── ✅ SHIPPED (0bf7e1dd), de-risks Phase 4
-Phase 1 (VK compute lane + BU_STORAGE) ── ✅ SHIPPED (cf18e615); unblocks Phase 2-VK and Phase 3
-   ├── Phase 2 (skinning): VK on Phase 1; GL3 on a parallel transform-feedback primitive
-   │        └── gives dynamic models GPU residency ── prereq for Phase 3
-   └── Phase 3 (GPU culling, VK-only): needs Phase 1 + indirect draw + Phase 2 residency
-Phase 4 (GPU shadow-volume gen) ── optional, only if Phase 0 leaves cost
+Phase 0 (CPU stencil-build gate) ── ✅ SHIPPED (0bf7e1dd)
+Phase 1 (VK compute lane + BU_STORAGE) ── ✅ SHIPPED (cf18e615)
+Phase 2 (GPU skinning, VK) ── ✅ SHIPPED (gpuSkinVB; Milestone C audited what it can retire)
+   └── Phase 3.0 (indirect-draw primitive) ── ✅ SHIPPED (feat/rhi-indirect-draw)
+        └── Phase 3.1+ (GPU cull pass, VK-only): needs a persistent per-object table (net-new)
+                 + the compute lane (have) + indirect draw (have) → retires pin #1 (light cull)
+Phase 4 (GPU shadow-volume gen) ── ❌ STRUCK (subsumed by ray-query)
+Ray-query shadows (RTX pivot, after culling) ── retires pin #2 (stencil volumes); changes pixels (opt-in)
 ```
+
+**Decision (2026-08-10): sequence culling now → ray-query later.** GPU-driven culling (Phase 3)
+first — the indirect-draw seed is in — then the RTX/ray-query pivot that subsumes Phase 4. This keeps
+both of the removable CPU-skin pins on a retirement path.
 
 The **GL3 transform-feedback primitive** (Phase 2-GL3) is independent of the **VK compute lane**
 (Phase 1) — they're two separate substitutable back-ends for the same "deform once" capability, so
