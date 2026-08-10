@@ -293,21 +293,42 @@ static void RB_RHI_SmaaDraw( rhi::RHI *r, rhi::ShaderHandle prog, const rhi::Ren
 
 /*
 =============
-RB_RHI_SmaaChain
+RB_RHI_SmaaEndUnitState
 
-The three SMAA 1x passes over an exact-size scene image: edge detection ->
-blending weights (AreaTex/SearchTex LUTs on units 1/2) -> neighborhood blend.
-outputRT 0 writes the resolved image to the backbuffer (LDR path; the caller
-already set viewport/scissor); otherwise into the given float target (HDR).
-The edge/weight passes discard on non-edge pixels, so both targets are
-cleared. Returns false (leaving the frame untouched) if anything is missing.
+After a multi-unit SMAA draw the GL active unit is left on 1/2, and idImage::Bind
+binds on the *active* unit while recording under currenttmu — the next
+CopyFramebuffer (film grain's snapshot) would land its bind on the wrong unit and
+then skip the "already bound" rebind on unit 0, sampling a stale SMAA target instead
+of _currentRender. Leave the chain on unit 0 with the bind cache invalidated so every
+following bind re-issues cleanly. VK has no active-unit state (each Draw fully
+specifies its texture set) and gl3ActiveTexture is a NULL qgl pointer there, so skip it.
 =============
 */
-static bool RB_RHI_SmaaChain( rhi::RHI *r, rhi::ImageHandle sceneImg, rhi::RenderTargetHandle outputRT, int w, int h ) {
+static void RB_RHI_SmaaEndUnitState( rhi::RHI *r ) {
+	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		RB_RHI_AAForgetTexBinds();
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+	}
+}
+
+/*
+=============
+RB_RHI_SmaaEdgesWeights
+
+The first two SMAA 1x passes over an exact-size scene image: luma edge detection ->
+blending weights (AreaTex/SearchTex LUTs on units 1/2), leaving the weights in
+rhiSmaaWeightsRT for a following neighborhood-blend pass (either RB_RHI_SmaaChain's
+blend, or the fused hdrresolve_smaa resolve). Both edge/weight targets discard on
+non-edge pixels, so both are cleared. The caller must have run RB_RHI_EnsureSmaaTargets.
+Does NOT restore unit state — the caller's blend pass is also multi-unit, so the shared
+RB_RHI_SmaaEndUnitState runs once after it. Returns false if a shader/image is missing.
+=============
+*/
+static bool RB_RHI_SmaaEdgesWeights( rhi::RHI *r, rhi::ImageHandle sceneImg, int w, int h ) {
 	rhi::ShaderHandle edgesProg = r->LoadShader( "smaa_edges" );
 	rhi::ShaderHandle weightsProg = r->LoadShader( "smaa_weights" );
-	rhi::ShaderHandle blendProg = r->LoadShader( "smaa_blend" );
-	if ( !edgesProg || !weightsProg || !blendProg || !sceneImg ) {
+	if ( !edgesProg || !weightsProg || !sceneImg ) {
 		return false;
 	}
 
@@ -334,6 +355,37 @@ static bool RB_RHI_SmaaChain( rhi::RHI *r, rhi::ImageHandle sceneImg, rhi::Rende
 	RB_RHI_SmaaDraw( r, weightsProg, parms, r->GetRenderTargetImage( rhiSmaaEdgesRT ),
 	                 rhiSmaaAreaTex, rhiSmaaSearchTex );
 	r->EndPass();
+	return true;
+}
+
+/*
+=============
+RB_RHI_SmaaChain
+
+The three SMAA 1x passes over an exact-size scene image: edges+weights (above) then
+neighborhood blend. outputRT 0 writes the resolved image to the backbuffer (LDR path;
+the caller already set viewport/scissor); otherwise into the given float target (HDR).
+Returns false (leaving the frame untouched) if anything is missing. The fused HDR path
+(RB_RHI_HdrResolveSmaaFused) reuses RB_RHI_SmaaEdgesWeights and does the blend itself.
+=============
+*/
+static bool RB_RHI_SmaaChain( rhi::RHI *r, rhi::ImageHandle sceneImg, rhi::RenderTargetHandle outputRT, int w, int h ) {
+	rhi::ShaderHandle blendProg = r->LoadShader( "smaa_blend" );
+	if ( !blendProg || !sceneImg ) {
+		return false;
+	}
+	if ( !RB_RHI_SmaaEdgesWeights( r, sceneImg, w, h ) ) {
+		return false;
+	}
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	// SMAA_RT_METRICS (the blend samples the weights + scene at texel offsets)
+	parms.localParam0[0] = 1.0f / w;
+	parms.localParam0[1] = 1.0f / h;
+	parms.localParam0[2] = (float)w;
+	parms.localParam0[3] = (float)h;
 
 	// pass 3: neighborhood blend -> backbuffer or the HDR AA target
 	if ( outputRT ) {
@@ -344,19 +396,7 @@ static bool RB_RHI_SmaaChain( rhi::RHI *r, rhi::ImageHandle sceneImg, rhi::Rende
 		RB_RHI_SmaaDraw( r, blendProg, parms, sceneImg, r->GetRenderTargetImage( rhiSmaaWeightsRT ) );
 	}
 
-	// the multi-unit draws left the GL active unit on 1/2, and idImage::Bind
-	// binds on the *active* unit while recording under currenttmu — the next
-	// CopyFramebuffer (film grain's snapshot) would land its bind on the wrong
-	// unit and then skip the "already bound" rebind on unit 0, sampling a stale
-	// SMAA target instead of _currentRender. Leave the chain on unit 0 with the
-	// bind cache invalidated so every following bind re-issues cleanly. VK has no
-	// active-unit state (each Draw fully specifies its texture set) and
-	// gl3ActiveTexture is a NULL qgl pointer there, so skip it.
-	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
-		RB_RHI_AAForgetTexBinds();
-		rhi::gl3ActiveTexture( GL_TEXTURE0 );
-		backEnd.glState.currenttmu = 0;
-	}
+	RB_RHI_SmaaEndUnitState( r );
 	return true;
 }
 
@@ -950,20 +990,132 @@ static bool RB_RHI_HdrSmaa( rhi::RHI *r ) {
 	return RB_RHI_SmaaChain( r, r->GetRenderTargetImage( rhiHdrRT ), rhiHdrAaRT, w, h );
 }
 
+/*
+=============
+RB_RHI_HdrResolveSmaaFused
+
+Fuses SMAA 1x's final neighborhood-blend pass INTO the HDR resolve: run edges+weights, then a
+single hdrresolve_smaa pass reads the float scene + the weights, does the blend, and applies the
+resolve's grain/gamma tail straight to the backbuffer. That drops the separate rhiHdrAaRT
+round-trip the classic path needs (blend -> rhiHdrAaRT, then hdrresolve reads it back).
+
+Eligible only when SMAA is the active AA (r_rhiAA 2) and chromatic aberration is OFF — chroma
+samples the resolved image at radial offsets, which a single fused pass can't provide (it only has
+the AA'd colour at the current fragment). Returns false to fall through to the classic path when
+ineligible or when a shader/target is unavailable; true when it has fully resolved the frame.
+
+For zero-weight pixels the neighborhood blend is a pass-through, so with chroma off the fused output
+is bit-identical to the classic AA-pass + hdrresolve it replaces.
+=============
+*/
+static bool RB_RHI_HdrResolveSmaaFused( rhi::RHI *r, int w, int h ) {
+	if ( r_rhiAA.GetInteger() != 2 || r_postChromaticAberration.GetFloat() > 0.0f || !rhiHdrRT ) {
+		return false;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "hdrresolve_smaa" );
+	if ( !prog ) {
+		return false;
+	}
+	if ( !RB_RHI_EnsureSmaaTargets( r, w, h, false ) ) {
+		return false;
+	}
+	if ( !RB_RHI_SmaaEdgesWeights( r, r->GetRenderTargetImage( rhiHdrRT ), w, h ) ) {
+		return false;
+	}
+
+	// final fused pass: neighborhood blend + grain + gamma, scene(unit 0) + weights(unit 1) -> backbuffer
+	r->SetFrameTarget( 0 );
+	r->SetViewport( 0, 0, w, h );
+	r->SetScissor( 0, 0, w, h );
+	backEnd.currentScissor.x1 = 0;
+	backEnd.currentScissor.y1 = 0;
+	backEnd.currentScissor.x2 = w - 1;
+	backEnd.currentScissor.y2 = h - 1;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	// SMAA_RT_METRICS (localParam0) — shared by the vertex offset and the blend
+	parms.localParam0[0] = 1.0f / w;
+	parms.localParam0[1] = 1.0f / h;
+	parms.localParam0[2] = (float)w;
+	parms.localParam0[3] = (float)h;
+	// grain intensity + seed live in windowCoord.xy here (localParam0 is RT_METRICS, chroma is off);
+	// grain size + gamma/brightness mirror RB_RHI_HdrResolve exactly (identity on GL, real on VK)
+	parms.windowCoord[0] = r_postFilmGrain.GetFloat();
+	parms.windowCoord[1] = (float)( Sys_Milliseconds() & 0xffff ) * 0.001f;
+	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
+	parms.localParam1[1] = 1.0f;	// brightness (identity)
+	parms.localParam1[2] = 1.0f;	// 1/gamma (identity)
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN && r_gammaInShader.GetBool() ) {
+		parms.localParam1[1] = r_brightness.GetFloat();
+		parms.localParam1[2] = ( r_gamma.GetFloat() > 0.0f ) ? 1.0f / r_gamma.GetFloat() : 1.0f;
+	}
+
+	idDrawVert quad[4];
+	memset( quad, 0, sizeof( quad ) );
+	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
+	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
+	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
+	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
+	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
+
+	rhi::BufferHandle vb, ib, ub;
+	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
+	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = CT_TWO_SIDED;
+	r->BindPipeline( pd );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = 6;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	da.textures[0] = r->GetRenderTargetImage( rhiHdrRT );
+	da.textures[1] = r->GetRenderTargetImage( rhiSmaaWeightsRT );
+	r->Draw( da );
+	backEnd.pc.c_drawElements++;
+
+	RB_RHI_SmaaEndUnitState( r );		// the scene+weights draw left GL on unit 1
+	return true;
+}
+
 static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	if ( !rbHdrActiveThisFrame ) {
 		return;
 	}
 	rbHdrActiveThisFrame = false;
 
-	rhi::ShaderHandle prog = r->LoadShader( "hdrresolve" );
-	if ( !prog || !rhiHdrRT ) {
+	if ( !rhiHdrRT ) {
 		r->SetFrameTarget( 0 );		// give up on HDR this frame, back to the backbuffer
 		return;
 	}
 
 	int w = glConfig.vidWidth;
 	int h = glConfig.vidHeight;
+
+	// Fused SMAA resolve (chroma off): the neighborhood blend + grain/gamma tail in one pass,
+	// dropping the rhiHdrAaRT round-trip. Falls through to the classic path when ineligible.
+	if ( RB_RHI_HdrResolveSmaaFused( r, w, h ) ) {
+		return;
+	}
+
+	rhi::ShaderHandle prog = r->LoadShader( "hdrresolve" );
+	if ( !prog ) {
+		r->SetFrameTarget( 0 );		// give up on HDR this frame, back to the backbuffer
+		return;
+	}
 
 	// AA first (scene->scene into rhiHdrAaRT, in the scene buffer's own format — RGBA16F
 	// in HDR, RGBA8 in the off-HDR post pass), so chroma below re-samples the anti-aliased

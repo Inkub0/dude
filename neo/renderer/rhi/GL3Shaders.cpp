@@ -61,6 +61,7 @@ static const char *gl3BootPrograms[] = {
 	"heathaze_maskvertex",
 	"heathaze_maskvertex_mask",
 	"helltime_accum",
+	"hdrresolve_smaa",		// fused SMAA neighborhood-blend + resolve (RB_RHI_HdrResolveSmaaFused)
 	"interaction",
 	"portalsky",
 	"postprocess",
