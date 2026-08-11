@@ -846,6 +846,7 @@ set(src_framework
 	framework/EventLoop.cpp
 	framework/File.cpp
 	framework/FileSystem.cpp
+	framework/ModCvarTranslation.cpp
 	framework/KeyInput.cpp
 	framework/UsercmdGen.cpp
 	framework/Session_menu.cpp

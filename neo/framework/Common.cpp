@@ -47,6 +47,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/Game.h"
 #include "framework/KeyInput.h"
 #include "framework/EventLoop.h"
+#include "framework/ModCvarTranslation.h"
 #include "renderer/Image.h"
 #include "renderer/Model.h"
 #include "renderer/ModelManager.h"
@@ -637,7 +638,14 @@ void idCommonLocal::DWarning( const char *fmt, ... ) {
 	va_end( argptr );
 	msg[sizeof(msg)-1] = '\0';
 
-	Printf( S_COLOR_YELLOW"WARNING: %s\n", msg );
+	// DUDE: mod-compat — tag warnings while a foreign mod is active so the
+	// terminal attributes them to the offending mod ("-phobos-", etc.).
+	const char *tag = ModCompat::WarningTag();
+	if ( tag[0] ) {
+		Printf( S_COLOR_YELLOW "WARNING: -%s- %s\n", tag, msg );
+	} else {
+		Printf( S_COLOR_YELLOW"WARNING: %s\n", msg );
+	}
 }
 
 /*
@@ -656,7 +664,14 @@ void idCommonLocal::Warning( const char *fmt, ... ) {
 	va_end( argptr );
 	msg[sizeof(msg)-1] = 0;
 
-	Printf( S_COLOR_YELLOW "WARNING: " S_COLOR_RED "%s\n", msg );
+	// DUDE: mod-compat — tag warnings while a foreign mod is active so the
+	// terminal attributes them to the offending mod ("-phobos-", etc.).
+	const char *tag = ModCompat::WarningTag();
+	if ( tag[0] ) {
+		Printf( S_COLOR_YELLOW "WARNING: " S_COLOR_CYAN "-%s- " S_COLOR_RED "%s\n", tag, msg );
+	} else {
+		Printf( S_COLOR_YELLOW "WARNING: " S_COLOR_RED "%s\n", msg );
+	}
 
 	if ( warningList.Num() < MAX_WARNING_LIST ) {
 		warningList.AddUnique( msg );
@@ -3360,6 +3375,10 @@ idCommonLocal::InitGame
 void idCommonLocal::InitGame( void ) {
 	// initialize the file system
 	fileSystem->Init();
+
+	// DUDE: load mod cvar translation table once fs can read base/. Cvar hooks
+	// are safe before this — ResolveAlias no-ops until Init succeeds.
+	ModCompat::Init();
 
 	// initialize the declaration manager
 	declManager->Init();

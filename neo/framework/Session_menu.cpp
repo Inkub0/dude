@@ -36,6 +36,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "ui/UserInterface.h"
 
 #include "framework/Session_local.h"
+#include "framework/ModCvarTranslation.h"
 
 idCVar	idSessionLocal::gui_configServerRate( "gui_configServerRate", "0", CVAR_GUI | CVAR_ARCHIVE | CVAR_ROM | CVAR_INTEGER, "" );
 
@@ -986,6 +987,12 @@ void idSessionLocal::HandleMainMenuCommands( const char *menuCommand ) {
 
 			if ( idStr::Icmp( vcmd, "restart" )  == 0) {
 				guiActive->HandleNamedEvent( "cvar write render" );
+				// DUDE: mod compat — some mod menus (e.g. tfphobos) write
+				// r_customWidth/Height but never r_mode = -1, so their choices
+				// silently fall back to r_mode's preset. Promote here.
+				if ( ModCompat::AutoCustomRes() ) {
+					cvarSystem->SetCVarInteger( "r_mode", -1 );
+				}
 				cmdSystem->BufferCommandText( CMD_EXEC_NOW, "vid_restart\n" );
 			}
 

@@ -50,6 +50,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/DeclManager.h"
 
 #include "framework/FileSystem.h"
+#include "framework/ModCvarTranslation.h"
 
 /*
 =============================================================================
@@ -361,6 +362,7 @@ public:
 	virtual int				WriteFile( const char *relativePath, const void *buffer, int size, const char *basePath = "fs_savepath" );
 	virtual void			RemoveFile( const char *relativePath );
 	virtual idFile *		OpenFileReadFlags( const char *relativePath, int searchFlags, pack_t **foundInPak = NULL, bool allowCopyFiles = true, const char* gamedir = NULL );
+	idFile *				OpenFileReadFlagsRaw( const char *relativePath, int searchFlags, pack_t **foundInPak, bool allowCopyFiles, const char* gamedir );
 	virtual idFile *		OpenFileRead( const char *relativePath, bool allowCopyFiles = true, const char* gamedir = NULL );
 	virtual idFile *		OpenFileWrite( const char *relativePath, const char *basePath = "fs_savepath" );
 	virtual idFile *		OpenFileAppend( const char *relativePath, bool sync = false, const char *basePath = "fs_basepath"   );
@@ -435,6 +437,14 @@ private:
 	int						dir_cache_count;
 
 	int						d3xp;	// 0: didn't check, -1: not installed, 1: installed
+
+	// DUDE: mod-compat #include-dedup for .script files. Each entry is a
+	// lowercased relative path that has already been opened for reading in
+	// this program-compile cycle. Reset when script/doom_main.script (the
+	// SCRIPT_DEFAULT entry point that always begins a new cycle) is opened.
+	// Off unless fs_modCompatShim is set.
+	idStrList				compiledScripts;
+	idHashIndex				compiledScriptsHash;
 
 private:
 	void					ReplaceSeparators( idStr &path, char sep = PATHSEPERATOR_CHAR );
@@ -919,6 +929,59 @@ const char *idFileSystemLocal::OSPathToRelativePath( const char *OSPath ) {
 		}
 	}
 
+	// DUDE: mod-compat fallback. Mod content sometimes bakes an absolute OS path
+	// from the author's machine (e.g. an ASE/LWO mapobject or material editor
+	// image: "C:/Doom3/tfphobos/textures/rock/foo.tga"). The searches above key
+	// on the game-dir name, which won't match when the mod was authored under a
+	// different fs_game than we're running (here: authored 'tfphobos', we run
+	// 'phobos'), so the asset — which usually DOES exist in the paks under its
+	// normal relative path — silently vanishes. As a last resort, look for the
+	// first canonical Doom 3 asset-root directory as a complete path component
+	// and take the relative path from there. Only for foreign mods, so stock
+	// content resolves bit-identically to before.
+	if ( ModCompat::IsForeignMod() ) {
+		static const char *assetRoots[] = {
+			"textures", "models", "materials", "guis", "gui", "sound", "sounds",
+			"script", "def", "particles", "skins", "fx", "anims", "af",
+			"cinematics", "video", "music", "maps", "dds", "generated", "env",
+			"glprogs", "ui", "fonts", "newfonts", "renderprogs"
+		};
+		const char *bestStart = NULL;
+		int osLen = idStr::Length( OSPath );
+		for ( int r = 0; r < (int)( sizeof( assetRoots ) / sizeof( assetRoots[0] ) ); r++ ) {
+			const char *root = assetRoots[r];
+			int rootLen = idStr::Length( root );
+			int from = 0;
+			int idx;
+			while ( from < osLen && ( idx = idStr::FindText( OSPath, root, false, from, osLen ) ) != -1 ) {
+				const char *hit = OSPath + idx;
+				char c1 = ( idx > 0 ) ? *( hit - 1 ) : '\0';
+				char c2 = *( hit + rootLen );
+				bool leftOk = ( idx == 0 ) || ( c1 == '/' || c1 == '\\' );
+				bool rightOk = ( c2 == '/' || c2 == '\\' );
+				if ( leftOk && rightOk ) {
+					// earliest match in the string wins → keeps the fullest subpath
+					if ( bestStart == NULL || hit < bestStart ) {
+						bestStart = hit;
+					}
+					break;
+				}
+				from = idx + 1;
+			}
+		}
+		if ( bestStart != NULL ) {
+			idStr::Copynz( relativePath, bestStart, sizeof( relativePath ) );
+			// normalize backslashes the rest of the engine won't expect here
+			for ( char *c = relativePath; *c; ++c ) {
+				if ( *c == '\\' ) *c = '/';
+			}
+			if ( fs_debug.GetInteger() ) {
+				common->Printf( "idFileSystem::OSPathToRelativePath: mod-compat salvaged '%s' -> '%s'\n", OSPath, relativePath );
+			}
+			return relativePath;
+		}
+	}
+
 	common->Warning( "idFileSystem::OSPathToRelativePath failed on %s", OSPath );
 
 	strcpy( relativePath, "" );
@@ -1052,6 +1115,38 @@ int idFileSystemLocal::ReadFile( const char *relativePath, void **buffer, ID_TIM
 
 	if ( buffer ) {
 		*buffer = NULL;
+	}
+
+	// DUDE: mod-compat script-compile dedup for the game DLL's engine-side
+	// existence pre-check. Some mods (e.g. Phobos) trigger two top-level
+	// program.CompileFile calls for scripts already chained via #include —
+	// the second re-registration causes parser redefinition errors. The
+	// engine's InitGame loop guards each CompileFile with `ReadFile(x, NULL)
+	// > 0`, so returning 0 here on a repeat skips the redundant compile
+	// entirely. This hook fires only on the existence pre-check (buffer==NULL);
+	// actual content reads (buffer!=NULL) always return real bytes so
+	// CompileFile itself never sees a truncated file. Marking is done in
+	// OpenFileReadFlags on successful opens (covers both #include and ReadFile
+	// paths). Reset when doom_main.script is opened — SCRIPT_DEFAULT is always
+	// the first script per program-compile cycle.
+	if ( buffer == NULL && ModCompat::IsForeignMod() ) {
+		int rpLen = idStr::Length( relativePath );
+		if ( rpLen > 7 && idStr::Icmp( relativePath + rpLen - 7, ".script" ) == 0 ) {
+			const char *slash = strrchr( relativePath, '/' );
+			const char *bslash = strrchr( relativePath, '\\' );
+			const char *sep = ( slash > bslash ) ? slash : bslash;
+			idStr scriptBase = sep ? sep + 1 : relativePath;
+			scriptBase.ToLower();
+			int hkey = compiledScriptsHash.GenerateKey( scriptBase.c_str(), false );
+			for ( int i = compiledScriptsHash.First( hkey ); i != -1; i = compiledScriptsHash.Next( i ) ) {
+				if ( compiledScripts[i] == scriptBase ) {
+					if ( fs_debug.GetInteger() ) {
+						common->Printf( "fs modCompatShim: skipping repeat top-level compile of '%s'\n", relativePath );
+					}
+					return 0;
+				}
+			}
+		}
 	}
 
 	buf = NULL;	// quiet compiler warning
@@ -2181,6 +2276,14 @@ void idFileSystemLocal::InstallGuiOverrides( const char *gameName ) {
 		return; // nothing to do (e.g. run.sh sets fs_savepath == fs_basepath)
 	}
 
+	// DUDE: skip (and undo) the base overrides when a foreign mod is active — otherwise
+	// the mirrored DUDE mainmenu.gui in savepath shadows the mod's own guis/mainmenu.gui.
+	// Mods based on d3xp/base are treated as DUDE-friendly.
+	const char *activeMod = fs_game.GetString();
+	const bool foreignMod = activeMod[0]
+		&& idStr::Icmp( activeMod, BASE_GAMEDIR ) != 0
+		&& idStr::Icmp( activeMod, "d3xp" ) != 0;
+
 	idStr srcDir = BuildOSPath( base, gameName, "guis" );
 	static const char *overrideExts[] = { ".gui", ".pd" };
 
@@ -2192,6 +2295,15 @@ void idFileSystemLocal::InstallGuiOverrides( const char *gameName ) {
 			idStr rel = idStr( "guis/" ) + files[i];
 			idStr from = BuildOSPath( base, gameName, rel.c_str() );
 			idStr to   = BuildOSPath( save, gameName, rel.c_str() );
+
+			if ( foreignMod ) {
+				// Remove any previously-installed savepath copy so the mod's own gui wins.
+				if ( remove( to.c_str() ) == 0 ) {
+					common->Printf( "removing DUDE GUI override from savepath (foreign mod '%s' active): %s/%s\n",
+						activeMod, gameName, rel.c_str() );
+				}
+				continue;
+			}
 
 			FILE *sf = OpenOSFile( from.c_str(), "rb" );
 			if ( !sf ) {
@@ -2863,6 +2975,12 @@ idFileSystemLocal::Restart
 ================
 */
 void idFileSystemLocal::Restart( void ) {
+	// DUDE: mod-compat script dedup — a fs_restart usually means the game or
+	// mod is changing; drop any lingering compiled-script tracking so we don't
+	// carry a mod's dedup state into a fresh mod (or into stock content).
+	compiledScripts.Clear();
+	compiledScriptsHash.Free();
+
 	// free anything we currently have loaded
 	Shutdown( true );
 
@@ -3107,6 +3225,41 @@ separate file or a ZIP file.
 ===========
 */
 idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int searchFlags, pack_t **foundInPak, bool allowCopyFiles, const char* gamedir ) {
+	idFile *result = OpenFileReadFlagsRaw( relativePath, searchFlags, foundInPak, allowCopyFiles, gamedir );
+
+	// DUDE: mod-compat script-compile dedup — mark a .script basename as
+	// successfully opened so a later top-level ReadFile(x, NULL) pre-check
+	// returns 0 and the DLL's InitGame loop skips a duplicate CompileFile.
+	// See the matching hook near the top of ReadFile() for the actual dedup.
+	// doom_main.script (SCRIPT_DEFAULT) is always the first script per
+	// program-compile cycle → treat it as the set-reset signal.
+	if ( result != NULL && relativePath && ModCompat::IsForeignMod() ) {
+		int rpLen = idStr::Length( relativePath );
+		if ( rpLen > 7 && idStr::Icmp( relativePath + rpLen - 7, ".script" ) == 0 ) {
+			const char *slash = strrchr( relativePath, '/' );
+			const char *bslash = strrchr( relativePath, '\\' );
+			const char *sep = ( slash > bslash ) ? slash : bslash;
+			idStr scriptBase = sep ? sep + 1 : relativePath;
+			scriptBase.ToLower();
+			if ( idStr::Icmp( scriptBase.c_str(), "doom_main.script" ) == 0 ) {
+				compiledScripts.Clear();
+				compiledScriptsHash.Free();
+			}
+			int hkey = compiledScriptsHash.GenerateKey( scriptBase.c_str(), false );
+			bool alreadyMarked = false;
+			for ( int i = compiledScriptsHash.First( hkey ); i != -1; i = compiledScriptsHash.Next( i ) ) {
+				if ( compiledScripts[i] == scriptBase ) { alreadyMarked = true; break; }
+			}
+			if ( !alreadyMarked ) {
+				compiledScripts.Append( scriptBase );
+				compiledScriptsHash.Add( hkey, compiledScripts.Num() - 1 );
+			}
+		}
+	}
+	return result;
+}
+
+idFile *idFileSystemLocal::OpenFileReadFlagsRaw( const char *relativePath, int searchFlags, pack_t **foundInPak, bool allowCopyFiles, const char* gamedir ) {
 	searchpath_t *	search;
 	idStr			netpath;
 	pack_t *		pak;
