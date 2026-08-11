@@ -4484,8 +4484,13 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
 	parms.depthTexRecip[0]    = ( (float)fullW / aoW ) / uploadW;	// gl_FragCoord (AO) -> depth tc
 	parms.depthTexRecip[1]    = ( (float)fullH / aoH ) / uploadH;
-	// SSAO Phase 1: .z = depth-mip max LOD (0 = off, ssao.frag uses the raw path), .w = LOD bias
-	parms.depthTexRecip[2]    = doDepthMip ? (float)( rhiSsaoDepthMipLevels - 1 ) : 0.0f;
+	// SSAO Phase 1: .z = depth-mip max LOD (0 = off, ssao.frag uses the raw path), .w = LOD bias.
+	// r_ssaoDepthMipMaxLod caps how coarse the march may go — the coarsest (box-averaged) mips are
+	// where occlusion smears across silhouettes into halos. Clamp to the built chain and keep >= 1
+	// when on, since ssao.frag treats .z < 0.5 as the feature-off flag.
+	float mipMaxLod = (float)( rhiSsaoDepthMipLevels - 1 );
+	mipMaxLod = idMath::ClampFloat( 1.0f, mipMaxLod, (float)r_ssaoDepthMipMaxLod.GetInteger() );
+	parms.depthTexRecip[2]    = doDepthMip ? mipMaxLod : 0.0f;
 	parms.depthTexRecip[3]    = r_ssaoDepthMipBias.GetFloat();
 	parms.screenCorrection[0] = 1.0f / aoW;				// gl_FragCoord -> [0,1] uv
 	parms.screenCorrection[1] = 1.0f / aoH;
