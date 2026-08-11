@@ -121,9 +121,24 @@ minus the wasted `zfill` geometry pass — so the final scene depth and `_curren
 same, just one pass cheaper. Headless boot is validation-clean (212 frames, ep1/e1m1). Depth-
 EQUAL invariant + the fps delta are the user's visual/perf gate.
 
-**Known limitation:** engages only when `r_ssr` is OFF — SSR needs the 2nd MRT (rough/metal)
-attachment that `BeginNormalPrepass` doesn't provide, so with SSR on it falls back to the
-standalone pass. Extending the merged prepass to carry the SSR MRT is the follow-up.
+## Status (2026-08-11 later): SSR MRT extension shipped — merge now engages with SSR on
+
+`BeginNormalPrepass(w, h, clear, wantMrt)` gained an optional 2nd color attachment
+(rough/metal). With `wantMrt` the merged pass renders `{normal, mat} + shared scene depth`;
+`EnsureMergeNormal` rebuilds on a `wantMrt` change and uses `PassClassFor(RGBA8, true,
+nColor)` so the `gbuffer` pipeline stays shared with — and render-pass-compatible with — the
+standalone MRT target (`CreateRenderTargetColorDepth` colorCount 2). `GetRenderTargetImage2`
+of the merged handle returns the mat image. The caller dropped the `!ssrWants` gate, passes
+`ssrWants` as `wantMrt`, sets `rhiNormalMrt`, and SSR (march + composite) reads
+`rhiNormalResultRT` (merged handle or standalone) instead of hardcoded `rhiNormalRT`. So the
+merge now folds the normal pass away in the actual `r_ssr 1` config, not just SSR-off.
+**User-verified** (VK, `r_ssr 1 + r_ssaoMergeNormal 1`): no black scene, SSR intact, **~0.3%
+fps uplift** — small, as expected (the win is CPU draw-submission, mostly hidden GPU-bound).
+
+### Earlier limitation (now lifted)
+Steps 2–3 engaged only when `r_ssr` was OFF — SSR needed the 2nd MRT (rough/metal) attachment
+that `BeginNormalPrepass` didn't provide, so with SSR on it fell back to the standalone pass.
+The extension above provides that attachment.
 
 ## Incremental steps (each build + verify before the next)
 

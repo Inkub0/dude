@@ -29,14 +29,19 @@ bilateral blur → optional temporal. `ssao.frag` reconstructs view-space positi
 ## Phase 1 — Prefiltered depth mip chain (biggest leverage) — GL3 + Vulkan
 
 **Status: BUILT (feat/ssao-depth-mip), user-tuned.** Behind `r_ssaoDepthMip` (default 1; off =
-the exact prior full-res raw-depth march, for an A/B) with `r_ssaoDepthMipBias` (default **0.2**)
-tuning LOD aggressiveness. **Silhouette-halo note:** a depth mip is a *point sample of a
+the exact prior full-res raw-depth march, for an A/B) with two quality knobs:
+`r_ssaoDepthMipBias` (default **0.1**, archived) tunes LOD aggressiveness and
+`r_ssaoDepthMipMaxLod` (default **2**, archived, 1–5) caps how coarse the march may ever go.
+**Silhouette-halo note:** a depth mip is a *point sample of a
 downsampled depth*, so at any depth discontinuity one coarse texel stands in for two surfaces —
 no filter (avg/min/max) can represent both, and the surviving foreground occluder still spreads
 its influence across the coarse footprint (positional quantization). The max-downsample removed
-the worst (phantom mid-depth) component; keeping steps on finer mips (`bias 0.2`) shrinks the
-residual band to near-invisible while retaining most of the speedup (measured ~100→133 fps at
-`bias 0.5`, most of it kept at 0.2). Fully eliminating the halo means not downsampling near
+the worst (phantom mid-depth) component; keeping steps on finer mips (lower `bias`) and refusing
+the coarsest mips (lower `maxLod`) shrinks the residual band. **User-tuned final (3080 Ti):
+`bias 0.1 + maxLod 2`** clears the perceptible halos while keeping most of the uplift (~25% vs
+the ~35% the old `bias 0.2`/uncapped gave; earlier A/B measured ~100→133 fps at `bias 0.5`). The
+cap clamps to the built chain and stays `>= 1` while the feature is on (`ssao.frag` reads
+`.z < 0.5` as feature-off). Fully eliminating the halo means not downsampling near
 edges — i.e. Phase 3 compute tiling marches full-res depth from shared memory. As built: a new RHI capability — `CreateRenderTargetMipped` +
 `BeginTargetMipPass` + `GetRenderTargetMipImage` (GL3: per-level `glTexImage2D` + a shared FBO
 re-pointed per level; Vulkan: an `mipLevels`-deep image with a level-0 attachment view, an
