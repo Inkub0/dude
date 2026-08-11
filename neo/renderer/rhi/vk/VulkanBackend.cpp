@@ -5438,9 +5438,11 @@ bool VulkanBackend::EnsureMergeNormal( int w, int h ) {
 		DestroyMergeNormal(); return false;
 	}
 
-	// render pass: normal (clear -> shader-read) + shared scene depth (clear -> DON'T CARE:
-	// B1 shares the depth attachment but the scene pass re-clears + reseals it via zfill,
-	// so we never preserve what we write here).
+	// render pass: normal (clear -> shader-read) + shared scene depth. The depth is CLEARed
+	// and sealed by the gbuffer geometry here, then STOREd so the resumed scene pass loads it
+	// for the depth-EQUAL interactions. (B1 used DON'T_CARE because it kept zfill to re-seal
+	// depth afterwards; steps 2-3 skip zfill, so this pass IS the seal and MUST preserve it —
+	// with DON'T_CARE the driver discards the sealed depth and the whole scene fails depth-EQUAL.)
 	VkAttachmentDescription atts[2] = {};
 	atts[0].format = VK_FORMAT_R8G8B8A8_UNORM;
 	atts[0].samples = VK_SAMPLE_COUNT_1_BIT;
@@ -5453,9 +5455,9 @@ bool VulkanBackend::EnsureMergeNormal( int w, int h ) {
 	atts[1].format = sceneDepthFormat;
 	atts[1].samples = VK_SAMPLE_COUNT_1_BIT;
 	atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	atts[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	atts[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;			// preserve the sealed depth for the scene pass
 	atts[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;	// preserve the cleared (0) stencil too
 	atts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	atts[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
@@ -5473,12 +5475,17 @@ bool VulkanBackend::EnsureMergeNormal( int w, int h ) {
 	deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
 	                     | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 	deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	// outgoing: color -> shader read (SSAO/SSR sample the normal); depth write -> the scene
+	// pass's depth test (EARLY/LATE fragment tests read the sealed depth for depth-EQUAL).
 	deps[1].srcSubpass = 0;
 	deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-	deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-	deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-	deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-	deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+	                     | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+	                     | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+	                     | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 	VkRenderPassCreateInfo rpi = {};
 	rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
 	rpi.attachmentCount = 2; rpi.pAttachments = atts;
