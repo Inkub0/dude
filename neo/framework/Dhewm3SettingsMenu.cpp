@@ -3619,6 +3619,38 @@ static void DrawShadowDebugMenu()
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaosteps" ) ) { r_ssaoSteps.SetInteger( 3 ); }
 
+	// Depth-mip acceleration + its two quality/speed knobs (docs/ssao-perf-optimization.md).
+	// The master toggle is mirrored from Enhancements; the bias/cap sliders live only here.
+	bool ssaoDepthMipDev = r_ssaoDepthMip.GetBool();
+	if ( ImGui::Checkbox( "Depth-Mip Acceleration##dev", &ssaoDepthMipDev ) ) {
+		r_ssaoDepthMip.SetBool( ssaoDepthMipDev );
+	}
+	AddTooltip( "March the horizon search over a prefiltered linear-depth mip chain (far taps read "
+		"coarse mips) instead of full-res depth every tap — cheaper at a wide radius. Same toggle as "
+		"Enhancements > Depth-Mip Acceleration." );
+
+	ImGui::BeginDisabled( !r_ssaoDepthMip.GetBool() );
+	float ssaoMipBias = r_ssaoDepthMipBias.GetFloat();
+	if ( ImGui::SliderFloat( "Mip Bias", &ssaoMipBias, 0.05f, 1.0f, "%.2f" ) ) {
+		r_ssaoDepthMipBias.SetFloat( ssaoMipBias );
+	}
+	AddTooltip( "How eagerly the march drops to coarser mips: LOD = log2(stepPixels * this). Higher = "
+		"coarser sooner (faster, but coarse depth smears occlusion across silhouettes into halos); "
+		"lower = stays on finer mips (sharper, keeps most of the speedup). Default 0.1." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##ssaomipbias" ) ) { r_ssaoDepthMipBias.SetFloat( 0.1f ); }
+
+	int ssaoMipCap = r_ssaoDepthMipMaxLod.GetInteger();
+	if ( ImGui::SliderInt( "Mip Coarseness Cap", &ssaoMipCap, 1, 5 ) ) {
+		r_ssaoDepthMipMaxLod.SetInteger( ssaoMipCap );
+	}
+	AddTooltip( "Caps how coarse the march may ever go. The coarsest mips (box-averaged depth) are "
+		"where occlusion smears across silhouettes into halos, so a lower cap kills halos at a small "
+		"speed cost; 5 = uncapped (old behaviour). Default 2." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##ssaomipcap" ) ) { r_ssaoDepthMipMaxLod.SetInteger( 2 ); }
+	ImGui::EndDisabled();
+
 	bool ssaoTemporalDev = r_ssaoTemporal.GetBool();
 	if ( ImGui::Checkbox( "Temporal Accumulation", &ssaoTemporalDev ) ) {
 		r_ssaoTemporal.SetBool( ssaoTemporalDev );
