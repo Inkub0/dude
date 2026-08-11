@@ -106,6 +106,25 @@ opaque surfaces) can only be confirmed by looking at the running game. So step 2
 `r_ssaoMergeNormal` (default 0, main path untouched) and verified in a build → in-engine-check loop
 with the user, not asserted from a headless run.
 
+## Status (2026-08-11): steps 2–3 wired — awaiting user visual/perf verdict
+
+The merge is complete behind `r_ssaoMergeNormal` (VK, `r_ssr` off, fullscreen primary view):
+`RB_RHI_NormalPrepass` now returns whether it took the merged path (BeginNormalPrepass
+sealed the *scene* depth via the `gbuffer` pass). `RB_RHI_DrawWorld` runs it **first**; if
+it merged, `zfill` (`RB_RHI_FillDepthBuffer`) is **skipped** and `_currentDepth` is captured
+from the sealed depth (`RB_RHI_CaptureCurrentDepth`, extracted from the depth prepass);
+otherwise `zfill` seals depth as before. The return value is the single source of truth, and a
+`BeginNormalPrepass` fallback (returns 0) cleanly leaves `zfill` to seal depth — no drift, no
+double-gate. **Correctness argument:** this is behaviour-identical to the already-verified B1
+(where `zfill` ran then `BeginNormalPrepass` cleared+re-sealed depth, discarding zfill's work),
+minus the wasted `zfill` geometry pass — so the final scene depth and `_currentDepth` are the
+same, just one pass cheaper. Headless boot is validation-clean (212 frames, ep1/e1m1). Depth-
+EQUAL invariant + the fps delta are the user's visual/perf gate.
+
+**Known limitation:** engages only when `r_ssr` is OFF — SSR needs the 2nd MRT (rough/metal)
+attachment that `BeginNormalPrepass` doesn't provide, so with SSR on it falls back to the
+standalone pass. Extending the merged prepass to carry the SSR MRT is the follow-up.
+
 ## Incremental steps (each build + verify before the next)
 
 1. **RHI + VK plumbing:** scene frame target grows the normal attachment; accessor added; no

@@ -1416,6 +1416,24 @@ Mirrors RB_STD_FillDepthBuffer/RB_T_FillDepthBuffer through the zfill
 program (opaque solid, perforated alpha-tested, subview down-modulate).
 ===================
 */
+// Capture the sealed scene depth into _currentDepth (currentDepthImage) for the passes
+// that sample it (soft particles, SSAO, SSR). Extracted from the depth prepass so the
+// r_ssaoMergeNormal path — which seals depth in the gbuffer prepass instead of zfill —
+// captures from the identical point. (M5: CopyDepthbuffer routes through the RHI capture on VK.)
+static void RB_RHI_CaptureCurrentDepth( const viewDef_t *viewDef ) {
+	bool getDepthCapture = r_enableDepthCapture.GetInteger() == 1
+		|| ( r_enableDepthCapture.GetInteger() == -1
+		     && ( r_useSoftParticles.GetBool()
+		          || ( ( r_ssao.GetBool() || r_ssr.GetBool() ) && R_BackendSupportsEnhancements() ) ) );
+	if ( getDepthCapture && viewDef->renderView.viewID >= 0
+	     && ( qglReadBuffer != NULL || rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) {
+		globalImages->currentDepthImage->CopyDepthbuffer( viewDef->viewport.x1,
+			viewDef->viewport.y1,
+			viewDef->viewport.x2 - viewDef->viewport.x1 + 1,
+			viewDef->viewport.y2 - viewDef->viewport.y1 + 1, true );
+	}
+}
+
 static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::ShaderHandle zfill = r->LoadShader( "zfill" );
 
@@ -1663,18 +1681,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 
 	// make the early depth pass available to shaders (soft particles, SSAO, SSR, etc.)
-	// (M5: idImage::CopyDepthbuffer routes through the RHI capture on Vulkan)
-	bool getDepthCapture = r_enableDepthCapture.GetInteger() == 1
-		|| ( r_enableDepthCapture.GetInteger() == -1
-		     && ( r_useSoftParticles.GetBool()
-		          || ( ( r_ssao.GetBool() || r_ssr.GetBool() ) && R_BackendSupportsEnhancements() ) ) );
-	if ( getDepthCapture && viewDef->renderView.viewID >= 0
-	     && ( qglReadBuffer != NULL || rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) {
-		globalImages->currentDepthImage->CopyDepthbuffer( viewDef->viewport.x1,
-			viewDef->viewport.y1,
-			viewDef->viewport.x2 - viewDef->viewport.x1 + 1,
-			viewDef->viewport.y2 - viewDef->viewport.y1 + 1, true );
-	}
+	RB_RHI_CaptureCurrentDepth( viewDef );
 }
 
 // Static/dynamic split (r_shadowMapCacheSplit): which layer a cube-shadow caster belongs
@@ -3254,9 +3261,14 @@ prepass: no subview down-modulate / clip planes (primary-view only). Perforated 
 the coverage the depth prepass seals.
 ===================
 */
-static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
+// Returns true when it took the r_ssaoMergeNormal path — i.e. the gbuffer pass sealed the
+// *scene* depth (FrameDepthImage) as well as writing the normal, so the caller must SKIP the
+// standalone zfill depth prepass and capture _currentDepth from this pass instead. Returns
+// false for the standalone-normal-target path (or when it does nothing), where zfill still
+// seals depth as usual.
+static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !R_BackendSupportsEnhancements() ) {
-		return;
+		return false;
 	}
 	// SSAO wants the buffer when it feeds the horizon search, or when it's being inspected
 	// (r_ssaoDebug 3) even if SSAO reconstructs normals from depth — so the debug view
@@ -3268,18 +3280,18 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const bool ssaoWants = r_ssao.GetBool()
 		&& ( r_ssaoNormalBuffer.GetBool() || r_ssaoDebug.GetInteger() == 3 );
 	if ( !ssaoWants && !ssrWants ) {
-		return;
+		return false;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
 		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
 		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
-		return;
+		return false;
 	}
 
 	rhi::ShaderHandle gbufProg = r->LoadShader( "gbuffer" );
 	if ( !gbufProg ) {
-		return;
+		return false;
 	}
 
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
@@ -3299,12 +3311,14 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const bool wantMerge = r_ssaoMergeNormal.GetBool()
 		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN && !ssrWants;
 	rhi::RenderTargetHandle activeNormalRT = 0;
+	bool didMerge = false;
 	if ( wantMerge ) {
 		activeNormalRT = r->BeginNormalPrepass( w, h, &clear );
+		didMerge = ( activeNormalRT != 0 );	// non-zero → the gbuffer pass shares (seals) scene depth
 	}
 	if ( activeNormalRT == 0 ) {
 		if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants ) ) {
-			return;
+			return false;
 		}
 		r->BeginTargetPass( rhiNormalRT, &clear );
 		activeNormalRT = rhiNormalRT;
@@ -3521,6 +3535,7 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_ForgetTexBinds();
 	rhiNormalResultRT = activeNormalRT;		// standalone rhiNormalRT or the merged handle
 	rhiNormalReadyThisView = true;
+	return didMerge;
 }
 
 static bool RB_RHI_EnsureSsaoTargets( rhi::RHI *r, int w, int h ) {
@@ -4698,8 +4713,6 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	}
 	backEnd.currentScissor = viewDef->scissor;
 
-	RB_RHI_FillDepthBuffer( r, viewDef );
-
 	// Phase 4 M4 (docs/vulkan-backend.md): the light loop now runs under
 	// Vulkan — stencil shadow volumes + interactions. The render-target
 	// enhancement passes (normal prepass, SSAO, SSR, shadow maps) need the
@@ -4709,18 +4722,20 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 		RB_RHI_LogOnce( "VK: world = depth + stencil + shadow maps + interactions + HDR + SSAO (SSR composites later, in the view pass)" );
 	}
 
-	// normal G-buffer (Option B): render bump-mapped view normals for SSAO to sample
-	// instead of reconstructing from depth. Runs before the SSAO pass that consumes it.
+	// normal G-buffer (Option B): bump-mapped view normals for SSAO to sample instead of
+	// reconstructing from depth. docs/ssao-normal-merge.md: with r_ssaoMergeNormal the
+	// gbuffer pass ALSO seals the scene depth, folding the standalone zfill prepass away
+	// (~0.65 ms / ~69% of SSAO's cost). So run it first: if it merged, it replaces zfill
+	// and we capture _currentDepth from its sealed depth; otherwise zfill seals depth as
+	// before. The return value is the single source of truth — no duplicate gate to drift,
+	// and a BeginNormalPrepass fallback (returns 0) cleanly leaves zfill to seal depth.
 	rhiNormalReadyThisView = false;
-	// docs/ssao-normal-merge.md: r_ssaoMergeNormal folds this normal into the depth prepass
-	// (one opaque pass instead of two — the normal pass is ~69% of SSAO's cost). The merged
-	// VK path is wired in steps 2-3; until then the flag only announces itself and the
-	// standalone pass still runs, so the default (flag 0) is exactly today's behaviour.
-	if ( r_ssaoMergeNormal.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		RB_RHI_LogOnce( "VK: r_ssaoMergeNormal set - merged normal prepass not wired yet "
-		                "(docs/ssao-normal-merge.md, steps 2-3); running the standalone pass" );
+	const bool mergedDepth = RB_RHI_NormalPrepass( r, viewDef );
+	if ( mergedDepth ) {
+		RB_RHI_CaptureCurrentDepth( viewDef );
+	} else {
+		RB_RHI_FillDepthBuffer( r, viewDef );
 	}
-	RB_RHI_NormalPrepass( r, viewDef );
 
 	// SSAO (GTAO) builds the AO buffer from the just-captured scene depth, before
 	// the ambient/interaction passes that consume it (docs/ssao-gtao.md). Each view
