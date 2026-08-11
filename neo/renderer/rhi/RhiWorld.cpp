@@ -407,8 +407,9 @@ static int  rhiHelltimeLastTick = -100000;
 // Normal G-buffer (Option B): bump-mapped view-space normals written by an extra opaque
 // geometry pass, so SSAO uses real per-pixel normals instead of reconstructing from depth.
 static rhi::RenderTargetHandle rhiNormalRT = 0;		// RGBA8 view-normal + depth (color+depth target)
-// the normal buffer SSAO/debug actually sample this view: rhiNormalRT (standalone pass) or
-// the merged handle from BeginNormalPrepass (r_ssaoMergeNormal). SSR always uses rhiNormalRT.
+// the normal buffer SSAO/SSR/debug actually sample this view: rhiNormalRT (standalone pass)
+// or the merged handle from BeginNormalPrepass (r_ssaoMergeNormal). Both expose the normal
+// (GetRenderTargetImage) + the SSR rough/metal MRT (GetRenderTargetImage2) when rhiNormalMrt.
 static rhi::RenderTargetHandle rhiNormalResultRT = 0;
 static int  rhiNormalW = 0, rhiNormalH = 0;			// full view resolution
 static bool rhiNormalReadyThisView = false;			// the normal buffer was produced for this view
@@ -3304,17 +3305,23 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	clear.depth = true;
 	clear.rgba[0] = 0.5f; clear.rgba[1] = 0.5f; clear.rgba[2] = 1.0f; clear.rgba[3] = 1.0f;
 
-	// r_ssaoMergeNormal (docs/ssao-normal-merge.md, step B1): on Vulkan, without the SSR
-	// MRT, render the normal into a pass that shares the *scene* depth — one geometry pass
-	// producing depth + normal instead of a standalone target. BeginNormalPrepass returns 0
-	// (→ standalone path) on GL3, when SSR wants the second attachment, or if unsupported.
+	// r_ssaoMergeNormal (docs/ssao-normal-merge.md): on Vulkan, render the normal into a pass
+	// that shares the *scene* depth — one geometry pass producing depth + normal instead of a
+	// standalone target. wantMrt (= ssrWants) also carries SSR's rough/metal MRT attachment so
+	// the merge serves SSR too. BeginNormalPrepass returns 0 (→ standalone path) on GL3 or if
+	// unsupported.
 	const bool wantMerge = r_ssaoMergeNormal.GetBool()
-		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN && !ssrWants;
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
 	rhi::RenderTargetHandle activeNormalRT = 0;
 	bool didMerge = false;
 	if ( wantMerge ) {
-		activeNormalRT = r->BeginNormalPrepass( w, h, &clear );
+		activeNormalRT = r->BeginNormalPrepass( w, h, &clear, ssrWants );
 		didMerge = ( activeNormalRT != 0 );	// non-zero → the gbuffer pass shares (seals) scene depth
+		if ( didMerge ) {
+			// the merged handle carries the MRT when ssrWants; track it so the SSR consumer
+			// (which gates on rhiNormalMrt + reads GetRenderTargetImage2) accepts it.
+			rhiNormalMrt = ssrWants;
+		}
 	}
 	if ( activeNormalRT == 0 ) {
 		if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants ) ) {
@@ -4121,11 +4128,13 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !fullscreenView ) {
 		return;
 	}
-	// needs this view's MRT G-buffer (normals + rough/metal) and captured depth
-	if ( !rhiNormalReadyThisView || !rhiNormalMrt || rhiNormalRT == 0 ) {
+	// needs this view's MRT G-buffer (normals + rough/metal) and captured depth. The result
+	// handle is the standalone rhiNormalRT or, under r_ssaoMergeNormal, the merged handle —
+	// both expose GetRenderTargetImage (normal) + GetRenderTargetImage2 (rough/metal).
+	if ( !rhiNormalReadyThisView || !rhiNormalMrt || rhiNormalResultRT == 0 ) {
 		return;
 	}
-	const rhi::ImageHandle matImg = r->GetRenderTargetImage2( rhiNormalRT );
+	const rhi::ImageHandle matImg = r->GetRenderTargetImage2( rhiNormalResultRT );
 	// depth capture: uploadWidth on GL; rhiCaptured on VK (a demand-load can set
 	// uploadWidth there without a real capture), matching the soft-particle idiom
 	const bool depthCaptured = vkMode ? globalImages->currentDepthImage->rhiCaptured
@@ -4265,11 +4274,11 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 	if ( vkMode ) {
-		RB_RHI_BindRTUnit( r, 2, rhiNormalRT );
+		RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
 		RB_RHI_BindRTImage( r, 3, matImg );
 	} else {
 		rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
-		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalResultRT ) );
 		rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
 		qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
 		rhi::gl3ActiveTexture( GL_TEXTURE0 );
@@ -4378,11 +4387,11 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// flip), unit 1 = depth, units 2/3 = G-buffer
 	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 	if ( vkMode ) {
-		RB_RHI_BindRTUnit( r, 2, rhiNormalRT );
+		RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
 		RB_RHI_BindRTImage( r, 3, matImg );
 	} else {
 		rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
-		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalResultRT ) );
 		rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
 		qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
 		rhi::gl3ActiveTexture( GL_TEXTURE0 );

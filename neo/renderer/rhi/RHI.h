@@ -271,9 +271,11 @@ public:
 	// (FrameDepthImage), so the depth prepass geometry produces the normal in one pass
 	// instead of a second opaque submission. Returns a RenderTargetHandle whose
 	// GetRenderTargetImage is the normal (bind it like the standalone rhiNormalRT), or 0
-	// where unsupported (GL3 / SSR-MRT wanted) so the caller runs the standalone pass.
+	// where unsupported (GL3) so the caller runs the standalone pass. wantMrt adds a
+	// second color attachment (SSR roughness/metalness, GetRenderTargetImage2) so the
+	// merge also serves SSR; the pass then carries {normal, mat} + shared scene depth.
 	// End with EndPass. Vulkan-only; the default is a no-op returning 0.
-	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear ) { return 0; }
+	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt = false ) { return 0; }
 	// the target's texture as a sampleable image handle — the same ImageHandle
 	// abstraction future material textures will use (Phase 4 image ownership).
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt ) = 0;

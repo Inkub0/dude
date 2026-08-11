@@ -163,7 +163,7 @@ public:
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt );
 	virtual void				SetFrameTarget( RenderTargetHandle rt );
 	virtual void				BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear );
-	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear );
+	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt );
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt );
 	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle rt );
 
@@ -604,8 +604,15 @@ private:
 	VkFramebuffer	mergeNormalFb = VK_NULL_HANDLE;
 	VkImage			mergeNormalFbDepth = VK_NULL_HANDLE;	// depth image the fb was built against
 	RenderTargetHandle mergeNormalTarget = 0;			// wraps mergeNormalImage for GetRenderTargetImage
-	bool			EnsureMergeNormal( int w, int h );
+	// optional 2nd color attachment (SSR roughness/metalness MRT) so the merge serves SSR too
+	VkImage			mergeMatImage = VK_NULL_HANDLE;
+	VmaAllocation	mergeMatAlloc = NULL;
+	VkImageView		mergeMatView = VK_NULL_HANDLE;
+	ImageHandle		mergeMatSampleImage = 0;			// GetRenderTargetImage2 of the merged handle
+	bool			mergeNormalMrt = false;				// the merged image/pass/fb currently carry the MRT
+	bool			EnsureMergeNormal( int w, int h, bool wantMrt );
 	void			DestroyMergeNormal();
+	ImageHandle		RegisterMergeSampleImage( VkImage img, VkImageView view, int w, int h );
 
 	// device features actually enabled (queried before device creation)
 	bool						haveAnisotropy = false;
@@ -5343,6 +5350,9 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetColorDepth( ImageFormat fmt,
 }
 
 ImageHandle VulkanBackend::GetRenderTargetImage2( RenderTargetHandle rt ) {
+	if ( rt != 0 && rt == mergeNormalTarget ) {
+		return mergeMatSampleImage;			// merged SSR material MRT (no targetTable entry)
+	}
 	RenderTarget *t = LookupTarget( rt );
 	return ( t && t->colorCount >= 2 ) ? t->colorSampleImage[1] : 0;
 }
@@ -5389,20 +5399,48 @@ void VulkanBackend::DestroyMergeNormal() {
 	if ( mergeNormalPass )  { vkDestroyRenderPass( device, mergeNormalPass, NULL ); mergeNormalPass = VK_NULL_HANDLE; }
 	if ( mergeNormalView )  { vkDestroyImageView( device, mergeNormalView, NULL ); mergeNormalView = VK_NULL_HANDLE; }
 	if ( mergeNormalImage ) { vmaDestroyImage( vma, mergeNormalImage, mergeNormalAlloc ); mergeNormalImage = VK_NULL_HANDLE; mergeNormalAlloc = NULL; }
+	if ( mergeMatView )     { vkDestroyImageView( device, mergeMatView, NULL ); mergeMatView = VK_NULL_HANDLE; }
+	if ( mergeMatImage )    { vmaDestroyImage( vma, mergeMatImage, mergeMatAlloc ); mergeMatImage = VK_NULL_HANDLE; mergeMatAlloc = NULL; }
 	if ( mergeNormalSampleImage >= 1 && mergeNormalSampleImage <= (ImageHandle)imageTable.size() ) {
 		imageTable[mergeNormalSampleImage - 1].live = false;
 	}
+	if ( mergeMatSampleImage >= 1 && mergeMatSampleImage <= (ImageHandle)imageTable.size() ) {
+		imageTable[mergeMatSampleImage - 1].live = false;
+	}
 	mergeNormalSampleImage = 0;
+	mergeMatSampleImage = 0;
+	mergeNormalMrt = false;
 	mergeNormalW = mergeNormalH = 0;
 	mergeNormalFbDepth = VK_NULL_HANDLE;
 	mergeNormalTarget = 0;
 }
 
-// (re)create the normal color image, its render pass, and its sampleable ImageRec at
-// size w*h. The framebuffer (which binds the *scene* depth) is (re)built lazily in
-// BeginNormalPrepass since FrameDepthImage() changes with HDR mode.
-bool VulkanBackend::EnsureMergeNormal( int w, int h ) {
-	if ( mergeNormalImage != VK_NULL_HANDLE && mergeNormalW == w && mergeNormalH == h ) {
+// register a sampleable RGBA8 ImageRec (view already created) into imageTable, returning
+// its 1-based handle; used for the merged normal (+ optional SSR material) color images.
+ImageHandle VulkanBackend::RegisterMergeSampleImage( VkImage img, VkImageView view, int w, int h ) {
+	ImageRec rec;
+	rec.image = img;
+	rec.alloc = NULL;					// owned by the merge* allocs, freed in DestroyMergeNormal
+	rec.view = view;
+	rec.sampler = GetSampler( TF_LINEAR, TR_CLAMP, false );
+	rec.live = true;
+	rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	rec.isDepth = false;
+	rec.isColorTarget = true;
+	rec.width = w; rec.height = h;
+	for ( size_t i = 0; i < imageTable.size(); i++ ) {
+		if ( !imageTable[i].live ) { imageTable[i] = rec; return (ImageHandle)( i + 1 ); }
+	}
+	imageTable.push_back( rec );
+	return (ImageHandle)imageTable.size();
+}
+
+// (re)create the normal color image (+ optional SSR material MRT), the render pass, and
+// their sampleable ImageRecs at size w*h. The framebuffer (which binds the *scene* depth)
+// is (re)built lazily in BeginNormalPrepass since FrameDepthImage() changes with HDR mode.
+bool VulkanBackend::EnsureMergeNormal( int w, int h, bool wantMrt ) {
+	if ( mergeNormalImage != VK_NULL_HANDLE && mergeNormalW == w && mergeNormalH == h
+	     && mergeNormalMrt == wantMrt ) {
 		return true;
 	}
 	DestroyMergeNormal();
@@ -5438,35 +5476,53 @@ bool VulkanBackend::EnsureMergeNormal( int w, int h ) {
 		DestroyMergeNormal(); return false;
 	}
 
-	// render pass: normal (clear -> shader-read) + shared scene depth. The depth is CLEARed
-	// and sealed by the gbuffer geometry here, then STOREd so the resumed scene pass loads it
-	// for the depth-EQUAL interactions. (B1 used DON'T_CARE because it kept zfill to re-seal
-	// depth afterwards; steps 2-3 skip zfill, so this pass IS the seal and MUST preserve it —
-	// with DON'T_CARE the driver discards the sealed depth and the whole scene fails depth-EQUAL.)
-	VkAttachmentDescription atts[2] = {};
-	atts[0].format = VK_FORMAT_R8G8B8A8_UNORM;
-	atts[0].samples = VK_SAMPLE_COUNT_1_BIT;
-	atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	atts[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-	atts[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	atts[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	atts[1].format = sceneDepthFormat;
-	atts[1].samples = VK_SAMPLE_COUNT_1_BIT;
-	atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	atts[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;			// preserve the sealed depth for the scene pass
-	atts[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;	// preserve the cleared (0) stencil too
-	atts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	atts[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	// optional 2nd color attachment (SSR rough/metal). Same format/usage as the normal.
+	if ( wantMrt ) {
+		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &mergeMatImage, &mergeMatAlloc, NULL ), "vmaCreateImage(merge mat)" ) ) {
+			mergeMatImage = VK_NULL_HANDLE; DestroyMergeNormal(); return false;
+		}
+		vwi.image = mergeMatImage;
+		if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &mergeMatView ), "vkCreateImageView(merge mat)" ) ) {
+			DestroyMergeNormal(); return false;
+		}
+	}
 
-	VkAttachmentReference colorRef = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
-	VkAttachmentReference depthRef = { 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+	// render pass: normal (+ mat) color (clear -> shader-read) + shared scene depth. The depth
+	// is CLEARed and sealed by the gbuffer geometry here, then STOREd so the resumed scene pass
+	// loads it for the depth-EQUAL interactions. (B1 used DON'T_CARE because it kept zfill to
+	// re-seal depth afterwards; steps 2-3 skip zfill, so this pass IS the seal and MUST preserve
+	// it — with DON'T_CARE the driver discards the sealed depth and the scene fails depth-EQUAL.)
+	const int nColor = wantMrt ? 2 : 1;
+	const int depthIdx = nColor;			// depth is the last attachment
+	VkAttachmentDescription atts[3] = {};
+	for ( int c = 0; c < nColor; c++ ) {
+		atts[c].format = VK_FORMAT_R8G8B8A8_UNORM;
+		atts[c].samples = VK_SAMPLE_COUNT_1_BIT;
+		atts[c].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		atts[c].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		atts[c].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		atts[c].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		atts[c].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		atts[c].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	}
+	atts[depthIdx].format = sceneDepthFormat;
+	atts[depthIdx].samples = VK_SAMPLE_COUNT_1_BIT;
+	atts[depthIdx].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	atts[depthIdx].storeOp = VK_ATTACHMENT_STORE_OP_STORE;			// preserve the sealed depth
+	atts[depthIdx].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	atts[depthIdx].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;	// preserve the cleared (0) stencil
+	atts[depthIdx].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	atts[depthIdx].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+	VkAttachmentReference colorRefs[2] = {
+		{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+		{ 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+	};
+	VkAttachmentReference depthRef = { (uint32_t)depthIdx, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
 	VkSubpassDescription sub = {};
 	sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-	sub.colorAttachmentCount = 1;
-	sub.pColorAttachments = &colorRef;
+	sub.colorAttachmentCount = (uint32_t)nColor;
+	sub.pColorAttachments = colorRefs;
 	sub.pDepthStencilAttachment = &depthRef;
 	VkSubpassDependency deps[2] = {};
 	deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
@@ -5475,7 +5531,7 @@ bool VulkanBackend::EnsureMergeNormal( int w, int h ) {
 	deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
 	                     | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 	deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-	// outgoing: color -> shader read (SSAO/SSR sample the normal); depth write -> the scene
+	// outgoing: color -> shader read (SSAO/SSR sample the normal + mat); depth write -> the scene
 	// pass's depth test (EARLY/LATE fragment tests read the sealed depth for depth-EQUAL).
 	deps[1].srcSubpass = 0;
 	deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
@@ -5488,33 +5544,20 @@ bool VulkanBackend::EnsureMergeNormal( int w, int h ) {
 	                     | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 	VkRenderPassCreateInfo rpi = {};
 	rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-	rpi.attachmentCount = 2; rpi.pAttachments = atts;
+	rpi.attachmentCount = (uint32_t)( nColor + 1 ); rpi.pAttachments = atts;
 	rpi.subpassCount = 1; rpi.pSubpasses = &sub;
 	rpi.dependencyCount = 2; rpi.pDependencies = deps;
 	if ( !vkCheck( vkCreateRenderPass( device, &rpi, NULL, &mergeNormalPass ), "vkCreateRenderPass(merge normal)" ) ) {
 		DestroyMergeNormal(); return false;
 	}
 
-	// sampleable ImageRec so SSAO binds the normal via GetRenderTargetImage
-	ImageRec rec;
-	rec.image = mergeNormalImage;
-	rec.alloc = NULL;					// owned by mergeNormalAlloc, freed in DestroyMergeNormal
-	rec.view = mergeNormalView;
-	rec.sampler = GetSampler( TF_LINEAR, TR_CLAMP, false );
-	rec.live = true;
-	rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	rec.isDepth = false;
-	rec.isColorTarget = true;
-	rec.width = w; rec.height = h;
-	mergeNormalSampleImage = 0;
-	for ( size_t i = 0; i < imageTable.size(); i++ ) {
-		if ( !imageTable[i].live ) { imageTable[i] = rec; mergeNormalSampleImage = (ImageHandle)( i + 1 ); break; }
-	}
-	if ( mergeNormalSampleImage == 0 ) {
-		imageTable.push_back( rec );
-		mergeNormalSampleImage = (ImageHandle)imageTable.size();
+	// sampleable ImageRecs so SSAO/SSR bind them via GetRenderTargetImage / GetRenderTargetImage2
+	mergeNormalSampleImage = RegisterMergeSampleImage( mergeNormalImage, mergeNormalView, w, h );
+	if ( wantMrt ) {
+		mergeMatSampleImage = RegisterMergeSampleImage( mergeMatImage, mergeMatView, w, h );
 	}
 
+	mergeNormalMrt = wantMrt;
 	mergeNormalW = w; mergeNormalH = h;
 	mergeNormalFb = VK_NULL_HANDLE;
 	mergeNormalFbDepth = VK_NULL_HANDLE;
@@ -5522,22 +5565,26 @@ bool VulkanBackend::EnsureMergeNormal( int w, int h ) {
 	return true;
 }
 
-RenderTargetHandle VulkanBackend::BeginNormalPrepass( int w, int h, const ClearArgs *clear ) {
+RenderTargetHandle VulkanBackend::BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt ) {
 	if ( !frameOpen || skipFrame || device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
 		return 0;
 	}
-	if ( !EnsureMergeNormal( w, h ) ) {
+	if ( !EnsureMergeNormal( w, h, wantMrt ) ) {
 		return 0;
 	}
+	const int nColor = wantMrt ? 2 : 1;
 	// (re)build the framebuffer when the scene depth image changes (HDR toggle / resize)
 	VkImage depthImg = FrameDepthImage();
 	if ( mergeNormalFb == VK_NULL_HANDLE || mergeNormalFbDepth != depthImg ) {
 		if ( mergeNormalFb ) { vkDestroyFramebuffer( device, mergeNormalFb, NULL ); mergeNormalFb = VK_NULL_HANDLE; }
-		VkImageView views[2] = { mergeNormalView, FrameDepthView() };
+		VkImageView views[3];
+		views[0] = mergeNormalView;
+		if ( wantMrt ) { views[1] = mergeMatView; }
+		views[nColor] = FrameDepthView();
 		VkFramebufferCreateInfo fbi = {};
 		fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 		fbi.renderPass = mergeNormalPass;
-		fbi.attachmentCount = 2; fbi.pAttachments = views;
+		fbi.attachmentCount = (uint32_t)( nColor + 1 ); fbi.pAttachments = views;
 		fbi.width = (uint32_t)w; fbi.height = (uint32_t)h; fbi.layers = 1;
 		if ( !vkCheck( vkCreateFramebuffer( device, &fbi, NULL, &mergeNormalFb ), "vkCreateFramebuffer(merge normal)" ) ) {
 			mergeNormalFb = VK_NULL_HANDLE; return 0;
@@ -5550,22 +5597,25 @@ RenderTargetHandle VulkanBackend::BeginNormalPrepass( int w, int h, const ClearA
 		vkCmdEndRenderPass( cb );			// suspend the scene pass (like BeginTargetPass)
 		insideScenePass = false;
 	}
-	VkClearValue cv[2] = {};
+	VkClearValue cv[3] = {};
 	if ( clear != NULL && clear->color ) {
-		cv[0].color.float32[0] = clear->rgba[0]; cv[0].color.float32[1] = clear->rgba[1];
-		cv[0].color.float32[2] = clear->rgba[2]; cv[0].color.float32[3] = clear->rgba[3];
+		for ( int c = 0; c < nColor; c++ ) {
+			cv[c].color.float32[0] = clear->rgba[0]; cv[c].color.float32[1] = clear->rgba[1];
+			cv[c].color.float32[2] = clear->rgba[2]; cv[c].color.float32[3] = clear->rgba[3];
+		}
 	}
-	cv[1].depthStencil.depth = 1.0f;
+	cv[nColor].depthStencil.depth = 1.0f;
 	VkRenderPassBeginInfo rbi = {};
 	rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 	rbi.renderPass = mergeNormalPass;
 	rbi.framebuffer = mergeNormalFb;
 	rbi.renderArea.extent = { (uint32_t)w, (uint32_t)h };
-	rbi.clearValueCount = 2;
+	rbi.clearValueCount = (uint32_t)( nColor + 1 );
 	rbi.pClearValues = cv;
 	vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
-	// same passClass as a colorCount-1 RGBA8+depth target so the gbuffer pipeline is shared
-	EnterTargetPass( w, h, /*flipY*/true, mergeNormalPass, PassClassFor( VK_FORMAT_R8G8B8A8_UNORM, true, 1 ), /*colorAtt*/1 );
+	// same passClass as the standalone RGBA8+depth normal target (colorCount 1 or 2) so the
+	// gbuffer pipeline is shared with the standalone path
+	EnterTargetPass( w, h, /*flipY*/true, mergeNormalPass, PassClassFor( VK_FORMAT_R8G8B8A8_UNORM, true, nColor ), /*colorAtt*/nColor );
 	return mergeNormalTarget;
 }
 
