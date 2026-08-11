@@ -1702,7 +1702,16 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	// (fast, GPU-resident, ordered by the skin->deform barrier), else the CPU-skinned tri->verts
 	// (needs current-pose tangents; snapshotted to frame memory, uploaded by the flush). The
 	// fixed-function tess path stays intact as the fallback (r_tessDeform off / not baked / GL3).
-	if ( !r_tessDeform.GetBool() && tri->tessDeformVB ) {
+	//
+	// GUARDRAIL: deform-once REQUIRES GPU skinning. Without it the source is the CPU-skinned verts,
+	// which the flush must upload as a fresh storage buffer (CreateBuffer/DestroyBuffer) per surface
+	// EVERY frame — allocation churn that made deform-once ~20x SLOWER than plain fixed-function tess
+	// in a multi-NPC scene (measured, Phobos reception). Gating on r_gpuSkinning removes that footgun:
+	// with skinning off, no deform buffer is ever built and every pass falls back to fixed-function
+	// tessellation (which also has the distance LOD the fixed-baked deform topology lacks). So the two
+	// GPU-offload features are wired together — deform-once only ever runs on top of GPU-resident source.
+	const bool tessDeformActive = r_tessDeform.GetBool() && r_gpuSkinning.GetBool();
+	if ( !tessDeformActive && tri->tessDeformVB ) {
 		// toggled off: release so the draw stops binding the frozen last deform and falls back
 		rhi::RHI *r = rhi::GetRHI();
 		if ( r ) {
@@ -1714,7 +1723,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		tri->tessDeformFrame = -1;
 	}
 
-	if ( r_tessDeform.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN
+	if ( tessDeformActive && rhi::GetActiveBackendType() == rhi::BT_VULKAN
 	     && tessBarySeam && numTessOutVerts > 0 && R_MD5_TessShader( rhi::GetRHI() ) != 0 && EnsureTessBuffersUploaded() ) {
 		rhi::RHI *r = rhi::GetRHI();
 		const int numTessV = numTessOutVerts;

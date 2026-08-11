@@ -29,6 +29,17 @@ namespace rhi {
 static idList<MaterialIR *>	irList;
 static idHashIndex			irHash;
 
+// DUDE golden rule: on Vulkan, prefer the runtime ARB->GLSL->SPIR-V transpiler
+// for stock custom-ARB newStages (heatHaze etc.) over the hand-written builtin
+// shaders. The transpiler is the only path on GL3 (healthy at every preset), is
+// numerically identical to the builtins (crossdiff 120/120), and measured far
+// faster on Vulkan — the heatHaze builtin cost ~44ms GPU vs ~1.78ms transpiled
+// on the same surface. This cvar (default 0) flips back to builtin-first only
+// for debugging / a shaderc-less build; needs a vid_restart (the per-material IR
+// is cached). No effect on GL3.
+idCVar r_arbPreferBuiltin( "r_arbPreferBuiltin", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan: use hand-written builtin shaders for stock custom-ARB stages instead of the (faster) runtime transpiler. 0 = transpiler-first (default), 1 = builtin-first. Needs vid_restart" );
+
 /*
 =============
 IR_TranspileSection
@@ -172,17 +183,36 @@ static MaterialIR *IR_Build( const idMaterial *material ) {
 				const char *vpFile = R_ARBProgramName( ns->vertexProgram, GL_VERTEX_PROGRAM_ARB );
 				const char *fpFile = R_ARBProgramName( ns->fragmentProgram, GL_FRAGMENT_PROGRAM_ARB );
 				const bool vk = GetActiveBackendType() == BT_VULKAN;
-				const char *builtin = vk ? IR_VkBuiltinForArb( vpFile, fpFile ) : NULL;
 				ShaderHandle prog = 0;
-				if ( builtin != NULL ) {
-					prog = GetRHI()->LoadShader( builtin );
-					if ( prog ) {
-						s.kind = SK_BUILTIN_ARB;
+
+				// Golden rule (see r_arbPreferBuiltin): the runtime transpiler is
+				// the primary path — faster than the Vulkan builtins and the same
+				// path GL3 uses. Builtins are only tried first when explicitly
+				// requested for debugging / a shaderc-less build.
+				if ( vk && r_arbPreferBuiltin.GetBool() ) {
+					const char *builtin = IR_VkBuiltinForArb( vpFile, fpFile );
+					if ( builtin ) {
+						prog = GetRHI()->LoadShader( builtin );
+						if ( prog ) {
+							s.kind = SK_BUILTIN_ARB;
+						}
 					}
-				} else if ( vpFile && fpFile ) {
+				}
+				if ( prog == 0 && vpFile && fpFile ) {
 					prog = IR_ResolveCustomArb( vpFile, fpFile, material->GetName() );
 					if ( prog ) {
 						s.kind = SK_CUSTOM_ARB;
+					}
+				}
+				if ( prog == 0 && vk ) {
+					// transpiler unavailable (no shaderc) or the compile failed —
+					// fall back to the verified builtin if one exists for this pair.
+					const char *builtin = IR_VkBuiltinForArb( vpFile, fpFile );
+					if ( builtin ) {
+						prog = GetRHI()->LoadShader( builtin );
+						if ( prog ) {
+							s.kind = SK_BUILTIN_ARB;
+						}
 					}
 				}
 				if ( prog ) {
