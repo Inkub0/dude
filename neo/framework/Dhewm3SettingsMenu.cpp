@@ -2425,10 +2425,10 @@ struct EnhancementPreset {
 	// above Potato. FXAA (1) is reachable by hand only — its niche is the
 	// subpixel shimmer damping SMAA doesn't do, moot on the PBR tiers.
 	int   rhiAA;                    // r_rhiAA: 0 = off, 1 = FXAA, 2 = SMAA
-	// SSAO world-space sampling radius (appended, see note above). Fixed at 36 world
+	// SSAO world-space sampling radius (appended, see note above). Fixed at 48 world
 	// units across every tier (user-calibrated) — the contact-crease scale that looks
 	// right regardless of preset; only the slice/step budget changes with the tier.
-	float ssaoRadius;               // r_ssaoRadius: 36 on every tier
+	float ssaoRadius;               // r_ssaoRadius: 48 on every tier
 	// SSAO temporal accumulation (appended, see note above). On for Medium only:
 	// it denoises the low slice/step march so Medium's cheap AO looks clean, a
 	// small frame-time win over brute-forcing samples. Redundant on the higher
@@ -2453,9 +2453,9 @@ struct EnhancementPreset {
 	// floor bulletproof even if it was hand-enabled before switching presets.
 	bool  gpuSkin;                  // r_gpuSkinning
 	// SSAO depth-mip acceleration (appended, see note above). On for every tier that runs SSAO
-	// (Medium/High/Ultra) — the ~25% AO speedup for near-invisible halos at bias 0.1 / cap 2.
-	// OFF on Nightmare (wants the sharpest AO, has the frame budget) and inert on Potato/Low
-	// (SSAO off). The bias/cap knobs stay at their archived cvar defaults across tiers.
+	// (Medium/High/Ultra/Nightmare) — the ~25% AO speedup for near-invisible halos at the
+	// archived bias 0.1 / cap 2 defaults. Inert on Potato/Low (SSAO off). The bias/cap knobs
+	// stay at their archived cvar defaults across tiers.
 	bool  ssaoDepthMip;             // r_ssaoDepthMip
 };
 
@@ -2466,12 +2466,12 @@ struct EnhancementPreset {
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 36.0f,  false,  false, 0.0f, false, 0.0f, false, false },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 36.0f,  false,  false, 0.0f, false, 0.0f, false, false },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 1,   3,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 36.0f,  true,   false, 0.0f, true, 0.0f, false, true },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 2,   4,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 36.0f,  false,  true,  0.0f, true, 1.0f, false, true },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 3,   6,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 36.0f,  false,  true,  -0.25f, true, 1.0f, false, true },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   9,   true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 36.0f, false,  true,  -0.25f, true, 1.0f, false, false },
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 1,   3,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, false, true },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 2,   4,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, false, true },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 3,   6,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, false, true },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, false, true },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -3604,9 +3604,9 @@ static void DrawShadowDebugMenu()
 		r_ssaoRadius.SetFloat( ssaoRad );
 	}
 	AddTooltip( "How far the occlusion samples reach, in world units. Small = tight contact creases "
-		"only; large = broad, softer occlusion (and more expensive). Default 72." );
+		"only; large = broad, softer occlusion (and more expensive). Default 48." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaorad" ) ) { r_ssaoRadius.SetFloat( 72.0f ); }
+	if ( ImGui::SmallButton( "reset##ssaorad" ) ) { r_ssaoRadius.SetFloat( 48.0f ); }
 
 	int ssaoSlices = r_ssaoSlices.GetInteger();
 	if ( ImGui::SliderInt( "Directions (slices)", &ssaoSlices, 1, 8 ) ) {
