@@ -321,7 +321,7 @@ gating — and atomic-compacted into a `VkDrawIndexedIndirectCommand[]` + count.
 vs genuine divergences. User-verified `PASS` (2048 objs, CPU vis == GPU vis, 0 mismatch) across view angles.
 **Proves:** per-object table upload, cull-math parity, atomic compaction into the indirect buffer.
 
-#### Phase 3.2a — cull the *live* surface set (real data, no draw) — ✅ SHIPPED (`feat/gpu-cull-live`, `r_gpuCullLive`, pending user PASS)
+#### Phase 3.2a — cull the *live* surface set (real data, no draw) — ✅ SHIPPED + USER-VERIFIED (`feat/gpu-cull-live` → HEAD `97bb4cd6`, `r_gpuCullLive`; PASS on mars_city1, 0-defect adversarial review)
 The Phase 3.1 kernel is now fed the **real per-frame surface set** instead of synthetic boxes, proving the
 GPU cull reproduces the shipping `R_CullLocalBox` on live geometry — dynamic/animated bounds, parented
 transforms, the constrained view frustum. The front-end (`R_AddAmbientDrawsurfs`, `tr_light.cpp`) records
@@ -400,7 +400,7 @@ Phase 1 (VK compute lane + BU_STORAGE) ── ✅ SHIPPED (cf18e615)
 Phase 2 (GPU skinning, VK) ── ✅ SHIPPED (gpuSkinVB; Milestone C audited what it can retire)
    └── Phase 3.0 (indirect-draw primitive) ── ✅ SHIPPED (feat/rhi-indirect-draw)
         └── Phase 3.1 (cull kernel, synthetic validation) ── ✅ SHIPPED (r_gpuCullTest)
-             └── Phase 3.2a (cull the live surface set, no draw) ── ✅ SHIPPED (feat/gpu-cull-live, r_gpuCullLive)
+             └── Phase 3.2a (cull the live surface set, no draw) ── ✅ SHIPPED + USER-VERIFIED (97bb4cd6, r_gpuCullLive)
                   └── Phase 3.2b (indirect consume, VK-only): needs a UNIFIED GEOMETRY BUFFER (net-new)
                        + per-object SSBO + COMPUTE→DRAW_INDIRECT barrier → retires pin #1 (light cull)
 Phase 4 (GPU shadow-volume gen) ── ❌ STRUCK (subsumed by ray-query)
