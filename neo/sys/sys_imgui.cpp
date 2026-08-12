@@ -330,12 +330,13 @@ bool Init(void* _sdlWindow, void* sdlGlContext)
 
 	const char* f10bind = idKeyInput::GetBinding( K_F10 );
 	if ( f10bind && f10bind[0] != '\0' ) {
-		if ( idStr::Icmp( f10bind, "dhewm3Settings" ) != 0 ) {
-			// if F10 is already bound, but not to dhewm3Settings, show a message
+		// accept the legacy "dhewm3Settings" name too, so existing configs don't warn
+		if ( idStr::Icmp( f10bind, "dudeSettings" ) != 0 && idStr::Icmp( f10bind, "dhewm3Settings" ) != 0 ) {
+			// if F10 is already bound, but not to the settings menu, show a message
 			common->Printf( "... the F10 key is already bound to '%s', otherwise it could be used to open the DUDE Settings Menu\n" , f10bind );
 		}
 	} else {
-		idKeyInput::SetBinding( K_F10, "dhewm3Settings" );
+		idKeyInput::SetBinding( K_F10, "dudeSettings" );
 	}
 
 	imgui_initialized = true;

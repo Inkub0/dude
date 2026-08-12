@@ -2457,7 +2457,9 @@ void idCommonLocal::InitCommands( void ) {
 	cmdSystem->AddCommand( "setMachineSpec", Com_SetMachineSpec_f, CMD_FL_SYSTEM, "detects system capabilities and sets com_machineSpec to appropriate value" );
 	cmdSystem->AddCommand( "execMachineSpec", Com_ExecMachineSpec_f, CMD_FL_SYSTEM, "execs the appropriate config files and sets cvars based on com_machineSpec" );
 
-	cmdSystem->AddCommand( "dhewm3Settings", Com_Dhewm3Settings_f, CMD_FL_SYSTEM, "Toggles (opens/closes) the (advanced) DUDE settings menu" );
+	cmdSystem->AddCommand( "dudeSettings", Com_Dhewm3Settings_f, CMD_FL_SYSTEM, "Toggles (opens/closes) the (advanced) DUDE settings menu" );
+	// DUDE: keep the legacy name as an alias so existing binds/configs (e.g. F10) keep working
+	cmdSystem->AddCommand( "dhewm3Settings", Com_Dhewm3Settings_f, CMD_FL_SYSTEM, "alias of dudeSettings (legacy name)" );
 
 	cmdSystem->AddCommand( "editPbrMaterial", Com_EditPbrMaterial_f, CMD_FL_SYSTEM, "opens the in-game PBR material editor for the surface under the crosshair (docs/pbr-materials.md); bind it to a key" );
 

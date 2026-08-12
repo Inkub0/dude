@@ -199,7 +199,18 @@ int SDL_main( int argc, char *argv[] ) {
 	strncpy(exe_path, [ [ [ NSBundle mainBundle ] bundlePath ] cStringUsingEncoding:NSUTF8StringEncoding ], sizeof(exe_path)-1);
 	exe_path[sizeof(exe_path)-1] = '\0';
 	// same for save_path for Posix_GetSavePath()
-	D3_snprintfC99(save_path, sizeof(save_path), "%s/Library/Application Support/dhewm3", [NSHomeDirectory() cStringUsingEncoding:NSUTF8StringEncoding]);
+	D3_snprintfC99(save_path, sizeof(save_path), "%s/Library/Application Support/dude", [NSHomeDirectory() cStringUsingEncoding:NSUTF8StringEncoding]);
+	// DUDE: one-time migration from the legacy dhewm3 dir so upgrading users
+	// keep their configs/saves. Best-effort: if the new dir is absent but the
+	// old one exists, clone it once. Any failure just starts fresh.
+	{
+		NSString *newPath = [NSString stringWithUTF8String:save_path];
+		NSString *oldPath = [NSString stringWithFormat:@"%@/Library/Application Support/dhewm3", NSHomeDirectory()];
+		NSFileManager *fm = [NSFileManager defaultManager];
+		if (![fm fileExistsAtPath:newPath] && [fm fileExistsAtPath:oldPath]) {
+			[fm copyItemAtPath:oldPath toPath:newPath error:nil];
+		}
+	}
 	// and preinitializing basepath is easy enough so do that as well
 	{
 		char* snap;

@@ -408,7 +408,38 @@ extern "C" { // DG: I need this in SDL_win32_main.c
 		if (len == 0)
 			return 0;
 
-		idStr::Append(dst, size, "/My Games/dhewm3");
+		idStr::Append(dst, size, "/My Games/dude");
+
+		// DUDE: one-time migration from the legacy "My Games/dhewm3" dir so
+		// upgrading users keep their configs/saves. Best-effort: if the new dir
+		// is absent but the old one exists, copy the tree once. Any failure just
+		// starts fresh in the new dir.
+		{
+			struct _stat st;
+			if (_stat(dst, &st) != 0) {
+				char oldDir[MAX_OSPATH];
+				idStr::Copynz(oldDir, dst, sizeof(oldDir));
+				// swap the trailing "dude" for "dhewm3"
+				size_t dl = strlen(oldDir);
+				if (dl >= 4 && idStr::Icmp(oldDir + dl - 4, "dude") == 0) {
+					oldDir[dl - 4] = '\0';
+					idStr::Append(oldDir, sizeof(oldDir), "dhewm3");
+					if (_stat(oldDir, &st) == 0 && (st.st_mode & _S_IFDIR)) {
+						// SHFileOperation needs double-null-terminated paths
+						char from[MAX_OSPATH + 1] = { 0 };
+						char to[MAX_OSPATH + 1] = { 0 };
+						idStr::Copynz(from, oldDir, MAX_OSPATH);
+						idStr::Copynz(to, dst, MAX_OSPATH);
+						SHFILEOPSTRUCTA op = { 0 };
+						op.wFunc = FO_COPY;
+						op.pFrom = from;
+						op.pTo = to;
+						op.fFlags = FOF_NO_UI | FOF_NOCONFIRMMKDIR;
+						SHFileOperationA(&op);
+					}
+				}
+			}
+		}
 
 		return len;
 	}

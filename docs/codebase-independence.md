@@ -52,20 +52,31 @@ the *authored* `.gui` files are third-party.
   community pak. Likely partial: only the elements we actually want to own.
 - Engine already exposes `r_scaleMenusTo43` for the non-widescreen fallback.
 
-### 3. Own the config / save identity  **[TODO]**
-The write dirs are half-renamed:
-- Linux save: `~/.local/share/dude` ✅ (`sys/linux/main.cpp:94`)
-- Linux config: `~/.config/**dhewm3**` ❌ (`sys/linux/main.cpp:235,237`)
-- Windows: `Documents/My Games/**dhewm3**`; macOS: `Application Support/**dhewm3**`
-- **Task:** unify on a `dude` dir across platforms, with a one-time migration / read
-  fallback so existing configs and keys aren't orphaned. (Related gotcha:
-  savepath > basepath override, documented separately.)
+### 3. Own the config / save identity  **[DONE]**
+All write dirs now use `dude`, with a best-effort one-time migration that clones
+the legacy `dhewm3` dir on first launch (only if the new dir doesn't exist yet),
+so upgrading users keep configs/keys/saves:
+- Linux save: `~/.local/share/dude` ✅ (`sys/linux/main.cpp`)
+- Linux config: `~/.config/dude` ✅ (`sys/linux/main.cpp` `PATH_CONFIG`;
+  `DUDE_MigrateLegacyConfig` recursively copies `~/.config/dhewm3`). **Verified**
+  in-engine: identical tree cloned.
+- macOS: `Application Support/dude` ✅ (`sys/osx/DOOMController.mm`; NSFileManager
+  `copyItemAtPath` from the legacy dir). *Unbuilt/untested on this machine.*
+- Windows: `Documents/My Games/dude` ✅ (`sys/win32/win_main.cpp` `Win_GetHomeDir`;
+  `SHFileOperationA` FO_COPY of the legacy tree). *Unbuilt/untested on this machine.*
+- Migration is guarded on "new dir absent AND old dir present" so it fires exactly
+  once and never clobbers a live `dude` dir. Log filenames still say `dhewm3log.txt`
+  (cosmetic, inside the now-`dude` dir — out of scope).
+- Related gotcha: savepath > basepath override, documented separately.
 
-### 4. Rename the settings command + F10 identity  **[TODO]**
-`dhewm3Settings` console command (registered in `framework/Common.cpp`, auto-bound in
-`sys/sys_imgui.cpp`) still carries the old name. Rename to `dudeSettings` and keep a
-`dhewm3Settings` **alias** so existing binds/configs keep working. (Low effort; do it
-with item 3.)
+### 4. Rename the settings command + F10 identity  **[DONE]**
+The console command is now `dudeSettings` (`framework/Common.cpp`), with the legacy
+`dhewm3Settings` kept as an **alias** (same handler) so existing binds/configs keep
+working. The F10 auto-bind (`sys/sys_imgui.cpp`) now sets `dudeSettings` on fresh
+installs but treats *either* name as already-bound, so a legacy F10 bind doesn't
+warn or get double-bound. Menu keybind label (`framework/Dhewm3SettingsMenu.cpp`)
+points at `dudeSettings`. **Verified**: both command names resolve in-engine (a
+bogus name errors "Unknown command", these two don't).
 
 ### 5. Desktop / packaging IDs  **[deferred]**
 Reverse-DNS `org.dhewm3.*` (`dist/linux/**`) and external refs `dhewm3-libs` /
