@@ -887,23 +887,12 @@ bool R_PbrWriteOverrideLine( const idMaterial *mat, float metal, float rough,
 extern idCVar r_pbr;					// GGX interaction path; supersedes r_shading while on
 extern idCVar r_pbrRoughness;			// Phase A global fallback roughness (per-material in Phase B)
 extern idCVar r_pbrSpecScale;			// artistic energy scale on the GGX lobe (1.66 = calibrated look)
-extern idCVar r_pbrMetalMetalness;		// metalness for the bare-metal category (0.8 = a sliver of diffuse)
 extern idCVar r_pbrMetalDiffuse;		// how much albedo colour metals keep (1 = all, 0 = physical kill)
 extern idCVar r_pbrToksvigBase;			// Toksvig variance baseline (anti-firefly vs highlight tightness)
 extern idCVar r_pbrFireflyClamp;		// GGX lobe ceiling (spike suppression / highlight-core cap)
-extern idCVar r_pbrSkinWetness;			// skin+eyes specular boost (sweat/water film; NOT metalness)
-extern idCVar r_pbrSkinRoughness;		// live per-category values (supersede baked table numbers
-extern idCVar r_pbrEyesRoughness;		// for entries tagged with the matching category column;
-extern idCVar r_pbrFleshRoughness;		// hand-authored pbr_overrides.cfg entries always win)
-extern idCVar r_pbrFleshWetness;		// slime/gore film on demons + hell-growth
-extern idCVar r_pbrMetalRoughness;
-extern idCVar r_pbrPaintedRoughness;
-extern idCVar r_pbrPaintedMetalness;
-extern idCVar r_pbrCeramicRoughness;	// ceramic sheen: painted floors + tile, floors and walls
-extern idCVar r_pbrRustRoughness;
-extern idCVar r_pbrRustMetalness;
-extern idCVar r_pbrStoneRoughness;
-extern idCVar r_pbrEnvScale;			// Phase C.1 metal env floor (light-glow reflection stand-in)
+// Per-category defaults (metal/rough/wet/env) live in a table now (Material.cpp,
+// R_PbrCategoryDefaults), persisted as @cat rows in the pbr config — not cvars.
+extern idCVar r_pbrEnvScale;			// Phase C.1 metal env floor GLOBAL base (per-category env rides on top)
 
 // DUDE PBR Phase C.2 screen-space reflections (docs/ssr.md) — GL3 backend only
 extern idCVar r_ssr;					// enable; reflectivity follows the PBR material table
@@ -917,6 +906,8 @@ extern idCVar r_ssrHiZ;					// min-Z depth pyramid to leap empty march span (dev
 extern idCVar r_ssrHiZLevel;			// coarse mip level the Hi-Z march leaps at
 extern idCVar r_ssrTemporal;			// accumulate across frames (resolves the march grain)
 extern idCVar r_ssrTemporalFeedback;	// history fraction kept per frame
+extern idCVar r_ssrGlossy;				// roughness-blurred reflections (reflection mip pyramid)
+extern idCVar r_ssrGlossyScale;			// blur-amount multiplier on the roughness-driven LOD
 extern idCVar r_ssrGlassProbes;			// glass reflects baked per-area room cubemaps
 extern idCVar r_ssrGlassProbeBake;		// auto-capture missing probes (one-time hitch per area)
 extern idCVar r_ssrGlassProbeSize;		// probe face resolution

@@ -223,6 +223,44 @@ static const char *PBR_NameForCategory( int cat ) {
 	}
 }
 
+// DUDE per-category PBR defaults (docs/pbr-materials.md). Each category is a preset of
+// {metalness, roughness, wetness, env}; a tagged material tracks its row live, a pinned
+// (NONE) material carries its own explicit values. Seeded with the historical per-category
+// cvar defaults so the look is unchanged until a slider moves; "@cat <name> m r w e" rows
+// in the pbr config override these at load, and the Categories UI writes them back.
+// wetness/env are multipliers (1 = neutral); env rides on top of the global r_pbrEnvScale.
+static pbrCatDefaults_t pbrCatDefaults[PBR_CAT_COUNT] = {
+	/* PBR_CAT_NONE    */ { 0.0f, 0.58f, 1.0f, 1.0f },	// unused (pinned materials carry their own)
+	/* PBR_CAT_SKIN    */ { 0.0f, 0.40f, 1.0f, 1.0f },
+	/* PBR_CAT_EYES    */ { 0.0f, 0.15f, 1.0f, 1.0f },
+	/* PBR_CAT_FLESH   */ { 0.0f, 0.55f, 1.0f, 1.0f },
+	/* PBR_CAT_METAL   */ { 0.8f, 0.32f, 1.0f, 1.0f },
+	/* PBR_CAT_PAINTED */ { 0.2f, 0.55f, 1.0f, 1.0f },
+	/* PBR_CAT_CERAMIC */ { 0.2f, 0.45f, 1.0f, 1.0f },
+	/* PBR_CAT_RUST    */ { 0.4f, 0.78f, 1.0f, 1.0f },
+	/* PBR_CAT_STONE   */ { 0.0f, 0.90f, 1.0f, 1.0f },
+};
+
+void R_PbrCategoryDefaults( int cat, float &metal, float &rough, float &wet, float &env ) {
+	if ( cat <= PBR_CAT_NONE || cat >= PBR_CAT_COUNT ) {
+		metal = 0.0f; rough = 0.58f; wet = 1.0f; env = 1.0f;
+		return;
+	}
+	const pbrCatDefaults_t &d = pbrCatDefaults[cat];
+	metal = d.metalness; rough = d.roughness; wet = d.wetness; env = d.env;
+}
+
+void R_PbrSetCategoryDefault( int cat, float metal, float rough, float wet, float env ) {
+	if ( cat <= PBR_CAT_NONE || cat >= PBR_CAT_COUNT ) {
+		return;
+	}
+	pbrCatDefaults_t &d = pbrCatDefaults[cat];
+	d.metalness = idMath::ClampFloat( 0.0f, 1.0f, metal );
+	d.roughness = idMath::ClampFloat( 0.03f, 1.0f, rough );
+	d.wetness   = idMath::ClampFloat( 0.0f, 8.0f, wet );
+	d.env       = idMath::ClampFloat( 0.0f, 4.0f, env );
+}
+
 // parse an already-loaded, NUL-terminated table buffer into pbrTable. 'label' is
 // only used for the summary print.
 static void PBR_ParseTableBuffer( const char *buf, const char *label ) {
@@ -240,6 +278,21 @@ static void PBR_ParseTableBuffer( const char *buf, const char *label ) {
 		int c = line.Find( '#' );
 		if ( c >= 0 ) {
 			line = line.Left( c );
+		}
+		// per-category defaults row: "@cat <name> <metal> <rough> <wet> <env>" — the
+		// preset every material tagged with that category tracks live. Parsed into
+		// pbrCatDefaults; later files win (dude-folder deltas over the shipped baseline).
+		{
+			char kw[16] = "", cname[64] = "";
+			float cm = 0, cr = 0, cw = 0, ce = 0;
+			if ( sscanf( line.c_str(), "%15s %63s %f %f %f %f", kw, cname, &cm, &cr, &cw, &ce ) == 6
+			     && !idStr::Icmp( kw, "@cat" ) ) {
+				const int cat = PBR_CategoryForName( cname );
+				if ( cat != PBR_CAT_NONE ) {
+					R_PbrSetCategoryDefault( cat, cm, cr, cw, ce );
+				}
+				continue;
+			}
 		}
 		// name + up to 5 string columns: metal, rough, category, wet, env. Each is
 		// tokenized as a string first so a '*' sentinel (inherit) parses uniformly.
@@ -419,6 +472,74 @@ bool R_PbrWriteOverrideLine( const idMaterial *mat, float metal, float rough,
 	                replaced ? "updated" : "added", name.c_str(), osPath.c_str() );
 
 	R_PbrTableReloadApply();
+	return true;
+}
+
+/*
+=============
+R_PbrWriteCategoryDefaults
+
+Persist the per-category defaults (the 8 "@cat <name> m r w e" rows) to the
+fs_savepath copy of pbr/pbr_overrides.cfg — the same dude-folder delta file the
+material editor writes. Drops any existing @cat rows and rewrites a fresh block,
+so the file always holds exactly one row per category. Called by the Categories UI.
+=============
+*/
+bool R_PbrWriteCategoryDefaults( void ) {
+	idStr osPath = fileSystem->RelativePathToOSPath( "pbr/pbr_overrides.cfg", "fs_savepath" );
+
+	idStr content;
+	idFile *rf = fileSystem->OpenExplicitFileRead( osPath.c_str() );
+	if ( rf ) {
+		int l = rf->Length();
+		if ( l > 0 ) {
+			char *tmp = (char *)Mem_Alloc( l + 1 );
+			rf->Read( tmp, l );
+			tmp[l] = '\0';
+			content = tmp;
+			Mem_Free( tmp );
+		}
+		fileSystem->CloseFile( rf );
+	}
+
+	// copy through, dropping existing @cat rows and the old section header
+	idStr out;
+	const char *p = content.c_str();
+	while ( *p ) {
+		const char *ls = p;
+		while ( *p && *p != '\n' ) {
+			p++;
+		}
+		idStr raw( ls, 0, (int)( p - ls ) );
+		if ( *p == '\n' ) {
+			p++;
+		}
+		idStr trimmed = raw;
+		trimmed.StripLeading( ' ' );
+		trimmed.StripLeading( '\t' );
+		if ( trimmed.Icmpn( "@cat ", 5 ) == 0 ||
+		     trimmed.Find( "category defaults (PBR)" ) >= 0 ) {
+			continue;		// drop; rewritten below
+		}
+		out += raw;
+		out += "\n";
+	}
+
+	out += "\n# ---- category defaults (PBR) ----\n";
+	for ( int cat = PBR_CAT_NONE + 1; cat < PBR_CAT_COUNT; cat++ ) {
+		float m, r, w, e;
+		R_PbrCategoryDefaults( cat, m, r, w, e );
+		out += va( "@cat %s %.3f %.3f %.3f %.3f\n", PBR_NameForCategory( cat ), m, r, w, e );
+	}
+
+	idFile *wf = fileSystem->OpenExplicitFileWrite( osPath.c_str() );
+	if ( !wf ) {
+		common->Warning( "PBR editor: could not open %s for writing", osPath.c_str() );
+		return false;
+	}
+	wf->Write( out.c_str(), out.Length() );
+	fileSystem->CloseFile( wf );
+	common->Printf( "PBR editor: wrote category defaults to %s\n", osPath.c_str() );
 	return true;
 }
 

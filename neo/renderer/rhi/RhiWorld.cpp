@@ -382,6 +382,14 @@ static rhi::RenderTargetHandle rhiSsrDepthMinRT = 0;
 static int  rhiSsrDepthMinW = 0, rhiSsrDepthMinH = 0;	// == SSR march buffer size
 static int  rhiSsrDepthMinLevels = 0;					// mip count (0 = not built)
 
+// SSR glossy reflections (docs/ssr.md, r_ssrGlossy): a colour mip pyramid of the
+// (temporally-accumulated) reflection buffer at the SSR march resolution. The composite
+// samples it at a roughness-proportional LOD so rough surfaces blur. Same mipped-target
+// machinery as the SSR Hi-Z above, but RGBA16F and an average (box) downsample.
+static rhi::RenderTargetHandle rhiSsrColorMipRT = 0;
+static int  rhiSsrColorMipW = 0, rhiSsrColorMipH = 0;	// == SSR march buffer size
+static int  rhiSsrColorMipLevels = 0;					// mip count (0 = not built)
+
 // DUDE berserk vision feedback trail (docs / memory berserk-vision-rhi, RB_RHI_BerserkAccum).
 // A ping-pong RGBA8 pair reproducing the stock ARB material's recursive _scratch feedback the
 // RHI path can't accumulate: each frame folds the freshly captured scene with the previous
@@ -563,36 +571,44 @@ static idImage *RB_RHI_SurfaceOcclusion( const idRenderModel *model, const idRen
 ===================
 RB_RHI_ResolvePbrMaterial
 
-Resolve a material's effective PBR metalness/roughness (docs/pbr-materials.md) in
-priority order: live per-category cvars (the Developer-tab sliders) > the material's
-baked table values (override-file entries and long-tail categories) > globals
-(metalness 0, r_pbrRoughness). Metalness comes back sanity-clamped to [0,1].
-Shared by the lit interaction fill and the SSR G-buffer pass so both see the same
-surface response; returns the category for callers with per-category extras (wetness).
+Resolve a material's effective PBR response (docs/pbr-materials.md), outputting all
+four params: metalness, roughness, wetness (specular-energy multiplier) and env (metal
+env-glow multiplier over the global r_pbrEnvScale). A category-tagged material tracks
+its category row in the per-category defaults table (the Categories sliders); a pinned
+(NONE) material carries its own baked/override values, with the global roughness
+fallback. Per-material wetness/env override columns always win. Metalness comes back
+sanity-clamped to [0,1]. Shared by the lit interaction fill and the SSR G-buffer pass
+so both see the same surface response; returns the category.
 ===================
 */
-static int RB_RHI_ResolvePbrMaterial( const idMaterial *mat, float &metal, float &rough ) {
+static int RB_RHI_ResolvePbrMaterial( const idMaterial *mat, float &metal, float &rough,
+                                      float &wet, float &env ) {
 	const int pbrCat = mat ? mat->GetPbrCategory() : PBR_CAT_NONE;
 	const float tblMetal = mat ? mat->GetPbrMetalness() : -1.0f;
 	const float tblRough = mat ? mat->GetPbrRoughness() : -1.0f;
-	metal = tblMetal >= 0.0f ? tblMetal : 0.0f;
-	rough = tblRough >= 0.0f ? tblRough : r_pbrRoughness.GetFloat();
-	switch ( pbrCat ) {
-	case PBR_CAT_SKIN:    metal = 0.0f; rough = r_pbrSkinRoughness.GetFloat(); break;
-	case PBR_CAT_EYES:    metal = 0.0f; rough = r_pbrEyesRoughness.GetFloat(); break;
-	case PBR_CAT_FLESH:   metal = 0.0f; rough = r_pbrFleshRoughness.GetFloat(); break;
-	case PBR_CAT_METAL:   metal = r_pbrMetalMetalness.GetFloat(); rough = r_pbrMetalRoughness.GetFloat(); break;
-	case PBR_CAT_PAINTED: metal = r_pbrPaintedMetalness.GetFloat();
-	                      rough = r_pbrPaintedRoughness.GetFloat(); break;
-	case PBR_CAT_CERAMIC: metal = r_pbrPaintedMetalness.GetFloat();
-	                      rough = r_pbrCeramicRoughness.GetFloat(); break;
-	case PBR_CAT_RUST:    metal = r_pbrRustMetalness.GetFloat();
-	                      rough = r_pbrRustRoughness.GetFloat(); break;
-	case PBR_CAT_STONE:   metal = 0.0f; rough = r_pbrStoneRoughness.GetFloat(); break;
-	default: break;		// PBR_CAT_NONE: baked/override values stand
+	const float matWet   = mat ? mat->GetPbrWetness() : -1.0f;
+	const float matEnv   = mat ? mat->GetPbrEnv() : -1.0f;
+	if ( pbrCat > PBR_CAT_NONE && pbrCat < PBR_CAT_COUNT ) {
+		// category-tagged: the whole class tracks its row in the defaults table
+		R_PbrCategoryDefaults( pbrCat, metal, rough, wet, env );
+	} else {
+		// pinned / long-tail: the material's own baked values, global roughness fallback
+		metal = tblMetal >= 0.0f ? tblMetal : 0.0f;
+		rough = tblRough >= 0.0f ? tblRough : r_pbrRoughness.GetFloat();
+		wet   = 1.0f;
+		env   = 1.0f;
 	}
+	// per-material override columns (5th/6th) win over the category defaults
+	if ( matWet >= 0.0f ) wet = matWet;
+	if ( matEnv >= 0.0f ) env = matEnv;
 	metal = idMath::ClampFloat( 0.0f, 1.0f, metal );
 	return pbrCat;
+}
+
+// two-output shim for callers that only need metalness/roughness (SSR G-buffer)
+static int RB_RHI_ResolvePbrMaterial( const idMaterial *mat, float &metal, float &rough ) {
+	float wet, env;
+	return RB_RHI_ResolvePbrMaterial( mat, metal, rough, wet, env );
 }
 
 /*
@@ -887,25 +903,12 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	bool pbrOrganicSpecFallback = false;
 	if ( r_pbr.GetBool() && !din->ambientLight ) {
 		const idMaterial *mat = din->surf->material;
-		float metal, rough;
-		const int pbrCat = RB_RHI_ResolvePbrMaterial( mat, metal, rough );
+		float metal, rough, wetMul, envMul;
+		const int pbrCat = RB_RHI_ResolvePbrMaterial( mat, metal, rough, wetMul, envMul );
 		// wetness = a specular-energy multiplier (the water/sweat/slime film) —
-		// deliberately not metalness, which would tint and darken like bronze. A
-		// per-material override (pbr_overrides.cfg 5th column) wins; otherwise the
-		// per-category wetness cvar for organics (skin/cornea/enamel, demon/gore),
-		// else neutral 1.
-		const float matWet = mat ? mat->GetPbrWetness() : -1.0f;
-		float wetMul;
-		if ( matWet >= 0.0f ) {
-			wetMul = matWet;
-		} else {
-			switch ( pbrCat ) {
-			case PBR_CAT_SKIN:
-			case PBR_CAT_EYES:  wetMul = r_pbrSkinWetness.GetFloat(); break;
-			case PBR_CAT_FLESH: wetMul = r_pbrFleshWetness.GetFloat(); break;
-			default:            wetMul = 1.0f; break;
-			}
-		}
+		// deliberately not metalness, which would tint and darken like bronze. Comes from
+		// the material's per-category defaults row (or a per-material override column),
+		// resolved above; neutral 1 leaves the specular unchanged.
 		float specScale = r_pbrSpecScale.GetFloat() * wetMul;
 		// clay world: force dielectric so metals don't kill the white diffuse / tint the
 		// specular — the clay render should read metal and non-metal surfaces the same
@@ -922,10 +925,10 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		parms.localParam1[2] = r_pbrToksvigBase.GetFloat();
 		parms.localParam1[3] = r_pbrFireflyClamp.GetFloat();
 		// Phase C.1 metal environment floor rides the occlusionParms spare slot
-		// (the occlusion block below only writes .xyz). A per-material env override
-		// (6th column) scales it; default 1 keeps the global r_pbrEnvScale.
-		const float matEnv = mat ? mat->GetPbrEnv() : -1.0f;
-		parms.occlusionParms[3] = r_pbrEnvScale.GetFloat() * ( matEnv >= 0.0f ? matEnv : 1.0f );
+		// (the occlusion block below only writes .xyz). The per-category env default
+		// (or a per-material override column) scales the global r_pbrEnvScale; resolved
+		// above as envMul, neutral 1 keeps the global value.
+		parms.occlusionParms[3] = r_pbrEnvScale.GetFloat() * envMul;
 
 		// organic materials authored without a specular stage (most blood decals
 		// — bloodpool01 — and the gibs) would zero the GGX lobe through the
@@ -2854,6 +2857,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 
 	rhiSsrRT = 0;				rhiSsrW = rhiSsrH = 0;
 	rhiSsrDepthMinRT = 0;		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
+	rhiSsrColorMipRT = 0;		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
 	rhiSsrHistRT[0] = rhiSsrHistRT[1] = 0;
 	rhiSsrHistIdx = 0;			rhiSsrHistW = rhiSsrHistH = 0;
 	rhiSsrHistValid = false;	rhiSsrHavePrevVP = false;
@@ -4085,6 +4089,36 @@ static bool RB_RHI_EnsureSsrDepthMin( rhi::RHI *r, int w, int h ) {
 	return true;
 }
 
+// r_ssrGlossy: (re)create the reflection colour mip pyramid at the SSR march resolution.
+// RGBA16F to preserve HDR reflected energy across the downsample. Returns false when the
+// backend has no mipped-target capability (CreateRenderTargetMipped -> 0), so the caller
+// falls back to the exact sharp composite. Mirrors RB_RHI_EnsureSsrDepthMin.
+static bool RB_RHI_EnsureSsrColorMip( rhi::RHI *r, int w, int h ) {
+	if ( rhiSsrColorMipRT && r->GetRenderTargetImage( rhiSsrColorMipRT ) == 0 ) {
+		rhiSsrColorMipRT = 0;
+		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
+	}
+	if ( rhiSsrColorMipRT && rhiSsrColorMipW == w && rhiSsrColorMipH == h ) {
+		return true;
+	}
+	if ( rhiSsrColorMipRT ) { r->DestroyRenderTarget( rhiSsrColorMipRT ); rhiSsrColorMipRT = 0; }
+
+	// enough levels for a broad glossy blur without an over-long chain; 6 reaches a 1/32
+	// footprint (≈ a mirror -> fully diffuse spread across the roughness cutoff).
+	int levels = 1;
+	for ( int d = ( w > h ? w : h ); d > 1 && levels < 6; d >>= 1 ) { levels++; }
+
+	rhiSsrColorMipRT = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, levels );
+	if ( !rhiSsrColorMipRT ) {
+		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
+		return false;
+	}
+	rhiSsrColorMipW = w;
+	rhiSsrColorMipH = h;
+	rhiSsrColorMipLevels = levels;
+	return true;
+}
+
 /*
 ===================
 RB_RHI_ScreenSpaceReflections
@@ -4363,6 +4397,56 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiSsrHistValid = false;
 	}
 
+	// ---- stage 2.5: glossy reflection pyramid (r_ssrGlossy, docs/ssr.md) ----
+	// Build a colour mip pyramid of the reflection result so the composite can read it at a
+	// roughness-proportional LOD (rough surfaces blur, sharp stay sharp). The sharp path is
+	// left exactly as before: glossySrcRT stays the single-level resultRT and glossyMaxLod 0
+	// tells ssr_composite.frag to sample level 0 with plain texture().
+	rhi::RenderTargetHandle glossySrcRT = resultRT;
+	float glossyMaxLod = 0.0f;
+	if ( r_ssrGlossy.GetBool() && RB_RHI_EnsureSsrColorMip( r, ssrW, ssrH ) ) {
+		rhi::ShaderHandle downProg = r->LoadShader( "ssr_colordown" );
+		if ( downProg && rhiSsrColorMipLevels >= 2 ) {
+			rhi::RenderParams cp;
+			memset( &cp, 0, sizeof( cp ) );
+			cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+			// level 0: 1:1 copy of the reflection result into the pyramid base (mode 0).
+			// Level 0 uses BeginTargetPass (its framebuffer is the base colorFb) — NOT
+			// BeginTargetMipPass, which only creates per-level framebuffers for L>=1 and
+			// rejects level 0 (a no-op that would leave the base black). Mirrors the Hi-Z
+			// build, whose level-0 linearize also uses BeginTargetPass.
+			cp.localParam0[0] = 0.0f;	// single-level source -> level 0
+			cp.localParam0[1] = 0.0f;	// mode 0 = copy
+			r->BeginTargetPass( rhiSsrColorMipRT, NULL );
+			RB_RHI_DrawFullscreen( r, downProg, cp, r->GetRenderTargetImage( resultRT ) );
+			r->EndPass();
+			// levels 1..N: 2x2 box average of the previous level (mode 1). localParam0.x =
+			// source level (VK binds a single-level view -> 0; GL binds the whole texture).
+			const bool vkBackend = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+			for ( int L = 1; L < rhiSsrColorMipLevels; L++ ) {
+				rhi::RenderParams dp = cp;
+				dp.localParam0[0] = vkBackend ? 0.0f : (float)( L - 1 );
+				dp.localParam0[1] = 1.0f;	// mode 1 = downsample
+				rhi::ImageHandle src = r->GetRenderTargetMipImage( rhiSsrColorMipRT, L - 1 );
+				r->BeginTargetMipPass( rhiSsrColorMipRT, L, NULL );
+				RB_RHI_DrawFullscreen( r, downProg, dp, src );
+				r->EndPass();
+			}
+			if ( !vkMode ) {
+				backEnd.glState.tmu[0].current2DMap = -1;	// direct binds bypassed the tmu cache
+			}
+			glossySrcRT  = rhiSsrColorMipRT;
+			// max LOD the composite may reach at the roughness cutoff, scaled by r_ssrGlossyScale
+			glossyMaxLod = (float)( rhiSsrColorMipLevels - 1 )
+			             * idMath::ClampFloat( 0.0f, 1.0f, r_ssrGlossyScale.GetFloat() );
+		}
+	} else if ( rhiSsrColorMipRT && !r_ssrGlossy.GetBool() ) {
+		// toggled off: reclaim the pyramid so it isn't left resident (mirrors the Hi-Z reclaim)
+		r->DestroyRenderTarget( rhiSsrColorMipRT );
+		rhiSsrColorMipRT = 0;
+		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
+	}
+
 	// ---- stage 3: full-res additive composite over the lit scene ----
 	rhi::RenderParams compParms;
 	memset( &compParms, 0, sizeof( compParms ) );
@@ -4371,6 +4455,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	compParms.localParam0[1] = invP11;
 	compParms.localParam1[1] = r_ssrIntensity.GetFloat();
 	compParms.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
+	compParms.localParam1[3] = glossyMaxLod;	// r_ssrGlossy: >0 = sample the pyramid by roughness; 0 = sharp
 	compParms.screenCorrection[0] = 1.0f / fullW;
 	compParms.screenCorrection[1] = 1.0f / fullH;
 	compParms.depthTexRecip[0] = 1.0f / uploadW;
@@ -4399,7 +4484,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		backEnd.glState.tmu[2].current2DMap = -1;
 		backEnd.glState.tmu[3].current2DMap = -1;
 	}
-	RB_RHI_DrawFullscreen( r, compProg, compParms, r->GetRenderTargetImage( resultRT ),
+	RB_RHI_DrawFullscreen( r, compProg, compParms, r->GetRenderTargetImage( glossySrcRT ),
 	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 	RB_RHI_ForgetTexBinds();
 }

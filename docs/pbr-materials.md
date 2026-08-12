@@ -14,13 +14,15 @@ flag in the suite so far: an energy-conserving GGX BRDF with Fresnel visibly cha
 (`r_shading 0/1`) remain byte-identical and reachable; the Potato preset stays an
 exact vanilla frame.
 
-Primary code (planned): BRDF branch in
+Primary code (built — see §9): BRDF branch in
 [`neo/shaders/interaction.frag`](../neo/shaders/interaction.frag), per-draw parameter
 fill in [`neo/renderer/rhi/RhiWorld.cpp`](../neo/renderer/rhi/RhiWorld.cpp), per-material
 data on `idMaterial` ([`neo/renderer/Material.cpp`](../neo/renderer/Material.cpp),
-following the `occlusionmap` pattern), classifier tool under `tools/`, cvars in
+following the `occlusionmap` pattern), classifier tool under `tools/`
+(`pbr_classify.py` + `pbr_make_overrides.py`), cvars in
 [`neo/renderer/RenderSystem_init.cpp`](../neo/renderer/RenderSystem_init.cpp), UI in the
-Enhancements tab ([`Dhewm3SettingsMenu.cpp`](../neo/framework/Dhewm3SettingsMenu.cpp)).
+Enhancements + Developer tabs and the in-game editor
+([`Dhewm3SettingsMenu.cpp`](../neo/framework/Dhewm3SettingsMenu.cpp)).
 
 ---
 
@@ -222,10 +224,16 @@ Metalness kills the diffuse lobe — a metal is *defined* by what it reflects �
      additive fullscreen pass at the translucent split point marches
      `_currentDepth` along the per-pixel reflection ray and composites the
      `_currentRender` scene copy weighted by Schlick Fresnel × gloss — mirrored
-     fixtures on the ceramic floors, corridors reflected in bare metal. v1 is
-     sharp-only (roughness dims, doesn't blur; `r_ssrMaxRoughness` gates); glossy
-     blur + temporal filtering are the C.2.1 follow-up. Works with `r_pbr` and
-     `r_hdr` each on or off. Full design, cvar table and limitations: docs/ssr.md.
+     fixtures on the ceramic floors, corridors reflected in bare metal. v1 was
+     sharp-only; **C.2.1 is now complete: resolution scale (`r_ssrResScale`),
+     Hi-Z traversal (`r_ssrHiZ`), temporal accumulation (`r_ssrTemporal`, on by
+     default) and glossy roughness-blur (`r_ssrGlossy`, built 2026-08-12 — a reflection
+     mip pyramid sampled at a roughness-proportional LOD; default off pending A/B then
+     Ultra+).** Roughness now blurs the reflection, not just dims it; `r_ssrMaxRoughness`
+     still gates the cutoff. The rough/metal MRT now
+     also rides the merged SSAO depth prepass when that path is on. Works with
+     `r_pbr` and `r_hdr` each on or off. Full design, cvar table and limitations:
+     docs/ssr.md.
 
 ## 6. Offline pipeline — classifier + table (Phase B)
 
@@ -352,28 +360,42 @@ modpack `.mtr` that redefines them with lit stages, zero engine work:
 
 **Per-category live values** (same Developer-tab section): each table entry is
 tagged with its category column, and for the main classes the values come from
-cvars at draw time — so these sliders retune the bulk of the game live. This now
-applies to override entries too, **when they carry a category**: an override line
-tagged `metal` follows the metal sliders, one tagged `none` (or with no category)
-pins its explicit numbers. The long-tail categories (wood, glass, cloth, liquid…)
-map to `none` internally, so they keep their baked table numbers. `wetness`/`env`
-are honored per-material when set to a number, else inherit (the per-category
-wetness cvar / `r_pbrEnvScale`).
+the **per-category defaults table** at draw time — so the Categories grid retunes the
+bulk of the game live. This applies to override entries too, **when they carry a
+category**: an override line tagged `metal` follows the metal row, one tagged `none` (or
+with no category) pins its explicit numbers. The long-tail categories (wood, glass, cloth,
+liquid…) map to `none` internally, so they keep their baked table numbers. Per-material
+`wetness`/`env` columns are honored when set to a number, else inherit the category row.
 
-| cvar | default | category |
-|---|---|---|
-| `r_pbrSkinRoughness` | 0.4 | human heads/faces |
-| `r_pbrSkinWetness` | 1.0 | specular-energy boost on skin **and eyes/teeth**, modelling the sweat/water film. Deliberately **not metalness** (metallic skin tints and darkens like bronze — wrong physics); a wet look = this raised + skin roughness lowered |
-| `r_pbrEyesRoughness` | 0.15 | eyes + teeth (`eyes` category: `left*`/`right*`/`teeth*` from the head meshes + eye-prefixed names under `models/`). **Caveat found in-game:** stock eyeballs are unlit `deform eyeBall` filter decals with no interaction stages, so this effectively drives **teeth only** (plus any lit monster-eye materials); a true eye glint needs Phase-D edits to the eye materials themselves |
-| `r_pbrFleshRoughness` | 0.55 | body flesh / gore / hell-growth |
-| `r_pbrFleshWetness` | 1.0 | flesh-only specular boost: the slime/gore film on demons, viscera, hell-growth — **and blood**: blood/gore/gib-named materials (including decals, rescued from the skip list) route to flesh so stains glisten. Since most blood decals and all gibs ship with **no specular map** (which would zero the lobe), organic categories (flesh/skin/eyes) with a black spec image get an **organic spec fallback**: the material's own diffuse binds as the spec mask, so the gleam follows the blood shape and density and tints dark red |
-| `r_pbrMetalRoughness` | 0.32 | bare metal (metalness from `r_pbrMetalMetalness`, 0.8) |
-| `r_pbrPaintedRoughness` | 0.55 | painted station panelling (walls) |
-| `r_pbrPaintedMetalness` | 0.2 | scuff-through on painted metal; shared by walls and floors |
-| `r_pbrCeramicRoughness` | 0.45 | the `ceramic_sheen` category (renamed from `painted_floor` when the washroom tiles joined): painted floors (`base_floor`/`recyc_floor`) **plus ceramic tile on floors and walls** (`washroom`). Tighter than the wall panelling so lights streak — the wet-floor / glazed-tile look; grate floors stay bare metal |
-| `r_pbrRustRoughness` | 0.78 | rusted/corroded metal (named rust/oxid/corro/dirty/stain) |
-| `r_pbrRustMetalness` | 0.4 | patchy bare-metal/oxide mix (rust itself is dielectric) |
-| `r_pbrStoneRoughness` | 0.9 | rock / concrete / brick |
+### Per-category defaults — a table, not cvars (refactored 2026-08-12)
+
+The per-category values are **no longer individual cvars**. Each of the 8 categories is a
+preset of **four** values — `{metalness, roughness, wetness, env}` — held in a table
+(`pbrCatDefaults[]` in `Material.cpp`, `R_PbrCategoryDefaults`/`R_PbrSetCategoryDefault`)
+and persisted as `@cat <name> m r w e` rows in `pbr/pbr_overrides.cfg` (the dude-folder
+delta; later files win, same as material rows). Edited via the **8×4 grid** in the
+Developer tab and the material editor's Categories tab (a "Save Category Defaults" button
+writes the `@cat` rows). The 14 old per-category cvars (`r_pbrSkinRoughness`,
+`r_pbrMetalMetalness`, `r_pbrCeramicMetalness`, …) were **removed**.
+
+Seed defaults (unchanged look from before the refactor):
+
+| category | metalness | roughness | wetness | env | notes |
+|---|---|---|---|---|---|
+| Bare Metal | 0.8 | 0.32 | 1.0 | 1.0 | grates/pipes/chrome; <1 metalness keeps a diffuse sliver |
+| Painted Metal | 0.2 | 0.55 | 1.0 | 1.0 | station panelling bulk |
+| Ceramic Sheen | 0.2 | 0.45 | 1.0 | 1.0 | painted floors + washroom tile; light-streak look |
+| Rusted Metal | 0.4 | 0.78 | 1.0 | 1.0 | named rust/oxid/corro/dirty/stain |
+| Stone/Concrete | 0.0 | 0.90 | 1.0 | 1.0 | rock/concrete/brick/plaster |
+| Skin (faces) | 0.0 | 0.40 | 1.0 | 1.0 | tight oily face sheen (firefly clamp caps the core) |
+| Eyes/Teeth | 0.0 | 0.15 | 1.0 | 1.0 | cornea/enamel catchlights; stock eyeballs unlit → teeth only (Phase D) |
+| Flesh/Gore | 0.0 | 0.55 | 1.0 | 1.0 | flesh/blood/gib; organic spec fallback binds diffuse when spec is black |
+
+**wetness** = a specular-energy multiplier (the sweat/water/slime/gore film; **not**
+metalness — metallic organics tint like bronze). **env** = a multiplier over the global
+`r_pbrEnvScale`. Both default to a neutral 1.0. For uniformity every category exposes all
+four, but **env only does anything on metals** (`F0·metal·envScale`) and metalness on the
+organic categories is a bronze-skin dial — available but near-inert where not physical.
 
 Weapons caveat: `models/weapons/*` is deliberately **excluded from the table**
 (no entries at all) — the viewmodel is the closest, most-stared-at surface in
@@ -409,20 +431,23 @@ lit anyway) are ignored and the pick lands on the lit wall behind them; the trac
 gained a `skipDecals` flag for this, with a non-skip fallback for standalone
 decals — and opens a floating ImGui window with the
 material's name, a category dropdown, and metalness/roughness/wetness/env sliders.
-Dragging a slider previews **live** on that surface (`idMaterial::SetPbrLive`
-pushes the values straight onto the material, bypassing the table); metalness and
-roughness grey out when a real category drives them. **Save** writes the line into
-`base/pbr/pbr_overrides.cfg` (`R_PbrWriteOverrideLine` → the `fs_basepath` copy, so
-the edit lands in the version-controlled file; a shadowing `fs_savepath` copy, if
-any, is not consulted), replacing the material's existing active *or* commented
-entry in place — or appending to a "live edits" section — then reloads the table.
+**Fork-on-edit model (2026-08-12):** all four sliders are **always editable** (no
+greying). When a material tracks a category they're **pre-filled from that category's
+live values**; the moment you drag *any* of them the material **auto-detaches to
+"none (pinned)"**, snapshotting the other three so the look is preserved — only that
+one material forks, the rest of the category is untouched. Re-selecting a category in
+the dropdown re-attaches it (and re-fills the sliders from that preset). Dragging
+previews **live** (`idMaterial::SetPbrLive`, bypassing the table). **Save** writes the
+line into `base/pbr/pbr_overrides.cfg` (`R_PbrWriteOverrideLine` → the `fs_savepath`
+copy — the dude-folder delta), replacing the material's existing active *or* commented
+entry in place, or appending to a "live edits" section, then reloads the table.
 **Revert**/close discards unsaved live edits (`ApplyPbrTable` restores the file
 values). The window has two tabs: **Material** (the per-material editor above) and
-**Categories** — sliders for the shared per-category cvars (bare-metal metalness/
-roughness, painted, ceramic, rust, stone, skin, eyes, flesh, and the skin/flesh
-wetness). Changing one moves *every* material tagged with that category at once
-(they read the cvars live at draw time), while pinned `none`/custom materials are
-untouched; those are the same archived cvars as the Developer tab, so edits persist.
+**Categories** — the **8×4 defaults grid** (metalness/roughness/wetness/env per
+category) plus Metal Color Retention; a "Save Category Defaults" button writes the
+`@cat` rows. Changing a grid cell moves *every* material tagged with that category at
+once (they read the table live at draw time), while pinned `none`/custom materials are
+untouched.
 Window wiring: `D3_ImGuiWin_PbrEditor` in
 [`sys_imgui.cpp`](../neo/sys/sys_imgui.cpp); UI + command in
 [`Dhewm3SettingsMenu.cpp`](../neo/framework/Dhewm3SettingsMenu.cpp).
@@ -437,45 +462,59 @@ that PBR replaces the specular model. Their values are preserved, not overwritte
 toggling PBR off restores the previous look exactly. The HDR toggle stays independent
 (never forced); the PBR tooltip recommends it.
 
-Preset placement: off through High (faithful-ish look preserved); candidate for
-Ultra/Ultra Nightmare once Phase B/C land and the look is calibrated. Per
-trim-debug-cvars policy, calibration-only cvars get folded once tuned.
+Preset placement (as shipped in `Dhewm3SettingsMenu.cpp`'s preset table): PBR is
+**on from High up** (High / Ultra / Nightmare), alongside HDR from Medium up and SSR
+from Ultra up — Potato/Low stay a faithful id-render. The calibration is done, so PBR
+graduated from "candidate" to a shipped tier. Per trim-debug-cvars policy, the
+calibration-only cvars were folded once tuned.
 
 ## 9. Status
 
 - **Phase A — GGX BRDF branch** (scalar params, Toksvig per-texel roughness, defaults
-  on stock assets): **built 2026-07-30, pending in-game verification.** As built:
+  on stock assets): **built + extensively in-game A/B-calibrated** (the whole §4/§5
+  calibration saga — Toksvig baseline, firefly clamp, spec scale, metal diffuse
+  retention — was tuned in the running engine, much of it user-driven). As built:
   GGX branch in `interaction.frag` (Schlick Fresnel, Smith-Schlick-GGX combined
   visibility `G/(4·N·L·N·V)`, Toksvig variance folded into α², π-free convention so
-  metalness-0 diffuse matches vanilla brightness exactly); `u_pbrParms` appended to
-  `RenderParams` (784 → 800 bytes, sizeof-propagated); cvars per §8 including the
-  Phase-A-only `r_pbrMetalness` debug global; Enhancements-tab toggle with the three
-  superseded specular controls greyed via `BeginDisabled`, values preserved. Vanilla
-  path only reordered (the `light` product moved after the branch, identical
-  multiplication order); GLSL validated with `glslangValidator` both stages.
-- **Phase B — classifier + table + overrides**: **built 2026-07-30, pending in-game
-  verification.** As built: `tools/pbr_classify.py` (signals per §6, plus
-  substring-token matching for compound names like `sopanel`/`rustpanel`, and
-  `models/mapobjects/<sub>` fixture priors) emits `base/pbr/pbr_materials.cfg`
-  (3,284 entries: 422 bare metal / 1,982 painted metal @0.2 / 17 rust / 388
-  stone / 381 flesh / ~100 other; ~800 unclassified fall back to the globals)
-  and a base+d3xp merged `d3xp/pbr/pbr_materials.cfg` (3,639). The first cut
-  marked all station panelling metalness 1.0 — "world of gunmetal", corrected
-  per the §3 painted-metal note. Runtime: name-keyed
-  `idHashTable` in `Material.cpp` loads table + `pbr_overrides.cfg` (override
-  wins) lazily at first material parse; `idMaterial` carries
-  `pbrMetalness/pbrRoughness` (-1 = no entry); the interaction fill uses them
-  with global fallbacks; `reloadPbrTable` re-applies live. `r_pbrMetalness`
-  debug global retired. **Extended 2026-07-31:** override file is now a
-  category-aware superset carrying per-material `wetness`/`env` columns (`*` =
-  inherit), override entries may keep their category to track the sliders, and
-  `tools/pbr_make_overrides.py` emits a full editable snapshot
-  (`base/pbr/pbr_overrides.cfg` 3,381 / `d3xp/pbr/pbr_overrides.cfg` 3,775).
+  metalness-0 diffuse matches vanilla brightness exactly). `u_pbrParms` **and** a
+  second `u_pbrParms2` vec4 now live in `RenderParams`, which has since grown to
+  **928 bytes** (46 vec4 + 3 mat4; `static_assert`-guarded in
+  [`RenderParams.h`](../neo/renderer/rhi/RenderParams.h)) as later features added
+  members. The Phase-A-only `r_pbrMetalness` debug global has been **removed** (per
+  trim-debug-cvars). Enhancements-tab toggle greys the three superseded specular
+  controls via `BeginDisabled`, values preserved. Vanilla path only reordered
+  (identical multiplication order); GLSL validated both stages.
+- **Phase B — classifier + table + overrides**: **built + in-game tuned.** As built:
+  `tools/pbr_classify.py` (signals per §6, plus substring-token matching for compound
+  names like `sopanel`/`rustpanel`, and `models/mapobjects/<sub>` fixture priors) emits
+  `base/pbr/pbr_materials.cfg` (currently **~3,430 active lines** with the in-game
+  hand-tuning baked in — see §6). The first cut marked all station panelling metalness
+  1.0 — "world of gunmetal", corrected per the §3 painted-metal note. **RoE keeps no
+  `pbr_materials.cfg` of its own** — it inherits `base/`'s via the mod file-search
+  fallback (§6 DRY decision); there is no `d3xp/pbr/pbr_materials.cfg`. Runtime:
+  name-keyed `idHashTable` in `Material.cpp` loads table + `pbr_overrides.cfg` (override
+  wins) lazily at first material parse; `idMaterial` carries `pbrMetalness/pbrRoughness`
+  (-1 = no entry); the interaction fill uses them with global fallbacks; `reloadPbrTable`
+  re-applies live. **Override files are now slim baked deltas** (not the full snapshots):
+  `base/pbr/pbr_overrides.cfg` ~141 active lines, `d3xp/pbr/pbr_overrides.cfg` ~413
+  (game-only materials + deliberate per-game edits; regenerate/bake per §6).
 - **Phase C — environment specular for metals**: C.1 light-glow floor **built**
-  (`r_pbrEnvScale`); C.2 screen-space reflections **v1 built** (`r_ssr`, sharp-only,
-  docs/ssr.md) — pending in-game verification; together they decide the metalness
-  clamp's fate. C.2.1 (glossy blur + temporal) is the follow-up.
-- **Phase D — per-texel map keywords / authored packs**: **optional, deferred**.
+  (`r_pbrEnvScale`); C.2 screen-space reflections **built** (`r_ssr`, docs/ssr.md),
+  now with **C.2.1 fully shipped**: resolution-scale + Hi-Z + temporal accumulation
+  (`r_ssrResScale`/`r_ssrHiZ`/`r_ssrTemporal`) **and glossy roughness-blur**
+  (`r_ssrGlossy`, built 2026-08-12 on `feat/ssr-glossy`, default off pending A/B →
+  Ultra+); the rough/metal MRT can ride the merged SSAO prepass. Together C.1/C.2
+  decide the metalness clamp's fate.
+- **Phase D — per-texel map keywords / authored packs**: **optional, deferred**
+  (plus the Phase-D backlog of asset-decl blockers in §7).
+- **Category-model refactor — built 2026-08-12 on `feat/ssr-glossy`** (pending in-engine
+  verify). The 14 per-category cvars were replaced by a per-category **defaults table**
+  ({metalness, roughness, wetness, env} × 8, `Material.cpp`), persisted as `@cat` rows in
+  the pbr config, edited via an 8×4 grid in the Developer tab + editor Categories tab. The
+  editor Material tab became **fork-on-edit** (all sliders live, no greying; editing a
+  category material detaches it to a pin). Behaviour-preserving: table seeded with the old
+  cvar defaults. Ceramic metalness also decoupled (was borrowing painted). Build clean both
+  backends; VK 5750 frames validation-clean, PBR table loads (3431+141).
 
 Sequencing rationale: A first because it's testable immediately and de-risks the BRDF;
 B is pure data work that's meaningless until the BRDF it feeds exists; C is the

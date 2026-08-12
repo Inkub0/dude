@@ -768,8 +768,24 @@ typedef enum {
 	PBR_CAT_CERAMIC,		// ceramic sheen: painted floors + tile on floors and walls
 							// (split from the wall panelling for the light-streak look)
 	PBR_CAT_RUST,			// rusted/corroded metal
-	PBR_CAT_STONE
+	PBR_CAT_STONE,
+	PBR_CAT_COUNT			// number of categories (array sizing); not a real category
 } pbrCategory_t;
+
+// DUDE per-category PBR defaults (docs/pbr-materials.md): each category is a preset of
+// four values every material tagged with it tracks live. Persisted as "@cat <name> m r
+// w e" rows in the pbr config; a material either follows its category or is pinned NONE.
+// wetness = specular-energy multiplier (1 = neutral); env = metal env-glow multiplier
+// over the global r_pbrEnvScale (1 = neutral). Accessors in Material.cpp.
+struct pbrCatDefaults_t {
+	float	metalness;
+	float	roughness;
+	float	wetness;
+	float	env;
+};
+void	R_PbrCategoryDefaults( int cat, float &metal, float &rough, float &wet, float &env );
+void	R_PbrSetCategoryDefault( int cat, float metal, float rough, float wet, float env );
+bool	R_PbrWriteCategoryDefaults( void );		// persist the @cat rows to pbr_overrides.cfg
 
 typedef idList<const idMaterial *> idMatList;
 

@@ -1112,7 +1112,7 @@ static void InitBindingEntries()
 		{ nullptr,          "Other"          , "#str_04064" }, // TODO: or "#str_02406"	"Misc"
 
 		{ "_impulse19",     "PDA / Score"    , "#str_04066" },
-		{ "dhewm3Settings", "DUDE settings menu", nullptr },
+		{ "dudeSettings", "DUDE settings menu", nullptr },
 		{ "savegame quick", "Quick Save"     , "#str_04067" },
 		{ "loadgame quick", "Quick Load"     , "#str_04068" },
 		{ "screenshot",     "Screenshot"     , "#str_04069" },
@@ -2920,6 +2920,54 @@ static void DrawEnhancementsMenu()
 
 // Developer tab: live render-debug toggles, shadow-map tuning and emissive-surface
 // controls. Not a "faithful" tab — purely for dialling values in-game during development.
+// DUDE PBR per-category defaults grid (docs/pbr-materials.md): an 8x4 table of the
+// {metalness, roughness, wetness, env} preset each category drives. Edits the live
+// defaults table (R_PbrSetCategoryDefault); category-tagged materials pick it up next
+// frame, no reload. Returns true if any value changed. Shared by the Developer tab and
+// the material editor's Categories tab. Env glow only does anything on metals; wetness
+// and (on organics) metalness are available for uniformity even where near-inert.
+static bool PbrCategoryGrid()
+{
+	static const struct { int cat; const char *label; } rows[] = {
+		{ PBR_CAT_METAL,   "Bare Metal" },
+		{ PBR_CAT_PAINTED, "Painted Metal" },
+		{ PBR_CAT_CERAMIC, "Ceramic Sheen" },
+		{ PBR_CAT_RUST,    "Rusted Metal" },
+		{ PBR_CAT_STONE,   "Stone / Concrete" },
+		{ PBR_CAT_SKIN,    "Skin (faces)" },
+		{ PBR_CAT_EYES,    "Eyes / Teeth" },
+		{ PBR_CAT_FLESH,   "Flesh / Gore" },
+	};
+	bool changed = false;
+	const ImGuiTableFlags flags = ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_RowBg;
+	if ( ImGui::BeginTable( "pbr_categories", 5, flags ) ) {
+		ImGui::TableSetupColumn( "Category", ImGuiTableColumnFlags_WidthFixed, 130.0f );
+		ImGui::TableSetupColumn( "Metalness" );
+		ImGui::TableSetupColumn( "Roughness" );
+		ImGui::TableSetupColumn( "Wetness" );
+		ImGui::TableSetupColumn( "Env glow" );
+		ImGui::TableHeadersRow();
+		for ( int i = 0; i < IM_ARRAYSIZE( rows ); i++ ) {
+			float m, r, w, e;
+			R_PbrCategoryDefaults( rows[i].cat, m, r, w, e );
+			ImGui::TableNextRow();
+			ImGui::PushID( rows[i].cat );
+			ImGui::TableNextColumn();
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted( rows[i].label );
+			bool c = false;
+			ImGui::TableNextColumn(); ImGui::SetNextItemWidth( -FLT_MIN ); c |= ImGui::SliderFloat( "##m", &m, 0.0f,  1.0f, "%.2f" );
+			ImGui::TableNextColumn(); ImGui::SetNextItemWidth( -FLT_MIN ); c |= ImGui::SliderFloat( "##r", &r, 0.03f, 1.0f, "%.2f" );
+			ImGui::TableNextColumn(); ImGui::SetNextItemWidth( -FLT_MIN ); c |= ImGui::SliderFloat( "##w", &w, 0.0f,  4.0f, "%.2f" );
+			ImGui::TableNextColumn(); ImGui::SetNextItemWidth( -FLT_MIN ); c |= ImGui::SliderFloat( "##e", &e, 0.0f,  4.0f, "%.2f" );
+			if ( c ) { R_PbrSetCategoryDefault( rows[i].cat, m, r, w, e ); changed = true; }
+			ImGui::PopID();
+		}
+		ImGui::EndTable();
+	}
+	return changed;
+}
+
 static void DrawShadowDebugMenu()
 {
 	ImGui::TextDisabled( "Developer tools for inspecting and tuning the renderer live: general debug "
@@ -3040,63 +3088,6 @@ static void DrawShadowDebugMenu()
 		"white; also the ceiling that skin/tight highlights ride at. Raise for hotter cores (pairs well "
 		"with HDR), lower to flatten everything." );
 
-	// live per-category values: these drive every material the classifier tagged
-	// with the matching category (the bulk of the game); hand-written
-	// pbr_overrides.cfg entries are exempt and always keep their own numbers.
-	ImGui::Spacing();
-	ImGui::TextDisabled( "Material categories (live; overrides file still wins per material):" );
-
-	float skinRough = r_pbrSkinRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Skin Roughness (heads/faces)", &skinRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrSkinRoughness.SetFloat( skinRough );
-	}
-	AddTooltip( "r_pbrSkinRoughness: human heads and faces. Low = tight oily sheen that makes facial "
-		"detail pop; the Highlight Ceiling above bounds the core so faces can't burn out." );
-
-	float skinWet = r_pbrSkinWetness.GetFloat();
-	if ( ImGui::SliderFloat( "Skin Wetness (specular film)", &skinWet, 0.0f, 4.0f, "%.2f" ) ) {
-		r_pbrSkinWetness.SetFloat( skinWet );
-	}
-	AddTooltip( "r_pbrSkinWetness: boost on the specular energy of skin, eyes and teeth, modelling the "
-		"sweat/water film (1 = dry baseline, 0 = dead-matte). For a properly wet look, raise this AND "
-		"lower Skin Roughness — wetness is not metalness; metallic skin would just tint like bronze." );
-
-	float eyesRough = r_pbrEyesRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Eye/Teeth Roughness", &eyesRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrEyesRoughness.SetFloat( eyesRough );
-	}
-	AddTooltip( "r_pbrEyesRoughness: cornea and enamel — the hardest, wettest surfaces on a face. Low "
-		"values give tiny hot catchlights when the flashlight crosses a face in the dark." );
-
-	float fleshRough = r_pbrFleshRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Flesh Roughness (bodies/gore)", &fleshRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrFleshRoughness.SetFloat( fleshRough );
-	}
-	AddTooltip( "r_pbrFleshRoughness: body flesh, meat, hell-growth." );
-
-	float fleshWet = r_pbrFleshWetness.GetFloat();
-	if ( ImGui::SliderFloat( "Flesh Wetness (slime film)", &fleshWet, 0.0f, 4.0f, "%.2f" ) ) {
-		r_pbrFleshWetness.SetFloat( fleshWet );
-	}
-	AddTooltip( "r_pbrFleshWetness: the slime/gore film on demons, viscera and hell-growth (1 = dry "
-		"baseline). Raise it with Flesh Roughness lowered for glistening horror flesh in the "
-		"flashlight beam." );
-
-	float metalMetal = r_pbrMetalMetalness.GetFloat();
-	if ( ImGui::SliderFloat( "Bare Metal Metalness", &metalMetal, 0.0f, 1.0f, "%.2f" ) ) {
-		r_pbrMetalMetalness.SetFloat( metalMetal );
-	}
-	AddTooltip( "r_pbrMetalMetalness: how metallic the bare-metal category is. Below 1 keeps a sliver of "
-		"diffuse so metals don't go black between lights (Doom 3 has near-zero ambient); raise toward 1 for "
-		"harder metals once Metal Environment Glow or SSR gives them something to reflect." );
-
-	float metalRough = r_pbrMetalRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Bare Metal Roughness", &metalRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrMetalRoughness.SetFloat( metalRough );
-	}
-	AddTooltip( "r_pbrMetalRoughness: grates, pipes, machined steel, chrome — surfaces with exposed metal "
-		"(metalness set by Bare Metal Metalness above)." );
-
 	float metalDiffuse = r_pbrMetalDiffuse.GetFloat();
 	if ( ImGui::SliderFloat( "Metal Color Retention", &metalDiffuse, 0.0f, 1.0f, "%.2f" ) ) {
 		r_pbrMetalDiffuse.SetFloat( metalDiffuse );
@@ -3115,49 +3106,20 @@ static void DrawShadowDebugMenu()
 		"going black where the highlight misses. Scales with light and shadow (metals stay dark in "
 		"darkness). With this up, the Metalness Cap can rise toward 1." );
 
-	float paintRough = r_pbrPaintedRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Painted Metal Roughness", &paintRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrPaintedRoughness.SetFloat( paintRough );
+	// per-category presets: the 8x4 grid every tagged material tracks live. A pinned
+	// (none) or per-material override still keeps its own values (edit those in the
+	// in-game material editor). Metalness/roughness = surface response; wetness = a
+	// specular-energy film; env glow = metal reflection floor (inert on non-metals).
+	ImGui::Spacing();
+	ImGui::TextDisabled( "Material category presets (live; a pinned/override material keeps its own):" );
+	PbrCategoryGrid();
+	if ( ImGui::Button( "Save Category Defaults" ) ) {
+		R_PbrWriteCategoryDefaults();
 	}
-	AddTooltip( "r_pbrPaintedRoughness: the station's painted panelling — the bulk of the game's surfaces." );
+	AddTooltip( "Writes the 8 category rows above as @cat lines in pbr/pbr_overrides.cfg (the dude folder) "
+		"so they persist across launches. Per-material pins go through Save in the in-game material editor." );
 
-	float paintMetal = r_pbrPaintedMetalness.GetFloat();
-	if ( ImGui::SliderFloat( "Painted Metal Metalness", &paintMetal, 0.0f, 1.0f, "%.2f" ) ) {
-		r_pbrPaintedMetalness.SetFloat( paintMetal );
-	}
-	AddTooltip( "r_pbrPaintedMetalness: paint is a dielectric, so keep this low — it models metal showing "
-		"through scuffs. Raising it tints highlights toward the surface color but darkens the diffuse body. "
-		"Shared by walls and floors." );
-
-	float ceramicRough = r_pbrCeramicRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Ceramic Sheen Roughness", &ceramicRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrCeramicRoughness.SetFloat( ceramicRough );
-	}
-	AddTooltip( "r_pbrCeramicRoughness: glossy hard surfaces — painted floors plus ceramic tile on floors "
-		"and walls (e.g. the washroom). Tighter than Painted Metal Roughness stretches every light into a "
-		"streak — the wet-floor / glazed-tile look. Grate floors are bare metal and unaffected." );
-
-	float rustRough = r_pbrRustRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Rusted Metal Roughness", &rustRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrRustRoughness.SetFloat( rustRough );
-	}
-	AddTooltip( "r_pbrRustRoughness: materials explicitly named rusty/corroded/dirty/stained. Note: most of "
-		"the game's rusty *look* is painted into the diffuse art of plain panels — the Painted Metal "
-		"sliders above are the mass lever for that; this one drives the named-rust set." );
-
-	float rustMetal = r_pbrRustMetalness.GetFloat();
-	if ( ImGui::SliderFloat( "Rusted Metal Metalness", &rustMetal, 0.0f, 1.0f, "%.2f" ) ) {
-		r_pbrRustMetalness.SetFloat( rustMetal );
-	}
-	AddTooltip( "r_pbrRustMetalness: rust itself is a dielectric oxide, so mid values model the patchy "
-		"bare-metal/oxide mix. Higher = more metallic glint through the rust." );
-
-	float stoneRough = r_pbrStoneRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Stone Roughness", &stoneRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrStoneRoughness.SetFloat( stoneRough );
-	}
-	AddTooltip( "r_pbrStoneRoughness: rock, concrete, brick, plaster (caves, hell, outdoor Mars)." );
-
+	ImGui::Spacing();
 	if ( ImGui::Button( "Reload PBR Table" ) ) {
 		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "reloadPbrTable\n" );
 	}
@@ -4378,7 +4340,7 @@ void Com_Dhewm3Settings_f( const idCmdArgs &args )
 	} else {
 		if ( ImGui::IsWindowFocused( ImGuiFocusedFlags_AnyWindow ) ) {
 			// if the settings window is open and an ImGui window has focus,
-			// close the settings window when "dhewm3Settings" is executed
+			// close the settings window when "dudeSettings" (or its legacy alias) is executed
 			D3::ImGuiHooks::CloseWindow( D3::ImGuiHooks::D3_ImGuiWin_Settings );
 		} else {
 			// if the settings window is open but no ImGui window has focus,
@@ -4416,11 +4378,18 @@ static void PbrEditor_LoadFrom( const idMaterial *mat )
 	if ( !mat ) {
 		return;
 	}
-	pbrEditCat   = mat->GetPbrCategory();
-	pbrEditMetal = mat->GetPbrMetalness() >= 0.0f ? mat->GetPbrMetalness() : 0.0f;
-	pbrEditRough = mat->GetPbrRoughness() >= 0.0f ? mat->GetPbrRoughness() : r_pbrRoughness.GetFloat();
-	pbrEditWet   = mat->GetPbrWetness()   >= 0.0f ? mat->GetPbrWetness()   : 1.0f;
-	pbrEditEnv   = mat->GetPbrEnv()       >= 0.0f ? mat->GetPbrEnv()       : 1.0f;
+	pbrEditCat = mat->GetPbrCategory();
+	if ( pbrEditCat > PBR_CAT_NONE && pbrEditCat < PBR_CAT_COUNT ) {
+		// tracking a category: pre-fill all 4 sliders from that category's live preset,
+		// so the editor shows the real current values (not the material's -1 placeholders)
+		R_PbrCategoryDefaults( pbrEditCat, pbrEditMetal, pbrEditRough, pbrEditWet, pbrEditEnv );
+	} else {
+		// pinned / long-tail: the material's own explicit values, global roughness fallback
+		pbrEditMetal = mat->GetPbrMetalness() >= 0.0f ? mat->GetPbrMetalness() : 0.0f;
+		pbrEditRough = mat->GetPbrRoughness() >= 0.0f ? mat->GetPbrRoughness() : r_pbrRoughness.GetFloat();
+		pbrEditWet   = mat->GetPbrWetness()   >= 0.0f ? mat->GetPbrWetness()   : 1.0f;
+		pbrEditEnv   = mat->GetPbrEnv()       >= 0.0f ? mat->GetPbrEnv()       : 1.0f;
+	}
 }
 
 // called by the editPbrMaterial command once it has traced a material
@@ -4461,24 +4430,40 @@ static void PbrEditor_DrawMaterialTab()
 	}
 	if ( ImGui::Combo( "Category", &comboIdx, pbrEditCatNames, IM_ARRAYSIZE( pbrEditCatNames ) ) ) {
 		pbrEditCat = pbrEditCatEnum[comboIdx];
+		// re-attaching to a category re-fills the sliders from its preset (so you see and
+		// start from its live values); selecting "none" keeps the current numbers as a pin
+		if ( pbrEditCat > PBR_CAT_NONE && pbrEditCat < PBR_CAT_COUNT ) {
+			R_PbrCategoryDefaults( pbrEditCat, pbrEditMetal, pbrEditRough, pbrEditWet, pbrEditEnv );
+		}
+	}
+
+	// all four sliders are always live — no greying. Pre-filled from the category preset
+	// when tracking; touching ANY of them forks this one material to a pinned custom.
+	bool edited = false;
+	edited |= ImGui::SliderFloat( "Metalness", &pbrEditMetal, 0.0f, 1.0f, "%.2f" );
+	edited |= ImGui::SliderFloat( "Roughness", &pbrEditRough, 0.03f, 1.0f, "%.2f" );
+	edited |= ImGui::SliderFloat( "Wetness (spec energy)", &pbrEditWet, 0.0f, 4.0f, "%.2f" );
+	edited |= ImGui::SliderFloat( "Env glow (metal)", &pbrEditEnv, 0.0f, 4.0f, "%.2f" );
+
+	// fork-on-edit: editing a category-tracked material detaches it to "none (pinned)".
+	// The current values are already in the sliders, so the look is preserved — only this
+	// material forks; the rest of the category is untouched. Re-attach via the dropdown.
+	if ( edited && pbrEditCat != PBR_CAT_NONE ) {
+		pbrEditCat = PBR_CAT_NONE;
 	}
 	const bool pinned = ( pbrEditCat == PBR_CAT_NONE );
-
-	ImGui::BeginDisabled( !pinned );
-	ImGui::SliderFloat( "Metalness", &pbrEditMetal, 0.0f, 1.0f, "%.2f" );
-	ImGui::SliderFloat( "Roughness", &pbrEditRough, 0.03f, 1.0f, "%.2f" );
-	ImGui::EndDisabled();
-	if ( !pinned ) {
-		ImGui::TextDisabled( "metalness/roughness track the '%s' category sliders (Categories tab)", pbrEditCatNames[comboIdx] );
+	if ( pinned ) {
+		ImGui::TextDisabled( "pinned (custom values) — pick a category above to re-attach and track it" );
+	} else {
+		ImGui::TextDisabled( "tracking '%s' — move any slider to fork this material to a custom pin", pbrEditCatNames[comboIdx] );
 	}
-	ImGui::SliderFloat( "Wetness (spec energy)", &pbrEditWet, 0.0f, 4.0f, "%.2f" );
-	ImGui::SliderFloat( "Env glow (metal)", &pbrEditEnv, 0.0f, 4.0f, "%.2f" );
 
-	// wetness/env at ~1.0 are the neutral default -> write as inherit ('*')
+	// tracking -> inherit (-1) so the material follows its category live; pinned -> all
+	// four explicit (the fork snapshot)
 	const float liveMetal = pinned ? pbrEditMetal : -1.0f;
 	const float liveRough = pinned ? pbrEditRough : -1.0f;
-	const float liveWet   = ( idMath::Fabs( pbrEditWet - 1.0f ) < 0.005f ) ? -1.0f : pbrEditWet;
-	const float liveEnv   = ( idMath::Fabs( pbrEditEnv - 1.0f ) < 0.005f ) ? -1.0f : pbrEditEnv;
+	const float liveWet   = pinned ? pbrEditWet   : -1.0f;
+	const float liveEnv   = pinned ? pbrEditEnv   : -1.0f;
 
 	// live preview: push the current values straight onto the material
 	const_cast<idMaterial *>( pbrEditMat )->SetPbrLive( liveMetal, liveRough, liveWet, liveEnv, pbrEditCat );
@@ -4514,38 +4499,18 @@ static void PbrEditor_DrawCategoriesTab()
 		ImGui::TextColored( ImVec4( 1.0f, 0.7f, 0.3f, 1.0f ), "r_pbr is 0 — enable PBR to see changes." );
 	}
 
-	ImGui::SeparatorText( "Bare Metal" );
-	PbrCvarSlider( "Metalness##metal", r_pbrMetalMetalness, 0.0f, 1.0f );
-	PbrCvarSlider( "Roughness##metal", r_pbrMetalRoughness, 0.03f, 1.0f );
-	PbrCvarSlider( "Color Retention##metal", r_pbrMetalDiffuse, 0.0f, 1.0f );
+	ImGui::Spacing();
+	PbrCategoryGrid();
+	ImGui::Spacing();
+	if ( ImGui::Button( "Save Category Defaults" ) ) {
+		R_PbrWriteCategoryDefaults();
+	}
+	ImGui::SameLine();
+	ImGui::TextDisabled( "-> pbr_overrides.cfg (@cat rows)" );
+
+	ImGui::Spacing();
+	PbrCvarSlider( "Metal Color Retention", r_pbrMetalDiffuse, 0.0f, 1.0f );
 	ImGui::TextDisabled( "keeps the asset's painted color on metals (0 = physical kill, 1 = full)" );
-
-	ImGui::SeparatorText( "Painted Metal (station panelling)" );
-	PbrCvarSlider( "Metalness##painted", r_pbrPaintedMetalness, 0.0f, 1.0f );
-	PbrCvarSlider( "Roughness##painted", r_pbrPaintedRoughness, 0.03f, 1.0f );
-
-	ImGui::SeparatorText( "Ceramic Sheen (floors / tile)" );
-	PbrCvarSlider( "Roughness##ceramic", r_pbrCeramicRoughness, 0.03f, 1.0f );
-	ImGui::TextDisabled( "metalness shared with Painted Metal" );
-
-	ImGui::SeparatorText( "Rusted Metal" );
-	PbrCvarSlider( "Metalness##rust", r_pbrRustMetalness, 0.0f, 1.0f );
-	PbrCvarSlider( "Roughness##rust", r_pbrRustRoughness, 0.03f, 1.0f );
-
-	ImGui::SeparatorText( "Stone / Concrete" );
-	PbrCvarSlider( "Roughness##stone", r_pbrStoneRoughness, 0.03f, 1.0f );
-
-	ImGui::SeparatorText( "Skin (faces)" );
-	PbrCvarSlider( "Roughness##skin", r_pbrSkinRoughness, 0.03f, 1.0f );
-	PbrCvarSlider( "Wetness##skin", r_pbrSkinWetness, 0.0f, 4.0f );
-
-	ImGui::SeparatorText( "Eyes / Teeth" );
-	PbrCvarSlider( "Roughness##eyes", r_pbrEyesRoughness, 0.03f, 1.0f );
-	ImGui::TextDisabled( "wetness shared with Skin" );
-
-	ImGui::SeparatorText( "Flesh / Gore" );
-	PbrCvarSlider( "Roughness##flesh", r_pbrFleshRoughness, 0.03f, 1.0f );
-	PbrCvarSlider( "Wetness##flesh", r_pbrFleshWetness, 0.0f, 4.0f );
 }
 
 // called from D3::ImGuiHooks::NewFrame() (if this window is enabled)
