@@ -249,7 +249,7 @@ private:
 	void						WriteConfiguration( void );
 	void						DumpWarnings( void );
 	void						LoadGameDLL( void );
-	void						LoadGameDLLbyName( const char *dll, idStr& s );
+	void						LoadGameDLLbyName( const char *dll, const char *gamedir, idStr& s );
 	void						UnloadGameDLL( void );
 	void						PrintLoadingMessage( const char *msg );
 	void						FilterLangList( idStrList* list, idStr lang );
@@ -2770,7 +2770,7 @@ idCommonLocal::LoadGameDLLbyName
 Helper for LoadGameDLL() to make it less painful to try different dll names.
 =================
 */
-void idCommonLocal::LoadGameDLLbyName( const char *dll, idStr& s ) {
+void idCommonLocal::LoadGameDLLbyName( const char *dll, const char *gamedir, idStr& s ) {
 	// try fs_dllpath first, if set
 	const char* dllpath = cvarSystem->GetCVarString("fs_gameDllPath");
 	if (dllpath != NULL && dllpath[0] != '\0') {
@@ -2831,6 +2831,37 @@ void idCommonLocal::LoadGameDLLbyName( const char *dll, idStr& s ) {
 			gameDLL = sys->DLL_Load(s);
 		}
 	#endif
+
+	// DUDE: last, look in the mod's own folder under the fs search paths. The
+	// classic id Tech 4 layout ships a mod's game DLL alongside its assets
+	// (e.g. <basepath>/tfphobos/tfphobos.so), but the stock loader only searched
+	// next to the engine binary and the install libdir, so a recompiled-for-dude
+	// mod DLL was invisible unless the user set fs_gameDllPath by hand. Searched
+	// last so the engine's own freshly-built base.so/d3xp.so (next to the binary)
+	// always win over a stale copy in a data folder. Safe for foreign mods: dude
+	// loads "<fsgame><suffix>" (tfphobos.so), never the retail "gamex86.dll", so
+	// an ABI-incompatible retail binary in the mod folder is never picked up.
+	if (!gameDLL && gamedir != NULL && gamedir[0] != '\0') {
+		const char *roots[2] = {
+			cvarSystem->GetCVarString("fs_savepath"),
+			cvarSystem->GetCVarString("fs_basepath")
+		};
+		for (int i = 0; i < 2 && !gameDLL; i++) {
+			if (roots[i] == NULL || roots[i][0] == '\0')
+				continue;
+			// <root>/<gamedir>/<dll> — the canonical in-mod-folder location
+			s = roots[i];
+			s.AppendPath(gamedir);
+			s.AppendPath(dll);
+			gameDLL = sys->DLL_Load(s);
+			if (gameDLL)
+				break;
+			// <root>/<dll> — DLL dropped loose next to the game data
+			s = roots[i];
+			s.AppendPath(dll);
+			gameDLL = sys->DLL_Load(s);
+		}
+	}
 }
 
 /*
@@ -2855,7 +2886,7 @@ void idCommonLocal::LoadGameDLL( void ) {
 	gameDLL = 0;
 
 	sys->DLL_GetFileName(fs_game, dll, sizeof(dll));
-	LoadGameDLLbyName(dll, s);
+	LoadGameDLLbyName(dll, fs_game, s);
 
 	// there was no gamelib for this mod, use default one from base game
 	if (!gameDLL) {
@@ -2865,7 +2896,7 @@ void idCommonLocal::LoadGameDLL( void ) {
 		if (fs_base && fs_base[0]) {
 			common->Warning( "couldn't load mod-specific %s, defaulting to library of fs_game_base (%s)!\n", dll, fs_base);
 			sys->DLL_GetFileName(fs_base, dll, sizeof(dll));
-			LoadGameDLLbyName(dll, s);
+			LoadGameDLLbyName(dll, fs_base, s);
 			if ( !gameDLL ) {
 				common->Warning( "couldn't load fs_game_base lib %s either, defaulting to base game's library!\n", dll);
 			}
@@ -2875,7 +2906,7 @@ void idCommonLocal::LoadGameDLL( void ) {
 
 		if ( !gameDLL ) {
 			sys->DLL_GetFileName(BASE_GAMEDIR, dll, sizeof(dll));
-			LoadGameDLLbyName(dll, s);
+			LoadGameDLLbyName(dll, BASE_GAMEDIR, s);
 		}
 	}
 
