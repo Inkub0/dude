@@ -501,11 +501,21 @@ void R_LoadARBProgram( int progIndex ) {
 	// RHI / GL 3.3-core backends have no ARB assembly programs — they run GLSL/SPIR-V and
 	// the Material IR maps custom ARB stages back to source via R_ARBProgramName. Without
 	// this guard the full path below just fails the availability check and prints
-	// "glprogs/*.vfp: GL_..._ARB not available" for every stock program at boot and on
-	// every vid_restart. Register the ident (byte-identical to the assignment further down,
-	// so R_FindARBProgram / R_ARBProgramName keep resolving) and return quietly. The legacy
-	// ARB2 path (allowARB2Path true) is unaffected and still compiles the programs.
-	if ( !glConfig.allowARB2Path ) {
+	// "glprogs/*.vfp: GL_..._ARB not available" for every custom-ARB material stage the mod
+	// touches (heatHaze, BlurXVariable, ...) at load time and on every vid_restart. Register
+	// the ident (byte-identical to the assignment further down, so R_FindARBProgram /
+	// R_ARBProgramName keep resolving for the transpiler) and return quietly.
+	//
+	// NB: gate on the actual ARB-extension availability, NOT allowARB2Path — the latter is
+	// forced true on BOTH RHI backends (GL3 core: RenderSystem_init.cpp ~1222, Vulkan: ~1130)
+	// purely to satisfy SetBackEndRenderer gating, so it can't tell "real ARB assembly" from
+	// "RHI stand-in". ARBVertexProgramAvailable/ARBFragmentProgramAvailable are only set by
+	// the legacy extension probe (skipped on core/Vulkan), so they're the honest signal.
+	const bool arbTargetAvailable =
+		( progs[progIndex].target == GL_VERTEX_PROGRAM_ARB )   ? glConfig.ARBVertexProgramAvailable :
+		( progs[progIndex].target == GL_FRAGMENT_PROGRAM_ARB ) ? glConfig.ARBFragmentProgramAvailable :
+		true;
+	if ( !arbTargetAvailable ) {
 		if ( progs[progIndex].ident == 0 ) {
 			progs[progIndex].ident = PROG_USER + progIndex;
 		}
