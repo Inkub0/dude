@@ -2970,16 +2970,32 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		//    exclusion (RhiWorld.cpp) would reject the all-additive glow and keep the ember dropped.
 		//    Gating additionally on tessDeformVB!=0 means only a surface actually deform-dispatched (the
 		//    body) takes it; a view-oriented sprite/particle glow and the blood decal have none.
-		//  - Otherwise (no deform buffer): a blood-overlay decal is a SEPARATE translucent surface that
-		//    fixed-function PN-tessellates via generic.tese (forBlendPass=true) to follow its own base.
+		//  - Otherwise (no deform buffer): fixed-function PN-tessellate via generic.tese (forBlendPass
+		//    =true). generic.tese ALSO runs dudeTessDisplace off the surface bump (bound on unit 1 below),
+		//    so an on-body EQUAL blend stage — the burning-corpse ember, a self-illum add, a mod emissive —
+		//    lands on the displaced zfill depth instead of failing EQUAL wherever the body is pushed out
+		//    (the bug that left the ember only on flat patches like the soles of the feet). A blood-overlay
+		//    decal is a SEPARATE surface with no bump stage, so it binds flatNormalMap => relief 0 => it
+		//    merely follows the PN base with no push, as before. (A PURELY additive glow — RoE soul aura —
+		//    is excluded from tessellation entirely by RB_RHI_TessellateSurf(forBlendPass), so it never
+		//    reaches here; only the deform-once buffer can carry it, hence the FALSE probe above.)
 		bool useDeform = false;
 		bool tess = RB_RHI_TessellateSurf( surf, true );
 		if ( RB_RHI_TessellateSurf( surf, false ) && tri->tessDeformVB && tri->tessDeformIB ) {
 			useDeform = true;
 			tess = false;			// deform-once supersedes fixed-function tess for the body
 		}
+		idImage *tessBump = NULL;
 		if ( tess ) {
 			RB_RHI_SetTessParms( parms );
+			// Bind the surface bump on unit 1 so generic.tese displaces this on-body blend
+			// stage (the imp/zombie burning-corpse ember, a self-illum add, a mod emissive)
+			// with the SAME bump texel / seam / strength as the zfill prepass it must match
+			// at depth-EQUAL. Without it the stage PN-follows but does NOT displace, so it
+			// fails EQUAL everywhere the body is displaced and survives only on flat patches
+			// (the soles of the feet). Bump-less surfaces (blood decals) get flatNormalMap =>
+			// relief 0 => no push, unchanged. u_bumpMatrix* is filled into parms here too.
+			tessBump = RB_RHI_TessBumpForZfill( surf, parms );
 		}
 
 		rhi::BufferHandle ub;
@@ -3033,6 +3049,14 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
 		da.textures[0] = stageImage;	// Vulkan path; 0 on GL3 (binds went via idImage)
+		if ( tess ) {
+			// unit 1 = displacement bump for generic.tese (Vulkan-only; GL3 never
+			// tessellates). tessBump is flatNormalMap when the material has no bump.
+			idImage *bumpImg = tessBump ? tessBump : globalImages->flatNormalMap;
+			bumpImg->Bind();		// upload trigger under Vulkan
+			da.textures[1] = bumpImg->rhiHandle ? bumpImg->rhiHandle
+			                                    : globalImages->flatNormalMap->rhiHandle;
+		}
 		if ( isBerserkBlit ) {
 			// unit 1 = the ghost trail (Vulkan needs it in DrawArgs; GL already bound it
 			// in RB_RHI_BerserkAccum). Without a trail, bind _scratch as a placeholder so

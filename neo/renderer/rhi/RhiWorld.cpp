@@ -801,7 +801,7 @@ void RB_RHI_SetTessParms( rhi::RenderParams &parms ) {
 // image to bind (unit 1 in zfill, unit 2 in the fog pass). Mirrors R_SetDrawInteraction /
 // the SSAO G-buffer so the displacement is bit-identical → depth-EQUAL holds. Shared by
 // the zfill prepass and the fog interaction pass.
-static idImage *RB_RHI_TessBumpForZfill( const drawSurf_t *surf, rhi::RenderParams &parms ) {
+idImage *RB_RHI_TessBumpForZfill( const drawSurf_t *surf, rhi::RenderParams &parms ) {
 	const shaderStage_t *bumpStage = surf->material->GetBumpStage();
 	const float *regs = surf->shaderRegisters;
 	idImage *bumpImg = globalImages->flatNormalMap;
