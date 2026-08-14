@@ -329,6 +329,14 @@ public:
 	// and whether this tic's renderView is a plain first-person view that may be interpolated
 	idVec3					firstPersonViewOriginPrev;
 	idMat3					firstPersonViewAxisPrev;
+	// com_interpolateAim component-separated interpolation: the mouse look (viewAngles) is advanced to
+	// real time each rendered frame while the view EFFECTS (viewBobAngles + weapon/damage kick) and the
+	// gravity axis interpolate smoothly, so bob/kick/roll/gravity no longer step at 60Hz. Snapshotted
+	// once per tic in CalculateFirstPersonView, mirroring exactly what GetViewPos composed this tic.
+	idAngles				effectViewAngles;		// this tic:  viewBobAngles + playerView.AngleOffset()
+	idAngles				effectViewAnglesPrev;	// previous tic
+	idMat3					gravityViewAxis;		// this tic:  physicsObj.GetGravityAxis()
+	idMat3					gravityViewAxisPrev;	// previous tic
 	bool					renderViewInterpolatable;
 
 	idDragEntity			dragEntity;

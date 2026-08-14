@@ -1279,6 +1279,10 @@ idPlayer::idPlayer() {
 
 	firstPersonViewOriginPrev	= vec3_zero;
 	firstPersonViewAxisPrev		= mat3_identity;
+	effectViewAngles.Zero();
+	effectViewAnglesPrev.Zero();
+	gravityViewAxis.Identity();
+	gravityViewAxisPrev.Identity();
 	renderViewInterpolatable	= false;
 
 	hipJoint				= INVALID_JOINT;
@@ -8667,6 +8671,8 @@ void idPlayer::CalculateFirstPersonView( void ) {
 	// tics (CalculateFirstPersonView runs exactly once per tic, from idPlayer::Think)
 	firstPersonViewOriginPrev = firstPersonViewOrigin;
 	firstPersonViewAxisPrev = firstPersonViewAxis;
+	effectViewAnglesPrev = effectViewAngles;		// com_interpolateAim: prev tic's view-effect sum
+	gravityViewAxisPrev = gravityViewAxis;			// com_interpolateAim: prev tic's gravity axis
 
 	if ( ( pm_modelView.GetInteger() == 1 ) || ( ( pm_modelView.GetInteger() == 2 ) && ( health <= 0 ) ) ) {
 		//	Displays the view from the point of view of the "camera" joint in the player model
@@ -8691,6 +8697,17 @@ void idPlayer::CalculateFirstPersonView( void ) {
 #endif
 	}
 
+	// com_interpolateAim: capture THIS tic's view-effect components so InterpolateRenderView can lerp
+	// them smoothly while advancing the mouse to real time. Mirrors the additive sum inside GetViewPos
+	// exactly (viewBobAngles + AngleOffset(); the health<=0 death path adds no bob/kick). Captured here
+	// -- after GetViewPos, before the teleport guard -- so the guard resets these prevs on a jump too.
+	if ( health <= 0 ) {
+		effectViewAngles.Zero();
+	} else {
+		effectViewAngles = viewBobAngles + playerView.AngleOffset();
+	}
+	gravityViewAxis = physicsObj.GetGravityAxis();
+
 	// If the view jumped much further than normal per-tic motion (teleport, respawn, level
 	// load, camera cut), snap the previous origin/axis to the current one so we don't interpolate
 	// across the discontinuity and smear the view for a frame. The angle test also catches
@@ -8699,9 +8716,12 @@ void idPlayer::CalculateFirstPersonView( void ) {
 	const float interpMaxDeltaSqr = Square( 64.0f );
 	const float interpMinForwardDot = 0.7f;	// ~45 degrees of view turn in a single tic
 	if ( ( firstPersonViewOrigin - firstPersonViewOriginPrev ).LengthSqr() > interpMaxDeltaSqr
-			|| ( firstPersonViewAxis[0] * firstPersonViewAxisPrev[0] ) < interpMinForwardDot ) {
+			|| ( firstPersonViewAxis[0] * firstPersonViewAxisPrev[0] ) < interpMinForwardDot
+			|| ( gravityViewAxisPrev != gravityViewAxis ) ) {	// gravity flip: the forward-dot test can miss a flip about the view axis
 		firstPersonViewOriginPrev = firstPersonViewOrigin;
 		firstPersonViewAxisPrev = firstPersonViewAxis;
+		effectViewAnglesPrev = effectViewAngles;	// com_interpolateAim: don't smear effects/gravity
+		gravityViewAxisPrev = gravityViewAxis;		// across a teleport / respawn / gravity flip
 	}
 }
 
@@ -8822,32 +8842,73 @@ void idPlayer::InterpolateRenderView( float frac ) {
 	// within the same tic stay consistent (idempotent) instead of drifting
 	renderView->vieworg = firstPersonViewOriginPrev + frac * ( firstPersonViewOrigin - firstPersonViewOriginPrev );
 
-	// Low-latency aim (com_interpolateAim): instead of slerping the orientation between the last two
-	// tics (which renders the aim up to one tic ~16.7ms in the past), advance it to real time by
-	// overlaying the pending mouse-look delta - the input received since the last tic that hasn't
-	// been simulated yet - onto the current tic's view. Mouselook then tracks the mouse 1:1 with no
-	// added latency; shooting is unaffected (still resolved from the usercmd at the tic). The
-	// position still interpolates: players feel aim latency far more than positional latency. We're
-	// already first-person here (renderViewInterpolatable gates out camera/cinematic/3rd-person), so
-	// only health/spectate need guarding. It stays continuous when the tic lands because the tic
-	// applies the same delta and the mouse buffer then reads empty.
+	// Low-latency aim (com_interpolateAim), component-separated: advance the mouse look (viewAngles) to
+	// real time each rendered frame while the view EFFECTS (bob + weapon/damage kick) and the gravity
+	// axis interpolate smoothly by frac, so bob/kick/roll/gravity no longer STEP at the 60Hz tic rate
+	// (the mouselook microstutter). The per-tic effect snapshot lives in CalculateFirstPersonView.
+	// Shooting is unaffected (resolved from the usercmd at the tic). The stock whole-axis slerp is kept
+	// VERBATIM on the aim-off / frac==1 / dead / spectating paths so those stay byte-identical.
 	float dyaw = 0.0f, dpitch = 0.0f;
-	if ( frac < 1.0f && health > 0 && !spectating && cvarSystem->GetCVarBool( "com_interpolateAim" ) ) {
+	// The real-time mouse overlay is valid ONLY when this tic will apply exactly the previewed free-look
+	// delta. UpdateViewAngles FREEZES viewAngles (objectiveSystemOpen / INFLUENCE_LEVEL2), RATE-LIMITS it
+	// (INFLUENCE_LEVEL3, +/-1 deg/tic), OVERRIDES pitch (centerView auto-recenter), or ARC-CLAMPS it on a
+	// mounted turret; in any of those the overlay would drift / rubber-band / overshoot the arc and snap
+	// each tic, so defer to the whole-axis slerp. Keep this mirrored with idPlayer::UpdateViewAngles.
+	const bool viewAnglesFree = ( !objectiveSystemOpen && !mountedObject
+		&& influenceActive != INFLUENCE_LEVEL2 && influenceActive != INFLUENCE_LEVEL3
+		&& centerView.IsDone( gameLocal.time ) );
+	const bool aim = ( frac < 1.0f && health > 0 && !spectating && viewAnglesFree
+		&& cvarSystem->GetCVarBool( "com_interpolateAim" ) );
+	if ( aim ) {
 		common->GetPendingViewAngleDelta( dyaw, dpitch );
 	}
 
-	if ( dyaw != 0.0f || dpitch != 0.0f ) {
+	if ( !aim ) {
+		// Aim off (or frac==1 / dead / spectating): EXACT stock behaviour -- slerp the whole view axis
+		// (mouselook + bob/kick) between the last two tics. At frac==1 this collapses to
+		// firstPersonViewAxis, so the last render of a tic equals the tic state. Byte-identical.
+		idQuat q;
+		q.Slerp( firstPersonViewAxisPrev.ToQuat(), firstPersonViewAxis.ToQuat(), frac );
+		renderView->viewaxis = q.ToMat3();
+	} else if ( pm_modelView.GetInteger() != 0 ) {
+		// Dev camera-joint view (pm_modelView): its axis is model*ang*gravity, not the additive
+		// viewAngles+effects sum, so component separation does not map. Keep the legacy composed-axis
+		// overlay so this rare dev cvar is unchanged.
 		idAngles a = firstPersonViewAxis.ToAngles();
 		a.pitch = idMath::ClampFloat( pm_minviewpitch.GetFloat(), pm_maxviewpitch.GetFloat(), a.pitch + dpitch );
 		a.yaw += dyaw;
 		renderView->viewaxis = a.ToMat3();
 	} else {
-		// slerp the view orientation (mouselook + bob/kick) so aiming is smooth above 60fps. This
-		// makes the aim render up to one tic (~16.7ms) in the past, but shooting is unaffected since
-		// it is resolved from the usercmd at the game tic, not from this rendered view.
-		idQuat q;
-		q.Slerp( firstPersonViewAxisPrev.ToQuat(), firstPersonViewAxis.ToQuat(), frac );
-		renderView->viewaxis = q.ToMat3();
+		// Component-separated recompose. GetViewPos builds the tic axis as an ADDITIVE Euler sum,
+		//   ( viewAngles + viewBobAngles + AngleOffset() ).ToMat3() * gravityAxis
+		// so we can advance the mouse (viewAngles) to real time while lerping the effect sum (bob +
+		// kick) and the gravity axis smoothly by frac. Zero-latency aim AND no 60Hz effect stepping.
+		const idAngles effect = effectViewAnglesPrev + frac * ( effectViewAngles - effectViewAnglesPrev );
+
+		// Real-time mouse look: newest tic's clamped mouse angle + the pending un-simulated delta,
+		// clamping the PITCH on the MOUSE component only -- exactly as UpdateViewAngles does, before the
+		// effects are added. That makes the tic-boundary and pitch-limit reconciliation exact: the next
+		// tic clamps the identical scalar to the identical window.
+		idAngles mouse = viewAngles;
+		mouse.yaw += dyaw;
+		if ( noclip ) {
+			mouse.pitch = idMath::ClampFloat( -89.0f, 89.0f, viewAngles.pitch + dpitch );
+		} else {
+			mouse.pitch = idMath::ClampFloat( pm_minviewpitch.GetFloat(), pm_maxviewpitch.GetFloat(), viewAngles.pitch + dpitch );
+		}
+
+		// Gravity axis: slerp only when it actually changed this tic (constant in ~all gameplay).
+		idMat3 gravity;
+		if ( gravityViewAxisPrev == gravityViewAxis ) {
+			gravity = gravityViewAxis;
+		} else {
+			idQuat gq;
+			gq.Slerp( gravityViewAxisPrev.ToQuat(), gravityViewAxis.ToQuat(), frac );
+			gravity = gq.ToMat3();
+		}
+
+		// Recompose EXACTLY as GetViewPos: (mouse + effect).ToMat3() * gravity.
+		renderView->viewaxis = ( mouse + effect ).ToMat3() * gravity;
 	}
 }
 
