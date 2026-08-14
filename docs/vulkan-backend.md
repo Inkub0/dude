@@ -484,3 +484,65 @@ Ideas worth revisiting; none blocking. Low-priority unless a measurement says ot
     shows draw submission (not shadows/skinning) is the remaining CPU cost.
   - Prerequisite for all of the above: a GPU-time profiler for the VK backend (the GL3
     path has `r_gl3GpuTime`) so wins are measured, not assumed. Build that first.
+
+---
+
+## References — Vulkan best practices & modern idioms
+
+The normative source is always the Khronos **Vulkan-Docs**
+(https://github.com/KhronosGroup/Vulkan-Docs) — we target current Vulkan and assume 1.4+.
+The four practitioner guides below are the ones we lean on for *architecture* and *perf*
+decisions; each is annotated with how it maps onto DUDE's current backend, so read them
+against our state rather than as generic advice.
+
+### NVIDIA — *Vulkan Dos and Don'ts* · https://developer.nvidia.com/blog/vulkan-dos-donts/
+Terse, vendor-authoritative checklist of perf rules; the fastest sanity-check for a new pass.
+Rules we already follow (cross-check when touching the backend):
+- **Sub-allocate, don't `vkAllocateMemory` per resource** — we use VMA; the static
+  vertex/index blocks (`CreateBuffer`) sub-allocate from big pools, see "May look into" above.
+- **Batch barriers, use `synchronization2`, tighten stage masks** — relevant to every new
+  compute→draw hazard; the Phase 3.2b `COMPUTE→DRAW_INDIRECT` barrier
+  (`VulkanBackend.cpp:3273–3274`) is exactly this rule.
+- **Push constants / dynamic UBO for per-draw data; keep set count and descriptors low** —
+  matches our UBO-ring `RenderParams` model.
+- **Minimize `vkQueueSubmit` (<10/frame) and pipeline binds; sort by shader; use a pipeline
+  cache + specialization constants; `OPTIMAL` tiling always; never profile with validation on.**
+- Watch-item for us: `VK_EXT_memory_budget` / `VK_EXT_pageable_device_local_memory` are the
+  right tools *if* the BAR-heap pressure noted in "May look into" ever materializes.
+
+### Arseny Kapoulkine (zeux) — *Writing an efficient Vulkan renderer* · https://zeux.io/2020/02/27/writing-an-efficient-vulkan-renderer/
+The best single article on renderer *structure*. Most useful part for us is the three
+descriptor-set strategies laid out as a ladder we can climb deliberately:
+1. **slot-based** (D3D11-style) — closest to where the RHI sits today;
+2. **frequency-based sets** (set 0 per-frame / set 1 per-material / set 2 per-draw) — the
+   natural next refactor if descriptor churn ever shows on a CPU profile;
+3. **bindless** (one global texture array + push-constant/SSBO indices) — the endgame that
+   unblocks GPU-driven rendering; see the Phase 3.2b cross-ref below.
+Also: persistent-mapped host-visible memory (we do this for the static buffers and UBO ring),
+large storage buffers over per-draw descriptors, manual vertex fetch from a unified buffer,
+render-pass `LOAD_OP_DONT_CARE`/`pResolveAttachments`, and the JIT-vs-AOT pipeline-cache tiers.
+
+### Allen Philip — *Using Modern Vulkan in 2025* · https://medium.com/@allenphilip78/using-modern-vulkan-in-2025-0bac45174304
+Survey of the post-1.3 features that collapse legacy boilerplate. Directly relevant to our
+open architecture questions:
+- **Dynamic rendering** (no render-pass/framebuffer objects) — candidate simplification for
+  the VK backend's pass setup; evaluate before adding more `VkRenderPass` variants.
+- **Bindless descriptors + Buffer Device Address (BDA)** — the modern answer to the Phase 3.2b
+  blocker: a unified, GPU-addressable geometry/params buffer indexed per draw. See the
+  cross-ref in [gpu-offload-plan.md](gpu-offload-plan.md) §3.2b.
+- **Shader objects** (`VK_EXT_shader_object`) — all render state dynamic, no PSO explosion;
+  worth watching, but our two-backend parity (GL3 still needs PSOs' equivalent) argues for
+  caution.
+- Vulkan-HPP / `Vulkan-Hpp` bindings — noted, not adopted (the RHI is a hand-rolled C++ layer;
+  not worth a churn).
+
+### *How to Vulkan* (2026) · https://www.howtovulkan.com/#target-audience
+Pragmatic single-file 1.3 tutorial (VMA, dynamic rendering, BDA, descriptor indexing,
+`synchronization2`, Slang shaders). Not architectural — its value is as a **clean reference
+implementation** of the modern idioms above when we prototype one (e.g. a dynamic-rendering
+spike or a BDA path), showing them wired top-to-bottom without abstraction layers.
+
+> Takeaway for the backlog: items 1–3 all point the same direction — **bindless + BDA +
+> dynamic rendering** is the coherent modernization that also unblocks GPU-driven culling
+> (Phase 3.2b). It is a real subproject, not a drop-in; treat these as the design references
+> when that phase is scheduled. Fidelity-neutral by construction (perf/architecture only).

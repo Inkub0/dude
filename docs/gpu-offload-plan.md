@@ -394,7 +394,11 @@ counts); on the RTX 3080 Ti the frame is GPU-bound, so this is architecture + CP
 here. **Risk:** high (persistent residency for a frame-arena renderer; portal visibility is genuinely
 data-dependent → a *hybrid*: CPU portal-area coarse pass feeds the GPU fine cull). Retires **one** of the
 three CPU-position-skin pins (light cull, `Interaction.cpp:130/405`) once the light-interaction cull also
-moves to the GPU.
+moves to the GPU. **Design references:** the (1)+(2) prerequisites here — one unified GPU-addressable
+geometry buffer plus a per-object SSBO indexed per draw, replacing the per-surface vb/ib + `RenderParams`
+UBO — are precisely the **bindless + Buffer Device Address** pattern surveyed in
+[vulkan-backend.md](vulkan-backend.md) § "References" (zeux's descriptor-set ladder, "Modern Vulkan in
+2025"). Read those before scoping this; they are the coherent way through the blocker, not a drop-in.
 
 ### Phase 4 — GPU shadow-volume generation — ❌ STRUCK (2026-08-10, recon-confirmed)
 **Do not build.** A recon of the residual stencil cost after Phase 0 concluded a GPU stencil-volume
