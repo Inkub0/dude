@@ -97,6 +97,9 @@ static idCVar r_vkComputeTest( "r_vkComputeTest", "0", CVAR_RENDERER | CVAR_BOOL
 static idCVar r_vkIndirectTest( "r_vkIndirectTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: route every indexed draw through the DrawIndexedIndirect primitive (a per-draw 1-command indirect ring) instead of vkCmdDrawIndexed. A pixel-identical A/B validating the Phase-3 indirect-draw seed (docs/gpu-offload-plan.md)" );
 
+static idCVar r_vkBdaTest( "r_vkBdaTest", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: run the buffer-device-address self-test (a compute kernel sums a storage buffer read through its raw GPU pointer, not a bound buffer) and print PASS/FAIL. Set to 1 to trigger. Validates the Phase-3.2b BDA primitive (docs/gpu-offload-plan.md)" );
+
 namespace rhi {
 
 static const int FRAMES_IN_FLIGHT = 2;
@@ -139,6 +142,7 @@ public:
 	virtual void			UpdateBuffer( BufferHandle b, int offset, int size, const void *data );
 	virtual void			DestroyBuffer( BufferHandle b );
 	virtual bool			ReadBuffer( BufferHandle b, void *dst, int size );
+	virtual unsigned long long	GetBufferDeviceAddress( BufferHandle b );
 	virtual ImageHandle		CreateImage( ImageFormat, int, int, const void * ) { return 0; }	// render-target era API; M7
 	virtual void			DestroyImage( ImageHandle h );
 	virtual ImageHandle		CreateTexture2D( int w, int h, const void *pixels,
@@ -193,6 +197,7 @@ private:
 	VkPipeline		GetComputePipeline( ShaderHandle shader );	// build/cache a VkPipeline for a compute shader
 	VkDescriptorSet	RecordDispatch( VkCommandBuffer cb, const ComputeArgs &args );	// bind+dispatch; returns the set to reclaim
 	void			ComputeSelfTest();							// r_vkComputeTest: dispatch a trivial kernel, read back, verify
+	void			BdaSelfTest();								// r_vkBdaTest: sum a buffer through its device-address pointer (Phase 3.2b BDA primitive)
 
 	bool			CreateInstance();
 	bool			PickPhysicalDevice();
@@ -627,6 +632,7 @@ private:
 	// opt-in at device creation: drawIndirectCount gates the count-buffer form, multiDrawIndirect
 	// gates any drawCount>1. Universal on desktop; enabled when present, gated when not.
 	bool						haveDrawIndirectCount = false;
+	bool						haveBufferDeviceAddress = false;	// VK_KHR_buffer_device_address (core 1.2); gates BDA usage + the VMA flag
 	bool						haveMultiDrawIndirect = false;
 	bool						indirectFeatureWarned = false;
 
@@ -1065,6 +1071,12 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	enabled12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 	haveDrawIndirectCount = supported12.drawIndirectCount == VK_TRUE;
 	enabled12.drawIndirectCount = haveDrawIndirectCount ? VK_TRUE : VK_FALSE;
+	// Buffer device address (Phase 3.2b): lets a shader dereference a buffer via a raw 64-bit
+	// pointer (GL_EXT_buffer_reference) instead of a bound vertex buffer — the modern path to
+	// per-draw geometry without one unified vb. Core in 1.2; enable only if reported, and gate
+	// the VMA allocator flag + buffer usage bit on the same flag (all three must agree).
+	haveBufferDeviceAddress = supported12.bufferDeviceAddress == VK_TRUE;
+	enabled12.bufferDeviceAddress = haveBufferDeviceAddress ? VK_TRUE : VK_FALSE;
 	enabled13.pNext = &enabled12;
 
 	VkDeviceCreateInfo dci = {};
@@ -1087,6 +1099,11 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	aci.device = device;
 	aci.instance = instance;
 	aci.vulkanApiVersion = VK_API_VERSION_1_4;
+	// must match the enabled feature + the buffer usage bit (Phase 3.2b BDA); VMA needs this to
+	// pass VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT / the alloc flag through to buffer creation.
+	if ( haveBufferDeviceAddress ) {
+		aci.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+	}
 	if ( !vkCheck( vmaCreateAllocator( &aci, &vma ), "vmaCreateAllocator" ) ) {
 		return false;
 	}
@@ -1734,6 +1751,13 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 		r_vkComputeTest.ClearModified();
 		if ( r_vkComputeTest.GetBool() ) {
 			ComputeSelfTest();
+		}
+	}
+	// BDA self-test (Phase 3.2b): same one-shot-on-toggle idiom as the compute test above.
+	if ( r_vkBdaTest.IsModified() ) {
+		r_vkBdaTest.ClearModified();
+		if ( r_vkBdaTest.GetBool() ) {
+			BdaSelfTest();
 		}
 	}
 
@@ -2763,6 +2787,12 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 		                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT; break;
 		default:         usageBits = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
 	}
+	// BDA (Phase 3.2b): storage buffers may be dereferenced by a shader pointer. Only legal when
+	// the allocator carries the BDA flag (else vmaCreateBuffer fails validation), so gate on the
+	// same capability. The consume phase will extend this to BU_VERTEX (per-draw geometry).
+	if ( usage == BU_STORAGE && haveBufferDeviceAddress ) {
+		usageBits |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+	}
 
 	VkBufferCreateInfo bci = {};
 	bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -3409,6 +3439,117 @@ void VulkanBackend::ComputeSelfTest() {
 		common->Printf( "VK compute self-test: PASS (%d elements doubled on the GPU)\n", N );
 	}
 	DestroyBuffer( buf );
+}
+
+/*
+====================
+VulkanBackend::GetBufferDeviceAddress
+
+GPU virtual address of a buffer (Vulkan buffer_device_address). Returns 0 if the
+feature is unavailable or the handle is invalid. The buffer must have been created
+with VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT (CreateBuffer adds it to BU_STORAGE
+when supported). vkGetBufferDeviceAddress is core in 1.2 and the device floor is 1.4.
+(Phase 3.2b BDA primitive.)
+====================
+*/
+unsigned long long VulkanBackend::GetBufferDeviceAddress( BufferHandle b ) {
+	if ( !haveBufferDeviceAddress || device == VK_NULL_HANDLE
+	     || b < 1 || b > (BufferHandle)bufferTable.size() ) {
+		return 0;
+	}
+	VkBuffer buf = bufferTable[b - 1];
+	if ( buf == VK_NULL_HANDLE ) {
+		return 0;
+	}
+	VkBufferDeviceAddressInfo ai = {};
+	ai.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+	ai.buffer = buf;
+	return (unsigned long long)vkGetBufferDeviceAddress( device, &ai );
+}
+
+// r_vkBdaTest: validate the buffer-device-address plumbing that Phase 3.2b needs to draw
+// per-surface geometry without one unified vertex buffer. Seeds a storage buffer with 0..N-1,
+// queries its GPU address, and dispatches a kernel that reads N uints THROUGH THAT RAW POINTER
+// (GL_EXT_buffer_reference, no bound buffer at that binding) and writes the sum to a separate
+// bound SSBO. Verifies the sum == N*(N-1)/2. Proves: feature enabled, address query works, and a
+// shader can dereference the pointer. Synchronous one-shot (dev tool) — never call per-frame.
+void VulkanBackend::BdaSelfTest() {
+	if ( device == VK_NULL_HANDLE || computePipeLayout == VK_NULL_HANDLE || uploadCb == VK_NULL_HANDLE ) {
+		common->Printf( "VK BDA self-test: unavailable (no compute lane)\n" );
+		return;
+	}
+	if ( !haveBufferDeviceAddress ) {
+		common->Printf( "VK BDA self-test: unavailable (device lacks bufferDeviceAddress)\n" );
+		return;
+	}
+	// The source is read via a buffer_reference pointer carried in the push constant (NOT bound to
+	// a descriptor); only the output sum is a bound SSBO at binding 0. buffer_reference is itself a
+	// 64-bit handle, so the push-constant address needs no separate int64 extension.
+	static const char *kSrc =
+		"#version 450\n"
+		"#extension GL_EXT_buffer_reference : require\n"
+		"layout(local_size_x = 64) in;\n"
+		"layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer SrcRef { uint v[]; };\n"
+		"layout(std430, binding = 0) buffer Out { uint sum; } outb;\n"
+		"layout(push_constant) uniform PC { SrcRef src; uint count; } pc;\n"
+		"void main() {\n"
+		"    if ( gl_GlobalInvocationID.x != 0u ) { return; }\n"
+		"    uint s = 0u;\n"
+		"    for ( uint i = 0u; i < pc.count; i++ ) { s += pc.src.v[i]; }\n"
+		"    outb.sum = s;\n"
+		"}\n";
+	ShaderHandle sh = CreateComputeShader( "cs_bdatest", kSrc );
+	if ( sh == 0 ) {
+		common->Printf( "VK BDA self-test: FAIL (compute shader did not compile)\n" );
+		return;
+	}
+
+	const int N = 256;
+	uint32_t seed[N];
+	uint32_t expect = 0;
+	for ( int i = 0; i < N; i++ ) { seed[i] = (uint32_t)i; expect += (uint32_t)i; }
+	BufferHandle src = CreateBuffer( BU_STORAGE, N * (int)sizeof( uint32_t ), seed );
+	BufferHandle out = CreateBuffer( BU_STORAGE, (int)sizeof( uint32_t ), NULL );
+	if ( src == 0 || out == 0 ) {
+		common->Printf( "VK BDA self-test: FAIL (storage buffer alloc)\n" );
+		if ( src ) { DestroyBuffer( src ); }
+		if ( out ) { DestroyBuffer( out ); }
+		return;
+	}
+
+	// check 1: the address query returns non-zero (feature + usage bit + query all wired)
+	unsigned long long addr = GetBufferDeviceAddress( src );
+	if ( addr == 0 ) {
+		common->Printf( "VK BDA self-test: FAIL (GetBufferDeviceAddress returned 0)\n" );
+		DestroyBuffer( src );
+		DestroyBuffer( out );
+		return;
+	}
+
+	// check 2: the shader dereferences that pointer, sums, and writes it to the bound out buffer
+	struct { unsigned long long addr; uint32_t count; } pc;
+	pc.addr = addr;
+	pc.count = (uint32_t)N;
+	ComputeArgs ca = {};
+	ca.shader = sh;
+	ca.storage[0] = out;			// binding 0 = the output sum (the source comes via the pointer)
+	ca.pushConstants = &pc;
+	ca.pushConstantSize = (int)sizeof( pc );
+	ca.groupsX = 1; ca.groupsY = 1; ca.groupsZ = 1;
+	DispatchSync( ca );
+
+	uint32_t got = 0;
+	const bool readOk = ReadBuffer( out, &got, (int)sizeof( got ) );
+	if ( !readOk ) {
+		common->Printf( "VK BDA self-test: FAIL (readback failed)\n" );
+	} else if ( got != expect ) {
+		common->Printf( "VK BDA self-test: FAIL (sum via pointer = %u, expected %u)\n", got, expect );
+	} else {
+		common->Printf( "VK BDA self-test: PASS (GPU summed %d uints through a device-address pointer 0x%llx = %u)\n",
+			N, addr, got );
+	}
+	DestroyBuffer( src );
+	DestroyBuffer( out );
 }
 
 /*

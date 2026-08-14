@@ -400,6 +400,57 @@ UBO — are precisely the **bindless + Buffer Device Address** pattern surveyed 
 [vulkan-backend.md](vulkan-backend.md) § "References" (zeux's descriptor-set ladder, "Modern Vulkan in
 2025"). Read those before scoping this; they are the coherent way through the blocker, not a drop-in.
 
+##### Modern-Vulkan path (BDA + manual vertex fetch) — dissolves the unified-buffer blocker
+The "one unified geometry buffer" prerequisite above is the **legacy** framing (fixed-function
+`vkCmdBindVertexBuffers` forces every sub-draw of a multi-draw to share one bound vb). The modern
+path removes that constraint instead of paying it:
+- **Vertex data via Buffer Device Address.** Keep the per-surface `ambientCache`/ring buffers exactly
+  as they are — *no persistent unified buffer, no residency refactor of the frame-arena.* Publish each
+  surface's **GPU address** (+ base vertex offset, stride) into a per-object SSBO entry. The zfill/gbuffer
+  vertex shader does **manual vertex fetch** from that pointer (`GL_EXT_buffer_reference`), keyed by
+  `gl_VertexIndex` + the per-draw base — so *no vertex buffer is bound at all*, and the single-bind
+  constraint that blocked 3.2b simply doesn't apply. This is zeux's "manual vertex fetch from a unified
+  buffer" generalized to a per-draw pointer.
+- **Indices:** `vkCmdDrawIndexedIndirect` still reads one *bound* index buffer via `firstIndex`. Simplest
+  hybrid — funnel indices through the existing per-frame **index ring** (`idxRing`, indices are tiny) and
+  address them with `firstIndex`; vertices come from BDA. (Or go non-indexed and fetch indices via BDA too;
+  the ring is less work.)
+- **Per-object params:** the per-surface `RenderParams` UBO becomes an SSBO indexed by
+  `gl_BaseInstance`/`firstInstance` (`gl_DrawID` under `drawIndirectCount`) — the same SSBO that carries the
+  BDA pointers. **Bindless textures** (`VK_EXT_descriptor_indexing`, core 1.2) fold the material samplers
+  into one global set indexed by a per-object material id, so multi-stage/perforated materials stop forcing
+  a re-bind mid-batch.
+- **Cost to *enable*** is small and already de-risked (see § "References" audit, 2026-08-14): `bufferDeviceAddress`
+  is ~1 line on the already-chained `enabled12` struct (`VulkanBackend.cpp:1064`, right beside
+  `drawIndirectCount`), + `VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT` on the allocator (`:1085`), +
+  `VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT` on the addressed buffers (`CreateBuffer :2741`), + a
+  `vkGetBufferDeviceAddress` wrapper in the RHI. SPIR-V/shaderc **already** target `vulkan1.4`, so no
+  compiler bump; the GLSL just needs `#extension GL_EXT_buffer_reference`.
+
+**What BDA does NOT solve** (still real 3.2b work): the *state* partitioning — tess flag, cull type (mirror
+views), scissor, weapon/model depth-hack, polygon offset — still has to bucket the multi-draw by pipeline
+(one `DrawIndexedIndirect` batch per pipeline/state bucket). BDA + bindless fix **geometry addressing and
+per-object data**, i.e. items (1)+(2) of the blocker; item (3) the `COMPUTE→DRAW_INDIRECT` barrier and the
+bucketing remain. Still VK-only, still fps-neutral on GPU-bound HW — architecture + CPU-bound-case relief.
+
+**Recommended seeding (matches the r_vkIndirectTest / r_gpuCullTest methodology):** land a small, isolated,
+headlessly-verifiable **BDA RHI primitive** first — enable the feature, add `GetBufferDeviceAddress`, and a
+compute test that reads a buffer through its pointer and reports the sum back (numeric readback, like the
+cull test) — *then* build the depth-prepass consume on proven plumbing. The depth prepass is the right first
+consumer: one pipeline (no state buckets), no material textures, over the world-static batch.
+
+**Status — BDA primitive ✅ BUILT (`r_vkBdaTest`, `feat/gpu-skin-cpu-unpin`, pending user PASS).** Wired the
+whole path: `bufferDeviceAddress` enabled on the device (gated on the device reporting it —
+`haveBufferDeviceAddress`), the `VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT` allocator flag +
+`VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT` on `BU_STORAGE` buffers (both gated on the same flag),
+`RHI::GetBufferDeviceAddress` (VK returns `vkGetBufferDeviceAddress`; GL3 returns 0), and a compute self-test
+that seeds `0..N-1`, queries the buffer's address, and dispatches a kernel that sums N uints read **through the
+raw pointer** (`GL_EXT_buffer_reference`, not a bound descriptor) into a separate SSBO, verifying `== N·(N-1)/2`.
+Proves feature + address query + shader deref end to end. Files: `VulkanBackend.cpp` (`CreateDeviceAndVma`
+feature/VMA, `CreateBuffer` usage, `GetBufferDeviceAddress` + `BdaSelfTest` by `ComputeSelfTest`), `RHI.h`.
+No consumer yet — the depth-prepass consume is the next step. VK-only; SPIR-V already targets 1.4 so no
+compiler bump was needed. **To verify:** run in-game console `r_vkBdaTest 1` → expect `VK BDA self-test: PASS`.
+
 ### Phase 4 — GPU shadow-volume generation — ❌ STRUCK (2026-08-10, recon-confirmed)
 **Do not build.** A recon of the residual stencil cost after Phase 0 concluded a GPU stencil-volume
 builder is not worth it and is a *dead-end vs ray-query*: (1) Phase 0 already removed ~100% indoor /
@@ -425,6 +476,7 @@ retired by **ray-query**, not by this phase.
 | TBO bind (joint palette) | 2 | ✅ `glTexBuffer` | ✅ SSBO/UBO | GL3 texture loop `:969–987` |
 | Geometry stage (opt) | 4 | ✅ | ✅ | GL3 2-stage loop `GL3Shaders.cpp:290`; VK stage assembly `:4980` |
 | Indirect draw (`DrawIndexedIndirect`) | 3.0 | ❌ (no-op) | ✅ SHIPPED | `RHI.h` `DrawIndexedIndirect`; VK `BindForDraw`+`vkCmdDrawIndexedIndirect[Count]`; `r_vkIndirectTest` |
+| Buffer device address (`GetBufferDeviceAddress`) | 3.2b | ❌ (returns 0) | ✅ BUILT (`r_vkBdaTest`) | `RHI.h` `GetBufferDeviceAddress`; VK device feature + VMA `BUFFER_DEVICE_ADDRESS` flag + `SHADER_DEVICE_ADDRESS` usage on `BU_STORAGE`; `vkGetBufferDeviceAddress` |
 
 VK enablers already in place: Vulkan 1.4 floor (all core compute guaranteed, no extension gating),
 runtime shaderc compiler, VMA, a timestamp-query idiom to measure any new pass. The `queues[]` array

@@ -185,6 +185,12 @@ public:
 	// host-visible BU_STORAGE mapping after a queue idle (device-local staging is a
 	// Phase-2 extension).
 	virtual bool			ReadBuffer( BufferHandle b, void *dst, int size ) { return false; }
+	// GPU virtual address of a buffer (Vulkan buffer_device_address / BDA). Lets a shader
+	// dereference the buffer through a raw pointer (GL_EXT_buffer_reference) instead of a bound
+	// vertex buffer or descriptor — the Phase 3.2b path to per-draw geometry without a single
+	// unified vertex buffer (docs/gpu-offload-plan.md §3.2b). 0 = unsupported (GL 3.3 has no
+	// equivalent, device lacks the feature) or invalid handle.
+	virtual unsigned long long	GetBufferDeviceAddress( BufferHandle b ) { return 0; }
 	virtual ImageHandle		CreateImage( ImageFormat fmt, int w, int h, const void *pixels ) = 0;
 	virtual void			DestroyImage( ImageHandle i ) = 0;
 
