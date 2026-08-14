@@ -647,6 +647,11 @@ private:
 	// currentDesc.shader == zfillShaderHandle. zfillBdaShaderHandle 0 = variant absent.
 	ShaderHandle				zfillShaderHandle = 0;
 	ShaderHandle				zfillBdaShaderHandle = 0;
+	// r_vkBdaZfill firing counters (confirmation the consume path is active, not
+	// silently falling back — a pixel-identical A/B looks the same either way).
+	int							bdaZfillDraws = 0;		// zfill draws routed via device address last frame
+	int							bdaZfillFallback = 0;	// candidate zfill draws that fell back (buffer not addressable)
+	unsigned int				bdaZfillLastPrint = 0;
 	bool						haveMultiDrawIndirect = false;
 	bool						indirectFeatureWarned = false;
 
@@ -1787,6 +1792,18 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 			}
 		}
 	}
+	// r_vkBdaZfill firing report (once/sec): confirms the consume path is actually active. The
+	// counters hold the frame that just ended; a non-zero "via device address" means BDA is live.
+	if ( r_vkBdaZfill.GetBool() ) {
+		unsigned int now = Sys_Milliseconds();
+		if ( now - bdaZfillLastPrint >= 1000 ) {
+			common->Printf( "VK BDA zfill: %d draws via device address, %d fell back (last frame)\n",
+			                bdaZfillDraws, bdaZfillFallback );
+			bdaZfillLastPrint = now;
+		}
+	}
+	bdaZfillDraws = 0;
+	bdaZfillFallback = 0;
 
 	// vsync toggle → new present mode; window size change → new extent
 	if ( r_swapInterval.IsModified() ) {
@@ -6274,10 +6291,11 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 				vkCmdPushConstants( cb, pipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
 				                    (uint32_t)sizeof( vbAddr ), &vbAddr );
 				vkCmdDrawIndexed( cb, (uint32_t)args.indexCount, 1, (uint32_t)args.firstIndex, 0, 0 );
+				bdaZfillDraws++;
 			}
 			return;
 		}
-		// address 0 (streamed/skinned geometry, no BDA usage) — fall through to the normal draw
+		bdaZfillFallback++;		// address 0 (streamed/skinned) — fall through to the normal draw
 	}
 	// r_vkIndirectTest: validate the Phase-3 indirect-draw seed by routing this exact draw
 	// through DrawIndexedIndirect — write a 1-command VkDrawIndexedIndirectCommand into the
