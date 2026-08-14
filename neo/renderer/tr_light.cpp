@@ -1765,6 +1765,10 @@ static void R_UpdateEmissiveLights( void ) {
 	// saturation nudges fall under the colour threshold) — force a full rebuild when any of
 	// them changes. The signature only shifts while a slider is dragged, so steady-state cost
 	// is zero; each value gets a well-separated weight so a single-knob change is always seen.
+	// r_emissiveSurfaces is included so that turning it OFF drops the GUI fill lights even while
+	// r_itemGlow keeps the system enabled: the rebuild frees everything, then only the item-glow
+	// requests (still queued) recreate their lights — the now-gated GUI screens don't. Without
+	// this, an on-screen fill light is held alive indefinitely by the frustum keep-alive below.
 	static float lastStyleSig = -1.0f;
 	const float styleSig = ( r_emissiveLightSpecular.GetBool() ? 2.0f : 0.0f )
 	                     + r_emissiveLightSpread.GetFloat()     * 8.0f
@@ -1772,7 +1776,8 @@ static void R_UpdateEmissiveLights( void ) {
 	                     + r_emissiveLightScale.GetFloat()      * 64.0f
 	                     + r_emissiveLightRadius.GetFloat()     * 256.0f
 	                     + r_emissiveLightSaturation.GetFloat() * 1024.0f
-	                     + r_itemGlow.GetFloat()               * 4096.0f;
+	                     + r_itemGlow.GetFloat()               * 4096.0f
+	                     + ( r_emissiveSurfaces.GetBool() ? 32768.0f : 0.0f );
 	if ( styleSig != lastStyleSig ) {
 		R_FreeAllEmissiveLights( world );
 		lastStyleSig = styleSig;
