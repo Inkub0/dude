@@ -36,15 +36,16 @@ savegames/
 /base/generated/
 /base/screenshots/
 /base/maps/
-# base/guis: only CLEAN DUDE-authored gui text may be tracked. The working
-# mainmenu.gui/mpmain.gui are id/CstDoom3-derivative game data — they stay
-# repo-local (the engine mirrors them into fs_savepath at startup) and out of
-# git like the pk4s; binary GUI assets (tga etc.) ship via the assets channel.
+# base/guis: only CLEAN DUDE-authored gui text may be tracked. mpmain.gui stays
+# repo-local (id/CstDoom3-derivative multiplayer menu, out of git like the pk4s,
+# mirrored into fs_savepath at startup); binary GUI assets (tga etc.) ship via
+# the assets channel. mainmenu.gui is tracked by choice despite its
+# id/CstDoom3-derivative history — strip it before an engine-only publish if
+# that provenance ever matters.
 /base/guis/*
 !/base/guis/*.gui
 !/base/guis/*.pd
 !/base/guis/dude/
-/base/guis/mainmenu.gui
 /base/guis/mpmain.gui
 *.pk4.orig
 *.pk4.bak
