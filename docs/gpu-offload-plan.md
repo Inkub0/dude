@@ -439,7 +439,7 @@ compute test that reads a buffer through its pointer and reports the sum back (n
 cull test) — *then* build the depth-prepass consume on proven plumbing. The depth prepass is the right first
 consumer: one pipeline (no state buckets), no material textures, over the world-static batch.
 
-**Status — BDA primitive ✅ BUILT (`r_vkBdaTest`, `feat/gpu-skin-cpu-unpin`, pending user PASS).** Wired the
+**Status — BDA primitive ✅ USER-VERIFIED PASS (`r_vkBdaTest`, `feat/gpu-skin-cpu-unpin`, 2026-08-14).** Wired the
 whole path: `bufferDeviceAddress` enabled on the device (gated on the device reporting it —
 `haveBufferDeviceAddress`), the `VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT` allocator flag +
 `VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT` on `BU_STORAGE` buffers (both gated on the same flag),
@@ -449,7 +449,7 @@ raw pointer** (`GL_EXT_buffer_reference`, not a bound descriptor) into a separat
 Proves feature + address query + shader deref end to end. Files: `VulkanBackend.cpp` (`CreateDeviceAndVma`
 feature/VMA, `CreateBuffer` usage, `GetBufferDeviceAddress` + `BdaSelfTest` by `ComputeSelfTest`), `RHI.h`.
 No consumer yet — the depth-prepass consume is the next step. VK-only; SPIR-V already targets 1.4 so no
-compiler bump was needed. **To verify:** run in-game console `r_vkBdaTest 1` → expect `VK BDA self-test: PASS`.
+compiler bump was needed. **Verified:** in-engine `r_vkBdaTest 1` → `VK BDA self-test: PASS` (2026-08-14).
 
 ### Phase 4 — GPU shadow-volume generation — ❌ STRUCK (2026-08-10, recon-confirmed)
 **Do not build.** A recon of the residual stencil cost after Phase 0 concluded a GPU stencil-volume
@@ -476,7 +476,7 @@ retired by **ray-query**, not by this phase.
 | TBO bind (joint palette) | 2 | ✅ `glTexBuffer` | ✅ SSBO/UBO | GL3 texture loop `:969–987` |
 | Geometry stage (opt) | 4 | ✅ | ✅ | GL3 2-stage loop `GL3Shaders.cpp:290`; VK stage assembly `:4980` |
 | Indirect draw (`DrawIndexedIndirect`) | 3.0 | ❌ (no-op) | ✅ SHIPPED | `RHI.h` `DrawIndexedIndirect`; VK `BindForDraw`+`vkCmdDrawIndexedIndirect[Count]`; `r_vkIndirectTest` |
-| Buffer device address (`GetBufferDeviceAddress`) | 3.2b | ❌ (returns 0) | ✅ BUILT (`r_vkBdaTest`) | `RHI.h` `GetBufferDeviceAddress`; VK device feature + VMA `BUFFER_DEVICE_ADDRESS` flag + `SHADER_DEVICE_ADDRESS` usage on `BU_STORAGE`; `vkGetBufferDeviceAddress` |
+| Buffer device address (`GetBufferDeviceAddress`) | 3.2b | ❌ (returns 0) | ✅ VERIFIED (`r_vkBdaTest`) | `RHI.h` `GetBufferDeviceAddress`; VK device feature + VMA `BUFFER_DEVICE_ADDRESS` flag + `SHADER_DEVICE_ADDRESS` usage on `BU_STORAGE`; `vkGetBufferDeviceAddress` |
 
 VK enablers already in place: Vulkan 1.4 floor (all core compute guaranteed, no extension gating),
 runtime shaderc compiler, VMA, a timestamp-query idiom to measure any new pass. The `queues[]` array
