@@ -8822,12 +8822,33 @@ void idPlayer::InterpolateRenderView( float frac ) {
 	// within the same tic stay consistent (idempotent) instead of drifting
 	renderView->vieworg = firstPersonViewOriginPrev + frac * ( firstPersonViewOrigin - firstPersonViewOriginPrev );
 
-	// slerp the view orientation (mouselook + bob/kick) so aiming is smooth above 60fps. This
-	// makes the aim render up to one tic (~16.7ms) in the past, but shooting is unaffected since
-	// it is resolved from the usercmd at the game tic, not from this rendered view.
-	idQuat q;
-	q.Slerp( firstPersonViewAxisPrev.ToQuat(), firstPersonViewAxis.ToQuat(), frac );
-	renderView->viewaxis = q.ToMat3();
+	// Low-latency aim (com_interpolateAim): instead of slerping the orientation between the last two
+	// tics (which renders the aim up to one tic ~16.7ms in the past), advance it to real time by
+	// overlaying the pending mouse-look delta - the input received since the last tic that hasn't
+	// been simulated yet - onto the current tic's view. Mouselook then tracks the mouse 1:1 with no
+	// added latency; shooting is unaffected (still resolved from the usercmd at the tic). The
+	// position still interpolates: players feel aim latency far more than positional latency. We're
+	// already first-person here (renderViewInterpolatable gates out camera/cinematic/3rd-person), so
+	// only health/spectate need guarding. It stays continuous when the tic lands because the tic
+	// applies the same delta and the mouse buffer then reads empty.
+	float dyaw = 0.0f, dpitch = 0.0f;
+	if ( frac < 1.0f && health > 0 && !spectating && cvarSystem->GetCVarBool( "com_interpolateAim" ) ) {
+		common->GetPendingViewAngleDelta( dyaw, dpitch );
+	}
+
+	if ( dyaw != 0.0f || dpitch != 0.0f ) {
+		idAngles a = firstPersonViewAxis.ToAngles();
+		a.pitch = idMath::ClampFloat( pm_minviewpitch.GetFloat(), pm_maxviewpitch.GetFloat(), a.pitch + dpitch );
+		a.yaw += dyaw;
+		renderView->viewaxis = a.ToMat3();
+	} else {
+		// slerp the view orientation (mouselook + bob/kick) so aiming is smooth above 60fps. This
+		// makes the aim render up to one tic (~16.7ms) in the past, but shooting is unaffected since
+		// it is resolved from the usercmd at the game tic, not from this rendered view.
+		idQuat q;
+		q.Slerp( firstPersonViewAxisPrev.ToQuat(), firstPersonViewAxis.ToQuat(), frac );
+		renderView->viewaxis = q.ToMat3();
+	}
 }
 
 /*

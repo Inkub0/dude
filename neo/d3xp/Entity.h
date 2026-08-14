@@ -405,6 +405,9 @@ protected:
 	idVec3					renderInterpOriginCur;
 	idMat3					renderInterpAxisPrev;
 	idMat3					renderInterpAxisCur;
+	idVec3					renderInterpOriginPrev2;	// tic before Prev; the extra sample cubic (Catmull-Rom) interpolation needs
+	idMat3					renderInterpAxisPrev2;
+	int						renderInterpHistCount;		// consecutive committed tics of history (capped at 2); < 2 falls back to linear
 	int						renderInterpSnapshotTime;	// gameLocal.time renderInterp*Cur belongs to, -1 = no snapshot yet
 	void					SnapshotRenderTransform( void );
 

@@ -343,6 +343,8 @@ public:
 
 	usercmd_t		GetDirectUsercmd( void );
 
+	void			GetPendingViewAngleDelta( float &yaw, float &pitch );
+
 private:
 	void			MakeCurrent( void );
 	void			InitCurrent( void );
@@ -1406,4 +1408,59 @@ usercmd_t idUsercmdGenLocal::GetDirectUsercmd( void ) {
 	lastPollTime = pollTime;
 
 	return cmd;
+}
+
+/*
+================
+idUsercmdGenLocal::GetPendingViewAngleDelta
+
+com_interpolate low-latency aim: return the view-angle delta from mouse motion that has arrived
+since the last game tic but has not been simulated yet, so the renderer can advance the aim to
+real-time between tics. Reads the mouse event buffer non-destructively (Sys_PollMouseInputEvents /
+Sys_ReturnMouseInputEvent only index it; the tic's Mouse()/Sys_EndMouseInputEvents owns clearing
+it), so it never steals input from the simulation. Sign/scale/invert and the strafe/mlook gating
+mirror MouseMove() exactly, so the preview matches the angle the next tic will actually apply and
+the view doesn't hitch when that tic lands.
+================
+*/
+void idUsercmdGenLocal::GetPendingViewAngleDelta( float &yaw, float &pitch ) {
+	yaw = 0.0f;
+	pitch = 0.0f;
+
+	if ( Inhibited() || ButtonState( UB_STRAFE ) ) {
+		return;
+	}
+
+	int numEvents = Sys_PollMouseInputEvents();
+	int dx = 0;
+	int dy = 0;
+	for ( int i = 0; i < numEvents; i++ ) {
+		int action, value;
+		if ( Sys_ReturnMouseInputEvent( i, action, value ) ) {
+			if ( action == M_DELTAX ) {
+				dx += value;
+			} else if ( action == M_DELTAY ) {
+				dy += value;
+			}
+		}
+	}
+
+	if ( !dx && !dy ) {
+		return;
+	}
+
+	// note: this ignores m_smooth's multi-sample averaging (default m_smooth 1 = raw, so no
+	// difference); with m_smooth > 1 the preview can differ slightly from the tic, but it's
+	// transient and self-corrects the moment the tic lands.
+	const float mx = (float)dx * sensitivity.GetFloat();
+	const float my = (float)dy * sensitivity.GetFloat();
+
+	const float invYaw = ( m_invertLook.GetInteger() & 2 ) ? -1.0f : 1.0f;
+	yaw = - m_yaw.GetFloat() * mx * invYaw;
+
+	// pitch only when looking (mouselook), matching MouseMove(); otherwise the mouse Y is movement
+	if ( cmd.buttons & BUTTON_MLOOK ) {
+		const float invPitch = ( m_invertLook.GetInteger() & 1 ) ? -1.0f : 1.0f;
+		pitch = m_pitch.GetFloat() * my * invPitch;
+	}
 }

@@ -438,6 +438,9 @@ idEntity::idEntity() {
 	renderInterpOriginCur.Zero();
 	renderInterpAxisPrev.Identity();
 	renderInterpAxisCur.Identity();
+	renderInterpOriginPrev2.Zero();
+	renderInterpAxisPrev2.Identity();
+	renderInterpHistCount = 0;
 	renderInterpSnapshotTime = -1;
 	renderInterpListedFrame = -1;
 	memset( &refSound, 0, sizeof( refSound ) );
@@ -1452,9 +1455,18 @@ void idEntity::SnapshotRenderTransform( void ) {
 			// first commit (spawn or savegame restore): no previous state to blend from
 			renderInterpOriginPrev = renderEntity.origin;
 			renderInterpAxisPrev = renderEntity.axis;
+			renderInterpOriginPrev2 = renderEntity.origin;
+			renderInterpAxisPrev2 = renderEntity.axis;
+			renderInterpHistCount = 1;
 		} else {
+			// age the history one tic: Prev2 <- Prev <- Cur
+			renderInterpOriginPrev2 = renderInterpOriginPrev;
+			renderInterpAxisPrev2 = renderInterpAxisPrev;
 			renderInterpOriginPrev = renderInterpOriginCur;
 			renderInterpAxisPrev = renderInterpAxisCur;
+			if ( renderInterpHistCount < 2 ) {
+				renderInterpHistCount++;
+			}
 		}
 		renderInterpSnapshotTime = gameLocal.time;
 		gameLocal.RegisterRenderInterpolation( this );
@@ -1462,10 +1474,14 @@ void idEntity::SnapshotRenderTransform( void ) {
 	renderInterpOriginCur = renderEntity.origin;
 	renderInterpAxisCur = renderEntity.axis;
 
-	// don't glide across teleports and other discontinuities
+	// don't glide across teleports and other discontinuities; drop the stale history so the next
+	// frames blend forward from here (and can't do a cubic overshoot off a pre-teleport sample)
 	if ( ( renderInterpOriginCur - renderInterpOriginPrev ).LengthSqr() > Square( RENDER_INTERP_TELEPORT_DIST ) ) {
 		renderInterpOriginPrev = renderInterpOriginCur;
 		renderInterpAxisPrev = renderInterpAxisCur;
+		renderInterpOriginPrev2 = renderInterpOriginCur;
+		renderInterpAxisPrev2 = renderInterpAxisCur;
+		renderInterpHistCount = 1;
 	}
 }
 
@@ -1493,7 +1509,25 @@ void idEntity::PresentInterpolated( float frac ) {
 	}
 
 	renderEntity_t lerped = renderEntity;
-	lerped.origin = renderInterpOriginPrev + frac * ( renderInterpOriginCur - renderInterpOriginPrev );
+
+	// position: cubic Hermite (Catmull-Rom) when we have two tics of history, so motion stays
+	// smooth (C1-continuous) through accelerations instead of kinking at each tic like a plain
+	// lerp; falls back to linear on the first tic of history or when com_interpolateCubic is off.
+	// Still strictly interpolation (frac in [0,1], between the last two committed tics) - no
+	// extrapolation, so no overshoot past the current state.
+	if ( gameLocal.renderInterpCubic && renderInterpHistCount >= 2 ) {
+		const idVec3 m0 = ( renderInterpOriginCur - renderInterpOriginPrev2 ) * 0.5f;	// centered tangent at Prev
+		const idVec3 m1 = renderInterpOriginCur - renderInterpOriginPrev;				// tangent at Cur
+		const float t2 = frac * frac;
+		const float t3 = t2 * frac;
+		lerped.origin = renderInterpOriginPrev * ( 2.0f * t3 - 3.0f * t2 + 1.0f )
+			+ m0 * ( t3 - 2.0f * t2 + frac )
+			+ renderInterpOriginCur * ( -2.0f * t3 + 3.0f * t2 )
+			+ m1 * ( t3 - t2 );
+	} else {
+		lerped.origin = renderInterpOriginPrev + frac * ( renderInterpOriginCur - renderInterpOriginPrev );
+	}
+
 	idQuat q;
 	q.Slerp( renderInterpAxisPrev.ToQuat(), renderInterpAxisCur.ToQuat(), frac );
 	lerped.axis = q.ToMat3();
@@ -1547,7 +1581,21 @@ bool idEntity::UpdateRenderEntity( renderEntity_s *renderEntity, const renderVie
 	if ( animator ) {
 		// renderAnimTimeOffset is normally 0; the view weapon sets it each rendered frame so its
 		// animation is sampled at the interpolated sub-tic instant (com_interpolate)
-		return animator->CreateFrame( gameLocal.time + renderAnimTimeOffset, false );
+		int animTime = gameLocal.time + renderAnimTimeOffset;
+
+		// com_interpolateAnim: sample skeletal animation at the same sub-tic instant the render
+		// transform is interpolated to, so limbs move smoothly above 60fps rather than stepping at
+		// the tic rate. Only for entities the weapon path hasn't already offset (renderAnimTimeOffset
+		// == 0); like the transform interp this samples up to one tic in the past, adding no gameplay
+		// latency.
+		if ( renderAnimTimeOffset == 0 && gameLocal.renderInterpAnim && gameLocal.renderInterpolateFrac < 1.0f ) {
+			int ticLen = gameLocal.time - gameLocal.previousTime;
+			if ( ticLen > 0 && ticLen <= 100 ) {
+				animTime -= (int)( ( 1.0f - gameLocal.renderInterpolateFrac ) * (float)ticLen );
+			}
+		}
+
+		return animator->CreateFrame( animTime, false );
 	}
 
 	return false;

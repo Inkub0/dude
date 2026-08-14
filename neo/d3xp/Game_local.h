@@ -292,6 +292,9 @@ public:
 	idList< idEntityPtr<idEntity> >	renderInterpEntities;
 	int						renderInterpFrameNum;	// framenum the list belongs to
 	bool					renderInterpApplied;	// true if render defs currently hold sub-tic (not tic) transforms
+	float					renderInterpolateFrac;	// this rendered frame's sub-tic alpha [0,1] (1.0 = on a tic / not interpolating); read by UpdateRenderEntity for anim
+	bool					renderInterpCubic;		// cached com_interpolateCubic for this rendered frame
+	bool					renderInterpAnim;		// cached com_interpolateAnim for this rendered frame
 	idDict					persistentLevelInfo;	// contains args that are kept around between levels
 
 	// can be used to automatically effect every material in the world that references globalParms

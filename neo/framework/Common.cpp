@@ -129,6 +129,10 @@ idCVar com_product_lang_ext( "com_product_lang_ext", "1", CVAR_INTEGER | CVAR_SY
 // smooth motion above 60 fps. The simulation itself still steps at USERCMD_HZ. Off by default
 // to keep the faithful, unmodified 60 fps behavior. See idPlayer::InterpolateRenderView().
 idCVar com_interpolate( "com_interpolate", "0", CVAR_BOOL | CVAR_SYSTEM | CVAR_ARCHIVE, "render smoothly above 60fps by interpolating the view between the fixed 60Hz game tics (requires vsync to cap fps)" );
+// com_interpolate refinements (ported from the best parts of dhewm3 PR #771; all no-ops unless com_interpolate is set)
+idCVar com_interpolateAim( "com_interpolateAim", "1", CVAR_BOOL | CVAR_SYSTEM | CVAR_ARCHIVE, "with com_interpolate: overlay pending (un-simulated) mouse look onto the rendered view so aiming has no added latency above 60fps; shooting still resolves at the game tic" );
+idCVar com_interpolateCubic( "com_interpolateCubic", "1", CVAR_BOOL | CVAR_SYSTEM | CVAR_ARCHIVE, "with com_interpolate: cubic (Catmull-Rom) instead of linear position interpolation for moving world entities; smoother through accelerations" );
+idCVar com_interpolateAnim( "com_interpolateAnim", "1", CVAR_BOOL | CVAR_SYSTEM | CVAR_ARCHIVE, "with com_interpolate: sample animated entities' skeletal animation at the sub-tic instant so limbs move smoothly above 60fps, not just their root transform" );
 // DG/DUDE: render-side frame-rate cap. Paces each frame to an even wall-clock interval so
 // motion stays smooth even without a clean vsync — the intended companion to running vsync
 // off (r_swapInterval 0) on a multi-monitor X11 setup where vsync clamps to the wrong
@@ -223,6 +227,7 @@ public:
 	virtual bool				GetAdditionalFunction(idCommon::FunctionType ft, idCommon::FunctionPointer* out_fnptr, void** out_userArg);
 
 	virtual float				GetTicInterpolation( void );
+	virtual void				GetPendingViewAngleDelta( float &yaw, float &pitch );
 
 	// DG end
 
@@ -373,6 +378,17 @@ float idCommonLocal::GetTicInterpolation( void ) {
 		frac = 1.0;
 	}
 	return (float)frac;
+}
+
+// Low-latency aim (com_interpolate + com_interpolateAim): forwards to the usercmd generator, which
+// owns the mouse buffer and the look scale/invert cvars. Reading the buffer here is non-consuming
+// (only the game tic clears it), so this just previews the not-yet-simulated mouse motion.
+void idCommonLocal::GetPendingViewAngleDelta( float &yaw, float &pitch ) {
+	yaw = 0.0f;
+	pitch = 0.0f;
+	if ( usercmdGen != NULL ) {
+		usercmdGen->GetPendingViewAngleDelta( yaw, pitch );
+	}
 }
 
 /*
@@ -2678,7 +2694,13 @@ void idCommonLocal::Frame( void ) {
 				} // else a new tic is started anyway (which often means that this frame was too long)
 			}
 			else if ( com_ticNumber == ticNumAtStart ) {
-				Com_WaitForNextTicStart();
+				// Server: skip the full-frame sleep (it only adds latency).
+				// Clients keep the wait for proper pacing.
+				if ( idAsyncNetwork::server.IsActive() ) {
+					Com_UpdateFrameTime();
+				} else {
+					Com_WaitForNextTicStart();
+				}
 			}
 			// else the com_ticNumber has already been updated and it's past time to start the next frame
 		}

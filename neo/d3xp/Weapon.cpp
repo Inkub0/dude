@@ -2447,16 +2447,18 @@ void idWeapon::InterpolateViewWeapon( float frac ) {
 	localQ.Slerp( localAxisPrev.ToQuat(), localAxisCur.ToQuat(), frac );
 	const idMat3 localAxis = localQ.ToMat3();
 
-	// interpolate the eye exactly as idPlayer::InterpolateRenderView does (same inputs, same frac),
-	// so the recomposed gun is locked to the rendered view; fall back to the current tic's eye when
-	// the view itself is not being interpolated
+	// recompose onto the exact eye idPlayer::InterpolateRenderView just produced this rendered frame:
+	// read it back from the player's renderView rather than re-deriving it here. In the plain case
+	// that view is the same prev->cur slerp we used to recompute, but when low-latency aim
+	// (com_interpolateAim) advanced the view orientation to real time, reading it keeps the gun
+	// locked to the view instead of lagging a tic behind it. Falls back to the current tic's eye
+	// when the view isn't being interpolated.
 	idVec3 eyeOrg;
 	idMat3 eyeAxis;
-	if ( owner->renderViewInterpolatable ) {
-		eyeOrg = eyeOrgPrev + frac * ( eyeOrgCur - eyeOrgPrev );
-		idQuat eyeQ;
-		eyeQ.Slerp( eyeAxisPrev.ToQuat(), eyeAxisCur.ToQuat(), frac );
-		eyeAxis = eyeQ.ToMat3();
+	const renderView_t *rv = owner->GetRenderView();
+	if ( owner->renderViewInterpolatable && rv ) {
+		eyeOrg  = rv->vieworg;
+		eyeAxis = rv->viewaxis;
 	} else {
 		eyeOrg  = eyeOrgCur;
 		eyeAxis = eyeAxisCur;

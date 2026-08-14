@@ -234,6 +234,9 @@ void idGameLocal::Clear( void ) {
 	renderInterpEntities.Clear();
 	renderInterpFrameNum = -1;
 	renderInterpApplied = false;
+	renderInterpolateFrac = 1.0f;
+	renderInterpCubic = false;
+	renderInterpAnim = false;
 	persistentLevelInfo.Clear();
 	memset( globalShaderParms, 0, sizeof( globalShaderParms ) );
 	random.SetSeed( 0 );
@@ -2514,13 +2517,12 @@ gameReturn_t idGameLocal::RunFrame(const usercmd_t* clientCmds) {
 		framenum++;
 		previousTime = time;
 
-		// dezo2/DG: recalculate each frame, see comment at CalcMSec()
-		int msec_fast = CalcMSec( framenum );
+		// dezo2/DG: recalculate each frame in single-player, see comment at CalcMSec()
+		int msec_fast = isMultiplayer ? USERCMD_MSEC : CalcMSec( framenum );
 		if ( slowmoState == SLOWMO_STATE_OFF ) {
 			msec = msec_fast;
 			msecPrecise = USERCMD_MSEC_PRECISE;
 		}
-
 		time += msec;
 		realClientTime = time;
 
@@ -2819,6 +2821,11 @@ makes rendering and sound system calls
 ================
 */
 bool idGameLocal::Draw( int clientNum ) {
+	// not interpolating unless the block below says so; keep UpdateRenderEntity's anim path (and
+	// the MP path) on exact tic state
+	renderInterpolateFrac = 1.0f;
+	renderInterpAnim = false;
+
 	if ( isMultiplayer ) {
 		return mpGame.Draw( clientNum );
 	}
@@ -2834,6 +2841,11 @@ bool idGameLocal::Draw( int clientNum ) {
 	// (com_interpolate, declared engine-side since it also controls the decoupled render loop)
 	if ( cvarSystem->GetCVarBool( "com_interpolate" ) ) {
 		float frac = common->GetTicInterpolation();
+		// cache the refinement toggles once per rendered frame (read per-entity below/in
+		// UpdateRenderEntity); all are no-ops at frac == 1.0
+		renderInterpolateFrac = frac;
+		renderInterpCubic = cvarSystem->GetCVarBool( "com_interpolateCubic" );
+		renderInterpAnim = cvarSystem->GetCVarBool( "com_interpolateAnim" );
 		player->InterpolateRenderView( frac );
 		player->InterpolateViewWeapon( frac );
 		// stage 3: world entities that moved this tic (movers, doors, monsters, projectiles,

@@ -291,6 +291,14 @@ public:
 	// interpolate positions between tics so motion is smooth above 60 fps.
 	// Returns 0 when interpolation isn't meaningful (e.g. before the first tic).
 	virtual float				GetTicInterpolation( void ) = 0;
+
+	// Low-latency aim (com_interpolate + com_interpolateAim): the view-angle delta from mouse
+	// input received since the last game tic but not yet simulated. The game overlays it on the
+	// rendered view so mouselook has no added latency above 60 fps (shooting still resolves at the
+	// tic). Returns zero yaw/pitch when input is inhibited, while strafing, or with no pending
+	// motion (e.g. right after a tic consumed the mouse buffer). Appended at the end of the
+	// interface to keep the game-DLL vtable ABI stable.
+	virtual void				GetPendingViewAngleDelta( float &yaw, float &pitch ) = 0;
 };
 
 extern idCommon *		common;

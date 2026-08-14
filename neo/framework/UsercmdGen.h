@@ -163,6 +163,10 @@ public:
 
 	// Directly sample a usercmd.
 	virtual usercmd_t	GetDirectUsercmd( void ) = 0;
+
+	// com_interpolate low-latency aim: the not-yet-simulated mouse look delta accumulated since the
+	// last tic (non-consuming read of the mouse buffer). Zero while inhibited/strafing/idle.
+	virtual void		GetPendingViewAngleDelta( float &yaw, float &pitch ) = 0;
 };
 
 extern idUsercmdGen	*usercmdGen;
