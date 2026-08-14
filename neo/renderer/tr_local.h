@@ -1002,6 +1002,17 @@ extern idCVar r_tessDeform;				// deform tessellated meshes once/frame in a comp
 extern idCVar r_gpuSkinning;			// skin animated meshes on the GPU (option-B TBN; off = faithful CPU skin)
 extern idCVar r_gpuSkinProfile;			// dev: size the Milestone-C prize (skinned-surface derive + ambient upload)
 void R_GpuSkinProfileAddDerive( double ms );	// accumulate one skinned-surface tangent-derive time (impl tr_light.cpp)
+void R_GpuSkinProfileAddStrip( int verts );		// Milestone D: count one CPU-skin-stripped surface (impl tr_light.cpp)
+
+// DUDE: Milestone D -- strip the redundant CPU position skin when GPU skinning is on (Vulkan only;
+// docs/gpu-offload-plan.md). Retires TransformVerts + R_BoundTriSurf + derive + ambient upload for
+// surfaces the frame proved safe (no stencil-shadow light in view, no overlay, non-deform, no scale).
+extern idCVar r_gpuSkinStripCpu;		// master toggle for the CPU-skin strip (needs r_gpuSkinning)
+extern bool   r_skinStripThisModel;		// transient: R_EntityDefDynamicModel arms it per-entity around InstantiateDynamicModel
+extern bool   r_viewHasStencilShadowLights;	// per-view: any light that will build a stencil volume this view (pin: stencil)
+// Shared stencil-build routing (Interaction.cpp CreateInteraction + the view-flag loop): true when the
+// light will be shadow-MAPPED, so its CPU stencil volume is never drawn and the build can be skipped.
+bool R_ShadowMapSkipStencilBuild( const idRenderLightLocal *lightDef, const idMaterial *lightShader );
 
 // DUDE: baked ambient-occlusion (occlusion) maps (enhancement backends only; docs/occlusion-maps.md)
 extern idCVar r_occlusionMaps;			// master toggle: use per-material baked AO maps

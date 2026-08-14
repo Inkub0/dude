@@ -294,6 +294,43 @@ once, skinned refit per frame) → TLAS → ray-query shadows/AO. That also *del
 shadow-volume consumer in the table above, which is one of the two things pinning the CPU position
 skin in place.
 
+#### Milestone D — stripping the CPU position skin (`r_gpuSkinStripCpu`, built 2026-08-14, UNVERIFIED in-engine)
+
+Milestone C left `TransformVerts` (position skin) + `R_BoundTriSurf` running unconditionally under GPU
+skinning — so GPU skinning was **pure added work**, which is exactly why it never won a frame. Milestone D
+gates that CPU work OFF for a surface when the frame proves it safe, so the GPU `gpuSkinVB` becomes the
+*sole* geometry source. **The recon that struck this as blocked was wrong on two counts:** there are
+**four** position pins, not three, and all four turned out tractable (not "no retirement path"):
+
+| Pin | Reader of `tri->verts.xyz` | Retirement in Milestone D |
+|---|---|---|
+| Light cull | `R_CalcInteractionCullBits`/`R_ClipTriangleToLight` via `R_CreateLightTris` | It is a **pure** optimization — never clips geometry, only drops whole tris fully outside the light frustum (`Interaction.cpp` "we do not actually use the clipped triangle"). Stripped surfaces take an early **full-index** path in `R_CreateLightTris` (reference all indexes, `bounds = tri->bounds`): pixel-identical (one-sided materials still GPU-cull backfaces; exterior tris shade to nothing / fall outside the light scissor), at the cost of extra rasterization. |
+| Stencil volumes | `R_CreateShadowVolume` / `R_CreateVertexProgramShadowCache` | Gated on a **per-view** flag `r_viewHasStencilShadowLights` (computed at the top of `R_AddModelSurfaces` via the shared `R_ShadowMapSkipStencilBuild`). No stencil-casting light in view ⇒ no volume is ever built ⇒ safe to strip. Matches Phase 0's domain (fully shadow-mapped scenes). |
+| Bounds | `R_BoundTriSurf` (MinMax over verts) | `idMD5Mesh::CalcBoundsFast` — a joint-palette-only conservative bound, **O(joints)**. Per-joint reach (max `\|`joint-local weight pos`\|`) is precomputed in `BuildGpuSkinData`; the runtime unions `(jointOrigin ± reach)`. The AABB over those spheres contains the convex hull of all weighted vertex positions ⇒ a strict superset; every consumer only ever under-culls. **Note `idMD5Mesh::CalcBounds` is NOT this — it calls `TransformVerts` internally (re-skins), so it is not free.** |
+| **Decals (the 4th pin)** | `idRenderModelOverlay::AddOverlaySurfacesToModel` reads posed `tri->verts.xyz` **every frame** (not a creation-time snapshot) | Gated per-entity on `!def->overlay` in `R_EntityDefDynamicModel`. Entities with an active blood/burn decal keep the full CPU skin (correctness first); the strip fires for the majority with none. |
+
+**Wiring.** `R_EntityDefDynamicModel` sets a transient `r_skinStripThisModel` (cvar on + `r_gpuSkinning`
++ no overlay + `!r_viewHasStencilShadowLights`) just around `InstantiateDynamicModel`; `UpdateSurface`
+ANDs in Vulkan + skin-data-ready + no MD5 skin-scale + the shader/SSBOs being ready (so `gpuSkinVB` is
+guaranteed to materialize, else the stripped surface would be invisible), skips `TransformVerts` /
+`R_BoundTriSurf` / `R_DeriveTangents` / the ambient upload, sets `tri->cpuSkinStripped`, and takes the
+bound from `CalcBoundsFast`. `R_CreateAmbientCache` early-returns (ambientCache NULL, draw from
+`gpuSkinVB` — reuses the Milestone-C no-upload gates). **HARD-GATED on `r_gpuSkinning`; OFF path is the
+stock CPU skinner byte-for-byte.** `r_gpuSkinProfile` now also prints `STRIP N surf/frame, V CPU-skin
+verts/frame removed` — pair with `com_speeds` `rf` for the reclaimed front-end ms.
+
+**Hardware reality (unchanged, user opted in anyway).** On the RTX 3080 Ti the frame is GPU-bound, so
+this wins **zero or negative** fps here (the light-cull skip *adds* rasterization). The payoff is the
+CPU-bound case (weak GPU / high entity counts) + RTX alignment (GPU as the sole geometry source). Built
+to reclaim measurable CPU front-end time (visible in `com_speeds rf` / the strip counter), not 3080 Ti fps.
+**Documented edge (accepted for v1):** the strip decision is cached with the dynamic model, so an entity
+instantiated in a non-stencil primary view then re-seen in a *stencil subview* the same frame casts a
+wrong stencil volume — unreachable with shadow mapping on (preset default); failure is a wrong shadow,
+not a crash. Files: `Model.h` (`cpuSkinStripped`), `Model_local.h`/`Model_md5.cpp`
+(`CalcBoundsFast` + joint-reach), `Interaction.cpp` (full-index lightTris + shared stencil helper),
+`tr_light.cpp` (`r_gpuSkinStripCpu`, view flag, `R_ShadowMapSkipStencilBuild`, ambient early-out),
+`tr_local.h` (externs).
+
 ### Phase 3 — GPU-driven culling *(Vulkan-only; biggest relief, most architecture)*
 
 #### Phase 3.0 — the indirect-draw RHI primitive — ✅ SHIPPED (`feat/rhi-indirect-draw`, pending user A/B)
