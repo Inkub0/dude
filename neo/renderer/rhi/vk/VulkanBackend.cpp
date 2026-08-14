@@ -100,6 +100,9 @@ static idCVar r_vkIndirectTest( "r_vkIndirectTest", "0", CVAR_RENDERER | CVAR_BO
 static idCVar r_vkBdaTest( "r_vkBdaTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: run the buffer-device-address self-test (a compute kernel sums a storage buffer read through its raw GPU pointer, not a bound buffer) and print PASS/FAIL. Set to 1 to trigger. Validates the Phase-3.2b BDA primitive (docs/gpu-offload-plan.md)" );
 
+static idCVar r_vkBdaZfill( "r_vkBdaZfill", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: route the world-static depth prepass (zfill) through a buffer-device-address manual-vertex-fetch shader instead of bound vertex attributes. Pixel-identical A/B; the first GPU-driven-draw consumer for Phase 3.2b (docs/gpu-offload-plan.md). Fires only on the flat zfill shader over addressable (persistent) geometry; animated/streamed surfaces fall back." );
+
 namespace rhi {
 
 static const int FRAMES_IN_FLIGHT = 2;
@@ -364,6 +367,12 @@ private:
 	// host pointer (host-visible storage) for UpdateBuffer.
 	std::vector<VmaAllocation>	bufferAllocs;
 	std::vector<byte *>			bufferMapped;
+	// parallel to bufferTable: cached GPU device address (BDA), computed once at
+	// creation for buffers with SHADER_DEVICE_ADDRESS usage; 0 = not addressable
+	// (ring slots, non-BDA usages, or the feature is unsupported). Cached so
+	// GetBufferDeviceAddress never calls vkGetBufferDeviceAddress on a buffer that
+	// lacks the usage bit (which would be invalid). (Phase 3.2b.)
+	std::vector<uint64_t>		bufferAddr;
 	std::vector<uint32_t>		freeBufferSlots;		// DestroyBuffer'd slots, reused by CreateBuffer
 	// A DestroyBuffer'd persistent buffer can still be referenced by up to
 	// FRAMES_IN_FLIGHT in-flight command buffers (a dynamic shadow/interaction
@@ -633,6 +642,11 @@ private:
 	// gates any drawCount>1. Universal on desktop; enabled when present, gated when not.
 	bool						haveDrawIndirectCount = false;
 	bool						haveBufferDeviceAddress = false;	// VK_KHR_buffer_device_address (core 1.2); gates BDA usage + the VMA flag
+	// r_vkBdaZfill (Phase 3.2b): cached handles for the depth-prepass BDA consume.
+	// Loaded on the cvar's first enable; the flat zfill draw is identified by
+	// currentDesc.shader == zfillShaderHandle. zfillBdaShaderHandle 0 = variant absent.
+	ShaderHandle				zfillShaderHandle = 0;
+	ShaderHandle				zfillBdaShaderHandle = 0;
 	bool						haveMultiDrawIndirect = false;
 	bool						indirectFeatureWarned = false;
 
@@ -1760,6 +1774,19 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 			BdaSelfTest();
 		}
 	}
+	// BDA zfill consume (Phase 3.2b): load the manual-vertex-fetch zfill variant on first enable,
+	// caching both the flat zfill handle (to identify the draw) and its BDA sibling. If the SPIR-V
+	// pair is missing the variant stays 0 and the Draw path falls back to normal zfill.
+	if ( r_vkBdaZfill.IsModified() ) {
+		r_vkBdaZfill.ClearModified();
+		if ( r_vkBdaZfill.GetBool() && zfillBdaShaderHandle == 0 ) {
+			zfillShaderHandle = LoadShader( "zfill" );
+			zfillBdaShaderHandle = LoadShader( "zfill_bda" );
+			if ( zfillBdaShaderHandle == 0 ) {
+				common->Warning( "VK: r_vkBdaZfill needs zfill_bda.{vert,frag}.spv (shaders/spv) - BDA zfill disabled" );
+			}
+		}
+	}
 
 	// vsync toggle → new present mode; window size change → new extent
 	if ( r_swapInterval.IsModified() ) {
@@ -2242,6 +2269,7 @@ bool VulkanBackend::CreateM2Resources() {
 			bufferTable.push_back( setups[i].ring->buffer );
 			bufferAllocs.push_back( NULL );		// ring-owned; not a persistent buffer
 			bufferMapped.push_back( NULL );
+			bufferAddr.push_back( 0 );			// ring buffers aren't BDA-addressable
 			setups[i].ring->handle = (BufferHandle)bufferTable.size();
 		}
 	}
@@ -2293,6 +2321,15 @@ bool VulkanBackend::CreateM2Resources() {
 		pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 		pli.setLayoutCount = 2;
 		pli.pSetLayouts = sets;
+		// Phase 3.2b: a small vertex-stage push-constant range carries a buffer_device_address
+		// (idDrawVert*) for the BDA manual-vertex-fetch zfill variant (r_vkBdaZfill). Backward-
+		// compatible — shaders that declare no push_constant simply never read it (128B floor).
+		VkPushConstantRange pcr = {};
+		pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+		pcr.offset = 0;
+		pcr.size = 16;
+		pli.pushConstantRangeCount = 1;
+		pli.pPushConstantRanges = &pcr;
 		if ( !vkCheck( vkCreatePipelineLayout( device, &pli, NULL, &pipeLayout ), "vkCreatePipelineLayout" ) ) {
 			return false;
 		}
@@ -2556,6 +2593,7 @@ void VulkanBackend::DestroyM2Resources() {
 	bufferTable.clear();
 	bufferAllocs.clear();
 	bufferMapped.clear();
+	bufferAddr.clear();
 	freeBufferSlots.clear();
 	ringOverflowWarned = false;
 	framePoolWarned = false;
@@ -2694,6 +2732,7 @@ bool VulkanBackend::GrowRing( RingBuf &ring, int minSize ) {
 	bufferTable.push_back( newBuf );
 	bufferAllocs.push_back( NULL );		// ring-owned; not a persistent buffer
 	bufferMapped.push_back( NULL );
+	bufferAddr.push_back( 0 );			// ring buffers aren't BDA-addressable
 	ring.handle = (BufferHandle)bufferTable.size();
 	streamGen++;
 	common->Printf( "VK: geometry ring grew to %d KB (mid-frame overflow)\n", newSize >> 10 );
@@ -2787,10 +2826,12 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 		                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT; break;
 		default:         usageBits = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
 	}
-	// BDA (Phase 3.2b): storage buffers may be dereferenced by a shader pointer. Only legal when
-	// the allocator carries the BDA flag (else vmaCreateBuffer fails validation), so gate on the
-	// same capability. The consume phase will extend this to BU_VERTEX (per-draw geometry).
-	if ( usage == BU_STORAGE && haveBufferDeviceAddress ) {
+	// BDA (Phase 3.2b): storage buffers (compute) and persistent vertex buffers (the world-static
+	// geometry the depth-prepass consume manually fetches, r_vkBdaZfill) may be dereferenced by a
+	// shader pointer. Only legal when the allocator carries the BDA flag (else vmaCreateBuffer
+	// fails validation), so gate on the same capability. Ring buffers aren't created here, so they
+	// stay address-less and the BDA zfill path falls back for streamed/skinned surfaces.
+	if ( ( usage == BU_STORAGE || usage == BU_VERTEX ) && haveBufferDeviceAddress ) {
 		usageBits |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 	}
 
@@ -2819,7 +2860,17 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 		memcpy( info.pMappedData, data, (size_t)size );
 	}
 
-	// reuse a slot freed by DestroyBuffer, else grow the table (keeping all three
+	// cache the device address now (BDA, Phase 3.2b): a buffer's address is fixed for its
+	// lifetime, and only buffers created with the usage bit above may be queried.
+	uint64_t addr = 0;
+	if ( usageBits & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT ) {
+		VkBufferDeviceAddressInfo bai = {};
+		bai.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+		bai.buffer = buf;
+		addr = (uint64_t)vkGetBufferDeviceAddress( device, &bai );
+	}
+
+	// reuse a slot freed by DestroyBuffer, else grow the table (keeping all
 	// parallel vectors in lockstep with bufferTable)
 	uint32_t idx;
 	if ( !freeBufferSlots.empty() ) {
@@ -2828,11 +2879,13 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 		bufferTable[idx] = buf;
 		bufferAllocs[idx] = alloc;
 		bufferMapped[idx] = (byte *)info.pMappedData;
+		bufferAddr[idx] = addr;
 	} else {
 		idx = (uint32_t)bufferTable.size();
 		bufferTable.push_back( buf );
 		bufferAllocs.push_back( alloc );
 		bufferMapped.push_back( (byte *)info.pMappedData );
+		bufferAddr.push_back( addr );
 	}
 	return (BufferHandle)( idx + 1 );
 }
@@ -2861,6 +2914,7 @@ void VulkanBackend::DestroyBuffer( BufferHandle b ) {
 		bufferTable[idx] = VK_NULL_HANDLE;
 		bufferAllocs[idx] = NULL;
 		bufferMapped[idx] = NULL;
+		bufferAddr[idx] = 0;
 		freeBufferSlots.push_back( idx );
 	}
 }
@@ -3445,26 +3499,19 @@ void VulkanBackend::ComputeSelfTest() {
 ====================
 VulkanBackend::GetBufferDeviceAddress
 
-GPU virtual address of a buffer (Vulkan buffer_device_address). Returns 0 if the
-feature is unavailable or the handle is invalid. The buffer must have been created
-with VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT (CreateBuffer adds it to BU_STORAGE
-when supported). vkGetBufferDeviceAddress is core in 1.2 and the device floor is 1.4.
+GPU virtual address of a buffer (Vulkan buffer_device_address). Returns the value
+cached at creation (a buffer's address is fixed for its lifetime), or 0 for a buffer
+that lacks SHADER_DEVICE_ADDRESS usage (ring slots, non-BDA usages, feature absent) or
+an invalid handle. Cached rather than re-queried so this never calls
+vkGetBufferDeviceAddress on a buffer without the usage bit (which is invalid).
 (Phase 3.2b BDA primitive.)
 ====================
 */
 unsigned long long VulkanBackend::GetBufferDeviceAddress( BufferHandle b ) {
-	if ( !haveBufferDeviceAddress || device == VK_NULL_HANDLE
-	     || b < 1 || b > (BufferHandle)bufferTable.size() ) {
+	if ( b < 1 || b > (BufferHandle)bufferAddr.size() ) {
 		return 0;
 	}
-	VkBuffer buf = bufferTable[b - 1];
-	if ( buf == VK_NULL_HANDLE ) {
-		return 0;
-	}
-	VkBufferDeviceAddressInfo ai = {};
-	ai.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
-	ai.buffer = buf;
-	return (unsigned long long)vkGetBufferDeviceAddress( device, &ai );
+	return (unsigned long long)bufferAddr[b - 1];
 }
 
 // r_vkBdaTest: validate the buffer-device-address plumbing that Phase 3.2b needs to draw
@@ -6206,6 +6253,31 @@ VulkanBackend::Draw
 void VulkanBackend::Draw( const DrawArgs &args ) {
 	if ( !frameOpen || skipFrame || args.indexCount <= 0 ) {
 		return;
+	}
+	// r_vkBdaZfill (Phase 3.2b consume): route the flat world-static depth-prepass through the
+	// manual-vertex-fetch variant, which reads positions from the vertex buffer's DEVICE ADDRESS
+	// instead of bound attributes — the first GPU-driven-draw building block. Pixel-identical
+	// (same position bytes, same invariant u_mvpMatrix*pos, same clip/texcoord). Fires only for the
+	// flat (non-tessellated) zfill shader over an addressable persistent buffer; streamed/skinned
+	// surfaces report address 0 and fall through to the normal draw below.
+	if ( r_vkBdaZfill.GetBool() && zfillBdaShaderHandle != 0
+	     && currentDesc.shader == zfillShaderHandle && !currentDesc.tessellate ) {
+		unsigned long long vbAddr = GetBufferDeviceAddress( args.vertexBuffer );
+		if ( vbAddr != 0 ) {
+			vbAddr += (unsigned long long)(uint32_t)args.vertexOffset;	// point at this surface's idDrawVert[0]
+			ShaderHandle saved = currentDesc.shader;
+			currentDesc.shader = zfillBdaShaderHandle;					// select the BDA pipeline for this draw
+			VkCommandBuffer cb;
+			bool ok = BindForDraw( args, cb );
+			currentDesc.shader = saved;
+			if ( ok ) {
+				vkCmdPushConstants( cb, pipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+				                    (uint32_t)sizeof( vbAddr ), &vbAddr );
+				vkCmdDrawIndexed( cb, (uint32_t)args.indexCount, 1, (uint32_t)args.firstIndex, 0, 0 );
+			}
+			return;
+		}
+		// address 0 (streamed/skinned geometry, no BDA usage) — fall through to the normal draw
 	}
 	// r_vkIndirectTest: validate the Phase-3 indirect-draw seed by routing this exact draw
 	// through DrawIndexedIndirect — write a 1-command VkDrawIndexedIndirectCommand into the

@@ -451,6 +451,21 @@ feature/VMA, `CreateBuffer` usage, `GetBufferDeviceAddress` + `BdaSelfTest` by `
 No consumer yet — the depth-prepass consume is the next step. VK-only; SPIR-V already targets 1.4 so no
 compiler bump was needed. **Verified:** in-engine `r_vkBdaTest 1` → `VK BDA self-test: PASS` (2026-08-14).
 
+**Consume — Increment 1 ✅ BUILT (`r_vkBdaZfill`, `feat/gpu-skin-cpu-unpin`, pending user A/B).** The flat
+world-static depth prepass now optionally fetches vertex positions from the buffer's **device address**
+(`zfill_bda.vert`, `GL_EXT_buffer_reference`) instead of bound attributes — per-draw, keeping the bound index
+buffer + UBO MVP. Self-contained in `VulkanBackend::Draw` (same idiom as `r_vkIndirectTest`): gated on the flat
+zfill shader over an addressable persistent `BU_VERTEX` buffer, so streamed/skinned/tessellated surfaces
+report address 0 and fall back to the normal draw. **Pixel-identical by construction** — same position bytes,
+same `invariant u_mvpMatrix * vec4(pos,1)`, so the depth buffer is bit-identical and the whole frame with it.
+Enablers: `SHADER_DEVICE_ADDRESS` extended to `BU_VERTEX` + per-buffer addresses cached at creation
+(`bufferAddr`), a 16-byte vertex push-constant range on the graphics layout, and `#extension
+GL_EXT_buffer_reference` in `prelude.vk.glsl` (SPIR-V-verified inert for every non-BDA shader; `zfill_bda`
+compiles to `PhysicalStorageBuffer64`). **Next — Increment 2:** move address+MVP into a per-object SSBO indexed
+by `firstInstance`; **Increment 3:** batch the simple opaque bucket (no depth-hack/scissor/poly-offset/tess/
+subview) into one `vkCmdDrawIndexedIndirect` + the `COMPUTE→DRAW_INDIRECT` barrier. **To verify:** toggle
+`r_vkBdaZfill 1` vs `0` in-world — identical image; watch world surfaces for any z-fighting or holes.
+
 ### Phase 4 — GPU shadow-volume generation — ❌ STRUCK (2026-08-10, recon-confirmed)
 **Do not build.** A recon of the residual stencil cost after Phase 0 concluded a GPU stencil-volume
 builder is not worth it and is a *dead-end vs ray-query*: (1) Phase 0 already removed ~100% indoor /
