@@ -1563,7 +1563,18 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	// R_DeriveTangents() to get normals, tangents, and face planes.  If it only
 	// needs shadows generated, it will only have to generate face planes.  If it only
 	// has ambient drawing, or is culled, no additional work will be necessary
-	if ( !r_useDeferredTangents.GetBool() ) {
+	//
+	// DUDE tessellation (docs/tessellation.md): the PN + displacement tese reads the
+	// per-vertex NORMAL. With deferred tangents, R_DeriveTangents is otherwise put off
+	// to R_CreateAmbientCache, which only runs it for materials that ReceivesLighting().
+	// An UNLIT character material (a cinematic/ambient skin, or a hair/fx sub-mesh) then
+	// reaches the tessellator with the Clear()ed ZERO normal — PN collapses to flat and
+	// displacement (along the zero normal) vanishes, so the surface subdivides but looks
+	// exactly like the un-tessellated mesh. Derive here, unconditionally, whenever
+	// tessellation is active so every tessellated surface has real corner normals no
+	// matter its lighting. Cheap (MD5 carries dominantTris -> the unsmoothed path).
+	if ( !r_useDeferredTangents.GetBool()
+	     || ( r_tessellation.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) {
 		// set face planes, vertex normals, tangents
 		R_DeriveTangents( tri );
 	}

@@ -254,6 +254,29 @@ Ground-truthed with `r_tessDebug 1` + `condump` (the log now prints
   model-path gate missed. Added **`heads/`** to the gate; every `.md5mesh` whose path
   contains `heads/` is a character/zombie head (no props/world geometry), so it's safe.
 
+### Cinematic actors tessellate; unlit skins keep their normals (2026-08-14)
+Two bugs kept the **RoE intro (erebus1) cutscene cast** — Dr. McNeil and the helmetless
+soldier — flat while a background scientist a few feet away tessellated correctly:
+- **Cinematic actors were gated out.** Their meshes live under `models/md5/cinematics/intro/`
+  (`mcneil.md5mesh`, `marine.md5mesh`), which the model-path gate deliberately excluded
+  (that folder also holds cinematic *scenery* — rocks, walls, clouds — and weapon props
+  that must stay flat). But a cinematic **actor** wears a real character/monster **material**
+  (`models/characters/mcneil/body`, `.../male_npc/soldier/soldier`, `models/monsters/…`),
+  which scenery/props never do. So a `cinematics/` mesh is now admitted **iff** its material
+  is a `models/characters/` or `models/monsters/` skin (`cinematicActor` in
+  `RB_RHI_TessellateSurf`). The intro cast tessellates; the rocks stay flat.
+- **Unlit character sub-meshes lost their normals.** The PN tese reads the per-vertex
+  normal; with deferred tangents (`r_useDeferredTangents 1`, default) `R_DeriveTangents` is
+  put off to `R_CreateAmbientCache`, which only runs it for materials that
+  `ReceivesLighting()`. An **unlit** character material (a cinematic/ambient skin, or a
+  `hair`/fx sub-mesh) then reached the tessellator with the `Clear()`ed **zero** normal — PN
+  collapsed to flat linear and displacement (along a zero normal) vanished, so the surface
+  subdivided but looked identical to the base mesh (and `r_tessDisplace` did nothing).
+  Confirmed live: the head `hair` logged `ReceivesLighting=0`, vertex-normal magnitude
+  `0.000`. Fixed in `idMD5Mesh::UpdateSurface`: when tessellation is active on Vulkan,
+  derive tangents unconditionally (not gated on lighting) so every tessellated surface has
+  real corner normals. Cheap — MD5 carries `dominantTris`, so it takes the unsmoothed path.
+
 ### SSAO normal prepass tessellates too (2026-08-04)
 SSAO (default `r_ssaoNormalBuffer 1`) reads per-pixel normals from a dedicated
 **normal-prepass G-buffer** (`RB_RHI_NormalPrepass`, shader `gbuffer`). That pass drew

@@ -1,4 +1,4 @@
-# Antialiasing — post-resolve AA (FXAA + SMAA now, TAA later)
+# Antialiasing — post-resolve AA (FXAA + SMAA now, FSR later)
 
 ## Status
 
@@ -42,7 +42,7 @@
   higher resolution and one fewer pass in the pipeline. SMAA-only for now (FXAA keeps its separate pass,
   trivial to fold later); auto-falls back to the classic path if a shader/target is unavailable. Added
   to `gl3BootPrograms[]` for boot-time validation.
-- **TAA — SUPERSEDED BY FSR2 (planned).** The hand-rolled TAA sketched below is replaced by
+- **FSR2 - Chosen over TAA (planned).** The hand-rolled TAA sketched below is replaced by
   integrating **AMD FSR2+ in Native-AA mode** (render scale 1.0) as roadmap item R1 in
   [rtx-shadow-roadmap.md](rtx-shadow-roadmap.md): FSR2 *is* a production TAA (temporal accumulation
   + RCAS sharpening) with the render-scale upscaling knob for free — one integration instead of two.
