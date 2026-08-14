@@ -1,8 +1,66 @@
-# Known bugs (GL3 backend)
+# Known bugs (GL3 & Vulkan backends)
 
 Deferred until the rendering pipeline is complete — tracked here for later triage.
 Hub: [vulkan-port.md](vulkan-port.md). Deliberate deviations (not bugs) are in
 [readme-changes.md](readme-changes.md).
+
+- **[RESOLVED 2026-08-04] Crash (SIGABRT) after killing the Mars City Underground scientist — vertex-block double-free.**
+  Reported 2026-08-04 on Vulkan: the game aborted shortly after the demonic-invasion
+  scene, with `Heap.h:839 Assertion 'block->node == NULL' failed` in
+  `idDynamicBlockAlloc<idDrawVert>::FreeInternal`. Backtrace:
+  `EndFrame → R_ToggleSmpFrame → R_FreeDeferredTriSurfs → R_ReallyFreeStaticTriSurf →
+  triVertexAllocator.Free(tri->verts)` — a `tri->verts` block freed while already in
+  the allocator free-tree (a double-free of a *sub-block* inside the custom pool, so
+  invisible to ASan). **Not the Vulkan port:** reproduces *identically* on
+  `r_graphicsAPI opengl3` (same binary offsets); the renderer frontend and the game
+  DLL are byte-for-byte identical to `master`, so the crashing code is backend-agnostic.
+  **Root cause (confirmed via an added double-free fingerprint + the reporter):** the
+  double-freed surface is an **`idRenderModelOverlay` merged surface** — blood/bullet
+  decal geometry baked onto the animated (MD5) scientist (fingerprint: numVerts=468
+  numIndexes=702 deformed=0 ambientSurf=no silIdx=no — a runtime-merged, self-owned
+  surface that never ran `R_CleanupTriangles`, i.e. the overlay path at
+  `ModelOverlay.cpp AddOverlaySurfacesToModel`, negative surface id `-1-k`). The
+  reporter killed the scientist *before* his scripted zombification, so the base model
+  was gone/changed when the decals were applied; `RenderWorld.cpp:261` keeps decals +
+  the cached dynamic model on a same-`hModel` update, and the overlay merged geometry
+  (owned only by `cachedDynamicModel->surfaces`) gets freed twice across the
+  `InstantiateDynamicModel` / `AddOverlaySurfacesToModel` / `DeleteSurfacesWithNegativeId`
+  churn. **This is a latent stock-Doom3 bug — still present in dhewm3 1.5.5** (our
+  `ModelOverlay.cpp`, `tr_lightrun.cpp`, `Model_md5.cpp`, `Model.cpp` are identical to
+  upstream and upstream has no fix), just rarely hit because it needs that specific
+  kill-before-swap timing. **Fix:** `R_ReallyFreeStaticTriSurf` now calls
+  `triVertexAllocator.CheckMemory( tri->verts )` before the verts free; if the block is
+  already back in the free-tree it skips the redundant free (never valid to do) instead
+  of aborting, and prints a one-shot notice. The double-free is one-shot at the actor's
+  death, so the skipped block is a single ~28 KB leak — negligible; the guard is inert
+  in normal play. See [[vertex-doublefree-crash]] memory.
+
+- **[OPEN 2026-08-03] Main-menu DOOM3 logo draws faded on Vulkan (declared GUI material `gui/mainmenu/doom3`).**
+  With the original pak assets, the menu logo (windowDef `DoomLogo` in `mainmenu.gui`, declared
+  material `gui/mainmenu/doom3` in pak000/pak005 `materials/*.mtr`: `blend blend` +
+  `map guis/assets/mainmenu/doom3.tga` + `rgb pdLogoTable[time*0.25]` + `alpha parm3` + `clamp`)
+  renders as a barely-visible ghost over the planet, as if its alpha channel were broken. Seen on
+  the **Vulkan** backend (GL3 not re-checked during this pass). **Workaround that renders
+  correctly:** a loose `base/guis/mainmenu.gui` (currently parked as `mainmenu.gui.bak`) pointing
+  the logo windowDefs at `guis/assets/mainmenu/dude_logo` plus the loose 2048×1024 32-bit
+  `base/guis/assets/mainmenu/dude_logo.tga` — an *implicit* material (bare image, no register
+  expressions). Repro: disable the loose gui so `zWideGuis_D3.pk4`'s `mainmenu.gui` (which
+  references `gui/mainmenu/doom3`) is active. **Ruled out 2026-08-03:**
+  (a) *the precompressed-DDS path* — pak001 ships `dds/guis/assets/mainmenu/doom3.dds` (DXT3,
+  256×128, 9 mips), but the Vulkan init hard-sets `glConfig.textureCompressionAvailable = false`
+  (RenderSystem_init.cpp), so `CheckPrecompressedImage` rejects immediately and both configs load
+  the TGA through the same `R_LoadTGA` → `GenerateImage` → RHI RGBA8 path;
+  (b) *front-end register evaluation* — an instrumented `RB_RHI_RenderShaderPasses` (debug hunk
+  reverted after the capture) showed the backend receives a fully correct draw: blend bits `0x65`
+  = `GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA` (textbook `blend blend`), stage
+  rgb 0.931–0.947 animating exactly per `pdLogoTable`, stage alpha = `parm3` = **1.000**.
+  So the fade happens *inside the Vulkan draw* of a register-coloured stage, downstream of the
+  material system. Next leads: how the VK generic path applies stage colour × texture alpha for
+  `SVC_IGNORE` stages vs the working vertex-colour implicit path; dump/sample the RHI-uploaded
+  `doom3.tga` (256×128) alpha as the shader sees it (swizzle/premultiply/mip suspects); compare
+  the VK pipeline's blend-factor translation of `0x65` against GL3 `ApplyState`. (The faint
+  `gui/menu/blackbars` overlay `DoomLogo2` at matcolor alpha 0.05 shares the same rect —
+  cosmetic, not the cause.)
 
 - **[MITIGATED 2026-08-01] Intermittent crash on repeated `vid_restart` (SDL3/X11 window teardown).**
   Independent of the backend-switch fix below — reproduced 2026-07-31 on the **legacy** backend
@@ -18,6 +76,16 @@ Hub: [vulkan-port.md](vulkan-port.md). Deliberate deviations (not bugs) are in
   still-valid window. After this the reporter could no longer reproduce the crash across repeated
   `vid_restart`s. Kept tracked (not "resolved") because it is an intermittent async race — re-verify
   on a native-SDL3 build and under the Vulkan backend's heavier re-init.
+  **2026-08-05 recurrence + second mitigation:** reproduced once by the reporter switching
+  Vulkan → legacy from the new in-menu Renderer selector (fullscreen, direct-apply
+  `video restart`): `BadWindow (X_TranslateCoords)` right after "Shutting down OpenGL
+  subsystem", before the new window init printed. Remaining suspect: `SDL_DestroyWindow`'s
+  *implicit* leave-fullscreen/mode-restore repositioning against a mid-teardown window.
+  Mitigation applied in the same spirit as the first: `GLimp_Shutdown` now leaves fullscreen
+  explicitly (`SDL_SetWindowFullscreen` + pump) while the window is fully alive, and pumps
+  once more after `SDL_DestroyWindow` so the destroy's event fallout is drained (and dropped)
+  before the next window comes up. Headless fullscreen restart + backend-switch stress passes;
+  awaiting reporter re-test on the real X/NVIDIA setup.
 
 - **[RESOLVED 2026-07-31] Garbled image / white screen when switching renderer backend (legacy ↔ opengl3).**
   Switching backends in Video Options — or any `vid_restart` while on the GL3 core backend —

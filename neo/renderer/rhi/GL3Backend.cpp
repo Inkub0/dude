@@ -120,6 +120,7 @@ class GL3Backend : public RHI {
 		GLuint	depthTex;	// companion depth attachment for a color+depth target (0 = none)
 		int		w, h;
 		bool	cube;		// tex is a GL_TEXTURE_CUBE_MAP (point-light shadow map)
+		int		mipLevels;	// >1: tex carries a GPU-generated mip chain (SSAO Phase 1); FBO writes level 0
 	};
 	renderTarget_t		renderTargets[MAX_RENDER_TARGETS];
 	RenderTargetHandle	activeTarget;		// 0 = backbuffer; set by BeginTargetPass
@@ -351,6 +352,11 @@ public:
 		// remember the backbuffer viewport so EndPass can put it back
 		qglGetIntegerv( GL_VIEWPORT, savedViewport );
 		gl3BindFramebuffer( GL_FRAMEBUFFER, t.fbo );
+		if ( t.mipLevels > 1 ) {
+			// a prior BeginTargetMipPass left the color attachment on a coarse level;
+			// re-point it at level 0 for this full-res pass (SSAO Phase 1 linearize)
+			gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0 );
+		}
 		activeTarget = rt;
 		qglViewport( 0, 0, t.w, t.h );
 		qglScissor( 0, 0, t.w, t.h );
@@ -464,6 +470,11 @@ public:
 		return GL3_FindProgram( name );
 	}
 
+	// custom (mod) ARB stage: the driver compiles the transpiled GLSL live
+	virtual ShaderHandle CreateShaderFromGlsl( const char *name, const char *vertSrc, const char *fragSrc ) {
+		return GL3_FindProgramFromSource( name, vertSrc, fragSrc );
+	}
+
 	// ---- offscreen render targets ----
 	virtual RenderTargetHandle CreateRenderTarget( ImageFormat fmt, int w, int h ) {
 		if ( !initialized || w <= 0 || h <= 0 ) {
@@ -543,9 +554,116 @@ public:
 		renderTargets[slot].w = w;
 		renderTargets[slot].h = h;
 		renderTargets[slot].cube = false;
+		renderTargets[slot].mipLevels = 1;
 		boundVBO = 0;	// binding the FBO's texture disturbed unit-0 bind tracking
 		common->DPrintf( "GL3: created %dx%d %s render target (handle %d)\n", w, h, colorTarget ? "color" : "depth", slot );
 		return (RenderTargetHandle)slot;
+	}
+
+	// SSAO Phase 1 (docs/ssao-perf-optimization.md): a color target with a full mip
+	// chain. Level 0 is rendered by a fullscreen pass (BeginTargetPass binds the FBO,
+	// whose color attachment is level 0); coarser levels are rendered by a max-downsample
+	// shader via BeginTargetMipPass. Sampled with an explicit textureLod (LINEAR_MIPMAP_NEAREST).
+	virtual RenderTargetHandle CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels ) {
+		if ( !initialized || w <= 0 || h <= 0 ) {
+			return 0;
+		}
+		if ( fmt != IF_RGBA8 && fmt != IF_RGBA16F && fmt != IF_R16F ) {
+			common->Warning( "GL3 CreateRenderTargetMipped: unsupported format %d (want IF_RGBA8, IF_RGBA16F or IF_R16F)", (int)fmt );
+			return 0;
+		}
+		int maxLevels = 1;
+		for ( int d = ( w > h ? w : h ); d > 1; d >>= 1 ) { maxLevels++; }
+		if ( mipLevels < 1 ) { mipLevels = 1; }
+		if ( mipLevels > maxLevels ) { mipLevels = maxLevels; }
+		if ( mipLevels > 8 ) { mipLevels = 8; }		// parity with VK RenderTarget::MAX_MIP
+
+		int slot = -1;
+		for ( int i = 1; i < MAX_RENDER_TARGETS; i++ ) {
+			if ( renderTargets[i].fbo == 0 && renderTargets[i].tex == 0 ) { slot = i; break; }
+		}
+		if ( slot < 0 ) {
+			common->Warning( "GL3 CreateRenderTargetMipped: out of render-target slots" );
+			return 0;
+		}
+
+		// IF_R16F: single-channel half-float (SSAO Phase 2 linear-depth mip). Only .r is
+		// ever written/read, so the RG/BA of the RGBA16F first cut were dead weight — R16F
+		// quarters the mip's bandwidth for the same .r bits.
+		const GLint  internalFmt = ( fmt == IF_RGBA16F ) ? GL_RGBA16F
+		                         : ( fmt == IF_R16F )    ? GL_R16F : GL_RGBA8;
+		const GLenum pixFmt      = ( fmt == IF_R16F )    ? GL_RED  : GL_RGBA;
+		const GLenum pixType     = ( fmt == IF_RGBA16F || fmt == IF_R16F ) ? GL_HALF_FLOAT : GL_UNSIGNED_BYTE;
+
+		GLuint tex = 0;
+		qglGenTextures( 1, &tex );
+		gl3ActiveTexture( GL_TEXTURE0 );
+		qglBindTexture( GL_TEXTURE_2D, tex );
+		// allocate every level (glTexStorage2D is GL 4.2 / not loaded; a per-level
+		// glTexImage2D loop needs no new entry point)
+		for ( int i = 0; i < mipLevels; i++ ) {
+			const int lw = ( ( w >> i ) > 1 ) ? ( w >> i ) : 1;
+			const int lh = ( ( h >> i ) > 1 ) ? ( h >> i ) : 1;
+			qglTexImage2D( GL_TEXTURE_2D, i, internalFmt, lw, lh, 0, pixFmt, pixType, NULL );
+		}
+		// NEAREST mip selection: an explicit textureLod picks a discrete level, bilinear within
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, mipLevels - 1 );
+
+		GLuint fbo = 0;
+		gl3GenFramebuffers( 1, &fbo );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, fbo );
+		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0 );	// level 0
+		GLenum status = gl3CheckFramebufferStatus( GL_FRAMEBUFFER );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
+		qglBindTexture( GL_TEXTURE_2D, 0 );
+
+		if ( status != GL_FRAMEBUFFER_COMPLETE ) {
+			common->Warning( "GL3 CreateRenderTargetMipped: incomplete FBO (0x%x), %dx%d", status, w, h );
+			gl3DeleteFramebuffers( 1, &fbo );
+			qglDeleteTextures( 1, &tex );
+			return 0;
+		}
+
+		renderTargets[slot].fbo = fbo;
+		renderTargets[slot].tex = tex;
+		renderTargets[slot].w = w;
+		renderTargets[slot].h = h;
+		renderTargets[slot].cube = false;
+		renderTargets[slot].mipLevels = mipLevels;
+		boundVBO = 0;
+		common->DPrintf( "GL3: created %dx%d mipped color render target (%d levels, handle %d)\n", w, h, mipLevels, slot );
+		return (RenderTargetHandle)slot;
+	}
+
+	// Render into a chosen mip level for the SSAO Phase 1 max-downsample. Re-points the
+	// target's shared FBO at that level; BeginTargetPass restores level 0 next frame.
+	virtual void BeginTargetMipPass( RenderTargetHandle rt, int level, const ClearArgs *clear ) {
+		if ( rt == 0 || rt >= (RenderTargetHandle)MAX_RENDER_TARGETS || !renderTargets[rt].fbo
+		     || level < 1 || level >= renderTargets[rt].mipLevels ) {
+			return;
+		}
+		const renderTarget_t &t = renderTargets[rt];
+		qglGetIntegerv( GL_VIEWPORT, savedViewport );
+		gl3BindFramebuffer( GL_FRAMEBUFFER, t.fbo );
+		gl3FramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, level );
+		activeTarget = rt;
+		const int lw = ( ( t.w >> level ) > 1 ) ? ( t.w >> level ) : 1;
+		const int lh = ( ( t.h >> level ) > 1 ) ? ( t.h >> level ) : 1;
+		qglViewport( 0, 0, lw, lh );
+		qglScissor( 0, 0, lw, lh );
+		DoClear( clear );
+	}
+
+	// GL3: the whole texture (the downsample shader texelFetches the given source level).
+	virtual ImageHandle GetRenderTargetMipImage( RenderTargetHandle rt, int mipLevel ) {
+		if ( rt == 0 || rt >= (RenderTargetHandle)MAX_RENDER_TARGETS || renderTargets[rt].tex == 0 ) {
+			return 0;
+		}
+		return (ImageHandle)renderTargets[rt].tex;
 	}
 
 	// Cube depth target for omni (point-light) shadow maps: one GL_TEXTURE_CUBE_MAP
@@ -860,6 +978,12 @@ public:
 		if ( args.shadowCube ) {
 			gl3ActiveTexture( GL_TEXTURE0 + 8 );
 			qglBindTexture( GL_TEXTURE_CUBE_MAP, args.shadowCube );
+		}
+		// unit 12: dynamic-layer cube (static/dynamic split, lever B). Only bound for lights
+		// with a movers-only layer; interaction.frag skips it unless u_pbrParms2.z is set.
+		if ( args.shadowCubeDyn ) {
+			gl3ActiveTexture( GL_TEXTURE0 + 12 );
+			qglBindTexture( GL_TEXTURE_CUBE_MAP, args.shadowCubeDyn );
 		}
 
 		qglDrawElements( GL_TRIANGLES, args.indexCount, GL_UNSIGNED_INT,

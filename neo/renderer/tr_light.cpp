@@ -48,6 +48,49 @@ VERTEX CACHE GENERATORS
 ===========================================================================================
 */
 
+// Milestone-C profiler (docs/gpu-offload-plan.md): measure the per-frame CPU cost that GPU
+// skinning would let us retire — the deferred tangent derive (R_DeriveTangents) plus the
+// ambient-cache upload (vertexCache.Alloc) — for GPU-skinned (gpuSkinVB) surfaces only. This
+// sizes the Milestone-C prize before we take on the decal/deform/weld gating to actually skip it.
+// Pure instrumentation: zero behaviour change, prints per-frame averages once/sec. Use with
+// r_gpuSkinning 1 on Vulkan, in a heavy scene.
+idCVar r_gpuSkinProfile( "r_gpuSkinProfile", "0", CVAR_RENDERER | CVAR_BOOL,
+	"report the per-frame CPU ms in the skinned-surface tangent-derive + ambient upload (the Milestone-C prize); needs r_gpuSkinning on (Vulkan)" );
+static double s_skinDeriveMs = 0.0;		// summed R_DeriveTangents time on deformed (skinned) surfaces
+static double s_skinUploadMs = 0.0;		// summed vertexCache.Alloc time on gpuSkinVB surfaces
+static int    s_skinDeriveSurfs = 0;	// # surfaces derived
+static int    s_skinUploadVerts = 0;	// # verts uploaded
+static int    s_skinProfFrames = 0;		// frames accumulated since last print
+static int    s_skinProfFrame = -1;		// last tr.frameCount seen (frame-edge detect)
+static double s_skinProfLastMs = 0.0;	// wall-clock of last print
+
+// Called from R_DeriveTangents (tr_trisurf.cpp) for each deformed-surface tangent derive, so the
+// profiler captures the real MD5 cost wherever it fires (the tess-weld path, the deferred ambient
+// path, etc.) rather than only the one call site R_CreateAmbientCache owns.
+void R_GpuSkinProfileAddDerive( double ms ) {
+	s_skinDeriveMs += ms;
+	s_skinDeriveSurfs++;
+}
+
+// Milestone C (docs/gpu-offload-plan.md): when a surface is drawn from its compute-skinned
+// gpuSkinVB, its per-frame ambient-cache vertex upload (a fresh VK buffer + copy every frame) is
+// never drawn — skip it so the CPU stops re-streaming geometry the GPU already produced. Opt-in +
+// off by default: leaving ambientCache NULL arms ~a dozen "has geometry?" gates, so this stays an
+// A/B toggle until proven, and the OFF path is byte-for-byte unchanged. Vulkan-only in effect
+// (gpuSkinVB is only set there).
+//
+// NOT the tangent derive — that stays. Its remaining CPU readers are decals (idRenderModelOverlay)
+// and deform materials. The third blocker this comment used to list, the tess weld, is GONE: the
+// bake weld in idMD5Mesh::BuildGpuSkinData superseded r_tessWeldSeams. Both survivors are per-SURFACE
+// conditions (overlay present / material deforms), so the derive IS gateable — it is just not worth
+// gating: r_gpuSkinProfile measured it at ~0.007 ms/frame in a 5-enemy fight, because MD5 meshes
+// carry dominantTris and so take the cheap O(verts) R_DeriveUnsmoothedTangents path
+// (tr_trisurf.cpp:1793), never the expensive smoothed one. ~0.1% of a frame against a real risk of
+// decal regressions. Don't re-litigate this without new numbers — see docs/gpu-offload-plan.md
+// "Milestone C", which also records that the engine is GPU-bound at these enemy counts.
+static idCVar r_gpuSkinNoUpload( "r_gpuSkinNoUpload", "0", CVAR_RENDERER | CVAR_BOOL,
+	"skip the redundant CPU ambient-cache upload for GPU-skinned surfaces (draw from gpuSkinVB); needs r_gpuSkinning on (Vulkan)" );
+
 /*
 ==================
 R_CreateAmbientCache
@@ -56,15 +99,54 @@ Create it if needed
 ==================
 */
 bool R_CreateAmbientCache( srfTriangles_t *tri, bool needsLighting ) {
+	// Milestone-C profiler: flush the accumulated skinned-surface costs once per second. Done at
+	// the top (before the cached early-out) on the first call of each frame so the window spans
+	// whole frames. Averages are per-frame over the elapsed window.
+	if ( r_gpuSkinProfile.GetBool() && tr.frameCount != s_skinProfFrame ) {
+		s_skinProfFrame = tr.frameCount;
+		const double now = Sys_MillisecondsPrecise();
+		if ( now - s_skinProfLastMs >= 1000.0 && s_skinProfFrames > 0 ) {
+			common->Printf( "gpuSkinProfile: %d skinned surf/frame -- derive %.3f ms/frame, ambient upload %.3f ms/frame (%d verts/frame) [avg over %d frames]\n",
+			                s_skinDeriveSurfs / s_skinProfFrames, s_skinDeriveMs / s_skinProfFrames,
+			                s_skinUploadMs / s_skinProfFrames, s_skinUploadVerts / s_skinProfFrames, s_skinProfFrames );
+			s_skinDeriveMs = s_skinUploadMs = 0.0;
+			s_skinDeriveSurfs = s_skinUploadVerts = 0;
+			s_skinProfFrames = 0;
+			s_skinProfLastMs = now;
+		}
+		s_skinProfFrames++;
+	}
+
 	if ( tri->ambientCache ) {
 		return true;
 	}
-	// we are going to use it for drawing, so make sure we have the tangents and normals
+
+	// we are going to use it for drawing, so make sure we have the tangents and normals. Kept even in
+	// the no-upload path below: decals (idRenderModelOverlay), deform materials, and the tess weld all
+	// read tri->verts normals/tangents on the CPU.
 	if ( needsLighting && !tri->tangentsCalculated ) {
 		R_DeriveTangents( tri );
 	}
 
-	vertexCache.Alloc( tri->verts, tri->numVerts * sizeof( tri->verts[0] ), &tri->ambientCache );
+	// Milestone C: a GPU-skinned surface draws from tri->gpuSkinVB, so this ambient-cache upload would
+	// never be drawn — skip it and return success with ambientCache left NULL. The draw path binds
+	// gpuSkinVB (RB_RHI_StreamAmbient), the visible-pass gates accept gpuSkinVB in place of the cache,
+	// and the cube-shadow invalidation hashes gpuSkinFrame instead of the (absent) per-frame handle.
+	if ( tri->gpuSkinVB && r_gpuSkinNoUpload.GetBool() ) {
+		return true;
+	}
+
+	// the tangent derive (the Milestone-C prize) is timed at its source in R_DeriveTangents; here we
+	// only time the redundant ambient-cache upload for gpuSkinVB surfaces (never drawn once skinned).
+	const bool prof = r_gpuSkinProfile.GetBool() && tri->gpuSkinVB;
+	if ( prof ) {
+		const double t1 = Sys_MillisecondsPrecise();
+		vertexCache.Alloc( tri->verts, tri->numVerts * sizeof( tri->verts[0] ), &tri->ambientCache );
+		s_skinUploadMs += Sys_MillisecondsPrecise() - t1;
+		s_skinUploadVerts += tri->numVerts;
+	} else {
+		vertexCache.Alloc( tri->verts, tri->numVerts * sizeof( tri->verts[0] ), &tri->ambientCache );
+	}
 	if ( !tri->ambientCache ) {
 		return false;
 	}
@@ -1683,6 +1765,10 @@ static void R_UpdateEmissiveLights( void ) {
 	// saturation nudges fall under the colour threshold) — force a full rebuild when any of
 	// them changes. The signature only shifts while a slider is dragged, so steady-state cost
 	// is zero; each value gets a well-separated weight so a single-knob change is always seen.
+	// r_emissiveSurfaces is included so that turning it OFF drops the GUI fill lights even while
+	// r_itemGlow keeps the system enabled: the rebuild frees everything, then only the item-glow
+	// requests (still queued) recreate their lights — the now-gated GUI screens don't. Without
+	// this, an on-screen fill light is held alive indefinitely by the frustum keep-alive below.
 	static float lastStyleSig = -1.0f;
 	const float styleSig = ( r_emissiveLightSpecular.GetBool() ? 2.0f : 0.0f )
 	                     + r_emissiveLightSpread.GetFloat()     * 8.0f
@@ -1690,7 +1776,8 @@ static void R_UpdateEmissiveLights( void ) {
 	                     + r_emissiveLightScale.GetFloat()      * 64.0f
 	                     + r_emissiveLightRadius.GetFloat()     * 256.0f
 	                     + r_emissiveLightSaturation.GetFloat() * 1024.0f
-	                     + r_itemGlow.GetFloat()               * 4096.0f;
+	                     + r_itemGlow.GetFloat()               * 4096.0f
+	                     + ( r_emissiveSurfaces.GetBool() ? 32768.0f : 0.0f );
 	if ( styleSig != lastStyleSig ) {
 		R_FreeAllEmissiveLights( world );
 		lastStyleSig = styleSig;
@@ -2093,7 +2180,15 @@ static void R_AddAmbientDrawsurfs( viewEntity_t *vEntity ) {
 			}
 		}
 
-		if ( !R_CullLocalBox( tri->bounds, vEntity->modelMatrix, 5, tr.viewDef->frustum ) ) {
+		const bool surfCulled = R_CullLocalBox( tri->bounds, vEntity->modelMatrix, 5, tr.viewDef->frustum );
+
+		// DUDE Phase 3.2 (r_gpuCullLive): record this candidate's real bounds/matrix + the CPU
+		// decision so R_GpuCullLive() can prove the GPU cull reproduces it. No-op unless armed.
+		if ( R_GpuCullLiveActive() ) {
+			R_GpuCull_RecordCandidate( tri->bounds, vEntity->modelMatrix, tri->numIndexes, surfCulled );
+		}
+
+		if ( !surfCulled ) {
 
 			def->visibleCount = tr.viewCount;
 
@@ -2102,8 +2197,11 @@ static void R_AddAmbientDrawsurfs( viewEntity_t *vEntity ) {
 				// don't add anything if the vertex cache was too full to give us an ambient cache
 				return;
 			}
-			// touch it so it won't get purged
-			vertexCache.Touch( tri->ambientCache );
+			// touch it so it won't get purged (GPU-skinned surfaces with r_gpuSkinNoUpload have no
+			// ambient cache — they draw from gpuSkinVB — so there is nothing to touch)
+			if ( tri->ambientCache ) {
+				vertexCache.Touch( tri->ambientCache );
+			}
 
 			if ( r_useIndexBuffers.GetBool() && !tri->indexCache ) {
 				vertexCache.Alloc( tri->indexes, tri->numIndexes * sizeof( tri->indexes[0] ), &tri->indexCache, true );
@@ -2193,6 +2291,10 @@ void R_AddModelSurfaces( void ) {
 	// clear the ambient surface list
 	tr.viewDef->numDrawSurfs = 0;
 	tr.viewDef->maxDrawSurfs = 0;	// will be set to INITIAL_DRAWSURFS on R_AddDrawSurf
+
+	// DUDE GPU-offload Phase 3.2 (r_gpuCullLive): arm the live-cull collector for this view (at
+	// most once/sec). When armed, R_AddAmbientDrawsurfs records each cull candidate below.
+	R_GpuCull_ResetLive();
 
 	// go through each entity that is either visible to the view, or to
 	// any light that intersects the view (for shadows)

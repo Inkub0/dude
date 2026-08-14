@@ -9,11 +9,19 @@
 //   u_localParam1 = ( radiusPixelFactor, numSteps, numSlices, bentNormalEnable )
 //   u_screenCorrection.xy = 1 / aoTargetSize       (gl_FragCoord -> [0,1] screen uv)
 //   u_depthTexRecip.xy    = div / depthUploadSize  (gl_FragCoord -> _currentDepth tc)
+//   u_depthTexRecip.z     = SSAO Phase 1 depth-mip max LOD (0 = feature off, raw path)
+//   u_depthTexRecip.w     = depth-mip LOD bias (r_ssaoDepthMipBias)
 
 #include "renderparms.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;   // DUDE normal G-buffer (view-space, encoded)
+// SSAO Phase 1 (docs/ssao-perf-optimization.md): prefiltered LINEAR view-space depth
+// mip chain (level 0 = ssao_depthmip.frag, coarser = box averages). The horizon march
+// reads a coarser mip for farther steps — the cache win. R = positive linear eye depth.
+// When the feature is off (u_depthTexRecip.z < 0.5) this is bound to _currentDepth as an
+// unused dummy and the march falls back to the raw-depth path (viewPos).
+SAMPLER_BINDING(2) uniform sampler2D u_linearDepthMip;
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -39,24 +47,66 @@ vec3 viewPosFromRaw( vec2 frag, float raw ) {
 	float vz  = 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y );   // negative
 	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
 	float d   = -vz;                                                              // positive depth
-	return vec3( ndc.x * d * u_localParam0.x, ndc.y * d * u_localParam0.y, vz );
+	// u_windowCoord.z = view-Y sign: +1 on GL (gl_FragCoord.y is bottom-up, agrees with
+	// view +Y), -1 on Vulkan (gl_FragCoord.y is top-down). Without it the reconstructed
+	// position Y is flipped vs the G-buffer normal, wrecking AO on floors/ceilings.
+	return vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
 }
 
 vec3 viewPos( vec2 frag ) {
 	return viewPosFromRaw( frag, rawDepth( frag ) );
 }
 
-// Reconstruct a view-space normal from depth — the FALLBACK used when the normal
-// G-buffer is off (main() reads the G-buffer directly when it's on, docs §4). Uses the
-// closer of each neighbour pair to avoid bleeding across silhouettes.
+// SSAO Phase 1: view-space position of a horizon-march tap from the prefiltered LINEAR
+// depth mip at an explicit LOD (coarser = farther steps). u_linearDepthMip.r holds the
+// positive linear eye depth already, so no per-tap reconstruction division is needed.
+vec3 viewPosLin( vec2 frag, float lod ) {
+	float d   = textureLod( u_linearDepthMip, frag * u_screenCorrection.xy, lod ).r;   // positive
+	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
+	return vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, -d );
+}
+
+// One horizon-march occluder tap. With the depth mip on (u_depthTexRecip.z >= 0.5) read
+// the mip at `lod`; otherwise the exact raw-depth path (an A/B toggle, r_ssaoDepthMip).
+// The branch is on a draw-coherent uniform, so it costs nothing on the GPU.
+vec3 viewPosStep( vec2 frag, float lod ) {
+	if ( u_depthTexRecip.z >= 0.5 ) {
+		return viewPosLin( frag, lod );
+	}
+	return viewPos( frag );
+}
+
+// Reconstruct a view-space normal from depth — the FALLBACK used when the normal G-buffer
+// is off (main() reads the G-buffer directly when it's on, docs §4). Accurate 9-tap method
+// (atyuwen, https://atyuwen.github.io/posts/normal-reconstruction/): for each axis sample two
+// neighbours on EACH side and linearly extrapolate the near pair and the far pair toward the
+// centre; the pair whose prediction matches the centre depth is the surface the centre lies on,
+// so the derivative is taken from that side. This keeps the normal off the wrong surface at
+// silhouettes / decals / thin geometry, where the old best-of-2 pick still smeared and made the
+// reconstructed AO look faceted. Raw projection depth is affine in 1/viewZ (linear across a
+// plane in screen space), so it's a valid space for the collinearity test.
 vec3 sampleViewNormal( vec2 frag, vec3 P ) {
-	vec3 Pr = viewPos( frag + vec2( 1.0, 0.0 ) );
-	vec3 Pl = viewPos( frag - vec2( 1.0, 0.0 ) );
-	vec3 Pu = viewPos( frag + vec2( 0.0, 1.0 ) );
-	vec3 Pd = viewPos( frag - vec2( 0.0, 1.0 ) );
-	vec3 dx = ( abs( Pr.z - P.z ) < abs( Pl.z - P.z ) ) ? ( Pr - P ) : ( P - Pl );
-	vec3 dy = ( abs( Pu.z - P.z ) < abs( Pd.z - P.z ) ) ? ( Pu - P ) : ( P - Pd );
-	vec3 N = normalize( cross( dx, dy ) );
+	float c = rawDepth( frag );
+
+	float l1 = rawDepth( frag + vec2( -1.0, 0.0 ) );
+	float l2 = rawDepth( frag + vec2( -2.0, 0.0 ) );
+	float r1 = rawDepth( frag + vec2(  1.0, 0.0 ) );
+	float r2 = rawDepth( frag + vec2(  2.0, 0.0 ) );
+	float errL = abs( ( 2.0 * l1 - l2 ) - c );
+	float errR = abs( ( 2.0 * r1 - r2 ) - c );
+	vec3  dpdx = ( errL < errR ) ? ( P - viewPosFromRaw( frag + vec2( -1.0, 0.0 ), l1 ) )
+	                             : ( viewPosFromRaw( frag + vec2(  1.0, 0.0 ), r1 ) - P );
+
+	float u1 = rawDepth( frag + vec2( 0.0,  1.0 ) );
+	float u2 = rawDepth( frag + vec2( 0.0,  2.0 ) );
+	float d1 = rawDepth( frag + vec2( 0.0, -1.0 ) );
+	float d2 = rawDepth( frag + vec2( 0.0, -2.0 ) );
+	float errU = abs( ( 2.0 * u1 - u2 ) - c );
+	float errD = abs( ( 2.0 * d1 - d2 ) - c );
+	vec3  dpdy = ( errU < errD ) ? ( viewPosFromRaw( frag + vec2( 0.0,  1.0 ), u1 ) - P )
+	                             : ( P - viewPosFromRaw( frag + vec2( 0.0, -1.0 ), d1 ) );
+
+	vec3 N = normalize( cross( dpdx, dpdy ) );
 	if ( dot( N, P ) > 0.0 ) {
 		N = -N;                        // face the camera (P points away from eye)
 	}
@@ -137,8 +187,9 @@ void main() {
 
 		// slice plane spanned by V and the screen-space direction; an in-plane tangent
 		// (perpendicular to V, toward +dir). planeN is unit and perpendicular to V, so
-		// cross(planeN, V) is already unit — no normalize needed.
-		vec3 sliceDir = vec3( dir, 0.0 );
+		// cross(planeN, V) is already unit — no normalize needed. dir.y carries the same
+		// view-Y sign (u_windowCoord.z) so the frag-space march maps to the right view dir.
+		vec3 sliceDir = vec3( dir.x, dir.y * u_windowCoord.z, 0.0 );
 		vec3 planeN   = normalize( cross( V, sliceDir ) );
 		vec3 tangent  = cross( planeN, V );
 
@@ -149,7 +200,13 @@ void main() {
 			if ( t >= numSteps ) {
 				break;
 			}
-			vec2 duv = dir * ( ( float( t ) + noise05 ) * stepPix );
+			float distPix = ( float( t ) + noise05 ) * stepPix;
+			vec2  duv     = dir * distPix;
+
+			// SSAO Phase 1: read a coarser depth mip for farther steps (cache win). LOD
+			// grows with the tap's screen distance; near taps stay on mip 0 where the
+			// contact detail matters. depthTexRecip.z = max LOD (0 = off), .w = bias.
+			float lod = clamp( log2( max( distPix * u_depthTexRecip.w, 1.0 ) ), 0.0, u_depthTexRecip.z );
 
 			// Drop occluders that land on the view weapon so the depth-hacked gun never
 			// darkens the world behind it (the source of the sway/move jitter). Only the
@@ -157,7 +214,7 @@ void main() {
 			// tell, so it keeps the old behaviour (weaponTexel is never evaluated then).
 			vec2  sp  = frag + duv;
 			if ( !useNormalBuffer || !weaponTexel( sp ) ) {
-				vec3  Dp  = viewPos( sp ) - P;
+				vec3  Dp  = viewPosStep( sp, lod ) - P;
 				float l2p = dot( Dp, Dp );
 				if ( l2p > 1e-6 ) {
 					float ca = dot( Dp, V ) * inversesqrt( l2p );
@@ -167,7 +224,7 @@ void main() {
 			}
 			vec2  sn  = frag - duv;
 			if ( !useNormalBuffer || !weaponTexel( sn ) ) {
-				vec3  Dn  = viewPos( sn ) - P;
+				vec3  Dn  = viewPosStep( sn, lod ) - P;
 				float l2n = dot( Dn, Dn );
 				if ( l2n > 1e-6 ) {
 					float ca = dot( Dn, V ) * inversesqrt( l2n );

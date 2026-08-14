@@ -86,11 +86,43 @@ struct RenderParams {
 								// fallbacks; Phase B swaps in per-material values.
 	float	pbrParms2[4];		// DUDE PBR extras: x = metal diffuse-kill strength kd
 								// (= 1 - r_pbrMetalDiffuse); diffuse *= 1 - metal*kd, so
-								// kd < 1 retains the asset albedo colour on metals. yzw spare.
+								// kd < 1 retains the asset albedo colour on metals.
+								// Shadow riders: y = slope-scaled bias strength
+								// (r_shadowMapSlopeBias), z = static/dynamic split
+								// hasDynamicLayer flag, w = normal-offset bias in texels
+								// (r_shadowMapNormalOffset; cube + sun lookups).
+
+	float	tessParms[4];		// DUDE tessellation (docs/tessellation.md): x = tess level
+								// (subdivision cap; 1 = flat), y = max view distance for the
+								// LOD falloff (beyond it factor rolls to 1), z = displacement
+								// strength (0 = pure PN smoothing), w = min model-space edge
+								// length to subdivide. Read by the .tesc/.tese stages only;
+								// 0 on every non-tessellated draw. (The UV-seam displacement
+								// mask is per-VERTEX, not a uniform -- see tess.glsl.)
+
+	float	parallaxParms[4];	// DUDE parallax occlusion mapping (docs/parallax.md):
+								// x = enable, y = height depth in UV units, z = min march
+								// steps (head-on), w = max march steps (grazing). Height map
+								// on unit 11; 0 on every non-parallax draw.
+	float	parallaxParms2[4];	// DUDE parallax extras: x = self-shadow strength (0 = off,
+								// r_parallaxShadow). yzw spare (reserved for distance LOD).
+
+	float	shadowProjectionS[4];	// UNBAKED light-projection texgen for the 2D shadow-map
+	float	shadowProjectionT[4];	// lookup. The cookie texgen (lightProjectionS/T/Q) carries
+	float	shadowProjectionQ[4];	// the light stage's texture matrix (rotating fan gobos etc.);
+								// the shadow depth map is rendered with the RAW projection, so
+								// the shadow must be sampled raw too or it swims with the
+								// animation. Filled only on the projected-2D shadow path.
+	float	shadowFalloffS[4];	// DUDE sun shadow maps (docs/shadow-research.md item 1): the
+								// virtual projection's DEPTH plane. Oversize-omni/parallel "sun"
+								// lights render their map through a per-view fitted virtual
+								// frustum whose linear depth is this plane — the light's own
+								// falloff texgen (a point light's falloff) can't serve as the
+								// compare reference there. Filled only on the sun path (mode 3).
 };
 
-// 3 mat4 (192) + 39 vec4 (624) = 816 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 816, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 3 mat4 (192) + 46 vec4 (736) = 928 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 928, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

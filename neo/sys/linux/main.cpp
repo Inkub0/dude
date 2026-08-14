@@ -31,6 +31,7 @@ If you have questions concerning this license or the applicable additional terms
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
+#include <dirent.h>
 
 //#include <SDL_main.h> - not needed, DUDE doesn't currently use SDL's SDL_main
 
@@ -184,6 +185,91 @@ static void SetExecutablePath(char* exePath)
 #endif
 }
 
+// DUDE: one-time migration from the legacy dhewm3 config dir to the new dude
+// dir. Recursively copies src into dst so existing configs, key binds and saves
+// aren't orphaned when we rename the directory. Best-effort: any failure just
+// leaves the legacy dir untouched (it stays readable there) and starts fresh.
+static bool DUDE_CopyFile(const char *src, const char *dst) {
+	int in = open(src, O_RDONLY);
+	if (in < 0)
+		return false;
+
+	struct stat st;
+	if (fstat(in, &st) != 0) {
+		close(in);
+		return false;
+	}
+
+	int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777);
+	if (out < 0) {
+		close(in);
+		return false;
+	}
+
+	char buf[65536];
+	ssize_t n;
+	bool ok = true;
+	while ((n = read(in, buf, sizeof(buf))) > 0) {
+		ssize_t off = 0;
+		while (off < n) {
+			ssize_t w = write(out, buf + off, n - off);
+			if (w <= 0) { ok = false; break; }
+			off += w;
+		}
+		if (!ok) break;
+	}
+	if (n < 0)
+		ok = false;
+
+	close(in);
+	close(out);
+	return ok;
+}
+
+static void DUDE_CopyDirRecursive(const char *src, const char *dst) {
+	DIR *d = opendir(src);
+	if (!d)
+		return;
+
+	mkdir(dst, 0755);
+
+	struct dirent *ent;
+	while ((ent = readdir(d)) != NULL) {
+		if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+			continue;
+
+		char srcPath[MAX_OSPATH];
+		char dstPath[MAX_OSPATH];
+		idStr::snPrintf(srcPath, sizeof(srcPath), "%s/%s", src, ent->d_name);
+		idStr::snPrintf(dstPath, sizeof(dstPath), "%s/%s", dst, ent->d_name);
+
+		struct stat st;
+		if (stat(srcPath, &st) != 0)
+			continue;
+
+		if (S_ISDIR(st.st_mode))
+			DUDE_CopyDirRecursive(srcPath, dstPath);
+		else if (S_ISREG(st.st_mode))
+			DUDE_CopyFile(srcPath, dstPath);
+	}
+
+	closedir(d);
+}
+
+// If the new dude config dir doesn't exist yet but a legacy dhewm3 one does,
+// clone it once so upgrading users keep their settings. Returns nothing; the
+// caller uses the dude path regardless.
+static void DUDE_MigrateLegacyConfig(const char *newDir, const char *legacyDir) {
+	struct stat st;
+	if (stat(newDir, &st) == 0)
+		return; // already migrated (or fresh dir created previously)
+	if (stat(legacyDir, &st) != 0 || !S_ISDIR(st.st_mode))
+		return; // nothing to migrate
+
+	common->Printf("DUDE: migrating config from '%s' to '%s'\n", legacyDir, newDir);
+	DUDE_CopyDirRecursive(legacyDir, newDir);
+}
+
 bool Sys_GetPath(sysPath_t type, idStr &path) {
 	const char *s;
 	char buf[MAX_OSPATH];
@@ -208,14 +294,31 @@ bool Sys_GetPath(sysPath_t type, idStr &path) {
 			if (stat(testPath.c_str(), &st) != -1 && S_ISDIR(st.st_mode)) {
 				common->Warning("using path of executable: %s", path.c_str());
 				return true;
-			} else {
-				idStr testPath = path + "/demo/demo00.pk4";
-				if(stat(testPath.c_str(), &st) != -1 && S_ISREG(st.st_mode)) {
-					common->Warning("using path of executable (seems to contain demo game data): %s", path.c_str());
-					return true;
-				} else {
-					path.Clear();
-				}
+			}
+			testPath = path + "/demo/demo00.pk4";
+			if (stat(testPath.c_str(), &st) != -1 && S_ISREG(st.st_mode)) {
+				common->Warning("using path of executable (seems to contain demo game data): %s", path.c_str());
+				return true;
+			}
+			// DUDE: one level up from the executable — the repo/portable
+			// layout keeps the binary in build/ (or bin/) with the game data
+			// in a sibling base/, so build/dude finds ../base from any cwd.
+			path.StripFilename();
+			testPath = path + "/" BASE_GAMEDIR;
+			if (path.Length() && stat(testPath.c_str(), &st) != -1 && S_ISDIR(st.st_mode)) {
+				common->Warning("using parent of executable path: %s", path.c_str());
+				return true;
+			}
+			path.Clear();
+		}
+
+		// DUDE: current working directory (unzip-and-run portable installs)
+		if (getcwd(buf, sizeof(buf))) {
+			idStr testPath = idStr(buf) + "/" BASE_GAMEDIR;
+			if (stat(testPath.c_str(), &st) != -1 && S_ISDIR(st.st_mode)) {
+				common->Warning("using current working directory: %s", buf);
+				path = buf;
+				return true;
 			}
 		}
 
@@ -230,14 +333,22 @@ bool Sys_GetPath(sysPath_t type, idStr &path) {
 		return false;
 
 	case PATH_CONFIG:
+	{
+		char legacy[MAX_OSPATH];
 		s = getenv("XDG_CONFIG_HOME");
-		if (s)
-			idStr::snPrintf(buf, sizeof(buf), "%s/dhewm3", s);
-		else
-			idStr::snPrintf(buf, sizeof(buf), "%s/.config/dhewm3", getenv("HOME"));
+		if (s) {
+			idStr::snPrintf(buf, sizeof(buf), "%s/dude", s);
+			idStr::snPrintf(legacy, sizeof(legacy), "%s/dhewm3", s);
+		} else {
+			idStr::snPrintf(buf, sizeof(buf), "%s/.config/dude", getenv("HOME"));
+			idStr::snPrintf(legacy, sizeof(legacy), "%s/.config/dhewm3", getenv("HOME"));
+		}
+
+		DUDE_MigrateLegacyConfig(buf, legacy);
 
 		path = buf;
 		return true;
+	}
 
 	case PATH_SAVE:
 		if(save_path[0] != '\0') {

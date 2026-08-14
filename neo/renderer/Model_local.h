@@ -154,6 +154,10 @@ public:
 	int							NumWeights( void ) const;
 
 private:
+	// DUDE tessellation (docs/tessellation.md): mark the source verts that sit on a UV
+	// seam so the displacement stage can pin them. Writes color[3] only.
+	void						StampTessSeamMask( idDrawVert *verts ) const;
+
 	idList<idVec2>				texCoords;			// texture coordinates
 	int							numWeights;			// number of weights
 	idVec4 *					scaledWeights;		// joint weights
@@ -162,6 +166,64 @@ private:
 	int							numTris;			// number of triangles
 	struct deformInfo_s *		deformInfo;			// used to create srfTriangles_t from base frames and new vertexes
 	int							surfaceNum;			// number of the static surface created for this mesh
+
+	// --- Phase 2 GPU MD5 skinning (docs/gpu-offload-plan.md; Vulkan only, opt-in r_gpuSkinning) ---
+	// Bind-pose data the compute kernel needs but the stock CPU path frees. Built once at load
+	// (BuildGpuSkinData) when the active backend is Vulkan. The kernel does full linear-blend
+	// skinning of position AND the TBN (option B): each output vertex walks an EXPANDED weight
+	// stream (source verts [0,numSourceVerts), then mirror-seam duplicates, each carrying its
+	// OWN per-weight joint-local N/T0/T1 so mirror handedness is preserved). Retained CPU-side
+	// so the wire-in can upload per-mesh static SSBOs. NULL when not built.
+	int							numOutputVerts;		// deformInfo->numOutputVerts, cached
+	int							skinExpandCount;	// total entries in the expanded weight stream (E)
+	unsigned int *				skinWeightStart;	// [numOutputVerts] each vert's first entry in the expanded stream
+	idVec4 *					skinExpandWeights;	// [E] scaledWeights, replicated per output vert (mirror-safe)
+	int *						skinExpandWDesc;	// [E*2] {joint*12 float base, terminator flag}
+	idVec4 *					skinExpandLocalTBN;	// [E*3] joint-local bind N,T0,T1 for the OWNING output vert
+	idDrawVert *				skinTemplate;		// [numOutputVerts] static st/color the kernel preserves
+
+
+	// per-mesh static SSBOs (rhi::BufferHandle; 0 = not uploaded), shared by all entities using
+	// this model, uploaded once on the first GPU skin. The per-entity output + joints buffers
+	// live elsewhere (the srfTriangles_t / the per-frame skin job).
+	unsigned int				skinGpuWeights;
+	unsigned int				skinGpuWDesc;
+	unsigned int				skinGpuWStart;
+	unsigned int				skinGpuLocalTBN;
+
+	void						BuildGpuSkinData( const idJointMat *bindJoints );
+	void						FreeGpuSkinData( void );
+	bool						EnsureSkinBuffersUploaded( void );
+	void						GpuSkinValidate( const idJointMat *entJoints, const struct srfTriangles_s *cpuRef );
+
+	// --- Roadmap B: compute "deform once, draw everywhere" tessellation (docs/tessellation.md,
+	// docs/gpu-offload-plan.md; Vulkan only, opt-in r_tessDeform). Instead of re-running PN +
+	// displacement in every depth-EQUAL pass via fixed-function .tesc/.tese, bake a STATIC uniform
+	// subdivision topology once at load, then a compute kernel evaluates PN + displacement into one
+	// expanded buffer that every pass draws. The bake is uniform level L == equal_spacing (bit-exact
+	// to the shipping fractional_odd only for odd L; default r_tessLevel 5 is odd). Per source
+	// triangle it emits either the full (L+1)(L+2)/2-vertex / L*L-triangle grid or, when every
+	// bind-pose edge is below r_tessMinEdge, a single undivided triangle (crack-free needs
+	// all-three-below, not any-below). NULL when not built. B-1 is validate-only (no draw). ---
+	int							numTessOutVerts;	// generated vertices across all source triangles
+	int							numTessOutTris;		// generated triangles (expanded index count = *3)
+	int							tessBakeLevel;		// L this bake used (rebuild on r_tessLevel change)
+	float						tessBakeMinEdge;	// r_tessMinEdge this bake used (rebuild on change)
+	idVec4 *					tessBarySeam;		// [numTessOutVerts] (bary u,v,w in xyz; seam mask in w)
+	int *						tessSrcTri;			// [numTessOutVerts*3] the 3 source-corner output-vert indices
+	float *						tessHeight;			// [numTessOutVerts] CPU-sampled displacement relief scalar (pre-strength)
+	glIndex_t *					tessExpandIndexes;	// [numTessOutTris*3] expanded 32-bit index list (B-2 draw)
+
+	// per-mesh static SSBOs (rhi::BufferHandle; 0 = not uploaded), shared by all entities using this
+	// model; the per-frame source-vert + output buffers live per-surface / in the validate harness.
+	unsigned int				tessGpuBarySeam;
+	unsigned int				tessGpuSrcTri;
+	unsigned int				tessGpuHeight;
+
+	void						BuildTessTopology( const idJointMat *bindJoints );
+	void						FreeTessData( void );
+	bool						EnsureTessBuffersUploaded( void );
+	void						TessDeformValidate( const struct srfTriangles_s *cpuRef );
 
 	void						TransformVerts( idDrawVert *verts, const idJointMat *joints );
 	void						TransformScaledVerts( idDrawVert *verts, const idJointMat *joints, float scale );

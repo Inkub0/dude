@@ -10,6 +10,8 @@
 // u_localParam0.z = grain time/seed (seconds)
 // u_localParam0.w = chromatic aberration strength; 0 = off
 // u_localParam1.x = grain cell size in pixels (1 = per-pixel, ~1.5-2 = filmic clumps)
+// u_localParam1.y = r_brightness (1 = identity)
+// u_localParam1.z = 1.0 / r_gamma (1 = identity)
 // u_windowCoord.zw = aberration center in uv (0.5, 0.5)
 
 #include "renderparms.glsl"
@@ -57,6 +59,15 @@ void main() {
 		float l = clamp( dot( color, vec3( 0.299, 0.587, 0.114 ) ), 0.0, 1.0 );
 		float response = 2.18 * sqrt( l ) * pow( 1.0 - l, 1.5 );
 		color += noise * u_localParam0.y * response;
+	}
+
+	// gamma / brightness. On Vulkan the r_gammaInShader correction is folded in here
+	// (the backend has no separate LDR gamma tail); GL passes identity and keeps its
+	// standalone gammabrightness pass, so this is an exact passthrough there. Matches
+	// R_SetColorMappings: out = pow( clamp( color * brightness, 0, 1 ), 1/gamma ).
+	if ( u_localParam1.y != 1.0 || u_localParam1.z != 1.0 ) {
+		color = clamp( color * u_localParam1.y, 0.0, 1.0 );
+		color = pow( color, vec3( u_localParam1.z ) );
 	}
 
 	fragColor = vec4( color, 1.0 );

@@ -95,11 +95,30 @@ re-renders it when the light or one of its shadow casters moves:
 - Per-frame **token** = hash of the light pose + every caster's
   entity/modelMatrix/geometry pointer/index count/vertex-cache handle. Token match →
   skip the render, sample the stored cube.
-- Lights with an **animated** caster (non-`DM_STATIC`) skip the cache (they'd never
-  hit) and use the scratch pool.
+- **Per-face invalidation** (`r_shadowMapCachePerFace`, default 1, *lever A*): on a warm
+  miss (a mover changed the token but the light itself is cached), re-render only the
+  cube faces the mover actually crossed — `RB_RHI_CubeFaceTokens` hashes each caster
+  into the faces it rasterizes into using the same allow + `R_CullLocalBox` test as the
+  render, so a face token can never miss a caster the render would draw there. Clean
+  faces keep their cached depth. Fidelity-identical; ~3× fewer faces on a debris storm.
+- **Static/dynamic split** (`r_shadowMapCacheSplit`, default 1, *lever B*): a light with
+  an **animated** caster (non-`DM_STATIC` — a monster) no longer bypasses the cache.
+  Its **static** (world) casters render into the cached cube (token folds static casters
+  only, so a mover walking past never invalidates it) and its **movers** render every
+  frame into a small per-frame scratch cube on unit 12 (`u_shadowCubeDyn`). The
+  interaction shader samples `min(u_shadowCube, u_shadowCubeDyn)` — the nearest occluder
+  across both layers is identical to one combined cube. `RB_RHI_CasterIsDynamic` is the
+  single classifier shared by the token static-fold and the `CF_STATIC`/`CF_DYNAMIC`
+  render filter, so they can't disagree. No new persistent RTs (reuses the per-tier cube
+  scratch pool). `r_shadowMapCacheSplit 0` → the old whole-cube-on-scratch path. When the
+  split is off, or the static layer can't fit the VRAM budget, such a light falls back to
+  that scratch path exactly as before.
 - **VRAM-bounded:** `r_shadowMapCacheMB` (`-1` = auto, half of detected video memory
   via `GL_NVX_gpu_memory_info` / `GL_ATI_meminfo`; `0` = unlimited). LRU eviction by
   last-seen frame.
+- **Diagnostics:** `r_shadowMapCacheDebug 1` prints a once/sec `cubeCache/s` line: hit
+  rate + re-renders split by cause (cold / warm-caster / warm-light) + faces rasterized +
+  `split` (lights kept cached via lever B) / scratch / dynamic / deferred / evict.
 - **Teardown:** `RB_RHI_FreeShadowCubeCache()` (called from
   `idRenderWorldLocal::FreeDefs`) drops the whole cache on world teardown / map reload,
   because cached cubes are keyed to light indices that `FreeDefs` frees — otherwise a
@@ -196,7 +215,10 @@ immediately. See also the private design note `emissive-gui-lights` in the agent
 | `r_shadowMapSizeScaleRadius` | 380 | 16–8192 | radius that maps to base resolution |
 | `r_shadowMapFaceCull` | 1 | 0/1 | cull cube faces outside the view frustum |
 | `r_shadowMapCache` | 1 | 0/1 | cache static point-light cubes across frames |
+| `r_shadowMapCachePerFace` | 1 | 0/1 | warm miss re-renders only the faces a mover crossed (lever A) |
+| `r_shadowMapCacheSplit` | 1 | 0/1 | moving-caster light: cache the static cube + a per-frame movers cube (lever B) |
 | `r_shadowMapCacheMB` | -1 | -1–32768 | cache VRAM budget; -1 = auto (½ VRAM), 0 = unlimited |
+| `r_shadowMapCacheDebug` | 0 | 0/1 | once/sec cube-cache breakdown (hit rate + re-render causes) |
 | `r_shadowMapBias` | 0.0025 | 0–0.5 | depth bias, world/perforated receivers |
 | `r_shadowMapModelBias` | 0.005 | 0–0.5 | depth bias, model receivers |
 | `r_shadowMapFlashlightBias` | 0.001 | 0–0.5 | depth bias, player flashlight (overrides the two above) |

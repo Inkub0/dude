@@ -32,6 +32,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/Session.h"
 
 #include "framework/CVarSystem.h"
+#include "framework/ModCvarTranslation.h"
 
 idCVar * idCVar::staticVars = NULL;
 
@@ -525,6 +526,11 @@ idCVarSystemLocal::FindInternal
 ============
 */
 idInternalCVar *idCVarSystemLocal::FindInternal( const char *name ) const {
+	// DUDE: mod compatibility shim — redirect known mod-side cvar names to their
+	// DUDE equivalents transparently (single hook covers Find/Set/Get). No-op
+	// unless a matching mod is active AND fs_modCompatShim is on.
+	name = ModCompat::ResolveAlias( name );
+
 	int hash = cvarHash.GenerateKey( name, false );
 	for ( int i = cvarHash.First( hash ); i != -1; i = cvarHash.Next( i ) ) {
 		if ( cvars[i]->nameString.Icmp( name ) == 0 ) {

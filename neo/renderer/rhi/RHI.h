@@ -27,16 +27,28 @@ typedef unsigned int ShaderHandle;		// linked vert+frag program pair
 typedef unsigned int RenderTargetHandle;	// offscreen FBO; 0 = the backbuffer
 
 enum BufferUsage {
-	BU_VERTEX,
+	BU_VERTEX,		// must stay 0 (the VK backend's switch default)
 	BU_INDEX,
-	BU_UNIFORM		// per-draw ring slices (RenderParams / ArbParams)
+	BU_UNIFORM,		// per-draw ring slices (RenderParams / ArbParams)
+	BU_STORAGE,		// GPU compute storage buffer (SSBO). VK only; GL 3.3 has no compute.
+					// Phase 1: host-visible (BAR), read back via ReadBuffer; a device-local
+					// staged variant is a Phase-2 follow-up (docs/gpu-offload-plan.md).
+					// Also carries INDIRECT usage so a compute pass can write a
+					// VkDrawIndexedIndirectCommand[] here for DrawIndexedIndirect (Phase 3 seed).
+	BU_SKIN			// dual-usage STORAGE|VERTEX buffer: written by the skinning compute
+					// kernel, then bound as a vertex buffer by the draw passes (Phase 2
+					// GPU MD5 skinning). VK only; the single hard prereq tessellation
+					// composition needs (the tesc/tese read it as ordinary vertex input).
+					// Host-visible+mapped for now (lets CreateBuffer pre-fill the static
+					// st/color fields the kernel leaves alone); device-local is a follow-up.
 };
 
 enum ImageFormat {
 	IF_RGBA8,
 	IF_DEPTH24_STENCIL8,	// backend may substitute D32S8
 	IF_RGBA16F,				// Tier-3 HDR target (post stack)
-	IF_DEPTH24				// depth-only; shadow-map target, sampler2DShadow-ready
+	IF_DEPTH24,				// depth-only; shadow-map target, sampler2DShadow-ready
+	IF_R16F					// single-channel half-float; SSAO linear-depth mip (Phase 2)
 };
 
 enum VertexLayout {
@@ -80,6 +92,12 @@ struct PipelineDesc {
 	// Vulkan backend reads it (bakes topology into the pipeline); GL3 passes
 	// primMode straight to glDrawArrays and ignores this.
 	int				topology = -1;
+	// DUDE tessellation (docs/tessellation.md): route this draw through the
+	// bound shader's tessellation-control/eval stages (patch-list topology, PN
+	// smoothing of enemy/prop meshes). Requires the shader to have a tess variant
+	// loaded and the device to support tessellation. Ignored by the GL3 backend
+	// (its GL 3.3 core context has no tessellation stages).
+	bool			tessellate = false;
 };
 
 struct DrawArgs {
@@ -95,12 +113,29 @@ struct DrawArgs {
 	SamplerHandle	samplers[8];
 	ImageHandle		shadowCube;		// point-light cube depth map; bound to unit 8
 									// as a GL_TEXTURE_CUBE_MAP (0 = unbound)
+	ImageHandle		ssao;			// SSAO/GTAO buffer; bound to unit 9 (0 = unbound)
+	ImageHandle		occlusion;		// baked occlusion map; bound to unit 10 (0 = unbound)
+	ImageHandle		parallax;		// parallax height map; bound to unit 11 (0 = unbound)
+	ImageHandle		shadowCubeDyn;	// static/dynamic split (lever B): movers-only cube depth; bound to unit 12 (0 = unbound)
 };
 
 struct ClearArgs {
 	bool	color, depth, stencil;
 	float	rgba[4];
 	unsigned char stencilValue;
+};
+
+// A GPU compute dispatch (docs/gpu-offload-plan.md Phase 1). The foundational
+// primitive later phases build GPU skinning / culling on. Vulkan only — the GL3
+// backend (GL 3.3 core, no compute) no-ops it. storage[] binds BU_STORAGE buffers
+// to std430 bindings 0..7; a small pushConstants blob carries params (element
+// counts etc.); groups* are the work-group counts. Recorded outside any render pass.
+struct ComputeArgs {
+	ShaderHandle	shader;				// from CreateComputeShader (0 = skip, no-op)
+	BufferHandle	storage[8];			// storage-buffer bindings 0..7 (0 = unbound)
+	const void *	pushConstants;		// params bound at push-constant offset 0 (NULL = none)
+	int				pushConstantSize;	// bytes, <= 128
+	unsigned int	groupsX, groupsY, groupsZ;
 };
 
 class RHI {
@@ -144,6 +179,12 @@ public:
 	virtual BufferHandle	CreateBuffer( BufferUsage usage, int size, const void *data ) = 0;
 	virtual void			UpdateBuffer( BufferHandle b, int offset, int size, const void *data ) = 0;
 	virtual void			DestroyBuffer( BufferHandle b ) = 0;
+	// Synchronous read-back of a buffer's contents into dst (GPU compute output;
+	// docs/gpu-offload-plan.md Phase 1). Stalls, so a dev/validation path — not a
+	// per-frame call. Backends without a compute lane return false. VK: memcpy of the
+	// host-visible BU_STORAGE mapping after a queue idle (device-local staging is a
+	// Phase-2 extension).
+	virtual bool			ReadBuffer( BufferHandle b, void *dst, int size ) { return false; }
 	virtual ImageHandle		CreateImage( ImageFormat fmt, int w, int h, const void *pixels ) = 0;
 	virtual void			DestroyImage( ImageHandle i ) = 0;
 
@@ -166,6 +207,21 @@ public:
 
 	virtual ShaderHandle	LoadShader( const char *name ) = 0;	// loads name.vert/.frag via VFS
 
+	// Compile a transpiled vertex+fragment GLSL body pair (as emitted by
+	// arb::ToGlsl — no #version/prelude line) into a linked program, cached by
+	// name. GL3 compiles through the driver (GL3_FindProgramFromSource); Vulkan
+	// through shaderc when built with DUDE_HAVE_SHADERC. Returns 0 when the
+	// backend has no runtime compiler (Vulkan without shaderc), so the caller
+	// degrades the stage. Used for custom (mod) ARB material stages the offline
+	// builtin table doesn't cover.
+	virtual ShaderHandle	CreateShaderFromGlsl( const char *name, const char *vertSrc, const char *fragSrc ) { return 0; }
+
+	// Compile a standalone compute-shader GLSL source (its own #version, no graphics
+	// prelude) into a compute pipeline, cached by name. Returns a ShaderHandle usable
+	// as ComputeArgs::shader. Backends without a compute lane (GL 3.3) return 0.
+	// docs/gpu-offload-plan.md Phase 1.
+	virtual ShaderHandle	CreateComputeShader( const char *name, const char *glslSrc ) { return 0; }
+
 	// ---- offscreen render targets (Phase 3.5 shadow maps; Phase 11 post stack) ----
 	// Create an offscreen target and its backing texture. A depth format makes a
 	// depth-only target (no color attachment) suitable for shadow maps, sampled
@@ -186,6 +242,22 @@ public:
 	// for the HDR scene buffer: an offscreen geometry pass that needs stencil (stencil
 	// shadows) and a sampleable float color. GetRenderTargetImage returns the color. 0 on failure.
 	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h ) = 0;
+	// Color target with a render-generated mip chain (SSAO Phase 1 prefiltered depth,
+	// docs/ssao-perf-optimization.md): a single mipLevels-deep color image whose level 0
+	// is rendered by a fullscreen pass (BeginTargetPass renders into level 0) and whose
+	// coarser levels are filled by a custom downsample shader — BeginTargetMipPass(level)
+	// renders into a chosen level while GetRenderTargetMipImage(level-1) supplies the
+	// source. The whole chain is sampleable through GetRenderTargetImage() with an
+	// explicit textureLod (a mip-spanning sampler). Default returns 0 so a backend
+	// without the capability degrades to the non-mipped path.
+	virtual RenderTargetHandle	CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels ) { return 0; }
+	// Begin a fullscreen pass rendering into a specific mip LEVEL of a mipped target
+	// (level 1..mipLevels-1; level 0 uses BeginTargetPass). Paired with EndPass.
+	virtual void				BeginTargetMipPass( RenderTargetHandle rt, int mipLevel, const ClearArgs *clear ) {}
+	// A sampleable ImageHandle for one mip level, to feed as the downsample input. On
+	// Vulkan this is a single-level view (sample it with texelFetch lod 0); on GL3 it is
+	// the whole texture (sample level `mipLevel` with texelFetch). 0 if not mipped.
+	virtual ImageHandle			GetRenderTargetMipImage( RenderTargetHandle rt, int mipLevel ) { return 0; }
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt ) = 0;
 	// Route the whole frame into an offscreen target (the HDR scene buffer): BeginPass
 	// clears into it and EndPass returns to it after nested target passes (shadow maps,
@@ -194,6 +266,16 @@ public:
 	// begin a pass into one face (0..5 = +X,-X,+Y,-Y,+Z,-Z) of a cube target.
 	// EndPass restores the backbuffer + viewport exactly like BeginTargetPass.
 	virtual void				BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear ) = 0;
+	// SSAO normal-pass merge (docs/ssao-normal-merge.md): begin a prepass that renders
+	// the normal G-buffer into a dedicated color image while sharing the *scene* depth
+	// (FrameDepthImage), so the depth prepass geometry produces the normal in one pass
+	// instead of a second opaque submission. Returns a RenderTargetHandle whose
+	// GetRenderTargetImage is the normal (bind it like the standalone rhiNormalRT), or 0
+	// where unsupported (GL3) so the caller runs the standalone pass. wantMrt adds a
+	// second color attachment (SSR roughness/metalness, GetRenderTargetImage2) so the
+	// merge also serves SSR; the pass then carries {normal, mat} + shared scene depth.
+	// End with EndPass. Vulkan-only; the default is a no-op returning 0.
+	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt = false ) { return 0; }
 	// the target's texture as a sampleable image handle — the same ImageHandle
 	// abstraction future material textures will use (Phase 4 image ownership).
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt ) = 0;
@@ -220,6 +302,31 @@ public:
 	virtual void	BindPipeline( const PipelineDesc &desc ) = 0;
 	virtual void	Draw( const DrawArgs &args ) = 0;
 
+	// GPU-driven indirect indexed draw (docs/gpu-offload-plan.md Phase 3, the seed
+	// primitive). Binds the SAME pipeline / vertex+index / uniform / textures as
+	// Draw(args) — args.indexCount/firstIndex are ignored — then issues the draw(s)
+	// from a GPU-resident VkDrawIndexedIndirectCommand[] living in `argsBuffer` (a
+	// BU_STORAGE buffer, which also carries INDIRECT usage) at byte `argsOffset`:
+	// `drawCount` commands, `stride` bytes apart. When `countBuffer` is nonzero the
+	// live draw count is read from it at `countOffset` (a GPU-written count, clamped
+	// to drawCount) via vkCmdDrawIndexedIndirectCount — the form GPU culling will use
+	// once a compute pass compacts the visible commands. Vulkan only; GL3 (GL 3.3, no
+	// indirect draw) no-ops. All commands share the one bound vertex/index buffer, so
+	// multi-draw (drawCount>1) needs a single GPU-resident geometry buffer (Phase 3).
+	virtual void	DrawIndexedIndirect( const DrawArgs &args, BufferHandle argsBuffer, int argsOffset,
+	                                     int drawCount, int stride,
+	                                     BufferHandle countBuffer = 0, int countOffset = 0 ) {}
+
+	// ---- compute (docs/gpu-offload-plan.md Phase 1) ----
+	// Record a GPU compute dispatch (see ComputeArgs). Vulkan records it on the frame
+	// command buffer outside any render pass; the GL3 backend (no compute) no-ops.
+	// The foundational primitive for CPU->GPU offload (skinning / culling).
+	virtual void	Dispatch( const ComputeArgs &args ) {}
+	// Like Dispatch but on a dedicated command buffer, submitted and WAITED ON (synchronous),
+	// so the result is ready for a ReadBuffer immediately. For dev/validation and load-time
+	// GPU work; stalls the GPU, so never per-frame. GL3 no-ops.
+	virtual void	DispatchSync( const ComputeArgs &args ) {}
+
 	// ---- screen copies (_currentRender / _currentDepth / _scratch, Phase 4 M5) ----
 	// The GL3 backend keeps the literal qglCopyTexSubImage2D path in idImage
 	// (default no-ops here); the Vulkan backend implements captures as copies
@@ -227,8 +334,11 @@ public:
 	//
 	// CreateCaptureImage allocates a sampleable copy target: RGBA8 color
 	// (linear, clamp-to-edge — the capture filtering GL sets) or the scene's
-	// depth format (nearest). Contents are undefined until the first copy.
-	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth ) { return 0; }
+	// depth format (nearest). hdrFloat makes the color target RGBA16F so an HDR
+	// frame's capture (glass refraction / heat haze) keeps the un-clamped scene
+	// instead of an 8-bit copy — mirrors GL3's GL_RGBA16F _currentRender in HDR.
+	// Contents are undefined until the first copy.
+	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth, bool hdrFloat = false ) { return 0; }
 	// Copy a framebuffer rect into a capture image. src rect is in GL window
 	// coordinates (origin bottom-left, like qglCopyTexSubImage2D); dst is in
 	// texel rows from the start of the image. Color copies convert to GL's

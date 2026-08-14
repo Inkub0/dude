@@ -27,6 +27,7 @@ If you have questions concerning this license or the applicable additional terms
 */
 
 #include "sys/platform.h"
+#include "idlib/containers/HashTable.h"	// DUDE: parallax height source table
 #include "renderer/tr_local.h"
 
 #include "renderer/Image.h"
@@ -634,4 +635,204 @@ const char *R_ParsePastImageProgram( idLexer &src ) {
 	parseBuffer[0] = 0;
 	R_ParseImageProgram_r( src, NULL, NULL, NULL, NULL, NULL );
 	return parseBuffer;
+}
+
+/*
+===============================================================================
+
+	DUDE: parallax height maps from normal maps (docs/parallax.md)
+
+	Doom 3 keeps its fine surface detail in the *normal* map (the `_local`
+	component of `addnormals(...)`), not in the coarse `_h` height source. To
+	make parallax occlusion mapping follow the detail the player actually sees
+	(the same map SSAO shows), recover a scalar height field by inverting the
+	R_HeightmapToNormalMap stencil above and marching that instead.
+
+===============================================================================
+*/
+
+// name (the generated image) -> source bump image program, so the generator can
+// re-load the normal map when the image is (re)built (level load, vid_restart).
+static idHashTable<idStr>	r_parallaxSources;
+
+/*
+===============
+R_BoxBlurAxis
+
+Separable box blur of a float plane along one axis, via a running sum, with
+WRAP-AROUND edges (the height field tiles, so the low-pass must too, else the
+high-pass leaves a seam at the texture border). radius texels each side.
+===============
+*/
+static void R_BoxBlurAxis( float *buf, float *tmp, int width, int height, int radius, bool horizontal ) {
+	const int major = horizontal ? height : width;		// lines to sweep
+	const int minor = horizontal ? width : height;		// length of each line
+	const int step  = horizontal ? 1 : width;			// stride within a line
+	const float inv = 1.0f / ( 2 * radius + 1 );
+	for ( int m = 0; m < major; m++ ) {
+		const int base = horizontal ? m * width : m;
+		// initial window sum [-radius, radius], wrapped
+		float sum = 0.0f;
+		for ( int k = -radius; k <= radius; k++ ) {
+			int idx = ( ( k % minor ) + minor ) % minor;
+			sum += buf[ base + idx * step ];
+		}
+		for ( int i = 0; i < minor; i++ ) {
+			tmp[ base + i * step ] = sum * inv;
+			int add = ( ( ( i + radius + 1 ) % minor ) + minor ) % minor;
+			int sub = ( ( ( i - radius ) % minor ) + minor ) % minor;
+			sum += buf[ base + add * step ] - buf[ base + sub * step ];
+		}
+	}
+	memcpy( buf, tmp, width * height * sizeof( float ) );
+}
+
+/*
+===============
+R_NormalMapToHeightMap
+
+Invert R_HeightmapToNormalMap: recover a height field from a tangent-space normal
+map. Per texel the surface slope is sx = -nx/nz, sy = -ny/nz (the inverse of the
+forward stencil). Rather than a cheap directional integration -- which streaks
+along the integration axis and does not tile -- solve the Poisson equation
+laplacian(H) = div(slope) by Jacobi relaxation with WRAP-AROUND boundaries: the
+result is isotropic (no streaks) and seamless (tiles), which matters because
+self-shadowing turns any height step at a tile seam into a dark line. A high-pass
+(wrap-aware box blur, subtracted) then keeps only local relief -- the low
+frequencies the relaxation hasn't resolved are exactly what we discard anyway, so
+a modest iteration count suffices. Overwrites data[] with grayscale height (a=255).
+===============
+*/
+static void R_NormalMapToHeightMap( byte *data, int width, int height ) {
+	const int n = width * height;
+	float *f   = (float *)R_StaticAlloc( n * sizeof( float ) );	// divergence of the slope field
+	float *h   = (float *)R_StaticAlloc( n * sizeof( float ) );	// solution (ping)
+	float *h2  = (float *)R_StaticAlloc( n * sizeof( float ) );	// solution (pong)
+
+	// slope divergence f = d(sx)/dx + d(sy)/dy, backward differences, wrapped. sx,sy are
+	// recomputed on the fly from the normal (sx = -nx/nz, sy = -ny/nz) to avoid two more
+	// full-size buffers.
+	#define PX_SLOPE_X( px ) ( -( ( data[(px)*4+0] - 128 ) / 127.0f ) / PX_NZ(px) )
+	#define PX_SLOPE_Y( px ) ( -( ( data[(px)*4+1] - 128 ) / 127.0f ) / PX_NZ(px) )
+	#define PX_NZ( px ) ( ( ( data[(px)*4+2] - 128 ) / 127.0f ) < 0.05f ? 0.05f : ( ( data[(px)*4+2] - 128 ) / 127.0f ) )
+	for ( int i = 0; i < height; i++ ) {
+		const int iu = ( ( i - 1 + height ) % height ) * width;
+		const int ic = i * width;
+		for ( int j = 0; j < width; j++ ) {
+			const int jl = ( j - 1 + width ) % width;
+			int p = ic + j;
+			f[p] = ( PX_SLOPE_X( p ) - PX_SLOPE_X( ic + jl ) )
+			     + ( PX_SLOPE_Y( p ) - PX_SLOPE_Y( iu + j ) );
+			h[p] = 0.0f;
+		}
+	}
+	#undef PX_SLOPE_X
+	#undef PX_SLOPE_Y
+	#undef PX_NZ
+
+	// Jacobi: H[p] = ( sum of 4 wrapped neighbours - f[p] ) / 4. High frequencies converge
+	// in a handful of sweeps; the low frequencies (slow to converge) are high-passed out.
+	const int iterations = 64;
+	for ( int it = 0; it < iterations; it++ ) {
+		for ( int i = 0; i < height; i++ ) {
+			const int ic = i * width;
+			const int iu = ( ( i - 1 + height ) % height ) * width;
+			const int id = ( ( i + 1 ) % height ) * width;
+			for ( int j = 0; j < width; j++ ) {
+				const int jl = ( j - 1 + width ) % width;
+				const int jr = ( j + 1 ) % width;
+				h2[ ic + j ] = 0.25f * ( h[ ic + jl ] + h[ ic + jr ] + h[ iu + j ] + h[ id + j ] - f[ ic + j ] );
+			}
+		}
+		float *sw = h; h = h2; h2 = sw;
+	}
+	R_StaticFree( f );
+
+	// high-pass: subtract a large wrap-aware box blur (two passes ~ Gaussian). Radius ~1/6
+	// of the smaller dimension keeps panel-scale relief while dropping the low frequencies.
+	int radius = ( width < height ? width : height ) / 6;
+	if ( radius < 1 ) { radius = 1; }
+	float *low = h2;					// reuse the pong buffer for the low-pass
+	memcpy( low, h, n * sizeof( float ) );
+	float *scratch = (float *)R_StaticAlloc( n * sizeof( float ) );
+	for ( int pass = 0; pass < 2; pass++ ) {
+		R_BoxBlurAxis( low, scratch, width, height, radius, true );
+		R_BoxBlurAxis( low, scratch, width, height, radius, false );
+	}
+	R_StaticFree( scratch );
+
+	// H = local relief; find range for normalization
+	float mn = 1e30f, mx = -1e30f;
+	for ( int i = 0; i < n; i++ ) {
+		h[i] -= low[i];
+		if ( h[i] < mn ) { mn = h[i]; }
+		if ( h[i] > mx ) { mx = h[i]; }
+	}
+	float range = mx - mn;
+	if ( range < 1e-5f ) { range = 1.0f; }
+
+	for ( int i = 0; i < n; i++ ) {
+		int v = (int)( ( h[i] - mn ) / range * 255.0f + 0.5f );
+		v = v < 0 ? 0 : ( v > 255 ? 255 : v );
+		data[ i*4 + 0 ] = data[ i*4 + 1 ] = data[ i*4 + 2 ] = (byte)v;
+		data[ i*4 + 3 ] = 255;
+	}
+
+	R_StaticFree( h2 );
+	R_StaticFree( h );
+}
+
+/*
+===============
+R_ParallaxHeightImage
+
+Generator: load the source bump program's *combined* normal map and convert it to
+a height field (docs/parallax.md). Re-runs on level load / vid_restart like any
+other generated image. Falls back to a flat mid-gray (no relief) if the source is
+unknown or fails to load.
+===============
+*/
+static void R_ParallaxHeightImage( idImage *image ) {
+	idStr *bumpProgram = NULL;
+	byte  *pic = NULL;
+	int    w = 0, hgt = 0;
+
+	if ( r_parallaxSources.Get( image->imgName, &bumpProgram ) && bumpProgram ) {
+		R_LoadImageProgram( bumpProgram->c_str(), &pic, &w, &hgt, NULL, NULL );
+	}
+
+	if ( !pic ) {
+		// flat height: parallax offset collapses to zero
+		byte flat[4] = { 128, 128, 128, 255 };
+		image->GenerateImage( flat, 1, 1, TF_DEFAULT, true, TR_REPEAT, TD_HIGH_QUALITY );
+		return;
+	}
+
+	R_NormalMapToHeightMap( pic, w, hgt );
+	image->GenerateImage( pic, w, hgt, TF_DEFAULT, true, TR_REPEAT, TD_HIGH_QUALITY );
+	R_StaticFree( pic );
+}
+
+/*
+===============
+R_CreateParallaxHeightImage
+
+Build (or fetch) the parallax height image derived from a bump stage's combined
+normal-map program. Returns NULL if the program is empty. The generated image is
+named with a `_parallaxHeight/` prefix so it never collides with the bump image
+that shares the same underlying program string (docs/parallax.md).
+===============
+*/
+idImage *R_CreateParallaxHeightImage( const char *bumpProgram ) {
+	if ( !bumpProgram || !bumpProgram[0] ) {
+		return NULL;
+	}
+	// Match the normalization ImageFromFunction applies to the name (strips ".tga",
+	// backslashes -> slashes) so the generator's image->imgName lookup key agrees.
+	idStr name = idStr( "_parallaxHeight/" ) + bumpProgram;
+	name.Replace( ".tga", "" );
+	name.BackSlashesToSlashes();
+	idStr source = bumpProgram;
+	r_parallaxSources.Set( name, source );
+	return globalImages->ImageFromFunction( name, R_ParallaxHeightImage );
 }

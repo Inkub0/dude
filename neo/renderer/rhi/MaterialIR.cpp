@@ -29,6 +29,17 @@ namespace rhi {
 static idList<MaterialIR *>	irList;
 static idHashIndex			irHash;
 
+// DUDE golden rule: on Vulkan, prefer the runtime ARB->GLSL->SPIR-V transpiler
+// for stock custom-ARB newStages (heatHaze etc.) over the hand-written builtin
+// shaders. The transpiler is the only path on GL3 (healthy at every preset), is
+// numerically identical to the builtins (crossdiff 120/120), and measured far
+// faster on Vulkan — the heatHaze builtin cost ~44ms GPU vs ~1.78ms transpiled
+// on the same surface. This cvar (default 0) flips back to builtin-first only
+// for debugging / a shaderc-less build; needs a vid_restart (the per-material IR
+// is cached). No effect on GL3.
+idCVar r_arbPreferBuiltin( "r_arbPreferBuiltin", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan: use hand-written builtin shaders for stock custom-ARB stages instead of the (faster) runtime transpiler. 0 = transpiler-first (default), 1 = builtin-first. Needs vid_restart" );
+
 /*
 =============
 IR_TranspileSection
@@ -71,37 +82,28 @@ static bool IR_TranspileSection( const char *fileName, const char *header, std::
 =============
 IR_ResolveCustomArb
 
-vp/fp glprogs file names -> linked GL3 program (cached), 0 on failure.
+vp/fp glprogs file names -> linked program (cached), 0 on failure.
+
+One path for both backends: the ARB assembly is transpiled to backend-neutral
+GLSL (arb::ToGlsl) and handed to the RHI, which compiles it — GL3 through the
+driver, Vulkan through shaderc (DUDE_HAVE_SHADERC). Vulkan without a runtime
+compiler returns 0, and the caller degrades the stage (SK_SKIP).
 =============
 */
 static ShaderHandle IR_ResolveCustomArb( const char *vpFile, const char *fpFile, const char *materialName ) {
 	std::string vertGlsl, fragGlsl;
 	idStr err;
 
-	// DUDE Phase 4 M2: the Vulkan backend has no runtime GLSL→SPIR-V compiler
-	// (SPIR-V is built at build time), so transpiled custom ARB programs can't
-	// be materialized there yet — degrade to the generic stage (the caller's
-	// existing fallback). Runtime shader compilation is planned with the
-	// _currentRender effects (M5).
-	if ( GetActiveBackendType() == BT_VULKAN ) {
-		static bool warned = false;
-		if ( !warned ) {
-			warned = true;
-			common->Printf( "VK IR: custom ARB stages degrade to generic until runtime SPIR-V lands (M5)\n" );
-		}
-		return 0;
-	}
-
 	if ( !IR_TranspileSection( vpFile, "!!ARBvp", vertGlsl, err ) ) {
-		common->Warning( "GL3 IR: %s: vertex program %s: %s", materialName, vpFile, err.c_str() );
+		common->Warning( "IR: %s: vertex program %s: %s", materialName, vpFile, err.c_str() );
 		return 0;
 	}
 	if ( !IR_TranspileSection( fpFile, "!!ARBfp", fragGlsl, err ) ) {
-		common->Warning( "GL3 IR: %s: fragment program %s: %s", materialName, fpFile, err.c_str() );
+		common->Warning( "IR: %s: fragment program %s: %s", materialName, fpFile, err.c_str() );
 		return 0;
 	}
 
-	return GL3_FindProgramFromSource( va( "arb/%s+%s", vpFile, fpFile ), vertGlsl.c_str(), fragGlsl.c_str() );
+	return GetRHI()->CreateShaderFromGlsl( va( "arb/%s+%s", vpFile, fpFile ), vertGlsl.c_str(), fragGlsl.c_str() );
 }
 
 /*
@@ -117,8 +119,19 @@ SPIR-V lands with the d3xp backend flip.
 =============
 */
 static const char *IR_VkBuiltinForArb( const char *vpFile, const char *fpFile ) {
-	if ( vpFile == NULL || fpFile == NULL || idStr::Icmp( vpFile, fpFile ) != 0 ) {
-		return NULL;	// all stock customs pair the same .vfp for both stages
+	if ( vpFile == NULL || fpFile == NULL ) {
+		return NULL;
+	}
+	// Two stock materials (textures/sfx/vppinch_bfgbolt, textures/sfx/vpsphere)
+	// split the pair: the heatHazeWithMaskAndVertex.vfp *vertex* program with
+	// the heatHazeWithMask.vfp *fragment* program. That has its own combined
+	// builtin (maskvertex VS + mask FS, vertex color emitted but unread).
+	if ( idStr::Icmp( vpFile, "heatHazeWithMaskAndVertex.vfp" ) == 0
+	  && idStr::Icmp( fpFile, "heatHazeWithMask.vfp" ) == 0 ) {
+		return "heathaze_maskvertex_mask";
+	}
+	if ( idStr::Icmp( vpFile, fpFile ) != 0 ) {
+		return NULL;	// the remaining stock customs pair the same .vfp for both stages
 	}
 	if ( idStr::Icmp( vpFile, "heatHaze.vfp" ) == 0 ) {
 		return "heathaze";
@@ -170,17 +183,36 @@ static MaterialIR *IR_Build( const idMaterial *material ) {
 				const char *vpFile = R_ARBProgramName( ns->vertexProgram, GL_VERTEX_PROGRAM_ARB );
 				const char *fpFile = R_ARBProgramName( ns->fragmentProgram, GL_FRAGMENT_PROGRAM_ARB );
 				const bool vk = GetActiveBackendType() == BT_VULKAN;
-				const char *builtin = vk ? IR_VkBuiltinForArb( vpFile, fpFile ) : NULL;
 				ShaderHandle prog = 0;
-				if ( builtin != NULL ) {
-					prog = GetRHI()->LoadShader( builtin );
-					if ( prog ) {
-						s.kind = SK_BUILTIN_ARB;
+
+				// Golden rule (see r_arbPreferBuiltin): the runtime transpiler is
+				// the primary path — faster than the Vulkan builtins and the same
+				// path GL3 uses. Builtins are only tried first when explicitly
+				// requested for debugging / a shaderc-less build.
+				if ( vk && r_arbPreferBuiltin.GetBool() ) {
+					const char *builtin = IR_VkBuiltinForArb( vpFile, fpFile );
+					if ( builtin ) {
+						prog = GetRHI()->LoadShader( builtin );
+						if ( prog ) {
+							s.kind = SK_BUILTIN_ARB;
+						}
 					}
-				} else if ( vpFile && fpFile ) {
+				}
+				if ( prog == 0 && vpFile && fpFile ) {
 					prog = IR_ResolveCustomArb( vpFile, fpFile, material->GetName() );
 					if ( prog ) {
 						s.kind = SK_CUSTOM_ARB;
+					}
+				}
+				if ( prog == 0 && vk ) {
+					// transpiler unavailable (no shaderc) or the compile failed —
+					// fall back to the verified builtin if one exists for this pair.
+					const char *builtin = IR_VkBuiltinForArb( vpFile, fpFile );
+					if ( builtin ) {
+						prog = GetRHI()->LoadShader( builtin );
+						if ( prog ) {
+							s.kind = SK_BUILTIN_ARB;
+						}
 					}
 				}
 				if ( prog ) {
@@ -193,10 +225,12 @@ static MaterialIR *IR_Build( const idMaterial *material ) {
 				} else if ( vk ) {
 					// a newStage has no stage image (its textures live in
 					// fragmentProgramImages), so the generic fallback comes out
-					// solid white — skip the stage entirely until runtime
-					// SPIR-V lands (the d3xp flip); invisible beats a white square
+					// solid white — skip the stage entirely. Reached only when
+					// the runtime compiler is unavailable (built without
+					// DUDE_HAVE_SHADERC) or a shaderc compile failed; invisible
+					// beats a white square.
 					s.kind = SK_SKIP;
-					common->Printf( "VK IR: %s: stage %d custom ARB skipped (no builtin translation, runtime SPIR-V pending)\n", material->GetName(), i );
+					common->Printf( "VK IR: %s: stage %d custom ARB skipped (no builtin, runtime compile unavailable/failed)\n", material->GetName(), i );
 				} else {
 					// degrade, don't crash: draw as a plain generic stage
 					common->Printf( "GL3 IR: %s: stage %d custom ARB degraded to generic\n", material->GetName(), i );

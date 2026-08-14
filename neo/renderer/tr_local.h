@@ -584,6 +584,7 @@ typedef struct {
 	int		c_createInteractions;	// number of calls to idInteraction::CreateInteraction
 	int		c_createLightTris;
 	int		c_createShadowVolumes;
+	int		c_shadowVolumesSkipped;	// Phase 0: builds skipped because the light will be shadow-mapped (r_shadowMapSkipStencilBuild)
 	int		c_generateMd5;
 	int		c_entityDefCallbacks;
 	int		c_alloc, c_free;	// counts for R_StaticAllc/R_StaticFree
@@ -886,23 +887,12 @@ bool R_PbrWriteOverrideLine( const idMaterial *mat, float metal, float rough,
 extern idCVar r_pbr;					// GGX interaction path; supersedes r_shading while on
 extern idCVar r_pbrRoughness;			// Phase A global fallback roughness (per-material in Phase B)
 extern idCVar r_pbrSpecScale;			// artistic energy scale on the GGX lobe (1.66 = calibrated look)
-extern idCVar r_pbrMetalMetalness;		// metalness for the bare-metal category (0.8 = a sliver of diffuse)
 extern idCVar r_pbrMetalDiffuse;		// how much albedo colour metals keep (1 = all, 0 = physical kill)
 extern idCVar r_pbrToksvigBase;			// Toksvig variance baseline (anti-firefly vs highlight tightness)
 extern idCVar r_pbrFireflyClamp;		// GGX lobe ceiling (spike suppression / highlight-core cap)
-extern idCVar r_pbrSkinWetness;			// skin+eyes specular boost (sweat/water film; NOT metalness)
-extern idCVar r_pbrSkinRoughness;		// live per-category values (supersede baked table numbers
-extern idCVar r_pbrEyesRoughness;		// for entries tagged with the matching category column;
-extern idCVar r_pbrFleshRoughness;		// hand-authored pbr_overrides.cfg entries always win)
-extern idCVar r_pbrFleshWetness;		// slime/gore film on demons + hell-growth
-extern idCVar r_pbrMetalRoughness;
-extern idCVar r_pbrPaintedRoughness;
-extern idCVar r_pbrPaintedMetalness;
-extern idCVar r_pbrCeramicRoughness;	// ceramic sheen: painted floors + tile, floors and walls
-extern idCVar r_pbrRustRoughness;
-extern idCVar r_pbrRustMetalness;
-extern idCVar r_pbrStoneRoughness;
-extern idCVar r_pbrEnvScale;			// Phase C.1 metal env floor (light-glow reflection stand-in)
+// Per-category defaults (metal/rough/wet/env) live in a table now (Material.cpp,
+// R_PbrCategoryDefaults), persisted as @cat rows in the pbr config — not cvars.
+extern idCVar r_pbrEnvScale;			// Phase C.1 metal env floor GLOBAL base (per-category env rides on top)
 
 // DUDE PBR Phase C.2 screen-space reflections (docs/ssr.md) — GL3 backend only
 extern idCVar r_ssr;					// enable; reflectivity follows the PBR material table
@@ -912,8 +902,12 @@ extern idCVar r_ssrSteps;				// ray-march samples per pixel
 extern idCVar r_ssrMaxDistance;			// ray reach, world units
 extern idCVar r_ssrThickness;			// assumed surface thickness for hit tests
 extern idCVar r_ssrResScale;			// march buffer resolution as a fraction of the view
+extern idCVar r_ssrHiZ;					// min-Z depth pyramid to leap empty march span (dev A/B)
+extern idCVar r_ssrHiZLevel;			// coarse mip level the Hi-Z march leaps at
 extern idCVar r_ssrTemporal;			// accumulate across frames (resolves the march grain)
 extern idCVar r_ssrTemporalFeedback;	// history fraction kept per frame
+extern idCVar r_ssrGlossy;				// roughness-blurred reflections (reflection mip pyramid)
+extern idCVar r_ssrGlossyScale;			// blur-amount multiplier on the roughness-driven LOD
 extern idCVar r_ssrGlassProbes;			// glass reflects baked per-area room cubemaps
 extern idCVar r_ssrGlassProbeBake;		// auto-capture missing probes (one-time hitch per area)
 extern idCVar r_ssrGlassProbeSize;		// probe face resolution
@@ -933,6 +927,9 @@ extern idCVar r_shadowMapModelBias;		// depth-compare bias, model (non-world) re
 extern idCVar r_shadowMapFlashlightBias;	// depth-compare bias, player flashlight (small)
 extern idCVar r_shadowMapSlopeBias;		// slope-scaled bias multiplier (grazing-angle acne)
 extern idCVar r_shadowMapDebug;			// print per-view light classification
+extern idCVar r_shadowMapCacheDebug;	// once/sec cube-cache breakdown (hit rate + re-render causes)
+extern idCVar r_shadowMapCachePerFace;	// warm miss re-renders only the faces an occluder moved across
+extern idCVar r_shadowMapCacheSplit;	// split a moving-caster light into a cached static cube + a scratch dynamic cube
 extern idCVar r_shadowMapCull;			// caster face culling (0 front / 1 back / 2 two-sided)
 extern idCVar r_shadowMapPerforated;	// let noShadows perforated surfaces cast punched-out shadow maps
 extern idCVar r_shadowMapViewWeapon;	// view weapon casts shadow-map shadows (default 0 = kept out of the map, no floor blob)
@@ -949,6 +946,11 @@ extern idCVar r_shadowMapCacheMB;			// VRAM budget for the shadow-map cache (MB;
 extern idCVar r_shadowMapBudgetHysteresis;	// point-light budget stickiness (percent score bonus for recent incumbents)
 extern idCVar r_shadowMapMaxUpdates;		// max cached cube maps re-rendered per view (stagger update bursts; 0 = unlimited)
 extern idCVar r_shadowMapStencilRadius;		// lights bigger than this (max radius axis) fall back to stencil shadows
+extern idCVar r_shadowMapSkipStencilBuild;	// skip building CPU stencil volumes for animated casters under shadow-mapped lights
+extern idCVar r_shadowMapSun;				// oversize/parallel "sun" lights: per-view fitted 2D map instead of stencil
+extern idCVar r_shadowMapSunBias;			// sun map depth-compare bias
+extern idCVar r_shadowMapSunRange;			// how far ahead of the camera the sun map covers (world units)
+extern idCVar r_shadowMapNormalOffset;		// normal-offset shadow bias in texels (cube + sun lookups; 0 = off)
 
 // DUDE: emissive fill lights for interactive GUI screens (enhancement backends only)
 extern idCVar r_emissiveSurfaces;		// master toggle (emissive surfaces cast fill light)
@@ -974,16 +976,44 @@ extern idCVar r_ssaoResScale;			// AO buffer resolution fraction (0.5 half .. 1.
 extern idCVar r_ssaoBentNormal;			// shade ambient along the bent normal
 extern idCVar r_ssaoBentStrength;		// blend toward the bent normal for the ambient lookup (C.2)
 extern idCVar r_ssaoNormalBuffer;		// SSAO reads a bump-mapped normal G-buffer vs depth reconstruct
+extern idCVar r_ssaoMergeNormal;		// VK: emit the SSAO normal inside the depth prepass (one pass) vs the standalone normal pass
 extern idCVar r_ssaoSpecular;			// also attenuate specular in occluded areas
 extern idCVar r_ssaoDebug;				// 1=show AO buffer, 2=show bent normals
 extern idCVar r_ssaoTemporal;			// accumulate AO across frames via camera reprojection
 extern idCVar r_ssaoTemporalFeedback;	// temporal history weight (0..0.97)
+extern idCVar r_ssaoDepthMip;			// march the horizon search over a prefiltered linear-depth mip chain (Phase 1)
+extern idCVar r_ssaoDepthMipBias;		// depth-mip LOD aggressiveness (log2(stepPix * bias))
+extern idCVar r_ssaoDepthMipMaxLod;		// depth-mip coarseness cap (kills far-tap halos)
+
+// DUDE: GPU tessellation of enemy/prop meshes (Vulkan only; docs/tessellation.md)
+extern idCVar r_tessellation;			// master toggle: PN-triangle smooth enemy/prop meshes
+extern idCVar r_tessLevel;				// subdivision level (1 = flat .. capped by device / 32)
+extern idCVar r_tessMaxDist;			// distance the subdivision starts rolling back toward flat
+extern idCVar r_tessMinEdge;			// min triangle edge length (world units) to tessellate (anti eye-bulge)
+extern idCVar r_tessDisplace;			// normal-map displacement strength (world units; +out/-in, 0=off)
+extern idCVar r_tessWeldSeams;			// weld coincident md5 normals so seams don't open under tess/displacement
+extern idCVar r_tessWeldThreshold;		// min normal dot to weld (1=only identical .. lower=weld harder edges)
+extern idCVar r_tessDebug;				// log each material name accepted for tessellation once (diagnostic)
+
+// DUDE: Roadmap B compute "deform once" tessellation (Vulkan only; docs/tessellation.md roadmap)
+extern idCVar r_tessDeform;				// deform tessellated meshes once/frame in a compute pass (vs per-pass .tesc/.tese)
+
+// DUDE: GPU MD5 skinning via the compute lane (Vulkan only; docs/gpu-offload-plan.md Phase 2)
+extern idCVar r_gpuSkinning;			// skin animated meshes on the GPU (option-B TBN; off = faithful CPU skin)
+extern idCVar r_gpuSkinProfile;			// dev: size the Milestone-C prize (skinned-surface derive + ambient upload)
+void R_GpuSkinProfileAddDerive( double ms );	// accumulate one skinned-surface tangent-derive time (impl tr_light.cpp)
 
 // DUDE: baked ambient-occlusion (occlusion) maps (enhancement backends only; docs/occlusion-maps.md)
 extern idCVar r_occlusionMaps;			// master toggle: use per-material baked AO maps
 extern idCVar r_occlusionMapScale;		// AO-map strength on the ambient term (0..1)
 extern idCVar r_occlusionMapDirect;		// AO-map strength on direct-light diffuse (0..1 of scale)
 extern idCVar r_occlusionMapsAutoBake;	// DEV: lazily bake missing model AO maps on first sight
+
+extern idCVar r_parallax;				// DUDE: master toggle for parallax occlusion mapping (Vulkan)
+extern idCVar r_parallaxScale;			// DUDE: global multiplier on per-material POM height scale
+extern idCVar r_parallaxMinSteps;		// DUDE: POM march steps head-on
+extern idCVar r_parallaxMaxSteps;		// DUDE: POM march steps at grazing angle (loop cap 32)
+extern idCVar r_parallaxShadow;			// DUDE: POM self-shadow strength (0 = off)
 
 // clears the per-material generated-AO lookup cache (RhiWorld.cpp) so freshly baked maps
 // are picked up without a vid_restart; called by the bakeAO* commands
@@ -1324,6 +1354,16 @@ void R_RenderView( viewDef_t *parms );
 bool R_CullLocalBox( const idBounds &bounds, const float modelMatrix[16], int numPlanes, const idPlane *planes );
 bool R_RadiusCullLocalBox( const idBounds &bounds, const float modelMatrix[16], int numPlanes, const idPlane *planes );
 bool R_CornerCullLocalBox( const idBounds &bounds, const float modelMatrix[16], int numPlanes, const idPlane *planes );
+
+// DUDE GPU-offload Phase 3.2 (live GPU frustum cull validation, cvar r_gpuCullLive):
+// the front-end records every ambient-cull candidate (real local bounds + modelMatrix +
+// numIndexes + the CPU R_CullLocalBox decision) so R_GpuCullLive() can prove the GPU cull
+// reproduces R_CullLocalBox on the LIVE per-frame surface set (dynamic/animated bounds,
+// parented transforms, live frustum) — the real-data half of wiring the cull in. All are
+// cheap no-ops when the cvar is off (R_GpuCullLiveActive() returns false, so no recording).
+void R_GpuCull_ResetLive( void );					// per-view: arm at most once/sec, reset the collector
+bool R_GpuCullLiveActive( void );					// true only for the armed view this second
+void R_GpuCull_RecordCandidate( const idBounds &bounds, const float modelMatrix[16], int numIndexes, bool culled );
 
 void R_AxisToModelMatrix( const idMat3 &axis, const idVec3 &origin, float modelMatrix[16] );
 
@@ -1720,6 +1760,9 @@ srfTriangles_t *	R_MergeTriangles( const srfTriangles_t *tri1, const srfTriangle
 // if the deformed verts have significant enough texture coordinate changes to reverse the texture
 // polarity of a triangle, the tangents will be incorrect
 void				R_DeriveTangents( srfTriangles_t *tri, bool allocFacePlanes = true );
+// DUDE tessellation: average coincident-vertex normals (near-parallel only) so a
+// seamed mesh deforms as one piece under PN tessellation/displacement (r_tessWeldSeams)
+void				R_WeldSeamNormals( srfTriangles_t *tri, float threshold );
 
 // deformable meshes precalculate as much as possible from a base frame, then generate
 // complete srfTriangles_t from just a new set of vertexes
@@ -1783,6 +1826,26 @@ void R_FrameFree( void *data );
 void *R_StaticAlloc( int bytes );		// just malloc with error checking
 void *R_ClearedStaticAlloc( int bytes );	// with memset
 void R_StaticFree( void *data );
+
+// Phase 2 GPU MD5 skinning (docs/gpu-offload-plan.md): the front end (idMD5Mesh::UpdateSurface)
+// records a skin job per visible skinned surface; the RHI backend flushes them as compute
+// dispatches in the pre-scene window (RB_RHI_ExecuteBackEndCommands, before the first pass).
+// All handles are rhi::BufferHandle (unsigned int); jointData is an R_FrameAlloc snapshot of
+// this frame's joint palette. Vulkan only; no-op on GL3. Impl in rhi/RhiBackend.cpp.
+void RB_RHI_AddSkinJob( unsigned int shader, unsigned int outVB, int numOutVerts,
+                        unsigned int weightsBuf, unsigned int wdescBuf, unsigned int wstartBuf, unsigned int localTbnBuf,
+                        const void *jointData, int numJoints, float skinScale );
+void RB_RHI_FlushSkinJobs( void );		// dispatch + clear the recorded jobs (backend, pre-scene)
+
+// Roadmap B compute deform-once tessellation (docs/tessellation.md; Vulkan only, no-op on GL3). Records
+// a deform job per visible tessellated surface; flushed as compute dispatches in the pre-scene window
+// AFTER the skin jobs (so the skin-write->deform-read COMPUTE->COMPUTE barrier orders them). srcVB is
+// the GPU source (gpuSkinVB) OR 0 with srcCpu an R_FrameAlloc'd copy the flush uploads. The three
+// static topology SSBOs are the mesh's; outVB is the per-surface expanded output. Impl rhi/RhiBackend.cpp.
+void RB_RHI_AddTessJob( unsigned int shader, unsigned int srcVB, const void *srcCpu, int numSrcVerts,
+                        unsigned int outVB, unsigned int barySeam, unsigned int srcTri, unsigned int height,
+                        int numOutVerts, float dispStrength );
+void RB_RHI_FlushTessJobs( void );		// dispatch + clear the recorded deform jobs (backend, pre-scene)
 
 
 /*

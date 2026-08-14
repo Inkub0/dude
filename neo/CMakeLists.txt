@@ -319,6 +319,8 @@ if(DHEWM3_VULKAN)
 	file(GLOB shader_spv_sources
 		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.vert
 		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.frag
+		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.tesc
+		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.tese
 		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.glsl)
 	add_custom_command(
 		OUTPUT ${spv_dir}/.stamp
@@ -329,6 +331,37 @@ if(DHEWM3_VULKAN)
 		COMMENT "Compiling shaders to SPIR-V (shaders/spv)"
 		VERBATIM)
 	add_custom_target(shaders_spv ALL DEPENDS ${spv_dir}/.stamp)
+
+	# Runtime GLSL->SPIR-V for custom (mod) ARB material stages on Vulkan. The
+	# GL3 backend gets runtime shader compilation from the driver; Vulkan has no
+	# in-driver GLSL compiler, so without shaderc a custom-ARB stage the offline
+	# builtin table doesn't cover degrades to skip (invisible). Optional so the
+	# leanest publish build can drop the dependency (stock effects then rely on
+	# the builtin table). See docs/mod-dll-compatibility.md / the ARB parity work.
+	option(DUDE_RUNTIME_ARB_COMPILER "Link shaderc for runtime custom-ARB shader compilation on Vulkan (mod shaders)" ON)
+	if(DUDE_RUNTIME_ARB_COMPILER)
+		find_package(PkgConfig QUIET)
+		if(PkgConfig_FOUND)
+			pkg_check_modules(SHADERC IMPORTED_TARGET QUIET shaderc)
+		endif()
+		if(SHADERC_FOUND)
+			list(APPEND vulkan_libs PkgConfig::SHADERC)
+			add_definitions(-DDUDE_HAVE_SHADERC=1)
+			message(STATUS "Vulkan: runtime custom-ARB shader compiler enabled (shaderc via pkg-config)")
+		else()
+			find_path(SHADERC_INCLUDE_DIR shaderc/shaderc.h)
+			find_library(SHADERC_LIBRARY NAMES shaderc_shared shaderc)
+			if(SHADERC_INCLUDE_DIR AND SHADERC_LIBRARY)
+				include_directories(${SHADERC_INCLUDE_DIR})
+				list(APPEND vulkan_libs ${SHADERC_LIBRARY})
+				add_definitions(-DDUDE_HAVE_SHADERC=1)
+				message(STATUS "Vulkan: runtime custom-ARB shader compiler enabled (shaderc: ${SHADERC_LIBRARY})")
+			else()
+				message(STATUS "Vulkan: shaderc not found; custom-ARB (mod) stages degrade to skip on Vulkan "
+				               "(set DUDE_RUNTIME_ARB_COMPILER=OFF to silence)")
+			endif()
+		endif()
+	endif()
 
 	message(STATUS "Vulkan renderer backend enabled (headers: ${Vulkan_INCLUDE_DIRS}; SPIR-V via ${spv_compiler})")
 endif()
@@ -446,11 +479,26 @@ if(D3_COMPILER_IS_GCC_OR_CLANG)
 	if(NOT CMAKE_CROSSCOMPILING AND ONATIVE)
 		add_compile_options(-march=native)
 	elseif(NOT APPLE AND cpu STREQUAL "x86")
-		add_compile_options(-march=pentium3)
+		# Pentium 4 (SSE2, 2000+) is the 32 bit floor. SSE4.1 is NOT part of the
+		# baseline here - it is confined to Simd_SSE41.cpp below and reached only
+		# through the CPUID dispatch in idSIMD::Init(), so the binary still boots
+		# on a P4 while modern CPUs get the fast processor.
+		add_compile_options(-march=pentium4)
 	elseif(SSE41 AND cpu STREQUAL "x86_64")
 		# raise the x86_64 baseline from SSE2 to SSE4.1 (Intel Penryn 2008+ / AMD Bulldozer 2011+)
 		# so the compiler can autovectorize with the newer instructions engine-wide
 		add_compile_options(-msse3 -mssse3 -msse4.1)
+	endif()
+
+	# idSIMD_SSE41 is picked at runtime by CPUID, so its implementation only needs
+	# the SSE4.1 target on its own translation unit. x86_64 already has it engine
+	# wide (above); x86 gets it per file so the baseline can stay at Pentium 4.
+	if(SSE41 AND (cpu STREQUAL "x86" OR cpu STREQUAL "x86_64"))
+		add_definitions(-DD3_HAS_SIMD_SSE41=1)
+		# also set on x86_64, where it is a harmless restatement of the global flags
+		# (and the safety net for an -DONATIVE=ON build on a pre-SSE4.1 CPU)
+		set_source_files_properties(idlib/math/Simd_SSE41.cpp PROPERTIES
+			COMPILE_OPTIONS "-msse3;-mssse3;-msse4.1")
 	endif()
 
 	if(FORCE_COLORED_OUTPUT)
@@ -798,6 +846,7 @@ set(src_framework
 	framework/EventLoop.cpp
 	framework/File.cpp
 	framework/FileSystem.cpp
+	framework/ModCvarTranslation.cpp
 	framework/KeyInput.cpp
 	framework/UsercmdGen.cpp
 	framework/Session_menu.cpp

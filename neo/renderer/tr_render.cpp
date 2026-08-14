@@ -709,8 +709,9 @@ static void RB_SubmittInteraction( drawInteraction_t *din, void (*DrawInteractio
 
 	if ( !din->diffuseImage || r_skipDiffuse.GetBool() ) {
 		din->diffuseImage = globalImages->blackImage;
-	} else if ( r_whiteWorld.GetBool() ) {
-		// DUDE: render all diffuse maps as white to judge lighting on its own
+	} else if ( r_whiteWorld.GetInteger() >= 1 ) {
+		// DUDE: render all diffuse maps as white to judge lighting/occlusion on its own
+		// (mode 2 additionally neutralises light colour + metalness — see RhiWorld)
 		din->diffuseImage = globalImages->whiteImage;
 	}
 	if ( !din->specularImage || r_skipSpecular.GetBool() || din->ambientLight ) {
@@ -752,7 +753,11 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 	inter.specularMatrix[0].Zero();
 	inter.specularMatrix[1].Zero();
 
-	if ( r_skipInteractions.GetBool() || !surf->geo || !surf->geo->ambientCache ) {
+	// NOTE: this is the SHARED stage-decomposition, called by the RHI backend too
+	// (RB_RHI_CreateDrawInteractions). A GPU-skinned surface (r_gpuSkinNoUpload) has no ambient
+	// cache — it draws from gpuSkinVB — so accept gpuSkinVB here or the surface gets zero light
+	// interactions and renders black.
+	if ( r_skipInteractions.GetBool() || !surf->geo || ( !surf->geo->ambientCache && !surf->geo->gpuSkinVB ) ) {
 		return;
 	}
 

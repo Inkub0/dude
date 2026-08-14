@@ -66,6 +66,7 @@ idCVar r_useLightPortalFlow( "r_useLightPortalFlow", "1", CVAR_RENDERER | CVAR_B
 // (see docs/vulkan-port.md) and require a DHEWM3_VULKAN build. Switching backends
 // needs a vid_restart (window recreate); the settings-menu selector comes later.
 idCVar r_graphicsAPI( "r_graphicsAPI", "opengl", CVAR_RENDERER | CVAR_ARCHIVE, "rendering backend: opengl (legacy, default), opengl3 (GL 3.3 core, in development), vulkan, vulkan-rt (in development)" );
+idCVar r_rhiActive( "r_rhiActive", "0", CVAR_RENDERER | CVAR_BOOL, "1 when the active backend routes through the RHI executor (opengl3 / vulkan); set by the renderer at init, don't change" );
 idCVar r_multiSamples( "r_multiSamples", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "number of antialiasing samples" );
 idCVar r_mode( "r_mode", "5", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_INTEGER, "video mode number" );
 idCVar r_displayRefresh( "r_displayRefresh", "0", CVAR_RENDERER | CVAR_INTEGER | CVAR_NOCHEAT, "optional display refresh rate option for vid mode", 0.0f, 200.0f );
@@ -130,7 +131,7 @@ idCVar r_skipOverlays( "r_skipOverlays", "0", CVAR_RENDERER | CVAR_BOOL, "skip o
 idCVar r_skipSpecular( "r_skipSpecular", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_CHEAT | CVAR_ARCHIVE, "use black for specular1" );
 idCVar r_skipBump( "r_skipBump", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "uses a flat surface instead of the bump map" );
 idCVar r_skipDiffuse( "r_skipDiffuse", "0", CVAR_RENDERER | CVAR_BOOL, "use black for diffuse" );
-idCVar r_whiteWorld( "r_whiteWorld", "0", CVAR_RENDERER | CVAR_BOOL, "render all diffuse maps as white to visualize lighting only (debug aid)" );
+idCVar r_whiteWorld( "r_whiteWorld", "0", CVAR_RENDERER | CVAR_INTEGER, "white-world debug: 0 = off, 1 = diffuse=white (lighting incl. light/material colour), 2 = clay (also neutralises light/material colour and forces metalness 0, so only occlusion/relief remains — SSAO + POM in grey)", 0, 2 );
 idCVar r_skipROQ( "r_skipROQ", "0", CVAR_RENDERER | CVAR_BOOL, "skip ROQ decoding" );
 
 idCVar r_ignore( "r_ignore", "0", CVAR_RENDERER, "used for random debugging without defining new vars" );
@@ -280,7 +281,7 @@ idCVar r_postFilmGrain( "r_postFilmGrain", "0.05", CVAR_RENDERER | CVAR_ARCHIVE 
 // spatial size of one grain cell: 1 = per-pixel noise (sensor-static look at high
 // resolutions), ~1.5-2 clumps the noise like scanned film stock
 idCVar r_postFilmGrainSize( "r_postFilmGrainSize", "1.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "film grain cell size in pixels (1 = per-pixel, 1.5-2 = coarser filmic clumps)", 1.0f, 4.0f );
-idCVar r_postChromaticAberration( "r_postChromaticAberration", "0.2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "chromatic aberration strength (0 = off, ~0.1..0.35, max 0.5)", 0.0f, 0.5f );
+idCVar r_postChromaticAberration( "r_postChromaticAberration", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "chromatic aberration strength (0 = off, ~0.1..0.35, max 0.5); off by default — opt-in taste effect", 0.0f, 0.5f );
 
 // DUDE post-resolve antialiasing over the finished 3D view (before 2D/GUI, HUD
 // unaffected). Separate from the hardware MSAA in r_multiSamples. GL3/Vulkan only.
@@ -319,28 +320,15 @@ idCVar r_specularExp( "r_specularExp", "16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR
 idCVar r_pbr( "r_pbr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "physically based (GGX/Cook-Torrance) specular + energy-conserving diffuse in the per-light interaction pass. Supersedes r_shading and the specular scale/exponent while on. Non-vanilla; opengl3/Vulkan only" );
 idCVar r_pbrRoughness( "r_pbrRoughness", "0.58", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "global fallback roughness for r_pbr until the per-material classifier table exists (docs/pbr-materials.md Phase B). 0.58 matches the Blinn-Phong exponent-16 highlight width via alpha = sqrt(2/(n+2)); in-game A/B put the perceptual match between 0.5 and 0.58", 0.03f, 1.0f );
 idCVar r_pbrSpecScale( "r_pbrSpecScale", "1.66", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "artistic energy scale on the r_pbr specular lobe (the PBR path's counterpart to r_specularScale, which it deliberately doesn't read). Dielectric-weighted: fades to 1 as metalness rises. 1.66 is the confirmed in-game perceptual match to the calibrated Blinn-Phong look now that the Toksvig baseline keeps lobes tight (the earlier 3 was calibrated against flattened lobes)", 0.0f, 8.0f );
-idCVar r_pbrMetalMetalness( "r_pbrMetalMetalness", "0.8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "metalness of the bare-metal category (grates, pipes, machined steel, chrome). Below 1 so metals keep a sliver of diffuse and don't go black between lights in Doom 3's near-zero ambient; raise toward 1 for harder metals once the environment glow (r_pbrEnvScale) or SSR gives them something to reflect (docs/pbr-materials.md sec. 5)", 0.0f, 1.0f );
 idCVar r_pbrMetalDiffuse( "r_pbrMetalDiffuse", "0.75", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how much of a metal's albedo colour survives in the diffuse term. Physical PBR kills diffuse entirely on metals (0), pushing the colour into reflections Doom 3 has no environment to supply, so metals read dark and off-colour; raising this keeps the asset's painted colour while the metallic specular still rides on top (1 = keep all, 0 = physical). A stylized, energy-relaxed metal for the enhancement path (docs/pbr-materials.md sec. 5)", 0.0f, 1.0f );
 idCVar r_pbrToksvigBase( "r_pbrToksvigBase", "0.08", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "normal-variance baseline subtracted before the Toksvig specular widening. Low = more anti-firefly widening but softer highlights; high = tighter highlights but white pixel spikes on seams return. 0.08 = calibrated split alongside the 2026-08-01 SSR/reflection retune (docs/pbr-materials.md sec. 4)", 0.0f, 0.6f );
 idCVar r_pbrFireflyClamp( "r_pbrFireflyClamp", "12", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "upper bound on the GGX specular lobe. Prevents isolated normal-map texels from spiking to clipped white; also the ceiling that skin/tight-roughness highlight cores ride at. Raise for hotter highlight cores (pairs well with r_hdr), lower to flatten", 1.0f, 16.0f );
 
-// live per-category material values (Developer-tab sliders). These supersede the
-// baked numbers in pbr/pbr_materials.cfg for entries tagged with the matching
-// category column; hand-written pbr_overrides.cfg entries always win instead.
-// Defaults mirror the classifier's CATEGORIES table (tools/pbr_classify.py).
-idCVar r_pbrSkinRoughness( "r_pbrSkinRoughness", "0.4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for human heads/faces (the `skin` category). Low = tight oily sheen that makes facial detail pop (the firefly clamp bounds the core so it can't burn out)", 0.03f, 1.0f );
-idCVar r_pbrSkinWetness( "r_pbrSkinWetness", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "skin-only multiplier on the specular energy, modelling the water/sweat film on faces (1 = dry baseline). Wetness is NOT metalness — metallic skin would tint and darken like bronze; a wet look pairs this raised with Skin Roughness lowered", 0.0f, 4.0f );
-idCVar r_pbrEyesRoughness( "r_pbrEyesRoughness", "0.15", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for eyes and teeth (the `eyes` category): cornea and enamel are the hardest, wettest surfaces on a face — low values give flashlight catchlights. Shares the skin wetness film", 0.03f, 1.0f );
-idCVar r_pbrFleshRoughness( "r_pbrFleshRoughness", "0.55", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for body flesh, meat and hell-growth (the `flesh` category)", 0.03f, 1.0f );
-idCVar r_pbrFleshWetness( "r_pbrFleshWetness", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "flesh-only multiplier on the specular energy: the slime/gore film on demons, viscera and hell-growth (1 = dry baseline). For glistening horror flesh raise this and lower flesh roughness", 0.0f, 4.0f );
-idCVar r_pbrCeramicRoughness( "r_pbrCeramicRoughness", "0.45", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for the `ceramic_sheen` category: painted floors plus ceramic tile on floors and walls (e.g. the washroom). Tighter than the wall panelling so lights stretch into streaks — the wet-floor / glazed-tile look. Metalness is shared with painted metal", 0.03f, 1.0f );
-idCVar r_pbrMetalRoughness( "r_pbrMetalRoughness", "0.32", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for bare metal — grates, pipes, machined steel, chrome (the `metal` category, metalness 1)", 0.03f, 1.0f );
-idCVar r_pbrPaintedRoughness( "r_pbrPaintedRoughness", "0.55", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for painted/coated metal — the station panelling bulk (the `metal_painted` category)", 0.03f, 1.0f );
-idCVar r_pbrPaintedMetalness( "r_pbrPaintedMetalness", "0.2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "metalness for painted/coated metal: paint is a dielectric, so keep this low — it models scuff-through to the metal beneath", 0.0f, 1.0f );
-idCVar r_pbrRustRoughness( "r_pbrRustRoughness", "0.78", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for rusted/corroded metal (the `metal_rust` category — materials named rust/oxid/corro/dirty/stain)", 0.03f, 1.0f );
-idCVar r_pbrRustMetalness( "r_pbrRustMetalness", "0.4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "metalness for rusted metal: rust itself is a dielectric oxide, so this models the patchy mix of bare metal and oxide", 0.0f, 1.0f );
+// Per-category PBR defaults (metalness/roughness/wetness/env) moved OUT of cvars into a
+// table persisted in the pbr config (docs/pbr-materials.md) — edited via the 8x4 grid in
+// the Developer tab / material editor, not individual cvars. r_pbrEnvScale (below) stays
+// as the GLOBAL env-glow base the per-category env multiplier rides on top of.
 idCVar r_pbrEnvScale( "r_pbrEnvScale", "0.3", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "Phase C.1 metal environment floor: stock Doom 3 has no environment probes, so metals reflect an F0-tinted share of each light's own energy instead of going black where the specular lobe misses. Scales with the light and its shadow, so metals still go dark in darkness. 0 = off (docs/pbr-materials.md sec. 5)", 0.0f, 2.0f );
-idCVar r_pbrStoneRoughness( "r_pbrStoneRoughness", "0.9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "roughness for rock, concrete, brick and plaster (the `stone` category)", 0.03f, 1.0f );
 
 // DUDE PBR Phase C.2 screen-space reflections (docs/ssr.md). Opt-in; independent of
 // r_pbr (the classifier table drives per-pixel reflectivity either way) and of r_hdr.
@@ -351,8 +339,12 @@ idCVar r_ssrSteps( "r_ssrSteps", "26", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEG
 idCVar r_ssrMaxDistance( "r_ssrMaxDistance", "1024", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "reflection ray reach in world units", 64.0f, 8192.0f );
 idCVar r_ssrThickness( "r_ssrThickness", "26", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "assumed surface thickness (world units) when testing ray hits; too low = gaps in reflections, too high = smearing behind edges", 1.0f, 256.0f );
 idCVar r_ssrResScale( "r_ssrResScale", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "resolution the reflection march runs at, as a fraction of the screen. The Fresnel/material weighting stays full-res (ssr_composite), so lowering this only softens the reflected image — half res is ~4x cheaper", 0.25f, 1.0f );
+idCVar r_ssrHiZ( "r_ssrHiZ", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "screen-space reflections: use a min-Z depth pyramid so the ray leaps provably-empty march span instead of stepping it (dev A/B; exact off = today's full-res march). Modest, scene-dependent win, near-zero on grazing reflective floors" );
+idCVar r_ssrHiZLevel( "r_ssrHiZLevel", "4", CVAR_RENDERER | CVAR_INTEGER, "with r_ssrHiZ: coarse mip level the march leaps at (higher = bigger blocks / longer leaps but a coarser nearest-surface bound). Dev tuning knob; 4 measured best on the dev box", 1, 5 );
 idCVar r_ssrTemporal( "r_ssrTemporal", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "accumulate reflections across frames (reprojected by camera motion) so the march's jitter grain resolves into a clean image. Neighbourhood-clamped to limit ghosting" );
 idCVar r_ssrTemporalFeedback( "r_ssrTemporalFeedback", "0.96", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "fraction of reflection history kept per frame with r_ssrTemporal: higher = smoother but slower to react, lower = noisier but snappier. Variance clipping + hit-aware blending keep ghosting bounded even this high", 0.0f, 0.97f );
+idCVar r_ssrGlossy( "r_ssrGlossy", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "glossy (roughness-blurred) reflections: build a mip pyramid of the reflection buffer and sample it at a roughness-proportional LOD in the composite, so rougher surfaces blur instead of mirroring sharply. Sharp cutoff still at r_ssrMaxRoughness. Off = the exact sharp path" );
+idCVar r_ssrGlossyScale( "r_ssrGlossyScale", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "with r_ssrGlossy: multiplier on the blur amount (the roughness-driven LOD). 1 = full pyramid reach at the roughness cutoff; lower keeps rough reflections tighter, higher blurs sooner", 0.0f, 1.0f );
 idCVar r_ssrGlassProbes( "r_ssrGlassProbes", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "with r_ssr: glass (cube-reflection) surfaces reflect a baked cubemap of the actual room (envprobes/<map>/ under fs_savepath, captured by bakeGlassProbe) instead of Doom 3's generic env/gen* cubemap, so panes mirror the real room at any viewing angle" );
 idCVar r_ssrGlassProbeScale( "r_ssrGlassProbeScale", "0.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "brightness of the baked room probe on glass, on top of the stage colour, r_gl3ReflectionScale and the energy normalization to the replaced env/gen* cube. Only applies while a probe is bound (bump-mapped glass ignores it — that shader takes no stage colour, matching vanilla). Default 0.5 from in-game calibration", 0.0f, 4.0f );
 idCVar r_ssrGlassProbeBake( "r_ssrGlassProbeBake", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "auto-capture a missing glass probe for the area the player stands in (6 offscreen renders = a one-time hitch per area, cached to disk forever). 0 = only the manual bakeGlassProbe command writes probes" );
@@ -364,11 +356,14 @@ idCVar r_ssrGlassProbeSize( "r_ssrGlassProbeSize", "256", CVAR_RENDERER | CVAR_A
 // stencil until implemented). See docs/port-phases.md Phase 8.
 idCVar r_shadowMapping( "r_shadowMapping", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "shadow technique: 0 = stencil volumes (faithful), 1 = shadow maps where supported" );
 idCVar r_shadowMapSize( "r_shadowMapSize", "1024", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "shadow map resolution (per light), power of two", 256, 4096 );
-idCVar r_shadowMapBias( "r_shadowMapBias", "0.0032", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for world/perforated receivers (acne suppression)", 0.0f, 0.5f );
-idCVar r_shadowMapModelBias( "r_shadowMapModelBias", "0.005", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for model (non-world) receivers; models usually need more", 0.0f, 0.5f );
+idCVar r_shadowMapBias( "r_shadowMapBias", "0.0008", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for world/perforated receivers (acne suppression). Tuned tight against r_shadowMapNormalOffset, which now carries most of the anti-acne load geometrically", 0.0f, 0.5f );
+idCVar r_shadowMapModelBias( "r_shadowMapModelBias", "0.0012", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for model (non-world) receivers; models usually need more. Tuned tight against r_shadowMapNormalOffset", 0.0f, 0.5f );
 idCVar r_shadowMapFlashlightBias( "r_shadowMapFlashlightBias", "0.001", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map depth-compare bias for the player flashlight; its grazing narrow cone needs a much smaller bias than other lights (0.0001-0.005) to avoid peter-panning", 0.0f, 0.5f );
 idCVar r_shadowMapSlopeBias( "r_shadowMapSlopeBias", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "shadow map slope-scaled bias: grows the depth bias by this * tan(surface-to-light angle) to kill banded acne where light grazes a surface. 0 = flat constant bias (old behaviour)", 0.0f, 8.0f );
 idCVar r_shadowMapDebug( "r_shadowMapDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "shadow-map debug: 1 = per-view light classification summary, 2 = also per-light readout (technique, occluder counts, dist/radius)", 0, 2 );
+idCVar r_shadowMapCacheDebug( "r_shadowMapCacheDebug", "0", CVAR_RENDERER | CVAR_BOOL, "print a once/sec cube-shadow cache breakdown: hit rate + cube re-renders split by cause (cold = new/evicted light, warm-caster = an occluder moved, warm-light = the light moved), plus scratch/dynamic/deferred/evictions/faces. Dev diagnostic for shadow-cache work" );
+idCVar r_shadowMapCachePerFace( "r_shadowMapCachePerFace", "1", CVAR_RENDERER | CVAR_BOOL, "cube-shadow cache: on a warm miss, re-render only the cube faces an occluder actually moved across, instead of all six (fidelity-identical). 0 = re-render the whole cube (old behaviour, for A/B)" );
+idCVar r_shadowMapCacheSplit( "r_shadowMapCacheSplit", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "cube-shadow cache: when a moving/animated caster (monster) is near a static point light, cache the world (static) cube and re-render only the movers into a small dynamic cube each frame, sampling min(static, dynamic). Keeps such lights cached instead of bypassing the cache entirely. Fidelity-identical. 0 = old behaviour (whole cube on the scratch path every frame, for A/B)" );
 idCVar r_shadowMapCull( "r_shadowMapCull", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "shadow caster faces: 0 = front, 1 = back (second-depth, less acne), 2 = two-sided", 0, 2 );
 idCVar r_shadowMapPerforated( "r_shadowMapPerforated", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "let perforated (alpha-tested) grates/fences cast real punched-out shadow maps even when flagged noShadows (that flag exists only because stencil couldn't perforate)" );
 idCVar r_shadowMapViewWeapon( "r_shadowMapViewWeapon", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "whether the first-person view weapon (and arms) casts shadow-map shadows. The view model sits at the player's world position, so under shadow mapping it throws a gun-shaped shadow onto nearby floors/walls (vanilla avoided this with per-material noShadows/noSelfShadow flags, but the chainsaw chain and plasmagun canister aren't flagged and cast anyway). A single shadow map can't self-shadow the weapon without also casting it on the world, so default 0 keeps the whole view model out of the map (no floor blob, no cast self-shadow; the gun still gets normal bump-mapped shading). 1 lets every view-weapon surface cast, even ones flagged noShadows; translucent invisibility skins never cast either way" );
@@ -377,12 +372,19 @@ idCVar r_shadowMapPointSize( "r_shadowMapPointSize", "1200", CVAR_RENDERER | CVA
 idCVar r_shadowMapCubePcf( "r_shadowMapCubePcf", "6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "point-light cube shadow PCF taps: 1 = single hardware 2x2 tap (hardest/blockiest edge, cheapest), higher = softer disc-filtered edge at more cost", 1, 16 );
 idCVar r_shadowMapPointLimit( "r_shadowMapPointLimit", "64", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "max point lights that get a cube shadow map per view (by on-screen importance); out-of-budget point lights are left unshadowed while r_shadowMapping is on. 0 = all point lights", 0, 128 );
 idCVar r_shadowMapSizeScale( "r_shadowMapSizeScale", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "scale each light's shadow-map resolution with its radius so texel-to-world size (shadow-edge sharpness) stays roughly constant; large lights get more resolution, small lights less" );
-idCVar r_shadowMapSizeScaleRadius( "r_shadowMapSizeScaleRadius", "380", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "light radius that maps to the base shadow resolution (r_shadowMapSize / r_shadowMapPointSize); lights larger than this get proportionally more resolution, smaller ones less", 16.0f, 8192.0f );
+idCVar r_shadowMapSizeScaleRadius( "r_shadowMapSizeScaleRadius", "192", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "light radius that maps to the base shadow resolution (r_shadowMapSize / r_shadowMapPointSize); lights larger than this get proportionally more resolution, smaller ones less", 16.0f, 8192.0f );
 idCVar r_shadowMapCache( "r_shadowMapCache", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "cache static point-light cube shadow maps across frames; a light is only regenerated when it or one of its shadow casters moves. Huge win in static scenes" );
 idCVar r_shadowMapCacheMB( "r_shadowMapCacheMB", "-1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "VRAM budget for the shadow-map cache, in MB. -1 = auto (half of detected video memory), 0 = unlimited", -1, 32768 );
 idCVar r_shadowMapBudgetHysteresis( "r_shadowMapBudgetHysteresis", "30", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "point-light shadow budget stickiness (percent). A light that was cube-shadowed in the last few frames keeps this on-screen-size score bonus, so it isn't kicked out of the r_shadowMapPointLimit set by a marginally bigger newcomer. Stops shadows flickering on/off at the budget boundary as the camera turns. 0 = off (rank purely by on-screen size)", 0, 500 );
 idCVar r_shadowMapMaxUpdates( "r_shadowMapMaxUpdates", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "max cached cube shadow maps re-rendered per view when a light or a moving rigid caster (door, lift, fan) changes. Excess lights reuse their previous (1-frame-stale) cube this view and refresh on a later one, spreading a burst of updates across frames. Only defers lights that already hold a cached cube; cold and dynamic (animated-caster) lights always render. 0 = unlimited (no staggering)", 0, 128 );
-idCVar r_shadowMapStencilRadius( "r_shadowMapStencilRadius", "250", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "lights whose largest light_radius axis exceeds this (world units) fall back to Carmack stencil shadows instead of a shadow map. Large 'sun replacement' lights look better as stencil (no cube-map pixelation on distant shadows) and cost no shadow-map VRAM. 0 = every light uses shadow maps", 0.0f, 16384.0f );
+idCVar r_shadowMapStencilRadius( "r_shadowMapStencilRadius", "255", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "lights whose largest light_radius axis exceeds this (world units) fall back to Carmack stencil shadows instead of a shadow map. Large 'sun replacement' lights look better as stencil (no cube-map pixelation on distant shadows) and cost no shadow-map VRAM. 0 = every light uses shadow maps", 0.0f, 16384.0f );
+idCVar r_shadowMapSkipStencilBuild( "r_shadowMapSkipStencilBuild", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "when a light will be shadow-MAPPED rather than stencil-shadowed, skip building its CPU stencil shadow volume for animated casters (it would never be drawn). The shadow-map caster path still shadows them. A pure CPU front-end win in shadow-mapped scenes; self-heals on r_shadowMapping toggle. 0 = always build volumes (old behaviour, for A/B)" );
+// DUDE sun shadow maps (docs/shadow-research.md item 1): oversize-omni / parallel "sun"
+// lights get a per-view fitted virtual 2D shadow map instead of Carmack stencil volumes.
+idCVar r_shadowMapSun( "r_shadowMapSun", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "oversize 'sun replacement' omni lights and parallel lights render a per-view fitted 2D shadow map instead of falling back to stencil volumes (needs r_shadowMapping). 0 = old stencil fallback" );
+idCVar r_shadowMapSunBias( "r_shadowMapSunBias", "0.0008", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "depth-compare bias for sun shadow maps; the sun map's depth unit spans the whole fitted view region, so this is smaller than the per-light biases. Tuned tight against r_shadowMapNormalOffset", 0.0f, 0.1f );
+idCVar r_shadowMapSunRange( "r_shadowMapSunRange", "3000", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how far ahead of the camera (world units) the sun shadow map covers; bigger = longer shadow reach but coarser texels", 512.0f, 16384.0f );
+idCVar r_shadowMapNormalOffset( "r_shadowMapNormalOffset", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "normal-offset shadow bias in shadow texels: the cube and sun shadow lookups sample from a point pushed along the surface normal by about this many texels' world size, killing grazing-angle acne geometrically instead of with a large depth bias. 0 = off", 0.0f, 8.0f );
 
 // DUDE: emissive fill lights — interactive GUI screens (monitors, keypads, wall
 // panels) glow but cast no light in Doom 3's model, so they read as decals pasted
@@ -408,11 +410,24 @@ idCVar r_itemGlow( "r_itemGlow", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT,
 // (not direct/dynamic lights), so it stays correct as lighting changes and fixes
 // Doom 3's flat/plastic model look. Non-vanilla; enhancement backends only.
 // See docs/ssao-gtao.md.
+// DUDE: GPU tessellation of enemy/prop meshes (Vulkan only; docs/tessellation.md).
+// PN-triangle smoothing rounds the low-poly silhouettes of characters and props;
+// off = bit-for-bit vanilla (no tess pipeline is built). GL3's 3.3 core context
+// has no tessellation stages, so this is inert there.
+idCVar r_tessellation( "r_tessellation", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "PN-triangle GPU tessellation that smooths enemy/prop mesh silhouettes (non-vanilla; Vulkan only)" );
+idCVar r_tessLevel( "r_tessLevel", "5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "tessellation subdivision level for enemies/props (1 = flat, higher = smoother silhouettes at more GPU cost; capped at 32 / the device limit)", 1.0f, 32.0f );
+idCVar r_tessMaxDist( "r_tessMaxDist", "160", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "view distance (world units) beyond which tessellation rolls back toward flat, an LOD/perf guard. 0 = uniform level everywhere", 0.0f, 8192.0f );
+idCVar r_tessMinEdge( "r_tessMinEdge", "0.72", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "minimum triangle edge length (world units) to tessellate; triangles finer than this stay flat, so small dense clusters (eyeballs, fine facial detail) don't over-inflate while big low-poly silhouette triangles still smooth. 0 = tessellate everything, higher = only the largest triangles", 0.0f, 64.0f );
+idCVar r_tessWeldSeams( "r_tessWeldSeams", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "weld coincident vertex normals on animated (md5) meshes so a model built from mirrored/UV-split halves deforms as one piece under tessellation + displacement, instead of the seam opening. Off = vanilla normals. Only applied to meshes that actually tessellate: requires r_tessellation on and the Vulkan backend, and skips any surface the tessellator leaves flat, so non-tessellated geometry keeps vanilla normals" );
+idCVar r_tessWeldThreshold( "r_tessWeldThreshold", "0.7", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how aggressively r_tessWeldSeams welds: only coincident normals whose dot product is at least this get averaged. 1 = weld only identical normals, lower = also weld sharper creases (0.7 closes mirror/UV seams while preserving hard edges)", 0.0f, 1.0f );
+idCVar r_tessDisplace( "r_tessDisplace", "-0.25", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "normal-map displacement on tessellated characters: push detail along the surface normal by this many world units (Doom 3 has no runtime height maps, so height is approximated from the bump map's blue channel). 0 = pure PN smoothing, positive raises detail, negative carves it in. Vulkan only", -8.0f, 8.0f );
+idCVar r_tessDebug( "r_tessDebug", "0", CVAR_RENDERER | CVAR_BOOL, "diagnostic: print each material name accepted for tessellation once. Walk up to a mis-tessellated character and read the console to find the leaked material (Vulkan)" );
+
 idCVar r_ssao( "r_ssao", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "screen-space ambient occlusion (GTAO) applied to the ambient light term; adds contact shadowing and depth to models (non-vanilla; opengl3/Vulkan only)" );
 idCVar r_ssaoIntensity( "r_ssaoIntensity", "1.2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO strength: scales the occlusion darkening (0 = none, 1.2 = default, higher = deeper creases)", 0.0f, 4.0f );
 idCVar r_ssaoFloor( "r_ssaoFloor", "0.03", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO minimum ambient visibility: fully-occluded areas darken to at most this (0 = can reach black, 1 = no darkening). Keeps creases from crushing to black in dark scenes", 0.0f, 1.0f );
 idCVar r_ssaoDirectLight( "r_ssaoDirectLight", "0.75", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how strongly SSAO darkens direct (dynamic) light's diffuse, 0..1. Doom 3 has almost no ambient, so this is what makes AO visible in normal scenes. Lower it if AO looks baked-in under moving lights; 0 = ambient-only (most faithful)", 0.0f, 1.0f );
-idCVar r_ssaoRadius( "r_ssaoRadius", "72", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO sampling radius in world units; larger reaches for broad occlusion, smaller keeps it to tight contact creases", 1.0f, 256.0f );
+idCVar r_ssaoRadius( "r_ssaoRadius", "48", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO sampling radius in world units; larger reaches for broad occlusion, smaller keeps it to tight contact creases", 1.0f, 256.0f );
 idCVar r_ssaoSlices( "r_ssaoSlices", "3", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "SSAO horizon-search directions (slices) per pixel; more = smoother, less directional noise, more GPU cost", 1, 8 );
 idCVar r_ssaoSteps( "r_ssaoSteps", "3", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "SSAO samples marched along each direction; more = more accurate horizons at range, more GPU cost", 1, 12 );
 idCVar r_ssaoResScale( "r_ssaoResScale", "0.75", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO buffer resolution as a fraction of the screen (0.5 = half ... 1.0 = full); lower is faster and softer, upsampled bilaterally", 0.25f, 1.0f );
@@ -420,9 +435,17 @@ idCVar r_ssaoBentNormal( "r_ssaoBentNormal", "1", CVAR_RENDERER | CVAR_ARCHIVE |
 idCVar r_ssaoBentStrength( "r_ssaoBentStrength", "0.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how far to bias the ambient cube lookup from the surface normal toward the bent normal (0 = surface normal, 1 = fully bent). Only matters where there is ambient light; needs r_ssaoBentNormal", 0.0f, 1.0f );
 idCVar r_ssaoNormalBuffer( "r_ssaoNormalBuffer", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "feed SSAO from a real bump-mapped normal G-buffer (an extra opaque geometry pass) instead of normals reconstructed from depth; picks up normal-map detail and removes faceting, at the cost of one geometry pass. 0 = reconstruct from depth (cheaper)" );
 idCVar r_ssaoSpecular( "r_ssaoSpecular", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "also attenuate specular highlights in occluded areas (stronger anti-plastic, mild fidelity departure); helps in scenes with little ambient fill" );
+idCVar r_ssaoMergeNormal( "r_ssaoMergeNormal", "0", CVAR_RENDERER | CVAR_BOOL, "Vulkan: produce the SSAO normal G-buffer inside the depth prepass (one opaque pass instead of two) rather than the separate RB_RHI_NormalPrepass. Dev flag during bring-up (docs/ssao-normal-merge.md); 0 = the standalone normal pass" );
 idCVar r_ssaoDebug( "r_ssaoDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "SSAO debug view: 0 = off, 1 = show the AO buffer, 2 = show bent normals, 3 = show the normal G-buffer", 0, 3 );
 idCVar r_ssaoTemporal( "r_ssaoTemporal", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "accumulate SSAO across frames via camera reprojection: smooths the horizon-search noise and lets slices/steps run lower for the same look. Static-world reprojection (no motion vectors); ghosting is bounded by a neighbourhood clamp. Non-vanilla; opengl3/Vulkan only" );
 idCVar r_ssaoTemporalFeedback( "r_ssaoTemporalFeedback", "0.9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO temporal history weight: fraction of the reprojected previous-frame AO kept each frame (higher = smoother/steadier but more latency and ghosting; 0 = no accumulation). Needs r_ssaoTemporal", 0.0f, 0.97f );
+// DUDE SSAO Phase 1: prefiltered linear-depth mip chain (docs/ssao-perf-optimization.md). The horizon
+// search reads a coarser mip for farther steps, so far taps touch a small cache-local footprint instead
+// of scattering across full-res _currentDepth. Visually near-identical; a GPU-time win that scales with
+// r_ssaoRadius. Adds a cheap linearize + mip-gen pass per view. On by default; toggle for an A/B.
+idCVar r_ssaoDepthMip( "r_ssaoDepthMip", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "SSAO: march the horizon search over a prefiltered linear-depth mip chain (far steps read coarse mips) instead of full-res depth. Cheaper on GPU at a wide radius, visually near-identical. 0 = full-res depth every tap (opengl3/Vulkan only)" );
+idCVar r_ssaoDepthMipBias( "r_ssaoDepthMipBias", "0.1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO depth-mip LOD aggressiveness: LOD = log2(stepPixels * this). Higher drops to coarser mips sooner (faster, but coarse depth smears occlusion across silhouettes into halos); lower keeps steps on finer mips (sharper, keeps most of the speedup). Needs r_ssaoDepthMip", 0.05f, 4.0f );
+idCVar r_ssaoDepthMipMaxLod( "r_ssaoDepthMipMaxLod", "2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "SSAO depth-mip coarseness cap: the horizon march never reads a mip coarser than this level, even for far taps. The coarsest mips (box-averaged depth) are where occlusion smears across silhouettes into halos, so a lower cap kills halos at a small speed cost; higher restores the last bit of speedup. Clamped to the built chain (<=5) and >=1 while r_ssaoDepthMip is on", 1, 5 );
 
 // DUDE: baked ambient-occlusion (occlusion) maps. Per-material AO textures declared with
 // the `occlusionmap` material keyword, multiplied into the ambient (and, scaled, direct-
@@ -432,6 +455,17 @@ idCVar r_occlusionMaps( "r_occlusionMaps", "0", CVAR_RENDERER | CVAR_ARCHIVE | C
 idCVar r_occlusionMapScale( "r_occlusionMapScale", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "strength of baked occlusion maps on the ambient term, 0..1 (0 = off, 1 = the map at full darkening)", 0.0f, 1.0f );
 idCVar r_occlusionMapDirect( "r_occlusionMapDirect", "0.9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how strongly baked occlusion maps darken direct (dynamic) light's diffuse, 0..1, as a fraction of r_occlusionMapScale. Doom 3 is mostly dynamic light, so this is what makes the map visible; lower it if AO looks baked-in under moving lights, 0 = ambient-only", 0.0f, 1.0f );
 idCVar r_occlusionMapsAutoBake( "r_occlusionMapsAutoBake", "0", CVAR_RENDERER | CVAR_BOOL, "DEV: when a model-entity surface has no explicit or cached occlusion map, bake one on first sight (writes generated/aomaps, one-time hitch per model). Off by default; use the bakeAO/bakeAOFolder commands for offline baking" );
+
+// DUDE: parallax occlusion mapping (non-vanilla; Vulkan enhancement). Per-pixel surface
+// relief on materials that carry height data -- auto-captured from a `heightmap(...)` operand
+// in the bump program (the source Doom 3 bakes its normals from), or an explicit `parallaxmap`
+// stage. Off = bit-for-bit vanilla with zero extra resident textures: no height map is loaded
+// unless r_parallax is set when the material is parsed. See docs/parallax.md.
+idCVar r_parallax( "r_parallax", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "parallax occlusion mapping: per-pixel surface relief on materials that carry height data (auto-captured from `heightmap(...)` in the bump program, or an explicit `parallaxmap` stage). Non-vanilla; Vulkan only. Takes effect on the next reloadDecls/map load" );
+idCVar r_parallaxScale( "r_parallaxScale", "0.1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "global multiplier on per-material parallax height scale, 0..4 (0 = flat, higher exaggerates the relief; 0.1 = tuned default)", 0.0f, 4.0f );
+idCVar r_parallaxMinSteps( "r_parallaxMinSteps", "6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "parallax occlusion mapping: height-field march steps when viewing head-on (cheaper). Ramps up to r_parallaxMaxSteps at grazing angles", 1, 32 );
+idCVar r_parallaxMaxSteps( "r_parallaxMaxSteps", "16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "parallax occlusion mapping: height-field march steps at grazing angles (higher = fewer swimming artifacts, costlier). Loop is capped at 32", 1, 32 );
+idCVar r_parallaxShadow( "r_parallaxShadow", "0.6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "parallax self-shadowing strength, 0..1 (0 = off): the marched relief casts contact shadows from the light direction. Adds a second (half-step) march per lit pixel. Only active when r_parallax is on", 0.0f, 1.0f );
 
 // DUDE: dampen the cube-map ("sheen") reflection on glass etc. The enhancement
 // backends light the scene brighter than the original renderer, so the environment
@@ -1005,6 +1039,11 @@ void R_InitOpenGL( void ) {
 		common->Warning( "r_graphicsAPI \"%s\": unknown backend, using OpenGL (opengl / opengl3 / vulkan / vulkan-rt)", r_graphicsAPI.GetString() );
 	}
 
+	// DUDE: publish the active-backend flag as a read-only cvar so game code (which
+	// can't see glConfig) can branch on it — e.g. the berserk vision captures at full
+	// resolution on the RHI backends but leaves the legacy 512x256 path untouched.
+	cvarSystem->SetCVarBool( "r_rhiActive", glConfig.rhiBackend );
+
 	// in case we had an error while doing a tiled rendering
 	tr.viewportOffset[0] = 0;
 	tr.viewportOffset[1] = 0;
@@ -1436,6 +1475,56 @@ static void R_ListModes_f( const idCmdArgs &args ) {
 		common->Printf( "%s\n", r_vidModes[i].description );
 	}
 	common->Printf( "\n" );
+}
+
+/*
+==============
+R_ListParallaxMaps_f
+
+DUDE (docs/parallax.md): list every material stage that captured a parallax height
+source, with its scale and the resolved height texture. Phase-A verification that
+auto-capture picked the right `_h.tga` on stock assets. Requires r_parallax to have
+been set when the materials were parsed (run `reloadDecls` after enabling it), since
+the height maps are only loaded then. Optional substring filters by material name.
+==============
+*/
+static void R_ListParallaxMaps_f( const idCmdArgs &args ) {
+	if ( !r_parallax.GetBool() ) {
+		common->Printf( "r_parallax is 0 -- no height maps are captured. Set r_parallax 1 and run reloadDecls.\n" );
+		return;
+	}
+
+	// idStr::Filter globs, so wrap a bare word in wildcards to act as a substring match
+	// (`listParallaxMaps rock` -> `*rock*`); an arg that already has wildcards is used as-is.
+	idStr filter;
+	if ( args.Argc() > 1 ) {
+		filter = args.Argv( 1 );
+		if ( filter.Find( '*' ) < 0 && filter.Find( '?' ) < 0 ) {
+			filter = idStr( "*" ) + filter + "*";
+		}
+	}
+
+	int withParallax = 0;
+	int total = declManager->GetNumDecls( DECL_MATERIAL );
+	for ( int i = 0; i < total; i++ ) {
+		const idMaterial *mat = declManager->MaterialByIndex( i, false );
+		if ( !mat ) {
+			continue;
+		}
+		if ( filter.Length() && !idStr::Filter( filter, mat->GetName(), false ) ) {
+			continue;
+		}
+		for ( int s = 0; s < mat->GetNumStages(); s++ ) {
+			const shaderStage_t *st = mat->GetStage( s );
+			if ( !st->parallaxImage ) {
+				continue;
+			}
+			common->Printf( "%-44s scale %4.1f  %s\n", mat->GetName(), st->parallaxScale,
+							st->parallaxImage->imgName.c_str() );
+			withParallax++;
+		}
+	}
+	common->Printf( "%i parallax height stage(s) across %i material(s)\n", withParallax, total );
 }
 
 
@@ -2883,6 +2972,7 @@ void R_InitCommands( void ) {
 	cmdSystem->AddCommand( "listRenderEntityDefs", R_ListRenderEntityDefs_f, CMD_FL_RENDERER, "lists the entity defs" );
 	cmdSystem->AddCommand( "listRenderLightDefs", R_ListRenderLightDefs_f, CMD_FL_RENDERER, "lists the light defs" );
 	cmdSystem->AddCommand( "listModes", R_ListModes_f, CMD_FL_RENDERER, "lists all video modes" );
+	cmdSystem->AddCommand( "listParallaxMaps", R_ListParallaxMaps_f, CMD_FL_RENDERER, "lists materials with a captured parallax height map (docs/parallax.md); needs r_parallax 1 + reloadDecls" );
 	cmdSystem->AddCommand( "reloadSurface", R_ReloadSurface_f, CMD_FL_RENDERER, "reloads the decl and images for selected surface" );
 	cmdSystem->AddCommand( "reloadPbrTable", R_ReloadPbrTable_f, CMD_FL_RENDERER, "re-reads pbr/pbr_materials.cfg + pbr/pbr_overrides.cfg and re-applies to loaded materials (docs/pbr-materials.md)" );
 }

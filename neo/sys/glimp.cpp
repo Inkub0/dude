@@ -1315,6 +1315,18 @@ void GLimp_Shutdown() {
 		SDL_SetRelativeMouseMode(SDL_FALSE);
 		SDL_SetWindowGrab(window, SDL_FALSE);
 	#endif
+		// Same reasoning as the grab release above: leave fullscreen
+		// EXPLICITLY while the window is fully alive instead of letting
+		// SDL_DestroyWindow do the implicit mode-restore mid-teardown —
+		// that implicit path repositions windows with X_TranslateCoords
+		// requests and threw BadWindow on a fullscreen Vulkan->GL backend
+		// switch (docs/known-bugs.md, vid_restart crash).
+	#if SDL_VERSION_ATLEAST(3, 0, 0)
+		SDL_SetWindowFullscreen(window, false);
+		SDL_SyncWindow(window);
+	#else
+		SDL_SetWindowFullscreen(window, 0);
+	#endif
 		SDL_PumpEvents();
 	}
 
@@ -1326,6 +1338,10 @@ void GLimp_Shutdown() {
 	if (window) {
 		SDL_DestroyWindow(window);
 		window = NULL;
+		// drain the destroy's event fallout now: anything still queued for
+		// the dead window gets dropped here (SDL no longer knows the id)
+		// instead of surfacing during the next window's creation
+		SDL_PumpEvents();
 	}
 #endif
 	// note: the Vulkan backend's device/swapchain/surface are torn down by

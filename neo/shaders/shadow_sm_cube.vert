@@ -8,9 +8,19 @@
 
 layout(location = 0) in vec4 attr_Position;	// w defaults to 1 (vec3 attribute)
 layout(location = 1) in vec2 attr_TexCoord;
+layout(location = 2) in vec3 attr_Normal;
+// DUDE tessellation (docs/tessellation.md): the alpha channel carries the
+// per-vertex UV-seam displacement mask idMD5Mesh stamps in (see tess.glsl).
+// Unused otherwise by this stage.
+layout(location = 5) in vec4 attr_Color;
 
 VARY(0) out vec3 var_LightVec;		// light-relative position; fragment takes length()
 VARY(1) out vec2 var_TexCoord;		// diffuse UV for perforated (alpha-tested) casters
+// model-space control net for the tessellation stages (see shadow_sm.vert); the cube
+// caster's tese recomputes the light-relative vector from the displaced position.
+VARY(2) out vec3 var_ModelPos;
+VARY(3) out vec4 var_ModelNormal;	// .w = UV-seam displacement mask
+VARY(4) out vec2 var_TexBump;
 
 void main() {
 	// world-oriented, light-relative position: rotate the model-space
@@ -34,6 +44,10 @@ void main() {
 	// coverage lookup for grates/fences; opaque casters bind white + a disabled test
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
 	var_TexCoord = vec2( dot( st, u_diffuseMatrixS ), dot( st, u_diffuseMatrixT ) );
+
+	var_ModelPos = attr_Position.xyz;
+	var_ModelNormal = vec4( attr_Normal, attr_Color.a );
+	var_TexBump = vec2( dot( st, u_bumpMatrixS ), dot( st, u_bumpMatrixT ) );
 
 	gl_Position = u_mvpMatrix * vec4( lr, 1.0 );
 }

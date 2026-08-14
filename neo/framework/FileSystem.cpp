@@ -28,6 +28,8 @@ If you have questions concerning this license or the applicable additional terms
 
 #ifdef WIN32
 	#include <io.h>	// for _read
+	#include <sys/types.h>
+	#include <sys/stat.h>	// stat()/S_ISDIR for the dude-folder probe (mingw provides these)
 #else
 	#include <sys/types.h>
 	#include <sys/stat.h>
@@ -48,6 +50,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/DeclManager.h"
 
 #include "framework/FileSystem.h"
+#include "framework/ModCvarTranslation.h"
 
 /*
 =============================================================================
@@ -359,6 +362,7 @@ public:
 	virtual int				WriteFile( const char *relativePath, const void *buffer, int size, const char *basePath = "fs_savepath" );
 	virtual void			RemoveFile( const char *relativePath );
 	virtual idFile *		OpenFileReadFlags( const char *relativePath, int searchFlags, pack_t **foundInPak = NULL, bool allowCopyFiles = true, const char* gamedir = NULL );
+	idFile *				OpenFileReadFlagsRaw( const char *relativePath, int searchFlags, pack_t **foundInPak, bool allowCopyFiles, const char* gamedir );
 	virtual idFile *		OpenFileRead( const char *relativePath, bool allowCopyFiles = true, const char* gamedir = NULL );
 	virtual idFile *		OpenFileWrite( const char *relativePath, const char *basePath = "fs_savepath" );
 	virtual idFile *		OpenFileAppend( const char *relativePath, bool sync = false, const char *basePath = "fs_basepath"   );
@@ -434,6 +438,14 @@ private:
 
 	int						d3xp;	// 0: didn't check, -1: not installed, 1: installed
 
+	// DUDE: mod-compat #include-dedup for .script files. Each entry is a
+	// lowercased relative path that has already been opened for reading in
+	// this program-compile cycle. Reset when script/doom_main.script (the
+	// SCRIPT_DEFAULT entry point that always begins a new cycle) is opened.
+	// Off unless fs_modCompatShim is set.
+	idStrList				compiledScripts;
+	idHashIndex				compiledScriptsHash;
+
 private:
 	void					ReplaceSeparators( idStr &path, char sep = PATHSEPERATOR_CHAR );
 	int						HashFileName( const char *fname ) const;
@@ -487,7 +499,7 @@ idCVar	idFileSystemLocal::fs_caseSensitiveOS( "fs_caseSensitiveOS", "1", CVAR_SY
 idCVar	idFileSystemLocal::fs_searchAddons( "fs_searchAddons", "0", CVAR_SYSTEM | CVAR_BOOL, "search all addon pk4s ( disables addon functionality )" );
 // DUDE: mirror loose base/<game>/guis/*.gui overrides into fs_savepath at startup so
 // they win regardless of launch method (fs_savepath outranks fs_basepath).
-idCVar	fs_installGuiOverrides( "fs_installGuiOverrides", "1", CVAR_SYSTEM | CVAR_BOOL | CVAR_ARCHIVE, "copy loose guis/ overrides from fs_basepath into fs_savepath so they always take effect (fs_savepath outranks fs_basepath)" );
+idCVar	fs_installGuiOverrides( "fs_installGuiOverrides", "1", CVAR_SYSTEM | CVAR_BOOL | CVAR_ARCHIVE, "mirror loose guis/ overrides (*.gui, *.pd) from fs_basepath into fs_savepath when their content differs, so they always take effect (fs_savepath outranks fs_basepath)" );
 
 idCVar idFileSystemLocal::fs_gameDllPath( "fs_gameDllPath", "", CVAR_SYSTEM | CVAR_INIT, "additional directory to search the game .dll (.so/.dylib/...) in; searched before all other places (if set)" );
 
@@ -917,6 +929,59 @@ const char *idFileSystemLocal::OSPathToRelativePath( const char *OSPath ) {
 		}
 	}
 
+	// DUDE: mod-compat fallback. Mod content sometimes bakes an absolute OS path
+	// from the author's machine (e.g. an ASE/LWO mapobject or material editor
+	// image: "C:/Doom3/tfphobos/textures/rock/foo.tga"). The searches above key
+	// on the game-dir name, which won't match when the mod was authored under a
+	// different fs_game than we're running (here: authored 'tfphobos', we run
+	// 'phobos'), so the asset — which usually DOES exist in the paks under its
+	// normal relative path — silently vanishes. As a last resort, look for the
+	// first canonical Doom 3 asset-root directory as a complete path component
+	// and take the relative path from there. Only for foreign mods, so stock
+	// content resolves bit-identically to before.
+	if ( ModCompat::IsForeignMod() ) {
+		static const char *assetRoots[] = {
+			"textures", "models", "materials", "guis", "gui", "sound", "sounds",
+			"script", "def", "particles", "skins", "fx", "anims", "af",
+			"cinematics", "video", "music", "maps", "dds", "generated", "env",
+			"glprogs", "ui", "fonts", "newfonts", "renderprogs"
+		};
+		const char *bestStart = NULL;
+		int osLen = idStr::Length( OSPath );
+		for ( int r = 0; r < (int)( sizeof( assetRoots ) / sizeof( assetRoots[0] ) ); r++ ) {
+			const char *root = assetRoots[r];
+			int rootLen = idStr::Length( root );
+			int from = 0;
+			int idx;
+			while ( from < osLen && ( idx = idStr::FindText( OSPath, root, false, from, osLen ) ) != -1 ) {
+				const char *hit = OSPath + idx;
+				char c1 = ( idx > 0 ) ? *( hit - 1 ) : '\0';
+				char c2 = *( hit + rootLen );
+				bool leftOk = ( idx == 0 ) || ( c1 == '/' || c1 == '\\' );
+				bool rightOk = ( c2 == '/' || c2 == '\\' );
+				if ( leftOk && rightOk ) {
+					// earliest match in the string wins → keeps the fullest subpath
+					if ( bestStart == NULL || hit < bestStart ) {
+						bestStart = hit;
+					}
+					break;
+				}
+				from = idx + 1;
+			}
+		}
+		if ( bestStart != NULL ) {
+			idStr::Copynz( relativePath, bestStart, sizeof( relativePath ) );
+			// normalize backslashes the rest of the engine won't expect here
+			for ( char *c = relativePath; *c; ++c ) {
+				if ( *c == '\\' ) *c = '/';
+			}
+			if ( fs_debug.GetInteger() ) {
+				common->Printf( "idFileSystem::OSPathToRelativePath: mod-compat salvaged '%s' -> '%s'\n", OSPath, relativePath );
+			}
+			return relativePath;
+		}
+	}
+
 	common->Warning( "idFileSystem::OSPathToRelativePath failed on %s", OSPath );
 
 	strcpy( relativePath, "" );
@@ -1050,6 +1115,38 @@ int idFileSystemLocal::ReadFile( const char *relativePath, void **buffer, ID_TIM
 
 	if ( buffer ) {
 		*buffer = NULL;
+	}
+
+	// DUDE: mod-compat script-compile dedup for the game DLL's engine-side
+	// existence pre-check. Some mods (e.g. Phobos) trigger two top-level
+	// program.CompileFile calls for scripts already chained via #include —
+	// the second re-registration causes parser redefinition errors. The
+	// engine's InitGame loop guards each CompileFile with `ReadFile(x, NULL)
+	// > 0`, so returning 0 here on a repeat skips the redundant compile
+	// entirely. This hook fires only on the existence pre-check (buffer==NULL);
+	// actual content reads (buffer!=NULL) always return real bytes so
+	// CompileFile itself never sees a truncated file. Marking is done in
+	// OpenFileReadFlags on successful opens (covers both #include and ReadFile
+	// paths). Reset when doom_main.script is opened — SCRIPT_DEFAULT is always
+	// the first script per program-compile cycle.
+	if ( buffer == NULL && ModCompat::IsForeignMod() ) {
+		int rpLen = idStr::Length( relativePath );
+		if ( rpLen > 7 && idStr::Icmp( relativePath + rpLen - 7, ".script" ) == 0 ) {
+			const char *slash = strrchr( relativePath, '/' );
+			const char *bslash = strrchr( relativePath, '\\' );
+			const char *sep = ( slash > bslash ) ? slash : bslash;
+			idStr scriptBase = sep ? sep + 1 : relativePath;
+			scriptBase.ToLower();
+			int hkey = compiledScriptsHash.GenerateKey( scriptBase.c_str(), false );
+			for ( int i = compiledScriptsHash.First( hkey ); i != -1; i = compiledScriptsHash.Next( i ) ) {
+				if ( compiledScripts[i] == scriptBase ) {
+					if ( fs_debug.GetInteger() ) {
+						common->Printf( "fs modCompatShim: skipping repeat top-level compile of '%s'\n", relativePath );
+					}
+					return 0;
+				}
+			}
+		}
 	}
 
 	buf = NULL;	// quiet compiler warning
@@ -2161,9 +2258,12 @@ idFileSystemLocal::InstallGuiOverrides
 
 DUDE: loose GUI overrides live in fs_basepath/<game>/guis, but fs_savepath outranks
 fs_basepath in the search order, so a pak sitting in savepath would shadow them.
-Mirror the loose top-level *.gui overrides from basepath into savepath (when the two
-differ) so they take effect no matter how the game is launched. Newer-only, so it's
-cheap and won't clobber unchanged files. Disable with fs_installGuiOverrides 0.
+Mirror the loose top-level *.gui overrides (and the *.pd include files they pull in)
+from basepath into savepath whenever the bytes differ, so the basepath copy takes
+effect no matter how the game is launched. Content compare, not timestamps: the
+basepath copy is canonical, and mtimes lie (git checkouts, restored backups) — a
+stale savepath copy with a newer date must still lose. Disable with
+fs_installGuiOverrides 0.
 ================
 */
 void idFileSystemLocal::InstallGuiOverrides( const char *gameName ) {
@@ -2176,32 +2276,66 @@ void idFileSystemLocal::InstallGuiOverrides( const char *gameName ) {
 		return; // nothing to do (e.g. run.sh sets fs_savepath == fs_basepath)
 	}
 
+	// DUDE: skip (and undo) the base overrides when a foreign mod is active — otherwise
+	// the mirrored DUDE mainmenu.gui in savepath shadows the mod's own guis/mainmenu.gui.
+	// Mods based on d3xp/base are treated as DUDE-friendly.
+	const char *activeMod = fs_game.GetString();
+	const bool foreignMod = activeMod[0]
+		&& idStr::Icmp( activeMod, BASE_GAMEDIR ) != 0
+		&& idStr::Icmp( activeMod, "d3xp" ) != 0;
+
 	idStr srcDir = BuildOSPath( base, gameName, "guis" );
-	idStrList guis;
-	ListOSFiles( srcDir, ".gui", guis );
+	static const char *overrideExts[] = { ".gui", ".pd" };
 
-	for ( int i = 0; i < guis.Num(); i++ ) {
-		idStr rel = idStr( "guis/" ) + guis[i];
-		idStr from = BuildOSPath( base, gameName, rel.c_str() );
-		idStr to   = BuildOSPath( save, gameName, rel.c_str() );
+	for ( int e = 0; e < 2; e++ ) {
+		idStrList files;
+		ListOSFiles( srcDir, overrideExts[e], files );
 
-		FILE *sf = OpenOSFile( from.c_str(), "rb" );
-		if ( !sf ) {
-			continue;
-		}
-		ID_TIME_T srcTime = Sys_FileTimeStamp( sf );
-		fclose( sf );
+		for ( int i = 0; i < files.Num(); i++ ) {
+			idStr rel = idStr( "guis/" ) + files[i];
+			idStr from = BuildOSPath( base, gameName, rel.c_str() );
+			idStr to   = BuildOSPath( save, gameName, rel.c_str() );
 
-		ID_TIME_T dstTime = FILE_NOT_FOUND_TIMESTAMP;
-		FILE *df = OpenOSFile( to.c_str(), "rb" );
-		if ( df ) {
-			dstTime = Sys_FileTimeStamp( df );
-			fclose( df );
-		}
+			if ( foreignMod ) {
+				// Remove any previously-installed savepath copy so the mod's own gui wins.
+				if ( remove( to.c_str() ) == 0 ) {
+					common->Printf( "removing DUDE GUI override from savepath (foreign mod '%s' active): %s/%s\n",
+						activeMod, gameName, rel.c_str() );
+				}
+				continue;
+			}
 
-		if ( dstTime == FILE_NOT_FOUND_TIMESTAMP || srcTime > dstTime ) {
-			common->Printf( "installing GUI override into savepath: %s/%s\n", gameName, rel.c_str() );
-			CopyFile( from.c_str(), to.c_str() );
+			FILE *sf = OpenOSFile( from.c_str(), "rb" );
+			if ( !sf ) {
+				continue;
+			}
+
+			bool same = false;
+			FILE *df = OpenOSFile( to.c_str(), "rb" );
+			if ( df ) {
+				fseek( sf, 0, SEEK_END );
+				fseek( df, 0, SEEK_END );
+				if ( ftell( sf ) == ftell( df ) ) {
+					rewind( sf );
+					rewind( df );
+					same = true;
+					byte sbuf[4096], dbuf[4096];
+					size_t n;
+					while ( ( n = fread( sbuf, 1, sizeof( sbuf ), sf ) ) > 0 ) {
+						if ( fread( dbuf, 1, n, df ) != n || memcmp( sbuf, dbuf, n ) != 0 ) {
+							same = false;
+							break;
+						}
+					}
+				}
+				fclose( df );
+			}
+			fclose( sf );
+
+			if ( !same ) {
+				common->Printf( "installing GUI override into savepath: %s/%s\n", gameName, rel.c_str() );
+				CopyFile( from.c_str(), to.c_str() );
+			}
 		}
 	}
 }
@@ -2713,6 +2847,36 @@ void idFileSystemLocal::SetRestartChecksums( const int pureChecksums[ MAX_PURE_P
 
 /*
 ================
+DUDE path model helpers (docs/filesystem-paths.md)
+
+fs_basepath is the read-only original game data; the "dude folder" (fs_savepath)
+is the single writable home for everything that diverges from it. These probe
+where that writable folder should live. Called during path resolution, BEFORE
+Startup(), so they must not touch searchPaths / the VFS -- raw OS calls only.
+================
+*/
+static bool FS_DirExists( const char *osDir ) {
+	struct stat st;
+	return stat( osDir, &st ) != -1 && S_ISDIR( st.st_mode );
+}
+
+// true if we can create osDir (its parent already exists -- it's a leaf under an
+// existing install or user dir) and write a file in it. Uses forward slashes,
+// which fopen/stat accept on every target including Windows.
+static bool FS_DirWritable( const char *osDir ) {
+	Sys_Mkdir( osDir );					// no-op if it already exists
+	idStr probe = idStr( osDir ) + "/.dudewrite.tmp";
+	FILE *f = fopen( probe.c_str(), "wb" );
+	if ( !f ) {
+		return false;
+	}
+	fclose( f );
+	remove( probe.c_str() );
+	return true;
+}
+
+/*
+================
 idFileSystemLocal::Init
 
 Called only at inital startup, not when the filesystem
@@ -2739,8 +2903,37 @@ void idFileSystemLocal::Init( void ) {
 	if (fs_basepath.GetString()[0] == '\0' && Sys_GetPath(PATH_BASE, path))
 		fs_basepath.SetString(path);
 
-	if (fs_savepath.GetString()[0] == '\0' && Sys_GetPath(PATH_SAVE, path))
-		fs_savepath.SetString(path);
+	// DUDE "dude folder" (fs_savepath): the single writable home for everything
+	// that diverges from the read-only base data. Resolution order:
+	//   1. explicit +set fs_savepath (e.g. run.sh) always wins -- left untouched
+	//   2. an existing dude folder at the per-user OS location is kept as-is, so
+	//      we never orphan a user's saves/config by relocating them
+	//   3. otherwise, if <fs_basepath>/dude is writable, co-locate there (a
+	//      portable, self-contained install "follows" the base data)
+	//   4. otherwise fall back to the per-user OS dir (read-only base install)
+	// The choice is logged with how to override it. (Per-install keying of the
+	// fallback and Steam/GOG base autodetection come in later Phase-1 steps.)
+	if ( fs_savepath.GetString()[0] == '\0' ) {
+		idStr userDir;
+		const bool haveUserDir = Sys_GetPath( PATH_SAVE, userDir );
+		idStr chosen;
+		const char *why = "";
+		if ( haveUserDir && FS_DirExists( userDir.c_str() ) ) {
+			chosen = userDir;			why = "existing user dir";
+		} else {
+			idStr coloc = idStr( fs_basepath.GetString() ) + "/dude";
+			if ( fs_basepath.GetString()[0] != '\0' && FS_DirWritable( coloc.c_str() ) ) {
+				chosen = coloc;			why = "co-located with base data";
+			} else if ( haveUserDir ) {
+				chosen = userDir;		why = "per-user dir (base data not writable)";
+			}
+		}
+		if ( chosen.Length() ) {
+			fs_savepath.SetString( chosen.c_str() );
+			common->Printf( "dude folder (writable divergence): %s [%s]\n", chosen.c_str(), why );
+			common->Printf( "  (override with +set fs_savepath <dir>)\n" );
+		}
+	}
 
 	if (fs_configpath.GetString()[0] == '\0' && Sys_GetPath(PATH_CONFIG, path))
 		fs_configpath.SetString(path);
@@ -2782,6 +2975,12 @@ idFileSystemLocal::Restart
 ================
 */
 void idFileSystemLocal::Restart( void ) {
+	// DUDE: mod-compat script dedup — a fs_restart usually means the game or
+	// mod is changing; drop any lingering compiled-script tracking so we don't
+	// carry a mod's dedup state into a fresh mod (or into stock content).
+	compiledScripts.Clear();
+	compiledScriptsHash.Free();
+
 	// free anything we currently have loaded
 	Shutdown( true );
 
@@ -3026,6 +3225,41 @@ separate file or a ZIP file.
 ===========
 */
 idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int searchFlags, pack_t **foundInPak, bool allowCopyFiles, const char* gamedir ) {
+	idFile *result = OpenFileReadFlagsRaw( relativePath, searchFlags, foundInPak, allowCopyFiles, gamedir );
+
+	// DUDE: mod-compat script-compile dedup — mark a .script basename as
+	// successfully opened so a later top-level ReadFile(x, NULL) pre-check
+	// returns 0 and the DLL's InitGame loop skips a duplicate CompileFile.
+	// See the matching hook near the top of ReadFile() for the actual dedup.
+	// doom_main.script (SCRIPT_DEFAULT) is always the first script per
+	// program-compile cycle → treat it as the set-reset signal.
+	if ( result != NULL && relativePath && ModCompat::IsForeignMod() ) {
+		int rpLen = idStr::Length( relativePath );
+		if ( rpLen > 7 && idStr::Icmp( relativePath + rpLen - 7, ".script" ) == 0 ) {
+			const char *slash = strrchr( relativePath, '/' );
+			const char *bslash = strrchr( relativePath, '\\' );
+			const char *sep = ( slash > bslash ) ? slash : bslash;
+			idStr scriptBase = sep ? sep + 1 : relativePath;
+			scriptBase.ToLower();
+			if ( idStr::Icmp( scriptBase.c_str(), "doom_main.script" ) == 0 ) {
+				compiledScripts.Clear();
+				compiledScriptsHash.Free();
+			}
+			int hkey = compiledScriptsHash.GenerateKey( scriptBase.c_str(), false );
+			bool alreadyMarked = false;
+			for ( int i = compiledScriptsHash.First( hkey ); i != -1; i = compiledScriptsHash.Next( i ) ) {
+				if ( compiledScripts[i] == scriptBase ) { alreadyMarked = true; break; }
+			}
+			if ( !alreadyMarked ) {
+				compiledScripts.Append( scriptBase );
+				compiledScriptsHash.Add( hkey, compiledScripts.Num() - 1 );
+			}
+		}
+	}
+	return result;
+}
+
+idFile *idFileSystemLocal::OpenFileReadFlagsRaw( const char *relativePath, int searchFlags, pack_t **foundInPak, bool allowCopyFiles, const char* gamedir ) {
 	searchpath_t *	search;
 	idStr			netpath;
 	pack_t *		pak;

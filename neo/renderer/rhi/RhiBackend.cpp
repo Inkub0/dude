@@ -23,6 +23,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 //     dynamic state / CopyFramebufferToImage in the Vulkan backend)
 
 #include "sys/platform.h"
+#include "idlib/geometry/JointTransform.h"
 #include "framework/FileSystem.h"
 #include "framework/CmdSystem.h"
 #include "renderer/RenderWorld_local.h"
@@ -32,6 +33,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "renderer/rhi/RHI.h"
 #include "renderer/rhi/GL3Local.h"
 #include "renderer/rhi/RenderParams.h"
+#include "renderer/rhi/RhiTess.h"
 #include "renderer/rhi/ArbParamsBlock.h"
 #include "renderer/rhi/MaterialIR.h"
 
@@ -86,6 +88,21 @@ extern idCVar r_gammaInShader;
 extern idCVar r_gamma;
 extern idCVar r_brightness;
 
+// DUDE berserk vision (RHI backends): a faithful port of the stock ARB material
+// textures/decals/berserk (materials/decals.mtr). That material recursively re-samples the
+// previous frame magnified ~3% about the centre (centerscale), gated by the berserk2
+// texture's radial alpha (sharp centre, feedback edges) — the "streak zoom". Its recursive
+// _scratch capture doesn't accumulate on the RHI path, so the exact same operations run
+// every frame into a ping-pong render target instead (berserk_accum), and the display blit
+// shows the accumulated buffer (the `berserk` builtin). Legacy keeps its original path.
+// The look constants (0.95 centerscale per 60fps-frame, full mask feedback, full-res trail)
+// are baked into the RB_RHI_BerserkAccum call below — tuned and locked, no user knobs.
+// game-driven strength: 1 while berserk is active, ramps 1->0 over the 2s wind-down after it
+// ends (PlayerView.cpp writes it, this backend reads it as both the intercept trigger and the
+// wind-down fade). Not a user knob — the game<->renderer bridge that drives the effect.
+idCVar r_berserkFade( "r_berserkFade", "0", CVAR_RENDERER | CVAR_FLOAT,
+	"berserk vision effect strength (set by the game: 1 active, fading to 0 as berserk ends)" );
+
 // DUDE: brightness scale for cube-map ("sheen") reflections on glass etc.
 // (r_gl3ReflectionScale, defined in RenderSystem_init.cpp) — the enhancement
 // backends light the scene brighter than the original renderer, so the
@@ -125,13 +142,14 @@ static rhi::RenderTargetHandle	rhiSmaaEdgesRT = 0;		// RG edge mask (RGBA8)
 static rhi::RenderTargetHandle	rhiSmaaWeightsRT = 0;	// blending weights (RGBA8)
 static rhi::RenderTargetHandle	rhiSmaaSceneRT = 0;		// de-POT'd LDR scene copy (RGBA8)
 static int rhiSmaaW = 0, rhiSmaaH = 0;
-// The LUTs are raw GL textures, NOT idImages: AreaTex is 160x560 and
-// idImage::GenerateImage hard-errors on non-power-of-2 dimensions (vanilla
-// mipmap/scaling assumptions). NPOT is core GL 3.0+ and this path only runs
-// on the GL3 backend; the names ride DrawArgs::textures like render-target
-// images do. TODO(RHI): becomes rhi CreateImage on the Vulkan backend.
-static GLuint rhiSmaaAreaTex = 0;
-static GLuint rhiSmaaSearchTex = 0;
+// The LUTs are NOT idImages: AreaTex is 160x560 and idImage::GenerateImage
+// hard-errors on non-power-of-2 dimensions (vanilla mipmap/scaling assumptions).
+// On GL3 they upload as raw NPOT GL textures (core GL 3.0+); on Vulkan they go
+// through the RHI CreateTexture2D image path (qgl is NULL there, and VK has no
+// power-of-2 restriction). Either way the handle rides DrawArgs::textures like the
+// render-target images do — a raw GL name on GL3, an RHI ImageHandle on VK.
+static rhi::ImageHandle rhiSmaaAreaTex = 0;
+static rhi::ImageHandle rhiSmaaSearchTex = 0;
 
 // target creation and the raw target-image binds in the SMAA draws bypass the
 // idImage bind cache in backEnd.glState.tmu; invalidate it so the engine
@@ -167,9 +185,29 @@ static GLuint RB_RHI_SmaaUploadLut( const byte *src, int srcChannels, int w, int
 	return tex;
 }
 
+// Vulkan LUT upload: the same RG/R -> RGBA8 expansion as the GL path above, but
+// through the RHI CreateTexture2D image path (qgl is NULL under VK). NPOT is fine
+// (the p-o-2 restriction was idImage-only), and CreateTexture2D's blocking upload
+// runs on its own uploadCb + fence, independent of the still-recording frame command
+// buffer, so a first-use mid-frame upload is safe. Returns an RHI ImageHandle that
+// rides DrawArgs::textures like the render-target images do.
+static rhi::ImageHandle RB_RHI_SmaaUploadLutVk( rhi::RHI *r, const byte *src, int srcChannels, int w, int h, int filter ) {
+	byte *pic = (byte *)R_StaticAlloc( w * h * 4 );
+	for ( int i = 0; i < w * h; i++ ) {
+		pic[i*4+0] = src[i*srcChannels+0];
+		pic[i*4+1] = srcChannels > 1 ? src[i*srcChannels+1] : 0;
+		pic[i*4+2] = 0;
+		pic[i*4+3] = 255;
+	}
+	rhi::ImageHandle img = r->CreateTexture2D( w, h, pic, filter, TR_CLAMP, false );
+	R_StaticFree( pic );
+	return img;
+}
+
 // edges + weights targets (and the LDR scene copy when asked for), sized to the
 // view; self-heals after a lost context the same way the SSR target does
 static bool RB_RHI_EnsureSmaaTargets( rhi::RHI *r, int w, int h, bool needScene ) {
+	const bool vkMode = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
 	if ( rhiSmaaEdgesRT && r->GetRenderTargetImage( rhiSmaaEdgesRT ) == 0 ) {
 		rhiSmaaEdgesRT = rhiSmaaWeightsRT = rhiSmaaSceneRT = 0;	// lost context (vid_restart)
 		rhiSmaaW = rhiSmaaH = 0;
@@ -199,9 +237,14 @@ static bool RB_RHI_EnsureSmaaTargets( rhi::RHI *r, int w, int h, bool needScene 
 	if ( !rhiSmaaAreaTex ) {
 		// AreaTex is RG (two packed coverage areas), bilinear — SMAA
 		// interpolates between sub-areas; SearchTex must be point-sampled
-		rhiSmaaAreaTex = RB_RHI_SmaaUploadLut( areaTexBytes, 2, AREATEX_WIDTH, AREATEX_HEIGHT, GL_LINEAR );
-		rhiSmaaSearchTex = RB_RHI_SmaaUploadLut( searchTexBytes, 1, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, GL_NEAREST );
-		RB_RHI_AAForgetTexBinds();		// the uploads disturbed the active unit's cached bind
+		if ( vkMode ) {
+			rhiSmaaAreaTex = RB_RHI_SmaaUploadLutVk( r, areaTexBytes, 2, AREATEX_WIDTH, AREATEX_HEIGHT, TF_LINEAR );
+			rhiSmaaSearchTex = RB_RHI_SmaaUploadLutVk( r, searchTexBytes, 1, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, TF_NEAREST );
+		} else {
+			rhiSmaaAreaTex = RB_RHI_SmaaUploadLut( areaTexBytes, 2, AREATEX_WIDTH, AREATEX_HEIGHT, GL_LINEAR );
+			rhiSmaaSearchTex = RB_RHI_SmaaUploadLut( searchTexBytes, 1, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, GL_NEAREST );
+			RB_RHI_AAForgetTexBinds();		// the uploads disturbed the active unit's cached bind
+		}
 	}
 	return rhiSmaaAreaTex != 0 && rhiSmaaSearchTex != 0;
 }
@@ -250,21 +293,42 @@ static void RB_RHI_SmaaDraw( rhi::RHI *r, rhi::ShaderHandle prog, const rhi::Ren
 
 /*
 =============
-RB_RHI_SmaaChain
+RB_RHI_SmaaEndUnitState
 
-The three SMAA 1x passes over an exact-size scene image: edge detection ->
-blending weights (AreaTex/SearchTex LUTs on units 1/2) -> neighborhood blend.
-outputRT 0 writes the resolved image to the backbuffer (LDR path; the caller
-already set viewport/scissor); otherwise into the given float target (HDR).
-The edge/weight passes discard on non-edge pixels, so both targets are
-cleared. Returns false (leaving the frame untouched) if anything is missing.
+After a multi-unit SMAA draw the GL active unit is left on 1/2, and idImage::Bind
+binds on the *active* unit while recording under currenttmu — the next
+CopyFramebuffer (film grain's snapshot) would land its bind on the wrong unit and
+then skip the "already bound" rebind on unit 0, sampling a stale SMAA target instead
+of _currentRender. Leave the chain on unit 0 with the bind cache invalidated so every
+following bind re-issues cleanly. VK has no active-unit state (each Draw fully
+specifies its texture set) and gl3ActiveTexture is a NULL qgl pointer there, so skip it.
 =============
 */
-static bool RB_RHI_SmaaChain( rhi::RHI *r, rhi::ImageHandle sceneImg, rhi::RenderTargetHandle outputRT, int w, int h ) {
+static void RB_RHI_SmaaEndUnitState( rhi::RHI *r ) {
+	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		RB_RHI_AAForgetTexBinds();
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+	}
+}
+
+/*
+=============
+RB_RHI_SmaaEdgesWeights
+
+The first two SMAA 1x passes over an exact-size scene image: luma edge detection ->
+blending weights (AreaTex/SearchTex LUTs on units 1/2), leaving the weights in
+rhiSmaaWeightsRT for a following neighborhood-blend pass (either RB_RHI_SmaaChain's
+blend, or the fused hdrresolve_smaa resolve). Both edge/weight targets discard on
+non-edge pixels, so both are cleared. The caller must have run RB_RHI_EnsureSmaaTargets.
+Does NOT restore unit state — the caller's blend pass is also multi-unit, so the shared
+RB_RHI_SmaaEndUnitState runs once after it. Returns false if a shader/image is missing.
+=============
+*/
+static bool RB_RHI_SmaaEdgesWeights( rhi::RHI *r, rhi::ImageHandle sceneImg, int w, int h ) {
 	rhi::ShaderHandle edgesProg = r->LoadShader( "smaa_edges" );
 	rhi::ShaderHandle weightsProg = r->LoadShader( "smaa_weights" );
-	rhi::ShaderHandle blendProg = r->LoadShader( "smaa_blend" );
-	if ( !edgesProg || !weightsProg || !blendProg || !sceneImg ) {
+	if ( !edgesProg || !weightsProg || !sceneImg ) {
 		return false;
 	}
 
@@ -291,6 +355,37 @@ static bool RB_RHI_SmaaChain( rhi::RHI *r, rhi::ImageHandle sceneImg, rhi::Rende
 	RB_RHI_SmaaDraw( r, weightsProg, parms, r->GetRenderTargetImage( rhiSmaaEdgesRT ),
 	                 rhiSmaaAreaTex, rhiSmaaSearchTex );
 	r->EndPass();
+	return true;
+}
+
+/*
+=============
+RB_RHI_SmaaChain
+
+The three SMAA 1x passes over an exact-size scene image: edges+weights (above) then
+neighborhood blend. outputRT 0 writes the resolved image to the backbuffer (LDR path;
+the caller already set viewport/scissor); otherwise into the given float target (HDR).
+Returns false (leaving the frame untouched) if anything is missing. The fused HDR path
+(RB_RHI_HdrResolveSmaaFused) reuses RB_RHI_SmaaEdgesWeights and does the blend itself.
+=============
+*/
+static bool RB_RHI_SmaaChain( rhi::RHI *r, rhi::ImageHandle sceneImg, rhi::RenderTargetHandle outputRT, int w, int h ) {
+	rhi::ShaderHandle blendProg = r->LoadShader( "smaa_blend" );
+	if ( !blendProg || !sceneImg ) {
+		return false;
+	}
+	if ( !RB_RHI_SmaaEdgesWeights( r, sceneImg, w, h ) ) {
+		return false;
+	}
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	// SMAA_RT_METRICS (the blend samples the weights + scene at texel offsets)
+	parms.localParam0[0] = 1.0f / w;
+	parms.localParam0[1] = 1.0f / h;
+	parms.localParam0[2] = (float)w;
+	parms.localParam0[3] = (float)h;
 
 	// pass 3: neighborhood blend -> backbuffer or the HDR AA target
 	if ( outputRT ) {
@@ -301,15 +396,7 @@ static bool RB_RHI_SmaaChain( rhi::RHI *r, rhi::ImageHandle sceneImg, rhi::Rende
 		RB_RHI_SmaaDraw( r, blendProg, parms, sceneImg, r->GetRenderTargetImage( rhiSmaaWeightsRT ) );
 	}
 
-	// the multi-unit draws left the GL active unit on 1/2, and idImage::Bind
-	// binds on the *active* unit while recording under currenttmu — the next
-	// CopyFramebuffer (film grain's snapshot) would land its bind on the wrong
-	// unit and then skip the "already bound" rebind on unit 0, sampling a stale
-	// SMAA target instead of _currentRender. Leave the chain on unit 0 with the
-	// bind cache invalidated so every following bind re-issues cleanly.
-	RB_RHI_AAForgetTexBinds();
-	rhi::gl3ActiveTexture( GL_TEXTURE0 );
-	backEnd.glState.currenttmu = 0;
+	RB_RHI_SmaaEndUnitState( r );
 	return true;
 }
 
@@ -657,11 +744,16 @@ onto the backbuffer at swap time, just before the gamma pass. Phase A is a strai
 passthrough resolve (shaders/hdrresolve.*); Phase B folds exposure + tonemap into it.
 =============
 */
-static rhi::RenderTargetHandle	rhiHdrRT = 0;		// scene buffer (RGBA16F + depth-stencil)
-static rhi::RenderTargetHandle	rhiHdrAaRT = 0;		// FXAA output ping (RGBA16F, color only)
+static rhi::RenderTargetHandle	rhiHdrRT = 0;		// scene buffer (RGBA16F HDR, or RGBA8 for the VK off-HDR post pass) + depth-stencil
+static rhi::RenderTargetHandle	rhiHdrAaRT = 0;		// FXAA/SMAA output ping (RGBA16F in HDR, RGBA8 for the VK off-HDR post pass; color only)
 static int						rhiHdrW = 0, rhiHdrH = 0;
-static bool						rbHdrActiveThisFrame = false;	// float FBO bound *right now* (view pass)
-static bool						rbHdrFrameActive = false;		// this whole frame is an HDR frame
+static bool						rbHdrRtFloat = false;			// rhiHdrRT is RGBA16F (HDR) vs RGBA8 (off-HDR post) — recreate on change
+static bool						rbHdrAaFloat = false;			// rhiHdrAaRT is RGBA16F vs RGBA8 — must track rhiHdrRT's format
+static bool						rbHdrActiveThisFrame = false;	// scene post-target bound *right now* (view pass)
+static bool						rbHdrFrameActive = false;		// this whole frame is a true float-HDR frame
+static bool						rbBerserkFrame = false;			// berserk material seen this frame → radial-blur the _scratch blit
+static bool						rbHelltimeFrame = false;		// bloodorbN hell-time material seen this frame
+static int						rbHelltimeLevel = 0;			// 0/1/2 = HELLTIME/BERSERK/INVULNERABILITY (from the bloodorbN name)
 
 /*
 =============
@@ -729,7 +821,43 @@ static bool RB_RHI_FrameHasWorldScene( const emptyCommand_t *cmds ) {
 static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	rbHdrActiveThisFrame = false;
 	rbHdrFrameActive = false;
-	if ( !r_hdr.GetBool() || !R_BackendSupportsEnhancements() ) {
+
+	// Baking a glass reflection probe (bakeGlassProbe, tr.takingEnvProbe): the six
+	// 90-degree faces must be the clean scene, so they stay on the straight-to-
+	// sceneColor path with no offscreen post target. Two reasons this matters:
+	//   1. Fidelity — film grain / chromatic aberration / tonemapping belong on the
+	//      final frame, not baked into a texture the live frame then samples *and*
+	//      re-posts; the probe would double up (the buggy captures literally showed
+	//      the HUD + aberration fringe of the frame behind the bake).
+	//   2. Correctness — the probe renders at the tile size (r_ssrGlassProbeSize,
+	//      e.g. 256) while the Vulkan scene image stays the swapchain size, so the
+	//      offscreen target is sized to the tile but every GL->VK y-flip still uses
+	//      sceneExtent (the window height). The scene then resolves/reads back out of
+	//      register (the validation copy/blit/clear-attachment errors) and the probe
+	//      face captured stale full-window content instead. The no-target path keeps
+	//      all coordinates on one height (sceneExtent == sceneColor), like GL.
+	if ( tr.takingEnvProbe ) {
+		return;
+	}
+
+	const bool wantHdr = r_hdr.GetBool() && R_BackendSupportsEnhancements();
+
+	// Off-HDR post (Vulkan only): the GL backend runs film grain / chromatic
+	// aberration per 3D view and gamma as a swap-time pass over the backbuffer, but
+	// on Vulkan the scene lives in an offscreen image that isn't sampleable in place,
+	// so those effects need the same route-the-scene-into-a-target-then-resolve flow
+	// the HDR path uses — just at RGBA8 instead of RGBA16F. FXAA/SMAA ride the same
+	// RGBA8 ping in this mode (see the AA scratch below). Engage it when any of grain /
+	// chroma / in-shader gamma / AA is active so the resolve has somewhere to apply them.
+	// When HDR is on, the float path already covers all of these.
+	const bool vkMode = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+	const bool gammaWanted = r_gammaInShader.GetBool()
+		&& ( r_gamma.GetFloat() != 1.0f || r_brightness.GetFloat() != 1.0f );
+	const bool ldrPostWanted = vkMode && !wantHdr
+		&& ( r_postFilmGrain.GetFloat() > 0.0f || r_postChromaticAberration.GetFloat() > 0.0f
+		     || gammaWanted || r_rhiAA.GetInteger() > 0 );
+
+	if ( !wantHdr && !ldrPostWanted ) {
 		return;		// off → the frame stays on the backbuffer exactly as before
 	}
 
@@ -743,37 +871,46 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	int w = glConfig.vidWidth;
 	int h = glConfig.vidHeight;
 
-	// (re)create on resolution change or a lost context (vid_restart wipes the
-	// backend's targets, so a stale handle reports a null image) — same idiom as
-	// the SSAO targets in RhiWorld
-	if ( rhiHdrRT && ( rhiHdrW != w || rhiHdrH != h || r->GetRenderTargetImage( rhiHdrRT ) == 0 ) ) {
+	// (re)create on resolution change, a format change (HDR toggled on/off — the
+	// off-HDR post target is RGBA8, the HDR one RGBA16F), or a lost context (vid_restart
+	// wipes the backend's targets, so a stale handle reports a null image) — same idiom
+	// as the SSAO targets in RhiWorld
+	if ( rhiHdrRT && ( rhiHdrW != w || rhiHdrH != h || rbHdrRtFloat != wantHdr
+	                   || r->GetRenderTargetImage( rhiHdrRT ) == 0 ) ) {
 		r->DestroyRenderTarget( rhiHdrRT );
 		rhiHdrRT = 0;
 	}
 	if ( !rhiHdrRT ) {
-		rhiHdrRT = r->CreateRenderTargetColorDepthStencil( rhi::IF_RGBA16F, w, h );
+		rhiHdrRT = r->CreateRenderTargetColorDepthStencil( wantHdr ? rhi::IF_RGBA16F : rhi::IF_RGBA8, w, h );
 		rhiHdrW = w;
 		rhiHdrH = h;
+		rbHdrRtFloat = wantHdr;
 	}
 	if ( !rhiHdrRT ) {
 		return;		// creation failed (no RGBA16F support?) → fall back to the backbuffer
 	}
 
-	// FXAA scratch: a float ping buffer so FXAA (r_rhiAA) also stays in HDR instead of
-	// round-tripping the 8-bit _currentRender. Only allocated while FXAA is on; freed when
-	// it turns off, on resize, or on context loss.
-	const bool wantAa = ( r_rhiAA.GetInteger() > 0 );
-	if ( rhiHdrAaRT && ( !wantAa || rhiHdrW != w || rhiHdrH != h || r->GetRenderTargetImage( rhiHdrAaRT ) == 0 ) ) {
+	// AA scratch: a ping buffer so FXAA/SMAA (r_rhiAA) run scene->scene before the
+	// resolve, keeping the anti-aliased image in the scene buffer's own format instead
+	// of round-tripping the 8-bit _currentRender. It matches rhiHdrRT's format — RGBA16F
+	// in HDR, RGBA8 in the VK off-HDR post pass — so it's recreated when that format flips.
+	// Freed when AA turns off, on resize, on a format switch, or on context loss.
+	const bool wantAa = ( wantHdr || ldrPostWanted ) && ( r_rhiAA.GetInteger() > 0 );
+	if ( rhiHdrAaRT && ( !wantAa || rhiHdrW != w || rhiHdrH != h || rbHdrAaFloat != wantHdr
+	                     || r->GetRenderTargetImage( rhiHdrAaRT ) == 0 ) ) {
 		r->DestroyRenderTarget( rhiHdrAaRT );
 		rhiHdrAaRT = 0;
 	}
 	if ( wantAa && !rhiHdrAaRT ) {
-		rhiHdrAaRT = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+		rhiHdrAaRT = r->CreateRenderTarget( wantHdr ? rhi::IF_RGBA16F : rhi::IF_RGBA8, w, h );
+		rbHdrAaFloat = wantHdr;
 	}
 
 	r->SetFrameTarget( rhiHdrRT );
 	rbHdrActiveThisFrame = true;
-	rbHdrFrameActive = true;	// stays true past HdrResolve so _currentRender keeps one format all frame
+	// only a true float-HDR frame forces _currentRender to RGBA16F; the off-HDR post
+	// target is RGBA8, so captures (glass refraction) keep the default 8-bit format
+	rbHdrFrameActive = wantHdr;	// stays true past HdrResolve so _currentRender keeps one format all frame
 }
 
 // FXAA as a float->float pass (rhiHdrRT color -> rhiHdrAaRT), so the anti-aliased image
@@ -853,14 +990,114 @@ static bool RB_RHI_HdrSmaa( rhi::RHI *r ) {
 	return RB_RHI_SmaaChain( r, r->GetRenderTargetImage( rhiHdrRT ), rhiHdrAaRT, w, h );
 }
 
+/*
+=============
+RB_RHI_HdrResolveSmaaFused
+
+Fuses SMAA 1x's final neighborhood-blend pass INTO the HDR resolve: run edges+weights, then a
+single hdrresolve_smaa pass reads the float scene + the weights, does the blend, and applies the
+resolve's grain/gamma tail straight to the backbuffer. That drops the separate rhiHdrAaRT
+round-trip the classic path needs (blend -> rhiHdrAaRT, then hdrresolve reads it back).
+
+Eligible only when SMAA is the active AA (r_rhiAA 2) and chromatic aberration is OFF — chroma
+samples the resolved image at radial offsets, which a single fused pass can't provide (it only has
+the AA'd colour at the current fragment). Returns false to fall through to the classic path when
+ineligible or when a shader/target is unavailable; true when it has fully resolved the frame.
+
+For zero-weight pixels the neighborhood blend is a pass-through, so with chroma off the fused output
+is bit-identical to the classic AA-pass + hdrresolve it replaces.
+=============
+*/
+static bool RB_RHI_HdrResolveSmaaFused( rhi::RHI *r, int w, int h ) {
+	if ( r_rhiAA.GetInteger() != 2 || r_postChromaticAberration.GetFloat() > 0.0f || !rhiHdrRT ) {
+		return false;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "hdrresolve_smaa" );
+	if ( !prog ) {
+		return false;
+	}
+	if ( !RB_RHI_EnsureSmaaTargets( r, w, h, false ) ) {
+		return false;
+	}
+	if ( !RB_RHI_SmaaEdgesWeights( r, r->GetRenderTargetImage( rhiHdrRT ), w, h ) ) {
+		return false;
+	}
+
+	// final fused pass: neighborhood blend + grain + gamma, scene(unit 0) + weights(unit 1) -> backbuffer
+	r->SetFrameTarget( 0 );
+	r->SetViewport( 0, 0, w, h );
+	r->SetScissor( 0, 0, w, h );
+	backEnd.currentScissor.x1 = 0;
+	backEnd.currentScissor.y1 = 0;
+	backEnd.currentScissor.x2 = w - 1;
+	backEnd.currentScissor.y2 = h - 1;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	// SMAA_RT_METRICS (localParam0) — shared by the vertex offset and the blend
+	parms.localParam0[0] = 1.0f / w;
+	parms.localParam0[1] = 1.0f / h;
+	parms.localParam0[2] = (float)w;
+	parms.localParam0[3] = (float)h;
+	// grain intensity + seed live in windowCoord.xy here (localParam0 is RT_METRICS, chroma is off);
+	// grain size + gamma/brightness mirror RB_RHI_HdrResolve exactly (identity on GL, real on VK)
+	parms.windowCoord[0] = r_postFilmGrain.GetFloat();
+	parms.windowCoord[1] = (float)( Sys_Milliseconds() & 0xffff ) * 0.001f;
+	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
+	parms.localParam1[1] = 1.0f;	// brightness (identity)
+	parms.localParam1[2] = 1.0f;	// 1/gamma (identity)
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN && r_gammaInShader.GetBool() ) {
+		parms.localParam1[1] = r_brightness.GetFloat();
+		parms.localParam1[2] = ( r_gamma.GetFloat() > 0.0f ) ? 1.0f / r_gamma.GetFloat() : 1.0f;
+	}
+
+	idDrawVert quad[4];
+	memset( quad, 0, sizeof( quad ) );
+	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
+	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
+	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
+	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
+	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
+
+	rhi::BufferHandle vb, ib, ub;
+	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
+	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = CT_TWO_SIDED;
+	r->BindPipeline( pd );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = 6;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	da.textures[0] = r->GetRenderTargetImage( rhiHdrRT );
+	da.textures[1] = r->GetRenderTargetImage( rhiSmaaWeightsRT );
+	r->Draw( da );
+	backEnd.pc.c_drawElements++;
+
+	RB_RHI_SmaaEndUnitState( r );		// the scene+weights draw left GL on unit 1
+	return true;
+}
+
 static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	if ( !rbHdrActiveThisFrame ) {
 		return;
 	}
 	rbHdrActiveThisFrame = false;
 
-	rhi::ShaderHandle prog = r->LoadShader( "hdrresolve" );
-	if ( !prog || !rhiHdrRT ) {
+	if ( !rhiHdrRT ) {
 		r->SetFrameTarget( 0 );		// give up on HDR this frame, back to the backbuffer
 		return;
 	}
@@ -868,7 +1105,20 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	int w = glConfig.vidWidth;
 	int h = glConfig.vidHeight;
 
-	// AA first (float->float into rhiHdrAaRT), so chroma below re-samples the anti-aliased
+	// Fused SMAA resolve (chroma off): the neighborhood blend + grain/gamma tail in one pass,
+	// dropping the rhiHdrAaRT round-trip. Falls through to the classic path when ineligible.
+	if ( RB_RHI_HdrResolveSmaaFused( r, w, h ) ) {
+		return;
+	}
+
+	rhi::ShaderHandle prog = r->LoadShader( "hdrresolve" );
+	if ( !prog ) {
+		r->SetFrameTarget( 0 );		// give up on HDR this frame, back to the backbuffer
+		return;
+	}
+
+	// AA first (scene->scene into rhiHdrAaRT, in the scene buffer's own format — RGBA16F
+	// in HDR, RGBA8 in the off-HDR post pass), so chroma below re-samples the anti-aliased
 	// image; the resolve then reads the AA buffer instead of the raw scene buffer. Off → the
 	// scratch buffer doesn't exist and we read the scene buffer directly. Mode 2 = SMAA,
 	// falling back to FXAA if its shaders/targets are unavailable.
@@ -901,6 +1151,15 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
 	parms.windowCoord[2] = 0.5f;	// aberration center in uv
 	parms.windowCoord[3] = 0.5f;
+	// gamma / brightness: folded into the resolve on Vulkan (the backend has no separate
+	// LDR gamma tail — RB_RHI_GammaBrightness only runs on GL). GL passes identity here so
+	// its standalone gammabrightness pass at swap stays the single point of correction.
+	parms.localParam1[1] = 1.0f;	// brightness (identity)
+	parms.localParam1[2] = 1.0f;	// 1/gamma (identity)
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN && r_gammaInShader.GetBool() ) {
+		parms.localParam1[1] = r_brightness.GetFloat();
+		parms.localParam1[2] = ( r_gamma.GetFloat() > 0.0f ) ? 1.0f / r_gamma.GetFloat() : 1.0f;
+	}
 
 	// fullscreen NDC quad, st 0..1 (the HDR target is exact screen size, so no NPOT correction)
 	idDrawVert quad[4];
@@ -968,19 +1227,17 @@ void RB_RHI_Shutdown( void ) {
 	rhiHdrAaRT = 0;
 	rhiHdrW = rhiHdrH = 0;
 
-	// SMAA edge/weight/scene targets + raw-GL LUTs (this file's statics). The
-	// context is still current here, so the LUT names can be deleted properly;
-	// they re-upload lazily on the new context.
+	// SMAA edge/weight/scene targets + LUTs (this file's statics). On GL3 the LUTs
+	// are raw GL names GL3Backend::Shutdown() doesn't track, so delete them here
+	// (context still current); on VK they're RHI images the backend's own table sweep
+	// below frees, so just forget the handles. They re-upload lazily next context.
 	rhiSmaaEdgesRT = rhiSmaaWeightsRT = rhiSmaaSceneRT = 0;
 	rhiSmaaW = rhiSmaaH = 0;
-	if ( rhiSmaaAreaTex ) {
-		qglDeleteTextures( 1, &rhiSmaaAreaTex );
-		rhiSmaaAreaTex = 0;
+	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		if ( rhiSmaaAreaTex )   { qglDeleteTextures( 1, &rhiSmaaAreaTex ); }
+		if ( rhiSmaaSearchTex ) { qglDeleteTextures( 1, &rhiSmaaSearchTex ); }
 	}
-	if ( rhiSmaaSearchTex ) {
-		qglDeleteTextures( 1, &rhiSmaaSearchTex );
-		rhiSmaaSearchTex = 0;
-	}
+	rhiSmaaAreaTex = rhiSmaaSearchTex = 0;
 
 	// deletes rings, VAOs, shader cache and every render target, then clears the
 	// backend's table so any stale handle now resolves to a null image
@@ -1109,6 +1366,165 @@ static void RB_RHI_StreamStore( rhi::RHI *r, const void *vertKey, const void *id
 	rbStreamedHash.Add( (int)( ( ( (uintptr_t)vertKey ^ (uintptr_t)idxKey ) >> 4 ) & 0x7fffffff ), index );
 }
 
+// ---- Phase 2 GPU MD5 skinning (docs/gpu-offload-plan.md) ------------------------------------
+// The front end (idMD5Mesh::UpdateSurface) records one job per visible skinned surface; the
+// backend flushes them as compute dispatches in the pre-scene window, before the first pass
+// opens (so the compute-write -> vertex-read barrier lands before any draw reads the buffer).
+struct rbSkinJob_t {
+	rhi::ShaderHandle	shader;
+	rhi::BufferHandle	outVB, weights, wdesc, wstart, localTbn;
+	const void *		jointData;			// R_FrameAlloc snapshot, valid this frame
+	int					numJoints;
+	int					numOutVerts;
+	float				skinScale;
+};
+static idList<rbSkinJob_t>	rbSkinJobs;
+
+void RB_RHI_AddSkinJob( unsigned int shader, unsigned int outVB, int numOutVerts,
+                        unsigned int weightsBuf, unsigned int wdescBuf, unsigned int wstartBuf, unsigned int localTbnBuf,
+                        const void *jointData, int numJoints, float skinScale ) {
+	rbSkinJob_t j;
+	j.shader = shader; j.outVB = outVB; j.numOutVerts = numOutVerts;
+	j.weights = weightsBuf; j.wdesc = wdescBuf; j.wstart = wstartBuf; j.localTbn = localTbnBuf;
+	j.jointData = jointData; j.numJoints = numJoints; j.skinScale = skinScale;
+	rbSkinJobs.Append( j );
+}
+
+void RB_RHI_FlushSkinJobs( void ) {
+	if ( rbSkinJobs.Num() == 0 ) {
+		return;
+	}
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r ) {
+		for ( int i = 0; i < rbSkinJobs.Num(); i++ ) {
+			const rbSkinJob_t &j = rbSkinJobs[i];
+			// per-frame joint palette (small; a shared batched buffer is a later optimisation)
+			rhi::BufferHandle jointsBuf = r->CreateBuffer( rhi::BU_STORAGE, j.numJoints * (int)sizeof( idJointMat ), j.jointData );
+			if ( !jointsBuf ) {
+				continue;
+			}
+			struct { unsigned int numVerts; float skinScale; } pc = { (unsigned int)j.numOutVerts, j.skinScale };
+			rhi::ComputeArgs ca = {};
+			ca.shader = j.shader;
+			ca.storage[0] = jointsBuf;
+			ca.storage[1] = j.weights;
+			ca.storage[2] = j.wdesc;
+			ca.storage[3] = j.wstart;
+			ca.storage[4] = j.outVB;
+			ca.storage[5] = j.localTbn;
+			ca.pushConstants = &pc;
+			ca.pushConstantSize = (int)sizeof( pc );
+			ca.groupsX = ( j.numOutVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
+			r->Dispatch( ca );					// records on the frame cb + a compute->vertex barrier
+			r->DestroyBuffer( jointsBuf );		// deferred/fence-retired: safe right after recording
+
+		}
+	}
+	rbSkinJobs.SetNum( 0 );
+}
+
+// Roadmap B: compute deform-once tessellation jobs (docs/tessellation.md). Same record-in-front-end /
+// dispatch-in-backend pattern as the skin jobs, flushed immediately AFTER them so the skin-write ->
+// deform-read dependency is covered by the skin dispatch's trailing COMPUTE->COMPUTE barrier.
+struct rbTessJob_t {
+	rhi::ShaderHandle	shader;
+	rhi::BufferHandle	srcVB;			// GPU source (gpuSkinVB); 0 => upload srcCpu instead
+	const void *		srcCpu;			// R_FrameAlloc'd source verts (used when srcVB == 0)
+	int					numSrcVerts;
+	rhi::BufferHandle	outVB, barySeam, srcTri, height;
+	int					numOutVerts;
+	float				dispStrength;
+};
+static idList<rbTessJob_t>	rbTessJobs;
+
+void RB_RHI_AddTessJob( unsigned int shader, unsigned int srcVB, const void *srcCpu, int numSrcVerts,
+                        unsigned int outVB, unsigned int barySeam, unsigned int srcTri, unsigned int height,
+                        int numOutVerts, float dispStrength ) {
+	rbTessJob_t j;
+	j.shader = shader; j.srcVB = srcVB; j.srcCpu = srcCpu; j.numSrcVerts = numSrcVerts;
+	j.outVB = outVB; j.barySeam = barySeam; j.srcTri = srcTri; j.height = height;
+	j.numOutVerts = numOutVerts; j.dispStrength = dispStrength;
+	rbTessJobs.Append( j );
+}
+
+void RB_RHI_FlushTessJobs( void ) {
+	if ( rbTessJobs.Num() == 0 ) {
+		return;
+	}
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r ) {
+		for ( int i = 0; i < rbTessJobs.Num(); i++ ) {
+			const rbTessJob_t &j = rbTessJobs[i];
+			rhi::BufferHandle srcBuf = j.srcVB;
+			bool ownSrc = false;
+			if ( srcBuf == 0 && j.srcCpu ) {
+				// CPU source (gpuSkinning off): upload this frame's deformed verts as a storage buffer
+				srcBuf = r->CreateBuffer( rhi::BU_STORAGE, j.numSrcVerts * (int)sizeof( idDrawVert ), j.srcCpu );
+				ownSrc = true;
+			}
+			if ( srcBuf == 0 ) {
+				continue;
+			}
+			struct { unsigned int numVerts; float dispStrength; } pc = { (unsigned int)j.numOutVerts, j.dispStrength };
+			rhi::ComputeArgs ca = {};
+			ca.shader = j.shader;
+			ca.storage[0] = srcBuf;
+			ca.storage[1] = j.barySeam;
+			ca.storage[2] = j.srcTri;
+			ca.storage[3] = j.height;
+			ca.storage[4] = j.outVB;
+			ca.pushConstants = &pc;
+			ca.pushConstantSize = (int)sizeof( pc );
+			ca.groupsX = ( j.numOutVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
+			r->Dispatch( ca );					// records on the frame cb + a compute->vertex/compute barrier
+			if ( ownSrc ) {
+				r->DestroyBuffer( srcBuf );		// deferred/fence-retired: safe right after recording
+			}
+		}
+	}
+	rbTessJobs.SetNum( 0 );
+}
+
+// Roadmap B: if this surface was deformed once this frame (Roadmap B) AND it is a classifier-approved
+// tess candidate (the caller passes `tess`, from RB_RHI_TessellateSurf), rebind the draw to the
+// pre-deformed expanded buffer + its expanded index count and disable fixed-function tess. Surfaces the
+// classifier excludes (eyes/teeth/headgear/etc.) keep `tess` false here, so they NEVER draw the deformed
+// buffer even though it may have been dispatched -- they render their base geometry, exactly as today.
+void RB_RHI_ApplyDeform( const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs,
+                         rhi::BufferHandle &ib, int &idxOfs, int &idxCount, bool &tess ) {
+	if ( tess && tri->tessDeformVB && tri->tessDeformIB ) {
+		vb = tri->tessDeformVB; vertOfs = 0;
+		ib = tri->tessDeformIB; idxOfs = 0;
+		idxCount = tri->tessDeformIndexes;
+		tess = false;						// deform-once supersedes the per-pass fixed-function tess
+	}
+}
+
+/*
+=============
+RB_RHI_DeformSubStage
+
+The custom-ARB / builtin-ARB / texgen sub-stage helpers below draw a single
+material stage with no tesc/tese pipeline, so they cannot fixed-function
+tessellate. But a mod's emissive stage (self-illum add, reflective cube, etc.)
+on a deform-once BODY still has to track the SAME displaced silhouette the zfill
+prepass + interactions drew from, or a DEPTHFUNC_EQUAL emissive fails EQUAL
+against the deformed depth and drops out (and a cube/skybox texgen samples the
+wrong surface). So redirect these draws to tri->tessDeformVB exactly like the
+generic stage path and every other RHI pass. GPU skinning (gpuSkinVB) is already
+handled upstream by RB_RHI_StreamAmbient, so this only adds the tess-deform case.
+Returns the index count to draw (tessDeformIndexes when redirected, else numIndexes).
+=============
+*/
+static int RB_RHI_DeformSubStage( const drawSurf_t *surf, rhi::BufferHandle &vb, int &vertOfs,
+                                  rhi::BufferHandle &ib, int &idxOfs ) {
+	const srfTriangles_t *tri = surf->geo;
+	int idxCount = tri->numIndexes;
+	bool tess = RB_RHI_TessellateSurf( surf, false );	// deform-once uses the non-blend classify
+	RB_RHI_ApplyDeform( tri, vb, vertOfs, ib, idxOfs, idxCount, tess );
+	return idxCount;
+}
+
 // Resolve this surface's indexes to a GPU buffer + byte offset. When the front
 // end has a resident index VBO (tri->indexCache, populated only when
 // r_useIndexBuffers is set — which the core profile forces on) draw it in
@@ -1124,6 +1540,15 @@ static void RB_RHI_ResolveIndices( rhi::RHI *r, const srfTriangles_s *tri, rhi::
 }
 
 void RB_RHI_StreamAmbient( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs ) {
+	// Phase 2 GPU skinning: this surface (or the interaction copy that inherited it) was skinned
+	// by the compute lane into a persistent vertex buffer — bind it directly. Indexes are static,
+	// so they resolve the normal way. Preferred over ambientCache so every pass draws the GPU pose.
+	if ( tri->gpuSkinVB ) {
+		vb = tri->gpuSkinVB;
+		vertOfs = 0;
+		RB_RHI_ResolveIndices( r, tri, ib, idxOfs );
+		return;
+	}
 	// static VBO fast path: the cache block already lives on the GPU (uploaded
 	// once at level load, or by AllocFrameTemp for dynamic surfaces), so hand
 	// back its handle and offset directly — no per-frame copy.
@@ -1313,12 +1738,35 @@ static void RB_RHI_RenderCustomStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		ap.vlocal[i][3] = regs[ns->vertexParms[i][3]];
 	}
 
-	// fragment program images by unit
-	for ( int i = 0; i < ns->numFragmentProgramImages; i++ ) {
-		if ( ns->fragmentProgramImages[i] ) {
+	// fragment program images by unit. On Vulkan the qgl* active-unit binds are
+	// NULL no-ops, so the images must reach the shader through DrawArgs.textures
+	// (with the same _currentRender capture guard the builtin-ARB path uses); on
+	// GL3 they still bind through idImage's active-unit path as before.
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	const bool vk = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	for ( int i = 0; i < ns->numFragmentProgramImages && i < 8; i++ ) {
+		idImage *img = ns->fragmentProgramImages[i];
+		if ( !img ) {
+			continue;
+		}
+		if ( vk ) {
+			if ( img == globalImages->currentRenderImage || img == globalImages->currentDepthImage
+			     || img == globalImages->scratchImage || img == globalImages->scratchImage2
+			     || img == globalImages->accumImage ) {
+				if ( !img->rhiCaptured || !img->rhiHandle ) {
+					RB_RHI_LogOnce( "VK: custom-ARB stage sampling a never-captured image skipped" );
+					return;
+				}
+				da.textures[i] = img->rhiHandle;
+			} else {
+				img->Bind();	// upload trigger only under Vulkan
+				da.textures[i] = img->rhiHandle;
+			}
+		} else {
 			rhi::gl3ActiveTexture( GL_TEXTURE0 + i );
 			backEnd.glState.currenttmu = i;
-			ns->fragmentProgramImages[i]->Bind();
+			img->Bind();
 		}
 	}
 
@@ -1335,13 +1783,12 @@ static void RB_RHI_RenderCustomStage( rhi::RHI *r, const viewDef_t *viewDef, con
 	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
 	r->BindPipeline( pd );
 
-	rhi::DrawArgs da;
-	memset( &da, 0, sizeof( da ) );
+	int idxCount = RB_RHI_DeformSubStage( surf, vb, vertOfs, ib, idxOfs );
 	da.vertexBuffer = vb;
 	da.vertexOffset = vertOfs;
 	da.indexBuffer = ib;
 	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-	da.indexCount = tri->numIndexes;
+	da.indexCount = idxCount;
 	da.uniformBuffer = ub;
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( ap );
@@ -1407,10 +1854,15 @@ static void RB_RHI_RenderBuiltinArbStage( rhi::RHI *r, const viewDef_t *viewDef,
 	parms.screenCorrection[0] = (float)w / potW;
 	parms.screenCorrection[1] = (float)h / potH;
 	parms.windowCoord[0] = 1.0f / w;
-	// this path only runs on Vulkan: top-down gl_FragCoord vs the GL-layout
-	// capture — the shaders add u_windowCoord.w to the row term (0 on GL)
+	// this path only runs on Vulkan: top-down gl_FragCoord vs the GL-layout capture —
+	// the shaders add u_windowCoord.w to the row term (0 on GL). The offset is 1.0:
+	// screenTc = (fragY*(-1/h) + w.w) * screenCorrection.y, and screenCorrection already
+	// carries h/potH, so w.w must be 1.0 for fragY 0..h -> V h/potH..0. The old
+	// vidHeight/h only equalled 1.0 when h==vidHeight; in a sub-window render (berserk
+	// crops the scene, h != vidHeight) it shifted the sample, so _currentRender heat-haze
+	// blood decals showed a shrunk copy of the window. 1.0 is correct at any viewport size.
 	parms.windowCoord[1] = -1.0f / h;
-	parms.windowCoord[3] = (float)glConfig.vidHeight / h;
+	parms.windowCoord[3] = 1.0f;
 
 	// stage vertexParms -> u_localParam0/1 (the stock programs use locals 0/1)
 	for ( int i = 0; i < ns->numVertexParms && i < 2; i++ ) {
@@ -1434,11 +1886,12 @@ static void RB_RHI_RenderBuiltinArbStage( rhi::RHI *r, const viewDef_t *viewDef,
 	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
 	r->BindPipeline( pd );
 
+	int idxCount = RB_RHI_DeformSubStage( surf, vb, vertOfs, ib, idxOfs );
 	da.vertexBuffer = vb;
 	da.vertexOffset = vertOfs;
 	da.indexBuffer = ib;
 	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-	da.indexCount = tri->numIndexes;
+	da.indexCount = idxCount;
 	da.uniformBuffer = ub;
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
@@ -1739,11 +2192,13 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		parms.windowCoord[0] = 1.0f / w;
 		parms.windowCoord[1] = 1.0f / h;
 		if ( vkMode ) {
-			// Vulkan gl_FragCoord is top-down but the capture keeps GL's
-			// bottom-up layout; portalsky.frag adds u_windowCoord.w to the row
-			// term (0 on GL): y' = (vidHeight - fragY) / h
+			// Vulkan gl_FragCoord is top-down but the capture keeps GL's bottom-up
+			// layout; portalsky.frag adds u_windowCoord.w to the row term (0 on GL).
+			// The offset is 1.0 (screenCorrection already carries h/potH); the old
+			// vidHeight/h only matched when h==vidHeight and mis-sampled sub-window
+			// (cropped) renders — same fix as the heat-haze path above.
 			parms.windowCoord[1] = -1.0f / h;
-			parms.windowCoord[3] = (float)glConfig.vidHeight / h;
+			parms.windowCoord[3] = 1.0f;
 		}
 		screenImg->Bind();
 		vkTex[0] = screenImg->rhiHandle;
@@ -1859,11 +2314,12 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 
 	rhi::DrawArgs da;
 	memset( &da, 0, sizeof( da ) );
+	int idxCount = RB_RHI_DeformSubStage( surf, vb, vertOfs, ib, idxOfs );
 	da.vertexBuffer = vb;
 	da.vertexOffset = vertOfs;
 	da.indexBuffer = ib;
 	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-	da.indexCount = tri->numIndexes;
+	da.indexCount = idxCount;
 	da.uniformBuffer = ub;
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
@@ -2094,6 +2550,9 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
 	r->BindPipeline( pd );
 
+	// No RB_RHI_DeformSubStage redirect (unlike the ARB/texgen helpers): a soft particle
+	// is a view-oriented, all-additive/alpha sprite, never a classifier-approved tess body,
+	// so tri->tessDeformVB is always 0 here and the deform would be a no-op anyway.
 	rhi::DrawArgs da;
 	memset( &da, 0, sizeof( da ) );
 	da.vertexBuffer = vb;
@@ -2134,6 +2593,63 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 
 /*
 =============
+RB_RHI_StagePolyOffset{Begin,End}
+
+Per-stage polygon offset (Material privatePolygonOffset): some weapon/decal stages
+carry their own offset on top of any material-level MF_POLYGONOFFSET. Stock GL applies
+it in RB_PrepareStageTexturing / disables it in RB_FinishStageTexturing
+(draw_common.cpp:87,260); the RHI stage path never ported it (VK doubly so — qgl* are
+NULL no-ops, only r->SetPolygonOffset -> vkCmdSetDepthBias lands). Mirrors the
+material-level dual pattern at the top of RB_RHI_RenderShaderPasses. End restores the
+material-level offset (or none) rather than leaving the stage's value latched, because
+on VK the dynamic depth bias persists per-draw and would bleed into the following stages.
+
+CRUCIAL EXCLUSION: skip DEPTHFUNC_EQUAL stages. Polygon offset only orders geometry
+under an *inequality* depth test; at EQUAL a stage must match the zfill prepass depth
+exactly, and the prepass carries no per-stage offset, so any bias makes the stage FAIL
+EQUAL and vanish. The imp "burning corpse" fire stage is exactly this — privatePolygonOffset
+-1 AND drawn at EQUAL (against the deform-once zfill, docs/tessellation.md) — so applying
+the offset drops the ember. (Material-level MF_POLYGONOFFSET is fine at EQUAL: the RHI zfill
+applies that same offset, so prepass and stage still match.)
+=============
+*/
+static bool RB_RHI_StageWantsPolyOffset( const shaderStage_t *pStage ) {
+	return pStage->privatePolygonOffset != 0.0f
+	    && ( pStage->drawStateBits & GLS_DEPTHFUNC_EQUAL ) == 0;
+}
+
+static void RB_RHI_StagePolyOffsetBegin( rhi::RHI *r, const shaderStage_t *pStage ) {
+	if ( !RB_RHI_StageWantsPolyOffset( pStage ) ) {
+		return;
+	}
+	if ( qglEnable != NULL ) {
+		qglEnable( GL_POLYGON_OFFSET_FILL );
+		qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * pStage->privatePolygonOffset );
+	}
+	r->SetPolygonOffset( true, r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * pStage->privatePolygonOffset );
+}
+
+static void RB_RHI_StagePolyOffsetEnd( rhi::RHI *r, const shaderStage_t *pStage, const idMaterial *shader ) {
+	if ( !RB_RHI_StageWantsPolyOffset( pStage ) ) {
+		return;
+	}
+	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+		// a material-level offset wraps the whole stage loop — restore it (matches
+		// draw_common.cpp:260 leaving MF_POLYGONOFFSET's offset in place)
+		if ( qglEnable != NULL ) {
+			qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+		}
+		r->SetPolygonOffset( true, r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+	} else {
+		if ( qglDisable != NULL ) {
+			qglDisable( GL_POLYGON_OFFSET_FILL );
+		}
+		r->SetPolygonOffset( false, 0.0f, 0.0f );
+	}
+}
+
+/*
+=============
 RB_RHI_RenderShaderPasses
 
 Ambient stages of one surface, driven by the Material IR: old-style stages
@@ -2169,18 +2685,30 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 	if ( !tri->numIndexes ) {
 		return;
 	}
-	if ( !tri->ambientCache ) {
-		common->Printf( "RB_RHI_RenderShaderPasses: !tri->ambientCache\n" );
+	// a GPU-skinned surface (r_gpuSkinNoUpload) has no ambient cache — it rasterizes from gpuSkinVB,
+	// which RB_RHI_StreamAmbient binds directly — so treat gpuSkinVB as satisfying this precondition.
+	if ( !tri->ambientCache && !tri->gpuSkinVB ) {
 		return;
 	}
 
 	const float *regs = surf->shaderRegisters;
 
-	// TODO(RHI): dynamic state; direct GL is fine for the GL backends, the
-	// Vulkan pipeline grows a depth-bias key when decals need it (M3+)
-	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) && qglEnable != NULL ) {
-		qglEnable( GL_POLYGON_OFFSET_FILL );
-		qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+	// MATERIAL-level polygon offset (MF_POLYGONOFFSET): coplanar decals (bullet/blood
+	// hits, signs) rely on it to win the depth test against the wall they sit on. The
+	// GL path enables it via qglPolygonOffset; on Vulkan qglEnable is NULL, so the RHI
+	// dynamic depth bias (SetPolygonOffset -> vkCmdSetDepthBias) is the only thing that
+	// lands. Without it decals z-fight the wall and flicker in/out with the camera. This
+	// offset wraps the WHOLE stage loop; the matching disable is at the end of this
+	// function (mirrors RB_RHI_FillDepthBuffer). The separate PER-STAGE offset
+	// (privatePolygonOffset: dissolve/weapon stages) is bracketed per draw inside the
+	// loop by RB_RHI_StagePolyOffset{Begin,End}, which restore this material offset.
+	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+		if ( qglEnable != NULL ) {
+			qglEnable( GL_POLYGON_OFFSET_FILL );
+			qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+		}
+		r->SetPolygonOffset( true, r_offsetFactor.GetFloat(),
+		                     r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
 	}
 
 	// depth range hacks (matrix side handled by RB_RHI_SpaceMvp; these are
@@ -2198,6 +2726,74 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 	RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
 
 	const rhi::MaterialIR *ir = rhi::IR_Get( shader );
+
+	// DUDE berserk vision: the stock effect is a recursive _scratch feedback
+	// (textures/decals/berserk zooms the previous frame 3% each frame) that doesn't
+	// accumulate on the RHI path. Reproduce the "streak zoom" instead as a TEMPORAL ghost
+	// trail (berserk_accum ping-pong) composited under the live scene: skip the broken
+	// overlay here (note berserk is active this frame), then drive the trail + composite
+	// when the fullscreen _scratch is blitted back. Legacy keeps its original feedback path.
+	if ( idStr::Icmp( shader->GetName(), "textures/decals/berserk" ) == 0 ) {
+		rbBerserkFrame = true;
+		return;	// _scratch stays the clean scene; the effect happens at the blit
+	}
+	// the fullscreen blit of the captured scene during berserk (dvMaterial == "_scratch").
+	// rbBerserkFrame catches the active powerup (its overlay was seen this frame);
+	// r_berserkFade (game-driven) additionally keeps the effect alive through the 2s
+	// wind-down after berserk ends, when that overlay is no longer drawn.
+	const float berserkFadeCvar = r_berserkFade.GetFloat();
+	const bool isBerserkBlit = ( rbBerserkFrame || berserkFadeCvar > 0.0f ) && !viewDef->viewEntitys
+		&& idStr::Icmp( shader->GetName(), "_scratch" ) == 0;
+
+	// advance the feedback buffer once for this blit (before the per-stage draw so it's
+	// bound for the display). rbBerserkFrame with a not-yet-updated fade cvar (SMP skew on
+	// the first active frame) falls back to full strength.
+	rhi::ImageHandle berserkTrail = 0;
+	if ( isBerserkBlit ) {
+		const float berserkFade = ( berserkFadeCvar > 0.0f ) ? berserkFadeCvar : 1.0f;
+		if ( R_BackendSupportsEnhancements() ) {
+			// baked-in look: 0.95 centerscale per 60fps-frame, full radial-mask feedback,
+			// full-res (÷1) trail. See berserk_accum.frag for the stock-faithful math.
+			berserkTrail = RB_RHI_BerserkAccum( r, viewDef, 0.95f, 1.0f, berserkFade, 1,
+			                                    Sys_Milliseconds() );
+		}
+	}
+
+	// DUDE hell-time / Artifact vision (D3XP FullscreenFX_Helltime): the stock effect recursively
+	// zooms the previous frame into _accum (textures/smf/bloodorb{1,2,3}/ac_capture, masked by
+	// bloodorb3.tga) — the same cross-frame capture that can't accumulate on the RHI (like
+	// berserk's _scratch), so it shows "ghost duplicates". Suppress the broken capture/draw halves
+	// and, at the final cr_draw blit, drive a ping-pong trail (RB_RHI_HelltimeAccum) + composite.
+	// The material name carries the level (bloodorb1/2/3). The game's FxFader + Blendback fade the
+	// effect in/out automatically, so no bridge cvar is needed. Legacy keeps its own _accum path.
+	const char *hlName = shader->GetName();
+	bool isHelltimeDraw = false;
+	if ( !viewDef->viewEntitys && idStr::Cmpn( hlName, "textures/smf/bloodorb", 21 ) == 0
+	     && hlName[21] >= '1' && hlName[21] <= '3' && hlName[22] == '/' ) {
+		const int lvl = hlName[21] - '1';			// '1'/'2'/'3' -> 0/1/2
+		const char *suffix = hlName + 22;			// "/ac_capture", "/cr_draw", ...
+		rbHelltimeFrame = true;
+		rbHelltimeLevel = lvl;
+		if ( idStr::Icmp( suffix, "/cr_draw" ) == 0 ) {
+			isHelltimeDraw = true;					// the display: composite the trail here
+		} else {
+			return;	// ac_init / ac_capture / cr_capture / ac_draw: kill the broken recursion
+		}
+	}
+	rhi::ImageHandle helltimeTrail = 0;
+	float helltimeSsX = 1.0f, helltimeSsY = 1.0f;
+	if ( isHelltimeDraw && R_BackendSupportsEnhancements() ) {
+		helltimeTrail = RB_RHI_HelltimeAccum( r, viewDef, rbHelltimeLevel, Sys_Milliseconds() );
+		// cr_draw's stretchpic texcoords span only [0..shiftScale] (the _currentRender POT
+		// convention), but the trail RT is a full-viewport 0..1 buffer. Rescale the display
+		// texcoords by 1/shiftScale so the whole trail shows full-screen (centred).
+		const int potW = globalImages->currentRenderImage->uploadWidth;
+		const int potH = globalImages->currentRenderImage->uploadHeight;
+		const int vw = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+		const int vh = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+		if ( potW > 0 ) { helltimeSsX = (float)vw / potW; }
+		if ( potH > 0 ) { helltimeSsY = (float)vh / potH; }
+	}
 
 	for ( int k = 0; k < ir->surfaceStages.Num(); k++ ) {
 		const rhi::StageIR &si = ir->surfaceStages[k];
@@ -2217,19 +2813,25 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			// _currentRender-sampling stages (heat haze, the RoE grabber warp)
 			// are drawn in the post-process pass, after the framebuffer copy —
 			// materials referencing _currentRender auto-sort to SS_POST_PROCESS
+			RB_RHI_StagePolyOffsetBegin( r, pStage );
 			RB_RHI_RenderCustomStage( r, viewDef, surf, pStage, si.program, mvp, vb, vertOfs, ib, idxOfs );
+			RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 			continue;
 		}
 		if ( si.kind == rhi::SK_BUILTIN_ARB ) {
 			// Vulkan: stock customs through their hand-translated builtins (M5)
+			RB_RHI_StagePolyOffsetBegin( r, pStage );
 			RB_RHI_RenderBuiltinArbStage( r, viewDef, surf, pStage, si.program, mvp, vb, vertOfs, ib, idxOfs );
+			RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 			continue;
 		}
 		if ( si.kind == rhi::SK_TEXGEN ) {
 			// fixed-function texgen (skybox / cube reflection / portal sky);
 			// M5: cube images bind through DrawArgs on Vulkan (the descriptor
 			// writer uses each image's own view — cube views included)
+			RB_RHI_StagePolyOffsetBegin( r, pStage );
 			RB_RHI_RenderTexgenStage( r, viewDef, surf, pStage, si, mvp, vb, vertOfs, ib, idxOfs );
+			RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 			continue;
 		}
 
@@ -2249,6 +2851,12 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			continue;
 		}
 
+		// per-stage polygon offset (privatePolygonOffset: dissolve/burning corpse,
+		// some weapon stages) wraps the actual draw below — the soft-particle helper
+		// or the generic stage. Restored at each exit so it never latches into the
+		// next stage on Vulkan's persistent dynamic depth bias.
+		RB_RHI_StagePolyOffsetBegin( r, pStage );
+
 		// soft particles (#3878): fade this quad against captured scene depth
 		// instead of drawing it as a hard billboard. The front-end flags the
 		// surface + radius (GL3/Vulkan only); we only soften additive / src-alpha
@@ -2263,6 +2871,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			&& ( src_blend == GLS_SRCBLEND_ONE || src_blend == GLS_SRCBLEND_SRC_ALPHA )
 			&& depthCaptured ) {
 			if ( RB_RHI_RenderSoftParticleStage( r, viewDef, surf, pStage, regs, src_blend, color, mvp, tri, vb, vertOfs, ib, idxOfs ) ) {
+				RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 				continue;
 			}
 		}
@@ -2291,6 +2900,29 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		} else {
 			parms.diffuseMatrixS[0] = 1.0f;
 			parms.diffuseMatrixT[1] = 1.0f;
+		}
+
+		// berserk vision display (berserk.frag): show the accumulated feedback buffer when
+		// present (hasTrail → .z), else the plain captured scene. The stage's texture matrix
+		// (the _scratch V-flip) still drives var_TexCoord for both.
+		if ( isBerserkBlit ) {
+			parms.localParam0[2] = berserkTrail ? 1.0f : 0.0f;
+		}
+		// hell-time display: same `berserk` display shader — show the accumulated trail (which
+		// already folds the sharp centre + the edge zoom-trail) when present, else the plain scene.
+		if ( isHelltimeDraw ) {
+			parms.localParam0[2] = helltimeTrail ? 1.0f : 0.0f;
+			if ( helltimeTrail ) {
+				// map cr_draw's [0..shiftScale] stretchpic texcoords onto the full 0..1 trail RT
+				// (see the shiftScale computation above). Only when a trail exists; the no-trail
+				// fallback keeps cr_draw's own texcoords so it samples _currentRender correctly.
+				parms.diffuseMatrixS[0] = ( helltimeSsX > 0.0f ) ? 1.0f / helltimeSsX : 1.0f;
+				parms.diffuseMatrixS[1] = 0.0f;
+				parms.diffuseMatrixS[3] = 0.0f;
+				parms.diffuseMatrixT[0] = 0.0f;
+				parms.diffuseMatrixT[1] = ( helltimeSsY > 0.0f ) ? 1.0f / helltimeSsY : 1.0f;
+				parms.diffuseMatrixT[3] = 0.0f;
+			}
 		}
 
 		// vertex color mode: var_Color = (attr_Color*modulate + add) * u_color
@@ -2328,12 +2960,51 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			break;
 		}
 
+		// DUDE tessellation (docs/tessellation.md): this pass draws a material's ambient/emissive
+		// stages. Two cases:
+		//  - Roadmap B deform-once: a classifier-approved BODY surface was pre-deformed into
+		//    tri->tessDeformVB this frame -- draw THAT (the same expanded, uniform-L buffer the zfill
+		//    prepass sealed from) so a DEPTHFUNC_EQUAL emissive stage (e.g. the imp burning-corpse
+		//    glow) matches the deformed depth instead of failing EQUAL against it. The deform decision
+		//    uses TessellateSurf(surf,FALSE) -- NOT the forBlendPass=true call, whose all-additive
+		//    exclusion (RhiWorld.cpp) would reject the all-additive glow and keep the ember dropped.
+		//    Gating additionally on tessDeformVB!=0 means only a surface actually deform-dispatched (the
+		//    body) takes it; a view-oriented sprite/particle glow and the blood decal have none.
+		//  - Otherwise (no deform buffer): fixed-function PN-tessellate via generic.tese (forBlendPass
+		//    =true). generic.tese ALSO runs dudeTessDisplace off the surface bump (bound on unit 1 below),
+		//    so an on-body EQUAL blend stage — the burning-corpse ember, a self-illum add, a mod emissive —
+		//    lands on the displaced zfill depth instead of failing EQUAL wherever the body is pushed out
+		//    (the bug that left the ember only on flat patches like the soles of the feet). A blood-overlay
+		//    decal is a SEPARATE surface with no bump stage, so it binds flatNormalMap => relief 0 => it
+		//    merely follows the PN base with no push, as before. (A PURELY additive glow — RoE soul aura —
+		//    is excluded from tessellation entirely by RB_RHI_TessellateSurf(forBlendPass), so it never
+		//    reaches here; only the deform-once buffer can carry it, hence the FALSE probe above.)
+		bool useDeform = false;
+		bool tess = RB_RHI_TessellateSurf( surf, true );
+		if ( RB_RHI_TessellateSurf( surf, false ) && tri->tessDeformVB && tri->tessDeformIB ) {
+			useDeform = true;
+			tess = false;			// deform-once supersedes fixed-function tess for the body
+		}
+		idImage *tessBump = NULL;
+		if ( tess ) {
+			RB_RHI_SetTessParms( parms );
+			// Bind the surface bump on unit 1 so generic.tese displaces this on-body blend
+			// stage (the imp/zombie burning-corpse ember, a self-illum add, a mod emissive)
+			// with the SAME bump texel / seam / strength as the zfill prepass it must match
+			// at depth-EQUAL. Without it the stage PN-follows but does NOT displace, so it
+			// fails EQUAL everywhere the body is displaced and survives only on flat patches
+			// (the soles of the feet). Bump-less surfaces (blood decals) get flatNormalMap =>
+			// relief 0 => no push, unchanged. u_bumpMatrix* is filled into parms here too.
+			tessBump = RB_RHI_TessBumpForZfill( surf, parms );
+		}
+
 		rhi::BufferHandle ub;
 		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 		rhi::ImageHandle stageImage = RB_RHI_BindStageImage( pStage, regs, viewDef );
 		if ( stageImage == RHI_SKIP_STAGE_IMAGE ) {
 			RB_RHI_LogOnce( "VK: stage sampling a never-captured _currentRender/_scratch skipped" );
+			RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 			continue;
 		}
 
@@ -2342,33 +3013,75 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		rhi::PipelineDesc pd;
 		pd.stateBits = ( pStage->drawStateBits & ~GLS_ATEST_BITS );
 		if ( !viewDef->viewEntitys ) {
-			pd.stateBits |= GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+			// 2D views (menu/console/HUD/loading): force depth-always. Clear any
+			// authored depth-func first -- a stage that carries GLS_DEPTHFUNC_EQUAL
+			// (e.g. the menu idlogo cinematic) would otherwise be left with BOTH
+			// the EQUAL and ALWAYS bits set, and the compare-op translation picks
+			// EQUAL (checked first), discarding every fragment against the 2D depth
+			// buffer -> the surface renders black. (In 3D the EQUAL is legit: the
+			// depth prepass gives it something to match, which is why the same
+			// videoMap materials play fine in-game.)
+			pd.stateBits = ( pd.stateBits & ~( GLS_DEPTHFUNC_EQUAL | GLS_DEPTHFUNC_ALWAYS ) )
+				| GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
 		}
-		pd.shader = si.program;
+		// hell-time display: cr_draw's stock blend is gl_dst_alpha, but the trail already folds
+		// the sharp centre + edge zoom-trail, so draw it as an opaque replace of the clean-scene
+		// framebuffer — the game's Blendback then cross-fades it in/out by the fader alpha.
+		if ( isHelltimeDraw ) {
+			pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+		}
+		// berserk / hell-time vision: blit the accumulated feedback buffer through the `berserk`
+		// display shader instead of a plain stretch — the zoom-trail lives in that buffer.
+		pd.shader = ( isBerserkBlit || isHelltimeDraw ) ? r->LoadShader( "berserk" ) : si.program;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = RB_RHI_CullFor( viewDef, shader->GetCullType() );
+		pd.tessellate = tess;
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
-		da.vertexBuffer = vb;
-		da.vertexOffset = vertOfs;
-		da.indexBuffer = ib;
-		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
+		da.vertexOffset = useDeform ? 0 : vertOfs;
+		da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
+		da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
+		da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
 		da.textures[0] = stageImage;	// Vulkan path; 0 on GL3 (binds went via idImage)
+		if ( tess ) {
+			// unit 1 = displacement bump for generic.tese (Vulkan-only; GL3 never
+			// tessellates). tessBump is flatNormalMap when the material has no bump.
+			idImage *bumpImg = tessBump ? tessBump : globalImages->flatNormalMap;
+			bumpImg->Bind();		// upload trigger under Vulkan
+			da.textures[1] = bumpImg->rhiHandle ? bumpImg->rhiHandle
+			                                    : globalImages->flatNormalMap->rhiHandle;
+		}
+		if ( isBerserkBlit ) {
+			// unit 1 = the ghost trail (Vulkan needs it in DrawArgs; GL already bound it
+			// in RB_RHI_BerserkAccum). Without a trail, bind _scratch as a placeholder so
+			// the u_trail sampler is valid on Vulkan — the shader ignores it (hasTrail=0).
+			da.textures[1] = berserkTrail ? berserkTrail : stageImage;
+		}
+		if ( isHelltimeDraw ) {
+			// unit 1 = the hell-time trail (VK via DrawArgs; GL bound in RB_RHI_HelltimeAccum).
+			// Placeholder = the stage's _currentRender when there's no trail (hasTrail=0).
+			da.textures[1] = helltimeTrail ? helltimeTrail : stageImage;
+		}
 		r->Draw( da );
 
 		backEnd.pc.c_drawElements++;
 		backEnd.pc.c_drawIndexes += tri->numIndexes;
 		backEnd.pc.c_drawVertexes += tri->numVerts;
+
+		RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 	}
 
-	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) && qglDisable != NULL ) {
-		qglDisable( GL_POLYGON_OFFSET_FILL );
+	if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+		if ( qglDisable != NULL ) {
+			qglDisable( GL_POLYGON_OFFSET_FILL );
+		}
+		r->SetPolygonOffset( false, 0.0f, 0.0f );
 	}
 	if ( surf->space->weaponDepthHack || ( surf->space->modelDepthHack != 0.0f && !( surf->dsFlags & DSF_SOFT_PARTICLE ) ) ) {
 		RB_LeaveDepthHack();
@@ -2476,19 +3189,18 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
 		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
 		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
-	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView
-	     && rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
-		// In HDR mode FXAA + film grain + chromatic aberration are all folded into the
-		// resolve chain (RB_RHI_HdrResolve / RB_RHI_HdrFxaa), sampling the float scene
-		// buffer instead of the 8-bit _currentRender copy that was re-banding the image
-		// ahead of the dither. Off HDR, they run here on the backbuffer exactly as before.
-		if ( !rbHdrActiveThisFrame ) {
+	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView ) {
+		// The GL per-view post chain (AA / film grain / chromatic aberration) is GL-only
+		// here; Vulkan folds grain/chroma into the scene resolve instead (RB_RHI_HdrResolve,
+		// over the HDR float buffer or the RGBA8 off-HDR post target — see RB_RHI_HdrBeginFrame).
+		if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN && !rbHdrActiveThisFrame ) {
 			// post-resolve antialiasing (FXAA) first, so film grain / chromatic
 			// aberration are applied on top of the resolved image rather than smoothed
 			RB_RHI_AAPass( r, viewDef );
 			RB_RHI_PostProcess( r, viewDef );
 		}
-		// r_ssaoDebug: overlay the AO buffer on top of the finished view
+		// r_ssaoDebug: overlay the AO buffer on top of the finished view. RHI fullscreen
+		// draw, so it works on both backends (the SSAO buffer is produced on Vulkan too).
 		RB_RHI_SSAODebugOverlay( r, viewDef );
 	}
 
@@ -2525,11 +3237,23 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 
 	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
 
+	// Phase 2 GPU skinning: dispatch all recorded MD5 skin jobs now, in the pre-scene window
+	// (frame cb open, no render pass yet) so the compute->vertex barrier lands before any draw.
+	RB_RHI_FlushSkinJobs();
+	// Roadmap B: deform-once tessellation dispatches, immediately AFTER the skin jobs so a deform that
+	// reads a surface's gpuSkinVB is ordered by the skin dispatch's trailing COMPUTE->COMPUTE barrier.
+	RB_RHI_FlushTessJobs();
+
+	rbBerserkFrame = false;	// set when the berserk material is seen (crop overlay), read at the _scratch blit
+	rbHelltimeFrame = false;	// set when a bloodorbN hell-time material is seen, read at its cr_draw blit
+
 	// route the whole frame into the RGBA16F scene buffer (r_hdr) before any clear
 	// or view command lands; a no-op that stays on the backbuffer when r_hdr is
-	// off or the frame is worldless (menu/GUI/cinematic — see RB_RHI_HdrBeginFrame)
-	if ( !vkMode ) {
-		RB_RHI_HdrBeginFrame( r, cmds );
+	// off or the frame is worldless (menu/GUI/cinematic — see RB_RHI_HdrBeginFrame).
+	// M7: live on Vulkan too, via the color render-target family in VulkanBackend.
+	RB_RHI_HdrBeginFrame( r, cmds );
+	if ( vkMode && r_hdr.GetBool() && RB_RHI_HdrCaptureActive() ) {
+		RB_RHI_LogOnce( "VK: HDR scene buffer active (r_hdr) - RGBA16F frame target" );
 	}
 
 	for ( ; cmds; cmds = (const emptyCommand_t *)cmds->next ) {
@@ -2578,11 +3302,18 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 		}
 		case RC_SWAP_BUFFERS:
 			if ( vkMode ) {
-				// present happens in the backend's EndFrame below (the GL-only
-				// resolve/gamma tail doesn't apply; swap capture is serviced
-				// after EndFrame). ImGui renders through the backend: EndFrame
-				// here runs ImGui::Render and hands the draw data over, drawn
-				// into the swapchain image between the scene blit and present.
+				// M7: resolve the scene post-target back onto the scene image, then
+				// present. When HDR is on this is the RGBA16F buffer (+FXAA/SMAA); when
+				// HDR is off but grain/chroma/gamma want it, it's the RGBA8 off-HDR post
+				// target; a no-op (target never bound) when nothing wants it. Folds in
+				// film grain + chroma + r_gammaInShader gamma/brightness (the VK backend
+				// has no separate LDR gamma tail), and must run before EndFrame blits the
+				// scene image to the swapchain.
+				RB_RHI_HdrResolve( r );
+				// present happens in the backend's EndFrame below (swap capture is
+				// serviced after EndFrame). ImGui renders through the backend:
+				// EndFrame here runs ImGui::Render and hands the draw data over,
+				// drawn into the swapchain image between the scene blit and present.
 				D3::ImGuiHooks::EndFrame();
 				break;
 			}

@@ -58,10 +58,17 @@ Deliberately scoped to *sharp* reflections on low-roughness surfaces:
      **hit-mask-aware feedback** (a jittered miss against an established
      reflection keeps ≥0.96 history; real disocclusions still die because the
      collapsed neighbourhood collapses the clip box first).
+   - **glossy pyramid** (`ssr_colordown.frag`, optional, `r_ssrGlossy`) — when on,
+     a colour mip pyramid of the reflection result is built between temporal and
+     composite (level 0 = 1:1 copy, levels 1..N = 2×2 box average), so the composite
+     can read it at a roughness-proportional LOD. Skipped entirely (and the pyramid
+     target reclaimed) when off — see §5.
    - **composite** (`ssr_composite.frag`) — full-resolution additive blend onto
      the framebuffer, applying Schlick Fresnel × gloss × `r_ssrIntensity` from
      the full-res G-buffer. Weighting at full res means a half-res march only
-     softens the reflected *image*, never the material/Fresnel edges.
+     softens the reflected *image*, never the material/Fresnel edges. With
+     `r_ssrGlossy` it samples the pyramid at `lod = (rough/maxRough)·maxLod·r_ssrGlossyScale`
+     (two adjacent levels hand-blended for smoothness); off = a plain sharp fetch.
 
    March details (`ssr.frag`):
    - reconstruct view-space position from `_currentDepth` (same
@@ -181,6 +188,8 @@ g-buffer.
 | `r_ssrResScale` | 1.0 | march buffer resolution fraction (menu stops: 1/2, 2/3, 3/4, Full) |
 | `r_ssrTemporal` | 1 | accumulate across frames; resolves the march grain |
 | `r_ssrTemporalFeedback` | 0.96 | history fraction kept per frame (variance clipping + hit-aware blending keep ghosting bounded even this high) |
+| `r_ssrGlossy` | 0 | roughness-blurred reflections: build a reflection mip pyramid and sample it at a roughness-proportional LOD in the composite, so rough surfaces blur instead of mirroring sharply. Off = the exact sharp path (byte-identical). Default off pending in-game A/B, then Ultra+ |
+| `r_ssrGlossyScale` | 1 | with `r_ssrGlossy`: multiplier on the roughness-driven blur LOD (0 = keep sharp, 1 = full pyramid reach at the roughness cutoff) |
 | `r_ssrGlassProbes` | 1 | glass reflects baked per-area room cubemaps instead of env/gen* (§2.1); inert while `r_ssr` is 0 |
 | `r_ssrGlassProbeBake` | 1 | auto-capture missing probes for the viewer's area (one-time hitch, cached to disk) |
 | `r_ssrGlassProbeSize` | 256 | probe face resolution; `bakeGlassProbe force` re-captures |
@@ -191,20 +200,20 @@ on/off toggle, the Resolution stops and the Temporal checkbox next to SSAO.
 
 ## 5. Known limitations / future work
 
-- **Sharp only** (glossy blur *deferred — gated on a real sighting*): roughness
-  dims the reflection but does not blur it. Glossy SSR needs a roughness-driven
-  blur of the (now offscreen) march buffer before the composite. **Decision
-  2026-07-31: not worth chasing proactively for Doom 3.** The surfaces where SSR
-  is most visible (wet floors, glass, polished panels) *should* stay fairly sharp
-  and already look right; the grimy medium-rough surfaces that would want blur
-  already have their reflection dimmed hard by roughness, so blurring a
-  near-invisible contribution is a subtle win in a dark, low-contrast game. The
-  artifact it fixes — a too-clean mirror ghost on a dirty floor — only bites in a
-  narrow roughness band when the scene is bright enough to show it. Revisit only
-  if playtesting turns up a specific surface reading as too clean; the cheap first
-  move then is a single roughness-weighted blur pass at the already-low SSR
-  resolution (the Half-res upsample softens a little already). No fidelity cost to
-  skipping it — `r_ssr` is fully opt-in and vanilla has no SSR at all.
+- **Glossy blur (`r_ssrGlossy`) — BUILT 2026-08-12** (was deferred, unblocked by a
+  user request). Roughness now *blurs* the reflection, not just dims it: a colour mip
+  pyramid of the temporally-accumulated reflection buffer (`ssr_colordown.frag`, RGBA16F,
+  built with the same `CreateRenderTargetMipped` machinery as the Hi-Z depth pyramid) is
+  sampled in the composite at `lod = (rough / maxRough) · maxLod · r_ssrGlossyScale`.
+  Two adjacent LODs are hand-blended (`floor`/`ceil` + `mix`) so the roughness→blur
+  transition is smooth even though the mip RT is `LINEAR_MIPMAP_NEAREST` — no per-backend
+  sampler change. Off (`r_ssrGlossy 0`, the default) keeps the exact sharp path: the
+  composite binds the single-level result buffer and `u_localParam1.w == 0` selects a plain
+  `texture()` fetch, byte-identical to before. GL3 + Vulkan. *Original deferral rationale
+  (kept for context): the surfaces where SSR is most visible — wet floors, glass, polished
+  panels — should stay fairly sharp, and grimy medium-rough surfaces already have their
+  reflection dimmed hard by roughness; so this is a subtle win in a dark game. Now that it
+  exists it's a free A/B, default-off until in-engine sign-off, then Ultra+.*
 - **Screen-space by nature**: off-screen content cannot appear in reflections;
   rays fade at screen edges. C.1's light-glow floor remains the fallback.
 - Reflections snapshot the scene *before* fog and translucents — a reflected
@@ -223,8 +232,20 @@ on/off toggle, the Resolution stops and the Temporal checkbox next to SSAO.
   armed-crossing hit test added after the first washroom test caught the
   bump-normal self-reflection haze.
 - C.2.1 resolution scale + temporal accumulation: built 2026-07-30, pending
-  in-game verification. Glossy blur deferred (see §5) — gated on a real sighting,
-  not on the active roadmap.
+  in-game verification.
+- Glossy (roughness-blurred) reflections (`r_ssrGlossy`): built 2026-08-12 on
+  `feat/ssr-glossy` (reflection mip pyramid + roughness-LOD composite, GL3 + Vulkan).
+  Headless-verified: 184/184 shaders compile, VK ran ~5750 frames validation-clean on
+  mars_city1 with glossy on, GL3 map-load clean. Default off; pending user in-engine
+  A/B, then wire into Ultra/Nightmare (where SSR already lives).
+  - **Gotcha fixed on the first cut:** the pyramid's level-0 copy first used
+    `BeginTargetMipPass(rt, 0)`, but that call **rejects level < 1** (only per-level
+    framebuffers for L>=1 exist — `VulkanBackend.cpp:4693`), so on VK level 0 was never
+    written → the whole pyramid read black and the fall-through draw smeared a small
+    reflection into the bottom-left of the scene. Level 0 must use `BeginTargetPass`
+    (the base `colorFb`), exactly like the Hi-Z build's level-0 linearize. The copy also
+    samples via `texture(var_TexCoord)` (colour-target flip-aware) rather than
+    `texelFetch`, so the pyramid stays oriented like the sharp result buffer.
 - Glass march (`r_ssrGlass`, environment_ssr shader variants): built and then
   **dropped** 2026-08-01 — in-game it only visibly contributed at grazing
   angles (screen-space limit; a head-on pane reflects the room behind the

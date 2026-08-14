@@ -24,6 +24,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "renderer/rhi/RHI.h"
 #include "renderer/rhi/GL3Local.h"
 #include "renderer/rhi/RenderParams.h"
+#include "renderer/rhi/RhiTess.h"
 #include "framework/FileSystem.h"
 #include "framework/DeclSkin.h"					// idDeclSkin (entity skin -> AO name for lazy bake)
 #include "tools/compilers/aobake/aobake.h"		// AO_BakeModelToCache (lazy occlusion-map baking)
@@ -63,8 +64,18 @@ static struct {
 	// lightRange normalizing the stored radial distance.
 	bool				lightShadowMapped;
 	rhi::ImageHandle	shadowImage;
+	// DUDE sun shadow maps (r_shadowMapSun): the 2D map on unit 7 was rendered through a
+	// per-view fitted VIRTUAL projection (rhiSunPlanes), not the light's own texgen — the
+	// receiver must sample with those planes and take its compare depth from the virtual
+	// falloff plane (shader mode 3). Only meaningful while lightShadowMapped is set.
+	bool				lightSunShadow;
 	bool				lightShadowCube;
 	rhi::ImageHandle	shadowCubeImage;
+	// static/dynamic split (r_shadowMapCacheSplit): when a cached static point light also
+	// has movers, they render into a second cube on unit 12 (shadowCubeDynImage). The
+	// interaction shader samples min(u_shadowCube, u_shadowCubeDyn) when this is set.
+	bool				lightHasDynamicLayer;
+	rhi::ImageHandle	shadowCubeDynImage;
 	float				lightRange;
 	// The player flashlight (light shader "lights/flashlight5", a narrow projected
 	// spot that hugs surfaces and sweeps every frame) self-shadows badly at the
@@ -80,12 +91,25 @@ static struct {
 static rhi::RenderTargetHandle rhiShadowMap = 0;
 static int rhiShadowMapSize = 0;
 
+// DUDE sun shadow maps (r_shadowMapSun): the current sun light's fitted virtual
+// projection — world-space S, T, Q, depth planes. Written by RB_RHI_ShadowMapPassSun,
+// read by the receiver parms fill (mode 3) while ictx.lightSunShadow is set.
+// rhiSunTexelWorld = one sun-map texel's world size at the fit center, for the
+// normal-offset bias (r_shadowMapNormalOffset).
+static idPlane rhiSunPlanes[4];
+static float rhiSunTexelWorld = 0.0f;
+
 // The cube depth target currently selected for this light's render/sample. It comes
 // from either the static cube cache (rhiCubeCache, keyed per light — see
 // RB_RHI_AcquireCubeTarget) or the per-tier scratch pool (RB_RHI_ShadowPoolTarget), not
 // a single persistent allocation. rhiShadowCubeSize is its face resolution.
 static rhi::RenderTargetHandle rhiShadowCube = 0;
 static int rhiShadowCubeSize = 0;
+// Static/dynamic split (r_shadowMapCacheSplit, lever B): when a moving/animated caster
+// shares a static point light, the world casters render into the cached cube above and
+// the movers into this scratch cube (regenerated every frame). 0 = no dynamic layer this
+// light (the common case). The interaction pass samples min(rhiShadowCube, rhiShadowCubeDyn).
+static rhi::RenderTargetHandle rhiShadowCubeDyn = 0;
 
 // r_shadowMapDebug: perforated (grate/fence) caster surfaces drawn into the map
 // this view — confirms the alpha-tested casters are actually reaching the pass.
@@ -208,7 +232,7 @@ static int RB_RHI_CountLightChain( const drawSurf_t *surf ) {
 // Vulkan (Phase 4 M3): RB_RHI_BindUnit records image handles here instead of
 // touching GL; RB_RHI_VkTextures copies them into a draw's DrawArgs. Handles
 // persist across draws exactly like GL binds do.
-static rhi::ImageHandle rhiVkUnits[9];
+static rhi::ImageHandle rhiVkUnits[13];	// units 0-7 + shadow cube 8 + SSAO 9 + occlusion 10 + parallax 11 + dynamic shadow cube 12
 
 static void RB_RHI_VkTextures( rhi::DrawArgs &da ) {
 	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
@@ -218,6 +242,10 @@ static void RB_RHI_VkTextures( rhi::DrawArgs &da ) {
 		da.textures[i] = rhiVkUnits[i];
 	}
 	da.shadowCube = rhiVkUnits[8];
+	da.ssao = rhiVkUnits[9];
+	da.occlusion = rhiVkUnits[10];
+	da.parallax = rhiVkUnits[11];
+	da.shadowCubeDyn = rhiVkUnits[12];
 }
 
 static void RB_RHI_ForgetTexBinds() {
@@ -237,7 +265,7 @@ RB_RHI_BindUnit
 static void RB_RHI_BindUnit( int unit, idImage *image ) {
 	// Vulkan: demand-load and record the handle for RB_RHI_VkTextures; no GL
 	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		if ( unit >= 0 && unit < 9 && image != NULL ) {
+		if ( unit >= 0 && unit < 12 && image != NULL ) {
 			image->Bind();		// upload trigger only under Vulkan
 			if ( image->rhiHandle == 0 ) {
 				// a white fallback silently breaks shading (e.g. a white
@@ -275,6 +303,30 @@ static void RB_RHI_BindUnit( int unit, idImage *image ) {
 	image->Bind();
 }
 
+// bind an already-resolved RHI image handle on a multitexture unit for the
+// post/SSAO/SSR passes. GL3: raw glActiveTexture+bind (these targets aren't
+// idImages). Vulkan: record into rhiVkUnits so RB_RHI_VkTextures carries it into
+// the next draw's DrawArgs (units 1-7 -> textures[], 9 -> ssao, 10 -> occ). Used
+// directly for an MRT second attachment (GetRenderTargetImage2), which has no
+// RenderTargetHandle of its own.
+static void RB_RHI_BindRTImage( rhi::RHI *r, int unit, rhi::ImageHandle img ) {
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		if ( unit >= 0 && unit < 12 ) {
+			rhiVkUnits[unit] = img;
+		}
+		return;
+	}
+	rhi::gl3ActiveTexture( GL_TEXTURE0 + unit );
+	qglBindTexture( GL_TEXTURE_2D, (GLuint)img );
+	rhi::gl3ActiveTexture( GL_TEXTURE0 );
+	backEnd.glState.currenttmu = 0;
+}
+
+// bind a render-target texture (GetRenderTargetImage handle) on a multitexture unit.
+static void RB_RHI_BindRTUnit( rhi::RHI *r, int unit, rhi::RenderTargetHandle rt ) {
+	RB_RHI_BindRTImage( r, unit, r->GetRenderTargetImage( rt ) );
+}
+
 // GTAO render targets (docs/ssao-gtao.md). Two RGBA8 screen-space buffers: the raw
 // horizon-search output and the bilaterally-blurred result the ambient pass / debug
 // overlay consume. R = ambient visibility, GBA = view-space bent normal. Rebuilt on
@@ -286,6 +338,16 @@ static rhi::RenderTargetHandle rhiSsaoResultRT = 0;	// whichever holds the finis
 static int  rhiSsaoW = 0, rhiSsaoH = 0;				// AO buffer size (may be < view for half-res)
 static int  rhiSsaoViewW = 0, rhiSsaoViewH = 0;		// full view size the AO covers
 static bool rhiSsaoAppliedThisView = false;			// AO was produced for the view being drawn
+
+// SSAO Phase 1 prefiltered depth mip chain (docs/ssao-perf-optimization.md, r_ssaoDepthMip).
+// A single AO-resolution RGBA16F target holding LINEAR view-space eye depth in R with a
+// render-generated mip chain: level 0 is written by ssao_depthmip.frag, coarser levels by
+// ssao_depthdown.frag (a max/farthest downsample, avoiding the fg/bg averaging halo).
+// ssao.frag's horizon march reads a coarser mip for farther steps, so far taps touch a
+// small cache-local footprint. Rebuilt on resize / lost context; freed when toggled off.
+static rhi::RenderTargetHandle rhiSsaoDepthMipRT = 0;
+static int  rhiSsaoDepthMipW = 0, rhiSsaoDepthMipH = 0;	// == AO buffer size
+static int  rhiSsaoDepthMipLevels = 0;					// mip count (0 = not built)
 
 // GTAO temporal accumulation (docs/ssao-gtao.md, r_ssaoTemporal). Two ping-ponged history
 // buffers hold the accumulated AO+bent so we can read last frame's result while writing
@@ -313,10 +375,50 @@ static bool rhiSsrHistValid = false;				// the read slot holds a usable previous
 static bool rhiSsrHavePrevVP = false;				// rhiSsrPrevViewProj holds a previous view-proj
 static float rhiSsrPrevViewProj[16];				// previous frame's world->clip (proj * view)
 static float rhiSsrJitterPhase = 0.0f;				// per-frame march jitter rotation
+// SSR Hi-Z (docs/ssao-perf-optimization.md, r_ssrHiZ): a min-Z (nearest-surface) linear-
+// depth mip chain at the SSR march resolution, so the march leaps provably-empty span.
+// Same machinery as the SSAO depth mip, with a MIN downsample instead of MAX.
+static rhi::RenderTargetHandle rhiSsrDepthMinRT = 0;
+static int  rhiSsrDepthMinW = 0, rhiSsrDepthMinH = 0;	// == SSR march buffer size
+static int  rhiSsrDepthMinLevels = 0;					// mip count (0 = not built)
+
+// SSR glossy reflections (docs/ssr.md, r_ssrGlossy): a colour mip pyramid of the
+// (temporally-accumulated) reflection buffer at the SSR march resolution. The composite
+// samples it at a roughness-proportional LOD so rough surfaces blur. Same mipped-target
+// machinery as the SSR Hi-Z above, but RGBA16F and an average (box) downsample.
+static rhi::RenderTargetHandle rhiSsrColorMipRT = 0;
+static int  rhiSsrColorMipW = 0, rhiSsrColorMipH = 0;	// == SSR march buffer size
+static int  rhiSsrColorMipLevels = 0;					// mip count (0 = not built)
+
+// DUDE berserk vision feedback trail (docs / memory berserk-vision-rhi, RB_RHI_BerserkAccum).
+// A ping-pong RGBA8 pair reproducing the stock ARB material's recursive _scratch feedback the
+// RHI path can't accumulate: each frame folds the freshly captured scene with the previous
+// frame magnified ~3-5% about the centre, gated by the berserk2 radial mask (see
+// berserk_accum.frag), so older frames fan out as streaks. Sized to the view. Invalidated on
+// resize / lost context; a large time gap re-seeds so a re-entry starts a clean trail.
+static rhi::RenderTargetHandle rhiBerserkTrailRT[2] = { 0, 0 };
+static int  rhiBerserkIdx = 0;						// slot that received the last sample is 1 - this
+static int  rhiBerserkW = 0, rhiBerserkH = 0;		// trail buffer size
+static bool rhiBerserkValid = false;				// a usable previous trail exists (history read ok)
+static int  rhiBerserkLastTick = -100000;			// Sys_Milliseconds of the last accumulation sample
+
+// DUDE hell-time / Artifact vision (D3XP FullscreenFX_Helltime, RB_RHI_HelltimeAccum). Its own
+// ping-pong pair, separate from berserk's, reproducing the stock recursive _accum zoom-feedback
+// (textures/smf/bloodorb{1,2,3}) the RHI can't accumulate — the same class of failure as _scratch.
+// Per-level tint/scale/rotation + the inverted bloodorb3 radial mask (see helltime_accum.frag).
+static rhi::RenderTargetHandle rhiHelltimeTrailRT[2] = { 0, 0 };
+static int  rhiHelltimeIdx = 0;
+static int  rhiHelltimeW = 0, rhiHelltimeH = 0;
+static bool rhiHelltimeValid = false;
+static int  rhiHelltimeLastTick = -100000;
 
 // Normal G-buffer (Option B): bump-mapped view-space normals written by an extra opaque
 // geometry pass, so SSAO uses real per-pixel normals instead of reconstructing from depth.
 static rhi::RenderTargetHandle rhiNormalRT = 0;		// RGBA8 view-normal + depth (color+depth target)
+// the normal buffer SSAO/SSR/debug actually sample this view: rhiNormalRT (standalone pass)
+// or the merged handle from BeginNormalPrepass (r_ssaoMergeNormal). Both expose the normal
+// (GetRenderTargetImage) + the SSR rough/metal MRT (GetRenderTargetImage2) when rhiNormalMrt.
+static rhi::RenderTargetHandle rhiNormalResultRT = 0;
 static int  rhiNormalW = 0, rhiNormalH = 0;			// full view resolution
 static bool rhiNormalReadyThisView = false;			// the normal buffer was produced for this view
 static bool rhiNormalMrt = false;					// has the SSR rough/metal attachment (docs/ssr.md)
@@ -469,36 +571,279 @@ static idImage *RB_RHI_SurfaceOcclusion( const idRenderModel *model, const idRen
 ===================
 RB_RHI_ResolvePbrMaterial
 
-Resolve a material's effective PBR metalness/roughness (docs/pbr-materials.md) in
-priority order: live per-category cvars (the Developer-tab sliders) > the material's
-baked table values (override-file entries and long-tail categories) > globals
-(metalness 0, r_pbrRoughness). Metalness comes back sanity-clamped to [0,1].
-Shared by the lit interaction fill and the SSR G-buffer pass so both see the same
-surface response; returns the category for callers with per-category extras (wetness).
+Resolve a material's effective PBR response (docs/pbr-materials.md), outputting all
+four params: metalness, roughness, wetness (specular-energy multiplier) and env (metal
+env-glow multiplier over the global r_pbrEnvScale). A category-tagged material tracks
+its category row in the per-category defaults table (the Categories sliders); a pinned
+(NONE) material carries its own baked/override values, with the global roughness
+fallback. Per-material wetness/env override columns always win. Metalness comes back
+sanity-clamped to [0,1]. Shared by the lit interaction fill and the SSR G-buffer pass
+so both see the same surface response; returns the category.
 ===================
 */
-static int RB_RHI_ResolvePbrMaterial( const idMaterial *mat, float &metal, float &rough ) {
+static int RB_RHI_ResolvePbrMaterial( const idMaterial *mat, float &metal, float &rough,
+                                      float &wet, float &env ) {
 	const int pbrCat = mat ? mat->GetPbrCategory() : PBR_CAT_NONE;
 	const float tblMetal = mat ? mat->GetPbrMetalness() : -1.0f;
 	const float tblRough = mat ? mat->GetPbrRoughness() : -1.0f;
-	metal = tblMetal >= 0.0f ? tblMetal : 0.0f;
-	rough = tblRough >= 0.0f ? tblRough : r_pbrRoughness.GetFloat();
-	switch ( pbrCat ) {
-	case PBR_CAT_SKIN:    metal = 0.0f; rough = r_pbrSkinRoughness.GetFloat(); break;
-	case PBR_CAT_EYES:    metal = 0.0f; rough = r_pbrEyesRoughness.GetFloat(); break;
-	case PBR_CAT_FLESH:   metal = 0.0f; rough = r_pbrFleshRoughness.GetFloat(); break;
-	case PBR_CAT_METAL:   metal = r_pbrMetalMetalness.GetFloat(); rough = r_pbrMetalRoughness.GetFloat(); break;
-	case PBR_CAT_PAINTED: metal = r_pbrPaintedMetalness.GetFloat();
-	                      rough = r_pbrPaintedRoughness.GetFloat(); break;
-	case PBR_CAT_CERAMIC: metal = r_pbrPaintedMetalness.GetFloat();
-	                      rough = r_pbrCeramicRoughness.GetFloat(); break;
-	case PBR_CAT_RUST:    metal = r_pbrRustMetalness.GetFloat();
-	                      rough = r_pbrRustRoughness.GetFloat(); break;
-	case PBR_CAT_STONE:   metal = 0.0f; rough = r_pbrStoneRoughness.GetFloat(); break;
-	default: break;		// PBR_CAT_NONE: baked/override values stand
+	const float matWet   = mat ? mat->GetPbrWetness() : -1.0f;
+	const float matEnv   = mat ? mat->GetPbrEnv() : -1.0f;
+	if ( pbrCat > PBR_CAT_NONE && pbrCat < PBR_CAT_COUNT ) {
+		// category-tagged: the whole class tracks its row in the defaults table
+		R_PbrCategoryDefaults( pbrCat, metal, rough, wet, env );
+	} else {
+		// pinned / long-tail: the material's own baked values, global roughness fallback
+		metal = tblMetal >= 0.0f ? tblMetal : 0.0f;
+		rough = tblRough >= 0.0f ? tblRough : r_pbrRoughness.GetFloat();
+		wet   = 1.0f;
+		env   = 1.0f;
 	}
+	// per-material override columns (5th/6th) win over the category defaults
+	if ( matWet >= 0.0f ) wet = matWet;
+	if ( matEnv >= 0.0f ) env = matEnv;
 	metal = idMath::ClampFloat( 0.0f, 1.0f, metal );
 	return pbrCat;
+}
+
+// two-output shim for callers that only need metalness/roughness (SSR G-buffer)
+static int RB_RHI_ResolvePbrMaterial( const idMaterial *mat, float &metal, float &rough ) {
+	float wet, env;
+	return RB_RHI_ResolvePbrMaterial( mat, metal, rough, wet, env );
+}
+
+/*
+===================
+RB_RHI_TessellateSurf
+
+DUDE tessellation (docs/tessellation.md): should this surface route through the
+PN-triangle tessellation pipeline? True only on the Vulkan backend with
+r_tessellation on, for a character/monster mesh — the worldspawn BSP (index 0),
+static props and the first-person viewmodel are left flat. The opaque prepass +
+interaction/ambient passes call with forBlendPass = false (they must agree under
+depth-EQUAL, so translucent / pure-emissive surfaces are excluded); the blended
+material pass calls with forBlendPass = true so blood-overlay decals — translucent,
+projected onto the monster's model — PN-tessellate too.
+
+Under Roadmap B deform-once (r_tessDeform), the BODY is drawn from a pre-deformed
+buffer (tri->tessDeformVB), NOT this fixed-function path — RB_RHI_TessOrDeform /
+RB_RHI_ApplyDeform substitute it and clear the tess flag. The forBlendPass = true
+fixed-function path then only ever runs for a blood-overlay decal, which is a SEPARATE
+surface with no deform buffer; it follows the base mesh's (welded) normals — welded on
+tri->verts in idMD5Mesh::UpdateSurface so the decal rides the same PN surface as the
+deformed body instead of clipping through it.
+===================
+*/
+bool RB_RHI_TessellateSurf( const drawSurf_s *surfIn, bool forBlendPass ) {
+	const drawSurf_t *surf = surfIn;
+	if ( !r_tessellation.GetBool()
+	     || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		return false;
+	}
+	const viewEntity_t *space = surf->space;
+	if ( space == NULL || space->entityDef == NULL || space->entityDef->index == 0 ) {
+		return false;
+	}
+	if ( space->weaponDepthHack || space->modelDepthHack != 0.0f ) {
+		return false;
+	}
+	const idMaterial *mat = surf->material;
+	if ( mat == NULL || mat->HasGui() ) {
+		return false;
+	}
+	// Translucent surfaces don't seal depth, so they can't tessellate in the opaque
+	// prepass/interaction passes (depth-EQUAL). The blended pass, though, draws them
+	// directly — where following the tessellated base is exactly what a blood decal
+	// needs — so allow them there.
+	if ( !forBlendPass && mat->Coverage() == MC_TRANSLUCENT ) {
+		return false;
+	}
+	// The blend pass tessellates conformal decal overlays (blood on the body) so they
+	// follow the deformed mesh. But a character entity can ALSO carry view-oriented
+	// additive glow/particle surfaces that inherit its model path — e.g. the RoE harvest
+	// "soul" aura, emitted from the corpse material via `deform particle` as
+	// textures/particles/ember_mid. Those are camera-facing sprite quads with degenerate
+	// normals; PN-tessellating + inward-displacing them collapses/clips the quads and the
+	// aura vanishes (Vulkan-only, only when r_tessellation is on — hence GL3 is unaffected).
+	// Blood decals alpha-blend and conform to the mesh; glows/particles are purely additive,
+	// so skip a surface whose ambient stages are ALL additive.
+	if ( forBlendPass ) {
+		bool anyAmbient = false, allAdditive = true;
+		for ( int i = 0; i < mat->GetNumStages(); i++ ) {
+			const shaderStage_t *st = mat->GetStage( i );
+			if ( st->lighting != SL_AMBIENT ) {
+				continue;
+			}
+			anyAmbient = true;
+			if ( ( st->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) )
+			     != ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE ) ) {
+				allAdditive = false;
+				break;
+			}
+		}
+		if ( anyAmbient && allAdditive ) {
+			return false;
+		}
+	}
+	const char *matName = mat->GetName();
+
+	// Characters/monsters only, gated on the ENTITY's model path rather than the
+	// surface material. A blood overlay is added to the monster's model but carries a
+	// textures/decals material — the entity's model still resolves to the monster md5,
+	// so it's recognised as monster geometry and can follow the deformed base. This is
+	// also more robust than IsDynamicModel() for props (a knocked-over moveable becomes
+	// a dynamic AF ragdoll and slipped a DM_STATIC test — that's how chair3 leaked).
+	// md5 model files live under models/md5/monsters/ (monsters), models/md5/chars/
+	// (human NPC bodies — security, marine, suit, labcoat...), models/md5/characters/
+	// (NPC def_head heads: models/md5/characters/npcs/heads|zheads/...) and
+	// models/md5/heads/ (the main-character def_heads — betruger, campbell, swann,
+	// sarge, player). Match all four substrings so every human/monster body AND head
+	// tessellates. Every md5mesh whose path contains "heads/" is a character/zombie
+	// head (verified — no props or world geometry live there), so "heads/" is safe.
+	// Props are models/mapobjects/. Cutscene actors live under models/md5/cinematics/
+	// but so does cinematic SCENERY (rocks, walls, clouds, wall meshes) and the actor's
+	// weapon props — so "cinematics/" can't be whitelisted wholesale. A cinematic ACTOR,
+	// though, wears a real character/monster SKIN (models/characters/mcneil/body,
+	// .../male_npc/soldier/soldier, models/monsters/imp/imp), while cinematic scenery and
+	// weapon props do not. So admit a cinematics/ mesh only when its MATERIAL is a
+	// character/monster skin — the intro McNeil + marine tessellate, the rocks stay flat.
+	// (Blood-overlay decals still ride in on the model path: their monster model resolves
+	// to monsters/… even though the decal material is textures/decals/….)
+	const idRenderModel *entModel = space->entityDef->parms.hModel;
+	const char *modelName = entModel ? entModel->Name() : "";
+	const bool modelIsChar = idStr::FindText( modelName, "monsters/", false ) != -1
+	  || idStr::FindText( modelName, "characters/", false ) != -1
+	  || idStr::FindText( modelName, "chars/", false ) != -1
+	  || idStr::FindText( modelName, "heads/", false ) != -1;
+	const bool cinematicActor = idStr::FindText( modelName, "cinematics/", false ) != -1
+	  && ( idStr::FindText( matName, "models/characters/", false ) != -1
+	    || idStr::FindText( matName, "models/monsters/", false ) != -1 );
+	if ( !modelIsChar && !cinematicActor ) {
+		return false;
+	}
+	// Small, highly convex facial sub-meshes (eyes, teeth, tongue, mouth interiors,
+	// jaws, eyelashes) get inflated by PN straight through the surrounding face.
+	// Exclude them by material name so r_tessMinEdge can stay low enough to catch
+	// ears/fingers without touching them. The head *skin* (which carries the ears) is
+	// a different material and still tessellates.
+	//  - Monsters + player name these "...eye..."/"...teeth..."/"...tongue..."/
+	//    "...mouth..."/"...jaw..." (cacoeye, cacodemon_mouth, pinky/teeth, mtongue,
+	//    zjaw01...). The only non-facial "eye" matches (skcubeyellow, hell eyeskin
+	//    walls) are static/world, already excluded above.
+	//  - Human NPC eyes/teeth/tongue are the shared models/characters/common/ folder
+	//    (left*/right* eyes, teeth*, tongue) — all facial bits, no body geometry.
+	//  - "lashes" (not "lash") avoids matching the commando's muzzle flash (mflash).
+	// (docs/tessellation.md)
+	// Rigid headgear — helmets, goggles/visors, eyeglasses — is hard, thin, often
+	// near-flat shell geometry: PN smoothing balloons it and inward displacement
+	// cracks the visor/lens open (the security guard's goggles broke visibly). It
+	// gains nothing from tessellation (it isn't organic), so exclude it while the
+	// surrounding face skin/ears still smooth.
+	//  - "gog"      : security guard headgear when the regsec skin is applied
+	//                 (helmet+goggles+mask baked as one material,
+	//                 models/characters/male_npc/security/gog).
+	//  - "zsechead" : the security head *shell* itself (models/monsters/zsecurity/
+	//                 zsechead2/zsechead3) — the helmeted head, shared by the living
+	//                 guard and the zombie-sec (skins just pick which name shows, so
+	//                 both spellings turn up depending on the guard). The zsec zombie
+	//                 *body* is dsecurity/zsheild, not zsechead, so it still smooths.
+	//  - "gogs"/"marsec": the goggle lenses + mars-sec mask on that head
+	//                 (zsgogs/zsgogs2 also match "gog").
+	//  - "helmet"   : sarge/marine helmets (models/characters/sarge2/helmet...).
+	//  - "glasses"  : scientist eyeglasses (models/characters/scientist/head02/
+	//                 glasses2 + its glasses2_fx lens-reflection pass).
+	// (confirmed by r_tessDebug capture; docs/tessellation.md)
+	static const char * const tessSkipNames[] = {
+		"eye", "teeth", "tongue", "mouth", "jaw", "lashes", "characters/common/",
+		"gog", "zsechead", "marsec", "helmet", "glasses"
+	};
+	for ( int i = 0; i < (int)( sizeof( tessSkipNames ) / sizeof( tessSkipNames[0] ) ); i++ ) {
+		if ( idStr::FindText( matName, tessSkipNames[i], false ) != -1 ) {
+			return false;
+		}
+	}
+	// For the OPAQUE passes, exclude purely emissive surfaces (no lit stage) — a
+	// monitor/screen/glow panel is drawn only in the flat depth-EQUAL ambient pass,
+	// never tessellated, so sealing its depth at the PN position would drop it
+	// (dark/shimmering panels). A lit surface that ALSO carries an ambient/blend stage
+	// (e.g. the imp's conditional "burning corpse" FX over its bump/diffuse/specular)
+	// still tessellates. In the blended pass we ARE that ambient/decal draw, so a
+	// pure-ambient surface (a blood decal) is exactly what we want to tessellate there.
+	if ( !forBlendPass ) {
+		bool hasLitStage = false;
+		for ( int i = 0; i < mat->GetNumStages(); i++ ) {
+			if ( mat->GetStage( i )->lighting != SL_AMBIENT ) {
+				hasLitStage = true;
+				break;
+			}
+		}
+		if ( !hasLitStage ) {
+			return false;
+		}
+	}
+
+	// r_tessDebug: log each accepted material once, together with the model it belongs
+	// to, so a surface that shouldn't be tessellated (a leaked eye/glasses/visor
+	// material) can be pinned down by walking up to the offending character and reading
+	// the console — the model name tells us which .md5mesh (body vs def_head) it is.
+	if ( r_tessDebug.GetBool() ) {
+		static idList<idStr> tessLogged;
+		if ( tessLogged.FindIndex( idStr( matName ) ) == -1 ) {
+			tessLogged.Append( idStr( matName ) );
+			const idRenderModel *m = space->entityDef->parms.hModel;
+			common->Printf( "tess: %s  <-  %s (dm=%d idx=%d)\n", matName,
+			                m ? m->Name() : "<null>",
+			                m ? (int)m->IsDynamicModel() : -1, space->entityDef->index );
+		}
+	}
+	return true;
+}
+
+// fill the tess params (level, LOD distance, displacement, min edge) into a
+// RenderParams the tessellation stages read; global cvar values, identical in
+// every pass so zfill/interaction/ambient displace to the same depth.
+void RB_RHI_SetTessParms( rhi::RenderParams &parms ) {
+	parms.tessParms[0] = r_tessLevel.GetFloat();
+	parms.tessParms[1] = r_tessMaxDist.GetFloat();
+	parms.tessParms[2] = r_tessDisplace.GetFloat();	// Phase 2 displacement strength
+	parms.tessParms[3] = r_tessMinEdge.GetFloat();	// min edge length to subdivide (anti eye-bulge)
+}
+
+// For a tessellated surface, copy the bump stage's texture matrix into parms (so the
+// pass builds the SAME bump texcoord the lit passes displace with) and return the bump
+// image to bind (unit 1 in zfill, unit 2 in the fog pass). Mirrors R_SetDrawInteraction /
+// the SSAO G-buffer so the displacement is bit-identical → depth-EQUAL holds. Shared by
+// the zfill prepass and the fog interaction pass.
+idImage *RB_RHI_TessBumpForZfill( const drawSurf_t *surf, rhi::RenderParams &parms ) {
+	const shaderStage_t *bumpStage = surf->material->GetBumpStage();
+	const float *regs = surf->shaderRegisters;
+	idImage *bumpImg = globalImages->flatNormalMap;
+	parms.bumpMatrixS[0] = 1.0f;
+	parms.bumpMatrixT[1] = 1.0f;
+	if ( bumpStage && bumpStage->texture.image ) {
+		bumpImg = bumpStage->texture.image;
+		if ( bumpStage->texture.hasMatrix ) {
+			parms.bumpMatrixS[0] = regs[bumpStage->texture.matrix[0][0]];
+			parms.bumpMatrixS[1] = regs[bumpStage->texture.matrix[0][1]];
+			parms.bumpMatrixS[3] = regs[bumpStage->texture.matrix[0][2]];
+			parms.bumpMatrixT[0] = regs[bumpStage->texture.matrix[1][0]];
+			parms.bumpMatrixT[1] = regs[bumpStage->texture.matrix[1][1]];
+			parms.bumpMatrixT[3] = regs[bumpStage->texture.matrix[1][2]];
+			if ( parms.bumpMatrixS[3] < -40.0f || parms.bumpMatrixS[3] > 40.0f ) parms.bumpMatrixS[3] -= (int)parms.bumpMatrixS[3];
+			if ( parms.bumpMatrixT[3] < -40.0f || parms.bumpMatrixT[3] > 40.0f ) parms.bumpMatrixT[3] -= (int)parms.bumpMatrixT[3];
+		}
+	}
+	return bumpImg;
+}
+
+// Roadmap B (docs/tessellation.md): classify a surface for the tessellated draw. Returns whether to
+// FIXED-FUNCTION tessellate (the shipping .tesc/.tese path); sets outUseDeform = draw the pre-deformed
+// expanded buffer instead (classifier-approved AND deform-once dispatched this frame). Mutually
+// exclusive; a classifier-excluded surface (eyes/teeth/headgear/etc.) gets BOTH false and draws its
+// base geometry, so deform never inflates what fixed-function tess correctly skips.
+static bool RB_RHI_TessOrDeform( const drawSurf_t *surf, const srfTriangles_t *tri, bool &outUseDeform ) {
+	const bool cand = RB_RHI_TessellateSurf( surf, false );
+	outUseDeform = cand && tri->tessDeformVB && tri->tessDeformIB;
+	return cand && !outUseDeform;
 }
 
 /*
@@ -540,8 +885,17 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		break;
 	}
 
-	memcpy( parms.diffuseModifier, din->diffuseColor.ToFloatPtr(), 16 );
-	memcpy( parms.specularModifier, din->specularColor.ToFloatPtr(), 16 );
+	// r_whiteWorld 2 (clay): the light+material colour is baked into din->diffuseColor, so
+	// force the modifier white to strip both — the surface then reads only occlusion/relief
+	// (SSAO + POM self-shadow) in grey, with no coloured-light tint. Metalness is zeroed below.
+	const bool clayWorld = r_whiteWorld.GetInteger() >= 2;
+	if ( clayWorld ) {
+		parms.diffuseModifier[0] = parms.diffuseModifier[1] = parms.diffuseModifier[2] = parms.diffuseModifier[3] = 1.0f;
+		parms.specularModifier[0] = parms.specularModifier[1] = parms.specularModifier[2] = parms.specularModifier[3] = 1.0f;
+	} else {
+		memcpy( parms.diffuseModifier, din->diffuseColor.ToFloatPtr(), 16 );
+		memcpy( parms.specularModifier, din->specularColor.ToFloatPtr(), 16 );
+	}
 
 	// DUDE Phase 3.5 specular tuning (interaction.frag). Defaults reproduce
 	// vanilla: scale 1, shading model 0 (the N.H lookup table). Only consumed by
@@ -561,27 +915,16 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	bool pbrOrganicSpecFallback = false;
 	if ( r_pbr.GetBool() && !din->ambientLight ) {
 		const idMaterial *mat = din->surf->material;
-		float metal, rough;
-		const int pbrCat = RB_RHI_ResolvePbrMaterial( mat, metal, rough );
+		float metal, rough, wetMul, envMul;
+		const int pbrCat = RB_RHI_ResolvePbrMaterial( mat, metal, rough, wetMul, envMul );
 		// wetness = a specular-energy multiplier (the water/sweat/slime film) —
-		// deliberately not metalness, which would tint and darken like bronze. A
-		// per-material override (pbr_overrides.cfg 5th column) wins; otherwise the
-		// per-category wetness cvar for organics (skin/cornea/enamel, demon/gore),
-		// else neutral 1.
-		const float matWet = mat ? mat->GetPbrWetness() : -1.0f;
-		float wetMul;
-		if ( matWet >= 0.0f ) {
-			wetMul = matWet;
-		} else {
-			switch ( pbrCat ) {
-			case PBR_CAT_SKIN:
-			case PBR_CAT_EYES:  wetMul = r_pbrSkinWetness.GetFloat(); break;
-			case PBR_CAT_FLESH: wetMul = r_pbrFleshWetness.GetFloat(); break;
-			default:            wetMul = 1.0f; break;
-			}
-		}
+		// deliberately not metalness, which would tint and darken like bronze. Comes from
+		// the material's per-category defaults row (or a per-material override column),
+		// resolved above; neutral 1 leaves the specular unchanged.
 		float specScale = r_pbrSpecScale.GetFloat() * wetMul;
-		parms.pbrParms[0] = metal;
+		// clay world: force dielectric so metals don't kill the white diffuse / tint the
+		// specular — the clay render should read metal and non-metal surfaces the same
+		parms.pbrParms[0] = clayWorld ? 0.0f : metal;
 		parms.pbrParms[1] = rough;
 		parms.pbrParms[2] = 1.0f;
 		parms.pbrParms[3] = specScale;
@@ -594,10 +937,10 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		parms.localParam1[2] = r_pbrToksvigBase.GetFloat();
 		parms.localParam1[3] = r_pbrFireflyClamp.GetFloat();
 		// Phase C.1 metal environment floor rides the occlusionParms spare slot
-		// (the occlusion block below only writes .xyz). A per-material env override
-		// (6th column) scales it; default 1 keeps the global r_pbrEnvScale.
-		const float matEnv = mat ? mat->GetPbrEnv() : -1.0f;
-		parms.occlusionParms[3] = r_pbrEnvScale.GetFloat() * ( matEnv >= 0.0f ? matEnv : 1.0f );
+		// (the occlusion block below only writes .xyz). The per-category env default
+		// (or a per-material override column) scales the global r_pbrEnvScale; resolved
+		// above as envMul, neutral 1 keeps the global value.
+		parms.occlusionParms[3] = r_pbrEnvScale.GetFloat() * envMul;
 
 		// organic materials authored without a specular stage (most blood decals
 		// — bloodpool01 — and the gibs) would zero the GGX lobe through the
@@ -615,10 +958,13 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	}
 
 	// shadow mapping (DUDE Phase 3.5): only the regular interaction shader samples
-	// the depth map — the ambientLight pass has no shadow term. The lookup reuses
-	// the light-projection texgen already filled above (lightProjection[]), so no
-	// extra matrix is needed here. Left zero (memset) for stencil / unshadowed
-	// lights -> u_shadowParms.x == 0 -> visibility 1.
+	// the depth map — the ambientLight pass has no shadow term. The 2D lookup uses a
+	// SEPARATE, unbaked projection texgen (shadowProjection[], filled below), NOT the
+	// cookie texgen (lightProjection[]): the cookie carries the light stage's texture
+	// matrix (rotating fan gobos etc.), but the caster renders the depth map with the
+	// raw projection, so sampling with the baked cookie UV would slide the shadow
+	// across a static depth field (the fan-shadow bug). Left zero (memset) for stencil
+	// / unshadowed lights -> u_shadowParms.x == 0 -> visibility 1.
 	if ( ( ictx.lightShadowMapped || ictx.lightShadowCube ) && !din->ambientLight ) {
 		// Receiver-dependent acne bias: flat world/BSP surfaces tolerate the tight
 		// world bias; models (non-static-world entities) have curved, high-slope
@@ -644,15 +990,58 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		// the spare pbrParms2.y slot; 0 keeps the old constant bias.
 		parms.pbrParms2[1] = r_shadowMapSlopeBias.GetFloat();
 
-		if ( ictx.lightShadowMapped ) {
+		if ( ictx.lightShadowMapped && ictx.lightSunShadow ) {
+			// DUDE sun shadow map (mode 3): the map was rendered through the per-view
+			// fitted VIRTUAL projection (rhiSunPlanes), so the lookup must use those
+			// same planes — the light's own texgen never saw this map. The compare
+			// reference is the virtual depth plane (shadowFalloffS -> var_ShadowProjection.z);
+			// the sun map's depth unit spans the whole fitted region, so the bias has
+			// its own (smaller) cvar. Slope-scaling still applies via pbrParms2.y.
+			parms.shadowParms[0] = 3.0f;		// sun: virtual-projection 2D map on unit 7
+			parms.shadowParms[1] = ( rhiShadowMapSize > 0 ) ? 1.0f / (float)rhiShadowMapSize : 0.0f;
+			parms.shadowParms[2] = r_shadowMapSunBias.GetFloat();
+			// normal-offset bias (interaction.vert/.tese): w = one sun texel's world
+			// size at the fit center; pbrParms2.w = the offset strength in texels
+			parms.shadowParms[3] = rhiSunTexelWorld;
+			parms.pbrParms2[3] = r_shadowMapNormalOffset.GetFloat();
+			idPlane rawLp;
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, rhiSunPlanes[0], rawLp );
+			memcpy( parms.shadowProjectionS, rawLp.ToFloatPtr(), 16 );
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, rhiSunPlanes[1], rawLp );
+			memcpy( parms.shadowProjectionT, rawLp.ToFloatPtr(), 16 );
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, rhiSunPlanes[2], rawLp );
+			memcpy( parms.shadowProjectionQ, rawLp.ToFloatPtr(), 16 );
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, rhiSunPlanes[3], rawLp );
+			memcpy( parms.shadowFalloffS, rawLp.ToFloatPtr(), 16 );
+		} else if ( ictx.lightShadowMapped ) {
 			parms.shadowParms[0] = 1.0f;		// projected/spot: 2D map on unit 7
 			parms.shadowParms[1] = ( rhiShadowMapSize > 0 ) ? 1.0f / (float)rhiShadowMapSize : 0.0f;
 			parms.shadowParms[2] = bias;
+
+			// UNBAKED projection for the 2D shadow lookup: the RAW light-projection
+			// planes transformed into this surface's local space, exactly as the
+			// caster does (RB_RHI_ShadowCasterChain), so the sampled UV lands in the
+			// same frame the depth was written. Equals lightProjection[] for lights
+			// without a projection texture matrix; differs (and fixes the swimming
+			// shadow) for rotating/scrolling gobos like the ceiling-fan lights.
+			idPlane rawLp;
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, backEnd.vLight->lightProject[0], rawLp );
+			memcpy( parms.shadowProjectionS, rawLp.ToFloatPtr(), 16 );
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, backEnd.vLight->lightProject[1], rawLp );
+			memcpy( parms.shadowProjectionT, rawLp.ToFloatPtr(), 16 );
+			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, backEnd.vLight->lightProject[2], rawLp );
+			memcpy( parms.shadowProjectionQ, rawLp.ToFloatPtr(), 16 );
 		} else {
 			parms.shadowParms[0] = 2.0f;		// point/omni: cube map on unit 8
 			parms.shadowParms[1] = ( rhiShadowCubeSize > 0 ) ? 1.0f / (float)rhiShadowCubeSize : 0.0f;
 			parms.shadowParms[2] = bias;
 			parms.shadowParms[3] = ictx.lightRange;	// radial-distance normalizer
+			// static/dynamic split: also sample the movers' cube (unit 12) and take the
+			// darker of the two. pbrParms2.z is the hasDynamicLayer flag the shader gates on.
+			parms.pbrParms2[2] = ( ictx.lightHasDynamicLayer && ictx.shadowCubeDynImage ) ? 1.0f : 0.0f;
+			// normal-offset bias (interaction.vert/.tese): strength in texels; the shader
+			// derives the world size per texel from 2*dist/res (exact for a cube face)
+			parms.pbrParms2[3] = r_shadowMapNormalOffset.GetFloat();
 		}
 	}
 
@@ -739,6 +1128,43 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			: scale * idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapDirect.GetFloat() );
 	}
 
+	// DUDE parallax occlusion mapping (docs/parallax.md). The interaction pass marches the
+	// bump stage's captured height map to offset the surface UVs, faking per-pixel relief on
+	// flat world geometry. Fragment-only (no geometry moved), so the flat depth prepass and
+	// GLS_DEPTHFUNC_EQUAL are untouched. Interaction pass only for now: the ambient pass keeps
+	// flat UVs until it gets a matching offset (Phase C). GetParallaxStage() is NULL on stock
+	// assets and with r_parallax off, so this stays inert on the base game.
+	//
+	// World (BSP) surfaces only: POM assumes a locally flat surface with a uniform tangent
+	// basis, which holds for walls/floors but not props/characters -- on those the offset
+	// smears and deforms edges. Props are the tessellation feature's job, not this one. The
+	// static-world test mirrors the occlusion-map path above.
+	//
+	// Opaque only: on alpha-tested (perforated) surfaces -- grates, fences, fans -- the UV
+	// march swims across the cut-out holes and fights the alpha test, looking worse than
+	// flat. The height-derived detail those need lives in their silhouette, not their depth.
+	idImage *parallaxImage = NULL;
+	if ( r_parallax.GetBool() && R_BackendSupportsEnhancements() && !din->ambientLight
+			&& din->surf->material && din->surf->material->Coverage() == MC_OPAQUE ) {
+		const idRenderEntityLocal *redef = din->surf->space ? din->surf->space->entityDef : NULL;
+		const bool worldSurf = redef && redef->parms.hModel
+		    && redef->parms.hModel->IsStaticWorldModel();
+		const shaderStage_t *px = worldSurf ? din->surf->material->GetParallaxStage() : NULL;
+		if ( px && px->parallaxImage ) {
+			parallaxImage = px->parallaxImage;
+			// The material's parallaxScale is the heightmap() bake magnitude (~3..10); convert
+			// to a UV displacement depth. Doom 3's height maps are low-contrast (authored only
+			// to derive normals), so the per-unit factor is generous to make the relief read;
+			// r_parallaxScale is the artist master knob on top (default 1, crank to exaggerate).
+			const float depth = px->parallaxScale * r_parallaxScale.GetFloat() * 0.015f;
+			parms.parallaxParms[0] = 1.0f;
+			parms.parallaxParms[1] = idMath::ClampFloat( 0.0f, 0.3f, depth );
+			parms.parallaxParms[2] = (float)r_parallaxMinSteps.GetInteger();
+			parms.parallaxParms[3] = (float)r_parallaxMaxSteps.GetInteger();
+			parms.parallaxParms2[0] = idMath::ClampFloat( 0.0f, 1.0f, r_parallaxShadow.GetFloat() );
+		}
+	}
+
 	// texture units exactly as RB_ARB2_DrawInteraction / the README table
 	RB_RHI_BindUnit( 0, din->ambientLight ? globalImages->ambientNormalMap : globalImages->normalCubeMapImage );
 	RB_RHI_BindUnit( 1, din->bumpImage );
@@ -753,6 +1179,26 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	if ( occlusionImage ) {
 		RB_RHI_BindUnit( 10, occlusionImage );
 	}
+	// unit 11: per-material parallax height map (u_parallaxMap). Only bound when this surface
+	// carries one and r_parallax is on; the shader gates on u_parallaxParms.x (docs/parallax.md).
+	if ( parallaxImage ) {
+		RB_RHI_BindUnit( 11, parallaxImage );
+	}
+
+	// DUDE tessellation: PN-smooth enemy/prop meshes. Both the ambient and the
+	// per-light interaction pass must tessellate whenever the depth prepass did,
+	// or the depth-EQUAL test drops the surface (docs/tessellation.md). The
+	// interaction and ambientlight shaders both carry a tess variant.
+	bool tess = RB_RHI_TessellateSurf( din->surf, false );
+	// Roadmap B: if this classifier-approved surface was deform-once dispatched, draw its pre-deformed
+	// expanded buffer (rebinds vb/ib/count, clears tess) instead of fixed-function tessellating.
+	rhi::BufferHandle dvb = ictx.vb, dib = ictx.ib;
+	int dVertOfs = ictx.vertOfs, dIdxOfs = ictx.idxOfs;
+	int idxCount = din->surf->geo->numIndexes;
+	RB_RHI_ApplyDeform( din->surf->geo, dvb, dVertOfs, dib, dIdxOfs, idxCount, tess );
+	if ( tess ) {
+		RB_RHI_SetTessParms( parms );
+	}
 
 	rhi::BufferHandle ub;
 	int uniOfs = ictx.r->AllocUniforms( &parms, sizeof( parms ), &ub );
@@ -763,15 +1209,16 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	pd.vertexLayout = rhi::VL_DRAWVERT;
 	pd.cullType = RB_RHI_CullFor( ictx.viewDef, CT_FRONT_SIDED );
 	pd.stencilState = ictx.stencilState;
+	pd.tessellate = tess;
 	ictx.r->BindPipeline( pd );
 
 	rhi::DrawArgs da;
 	memset( &da, 0, sizeof( da ) );
-	da.vertexBuffer = ictx.vb;
-	da.vertexOffset = ictx.vertOfs;
-	da.indexBuffer = ictx.ib;
-	da.firstIndex = ictx.idxOfs / (int)sizeof( glIndex_t );
-	da.indexCount = din->surf->geo->numIndexes;
+	da.vertexBuffer = dvb;
+	da.vertexOffset = dVertOfs;
+	da.indexBuffer = dib;
+	da.firstIndex = dIdxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = idxCount;
 	da.uniformBuffer = ub;
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
@@ -780,6 +1227,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		da.textures[7] = ictx.shadowImage;	// 2D depth map for u_shadowMap (unit 7)
 	} else if ( ictx.lightShadowCube && !din->ambientLight ) {
 		da.shadowCube = ictx.shadowCubeImage;	// cube depth map for u_shadowCube (unit 8)
+		if ( ictx.lightHasDynamicLayer && ictx.shadowCubeDynImage ) {
+			da.shadowCubeDyn = ictx.shadowCubeDynImage;	// movers' cube for u_shadowCubeDyn (unit 12)
+		}
 	}
 	ictx.r->Draw( da );
 
@@ -797,7 +1247,7 @@ the idTech4 stage decomposition runs unchanged.
 */
 static void RB_RHI_CreateDrawInteractions( const drawSurf_t *surf ) {
 	for ( ; surf; surf = surf->nextOnLight ) {
-		if ( !surf->geo || !surf->geo->ambientCache ) {
+		if ( !surf->geo || ( !surf->geo->ambientCache && !surf->geo->gpuSkinVB ) ) {
 			continue;
 		}
 		RB_RHI_SpaceMvp( ictx.viewDef, surf->space, ictx.mvp );
@@ -982,6 +1432,24 @@ Mirrors RB_STD_FillDepthBuffer/RB_T_FillDepthBuffer through the zfill
 program (opaque solid, perforated alpha-tested, subview down-modulate).
 ===================
 */
+// Capture the sealed scene depth into _currentDepth (currentDepthImage) for the passes
+// that sample it (soft particles, SSAO, SSR). Extracted from the depth prepass so the
+// r_ssaoMergeNormal path — which seals depth in the gbuffer prepass instead of zfill —
+// captures from the identical point. (M5: CopyDepthbuffer routes through the RHI capture on VK.)
+static void RB_RHI_CaptureCurrentDepth( const viewDef_t *viewDef ) {
+	bool getDepthCapture = r_enableDepthCapture.GetInteger() == 1
+		|| ( r_enableDepthCapture.GetInteger() == -1
+		     && ( r_useSoftParticles.GetBool()
+		          || ( ( r_ssao.GetBool() || r_ssr.GetBool() ) && R_BackendSupportsEnhancements() ) ) );
+	if ( getDepthCapture && viewDef->renderView.viewID >= 0
+	     && ( qglReadBuffer != NULL || rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) {
+		globalImages->currentDepthImage->CopyDepthbuffer( viewDef->viewport.x1,
+			viewDef->viewport.y1,
+			viewDef->viewport.x2 - viewDef->viewport.x1 + 1,
+			viewDef->viewport.y2 - viewDef->viewport.y1 + 1, true );
+	}
+}
+
 static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::ShaderHandle zfill = r->LoadShader( "zfill" );
 
@@ -1027,7 +1495,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( tg == TG_SCREEN || tg == TG_SCREEN2 || tg == TG_SKYBOX_CUBE || tg == TG_WOBBLESKY_CUBE ) {
 			continue;
 		}
-		if ( !tri->numIndexes || !tri->ambientCache ) {
+		if ( !tri->numIndexes || ( !tri->ambientCache && !tri->gpuSkinVB ) ) {
 			continue;
 		}
 
@@ -1094,12 +1562,22 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		int vertOfs, idxOfs;
 		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
 
+		// DUDE tessellation: the prepass must PN-subdivide enemy/prop surfaces
+		// with the exact factors the interaction pass uses, so the sealed depth
+		// lines up under the depth-EQUAL interactions (docs/tessellation.md).
+		bool tess = RB_RHI_TessellateSurf( surf, false );
+		// Roadmap B: draw the pre-deformed expanded buffer if this surface was deform-once dispatched
+		// (ApplyDeform rebinds vb/ib/count + clears tess, so the tess-setup below is skipped).
+		int idxCount = tri->numIndexes;
+		RB_RHI_ApplyDeform( tri, vb, vertOfs, ib, idxOfs, idxCount, tess );
+
 		rhi::PipelineDesc pd;
 		pd.stateBits = stateBits;
 		pd.shader = zfill;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = RB_RHI_CullFor( viewDef, CT_FRONT_SIDED );
 		pd.stencilState = rhi::SS_ALWAYS;	// stencil test on, always pass (GL parity)
+		pd.tessellate = tess;
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
@@ -1107,7 +1585,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.vertexOffset = vertOfs;
 		da.indexBuffer = ib;
 		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.indexCount = idxCount;
 
 		bool drawSolid = ( shader->Coverage() == MC_OPAQUE );
 
@@ -1147,11 +1625,19 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 					parms.diffuseMatrixS[0] = 1.0f;
 					parms.diffuseMatrixT[1] = 1.0f;
 				}
+				idImage *tessBump = NULL;
+				if ( tess ) {
+					RB_RHI_SetTessParms( parms );
+					tessBump = RB_RHI_TessBumpForZfill( surf, parms );
+				}
 
 				rhi::BufferHandle ub;
 				int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 				RB_RHI_BindUnit( 0, pStage->texture.image );
+				if ( tess ) {
+					RB_RHI_BindUnit( 1, tessBump );
+				}
 				RB_RHI_VkTextures( da );
 				r->BindPipeline( pd );
 				da.uniformBuffer = ub;
@@ -1173,11 +1659,19 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 			memcpy( parms.clipPlane, localClipPlane, sizeof( parms.clipPlane ) );
 			parms.diffuseMatrixS[0] = 1.0f;
 			parms.diffuseMatrixT[1] = 1.0f;
+			idImage *tessBump = NULL;
+			if ( tess ) {
+				RB_RHI_SetTessParms( parms );
+				tessBump = RB_RHI_TessBumpForZfill( surf, parms );
+			}
 
 			rhi::BufferHandle ub;
 			int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 			RB_RHI_BindUnit( 0, globalImages->whiteImage );
+			if ( tess ) {
+				RB_RHI_BindUnit( 1, tessBump );
+			}
 			RB_RHI_VkTextures( da );
 			r->BindPipeline( pd );
 			da.uniformBuffer = ub;
@@ -1203,18 +1697,20 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 
 	// make the early depth pass available to shaders (soft particles, SSAO, SSR, etc.)
-	// (M5: idImage::CopyDepthbuffer routes through the RHI capture on Vulkan)
-	bool getDepthCapture = r_enableDepthCapture.GetInteger() == 1
-		|| ( r_enableDepthCapture.GetInteger() == -1
-		     && ( r_useSoftParticles.GetBool()
-		          || ( ( r_ssao.GetBool() || r_ssr.GetBool() ) && R_BackendSupportsEnhancements() ) ) );
-	if ( getDepthCapture && viewDef->renderView.viewID >= 0
-	     && ( qglReadBuffer != NULL || rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) {
-		globalImages->currentDepthImage->CopyDepthbuffer( viewDef->viewport.x1,
-			viewDef->viewport.y1,
-			viewDef->viewport.x2 - viewDef->viewport.x1 + 1,
-			viewDef->viewport.y2 - viewDef->viewport.y1 + 1, true );
-	}
+	RB_RHI_CaptureCurrentDepth( viewDef );
+}
+
+// Static/dynamic split (r_shadowMapCacheSplit): which layer a cube-shadow caster belongs
+// to. A dynamic caster is one whose model regenerates geometry every frame (animated md5s,
+// ragdolls, particles — IsDynamicModel() != DM_STATIC); it can never cache-hit, so it goes
+// into the per-frame dynamic cube. Everything else (world BSP + static-model props) is
+// static and goes into the cached cube. This is the SAME per-caster test RB_RHI_CubeToken
+// uses to raise its 'dynamic' flag, so the token classification and the render can never
+// disagree about which layer a caster lands in.
+enum casterFilter_t { CF_ALL, CF_STATIC, CF_DYNAMIC };
+static bool RB_RHI_CasterIsDynamic( const drawSurf_t *surf ) {
+	const idRenderEntityLocal *edef = surf->space ? surf->space->entityDef : NULL;
+	return edef && edef->parms.hModel && edef->parms.hModel->IsDynamicModel() != DM_STATIC;
 }
 
 /*
@@ -1343,12 +1839,20 @@ Renders one interaction chain's depth from a projected light's point of view thr
 the shadow_sm program. The light-projection planes are transformed into each surface's
 model space exactly like the interaction pass, so shadow_sm.vert projects to the same
 cookie UV and writes the linear falloff as depth.
+
+projPlanes overrides the projection: 4 world-space planes (S, T, Q, falloff/depth) —
+the sun pass (RB_RHI_ShadowMapPassSun) renders through a per-view fitted VIRTUAL
+projection instead of the light's own texgen. NULL = the light's lightProject[0..3].
 ===================
 */
-static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::ShaderHandle prog ) {
+static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::ShaderHandle prog,
+                                      const idPlane *projPlanes = NULL ) {
+	if ( projPlanes == NULL ) {
+		projPlanes = backEnd.vLight->lightProject;		// idPlane[4]: S, T, Q, falloff
+	}
 	for ( ; surf; surf = surf->nextOnLight ) {
 		const srfTriangles_t *tri = surf->geo;
-		if ( !tri || !tri->ambientCache || !tri->numIndexes ) {
+		if ( !tri || ( !tri->ambientCache && !tri->gpuSkinVB ) || !tri->numIndexes ) {
 			continue;
 		}
 		if ( !RB_RHI_ShadowCasterAllowed( surf ) ) {
@@ -1358,18 +1862,31 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		rhi::RenderParams parms;
 		memset( &parms, 0, sizeof( parms ) );
 		idPlane lp;
-		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[0], lp );
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, projPlanes[0], lp );
 		memcpy( parms.lightProjectionS, lp.ToFloatPtr(), 16 );
-		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[1], lp );
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, projPlanes[1], lp );
 		memcpy( parms.lightProjectionT, lp.ToFloatPtr(), 16 );
-		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[2], lp );
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, projPlanes[2], lp );
 		memcpy( parms.lightProjectionQ, lp.ToFloatPtr(), 16 );
-		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[3], lp );
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, projPlanes[3], lp );
 		memcpy( parms.lightFalloffS, lp.ToFloatPtr(), 16 );
 
 		int smCull;
 		bool perforatedCaster;
 		idImage *coverImage = RB_RHI_SetupCasterCoverage( surf, parms, smCull, perforatedCaster );
+
+		// DUDE tessellation: a PN-tessellated + displaced character must cast from its
+		// DEFORMED surface, or its shadow keeps the low-poly silhouette while the lit
+		// body is rounded. shadow_sm.tese runs the same dudeTessPN + dudeTessDisplace as
+		// zfill, driven by the same global tess params + bump, so the occluder surface
+		// coincides with the receiver's lit surface by construction. GL3 never tessellates.
+		idImage *bumpImg = NULL;
+		bool useDeform = false;
+		const bool tess = RB_RHI_TessOrDeform( surf, tri, useDeform );
+		if ( tess ) {
+			RB_RHI_SetTessParms( parms );
+			bumpImg = RB_RHI_TessBumpForZfill( surf, parms );	// sets bumpMatrix; tese displaces
+		}
 
 		rhi::BufferHandle vb, ib;
 		int vertOfs, idxOfs;
@@ -1383,20 +1900,25 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		pd.shader = prog;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = smCull;
+		pd.tessellate = tess;
 
 		RB_RHI_BindUnit( 0, coverImage );
+		if ( tess ) {
+			RB_RHI_BindUnit( 1, bumpImg );	// shadow_sm.tese displacement source (unit 0 is coverage)
+		}
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
-		da.vertexBuffer = vb;
-		da.vertexOffset = vertOfs;
-		da.indexBuffer = ib;
-		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
+		da.vertexOffset = useDeform ? 0 : vertOfs;
+		da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
+		da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
+		da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
+		RB_RHI_VkTextures( da );		// VK: coverage (unit 0) + bump (unit 1 when tessellating) into DrawArgs
 		r->Draw( da );
 
 		backEnd.pc.c_shadowElements++;
@@ -1409,8 +1931,9 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 // Forward decls: the 2D shadow-map cache (RB_RHI_Acquire2DTarget) and the shared token
 // hash (RB_RHI_CubeToken) live further down with the point-cube cache, but this 2D pass
 // uses them. r_shadowMapDebug counters: 2D cache hits vs maps actually rendered.
-static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float range, int size, bool *outDynamic );
+static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float range, int size, bool *outDynamic, unsigned long long *outLightTok = NULL, bool staticOnly = false );
 static rhi::RenderTargetHandle RB_RHI_Acquire2DTarget( rhi::RHI *r, int lightIndex, int size, unsigned long long token, bool &hit );
+static unsigned long long RB_RHI_HashBytes( unsigned long long h, const void *data, size_t n );
 static int rhiMapCacheHits = 0;
 static int rhiMapCacheRendered = 0;
 
@@ -1469,6 +1992,161 @@ static bool RB_RHI_ShadowMapPass( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderH
 	RB_RHI_ShadowCasterChain( r, vLight->shadowMapCasters, prog );
 
 	r->EndPass();		// restores the backbuffer + the main view's viewport
+	return true;
+}
+
+/*
+===================
+Sun shadow maps (r_shadowMapSun — docs/shadow-research.md item 1, milestone 1)
+
+Oversize "sun replacement" omni lights and parallel lights can't use the per-light
+shadow paths — a cube can't resolve a shadow thrown thousands of units, and there is
+no directional projection — so they used to fall back to Carmack stencil volumes
+(fill-rate heavy, low-poly silhouettes, the CPU volume build). Instead, render their
+occluders through a per-view fitted VIRTUAL projection into the ordinary 2D pass:
+
+ - The covered region is the view frustum's bounding sphere out to r_shadowMapSunRange
+   (a sphere, so the fit's SIZE is rotation-invariant — no wobble as the camera turns).
+ - An oversize omni gets a perspective frustum from the light origin subtending that
+   sphere (a virtual spot light aimed at the view); a parallel light gets an ortho
+   projection along its direction (Q plane == constant 1 runs through the same
+   shadow_sm math unchanged: ndc = 2*s - q with q == 1).
+ - The projection is expressed as the same 4 texgen planes (S, T, Q, depth) the whole
+   2D pipeline already speaks; shadow_sm renders the casters, and the receiver samples
+   with the same planes in shader mode 3 (compare ref = the virtual depth plane).
+ - The fit is quantized (sphere center snapped to a texel-scale grid) so an idle view
+   produces bit-identical planes and a stable cache token — the static 2D cache then
+   skips the re-render entirely while nothing moves.
+
+The fitted planes are stashed in rhiSunPlanes (declared with the shadow globals up top)
+for the receiver fill; a successful pass sets ictx.lightShadowMapped + lightSunShadow,
+which suppresses the stencil draw for this light (useStencil sees shadowMapped) — that
+is the fps win.
+===================
+*/
+static bool RB_RHI_ShadowMapPassSun( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderHandle prog ) {
+	const viewDef_t *viewDef = backEnd.viewDef;
+	if ( !vLight->shadowMapCasters || !vLight->lightDef ) {
+		return false;
+	}
+
+	// ---- fit: bounding sphere of the view frustum out to r_shadowMapSunRange ----
+	const float range = r_shadowMapSunRange.GetFloat();
+	const idVec3 org = viewDef->renderView.vieworg;
+	const idVec3 fwd = viewDef->renderView.viewaxis[0];
+	const float tx = idMath::Tan( DEG2RAD( viewDef->renderView.fov_x * 0.5f ) );
+	const float ty = idMath::Tan( DEG2RAD( viewDef->renderView.fov_y * 0.5f ) );
+	// sphere centered halfway out on the view axis; radius reaches the far corners
+	// (and trivially contains the near end). Not minimal, but stable and simple.
+	idVec3 C = org + fwd * ( 0.5f * range );
+	const float R = idMath::Sqrt( 0.25f + tx * tx + ty * ty ) * range;
+
+	// quantize the center so a stationary view yields identical planes + cache token
+	const float grid = R / 32.0f;
+	for ( int i = 0; i < 3; i++ ) {
+		C[i] = idMath::Rint( C[i] / grid ) * grid;
+	}
+
+	// ---- virtual projection planes (world space) ----
+	const bool isParallel = vLight->lightDef->parms.parallel;
+	idVec3 n;			// projection axis, pointing away from the light
+	float zNear, zFar;	// depth-plane span along n (world units)
+	if ( isParallel ) {
+		// parallel: shadows travel opposite the (normalized) lightCenter direction
+		n = vLight->lightDef->parms.lightCenter;
+		if ( n.Normalize() == 0.0f ) {
+			n.Set( 0.0f, 0.0f, 1.0f );		// same default as R_DeriveLightData
+		}
+		n = -n;
+		// pancake: catch casters far toward the light (ceilings, skylights, terrain)
+		zNear = C * n - 8192.0f;
+		zFar  = C * n + R;
+	} else {
+		// oversize omni: perspective from the light origin, subtending the sphere
+		const idVec3 O = vLight->globalLightOrigin;
+		n = C - O;
+		const float dist = n.Normalize();
+		if ( dist <= R * 1.05f ) {
+			return false;		// light inside/near the covered region: no usable frustum -> stencil
+		}
+		// depth-plane span in ABSOLUTE n·P terms (n·C == n·O + dist), matching the
+		// depth plane below which dots world positions directly
+		zNear = C * n - R;
+		zFar  = C * n + R;
+		// build the S/T planes about the light origin below; fall through with n set
+	}
+
+	idVec3 rightV = ( idMath::Fabs( n.z ) < 0.99f ) ? ( n.Cross( idVec3( 0, 0, 1 ) ) ) : ( n.Cross( idVec3( 1, 0, 0 ) ) );
+	rightV.Normalize();
+	idVec3 upV = rightV.Cross( n );
+
+	// planes in the a*x+b*y+c*z+d form shadow_sm consumes: s=dot(P,S), t=dot(P,T),
+	// q=dot(P,Q), depth=dot(P,F); ndc = (2s-q, 2t-q, ., q)
+	float fitWidth = 2.0f * R;		// world width the map spans at the fit center (ortho exact)
+	if ( isParallel ) {
+		// ortho: s = 0.5 + (P-C)·right/(2R); q = 1; depth spans [zNear, zFar] along n
+		rhiSunPlanes[0].SetNormal( rightV / ( 2.0f * R ) );
+		rhiSunPlanes[0][3] = 0.5f - ( C * rightV ) / ( 2.0f * R );
+		rhiSunPlanes[1].SetNormal( upV / ( 2.0f * R ) );
+		rhiSunPlanes[1][3] = 0.5f - ( C * upV ) / ( 2.0f * R );
+		rhiSunPlanes[2].SetNormal( vec3_origin );
+		rhiSunPlanes[2][3] = 1.0f;
+	} else {
+		// perspective from O: with p = P - O, z = p·n, tanT covering the sphere:
+		// s/q = 0.5 + (p·right)/(2 z tanT), q = z  ->  S = 0.5*n + right/(2 tanT)
+		const idVec3 O = vLight->globalLightOrigin;
+		const float dist = ( C - O ).Length();
+		const float tanT = R / idMath::Sqrt( dist * dist - R * R );
+		fitWidth = 2.0f * dist * tanT;		// frustum width at the fit center
+		idVec3 sN = 0.5f * n + rightV / ( 2.0f * tanT );
+		rhiSunPlanes[0].SetNormal( sN );
+		rhiSunPlanes[0][3] = -( sN * O );
+		idVec3 tN = 0.5f * n + upV / ( 2.0f * tanT );
+		rhiSunPlanes[1].SetNormal( tN );
+		rhiSunPlanes[1][3] = -( tN * O );
+		rhiSunPlanes[2].SetNormal( n );
+		rhiSunPlanes[2][3] = -( n * O );
+	}
+	// depth plane: 0..1 over [zNear, zFar] along n (both species)
+	rhiSunPlanes[3].SetNormal( n / ( zFar - zNear ) );
+	rhiSunPlanes[3][3] = -zNear / ( zFar - zNear );
+
+	// ---- target + cache ----
+	const int mapHi = idMath::ClampInt( 256, 4096, glConfig.maxTextureSize );
+	const int size = idMath::ClampInt( 256, mapHi, r_shadowMapSize.GetInteger() );	// base res; no radius tiering (the fit IS the sizing)
+	const int lightIndex = vLight->lightDef->index;
+	bool dynamic = false;
+	unsigned long long token = RB_RHI_CubeToken( vLight, 0.0f, size, &dynamic );
+	// fold the quantized fit into the token: a moved view = new planes = re-render;
+	// an idle view = identical planes = static-cache hit. R rides along because every
+	// plane scales with it and it changes with fov (scripted zooms, g_fov) even while
+	// C and range hold still — without it a fov change would sample a stale map
+	// through mismatched planes.
+	token = RB_RHI_HashBytes( token, C.ToFloatPtr(), 3 * (int)sizeof( float ) );
+	token = RB_RHI_HashBytes( token, &range, (int)sizeof( range ) );
+	token = RB_RHI_HashBytes( token, &R, (int)sizeof( R ) );
+	bool hit = false;
+	rhiShadowMap = dynamic ? 0 : RB_RHI_Acquire2DTarget( r, lightIndex, size, token, hit );
+	if ( rhiShadowMap == 0 ) {
+		rhiShadowMap = RB_RHI_ShadowPoolTarget( r, false, -SHADOW_TIER_MIN, size );	// scratch fallback (base tier)
+	}
+	rhiShadowMapSize = size;
+	rhiSunTexelWorld = fitWidth / (float)size;	// for the normal-offset bias (set on cache hits too)
+	if ( rhiShadowMap == 0 ) {
+		return false;
+	}
+	if ( hit ) {
+		rhiMapCacheHits++;
+		return true;		// planes re-derived above are bit-identical to the cached render
+	}
+	rhiMapCacheRendered++;
+
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.depth = true;
+	r->BeginTargetPass( rhiShadowMap, &clear );
+	RB_RHI_ShadowCasterChain( r, vLight->shadowMapCasters, prog, rhiSunPlanes );
+	r->EndPass();
 	return true;
 }
 
@@ -1562,14 +2240,23 @@ static void RB_RHI_ExtractWorldFrustum( const float m[16], const idVec3 &lightOr
 // geometry actually inside its 90-degree cone.
 static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, rhi::ShaderHandle prog,
                                           const float faceViewProj[16], const idPlane facePlanes[6],
-                                          const idVec3 &globalLightOrigin, float range ) {
+                                          const idVec3 &globalLightOrigin, float range,
+                                          casterFilter_t filter ) {
 	for ( ; surf; surf = surf->nextOnLight ) {
 		const srfTriangles_t *tri = surf->geo;
-		if ( !tri || !tri->ambientCache || !tri->numIndexes ) {
+		if ( !tri || ( !tri->ambientCache && !tri->gpuSkinVB ) || !tri->numIndexes ) {
 			continue;
 		}
 		if ( !RB_RHI_ShadowCasterAllowed( surf ) ) {
 			continue;
+		}
+		// static/dynamic split (r_shadowMapCacheSplit): render only the layer we're
+		// filling. CF_ALL (legacy) keeps every allowed caster.
+		if ( filter != CF_ALL ) {
+			const bool dyn = RB_RHI_CasterIsDynamic( surf );
+			if ( ( filter == CF_STATIC && dyn ) || ( filter == CF_DYNAMIC && !dyn ) ) {
+				continue;
+			}
 		}
 		// per-face cull: skip casters whose world bounds miss this face's cone
 		if ( R_CullLocalBox( tri->bounds, surf->space->modelMatrix, 6, facePlanes ) ) {
@@ -1606,6 +2293,16 @@ static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, r
 			smCull = CT_FRONT_SIDED;
 		}
 
+		// DUDE tessellation: cast the point-light shadow from the deformed surface too
+		// (same dudeTessPN + dudeTessDisplace as zfill / the lit passes). GL3 never tessellates.
+		idImage *bumpImg = NULL;
+		bool useDeform = false;
+		const bool tess = RB_RHI_TessOrDeform( surf, tri, useDeform );
+		if ( tess ) {
+			RB_RHI_SetTessParms( parms );
+			bumpImg = RB_RHI_TessBumpForZfill( surf, parms );	// sets bumpMatrix; tese displaces
+		}
+
 		rhi::BufferHandle vb, ib;
 		int vertOfs, idxOfs;
 		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
@@ -1618,20 +2315,25 @@ static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, r
 		pd.shader = prog;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = smCull;
+		pd.tessellate = tess;
 
 		RB_RHI_BindUnit( 0, coverImage );
+		if ( tess ) {
+			RB_RHI_BindUnit( 1, bumpImg );	// shadow_sm_cube.tese displacement source (unit 0 is coverage)
+		}
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
-		da.vertexBuffer = vb;
-		da.vertexOffset = vertOfs;
-		da.indexBuffer = ib;
-		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
+		da.vertexOffset = useDeform ? 0 : vertOfs;
+		da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
+		da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
+		da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
+		RB_RHI_VkTextures( da );		// VK: coverage (unit 0) + bump (unit 1 when tessellating) into DrawArgs
 		r->Draw( da );
 
 		backEnd.pc.c_shadowElements++;
@@ -1705,6 +2407,8 @@ struct shadowCubeCache_t {
 	rhi::RenderTargetHandle	rt;
 	int						size;			// face resolution of rt
 	unsigned long long		token;			// invalidation hash of light + casters
+	unsigned long long		lightTok;		// light-pose-only sub-hash (r_shadowMapCacheDebug: classify a warm miss as light-moved vs caster-moved)
+	unsigned long long		faceTok[6];		// per-face token (r_shadowMapCachePerFace): re-render only the cube faces a mover dirtied
 	int						lastFrame;		// for LRU eviction
 	size_t					bytes;			// VRAM cost estimate
 };
@@ -1722,6 +2426,17 @@ static int rhiCubeCacheScratch = 0;
 // misses), and stale misses deferred to a later frame because the budget was spent.
 static int rhiCubeUpdatesSpent = 0;
 static int rhiCubeCacheDeferred = 0;
+// r_shadowMapCacheDebug: rendered misses split by cause + LRU evictions this view. Cold =
+// fresh slot (light new to the cache or evicted and returned); warm-caster = an occluder in
+// the light's volume moved; warm-light = the light's own pose changed. These say which
+// caching lever matters (per-face / static-dynamic split vs eviction-budget tuning).
+static int rhiCubeMissCold = 0;
+static int rhiCubeMissWarmCaster = 0;
+static int rhiCubeMissWarmLight = 0;
+static int rhiCubeEvictions = 0;
+// r_shadowMapCacheDebug: point lights that used the static/dynamic split this view — a
+// moving-caster light kept CACHED for its world layer instead of bypassing the cache.
+static int rhiCubeCacheSplit = 0;
 
 // depth24 cube cost: 6 faces, 4 bytes/texel (GL pads DEPTH_COMPONENT24 to 32-bit).
 static size_t RB_RHI_CubeBytes( int size ) {
@@ -1751,13 +2466,39 @@ static unsigned long long RB_RHI_HashBytes( unsigned long long h, const void *da
 	return h;
 }
 
+// One caster's identity+transform hash: entityDef index, model matrix, and geometry identity
+// (pointer + index count + cache handle — a dynamic model gets a fresh ambient cache each frame,
+// so this flips and invalidates it). Shared by the whole-light token and the per-face tokens so
+// the two can never disagree about what a caster contributes.
+static unsigned long long RB_RHI_CasterHash( const drawSurf_t *surf ) {
+	unsigned long long c = 1469598103934665603ULL;			// FNV offset basis
+	const idRenderEntityLocal *edef = surf->space ? surf->space->entityDef : NULL;
+	const int idx = edef ? edef->index : -1;
+	c = RB_RHI_HashBytes( c, &idx, sizeof( idx ) );
+	c = RB_RHI_HashBytes( c, surf->space->modelMatrix, 16 * sizeof( float ) );
+	const void *geo = surf->geo;
+	c = RB_RHI_HashBytes( c, &geo, sizeof( geo ) );
+	if ( surf->geo ) {
+		c = RB_RHI_HashBytes( c, &surf->geo->numIndexes, sizeof( surf->geo->numIndexes ) );
+		c = RB_RHI_HashBytes( c, &surf->geo->ambientCache, sizeof( surf->geo->ambientCache ) );
+		// a GPU-skinned caster with r_gpuSkinNoUpload has no per-frame ambient-cache handle to flip,
+		// so key the invalidation off gpuSkinFrame (bumped each frame it is re-skinned) — otherwise an
+		// animating monster would cast a frozen cube shadow.
+		if ( surf->geo->gpuSkinVB ) {
+			c = RB_RHI_HashBytes( c, &surf->geo->gpuSkinFrame, sizeof( surf->geo->gpuSkinFrame ) );
+		}
+	}
+	return c;
+}
+
 // Invalidation token: the light pose/reach plus every caster's identity and
 // transform. A moving light, a swinging door (modelMatrix), or an animating monster
 // (regenerated geometry / cache handle) all change the token and force a re-render;
 // a fully static light hashes identically every frame and stays cached. The caster
 // contributions are summed so frame-to-frame reordering of the list doesn't matter.
 static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float range, int size,
-                                            bool *outDynamic ) {
+                                            bool *outDynamic, unsigned long long *outLightTok,
+                                            bool staticOnly ) {
 	unsigned long long h = 1469598103934665603ULL;			// FNV offset basis
 	h = RB_RHI_HashBytes( h, vLight->globalLightOrigin.ToFloatPtr(), 3 * sizeof( float ) );
 	h = RB_RHI_HashBytes( h, vLight->lightDef->parms.lightCenter.ToFloatPtr(), 3 * sizeof( float ) );
@@ -1772,31 +2513,78 @@ static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float ran
 	bool dynamic = false;
 	unsigned long long casters = 0;
 	for ( const drawSurf_t *surf = vLight->shadowMapCasters; surf; surf = surf->nextOnLight ) {
-		unsigned long long c = 1469598103934665603ULL;
-		const idRenderEntityLocal *edef = surf->space ? surf->space->entityDef : NULL;
-		const int idx = edef ? edef->index : -1;
-		c = RB_RHI_HashBytes( c, &idx, sizeof( idx ) );
-		c = RB_RHI_HashBytes( c, surf->space->modelMatrix, 16 * sizeof( float ) );
-		// geometry identity: pointer + index count + cache handle (dynamic models get
-		// a fresh ambient cache each frame, so this flips and invalidates them)
-		const void *geo = surf->geo;
-		c = RB_RHI_HashBytes( c, &geo, sizeof( geo ) );
-		if ( surf->geo ) {
-			c = RB_RHI_HashBytes( c, &surf->geo->numIndexes, sizeof( surf->geo->numIndexes ) );
-			c = RB_RHI_HashBytes( c, &surf->geo->ambientCache, sizeof( surf->geo->ambientCache ) );
-		}
-		casters += c;
 		// animated/particle casters (monsters, ragdolls) change every frame, so a light
 		// touching one can never cache-hit; flag it so the caller keeps it on the scratch
 		// path instead of wasting a persistent slot + VRAM on it.
-		if ( edef && edef->parms.hModel && edef->parms.hModel->IsDynamicModel() != DM_STATIC ) {
+		const bool dyn = RB_RHI_CasterIsDynamic( surf );
+		if ( dyn ) {
 			dynamic = true;
 		}
+		// staticOnly (r_shadowMapCacheSplit): fold only the static casters into the token,
+		// so a mover walking past a static light doesn't invalidate its cached (static) cube.
+		// The movers get their own scratch cube instead. Must match CF_STATIC in the render.
+		if ( staticOnly && dyn ) {
+			continue;
+		}
+		casters += RB_RHI_CasterHash( surf );
 	}
 	if ( outDynamic ) {
 		*outDynamic = dynamic;
 	}
+	if ( outLightTok ) {
+		*outLightTok = h;		// light-pose-only sub-hash (before folding in the caster set)
+	}
 	return h ^ casters;
+}
+
+// Per-face invalidation tokens (r_shadowMapCachePerFace). faceTok[f] = the light-pose hash XOR
+// the summed per-caster hashes of the occluders that actually rasterize into face f — using the
+// SAME allow + R_CullLocalBox test the render (RB_RHI_ShadowCasterChainCube) uses, so a face's
+// token can never miss a caster the render would draw there (which would leave a stale shadow).
+// The light pose is in every face's hash, so a moved light flips all six -> the whole cube
+// re-renders. Computed only on a warm miss, to find which faces a mover dirtied.
+static void RB_RHI_CubeFaceTokens( const viewLight_t *vLight, float range, int size,
+                                   unsigned long long faceTok[6], bool staticOnly ) {
+	unsigned long long h = 1469598103934665603ULL;
+	h = RB_RHI_HashBytes( h, vLight->globalLightOrigin.ToFloatPtr(), 3 * sizeof( float ) );
+	h = RB_RHI_HashBytes( h, vLight->lightDef->parms.lightCenter.ToFloatPtr(), 3 * sizeof( float ) );
+	h = RB_RHI_HashBytes( h, &vLight->lightDef->parms.axis, sizeof( idMat3 ) );
+	h = RB_RHI_HashBytes( h, &range, sizeof( range ) );
+	h = RB_RHI_HashBytes( h, &size, sizeof( size ) );
+	const float perfStrength = r_shadowMapPerforatedStrength.GetFloat();
+	h = RB_RHI_HashBytes( h, &perfStrength, sizeof( perfStrength ) );
+
+	idPlane facePlanes[6][6];
+	for ( int f = 0; f < 6; f++ ) {
+		float vp[16];
+		RB_RHI_CubeFaceViewProj( f, range, vp );
+		RB_RHI_ExtractWorldFrustum( vp, vLight->globalLightOrigin, facePlanes[f] );
+	}
+	unsigned long long faceCasters[6] = { 0, 0, 0, 0, 0, 0 };
+	for ( const drawSurf_t *surf = vLight->shadowMapCasters; surf; surf = surf->nextOnLight ) {
+		const srfTriangles_t *tri = surf->geo;
+		if ( !tri || ( !tri->ambientCache && !tri->gpuSkinVB ) || !tri->numIndexes ) {
+			continue;
+		}
+		if ( !RB_RHI_ShadowCasterAllowed( surf ) ) {
+			continue;
+		}
+		// static/dynamic split: the per-face tokens gate the cached (static) cube, so on a
+		// split light they must ignore movers — exactly as the static whole-cube token does.
+		if ( staticOnly && RB_RHI_CasterIsDynamic( surf ) ) {
+			continue;
+		}
+		const unsigned long long c = RB_RHI_CasterHash( surf );
+		for ( int f = 0; f < 6; f++ ) {
+			// !R_CullLocalBox == the box overlaps this face's cone == the render draws it here
+			if ( !R_CullLocalBox( tri->bounds, surf->space->modelMatrix, 6, facePlanes[f] ) ) {
+				faceCasters[f] += c;
+			}
+		}
+	}
+	for ( int f = 0; f < 6; f++ ) {
+		faceTok[f] = h ^ faceCasters[f];
+	}
 }
 
 // Pick the render target for this light's cube. On a cache hit, returns the stored
@@ -1812,8 +2600,8 @@ static unsigned long long RB_RHI_CubeToken( const viewLight_t *vLight, float ran
 // once it commits to re-rendering, so a deferred light stays a miss and is retried next
 // frame. A cold miss (fresh slot, no prior contents) leaves stale=false and must render.
 static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightIndex, int size,
-                                                         unsigned long long token, bool &hit,
-                                                         bool &stale, shadowCubeCache_t **pendingSlot ) {
+                                                         unsigned long long token, unsigned long long lightTok,
+                                                         bool &hit, bool &stale, shadowCubeCache_t **pendingSlot ) {
 	hit = false;
 	stale = false;
 	*pendingSlot = NULL;
@@ -1890,6 +2678,7 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 		rhiCubeCache[victim].lightIndex = -1;
 		rhiCubeCache[victim].rt = 0;
 		rhiCubeCache[victim].bytes = 0;
+		rhiCubeEvictions++;			// r_shadowMapCacheDebug: VRAM-pressure churn signal
 		if ( firstFree < 0 ) {
 			firstFree = victim;
 		}
@@ -1908,9 +2697,12 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 	slot.rt = rt;
 	slot.size = size;
 	slot.token = token;			// we are about to render this token's geometry
+	slot.lightTok = lightTok;	// r_shadowMapCacheDebug classification baseline
+	for ( int f = 0; f < 6; f++ ) { slot.faceTok[f] = 0; }	// per-face baseline; caller fills it after the cold render
 	slot.lastFrame = rhiCubeCacheFrameNo;
 	slot.bytes = need;
 	rhiCubeCacheBytes += need;
+	*pendingSlot = &slot;		// cold miss: hand the slot back so the caller stores per-face tokens
 	return rt;					// hit stays false -> caller renders
 }
 
@@ -2061,7 +2853,7 @@ static void RB_RHI_ResetLightBudgetHyst();		// defined with the hysteresis helpe
 // the new context. Driven by RB_RHI_Shutdown (RhiBackend.cpp).
 void RB_RHI_ResetWorldTargets( void ) {
 	rhiShadowMap = 0;			rhiShadowMapSize = 0;
-	rhiShadowCube = 0;			rhiShadowCubeSize = 0;
+	rhiShadowCube = 0;			rhiShadowCubeSize = 0;	rhiShadowCubeDyn = 0;
 	for ( int i = 0; i < SHADOW_NTIERS; i++ ) {
 		rhiShadowMapPool[i].rt  = 0;	rhiShadowMapPool[i].size  = 0;
 		rhiShadowCubePool[i].rt = 0;	rhiShadowCubePool[i].size = 0;
@@ -2070,17 +2862,30 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoRT = rhiSsaoBlurRT = rhiSsaoResultRT = 0;
 	rhiSsaoW = rhiSsaoH = rhiSsaoViewW = rhiSsaoViewH = 0;
 	rhiSsaoAppliedThisView = false;
+	rhiSsaoDepthMipRT = 0;		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
 	rhiSsaoHistRT[0] = rhiSsaoHistRT[1] = 0;
 	rhiSsaoHistIdx = 0;			rhiSsaoHistW = rhiSsaoHistH = 0;
 	rhiSsaoHistValid = false;	rhiSsaoHavePrevVP = false;
 
 	rhiSsrRT = 0;				rhiSsrW = rhiSsrH = 0;
+	rhiSsrDepthMinRT = 0;		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
+	rhiSsrColorMipRT = 0;		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
 	rhiSsrHistRT[0] = rhiSsrHistRT[1] = 0;
 	rhiSsrHistIdx = 0;			rhiSsrHistW = rhiSsrHistH = 0;
 	rhiSsrHistValid = false;	rhiSsrHavePrevVP = false;
 
 	rhiNormalRT = 0;			rhiNormalW = rhiNormalH = 0;
 	rhiNormalReadyThisView = false;	rhiNormalMrt = false;
+
+	rhiBerserkTrailRT[0] = rhiBerserkTrailRT[1] = 0;
+	rhiBerserkIdx = 0;			rhiBerserkW = rhiBerserkH = 0;
+	rhiBerserkValid = false;	rhiBerserkLastTick = -100000;
+
+	// forget the hell-time ping-pong slots too, so a vid_restart can't leave a stale handle
+	// aliasing a reclaimed render-target slot (EnsureHelltimeTrail then reallocates cleanly).
+	rhiHelltimeTrailRT[0] = rhiHelltimeTrailRT[1] = 0;
+	rhiHelltimeIdx = 0;			rhiHelltimeW = rhiHelltimeH = 0;
+	rhiHelltimeValid = false;	rhiHelltimeLastTick = -100000;
 }
 
 void RB_RHI_FreeShadowCubeCache() {
@@ -2094,13 +2899,62 @@ void RB_RHI_FreeShadowCubeCache() {
 	RB_RHI_ResetLightBudgetHyst();
 }
 
+// Render a point light's occluder depth into `cubeTarget`, one 90-degree face at a time.
+// renderFace[] gates which faces to (re)draw (per-face invalidation, lever A); faceCull skips
+// faces whose cone can't reach the camera — valid only for a throwaway cube regenerated this
+// frame, never a cached cube sampled from future angles. filter picks the static/dynamic layer
+// (lever B) or CF_ALL for the whole caster set.
+static void RB_RHI_RenderCubeFaces( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderHandle prog,
+                                    rhi::RenderTargetHandle cubeTarget, float range,
+                                    const bool renderFace[6], bool faceCull, casterFilter_t filter ) {
+	const idVec3 &L = vLight->globalLightOrigin;
+
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.depth = true;
+
+	// whole-face view-frustum cull: fetch the camera frustum corners once, then skip
+	// the (expensive) occluder rasterization on any face whose cone can't reach the
+	// view. The face is still cleared to far depth so seamless cube sampling reads it
+	// as "lit" at shared edges — only the geometry, the dominant cost, is skipped.
+	idVec3 viewCorners[8];
+	const bool doCull = faceCull && r_shadowMapFaceCull.GetBool() && backEnd.viewDef;
+	if ( doCull ) {
+		backEnd.viewDef->viewFrustum.ToPoints( viewCorners );
+	}
+
+	for ( int face = 0; face < 6; face++ ) {
+		if ( !renderFace[face] ) {
+			continue;			// per-face invalidation: unchanged face keeps its cached depth
+		}
+		float vp[16];
+		RB_RHI_CubeFaceViewProj( face, range, vp );
+		idPlane planes[6];
+		RB_RHI_ExtractWorldFrustum( vp, L, planes );
+
+		const bool cullFace = doCull && RB_RHI_ViewOutsideFaceCone( planes, viewCorners );
+
+		r->BeginCubeFacePass( cubeTarget, face, &clear );
+		if ( !cullFace ) {
+			// single complete occluder set (full ambientTris, view-independent); see the
+			// shadowMapCasters comment in idInteraction::AddActiveInteraction
+			RB_RHI_ShadowCasterChainCube( r, vLight->shadowMapCasters, prog, vp, planes, L, range, filter );
+			rhiShadowCubeFaces++;
+		} else {
+			rhiShadowCubeFacesCulled++;
+		}
+		r->EndPass();
+	}
+}
+
 /*
 ===================
 RB_RHI_ShadowMapPassCube
 
-Renders a point light's occluder depth into the shared cube target, one 90-degree
-face at a time with per-face culling. Returns false (→ stencil fallback) if the cube
-target can't be created.
+Renders a point light's occluder depth into a cube target, one 90-degree face at a time
+with per-face culling. With r_shadowMapCacheSplit a moving-caster light renders its world
+occluders into the cached cube and its movers into a per-frame scratch cube (sampled as
+min of the two). Returns false (→ stencil fallback) if the cube target can't be created.
 ===================
 */
 static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderHandle prog, float range ) {
@@ -2121,19 +2975,36 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	// (token stored); if caching is off or the light won't fit the budget it returns 0
 	// and we fall back to the shared scratch pool that regenerates every frame.
 	const int lightIndex = vLight->lightDef->index;
+	// static/dynamic split (r_shadowMapCacheSplit, lever B): a light with a moving/animated
+	// caster normally bypasses the cache and regenerates the whole cube every frame. With the
+	// split on we cache the STATIC (world) casters and re-render only the movers into a small
+	// per-frame cube, sampling min(static, dynamic) in the interaction pass. The token then
+	// folds static casters only, so a monster walking past a static light no longer invalidates
+	// its cached cube.
+	const bool split = r_shadowMapCacheSplit.GetBool();
 	bool dynamic = false;
-	const unsigned long long token = RB_RHI_CubeToken( vLight, range, size, &dynamic );
+	unsigned long long lightTok = 0;
+	const unsigned long long token = RB_RHI_CubeToken( vLight, range, size, &dynamic, &lightTok, /*staticOnly=*/split );
 	bool hit = false;
 	bool stale = false;
 	shadowCubeCache_t *pendingSlot = NULL;
-	// A light with an animated (non DM_STATIC) caster changes every frame, so it can
-	// never cache-hit. Skip the cache entirely and use the shared scratch pool, which
-	// costs no persistent VRAM slot and still gets per-face view-frustum culling.
 	rhi::RenderTargetHandle target = 0;
-	if ( dynamic ) {
+	bool splitActive = false;		// this light rendered a cached static + scratch dynamic pair
+	if ( dynamic && split ) {
+		// try to cache the static layer (static-only token). Hit / warm-miss / eviction all
+		// behave exactly like a static light; only the render below is filtered to CF_STATIC.
+		target = RB_RHI_AcquireCubeTarget( r, lightIndex, size, token, lightTok, hit, stale, &pendingSlot );
+		splitActive = ( target != 0 );
+	}
+	if ( splitActive ) {
+		rhiCubeCacheSplit++;
+	} else if ( dynamic ) {
+		// split off, or the static layer didn't fit the budget: legacy whole-cube scratch,
+		// which costs no persistent VRAM slot and still gets per-face view-frustum culling.
 		rhiCubeCacheDynamic++;
 	} else {
-		target = RB_RHI_AcquireCubeTarget( r, lightIndex, size, token, hit, stale, &pendingSlot );
+		// fully static light: unchanged cached path.
+		target = RB_RHI_AcquireCubeTarget( r, lightIndex, size, token, lightTok, hit, stale, &pendingSlot );
 	}
 	const bool cached = ( target != 0 );
 	if ( !cached ) {
@@ -2144,65 +3015,92 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	}
 	rhiShadowCube = target;
 	rhiShadowCubeSize = size;
+	rhiShadowCubeDyn = 0;			// set below only if this light renders a dynamic layer
 	if ( target == 0 ) {
 		return false;
 	}
+
+	// Does the primary (static/combined) cube need a (re)render this frame? A hit or a
+	// deferred warm miss reuses last frame's cube; a split light still re-renders its
+	// dynamic layer below regardless.
+	bool renderPrimary = true;
 	if ( hit ) {
 		rhiCubeCacheHits++;
-		return true;			// unchanged since last frame — nothing to render
-	}
-	if ( cached ) {
+		renderPrimary = false;			// unchanged since last frame
+	} else if ( cached ) {
 		// Update budget (r_shadowMapMaxUpdates): a warm miss can be deferred — its old cube
 		// is still on the slot, so sample that this view and retry next frame. Cold misses
 		// (stale == false) have no prior contents and must render regardless of budget.
 		const int maxUpdates = r_shadowMapMaxUpdates.GetInteger();
 		if ( stale && maxUpdates > 0 && rhiCubeUpdatesSpent >= maxUpdates ) {
 			rhiCubeCacheDeferred++;
-			return true;		// reuse last frame's cube; token left stale -> retried next view
-		}
-		rhiCubeCacheMiss++;
-		rhiCubeUpdatesSpent++;
-		if ( pendingSlot ) {
-			pendingSlot->token = token;		// committing to the re-render: adopt the new token
-		}
-	}
-
-	const idVec3 &L = vLight->globalLightOrigin;
-
-	rhi::ClearArgs clear;
-	memset( &clear, 0, sizeof( clear ) );
-	clear.depth = true;
-
-	// whole-face view-frustum cull: fetch the camera frustum corners once, then skip
-	// the (expensive) occluder rasterization on any face whose cone can't reach the
-	// view. The face is still cleared to far depth so seamless cube sampling reads it
-	// as "lit" at shared edges — only the geometry, the dominant cost, is skipped.
-	// Only for scratch (throwaway) renders: a cached cube is sampled from arbitrary
-	// future camera angles, so it must contain all six faces.
-	idVec3 viewCorners[8];
-	const bool faceCull = !cached && r_shadowMapFaceCull.GetBool() && backEnd.viewDef;
-	if ( faceCull ) {
-		backEnd.viewDef->viewFrustum.ToPoints( viewCorners );
-	}
-
-	for ( int face = 0; face < 6; face++ ) {
-		float vp[16];
-		RB_RHI_CubeFaceViewProj( face, range, vp );
-		idPlane planes[6];
-		RB_RHI_ExtractWorldFrustum( vp, L, planes );
-
-		const bool cullFace = faceCull && RB_RHI_ViewOutsideFaceCone( planes, viewCorners );
-
-		r->BeginCubeFacePass( rhiShadowCube, face, &clear );
-		if ( !cullFace ) {
-			// single complete occluder set (full ambientTris, view-independent); see the
-			// shadowMapCasters comment in idInteraction::AddActiveInteraction
-			RB_RHI_ShadowCasterChainCube( r, vLight->shadowMapCasters, prog, vp, planes, L, range );
-			rhiShadowCubeFaces++;
+			renderPrimary = false;		// reuse last frame's cube; token left stale -> retried next view
 		} else {
-			rhiShadowCubeFacesCulled++;
+			rhiCubeCacheMiss++;
+			// r_shadowMapCacheDebug: attribute this re-render. Cold = fresh slot (light new to the
+			// cache or evicted and returned). Warm-light = the light-pose sub-hash differs from the
+			// stored one (the light moved). Warm-caster = pose held, so an occluder in the light's
+			// volume moved. Classify BEFORE the commit below overwrites the stored baseline.
+			if ( !stale ) {
+				rhiCubeMissCold++;
+			} else if ( pendingSlot && lightTok != pendingSlot->lightTok ) {
+				rhiCubeMissWarmLight++;
+			} else {
+				rhiCubeMissWarmCaster++;
+			}
+			rhiCubeUpdatesSpent++;
+			if ( pendingSlot ) {
+				pendingSlot->token = token;		// committing to the re-render: adopt the new token
+				pendingSlot->lightTok = lightTok;
+			}
 		}
-		r->EndPass();
+	}
+
+	// Primary layer: the cached static cube on a split light (CF_STATIC), else the whole
+	// caster set (CF_ALL). Skipped entirely on a hit / deferred warm miss.
+	if ( renderPrimary ) {
+		// Per-face invalidation (r_shadowMapCachePerFace, lever A): on a WARM miss re-render only the
+		// faces a mover actually dirtied; clean faces keep their cached depth. A cold miss (fresh slot)
+		// renders all six and stores the baseline; scratch (uncached) is untouched (renderFace all
+		// true). On a split light the per-face tokens fold static casters only, matching the render.
+		bool renderFace[6] = { true, true, true, true, true, true };
+		if ( cached && pendingSlot ) {
+			if ( r_shadowMapCachePerFace.GetBool() ) {
+				unsigned long long faceTok[6];
+				RB_RHI_CubeFaceTokens( vLight, range, size, faceTok, /*staticOnly=*/split );
+				for ( int f = 0; f < 6; f++ ) {
+					renderFace[f] = stale ? ( faceTok[f] != pendingSlot->faceTok[f] ) : true;
+					pendingSlot->faceTok[f] = faceTok[f];	// adopt the new per-face baseline
+				}
+			} else {
+				// per-face OFF: this miss re-renders all six faces but doesn't recompute the per-face
+				// tokens, so the stored baseline goes stale. Zero it so a later r_shadowMapCachePerFace
+				// 1 can't trust a frozen baseline and skip a face that has since changed (review D1) —
+				// the next per-face-on warm miss then re-renders all six once and re-baselines.
+				for ( int f = 0; f < 6; f++ ) {
+					pendingSlot->faceTok[f] = 0;
+				}
+			}
+		}
+		// a cached cube is sampled from arbitrary future camera angles, so it must hold all six
+		// faces (no view-frustum face cull); a scratch cube is regenerated this frame, so faces
+		// outside the view are safe to skip.
+		RB_RHI_RenderCubeFaces( r, vLight, prog, target, range, renderFace, /*faceCull=*/!cached,
+		                        splitActive ? CF_STATIC : CF_ALL );
+	}
+
+	// Dynamic layer (split only): the movers, re-rendered every frame into a scratch cube.
+	// The interaction pass samples min(static, dynamic), so a mover shadows through the
+	// cached world cube without ever invalidating it. All six faces, view-frustum culled
+	// (this cube lives one frame). Failing to get a scratch target just drops the dynamic
+	// shadow this frame (the static shadow still shows); u_shadowCubeDyn stays unbound.
+	if ( splitActive ) {
+		const rhi::RenderTargetHandle dynTarget = RB_RHI_ShadowPoolTarget( r, true, tier, size );
+		if ( dynTarget != 0 && dynTarget != target ) {
+			const bool allFaces[6] = { true, true, true, true, true, true };
+			RB_RHI_RenderCubeFaces( r, vLight, prog, dynTarget, range, allFaces, /*faceCull=*/true, CF_DYNAMIC );
+			rhiShadowCubeDyn = dynTarget;
+		}
 	}
 	return true;
 }
@@ -2380,37 +3278,41 @@ prepass: no subview down-modulate / clip planes (primary-view only). Perforated 
 the coverage the depth prepass seals.
 ===================
 */
-static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
+// Returns true when it took the r_ssaoMergeNormal path — i.e. the gbuffer pass sealed the
+// *scene* depth (FrameDepthImage) as well as writing the normal, so the caller must SKIP the
+// standalone zfill depth prepass and capture _currentDepth from this pass instead. Returns
+// false for the standalone-normal-target path (or when it does nothing), where zfill still
+// seals depth as usual.
+static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !R_BackendSupportsEnhancements() ) {
-		return;
+		return false;
 	}
 	// SSAO wants the buffer when it feeds the horizon search, or when it's being inspected
 	// (r_ssaoDebug 3) even if SSAO reconstructs normals from depth — so the debug view
 	// always has data. SSR needs it unconditionally (normals to reflect about + the
 	// rough/metal attachment).
+	// M7: SSR now runs on Vulkan too (RB_RHI_ScreenSpaceReflections), so build the
+	// MRT rough/metal attachment on both backends when r_ssr wants it
 	const bool ssrWants = r_ssr.GetBool();
 	const bool ssaoWants = r_ssao.GetBool()
 		&& ( r_ssaoNormalBuffer.GetBool() || r_ssaoDebug.GetInteger() == 3 );
 	if ( !ssaoWants && !ssrWants ) {
-		return;
+		return false;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
 		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
 		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
-		return;
+		return false;
 	}
 
 	rhi::ShaderHandle gbufProg = r->LoadShader( "gbuffer" );
 	if ( !gbufProg ) {
-		return;
+		return false;
 	}
 
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-	if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants ) ) {
-		return;
-	}
 
 	// clear to a flat camera-facing normal (0.5,0.5,1) and the far plane
 	rhi::ClearArgs clear;
@@ -2418,7 +3320,32 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	clear.color = true;
 	clear.depth = true;
 	clear.rgba[0] = 0.5f; clear.rgba[1] = 0.5f; clear.rgba[2] = 1.0f; clear.rgba[3] = 1.0f;
-	r->BeginTargetPass( rhiNormalRT, &clear );
+
+	// r_ssaoMergeNormal (docs/ssao-normal-merge.md): on Vulkan, render the normal into a pass
+	// that shares the *scene* depth — one geometry pass producing depth + normal instead of a
+	// standalone target. wantMrt (= ssrWants) also carries SSR's rough/metal MRT attachment so
+	// the merge serves SSR too. BeginNormalPrepass returns 0 (→ standalone path) on GL3 or if
+	// unsupported.
+	const bool wantMerge = r_ssaoMergeNormal.GetBool()
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	rhi::RenderTargetHandle activeNormalRT = 0;
+	bool didMerge = false;
+	if ( wantMerge ) {
+		activeNormalRT = r->BeginNormalPrepass( w, h, &clear, ssrWants );
+		didMerge = ( activeNormalRT != 0 );	// non-zero → the gbuffer pass shares (seals) scene depth
+		if ( didMerge ) {
+			// the merged handle carries the MRT when ssrWants; track it so the SSR consumer
+			// (which gates on rhiNormalMrt + reads GetRenderTargetImage2) accepts it.
+			rhiNormalMrt = ssrWants;
+		}
+	}
+	if ( activeNormalRT == 0 ) {
+		if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants ) ) {
+			return false;
+		}
+		r->BeginTargetPass( rhiNormalRT, &clear );
+		activeNormalRT = rhiNormalRT;
+	}
 
 	rhi::PipelineDesc pd;
 	pd.stateBits = GLS_DEPTHFUNC_LESS;
@@ -2442,7 +3369,7 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( tg == TG_SCREEN || tg == TG_SCREEN2 || tg == TG_SKYBOX_CUBE || tg == TG_WOBBLESKY_CUBE ) {
 			continue;					// sky must not seal the normal/depth buffer
 		}
-		if ( !tri->numIndexes || !tri->ambientCache ) {
+		if ( !tri->numIndexes || ( !tri->ambientCache && !tri->gpuSkinVB ) ) {
 			continue;
 		}
 		// skip materials with every stage conditioned off (mirror the depth prepass)
@@ -2506,6 +3433,19 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			parms.pbrParms[1] = rough;
 		}
 
+		// DUDE tessellation: subdivide character/monster surfaces here identically to the
+		// depth prepass (same PN + displacement) so SSAO's normals follow the rounded
+		// silhouette the lit passes draw — otherwise the AO hugs the flat, un-tessellated
+		// edges (faceted shadows on a now-rounded model). The bump is already on unit 0
+		// with the matching bump matrix (var_TexBump), so gbuffer.tese displaces
+		// bit-identically to zfill.tese. pd.tessellate applies to both draws below.
+		bool useDeform = false;
+		const bool tess = RB_RHI_TessOrDeform( surf, tri, useDeform );
+		if ( tess ) {
+			RB_RHI_SetTessParms( parms );
+		}
+		pd.tessellate = tess;
+
 		rhi::BufferHandle vb, ib;
 		int vertOfs, idxOfs;
 		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
@@ -2515,8 +3455,15 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// they z-fight in the normal buffer and their normals flicker against the wall's.
 		const bool polyOffset = shader->TestMaterialFlag( MF_POLYGONOFFSET );
 		if ( polyOffset ) {
-			qglEnable( GL_POLYGON_OFFSET_FILL );
-			qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+			// Vulkan: the qgl pointers are NULL — calling them segfaults, so guard
+			// like every other qgl site here. The RHI dynamic depth bias below is
+			// what actually offsets the decal in the normal buffer on Vulkan.
+			if ( qglEnable != NULL ) {
+				qglEnable( GL_POLYGON_OFFSET_FILL );
+				qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+			}
+			r->SetPolygonOffset( true, r_offsetFactor.GetFloat(),
+			                     r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
 		}
 
 		// Depth hacks (view weapon / depth-hacked models) so the geometry rasterizes into
@@ -2536,11 +3483,11 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
-		da.vertexBuffer = vb;
-		da.vertexOffset = vertOfs;
-		da.indexBuffer = ib;
-		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
+		da.vertexOffset = useDeform ? 0 : vertOfs;
+		da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
+		da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
+		da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
 		da.uniformSize = sizeof( parms );
 
 		// Perforated (alpha-tested) surfaces: draw one live alpha-tested stage per coverage
@@ -2573,6 +3520,7 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				RB_RHI_BindUnit( 1, pStage->texture.image );
 				da.uniformBuffer = ub;
 				da.uniformOffset = uniOfs;
+				RB_RHI_VkTextures( da );	// VK: units 0 (bump) + 1 (diffuse coverage) from rhiVkUnits
 				r->Draw( da );
 				backEnd.pc.c_drawElements++;
 				drewCoverage = true;
@@ -2590,6 +3538,7 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			RB_RHI_BindUnit( 1, globalImages->whiteImage );
 			da.uniformBuffer = ub;
 			da.uniformOffset = uniOfs;
+			RB_RHI_VkTextures( da );	// VK: units 0 (bump) + 1 (white) from rhiVkUnits
 			r->Draw( da );
 			backEnd.pc.c_drawElements++;
 		}
@@ -2598,13 +3547,18 @@ static void RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			RB_LeaveDepthHack();
 		}
 		if ( polyOffset ) {
-			qglDisable( GL_POLYGON_OFFSET_FILL );
+			if ( qglDisable != NULL ) {
+				qglDisable( GL_POLYGON_OFFSET_FILL );
+			}
+			r->SetPolygonOffset( false, 0.0f, 0.0f );
 		}
 	}
 
 	r->EndPass();
 	RB_RHI_ForgetTexBinds();
+	rhiNormalResultRT = activeNormalRT;		// standalone rhiNormalRT or the merged handle
 	rhiNormalReadyThisView = true;
+	return didMerge;
 }
 
 static bool RB_RHI_EnsureSsaoTargets( rhi::RHI *r, int w, int h ) {
@@ -2628,6 +3582,39 @@ static bool RB_RHI_EnsureSsaoTargets( rhi::RHI *r, int w, int h ) {
 	}
 	rhiSsaoW = w;
 	rhiSsaoH = h;
+	return true;
+}
+
+// SSAO Phase 1: (re)allocate the prefiltered linear-depth mip target at the AO size.
+// Returns false when the backend has no mipped-target capability (CreateRenderTargetMipped
+// returns 0), so the caller silently falls back to the full-res raw-depth march.
+static bool RB_RHI_EnsureSsaoDepthMip( rhi::RHI *r, int w, int h ) {
+	// a lost context (vid_restart) leaves the handle set but its texture gone
+	if ( rhiSsaoDepthMipRT && r->GetRenderTargetImage( rhiSsaoDepthMipRT ) == 0 ) {
+		rhiSsaoDepthMipRT = 0;
+		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
+	}
+	if ( rhiSsaoDepthMipRT && rhiSsaoDepthMipW == w && rhiSsaoDepthMipH == h ) {
+		return true;
+	}
+	if ( rhiSsaoDepthMipRT ) { r->DestroyRenderTarget( rhiSsaoDepthMipRT ); rhiSsaoDepthMipRT = 0; }
+
+	// enough levels to cover the horizon radius in coarse mips, capped so the chain (and
+	// its per-level blit) stays short — 6 levels already reaches a 1/32 footprint.
+	int levels = 1;
+	for ( int d = ( w > h ? w : h ); d > 1 && levels < 6; d >>= 1 ) { levels++; }
+
+	// R16F (Phase 2): only .r is ever written/read (linear eye depth), so single-channel
+	// half-float is bit-identical to the RGBA16F first cut at a quarter the bandwidth —
+	// which directly compounds Phase 1's cache-locality win on the horizon march.
+	rhiSsaoDepthMipRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, levels );
+	if ( !rhiSsaoDepthMipRT ) {
+		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
+		return false;
+	}
+	rhiSsaoDepthMipW = w;
+	rhiSsaoDepthMipH = h;
+	rhiSsaoDepthMipLevels = levels;
 	return true;
 }
 
@@ -2721,9 +3708,319 @@ static void RB_RHI_DrawFullscreen( rhi::RHI *r, rhi::ShaderHandle prog,
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
 	da.textures[0] = rtInput0;		// 0 = leave unit 0 as the caller bound it
+	RB_RHI_VkTextures( da );			// VK: pull units 1-10 the caller recorded via RB_RHI_BindRTUnit
+	if ( rtInput0 != 0 ) {
+		da.textures[0] = rtInput0;	// the unit-0 param wins on both backends
+	}
 	r->Draw( da );
 
 	backEnd.pc.c_drawElements++;
+}
+
+// (re)allocate the berserk temporal trail ping-pong. Both slots are cleared to black on
+// creation so the first history read is defined on Vulkan (an unwritten color target's
+// layout is UNDEFINED and would trip validation) and starts from nothing on GL.
+static bool RB_RHI_EnsureBerserkTrail( rhi::RHI *r, int w, int h ) {
+	if ( rhiBerserkTrailRT[0] && r->GetRenderTargetImage( rhiBerserkTrailRT[0] ) == 0 ) {
+		rhiBerserkTrailRT[0] = rhiBerserkTrailRT[1] = 0;	// lost context (vid_restart)
+		rhiBerserkW = rhiBerserkH = 0;
+	}
+	if ( rhiBerserkTrailRT[0] && rhiBerserkTrailRT[1] && rhiBerserkW == w && rhiBerserkH == h ) {
+		return true;
+	}
+	for ( int i = 0; i < 2; i++ ) {
+		if ( rhiBerserkTrailRT[i] ) { r->DestroyRenderTarget( rhiBerserkTrailRT[i] ); rhiBerserkTrailRT[i] = 0; }
+	}
+	rhiBerserkTrailRT[0] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+	rhiBerserkTrailRT[1] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+	if ( !rhiBerserkTrailRT[0] || !rhiBerserkTrailRT[1] ) {
+		for ( int i = 0; i < 2; i++ ) {
+			if ( rhiBerserkTrailRT[i] ) { r->DestroyRenderTarget( rhiBerserkTrailRT[i] ); rhiBerserkTrailRT[i] = 0; }
+		}
+		rhiBerserkW = rhiBerserkH = 0;
+		return false;
+	}
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.color = true;
+	r->BeginTargetPass( rhiBerserkTrailRT[0], &clear ); r->EndPass();
+	r->BeginTargetPass( rhiBerserkTrailRT[1], &clear ); r->EndPass();
+	rhiBerserkW = w;			rhiBerserkH = h;
+	rhiBerserkIdx = 0;			rhiBerserkValid = false;
+	rhiBerserkLastTick = -100000;
+	return true;
+}
+
+/*
+===================
+RB_RHI_BerserkAccum
+
+Advance the berserk-vision feedback buffer one frame and return it for the display blit
+in RB_RHI_RenderShaderPasses. A faithful port of the stock ARB material
+textures/decals/berserk (materials/decals.mtr): each frame folds the freshly captured
+scene with the PREVIOUS frame magnified ~3% about the centre (centerscale 0.97), gated by
+the berserk2 texture's alpha (a radial mask — sharp at the centre, feedback at the edges;
+rotated over time). The recursion runs in a ping-pong render target — the reliable flavour
+of cross-frame feedback (same as the SSAO/SSR history) — because the stock recursive
+_scratch capture doesn't accumulate on the RHI path.
+
+baseScale = per-60fps-frame centerscale (0.95 baked in the caller; stock is 0.97), feedback =
+mask/feedback strength, fade = 0..1 wind-down (1 active; as it falls the
+zoom relaxes to identity and the feedback drops, so the streaks settle and merge back into
+the sharp scene). Returns the accumulated image (bound on unit 1 for the display draw) or 0.
+===================
+*/
+rhi::ImageHandle RB_RHI_BerserkAccum( rhi::RHI *r, const viewDef_t *viewDef,
+                                      float baseScale, float feedback, float fade,
+                                      int trailDiv, int timeMs ) {
+	const int fullW = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int fullH = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	int div = ( trailDiv < 1 ) ? 1 : trailDiv;
+	int tw = fullW / div;	if ( tw < 1 ) tw = 1;
+	int th = fullH / div;	if ( th < 1 ) th = 1;
+	if ( !RB_RHI_EnsureBerserkTrail( r, tw, th ) ) {
+		return 0;
+	}
+
+	rhi::ShaderHandle accumProg = r->LoadShader( "berserk_accum" );
+	if ( !accumProg ) {
+		return 0;
+	}
+
+	// the rotating radial mask (stock stage 0 = maskcolor berserk2). Cached once; clamp
+	// addressing + linear filtering, matching the material's `clamp`.
+	static idImage *maskImg = NULL;
+	if ( maskImg == NULL ) {
+		maskImg = globalImages->ImageFromFile( "textures/decals/berserk2", TF_LINEAR, false,
+		                                       TR_CLAMP, TD_HIGH_QUALITY );
+	}
+	if ( maskImg == NULL || maskImg == globalImages->defaultImage ) {
+		return 0;
+	}
+
+	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+
+	// a large gap since the last frame means the held trail is stale — berserk was
+	// re-entered, or the wind-down ended and a new one began. Drop it so this frame
+	// re-seeds from the clean scene instead of recirculating a scene from seconds ago.
+	int dt = timeMs - rhiBerserkLastTick;
+	if ( dt > 1000 || dt < 0 ) {
+		rhiBerserkValid = false;
+		dt = 16;
+	}
+	if ( dt < 1 ) { dt = 1; }
+
+	// framerate-independent zoom: the stock effect magnified 0.97/frame at its ~60fps, so
+	// normalise to a 60fps (16.67ms) reference — otherwise it rushes outward at high fps.
+	// Wind-down (fade<1) relaxes the magnify toward identity so the streaks stop growing.
+	float frameScale = idMath::Pow( baseScale, (float)dt / 16.6667f );
+	float scale = 1.0f + ( frameScale - 1.0f ) * fade;
+
+	// mask rotation (stock `rotate time*3`, value in cycles -> radians)
+	float ang = idMath::TWO_PI * ( (float)timeMs * 0.001f * 3.0f );
+
+	const int writeIdx = rhiBerserkIdx;
+	const int readIdx  = 1 - rhiBerserkIdx;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.localParam0[0] = scale;
+	parms.localParam0[1] = feedback * fade;					// wind-down fades the feedback out
+	parms.localParam0[2] = rhiBerserkValid ? 1.0f : 0.0f;
+	parms.localParam1[0] = cosf( ang );
+	parms.localParam1[1] = sinf( ang );
+	// Vulkan writes this fullscreen pass through a flipY viewport while _scratch is captured
+	// top-down; the shader works in _scratch space so the feedback stays coherent (no per-frame
+	// vertical flip). GL has no flipY, so leave it off there.
+	parms.localParam1[2] = vkMode ? 1.0f : 0.0f;
+
+	r->BeginTargetPass( rhiBerserkTrailRT[writeIdx], NULL );
+	RB_RHI_BindUnit( 0, globalImages->scratchImage );		// current scene (both backends)
+	RB_RHI_BindRTUnit( r, 1, rhiBerserkTrailRT[readIdx] );	// previous frame (cleared -> valid on first use)
+	RB_RHI_BindUnit( 2, maskImg );							// berserk2 radial mask
+	if ( !vkMode ) {
+		backEnd.glState.tmu[1].current2DMap = -1;			// direct bind bypassed the tmu cache
+	}
+	RB_RHI_DrawFullscreen( r, accumProg, parms, 0 );
+	r->EndPass();
+
+	rhiBerserkIdx  = readIdx;		// next frame writes the other slot
+	rhiBerserkValid = true;
+	rhiBerserkLastTick = timeMs;
+
+	rhi::ImageHandle trailImg = r->GetRenderTargetImage( rhiBerserkTrailRT[writeIdx] );
+
+	// bind it on unit 1 for the display draw that follows in the surface loop: GL keeps
+	// the binding live; the Vulkan caller re-supplies it via DrawArgs.textures[1].
+	RB_RHI_BindRTImage( r, 1, trailImg );
+	if ( !vkMode ) {
+		backEnd.glState.tmu[1].current2DMap = -1;
+	}
+	return trailImg;
+}
+
+// (re)allocate the hell-time temporal trail ping-pong (mirrors RB_RHI_EnsureBerserkTrail).
+static bool RB_RHI_EnsureHelltimeTrail( rhi::RHI *r, int w, int h ) {
+	if ( rhiHelltimeTrailRT[0] && r->GetRenderTargetImage( rhiHelltimeTrailRT[0] ) == 0 ) {
+		rhiHelltimeTrailRT[0] = rhiHelltimeTrailRT[1] = 0;	// lost context (vid_restart)
+		rhiHelltimeW = rhiHelltimeH = 0;
+	}
+	if ( rhiHelltimeTrailRT[0] && rhiHelltimeTrailRT[1] && rhiHelltimeW == w && rhiHelltimeH == h ) {
+		return true;
+	}
+	for ( int i = 0; i < 2; i++ ) {
+		if ( rhiHelltimeTrailRT[i] ) { r->DestroyRenderTarget( rhiHelltimeTrailRT[i] ); rhiHelltimeTrailRT[i] = 0; }
+	}
+	rhiHelltimeTrailRT[0] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+	rhiHelltimeTrailRT[1] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+	if ( !rhiHelltimeTrailRT[0] || !rhiHelltimeTrailRT[1] ) {
+		for ( int i = 0; i < 2; i++ ) {
+			if ( rhiHelltimeTrailRT[i] ) { r->DestroyRenderTarget( rhiHelltimeTrailRT[i] ); rhiHelltimeTrailRT[i] = 0; }
+		}
+		rhiHelltimeW = rhiHelltimeH = 0;
+		return false;
+	}
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.color = true;
+	r->BeginTargetPass( rhiHelltimeTrailRT[0], &clear ); r->EndPass();
+	r->BeginTargetPass( rhiHelltimeTrailRT[1], &clear ); r->EndPass();
+	rhiHelltimeW = w;			rhiHelltimeH = h;
+	rhiHelltimeIdx = 0;			rhiHelltimeValid = false;
+	rhiHelltimeLastTick = -100000;
+	return true;
+}
+
+/*
+===================
+RB_RHI_HelltimeAccum
+
+Advance the D3XP hell-time (Artifact) feedback buffer one frame and return it for the display
+composite in RB_RHI_RenderShaderPasses (the bloodorbN/cr_draw blit). Faithful port of the stock
+recursive _accum zoom-feedback (materials/smf.mtr) — see helltime_accum.frag. `level` selects the
+per-level look (0 = HELLTIME/Artifact, 1 = BERSERK, 2 = INVULNERABILITY), which the caller reads
+from the bloodorb1/2/3 material name. The scene input is _currentRender (captured by the fx
+manager's CaptureCurrentRender before the accum pass). Returns the trail image, or 0.
+===================
+*/
+rhi::ImageHandle RB_RHI_HelltimeAccum( rhi::RHI *r, const viewDef_t *viewDef, int level, int timeMs ) {
+	const int fullW = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int fullH = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	int tw = fullW;	if ( tw < 1 ) tw = 1;
+	int th = fullH;	if ( th < 1 ) th = 1;
+	if ( !RB_RHI_EnsureHelltimeTrail( r, tw, th ) ) {
+		return 0;
+	}
+
+	rhi::ShaderHandle accumProg = r->LoadShader( "helltime_accum" );
+	if ( !accumProg ) {
+		return 0;
+	}
+
+	// the radial gate (stock maskcolor stage = bloodorb3.tga). Cached once; clamp + linear,
+	// matching the material's `clamp`. Its alpha is ~1 at the centre, ~0 at the edges.
+	static idImage *maskImg = NULL;
+	if ( maskImg == NULL ) {
+		maskImg = globalImages->ImageFromFile( "textures/smf/bloodorb3", TF_LINEAR, false,
+		                                       TR_CLAMP, TD_HIGH_QUALITY );
+	}
+	if ( maskImg == NULL || maskImg == globalImages->defaultImage ) {
+		return 0;
+	}
+
+	// current scene is _currentRender (the fx manager captured it before this pass); if it was
+	// never captured on Vulkan, bail so the display falls back to the plain scene.
+	idImage *sceneImg = globalImages->currentRenderImage;
+	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	if ( vkMode && ( !sceneImg->rhiCaptured || !sceneImg->rhiHandle ) ) {
+		return 0;
+	}
+
+	// re-seed after a large gap (re-entry / a new powerup window) so we don't recirculate a
+	// scene from seconds ago.
+	int dt = timeMs - rhiHelltimeLastTick;
+	if ( dt > 1000 || dt < 0 ) {
+		rhiHelltimeValid = false;
+		dt = 16;
+	}
+	if ( dt < 1 ) { dt = 1; }
+	const float dtNorm = (float)dt / 16.6667f;
+
+	// per-level baked params (materials/smf.mtr bloodorb1/2/3). Scales/tints authored per-60fps
+	// frame; framerate-normalise the magnify like berserk. Rotation is a per-frame increment
+	// that accumulates through the recursion (stock `rotate 0.005` is a fixed per-frame spin).
+	// tint = the stock cr_capture colour (the dominant per-level scene tint on the injected
+	// _currentRender), NOT the subtle ac_capture accum tint — that's what colours the whole view.
+	float baseScale = 0.995f;
+	float rotCyclesPerFrame = 0.0f;
+	float tint[3] = { 1.0f, 1.0f, 1.0f };
+	const float sPulse = sinf( (float)timeMs * 0.001f * 0.5f * idMath::TWO_PI );	// stock sintable[time*0.5]
+	switch ( level ) {
+	default:
+	case 0:	// HELLTIME / Artifact — neutral (bloodorb1 cr_capture 1,1,1), gentle zoom, no rotation
+		baseScale = 0.995f;
+		break;
+	case 1:	// BERSERK — warm (bloodorb2 cr_capture 1,0.8,0.8), slow spin, subtle scale pulse
+		baseScale = 0.990f + sPulse * 0.004f;
+		rotCyclesPerFrame = 0.005f;
+		tint[0] = 1.0f; tint[1] = 0.8f; tint[2] = 0.8f;
+		break;
+	case 2:	// INVULNERABILITY — red (bloodorb3 cr_capture 0.8,0.5,0.5), slow spin
+		baseScale = 0.995f + sPulse * 0.004f;
+		rotCyclesPerFrame = 0.005f;
+		tint[0] = 0.8f; tint[1] = 0.5f; tint[2] = 0.5f;
+		break;
+	}
+
+	const float scale = idMath::Pow( baseScale, dtNorm );
+	const float ang = idMath::TWO_PI * rotCyclesPerFrame * dtNorm;		// per-frame spin increment
+
+	const int writeIdx = rhiHelltimeIdx;
+	const int readIdx  = 1 - rhiHelltimeIdx;
+
+	// _currentRender is POT-oversized; the scene lives in [0..shiftScale]. Pass shiftScale so the
+	// accum un-squashes it into the full trail (helltime_accum.frag scales the scene read by it).
+	const int potW = sceneImg->uploadWidth;
+	const int potH = sceneImg->uploadHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.screenCorrection[0] = ( potW > 0 ) ? (float)fullW / potW : 1.0f;
+	parms.screenCorrection[1] = ( potH > 0 ) ? (float)fullH / potH : 1.0f;
+	parms.localParam0[0] = scale;
+	parms.localParam0[1] = 1.0f;						// feedback strength (full mask gate)
+	parms.localParam0[2] = rhiHelltimeValid ? 1.0f : 0.0f;
+	parms.localParam0[3] = 1.0f;						// maskInvert (bloodorb3 alpha is high-centre)
+	parms.localParam1[0] = cosf( ang );
+	parms.localParam1[1] = sinf( ang );
+	parms.localParam1[2] = vkMode ? 1.0f : 0.0f;		// flipY (see helltime_accum.frag)
+	parms.color[0] = tint[0];
+	parms.color[1] = tint[1];
+	parms.color[2] = tint[2];
+	parms.color[3] = 1.0f;
+
+	r->BeginTargetPass( rhiHelltimeTrailRT[writeIdx], NULL );
+	RB_RHI_BindUnit( 0, sceneImg );							// _currentRender (both backends)
+	RB_RHI_BindRTUnit( r, 1, rhiHelltimeTrailRT[readIdx] );	// previous frame
+	RB_RHI_BindUnit( 2, maskImg );							// bloodorb3 radial mask
+	if ( !vkMode ) {
+		backEnd.glState.tmu[1].current2DMap = -1;			// direct bind bypassed the tmu cache
+	}
+	RB_RHI_DrawFullscreen( r, accumProg, parms, 0 );
+	r->EndPass();
+
+	rhiHelltimeIdx  = readIdx;
+	rhiHelltimeValid = true;
+	rhiHelltimeLastTick = timeMs;
+
+	rhi::ImageHandle trailImg = r->GetRenderTargetImage( rhiHelltimeTrailRT[writeIdx] );
+	RB_RHI_BindRTImage( r, 1, trailImg );
+	if ( !vkMode ) {
+		backEnd.glState.tmu[1].current2DMap = -1;
+	}
+	return trailImg;
 }
 
 static bool RB_RHI_EnsureSsrTarget( rhi::RHI *r, int w, int h ) {
@@ -2773,6 +4070,67 @@ static bool RB_RHI_EnsureSsrHistory( rhi::RHI *r, int w, int h ) {
 	return true;
 }
 
+// SSR Hi-Z (docs/ssao-perf-optimization.md, r_ssrHiZ): (re)allocate the min-Z depth pyramid
+// at the SSR march resolution. Mirrors RB_RHI_EnsureSsaoDepthMip exactly; returns false when
+// the backend has no mipped-target capability (CreateRenderTargetMipped -> 0), so the caller
+// silently falls back to the exact full-res march.
+static bool RB_RHI_EnsureSsrDepthMin( rhi::RHI *r, int w, int h ) {
+	// a lost context (vid_restart) leaves the handle set but its texture gone
+	if ( rhiSsrDepthMinRT && r->GetRenderTargetImage( rhiSsrDepthMinRT ) == 0 ) {
+		rhiSsrDepthMinRT = 0;
+		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
+	}
+	if ( rhiSsrDepthMinRT && rhiSsrDepthMinW == w && rhiSsrDepthMinH == h ) {
+		return true;
+	}
+	if ( rhiSsrDepthMinRT ) { r->DestroyRenderTarget( rhiSsrDepthMinRT ); rhiSsrDepthMinRT = 0; }
+
+	// enough levels to leap across the march radius in coarse blocks, capped so the chain
+	// (and its per-level fills) stays short — 6 levels reaches a 1/32 footprint.
+	int levels = 1;
+	for ( int d = ( w > h ? w : h ); d > 1 && levels < 6; d >>= 1 ) { levels++; }
+
+	rhiSsrDepthMinRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, levels );
+	if ( !rhiSsrDepthMinRT ) {
+		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
+		return false;
+	}
+	rhiSsrDepthMinW = w;
+	rhiSsrDepthMinH = h;
+	rhiSsrDepthMinLevels = levels;
+	return true;
+}
+
+// r_ssrGlossy: (re)create the reflection colour mip pyramid at the SSR march resolution.
+// RGBA16F to preserve HDR reflected energy across the downsample. Returns false when the
+// backend has no mipped-target capability (CreateRenderTargetMipped -> 0), so the caller
+// falls back to the exact sharp composite. Mirrors RB_RHI_EnsureSsrDepthMin.
+static bool RB_RHI_EnsureSsrColorMip( rhi::RHI *r, int w, int h ) {
+	if ( rhiSsrColorMipRT && r->GetRenderTargetImage( rhiSsrColorMipRT ) == 0 ) {
+		rhiSsrColorMipRT = 0;
+		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
+	}
+	if ( rhiSsrColorMipRT && rhiSsrColorMipW == w && rhiSsrColorMipH == h ) {
+		return true;
+	}
+	if ( rhiSsrColorMipRT ) { r->DestroyRenderTarget( rhiSsrColorMipRT ); rhiSsrColorMipRT = 0; }
+
+	// enough levels for a broad glossy blur without an over-long chain; 6 reaches a 1/32
+	// footprint (≈ a mirror -> fully diffuse spread across the roughness cutoff).
+	int levels = 1;
+	for ( int d = ( w > h ? w : h ); d > 1 && levels < 6; d >>= 1 ) { levels++; }
+
+	rhiSsrColorMipRT = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, levels );
+	if ( !rhiSsrColorMipRT ) {
+		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
+		return false;
+	}
+	rhiSsrColorMipW = w;
+	rhiSsrColorMipH = h;
+	rhiSsrColorMipLevels = levels;
+	return true;
+}
+
 /*
 ===================
 RB_RHI_ScreenSpaceReflections
@@ -2795,6 +4153,18 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !r_ssr.GetBool() || !R_BackendSupportsEnhancements() ) {
 		return;
 	}
+	// M7: SSR runs on both backends now. On Vulkan the G-buffer / scene-copy binds
+	// route through RB_RHI_BindRTUnit/Image into rhiVkUnits (like SSAO) instead of
+	// raw GL multitexture, and the shaders carry a view-Y sign + capture row-flip
+	// for VK's top-down framebuffer vs the GL-layout _currentRender snapshot.
+	const bool vkMode = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+	if ( vkMode ) {
+		static bool ssrLiveLogged = false;
+		if ( !ssrLiveLogged ) {
+			ssrLiveLogged = true;
+			common->Printf( "RHI backend: VK SSR (r_ssr) live - G-buffer march + composite\n" );
+		}
+	}
 	if ( !viewDef->viewEntitys || viewDef->isSubview ) {
 		return;
 	}
@@ -2804,12 +4174,18 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !fullscreenView ) {
 		return;
 	}
-	// needs this view's MRT G-buffer (normals + rough/metal) and captured depth
-	if ( !rhiNormalReadyThisView || !rhiNormalMrt || rhiNormalRT == 0 ) {
+	// needs this view's MRT G-buffer (normals + rough/metal) and captured depth. The result
+	// handle is the standalone rhiNormalRT or, under r_ssaoMergeNormal, the merged handle —
+	// both expose GetRenderTargetImage (normal) + GetRenderTargetImage2 (rough/metal).
+	if ( !rhiNormalReadyThisView || !rhiNormalMrt || rhiNormalResultRT == 0 ) {
 		return;
 	}
-	const rhi::ImageHandle matImg = r->GetRenderTargetImage2( rhiNormalRT );
-	if ( matImg == 0 || globalImages->currentDepthImage->uploadWidth <= 0 ) {
+	const rhi::ImageHandle matImg = r->GetRenderTargetImage2( rhiNormalResultRT );
+	// depth capture: uploadWidth on GL; rhiCaptured on VK (a demand-load can set
+	// uploadWidth there without a real capture), matching the soft-particle idiom
+	const bool depthCaptured = vkMode ? globalImages->currentDepthImage->rhiCaptured
+	                                  : globalImages->currentDepthImage->uploadWidth > 0;
+	if ( matImg == 0 || !depthCaptured ) {
 		return;
 	}
 	rhi::ShaderHandle marchProg = r->LoadShader( "ssr" );
@@ -2829,17 +4205,68 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 
-	// snapshot the lit opaque scene; CopyFramebuffer leaves _currentRender bound on
-	// the active unit — exactly where ssr.frag samples it (unit 0)
-	rhi::gl3ActiveTexture( GL_TEXTURE0 );
-	backEnd.glState.currenttmu = 0;
-	globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1,
-		viewDef->viewport.y1, fullW, fullH, true );
-
 	const int uploadW = globalImages->currentDepthImage->uploadWidth;
 	const int uploadH = globalImages->currentDepthImage->uploadHeight;
 	const float invP00 = ( viewDef->projectionMatrix[0] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[0] : 1.0f;
 	const float invP11 = ( viewDef->projectionMatrix[5] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[5] : 1.0f;
+
+	// ---- Hi-Z (r_ssrHiZ, docs/ssao-perf-optimization.md): build a min-Z (nearest-surface)
+	// linear-depth pyramid at the SSR march resolution so the march can leap provably-empty
+	// span (see ssr.frag hiZMin). Mirrors the SSAO depth-mip build with a MIN downsample.
+	// Done BEFORE the scene snapshot below so the pyramid passes' unit-0 binds are then
+	// re-established as _currentRender by CopyFramebuffer (the GL march samples it on unit 0). ----
+	bool doSsrHiZ  = false;
+	int  ssrHiZLod = 0;
+	if ( r_ssrHiZ.GetBool() ) {
+		if ( RB_RHI_EnsureSsrDepthMin( r, ssrW, ssrH ) ) {
+			rhi::ShaderHandle minProg  = r->LoadShader( "ssr_depthmin" );	// linearize into level 0
+			rhi::ShaderHandle downProg = r->LoadShader( "ssr_depthdown" );	// min-downsample the chain
+			doSsrHiZ = ( minProg != 0 && downProg != 0 && rhiSsrDepthMinLevels >= 2 );
+			if ( doSsrHiZ ) {
+				rhi::RenderParams pyr;
+				memset( &pyr, 0, sizeof( pyr ) );
+				pyr.mvpMatrix[0] = pyr.mvpMatrix[5] = pyr.mvpMatrix[10] = pyr.mvpMatrix[15] = 1.0f;
+				pyr.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;	// SSR frag -> depth tc
+				pyr.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
+				// level 0: linearize _currentDepth into the min-Z target
+				r->BeginTargetPass( rhiSsrDepthMinRT, NULL );
+				RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+				RB_RHI_DrawFullscreen( r, minProg, pyr, 0 );
+				r->EndPass();
+				// levels 1..N-1: MIN (nearest) downsample from the previous level. localParam0.x
+				// = the source mip level (VK binds a single-level view -> 0; GL binds the whole
+				// texture -> the real level for texelFetch), exactly like ssao_depthdown.
+				const bool vkBackend = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+				for ( int L = 1; L < rhiSsrDepthMinLevels; L++ ) {
+					rhi::RenderParams dp = pyr;
+					dp.localParam0[0] = vkBackend ? 0.0f : (float)( L - 1 );
+					rhi::ImageHandle src = r->GetRenderTargetMipImage( rhiSsrDepthMinRT, L - 1 );
+					r->BeginTargetMipPass( rhiSsrDepthMinRT, L, NULL );
+					RB_RHI_DrawFullscreen( r, downProg, dp, src );
+					r->EndPass();
+				}
+				backEnd.glState.tmu[0].current2DMap = -1;	// direct binds bypassed the tmu cache
+				ssrHiZLod = idMath::ClampInt( 1, rhiSsrDepthMinLevels - 1, r_ssrHiZLevel.GetInteger() );
+			}
+		}
+	} else if ( rhiSsrDepthMinRT ) {
+		// toggled off: reclaim the target so it isn't left resident (mirrors SSAO)
+		r->DestroyRenderTarget( rhiSsrDepthMinRT );
+		rhiSsrDepthMinRT = 0;
+		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
+	}
+
+	// snapshot the lit opaque scene; on GL CopyFramebuffer leaves _currentRender bound
+	// on the active unit — exactly where ssr.frag samples it (unit 0), and re-establishes it
+	// after the Hi-Z build above bound depth there. On VK the copy routes through the RHI
+	// capture path and unit 0 is recorded via rhiVkUnits below, so skip the raw
+	// gl3ActiveTexture (a NULL qgl pointer on the Vulkan backend).
+	if ( !vkMode ) {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+	}
+	globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1,
+		viewDef->viewport.y1, fullW, fullH, true );
 
 	// ---- stage 1: march into the offscreen buffer (cleared to 0 = miss) ----
 	rhi::RenderParams parms;
@@ -2869,23 +4296,53 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiSsrJitterPhase -= (float)(int)rhiSsrJitterPhase;
 		parms.windowCoord[1] = rhiSsrJitterPhase;
 	}
+	// view-Y sign (u_windowCoord.z): +1 on GL (gl_FragCoord.y bottom-up, agrees with
+	// view +Y and the bottom-up _currentRender capture), -1 on Vulkan (top-down
+	// framebuffer). Flips the reconstructed view-space Y and the project-to-screen /
+	// capture-sample rows so the march matches the G-buffer normals (same idea as
+	// ssao.frag's u_windowCoord.z). Inert at +1 on GL.
+	const float viewYSign = vkMode ? -1.0f : 1.0f;
+	parms.windowCoord[2] = viewYSign;
+	// Hi-Z leap LOD for ssr.frag (u_localParam1.w); 0 = feature off -> exact full-res march
+	parms.localParam1[3] = (float)ssrHiZLod;
 
 	rhi::ClearArgs clear;
 	memset( &clear, 0, sizeof( clear ) );
 	clear.color = true;		// rgba 0 = miss everywhere the march discards
 
 	r->BeginTargetPass( rhiSsrRT, &clear );
-	// unit 0 = _currentRender (bound by the copy above); unit 1 = depth; units 2/3 =
-	// the G-buffer attachments (raw binds — tmu cache entries invalidated below)
+	// unit 0 = _currentRender; unit 1 = depth; units 2/3 = the G-buffer attachments.
+	// GL: the copy above left _currentRender bound on unit 0, units 2/3 raw-bind (tmu
+	// cache entries invalidated below). VK: record all four into rhiVkUnits so
+	// RB_RHI_DrawFullscreen carries them via DrawArgs.
+	if ( vkMode ) {
+		RB_RHI_BindRTImage( r, 0, globalImages->currentRenderImage->rhiHandle );
+	}
 	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
-	rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
-	qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
-	rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
-	qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
-	rhi::gl3ActiveTexture( GL_TEXTURE0 );
-	backEnd.glState.currenttmu = 0;
-	backEnd.glState.tmu[2].current2DMap = -1;
-	backEnd.glState.tmu[3].current2DMap = -1;
+	if ( vkMode ) {
+		RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
+		RB_RHI_BindRTImage( r, 3, matImg );
+	} else {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalResultRT ) );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+		backEnd.glState.tmu[2].current2DMap = -1;
+		backEnd.glState.tmu[3].current2DMap = -1;
+	}
+	// Hi-Z min-Z pyramid on unit 4 for the march's leap test. When off, bind _currentDepth
+	// as an unused dummy so the descriptor slot stays valid on VK (ssr.frag routes to the
+	// exact march via u_localParam1.w = 0 and never samples it). Mirrors the SSAO unit-2 idiom.
+	if ( doSsrHiZ ) {
+		RB_RHI_BindRTUnit( r, 4, rhiSsrDepthMinRT );
+		if ( !vkMode ) {
+			backEnd.glState.tmu[4].current2DMap = -1;	// direct bind bypassed the tmu cache
+		}
+	} else {
+		RB_RHI_BindUnit( 4, globalImages->currentDepthImage );
+	}
 	RB_RHI_DrawFullscreen( r, marchProg, parms, 0 );
 	r->EndPass();
 
@@ -2921,11 +4378,22 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			// unit 2 = depth
 			r->BeginTargetPass( rhiSsrHistRT[writeIdx], NULL );
 			RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
-			rhi::gl3ActiveTexture( GL_TEXTURE0 + 1 );
-			qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiSsrHistRT[readIdx] ) );
-			rhi::gl3ActiveTexture( GL_TEXTURE0 );
-			backEnd.glState.currenttmu = 0;
-			backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
+			if ( vkMode ) {
+				// First frame after (re)alloc the read slot was never rendered, so its
+				// real layout is still UNDEFINED (the color target's tracker claims
+				// SHADER_READ_ONLY only after a write). The shader early-outs on
+				// historyUsable=0, but u_history is a statically-used sampler that VK
+				// validates regardless — bind the just-marched result (a written,
+				// SHADER_READ_ONLY target) until a real history slot exists.
+				rhi::RenderTargetHandle histRT = historyUsable ? rhiSsrHistRT[readIdx] : rhiSsrRT;
+				RB_RHI_BindRTUnit( r, 1, histRT );			// history read (VK rhiVkUnits[1])
+			} else {
+				rhi::gl3ActiveTexture( GL_TEXTURE0 + 1 );
+				qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiSsrHistRT[readIdx] ) );
+				rhi::gl3ActiveTexture( GL_TEXTURE0 );
+				backEnd.glState.currenttmu = 0;
+				backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
+			}
 			RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiSsrRT ) );
 			r->EndPass();
 
@@ -2941,6 +4409,56 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiSsrHistValid = false;
 	}
 
+	// ---- stage 2.5: glossy reflection pyramid (r_ssrGlossy, docs/ssr.md) ----
+	// Build a colour mip pyramid of the reflection result so the composite can read it at a
+	// roughness-proportional LOD (rough surfaces blur, sharp stay sharp). The sharp path is
+	// left exactly as before: glossySrcRT stays the single-level resultRT and glossyMaxLod 0
+	// tells ssr_composite.frag to sample level 0 with plain texture().
+	rhi::RenderTargetHandle glossySrcRT = resultRT;
+	float glossyMaxLod = 0.0f;
+	if ( r_ssrGlossy.GetBool() && RB_RHI_EnsureSsrColorMip( r, ssrW, ssrH ) ) {
+		rhi::ShaderHandle downProg = r->LoadShader( "ssr_colordown" );
+		if ( downProg && rhiSsrColorMipLevels >= 2 ) {
+			rhi::RenderParams cp;
+			memset( &cp, 0, sizeof( cp ) );
+			cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+			// level 0: 1:1 copy of the reflection result into the pyramid base (mode 0).
+			// Level 0 uses BeginTargetPass (its framebuffer is the base colorFb) — NOT
+			// BeginTargetMipPass, which only creates per-level framebuffers for L>=1 and
+			// rejects level 0 (a no-op that would leave the base black). Mirrors the Hi-Z
+			// build, whose level-0 linearize also uses BeginTargetPass.
+			cp.localParam0[0] = 0.0f;	// single-level source -> level 0
+			cp.localParam0[1] = 0.0f;	// mode 0 = copy
+			r->BeginTargetPass( rhiSsrColorMipRT, NULL );
+			RB_RHI_DrawFullscreen( r, downProg, cp, r->GetRenderTargetImage( resultRT ) );
+			r->EndPass();
+			// levels 1..N: 2x2 box average of the previous level (mode 1). localParam0.x =
+			// source level (VK binds a single-level view -> 0; GL binds the whole texture).
+			const bool vkBackend = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+			for ( int L = 1; L < rhiSsrColorMipLevels; L++ ) {
+				rhi::RenderParams dp = cp;
+				dp.localParam0[0] = vkBackend ? 0.0f : (float)( L - 1 );
+				dp.localParam0[1] = 1.0f;	// mode 1 = downsample
+				rhi::ImageHandle src = r->GetRenderTargetMipImage( rhiSsrColorMipRT, L - 1 );
+				r->BeginTargetMipPass( rhiSsrColorMipRT, L, NULL );
+				RB_RHI_DrawFullscreen( r, downProg, dp, src );
+				r->EndPass();
+			}
+			if ( !vkMode ) {
+				backEnd.glState.tmu[0].current2DMap = -1;	// direct binds bypassed the tmu cache
+			}
+			glossySrcRT  = rhiSsrColorMipRT;
+			// max LOD the composite may reach at the roughness cutoff, scaled by r_ssrGlossyScale
+			glossyMaxLod = (float)( rhiSsrColorMipLevels - 1 )
+			             * idMath::ClampFloat( 0.0f, 1.0f, r_ssrGlossyScale.GetFloat() );
+		}
+	} else if ( rhiSsrColorMipRT && !r_ssrGlossy.GetBool() ) {
+		// toggled off: reclaim the pyramid so it isn't left resident (mirrors the Hi-Z reclaim)
+		r->DestroyRenderTarget( rhiSsrColorMipRT );
+		rhiSsrColorMipRT = 0;
+		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
+	}
+
 	// ---- stage 3: full-res additive composite over the lit scene ----
 	rhi::RenderParams compParms;
 	memset( &compParms, 0, sizeof( compParms ) );
@@ -2949,10 +4467,12 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	compParms.localParam0[1] = invP11;
 	compParms.localParam1[1] = r_ssrIntensity.GetFloat();
 	compParms.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
+	compParms.localParam1[3] = glossyMaxLod;	// r_ssrGlossy: >0 = sample the pyramid by roughness; 0 = sharp
 	compParms.screenCorrection[0] = 1.0f / fullW;
 	compParms.screenCorrection[1] = 1.0f / fullH;
 	compParms.depthTexRecip[0] = 1.0f / uploadW;
 	compParms.depthTexRecip[1] = 1.0f / uploadH;
+	compParms.windowCoord[2] = viewYSign;		// view-Y sign for the NdotV reconstruction (VK)
 
 	// EndPass restored the view scissor; keep the CPU cache in step, and cover the
 	// whole view in case the last surface left a crop before the target passes
@@ -2960,17 +4480,23 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	               tr.viewportOffset[1] + viewDef->viewport.y1, fullW, fullH );
 	backEnd.currentScissor = viewDef->scissor;
 
-	// unit 0 = SSR result (via DrawFullscreen), unit 1 = depth, units 2/3 = G-buffer
+	// unit 0 = SSR result (via DrawFullscreen, a color target -> VK cancels the scene
+	// flip), unit 1 = depth, units 2/3 = G-buffer
 	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
-	rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
-	qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
-	rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
-	qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
-	rhi::gl3ActiveTexture( GL_TEXTURE0 );
-	backEnd.glState.currenttmu = 0;
-	backEnd.glState.tmu[2].current2DMap = -1;
-	backEnd.glState.tmu[3].current2DMap = -1;
-	RB_RHI_DrawFullscreen( r, compProg, compParms, r->GetRenderTargetImage( resultRT ),
+	if ( vkMode ) {
+		RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
+		RB_RHI_BindRTImage( r, 3, matImg );
+	} else {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalResultRT ) );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+		backEnd.glState.tmu[2].current2DMap = -1;
+		backEnd.glState.tmu[3].current2DMap = -1;
+	}
+	RB_RHI_DrawFullscreen( r, compProg, compParms, r->GetRenderTargetImage( glossySrcRT ),
 	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 	RB_RHI_ForgetTexBinds();
 }
@@ -3018,6 +4544,24 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 
+	// SSAO Phase 1 (docs/ssao-perf-optimization.md): build the prefiltered linear-depth
+	// mip chain when enabled and the backend supports mipped targets. depthTexRecip.z
+	// carries the max LOD to ssao.frag (0 = off -> the raw full-res path).
+	bool doDepthMip = false;
+	rhi::ShaderHandle depthMipProg = 0, depthDownProg = 0;
+	if ( r_ssaoDepthMip.GetBool() ) {
+		if ( RB_RHI_EnsureSsaoDepthMip( r, aoW, aoH ) ) {
+			depthMipProg  = r->LoadShader( "ssao_depthmip" );	// linearize into level 0
+			depthDownProg = r->LoadShader( "ssao_depthdown" );	// max-downsample the chain
+			doDepthMip = ( depthMipProg != 0 && depthDownProg != 0 );
+		}
+	} else if ( rhiSsaoDepthMipRT ) {
+		// toggled off: reclaim the target so it isn't left resident
+		r->DestroyRenderTarget( rhiSsaoDepthMipRT );
+		rhiSsaoDepthMipRT = 0;
+		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
+	}
+
 	// horizon-search sample budget (clamped to the shader's MAX_SLICES / MAX_STEPS)
 	const int slices = idMath::ClampInt( 1, 8,  r_ssaoSlices.GetInteger() );
 	const int steps  = idMath::ClampInt( 1, 12, r_ssaoSteps.GetInteger() );
@@ -3037,6 +4581,14 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
 	parms.depthTexRecip[0]    = ( (float)fullW / aoW ) / uploadW;	// gl_FragCoord (AO) -> depth tc
 	parms.depthTexRecip[1]    = ( (float)fullH / aoH ) / uploadH;
+	// SSAO Phase 1: .z = depth-mip max LOD (0 = off, ssao.frag uses the raw path), .w = LOD bias.
+	// r_ssaoDepthMipMaxLod caps how coarse the march may go — the coarsest (box-averaged) mips are
+	// where occlusion smears across silhouettes into halos. Clamp to the built chain and keep >= 1
+	// when on, since ssao.frag treats .z < 0.5 as the feature-off flag.
+	float mipMaxLod = (float)( rhiSsaoDepthMipLevels - 1 );
+	mipMaxLod = idMath::ClampFloat( 1.0f, mipMaxLod, (float)r_ssaoDepthMipMaxLod.GetInteger() );
+	parms.depthTexRecip[2]    = doDepthMip ? mipMaxLod : 0.0f;
+	parms.depthTexRecip[3]    = r_ssaoDepthMipBias.GetFloat();
 	parms.screenCorrection[0] = 1.0f / aoW;				// gl_FragCoord -> [0,1] uv
 	parms.screenCorrection[1] = 1.0f / aoH;
 	parms.localParam0[0] = invP00;
@@ -3049,8 +4601,12 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[3] = r_ssaoBentNormal.GetBool() ? 1.0f : 0.0f;
 	// use the bump-mapped normal G-buffer (unit 1) if the normal prepass produced one this
 	// view; otherwise ssao.frag reconstructs the normal from depth (windowCoord.x = flag)
-	const bool useNormalBuf = rhiNormalReadyThisView && rhiNormalRT != 0 && r_ssaoNormalBuffer.GetBool();
+	const bool useNormalBuf = rhiNormalReadyThisView && rhiNormalResultRT != 0 && r_ssaoNormalBuffer.GetBool();
 	parms.windowCoord[0] = useNormalBuf ? 1.0f : 0.0f;
+	// view-Y sign for ssao.frag's position reconstruction: +1 on GL (gl_FragCoord.y
+	// bottom-up), -1 on Vulkan (top-down) so reconstructed positions match the view-
+	// space G-buffer normal — otherwise AO is wrong on floors/ceilings
+	parms.windowCoord[2] = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ? -1.0f : 1.0f;
 	// per-frame noise rotation for temporal accumulation: advance a golden-ratio walk so
 	// each frame's horizon search jitters differently, giving the temporal pass distinct
 	// samples to average. 0 when temporal is off -> ssao.frag falls back to the plain dither.
@@ -3060,16 +4616,50 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.windowCoord[1] = rhiSsaoJitterPhase;
 	}
 
+	// SSAO Phase 1: linearize _currentDepth into level 0 of the depth-mip target, then
+	// box-average it down the chain. Done before the horizon search so ssao.frag can
+	// textureLod a coarser mip for its far steps (the cache win).
+	if ( doDepthMip ) {
+		// level 0: linearize _currentDepth into the mip target
+		r->BeginTargetPass( rhiSsaoDepthMipRT, NULL );
+		RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+		RB_RHI_DrawFullscreen( r, depthMipProg, parms, 0 );
+		r->EndPass();
+		// levels 1..N-1: max-downsample from the previous level (a conservative farthest-
+		// depth filter that avoids the foreground/background averaging halo). Source level
+		// bound on unit 0 via DrawFullscreen; localParam0.x = the source mip level the
+		// downsample shader texelFetches (Vulkan binds a single-level view -> 0; GL3 binds
+		// the whole texture -> the real level).
+		const bool vkBackend = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+		for ( int L = 1; L < rhiSsaoDepthMipLevels; L++ ) {
+			rhi::RenderParams dp = parms;
+			dp.localParam0[0] = vkBackend ? 0.0f : (float)( L - 1 );
+			rhi::ImageHandle src = r->GetRenderTargetMipImage( rhiSsaoDepthMipRT, L - 1 );
+			r->BeginTargetMipPass( rhiSsaoDepthMipRT, L, NULL );
+			RB_RHI_DrawFullscreen( r, depthDownProg, dp, src );
+			r->EndPass();
+		}
+		// direct binds bypassed the tmu cache; forget unit 0 so the horizon search's
+		// cache-aware depth bind below actually re-issues.
+		backEnd.glState.tmu[0].current2DMap = -1;
+	}
+
 	// horizon search: _currentDepth (unit 0) [+ normal G-buffer on unit 1] -> raw AO
 	r->BeginTargetPass( rhiSsaoRT, NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	if ( useNormalBuf ) {
-		rhi::gl3ActiveTexture( GL_TEXTURE0 + 1 );
-		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalRT ) );
-		rhi::gl3ActiveTexture( GL_TEXTURE0 );
-		backEnd.glState.currenttmu = 0;
+		RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );	// normal G-buffer (GL raw bind / VK rhiVkUnits[1])
 		// direct bind bypassed the tmu cache; forget unit 1 so the blur's depth bind re-issues
 		backEnd.glState.tmu[1].current2DMap = -1;
+	}
+	// SSAO Phase 1: the prefiltered depth mip on unit 2 for the far-step taps. When off,
+	// bind _currentDepth there as an unused dummy so the descriptor slot stays valid
+	// (ssao.frag routes to the raw path via depthTexRecip.z, never sampling it).
+	if ( doDepthMip ) {
+		RB_RHI_BindRTUnit( r, 2, rhiSsaoDepthMipRT );
+		backEnd.glState.tmu[2].current2DMap = -1;	// direct bind bypassed the tmu cache
+	} else {
+		RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
 	}
 	RB_RHI_DrawFullscreen( r, ssaoProg, parms, 0 );
 	r->EndPass();
@@ -3127,11 +4717,8 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			// slot (a render target, direct-bound like the normal buffer), unit 2 = depth
 			r->BeginTargetPass( rhiSsaoHistRT[writeIdx], NULL );
 			RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
-			rhi::gl3ActiveTexture( GL_TEXTURE0 + 1 );
-			qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiSsaoHistRT[readIdx] ) );
-			rhi::gl3ActiveTexture( GL_TEXTURE0 );
-			backEnd.glState.currenttmu = 0;
-			backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
+			RB_RHI_BindRTUnit( r, 1, rhiSsaoHistRT[readIdx] );	// history read (GL raw / VK rhiVkUnits[1])
+			backEnd.glState.tmu[1].current2DMap = -1;			// direct bind bypassed the tmu cache
 			RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiSsaoRT ) );
 			r->EndPass();
 
@@ -3178,7 +4765,7 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	// mode 3 shows the raw normal G-buffer; 1/2 show the AO result
-	rhi::RenderTargetHandle srcRT = ( mode >= 3 ) ? rhiNormalRT : rhiSsaoResultRT;
+	rhi::RenderTargetHandle srcRT = ( mode >= 3 ) ? rhiNormalResultRT : rhiSsaoResultRT;
 	if ( !srcRT || r->GetRenderTargetImage( srcRT ) == 0 ) {
 		return;
 	}
@@ -3237,41 +4824,44 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	}
 	backEnd.currentScissor = viewDef->scissor;
 
-	RB_RHI_FillDepthBuffer( r, viewDef );
-
 	// Phase 4 M4 (docs/vulkan-backend.md): the light loop now runs under
 	// Vulkan — stencil shadow volumes + interactions. The render-target
 	// enhancement passes (normal prepass, SSAO, SSR, shadow maps) need the
 	// VK render-target family and arrive together at M7.
 	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
 	if ( vkMode ) {
-		RB_RHI_LogOnce( "VK: world = depth + stencil shadows + interactions; shadow maps/SSAO/SSR arrive at M7" );
+		RB_RHI_LogOnce( "VK: world = depth + stencil + shadow maps + interactions + HDR + SSAO (SSR composites later, in the view pass)" );
 	}
 
-	// normal G-buffer (Option B): render bump-mapped view normals for SSAO to sample
-	// instead of reconstructing from depth. Runs before the SSAO pass that consumes it.
+	// normal G-buffer (Option B): bump-mapped view normals for SSAO to sample instead of
+	// reconstructing from depth. docs/ssao-normal-merge.md: with r_ssaoMergeNormal the
+	// gbuffer pass ALSO seals the scene depth, folding the standalone zfill prepass away
+	// (~0.65 ms / ~69% of SSAO's cost). So run it first: if it merged, it replaces zfill
+	// and we capture _currentDepth from its sealed depth; otherwise zfill seals depth as
+	// before. The return value is the single source of truth — no duplicate gate to drift,
+	// and a BeginNormalPrepass fallback (returns 0) cleanly leaves zfill to seal depth.
 	rhiNormalReadyThisView = false;
-	if ( !vkMode ) {
-		RB_RHI_NormalPrepass( r, viewDef );
+	const bool mergedDepth = RB_RHI_NormalPrepass( r, viewDef );
+	if ( mergedDepth ) {
+		RB_RHI_CaptureCurrentDepth( viewDef );
+	} else {
+		RB_RHI_FillDepthBuffer( r, viewDef );
 	}
 
 	// SSAO (GTAO) builds the AO buffer from the just-captured scene depth, before
 	// the ambient/interaction passes that consume it (docs/ssao-gtao.md). Each view
 	// starts with no AO; the pass sets rhiSsaoAppliedThisView when it produces one.
 	rhiSsaoAppliedThisView = false;
-	if ( !vkMode ) {
-		RB_RHI_SSAOPass( r, viewDef );
-	}
+	RB_RHI_SSAOPass( r, viewDef );
 
 	// Bind the AO buffer on unit 9 for the whole per-light loop: both the ambient and
 	// interaction shaders sample u_ssao there, and nothing in the loop touches unit 9
 	// (Draw binds 0-8). Bound once here rather than per draw; the enable flag in
 	// localParam0.x (set per surface) decides whether a shader actually reads it.
 	if ( rhiSsaoAppliedThisView ) {
-		rhi::gl3ActiveTexture( GL_TEXTURE0 + 9 );
-		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiSsaoResultRT ) );
-		rhi::gl3ActiveTexture( GL_TEXTURE0 );
-		backEnd.glState.currenttmu = 0;
+		// GL: raw-bind on unit 9. VK: record into rhiVkUnits[9] so every interaction/
+		// ambient draw's RB_RHI_VkTextures carries it as DrawArgs::ssao for the loop.
+		RB_RHI_BindRTUnit( r, 9, rhiSsaoResultRT );
 	}
 
 	// per-light shadowing and adding (matches RB_ARB2_DrawInteractions)
@@ -3289,6 +4879,11 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	rhiCubeCacheScratch = 0;
 	rhiCubeUpdatesSpent = 0;
 	rhiCubeCacheDeferred = 0;
+	rhiCubeMissCold = 0;
+	rhiCubeMissWarmCaster = 0;
+	rhiCubeMissWarmLight = 0;
+	rhiCubeEvictions = 0;
+	rhiCubeCacheSplit = 0;
 	rhiMapCacheHits = 0;
 	rhiMapCacheRendered = 0;
 	rhiCubeCacheFrameNo++;			// bump before the light loop so lastFrame == "this view"
@@ -3331,9 +4926,12 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			// falls back to stencil. That mix is exactly the free per-light selection.
 			// Reading lightDef->parms here is a read-only frontend query.
 			ictx.lightShadowMapped = false;
+			ictx.lightSunShadow = false;
 			ictx.shadowImage = 0;
 			ictx.lightShadowCube = false;
 			ictx.shadowCubeImage = 0;
+			ictx.lightHasDynamicLayer = false;
+			ictx.shadowCubeDynImage = 0;
 
 			// Flag the player flashlight so its interactions get the dedicated small
 			// shadow bias (see r_shadowMapFlashlightBias). Keyed on the light shader
@@ -3357,12 +4955,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			    && vLight->lightShader->LightCastsShadows();
 			const bool isPoint = vLight->lightDef && vLight->lightDef->parms.pointLight;
 			const bool isParallel = vLight->lightDef && vLight->lightDef->parms.parallel;
-			// shadow maps need the VK render-target family (M7); until then every
-			// light takes the stencil path under Vulkan
-			const bool smEnabled = r_shadowMapping.GetBool() && !vkMode;
-			if ( vkMode && r_shadowMapping.GetBool() ) {
-				RB_RHI_LogOnce( "VK: r_shadowMapping deferred to M7 - lights use stencil shadows" );
-			}
+			// M7: shadow maps run on Vulkan now (the RHI depth render-target family
+			// is live) — projected/spot lights get a 2D depth map, budgeted point
+			// lights a cube depth map, everything else still falls back to stencil.
+			const bool smEnabled = r_shadowMapping.GetBool();
 
 			// DUDE Phase 3.5: giant "sun replacement" lights (Phobos fakes its sky
 			// with omni lights up to radius 5000) look poor as a single shadow map —
@@ -3376,24 +4972,55 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				const idVec3 &lr = vLight->lightDef->parms.lightRadius;
 				lightMaxAxis = Max( lr.x, Max( lr.y, lr.z ) );
 			}
+			// The player flashlight is a narrow projected spot with flashRadius 400
+			// (weapon_flashlight.def), which trips the 255 default cutoff even though a
+			// single 2D map resolves a bounded cone perfectly — a false positive of a rule
+			// meant for giant omni suns. Exempt it so it takes the (tessellatable) 2D-map
+			// path like every other projected light instead of a low-poly stencil shadow.
 			const bool oversize = smEnabled && smStencilRadius > 0.0f
-			    && lightMaxAxis > smStencilRadius;
+			    && lightMaxAxis > smStencilRadius && !ictx.lightIsFlashlight;
 
-			if ( smEnabled && lightMayShadow && hasInteractions && !oversize ) {
-				if ( !isPoint && !isParallel ) {
+			if ( smEnabled && lightMayShadow && hasInteractions ) {
+				if ( ( oversize || isParallel ) && r_shadowMapSun.GetBool() ) {
+					// DUDE sun shadow maps (docs/shadow-research.md item 1): oversize
+					// "sun replacement" omnis and parallel lights render a per-view
+					// fitted virtual 2D map instead of the stencil fallback. The fit
+					// requires the light to sit OUTSIDE the fitted view sphere (a
+					// projection from the light toward the view) — a distant sky sun
+					// qualifies; a big omni you stand next to does not, and declines.
+					if ( RB_RHI_ShadowMapPassSun( r, vLight, shadowMapProg ) ) {
+						ictx.lightShadowMapped = true;
+						ictx.lightSunShadow = true;
+						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
+						dbgShadowMapped++;
+					}
+				}
+				if ( !ictx.lightShadowMapped && !oversize && !isPoint && !isParallel ) {
 					// projected / spot light: single 2D depth map
 					if ( RB_RHI_ShadowMapPass( r, vLight, shadowMapProg ) ) {
 						ictx.lightShadowMapped = true;
 						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
 						dbgShadowMapped++;
 					}
-				} else if ( isPoint && !isParallel && RB_RHI_PointLightInBudget( viewDef, vLight ) ) {
+				} else if ( !ictx.lightShadowMapped && isPoint && !isParallel
+				            // an oversize point light reaches the cube path only when the sun
+				            // fit declined it (light inside the fitted region = a big indoor
+				            // omni, not a distant sun): the adaptive tiers give it a usable
+				            // cube, and stencil stays the last resort. With r_shadowMapSun
+				            // off, oversize keeps the old direct-to-stencil routing for A/B.
+				            && ( !oversize || r_shadowMapSun.GetBool() )
+				            && RB_RHI_PointLightInBudget( viewDef, vLight ) ) {
 					// point / omni light: 6-face cube map, budgeted by on-screen
 					// importance (r_shadowMapPointLimit) so a busy room stays bounded
 					const float range = RB_RHI_PointLightRange( vLight );
 					if ( RB_RHI_ShadowMapPassCube( r, vLight, shadowCubeProg, range ) ) {
 						ictx.lightShadowCube = true;
 						ictx.shadowCubeImage = r->GetRenderTargetImage( rhiShadowCube );
+						// static/dynamic split: a second (movers) cube to min() with the static one
+						if ( rhiShadowCubeDyn != 0 ) {
+							ictx.lightHasDynamicLayer = true;
+							ictx.shadowCubeDynImage = r->GetRenderTargetImage( rhiShadowCubeDyn );
+						}
 						ictx.lightRange = range;
 						rhiShadowCubeLights++;
 					}
@@ -3425,7 +5052,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				                vLight->lightDef->index,
 				                isPoint ? "point" : ( isParallel ? "parallel" : "projected" ),
 				                lightMayShadow ? "" : " (noShadow)",
-				                ictx.lightShadowCube ? "cube" : ( ictx.lightShadowMapped ? "2D" : ( oversize ? "stencil" : "none" ) ),
+				                ictx.lightShadowCube ? "cube" : ( ictx.lightSunShadow ? "sun" : ( ictx.lightShadowMapped ? "2D" : ( oversize ? "stencil" : "none" ) ) ),
 				                dbgRes,
 				                RB_RHI_CountLightChain( vLight->globalInteractions ),
 				                RB_RHI_CountLightChain( vLight->localInteractions ),
@@ -3511,6 +5138,37 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 		                rhiShadowPerfCasters, r_shadowMapping.GetInteger() );
 	}
 
+	// r_shadowMapCacheDebug: accumulate the per-view cube-cache tallies over ~1 second and
+	// print a single sustained line, so the dominant re-render cause is legible instead of
+	// per-frame spam. Hit% is over cached lookups (excludes scratch/dynamic lights, which
+	// never enter the cache). This is what says which caching lever is worth building.
+	if ( r_shadowMapCacheDebug.GetBool() ) {
+		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accFaces, accSplit, accFrames, accStartMs;
+		const int nowMs = Sys_Milliseconds();
+		if ( accStartMs == 0 ) { accStartMs = nowMs; }
+		accHits       += rhiCubeCacheHits;
+		accCold       += rhiCubeMissCold;
+		accWarmCaster += rhiCubeMissWarmCaster;
+		accWarmLight  += rhiCubeMissWarmLight;
+		accScratch    += rhiCubeCacheScratch;
+		accDynamic    += rhiCubeCacheDynamic;
+		accDeferred   += rhiCubeCacheDeferred;
+		accEvict      += rhiCubeEvictions;
+		accFaces      += rhiShadowCubeFaces;		// actual cube FACES rasterized -> the GPU cost per-face invalidation cuts
+		accSplit      += rhiCubeCacheSplit;			// moving-caster lights kept cached via the static/dynamic split
+		accFrames++;
+		if ( nowMs - accStartMs >= 1000 ) {
+			const int rendered = accCold + accWarmCaster + accWarmLight;
+			const int lookups  = accHits + rendered;
+			const int hitPct   = lookups > 0 ? ( 100 * accHits ) / lookups : 0;
+			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | faces %d | split %d, scratch %d, dynamic %d, deferred %d, evict %d | %d frames\n",
+			                accHits, hitPct, rendered, accCold, accWarmCaster, accWarmLight, accFaces,
+			                accSplit, accScratch, accDynamic, accDeferred, accEvict, accFrames );
+			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accFaces = accSplit = accFrames = 0;
+			accStartMs = nowMs;
+		}
+	}
+
 	// shader passes run with stencil satisfied everywhere
 	if ( qglStencilFunc != NULL ) {
 		qglStencilFunc( GL_ALWAYS, 128, 255 );
@@ -3562,7 +5220,7 @@ static void RB_RHI_BlendLightChain( rhi::RHI *r, const viewDef_t *viewDef, const
                                     idImage *projectionImage, idImage *falloffImage ) {
 	for ( ; surf; surf = surf->nextOnLight ) {
 		const srfTriangles_t *tri = surf->geo;
-		if ( !tri->ambientCache ) {
+		if ( !tri->ambientCache && !tri->gpuSkinVB ) {
 			continue;
 		}
 
@@ -3592,6 +5250,10 @@ static void RB_RHI_BlendLightChain( rhi::RHI *r, const viewDef_t *viewDef, const
 		rhi::BufferHandle vb, ib;
 		int vertOfs, idxOfs;
 		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
+		// Roadmap B: a deformed surface draws its expanded buffer here too -- blend lights don't
+		// fixed-function tessellate, but must modulate the same deformed geometry / sealed depth.
+		bool useDeform = false;
+		RB_RHI_TessOrDeform( surf, tri, useDeform );
 
 		RB_RHI_BindUnit( 0, projectionImage );
 		RB_RHI_BindUnit( 1, falloffImage );
@@ -3605,11 +5267,11 @@ static void RB_RHI_BlendLightChain( rhi::RHI *r, const viewDef_t *viewDef, const
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
-		da.vertexBuffer = vb;
-		da.vertexOffset = vertOfs;
-		da.indexBuffer = ib;
-		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
+		da.vertexOffset = useDeform ? 0 : vertOfs;
+		da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
+		da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
+		da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
@@ -3679,10 +5341,11 @@ fade (S = constant per viewer, T = per-surface top plane).
 */
 static void RB_RHI_FogChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf,
                              rhi::ShaderHandle prog, int stateBits, int cull, const float color[4],
-                             const idPlane &fogPlane0, const idPlane &fogPlane2, float enterS ) {
+                             const idPlane &fogPlane0, const idPlane &fogPlane2, float enterS,
+                             bool allowTess ) {
 	for ( ; surf; surf = surf->nextOnLight ) {
 		const srfTriangles_t *tri = surf->geo;
-		if ( !tri->ambientCache ) {
+		if ( !tri->ambientCache && !tri->gpuSkinVB ) {
 			continue;
 		}
 
@@ -3708,6 +5371,20 @@ static void RB_RHI_FogChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSu
 		// unit 1 S: enter fade, constant per viewer
 		parms.texGen1S[3] = enterS;
 
+		// DUDE tessellation: a character/monster surface was PN-tessellated (and
+		// normal-displaced) in the depth prepass, so its z-buffer depth is the
+		// tessellated depth. This fog interaction pass runs at DEPTHFUNC_EQUAL, so
+		// it MUST tessellate the same way (fog.tesc/.tese mirror zfill) or every fog
+		// fragment fails the equal test and the model renders un-fogged — a dark
+		// silhouette in the fog. Never on the frustum-volume fill (allowTess false).
+		idImage *bumpImg = NULL;
+		bool useDeform = false;
+		const bool tess = allowTess && RB_RHI_TessOrDeform( surf, tri, useDeform );
+		if ( tess ) {
+			RB_RHI_SetTessParms( parms );
+			bumpImg = RB_RHI_TessBumpForZfill( surf, parms );	// sets bumpMatrix; fog.tese displaces
+		}
+
 		RB_RHI_SetSurfScissor( r, viewDef, surf );
 
 		rhi::BufferHandle ub;
@@ -3719,25 +5396,29 @@ static void RB_RHI_FogChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSu
 
 		RB_RHI_BindUnit( 0, globalImages->fogImage );
 		RB_RHI_BindUnit( 1, globalImages->fogEnterImage );
+		if ( tess ) {
+			RB_RHI_BindUnit( 2, bumpImg );	// fog.tese displacement source (unit 2; 0/1 are fog textures)
+		}
 
 		rhi::PipelineDesc pd;
 		pd.stateBits = stateBits;
 		pd.shader = prog;
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = RB_RHI_CullFor( viewDef, cull );
+		pd.tessellate = tess;
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
-		da.vertexBuffer = vb;
-		da.vertexOffset = vertOfs;
-		da.indexBuffer = ib;
-		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
-		da.indexCount = tri->numIndexes;
+		da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
+		da.vertexOffset = useDeform ? 0 : vertOfs;
+		da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
+		da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
+		da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
 		da.uniformBuffer = ub;
 		da.uniformOffset = uniOfs;
 		da.uniformSize = sizeof( parms );
-		RB_RHI_VkTextures( da );		// VK: units 0/1 recorded by the binds above
+		RB_RHI_VkTextures( da );		// VK: units 0/1 (+2 bump when tessellating) recorded by the binds above
 		r->Draw( da );
 
 		backEnd.pc.c_drawElements++;
@@ -3800,8 +5481,10 @@ static void RB_RHI_FogLight( rhi::RHI *r, viewDef_t *viewDef, viewLight_t *vLigh
 	rhi::ShaderHandle prog = r->LoadShader( "fog" );
 
 	int stateEqual = GLS_DEPTHMASK | GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA | GLS_DEPTHFUNC_EQUAL;
-	RB_RHI_FogChain( r, viewDef, vLight->globalInteractions, prog, stateEqual, CT_FRONT_SIDED, color, fogPlane0, fogPlane2, enterS );
-	RB_RHI_FogChain( r, viewDef, vLight->localInteractions, prog, stateEqual, CT_FRONT_SIDED, color, fogPlane0, fogPlane2, enterS );
+	// interaction chains run at DEPTHFUNC_EQUAL over real geometry -> allow tessellation
+	// so PN-tessellated models fog against their own (tessellated) depth.
+	RB_RHI_FogChain( r, viewDef, vLight->globalInteractions, prog, stateEqual, CT_FRONT_SIDED, color, fogPlane0, fogPlane2, enterS, true );
+	RB_RHI_FogChain( r, viewDef, vLight->localInteractions, prog, stateEqual, CT_FRONT_SIDED, color, fogPlane0, fogPlane2, enterS, true );
 
 	// the light frustum bounding planes aren't in the depth buffer, so use
 	// DEPTHFUNC_LESS instead of EQUAL and draw the volume's far (back) side
@@ -3811,7 +5494,8 @@ static void RB_RHI_FogLight( rhi::RHI *r, viewDef_t *viewDef, viewLight_t *vLigh
 	ds.geo = frustumTris;
 	ds.scissorRect = viewDef->scissor;
 	int stateLess = GLS_DEPTHMASK | GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA | GLS_DEPTHFUNC_LESS;
-	RB_RHI_FogChain( r, viewDef, &ds, prog, stateLess, CT_BACK_SIDED, color, fogPlane0, fogPlane2, enterS );
+	// the frustum-volume fill is a synthetic worldspace hull, never a tessellated model
+	RB_RHI_FogChain( r, viewDef, &ds, prog, stateLess, CT_BACK_SIDED, color, fogPlane0, fogPlane2, enterS, false );
 }
 
 /*

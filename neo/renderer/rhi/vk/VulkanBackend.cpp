@@ -34,6 +34,11 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 
 #include <vulkan/vulkan.h>
 
+#ifdef DUDE_HAVE_SHADERC
+// runtime GLSL->SPIR-V for custom (mod) ARB material stages (CreateShaderFromGlsl)
+#include <shaderc/shaderc.h>
+#endif
+
 // VMA implementation lives in this TU (header-only, vendored at libs/vma/).
 // We link the real loader and compile with prototypes, so VMA can call the
 // API statically. The pragmas keep its (vendored) warnings out of our build.
@@ -67,11 +72,14 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
   #include "../../../libs/imgui/backends/imgui_impl_vulkan.h"
 #endif
 
-// dev-time validation layer (VK_LAYER_KHRONOS_validation); default on while
-// the backend is being brought up — every milestone's exit bar includes
-// "validation clean". Not archived: a missing layer must never stick.
-static idCVar r_vkValidation( "r_vkValidation", "1", CVAR_RENDERER | CVAR_BOOL,
-	"Vulkan: enable the Khronos validation layer if installed (dev)" );
+// dev-time validation layer (VK_LAYER_KHRONOS_validation). Default OFF: it deep-
+// checks every API call and its per-descriptor-set bookkeeping scales with draw
+// count, so it costs a large, draw-count-dependent chunk of frame time — a dev
+// tool, not something to ship on. Enable with +set r_vkValidation 1 when chasing
+// correctness (every milestone's exit bar is still "validation clean" with it on).
+// Not archived: a missing layer must never stick.
+static idCVar r_vkValidation( "r_vkValidation", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan: enable the Khronos validation layer if installed (dev; costs FPS)" );
 // explicit adapter pick; -1 = auto (first discrete GPU, else first usable)
 static idCVar r_vkDevice( "r_vkDevice", "-1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
 	"Vulkan: physical device index to use (-1 = auto-select)" );
@@ -79,6 +87,15 @@ static idCVar r_vkDevice( "r_vkDevice", "-1", CVAR_RENDERER | CVAR_ARCHIVE | CVA
 // image to vkdump.tga in fs_savepath, then self-reset. Blocks one frame.
 static idCVar r_vkDumpNextFrame( "r_vkDumpNextFrame", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan: write the next frame's scene image to vkdump.tga (dev)" );
+
+static idCVar r_vkGpuTime( "r_vkGpuTime", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: print GPU frame time (ms), averaged once per second" );
+
+static idCVar r_vkComputeTest( "r_vkComputeTest", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: run the compute-lane self-test (dispatch a kernel doubling a storage buffer, read back, verify) and print PASS/FAIL. Set to 1 to trigger (docs/gpu-offload-plan.md Phase 1)" );
+
+static idCVar r_vkIndirectTest( "r_vkIndirectTest", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: route every indexed draw through the DrawIndexedIndirect primitive (a per-draw 1-command indirect ring) instead of vkCmdDrawIndexed. A pixel-identical A/B validating the Phase-3 indirect-draw seed (docs/gpu-offload-plan.md)" );
 
 namespace rhi {
 
@@ -106,7 +123,7 @@ public:
 
 	// ---- passes ----
 	virtual void	BeginPass( const ClearArgs *clear );
-	virtual void	BeginTargetPass( RenderTargetHandle rt, const ClearArgs *clear ) { if ( frameOpen ) fakePassDepth++; }
+	virtual void	BeginTargetPass( RenderTargetHandle rt, const ClearArgs *clear );
 	virtual void	EndPass();
 	virtual void	SetViewport( int x, int y, int w, int h );
 	virtual void	SetScissor( int x, int y, int w, int h );
@@ -115,9 +132,13 @@ public:
 	virtual void	ClearStencilBuffer( int value );
 
 	// ---- resources ----
-	virtual BufferHandle	CreateBuffer( BufferUsage, int, const void * ) { return 0; }	// static VBOs: unused (CPU vertexCache); M3+
-	virtual void			UpdateBuffer( BufferHandle, int, int, const void * ) {}
-	virtual void			DestroyBuffer( BufferHandle ) {}
+	// persistent static vertex/index buffers: host-visible + mapped, so the
+	// vertexCache uploads level/model geometry once instead of re-streaming every
+	// surface through the ring each frame (the old CPU-cache "SLOW" path).
+	virtual BufferHandle	CreateBuffer( BufferUsage usage, int size, const void *data );
+	virtual void			UpdateBuffer( BufferHandle b, int offset, int size, const void *data );
+	virtual void			DestroyBuffer( BufferHandle b );
+	virtual bool			ReadBuffer( BufferHandle b, void *dst, int size );
 	virtual ImageHandle		CreateImage( ImageFormat, int, int, const void * ) { return 0; }	// render-target era API; M7
 	virtual void			DestroyImage( ImageHandle h );
 	virtual ImageHandle		CreateTexture2D( int w, int h, const void *pixels,
@@ -125,16 +146,26 @@ public:
 	virtual ImageHandle		CreateTextureCube( int size, const void * const pics[6],
 	                                           int textureFilter, bool allowMips );
 	virtual ShaderHandle	LoadShader( const char *name );
+	virtual ShaderHandle	CreateShaderFromGlsl( const char *name, const char *vertSrc, const char *fragSrc );
+	virtual ShaderHandle	CreateComputeShader( const char *name, const char *glslSrc );
 
-	virtual RenderTargetHandle	CreateRenderTarget( ImageFormat, int, int ) { return 0; }
-	virtual RenderTargetHandle	CreateRenderTargetCube( ImageFormat, int ) { return 0; }
-	virtual RenderTargetHandle	CreateRenderTargetColorDepth( ImageFormat, int, int, int ) { return 0; }
-	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat, int, int ) { return 0; }
-	virtual void				DestroyRenderTarget( RenderTargetHandle ) {}
-	virtual void				SetFrameTarget( RenderTargetHandle ) {}
-	virtual void				BeginCubeFacePass( RenderTargetHandle, int, const ClearArgs * ) { if ( frameOpen ) fakePassDepth++; }
-	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle ) { return 0; }
-	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle ) { return 0; }
+	// M7 render-target family. Live: depth targets (2D + cube shadow maps),
+	// color-only + color+depth-stencil targets (the HDR RGBA16F scene buffer and
+	// its FXAA ping). Still stubbed: color+depth for the SSAO normal G-buffer /
+	// SSR material buffer (return 0 → those features stay off until the SSAO slice).
+	virtual RenderTargetHandle	CreateRenderTarget( ImageFormat fmt, int w, int h );
+	virtual RenderTargetHandle	CreateRenderTargetCube( ImageFormat fmt, int size );
+	virtual RenderTargetHandle	CreateRenderTargetColorDepth( ImageFormat fmt, int w, int h, int colorCount );
+	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h );
+	virtual RenderTargetHandle	CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels );
+	virtual void				BeginTargetMipPass( RenderTargetHandle rt, int mipLevel, const ClearArgs *clear );
+	virtual ImageHandle			GetRenderTargetMipImage( RenderTargetHandle rt, int mipLevel );
+	virtual void				DestroyRenderTarget( RenderTargetHandle rt );
+	virtual void				SetFrameTarget( RenderTargetHandle rt );
+	virtual void				BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear );
+	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt );
+	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt );
+	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle rt );
 
 	virtual int		AllocUniforms( const void *data, int size, BufferHandle *buffer );
 	virtual int		AllocVertices( const void *data, int size, BufferHandle *buffer );
@@ -144,7 +175,11 @@ public:
 	// ---- drawing ----
 	virtual void	BindPipeline( const PipelineDesc &desc );
 	virtual void	Draw( const DrawArgs &args );
-	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth );
+	virtual void	DrawIndexedIndirect( const DrawArgs &args, BufferHandle argsBuffer, int argsOffset,
+	                                     int drawCount, int stride, BufferHandle countBuffer, int countOffset );
+	virtual void	Dispatch( const ComputeArgs &args );
+	virtual void	DispatchSync( const ComputeArgs &args );
+	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth, bool hdrFloat );
 	virtual void	CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 	                                        int srcX, int srcY, int w, int h, bool depth );
 	virtual void	RetireImage( ImageHandle img );
@@ -154,6 +189,11 @@ public:
 	                               const float mvp[16], bool textured );
 
 private:
+	// compute lane (docs/gpu-offload-plan.md Phase 1)
+	VkPipeline		GetComputePipeline( ShaderHandle shader );	// build/cache a VkPipeline for a compute shader
+	VkDescriptorSet	RecordDispatch( VkCommandBuffer cb, const ComputeArgs &args );	// bind+dispatch; returns the set to reclaim
+	void			ComputeSelfTest();							// r_vkComputeTest: dispatch a trivial kernel, read back, verify
+
 	bool			CreateInstance();
 	bool			PickPhysicalDevice();
 	bool			CreateDeviceAndVma();
@@ -223,13 +263,35 @@ private:
 	int							fakePassDepth = 0;			// balanced no-op target passes
 	int							presentedFrames = 0;		// session diagnostic (shutdown summary)
 
+	// GPU frame timing (r_vkGpuTime) — a VK_QUERY_TYPE_TIMESTAMP pool holding two
+	// stamps (begin+end) per frame slot. Each slot's pair is read back at that
+	// slot's next BeginFrame, after its fence proves the GPU is done, so the read
+	// never stalls. Mirrors the GL3 backend's r_gl3GpuTime.
+	VkQueryPool					gpuTimerPool = VK_NULL_HANDLE;
+	bool						gpuTimerSupported = false;	// device+queue can timestamp
+	bool						gpuTimerBusy[FRAMES_IN_FLIGHT] = {};	// slot holds an unread pair
+	bool						gpuTimerActive = false;		// begin stamp written this frame
+	double						gpuTimerPeriodNs = 1.0;		// ns per timestamp tick
+	uint64_t					gpuTimerMask = ~0ULL;		// valid-bit mask (queue timestampValidBits)
+	double						gpuTimeAccumMs = 0.0;		// summed since last print
+	int							gpuTimeSamples = 0;
+	unsigned int				gpuTimeLastPrint = 0;
+	void						GpuTimerReadback( int slot );
+
 	// ================= M2: rings / shaders / pipelines / images =================
 
 	// M2 helpers
 	struct RingBuf;					// defined below (member struct, not ::rhi::RingBuf)
 	bool			CreateM2Resources();
 	void			DestroyM2Resources();
+	void			CreatePipelineCache();		// seed the driver pipeline cache from disk
+	void			SavePipelineCache();		// write the driver pipeline cache back to disk
 	void			EnsureScenePass();
+	// Shared per-draw binding (viewport/scissor/bias, pipeline, descriptor sets, vertex+index
+	// buffers) for both Draw and DrawIndexedIndirect. Returns false + the caller draws nothing
+	// when the frame/pass/pipeline/buffers aren't ready. Does NOT gate on args.indexCount (the
+	// indirect path's count lives in the args buffer).
+	bool			BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut );
 	int				AllocFromRing( RingBuf &ring, const void *data, int size, int align,
 	                               int wrapReserve, BufferHandle *buffer );
 	VkSampler		GetSampler( int textureFilter, int textureRepeat, bool hasMips );
@@ -242,10 +304,15 @@ private:
 	// the dynamic-UBO descriptor's fixed range must cover whatever a shader
 	// reads past the dynamic offset
 	static const int MAX_UNIFORM_SLICE = 2048;
-	static const int UBO_RING_SIZE  = 16 << 20;		// per frame slot (GL3 sizes)
-	static const int VERT_RING_SIZE = 4 << 20;
-	static const int IDX_RING_SIZE  = 2 << 20;
+	static const int UBO_RING_SIZE  = 16 << 20;		// per frame slot
+	// geometry rings: sized so complex D3 scenes (M7 streams a lot of shadow-volume
+	// + multi-pass geometry) fit without the mid-frame doubling in GrowRing. The
+	// GL3 4MB/2MB defaults grew to 16MB on busy views; start there so the grow is a
+	// rare safety net, not a per-scene warm-up cost.
+	static const int VERT_RING_SIZE = 16 << 20;
+	static const int IDX_RING_SIZE  = 8 << 20;
 	static const int STAGING_RING_SIZE = 2 << 20;	// mid-frame texture updates (cinematics)
+	static const int INDIRECT_RING_SIZE = 1 << 20;	// r_vkIndirectTest 1-command-per-draw ring (~52k draws; grows)
 	static const int MAX_FRAME_SETS = 4096;			// per-draw texture sets per frame
 
 	struct RingBuf {
@@ -264,6 +331,10 @@ private:
 	// frames); grows like the geometry rings. A 512x512 RGB video frame is
 	// 1 MB, so 2 MB covers the common case without growth.
 	RingBuf						stagingRing[FRAMES_IN_FLIGHT];
+	// r_vkIndirectTest: per-frame ring of VkDrawIndexedIndirectCommand written one-per-draw
+	// (host-visible+INDIRECT). A per-frame-in-flight partition (like the geometry rings) so a
+	// draw's command survives until its frame's fence, unread by the next frame's writes.
+	RingBuf						indirectRing[FRAMES_IN_FLIGHT];
 	int							streamGen = 0;
 	int							uboAlign = 256;
 	bool						ringOverflowWarned = false;
@@ -281,6 +352,31 @@ private:
 	void						DrainRetiredRings( int slot );
 
 	std::vector<VkBuffer>		bufferTable;			// handle = index + 1
+	// parallel to bufferTable, kept in lockstep at every push site. A non-NULL
+	// alloc marks a *persistent* buffer (CreateBuffer) that this backend owns and
+	// must vmaDestroy; ring slots leave these NULL (the RingBuf owns their alloc)
+	// so teardown never double-frees. bufferMapped is the persistent buffer's
+	// host pointer (host-visible storage) for UpdateBuffer.
+	std::vector<VmaAllocation>	bufferAllocs;
+	std::vector<byte *>			bufferMapped;
+	std::vector<uint32_t>		freeBufferSlots;		// DestroyBuffer'd slots, reused by CreateBuffer
+	// A DestroyBuffer'd persistent buffer can still be referenced by up to
+	// FRAMES_IN_FLIGHT in-flight command buffers (a dynamic shadow/interaction
+	// rebuilt this frame, or the whole level's geometry freed at map unload).
+	// Destroying it immediately makes the GPU read freed memory → blinking shadows
+	// / unload-time UAF. So retire it with a TTL and vmaDestroy only after that many
+	// BeginFrame fence waits: DestroyBuffer runs at arbitrary points in the frame
+	// cycle (often *between* frames, after frameIndex advanced), so a per-slot list
+	// can drain too early — a TTL counted down once per BeginFrame is correct
+	// regardless of when the free happens. TTL = FRAMES_IN_FLIGHT+1 guarantees every
+	// slot's fence has been waited at least once (all referencing frames done).
+	struct RetiredBuffer {
+		VkBuffer		buffer;
+		VmaAllocation	alloc;
+		int				ttl;
+	};
+	std::vector<RetiredBuffer>	retiredBuffers;
+	void						DrainRetiredBuffers( bool force );
 
 	struct ImageRec {
 		VkImage			image = VK_NULL_HANDLE;
@@ -293,6 +389,10 @@ private:
 		// UNDEFINED means never written (first transition discards).
 		VkImageLayout	layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		bool			isDepth = false;				// capture: scene depth format
+		// a color render target (CreateColorTarget) is stored top-down like the
+		// scene, unlike the bottom-up M5 captures — so a fullscreen pass sampling it
+		// with the shared GL quad needs the negative-height flip cancelled (Draw).
+		bool			isColorTarget = false;
 		int				width = 0, height = 0;
 	};
 	std::vector<ImageRec>		imageTable;				// handle = index + 1
@@ -312,6 +412,15 @@ private:
 		idStr			name;
 		VkShaderModule	vert = VK_NULL_HANDLE;
 		VkShaderModule	frag = VK_NULL_HANDLE;
+		// optional tessellation stages (DUDE tessellation, docs/tessellation.md).
+		// Loaded when shaders/spv/<name>.tesc.spv + .tese.spv exist; a pipeline
+		// built with PipelineDesc::tessellate appends them and switches to a
+		// patch-list topology. NULL for every shader without a tess variant.
+		VkShaderModule	tesc = VK_NULL_HANDLE;
+		VkShaderModule	tese = VK_NULL_HANDLE;
+		// compute stage (docs/gpu-offload-plan.md Phase 1). Set by CreateComputeShader;
+		// vert/frag stay NULL for a compute rec, and GetComputePipeline reads this.
+		VkShaderModule	comp = VK_NULL_HANDLE;
 		bool			failed = false;
 	};
 	std::vector<ShaderRec>		shaderTable;			// handle = index + 1
@@ -323,9 +432,30 @@ private:
 	VkDescriptorSetLayout		setLayoutUbo = VK_NULL_HANDLE;
 	VkDescriptorSetLayout		setLayoutTex = VK_NULL_HANDLE;
 	VkPipelineLayout			pipeLayout = VK_NULL_HANDLE;
+	// compute lane (docs/gpu-offload-plan.md Phase 1): one set of 8 storage-buffer
+	// bindings + a 128-byte push-constant range, its own pipeline layout, a pool for
+	// per-dispatch sets, and a shader-handle-keyed compute pipeline cache. Kept fully
+	// separate from the graphics layouts/pipelines above.
+	VkDescriptorSetLayout		setLayoutCompute = VK_NULL_HANDLE;
+	VkPipelineLayout			computePipeLayout = VK_NULL_HANDLE;
+	VkDescriptorPool			computePool = VK_NULL_HANDLE;
+	std::unordered_map<ShaderHandle, VkPipeline>	computePipelineCache;
+	std::vector<VkDescriptorSet>	retiredComputeSets[FRAMES_IN_FLIGHT];	// freed behind the frame fence
 	VkDescriptorPool			persistentPool = VK_NULL_HANDLE;	// holds the per-slot set-0s
 	VkDescriptorSet				uboSet[FRAMES_IN_FLIGHT] = {};
 	VkDescriptorPool			framePool[FRAMES_IN_FLIGHT] = {};	// per-draw set-1s, reset per frame
+	VkDescriptorPool			texturePool = VK_NULL_HANDLE;	// persistent pool for repeated texture combos
+	// Cross-frame texture-set cache, keyed on the referenced ImageHandles. Those
+	// handles are recycled (shadow-map eviction frees + reuses imageTable slots,
+	// RetireImage the same for captures/cinematics), so a set cached in an earlier
+	// frame can end up referencing a VkImageView that was destroyed and its handle
+	// reassigned. InvalidateTextureSets() drops the whole cache whenever any handle
+	// is retired; the sets themselves are deferred-freed a frame slot later (they
+	// may still be bound in in-flight command buffers, same lifetime rule as
+	// retiredImages/retiredTargets), so no live command buffer ever loses its set.
+	std::unordered_map<uint64_t, VkDescriptorSet> textureSetCache;
+	std::vector<VkDescriptorSet> retiredTexSets[FRAMES_IN_FLIGHT];
+	void						InvalidateTextureSets();
 	bool						framePoolWarned = false;
 	ImageHandle					dummyImage = 0;			// 1x1 white for unused sampler slots
 	ImageHandle					dummyCube = 0;			// 1x1 white cube (samplerCube slots)
@@ -344,13 +474,172 @@ private:
 	bool						CreateShadowDummy( ShadowDummy &d, bool cube );
 	void						DestroyShadowDummy( ShadowDummy &d );
 
+	// ================= M7: offscreen render targets =================
+	// Depth-only targets for shadow maps: a 2D depth image (projected/spot
+	// lights) or a 6-face cube depth image (point lights). Rendered into with
+	// BeginTargetPass / BeginCubeFacePass and sampled through the ordinary
+	// DrawArgs path — GetRenderTargetImage registers a sampleable ImageRec with
+	// a depth-compare sampler (unit 7 = 2D map, unit 8 = cube map), so the
+	// descriptor writer needs no shadow-specific code. The color / color+depth
+	// (+stencil) variants that SSAO, SSR and the HDR frame target need are not
+	// built yet (their Create* methods still return 0).
+	struct RenderTarget {
+		bool			live = false;
+		bool			cube = false;
+		int				w = 0, h = 0;
+		VkFormat		depthFormat = VK_FORMAT_UNDEFINED;
+		VkImage			depthImage = VK_NULL_HANDLE;
+		VmaAllocation	depthAlloc = NULL;
+		VkImageView		sampleView = VK_NULL_HANDLE;	// 2D depth / cube view (sampled)
+		VkImageView		faceView[6] = {};				// per-face single-layer views (rendered into)
+		VkRenderPass	pass = VK_NULL_HANDLE;			// depth clear → shader-read
+		VkFramebuffer	fb[6] = {};						// [0] = 2D; [0..5] = cube faces
+		ImageHandle		sampleImage = 0;				// imageTable handle GetRenderTargetImage returns
+
+		// ---- M7 color targets (HDR scene buffer, later SSAO/SSR) ----
+		// A color target carries 1-2 sampleable color attachments (colorImage[]),
+		// each registered as a SHADER_READ_ONLY ImageRec (colorSampleImage[]), plus
+		// an optional depth(-stencil) attachment. Two usage shapes share the fields:
+		//   * frame target (SetFrameTarget): the whole scene renders into it across
+		//     several BeginPass/EndPass passes, so it needs clear/load/clearDS pass
+		//     variants + everWritten tracking, exactly like the swapchain sceneColor.
+		//   * nested target (BeginTargetPass): one begin→draw→EndPass fullscreen pass,
+		//     served by colorClearPass alone.
+		bool			colorTarget = false;
+		int				colorCount = 0;					// 1 or 2 color attachments
+		VkFormat		colorFormat = VK_FORMAT_UNDEFINED;
+		VkImage			colorImage[2] = {};
+		VmaAllocation	colorAlloc[2] = {};
+		VkImageView		colorView[2] = {};				// level-0 attachment view (framebuffer)
+		// SSAO Phase 1 mip chain (colorMipLevels > 1, colorImage[0] only). colorView[0]
+		// stays level-0-only for the linearize framebuffer; colorSampleView[0] spans every
+		// level so the sampleable ImageRec can textureLod into coarser mips. The chain is
+		// built by a per-level max-downsample: colorLevelView[L]/colorLevelFb[L] render
+		// into level L, colorLevelInput[L] is a single-level ImageRec feeding level L as
+		// the next level's source. 1 = plain single-mip (none of the mip fields used).
+		int				colorMipLevels = 1;
+		static const int MAX_MIP = 8;
+		VkImageView		colorSampleView[2] = {};		// all-levels sample view (= colorView[] when 1 mip)
+		VkImageView		colorLevelView[MAX_MIP] = {};	// per-level single-level attachment/sample views (L>=1)
+		VkFramebuffer	colorLevelFb[MAX_MIP] = {};		// per-level downsample framebuffers (L>=1)
+		ImageHandle		colorLevelInput[MAX_MIP] = {};	// per-level single-level sampleable handles (source binds)
+		ImageHandle		colorSampleImage[2] = { 0, 0 };	// handles GetRenderTargetImage / 2 return
+		bool			hasDepth = false;				// depth or depth-stencil attachment present
+		VkImage			dsImage = VK_NULL_HANDLE;
+		VmaAllocation	dsAlloc = NULL;
+		VkImageView		dsView = VK_NULL_HANDLE;
+		VkRenderPass	colorClearPass = VK_NULL_HANDLE;	// clear color(+ds) → shader-read
+		VkRenderPass	colorLoadPass = VK_NULL_HANDLE;		// load color(+ds) → shader-read (frame target only)
+		VkRenderPass	colorClearDSPass = VK_NULL_HANDLE;	// keep color, clear depth-stencil (world-view begin)
+		VkFramebuffer	colorFb = VK_NULL_HANDLE;
+		bool			everWritten = false;			// false until this target's first clear pass this session
+		uint8_t			passClass = 0;					// pipeline-key discriminator (format signature)
+	};
+	std::vector<RenderTarget>	targetTable;			// handle = index + 1
+	VkSampler					shadowCompareSampler = VK_NULL_HANDLE;	// shared LINEAR + LEQUAL compare
+	// one shared depth-only render pass (D32_SFLOAT, clear→shader-read); every
+	// depth target's framebuffer and every shadow-map pipeline is built against
+	// it (2D + cube faces share the structure, so all are render-pass compatible)
+	VkRenderPass				shadowPass = VK_NULL_HANDLE;
+	bool						EnsureShadowPass();
+	// Shadow-cache eviction/reallocation destroys targets mid-frame (the cube/2D
+	// caches, RhiWorld.cpp), so target destruction is deferred to this slot's next
+	// fence wait — same lifetime rule as retiredImages/retiredRings.
+	std::vector<RenderTarget>	retiredTargets[FRAMES_IN_FLIGHT];
+	RenderTarget *				LookupTarget( RenderTargetHandle h ) {
+		return ( h >= 1 && h <= (RenderTargetHandle)targetTable.size() && targetTable[h - 1].live )
+			? &targetTable[h - 1] : NULL;
+	}
+	int				AllocTargetSlot();			// index of a free targetTable slot (grows the table if needed)
+	bool			CreateDepthTarget( RenderTarget &t, int w, int h, bool cube );
+	// color target: colorCount 1-2 sampleable color attachments (colorFmt), plus a
+	// depth-stencil attachment when wantDepthStencil. frameCapable builds the extra
+	// load/clearDS pass variants a SetFrameTarget scene buffer needs (HDR).
+	bool			CreateColorTarget( RenderTarget &t, int w, int h, VkFormat colorFmt,
+	                                   int colorCount, bool wantDepthStencil, bool frameCapable,
+	                                   int mipLevels = 1 );
+	bool			BuildColorPasses( RenderTarget &t, bool frameCapable );
+	void			FreeTargetObjects( RenderTarget &t );	// frees VK objects only (not the imageTable slot)
+	void			ReleaseTargetSampleSlots( RenderTarget &t );	// frees the imageTable slots a target lent out
+	// shared tail of BeginTargetPass / BeginCubeFacePass: retarget viewport + pipeline pass
+	void			EnterTargetPass( int w, int h, bool flipY, VkRenderPass pipePass, uint8_t passClass, int colorAtt );
+	void			DrainRetiredTargets( int slot );
+	void			DestroyAllTargets();
+	VkSampler		ShadowCompareSampler();
+	// classify a color target's format signature into the pipeline-key pass class,
+	// so scene pipelines built for the RGBA8 swapchain path and the RGBA16F HDR
+	// path stay distinct cache entries (render-pass-incompatible attachment formats)
+	uint8_t			PassClassFor( VkFormat colorFmt, bool hasDepth, int colorCount ) const;
+
+	// SetFrameTarget: 0 = the swapchain sceneColor path (default); otherwise the
+	// scene renders into this color target (the HDR RGBA16F scene buffer). BeginPass
+	// and the shadow/AA nested passes' EndPass resume route through it.
+	RenderTargetHandle			frameTarget = 0;
+	// render pass + key-class the next pipeline is built for. Updated whenever the
+	// active draw destination changes (scene target, frame target, nested target).
+	VkRenderPass				curPipelinePass = VK_NULL_HANDLE;	// canonical pass to build against
+	uint8_t						curPassClass = 0;
+	int							curColorAtt = 1;	// color attachments of the active pass (0 = depth-only shadow, 2 = MRT)
+	bool						lastEffFlipY = true;	// effective Y-flip last applied to the viewport (post passes cancel it)
+	// the color/depth images the current frame target resolves to, for the M5
+	// _currentRender / _currentDepth captures (sceneColor by default, the HDR
+	// buffer while a frame target is set). Layout differs: sceneColor sits in
+	// TRANSFER_SRC between passes, a sampled color target in SHADER_READ_ONLY.
+	VkImage			FrameColorImage() const;
+	VkImageLayout	FrameColorBetweenLayout() const;
+	VkImage			FrameDepthImage() const;
+	VkImageView		FrameDepthView() const;		// view backing FrameDepthImage (for the merged normal fb)
+
+	// SSAO normal-pass merge (docs/ssao-normal-merge.md): a dedicated normal color image
+	// rendered alongside the *scene* depth (FrameDepthImage) in the depth prepass. The
+	// framebuffer is rebuilt when the scene depth image changes (HDR toggle / resize).
+	// B1 uses depth storeOp DONT_CARE — it shares the depth attachment but the scene pass
+	// still clears + reseals it via zfill, so nothing here changes the scene depth.
+	VkImage			mergeNormalImage = VK_NULL_HANDLE;
+	VmaAllocation	mergeNormalAlloc = NULL;
+	VkImageView		mergeNormalView = VK_NULL_HANDLE;
+	ImageHandle		mergeNormalSampleImage = 0;
+	int				mergeNormalW = 0, mergeNormalH = 0;
+	VkRenderPass	mergeNormalPass = VK_NULL_HANDLE;	// {normal clear->shader-read, depth clear->dontcare}
+	VkFramebuffer	mergeNormalFb = VK_NULL_HANDLE;
+	VkImage			mergeNormalFbDepth = VK_NULL_HANDLE;	// depth image the fb was built against
+	RenderTargetHandle mergeNormalTarget = 0;			// wraps mergeNormalImage for GetRenderTargetImage
+	// optional 2nd color attachment (SSR roughness/metalness MRT) so the merge serves SSR too
+	VkImage			mergeMatImage = VK_NULL_HANDLE;
+	VmaAllocation	mergeMatAlloc = NULL;
+	VkImageView		mergeMatView = VK_NULL_HANDLE;
+	ImageHandle		mergeMatSampleImage = 0;			// GetRenderTargetImage2 of the merged handle
+	bool			mergeNormalMrt = false;				// the merged image/pass/fb currently carry the MRT
+	bool			EnsureMergeNormal( int w, int h, bool wantMrt );
+	void			DestroyMergeNormal();
+	ImageHandle		RegisterMergeSampleImage( VkImage img, VkImageView view, int w, int h );
+
 	// device features actually enabled (queried before device creation)
 	bool						haveAnisotropy = false;
 	bool						haveFillModeNonSolid = false;
+	// tessellationShader (optional; universal on desktop). Gates the whole DUDE
+	// tessellation feature: without it no tess pipeline is ever built and the
+	// tess shader modules are skipped. maxTessGenLevel bounds the slider.
+	bool						haveTessellation = false;
+	uint32_t					maxTessGenLevel = 64;
+	// GPU-driven indirect draw (docs/gpu-offload-plan.md Phase 3). The 1.4 floor guarantees
+	// the vkCmdDrawIndexedIndirect[Count] *commands* exist, but the FEATURES are still explicit
+	// opt-in at device creation: drawIndirectCount gates the count-buffer form, multiDrawIndirect
+	// gates any drawCount>1. Universal on desktop; enabled when present, gated when not.
+	bool						haveDrawIndirectCount = false;
+	bool						haveMultiDrawIndirect = false;
+	bool						indirectFeatureWarned = false;
 
 	std::unordered_map<unsigned long long, VkPipeline>	pipelineCache;
+	// disk-persisted DRIVER pipeline cache (distinct from the map above, which is our
+	// CPU permutation->VkPipeline table): seeded from a blob at Init, fed to every
+	// vkCreateGraphicsPipelines, written back at Shutdown so first-use compile cost is
+	// paid once across runs, not every session.
+	VkPipelineCache				diskPipelineCache = VK_NULL_HANDLE;
 	PipelineDesc				currentDesc;
 	VkPipeline					boundPipeline = VK_NULL_HANDLE;
+	uint64_t					boundTexKey = 0;
+	VkDescriptorSet				boundTexSet = VK_NULL_HANDLE;
 	bool						dynStateDirty = true;	// (re)emit viewport+scissor before next draw
 	float						depthRangeMin = 0.0f;	// SetDepthRange window (weapon/model depth hacks)
 	float						depthRangeMax = 1.0f;
@@ -358,6 +647,14 @@ private:
 	float						polyOfsUnits = 0.0f;
 	int							vpRect[4] = { 0, 0, 0, 0 };	// GL-convention viewport (origin bottom-left)
 	int							scRect[4] = { 0, 0, 0, 0 };
+	// M7: while rendering into an offscreen target (shadow map) the viewport is
+	// NOT Y-flipped (unlike the scene pass) and uses the target's height, so the
+	// projective shadow write/read stays self-consistent — matching GL exactly.
+	bool						insideTargetPass = false;
+	int							curRenderH = 0;			// viewport/scissor height of the active pass
+	bool						curFlipY = true;		// scene = flipped; offscreen target = not
+	int							savedVpRect[4] = { 0, 0, 0, 0 };	// restored by the target's EndPass
+	int							savedScRect[4] = { 0, 0, 0, 0 };
 
 	// synchronous upload plumbing (image staging at load time)
 	VkCommandPool				uploadPool = VK_NULL_HANDLE;
@@ -445,11 +742,14 @@ bool VulkanBackend::CreateInstance() {
 		return false;
 	}
 
-	// instance-level Vulkan version — the loader must give us 1.1
+	// instance-level Vulkan version — the loader must give us 1.4. If it can't,
+	// we bail and R_InitOpenGL falls back to a GL backend (no crash); the whole
+	// backend targets a single 1.4 baseline rather than juggling older versions.
 	uint32_t instVersion = VK_API_VERSION_1_0;
 	vkEnumerateInstanceVersion( &instVersion );
-	if ( instVersion < VK_API_VERSION_1_1 ) {
-		common->Warning( "VK: instance only supports Vulkan 1.0 (baseline is 1.1)" );
+	if ( instVersion < VK_API_VERSION_1_4 ) {
+		common->Warning( "VK: loader only supports Vulkan %u.%u (baseline is 1.4) - update your Vulkan runtime/drivers",
+			VK_API_VERSION_MAJOR( instVersion ), VK_API_VERSION_MINOR( instVersion ) );
 		return false;
 	}
 
@@ -505,7 +805,7 @@ bool VulkanBackend::CreateInstance() {
 	app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
 	app.pApplicationName = "DUDE";
 	app.pEngineName = "DUDE";
-	app.apiVersion = VK_API_VERSION_1_1;
+	app.apiVersion = VK_API_VERSION_1_4;
 
 	VkInstanceCreateInfo ici = {};
 	ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -589,8 +889,8 @@ bool VulkanBackend::PickPhysicalDevice() {
 			VK_API_VERSION_MAJOR( props.apiVersion ), VK_API_VERSION_MINOR( props.apiVersion ),
 			VK_API_VERSION_PATCH( props.apiVersion ) );
 
-		if ( props.apiVersion < VK_API_VERSION_1_1 ) {
-			common->Printf( "VK:   skipped (needs Vulkan 1.1)\n" );
+		if ( props.apiVersion < VK_API_VERSION_1_4 ) {
+			common->Printf( "VK:   skipped (needs Vulkan 1.4)\n" );
 			continue;
 		}
 
@@ -706,6 +1006,13 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	haveFillModeNonSolid = supported.fillModeNonSolid == VK_TRUE;
 	enabled.samplerAnisotropy = haveAnisotropy ? VK_TRUE : VK_FALSE;
 	enabled.fillModeNonSolid = haveFillModeNonSolid ? VK_TRUE : VK_FALSE;
+	// DUDE tessellation (docs/tessellation.md): PN-triangle smoothing of enemy/
+	// prop meshes. Optional feature, but present on every desktop GPU we target.
+	haveTessellation = supported.tessellationShader == VK_TRUE;
+	enabled.tessellationShader = haveTessellation ? VK_TRUE : VK_FALSE;
+	if ( haveTessellation ) {
+		maxTessGenLevel = physProps.limits.maxTessellationGenerationLevel;
+	}
 	// zfill.vert always writes gl_ClipDistance[0] (subview near clip; zero
 	// plane when unused) — universal on desktop
 	if ( supported.shaderClipDistance ) {
@@ -714,8 +1021,55 @@ bool VulkanBackend::CreateDeviceAndVma() {
 		common->Warning( "VK: device lacks shaderClipDistance - the depth prepass shader may fail" );
 	}
 
+	// GPU-offload hardening (docs/gpu-offload-plan.md): with robustBufferAccess an out-of-bounds
+	// vertex/index/storage fetch returns 0 / is clamped instead of faulting the device. The compute
+	// offload paths (skinning, tessellate-once) hand the rasterizer buffers produced this frame, so a
+	// bug there must degrade to a visible glitch — never a GPU page fault that device-losts and hangs
+	// the machine. Universally supported on desktop and near-zero cost; enable whenever present.
+	if ( supported.robustBufferAccess ) {
+		enabled.robustBufferAccess = VK_TRUE;
+	}
+
+	// GPU-driven indirect draw (Phase 3): multiDrawIndirect gates a >1 drawCount in a single
+	// vkCmdDrawIndexedIndirect; the count-buffer form (drawIndirectCount) is a Vulkan 1.2 feature
+	// enabled below via the pNext chain. Both universal on desktop; enable when present.
+	haveMultiDrawIndirect = supported.multiDrawIndirect == VK_TRUE;
+	enabled.multiDrawIndirect = haveMultiDrawIndirect ? VK_TRUE : VK_FALSE;
+
+	// discard in fragment shaders compiles to OpDemoteToHelperInvocation under
+	// the vulkan1.4 SPIR-V target (modern helper-invocation semantics rather
+	// than the old OpKill); the capability needs shaderDemoteToHelperInvocation,
+	// a core + required feature since Vulkan 1.3, so guaranteed on our 1.4 floor.
+	VkPhysicalDeviceVulkan13Features supported13 = {};
+	supported13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	// Vulkan 1.2 feature struct: drawIndirectCount (the vkCmdDraw*IndirectCount form) lives here.
+	VkPhysicalDeviceVulkan12Features supported12 = {};
+	supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+	supported13.pNext = &supported12;
+	VkPhysicalDeviceFeatures2 supported2 = {};
+	supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	supported2.pNext = &supported13;
+	vkGetPhysicalDeviceFeatures2( physical, &supported2 );
+
+	VkPhysicalDeviceVulkan13Features enabled13 = {};
+	enabled13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	if ( supported13.shaderDemoteToHelperInvocation ) {
+		enabled13.shaderDemoteToHelperInvocation = VK_TRUE;
+	} else {
+		common->Warning( "VK: device lacks shaderDemoteToHelperInvocation - alpha-tested (discard) shaders may fail" );
+	}
+
+	// GPU-driven indirect draw (Phase 3): the count-buffer form needs drawIndirectCount enabled
+	// explicitly (the 1.4 command floor does not imply the feature). Chained after enabled13.
+	VkPhysicalDeviceVulkan12Features enabled12 = {};
+	enabled12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+	haveDrawIndirectCount = supported12.drawIndirectCount == VK_TRUE;
+	enabled12.drawIndirectCount = haveDrawIndirectCount ? VK_TRUE : VK_FALSE;
+	enabled13.pNext = &enabled12;
+
 	VkDeviceCreateInfo dci = {};
 	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+	dci.pNext = &enabled13;
 	dci.queueCreateInfoCount = queueCount;
 	dci.pQueueCreateInfos = queues;
 	dci.enabledExtensionCount = 1;
@@ -732,7 +1086,7 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	aci.physicalDevice = physical;
 	aci.device = device;
 	aci.instance = instance;
-	aci.vulkanApiVersion = VK_API_VERSION_1_1;
+	aci.vulkanApiVersion = VK_API_VERSION_1_4;
 	if ( !vkCheck( vmaCreateAllocator( &aci, &vma ), "vmaCreateAllocator" ) ) {
 		return false;
 	}
@@ -1241,6 +1595,7 @@ bool VulkanBackend::Init() {
 		Shutdown();
 		return false;
 	}
+	CreatePipelineCache();		// non-fatal: pipelines still build cold if this fails
 	if ( !CreateSwapchain() || !CreateSceneTargets() || !CreateFrameSlots() || !CreateM2Resources() ) {
 		Shutdown();
 		return false;
@@ -1273,6 +1628,7 @@ void VulkanBackend::Shutdown() {
 	}
 	if ( device != VK_NULL_HANDLE ) {
 		vkDeviceWaitIdle( device );
+		SavePipelineCache();		// persist this session's compiles before teardown
 	}
 
 	// M6: ImGui device objects must die before the device. Normally sys_imgui
@@ -1285,12 +1641,23 @@ void VulkanBackend::Shutdown() {
 		imguiPassFormat = VK_FORMAT_UNDEFINED;
 	}
 
+	// Free the frame command buffers (via their pools) BEFORE the buffer/image
+	// sweeps. After vkDeviceWaitIdle their GPU work is done, but they're still in
+	// the recorded state, holding references to this level's persistent static
+	// buffers; the validation layer only releases those on command-buffer *free*
+	// (not reset), so destroying the buffers first intermittently trips
+	// VUID-vkDestroyBuffer-buffer-00922 on a clean quit. DestroyM2Resources never
+	// touches the frame slots, so this reorder is safe.
+	DestroyFrameSlots();
 	if ( device != VK_NULL_HANDLE ) {
 		DestroyM2Resources();
 	}
-	DestroyFrameSlots();
 	DestroySceneTargets();
 	DestroySwapchain( true );
+	if ( diskPipelineCache != VK_NULL_HANDLE ) {
+		vkDestroyPipelineCache( device, diskPipelineCache, NULL );
+		diskPipelineCache = VK_NULL_HANDLE;
+	}
 	if ( vma )     { vmaDestroyAllocator( vma ); vma = NULL; }
 	if ( device )  { vkDestroyDevice( device, NULL ); device = VK_NULL_HANDLE; }
 	if ( messenger ) {
@@ -1319,6 +1686,38 @@ void VulkanBackend::Shutdown() {
 
 /*
 ====================
+VulkanBackend::GpuTimerReadback
+
+Reads back slot's begin/end timestamp pair (recorded the last time this slot ran,
+now guaranteed done by BeginFrame's fence wait — so no WAIT bit, no stall),
+converts the tick delta to ms, and prints a running average once per second.
+====================
+*/
+void VulkanBackend::GpuTimerReadback( int slot ) {
+	if ( !gpuTimerBusy[slot] ) {
+		return;
+	}
+	gpuTimerBusy[slot] = false;
+	uint64_t stamps[2] = { 0, 0 };
+	if ( vkGetQueryPoolResults( device, gpuTimerPool, 2 * slot, 2,
+	         sizeof( stamps ), stamps, sizeof( uint64_t ), VK_QUERY_RESULT_64_BIT ) != VK_SUCCESS ) {
+		return;		// VK_NOT_READY not expected post-fence; skip this sample
+	}
+	uint64_t delta = ( stamps[1] & gpuTimerMask ) - ( stamps[0] & gpuTimerMask );
+	gpuTimeAccumMs += ( (double)delta * gpuTimerPeriodNs ) / 1000000.0;
+	gpuTimeSamples++;
+	unsigned int now = Sys_Milliseconds();
+	if ( now - gpuTimeLastPrint >= 1000 ) {
+		common->Printf( "VK GPU: %.2f ms (%d samples)\n",
+		                gpuTimeAccumMs / gpuTimeSamples, gpuTimeSamples );
+		gpuTimeAccumMs = 0.0;
+		gpuTimeSamples = 0;
+		gpuTimeLastPrint = now;
+	}
+}
+
+/*
+====================
 VulkanBackend::BeginFrame
 ====================
 */
@@ -1328,6 +1727,15 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	}
 	FrameSlot &f = frames[frameIndex];
 	vkWaitForFences( device, 1, &f.fence, VK_TRUE, UINT64_MAX );
+
+	// compute-lane self-test (Phase 1): one-shot on the cvar toggle. Runs on the synchronous
+	// upload cb (waits idle) — a dev validation path, so gate it to the modified edge.
+	if ( r_vkComputeTest.IsModified() ) {
+		r_vkComputeTest.ClearModified();
+		if ( r_vkComputeTest.GetBool() ) {
+			ComputeSelfTest();
+		}
+	}
 
 	// vsync toggle → new present mode; window size change → new extent
 	if ( r_swapInterval.IsModified() ) {
@@ -1375,19 +1783,51 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	vkBeginCommandBuffer( f.cb, &bi );
 
+	// GPU timer (r_vkGpuTime): read back this slot's previous pair before the
+	// reset wipes it, then — while active — reset the two queries (must be outside
+	// a render pass; the cb has none open yet) and stamp the frame's start.
+	gpuTimerActive = false;
+	if ( gpuTimerSupported ) {
+		GpuTimerReadback( frameIndex );
+		if ( r_vkGpuTime.GetBool() ) {
+			vkCmdResetQueryPool( f.cb, gpuTimerPool, 2 * frameIndex, 2 );
+			vkCmdWriteTimestamp( f.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, gpuTimerPool, 2 * frameIndex );
+			gpuTimerActive = true;
+		}
+	}
+
 	// M2: this slot's GPU work is fenced off — reset its rings (the
 	// StreamGeneration contract) and its per-draw descriptor pool
 	DrainRetiredRings( frameIndex );	// buffers replaced by GrowRing last time this slot ran
+	DrainRetiredBuffers( false );		// age out static vertex/index blocks freed by the vertexCache
 	DrainRetiredImages( frameIndex );	// capture/cinematic images replaced by RetireImage
+	DrainRetiredTargets( frameIndex );	// shadow-map targets evicted by the shadow caches
+	if ( texturePool && !retiredTexSets[frameIndex].empty() ) {
+		// texture sets invalidated ~FRAMES_IN_FLIGHT frames ago: this slot's fence
+		// has passed, so nothing in flight still references them — free for reuse
+		vkFreeDescriptorSets( device, texturePool, (uint32_t)retiredTexSets[frameIndex].size(),
+			retiredTexSets[frameIndex].data() );
+		retiredTexSets[frameIndex].clear();
+	}
+	if ( computePool && !retiredComputeSets[frameIndex].empty() ) {
+		// per-dispatch compute sets from this slot's previous frame; the fence above
+		// guarantees that frame's work is done, so they're safe to free (Phase 1).
+		vkFreeDescriptorSets( device, computePool, (uint32_t)retiredComputeSets[frameIndex].size(),
+			retiredComputeSets[frameIndex].data() );
+		retiredComputeSets[frameIndex].clear();
+	}
 	uboRing[frameIndex].offset = 0;
 	vertRing[frameIndex].offset = 0;
 	idxRing[frameIndex].offset = 0;
 	stagingRing[frameIndex].offset = 0;
+	indirectRing[frameIndex].offset = 0;
 	streamGen++;
 	if ( framePool[frameIndex] ) {
 		vkResetDescriptorPool( device, framePool[frameIndex], 0 );
 	}
 	boundPipeline = VK_NULL_HANDLE;
+	boundTexKey = 0;
+	boundTexSet = VK_NULL_HANDLE;
 	dynStateDirty = true;
 	depthRangeMin = 0.0f;
 	depthRangeMax = 1.0f;
@@ -1401,6 +1841,13 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	insideScenePass = false;
 	sceneWritten = false;
 	fakePassDepth = 0;
+	insideTargetPass = false;
+	curRenderH = (int)swapExtent.height;	// scene extent; target passes override
+	curFlipY = true;
+	frameTarget = 0;						// SetFrameTarget re-routes each HDR frame from scratch
+	curPipelinePass = passClear;
+	curPassClass = 0;
+	curColorAtt = 1;
 }
 
 /*
@@ -1415,33 +1862,60 @@ void VulkanBackend::BeginPass( const ClearArgs *clear ) {
 	if ( !frameOpen || skipFrame || insideScenePass ) {
 		return;
 	}
+	// the scene renders into the swapchain sceneColor by default, or into the
+	// active frame target (the HDR RGBA16F buffer) when SetFrameTarget set one.
+	RenderTarget *ft = ( frameTarget != 0 ) ? LookupTarget( frameTarget ) : NULL;
+	if ( frameTarget != 0 && ( ft == NULL || !ft->colorTarget ) ) {
+		ft = NULL;			// stale/invalid handle → fall back to sceneColor
+	}
+	bool &everWritten = ft ? ft->everWritten : sceneEverWritten;
+
 	// pick the pass variant by which channels the caller wants cleared: a
 	// depth/stencil-only clear (world-view begin) must keep the frame's color
-	const bool wantColorClear = ( clear != NULL && clear->color ) || !sceneEverWritten;
-	const bool wantDsClear = ( clear != NULL && ( clear->depth || clear->stencil ) ) || !sceneEverWritten;
+	const bool wantColorClear = ( clear != NULL && clear->color ) || !everWritten;
+	const bool wantDsClear = ( clear != NULL && ( clear->depth || clear->stencil ) ) || !everWritten;
 
-	VkClearValue cv[2] = {};
+	VkClearValue cv[3] = {};
+	const int nColor = ft ? ft->colorCount : 1;
+	const bool hasDS = ft ? ft->hasDepth : true;	// sceneColor always carries depth-stencil
 	if ( clear != NULL && clear->color ) {
-		cv[0].color.float32[0] = clear->rgba[0];
-		cv[0].color.float32[1] = clear->rgba[1];
-		cv[0].color.float32[2] = clear->rgba[2];
-		cv[0].color.float32[3] = clear->rgba[3];
+		for ( int c = 0; c < nColor; c++ ) {
+			cv[c].color.float32[0] = clear->rgba[0];
+			cv[c].color.float32[1] = clear->rgba[1];
+			cv[c].color.float32[2] = clear->rgba[2];
+			cv[c].color.float32[3] = clear->rgba[3];
+		}
 	}
-	cv[1].depthStencil.depth = 1.0f;
-	cv[1].depthStencil.stencil = clear != NULL ? clear->stencilValue : 0;
+	if ( hasDS ) {
+		cv[nColor].depthStencil.depth = 1.0f;
+		cv[nColor].depthStencil.stencil = clear != NULL ? clear->stencilValue : 0;
+	}
+
+	// a frame target without the load/clearDS variants (a color-only target used
+	// as a frame target — the frontend doesn't, but stay robust) falls back to clear
+	VkRenderPass rpClear = ft ? ft->colorClearPass   : passClear;
+	VkRenderPass rpLoad  = ( ft ? ft->colorLoadPass    : passLoad )    ? ( ft ? ft->colorLoadPass : passLoad ) : rpClear;
+	VkRenderPass rpClrDS = ( ft ? ft->colorClearDSPass : passClearDS ) ? ( ft ? ft->colorClearDSPass : passClearDS ) : rpClear;
 
 	VkRenderPassBeginInfo rbi = {};
 	rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	rbi.renderPass = wantColorClear ? passClear : ( wantDsClear ? passClearDS : passLoad );
-	rbi.framebuffer = sceneFb;
-	rbi.renderArea.extent = sceneExtent;
-	rbi.clearValueCount = 2;
+	rbi.renderPass = wantColorClear ? rpClear : ( wantDsClear ? rpClrDS : rpLoad );
+	rbi.framebuffer = ft ? ft->colorFb : sceneFb;
+	rbi.renderArea.extent = ft ? VkExtent2D{ (uint32_t)ft->w, (uint32_t)ft->h } : sceneExtent;
+	rbi.clearValueCount = (uint32_t)( nColor + ( hasDS ? 1 : 0 ) );
 	rbi.pClearValues = cv;
 	vkCmdBeginRenderPass( frames[frameIndex].cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
 
+	// the pipelines drawn in this pass target its render pass / format class
+	curRenderH = ft ? ft->h : (int)sceneExtent.height;
+	curFlipY = true;
+	curPipelinePass = rpClear;
+	curPassClass = ft ? ft->passClass : 0;
+	curColorAtt = nColor;
+
 	insideScenePass = true;
 	sceneWritten = true;
-	sceneEverWritten = true;
+	everWritten = true;
 }
 
 /*
@@ -1450,6 +1924,31 @@ VulkanBackend::EndPass
 ====================
 */
 void VulkanBackend::EndPass() {
+	if ( insideTargetPass ) {
+		// close the offscreen nested pass (shadow map / AA ping). The scene pass
+		// resumes on the next Draw (EnsureScenePass → load variant) against the
+		// frame target it interrupted; restore that destination's viewport class,
+		// exactly like GL3's savedViewport restore.
+		vkCmdEndRenderPass( frames[frameIndex].cb );
+		insideTargetPass = false;
+		RenderTarget *ft = ( frameTarget != 0 ) ? LookupTarget( frameTarget ) : NULL;
+		if ( ft && ft->colorTarget ) {
+			curRenderH = ft->h;
+			curPipelinePass = ft->colorClearPass;
+			curPassClass = ft->passClass;
+			curColorAtt = ft->colorCount;
+		} else {
+			curRenderH = (int)sceneExtent.height;
+			curPipelinePass = passClear;
+			curPassClass = 0;
+			curColorAtt = 1;
+		}
+		curFlipY = true;
+		memcpy( vpRect, savedVpRect, sizeof( vpRect ) );
+		memcpy( scRect, savedScRect, sizeof( scRect ) );
+		dynStateDirty = true;
+		return;
+	}
 	if ( fakePassDepth > 0 ) {
 		fakePassDepth--;		// balanced a no-op target pass
 		return;
@@ -1581,6 +2080,15 @@ void VulkanBackend::EndFrame() {
 		}
 	}
 
+	// GPU timer (r_vkGpuTime): stamp the frame's end just before closing the cb;
+	// the pair reads back at this slot's next BeginFrame. BOTTOM_OF_PIPE so the
+	// stamp waits for all prior GPU work this frame to finish.
+	if ( gpuTimerActive ) {
+		vkCmdWriteTimestamp( f.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuTimerPool, 2 * frameIndex + 1 );
+		gpuTimerBusy[frameIndex] = true;
+		gpuTimerActive = false;
+	}
+
 	vkEndCommandBuffer( f.cb );
 
 	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -1644,6 +2152,34 @@ bool VulkanBackend::CreateM2Resources() {
 		uboAlign = 256;
 	}
 
+	// GPU timer query pool (r_vkGpuTime). Gated on the graphics queue's
+	// timestampValidBits; timestampPeriod is ns/tick. If unsupported the cvar just
+	// stays inert (like the GL3 timer without the query entry points). Recreated
+	// here so it re-arms after vid_restart too.
+	uint32_t validBits = 0;
+	{
+		uint32_t qfCount = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties( physical, &qfCount, NULL );
+		std::vector<VkQueueFamilyProperties> qfp( qfCount );
+		vkGetPhysicalDeviceQueueFamilyProperties( physical, &qfCount, qfp.data() );
+		if ( gfxFamily < qfCount ) { validBits = qfp[gfxFamily].timestampValidBits; }
+	}
+	gpuTimerSupported = physProps.limits.timestampPeriod > 0.0f && validBits > 0;
+	if ( gpuTimerSupported ) {
+		gpuTimerPeriodNs = (double)physProps.limits.timestampPeriod;
+		gpuTimerMask = ( validBits >= 64 ) ? ~0ULL : ( ( 1ULL << validBits ) - 1 );
+		VkQueryPoolCreateInfo qpi = {};
+		qpi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+		qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+		qpi.queryCount = 2 * FRAMES_IN_FLIGHT;		// begin+end per slot
+		if ( !vkCheck( vkCreateQueryPool( device, &qpi, NULL, &gpuTimerPool ), "vkCreateQueryPool(timer)" ) ) {
+			gpuTimerPool = VK_NULL_HANDLE;
+			gpuTimerSupported = false;
+		}
+	}
+	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) { gpuTimerBusy[i] = false; }
+	gpuTimerActive = false;
+
 	// host-visible persistently-mapped rings, one set per frame slot — the
 	// slot's fence wait in BeginFrame guarantees the GPU is done with them
 	// before offsets reset (the StreamGeneration contract)
@@ -1653,13 +2189,14 @@ bool VulkanBackend::CreateM2Resources() {
 		VkBufferUsageFlags usage;
 	};
 	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
-		const ringSetup_t setups[4] = {
+		const ringSetup_t setups[5] = {
 			{ &uboRing[slot],  UBO_RING_SIZE,  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT },
 			{ &vertRing[slot], VERT_RING_SIZE, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT },
 			{ &idxRing[slot],  IDX_RING_SIZE,  VK_BUFFER_USAGE_INDEX_BUFFER_BIT },
 			{ &stagingRing[slot], STAGING_RING_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT },
+			{ &indirectRing[slot], INDIRECT_RING_SIZE, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT },
 		};
-		for ( int i = 0; i < 4; i++ ) {
+		for ( int i = 0; i < 5; i++ ) {
 			VkBufferCreateInfo bci = {};
 			bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 			bci.size = (VkDeviceSize)setups[i].size;
@@ -1679,9 +2216,18 @@ bool VulkanBackend::CreateM2Resources() {
 			setups[i].ring->offset = 0;
 			setups[i].ring->usage = setups[i].usage;
 			bufferTable.push_back( setups[i].ring->buffer );
+			bufferAllocs.push_back( NULL );		// ring-owned; not a persistent buffer
+			bufferMapped.push_back( NULL );
 			setups[i].ring->handle = (BufferHandle)bufferTable.size();
 		}
 	}
+
+	// tess stages read the same UBO (matrices, tess params, light origin) and,
+	// for displacement, the same texture set; fold the bits in only when the
+	// device supports tessellation (else the flags reference an unusable stage).
+	const VkShaderStageFlags tessStages = haveTessellation
+		? ( VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT )
+		: 0;
 
 	// set 0: one dynamic-offset UBO reused for every draw
 	{
@@ -1689,7 +2235,7 @@ bool VulkanBackend::CreateM2Resources() {
 		b.binding = 0;
 		b.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 		b.descriptorCount = 1;
-		b.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+		b.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | tessStages;
 		VkDescriptorSetLayoutCreateInfo li = {};
 		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
 		li.bindingCount = 1;
@@ -1699,18 +2245,19 @@ bool VulkanBackend::CreateM2Resources() {
 		}
 	}
 	// set 1: combined image samplers, units 0-7, shadow cube at 8, SSAO at 9,
-	// occlusion map at 10 (interaction/ambientlight declare 9/10; dummies until M7)
+	// occlusion map at 10, parallax height map at 11 (interaction declares 9/10/11;
+	// dummies bound where a shader doesn't sample them)
 	{
-		VkDescriptorSetLayoutBinding b[11] = {};
-		for ( int i = 0; i < 11; i++ ) {
+		VkDescriptorSetLayoutBinding b[13] = {};
+		for ( int i = 0; i < 13; i++ ) {
 			b[i].binding = (uint32_t)i;
 			b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 			b[i].descriptorCount = 1;
-			b[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+			b[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | tessStages;
 		}
 		VkDescriptorSetLayoutCreateInfo li = {};
 		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-		li.bindingCount = 11;
+		li.bindingCount = 13;
 		li.pBindings = b;
 		if ( !vkCheck( vkCreateDescriptorSetLayout( device, &li, NULL, &setLayoutTex ), "vkCreateDescriptorSetLayout(tex)" ) ) {
 			return false;
@@ -1723,6 +2270,50 @@ bool VulkanBackend::CreateM2Resources() {
 		pli.setLayoutCount = 2;
 		pli.pSetLayouts = sets;
 		if ( !vkCheck( vkCreatePipelineLayout( device, &pli, NULL, &pipeLayout ), "vkCreatePipelineLayout" ) ) {
+			return false;
+		}
+	}
+
+	// compute lane (docs/gpu-offload-plan.md Phase 1): one set of 8 STORAGE_BUFFER bindings
+	// (ComputeArgs::storage[]) + a 128-byte push-constant range for params, a dedicated
+	// pipeline layout, and a FREE-able pool for per-dispatch sets. All COMPUTE-stage, kept
+	// fully independent of the 2-set graphics layout above.
+	{
+		VkDescriptorSetLayoutBinding sb[8] = {};
+		for ( int i = 0; i < 8; i++ ) {
+			sb[i].binding = (uint32_t)i;
+			sb[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			sb[i].descriptorCount = 1;
+			sb[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		}
+		VkDescriptorSetLayoutCreateInfo li = {};
+		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		li.bindingCount = 8;
+		li.pBindings = sb;
+		if ( !vkCheck( vkCreateDescriptorSetLayout( device, &li, NULL, &setLayoutCompute ), "vkCreateDescriptorSetLayout(compute)" ) ) {
+			return false;
+		}
+		VkPushConstantRange pcr = {};
+		pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		pcr.offset = 0;
+		pcr.size = 128;			// >= the guaranteed maxPushConstantsSize floor
+		VkPipelineLayoutCreateInfo pli = {};
+		pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		pli.setLayoutCount = 1;
+		pli.pSetLayouts = &setLayoutCompute;
+		pli.pushConstantRangeCount = 1;
+		pli.pPushConstantRanges = &pcr;
+		if ( !vkCheck( vkCreatePipelineLayout( device, &pli, NULL, &computePipeLayout ), "vkCreatePipelineLayout(compute)" ) ) {
+			return false;
+		}
+		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAME_SETS * 8 };
+		VkDescriptorPoolCreateInfo pci = {};
+		pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		pci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+		pci.maxSets = MAX_FRAME_SETS;
+		pci.poolSizeCount = 1;
+		pci.pPoolSizes = &ps;
+		if ( !vkCheck( vkCreateDescriptorPool( device, &pci, NULL, &computePool ), "vkCreateDescriptorPool(compute)" ) ) {
 			return false;
 		}
 	}
@@ -1761,7 +2352,23 @@ bool VulkanBackend::CreateM2Resources() {
 			vkUpdateDescriptorSets( device, 1, &w, 0, NULL );
 		}
 	}
-	// per-frame texture-set pools (reset wholesale each BeginFrame)
+	// persistent texture-set pool: reuse the same descriptor sets across frames
+	// for repeated texture combinations, which is the common case and avoids
+	// the per-frame allocation churn that otherwise stresses the pool.
+	{
+		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * 13 * 4 };
+		VkDescriptorPoolCreateInfo pci = {};
+		pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		pci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+		pci.maxSets = MAX_FRAME_SETS * 4;
+		pci.poolSizeCount = 1;
+		pci.pPoolSizes = &ps;
+		if ( !vkCheck( vkCreateDescriptorPool( device, &pci, NULL, &texturePool ), "vkCreateDescriptorPool(texture)" ) ) {
+			return false;
+		}
+	}
+	// per-frame texture-set pools (reset wholesale each BeginFrame) for fallback
+	// allocations if the persistent pool is exhausted.
 	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) {
 		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * 11 };
 		VkDescriptorPoolCreateInfo pci = {};
@@ -1830,15 +2437,37 @@ VulkanBackend::DestroyM2Resources
 ====================
 */
 void VulkanBackend::DestroyM2Resources() {
+	// M7 render targets first: this frees the shadow-map images/views and clears
+	// their borrowed imageTable slots (live=false) so the imageTable sweep below
+	// doesn't double-free them. Device is idle here.
+	DestroyAllTargets();
+
+	if ( gpuTimerPool != VK_NULL_HANDLE ) {
+		vkDestroyQueryPool( device, gpuTimerPool, NULL );
+		gpuTimerPool = VK_NULL_HANDLE;
+	}
+
+	DestroyMergeNormal();		// SSAO normal-merge image/pass/fb (before the imageTable sweep)
+
 	for ( auto &kv : pipelineCache ) {
 		vkDestroyPipeline( device, kv.second, NULL );
 	}
 	pipelineCache.clear();
 	boundPipeline = VK_NULL_HANDLE;
 
+	// compute pipelines (Phase 1); the map also holds cached VK_NULL_HANDLEs for
+	// failed shaders — skip those.
+	for ( auto &kv : computePipelineCache ) {
+		if ( kv.second ) { vkDestroyPipeline( device, kv.second, NULL ); }
+	}
+	computePipelineCache.clear();
+
 	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
 		if ( shaderTable[i].vert ) { vkDestroyShaderModule( device, shaderTable[i].vert, NULL ); }
 		if ( shaderTable[i].frag ) { vkDestroyShaderModule( device, shaderTable[i].frag, NULL ); }
+		if ( shaderTable[i].tesc ) { vkDestroyShaderModule( device, shaderTable[i].tesc, NULL ); }
+		if ( shaderTable[i].tese ) { vkDestroyShaderModule( device, shaderTable[i].tese, NULL ); }
+		if ( shaderTable[i].comp ) { vkDestroyShaderModule( device, shaderTable[i].comp, NULL ); }
 	}
 	shaderTable.clear();
 
@@ -1863,30 +2492,133 @@ void VulkanBackend::DestroyM2Resources() {
 		if ( framePool[i] ) { vkDestroyDescriptorPool( device, framePool[i], NULL ); framePool[i] = VK_NULL_HANDLE; }
 		uboSet[i] = VK_NULL_HANDLE;
 	}
+	textureSetCache.clear();
+	// device is idle here; destroying the pool frees every set, so the pending
+	// retire lists just need their now-dangling handles dropped
+	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) { retiredTexSets[i].clear(); retiredComputeSets[i].clear(); }
+	if ( texturePool ) { vkDestroyDescriptorPool( device, texturePool, NULL ); texturePool = VK_NULL_HANDLE; }
 	if ( persistentPool ) { vkDestroyDescriptorPool( device, persistentPool, NULL ); persistentPool = VK_NULL_HANDLE; }
 	if ( pipeLayout )     { vkDestroyPipelineLayout( device, pipeLayout, NULL ); pipeLayout = VK_NULL_HANDLE; }
 	if ( setLayoutUbo )   { vkDestroyDescriptorSetLayout( device, setLayoutUbo, NULL ); setLayoutUbo = VK_NULL_HANDLE; }
 	if ( setLayoutTex )   { vkDestroyDescriptorSetLayout( device, setLayoutTex, NULL ); setLayoutTex = VK_NULL_HANDLE; }
+	// compute lane (Phase 1)
+	if ( computePool )       { vkDestroyDescriptorPool( device, computePool, NULL ); computePool = VK_NULL_HANDLE; }
+	if ( computePipeLayout ) { vkDestroyPipelineLayout( device, computePipeLayout, NULL ); computePipeLayout = VK_NULL_HANDLE; }
+	if ( setLayoutCompute )  { vkDestroyDescriptorSetLayout( device, setLayoutCompute, NULL ); setLayoutCompute = VK_NULL_HANDLE; }
 
 	if ( uploadFence ) { vkDestroyFence( device, uploadFence, NULL ); uploadFence = VK_NULL_HANDLE; }
 	if ( uploadPool )  { vkDestroyCommandPool( device, uploadPool, NULL ); uploadPool = VK_NULL_HANDLE; uploadCb = VK_NULL_HANDLE; }
 
+	DrainRetiredBuffers( true );			// device idle: destroy every retired block now
 	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
 		DrainRetiredRings( slot );		// device is idle here
 		DrainRetiredImages( slot );
-		RingBuf *rings[4] = { &uboRing[slot], &vertRing[slot], &idxRing[slot], &stagingRing[slot] };
-		for ( int i = 0; i < 4; i++ ) {
+		RingBuf *rings[5] = { &uboRing[slot], &vertRing[slot], &idxRing[slot], &stagingRing[slot], &indirectRing[slot] };
+		for ( int i = 0; i < 5; i++ ) {
 			if ( rings[i]->buffer ) {
 				vmaDestroyBuffer( vma, rings[i]->buffer, rings[i]->alloc );
 			}
 			*rings[i] = RingBuf();
 		}
 	}
+	// free any persistent buffers the vertexCache didn't explicitly DestroyBuffer
+	// (e.g. engine shutdown, where blocks are abandoned rather than purged). Ring
+	// slots have a NULL alloc here — already destroyed above — so they're skipped.
+	for ( size_t i = 0; i < bufferAllocs.size(); i++ ) {
+		if ( bufferAllocs[i] ) {
+			vmaDestroyBuffer( vma, bufferTable[i], bufferAllocs[i] );
+		}
+	}
 	bufferTable.clear();
+	bufferAllocs.clear();
+	bufferMapped.clear();
+	freeBufferSlots.clear();
 	ringOverflowWarned = false;
 	framePoolWarned = false;
 
 	IR_Purge();
+}
+
+/*
+====================
+VulkanBackend::CreatePipelineCache
+
+Create the driver's VkPipelineCache, seeded from the blob written at the last
+Shutdown so first-use pipeline compiles are reused across runs. Non-fatal: on
+any failure diskPipelineCache stays NULL and pipelines simply build cold (the
+VK_NULL_HANDLE path). The Vulkan spec guarantees safe handling of incompatible
+initial data, but we header-check vendor/device/UUID first so a GPU or driver
+swap starts fresh (and logs it) instead of handing the driver stale bytes.
+====================
+*/
+void VulkanBackend::CreatePipelineCache() {
+	diskPipelineCache = VK_NULL_HANDLE;
+	if ( device == VK_NULL_HANDLE ) {
+		return;
+	}
+
+	void *blob = NULL;
+	const int blobLen = fileSystem->ReadFile( "vkpipelinecache.bin", &blob, NULL );
+	const void *initData = NULL;
+	size_t      initSize = 0;
+	// VkPipelineCacheHeaderVersionOne = uint32 headerSize, uint32 version,
+	// uint32 vendorID, uint32 deviceID, uint8 uuid[VK_UUID_SIZE]
+	if ( blob && blobLen >= (int)( 16 + VK_UUID_SIZE ) ) {
+		const uint8_t *h = (const uint8_t *)blob;
+		uint32_t hdrVer = 0, vendorID = 0, deviceID = 0;
+		memcpy( &hdrVer,   h + 4,  4 );
+		memcpy( &vendorID, h + 8,  4 );
+		memcpy( &deviceID, h + 12, 4 );
+		const bool match = hdrVer == VK_PIPELINE_CACHE_HEADER_VERSION_ONE
+			&& vendorID == physProps.vendorID
+			&& deviceID == physProps.deviceID
+			&& memcmp( h + 16, physProps.pipelineCacheUUID, VK_UUID_SIZE ) == 0;
+		if ( match ) {
+			initData = blob;
+			initSize = (size_t)blobLen;
+		} else {
+			common->Printf( "VK: on-disk pipeline cache is for a different device/driver - starting fresh\n" );
+		}
+	}
+
+	VkPipelineCacheCreateInfo pci = {};
+	pci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+	pci.initialDataSize = initSize;
+	pci.pInitialData = initData;
+	if ( !vkCheck( vkCreatePipelineCache( device, &pci, NULL, &diskPipelineCache ), "vkCreatePipelineCache" ) ) {
+		diskPipelineCache = VK_NULL_HANDLE;
+	} else if ( initSize ) {
+		common->Printf( "VK: pipeline cache seeded from disk (%d KB)\n", blobLen / 1024 );
+	}
+	if ( blob ) {
+		fileSystem->FreeFile( blob );		// vkCreatePipelineCache copied the initial data
+	}
+}
+
+/*
+====================
+VulkanBackend::SavePipelineCache
+
+Write the driver pipeline cache back to fs_savepath so the next run (and each
+vid_restart) reuses this session's compiles. Called with the device idle.
+====================
+*/
+void VulkanBackend::SavePipelineCache() {
+	if ( device == VK_NULL_HANDLE || diskPipelineCache == VK_NULL_HANDLE ) {
+		return;
+	}
+	size_t size = 0;
+	if ( vkGetPipelineCacheData( device, diskPipelineCache, &size, NULL ) != VK_SUCCESS || size == 0 ) {
+		return;
+	}
+	void *data = R_StaticAlloc( (int)size );
+	if ( !data ) {
+		return;
+	}
+	if ( vkGetPipelineCacheData( device, diskPipelineCache, &size, data ) == VK_SUCCESS && size > 0 ) {
+		fileSystem->WriteFile( "vkpipelinecache.bin", data, (int)size );
+	}
+	R_StaticFree( data );
 }
 
 /*
@@ -1936,6 +2668,8 @@ bool VulkanBackend::GrowRing( RingBuf &ring, int minSize ) {
 	ring.size = newSize;
 	ring.offset = 0;
 	bufferTable.push_back( newBuf );
+	bufferAllocs.push_back( NULL );		// ring-owned; not a persistent buffer
+	bufferMapped.push_back( NULL );
 	ring.handle = (BufferHandle)bufferTable.size();
 	streamGen++;
 	common->Printf( "VK: geometry ring grew to %d KB (mid-frame overflow)\n", newSize >> 10 );
@@ -1989,6 +2723,150 @@ int VulkanBackend::AllocVertices( const void *data, int size, BufferHandle *buff
 }
 int VulkanBackend::AllocIndices( const void *data, int size, BufferHandle *buffer ) {
 	return AllocFromRing( idxRing[frameIndex], data, size, 4, 0, buffer );
+}
+
+/*
+====================
+VulkanBackend::CreateBuffer
+
+Persistent static geometry buffer (the vertexCache's per-surface vertex/index
+blocks). Host-visible + persistently mapped, so the upload is a plain memcpy
+with no staging copy or queue submit — thousands of these are created at level
+load, and a submit+fence-wait per block would serialize the whole load. On
+discrete GPUs this lands in system RAM (or the ReBAR window), which is fine for
+D3-sized geometry and still a large win over re-streaming every visible surface
+into the ring every frame. Returns 0 on failure; callers fall back to the ring.
+====================
+*/
+BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const void *data ) {
+	if ( size <= 0 ) {
+		return 0;
+	}
+	VkBufferUsageFlags usageBits;
+	switch ( usage ) {
+		case BU_INDEX:   usageBits = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;  break;
+		case BU_UNIFORM: usageBits = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT; break;
+		// compute storage buffer (Phase 1). TRANSFER_SRC/DST let a later device-local
+		// variant stage seed/readback; harmless on the host-visible buffer below.
+		// INDIRECT lets a compute pass write a VkDrawIndexedIndirectCommand[] here that
+		// DrawIndexedIndirect consumes (Phase 3 seed); harmless on the host-visible buffer.
+		case BU_STORAGE: usageBits = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+		                           | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+		                           | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+		                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT; break;
+		// skinning output: compute writes it (STORAGE), the draw passes fetch it as a
+		// vertex buffer (VERTEX). TRANSFER bits let CreateBuffer seed the static
+		// st/color fields and a later device-local variant stage. (Phase 2.)
+		case BU_SKIN:    usageBits = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+		                           | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+		                           | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+		                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT; break;
+		default:         usageBits = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
+	}
+
+	VkBufferCreateInfo bci = {};
+	bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bci.size = (VkDeviceSize)size;
+	bci.usage = usageBits;
+	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	// storage buffers are read back on the host (ReadBuffer), so hint RANDOM access to keep
+	// them in cached memory; everything else is write-only-from-CPU (SEQUENTIAL_WRITE lets the
+	// allocator pick write-combined). A wrong hint doesn't break correctness on coherent memory
+	// but would make storage read-back pathologically slow on a write-combined heap.
+	aci.flags = ( usage == BU_STORAGE ? VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+	                                  : VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT )
+	          | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	VkBuffer buf = VK_NULL_HANDLE;
+	VmaAllocation alloc = NULL;
+	VmaAllocationInfo info = {};
+	if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &buf, &alloc, &info ), "vmaCreateBuffer(static)" ) ) {
+		return 0;
+	}
+	if ( data ) {
+		memcpy( info.pMappedData, data, (size_t)size );
+	}
+
+	// reuse a slot freed by DestroyBuffer, else grow the table (keeping all three
+	// parallel vectors in lockstep with bufferTable)
+	uint32_t idx;
+	if ( !freeBufferSlots.empty() ) {
+		idx = freeBufferSlots.back();
+		freeBufferSlots.pop_back();
+		bufferTable[idx] = buf;
+		bufferAllocs[idx] = alloc;
+		bufferMapped[idx] = (byte *)info.pMappedData;
+	} else {
+		idx = (uint32_t)bufferTable.size();
+		bufferTable.push_back( buf );
+		bufferAllocs.push_back( alloc );
+		bufferMapped.push_back( (byte *)info.pMappedData );
+	}
+	return (BufferHandle)( idx + 1 );
+}
+
+void VulkanBackend::UpdateBuffer( BufferHandle b, int offset, int size, const void *data ) {
+	if ( b < 1 || b > (BufferHandle)bufferMapped.size() || !data || size <= 0 ) {
+		return;
+	}
+	byte *mapped = bufferMapped[b - 1];
+	if ( mapped ) {		// persistent (host-visible) buffer; coherent, no flush needed
+		memcpy( mapped + offset, data, (size_t)size );
+	}
+}
+
+void VulkanBackend::DestroyBuffer( BufferHandle b ) {
+	if ( b < 1 || b > (BufferHandle)bufferTable.size() ) {
+		return;
+	}
+	uint32_t idx = (uint32_t)( b - 1 );
+	if ( bufferAllocs[idx] ) {		// only persistent buffers are ours to destroy
+		// defer the vmaDestroy until in-flight frames that may reference it retire
+		retiredBuffers.push_back( { bufferTable[idx], bufferAllocs[idx], FRAMES_IN_FLIGHT + 1 } );
+		// the slot/handle is free to reuse now: already-recorded command buffers
+		// hold the VkBuffer by value, and no new draw references this handle (the
+		// vertexCache cleared block->vbo alongside this call).
+		bufferTable[idx] = VK_NULL_HANDLE;
+		bufferAllocs[idx] = NULL;
+		bufferMapped[idx] = NULL;
+		freeBufferSlots.push_back( idx );
+	}
+}
+
+// Synchronous readback of a buffer (docs/gpu-offload-plan.md Phase 1). Phase-1 storage
+// buffers are host-visible+coherent+mapped, so once the GPU is idle the compute writes are
+// visible to the mapped pointer and this is a plain memcpy. A device-local storage buffer
+// (bufferMapped == NULL) needs a TRANSFER_SRC -> staging -> map copy — that's the Phase-2
+// extension; return false here so callers know the fast path wasn't taken. Stalls the GPU
+// (vkQueueWaitIdle) — a dev/validation path, never a per-frame call.
+bool VulkanBackend::ReadBuffer( BufferHandle b, void *dst, int size ) {
+	if ( device == VK_NULL_HANDLE || b < 1 || b > (BufferHandle)bufferMapped.size() || !dst || size <= 0 ) {
+		return false;
+	}
+	byte *mapped = bufferMapped[b - 1];
+	if ( !mapped ) {
+		return false;		// device-local (no host mapping) — Phase-2 staging readback
+	}
+	vkQueueWaitIdle( gfxQueue );	// all GPU writes complete + (coherent) visible to the host
+	memcpy( dst, mapped, (size_t)size );
+	return true;
+}
+
+// Called once per BeginFrame (after the slot's fence wait): age every retired
+// buffer and destroy those whose TTL has elapsed. `force` (device idle at
+// teardown) destroys them all regardless of TTL.
+void VulkanBackend::DrainRetiredBuffers( bool force ) {
+	for ( size_t i = 0; i < retiredBuffers.size(); ) {
+		if ( force || --retiredBuffers[i].ttl <= 0 ) {
+			vmaDestroyBuffer( vma, retiredBuffers[i].buffer, retiredBuffers[i].alloc );
+			retiredBuffers[i] = retiredBuffers.back();
+			retiredBuffers.pop_back();
+		} else {
+			i++;
+		}
+	}
 }
 
 /*
@@ -2055,6 +2933,28 @@ ShaderHandle VulkanBackend::LoadShader( const char *name ) {
 	mi.codeSize = fragSpv.size();
 	mi.pCode = (const uint32_t *)fragSpv.data();
 	ok = ok && vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.frag ), va( "vkCreateShaderModule(%s.frag)", name ) );
+
+	// optional tessellation pair (DUDE tessellation): a shader gets a tess
+	// variant only if BOTH .tesc.spv and .tese.spv exist and the device supports
+	// tessellation. Absent = normal vert+frag shader (not an error). If one half
+	// is present without the other, treat it as no tess variant.
+	if ( ok && haveTessellation ) {
+		std::vector<byte> tescSpv, teseSpv;
+		if ( VK_ReadSpv( va( "%s.tesc.spv", name ), tescSpv )
+		  && VK_ReadSpv( va( "%s.tese.spv", name ), teseSpv ) ) {
+			mi.codeSize = tescSpv.size();
+			mi.pCode = (const uint32_t *)tescSpv.data();
+			bool tok = vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.tesc ), va( "vkCreateShaderModule(%s.tesc)", name ) );
+			mi.codeSize = teseSpv.size();
+			mi.pCode = (const uint32_t *)teseSpv.data();
+			tok = tok && vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.tese ), va( "vkCreateShaderModule(%s.tese)", name ) );
+			if ( !tok ) {
+				if ( rec.tesc ) { vkDestroyShaderModule( device, rec.tesc, NULL ); rec.tesc = VK_NULL_HANDLE; }
+				if ( rec.tese ) { vkDestroyShaderModule( device, rec.tese, NULL ); rec.tese = VK_NULL_HANDLE; }
+			}
+		}
+	}
+
 	if ( !ok ) {
 		if ( rec.vert ) { vkDestroyShaderModule( device, rec.vert, NULL ); rec.vert = VK_NULL_HANDLE; }
 		if ( rec.frag ) { vkDestroyShaderModule( device, rec.frag, NULL ); rec.frag = VK_NULL_HANDLE; }
@@ -2062,6 +2962,453 @@ ShaderHandle VulkanBackend::LoadShader( const char *name ) {
 	}
 	shaderTable.push_back( rec );
 	return rec.failed ? 0 : (ShaderHandle)shaderTable.size();
+}
+
+/*
+====================
+VulkanBackend::CreateShaderFromGlsl
+
+Runtime GLSL->SPIR-V for custom (mod) ARB material stages: arb::ToGlsl emits
+backend-neutral GLSL (SAMPLER_BINDING/VARY/UBO_BINDING macros, #include
+"arbparams.glsl"), which this compiles for Vulkan exactly the way the offline
+compile_spv.py builds the builtins — prepend prelude.vk.glsl, inject
+`invariant gl_Position;` for the vertex stage, textually resolve #include,
+compile with shaderc (target vulkan1.4). Cached in shaderTable by name so a
+material's program is compiled once. Without DUDE_HAVE_SHADERC this returns 0
+and the caller degrades the stage (SK_SKIP) — the pre-shaderc behaviour.
+====================
+*/
+#ifdef DUDE_HAVE_SHADERC
+// Read a shader source file (prelude / #include target) the same way the GL3
+// loader does: VFS "shaders/<file>" first (moddable), then the source tree.
+static bool VK_ReadShaderSource( const char *fileName, idStr &out ) {
+	void *buf = NULL;
+	int len = fileSystem->ReadFile( va( "shaders/%s", fileName ), &buf, NULL );
+	if ( len >= 0 && buf ) {
+		out.Clear();
+		out.Append( (const char *)buf, len );
+		fileSystem->FreeFile( buf );
+		return true;
+	}
+#ifdef DUDE_SHADER_SOURCE_DIR
+	FILE *f = fopen( va( "%s/%s", DUDE_SHADER_SOURCE_DIR, fileName ), "rb" );
+	if ( f ) {
+		fseek( f, 0, SEEK_END );
+		long size = ftell( f );
+		fseek( f, 0, SEEK_SET );
+		if ( size > 0 ) {
+			char *text = (char *)malloc( size );
+			if ( text && fread( text, 1, size, f ) == (size_t)size ) {
+				out.Clear();
+				out.Append( text, size );
+				free( text );
+				fclose( f );
+				return true;
+			}
+			free( text );
+		}
+		fclose( f );
+	}
+#endif
+	return false;
+}
+
+// Textually resolve #include "file" in an in-memory body, recursively —
+// mirrors compile_spv.py's expand_includes and the GL3 loader, so a
+// runtime-compiled transpiled program sees the same arbparams.glsl the offline
+// builtins do (the driver/shaderc never sees the #include directive itself).
+static bool VK_ExpandIncludes( const char *body, idStr &out, int depth ) {
+	if ( depth > 8 ) {
+		common->Warning( "VK shaderc: #include depth > 8 (cycle?)" );
+		return false;
+	}
+	const char *p = body;
+	while ( *p ) {
+		const char *nl = strchr( p, '\n' );
+		const char *lineEnd = nl ? nl : p + strlen( p );
+		const char *s = p;
+		while ( s < lineEnd && ( *s == ' ' || *s == '\t' ) ) {
+			s++;
+		}
+		if ( lineEnd - s >= 8 && idStr::Cmpn( s, "#include", 8 ) == 0 ) {
+			const char *q1 = (const char *)memchr( s, '"', lineEnd - s );
+			const char *q2 = q1 ? (const char *)memchr( q1 + 1, '"', lineEnd - ( q1 + 1 ) ) : NULL;
+			if ( !q1 || !q2 ) {
+				common->Warning( "VK shaderc: malformed #include" );
+				return false;
+			}
+			idStr inc;
+			inc.Append( q1 + 1, (int)( q2 - q1 - 1 ) );
+			idStr incText;
+			if ( !VK_ReadShaderSource( inc.c_str(), incText ) ) {
+				common->Warning( "VK shaderc: couldn't read include shaders/%s", inc.c_str() );
+				return false;
+			}
+			if ( !VK_ExpandIncludes( incText.c_str(), out, depth + 1 ) ) {
+				return false;
+			}
+			out.Append( "\n", 1 );
+		} else {
+			out.Append( p, (int)( lineEnd - p ) );
+			if ( nl ) {
+				out.Append( "\n", 1 );
+			}
+		}
+		if ( !nl ) {
+			break;
+		}
+		p = nl + 1;
+	}
+	return true;
+}
+
+static bool VK_CompileGlslToSpv( const char *name, const char *body, shaderc_shader_kind kind, std::vector<uint32_t> &out ) {
+	idStr full;
+	if ( kind == shaderc_compute_shader ) {
+		// Compute units are authored standalone (their own #version, no graphics prelude):
+		// prelude.vk.glsl declares vertex/fragment layout bindings + VARY/SAMPLER_BINDING
+		// macros and the invariant gl_Position that don't belong in — and won't compile in —
+		// a compute stage. Just expand includes on the body directly.
+		if ( !VK_ExpandIncludes( body, full, 0 ) ) {
+			return false;
+		}
+	} else {
+		idStr prelude;
+		if ( !VK_ReadShaderSource( "prelude.vk.glsl", prelude ) ) {
+			common->Warning( "VK shaderc: missing shaders/prelude.vk.glsl" );
+			return false;
+		}
+		full = prelude;
+		full.Append( "\n", 1 );
+		if ( kind == shaderc_vertex_shader ) {
+			// multi-pass depth invariance, exactly as compile_spv.py injects it
+			full += "invariant gl_Position;\n";
+		}
+		if ( !VK_ExpandIncludes( body, full, 0 ) ) {
+			return false;
+		}
+	}
+
+	shaderc_compiler_t comp = shaderc_compiler_initialize();
+	shaderc_compile_options_t opts = shaderc_compile_options_initialize();
+	shaderc_compile_options_set_target_env( opts, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_4 );
+	shaderc_compile_options_set_source_language( opts, shaderc_source_language_glsl );
+	shaderc_compilation_result_t res = shaderc_compile_into_spv(
+	    comp, full.c_str(), (size_t)full.Length(), kind, name, "main", opts );
+	bool ok = shaderc_result_get_compilation_status( res ) == shaderc_compilation_status_success;
+	if ( !ok ) {
+		common->Warning( "VK shaderc: %s failed:\n%s", name, shaderc_result_get_error_message( res ) );
+	} else {
+		const uint32_t *code = (const uint32_t *)shaderc_result_get_bytes( res );
+		size_t words = shaderc_result_get_length( res ) / sizeof( uint32_t );
+		out.assign( code, code + words );
+	}
+	shaderc_result_release( res );
+	shaderc_compile_options_release( opts );
+	shaderc_compiler_release( comp );
+	return ok;
+}
+#endif	// DUDE_HAVE_SHADERC
+
+ShaderHandle VulkanBackend::CreateShaderFromGlsl( const char *name, const char *vertSrc, const char *fragSrc ) {
+#ifdef DUDE_HAVE_SHADERC
+	if ( device == VK_NULL_HANDLE || name == NULL || name[0] == '\0' || vertSrc == NULL || fragSrc == NULL ) {
+		return 0;
+	}
+	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
+		if ( shaderTable[i].name.Icmp( name ) == 0 ) {
+			return shaderTable[i].failed ? 0 : (ShaderHandle)( i + 1 );
+		}
+	}
+
+	ShaderRec rec;
+	rec.name = name;
+
+	std::vector<uint32_t> vertSpv, fragSpv;
+	if ( !VK_CompileGlslToSpv( name, vertSrc, shaderc_vertex_shader, vertSpv )
+	  || !VK_CompileGlslToSpv( name, fragSrc, shaderc_fragment_shader, fragSpv ) ) {
+		rec.failed = true;
+		shaderTable.push_back( rec );
+		return 0;
+	}
+
+	VkShaderModuleCreateInfo mi = {};
+	mi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	mi.codeSize = vertSpv.size() * sizeof( uint32_t );
+	mi.pCode = vertSpv.data();
+	bool ok = vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.vert ), va( "vkCreateShaderModule(%s.vert)", name ) );
+	mi.codeSize = fragSpv.size() * sizeof( uint32_t );
+	mi.pCode = fragSpv.data();
+	ok = ok && vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.frag ), va( "vkCreateShaderModule(%s.frag)", name ) );
+	if ( !ok ) {
+		if ( rec.vert ) { vkDestroyShaderModule( device, rec.vert, NULL ); rec.vert = VK_NULL_HANDLE; }
+		if ( rec.frag ) { vkDestroyShaderModule( device, rec.frag, NULL ); rec.frag = VK_NULL_HANDLE; }
+		rec.failed = true;
+	}
+	shaderTable.push_back( rec );
+	return rec.failed ? 0 : (ShaderHandle)shaderTable.size();
+#else
+	(void)name; (void)vertSrc; (void)fragSrc;
+	return 0;
+#endif
+}
+
+// Compile a standalone compute GLSL source into a compute shader module (Phase 1).
+// Mirrors CreateShaderFromGlsl but one stage (shaderc_compute_shader) into ShaderRec.comp.
+// Cached by name in the same shaderTable (handle = index+1); a compute rec leaves vert/frag
+// NULL. Namespace compute names (e.g. "cs_*") so they never collide with a graphics shader.
+ShaderHandle VulkanBackend::CreateComputeShader( const char *name, const char *glslSrc ) {
+#ifdef DUDE_HAVE_SHADERC
+	if ( device == VK_NULL_HANDLE || name == NULL || name[0] == '\0' || glslSrc == NULL ) {
+		return 0;
+	}
+	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
+		if ( shaderTable[i].name.Icmp( name ) == 0 ) {
+			return shaderTable[i].failed ? 0 : (ShaderHandle)( i + 1 );
+		}
+	}
+
+	ShaderRec rec;
+	rec.name = name;
+
+	std::vector<uint32_t> compSpv;
+	if ( !VK_CompileGlslToSpv( name, glslSrc, shaderc_compute_shader, compSpv ) ) {
+		rec.failed = true;
+		shaderTable.push_back( rec );
+		return 0;
+	}
+
+	VkShaderModuleCreateInfo mi = {};
+	mi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	mi.codeSize = compSpv.size() * sizeof( uint32_t );
+	mi.pCode = compSpv.data();
+	if ( !vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.comp ), va( "vkCreateShaderModule(%s.comp)", name ) ) ) {
+		rec.comp = VK_NULL_HANDLE;
+		rec.failed = true;
+	}
+	shaderTable.push_back( rec );
+	return rec.failed ? 0 : (ShaderHandle)shaderTable.size();
+#else
+	(void)name; (void)glslSrc;
+	return 0;
+#endif
+}
+
+// Build (or fetch from cache) a compute VkPipeline for a compute shader handle. Keyed by
+// ShaderHandle in a map separate from the graphics pipelineCache (whose key encodes graphics
+// state compute has none of). Caches VK_NULL_HANDLE for a missing/failed compute module so a
+// failed shaderc compile isn't retried every dispatch. Reuses diskPipelineCache. (Phase 1.)
+VkPipeline VulkanBackend::GetComputePipeline( ShaderHandle shader ) {
+	auto it = computePipelineCache.find( shader );
+	if ( it != computePipelineCache.end() ) {
+		return it->second;
+	}
+	VkPipeline pipeline = VK_NULL_HANDLE;
+	if ( shader >= 1 && shader <= (ShaderHandle)shaderTable.size()
+	     && !shaderTable[shader - 1].failed && shaderTable[shader - 1].comp != VK_NULL_HANDLE ) {
+		VkPipelineShaderStageCreateInfo stage = {};
+		stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+		stage.module = shaderTable[shader - 1].comp;
+		stage.pName = "main";
+		VkComputePipelineCreateInfo cpci = {};
+		cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		cpci.stage = stage;
+		cpci.layout = computePipeLayout;
+		if ( !vkCheck( vkCreateComputePipelines( device, diskPipelineCache, 1, &cpci, NULL, &pipeline ), "vkCreateComputePipelines" ) ) {
+			pipeline = VK_NULL_HANDLE;
+		}
+	}
+	computePipelineCache[shader] = pipeline;		// cache success AND null (don't retry)
+	return pipeline;
+}
+
+// Record a compute dispatch onto cb: bind the pipeline, allocate + write + bind a storage
+// descriptor set, push params, vkCmdDispatch. Returns the allocated set so the CALLER reclaims
+// it (free after idle for the synchronous self-test; retire behind the frame fence mid-frame).
+// VK_NULL_HANDLE = nothing recorded. Barriers are the caller's job (they know the consumer:
+// HOST for readback, VERTEX_INPUT for skinning). Must be recorded outside a render pass. (Phase 1.)
+VkDescriptorSet VulkanBackend::RecordDispatch( VkCommandBuffer cb, const ComputeArgs &args ) {
+	VkPipeline pipeline = GetComputePipeline( args.shader );
+	if ( pipeline == VK_NULL_HANDLE ) {
+		return VK_NULL_HANDLE;
+	}
+	VkDescriptorSetAllocateInfo ai = {};
+	ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	ai.descriptorPool = computePool;
+	ai.descriptorSetCount = 1;
+	ai.pSetLayouts = &setLayoutCompute;
+	VkDescriptorSet set = VK_NULL_HANDLE;
+	if ( vkAllocateDescriptorSets( device, &ai, &set ) != VK_SUCCESS ) {
+		common->Warning( "VK: compute descriptor pool exhausted" );
+		return VK_NULL_HANDLE;
+	}
+	// write only the bound storage buffers; a compute shader statically uses only what it
+	// binds, so unbound bindings need no descriptor.
+	VkDescriptorBufferInfo bi[8] = {};
+	VkWriteDescriptorSet w[8] = {};
+	int n = 0;
+	for ( int i = 0; i < 8; i++ ) {
+		if ( args.storage[i] < 1 || args.storage[i] > (BufferHandle)bufferTable.size() ) {
+			continue;
+		}
+		bi[n].buffer = bufferTable[args.storage[i] - 1];
+		bi[n].offset = 0;
+		bi[n].range = VK_WHOLE_SIZE;
+		w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		w[n].dstSet = set;
+		w[n].dstBinding = (uint32_t)i;
+		w[n].descriptorCount = 1;
+		w[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		w[n].pBufferInfo = &bi[n];
+		n++;
+	}
+	if ( n > 0 ) {
+		vkUpdateDescriptorSets( device, (uint32_t)n, w, 0, NULL );
+	}
+	vkCmdBindPipeline( cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline );
+	vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeLayout, 0, 1, &set, 0, NULL );
+	if ( args.pushConstants && args.pushConstantSize > 0 ) {
+		uint32_t pcSize = (uint32_t)( args.pushConstantSize > 128 ? 128 : args.pushConstantSize );
+		vkCmdPushConstants( cb, computePipeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pcSize, args.pushConstants );
+	}
+	vkCmdDispatch( cb, args.groupsX ? args.groupsX : 1, args.groupsY ? args.groupsY : 1, args.groupsZ ? args.groupsZ : 1 );
+	return set;
+}
+
+void VulkanBackend::Dispatch( const ComputeArgs &args ) {
+	if ( device == VK_NULL_HANDLE || computePipeLayout == VK_NULL_HANDLE || !frameOpen || skipFrame ) {
+		return;
+	}
+	// a vkCmdDispatch is illegal inside a render pass; the compute lane records in the
+	// pre-scene window on the frame cb. If a scene/target pass is already open, skip
+	// (Phase 2 sequences dispatches before the scene pass opens).
+	if ( insideScenePass || insideTargetPass ) {
+		static bool warned = false;
+		if ( !warned ) { warned = true; common->Warning( "VK: Dispatch() inside a render pass — skipped (record it pre-scene)" ); }
+		return;
+	}
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	VkDescriptorSet set = RecordDispatch( cb, args );
+	if ( set == VK_NULL_HANDLE ) {
+		return;
+	}
+	// make compute writes available to subsequent vertex fetch / shader reads this frame.
+	// COMPUTE_SHADER is in the destination set so a following dispatch can consume this one's
+	// output (the MD5 skin runs as position pass -> tangent-derive pass over the same buffer).
+	VkMemoryBarrier mb = {};
+	mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	mb.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		0, 1, &mb, 0, NULL, 0, NULL );
+	retiredComputeSets[frameIndex].push_back( set );
+}
+
+// Synchronous compute dispatch on the dedicated upload cb: record, barrier to HOST, submit,
+// wait. Leaves the result visible to a subsequent ReadBuffer. Stalls the GPU — dev/validation
+// and load-time only, never per-frame. (Phase 1/2.)
+void VulkanBackend::DispatchSync( const ComputeArgs &args ) {
+	if ( device == VK_NULL_HANDLE || computePipeLayout == VK_NULL_HANDLE || uploadCb == VK_NULL_HANDLE ) {
+		return;
+	}
+	vkQueueWaitIdle( gfxQueue );
+	vkResetCommandBuffer( uploadCb, 0 );
+	VkCommandBufferBeginInfo bbi = {};
+	bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer( uploadCb, &bbi );
+	VkDescriptorSet set = RecordDispatch( uploadCb, args );
+	if ( set != VK_NULL_HANDLE ) {
+		VkMemoryBarrier mb = {};
+		mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+			0, 1, &mb, 0, NULL, 0, NULL );
+	}
+	vkEndCommandBuffer( uploadCb );
+	VkSubmitInfo si = {};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &uploadCb;
+	vkResetFences( device, 1, &uploadFence );
+	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	if ( set != VK_NULL_HANDLE ) {
+		vkFreeDescriptorSets( device, computePool, 1, &set );		// cb done -> safe
+	}
+}
+
+// r_vkComputeTest: validate the whole compute lane end to end. Seeds a host-visible storage
+// buffer with 0..N-1, dispatches a kernel that doubles each element, reads it back and checks
+// data[i] == 2*i. Two staged checks isolate a failure: the raw seed round-trip (buffer create +
+// ReadBuffer, no compute) then the dispatched result. Synchronous one-shot (dev tool) — records
+// on the upload cb and waits idle, so never call it per-frame. (Phase 1.)
+void VulkanBackend::ComputeSelfTest() {
+	if ( device == VK_NULL_HANDLE || computePipeLayout == VK_NULL_HANDLE || uploadCb == VK_NULL_HANDLE ) {
+		common->Printf( "VK compute self-test: unavailable (no compute lane)\n" );
+		return;
+	}
+	static const char *kSrc =
+		"#version 450\n"
+		"layout(local_size_x = 64) in;\n"
+		"layout(std430, binding = 0) buffer B { uint v[]; };\n"
+		"layout(push_constant) uniform PC { uint count; } pc;\n"
+		"void main() {\n"
+		"    uint i = gl_GlobalInvocationID.x;\n"
+		"    if ( i < pc.count ) { v[i] = v[i] * 2u; }\n"
+		"}\n";
+	ShaderHandle sh = CreateComputeShader( "cs_selftest", kSrc );
+	if ( sh == 0 ) {
+		common->Printf( "VK compute self-test: FAIL (compute shader did not compile)\n" );
+		return;
+	}
+	const int N = 256;
+	uint32_t seed[N];
+	for ( int i = 0; i < N; i++ ) { seed[i] = (uint32_t)i; }
+	BufferHandle buf = CreateBuffer( BU_STORAGE, N * (int)sizeof( uint32_t ), seed );
+	if ( buf == 0 ) {
+		common->Printf( "VK compute self-test: FAIL (storage buffer alloc)\n" );
+		return;
+	}
+
+	// check 1: raw seed survives buffer-create + readback (isolates the buffer path from compute)
+	uint32_t back[N];
+	bool ok = ReadBuffer( buf, back, N * (int)sizeof( uint32_t ) );
+	for ( int i = 0; ok && i < N; i++ ) {
+		if ( back[i] != (uint32_t)i ) {
+			common->Printf( "VK compute self-test: FAIL (seed round-trip at i=%d: %u != %d)\n", i, back[i], i );
+			ok = false;
+		}
+	}
+	if ( !ok ) { DestroyBuffer( buf ); return; }
+
+	// check 2: dispatch the doubling kernel, read back, verify data[i] == 2*i
+	uint32_t count = (uint32_t)N;
+	ComputeArgs ca = {};
+	ca.shader = sh;
+	ca.storage[0] = buf;
+	ca.pushConstants = &count;
+	ca.pushConstantSize = (int)sizeof( count );
+	ca.groupsX = ( N + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
+
+	DispatchSync( ca );
+	const bool readOk = ReadBuffer( buf, back, N * (int)sizeof( uint32_t ) );
+	int firstBad = -1;
+	for ( int i = 0; readOk && i < N; i++ ) {
+		if ( back[i] != (uint32_t)( 2 * i ) ) { firstBad = i; break; }
+	}
+	if ( !readOk ) {
+		common->Printf( "VK compute self-test: FAIL (readback failed)\n" );
+	} else if ( firstBad >= 0 ) {
+		// a no-op dispatch (null pipeline) leaves the seed untouched, so it also lands here
+		common->Printf( "VK compute self-test: FAIL (result at i=%d: %u != %d)\n", firstBad, back[firstBad], 2 * firstBad );
+	} else {
+		common->Printf( "VK compute self-test: PASS (%d elements doubled on the GPU)\n", N );
+	}
+	DestroyBuffer( buf );
 }
 
 /*
@@ -2092,8 +3439,11 @@ VkSampler VulkanBackend::GetSampler( int textureFilter, int textureRepeat, bool 
 		break;
 	case TF_LINEAR:
 		si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+		// NEAREST mip mode: an explicit textureLod picks the nearest discrete level
+		// (matches GL's GL_LINEAR_MIPMAP_NEAREST for the SSAO depth mip). maxLod stays
+		// 0 for non-mipped RTs; the mipped depth chain needs the whole range unclamped.
 		si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-		si.maxLod = 0.0f;
+		si.maxLod = hasMips ? VK_LOD_CLAMP_NONE : 0.0f;
 		break;
 	default:	// TF_DEFAULT: trilinear + anisotropy when the device has it
 		si.magFilter = si.minFilter = VK_FILTER_LINEAR;
@@ -2315,13 +3665,34 @@ void VulkanBackend::DestroyImage( ImageHandle h ) {
 	if ( device == VK_NULL_HANDLE || h < 1 || h > (ImageHandle)imageTable.size() || !imageTable[h - 1].live ) {
 		return;
 	}
-	// frames may still reference the view via this frame's descriptor sets;
-	// image churn happens at load boundaries, where a full stop is acceptable
-	vkDeviceWaitIdle( device );
+	// idImage::GenerateImage destroys then recreates dynamically-updated 2D images
+	// (scratch GUIs, video, menu logos) and can do so either between frames (front
+	// end reload) or mid-frame (a recording command buffer has already bound a
+	// descriptor set sampling this view). The two cases need different lifetimes:
+	//
+	//   * no frame open  -> vkDeviceWaitIdle waits every in-flight submission, so
+	//     the objects are safe to free immediately.
+	//   * frame open      -> vkDeviceWaitIdle does NOT wait for the still-recording
+	//     command buffer, so freeing the view here would pull it out from under a
+	//     live set and the GPU would sample a dead view on submit (VK_ERROR_DEVICE_
+	//     LOST). Defer to this slot's retire list (freed after its fence, once no
+	//     in-flight cb can reference it) exactly like RetireImage.
+	//
+	// (Deferring unconditionally is wrong between frames: EndFrame has already
+	// advanced frameIndex, so the retire list would drain on the wrong slot's
+	// fence, before the just-submitted frame that used the view has completed.)
 	ImageRec &rec = imageTable[h - 1];
-	if ( rec.view )  { vkDestroyImageView( device, rec.view, NULL ); }
-	if ( rec.image ) { vmaDestroyImage( vma, rec.image, rec.alloc ); }
+	if ( frameOpen ) {
+		retiredImages[frameIndex].push_back( { rec.image, rec.alloc, rec.view } );
+	} else {
+		vkDeviceWaitIdle( device );
+		if ( rec.view )  { vkDestroyImageView( device, rec.view, NULL ); }
+		if ( rec.image ) { vmaDestroyImage( vma, rec.image, rec.alloc ); }
+	}
 	rec = ImageRec();
+	// drop the cross-frame texture-set cache: any cached set keyed on handle h is
+	// now stale, and reusing the slot would otherwise sample the wrong texture.
+	InvalidateTextureSets();
 }
 
 /*
@@ -2340,6 +3711,7 @@ void VulkanBackend::RetireImage( ImageHandle h ) {
 	ImageRec &rec = imageTable[h - 1];
 	retiredImages[frameIndex].push_back( { rec.image, rec.alloc, rec.view } );
 	rec = ImageRec();
+	InvalidateTextureSets();	// handle h is now free for reuse; cached sets referencing it are stale
 }
 
 void VulkanBackend::DrainRetiredImages( int slot ) {
@@ -2353,15 +3725,44 @@ void VulkanBackend::DrainRetiredImages( int slot ) {
 
 /*
 ====================
+VulkanBackend::InvalidateTextureSets
+
+Drop the whole cross-frame texture-set cache. Called whenever an ImageHandle is
+retired (RetireImage) or a render target is destroyed (DestroyRenderTarget) —
+either recycles an imageTable slot, so any cached set that references it is now
+stale. The sets can't be freed here (this runs mid-frame; they may still be
+bound in this and the other in-flight command buffers), so they are queued on
+this slot's retire list and freed once its fence has passed, in BeginFrame.
+
+Coarse but correct, and never worse than the shipped baseline (which rebuilt
+every set every frame): on frames with no retirement the cache survives intact.
+====================
+*/
+void VulkanBackend::InvalidateTextureSets() {
+	if ( textureSetCache.empty() ) {
+		return;
+	}
+	for ( auto &kv : textureSetCache ) {
+		retiredTexSets[frameIndex].push_back( kv.second );
+	}
+	textureSetCache.clear();
+	// a retired set may be the one the last-bound fast path is holding; drop it
+	boundTexKey = 0;
+	boundTexSet = VK_NULL_HANDLE;
+}
+
+/*
+====================
 VulkanBackend::CreateCaptureImage
 
 Sampleable copy target for the M5 screen captures: RGBA8 (linear/clamp — the
-filtering GL sets after every capture) or the scene's depth-stencil format
-(nearest, sampled through a depth-aspect view). Contents are undefined until
-the first CopyFramebufferToImage.
+filtering GL sets after every capture), RGBA16F when hdrFloat (an HDR frame's
+_currentRender, so refraction samples the un-clamped float scene), or the
+scene's depth-stencil format (nearest, sampled through a depth-aspect view).
+Contents are undefined until the first CopyFramebufferToImage.
 ====================
 */
-ImageHandle VulkanBackend::CreateCaptureImage( int w, int h, bool depth ) {
+ImageHandle VulkanBackend::CreateCaptureImage( int w, int h, bool depth, bool hdrFloat ) {
 	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
 		return 0;
 	}
@@ -2372,7 +3773,8 @@ ImageHandle VulkanBackend::CreateCaptureImage( int w, int h, bool depth ) {
 	VkImageCreateInfo ici = {};
 	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	ici.imageType = VK_IMAGE_TYPE_2D;
-	ici.format = depth ? sceneDepthFormat : VK_FORMAT_R8G8B8A8_UNORM;
+	ici.format = depth ? sceneDepthFormat
+	           : ( hdrFloat ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM );
 	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
 	ici.mipLevels = 1;
 	ici.arrayLayers = 1;
@@ -2493,8 +3895,28 @@ void VulkanBackend::CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst );
 
 	if ( !depth ) {
-		// scene color sits in TRANSFER_SRC_OPTIMAL between passes; flip while
-		// blitting (reversed src y corners) to reach GL's bottom-up layout
+		// source = the active frame color (sceneColor, or the HDR buffer when a
+		// frame target is set). sceneColor rests in TRANSFER_SRC between passes; a
+		// sampled color target rests in SHADER_READ_ONLY, so round-trip it here.
+		VkImage       srcImg = FrameColorImage();
+		VkImageLayout between = FrameColorBetweenLayout();
+		const bool    needRT = ( between != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL );
+		if ( needRT ) {
+			VkImageMemoryBarrier b = {};
+			b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+			b.oldLayout = between;
+			b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+			b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			b.image = srcImg;
+			b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			b.subresourceRange.levelCount = 1;
+			b.subresourceRange.layerCount = 1;
+			vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+				0, 0, NULL, 0, NULL, 1, &b );
+		}
+		// flip while blitting (reversed src y corners) to reach GL's bottom-up layout
 		VkImageBlit blit = {};
 		blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		blit.srcSubresource.layerCount = 1;
@@ -2503,11 +3925,28 @@ void VulkanBackend::CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 		blit.dstSubresource = blit.srcSubresource;
 		blit.dstOffsets[0] = { dstX, dstY, 0 };
 		blit.dstOffsets[1] = { dstX + w, dstY + h, 1 };
-		vkCmdBlitImage( cb, sceneColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		vkCmdBlitImage( cb, srcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 			rec.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST );
+		if ( needRT ) {
+			VkImageMemoryBarrier b = {};
+			b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+			b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+			b.newLayout = between;
+			b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			b.image = srcImg;
+			b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			b.subresourceRange.levelCount = 1;
+			b.subresourceRange.layerCount = 1;
+			vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0, 0, NULL, 0, NULL, 1, &b );
+		}
 	} else {
-		// scene depth stays DEPTH_STENCIL_ATTACHMENT_OPTIMAL between passes;
-		// round-trip it through TRANSFER_SRC for the copy
+		// depth (sceneDepth, or the HDR buffer's depth-stencil when a frame target
+		// is set) stays DEPTH_STENCIL_ATTACHMENT_OPTIMAL between passes; round-trip
+		// it through TRANSFER_SRC for the copy
+		VkImage srcDepth = FrameDepthImage();
 		VkImageMemoryBarrier srcBar = {};
 		srcBar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		srcBar.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
@@ -2516,7 +3955,7 @@ void VulkanBackend::CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 		srcBar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 		srcBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		srcBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		srcBar.image = sceneDepth;
+		srcBar.image = srcDepth;
 		srcBar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
 		srcBar.subresourceRange.levelCount = 1;
 		srcBar.subresourceRange.layerCount = 1;
@@ -2530,7 +3969,7 @@ void VulkanBackend::CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 		c.dstSubresource = c.srcSubresource;
 		c.dstOffset = { dstX, dstY, 0 };
 		c.extent = { (uint32_t)w, (uint32_t)h, 1 };
-		vkCmdCopyImage( cb, sceneDepth, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		vkCmdCopyImage( cb, srcDepth, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 			rec.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c );
 
 		VkImageMemoryBarrier srcBack = srcBar;
@@ -2995,6 +4434,1228 @@ void VulkanBackend::DestroyShadowDummy( ShadowDummy &d ) {
 }
 
 /*
+===============================================================================
+
+	M7 render targets — depth shadow maps (docs/vulkan-backend.md M7)
+
+	Depth-only offscreen targets, 2D (projected/spot lights) or 6-face cube
+	(point lights). shadow_sm/shadow_sm_cube write the light's linear falloff to
+	gl_FragDepth, which interaction.frag compares against — an explicit [0,1]
+	value, so the GL/VK NDC-depth difference is irrelevant here. The one VK
+	nuance: the pass renders with a plain (non-Y-flipped) viewport, so the
+	projective (s/q, t/q) write reads back self-consistently, matching GL.
+
+===============================================================================
+*/
+
+// Shared LINEAR + clamp + LEQUAL-compare sampler for every shadow map (matches
+// GL3's per-target GL_COMPARE_REF_TO_TEXTURE / GL_LEQUAL / GL_LINEAR setup).
+VkSampler VulkanBackend::ShadowCompareSampler() {
+	if ( shadowCompareSampler == VK_NULL_HANDLE ) {
+		VkSamplerCreateInfo sci = {};
+		sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
+		sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+		sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		sci.compareEnable = VK_TRUE;
+		sci.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+		sci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;	// out-of-map = depth 1 = unshadowed
+		vkCheck( vkCreateSampler( device, &sci, NULL, &shadowCompareSampler ), "vkCreateSampler(shadow compare)" );
+	}
+	return shadowCompareSampler;
+}
+
+// The single depth-only render pass every shadow target shares: clear depth →
+// draw occluders → leave the image SHADER_READ_ONLY for sampling. Cube faces
+// are single-layer depth attachments, structurally identical to the 2D map.
+bool VulkanBackend::EnsureShadowPass() {
+	if ( shadowPass != VK_NULL_HANDLE ) {
+		return true;
+	}
+	VkAttachmentDescription att = {};
+	att.format = VK_FORMAT_D32_SFLOAT;
+	att.samples = VK_SAMPLE_COUNT_1_BIT;
+	att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	VkAttachmentReference depthRef = { 0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+	VkSubpassDescription sub = {};
+	sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	sub.pDepthStencilAttachment = &depthRef;
+
+	// prior sampling of last frame's map must finish before we overwrite it;
+	// our depth writes must be visible to the interaction pass that samples it
+	VkSubpassDependency deps[2] = {};
+	deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+	deps[0].dstSubpass = 0;
+	deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+	deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	deps[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	deps[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+	deps[1].srcSubpass = 0;
+	deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+	deps[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	deps[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+	deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+	VkRenderPassCreateInfo rpi = {};
+	rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+	rpi.attachmentCount = 1;
+	rpi.pAttachments = &att;
+	rpi.subpassCount = 1;
+	rpi.pSubpasses = &sub;
+	rpi.dependencyCount = 2;
+	rpi.pDependencies = deps;
+	return vkCheck( vkCreateRenderPass( device, &rpi, NULL, &shadowPass ), "vkCreateRenderPass(shadow)" );
+}
+
+// Allocate a depth image (2D or cube), its sample view + per-face render views,
+// framebuffer(s), and register the sampleable ImageRec. Returns false (and
+// leaves t clean) on failure.
+bool VulkanBackend::CreateDepthTarget( RenderTarget &t, int w, int h, bool cube ) {
+	if ( device == VK_NULL_HANDLE || !EnsureShadowPass() ) {
+		return false;
+	}
+	const int layers = cube ? 6 : 1;
+	t.cube = cube;
+	t.w = w;
+	t.h = h;
+	t.depthFormat = VK_FORMAT_D32_SFLOAT;
+
+	VkImageCreateInfo ici = {};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = t.depthFormat;
+	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.mipLevels = 1;
+	ici.arrayLayers = (uint32_t)layers;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &t.depthImage, &t.depthAlloc, NULL ), "vmaCreateImage(shadow map)" ) ) {
+		t = RenderTarget();
+		return false;
+	}
+
+	// sampled view: cube (all 6 layers) or plain 2D
+	VkImageViewCreateInfo vwi = {};
+	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vwi.image = t.depthImage;
+	vwi.viewType = cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D;
+	vwi.format = t.depthFormat;
+	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	vwi.subresourceRange.levelCount = 1;
+	vwi.subresourceRange.layerCount = (uint32_t)layers;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &t.sampleView ), "vkCreateImageView(shadow sample)" ) ) {
+		FreeTargetObjects( t );
+		t = RenderTarget();
+		return false;
+	}
+
+	// render view(s) + framebuffer(s). 2D reuses the sample view as its
+	// attachment; the cube needs one single-layer 2D view per face.
+	for ( int f = 0; f < layers; f++ ) {
+		VkImageView renderView = t.sampleView;
+		if ( cube ) {
+			VkImageViewCreateInfo fvi = vwi;
+			fvi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			fvi.subresourceRange.baseArrayLayer = (uint32_t)f;
+			fvi.subresourceRange.layerCount = 1;
+			if ( !vkCheck( vkCreateImageView( device, &fvi, NULL, &t.faceView[f] ), "vkCreateImageView(shadow face)" ) ) {
+				FreeTargetObjects( t );
+				t = RenderTarget();
+				return false;
+			}
+			renderView = t.faceView[f];
+		}
+		VkFramebufferCreateInfo fbi = {};
+		fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		fbi.renderPass = shadowPass;
+		fbi.attachmentCount = 1;
+		fbi.pAttachments = &renderView;
+		fbi.width = (uint32_t)w;
+		fbi.height = (uint32_t)h;
+		fbi.layers = 1;
+		if ( !vkCheck( vkCreateFramebuffer( device, &fbi, NULL, &t.fb[f] ), "vkCreateFramebuffer(shadow)" ) ) {
+			FreeTargetObjects( t );
+			t = RenderTarget();
+			return false;
+		}
+	}
+
+	// register the sampleable ImageRec (borrowed image/view — freed by the RT,
+	// not the generic image path). The descriptor writer binds it at unit 7/8.
+	ImageRec rec;
+	rec.image = t.depthImage;
+	rec.alloc = NULL;					// owned by the RenderTarget
+	rec.view = t.sampleView;			// owned by the RenderTarget
+	rec.sampler = ShadowCompareSampler();
+	rec.live = true;
+	rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	rec.isDepth = true;
+	rec.width = w;
+	rec.height = h;
+	t.sampleImage = 0;
+	for ( size_t i = 0; i < imageTable.size(); i++ ) {
+		if ( !imageTable[i].live ) {
+			imageTable[i] = rec;
+			t.sampleImage = (ImageHandle)( i + 1 );
+			break;
+		}
+	}
+	if ( t.sampleImage == 0 ) {
+		imageTable.push_back( rec );
+		t.sampleImage = (ImageHandle)imageTable.size();
+	}
+
+	t.live = true;
+	return true;
+}
+
+RenderTargetHandle VulkanBackend::CreateRenderTarget( ImageFormat fmt, int w, int h ) {
+	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
+		return 0;
+	}
+	// IF_DEPTH24 = a 2D shadow map (depth-only). IF_RGBA16F/IF_RGBA8 = a color-only
+	// target sampled as an ordinary texture: the HDR FXAA ping, and later the SSR
+	// march/history buffers. IF_DEPTH24_STENCIL8 (SSAO color+depth) still stubbed.
+	if ( fmt == IF_DEPTH24 ) {
+		int slot = AllocTargetSlot();
+		if ( !CreateDepthTarget( targetTable[slot], w, h, false ) ) {
+			targetTable[slot] = RenderTarget();
+			return 0;
+		}
+		return (RenderTargetHandle)( slot + 1 );
+	}
+	VkFormat cf = ( fmt == IF_RGBA16F ) ? VK_FORMAT_R16G16B16A16_SFLOAT
+	            : ( fmt == IF_R16F ) ? VK_FORMAT_R16_SFLOAT
+	            : ( fmt == IF_RGBA8 ) ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_UNDEFINED;
+	if ( cf == VK_FORMAT_UNDEFINED ) {
+		return 0;
+	}
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, cf, 1, /*ds*/false, /*frameCapable*/false ) ) {
+		targetTable[slot] = RenderTarget();
+		return 0;
+	}
+	return (RenderTargetHandle)( slot + 1 );
+}
+
+// SSAO Phase 1: a color target carrying a render-generated mip chain. Level 0 is a
+// normal color attachment (a fullscreen linearize pass renders into it); levels 1..N
+// are filled by a per-level max-downsample (BeginTargetMipPass + a downsample shader).
+// The whole chain is sampled with an explicit textureLod (see CreateColorTarget).
+RenderTargetHandle VulkanBackend::CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels ) {
+	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
+		return 0;
+	}
+	VkFormat cf = ( fmt == IF_RGBA16F ) ? VK_FORMAT_R16G16B16A16_SFLOAT
+	            : ( fmt == IF_R16F ) ? VK_FORMAT_R16_SFLOAT
+	            : ( fmt == IF_RGBA8 ) ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_UNDEFINED;
+	if ( cf == VK_FORMAT_UNDEFINED ) {
+		return 0;
+	}
+	// clamp the request to the image's real mip count (floor(log2(max(w,h))) + 1)
+	int maxLevels = 1;
+	for ( int d = ( w > h ? w : h ); d > 1; d >>= 1 ) { maxLevels++; }
+	if ( mipLevels < 1 ) { mipLevels = 1; }
+	if ( mipLevels > maxLevels ) { mipLevels = maxLevels; }
+	// the per-level view/framebuffer/input arrays are [MAX_MIP]; never index past them
+	if ( mipLevels > RenderTarget::MAX_MIP ) { mipLevels = RenderTarget::MAX_MIP; }
+
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, cf, 1, /*ds*/false, /*frameCapable*/false, mipLevels ) ) {
+		targetTable[slot] = RenderTarget();
+		return 0;
+	}
+	return (RenderTargetHandle)( slot + 1 );
+}
+
+// Begin a fullscreen pass rendering into mip LEVEL of a mipped color target (level >= 1;
+// level 0 is the linearize pass via BeginTargetPass). Uses the level's own framebuffer.
+// The color-target render pass's external dependencies serialize this write against the
+// previous frame's ssao.frag reads of this level (WAR) and make the just-written source
+// level visible to the next level's sample — so no manual barriers are needed.
+void VulkanBackend::BeginTargetMipPass( RenderTargetHandle rt, int level, const ClearArgs *clear ) {
+	if ( !frameOpen || skipFrame ) {
+		return;
+	}
+	RenderTarget *t = LookupTarget( rt );
+	if ( t == NULL || !t->colorTarget || level < 1 || level >= t->colorMipLevels
+	     || t->colorLevelFb[level] == VK_NULL_HANDLE ) {
+		if ( frameOpen ) { fakePassDepth++; }		// balance the caller's EndPass
+		return;
+	}
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );
+		insideScenePass = false;
+	}
+	const int lw = ( ( t->w >> level ) > 1 ) ? ( t->w >> level ) : 1;
+	const int lh = ( ( t->h >> level ) > 1 ) ? ( t->h >> level ) : 1;
+	VkClearValue cv = {};
+	if ( clear != NULL && clear->color ) {
+		cv.color.float32[0] = clear->rgba[0]; cv.color.float32[1] = clear->rgba[1];
+		cv.color.float32[2] = clear->rgba[2]; cv.color.float32[3] = clear->rgba[3];
+	}
+	VkRenderPassBeginInfo rbi = {};
+	rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	rbi.renderPass = t->colorClearPass;
+	rbi.framebuffer = t->colorLevelFb[level];
+	rbi.renderArea.extent = { (uint32_t)lw, (uint32_t)lh };
+	rbi.clearValueCount = 1;
+	rbi.pClearValues = &cv;
+	vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
+	EnterTargetPass( lw, lh, /*flipY*/true, t->colorClearPass, t->passClass, 1 );
+	t->everWritten = true;
+}
+
+// A single-level sampleable handle for one mip level, to feed as the downsample source.
+ImageHandle VulkanBackend::GetRenderTargetMipImage( RenderTargetHandle rt, int mipLevel ) {
+	RenderTarget *t = LookupTarget( rt );
+	if ( t == NULL || !t->colorTarget || mipLevel < 0 || mipLevel >= t->colorMipLevels ) {
+		return 0;
+	}
+	return t->colorLevelInput[mipLevel];
+}
+
+RenderTargetHandle VulkanBackend::CreateRenderTargetCube( ImageFormat fmt, int size ) {
+	if ( device == VK_NULL_HANDLE || size <= 0 ) {
+		return 0;
+	}
+	if ( fmt != IF_DEPTH24 ) {
+		return 0;
+	}
+	int slot = -1;
+	for ( size_t i = 0; i < targetTable.size(); i++ ) {
+		if ( !targetTable[i].live ) { slot = (int)i; break; }
+	}
+	if ( slot < 0 ) {
+		targetTable.push_back( RenderTarget() );
+		slot = (int)targetTable.size() - 1;
+	}
+	if ( !CreateDepthTarget( targetTable[slot], size, size, true ) ) {
+		return 0;
+	}
+	return (RenderTargetHandle)( slot + 1 );
+}
+
+ImageHandle VulkanBackend::GetRenderTargetImage( RenderTargetHandle rt ) {
+	if ( rt != 0 && rt == mergeNormalTarget ) {
+		return mergeNormalSampleImage;		// merged SSAO normal (no targetTable entry)
+	}
+	RenderTarget *t = LookupTarget( rt );
+	if ( t == NULL ) {
+		return 0;
+	}
+	return t->colorTarget ? t->colorSampleImage[0] : t->sampleImage;
+}
+
+// stash the interrupted scene viewport, point the dynamic viewport/scissor at
+// the target, and mark the target pass open. Shared tail of every BeginTargetPass
+// / BeginCubeFacePass. flipY: shadow maps render un-flipped (projective read/write
+// self-consistency); color targets render flipped like the scene (their fullscreen
+// resolve samples them 1:1 back onto sceneColor).
+void VulkanBackend::EnterTargetPass( int w, int h, bool flipY, VkRenderPass pipePass,
+                                     uint8_t passClass, int colorAtt ) {
+	memcpy( savedVpRect, vpRect, sizeof( vpRect ) );
+	memcpy( savedScRect, scRect, sizeof( scRect ) );
+	vpRect[0] = 0; vpRect[1] = 0; vpRect[2] = w; vpRect[3] = h;
+	scRect[0] = 0; scRect[1] = 0; scRect[2] = w; scRect[3] = h;
+	curRenderH = h;
+	curFlipY = flipY;
+	curPipelinePass = pipePass;
+	curPassClass = passClass;
+	curColorAtt = colorAtt;
+	insideTargetPass = true;
+	dynStateDirty = true;
+}
+
+// begin an offscreen pass into a target. 2D depth (shadow map) and color (the HDR
+// FXAA ping, later SSAO/SSR fullscreen buffers) both route here; cube depth faces
+// go through BeginCubeFacePass. Suspends the scene pass; the scene resumes on the
+// next Draw's EnsureScenePass (or this target's EndPass).
+void VulkanBackend::BeginTargetPass( RenderTargetHandle rt, const ClearArgs *clear ) {
+	if ( !frameOpen || skipFrame ) {
+		return;
+	}
+	RenderTarget *t = LookupTarget( rt );
+	if ( t == NULL || t->cube ) {
+		if ( frameOpen ) { fakePassDepth++; }	// invalid / wrong entry point → balance the EndPass
+		return;
+	}
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );				// suspend the scene pass
+		insideScenePass = false;
+	}
+
+	VkRenderPassBeginInfo rbi = {};
+	rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	rbi.renderArea.extent = { (uint32_t)t->w, (uint32_t)t->h };
+
+	if ( t->colorTarget ) {
+		// clear each color attachment (fullscreen draws overwrite it anyway) + ds
+		VkClearValue cv[3] = {};
+		if ( clear != NULL && clear->color ) {
+			for ( int c = 0; c < t->colorCount; c++ ) {
+				cv[c].color.float32[0] = clear->rgba[0]; cv[c].color.float32[1] = clear->rgba[1];
+				cv[c].color.float32[2] = clear->rgba[2]; cv[c].color.float32[3] = clear->rgba[3];
+			}
+		}
+		if ( t->hasDepth ) { cv[t->colorCount].depthStencil.depth = 1.0f; }
+		rbi.renderPass = t->colorClearPass;
+		rbi.framebuffer = t->colorFb;
+		rbi.clearValueCount = (uint32_t)( t->colorCount + ( t->hasDepth ? 1 : 0 ) );
+		rbi.pClearValues = cv;
+		vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
+		EnterTargetPass( t->w, t->h, /*flipY*/true, t->colorClearPass, t->passClass, t->colorCount );
+		t->everWritten = true;
+	} else {
+		VkClearValue cv = {};
+		cv.depthStencil.depth = 1.0f;
+		rbi.renderPass = shadowPass;
+		rbi.framebuffer = t->fb[0];
+		rbi.clearValueCount = 1;
+		rbi.pClearValues = &cv;
+		vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
+		EnterTargetPass( t->w, t->h, /*flipY*/false, shadowPass, /*PC_SHADOW*/1, /*colorAtt*/0 );
+	}
+}
+
+void VulkanBackend::BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear ) {
+	if ( !frameOpen || skipFrame ) {
+		return;
+	}
+	RenderTarget *t = LookupTarget( rt );
+	if ( t == NULL || !t->cube || face < 0 || face > 5 ) {
+		if ( frameOpen ) { fakePassDepth++; }
+		return;
+	}
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );
+		insideScenePass = false;
+	}
+	VkClearValue cv = {};
+	cv.depthStencil.depth = 1.0f;
+	VkRenderPassBeginInfo rbi = {};
+	rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	rbi.renderPass = shadowPass;
+	rbi.framebuffer = t->fb[face];
+	rbi.renderArea.extent = { (uint32_t)t->w, (uint32_t)t->h };
+	rbi.clearValueCount = 1;
+	rbi.pClearValues = &cv;
+	vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
+
+	EnterTargetPass( t->w, t->h, /*flipY*/false, shadowPass, /*PC_SHADOW*/1, /*colorAtt*/0 );
+}
+
+// free a target's Vulkan objects (framebuffers, views, image). Never touches
+// the imageTable slot — that is cleared eagerly by DestroyRenderTarget so no
+// new draw samples a target being torn down.
+void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
+	for ( int f = 0; f < 6; f++ ) {
+		if ( t.fb[f] )       { vkDestroyFramebuffer( device, t.fb[f], NULL ); t.fb[f] = VK_NULL_HANDLE; }
+	}
+	for ( int f = 0; f < 6; f++ ) {
+		if ( t.faceView[f] ) { vkDestroyImageView( device, t.faceView[f], NULL ); t.faceView[f] = VK_NULL_HANDLE; }
+	}
+	if ( t.sampleView )      { vkDestroyImageView( device, t.sampleView, NULL ); t.sampleView = VK_NULL_HANDLE; }
+	if ( t.depthImage )      { vmaDestroyImage( vma, t.depthImage, t.depthAlloc ); t.depthImage = VK_NULL_HANDLE; t.depthAlloc = NULL; }
+
+	// color-target resources
+	if ( t.colorFb )         { vkDestroyFramebuffer( device, t.colorFb, NULL ); t.colorFb = VK_NULL_HANDLE; }
+	if ( t.colorClearPass )  { vkDestroyRenderPass( device, t.colorClearPass, NULL ); t.colorClearPass = VK_NULL_HANDLE; }
+	if ( t.colorLoadPass )   { vkDestroyRenderPass( device, t.colorLoadPass, NULL ); t.colorLoadPass = VK_NULL_HANDLE; }
+	if ( t.colorClearDSPass ){ vkDestroyRenderPass( device, t.colorClearDSPass, NULL ); t.colorClearDSPass = VK_NULL_HANDLE; }
+	// SSAO Phase 1 mip chain per-level views + framebuffers (L >= 1; L 0 = colorView[0])
+	for ( int L = 1; L < RenderTarget::MAX_MIP; L++ ) {
+		if ( t.colorLevelFb[L] )   { vkDestroyFramebuffer( device, t.colorLevelFb[L], NULL ); t.colorLevelFb[L] = VK_NULL_HANDLE; }
+		if ( t.colorLevelView[L] ) { vkDestroyImageView( device, t.colorLevelView[L], NULL ); t.colorLevelView[L] = VK_NULL_HANDLE; }
+	}
+	for ( int c = 0; c < 2; c++ ) {
+		if ( t.colorSampleView[c] ) { vkDestroyImageView( device, t.colorSampleView[c], NULL ); t.colorSampleView[c] = VK_NULL_HANDLE; }
+		if ( t.colorView[c] )  { vkDestroyImageView( device, t.colorView[c], NULL ); t.colorView[c] = VK_NULL_HANDLE; }
+		if ( t.colorImage[c] ) { vmaDestroyImage( vma, t.colorImage[c], t.colorAlloc[c] ); t.colorImage[c] = VK_NULL_HANDLE; t.colorAlloc[c] = NULL; }
+	}
+	if ( t.dsView )          { vkDestroyImageView( device, t.dsView, NULL ); t.dsView = VK_NULL_HANDLE; }
+	if ( t.dsImage )         { vmaDestroyImage( vma, t.dsImage, t.dsAlloc ); t.dsImage = VK_NULL_HANDLE; t.dsAlloc = NULL; }
+}
+
+// free every imageTable slot a target lent out (depth sample + color samples)
+void VulkanBackend::ReleaseTargetSampleSlots( RenderTarget &t ) {
+	ImageHandle handles[3] = { t.sampleImage, t.colorSampleImage[0], t.colorSampleImage[1] };
+	for ( int i = 0; i < 3; i++ ) {
+		ImageHandle h = handles[i];
+		if ( h >= 1 && h <= (ImageHandle)imageTable.size() ) {
+			imageTable[h - 1] = ImageRec();
+			imageTable[h - 1].live = false;
+		}
+	}
+	// SSAO Phase 1: per-level source handles
+	for ( int L = 0; L < RenderTarget::MAX_MIP; L++ ) {
+		ImageHandle h = t.colorLevelInput[L];
+		if ( h >= 1 && h <= (ImageHandle)imageTable.size() ) {
+			imageTable[h - 1] = ImageRec();
+			imageTable[h - 1].live = false;
+		}
+		t.colorLevelInput[L] = 0;
+	}
+	t.sampleImage = 0;
+	t.colorSampleImage[0] = t.colorSampleImage[1] = 0;
+}
+
+void VulkanBackend::DestroyRenderTarget( RenderTargetHandle rt ) {
+	RenderTarget *t = LookupTarget( rt );
+	if ( t == NULL ) {
+		return;
+	}
+	// stop new draws from sampling it immediately (the ImageRec slots are freed
+	// for reuse). The shadow caches evict mid-frame, so when a frame is recording
+	// defer the Vulkan-object destruction to this slot's retire list (freed after
+	// its fence, once no in-flight cb can reference the sample views). Between
+	// frames frameIndex has already advanced, so the retire list would drain on
+	// the wrong fence — waitIdle + free immediately instead (same reasoning as
+	// DestroyImage).
+	ReleaseTargetSampleSlots( *t );
+	if ( frameOpen ) {
+		retiredTargets[frameIndex].push_back( *t );
+	} else {
+		vkDeviceWaitIdle( device );
+		FreeTargetObjects( *t );
+	}
+	*t = RenderTarget();		// free the target-table slot
+	InvalidateTextureSets();	// a freed sample handle may be cached in a texture set (shadow unit 7/8, HDR unit 0)
+}
+
+void VulkanBackend::DrainRetiredTargets( int slot ) {
+	for ( size_t i = 0; i < retiredTargets[slot].size(); i++ ) {
+		FreeTargetObjects( retiredTargets[slot][i] );
+	}
+	retiredTargets[slot].clear();
+}
+
+// teardown: device is idle. Free every retired + live target and the shared
+// pass/sampler, and clear their imageTable slots.
+void VulkanBackend::DestroyAllTargets() {
+	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
+		DrainRetiredTargets( slot );
+	}
+	for ( size_t i = 0; i < targetTable.size(); i++ ) {
+		RenderTarget &t = targetTable[i];
+		if ( !t.live ) {
+			continue;
+		}
+		ReleaseTargetSampleSlots( t );
+		FreeTargetObjects( t );
+		t = RenderTarget();
+	}
+	targetTable.clear();
+	if ( shadowPass )           { vkDestroyRenderPass( device, shadowPass, NULL ); shadowPass = VK_NULL_HANDLE; }
+	if ( shadowCompareSampler ) { vkDestroySampler( device, shadowCompareSampler, NULL ); shadowCompareSampler = VK_NULL_HANDLE; }
+}
+
+/*
+===============================================================================
+
+	M7 color render targets — HDR scene buffer (docs/hdr-pipeline.md, r_hdr)
+
+	A color target carries 1-2 sampleable color attachments (+ optional depth-
+	stencil) and, unlike the depth shadow maps, is *sampled* as an ordinary
+	texture after being rendered into. Its render passes therefore end the color
+	attachment in SHADER_READ_ONLY so the descriptor path (which assumes that
+	layout) binds it with no special case; the load-pass initialLayout is the same
+	SHADER_READ_ONLY, so the between-pass round-trip is render-pass-managed.
+
+	The HDR scene buffer is a *frame* target (SetFrameTarget): the whole scene
+	renders into an RGBA16F color + depth-stencil target across the usual
+	clear / clearDS / load pass sequence, then hdrresolve.frag samples it back
+	onto the swapchain sceneColor. Colour is float, so fog/gradient banding is
+	gone; matches the GL3 path exactly.
+
+===============================================================================
+*/
+
+// format signature -> pipeline-key pass class. Scene pipelines rendered into the
+// RGBA8 swapchain path (class 0) and the RGBA16F HDR buffer (class 2) are render-
+// pass-incompatible (different color format), so they must be distinct cache keys.
+uint8_t VulkanBackend::PassClassFor( VkFormat colorFmt, bool hasDepth, int colorCount ) const {
+	if ( colorFmt == VK_FORMAT_R16G16B16A16_SFLOAT ) {
+		return hasDepth ? 2 : 3;			// HDR scene buffer / RGBA16F color-only (AA ping, SSR)
+	}
+	if ( colorFmt == VK_FORMAT_R16_SFLOAT ) {
+		return 7;							// single-channel half-float (SSAO linear-depth mip, Phase 2)
+	}
+	// RGBA8 family (SSAO buffers later)
+	if ( !hasDepth )      { return 4; }		// color-only RGBA8
+	return colorCount >= 2 ? 6 : 5;			// color+depth (+MRT)
+}
+
+// The per-target render passes. colorClearPass always; the load/clearDS variants
+// only for a frame target (a nested one-shot target never re-loads its content).
+bool VulkanBackend::BuildColorPasses( RenderTarget &t, bool frameCapable ) {
+	const int nColor = t.colorCount;
+	const int variants = frameCapable ? 3 : 1;		// 0=clear, 1=load, 2=clearDS
+	for ( int v = 0; v < variants; v++ ) {
+		const bool clearColor = ( v == 0 );			// clear resets color; load/clearDS keep it
+		const bool clearDS    = ( v == 0 || v == 2 );
+
+		VkAttachmentDescription atts[3] = {};
+		VkAttachmentReference   colorRefs[2] = {};
+		for ( int c = 0; c < nColor; c++ ) {
+			atts[c].format = t.colorFormat;
+			atts[c].samples = VK_SAMPLE_COUNT_1_BIT;
+			atts[c].loadOp = clearColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+			atts[c].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			atts[c].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			atts[c].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			atts[c].initialLayout = clearColor ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			atts[c].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			colorRefs[c].attachment = (uint32_t)c;
+			colorRefs[c].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		}
+		VkAttachmentReference depthRef = { (uint32_t)nColor, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+		if ( t.hasDepth ) {
+			VkAttachmentDescription &d = atts[nColor];
+			d.format = sceneDepthFormat;
+			d.samples = VK_SAMPLE_COUNT_1_BIT;
+			d.loadOp = clearDS ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+			d.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			d.stencilLoadOp = clearDS ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+			d.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+			d.initialLayout = clearDS ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+			d.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		}
+
+		VkSubpassDescription sub = {};
+		sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		sub.colorAttachmentCount = (uint32_t)nColor;
+		sub.pColorAttachments = colorRefs;
+		sub.pDepthStencilAttachment = t.hasDepth ? &depthRef : NULL;
+
+		// prior sample of this target (last pass / last frame) must finish before we
+		// overwrite it; our writes must be visible to whoever samples it next
+		VkSubpassDependency deps[2] = {};
+		deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+		deps[0].dstSubpass = 0;
+		deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+		                     | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+		deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+		                     | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+		deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+		                      | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+		deps[1].srcSubpass = 0;
+		deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+		deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+		deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+
+		VkRenderPassCreateInfo rpi = {};
+		rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		rpi.attachmentCount = (uint32_t)( nColor + ( t.hasDepth ? 1 : 0 ) );
+		rpi.pAttachments = atts;
+		rpi.subpassCount = 1;
+		rpi.pSubpasses = &sub;
+		rpi.dependencyCount = 2;
+		rpi.pDependencies = deps;
+
+		VkRenderPass *dst = ( v == 0 ) ? &t.colorClearPass : ( v == 1 ? &t.colorLoadPass : &t.colorClearDSPass );
+		if ( !vkCheck( vkCreateRenderPass( device, &rpi, NULL, dst ), "vkCreateRenderPass(color target)" ) ) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat colorFmt,
+                                       int colorCount, bool wantDepthStencil, bool frameCapable,
+                                       int mipLevels ) {
+	if ( device == VK_NULL_HANDLE || colorCount < 1 || colorCount > 2 ) {
+		return false;
+	}
+	if ( wantDepthStencil && sceneDepthFormat == VK_FORMAT_UNDEFINED ) {
+		return false;
+	}
+	if ( mipLevels < 1 ) { mipLevels = 1; }
+	const bool mipped = mipLevels > 1;
+	t.colorTarget = true;
+	t.colorCount = colorCount;
+	t.colorFormat = colorFmt;
+	t.hasDepth = wantDepthStencil;
+	t.colorMipLevels = mipLevels;
+	t.w = w;
+	t.h = h;
+	t.passClass = PassClassFor( colorFmt, wantDepthStencil, colorCount );
+
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+
+	for ( int c = 0; c < colorCount; c++ ) {
+		VkImageCreateInfo ici = {};
+		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		ici.imageType = VK_IMAGE_TYPE_2D;
+		ici.format = colorFmt;
+		ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+		ici.mipLevels = (uint32_t)mipLevels;
+		ici.arrayLayers = 1;
+		ici.samples = VK_SAMPLE_COUNT_1_BIT;
+		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+		// SAMPLED: read back by the resolve/next feature; TRANSFER_SRC: the M5
+		// _currentRender capture blits from it while this is the frame target. The SSAO
+		// Phase 1 mip chain renders each level as a COLOR_ATTACHMENT (already set), so no
+		// transfer-dst is needed — coarse levels are drawn by a downsample shader.
+		ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+		          | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &t.colorImage[c], &t.colorAlloc[c], NULL ),
+		               "vmaCreateImage(color target)" ) ) {
+			FreeTargetObjects( t );
+			return false;
+		}
+		// level-0-only view: the framebuffer attachment (fullscreen draws write level 0).
+		VkImageViewCreateInfo vwi = {};
+		vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		vwi.image = t.colorImage[c];
+		vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		vwi.format = colorFmt;
+		vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		vwi.subresourceRange.levelCount = 1;
+		vwi.subresourceRange.layerCount = 1;
+		if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &t.colorView[c] ), "vkCreateImageView(color target)" ) ) {
+			FreeTargetObjects( t );
+			return false;
+		}
+		// all-levels sample view: ssao.frag textureLods coarser mips through this.
+		// Single-mip targets reuse colorView[c] (colorSampleView stays null).
+		if ( mipped ) {
+			VkImageViewCreateInfo svi = vwi;
+			svi.subresourceRange.levelCount = (uint32_t)mipLevels;
+			if ( !vkCheck( vkCreateImageView( device, &svi, NULL, &t.colorSampleView[c] ), "vkCreateImageView(color mip sample)" ) ) {
+				FreeTargetObjects( t );
+				return false;
+			}
+		}
+	}
+
+	if ( wantDepthStencil ) {
+		VkImageCreateInfo ici = {};
+		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		ici.imageType = VK_IMAGE_TYPE_2D;
+		ici.format = sceneDepthFormat;
+		ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+		ici.mipLevels = 1;
+		ici.arrayLayers = 1;
+		ici.samples = VK_SAMPLE_COUNT_1_BIT;
+		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+		ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &t.dsImage, &t.dsAlloc, NULL ), "vmaCreateImage(target ds)" ) ) {
+			FreeTargetObjects( t );
+			return false;
+		}
+		VkImageViewCreateInfo vwi = {};
+		vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		vwi.image = t.dsImage;
+		vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		vwi.format = sceneDepthFormat;
+		vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+		vwi.subresourceRange.levelCount = 1;
+		vwi.subresourceRange.layerCount = 1;
+		if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &t.dsView ), "vkCreateImageView(target ds)" ) ) {
+			FreeTargetObjects( t );
+			return false;
+		}
+	}
+
+	if ( !BuildColorPasses( t, frameCapable ) ) {
+		FreeTargetObjects( t );
+		return false;
+	}
+
+	VkImageView views[3] = {};
+	int nv = 0;
+	for ( int c = 0; c < colorCount; c++ ) { views[nv++] = t.colorView[c]; }
+	if ( wantDepthStencil ) { views[nv++] = t.dsView; }
+	VkFramebufferCreateInfo fbi = {};
+	fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+	fbi.renderPass = t.colorClearPass;		// compatible with the load/clearDS variants
+	fbi.attachmentCount = (uint32_t)nv;
+	fbi.pAttachments = views;
+	fbi.width = (uint32_t)w;
+	fbi.height = (uint32_t)h;
+	fbi.layers = 1;
+	if ( !vkCheck( vkCreateFramebuffer( device, &fbi, NULL, &t.colorFb ), "vkCreateFramebuffer(color target)" ) ) {
+		FreeTargetObjects( t );
+		return false;
+	}
+
+	// register each color attachment as a sampleable ImageRec (SHADER_READ_ONLY,
+	// linear/clamp — the resolve samples 1:1). Views/images owned by the target.
+	for ( int c = 0; c < colorCount; c++ ) {
+		ImageRec rec;
+		rec.image = t.colorImage[c];
+		rec.alloc = NULL;
+		// mipped targets sample the whole chain (all-levels view + a maxLod-unclamped,
+		// NEAREST-mip sampler so an explicit textureLod reaches every coarse level; the
+		// plain TF_LINEAR sampler clamps maxLod to 0 and would pin every fetch to mip 0).
+		rec.view = mipped ? t.colorSampleView[c] : t.colorView[c];
+		rec.sampler = GetSampler( TF_LINEAR, TR_CLAMP, mipped );
+		rec.live = true;
+		rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		rec.isDepth = false;
+		rec.isColorTarget = true;
+		rec.width = w;
+		rec.height = h;
+		ImageHandle handle = 0;
+		for ( size_t i = 0; i < imageTable.size(); i++ ) {
+			if ( !imageTable[i].live ) { imageTable[i] = rec; handle = (ImageHandle)( i + 1 ); break; }
+		}
+		if ( handle == 0 ) {
+			imageTable.push_back( rec );
+			handle = (ImageHandle)imageTable.size();
+		}
+		t.colorSampleImage[c] = handle;
+	}
+
+	// SSAO Phase 1 mip chain: per-level single-level views (attachment + downsample
+	// source), a framebuffer per level 1..N-1 to render the max-downsample into, and a
+	// single-level ImageRec per level so it can be bound as the next level's source.
+	// Level 0 reuses colorView[0] (its framebuffer is colorFb, the linearize target).
+	if ( mipped ) {
+		for ( int L = 0; L < mipLevels; L++ ) {
+			const int lw = ( ( w >> L ) > 1 ) ? ( w >> L ) : 1;
+			const int lh = ( ( h >> L ) > 1 ) ? ( h >> L ) : 1;
+			VkImageView lv = t.colorView[0];
+			if ( L > 0 ) {
+				VkImageViewCreateInfo lvi = {};
+				lvi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+				lvi.image = t.colorImage[0];
+				lvi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+				lvi.format = colorFmt;
+				lvi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+				lvi.subresourceRange.baseMipLevel = (uint32_t)L;
+				lvi.subresourceRange.levelCount = 1;
+				lvi.subresourceRange.layerCount = 1;
+				if ( !vkCheck( vkCreateImageView( device, &lvi, NULL, &t.colorLevelView[L] ), "vkCreateImageView(mip level)" ) ) {
+					FreeTargetObjects( t );
+					return false;
+				}
+				lv = t.colorLevelView[L];
+				VkFramebufferCreateInfo lfb = {};
+				lfb.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+				lfb.renderPass = t.colorClearPass;		// compatible: same format, 1 color, no depth
+				lfb.attachmentCount = 1;
+				lfb.pAttachments = &lv;
+				lfb.width = (uint32_t)lw;
+				lfb.height = (uint32_t)lh;
+				lfb.layers = 1;
+				if ( !vkCheck( vkCreateFramebuffer( device, &lfb, NULL, &t.colorLevelFb[L] ), "vkCreateFramebuffer(mip level)" ) ) {
+					FreeTargetObjects( t );
+					return false;
+				}
+			}
+			// a single-level sampleable ImageRec so this level can feed the next as a
+			// downsample source (texelFetch lod 0; NEAREST, no filtering). isColorTarget
+			// is left false — the downsample reads by absolute texel, not the flipped quad.
+			ImageRec rec;
+			rec.image = t.colorImage[0];
+			rec.alloc = NULL;
+			rec.view = lv;
+			rec.sampler = GetSampler( TF_NEAREST, TR_CLAMP, false );
+			rec.live = true;
+			rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			rec.isColorTarget = false;
+			rec.width = lw;
+			rec.height = lh;
+			ImageHandle lh2 = 0;
+			for ( size_t i = 0; i < imageTable.size(); i++ ) {
+				if ( !imageTable[i].live ) { imageTable[i] = rec; lh2 = (ImageHandle)( i + 1 ); break; }
+			}
+			if ( lh2 == 0 ) { imageTable.push_back( rec ); lh2 = (ImageHandle)imageTable.size(); }
+			t.colorLevelInput[L] = lh2;
+		}
+	}
+
+	t.everWritten = false;
+	t.live = true;
+	return true;
+}
+
+// slot allocation shared by every Create* entry point
+int VulkanBackend::AllocTargetSlot() {
+	for ( size_t i = 0; i < targetTable.size(); i++ ) {
+		if ( !targetTable[i].live ) { return (int)i; }
+	}
+	targetTable.push_back( RenderTarget() );
+	return (int)targetTable.size() - 1;
+}
+
+RenderTargetHandle VulkanBackend::CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h ) {
+	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
+		return 0;
+	}
+	VkFormat cf = ( fmt == IF_RGBA16F ) ? VK_FORMAT_R16G16B16A16_SFLOAT
+	            : ( fmt == IF_RGBA8 ) ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_UNDEFINED;
+	if ( cf == VK_FORMAT_UNDEFINED ) {
+		common->Warning( "VK CreateRenderTargetColorDepthStencil: only IF_RGBA8/IF_RGBA16F supported" );
+		return 0;
+	}
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, cf, 1, /*ds*/true, /*frameCapable*/true ) ) {
+		targetTable[slot] = RenderTarget();
+		return 0;
+	}
+	common->DPrintf( "VK: created %dx%d %s color+depth-stencil frame target (handle %d)\n",
+		w, h, fmt == IF_RGBA16F ? "RGBA16F" : "RGBA8", slot + 1 );
+	return (RenderTargetHandle)( slot + 1 );
+}
+
+// color + depth(-stencil) target for a depth-tested offscreen geometry pass (the
+// SSAO normal G-buffer). colorCount 2 adds a second RGBA8 attachment (SSR
+// material MRT, GetRenderTargetImage2). Rendered via BeginTargetPass, single-pass,
+// the depth attachment written/tested but not sampled. Uses sceneDepthFormat
+// (carries an unused stencil vs GL's DEPTH_COMPONENT24 — harmless).
+RenderTargetHandle VulkanBackend::CreateRenderTargetColorDepth( ImageFormat fmt, int w, int h, int colorCount ) {
+	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
+		return 0;
+	}
+	if ( fmt != IF_RGBA8 ) {
+		common->Warning( "VK CreateRenderTargetColorDepth: only IF_RGBA8 supported" );
+		return 0;
+	}
+	if ( colorCount < 1 || colorCount > 2 ) {
+		common->Warning( "VK CreateRenderTargetColorDepth: colorCount must be 1 or 2" );
+		return 0;
+	}
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R8G8B8A8_UNORM, colorCount, /*ds*/true, /*frameCapable*/false ) ) {
+		targetTable[slot] = RenderTarget();
+		return 0;
+	}
+	common->DPrintf( "VK: created %dx%d RGBA8 color+depth render target (handle %d, %d color)\n",
+		w, h, slot + 1, colorCount );
+	return (RenderTargetHandle)( slot + 1 );
+}
+
+ImageHandle VulkanBackend::GetRenderTargetImage2( RenderTargetHandle rt ) {
+	if ( rt != 0 && rt == mergeNormalTarget ) {
+		return mergeMatSampleImage;			// merged SSR material MRT (no targetTable entry)
+	}
+	RenderTarget *t = LookupTarget( rt );
+	return ( t && t->colorCount >= 2 ) ? t->colorSampleImage[1] : 0;
+}
+
+// the color/depth image the current frame target resolves to (for M5 captures)
+VkImage VulkanBackend::FrameColorImage() const {
+	if ( frameTarget != 0 ) {
+		const RenderTarget &t = targetTable[frameTarget - 1];
+		if ( t.live && t.colorTarget ) { return t.colorImage[0]; }
+	}
+	return sceneColor;
+}
+VkImageLayout VulkanBackend::FrameColorBetweenLayout() const {
+	// a sampled color target rests in SHADER_READ_ONLY between passes; the
+	// swapchain sceneColor rests in TRANSFER_SRC (its render passes' finalLayout)
+	if ( frameTarget != 0 ) {
+		const RenderTarget &t = targetTable[frameTarget - 1];
+		if ( t.live && t.colorTarget ) { return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; }
+	}
+	return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+}
+VkImage VulkanBackend::FrameDepthImage() const {
+	if ( frameTarget != 0 ) {
+		const RenderTarget &t = targetTable[frameTarget - 1];
+		if ( t.live && t.hasDepth ) { return t.dsImage; }
+	}
+	return sceneDepth;
+}
+VkImageView VulkanBackend::FrameDepthView() const {
+	if ( frameTarget != 0 ) {
+		const RenderTarget &t = targetTable[frameTarget - 1];
+		if ( t.live && t.hasDepth ) { return t.dsView; }
+	}
+	return sceneDepthView;
+}
+
+// SSAO normal-pass merge (docs/ssao-normal-merge.md). A dedicated handle special-cased
+// in GetRenderTargetImage so BindRTUnit works without a targetTable entry (the merged
+// normal owns its own image/pass/fb, freed by DestroyMergeNormal — no double-free).
+static const rhi::RenderTargetHandle MERGE_NORMAL_HANDLE = 0x7FFF0001u;
+
+void VulkanBackend::DestroyMergeNormal() {
+	if ( mergeNormalFb )    { vkDestroyFramebuffer( device, mergeNormalFb, NULL ); mergeNormalFb = VK_NULL_HANDLE; }
+	if ( mergeNormalPass )  { vkDestroyRenderPass( device, mergeNormalPass, NULL ); mergeNormalPass = VK_NULL_HANDLE; }
+	if ( mergeNormalView )  { vkDestroyImageView( device, mergeNormalView, NULL ); mergeNormalView = VK_NULL_HANDLE; }
+	if ( mergeNormalImage ) { vmaDestroyImage( vma, mergeNormalImage, mergeNormalAlloc ); mergeNormalImage = VK_NULL_HANDLE; mergeNormalAlloc = NULL; }
+	if ( mergeMatView )     { vkDestroyImageView( device, mergeMatView, NULL ); mergeMatView = VK_NULL_HANDLE; }
+	if ( mergeMatImage )    { vmaDestroyImage( vma, mergeMatImage, mergeMatAlloc ); mergeMatImage = VK_NULL_HANDLE; mergeMatAlloc = NULL; }
+	if ( mergeNormalSampleImage >= 1 && mergeNormalSampleImage <= (ImageHandle)imageTable.size() ) {
+		imageTable[mergeNormalSampleImage - 1].live = false;
+	}
+	if ( mergeMatSampleImage >= 1 && mergeMatSampleImage <= (ImageHandle)imageTable.size() ) {
+		imageTable[mergeMatSampleImage - 1].live = false;
+	}
+	mergeNormalSampleImage = 0;
+	mergeMatSampleImage = 0;
+	mergeNormalMrt = false;
+	mergeNormalW = mergeNormalH = 0;
+	mergeNormalFbDepth = VK_NULL_HANDLE;
+	mergeNormalTarget = 0;
+}
+
+// register a sampleable RGBA8 ImageRec (view already created) into imageTable, returning
+// its 1-based handle; used for the merged normal (+ optional SSR material) color images.
+ImageHandle VulkanBackend::RegisterMergeSampleImage( VkImage img, VkImageView view, int w, int h ) {
+	ImageRec rec;
+	rec.image = img;
+	rec.alloc = NULL;					// owned by the merge* allocs, freed in DestroyMergeNormal
+	rec.view = view;
+	rec.sampler = GetSampler( TF_LINEAR, TR_CLAMP, false );
+	rec.live = true;
+	rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	rec.isDepth = false;
+	rec.isColorTarget = true;
+	rec.width = w; rec.height = h;
+	for ( size_t i = 0; i < imageTable.size(); i++ ) {
+		if ( !imageTable[i].live ) { imageTable[i] = rec; return (ImageHandle)( i + 1 ); }
+	}
+	imageTable.push_back( rec );
+	return (ImageHandle)imageTable.size();
+}
+
+// (re)create the normal color image (+ optional SSR material MRT), the render pass, and
+// their sampleable ImageRecs at size w*h. The framebuffer (which binds the *scene* depth)
+// is (re)built lazily in BeginNormalPrepass since FrameDepthImage() changes with HDR mode.
+bool VulkanBackend::EnsureMergeNormal( int w, int h, bool wantMrt ) {
+	if ( mergeNormalImage != VK_NULL_HANDLE && mergeNormalW == w && mergeNormalH == h
+	     && mergeNormalMrt == wantMrt ) {
+		return true;
+	}
+	DestroyMergeNormal();
+	if ( sceneDepthFormat == VK_FORMAT_UNDEFINED ) {
+		return false;
+	}
+
+	VkImageCreateInfo ici = {};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &mergeNormalImage, &mergeNormalAlloc, NULL ), "vmaCreateImage(merge normal)" ) ) {
+		mergeNormalImage = VK_NULL_HANDLE; return false;
+	}
+	VkImageViewCreateInfo vwi = {};
+	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vwi.image = mergeNormalImage;
+	vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vwi.format = VK_FORMAT_R8G8B8A8_UNORM;
+	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	vwi.subresourceRange.levelCount = 1;
+	vwi.subresourceRange.layerCount = 1;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &mergeNormalView ), "vkCreateImageView(merge normal)" ) ) {
+		DestroyMergeNormal(); return false;
+	}
+
+	// optional 2nd color attachment (SSR rough/metal). Same format/usage as the normal.
+	if ( wantMrt ) {
+		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &mergeMatImage, &mergeMatAlloc, NULL ), "vmaCreateImage(merge mat)" ) ) {
+			mergeMatImage = VK_NULL_HANDLE; DestroyMergeNormal(); return false;
+		}
+		vwi.image = mergeMatImage;
+		if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &mergeMatView ), "vkCreateImageView(merge mat)" ) ) {
+			DestroyMergeNormal(); return false;
+		}
+	}
+
+	// render pass: normal (+ mat) color (clear -> shader-read) + shared scene depth. The depth
+	// is CLEARed and sealed by the gbuffer geometry here, then STOREd so the resumed scene pass
+	// loads it for the depth-EQUAL interactions. (B1 used DON'T_CARE because it kept zfill to
+	// re-seal depth afterwards; steps 2-3 skip zfill, so this pass IS the seal and MUST preserve
+	// it — with DON'T_CARE the driver discards the sealed depth and the scene fails depth-EQUAL.)
+	const int nColor = wantMrt ? 2 : 1;
+	const int depthIdx = nColor;			// depth is the last attachment
+	VkAttachmentDescription atts[3] = {};
+	for ( int c = 0; c < nColor; c++ ) {
+		atts[c].format = VK_FORMAT_R8G8B8A8_UNORM;
+		atts[c].samples = VK_SAMPLE_COUNT_1_BIT;
+		atts[c].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		atts[c].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		atts[c].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		atts[c].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		atts[c].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		atts[c].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	}
+	atts[depthIdx].format = sceneDepthFormat;
+	atts[depthIdx].samples = VK_SAMPLE_COUNT_1_BIT;
+	atts[depthIdx].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	atts[depthIdx].storeOp = VK_ATTACHMENT_STORE_OP_STORE;			// preserve the sealed depth
+	atts[depthIdx].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	atts[depthIdx].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;	// preserve the cleared (0) stencil
+	atts[depthIdx].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	atts[depthIdx].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+	VkAttachmentReference colorRefs[2] = {
+		{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+		{ 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+	};
+	VkAttachmentReference depthRef = { (uint32_t)depthIdx, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+	VkSubpassDescription sub = {};
+	sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	sub.colorAttachmentCount = (uint32_t)nColor;
+	sub.pColorAttachments = colorRefs;
+	sub.pDepthStencilAttachment = &depthRef;
+	VkSubpassDependency deps[2] = {};
+	deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+	deps[0].dstSubpass = 0;
+	deps[0].srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+	deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+	                     | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	// outgoing: color -> shader read (SSAO/SSR sample the normal + mat); depth write -> the scene
+	// pass's depth test (EARLY/LATE fragment tests read the sealed depth for depth-EQUAL).
+	deps[1].srcSubpass = 0;
+	deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+	deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+	                     | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+	                     | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+	                     | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	VkRenderPassCreateInfo rpi = {};
+	rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+	rpi.attachmentCount = (uint32_t)( nColor + 1 ); rpi.pAttachments = atts;
+	rpi.subpassCount = 1; rpi.pSubpasses = &sub;
+	rpi.dependencyCount = 2; rpi.pDependencies = deps;
+	if ( !vkCheck( vkCreateRenderPass( device, &rpi, NULL, &mergeNormalPass ), "vkCreateRenderPass(merge normal)" ) ) {
+		DestroyMergeNormal(); return false;
+	}
+
+	// sampleable ImageRecs so SSAO/SSR bind them via GetRenderTargetImage / GetRenderTargetImage2
+	mergeNormalSampleImage = RegisterMergeSampleImage( mergeNormalImage, mergeNormalView, w, h );
+	if ( wantMrt ) {
+		mergeMatSampleImage = RegisterMergeSampleImage( mergeMatImage, mergeMatView, w, h );
+	}
+
+	mergeNormalMrt = wantMrt;
+	mergeNormalW = w; mergeNormalH = h;
+	mergeNormalFb = VK_NULL_HANDLE;
+	mergeNormalFbDepth = VK_NULL_HANDLE;
+	mergeNormalTarget = MERGE_NORMAL_HANDLE;
+	return true;
+}
+
+RenderTargetHandle VulkanBackend::BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt ) {
+	if ( !frameOpen || skipFrame || device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
+		return 0;
+	}
+	if ( !EnsureMergeNormal( w, h, wantMrt ) ) {
+		return 0;
+	}
+	const int nColor = wantMrt ? 2 : 1;
+	// (re)build the framebuffer when the scene depth image changes (HDR toggle / resize)
+	VkImage depthImg = FrameDepthImage();
+	if ( mergeNormalFb == VK_NULL_HANDLE || mergeNormalFbDepth != depthImg ) {
+		if ( mergeNormalFb ) { vkDestroyFramebuffer( device, mergeNormalFb, NULL ); mergeNormalFb = VK_NULL_HANDLE; }
+		VkImageView views[3];
+		views[0] = mergeNormalView;
+		if ( wantMrt ) { views[1] = mergeMatView; }
+		views[nColor] = FrameDepthView();
+		VkFramebufferCreateInfo fbi = {};
+		fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		fbi.renderPass = mergeNormalPass;
+		fbi.attachmentCount = (uint32_t)( nColor + 1 ); fbi.pAttachments = views;
+		fbi.width = (uint32_t)w; fbi.height = (uint32_t)h; fbi.layers = 1;
+		if ( !vkCheck( vkCreateFramebuffer( device, &fbi, NULL, &mergeNormalFb ), "vkCreateFramebuffer(merge normal)" ) ) {
+			mergeNormalFb = VK_NULL_HANDLE; return 0;
+		}
+		mergeNormalFbDepth = depthImg;
+	}
+
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );			// suspend the scene pass (like BeginTargetPass)
+		insideScenePass = false;
+	}
+	VkClearValue cv[3] = {};
+	if ( clear != NULL && clear->color ) {
+		for ( int c = 0; c < nColor; c++ ) {
+			cv[c].color.float32[0] = clear->rgba[0]; cv[c].color.float32[1] = clear->rgba[1];
+			cv[c].color.float32[2] = clear->rgba[2]; cv[c].color.float32[3] = clear->rgba[3];
+		}
+	}
+	cv[nColor].depthStencil.depth = 1.0f;
+	VkRenderPassBeginInfo rbi = {};
+	rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	rbi.renderPass = mergeNormalPass;
+	rbi.framebuffer = mergeNormalFb;
+	rbi.renderArea.extent = { (uint32_t)w, (uint32_t)h };
+	rbi.clearValueCount = (uint32_t)( nColor + 1 );
+	rbi.pClearValues = cv;
+	vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
+	// same passClass as the standalone RGBA8+depth normal target (colorCount 1 or 2) so the
+	// gbuffer pipeline is shared with the standalone path
+	EnterTargetPass( w, h, /*flipY*/true, mergeNormalPass, PassClassFor( VK_FORMAT_R8G8B8A8_UNORM, true, nColor ), /*colorAtt*/nColor );
+	return mergeNormalTarget;
+}
+
+// SetFrameTarget: route the whole scene into an offscreen color target (HDR), or
+// back to the swapchain sceneColor path (rt == 0). Any open scene pass is closed
+// so the next Draw re-opens against the new destination.
+void VulkanBackend::SetFrameTarget( RenderTargetHandle rt ) {
+	if ( !frameOpen || skipFrame ) {
+		frameTarget = rt;		// remembered; takes effect when a frame is open
+		return;
+	}
+	if ( rt != 0 ) {
+		RenderTarget *t = LookupTarget( rt );
+		if ( t == NULL || !t->colorTarget ) {
+			return;				// invalid handle — stay where we are
+		}
+	}
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( frames[frameIndex].cb );
+		insideScenePass = false;
+	}
+	frameTarget = rt;
+	// the resume viewport/extent tracks the new destination
+	if ( rt != 0 ) {
+		RenderTarget *t = &targetTable[rt - 1];
+		curRenderH = t->h;
+		curPipelinePass = t->colorClearPass;
+		curPassClass = t->passClass;
+		curColorAtt = t->colorCount;
+	} else {
+		curRenderH = (int)sceneExtent.height;
+		curPipelinePass = passClear;
+		curPassClass = 0;
+		curColorAtt = 1;
+	}
+	curFlipY = true;
+	dynStateDirty = true;
+}
+
+/*
 ====================
 VulkanBackend::GetPipeline
 
@@ -3008,7 +5669,21 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	                   | GLS_REDMASK | GLS_GREENMASK | GLS_BLUEMASK | GLS_ALPHAMASK
 	                   | GLS_POLYMODE_LINE | GLS_DEPTHFUNC_EQUAL | GLS_DEPTHFUNC_LESS | GLS_DEPTHFUNC_ALWAYS;
 	const unsigned int bits = (unsigned int)( desc.stateBits & RELEVANT );
+	// desc.tessellate (bit 18, free between RELEVANT's bit 17 and passClass at 24)
+	// keeps the tessellated (patch-list, tesc+tese) and flat variants of the same
+	// shader on distinct cache entries. Only honoured when the shader actually
+	// carries a tess pair and the device supports tessellation.
+	const bool tessellate = desc.tessellate && haveTessellation
+		&& desc.shader >= 1 && desc.shader <= (ShaderHandle)shaderTable.size()
+		&& shaderTable[desc.shader - 1].tesc != VK_NULL_HANDLE
+		&& shaderTable[desc.shader - 1].tese != VK_NULL_HANDLE;
+	// curPassClass (bits 24-31, free above RELEVANT's bit 17) keeps pipelines for
+	// render-pass-incompatible destinations apart: the same shader+state built for
+	// the RGBA8 swapchain scene (class 0) and the RGBA16F HDR buffer (class 2) are
+	// distinct cache entries built against distinct render passes.
 	const unsigned long long key = (unsigned long long)bits
+		| ( (unsigned long long)( tessellate ? 1 : 0 ) << 18 )
+		| ( (unsigned long long)( curPassClass & 0xff ) << 24 )
 		| ( (unsigned long long)( desc.shader & 0xffff ) << 32 )
 		| ( (unsigned long long)( desc.vertexLayout & 0xf ) << 48 )
 		| ( (unsigned long long)( desc.cullType & 0xf ) << 52 )
@@ -3027,7 +5702,7 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	}
 	const ShaderRec &sh = shaderTable[desc.shader - 1];
 
-	VkPipelineShaderStageCreateInfo stages[2] = {};
+	VkPipelineShaderStageCreateInfo stages[4] = {};
 	stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
 	stages[0].module = sh.vert;
@@ -3035,6 +5710,21 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	stages[1] = stages[0];
 	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 	stages[1].module = sh.frag;
+	uint32_t stageCount = 2;
+	if ( tessellate ) {
+		// tesc + tese ride alongside vert + frag; the tese re-runs the vertex
+		// body on the PN-evaluated position (docs/tessellation.md)
+		stages[stageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stages[stageCount].stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+		stages[stageCount].module = sh.tesc;
+		stages[stageCount].pName = "main";
+		stageCount++;
+		stages[stageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stages[stageCount].stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+		stages[stageCount].module = sh.tese;
+		stages[stageCount].pName = "main";
+		stageCount++;
+	}
 
 	// vertex layouts (must match the GL3 VAO setups / shader locations)
 	VkVertexInputBindingDescription binding = {};
@@ -3075,6 +5765,12 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	VkPipelineInputAssemblyStateCreateInfo ia = {};
 	ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
 	ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	// a tessellated draw feeds the tessellator triangular patches: the same
+	// indexed triangle list, reinterpreted as 3-control-point patches. Skip the
+	// GL primMode switch below (only immediate-mode debug draws set desc.topology).
+	if ( tessellate ) {
+		ia.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+	} else
 	// desc.topology carries a GL primMode for immediate-mode debug draws; -1
 	// (every normal draw) stays triangle list. GL_LINE_LOOP has no VK analogue —
 	// degrade to a line strip (leaves the loop open; only debug wireframes).
@@ -3222,8 +5918,12 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 
 	VkPipelineColorBlendStateCreateInfo cb = {};
 	cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-	cb.attachmentCount = 1;
-	cb.pAttachments = &att;
+	// blend-attachment count must match the active subpass: 0 for the depth-only
+	// shadow pass, 1 for the scene / HDR / color targets, 2 for an MRT target. The
+	// MRT attachments share one blend config (the SSR material buffer isn't blended).
+	VkPipelineColorBlendAttachmentState attArr[2] = { att, att };
+	cb.attachmentCount = (uint32_t)curColorAtt;
+	cb.pAttachments = ( curColorAtt > 0 ) ? attArr : NULL;
 
 	const VkDynamicState dyn[3] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
 	                                VK_DYNAMIC_STATE_DEPTH_BIAS };
@@ -3232,12 +5932,19 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	dsi.dynamicStateCount = 3;
 	dsi.pDynamicStates = dyn;
 
+	// triangular patches carry 3 control points (the triangle's corners); the
+	// tesc/tese do PN evaluation over the barycentric domain.
+	VkPipelineTessellationStateCreateInfo ts = {};
+	ts.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+	ts.patchControlPoints = 3;
+
 	VkGraphicsPipelineCreateInfo pci = {};
 	pci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-	pci.stageCount = 2;
+	pci.stageCount = stageCount;
 	pci.pStages = stages;
 	pci.pVertexInputState = &vin;
 	pci.pInputAssemblyState = &ia;
+	pci.pTessellationState = tessellate ? &ts : NULL;
 	pci.pViewportState = &vp;
 	pci.pRasterizationState = &rs;
 	pci.pMultisampleState = &ms;
@@ -3245,11 +5952,15 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	pci.pColorBlendState = &cb;
 	pci.pDynamicState = &dsi;
 	pci.layout = pipeLayout;
-	pci.renderPass = passClear;		// compatible with passLoad (same formats/samples)
+	// curPipelinePass is the render pass of the active destination (scene passClear,
+	// the HDR buffer's colorClearPass, a shadow/AA nested pass, ...). It's compatible
+	// with that destination's load/clearDS variants (same formats), and curPassClass
+	// in the cache key keeps render-pass-incompatible destinations on separate keys.
+	pci.renderPass = curPipelinePass ? curPipelinePass : passClear;
 	pci.subpass = 0;
 
 	VkPipeline pipeline = VK_NULL_HANDLE;
-	if ( !vkCheck( vkCreateGraphicsPipelines( device, VK_NULL_HANDLE, 1, &pci, NULL, &pipeline ),
+	if ( !vkCheck( vkCreateGraphicsPipelines( device, diskPipelineCache, 1, &pci, NULL, &pipeline ),
 	               va( "vkCreateGraphicsPipelines(%s)", sh.name.c_str() ) ) ) {
 		pipeline = VK_NULL_HANDLE;
 	}
@@ -3355,40 +6066,162 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 	if ( !frameOpen || skipFrame || args.indexCount <= 0 ) {
 		return;
 	}
+	// r_vkIndirectTest: validate the Phase-3 indirect-draw seed by routing this exact draw
+	// through DrawIndexedIndirect — write a 1-command VkDrawIndexedIndirectCommand into the
+	// per-frame indirect ring and draw from it. Pixel-identical when the plumbing is right.
+	// vertexOffset stays 0 in the command: the vertex buffer's byte offset lives in the buffer
+	// binding (BindForDraw), matching the 0 vertexOffset vkCmdDrawIndexed uses in the direct path.
+	if ( r_vkIndirectTest.GetBool() ) {
+		VkDrawIndexedIndirectCommand cmd;
+		cmd.indexCount = (uint32_t)args.indexCount;
+		cmd.instanceCount = 1;
+		cmd.firstIndex = (uint32_t)args.firstIndex;
+		cmd.vertexOffset = 0;
+		cmd.firstInstance = 0;
+		BufferHandle ah = 0;
+		int aofs = AllocFromRing( indirectRing[frameIndex], &cmd, (int)sizeof( cmd ), 4, 0, &ah );
+		if ( ah ) {
+			DrawIndexedIndirect( args, ah, aofs, 1, (int)sizeof( cmd ), 0, 0 );
+			return;
+		}
+		// ring not ready (pre-init / overflow past a failed grow) — fall through to the direct draw
+	}
+	VkCommandBuffer cb;
+	if ( !BindForDraw( args, cb ) ) {
+		return;
+	}
+	vkCmdDrawIndexed( cb, (uint32_t)args.indexCount, 1, (uint32_t)args.firstIndex, 0, 0 );
+}
+
+/*
+====================
+VulkanBackend::DrawIndexedIndirect
+
+The Phase-3 indirect-draw seed: same bindings as Draw, but the draw parameters come
+from a GPU-resident VkDrawIndexedIndirectCommand[] (a compute cull pass will write it).
+See RHI.h. The 1.4 floor guarantees the vkCmdDraw*Indirect[Count] COMMANDS exist, but the
+count-buffer form needs the drawIndirectCount FEATURE and a >1 drawCount needs
+multiDrawIndirect — both enabled at device creation when present, gated below when absent.
+====================
+*/
+void VulkanBackend::DrawIndexedIndirect( const DrawArgs &args, BufferHandle argsBuffer, int argsOffset,
+                                         int drawCount, int stride, BufferHandle countBuffer, int countOffset ) {
+	if ( drawCount <= 0 ) {
+		return;
+	}
+	VkBuffer ab = LookupBuffer( argsBuffer );
+	if ( ab == VK_NULL_HANDLE ) {
+		return;
+	}
+	// feature gates: without the enabled feature the command is UB / a validation error, so
+	// degrade (skip + warn once) rather than issue it. Universal on desktop, so this is a net.
+	if ( countBuffer && !haveDrawIndirectCount ) {
+		if ( !indirectFeatureWarned ) {
+			indirectFeatureWarned = true;
+			common->Warning( "VK: DrawIndexedIndirect count form needs drawIndirectCount (unsupported) - skipped" );
+		}
+		return;
+	}
+	if ( drawCount > 1 && !haveMultiDrawIndirect ) {
+		if ( !indirectFeatureWarned ) {
+			indirectFeatureWarned = true;
+			common->Warning( "VK: DrawIndexedIndirect drawCount>1 needs multiDrawIndirect (unsupported) - skipped" );
+		}
+		return;
+	}
+	VkCommandBuffer cb;
+	if ( !BindForDraw( args, cb ) ) {
+		return;
+	}
+	if ( countBuffer ) {
+		VkBuffer cbuf = LookupBuffer( countBuffer );
+		if ( cbuf == VK_NULL_HANDLE ) {
+			return;
+		}
+		// GPU-written count form (Phase 3 cull output): draw min(*count, drawCount) commands
+		vkCmdDrawIndexedIndirectCount( cb, ab, (VkDeviceSize)argsOffset, cbuf, (VkDeviceSize)countOffset,
+		                               (uint32_t)drawCount, (uint32_t)stride );
+	} else {
+		vkCmdDrawIndexedIndirect( cb, ab, (VkDeviceSize)argsOffset, (uint32_t)drawCount, (uint32_t)stride );
+	}
+}
+
+/*
+====================
+VulkanBackend::BindForDraw
+
+Shared per-draw binding for Draw and DrawIndexedIndirect (viewport/scissor/depth-bias,
+pipeline, set0 UBO, set1 texture set, vertex+index buffers). Returns false + draws nothing
+when the frame/pass/pipeline/buffers aren't ready. Does not gate on args.indexCount — the
+indirect path's count lives in its args buffer.
+====================
+*/
+bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) {
+	if ( !frameOpen || skipFrame ) {
+		return false;
+	}
 	VkPipeline pipeline = GetPipeline( currentDesc );
 	if ( pipeline == VK_NULL_HANDLE ) {
-		return;		// missing shader — degrade by not drawing
+		return false;		// missing shader — degrade by not drawing
 	}
 	VkBuffer vb = LookupBuffer( args.vertexBuffer );
 	VkBuffer ib = LookupBuffer( args.indexBuffer );
 	if ( vb == VK_NULL_HANDLE || ib == VK_NULL_HANDLE ) {
-		return;
+		return false;
 	}
 
-	EnsureScenePass();
-	if ( !insideScenePass ) {
-		return;
+	if ( insideTargetPass ) {
+		// rendering into an offscreen shadow-map target: its render pass is
+		// already open (BeginTargetPass/BeginCubeFacePass); don't touch the scene pass
+	} else {
+		EnsureScenePass();
+		if ( !insideScenePass ) {
+			return false;
+		}
 	}
 	VkCommandBuffer cb = frames[frameIndex].cb;
 
+	// A fullscreen pass sampling a color render target (HDR resolve/FXAA/SMAA) must
+	// cancel the scene's negative-height flip: those targets are stored top-down,
+	// so the shared GL fullscreen quad would otherwise sample them upside down. Only
+	// post passes ever sample a color target as unit 0, so this is precise.
+	bool effFlipY = curFlipY;
+	if ( curFlipY && args.textures[0] >= 1 && args.textures[0] <= (ImageHandle)imageTable.size()
+	     && imageTable[args.textures[0] - 1].live && imageTable[args.textures[0] - 1].isColorTarget ) {
+		effFlipY = false;
+	}
+	if ( effFlipY != lastEffFlipY ) {
+		lastEffFlipY = effFlipY;
+		dynStateDirty = true;
+	}
+
 	if ( dynStateDirty ) {
-		// negative-height viewport: y-up NDC like GL; rects converted from
-		// GL's bottom-left origin to Vulkan's top-left
-		const float fbH = (float)sceneExtent.height;
+		// scene pass: negative-height viewport (y-up NDC like GL) with the GL
+		// bottom-left rect converted to Vulkan's top-left. Offscreen target
+		// pass: a plain top-left viewport at the target's height — the shadow
+		// map's projective write then reads back self-consistently (matches GL).
+		const int   renderH = curRenderH;
 		VkViewport v = {};
 		v.x = (float)vpRect[0];
-		v.y = fbH - (float)vpRect[1];
 		v.width = (float)vpRect[2];
-		v.height = -(float)vpRect[3];
-		v.minDepth = depthRangeMin;
-		v.maxDepth = depthRangeMax;
+		if ( effFlipY ) {
+			v.y = (float)renderH - (float)vpRect[1];
+			v.height = -(float)vpRect[3];
+		} else {
+			v.y = (float)vpRect[1];
+			v.height = (float)vpRect[3];
+		}
+		// shadow-map passes always want the full [0,1] depth range: the weapon/
+		// model depth hack (SetDepthRange) is a scene-only concern
+		v.minDepth = insideTargetPass ? 0.0f : depthRangeMin;
+		v.maxDepth = insideTargetPass ? 1.0f : depthRangeMax;
 		vkCmdSetViewport( cb, 0, 1, &v );
 
 		VkRect2D sc = {};
 		int sx = scRect[0], sy = scRect[1], sw = scRect[2], sh = scRect[3];
 		if ( sw < 0 ) { sw = 0; }
 		if ( sh < 0 ) { sh = 0; }
-		int top = (int)sceneExtent.height - ( sy + sh );
+		int top = effFlipY ? ( renderH - ( sy + sh ) ) : sy;
 		if ( sx < 0 ) { sw += sx; sx = 0; }
 		if ( top < 0 ) { sh += top; top = 0; }
 		if ( sw < 0 ) { sw = 0; }
@@ -3414,69 +6247,136 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 	// set 1: per-draw texture set from the frame pool (dummy in empty slots)
 	{
 		VkDescriptorSet texSet = VK_NULL_HANDLE;
-		VkDescriptorSetAllocateInfo ai = {};
-		ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-		ai.descriptorPool = framePool[frameIndex];
-		ai.descriptorSetCount = 1;
-		ai.pSetLayouts = &setLayoutTex;
-		if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
-			if ( !framePoolWarned ) {
-				framePoolWarned = true;
-				common->Warning( "VK: per-frame descriptor pool exhausted (%d sets)", MAX_FRAME_SETS );
-			}
-			return;
+		uint64_t key = 0xcbf29ce484222325ull;
+		auto mixKey = []( uint64_t &seed, uint32_t value ) {
+			seed ^= (uint64_t)value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+		};
+		for ( int i = 0; i < 8; i++ ) {
+			mixKey( key, (uint32_t)args.textures[i] );
 		}
-		// bindings 0-7 = units, 8 = shadow cube, 9 = SSAO, 10 = occlusion map.
-		// Empty slots take a dummy typed for what the shaders statically
-		// declare: unit 7 is interaction.frag's sampler2DShadow and 8 its
-		// samplerCubeShadow (depth-compare dummies until M7 shadow maps);
-		// everything else is sampler2D (white). Real handles always win.
-		VkDescriptorImageInfo infos[11];
-		VkWriteDescriptorSet writes[11];
-		const ImageRec &dummy = imageTable[dummyImage - 1];
-		for ( int i = 0; i < 11; i++ ) {
-			VkSampler sampler = dummy.sampler;
-			VkImageView view = dummy.view;
-			if ( i < 8 && args.textures[i] >= 1 && args.textures[i] <= (ImageHandle)imageTable.size()
-			     && imageTable[args.textures[i] - 1].live ) {
-				const ImageRec &rec = imageTable[args.textures[i] - 1];
-				sampler = rec.sampler;
-				view = rec.view;
-			} else if ( i == 7 ) {
-				sampler = dummyShadow2D.sampler;
-				view = dummyShadow2D.view;
-			} else if ( i == 8 ) {
-				if ( args.shadowCube >= 1 && args.shadowCube <= (ImageHandle)imageTable.size()
-				     && imageTable[args.shadowCube - 1].live ) {
-					const ImageRec &rec = imageTable[args.shadowCube - 1];
-					sampler = rec.sampler;
-					view = rec.view;
-				} else {
-					sampler = dummyShadowCube.sampler;
-					view = dummyShadowCube.view;
+		mixKey( key, (uint32_t)args.shadowCube );
+		mixKey( key, (uint32_t)args.ssao );
+		mixKey( key, (uint32_t)args.occlusion );
+		mixKey( key, (uint32_t)args.parallax );
+		mixKey( key, (uint32_t)args.shadowCubeDyn );
+		bool needsTexBind = true;
+		if ( boundTexSet != VK_NULL_HANDLE && boundTexKey == key ) {
+			texSet = boundTexSet;
+			needsTexBind = false;
+		} else {
+			// The cross-frame cache has no natural eviction: wandering a large level
+			// accumulates unique (texture x light x ssao x occlusion) combos forever,
+			// and once its live set count reaches texturePool's capacity
+			// vkAllocateDescriptorSets fails, this Draw bails, and lit geometry drops
+			// out (the level goes dark, self-lit GUI screens aside). Flush the whole
+			// cache at a high-water mark well under the pool size (the sets retire
+			// behind the fence and rebuild on demand); with FRAMES_IN_FLIGHT slots the
+			// peak occupancy stays ~(FRAMES_IN_FLIGHT+1)*cap, inside the pool's 4x cap.
+			if ( texturePool && (int)textureSetCache.size() >= MAX_FRAME_SETS ) {
+				InvalidateTextureSets();
+			}
+			auto it = textureSetCache.find( key );
+			if ( it != textureSetCache.end() ) {
+				texSet = it->second;
+			} else {
+				VkDescriptorSetAllocateInfo ai = {};
+				ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+				ai.descriptorPool = texturePool ? texturePool : framePool[frameIndex];
+				ai.descriptorSetCount = 1;
+				ai.pSetLayouts = &setLayoutTex;
+				if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
+					if ( !framePoolWarned ) {
+						framePoolWarned = true;
+						common->Warning( "VK: descriptor pool exhausted while allocating texture set" );
+					}
+					return false;
 				}
+				// bindings 0-7 = units, 8 = shadow cube, 9 = SSAO, 10 = occlusion map,
+				// 11 = parallax height map. Empty slots take a dummy typed for what the
+				// shaders statically declare: unit 7 is interaction.frag's sampler2DShadow
+				// and 8 its samplerCubeShadow (depth-compare dummies until M7 shadow maps);
+				// everything else is sampler2D (white). Real handles always win.
+				VkDescriptorImageInfo infos[13];
+				VkWriteDescriptorSet writes[13];
+				const ImageRec &dummy = imageTable[dummyImage - 1];
+				for ( int i = 0; i < 13; i++ ) {
+					VkSampler sampler = dummy.sampler;
+					VkImageView view = dummy.view;
+					if ( i < 8 && args.textures[i] >= 1 && args.textures[i] <= (ImageHandle)imageTable.size()
+					     && imageTable[args.textures[i] - 1].live ) {
+						const ImageRec &rec = imageTable[args.textures[i] - 1];
+						sampler = rec.sampler;
+						view = rec.view;
+					} else if ( i == 7 ) {
+						sampler = dummyShadow2D.sampler;
+						view = dummyShadow2D.view;
+					} else if ( i == 8 ) {
+						if ( args.shadowCube >= 1 && args.shadowCube <= (ImageHandle)imageTable.size()
+						     && imageTable[args.shadowCube - 1].live ) {
+							const ImageRec &rec = imageTable[args.shadowCube - 1];
+							sampler = rec.sampler;
+							view = rec.view;
+						} else {
+							sampler = dummyShadowCube.sampler;
+							view = dummyShadowCube.view;
+						}
+					} else if ( i == 9 && args.ssao >= 1 && args.ssao <= (ImageHandle)imageTable.size()
+					            && imageTable[args.ssao - 1].live ) {
+						const ImageRec &rec = imageTable[args.ssao - 1];		// SSAO/GTAO buffer (else white)
+						sampler = rec.sampler;
+						view = rec.view;
+					} else if ( i == 10 && args.occlusion >= 1 && args.occlusion <= (ImageHandle)imageTable.size()
+					            && imageTable[args.occlusion - 1].live ) {
+						const ImageRec &rec = imageTable[args.occlusion - 1];	// baked occlusion map (else white)
+						sampler = rec.sampler;
+						view = rec.view;
+					} else if ( i == 11 && args.parallax >= 1 && args.parallax <= (ImageHandle)imageTable.size()
+					            && imageTable[args.parallax - 1].live ) {
+						const ImageRec &rec = imageTable[args.parallax - 1];	// parallax height map (else white)
+						sampler = rec.sampler;
+						view = rec.view;
+					} else if ( i == 12 ) {
+						// dynamic-layer shadow cube (lever B). samplerCubeShadow -> the cube depth
+						// dummy when no movers-only layer is bound, mirroring unit 8.
+						if ( args.shadowCubeDyn >= 1 && args.shadowCubeDyn <= (ImageHandle)imageTable.size()
+						     && imageTable[args.shadowCubeDyn - 1].live ) {
+							const ImageRec &rec = imageTable[args.shadowCubeDyn - 1];
+							sampler = rec.sampler;
+							view = rec.view;
+						} else {
+							sampler = dummyShadowCube.sampler;
+							view = dummyShadowCube.view;
+						}
+					}
+					infos[i] = {};
+					infos[i].sampler = sampler;
+					infos[i].imageView = view;
+					infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+					writes[i] = {};
+					writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+					writes[i].dstSet = texSet;
+					writes[i].dstBinding = (uint32_t)i;
+					writes[i].descriptorCount = 1;
+					writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+					writes[i].pImageInfo = &infos[i];
+				}
+				vkUpdateDescriptorSets( device, 13, writes, 0, NULL );
+				textureSetCache[key] = texSet;
 			}
-			infos[i] = {};
-			infos[i].sampler = sampler;
-			infos[i].imageView = view;
-			infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			writes[i] = {};
-			writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			writes[i].dstSet = texSet;
-			writes[i].dstBinding = (uint32_t)i;
-			writes[i].descriptorCount = 1;
-			writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-			writes[i].pImageInfo = &infos[i];
+			boundTexSet = texSet;
+			boundTexKey = key;
 		}
-		vkUpdateDescriptorSets( device, 11, writes, 0, NULL );
-		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout,
-			1, 1, &texSet, 0, NULL );
+		if ( needsTexBind ) {
+			vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout,
+				1, 1, &texSet, 0, NULL );
+		}
 	}
 
 	VkDeviceSize vbOfs = (VkDeviceSize)args.vertexOffset;
 	vkCmdBindVertexBuffers( cb, 0, 1, &vb, &vbOfs );
 	vkCmdBindIndexBuffer( cb, ib, 0, VK_INDEX_TYPE_UINT32 );
-	vkCmdDrawIndexed( cb, (uint32_t)args.indexCount, 1, (uint32_t)args.firstIndex, 0, 0 );
+	cbOut = cb;
+	return true;
 }
 
 /*
@@ -3578,31 +6478,40 @@ void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int
 	// untextured; a white texel yields pure vertex color through generic.frag
 	{
 		VkDescriptorSet texSet = VK_NULL_HANDLE;
-		VkDescriptorSetAllocateInfo ai = {};
-		ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-		ai.descriptorPool = framePool[frameIndex];
-		ai.descriptorSetCount = 1;
-		ai.pSetLayouts = &setLayoutTex;
-		if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
-			return;
+		const uint64_t key = 0;
+		auto it = textureSetCache.find( key );
+		if ( it != textureSetCache.end() ) {
+			texSet = it->second;
+		} else {
+			VkDescriptorSetAllocateInfo ai = {};
+			ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+			ai.descriptorPool = texturePool ? texturePool : framePool[frameIndex];
+			ai.descriptorSetCount = 1;
+			ai.pSetLayouts = &setLayoutTex;
+			if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
+				return;
+			}
+			VkDescriptorImageInfo infos[13];
+			VkWriteDescriptorSet writes[13];
+			const ImageRec &dummy = imageTable[dummyImage - 1];
+			for ( int i = 0; i < 13; i++ ) {
+				// units 8 and 12 are samplerCubeShadow -> the cube depth dummy; 7 is the 2D shadow dummy
+				const bool cubeShadow = ( i == 8 || i == 12 );
+				infos[i] = {};
+				infos[i].sampler = ( i == 7 ) ? dummyShadow2D.sampler : ( cubeShadow ? dummyShadowCube.sampler : dummy.sampler );
+				infos[i].imageView = ( i == 7 ) ? dummyShadow2D.view : ( cubeShadow ? dummyShadowCube.view : dummy.view );
+				infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				writes[i] = {};
+				writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+				writes[i].dstSet = texSet;
+				writes[i].dstBinding = (uint32_t)i;
+				writes[i].descriptorCount = 1;
+				writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				writes[i].pImageInfo = &infos[i];
+			}
+			vkUpdateDescriptorSets( device, 13, writes, 0, NULL );
+			textureSetCache[key] = texSet;
 		}
-		VkDescriptorImageInfo infos[11];
-		VkWriteDescriptorSet writes[11];
-		const ImageRec &dummy = imageTable[dummyImage - 1];
-		for ( int i = 0; i < 11; i++ ) {
-			infos[i] = {};
-			infos[i].sampler = ( i == 7 ) ? dummyShadow2D.sampler : ( i == 8 ? dummyShadowCube.sampler : dummy.sampler );
-			infos[i].imageView = ( i == 7 ) ? dummyShadow2D.view : ( i == 8 ? dummyShadowCube.view : dummy.view );
-			infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			writes[i] = {};
-			writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			writes[i].dstSet = texSet;
-			writes[i].dstBinding = (uint32_t)i;
-			writes[i].descriptorCount = 1;
-			writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-			writes[i].pImageInfo = &infos[i];
-		}
-		vkUpdateDescriptorSets( device, 11, writes, 0, NULL );
 		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout, 1, 1, &texSet, 0, NULL );
 	}
 
@@ -3736,7 +6645,7 @@ bool VulkanBackend::ImGuiInit() {
 	}
 
 	ImGui_ImplVulkan_InitInfo ii = {};
-	ii.ApiVersion = VK_API_VERSION_1_1;
+	ii.ApiVersion = VK_API_VERSION_1_4;
 	ii.Instance = instance;
 	ii.PhysicalDevice = physical;
 	ii.Device = device;

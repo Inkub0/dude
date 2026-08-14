@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/VertexCache.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/rhi/RHI.h"
 
 /*
 ==============================================================================
@@ -376,12 +377,68 @@ void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 		return;
 	}
 
+	// Phase 2 GPU skinning: release the persistent compute-skinned vertex buffer — but ONLY the
+	// owner may destroy it. R_CreateLightTris copies the OWNING ambient surface's gpuSkinVB handle
+	// into every per-light interaction surface (so the interaction draws the GPU pose from the same
+	// buffer). Those inherited copies have ambientSurface != NULL and are freed every frame; if they
+	// destroyed the shared handle it would recycle the RHI buffer slot the still-live ambient surface
+	// is about to draw, aliasing it onto a smaller buffer -> out-of-bounds vertex fetch -> GPU page
+	// fault / device-lost. So mirror the verts/indexes ownership guards below: only free when we own
+	// it (ambientSurface == NULL); an inherited copy just drops its borrowed handle. DestroyBuffer is
+	// deferred/fence-retired in the VK backend, so the owner's free is safe even mid-flight.
+	if ( tri->gpuSkinVB ) {
+		if ( tri->ambientSurface == NULL ) {
+			rhi::RHI *r = rhi::GetRHI();
+			if ( r ) { r->DestroyBuffer( tri->gpuSkinVB ); }
+		}
+		tri->gpuSkinVB = 0;
+	}
+
+	// Roadmap B deform-once buffers: same ownership as gpuSkinVB -- R_CreateLightTris copies the owning
+	// ambient surface's handles into every interaction surface, so only the owner (ambientSurface==NULL)
+	// destroys them; inherited copies just drop the borrowed handles.
+	if ( tri->tessDeformVB || tri->tessDeformIB ) {
+		if ( tri->ambientSurface == NULL ) {
+			rhi::RHI *r = rhi::GetRHI();
+			if ( r ) {
+				if ( tri->tessDeformVB ) { r->DestroyBuffer( tri->tessDeformVB ); }
+				if ( tri->tessDeformIB ) { r->DestroyBuffer( tri->tessDeformIB ); }
+			}
+		}
+		tri->tessDeformVB = 0;
+		tri->tessDeformIB = 0;
+		tri->tessDeformVerts = 0;
+		tri->tessDeformIndexes = 0;
+		tri->tessDeformFrame = 0;
+	}
+
 	R_FreeStaticTriSurfVertexCaches( tri );
 
 	if ( tri->verts != NULL ) {
 		// R_CreateLightTris points tri->verts at the verts of the ambient surface
 		if ( tri->ambientSurface == NULL || tri->verts != tri->ambientSurface->verts ) {
-			triVertexAllocator.Free( tri->verts );
+			// dhewm-rt hardening for a latent, backend-agnostic stock-Doom3 double-free
+			// (still present through dhewm3 1.5.5): an idRenderModelOverlay decal surface
+			// baked onto an animated model can have its verts block freed twice when the
+			// base model is gone/changed at overlay-apply time (e.g. killing a scripted
+			// actor before a model swap). CheckMemory() returns non-NULL once the block is
+			// already back in the free-tree (that is exactly the Heap.h:839
+			// "block->node == NULL" abort). Skip the redundant free instead of aborting.
+			// One-shot event at the actor's death, so the skipped block is a single
+			// harmless leak. See docs/known-bugs.md.
+			if ( triVertexAllocator.CheckMemory( tri->verts ) != NULL ) {
+				static bool reportedVertDoubleFree = false;
+				if ( !reportedVertDoubleFree ) {
+					reportedVertDoubleFree = true;
+					common->Printf( "R_ReallyFreeStaticTriSurf: skipped a redundant verts free "
+						"(known inherited overlay/decal double-free, harmless; prints once). "
+						"surf numVerts=%d numIndexes=%d deformed=%d ambientSurf=%s silIdx=%s\n",
+						tri->numVerts, tri->numIndexes, tri->deformedSurface ? 1 : 0,
+						tri->ambientSurface ? "yes" : "no", tri->silIndexes ? "yes" : "no" );
+				}
+			} else {
+				triVertexAllocator.Free( tri->verts );
+			}
 		}
 	}
 
@@ -773,6 +830,62 @@ static int *R_CreateSilRemap( const srfTriangles_t *tri ) {
 	}
 
 	return remap;
+}
+
+/*
+=================
+R_WeldSeamNormals
+
+DUDE tessellation (docs/tessellation.md): average vertex normals across coincident
+(same-position) vertices whose normals are already near-parallel (dot >= threshold),
+so a mesh split into UV / mirror halves deforms as a single piece under PN
+tessellation and displacement instead of the seam pulling open. The near-parallel
+gate leaves genuine hard-edge creases (widely divergent coincident normals) alone.
+Runs on md5 surfaces only, and only when r_tessWeldSeams is set, so vanilla lighting
+is untouched by default. Reads a snapshot of the normals so welding one vertex never
+feeds the average of the next.
+=================
+*/
+void R_WeldSeamNormals( srfTriangles_t *tri, float threshold ) {
+	if ( tri == NULL || tri->verts == NULL || tri->numVerts < 2 ) {
+		return;
+	}
+
+	idHashIndex hash( 1024, tri->numVerts );
+	for ( int i = 0; i < tri->numVerts; i++ ) {
+		hash.Add( hash.GenerateKey( tri->verts[i].xyz ), i );
+	}
+
+	idVec3 *orig = (idVec3 *)R_StaticAlloc( tri->numVerts * sizeof( idVec3 ) );
+	for ( int i = 0; i < tri->numVerts; i++ ) {
+		orig[i] = tri->verts[i].normal;
+		orig[i].Normalize();
+	}
+
+	for ( int i = 0; i < tri->numVerts; i++ ) {
+		const idVec3 &p = tri->verts[i].xyz;
+		idVec3 sum = orig[i];
+		int cnt = 1;
+		const int hashKey = hash.GenerateKey( p );
+		for ( int j = hash.First( hashKey ); j >= 0; j = hash.Next( j ) ) {
+			if ( j == i ) {
+				continue;
+			}
+			if ( tri->verts[j].xyz[0] != p[0] || tri->verts[j].xyz[1] != p[1] || tri->verts[j].xyz[2] != p[2] ) {
+				continue;	// same hash bucket, different position
+			}
+			if ( orig[j] * orig[i] >= threshold ) {
+				sum += orig[j];
+				cnt++;
+			}
+		}
+		if ( cnt > 1 ) {
+			sum.Normalize();
+			tri->verts[i].normal = sum;
+		}
+	}
+
+	R_StaticFree( orig );
 }
 
 /*
@@ -1697,7 +1810,15 @@ void R_DeriveTangents( srfTriangles_t *tri, bool allocFacePlanes ) {
 	idPlane			*planes;
 
 	if ( tri->dominantTris != NULL ) {
-		R_DeriveUnsmoothedTangents( tri );
+		// MD5 / deformed meshes take this path (they carry dominantTris). Time it for the GPU-skin
+		// profiler (r_gpuSkinProfile) so the Milestone-C prize is measured wherever the derive fires.
+		if ( tri->deformedSurface && r_gpuSkinProfile.GetBool() ) {
+			const double t0 = Sys_MillisecondsPrecise();
+			R_DeriveUnsmoothedTangents( tri );
+			R_GpuSkinProfileAddDerive( Sys_MillisecondsPrecise() - t0 );
+		} else {
+			R_DeriveUnsmoothedTangents( tri );
+		}
 		return;
 	}
 

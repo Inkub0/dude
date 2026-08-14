@@ -1112,7 +1112,7 @@ static void InitBindingEntries()
 		{ nullptr,          "Other"          , "#str_04064" }, // TODO: or "#str_02406"	"Misc"
 
 		{ "_impulse19",     "PDA / Score"    , "#str_04066" },
-		{ "dhewm3Settings", "DUDE settings menu", nullptr },
+		{ "dudeSettings", "DUDE settings menu", nullptr },
 		{ "savegame quick", "Quick Save"     , "#str_04067" },
 		{ "loadgame quick", "Quick Load"     , "#str_04068" },
 		{ "screenshot",     "Screenshot"     , "#str_04069" },
@@ -1443,7 +1443,16 @@ enum OptionType {
 	OT_FLOAT,
 	OT_INT,
 	OT_CUSTOM,  // using a callback in Draw()
+	OT_GROUP,   // a collapsible "burger" group that owns a child array of options
 };
+
+// forward decls so CVarOption's inline Init()/Draw() can recurse into groups (the free
+// functions and the group-chrome helpers below are defined further down)
+struct CVarOption;
+static void InitOptions( CVarOption options[], int numOptions );
+static void DrawOptions( CVarOption options[], int numOptions );
+static bool BeginSettingsGroup( const char* label, idCVar* masterCvar, const char* masterTooltip, bool gateBody );
+static void EndSettingsGroup();
 
 struct CVarOption {
 	typedef void (*DrawCallback)( idCVar& cvar ); // for OT_CUSTOM
@@ -1456,6 +1465,11 @@ struct CVarOption {
 	// TODO: the following two could be a union, together with drawCallback and possibly others!
 	float minVal = 0.0f;
 	float maxVal = 0.0f;
+	// OT_GROUP only: the child options this group owns, plus an optional tooltip for the
+	// group's master switch (name holds the master cvar, or is null for a plain category)
+	CVarOption* children = nullptr;
+	int numChildren = 0;
+	const char* tooltip = nullptr;
 
 
 	CVarOption() = default;
@@ -1471,16 +1485,27 @@ struct CVarOption {
 	CVarOption(const char* headingLabel) : label(headingLabel), type(OT_HEADING)
 	{}
 
+	// collapsible "burger" group. _masterCvar (may be null) draws a switch on the header
+	// row that turns the whole group on/off; the body greys out while it's off.
+	CVarOption(const char* _label, const char* _masterCvar, CVarOption* _children, int _numChildren, const char* _tip = nullptr)
+	: name(_masterCvar), label(_label), type(OT_GROUP), children(_children), numChildren(_numChildren), tooltip(_tip)
+	{}
+
 	void Init()
 	{
 		if (name != NULL) {
 			cvar = cvarSystem->Find(name);
 		}
+		if (type == OT_GROUP && children != nullptr) {
+			InitOptions(children, numChildren);
+		}
 	}
 
 	void Draw()
 	{
-		if (type == OT_HEADING) {
+		if (type == OT_GROUP) {
+			DrawGroup();
+		} else if (type == OT_HEADING) {
 			if (label != NULL) {
 				ImGui::SeparatorText( label );
 			}
@@ -1528,6 +1553,16 @@ struct CVarOption {
 			}
 		}
 	}
+
+	// OT_GROUP is drawn separately: it may have no master cvar, so it can't sit inside the
+	// `cvar != nullptr` branch above.
+	void DrawGroup()
+	{
+		if ( BeginSettingsGroup( label, cvar, tooltip, true ) ) {
+			DrawOptions( children, numChildren );
+			EndSettingsGroup();
+		}
+	}
 };
 
 static void InitOptions(CVarOption options[], int numOptions)
@@ -1542,6 +1577,64 @@ static void DrawOptions(CVarOption options[], int numOptions)
 	for( int i=0; i < numOptions; ++i ) {
 		options[i].Draw();
 	}
+}
+
+// ---- Collapsible "burger" settings groups ------------------------------------------
+// A framed, collapsible section header. When masterCvar is non-null a checkbox bound to
+// it sits at the right edge of the header row - the whole group's on/off switch. With
+// gateBody=true the body is greyed out (but stays visible) while the switch is off, so
+// the tuning controls remain discoverable. Returns true when the body is open; the caller
+// then draws the child widgets and, ONLY if it returned true, calls EndSettingsGroup().
+// Groups start expanded and remember their fold state (keyed by label).
+static bool BeginSettingsGroup( const char* label, idCVar* masterCvar = nullptr,
+                                const char* masterTooltip = nullptr, bool gateBody = true )
+{
+	ImGui::PushID( label );
+
+	if ( masterCvar != nullptr ) {
+		ImGui::SetNextItemAllowOverlap();
+	}
+	const bool open = ImGui::CollapsingHeader( label, ImGuiTreeNodeFlags_AllowOverlap );
+
+	if ( masterCvar != nullptr ) {
+		// right-align the master switch on the header row (over the framed header), with a
+		// little breathing room from the right edge / scrollbar.
+		const ImGuiStyle& st = ImGui::GetStyle();
+		ImGui::SameLine();
+		ImGui::SetCursorPosX( ImGui::GetWindowWidth() - ImGui::GetFrameHeight()
+			- st.FramePadding.x - st.ItemSpacing.x - st.ScrollbarSize );
+		bool on = masterCvar->GetBool();
+		if ( ImGui::Checkbox( "##groupmaster", &on ) ) {
+			masterCvar->SetBool( on );
+		}
+		// Attach the description straight to the switch (hover it to read). We deliberately
+		// do NOT use the "(?)" marker here: the switch sits at the right edge, so a trailing
+		// "(?)" drawn after it via SameLine would bleed off-screen.
+		if ( ImGui::BeginItemTooltip() ) {
+			ImGui::PushTextWrapPos( ImGui::GetFontSize() * 35.0f );
+			ImGui::TextDisabled( "%s", masterCvar->GetName() );
+			ImGui::TextUnformatted( masterTooltip != nullptr ? masterTooltip : masterCvar->GetDescription() );
+			ImGui::PopTextWrapPos();
+			ImGui::EndTooltip();
+		}
+	}
+
+	if ( !open ) {
+		ImGui::PopID();
+		return false;
+	}
+
+	ImGui::Indent();
+	ImGui::BeginDisabled( gateBody && masterCvar != nullptr && !masterCvar->GetBool() );
+	return true;
+}
+
+static void EndSettingsGroup()
+{
+	ImGui::EndDisabled();
+	ImGui::Unindent();
+	ImGui::PopID();
+	ImGui::Spacing();
 }
 
 static CVarOption controlOptions[] = {
@@ -1606,58 +1699,14 @@ struct VidMode {
 	}
 };
 
-static CVarOption videoOptionsImmediately[] = {
-	CVarOption( "Options that take effect immediately" ),
+// NOTE: the former Video Options tab (resolution, window mode, VSync, brightness/gamma,
+// anisotropic filtering, textures, GUI/layout, screenshots, OpenGL info, ...) has been folded
+// into the Graphics tab. Soft Particles / Depth Buffer Capture live in enhancementOptions[].
+// The vanilla "Advanced Options" toggles (r_skipNewAmbient, r_shadows, r_skipSpecular,
+// r_skipBump) were removed 2026-08-02 - every supported GPU runs them on; still console-reachable.
 
-	CVarOption( "r_swapInterval", []( idCVar& cvar ) {
-		int curVsync = idMath::ClampInt( -1, 1, r_swapInterval.GetInteger() );
-		if ( curVsync == -1 ) {
-			curVsync = 2;
-		}
-		if ( ImGui::Combo( "Vertical Sync", &curVsync, "Disable VSync\0Enable VSync\0Adaptive VSync\0" ) ) {
-			if ( curVsync == 2 ) {
-				curVsync = -1;
-			}
-			if ( GLimp_SetSwapInterval( curVsync ) ) {
-				r_swapInterval.SetInteger( curVsync );
-				// this was just set with GLimp_SetSwapInterval(), no reason to set it again in R_CheckCvars()
-				r_swapInterval.ClearModified();
-			} else {
-				D3::ImGuiHooks::ShowWarningOverlay( "Setting VSync (GL SwapInterval) failed, maybe try another mode" );
-			}
-		} else {
-			AddTooltip( "r_swapInterval" );
-		}
-		AddDescrTooltip( "Note: Not all GPUs/drivers support Adaptive VSync" );
-	} ),
-	CVarOption( "image_anisotropy", []( idCVar& cvar ) {
-		const char* descr = "Max Texture Anisotropy";
-		if ( glConfig.maxTextureAnisotropy > 1 )
-		{
-			int texAni = cvar.GetInteger();
-			const char* fmtStr = (texAni > 1) ? "%d" : "No Anisotropic Filtering";
-			ImGui::SliderInt( "Anisotropic Filtering", &texAni, 1,
-			                  glConfig.maxTextureAnisotropy, fmtStr,
-			                  ImGuiSliderFlags_AlwaysClamp );
-			if ( texAni != cvar.GetInteger() ) {
-				cvar.SetInteger( texAni );
-			}
-		} else {
-			ImGui::BeginDisabled();
-			int texAni = 0;
-			ImGui::SliderInt( "Anisotropic Filtering", &texAni, 1, 8, "Not supported" );
-			ImGui::EndDisabled();
-			descr = "Anisotropic filtering is not supported by this system!";
-		}
-		AddCVarOptionTooltips( cvar, descr );
-	} ),
-	CVarOption( "r_windowResizable", "Make DUDE window resizable", OT_BOOL ),
-	CVarOption( "r_brightness", "Brightness", OT_FLOAT, 0.5f, 2.0f ),
-	CVarOption( "r_gamma", "Gamma", OT_FLOAT, 0.5f, 3.0f ),
-	CVarOption( "r_gammaInShader", "Apply gamma and brightness in shaders", OT_BOOL ),
-	CVarOption( "r_scaleMenusTo43", "Scale fullscreen menus to 4:3", OT_BOOL ),
-	CVarOption( "gui_hiResFonts", "High-resolution GUI fonts (displays taller than 720p)", OT_BOOL ),
-
+// Screenshots section — a plain section at the bottom of the Graphics tab.
+static CVarOption screenshotOptions[] = {
 	CVarOption( "Screenshots" ),
 	CVarOption( "r_screenshotFormat", []( idCVar& cvar ) {
 		// "Screenshot format. 0 = TGA (default), 1 = BMP, 2 = PNG, 3 = JPG"
@@ -1669,21 +1718,61 @@ static CVarOption videoOptionsImmediately[] = {
 	} ),
 	CVarOption( "r_screenshotPngCompression", "Compression level for PNG screenshots", OT_INT, 0, 9 ),
 	CVarOption( "r_screenshotJpgQuality", "Quality level for JPG screenshots", OT_INT, 1, 100 ),
-	// NOTE: Soft Particles and Depth Buffer Capture are non-vanilla enhancements
-	// and now live in the GL3/Vulkan-only "Enhancements" tab (enhancementOptions[]).
-	//
-	// DUDE: the vanilla-quality "Advanced Options" toggles (r_skipNewAmbient, r_shadows,
-	// r_skipSpecular, r_skipBump) were removed 2026-08-02 - every supported GPU runs them
-	// on, matching the trimmed in-game Advanced page. Their cvar defaults keep them on;
-	// still reachable from the console for anyone who really needs to toggle them.
+};
+
+// Brightness / Gamma (live), shown in the Display group.
+static CVarOption displayColorOptions[] = {
+	CVarOption( "r_brightness", "Brightness", OT_FLOAT, 0.5f, 2.0f ),
+	CVarOption( "r_gamma", "Gamma", OT_FLOAT, 0.5f, 3.0f ),
+	CVarOption( "r_gammaInShader", "Apply gamma and brightness in shaders", OT_BOOL ),
+};
+
+// Anisotropic filtering (live) — its own collapsible group in the Graphics tab.
+static CVarOption anisoOptions[] = {
+	CVarOption( "image_anisotropy", []( idCVar& cvar ) {
+		const char* descr = "Max Texture Anisotropy";
+		if ( glConfig.maxTextureAnisotropy > 1 )
+		{
+			int texAni = cvar.GetInteger();
+			const char* fmtStr = (texAni > 1) ? "%d" : "No Anisotropic Filtering";
+			ImGui::SliderInt( "Level", &texAni, 1,
+			                  glConfig.maxTextureAnisotropy, fmtStr,
+			                  ImGuiSliderFlags_AlwaysClamp );
+			if ( texAni != cvar.GetInteger() ) {
+				cvar.SetInteger( texAni );
+			}
+		} else {
+			ImGui::BeginDisabled();
+			int texAni = 0;
+			ImGui::SliderInt( "Level", &texAni, 1, 8, "Not supported" );
+			ImGui::EndDisabled();
+			descr = "Anisotropic filtering is not supported by this system!";
+		}
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
+};
+
+// GUI / layout toggles (live). Drawn as a plain section
+// (not a burger) near the bottom of the Graphics tab, just above Screenshots.
+static CVarOption guiLayoutOptions[] = {
+	CVarOption( "GUI and Layout" ),
+	CVarOption( "r_scaleMenusTo43", "Scale fullscreen menus to 4:3", OT_BOOL ),
+	CVarOption( "gui_hiResFonts", "High-resolution GUI fonts (displays taller than 720p)", OT_BOOL ),
 };
 
 // Non-vanilla graphical enhancements. This tab (and everything in it) is only
 // shown/active on backends that support it (GL3/Vulkan) - see
 // R_BackendSupportsEnhancements(). The legacy ARB2 renderer stays faithful to
 // vanilla Doom 3, so none of these effects run there.
-static CVarOption enhancementOptions[] = {
-	CVarOption( "Lighting" ),
+// The Graphics tab is organised into collapsible "burger" groups (see OT_GROUP /
+// BeginSettingsGroup). Each group owns a child array below; the top-level enhancementOptions[]
+// wires them together. Groups with a single clean master toggle (Tessellation, Parallax)
+// put that switch on the header row and grey their body out while off; the rest are plain
+// collapsible categories. The Antialiasing, Ambient Occlusion, Reflections and Shadows
+// sections use custom widgets (discrete-stop sliders, backend notes) and are hand-drawn as
+// groups directly in DrawGraphicsMenu().
+
+static CVarOption lightingOptions[] = {
 	CVarOption( "r_pbr", []( idCVar& cvar ) {
 		bool enable = cvar.GetBool();
 		if ( ImGui::Checkbox( "PBR Materials (GGX)", &enable ) ) {
@@ -1751,19 +1840,77 @@ static CVarOption enhancementOptions[] = {
 			"0 = vanilla (no light), 1 = full faint glow. Only noticeable in near-total darkness.";
 		AddCVarOptionTooltips( cvar, descr );
 	} ),
+};
 
-	// NOTE: the Shadows section is hand-drawn in DrawEnhancementsMenu() (grouped
-	// under the toggle, with a fine-grained bias control), not listed here.
+// NOTE: the Shadows section is hand-drawn in DrawGraphicsMenu() (a burger group under
+// its master toggle, with a fine-grained bias control), not listed here.
 
-	CVarOption( "Post-Processing" ),
+// Tessellation: the master switch (r_tessellation) rides the group header, so these
+// sub-controls no longer gate themselves - the group greys them out while it is off.
+static CVarOption tessellationOptions[] = {
+	CVarOption( "r_tessLevel", []( idCVar& cvar ) {
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Tessellation Level", &f, 1.0f, 16.0f, "%.0f", 0 ) ) {
+			cvar.SetFloat( f );
+		}
+		AddCVarOptionTooltips( cvar );
+	} ),
+	CVarOption( "r_tessDisplace", []( idCVar& cvar ) {
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Displacement", &f, -4.0f, 4.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( f );
+		}
+		const char* descr = "Normal-map displacement: push surface detail along the normal by this many world\n"
+			"units. Doom 3 has no runtime height maps, so height is approximated from the bump\n"
+			"map, positive raises detail, negative carves it in. 0 = pure PN silhouette smoothing.";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
+	CVarOption( "r_tessMaxDist", []( idCVar& cvar ) {
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Tessellation Distance", &f, 0.0f, 2048.0f, "%.0f", 0 ) ) {
+			cvar.SetFloat( f );
+		}
+		const char* descr = "View distance (world units) beyond which tessellation rolls back toward flat,\n"
+			"an LOD/performance guard. 0 = full tessellation at any distance.";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
+};
+
+// Parallax: master switch (r_parallax) rides the group header.
+static CVarOption parallaxOptions[] = {
+	CVarOption( "r_parallaxScale", []( idCVar& cvar ) {
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Parallax Depth", &f, 0.0f, 2.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( idMath::ClampFloat( 0.0f, 4.0f, f ) );
+		}
+		const char* descr = "Strength of the parallax relief. 0 = flat, higher exaggerates the apparent depth.";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
+	CVarOption( "r_parallaxShadow", []( idCVar& cvar ) {
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Parallax Self-Shadow", &f, 0.0f, 1.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, f ) );
+		}
+		const char* descr = "The parallax relief casts soft contact shadows from the light direction, which is\n"
+			"what makes the fake depth read as real. 0 = off. Adds a second (half-step) march\n"
+			"per lit pixel.";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
+};
+
+// Post-Processing: a plain collapsible category (no single master toggle).
+static CVarOption postProcessOptions[] = {
 	// HDR rendering: accumulate the scene into a float (RGBA16F) buffer instead of the
 	// 8-bit backbuffer, then resolve back. Removes fog/gradient banding.
 	CVarOption( "r_hdr", "HDR Rendering", OT_BOOL ),
 	CVarOption( "r_postFilmGrain", "Film Grain", OT_FLOAT, 0.0f, 0.25f ),
 	CVarOption( "r_postFilmGrainSize", "Film Grain Size", OT_FLOAT, 1.0f, 4.0f ),
 	CVarOption( "r_postChromaticAberration", "Chromatic Aberration", OT_FLOAT, 0.0f, 0.5f ),
+};
 
-	CVarOption( "Particles" ),
+// Particles: a plain collapsible category (soft particles + depth capture + smoke blend
+// each have their own toggle / dependency handling).
+static CVarOption particleOptions[] = {
 	CVarOption( "r_useSoftParticles", []( idCVar& cvar ) {
 		bool enable = cvar.GetBool();
 		if ( ImGui::Checkbox( "Use Soft Particles", &enable ) ) {
@@ -1827,6 +1974,27 @@ static CVarOption enhancementOptions[] = {
 	} ),
 };
 
+// Top-level Enhancements groups. A non-null master cvar (2nd arg) draws the group's
+// on/off switch on the header row and greys the body while off; nullptr = a plain
+// collapsible category. Init()/DrawOptions() recurse into each group's child array.
+static CVarOption enhancementOptions[] = {
+	CVarOption( "Lighting", nullptr, lightingOptions, IM_ARRAYSIZE( lightingOptions ) ),
+	CVarOption( "Tessellation (only Vulkan)", "r_tessellation", tessellationOptions, IM_ARRAYSIZE( tessellationOptions ),
+		"GPU PN-triangle tessellation that rounds the low-poly silhouettes of animated\n"
+		"characters (enemies, NPCs). Vulkan only - the OpenGL backend's GL 3.3 context has\n"
+		"no tessellation stages, so this does nothing there. Static props are left flat on\n"
+		"purpose (PN inflates hard-surface geometry). Off = vanilla.\n"
+		"(Fine-tuning: Min Triangle Size lives in the Debugging tab.)" ),
+	CVarOption( "Parallax Mapping", "r_parallax", parallaxOptions, IM_ARRAYSIZE( parallaxOptions ),
+		"Per-pixel surface relief on world walls, floors and panels: a height field is\n"
+		"derived from each material's normal map and marched to fake real depth. Opaque\n"
+		"world (BSP) geometry only - props and characters are left to Tessellation, where\n"
+		"parallax would deform their curved surfaces. Takes effect on the next map load.\n"
+		"Off = vanilla." ),
+	CVarOption( "Post-Processing", nullptr, postProcessOptions, IM_ARRAYSIZE( postProcessOptions ) ),
+	CVarOption( "Particles", nullptr, particleOptions, IM_ARRAYSIZE( particleOptions ) ),
+};
+
 idList<VidMode> vidModes;
 
 static bool initialFullscreen = false;
@@ -1838,7 +2006,7 @@ static int initialUsePrecomprTextures = 0;
 static int initialUseCompression = 0;
 static int initialUseNormalCompr = 0;
 
-static void SetVideoStuffFromCVars()
+static void CaptureGraphicsBaseline()
 {
 	const int curMode = r_mode.GetInteger();
 	initialMode = curMode;
@@ -1862,7 +2030,7 @@ static void SetVideoStuffFromCVars()
 	initialUseNormalCompr = globalImages->image_useNormalCompression.GetInteger();
 }
 
-static bool VideoHasResettableChanges()
+static bool GraphicsHasResettableChanges()
 {
 	const int curMode = r_mode.GetInteger();
 	if ( curMode != initialMode )
@@ -1893,7 +2061,7 @@ static bool VideoHasResettableChanges()
 	return false;
 }
 
-static bool VideoHasApplyableChanges()
+static bool GraphicsHasApplyableChanges()
 {
 	glimpParms_t curState = GLimp_GetCurState();
 	int wantedWidth = 0, wantedHeight = 0;
@@ -1925,7 +2093,7 @@ static bool VideoHasApplyableChanges()
 }
 
 
-static void ApplyVideoSettings()
+static void ApplyGraphicsSettings()
 {
 	const char* cmd = "vid_restart partial\n";
 	if ( initialUsePrecomprTextures != globalImages->image_usePrecompressedTextures.GetInteger()
@@ -1938,7 +2106,7 @@ static void ApplyVideoSettings()
 	cmdSystem->BufferCommandText( CMD_EXEC_APPEND, cmd );
 }
 
-static void VideoResetChanges()
+static void GraphicsResetChanges()
 {
 	r_mode.SetInteger( initialMode );
 	r_customWidth.SetInteger( initialCustomVidRes[0] );
@@ -1953,9 +2121,12 @@ static void VideoResetChanges()
 	globalImages->image_useNormalCompression.SetInteger( initialUseNormalCompr );
 }
 
-static void InitVideoOptionsMenu()
+static void InitGraphicsMenu()
 {
-	InitOptions( videoOptionsImmediately, IM_ARRAYSIZE(videoOptionsImmediately) );
+	InitOptions( screenshotOptions, IM_ARRAYSIZE(screenshotOptions) );
+	InitOptions( displayColorOptions, IM_ARRAYSIZE(displayColorOptions) );
+	InitOptions( anisoOptions, IM_ARRAYSIZE(anisoOptions) );
+	InitOptions( guiLayoutOptions, IM_ARRAYSIZE(guiLayoutOptions) );
 	InitOptions( enhancementOptions, IM_ARRAYSIZE(enhancementOptions) );
 
 	vidModes.SetNum(0, false);
@@ -1978,17 +2149,18 @@ static void InitVideoOptionsMenu()
 		vm.Init();
 	}
 
-	SetVideoStuffFromCVars();
+	CaptureGraphicsBaseline();
 }
 
-static void DrawVideoOptionsMenu()
+// Renderer backend selector. Lives at the top of the Graphics tab: it works
+// on every backend and is how you switch backends to unlock the enhancement settings below.
+static void DrawRendererBackend()
 {
-	ImGui::Spacing();
-
 	// Renderer backend selection (DUDE). Changing this only takes effect after a
-	// vid_restart. "opengl" is the legacy, vanilla-faithful ARB2 path; "opengl3"
-	// is the GL 3.3 core backend that enables the Enhancements tab. Vulkan is not
-	// implemented yet.
+	// renderer restart. "opengl" is the legacy, vanilla-faithful ARB2 path; "opengl3"
+	// is the GL 3.3 core backend and "vulkan" is the Vulkan backend — both route through
+	// the RHI and enable the Graphics tab (Vulkan additionally unlocks Vulkan-only
+	// features like GPU tessellation).
 	ImGui::SeparatorText( "Renderer Backend" );
 	{
 		const char* curAPI = r_graphicsAPI.GetString();
@@ -2004,74 +2176,98 @@ static void DrawVideoOptionsMenu()
 		AddTooltip( "Faithful to vanilla Doom 3. Graphical enhancements are disabled." );
 		ImGui::SameLine();
 		ImGui::RadioButton( "OpenGL 3.3 Core", &backendSel, 1 );
-		AddTooltip( "Modern GL 3.3 core backend (in development). Enables the Enhancements tab." );
+		AddTooltip( "Modern GL 3.3 core backend. Enables the graphical enhancements." );
 		ImGui::SameLine();
+#ifdef DHEWM3_VULKAN
+		ImGui::RadioButton( "Vulkan", &backendSel, 2 );
+		AddTooltip( "Vulkan backend. Enables the graphical enhancements plus Vulkan-only features (GPU tessellation)." );
+#else
+		// this build was compiled without the Vulkan backend
 		ImGui::BeginDisabled();
-		ImGui::RadioButton( "Vulkan (coming soon)", &backendSel, 2 );
+		ImGui::RadioButton( "Vulkan (not built)", &backendSel, 2 );
 		ImGui::EndDisabled();
+		AddTooltip( "This build was compiled without the Vulkan backend (-DDHEWM3_VULKAN=OFF)." );
+#endif
 
 		if ( backendSel != oldSel ) {
-			// only legacy and opengl3 are selectable; vulkan radio is disabled
-			r_graphicsAPI.SetString( backendSel == 1 ? "opengl3" : "opengl" );
+			const char* apiName = ( backendSel == 2 ) ? "vulkan"
+			                    : ( backendSel == 1 ) ? "opengl3" : "opengl";
+			r_graphicsAPI.SetString( apiName );
 		}
 
-		// if the selected backend differs from the one currently running, offer to
-		// apply it (a full renderer restart). glConfig.coreProfile reflects reality.
-		const bool runningIsCore = glConfig.coreProfile;
-		const bool selectedIsCore = ( idStr::Icmp( r_graphicsAPI.GetString(), "opengl3" ) == 0 );
-		if ( runningIsCore != selectedIsCore ) {
+		// If the selected backend differs from the one actually running, offer to apply
+		// it. Running backend from glConfig: rhiBackend is true for GL3+Vulkan, coreProfile
+		// is GL3-only (Vulkan keeps rhiBackend true with coreProfile false — RenderSystem.h).
+		const int runningSel = !glConfig.rhiBackend ? 0 : ( glConfig.coreProfile ? 1 : 2 );
+		if ( backendSel != runningSel ) {
 			ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
 				"Backend change pending - restart the renderer to apply it." );
 			if ( ImGui::Button( "Apply Backend (restart renderer)" ) ) {
 				cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "vid_restart\n" );
 			}
 			AddTooltip( "Runs 'vid_restart' to recreate the renderer with the selected backend." );
+			if ( backendSel == 2 || runningSel == 2 ) {
+				ImGui::TextDisabled( "Switching to/from Vulkan: if the UI or cursor vanishes after Apply, fully "
+					"quit and relaunch (the setting is saved)." );
+			}
 		}
 	}
+}
 
-	// DUDE: the legacy image-quality preset (com_machineSpec: Low/Medium/High/Ultra)
-	// is no longer user-selectable - every supported GPU handles Ultra, so it stays
-	// pinned there (setMachineSpec at startup + the dudePreset command). The in-game
-	// quality selector now drives the DUDE enhancement tiers instead.
-
-	ImGui::SeparatorText( "Options that must be applied" );
-
-	// fullscreen
-	int fullscreenChoice = r_fullscreen.GetBool();
-	if ( ImGui::Combo( "Window Mode", &fullscreenChoice, "Windowed\0Fullscreen\0" ) ) {
-		r_fullscreen.SetBool( fullscreenChoice != 0 );
+// Live GPU / OpenGL info. Shown just below the Renderer
+// Backend selector at the top of the Graphics tab.
+static void DrawOpenGLInfo()
+{
+	if ( ImGui::TreeNode("OpenGL Info") ) {
+		ImGui::BeginDisabled();
+		ImGui::Text( "OpenGL vendor: %s", glConfig.vendor_string );
+		ImGui::Text( "OpenGL renderer: %s", glConfig.renderer_string );
+		ImGui::Text( "OpenGL version: %s", glConfig.version_string );
+		if ( glConfig.glDebugOutputAvailable && glConfig.haveDebugContext ) {
+			ImGui::Text( "    using an OpenGL debug context to show warnings from the OpenGL driver" );
+		}
+		ImGui::EndDisabled();
+		ImGui::TreePop();
+	} else {
+		AddTooltip( "Click to show information about the currently used Graphics Card (GPU)" );
 	}
-	AddTooltip( "r_fullscreen" );
-	bool fullscreenDesktop = r_fullscreenDesktop.GetBool();
-	if ( ImGui::Checkbox( "Fullscreen Desktop Mode: Use borderless window at desktop resolution for fullscreen", &fullscreenDesktop ) ) {
-		r_fullscreenDesktop.SetBool( fullscreenDesktop );
-	}
-	AddTooltip( "r_fullscreenDesktop" );
-	AddDescrTooltip( "ignores the resolution configured in DUDE, doesn't switch the display resolution, can prevent issues like desktop icons being rearranged after running the game" );
+}
 
-	// Video Mode / Resolution
+// Display / windowing settings for the Graphics tab.
+// Order matches the request: Resolution, Window Mode, Frame Rate Cap, Fullscreen Desktop,
+// Vertical Sync. Resolution / Window Mode / Fullscreen Desktop need the Apply restart drawn
+// by the caller; Frame Rate Cap and Vertical Sync take effect live.
+static void DrawDisplaySettings()
+{
+	// Resolution
 	static int selModeIdx = -1; // index within our vidModes array
-	static int selMode = -3; // global mode number (as used in r_mode)
+	static int selMode = -3;    // global mode number (as used in r_mode)
 	int curMode = r_mode.GetInteger();
 	if ( selMode != curMode ) {
 		selMode = curMode;
 		int w, h;
 		if ( !R_GetModeInfo( &w, &h, curMode ) ) {
-			// invalid mode
 			selMode = (curMode < 0) ? -1 : 4; // safe default (800x600)
 			r_mode.SetInteger( selMode );
 		}
-		selModeIdx = 0; // set *something* in case it's not found below
+		selModeIdx = 0;
 		for ( int i=0, n=vidModes.Num(); i < n; ++i ) {
-			if ( vidModes[i].mode == selMode ) {
-				selModeIdx = i;
-				break;
-			}
+			if ( vidModes[i].mode == selMode ) { selModeIdx = i; break; }
 		}
 	}
 
-	const char* resLabel = ( fullscreenChoice && fullscreenDesktop ) ? "Window Resolution (ignored for Fullscreen Desktop Mode!)###resMode" : "Resolution###resMode";
+	// Current resolution info, shown above the dropdown.
+	if ( (int)glConfig.winWidth != glConfig.vidWidth ) {
+		ImGui::TextDisabled( "Current Resolution: %g x %g (Physical: %d x %d)",
+		                     glConfig.winWidth, glConfig.winHeight, glConfig.vidWidth, glConfig.vidHeight );
+		AddDescrTooltip( "Apparently your system is using a HighDPI mode, where the logical resolution (used to specify"
+		                 " window sizes) is lower than the physical resolution (number of pixels actually rendered)." );
+	} else {
+		ImGui::TextDisabled( "Current Resolution: %d x %d", glConfig.vidWidth, glConfig.vidHeight );
+	}
 
+	const char* resLabel = ( r_fullscreen.GetBool() && r_fullscreenDesktop.GetBool() )
+		? "Window Resolution (ignored for Fullscreen Desktop Mode!)###resMode" : "Resolution###resMode";
 	if ( ImGui::Combo( resLabel, &selModeIdx, [](void* data, int idx) -> const char* {
 				const idList<VidMode>& vms = *static_cast< const idList<VidMode>* >(data);
 				return vms[idx].label.c_str();
@@ -2081,7 +2277,6 @@ static void DrawVideoOptionsMenu()
 		r_mode.SetInteger( selMode );
 	}
 	AddTooltip( "r_mode" );
-
 	if ( selMode == -1 ) {
 		int vidRes[2] = { r_customWidth.GetInteger(), r_customHeight.GetInteger() };
 		if ( ImGui::InputInt2( "Custom Resolution (width x height)", vidRes ) ) {
@@ -2093,33 +2288,14 @@ static void DrawVideoOptionsMenu()
 		AddTooltip( "r_customWidth / r_customHeight" );
 	}
 
-	// resolution info text
-#if SDL_VERSION_ATLEAST(3, 0, 0)
-	// in SDL3 it's a Display ID, in SDL2 a Display Index, in both cases the value
-	// can be fed into SDL_GetDisplayBounds()
-	SDL_DisplayID sdlDisplayId_x = SDL_GetDisplayForWindow( SDL_GL_GetCurrentWindow() );
-#else // SDL2
-	int sdlDisplayId_x = SDL_GetWindowDisplayIndex( SDL_GL_GetCurrentWindow() );
-#endif
-	SDL_Rect displayRect = {};
-	SDL_GetDisplayBounds( sdlDisplayId_x, &displayRect );
-	if ( (int)glConfig.winWidth != glConfig.vidWidth ) {
-		ImGui::TextDisabled( "Current Resolution: %g x %g (Physical: %d x %d)",
-		                     glConfig.winWidth, glConfig.winHeight, glConfig.vidWidth, glConfig.vidHeight );
-		AddDescrTooltip( "Apparently your system is using a HighDPI mode, where the logical resolution (used to specify"
-		                 " window sizes) is lower than the physical resolution (number of pixels actually rendered)." );
-		float scale = float(glConfig.vidWidth)/glConfig.winWidth;
-		int pw = scale * displayRect.w;
-		int ph = scale * displayRect.h;
-		ImGui::TextDisabled( "Display Size: %d x %d (Physical: %d x %d)", displayRect.w, displayRect.h, pw, ph );
-	} else {
-		ImGui::TextDisabled( "Current Resolution: %d x %d", glConfig.vidWidth, glConfig.vidHeight );
-		ImGui::TextDisabled( "Display Size: %d x %d", displayRect.w, displayRect.h );
+	// Window Mode
+	int fullscreenChoice = r_fullscreen.GetBool();
+	if ( ImGui::Combo( "Window Mode", &fullscreenChoice, "Windowed\0Fullscreen\0" ) ) {
+		r_fullscreen.SetBool( fullscreenChoice != 0 );
 	}
+	AddTooltip( "r_fullscreen" );
 
-	// Frame Rate Cap (com_maxFPS). Read live by the frame loop, so this applies immediately —
-	// no vid_restart. 0 shows as "Uncapped". Most useful with VSync disabled, where it provides
-	// the frame pacing VSync would otherwise give (and sidesteps multi-monitor VSync clamping).
+	// Frame Rate Cap (com_maxFPS). Read live by the frame loop, so it applies immediately.
 	int maxFps = com_maxFPS.GetInteger();
 	if ( ImGui::SliderInt( "Frame Rate Cap", &maxFps, 0, 360,
 	                       maxFps <= 0 ? "Uncapped" : "%d FPS", ImGuiSliderFlags_AlwaysClamp ) ) {
@@ -2130,29 +2306,57 @@ static void DrawVideoOptionsMenu()
 	                       "locks to the wrong refresh rate. Set it to your monitor's refresh, or a clean "
 	                       "divisor of it (e.g. 72 on a 144 Hz panel)." );
 
-	// MSAA
-	static const char* msaaLevels[] = { "No Antialiasing", "2x", "4x", "8x", "16x" };
-	int msaa = r_multiSamples.GetInteger();
-	int msaaModeIndex = Min( 4, ( msaa > 1 ) ? idMath::ILog2( msaa ) : 0 );
-	const char* curLvl = msaaLevels[msaaModeIndex];
-	if ( ImGui::SliderInt( "Antialiasing (MSAA)", &msaaModeIndex, 0, 4, curLvl, ImGuiSliderFlags_NoInput ) ) {
-		msaa = ( msaaModeIndex > 0 ) ? ( 1 << msaaModeIndex ) : 0;
-		r_multiSamples.SetInteger( msaa );
+	// Fullscreen Desktop
+	bool fullscreenDesktop = r_fullscreenDesktop.GetBool();
+	if ( ImGui::Checkbox( "Fullscreen Desktop (borderless at desktop resolution)", &fullscreenDesktop ) ) {
+		r_fullscreenDesktop.SetBool( fullscreenDesktop );
 	}
-	AddCVarOptionTooltips( r_multiSamples, "Note: Not all GPUs/drivers support all modes, esp. not 16x!" );
+	AddTooltip( "r_fullscreenDesktop" );
+	AddDescrTooltip( "Borderless window at the desktop resolution instead of a real mode switch; avoids desktop icons being rearranged." );
 
-	// Texture memory/quality trade-offs. Kept (rather than pinned to max quality) because
-	// texture-heavy mods / hi-res retexture packs benefit from compression to fit VRAM.
-	ImGui::SeparatorText( "Texture Options" );
+	// Make window resizable — only meaningful in windowed mode, so grey it out in fullscreen.
+	ImGui::BeginDisabled( r_fullscreen.GetBool() );
+	bool windowResizable = r_windowResizable.GetBool();
+	if ( ImGui::Checkbox( "Make DUDE window resizable", &windowResizable ) ) {
+		r_windowResizable.SetBool( windowResizable );
+	}
+	AddCVarOptionTooltips( r_windowResizable );
+	ImGui::EndDisabled();
 
+	// Vertical Sync (live; applied immediately via GLimp_SetSwapInterval)
+	int curVsync = idMath::ClampInt( -1, 1, r_swapInterval.GetInteger() );
+	if ( curVsync == -1 ) {
+		curVsync = 2;
+	}
+	if ( ImGui::Combo( "Vertical Sync", &curVsync, "Disable VSync\0Enable VSync\0Adaptive VSync\0" ) ) {
+		if ( curVsync == 2 ) {
+			curVsync = -1;
+		}
+		if ( GLimp_SetSwapInterval( curVsync ) ) {
+			r_swapInterval.SetInteger( curVsync );
+			// this was just set with GLimp_SetSwapInterval(), no reason to set it again in R_CheckCvars()
+			r_swapInterval.ClearModified();
+		} else {
+			D3::ImGuiHooks::ShowWarningOverlay( "Setting VSync (GL SwapInterval) failed, maybe try another mode" );
+		}
+	} else {
+		AddTooltip( "r_swapInterval" );
+	}
+	AddDescrTooltip( "Note: Not all GPUs/drivers support Adaptive VSync" );
+}
+
+// Texture memory/quality trade-offs. Kept rather than
+// pinned to max quality because texture-heavy mods / hi-res retexture packs benefit from
+// compression to fit VRAM. All of these need a renderer restart (the shared Apply below).
+static void DrawTextureOptions()
+{
 	int usePreComprTex = globalImages->image_usePrecompressedTextures.GetInteger();
 	if ( ImGui::Combo( "Use precompressed (.dds) textures", &usePreComprTex,
 	                   "No, only uncompressed\0Yes, no matter which format\0Only if high quality (BPCT/BC7)\0" ) )
 	{
 		globalImages->image_usePrecompressedTextures.SetInteger(usePreComprTex);
 		// by default I guess people also want compressed normal maps when using this
-		// especially relevant for retexturing packs that only ship BC7 DDS files
-		// (otherwise the lowres TGA normalmaps would be used)
+		// (retexturing packs that only ship BC7 DDS files, otherwise lowres TGA normalmaps are used)
 		if ( usePreComprTex ) {
 			cvarSystem->SetCVarInteger( "image_useNormalCompression", 2 );
 		}
@@ -2186,66 +2390,14 @@ static void DrawVideoOptionsMenu()
 		AddTooltip( "Can only be used if (pre)compressed textures are enabled!" );
 	}
 	ImGui::EndDisabled();
-
-	// Apply Button
-	if ( !VideoHasApplyableChanges() ) {
-		ImGui::BeginDisabled();
-		ImGui::Button( "Apply" );
-		AddTooltip( "No changes were made, so there's nothing to apply" );
-		ImGui::EndDisabled();
-	} else {
-		if ( ImGui::Button( "Apply" ) ) {
-			ApplyVideoSettings();
-		}
-		AddTooltip( "Click to apply the settings above, might restart the renderer (but not the game)" );
-	}
-
-	ImGui::SameLine();
-
-	// Reset button
-	if ( !VideoHasResettableChanges() ) {
-		ImGui::BeginDisabled();
-		ImGui::Button( "Reset" );
-		AddTooltip( "The window's current state is like it was when opening the menu, so there's nothing to reset" );
-		ImGui::EndDisabled();
-	} else {
-		ImGui::SameLine();
-		if ( ImGui::Button("Reset") ) {
-			VideoResetChanges();
-		}
-		AddTooltip( "Click to restore the settings as the were when opening this menu" );
-	}
-
-	// options that take effect immediately, just by modifying their CVar:
-
-	DrawOptions( videoOptionsImmediately, IM_ARRAYSIZE(videoOptionsImmediately) );
-
-	ImGui::Separator();
-
-	if ( ImGui::TreeNode("OpenGL Info") ) {
-		ImGui::BeginDisabled();
-
-		ImGui::Text( "OpenGL vendor: %s", glConfig.vendor_string );
-		ImGui::Text( "OpenGL renderer: %s", glConfig.renderer_string );
-		ImGui::Text( "OpenGL version: %s", glConfig.version_string );
-
-		if ( glConfig.glDebugOutputAvailable && glConfig.haveDebugContext ) {
-			ImGui::Text( "    using an OpenGL debug context to show warnings from the OpenGL driver" );
-		}
-
-		ImGui::EndDisabled();
-		ImGui::TreePop();
-	} else {
-		AddTooltip( "Click to show information about the currently used Graphics Card (GPU)" );
-	}
 }
 
 // ---------------------------------------------------------------------------
 // Enhancement quality presets (DUDE Phase 3.5)
 //
 // One-click tiers that set the whole GL3 enhancement suite as a group instead of
-// dialling every slider by hand. Separate from Video Options' vanilla "Quality
-// Preset" (com_machineSpec, which drives image/texture quality): this one only
+// dialling every slider by hand. This is distinct from the old vanilla image-quality
+// preset (com_machineSpec, no longer user-selectable - pinned to Ultra): it only
 // touches the non-vanilla enhancement cvars (SSAO, shadow maps, emissive fill,
 // soft particles, post-FX).
 //
@@ -2304,7 +2456,12 @@ struct EnhancementPreset {
 	// so the table's positional initializers stay append-only). Inert on Potato/Low,
 	// which use stencil shadows, but carried for determinism.
 	bool  shadowMapSizeScale;       // r_shadowMapSizeScale: scale each light's res with its radius
-	float shadowMapSizeScaleRadius; // r_shadowMapSizeScaleRadius: pivot radius that gets the base res
+	float shadowMapSizeScaleRadius; // r_shadowMapSizeScaleRadius: pivot radius that gets the base res.
+	                                // A HIGHER pivot pushes more lights down a resolution tier (cheaper,
+	                                // slightly softer). Ultra/Nightmare use 480 (vs 380 on Medium/High) on
+	                                // purpose, NOT a typo: the trim only bites on their 2048 base, while the
+	                                // lower tiers' small bases (512/1200) already floor big lights at 1/2x
+	                                // regardless of the pivot, so raising it there would be a no-op.
 	// baked ambient-occlusion maps (r_occlusionMaps). Appended (see note above) to keep the
 	// table's positional initializers stable. On for every tier except Potato; inert on stock
 	// assets and on the legacy backend, so it only shows where baked maps exist (chars, props).
@@ -2325,17 +2482,38 @@ struct EnhancementPreset {
 	// above Potato. FXAA (1) is reachable by hand only — its niche is the
 	// subpixel shimmer damping SMAA doesn't do, moot on the PBR tiers.
 	int   rhiAA;                    // r_rhiAA: 0 = off, 1 = FXAA, 2 = SMAA
-	// SSAO world-space sampling radius (appended, see note above). Unlike the
-	// other calibration cvars this one is tier-scaled: tight contact creases on
-	// the cheaper tiers, broad ambient occlusion on the expensive ones. Carried
-	// as the Medium value on Potato/Low (inert there — SSAO is off).
-	float ssaoRadius;               // r_ssaoRadius: 32 Medium .. 128 Nightmare
+	// SSAO world-space sampling radius (appended, see note above). Fixed at 48 world
+	// units across every tier (user-calibrated) — the contact-crease scale that looks
+	// right regardless of preset; only the slice/step budget changes with the tier.
+	float ssaoRadius;               // r_ssaoRadius: 48 on every tier
 	// SSAO temporal accumulation (appended, see note above). On for Medium only:
 	// it denoises the low slice/step march so Medium's cheap AO looks clean, a
 	// small frame-time win over brute-forcing samples. Redundant on the higher
 	// tiers (their per-frame AO is already clean) and inert on Potato/Low (SSAO
 	// off), so it stays off everywhere else.
 	bool  ssaoTemporal;             // r_ssaoTemporal
+	// DUDE GPU tessellation (appended, see note above; Vulkan-only, inert elsewhere):
+	// PN-triangle character smoothing from High up, normal-map displacement from Ultra
+	// up. tessDisplace carried as 0 on the lower tiers so tessellation there (if hand-
+	// enabled) is pure silhouette smoothing.
+	bool  tessellation;             // r_tessellation
+	float tessDisplace;             // r_tessDisplace
+	// DUDE parallax occlusion mapping (appended, see note above; GL3 + Vulkan): world-surface
+	// relief from Medium up. Self-shadowing (the second, half-step march) is the cost swing, so
+	// it's off on Medium and full from High up. parallaxShadow is inert where parallax is off.
+	bool  parallax;                 // r_parallax
+	float parallaxShadow;           // r_parallaxShadow
+	// DUDE GPU MD5 skinning (appended, see note above; Vulkan-only, inert on GL3). Option-B TBN is a
+	// small fidelity divergence from stock's per-frame re-derive, so it is OFF on every preset for now
+	// — Potato/Low stay a faithful id-render, and the higher tiers only flip it on once it is a proven
+	// perf win (Milestone C strips the redundant CPU skin). Every preset forcing it 0 keeps the faithful
+	// floor bulletproof even if it was hand-enabled before switching presets.
+	bool  gpuSkin;                  // r_gpuSkinning
+	// SSAO depth-mip acceleration (appended, see note above). On for every tier that runs SSAO
+	// (Medium/High/Ultra/Nightmare) — the ~25% AO speedup for near-invisible halos at the
+	// archived bias 0.1 / cap 2 defaults. Inert on Potato/Low (SSAO off). The bias/cap knobs
+	// stay at their archived cvar defaults across tiers.
+	bool  ssaoDepthMip;             // r_ssaoDepthMip
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2344,13 +2522,13 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 32.0f,  false },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 32.0f,  false },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 3,   2,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 32.0f,  true  },
-	{ "High",         true,  false, true,  true,  true,   0.75f, 3,   3,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 64.0f,  false },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.8f, 6,   4,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 96.0f,  false },
-	{ "Nightmare", true, true, true, true,  true,   1.0f, 7,   5,   true,  true,  2048, 2048, 12, 128,  48,   0.05f, 0.2f,  0.7f, 1,  1.2f, 42.0f, true, 340.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 128.0f, false },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, false, true },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, false, true },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, false, true },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, false, true },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2378,6 +2556,7 @@ static void ApplyEnhancementPreset( int idx )
 	r_ssaoBentNormal.SetBool( p.ssaoBentNormal );
 	r_ssaoRadius.SetFloat( p.ssaoRadius );
 	r_ssaoTemporal.SetBool( p.ssaoTemporal );
+	r_ssaoDepthMip.SetBool( p.ssaoDepthMip );
 
 	r_shadowMapSize.SetInteger( p.shadowMapSize );
 	r_shadowMapPointSize.SetInteger( p.shadowMapPointSize );
@@ -2405,6 +2584,20 @@ static void ApplyEnhancementPreset( int idx )
 	r_pbr.SetBool( p.pbr );
 	r_ssr.SetBool( p.ssr );
 	r_ssrResScale.SetFloat( p.ssrResScale );
+
+	// GPU tessellation (Vulkan-only; inert on GL3): character smoothing from High,
+	// normal-map displacement from Ultra.
+	r_tessellation.SetBool( p.tessellation );
+	r_tessDisplace.SetFloat( p.tessDisplace );
+
+	// parallax occlusion mapping (GL3 + Vulkan): world relief from Medium, self-shadow from High.
+	r_parallax.SetBool( p.parallax );
+	r_parallaxShadow.SetFloat( p.parallaxShadow );
+
+	// GPU MD5 skinning (Vulkan-only; inert on GL3). OFF on every preset for now — option-B TBN is a
+	// fidelity divergence, so this keeps Potato (and every tier) a faithful id-render until it is a
+	// proven perf win and deliberately flipped on for the top tiers.
+	r_gpuSkinning.SetBool( p.gpuSkin );
 }
 
 // Return the preset whose full cvar vector the live cvars currently match, or -1
@@ -2427,6 +2620,7 @@ static int DetectEnhancementPreset()
 			r_ssaoBentNormal.GetBool()         == p.ssaoBentNormal &&
 			idMath::Fabs( r_ssaoRadius.GetFloat() - p.ssaoRadius ) < 0.5f &&
 			r_ssaoTemporal.GetBool()           == p.ssaoTemporal &&
+			r_ssaoDepthMip.GetBool()           == p.ssaoDepthMip &&
 			r_shadowMapSize.GetInteger()       == p.shadowMapSize &&
 			r_shadowMapPointSize.GetInteger()  == p.shadowMapPointSize &&
 			r_shadowMapCubePcf.GetInteger()    == p.shadowMapCubePcf &&
@@ -2446,7 +2640,12 @@ static int DetectEnhancementPreset()
 			r_hdr.GetBool()                    == p.hdr &&
 			r_pbr.GetBool()                    == p.pbr &&
 			r_ssr.GetBool()                    == p.ssr &&
-			idMath::Fabs( r_ssrResScale.GetFloat() - p.ssrResScale ) < 0.01f;
+			idMath::Fabs( r_ssrResScale.GetFloat() - p.ssrResScale ) < 0.01f &&
+			r_tessellation.GetBool()           == p.tessellation &&
+			idMath::Fabs( r_tessDisplace.GetFloat() - p.tessDisplace ) < 0.01f &&
+			r_parallax.GetBool()               == p.parallax &&
+			idMath::Fabs( r_parallaxShadow.GetFloat() - p.parallaxShadow ) < 0.01f &&
+			r_gpuSkinning.GetBool()            == p.gpuSkin;
 		if ( match ) {
 			return i;
 		}
@@ -2454,75 +2653,92 @@ static int DetectEnhancementPreset()
 	return -1;
 }
 
-static void DrawEnhancementsMenu()
+// --- Enhancements groups. Each collapsible "burger" section lives in its own helper so
+// DrawGraphicsMenu() can order them freely (just reorder the calls). The five that
+// wrap a CVarOption child array hoist their master switch, where they have one, onto the
+// group header. ---
+
+static void DrawEnhGroup_Lighting()
 {
-	ImGui::Spacing();
-	ImGui::TextDisabled( "Enhancements that deviate from vanilla Doom 3." );
-	ImGui::Spacing();
-
-	const bool supported = R_BackendSupportsEnhancements();
-	if ( !supported ) {
-		ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
-			"These settings don't apply on the current (legacy) backend." );
-		ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
-			"Choose OpenGL 3.3 as the Renderer Backend in Video Options to enable them." );
-		ImGui::Spacing();
+	if ( BeginSettingsGroup( "Lighting" ) ) {
+		DrawOptions( lightingOptions, IM_ARRAYSIZE( lightingOptions ) );
+		EndSettingsGroup();
 	}
+}
 
-	// grey everything out (and make it non-interactive) when the running backend
-	// can't use these effects - they simply don't apply then.
-	ImGui::BeginDisabled( !supported );
+static void DrawEnhGroup_Tessellation()
+{
+	if ( BeginSettingsGroup( "Tessellation (only Vulkan)", &r_tessellation,
+			"GPU PN-triangle tessellation that rounds the low-poly silhouettes of animated\n"
+			"characters (enemies, NPCs). Vulkan only - the OpenGL backend's GL 3.3 context has\n"
+			"no tessellation stages, so this does nothing there. Static props are left flat on\n"
+			"purpose (PN inflates hard-surface geometry). Off = vanilla.\n"
+			"(Fine-tuning: Min Triangle Size lives in the Debugging tab.)" ) ) {
+		DrawOptions( tessellationOptions, IM_ARRAYSIZE( tessellationOptions ) );
+		EndSettingsGroup();
+	}
+}
 
-	// One-click quality presets for the whole enhancement suite. The combo is the
-	// user's target; the status line reflects the live cvars (so hand-tweaking any
-	// slider below reads back as "Custom"). Nothing is applied until "Apply".
-	ImGui::SeparatorText( "Quality Preset" );
-	{
-		static int selPreset = -1;
-		if ( selPreset < 0 ) {
-			const int d = DetectEnhancementPreset();
-			selPreset = ( d >= 0 ) ? d : PRESET_HIGH;
-		}
+static void DrawEnhGroup_SurfaceRelief()
+{
+	if ( BeginSettingsGroup( "Surface Relief (Parallax)", &r_parallax,
+			"Per-pixel surface relief on world walls, floors and panels: a height field is\n"
+			"derived from each material's normal map and marched to fake real depth. Opaque\n"
+			"world (BSP) geometry only - props and characters are left to Tessellation, where\n"
+			"parallax would deform their curved surfaces. Takes effect on the next map load.\n"
+			"Off = vanilla." ) ) {
+		DrawOptions( parallaxOptions, IM_ARRAYSIZE( parallaxOptions ) );
+		EndSettingsGroup();
+	}
+}
 
+static void DrawEnhGroup_PostProcess()
+{
+	if ( BeginSettingsGroup( "Post-Processing" ) ) {
+		DrawOptions( postProcessOptions, IM_ARRAYSIZE( postProcessOptions ) );
+		EndSettingsGroup();
+	}
+}
+
+static void DrawEnhGroup_Particles()
+{
+	if ( BeginSettingsGroup( "Particles" ) ) {
+		DrawOptions( particleOptions, IM_ARRAYSIZE( particleOptions ) );
+		EndSettingsGroup();
+	}
+}
+
+// Antialiasing group: hardware MSAA + post-process FXAA/SMAA under one "Antialiasing" header.
+// Drawn OUTSIDE the enhancement-gated block so hardware MSAA stays usable on the legacy
+// backend; the post-process part is opengl3/Vulkan-only and greys out on the legacy renderer.
+static void DrawGroup_Antialiasing()
+{
+	if ( BeginSettingsGroup( "Antialiasing" ) ) {
+		// Hardware MSAA (r_multiSamples) — works on every backend, needs a renderer restart
+		// (Apply at the bottom of the tab).
+		static const char* msaaLevels[] = { "No Antialiasing", "2x", "4x", "8x", "16x" };
+		int msaa = r_multiSamples.GetInteger();
+		int msaaModeIndex = Min( 4, ( msaa > 1 ) ? idMath::ILog2( msaa ) : 0 );
 		ImGui::SetNextItemWidth( 220.0f );
-		ImGui::Combo( "##enhPreset", &selPreset,
-			"Potato\0Low\0Medium\0High\0Ultra\0Nightmare\0" );
-		ImGui::SameLine();
-		if ( ImGui::Button( "Apply Preset" ) ) {
-			ApplyEnhancementPreset( selPreset );
+		if ( ImGui::SliderInt( "Hardware MSAA", &msaaModeIndex, 0, 4, msaaLevels[msaaModeIndex], ImGuiSliderFlags_NoInput ) ) {
+			msaa = ( msaaModeIndex > 0 ) ? ( 1 << msaaModeIndex ) : 0;
+			r_multiSamples.SetInteger( msaa );
 		}
-		AddTooltip( "One-click tiers for the whole enhancement suite (SSAO, shadow maps, emissive "
-			"fill light, soft particles, post-FX, specular look) plus the rendering pipeline: HDR "
-			"from Medium up, PBR materials from High up, screen-space reflections from Ultra up "
-			"(at half march resolution; two-thirds on Nightmare). 'Potato' is the "
-			"vanilla-faithful floor (everything off, vanilla specular) and the fastest. Presets set "
-			"the shading look and the performance levers; your fine-tuning (SSAO radii, emissive "
-			"reach/tint, shadow biases, PBR category sliders) is left alone. Tweaking any slider "
-			"afterwards shows 'Custom'. Separate from the image-quality preset in Video Options." );
+		AddCVarOptionTooltips( r_multiSamples, "Hardware multisample antialiasing applied across the whole 3D "
+			"scene (the entire framebuffer), which makes it by far the most GPU-expensive antialiasing option "
+			"here - much heavier than the post-process FXAA/SMAA below. It smooths geometry edges only, not "
+			"specular/normal-map shimmer. Needs a renderer restart to change (Apply at the bottom of the tab); "
+			"not all GPUs/drivers support every mode, especially 16x." );
 
-		const int detected = DetectEnhancementPreset();
-		if ( detected < 0 ) {
-			ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ), "Current: Custom (hand-tuned)" );
-		} else {
-			ImGui::TextDisabled( "Current: %s", enhancementPresets[detected].name );
-		}
-	}
-	ImGui::Spacing();
-
-	// Post-resolve antialiasing (DUDE) — kept high, right under the preset, since it's
-	// the most visible image-quality control. Separate from the hardware "Antialiasing
-	// (MSAA)" slider in Video Options: that only smooths backbuffer geometry edges, while
-	// this runs over the finished 3D view and also tackles specular/normal-map shimmer.
-	// opengl3/Vulkan only; read live by the renderer (no restart). docs/antialiasing.md
-	ImGui::SeparatorText( "Antialiasing (post-process)" );
-	{
+		// Post-process AA (FXAA/SMAA) — opengl3/Vulkan only, so it greys out on the legacy backend.
+		ImGui::BeginDisabled( !R_BackendSupportsEnhancements() );
 		int aa = r_rhiAA.GetInteger();
 		ImGui::SetNextItemWidth( 220.0f );
 		if ( ImGui::Combo( "Post Antialiasing", &aa, "Off\0FXAA (fast, damps shimmer)\0SMAA (sharpest edges)\0" ) ) {
 			r_rhiAA.SetInteger( aa );
 		}
 		AddTooltip( "Post-process antialiasing over the finished 3D view, on top of (and independent "
-			"from) the hardware MSAA in Video Options. FXAA is one cheap pass whose subpixel smoothing "
+			"from) the hardware MSAA above. FXAA is one cheap pass whose subpixel smoothing "
 			"also damps the specular/normal-map shimmer MSAA can't touch, at a slight overall softening. "
 			"SMAA reconstructs edges much more precisely and leaves texture detail sharp, but does not "
 			"treat shimmer (with PBR materials on, Toksvig already covers most of it). HUD and menus are "
@@ -2540,17 +2756,17 @@ static void DrawEnhancementsMenu()
 			"least shimmer reduction); higher values blend fine subpixel detail toward its neighbourhood, "
 			"cutting more of the specular/normal-map crawl but softening textures slightly. ~0.75 is a "
 			"good balance." );
-		ImGui::EndDisabled();
+		ImGui::EndDisabled();	// FXAA strength gate
+		ImGui::EndDisabled();	// post-process supported gate
+		EndSettingsGroup();
 	}
-	ImGui::Spacing();
+}
 
-	DrawOptions( enhancementOptions, IM_ARRAYSIZE(enhancementOptions) );
-
-	// Ambient Occlusion (DUDE Phase 3.5). Master toggle only; the tuning sliders live
-	// in the Developer tab (Settings > Developer > Ambient Occlusion), like the shadow
-	// maps and emissive surfaces. Read live by the renderer (no restart).
-	ImGui::SeparatorText( "Ambient Occlusion" );
-	{
+static void DrawEnhGroup_AmbientOcclusion()
+{
+	// Ambient Occlusion (DUDE Phase 3.5). Master toggle + the quality/perf stops; the fine
+	// tuning sliders live in the Debugging tab. Read live by the renderer (no restart).
+	if ( BeginSettingsGroup( "Ambient Occlusion" ) ) {
 		bool ssao = r_ssao.GetBool();
 		if ( ImGui::Checkbox( "SSAO (GTAO ambient occlusion)", &ssao ) ) {
 			r_ssao.SetBool( ssao );
@@ -2562,8 +2778,8 @@ static void DrawEnhancementsMenu()
 
 		// Resolution: discrete quality/perf stops from half to full screen resolution.
 		ImGui::BeginDisabled( !r_ssao.GetBool() );
-		const float ssaoResStops[]  = { 0.5f, 0.75f, 0.8f, 1.0f };
-		const char *ssaoResLabels[] = { "Half (1/2)", "Three-quarter (3/4)", "Four-fifths (4/5)", "Full" };
+		const float ssaoResStops[]  = { 0.5f, 0.667f, 0.75f, 0.8f, 1.0f };
+		const char *ssaoResLabels[] = { "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Four-fifths (4/5)", "Full" };
 		const int ssaoNumStops = IM_ARRAYSIZE( ssaoResStops );
 		const float curScale = r_ssaoResScale.GetFloat();
 		int ssaoResIdx = 0;
@@ -2591,6 +2807,22 @@ static void DrawEnhancementsMenu()
 			"it fresh each frame. Smooths the AO and lets the Directions/Steps run lower for the same "
 			"look, so it's cheaper on weaker GPUs. Ghosting on fast motion is clamped automatically; "
 			"the Feedback strength lives in the Developer tab. Non-vanilla; opengl3 only." );
+
+		// Depth-mip acceleration (docs/ssao-perf-optimization.md). A prefiltered linear-depth
+		// mip chain: far horizon steps read a coarse, cache-local mip instead of scattering
+		// across full-res depth. ~40% cheaper AO at a wide radius (measured r_ssaoDepthMip
+		// 0 vs 1 = 74 -> 104 fps). Trade-off: a faint silhouette halo. Standalone preference,
+		// not preset-driven — a preset change shouldn't override the fidelity choice.
+		bool ssaoDepthMip = r_ssaoDepthMip.GetBool();
+		if ( ImGui::Checkbox( "Depth-Mip Acceleration", &ssaoDepthMip ) ) {
+			r_ssaoDepthMip.SetBool( ssaoDepthMip );
+		}
+		AddTooltip( "Speed up the AO horizon search by reading a prefiltered depth mip chain: far "
+			"samples read a coarser, cache-friendly copy of the depth buffer instead of scattering "
+			"across full-resolution depth. Big win at a wide radius (~40% cheaper AO here). "
+			"Trade-off: a faint dark halo can appear around object silhouettes, since one coarse "
+			"depth texel can't represent both surfaces at an edge. Off = the exact full-resolution "
+			"depth march (most accurate, most expensive). Recommended on. Non-vanilla; opengl3/Vulkan." );
 		ImGui::EndDisabled();
 
 		// Baked occlusion maps: independent of SSAO (works with it off). Inert unless a
@@ -2606,25 +2838,22 @@ static void DrawEnhancementsMenu()
 			"(no stock Doom 3 asset does, so this is inert on the base game and aimed at mods / "
 			"custom art). Complements SSAO; strength sliders are in the Developer tab. Non-vanilla; "
 			"opengl3 only." );
+		EndSettingsGroup();
 	}
+}
 
-	// Reflections (DUDE PBR Phase C.2, docs/ssr.md). Master toggle + the quality/perf
-	// stops here (mirroring the SSAO block); the tuning sliders live in the Developer
-	// tab next to the PBR knobs.
-	ImGui::SeparatorText( "Reflections" );
-	{
-		bool ssr = r_ssr.GetBool();
-		if ( ImGui::Checkbox( "Screen-Space Reflections", &ssr ) ) {
-			r_ssr.SetBool( ssr );
-		}
-		AddTooltip( "Glossy and metallic surfaces (polished floors, bare metal — per the PBR "
+static void DrawEnhGroup_Reflections()
+{
+	// Reflections (DUDE PBR Phase C.2, docs/ssr.md). Master switch on the group header +
+	// the quality/perf stops here; the tuning sliders live in the Developer tab next to
+	// the PBR knobs.
+	if ( BeginSettingsGroup( "Reflections", &r_ssr,
+			"Glossy and metallic surfaces (polished floors, bare metal — per the PBR "
 			"material table) mirror the on-screen scene: fixtures, screens, characters. "
 			"Reflections are screen-space, so off-screen objects can't appear and rays fade at "
 			"the screen edges. Works with PBR shading on or off; tuning sliders are in the "
-			"Developer tab. Non-vanilla; opengl3 only." );
-
+			"Developer tab. Non-vanilla; opengl3 only." ) ) {
 		// Resolution: discrete quality/perf stops for the reflection march buffer.
-		ImGui::BeginDisabled( !r_ssr.GetBool() );
 		const float ssrResStops[]  = { 0.5f, 0.667f, 0.75f, 1.0f };
 		const char *ssrResLabels[] = { "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Full" };
 		const int ssrNumStops = IM_ARRAYSIZE( ssrResStops );
@@ -2656,6 +2885,20 @@ static void DrawEnhancementsMenu()
 			"image; ghosting on fast motion is clamped automatically. The Feedback strength lives "
 			"in the Developer tab. Non-vanilla; opengl3 only." );
 
+		// Hi-Z acceleration (docs/ssao-perf-optimization.md, r_ssrHiZ). A min-Z depth pyramid
+		// lets the march leap provably-empty span instead of stepping it. Pure perf option —
+		// reflections are pixel-identical. Marginal + scene-dependent, so default-off + opt-in;
+		// leap aggressiveness is the dev cvar r_ssrHiZLevel.
+		bool ssrHiZ = r_ssrHiZ.GetBool();
+		if ( ImGui::Checkbox( "Hi-Z Acceleration##ssr", &ssrHiZ ) ) {
+			r_ssrHiZ.SetBool( ssrHiZ );
+		}
+		AddTooltip( "Speed up the reflection ray-march by leaping over empty space with a depth "
+			"pyramid instead of stepping through it. Reflections look identical — this is a pure "
+			"performance option, no visual change. The gain is scene-dependent: a few percent on "
+			"open / distant reflections, and essentially nothing on grazing reflective floors "
+			"(where the rays hug the surface). Best left off on older GPUs. Non-vanilla; opengl3/Vulkan." );
+
 		// Glass: baked room probes replace the generic env/gen* cubemap (docs/ssr.md).
 		bool ssrProbes = r_ssrGlassProbes.GetBool();
 		if ( ImGui::Checkbox( "Glass Reflections##ssr", &ssrProbes ) ) {
@@ -2666,25 +2909,20 @@ static void DrawEnhancementsMenu()
 			"cubemap - panes mirror the real room at any viewing angle. Re-capture an area with "
 			"the bakeGlassProbe console command; brightness slider in the Developer tab. "
 			"Non-vanilla; opengl3 only." );
-		ImGui::EndDisabled();
+		EndSettingsGroup();
 	}
+}
 
-	// Shadows (DUDE Phase 3.5). Hand-drawn so the sub-settings are visibly grouped
-	// under the toggle and disabled when it is off - making it clear they all take
-	// effect together. Every value is read live by the renderer (no restart).
-	ImGui::SeparatorText( "Shadows" );
-	{
-		bool sm = r_shadowMapping.GetBool();
-		if ( ImGui::Checkbox( "Shadow Mapping", &sm ) ) {
-			r_shadowMapping.SetBool( sm );
-		}
-		AddTooltip( "Soft shadow maps for projected/spot and point lights instead of hard "
+static void DrawEnhGroup_Shadows()
+{
+	// Shadows (DUDE Phase 3.5). The master switch on the group header greys the whole
+	// group out when off, making it clear the sub-settings all take effect together.
+	// Every value is read live by the renderer (no restart).
+	if ( BeginSettingsGroup( "Shadows", &r_shadowMapping,
+			"Soft shadow maps for projected/spot and point lights instead of hard "
 			"stencil shadow volumes. While on, stencil shadows are fully off: lights without "
 			"a shadow map (parallel, or out-of-budget point) render unshadowed. This isolates "
-			"shadow-map cost for profiling. Off = vanilla stencil shadows everywhere." );
-
-		// the sub-settings only matter while shadow mapping is on
-		ImGui::BeginDisabled( !r_shadowMapping.GetBool() );
+			"shadow-map cost for profiling. Off = vanilla stencil shadows everywhere." ) ) {
 
 		int res = r_shadowMapSize.GetInteger();
 		if ( ImGui::SliderInt( "Spot / Projected Map Resolution", &res, 256, 4096 ) ) {
@@ -2740,29 +2978,232 @@ static void DrawEnhancementsMenu()
 			"render unshadowed (stencil shadows are fully off). Lower = faster in crowded "
 			"scenes. 0 = all point lights (default; most consistent, slowest)." );
 
-		ImGui::EndDisabled();
+		EndSettingsGroup();
+	}
+}
+
+static void DrawGraphicsMenu()
+{
+	ImGui::Spacing();
+
+	// --- Display / renderer settings (work on every backend). These stay above and
+	// outside the enhancement-only block below. ---
+	DrawRendererBackend();
+	DrawOpenGLInfo();
+
+	// Display / windowing / output settings — a collapsible "burger" group like the
+	// enhancement groups below. Renderer Backend stays pinned above it.
+	if ( BeginSettingsGroup( "Display" ) ) {
+		DrawDisplaySettings();
+		// Brightness / Gamma (live). These took the spot the MSAA slider used to hold; MSAA
+		// now lives in the "Antialiasing" group further down.
+		DrawOptions( displayColorOptions, IM_ARRAYSIZE( displayColorOptions ) );
+		EndSettingsGroup();
 	}
 
+	ImGui::Spacing();
+	ImGui::TextDisabled( "Enhancements that deviate from vanilla Doom 3." );
+	ImGui::Spacing();
+
+	const bool supported = R_BackendSupportsEnhancements();
+	if ( !supported ) {
+		ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
+			"These settings don't apply on the current (legacy) backend." );
+		ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
+			"Choose OpenGL 3.3 as the Renderer Backend at the top of this tab to enable them." );
+		ImGui::Spacing();
+	}
+
+	// grey everything out (and make it non-interactive) when the running backend
+	// can't use these effects - they simply don't apply then.
+	ImGui::BeginDisabled( !supported );
+
+	// One-click quality presets for the whole enhancement suite. The combo is the
+	// user's target; the status line reflects the live cvars (so hand-tweaking any
+	// slider below reads back as "Custom"). Nothing is applied until "Apply".
+	ImGui::SeparatorText( "Quality Preset" );
+	{
+		static int selPreset = -1;
+		static int lastDetected = -2;	// -2 = "not seen yet" -> forces a first-frame sync
+
+		// The live enhancement cvars are the shared source of truth. Re-detect every
+		// frame so an external actor snaps this combo into agreement: the classic Doom
+		// quality selector (its choiceDef drives dude_preset, then applies) or a console
+		// "dudePreset". Detection returning -1 means "Custom" (a slider was hand-tweaked),
+		// which isn't a valid combo index - leave the combo where the user left it then.
+		const int detected = DetectEnhancementPreset();
+		if ( selPreset < 0 ) {
+			selPreset = ( detected >= 0 ) ? detected : PRESET_HIGH;
+		}
+		if ( detected >= 0 && detected != lastDetected ) {
+			selPreset = detected;
+		}
+		lastDetected = detected;
+
+		ImGui::SetNextItemWidth( 220.0f );
+		ImGui::Combo( "##enhPreset", &selPreset,
+			"Potato\0Low\0Medium\0High\0Ultra\0Nightmare\0" );
+		ImGui::SameLine();
+		if ( ImGui::Button( "Apply Preset" ) ) {
+			ApplyEnhancementPreset( selPreset );
+			// keep the shared cvar honest so the classic Doom selector agrees at once;
+			// mark it as ours so this frame's re-detect isn't treated as external.
+			dude_preset.SetInteger( selPreset );
+			lastDetected = selPreset;
+		}
+		AddTooltip( "One-click tiers for the whole enhancement suite (SSAO, shadow maps, emissive "
+			"fill light, soft particles, post-FX, specular look) plus the rendering pipeline: HDR "
+			"from Medium up, PBR materials from High up, screen-space reflections from Ultra up "
+			"(at half march resolution; two-thirds on Nightmare). 'Potato' is the "
+			"vanilla-faithful floor (everything off, vanilla specular) and the fastest. Presets set "
+			"the shading look and the performance levers; your fine-tuning (SSAO radii, emissive "
+			"reach/tint, shadow biases, PBR category sliders) is left alone. Tweaking any slider "
+			"afterwards shows 'Custom'." );
+
+		if ( detected < 0 ) {
+			ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ), "Current: Custom (hand-tuned)" );
+		} else {
+			ImGui::TextDisabled( "Current: %s", enhancementPresets[detected].name );
+		}
+	}
+	ImGui::Spacing();
+
+	// Collapsible "burger" groups, ordered for a typical player (most visible impact
+	// first). Reorder these calls to change the on-screen order.
+	DrawEnhGroup_Shadows();
+	DrawEnhGroup_AmbientOcclusion();
+	DrawEnhGroup_SurfaceRelief();
+	DrawEnhGroup_Tessellation();
+	DrawEnhGroup_Particles();
+	DrawEnhGroup_Lighting();
+	DrawEnhGroup_Reflections();
+	DrawEnhGroup_PostProcess();
+
 	ImGui::EndDisabled();
+
+	// Antialiasing (hardware MSAA + post-process FXAA/SMAA). Outside the enhancement gate so
+	// MSAA stays usable on the legacy backend; the post-process part greys out there.
+	DrawGroup_Antialiasing();
+
+	// Anisotropic Filtering — its own small collapsible group (works on every backend, live).
+	if ( BeginSettingsGroup( "Anisotropic Filtering" ) ) {
+		DrawOptions( anisoOptions, IM_ARRAYSIZE( anisoOptions ) );
+		EndSettingsGroup();
+	}
+
+	// Texture Options — works on every backend, so it sits at the bottom outside the
+	// enhancement-only block, as its own collapsible group.
+	if ( BeginSettingsGroup( "Texture Options" ) ) {
+		DrawTextureOptions();
+		EndSettingsGroup();
+	}
+
+	// Shared Apply / Reset for all the video settings that need a renderer restart
+	// (resolution, window mode, fullscreen-desktop, MSAA, textures). Frame Rate Cap and
+	// Vertical Sync take effect live and are not covered here.
+	if ( !GraphicsHasApplyableChanges() ) {
+		ImGui::BeginDisabled();
+		ImGui::Button( "Apply" );
+		AddTooltip( "No changes were made, so there's nothing to apply" );
+		ImGui::EndDisabled();
+	} else {
+		if ( ImGui::Button( "Apply" ) ) {
+			ApplyGraphicsSettings();
+		}
+		AddTooltip( "Click to apply the display / texture settings above; restarts the renderer (but not the game)." );
+	}
+	ImGui::SameLine();
+	if ( !GraphicsHasResettableChanges() ) {
+		ImGui::BeginDisabled();
+		ImGui::Button( "Reset" );
+		AddTooltip( "Nothing has changed since the menu was opened, so there's nothing to reset" );
+		ImGui::EndDisabled();
+	} else {
+		if ( ImGui::Button( "Reset" ) ) {
+			GraphicsResetChanges();
+		}
+		AddTooltip( "Restore the display / texture settings to what they were when this menu was opened" );
+	}
+
+	// GUI and Layout — plain section (not a burger), just above Screenshots.
+	ImGui::Spacing();
+	DrawOptions( guiLayoutOptions, IM_ARRAYSIZE( guiLayoutOptions ) );
+
+	// Screenshots — live (no restart), so it sits at the very bottom.
+	ImGui::Spacing();
+	DrawOptions( screenshotOptions, IM_ARRAYSIZE( screenshotOptions ) );
 }
 
 // Developer tab: live render-debug toggles, shadow-map tuning and emissive-surface
 // controls. Not a "faithful" tab — purely for dialling values in-game during development.
-static void DrawShadowDebugMenu()
+// DUDE PBR per-category defaults grid (docs/pbr-materials.md): an 8x4 table of the
+// {metalness, roughness, wetness, env} preset each category drives. Edits the live
+// defaults table (R_PbrSetCategoryDefault); category-tagged materials pick it up next
+// frame, no reload. Returns true if any value changed. Shared by the Developer tab and
+// the material editor's Categories tab. Env glow only does anything on metals; wetness
+// and (on organics) metalness are available for uniformity even where near-inert.
+static bool PbrCategoryGrid()
 {
-	ImGui::TextDisabled( "Developer tools for inspecting and tuning the renderer live: general debug "
-		"views, shadow maps, and emissive surfaces. Dial values in, then report the good ones back." );
-	ImGui::Spacing();
+	static const struct { int cat; const char *label; } rows[] = {
+		{ PBR_CAT_METAL,   "Bare Metal" },
+		{ PBR_CAT_PAINTED, "Painted Metal" },
+		{ PBR_CAT_CERAMIC, "Ceramic Sheen" },
+		{ PBR_CAT_RUST,    "Rusted Metal" },
+		{ PBR_CAT_STONE,   "Stone / Concrete" },
+		{ PBR_CAT_SKIN,    "Skin (faces)" },
+		{ PBR_CAT_EYES,    "Eyes / Teeth" },
+		{ PBR_CAT_FLESH,   "Flesh / Gore" },
+	};
+	bool changed = false;
+	const ImGuiTableFlags flags = ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_RowBg;
+	if ( ImGui::BeginTable( "pbr_categories", 5, flags ) ) {
+		ImGui::TableSetupColumn( "Category", ImGuiTableColumnFlags_WidthFixed, 130.0f );
+		ImGui::TableSetupColumn( "Metalness" );
+		ImGui::TableSetupColumn( "Roughness" );
+		ImGui::TableSetupColumn( "Wetness" );
+		ImGui::TableSetupColumn( "Env glow" );
+		ImGui::TableHeadersRow();
+		for ( int i = 0; i < IM_ARRAYSIZE( rows ); i++ ) {
+			float m, r, w, e;
+			R_PbrCategoryDefaults( rows[i].cat, m, r, w, e );
+			ImGui::TableNextRow();
+			ImGui::PushID( rows[i].cat );
+			ImGui::TableNextColumn();
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted( rows[i].label );
+			bool c = false;
+			ImGui::TableNextColumn(); ImGui::SetNextItemWidth( -FLT_MIN ); c |= ImGui::SliderFloat( "##m", &m, 0.0f,  1.0f, "%.2f" );
+			ImGui::TableNextColumn(); ImGui::SetNextItemWidth( -FLT_MIN ); c |= ImGui::SliderFloat( "##r", &r, 0.03f, 1.0f, "%.2f" );
+			ImGui::TableNextColumn(); ImGui::SetNextItemWidth( -FLT_MIN ); c |= ImGui::SliderFloat( "##w", &w, 0.0f,  4.0f, "%.2f" );
+			ImGui::TableNextColumn(); ImGui::SetNextItemWidth( -FLT_MIN ); c |= ImGui::SliderFloat( "##e", &e, 0.0f,  4.0f, "%.2f" );
+			if ( c ) { R_PbrSetCategoryDefault( rows[i].cat, m, r, w, e ); changed = true; }
+			ImGui::PopID();
+		}
+		ImGui::EndTable();
+	}
+	return changed;
+}
 
+// --- Debugging groups. Each collapsible section is its own helper so DrawShadowDebugMenu()
+// can order them freely (just reorder the calls). The backend-gated sections (shadow maps,
+// emissive, glass, SSAO, occlusion maps) grey their own body out on the legacy renderer; the
+// general / PBR / SSR sections stay live on every backend. Section bodies are left at their
+// original indentation to keep the diff readable. ---
+
+static void DrawDbgGroup_RenderDebugging()
+{
 	// General render-debug toggles — core cvars that work on every backend (not
-	// enhancement-gated), so they stay live even on the legacy renderer.
+	// enhancement-gated). Pinned to the top and always shown (not collapsible).
 	ImGui::SeparatorText( "Render Debugging" );
 
-	bool whiteWorld = r_whiteWorld.GetBool();
-	if ( ImGui::Checkbox( "White World (diffuse = white, lighting only)", &whiteWorld ) ) {
-		r_whiteWorld.SetBool( whiteWorld );
+	int whiteWorld = r_whiteWorld.GetInteger();
+	const char *whiteWorldModes[] = { "Off", "White (lighting + colour)", "Clay (occlusion only)" };
+	if ( ImGui::Combo( "White World", &whiteWorld, whiteWorldModes, IM_ARRAYSIZE( whiteWorldModes ) ) ) {
+		r_whiteWorld.SetInteger( whiteWorld );
 	}
-	AddTooltip( "Render every diffuse map as white so you can read lighting and shadows in isolation." );
+	AddTooltip( "Render diffuse as white to read lighting/occlusion in isolation. Clay also neutralises "
+	            "light + material colour and forces metalness 0, so only the SSAO + POM occlusion/relief "
+	            "shows, in grey." );
 
 	int showTris = r_showTris.GetInteger();
 	if ( ImGui::SliderInt( "Wireframe", &showTris, 0, 3 ) ) {
@@ -2785,14 +3226,65 @@ static void DrawShadowDebugMenu()
 		"On opengl3/Vulkan with Shadow Mapping enabled, shadows come from the shadow maps below instead, "
 		"so this only affects the stencil path." );
 
+	ImGui::Spacing();
+}
+
+static void DrawDbgGroup_Tessellation()
+{
+	// DUDE tessellation (docs/tessellation.md): the fine-grain size threshold, seam welding
+	// and the material logger. The on/off + level live in the Graphics tab (Tessellation);
+	// this is tuning only. Vulkan only.
+	if ( BeginSettingsGroup( "Tessellation" ) ) {
+	if ( !r_tessellation.GetBool() ) {
+		ImGui::TextDisabled( "Tessellation is off — enable \"Mesh Tessellation\" in the Graphics tab first." );
+	}
+	ImGui::BeginDisabled( !r_tessellation.GetBool() );
+	float tessMinEdge = r_tessMinEdge.GetFloat();
+	if ( ImGui::SliderFloat( "Tessellation Min Triangle Size", &tessMinEdge, 0.0f, 8.0f, "%.2f", 0 ) ) {
+		r_tessMinEdge.SetFloat( tessMinEdge );
+	}
+	AddTooltip( "r_tessMinEdge: triangles with edges finer than this (world units) stay flat, so dense "
+		"detail (eye-sockets, faces) doesn't over-inflate under PN while larger silhouette triangles still "
+		"smooth. Raise if faces/fine features distort; lower to smooth more aggressively. Vulkan only." );
+
+	bool tessDebug = r_tessDebug.GetBool();
+	if ( ImGui::Checkbox( "Log Tessellated Materials", &tessDebug ) ) {
+		r_tessDebug.SetBool( tessDebug );
+	}
+	AddTooltip( "r_tessDebug: print each material name accepted for tessellation once (with model type and "
+		"entity index) to the console, so a mis-tessellated surface can be identified. Vulkan only." );
+
+	bool tessWeld = r_tessWeldSeams.GetBool();
+	if ( ImGui::Checkbox( "Weld Seam Normals", &tessWeld ) ) {
+		r_tessWeldSeams.SetBool( tessWeld );
+	}
+	AddTooltip( "r_tessWeldSeams: average coincident vertex normals on animated meshes so a model built from "
+		"mirrored/UV-split halves deforms as one piece (no seam opening) under tessellation + displacement. "
+		"Off = vanilla normals." );
+
+	ImGui::BeginDisabled( !r_tessWeldSeams.GetBool() );
+	float tessWeldThr = r_tessWeldThreshold.GetFloat();
+	if ( ImGui::SliderFloat( "Seam Weld Threshold", &tessWeldThr, 0.0f, 1.0f, "%.2f", 0 ) ) {
+		r_tessWeldThreshold.SetFloat( tessWeldThr );
+	}
+	AddTooltip( "r_tessWeldThreshold: only coincident normals whose dot product is at least this get welded. "
+		"1 = weld only identical normals; lower also welds sharper creases (0.7 closes seams while keeping "
+		"hard edges)." );
+	ImGui::EndDisabled();
+	ImGui::EndDisabled();
+	EndSettingsGroup();
+	}
+}
+
+static void DrawDbgGroup_PBR()
+{
 	// DUDE PBR materials (docs/pbr-materials.md): every live tuning knob for the
 	// GGX interaction path in one place, so the look can be dialled in-game.
 	// All values apply instantly (per-draw uniforms, no reloadShaders needed).
-	ImGui::Spacing();
-	ImGui::SeparatorText( "PBR Materials (GGX)" );
+	if ( BeginSettingsGroup( "PBR Materials (GGX)" ) ) {
 
 	if ( !r_pbr.GetBool() ) {
-		ImGui::TextDisabled( "PBR is off — enable \"PBR Materials (GGX)\" in the Enhancements tab first." );
+		ImGui::TextDisabled( "PBR is off — enable \"PBR Materials (GGX)\" in the Graphics tab first." );
 	}
 	ImGui::BeginDisabled( !r_pbr.GetBool() );
 
@@ -2828,63 +3320,6 @@ static void DrawShadowDebugMenu()
 		"white; also the ceiling that skin/tight highlights ride at. Raise for hotter cores (pairs well "
 		"with HDR), lower to flatten everything." );
 
-	// live per-category values: these drive every material the classifier tagged
-	// with the matching category (the bulk of the game); hand-written
-	// pbr_overrides.cfg entries are exempt and always keep their own numbers.
-	ImGui::Spacing();
-	ImGui::TextDisabled( "Material categories (live; overrides file still wins per material):" );
-
-	float skinRough = r_pbrSkinRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Skin Roughness (heads/faces)", &skinRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrSkinRoughness.SetFloat( skinRough );
-	}
-	AddTooltip( "r_pbrSkinRoughness: human heads and faces. Low = tight oily sheen that makes facial "
-		"detail pop; the Highlight Ceiling above bounds the core so faces can't burn out." );
-
-	float skinWet = r_pbrSkinWetness.GetFloat();
-	if ( ImGui::SliderFloat( "Skin Wetness (specular film)", &skinWet, 0.0f, 4.0f, "%.2f" ) ) {
-		r_pbrSkinWetness.SetFloat( skinWet );
-	}
-	AddTooltip( "r_pbrSkinWetness: boost on the specular energy of skin, eyes and teeth, modelling the "
-		"sweat/water film (1 = dry baseline, 0 = dead-matte). For a properly wet look, raise this AND "
-		"lower Skin Roughness — wetness is not metalness; metallic skin would just tint like bronze." );
-
-	float eyesRough = r_pbrEyesRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Eye/Teeth Roughness", &eyesRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrEyesRoughness.SetFloat( eyesRough );
-	}
-	AddTooltip( "r_pbrEyesRoughness: cornea and enamel — the hardest, wettest surfaces on a face. Low "
-		"values give tiny hot catchlights when the flashlight crosses a face in the dark." );
-
-	float fleshRough = r_pbrFleshRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Flesh Roughness (bodies/gore)", &fleshRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrFleshRoughness.SetFloat( fleshRough );
-	}
-	AddTooltip( "r_pbrFleshRoughness: body flesh, meat, hell-growth." );
-
-	float fleshWet = r_pbrFleshWetness.GetFloat();
-	if ( ImGui::SliderFloat( "Flesh Wetness (slime film)", &fleshWet, 0.0f, 4.0f, "%.2f" ) ) {
-		r_pbrFleshWetness.SetFloat( fleshWet );
-	}
-	AddTooltip( "r_pbrFleshWetness: the slime/gore film on demons, viscera and hell-growth (1 = dry "
-		"baseline). Raise it with Flesh Roughness lowered for glistening horror flesh in the "
-		"flashlight beam." );
-
-	float metalMetal = r_pbrMetalMetalness.GetFloat();
-	if ( ImGui::SliderFloat( "Bare Metal Metalness", &metalMetal, 0.0f, 1.0f, "%.2f" ) ) {
-		r_pbrMetalMetalness.SetFloat( metalMetal );
-	}
-	AddTooltip( "r_pbrMetalMetalness: how metallic the bare-metal category is. Below 1 keeps a sliver of "
-		"diffuse so metals don't go black between lights (Doom 3 has near-zero ambient); raise toward 1 for "
-		"harder metals once Metal Environment Glow or SSR gives them something to reflect." );
-
-	float metalRough = r_pbrMetalRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Bare Metal Roughness", &metalRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrMetalRoughness.SetFloat( metalRough );
-	}
-	AddTooltip( "r_pbrMetalRoughness: grates, pipes, machined steel, chrome — surfaces with exposed metal "
-		"(metalness set by Bare Metal Metalness above)." );
-
 	float metalDiffuse = r_pbrMetalDiffuse.GetFloat();
 	if ( ImGui::SliderFloat( "Metal Color Retention", &metalDiffuse, 0.0f, 1.0f, "%.2f" ) ) {
 		r_pbrMetalDiffuse.SetFloat( metalDiffuse );
@@ -2903,49 +3338,20 @@ static void DrawShadowDebugMenu()
 		"going black where the highlight misses. Scales with light and shadow (metals stay dark in "
 		"darkness). With this up, the Metalness Cap can rise toward 1." );
 
-	float paintRough = r_pbrPaintedRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Painted Metal Roughness", &paintRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrPaintedRoughness.SetFloat( paintRough );
+	// per-category presets: the 8x4 grid every tagged material tracks live. A pinned
+	// (none) or per-material override still keeps its own values (edit those in the
+	// in-game material editor). Metalness/roughness = surface response; wetness = a
+	// specular-energy film; env glow = metal reflection floor (inert on non-metals).
+	ImGui::Spacing();
+	ImGui::TextDisabled( "Material category presets (live; a pinned/override material keeps its own):" );
+	PbrCategoryGrid();
+	if ( ImGui::Button( "Save Category Defaults" ) ) {
+		R_PbrWriteCategoryDefaults();
 	}
-	AddTooltip( "r_pbrPaintedRoughness: the station's painted panelling — the bulk of the game's surfaces." );
+	AddTooltip( "Writes the 8 category rows above as @cat lines in pbr/pbr_overrides.cfg (the dude folder) "
+		"so they persist across launches. Per-material pins go through Save in the in-game material editor." );
 
-	float paintMetal = r_pbrPaintedMetalness.GetFloat();
-	if ( ImGui::SliderFloat( "Painted Metal Metalness", &paintMetal, 0.0f, 1.0f, "%.2f" ) ) {
-		r_pbrPaintedMetalness.SetFloat( paintMetal );
-	}
-	AddTooltip( "r_pbrPaintedMetalness: paint is a dielectric, so keep this low — it models metal showing "
-		"through scuffs. Raising it tints highlights toward the surface color but darkens the diffuse body. "
-		"Shared by walls and floors." );
-
-	float ceramicRough = r_pbrCeramicRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Ceramic Sheen Roughness", &ceramicRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrCeramicRoughness.SetFloat( ceramicRough );
-	}
-	AddTooltip( "r_pbrCeramicRoughness: glossy hard surfaces — painted floors plus ceramic tile on floors "
-		"and walls (e.g. the washroom). Tighter than Painted Metal Roughness stretches every light into a "
-		"streak — the wet-floor / glazed-tile look. Grate floors are bare metal and unaffected." );
-
-	float rustRough = r_pbrRustRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Rusted Metal Roughness", &rustRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrRustRoughness.SetFloat( rustRough );
-	}
-	AddTooltip( "r_pbrRustRoughness: materials explicitly named rusty/corroded/dirty/stained. Note: most of "
-		"the game's rusty *look* is painted into the diffuse art of plain panels — the Painted Metal "
-		"sliders above are the mass lever for that; this one drives the named-rust set." );
-
-	float rustMetal = r_pbrRustMetalness.GetFloat();
-	if ( ImGui::SliderFloat( "Rusted Metal Metalness", &rustMetal, 0.0f, 1.0f, "%.2f" ) ) {
-		r_pbrRustMetalness.SetFloat( rustMetal );
-	}
-	AddTooltip( "r_pbrRustMetalness: rust itself is a dielectric oxide, so mid values model the patchy "
-		"bare-metal/oxide mix. Higher = more metallic glint through the rust." );
-
-	float stoneRough = r_pbrStoneRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Stone Roughness", &stoneRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrStoneRoughness.SetFloat( stoneRough );
-	}
-	AddTooltip( "r_pbrStoneRoughness: rock, concrete, brick, plaster (caves, hell, outdoor Mars)." );
-
+	ImGui::Spacing();
 	if ( ImGui::Button( "Reload PBR Table" ) ) {
 		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "reloadPbrTable\n" );
 	}
@@ -2954,19 +3360,20 @@ static void DrawShadowDebugMenu()
 		"\"<material> <metalness> <roughness>\" line to base/pbr/pbr_overrides.cfg, then press this." );
 
 	ImGui::EndDisabled();
-
-	// SSR tuning (docs/ssr.md). Deliberately outside the r_pbr-disabled block: SSR
-	// reads the same material table but works with PBR shading off. Master toggle
-	// mirrors the Enhancements tab.
-	ImGui::Spacing();
-	ImGui::SeparatorText( "Screen-Space Reflections (SSR)" );
-
-	bool ssrOn = r_ssr.GetBool();
-	if ( ImGui::Checkbox( "SSR (master)", &ssrOn ) ) {
-		r_ssr.SetBool( ssrOn );
+	EndSettingsGroup();
 	}
-	AddTooltip( "r_ssr: glossy/metallic surfaces mirror the on-screen scene (PBR Phase C.2). "
-		"Same toggle as Enhancements > Reflections." );
+}
+
+static void DrawDbgGroup_SSR()
+{
+	// SSR tuning (docs/ssr.md). Deliberately outside the r_pbr-disabled block: SSR
+	// reads the same material table but works with PBR shading off. The on/off switch
+	// lives in the Graphics tab (Reflections); this is tuning only.
+	if ( BeginSettingsGroup( "Screen-Space Reflections (SSR)" ) ) {
+
+	if ( !r_ssr.GetBool() ) {
+		ImGui::TextDisabled( "SSR is off — enable \"Screen-Space Reflections\" in the Graphics tab first." );
+	}
 
 	ImGui::BeginDisabled( !r_ssr.GetBool() );
 
@@ -3011,7 +3418,7 @@ static void DrawShadowDebugMenu()
 		r_ssrTemporalFeedback.SetFloat( ssrFeedback );
 	}
 	AddTooltip( "r_ssrTemporalFeedback: fraction of reflection history kept per frame while Temporal "
-		"Accumulation is on (Enhancements tab). Higher = smoother, converges slower and can trail "
+		"Accumulation is on (Graphics tab). Higher = smoother, converges slower and can trail "
 		"on fast motion; lower = grainier but snappier." );
 
 	float glassProbeScale = r_ssrGlassProbeScale.GetFloat();
@@ -3019,17 +3426,24 @@ static void DrawShadowDebugMenu()
 		r_ssrGlassProbeScale.SetFloat( glassProbeScale );
 	}
 	AddTooltip( "r_ssrGlassProbeScale: brightness of the baked room cubemap on glass only "
-		"(Enhancements > Glass Reflections). Applied on top of the material's own reflection "
+		"(Graphics > Glass Reflections). Applied on top of the material's own reflection "
 		"colour and the global Reflection Brightness; other reflective surfaces are unaffected." );
 
 	ImGui::EndDisabled();
+	EndSettingsGroup();
+	}
+}
 
-	ImGui::Spacing();
-	ImGui::SeparatorText( "Shadow Maps" );
-
+// Shadow Maps, Emissive, Glass, SSAO and Occlusion Maps are enhancement-backend features:
+// each greys its OWN body out on the legacy renderer (BeginDisabled inside the group body,
+// so the collapsible header itself stays usable and the sections can be reordered freely).
+static void DrawDbgGroup_ShadowMaps()
+{
 	const bool supported = R_BackendSupportsEnhancements();
+	if ( BeginSettingsGroup( "Shadow Maps" ) ) {
+
 	if ( !supported ) {
-		ImGui::TextDisabled( "Shadow mapping needs the GL 3.3 (opengl3) backend. Switch to it in Video Options." );
+		ImGui::TextDisabled( "Shadow mapping needs the GL 3.3 (opengl3) backend. Switch to it in the Graphics tab." );
 	}
 	ImGui::TextDisabled( "Per-light tuning for the shadow-map system (2D and cube maps)." );
 	ImGui::Spacing();
@@ -3243,13 +3657,20 @@ static void DrawShadowDebugMenu()
 	ImGui::EndDisabled();	// cache on
 
 	ImGui::EndDisabled();	// shadow mapping on
+	ImGui::EndDisabled();	// backend supported
+	EndSettingsGroup();
+	}
+}
 
-	// --- Emissive surfaces (independent of shadow mapping; master toggle is in Enhancements > Lighting) ---
-	ImGui::Spacing();
-	ImGui::SeparatorText( "Emissive Surfaces" );
-	ImGui::TextDisabled( "Fill-light behaviour for glowing screens/monitors. Enable in Enhancements > Lighting." );
+static void DrawDbgGroup_Emissive()
+{
+	const bool supported = R_BackendSupportsEnhancements();
+	// --- Emissive surfaces (independent of shadow mapping; master toggle is in Graphics > Lighting) ---
+	if ( BeginSettingsGroup( "Emissive Surfaces" ) ) {
+	ImGui::TextDisabled( "Fill-light behaviour for glowing screens/monitors. Enable in Graphics > Lighting." );
 	ImGui::Spacing();
 
+	ImGui::BeginDisabled( !supported );
 	ImGui::BeginDisabled( !r_emissiveSurfaces.GetBool() );
 
 	float emScale = r_emissiveLightScale.GetFloat();
@@ -3315,10 +3736,16 @@ static void DrawShadowDebugMenu()
 		"Off: diffuse-only, a calmer soft fill." );
 
 	ImGui::EndDisabled();	// emissive surfaces on
+	ImGui::EndDisabled();	// backend supported
+	EndSettingsGroup();
+	}
+}
 
+static void DrawDbgGroup_Glass()
+{
+	const bool supported = R_BackendSupportsEnhancements();
 	// --- Glass reflections (opengl3/Vulkan only) ---
-	ImGui::Spacing();
-	ImGui::SeparatorText( "Glass Reflections" );
+	if ( BeginSettingsGroup( "Glass Reflections" ) ) {
 	ImGui::TextDisabled( "Cube-map reflection (\"sheen\") brightness on glass. opengl3/Vulkan only." );
 	ImGui::Spacing();
 
@@ -3334,18 +3761,25 @@ static void DrawShadowDebugMenu()
 	if ( ImGui::SmallButton( "reset##reflscale" ) ) { r_gl3ReflectionScale.SetFloat( 0.7f ); }
 
 	ImGui::EndDisabled();	// glass reflections (backend supported)
+	EndSettingsGroup();
+	}
+}
 
+static void DrawDbgGroup_SSAO()
+{
+	const bool supported = R_BackendSupportsEnhancements();
 	// --- Ambient Occlusion (SSAO/GTAO). Master toggle is in Enhancements; full tuning here. ---
+	if ( BeginSettingsGroup( "Ambient Occlusion (SSAO)" ) ) {
+	ImGui::TextDisabled( "GTAO horizon-based ambient occlusion on the ambient term. Enable in Graphics > Ambient Occlusion." );
 	ImGui::Spacing();
-	ImGui::SeparatorText( "Ambient Occlusion (SSAO)" );
-	ImGui::TextDisabled( "GTAO horizon-based ambient occlusion on the ambient term. Enable in Enhancements > Ambient Occlusion." );
-	ImGui::Spacing();
+
+	ImGui::BeginDisabled( !supported );
 
 	bool ssao = r_ssao.GetBool();
 	if ( ImGui::Checkbox( "SSAO (master)", &ssao ) ) {
 		r_ssao.SetBool( ssao );
 	}
-	AddTooltip( "Master toggle (same cvar as Enhancements > Ambient Occlusion). On = occlude the "
+	AddTooltip( "Master toggle (same cvar as Graphics > Ambient Occlusion). On = occlude the "
 		"ambient term in creases/contacts; Off = vanilla flat ambient." );
 
 	int ssaoDbg = r_ssaoDebug.GetInteger();
@@ -3392,9 +3826,9 @@ static void DrawShadowDebugMenu()
 		r_ssaoRadius.SetFloat( ssaoRad );
 	}
 	AddTooltip( "How far the occlusion samples reach, in world units. Small = tight contact creases "
-		"only; large = broad, softer occlusion (and more expensive). Default 72." );
+		"only; large = broad, softer occlusion (and more expensive). Default 48." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaorad" ) ) { r_ssaoRadius.SetFloat( 72.0f ); }
+	if ( ImGui::SmallButton( "reset##ssaorad" ) ) { r_ssaoRadius.SetFloat( 48.0f ); }
 
 	int ssaoSlices = r_ssaoSlices.GetInteger();
 	if ( ImGui::SliderInt( "Directions (slices)", &ssaoSlices, 1, 8 ) ) {
@@ -3414,6 +3848,38 @@ static void DrawShadowDebugMenu()
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaosteps" ) ) { r_ssaoSteps.SetInteger( 3 ); }
 
+	// Depth-mip acceleration + its two quality/speed knobs (docs/ssao-perf-optimization.md).
+	// The master toggle is mirrored from Enhancements; the bias/cap sliders live only here.
+	bool ssaoDepthMipDev = r_ssaoDepthMip.GetBool();
+	if ( ImGui::Checkbox( "Depth-Mip Acceleration##dev", &ssaoDepthMipDev ) ) {
+		r_ssaoDepthMip.SetBool( ssaoDepthMipDev );
+	}
+	AddTooltip( "March the horizon search over a prefiltered linear-depth mip chain (far taps read "
+		"coarse mips) instead of full-res depth every tap — cheaper at a wide radius. Same toggle as "
+		"Graphics > Depth-Mip Acceleration." );
+
+	ImGui::BeginDisabled( !r_ssaoDepthMip.GetBool() );
+	float ssaoMipBias = r_ssaoDepthMipBias.GetFloat();
+	if ( ImGui::SliderFloat( "Mip Bias", &ssaoMipBias, 0.05f, 1.0f, "%.2f" ) ) {
+		r_ssaoDepthMipBias.SetFloat( ssaoMipBias );
+	}
+	AddTooltip( "How eagerly the march drops to coarser mips: LOD = log2(stepPixels * this). Higher = "
+		"coarser sooner (faster, but coarse depth smears occlusion across silhouettes into halos); "
+		"lower = stays on finer mips (sharper, keeps most of the speedup). Default 0.1." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##ssaomipbias" ) ) { r_ssaoDepthMipBias.SetFloat( 0.1f ); }
+
+	int ssaoMipCap = r_ssaoDepthMipMaxLod.GetInteger();
+	if ( ImGui::SliderInt( "Mip Coarseness Cap", &ssaoMipCap, 1, 5 ) ) {
+		r_ssaoDepthMipMaxLod.SetInteger( ssaoMipCap );
+	}
+	AddTooltip( "Caps how coarse the march may ever go. The coarsest mips (box-averaged depth) are "
+		"where occlusion smears across silhouettes into halos, so a lower cap kills halos at a small "
+		"speed cost; 5 = uncapped (old behaviour). Default 2." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##ssaomipcap" ) ) { r_ssaoDepthMipMaxLod.SetInteger( 2 ); }
+	ImGui::EndDisabled();
+
 	bool ssaoTemporalDev = r_ssaoTemporal.GetBool();
 	if ( ImGui::Checkbox( "Temporal Accumulation", &ssaoTemporalDev ) ) {
 		r_ssaoTemporal.SetBool( ssaoTemporalDev );
@@ -3421,7 +3887,7 @@ static void DrawShadowDebugMenu()
 	AddTooltip( "Reuse the previous frame's AO (reprojected by camera motion) to amortize the "
 		"horizon search across frames: smooths the per-pixel noise and lets Directions/Steps run "
 		"lower for the same look. Ghosting on fast motion / disocclusion is bounded by a "
-		"neighbourhood clamp. Same toggle as Enhancements > Ambient Occlusion." );
+		"neighbourhood clamp. Same toggle as Graphics > Ambient Occlusion." );
 
 	ImGui::BeginDisabled( !r_ssaoTemporal.GetBool() );
 	float ssaoFeedback = r_ssaoTemporalFeedback.GetFloat();
@@ -3435,7 +3901,7 @@ static void DrawShadowDebugMenu()
 	if ( ImGui::SmallButton( "reset##ssaofeedback" ) ) { r_ssaoTemporalFeedback.SetFloat( 0.9f ); }
 	ImGui::EndDisabled();
 
-	// Resolution is exposed in Enhancements > Ambient Occlusion (as a slider).
+	// Resolution is exposed in Graphics > Ambient Occlusion (as a slider).
 
 	bool ssaoNormalBuf = r_ssaoNormalBuffer.GetBool();
 	if ( ImGui::Checkbox( "Normal Buffer (bump-mapped)", &ssaoNormalBuf ) ) {
@@ -3473,12 +3939,19 @@ static void DrawShadowDebugMenu()
 		"anti-plastic look; a mild deviation from vanilla). Scaled by Direct Light AO. Off by default." );
 
 	ImGui::EndDisabled();	// ssao on
+	ImGui::EndDisabled();	// backend supported
+	EndSettingsGroup();
+	}
+}
 
+static void DrawDbgGroup_OcclusionMaps()
+{
+	const bool supported = R_BackendSupportsEnhancements();
 	// Baked occlusion maps (docs/occlusion-maps.md). Independent of SSAO (works with it off);
-	// still enhancement-backend only, covered by the outer BeginDisabled. Mirrors the
-	// Enhancements-tab toggle and adds the two strength sliders.
-	ImGui::SeparatorText( "Occlusion Maps" );
-	{
+	// still enhancement-backend only. Mirrors the Enhancements-tab toggle and adds the two
+	// strength sliders.
+	if ( BeginSettingsGroup( "Occlusion Maps" ) ) {
+		ImGui::BeginDisabled( !supported );
 		bool oclMaps = r_occlusionMaps.GetBool();
 		if ( ImGui::Checkbox( "Baked Occlusion Maps (r_occlusionMaps)", &oclMaps ) ) {
 			r_occlusionMaps.SetBool( oclMaps );
@@ -3507,9 +3980,28 @@ static void DrawShadowDebugMenu()
 		ImGui::SameLine();
 		if ( ImGui::SmallButton( "reset##ocldirect" ) ) { r_occlusionMapDirect.SetFloat( 0.9f ); }
 		ImGui::EndDisabled();
+		ImGui::EndDisabled();	// backend supported
+		EndSettingsGroup();
 	}
+}
 
-	ImGui::EndDisabled();	// backend supported
+static void DrawShadowDebugMenu()
+{
+	ImGui::TextDisabled( "Developer tools for inspecting and tuning the renderer live: general debug "
+		"views, shadow maps, and emissive surfaces. Dial values in, then report the good ones back." );
+	ImGui::Spacing();
+
+	// Collapsible "burger" groups, ordered to mirror the Graphics tab. Reorder these
+	// calls to change the on-screen order.
+	DrawDbgGroup_RenderDebugging();
+	DrawDbgGroup_ShadowMaps();
+	DrawDbgGroup_SSAO();
+	DrawDbgGroup_OcclusionMaps();
+	DrawDbgGroup_Tessellation();
+	DrawDbgGroup_PBR();
+	DrawDbgGroup_Emissive();
+	DrawDbgGroup_SSR();
+	DrawDbgGroup_Glass();
 }
 
 static idStrList alDevices;
@@ -3973,12 +4465,12 @@ static void InitDhewm3SettingsMenu()
 	InitBindingEntries();
 	InitOptions( controlOptions, IM_ARRAYSIZE(controlOptions) );
 
-	InitVideoOptionsMenu();
+	InitGraphicsMenu();
 	InitAudioOptionsMenu();
 	InitGameOptionsMenu();
 
 	const ImGuiStyle& style = ImGui::GetStyle();
-	float defaultWidth = ImGui::CalcTextSize( "Control BindingsControl OptionsVideo OptionsAudio OptionsGame OptionsOther Options" ).x;
+	float defaultWidth = ImGui::CalcTextSize( "Control BindingsControl OptionsGraphicsDebuggingAudio OptionsGame OptionsOther Options" ).x;
 	defaultWidth += 2.0f * style.WindowPadding.x + 12.0f * style.FramePadding.x + 5.0f * style.ItemInnerSpacing.x;
 	ImVec2 displaySize = ImGui::GetIO().DisplaySize;
 	settingsMenuDefaultSize.x = fminf( defaultWidth, displaySize.x * 0.8f );
@@ -4032,21 +4524,15 @@ void Com_DrawDhewm3SettingsMenu()
 			ImGui::EndChild();
 			ImGui::EndTabItem();
 		}
-		if (ImGui::BeginTabItem("Video Options"))
+		// Display / renderer / enhancement settings (the former "Video Options" tab was
+		// folded in here). Always visible, but the non-vanilla enhancement controls are
+		// greyed out unless the running backend supports them (see DrawGraphicsMenu).
+		// The legacy ARB2 renderer stays faithful to vanilla Doom 3, so those effects
+		// don't apply there.
+		if ( ImGui::BeginTabItem("Graphics") )
 		{
-			BeginTabChild( "vidchild" );
-			DrawVideoOptionsMenu();
-			ImGui::EndChild();
-			ImGui::EndTabItem();
-		}
-		// non-vanilla graphical enhancements. Always visible, but the controls are
-		// greyed out unless the running backend supports them (see
-		// DrawEnhancementsMenu). The legacy ARB2 renderer stays faithful to vanilla
-		// Doom 3, so these effects don't apply there.
-		if ( ImGui::BeginTabItem("Enhancements") )
-		{
-			BeginTabChild( "enhancementschild" );
-			DrawEnhancementsMenu();
+			BeginTabChild( "graphicschild" );
+			DrawGraphicsMenu();
 			ImGui::EndChild();
 			ImGui::EndTabItem();
 		}
@@ -4134,7 +4620,7 @@ void Com_Dhewm3Settings_f( const idCmdArgs &args )
 	} else {
 		if ( ImGui::IsWindowFocused( ImGuiFocusedFlags_AnyWindow ) ) {
 			// if the settings window is open and an ImGui window has focus,
-			// close the settings window when "dhewm3Settings" is executed
+			// close the settings window when "dudeSettings" (or its legacy alias) is executed
 			D3::ImGuiHooks::CloseWindow( D3::ImGuiHooks::D3_ImGuiWin_Settings );
 		} else {
 			// if the settings window is open but no ImGui window has focus,
@@ -4172,11 +4658,18 @@ static void PbrEditor_LoadFrom( const idMaterial *mat )
 	if ( !mat ) {
 		return;
 	}
-	pbrEditCat   = mat->GetPbrCategory();
-	pbrEditMetal = mat->GetPbrMetalness() >= 0.0f ? mat->GetPbrMetalness() : 0.0f;
-	pbrEditRough = mat->GetPbrRoughness() >= 0.0f ? mat->GetPbrRoughness() : r_pbrRoughness.GetFloat();
-	pbrEditWet   = mat->GetPbrWetness()   >= 0.0f ? mat->GetPbrWetness()   : 1.0f;
-	pbrEditEnv   = mat->GetPbrEnv()       >= 0.0f ? mat->GetPbrEnv()       : 1.0f;
+	pbrEditCat = mat->GetPbrCategory();
+	if ( pbrEditCat > PBR_CAT_NONE && pbrEditCat < PBR_CAT_COUNT ) {
+		// tracking a category: pre-fill all 4 sliders from that category's live preset,
+		// so the editor shows the real current values (not the material's -1 placeholders)
+		R_PbrCategoryDefaults( pbrEditCat, pbrEditMetal, pbrEditRough, pbrEditWet, pbrEditEnv );
+	} else {
+		// pinned / long-tail: the material's own explicit values, global roughness fallback
+		pbrEditMetal = mat->GetPbrMetalness() >= 0.0f ? mat->GetPbrMetalness() : 0.0f;
+		pbrEditRough = mat->GetPbrRoughness() >= 0.0f ? mat->GetPbrRoughness() : r_pbrRoughness.GetFloat();
+		pbrEditWet   = mat->GetPbrWetness()   >= 0.0f ? mat->GetPbrWetness()   : 1.0f;
+		pbrEditEnv   = mat->GetPbrEnv()       >= 0.0f ? mat->GetPbrEnv()       : 1.0f;
+	}
 }
 
 // called by the editPbrMaterial command once it has traced a material
@@ -4207,7 +4700,7 @@ static void PbrEditor_DrawMaterialTab()
 	ImGui::TextColored( ImVec4( 0.6f, 0.8f, 1.0f, 1.0f ), "%s", pbrEditName.c_str() );
 	if ( !r_pbr.GetBool() ) {
 		ImGui::TextColored( ImVec4( 1.0f, 0.7f, 0.3f, 1.0f ),
-			"r_pbr is 0 — enable PBR (Enhancements tab) to see edits." );
+			"r_pbr is 0 — enable PBR (Graphics tab) to see edits." );
 	}
 	ImGui::Separator();
 
@@ -4217,24 +4710,40 @@ static void PbrEditor_DrawMaterialTab()
 	}
 	if ( ImGui::Combo( "Category", &comboIdx, pbrEditCatNames, IM_ARRAYSIZE( pbrEditCatNames ) ) ) {
 		pbrEditCat = pbrEditCatEnum[comboIdx];
+		// re-attaching to a category re-fills the sliders from its preset (so you see and
+		// start from its live values); selecting "none" keeps the current numbers as a pin
+		if ( pbrEditCat > PBR_CAT_NONE && pbrEditCat < PBR_CAT_COUNT ) {
+			R_PbrCategoryDefaults( pbrEditCat, pbrEditMetal, pbrEditRough, pbrEditWet, pbrEditEnv );
+		}
+	}
+
+	// all four sliders are always live — no greying. Pre-filled from the category preset
+	// when tracking; touching ANY of them forks this one material to a pinned custom.
+	bool edited = false;
+	edited |= ImGui::SliderFloat( "Metalness", &pbrEditMetal, 0.0f, 1.0f, "%.2f" );
+	edited |= ImGui::SliderFloat( "Roughness", &pbrEditRough, 0.03f, 1.0f, "%.2f" );
+	edited |= ImGui::SliderFloat( "Wetness (spec energy)", &pbrEditWet, 0.0f, 4.0f, "%.2f" );
+	edited |= ImGui::SliderFloat( "Env glow (metal)", &pbrEditEnv, 0.0f, 4.0f, "%.2f" );
+
+	// fork-on-edit: editing a category-tracked material detaches it to "none (pinned)".
+	// The current values are already in the sliders, so the look is preserved — only this
+	// material forks; the rest of the category is untouched. Re-attach via the dropdown.
+	if ( edited && pbrEditCat != PBR_CAT_NONE ) {
+		pbrEditCat = PBR_CAT_NONE;
 	}
 	const bool pinned = ( pbrEditCat == PBR_CAT_NONE );
-
-	ImGui::BeginDisabled( !pinned );
-	ImGui::SliderFloat( "Metalness", &pbrEditMetal, 0.0f, 1.0f, "%.2f" );
-	ImGui::SliderFloat( "Roughness", &pbrEditRough, 0.03f, 1.0f, "%.2f" );
-	ImGui::EndDisabled();
-	if ( !pinned ) {
-		ImGui::TextDisabled( "metalness/roughness track the '%s' category sliders (Categories tab)", pbrEditCatNames[comboIdx] );
+	if ( pinned ) {
+		ImGui::TextDisabled( "pinned (custom values) — pick a category above to re-attach and track it" );
+	} else {
+		ImGui::TextDisabled( "tracking '%s' — move any slider to fork this material to a custom pin", pbrEditCatNames[comboIdx] );
 	}
-	ImGui::SliderFloat( "Wetness (spec energy)", &pbrEditWet, 0.0f, 4.0f, "%.2f" );
-	ImGui::SliderFloat( "Env glow (metal)", &pbrEditEnv, 0.0f, 4.0f, "%.2f" );
 
-	// wetness/env at ~1.0 are the neutral default -> write as inherit ('*')
+	// tracking -> inherit (-1) so the material follows its category live; pinned -> all
+	// four explicit (the fork snapshot)
 	const float liveMetal = pinned ? pbrEditMetal : -1.0f;
 	const float liveRough = pinned ? pbrEditRough : -1.0f;
-	const float liveWet   = ( idMath::Fabs( pbrEditWet - 1.0f ) < 0.005f ) ? -1.0f : pbrEditWet;
-	const float liveEnv   = ( idMath::Fabs( pbrEditEnv - 1.0f ) < 0.005f ) ? -1.0f : pbrEditEnv;
+	const float liveWet   = pinned ? pbrEditWet   : -1.0f;
+	const float liveEnv   = pinned ? pbrEditEnv   : -1.0f;
 
 	// live preview: push the current values straight onto the material
 	const_cast<idMaterial *>( pbrEditMat )->SetPbrLive( liveMetal, liveRough, liveWet, liveEnv, pbrEditCat );
@@ -4270,38 +4779,18 @@ static void PbrEditor_DrawCategoriesTab()
 		ImGui::TextColored( ImVec4( 1.0f, 0.7f, 0.3f, 1.0f ), "r_pbr is 0 — enable PBR to see changes." );
 	}
 
-	ImGui::SeparatorText( "Bare Metal" );
-	PbrCvarSlider( "Metalness##metal", r_pbrMetalMetalness, 0.0f, 1.0f );
-	PbrCvarSlider( "Roughness##metal", r_pbrMetalRoughness, 0.03f, 1.0f );
-	PbrCvarSlider( "Color Retention##metal", r_pbrMetalDiffuse, 0.0f, 1.0f );
+	ImGui::Spacing();
+	PbrCategoryGrid();
+	ImGui::Spacing();
+	if ( ImGui::Button( "Save Category Defaults" ) ) {
+		R_PbrWriteCategoryDefaults();
+	}
+	ImGui::SameLine();
+	ImGui::TextDisabled( "-> pbr_overrides.cfg (@cat rows)" );
+
+	ImGui::Spacing();
+	PbrCvarSlider( "Metal Color Retention", r_pbrMetalDiffuse, 0.0f, 1.0f );
 	ImGui::TextDisabled( "keeps the asset's painted color on metals (0 = physical kill, 1 = full)" );
-
-	ImGui::SeparatorText( "Painted Metal (station panelling)" );
-	PbrCvarSlider( "Metalness##painted", r_pbrPaintedMetalness, 0.0f, 1.0f );
-	PbrCvarSlider( "Roughness##painted", r_pbrPaintedRoughness, 0.03f, 1.0f );
-
-	ImGui::SeparatorText( "Ceramic Sheen (floors / tile)" );
-	PbrCvarSlider( "Roughness##ceramic", r_pbrCeramicRoughness, 0.03f, 1.0f );
-	ImGui::TextDisabled( "metalness shared with Painted Metal" );
-
-	ImGui::SeparatorText( "Rusted Metal" );
-	PbrCvarSlider( "Metalness##rust", r_pbrRustMetalness, 0.0f, 1.0f );
-	PbrCvarSlider( "Roughness##rust", r_pbrRustRoughness, 0.03f, 1.0f );
-
-	ImGui::SeparatorText( "Stone / Concrete" );
-	PbrCvarSlider( "Roughness##stone", r_pbrStoneRoughness, 0.03f, 1.0f );
-
-	ImGui::SeparatorText( "Skin (faces)" );
-	PbrCvarSlider( "Roughness##skin", r_pbrSkinRoughness, 0.03f, 1.0f );
-	PbrCvarSlider( "Wetness##skin", r_pbrSkinWetness, 0.0f, 4.0f );
-
-	ImGui::SeparatorText( "Eyes / Teeth" );
-	PbrCvarSlider( "Roughness##eyes", r_pbrEyesRoughness, 0.03f, 1.0f );
-	ImGui::TextDisabled( "wetness shared with Skin" );
-
-	ImGui::SeparatorText( "Flesh / Gore" );
-	PbrCvarSlider( "Roughness##flesh", r_pbrFleshRoughness, 0.03f, 1.0f );
-	PbrCvarSlider( "Wetness##flesh", r_pbrFleshWetness, 0.0f, 4.0f );
 }
 
 // called from D3::ImGuiHooks::NewFrame() (if this window is enabled)

@@ -376,7 +376,16 @@ idCinematicLocal::ResetTime
 ==============
 */
 void idCinematicLocal::ResetTime(int time) {
-	startTime = ( backEnd.viewDef ) ? 1000 * backEnd.viewDef->floatTime : -1;
+	// Anchor the playback clock to the frame we are first actually drawn, not to
+	// backEnd.viewDef->floatTime at the moment of reset. A GUI can reset a
+	// cinematic long before (or without) its surface being rendered -- e.g. the
+	// non-looping intro logo in guis/intro.gui gets reset ~10s before it is
+	// shown. With the old backEnd.viewDef anchor, that stale start made
+	// ImageForTime compute a frame past EOF and latch a non-looping video to
+	// FMV_IDLE (permanent black). startTime == -1 defers the anchor to the first
+	// ImageForTime call -- which is exactly why the in-game videos, reset and
+	// drawn in the same frame, always played correctly.
+	startTime = -1;
 	status = FMV_PLAY;
 }
 

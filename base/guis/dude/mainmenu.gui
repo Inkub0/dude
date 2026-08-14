@@ -1,0 +1,1713 @@
+// DUDE main menu — clean-authored replacement, screen 1: title-screen ambience.
+//
+// Written from scratch for DUDE (git-tracked). It references id Software's
+// stock Doom 3 materials/models/sounds at runtime (they ship in the game's
+// pk4s, same as any mod), but contains no id or CstDoom3 gui text.
+//
+// Dev harness: view with `testGUI guis/dude/mainmenu.gui` from the console.
+// This file becomes guis/mainmenu.gui only when all screens are done and
+// verified (docs/codebase-independence.md, item 2).
+//
+// Scope so far:
+//   screen 1 — title ambience: starfield, Mars fly-in + endless spin, halo,
+//     scanlines, scan pulse, DUDE logo, boot fade-in, menu music.
+//   screen 2 — primary navigation: bottom chrome, Options/New Game/Load/
+//     Multiplayer buttons (and their in-game Save/Stop/Return variants),
+//     Mods/Updates/Credits/Exit row, DUDE Settings, top border, grid FX,
+//     tooltips. Screen-switch choreography is stubbed (animXxx placeholders)
+//     until the target screens exist.
+//
+// Naming vs. the reference layout (for cross-session consistency):
+//   Options* -> opt*, NewGameBtn* -> ng*, LoadBtn* -> load*,
+//   MultiplayerBtn* -> mp*, ToolTip1/2 -> tipTop/tipBottom,
+//   TopSmall/LargeBorder -> borderTopBar/borderTopCorner,
+//   Anim<X> -> anim<X>, LogoDown/Up -> logoHide/logoShow,
+//   layer suffixes: BGGray/BG/H/G -> Gray/Base/Hi/Glow.
+
+windowDef Desktop {
+	#include "guis/_dude_anchor.pd"
+	scaleto43	0
+	rect		0, 0, 640, 480
+	backcolor	0, 0, 0, 1
+	menugui		1
+	float selected	0
+
+	onActivate {
+		showcursor "1" ;
+		resetTime "bootSeq" "0" ;
+	}
+
+	onESC {
+		set "cmd" "close" ;
+	}
+
+	// ---- one-shot boot sequence: music on, mars fly-in, logo reveal ----
+	windowDef bootSeq {
+		rect		0, 0, 0, 0
+		visible		0
+		notime		1
+
+		onTime 10 {
+			set "cmd" "music guisounds_menu" ;
+			resetTime "bgMars" "0" ;
+		}
+		// loop the menu track (it is ~2:49 long)
+		onTime 169000 {
+			resetTime "10" ;
+		}
+	}
+
+	// ---- background: starfield ----
+	windowDef bgStars {
+		rect		-200, 0, 1024, 1024
+		background	"gui/mainmenu/star"
+		matcolor	0.7, 0.7, 0.7, 0.7
+		matscalex	4
+		matscaley	4
+		noevents	1
+	}
+
+	windowDef bgStarsBlink1 {
+		rect		-200, 0, 1024, 1024
+		background	"gui/mainmenu/star1"
+		matcolor	1, 1, 1, 1
+		matscalex	10
+		matscaley	10
+		noevents	1
+	}
+
+	windowDef bgStarsBlink2 {
+		rect		-200, 0, 1024, 1024
+		background	"gui/mainmenu/star3"
+		matcolor	1, 1, 1, 1
+		matscalex	4
+		matscaley	4
+		noevents	1
+	}
+
+	// ---- background: the planet, rendered live, with its arrival choreography ----
+	renderDef bgMars {
+		rect		0, 20, 640, 430
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		backcolor	0, 0, 0, 0.4
+		model		"models/wipes/planet2.lwo"
+		needsRender	1
+		modelRotate	0, time * 0.001, 0, 0
+		modelOrigin	-80, 0, -25, 0
+		viewOffset	-300, -28, 0, 0
+		lightOrigin	0, 0, 0, 0
+		lightColor	1, 1, 1, 1
+		notime		1
+
+		onTime 100 {
+			// drift in: planet swings upright while the starfield settles
+			transition "modelRotate" "-60 60 0 0" "0 0 0 0" "12000" "0" "0.9" ;
+			transition "bgStars::rect" "-100 0 1256 1256" "-205 -70 1024 1024" "12000" "0" "0.9" ;
+			transition "bgStarsBlink1::rect" "-50 0 1256 1256" "-205 -90 1024 1024" "12000" "0" "0.9" ;
+			transition "bgStarsBlink2::rect" "-30 0 1256 1256" "-205 -110 1024 1024" "12000" "0" "0.9" ;
+			transition "lightOrigin" "-60 -150 -100 0" "-120 -140 -150 0" "1000" ;
+		}
+		onTime 500 {
+			transition "bootFade::backcolor" "0 0 0 1" "0 0 0 0" "1000" ;
+		}
+		onTime 1100 {
+			set "bootFade::rect" "0 0 640 0" ;
+			transition "viewOffset" "-300 -28 0 0" "-128 0 0 0" "9500" "0" "0.9" ;
+			transition "lightOrigin" "-120 -140 -150 0" "-180 -80 0 0" "3000" "0.6" "0.2" ;
+		}
+		onTime 4100 {
+			transition "lightOrigin" "-180 -80 0 0" "-128 10 150 0" "9000" "0.1" "0.9" ;
+		}
+		onTime 10700 {
+			// sun crests the planet's rim
+			transition "bgMarsHalo::matcolor" "0 0 0 0" "0.7 0.7 0.7 0.7" "2500" ;
+		}
+		onTime 12650 {
+			resetTime "marsSpinLoop" "0" ;
+		}
+	}
+
+	// endless slow rotation once the fly-in has finished
+	windowDef marsSpinLoop {
+		rect		0, 0, 0, 0
+		visible		0
+		notime		1
+
+		onTime 0 {
+			transition "bgMars::modelRotate" "0 0 0 0" "0 -360 0 0" "500000" ;
+		}
+		onTime 500000 {
+			resetTime "0" ;
+		}
+	}
+
+	// glow on the planet's sunlit rim
+	windowDef bgMarsHalo {
+		rect		133, 57, 373, 373
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		background	"gui/mainmenu/marshighlight"
+		matcolor	0, 0, 0, 0
+		noevents	1
+	}
+
+	// bottom-up darkening gradient over planet and stars
+	windowDef bgVignette {
+		rect		0, 110, 640, -370
+		background	"gui/newpda/highlight"
+		matcolor	0, 0, 0, 0
+		noevents	1
+	}
+
+	// ---- CRT dressing ----
+	windowDef fxScanlines {
+		rect		0, 0, 640, 480
+		background	"gui/test/gui_scanlines4a"
+		matcolor	0, 0, 0, pdrasterfade [ time * .002 ] * 3
+		matscaley	3.75
+		noevents	1
+	}
+
+	// grid lines over the upper screen (id's stock grid2b.pd defines the
+	// LineH* windows; the gridFX include further down drives their glow)
+	#include "guis/test/grid2b.pd"
+
+	// periodic full-screen scanning pulse sweeping down
+	windowDef fxScanPulse {
+		rect		0, 0, 640, 480
+		visible		1
+		noevents	1
+
+		windowDef fxScanPulseBar {
+			rect		0, 0, 640, 3000
+			background	"guis/assets/common/pulseline"
+			matcolor	1, 1, 1, 0.03
+			noevents	1
+
+			onTime 0 {
+				transition "rect" "0 -3000 640 3000" "0 0 640 3000" "5000" ;
+			}
+			onTime 5000 {
+				transition "rect" "0 0 640 3000" "0 3000 640 3000" "5000" ;
+			}
+			onTime 25000 {
+				resetTime "0" ;
+			}
+		}
+	}
+
+	// ---- title logo ----
+	windowDef titleLogo {
+		rect		212, 155, 256, 128
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		background	"guis/assets/mainmenu/dude_logo"
+		matcolor	1, 1, 1, 1
+		noevents	1
+	}
+
+	// faint animated sheen over the logo
+	windowDef titleLogoSheen {
+		rect		212, 155, 256, 128
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		background	"gui/menu/blackbars"
+		matcolor	1, 1, 1, 0.05
+		noevents	1
+	}
+
+	// ================= primary navigation =================
+	// Menu state lives on the Desktop: which screen is selected.
+	// 0 main, 1 options, 2 new game, 3 load, 4 multiplayer, 5 credits,
+	// 6 save, 7 mods, 8 quit-to-menu (same scheme the game code expects).
+
+	windowDef navRoot {
+		rect		0, 0, 640, 480
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+
+		// ---- bottom border ----
+		windowDef borderBotCurve {
+			rect		0, 436, 32, 32
+			background	"gui/mainmenu/borderb_corner2"
+			matcolor	0.45, 0.55, 0.7, 0.11
+			noevents	1
+		}
+		windowDef borderBotBar {
+			rect		0, 468, 365, 12
+			backcolor	0.45, 0.55, 0.7, 0.11
+			noevents	1
+		}
+		windowDef borderBotAngle {
+			rect		365, 448, 32, 32
+			background	"gui/mainmenu/borderb_angle"
+			matcolor	0.45, 0.55, 0.7, 0.11
+			noevents	1
+		}
+		windowDef borderBotTall {
+			rect		397, 451, 243, 29
+			backcolor	0.45, 0.55, 0.7, 0.11
+			noevents	1
+		}
+
+		// ---- spacer band between the nav buttons and the bottom row ----
+		windowDef spacerAngleL {
+			rect		177, 432, -32, -32
+			background	"gui/mainmenu/button_largeangle1"
+			matcolor	0.6, 0.85, 0.8, 0.08
+			noevents	1
+		}
+		windowDef spacerBarTall {
+			rect		209, 440, 155, 24
+			backcolor	0.6, 0.85, 0.8, 0.08
+			noevents	1
+		}
+		windowDef spacerAngleR {
+			rect		364, 432, 32, 32
+			background	"gui/mainmenu/borderb_angle2"
+			matcolor	0.6, 0.85, 0.8, 0.08
+			noevents	1
+		}
+		windowDef spacerBarSmall {
+			rect		396, 440, 244, 7
+			backcolor	0.6, 0.85, 0.8, 0.08
+			noevents	1
+		}
+
+		// ---- Options button chrome (lower-left wedge) ----
+		windowDef optLoCornerL {
+			rect		1, 440, 32, 32
+			background	"gui/mainmenu/button_largeangle0"
+			matcolor	0.45, 0.55, 0.7, 0.2
+			noevents	1
+		}
+		windowDef optLoBar {
+			rect		33, 440, 132, 24
+			backcolor	0.45, 0.55, 0.7, 0.2
+			noevents	1
+		}
+		windowDef optLoCornerR {
+			rect		165, 440, 32, 32
+			background	"gui/mainmenu/button_largeangle1"
+			matcolor	0.45, 0.55, 0.7, 0.2
+			noevents	1
+		}
+		windowDef optMidBar {
+			rect		3, 424, 27, 16
+			backcolor	0.45, 0.55, 0.7, 0.2
+			noevents	1
+		}
+		windowDef optMidCorner {
+			rect		30, 404, 36, 36
+			background	"gui/mainmenu/borderb_corner2"
+			matcolor	0.45, 0.55, 0.7, 0.2
+			noevents	1
+		}
+		windowDef optTopCornerL {
+			rect		2, 408, -8, 16
+			background	"gui/mainmenu/button_smallangle1"
+			matcolor	0.45, 0.55, 0.7, 0.2
+			noevents	1
+		}
+		windowDef optTopBar {
+			rect		10, 408, 4, 16
+			backcolor	0.45, 0.55, 0.7, 0.2
+			noevents	1
+		}
+		windowDef optTopCornerR {
+			rect		14, 408, -16, 16
+			background	"gui/mainmenu/button_smallangle0"
+			matcolor	0.45, 0.55, 0.7, 0.2
+			noevents	1
+		}
+		windowDef optSideBar {
+			rect		23, 412, 7, 0
+			backcolor	0.45, 0.55, 0.7, 0.2
+			noevents	1
+		}
+
+		// ---- Options fan rows (invisible until the options screen unfolds) ----
+		windowDef optFan1Side {
+			rect		3, 352, 9, 19
+			backcolor	0.45, 0.55, 0.7, 0
+			noevents	1
+		}
+		windowDef optFan1Corner {
+			rect		12, 346, 16, 32
+			background	"gui/mainmenu/button_cornerangle"
+			matcolor	0.45, 0.55, 0.7, 0
+			noevents	1
+		}
+		windowDef optFan1GlowEdge {
+			rect		-1, 346, 16, 32
+			background	"gui/mainmenu/buttong_cornersquare"
+			matcolor	0.55, 0.65, 0.75, 0
+			noevents	1
+		}
+		windowDef optFan1GlowBar {
+			rect		15, 346, 102, 32
+			background	"gui/mainmenu/buttong_middlesm"
+			matcolor	0.55, 0.65, 0.75, 0
+			noevents	1
+		}
+		windowDef optFan1GlowCorner {
+			rect		117, 346, 16, 32
+			background	"gui/mainmenu/buttong_cornerangle"
+			matcolor	0.55, 0.65, 0.75, 0
+			noevents	1
+		}
+		windowDef optFan2Side {
+			rect		3, 372, 9, 19
+			backcolor	0.45, 0.55, 0.7, 0
+			noevents	1
+		}
+		windowDef optFan2Corner {
+			rect		12, 366, 16, 32
+			background	"gui/mainmenu/button_cornerangle"
+			matcolor	0.45, 0.55, 0.7, 0
+			noevents	1
+		}
+		windowDef optFan2GlowEdge {
+			rect		-1, 366, 16, 32
+			background	"gui/mainmenu/buttong_cornersquare"
+			matcolor	0.55, 0.65, 0.75, 0
+			noevents	1
+		}
+		windowDef optFan2GlowBar {
+			rect		15, 366, 102, 32
+			background	"gui/mainmenu/buttong_middlesm"
+			matcolor	0.55, 0.65, 0.75, 0
+			noevents	1
+		}
+		windowDef optFan2GlowCorner {
+			rect		117, 366, 16, 32
+			background	"gui/mainmenu/buttong_cornerangle"
+			matcolor	0.55, 0.65, 0.75, 0
+			noevents	1
+		}
+		windowDef optFan3Side {
+			rect		3, 392, 9, 19
+			backcolor	0.45, 0.55, 0.7, 0
+			noevents	1
+		}
+		windowDef optFan3Corner {
+			rect		12, 386, 16, 32
+			background	"gui/mainmenu/button_cornerangle"
+			matcolor	0.45, 0.55, 0.7, 0
+			noevents	1
+		}
+		windowDef optFan3GlowEdge {
+			rect		-1, 386, 16, 32
+			background	"gui/mainmenu/buttong_cornersquare"
+			matcolor	0.55, 0.65, 0.75, 0
+			noevents	1
+		}
+		windowDef optFan3GlowBar {
+			rect		15, 386, 102, 32
+			background	"gui/mainmenu/buttong_middlesm"
+			matcolor	0.55, 0.65, 0.75, 0
+			noevents	1
+		}
+		windowDef optFan3GlowCorner {
+			rect		117, 386, 16, 32
+			background	"gui/mainmenu/buttong_cornerangle"
+			matcolor	0.55, 0.65, 0.75, 0
+			noevents	1
+		}
+		windowDef optFan4Side {
+			rect		3, 412, 9, 19
+			backcolor	0.45, 0.55, 0.7, 0
+			noevents	1
+		}
+		windowDef optFan4Corner {
+			rect		12, 406, 16, 32
+			background	"gui/mainmenu/button_cornerangle"
+			matcolor	0.45, 0.55, 0.7, 0
+			noevents	1
+		}
+		windowDef optFan4GlowEdge {
+			rect		-1, 406, 16, 32
+			background	"gui/mainmenu/buttong_cornersquare"
+			matcolor	0.55, 0.65, 0.75, 0
+			noevents	1
+		}
+		windowDef optFan4GlowBar {
+			rect		15, 406, 102, 32
+			background	"gui/mainmenu/buttong_middlesm"
+			matcolor	0.55, 0.65, 0.75, 0
+			noevents	1
+		}
+		windowDef optFan4GlowCorner {
+			rect		117, 406, 16, 32
+			background	"gui/mainmenu/buttong_cornerangle"
+			matcolor	0.55, 0.65, 0.75, 0
+			noevents	1
+		}
+
+		// ---- New Game button plate (also hosts Save Game when in-game) ----
+		// Layers per segment: Gray (disabled look), Base, Hi (hover flash),
+		// Glow (resting glow) — visibility keyed off gui::inGame like stock.
+		windowDef ngEdgeL {
+			rect		27, 410, 32, 32
+			noevents	1
+
+			windowDef ngEdgeLGray {
+				rect		0, 0, 32, 32
+				background	"gui/mainmenu/button_edge"
+				matcolor	0.45, 0.45, 0.45, 0.3
+				noevents	1
+				visible		("gui::inGame" == 2)
+			}
+			windowDef ngEdgeLBase {
+				rect		0, 0, 32, 32
+				background	"gui/mainmenu/button_edge"
+				matcolor	0.45, 0.55, 0.7, 0.3
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+			windowDef ngEdgeLHi {
+				rect		7, 3, 26, 26
+				background	"gui/mainmenu/button_edge"
+				matcolor	1, 1, 1, 0
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+			windowDef ngEdgeLGlow {
+				rect		0, 0, 32, 32
+				background	"gui/mainmenu/buttong_edge"
+				matcolor	0.55, 0.65, 0.75, 0.5
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+		}
+		windowDef ngMid {
+			rect		59, 410, 150, 32
+			noevents	1
+
+			windowDef ngMidGray {
+				rect		0, 0, 150, 32
+				background	"gui/mainmenu/button_middle"
+				matcolor	0.45, 0.45, 0.45, 0.3
+				noevents	1
+				visible		("gui::inGame" == 2)
+			}
+			windowDef ngMidBase {
+				rect		0, 0, 150, 32
+				background	"gui/mainmenu/button_middle"
+				matcolor	0.45, 0.55, 0.7, 0.3
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+			windowDef ngMidHi {
+				rect		1, 3, 148, 26
+				background	"gui/mainmenu/button_middle"
+				matcolor	1, 1, 1, 0
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+			windowDef ngMidGlow {
+				rect		0, 0, 150, 32
+				background	"gui/mainmenu/buttong_middle"
+				matcolor	0.55, 0.65, 0.75, 0.5
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+		}
+		windowDef ngEdgeR {
+			rect		209, 409, 32, 32
+			noevents	1
+
+			windowDef ngEdgeRGray {
+				rect		0, 0, -32, -32
+				background	"gui/mainmenu/button_edge"
+				matcolor	0.45, 0.45, 0.45, 0.3
+				noevents	1
+				visible		("gui::inGame" == 2)
+			}
+			windowDef ngEdgeRBase {
+				rect		0, 0, -32, -32
+				background	"gui/mainmenu/button_edge"
+				matcolor	0.45, 0.55, 0.7, 0.3
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+			windowDef ngEdgeRHi {
+				rect		-1, 3, -26, -26
+				background	"gui/mainmenu/button_edge"
+				matcolor	1, 1, 1, 0
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+			windowDef ngEdgeRGlow {
+				rect		0, 0, -32, -32
+				background	"gui/mainmenu/buttong_edge"
+				matcolor	0.55, 0.65, 0.75, 0.5
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+		}
+
+		// ---- Load Game button plate ----
+		windowDef loadEdgeL {
+			rect		213, 410, 32, 32
+			noevents	1
+
+			windowDef loadEdgeLGray {
+				rect		0, 0, 32, 32
+				background	"gui/mainmenu/button_edge"
+				matcolor	0.45, 0.45, 0.45, 0.3
+				noevents	1
+				visible		("gui::inGame" == 2)
+			}
+			windowDef loadEdgeLBase {
+				rect		0, 0, 32, 32
+				background	"gui/mainmenu/button_edge"
+				matcolor	0.45, 0.55, 0.7, 0.3
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+			windowDef loadEdgeLHi {
+				rect		7, 3, 26, 26
+				background	"gui/mainmenu/button_edge"
+				matcolor	1, 1, 1, 0
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+			windowDef loadEdgeLGlow {
+				rect		0, 0, 32, 32
+				background	"gui/mainmenu/buttong_edge"
+				matcolor	0.55, 0.65, 0.75, 0.5
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+		}
+		windowDef loadMid {
+			rect		245, 410, 160, 32
+			noevents	1
+
+			windowDef loadMidGray {
+				rect		0, 0, 160, 32
+				background	"gui/mainmenu/button_middle"
+				matcolor	0.45, 0.45, 0.45, 0.3
+				noevents	1
+				visible		("gui::inGame" == 2)
+			}
+			windowDef loadMidBase {
+				rect		0, 0, 160, 32
+				background	"gui/mainmenu/button_middle"
+				matcolor	0.45, 0.55, 0.7, 0.3
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+			windowDef loadMidHi {
+				rect		1, 3, 158, 26
+				background	"gui/mainmenu/button_middle"
+				matcolor	1, 1, 1, 0
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+			windowDef loadMidGlow {
+				rect		0, 0, 160, 32
+				background	"gui/mainmenu/buttong_middle"
+				matcolor	0.55, 0.65, 0.75, 0.5
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+		}
+		windowDef loadEdgeR {
+			rect		405, 409, 32, 32
+			noevents	1
+
+			windowDef loadEdgeRGray {
+				rect		0, 0, -32, -32
+				background	"gui/mainmenu/button_edge"
+				matcolor	0.45, 0.45, 0.45, 0.3
+				noevents	1
+				visible		("gui::inGame" == 2)
+			}
+			windowDef loadEdgeRBase {
+				rect		0, 0, -32, -32
+				background	"gui/mainmenu/button_edge"
+				matcolor	0.45, 0.55, 0.7, 0.3
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+			windowDef loadEdgeRHi {
+				rect		-1, 3, -26, -26
+				background	"gui/mainmenu/button_edge"
+				matcolor	1, 1, 1, 0
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+			windowDef loadEdgeRGlow {
+				rect		0, 0, -32, -32
+				background	"gui/mainmenu/buttong_edge"
+				matcolor	0.55, 0.65, 0.75, 0.5
+				noevents	1
+				visible		("gui::inGame" != 2)
+			}
+		}
+
+		// ---- Multiplayer button plate (also hosts Stop Game when in-game) ----
+		windowDef mpEdgeL {
+			rect		409, 410, 32, 32
+			noevents	1
+
+			windowDef mpEdgeLBase {
+				rect		0, 0, 32, 32
+				background	"gui/mainmenu/button_edge"
+				matcolor	0.45, 0.55, 0.7, 0.3
+				noevents	1
+			}
+			windowDef mpEdgeLHi {
+				rect		7, 3, 26, 26
+				background	"gui/mainmenu/button_edge"
+				matcolor	1, 1, 1, 0
+				noevents	1
+			}
+			windowDef mpEdgeLGlow {
+				rect		0, 0, 32, 32
+				background	"gui/mainmenu/buttong_edge"
+				matcolor	0.55, 0.65, 0.75, 0.5
+				noevents	1
+			}
+		}
+		windowDef mpMid {
+			rect		441, 410, 166, 32
+			noevents	1
+
+			windowDef mpMidBase {
+				rect		0, 0, 166, 32
+				background	"gui/mainmenu/button_middle"
+				matcolor	0.45, 0.55, 0.7, 0.3
+				noevents	1
+			}
+			windowDef mpMidHi {
+				rect		1, 3, 164, 26
+				background	"gui/mainmenu/button_middle"
+				matcolor	1, 1, 1, 0
+				noevents	1
+			}
+			windowDef mpMidGlow {
+				rect		0, 0, 166, 32
+				background	"gui/mainmenu/buttong_middle"
+				matcolor	0.55, 0.65, 0.75, 0.5
+				noevents	1
+			}
+		}
+		windowDef mpEdgeR {
+			rect		607, 409, 32, 32
+
+			windowDef mpEdgeRBase {
+				rect		0, 0, -32, -32
+				background	"gui/mainmenu/button_edge"
+				matcolor	0.45, 0.55, 0.7, 0.3
+				noevents	1
+			}
+			windowDef mpEdgeRHi {
+				rect		-1, 3, -26, -26
+				background	"gui/mainmenu/button_edge"
+				matcolor	1, 1, 1, 0
+				noevents	1
+			}
+			windowDef mpEdgeRGlow {
+				rect		0, 0, -32, -32
+				background	"gui/mainmenu/buttong_edge"
+				matcolor	0.55, 0.65, 0.75, 0.5
+				noevents	1
+			}
+		}
+
+		// ---- DUDE Settings (text button on the spacer band) ----
+		windowDef dudeSettingsBtn {
+			rect		208, 443, 156.75, 19
+			text		"DUDE Settings"
+			font		"fonts/bank"
+			textscale	0.34
+			textalign	0
+			textaligny	-6
+			forecolor	0.9, 1, 1, 0.6
+
+			onMouseEnter {
+				transition "forecolor" "0.9 1 1 0.6" "1 1 1 1" "200" ;
+				resetTime "tipTop" "0" ;
+				set "tipBottom::text" "DUDE Settings Menu" ;
+			}
+			onMouseExit {
+				transition "forecolor" "1 1 1 1" "0.9 1 1 0.6" "200" ;
+				resetTime "tipBottom" "0" ;
+			}
+			onAction {
+				set "cmd" "play guisounds_menuclickdown" ;
+				set "cmd" "exec" "dhewm3Settings" ;
+			}
+		}
+
+		// ---- Options (text) ----
+		windowDef navOptionsText {
+			rect		10, 441, 175, 21
+			text		"#str_00186"
+			textscale	0.26
+			textalign	1
+			textaligny	2
+			forecolor	1, 1, 1, 0.4
+			float "exitanim" 0
+
+			onMouseEnter {
+				set "exitanim" "1" ;
+				if ("desktop::selected" == 1) {
+					resetTime "tipTop" "0" ;
+					set "tipTop::text" "#str_02205" ;
+					set "tipBottom::text" "#str_02205" ;
+				} else {
+					transition "forecolor" "1 1 1 0.4" "1 1 1 1" "100" ;
+					transition "optLoCornerL::matcolor" "0.45 0.55 0.7 0.2" "0.45 0.55 0.7 0.35" "300" ;
+					transition "optLoBar::backcolor" "0.45 0.55 0.7 0.2" "0.45 0.55 0.7 0.35" "300" ;
+					transition "optLoCornerR::matcolor" "0.45 0.55 0.7 0.2" "0.45 0.55 0.7 0.35" "300" ;
+					transition "optMidBar::backcolor" "0.45 0.55 0.7 0.2" "0.45 0.55 0.7 0.35" "300" ;
+					transition "optMidCorner::matcolor" "0.45 0.55 0.7 0.2" "0.45 0.55 0.7 0.35" "300" ;
+					transition "optTopCornerL::matcolor" "0.45 0.55 0.7 0.2" "0.45 0.55 0.7 0.35" "300" ;
+					transition "optTopBar::backcolor" "0.45 0.55 0.7 0.2" "0.45 0.55 0.7 0.35" "300" ;
+					transition "optTopCornerR::matcolor" "0.45 0.55 0.7 0.2" "0.45 0.55 0.7 0.35" "300" ;
+					transition "optSideBar::backcolor" "0.45 0.55 0.7 0.2" "0.45 0.55 0.7 0.35" "300" ;
+					resetTime "tipTop" "0" ;
+					set "tipTop::text" "#str_02206" ;
+					set "tipBottom::text" "#str_02206" ;
+				}
+			}
+
+			onMouseExit {
+				if ("desktop::selected" == 1) {
+					resetTime "tipBottom" "0" ;
+				} else {
+					if ("exitanim" == 1) {
+						set "exitanim" "0" ;
+						transition "forecolor" "1 1 1 1" "1 1 1 0.4" "200" ;
+						transition "optLoCornerL::matcolor" "0.45 0.55 0.7 0.3" "0.45 0.55 0.7 0.2" "300" ;
+						transition "optLoBar::backcolor" "0.45 0.55 0.7 0.3" "0.45 0.55 0.7 0.2" "300" ;
+						transition "optLoCornerR::matcolor" "0.45 0.55 0.7 0.3" "0.45 0.55 0.7 0.2" "300" ;
+						transition "optMidBar::backcolor" "0.45 0.55 0.7 0.3" "0.45 0.55 0.7 0.2" "300" ;
+						transition "optMidCorner::matcolor" "0.45 0.55 0.7 0.3" "0.45 0.55 0.7 0.2" "300" ;
+						transition "optTopCornerL::matcolor" "0.45 0.55 0.7 0.3" "0.45 0.55 0.7 0.2" "300" ;
+						transition "optTopBar::backcolor" "0.45 0.55 0.7 0.3" "0.45 0.55 0.7 0.2" "300" ;
+						transition "optTopCornerR::matcolor" "0.45 0.55 0.7 0.3" "0.45 0.55 0.7 0.2" "300" ;
+						transition "optSideBar::backcolor" "0.45 0.55 0.7 0.3" "0.45 0.55 0.7 0.2" "300" ;
+					}
+					resetTime "tipBottom" "0" ;
+				}
+			}
+
+			onAction {
+				set "exitanim" "0" ;
+				if ("desktop::selected" == 1) {
+					set "cmd" "play guisounds_menuclickdown" ;
+					resetTime "animOptionsToMain" "0" ;
+					set "desktop::selected" "0" ;
+					transition "forecolor" "1 1 1 0.1" "1 1 1 0.4" "200" ;
+					transition "dudeSettingsBtn::rect" "255, 443, 100, 16" "233, 443, 100, 16" "300" ;
+				} else {
+					transition "dudeSettingsBtn::rect" "233, 443, 100, 16" "255, 443, 100, 16" "300" ;
+					transition "forecolor" "1 1 1 1" "1 1 1 0.1" "200" ;
+					set "cmd" "play guisounds_menuclickup" ;
+					if ("desktop::selected" == 2) {
+						resetTime "animNGToMain" "0" ;
+					}
+					if ("desktop::selected" == 3) {
+						resetTime "animLGToMain" "0" ;
+						resetTime "logoShow" "0" ;
+						resetTime "topBarSlideIn" "0" ;
+					}
+					if ("desktop::selected" == 4) {
+						resetTime "animMPToMain" "0" ;
+					}
+					if ("desktop::selected" == 6) {
+						resetTime "animSGToMain" "0" ;
+						resetTime "logoShow" "0" ;
+						resetTime "topBarSlideIn" "0" ;
+					}
+					if ("desktop::selected" == 7) {
+						resetTime "animModsDown" "0" ;
+						resetTime "logoShow" "0" ;
+						resetTime "topBarSlideIn" "0" ;
+					}
+					resetTime "animMainToOptions" "0" ;
+					set "desktop::selected" "1" ;
+					if ("logoHide::logo" == 0) {
+						resetTime "logoShow" "0" ;
+					}
+				}
+			}
+		}
+
+		// ---- New Game (text; single-player, main menu only) ----
+		windowDef navNewGameText {
+			rect		53, 415, 160, 21
+			text		"#str_02207"
+			textscale	0.26
+			textalign	1
+			textaligny	1
+			forecolor	1, 1, 1, 1
+			visible		("gui::inGame" == 0)
+			float "exitanim" 0
+
+			onMouseEnter {
+				set "exitanim" "1" ;
+				if ("desktop::selected" == 2) {
+					resetTime "tipTop" "0" ;
+					set "tipTop::text" "#str_02208" ;
+					set "tipBottom::text" "#str_02208" ;
+				} else {
+					transition "ngEdgeLGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+					transition "ngMidGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+					transition "ngEdgeRGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+					transition "ngEdgeLHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+					transition "ngMidHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+					transition "ngEdgeRHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+					transition "ngEdgeLHi::rect" "0 0 32 32" "7 3 26 26" "300" "0" "0.9" ;
+					transition "ngMidHi::rect" "0 0 150 32" "0 3 150 26" "300" "0" "0.9" ;
+					transition "ngEdgeRHi::rect" "0 0 -32 -32" "-1 3 -26 -26" "300" "0" "0.9" ;
+					transition "forecolor" "1 1 1 1" "1 1 1 1" "200" ;
+					resetTime "tipTop" "0" ;
+					set "tipTop::text" "#str_02209" ;
+					set "tipBottom::text" "#str_02209" ;
+				}
+			}
+
+			onMouseExit {
+				if ("desktop::selected" == 0) {
+					if ("exitanim" == 1) {
+						set "exitanim" "0" ;
+						transition "ngEdgeLGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "ngMidGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "ngEdgeRGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "ngEdgeLHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+						transition "ngMidHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+						transition "ngEdgeRHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+					}
+					resetTime "tipBottom" "0" ;
+				} else {
+					if ("desktop::selected" == 2) {
+						resetTime "tipBottom" "0" ;
+					} else {
+						if ("exitanim" == 1) {
+							set "exitanim" "0" ;
+							transition "ngEdgeLGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+							transition "ngMidGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+							transition "ngEdgeRGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+							transition "ngEdgeLHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+							transition "ngMidHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+							transition "ngEdgeRHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+							transition "forecolor" "1 1 1 1" "1 1 1 0.5" "200" ;
+						}
+						resetTime "tipBottom" "0" ;
+					}
+				}
+			}
+
+			onAction {
+				set "exitanim" "0" ;
+				if ("desktop::selected" == 2) {
+					set "cmd" "play guisounds_menuclickdown" ;
+					resetTime "animNGToMain" "0" ;
+					set "desktop::selected" "0" ;
+					transition "forecolor" "1 1 1 0.1" "1 1 1 1" "200" ;
+				} else {
+					transition "forecolor" "1 1 1 1" "1 1 1 0.1" "200" ;
+					set "cmd" "play guisounds_menuclickup" ;
+					if ("desktop::selected" == 1) {
+						resetTime "animOptionsToMain" "0" ;
+					}
+					if ("desktop::selected" == 3) {
+						resetTime "animLGToMain" "0" ;
+					}
+					if ("desktop::selected" == 4) {
+						resetTime "animMPToMain" "0" ;
+					}
+					if ("desktop::selected" == 7) {
+						resetTime "animModsDown" "0" ;
+						resetTime "logoShow" "0" ;
+						resetTime "topBarSlideIn" "0" ;
+					}
+					resetTime "animMainToNG" "0" ;
+					set "desktop::selected" "2" ;
+					if ("logoHide::logo" == 0) {
+						resetTime "logoShow" "0" ;
+					}
+				}
+			}
+		}
+
+		// ---- Save Game (text; same plate as New Game, in-game only) ----
+		windowDef navSaveGameText {
+			rect		53, 415, 160, 21
+			text		"#str_02179"
+			textscale	0.26
+			textalign	1
+			textaligny	1
+			forecolor	1, 1, 1, 1
+			visible		("gui::inGame" == 1)
+			float "exitanim" 0
+
+			onMouseEnter {
+				set "exitanim" "1" ;
+				if ("desktop::selected" == 6) {
+					resetTime "tipTop" "0" ;
+					set "tipTop::text" "#str_02210" ;
+					set "tipBottom::text" "#str_02210" ;
+				} else {
+					transition "ngEdgeLGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+					transition "ngMidGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+					transition "ngEdgeRGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+					transition "ngEdgeLHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+					transition "ngMidHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+					transition "ngEdgeRHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+					transition "ngEdgeLHi::rect" "0 0 32 32" "7 3 26 26" "300" "0" "0.9" ;
+					transition "ngMidHi::rect" "0 0 150 32" "0 3 150 26" "300" "0" "0.9" ;
+					transition "ngEdgeRHi::rect" "0 0 -32 -32" "-1 3 -26 -26" "300" "0" "0.9" ;
+					transition "forecolor" "1 1 1 1" "1 1 1 1" "200" ;
+					resetTime "tipTop" "0" ;
+					set "tipTop::text" "#str_02211" ;
+					set "tipBottom::text" "#str_02211" ;
+				}
+			}
+
+			onMouseExit {
+				if ("desktop::selected" == 0) {
+					if ("exitanim" == 1) {
+						set "exitanim" "0" ;
+						transition "ngEdgeLGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "ngMidGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "ngEdgeRGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "ngEdgeLHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+						transition "ngMidHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+						transition "ngEdgeRHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+					}
+					resetTime "tipBottom" "0" ;
+				} else {
+					if ("desktop::selected" == 6) {
+						resetTime "tipBottom" "0" ;
+					} else {
+						if ("exitanim" == 1) {
+							set "exitanim" "0" ;
+							transition "ngEdgeLGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+							transition "ngMidGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+							transition "ngEdgeRGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+							transition "ngEdgeLHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+							transition "ngMidHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+							transition "ngEdgeRHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+							transition "forecolor" "1 1 1 1" "1 1 1 0.5" "200" ;
+						}
+						resetTime "tipBottom" "0" ;
+					}
+				}
+			}
+
+			onAction {
+				set "exitanim" "0" ;
+				if ("desktop::selected" == 6) {
+					set "cmd" "play guisounds_menuclickdown" ;
+					resetTime "animSGToMain" "0" ;
+					set "desktop::selected" "0" ;
+					transition "forecolor" "1 1 1 0.1" "1 1 1 1" "200" ;
+				} else {
+					transition "forecolor" "1 1 1 1" "1 1 1 0.1" "200" ;
+					set "cmd" "play guisounds_menuclickup" ;
+					if ("desktop::selected" == 1) {
+						resetTime "animOptionsToMain" "0" ;
+					}
+					if ("desktop::selected" == 3) {
+						resetTime "animLGToMain" "0" ;
+					}
+					resetTime "animMainToSG" "0" ;
+					set "desktop::selected" "6" ;
+				}
+			}
+		}
+
+		// ---- Load Game (text) ----
+		windowDef navLoadText {
+			rect		240, 415, 170, 21
+			text		"#str_02187"
+			textscale	0.26
+			textalign	1
+			textaligny	1
+			forecolor	1, 1, 1, 1
+			visible		("gui::inGame" != 2)
+			float "exitanim" 0
+
+			onMouseEnter {
+				set "exitanim" "1" ;
+				if ("desktop::selected" == 3) {
+					resetTime "tipTop" "0" ;
+					set "tipTop::text" "#str_02212" ;
+					set "tipBottom::text" "#str_02212" ;
+				} else {
+					transition "loadEdgeLGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+					transition "loadMidGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+					transition "loadEdgeRGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+					transition "loadEdgeLHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+					transition "loadMidHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+					transition "loadEdgeRHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+					transition "loadEdgeLHi::rect" "0 0 32 32" "7 3 26 26" "300" "0" "0.9" ;
+					transition "loadMidHi::rect" "0 0 160 32" "0 3 160 26" "300" "0" "0.9" ;
+					transition "loadEdgeRHi::rect" "0 0 -32 -32" "-1 3 -26 -26" "300" "0" "0.9" ;
+					transition "forecolor" "1 1 1 1" "1 1 1 1" "200" ;
+					resetTime "tipTop" "0" ;
+					set "tipTop::text" "#str_02213" ;
+					set "tipBottom::text" "#str_02213" ;
+				}
+			}
+
+			onMouseExit {
+				if ("desktop::selected" == 0) {
+					if ("exitanim" == 1) {
+						set "exitanim" "0" ;
+						transition "loadEdgeLGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "loadMidGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "loadEdgeRGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "loadEdgeLHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+						transition "loadMidHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+						transition "loadEdgeRHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+					}
+					resetTime "tipBottom" "0" ;
+				} else {
+					if ("desktop::selected" == 3) {
+						resetTime "tipBottom" "0" ;
+					} else {
+						if ("exitanim" == 1) {
+							set "exitanim" "0" ;
+							transition "loadEdgeLGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+							transition "loadMidGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+							transition "loadEdgeRGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+							transition "loadEdgeLHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+							transition "loadMidHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+							transition "loadEdgeRHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+							transition "forecolor" "1 1 1 1" "1 1 1 0.5" "200" ;
+						}
+						resetTime "tipBottom" "0" ;
+					}
+				}
+			}
+
+			onAction {
+				set "exitanim" "0" ;
+				if ("desktop::selected" == 3) {
+					set "cmd" "play guisounds_menuclickdown" ;
+					resetTime "animLGToMain" "0" ;
+					set "desktop::selected" "0" ;
+					transition "forecolor" "1 1 1 0.1" "1 1 1 1" "200" ;
+				} else {
+					transition "forecolor" "1 1 1 1" "1 1 1 0.1" "200" ;
+					set "cmd" "play guisounds_menuclickup" ;
+					if ("desktop::selected" == 1) {
+						resetTime "animOptionsToMain" "0" ;
+					}
+					if ("desktop::selected" == 2) {
+						resetTime "animNGToMain" "0" ;
+					}
+					if ("desktop::selected" == 4) {
+						resetTime "animMPToMain" "0" ;
+					}
+					if ("desktop::selected" == 6) {
+						resetTime "animSGToMain" "0" ;
+					}
+					if ("desktop::selected" == 7) {
+						resetTime "animModsDown" "0" ;
+					}
+					resetTime "animMainToLG" "0" ;
+					set "desktop::selected" "3" ;
+				}
+			}
+		}
+
+		// ---- Multiplayer (text) ----
+		windowDef navMultiplayerText {
+			rect		435, 415, 180, 21
+			text		"#str_00253"
+			textscale	0.26
+			textalign	1
+			textaligny	1
+			forecolor	1, 1, 1, 1
+			visible		("gui::inGame" == 0 || "gui::inGame" == 2)
+			float "exitanim" 0
+
+			onMouseEnter {
+				set "exitanim" "1" ;
+				if ("desktop::selected" == 4) {
+					resetTime "tipTop" "0" ;
+					set "tipTop::text" "#str_02214" ;
+					set "tipBottom::text" "#str_02214" ;
+				} else {
+					transition "mpEdgeLGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+					transition "mpMidGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+					transition "mpEdgeRGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+					transition "mpEdgeLHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+					transition "mpMidHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+					transition "mpEdgeRHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+					transition "mpEdgeLHi::rect" "0 0 32 32" "7 3 26 26" "300" "0" "0.9" ;
+					transition "mpMidHi::rect" "0 0 166 32" "0 3 166 26" "300" "0" "0.9" ;
+					transition "mpEdgeRHi::rect" "0 0 -32 -32" "-1 3 -26 -26" "300" "0" "0.9" ;
+					transition "forecolor" "1 1 1 1" "1 1 1 1" "200" ;
+					resetTime "tipTop" "0" ;
+					set "tipTop::text" "#str_02215" ;
+					set "tipBottom::text" "#str_02215" ;
+				}
+			}
+
+			onMouseExit {
+				if ("desktop::selected" == 0) {
+					if ("exitanim" == 1) {
+						set "exitanim" "0" ;
+						transition "mpEdgeLGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "mpMidGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "mpEdgeRGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "mpEdgeLHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+						transition "mpMidHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+						transition "mpEdgeRHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+					}
+					resetTime "tipBottom" "0" ;
+				} else {
+					if ("desktop::selected" == 4) {
+						resetTime "tipBottom" "0" ;
+					} else {
+						if ("exitanim" == 1) {
+							set "exitanim" "0" ;
+							transition "mpEdgeLGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+							transition "mpMidGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+							transition "mpEdgeRGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+							transition "mpEdgeLHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "500" "0" "0.6" ;
+							transition "mpMidHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "500" "0" "0.6" ;
+							transition "mpEdgeRHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "500" "0" "0.6" ;
+							transition "forecolor" "1 1 1 1" "1 1 1 0.5" "200" ;
+						}
+						resetTime "tipBottom" "0" ;
+					}
+				}
+			}
+
+			onAction {
+				set "exitanim" "0" ;
+				if ("desktop::selected" == 4) {
+					set "cmd" "play guisounds_menuclickdown" ;
+					resetTime "animMPToMain" "0" ;
+					set "desktop::selected" "0" ;
+					transition "forecolor" "1 1 1 0.1" "1 1 1 1" "200" ;
+				} else {
+					transition "forecolor" "1 1 1 1" "1 1 1 0.1" "200" ;
+					set "cmd" "play guisounds_menuclickup" ;
+					if ("desktop::selected" == 1) {
+						resetTime "animOptionsToMain" "0" ;
+					}
+					if ("desktop::selected" == 2) {
+						resetTime "animNGToMain" "0" ;
+					}
+					if ("desktop::selected" == 3) {
+						resetTime "animLGToMain" "0" ;
+					}
+					if ("desktop::selected" == 7) {
+						resetTime "animModsDown" "0" ;
+					}
+					resetTime "animMainToMP" "0" ;
+					set "desktop::selected" "4" ;
+					if ("logoHide::logo" == 0) {
+						resetTime "logoShow" "0" ;
+					}
+				}
+			}
+		}
+
+		// ---- Stop Game (text; same plate as Multiplayer, in-game only) ----
+		windowDef navStopGameText {
+			rect		435, 415, 180, 21
+			text		"#str_02216"
+			textscale	0.26
+			textalign	1
+			textaligny	1
+			forecolor	1, 1, 1, 1
+			float "mouseout" 0
+			visible		("gui::inGame" == 1)
+
+			onMouseEnter {
+				transition "mpEdgeLGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+				transition "mpMidGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+				transition "mpEdgeRGlow::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+				transition "mpEdgeLHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+				transition "mpMidHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+				transition "mpEdgeRHi::matcolor" "1 1 1 0" "0.55 0.65 0.75 0.5" "200" ;
+				transition "mpEdgeLHi::rect" "0 0 32 32" "7 3 26 26" "300" "0" "0.9" ;
+				transition "mpMidHi::rect" "0 0 166 32" "0 3 166 26" "300" "0" "0.9" ;
+				transition "mpEdgeRHi::rect" "0 0 -32 -32" "-1 3 -26 -26" "300" "0" "0.9" ;
+				transition "forecolor" "1 1 1 1" "1 1 1 1" "200" ;
+				resetTime "tipTop" "0" ;
+				set "tipTop::text" "#str_02217" ;
+				set "tipBottom::text" "#str_02217" ;
+				set "mouseout" "1" ;
+			}
+
+			onMouseExit {
+				if ("desktop::selected" == 0) {
+					if ("mouseout" == 1) {
+						set "mouseout" "0" ;
+						transition "mpEdgeLGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "mpMidGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "mpEdgeRGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+						transition "mpEdgeLHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+						transition "mpMidHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+						transition "mpEdgeRHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+					}
+					resetTime "tipBottom" "0" ;
+				} else {
+					if ("mouseout" == 1) {
+						set "mouseout" "0" ;
+						transition "mpEdgeLGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+						transition "mpMidGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+						transition "mpEdgeRGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "400" ;
+						transition "mpEdgeLHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "500" "0" "0.6" ;
+						transition "mpMidHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "500" "0" "0.6" ;
+						transition "mpEdgeRHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "500" "0" "0.6" ;
+						transition "forecolor" "1 1 1 1" "1 1 1 0.5" "200" ;
+					}
+					resetTime "tipBottom" "0" ;
+				}
+			}
+
+			onAction {
+				if ("desktop::selected" == 1) {
+					resetTime "animOptionsToMain" "0" ;
+				}
+				if ("desktop::selected" == 3) {
+					resetTime "animLGToMain" "0" ;
+				}
+				if ("desktop::selected" == 6) {
+					resetTime "animSGToMain" "0" ;
+				}
+				if ("desktop::selected" == 7) {
+					resetTime "animModsDown" "0" ;
+				}
+				set "desktop::selected" "8" ;
+				set "cmd" "play guisounds_menuclickup" ;
+				resetTime "animQTMUp" "0" ;
+				set "mouseout" "0" ;
+				transition "mpEdgeLGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+				transition "mpMidGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+				transition "mpEdgeRGlow::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+				transition "mpEdgeLHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+				transition "mpMidHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+				transition "mpEdgeRHi::matcolor" "0.55 0.65 0.75 0.5" "1 1 1 0" "400" ;
+				resetTime "tipBottom" "0" ;
+			}
+		}
+
+		// ---- bottom-right utility row ----
+		windowDef navReturnText {
+			rect		420, 454, 140, 22
+			text		"#str_04106"
+			textscale	0.26
+			textalign	1
+			textaligny	2
+			forecolor	1, 1, 1, 0.4
+			visible		("gui::inGame" != 0)
+
+			onMouseEnter {
+				transition "forecolor" "1 1 1 0.4" "1 1 1 1" "100" ;
+				resetTime "tipTop" "0" ;
+				set "tipTop::text" "#str_04107" ;
+				set "tipBottom::text" "#str_04107" ;
+			}
+			onMouseExit {
+				transition "forecolor" "0.8 0.95 1 1" "1 1 1 0.4" "200" ;
+				resetTime "tipBottom" "0" ;
+			}
+			onAction {
+				set "cmd" "play guisounds_menuclickup" ;
+			}
+			onActionRelease {
+				set "cmd" "close" ;
+			}
+		}
+
+		windowDef navModsText {
+			rect		384, 454, 50, 22
+			text		"#str_04098"
+			textscale	0.25
+			textalign	1
+			textaligny	2
+			forecolor	1, 1, 1, 0.4
+			visible		("gui::inGame" == 0)
+
+			onMouseEnter {
+				transition "forecolor" "1 1 1 0.4" "1 1 1 1" "100" ;
+				resetTime "tipTop" "0" ;
+				set "tipTop::text" "#str_04108" ;
+				set "tipBottom::text" "#str_04108" ;
+			}
+			onMouseExit {
+				transition "forecolor" "0.8 0.95 1 1" "1 1 1 0.4" "200" ;
+				resetTime "tipBottom" "0" ;
+			}
+			onAction {
+				if ("desktop::selected" == 7) {
+					set "cmd" "play guisounds_menuclickdown" ;
+					resetTime "animModsDown" "0" ;
+					set "desktop::selected" "0" ;
+				} else {
+					set "cmd" "play guisounds_menuclickup" ;
+					if ("desktop::selected" == 1) {
+						resetTime "animOptionsToMain" "0" ;
+					}
+					if ("desktop::selected" == 2) {
+						resetTime "animNGToMain" "0" ;
+					}
+					if ("desktop::selected" == 3) {
+						resetTime "animLGToMain" "0" ;
+					}
+					if ("desktop::selected" == 4) {
+						resetTime "animMPToMain" "0" ;
+					}
+					if ("desktop::selected" == 6) {
+						resetTime "animSGToMain" "0" ;
+					}
+					set "cmd" "play guisounds_chirpconnect" ;
+					set "desktop::selected" "7" ;
+					resetTime "animModsUp" "0" ;
+				}
+			}
+		}
+
+		windowDef navUpdatesText {
+			rect		441, 454, 73, 22
+			text		"#str_04837"
+			textscale	0.25
+			textalign	1
+			textaligny	2
+			forecolor	1, 1, 1, 0.4
+			visible		("gui::inGame" == 0)
+			notime		1
+
+			onMouseEnter {
+				transition "forecolor" "1 1 1 0.4" "1 1 1 1" "100" ;
+				resetTime "tipTop" "0" ;
+				set "tipTop::text" "#str_04838" ;
+				set "tipBottom::text" "#str_04838" ;
+			}
+			onMouseExit {
+				transition "forecolor" "0.8 0.95 1 1" "1 1 1 0.4" "200" ;
+				resetTime "tipBottom" "0" ;
+			}
+			onAction {
+				set "cmd" "play guisounds_menuclickup ; CheckUpdate2" ;
+				resetTime "tipBottom" "0" ;
+				transition "forecolor" "0.8 0.95 1 1" "1 1 1 0.4" "200" ;
+				set "noevents" "1" ;
+				resetTime "0" ;
+			}
+			// cooldown before the button accepts another update check
+			onTime 5000 {
+				set "noevents" "0" ;
+			}
+		}
+
+		windowDef navCreditsText {
+			rect		522, 454, 65, 22
+			text		"#str_02218"
+			textscale	0.25
+			textalign	1
+			textaligny	2
+			forecolor	1, 1, 1, 0.4
+			visible		("gui::inGame" == 0)
+
+			onMouseEnter {
+				transition "forecolor" "1 1 1 0.4" "1 1 1 1" "100" ;
+				resetTime "tipTop" "0" ;
+				set "tipTop::text" "#str_02219" ;
+				set "tipBottom::text" "#str_02219" ;
+			}
+			onMouseExit {
+				transition "forecolor" "0.8 0.95 1 1" "1 1 1 0.4" "200" ;
+				resetTime "tipBottom" "0" ;
+			}
+			onAction {
+				if ("desktop::selected" == 1) {
+					resetTime "animOptionsToMain" "0" ;
+				}
+				if ("desktop::selected" == 2) {
+					resetTime "animNGToMain" "0" ;
+				}
+				if ("desktop::selected" == 3) {
+					resetTime "animLGToMain" "0" ;
+				}
+				if ("desktop::selected" == 4) {
+					resetTime "animMPToMain" "0" ;
+				}
+				if ("desktop::selected" == 6) {
+					resetTime "animSGToMain" "0" ;
+				}
+				if ("desktop::selected" == 7) {
+					resetTime "animModsDown" "0" ;
+				}
+				transition "navOptionsText::forecolor" "1 1 1 1" "1 1 1 0.4" "200" ;
+				transition "navNewGameText::forecolor" "1 1 1 1" "1 1 1 1" "200" ;
+				transition "navLoadText::forecolor" "1 1 1 1" "1 1 1 1" "200" ;
+				transition "navMultiplayerText::forecolor" "1 1 1 0.5" "1 1 1 1" "200" ;
+				set "cmd" "play guisounds_chirpconnect" ;
+				set "desktop::selected" "5" ;
+				resetTime "animCreditsUp" "0" ;
+			}
+		}
+
+		windowDef navExitText {
+			rect		594, 454, 40, 22
+			text		"#str_01248"
+			textscale	0.25
+			textalign	1
+			textaligny	2
+			forecolor	1, 1, 1, 0.4
+
+			onMouseEnter {
+				transition "forecolor" "1 1 1 0.4" "1 1 1 1" "100" ;
+				resetTime "tipTop" "0" ;
+				set "tipTop::text" "#str_01976" ;
+				set "tipBottom::text" "#str_01976" ;
+			}
+			onMouseExit {
+				transition "forecolor" "0.8 0.95 1 1" "1 1 1 0.4" "200" ;
+				resetTime "tipBottom" "0" ;
+			}
+			onAction {
+				set "cmd" "play guisounds_menuclickup" ;
+				resetTime "animQOSUp" "0" ;
+			}
+		}
+	}
+
+	// ---- interactive grid FX over the upper screen (id's stock building
+	//      blocks: grid2b.pd defines the LineH* windows, grid3b.pd their
+	//      mouse-driven glow — both live in pak000) ----
+	windowDef gridFX {
+		rect		0, 0, 640, 400
+
+		#include "guis/test/grid3b.pd"
+	}
+
+	// ---- top border (slides when sub-screens open) ----
+	windowDef borderTopBar {
+		cstAnchor	CST_ANCHOR_VCENTER
+		rect		0, -1, 542, 16
+		background	"gui/mainmenu/border_small"
+		matcolor	0.45, 0.6, 0.7, 0.2
+		noevents	1
+	}
+	windowDef borderTopCorner {
+		cstAnchor	CST_ANCHOR_VCENTER
+		rect		542, -1, 128, 128
+		background	"gui/mainmenu/border_corner"
+		matcolor	0.45, 0.6, 0.7, 0.2
+		noevents	1
+	}
+
+	// ---- reusable one-shot animation drivers ----
+	windowDef logoHide {
+		rect		0, 0, 0, 0
+		visible		0
+		notime		1
+		float logo	1
+
+		onTime 0 {
+			transition "titleLogo::matcolor" "1 1 1 1" "1 1 1 0" "600" ;
+			set "logoHide::logo" "0" ;
+		}
+	}
+	windowDef logoShow {
+		rect		0, 0, 0, 0
+		visible		0
+		notime		1
+
+		onTime 0 {
+			transition "titleLogo::matcolor" "1 1 1 0" "1 1 1 1" "600" ;
+			set "logoHide::logo" "1" ;
+		}
+	}
+	windowDef topBarSlideOut {
+		rect		0, 0, 0, 0
+		visible		0
+		notime		1
+
+		onTime 0 {
+			transition "borderTopBar::rect" "0 -1 542 16" "0 -1 640 16" "300" "9" "0" ;
+			transition "borderTopCorner::rect" "542 -1 128 128" "640 -1 128 128" "300" "9" "0" ;
+		}
+	}
+	windowDef topBarSlideIn {
+		rect		0, 0, 0, 0
+		visible		0
+		notime		1
+
+		onTime 0 {
+			transition "borderTopBar::rect" "0 -1 640 16" "0 -1 542 16" "300" "0" "9" ;
+			transition "borderTopCorner::rect" "640 -1 128 128" "542 -1 128 128" "300" "0" "9" ;
+		}
+	}
+
+	// ---- screen-switch choreography STUBS ----
+	// Each becomes the real transition when its target screen is authored.
+	// They only park a flag for now so clicks stay silent no-ops.
+	windowDef animMainToOptions {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animOptionsToMain {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animMainToNG {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animNGToMain {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animMainToLG {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animLGToMain {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animMainToMP {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animMPToMain {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animMainToSG {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animSGToMain {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animModsUp {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animModsDown {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animCreditsUp {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animQOSUp {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+	windowDef animQTMUp {
+		rect	0, 0, 0, 0
+		visible	0
+		notime	1
+		float stub	0
+		onTime 0 { set "stub" "1" ; }
+	}
+
+	// ---- tooltip pair: hover-in resets tipTop (shows), hover-out resets
+	//      tipBottom (hides); both mirror the same text top and bottom ----
+	windowDef tipTop {
+		rect		17, 0, 0, 12
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		text		"#str_01997"
+		font		"fonts/bank"
+		textscale	0.25
+		forecolor	1, 1, 1, 0
+		notime		1
+		noevents	1
+		textaligny	-7
+		visible		0
+
+		onTime 0 {
+			set "tipBottom::tipoff" "0" ;
+			transition "rect" "17 0 0 12" "17 0 370 12" "150" ;
+			transition "tipBottom::rect" "17 470 0 10" "17 470 370 10" "150" ;
+			transition "forecolor" "1 1 1 0.5" "1 1 1 0.2" "250" ;
+			transition "tipBottom::forecolor" "1 1 1 0.5" "1 1 1 0.2" "250" ;
+		}
+	}
+	windowDef tipBottom {
+		rect		17, 470, 0, 10
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		text		"#str_01998"
+		font		"fonts/bank"
+		textscale	0.25
+		forecolor	1, 1, 1, 0
+		notime		1
+		noevents	1
+		float tipoff	1
+		textaligny	-9
+
+		onTime 0 {
+			set "tipoff" "1" ;
+			transition "tipTop::rect" "17 0 370 12" "17 0 0 12" "50" ;
+			transition "rect" "17 470 370 10" "17 470 0 10" "50" ;
+			transition "forecolor" "1 1 1 0.3" "1 1 1 0" "50" ;
+			transition "tipTop::forecolor" "1 1 1 0.3" "1 1 1 0" "50" ;
+		}
+		onTime 250 {
+			if ("tipoff" == 1) {
+				set "rect" "17 -7 0 19" ;
+				set "tipTop::rect" "17 461 0 19" ;
+				set "forecolor" "1 1 1 0" ;
+				set "tipTop::forecolor" "1 1 1 0" ;
+			}
+		}
+	}
+
+	// ---- boot fade: modal black cover, released by the bgMars choreography ----
+	windowDef bootFade {
+		rect		0, 0, 640, 480
+		backcolor	0, 0, 0, 1
+		modal		1
+	}
+}

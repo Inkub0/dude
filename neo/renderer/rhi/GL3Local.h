@@ -86,6 +86,24 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE				0x812F
 #endif
+// SSAO Phase 1 mipped linear-depth target (docs/ssao-perf-optimization.md)
+#ifndef GL_TEXTURE_MAX_LEVEL
+#define GL_TEXTURE_MAX_LEVEL			0x813D
+#endif
+#ifndef GL_LINEAR_MIPMAP_NEAREST
+#define GL_LINEAR_MIPMAP_NEAREST		0x2701
+#endif
+#ifndef GL_NEAREST_MIPMAP_NEAREST
+#define GL_NEAREST_MIPMAP_NEAREST		0x2700
+#endif
+// SSAO Phase 2 (docs/ssao-perf-optimization.md): single-channel half-float storage
+// for the linear-depth mip — quarter the bandwidth of the RGBA16F first cut, same .r.
+#ifndef GL_R16F
+#define GL_R16F							0x822D
+#endif
+#ifndef GL_RED
+#define GL_RED							0x1903
+#endif
 // cube-map depth targets (point-light shadow maps)
 #ifndef GL_TEXTURE_CUBE_MAP
 #define GL_TEXTURE_CUBE_MAP				0x8513
@@ -154,7 +172,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 	GL3F( PFNGLBINDFRAMEBUFFERPROC,			BindFramebuffer ) \
 	GL3F( PFNGLFRAMEBUFFERTEXTURE2DPROC,	FramebufferTexture2D ) \
 	GL3F( PFNGLCHECKFRAMEBUFFERSTATUSPROC,	CheckFramebufferStatus ) \
-	GL3F( PFNGLDRAWBUFFERSPROC,				DrawBuffers )
+	GL3F( PFNGLDRAWBUFFERSPROC,				DrawBuffers ) \
+	GL3F( PFNGLGENERATEMIPMAPPROC,			GenerateMipmap )	/* SSAO Phase 1 depth mip chain */
 
 namespace rhi {
 
@@ -191,6 +210,10 @@ void RB_RHI_LogOnce( const char *what );
 // interactions, shader passes)
 void RB_RHI_StreamAmbient( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs );
 void RB_RHI_StreamShadow( rhi::RHI *r, const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs );
+// Roadmap B (docs/tessellation.md): rebind a classifier-approved tess surface's draw to its pre-deformed
+// expanded buffer + index count and clear `tess`, when it was deform-once dispatched this frame. No-op
+// otherwise. Call after RB_RHI_StreamAmbient + RB_RHI_TessellateSurf, passing that `tess` result.
+void RB_RHI_ApplyDeform( const srfTriangles_s *tri, rhi::BufferHandle &vb, int &vertOfs, rhi::BufferHandle &ib, int &idxOfs, int &idxCount, bool &tess );
 
 // MVP for a model space, including the weapon/model depth hack projection
 // tweaks (the depth range part stays in RB_Enter/LeaveDepthHack)
@@ -214,6 +237,20 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
 // opaque scene. Called at the shader-pass translucent split point (RhiWorld.cpp);
 // no-op unless r_ssr produced this view's MRT G-buffer.
 void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_s *viewDef );
+
+// DUDE berserk vision feedback (docs / memory berserk-vision-rhi): advance the ping-pong
+// accumulator one frame (faithful port of the stock ARB material textures/decals/berserk)
+// and return the accumulated image, bound on unit 1, for the display blit in
+// RB_RHI_RenderShaderPasses. Returns 0 if the buffer can't be built (caller shows the
+// plain scene). fade is the 0..1 wind-down strength (1 = active berserk).
+rhi::ImageHandle RB_RHI_BerserkAccum( rhi::RHI *r, const viewDef_s *viewDef,
+                                      float baseScale, float feedback, float fade,
+                                      int trailDiv, int timeMs );
+
+// D3XP hell-time / Artifact vision feedback (RB_RHI_HelltimeAccum, RhiWorld.cpp): advance the
+// per-level ping-pong trail one frame and return it (bound on unit 1) for the bloodorbN/cr_draw
+// display composite. level 0/1/2 = HELLTIME/BERSERK/INVULNERABILITY. Returns 0 if unbuildable.
+rhi::ImageHandle RB_RHI_HelltimeAccum( rhi::RHI *r, const viewDef_s *viewDef, int level, int timeMs );
 
 // screenshot support: composited desktops return garbage for front-buffer
 // reads, so R_ReadTiledPixels registers a destination and the executor

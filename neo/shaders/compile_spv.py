@@ -61,7 +61,7 @@ def main():
     compiled = 0
     skipped = 0
     for f in sorted(SHADER_DIR.iterdir()):
-        if f.suffix not in (".vert", ".frag"):
+        if f.suffix not in (".vert", ".frag", ".tesc", ".tese"):
             continue
         spv = outdir / (f.name + ".spv")
         if spv.exists() and spv.stat().st_mtime >= max(f.stat().st_mtime, deps_mtime):
@@ -69,7 +69,11 @@ def main():
             continue
 
         src = expand_includes(f.read_text())
-        invariant = "invariant gl_Position;\n" if f.suffix == ".vert" else ""
+        # gl_Position must be invariant in whichever stage finalizes it so the
+        # depth prepass and the interaction pass agree bit-for-bit (multi-pass
+        # depth-EQUAL). That is the vertex stage normally, or the tessellation
+        # evaluation stage when a draw is tessellated (docs/tessellation.md).
+        invariant = "invariant gl_Position;\n" if f.suffix in (".vert", ".tese") else ""
         full = prelude + "\n" + invariant + src
 
         # the temp file must keep the stage suffix so both compilers detect it
@@ -77,10 +81,10 @@ def main():
             tmp.write(full)
             tmpname = tmp.name
         if is_glslang:
-            cmd = [str(compiler), "-V", "--target-env", "vulkan1.0",
+            cmd = [str(compiler), "-V", "--target-env", "vulkan1.4",
                    "-o", str(spv), tmpname]
         else:  # glslc
-            cmd = [str(compiler), "--target-env=vulkan1.0",
+            cmd = [str(compiler), "--target-env=vulkan1.4",
                    "-o", str(spv), tmpname]
         r = subprocess.run(cmd, capture_output=True, text=True)
         os.unlink(tmpname)

@@ -122,6 +122,25 @@ static void R_PerformanceCounters( void ) {
 		common->Printf( "lightScale: %f\n", backEnd.pc.maxLightValue );
 	}
 
+	// Phase 0 diagnostic (reuses r_shadowMapCacheDebug, alongside the backend cubeCache/s
+	// line): once/sec, CPU stencil shadow volumes built vs skipped because the light will be
+	// shadow-mapped (r_shadowMapSkipStencilBuild). A high 'skipped' with low 'built' during
+	// combat = the gate removing per-frame silhouette+extrusion work that would never draw.
+	if ( r_shadowMapCacheDebug.GetBool() ) {
+		static int accBuilt, accSkipped, accFrames, accStartMs;
+		const int nowMs = Sys_Milliseconds();
+		if ( accStartMs == 0 ) { accStartMs = nowMs; }
+		accBuilt   += tr.pc.c_createShadowVolumes;
+		accSkipped += tr.pc.c_shadowVolumesSkipped;
+		accFrames++;
+		if ( nowMs - accStartMs >= 1000 ) {
+			common->Printf( "shadowVol/s: built %d, skipped %d (stencil-build gate) | %d frames\n",
+				accBuilt, accSkipped, accFrames );
+			accBuilt = accSkipped = accFrames = 0;
+			accStartMs = nowMs;
+		}
+	}
+
 	memset( &tr.pc, 0, sizeof( tr.pc ) );
 	memset( &backEnd.pc, 0, sizeof( backEnd.pc ) );
 }
@@ -604,6 +623,23 @@ void idRenderSystemLocal::BeginFrame( int windowWidth, int windowHeight ) {
 			r_useScissor.SetBool( origUseScissor );
 		}
 	} // DG end
+
+	// Phase 0 (r_shadowMapSkipStencilBuild): these cvars change WHICH lights fall back to
+	// stencil shadows vs a shadow map, i.e. whether a cached interaction's stencil shadow
+	// volume is ever drawn. Interactions that skipped their volume build under the old
+	// decision would go stale, so drop them on a change; they regenerate lazily next view
+	// with the volume built (or skipped) to match. Mirrors the FreeInteractions() reset the
+	// vertex-program-state switch already uses.
+	if ( r_shadowMapSkipStencilBuild.IsModified() || r_shadowMapping.IsModified()
+			|| r_shadowMapStencilRadius.IsModified() || r_shadowMapSun.IsModified() ) {
+		r_shadowMapSkipStencilBuild.ClearModified();
+		r_shadowMapping.ClearModified();
+		r_shadowMapStencilRadius.ClearModified();
+		r_shadowMapSun.ClearModified();		// sun maps change the oversize skip decision too
+		if ( primaryWorld ) {
+			primaryWorld->FreeInteractions();
+		}
+	}
 
 	// determine which back end we will use
 	SetBackEndRenderer();

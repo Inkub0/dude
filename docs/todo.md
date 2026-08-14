@@ -47,14 +47,16 @@ Design decisions taken:
 | PBR materials (GGX) | off | off | off | on | on | on |
 | screen-space reflections | off | off | off | off | on | on |
 | SSR march resolution | — | — | — | — | 1/2 | 2/3 |
-| SSAO res scale | — | — | 0.5 | 0.75 | 0.8 | 1.0 |
-| SSAO slices / steps | — | — | 3 / 2 | 3 / 3 | 6 / 4 | 7 / 5 |
-| SSAO normal G-buffer | — | — | off | on | on | on |
+| SSAO res scale | — | — | 1/2 | 2/3 | 3/4 | 4/5 |
+| SSAO directions / steps | — | — | 2 / 4 | 3 / 6 | 4 / 8 | 5 / 10 |
+| SSAO radius (world) | — | — | 48 | 48 | 48 | 48 |
+| SSAO depth-mip accel | — | — | on | on | on | on |
+| SSAO normal G-buffer | — | — | off (depth reconstruct) | on | on | on |
 | shadow 2D / cube res | — | — | 512 / 512 | 1024 / 1200 | 2048 / 2048 | 2048 / 2048 |
-| cube PCF taps | — | — | 5 | 6 | 8 | 12 |
+| cube PCF taps | — | — | 5 | 6 | 8 | 10 |
 | point-light budget | — | — | 16 | 64 | 96 | 128 (all) |
 | shadow size-scale | on* | on* | on | on | on | on |
-| size-scale pivot radius | 380* | 380* | 380 | 380 | 340 | 340 |
+| size-scale pivot radius | 380* | 380* | 380 | 380 | 480 | 480 |
 | emissive light cap | — | — | 16 | 24 | 32 | 48 |
 | film grain / chroma | off | 0.05 / off | 0.05 / 0.2 | 0.05 / 0.2 | 0.05 / 0.2 | 0.05 / 0.2 |
 | film grain size | 1.5* | 1.5 | 1.5 | 1.5 | 1.5 | 1.5 |
@@ -68,12 +70,14 @@ High and up; still applied for determinism. Sub-Ultra tiers carry SSR march reso
 1.0 so a hand-enabled SSR runs at the full-res default.)
 
 Shadow size-scaling (`r_shadowMapSizeScale`) stays **on at every tier**: it distributes the
-per-light resolution budget by light importance (a light at the pivot radius gets the tier's
-base cube res, bigger lights get more, smaller ones less). The tiered **base resolution** is
-the primary lever; the **pivot radius** (`r_shadowMapSizeScaleRadius`) is a secondary
-sharpness lever — *lowering* it makes more of a map's lights count as "large" and get boosted
-above base res, so only the top two tiers tighten it (Ultra 340, Ultra Nightmare 300) while
-Potato→High keep the Doom-3-typical 380 default.
+per-light resolution budget by light radius (a light at the pivot radius gets the tier's base
+cube/2D res, bigger lights get more, smaller ones less). The tiered **base resolution** is the
+primary lever; the **pivot radius** (`r_shadowMapSizeScaleRadius`) is a secondary perf/sharpness
+lever — *raising* it pushes the biggest lights down a resolution tier. Ultra/Nightmare use **480**
+(vs 380 on Medium/High) to drop their largest cube + spot lights from a 2048 face to 1024 — a real
+shadow-render saving in big "sun"-light areas (user-verified) at slightly softer big-light shadows.
+It only bites on the 2048-base tiers: Medium/High's small bases (512 / 1200) already floor big
+lights at ½× regardless of the pivot, so raising it there would be a no-op.
 
 Original spec (kept for reference) — each preset writes the non-vanilla enhancement cvars
 together, covering at minimum:

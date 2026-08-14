@@ -8,9 +8,14 @@
 //
 // Uniform packing (RB_RHI_ScreenSpaceReflections):
 //   u_localParam0.xy      = ( 1/proj00, 1/proj11 ) view-pos reconstruction
-//   u_localParam1         = ( 0, intensity, maxRoughness, 0 )
+//   u_localParam1         = ( 0, intensity, maxRoughness, glossyMaxLod )
 //   u_screenCorrection.xy = 1 / viewSize (gl_FragCoord -> [0,1] uv)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth texcoord
+//
+// Glossy reflections (r_ssrGlossy): when u_localParam1.w (glossyMaxLod) > 0 the
+// reflection sampler is the ssr_colordown mip pyramid, and the reflection is read
+// at a roughness-proportional LOD so rough surfaces blur. w == 0 = the sharp path:
+// unit 0 is the single-level result buffer and we sample level 0 exactly (unchanged).
 
 #include "renderparms.glsl"
 
@@ -50,11 +55,13 @@ void main() {
 		discard;
 	}
 
-	// view-space position for NdotV (same reconstruction as ssr.frag)
+	// view-space position for NdotV (same reconstruction as ssr.frag). u_windowCoord.z
+	// is the view-Y sign (+1 GL / -1 Vulkan): flips the reconstructed Y so NdotV agrees
+	// with the view-space G-buffer normal on VK's top-down framebuffer.
 	float vz  = 1.0 / ( raw * depth_consts.x + depth_consts.y );      // negative
 	vec2  ndc = uv * 2.0 - 1.0;
 	float d   = -vz;
-	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * d * u_localParam0.y, vz );
+	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
 	vec3  N   = normalize( nt.xyz * 2.0 - 1.0 );
 	vec3  V   = normalize( -P );
 
@@ -65,6 +72,21 @@ void main() {
 	float F0 = mix( 0.04, 0.9, metal );
 	float F  = F0 + ( 1.0 - F0 ) * pow( 1.0 - NdotV, 5.0 );
 
-	vec3 refl = texture( u_ssr, uv ).rgb;          // low-res march, bilinear upsample
+	// reflection colour. Sharp path (glossyMaxLod == 0): a single-level bilinear
+	// upsample, byte-identical to the pre-glossy build. Glossy path: sample the
+	// reflection mip pyramid at a roughness-proportional LOD and hand-blend the two
+	// adjacent levels (the mip RT is LINEAR_MIPMAP_NEAREST, so an explicit two-tap
+	// mix gives the trilinear smoothness without a per-backend sampler change).
+	float maxLod = u_localParam1.w;
+	vec3 refl;
+	if ( maxLod > 0.0 ) {
+		float lod = clamp( ( rough / maxRough ) * maxLod, 0.0, maxLod );
+		float l0  = floor( lod );
+		vec3  a   = textureLod( u_ssr, uv, l0 ).rgb;
+		vec3  b   = textureLod( u_ssr, uv, min( l0 + 1.0, maxLod ) ).rgb;
+		refl = mix( a, b, lod - l0 );
+	} else {
+		refl = texture( u_ssr, uv ).rgb;           // low-res march, bilinear upsample
+	}
 	fragColor = vec4( refl * ( F * gloss * u_localParam1.y ), 0.0 );
 }

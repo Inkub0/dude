@@ -1,4 +1,4 @@
-# HDR render pipeline — design
+pep# HDR render pipeline — design
 
 Design reference for an **HDR render pipeline with SDR output** ("fake HDR") on the
 GL 3.3 `opengl3` (RHI) backend, and its Vulkan port. Same enhancement framing as the
@@ -38,10 +38,14 @@ Fixes banding everywhere with zero intended look change. Gate: `r_hdr` (default 
 **Frame flow (opengl3):**
 
 1. `RB_GL3_ExecuteBackEndCommands` → after `BeginFrame`, if `r_hdr` and
-   `R_BackendSupportsEnhancements()`, lazily create a screen-sized **RGBA16F** color
-   target with a **DEPTH24_STENCIL8** attachment (stencil shadows need the stencil), and
-   `SetFrameTarget()` it. All `RC_SET_BUFFER` clears and every `RC_DRAW_VIEW` (3D
-   subviews, main view, 2D GUI) then accumulate into it.
+   `R_BackendSupportsEnhancements()` **and the frame draws a fullscreen world view**,
+   lazily create a screen-sized **RGBA16F** color target with a **DEPTH24_STENCIL8**
+   attachment (stencil shadows need the stencil), and `SetFrameTarget()` it. All
+   `RC_SET_BUFFER` clears and every `RC_DRAW_VIEW` (3D subviews, main view, 2D GUI) then
+   accumulate into it. **Worldless frames — the main menu, load/save GUI, cinematics —
+   stay on the 8-bit path** (`rbHdrFrameActive` gates the whole frame,
+   `RhiBackend.cpp:864`): the float resolve was lifting near-black scene detail through
+   translucent 2D (the menu planet limb behind the LOAD GAME button) — fixed in `2b1f1a56`.
 2. The backend's `frameTarget` concept makes `EndPass` return to the HDR FBO instead of
    the backbuffer, so nested target passes (shadow maps, SSAO) restore correctly. When
    `frameTarget == 0` (HDR off) behaviour is bit-for-bit the old path.
@@ -50,32 +54,42 @@ Fixes banding everywhere with zero intended look change. Gate: `r_hdr` (default 
    `RB_RHI_GammaBrightness` then runs on the resolved backbuffer unchanged, followed by
    screenshot readback and the ImGui overlay — all on the backbuffer, exactly as before.
 
-**Dither (`r_hdrDither`, default on).** The float→8-bit resolve is the last quantization
-point, so RGBA16F alone only removes the *banding from accumulation* — the resolve still
-bands. `hdrresolve.frag` therefore dithers: a texture-free blue-noise-like value
-(interleaved gradient noise, Jimenez 2014) remapped to a triangular PDF and scaled to ~1
-LSB, added before the 8-bit write. `u_localParam0.x` carries the amount (0 = off). This is
-what clears the *residual* bands RGBA16F leaves behind.
+**Dither — tried, then removed (`2b1f1a56`).** An early version added a resolve-time
+dither (`r_hdrDither`, default on): interleaved gradient noise (Jimenez 2014) remapped to a
+triangular PDF, scaled to ~1 LSB, added before the 8-bit write to kill the *residual* bands
+the float→8-bit resolve still leaves. It turned out to be a **dead-end**: once film grain and
+chromatic aberration were folded into the resolve so they sample the float buffer directly
+(below), the banding is gone without it. The cvar, its menu slider, and the resolve dither
+code were all deleted — `hdrresolve.frag` no longer dithers, and there is no `r_hdrDither`.
 
-**UI.** "HDR Rendering" + a nested "Dither Resolve (steps)" slider live in the Enhancements
-tab's Post-Processing section ([`Dhewm3SettingsMenu.cpp`](../neo/framework/Dhewm3SettingsMenu.cpp),
-`enhancementOptions[]`); not wired into the quality presets (standalone).
+**UI.** A single "HDR Rendering" toggle lives in the Enhancements tab's Post-Processing
+section ([`Dhewm3SettingsMenu.cpp:1843`](../neo/framework/Dhewm3SettingsMenu.cpp),
+`CVarOption( "r_hdr", … )`), alongside the standalone Film Grain / Film Grain Size /
+Chromatic Aberration sliders; not wired into the quality presets (standalone).
 
 **The whole post chain folds into the resolve.** FXAA, film grain and chromatic aberration
 normally run as separate passes that snapshot the framebuffer into the 8-bit `_currentRender`
 image, sample that, and write back. In HDR mode any such 8-bit round-trip re-quantizes the
-smooth float scene into hard bands *before* the resolve dither runs — so the dither appeared to
-do nothing whenever those effects were on. Fix: in HDR mode `RB_RHI_AAPass` and
-`RB_RHI_PostProcess` are skipped, and the chain is rebuilt in float:
+smooth float scene into hard bands *before* the resolve runs — reintroducing exactly the banding
+HDR exists to remove, whenever those effects were on. (This 8-bit round-trip is also what made the
+old resolve dither pointless, and folding the chain in float is what let it be dropped.) Fix: in
+HDR mode `RB_RHI_AAPass` and `RB_RHI_PostProcess` are skipped, and the chain is rebuilt in float:
 
 - `RB_RHI_HdrFxaa` runs FXAA as a float→float pass (`rhiHdrRT` → `rhiHdrAaRT`, a second
   RGBA16F color buffer allocated only while `r_rhiAA` is on), reusing `fxaa.frag` unchanged
   (it samples whatever is bound to unit 0; screenCorrection/texel set for an exact-size source).
 - `hdrresolve.frag` then reads the AA'd buffer (or the scene buffer if FXAA is off) and applies
-  chromatic aberration → film grain → dither, in that order, writing 8-bit **once**.
+  chromatic aberration → film grain → gamma/brightness, in that order, writing 8-bit **once**.
+  (On Vulkan the `r_gammaInShader` correction is folded in here since the VK backend has no
+  separate LDR gamma tail; GL passes identity and keeps its standalone gamma/brightness pass.)
+- SMAA (`r_rhiAA 2`) goes one step further when chroma is off: its neighborhood-blend pass folds
+  *into* the resolve too (`hdrresolve_smaa.frag` via `RB_RHI_HdrResolveSmaaFused`), so the
+  `rhiHdrAaRT` round-trip is skipped entirely — edges+weights, then a single blend+grain+gamma pass to
+  the backbuffer. Chroma-on falls back to the separate-blend path above (its radial offset taps need
+  the AA'd image). See [antialiasing.md](antialiasing.md).
 
-So the correct order (scene → FXAA → chroma → grain → dither → 8-bit) is preserved, everything
-stays half-float until the single resolve write, and the dither is the last thing before it.
+So the correct order (scene → AA → chroma → grain → gamma → 8-bit) is preserved, and everything
+stays half-float until the single resolve write.
 
 **Key files:**
 - Backend: `CreateRenderTargetColorDepthStencil(IF_RGBA16F,…)`, `SetFrameTarget()`,
@@ -117,8 +131,11 @@ it's a behaviour change gated behind `r_hdr`.
   into a single-sample HDR FBO, not the multisampled backbuffer. Use `r_rhiAA` (FXAA) for
   edge AA meanwhile; a multisampled RGBA16F target + resolve blit is a follow-up.
 - Toggling `r_hdr` needs no `vid_restart`; the target is (re)created lazily and on resize.
-- Dither runs only in the resolve, so it only helps while `r_hdr` is on. Banding on the
-  legacy 8-bit path (HDR off) would need a separate dither pass — not done (HDR is the fix).
+- Banding on the legacy 8-bit path (HDR off) is unaddressed — HDR is the fix, so turning it
+  on is the remedy; there is no separate LDR dither pass.
+- **Negative interaction output is floored** (`interaction.frag:435`): the RGBA16F target
+  doesn't clamp, so a negative N·L used to *subtract* warm light and blue-shift models under
+  HDR; the shader now floors to 0 to match the old 8-bit fixed-point clamp (`2b1f1a56`).
 
 ---
 
@@ -180,9 +197,75 @@ render-pass builder. The RHI methods added for Phase A (`CreateRenderTargetColor
 
 ---
 
+## HDR *display* output (HDR10 / scRGB) — separate future feature, NOT a phase
+
+**Everything above is HDR *rendering* with SDR *output*** — the float scene is always tonemapped
+back down to Rec.709/sRGB and written to an 8-bit backbuffer, so **Phases A/B/C are fully visible
+on an ordinary monitor** (banding gone, adaptation, bloom — all SDR-visible). None of them need an
+HDR panel.
+
+An **actual HDR display is only required for a distinct fourth capability**: sending the >1.0
+values to the panel directly instead of compressing them into SDR — i.e. presenting into a
+swapchain in a PQ (HDR10) or scRGB colorspace so a 1000-nit highlight is *emitted* as 1000 nits.
+This is deliberately out of scope for the pipeline above; it is tracked here only so the design is
+recorded.
+
+**Why it's separate, not "Phase D":** it changes the *presentation/encode*, not the rendering. It
+is also the **only** HDR work here that is hardware-gated (needs an HDR monitor + OS HDR mode) and
+**Vulkan-only** — GL 3.3 has no portable path.
+
+**Requirements when/if it's built:**
+- **Swapchain colorspace.** `VK_EXT_swapchain_colorspace`, then either
+  `VK_COLOR_SPACE_HDR10_ST2084_EXT` with a 10-bit format (`VK_FORMAT_A2B10G10R10_UNORM_PACK32`,
+  PQ-encoded) or `VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT` (scRGB) with
+  `VK_FORMAT_R16G16B16A16_SFLOAT`. Enumerate via `vkGetPhysicalDeviceSurfaceFormats2KHR` and fall
+  back to the current sRGB swapchain when unsupported / OS HDR off.
+- **A different resolve tail.** Instead of the sRGB clamp+gamma in `hdrresolve.frag`, encode to the
+  target space: PQ (SMPTE ST 2084) with a nits mapping, or scRGB linear with SDR white pinned at
+  1.0. Peak-luminance / paper-white cvars (`r_hdrDisplayPeakNits`, `r_hdrDisplayPaperWhite`).
+- **No SDR tonemap** on this path (or a much higher-peak one) — the whole point is to *not* crush
+  the range.
+
+**Fork point: Phase B's tonemap.** B is where the float buffer first meets a tone curve, so that
+is the clean branch — share the float scene + exposure up to that point, then split
+`tonemap → SDR/sRGB` vs `encode → PQ/scRGB` as two resolve-tail variants. Building B with that
+split in mind (exposure/curve separated from the final encode) keeps this path cheap to add later.
+
+---
+
 ## Status
 
-- **Phase A** — implemented behind `r_hdr` (default off). Needs in-engine verification
-  (menus, mirrors/subviews, HUD, stencil shadows, screenshots) — headless build only so far.
-- **Phase B** — planned.
-- **Phase C** — planned.
+- **Phase A** — ✅ **DONE + USER-VERIFIED** behind `r_hdr` (default off) on **both GL3 and
+  Vulkan**. User runs with HDR on and is happy with it in-engine. Got there via in-engine
+  iteration: the worldless-frame 8-bit gate and the negative-interaction floor (`2b1f1a56`)
+  were both fixes for artifacts observed running (menu planet-limb lift, blue-shifted models);
+  the originally-planned resolve dither was tried and **removed** as a dead-end. Only open
+  item is the deferred MSAA-in-HDR follow-up (use `r_rhiAA`/FXAA meanwhile).
+- **Phase B** (eye adaptation + tonemap) — planned, **not started** (no `r_hdrEyeAdaptation`
+  / `r_hdrTonemap` / `r_hdrAdaptSpeed` / `r_hdrExposure*` cvars exist yet).
+- **Phase C** (dynamic-range injection + bloom) — planned, **not started** (no `r_hdrOverbright`).
+- **HDR display output** (HDR10/scRGB) — separate future feature, **not started**; the only
+  hardware-gated (needs an HDR panel), Vulkan-only part. Forks off Phase B's tonemap. See the
+  "HDR *display* output" section above.
+
+### Vulkan port (M7) — as-built
+
+Phase A now runs on the Vulkan backend too (`neo/renderer/rhi/vk/VulkanBackend.cpp`), same
+`r_hdr` cvar and frontend driver (`RB_RHI_HdrBeginFrame`/`HdrResolve`). What the port added:
+
+- `CreateRenderTargetColorDepthStencil(IF_RGBA16F)` → an RGBA16F color image + a
+  D24S8/D32S8 depth-stencil (stencil shadows need it), with clear / load / clearDS render-
+  pass variants mirroring the swapchain scene passes. Colour attachment ends each pass in
+  `SHADER_READ_ONLY` so the resolve samples it through the ordinary descriptor path.
+- Color-only `CreateRenderTarget(IF_RGBA16F/IF_RGBA8)` for the FXAA/SMAA ping (and future
+  SSR buffers); `GetRenderTargetImage2` for MRT.
+- `SetFrameTarget` re-routes `BeginPass`/`EndPass` into the HDR buffer; the pipeline cache
+  key carries a pass-class byte so the same scene shaders get RGBA8-swapchain and
+  RGBA16F-HDR pipeline variants (render-pass-incompatible colour formats).
+- **Orientation:** a color render target is stored top-down (rendered like the scene),
+  unlike the bottom-up M5 `_currentRender` captures, so any fullscreen pass sampling one
+  (resolve/FXAA/SMAA) cancels the negative-height viewport flip. Glass/heat-haze captures
+  during an HDR frame copy from the HDR buffer (with a `SHADER_READ_ONLY`↔`TRANSFER_SRC`
+  round-trip); the capture is still RGBA8 (minor: 8-bit refraction sample vs GL3's RGBA16F).
+- Default path unchanged: with `r_hdr 0` the frame target stays 0 and every scene/shadow
+  pass behaves exactly as before M7.

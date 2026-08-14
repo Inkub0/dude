@@ -1,0 +1,96 @@
+// DUDE tessellation (docs/tessellation.md): interaction evaluation shader.
+// PN-smooths the model-space position; linearly interpolates the interaction
+// varyings (identical to the flat path's rasterizer interpolation — PN only
+// reshapes the silhouette, not the shading vectors); recomputes gl_Position.
+// gl_Position is injected `invariant` by compile_spv.py so this matches the
+// zfill tese bit-for-bit (depth-EQUAL interaction pass).
+
+#include "renderparms.glsl"
+#include "tess.glsl"
+
+SAMPLER_BINDING(1) uniform sampler2D u_bumpMap;	// normal map, for Phase 2 displacement
+
+layout(triangles, fractional_odd_spacing, cw) in;	// fractional = smooth LOD:
+										// new verts slide in as the distance factor changes instead of popping.
+										// Must match in every pass (crack-free + depth-EQUAL).
+
+VARY(0)  in vec3 i_TexLightVec[];
+VARY(1)  in vec2 i_TexBump[];
+VARY(2)  in vec2 i_TexFalloff[];
+VARY(3)  in vec4 i_TexProjection[];
+VARY(4)  in vec2 i_TexDiffuse[];
+VARY(5)  in vec2 i_TexSpecular[];
+VARY(6)  in vec3 i_TexHalfVec[];
+VARY(7)  in vec4 i_Color[];
+VARY(8)  in vec3 i_TexViewVec[];
+VARY(9)  in vec3 i_ShadowCubeVec[];
+VARY(10) in vec3 i_ModelPos[];
+VARY(11) in vec4 i_ModelNormal[];
+VARY(12) in vec4 i_ShadowProjection[];
+
+VARY(0) out vec3 var_TexLightVec;
+VARY(1) out vec2 var_TexBump;
+VARY(2) out vec2 var_TexFalloff;
+VARY(3) out vec4 var_TexProjection;
+VARY(4) out vec2 var_TexDiffuse;
+VARY(5) out vec2 var_TexSpecular;
+VARY(6) out vec3 var_TexHalfVec;
+VARY(7) out vec4 var_Color;
+VARY(8) out vec3 var_TexViewVec;
+VARY(9) out vec3 var_ShadowCubeVec;
+VARY(12) out vec4 var_ShadowProjection;
+
+void main() {
+	vec3 tc = gl_TessCoord;
+
+	// PN wants unit corner normals; .w is the UV-seam displacement mask (tess.glsl)
+	vec3 n0 = normalize( i_ModelNormal[0].xyz );
+	vec3 n1 = normalize( i_ModelNormal[1].xyz );
+	vec3 n2 = normalize( i_ModelNormal[2].xyz );
+
+	vec3 pos = dudeTessPN( i_ModelPos[0], i_ModelPos[1], i_ModelPos[2], n0, n1, n2, tc );
+
+	var_TexLightVec   = i_TexLightVec[0]   * tc.x + i_TexLightVec[1]   * tc.y + i_TexLightVec[2]   * tc.z;
+	var_TexBump       = i_TexBump[0]       * tc.x + i_TexBump[1]       * tc.y + i_TexBump[2]       * tc.z;
+	var_TexDiffuse    = i_TexDiffuse[0]    * tc.x + i_TexDiffuse[1]    * tc.y + i_TexDiffuse[2]    * tc.z;
+	var_TexSpecular   = i_TexSpecular[0]   * tc.x + i_TexSpecular[1]   * tc.y + i_TexSpecular[2]   * tc.z;
+	var_TexHalfVec    = i_TexHalfVec[0]    * tc.x + i_TexHalfVec[1]    * tc.y + i_TexHalfVec[2]    * tc.z;
+	var_Color         = i_Color[0]         * tc.x + i_Color[1]         * tc.y + i_Color[2]         * tc.z;
+	var_TexViewVec    = i_TexViewVec[0]    * tc.x + i_TexViewVec[1]    * tc.y + i_TexViewVec[2]    * tc.z;
+
+	// optional normal-map displacement along the interpolated geometric normal
+	vec3 geoN = normalize( n0 * tc.x + n1 * tc.y + n2 * tc.z );
+	float seam = i_ModelNormal[0].w * tc.x + i_ModelNormal[1].w * tc.y + i_ModelNormal[2].w * tc.z;
+	pos = dudeTessDisplace( pos, geoN, u_bumpMap, var_TexBump, seam );
+
+	// Recompute the light-space projective quantities from the DISPLACED position rather
+	// than barycentric-interpolating the flat control-vertex values. The shadow-map casters
+	// (shadow_sm.tese / shadow_sm_cube.tese) now write depth from this same displaced surface,
+	// so the receiver's shadow reference (falloff depth, shadow UV, cube light-vector) must be
+	// evaluated there too — interpolating leaves them on the flat surface and the caster/receiver
+	// depths disagree by the displacement (self-shadow acne / peter-panning). All are affine in
+	// position; this mirrors fog.tese / shadow_sm.tese. The cookie (var_TexProjection) and falloff
+	// then also track the displaced surface the fragment is actually rasterized at.
+	vec4 dp = vec4( pos, 1.0 );
+	var_TexFalloff       = vec2( dot( dp, u_lightFalloffS ), 0.5 );
+	var_TexProjection    = vec4( dot( dp, u_lightProjectionS ), dot( dp, u_lightProjectionT ), 0.0, dot( dp, u_lightProjectionQ ) );
+	// Normal-offset shadow bias at the displaced position (mirrors interaction.vert:
+	// u_pbrParms2.w in texels; sun texel world size in u_shadowParms.w, cube face
+	// texel = 2*dist/res). Only the shadow lookups use the offset position.
+	vec4 shadowDp = dp;
+	if ( u_pbrParms2.w > 0.0 && u_shadowParms.x > 2.5 ) {
+		shadowDp.xyz += geoN * ( u_pbrParms2.w * u_shadowParms.w );
+	}
+	// .z = the sun path's (mode 3) compare depth — recomputed at the displaced position
+	// like its neighbors, or tessellated receivers would never take sun shadows
+	var_ShadowProjection = vec4( dot( shadowDp, u_shadowProjectionS ), dot( shadowDp, u_shadowProjectionT ), dot( shadowDp, u_shadowFalloffS ), dot( shadowDp, u_shadowProjectionQ ) );
+	vec3 fragToLight = pos - u_localLightOrigin.xyz;
+	if ( u_pbrParms2.w > 0.0 && u_shadowParms.x > 1.5 && u_shadowParms.x < 2.5 ) {
+		fragToLight += geoN * ( u_pbrParms2.w * 2.0 * length( fragToLight ) * u_shadowParms.y );
+	}
+	var_ShadowCubeVec = vec3( dot( u_modelMatrixRow0.xyz, fragToLight ),
+	                          dot( u_modelMatrixRow1.xyz, fragToLight ),
+	                          dot( u_modelMatrixRow2.xyz, fragToLight ) );
+
+	gl_Position = u_mvpMatrix * vec4( pos, 1.0 );
+}

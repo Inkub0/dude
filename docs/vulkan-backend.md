@@ -364,6 +364,59 @@ Original plan:
 - **Verify:** each feature A/B'd against its GL3 counterpart (RenderDoc side-by-side);
   presets Potato→Nightmare apply and detect correctly on Vulkan.
 
+**As-built so far:**
+- **Shadow maps [BUILT]** — 2D depth (projected/spot) + cube depth (point) targets,
+  one shared depth-only render pass, LEQUAL-compare sampler; `r_shadowMapping` no longer
+  `!vkMode`-gated (`RhiWorld.cpp`), alpha-tested casters feed unit-0 coverage.
+- **HDR pipeline [BUILT, pending in-engine check]** — the color render-target family on
+  VMA images: `CreateRenderTargetColorDepthStencil` (RGBA16F + D24S8/D32S8 scene buffer),
+  color-only `CreateRenderTarget` (RGBA16F FXAA/SMAA ping, later SSR buffers),
+  `GetRenderTargetImage2`, and `SetFrameTarget` re-routing the whole scene into the HDR
+  buffer. The pipeline cache key gained a "pass class" byte (bits 24-31) so scene shaders
+  build render-pass-compatible variants for the RGBA8 swapchain path (class 0) and the
+  RGBA16F HDR path (class 2); `BeginPass`/`EndPass`/`GetPipeline` route by the active
+  destination. Fullscreen post passes that *sample* a color target (resolve/FXAA/SMAA)
+  cancel the negative-height flip — those targets are stored top-down, unlike the
+  bottom-up M5 captures. `_currentRender`/`_currentDepth` captures follow the active frame
+  target (glass-in-HDR works). The color capture is **RGBA16F in an HDR frame** now
+  (`CreateCaptureImage` hdrFloat flag, keyed off `RB_RHI_HdrFrameActive()` so the format
+  can't flip mid-frame), so glass refraction / heat haze sample the un-clamped float scene
+  — parity with GL3's `GL_RGBA16F` `_currentRender`; RGBA8 off HDR as before.
+- **SSAO/GTAO [BUILT, pending in-engine check]** — `CreateRenderTargetColorDepth` (RGBA8
+  color + depth, +MRT) via the same color-target machinery; normal G-buffer prepass + the
+  ssao/ssao_blur/ssao_temporal fullscreen passes un-gated on Vulkan. The multitexture the
+  post passes bind by raw GL on GL3 (normal/material/history buffers) is routed through a
+  new `RB_RHI_BindRTUnit` → `rhiVkUnits` (extended to 11) → `RB_RHI_VkTextures`; DrawArgs
+  gained `ssao`/`occlusion` fields bound at descriptor units 9/10 (were dummies). The AO
+  buffer is recorded once before the light loop and rides every interaction/ambient draw.
+  `r_ssaoDebug 1/2` works on Vulkan. Benign validation warning: gbuffer.frag always writes
+  the SSR MRT output, discarded on the SSAO-only (1-attachment) target — same as GL.
+- **SSR [BUILT]** — un-gated on Vulkan; the raw-GL march/composite binds were routed
+  through `RB_RHI_BindRTUnit` like SSAO, and NormalPrepass writes its MRT there. PBR
+  (`r_pbr`) rides the interaction shaders and already runs on Vulkan.
+- **Off-HDR post [BUILT]** — film grain / chromatic aberration / `r_gammaInShader`
+  gamma+brightness. GL runs these per-view and at swap over the backbuffer, but the VK
+  scene lives in an offscreen image, so when HDR is off they route through an RGBA8
+  post-target (`ldrPostWanted`) resolved by the shared, format-agnostic `hdrresolve`
+  shader (the VK backend has no separate LDR gamma tail). Identity params are exact
+  passthrough, so GL keeps its standalone gammabrightness pass with no double-apply.
+- **SMAA/FXAA [BUILT]** — FXAA rode the RHI from the start; SMAA is now ported. Its
+  AreaTex/SearchTex LUTs upload via `CreateTexture2D` (NPOT is fine on VK; the p-o-2 bar
+  was idImage-only) instead of raw qgl, and the GL active-unit hygiene in the chain tail
+  is guarded off (`gl3ActiveTexture` is a NULL qgl pointer on VK). AA now also runs in the
+  off-HDR post pass — the `rhiHdrAaRT` ping tracks the scene buffer's format (RGBA16F in
+  HDR, RGBA8 off-HDR), so `r_rhiAA` 1/2 works in both modes on Vulkan. **SMAA-into-resolve
+  fusion (2026-08):** with chromatic aberration off, SMAA's neighborhood-blend pass folds into
+  the resolve (`hdrresolve_smaa`, `RB_RHI_HdrResolveSmaaFused`), skipping the `rhiHdrAaRT`
+  round-trip; chroma-on keeps the classic separate blend+resolve. See `docs/antialiasing.md`.
+- **Stability fixes (during M7 play-testing):** (1) *device-lost* (`VkResult -4` spam +
+  freeze) from `DestroyImage`/`DestroyRenderTarget` freeing a view mid-frame while a bound
+  descriptor set still referenced it — `vkDeviceWaitIdle` doesn't cover the still-recording
+  cb. Fixed by guarding on `frameOpen`: defer to the frame-slot retire list when a frame is
+  recording, `vkDeviceWaitIdle`+destroy between frames. (2) *pool exhaustion* (lights go
+  dark, "descriptor pool exhausted") from the unbounded cross-frame `textureSetCache`
+  filling the 16384-set pool — fixed with a high-water flush at `MAX_FRAME_SETS`.
+
 **Phase exit = the plan's final milestone:** Mars City loads; identical light/shadow
 behaviour; no missing interactions; RenderDoc shows depth, stencil, and interaction
 passes; perceptual-equivalence bar met. Then Phase 5 (validation & polish, backend
@@ -376,8 +429,12 @@ switching hardening, 1.1-profile check) takes over.
   bridge per-category as each milestone pulls it in (M2 2D → M4 cube/falloff → M5
   scratch/cinematic), never "port Image_load wholesale".
 - **Pipeline permutation warmup** — first-use `vkCreateGraphicsPipelines` stutter where
-  GL3 pays a cheaper program+state switch. Mitigation: disk-persisted VkPipelineCache
-  (decided) + optional prewarm of the known `(stateBits, shader)` set at level load.
+  GL3 pays a cheaper program+state switch. **Disk-persisted `VkPipelineCache` is DONE**
+  (`63c2539f`): a driver cache seeded at `Init` from `fs_savepath/base/vkpipelinecache.bin`,
+  fed to every pipeline build, saved back at `Shutdown`; seeding is header-checked
+  (version/vendor/device/UUID) so a GPU/driver swap starts fresh, and the whole path is
+  non-fatal. So the *cross-run* cost is now paid once. Still open (optional): prewarm of the
+  known `(stateBits, shader)` set at level load, to hide the *first-ever* compile too.
 - **The X11 teardown race** ([known-bugs.md](known-bugs.md), mitigated 2026-08-01) —
   Vulkan's heavier re-init exercises exactly that path; re-verify under repeated
   `vid_restart` early (M1), not at the end.
@@ -387,3 +444,43 @@ switching hardening, 1.1-profile check) takes over.
 - **Stencil format portability** — D24S8 isn't universal on Vulkan (notably missing on
   AMD Windows drivers historically); the backend must fall back to D32S8
   (`IF_DEPTH24_STENCIL8` already documents "backend may substitute D32S8").
+
+## May look into (backlog — not scheduled)
+
+Ideas worth revisiting; none blocking. Low-priority unless a measurement says otherwise.
+
+- **Persistent static buffers → device-local + staging (if BAR pressure ever shows).**
+  `VulkanBackend::CreateBuffer` (the vertexCache's static vertex/index blocks, added on
+  `feat/vulkan-static-vertex-buffers`) allocates **host-visible** buffers. VMA places them
+  in the driver's host-visible **device-local BAR heap** — measured on an RTX 3080 Ti
+  (no ReBAR): the 246 MB heap, ~667 buffers ≈ 1.9 MB at the mars_city1 spawn; a full-map
+  roam is tens of MB. That heap is shared with the geometry/UBO rings (~80 MB) and is
+  *small*. For real D3 maps this is fine and actually near-optimal (write-once by CPU,
+  read from VRAM). **Only if** a level ever pressures the BAR heap (VMA then silently
+  spills to system RAM → slower GPU reads, no crash): either (a) make the ring-fallback
+  path noisy — `CreateBuffer` already returns 0 → vertexCache streams via the ring, but
+  that fallback is currently silent, so add a one-time warning; and/or (b) switch these to
+  **device-local** memory with a staging upload, moving them to the big VRAM heap with best
+  bandwidth. Cost of (b): a staging copy + submit per block at level load (avoided today
+  for fast loads); batch the uploads if pursued. Measure first with `r_showVertexCache 1`
+  (`total:…=k` is the live resident geometry) before changing anything.
+
+- **Offload CPU-bound work to the GPU for FPS** (the real Doom 3 bottleneck is the CPU
+  front-end, not GPU throughput — a modern GPU sits idle). Vulkan makes these tractable;
+  all must stay visually identical to the classic path (perf-only, fidelity-neutral).
+  Highest-value candidates, roughly in order:
+  - **GPU vertex skinning** for animated md5 meshes (enemies/NPCs). Today `idSIMD` skins
+    every animated vertex on the CPU each frame, then streams the result. Move to a vertex
+    shader: upload the bind-pose once (the new persistent-buffer path is the prerequisite)
+    + joint matrices per draw in the UBO ring. Frees a big chunk of per-frame CPU.
+  - **GPU shadow-volume extrusion / silhouette.** The vertex-program shadow cache already
+    projects to infinity in the shader (the w=0 trick), but silhouette determination and
+    cap generation are still CPU (`R_CreateShadowVolume`) — historically D3's single
+    biggest CPU cost. A geometry/compute path that builds the volume on the GPU is the
+    large prize; scope it carefully (must match the stencil result exactly, incl.
+    `DEPTHFUNC_EQUAL` zfill parity — see the tessellation note for the same constraint).
+  - **Compute-based culling / GPU-driven draw submission.** Bigger architectural change;
+    would cut CPU draw-call setup. Only worth it after the above two, and after profiling
+    shows draw submission (not shadows/skinning) is the remaining CPU cost.
+  - Prerequisite for all of the above: a GPU-time profiler for the VK backend (the GL3
+    path has `r_gl3GpuTime`) so wins are measured, not assumed. Build that first.

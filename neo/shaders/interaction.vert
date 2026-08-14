@@ -20,8 +20,16 @@ VARY(6) out vec3 var_TexHalfVec;    // texcoord[6]: half-angle vector in tangent
 VARY(7) out vec4 var_Color;
 VARY(8) out vec3 var_TexViewVec;    // view vector in tangent space (PBR path only)
 VARY(9) out vec3 var_ShadowCubeVec; // world-space light->frag vector (point-light cube shadow)
+// model-space position + normal, consumed only by the tessellation stages
+// (DUDE tessellation, docs/tessellation.md) for the PN control net. Unused by
+// the fragment shader — a benign "output not consumed" in the flat pipeline.
+VARY(10) out vec3 var_ModelPos;
+VARY(11) out vec4 var_ModelNormal;	// .w = UV-seam displacement mask
+VARY(12) out vec4 var_ShadowProjection; // UNBAKED projection for the 2D shadow lookup
 
 void main() {
+	var_ModelPos = attr_Position.xyz;
+	var_ModelNormal = vec4( attr_Normal, attr_Color.a );
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
 
 	// vector to light in tangent space
@@ -44,6 +52,32 @@ void main() {
 	                          0.0,
 	                          dot( attr_Position, u_lightProjectionQ ) );
 
+	// Normal-offset shadow bias (u_pbrParms2.w, r_shadowMapNormalOffset, in texels):
+	// shift the SHADOW SAMPLE position along the geometric normal by about a shadow
+	// texel's world size, so grazing receivers sample past their own silhouette
+	// instead of leaning on a large depth bias (kills banded acne with far less
+	// peter-panning). Applied only where the texel world size is exact: the sun path
+	// (mode 3; u_shadowParms.w carries the precomputed world size per texel) and the
+	// cube path below (a 90-degree face spans exactly 2*dist, so texel = 2*dist/res).
+	// The 2D spot path keeps its per-receiver-tuned depth biases untouched. Lighting
+	// itself never uses the offset position — only the shadow lookups do.
+	vec4 shadowPos = attr_Position;
+	if ( u_pbrParms2.w > 0.0 && u_shadowParms.x > 2.5 ) {
+		shadowPos.xyz += attr_Normal * ( u_pbrParms2.w * u_shadowParms.w );
+	}
+
+	// same projection but from the UNBAKED planes, for the 2D shadow-map lookup:
+	// var_TexProjection carries the light stage's texture matrix (rotating fan gobo),
+	// but the shadow depth map was rendered raw, so it must be sampled raw. Equal to
+	// var_TexProjection for lights without a projection texture matrix.
+	// .z = the sun path's (mode 3) compare depth along the virtual projection's
+	// falloff plane; zero-filled (harmless) on the ordinary 2D path, which takes its
+	// reference from the light falloff instead.
+	var_ShadowProjection = vec4( dot( shadowPos, u_shadowProjectionS ),
+	                             dot( shadowPos, u_shadowProjectionT ),
+	                             dot( shadowPos, u_shadowFalloffS ),
+	                             dot( shadowPos, u_shadowProjectionQ ) );
+
 	// half-angle vector in tangent space (normalize both, add; length-free in fp)
 	vec3 toView = normalize( u_localViewOrigin.xyz - attr_Position.xyz );
 	vec3 halfV = normalize( toLight ) + toView;
@@ -60,7 +94,12 @@ void main() {
 	// rotate the model-space (frag - light) vector by the model->world rotation.
 	// Matches the caster's light-relative space (shadow_sm_cube.vert). Cheap enough
 	// to always compute; only sampled when u_shadowParms.x selects the cube path.
+	// Normal-offset bias (see shadowPos above): a cube face at 90 degrees spans
+	// exactly 2*dist, so one texel is 2*dist*u_shadowParms.y world units — exact.
 	vec3 fragToLight = -toLight;	// attr_Position - localLightOrigin, model space
+	if ( u_pbrParms2.w > 0.0 && u_shadowParms.x > 1.5 && u_shadowParms.x < 2.5 ) {
+		fragToLight += attr_Normal * ( u_pbrParms2.w * 2.0 * length( fragToLight ) * u_shadowParms.y );
+	}
 	var_ShadowCubeVec = vec3( dot( u_modelMatrixRow0.xyz, fragToLight ),
 	                          dot( u_modelMatrixRow1.xyz, fragToLight ),
 	                          dot( u_modelMatrixRow2.xyz, fragToLight ) );

@@ -1,4 +1,4 @@
-# Antialiasing — post-resolve AA (FXAA + SMAA now, TAA later)
+# Antialiasing — post-resolve AA (FXAA + SMAA now, FSR later)
 
 ## Status
 
@@ -20,13 +20,38 @@
   targets with the lost-context self-heal the SSR target uses. **LDR rail:** the POT
   `_currentRender` snapshot is first de-POT'd (`smaa_copy`) into an exact-size scene target so
   the border searches never read padding, then the chain resolves onto the backbuffer.
-  **HDR rail:** the chain samples the exact-size float scene buffer directly and resolves into
-  `rhiHdrAaRT` (the same float ping FXAA uses), keeping the AA→chroma→grain→dither order; edge
-  detection reads unclamped HDR luma, which merely over-detects on >1 highlights. Missing
-  shaders/targets fall back to FXAA. Kept alongside FXAA deliberately: FXAA's subpixel
-  low-pass is the only pre-TAA shimmer damper (moot on PBR tiers, where Toksvig covers it) —
-  re-evaluate dropping FXAA once TAA lands.
-- **TAA — PENDING.** Reuses the temporal-SSAO machinery; blocked on per-object motion vectors (below).
+  **HDR rail:** the chain samples the exact-size float scene buffer directly; classically the blend
+  resolves into `rhiHdrAaRT` (the same float ping FXAA uses) and a second `hdrresolve` pass reads it
+  back, keeping the AA→chroma→grain→dither order (with chromatic aberration off this blend is now folded
+  into the resolve — see the fusion entry below). Edge detection reads unclamped HDR luma, which merely
+  over-detects on >1 highlights. Missing shaders/targets fall back to FXAA. Kept alongside FXAA
+  deliberately: FXAA's subpixel low-pass is the only pre-TAA shimmer damper (moot on PBR tiers, where
+  Toksvig covers it) — re-evaluate dropping FXAA once TAA lands.
+- **SMAA-into-resolve fusion — IMPLEMENTED** (2026-08-10, `feat/smaa-resolve-fusion`). On the HDR rail,
+  SMAA's pass-3 neighborhood blend is folded into `RB_RHI_HdrResolve`: `hdrresolve_smaa.{vert,frag}` =
+  the blend (`smaa.glsl`) plus the resolve's film-grain + gamma/brightness tail, so the anti-aliased
+  float scene reaches the backbuffer in **one** pass instead of blend→`rhiHdrAaRT`→`hdrresolve`.
+  `RB_RHI_SmaaChain` was split into a reusable `RB_RHI_SmaaEdgesWeights` (+ shared
+  `RB_RHI_SmaaEndUnitState`); the fused `RB_RHI_HdrResolveSmaaFused` runs edges+weights then blends
+  straight to the backbuffer. **Gated to chromatic aberration OFF** — chroma samples the resolved image
+  at radial offsets, which a single fused pass can't provide, so the chroma-on case keeps the classic
+  AA-pass + `hdrresolve`; with chroma off the fused output is bit-identical (independent review + user
+  A/B, `mars_city1`). Param note: `localParam0` carries `SMAA_RT_METRICS` in the fused shader, so grain
+  intensity/seed move to `windowCoord.xy`. Drops one full-screen pass + one RGBA16F round-trip —
+  **fps-neutral on a GPU-bound RTX 3080 Ti** (within noise), a real bandwidth/VRAM win on weaker GPUs /
+  higher resolution and one fewer pass in the pipeline. SMAA-only for now (FXAA keeps its separate pass,
+  trivial to fold later); auto-falls back to the classic path if a shader/target is unavailable. Added
+  to `gl3BootPrograms[]` for boot-time validation.
+- **FSR2 - Chosen over TAA (planned).** The hand-rolled TAA sketched below is replaced by
+  integrating **AMD FSR2+ in Native-AA mode** (render scale 1.0) as roadmap item R1 in
+  [rtx-shadow-roadmap.md](rtx-shadow-roadmap.md): FSR2 *is* a production TAA (temporal accumulation
+  + RCAS sharpening) with the render-scale upscaling knob for free — one integration instead of two.
+  Same prerequisites as TAA (per-object motion vectors, sub-pixel jitter) plus reactive masks for
+  Doom 3's additive particles (the real work) and a resolve reorder (FSR2 before grain/HUD at
+  display res). MIT-licensed pure compute — runs on any VK-capable GPU, no vendor lock; **VK-only**
+  (GL3.3 keeps SMAA/FXAA), cvar + preset gated so off = today's renderer. FSR3.1 frame generation
+  deliberately parked: `com_interpolate` already renders real >60Hz frames. The TAA notes below are
+  kept as design reference for the shared prerequisites.
 
 The sections below are the original design sketch; TAA remains the planned upgrade.
 

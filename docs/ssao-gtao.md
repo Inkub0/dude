@@ -213,10 +213,25 @@ softened from 2.4 to the **current default of 1.2** — with the broader radius,
 and 1.2 blends the AO into the scene more subtly. Both radius and intensity are artistic
 cvars, not preset levers (§ presets leave those alone), so these defaults apply under every tier.
 
-The **normal G-buffer pass** (Option B) measured **~0.08 ms** (within noise) — the extra
-opaque geometry pass is effectively free (Doom 3 geometry is low-poly, the gbuffer shader
-is trivial). So the mooted optimizations (half-res normal buffer, MRT-merge into the depth
-prepass) are **not worth doing** — the pass isn't a measurable cost.
+The **normal G-buffer pass** (Option B) was originally measured at **~0.08 ms** by GPU-only
+timing and called "effectively free". **That was wrong** — GPU-time misses the CPU/geometry
+submission cost of a full second opaque pass. Re-measured 2026-08-05 by fps A/B on an RTX
+3080 Ti (full-res SSAO, mars_city1 — note: use a real-geometry viewpoint, not the intro
+video screen):
+
+| config | fps | ms/frame | delta |
+|---|---|---|---|
+| `r_ssao 0` | ~1040 | 0.96 | baseline |
+| `r_ssao 1`, `r_ssaoNormalBuffer 0` | ~800 | 1.25 | **+0.29 ms** — the AO+blur shader |
+| `r_ssao 1`, `r_ssaoNormalBuffer 1` | ~525 | 1.90 | **+0.65 ms** — the normal G-buffer pass |
+
+So the normal pass is **~69% of SSAO's total cost** (~0.94 ms), more than double the AO
+computation itself — and since it is a *geometry* pass (resolution-independent) while the AO
+scales with `r_ssaoResScale`, at the default half-res it dominates even harder (~90%). It
+also feeds SSR, so cutting it helps both. **MRT-merging the normal output into the existing
+depth prepass — or dropping to reconstructed normals — is therefore the single highest-value
+SSAO FPS optimization**, not a non-starter. The merge is clean on Vulkan (dedicated offscreen
+scene-depth target) and blocked on GL3 by the backbuffer-depth / MSAA-blit question (§13).
 
 ## 9. Cvar reference (proposed)
 

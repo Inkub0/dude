@@ -22,6 +22,7 @@ SAMPLER_BINDING(0) uniform sampler2D u_currentRender;   // lit opaque scene snap
 SAMPLER_BINDING(1) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(2) uniform sampler2D u_normalBuffer;    // xyz = view normal, a = weapon mask
 SAMPLER_BINDING(3) uniform sampler2D u_materialBuffer;  // x = roughness, y = metalness
+SAMPLER_BINDING(4) uniform sampler2D u_hiZMinDepth;     // SSR-res min-Z pyramid (+linear eye depth); r_ssrHiZ
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -42,11 +43,22 @@ float viewZFromRaw( float raw ) {
 	return 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y );   // negative
 }
 
+// Convert a GL-convention (bottom-up, clip-derived) row to the device framebuffer
+// row: identity on GL (u_windowCoord.z > 0), flipped on Vulkan where gl_FragCoord
+// and the depth / G-buffer targets are top-down. Used to project march samples onto
+// those device-oriented buffers, and again when sampling the bottom-up _currentRender
+// capture (the two flips cancel back to GL rows for that one read). Inert on GL.
+float deviceRow( float glRow ) {
+	return ( u_windowCoord.z > 0.0 ) ? glRow : ( 1.0 - glRow );
+}
+
 vec3 viewPosFromRaw( vec2 frag, float raw ) {
 	float vz  = viewZFromRaw( raw );
 	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
 	float d   = -vz;
-	return vec3( ndc.x * d * u_localParam0.x, ndc.y * d * u_localParam0.y, vz );
+	// u_windowCoord.z = view-Y sign (+1 GL / -1 Vulkan): flips the reconstructed Y so
+	// it agrees with the view-space G-buffer normal on VK's top-down framebuffer
+	return vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
 }
 
 // interleaved gradient noise — per-pixel jitter that hides the march banding
@@ -54,14 +66,34 @@ float ign( vec2 p ) {
 	return fract( 52.9829189 * fract( dot( p, vec2( 0.06711056, 0.00583715 ) ) ) );
 }
 
-// project a view-space point to fragment coordinates; w <= 0 means behind the eye
+// project a view-space point to fragment coordinates; w <= 0 means behind the eye.
+// SSR runs only on fullscreen PRIMARY views, whose projection is a standard perspective
+// matrix: every term is zero except [0][0]/[1][1] (scale), [2][0]/[2][1] (frustum-centre
+// offset), the depth row (unused here), and w = -z at [2][3]. Multiplying out just those
+// is BIT-IDENTICAL to the full u_projectionMatrix * vec4(viewPos,1.0) — the dropped terms
+// are exactly *0 — at ~5 muls instead of 16 (the compiler can't drop them: the zeros are
+// runtime uniform values). The clip->uv is GL-convention (y-up); deviceRow re-orients the
+// row so the returned frag addresses the device-oriented depth / G-buffer (top-down on VK).
 vec3 projectToFrag( vec3 viewPos ) {
-	vec4 clip = u_projectionMatrix * vec4( viewPos, 1.0 );
-	if ( clip.w <= 0.0 ) {
+	float cw = u_projectionMatrix[2][3] * viewPos.z;                                        // clip.w = -z
+	if ( cw <= 0.0 ) {
 		return vec3( -1.0, -1.0, -1.0 );
 	}
-	vec2 uv01 = ( clip.xy / clip.w ) * 0.5 + 0.5;
+	float cx = u_projectionMatrix[0][0] * viewPos.x + u_projectionMatrix[2][0] * viewPos.z;  // clip.x
+	float cy = u_projectionMatrix[1][1] * viewPos.y + u_projectionMatrix[2][1] * viewPos.z;  // clip.y
+	vec2 uv01 = ( vec2( cx, cy ) / cw ) * 0.5 + 0.5;
+	uv01.y = deviceRow( uv01.y );
 	return vec3( uv01 / u_screenCorrection.xy, 1.0 );
+}
+
+// Hi-Z (r_ssrHiZ): nearest surface (smallest +linear eye depth) over the aligned 2^lod
+// block containing frag. POINT-sampled via texelFetch — a filtered blend could over-report
+// the min and let a leap skip a real hit. Clamped to the level's extent so an odd-size
+// coarse level never reads out of range (UB). Level 0 is exact; coarser levels min-downsampled.
+float hiZMin( vec2 frag, int lod ) {
+	ivec2 c  = ivec2( frag ) >> lod;
+	ivec2 mx = textureSize( u_hiZMinDepth, lod ) - 1;
+	return texelFetch( u_hiZMinDepth, min( c, mx ), lod ).r;
 }
 
 void main() {
@@ -110,6 +142,7 @@ void main() {
 	float maxDist   = u_localParam0.z;
 	float thickness = u_localParam0.w;
 	float stepLen   = maxDist / float( steps );
+	float hiZLod    = u_localParam1.w;         // r_ssrHiZ LOD to leap at (0 = feature off -> exact march)
 
 	// Jittered linear march with an ARMED crossing test: a sample only counts as a
 	// hit when (a) some earlier sample was genuinely in FRONT of the depth surface
@@ -154,8 +187,38 @@ void main() {
 		if ( dz <= 0.0 ) {
 			armed = true;                          // seen in front; a crossing can now hit
 		}
+
+		// Hi-Z safe-advance (r_ssrHiZ): after the UNCHANGED test above, leap across span that
+		// is provably in front of every surface it covers, so the tuned hit path never samples
+		// anything the exact march wouldn't. Two conditions make a leap safe: (a) DEPTH — ray
+		// depth is linear in t, so bounding the landing to nearestPos-thickness keeps the whole
+		// span in front of the block's nearest surface; (b) CONTAINMENT — the landing frag stays
+		// in the SAME coarse block. The projected ray is a straight, monotone screen segment and
+		// a block is convex, so in-block endpoints imply the whole segment is in-block and
+		// nearestPos validly bounds every surface under the leap. Receding rays only (R.z<0,
+		// depth grows with t); other rays take the exact step. adv >= stepLen always, so the
+		// iteration count can only drop -> the MAX_MARCH_STEPS bound and hit logic are preserved.
+		float adv = stepLen;
+		if ( hiZLod >= 0.5 && R.z < -1e-4 ) {
+			int   lod        = int( hiZLod );
+			float nearestPos = hiZMin( pf.xy, lod );
+			float margin     = nearestPos - thickness - ( -rayPos.z );
+			if ( margin > 0.0 ) {
+				float advCand = margin / ( -R.z );      // lands at ray depth == nearestPos - thickness
+				if ( advCand > stepLen ) {
+					vec3 land = P + R * ( t + advCand );
+					vec3 lpf  = projectToFrag( land );
+					vec2 lsuv = lpf.xy * u_screenCorrection.xy;
+					if ( land.z < -1.0 && lpf.z >= 0.0
+					     && lsuv.x >= 0.0 && lsuv.x <= 1.0 && lsuv.y >= 0.0 && lsuv.y <= 1.0
+					     && ( ivec2( pf.xy ) >> lod ) == ( ivec2( lpf.xy ) >> lod ) ) {
+						adv = advCand;                  // verified: whole leap stays in front + in block
+					}
+				}
+			}
+		}
 		tPrev = t;
-		t += stepLen;
+		t += adv;
 	}
 	if ( tHit < 0.0 ) {
 		discard;
@@ -165,8 +228,9 @@ void main() {
 	float lo = tPrev, hi = tHit;
 	for ( int i = 0; i < REFINE_STEPS; i++ ) {
 		float mid = 0.5 * ( lo + hi );
-		vec3 pf = projectToFrag( P + R * mid );
-		float dz = viewZFromRaw( rawDepth( pf.xy ) ) - ( P + R * mid ).z;
+		vec3  rp  = P + R * mid;                    // was computed twice (project + .z)
+		vec3  pf  = projectToFrag( rp );
+		float dz  = viewZFromRaw( rawDepth( pf.xy ) ) - rp.z;
 		if ( dz > 0.0 ) {
 			hi = mid;
 		} else {
@@ -187,7 +251,10 @@ void main() {
 	float edge  = smoothstep( 0.0, 0.08, min( eDist.x, eDist.y ) );
 	float range = 1.0 - clamp( hi / maxDist, 0.0, 1.0 );
 
-	// per-ray fades premultiplied; material weighting happens in ssr_composite.frag
-	vec3 scene = texture( u_currentRender, hitUv * u_screenCorrection.zw ).rgb;
+	// per-ray fades premultiplied; material weighting happens in ssr_composite.frag.
+	// hitUv is a device-oriented row (projectToFrag); deviceRow flips it back to the
+	// bottom-up GL layout of the _currentRender capture (inert on GL).
+	vec2 crUv = vec2( hitUv.x, deviceRow( hitUv.y ) ) * u_screenCorrection.zw;
+	vec3 scene = texture( u_currentRender, crUv ).rgb;
 	fragColor = vec4( scene * ( edge * range * facing ), 1.0 );
 }

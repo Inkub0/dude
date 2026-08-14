@@ -223,6 +223,14 @@ typedef struct {
 	float				privatePolygonOffset;	// a per-stage polygon offset
 
 	newShaderStage_t	*newStage;			// vertex / fragment program based stage
+
+	// DUDE: parallax occlusion mapping height source (non-vanilla; Vulkan enhancement).
+	// Lives on the SL_BUMP stage: auto-captured from a `heightmap(x, N)` operand in the
+	// bump's image program, or set explicitly via the `parallaxmap` keyword. NULL unless
+	// r_parallax was set when the material was parsed (off = zero extra resident textures).
+	// Consumed only by the enhancement backends; see docs/parallax.md.
+	idImage *			parallaxImage;
+	float				parallaxScale;
 } shaderStage_t;
 
 typedef enum {
@@ -384,6 +392,12 @@ public:
 						// A non-vanilla enhancement; only the GL3/Vulkan interaction+ambient
 						// passes read it (docs/occlusion-maps.md). NULL on all stock assets.
 	const shaderStage_t *GetOcclusionStage( void ) const;
+
+						// DUDE: first bump stage carrying a captured parallax height source, or
+						// NULL. Non-vanilla; the Vulkan interaction pass marches it for parallax
+						// occlusion mapping. NULL on stock assets / with r_parallax off
+						// (docs/parallax.md).
+	const shaderStage_t *GetParallaxStage( void ) const;
 
 						// DUDE PBR (docs/pbr-materials.md Phase B): per-material metalness /
 						// roughness from the generated pbr/pbr_materials.cfg table (merged
@@ -754,8 +768,24 @@ typedef enum {
 	PBR_CAT_CERAMIC,		// ceramic sheen: painted floors + tile on floors and walls
 							// (split from the wall panelling for the light-streak look)
 	PBR_CAT_RUST,			// rusted/corroded metal
-	PBR_CAT_STONE
+	PBR_CAT_STONE,
+	PBR_CAT_COUNT			// number of categories (array sizing); not a real category
 } pbrCategory_t;
+
+// DUDE per-category PBR defaults (docs/pbr-materials.md): each category is a preset of
+// four values every material tagged with it tracks live. Persisted as "@cat <name> m r
+// w e" rows in the pbr config; a material either follows its category or is pinned NONE.
+// wetness = specular-energy multiplier (1 = neutral); env = metal env-glow multiplier
+// over the global r_pbrEnvScale (1 = neutral). Accessors in Material.cpp.
+struct pbrCatDefaults_t {
+	float	metalness;
+	float	roughness;
+	float	wetness;
+	float	env;
+};
+void	R_PbrCategoryDefaults( int cat, float &metal, float &rough, float &wet, float &env );
+void	R_PbrSetCategoryDefault( int cat, float metal, float rough, float wet, float env );
+bool	R_PbrWriteCategoryDefaults( void );		// persist the @cat rows to pbr_overrides.cfg
 
 typedef idList<const idMaterial *> idMatList;
 

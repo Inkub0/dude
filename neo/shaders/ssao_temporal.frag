@@ -37,15 +37,23 @@ void main() {
 		return;
 	}
 
-	// view-space position from depth (identical reconstruction to ssao.frag)
+	// view-space position from depth (identical reconstruction to ssao.frag, incl. the
+	// u_windowCoord.z view-Y sign: +1 GL, -1 Vulkan, so reprojection matches the normal)
 	float vz  = 1.0 / ( raw * depth_consts.x + depth_consts.y );      // negative
 	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
 	float d   = -vz;                                                  // positive depth
-	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * d * u_localParam0.y, vz );
+	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
 
-	// reproject into the previous frame: current view space -> previous clip -> uv
+	// reproject into the previous frame: current view space -> previous clip -> uv.
+	// prevUV is GL-convention (y-up); on Vulkan (u_windowCoord.z < 0) flip the row to
+	// address the device-native top-down history buffer, or the reprojected history
+	// samples vertically mirrored and accumulates an upside-down ghost. Mirrors the
+	// same fix in ssr_temporal.frag.
 	vec4  prevClip = u_modelViewMatrix * vec4( P, 1.0 );
 	vec2  prevUV   = ( prevClip.xy / prevClip.w ) * 0.5 + 0.5;
+	if ( u_windowCoord.z < 0.0 ) {
+		prevUV.y = 1.0 - prevUV.y;
+	}
 
 	bool valid = u_localParam0.w > 0.5 && prevClip.w > 0.0
 	          && all( greaterThanEqual( prevUV, vec2( 0.0 ) ) )

@@ -349,6 +349,16 @@ void idRenderModelOverlay::AddOverlaySurfacesToModel( idRenderModel *baseModel )
 					return;
 				}
 				newTri->verts[numVerts].xyz = baseSurf->geometry->verts[overlayVert->vertexNum].xyz;
+				// carry the base vertex's normal/tangents onto the overlay vertex. The
+				// overlay verts are memset to zero above and only xyz/st were filled, so
+				// the normal was (0,0,0). Blended decal rendering doesn't need it, but the
+				// DUDE tessellation of the blend pass (docs/tessellation.md) PN-evaluates
+				// with it — a zero normal makes normalize() NaN and the decal vanishes.
+				// Copying the base normal makes the decal follow the same PN surface as the
+				// mesh it sits on. Harmless on the legacy/GL path.
+				newTri->verts[numVerts].normal = baseSurf->geometry->verts[overlayVert->vertexNum].normal;
+				newTri->verts[numVerts].tangents[0] = baseSurf->geometry->verts[overlayVert->vertexNum].tangents[0];
+				newTri->verts[numVerts].tangents[1] = baseSurf->geometry->verts[overlayVert->vertexNum].tangents[1];
 				numVerts++;
 			}
 		}

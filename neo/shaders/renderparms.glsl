@@ -81,4 +81,28 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // instead of the physical full kill. y = shadow
 	                            // slope-scaled bias strength (r_shadowMapSlopeBias;
 	                            // set in the shadow block, independent of r_pbr). zw spare.
+
+	vec4 u_tessParms;            // DUDE tessellation (docs/tessellation.md):
+	                            // x = tess level (subdivision cap; 1 = flat),
+	                            // y = max view distance for the LOD falloff,
+	                            // z = displacement strength (0 = pure PN smoothing),
+	                            // w = min model-space edge length to subdivide.
+	                            // Consumed by the .tesc / .tese stages only.
+
+	vec4 u_parallaxParms;        // DUDE parallax occlusion mapping (docs/parallax.md):
+	                            // x = enable, y = height depth in UV units,
+	                            // z = min march steps (head-on), w = max march steps
+	                            // (grazing). Height map on unit 11 (u_parallaxMap).
+	vec4 u_parallaxParms2;       // DUDE parallax extras: x = self-shadow strength
+	                            // (0 = off). yzw spare.
+
+	vec4 u_shadowProjectionS;    // UNBAKED light-projection texgen for the 2D shadow-map
+	vec4 u_shadowProjectionT;    // lookup. The cookie texgen (u_lightProjectionS/T/Q) carries
+	vec4 u_shadowProjectionQ;    // the light stage's texture matrix (rotating fan gobos etc.);
+	                            // the shadow map is rendered raw, so it must be sampled raw or
+	                            // the shadow swims with the animation. Filled only on the
+	                            // projected-2D shadow path (0 otherwise).
+	vec4 u_shadowFalloffS;       // DUDE sun shadows: the virtual projection's depth plane —
+	                            // the compare reference for the mode-3 (sun) shadow lookup.
+	                            // Filled only on the sun path (0 otherwise).
 };
