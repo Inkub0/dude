@@ -16,6 +16,7 @@
 /neo/out*
 /neo/build*
 /.vs*
+/.idea/
 
 /neo/CMakeSettings.json
 
