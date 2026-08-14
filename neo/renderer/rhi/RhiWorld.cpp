@@ -699,13 +699,25 @@ bool RB_RHI_TessellateSurf( const drawSurf_s *surfIn, bool forBlendPass ) {
 	// sarge, player). Match all four substrings so every human/monster body AND head
 	// tessellates. Every md5mesh whose path contains "heads/" is a character/zombie
 	// head (verified — no props or world geometry live there), so "heads/" is safe.
-	// Props are models/mapobjects/, cutscene actors models/md5/cinematics/ (left flat).
+	// Props are models/mapobjects/. Cutscene actors live under models/md5/cinematics/
+	// but so does cinematic SCENERY (rocks, walls, clouds, wall meshes) and the actor's
+	// weapon props — so "cinematics/" can't be whitelisted wholesale. A cinematic ACTOR,
+	// though, wears a real character/monster SKIN (models/characters/mcneil/body,
+	// .../male_npc/soldier/soldier, models/monsters/imp/imp), while cinematic scenery and
+	// weapon props do not. So admit a cinematics/ mesh only when its MATERIAL is a
+	// character/monster skin — the intro McNeil + marine tessellate, the rocks stay flat.
+	// (Blood-overlay decals still ride in on the model path: their monster model resolves
+	// to monsters/… even though the decal material is textures/decals/….)
 	const idRenderModel *entModel = space->entityDef->parms.hModel;
 	const char *modelName = entModel ? entModel->Name() : "";
-	if ( idStr::FindText( modelName, "monsters/", false ) == -1
-	  && idStr::FindText( modelName, "characters/", false ) == -1
-	  && idStr::FindText( modelName, "chars/", false ) == -1
-	  && idStr::FindText( modelName, "heads/", false ) == -1 ) {
+	const bool modelIsChar = idStr::FindText( modelName, "monsters/", false ) != -1
+	  || idStr::FindText( modelName, "characters/", false ) != -1
+	  || idStr::FindText( modelName, "chars/", false ) != -1
+	  || idStr::FindText( modelName, "heads/", false ) != -1;
+	const bool cinematicActor = idStr::FindText( modelName, "cinematics/", false ) != -1
+	  && ( idStr::FindText( matName, "models/characters/", false ) != -1
+	    || idStr::FindText( matName, "models/monsters/", false ) != -1 );
+	if ( !modelIsChar && !cinematicActor ) {
 		return false;
 	}
 	// Small, highly convex facial sub-meshes (eyes, teeth, tongue, mouth interiors,
