@@ -1475,15 +1475,19 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 	float mvp[16];
 	float localClipPlane[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 
-	// Phase 3.2b consume (r_vkBdaZfill 2): collect solid-opaque, front-sided, full-view-scissor,
-	// addressable surfaces and draw the whole bucket with one indirect call after the loop instead
-	// of per-surface. Gated off unless the VK backend has BDA + the batch shader; front-sided views
-	// only (a mirror flips culling, which the single batch pipeline can't express). See DrawZfillBatch.
+	// Phase 3.2b consume (r_vkBdaZfill 2): collect solid-opaque, front-sided, addressable WORLD-BSP
+	// surfaces and draw the whole bucket with one indirect call after the loop instead of per-surface.
+	// Restricted to worldSpace because all BSP surfaces are one render entity sharing ONE scissor (the
+	// portal-chain union the normal path also draws them all with) — so the batch replays that exact
+	// scissor. Static-model props (their own per-entity scissors) stay per-surface. Gated off unless the
+	// VK backend has BDA + the batch shader; front-sided, non-clip views only. See DrawZfillBatch.
 	const bool batchZfill = r->ZfillBatchEnabled()
 		&& !useClipPlane		// the batch shader writes no gl_ClipDistance; a clip-plane subview must clip
 		&& ( RB_RHI_CullFor( viewDef, CT_FRONT_SIDED ) == CT_FRONT_SIDED );
 	static idList<rhi::RHI::ZfillBatchItem> zfillBatchItems;
+	static idList<idScreenRect> zfillBatchScissors;		// parallel to zfillBatchItems; the batch groups by this
 	zfillBatchItems.SetNum( 0, false );		// reuse capacity across frames
+	zfillBatchScissors.SetNum( 0, false );
 
 	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
 	for ( int i = 0; i < viewDef->numDrawSurfs; i++ ) {
@@ -1599,15 +1603,14 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 		bool drawSolid = ( shader->Coverage() == MC_OPAQUE );
 
-		// Phase 3.2b consume mode 2: defer solid-opaque, non-hacked, unscissored, addressable
-		// surfaces into the batched indirect draw. Everything the single batch pipeline/shader
-		// can't express (perforated, subview, depth-hack, polygon offset, tessellated, portal
-		// scissor, or streamed/skinned geometry with no device address) stays on this per-surface
-		// path. Bit-identical: the batch replays the same mvp * vec4(pos,1) with invariant depth.
+		// Phase 3.2b consume mode 2: defer solid-opaque, non-hacked, addressable surfaces into the
+		// batched indirect draw, tagged with their scissor (grouped at emit). Everything the batch
+		// pipeline/shader can't express (perforated, subview, depth-hack, polygon offset, tessellated,
+		// or streamed/skinned geometry with no device address) stays on this per-surface path.
+		// Bit-identical: the batch replays the same mvp * vec4(pos,1) with invariant depth.
 		if ( batchZfill && drawSolid && shader->GetSort() != SS_SUBVIEW
 		     && !surf->space->weaponDepthHack && surf->space->modelDepthHack == 0.0f
-		     && !shader->TestMaterialFlag( MF_POLYGONOFFSET ) && !tess
-		     && ( !r_useScissor.GetBool() || surf->scissorRect.Equals( viewDef->scissor ) ) ) {
+		     && !shader->TestMaterialFlag( MF_POLYGONOFFSET ) && !tess ) {
 			unsigned long long vbAddr = r->GetBufferDeviceAddress( vb );
 			unsigned long long ibAddr = r->GetBufferDeviceAddress( ib );
 			if ( vbAddr != 0 && ibAddr != 0 ) {
@@ -1617,6 +1620,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 				it.indexCount = idxCount;
 				memcpy( it.mvp, mvp, sizeof( it.mvp ) );
 				zfillBatchItems.Append( it );
+				zfillBatchScissors.Append( surf->scissorRect );		// grouped by scissor at emit
 				continue;		// drawn later as part of the batch
 			}
 		}
@@ -1724,19 +1728,54 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 	}
 
-	// Phase 3.2b consume mode 2: draw the whole deferred bucket with one indirect call. Reset the
-	// scissor to the full view and clear any polygon-offset bias first — the loop may have left a
-	// per-surface scissor from a non-batched surface, and the batch draws unscissored full-view.
+	// Phase 3.2b consume mode 2: draw the deferred bucket as one indirect call PER DISTINCT SCISSOR.
+	// Surfaces of the same entity share a scissor, so this collapses each entity's surfaces (and the
+	// BSP's) into one draw while each group rasterizes with its exact scissor — pixel-identical, and
+	// safe for portal-clipped entities (which ignoring the scissor would not be). Clear the polygon
+	// bias once up front; the loop may have left a per-surface scissor, but every group sets its own.
 	if ( batchZfill && zfillBatchItems.Num() > 0 ) {
-		if ( r_useScissor.GetBool() ) {
-			backEnd.currentScissor = viewDef->scissor;
-			r->SetScissor( viewDef->viewport.x1 + viewDef->scissor.x1,
-			               viewDef->viewport.y1 + viewDef->scissor.y1,
-			               viewDef->scissor.x2 + 1 - viewDef->scissor.x1,
-			               viewDef->scissor.y2 + 1 - viewDef->scissor.y1 );
-		}
 		r->SetPolygonOffset( false, 0.0f, 0.0f );
-		r->DrawZfillBatch( zfillBatchItems.Ptr(), zfillBatchItems.Num() );
+		// reorder items so each scissor's items are contiguous, and record one group (range + scissor)
+		// per distinct scissor. One DrawZfillBatch call uploads all items once and draws per group.
+		static idList<rhi::RHI::ZfillBatchItem> ordered;
+		static idList<rhi::RHI::ZfillBatchGroup> groups;
+		static idList<bool> used;
+		ordered.SetNum( 0, false );
+		groups.SetNum( 0, false );
+		const int n = zfillBatchItems.Num();
+		used.SetNum( n, false );
+		for ( int k = 0; k < n; k++ ) {
+			used[k] = false;
+		}
+		for ( int a = 0; a < n; a++ ) {
+			if ( used[a] ) {
+				continue;
+			}
+			const idScreenRect sc = zfillBatchScissors[a];
+			rhi::RHI::ZfillBatchGroup grp;
+			grp.firstItem = ordered.Num();
+			for ( int b = a; b < n; b++ ) {
+				if ( !used[b] && zfillBatchScissors[b].Equals( sc ) ) {
+					ordered.Append( zfillBatchItems[b] );
+					used[b] = true;
+				}
+			}
+			grp.itemCount = ordered.Num() - grp.firstItem;
+			// GL-convention scissor rect (as SetScissor takes); full view when scissoring is off
+			if ( r_useScissor.GetBool() ) {
+				grp.scissorX = viewDef->viewport.x1 + sc.x1;
+				grp.scissorY = viewDef->viewport.y1 + sc.y1;
+				grp.scissorW = sc.x2 + 1 - sc.x1;
+				grp.scissorH = sc.y2 + 1 - sc.y1;
+			} else {
+				grp.scissorX = viewDef->viewport.x1 + viewDef->scissor.x1;
+				grp.scissorY = viewDef->viewport.y1 + viewDef->scissor.y1;
+				grp.scissorW = viewDef->scissor.x2 + 1 - viewDef->scissor.x1;
+				grp.scissorH = viewDef->scissor.y2 + 1 - viewDef->scissor.y1;
+			}
+			groups.Append( grp );
+		}
+		r->DrawZfillBatch( ordered.Ptr(), ordered.Num(), groups.Ptr(), groups.Num() );
 	}
 
 	if ( useClipPlane && qglDisable != NULL ) {

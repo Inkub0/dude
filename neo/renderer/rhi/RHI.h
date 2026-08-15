@@ -341,7 +341,19 @@ public:
 		int					indexCount;		// indices to draw (== vertexCount of the non-indexed draw)
 		float				mvp[16];		// RB_RHI_SpaceMvp for the surface's space
 	};
-	virtual void	DrawZfillBatch( const ZfillBatchItem *items, int count ) {}
+	// Surfaces sharing one scissor form a group; each becomes a separate indirect draw (one bound
+	// scissor per draw) over a sub-range of the one uploaded item array. Items must be ordered so a
+	// group's items are contiguous ([firstItem, firstItem+itemCount)). Scissor is a GL-convention
+	// rect (same x/y/w/h as SetScissor); a zero-size or negative rect means "no scissor" (full view).
+	struct ZfillBatchGroup {
+		int	firstItem, itemCount;
+		int	scissorX, scissorY, scissorW, scissorH;
+	};
+	// Upload all `count` items to one per-frame SSBO ONCE, then issue `groupCount` indirect draws
+	// (one per scissor group) over the shared buffer. One upload avoids the multi-draw hazard of
+	// re-writing a shared buffer between draws that only execute at submit.
+	virtual void	DrawZfillBatch( const ZfillBatchItem *items, int count,
+	                                const ZfillBatchGroup *groups, int groupCount ) {}
 	// True when the frontend should collect a ZfillBatch this view (Vulkan, r_vkBdaZfill 2,
 	// BDA supported, the batch shader loaded). GL3 / other modes return false → per-surface draw.
 	virtual bool	ZfillBatchEnabled() { return false; }

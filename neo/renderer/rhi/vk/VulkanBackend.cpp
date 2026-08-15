@@ -184,7 +184,8 @@ public:
 	virtual void	Draw( const DrawArgs &args );
 	virtual void	DrawIndexedIndirect( const DrawArgs &args, BufferHandle argsBuffer, int argsOffset,
 	                                     int drawCount, int stride, BufferHandle countBuffer, int countOffset );
-	virtual void	DrawZfillBatch( const ZfillBatchItem *items, int count );
+	virtual void	DrawZfillBatch( const ZfillBatchItem *items, int count,
+	                                const ZfillBatchGroup *groups, int groupCount );
 	virtual bool	ZfillBatchEnabled() {
 		return r_vkBdaZfill.GetInteger() >= 2 && haveBufferDeviceAddress && zfillBatchShaderHandle != 0
 		       && haveDrawIndirectFirstInstance && haveMultiDrawIndirect;
@@ -658,7 +659,8 @@ private:
 	// silently falling back — a pixel-identical A/B looks the same either way).
 	int							bdaZfillDraws = 0;		// zfill draws routed via device address last frame
 	int							bdaZfillFallback = 0;	// candidate zfill draws that fell back (buffer not addressable)
-	int							bdaZfillBatched = 0;	// surfaces folded into the batched indirect draw last frame
+	int							bdaZfillBatched = 0;	// surfaces folded into batched indirect draws last frame
+	int							bdaZfillBatchDraws = 0;	// number of indirect draws (one per distinct scissor group)
 	unsigned int				bdaZfillLastPrint = 0;
 	// mode-2 batch: per-frame double-buffered SSBO of ObjRec + the VkDrawIndirectCommand[]. Both
 	// BU_STORAGE (addressable + INDIRECT usage); grown on demand and updated each frame (host-visible).
@@ -1817,14 +1819,15 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	if ( r_vkBdaZfill.GetInteger() != 0 ) {
 		unsigned int now = Sys_Milliseconds();
 		if ( now - bdaZfillLastPrint >= 1000 ) {
-			common->Printf( "VK BDA zfill: %d per-draw via device address, %d batched (1 indirect draw), %d fell back (last frame)\n",
-			                bdaZfillDraws, bdaZfillBatched, bdaZfillFallback );
+			common->Printf( "VK BDA zfill: %d per-draw via device address, %d batched in %d indirect draws, %d fell back (last frame)\n",
+			                bdaZfillDraws, bdaZfillBatched, bdaZfillBatchDraws, bdaZfillFallback );
 			bdaZfillLastPrint = now;
 		}
 	}
 	bdaZfillDraws = 0;
 	bdaZfillFallback = 0;
 	bdaZfillBatched = 0;
+	bdaZfillBatchDraws = 0;
 
 	// vsync toggle → new present mode; window size change → new extent
 	if ( r_swapInterval.IsModified() ) {
@@ -2871,12 +2874,13 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 		                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT; break;
 		default:         usageBits = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
 	}
-	// BDA (Phase 3.2b): storage buffers (compute) and persistent vertex buffers (the world-static
-	// geometry the depth-prepass consume manually fetches, r_vkBdaZfill) may be dereferenced by a
-	// shader pointer. Only legal when the allocator carries the BDA flag (else vmaCreateBuffer
-	// fails validation), so gate on the same capability. Ring buffers aren't created here, so they
-	// stay address-less and the BDA zfill path falls back for streamed/skinned surfaces.
-	if ( ( usage == BU_STORAGE || usage == BU_VERTEX ) && haveBufferDeviceAddress ) {
+	// BDA (Phase 3.2b): storage buffers (compute) and persistent vertex/index buffers (the world-static
+	// geometry the depth-prepass consume manually fetches, r_vkBdaZfill — the batched path fetches BOTH
+	// vertices and indices via device-address pointers) may be dereferenced by a shader pointer. Only
+	// legal when the allocator carries the BDA flag (else vmaCreateBuffer fails validation), so gate on
+	// the same capability. Ring buffers aren't created here, so they stay address-less and the BDA zfill
+	// path falls back for streamed/skinned surfaces.
+	if ( ( usage == BU_STORAGE || usage == BU_VERTEX || usage == BU_INDEX ) && haveBufferDeviceAddress ) {
 		usageBits |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 	}
 
@@ -6426,9 +6430,11 @@ addressable, INDIRECT usage), grown on demand. The frontend gates this to front-
 Pixel-identical: same MVP bytes, same invariant `mvp * vec4(pos,1)` -> bit-identical depth.
 ====================
 */
-void VulkanBackend::DrawZfillBatch( const ZfillBatchItem *items, int count ) {
-	if ( count <= 0 || !items || !frameOpen || skipFrame || !haveBufferDeviceAddress
-	     || zfillBatchShaderHandle == 0 || !haveDrawIndirectFirstInstance || !haveMultiDrawIndirect ) {
+void VulkanBackend::DrawZfillBatch( const ZfillBatchItem *items, int count,
+                                    const ZfillBatchGroup *groups, int groupCount ) {
+	if ( count <= 0 || !items || groupCount <= 0 || !groups || !frameOpen || skipFrame
+	     || !haveBufferDeviceAddress || zfillBatchShaderHandle == 0
+	     || !haveDrawIndirectFirstInstance || !haveMultiDrawIndirect ) {
 		return;
 	}
 	EnsureScenePass();
@@ -6479,7 +6485,6 @@ void VulkanBackend::DrawZfillBatch( const ZfillBatchItem *items, int count ) {
 	}
 
 	VkCommandBuffer cb = frames[slot].cb;
-	ApplyDynState( cb, curFlipY );		// scene viewport + the frontend's reset scissor/bias
 
 	// batch pipeline: no vertex input (VL_NONE — verts fetched via BDA), the batch shader, and the
 	// flat solid zfill depth state. cullType default = CT_FRONT_SIDED (frontend gates to it).
@@ -6496,9 +6501,27 @@ void VulkanBackend::DrawZfillBatch( const ZfillBatchItem *items, int count ) {
 	boundPipeline = pipeline;					// keep the redundant-bind tracking honest
 	// the batch shader uses no descriptor sets (MVP/geometry all via BDA push constant), so bind none
 	vkCmdPushConstants( cb, pipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, (uint32_t)sizeof( objAddr ), &objAddr );
-	// count = deferred solid-opaque surfaces in one view, at most low thousands — far below the
-	// guaranteed maxDrawIndirectCount floor (65535 with multiDrawIndirect), so no clamp needed.
-	vkCmdDrawIndirect( cb, cmdVk, 0, (uint32_t)count, (uint32_t)cmdStride );
+
+	// one indirect draw per scissor group, over the group's contiguous command sub-range. All groups
+	// read the SAME uploaded SSBO (firstInstance is the global item index), so nothing is re-written
+	// between draws — the multi-draw hazard the single-buffer-per-call version had. Set each group's
+	// scissor via the shared ApplyDynState path (scRect + dirty), then restore the caller's scissor.
+	const int savedSc[4] = { scRect[0], scRect[1], scRect[2], scRect[3] };
+	for ( int g = 0; g < groupCount; g++ ) {
+		if ( groups[g].itemCount <= 0 || groups[g].firstItem < 0
+		     || groups[g].firstItem + groups[g].itemCount > count ) {
+			continue;
+		}
+		scRect[0] = groups[g].scissorX; scRect[1] = groups[g].scissorY;
+		scRect[2] = groups[g].scissorW; scRect[3] = groups[g].scissorH;
+		dynStateDirty = true;
+		ApplyDynState( cb, curFlipY );			// scene viewport + this group's scissor, bias 0
+		vkCmdDrawIndirect( cb, cmdVk, (VkDeviceSize)( (size_t)groups[g].firstItem * cmdStride ),
+		                   (uint32_t)groups[g].itemCount, (uint32_t)cmdStride );
+		bdaZfillBatchDraws++;
+	}
+	scRect[0] = savedSc[0]; scRect[1] = savedSc[1]; scRect[2] = savedSc[2]; scRect[3] = savedSc[3];
+	dynStateDirty = true;						// force the next real draw to re-apply the caller's scissor
 	bdaZfillBatched += count;
 }
 
