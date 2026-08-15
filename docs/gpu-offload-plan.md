@@ -451,7 +451,7 @@ feature/VMA, `CreateBuffer` usage, `GetBufferDeviceAddress` + `BdaSelfTest` by `
 No consumer yet — the depth-prepass consume is the next step. VK-only; SPIR-V already targets 1.4 so no
 compiler bump was needed. **Verified:** in-engine `r_vkBdaTest 1` → `VK BDA self-test: PASS` (2026-08-14).
 
-**Consume — Increment 1 ✅ BUILT (`r_vkBdaZfill`, `feat/gpu-skin-cpu-unpin`, pending user A/B).** The flat
+**Consume — Increment 1 ✅ USER-VERIFIED (`r_vkBdaZfill`, `feat/gpu-skin-cpu-unpin`, 2026-08-15).** The flat
 world-static depth prepass now optionally fetches vertex positions from the buffer's **device address**
 (`zfill_bda.vert`, `GL_EXT_buffer_reference`) instead of bound attributes — per-draw, keeping the bound index
 buffer + UBO MVP. Self-contained in `VulkanBackend::Draw` (same idiom as `r_vkIndirectTest`): gated on the flat
@@ -465,6 +465,9 @@ compiles to `PhysicalStorageBuffer64`). **Next — Increment 2:** move address+M
 by `firstInstance`; **Increment 3:** batch the simple opaque bucket (no depth-hack/scissor/poly-offset/tess/
 subview) into one `vkCmdDrawIndexedIndirect` + the `COMPUTE→DRAW_INDIRECT` barrier. **To verify:** toggle
 `r_vkBdaZfill 1` vs `0` in-world — identical image; watch world surfaces for any z-fighting or holes.
+Verified 2026-08-15 on mars_city1: image identical, `VK BDA zfill: 164 draws via device address, 0 fell
+back` (count tracked visible geometry as the view moved). The BDA vertex-fetch path is proven correct on live
+world-static geometry — the remaining increments only change *how draws are grouped/dispatched*, not the fetch.
 
 ### Phase 4 — GPU shadow-volume generation — ❌ STRUCK (2026-08-10, recon-confirmed)
 **Do not build.** A recon of the residual stencil cost after Phase 0 concluded a GPU stencil-volume
