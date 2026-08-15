@@ -303,4 +303,17 @@ public:
 
 extern idCommon *		common;
 
+// DUDE: parallel image load. A worker thread calls Com_BeginThreadCapture() on entry
+// and Com_EndThreadCapture() before exit; while active, all common->Printf/Warning/
+// Error output from that thread is buffered instead of touching the console, warning
+// list, screen refresh or error longjmp. The main thread calls Com_FlushThreadCapture()
+// after joining the workers to emit the buffered text in normal order, and
+// Com_ThreadCaptureHadError() to learn whether any worker hit Error/FatalError.
+// Free functions (not idCommon virtuals) so the game-DLL ABI is unchanged.
+void					Com_BeginThreadCapture( void );
+void					Com_EndThreadCapture( void );
+bool					Com_ThreadCaptureActive( void );
+bool					Com_ThreadCaptureHadError( void );
+void					Com_FlushThreadCapture( void );
+
 #endif /* !__COMMON_H__ */

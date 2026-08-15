@@ -1868,6 +1868,121 @@ void	idImage::ActuallyLoadImage( bool checkForPrecompressed, bool fromBackEnd ) 
 	}
 }
 
+/*
+==============
+idImage::LoadImageCpu
+
+DUDE parallel level load (Vulkan): the worker-thread half of an image load. Decodes
+the source and builds the RGBA8 mip pyramid into parallelData, touching no GPU/GL
+state — only the heap, filesystem and captured-print paths, all made thread-safe for
+the duration of the parallel phase (see r_parallelImageLoad). Mirrors the Vulkan
+branch of ActuallyLoadImage + GenerateImage. Returns false on decode failure, so
+UploadImageCpu makes the default image on the main thread. Callers must have already
+excluded generator/cube/partial images (those stay on the serial path).
+==============
+*/
+bool idImage::LoadImageCpu() {
+	parallelData = (parallelLoad_t *)R_StaticAlloc( sizeof( parallelLoad_t ) );
+	memset( parallelData, 0, sizeof( *parallelData ) );
+
+	byte *pic = NULL;
+	int width = 0, height = 0;
+
+	R_LoadImageProgram( imgName, &pic, &width, &height, &timestamp, &depth );
+
+	if ( pic == NULL ) {
+		parallelData->failed = true;
+		return false;
+	}
+
+	// NOTE: the MD4 imageHash the serial path computes here is deliberately skipped —
+	// it feeds only a dev-only duplicate-image report and costs ~10% of load time.
+
+	// swap red into alpha for RXGB normal maps, matching GenerateImage's Vulkan branch
+	// (interaction.frag decodes bump.x from the alpha channel). Done in place — pic is
+	// this worker's private buffer.
+	if ( depth == TD_BUMP && globalImages->image_useNormalCompression.GetInteger() != 1 ) {
+		const int bytes = width * height * 4;
+		for ( int i = 0; i < bytes; i += 4 ) {
+			pic[ i + 3 ] = pic[ i ];
+			pic[ i ] = 0;
+		}
+	}
+
+	// build the mip chain; allowMips == (filter == TF_DEFAULT) and preserveBorder ==
+	// (repeat == TR_CLAMP_TO_ZERO) exactly mirror CreateTexture2D's caller in GenerateImage
+	parallelData->levelData[0] = pic;
+	parallelData->levelW[0] = width;
+	parallelData->levelH[0] = height;
+	parallelData->numLevels = 1;
+
+	if ( filter == TF_DEFAULT ) {
+		const bool preserveBorder = ( repeat == TR_CLAMP_TO_ZERO );
+		const byte *src = pic;
+		int lw = width, lh = height;
+		while ( ( lw > 1 || lh > 1 ) && parallelData->numLevels < PARALLEL_MAX_LEVELS ) {
+			byte *shrunk = R_MipMap( src, lw, lh, preserveBorder );
+			lw = lw > 1 ? lw >> 1 : 1;
+			lh = lh > 1 ? lh >> 1 : 1;
+			const int n = parallelData->numLevels;
+			parallelData->levelData[n] = shrunk;
+			parallelData->levelW[n] = lw;
+			parallelData->levelH[n] = lh;
+			parallelData->numLevels++;
+			src = shrunk;
+		}
+	}
+
+	parallelData->width = width;
+	parallelData->height = height;
+	return true;
+}
+
+/*
+==============
+idImage::UploadImageCpu
+
+DUDE parallel level load (Vulkan): the main-thread half. Uploads the worker-built mip
+pyramid through the RHI (GPU submit is not thread-safe) and frees parallelData. Sets
+the same state GenerateImage's Vulkan branch does (type / uploadWidth / uploadHeight /
+rhiHandle).
+==============
+*/
+void idImage::UploadImageCpu() {
+	if ( parallelData == NULL ) {
+		return;
+	}
+
+	if ( parallelData->failed ) {
+		common->Warning( "Couldn't load image: %s", imgName.c_str() );
+		MakeDefault();
+	} else {
+		PurgeImage();		// drop any previous binding, matching GenerateImage
+
+		rhi::RHI::PrebuiltMip mips[PARALLEL_MAX_LEVELS];
+		for ( int i = 0; i < parallelData->numLevels; i++ ) {
+			mips[i].data = parallelData->levelData[i];
+			mips[i].w = parallelData->levelW[i];
+			mips[i].h = parallelData->levelH[i];
+		}
+
+		rhiHandle = rhi::GetRHI()->CreateTexture2DPrebuilt( parallelData->width, parallelData->height,
+			mips, parallelData->numLevels, (int)filter, (int)repeat );
+		type = TT_2D;
+		uploadWidth = parallelData->width;
+		uploadHeight = parallelData->height;
+		precompressedFile = false;
+	}
+
+	for ( int i = 0; i < parallelData->numLevels; i++ ) {
+		if ( parallelData->levelData[i] ) {
+			R_StaticFree( parallelData->levelData[i] );
+		}
+	}
+	R_StaticFree( parallelData );
+	parallelData = NULL;
+}
+
 //=========================================================================================================
 
 /*

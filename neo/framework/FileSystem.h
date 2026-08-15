@@ -291,4 +291,11 @@ public:
 
 extern idFileSystem *		fileSystem;
 
+// DUDE: parallel level load — when enabled, the file-open path (searchpath walk +
+// zip reopen) is serialized with a lock so worker threads may open files
+// concurrently; the actual reads use per-file handles and stay lock-free. Only ever
+// enabled for the parallel image-load phase; see r_parallelImageLoad. Free function
+// (not a virtual) to keep the game-visible idFileSystem ABI unchanged.
+void						FS_SetThreadReadSafe( bool enable );
+
 #endif /* !__FILESYSTEM_H__ */

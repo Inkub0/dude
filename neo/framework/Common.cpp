@@ -28,6 +28,8 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sys/sys_sdl.h"
 
+#include <mutex>
+
 #if SDL_VERSION_ATLEAST(3, 0, 0)
   // DG: compat with SDL2
   #define SDL_setenv SDL_setenv_unsafe
@@ -496,6 +498,36 @@ idCommonLocal::VPrintf
 A raw string should NEVER be passed as fmt, because of "%f" type crashes.
 ==================
 */
+// DUDE: parallel image load. Worker threads must never touch the console, the
+// warning list, the screen refresh/pacifier, or the error longjmp (all main-thread /
+// renderer state). While capture is enabled for a thread, common->Printf/Warning/
+// Error just format their message and append it to a shared buffer; the main thread
+// flushes it (in order-independent lumps) after the workers join. See r_parallelImageLoad.
+static thread_local bool	com_threadCapture = false;
+static std::mutex			com_captureMutex;
+static idStr				com_captureBuffer;
+static volatile bool		com_captureHadError = false;
+
+void Com_BeginThreadCapture( void )		{ com_threadCapture = true; }
+void Com_EndThreadCapture( void )		{ com_threadCapture = false; }
+bool Com_ThreadCaptureActive( void )	{ return com_threadCapture; }
+bool Com_ThreadCaptureHadError( void )	{ return com_captureHadError; }
+
+static void Com_CaptureAppend( const char *msg ) {
+	std::lock_guard<std::mutex> lk( com_captureMutex );
+	com_captureBuffer += msg;
+}
+
+void Com_FlushThreadCapture( void ) {
+	// main thread only, after the workers have joined
+	std::lock_guard<std::mutex> lk( com_captureMutex );
+	if ( com_captureBuffer.Length() ) {
+		common->Printf( "%s", com_captureBuffer.c_str() );
+		com_captureBuffer.Clear();
+	}
+	com_captureHadError = false;
+}
+
 void idCommonLocal::VPrintf( const char *fmt, va_list args ) {
 	char		msg[MAX_PRINT_MSG_SIZE];
 	int			timeLength;
@@ -522,6 +554,13 @@ void idCommonLocal::VPrintf( const char *fmt, va_list args ) {
 	if ( idStr::vsnPrintf( msg+timeLength, MAX_PRINT_MSG_SIZE-timeLength-1, fmt, args ) < 0 ) {
 		msg[sizeof(msg)-2] = '\n'; msg[sizeof(msg)-1] = '\0'; // avoid output garbling
 		Sys_Printf( "idCommon::VPrintf: truncated to %zd characters\n", strlen(msg)-1 );
+	}
+
+	// DUDE: on a parallel-load worker thread, capture and bail before any console /
+	// screen / Sys_Printf work (none of which is thread-safe).
+	if ( com_threadCapture ) {
+		Com_CaptureAppend( msg );
+		return;
 	}
 
 	if ( rd_buffer ) {
@@ -689,7 +728,9 @@ void idCommonLocal::Warning( const char *fmt, ... ) {
 		Printf( S_COLOR_YELLOW "WARNING: " S_COLOR_RED "%s\n", msg );
 	}
 
-	if ( warningList.Num() < MAX_WARNING_LIST ) {
+	// DUDE: don't mutate the shared warning list from a parallel-load worker; the
+	// text was already captured via Printf->VPrintf above.
+	if ( !com_threadCapture && warningList.Num() < MAX_WARNING_LIST ) {
 		warningList.AddUnique( msg );
 	}
 }
@@ -792,6 +833,22 @@ void idCommonLocal::Error( const char *fmt, ... ) {
 	static int	errorCount;
 	int			currentTime;
 
+	// DUDE: a parallel-load worker cannot take the error longjmp (it targets a
+	// setjmp made on the main thread). Capture the message, flag it, and return so
+	// the worker unwinds normally; the main thread inspects the flag after joining.
+	if ( com_threadCapture ) {
+		char msg[MAX_PRINT_MSG_SIZE];
+		va_start( argptr, fmt );
+		idStr::vsnPrintf( msg, sizeof(msg), fmt, argptr );
+		va_end( argptr );
+		msg[sizeof(msg)-1] = '\0';
+		com_captureHadError = true;
+		Com_CaptureAppend( "ERROR: " );
+		Com_CaptureAppend( msg );
+		Com_CaptureAppend( "\n" );
+		return;
+	}
+
 	int code = ERP_DROP;
 
 	// always turn this off after an error
@@ -883,6 +940,21 @@ Dump out of the game to a system dialog
 */
 void idCommonLocal::FatalError( const char *fmt, ... ) {
 	va_list		argptr;
+
+	// DUDE: never longjmp / Sys_Quit from a parallel-load worker; capture and flag
+	// so the main thread can raise the real fatal error after joining.
+	if ( com_threadCapture ) {
+		char msg[MAX_PRINT_MSG_SIZE];
+		va_start( argptr, fmt );
+		idStr::vsnPrintf( msg, sizeof(msg), fmt, argptr );
+		va_end( argptr );
+		msg[sizeof(msg)-1] = '\0';
+		com_captureHadError = true;
+		Com_CaptureAppend( "FATAL: " );
+		Com_CaptureAppend( msg );
+		Com_CaptureAppend( "\n" );
+		return;
+	}
 
 	// if we got a recursive error, make it fatal
 	if ( com_errorEntered ) {

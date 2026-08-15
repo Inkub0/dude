@@ -63,6 +63,12 @@ void		Mem_Dump_f( const class idCmdArgs &args );
 void		Mem_DumpCompressed_f( const class idCmdArgs &args );
 void		Mem_AllocDefragBlock( void );
 
+// DUDE: parallel level load — when enabled, Mem_Alloc/Free take a global lock so
+// worker threads can allocate through the (otherwise non-thread-safe) idHeap.
+// Near-zero cost when disabled (one relaxed atomic load per allocation). Only ever
+// enabled for the duration of the parallel image-load phase; see r_parallelImageLoad.
+void		Mem_SetThreadSafe( bool enable );
+
 
 #ifndef ID_DEBUG_MEMORY
 

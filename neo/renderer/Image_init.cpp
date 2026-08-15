@@ -32,8 +32,16 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/tr_local.h"
 
 #include "renderer/Image.h"
+#include "renderer/rhi/RHI.h"			// DUDE: rhi::GetActiveBackendType / BT_VULKAN / GetRHI
+
+#include "framework/Common.h"			// DUDE: Com_*ThreadCapture (parallel image load)
+#include "framework/FileSystem.h"		// DUDE: FS_SetThreadReadSafe
 
 #include "framework/GameCallbacks_local.h"
+
+#include <atomic>						// DUDE: parallel image load
+#include <thread>
+#include <vector>
 
 const char *imageFilter[] = {
 	"GL_LINEAR_MIPMAP_NEAREST",
@@ -53,6 +61,12 @@ idCVar idImageManager::image_forceDownSize( "image_forceDownSize", "0", CVAR_REN
 idCVar idImageManager::image_roundDown( "image_roundDown", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "round bad sizes down to nearest power of two" );
 idCVar idImageManager::image_colorMipLevels( "image_colorMipLevels", "0", CVAR_RENDERER | CVAR_BOOL, "development aid to see texture mip usage" );
 idCVar idImageManager::image_preload( "image_preload", "1", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "if 0, dynamically load all images" );
+
+// DUDE: parallel level load. When enabled (Vulkan backend), EndLevelLoad decodes and
+// mip-maps eligible 2D images across worker threads, then uploads them on the main
+// thread. Off by default until verified pixel-identical; see level-load perf notes.
+idCVar r_parallelImageLoad( "r_parallelImageLoad", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "parallelize per-image decode + mipmap across worker threads at level load (Vulkan backend)" );
+idCVar r_parallelImageLoadThreads( "r_parallelImageLoadThreads", "0", CVAR_RENDERER | CVAR_INTEGER | CVAR_ARCHIVE, "worker threads for r_parallelImageLoad (0 = auto = hardware threads)" );
 idCVar idImageManager::image_useCompression( "image_useCompression", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
 		"Compress textures on load so they use less VRAM. 1 = compress with S3TC/DXT when uploading 2 = compress with BPTC when uploading (if available) "
 		"0 = upload uncompressed (unless image_usePrecompressedTextures is 1 and it's loaded from a precompressed .dds file)" );
@@ -2109,19 +2123,111 @@ void idImageManager::EndLevelLoad() {
 	}
 
 	// load the ones we do need, if we are preloading
-	for ( int i = 0 ; i < images.Num() ; i++ ) {
-		idImage	*image = images[ i ];
-		if ( image->generatorFunction ) {
-			continue;
+	// DUDE: parallel level load. On the Vulkan backend, decode + mipmap eligible plain
+	// 2D images across worker threads (LoadImageCpu, no GPU/GL state), then upload them
+	// on the main thread (UploadImageCpu). Cube/generator/partial images and the GL
+	// backend keep the serial ActuallyLoadImage path. Selection matches the serial
+	// condition exactly so behaviour is identical when the cvar is toggled.
+	const bool useParallel = r_parallelImageLoad.GetBool()
+		&& glConfig.rhiBackend
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+
+	if ( useParallel ) {
+		std::vector<idImage *> par;
+		par.reserve( images.Num() );
+
+		for ( int i = 0 ; i < images.Num() ; i++ ) {
+			idImage	*image = images[ i ];
+			if ( image->generatorFunction ) {
+				continue;
+			}
+			if ( image->levelLoadReferenced && image->texnum == idImage::TEXTURE_NOT_LOADED && !image->partialImage ) {
+				if ( image->cubeFiles == CF_2D && !image->isPartialImage ) {
+					par.push_back( image );		// worker-decodable
+				} else {
+					// cube maps / partial-companion images stay serial (they touch the
+					// precompressed / GL paths directly)
+					loadCount++;
+					image->ActuallyLoadImage( true, false );
+					if ( ( loadCount & 15 ) == 0 ) {
+						session->PacifierUpdate();
+					}
+				}
+			}
 		}
 
-		if ( image->levelLoadReferenced && image->texnum == idImage::TEXTURE_NOT_LOADED && !image->partialImage ) {
-//			common->Printf( "Loading %s\n", image->imgName.c_str() );
-			loadCount++;
-			image->ActuallyLoadImage( true, false );
+		if ( !par.empty() ) {
+			int nThreads = r_parallelImageLoadThreads.GetInteger();
+			if ( nThreads <= 0 ) {
+				nThreads = (int)std::thread::hardware_concurrency();
+			}
+			if ( nThreads < 2 ) { nThreads = 2; }
+			if ( nThreads > 32 ) { nThreads = 32; }
+			if ( nThreads > (int)par.size() ) { nThreads = (int)par.size(); }
 
-			if ( ( loadCount & 15 ) == 0 ) {
-				session->PacifierUpdate();
+			idImage ** const	list = par.data();
+			const int			count = (int)par.size();
+			std::atomic<int>	nextIndex( 0 );
+
+			// heap / filesystem / print become thread-safe only for this window
+			Mem_SetThreadSafe( true );
+			FS_SetThreadReadSafe( true );
+
+			// phase 1: worker threads decode + build mip pyramids
+			std::vector<std::thread> pool;
+			pool.reserve( nThreads );
+			for ( int k = 0 ; k < nThreads ; k++ ) {
+				pool.push_back( std::thread( [&]() {
+					Com_BeginThreadCapture();
+					for ( ;; ) {
+						const int idx = nextIndex.fetch_add( 1, std::memory_order_relaxed );
+						if ( idx >= count ) {
+							break;
+						}
+						list[idx]->LoadImageCpu();
+					}
+					Com_EndThreadCapture();
+				} ) );
+			}
+			for ( size_t k = 0 ; k < pool.size() ; k++ ) {
+				pool[k].join();
+			}
+
+			Mem_SetThreadSafe( false );
+			FS_SetThreadReadSafe( false );
+
+			// surface any prints/warnings the workers buffered (order-independent)
+			const bool hadErr = Com_ThreadCaptureHadError();
+			Com_FlushThreadCapture();
+			if ( hadErr ) {
+				common->Warning( "r_parallelImageLoad: a worker hit an error during decode (see above); affected images use the default texture" );
+			}
+
+			// phase 2: upload the decoded pyramids on the main thread (GPU submit is
+			// not thread-safe)
+			for ( int i = 0 ; i < count ; i++ ) {
+				loadCount++;
+				list[i]->UploadImageCpu();
+				if ( ( loadCount & 15 ) == 0 ) {
+					session->PacifierUpdate();
+				}
+			}
+		}
+	} else {
+		for ( int i = 0 ; i < images.Num() ; i++ ) {
+			idImage	*image = images[ i ];
+			if ( image->generatorFunction ) {
+				continue;
+			}
+
+			if ( image->levelLoadReferenced && image->texnum == idImage::TEXTURE_NOT_LOADED && !image->partialImage ) {
+	//			common->Printf( "Loading %s\n", image->imgName.c_str() );
+				loadCount++;
+				image->ActuallyLoadImage( true, false );
+
+				if ( ( loadCount & 15 ) == 0 ) {
+					session->PacifierUpdate();
+				}
 			}
 		}
 	}

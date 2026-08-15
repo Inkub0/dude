@@ -237,6 +237,15 @@ public:
 	void		ImageProgramStringToCompressedFileName( const char *imageProg, char *fileName ) const;
 	int			NumLevelsForImageSize( int width, int height ) const;
 
+	// DUDE: parallel level load (r_parallelImageLoad, Vulkan backend). LoadImageCpu()
+	// runs on a worker thread: it decodes the source and builds the RGBA8 mip pyramid
+	// into parallelData, touching no GPU/GL state. UploadImageCpu() runs afterwards on
+	// the main thread: it hands the pyramid to the RHI and frees parallelData. Split so
+	// the CPU-heavy decode+mipmap work parallelizes while the (non-thread-safe) GPU
+	// submit stays serial. Mirrors the Vulkan branch of ActuallyLoadImage/GenerateImage.
+	bool		LoadImageCpu();
+	void		UploadImageCpu();
+
 	// data commonly accessed is grouped here
 	static const int TEXTURE_NOT_LOADED = -1;
 	GLuint				texnum;					// gl texture binding, will be TEXTURE_NOT_LOADED if not loaded
@@ -286,6 +295,19 @@ public:
 	idImage *			hashNext;				// for hash chains to speed lookup
 
 	int					refCount;				// overall ref count
+
+	// DUDE: parallel level load. Worker-built RGBA8 mip pyramid, handed to the main
+	// thread for GPU upload. NULL except between LoadImageCpu() and UploadImageCpu().
+	static const int	PARALLEL_MAX_LEVELS = 16;	// covers up to 32768px (log2)+1
+	struct parallelLoad_t {
+		byte *			levelData[PARALLEL_MAX_LEVELS];	// R_StaticAlloc'd, level 0 = base
+		int				levelW[PARALLEL_MAX_LEVELS];
+		int				levelH[PARALLEL_MAX_LEVELS];
+		int				numLevels;
+		int				width, height;					// base level dimensions
+		bool			failed;							// decode failed → MakeDefault on main
+	};
+	parallelLoad_t *	parallelData;
 };
 
 ID_INLINE idImage::idImage() {
@@ -320,6 +342,7 @@ ID_INLINE idImage::idImage() {
 	cacheUsagePrev = cacheUsageNext = NULL;
 	hashNext = NULL;
 	refCount = 0;
+	parallelData = NULL;
 }
 
 
