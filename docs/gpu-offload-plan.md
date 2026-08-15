@@ -469,6 +469,25 @@ Verified 2026-08-15 on mars_city1: image identical, `VK BDA zfill: 164 draws via
 back` (count tracked visible geometry as the view moved). The BDA vertex-fetch path is proven correct on live
 world-static geometry — the remaining increments only change *how draws are grouped/dispatched*, not the fetch.
 
+**Consume — Increment 2 ✅ BUILT (`r_vkBdaZfill 2`, `feat/gpu-skin-cpu-unpin`, pending user A/B).** The actual
+GPU-driven draw: the solid-opaque world-static bucket is collected in `RB_RHI_FillDepthBuffer` and drawn with
+**one non-indexed `vkCmdDrawIndirect`**. Fully bindless — each surface's vertices *and* indices are fetched
+through device-address pointers (`zfill_batch.vert`, two `buffer_reference` types), so surfaces with different
+vb/ib batch together with no bound geometry. Per-object `{vbAddr, ibAddr, mvp}` lives in a per-frame SSBO
+indexed by `gl_InstanceIndex` (= each command's `firstInstance`; needs `drawIndirectFirstInstance`, now
+enabled). Batchable predicate: MC_OPAQUE, non-subview, no depth-hack/polygon-offset/tessellation, full-view
+scissor, no clip plane, front-sided view, vb+ib BDA-addressable; everything else stays per-surface (mode-1 BDA
+or normal). Pixel-identical by construction (same MVP bytes from `RB_RHI_SpaceMvp`, same `invariant
+mvp*vec4(pos,1)` → bit-identical depth; color `{0,0,0,1}`, LESS, SS_ALWAYS, CT_FRONT_SIDED all match).
+New infra: `VL_NONE` (empty vertex input), double-buffered `BU_STORAGE` batch buffers (host-visible,
+addressable, INDIRECT usage, grown on demand), `RHI::DrawZfillBatch`/`ZfillBatchEnabled`, and `ApplyDynState`
+factored out of `BindForDraw`. **Adversarial review: 0 correctness/crash bugs** (std430 layout, index/vertex
+math, frame-in-flight double-buffering, descriptor-tracking, pixel-identity all confirmed). Counter now reports
+`N per-draw, M batched (1 indirect draw), K fell back`. **To verify:** `r_vkBdaZfill 2` vs `0` — identical
+image, `M batched` non-zero; watch world surfaces for z-fighting/holes (the one thing a MVP-from-SSBO depth
+mismatch would show). **Next — Increment 3:** feed the indirect commands from the GPU cull compute pass
+(`r_gpuCullLive`) + the `COMPUTE→DRAW_INDIRECT` barrier — the full GPU-driven pipeline.
+
 ### Phase 4 — GPU shadow-volume generation — ❌ STRUCK (2026-08-10, recon-confirmed)
 **Do not build.** A recon of the residual stencil cost after Phase 0 concluded a GPU stencil-volume
 builder is not worth it and is a *dead-end vs ray-query*: (1) Phase 0 already removed ~100% indoor /

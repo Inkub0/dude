@@ -55,6 +55,8 @@ enum VertexLayout {
 	VL_DRAWVERT,	// idDrawVert: pos3/st2/normal3/tangent3/bitangent3/color4ub, locations 0-5
 	VL_SHADOW,		// shadowCache_t: pos4 only, location 0
 	VL_IMMEDIATE,	// imVert_t: pos3/st2/color4ub (24 B), locations 0/1/5 — debug drawing
+	VL_NONE,		// no vertex input: the shader fetches vertices itself (BDA manual fetch,
+					// Phase 3.2b batched zfill). No bound vertex buffer required.
 	VL_COUNT
 };
 
@@ -322,6 +324,27 @@ public:
 	virtual void	DrawIndexedIndirect( const DrawArgs &args, BufferHandle argsBuffer, int argsOffset,
 	                                     int drawCount, int stride,
 	                                     BufferHandle countBuffer = 0, int countOffset = 0 ) {}
+
+	// GPU virtual address of a buffer created with an address-capable usage (BDA). Declared
+	// above as GetBufferDeviceAddress; the frontend uses it to build a ZfillBatch (below).
+
+	// One draw for a whole bucket of solid-opaque depth-prepass surfaces (Phase 3.2b consume,
+	// Increment 2). Each item carries its geometry as DEVICE ADDRESSES (vbAddr = base+vertexOffset,
+	// ibAddr = base+firstIndex-bytes) plus the surface MVP; the backend uploads them to a per-object
+	// SSBO, builds one VkDrawIndirectCommand per item (firstInstance = item index), and issues a
+	// single non-indexed vkCmdDrawIndirect whose shader fetches indices+vertices through the
+	// pointers (no bound vb/ib). Pixel-identical to per-surface zfill for the same surfaces. Vulkan
+	// only; GL3 no-ops (the frontend never populates a batch there — GetBufferDeviceAddress is 0).
+	struct ZfillBatchItem {
+		unsigned long long	vbAddr;			// device address of idDrawVert[0] (+vertexOffset)
+		unsigned long long	ibAddr;			// device address of the surface's first index
+		int					indexCount;		// indices to draw (== vertexCount of the non-indexed draw)
+		float				mvp[16];		// RB_RHI_SpaceMvp for the surface's space
+	};
+	virtual void	DrawZfillBatch( const ZfillBatchItem *items, int count ) {}
+	// True when the frontend should collect a ZfillBatch this view (Vulkan, r_vkBdaZfill 2,
+	// BDA supported, the batch shader loaded). GL3 / other modes return false → per-surface draw.
+	virtual bool	ZfillBatchEnabled() { return false; }
 
 	// ---- compute (docs/gpu-offload-plan.md Phase 1) ----
 	// Record a GPU compute dispatch (see ComputeArgs). Vulkan records it on the frame

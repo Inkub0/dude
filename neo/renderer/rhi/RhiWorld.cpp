@@ -1475,6 +1475,16 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 	float mvp[16];
 	float localClipPlane[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 
+	// Phase 3.2b consume (r_vkBdaZfill 2): collect solid-opaque, front-sided, full-view-scissor,
+	// addressable surfaces and draw the whole bucket with one indirect call after the loop instead
+	// of per-surface. Gated off unless the VK backend has BDA + the batch shader; front-sided views
+	// only (a mirror flips culling, which the single batch pipeline can't express). See DrawZfillBatch.
+	const bool batchZfill = r->ZfillBatchEnabled()
+		&& !useClipPlane		// the batch shader writes no gl_ClipDistance; a clip-plane subview must clip
+		&& ( RB_RHI_CullFor( viewDef, CT_FRONT_SIDED ) == CT_FRONT_SIDED );
+	static idList<rhi::RHI::ZfillBatchItem> zfillBatchItems;
+	zfillBatchItems.SetNum( 0, false );		// reuse capacity across frames
+
 	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
 	for ( int i = 0; i < viewDef->numDrawSurfs; i++ ) {
 		const drawSurf_t *surf = drawSurfs[i];
@@ -1589,6 +1599,28 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 		bool drawSolid = ( shader->Coverage() == MC_OPAQUE );
 
+		// Phase 3.2b consume mode 2: defer solid-opaque, non-hacked, unscissored, addressable
+		// surfaces into the batched indirect draw. Everything the single batch pipeline/shader
+		// can't express (perforated, subview, depth-hack, polygon offset, tessellated, portal
+		// scissor, or streamed/skinned geometry with no device address) stays on this per-surface
+		// path. Bit-identical: the batch replays the same mvp * vec4(pos,1) with invariant depth.
+		if ( batchZfill && drawSolid && shader->GetSort() != SS_SUBVIEW
+		     && !surf->space->weaponDepthHack && surf->space->modelDepthHack == 0.0f
+		     && !shader->TestMaterialFlag( MF_POLYGONOFFSET ) && !tess
+		     && ( !r_useScissor.GetBool() || surf->scissorRect.Equals( viewDef->scissor ) ) ) {
+			unsigned long long vbAddr = r->GetBufferDeviceAddress( vb );
+			unsigned long long ibAddr = r->GetBufferDeviceAddress( ib );
+			if ( vbAddr != 0 && ibAddr != 0 ) {
+				rhi::RHI::ZfillBatchItem it;
+				it.vbAddr = vbAddr + (unsigned long long)vertOfs;
+				it.ibAddr = ibAddr + (unsigned long long)idxOfs;
+				it.indexCount = idxCount;
+				memcpy( it.mvp, mvp, sizeof( it.mvp ) );
+				zfillBatchItems.Append( it );
+				continue;		// drawn later as part of the batch
+			}
+		}
+
 		if ( shader->Coverage() == MC_PERFORATED ) {
 			// alpha-tested stages; if none were live, fall back to solid
 			bool didDraw = false;
@@ -1690,6 +1722,21 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( surf->space->weaponDepthHack || surf->space->modelDepthHack != 0.0f ) {
 			RB_LeaveDepthHack();
 		}
+	}
+
+	// Phase 3.2b consume mode 2: draw the whole deferred bucket with one indirect call. Reset the
+	// scissor to the full view and clear any polygon-offset bias first — the loop may have left a
+	// per-surface scissor from a non-batched surface, and the batch draws unscissored full-view.
+	if ( batchZfill && zfillBatchItems.Num() > 0 ) {
+		if ( r_useScissor.GetBool() ) {
+			backEnd.currentScissor = viewDef->scissor;
+			r->SetScissor( viewDef->viewport.x1 + viewDef->scissor.x1,
+			               viewDef->viewport.y1 + viewDef->scissor.y1,
+			               viewDef->scissor.x2 + 1 - viewDef->scissor.x1,
+			               viewDef->scissor.y2 + 1 - viewDef->scissor.y1 );
+		}
+		r->SetPolygonOffset( false, 0.0f, 0.0f );
+		r->DrawZfillBatch( zfillBatchItems.Ptr(), zfillBatchItems.Num() );
 	}
 
 	if ( useClipPlane && qglDisable != NULL ) {

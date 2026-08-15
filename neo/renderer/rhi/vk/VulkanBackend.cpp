@@ -100,8 +100,8 @@ static idCVar r_vkIndirectTest( "r_vkIndirectTest", "0", CVAR_RENDERER | CVAR_BO
 static idCVar r_vkBdaTest( "r_vkBdaTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: run the buffer-device-address self-test (a compute kernel sums a storage buffer read through its raw GPU pointer, not a bound buffer) and print PASS/FAIL. Set to 1 to trigger. Validates the Phase-3.2b BDA primitive (docs/gpu-offload-plan.md)" );
 
-static idCVar r_vkBdaZfill( "r_vkBdaZfill", "0", CVAR_RENDERER | CVAR_BOOL,
-	"Vulkan backend: route the world-static depth prepass (zfill) through a buffer-device-address manual-vertex-fetch shader instead of bound vertex attributes. Pixel-identical A/B; the first GPU-driven-draw consumer for Phase 3.2b (docs/gpu-offload-plan.md). Fires only on the flat zfill shader over addressable (persistent) geometry; animated/streamed surfaces fall back." );
+static idCVar r_vkBdaZfill( "r_vkBdaZfill", "0", CVAR_RENDERER | CVAR_INTEGER,
+	"Vulkan backend: route the world-static depth prepass (zfill) through buffer-device-address geometry fetch. 0 = off (bound attributes); 1 = per-draw BDA vertex fetch; 2 = batched indirect (one vkCmdDrawIndirect over the solid-opaque bucket, indices+verts via BDA). Pixel-identical A/B; the Phase 3.2b consume (docs/gpu-offload-plan.md). Addressable persistent geometry only; animated/streamed/tessellated/perforated surfaces fall back." );
 
 namespace rhi {
 
@@ -184,6 +184,11 @@ public:
 	virtual void	Draw( const DrawArgs &args );
 	virtual void	DrawIndexedIndirect( const DrawArgs &args, BufferHandle argsBuffer, int argsOffset,
 	                                     int drawCount, int stride, BufferHandle countBuffer, int countOffset );
+	virtual void	DrawZfillBatch( const ZfillBatchItem *items, int count );
+	virtual bool	ZfillBatchEnabled() {
+		return r_vkBdaZfill.GetInteger() >= 2 && haveBufferDeviceAddress && zfillBatchShaderHandle != 0
+		       && haveDrawIndirectFirstInstance && haveMultiDrawIndirect;
+	}
 	virtual void	Dispatch( const ComputeArgs &args );
 	virtual void	DispatchSync( const ComputeArgs &args );
 	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth, bool hdrFloat );
@@ -300,6 +305,7 @@ private:
 	// when the frame/pass/pipeline/buffers aren't ready. Does NOT gate on args.indexCount (the
 	// indirect path's count lives in the args buffer).
 	bool			BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut );
+	void			ApplyDynState( VkCommandBuffer cb, bool effFlipY );	// viewport/scissor/depth-bias (shared by BindForDraw + DrawZfillBatch)
 	int				AllocFromRing( RingBuf &ring, const void *data, int size, int align,
 	                               int wrapReserve, BufferHandle *buffer );
 	VkSampler		GetSampler( int textureFilter, int textureRepeat, bool hasMips );
@@ -646,13 +652,21 @@ private:
 	// Loaded on the cvar's first enable; the flat zfill draw is identified by
 	// currentDesc.shader == zfillShaderHandle. zfillBdaShaderHandle 0 = variant absent.
 	ShaderHandle				zfillShaderHandle = 0;
-	ShaderHandle				zfillBdaShaderHandle = 0;
+	ShaderHandle				zfillBdaShaderHandle = 0;	// per-draw BDA vertex fetch (mode 1)
+	ShaderHandle				zfillBatchShaderHandle = 0;	// batched indirect, verts+indices via BDA (mode 2)
 	// r_vkBdaZfill firing counters (confirmation the consume path is active, not
 	// silently falling back — a pixel-identical A/B looks the same either way).
 	int							bdaZfillDraws = 0;		// zfill draws routed via device address last frame
 	int							bdaZfillFallback = 0;	// candidate zfill draws that fell back (buffer not addressable)
+	int							bdaZfillBatched = 0;	// surfaces folded into the batched indirect draw last frame
 	unsigned int				bdaZfillLastPrint = 0;
+	// mode-2 batch: per-frame double-buffered SSBO of ObjRec + the VkDrawIndirectCommand[]. Both
+	// BU_STORAGE (addressable + INDIRECT usage); grown on demand and updated each frame (host-visible).
+	BufferHandle				batchObjBuf[FRAMES_IN_FLIGHT] = { 0 };
+	BufferHandle				batchCmdBuf[FRAMES_IN_FLIGHT] = { 0 };
+	int							batchCapacity[FRAMES_IN_FLIGHT] = { 0 };	// objects each buffer pair holds
 	bool						haveMultiDrawIndirect = false;
+	bool						haveDrawIndirectFirstInstance = false;	// non-zero firstInstance in indirect cmds (Phase 3.2b batch)
 	bool						indirectFeatureWarned = false;
 
 	std::unordered_map<unsigned long long, VkPipeline>	pipelineCache;
@@ -1060,6 +1074,11 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	// enabled below via the pNext chain. Both universal on desktop; enable when present.
 	haveMultiDrawIndirect = supported.multiDrawIndirect == VK_TRUE;
 	enabled.multiDrawIndirect = haveMultiDrawIndirect ? VK_TRUE : VK_FALSE;
+	// Phase 3.2b batched zfill: each VkDrawIndirectCommand carries a non-zero firstInstance to
+	// index the per-object SSBO (gl_InstanceIndex). A non-zero indirect firstInstance needs this
+	// feature; without it the batch is disabled (ZfillBatchEnabled) and mode 2 degrades to per-draw.
+	haveDrawIndirectFirstInstance = supported.drawIndirectFirstInstance == VK_TRUE;
+	enabled.drawIndirectFirstInstance = haveDrawIndirectFirstInstance ? VK_TRUE : VK_FALSE;
 
 	// discard in fragment shaders compiles to OpDemoteToHelperInvocation under
 	// the vulkan1.4 SPIR-V target (modern helper-invocation semantics rather
@@ -1784,26 +1803,28 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	// pair is missing the variant stays 0 and the Draw path falls back to normal zfill.
 	if ( r_vkBdaZfill.IsModified() ) {
 		r_vkBdaZfill.ClearModified();
-		if ( r_vkBdaZfill.GetBool() && zfillBdaShaderHandle == 0 ) {
+		if ( r_vkBdaZfill.GetInteger() != 0 && zfillBdaShaderHandle == 0 ) {
 			zfillShaderHandle = LoadShader( "zfill" );
-			zfillBdaShaderHandle = LoadShader( "zfill_bda" );
-			if ( zfillBdaShaderHandle == 0 ) {
-				common->Warning( "VK: r_vkBdaZfill needs zfill_bda.{vert,frag}.spv (shaders/spv) - BDA zfill disabled" );
+			zfillBdaShaderHandle = LoadShader( "zfill_bda" );		// mode 1
+			zfillBatchShaderHandle = LoadShader( "zfill_batch" );	// mode 2
+			if ( zfillBdaShaderHandle == 0 || zfillBatchShaderHandle == 0 ) {
+				common->Warning( "VK: r_vkBdaZfill needs zfill_bda + zfill_batch .spv (shaders/spv) - some modes disabled" );
 			}
 		}
 	}
 	// r_vkBdaZfill firing report (once/sec): confirms the consume path is actually active. The
-	// counters hold the frame that just ended; a non-zero "via device address" means BDA is live.
-	if ( r_vkBdaZfill.GetBool() ) {
+	// counters hold the frame that just ended; a non-zero "via device address"/"batched" means live.
+	if ( r_vkBdaZfill.GetInteger() != 0 ) {
 		unsigned int now = Sys_Milliseconds();
 		if ( now - bdaZfillLastPrint >= 1000 ) {
-			common->Printf( "VK BDA zfill: %d draws via device address, %d fell back (last frame)\n",
-			                bdaZfillDraws, bdaZfillFallback );
+			common->Printf( "VK BDA zfill: %d per-draw via device address, %d batched (1 indirect draw), %d fell back (last frame)\n",
+			                bdaZfillDraws, bdaZfillBatched, bdaZfillFallback );
 			bdaZfillLastPrint = now;
 		}
 	}
 	bdaZfillDraws = 0;
 	bdaZfillFallback = 0;
+	bdaZfillBatched = 0;
 
 	// vsync toggle → new present mode; window size change → new extent
 	if ( r_swapInterval.IsModified() ) {
@@ -2611,6 +2632,13 @@ void VulkanBackend::DestroyM2Resources() {
 	bufferAllocs.clear();
 	bufferMapped.clear();
 	bufferAddr.clear();
+	// the mode-2 batch buffers lived in the table just cleared; drop the stale handles so
+	// DrawZfillBatch reallocates rather than resolving a reused slot (Phase 3.2b).
+	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) {
+		batchObjBuf[i] = 0;
+		batchCmdBuf[i] = 0;
+		batchCapacity[i] = 0;
+	}
 	freeBufferSlots.clear();
 	ringOverflowWarned = false;
 	framePoolWarned = false;
@@ -5935,7 +5963,13 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	VkVertexInputBindingDescription binding = {};
 	VkVertexInputAttributeDescription attrs[6] = {};
 	uint32_t attrCount = 0;
-	if ( desc.vertexLayout == VL_DRAWVERT ) {
+	uint32_t bindingCount = 1;
+	if ( desc.vertexLayout == VL_NONE ) {
+		// no vertex input: the shader fetches vertices itself via device address
+		// (Phase 3.2b batched zfill). No bound vertex buffer, so no binding either.
+		bindingCount = 0;
+		attrCount = 0;
+	} else if ( desc.vertexLayout == VL_DRAWVERT ) {
 		binding.stride = sizeof( idDrawVert );
 		attrs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, (uint32_t)offsetof( idDrawVert, xyz ) };
 		attrs[1] = { 1, 0, VK_FORMAT_R32G32_SFLOAT,    (uint32_t)offsetof( idDrawVert, st ) };
@@ -5962,8 +5996,8 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 
 	VkPipelineVertexInputStateCreateInfo vin = {};
 	vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	vin.vertexBindingDescriptionCount = 1;
-	vin.pVertexBindingDescriptions = &binding;
+	vin.vertexBindingDescriptionCount = bindingCount;
+	vin.pVertexBindingDescriptions = bindingCount ? &binding : NULL;
 	vin.vertexAttributeDescriptionCount = attrCount;
 	vin.pVertexAttributeDescriptions = attrs;
 
@@ -6277,7 +6311,7 @@ void VulkanBackend::Draw( const DrawArgs &args ) {
 	// (same position bytes, same invariant u_mvpMatrix*pos, same clip/texcoord). Fires only for the
 	// flat (non-tessellated) zfill shader over an addressable persistent buffer; streamed/skinned
 	// surfaces report address 0 and fall through to the normal draw below.
-	if ( r_vkBdaZfill.GetBool() && zfillBdaShaderHandle != 0
+	if ( r_vkBdaZfill.GetInteger() >= 1 && zfillBdaShaderHandle != 0
 	     && currentDesc.shader == zfillShaderHandle && !currentDesc.tessellate ) {
 		unsigned long long vbAddr = GetBufferDeviceAddress( args.vertexBuffer );
 		if ( vbAddr != 0 ) {
@@ -6379,6 +6413,148 @@ void VulkanBackend::DrawIndexedIndirect( const DrawArgs &args, BufferHandle args
 
 /*
 ====================
+VulkanBackend::DrawZfillBatch
+
+Phase 3.2b consume — Increment 2. One non-indexed vkCmdDrawIndirect for the whole
+solid-opaque world-static depth-prepass bucket. Each item's geometry is addressed by
+device-address pointers (no bound vb/ib): the batch shader fetches the index via
+obj.ib[gl_VertexIndex] then the vertex via obj.vb[index], and the MVP from the same
+per-object record (indexed by gl_InstanceIndex == the command's firstInstance). Per-frame
+double-buffered SSBO (ObjRec[]) + VkDrawIndirectCommand[], both BU_STORAGE (host-visible,
+addressable, INDIRECT usage), grown on demand. The frontend gates this to front-sided
+(non-mirror) views over the flat solid bucket, so the state below matches the normal zfill.
+Pixel-identical: same MVP bytes, same invariant `mvp * vec4(pos,1)` -> bit-identical depth.
+====================
+*/
+void VulkanBackend::DrawZfillBatch( const ZfillBatchItem *items, int count ) {
+	if ( count <= 0 || !items || !frameOpen || skipFrame || !haveBufferDeviceAddress
+	     || zfillBatchShaderHandle == 0 || !haveDrawIndirectFirstInstance || !haveMultiDrawIndirect ) {
+		return;
+	}
+	EnsureScenePass();
+	if ( !insideScenePass ) {
+		return;
+	}
+	const int slot = frameIndex;
+	struct ObjRec { unsigned long long vb, ib; float mvp[16]; };	// 80 B, matches std430 (align 16)
+	const int objStride = (int)sizeof( ObjRec );
+	const int cmdStride = (int)sizeof( VkDrawIndirectCommand );
+
+	// grow the per-slot buffers to hold `count` objects (safe to destroy+recreate: this slot's
+	// prior contents were consumed FRAMES_IN_FLIGHT frames ago, fence-waited at BeginFrame).
+	if ( batchCapacity[slot] < count ) {
+		int newCap = batchCapacity[slot] ? batchCapacity[slot] : 256;
+		while ( newCap < count ) { newCap *= 2; }
+		if ( batchObjBuf[slot] ) { DestroyBuffer( batchObjBuf[slot] ); batchObjBuf[slot] = 0; }
+		if ( batchCmdBuf[slot] ) { DestroyBuffer( batchCmdBuf[slot] ); batchCmdBuf[slot] = 0; }
+		batchObjBuf[slot] = CreateBuffer( BU_STORAGE, newCap * objStride, NULL );
+		batchCmdBuf[slot] = CreateBuffer( BU_STORAGE, newCap * cmdStride, NULL );
+		batchCapacity[slot] = ( batchObjBuf[slot] && batchCmdBuf[slot] ) ? newCap : 0;
+	}
+	if ( batchObjBuf[slot] == 0 || batchCmdBuf[slot] == 0 ) {
+		return;		// alloc failed — skip (surfaces were skipped in the loop → a transient hole; dev path)
+	}
+	byte *objMap = bufferMapped[batchObjBuf[slot] - 1];
+	byte *cmdMap = bufferMapped[batchCmdBuf[slot] - 1];
+	if ( objMap == NULL || cmdMap == NULL ) {
+		return;
+	}
+	// write the object records + one indirect command per item straight into host-visible memory
+	for ( int i = 0; i < count; i++ ) {
+		ObjRec *r = (ObjRec *)( objMap + (size_t)i * objStride );
+		r->vb = items[i].vbAddr;
+		r->ib = items[i].ibAddr;
+		memcpy( r->mvp, items[i].mvp, sizeof( r->mvp ) );
+		VkDrawIndirectCommand *c = (VkDrawIndirectCommand *)( cmdMap + (size_t)i * cmdStride );
+		c->vertexCount = (uint32_t)items[i].indexCount;
+		c->instanceCount = 1;
+		c->firstVertex = 0;
+		c->firstInstance = (uint32_t)i;			// -> gl_InstanceIndex selects ObjRec i
+	}
+
+	unsigned long long objAddr = GetBufferDeviceAddress( batchObjBuf[slot] );
+	VkBuffer cmdVk = LookupBuffer( batchCmdBuf[slot] );
+	if ( objAddr == 0 || cmdVk == VK_NULL_HANDLE ) {
+		return;
+	}
+
+	VkCommandBuffer cb = frames[slot].cb;
+	ApplyDynState( cb, curFlipY );		// scene viewport + the frontend's reset scissor/bias
+
+	// batch pipeline: no vertex input (VL_NONE — verts fetched via BDA), the batch shader, and the
+	// flat solid zfill depth state. cullType default = CT_FRONT_SIDED (frontend gates to it).
+	PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_LESS;
+	pd.shader = zfillBatchShaderHandle;
+	pd.vertexLayout = VL_NONE;
+	pd.stencilState = SS_ALWAYS;
+	VkPipeline pipeline = GetPipeline( pd );
+	if ( pipeline == VK_NULL_HANDLE ) {
+		return;
+	}
+	vkCmdBindPipeline( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline );
+	boundPipeline = pipeline;					// keep the redundant-bind tracking honest
+	// the batch shader uses no descriptor sets (MVP/geometry all via BDA push constant), so bind none
+	vkCmdPushConstants( cb, pipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, (uint32_t)sizeof( objAddr ), &objAddr );
+	// count = deferred solid-opaque surfaces in one view, at most low thousands — far below the
+	// guaranteed maxDrawIndirectCount floor (65535 with multiDrawIndirect), so no clamp needed.
+	vkCmdDrawIndirect( cb, cmdVk, 0, (uint32_t)count, (uint32_t)cmdStride );
+	bdaZfillBatched += count;
+}
+
+/*
+====================
+VulkanBackend::ApplyDynState
+
+Flush the dynamic viewport/scissor/depth-bias when dirty (shared by BindForDraw and
+the batched DrawZfillBatch). effFlipY selects the scene's negative-height y-flip; the
+scene rects (vpRect/scRect) and bias (polyOfs factor/units) come from the Set* setters.
+====================
+*/
+void VulkanBackend::ApplyDynState( VkCommandBuffer cb, bool effFlipY ) {
+	if ( !dynStateDirty ) {
+		return;
+	}
+	// scene pass: negative-height viewport (y-up NDC like GL) with the GL bottom-left
+	// rect converted to Vulkan's top-left. Offscreen target pass: a plain top-left
+	// viewport at the target's height (the shadow map's projective write reads back
+	// self-consistently, matching GL).
+	const int renderH = curRenderH;
+	VkViewport v = {};
+	v.x = (float)vpRect[0];
+	v.width = (float)vpRect[2];
+	if ( effFlipY ) {
+		v.y = (float)renderH - (float)vpRect[1];
+		v.height = -(float)vpRect[3];
+	} else {
+		v.y = (float)vpRect[1];
+		v.height = (float)vpRect[3];
+	}
+	// shadow-map passes always want the full [0,1] depth range: the weapon/model
+	// depth hack (SetDepthRange) is a scene-only concern
+	v.minDepth = insideTargetPass ? 0.0f : depthRangeMin;
+	v.maxDepth = insideTargetPass ? 1.0f : depthRangeMax;
+	vkCmdSetViewport( cb, 0, 1, &v );
+
+	VkRect2D sc = {};
+	int sx = scRect[0], sy = scRect[1], sw = scRect[2], sh = scRect[3];
+	if ( sw < 0 ) { sw = 0; }
+	if ( sh < 0 ) { sh = 0; }
+	int top = effFlipY ? ( renderH - ( sy + sh ) ) : sy;
+	if ( sx < 0 ) { sw += sx; sx = 0; }
+	if ( top < 0 ) { sh += top; top = 0; }
+	if ( sw < 0 ) { sw = 0; }
+	if ( sh < 0 ) { sh = 0; }
+	sc.offset = { sx, top };
+	sc.extent = { (uint32_t)sw, (uint32_t)sh };
+	vkCmdSetScissor( cb, 0, 1, &sc );
+
+	vkCmdSetDepthBias( cb, polyOfsUnits, 0.0f, polyOfsFactor );
+	dynStateDirty = false;
+}
+
+/*
+====================
 VulkanBackend::BindForDraw
 
 Shared per-draw binding for Draw and DrawIndexedIndirect (viewport/scissor/depth-bias,
@@ -6426,44 +6602,7 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 		dynStateDirty = true;
 	}
 
-	if ( dynStateDirty ) {
-		// scene pass: negative-height viewport (y-up NDC like GL) with the GL
-		// bottom-left rect converted to Vulkan's top-left. Offscreen target
-		// pass: a plain top-left viewport at the target's height — the shadow
-		// map's projective write then reads back self-consistently (matches GL).
-		const int   renderH = curRenderH;
-		VkViewport v = {};
-		v.x = (float)vpRect[0];
-		v.width = (float)vpRect[2];
-		if ( effFlipY ) {
-			v.y = (float)renderH - (float)vpRect[1];
-			v.height = -(float)vpRect[3];
-		} else {
-			v.y = (float)vpRect[1];
-			v.height = (float)vpRect[3];
-		}
-		// shadow-map passes always want the full [0,1] depth range: the weapon/
-		// model depth hack (SetDepthRange) is a scene-only concern
-		v.minDepth = insideTargetPass ? 0.0f : depthRangeMin;
-		v.maxDepth = insideTargetPass ? 1.0f : depthRangeMax;
-		vkCmdSetViewport( cb, 0, 1, &v );
-
-		VkRect2D sc = {};
-		int sx = scRect[0], sy = scRect[1], sw = scRect[2], sh = scRect[3];
-		if ( sw < 0 ) { sw = 0; }
-		if ( sh < 0 ) { sh = 0; }
-		int top = effFlipY ? ( renderH - ( sy + sh ) ) : sy;
-		if ( sx < 0 ) { sw += sx; sx = 0; }
-		if ( top < 0 ) { sh += top; top = 0; }
-		if ( sw < 0 ) { sw = 0; }
-		if ( sh < 0 ) { sh = 0; }
-		sc.offset = { sx, top };
-		sc.extent = { (uint32_t)sw, (uint32_t)sh };
-		vkCmdSetScissor( cb, 0, 1, &sc );
-
-		vkCmdSetDepthBias( cb, polyOfsUnits, 0.0f, polyOfsFactor );
-		dynStateDirty = false;
-	}
+	ApplyDynState( cb, effFlipY );
 
 	if ( pipeline != boundPipeline ) {
 		vkCmdBindPipeline( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline );
