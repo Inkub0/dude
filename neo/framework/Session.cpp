@@ -1650,6 +1650,8 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 		common->Error( "couldn't load %s", fullMapName.c_str() );
 	}
 
+	int t_proc = Sys_Milliseconds();		// DUDE: load phase timing (see breakdown below)
+
 	// for the synchronous networking we needed to roll the angles over from
 	// level to level, but now we can just clear everything
 	usercmdGen->InitForNewMap();
@@ -1686,6 +1688,8 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 		}
 	}
 
+	int t_game = Sys_Milliseconds();		// DUDE: load phase timing
+
 	// actually purge/load the media
 	if ( !reloadingSameMap ) {
 		renderSystem->EndLevelLoad();
@@ -1694,6 +1698,8 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 		SetBytesNeededForMapLoad( mapString.c_str(), fileSystem->GetReadCount() );
 	}
 	uiManager->EndLevelLoad();
+
+	int t_media = Sys_Milliseconds();		// DUDE: load phase timing
 
 	if ( !idAsyncNetwork::IsActive() && !loadingSaveGame ) {
 		// run a few frames to allow everything to settle
@@ -1704,6 +1710,11 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 
 	int	msec = Sys_Milliseconds() - start;
 	common->Printf( "%6d msec to load %s\n", msec, mapString.c_str() );
+	// DUDE: per-phase breakdown to target load-time work. proc = renderSystem geometry
+	// (.proc); game = collision/AAS/entity spawn/script (InitFromNewMap); media =
+	// model/image/sound EndLevelLoad; settle = the 10 warm-up RunFrame()s.
+	common->Printf( "  load phases (msec): proc=%d game=%d media=%d settle=%d\n",
+		t_proc - start, t_game - t_proc, t_media - t_game, msec - ( t_media - start ) );
 
 	// let the renderSystem generate interactions now that everything is spawned
 	rw->GenerateAllInteractions();
