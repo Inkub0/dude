@@ -491,8 +491,31 @@ predicate collected nothing; fixed by **grouping surfaces by scissor** and drawi
 `DrawZfillBatch` per group re-wrote the *same* SSBO between draws that only execute at submit, so every group read
 the last group's data → surfaces blinked to black; fixed by **uploading all items once** and drawing per-group
 over sub-ranges (`firstInstance` = global index). **Adversarial review (pre-bugs): 0 defects on the std430/index
-math/lifetime/pixel-identity.** **Next — Increment 3:** feed the indirect commands from the GPU cull compute pass
-(`r_gpuCullLive`) + the `COMPUTE→DRAW_INDIRECT` barrier — the full GPU-driven pipeline.
+math/lifetime/pixel-identity.** **Phase 3.2b (the batched GPU-driven DRAW) is DONE and banked here.**
+
+#### Increment 3 (GPU-driven CULL for the prepass) — ❌ STRUCK (2026-08-15, recon-confirmed)
+**Do not build (as a prepass cull).** Two recons confirmed everything to wire a GPU cull→indirect-draw
+already exists — the `GPUCULL_SRC` kernel (`tr_main.cpp:713`) reproduces `R_CullLocalBox` and atomic-compacts
+`VkDrawIndexedIndirectCommand[]` + count; `R_GpuCull_RecordCandidate` (`tr_light.cpp:2264`) records candidates
+at the cull site; `vkCmdDrawIndexedIndirectCount` + `drawIndirectCount` are wired; only a one-line
+`COMPUTE→DRAW_INDIRECT` barrier widening (`VulkanBackend.cpp` Dispatch: add `VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT`
++ `VK_ACCESS_INDIRECT_COMMAND_READ_BIT`) is missing. **But it's architecturally redundant:** `R_CullLocalBox`
+runs inside `R_AddAmbientDrawsurfs` to build `viewDef->drawSurfs`, the list **every** pass consumes (ambient,
+interactions, shadows) — so a prepass GPU cull re-culls what the CPU already culled for those passes = **zero
+cull relief**. Retiring the CPU cull requires making *every* pass consume a GPU-produced list and dropping
+`drawSurfs` (no readback anywhere) — the whole-renderer rewrite below. The GPU-driven-cull endgame is
+**ray-query**, not this. The `r_gpuCullLive` primitive already banked the "validated GPU cull" milestone.
+
+#### Nice to have (future) — "refactor renderer in GPU" (full GPU-driven path)
+The genuinely-valuable version of GPU-driven culling: **every** pass (prepass, ambient, interaction, shadow)
+consumes a GPU-produced draw list instead of the CPU `drawSurfs`, so the CPU does only the coarse area-level
+portal flood (data-dependent, must stay CPU) and hands the GPU per-area static candidate ranges; the GPU
+frustum-culls + drives all draws, no GPU→CPU readback. **Enormous, high-risk (touches lighting/shadows/
+interactions), fps-neutral on current HW — not worth it for raster gains alone.** *Revisit at the RTX pivot:*
+ray-query needs geometry in GPU-addressable form (BLAS build + ray pipeline), and Increment 2's **BDA geometry
+addressing is already that groundwork** — a full GPU-driven path (GPU decides visibility → drives both raster
+*and* ray-query) is a real RTX enabler. So: parked as a deliberate RTX-era item, not a dead end. All the
+raster pieces (cull kernel, BDA geometry, indirect-count draw, the barrier one-liner) are in place to build on.
 
 ### Phase 4 — GPU shadow-volume generation — ❌ STRUCK (2026-08-10, recon-confirmed)
 **Do not build.** A recon of the residual stencil cost after Phase 0 concluded a GPU stencil-volume
@@ -537,8 +560,10 @@ Phase 2 (GPU skinning, VK) ── ✅ SHIPPED (gpuSkinVB; Milestone C audited wh
    └── Phase 3.0 (indirect-draw primitive) ── ✅ SHIPPED (feat/rhi-indirect-draw)
         └── Phase 3.1 (cull kernel, synthetic validation) ── ✅ SHIPPED (r_gpuCullTest)
              └── Phase 3.2a (cull the live surface set, no draw) ── ✅ SHIPPED + USER-VERIFIED (97bb4cd6, r_gpuCullLive)
-                  └── Phase 3.2b (indirect consume, VK-only): needs a UNIFIED GEOMETRY BUFFER (net-new)
-                       + per-object SSBO + COMPUTE→DRAW_INDIRECT barrier → retires pin #1 (light cull)
+                  └── Phase 3.2b (batched indirect DRAW via BDA) ── ✅ DONE + USER-VERIFIED (r_vkBdaZfill 2; BDA dissolved
+                       the "unified geometry buffer" blocker — no net-new buffer needed; verts+indices via device address)
+                       └── Increment 3 (GPU-driven CULL for the prepass) ── ❌ STRUCK (redundant w/ shared drawSurfs;
+                            real version = "refactor renderer in GPU", parked as an RTX-era nice-to-have)
 Phase 4 (GPU shadow-volume gen) ── ❌ STRUCK (subsumed by ray-query)
 Ray-query shadows (RTX pivot, after culling) ── retires pin #2 (stencil volumes); changes pixels (opt-in)
 ```
