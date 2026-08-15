@@ -227,6 +227,10 @@ public:
 	bool		ShouldImageBePartialCached();
 	void		WritePrecompressedImage();
 	bool		CheckPrecompressedImage( bool fullLoad );
+	// DUDE: the read+validate half of CheckPrecompressedImage (allocates *dataOut with
+	// R_StaticAlloc; caller frees). Split out so the parallel loader can read/inflate the
+	// .dds on a worker and keep the GL upload (UploadPrecompressedImage) on the main thread.
+	bool		ReadPrecompressedImage( byte **dataOut, int *lenOut );
 	void		UploadPrecompressedImage( byte *data, int len );
 	void		ActuallyLoadImage( bool checkForPrecompressed, bool fromBackEnd );
 	void		StartBackgroundImageLoad();
@@ -300,11 +304,17 @@ public:
 	// thread for GPU upload. NULL except between LoadImageCpu() and UploadImageCpu().
 	static const int	PARALLEL_MAX_LEVELS = 16;	// covers up to 32768px (log2)+1
 	struct parallelLoad_t {
+		// Vulkan: worker-decoded RGBA8 mip pyramid → CreateTexture2DPrebuilt on main
 		byte *			levelData[PARALLEL_MAX_LEVELS];	// R_StaticAlloc'd, level 0 = base
 		int				levelW[PARALLEL_MAX_LEVELS];
 		int				levelH[PARALLEL_MAX_LEVELS];
 		int				numLevels;
 		int				width, height;					// base level dimensions
+		// GL3: worker-read raw .dds bytes → UploadPrecompressedImage on main
+		byte *			precompressedData;				// R_StaticAlloc'd, NULL if not a .dds load
+		int				precompressedLen;
+		// GL3 non-.dds: worker can't replicate the GL decode path → main runs the serial load
+		bool			needsSerial;
 		bool			failed;							// decode failed → MakeDefault on main
 	};
 	parallelLoad_t *	parallelData;

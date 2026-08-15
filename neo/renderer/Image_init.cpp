@@ -65,7 +65,7 @@ idCVar idImageManager::image_preload( "image_preload", "1", CVAR_RENDERER | CVAR
 // DUDE: parallel level load. When enabled (Vulkan backend), EndLevelLoad decodes and
 // mip-maps eligible 2D images across worker threads, then uploads them on the main
 // thread. Off by default until verified pixel-identical; see level-load perf notes.
-idCVar r_parallelImageLoad( "r_parallelImageLoad", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "parallelize per-image decode + mipmap across worker threads at level load (Vulkan backend)" );
+idCVar r_parallelImageLoad( "r_parallelImageLoad", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "parallelize per-image load across worker threads at level load (VK: decode+mipmap; GL3: .dds read+inflate)" );
 idCVar r_parallelImageLoadThreads( "r_parallelImageLoadThreads", "0", CVAR_RENDERER | CVAR_INTEGER | CVAR_ARCHIVE, "worker threads for r_parallelImageLoad (0 = auto = hardware threads)" );
 idCVar idImageManager::image_useCompression( "image_useCompression", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
 		"Compress textures on load so they use less VRAM. 1 = compress with S3TC/DXT when uploading 2 = compress with BPTC when uploading (if available) "
@@ -2123,14 +2123,13 @@ void idImageManager::EndLevelLoad() {
 	}
 
 	// load the ones we do need, if we are preloading
-	// DUDE: parallel level load. On the Vulkan backend, decode + mipmap eligible plain
-	// 2D images across worker threads (LoadImageCpu, no GPU/GL state), then upload them
-	// on the main thread (UploadImageCpu). Cube/generator/partial images and the GL
-	// backend keep the serial ActuallyLoadImage path. Selection matches the serial
-	// condition exactly so behaviour is identical when the cvar is toggled.
-	const bool useParallel = r_parallelImageLoad.GetBool()
-		&& glConfig.rhiBackend
-		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	// DUDE: parallel level load. Worker threads do the CPU-heavy per-image work with no
+	// GPU/GL state (LoadImageCpu: Vulkan decodes + mipmaps the source; GL3 reads +
+	// inflates the .dds), then the main thread uploads (UploadImageCpu: VK pyramid, GL
+	// .dds blocks, or a serial fallback for GL non-.dds images). Cube/generator/partial
+	// images stay serial. Selection matches the serial condition exactly, so behaviour
+	// is identical when the cvar is off.
+	const bool useParallel = r_parallelImageLoad.GetBool();
 
 	if ( useParallel ) {
 		std::vector<idImage *> par;
