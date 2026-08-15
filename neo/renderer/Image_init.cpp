@@ -62,10 +62,11 @@ idCVar idImageManager::image_roundDown( "image_roundDown", "1", CVAR_RENDERER | 
 idCVar idImageManager::image_colorMipLevels( "image_colorMipLevels", "0", CVAR_RENDERER | CVAR_BOOL, "development aid to see texture mip usage" );
 idCVar idImageManager::image_preload( "image_preload", "1", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "if 0, dynamically load all images" );
 
-// DUDE: parallel level load. When enabled (Vulkan backend), EndLevelLoad decodes and
-// mip-maps eligible 2D images across worker threads, then uploads them on the main
-// thread. Off by default until verified pixel-identical; see level-load perf notes.
-idCVar r_parallelImageLoad( "r_parallelImageLoad", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "parallelize per-image load across worker threads at level load (VK: decode+mipmap; GL3: .dds read+inflate)" );
+// DUDE: parallel level load. EndLevelLoad does the CPU-heavy per-image work across
+// worker threads (VK: decode+mipmap; GL3: .dds read+inflate), then uploads on the main
+// thread. On by default — user-verified pixel-identical, ~6x (VK) / ~12x (GL3) on the
+// image phase, and the thread-safety locks are inert outside the load window.
+idCVar r_parallelImageLoad( "r_parallelImageLoad", "1", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "parallelize per-image load across worker threads at level load (VK: decode+mipmap; GL3: .dds read+inflate)" );
 idCVar r_parallelImageLoadThreads( "r_parallelImageLoadThreads", "0", CVAR_RENDERER | CVAR_INTEGER | CVAR_ARCHIVE, "worker threads for r_parallelImageLoad (0 = auto = hardware threads)" );
 idCVar idImageManager::image_useCompression( "image_useCompression", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
 		"Compress textures on load so they use less VRAM. 1 = compress with S3TC/DXT when uploading 2 = compress with BPTC when uploading (if available) "
