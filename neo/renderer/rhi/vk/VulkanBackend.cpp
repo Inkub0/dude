@@ -97,6 +97,8 @@ static idCVar r_vkComputeTest( "r_vkComputeTest", "0", CVAR_RENDERER | CVAR_BOOL
 	"Vulkan backend: run the compute-lane self-test (dispatch a kernel doubling a storage buffer, read back, verify) and print PASS/FAIL. Set to 1 to trigger (docs/gpu-offload-plan.md Phase 1)" );
 static idCVar r_fsr2Test( "r_fsr2Test", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: FSR2 bring-up self-test - size the scratch, build the FSR2 VK interface, create a Native-AA FSR2 context (no dispatch), destroy it, and print PASS/FAIL. Set to 1 to trigger (docs/fsr-temporal-pipeline.md, R1/C0)" );
+static idCVar r_mrt3Test( "r_mrt3Test", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: MRT plumbing self-test - create + destroy a 3-attachment velocity gbuffer (RGBA8 normal + RGBA8 SSR + RG16F velocity + depth, a distinct pass class) and print PASS/FAIL. Proves RG16F color attachments work on this driver. Set to 1 to trigger (docs/fsr-temporal-pipeline.md, R1/A0)" );
 
 static idCVar r_vkIndirectTest( "r_vkIndirectTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: route every indexed draw through the DrawIndexedIndirect primitive (a per-draw 1-command indirect ring) instead of vkCmdDrawIndexed. A pixel-identical A/B validating the Phase-3 indirect-draw seed (docs/gpu-offload-plan.md)" );
@@ -221,6 +223,7 @@ private:
 	void			ComputeSelfTest();							// r_vkComputeTest: dispatch a trivial kernel, read back, verify
 	void			BdaSelfTest();								// r_vkBdaTest: sum a buffer through its device-address pointer (Phase 3.2b BDA primitive)
 	void			Fsr2SelfTest();								// r_fsr2Test: init the vendored FSR2 VK backend + create/destroy a context
+	void			Mrt3SelfTest();								// r_mrt3Test: create/destroy a 3-MRT RG16F velocity gbuffer target
 
 	bool			CreateInstance();
 	bool			PickPhysicalDevice();
@@ -541,11 +544,11 @@ private:
 		//   * nested target (BeginTargetPass): one begin→draw→EndPass fullscreen pass,
 		//     served by colorClearPass alone.
 		bool			colorTarget = false;
-		int				colorCount = 0;					// 1 or 2 color attachments
-		VkFormat		colorFormat = VK_FORMAT_UNDEFINED;
-		VkImage			colorImage[2] = {};
-		VmaAllocation	colorAlloc[2] = {};
-		VkImageView		colorView[2] = {};				// level-0 attachment view (framebuffer)
+		int				colorCount = 0;					// 1-3 color attachments (3 = velocity gbuffer, R1/A0)
+		VkFormat		colorFormat[3] = {};			// per-attachment format (mixed for the 3-MRT velocity target)
+		VkImage			colorImage[3] = {};
+		VmaAllocation	colorAlloc[3] = {};
+		VkImageView		colorView[3] = {};				// level-0 attachment view (framebuffer)
 		// SSAO Phase 1 mip chain (colorMipLevels > 1, colorImage[0] only). colorView[0]
 		// stays level-0-only for the linearize framebuffer; colorSampleView[0] spans every
 		// level so the sampleable ImageRec can textureLod into coarser mips. The chain is
@@ -554,11 +557,11 @@ private:
 		// the next level's source. 1 = plain single-mip (none of the mip fields used).
 		int				colorMipLevels = 1;
 		static const int MAX_MIP = 8;
-		VkImageView		colorSampleView[2] = {};		// all-levels sample view (= colorView[] when 1 mip)
+		VkImageView		colorSampleView[3] = {};		// all-levels sample view (= colorView[] when 1 mip)
 		VkImageView		colorLevelView[MAX_MIP] = {};	// per-level single-level attachment/sample views (L>=1)
 		VkFramebuffer	colorLevelFb[MAX_MIP] = {};		// per-level downsample framebuffers (L>=1)
 		ImageHandle		colorLevelInput[MAX_MIP] = {};	// per-level single-level sampleable handles (source binds)
-		ImageHandle		colorSampleImage[2] = { 0, 0 };	// handles GetRenderTargetImage / 2 return
+		ImageHandle		colorSampleImage[3] = { 0, 0, 0 };	// handles GetRenderTargetImage / 2 return
 		bool			hasDepth = false;				// depth or depth-stencil attachment present
 		VkImage			dsImage = VK_NULL_HANDLE;
 		VmaAllocation	dsAlloc = NULL;
@@ -587,12 +590,13 @@ private:
 	}
 	int				AllocTargetSlot();			// index of a free targetTable slot (grows the table if needed)
 	bool			CreateDepthTarget( RenderTarget &t, int w, int h, bool cube );
-	// color target: colorCount 1-2 sampleable color attachments (colorFmt), plus a
-	// depth-stencil attachment when wantDepthStencil. frameCapable builds the extra
-	// load/clearDS pass variants a SetFrameTarget scene buffer needs (HDR).
+	// color target: colorCount 1-3 sampleable color attachments (colorFmt, or per-attachment
+	// via mrtFormats for the mixed 3-MRT velocity gbuffer), plus a depth-stencil attachment
+	// when wantDepthStencil. frameCapable builds the extra load/clearDS pass variants a
+	// SetFrameTarget scene buffer needs (HDR).
 	bool			CreateColorTarget( RenderTarget &t, int w, int h, VkFormat colorFmt,
 	                                   int colorCount, bool wantDepthStencil, bool frameCapable,
-	                                   int mipLevels = 1 );
+	                                   int mipLevels = 1, const VkFormat *mrtFormats = NULL );
 	bool			BuildColorPasses( RenderTarget &t, bool frameCapable );
 	void			FreeTargetObjects( RenderTarget &t );	// frees VK objects only (not the imageTable slot)
 	void			ReleaseTargetSampleSlots( RenderTarget &t );	// frees the imageTable slots a target lent out
@@ -1864,6 +1868,14 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 		r_fsr2Test.ClearModified();
 		if ( r_fsr2Test.GetBool() ) {
 			Fsr2SelfTest();
+		}
+	}
+
+	// MRT/format plumbing self-test (R1/A0): one-shot on the cvar toggle.
+	if ( r_mrt3Test.IsModified() ) {
+		r_mrt3Test.ClearModified();
+		if ( r_mrt3Test.GetBool() ) {
+			Mrt3SelfTest();
 		}
 	}
 
@@ -3753,6 +3765,38 @@ void VulkanBackend::Fsr2SelfTest() {
 
 /*
 ====================
+VulkanBackend::Mrt3SelfTest
+
+r_mrt3Test: MRT/format plumbing validation for the R1 motion-vector work (A0,
+docs/fsr-temporal-pipeline.md). Creates the 3-attachment velocity gbuffer layout
+(RGBA8 normal @0 + RGBA8 SSR @1 + RG16F velocity @2 + depth) through the normal target
+lifecycle, then destroys it. Proves RG16F is an accepted color-attachment format on this
+driver and that the distinct 3-MRT pass class (8) builds a valid render pass + framebuffer
+without aliasing class 6 (the shipping 2-attachment SSR normal prepass). No velocity is
+emitted and the frontend is untouched; with r_mrt3Test 0 no 3-MRT target is ever created.
+====================
+*/
+void VulkanBackend::Mrt3SelfTest() {
+	if ( device == VK_NULL_HANDLE ) {
+		common->Printf( "VK MRT3 self-test: unavailable (no VK device)\n" );
+		return;
+	}
+
+	RenderTargetHandle rt = CreateRenderTargetColorDepth( IF_RGBA8, 256, 256, 3 );
+	if ( rt == 0 ) {
+		common->Warning( "VK MRT3 self-test: FAIL - 3-MRT RG16F target creation failed (driver may reject RG16F as a color attachment)" );
+		return;
+	}
+
+	RenderTarget *t = LookupTarget( rt );
+	common->Printf( "VK MRT3 self-test: PASS - 3-MRT target (RGBA8 + RGBA8 + RG16F + depth, passClass %u) created\n",
+		t ? (unsigned)t->passClass : 0 );
+
+	DestroyRenderTarget( rt );			// full teardown (VK objects + imageTable slots)
+}
+
+/*
+====================
 VulkanBackend::GetSampler
 
 Sampler from the engine's textureFilter_t/textureRepeat_t. The GL path's
@@ -5194,7 +5238,7 @@ void VulkanBackend::BeginTargetPass( RenderTargetHandle rt, const ClearArgs *cle
 
 	if ( t->colorTarget ) {
 		// clear each color attachment (fullscreen draws overwrite it anyway) + ds
-		VkClearValue cv[3] = {};
+		VkClearValue cv[4] = {};		// up to 3 color + 1 depth (R1/A0)
 		if ( clear != NULL && clear->color ) {
 			for ( int c = 0; c < t->colorCount; c++ ) {
 				cv[c].color.float32[0] = clear->rgba[0]; cv[c].color.float32[1] = clear->rgba[1];
@@ -5272,7 +5316,7 @@ void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
 		if ( t.colorLevelFb[L] )   { vkDestroyFramebuffer( device, t.colorLevelFb[L], NULL ); t.colorLevelFb[L] = VK_NULL_HANDLE; }
 		if ( t.colorLevelView[L] ) { vkDestroyImageView( device, t.colorLevelView[L], NULL ); t.colorLevelView[L] = VK_NULL_HANDLE; }
 	}
-	for ( int c = 0; c < 2; c++ ) {
+	for ( int c = 0; c < 3; c++ ) {		// R1/A0: incl. the 3rd (RG16F velocity) attachment on a 3-MRT; unused slots are null-guarded
 		if ( t.colorSampleView[c] ) { vkDestroyImageView( device, t.colorSampleView[c], NULL ); t.colorSampleView[c] = VK_NULL_HANDLE; }
 		if ( t.colorView[c] )  { vkDestroyImageView( device, t.colorView[c], NULL ); t.colorView[c] = VK_NULL_HANDLE; }
 		if ( t.colorImage[c] ) { vmaDestroyImage( vma, t.colorImage[c], t.colorAlloc[c] ); t.colorImage[c] = VK_NULL_HANDLE; t.colorAlloc[c] = NULL; }
@@ -5283,8 +5327,8 @@ void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
 
 // free every imageTable slot a target lent out (depth sample + color samples)
 void VulkanBackend::ReleaseTargetSampleSlots( RenderTarget &t ) {
-	ImageHandle handles[3] = { t.sampleImage, t.colorSampleImage[0], t.colorSampleImage[1] };
-	for ( int i = 0; i < 3; i++ ) {
+	ImageHandle handles[4] = { t.sampleImage, t.colorSampleImage[0], t.colorSampleImage[1], t.colorSampleImage[2] };
+	for ( int i = 0; i < 4; i++ ) {
 		ImageHandle h = handles[i];
 		if ( h >= 1 && h <= (ImageHandle)imageTable.size() ) {
 			imageTable[h - 1] = ImageRec();
@@ -5301,7 +5345,7 @@ void VulkanBackend::ReleaseTargetSampleSlots( RenderTarget &t ) {
 		t.colorLevelInput[L] = 0;
 	}
 	t.sampleImage = 0;
-	t.colorSampleImage[0] = t.colorSampleImage[1] = 0;
+	t.colorSampleImage[0] = t.colorSampleImage[1] = t.colorSampleImage[2] = 0;
 }
 
 void VulkanBackend::DestroyRenderTarget( RenderTargetHandle rt ) {
@@ -5387,6 +5431,7 @@ uint8_t VulkanBackend::PassClassFor( VkFormat colorFmt, bool hasDepth, int color
 	}
 	// RGBA8 family (SSAO buffers later)
 	if ( !hasDepth )      { return 4; }		// color-only RGBA8
+	if ( colorCount >= 3 ) { return 8; }	// 3-MRT velocity gbuffer (RGBA8+RGBA8+RG16F+depth): distinct layout, MUST NOT alias class 6
 	return colorCount >= 2 ? 6 : 5;			// color+depth (+MRT)
 }
 
@@ -5399,10 +5444,10 @@ bool VulkanBackend::BuildColorPasses( RenderTarget &t, bool frameCapable ) {
 		const bool clearColor = ( v == 0 );			// clear resets color; load/clearDS keep it
 		const bool clearDS    = ( v == 0 || v == 2 );
 
-		VkAttachmentDescription atts[3] = {};
-		VkAttachmentReference   colorRefs[2] = {};
+		VkAttachmentDescription atts[4] = {};		// up to 3 color + 1 depth (R1/A0)
+		VkAttachmentReference   colorRefs[3] = {};
 		for ( int c = 0; c < nColor; c++ ) {
-			atts[c].format = t.colorFormat;
+			atts[c].format = t.colorFormat[c];
 			atts[c].samples = VK_SAMPLE_COUNT_1_BIT;
 			atts[c].loadOp = clearColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 			atts[c].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -5470,8 +5515,8 @@ bool VulkanBackend::BuildColorPasses( RenderTarget &t, bool frameCapable ) {
 
 bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat colorFmt,
                                        int colorCount, bool wantDepthStencil, bool frameCapable,
-                                       int mipLevels ) {
-	if ( device == VK_NULL_HANDLE || colorCount < 1 || colorCount > 2 ) {
+                                       int mipLevels, const VkFormat *mrtFormats ) {
+	if ( device == VK_NULL_HANDLE || colorCount < 1 || colorCount > 3 ) {
 		return false;
 	}
 	if ( wantDepthStencil && sceneDepthFormat == VK_FORMAT_UNDEFINED ) {
@@ -5481,7 +5526,9 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 	const bool mipped = mipLevels > 1;
 	t.colorTarget = true;
 	t.colorCount = colorCount;
-	t.colorFormat = colorFmt;
+	for ( int c = 0; c < colorCount; c++ ) {
+		t.colorFormat[c] = mrtFormats ? mrtFormats[c] : colorFmt;	// NULL = broadcast (bit-identical for existing callers)
+	}
 	t.hasDepth = wantDepthStencil;
 	t.colorMipLevels = mipLevels;
 	t.w = w;
@@ -5495,7 +5542,7 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		VkImageCreateInfo ici = {};
 		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 		ici.imageType = VK_IMAGE_TYPE_2D;
-		ici.format = colorFmt;
+		ici.format = t.colorFormat[c];
 		ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
 		ici.mipLevels = (uint32_t)mipLevels;
 		ici.arrayLayers = 1;
@@ -5518,7 +5565,7 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 		vwi.image = t.colorImage[c];
 		vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		vwi.format = colorFmt;
+		vwi.format = t.colorFormat[c];
 		vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		vwi.subresourceRange.levelCount = 1;
 		vwi.subresourceRange.layerCount = 1;
@@ -5573,7 +5620,7 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		return false;
 	}
 
-	VkImageView views[3] = {};
+	VkImageView views[4] = {};		// up to 3 color + 1 depth (R1/A0)
 	int nv = 0;
 	for ( int c = 0; c < colorCount; c++ ) { views[nv++] = t.colorView[c]; }
 	if ( wantDepthStencil ) { views[nv++] = t.dsView; }
@@ -5724,12 +5771,15 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetColorDepth( ImageFormat fmt,
 		common->Warning( "VK CreateRenderTargetColorDepth: only IF_RGBA8 supported" );
 		return 0;
 	}
-	if ( colorCount < 1 || colorCount > 2 ) {
-		common->Warning( "VK CreateRenderTargetColorDepth: colorCount must be 1 or 2" );
+	if ( colorCount < 1 || colorCount > 3 ) {
+		common->Warning( "VK CreateRenderTargetColorDepth: colorCount must be 1-3" );
 		return 0;
 	}
+	// colorCount 3 = the R1 velocity gbuffer: RGBA8 normal @0, RGBA8 SSR @1, RG16F velocity @2.
+	const VkFormat velFormats[3] = { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16_SFLOAT };
+	const VkFormat *mrt = ( colorCount == 3 ) ? velFormats : NULL;
 	int slot = AllocTargetSlot();
-	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R8G8B8A8_UNORM, colorCount, /*ds*/true, /*frameCapable*/false ) ) {
+	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R8G8B8A8_UNORM, colorCount, /*ds*/true, /*frameCapable*/false, /*mipLevels*/1, mrt ) ) {
 		targetTable[slot] = RenderTarget();
 		return 0;
 	}
@@ -6316,7 +6366,7 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	// blend-attachment count must match the active subpass: 0 for the depth-only
 	// shadow pass, 1 for the scene / HDR / color targets, 2 for an MRT target. The
 	// MRT attachments share one blend config (the SSR material buffer isn't blended).
-	VkPipelineColorBlendAttachmentState attArr[2] = { att, att };
+	VkPipelineColorBlendAttachmentState attArr[3] = { att, att, att };	// up to 3 color attachments (R1/A0)
 	cb.attachmentCount = (uint32_t)curColorAtt;
 	cb.pAttachments = ( curColorAtt > 0 ) ? attArr : NULL;
 

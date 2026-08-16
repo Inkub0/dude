@@ -91,7 +91,13 @@ per the fidelity policy).
 | **D** | Reactive + transparency/composition masks (additive particles, weapon) | L | VK | the real quality work | C2 |
 | **E** | Preset + menu wiring (Native-AA on the top VK tier) | M | VK | ships to users | C2 |
 
-### A0 — MRT/format plumbing (VK, self-test only)
+### A0 — MRT/format plumbing (VK, self-test only)  **[DONE + user-verified 2026-08-16]**
+
+`r_mrt3Test` PASS on the RTX 3080 Ti (`3-MRT target (RGBA8 + RGBA8 + RG16F + depth, passClass 8)
+created`). Adds `IF_RG16F` + per-attachment formats + a distinct 3-MRT pass class; bit-identical
+when off. Adversarial review confirmed the invariant and caught 3 dormant defects in the 3-MRT
+path (blend-array size, teardown leaks) — all fixed, so A2 gets a correct foundation.
+
 Land the riskiest structural change in isolation: a new `IF_RG16F` (→ `VK_FORMAT_R16G16_SFLOAT`)
 and a **3rd color attachment as a distinct VK pass class** that cannot alias class 6. No velocity
 emitted, no shader delta, no frontend change. An init-time smoke test creates a
