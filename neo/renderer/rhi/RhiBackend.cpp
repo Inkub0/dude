@@ -840,7 +840,13 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 		return;
 	}
 
-	const bool wantHdr = r_hdr.GetBool() && R_BackendSupportsEnhancements();
+	// r_fsr (R1/C1, Vulkan only) forces the offscreen RGBA16F scene buffer on even with r_hdr off:
+	// FSR2 (C2) wants an HDR scene, so r_fsr rides the same route-scene-into-rhiHdrRT path r_hdr uses
+	// (which already de-bands and gates worldless frames out). At C1 this is the whole effect —
+	// bit-identical to r_hdr on; the scene/HUD reorder + the FSR2 dispatch come in C2.
+	const bool wantHdr = ( r_hdr.GetBool()
+	                       || ( r_fsr.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) )
+	                     && R_BackendSupportsEnhancements();
 
 	// Off-HDR post (Vulkan only): the GL backend runs film grain / chromatic
 	// aberration per 3D view and gamma as a swap-time pass over the backbuffer, but
@@ -3267,6 +3273,12 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 		case RC_NOP:
 			break;
 		case RC_DRAW_VIEW:
+			// R1/C1 lands only r_fsr + the forced HDR scene path (below, in HdrBeginFrame). The
+			// scene/HUD REORDER (resolving the scene before the 2D overlays) is deferred to C2: a
+			// pure passthrough reorder has nowhere correct to composite the HUD — the old flow keeps
+			// scene+HUD together in the HDR buffer and blends the HUD in HDR, so resolving the scene
+			// to LDR first would dim translucent HUD panels. C2 introduces a display-res HDR composite
+			// target (FSR2 output) the HUD blends into in HDR, tonemapped at the very end.
 			RB_RHI_DrawView( r, ((const drawSurfsCommand_t *)cmds)->viewDef );
 			break;
 		case RC_SET_BUFFER: {

@@ -299,6 +299,7 @@ idCVar r_fxaaStrength( "r_fxaaStrength", "0.75", CVAR_RENDERER | CVAR_ARCHIVE | 
 // buffer instead of the 8-bit backbuffer, then resolve back. Phase A is look-neutral —
 // it removes fog/gradient banding without changing the image. GL3/Vulkan backends only.
 idCVar r_hdr( "r_hdr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "render the scene into a float (RGBA16F) buffer to remove banding (non-vanilla; opengl3/Vulkan only)" );
+idCVar r_fsr( "r_fsr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "AMD FSR2 temporal anti-aliasing / upscaler (docs/fsr-temporal-pipeline.md R1; Vulkan only). C1: forces the RGBA16F scene buffer on (FSR2's HDR input) — bit-identical to r_hdr on. The scene/HUD reorder and the FSR2 dispatch itself land in C2. Off = the frame is unchanged" );
 
 // DUDE Phase 3.5 "specular tuning" enhancement (GL3/Vulkan interaction shader
 // only; inert on the legacy ARB2 path). Defaults reproduce vanilla exactly:

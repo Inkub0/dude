@@ -244,7 +244,19 @@ never set `r_fsr`. **Validator:** builds + links; `ffxFsr2ContextCreate` succeed
 device (no dispatch); on a device *without* the required feature, device creation is unchanged and
 `r_fsr` reports a no-op.
 
-### C1 — pipeline reorder as a bit-identical passthrough (VK, `r_fsr` absent)
+### C1 — add `r_fsr` + force the HDR scene path  **[DONE + user-verified 2026-08-16]**
+
+**RE-SCOPED from the original "passthrough reorder" plan (below) after a user test.** The reorder was
+built and reverted: resolving the scene to LDR before the 2D overlays made the HUD slightly DIMMER,
+because with `r_hdr` on the old flow composites scene+HUD **together** in `rhiHdrRT` and blends
+translucent HUD panels over the **un-clamped HDR** scene. **Key insight: a passthrough reorder has
+nowhere correct to composite the HUD** — keeping scene+HUD in the HDR buffer and resolving at swap
+IS the old flow; the HUD-in-HDR fix needs a display-res **HDR composite** buffer, which is only
+needed once FSR2 actually inserts between the scene and the HUD. **So the reorder moved to C2.** C1
+is now just: `r_fsr` (VK-only, default 0, ARCHIVE) + `HdrBeginFrame`'s `wantHdr |= (r_fsr && VK)`
+forcing the RGBA16F scene path = **bit-identical to `r_hdr` on** (HUD stays in HDR, unchanged).
+User-verified: `r_fsr 1` indistinguishable from `r_fsr 0`. Original plan text below.
+
 Land the biggest OFF-path risk — the **scene/HUD target split** — as a pure passthrough with **no
 FSR2 dispatch**, so the deterministic structural change is bit-checkable separately from FSR2's
 non-deterministic output. Route the 3D world to a scene-only `rhiHdrRT` (no HUD); route the
@@ -259,9 +271,14 @@ across HUD+world / console-over-game / PDA-over-game / letterboxed-cinematic-wit
 menu frames.
 
 ### C2 — FSR2 context/dispatch, Native-AA (VK)
-The convergence point. Force the offscreen **RGBA16F** scene buffer on when `r_fsr` is on even if
-`r_hdr` is off (FSR2 wants HDR). New `RunFsr2` records FSR2's dispatch onto the frame command
-buffer **after the scene pass closes** (the RHI `Dispatch` refuses in-render-pass and records
+The convergence point. **C2 also inherits the scene/HUD REORDER deferred from C1** (see C1's
+re-scope note): FSR2 reads the scene (`rhiHdrRT`) before the 2D overlays and writes a **display-res
+HDR (RGBA16F) composite** buffer; the HUD/console/menu then composite into THAT buffer **in HDR**
+(so translucent panels keep the pre-tonemap brightness the old whole-frame path gave them — the
+thing C1's LDR reorder got wrong), and grain/chroma stay scene-only while gamma/tonemap is the
+final pass over the whole composite at swap. FSR2 forces the RGBA16F scene buffer on (already done
+in C1) even if `r_hdr` is off (FSR2 wants HDR). New `RunFsr2` records FSR2's dispatch onto the frame
+command buffer **after the scene pass closes** (the RHI `Dispatch` refuses in-render-pass and records
 pre-scene). Wrap inputs with `ffxGetTextureResourceVK`: color = `rhiHdrRT` (pre-tonemap RGBA16F),
 depth = scene depth aspect, motionVectors = A2's RG16F, output = a new display-res compute-write
 image. **Context flags (verified):** `HIGH_DYNAMIC_RANGE` set, `DEPTH_INFINITE` set,
