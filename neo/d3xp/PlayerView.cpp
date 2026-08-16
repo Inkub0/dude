@@ -33,6 +33,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "gamesys/SaveGame.h"
 #include "GameBase.h"
 #include "Player.h"
+#include "Weapon.h"
 
 #include "PlayerView.h"
 
@@ -67,6 +68,9 @@ idPlayerView::idPlayerView() {
 	lagoMaterial = declManager->FindMaterial( LAGO_MATERIAL, false );
 	bfgVision = false;
 	dvFinishTime = 0;
+	reloadFocusChangeTime = 0;
+	reloadFocusReloading = false;
+	reloadFocusHoldUntil = 0;
 	kickFinishTime = 0;
 	kickAngles.Zero();
 	lastDamageTime = 0.0f;
@@ -690,6 +694,37 @@ idPlayerView::RenderPlayerView
 */
 void idPlayerView::RenderPlayerView( idUserInterface *hud ) {
 	const renderView_t *view = player->GetRenderView();
+
+	// DUDE weapon-reload depth-of-field (RHI backends only): as the weapon reloads,
+	// focus on it and blur the world beyond. Drive a 0..1 envelope off the reload
+	// state, DEBOUNCED: the shotgun script drops to WP_READY for a single frame after
+	// every shell (so the player can fire mid-reload), so hold the blur alive across
+	// those brief gaps and only ease out once the whole sequence really ends --
+	// otherwise it pulses once per shell. Backend (r_dof) reads r_weaponReloadFocus.
+	const int RELOAD_FOCUS_IN_MS   = 160;
+	const int RELOAD_FOCUS_OUT_MS  = 200;
+	const int RELOAD_FOCUS_HOLD_MS = 80;	// bridge the ~1-frame per-shell WP_READY blips (min that stays safe to ~16fps render)
+	float reloadFocus = 0.0f;
+	if ( cvarSystem->GetCVarBool( "r_rhiActive" ) ) {
+		idWeapon *reloadWeapon = player->weapon.GetEntity();
+		if ( reloadWeapon && reloadWeapon->IsReloading() ) {
+			reloadFocusHoldUntil = gameLocal.time + RELOAD_FOCUS_HOLD_MS;
+		}
+		const bool active = gameLocal.time < reloadFocusHoldUntil;
+		if ( active != reloadFocusReloading ) {
+			reloadFocusReloading = active;
+			reloadFocusChangeTime = gameLocal.time;
+		}
+		const int since = gameLocal.time - reloadFocusChangeTime;
+		if ( reloadFocusReloading ) {
+			const float in = idMath::ClampFloat( 0.0f, 1.0f, (float)since / (float)RELOAD_FOCUS_IN_MS );
+			reloadFocus = in * in * ( 3.0f - 2.0f * in );
+		} else {
+			const float out = idMath::ClampFloat( 0.0f, 1.0f, (float)since / (float)RELOAD_FOCUS_OUT_MS );
+			reloadFocus = 1.0f - out * out * ( 3.0f - 2.0f * out );
+		}
+	}
+	cvarSystem->SetCVarFloat( "r_weaponReloadFocus", reloadFocus );
 
 	SingleView( hud, view );
 	ScreenFade();

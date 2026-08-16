@@ -461,6 +461,16 @@ idCVar r_occlusionMapsAutoBake( "r_occlusionMapsAutoBake", "0", CVAR_RENDERER | 
 // in the bump program (the source Doom 3 bakes its normals from), or an explicit `parallaxmap`
 // stage. Off = bit-for-bit vanilla with zero extra resident textures: no height map is loaded
 // unless r_parallax is set when the material is parsed. See docs/parallax.md.
+// DUDE weapon-reload depth-of-field: as the weapon reloads the game eases
+// r_weaponReloadFocus 0->1->0 (idPlayerView) and this blurs the world beyond the
+// gun, focusing on the reload. Non-vanilla, opt-in, off by default; opengl3/Vulkan.
+idCVar r_dof( "r_dof", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "weapon-reload depth-of-field: blur the world as the weapon reloads (opengl3/Vulkan). Non-vanilla, off by default" );
+idCVar r_dofBlurRadius( "r_dofBlurRadius", "6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "weapon-reload DoF: max world blur radius in pixels at full focus", 0.0f, 64.0f );
+idCVar r_dofFocusStart( "r_dofFocusStart", "0.35", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "weapon-reload DoF: scene raw-depth where the blur begins (the weapon stays sharp below this)", 0.0f, 1.0f );
+idCVar r_dofFocusEnd( "r_dofFocusEnd", "0.72", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "weapon-reload DoF: scene raw-depth where the blur reaches full strength", 0.0f, 1.0f );
+// game->renderer bridge, written by idPlayerView every frame (not a user knob):
+// the 0..1 reload focus envelope the DoF pass scales its blur by.
+idCVar r_weaponReloadFocus( "r_weaponReloadFocus", "0", CVAR_RENDERER | CVAR_FLOAT, "weapon-reload DoF strength (set by the game: eases 0->1->0 across the reload animation)" );
 idCVar r_parallax( "r_parallax", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "parallax occlusion mapping: per-pixel surface relief on materials that carry height data (auto-captured from `heightmap(...)` in the bump program, or an explicit `parallaxmap` stage). Non-vanilla; Vulkan only. Takes effect on the next reloadDecls/map load" );
 idCVar r_parallaxScale( "r_parallaxScale", "0.1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "global multiplier on per-material parallax height scale, 0..4 (0 = flat, higher exaggerates the relief; 0.1 = tuned default)", 0.0f, 4.0f );
 idCVar r_parallaxMinSteps( "r_parallaxMinSteps", "6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "parallax occlusion mapping: height-field march steps when viewing head-on (cheaper). Ramps up to r_parallaxMaxSteps at grazing angles", 1, 32 );
