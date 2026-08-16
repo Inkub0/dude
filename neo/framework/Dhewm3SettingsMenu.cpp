@@ -3554,6 +3554,65 @@ static void DrawDbgGroup_GpuOffload()
 	}
 }
 
+static void DrawDbgGroup_FSR()
+{
+	// FSR temporal pipeline (docs/fsr-temporal-pipeline.md). Motion vectors + jitter are the
+	// inputs FSR2 (R1) consumes; the debug views expose the velocity buffer. Vulkan only — the
+	// velocity MRT needs a float-colour render target the GL 3.3 backend doesn't have. VK is
+	// rhiBackend && !coreProfile (RenderSystem.h; see the running-backend combo above).
+	const bool isVulkan = glConfig.rhiBackend && !glConfig.coreProfile;
+	if ( BeginSettingsGroup( "FSR / Motion Vectors (Vulkan only)" ) ) {
+	ImGui::TextDisabled( "Motion vectors + sub-pixel jitter — the temporal inputs for FSR2 (in progress)." );
+	ImGui::Spacing();
+
+	if ( !isVulkan ) {
+		ImGui::TextDisabled( "Requires the Vulkan backend (velocity needs a float-colour render target)." );
+	}
+	ImGui::BeginDisabled( !isVulkan );
+
+	bool mv = r_motionVectors.GetBool();
+	if ( ImGui::Checkbox( "Motion Vectors (r_motionVectors)", &mv ) ) {
+		r_motionVectors.SetBool( mv );
+	}
+	AddTooltip( "Per-object screen-space motion vectors written into the normal G-buffer's 3rd MRT "
+		"(R1/A2). Forces the normal prepass on (an extra opaque pass). Feeds the temporal SSAO/SSR "
+		"reprojection so moving objects stop dragging a ghost, and — eventually — FSR2." );
+
+	ImGui::BeginDisabled( !r_motionVectors.GetBool() );
+
+	int mvDbg = r_mvDebug.GetInteger();
+	const char *mvDbgItems[] = { "off (feed consumers)", "direction (R=+x, G=+y)", "magnitude" };
+	if ( ImGui::Combo( "Debug View (r_mvDebug)", &mvDbg, mvDbgItems, IM_ARRAYSIZE( mvDbgItems ) ) ) {
+		r_mvDebug.SetInteger( mvDbg );
+	}
+	AddTooltip( "Visualize the velocity buffer over the scene. 1 = direction (static = flat grey, the "
+		"tint flips with motion); 2 = magnitude (black = no motion). Strafe / walk to see the geometry "
+		"light up by depth; a camera pan concentrates velocity at the screen edges. 0 to feed the consumers." );
+
+	float mvScale = r_mvDebugScale.GetFloat();
+	if ( ImGui::SliderFloat( "Debug Gain (r_mvDebugScale)", &mvScale, 1.0f, 40.0f, "%.0f" ) ) {
+		r_mvDebugScale.SetFloat( mvScale );
+	}
+	AddTooltip( "Amplifies the debug overlay only — per-frame screen velocities are tiny, so crank this "
+		"up to see slow motion. Does not affect the velocity fed to the consumers." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##mvscale" ) ) { r_mvDebugScale.SetFloat( 1.0f ); }
+
+	ImGui::EndDisabled();	// !r_motionVectors
+
+	bool jitter = r_temporalJitter.GetBool();
+	if ( ImGui::Checkbox( "Temporal Jitter (r_temporalJitter)", &jitter ) ) {
+		r_temporalJitter.SetBool( jitter );
+	}
+	AddTooltip( "Sub-pixel Halton(2,3) projection jitter per rendered frame — the temporal-supersampling "
+		"input for FSR2 (R1/B). On its own (no FSR2 resolve yet) the image just shimmers; it pays off once "
+		"FSR2 lands. Off = un-jittered projection, unchanged." );
+
+	ImGui::EndDisabled();	// !isVulkan
+	EndSettingsGroup();
+	}
+}
+
 // Shadow Maps, Emissive, Glass, SSAO and Occlusion Maps are enhancement-backend features:
 // each greys its OWN body out on the legacy renderer (BeginDisabled inside the group body,
 // so the collapsible header itself stays usable and the sections can be reordered freely).
@@ -4122,6 +4181,7 @@ static void DrawShadowDebugMenu()
 	DrawDbgGroup_Emissive();
 	DrawDbgGroup_SSR();
 	DrawDbgGroup_DepthOfField();
+	DrawDbgGroup_FSR();
 	DrawDbgGroup_Glass();
 	DrawDbgGroup_GpuOffload();
 }
