@@ -3434,6 +3434,59 @@ static void DrawDbgGroup_SSR()
 	}
 }
 
+static void DrawDbgGroup_DepthOfField()
+{
+	// Weapon-reload depth-of-field (r_dof): as a weapon reloads, the world beyond it
+	// blurs so the view pulls focus onto the gun. Eases in on reload start, holds across
+	// multi-shell reloads, eases out at the end. RHI backends only. The on/off switch
+	// rides the group header; the sliders are live tuning.
+	if ( BeginSettingsGroup( "Depth of Field (weapon reload)", &r_dof,
+			"r_dof: as a weapon reloads, blur the world beyond it so the view pulls focus\n"
+			"onto the gun. Eases in on reload start, holds across multi-shell reloads, eases\n"
+			"out at the end. Non-vanilla; opengl3 / Vulkan only. Off = vanilla." ) ) {
+
+		ImGui::BeginDisabled( !R_BackendSupportsEnhancements() );
+		if ( !R_BackendSupportsEnhancements() ) {
+			ImGui::TextDisabled( "Needs the opengl3 or Vulkan backend." );
+		}
+
+		float radius = r_dofBlurRadius.GetFloat();
+		if ( ImGui::SliderFloat( "Blur Radius", &radius, 0.0f, 64.0f, "%.0f" ) ) {
+			r_dofBlurRadius.SetFloat( radius );
+		}
+		ImGui::SameLine();
+		if ( ImGui::SmallButton( "reset##dofradius" ) ) { r_dofBlurRadius.SetFloat( 6.0f ); }
+		AddTooltip( "r_dofBlurRadius: maximum world blur radius in pixels at full focus. "
+			"Higher = stronger, dreamier blur; ~6 is a subtle default." );
+
+		float focusStart = r_dofFocusStart.GetFloat();
+		if ( ImGui::SliderFloat( "Focus Start", &focusStart, 0.0f, 1.0f, "%.2f" ) ) {
+			r_dofFocusStart.SetFloat( focusStart );
+		}
+		ImGui::SameLine();
+		if ( ImGui::SmallButton( "reset##dofstart" ) ) { r_dofFocusStart.SetFloat( 0.35f ); }
+		AddTooltip( "r_dofFocusStart: scene depth (0..1, hyperbolic) where the blur starts ramping. "
+			"The weapon sits below this and stays sharp - raise it if the gun itself softens." );
+
+		float focusEnd = r_dofFocusEnd.GetFloat();
+		if ( ImGui::SliderFloat( "Focus End", &focusEnd, 0.0f, 1.0f, "%.2f" ) ) {
+			r_dofFocusEnd.SetFloat( focusEnd );
+		}
+		ImGui::SameLine();
+		if ( ImGui::SmallButton( "reset##dofend" ) ) { r_dofFocusEnd.SetFloat( 0.72f ); }
+		AddTooltip( "r_dofFocusEnd: scene depth where the blur reaches full strength. "
+			"Lower it if the near world stays too sharp." );
+
+		ImGui::Spacing();
+		ImGui::Text( "Live reload focus: %.2f", r_weaponReloadFocus.GetFloat() );
+		AddTooltip( "r_weaponReloadFocus: the current 0..1 envelope the game drives during a reload "
+			"(read-only). Watch it rise to 1 while you reload and fall back to 0 after." );
+
+		ImGui::EndDisabled();
+		EndSettingsGroup();
+	}
+}
+
 // Shadow Maps, Emissive, Glass, SSAO and Occlusion Maps are enhancement-backend features:
 // each greys its OWN body out on the legacy renderer (BeginDisabled inside the group body,
 // so the collapsible header itself stays usable and the sections can be reordered freely).
@@ -4001,6 +4054,7 @@ static void DrawShadowDebugMenu()
 	DrawDbgGroup_PBR();
 	DrawDbgGroup_Emissive();
 	DrawDbgGroup_SSR();
+	DrawDbgGroup_DepthOfField();
 	DrawDbgGroup_Glass();
 }
 

@@ -1009,6 +1009,11 @@ extern idCVar r_occlusionMapScale;		// AO-map strength on the ambient term (0..1
 extern idCVar r_occlusionMapDirect;		// AO-map strength on direct-light diffuse (0..1 of scale)
 extern idCVar r_occlusionMapsAutoBake;	// DEV: lazily bake missing model AO maps on first sight
 
+extern idCVar r_dof;					// DUDE: weapon-reload depth-of-field master toggle (RHI)
+extern idCVar r_dofBlurRadius;			// DUDE: DoF max world blur radius (pixels)
+extern idCVar r_dofFocusStart;			// DUDE: DoF scene raw-depth where the blur begins
+extern idCVar r_dofFocusEnd;			// DUDE: DoF scene raw-depth where the blur maxes
+extern idCVar r_weaponReloadFocus;		// DUDE: DoF strength bridge (game-written 0..1 envelope)
 extern idCVar r_parallax;				// DUDE: master toggle for parallax occlusion mapping (Vulkan)
 extern idCVar r_parallaxScale;			// DUDE: global multiplier on per-material POM height scale
 extern idCVar r_parallaxMinSteps;		// DUDE: POM march steps head-on

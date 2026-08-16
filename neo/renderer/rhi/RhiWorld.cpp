@@ -4796,6 +4796,87 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 /*
 ===================
+RB_RHI_DepthOfField
+
+DUDE weapon-reload depth-of-field (r_dof). As the weapon reloads the game eases
+r_weaponReloadFocus 0->1->0 (idPlayerView::RenderPlayerView); this pass keeps the
+near, depth-hacked weapon sharp and blurs the world beyond it, scaled by that
+envelope. A single-pass depth-gated disc blur (depthoffield.frag) over the
+captured scene, drawn onto the live target at the end of the fullscreen 3D view
+(weapon included) before the tonemap/HUD, so it works on both RHI backends and in
+the HDR float path. Zero cost unless a reload is in progress (focus 0 early-outs).
+===================
+*/
+void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !r_dof.GetBool() || !R_BackendSupportsEnhancements() ) {
+		return;
+	}
+	const float focus = idMath::ClampFloat( 0.0f, 1.0f, r_weaponReloadFocus.GetFloat() );
+	if ( focus <= 0.0f ) {
+		return;		// not reloading -> nothing to blur
+	}
+	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
+		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
+		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
+		return;		// primary world view only (not mirrors / GUI renderDefs)
+	}
+
+	rhi::ShaderHandle prog = r->LoadShader( "depthoffield" );
+	if ( !prog ) {
+		return;
+	}
+
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+
+	// snapshot the finished scene colour and the sealed scene depth. The weapon
+	// view model was drawn into both with the depth hack, so it sits in the near
+	// depth band (reads as sharp) while the world beyond blurs.
+	globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1, viewDef->viewport.y1, w, h, true );
+	globalImages->currentDepthImage->CopyDepthbuffer( viewDef->viewport.x1, viewDef->viewport.y1, w, h, true );
+
+	const int colPotW = globalImages->currentRenderImage->uploadWidth  > 0 ? globalImages->currentRenderImage->uploadWidth  : w;
+	const int colPotH = globalImages->currentRenderImage->uploadHeight > 0 ? globalImages->currentRenderImage->uploadHeight : h;
+	const int depPotW = globalImages->currentDepthImage->uploadWidth   > 0 ? globalImages->currentDepthImage->uploadWidth   : w;
+	const int depPotH = globalImages->currentDepthImage->uploadHeight  > 0 ? globalImages->currentDepthImage->uploadHeight  : h;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.screenCorrection[0] = (float)w / colPotW;			// viewport uv -> _currentRender
+	parms.screenCorrection[1] = (float)h / colPotH;
+	parms.localParam0[0] = focus;
+	parms.localParam0[1] = idMath::ClampFloat( 0.0f, 64.0f, r_dofBlurRadius.GetFloat() );
+	parms.localParam0[2] = r_dofFocusStart.GetFloat();
+	parms.localParam0[3] = r_dofFocusEnd.GetFloat();
+	parms.localParam1[0] = (float)w / depPotW;				// viewport uv -> _currentDepth
+	parms.localParam1[1] = (float)h / depPotH;
+	parms.localParam1[2] = 1.0f / (float)w;					// pixel -> uv step for the blur disc
+	parms.localParam1[3] = 1.0f / (float)h;
+	// Vulkan stores the DEPTH capture top-down (native) while the colour capture reads
+	// upright under the same fullscreen-quad uv, so with one uv the depth is V-flipped
+	// relative to the colour (the weapon reads far, the far world reads near). Flip ONLY
+	// the depth sample's V on Vulkan; GL shares the framebuffer orientation for both, so
+	// 0 there. (The colour capture stays unflipped — it already displays upright.)
+	parms.windowCoord[0] = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ? 1.0f : 0.0f;
+
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
+	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	RB_RHI_BindUnit( 0, globalImages->currentRenderImage );
+	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	RB_RHI_DrawFullscreen( r, prog, parms, globalImages->currentRenderImage->rhiHandle );
+
+	// direct binds above; forget the tmu cache so later 2D/GUI binds re-issue
+	RB_RHI_ForgetTexBinds();
+}
+
+/*
+===================
 RB_RHI_DrawWorld
 
 Depth prepass + stencil shadows + per-light interactions, following the

@@ -232,6 +232,7 @@ void RB_RHI_FogAllLights( rhi::RHI *r, viewDef_s *viewDef );
 // GTAO debug overlay (r_ssaoDebug): blit the AO buffer over the finished 3D view.
 // Called at end-of-view so the scene passes don't overwrite it (RhiWorld.cpp).
 void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
+void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_s *viewDef );
 
 // DUDE screen-space reflections (docs/ssr.md): additive composite over the lit
 // opaque scene. Called at the shader-pass translucent split point (RhiWorld.cpp);

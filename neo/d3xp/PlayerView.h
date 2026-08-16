@@ -432,6 +432,10 @@ public:
 	int					AddWarp( idVec3 worldOrigin, float centerx, float centery, float initialRadius, float durationMsec );
 	void				FreeWarp( int id );
 #endif
+	// DUDE weapon-reload depth-of-field envelope state (drives r_weaponReloadFocus):
+	int					reloadFocusChangeTime;	// gameLocal.time of the last IsReloading edge
+	bool				reloadFocusReloading;	// debounced reload-active state (edge detection)
+	int					reloadFocusHoldUntil;	// keep the blur alive past the ~1-frame WP_READY gaps between shells
 };
 
 #endif /* !__GAME_PLAYERVIEW_H__ */
