@@ -140,7 +140,46 @@ other. Skip jitter on subview/mirror/xray/env-probe/screenshot and the 2D/HUD or
 **Validator:** `r_temporalJitter 0` AND `r_jitter 0` → projection matrix bit-identical
 (dump+diff 16 floats).
 
-### C0 — FSR2 vendoring + toolchain spike + conditional features (VK, build only)
+### C0 — FSR2 vendoring + toolchain spike + conditional features (VK, build only)  **[spike findings 2026-08-16]**
+
+**Toolchain RESOLVED (positive):** FSR2's Vulkan backend is **GLSL→SPIR-V via glslang**, not
+HLSL/DXC — `vk/CMakeLists.txt` compiles `shaders/ffx_fsr2_*_pass.glsl` with
+`-compiler=glslang --target-env vulkan1.1 -S comp -DFFX_GLSL=1` into `*_permutations.h`
+SPIR-V byte-array headers that `ffx_fsr2_shaders_vk.cpp` `#include`s. MIT, pure compute, no
+vendor blob, no runtime-shaderc dependency. So DUDE vendors *prebuilt* headers + the MIT C++
+API and compiles them with **no new build-time shader step**. (The "GLSL port needed?" worry is
+moot — already GLSL.) glslang compiles the shaders to valid SPIR-V on the dev box.
+
+**Open sub-task — how to generate the ~8 permutation headers (one-time, then vendored):** the
+generator (`FidelityFX_SC`) ships Windows-only; under `wine` it compiles every permutation to
+valid `.spv` but the final reflection/header-aggregation step fails (exit 3, silent). Native
+FFX_SC source not readily fetchable; `spirv-cross`/`spirv-reflect` not installed (but
+`spirv-dis`/`glslangValidator` are). Header format (from `ffx_fsr2_shaders_vk.cpp`): per pass a
+`PermutationKey` bitfield → `IndirectionTable[]` (dedup) → `PermutationInfo[]` of
+`{blobData, blobSize, num{Storage,Sampled}ImageResources, numUniformBufferResources,
+name/binding tables}`. Candidate paths: (A) native generator script (glslangValidator +
+SPIR-V reflection → emit FFX_SC's header format); (B) fix FFX_SC under wine; (C) locate/build
+native FFX_SC; (D) source pre-generated headers.
+
+**RESOLVED → path A, built + proven.** Wine FFX_SC is a dead end (`err:seh:check_noexcept` —
+MSVC exception in a `noexcept` fn during reflection; unfixable under wine). Native generator
+**[neo/libs/fsr2/gen_fsr2_vk_permutations.py]** replaces FidelityFX_SC for the glslang/VK path:
+per pass it compiles every permutation with the system `glslangValidator` (exact FFX_SC args),
+reflects bindings from `spirv-dis` (storage `rw_*` / sampled `r_*` / uniform `cb*`; immutable
+samplers `s_*` excluded — the VK backend owns those as set-0 `pImmutableSamplers`), dedups
+blobs, and emits the exact `PermutationKey` union + `IndirectionTable` + `PermutationInfo`
+format (self-consistent little-endian bit packing). **Proven:** all 8 headers generate clean
+(0 warnings; e.g. rcas 2 blobs, accumulate 48, luminance 1); `spirv-val` passes the blobs; and
+the *real* upstream `ffx_fsr2_shaders_vk.cpp` compiles cleanly against them. **Upstream FSR2
+Linux patches needed when vendoring** (MSVC-isms): `-DFFX_GCC` (empties `FFX_API __declspec`),
+`#include <cstddef>` (`size_t`), plus core/backend `_countof`, `<cwchar>` (`wcscmp`),
+`<codecvt>`/`<locale>` (`std::wstring_convert`). Remaining C0: vendor api+vk+headers into
+neo/libs/fsr2/, apply patches, wire CMakeLists (VK-guarded, imgui-style inline compile),
+VulkanBackend raw-handle accessors + conditional device features, `r_fsr2Test` link/create
+smoke test.
+
+Original plan text below.
+
 De-risk the top unknown: FSR2 kernels are authored in **HLSL** and its stock pipeline
 pre-compiles them, but DUDE has only a **shaderc GLSL→SPIR-V** runtime path. Resolve the shader
 production route — (a) offline DXC→SPIR-V blob vendoring (one-time build dep), or (b) a
