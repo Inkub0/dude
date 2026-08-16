@@ -351,16 +351,90 @@ static int  rhiSsaoDepthMipLevels = 0;					// mip count (0 = not built)
 
 // GTAO temporal accumulation (docs/ssao-gtao.md, r_ssaoTemporal). Two ping-ponged history
 // buffers hold the accumulated AO+bent so we can read last frame's result while writing
-// this one; the resolve reprojects it by camera motion (rhiSsaoPrevViewProj) and clamps
-// to the local current-frame range. History is invalidated on resize / lost context /
-// temporal toggle so a re-enable never blends stale data.
+// this one; the resolve reprojects it by camera motion (the shared rhiTemporalCam state
+// below) and clamps to the local current-frame range. History is invalidated on resize /
+// lost context / temporal toggle so a re-enable never blends stale data.
 static rhi::RenderTargetHandle rhiSsaoHistRT[2] = { 0, 0 };
 static int  rhiSsaoHistIdx  = 0;					// which history slot receives this frame's resolve
 static int  rhiSsaoHistW = 0, rhiSsaoHistH = 0;		// history buffer size (matches the AO buffer)
 static bool rhiSsaoHistValid = false;				// the read slot holds a usable previous frame
-static bool rhiSsaoHavePrevVP = false;				// rhiSsaoPrevViewProj holds a previous view-proj
-static float rhiSsaoPrevViewProj[16];				// previous frame's world->clip (proj * view)
 static float rhiSsaoJitterPhase = 0.0f;				// per-frame noise rotation (golden-ratio walk in [0,1))
+
+// ---- shared camera temporal state (docs/fsr-temporal-pipeline.md, increment A1) ----
+// The SSAO and SSR temporal resolves both reproject last frame's history by pure camera
+// motion, so both need the previous rendered frame's world->clip. They kept two private
+// copies before; this is the single source they now share (and that motion-vector
+// generation + FSR2 will consume). Only the main fullscreen view reaches either resolve
+// (both early-out on !viewEntitys / isSubview / !fullscreen), so exactly one view updates
+// this per rendered frame.
+//
+// prevViewProj holds the PREVIOUS frame's world->clip; it is advanced from a staged copy
+// exactly once per rendered frame (frame-count guarded) so the second consumer in a frame
+// still reprojects against the previous frame, not this frame's freshly-staged value. The
+// UN-jittered projection is staged so temporal jitter (increment B) never smears the
+// history. historyReset flags a camera cut / teleport (origin jump > r_temporalResetDist)
+// so the consumers drop stale history instead of leaning on the neighbourhood clamp.
+struct rhiTemporalCam_t {
+	float	prevViewProj[16];		// previous rendered frame's world->clip (un-jittered proj*view)
+	float	stagedViewProj[16];		// this frame's world->clip, promoted to prev next frame
+	idVec3	prevOrigin;				// previous frame's view origin (discontinuity detector)
+	idVec3	stagedOrigin;
+	int		stagedFrame;			// tr.frameCount of the last stage (once-per-frame advance guard)
+	bool	havePrevVP;				// prevViewProj holds a usable previous frame
+	bool	haveStaged;
+	bool	historyReset;			// this frame is a discontinuity (cut / teleport)
+};
+static rhiTemporalCam_t rhiTemporalCam;		// zero-initialised: haveStaged / havePrevVP start false
+
+// defined with the other matrix helpers further down; forward-declared for the temporal
+// helpers here (myGlMultMatrix already comes from a header)
+static bool R_InvertGLMatrix( const float in[16], float out[16] );
+
+// Advance prev<-staged once per rendered frame, classify a discontinuity, and build this
+// frame's reprojection (current view space -> previous frame's clip). Returns whether the
+// current view matrix inverted (reproj is valid); *prevUsable is true when a usable
+// previous frame exists AND this frame is not a cut.
+static bool RB_RHI_TemporalReproj( const viewDef_t *viewDef, float reproj[16], bool *prevUsable ) {
+	rhiTemporalCam_t &tc = rhiTemporalCam;
+
+	if ( tc.stagedFrame != tr.frameCount ) {			// first temporal consumer of a new frame
+		if ( tc.haveStaged ) {
+			memcpy( tc.prevViewProj, tc.stagedViewProj, sizeof( tc.prevViewProj ) );
+			tc.prevOrigin = tc.stagedOrigin;
+			tc.havePrevVP = true;
+		}
+		const float resetDist = r_temporalResetDist.GetFloat();
+		tc.historyReset = tc.havePrevVP && resetDist > 0.0f
+			&& ( viewDef->renderView.vieworg - tc.prevOrigin ).LengthSqr() > resetDist * resetDist;
+		tc.haveStaged  = false;
+		tc.stagedFrame = tr.frameCount;
+	}
+
+	float invViewCur[16];
+	const bool haveInv = R_InvertGLMatrix( viewDef->worldSpace.modelViewMatrix, invViewCur );
+	if ( haveInv ) {
+		myGlMultMatrix( invViewCur, tc.prevViewProj, reproj );
+	}
+	*prevUsable = tc.havePrevVP && !tc.historyReset;
+	return haveInv;
+}
+
+// Record this frame's world->clip (un-jittered) as next frame's "previous"; called by a
+// temporal resolve once it commits, so prev advances exactly once per rendered frame.
+static void RB_RHI_TemporalStageCur( const viewDef_t *viewDef ) {
+	rhiTemporalCam_t &tc = rhiTemporalCam;
+	myGlMultMatrix( viewDef->worldSpace.modelViewMatrix, viewDef->unjitteredProjectionMatrix, tc.stagedViewProj );
+	tc.stagedOrigin = viewDef->renderView.vieworg;
+	tc.haveStaged   = true;
+}
+
+// Drop the shared camera history (lost context / target realloc).
+static void RB_RHI_TemporalResetCam( void ) {
+	rhiTemporalCam.havePrevVP   = false;
+	rhiTemporalCam.haveStaged   = false;
+	rhiTemporalCam.historyReset = false;
+	rhiTemporalCam.stagedFrame  = -1;
+}
 
 // SSR render targets (docs/ssr.md, Phase C.2.1). RGBA16F so reflected HDR energy
 // survives the intermediate; the march renders at r_ssrResScale of the view and the
@@ -372,8 +446,6 @@ static rhi::RenderTargetHandle rhiSsrHistRT[2] = { 0, 0 };	// temporal history p
 static int  rhiSsrHistIdx = 0;						// which slot receives this frame's resolve
 static int  rhiSsrHistW = 0, rhiSsrHistH = 0;
 static bool rhiSsrHistValid = false;				// the read slot holds a usable previous frame
-static bool rhiSsrHavePrevVP = false;				// rhiSsrPrevViewProj holds a previous view-proj
-static float rhiSsrPrevViewProj[16];				// previous frame's world->clip (proj * view)
 static float rhiSsrJitterPhase = 0.0f;				// per-frame march jitter rotation
 // SSR Hi-Z (docs/ssao-perf-optimization.md, r_ssrHiZ): a min-Z (nearest-surface) linear-
 // depth mip chain at the SSR march resolution, so the march leaps provably-empty span.
@@ -2951,14 +3023,14 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoDepthMipRT = 0;		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
 	rhiSsaoHistRT[0] = rhiSsaoHistRT[1] = 0;
 	rhiSsaoHistIdx = 0;			rhiSsaoHistW = rhiSsaoHistH = 0;
-	rhiSsaoHistValid = false;	rhiSsaoHavePrevVP = false;
+	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();
 
 	rhiSsrRT = 0;				rhiSsrW = rhiSsrH = 0;
 	rhiSsrDepthMinRT = 0;		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
 	rhiSsrColorMipRT = 0;		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
 	rhiSsrHistRT[0] = rhiSsrHistRT[1] = 0;
 	rhiSsrHistIdx = 0;			rhiSsrHistW = rhiSsrHistH = 0;
-	rhiSsrHistValid = false;	rhiSsrHavePrevVP = false;
+	rhiSsrHistValid = false;
 
 	rhiNormalRT = 0;			rhiNormalW = rhiNormalH = 0;
 	rhiNormalReadyThisView = false;	rhiNormalMrt = false;
@@ -4444,17 +4516,12 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( r_ssrTemporal.GetBool() && RB_RHI_EnsureSsrHistory( r, ssrW, ssrH ) ) {
 		rhi::ShaderHandle tempProg = r->LoadShader( "ssr_temporal" );
 		if ( tempProg ) {
-			// current world->clip; kept for next frame as its "previous" reprojection
-			float curViewProj[16];
-			myGlMultMatrix( viewDef->worldSpace.modelViewMatrix, viewDef->projectionMatrix, curViewProj );
-
-			// reproj = (view space this frame -> world) then (world -> previous clip)
-			float invViewCur[16], reproj[16];
-			const bool haveInv = R_InvertGLMatrix( viewDef->worldSpace.modelViewMatrix, invViewCur );
-			if ( haveInv ) {
-				myGlMultMatrix( invViewCur, rhiSsrPrevViewProj, reproj );
-			}
-			const bool historyUsable = rhiSsrHistValid && rhiSsrHavePrevVP && haveInv;
+			// reproject last frame's reflection by camera motion; the shared camera state
+			// (docs/fsr-temporal-pipeline.md A1) advances prev<-cur once per rendered frame
+			float reproj[16];
+			bool prevUsable;
+			const bool haveInv = RB_RHI_TemporalReproj( viewDef, reproj, &prevUsable );
+			const bool historyUsable = rhiSsrHistValid && prevUsable && haveInv;
 
 			const int writeIdx = rhiSsrHistIdx;
 			const int readIdx  = 1 - rhiSsrHistIdx;
@@ -4491,8 +4558,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 			resultRT = rhiSsrHistRT[writeIdx];
 			rhiSsrHistIdx = readIdx;
-			memcpy( rhiSsrPrevViewProj, curViewProj, sizeof( curViewProj ) );
-			rhiSsrHavePrevVP = true;
+			RB_RHI_TemporalStageCur( viewDef );
 			rhiSsrHistValid  = true;
 		}
 	} else {
@@ -4783,17 +4849,12 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( r_ssaoTemporal.GetBool() && RB_RHI_EnsureSsaoHistory( r, aoW, aoH ) ) {
 		rhi::ShaderHandle tempProg = r->LoadShader( "ssao_temporal" );
 		if ( tempProg ) {
-			// current world->clip; kept for next frame as its "previous" reprojection
-			float curViewProj[16];
-			myGlMultMatrix( viewDef->worldSpace.modelViewMatrix, viewDef->projectionMatrix, curViewProj );
-
-			// reproj = (view space this frame -> world) then (world -> previous clip)
-			float invViewCur[16], reproj[16];
-			const bool haveInv = R_InvertGLMatrix( viewDef->worldSpace.modelViewMatrix, invViewCur );
-			if ( haveInv ) {
-				myGlMultMatrix( invViewCur, rhiSsaoPrevViewProj, reproj );
-			}
-			const bool historyUsable = rhiSsaoHistValid && rhiSsaoHavePrevVP && haveInv;
+			// reproject last frame's AO by camera motion; the shared camera state
+			// (docs/fsr-temporal-pipeline.md A1) advances prev<-cur once per rendered frame
+			float reproj[16];
+			bool prevUsable;
+			const bool haveInv = RB_RHI_TemporalReproj( viewDef, reproj, &prevUsable );
+			const bool historyUsable = rhiSsaoHistValid && prevUsable && haveInv;
 
 			const int writeIdx = rhiSsaoHistIdx;
 			const int readIdx  = 1 - rhiSsaoHistIdx;
@@ -4816,8 +4877,7 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 			rhiSsaoResultRT = rhiSsaoHistRT[writeIdx];	// accumulated AO the lighting samples
 			rhiSsaoHistIdx  = readIdx;					// next frame writes the other slot
-			memcpy( rhiSsaoPrevViewProj, curViewProj, sizeof( curViewProj ) );
-			rhiSsaoHavePrevVP = true;
+			RB_RHI_TemporalStageCur( viewDef );
 			rhiSsaoHistValid  = true;					// the write slot now holds a usable history
 		}
 	} else {

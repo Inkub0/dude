@@ -381,6 +381,11 @@ typedef struct viewDef_s {
 	renderView_t		renderView;
 
 	float				projectionMatrix[16];
+	// projectionMatrix with any sub-pixel jitter removed (bit-identical to projectionMatrix
+	// when r_jitter is off). Temporal consumers (SSAO/SSR reprojection, motion vectors, FSR2)
+	// must reproject against the un-jittered world->clip or the frame jitter smears the
+	// history. See docs/fsr-temporal-pipeline.md (increments A1/B).
+	float				unjitteredProjectionMatrix[16];
 	viewEntity_t		worldSpace;
 
 	idRenderWorldLocal *renderWorld;
@@ -981,6 +986,7 @@ extern idCVar r_ssaoSpecular;			// also attenuate specular in occluded areas
 extern idCVar r_ssaoDebug;				// 1=show AO buffer, 2=show bent normals
 extern idCVar r_ssaoTemporal;			// accumulate AO across frames via camera reprojection
 extern idCVar r_ssaoTemporalFeedback;	// temporal history weight (0..0.97)
+extern idCVar r_temporalResetDist;		// view-origin jump (world units) that resets temporal history (cut/teleport); 0 = never
 extern idCVar r_ssaoDepthMip;			// march the horizon search over a prefiltered linear-depth mip chain (Phase 1)
 extern idCVar r_ssaoDepthMipBias;		// depth-mip LOD aggressiveness (log2(stepPix * bias))
 extern idCVar r_ssaoDepthMipMaxLod;		// depth-mip coarseness cap (kills far-tap halos)

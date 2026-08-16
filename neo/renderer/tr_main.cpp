@@ -1350,6 +1350,15 @@ void R_SetupProjection( viewDef_t * viewDef ) {
 	viewDef->projectionMatrix[7] = 0;
 	viewDef->projectionMatrix[11] = -1;
 	viewDef->projectionMatrix[15] = 0;
+
+	// Un-jittered copy for the temporal consumers (docs/fsr-temporal-pipeline.md A1/B).
+	// Only the frustum-shear terms [8]/[9] carry the jitter (this frustum is symmetric, so
+	// they are 0 un-jittered); everything else is jitter-independent. Subtracting the jitter
+	// back out of xmin/xmax/ymin/ymax is exactly a no-op when r_jitter is off (jitterx/y == 0),
+	// so projectionMatrix and unjitteredProjectionMatrix are bit-for-bit identical today.
+	memcpy( viewDef->unjitteredProjectionMatrix, viewDef->projectionMatrix, sizeof( viewDef->projectionMatrix ) );
+	viewDef->unjitteredProjectionMatrix[8] = ( ( xmax - jitterx ) + ( xmin - jitterx ) ) / width;
+	viewDef->unjitteredProjectionMatrix[9] = ( ( ymax - jittery ) + ( ymin - jittery ) ) / height;
 }
 
 /*
