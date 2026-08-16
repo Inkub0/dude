@@ -36,6 +36,9 @@ If you have questions concerning this license or the applicable additional terms
 	#include <unistd.h>
 #endif
 
+#include <atomic>
+#include <mutex>
+
 #include "sys/platform.h"
 
 #ifdef ID_ENABLE_CURL
@@ -398,9 +401,11 @@ private:
 	friend int				BackgroundDownloadThread( void *pexit );
 
 	searchpath_t *			searchPaths;
-	int						readCount;			// total bytes read
-	int						loadCount;			// total files read
-	int						loadStack;			// total files in memory
+	// DUDE: atomic so the parallel image-load workers can bump them without a torn
+	// read-modify-write (they are otherwise plain diagnostic/progress counters).
+	std::atomic<int>		readCount;			// total bytes read
+	std::atomic<int>		loadCount;			// total files read
+	std::atomic<int>		loadStack;			// total files in memory
 	idStr					gameFolder;			// this will be a single name without separators
 
 	searchpath_t			*addonPaks;			// not loaded up, but we saw them
@@ -3224,7 +3229,33 @@ Used for streaming data out of either a
 separate file or a ZIP file.
 ===========
 */
+// DUDE: parallel level load. The file-open path walks the shared searchpath list,
+// re-opens zip handles and mutates the mod-compat script table, so it must be
+// serialized when worker threads open images concurrently. The subsequent reads use
+// per-file handles (unzReOpen gives each open its own cursor) and stay lock-free, so
+// zlib inflate still runs in parallel. Recursive so ReadFile->OpenFileRead nesting is
+// safe; near-zero cost (one relaxed atomic load) when disabled.
+static std::atomic<bool>		fs_threadSafe( false );
+static std::recursive_mutex		fs_threadMutex;
+
+void FS_SetThreadReadSafe( bool enable ) {
+	fs_threadSafe.store( enable, std::memory_order_release );
+}
+
+namespace {
+	struct FsGate {
+		bool locked;
+		FsGate() : locked( fs_threadSafe.load( std::memory_order_acquire ) ) {
+			if ( locked ) { fs_threadMutex.lock(); }
+		}
+		~FsGate() {
+			if ( locked ) { fs_threadMutex.unlock(); }
+		}
+	};
+}
+
 idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int searchFlags, pack_t **foundInPak, bool allowCopyFiles, const char* gamedir ) {
+	FsGate _g;
 	idFile *result = OpenFileReadFlagsRaw( relativePath, searchFlags, foundInPak, allowCopyFiles, gamedir );
 
 	// DUDE: mod-compat script-compile dedup — mark a .script basename as

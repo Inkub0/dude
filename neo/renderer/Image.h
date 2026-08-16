@@ -227,6 +227,10 @@ public:
 	bool		ShouldImageBePartialCached();
 	void		WritePrecompressedImage();
 	bool		CheckPrecompressedImage( bool fullLoad );
+	// DUDE: the read+validate half of CheckPrecompressedImage (allocates *dataOut with
+	// R_StaticAlloc; caller frees). Split out so the parallel loader can read/inflate the
+	// .dds on a worker and keep the GL upload (UploadPrecompressedImage) on the main thread.
+	bool		ReadPrecompressedImage( byte **dataOut, int *lenOut );
 	void		UploadPrecompressedImage( byte *data, int len );
 	void		ActuallyLoadImage( bool checkForPrecompressed, bool fromBackEnd );
 	void		StartBackgroundImageLoad();
@@ -236,6 +240,15 @@ public:
 									 textureDepth_t minimumDepth ) const;
 	void		ImageProgramStringToCompressedFileName( const char *imageProg, char *fileName ) const;
 	int			NumLevelsForImageSize( int width, int height ) const;
+
+	// DUDE: parallel level load (r_parallelImageLoad, Vulkan backend). LoadImageCpu()
+	// runs on a worker thread: it decodes the source and builds the RGBA8 mip pyramid
+	// into parallelData, touching no GPU/GL state. UploadImageCpu() runs afterwards on
+	// the main thread: it hands the pyramid to the RHI and frees parallelData. Split so
+	// the CPU-heavy decode+mipmap work parallelizes while the (non-thread-safe) GPU
+	// submit stays serial. Mirrors the Vulkan branch of ActuallyLoadImage/GenerateImage.
+	bool		LoadImageCpu();
+	void		UploadImageCpu();
 
 	// data commonly accessed is grouped here
 	static const int TEXTURE_NOT_LOADED = -1;
@@ -286,6 +299,25 @@ public:
 	idImage *			hashNext;				// for hash chains to speed lookup
 
 	int					refCount;				// overall ref count
+
+	// DUDE: parallel level load. Worker-built RGBA8 mip pyramid, handed to the main
+	// thread for GPU upload. NULL except between LoadImageCpu() and UploadImageCpu().
+	static const int	PARALLEL_MAX_LEVELS = 16;	// covers up to 32768px (log2)+1
+	struct parallelLoad_t {
+		// Vulkan: worker-decoded RGBA8 mip pyramid → CreateTexture2DPrebuilt on main
+		byte *			levelData[PARALLEL_MAX_LEVELS];	// R_StaticAlloc'd, level 0 = base
+		int				levelW[PARALLEL_MAX_LEVELS];
+		int				levelH[PARALLEL_MAX_LEVELS];
+		int				numLevels;
+		int				width, height;					// base level dimensions
+		// GL3: worker-read raw .dds bytes → UploadPrecompressedImage on main
+		byte *			precompressedData;				// R_StaticAlloc'd, NULL if not a .dds load
+		int				precompressedLen;
+		// GL3 non-.dds: worker can't replicate the GL decode path → main runs the serial load
+		bool			needsSerial;
+		bool			failed;							// decode failed → MakeDefault on main
+	};
+	parallelLoad_t *	parallelData;
 };
 
 ID_INLINE idImage::idImage() {
@@ -320,6 +352,7 @@ ID_INLINE idImage::idImage() {
 	cacheUsagePrev = cacheUsageNext = NULL;
 	hashNext = NULL;
 	refCount = 0;
+	parallelData = NULL;
 }
 
 

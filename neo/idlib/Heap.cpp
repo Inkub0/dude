@@ -31,6 +31,9 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "idlib/Heap.h"
 
+#include <atomic>
+#include <mutex>
+
 #ifndef USE_LIBC_MALLOC
 	#define USE_LIBC_MALLOC		0
 #endif
@@ -1059,6 +1062,31 @@ void Mem_UpdateFreeStats( int size ) {
 }
 
 
+// DUDE: parallel level load. The idHeap free-lists are not thread-safe; during the
+// parallel image-load phase (r_parallelImageLoad) worker threads allocate through
+// Mem_Alloc/Free, so we gate every allocation on a global lock. When disabled (the
+// steady-state 60fps case) each call pays only one relaxed atomic load + a
+// predicted-not-taken branch, so the render loop is unaffected. recursive_mutex so a
+// FatalError raised while the lock is held (which itself allocates) cannot self-deadlock.
+static std::atomic<bool>		mem_threadSafe( false );
+static std::recursive_mutex		mem_threadMutex;
+
+void Mem_SetThreadSafe( bool enable ) {
+	mem_threadSafe.store( enable, std::memory_order_release );
+}
+
+namespace {
+	struct MemGate {
+		bool locked;
+		MemGate() : locked( mem_threadSafe.load( std::memory_order_acquire ) ) {
+			if ( locked ) { mem_threadMutex.lock(); }
+		}
+		~MemGate() {
+			if ( locked ) { mem_threadMutex.unlock(); }
+		}
+	};
+}
+
 #ifndef ID_DEBUG_MEMORY
 
 /*
@@ -1076,6 +1104,7 @@ void *Mem_Alloc( const int size ) {
 #endif
 		return malloc( size );
 	}
+	MemGate _g;
 	void *mem = mem_heap->Allocate( size );
 	Mem_UpdateAllocStats( mem_heap->Msize( mem ) );
 	return mem;
@@ -1097,6 +1126,7 @@ void Mem_Free( void *ptr ) {
 		free( ptr );
 		return;
 	}
+	MemGate _g;
 	Mem_UpdateFreeStats( mem_heap->Msize( ptr ) );
 	mem_heap->Free( ptr );
 }
@@ -1116,6 +1146,7 @@ void *Mem_Alloc16( const int size ) {
 #endif
 		return malloc( size );
 	}
+	MemGate _g;
 	void *mem = mem_heap->Allocate16( size );
 	// make sure the memory is 16 byte aligned
 	assert( ( ((intptr_t)mem) & 15) == 0 );
@@ -1138,6 +1169,7 @@ void Mem_Free16( void *ptr ) {
 		free( ptr );
 		return;
 	}
+	MemGate _g;
 	// make sure the memory is 16 byte aligned
 	assert( ( ((intptr_t)ptr) & 15) == 0 );
 	mem_heap->Free16( ptr );

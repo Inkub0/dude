@@ -153,6 +153,12 @@ public:
 	virtual void			DestroyImage( ImageHandle h );
 	virtual ImageHandle		CreateTexture2D( int w, int h, const void *pixels,
 	                                         int textureFilter, int textureRepeat, bool allowMips );
+	virtual ImageHandle		CreateTexture2DPrebuilt( int w, int h, const PrebuiltMip *levels,
+	                                                 int numLevels, int textureFilter,
+	                                                 int textureRepeat );
+	ImageHandle				UploadTexture2DLevels( int w, int h, const PrebuiltMip *levels,
+	                                               int numLevels, int textureFilter,
+	                                               int textureRepeat );	// shared by the two above
 	virtual ImageHandle		CreateTextureCube( int size, const void * const pics[6],
 	                                           int textureFilter, bool allowMips );
 	virtual ShaderHandle	LoadShader( const char *name );
@@ -3737,11 +3743,11 @@ ImageHandle VulkanBackend::CreateTexture2D( int w, int h, const void *pixels,
 		return 0;
 	}
 
-	// build the level list (level 0 borrows the caller's pixels)
-	struct level_t { const byte *data; int w, h; };
-	std::vector<level_t> levels;
+	// build the RGBA8 mip chain on the calling thread (level 0 borrows the caller's
+	// pixels), then hand it to the shared uploader
+	std::vector<PrebuiltMip> levels;
 	std::vector<byte *> owned;		// R_MipMap results to free
-	levels.push_back( { (const byte *)pixels, w, h } );
+	levels.push_back( { pixels, w, h } );
 	if ( allowMips ) {
 		const bool preserveBorder = ( textureRepeat == TR_CLAMP_TO_ZERO );
 		const byte *src = (const byte *)pixels;
@@ -3755,6 +3761,55 @@ ImageHandle VulkanBackend::CreateTexture2D( int w, int h, const void *pixels,
 			src = shrunk;
 		}
 	}
+
+	ImageHandle handle = UploadTexture2DLevels( w, h, levels.data(), (int)levels.size(),
+		textureFilter, textureRepeat );
+
+	for ( size_t i = 0; i < owned.size(); i++ ) { R_StaticFree( owned[i] ); }
+	return handle;
+}
+
+/*
+====================
+VulkanBackend::CreateTexture2DPrebuilt
+
+DUDE parallel image load: the RGBA8 mip chain was built on a worker thread; just
+upload it here on the main thread (GPU submit is not thread-safe — one shared
+uploadCb/uploadFence). The worker owns and frees the level buffers.
+====================
+*/
+ImageHandle VulkanBackend::CreateTexture2DPrebuilt( int w, int h, const PrebuiltMip *levels,
+                                                    int numLevels, int textureFilter,
+                                                    int textureRepeat ) {
+	return UploadTexture2DLevels( w, h, levels, numLevels, textureFilter, textureRepeat );
+}
+
+/*
+====================
+VulkanBackend::UploadTexture2DLevels
+
+Shared GPU upload for CreateTexture2D / CreateTexture2DPrebuilt: stage the supplied
+RGBA8 mip levels and copy them into a new sampled image with a blocking submit. Does
+not own the level buffers (the caller frees them once this returns).
+====================
+*/
+ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMip *inLevels,
+                                                  int numLevels, int textureFilter,
+                                                  int textureRepeat ) {
+	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 || numLevels < 1 || inLevels == NULL
+			|| inLevels[0].data == NULL || uploadCb == VK_NULL_HANDLE ) {
+		return 0;
+	}
+
+	// mirror into the local descriptor type the rest of this function already uses;
+	// owned stays empty because the caller owns the level pixel buffers
+	struct level_t { const byte *data; int w, h; };
+	std::vector<level_t> levels;
+	levels.reserve( numLevels );
+	for ( int i = 0; i < numLevels; i++ ) {
+		levels.push_back( { (const byte *)inLevels[i].data, inLevels[i].w, inLevels[i].h } );
+	}
+	std::vector<byte *> owned;
 
 	VkDeviceSize total = 0;
 	for ( size_t i = 0; i < levels.size(); i++ ) {

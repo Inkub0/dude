@@ -332,7 +332,10 @@ static void R_ImageAdd( byte *data1, int width1, int height1, byte *data2, int w
 
 
 // we build a canonical token form of the image program here
-static char parseBuffer[MAX_IMAGE_NAME];
+// DUDE: thread_local so parallel image-load workers (r_parallelImageLoad) each parse
+// into their own buffer instead of clobbering a shared one. Reset per top-level call
+// in R_LoadImageProgram / R_ParsePastImageProgram, so per-thread storage is correct.
+static thread_local char parseBuffer[MAX_IMAGE_NAME];
 
 /*
 ===================
