@@ -149,6 +149,13 @@ typedef struct srfTriangles_s {
 	int							gpuSkinVerts;			// vert count the buffer was sized for (realloc on change)
 	int							gpuSkinFrame;			// tr.frameCount it was last dispatched (skin once/frame)
 
+	// Milestone D (docs/gpu-offload-plan.md; Vulkan only, opt-in r_gpuSkinStripCpu): when true the CPU
+	// position skin (TransformVerts) was SKIPPED this frame for this surface — verts[].xyz is invalid
+	// and the surface draws solely from gpuSkinVB. bounds came from the cheap joint-reach CalcBoundsFast,
+	// and downstream position readers (light-cull, ambient upload) route around verts. Only set when the
+	// frame proved it safe: no stencil-shadow light in view, no overlay/decal, non-deform, no skin-scale.
+	bool						cpuSkinStripped;		// true = verts[].xyz not CPU-skinned this frame
+
 	// Roadmap B: compute "deform once, draw everywhere" tessellation (docs/tessellation.md; Vulkan
 	// only, r_tessDeform). When non-zero, a per-frame compute pass PN+displaced this surface into
 	// tessDeformVB (an expanded BU_SKIN vertex buffer), with tessDeformIB its expanded 32-bit index

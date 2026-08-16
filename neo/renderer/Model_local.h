@@ -148,6 +148,12 @@ public:
 	void						ParseMesh( idLexer &parser, int numJoints, const idJointMat *joints );
 	void						UpdateSurface( const struct renderEntity_s *ent, const idJointMat *joints, modelSurface_t *surf );
 	idBounds					CalcBounds( const idJointMat *joints );
+	// Milestone D (docs/gpu-offload-plan.md): a CHEAP conservative bound from the joint palette only —
+	// O(joints used), no per-vertex skin. Unions each used joint's world origin +/- its precomputed
+	// reach radius (skinBoundJoint/Reach). The AABB over those spheres contains the convex hull of all
+	// weighted vertex positions, so it is a strict superset of the true skinned bound. Replaces
+	// R_BoundTriSurf when the CPU position skin is stripped (r_gpuSkinStripCpu). Vulkan skinning path.
+	idBounds					CalcBoundsFast( const idJointMat *joints ) const;
 	int							NearestJoint( int a, int b, int c ) const;
 	int							NumVerts( void ) const;
 	int							NumTris( void ) const;
@@ -181,6 +187,12 @@ private:
 	int *						skinExpandWDesc;	// [E*2] {joint*12 float base, terminator flag}
 	idVec4 *					skinExpandLocalTBN;	// [E*3] joint-local bind N,T0,T1 for the OWNING output vert
 	idDrawVert *				skinTemplate;		// [numOutputVerts] static st/color the kernel preserves
+
+	// Milestone D: per-used-joint reach radius for CalcBoundsFast (built in BuildGpuSkinData from the
+	// bind-pose weights: reach = max |joint-local weight position| over that joint's weights). Parallel
+	// arrays, one entry per joint this mesh actually weights to. Empty until BuildGpuSkinData runs.
+	idList<int>					skinBoundJoint;		// joint indices this mesh weights to
+	idList<float>				skinBoundReach;		// parallel: max joint-local offset magnitude for that joint
 
 
 	// per-mesh static SSBOs (rhi::BufferHandle; 0 = not uploaded), shared by all entities using

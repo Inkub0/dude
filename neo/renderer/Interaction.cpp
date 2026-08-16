@@ -318,6 +318,21 @@ static srfTriangles_t *R_CreateLightTris( const idRenderEntityLocal *ent,
 	newTri->numVerts = tri->numVerts;
 	R_ReferenceStaticTriSurfVerts( newTri, tri );
 
+	// Milestone D (docs/gpu-offload-plan.md): a CPU-skin-stripped surface has no valid tri->verts.xyz,
+	// so the per-triangle light cull (R_CalcInteractionCullBits / R_ClipTriangleToLight) and the MinMax
+	// bounds cannot read positions. That cull is a PURE optimization -- it never clips geometry, only
+	// drops whole triangles fully outside the light frustum (see the r_usePreciseTriangleInteractions
+	// note below) -- so referencing ALL indexes is pixel-identical: one-sided materials still GPU-cull
+	// backfaces at raster, and frustum-exterior tris shade to nothing / fall outside the light scissor.
+	// Bounds come from the conservative joint-reach CalcBoundsFast already on tri->bounds. cullInfo is
+	// left cleared (the caller's R_FreeInteractionCullInfo no-ops on the NULL arrays). Routes pin #1.
+	if ( tri->cpuSkinStripped ) {
+		R_ReferenceStaticTriSurfIndexes( newTri, tri );
+		newTri->numIndexes = tri->numIndexes;
+		newTri->bounds = tri->bounds;
+		return newTri;
+	}
+
 	// calculate cull information
 	if ( !includeBackFaces ) {
 		R_CalcInteractionFacing( ent, tri, light, cullInfo );
@@ -859,25 +874,12 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 	// every caster, not just animated ones. A cached interaction that skips its build here
 	// goes stale if the technique routing changes, so BeginFrame FreeInteractions() on a
 	// change to r_shadowMapping / r_shadowMapStencilRadius / r_shadowMapSkipStencilBuild.
-	bool skipStencilBuild = false;
-	if ( r_shadowMapSkipStencilBuild.GetBool() && r_shadowMapping.GetBool() ) {
-		const float smStencilRadius = r_shadowMapStencilRadius.GetFloat();
-		const idVec3 &lr = lightDef->parms.lightRadius;
-		float lightMaxAxis = lr.x;
-		if ( lr.y > lightMaxAxis ) { lightMaxAxis = lr.y; }
-		if ( lr.z > lightMaxAxis ) { lightMaxAxis = lr.z; }
-		// the player flashlight trips the oversize radius (flashRadius 400) but is exempted
-		// backend-side so it takes the 2D-map path — mirror that exemption here.
-		const bool isFlashlight = lightShader
-			&& idStr::FindText( lightShader->GetName(), "flashlight", false ) != -1;
-		const bool oversize = smStencilRadius > 0.0f && lightMaxAxis > smStencilRadius && !isFlashlight;
-		// shadow-mapped (not oversize) -> the volume is never drawn. With sun shadow maps on
-		// (r_shadowMapSun), oversize lights are ALSO mapped — a distant sun gets the fitted
-		// virtual 2D map, a big indoor omni falls through to a cube — so their volumes can be
-		// skipped too; stencil then only ever draws if every map path failed, and such a light
-		// simply goes unshadowed for that frame instead of paying this build every frame.
-		skipStencilBuild = !oversize || r_shadowMapSun.GetBool();
-	}
+	// The routing (shadow-mapped vs oversize-"sun" stencil, flashlight exemption, r_shadowMapSun) is
+	// shared with the Milestone-D view flag in tr_light.cpp via R_ShadowMapSkipStencilBuild so the two
+	// can never drift: a shadow-mapped light's volume is never drawn, and with sun shadow maps on even
+	// oversize lights are mapped, so their builds can be skipped too (stencil then only draws if every
+	// map path failed, and such a light simply goes unshadowed that frame instead of paying the build).
+	const bool skipStencilBuild = R_ShadowMapSkipStencilBuild( lightDef, lightShader );
 
 	//
 	// create slots for each of the model's surfaces

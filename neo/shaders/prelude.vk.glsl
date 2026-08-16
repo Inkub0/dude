@@ -1,5 +1,12 @@
 #version 450
 
+// Buffer references (GPU pointers) for manual vertex fetch — the Phase 3.2b BDA
+// path (zfill_bda, docs/gpu-offload-plan.md §3.2b). Declared once here because
+// compile_spv.py injects `invariant gl_Position;` ahead of each shader body, and
+// an #extension must precede any statement. Inert for shaders that never name a
+// buffer_reference type, so it changes no other shader's SPIR-V.
+#extension GL_EXT_buffer_reference : require
+
 // Vulkan prelude. Set 0 holds the per-draw uniform block, set 1 the
 // combined image samplers, addressed by the same unit numbers the ARB
 // programs used.

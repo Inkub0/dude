@@ -609,6 +609,42 @@ void idMD5Mesh::BuildGpuSkinData( const idJointMat *bindJoints ) {
 	R_FreeStaticTriSurf( tri );				// deformedSurface==true -> shared deformInfo arrays kept
 	Mem_FreeA( origStart, onStack );
 	Mem_FreeA( origCount, onStack );
+
+	// Milestone D (docs/gpu-offload-plan.md): precompute the per-used-joint reach for CalcBoundsFast.
+	// scaledWeights[w].xyz == weightValue * (joint-LOCAL vertex position), .w == weightValue, so the
+	// local offset is xyz/w and its magnitude is the vertex's distance from the joint origin (rotation
+	// preserves length). reach[joint] = max of that over the joint's weights; the runtime bound unions
+	// (jointOrigin +/- reach) per used joint. The AABB over those spheres contains the convex hull of
+	// every weighted vertex position -> a strict superset of the true skinned bound.
+	skinBoundJoint.Clear();
+	skinBoundReach.Clear();
+	int maxJoint = -1;
+	for ( int w = 0; w < numWeights; w++ ) {
+		const int ji = weightIndex[w * 2 + 0] / (int)sizeof( idJointMat );
+		if ( ji > maxJoint ) { maxJoint = ji; }
+	}
+	if ( maxJoint >= 0 ) {
+		bool reachOnStack;
+		float *reach = (float *)Mem_MallocA( ( maxJoint + 1 ) * sizeof( float ), reachOnStack );
+		for ( int i = 0; i <= maxJoint; i++ ) { reach[i] = -1.0f; }		// -1 = joint unused by this mesh
+		for ( int w = 0; w < numWeights; w++ ) {
+			const int ji = weightIndex[w * 2 + 0] / (int)sizeof( idJointMat );
+			const idVec4 &sw = scaledWeights[w];
+			float mag = 0.0f;
+			if ( idMath::Fabs( sw.w ) > 1e-8f ) {
+				const idVec3 local( sw.x / sw.w, sw.y / sw.w, sw.z / sw.w );
+				mag = local.Length();
+			}
+			if ( mag > reach[ji] ) { reach[ji] = mag; }		// -1 sentinel -> first real value (>=0) always wins
+		}
+		for ( int i = 0; i <= maxJoint; i++ ) {
+			if ( reach[i] >= 0.0f ) {
+				skinBoundJoint.Append( i );
+				skinBoundReach.Append( reach[i] );
+			}
+		}
+		Mem_FreeA( reach, reachOnStack );
+	}
 }
 
 /*
@@ -632,6 +668,8 @@ void idMD5Mesh::FreeGpuSkinData( void ) {
 	skinGpuWeights = skinGpuWDesc = skinGpuWStart = skinGpuLocalTBN = 0;
 	numOutputVerts = 0;
 	skinExpandCount = 0;
+	skinBoundJoint.Clear();
+	skinBoundReach.Clear();
 }
 
 /*
@@ -1531,33 +1569,67 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		StampTessSeamMask( tri->verts );
 	}
 
-	// This CPU skin runs even when the GPU skinner below is active, and that is deliberate, not an
-	// oversight: it writes ONLY xyz, and three front-end consumers read those positions every frame
-	// with no way to see gpuSkinVB (a GPU-side buffer with no CPU mapping):
-	//   - light culling      R_CalcInteractionCullBits / R_ClipTriangleToLight (Interaction.cpp:130, :405)
-	//                        -- per interaction, PER LIGHT; decides what gets lit at all
-	//   - stencil shadows    R_CreateShadowVolume (Interaction.cpp:947), R_CreateVertexProgramShadowCache
-	//                        (tr_light.cpp:245) -- absent for shadow-mapped lights, present for stencil ones
+	// This CPU skin normally runs even when the GPU skinner below is active, because it writes tri->
+	// verts.xyz and front-end consumers read those positions every frame with no way to see gpuSkinVB
+	// (a GPU-side buffer with no CPU mapping):
+	//   - light culling      R_CalcInteractionCullBits / R_ClipTriangleToLight (Interaction.cpp)
+	//                        -- per interaction, PER LIGHT; a PURE cull (skipping it draws all tris)
+	//   - stencil shadows    R_CreateShadowVolume, R_CreateVertexProgramShadowCache
+	//                        -- absent for shadow-mapped lights, present for stencil/sun ones
 	//   - surface bounds     R_BoundTriSurf, just below
-	// Retiring it therefore needs culling + shadow-volume construction on the GPU too (docs/
-	// gpu-offload-plan.md Phases 3-4), not a flag. The other half -- the TBN this call never touches
-	// and R_DeriveTangents recomputes -- IS redundant under GPU skinning, but it was measured at
-	// ~0.007 ms/frame (MD5 carries dominantTris, so it takes the cheap unsmoothed path) against a
-	// GPU-bound frame, so it is deliberately left alone. See "Milestone C" in that doc before
-	// assuming there is perf here.
-	if ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f ) {
-		TransformScaledVerts( tri->verts, entJoints, ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] );
+	//   - blood/burn decals  idRenderModelOverlay::AddOverlaySurfacesToModel (reads xyz each frame)
+	//
+	// Milestone D (r_gpuSkinStripCpu, docs/gpu-offload-plan.md): retire ALL of that when the frame
+	// proved every reader is absent for this surface. R_EntityDefDynamicModel set r_skinStripThisModel
+	// only when the view has no stencil-shadow light (pin: stencil) and this entity has no overlay
+	// (pin: decals); the light-cull reads are routed around by R_CreateLightTris' full-index path
+	// (pin: light cull) and the bound comes from the O(joints) joint-reach CalcBoundsFast (pin: bounds,
+	// a conservative superset every consumer tolerates). Surfaces whose MATERIAL reads posed positions on
+	// the CPU keep the full skin: a vertex deform (deform eyeBall on every character/monster eye sub-mesh,
+	// expand/move/turb/flare) rebuilds geometry from tri->verts in R_DeformDrawSurf every frame, and
+	// subview/GUI materials read them in R_PreciseCullSurface -> gate on Deform()==DFRM_NONE && !HasSubview()
+	// && !HasGui(). PER-MESH on the mesh's own material, which is exactly right: the eye is its own idMD5Mesh
+	// with the eyeBall material (excluded), while the body mesh (plain) still strips. Skin-scaled deaths keep
+	// the CPU path too (the fast bound carries no MD5 skin-scale). Requires the GPU skin to materialize below
+	// (shader + SSBOs ready) or the stripped surface would have no geometry at all. When stripped the surface
+	// rasterizes solely from gpuSkinVB, and the redundant CPU TransformVerts + R_DeriveTangents +
+	// ambient upload are all gone -- the actual per-frame CPU skin cost this whole project set out to
+	// remove. HARD-GATED on r_gpuSkinning so the OFF path is byte-for-byte the stock CPU skinner.
+	const bool stripCpu =
+		r_skinStripThisModel
+		&& r_gpuSkinning.GetBool()
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN
+		&& ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] == 0.0f
+		&& shader && shader->Deform() == DFRM_NONE			// vertex deforms (eyeBall on every char/monster eye mesh,
+		&& !shader->HasSubview() && !shader->HasGui()		// expand/move/turb) + subview/GUI precise-cull read tri->verts
+		&& skinExpandLocalTBN && skinWeightStart && skinExpandWDesc && skinExpandWeights
+		&& skinExpandCount > 0 && numOutputVerts == deformInfo->numOutputVerts
+		&& skinBoundJoint.Num() > 0
+		&& R_MD5_SkinShader( rhi::GetRHI() ) != 0		// gpuSkinVB must materialize below, else invisible
+		&& EnsureSkinBuffersUploaded();
+	tri->cpuSkinStripped = stripCpu;
+
+	if ( !stripCpu ) {
+		if ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f ) {
+			TransformScaledVerts( tri->verts, entJoints, ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] );
+		} else {
+			TransformVerts( tri->verts, entJoints );
+		}
+
+		// replicate the mirror seam vertexes
+		base = deformInfo->numOutputVerts - deformInfo->numMirroredVerts;
+		for ( i = 0; i < deformInfo->numMirroredVerts; i++ ) {
+			tri->verts[base + i] = tri->verts[deformInfo->mirroredVerts[i]];
+		}
+
+		R_BoundTriSurf( tri );
 	} else {
-		TransformVerts( tri->verts, entJoints );
+		// stripped: verts[].xyz stays as-is (unread this frame); bound from the joint palette only
+		tri->bounds = CalcBoundsFast( entJoints );
+		if ( r_gpuSkinProfile.GetBool() ) {
+			R_GpuSkinProfileAddStrip( deformInfo->numOutputVerts );
+		}
 	}
-
-	// replicate the mirror seam vertexes
-	base = deformInfo->numOutputVerts - deformInfo->numMirroredVerts;
-	for ( i = 0; i < deformInfo->numMirroredVerts; i++ ) {
-		tri->verts[base + i] = tri->verts[deformInfo->mirroredVerts[i]];
-	}
-
-	R_BoundTriSurf( tri );
 
 	// If a surface is going to be have a lighting interaction generated, it will also have to call
 	// R_DeriveTangents() to get normals, tangents, and face planes.  If it only
@@ -1573,8 +1645,9 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	// exactly like the un-tessellated mesh. Derive here, unconditionally, whenever
 	// tessellation is active so every tessellated surface has real corner normals no
 	// matter its lighting. Cheap (MD5 carries dominantTris -> the unsmoothed path).
-	if ( !r_useDeferredTangents.GetBool()
-	     || ( r_tessellation.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) {
+	if ( !stripCpu
+	     && ( !r_useDeferredTangents.GetBool()
+	          || ( r_tessellation.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) ) {
 		// set face planes, vertex normals, tangents
 		R_DeriveTangents( tri );
 	}
@@ -1591,7 +1664,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	// -- it only changes the decal copy and the (unused) ambient cache; the always-on CPU consumers
 	// (culling/shadow/bounds) read tri->verts.xyz only. Must run after normals exist and before the CPU
 	// deform snapshot + R_CreateAmbientCache, so derive tangents first if r_useDeferredTangents deferred them.
-	if ( r_tessDeform.GetBool() || r_gpuSkinning.GetBool() ) {
+	if ( !stripCpu && ( r_tessDeform.GetBool() || r_gpuSkinning.GetBool() ) ) {
 		// Derive first: this also sets tangentsCalculated so R_CreateAmbientCache below does NOT re-derive
 		// and clobber the normals we are about to write. (The decal copies both normal + tangents.)
 		if ( !tri->tangentsCalculated ) {
@@ -1834,6 +1907,31 @@ idBounds idMD5Mesh::CalcBounds( const idJointMat *entJoints ) {
 
 	Mem_FreeA( verts, onStack );
 
+	return bounds;
+}
+
+/*
+====================
+idMD5Mesh::CalcBoundsFast
+
+Milestone D (docs/gpu-offload-plan.md): a conservative bound from the joint palette ALONE — no
+per-vertex skin, O(joints this mesh uses). Unions each used joint's world origin +/- its precomputed
+reach radius (built in BuildGpuSkinData). The AABB over those spheres contains the convex hull of
+every weighted vertex position, so it is a strict superset of the true skinned bound (every consumer
+of tri->bounds only ever UNDER-culls with a larger box, never wrong). Empty skinBoundJoint (data not
+built) returns a cleared/inverted bound — callers must gate on skinBoundJoint.Num() > 0.
+====================
+*/
+idBounds idMD5Mesh::CalcBoundsFast( const idJointMat *entJoints ) const {
+	idBounds bounds;
+	bounds.Clear();
+	const int n = skinBoundJoint.Num();
+	for ( int i = 0; i < n; i++ ) {
+		const idVec3 o = entJoints[ skinBoundJoint[i] ].ToVec3();		// joint world origin (translation column)
+		const float r = skinBoundReach[i];
+		bounds.AddPoint( o + idVec3( r, r, r ) );
+		bounds.AddPoint( o - idVec3( r, r, r ) );
+	}
 	return bounds;
 }
 

@@ -294,6 +294,43 @@ once, skinned refit per frame) → TLAS → ray-query shadows/AO. That also *del
 shadow-volume consumer in the table above, which is one of the two things pinning the CPU position
 skin in place.
 
+#### Milestone D — stripping the CPU position skin (`r_gpuSkinStripCpu`, built 2026-08-14, UNVERIFIED in-engine)
+
+Milestone C left `TransformVerts` (position skin) + `R_BoundTriSurf` running unconditionally under GPU
+skinning — so GPU skinning was **pure added work**, which is exactly why it never won a frame. Milestone D
+gates that CPU work OFF for a surface when the frame proves it safe, so the GPU `gpuSkinVB` becomes the
+*sole* geometry source. **The recon that struck this as blocked was wrong on two counts:** there are
+**four** position pins, not three, and all four turned out tractable (not "no retirement path"):
+
+| Pin | Reader of `tri->verts.xyz` | Retirement in Milestone D |
+|---|---|---|
+| Light cull | `R_CalcInteractionCullBits`/`R_ClipTriangleToLight` via `R_CreateLightTris` | It is a **pure** optimization — never clips geometry, only drops whole tris fully outside the light frustum (`Interaction.cpp` "we do not actually use the clipped triangle"). Stripped surfaces take an early **full-index** path in `R_CreateLightTris` (reference all indexes, `bounds = tri->bounds`): pixel-identical (one-sided materials still GPU-cull backfaces; exterior tris shade to nothing / fall outside the light scissor), at the cost of extra rasterization. |
+| Stencil volumes | `R_CreateShadowVolume` / `R_CreateVertexProgramShadowCache` | Gated on a **per-view** flag `r_viewHasStencilShadowLights` (computed at the top of `R_AddModelSurfaces` via the shared `R_ShadowMapSkipStencilBuild`). No stencil-casting light in view ⇒ no volume is ever built ⇒ safe to strip. Matches Phase 0's domain (fully shadow-mapped scenes). |
+| Bounds | `R_BoundTriSurf` (MinMax over verts) | `idMD5Mesh::CalcBoundsFast` — a joint-palette-only conservative bound, **O(joints)**. Per-joint reach (max `\|`joint-local weight pos`\|`) is precomputed in `BuildGpuSkinData`; the runtime unions `(jointOrigin ± reach)`. The AABB over those spheres contains the convex hull of all weighted vertex positions ⇒ a strict superset; every consumer only ever under-culls. **Note `idMD5Mesh::CalcBounds` is NOT this — it calls `TransformVerts` internally (re-skins), so it is not free.** |
+| **Decals (the 4th pin)** | `idRenderModelOverlay::AddOverlaySurfacesToModel` reads posed `tri->verts.xyz` **every frame** (not a creation-time snapshot) | Gated per-entity on `!def->overlay` in `R_EntityDefDynamicModel`. Entities with an active blood/burn decal keep the full CPU skin (correctness first); the strip fires for the majority with none. |
+
+**Wiring.** `R_EntityDefDynamicModel` sets a transient `r_skinStripThisModel` (cvar on + `r_gpuSkinning`
++ no overlay + `!r_viewHasStencilShadowLights`) just around `InstantiateDynamicModel`; `UpdateSurface`
+ANDs in Vulkan + skin-data-ready + no MD5 skin-scale + the shader/SSBOs being ready (so `gpuSkinVB` is
+guaranteed to materialize, else the stripped surface would be invisible), skips `TransformVerts` /
+`R_BoundTriSurf` / `R_DeriveTangents` / the ambient upload, sets `tri->cpuSkinStripped`, and takes the
+bound from `CalcBoundsFast`. `R_CreateAmbientCache` early-returns (ambientCache NULL, draw from
+`gpuSkinVB` — reuses the Milestone-C no-upload gates). **HARD-GATED on `r_gpuSkinning`; OFF path is the
+stock CPU skinner byte-for-byte.** `r_gpuSkinProfile` now also prints `STRIP N surf/frame, V CPU-skin
+verts/frame removed` — pair with `com_speeds` `rf` for the reclaimed front-end ms.
+
+**Hardware reality (unchanged, user opted in anyway).** On the RTX 3080 Ti the frame is GPU-bound, so
+this wins **zero or negative** fps here (the light-cull skip *adds* rasterization). The payoff is the
+CPU-bound case (weak GPU / high entity counts) + RTX alignment (GPU as the sole geometry source). Built
+to reclaim measurable CPU front-end time (visible in `com_speeds rf` / the strip counter), not 3080 Ti fps.
+**Documented edge (accepted for v1):** the strip decision is cached with the dynamic model, so an entity
+instantiated in a non-stencil primary view then re-seen in a *stencil subview* the same frame casts a
+wrong stencil volume — unreachable with shadow mapping on (preset default); failure is a wrong shadow,
+not a crash. Files: `Model.h` (`cpuSkinStripped`), `Model_local.h`/`Model_md5.cpp`
+(`CalcBoundsFast` + joint-reach), `Interaction.cpp` (full-index lightTris + shared stencil helper),
+`tr_light.cpp` (`r_gpuSkinStripCpu`, view flag, `R_ShadowMapSkipStencilBuild`, ambient early-out),
+`tr_local.h` (externs).
+
 ### Phase 3 — GPU-driven culling *(Vulkan-only; biggest relief, most architecture)*
 
 #### Phase 3.0 — the indirect-draw RHI primitive — ✅ SHIPPED (`feat/rhi-indirect-draw`, pending user A/B)
@@ -357,7 +394,128 @@ counts); on the RTX 3080 Ti the frame is GPU-bound, so this is architecture + CP
 here. **Risk:** high (persistent residency for a frame-arena renderer; portal visibility is genuinely
 data-dependent → a *hybrid*: CPU portal-area coarse pass feeds the GPU fine cull). Retires **one** of the
 three CPU-position-skin pins (light cull, `Interaction.cpp:130/405`) once the light-interaction cull also
-moves to the GPU.
+moves to the GPU. **Design references:** the (1)+(2) prerequisites here — one unified GPU-addressable
+geometry buffer plus a per-object SSBO indexed per draw, replacing the per-surface vb/ib + `RenderParams`
+UBO — are precisely the **bindless + Buffer Device Address** pattern surveyed in
+[vulkan-backend.md](vulkan-backend.md) § "References" (zeux's descriptor-set ladder, "Modern Vulkan in
+2025"). Read those before scoping this; they are the coherent way through the blocker, not a drop-in.
+
+##### Modern-Vulkan path (BDA + manual vertex fetch) — dissolves the unified-buffer blocker
+The "one unified geometry buffer" prerequisite above is the **legacy** framing (fixed-function
+`vkCmdBindVertexBuffers` forces every sub-draw of a multi-draw to share one bound vb). The modern
+path removes that constraint instead of paying it:
+- **Vertex data via Buffer Device Address.** Keep the per-surface `ambientCache`/ring buffers exactly
+  as they are — *no persistent unified buffer, no residency refactor of the frame-arena.* Publish each
+  surface's **GPU address** (+ base vertex offset, stride) into a per-object SSBO entry. The zfill/gbuffer
+  vertex shader does **manual vertex fetch** from that pointer (`GL_EXT_buffer_reference`), keyed by
+  `gl_VertexIndex` + the per-draw base — so *no vertex buffer is bound at all*, and the single-bind
+  constraint that blocked 3.2b simply doesn't apply. This is zeux's "manual vertex fetch from a unified
+  buffer" generalized to a per-draw pointer.
+- **Indices:** `vkCmdDrawIndexedIndirect` still reads one *bound* index buffer via `firstIndex`. Simplest
+  hybrid — funnel indices through the existing per-frame **index ring** (`idxRing`, indices are tiny) and
+  address them with `firstIndex`; vertices come from BDA. (Or go non-indexed and fetch indices via BDA too;
+  the ring is less work.)
+- **Per-object params:** the per-surface `RenderParams` UBO becomes an SSBO indexed by
+  `gl_BaseInstance`/`firstInstance` (`gl_DrawID` under `drawIndirectCount`) — the same SSBO that carries the
+  BDA pointers. **Bindless textures** (`VK_EXT_descriptor_indexing`, core 1.2) fold the material samplers
+  into one global set indexed by a per-object material id, so multi-stage/perforated materials stop forcing
+  a re-bind mid-batch.
+- **Cost to *enable*** is small and already de-risked (see § "References" audit, 2026-08-14): `bufferDeviceAddress`
+  is ~1 line on the already-chained `enabled12` struct (`VulkanBackend.cpp:1064`, right beside
+  `drawIndirectCount`), + `VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT` on the allocator (`:1085`), +
+  `VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT` on the addressed buffers (`CreateBuffer :2741`), + a
+  `vkGetBufferDeviceAddress` wrapper in the RHI. SPIR-V/shaderc **already** target `vulkan1.4`, so no
+  compiler bump; the GLSL just needs `#extension GL_EXT_buffer_reference`.
+
+**What BDA does NOT solve** (still real 3.2b work): the *state* partitioning — tess flag, cull type (mirror
+views), scissor, weapon/model depth-hack, polygon offset — still has to bucket the multi-draw by pipeline
+(one `DrawIndexedIndirect` batch per pipeline/state bucket). BDA + bindless fix **geometry addressing and
+per-object data**, i.e. items (1)+(2) of the blocker; item (3) the `COMPUTE→DRAW_INDIRECT` barrier and the
+bucketing remain. Still VK-only, still fps-neutral on GPU-bound HW — architecture + CPU-bound-case relief.
+
+**Recommended seeding (matches the r_vkIndirectTest / r_gpuCullTest methodology):** land a small, isolated,
+headlessly-verifiable **BDA RHI primitive** first — enable the feature, add `GetBufferDeviceAddress`, and a
+compute test that reads a buffer through its pointer and reports the sum back (numeric readback, like the
+cull test) — *then* build the depth-prepass consume on proven plumbing. The depth prepass is the right first
+consumer: one pipeline (no state buckets), no material textures, over the world-static batch.
+
+**Status — BDA primitive ✅ USER-VERIFIED PASS (`r_vkBdaTest`, `feat/gpu-skin-cpu-unpin`, 2026-08-14).** Wired the
+whole path: `bufferDeviceAddress` enabled on the device (gated on the device reporting it —
+`haveBufferDeviceAddress`), the `VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT` allocator flag +
+`VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT` on `BU_STORAGE` buffers (both gated on the same flag),
+`RHI::GetBufferDeviceAddress` (VK returns `vkGetBufferDeviceAddress`; GL3 returns 0), and a compute self-test
+that seeds `0..N-1`, queries the buffer's address, and dispatches a kernel that sums N uints read **through the
+raw pointer** (`GL_EXT_buffer_reference`, not a bound descriptor) into a separate SSBO, verifying `== N·(N-1)/2`.
+Proves feature + address query + shader deref end to end. Files: `VulkanBackend.cpp` (`CreateDeviceAndVma`
+feature/VMA, `CreateBuffer` usage, `GetBufferDeviceAddress` + `BdaSelfTest` by `ComputeSelfTest`), `RHI.h`.
+No consumer yet — the depth-prepass consume is the next step. VK-only; SPIR-V already targets 1.4 so no
+compiler bump was needed. **Verified:** in-engine `r_vkBdaTest 1` → `VK BDA self-test: PASS` (2026-08-14).
+
+**Consume — Increment 1 ✅ USER-VERIFIED (`r_vkBdaZfill`, `feat/gpu-skin-cpu-unpin`, 2026-08-15).** The flat
+world-static depth prepass now optionally fetches vertex positions from the buffer's **device address**
+(`zfill_bda.vert`, `GL_EXT_buffer_reference`) instead of bound attributes — per-draw, keeping the bound index
+buffer + UBO MVP. Self-contained in `VulkanBackend::Draw` (same idiom as `r_vkIndirectTest`): gated on the flat
+zfill shader over an addressable persistent `BU_VERTEX` buffer, so streamed/skinned/tessellated surfaces
+report address 0 and fall back to the normal draw. **Pixel-identical by construction** — same position bytes,
+same `invariant u_mvpMatrix * vec4(pos,1)`, so the depth buffer is bit-identical and the whole frame with it.
+Enablers: `SHADER_DEVICE_ADDRESS` extended to `BU_VERTEX` + per-buffer addresses cached at creation
+(`bufferAddr`), a 16-byte vertex push-constant range on the graphics layout, and `#extension
+GL_EXT_buffer_reference` in `prelude.vk.glsl` (SPIR-V-verified inert for every non-BDA shader; `zfill_bda`
+compiles to `PhysicalStorageBuffer64`). **Next — Increment 2:** move address+MVP into a per-object SSBO indexed
+by `firstInstance`; **Increment 3:** batch the simple opaque bucket (no depth-hack/scissor/poly-offset/tess/
+subview) into one `vkCmdDrawIndexedIndirect` + the `COMPUTE→DRAW_INDIRECT` barrier. **To verify:** toggle
+`r_vkBdaZfill 1` vs `0` in-world — identical image; watch world surfaces for any z-fighting or holes.
+Verified 2026-08-15 on mars_city1: image identical, `VK BDA zfill: 164 draws via device address, 0 fell
+back` (count tracked visible geometry as the view moved). The BDA vertex-fetch path is proven correct on live
+world-static geometry — the remaining increments only change *how draws are grouped/dispatched*, not the fetch.
+
+**Consume — Increment 2 ✅ USER-VERIFIED (`r_vkBdaZfill 2`, `feat/gpu-skin-cpu-unpin`, 2026-08-15).** The actual
+GPU-driven draw: the solid-opaque depth-prepass bucket is collected in `RB_RHI_FillDepthBuffer` and drawn with
+**non-indexed `vkCmdDrawIndirect`, one per distinct scissor group** (measured 3–5 draws for ~130–150 surfaces on
+mars_city1). Fully bindless — each surface's vertices *and* indices are fetched through device-address pointers
+(`zfill_batch.vert`, two `buffer_reference` types), so surfaces with different vb/ib batch together with no bound
+geometry. Per-object `{vbAddr, ibAddr, mvp}` lives in a per-frame SSBO indexed by `gl_InstanceIndex` (= each
+command's `firstInstance`; needs `drawIndirectFirstInstance`, enabled). Batchable predicate: MC_OPAQUE,
+non-subview, no depth-hack/polygon-offset/tessellation, front-sided non-clip view, vb+ib BDA-addressable;
+everything else stays per-surface (mode-1 BDA or normal). Pixel-identical by construction (same MVP bytes from
+`RB_RHI_SpaceMvp`, same `invariant mvp*vec4(pos,1)` → bit-identical depth; color `{0,0,0,1}`, LESS, SS_ALWAYS,
+CT_FRONT_SIDED all match). New infra: `VL_NONE` (empty vertex input), double-buffered `BU_STORAGE` batch buffers,
+`RHI::DrawZfillBatch`(items + scissor `groups`)/`ZfillBatchEnabled`, `ApplyDynState` factored out of `BindForDraw`.
+
+**Three bring-up bugs found + fixed (were why it silently fell back / blinked):** (1) **index buffers weren't
+address-capable** — `SHADER_DEVICE_ADDRESS` had been added to `BU_STORAGE`/`BU_VERTEX` but not `BU_INDEX`, so
+the fully-bindless index fetch got `ibAddr==0` and every surface fell to per-draw; (2) **per-entity scissors** —
+`surf->scissorRect` is the entity's screen-bounds rect (never exactly the view rect), so the first exact-match
+predicate collected nothing; fixed by **grouping surfaces by scissor** and drawing one indirect call per group
+(surfaces of an entity/BSP share a scissor → 3–5 groups, not 130); (3) **multi-draw buffer clobber** — issuing a
+`DrawZfillBatch` per group re-wrote the *same* SSBO between draws that only execute at submit, so every group read
+the last group's data → surfaces blinked to black; fixed by **uploading all items once** and drawing per-group
+over sub-ranges (`firstInstance` = global index). **Adversarial review (pre-bugs): 0 defects on the std430/index
+math/lifetime/pixel-identity.** **Phase 3.2b (the batched GPU-driven DRAW) is DONE and banked here.**
+
+#### Increment 3 (GPU-driven CULL for the prepass) — ❌ STRUCK (2026-08-15, recon-confirmed)
+**Do not build (as a prepass cull).** Two recons confirmed everything to wire a GPU cull→indirect-draw
+already exists — the `GPUCULL_SRC` kernel (`tr_main.cpp:713`) reproduces `R_CullLocalBox` and atomic-compacts
+`VkDrawIndexedIndirectCommand[]` + count; `R_GpuCull_RecordCandidate` (`tr_light.cpp:2264`) records candidates
+at the cull site; `vkCmdDrawIndexedIndirectCount` + `drawIndirectCount` are wired; only a one-line
+`COMPUTE→DRAW_INDIRECT` barrier widening (`VulkanBackend.cpp` Dispatch: add `VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT`
++ `VK_ACCESS_INDIRECT_COMMAND_READ_BIT`) is missing. **But it's architecturally redundant:** `R_CullLocalBox`
+runs inside `R_AddAmbientDrawsurfs` to build `viewDef->drawSurfs`, the list **every** pass consumes (ambient,
+interactions, shadows) — so a prepass GPU cull re-culls what the CPU already culled for those passes = **zero
+cull relief**. Retiring the CPU cull requires making *every* pass consume a GPU-produced list and dropping
+`drawSurfs` (no readback anywhere) — the whole-renderer rewrite below. The GPU-driven-cull endgame is
+**ray-query**, not this. The `r_gpuCullLive` primitive already banked the "validated GPU cull" milestone.
+
+#### Nice to have (future) — "refactor renderer in GPU" (full GPU-driven path)
+The genuinely-valuable version of GPU-driven culling: **every** pass (prepass, ambient, interaction, shadow)
+consumes a GPU-produced draw list instead of the CPU `drawSurfs`, so the CPU does only the coarse area-level
+portal flood (data-dependent, must stay CPU) and hands the GPU per-area static candidate ranges; the GPU
+frustum-culls + drives all draws, no GPU→CPU readback. **Enormous, high-risk (touches lighting/shadows/
+interactions), fps-neutral on current HW — not worth it for raster gains alone.** *Revisit at the RTX pivot:*
+ray-query needs geometry in GPU-addressable form (BLAS build + ray pipeline), and Increment 2's **BDA geometry
+addressing is already that groundwork** — a full GPU-driven path (GPU decides visibility → drives both raster
+*and* ray-query) is a real RTX enabler. So: parked as a deliberate RTX-era item, not a dead end. All the
+raster pieces (cull kernel, BDA geometry, indirect-count draw, the barrier one-liner) are in place to build on.
 
 ### Phase 4 — GPU shadow-volume generation — ❌ STRUCK (2026-08-10, recon-confirmed)
 **Do not build.** A recon of the residual stencil cost after Phase 0 concluded a GPU stencil-volume
@@ -384,6 +542,7 @@ retired by **ray-query**, not by this phase.
 | TBO bind (joint palette) | 2 | ✅ `glTexBuffer` | ✅ SSBO/UBO | GL3 texture loop `:969–987` |
 | Geometry stage (opt) | 4 | ✅ | ✅ | GL3 2-stage loop `GL3Shaders.cpp:290`; VK stage assembly `:4980` |
 | Indirect draw (`DrawIndexedIndirect`) | 3.0 | ❌ (no-op) | ✅ SHIPPED | `RHI.h` `DrawIndexedIndirect`; VK `BindForDraw`+`vkCmdDrawIndexedIndirect[Count]`; `r_vkIndirectTest` |
+| Buffer device address (`GetBufferDeviceAddress`) | 3.2b | ❌ (returns 0) | ✅ VERIFIED (`r_vkBdaTest`) | `RHI.h` `GetBufferDeviceAddress`; VK device feature + VMA `BUFFER_DEVICE_ADDRESS` flag + `SHADER_DEVICE_ADDRESS` usage on `BU_STORAGE`; `vkGetBufferDeviceAddress` |
 
 VK enablers already in place: Vulkan 1.4 floor (all core compute guaranteed, no extension gating),
 runtime shaderc compiler, VMA, a timestamp-query idiom to measure any new pass. The `queues[]` array
@@ -401,8 +560,10 @@ Phase 2 (GPU skinning, VK) ── ✅ SHIPPED (gpuSkinVB; Milestone C audited wh
    └── Phase 3.0 (indirect-draw primitive) ── ✅ SHIPPED (feat/rhi-indirect-draw)
         └── Phase 3.1 (cull kernel, synthetic validation) ── ✅ SHIPPED (r_gpuCullTest)
              └── Phase 3.2a (cull the live surface set, no draw) ── ✅ SHIPPED + USER-VERIFIED (97bb4cd6, r_gpuCullLive)
-                  └── Phase 3.2b (indirect consume, VK-only): needs a UNIFIED GEOMETRY BUFFER (net-new)
-                       + per-object SSBO + COMPUTE→DRAW_INDIRECT barrier → retires pin #1 (light cull)
+                  └── Phase 3.2b (batched indirect DRAW via BDA) ── ✅ DONE + USER-VERIFIED (r_vkBdaZfill 2; BDA dissolved
+                       the "unified geometry buffer" blocker — no net-new buffer needed; verts+indices via device address)
+                       └── Increment 3 (GPU-driven CULL for the prepass) ── ❌ STRUCK (redundant w/ shared drawSurfs;
+                            real version = "refactor renderer in GPU", parked as an RTX-era nice-to-have)
 Phase 4 (GPU shadow-volume gen) ── ❌ STRUCK (subsumed by ray-query)
 Ray-query shadows (RTX pivot, after culling) ── retires pin #2 (stencil volumes); changes pixels (opt-in)
 ```
