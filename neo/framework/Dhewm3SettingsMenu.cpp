@@ -3487,6 +3487,66 @@ static void DrawDbgGroup_DepthOfField()
 	}
 }
 
+static void DrawDbgGroup_GpuOffload()
+{
+	// Vulkan GPU-offload experiments. All opt-in, off by default: they free CPU front-end
+	// time (only a win when CPU-bound), and are groundwork for the RTX pivot (GPU-resident
+	// skinned geometry so ray-tracing acceleration structures can be built/refit on-GPU).
+	if ( BeginSettingsGroup( "GPU Offload (Vulkan)" ) ) {
+
+		const bool vk = glConfig.rhiBackend && !glConfig.coreProfile;
+		if ( !vk ) {
+			ImGui::TextDisabled( "Vulkan backend only — switch to Vulkan in the Graphics tab (needs a renderer restart)." );
+		}
+		ImGui::BeginDisabled( !vk );
+
+		bool gpuSkin = r_gpuSkinning.GetBool();
+		if ( ImGui::Checkbox( "GPU skinning", &gpuSkin ) ) {
+			r_gpuSkinning.SetBool( gpuSkin );
+		}
+		AddTooltip( "r_gpuSkinning: skin animated meshes on the GPU. Non-faithful (option-B TBN, not Doom 3's "
+			"exact CPU skin), so off by default. Prerequisite for the CPU-skin strip below, and for ray-tracing "
+			"animated geometry later. Takes effect on the next map load." );
+
+		ImGui::BeginDisabled( !r_gpuSkinning.GetBool() );
+		bool strip = r_gpuSkinStripCpu.GetBool();
+		if ( ImGui::Checkbox( "Strip redundant CPU skin", &strip ) ) {
+			r_gpuSkinStripCpu.SetBool( strip );
+		}
+		AddTooltip( "r_gpuSkinStripCpu: drop the now-redundant CPU position-skin for GPU-skinned surfaces. "
+			"Frees CPU time — measured ~+3% fps when CPU-bound (weaker GPU / low presets); no change when "
+			"GPU-bound. Needs GPU skinning on." );
+		ImGui::EndDisabled();
+
+		ImGui::Separator();
+
+		int zfill = cvarSystem->GetCVarInteger( "r_vkBdaZfill" );
+		if ( ImGui::Combo( "Z-fill offload", &zfill, "Off\0BDA vertex-fetch\0Batched indirect\0" ) ) {
+			cvarSystem->SetCVarInteger( "r_vkBdaZfill", zfill );
+		}
+		AddTooltip( "r_vkBdaZfill: GPU-driven z-prepass via buffer-device-address vertex fetch (1) and batched "
+			"indirect draws (2). Pixel-identical. Currently a wash / slight loss at typical geometry (batch "
+			"overhead >= the draw-call savings) — kept as GPU-driven-rendering groundwork for RTX." );
+
+		bool bdaTest = cvarSystem->GetCVarBool( "r_vkBdaTest" );
+		if ( ImGui::Checkbox( "BDA self-test", &bdaTest ) ) {
+			cvarSystem->SetCVarBool( "r_vkBdaTest", bdaTest );
+		}
+		AddTooltip( "r_vkBdaTest: one-shot buffer-device-address primitive self-test; prints PASS/FAIL to the console." );
+
+		ImGui::Separator();
+
+		bool gpuTime = cvarSystem->GetCVarBool( "r_vkGpuTime" );
+		if ( ImGui::Checkbox( "Show GPU frame time", &gpuTime ) ) {
+			cvarSystem->SetCVarBool( "r_vkGpuTime", gpuTime );
+		}
+		AddTooltip( "r_vkGpuTime: print the Vulkan GPU frame time (ms) once per second — handy for A/B-ing the offloads." );
+
+		ImGui::EndDisabled();
+		EndSettingsGroup();
+	}
+}
+
 // Shadow Maps, Emissive, Glass, SSAO and Occlusion Maps are enhancement-backend features:
 // each greys its OWN body out on the legacy renderer (BeginDisabled inside the group body,
 // so the collapsible header itself stays usable and the sections can be reordered freely).
@@ -4056,6 +4116,7 @@ static void DrawShadowDebugMenu()
 	DrawDbgGroup_SSR();
 	DrawDbgGroup_DepthOfField();
 	DrawDbgGroup_Glass();
+	DrawDbgGroup_GpuOffload();
 }
 
 static idStrList alDevices;
