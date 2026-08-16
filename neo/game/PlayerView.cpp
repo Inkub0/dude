@@ -588,14 +588,22 @@ void idPlayerView::BerserkVision( idUserInterface *hud, const renderView_t *view
 	// size there — the 512x256 crop was a 2004 fill-rate optimisation that reads as
 	// pixelation today. Legacy keeps the original low-res crop its recursive _scratch
 	// feedback path expects, untouched.
-	if ( cvarSystem->GetCVarBool( "r_rhiActive" ) ) {
-		renderSystem->CropRenderSize( SCREEN_WIDTH, SCREEN_HEIGHT, true );
-	} else {
+	// RHI (opengl3/vulkan): capture the scene at FULL resolution (no crop). The old
+	// CropRenderSize(SCREEN_WIDTH, SCREEN_HEIGHT, true) POT-rounds the physical window DOWN
+	// (e.g. 2560x1440 -> 2048x1024); the RHI renders the scene full-res, so the capture then
+	// grabbed only that bottom-left sub-region and the display stretched it (enlarged corner,
+	// crosshair pulled to the top-right). With no crop, _scratch holds the whole render
+	// (POT-padded) and RB_RHI_BerserkAccum screen-corrects the sample. Legacy keeps its
+	// 512x256 crop, which its recursive _scratch feedback path expects.
+	const bool rhiBerserk = cvarSystem->GetCVarBool( "r_rhiActive" );
+	if ( !rhiBerserk ) {
 		renderSystem->CropRenderSize( 512, 256, true );
 	}
 	SingleView( hud, view );
 	renderSystem->CaptureRenderToImage( "_scratch" );
-	renderSystem->UnCrop();
+	if ( !rhiBerserk ) {
+		renderSystem->UnCrop();
+	}
 	renderSystem->SetColor4( 1.0f, 1.0f, 1.0f, 1.0f );
 	renderSystem->DrawStretchPic( 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 1, 1, 0, dvMaterial );
 }
