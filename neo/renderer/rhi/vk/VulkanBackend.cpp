@@ -103,6 +103,9 @@ static idCVar r_vkBdaTest( "r_vkBdaTest", "0", CVAR_RENDERER | CVAR_BOOL,
 static idCVar r_vkBdaZfill( "r_vkBdaZfill", "0", CVAR_RENDERER | CVAR_INTEGER,
 	"Vulkan backend: route the world-static depth prepass (zfill) through buffer-device-address geometry fetch. 0 = off (bound attributes); 1 = per-draw BDA vertex fetch; 2 = batched indirect (one vkCmdDrawIndirect over the solid-opaque bucket, indices+verts via BDA). Pixel-identical A/B; the Phase 3.2b consume (docs/gpu-offload-plan.md). Addressable persistent geometry only; animated/streamed/tessellated/perforated surfaces fall back." );
 
+static idCVar r_vkBdaVerbose( "r_vkBdaVerbose", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: print the r_vkBdaZfill firing counter once/sec (per-draw / batched / fell-back) to confirm the BDA z-fill path is live. Diagnostic only, off by default so enabling the offload doesn't chatter to the console." );
+
 namespace rhi {
 
 static const int FRAMES_IN_FLIGHT = 2;
@@ -1814,9 +1817,10 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 			}
 		}
 	}
-	// r_vkBdaZfill firing report (once/sec): confirms the consume path is actually active. The
-	// counters hold the frame that just ended; a non-zero "via device address"/"batched" means live.
-	if ( r_vkBdaZfill.GetInteger() != 0 ) {
+	// r_vkBdaZfill firing report (once/sec, gated behind r_vkBdaVerbose so enabling the offload
+	// stays silent): confirms the consume path is active. The counters hold the frame that just
+	// ended; a non-zero "via device address"/"batched" means live.
+	if ( r_vkBdaZfill.GetInteger() != 0 && r_vkBdaVerbose.GetBool() ) {
 		unsigned int now = Sys_Milliseconds();
 		if ( now - bdaZfillLastPrint >= 1000 ) {
 			common->Printf( "VK BDA zfill: %d per-draw via device address, %d batched in %d indirect draws, %d fell back (last frame)\n",

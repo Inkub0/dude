@@ -3528,6 +3528,13 @@ static void DrawDbgGroup_GpuOffload()
 			"indirect draws (2). Pixel-identical. Currently a wash / slight loss at typical geometry (batch "
 			"overhead >= the draw-call savings) — kept as GPU-driven-rendering groundwork for RTX." );
 
+		bool bdaVerbose = cvarSystem->GetCVarBool( "r_vkBdaVerbose" );
+		if ( ImGui::Checkbox( "Verbose z-fill log", &bdaVerbose ) ) {
+			cvarSystem->SetCVarBool( "r_vkBdaVerbose", bdaVerbose );
+		}
+		AddTooltip( "r_vkBdaVerbose: print the z-fill offload firing counter once/sec (per-draw / batched / "
+			"fell-back). Off by default; a diagnostic to confirm the BDA path is active." );
+
 		bool bdaTest = cvarSystem->GetCVarBool( "r_vkBdaTest" );
 		if ( ImGui::Checkbox( "BDA self-test", &bdaTest ) ) {
 			cvarSystem->SetCVarBool( "r_vkBdaTest", bdaTest );
