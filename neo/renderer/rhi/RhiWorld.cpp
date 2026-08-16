@@ -436,6 +436,62 @@ static void RB_RHI_TemporalResetCam( void ) {
 	rhiTemporalCam.stagedFrame  = -1;
 }
 
+// ---- per-object motion-vector cache (docs/fsr-temporal-pipeline.md, increment A2) ----
+// viewEntity_t is frame-temporary, so to build per-object motion vectors we copy each drawn
+// space's model->clip out of the normal prepass and read last frame's value back next frame.
+// Keyed by entityDef->index (dense, bounded by peak live entities). The world/BSP shares
+// viewDef->worldSpace (entityDef == NULL) under a reserved key, so camera motion falls out of
+// the exact same path — worldSpace.modelViewMatrix is the pure view matrix, so its stored MVP
+// is the world->clip A1's camera reprojection also tracks. Rigid transform only: GPU-skinned /
+// tessellation-deformed vertices reuse the rigid prev matrix (documented v1 limitation).
+//
+// The normal prepass runs once per rendered frame, primary fullscreen view only (it early-outs
+// on isSubview / non-fullscreen), so each entity appears at most once here and the index key is
+// unambiguous — mirrors/subviews never reach this cache. A per-entry frameCount stamp evicts
+// despawned / not-seen-last-frame entities: their next appearance starts at zero velocity
+// (prevMvp := curMvp) instead of a bogus jump from a stale matrix.
+struct rhiPrevModel_t {
+	float	mvp[16];		// previous frame's model->clip (the RB_RHI_SpaceMvp value)
+	int		frame;			// tr.frameCount when last written (-of a valid entry)
+	bool	valid;			// mvp holds a real matrix (distinguishes a never-written slot)
+};
+static idList<rhiPrevModel_t>	rhiPrevModels;		// [0] = worldSpace; [entityDef->index + 1] = entities
+
+// Read this space's previous-frame MVP into prevMvp and stage curMvp for next frame. When no
+// usable previous frame exists (first sighting / despawn gap / a second primary view in one
+// frame) prevMvp is set to curMvp so the shader writes zero velocity. Called once per space.
+static void RB_RHI_MotionPrevMvp( const viewEntity_t *space, const float curMvp[16], float prevMvp[16] ) {
+	const int key = space->entityDef ? space->entityDef->index + 1 : 0;
+	if ( key < 0 ) {						// paranoia: a negative index would corrupt the list
+		memcpy( prevMvp, curMvp, sizeof( float ) * 16 );
+		return;
+	}
+	if ( key >= rhiPrevModels.Num() ) {
+		rhiPrevModel_t empty;
+		memset( &empty, 0, sizeof( empty ) );
+		while ( rhiPrevModels.Num() <= key ) {
+			rhiPrevModels.Append( empty );
+		}
+	}
+	rhiPrevModel_t &e = rhiPrevModels[key];
+	// usable = written on the immediately preceding rendered frame; any older stamp is a
+	// despawn gap / first sighting / a duplicate view this frame -> no history -> zero velocity.
+	if ( e.valid && e.frame == tr.frameCount - 1 ) {
+		memcpy( prevMvp, e.mvp, sizeof( float ) * 16 );
+	} else {
+		memcpy( prevMvp, curMvp, sizeof( float ) * 16 );
+	}
+	memcpy( e.mvp, curMvp, sizeof( float ) * 16 );
+	e.frame = tr.frameCount;
+	e.valid = true;
+}
+
+// Drop all cached matrices (lost context / target realloc). The frame stamp already evicts
+// despawns, but a vid_restart can reuse indices, so wipe on the same hook as the camera state.
+static void RB_RHI_MotionResetCache( void ) {
+	rhiPrevModels.SetNum( 0 );
+}
+
 // SSR render targets (docs/ssr.md, Phase C.2.1). RGBA16F so reflected HDR energy
 // survives the intermediate; the march renders at r_ssrResScale of the view and the
 // composite upsamples with full-res Fresnel/gloss weighting. Temporal accumulation
@@ -494,6 +550,7 @@ static rhi::RenderTargetHandle rhiNormalResultRT = 0;
 static int  rhiNormalW = 0, rhiNormalH = 0;			// full view resolution
 static bool rhiNormalReadyThisView = false;			// the normal buffer was produced for this view
 static bool rhiNormalMrt = false;					// has the SSR rough/metal attachment (docs/ssr.md)
+static bool rhiNormalVel = false;					// has the RG16F velocity attachment (R1/A2, r_motionVectors)
 
 // ---- per-surface occlusion-map auto-load cache (docs/occlusion-maps.md) ----
 // Keyed by (render model, surface index) -- stable per model surface and shared across every
@@ -3023,7 +3080,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoDepthMipRT = 0;		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
 	rhiSsaoHistRT[0] = rhiSsaoHistRT[1] = 0;
 	rhiSsaoHistIdx = 0;			rhiSsaoHistW = rhiSsaoHistH = 0;
-	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();
+	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
 
 	rhiSsrRT = 0;				rhiSsrW = rhiSsrH = 0;
 	rhiSsrDepthMinRT = 0;		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
@@ -3033,7 +3090,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsrHistValid = false;
 
 	rhiNormalRT = 0;			rhiNormalW = rhiNormalH = 0;
-	rhiNormalReadyThisView = false;	rhiNormalMrt = false;
+	rhiNormalReadyThisView = false;	rhiNormalMrt = false;	rhiNormalVel = false;
 
 	rhiBerserkTrailRT[0] = rhiBerserkTrailRT[1] = 0;
 	rhiBerserkIdx = 0;			rhiBerserkW = rhiBerserkH = 0;
@@ -3401,17 +3458,20 @@ static bool RB_RHI_PointLightInBudget( const viewDef_t *viewDef, const viewLight
 	return inBudget;
 }
 
-static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h, bool wantMrt ) {
+static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h, bool wantMrt, bool wantVel ) {
 	if ( rhiNormalRT && r->GetRenderTargetImage( rhiNormalRT ) == 0 ) {
 		rhiNormalRT = 0;					// lost context (vid_restart)
 		rhiNormalW = rhiNormalH = 0;
 	}
-	if ( rhiNormalRT && rhiNormalW == w && rhiNormalH == h && rhiNormalMrt == wantMrt ) {
+	if ( rhiNormalRT && rhiNormalW == w && rhiNormalH == h && rhiNormalMrt == wantMrt && rhiNormalVel == wantVel ) {
 		return true;
 	}
 	if ( rhiNormalRT ) { r->DestroyRenderTarget( rhiNormalRT ); rhiNormalRT = 0; }
-	// wantMrt adds the SSR roughness/metalness attachment (docs/ssr.md) to the same pass
-	rhiNormalRT = r->CreateRenderTargetColorDepth( rhi::IF_RGBA8, w, h, wantMrt ? 2 : 1 );
+	// wantMrt adds the SSR roughness/metalness attachment (docs/ssr.md); wantVel adds the RG16F
+	// velocity attachment (R1/A2) as a 3rd MRT. colorCount 3 selects A0's mixed-format layout
+	// [RGBA8, RGBA8, RG16F]; else the 1/2-attachment RGBA8 layout, byte-identical to before.
+	const int colorCount = wantVel ? 3 : ( wantMrt ? 2 : 1 );
+	rhiNormalRT = r->CreateRenderTargetColorDepth( rhi::IF_RGBA8, w, h, colorCount );
 	if ( !rhiNormalRT ) {
 		rhiNormalW = rhiNormalH = 0;
 		return false;
@@ -3419,6 +3479,7 @@ static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h, bool wantMrt )
 	rhiNormalW = w;
 	rhiNormalH = h;
 	rhiNormalMrt = wantMrt;
+	rhiNormalVel = wantVel;
 	return true;
 }
 
@@ -3454,7 +3515,12 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const bool ssrWants = r_ssr.GetBool();
 	const bool ssaoWants = r_ssao.GetBool()
 		&& ( r_ssaoNormalBuffer.GetBool() || r_ssaoDebug.GetInteger() == 3 );
-	if ( !ssaoWants && !ssrWants ) {
+	// R1/A2: per-object motion vectors are VK-only (GL3 has no float-colour RT). When on they
+	// FORCE the normal prepass to run (for the velocity MRT) even if SSAO/SSR want nothing, and
+	// take the standalone 3-MRT path — never the depth-merged pass, which has no 3rd attachment.
+	const bool velWants = r_motionVectors.GetBool()
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	if ( !ssaoWants && !ssrWants && !velWants ) {
 		return false;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
@@ -3485,7 +3551,8 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// the merge serves SSR too. BeginNormalPrepass returns 0 (→ standalone path) on GL3 or if
 	// unsupported.
 	const bool wantMerge = r_ssaoMergeNormal.GetBool()
-		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN
+		&& !velWants;						// velocity needs the standalone 3-MRT (R1/A2)
 	rhi::RenderTargetHandle activeNormalRT = 0;
 	bool didMerge = false;
 	if ( wantMerge ) {
@@ -3495,10 +3562,11 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			// the merged handle carries the MRT when ssrWants; track it so the SSR consumer
 			// (which gates on rhiNormalMrt + reads GetRenderTargetImage2) accepts it.
 			rhiNormalMrt = ssrWants;
+			rhiNormalVel = false;			// the merged pass carries no velocity attachment (R1/A2)
 		}
 	}
 	if ( activeNormalRT == 0 ) {
-		if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants ) ) {
+		if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants, velWants ) ) {
 			return false;
 		}
 		r->BeginTargetPass( rhiNormalRT, &clear );
@@ -3513,6 +3581,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	const viewEntity_t *currentSpace = NULL;
 	float mvp[16];
+	float spacePrevMvp[16] = { 0 };		// R1/A2: previous frame's MVP for currentSpace (velWants only)
 
 	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
 	for ( int i = 0; i < viewDef->numDrawSurfs; i++ ) {
@@ -3545,6 +3614,14 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( surf->space != currentSpace ) {
 			currentSpace = surf->space;
 			RB_RHI_SpaceMvp( viewDef, surf->space, mvp );
+			// R1/A2: read this space's previous-frame MVP and stage the current one for next
+			// frame. Uses the same mvp fed to u_mvpMatrix, so a static space gives prev == cur
+			// (exactly zero velocity). While jitter is off this mvp is un-jittered; increment B
+			// must keep jitter out of the velocity (FSR2 runs MOTION_VECTORS_JITTER_CANCELLATION
+			// unset), by feeding an un-jittered current MVP or subtracting the jitter delta.
+			if ( velWants ) {
+				RB_RHI_MotionPrevMvp( surf->space, mvp, spacePrevMvp );
+			}
 		}
 
 		// bump image + texture matrix for this surface, matching the interaction/specular
@@ -3576,6 +3653,9 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		memset( &parms, 0, sizeof( parms ) );
 		memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
 		memcpy( parms.modelViewMatrix, surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
+		if ( velWants ) {
+			memcpy( parms.prevMvpMatrix, spacePrevMvp, sizeof( parms.prevMvpMatrix ) );	// R1/A2 motion vectors
+		}
 		memcpy( parms.bumpMatrixS, bumpS, sizeof( bumpS ) );
 		memcpy( parms.bumpMatrixT, bumpT, sizeof( bumpT ) );
 		// AO mask (gbuffer.frag alpha): 0 on the view weapon so SSAO skips it — its
@@ -5029,6 +5109,60 @@ void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 /*
 ===================
+RB_RHI_MotionVectorDebugOverlay
+
+r_mvDebug visualization (docs/fsr-temporal-pipeline.md R1/A2): blit the velocity MRT over the
+finished 3D view so the motion-vector convention can be checked — the #1 FSR2 integration bug.
+The velocity stored is currUV - prevUV, so a static world under a RIGHTWARD camera pan moved
+LEFT on screen (negative x): mode 1 tints it toward green (−x → below-0.5 red, so green
+dominates). A violent full-screen smear that follows the pan the WRONG way means the sign is
+inverted. No-op unless r_motionVectors + r_mvDebug are on and the standalone velocity target
+exists (VK only).
+===================
+*/
+void RB_RHI_MotionVectorDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
+	const int mode = r_mvDebug.GetInteger();
+	if ( mode <= 0 || !r_motionVectors.GetBool() || !R_BackendSupportsEnhancements() ) {
+		return;
+	}
+	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN
+	     || !rhiNormalReadyThisView || !rhiNormalVel || !rhiNormalResultRT ) {
+		return;					// velocity MRT is VK-only and only exists when it was produced this view
+	}
+	rhi::ImageHandle velImg = r->GetRenderTargetImage3( rhiNormalResultRT );
+	if ( !velImg ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "ssao_debug" );
+	if ( !prog ) {
+		return;
+	}
+
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.localParam0[0] = ( mode >= 2 ) ? 5.0f : 4.0f;		// ssao_debug: 4 = direction, 5 = magnitude
+	// per-frame UV velocity is tiny, so amplify for visibility; the magnitude view reads darker
+	// than the centred direction view, so it gets a larger base gain. r_mvDebugScale multiplies
+	// both so slow motion can be cranked up live (magnitude stays black where there is NO motion).
+	parms.localParam0[1] = ( ( mode >= 2 ) ? 40.0f : 12.0f ) * r_mvDebugScale.GetFloat();
+
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
+	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	RB_RHI_DrawFullscreen( r, prog, parms, velImg );
+
+	RB_RHI_ForgetTexBinds();
+}
+
+/*
+===================
 RB_RHI_DrawWorld
 
 Depth prepass + stencil shadows + per-light interactions, following the
@@ -5073,7 +5207,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// and we capture _currentDepth from its sealed depth; otherwise zfill seals depth as
 	// before. The return value is the single source of truth — no duplicate gate to drift,
 	// and a BeginNormalPrepass fallback (returns 0) cleanly leaves zfill to seal depth.
-	rhiNormalReadyThisView = false;
+	rhiNormalReadyThisView = false;	rhiNormalVel = false;	// R1/A2: recomputed by the prepass when it runs
 	const bool mergedDepth = RB_RHI_NormalPrepass( r, viewDef );
 	if ( mergedDepth ) {
 		RB_RHI_CaptureCurrentDepth( viewDef );

@@ -234,6 +234,10 @@ void RB_RHI_FogAllLights( rhi::RHI *r, viewDef_s *viewDef );
 void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
 void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_s *viewDef );
 
+// motion-vector debug overlay (r_mvDebug; docs/fsr-temporal-pipeline.md R1/A2): blit the
+// velocity MRT over the finished 3D view. No-op unless r_motionVectors + r_mvDebug are on (VK).
+void RB_RHI_MotionVectorDebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
+
 // DUDE screen-space reflections (docs/ssr.md): additive composite over the lit
 // opaque scene. Called at the shader-pass translucent split point (RhiWorld.cpp);
 // no-op unless r_ssr produced this view's MRT G-buffer.

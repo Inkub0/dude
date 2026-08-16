@@ -3206,6 +3206,8 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		// weapon, on both backends and under HDR. Zero cost unless a reload is easing
 		// r_weaponReloadFocus above 0 (idPlayerView writes it).
 		RB_RHI_DepthOfField( r, viewDef );
+		// r_mvDebug: overlay the per-object velocity buffer (R1/A2; VK-only, no-op otherwise)
+		RB_RHI_MotionVectorDebugOverlay( r, viewDef );
 	}
 
 	// debug visualization (r_showTris, r_showNormals, debug lines/polygons, …)

@@ -987,6 +987,9 @@ extern idCVar r_ssaoDebug;				// 1=show AO buffer, 2=show bent normals
 extern idCVar r_ssaoTemporal;			// accumulate AO across frames via camera reprojection
 extern idCVar r_ssaoTemporalFeedback;	// temporal history weight (0..0.97)
 extern idCVar r_temporalResetDist;		// view-origin jump (world units) that resets temporal history (cut/teleport); 0 = never
+extern idCVar r_motionVectors;			// VK: per-object screen-velocity MRT in the normal prepass (R1/A2, feeds FSR2 / temporal SSAO+SSR)
+extern idCVar r_mvDebug;				// visualize the velocity buffer: 0=off, 1=direction, 2=magnitude
+extern idCVar r_mvDebugScale;			// live gain multiplier for the r_mvDebug overlay (crank up to see slow motion)
 extern idCVar r_ssaoDepthMip;			// march the horizon search over a prefiltered linear-depth mip chain (Phase 1)
 extern idCVar r_ssaoDepthMipBias;		// depth-mip LOD aggressiveness (log2(stepPix * bias))
 extern idCVar r_ssaoDepthMipMaxLod;		// depth-mip coarseness cap (kills far-tap halos)

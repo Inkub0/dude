@@ -27,6 +27,11 @@ VARY(1) out vec3 var_T;
 VARY(2) out vec3 var_B;
 VARY(3) out vec3 var_N;
 VARY(4) out vec2 var_TexCoverage;
+// motion vectors (R1/A2): generated here from the DISPLACED position so the tessellated
+// silhouette's velocity matches its rasterized depth. Rigid transform only — GPU-skinned /
+// deforming vertices reuse the rigid prev matrix (documented v1 limitation).
+VARY(7) out vec4 var_CurClip;
+VARY(8) out vec4 var_PrevClip;
 
 void main() {
 	vec3 tc = gl_TessCoord;
@@ -50,5 +55,11 @@ void main() {
 	float seam = i_ModelNormal[0].w * tc.x + i_ModelNormal[1].w * tc.y + i_ModelNormal[2].w * tc.z;
 	pos = dudeTessDisplace( pos, geoN, u_bumpMap, var_TexBump, seam );
 
-	gl_Position = u_mvpMatrix * vec4( pos, 1.0 );
+	// motion vectors (R1/A2): both clips from the same displaced model-space position, so a
+	// static patch gives currClip == prevClip (zero velocity) and a moving rigid one gives its
+	// true screen motion. gbuffer.frag does the per-pixel divide.
+	vec4 curClip = u_mvpMatrix * vec4( pos, 1.0 );
+	var_CurClip  = curClip;
+	var_PrevClip = u_prevMvpMatrix * vec4( pos, 1.0 );
+	gl_Position  = curClip;
 }

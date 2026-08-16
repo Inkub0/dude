@@ -119,10 +119,19 @@ struct RenderParams {
 								// frustum whose linear depth is this plane — the light's own
 								// falloff texgen (a point light's falloff) can't serve as the
 								// compare reference there. Filled only on the sun path (mode 3).
+
+	float	prevMvpMatrix[16];	// DUDE motion vectors (docs/fsr-temporal-pipeline.md R1/A2): the
+								// PREVIOUS rendered frame's model->clip for this surface's space
+								// (un-jittered; same VK z-remap convention as mvpMatrix). gbuffer.
+								// {vert,tese} project the vertex through both this and mvpMatrix and
+								// write the per-object screen velocity (currUV - prevUV) into the
+								// 3rd MRT. Filled ONLY by the VK normal prepass when r_motionVectors
+								// is on; 0 (unused) on every other draw. Appended LAST so no existing
+								// member's std140 offset shifts.
 };
 
-// 3 mat4 (192) + 46 vec4 (736) = 928 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 928, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 4 mat4 (256) + 46 vec4 (736) = 992 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 992, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

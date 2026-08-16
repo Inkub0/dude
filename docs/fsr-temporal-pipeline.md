@@ -119,6 +119,28 @@ history invalidation on cuts (today's clamp only *hides* wrong cross-cut history
 camera cut fires `historyReset`; stored projection has `[8]==[9]==0`.
 
 ### A2 — per-object velocity (VK; GL3 stays camera-only)
+
+**PRODUCTION half DONE + user-validated 2026-08-16 (branch `feat/temporal-prevvp-reset`).** The
+velocity buffer ships (`r_motionVectors`, `r_mvDebug` 1 dir / 2 mag + `r_mvDebugScale`); consumption
+(feeding temporal SSAO/SSR) is the follow-up. **As-built deltas from the plan below:** (a) stores the
+prev MVP by **growing `RenderParams` one mat4 (`prevMvpMatrix`, 928→992)**, NOT the "separate small
+UBO/push" the plan preferred — `uboAlign=256` so 928 and 992 round to the same 1024-byte ring slice,
+making the "+64 B/draw" cost literally zero, while a 2nd UBO binding is layout surgery on every
+pipeline. (b) **Standalone 3-MRT path forced when velocity is wanted** (`wantMerge && !velWants`),
+which *sidesteps* the `RB_RHI_TessBumpForZfill`/merge/depth-EQUAL contract entirely — scene depth
+stays zfill's, untouched, so "MV-on depth == zfill depth" holds by construction. (c) cache is a flat
+`idList` keyed `[0]=worldSpace`, `[entityDef->index+1]=entities` (not `idHashIndex`; index is dense
+and the primary-fullscreen-view-only prepass means no mirror/subview dupes). (d) velocity is
+**per-pixel** — vert/tese emit cur+prev clip, frag divides each by its own `w`. **Validation:** static
+camera → grey (≈0); **strafe → walls tint by depth (near>far parallax); walk forward → radial
+expansion field** (the geometry-tracking + sign confirmation); a camera pan concentrates velocity at
+the edges (perspective `sec²`), a poor geometry test. Rigid-only: skinned limb motion isn't captured
+(v1 limit → increment D). **NEXT: A2-consumption** = temporal SSAO/SSR sample the velocity
+(`historyUV = currentUV − velocity`) instead of the camera-only reproj matrix, with a fallback when
+`r_motionVectors` is off.
+
+Original plan text:
+
 The largest net-new frontend work. A persistent **prev-frame per-object matrix cache** (static
 `idHashIndex` keyed by `entityDef->index` — `viewEntity_t` is frame-temporary, so copy
 `modelViewMatrix` out each frame, evict despawned, discriminate mirror/subview duplicates).

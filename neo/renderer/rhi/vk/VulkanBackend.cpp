@@ -188,6 +188,7 @@ public:
 	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt );
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt );
 	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle rt );
+	virtual ImageHandle			GetRenderTargetImage3( RenderTargetHandle rt );
 
 	virtual int		AllocUniforms( const void *data, int size, BufferHandle *buffer );
 	virtual int		AllocVertices( const void *data, int size, BufferHandle *buffer );
@@ -5241,6 +5242,11 @@ void VulkanBackend::BeginTargetPass( RenderTargetHandle rt, const ClearArgs *cle
 		VkClearValue cv[4] = {};		// up to 3 color + 1 depth (R1/A0)
 		if ( clear != NULL && clear->color ) {
 			for ( int c = 0; c < t->colorCount; c++ ) {
+				// attachment 2 is the RG16F velocity MRT (R1/A2): sky/uncovered pixels are
+				// never drawn into the normal prepass, so they keep the clear value — which
+				// for velocity must be ZERO motion, not the flat-normal color the other
+				// attachments clear to. Leave cv[2] zero-initialised.
+				if ( c >= 2 ) { continue; }
 				cv[c].color.float32[0] = clear->rgba[0]; cv[c].color.float32[1] = clear->rgba[1];
 				cv[c].color.float32[2] = clear->rgba[2]; cv[c].color.float32[3] = clear->rgba[3];
 			}
@@ -5794,6 +5800,12 @@ ImageHandle VulkanBackend::GetRenderTargetImage2( RenderTargetHandle rt ) {
 	}
 	RenderTarget *t = LookupTarget( rt );
 	return ( t && t->colorCount >= 2 ) ? t->colorSampleImage[1] : 0;
+}
+
+// third color attachment = the RG16F velocity MRT of the 3-MRT normal prepass (R1/A2).
+ImageHandle VulkanBackend::GetRenderTargetImage3( RenderTargetHandle rt ) {
+	RenderTarget *t = LookupTarget( rt );
+	return ( t && t->colorCount >= 3 ) ? t->colorSampleImage[2] : 0;
 }
 
 // the color/depth image the current frame target resolves to (for M5 captures)
