@@ -48,7 +48,10 @@ void main() {
 		q.y = 1.0 - q.y;
 	}
 
-	vec4 cur = texture( u_scratch, q );
+	// _scratch is a POT full-res capture; the scene fills only [0,shiftScale] of it, so
+	// screen-correct the scene sample (localParam0.w / localParam1.w). The history + mask
+	// stay in the trail's full [0,1] space below.
+	vec4 cur = texture( u_scratch, q * vec2( u_localParam0.w, u_localParam1.w ) );
 
 	// first frame after (re)allocation: no usable history, seed with the clean scene.
 	if ( u_localParam0.z < 0.5 ) {

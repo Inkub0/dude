@@ -3828,6 +3828,12 @@ rhi::ImageHandle RB_RHI_BerserkAccum( rhi::RHI *r, const viewDef_t *viewDef,
 	parms.localParam0[0] = scale;
 	parms.localParam0[1] = feedback * fade;					// wind-down fades the feedback out
 	parms.localParam0[2] = rhiBerserkValid ? 1.0f : 0.0f;
+	// _scratch is a POT full-res capture (no crop) — the scene fills only [0,shiftScale] of it.
+	// Screen-correct the scene sample so the whole render maps to the trail's [0,1] (.w on both).
+	parms.localParam0[3] = ( globalImages->scratchImage->uploadWidth  > 0 )
+		? (float)fullW / globalImages->scratchImage->uploadWidth  : 1.0f;
+	parms.localParam1[3] = ( globalImages->scratchImage->uploadHeight > 0 )
+		? (float)fullH / globalImages->scratchImage->uploadHeight : 1.0f;
 	parms.localParam1[0] = cosf( ang );
 	parms.localParam1[1] = sinf( ang );
 	// Vulkan writes this fullscreen pass through a flipY viewport while _scratch is captured
