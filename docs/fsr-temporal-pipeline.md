@@ -249,8 +249,17 @@ pre-scene). Wrap inputs with `ffxGetTextureResourceVK`: color = `rhiHdrRT` (pre-
 depth = scene depth aspect, motionVectors = A2's RG16F, output = a new display-res compute-write
 image. **Context flags (verified):** `HIGH_DYNAMIC_RANGE` set, `DEPTH_INFINITE` set,
 `DEPTH_INVERTED` **unset**, `AUTO_EXPOSURE` set, `MOTION_VECTORS_JITTER_CANCELLATION` unset.
-**Dispatch fields:** `motionVectorScale = {renderW, −renderH}` (the Y-flip to FSR2's top-left
-origin happens **here**), `jitterOffset` = B's stored value, `frameTimeDelta` in **ms**,
+**Dispatch fields:** `motionVectorScale = {−renderW, +renderH}` — **NOT `{renderW, −renderH}`**
+(corrected by the A2 adversarial review, verified against the vendored FSR2 shaders). A2 stores
+`currUV − prevUV` in **+Y-up** UV; FSR2 wants `prevUV − curUV` in **top-left +Y-down** UV
+(`fReprojectedUv = fUv + fMotionVector`, then samples history — `ffx_fsr2_reproject.h`,
+`_depth_clip.h`, `_reconstruct_dilated_velocity...h`). The scale must therefore do TWO things
+at once: reverse the direction (negate **both** axes) and flip +Y-up→+Y-down (negate Y). On X
+only the reversal applies → **−renderW**; on Y the reversal and the coordinate flip **cancel** →
+**+renderH**. The naive "just flip Y" (`{renderW, −renderH}`) reprojects backwards on both axes =
+full-image smear. (The in-engine temporal SSAO/SSR consumers use `historyUV = currentUV − velocity`
+in the engine's own +Y-up space and are unaffected — this correction is FSR2-dispatch-only.)
+`jitterOffset` = B's stored value, `frameTimeDelta` in **ms**,
 `cameraFovAngleVertical` in **radians**, `preExposure` = 1.0, `reset` = A1's `historyReset`.
 Bypass FXAA/SMAA when `r_fsr` is on (RCAS replaces them). Move grain/chroma/gamma to display res
 over the FSR2 output. **Validators:** `r_fsr 0` bit-identical (C1 already proved the passthrough);

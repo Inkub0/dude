@@ -451,9 +451,14 @@ static void RB_RHI_TemporalResetCam( void ) {
 // despawned / not-seen-last-frame entities: their next appearance starts at zero velocity
 // (prevMvp := curMvp) instead of a bogus jump from a stale matrix.
 struct rhiPrevModel_t {
-	float	mvp[16];		// previous frame's model->clip (the RB_RHI_SpaceMvp value)
-	int		frame;			// tr.frameCount when last written (-of a valid entry)
-	bool	valid;			// mvp holds a real matrix (distinguishes a never-written slot)
+	float		mvp[16];	// previous frame's model->clip (the RB_RHI_SpaceMvp value)
+	const void	*entityDef;	// identity guard: the idRenderEntityLocal* this slot held last frame.
+							// entityDef->index is a world slot handle FindNull reuses the instant an
+							// entity is freed, so without this a despawn+respawn into the same slot on
+							// consecutive frames would feed the new entity its predecessor's matrix
+							// (a one-frame bogus velocity — e.g. a rocket that spawns debris on impact).
+	int			frame;		// tr.frameCount when last written
+	bool		valid;		// mvp holds a real matrix (distinguishes a never-written slot)
 };
 static idList<rhiPrevModel_t>	rhiPrevModels;		// [0] = worldSpace; [entityDef->index + 1] = entities
 
@@ -474,14 +479,18 @@ static void RB_RHI_MotionPrevMvp( const viewEntity_t *space, const float curMvp[
 		}
 	}
 	rhiPrevModel_t &e = rhiPrevModels[key];
-	// usable = written on the immediately preceding rendered frame; any older stamp is a
-	// despawn gap / first sighting / a duplicate view this frame -> no history -> zero velocity.
-	if ( e.valid && e.frame == tr.frameCount - 1 ) {
+	// usable = written on the immediately preceding rendered frame BY THE SAME ENTITY. The pointer
+	// guard rejects a reused slot (a fresh idRenderEntityLocal is a different pointer), so a
+	// despawn+respawn into the same index starts at zero velocity instead of inheriting the
+	// previous occupant's matrix. Any older stamp is a despawn gap / first sighting / a duplicate
+	// view this frame -> also zero velocity. (worldSpace is entityDef==NULL both sides -> matches.)
+	if ( e.valid && e.frame == tr.frameCount - 1 && e.entityDef == (const void *)space->entityDef ) {
 		memcpy( prevMvp, e.mvp, sizeof( float ) * 16 );
 	} else {
 		memcpy( prevMvp, curMvp, sizeof( float ) * 16 );
 	}
 	memcpy( e.mvp, curMvp, sizeof( float ) * 16 );
+	e.entityDef = (const void *)space->entityDef;
 	e.frame = tr.frameCount;
 	e.valid = true;
 }
@@ -4613,8 +4622,15 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			tempParms.localParam0[2] = idMath::ClampFloat( 0.0f, 0.97f, r_ssrTemporalFeedback.GetFloat() );
 			tempParms.localParam0[3] = historyUsable ? 1.0f : 0.0f;
 
+			// R1/A2 consumption: reproject the reflection history by the per-object velocity buffer
+			// when it exists (r_motionVectors, VK) so moving objects stop dragging a reflection
+			// ghost. Falls back to the camera-only matrix reproj (localParam1.x = 0).
+			rhi::ImageHandle velImg = ( rhiNormalVel && rhiNormalReadyThisView )
+				? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
+			tempParms.localParam1[0] = velImg ? 1.0f : 0.0f;
+
 			// unit 0 = current march (via DrawFullscreen), unit 1 = history read slot,
-			// unit 2 = depth
+			// unit 2 = depth, unit 3 = velocity (R1/A2)
 			r->BeginTargetPass( rhiSsrHistRT[writeIdx], NULL );
 			RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
 			if ( vkMode ) {
@@ -4633,6 +4649,9 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 				backEnd.glState.currenttmu = 0;
 				backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
 			}
+			// unit 3 = velocity MRT, or a dummy (u_velocity is a statically-used sampler VK validates)
+			if ( velImg ) { RB_RHI_BindRTImage( r, 3, velImg ); }
+			else          { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
 			RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiSsrRT ) );
 			r->EndPass();
 
@@ -4946,12 +4965,23 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			tempParms.localParam0[2] = idMath::ClampFloat( 0.0f, 0.97f, r_ssaoTemporalFeedback.GetFloat() );
 			tempParms.localParam0[3] = historyUsable ? 1.0f : 0.0f;
 
+			// R1/A2 consumption: reproject the AO history by the per-object velocity buffer when it
+			// exists (r_motionVectors, VK) so moving objects stop dragging their AO. Falls back to
+			// the camera-only matrix reproj (localParam1.x = 0).
+			rhi::ImageHandle velImg = ( rhiNormalVel && rhiNormalReadyThisView )
+				? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
+			tempParms.localParam1[0] = velImg ? 1.0f : 0.0f;
+
 			// unit 0 = current AO (rhiSsaoRT, via DrawFullscreen), unit 1 = history read
-			// slot (a render target, direct-bound like the normal buffer), unit 2 = depth
+			// slot (a render target, direct-bound like the normal buffer), unit 2 = depth,
+			// unit 3 = velocity (R1/A2)
 			r->BeginTargetPass( rhiSsaoHistRT[writeIdx], NULL );
 			RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
 			RB_RHI_BindRTUnit( r, 1, rhiSsaoHistRT[readIdx] );	// history read (GL raw / VK rhiVkUnits[1])
 			backEnd.glState.tmu[1].current2DMap = -1;			// direct bind bypassed the tmu cache
+			// unit 3 = velocity MRT, or a dummy (u_velocity is a statically-used sampler VK validates)
+			if ( velImg ) { RB_RHI_BindRTImage( r, 3, velImg ); }
+			else          { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
 			RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiSsaoRT ) );
 			r->EndPass();
 
