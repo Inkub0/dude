@@ -56,9 +56,10 @@ void main() {
 	// clip by its OWN w so large world triangles reproject correctly, take the NDC delta, scale
 	// by 0.5 into [0,1] UV units. Canonical +Y-up direction currUV - prevUV: the SSAO/SSR
 	// consumers fetch history at currentUV - velocity; the FSR2 dispatch (C2) applies the top-left
-	// Y-flip via motionVectorScale. Zeroed on the depth-hacked view weapon (u_localParam0.x == 0,
-	// the same mask written to fragColor.a), whose projection makes its vectors unreliable.
+	// Y-flip via motionVectorScale. u_localParam1.xy cancels the per-frame projection jitter (R1/B;
+	// 0 when r_temporalJitter is off) so the jitter never registers as motion. Zeroed on the depth-
+	// hacked view weapon (u_localParam0.x == 0, the same mask written to fragColor.a).
 	vec2 curUV  = var_CurClip.xy  / var_CurClip.w;
 	vec2 prevUV = var_PrevClip.xy / var_PrevClip.w;
-	out_Velocity = ( curUV - prevUV ) * 0.5 * u_localParam0.x;
+	out_Velocity = ( ( curUV - prevUV ) * 0.5 + u_localParam1.xy ) * u_localParam0.x;
 }

@@ -109,6 +109,7 @@ idCVar r_gammaInShader( "r_gammaInShader", "1", CVAR_RENDERER | CVAR_ARCHIVE | C
 idCVar r_renderer( "r_renderer", "best", CVAR_RENDERER | CVAR_ARCHIVE, "hardware specific renderer path to use", r_rendererArgs, idCmdSystem::ArgCompletion_String<r_rendererArgs> );
 
 idCVar r_jitter( "r_jitter", "0", CVAR_RENDERER | CVAR_BOOL, "randomly subpixel jitter the projection matrix" );
+idCVar r_temporalJitter( "r_temporalJitter", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "sub-pixel Halton(2,3) projection jitter per rendered frame, the temporal-supersampling input for FSR2 (docs/fsr-temporal-pipeline.md R1/B). Infrastructure: on its own (no temporal resolve) the image just shimmers; it pays off under FSR2 (R1/C2). Off = un-jittered projection, bit-identical to before. Main fullscreen view only (skips subviews/mirrors/env-probe/screenshots)" );
 
 idCVar r_skipSuppress( "r_skipSuppress", "0", CVAR_RENDERER | CVAR_BOOL, "ignore the per-view suppressions" );
 idCVar r_skipPostProcess( "r_skipPostProcess", "0", CVAR_RENDERER | CVAR_BOOL, "skip all post-process renderings" );

@@ -461,6 +461,9 @@ struct rhiPrevModel_t {
 	bool		valid;		// mvp holds a real matrix (distinguishes a never-written slot)
 };
 static idList<rhiPrevModel_t>	rhiPrevModels;		// [0] = worldSpace; [entityDef->index + 1] = entities
+// previous rendered frame's applied projection jitter (pixels, +Y-up), for the R1/B velocity
+// jitter-cancellation. Advanced once per frame in the normal prepass (primary fullscreen view).
+static float rhiPrevJitter[2] = { 0.0f, 0.0f };
 
 // Read this space's previous-frame MVP into prevMvp and stage curMvp for next frame. When no
 // usable previous frame exists (first sighting / despawn gap / a second primary view in one
@@ -499,6 +502,7 @@ static void RB_RHI_MotionPrevMvp( const viewEntity_t *space, const float curMvp[
 // despawns, but a vid_restart can reuse indices, so wipe on the same hook as the camera state.
 static void RB_RHI_MotionResetCache( void ) {
 	rhiPrevModels.SetNum( 0 );
+	rhiPrevJitter[0] = rhiPrevJitter[1] = 0.0f;
 }
 
 // SSR render targets (docs/ssr.md, Phase C.2.1). RGBA16F so reflected HDR energy
@@ -3592,6 +3596,20 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	float mvp[16];
 	float spacePrevMvp[16] = { 0 };		// R1/A2: previous frame's MVP for currentSpace (velWants only)
 
+	// R1/B: cancel the per-frame projection jitter out of the velocity so it stays real motion
+	// (FSR2 runs MOTION_VECTORS_JITTER_CANCELLATION unset). The jitter is a depth-independent
+	// uniform screen shift, so one per-view correction (jitter_cur - jitter_prev)/viewport in
+	// +Y-up UV, added to every velocity, is exact. viewDef->jitter is 0 when r_temporalJitter is
+	// off, so this is 0 (a no-op) unless jitter is active. Advanced once per frame (this prepass
+	// runs only for the primary fullscreen view).
+	float jitterCorr[2] = { 0.0f, 0.0f };
+	if ( velWants ) {
+		jitterCorr[0] = ( viewDef->jitter[0] - rhiPrevJitter[0] ) / (float)w;
+		jitterCorr[1] = ( viewDef->jitter[1] - rhiPrevJitter[1] ) / (float)h;
+		rhiPrevJitter[0] = viewDef->jitter[0];
+		rhiPrevJitter[1] = viewDef->jitter[1];
+	}
+
 	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
 	for ( int i = 0; i < viewDef->numDrawSurfs; i++ ) {
 		const drawSurf_t *surf = drawSurfs[i];
@@ -3664,6 +3682,8 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		memcpy( parms.modelViewMatrix, surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
 		if ( velWants ) {
 			memcpy( parms.prevMvpMatrix, spacePrevMvp, sizeof( parms.prevMvpMatrix ) );	// R1/A2 motion vectors
+			parms.localParam1[0] = jitterCorr[0];		// R1/B: jitter cancellation (gbuffer.frag adds it)
+			parms.localParam1[1] = jitterCorr[1];
 		}
 		memcpy( parms.bumpMatrixS, bumpS, sizeof( bumpS ) );
 		memcpy( parms.bumpMatrixT, bumpT, sizeof( bumpT ) );

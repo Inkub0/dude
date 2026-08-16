@@ -157,7 +157,24 @@ camera-only reproj within a perceptual threshold (not bit-exact — RG16F quanti
 objects → strictly less ghosting; **MV-on/SSAO-off depth == zfill depth bit-for-bit** before any
 interaction pass is trusted; `r_vkBdaZfill 1` vs `2` leave velocity identical.
 
-### B — sub-pixel Halton jitter (both RHI)
+### B — sub-pixel Halton jitter (both RHI)  **[DONE + user-verified 2026-08-16]**
+
+`r_temporalJitter` (default 0, ARCHIVE). **As-built deltas:** (a) **hand-rolled `R_Halton(index,base)`**
+in tr_main.cpp, NOT `ffxFsr2GetJitterOffset` — keeps backend-agnostic core from including FSR2/VK
+headers; FSR2 only needs the applied jitter fed back via `jitterOffset` (any consistent sequence
+works; Halton(2,3) phase 8 matches its default). (b) Legacy `r_jitter` **left as an independent
+source** (not retired) — both default 0, so OFF == un-jittered, bit-identical. (c) **Velocity
+jitter-cancellation done HERE** (the A2 coupling): the projection jitter is a depth-independent
+uniform screen shift, so one per-view `(jitter_cur − jitter_prev)/viewport` (+Y-up UV) added to the
+velocity in gbuffer.frag via the spare `u_localParam1.xy` cancels it exactly — cheaper than an
+un-jittered MVP, no RenderParams growth. Prev jitter tracked in `rhiPrevJitter` (advanced once/frame
+in the prepass, reset with the MV cache). `viewDef->jitter[2]` (pixels, +Y-up) stores it for C2.
+Skips subview/env-probe/screenshot (2D/HUD doesn't hit R_SetupProjection). **User-verified:** static
+camera + `r_temporalJitter 1` + `r_mvDebug 1` stays flat grey (jitter cancelled from the velocity);
+`r_temporalJitter 0` = unchanged. Payoff is C2 (alone it just shimmers — no resolve).
+
+Original plan text:
+
 Swap the `idRandom` source in the **existing** `R_SetupProjection` jitter block
 (tr_main.cpp:1300-1329) for `ffxFsr2GetJitterOffset` (Halton(2,3), phase 8 at scale 1.0), indexed
 by **`tr.frameCount`** (per rendered frame — correct for `com_interpolate`, **not** per-tic, or

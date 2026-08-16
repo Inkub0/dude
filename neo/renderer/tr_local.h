@@ -386,6 +386,10 @@ typedef struct viewDef_s {
 	// must reproject against the un-jittered world->clip or the frame jitter smears the
 	// history. See docs/fsr-temporal-pipeline.md (increments A1/B).
 	float				unjitteredProjectionMatrix[16];
+	// sub-pixel projection jitter applied THIS frame, in pixels ([-0.5,0.5], +Y-up), 0 when off
+	// (docs/fsr-temporal-pipeline.md B). Halton(2,3) per rendered frame; handed to FSR2's
+	// jitterOffset in C2 so it can undo the jitter it accumulates. Main fullscreen view only.
+	float				jitter[2];
 	viewEntity_t		worldSpace;
 
 	idRenderWorldLocal *renderWorld;
@@ -1177,6 +1181,7 @@ extern idCVar r_shadowPolygonOffset;	// bias value added to depth test for stenc
 extern idCVar r_shadowPolygonFactor;	// scale value for stencil shadow drawing
 
 extern idCVar r_jitter;					// randomly subpixel jitter the projection matrix
+extern idCVar r_temporalJitter;			// Halton(2,3) sub-pixel jitter per frame for temporal AA / FSR2 (R1/B)
 extern idCVar r_lightSourceRadius;		// for soft-shadow sampling
 extern idCVar r_lockSurfaces;
 extern idCVar r_orderIndexes;			// perform index reorganization to optimize vertex use
