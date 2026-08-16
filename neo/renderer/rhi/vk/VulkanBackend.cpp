@@ -66,6 +66,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "renderer/rhi/RenderParams.h"	// M6: DrawImmediate fills the generic UBO
 #include "renderer/rhi/MaterialIR.h"		// IR_Purge on shader-cache lifecycle
 #include "renderer/rhi/vk/VulkanImGui.h"	// M6: ImGui glue (impl at the end of this TU)
+#include "ffx_fsr2.h"						// vendored FidelityFX FSR2 (docs/fsr-temporal-pipeline.md, R1)
+#include "vk/ffx_fsr2_vk.h"					// FSR2 Vulkan backend init (against our VkDevice)
 
 #ifndef IMGUI_DISABLE
   #include "../../../libs/imgui/imgui.h"
@@ -93,6 +95,8 @@ static idCVar r_vkGpuTime( "r_vkGpuTime", "0", CVAR_RENDERER | CVAR_BOOL,
 
 static idCVar r_vkComputeTest( "r_vkComputeTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: run the compute-lane self-test (dispatch a kernel doubling a storage buffer, read back, verify) and print PASS/FAIL. Set to 1 to trigger (docs/gpu-offload-plan.md Phase 1)" );
+static idCVar r_fsr2Test( "r_fsr2Test", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: FSR2 bring-up self-test - size the scratch, build the FSR2 VK interface, create a Native-AA FSR2 context (no dispatch), destroy it, and print PASS/FAIL. Set to 1 to trigger (docs/fsr-temporal-pipeline.md, R1/C0)" );
 
 static idCVar r_vkIndirectTest( "r_vkIndirectTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: route every indexed draw through the DrawIndexedIndirect primitive (a per-draw 1-command indirect ring) instead of vkCmdDrawIndexed. A pixel-identical A/B validating the Phase-3 indirect-draw seed (docs/gpu-offload-plan.md)" );
@@ -216,6 +220,7 @@ private:
 	VkDescriptorSet	RecordDispatch( VkCommandBuffer cb, const ComputeArgs &args );	// bind+dispatch; returns the set to reclaim
 	void			ComputeSelfTest();							// r_vkComputeTest: dispatch a trivial kernel, read back, verify
 	void			BdaSelfTest();								// r_vkBdaTest: sum a buffer through its device-address pointer (Phase 3.2b BDA primitive)
+	void			Fsr2SelfTest();								// r_fsr2Test: init the vendored FSR2 VK backend + create/destroy a context
 
 	bool			CreateInstance();
 	bool			PickPhysicalDevice();
@@ -1101,6 +1106,10 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	VkPhysicalDeviceVulkan12Features supported12 = {};
 	supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 	supported13.pNext = &supported12;
+	// Vulkan 1.1 feature struct: 16-bit storage, needed by FSR2's fp16 shader permutations.
+	VkPhysicalDeviceVulkan11Features supported11 = {};
+	supported11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+	supported12.pNext = &supported11;
 	VkPhysicalDeviceFeatures2 supported2 = {};
 	supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 	supported2.pNext = &supported13;
@@ -1126,7 +1135,18 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	// the VMA allocator flag + buffer usage bit on the same flag (all three must agree).
 	haveBufferDeviceAddress = supported12.bufferDeviceAddress == VK_TRUE;
 	enabled12.bufferDeviceAddress = haveBufferDeviceAddress ? VK_TRUE : VK_FALSE;
+	// FSR2 (docs/fsr-temporal-pipeline.md) auto-selects fp16 shader permutations on GPUs that
+	// support half precision; enable shaderFloat16 + 16-bit storage when present so those
+	// pipelines create. Enabled only when supported, so device creation is unchanged on GPUs
+	// that lack them, and the features are inert unless FSR2 actually runs.
+	enabled12.shaderFloat16 = supported12.shaderFloat16;
 	enabled13.pNext = &enabled12;
+
+	VkPhysicalDeviceVulkan11Features enabled11 = {};
+	enabled11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+	enabled11.storageBuffer16BitAccess = supported11.storageBuffer16BitAccess;
+	enabled11.uniformAndStorageBuffer16BitAccess = supported11.uniformAndStorageBuffer16BitAccess;
+	enabled12.pNext = &enabled11;
 
 	VkDeviceCreateInfo dci = {};
 	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -1838,6 +1858,14 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	bdaZfillFallback = 0;
 	bdaZfillBatched = 0;
 	bdaZfillBatchDraws = 0;
+
+	// FSR2 bring-up self-test (R1/C0): one-shot on the cvar toggle.
+	if ( r_fsr2Test.IsModified() ) {
+		r_fsr2Test.ClearModified();
+		if ( r_fsr2Test.GetBool() ) {
+			Fsr2SelfTest();
+		}
+	}
 
 	// vsync toggle → new present mode; window size change → new extent
 	if ( r_swapInterval.IsModified() ) {
@@ -3656,6 +3684,71 @@ void VulkanBackend::BdaSelfTest() {
 	}
 	DestroyBuffer( src );
 	DestroyBuffer( out );
+}
+
+/*
+====================
+VulkanBackend::Fsr2SelfTest
+
+r_fsr2Test: bring-up validation for the vendored FidelityFX FSR2 Vulkan backend (R1/C0,
+docs/fsr-temporal-pipeline.md). Sizes the FSR2 scratch, builds its VK interface against our
+real physical/logical device, creates an FSR2 context in Native-AA config (render == display,
+no dispatch), then tears it down. Proves the vendored MIT library links and initialises its
+compute pipelines on this GPU. No rendering effect; a dev/CI path gated to the cvar edge.
+====================
+*/
+void VulkanBackend::Fsr2SelfTest() {
+	if ( physical == VK_NULL_HANDLE || device == VK_NULL_HANDLE ) {
+		common->Printf( "FSR2 self-test: unavailable (no VK device)\n" );
+		return;
+	}
+
+	const size_t scratchSize = ffxFsr2GetScratchMemorySizeVK( physical );
+	if ( scratchSize == 0 ) {
+		common->Warning( "FSR2 self-test: ffxFsr2GetScratchMemorySizeVK returned 0" );
+		return;
+	}
+
+	void *scratch = malloc( scratchSize );
+	FfxFsr2Context *ctx = (FfxFsr2Context *)malloc( sizeof( FfxFsr2Context ) );
+	if ( scratch == NULL || ctx == NULL ) {
+		common->Warning( "FSR2 self-test: out of memory (scratch %zu B)", scratchSize );
+		free( scratch );
+		free( ctx );
+		return;
+	}
+
+	FfxFsr2ContextDescription desc = {};
+	FfxErrorCode err = ffxFsr2GetInterfaceVK( &desc.callbacks, scratch, scratchSize, physical, vkGetDeviceProcAddr );
+	if ( err != FFX_OK ) {
+		common->Warning( "FSR2 self-test: ffxFsr2GetInterfaceVK FAILED (code %d)", (int)err );
+		free( scratch );
+		free( ctx );
+		return;
+	}
+
+	desc.device = ffxGetDeviceVK( device );
+	desc.maxRenderSize.width  = desc.displaySize.width  = (uint32_t)glConfig.vidWidth;
+	desc.maxRenderSize.height = desc.displaySize.height = (uint32_t)glConfig.vidHeight;
+	// Native-AA config (matches the intended R1 usage): HDR pre-tonemap input, non-reversed-z
+	// infinite-far depth, auto-exposure. No dispatch is issued here.
+	desc.flags = FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE | FFX_FSR2_ENABLE_DEPTH_INFINITE | FFX_FSR2_ENABLE_AUTO_EXPOSURE;
+	desc.fpMessage = NULL;
+
+	err = ffxFsr2ContextCreate( ctx, &desc );
+	if ( err != FFX_OK ) {
+		common->Warning( "FSR2 self-test: ffxFsr2ContextCreate FAILED (code %d)", (int)err );
+		free( scratch );
+		free( ctx );
+		return;
+	}
+
+	common->Printf( "FSR2 self-test: PASS - context created (Native-AA %ux%u, scratch %zu KB)\n",
+		desc.displaySize.width, desc.displaySize.height, scratchSize / 1024 );
+
+	ffxFsr2ContextDestroy( ctx );		// scratch must outlive the context; free after destroy
+	free( scratch );
+	free( ctx );
 }
 
 /*

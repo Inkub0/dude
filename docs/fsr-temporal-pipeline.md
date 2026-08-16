@@ -140,7 +140,14 @@ other. Skip jitter on subview/mirror/xray/env-probe/screenshot and the 2D/HUD or
 **Validator:** `r_temporalJitter 0` AND `r_jitter 0` → projection matrix bit-identical
 (dump+diff 16 floats).
 
-### C0 — FSR2 vendoring + toolchain spike + conditional features (VK, build only)  **[spike findings 2026-08-16]**
+### C0 — FSR2 vendoring + toolchain spike + conditional features (VK, build only)  **[DONE + user-verified 2026-08-16]**
+
+**Closed:** `r_fsr2Test` PASS on the RTX 3080 Ti — `FSR2 self-test: PASS - context created
+(Native-AA 2560x1440, scratch 545 KB)`. FSR2 links, sizes its scratch, builds its VK interface
+against DUDE's device, and creates a full FSR2 context (all compute pipelines) with the
+conditionally-enabled fp16 / 16-bit-storage features. Vendoring committed `43b41452`; smoke test
++ device features in the following commit.
+
 
 **Toolchain RESOLVED (positive):** FSR2's Vulkan backend is **GLSL→SPIR-V via glslang**, not
 HLSL/DXC — `vk/CMakeLists.txt` compiles `shaders/ffx_fsr2_*_pass.glsl` with
