@@ -321,7 +321,11 @@ idCVar r_hdrAdaptBrighten( "r_hdrAdaptBrighten", "1.5", CVAR_RENDERER | CVAR_ARC
 idCVar r_hdrAdaptDarken( "r_hdrAdaptDarken", "0.8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: max exposure REMOVED from r_hdrExposure as the scene brightens (bright scenes dim, keep mild)", 0.0f, 8.0f );
 // Reference luminance: the geometric-mean scene luminance mapped to r_hdrExposure (neutral). Doom 3
 // scenes are dark, so this is low. Raise it to treat brighter scenes as neutral, lower for darker.
-idCVar r_hdrAdaptKey( "r_hdrAdaptKey", "0.05", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation reference luminance mapped to r_hdrExposure (the neutral scene brightness)", 0.005f, 1.0f );
+idCVar r_hdrAdaptKey( "r_hdrAdaptKey", "0.03", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation reference luminance mapped to r_hdrExposure (the neutral scene brightness)", 0.005f, 1.0f );
+// Metering region: fraction of the view width/height averaged for luminance, centred on the screen.
+// 1 = whole screen (dark periphery washes out what you look at); lower = center-weighted, so aiming
+// at a light or a dark corner actually moves the exposure — the "look at" behaviour.
+idCVar r_hdrAdaptCenter( "r_hdrAdaptCenter", "0.6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation metering: central fraction of the view measured (1 = whole screen, lower = center-weighted)", 0.15f, 1.0f );
 // Debug: draw the adapted exposure as a flat grayscale (exposure * 0.2, so mid-gray ~= 2.5) so you
 // can see whether it is pinned or actually tracking the scene. Needs r_hdrEyeAdaptation.
 idCVar r_hdrEyeAdaptDebug( "r_hdrEyeAdaptDebug", "0", CVAR_RENDERER | CVAR_BOOL, "debug: show the adapted exposure as a flat grayscale (needs r_hdrEyeAdaptation)" );

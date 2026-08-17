@@ -4974,6 +4974,7 @@ extern idCVar r_hdrExposure;
 extern idCVar r_hdrAdaptBrighten;
 extern idCVar r_hdrAdaptDarken;
 extern idCVar r_hdrAdaptKey;
+extern idCVar r_hdrAdaptCenter;
 extern idCVar r_hdrTonemap;
 
 static const int RHI_LUMA_MIP_BASE = 128;					// 128 -> 8 levels reach 1x1 (RenderTarget::MAX_MIP)
@@ -5059,6 +5060,7 @@ rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg
 	rhi::RenderParams p;
 	memset( &p, 0, sizeof( p ) );
 	p.mvpMatrix[0] = p.mvpMatrix[5] = p.mvpMatrix[10] = p.mvpMatrix[15] = 1.0f;
+	p.localParam0[0] = idMath::ClampFloat( 0.05f, 1.0f, r_hdrAdaptCenter.GetFloat() );	// central metering crop (hdrluma)
 
 	r->BeginTargetPass( rhiLumaMipRT, NULL );
 	RB_RHI_DrawFullscreen( r, lumaProg, p, sceneImg );

@@ -1968,11 +1968,19 @@ static CVarOption postProcessOptions[] = {
 		AddTooltip( "r_hdrAdaptDarken: how much exposure is REMOVED from the Exposure above as the scene\n"
 			"brightens (bright scenes dim). Keep small for a mild pull-down." );
 		float ekey = cvarSystem->GetCVarFloat( "r_hdrAdaptKey" );
-		if ( ImGui::SliderFloat( "Reference Luminance", &ekey, 0.005f, 0.5f, "%.3f" ) ) {
+		if ( ImGui::SliderFloat( "Reference Luminance", &ekey, 0.005f, 0.08f, "%.3f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrAdaptKey", ekey );
 		}
-		AddTooltip( "r_hdrAdaptKey: the scene luminance treated as neutral (mapped to the Exposure). Lower\n"
-			"for darker 'neutral' scenes, higher for brighter. The center the adaptation swings around." );
+		AddTooltip( "r_hdrAdaptKey: the scene luminance treated as neutral (mapped to the Exposure). Sit it\n"
+			"in the middle of the scene's range so both directions engage; too high and every scene reads\n"
+			"as 'dark' so it only ever brightens." );
+		float ecen = cvarSystem->GetCVarFloat( "r_hdrAdaptCenter" );
+		if ( ImGui::SliderFloat( "Metering Region", &ecen, 0.15f, 1.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptCenter", ecen );
+		}
+		AddTooltip( "r_hdrAdaptCenter: central fraction of the view measured. 1 = whole screen (the dark\n"
+			"periphery washes out what you look at); lower = center-weighted, so aiming at a light or a\n"
+			"dark corner actually moves the exposure." );
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 

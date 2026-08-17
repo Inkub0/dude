@@ -4,6 +4,9 @@
 // scene luminance (robust to a few very bright pixels). Rendered at the luma target's base
 // resolution, so var_TexCoord (0..1) maps the whole scene into this coarse sampling grid.
 
+// u_localParam0.x = central metering fraction (r_hdrAdaptCenter): the grid maps to this centred
+// crop of the scene, so the periphery is ignored and what you look at drives the exposure.
+
 #include "renderparms.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_hdrScene;
@@ -13,7 +16,8 @@ VARY(0) in vec2 var_TexCoord;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-	vec3  c    = texture( u_hdrScene, var_TexCoord ).rgb;
+	vec2  uv   = 0.5 + ( var_TexCoord - 0.5 ) * u_localParam0.x;   // centred metering crop
+	vec3  c    = texture( u_hdrScene, uv ).rgb;
 	float luma = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
 	// log-luminance; floor keeps log() finite and bounds pure-black areas.
 	fragColor  = vec4( log( max( luma, 1e-4 ) ), 0.0, 0.0, 1.0 );
