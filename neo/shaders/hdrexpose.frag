@@ -10,6 +10,7 @@
 //   u_localParam0.w = blend alpha = 1 - exp(-dt / tau)  (0 = frozen, 1 = snap)
 //   u_localParam1.x = previous exposure usable (1) or snap to target (0, first frame / reset)
 //   u_localParam1.y = luma source mip level (Vulkan single-level view -> 0; GL3 -> coarsest)
+//   u_localParam1.z = adaptation key (r_hdrAdaptKey): the scene luminance mapping to r_hdrExposure
 
 #include "renderparms.glsl"
 
@@ -20,16 +21,15 @@ VARY(0) in vec2 var_TexCoord;
 
 layout(location = 0) out vec4 fragColor;
 
-const float MIDGRAY = 0.18;
-
 void main() {
 	int   lod  = int( u_localParam1.y + 0.5 );
 	float logL = texelFetch( u_lumaAvg, ivec2( 0 ), lod ).r;
 	float L    = exp( logL );                                     // geometric-mean luminance
-	// expose so a mid-gray scene lands at r_hdrExposure; brighter scenes expose down, darker up.
-	float target = clamp( u_localParam0.x * MIDGRAY / max( L, 1e-4 ),
+	// expose so a key-luminance scene lands at r_hdrExposure; brighter scenes expose down, darker up.
+	float target = clamp( u_localParam0.x * u_localParam1.z / max( L, 1e-4 ),
 	                      u_localParam0.y, u_localParam0.z );
 	float prev = texelFetch( u_prevExposure, ivec2( 0 ), 0 ).r;
 	float adapted = ( u_localParam1.x > 0.5 ) ? mix( prev, target, u_localParam0.w ) : target;
-	fragColor = vec4( adapted, 0.0, 0.0, 1.0 );
+	// .r = adapted exposure (what the resolve uses); .g = log-luma for the debug view.
+	fragColor = vec4( adapted, logL, 0.0, 1.0 );
 }

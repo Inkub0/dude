@@ -84,6 +84,7 @@ extern idCVar r_hdrTonemap;
 extern idCVar r_hdrExposure;
 extern idCVar r_hdrOverbright;
 extern idCVar r_hdrEyeAdaptation;
+extern idCVar r_hdrEyeAdaptDebug;
 
 // DUDE gamma/brightness in shader (RenderSystem_init.cpp). On the core context
 // there is no fixed-function/ARB gamma and SDL3 has no hardware gamma ramp, so
@@ -1180,6 +1181,7 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
 	parms.localParam1[3] = (float)r_hdrTonemap.GetInteger();	// tonemap curve select
 	parms.windowCoord[0] = ( eyeExposureImg != 0 ) ? 1.0f : 0.0f;	// eye-adapt flag: sample the 1x1 adapted exposure
+	parms.windowCoord[1] = ( eyeExposureImg != 0 && r_hdrEyeAdaptDebug.GetBool() ) ? 1.0f : 0.0f;	// eye-adapt debug: show exposure as grayscale
 	parms.windowCoord[2] = 0.5f;	// aberration center in uv
 	parms.windowCoord[3] = 0.5f;
 	// gamma / brightness: folded into the resolve on Vulkan (the backend has no separate

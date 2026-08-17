@@ -60,6 +60,17 @@ void main() {
 	// adapted-exposure texture instead of the static r_hdrExposure.
 	float exposure = ( u_windowCoord.x > 0.5 ) ? texelFetch( u_adaptedExposure, ivec2( 0 ), 0 ).r
 	                                            : u_localParam0.x;
+	// eye-adapt debug, split screen: LEFT half = adapted exposure (exposure * 0.2, ~2.5 = mid-gray);
+	// RIGHT half = the measured scene log-luma remapped to gray. The right half is the diagnostic —
+	// if it does NOT change as you look around dark vs bright, the luminance measurement is broken
+	// (constant), not the exposure formula. If the right half tracks the scene but the left is a
+	// constant, it's a formula/key/clamp issue instead.
+	if ( u_windowCoord.y > 0.5 ) {
+		vec2  e = texelFetch( u_adaptedExposure, ivec2( 0 ), 0 ).rg;   // r = exposure, g = log-luma
+		float g = ( var_TexCoord.x < 0.5 ) ? e.r * 0.2 : ( e.g + 9.0 ) / 12.0;
+		fragColor = vec4( vec3( g ), 1.0 );
+		return;
+	}
 	color = DudeTonemap( color, exposure, int( u_localParam1.w + 0.5 ) );
 
 	// film grain: triangular monochrome noise through a filmic beta-curve response —
