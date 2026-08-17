@@ -60,17 +60,6 @@ void main() {
 	// adapted-exposure texture instead of the static r_hdrExposure.
 	float exposure = ( u_windowCoord.x > 0.5 ) ? texelFetch( u_adaptedExposure, ivec2( 0 ), 0 ).r
 	                                            : u_localParam0.x;
-	// eye-adapt debug, split screen: LEFT half = adapted exposure (exposure * 0.2, ~2.5 = mid-gray);
-	// RIGHT half = the measured scene log-luma remapped to gray. The right half is the diagnostic —
-	// if it does NOT change as you look around dark vs bright, the luminance measurement is broken
-	// (constant), not the exposure formula. If the right half tracks the scene but the left is a
-	// constant, it's a formula/key/clamp issue instead.
-	if ( u_windowCoord.y > 0.5 ) {
-		vec2  e = texelFetch( u_adaptedExposure, ivec2( 0 ), 0 ).rg;   // r = exposure, g = log-luma
-		float g = ( var_TexCoord.x < 0.5 ) ? e.r * 0.2 : ( e.g + 9.0 ) / 12.0;
-		fragColor = vec4( vec3( g ), 1.0 );
-		return;
-	}
 	color = DudeTonemap( color, exposure, int( u_localParam1.w + 0.5 ) );
 
 	// film grain: triangular monochrome noise through a filmic beta-curve response —
@@ -93,6 +82,24 @@ void main() {
 	if ( u_localParam1.y != 1.0 || u_localParam1.z != 1.0 ) {
 		color = clamp( color * u_localParam1.y, 0.0, 1.0 );
 		color = pow( color, vec3( u_localParam1.z ) );
+	}
+
+	// eye-adapt debug: overlay two small squares on the live scene (so you keep a view of the
+	// world). LEFT box = adapted exposure (*0.2, ~2.5 = mid-gray); RIGHT box = measured scene
+	// luminance. The RIGHT box is the diagnostic — if it does not track the scene as you look at
+	// dark vs bright, the luminance measurement (not the formula) is the problem. u_color.x =
+	// aspect (w/h) keeps the boxes square; they sit low to stay clear of the console.
+	if ( u_windowCoord.y > 0.5 ) {
+		vec2  e = texelFetch( u_adaptedExposure, ivec2( 0 ), 0 ).rg;   // r = exposure, g = log-luma
+		float halfH = 0.18;
+		float halfW = halfH / max( u_color.x, 0.01 );
+		vec2  dL = abs( var_TexCoord - vec2( 0.30, 0.76 ) );
+		vec2  dR = abs( var_TexCoord - vec2( 0.70, 0.76 ) );
+		if ( dL.x < halfW && dL.y < halfH ) {
+			color = vec3( e.r * 0.2 );
+		} else if ( dR.x < halfW && dR.y < halfH ) {
+			color = vec3( ( e.g + 9.0 ) / 12.0 );
+		}
 	}
 
 	fragColor = vec4( color, 1.0 );

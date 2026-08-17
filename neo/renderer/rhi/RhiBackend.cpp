@@ -761,6 +761,7 @@ static rhi::RenderTargetHandle	rhiHdrAaRT = 0;		// FXAA/SMAA output ping (RGBA16
 static int						rhiHdrW = 0, rhiHdrH = 0;
 static bool						rbHdrRtFloat = false;			// rhiHdrRT is RGBA16F (HDR) vs RGBA8 (off-HDR post) — recreate on change
 static bool						rbHdrAaFloat = false;			// rhiHdrAaRT is RGBA16F vs RGBA8 — must track rhiHdrRT's format
+static rhi::ImageHandle			rbEyeExposureImg = 0;			// B1 eye-adapt: 1x1 adapted exposure, measured at end of the primary 3D view, sampled by the resolve
 static bool						rbHdrActiveThisFrame = false;	// scene post-target bound *right now* (view pass)
 static bool						rbHdrFrameActive = false;		// this whole frame is a true float-HDR frame
 static bool						rbBerserkFrame = false;			// berserk material seen this frame → radial-blur the _scratch blit
@@ -920,6 +921,7 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 
 	r->SetFrameTarget( rhiHdrRT );
 	rbHdrActiveThisFrame = true;
+	rbEyeExposureImg = 0;		// B1: recomputed at the end of the primary 3D view (0 = use static exposure)
 	// only a true float-HDR frame forces _currentRender to RGBA16F; the off-HDR post
 	// target is RGBA8, so captures (glass refraction) keep the default 8-bit format
 	rbHdrFrameActive = wantHdr;	// stays true past HdrResolve so _currentRender keeps one format all frame
@@ -1129,10 +1131,10 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	int w = glConfig.vidWidth;
 	int h = glConfig.vidHeight;
 
-	// Eye adaptation (Phase B1): measure the finished HDR scene and update the adapted exposure
-	// (its own offscreen target passes, like the FXAA pass below — before SetFrameTarget(0)).
-	// Returns the 1x1 exposure image for the resolve to sample, or 0 when adaptation is off.
-	rhi::ImageHandle eyeExposureImg = RB_RHI_EyeAdaptExposure( r, r->GetRenderTargetImage( rhiHdrRT ) );
+	// Eye adaptation (Phase B1): the adapted exposure was computed at the end of the primary 3D
+	// view (scene-only, before the HUD/console). The resolve just samples that 1x1 here; 0 when
+	// adaptation is off, so the static r_hdrExposure is used.
+	rhi::ImageHandle eyeExposureImg = rbEyeExposureImg;
 
 	// Fused SMAA resolve (chroma off): the neighborhood blend + grain/gamma tail in one pass,
 	// dropping the rhiHdrAaRT round-trip. Falls through to the classic path when ineligible.
@@ -1181,7 +1183,8 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
 	parms.localParam1[3] = (float)r_hdrTonemap.GetInteger();	// tonemap curve select
 	parms.windowCoord[0] = ( eyeExposureImg != 0 ) ? 1.0f : 0.0f;	// eye-adapt flag: sample the 1x1 adapted exposure
-	parms.windowCoord[1] = ( eyeExposureImg != 0 && r_hdrEyeAdaptDebug.GetBool() ) ? 1.0f : 0.0f;	// eye-adapt debug: show exposure as grayscale
+	parms.windowCoord[1] = ( eyeExposureImg != 0 && r_hdrEyeAdaptDebug.GetBool() ) ? 1.0f : 0.0f;	// eye-adapt debug: overlay exposure/luma boxes
+	parms.color[0] = ( h > 0 ) ? (float)w / (float)h : 1.777f;	// aspect for square debug boxes (u_color.x)
 	parms.windowCoord[2] = 0.5f;	// aberration center in uv
 	parms.windowCoord[3] = 0.5f;
 	// gamma / brightness: folded into the resolve on Vulkan (the backend has no separate
@@ -3265,6 +3268,12 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		// weapon, on both backends and under HDR. Zero cost unless a reload is easing
 		// r_weaponReloadFocus above 0 (idPlayerView writes it).
 		RB_RHI_DepthOfField( r, viewDef );
+		// HDR eye adaptation (Phase B1): measure the SCENE luminance HERE — end of the primary
+		// 3D view, before the HUD / console / menus are composited into the HDR buffer — so the
+		// adapted exposure tracks the world, not the UI. The resolve samples rbEyeExposureImg.
+		if ( rbHdrActiveThisFrame && rhiHdrRT ) {
+			rbEyeExposureImg = RB_RHI_EyeAdaptExposure( r, r->GetRenderTargetImage( rhiHdrRT ) );
+		}
 	}
 
 	// debug visualization (r_showTris, r_showNormals, debug lines/polygons, …)
