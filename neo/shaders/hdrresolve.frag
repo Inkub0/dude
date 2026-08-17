@@ -62,6 +62,16 @@ void main() {
 	                                            : u_localParam0.x;
 	color = DudeTonemap( color, exposure, int( u_localParam1.w + 0.5 ) );
 
+	// eye-adapt low-light response: brightenFrac (0 neutral .. ~1 at full dark boost) from the 1x1
+	// exposure's .b. Desaturate toward gray as it ramps (scotopic vision — colours wash out in the
+	// dark); u_color.z is the amount at full brighten (0.25 = colours drop to ~75%). Then the grain
+	// block below boosts noise by (1 + brightenFrac * u_color.y) — high-gain sensor/eye noise.
+	float brightenFrac = ( u_windowCoord.x > 0.5 ) ? texelFetch( u_adaptedExposure, ivec2( 0 ), 0 ).b : 0.0;
+	if ( brightenFrac > 0.0 && u_color.z > 0.0 ) {
+		float gray = dot( color, vec3( 0.2126, 0.7152, 0.0722 ) );
+		color = mix( color, vec3( gray ), brightenFrac * u_color.z );
+	}
+
 	// film grain: triangular monochrome noise through a filmic beta-curve response —
 	// zero at pure black (no clip-lift greying of the void), peaking around 25%
 	// luminance, tapering off in highlights. Same curve as postprocess.frag; the HDR
@@ -72,12 +82,8 @@ void main() {
 		float noise = 0.5 * ( hash12( cell + seed ) + hash12( cell + seed + vec2( 42.13, 59.71 ) ) ) - 0.5;
 		float l = clamp( dot( color, vec3( 0.299, 0.587, 0.114 ) ), 0.0, 1.0 );
 		float response = 2.18 * sqrt( l ) * pow( 1.0 - l, 1.5 );
-		// eye-adapt low-light grain: as the dark-scene brightening ramps up, boost grain (high-gain
-		// noise). The 1x1 exposure's .b carries clamp((exposure-mid)/brighten) * r_hdrAdaptGrain.
-		float grainAmt = u_localParam0.y;
-		if ( u_windowCoord.x > 0.5 ) {
-			grainAmt *= 1.0 + texelFetch( u_adaptedExposure, ivec2( 0 ), 0 ).b;
-		}
+		// eye-adapt low-light grain: boost noise with the brighten fraction (hoisted above).
+		float grainAmt = u_localParam0.y * ( 1.0 + brightenFrac * u_color.y );
 		color += noise * grainAmt * response;
 	}
 

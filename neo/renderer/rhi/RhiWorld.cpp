@@ -4975,7 +4975,6 @@ extern idCVar r_hdrAdaptBrighten;
 extern idCVar r_hdrAdaptDarken;
 extern idCVar r_hdrAdaptKey;
 extern idCVar r_hdrAdaptCenter;
-extern idCVar r_hdrAdaptGrain;
 extern idCVar r_hdrTonemap;
 
 static const int RHI_LUMA_MIP_BASE = 128;					// 128 -> 8 levels reach 1x1 (RenderTarget::MAX_MIP)
@@ -5101,7 +5100,6 @@ rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg
 	ep.localParam1[0] = rhiExposureValid ? 1.0f : 0.0f;					// ease from prev, else snap
 	ep.localParam1[1] = vk ? 0.0f : (float)( rhiLumaMipLevels - 1 );	// coarsest luma LOD (GL reads the 1x1 level)
 	ep.localParam1[2] = r_hdrAdaptKey.GetFloat();						// key: scene luminance mapping to r_hdrExposure
-	ep.localParam1[3] = r_hdrAdaptGrain.GetFloat();						// low-light grain boost at full brighten
 
 	rhi::ImageHandle lumaAvg = r->GetRenderTargetMipImage( rhiLumaMipRT, rhiLumaMipLevels - 1 );
 

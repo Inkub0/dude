@@ -1982,11 +1982,18 @@ static CVarOption postProcessOptions[] = {
 			"periphery washes out what you look at); lower = center-weighted, so aiming at a light or a\n"
 			"dark corner actually moves the exposure." );
 		float egrain = cvarSystem->GetCVarFloat( "r_hdrAdaptGrain" );
-		if ( ImGui::SliderFloat( "Low-light Grain Boost", &egrain, 0.0f, 3.0f, "%.2f" ) ) {
+		if ( ImGui::SliderFloat( "Low-light Grain Boost", &egrain, 0.0f, 5.0f, "%.2f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrAdaptGrain", egrain );
 		}
 		AddTooltip( "r_hdrAdaptGrain: raise film grain as the dark-scene brightening ramps up (high-gain\n"
 			"sensor/eye noise). 1 = grain ~doubles at full brightening; 0 = off. Needs Film Grain > 0." );
+		float edesat = cvarSystem->GetCVarFloat( "r_hdrAdaptDesat" );
+		if ( ImGui::SliderFloat( "Low-light Desaturation", &edesat, 0.0f, 1.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptDesat", edesat );
+		}
+		AddTooltip( "r_hdrAdaptDesat: wash colours toward gray as the dark-scene brightening ramps up\n"
+			"(scotopic vision — rods take over in the dark). 0.25 = colours drop to ~75% at full\n"
+			"brightening; 0 = off." );
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 
