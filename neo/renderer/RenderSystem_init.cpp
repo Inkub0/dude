@@ -307,6 +307,10 @@ idCVar r_hdrExposure( "r_hdrExposure", "2.33", CVAR_RENDERER | CVAR_ARCHIVE | CV
 // giving the tonemap curve real highlight range and eye-adaptation bright anchors. Only active
 // with r_hdrTonemap>=1 (like r_hdrExposure), so it never touches the faithful mode-0 look. 1=off.
 idCVar r_hdrOverbright( "r_hdrOverbright", "3.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright multiplier for additive self-illum stages (needs r_hdr + r_hdrTonemap>=1): pushes lamps/screens/fire above 1.0 for tonemap+adaptation range; 1=off. When active it auto-disables the legacy r_flareSize light haze", 1.0f, 8.0f );
+// Overbright saturation: the tonemap desaturates the very bright colours overbright pushes into
+// (coloured fire/lava go white while white lights are fine). Pre-saturate the boosted additive
+// stages so the hue survives the curve. 1 = off; white is unaffected (no saturation to boost).
+idCVar r_hdrOverbrightSat( "r_hdrOverbrightSat", "1.4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright saturation compensation for coloured emissive (fire/lava) that the tonemap washes out; 1 = off", 1.0f, 3.0f );
 // HDR eye adaptation / auto-exposure (Phase B1, needs r_hdr + r_hdrTonemap>=1): the scene's
 // average (log) luminance drives the tonemap exposure over time. r_hdrExposure becomes the
 // exposure at a mid-gray (~0.18) scene; brighter scenes expose down, darker expose up, clamped

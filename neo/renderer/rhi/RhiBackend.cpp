@@ -83,6 +83,7 @@ extern idCVar r_fxaaStrength;
 extern idCVar r_hdrTonemap;
 extern idCVar r_hdrExposure;
 extern idCVar r_hdrOverbright;
+extern idCVar r_hdrOverbrightSat;
 extern idCVar r_hdrEyeAdaptation;
 extern idCVar r_hdrEyeAdaptDebug;
 extern idCVar r_hdrAdaptGrain;
@@ -3018,6 +3019,9 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			parms.color[0] *= ob;
 			parms.color[1] *= ob;
 			parms.color[2] *= ob;
+			// pre-saturate so the tonemap doesn't wash coloured emissive (fire/lava) to white;
+			// generic.frag reads localParam0.x (>1 = boost, white is unaffected).
+			parms.localParam0[0] = r_hdrOverbrightSat.GetFloat();
 		}
 
 		// fixed-function alpha test bits -> in-shader test (fail if a < ref)

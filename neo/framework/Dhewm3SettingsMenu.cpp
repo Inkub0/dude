@@ -1938,6 +1938,13 @@ static CVarOption postProcessOptions[] = {
 			"so they exceed 1.0 and the tonemap curve treats them as real highlights (and eye-adaptation\n"
 			"has bright anchors). 1 = off; ~3 is a good look. When active it auto-disables the legacy\n"
 			"light-flare/glare haze (r_flareSize). No effect while Tonemap is Off." );
+		float obsat = cvarSystem->GetCVarFloat( "r_hdrOverbrightSat" );
+		if ( ImGui::SliderFloat( "Overbright Saturation", &obsat, 1.0f, 3.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrOverbrightSat", obsat );
+		}
+		AddTooltip( "r_hdrOverbrightSat: pre-saturate coloured emissive (fire, lava) before the tonemap so\n"
+			"it doesn't wash to white when overbright pushes it very bright. White lights are unaffected.\n"
+			"1 = off. Only acts on overbright additive stages." );
 
 		// Eye adaptation (Phase B1): auto-exposure driven by the scene's average luminance. The
 		// Exposure slider above becomes the mid-gray target; brighter scenes expose down over time.
