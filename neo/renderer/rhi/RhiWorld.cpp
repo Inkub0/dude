@@ -5126,6 +5126,117 @@ rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg
 	return r->GetRenderTargetImage( rhiExposureRT[writeIdx] );			// fresh exposure for the resolve
 }
 
+// ---- HDR bloom (Phase C, docs/hdr-pipeline.md) ----
+extern idCVar r_hdrBloom;
+extern idCVar r_hdrBloomThreshold;
+
+#define RHI_BLOOM_MAX 6
+static rhi::RenderTargetHandle rhiBloomD[RHI_BLOOM_MAX] = { 0 };	// downsample chain (threshold -> smaller)
+static rhi::RenderTargetHandle rhiBloomU[RHI_BLOOM_MAX] = { 0 };	// upsample-combine chain (result in [0])
+static int rhiBloomW[RHI_BLOOM_MAX] = { 0 };
+static int rhiBloomH[RHI_BLOOM_MAX] = { 0 };
+static int rhiBloomLevels = 0;
+static int rhiBloomBaseW = 0, rhiBloomBaseH = 0;					// vid size the chain was built for
+
+static void RB_RHI_DestroyBloom( rhi::RHI *r ) {
+	for ( int i = 0; i < RHI_BLOOM_MAX; i++ ) {
+		if ( rhiBloomD[i] ) { r->DestroyRenderTarget( rhiBloomD[i] ); rhiBloomD[i] = 0; }
+		if ( rhiBloomU[i] ) { r->DestroyRenderTarget( rhiBloomU[i] ); rhiBloomU[i] = 0; }
+	}
+	rhiBloomLevels = 0; rhiBloomBaseW = rhiBloomBaseH = 0;
+}
+
+// Ensure the down+up bloom chains exist at the current resolution; rebuild on resize / lost context.
+static bool RB_RHI_EnsureBloom( rhi::RHI *r ) {
+	const int vw = glConfig.vidWidth, vh = glConfig.vidHeight;
+	if ( rhiBloomD[0] && r->GetRenderTargetImage( rhiBloomD[0] ) == 0 ) {	// lost context (vid_restart)
+		for ( int i = 0; i < RHI_BLOOM_MAX; i++ ) { rhiBloomD[i] = rhiBloomU[i] = 0; }
+		rhiBloomLevels = 0; rhiBloomBaseW = rhiBloomBaseH = 0;
+	}
+	if ( rhiBloomLevels >= 2 && rhiBloomBaseW == vw && rhiBloomBaseH == vh ) {
+		return true;
+	}
+	RB_RHI_DestroyBloom( r );
+	int w = vw / 2, h = vh / 2, n = 0;
+	for ( ; n < RHI_BLOOM_MAX && w >= 8 && h >= 8; n++ ) {
+		rhiBloomD[n] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+		rhiBloomU[n] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+		if ( !rhiBloomD[n] || !rhiBloomU[n] ) { break; }
+		rhiBloomW[n] = w; rhiBloomH[n] = h;
+		w /= 2; h /= 2;
+	}
+	rhiBloomLevels = n;
+	if ( rhiBloomLevels < 2 ) { RB_RHI_DestroyBloom( r ); return false; }	// need at least down + up
+	rhiBloomBaseW = vw; rhiBloomBaseH = vh;
+	return true;
+}
+
+/*
+===================
+RB_RHI_Bloom
+
+HDR bloom (Phase C). Threshold the bright HDR scene at half res, downsample it through a chain
+of ever-smaller targets (the downsample IS the blur), then tent-upsample back up, adding each
+level's downsample content in-shader (VK BeginTargetPass always clears, so the up-chain writes a
+separate set of targets rather than accumulating in place). Returns the half-res glow
+(rhiBloomU[0]) for the resolve to bilinear-upsample and add before the tonemap; 0 when bloom is
+off. Runs at the end of the primary 3D view (scene-only), like eye adaptation.
+===================
+*/
+rhi::ImageHandle RB_RHI_Bloom( rhi::RHI *r, rhi::ImageHandle sceneImg ) {
+	if ( r_hdrBloom.GetFloat() <= 0.0f || sceneImg == 0 ) {
+		return 0;
+	}
+	if ( !R_BackendSupportsEnhancements() || !RB_RHI_EnsureBloom( r ) ) {
+		return 0;
+	}
+	rhi::ShaderHandle threshProg = r->LoadShader( "bloomthreshold" );
+	rhi::ShaderHandle downProg   = r->LoadShader( "bloomdown" );
+	rhi::ShaderHandle upProg     = r->LoadShader( "bloomup" );
+	if ( !threshProg || !downProg || !upProg ) {
+		return 0;
+	}
+	const int N = rhiBloomLevels;
+
+	// threshold: scene -> D[0] (half res, bright pixels only)
+	rhi::RenderParams p;
+	memset( &p, 0, sizeof( p ) );
+	p.mvpMatrix[0] = p.mvpMatrix[5] = p.mvpMatrix[10] = p.mvpMatrix[15] = 1.0f;
+	p.localParam0[0] = r_hdrBloomThreshold.GetFloat();
+	r->BeginTargetPass( rhiBloomD[0], NULL );
+	RB_RHI_DrawFullscreen( r, threshProg, p, sceneImg );
+	r->EndPass();
+
+	// downsample chain: D[i-1] -> D[i]
+	for ( int i = 1; i < N; i++ ) {
+		rhi::RenderParams dp;
+		memset( &dp, 0, sizeof( dp ) );
+		dp.mvpMatrix[0] = dp.mvpMatrix[5] = dp.mvpMatrix[10] = dp.mvpMatrix[15] = 1.0f;
+		dp.localParam0[0] = 1.0f / (float)rhiBloomW[i-1];		// source texel size
+		dp.localParam0[1] = 1.0f / (float)rhiBloomH[i-1];
+		r->BeginTargetPass( rhiBloomD[i], NULL );
+		RB_RHI_DrawFullscreen( r, downProg, dp, r->GetRenderTargetImage( rhiBloomD[i-1] ) );
+		r->EndPass();
+	}
+
+	// upsample-combine chain: U[i] = tent_up( src ) + D[i]; src = D[N-1] to start, then U[i+1]
+	for ( int i = N - 2; i >= 0; i-- ) {
+		rhi::RenderParams up;
+		memset( &up, 0, sizeof( up ) );
+		up.mvpMatrix[0] = up.mvpMatrix[5] = up.mvpMatrix[10] = up.mvpMatrix[15] = 1.0f;
+		up.localParam0[0] = 1.0f / (float)rhiBloomW[i+1];		// smaller-level texel size (tent offsets)
+		up.localParam0[1] = 1.0f / (float)rhiBloomH[i+1];
+		rhi::RenderTargetHandle srcRT = ( i == N - 2 ) ? rhiBloomD[N-1] : rhiBloomU[i+1];
+		r->BeginTargetPass( rhiBloomU[i], NULL );
+		RB_RHI_BindRTUnit( r, 1, rhiBloomD[i] );				// this level's downsample content -> unit 1 (u_add)
+		RB_RHI_DrawFullscreen( r, upProg, up, r->GetRenderTargetImage( srcRT ) );	// upsample source -> unit 0
+		r->EndPass();
+	}
+
+	RB_RHI_ForgetTexBinds();
+	return r->GetRenderTargetImage( rhiBloomU[0] );				// half-res glow (resolve bilinear-upsamples + adds)
+}
+
 /*
 ===================
 RB_RHI_DrawWorld

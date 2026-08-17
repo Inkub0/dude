@@ -88,6 +88,7 @@ extern idCVar r_hdrEyeAdaptation;
 extern idCVar r_hdrEyeAdaptDebug;
 extern idCVar r_hdrAdaptGrain;
 extern idCVar r_hdrAdaptDesat;
+extern idCVar r_hdrBloom;
 
 // DUDE gamma/brightness in shader (RenderSystem_init.cpp). On the core context
 // there is no fixed-function/ARB gamma and SDL3 has no hardware gamma ramp, so
@@ -765,6 +766,7 @@ static int						rhiHdrW = 0, rhiHdrH = 0;
 static bool						rbHdrRtFloat = false;			// rhiHdrRT is RGBA16F (HDR) vs RGBA8 (off-HDR post) — recreate on change
 static bool						rbHdrAaFloat = false;			// rhiHdrAaRT is RGBA16F vs RGBA8 — must track rhiHdrRT's format
 static rhi::ImageHandle			rbEyeExposureImg = 0;			// B1 eye-adapt: 1x1 adapted exposure, measured at end of the primary 3D view, sampled by the resolve
+static rhi::ImageHandle			rbBloomImg = 0;					// Phase C bloom: half-res glow, produced at end of the primary 3D view, added by the resolve
 static bool						rbHdrActiveThisFrame = false;	// scene post-target bound *right now* (view pass)
 static bool						rbHdrFrameActive = false;		// this whole frame is a true float-HDR frame
 static bool						rbBerserkFrame = false;			// berserk material seen this frame → radial-blur the _scratch blit
@@ -940,6 +942,7 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	r->SetFrameTarget( rhiHdrRT );
 	rbHdrActiveThisFrame = true;
 	rbEyeExposureImg = 0;		// B1: recomputed at the end of the primary 3D view (0 = use static exposure)
+	rbBloomImg = 0;				// Phase C: recomputed at the end of the primary 3D view (0 = no bloom)
 	// only a true float-HDR frame forces _currentRender to RGBA16F; the off-HDR post
 	// target is RGBA8, so captures (glass refraction) keep the default 8-bit format
 	rbHdrFrameActive = wantHdr;	// stays true past HdrResolve so _currentRender keeps one format all frame
@@ -1044,9 +1047,9 @@ static bool RB_RHI_HdrResolveSmaaFused( rhi::RHI *r, int w, int h ) {
 	if ( r_rhiAA.GetInteger() != 2 || r_postChromaticAberration.GetFloat() > 0.0f || !rhiHdrRT ) {
 		return false;
 	}
-	// Eye adaptation (Phase B1) is wired into the plain resolve only; fall through to it so the
-	// adapted exposure sampler is bound. SMAA still applies there (unfused, via RB_RHI_HdrSmaa).
-	if ( r_hdrEyeAdaptation.GetBool() ) {
+	// Eye adaptation (B1) and bloom (Phase C) are wired into the plain resolve only; fall through to
+	// it so their samplers are bound. SMAA still applies there (unfused, via RB_RHI_HdrSmaa).
+	if ( r_hdrEyeAdaptation.GetBool() || r_hdrBloom.GetFloat() > 0.0f ) {
 		return false;
 	}
 	rhi::ShaderHandle prog = r->LoadShader( "hdrresolve_smaa" );
@@ -1205,6 +1208,7 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	parms.color[0] = ( h > 0 ) ? (float)w / (float)h : 1.777f;	// aspect for square debug boxes (u_color.x)
 	parms.color[1] = r_hdrAdaptGrain.GetFloat();				// low-light grain boost at full brighten (u_color.y)
 	parms.color[2] = r_hdrAdaptDesat.GetFloat();				// low-light desaturation at full brighten (u_color.z)
+	parms.color[3] = ( rbBloomImg != 0 ) ? r_hdrBloom.GetFloat() : 0.0f;	// bloom strength (u_color.w); 0 = no bloom this frame
 	parms.windowCoord[2] = 0.5f;	// aberration center in uv
 	parms.windowCoord[3] = 0.5f;
 	// gamma / brightness: folded into the resolve on Vulkan (the backend has no separate
@@ -1257,6 +1261,9 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	// unit 1 = the 1x1 adapted exposure (Phase B1); a valid dummy (the scene) when adaptation is
 	// off, since the shader only samples it when the eye-adapt flag is set (windowCoord.x).
 	da.textures[1] = ( eyeExposureImg != 0 ) ? eyeExposureImg : da.textures[0];
+	// unit 2 = the half-res bloom glow (Phase C); dummy (scene) when off — the shader only samples
+	// it when the bloom strength (color.w) is > 0.
+	da.textures[2] = ( rbBloomImg != 0 ) ? rbBloomImg : da.textures[0];
 	r->Draw( da );
 
 	backEnd.pc.c_drawElements++;
@@ -3296,6 +3303,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		// adapted exposure tracks the world, not the UI. The resolve samples rbEyeExposureImg.
 		if ( rbHdrActiveThisFrame && rhiHdrRT ) {
 			rbEyeExposureImg = RB_RHI_EyeAdaptExposure( r, r->GetRenderTargetImage( rhiHdrRT ) );
+			// HDR bloom (Phase C): same scene-only point — threshold + blur the bright scene into a
+			// half-res glow the resolve adds before the tonemap.
+			rbBloomImg = RB_RHI_Bloom( r, r->GetRenderTargetImage( rhiHdrRT ) );
 		}
 	}
 

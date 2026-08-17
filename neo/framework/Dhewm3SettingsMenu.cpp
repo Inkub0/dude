@@ -1958,6 +1958,25 @@ static CVarOption postProcessOptions[] = {
 			"Fine-tuning knobs are in the Debug tab -> Eye Adaptation. Off = the static Exposure." );
 		ImGui::EndDisabled();
 
+		// Bloom (Phase C): glow bled from bright pixels, added before the tonemap. Needs r_hdr and
+		// works with any curve, so it sits outside the tonemap-off greying (but inside r_hdr).
+		ImGui::Spacing();
+		float bloom = cvarSystem->GetCVarFloat( "r_hdrBloom" );
+		if ( ImGui::SliderFloat( "Bloom", &bloom, 0.0f, 2.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrBloom", bloom );
+		}
+		AddTooltip( "r_hdrBloom: glow bled from bright pixels, added before the tonemap — the punch the\n"
+			"curve otherwise rolls off. 0 = off. opengl3 / Vulkan." );
+		ImGui::BeginDisabled( bloom <= 0.0f );
+		float bthr = cvarSystem->GetCVarFloat( "r_hdrBloomThreshold" );
+		if ( ImGui::SliderFloat( "Bloom Threshold", &bthr, 0.0f, 8.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrBloomThreshold", bthr );
+		}
+		AddTooltip( "r_hdrBloomThreshold: brightness a pixel must exceed to bloom. Lower it to catch\n"
+			"fire/lava directly (can replace the emissive overbright); raise to bloom only the\n"
+			"brightest highlights." );
+		ImGui::EndDisabled();
+
 		ImGui::EndDisabled();
 	} ),
 	CVarOption( "r_postFilmGrain", "Film Grain", OT_FLOAT, 0.0f, 0.25f ),

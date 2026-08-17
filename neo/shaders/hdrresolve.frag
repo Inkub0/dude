@@ -22,6 +22,7 @@
 
 SAMPLER_BINDING(0) uniform sampler2D u_hdrScene;
 SAMPLER_BINDING(1) uniform sampler2D u_adaptedExposure;   // 1x1 eye-adaptation exposure (Phase B1)
+SAMPLER_BINDING(2) uniform sampler2D u_bloom;             // half-res bloom glow (Phase C); u_color.w = strength
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -51,6 +52,13 @@ void main() {
 		              texture( u_hdrScene, uv - caOffset ).b );
 	} else {
 		color = texture( u_hdrScene, uv ).rgb;
+	}
+
+	// HDR bloom (Phase C): add the half-res glow into the linear scene BEFORE exposure/tonemap, so
+	// it's exposed and rolled off by the curve like real light. u_color.w = strength; 0 = off. The
+	// bloom target is half-res, so this bilinear-samples it up to full res.
+	if ( u_color.w > 0.0 ) {
+		color += texture( u_bloom, uv ).rgb * u_color.w;
 	}
 
 	// exposure + tonemap: map the linear HDR scene into display [0,1] before grain/gamma.

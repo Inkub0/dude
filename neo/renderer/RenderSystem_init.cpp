@@ -311,6 +311,12 @@ idCVar r_hdrOverbright( "r_hdrOverbright", "2.16", CVAR_RENDERER | CVAR_ARCHIVE 
 // (coloured fire/lava go white while white lights are fine). Pre-saturate the boosted additive
 // stages so the hue survives the curve. 1 = off; white is unaffected (no saturation to boost).
 idCVar r_hdrOverbrightSat( "r_hdrOverbrightSat", "1.30", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright saturation compensation for coloured emissive (fire/lava) that the tonemap washes out; 1 = off", 1.0f, 3.0f );
+// HDR bloom (needs r_hdr): threshold the bright HDR pixels, blur them through a downsample/upsample
+// chain, and add the glow back before the tonemap — the "punch" the curve otherwise rolls off.
+// Threshold sets the brightness that starts to bloom (lower it to catch fire/lava directly, which
+// can replace the emissive overbright). 0 = off.
+idCVar r_hdrBloom( "r_hdrBloom", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR bloom intensity: glow bled from bright pixels, added before the tonemap (needs r_hdr); 0 = off", 0.0f, 2.0f );
+idCVar r_hdrBloomThreshold( "r_hdrBloomThreshold", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR bloom brightness threshold: pixels above this bloom (lower to catch fire/lava directly)", 0.0f, 8.0f );
 // HDR eye adaptation / auto-exposure (Phase B1, needs r_hdr + r_hdrTonemap>=1): the scene's
 // average (log) luminance drives the tonemap exposure over time. r_hdrExposure becomes the
 // exposure at a mid-gray (~0.18) scene; brighter scenes expose down, darker expose up, clamped

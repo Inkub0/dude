@@ -167,8 +167,16 @@ Gives adaptation something to work with, and adds the classic bright-light bleed
 
 - **Overbright lights / emissive boost:** optional multipliers pushing bright lights and
   self-illum surfaces above `1.0` so highlights carry real energy (`r_hdrOverbright`).
-- **Bloom:** threshold the HDR buffer, blur, add back before tonemap. The Phobos bloom suite
-  already transpiles (see [shaders/README.md](../neo/shaders/README.md)); reuse it.
+- **Bloom:** ✅ **BUILT** (`r_hdrBloom`, default off). Threshold the bright HDR scene at half res
+  (`bloomthreshold.frag`, soft-knee, hue-preserving) → downsample chain (`bloomdown.frag`, 5-tap
+  dual-filter) → tent-upsample-and-combine chain (`bloomup.frag`, 3×3 tent + in-shader add of each
+  level's downsample) → the resolve bilinear-upsamples the half-res glow and adds it into the linear
+  scene *before* the tonemap (so it exposes/rolls off like real light). `RB_RHI_Bloom` runs at the
+  end of the primary 3D view (scene-only, like eye adaptation), on two single-level target chains
+  (`rhiBloomD`/`rhiBloomU`) — deliberately NOT the mip-render path, and it combines in-shader because
+  VK `BeginTargetPass` always clears (no additive load-preserve). `r_hdrBloomThreshold` sets the
+  bloom cut-in — lower it to bloom fire/lava directly, which can stand in for the emissive overbright.
+  opengl3 + Vulkan, tunable in Post-Processing.
 
 ### C-lite — additive self-illum overbright  *(BUILT, the minimal first slice)*
 
