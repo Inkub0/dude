@@ -1925,7 +1925,7 @@ static CVarOption postProcessOptions[] = {
 			cvarSystem->SetCVarFloat( "r_hdrExposure", exposure );
 		}
 		AddTooltip( "r_hdrExposure: linear exposure multiplier applied before the tonemap curve.\n"
-			"Raises or lowers the scene brightness feeding the curve; default 1.25. No effect while Tonemap is Off." );
+			"Raises or lowers the scene brightness feeding the curve; default 2.33. No effect while Tonemap is Off." );
 
 		// Emissive overbright, same tonemap-gated block. Pushes additive self-illum
 		// surfaces above 1.0 so the curve rolls them off as real highlights; like
@@ -1936,7 +1936,8 @@ static CVarOption postProcessOptions[] = {
 		}
 		AddTooltip( "r_hdrOverbright: multiply additive self-illum surfaces (lamps, screens, fire, glares)\n"
 			"so they exceed 1.0 and the tonemap curve treats them as real highlights (and eye-adaptation\n"
-			"has bright anchors). 1 = off; ~2 is a good look. No effect while Tonemap is Off." );
+			"has bright anchors). 1 = off; ~3 is a good look. When active it auto-disables the legacy\n"
+			"light-flare/glare haze (r_flareSize). No effect while Tonemap is Off." );
 		ImGui::EndDisabled();
 
 		ImGui::EndDisabled();
