@@ -3579,7 +3579,7 @@ static void DrawDbgGroup_EyeAdaptation()
 		if ( ImGui::SliderFloat( "Darken in Light", &edar, 0.0f, 4.0f, "%.2f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrAdaptDarken", edar );
 		}
-		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaDar" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptDarken", 0.80f ); }
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaDar" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptDarken", 0.85f ); }
 		AddTooltip( "r_hdrAdaptDarken: exposure REMOVED from the base Exposure as the scene brightens\n"
 			"(bright scenes dim). Keep small for a mild pull-down." );
 
@@ -3587,7 +3587,7 @@ static void DrawDbgGroup_EyeAdaptation()
 		if ( ImGui::SliderFloat( "Reference Luminance", &ekey, 0.005f, 0.08f, "%.3f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrAdaptKey", ekey );
 		}
-		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaKey" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptKey", 0.024f ); }
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaKey" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptKey", 0.03f ); }
 		AddTooltip( "r_hdrAdaptKey: the scene luminance treated as neutral (mapped to the base Exposure).\n"
 			"Sit it in the middle of the scene's range so both directions engage; too high and every\n"
 			"scene reads as 'dark' so it only ever brightens." );

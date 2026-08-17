@@ -301,16 +301,16 @@ idCVar r_hdr( "r_hdr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "render th
 // HDR tonemap (needs r_hdr): static-exposure curve folded into the resolve. 0 = off/faithful
 // (bit-identical to the straight resolve), 1 = Reinhard, 2 = ACES, 3 = AgX, 4 = Khronos PBR Neutral.
 idCVar r_hdrTonemap( "r_hdrTonemap", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "HDR tonemap curve (needs r_hdr): 0=off/faithful, 1=Reinhard, 2=ACES, 3=AgX, 4=Khronos PBR Neutral", 0, 4 );
-idCVar r_hdrExposure( "r_hdrExposure", "2.33", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR static exposure multiplier applied before the tonemap curve (needs r_hdr + r_hdrTonemap>=1)", 0.1f, 8.0f );
+idCVar r_hdrExposure( "r_hdrExposure", "3.25", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR static exposure multiplier applied before the tonemap curve (needs r_hdr + r_hdrTonemap>=1)", 0.1f, 8.0f );
 // HDR C-lite overbright (needs r_hdr + a tonemap curve): multiply additive self-illum stages
 // (blend add — lamps, screens, fire, glares) so they exceed 1.0 in the float scene buffer,
 // giving the tonemap curve real highlight range and eye-adaptation bright anchors. Only active
 // with r_hdrTonemap>=1 (like r_hdrExposure), so it never touches the faithful mode-0 look. 1=off.
-idCVar r_hdrOverbright( "r_hdrOverbright", "3.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright multiplier for additive self-illum stages (needs r_hdr + r_hdrTonemap>=1): pushes lamps/screens/fire above 1.0 for tonemap+adaptation range; 1=off. When active it auto-disables the legacy r_flareSize light haze", 1.0f, 8.0f );
+idCVar r_hdrOverbright( "r_hdrOverbright", "1.92", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright multiplier for additive self-illum stages (needs r_hdr + r_hdrTonemap>=1): pushes lamps/screens/fire above 1.0 for tonemap+adaptation range; 1=off. When active it auto-disables the legacy r_flareSize light haze", 1.0f, 8.0f );
 // Overbright saturation: the tonemap desaturates the very bright colours overbright pushes into
 // (coloured fire/lava go white while white lights are fine). Pre-saturate the boosted additive
 // stages so the hue survives the curve. 1 = off; white is unaffected (no saturation to boost).
-idCVar r_hdrOverbrightSat( "r_hdrOverbrightSat", "1.4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright saturation compensation for coloured emissive (fire/lava) that the tonemap washes out; 1 = off", 1.0f, 3.0f );
+idCVar r_hdrOverbrightSat( "r_hdrOverbrightSat", "1.35", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright saturation compensation for coloured emissive (fire/lava) that the tonemap washes out; 1 = off", 1.0f, 3.0f );
 // HDR eye adaptation / auto-exposure (Phase B1, needs r_hdr + r_hdrTonemap>=1): the scene's
 // average (log) luminance drives the tonemap exposure over time. r_hdrExposure becomes the
 // exposure at a mid-gray (~0.18) scene; brighter scenes expose down, darker expose up, clamped
@@ -322,10 +322,10 @@ idCVar r_hdrAdaptSpeed( "r_hdrAdaptSpeed", "2.5", CVAR_RENDERER | CVAR_ARCHIVE |
 // it brightens it falls by up to -Darken. A smooth tanh rolloff self-limits both, so it eases to
 // the bounds instead of pinning. Darken is kept small for the "mildly less bright" look.
 idCVar r_hdrAdaptBrighten( "r_hdrAdaptBrighten", "1.22", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: max exposure ADDED to r_hdrExposure as the scene darkens (dark areas brighten)", 0.0f, 8.0f );
-idCVar r_hdrAdaptDarken( "r_hdrAdaptDarken", "0.8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: max exposure REMOVED from r_hdrExposure as the scene brightens (bright scenes dim, keep mild)", 0.0f, 8.0f );
+idCVar r_hdrAdaptDarken( "r_hdrAdaptDarken", "0.85", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: max exposure REMOVED from r_hdrExposure as the scene brightens (bright scenes dim, keep mild)", 0.0f, 8.0f );
 // Reference luminance: the geometric-mean scene luminance mapped to r_hdrExposure (neutral). Doom 3
 // scenes are dark, so this is low. Raise it to treat brighter scenes as neutral, lower for darker.
-idCVar r_hdrAdaptKey( "r_hdrAdaptKey", "0.024", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation reference luminance mapped to r_hdrExposure (the neutral scene brightness)", 0.005f, 1.0f );
+idCVar r_hdrAdaptKey( "r_hdrAdaptKey", "0.03", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation reference luminance mapped to r_hdrExposure (the neutral scene brightness)", 0.005f, 1.0f );
 // Metering region: fraction of the view width/height averaged for luminance, centred on the screen.
 // 1 = whole screen (dark periphery washes out what you look at); lower = center-weighted, so aiming
 // at a light or a dark corner actually moves the exposure — the "look at" behaviour.

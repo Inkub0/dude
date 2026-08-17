@@ -838,14 +838,18 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	rbHdrActiveThisFrame = false;
 	rbHdrFrameActive = false;
 
-	// Turning HDR off clears the tonemap curve (and with it exposure / overbright / eye-adaptation,
-	// which all ride it): a curve with r_hdr off both looks wrong and can't be changed in the menu
-	// (its combo greys out). Reset on the on->off edge, whatever toggled r_hdr (menu, console,
-	// preset). Init prev=true so a config loaded with r_hdr 0 but a stale curve also self-corrects.
+	// Tonemap follows the HDR toggle (the curve is meaningless — and unreachable in the greyed-out
+	// combo — with r_hdr off). On the off edge clear it to faithful; on the on edge default it to
+	// Reinhard (the standard look). Both act whatever flipped r_hdr (menu, console, preset). A
+	// manual curve choice while HDR stays on persists; only an actual toggle re-defaults it. Init
+	// prev=true so a config loaded with r_hdr 0 + a stale curve self-corrects and a saved r_hdr-on
+	// curve is left alone (no false edge).
 	static bool rbPrevHdr = true;
 	const bool rbHdrNow = r_hdr.GetBool();
 	if ( rbPrevHdr && !rbHdrNow && r_hdrTonemap.GetInteger() != 0 ) {
-		r_hdrTonemap.SetInteger( 0 );
+		r_hdrTonemap.SetInteger( 0 );			// HDR off -> faithful
+	} else if ( !rbPrevHdr && rbHdrNow && r_hdrTonemap.GetInteger() == 0 ) {
+		r_hdrTonemap.SetInteger( 1 );			// HDR on -> Reinhard
 	}
 	rbPrevHdr = rbHdrNow;
 
