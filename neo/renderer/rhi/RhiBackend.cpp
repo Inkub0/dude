@@ -82,6 +82,7 @@ extern idCVar r_rhiAA;
 extern idCVar r_fxaaStrength;
 extern idCVar r_hdrTonemap;
 extern idCVar r_hdrExposure;
+extern idCVar r_hdrOverbright;
 
 // DUDE gamma/brightness in shader (RenderSystem_init.cpp). On the core context
 // there is no fixed-function/ARB gamma and SDL3 has no hardware gamma ramp, so
@@ -2948,6 +2949,24 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		parms.color[1] = color[1];
 		parms.color[2] = color[2];
 		parms.color[3] = color[3];
+
+		// DUDE C-lite HDR overbright (docs/hdr-pipeline.md Phase C): scale additive
+		// self-illum stages (blend add — lamps, monitor screens, fire, glares) so they
+		// exceed 1.0 in the float scene buffer, giving the tonemap curve real highlight
+		// range and eye-adaptation bright anchors to measure. Only while the HDR float
+		// target is bound (on the 8-bit path >1 would just clip to white) AND a tonemap
+		// curve is active (r_hdrTonemap>=1, like r_hdrExposure — so the faithful mode-0
+		// look is never touched), RGB only (alpha untouched), and only for the ONE|ONE
+		// additive blend. The >1 guard makes r_hdrOverbright 1 skip entirely, so it stays
+		// bit-identical whenever it is off. Boosts the old-style generic stages here; soft
+		// particles, custom-ARB and texgen stages took an earlier branch and stay unboosted.
+		if ( rbHdrActiveThisFrame && r_hdrTonemap.GetInteger() >= 1 && r_hdrOverbright.GetFloat() > 1.0f
+		     && ( pStage->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) == ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE ) ) {
+			const float ob = r_hdrOverbright.GetFloat();
+			parms.color[0] *= ob;
+			parms.color[1] *= ob;
+			parms.color[2] *= ob;
+		}
 
 		// fixed-function alpha test bits -> in-shader test (fail if a < ref)
 		switch ( pStage->drawStateBits & GLS_ATEST_BITS ) {
