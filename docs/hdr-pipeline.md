@@ -177,11 +177,15 @@ work on, without bloom or a light-injection overhaul. Rationale: stock content i
 LDR, so nothing exceeds `1.0` and adaptation just rescales a flat image — this creates the
 bright anchors it needs.
 
-- **What:** `r_hdrOverbright` (float, default `2.0`, range `1..8`, archive; `1` = off) scales
+- **What:** `r_hdrOverbright` (float, default `3.0`, range `1..8`, archive; `1` = off) scales
   **additive** material stages (`GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE` — the self-illum blend:
   lamps, monitor screens, fire, glares) so their RGB exceeds `1.0` in the float scene buffer.
   Active only with a tonemap curve on (`r_hdrTonemap>=1`, like `r_hdrExposure`), so the faithful
   mode-0 look is never touched. ImGui slider sits under the Tonemap combo (greys out with it).
+- **Supersedes the legacy flare haze:** when overbright is active, `R_FlareDeform` forces the
+  `r_flareSize` flare/glare deform ("the old light haze") to its `0`/off size — the lights are
+  genuinely bright now, so the faked sprite double-counts. Restored when overbright is off.
+  (Paired default retune: `r_hdrExposure` 2.33, `r_hdrOverbright` 3.0.)
 - **Where:** one guard at the `parms.color` set in `RB_RHI_RenderShaderPasses`
   ([RhiBackend.cpp](../neo/renderer/rhi/RhiBackend.cpp)). No shader edit — `generic.vert`
   already multiplies `var_Color` by `u_color` (= `parms.color`), so scaling the stage colour

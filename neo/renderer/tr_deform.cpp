@@ -523,6 +523,9 @@ static void R_FlareDeform( drawSurf_t *surf ) {
 }
 */
 
+extern idCVar r_hdrTonemap;		// DUDE HDR tonemap curve select (RenderSystem_init.cpp)
+extern idCVar r_hdrOverbright;	// DUDE HDR emissive overbright (RenderSystem_init.cpp)
+
 static void R_FlareDeform( drawSurf_t *surf ) {
 	const srfTriangles_t *tri;
 	srfTriangles_t		*newTri;
@@ -587,7 +590,17 @@ static void R_FlareDeform( drawSurf_t *surf ) {
 		ac[j].color[3] = 255;
 	}
 
-	float	spread = surf->shaderRegisters[ surf->material->GetDeformRegister(0) ] * r_flareSize.GetFloat();
+	// DUDE: HDR emissive overbright (r_hdrOverbright) makes the light sources genuinely
+	// bright and, with the tonemap curve, they bloom through it — so the legacy flare/
+	// glare deform ("the old light haze") double-counts and is redundant. Force its size
+	// to 0 (the engine's own "off" value for r_flareSize) whenever overbright is active;
+	// unchanged otherwise. Mirrors the backend overbright gate (HDR + tonemap>=1).
+	float	flareScale = r_flareSize.GetFloat();
+	if ( R_BackendSupportsEnhancements() && r_hdr.GetBool()
+	     && r_hdrTonemap.GetInteger() >= 1 && r_hdrOverbright.GetFloat() > 1.0f ) {
+		flareScale = 0.0f;
+	}
+	float	spread = surf->shaderRegisters[ surf->material->GetDeformRegister(0) ] * flareScale;
 	idVec3	edgeDir[4][3];
 	glIndex_t		indexes[MAX_TRI_WINDING_INDEXES];
 	int		numIndexes = R_WindingFromTriangles( tri, indexes );

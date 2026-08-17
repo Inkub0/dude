@@ -301,12 +301,12 @@ idCVar r_hdr( "r_hdr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "render th
 // HDR tonemap (needs r_hdr): static-exposure curve folded into the resolve. 0 = off/faithful
 // (bit-identical to the straight resolve), 1 = Reinhard, 2 = ACES, 3 = AgX, 4 = Khronos PBR Neutral.
 idCVar r_hdrTonemap( "r_hdrTonemap", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "HDR tonemap curve (needs r_hdr): 0=off/faithful, 1=Reinhard, 2=ACES, 3=AgX, 4=Khronos PBR Neutral", 0, 4 );
-idCVar r_hdrExposure( "r_hdrExposure", "1.25", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR static exposure multiplier applied before the tonemap curve (needs r_hdr + r_hdrTonemap>=1)", 0.1f, 8.0f );
+idCVar r_hdrExposure( "r_hdrExposure", "2.33", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR static exposure multiplier applied before the tonemap curve (needs r_hdr + r_hdrTonemap>=1)", 0.1f, 8.0f );
 // HDR C-lite overbright (needs r_hdr + a tonemap curve): multiply additive self-illum stages
 // (blend add — lamps, screens, fire, glares) so they exceed 1.0 in the float scene buffer,
 // giving the tonemap curve real highlight range and eye-adaptation bright anchors. Only active
 // with r_hdrTonemap>=1 (like r_hdrExposure), so it never touches the faithful mode-0 look. 1=off.
-idCVar r_hdrOverbright( "r_hdrOverbright", "2.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright multiplier for additive self-illum stages (needs r_hdr + r_hdrTonemap>=1): pushes lamps/screens/fire above 1.0 for tonemap+adaptation range; 1=off", 1.0f, 8.0f );
+idCVar r_hdrOverbright( "r_hdrOverbright", "3.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright multiplier for additive self-illum stages (needs r_hdr + r_hdrTonemap>=1): pushes lamps/screens/fire above 1.0 for tonemap+adaptation range; 1=off. When active it auto-disables the legacy r_flareSize light haze", 1.0f, 8.0f );
 
 // DUDE Phase 3.5 "specular tuning" enhancement (GL3/Vulkan interaction shader
 // only; inert on the legacy ARB2 path). Defaults reproduce vanilla exactly:
