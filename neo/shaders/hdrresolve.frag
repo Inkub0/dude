@@ -6,15 +6,18 @@
 // (not the separate postprocess pass), so they sample the smooth float buffer instead
 // of round-tripping through the 8-bit _currentRender image.
 //
+// u_localParam0.x = HDR exposure multiplier (r_hdrExposure, applied before the tonemap)
 // u_localParam0.y = film grain intensity; 0 = off
 // u_localParam0.z = grain time/seed (seconds)
 // u_localParam0.w = chromatic aberration strength; 0 = off
 // u_localParam1.x = grain cell size in pixels (1 = per-pixel, ~1.5-2 = filmic clumps)
 // u_localParam1.y = r_brightness (1 = identity)
 // u_localParam1.z = 1.0 / r_gamma (1 = identity)
+// u_localParam1.w = tonemap curve (r_hdrTonemap): 0 off, 1 Reinhard, 2 ACES, 3 AgX, 4 PBR Neutral
 // u_windowCoord.zw = aberration center in uv (0.5, 0.5)
 
 #include "renderparms.glsl"
+#include "tonemap.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_hdrScene;
 
@@ -47,6 +50,11 @@ void main() {
 	} else {
 		color = texture( u_hdrScene, uv ).rgb;
 	}
+
+	// exposure + tonemap: map the linear HDR scene into display [0,1] before grain/gamma.
+	// Mode 0 with exposure 1.0 is a passthrough, so the default (r_hdrTonemap 0) is
+	// bit-identical to the pre-tonemap resolve. Grain then runs on the display-range image.
+	color = DudeTonemap( color, u_localParam0.x, int( u_localParam1.w + 0.5 ) );
 
 	// film grain: triangular monochrome noise through a filmic beta-curve response —
 	// zero at pure black (no clip-lift greying of the void), peaking around 25%
