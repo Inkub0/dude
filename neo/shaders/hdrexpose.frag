@@ -1,16 +1,20 @@
 // HDR eye adaptation (Phase B1, docs/hdr-pipeline.md): compute the adapted exposure into a
-// 1x1 ping-pong target. Reads the 1x1 geometric-mean scene luminance (exp of the averaged
-// log-luma) and the previous frame's exposure, targets a mid-gray key, clamps to [min,max],
-// and eases toward it — the temporal lag IS the eye-adaptation feel. The resolve then samples
-// this 1x1 as its exposure instead of the static r_hdrExposure.
+// 1x1 ping-pong target. Reads the 1x1 geometric-mean scene luminance and the previous frame's
+// exposure, and eases toward a target — the temporal lag IS the eye-adaptation feel. The resolve
+// then samples this 1x1 as its exposure instead of the static r_hdrExposure.
 //
-//   u_localParam0.x = r_hdrExposure (the exposure at a mid-gray ~0.18 scene)
-//   u_localParam0.y = min exposure clamp
-//   u_localParam0.z = max exposure clamp
+// Relative model (no hard clamp): r_hdrExposure is the neutral "mid" exposure at the reference
+// luminance (key). How many stops the scene sits from the reference maps through a tanh, so as the
+// scene darkens the exposure eases UP toward mid + Brighten, and as it brightens it eases DOWN
+// toward mid - Darken — self-limiting instead of pinning.
+//
+//   u_localParam0.x = r_hdrExposure (neutral "mid" exposure)
+//   u_localParam0.y = Brighten (max exposure ADDED as the scene darkens)
+//   u_localParam0.z = Darken   (max exposure REMOVED as the scene brightens)
 //   u_localParam0.w = blend alpha = 1 - exp(-dt / tau)  (0 = frozen, 1 = snap)
 //   u_localParam1.x = previous exposure usable (1) or snap to target (0, first frame / reset)
 //   u_localParam1.y = luma source mip level (Vulkan single-level view -> 0; GL3 -> coarsest)
-//   u_localParam1.z = adaptation key (r_hdrAdaptKey): the scene luminance mapping to r_hdrExposure
+//   u_localParam1.z = reference luminance (r_hdrAdaptKey): the scene luminance mapping to mid
 
 #include "renderparms.glsl"
 
@@ -21,13 +25,25 @@ VARY(0) in vec2 var_TexCoord;
 
 layout(location = 0) out vec4 fragColor;
 
+const float WIDTH = 2.5;   // stops of scene brightness that fill the tanh response (softness)
+
 void main() {
 	int   lod  = int( u_localParam1.y + 0.5 );
 	float logL = texelFetch( u_lumaAvg, ivec2( 0 ), lod ).r;
 	float L    = exp( logL );                                     // geometric-mean luminance
-	// expose so a key-luminance scene lands at r_hdrExposure; brighter scenes expose down, darker up.
-	float target = clamp( u_localParam0.x * u_localParam1.z / max( L, 1e-4 ),
-	                      u_localParam0.y, u_localParam0.z );
+
+	float mid      = u_localParam0.x;
+	float brighten = u_localParam0.y;
+	float darken   = u_localParam0.z;
+	float Lref     = max( u_localParam1.z, 1e-4 );
+
+	// stops from the reference: >0 brighter than neutral, <0 darker. tanh( -stops/width ) is +1 in
+	// the dark (add Brighten) and -1 in the bright (subtract Darken), easing smoothly between.
+	float stops = log2( max( L, 1e-4 ) / Lref );
+	float t     = tanh( -stops / WIDTH );                         // [-1, 1], + = darker scene
+	float amp   = ( t >= 0.0 ) ? brighten : darken;
+	float target = max( mid + amp * t, 0.05 );                    // floor keeps exposure positive
+
 	float prev = texelFetch( u_prevExposure, ivec2( 0 ), 0 ).r;
 	float adapted = ( u_localParam1.x > 0.5 ) ? mix( prev, target, u_localParam0.w ) : target;
 	// .r = adapted exposure (what the resolve uses); .g = log-luma for the debug view.

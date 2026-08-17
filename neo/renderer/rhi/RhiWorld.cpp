@@ -4971,8 +4971,8 @@ void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_t *viewDef ) {
 extern idCVar r_hdrEyeAdaptation;
 extern idCVar r_hdrAdaptSpeed;
 extern idCVar r_hdrExposure;
-extern idCVar r_hdrExposureMin;
-extern idCVar r_hdrExposureMax;
+extern idCVar r_hdrAdaptBrighten;
+extern idCVar r_hdrAdaptDarken;
 extern idCVar r_hdrAdaptKey;
 extern idCVar r_hdrTonemap;
 
@@ -5091,9 +5091,9 @@ rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg
 	rhi::RenderParams ep;
 	memset( &ep, 0, sizeof( ep ) );
 	ep.mvpMatrix[0] = ep.mvpMatrix[5] = ep.mvpMatrix[10] = ep.mvpMatrix[15] = 1.0f;
-	ep.localParam0[0] = r_hdrExposure.GetFloat();						// exposure at a mid-gray scene
-	ep.localParam0[1] = r_hdrExposureMin.GetFloat();
-	ep.localParam0[2] = r_hdrExposureMax.GetFloat();
+	ep.localParam0[0] = r_hdrExposure.GetFloat();						// neutral "mid" exposure
+	ep.localParam0[1] = r_hdrAdaptBrighten.GetFloat();					// added as the scene darkens
+	ep.localParam0[2] = r_hdrAdaptDarken.GetFloat();					// removed as the scene brightens
 	ep.localParam0[3] = alpha;
 	ep.localParam1[0] = rhiExposureValid ? 1.0f : 0.0f;					// ease from prev, else snap
 	ep.localParam1[1] = vk ? 0.0f : (float)( rhiLumaMipLevels - 1 );	// coarsest luma LOD (GL reads the 1x1 level)

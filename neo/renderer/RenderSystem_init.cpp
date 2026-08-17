@@ -313,12 +313,15 @@ idCVar r_hdrOverbright( "r_hdrOverbright", "3.0", CVAR_RENDERER | CVAR_ARCHIVE |
 // to [min,max] and eased with a time constant ~1/speed seconds. Off = the static r_hdrExposure.
 idCVar r_hdrEyeAdaptation( "r_hdrEyeAdaptation", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "HDR auto-exposure / eye adaptation (needs r_hdr + r_hdrTonemap>=1): average scene luminance drives the tonemap exposure over time; off = static r_hdrExposure" );
 idCVar r_hdrAdaptSpeed( "r_hdrAdaptSpeed", "1.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation speed (higher = faster); the exposure lags with a time constant ~1/speed seconds", 0.1f, 10.0f );
-idCVar r_hdrExposureMin( "r_hdrExposureMin", "1.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation minimum exposure clamp (needs r_hdrEyeAdaptation)", 0.05f, 8.0f );
-idCVar r_hdrExposureMax( "r_hdrExposureMax", "3.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation maximum exposure clamp (needs r_hdrEyeAdaptation)", 0.05f, 16.0f );
-// Adaptation key: the geometric-mean scene luminance that maps to r_hdrExposure. Doom 3's linear
-// scenes are dark, so this is low; RAISE it if the exposure sits pinned at max (too bright, never
-// adapts), LOWER it if pinned at min. The center of the auto-exposure response.
-idCVar r_hdrAdaptKey( "r_hdrAdaptKey", "0.10", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation key: the scene luminance mapping to r_hdrExposure (raise if exposure pins at max)", 0.005f, 1.0f );
+// Relative adaptation (no hard clamp): r_hdrExposure is the neutral "mid" exposure at a reference
+// scene luminance (r_hdrAdaptKey). As the scene darkens the exposure rises by up to +Brighten; as
+// it brightens it falls by up to -Darken. A smooth tanh rolloff self-limits both, so it eases to
+// the bounds instead of pinning. Darken is kept small for the "mildly less bright" look.
+idCVar r_hdrAdaptBrighten( "r_hdrAdaptBrighten", "1.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: max exposure ADDED to r_hdrExposure as the scene darkens (dark areas brighten)", 0.0f, 8.0f );
+idCVar r_hdrAdaptDarken( "r_hdrAdaptDarken", "0.8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: max exposure REMOVED from r_hdrExposure as the scene brightens (bright scenes dim, keep mild)", 0.0f, 8.0f );
+// Reference luminance: the geometric-mean scene luminance mapped to r_hdrExposure (neutral). Doom 3
+// scenes are dark, so this is low. Raise it to treat brighter scenes as neutral, lower for darker.
+idCVar r_hdrAdaptKey( "r_hdrAdaptKey", "0.05", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation reference luminance mapped to r_hdrExposure (the neutral scene brightness)", 0.005f, 1.0f );
 // Debug: draw the adapted exposure as a flat grayscale (exposure * 0.2, so mid-gray ~= 2.5) so you
 // can see whether it is pinned or actually tracking the scene. Needs r_hdrEyeAdaptation.
 idCVar r_hdrEyeAdaptDebug( "r_hdrEyeAdaptDebug", "0", CVAR_RENDERER | CVAR_BOOL, "debug: show the adapted exposure as a flat grayscale (needs r_hdrEyeAdaptation)" );

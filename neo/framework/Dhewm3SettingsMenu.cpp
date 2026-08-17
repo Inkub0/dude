@@ -1955,16 +1955,24 @@ static CVarOption postProcessOptions[] = {
 			cvarSystem->SetCVarFloat( "r_hdrAdaptSpeed", aspeed );
 		}
 		AddTooltip( "r_hdrAdaptSpeed: adaptation rate; higher = faster (time constant ~1/speed seconds)." );
-		float emin = cvarSystem->GetCVarFloat( "r_hdrExposureMin" );
-		if ( ImGui::SliderFloat( "Exposure Min", &emin, 0.05f, 8.0f, "%.2f" ) ) {
-			cvarSystem->SetCVarFloat( "r_hdrExposureMin", emin );
+		float ebri = cvarSystem->GetCVarFloat( "r_hdrAdaptBrighten" );
+		if ( ImGui::SliderFloat( "Brighten in Dark", &ebri, 0.0f, 4.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptBrighten", ebri );
 		}
-		float emax = cvarSystem->GetCVarFloat( "r_hdrExposureMax" );
-		if ( ImGui::SliderFloat( "Exposure Max", &emax, 0.05f, 16.0f, "%.2f" ) ) {
-			cvarSystem->SetCVarFloat( "r_hdrExposureMax", emax );
+		AddTooltip( "r_hdrAdaptBrighten: how much exposure is ADDED to the Exposure above as the scene\n"
+			"darkens (dark areas open up). Eases smoothly to this cap, never pins." );
+		float edar = cvarSystem->GetCVarFloat( "r_hdrAdaptDarken" );
+		if ( ImGui::SliderFloat( "Darken in Light", &edar, 0.0f, 4.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptDarken", edar );
 		}
-		AddTooltip( "r_hdrExposureMin / Max: clamp the adapted exposure so dark rooms don't over-brighten\n"
-			"and bright scenes keep detail." );
+		AddTooltip( "r_hdrAdaptDarken: how much exposure is REMOVED from the Exposure above as the scene\n"
+			"brightens (bright scenes dim). Keep small for a mild pull-down." );
+		float ekey = cvarSystem->GetCVarFloat( "r_hdrAdaptKey" );
+		if ( ImGui::SliderFloat( "Reference Luminance", &ekey, 0.005f, 0.5f, "%.3f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptKey", ekey );
+		}
+		AddTooltip( "r_hdrAdaptKey: the scene luminance treated as neutral (mapped to the Exposure). Lower\n"
+			"for darker 'neutral' scenes, higher for brighter. The center the adaptation swings around." );
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 
