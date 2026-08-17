@@ -170,6 +170,33 @@ Gives adaptation something to work with, and adds the classic bright-light bleed
 - **Bloom:** threshold the HDR buffer, blur, add back before tonemap. The Phobos bloom suite
   already transpiles (see [shaders/README.md](../neo/shaders/README.md)); reuse it.
 
+### C-lite — additive self-illum overbright  *(BUILT, the minimal first slice)*
+
+The smallest slice of Phase C that gives B0's tonemap and B1's eye-adaptation real range to
+work on, without bloom or a light-injection overhaul. Rationale: stock content is authored to
+LDR, so nothing exceeds `1.0` and adaptation just rescales a flat image — this creates the
+bright anchors it needs.
+
+- **What:** `r_hdrOverbright` (float, default `2.0`, range `1..8`, archive; `1` = off) scales
+  **additive** material stages (`GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE` — the self-illum blend:
+  lamps, monitor screens, fire, glares) so their RGB exceeds `1.0` in the float scene buffer.
+  Active only with a tonemap curve on (`r_hdrTonemap>=1`, like `r_hdrExposure`), so the faithful
+  mode-0 look is never touched. ImGui slider sits under the Tonemap combo (greys out with it).
+- **Where:** one guard at the `parms.color` set in `RB_RHI_RenderShaderPasses`
+  ([RhiBackend.cpp](../neo/renderer/rhi/RhiBackend.cpp)). No shader edit — `generic.vert`
+  already multiplies `var_Color` by `u_color` (= `parms.color`), so scaling the stage colour
+  scales the additive output. Both backends free (the pass is shared GL3+VK).
+- **Faithfulness / gating:** applied only while `rbHdrActiveThisFrame` (the float target is
+  bound — on the 8-bit path `>1` would clip to white); RGB only, alpha untouched; the `>1`
+  guard makes `r_hdrOverbright 1` skip entirely, so the default and the legacy path are
+  bit-identical. Non-vanilla, opt-in, not preset-wired.
+- **Deliberately excluded (keeps it minimal):** no uniform light/diffuse multiply (that is just
+  exposure, no *range*); no bloom; soft-particle, custom-ARB and texgen stages take an earlier
+  branch and stay unboosted (a follow-up if stock/mod emissive customs need it).
+- **Known tuning item:** additive *particles* (sparks, muzzle glares) also boost — usually
+  desirable, but a bright spark field can blow out; a material-name gate (like
+  `RB_RHI_ParticleLooksLikeSmoke`) is the escape hatch if needed.
+
 ---
 
 ## Vulkan port
@@ -241,9 +268,18 @@ split in mind (exposure/curve separated from the final encode) keeps this path c
   were both fixes for artifacts observed running (menu planet-limb lift, blue-shifted models);
   the originally-planned resolve dither was tried and **removed** as a dead-end. Only open
   item is the deferred MSAA-in-HDR follow-up (use `r_rhiAA`/FXAA meanwhile).
-- **Phase B** (eye adaptation + tonemap) — planned, **not started** (no `r_hdrEyeAdaptation`
-  / `r_hdrTonemap` / `r_hdrAdaptSpeed` / `r_hdrExposure*` cvars exist yet).
-- **Phase C** (dynamic-range injection + bloom) — planned, **not started** (no `r_hdrOverbright`).
+- **Phase B0** (static tonemap) — ✅ **DONE + MERGED** (`r_hdrTonemap` 0..4 Off/Reinhard/ACES/
+  AgX/Khronos-PBR-Neutral + `r_hdrExposure`, default 1.25, folded into both resolve paths;
+  `neo/shaders/tonemap.glsl`; ImGui combo + exposure slider). Mode 0 stays bit-identical.
+  GL3 + Vulkan. Pending only the user's final look-calibration of the curves.
+- **Phase B1** (eye adaptation) — planned, **not started**. The consumer half is already in
+  place (the resolve applies an exposure scalar to the curves); B1 just has to *produce* it:
+  luminance reduce (reuse the SSAO `IF_R16F` mip infra) → temporal adapt into a ping-pong 1×1
+  target (NOT `_scratch` capture feedback — unreliable on the RHI) → clamp → feed the resolve.
+  New cvars `r_hdrEyeAdaptation` / `r_hdrAdaptSpeed` / `r_hdrExposureMin/Max`. Gated on Phase C
+  for a meaningful effect (see the range caveat).
+- **Phase C** — ✅ **C-lite BUILT** (`r_hdrOverbright`, additive self-illum overbright, default
+  off; see the "C-lite" section above). Full Phase C (light injection + bloom) still planned.
 - **HDR display output** (HDR10/scRGB) — separate future feature, **not started**; the only
   hardware-gated (needs an HDR panel), Vulkan-only part. Forks off Phase B's tonemap. See the
   "HDR *display* output" section above.
