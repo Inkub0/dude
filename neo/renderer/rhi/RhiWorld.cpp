@@ -4977,25 +4977,36 @@ extern idCVar r_hdrAdaptKey;
 extern idCVar r_hdrAdaptCenter;
 extern idCVar r_hdrTonemap;
 
-static const int RHI_LUMA_MIP_BASE = 128;					// 128 -> 8 levels reach 1x1 (RenderTarget::MAX_MIP)
-static rhi::RenderTargetHandle rhiLumaMipRT = 0;			// mipped R16F log-luma reduction (rebuilt each frame)
-static int rhiLumaMipLevels = 0;
+// Single-level luma reduction targets (64 -> 8 -> 1), each 8x8-averaging into the next. Deliberately
+// NOT a mip-render chain (BeginTargetMipPass): that path has no write->read barrier between levels and
+// faulted the GPU (device-loss, black screen) when driven every frame. These go through the ordinary
+// BeginTargetPass path the resolve / SSAO-temporal / DoF use, which is properly synchronized.
+static rhi::RenderTargetHandle rhiLumaA = 0;				// 64x64 RGBA16F, .r = log-luma of the centre-cropped scene
+static rhi::RenderTargetHandle rhiLumaB = 0;				// 8x8 RGBA16F, .r = 8x8 average of A
+static rhi::RenderTargetHandle rhiLumaC = 0;				// 1x1 RGBA16F, .r = 8x8 average of B = geometric-mean log-luma
 static rhi::RenderTargetHandle rhiExposureRT[2] = { 0, 0 };	// 1x1 RGBA16F adapted-exposure ping-pong (.r)
 static bool rhiExposureValid = false;						// the read slot holds a usable previous exposure
 static int rhiExposureIdx = 0;								// write slot
 static int rhiExposureLastTick = -100000;					// Sys_Milliseconds() of the last update
 
-// Ensure the luma mip target + the 1x1 exposure ping-pong exist; invalidate on lost context.
+// Ensure the luma reduction targets + the 1x1 exposure ping-pong exist; invalidate on lost context.
 static bool RB_RHI_EnsureEyeAdaptTargets( rhi::RHI *r ) {
-	if ( rhiLumaMipRT && r->GetRenderTargetImage( rhiLumaMipRT ) == 0 ) {
-		rhiLumaMipRT = 0; rhiLumaMipLevels = 0;			// lost context (vid_restart)
+	if ( rhiLumaA && r->GetRenderTargetImage( rhiLumaA ) == 0 ) {
+		rhiLumaA = rhiLumaB = rhiLumaC = 0;				// lost context (vid_restart)
 	}
-	if ( !rhiLumaMipRT ) {
-		int levels = 1;
-		for ( int d = RHI_LUMA_MIP_BASE; d > 1 && levels < 8; d >>= 1 ) { levels++; }
-		rhiLumaMipRT = r->CreateRenderTargetMipped( rhi::IF_R16F, RHI_LUMA_MIP_BASE, RHI_LUMA_MIP_BASE, levels );
-		if ( !rhiLumaMipRT ) { rhiLumaMipLevels = 0; return false; }
-		rhiLumaMipLevels = levels;
+	if ( !rhiLumaA || !rhiLumaB || !rhiLumaC ) {
+		if ( rhiLumaA ) { r->DestroyRenderTarget( rhiLumaA ); rhiLumaA = 0; }
+		if ( rhiLumaB ) { r->DestroyRenderTarget( rhiLumaB ); rhiLumaB = 0; }
+		if ( rhiLumaC ) { r->DestroyRenderTarget( rhiLumaC ); rhiLumaC = 0; }
+		rhiLumaA = r->CreateRenderTarget( rhi::IF_RGBA16F, 64, 64 );
+		rhiLumaB = r->CreateRenderTarget( rhi::IF_RGBA16F, 8, 8 );
+		rhiLumaC = r->CreateRenderTarget( rhi::IF_RGBA16F, 1, 1 );
+		if ( !rhiLumaA || !rhiLumaB || !rhiLumaC ) {
+			if ( rhiLumaA ) { r->DestroyRenderTarget( rhiLumaA ); rhiLumaA = 0; }
+			if ( rhiLumaB ) { r->DestroyRenderTarget( rhiLumaB ); rhiLumaB = 0; }
+			if ( rhiLumaC ) { r->DestroyRenderTarget( rhiLumaC ); rhiLumaC = 0; }
+			return false;
+		}
 	}
 	if ( rhiExposureRT[0] && r->GetRenderTargetImage( rhiExposureRT[0] ) == 0 ) {
 		rhiExposureRT[0] = rhiExposureRT[1] = 0;
@@ -5054,26 +5065,26 @@ rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg
 	if ( !lumaProg || !downProg || !expProg ) {
 		return 0;
 	}
-	const bool vk = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
-
-	// 1. luminance reduction: level 0 = log-luma of the scene, then box-average down to 1x1
+	// 1. luminance reduction: scene -> A (64x64 log-luma, centre-cropped) -> B (8x8) -> C (1x1),
+	// each an 8x8 box-average, through the ordinary BeginTargetPass path — target->target reads are
+	// properly synchronized there, unlike the barrier-less mip-render chain (which faulted the GPU
+	// when driven every frame). C.r ends as the geometric-mean log-luma.
 	rhi::RenderParams p;
 	memset( &p, 0, sizeof( p ) );
 	p.mvpMatrix[0] = p.mvpMatrix[5] = p.mvpMatrix[10] = p.mvpMatrix[15] = 1.0f;
 	p.localParam0[0] = idMath::ClampFloat( 0.05f, 1.0f, r_hdrAdaptCenter.GetFloat() );	// central metering crop (hdrluma)
 
-	r->BeginTargetPass( rhiLumaMipRT, NULL );
+	r->BeginTargetPass( rhiLumaA, NULL );					// scene -> 64x64 log-luma
 	RB_RHI_DrawFullscreen( r, lumaProg, p, sceneImg );
 	r->EndPass();
 
-	for ( int L = 1; L < rhiLumaMipLevels; L++ ) {
-		rhi::RenderParams dp = p;
-		dp.localParam0[0] = vk ? 0.0f : (float)( L - 1 );	// source mip level (VK single-level view -> 0)
-		rhi::ImageHandle src = r->GetRenderTargetMipImage( rhiLumaMipRT, L - 1 );
-		r->BeginTargetMipPass( rhiLumaMipRT, L, NULL );
-		RB_RHI_DrawFullscreen( r, downProg, dp, src );
-		r->EndPass();
-	}
+	r->BeginTargetPass( rhiLumaB, NULL );					// 64 -> 8 (each texel = 8x8 average)
+	RB_RHI_DrawFullscreen( r, downProg, p, r->GetRenderTargetImage( rhiLumaA ) );
+	r->EndPass();
+
+	r->BeginTargetPass( rhiLumaC, NULL );					// 8 -> 1 (8x8 average = geometric mean)
+	RB_RHI_DrawFullscreen( r, downProg, p, r->GetRenderTargetImage( rhiLumaB ) );
+	r->EndPass();
 
 	// 2. temporal adaptation into the 1x1 exposure ping-pong
 	int timeMs = Sys_Milliseconds();
@@ -5098,10 +5109,10 @@ rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg
 	ep.localParam0[2] = r_hdrAdaptDarken.GetFloat();					// removed as the scene brightens
 	ep.localParam0[3] = alpha;
 	ep.localParam1[0] = rhiExposureValid ? 1.0f : 0.0f;					// ease from prev, else snap
-	ep.localParam1[1] = vk ? 0.0f : (float)( rhiLumaMipLevels - 1 );	// coarsest luma LOD (GL reads the 1x1 level)
+	ep.localParam1[1] = 0.0f;											// luma source is a single-level 1x1 target (lod 0)
 	ep.localParam1[2] = r_hdrAdaptKey.GetFloat();						// key: scene luminance mapping to r_hdrExposure
 
-	rhi::ImageHandle lumaAvg = r->GetRenderTargetMipImage( rhiLumaMipRT, rhiLumaMipLevels - 1 );
+	rhi::ImageHandle lumaAvg = r->GetRenderTargetImage( rhiLumaC );		// the 1x1 average
 
 	r->BeginTargetPass( rhiExposureRT[writeIdx], NULL );
 	RB_RHI_BindRTUnit( r, 1, rhiExposureRT[readIdx] );					// previous exposure on unit 1
