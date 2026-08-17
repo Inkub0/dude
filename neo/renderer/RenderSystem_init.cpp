@@ -328,10 +328,10 @@ idCVar r_hdrAdaptKey( "r_hdrAdaptKey", "0.024", CVAR_RENDERER | CVAR_ARCHIVE | C
 idCVar r_hdrAdaptCenter( "r_hdrAdaptCenter", "0.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation metering: central fraction of the view measured (1 = whole screen, lower = center-weighted)", 0.15f, 1.0f );
 // Low-light grain boost: as the dark-scene brightening ramps up, scale film grain (r_postFilmGrain)
 // with it — high-gain sensor/eye noise. 1 = grain (almost) doubles at full brightening; 0 = off.
-idCVar r_hdrAdaptGrain( "r_hdrAdaptGrain", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: extra film grain at full low-light brightening (1 = ~double the grain, 0 = off; needs r_postFilmGrain)", 0.0f, 5.0f );
+idCVar r_hdrAdaptGrain( "r_hdrAdaptGrain", "3.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: extra film grain at full low-light brightening (1 = ~double the grain, 0 = off; needs r_postFilmGrain)", 0.0f, 5.0f );
 // Low-light desaturation: as the dark-scene brightening ramps up, wash colours toward gray (scotopic
 // vision — rods take over from cones in the dark). 0.25 = colours drop to ~75% at full brightening.
-idCVar r_hdrAdaptDesat( "r_hdrAdaptDesat", "0.25", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: colour desaturation at full low-light brightening (0.25 = ~75% saturation, 0 = off)", 0.0f, 1.0f );
+idCVar r_hdrAdaptDesat( "r_hdrAdaptDesat", "0.33", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: colour desaturation at full low-light brightening (0.25 = ~75% saturation, 0 = off)", 0.0f, 1.0f );
 // Debug: draw the adapted exposure as a flat grayscale (exposure * 0.2, so mid-gray ~= 2.5) so you
 // can see whether it is pinned or actually tracking the scene. Needs r_hdrEyeAdaptation.
 idCVar r_hdrEyeAdaptDebug( "r_hdrEyeAdaptDebug", "0", CVAR_RENDERER | CVAR_BOOL, "debug: show the adapted exposure as a flat grayscale (needs r_hdrEyeAdaptation)" );

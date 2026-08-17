@@ -1947,54 +1947,8 @@ static CVarOption postProcessOptions[] = {
 			cvarSystem->SetCVarBool( "r_hdrEyeAdaptation", eye );
 		}
 		AddTooltip( "r_hdrEyeAdaptation: the scene's average luminance drives the tonemap exposure over\n"
-			"time (bright rooms expose down, dark rooms up). Exposure above becomes the mid-gray target.\n"
-			"opengl3 / Vulkan; needs a tonemap curve. Off = the static Exposure." );
-		ImGui::BeginDisabled( !eye );
-		float aspeed = cvarSystem->GetCVarFloat( "r_hdrAdaptSpeed" );
-		if ( ImGui::SliderFloat( "Adapt Speed", &aspeed, 0.1f, 10.0f, "%.2f" ) ) {
-			cvarSystem->SetCVarFloat( "r_hdrAdaptSpeed", aspeed );
-		}
-		AddTooltip( "r_hdrAdaptSpeed: adaptation rate; higher = faster (time constant ~1/speed seconds)." );
-		float ebri = cvarSystem->GetCVarFloat( "r_hdrAdaptBrighten" );
-		if ( ImGui::SliderFloat( "Brighten in Dark", &ebri, 0.0f, 4.0f, "%.2f" ) ) {
-			cvarSystem->SetCVarFloat( "r_hdrAdaptBrighten", ebri );
-		}
-		AddTooltip( "r_hdrAdaptBrighten: how much exposure is ADDED to the Exposure above as the scene\n"
-			"darkens (dark areas open up). Eases smoothly to this cap, never pins." );
-		float edar = cvarSystem->GetCVarFloat( "r_hdrAdaptDarken" );
-		if ( ImGui::SliderFloat( "Darken in Light", &edar, 0.0f, 4.0f, "%.2f" ) ) {
-			cvarSystem->SetCVarFloat( "r_hdrAdaptDarken", edar );
-		}
-		AddTooltip( "r_hdrAdaptDarken: how much exposure is REMOVED from the Exposure above as the scene\n"
-			"brightens (bright scenes dim). Keep small for a mild pull-down." );
-		float ekey = cvarSystem->GetCVarFloat( "r_hdrAdaptKey" );
-		if ( ImGui::SliderFloat( "Reference Luminance", &ekey, 0.005f, 0.08f, "%.3f" ) ) {
-			cvarSystem->SetCVarFloat( "r_hdrAdaptKey", ekey );
-		}
-		AddTooltip( "r_hdrAdaptKey: the scene luminance treated as neutral (mapped to the Exposure). Sit it\n"
-			"in the middle of the scene's range so both directions engage; too high and every scene reads\n"
-			"as 'dark' so it only ever brightens." );
-		float ecen = cvarSystem->GetCVarFloat( "r_hdrAdaptCenter" );
-		if ( ImGui::SliderFloat( "Metering Region", &ecen, 0.15f, 1.0f, "%.2f" ) ) {
-			cvarSystem->SetCVarFloat( "r_hdrAdaptCenter", ecen );
-		}
-		AddTooltip( "r_hdrAdaptCenter: central fraction of the view measured. 1 = whole screen (the dark\n"
-			"periphery washes out what you look at); lower = center-weighted, so aiming at a light or a\n"
-			"dark corner actually moves the exposure." );
-		float egrain = cvarSystem->GetCVarFloat( "r_hdrAdaptGrain" );
-		if ( ImGui::SliderFloat( "Low-light Grain Boost", &egrain, 0.0f, 5.0f, "%.2f" ) ) {
-			cvarSystem->SetCVarFloat( "r_hdrAdaptGrain", egrain );
-		}
-		AddTooltip( "r_hdrAdaptGrain: raise film grain as the dark-scene brightening ramps up (high-gain\n"
-			"sensor/eye noise). 1 = grain ~doubles at full brightening; 0 = off. Needs Film Grain > 0." );
-		float edesat = cvarSystem->GetCVarFloat( "r_hdrAdaptDesat" );
-		if ( ImGui::SliderFloat( "Low-light Desaturation", &edesat, 0.0f, 1.0f, "%.2f" ) ) {
-			cvarSystem->SetCVarFloat( "r_hdrAdaptDesat", edesat );
-		}
-		AddTooltip( "r_hdrAdaptDesat: wash colours toward gray as the dark-scene brightening ramps up\n"
-			"(scotopic vision — rods take over in the dark). 0.25 = colours drop to ~75% at full\n"
-			"brightening; 0 = off." );
-		ImGui::EndDisabled();
+			"time (dark rooms brighten, bright scenes dim). Needs a tonemap curve; opengl3 / Vulkan.\n"
+			"Fine-tuning knobs are in the Debug tab -> Eye Adaptation. Off = the static Exposure." );
 		ImGui::EndDisabled();
 
 		ImGui::EndDisabled();
@@ -3583,6 +3537,93 @@ static void DrawDbgGroup_DepthOfField()
 	}
 }
 
+static void DrawDbgGroup_EyeAdaptation()
+{
+	// HDR eye adaptation (Phase B1) fine-tuning. The on/off toggle lives in
+	// Graphics -> Post-Processing (needs r_hdr + a tonemap curve); these are the knobs.
+	if ( BeginSettingsGroup( "Eye Adaptation (auto-exposure)" ) ) {
+
+		const bool backendOk = R_BackendSupportsEnhancements();
+		if ( !backendOk ) {
+			ImGui::TextDisabled( "Needs the opengl3 or Vulkan backend." );
+		}
+		const bool eye = cvarSystem->GetCVarBool( "r_hdrEyeAdaptation" );
+		if ( !eye ) {
+			ImGui::TextDisabled( "Enable Eye Adaptation in Graphics -> Post-Processing." );
+		}
+		ImGui::BeginDisabled( !backendOk || !eye );
+
+		float aspeed = cvarSystem->GetCVarFloat( "r_hdrAdaptSpeed" );
+		if ( ImGui::SliderFloat( "Adapt Speed", &aspeed, 0.1f, 10.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptSpeed", aspeed );
+		}
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaSpeed" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptSpeed", 2.5f ); }
+		AddTooltip( "r_hdrAdaptSpeed: adaptation rate; higher = faster (time constant ~1/speed seconds)." );
+
+		float ebri = cvarSystem->GetCVarFloat( "r_hdrAdaptBrighten" );
+		if ( ImGui::SliderFloat( "Brighten in Dark", &ebri, 0.0f, 4.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptBrighten", ebri );
+		}
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaBri" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptBrighten", 1.22f ); }
+		AddTooltip( "r_hdrAdaptBrighten: exposure ADDED to the base Exposure as the scene darkens (dark\n"
+			"areas open up). Eases smoothly to this cap, never pins." );
+
+		float edar = cvarSystem->GetCVarFloat( "r_hdrAdaptDarken" );
+		if ( ImGui::SliderFloat( "Darken in Light", &edar, 0.0f, 4.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptDarken", edar );
+		}
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaDar" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptDarken", 0.80f ); }
+		AddTooltip( "r_hdrAdaptDarken: exposure REMOVED from the base Exposure as the scene brightens\n"
+			"(bright scenes dim). Keep small for a mild pull-down." );
+
+		float ekey = cvarSystem->GetCVarFloat( "r_hdrAdaptKey" );
+		if ( ImGui::SliderFloat( "Reference Luminance", &ekey, 0.005f, 0.08f, "%.3f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptKey", ekey );
+		}
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaKey" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptKey", 0.024f ); }
+		AddTooltip( "r_hdrAdaptKey: the scene luminance treated as neutral (mapped to the base Exposure).\n"
+			"Sit it in the middle of the scene's range so both directions engage; too high and every\n"
+			"scene reads as 'dark' so it only ever brightens." );
+
+		float ecen = cvarSystem->GetCVarFloat( "r_hdrAdaptCenter" );
+		if ( ImGui::SliderFloat( "Metering Region", &ecen, 0.15f, 1.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptCenter", ecen );
+		}
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaCen" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptCenter", 0.5f ); }
+		AddTooltip( "r_hdrAdaptCenter: central fraction of the view measured. 1 = whole screen (the dark\n"
+			"periphery washes out what you look at); lower = center-weighted, so aiming at a light or a\n"
+			"dark corner actually moves the exposure." );
+
+		float egrain = cvarSystem->GetCVarFloat( "r_hdrAdaptGrain" );
+		if ( ImGui::SliderFloat( "Low-light Grain Boost", &egrain, 0.0f, 5.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptGrain", egrain );
+		}
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaGrain" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptGrain", 3.0f ); }
+		AddTooltip( "r_hdrAdaptGrain: raise film grain as the dark-scene brightening ramps up (high-gain\n"
+			"sensor/eye noise). 1 = grain ~doubles at full brightening; 0 = off. Needs Film Grain > 0." );
+
+		float edesat = cvarSystem->GetCVarFloat( "r_hdrAdaptDesat" );
+		if ( ImGui::SliderFloat( "Low-light Desaturation", &edesat, 0.0f, 1.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptDesat", edesat );
+		}
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaDesat" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptDesat", 0.33f ); }
+		AddTooltip( "r_hdrAdaptDesat: wash colours toward gray as the dark-scene brightening ramps up\n"
+			"(scotopic vision — rods take over in the dark). 0.33 = colours drop to ~67% at full\n"
+			"brightening; 0 = off." );
+
+		ImGui::Spacing();
+		bool dbg = cvarSystem->GetCVarBool( "r_hdrEyeAdaptDebug" );
+		if ( ImGui::Checkbox( "Debug boxes (exposure / luminance)", &dbg ) ) {
+			cvarSystem->SetCVarBool( "r_hdrEyeAdaptDebug", dbg );
+		}
+		AddTooltip( "r_hdrEyeAdaptDebug: overlay two boxes low on screen — left = adapted exposure,\n"
+			"right = measured scene luminance — to see the metering while you tune." );
+
+		ImGui::EndDisabled();
+		EndSettingsGroup();
+	}
+}
+
 static void DrawDbgGroup_GpuOffload()
 {
 	// Vulkan GPU-offload experiments. All opt-in, off by default: they free CPU front-end
@@ -4218,6 +4259,7 @@ static void DrawShadowDebugMenu()
 	DrawDbgGroup_Emissive();
 	DrawDbgGroup_SSR();
 	DrawDbgGroup_DepthOfField();
+	DrawDbgGroup_EyeAdaptation();
 	DrawDbgGroup_Glass();
 	DrawDbgGroup_GpuOffload();
 }
