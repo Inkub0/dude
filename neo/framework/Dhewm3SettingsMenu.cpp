@@ -1903,6 +1903,33 @@ static CVarOption postProcessOptions[] = {
 	// HDR rendering: accumulate the scene into a float (RGBA16F) buffer instead of the
 	// 8-bit backbuffer, then resolve back. Removes fog/gradient banding.
 	CVarOption( "r_hdr", "HDR Rendering", OT_BOOL ),
+	// Tonemap curve: needs the float scene buffer, so it greys out while HDR is off.
+	// 0 = faithful (straight resolve, the default); the curves are opt-in cinematic looks.
+	CVarOption( "r_hdrTonemap", []( idCVar& cvar ) {
+		ImGui::BeginDisabled( !r_hdr.GetBool() );
+		int sel = idMath::ClampInt( 0, 4, cvar.GetInteger() );
+		if ( ImGui::Combo( "Tonemap", &sel, "Off (faithful)\0Reinhard\0ACES\0AgX\0Khronos PBR Neutral\0" ) ) {
+			cvar.SetInteger( sel );
+		}
+		const char* descr = "Compress the HDR scene's bright highlights into the display range with a filmic\n"
+			"curve, instead of hard-clipping them to white. Off reproduces the vanilla resolve\n"
+			"exactly; ACES is the game-standard look, AgX and PBR Neutral shift colour the least.\n"
+			"Exposure below feeds the curve (it does nothing while Tonemap is Off).";
+		AddCVarOptionTooltips( cvar, descr );
+
+		// Exposure knob, right under the curve dropdown. Exposure only shapes the tonemap
+		// curves (mode 0 stays a pure passthrough), so it greys out when Tonemap is Off.
+		ImGui::BeginDisabled( sel == 0 );
+		float exposure = cvarSystem->GetCVarFloat( "r_hdrExposure" );
+		if ( ImGui::SliderFloat( "Exposure", &exposure, 0.1f, 8.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrExposure", exposure );
+		}
+		AddTooltip( "r_hdrExposure: linear exposure multiplier applied before the tonemap curve.\n"
+			"Raises or lowers the scene brightness feeding the curve; default 1.25. No effect while Tonemap is Off." );
+		ImGui::EndDisabled();
+
+		ImGui::EndDisabled();
+	} ),
 	CVarOption( "r_postFilmGrain", "Film Grain", OT_FLOAT, 0.0f, 0.25f ),
 	CVarOption( "r_postFilmGrainSize", "Film Grain Size", OT_FLOAT, 1.0f, 4.0f ),
 	CVarOption( "r_postChromaticAberration", "Chromatic Aberration", OT_FLOAT, 0.0f, 0.5f ),

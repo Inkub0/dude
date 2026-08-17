@@ -80,6 +80,8 @@ extern idCVar r_postFilmGrainSize;
 extern idCVar r_postChromaticAberration;
 extern idCVar r_rhiAA;
 extern idCVar r_fxaaStrength;
+extern idCVar r_hdrTonemap;
+extern idCVar r_hdrExposure;
 
 // DUDE gamma/brightness in shader (RenderSystem_init.cpp). On the core context
 // there is no fixed-function/ARB gamma and SDL3 has no hardware gamma ramp, so
@@ -1044,9 +1046,11 @@ static bool RB_RHI_HdrResolveSmaaFused( rhi::RHI *r, int w, int h ) {
 	// grain size + gamma/brightness mirror RB_RHI_HdrResolve exactly (identity on GL, real on VK)
 	parms.windowCoord[0] = r_postFilmGrain.GetFloat();
 	parms.windowCoord[1] = (float)( Sys_Milliseconds() & 0xffff ) * 0.001f;
+	parms.windowCoord[2] = r_hdrExposure.GetFloat();		// exposure (localParam0 is RT_METRICS)
 	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
 	parms.localParam1[1] = 1.0f;	// brightness (identity)
 	parms.localParam1[2] = 1.0f;	// 1/gamma (identity)
+	parms.localParam1[3] = (float)r_hdrTonemap.GetInteger();	// tonemap curve select
 	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN && r_gammaInShader.GetBool() ) {
 		parms.localParam1[1] = r_brightness.GetFloat();
 		parms.localParam1[2] = ( r_gamma.GetFloat() > 0.0f ) ? 1.0f / r_gamma.GetFloat() : 1.0f;
@@ -1145,10 +1149,12 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	// film grain + chromatic aberration are folded into the resolve here (RB_RHI_PostProcess
 	// is skipped in HDR mode) so they sample the smooth float buffer instead of the 8-bit
 	// _currentRender round-trip that was re-banding the image
+	parms.localParam0[0] = r_hdrExposure.GetFloat();		// exposure, applied before the tonemap curve
 	parms.localParam0[1] = r_postFilmGrain.GetFloat();
 	parms.localParam0[2] = (float)( Sys_Milliseconds() & 0xffff ) * 0.001f;	// animated grain seed
 	parms.localParam0[3] = r_postChromaticAberration.GetFloat();
 	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
+	parms.localParam1[3] = (float)r_hdrTonemap.GetInteger();	// tonemap curve select
 	parms.windowCoord[2] = 0.5f;	// aberration center in uv
 	parms.windowCoord[3] = 0.5f;
 	// gamma / brightness: folded into the resolve on Vulkan (the backend has no separate

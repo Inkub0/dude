@@ -298,6 +298,10 @@ idCVar r_fxaaStrength( "r_fxaaStrength", "0.75", CVAR_RENDERER | CVAR_ARCHIVE | 
 // buffer instead of the 8-bit backbuffer, then resolve back. Phase A is look-neutral —
 // it removes fog/gradient banding without changing the image. GL3/Vulkan backends only.
 idCVar r_hdr( "r_hdr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "render the scene into a float (RGBA16F) buffer to remove banding (non-vanilla; opengl3/Vulkan only)" );
+// HDR tonemap (needs r_hdr): static-exposure curve folded into the resolve. 0 = off/faithful
+// (bit-identical to the straight resolve), 1 = Reinhard, 2 = ACES, 3 = AgX, 4 = Khronos PBR Neutral.
+idCVar r_hdrTonemap( "r_hdrTonemap", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "HDR tonemap curve (needs r_hdr): 0=off/faithful, 1=Reinhard, 2=ACES, 3=AgX, 4=Khronos PBR Neutral", 0, 4 );
+idCVar r_hdrExposure( "r_hdrExposure", "1.25", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR static exposure multiplier applied before the tonemap curve (needs r_hdr + r_hdrTonemap>=1)", 0.1f, 8.0f );
 
 // DUDE Phase 3.5 "specular tuning" enhancement (GL3/Vulkan interaction shader
 // only; inert on the legacy ARB2 path). Defaults reproduce vanilla exactly:

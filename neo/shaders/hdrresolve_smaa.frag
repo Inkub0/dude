@@ -16,8 +16,11 @@
 // u_localParam1.x  = grain cell size in pixels (1 = per-pixel)
 // u_localParam1.y  = r_brightness (1 = identity)
 // u_localParam1.z  = 1.0 / r_gamma (1 = identity)
+// u_localParam1.w  = tonemap curve (r_hdrTonemap): 0 off, 1 Reinhard, 2 ACES, 3 AgX, 4 PBR Neutral
+// u_windowCoord.z  = HDR exposure multiplier (r_hdrExposure); windowCoord.x/y hold the grain parms
 
 #include "renderparms.glsl"
+#include "tonemap.glsl"
 
 #define SMAA_GLSL_3 1
 #define SMAA_RT_METRICS u_localParam0
@@ -44,6 +47,10 @@ void main() {
 	// SMAA 1x neighborhood blend: the anti-aliased scene colour. Pixels with zero weights pass
 	// through untouched, exactly as the standalone smaa_blend pass.
 	vec3 color = SMAANeighborhoodBlendingPS( var_TexCoord, var_SmaaOffset, u_sceneTex, u_blendTex ).rgb;
+
+	// exposure + tonemap (identical to hdrresolve.frag; exposure lives in windowCoord.z here
+	// because localParam0 carries SMAA_RT_METRICS). Mode 0 + exposure 1.0 = passthrough.
+	color = DudeTonemap( color, u_windowCoord.z, int( u_localParam1.w + 0.5 ) );
 
 	// film grain: identical curve/seed to hdrresolve.frag, only the parm slots differ (intensity +
 	// seed live in windowCoord.xy here because localParam0 carries SMAA_RT_METRICS)
