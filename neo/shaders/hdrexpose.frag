@@ -15,6 +15,7 @@
 //   u_localParam1.x = previous exposure usable (1) or snap to target (0, first frame / reset)
 //   u_localParam1.y = luma source mip level (Vulkan single-level view -> 0; GL3 -> coarsest)
 //   u_localParam1.z = reference luminance (r_hdrAdaptKey): the scene luminance mapping to mid
+//   u_localParam1.w = low-light grain boost (r_hdrAdaptGrain): extra grain factor at full brighten
 
 #include "renderparms.glsl"
 
@@ -46,6 +47,9 @@ void main() {
 
 	float prev = texelFetch( u_prevExposure, ivec2( 0 ), 0 ).r;
 	float adapted = ( u_localParam1.x > 0.5 ) ? mix( prev, target, u_localParam0.w ) : target;
-	// .r = adapted exposure (what the resolve uses); .g = log-luma for the debug view.
-	fragColor = vec4( adapted, logL, 0.0, 1.0 );
+	// how far into the low-light brightening we are (0 at neutral, ~1 at the Brighten cap), scaled by
+	// the grain-boost knob — the resolve adds this to its grain multiplier.
+	float brightenFrac = clamp( ( adapted - mid ) / max( brighten, 1e-3 ), 0.0, 1.0 ) * u_localParam1.w;
+	// .r = adapted exposure (what the resolve uses); .g = log-luma (debug); .b = grain boost.
+	fragColor = vec4( adapted, logL, brightenFrac, 1.0 );
 }

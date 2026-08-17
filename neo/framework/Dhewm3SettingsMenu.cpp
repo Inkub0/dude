@@ -1981,6 +1981,12 @@ static CVarOption postProcessOptions[] = {
 		AddTooltip( "r_hdrAdaptCenter: central fraction of the view measured. 1 = whole screen (the dark\n"
 			"periphery washes out what you look at); lower = center-weighted, so aiming at a light or a\n"
 			"dark corner actually moves the exposure." );
+		float egrain = cvarSystem->GetCVarFloat( "r_hdrAdaptGrain" );
+		if ( ImGui::SliderFloat( "Low-light Grain Boost", &egrain, 0.0f, 3.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptGrain", egrain );
+		}
+		AddTooltip( "r_hdrAdaptGrain: raise film grain as the dark-scene brightening ramps up (high-gain\n"
+			"sensor/eye noise). 1 = grain ~doubles at full brightening; 0 = off. Needs Film Grain > 0." );
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 

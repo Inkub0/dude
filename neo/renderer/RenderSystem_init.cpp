@@ -312,20 +312,23 @@ idCVar r_hdrOverbright( "r_hdrOverbright", "3.0", CVAR_RENDERER | CVAR_ARCHIVE |
 // exposure at a mid-gray (~0.18) scene; brighter scenes expose down, darker expose up, clamped
 // to [min,max] and eased with a time constant ~1/speed seconds. Off = the static r_hdrExposure.
 idCVar r_hdrEyeAdaptation( "r_hdrEyeAdaptation", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "HDR auto-exposure / eye adaptation (needs r_hdr + r_hdrTonemap>=1): average scene luminance drives the tonemap exposure over time; off = static r_hdrExposure" );
-idCVar r_hdrAdaptSpeed( "r_hdrAdaptSpeed", "1.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation speed (higher = faster); the exposure lags with a time constant ~1/speed seconds", 0.1f, 10.0f );
+idCVar r_hdrAdaptSpeed( "r_hdrAdaptSpeed", "2.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation speed (higher = faster); the exposure lags with a time constant ~1/speed seconds", 0.1f, 10.0f );
 // Relative adaptation (no hard clamp): r_hdrExposure is the neutral "mid" exposure at a reference
 // scene luminance (r_hdrAdaptKey). As the scene darkens the exposure rises by up to +Brighten; as
 // it brightens it falls by up to -Darken. A smooth tanh rolloff self-limits both, so it eases to
 // the bounds instead of pinning. Darken is kept small for the "mildly less bright" look.
-idCVar r_hdrAdaptBrighten( "r_hdrAdaptBrighten", "1.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: max exposure ADDED to r_hdrExposure as the scene darkens (dark areas brighten)", 0.0f, 8.0f );
+idCVar r_hdrAdaptBrighten( "r_hdrAdaptBrighten", "1.22", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: max exposure ADDED to r_hdrExposure as the scene darkens (dark areas brighten)", 0.0f, 8.0f );
 idCVar r_hdrAdaptDarken( "r_hdrAdaptDarken", "0.8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: max exposure REMOVED from r_hdrExposure as the scene brightens (bright scenes dim, keep mild)", 0.0f, 8.0f );
 // Reference luminance: the geometric-mean scene luminance mapped to r_hdrExposure (neutral). Doom 3
 // scenes are dark, so this is low. Raise it to treat brighter scenes as neutral, lower for darker.
-idCVar r_hdrAdaptKey( "r_hdrAdaptKey", "0.03", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation reference luminance mapped to r_hdrExposure (the neutral scene brightness)", 0.005f, 1.0f );
+idCVar r_hdrAdaptKey( "r_hdrAdaptKey", "0.024", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation reference luminance mapped to r_hdrExposure (the neutral scene brightness)", 0.005f, 1.0f );
 // Metering region: fraction of the view width/height averaged for luminance, centred on the screen.
 // 1 = whole screen (dark periphery washes out what you look at); lower = center-weighted, so aiming
 // at a light or a dark corner actually moves the exposure — the "look at" behaviour.
-idCVar r_hdrAdaptCenter( "r_hdrAdaptCenter", "0.6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation metering: central fraction of the view measured (1 = whole screen, lower = center-weighted)", 0.15f, 1.0f );
+idCVar r_hdrAdaptCenter( "r_hdrAdaptCenter", "0.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation metering: central fraction of the view measured (1 = whole screen, lower = center-weighted)", 0.15f, 1.0f );
+// Low-light grain boost: as the dark-scene brightening ramps up, scale film grain (r_postFilmGrain)
+// with it — high-gain sensor/eye noise. 1 = grain (almost) doubles at full brightening; 0 = off.
+idCVar r_hdrAdaptGrain( "r_hdrAdaptGrain", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: extra film grain at full low-light brightening (1 = ~double the grain, 0 = off; needs r_postFilmGrain)", 0.0f, 3.0f );
 // Debug: draw the adapted exposure as a flat grayscale (exposure * 0.2, so mid-gray ~= 2.5) so you
 // can see whether it is pinned or actually tracking the scene. Needs r_hdrEyeAdaptation.
 idCVar r_hdrEyeAdaptDebug( "r_hdrEyeAdaptDebug", "0", CVAR_RENDERER | CVAR_BOOL, "debug: show the adapted exposure as a flat grayscale (needs r_hdrEyeAdaptation)" );

@@ -72,7 +72,13 @@ void main() {
 		float noise = 0.5 * ( hash12( cell + seed ) + hash12( cell + seed + vec2( 42.13, 59.71 ) ) ) - 0.5;
 		float l = clamp( dot( color, vec3( 0.299, 0.587, 0.114 ) ), 0.0, 1.0 );
 		float response = 2.18 * sqrt( l ) * pow( 1.0 - l, 1.5 );
-		color += noise * u_localParam0.y * response;
+		// eye-adapt low-light grain: as the dark-scene brightening ramps up, boost grain (high-gain
+		// noise). The 1x1 exposure's .b carries clamp((exposure-mid)/brighten) * r_hdrAdaptGrain.
+		float grainAmt = u_localParam0.y;
+		if ( u_windowCoord.x > 0.5 ) {
+			grainAmt *= 1.0 + texelFetch( u_adaptedExposure, ivec2( 0 ), 0 ).b;
+		}
+		color += noise * grainAmt * response;
 	}
 
 	// gamma / brightness. On Vulkan the r_gammaInShader correction is folded in here
