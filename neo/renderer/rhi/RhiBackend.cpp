@@ -837,6 +837,17 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	rbHdrActiveThisFrame = false;
 	rbHdrFrameActive = false;
 
+	// Turning HDR off clears the tonemap curve (and with it exposure / overbright / eye-adaptation,
+	// which all ride it): a curve with r_hdr off both looks wrong and can't be changed in the menu
+	// (its combo greys out). Reset on the on->off edge, whatever toggled r_hdr (menu, console,
+	// preset). Init prev=true so a config loaded with r_hdr 0 but a stale curve also self-corrects.
+	static bool rbPrevHdr = true;
+	const bool rbHdrNow = r_hdr.GetBool();
+	if ( rbPrevHdr && !rbHdrNow && r_hdrTonemap.GetInteger() != 0 ) {
+		r_hdrTonemap.SetInteger( 0 );
+	}
+	rbPrevHdr = rbHdrNow;
+
 	// Baking a glass reflection probe (bakeGlassProbe, tr.takingEnvProbe): the six
 	// 90-degree faces must be the clean scene, so they stay on the straight-to-
 	// sceneColor path with no offscreen post target. Two reasons this matters:
