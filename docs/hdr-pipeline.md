@@ -276,12 +276,17 @@ split in mind (exposure/curve separated from the final encode) keeps this path c
   AgX/Khronos-PBR-Neutral + `r_hdrExposure`, default 1.25, folded into both resolve paths;
   `neo/shaders/tonemap.glsl`; ImGui combo + exposure slider). Mode 0 stays bit-identical.
   GL3 + Vulkan. Pending only the user's final look-calibration of the curves.
-- **Phase B1** (eye adaptation) — planned, **not started**. The consumer half is already in
-  place (the resolve applies an exposure scalar to the curves); B1 just has to *produce* it:
-  luminance reduce (reuse the SSAO `IF_R16F` mip infra) → temporal adapt into a ping-pong 1×1
-  target (NOT `_scratch` capture feedback — unreliable on the RHI) → clamp → feed the resolve.
-  New cvars `r_hdrEyeAdaptation` / `r_hdrAdaptSpeed` / `r_hdrExposureMin/Max`. Gated on Phase C
-  for a meaningful effect (see the range caveat).
+- **Phase B1** (eye adaptation) — ✅ **BUILT** (`r_hdrEyeAdaptation`, default off; needs r_hdr +
+  a tonemap curve). Pipeline: reduce the HDR scene to a 1×1 geometric-mean luminance via an
+  `IF_R16F` log-luma mip chain (`hdrluma`/`hdrlumadown`, reusing the SSAO `CreateRenderTargetMipped`
+  + `BeginTargetMipPass` infra) → ease an adapted exposure toward `r_hdrExposure * 0.18 / L`,
+  clamped to `[r_hdrExposureMin, r_hdrExposureMax]`, into a **1×1 RGBA16F ping-pong** with an
+  `exp(-dt/τ)` lag (`hdrexpose`, τ = 1/`r_hdrAdaptSpeed`; ping-pong cleared on creation for VK) →
+  the resolve samples that 1×1 (`hdrresolve.frag` binding 1) instead of the static exposure. Runs
+  at the top of `RB_RHI_HdrResolve` (SMAA fusion disabled when adaptation is on so only the plain
+  path needs the sampler). ImGui: toggle + Adapt Speed / Exposure Min / Max under the Tonemap combo.
+  GL3 + Vulkan, opt-in. Now that C-lite overbright pushes lights past 1.0, adaptation has real
+  range to measure. **Pending user in-engine verify** (esp. VK, the swap-time offscreen passes).
 - **Phase C** — ✅ **C-lite BUILT** (`r_hdrOverbright`, additive self-illum overbright, default
   off; see the "C-lite" section above). Full Phase C (light injection + bloom) still planned.
 - **HDR display output** (HDR10/scRGB) — separate future feature, **not started**; the only

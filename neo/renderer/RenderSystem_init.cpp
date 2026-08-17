@@ -307,6 +307,14 @@ idCVar r_hdrExposure( "r_hdrExposure", "2.33", CVAR_RENDERER | CVAR_ARCHIVE | CV
 // giving the tonemap curve real highlight range and eye-adaptation bright anchors. Only active
 // with r_hdrTonemap>=1 (like r_hdrExposure), so it never touches the faithful mode-0 look. 1=off.
 idCVar r_hdrOverbright( "r_hdrOverbright", "3.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright multiplier for additive self-illum stages (needs r_hdr + r_hdrTonemap>=1): pushes lamps/screens/fire above 1.0 for tonemap+adaptation range; 1=off. When active it auto-disables the legacy r_flareSize light haze", 1.0f, 8.0f );
+// HDR eye adaptation / auto-exposure (Phase B1, needs r_hdr + r_hdrTonemap>=1): the scene's
+// average (log) luminance drives the tonemap exposure over time. r_hdrExposure becomes the
+// exposure at a mid-gray (~0.18) scene; brighter scenes expose down, darker expose up, clamped
+// to [min,max] and eased with a time constant ~1/speed seconds. Off = the static r_hdrExposure.
+idCVar r_hdrEyeAdaptation( "r_hdrEyeAdaptation", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "HDR auto-exposure / eye adaptation (needs r_hdr + r_hdrTonemap>=1): average scene luminance drives the tonemap exposure over time; off = static r_hdrExposure" );
+idCVar r_hdrAdaptSpeed( "r_hdrAdaptSpeed", "1.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation speed (higher = faster); the exposure lags with a time constant ~1/speed seconds", 0.1f, 10.0f );
+idCVar r_hdrExposureMin( "r_hdrExposureMin", "0.6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation minimum exposure clamp (needs r_hdrEyeAdaptation)", 0.05f, 8.0f );
+idCVar r_hdrExposureMax( "r_hdrExposureMax", "4.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation maximum exposure clamp (needs r_hdrEyeAdaptation)", 0.05f, 16.0f );
 
 // DUDE Phase 3.5 "specular tuning" enhancement (GL3/Vulkan interaction shader
 // only; inert on the legacy ARB2 path). Defaults reproduce vanilla exactly:

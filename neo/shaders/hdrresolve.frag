@@ -14,12 +14,14 @@
 // u_localParam1.y = r_brightness (1 = identity)
 // u_localParam1.z = 1.0 / r_gamma (1 = identity)
 // u_localParam1.w = tonemap curve (r_hdrTonemap): 0 off, 1 Reinhard, 2 ACES, 3 AgX, 4 PBR Neutral
+// u_windowCoord.x  = eye-adaptation flag: >0.5 = use the 1x1 adapted exposure below instead of localParam0.x
 // u_windowCoord.zw = aberration center in uv (0.5, 0.5)
 
 #include "renderparms.glsl"
 #include "tonemap.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_hdrScene;
+SAMPLER_BINDING(1) uniform sampler2D u_adaptedExposure;   // 1x1 eye-adaptation exposure (Phase B1)
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -54,7 +56,11 @@ void main() {
 	// exposure + tonemap: map the linear HDR scene into display [0,1] before grain/gamma.
 	// Mode 0 with exposure 1.0 is a passthrough, so the default (r_hdrTonemap 0) is
 	// bit-identical to the pre-tonemap resolve. Grain then runs on the display-range image.
-	color = DudeTonemap( color, u_localParam0.x, int( u_localParam1.w + 0.5 ) );
+	// Eye adaptation (Phase B1): when its flag is set, the exposure comes from the 1x1
+	// adapted-exposure texture instead of the static r_hdrExposure.
+	float exposure = ( u_windowCoord.x > 0.5 ) ? texelFetch( u_adaptedExposure, ivec2( 0 ), 0 ).r
+	                                            : u_localParam0.x;
+	color = DudeTonemap( color, exposure, int( u_localParam1.w + 0.5 ) );
 
 	// film grain: triangular monochrome noise through a filmic beta-curve response —
 	// zero at pure black (no clip-lift greying of the void), peaking around 25%

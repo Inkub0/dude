@@ -1938,6 +1938,34 @@ static CVarOption postProcessOptions[] = {
 			"so they exceed 1.0 and the tonemap curve treats them as real highlights (and eye-adaptation\n"
 			"has bright anchors). 1 = off; ~3 is a good look. When active it auto-disables the legacy\n"
 			"light-flare/glare haze (r_flareSize). No effect while Tonemap is Off." );
+
+		// Eye adaptation (Phase B1): auto-exposure driven by the scene's average luminance. The
+		// Exposure slider above becomes the mid-gray target; brighter scenes expose down over time.
+		ImGui::Spacing();
+		bool eye = cvarSystem->GetCVarBool( "r_hdrEyeAdaptation" );
+		if ( ImGui::Checkbox( "Eye Adaptation (auto-exposure)", &eye ) ) {
+			cvarSystem->SetCVarBool( "r_hdrEyeAdaptation", eye );
+		}
+		AddTooltip( "r_hdrEyeAdaptation: the scene's average luminance drives the tonemap exposure over\n"
+			"time (bright rooms expose down, dark rooms up). Exposure above becomes the mid-gray target.\n"
+			"opengl3 / Vulkan; needs a tonemap curve. Off = the static Exposure." );
+		ImGui::BeginDisabled( !eye );
+		float aspeed = cvarSystem->GetCVarFloat( "r_hdrAdaptSpeed" );
+		if ( ImGui::SliderFloat( "Adapt Speed", &aspeed, 0.1f, 10.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptSpeed", aspeed );
+		}
+		AddTooltip( "r_hdrAdaptSpeed: adaptation rate; higher = faster (time constant ~1/speed seconds)." );
+		float emin = cvarSystem->GetCVarFloat( "r_hdrExposureMin" );
+		if ( ImGui::SliderFloat( "Exposure Min", &emin, 0.05f, 8.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrExposureMin", emin );
+		}
+		float emax = cvarSystem->GetCVarFloat( "r_hdrExposureMax" );
+		if ( ImGui::SliderFloat( "Exposure Max", &emax, 0.05f, 16.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrExposureMax", emax );
+		}
+		AddTooltip( "r_hdrExposureMin / Max: clamp the adapted exposure so dark rooms don't over-brighten\n"
+			"and bright scenes keep detail." );
+		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 
 		ImGui::EndDisabled();

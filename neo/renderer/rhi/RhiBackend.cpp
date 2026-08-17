@@ -83,6 +83,7 @@ extern idCVar r_fxaaStrength;
 extern idCVar r_hdrTonemap;
 extern idCVar r_hdrExposure;
 extern idCVar r_hdrOverbright;
+extern idCVar r_hdrEyeAdaptation;
 
 // DUDE gamma/brightness in shader (RenderSystem_init.cpp). On the core context
 // there is no fixed-function/ARB gamma and SDL3 has no hardware gamma ramp, so
@@ -1022,6 +1023,11 @@ static bool RB_RHI_HdrResolveSmaaFused( rhi::RHI *r, int w, int h ) {
 	if ( r_rhiAA.GetInteger() != 2 || r_postChromaticAberration.GetFloat() > 0.0f || !rhiHdrRT ) {
 		return false;
 	}
+	// Eye adaptation (Phase B1) is wired into the plain resolve only; fall through to it so the
+	// adapted exposure sampler is bound. SMAA still applies there (unfused, via RB_RHI_HdrSmaa).
+	if ( r_hdrEyeAdaptation.GetBool() ) {
+		return false;
+	}
 	rhi::ShaderHandle prog = r->LoadShader( "hdrresolve_smaa" );
 	if ( !prog ) {
 		return false;
@@ -1122,6 +1128,11 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	int w = glConfig.vidWidth;
 	int h = glConfig.vidHeight;
 
+	// Eye adaptation (Phase B1): measure the finished HDR scene and update the adapted exposure
+	// (its own offscreen target passes, like the FXAA pass below — before SetFrameTarget(0)).
+	// Returns the 1x1 exposure image for the resolve to sample, or 0 when adaptation is off.
+	rhi::ImageHandle eyeExposureImg = RB_RHI_EyeAdaptExposure( r, r->GetRenderTargetImage( rhiHdrRT ) );
+
 	// Fused SMAA resolve (chroma off): the neighborhood blend + grain/gamma tail in one pass,
 	// dropping the rhiHdrAaRT round-trip. Falls through to the classic path when ineligible.
 	if ( RB_RHI_HdrResolveSmaaFused( r, w, h ) ) {
@@ -1168,6 +1179,7 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	parms.localParam0[3] = r_postChromaticAberration.GetFloat();
 	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
 	parms.localParam1[3] = (float)r_hdrTonemap.GetInteger();	// tonemap curve select
+	parms.windowCoord[0] = ( eyeExposureImg != 0 ) ? 1.0f : 0.0f;	// eye-adapt flag: sample the 1x1 adapted exposure
 	parms.windowCoord[2] = 0.5f;	// aberration center in uv
 	parms.windowCoord[3] = 0.5f;
 	// gamma / brightness: folded into the resolve on Vulkan (the backend has no separate
@@ -1217,6 +1229,9 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
 	da.textures[0] = r->GetRenderTargetImage( sourceRT );
+	// unit 1 = the 1x1 adapted exposure (Phase B1); a valid dummy (the scene) when adaptation is
+	// off, since the shader only samples it when the eye-adapt flag is set (windowCoord.x).
+	da.textures[1] = ( eyeExposureImg != 0 ) ? eyeExposureImg : da.textures[0];
 	r->Draw( da );
 
 	backEnd.pc.c_drawElements++;
