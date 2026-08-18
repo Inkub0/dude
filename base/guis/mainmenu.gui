@@ -4843,9 +4843,14 @@ windowDef OptionsMenuParent {
 			}
 		}
 
-	//ANTIALIASING (DUDE: moved here from the Advanced popup; MSAA needs a vid_restart)
+	//ANTIALIASING (DUDE: moved here from the Advanced popup; MSAA needs a vid_restart).
+	// Three backend variants visibility-switched on gui::dudeBackend (Session_menu.cpp):
+	// 0 = legacy ARB keeps the MSAA row below; 1 = opengl3 gets None/FXAA/SMAA; 2 = Vulkan
+	// adds FSR2. The RHI rows bind the dude_aa bridge cvar; "exec dudeAA" applies it to
+	// r_rhiAA / r_fsr live (no restart). MSAA only exists on the legacy backend.
 		windowDef OSAntialias {
 			rect		34, 200, 320, 16
+			visible		("gui::dudeBackend" == 0)
 			windowDef OSAntialiasL {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4889,6 +4894,104 @@ windowDef OptionsMenuParent {
 				onAction {
 					set "ResetSystemBtnText::vidrestrt" "1" ;
 					set "OSWarning::forecolor" "1 1 1 1" ;
+				}
+			}
+		}
+	//ANTIALIASING - opengl3 variant (live post AA, no restart)
+		windowDef OSAntialiasGl3 {
+			rect		34, 200, 320, 16
+			visible		("gui::dudeBackend" == 1)
+			windowDef OSAntialiasGl3L {
+				rect		0, 0, 8, 16
+				background	"gui/mainmenu/select_edge"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OSAntialiasGl3M {
+				rect		8, 0, 304, 16
+				background	"gui/mainmenu/select_border"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OSAntialiasGl3R {
+				rect		312, 0, 8, 16
+				background	"gui/mainmenu/select_angle"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OSAntialiasGl3Title {
+				rect		1, 1, 180, 14
+				text		"#str_04128"
+				font		"fonts/bank"
+				textscale	0.25
+				textalign	2
+				textaligny	-6
+				forecolor	1, 1, 1, 1
+			}
+			choiceDef OSAntialiasGl3Primary {
+				rect		210, 1, 100, 14
+				choices		"None;FXAA;SMAA"
+				values		"0;1;2"
+				cvar		"dude_aa"
+				updateGroup	render
+				choiceType	1
+				font		"fonts/bank"
+				textscale	0.25
+				textalign	1
+				textaligny	-6
+				forecolor	0.6, 0.8, 0.8, 1
+
+				onAction {
+					set	"cmd"	"exec dudeAA" ;
+				}
+			}
+		}
+	//ANTIALIASING - Vulkan variant (adds FSR2 temporal AA)
+		windowDef OSAntialiasVk {
+			rect		34, 200, 320, 16
+			visible		("gui::dudeBackend" == 2)
+			windowDef OSAntialiasVkL {
+				rect		0, 0, 8, 16
+				background	"gui/mainmenu/select_edge"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OSAntialiasVkM {
+				rect		8, 0, 304, 16
+				background	"gui/mainmenu/select_border"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OSAntialiasVkR {
+				rect		312, 0, 8, 16
+				background	"gui/mainmenu/select_angle"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OSAntialiasVkTitle {
+				rect		1, 1, 180, 14
+				text		"#str_04128"
+				font		"fonts/bank"
+				textscale	0.25
+				textalign	2
+				textaligny	-6
+				forecolor	1, 1, 1, 1
+			}
+			choiceDef OSAntialiasVkPrimary {
+				rect		210, 1, 100, 14
+				choices		"None;FXAA;SMAA;FSR2"
+				values		"0;1;2;3"
+				cvar		"dude_aa"
+				updateGroup	render
+				choiceType	1
+				font		"fonts/bank"
+				textscale	0.25
+				textalign	1
+				textaligny	-6
+				forecolor	0.6, 0.8, 0.8, 1
+
+				onAction {
+					set	"cmd"	"exec dudeAA" ;
 				}
 			}
 		}

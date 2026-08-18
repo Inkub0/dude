@@ -76,6 +76,7 @@ extern void Com_EditPbrMaterial_f( const idCmdArgs &args );
 // DUDE: apply an enhancement quality preset by index (drives the classic quality
 // selector); implemented in Dhewm3SettingsMenu.cpp
 extern void Com_DudePreset_f( const idCmdArgs &args );
+extern void Com_DudeAA_f( const idCmdArgs &args );
 
 typedef enum {
 	ERP_NONE,
@@ -102,6 +103,11 @@ idCVar com_machineSpec( "com_machineSpec", "-1", CVAR_INTEGER | CVAR_ARCHIVE | C
 // mainmenu.gui binds to this). -1 = Custom/unset, 0 = Potato .. 5 = Nightmare. The
 // "dudePreset" command applies it; see Dhewm3SettingsMenu.cpp.
 idCVar dude_preset( "dude_preset", "-1", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "DUDE enhancement quality tier: -1 = custom, 0 = Potato, 1 = Low, 2 = Medium, 3 = High, 4 = Ultra, 5 = Nightmare", -1, 5 );
+// DUDE: menu bridge for the RHI antialiasing selector (choiceDef in mainmenu.gui binds to
+// this on the opengl3/Vulkan backends; legacy keeps the MSAA r_multisamples row). NOT
+// archived — the truth lives in r_rhiAA + r_fsr (both archived); this is synced from them
+// when the menu opens and applied to them by the "dudeAA" command (Dhewm3SettingsMenu.cpp).
+idCVar dude_aa( "dude_aa", "0", CVAR_INTEGER | CVAR_SYSTEM, "DUDE menu antialiasing selection: 0 = off, 1 = FXAA, 2 = SMAA, 3 = FSR2 (Vulkan only)", 0, 3 );
 idCVar com_purgeAll( "com_purgeAll", "0", CVAR_BOOL | CVAR_ARCHIVE | CVAR_SYSTEM, "purge everything between level loads" );
 idCVar com_memoryMarker( "com_memoryMarker", "-1", CVAR_INTEGER | CVAR_SYSTEM | CVAR_INIT, "used as a marker for memory stats" );
 idCVar com_preciseTic( "com_preciseTic", "1", CVAR_BOOL|CVAR_SYSTEM, "run one game tick every async thread update" );
@@ -2552,6 +2558,8 @@ void idCommonLocal::InitCommands( void ) {
 	cmdSystem->AddCommand( "editPbrMaterial", Com_EditPbrMaterial_f, CMD_FL_SYSTEM, "opens the in-game PBR material editor for the surface under the crosshair (docs/pbr-materials.md); bind it to a key" );
 
 	cmdSystem->AddCommand( "dudePreset", Com_DudePreset_f, CMD_FL_SYSTEM, "applies a DUDE enhancement quality preset by index (0 = Potato .. 5 = Nightmare); drives the in-game quality selector" );
+
+	cmdSystem->AddCommand( "dudeAA", Com_DudeAA_f, CMD_FL_SYSTEM, "applies the dude_aa menu antialiasing selection to r_rhiAA / r_fsr; drives the in-game AA selector on the opengl3/Vulkan backends" );
 
 #if	!defined( ID_DEDICATED )
 	// compilers

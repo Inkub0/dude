@@ -4816,6 +4816,48 @@ int Com_DetectDudePreset( void )
 	return DetectEnhancementPreset();
 }
 
+// DUDE: the in-game AA selector (mainmenu.gui) on the RHI backends. Three backend
+// variants of the row are visibility-switched on "gui::dudeBackend" (0 = legacy ARB,
+// keeps the MSAA r_multisamples row; 1 = opengl3, None/FXAA/SMAA; 2 = Vulkan, adds
+// FSR2). The choiceDef binds the dude_aa bridge cvar; onAction runs "dudeAA", which
+// applies it to the real archived cvars here.
+int Com_DudeAABackend( void )
+{
+	if ( !glConfig.rhiBackend ) {
+		return 0;						// legacy ARB: hardware MSAA is the only AA
+	}
+	return glConfig.coreProfile ? 1 : 2;	// GL core context = opengl3; RHI without one = Vulkan
+}
+
+// What the AA selector should currently show: FSR2 wins on Vulkan (it bypasses the
+// post AA), otherwise the r_rhiAA mode.
+int Com_DetectDudeAA( void )
+{
+	if ( Com_DudeAABackend() == 2 && r_fsr.GetBool() ) {
+		return 3;
+	}
+	return idMath::ClampInt( 0, 2, r_rhiAA.GetInteger() );
+}
+
+void Com_DudeAA_f( const idCmdArgs &args )
+{
+	int v;
+	if ( args.Argc() >= 2 ) {
+		v = atoi( args.Argv( 1 ) );
+		dude_aa.SetInteger( v );
+	} else {
+		v = dude_aa.GetInteger();		// written live by the menu choiceDef
+	}
+	if ( v >= 3 ) {
+		// FSR2 (Vulkan only): RCAS replaces FXAA/SMAA, r_rhiAA is bypassed while it runs —
+		// leave it untouched so switching back restores the previous post AA.
+		r_fsr.SetBool( true );
+		return;
+	}
+	r_fsr.SetBool( false );
+	r_rhiAA.SetInteger( idMath::ClampInt( 0, 2, v ) );
+}
+
 static bool BeginTabChild( const char* name )
 {
 	bool ret = ImGui::BeginChild( name, ImVec2(0, 0), 0, ImGuiChildFlags_NavFlattened );

@@ -294,6 +294,10 @@ void idSessionLocal::SetPbMenuGuiVars( void ) {
 // DUDE: current enhancement-preset index (-1 = Custom), implemented in
 // Dhewm3SettingsMenu.cpp. Used to keep the quality selector's dude_preset cvar honest.
 extern int Com_DetectDudePreset( void );
+// DUDE AA selector (Dhewm3SettingsMenu.cpp): which backend variant of the AA row to show
+// (0 = legacy MSAA, 1 = opengl3, 2 = Vulkan) and what the selector should currently read.
+extern int Com_DudeAABackend( void );
+extern int Com_DetectDudeAA( void );
 
 /*
 ===============
@@ -315,6 +319,11 @@ void idSessionLocal::SetMainMenuGuiVars( void ) {
 			dude_preset.SetInteger( det );
 		}
 	}
+	// DUDE: backend-aware AA row. The GUI shows one of three AA selectors by this state
+	// (legacy = MSAA / opengl3 = FXAA+SMAA / Vulkan = +FSR2); sync the bridge cvar so the
+	// visible selector reads the live r_rhiAA / r_fsr reality.
+	guiMainMenu->SetStateInt( "dudeBackend", Com_DudeAABackend() );
+	dude_aa.SetInteger( Com_DetectDudeAA() );
 
 	// "inetGame" will hold a hand-typed inet address, which is not archived to a cvar
 	guiMainMenu->SetStateString( "inetGame", "" );
