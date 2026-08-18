@@ -1982,6 +1982,8 @@ static CVarOption postProcessOptions[] = {
 	CVarOption( "r_postFilmGrain", "Film Grain", OT_FLOAT, 0.0f, 0.25f ),
 	CVarOption( "r_postFilmGrainSize", "Film Grain Size", OT_FLOAT, 1.0f, 4.0f ),
 	CVarOption( "r_postChromaticAberration", "Chromatic Aberration", OT_FLOAT, 0.0f, 0.5f ),
+	// Weapon-reload depth of field: the on/off toggle (tuning sliders are in Debug -> Depth of Field).
+	CVarOption( "r_dof", "Weapon-Reload Depth of Field", OT_BOOL ),
 };
 
 // Particles: a plain collapsible category (soft particles + depth capture + smoke blend
@@ -3514,17 +3516,18 @@ static void DrawDbgGroup_DepthOfField()
 {
 	// Weapon-reload depth-of-field (r_dof): as a weapon reloads, the world beyond it
 	// blurs so the view pulls focus onto the gun. Eases in on reload start, holds across
-	// multi-shell reloads, eases out at the end. RHI backends only. The on/off switch
-	// rides the group header; the sliders are live tuning.
-	if ( BeginSettingsGroup( "Depth of Field (weapon reload)", &r_dof,
-			"r_dof: as a weapon reloads, blur the world beyond it so the view pulls focus\n"
-			"onto the gun. Eases in on reload start, holds across multi-shell reloads, eases\n"
-			"out at the end. Non-vanilla; opengl3 / Vulkan only. Off = vanilla." ) ) {
+	// multi-shell reloads, eases out at the end. RHI backends only. The on/off toggle now
+	// lives in Graphics -> Post-Processing; these are the live tuning sliders.
+	if ( BeginSettingsGroup( "Depth of Field (weapon reload)" ) ) {
 
-		ImGui::BeginDisabled( !R_BackendSupportsEnhancements() );
-		if ( !R_BackendSupportsEnhancements() ) {
+		const bool backendOk = R_BackendSupportsEnhancements();
+		if ( !backendOk ) {
 			ImGui::TextDisabled( "Needs the opengl3 or Vulkan backend." );
 		}
+		if ( !r_dof.GetBool() ) {
+			ImGui::TextDisabled( "Enable in Graphics -> Post-Processing." );
+		}
+		ImGui::BeginDisabled( !backendOk || !r_dof.GetBool() );
 
 		float radius = r_dofBlurRadius.GetFloat();
 		if ( ImGui::SliderFloat( "Blur Radius", &radius, 0.0f, 64.0f, "%.0f" ) ) {
