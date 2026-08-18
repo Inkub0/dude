@@ -1077,20 +1077,170 @@ static void R_GpuCullLive( void ) {
 
 /*
 =================
-R2 world-geometry ray-query validator (docs/rtx-shadow-roadmap.md)
+R2 world ray-query scene + validator (docs/rtx-shadow-roadmap.md)
 
-r_rtWorldTest: one-shot on the cvar edge (BLAS builds over a whole map are heavy, so no
-once/sec loop; the cvar flips itself back off after running). Gathers the loaded map's static
-opaque world triangles (the _areaN models), builds one BLAS per area + an identity-instance
-TLAS through the RHI acceleration-structure API, traces an 8x8 ray grid across the CURRENT
-view frustum from a compute shader (GL_EXT_ray_query), and diffs every hit distance against a
-CPU Moller-Trumbore sweep over the same triangle soup. A hit/miss flip that any slightly
-perturbed CPU ray reproduces is bucketed boundary-FP (edge/crack graze), mirroring the GPU-cull
-validator; PASS iff 0 genuine. Vulkan + RT hardware only. Everything is destroyed at the end.
+r_rtWorld: build and KEEP the static-world acceleration structure (one BLAS per _areaN model,
+opaque surfaces only, identity-instance TLAS) - the scene R3's per-frame shadow rays will
+consume. Built lazily on the first primary view (a full map is ~50-65 ms, load-time class),
+rebuilt automatically on map change, torn down when switched off. The backend owns the AS
+objects, so a vid_restart self-heals: Shutdown frees the scene, GetTlasAddress() reads 0
+here, and the next primary view rebuilds. Infrastructure only - no consumer yet.
+
+r_rtWorldTest: one-shot validator (self-clears). Traces an 8x8 ray grid across the CURRENT
+view frustum against the world scene - the persistent one when r_rtWorld is live, else a
+transient build - and diffs every hit distance against a CPU Moller-Trumbore sweep over the
+same triangle soup. A hit/miss flip that a slightly perturbed CPU ray reproduces is bucketed
+boundary-FP (edge/crack graze), mirroring the GPU-cull validator; PASS iff 0 genuine.
+Vulkan + RT hardware only.
 =================
 */
+static idCVar r_rtWorld( "r_rtWorld", "0", CVAR_RENDERER | CVAR_BOOL,
+	"build + keep the static-world ray-query acceleration structure (Vulkan + RT hardware; prereq for RT shadows)" );
 static idCVar r_rtWorldTest( "r_rtWorldTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"validate ray-query BLAS/TLAS over the loaded map's static world vs a CPU ray trace (Vulkan + RT hardware; one-shot, self-clears)" );
+
+struct rtAreaSlice_t { int vertStart, numVerts, idxStart, numIdx; };
+
+// Gather the loaded map's opaque static world triangles (the _areaN models) into a packed
+// float3/int soup, indices area-local so each slice feeds CreateBlas directly. Returns false
+// with nothing allocated when there is no opaque world geometry; otherwise the caller
+// Mem_Free16's pos/idx/slices.
+static bool R_RtGatherWorld( float *&pos, int *&idx, rtAreaSlice_t *&slices, int &numSlices,
+		int &worldVerts, int &worldIndexes ) {
+	pos = NULL; idx = NULL; slices = NULL;
+	numSlices = 0; worldVerts = 0; worldIndexes = 0;
+	const int numAreas = tr.primaryWorld->NumAreas();
+	for ( int a = 0; a < numAreas; a++ ) {
+		const idRenderModel *model = renderModelManager->FindModel( va( "_area%i", a ) );
+		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = model->Surface( s );
+			if ( surf->geometry == NULL || surf->shader == NULL || surf->shader->Coverage() != MC_OPAQUE
+				|| surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
+				continue;
+			}
+			worldVerts += surf->geometry->numVerts;
+			worldIndexes += surf->geometry->numIndexes;
+		}
+	}
+	if ( worldIndexes < 3 ) {
+		return false;
+	}
+	pos = (float *)Mem_Alloc16( worldVerts * 3 * (int)sizeof( float ) );
+	idx = (int *)Mem_Alloc16( worldIndexes * (int)sizeof( int ) );
+	slices = (rtAreaSlice_t *)Mem_Alloc16( numAreas * (int)sizeof( rtAreaSlice_t ) );
+	int vertBase = 0, idxBase = 0;
+	for ( int a = 0; a < numAreas; a++ ) {
+		const idRenderModel *model = renderModelManager->FindModel( va( "_area%i", a ) );
+		rtAreaSlice_t sl;
+		sl.vertStart = vertBase; sl.idxStart = idxBase; sl.numVerts = 0; sl.numIdx = 0;
+		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = model->Surface( s );
+			if ( surf->geometry == NULL || surf->shader == NULL || surf->shader->Coverage() != MC_OPAQUE
+				|| surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
+				continue;
+			}
+			const srfTriangles_t *tri = surf->geometry;
+			for ( int k = 0; k < tri->numVerts; k++ ) {
+				const idVec3 &p = tri->verts[k].xyz;
+				float *dst = pos + ( sl.vertStart + sl.numVerts + k ) * 3;
+				dst[0] = p[0]; dst[1] = p[1]; dst[2] = p[2];
+			}
+			for ( int n = 0; n < tri->numIndexes; n++ ) {
+				idx[sl.idxStart + sl.numIdx + n] = sl.numVerts + tri->indexes[n];
+			}
+			sl.numVerts += tri->numVerts;
+			sl.numIdx += tri->numIndexes;
+		}
+		if ( sl.numIdx < 3 ) {
+			continue;
+		}
+		vertBase += sl.numVerts;
+		idxBase += sl.numIdx;
+		slices[numSlices++] = sl;
+	}
+	return numSlices > 0;
+}
+
+// Build one BLAS per slice + the identity-instance TLAS. Returns the TLAS address (0 =
+// failure); *blasFail counts slices whose BLAS build failed.
+static unsigned long long R_RtBuildWorldScene( rhi::RHI *r, const float *pos, const int *idx,
+		const rtAreaSlice_t *slices, int numSlices, int *blasFail ) {
+	rhi::RHI::RtInstance *inst = (rhi::RHI::RtInstance *)Mem_Alloc16( numSlices * (int)sizeof( rhi::RHI::RtInstance ) );
+	int numInst = 0;
+	*blasFail = 0;
+	for ( int s = 0; s < numSlices; s++ ) {
+		rhi::BlasHandle blas = r->CreateBlas( pos + slices[s].vertStart * 3, slices[s].numVerts,
+			3 * (int)sizeof( float ), idx + slices[s].idxStart, slices[s].numIdx );
+		if ( blas == 0 ) {
+			( *blasFail )++;
+			continue;
+		}
+		rhi::RHI::RtInstance &in = inst[numInst++];
+		memset( &in, 0, sizeof( in ) );
+		in.transform[0] = 1.0f; in.transform[5] = 1.0f; in.transform[10] = 1.0f;	// identity 3x4
+		in.blas = blas;
+		in.mask = 0xFF;
+	}
+	unsigned long long tlasAddr = ( numInst > 0 ) ? r->BuildTlas( inst, numInst ) : 0;
+	Mem_Free16( inst );
+	return tlasAddr;
+}
+
+/*
+=================
+R_RtWorldUpdate
+
+Keeps the persistent world scene in sync with r_rtWorld: lazy build on the first primary
+view, rebuild on map change (mapName comparison), teardown when switched off.
+=================
+*/
+static idStr s_rtWorldMap;
+static void R_RtWorldUpdate( void ) {
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r == NULL ) {
+		return;
+	}
+	if ( !r_rtWorld.GetBool() ) {
+		if ( r_rtWorld.IsModified() ) {
+			r_rtWorld.ClearModified();
+			r->DestroyRtScene();		// switched off: free the scene (no-op when never built)
+			s_rtWorldMap.Clear();
+		}
+		return;
+	}
+	if ( tr.viewDef == NULL || tr.viewDef->isSubview || tr.primaryWorld == NULL
+		|| tr.primaryWorld->NumAreas() <= 0 ) {
+		return;
+	}
+	if ( !r->SupportsRayQuery() ) {
+		return;							// stays pending; a backend/hardware change re-evaluates
+	}
+	if ( r->GetTlasAddress() != 0 && s_rtWorldMap.Icmp( tr.primaryWorld->mapName ) == 0 ) {
+		return;							// scene live and current
+	}
+	r_rtWorld.ClearModified();
+	r->DestroyRtScene();
+
+	float *pos; int *idx; rtAreaSlice_t *slices;
+	int numSlices, worldVerts, worldIndexes;
+	if ( !R_RtGatherWorld( pos, idx, slices, numSlices, worldVerts, worldIndexes ) ) {
+		return;
+	}
+	const int msStart = Sys_Milliseconds();
+	int blasFail = 0;
+	const unsigned long long tlasAddr = R_RtBuildWorldScene( r, pos, idx, slices, numSlices, &blasFail );
+	Mem_Free16( pos ); Mem_Free16( idx ); Mem_Free16( slices );
+	if ( tlasAddr == 0 ) {
+		common->Warning( "r_rtWorld: world scene build failed (%d BLAS failures) - disabling", blasFail );
+		r->DestroyRtScene();
+		r_rtWorld.SetBool( false );
+		return;
+	}
+	s_rtWorldMap = tr.primaryWorld->mapName;
+	common->Printf( "r_rtWorld: %d BLAS, %d tris, %d ms build%s\n",
+		numSlices - blasFail, worldIndexes / 3, Sys_Milliseconds() - msStart,
+		blasFail ? va( " (%d BLAS failed)", blasFail ) : "" );
+}
 
 static const char *RTWORLD_SRC =
 	"#version 460\n"
@@ -1153,7 +1303,7 @@ static void R_RtWorldValidate( void ) {
 		return;
 	}
 	if ( tr.viewDef == NULL || tr.viewDef->isSubview || tr.primaryWorld == NULL ) {
-		return;						// stay armed until a primary in-game view renders
+		return;							// stay armed until a primary in-game view renders
 	}
 	// consume: run once, flip the cvar back off so a re-enable re-runs
 	r_rtWorldTest.SetBool( false );
@@ -1164,90 +1314,37 @@ static void R_RtWorldValidate( void ) {
 		common->Printf( "r_rtWorldTest: unavailable (needs Vulkan + KHR_ray_query hardware)\n" );
 		return;
 	}
-	const int numAreas = tr.primaryWorld->NumAreas();
-	if ( numAreas <= 0 ) {
+	if ( tr.primaryWorld->NumAreas() <= 0 ) {
 		common->Printf( "r_rtWorldTest: no map loaded\n" );
 		return;
 	}
 
-	// pass 1: size the packed soup (opaque static world surfaces only - the same set RT
-	// shadows will treat as casters first)
-	int worldVerts = 0, worldIndexes = 0;
-	for ( int a = 0; a < numAreas; a++ ) {
-		const idRenderModel *model = renderModelManager->FindModel( va( "_area%i", a ) );
-		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
-			const modelSurface_t *surf = model->Surface( s );
-			if ( surf->geometry == NULL || surf->shader == NULL || surf->shader->Coverage() != MC_OPAQUE
-				|| surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
-				continue;
-			}
-			worldVerts += surf->geometry->numVerts;
-			worldIndexes += surf->geometry->numIndexes;
-		}
-	}
-	if ( worldIndexes < 3 ) {
+	float *pos; int *idx; rtAreaSlice_t *slices;
+	int numSlices, worldVerts, worldIndexes;
+	if ( !R_RtGatherWorld( pos, idx, slices, numSlices, worldVerts, worldIndexes ) ) {
 		common->Printf( "r_rtWorldTest: no opaque world geometry found\n" );
 		return;
 	}
 
-	// pass 2: concatenate per area (indices area-local, so each slice feeds CreateBlas
-	// directly) and build one BLAS + one identity instance per non-empty area
-	struct AreaSlice { int vertStart, numVerts, idxStart, numIdx; };
-	float *pos = (float *)Mem_Alloc16( worldVerts * 3 * (int)sizeof( float ) );
-	int *idx = (int *)Mem_Alloc16( worldIndexes * (int)sizeof( int ) );
-	AreaSlice *slices = (AreaSlice *)Mem_Alloc16( numAreas * (int)sizeof( AreaSlice ) );
-	rhi::RHI::RtInstance *inst = (rhi::RHI::RtInstance *)Mem_Alloc16( numAreas * (int)sizeof( rhi::RHI::RtInstance ) );
-	int vertBase = 0, idxBase = 0, numSlices = 0, numInst = 0, blasFail = 0;
-
-	const int msBuildStart = Sys_Milliseconds();
-	for ( int a = 0; a < numAreas; a++ ) {
-		const idRenderModel *model = renderModelManager->FindModel( va( "_area%i", a ) );
-		AreaSlice sl;
-		sl.vertStart = vertBase; sl.idxStart = idxBase; sl.numVerts = 0; sl.numIdx = 0;
-		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
-			const modelSurface_t *surf = model->Surface( s );
-			if ( surf->geometry == NULL || surf->shader == NULL || surf->shader->Coverage() != MC_OPAQUE
-				|| surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
-				continue;
-			}
-			const srfTriangles_t *tri = surf->geometry;
-			for ( int k = 0; k < tri->numVerts; k++ ) {
-				const idVec3 &p = tri->verts[k].xyz;
-				float *dst = pos + ( sl.vertStart + sl.numVerts + k ) * 3;
-				dst[0] = p[0]; dst[1] = p[1]; dst[2] = p[2];
-			}
-			for ( int n = 0; n < tri->numIndexes; n++ ) {
-				idx[sl.idxStart + sl.numIdx + n] = sl.numVerts + tri->indexes[n];
-			}
-			sl.numVerts += tri->numVerts;
-			sl.numIdx += tri->numIndexes;
-		}
-		if ( sl.numIdx < 3 ) {
-			continue;
-		}
-		vertBase += sl.numVerts;
-		idxBase += sl.numIdx;
-		slices[numSlices++] = sl;
-		rhi::BlasHandle blas = r->CreateBlas( pos + sl.vertStart * 3, sl.numVerts, 3 * (int)sizeof( float ),
-			idx + sl.idxStart, sl.numIdx );
-		if ( blas == 0 ) {
-			blasFail++;
-			continue;
-		}
-		rhi::RHI::RtInstance &in = inst[numInst++];
-		memset( &in, 0, sizeof( in ) );
-		in.transform[0] = 1.0f; in.transform[5] = 1.0f; in.transform[10] = 1.0f;	// identity 3x4
-		in.blas = blas;
-		in.mask = 0xFF;
+	// scene: reuse the persistent one when live (R_RtWorldUpdate ran just before us, so it is
+	// current for this map), else a transient build torn down at the end
+	const bool persistent = r_rtWorld.GetBool() && r->GetTlasAddress() != 0;
+	int blasFail = 0, msBuild = 0;
+	unsigned long long tlasAddr;
+	if ( persistent ) {
+		tlasAddr = r->GetTlasAddress();
+	} else {
+		const int msStart = Sys_Milliseconds();
+		tlasAddr = R_RtBuildWorldScene( r, pos, idx, slices, numSlices, &blasFail );
+		msBuild = Sys_Milliseconds() - msStart;
 	}
-	unsigned long long tlasAddr = ( numInst > 0 ) ? r->BuildTlas( inst, numInst ) : 0;
-	const int msBuild = Sys_Milliseconds() - msBuildStart;
-
 	if ( tlasAddr == 0 || blasFail > 0 ) {
 		common->Printf( "r_rtWorldTest: FAIL (AS build: %d/%d BLAS failed, tlas %s)\n",
 			blasFail, numSlices, tlasAddr ? "ok" : "failed" );
-		r->DestroyRtScene();
-		Mem_Free16( pos ); Mem_Free16( idx ); Mem_Free16( slices ); Mem_Free16( inst );
+		if ( !persistent ) {
+			r->DestroyRtScene();
+		}
+		Mem_Free16( pos ); Mem_Free16( idx ); Mem_Free16( slices );
 		return;
 	}
 
@@ -1300,8 +1397,10 @@ static void R_RtWorldValidate( void ) {
 	}
 	if ( !traced ) {
 		common->Printf( "r_rtWorldTest: FAIL (trace dispatch/readback failed)\n" );
-		r->DestroyRtScene();
-		Mem_Free16( pos ); Mem_Free16( idx ); Mem_Free16( slices ); Mem_Free16( inst );
+		if ( !persistent ) {
+			r->DestroyRtScene();
+		}
+		Mem_Free16( pos ); Mem_Free16( idx ); Mem_Free16( slices );
 		return;
 	}
 
@@ -1356,14 +1455,18 @@ static void R_RtWorldValidate( void ) {
 		}
 	}
 
-	common->Printf( "r_rtWorldTest: %d areas -> %d BLAS (%d tris, %d ms build); %d/%d rays hit -- %s "
+	common->Printf( "r_rtWorldTest: %d BLAS (%d tris, %s); %d/%d rays hit -- %s "
 		"(mismatch %d = %d boundary-FP + %d genuine, first genuine @%d)\n",
-		numAreas, numInst, worldIndexes / 3, msBuild, gpuHits, NR,
+		numSlices - blasFail, worldIndexes / 3,
+		persistent ? "persistent scene" : va( "%d ms build", msBuild ),
+		gpuHits, NR,
 		( genuine == 0 && gpuHits > 0 ) ? "PASS" : "FAIL",
 		mismatch, boundary, genuine, firstGenuine );
 
-	r->DestroyRtScene();
-	Mem_Free16( pos ); Mem_Free16( idx ); Mem_Free16( slices ); Mem_Free16( inst );
+	if ( !persistent ) {
+		r->DestroyRtScene();
+	}
+	Mem_Free16( pos ); Mem_Free16( idx ); Mem_Free16( slices );
 }
 
 /*
@@ -1873,8 +1976,10 @@ void R_RenderView( viewDef_t *parms ) {
 	//   r_gpuCullLive (3.2): the REAL surfaces R_AddModelSurfaces just recorded — validates on live data.
 	R_GpuCullValidate();
 	R_GpuCullLive();
-	// R2 ray-query world validator (docs/rtx-shadow-roadmap.md): one-shot BLAS/TLAS build over
-	// the loaded map's static world + GPU-vs-CPU ray diff. Self-gates off; Vulkan + RT only.
+	// R2 ray-query world scene + validator (docs/rtx-shadow-roadmap.md): r_rtWorld keeps the
+	// persistent static-world AS in sync (lazy build / map change / teardown); r_rtWorldTest
+	// is the one-shot GPU-vs-CPU ray diff. Both self-gate; Vulkan + RT hardware only.
+	R_RtWorldUpdate();
 	R_RtWorldValidate();
 
 	// any viewLight that didn't have visible surfaces can have it's shadows removed

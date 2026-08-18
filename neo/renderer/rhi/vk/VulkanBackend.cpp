@@ -247,6 +247,7 @@ private:
 	                            const int *indexes, int numIndexes ) override;
 	void			DestroyBlas( BlasHandle blas ) override;
 	unsigned long long	BuildTlas( const RtInstance *instances, int count ) override;
+	unsigned long long	GetTlasAddress() override;
 	void			DestroyRtScene() override;
 	// FSR2 runtime (R1/C2): persistent context + output image, sized to the scene target.
 	bool			Fsr2EnsureContext( int w, int h );			// (re)create the FSR2 context + output image on size change
@@ -732,6 +733,7 @@ private:
 	std::vector<RtBlas>			rtBlases;					// BlasHandle = index + 1
 	VkAccelerationStructureKHR	rtTlas = VK_NULL_HANDLE;
 	RtBuf						rtTlasBuf;
+	VkDeviceAddress				rtTlasAddr = 0;				// live TLAS address (GetTlasAddress)
 	bool	CreateRtBuffer( VkBufferUsageFlags usage, VkDeviceSize size, const void *data, RtBuf &rb );
 	void	DestroyRtBuffer( RtBuf &rb );
 	// size + create + build one AS on the upload cb, synchronously (scratch is transient)
@@ -4086,6 +4088,7 @@ unsigned long long VulkanBackend::BuildTlas( const RtInstance *instances, int co
 		rtTlas = VK_NULL_HANDLE;
 	}
 	DestroyRtBuffer( rtTlasBuf );
+	rtTlasAddr = 0;
 
 	std::vector<VkAccelerationStructureInstanceKHR> vkInst( (size_t)count );
 	uint32_t live = 0;
@@ -4125,7 +4128,12 @@ unsigned long long VulkanBackend::BuildTlas( const RtInstance *instances, int co
 	VkAccelerationStructureDeviceAddressInfoKHR dai = {};
 	dai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
 	dai.accelerationStructure = rtTlas;
-	return (unsigned long long)pfnGetAsDeviceAddress( device, &dai );
+	rtTlasAddr = pfnGetAsDeviceAddress( device, &dai );
+	return (unsigned long long)rtTlasAddr;
+}
+
+unsigned long long VulkanBackend::GetTlasAddress() {
+	return (unsigned long long)rtTlasAddr;
 }
 
 void VulkanBackend::DestroyRtScene() {
@@ -4140,6 +4148,7 @@ void VulkanBackend::DestroyRtScene() {
 		rtTlas = VK_NULL_HANDLE;
 	}
 	DestroyRtBuffer( rtTlasBuf );
+	rtTlasAddr = 0;
 	for ( size_t i = 0; i < rtBlases.size(); i++ ) {
 		if ( rtBlases[i].as != VK_NULL_HANDLE ) {
 			pfnDestroyAs( device, rtBlases[i].as, NULL );

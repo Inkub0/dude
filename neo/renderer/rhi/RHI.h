@@ -439,6 +439,9 @@ public:
 	// the TLAS device address - what accelerationStructureEXT(uvec2) wants in a shader -
 	// or 0 on failure. Replaces any previous TLAS.
 	virtual unsigned long long	BuildTlas( const RtInstance *instances, int count ) { return 0; }
+	// Device address of the current scene TLAS (0 = none). Reads 0 after a backend restart
+	// dropped the scene - callers treat that as "rebuild needed".
+	virtual unsigned long long	GetTlasAddress() { return 0; }
 	// Free the TLAS and every live BLAS (level transition / shutdown).
 	virtual void	DestroyRtScene() {}
 
