@@ -1,10 +1,30 @@
 # R1 — the FSR2 temporal pipeline (motion vectors + jitter + FSR2 Native-AA)
 
-Status: **planned (implementation plan)**. This is roadmap item **R1** from
-[rtx-shadow-roadmap.md](rtx-shadow-roadmap.md) — the temporal pipeline that supersedes the
-hand-rolled-TAA plan in [antialiasing.md](antialiasing.md). VK-only for the FSR2 dispatch;
-motion vectors + jitter benefit both RHI backends. Legacy ARB is never touched. Every
-increment is cvar-gated so **OFF == today's renderer, bit-for-bit**.
+Status: **COMPLETE — A0..E all built + user-verified, merged to master 2026-08-18** (`r_fsr`
+Native-AA + auto-reactive deghosting, default in the Nightmare preset, backend-aware AA
+menus). This is roadmap item **R1** from [rtx-shadow-roadmap.md](rtx-shadow-roadmap.md) —
+the temporal pipeline that supersedes the hand-rolled-TAA plan in
+[antialiasing.md](antialiasing.md). VK-only for the FSR2 dispatch; motion vectors + jitter
+benefit both RHI backends. Legacy ARB is never touched. Every increment is cvar-gated so
+**OFF == today's renderer, bit-for-bit**. Each increment section below carries its as-built
+record above the original plan text.
+
+## PARKED FOLLOW-UP — sub-native upscaling (the "real FSR" fps lever)
+
+Deliberately NOT built in R1 (the game is CPU-front-end bound today, so a GPU-side fps win
+buys nothing; the customer is the RT era, where per-pixel ray budgets make 67% scale ≈ half
+the ray cost). When it happens, the work is:
+
+- **Render scale < 1.0**: scene (and its depth/velocity/SSAO/SSR chain) at render-res,
+  FSR2 output at display-res. `r_fsrScale` (or quality presets: Quality 0.67 / Balanced
+  0.59 / Performance 0.5), plus `fsrQuality/renderScale` preset columns (E reserved them).
+- **The scene/HUD reorder** deferred out of C2: FSR2 writes a display-res HDR composite the
+  HUD blends into (in HDR), tonemap last — this also kills C2's copy-back. The copy-back
+  shortcut is exact ONLY at Native-AA; at any other scale the reorder is mandatory.
+- Re-check `ffxFsr2GetJitterPhaseCount` (phase count grows with the scale ratio) and the
+  `maxRenderSize`/`displaySize` split in `Fsr2EnsureContext` (today both == display).
+- Reduced-res inputs interact with the SSAO/SSR temporal consumers (they'd march at
+  render-res for free — a win — but their history buffers key on size).
 
 Decision record + prior context: the `fsr-temporal-pipeline` memory, `render-interpolation-feature`
 (why frame-gen is parked), `antialiasing-plan`, `gpu-perf-heavy-pass-profile`.
