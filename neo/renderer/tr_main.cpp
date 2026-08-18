@@ -36,6 +36,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/platform.h"
 #include "framework/Session.h"
 #include "renderer/RenderWorld_local.h"
+#include "renderer/ModelManager.h"
 
 #include "renderer/tr_local.h"
 #include "renderer/rhi/RHI.h"
@@ -1075,6 +1076,297 @@ static void R_GpuCullLive( void ) {
 }
 
 /*
+=================
+R2 world-geometry ray-query validator (docs/rtx-shadow-roadmap.md)
+
+r_rtWorldTest: one-shot on the cvar edge (BLAS builds over a whole map are heavy, so no
+once/sec loop; the cvar flips itself back off after running). Gathers the loaded map's static
+opaque world triangles (the _areaN models), builds one BLAS per area + an identity-instance
+TLAS through the RHI acceleration-structure API, traces an 8x8 ray grid across the CURRENT
+view frustum from a compute shader (GL_EXT_ray_query), and diffs every hit distance against a
+CPU Moller-Trumbore sweep over the same triangle soup. A hit/miss flip that any slightly
+perturbed CPU ray reproduces is bucketed boundary-FP (edge/crack graze), mirroring the GPU-cull
+validator; PASS iff 0 genuine. Vulkan + RT hardware only. Everything is destroyed at the end.
+=================
+*/
+static idCVar r_rtWorldTest( "r_rtWorldTest", "0", CVAR_RENDERER | CVAR_BOOL,
+	"validate ray-query BLAS/TLAS over the loaded map's static world vs a CPU ray trace (Vulkan + RT hardware; one-shot, self-clears)" );
+
+static const char *RTWORLD_SRC =
+	"#version 460\n"
+	"#extension GL_EXT_ray_query : require\n"
+	"layout(local_size_x = 64) in;\n"
+	"layout(std430, binding = 0) writeonly buffer Out { float t[]; } outb;\n"
+	"layout(std430, binding = 1) readonly buffer Rays { vec4 dir[]; } rays;\n"
+	"layout(push_constant) uniform PC { uvec2 tlas; uint count; float ox, oy, oz, tmax; } pc;\n"
+	"void main() {\n"
+	"    uint i = gl_GlobalInvocationID.x;\n"
+	"    if ( i >= pc.count ) { return; }\n"
+	"    rayQueryEXT rq;\n"
+	"    rayQueryInitializeEXT( rq, accelerationStructureEXT( pc.tlas ), gl_RayFlagsOpaqueEXT, 0xFFu,\n"
+	"                           vec3( pc.ox, pc.oy, pc.oz ), 0.0, rays.dir[i].xyz, pc.tmax );\n"
+	"    while ( rayQueryProceedEXT( rq ) ) { }\n"
+	"    outb.t[i] = ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )\n"
+	"        ? rayQueryGetIntersectionTEXT( rq, true ) : -1.0;\n"
+	"}\n";
+
+// Moller-Trumbore closest hit of one ray against a packed float3/int soup slice; returns
+// the closest t in (0, tmax) or -1. Same math as the synthetic self-test's reference.
+static float R_RtCpuTrace( const idVec3 &org, const idVec3 &dir, float tmax,
+		const float *pos, const int *idx, int idxStart, int idxCount, int vertStart ) {
+	float best = -1.0f;
+	for ( int n = idxStart; n < idxStart + idxCount; n += 3 ) {
+		const float *v0 = pos + ( vertStart + idx[n + 0] ) * 3;
+		const float *v1 = pos + ( vertStart + idx[n + 1] ) * 3;
+		const float *v2 = pos + ( vertStart + idx[n + 2] ) * 3;
+		const idVec3 e1( v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2] );
+		const idVec3 e2( v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2] );
+		const idVec3 pv = dir.Cross( e2 );
+		const float det = e1 * pv;
+		if ( det > -1e-8f && det < 1e-8f ) {
+			continue;
+		}
+		const float inv = 1.0f / det;
+		const idVec3 tv( org[0]-v0[0], org[1]-v0[1], org[2]-v0[2] );
+		const float u = ( tv * pv ) * inv;
+		if ( u < 0.0f || u > 1.0f ) {
+			continue;
+		}
+		const idVec3 qv = tv.Cross( e1 );
+		const float w = ( dir * qv ) * inv;
+		if ( w < 0.0f || u + w > 1.0f ) {
+			continue;
+		}
+		const float t = ( e2 * qv ) * inv;
+		if ( t > 0.0f && t < tmax && ( best < 0.0f || t < best ) ) {
+			best = t;
+		}
+	}
+	return best;
+}
+
+static void R_RtWorldValidate( void ) {
+	if ( !r_rtWorldTest.GetBool() ) {
+		if ( r_rtWorldTest.IsModified() ) {
+			r_rtWorldTest.ClearModified();
+		}
+		return;
+	}
+	if ( tr.viewDef == NULL || tr.viewDef->isSubview || tr.primaryWorld == NULL ) {
+		return;						// stay armed until a primary in-game view renders
+	}
+	// consume: run once, flip the cvar back off so a re-enable re-runs
+	r_rtWorldTest.SetBool( false );
+	r_rtWorldTest.ClearModified();
+
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r == NULL || !r->SupportsRayQuery() ) {
+		common->Printf( "r_rtWorldTest: unavailable (needs Vulkan + KHR_ray_query hardware)\n" );
+		return;
+	}
+	const int numAreas = tr.primaryWorld->NumAreas();
+	if ( numAreas <= 0 ) {
+		common->Printf( "r_rtWorldTest: no map loaded\n" );
+		return;
+	}
+
+	// pass 1: size the packed soup (opaque static world surfaces only - the same set RT
+	// shadows will treat as casters first)
+	int worldVerts = 0, worldIndexes = 0;
+	for ( int a = 0; a < numAreas; a++ ) {
+		const idRenderModel *model = renderModelManager->FindModel( va( "_area%i", a ) );
+		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = model->Surface( s );
+			if ( surf->geometry == NULL || surf->shader == NULL || surf->shader->Coverage() != MC_OPAQUE
+				|| surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
+				continue;
+			}
+			worldVerts += surf->geometry->numVerts;
+			worldIndexes += surf->geometry->numIndexes;
+		}
+	}
+	if ( worldIndexes < 3 ) {
+		common->Printf( "r_rtWorldTest: no opaque world geometry found\n" );
+		return;
+	}
+
+	// pass 2: concatenate per area (indices area-local, so each slice feeds CreateBlas
+	// directly) and build one BLAS + one identity instance per non-empty area
+	struct AreaSlice { int vertStart, numVerts, idxStart, numIdx; };
+	float *pos = (float *)Mem_Alloc16( worldVerts * 3 * (int)sizeof( float ) );
+	int *idx = (int *)Mem_Alloc16( worldIndexes * (int)sizeof( int ) );
+	AreaSlice *slices = (AreaSlice *)Mem_Alloc16( numAreas * (int)sizeof( AreaSlice ) );
+	rhi::RHI::RtInstance *inst = (rhi::RHI::RtInstance *)Mem_Alloc16( numAreas * (int)sizeof( rhi::RHI::RtInstance ) );
+	int vertBase = 0, idxBase = 0, numSlices = 0, numInst = 0, blasFail = 0;
+
+	const int msBuildStart = Sys_Milliseconds();
+	for ( int a = 0; a < numAreas; a++ ) {
+		const idRenderModel *model = renderModelManager->FindModel( va( "_area%i", a ) );
+		AreaSlice sl;
+		sl.vertStart = vertBase; sl.idxStart = idxBase; sl.numVerts = 0; sl.numIdx = 0;
+		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = model->Surface( s );
+			if ( surf->geometry == NULL || surf->shader == NULL || surf->shader->Coverage() != MC_OPAQUE
+				|| surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
+				continue;
+			}
+			const srfTriangles_t *tri = surf->geometry;
+			for ( int k = 0; k < tri->numVerts; k++ ) {
+				const idVec3 &p = tri->verts[k].xyz;
+				float *dst = pos + ( sl.vertStart + sl.numVerts + k ) * 3;
+				dst[0] = p[0]; dst[1] = p[1]; dst[2] = p[2];
+			}
+			for ( int n = 0; n < tri->numIndexes; n++ ) {
+				idx[sl.idxStart + sl.numIdx + n] = sl.numVerts + tri->indexes[n];
+			}
+			sl.numVerts += tri->numVerts;
+			sl.numIdx += tri->numIndexes;
+		}
+		if ( sl.numIdx < 3 ) {
+			continue;
+		}
+		vertBase += sl.numVerts;
+		idxBase += sl.numIdx;
+		slices[numSlices++] = sl;
+		rhi::BlasHandle blas = r->CreateBlas( pos + sl.vertStart * 3, sl.numVerts, 3 * (int)sizeof( float ),
+			idx + sl.idxStart, sl.numIdx );
+		if ( blas == 0 ) {
+			blasFail++;
+			continue;
+		}
+		rhi::RHI::RtInstance &in = inst[numInst++];
+		memset( &in, 0, sizeof( in ) );
+		in.transform[0] = 1.0f; in.transform[5] = 1.0f; in.transform[10] = 1.0f;	// identity 3x4
+		in.blas = blas;
+		in.mask = 0xFF;
+	}
+	unsigned long long tlasAddr = ( numInst > 0 ) ? r->BuildTlas( inst, numInst ) : 0;
+	const int msBuild = Sys_Milliseconds() - msBuildStart;
+
+	if ( tlasAddr == 0 || blasFail > 0 ) {
+		common->Printf( "r_rtWorldTest: FAIL (AS build: %d/%d BLAS failed, tlas %s)\n",
+			blasFail, numSlices, tlasAddr ? "ok" : "failed" );
+		r->DestroyRtScene();
+		Mem_Free16( pos ); Mem_Free16( idx ); Mem_Free16( slices ); Mem_Free16( inst );
+		return;
+	}
+
+	// 8x8 ray grid across the live view frustum (0.9 x the half-FOV so every ray stays in-view)
+	const renderView_t &rv = tr.viewDef->renderView;
+	const float tanX = idMath::Tan( DEG2RAD( rv.fov_x * 0.5f ) ) * 0.9f;
+	const float tanY = idMath::Tan( DEG2RAD( rv.fov_y * 0.5f ) ) * 0.9f;
+	const int NR = 64;
+	const float TMAX = 100000.0f;
+	idVec3 dirs[NR];
+	float dirBlob[NR * 4];
+	for ( int i = 0; i < NR; i++ ) {
+		const float u = ( ( (float)( i % 8 ) + 0.5f ) / 8.0f * 2.0f - 1.0f ) * tanX;
+		const float v = ( ( (float)( i / 8 ) + 0.5f ) / 8.0f * 2.0f - 1.0f ) * tanY;
+		dirs[i] = rv.viewaxis[0] - u * rv.viewaxis[1] + v * rv.viewaxis[2];
+		dirs[i].Normalize();
+		dirBlob[i * 4 + 0] = dirs[i][0]; dirBlob[i * 4 + 1] = dirs[i][1];
+		dirBlob[i * 4 + 2] = dirs[i][2]; dirBlob[i * 4 + 3] = 0.0f;
+	}
+
+	static rhi::ShaderHandle s_shader = 0;
+	if ( s_shader == 0 ) {
+		s_shader = r->CreateComputeShader( "cs_rtworldtest", RTWORLD_SRC );
+	}
+	float gpuT[NR];
+	bool traced = false;
+	if ( s_shader != 0 ) {
+		float seed[NR];
+		for ( int i = 0; i < NR; i++ ) { seed[i] = -3.0f; }		// sentinel: dead dispatch != miss
+		rhi::BufferHandle bOut = r->CreateBuffer( rhi::BU_STORAGE, NR * (int)sizeof( float ), seed );
+		rhi::BufferHandle bRays = r->CreateBuffer( rhi::BU_STORAGE, NR * 4 * (int)sizeof( float ), dirBlob );
+		struct { unsigned int tlasLo, tlasHi, count; float ox, oy, oz, tmax; } pc;
+		pc.tlasLo = (unsigned int)( tlasAddr & 0xFFFFFFFFu );
+		pc.tlasHi = (unsigned int)( tlasAddr >> 32 );
+		pc.count = NR;
+		pc.ox = rv.vieworg[0]; pc.oy = rv.vieworg[1]; pc.oz = rv.vieworg[2];
+		pc.tmax = TMAX;
+		rhi::ComputeArgs ca;
+		memset( &ca, 0, sizeof( ca ) );
+		ca.shader = s_shader;
+		ca.storage[0] = bOut;
+		ca.storage[1] = bRays;
+		ca.pushConstants = &pc;
+		ca.pushConstantSize = (int)sizeof( pc );
+		ca.groupsX = 1; ca.groupsY = 1; ca.groupsZ = 1;
+		r->DispatchSync( ca );
+		traced = r->ReadBuffer( bOut, gpuT, NR * (int)sizeof( float ) );
+		r->DestroyBuffer( bOut );
+		r->DestroyBuffer( bRays );
+	}
+	if ( !traced ) {
+		common->Printf( "r_rtWorldTest: FAIL (trace dispatch/readback failed)\n" );
+		r->DestroyRtScene();
+		Mem_Free16( pos ); Mem_Free16( idx ); Mem_Free16( slices ); Mem_Free16( inst );
+		return;
+	}
+
+	// CPU reference over the identical soup + boundary classification of any disagreement
+	int gpuHits = 0, mismatch = 0, boundary = 0, genuine = 0, firstGenuine = -1;
+	for ( int i = 0; i < NR; i++ ) {
+		float cpuT = -1.0f;
+		for ( int sl = 0; sl < numSlices; sl++ ) {
+			const float t = R_RtCpuTrace( rv.vieworg, dirs[i], TMAX,
+				pos, idx, slices[sl].idxStart, slices[sl].numIdx, slices[sl].vertStart );
+			if ( t > 0.0f && ( cpuT < 0.0f || t < cpuT ) ) {
+				cpuT = t;
+			}
+		}
+		const bool gpuHit = gpuT[i] >= 0.0f;
+		if ( gpuHit ) {
+			gpuHits++;
+		}
+		const float tol = 0.05f + ( cpuT > 0.0f ? cpuT : 0.0f ) * 0.001f;
+		const bool ok = ( gpuHit == ( cpuT >= 0.0f ) )
+			&& ( !gpuHit || ( gpuT[i] > cpuT - tol && gpuT[i] < cpuT + tol ) );
+		if ( ok ) {
+			continue;
+		}
+		mismatch++;
+		// perturb the ray slightly; if any perturbed CPU trace reproduces the GPU result the
+		// ray grazes an edge/crack (legit FP divergence), not a broken AS
+		bool isBoundary = false;
+		for ( int p = 0; p < 4 && !isBoundary; p++ ) {
+			idVec3 pd = dirs[i]
+				+ ( ( p & 1 ) ? 0.002f : -0.002f ) * ( ( p & 2 ) ? rv.viewaxis[1] : rv.viewaxis[2] );
+			pd.Normalize();
+			float pT = -1.0f;
+			for ( int sl = 0; sl < numSlices; sl++ ) {
+				const float t = R_RtCpuTrace( rv.vieworg, pd, TMAX,
+					pos, idx, slices[sl].idxStart, slices[sl].numIdx, slices[sl].vertStart );
+				if ( t > 0.0f && ( pT < 0.0f || t < pT ) ) {
+					pT = t;
+				}
+			}
+			const float ptol = 0.05f + ( pT > 0.0f ? pT : 0.0f ) * 0.005f;	// looser: the ray moved
+			isBoundary = ( gpuHit == ( pT >= 0.0f ) )
+				&& ( !gpuHit || ( gpuT[i] > pT - ptol && gpuT[i] < pT + ptol ) );
+		}
+		if ( isBoundary ) {
+			boundary++;
+		} else {
+			genuine++;
+			if ( firstGenuine < 0 ) {
+				firstGenuine = i;
+			}
+		}
+	}
+
+	common->Printf( "r_rtWorldTest: %d areas -> %d BLAS (%d tris, %d ms build); %d/%d rays hit -- %s "
+		"(mismatch %d = %d boundary-FP + %d genuine, first genuine @%d)\n",
+		numAreas, numInst, worldIndexes / 3, msBuild, gpuHits, NR,
+		( genuine == 0 && gpuHits > 0 ) ? "PASS" : "FAIL",
+		mismatch, boundary, genuine, firstGenuine );
+
+	r->DestroyRtScene();
+	Mem_Free16( pos ); Mem_Free16( idx ); Mem_Free16( slices ); Mem_Free16( inst );
+}
+
+/*
 ==========================
 R_TransformModelToClip
 ==========================
@@ -1581,6 +1873,9 @@ void R_RenderView( viewDef_t *parms ) {
 	//   r_gpuCullLive (3.2): the REAL surfaces R_AddModelSurfaces just recorded — validates on live data.
 	R_GpuCullValidate();
 	R_GpuCullLive();
+	// R2 ray-query world validator (docs/rtx-shadow-roadmap.md): one-shot BLAS/TLAS build over
+	// the loaded map's static world + GPU-vs-CPU ray diff. Self-gates off; Vulkan + RT only.
+	R_RtWorldValidate();
 
 	// any viewLight that didn't have visible surfaces can have it's shadows removed
 	R_RemoveUnecessaryViewLights();

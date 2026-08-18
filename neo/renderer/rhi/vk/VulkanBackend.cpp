@@ -240,6 +240,14 @@ private:
 	void			Fsr2SelfTest();								// r_fsr2Test: init the vendored FSR2 VK backend + create/destroy a context
 	void			Mrt3SelfTest();								// r_mrt3Test: create/destroy a 3-MRT RG16F velocity gbuffer target
 	void			RayQuerySelfTest();							// r_rayQueryTest: BLAS/TLAS build + compute ray trace vs CPU reference (R2 foundation)
+
+	// ---- ray-query acceleration structures (R2, docs/rtx-shadow-roadmap.md) ----
+	bool			SupportsRayQuery() override;
+	BlasHandle		CreateBlas( const float *positions, int numVerts, int posStride,
+	                            const int *indexes, int numIndexes ) override;
+	void			DestroyBlas( BlasHandle blas ) override;
+	unsigned long long	BuildTlas( const RtInstance *instances, int count ) override;
+	void			DestroyRtScene() override;
 	// FSR2 runtime (R1/C2): persistent context + output image, sized to the scene target.
 	bool			Fsr2EnsureContext( int w, int h );			// (re)create the FSR2 context + output image on size change
 	void			Fsr2DestroyContext( bool deviceIdle );		// tear down context/scratch/output (vid_restart, resize, shutdown)
@@ -707,6 +715,28 @@ private:
 	PFN_vkDestroyAccelerationStructureKHR			pfnDestroyAs = NULL;
 	PFN_vkCmdBuildAccelerationStructuresKHR			pfnCmdBuildAs = NULL;
 	PFN_vkGetAccelerationStructureDeviceAddressKHR	pfnGetAsDeviceAddress = NULL;
+
+	// R2 AS plumbing: raw VMA buffers with the AS-specific usage bits BufferHandle doesn't
+	// carry (build-input / AS-storage / scratch), host-visible + BDA. Tiny per-AS metadata;
+	// device-local staging is a later perf pass, mirroring the static-vertex-buffer history.
+	struct RtBuf {
+		VkBuffer			buf = VK_NULL_HANDLE;
+		VmaAllocation		alloc = NULL;
+		VkDeviceAddress		addr = 0;
+	};
+	struct RtBlas {
+		VkAccelerationStructureKHR	as = VK_NULL_HANDLE;	// VK_NULL_HANDLE = freed slot
+		RtBuf						buf;
+		VkDeviceAddress				addr = 0;				// AS device address (TLAS instances consume this)
+	};
+	std::vector<RtBlas>			rtBlases;					// BlasHandle = index + 1
+	VkAccelerationStructureKHR	rtTlas = VK_NULL_HANDLE;
+	RtBuf						rtTlasBuf;
+	bool	CreateRtBuffer( VkBufferUsageFlags usage, VkDeviceSize size, const void *data, RtBuf &rb );
+	void	DestroyRtBuffer( RtBuf &rb );
+	// size + create + build one AS on the upload cb, synchronously (scratch is transient)
+	bool	BuildAsSync( VkAccelerationStructureTypeKHR type, const VkAccelerationStructureGeometryKHR &geom,
+	                     uint32_t primCount, RtBuf &asBuf, VkAccelerationStructureKHR &as );
 	FfxFsr2Context *			fsr2Ctx = NULL;
 	void *						fsr2Scratch = NULL;
 	int							fsr2W = 0, fsr2H = 0;
@@ -1880,6 +1910,9 @@ void VulkanBackend::Shutdown() {
 
 	// FSR2 (R1/C2): the context owns device pipelines/images; free while the device lives
 	Fsr2DestroyContext( true );
+
+	// R2: acceleration structures + their backing buffers must die before VMA/device
+	DestroyRtScene();
 
 	// M6: ImGui device objects must die before the device. Normally sys_imgui
 	// shuts down first (it calls ImGuiShutdown through the glue); this is the
@@ -3869,6 +3902,253 @@ void VulkanBackend::BdaSelfTest() {
 	DestroyBuffer( out );
 }
 
+/*
+================================================================================
+R2 ray-query acceleration structures (docs/rtx-shadow-roadmap.md)
+
+Synchronous builds on the upload cb (DispatchSync's submit idiom) — load-time and
+validation use; the per-frame TLAS rebuild + BLAS refit lanes move onto the frame
+command buffer when R3 consumes them. All buffers host-visible (D3-scale AS data
+is small); device-local staging is a later perf pass, mirroring the
+static-vertex-buffer history.
+================================================================================
+*/
+
+bool VulkanBackend::SupportsRayQuery() {
+	return haveRayQuery && device != VK_NULL_HANDLE && uploadCb != VK_NULL_HANDLE;
+}
+
+bool VulkanBackend::CreateRtBuffer( VkBufferUsageFlags usage, VkDeviceSize size, const void *data, RtBuf &rb ) {
+	VkBufferCreateInfo bci = {};
+	bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bci.size = size;
+	bci.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	VmaAllocationInfo info = {};
+	if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &rb.buf, &rb.alloc, &info ), "vmaCreateBuffer(rt)" ) ) {
+		rb.buf = VK_NULL_HANDLE;
+		rb.alloc = NULL;
+		return false;
+	}
+	if ( data ) {
+		memcpy( info.pMappedData, data, (size_t)size );
+	}
+	VkBufferDeviceAddressInfo bai = {};
+	bai.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+	bai.buffer = rb.buf;
+	rb.addr = (VkDeviceAddress)vkGetBufferDeviceAddress( device, &bai );
+	return true;
+}
+
+void VulkanBackend::DestroyRtBuffer( RtBuf &rb ) {
+	if ( rb.buf != VK_NULL_HANDLE ) {
+		vmaDestroyBuffer( vma, rb.buf, rb.alloc );
+	}
+	rb.buf = VK_NULL_HANDLE;
+	rb.alloc = NULL;
+	rb.addr = 0;
+}
+
+// Size, create and build one AS synchronously; the fence wait doubles as the build->consume
+// dependency barrier (a TLAS build reading a BLAS built the same way is already ordered).
+bool VulkanBackend::BuildAsSync( VkAccelerationStructureTypeKHR type, const VkAccelerationStructureGeometryKHR &geom,
+		uint32_t primCount, RtBuf &asBuf, VkAccelerationStructureKHR &as ) {
+	VkAccelerationStructureBuildGeometryInfoKHR bgi = {};
+	bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+	bgi.type = type;
+	bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+	bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+	bgi.geometryCount = 1;
+	bgi.pGeometries = &geom;
+	VkAccelerationStructureBuildSizesInfoKHR sizes = {};
+	sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+	pfnGetAsBuildSizes( device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, &primCount, &sizes );
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, asBuf ) ) {
+		return false;
+	}
+	RtBuf scratch;
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, scratch ) ) {
+		DestroyRtBuffer( asBuf );
+		return false;
+	}
+	VkAccelerationStructureCreateInfoKHR asci = {};
+	asci.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+	asci.buffer = asBuf.buf;
+	asci.size = sizes.accelerationStructureSize;
+	asci.type = type;
+	if ( !vkCheck( pfnCreateAs( device, &asci, NULL, &as ), "vkCreateAccelerationStructureKHR" ) ) {
+		as = VK_NULL_HANDLE;
+		DestroyRtBuffer( asBuf );
+		DestroyRtBuffer( scratch );
+		return false;
+	}
+	bgi.dstAccelerationStructure = as;
+	bgi.scratchData.deviceAddress = ( scratch.addr + asScratchAlignment - 1 ) & ~(VkDeviceAddress)( asScratchAlignment - 1 );
+	VkAccelerationStructureBuildRangeInfoKHR range = {};
+	range.primitiveCount = primCount;
+	const VkAccelerationStructureBuildRangeInfoKHR *pRange = &range;
+	vkQueueWaitIdle( gfxQueue );
+	vkResetCommandBuffer( uploadCb, 0 );
+	VkCommandBufferBeginInfo bbi = {};
+	bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer( uploadCb, &bbi );
+	pfnCmdBuildAs( uploadCb, 1, &bgi, &pRange );
+	vkEndCommandBuffer( uploadCb );
+	VkSubmitInfo si = {};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &uploadCb;
+	vkResetFences( device, 1, &uploadFence );
+	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	DestroyRtBuffer( scratch );
+	return true;
+}
+
+BlasHandle VulkanBackend::CreateBlas( const float *positions, int numVerts, int posStride,
+		const int *indexes, int numIndexes ) {
+	if ( !SupportsRayQuery() || positions == NULL || indexes == NULL || numVerts <= 0 || numIndexes < 3 ) {
+		return 0;
+	}
+	// stage the inputs; freed right after the synchronous build (the AS holds no reference)
+	RtBuf vb, ib;
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+			(VkDeviceSize)numVerts * (VkDeviceSize)posStride, positions, vb ) ) {
+		return 0;
+	}
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+			(VkDeviceSize)numIndexes * sizeof( int ), indexes, ib ) ) {
+		DestroyRtBuffer( vb );
+		return 0;
+	}
+	VkAccelerationStructureGeometryKHR geom = {};
+	geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+	geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+	geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+	geom.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+	geom.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+	geom.geometry.triangles.vertexData.deviceAddress = vb.addr;
+	geom.geometry.triangles.vertexStride = (VkDeviceSize)posStride;
+	geom.geometry.triangles.maxVertex = (uint32_t)( numVerts - 1 );
+	geom.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
+	geom.geometry.triangles.indexData.deviceAddress = ib.addr;
+
+	RtBlas blas;
+	const bool ok = BuildAsSync( VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, geom,
+		(uint32_t)( numIndexes / 3 ), blas.buf, blas.as );
+	DestroyRtBuffer( vb );
+	DestroyRtBuffer( ib );
+	if ( !ok ) {
+		return 0;
+	}
+	VkAccelerationStructureDeviceAddressInfoKHR dai = {};
+	dai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+	dai.accelerationStructure = blas.as;
+	blas.addr = pfnGetAsDeviceAddress( device, &dai );
+	// reuse a freed slot if one exists (level-scoped churn), else append
+	for ( size_t i = 0; i < rtBlases.size(); i++ ) {
+		if ( rtBlases[i].as == VK_NULL_HANDLE ) {
+			rtBlases[i] = blas;
+			return (BlasHandle)( i + 1 );
+		}
+	}
+	rtBlases.push_back( blas );
+	return (BlasHandle)rtBlases.size();
+}
+
+void VulkanBackend::DestroyBlas( BlasHandle blas ) {
+	if ( blas == 0 || (size_t)blas > rtBlases.size() ) {
+		return;
+	}
+	RtBlas &b = rtBlases[blas - 1];
+	if ( b.as != VK_NULL_HANDLE ) {
+		vkQueueWaitIdle( gfxQueue );
+		pfnDestroyAs( device, b.as, NULL );
+		b.as = VK_NULL_HANDLE;
+	}
+	DestroyRtBuffer( b.buf );
+	b.addr = 0;
+}
+
+unsigned long long VulkanBackend::BuildTlas( const RtInstance *instances, int count ) {
+	if ( !SupportsRayQuery() || instances == NULL || count <= 0 ) {
+		return 0;
+	}
+	// replace any previous TLAS (synchronous path, so the idle guarantees it isn't in flight)
+	if ( rtTlas != VK_NULL_HANDLE ) {
+		vkQueueWaitIdle( gfxQueue );
+		pfnDestroyAs( device, rtTlas, NULL );
+		rtTlas = VK_NULL_HANDLE;
+	}
+	DestroyRtBuffer( rtTlasBuf );
+
+	std::vector<VkAccelerationStructureInstanceKHR> vkInst( (size_t)count );
+	uint32_t live = 0;
+	for ( int i = 0; i < count; i++ ) {
+		const RtInstance &in = instances[i];
+		if ( in.blas == 0 || (size_t)in.blas > rtBlases.size() || rtBlases[in.blas - 1].as == VK_NULL_HANDLE ) {
+			continue;
+		}
+		VkAccelerationStructureInstanceKHR &out = vkInst[live++];
+		memset( &out, 0, sizeof( out ) );
+		memcpy( &out.transform, in.transform, sizeof( in.transform ) );	// both row-major 3x4
+		out.mask = in.mask & 0xFFu;
+		// facing cull off: shadow rays must block on geometry seen from either side
+		out.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+		out.accelerationStructureReference = rtBlases[in.blas - 1].addr;
+	}
+	if ( live == 0 ) {
+		return 0;
+	}
+	RtBuf instBuf;
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+			(VkDeviceSize)live * sizeof( VkAccelerationStructureInstanceKHR ), vkInst.data(), instBuf ) ) {
+		return 0;
+	}
+	VkAccelerationStructureGeometryKHR geom = {};
+	geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+	geom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+	geom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+	geom.geometry.instances.arrayOfPointers = VK_FALSE;
+	geom.geometry.instances.data.deviceAddress = instBuf.addr;
+	const bool ok = BuildAsSync( VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, geom, live, rtTlasBuf, rtTlas );
+	DestroyRtBuffer( instBuf );
+	if ( !ok ) {
+		rtTlas = VK_NULL_HANDLE;
+		return 0;
+	}
+	VkAccelerationStructureDeviceAddressInfoKHR dai = {};
+	dai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+	dai.accelerationStructure = rtTlas;
+	return (unsigned long long)pfnGetAsDeviceAddress( device, &dai );
+}
+
+void VulkanBackend::DestroyRtScene() {
+	if ( device == VK_NULL_HANDLE ) {
+		return;
+	}
+	if ( rtTlas != VK_NULL_HANDLE || !rtBlases.empty() ) {
+		vkQueueWaitIdle( gfxQueue );
+	}
+	if ( rtTlas != VK_NULL_HANDLE ) {
+		pfnDestroyAs( device, rtTlas, NULL );
+		rtTlas = VK_NULL_HANDLE;
+	}
+	DestroyRtBuffer( rtTlasBuf );
+	for ( size_t i = 0; i < rtBlases.size(); i++ ) {
+		if ( rtBlases[i].as != VK_NULL_HANDLE ) {
+			pfnDestroyAs( device, rtBlases[i].as, NULL );
+		}
+		DestroyRtBuffer( rtBlases[i].buf );
+	}
+	rtBlases.clear();
+}
+
 // r_rayQueryTest: validate the R2 acceleration-structure foundation end-to-end BEFORE anything
 // renders from it (docs/rtx-shadow-roadmap.md; the house validator-first pattern). Builds a BLAS
 // over two known triangles (prim 0 spans the ray grid at z=5; prim 1 sits behind it at z=9,
@@ -3898,150 +4178,27 @@ void VulkanBackend::RayQuerySelfTest() {
 	const int GRID = 16;
 	const int N = GRID * GRID;
 
-	struct RawBuf {
-		VkBuffer buf = VK_NULL_HANDLE;
-		VmaAllocation alloc = NULL;
-		VkDeviceAddress addr = 0;
-	};
-	RawBuf vb, blasBuf, blasScratch, instBuf, tlasBuf, tlasScratch;
-	VkAccelerationStructureKHR blas = VK_NULL_HANDLE, tlas = VK_NULL_HANDLE;
-	BufferHandle out = 0;
-
-	// host-visible + BDA raw buffer (AS inputs/storage/scratch need usage bits BufferHandle
-	// doesn't carry; sizes here are tiny so host-visible is fine even on the BAR heap)
-	auto createRaw = [&]( VkBufferUsageFlags usage, VkDeviceSize size, const void *data, RawBuf &rb ) -> bool {
-		VkBufferCreateInfo bci = {};
-		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-		bci.size = size;
-		bci.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-		bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-		VmaAllocationCreateInfo aci = {};
-		aci.usage = VMA_MEMORY_USAGE_AUTO;
-		aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-		aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-		VmaAllocationInfo info = {};
-		if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &rb.buf, &rb.alloc, &info ), "vmaCreateBuffer(rayquery test)" ) ) {
-			return false;
-		}
-		if ( data ) {
-			memcpy( info.pMappedData, data, (size_t)size );
-		}
-		VkBufferDeviceAddressInfo bai = {};
-		bai.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
-		bai.buffer = rb.buf;
-		rb.addr = (VkDeviceAddress)vkGetBufferDeviceAddress( device, &bai );
-		return true;
-	};
-	auto cleanup = [&]() {
-		vkQueueWaitIdle( gfxQueue );
-		if ( tlas != VK_NULL_HANDLE ) { pfnDestroyAs( device, tlas, NULL ); }
-		if ( blas != VK_NULL_HANDLE ) { pfnDestroyAs( device, blas, NULL ); }
-		RawBuf *raws[6] = { &vb, &blasBuf, &blasScratch, &instBuf, &tlasBuf, &tlasScratch };
-		for ( int ri = 0; ri < 6; ri++ ) {
-			if ( raws[ri]->buf != VK_NULL_HANDLE ) { vmaDestroyBuffer( vma, raws[ri]->buf, raws[ri]->alloc ); }
-		}
-		if ( out != 0 ) { DestroyBuffer( out ); }
-	};
-	// size, create and build one AS on the upload cb, synchronously (mirrors DispatchSync's
-	// submit idiom); the fence wait between the BLAS and TLAS builds is the dependency barrier
-	auto buildAs = [&]( VkAccelerationStructureTypeKHR type, const VkAccelerationStructureGeometryKHR &geom,
-	                    uint32_t primCount, RawBuf &asBuf, RawBuf &scratch, VkAccelerationStructureKHR &as ) -> bool {
-		VkAccelerationStructureBuildGeometryInfoKHR bgi = {};
-		bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
-		bgi.type = type;
-		bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-		bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-		bgi.geometryCount = 1;
-		bgi.pGeometries = &geom;
-		VkAccelerationStructureBuildSizesInfoKHR sizes = {};
-		sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-		pfnGetAsBuildSizes( device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, &primCount, &sizes );
-		if ( !createRaw( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, asBuf )
-			|| !createRaw( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, scratch ) ) {
-			return false;
-		}
-		VkAccelerationStructureCreateInfoKHR asci = {};
-		asci.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
-		asci.buffer = asBuf.buf;
-		asci.size = sizes.accelerationStructureSize;
-		asci.type = type;
-		if ( !vkCheck( pfnCreateAs( device, &asci, NULL, &as ), "vkCreateAccelerationStructureKHR" ) ) {
-			return false;
-		}
-		bgi.dstAccelerationStructure = as;
-		bgi.scratchData.deviceAddress = ( scratch.addr + asScratchAlignment - 1 ) & ~(VkDeviceAddress)( asScratchAlignment - 1 );
-		VkAccelerationStructureBuildRangeInfoKHR range = {};
-		range.primitiveCount = primCount;
-		const VkAccelerationStructureBuildRangeInfoKHR *pRange = &range;
-		vkQueueWaitIdle( gfxQueue );
-		vkResetCommandBuffer( uploadCb, 0 );
-		VkCommandBufferBeginInfo bbi = {};
-		bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-		vkBeginCommandBuffer( uploadCb, &bbi );
-		pfnCmdBuildAs( uploadCb, 1, &bgi, &pRange );
-		vkEndCommandBuffer( uploadCb );
-		VkSubmitInfo si = {};
-		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		si.commandBufferCount = 1;
-		si.pCommandBuffers = &uploadCb;
-		vkResetFences( device, 1, &uploadFence );
-		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
-		return true;
-	};
-
-	// BLAS over the two triangles (non-indexed, opaque)
-	if ( !createRaw( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, sizeof( kTris ), kTris, vb ) ) {
-		common->Printf( "VK ray-query self-test: FAIL (vertex buffer alloc)\n" );
-		cleanup();
+	// two triangles -> one BLAS -> one-instance TLAS, all through the PUBLIC API (CreateBlas /
+	// BuildTlas) so this stays the permanent regression test of the exact path real geometry
+	// uses. Identity instance transform; indexes 0..5 (two independent triangles).
+	static const int kIdx[6] = { 0, 1, 2, 3, 4, 5 };
+	const BlasHandle blasHandle = CreateBlas( &kTris[0][0][0], 6, 3 * (int)sizeof( float ), kIdx, 6 );
+	if ( blasHandle == 0 ) {
+		common->Printf( "VK ray-query self-test: FAIL (CreateBlas)\n" );
 		return;
 	}
-	VkAccelerationStructureGeometryKHR triGeom = {};
-	triGeom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
-	triGeom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-	triGeom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
-	triGeom.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-	triGeom.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-	triGeom.geometry.triangles.vertexData.deviceAddress = vb.addr;
-	triGeom.geometry.triangles.vertexStride = 3 * sizeof( float );
-	triGeom.geometry.triangles.maxVertex = 5;
-	triGeom.geometry.triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
-	if ( !buildAs( VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, triGeom, 2, blasBuf, blasScratch, blas ) ) {
-		common->Printf( "VK ray-query self-test: FAIL (BLAS build)\n" );
-		cleanup();
+	RtInstance rtInst = {};
+	rtInst.transform[0] = 1.0f;		// row-major 3x4 identity
+	rtInst.transform[5] = 1.0f;
+	rtInst.transform[10] = 1.0f;
+	rtInst.blas = blasHandle;
+	rtInst.mask = 0xFF;
+	const unsigned long long tlasAddr = BuildTlas( &rtInst, 1 );
+	if ( tlasAddr == 0 ) {
+		common->Printf( "VK ray-query self-test: FAIL (BuildTlas)\n" );
+		DestroyRtScene();
 		return;
 	}
-
-	// one-instance TLAS (identity transform, facing cull off so winding can't hide a hit)
-	VkAccelerationStructureDeviceAddressInfoKHR dai = {};
-	dai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
-	dai.accelerationStructure = blas;
-	VkAccelerationStructureInstanceKHR inst = {};
-	inst.transform.matrix[0][0] = 1.0f;
-	inst.transform.matrix[1][1] = 1.0f;
-	inst.transform.matrix[2][2] = 1.0f;
-	inst.mask = 0xFF;
-	inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-	inst.accelerationStructureReference = pfnGetAsDeviceAddress( device, &dai );
-	if ( !createRaw( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, sizeof( inst ), &inst, instBuf ) ) {
-		common->Printf( "VK ray-query self-test: FAIL (instance buffer alloc)\n" );
-		cleanup();
-		return;
-	}
-	VkAccelerationStructureGeometryKHR instGeom = {};
-	instGeom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
-	instGeom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
-	instGeom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
-	instGeom.geometry.instances.arrayOfPointers = VK_FALSE;
-	instGeom.geometry.instances.data.deviceAddress = instBuf.addr;
-	if ( !buildAs( VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, instGeom, 1, tlasBuf, tlasScratch, tlas ) ) {
-		common->Printf( "VK ray-query self-test: FAIL (TLAS build)\n" );
-		cleanup();
-		return;
-	}
-	dai.accelerationStructure = tlas;
-	VkDeviceAddress tlasAddr = pfnGetAsDeviceAddress( device, &dai );
 
 	// trace the grid from compute; results land in a bound SSBO seeded with sentinels so a
 	// silently-dead dispatch reads as a mismatch, never a coincidental pass
@@ -4072,16 +4229,16 @@ void VulkanBackend::RayQuerySelfTest() {
 	ShaderHandle sh = CreateComputeShader( "cs_rayquerytest", kSrc );
 	if ( sh == 0 ) {
 		common->Printf( "VK ray-query self-test: FAIL (GL_EXT_ray_query compute shader did not compile)\n" );
-		cleanup();
+		DestroyRtScene();
 		return;
 	}
 	struct GpuHit { float t; uint32_t prim; };
 	GpuHit seed[N];
 	for ( int i = 0; i < N; i++ ) { seed[i].t = -2.0f; seed[i].prim = 0xDEADBEEFu; }
-	out = CreateBuffer( BU_STORAGE, N * (int)sizeof( GpuHit ), seed );
+	BufferHandle out = CreateBuffer( BU_STORAGE, N * (int)sizeof( GpuHit ), seed );
 	if ( out == 0 ) {
 		common->Printf( "VK ray-query self-test: FAIL (result buffer alloc)\n" );
-		cleanup();
+		DestroyRtScene();
 		return;
 	}
 	struct { uint32_t tlasLo, tlasHi, count; } pc;
@@ -4099,7 +4256,8 @@ void VulkanBackend::RayQuerySelfTest() {
 	GpuHit got[N];
 	if ( !ReadBuffer( out, got, N * (int)sizeof( GpuHit ) ) ) {
 		common->Printf( "VK ray-query self-test: FAIL (readback failed)\n" );
-		cleanup();
+		DestroyBuffer( out );
+		DestroyRtScene();
 		return;
 	}
 
@@ -4161,7 +4319,8 @@ void VulkanBackend::RayQuerySelfTest() {
 		common->Printf( "VK ray-query self-test: FAIL (%d/%d rays mismatch; first at ray %d: GPU t=%.4f prim=0x%x)\n",
 			mismatches, N, i, got[i].t, got[i].prim );
 	}
-	cleanup();
+	DestroyBuffer( out );
+	DestroyRtScene();
 }
 
 /*
