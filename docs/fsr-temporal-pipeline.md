@@ -364,6 +364,21 @@ top of A2's velocity zeroing. **Validator:** particle-ghosting A/B on a plasma-f
 weapon smear during rapid strafing; user screenshot sign-off.
 
 ### E — preset + menu wiring (VK)
+
+**BUILT (branch `feat/fsr2-dispatch`).** As-built: `fsr` column appended to
+`EnhancementPreset` + matching `DetectEnhancementPreset` compare; **Nightmare only** gets
+`fsr=true`. **Deviation from the plan below: `rhiAA` STAYS SMAA (2) in the Nightmare row**,
+not 0 — the HDR resolve already bypasses FXAA/SMAA whenever FSR2 actually resolved the frame
+(`rbFsrRanThisFrame`), so there is no stacked AA, and keeping SMAA gives GL3 (where `r_fsr`
+is inert) its post-AA fallback on the same preset. The `fsrQuality/renderScale` columns wait
+for the upscaling increment (Native-AA has no scale). Menu wiring shipped earlier and beyond
+the plan: the classic System-menu AA row is backend-aware (MSAA legacy / FXAA+SMAA GL3 /
++FSR2 VK via the `dude_aa` bridge), and the ImGui FSR2 controls (toggle + RCAS + reactive)
+live in Graphics → Antialiasing, with the Debug-tab FSR group keeping only the MV
+infrastructure/debug views. "Ultra Nightmare" stays doc-reserved.
+
+Original plan text:
+
 Keep `r_fsr` a **separate** toggle (do **not** overload `r_rhiAA`, which is shared with GL3 and
 consumed unconditionally in ~8 RHI sites); when `r_fsr` is on and VK, FSR wins and short-circuits
 every `r_rhiAA` post-AA site. Append `fsr`+`fsrQuality/renderScale` columns to `EnhancementPreset`

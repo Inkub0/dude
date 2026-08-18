@@ -2600,6 +2600,13 @@ struct EnhancementPreset {
 	// opaque pass on the budget tier for a marginal win. FSR2 (r_fsr) implies the
 	// velocity buffer regardless of this flag.
 	bool  motionVectors;            // r_motionVectors
+	// FSR2 Native-AA (appended, see note above; R1/E, Vulkan-only, inert elsewhere).
+	// Nightmare only: the temporal resolve that kills D3's specular/normal-map shimmer,
+	// ~1.7 ms GPU at 1440p — exactly what the top tier is for. rhiAA deliberately STAYS
+	// SMAA in the row (deviation from the plan's rhiAA=0): the HDR resolve already
+	// bypasses FXAA/SMAA while FSR2 runs (no stacking), and keeping it gives the GL3
+	// backend — where r_fsr is inert — its SMAA fallback on the same preset.
+	bool  fsr;                      // r_fsr
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2608,13 +2615,13 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, false, true,  false },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, false, true,  false },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, false, true,  true },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, false, true,  true },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, false, true,  false, false },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, false, true,  false, false },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, false, true,  true,  false },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, false, true,  true,  true },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2688,6 +2695,10 @@ static void ApplyEnhancementPreset( int idx )
 	// per-object motion vectors (Vulkan-only; inert on GL3): Ultra/Nightmare, where the
 	// SSR temporal accumulation consumes them and the normal prepass is already funded.
 	r_motionVectors.SetBool( p.motionVectors );
+
+	// FSR2 Native-AA (R1/E; Vulkan-only, inert on GL3): Nightmare only. The resolve
+	// bypasses the row's SMAA while FSR2 runs, so there is no stacked AA.
+	r_fsr.SetBool( p.fsr );
 }
 
 // Return the preset whose full cvar vector the live cvars currently match, or -1
@@ -2736,7 +2747,8 @@ static int DetectEnhancementPreset()
 			r_parallax.GetBool()               == p.parallax &&
 			idMath::Fabs( r_parallaxShadow.GetFloat() - p.parallaxShadow ) < 0.01f &&
 			r_gpuSkinning.GetBool()            == p.gpuSkin &&
-			r_motionVectors.GetBool()          == p.motionVectors;
+			r_motionVectors.GetBool()          == p.motionVectors &&
+			r_fsr.GetBool()                    == p.fsr;
 		if ( match ) {
 			return i;
 		}
@@ -2849,6 +2861,53 @@ static void DrawGroup_Antialiasing()
 			"good balance." );
 		ImGui::EndDisabled();	// FXAA strength gate
 		ImGui::EndDisabled();	// post-process supported gate
+
+		// FSR2 temporal AA (R1; Vulkan only). When on it supersedes the post AA above
+		// (the resolve bypasses FXAA/SMAA — no stacking) and resolves the specular/
+		// normal-map shimmer neither of them can. Default on in the Nightmare preset.
+		{
+			const bool isVulkan = glConfig.rhiBackend && !glConfig.coreProfile;
+			ImGui::BeginDisabled( !isVulkan );
+			bool fsr = r_fsr.GetBool();
+			if ( ImGui::Checkbox( "FSR2 Temporal AA (Vulkan only)", &fsr ) ) {
+				r_fsr.SetBool( fsr );
+			}
+			AddTooltip( "AMD FSR2 in native-resolution mode: temporal accumulation + RCAS sharpening "
+				"that resolves the specular/normal-map shimmer FXAA/SMAA structurally can't (Doom 3's "
+				"signature aliasing). Auto-enables motion vectors + sub-pixel jitter and replaces the "
+				"post antialiasing above while it runs. ~1.7 ms GPU at 1440p. Non-vanilla; Vulkan only "
+				"(docs/fsr-temporal-pipeline.md)." );
+			{
+				ImGui::BeginDisabled( !r_fsr.GetBool() );
+				float sharp = r_fsrSharpness.GetFloat();
+				ImGui::SetNextItemWidth( 220.0f );
+				if ( ImGui::SliderFloat( "RCAS Sharpness", &sharp, 0.0f, 1.0f, "%.2f" ) ) {
+					r_fsrSharpness.SetFloat( sharp );
+				}
+				AddTooltip( "FSR2's built-in sharpening pass, countering the slight softening of any "
+					"temporal accumulation. 0 disables the pass. (r_fsrSharpness)" );
+				bool reactive = r_fsrReactive.GetBool();
+				if ( ImGui::Checkbox( "Reactive Mask", &reactive ) ) {
+					r_fsrReactive.SetBool( reactive );
+				}
+				AddTooltip( "Deghosts additive/translucent content (particles, muzzle flashes, GUI "
+					"screens): an opaque-only snapshot is compared against the final frame, and where "
+					"they diverge FSR2 trusts its history less. Leave on. (r_fsrReactive)" );
+				{
+					ImGui::BeginDisabled( !r_fsrReactive.GetBool() );
+					float rs = r_fsrReactiveScale.GetFloat();
+					ImGui::SetNextItemWidth( 220.0f );
+					if ( ImGui::SliderFloat( "Reactive Strength", &rs, 0.0f, 2.0f, "%.2f" ) ) {
+						r_fsrReactiveScale.SetFloat( rs );
+					}
+					AddTooltip( "Higher = less ghosting on particles but more shimmer on them. "
+						"(r_fsrReactiveScale)" );
+					ImGui::EndDisabled();
+				}
+				ImGui::EndDisabled();	// !r_fsr
+			}
+			ImGui::EndDisabled();	// !isVulkan
+		}
 		EndSettingsGroup();
 	}
 }
@@ -3741,7 +3800,7 @@ static void DrawDbgGroup_FSR()
 	// rhiBackend && !coreProfile (RenderSystem.h; see the running-backend combo above).
 	const bool isVulkan = glConfig.rhiBackend && !glConfig.coreProfile;
 	if ( BeginSettingsGroup( "FSR / Motion Vectors (Vulkan only)" ) ) {
-	ImGui::TextDisabled( "Motion vectors + sub-pixel jitter — the temporal inputs for FSR2 (in progress)." );
+	ImGui::TextDisabled( "Motion-vector infrastructure + debug views. The FSR2 switch is in Graphics -> Antialiasing." );
 	ImGui::Spacing();
 
 	if ( !isVulkan ) {
@@ -3749,42 +3808,8 @@ static void DrawDbgGroup_FSR()
 	}
 	ImGui::BeginDisabled( !isVulkan );
 
-	bool fsr = r_fsr.GetBool();
-	if ( ImGui::Checkbox( "FSR2 Native-AA (r_fsr)", &fsr ) ) {
-		r_fsr.SetBool( fsr );
-	}
-	AddTooltip( "AMD FSR2 temporal anti-aliasing at native resolution (R1/C2). Resolves the "
-		"specular/normal-map shimmer SMAA can't touch. Auto-enables motion vectors + sub-pixel "
-		"jitter, forces the HDR scene buffer, and replaces FXAA/SMAA with FSR2's RCAS sharpen." );
-
-	{
-		ImGui::BeginDisabled( !r_fsr.GetBool() );
-		float sharp = r_fsrSharpness.GetFloat();
-		if ( ImGui::SliderFloat( "RCAS Sharpness (r_fsrSharpness)", &sharp, 0.0f, 1.0f, "%.2f" ) ) {
-			r_fsrSharpness.SetFloat( sharp );
-		}
-		AddTooltip( "FSR2's built-in sharpening pass, countering the slight softening of any "
-			"temporal accumulation. 0 disables the pass." );
-		bool reactive = r_fsrReactive.GetBool();
-		if ( ImGui::Checkbox( "Reactive Mask (r_fsrReactive)", &reactive ) ) {
-			r_fsrReactive.SetBool( reactive );
-		}
-		AddTooltip( "Deghosts additive/translucent content (particles, muzzle flashes, GUI "
-			"screens): an opaque-only snapshot is compared against the final frame, and where "
-			"they diverge FSR2 trusts its history less (R1/D auto-reactive)." );
-		{
-			ImGui::BeginDisabled( !r_fsrReactive.GetBool() );
-			float rs = r_fsrReactiveScale.GetFloat();
-			if ( ImGui::SliderFloat( "Reactive Strength (r_fsrReactiveScale)", &rs, 0.0f, 2.0f, "%.2f" ) ) {
-				r_fsrReactiveScale.SetFloat( rs );
-			}
-			AddTooltip( "Higher = less ghosting on particles but more shimmer on them." );
-			ImGui::EndDisabled();
-		}
-		ImGui::EndDisabled();
-	}
-	ImGui::Spacing();
-
+	// The user-facing FSR2 switch (+ sharpness/reactive) lives in Graphics -> Antialiasing;
+	// this group keeps the motion-vector infrastructure + debug views only.
 	bool mv = r_motionVectors.GetBool();
 	if ( ImGui::Checkbox( "Motion Vectors (r_motionVectors)", &mv ) ) {
 		r_motionVectors.SetBool( mv );
