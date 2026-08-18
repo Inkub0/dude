@@ -3613,9 +3613,9 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// R1/B: cancel the per-frame projection jitter out of the velocity so it stays real motion
 	// (FSR2 runs MOTION_VECTORS_JITTER_CANCELLATION unset). The jitter is a depth-independent
 	// uniform screen shift, so one per-view correction (jitter_cur - jitter_prev)/viewport in
-	// +Y-up UV, added to every velocity, is exact. viewDef->jitter is 0 when r_temporalJitter is
-	// off, so this is 0 (a no-op) unless jitter is active. Advanced once per frame (this prepass
-	// runs only for the primary fullscreen view).
+	// +Y-up UV, added to every velocity, is exact. viewDef->jitter is 0 when no jitter is active
+	// (jitter is driven by r_fsr on VK, tr_main.cpp), so this is 0 (a no-op) otherwise.
+	// Advanced once per frame (this prepass runs only for the primary fullscreen view).
 	float jitterCorr[2] = { 0.0f, 0.0f };
 	if ( velWants ) {
 		jitterCorr[0] = ( viewDef->jitter[0] - rhiPrevJitter[0] ) / (float)w;
@@ -5463,8 +5463,8 @@ rhi::RenderTargetHandle RB_RHI_VelocityTargetThisView( void ) {
 
 void RB_RHI_MotionVectorDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int mode = r_mvDebug.GetInteger();
-	if ( mode <= 0 || !r_motionVectors.GetBool() || !R_BackendSupportsEnhancements() ) {
-		return;
+	if ( mode <= 0 || !( r_motionVectors.GetBool() || r_fsr.GetBool() ) || !R_BackendSupportsEnhancements() ) {
+		return;		// velocity is produced by r_motionVectors OR implied by r_fsr (C2)
 	}
 	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN
 	     || !rhiNormalReadyThisView || !rhiNormalVel || !rhiNormalResultRT ) {

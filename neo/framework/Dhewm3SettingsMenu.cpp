@@ -3786,14 +3786,6 @@ static void DrawDbgGroup_FSR()
 
 	ImGui::EndDisabled();	// !r_motionVectors
 
-	bool jitter = r_temporalJitter.GetBool();
-	if ( ImGui::Checkbox( "Temporal Jitter (r_temporalJitter)", &jitter ) ) {
-		r_temporalJitter.SetBool( jitter );
-	}
-	AddTooltip( "Sub-pixel Halton(2,3) projection jitter per rendered frame — the temporal-supersampling "
-		"input for FSR2 (R1/B). On its own (no FSR2 resolve yet) the image just shimmers; it pays off once "
-		"FSR2 lands. Off = un-jittered projection, unchanged." );
-
 	ImGui::EndDisabled();	// !isVulkan
 	EndSettingsGroup();
 	}

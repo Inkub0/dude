@@ -1183,7 +1183,6 @@ extern idCVar r_shadowPolygonOffset;	// bias value added to depth test for stenc
 extern idCVar r_shadowPolygonFactor;	// scale value for stencil shadow drawing
 
 extern idCVar r_jitter;					// randomly subpixel jitter the projection matrix
-extern idCVar r_temporalJitter;			// Halton(2,3) sub-pixel jitter per frame for temporal AA / FSR2 (R1/B)
 extern idCVar r_lightSourceRadius;		// for soft-shadow sampling
 extern idCVar r_lockSurfaces;
 extern idCVar r_orderIndexes;			// perform index reorganization to optimize vertex use

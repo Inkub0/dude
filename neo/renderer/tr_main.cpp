@@ -1316,10 +1316,12 @@ void R_SetupProjection( viewDef_t * viewDef ) {
 	// (tr.frameCount, correct under com_interpolate) so each frame samples a fresh offset.
 	// Legacy r_jitter is left untouched as an independent source; both default off -> no jitter.
 	float jitterPixX = 0.0f, jitterPixY = 0.0f;
-	// r_fsr (R1/C2) implies the temporal jitter: FSR2's supersampling comes from the
-	// jittered sample positions; without them it degrades to a plain accumulation blur.
-	const bool wantTemporalJitter = ( r_temporalJitter.GetBool()
-			|| ( r_fsr.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) )
+	// The temporal Halton jitter is driven solely by r_fsr (R1/C2, Vulkan): FSR2's
+	// supersampling comes from the jittered sample positions, and it is the only
+	// consumer that resolves them (the standalone r_temporalJitter toggle from
+	// increment B was retired once C2 was verified — alone it just shimmers).
+	const bool wantTemporalJitter = r_fsr.GetBool()
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN
 		&& !viewDef->isSubview && !tr.takingEnvProbe && !tr.takingScreenshot;
 	if ( wantTemporalJitter ) {
 		const int idx = ( tr.frameCount % R_JITTER_PHASE ) + 1;		// Halton is 1-indexed
