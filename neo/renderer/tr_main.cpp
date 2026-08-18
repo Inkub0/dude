@@ -1280,6 +1280,21 @@ void R_SetViewMatrix( viewDef_t *viewDef ) {
 	myGlMultMatrix( viewerMatrix, s_flipMatrix, world->modelViewMatrix );
 }
 
+// Radical-inverse Halton sample in [0,1) — the low-discrepancy sequence FSR2 uses for its
+// sub-pixel jitter (docs/fsr-temporal-pipeline.md B). Base 2 on X, base 3 on Y. 1-indexed.
+static float R_Halton( int index, int base ) {
+	float f = 1.0f, r = 0.0f;
+	while ( index > 0 ) {
+		f /= (float)base;
+		r += f * (float)( index % base );
+		index /= base;
+	}
+	return r;
+}
+
+// Native-AA (render == display) jitter phase count; matches ffxFsr2GetJitterPhaseCount at scale 1.0.
+static const int R_JITTER_PHASE = 8;
+
 /*
 ===============
 R_SetupProjection
@@ -1294,15 +1309,29 @@ void R_SetupProjection( viewDef_t * viewDef ) {
 	float	jitterx, jittery;
 	static	idRandom random;
 
-	// random jittering is usefull when multiple
-	// frames are going to be blended together
-	// for motion blurred anti-aliasing
-	if ( r_jitter.GetBool() ) {
-		jitterx = random.RandomFloat();
-		jittery = random.RandomFloat();
-	} else {
-		jitterx = jittery = 0;
+	// sub-pixel projection jitter, in PIXELS ([-0.5,0.5] Halton, or [0,1) legacy). Stored on the
+	// viewDef for FSR2 (C2); 0 when no jitter is active so projectionMatrix stays un-jittered.
+	// The temporal Halton jitter (R1/B) is the FSR2 supersampling input — main fullscreen view
+	// only (a jittered subview/probe/screenshot would misalign), indexed per RENDERED frame
+	// (tr.frameCount, correct under com_interpolate) so each frame samples a fresh offset.
+	// Legacy r_jitter is left untouched as an independent source; both default off -> no jitter.
+	float jitterPixX = 0.0f, jitterPixY = 0.0f;
+	const bool wantTemporalJitter = r_temporalJitter.GetBool()
+		&& !viewDef->isSubview && !tr.takingEnvProbe && !tr.takingScreenshot;
+	if ( wantTemporalJitter ) {
+		const int idx = ( tr.frameCount % R_JITTER_PHASE ) + 1;		// Halton is 1-indexed
+		jitterPixX = R_Halton( idx, 2 ) - 0.5f;
+		jitterPixY = R_Halton( idx, 3 ) - 0.5f;
+	} else if ( r_jitter.GetBool() ) {
+		// random jittering is usefull when multiple frames are going to be blended together
+		// for motion blurred anti-aliasing (order preserved: x then y advances the RNG as before)
+		jitterPixX = random.RandomFloat();
+		jitterPixY = random.RandomFloat();
 	}
+	jitterx = jitterPixX;
+	jittery = jitterPixY;
+	viewDef->jitter[0] = jitterPixX;
+	viewDef->jitter[1] = jitterPixY;
 
 	//
 	// set up projection matrix
@@ -1350,6 +1379,15 @@ void R_SetupProjection( viewDef_t * viewDef ) {
 	viewDef->projectionMatrix[7] = 0;
 	viewDef->projectionMatrix[11] = -1;
 	viewDef->projectionMatrix[15] = 0;
+
+	// Un-jittered copy for the temporal consumers (docs/fsr-temporal-pipeline.md A1/B).
+	// Only the frustum-shear terms [8]/[9] carry the jitter (this frustum is symmetric, so
+	// they are 0 un-jittered); everything else is jitter-independent. Subtracting the jitter
+	// back out of xmin/xmax/ymin/ymax is exactly a no-op when r_jitter is off (jitterx/y == 0),
+	// so projectionMatrix and unjitteredProjectionMatrix are bit-for-bit identical today.
+	memcpy( viewDef->unjitteredProjectionMatrix, viewDef->projectionMatrix, sizeof( viewDef->projectionMatrix ) );
+	viewDef->unjitteredProjectionMatrix[8] = ( ( xmax - jitterx ) + ( xmin - jitterx ) ) / width;
+	viewDef->unjitteredProjectionMatrix[9] = ( ( ymax - jittery ) + ( ymin - jittery ) ) / height;
 }
 
 /*

@@ -811,6 +811,15 @@ if(DHEWM3_VULKAN)
 	# Phase 4 (docs/vulkan-backend.md): the Vulkan backend lives in rhi/vk/,
 	# compiled only under the option (needs Vulkan headers + C++17)
 	list(APPEND src_renderer renderer/rhi/vk/VulkanBackend.cpp)
+	# Vendored AMD FidelityFX FSR2 (MIT) for the temporal pipeline / FSR2 Native-AA
+	# (docs/fsr-temporal-pipeline.md). VK-only: core API + VK backend + prebuilt SPIR-V
+	# permutation headers, compiled inline (imgui-style) so there is no build-time shader
+	# generation step. gcc/clang portability shims live in libs/fsr2/ffx_dude_compat.h.
+	list(APPEND src_renderer
+		libs/fsr2/ffx_fsr2.cpp
+		libs/fsr2/ffx_assert.cpp
+		libs/fsr2/vk/ffx_fsr2_vk.cpp
+		libs/fsr2/vk/shaders/ffx_fsr2_shaders_vk.cpp)
 endif()
 
 always_optimize_sourcefile(renderer/stblib_impls.c)
@@ -1498,6 +1507,11 @@ if(CORE)
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} PREFIX neo FILES ${src_core} ${src_sys_base} ${src_sys_core} ${src_imgui} ${src_editor_tools})
 
 	target_include_directories(${DHEWM3BINARY} PRIVATE "${CMAKE_SOURCE_DIR}/libs/imgui")
+
+if(DHEWM3_VULKAN)
+	# vendored FSR2 headers so the Vulkan backend can #include "ffx_fsr2.h" / "vk/ffx_fsr2_vk.h"
+	target_include_directories(${DHEWM3BINARY} PRIVATE "${CMAKE_SOURCE_DIR}/libs/fsr2")
+endif()
 
 if(HARDLINK_GAME)
 	set_target_properties(${DHEWM3BINARY} PROPERTIES COMPILE_DEFINITIONS "${TOOLS_DEFINES}")

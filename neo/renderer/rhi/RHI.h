@@ -48,7 +48,8 @@ enum ImageFormat {
 	IF_DEPTH24_STENCIL8,	// backend may substitute D32S8
 	IF_RGBA16F,				// Tier-3 HDR target (post stack)
 	IF_DEPTH24,				// depth-only; shadow-map target, sampler2DShadow-ready
-	IF_R16F					// single-channel half-float; SSAO linear-depth mip (Phase 2)
+	IF_R16F,				// single-channel half-float; SSAO linear-depth mip (Phase 2)
+	IF_RG16F				// two-channel half-float; motion-vector / velocity MRT (R1/A0)
 };
 
 enum VertexLayout {
@@ -299,6 +300,9 @@ public:
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt ) = 0;
 	// second color attachment of a colorCount-2 color+depth target (0 if absent)
 	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle rt ) = 0;
+	// third color attachment (RG16F velocity MRT, R1/A2). Non-pure: only the VK
+	// 3-MRT velocity gbuffer has one; every other target and the GL3 backend return 0.
+	virtual ImageHandle			GetRenderTargetImage3( RenderTargetHandle rt ) { return 0; }
 
 	// per-draw uniform ring: writes `size` bytes and returns the aligned
 	// offset (+ the ring's buffer in *buffer) for DrawArgs::uniformBuffer/
