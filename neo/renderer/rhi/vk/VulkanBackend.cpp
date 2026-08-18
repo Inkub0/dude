@@ -4018,12 +4018,16 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 	// -renderW and Y's two negations cancel to +renderH.
 	dd.motionVectorScale.x = -(float)w;
 	dd.motionVectorScale.y = (float)h;
-	// Jitter, same coordinate reasoning: the engine's applied jitter is +Y-up pixels,
-	// FSR2's convention is +Y-down (its jitterY is applied proj[2][1] -= 2*jy/h), so X
-	// passes through and Y negates. (Validated empirically: a wrong sign shows as a
-	// one-pixel vibration / soft output on a static scene, wrong MV scale as smear.)
-	dd.jitterOffset.x = args.jitterX;
-	dd.jitterOffset.y = -args.jitterY;
+	// Jitter: FSR2's fJitter is the CONTENT's displacement in storage pixels (top-left,
+	// +y down): the accumulate pass samples the jittered input at fHrUv + fJitter/Size
+	// (ffx_fsr2_accumulate.h). The engine shifts the frustum WINDOW by +jitter
+	// (tr_main.cpp xmin/xmax += j), and with GL-style z_eye NEGATIVE in front the
+	// (r+l)/w term flips sign after the perspective divide — so the content moves
+	// OPPOSITE the applied jitter: -jx columns, and -jy in NDC+y-up = +jy rows under
+	// the negative-viewport flip (row 0 = top). Hence {-jx, +jy}. (Empirically gated:
+	// the inverted sign showed as micro-boiling on a static scene, 2026-08-18.)
+	dd.jitterOffset.x = -args.jitterX;
+	dd.jitterOffset.y = args.jitterY;
 	dd.renderSize.width = w;
 	dd.renderSize.height = h;
 	dd.enableSharpening = args.sharpness >= 0.0f;
