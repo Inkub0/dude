@@ -70,6 +70,11 @@ static struct {
 	// receiver must sample with those planes and take its compare depth from the virtual
 	// falloff plane (shader mode 3). Only meaningful while lightShadowMapped is set.
 	bool				lightSunShadow;
+	// RT sun shadows (R3): this light took the sun route WITHOUT a rendered map - the
+	// virtual-map fit declined (light inside the fitted view sphere) but the ray path
+	// serves it anyway. rhiSunPlanes/shadowImage are stale for this light; only shader
+	// mode 4 is valid, and the receiver fill downgrades to unshadowed if the TLAS died.
+	bool				lightRtOnly;
 	bool				lightShadowCube;
 	rhi::ImageHandle	shadowCubeImage;
 	// static/dynamic split (r_shadowMapCacheSplit): when a cached static point light also
@@ -1196,6 +1201,11 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 					parms.rtParms[3] = 100000.0f;
 					rtSun = true;
 				}
+			}
+			if ( ictx.lightRtOnly && !rtSun ) {
+				// the RT-only route lost its TLAS mid-frame: rhiSunPlanes are stale for
+				// this light, so unshadowed beats sampling a map that was never fitted
+				parms.shadowParms[0] = 0.0f;
 			}
 		} else if ( ictx.lightShadowMapped ) {
 			parms.shadowParms[0] = 1.0f;		// projected/spot: 2D map on unit 7
@@ -5683,6 +5693,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			// Reading lightDef->parms here is a read-only frontend query.
 			ictx.lightShadowMapped = false;
 			ictx.lightSunShadow = false;
+			ictx.lightRtOnly = false;
 			ictx.shadowImage = 0;
 			ictx.lightShadowCube = false;
 			ictx.shadowCubeImage = 0;
@@ -5747,6 +5758,19 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 					if ( RB_RHI_ShadowMapPassSun( r, vLight, shadowMapProg ) ) {
 						ictx.lightShadowMapped = true;
 						ictx.lightSunShadow = true;
+						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
+						dbgShadowMapped++;
+					} else if ( r_rtSunShadows.GetBool() && ictx.interactionRtProg != 0
+							&& r->GetTlasAddress() != 0 ) {
+						// RT sun shadows (R3): the virtual-map fit declined - the light
+						// sits inside the fitted view sphere (low "sun" omnis, e.g.
+						// commoutside) - but the ray path needs no fit geometry: one ray
+						// toward the light origin serves any light. Take the sun route
+						// RT-only; mode 4 samples no map, and a zero unit-7 handle takes
+						// the backend default binding exactly like mode-0 lights.
+						ictx.lightShadowMapped = true;
+						ictx.lightSunShadow = true;
+						ictx.lightRtOnly = true;
 						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
 						dbgShadowMapped++;
 					}
