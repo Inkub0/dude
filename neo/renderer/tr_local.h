@@ -381,6 +381,15 @@ typedef struct viewDef_s {
 	renderView_t		renderView;
 
 	float				projectionMatrix[16];
+	// projectionMatrix with any sub-pixel jitter removed (bit-identical to projectionMatrix
+	// when r_jitter is off). Temporal consumers (SSAO/SSR reprojection, motion vectors, FSR2)
+	// must reproject against the un-jittered world->clip or the frame jitter smears the
+	// history. See docs/fsr-temporal-pipeline.md (increments A1/B).
+	float				unjitteredProjectionMatrix[16];
+	// sub-pixel projection jitter applied THIS frame, in pixels ([-0.5,0.5], +Y-up), 0 when off
+	// (docs/fsr-temporal-pipeline.md B). Halton(2,3) per rendered frame; handed to FSR2's
+	// jitterOffset in C2 so it can undo the jitter it accumulates. Main fullscreen view only.
+	float				jitter[2];
 	viewEntity_t		worldSpace;
 
 	idRenderWorldLocal *renderWorld;
@@ -869,6 +878,10 @@ extern idCVar r_postFilmGrainSize;		// grain cell size in pixels (1 = per-pixel)
 extern idCVar r_postChromaticAberration;	// chromatic aberration strength (0 = off)
 extern idCVar r_rhiAA;					// post-resolve antialiasing (0 = off, 1 = FXAA)
 extern idCVar r_hdr;					// HDR float scene buffer (removes banding); opengl3/Vulkan only
+extern idCVar r_fsr;					// AMD FSR2 temporal AA, Native-AA mode (Vulkan only, R1/C2)
+extern idCVar r_fsrSharpness;			// FSR2 RCAS sharpening amount (0 = off)
+extern idCVar r_fsrReactive;			// FSR2 auto-reactive mask: deghost additive/translucent content (R1/D)
+extern idCVar r_fsrReactiveScale;		// FSR2 auto-reactive mask strength
 extern idCVar r_fxaaStrength;			// FXAA subpixel smoothing amount (0 = edge-only .. 1)
 
 // DUDE Phase 3.5 specular tuning — GL3/Vulkan interaction shader only, vanilla at default
@@ -981,6 +994,10 @@ extern idCVar r_ssaoSpecular;			// also attenuate specular in occluded areas
 extern idCVar r_ssaoDebug;				// 1=show AO buffer, 2=show bent normals
 extern idCVar r_ssaoTemporal;			// accumulate AO across frames via camera reprojection
 extern idCVar r_ssaoTemporalFeedback;	// temporal history weight (0..0.97)
+extern idCVar r_temporalResetDist;		// view-origin jump (world units) that resets temporal history (cut/teleport); 0 = never
+extern idCVar r_motionVectors;			// VK: per-object screen-velocity MRT in the normal prepass (R1/A2, feeds FSR2 / temporal SSAO+SSR)
+extern idCVar r_mvDebug;				// visualize the velocity buffer: 0=off, 1=direction, 2=magnitude
+extern idCVar r_mvDebugScale;			// live gain multiplier for the r_mvDebug overlay (crank up to see slow motion)
 extern idCVar r_ssaoDepthMip;			// march the horizon search over a prefiltered linear-depth mip chain (Phase 1)
 extern idCVar r_ssaoDepthMipBias;		// depth-mip LOD aggressiveness (log2(stepPix * bias))
 extern idCVar r_ssaoDepthMipMaxLod;		// depth-mip coarseness cap (kills far-tap halos)

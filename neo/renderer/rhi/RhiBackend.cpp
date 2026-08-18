@@ -768,6 +768,7 @@ static bool						rbHdrAaFloat = false;			// rhiHdrAaRT is RGBA16F vs RGBA8 — m
 static rhi::ImageHandle			rbEyeExposureImg = 0;			// B1 eye-adapt: 1x1 adapted exposure, measured at end of the primary 3D view, sampled by the resolve
 static rhi::ImageHandle			rbBloomImg = 0;					// Phase C bloom: half-res glow, produced at end of the primary 3D view, added by the resolve
 static bool						rbHdrActiveThisFrame = false;	// scene post-target bound *right now* (view pass)
+static bool						rbFsrRanThisFrame = false;		// FSR2 resolved this frame's scene (R1/C2): RCAS replaces FXAA/SMAA at the resolve
 static bool						rbHdrFrameActive = false;		// this whole frame is a true float-HDR frame
 static bool						rbBerserkFrame = false;			// berserk material seen this frame → radial-blur the _scratch blit
 static bool						rbHelltimeFrame = false;		// bloodorbN hell-time material seen this frame
@@ -838,6 +839,7 @@ static bool RB_RHI_FrameHasWorldScene( const emptyCommand_t *cmds ) {
 
 static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	rbHdrActiveThisFrame = false;
+	rbFsrRanThisFrame = false;
 	rbHdrFrameActive = false;
 
 	// Tonemap follows the HDR toggle (the curve is meaningless — and unreachable in the greyed-out
@@ -873,7 +875,13 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 		return;
 	}
 
-	const bool wantHdr = r_hdr.GetBool() && R_BackendSupportsEnhancements();
+	// r_fsr (R1/C1, Vulkan only) forces the offscreen RGBA16F scene buffer on even with r_hdr off:
+	// FSR2 (C2) wants an HDR scene, so r_fsr rides the same route-scene-into-rhiHdrRT path r_hdr uses
+	// (which already de-bands and gates worldless frames out). At C1 this is the whole effect —
+	// bit-identical to r_hdr on; the scene/HUD reorder + the FSR2 dispatch come in C2.
+	const bool wantHdr = ( r_hdr.GetBool()
+	                       || ( r_fsr.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) )
+	                     && R_BackendSupportsEnhancements();
 
 	// Off-HDR post (Vulkan only): the GL backend runs film grain / chromatic
 	// aberration per 3D view and gamma as a swap-time pass over the backbuffer, but
@@ -1159,7 +1167,9 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 
 	// Fused SMAA resolve (chroma off): the neighborhood blend + grain/gamma tail in one pass,
 	// dropping the rhiHdrAaRT round-trip. Falls through to the classic path when ineligible.
-	if ( RB_RHI_HdrResolveSmaaFused( r, w, h ) ) {
+	// When FSR2 resolved this frame (R1/C2) its RCAS replaces FXAA/SMAA entirely — stacking
+	// a second AA over the temporally-resolved image only softens it.
+	if ( !rbFsrRanThisFrame && RB_RHI_HdrResolveSmaaFused( r, w, h ) ) {
 		return;
 	}
 
@@ -1175,7 +1185,7 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	// scratch buffer doesn't exist and we read the scene buffer directly. Mode 2 = SMAA,
 	// falling back to FXAA if its shaders/targets are unavailable.
 	rhi::RenderTargetHandle sourceRT = rhiHdrRT;
-	if ( r_rhiAA.GetInteger() > 0 && rhiHdrAaRT ) {
+	if ( !rbFsrRanThisFrame && r_rhiAA.GetInteger() > 0 && rhiHdrAaRT ) {
 		if ( r_rhiAA.GetInteger() != 2 || !RB_RHI_HdrSmaa( r ) ) {
 			RB_RHI_HdrFxaa( r );
 		}
@@ -3182,6 +3192,32 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 
 /*
 =============
+RB_RHI_FsrCaptureOpaque
+
+R1/D: snapshot the opaque scene for FSR2's auto-reactive mask, at the opaque/translucent
+split of the primary fullscreen view. Only when this frame will actually dispatch FSR2
+(same conditions as the dispatch site) — otherwise the copy is wasted bandwidth.
+=============
+*/
+static void RB_RHI_FsrCaptureOpaque( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !r_fsr.GetBool() || !r_fsrReactive.GetBool() || !rbHdrActiveThisFrame || !rhiHdrRT
+	     || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		return;
+	}
+	if ( !viewDef->viewEntitys || viewDef->isSubview ) {
+		return;
+	}
+	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
+		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
+		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+	if ( !fullscreenView ) {
+		return;
+	}
+	r->Fsr2CaptureOpaque( rhiHdrRT );
+}
+
+/*
+=============
 RB_RHI_DrawView
 =============
 */
@@ -3245,11 +3281,15 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		if ( !ssrDone && drawSurfs[i]->material->GetSort() > SS_DECAL ) {
 			ssrDone = true;
 			RB_RHI_ScreenSpaceReflections( r, viewDef );
+			// R1/D: snapshot the opaque scene (incl. the SSR composite — reflections live on
+			// opaque surfaces) for FSR2's auto-reactive mask, before particles/blends draw
+			RB_RHI_FsrCaptureOpaque( r, viewDef );
 		}
 		RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, mvp );
 	}
 	if ( !ssrDone ) {
 		RB_RHI_ScreenSpaceReflections( r, viewDef );	// view had no translucent surfaces
+		RB_RHI_FsrCaptureOpaque( r, viewDef );			// fog/post still draw after this point
 	}
 
 	// fog and blend lights
@@ -3298,6 +3338,40 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		// weapon, on both backends and under HDR. Zero cost unless a reload is easing
 		// r_weaponReloadFocus above 0 (idPlayerView writes it).
 		RB_RHI_DepthOfField( r, viewDef );
+		// R1/C2: FSR2 Native-AA temporal resolve. Reads the pre-tonemap HDR scene, its
+		// depth, and A2's per-object velocity; the backend writes the resolved image back
+		// over rhiHdrRT (copy-back, Native-AA-exact), so the eye-adapt/bloom measurement
+		// below and everything after — HUD composite, tonemap, grain — consume the
+		// stabilised scene. VK-only; inert when the velocity MRT wasn't produced.
+		if ( r_fsr.GetBool() && rbHdrActiveThisFrame && rhiHdrRT
+		     && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+			const rhi::RenderTargetHandle velRT = RB_RHI_VelocityTargetThisView();
+			if ( velRT != 0 ) {
+				// wall-clock delta between dispatches (FSR2 wants ms; menus/paused frames
+				// still advance it, which is correct — history ages in real time)
+				static int fsrPrevMs = 0;
+				const int nowMs = Sys_Milliseconds();
+				float dtMs = ( fsrPrevMs > 0 ) ? (float)( nowMs - fsrPrevMs ) : 16.6f;
+				fsrPrevMs = nowMs;
+				dtMs = idMath::ClampFloat( 0.1f, 200.0f, dtMs );
+
+				rhi::Fsr2DispatchArgs fa;
+				memset( &fa, 0, sizeof( fa ) );
+				fa.sceneRT = rhiHdrRT;
+				fa.velocityRT = velRT;
+				fa.jitterX = viewDef->jitter[0];
+				fa.jitterY = viewDef->jitter[1];
+				fa.frameTimeMs = dtMs;
+				fa.fovYRadians = DEG2RAD( viewDef->renderView.fov_y );
+				fa.zNear = r_znear.GetFloat();
+				fa.reset = RB_RHI_TemporalFsrReset( viewDef );
+				fa.sharpness = r_fsrSharpness.GetFloat() > 0.0f ? r_fsrSharpness.GetFloat() : -1.0f;
+				// auto-reactive (R1/D): only meaningful when this frame's opaque snapshot was
+				// captured (the backend also guards on that); < 0 disables
+				fa.reactiveScale = r_fsrReactive.GetBool() ? r_fsrReactiveScale.GetFloat() : -1.0f;
+				rbFsrRanThisFrame = r->RunFsr2( fa );
+			}
+		}
 		// HDR eye adaptation (Phase B1): measure the SCENE luminance HERE — end of the primary
 		// 3D view, before the HUD / console / menus are composited into the HDR buffer — so the
 		// adapted exposure tracks the world, not the UI. The resolve samples rbEyeExposureImg.
@@ -3307,6 +3381,8 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 			// half-res glow the resolve adds before the tonemap.
 			rbBloomImg = RB_RHI_Bloom( r, r->GetRenderTargetImage( rhiHdrRT ) );
 		}
+		// r_mvDebug: overlay the per-object velocity buffer (R1/A2; VK-only, no-op otherwise)
+		RB_RHI_MotionVectorDebugOverlay( r, viewDef );
 	}
 
 	// debug visualization (r_showTris, r_showNormals, debug lines/polygons, …)
@@ -3366,6 +3442,12 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 		case RC_NOP:
 			break;
 		case RC_DRAW_VIEW:
+			// r_fsr (R1/C2): the FSR2 dispatch runs INSIDE the primary world view's DrawView
+			// (after DoF, before the eye-adapt/bloom measurement) and copies its resolved
+			// output back over rhiHdrRT — so the frame structure here is unchanged: HUD
+			// views still composite into the HDR buffer after the world view, and the
+			// single resolve at swap tonemaps scene+HUD together (no reorder; the
+			// display-res composite split waits for the upscaling increment).
 			RB_RHI_DrawView( r, ((const drawSurfsCommand_t *)cmds)->viewDef );
 			break;
 		case RC_SET_BUFFER: {

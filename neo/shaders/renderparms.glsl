@@ -105,4 +105,10 @@ UBO_BINDING(0) uniform RenderParams {
 	vec4 u_shadowFalloffS;       // DUDE sun shadows: the virtual projection's depth plane —
 	                            // the compare reference for the mode-3 (sun) shadow lookup.
 	                            // Filled only on the sun path (0 otherwise).
+
+	mat4 u_prevMvpMatrix;        // DUDE motion vectors (docs/fsr-temporal-pipeline.md R1/A2): the
+	                            // PREVIOUS rendered frame's model->clip for this surface's space
+	                            // (un-jittered). gbuffer.{vert,tese} write the per-object screen
+	                            // velocity (currUV - prevUV, +Y-up) into the 3rd MRT. Filled only by
+	                            // the VK normal prepass when r_motionVectors is on; 0 elsewhere.
 };

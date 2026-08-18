@@ -66,6 +66,17 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "renderer/rhi/RenderParams.h"	// M6: DrawImmediate fills the generic UBO
 #include "renderer/rhi/MaterialIR.h"		// IR_Purge on shader-cache lifecycle
 #include "renderer/rhi/vk/VulkanImGui.h"	// M6: ImGui glue (impl at the end of this TU)
+#include "ffx_fsr2.h"						// vendored FidelityFX FSR2 (docs/fsr-temporal-pipeline.md, R1)
+#include "vk/ffx_fsr2_vk.h"					// FSR2 Vulkan backend init (against our VkDevice)
+
+// auto-reactive mask flags (R1/D): CPU/shader ABI values from the vendored
+// shaders/ffx_fsr2_resources.h (a GLSL-shared header the C API doesn't re-export)
+#ifndef FFX_FSR2_AUTOREACTIVEFLAGS_APPLY_TONEMAP
+#define FFX_FSR2_AUTOREACTIVEFLAGS_APPLY_TONEMAP		1
+#define FFX_FSR2_AUTOREACTIVEFLAGS_APPLY_INVERSETONEMAP	2
+#define FFX_FSR2_AUTOREACTIVEFLAGS_APPLY_THRESHOLD		4
+#define FFX_FSR2_AUTOREACTIVEFLAGS_USE_COMPONENTS_MAX	8
+#endif
 
 #ifndef IMGUI_DISABLE
   #include "../../../libs/imgui/imgui.h"
@@ -93,6 +104,10 @@ static idCVar r_vkGpuTime( "r_vkGpuTime", "0", CVAR_RENDERER | CVAR_BOOL,
 
 static idCVar r_vkComputeTest( "r_vkComputeTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: run the compute-lane self-test (dispatch a kernel doubling a storage buffer, read back, verify) and print PASS/FAIL. Set to 1 to trigger (docs/gpu-offload-plan.md Phase 1)" );
+static idCVar r_fsr2Test( "r_fsr2Test", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: FSR2 bring-up self-test - size the scratch, build the FSR2 VK interface, create a Native-AA FSR2 context (no dispatch), destroy it, and print PASS/FAIL. Set to 1 to trigger (docs/fsr-temporal-pipeline.md, R1/C0)" );
+static idCVar r_mrt3Test( "r_mrt3Test", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: MRT plumbing self-test - create + destroy a 3-attachment velocity gbuffer (RGBA8 normal + RGBA8 SSR + RG16F velocity + depth, a distinct pass class) and print PASS/FAIL. Proves RG16F color attachments work on this driver. Set to 1 to trigger (docs/fsr-temporal-pipeline.md, R1/A0)" );
 
 static idCVar r_vkIndirectTest( "r_vkIndirectTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: route every indexed draw through the DrawIndexedIndirect primitive (a per-draw 1-command indirect ring) instead of vkCmdDrawIndexed. A pixel-identical A/B validating the Phase-3 indirect-draw seed (docs/gpu-offload-plan.md)" );
@@ -182,6 +197,7 @@ public:
 	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt );
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt );
 	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle rt );
+	virtual ImageHandle			GetRenderTargetImage3( RenderTargetHandle rt );
 
 	virtual int		AllocUniforms( const void *data, int size, BufferHandle *buffer );
 	virtual int		AllocVertices( const void *data, int size, BufferHandle *buffer );
@@ -201,6 +217,8 @@ public:
 	}
 	virtual void	Dispatch( const ComputeArgs &args );
 	virtual void	DispatchSync( const ComputeArgs &args );
+	virtual bool	RunFsr2( const Fsr2DispatchArgs &args );
+	virtual void	Fsr2CaptureOpaque( RenderTargetHandle sceneRT );
 	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth, bool hdrFloat );
 	virtual void	CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 	                                        int srcX, int srcY, int w, int h, bool depth );
@@ -216,6 +234,11 @@ private:
 	VkDescriptorSet	RecordDispatch( VkCommandBuffer cb, const ComputeArgs &args );	// bind+dispatch; returns the set to reclaim
 	void			ComputeSelfTest();							// r_vkComputeTest: dispatch a trivial kernel, read back, verify
 	void			BdaSelfTest();								// r_vkBdaTest: sum a buffer through its device-address pointer (Phase 3.2b BDA primitive)
+	void			Fsr2SelfTest();								// r_fsr2Test: init the vendored FSR2 VK backend + create/destroy a context
+	void			Mrt3SelfTest();								// r_mrt3Test: create/destroy a 3-MRT RG16F velocity gbuffer target
+	// FSR2 runtime (R1/C2): persistent context + output image, sized to the scene target.
+	bool			Fsr2EnsureContext( int w, int h );			// (re)create the FSR2 context + output image on size change
+	void			Fsr2DestroyContext( bool deviceIdle );		// tear down context/scratch/output (vid_restart, resize, shutdown)
 
 	bool			CreateInstance();
 	bool			PickPhysicalDevice();
@@ -536,11 +559,11 @@ private:
 		//   * nested target (BeginTargetPass): one begin→draw→EndPass fullscreen pass,
 		//     served by colorClearPass alone.
 		bool			colorTarget = false;
-		int				colorCount = 0;					// 1 or 2 color attachments
-		VkFormat		colorFormat = VK_FORMAT_UNDEFINED;
-		VkImage			colorImage[2] = {};
-		VmaAllocation	colorAlloc[2] = {};
-		VkImageView		colorView[2] = {};				// level-0 attachment view (framebuffer)
+		int				colorCount = 0;					// 1-3 color attachments (3 = velocity gbuffer, R1/A0)
+		VkFormat		colorFormat[3] = {};			// per-attachment format (mixed for the 3-MRT velocity target)
+		VkImage			colorImage[3] = {};
+		VmaAllocation	colorAlloc[3] = {};
+		VkImageView		colorView[3] = {};				// level-0 attachment view (framebuffer)
 		// SSAO Phase 1 mip chain (colorMipLevels > 1, colorImage[0] only). colorView[0]
 		// stays level-0-only for the linearize framebuffer; colorSampleView[0] spans every
 		// level so the sampleable ImageRec can textureLod into coarser mips. The chain is
@@ -549,11 +572,11 @@ private:
 		// the next level's source. 1 = plain single-mip (none of the mip fields used).
 		int				colorMipLevels = 1;
 		static const int MAX_MIP = 8;
-		VkImageView		colorSampleView[2] = {};		// all-levels sample view (= colorView[] when 1 mip)
+		VkImageView		colorSampleView[3] = {};		// all-levels sample view (= colorView[] when 1 mip)
 		VkImageView		colorLevelView[MAX_MIP] = {};	// per-level single-level attachment/sample views (L>=1)
 		VkFramebuffer	colorLevelFb[MAX_MIP] = {};		// per-level downsample framebuffers (L>=1)
 		ImageHandle		colorLevelInput[MAX_MIP] = {};	// per-level single-level sampleable handles (source binds)
-		ImageHandle		colorSampleImage[2] = { 0, 0 };	// handles GetRenderTargetImage / 2 return
+		ImageHandle		colorSampleImage[3] = { 0, 0, 0 };	// handles GetRenderTargetImage / 2 return
 		bool			hasDepth = false;				// depth or depth-stencil attachment present
 		VkImage			dsImage = VK_NULL_HANDLE;
 		VmaAllocation	dsAlloc = NULL;
@@ -582,12 +605,13 @@ private:
 	}
 	int				AllocTargetSlot();			// index of a free targetTable slot (grows the table if needed)
 	bool			CreateDepthTarget( RenderTarget &t, int w, int h, bool cube );
-	// color target: colorCount 1-2 sampleable color attachments (colorFmt), plus a
-	// depth-stencil attachment when wantDepthStencil. frameCapable builds the extra
-	// load/clearDS pass variants a SetFrameTarget scene buffer needs (HDR).
+	// color target: colorCount 1-3 sampleable color attachments (colorFmt, or per-attachment
+	// via mrtFormats for the mixed 3-MRT velocity gbuffer), plus a depth-stencil attachment
+	// when wantDepthStencil. frameCapable builds the extra load/clearDS pass variants a
+	// SetFrameTarget scene buffer needs (HDR).
 	bool			CreateColorTarget( RenderTarget &t, int w, int h, VkFormat colorFmt,
 	                                   int colorCount, bool wantDepthStencil, bool frameCapable,
-	                                   int mipLevels = 1 );
+	                                   int mipLevels = 1, const VkFormat *mrtFormats = NULL );
 	bool			BuildColorPasses( RenderTarget &t, bool frameCapable );
 	void			FreeTargetObjects( RenderTarget &t );	// frees VK objects only (not the imageTable slot)
 	void			ReleaseTargetSampleSlots( RenderTarget &t );	// frees the imageTable slots a target lent out
@@ -658,6 +682,38 @@ private:
 	// gates any drawCount>1. Universal on desktop; enabled when present, gated when not.
 	bool						haveDrawIndirectCount = false;
 	bool						haveBufferDeviceAddress = false;	// VK_KHR_buffer_device_address (core 1.2); gates BDA usage + the VMA flag
+	// FSR2 Native-AA runtime (docs/fsr-temporal-pipeline.md R1/C2). The context and its
+	// scratch persist across frames (they hold the temporal history); recreated when the
+	// scene-target size changes. fsr2Out is the display-res UAV FSR2 writes, copied back
+	// over the scene color each dispatch. fsr2DepthView is a depth-only-aspect view of the
+	// scene target's combined depth-stencil image (a sampled view may carry only one
+	// aspect), keyed on fsr2DepthSrc so a target realloc rebuilds it.
+	bool						haveSeparateDepthStencilLayouts = false;	// core 1.2; FSR2's depth barriers need it
+	FfxFsr2Context *			fsr2Ctx = NULL;
+	void *						fsr2Scratch = NULL;
+	int							fsr2W = 0, fsr2H = 0;
+	VkImage						fsr2Out = VK_NULL_HANDLE;
+	VmaAllocation				fsr2OutAlloc = NULL;
+	VkImageView					fsr2OutView = VK_NULL_HANDLE;
+	bool						fsr2OutWritten = false;		// false until first dispatch (layout UNDEFINED)
+	VkImage						fsr2DepthSrc = VK_NULL_HANDLE;
+	VkImageView					fsr2DepthView = VK_NULL_HANDLE;
+	bool						fsr2WarnedNoFeature = false;
+	bool						fsr2FirstDispatch = true;	// force reset on the first dispatch of a context
+	// R1/D auto-reactive: opaque-only scene snapshot (Fsr2CaptureOpaque, straight copy at
+	// the translucent split) + the R8 reactive mask FSR2 generates from opaque-vs-final.
+	// fsr2OpaqueValid is per-frame (cleared in BeginFrame): the mask is only meaningful
+	// when the snapshot came from THIS frame's opaque scene.
+	VkImage						fsr2Opaque = VK_NULL_HANDLE;
+	VmaAllocation				fsr2OpaqueAlloc = NULL;
+	VkImageView					fsr2OpaqueView = VK_NULL_HANDLE;
+	int							fsr2OpaqueW = 0, fsr2OpaqueH = 0;
+	bool						fsr2OpaqueWritten = false;	// layout: false = UNDEFINED, true = SHADER_READ_ONLY
+	bool						fsr2OpaqueValid = false;	// captured this frame (cleared each BeginFrame)
+	VkImage						fsr2Reactive = VK_NULL_HANDLE;
+	VmaAllocation				fsr2ReactiveAlloc = NULL;
+	VkImageView					fsr2ReactiveView = VK_NULL_HANDLE;
+	bool						fsr2ReactiveWritten = false;	// false = UNDEFINED, true = SHADER_READ_ONLY (post-dispatch)
 	// r_vkBdaZfill (Phase 3.2b): cached handles for the depth-prepass BDA consume.
 	// Loaded on the cvar's first enable; the flat zfill draw is identified by
 	// currentDesc.shader == zfillShaderHandle. zfillBdaShaderHandle 0 = variant absent.
@@ -1101,6 +1157,10 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	VkPhysicalDeviceVulkan12Features supported12 = {};
 	supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 	supported13.pNext = &supported12;
+	// Vulkan 1.1 feature struct: 16-bit storage, needed by FSR2's fp16 shader permutations.
+	VkPhysicalDeviceVulkan11Features supported11 = {};
+	supported11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+	supported12.pNext = &supported11;
 	VkPhysicalDeviceFeatures2 supported2 = {};
 	supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 	supported2.pNext = &supported13;
@@ -1126,7 +1186,23 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	// the VMA allocator flag + buffer usage bit on the same flag (all three must agree).
 	haveBufferDeviceAddress = supported12.bufferDeviceAddress == VK_TRUE;
 	enabled12.bufferDeviceAddress = haveBufferDeviceAddress ? VK_TRUE : VK_FALSE;
+	// FSR2 (docs/fsr-temporal-pipeline.md) auto-selects fp16 shader permutations on GPUs that
+	// support half precision; enable shaderFloat16 + 16-bit storage when present so those
+	// pipelines create. Enabled only when supported, so device creation is unchanged on GPUs
+	// that lack them, and the features are inert unless FSR2 actually runs.
+	enabled12.shaderFloat16 = supported12.shaderFloat16;
+	// FSR2 C2: the vendored VK backend emits depth-ONLY-aspect barriers on the sampled scene
+	// depth, which a combined D24S8/D32S8 image only permits with separateDepthStencilLayouts
+	// (core 1.2). Enable when supported; RunFsr2 refuses (once, with a warning) without it.
+	haveSeparateDepthStencilLayouts = supported12.separateDepthStencilLayouts == VK_TRUE;
+	enabled12.separateDepthStencilLayouts = haveSeparateDepthStencilLayouts ? VK_TRUE : VK_FALSE;
 	enabled13.pNext = &enabled12;
+
+	VkPhysicalDeviceVulkan11Features enabled11 = {};
+	enabled11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+	enabled11.storageBuffer16BitAccess = supported11.storageBuffer16BitAccess;
+	enabled11.uniformAndStorageBuffer16BitAccess = supported11.uniformAndStorageBuffer16BitAccess;
+	enabled12.pNext = &enabled11;
 
 	VkDeviceCreateInfo dci = {};
 	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -1697,6 +1773,9 @@ void VulkanBackend::Shutdown() {
 		SavePipelineCache();		// persist this session's compiles before teardown
 	}
 
+	// FSR2 (R1/C2): the context owns device pipelines/images; free while the device lives
+	Fsr2DestroyContext( true );
+
 	// M6: ImGui device objects must die before the device. Normally sys_imgui
 	// shuts down first (it calls ImGuiShutdown through the glue); this is the
 	// safety net for partial-teardown orders.
@@ -1794,6 +1873,10 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	FrameSlot &f = frames[frameIndex];
 	vkWaitForFences( device, 1, &f.fence, VK_TRUE, UINT64_MAX );
 
+	// FSR2 auto-reactive (R1/D): the opaque snapshot is one-frame data — a new frame
+	// invalidates it until Fsr2CaptureOpaque runs again at this frame's translucent split
+	fsr2OpaqueValid = false;
+
 	// compute-lane self-test (Phase 1): one-shot on the cvar toggle. Runs on the synchronous
 	// upload cb (waits idle) — a dev validation path, so gate it to the modified edge.
 	if ( r_vkComputeTest.IsModified() ) {
@@ -1838,6 +1921,22 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	bdaZfillFallback = 0;
 	bdaZfillBatched = 0;
 	bdaZfillBatchDraws = 0;
+
+	// FSR2 bring-up self-test (R1/C0): one-shot on the cvar toggle.
+	if ( r_fsr2Test.IsModified() ) {
+		r_fsr2Test.ClearModified();
+		if ( r_fsr2Test.GetBool() ) {
+			Fsr2SelfTest();
+		}
+	}
+
+	// MRT/format plumbing self-test (R1/A0): one-shot on the cvar toggle.
+	if ( r_mrt3Test.IsModified() ) {
+		r_mrt3Test.ClearModified();
+		if ( r_mrt3Test.GetBool() ) {
+			Mrt3SelfTest();
+		}
+	}
 
 	// vsync toggle → new present mode; window size change → new extent
 	if ( r_swapInterval.IsModified() ) {
@@ -3660,6 +3759,624 @@ void VulkanBackend::BdaSelfTest() {
 
 /*
 ====================
+VulkanBackend::Fsr2SelfTest
+
+r_fsr2Test: bring-up validation for the vendored FidelityFX FSR2 Vulkan backend (R1/C0,
+docs/fsr-temporal-pipeline.md). Sizes the FSR2 scratch, builds its VK interface against our
+real physical/logical device, creates an FSR2 context in Native-AA config (render == display,
+no dispatch), then tears it down. Proves the vendored MIT library links and initialises its
+compute pipelines on this GPU. No rendering effect; a dev/CI path gated to the cvar edge.
+====================
+*/
+void VulkanBackend::Fsr2SelfTest() {
+	if ( physical == VK_NULL_HANDLE || device == VK_NULL_HANDLE ) {
+		common->Printf( "FSR2 self-test: unavailable (no VK device)\n" );
+		return;
+	}
+
+	const size_t scratchSize = ffxFsr2GetScratchMemorySizeVK( physical );
+	if ( scratchSize == 0 ) {
+		common->Warning( "FSR2 self-test: ffxFsr2GetScratchMemorySizeVK returned 0" );
+		return;
+	}
+
+	void *scratch = malloc( scratchSize );
+	FfxFsr2Context *ctx = (FfxFsr2Context *)malloc( sizeof( FfxFsr2Context ) );
+	if ( scratch == NULL || ctx == NULL ) {
+		common->Warning( "FSR2 self-test: out of memory (scratch %zu B)", scratchSize );
+		free( scratch );
+		free( ctx );
+		return;
+	}
+
+	FfxFsr2ContextDescription desc = {};
+	FfxErrorCode err = ffxFsr2GetInterfaceVK( &desc.callbacks, scratch, scratchSize, physical, vkGetDeviceProcAddr );
+	if ( err != FFX_OK ) {
+		common->Warning( "FSR2 self-test: ffxFsr2GetInterfaceVK FAILED (code %d)", (int)err );
+		free( scratch );
+		free( ctx );
+		return;
+	}
+
+	desc.device = ffxGetDeviceVK( device );
+	desc.maxRenderSize.width  = desc.displaySize.width  = (uint32_t)glConfig.vidWidth;
+	desc.maxRenderSize.height = desc.displaySize.height = (uint32_t)glConfig.vidHeight;
+	// Native-AA config (matches the intended R1 usage): HDR pre-tonemap input, non-reversed-z
+	// infinite-far depth, auto-exposure. No dispatch is issued here.
+	desc.flags = FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE | FFX_FSR2_ENABLE_DEPTH_INFINITE | FFX_FSR2_ENABLE_AUTO_EXPOSURE;
+	desc.fpMessage = NULL;
+
+	err = ffxFsr2ContextCreate( ctx, &desc );
+	if ( err != FFX_OK ) {
+		common->Warning( "FSR2 self-test: ffxFsr2ContextCreate FAILED (code %d)", (int)err );
+		free( scratch );
+		free( ctx );
+		return;
+	}
+
+	common->Printf( "FSR2 self-test: PASS - context created (Native-AA %ux%u, scratch %zu KB)\n",
+		desc.displaySize.width, desc.displaySize.height, scratchSize / 1024 );
+
+	ffxFsr2ContextDestroy( ctx );		// scratch must outlive the context; free after destroy
+	free( scratch );
+	free( ctx );
+}
+
+/*
+====================
+VulkanBackend::Fsr2EnsureContext / Fsr2DestroyContext / RunFsr2
+
+The FSR2 Native-AA runtime (R1/C2, docs/fsr-temporal-pipeline.md). The context holds
+FSR2's temporal history (internal upscaled color / lock / depth pyramids), so it
+persists across frames and is only recreated when the scene-target size changes.
+The output image is a same-size RGBA16F storage image; after the dispatch it is
+copied back over the scene target's color attachment 0, so the rest of the frame
+(eye adaptation, bloom, HUD composite, tonemap resolve) consumes the resolved scene
+with the frame structure unchanged (the render-scale reorder is deferred to the
+upscaling phase — Native-AA makes copy-back exact).
+====================
+*/
+void VulkanBackend::Fsr2DestroyContext( bool deviceIdle ) {
+	if ( fsr2Ctx != NULL ) {
+		if ( !deviceIdle && device != VK_NULL_HANDLE ) {
+			vkDeviceWaitIdle( device );		// context teardown frees pipelines the GPU may still use
+		}
+		ffxFsr2ContextDestroy( fsr2Ctx );
+		free( fsr2Ctx );
+		fsr2Ctx = NULL;
+	}
+	if ( fsr2Scratch != NULL ) {
+		free( fsr2Scratch );
+		fsr2Scratch = NULL;
+	}
+	if ( fsr2OutView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2OutView, NULL ); fsr2OutView = VK_NULL_HANDLE; }
+	if ( fsr2Out != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Out, fsr2OutAlloc ); fsr2Out = VK_NULL_HANDLE; fsr2OutAlloc = NULL; }
+	if ( fsr2DepthView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2DepthView, NULL ); fsr2DepthView = VK_NULL_HANDLE; }
+	if ( fsr2OpaqueView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2OpaqueView, NULL ); fsr2OpaqueView = VK_NULL_HANDLE; }
+	if ( fsr2Opaque != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Opaque, fsr2OpaqueAlloc ); fsr2Opaque = VK_NULL_HANDLE; fsr2OpaqueAlloc = NULL; }
+	if ( fsr2ReactiveView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2ReactiveView, NULL ); fsr2ReactiveView = VK_NULL_HANDLE; }
+	if ( fsr2Reactive != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Reactive, fsr2ReactiveAlloc ); fsr2Reactive = VK_NULL_HANDLE; fsr2ReactiveAlloc = NULL; }
+	fsr2DepthSrc = VK_NULL_HANDLE;
+	fsr2W = fsr2H = 0;
+	fsr2OpaqueW = fsr2OpaqueH = 0;
+	fsr2OutWritten = false;
+	fsr2OpaqueWritten = false;
+	fsr2OpaqueValid = false;
+	fsr2ReactiveWritten = false;
+	fsr2FirstDispatch = true;
+}
+
+bool VulkanBackend::Fsr2EnsureContext( int w, int h ) {
+	if ( fsr2Ctx != NULL && fsr2W == w && fsr2H == h ) {
+		return true;
+	}
+	Fsr2DestroyContext( false );		// size changed (or first use): full rebuild
+
+	const size_t scratchSize = ffxFsr2GetScratchMemorySizeVK( physical );
+	if ( scratchSize == 0 ) {
+		return false;
+	}
+	fsr2Scratch = malloc( scratchSize );
+	fsr2Ctx = (FfxFsr2Context *)malloc( sizeof( FfxFsr2Context ) );
+	if ( fsr2Scratch == NULL || fsr2Ctx == NULL ) {
+		Fsr2DestroyContext( true );
+		return false;
+	}
+
+	FfxFsr2ContextDescription desc = {};
+	FfxErrorCode err = ffxFsr2GetInterfaceVK( &desc.callbacks, fsr2Scratch, scratchSize, physical, vkGetDeviceProcAddr );
+	if ( err != FFX_OK ) {
+		common->Warning( "FSR2: ffxFsr2GetInterfaceVK failed (code %d)", (int)err );
+		Fsr2DestroyContext( true );
+		return false;
+	}
+	desc.device = ffxGetDeviceVK( device );
+	desc.maxRenderSize.width = (uint32_t)w;
+	desc.maxRenderSize.height = (uint32_t)h;
+	desc.displaySize.width = (uint32_t)w;		// Native-AA: render == display
+	desc.displaySize.height = (uint32_t)h;
+	// Plan-verified flags: un-tonemapped linear HDR input, D3's far-plane-at-infinity
+	// non-reversed depth, FSR2's own auto-exposure (the engine's eye adaptation runs
+	// AFTER the resolve and is unaffected). NO jitter-cancellation flag: A2 already
+	// subtracts the jitter from the velocity buffer.
+	desc.flags = FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE | FFX_FSR2_ENABLE_DEPTH_INFINITE | FFX_FSR2_ENABLE_AUTO_EXPOSURE;
+	err = ffxFsr2ContextCreate( fsr2Ctx, &desc );
+	if ( err != FFX_OK ) {
+		common->Warning( "FSR2: ffxFsr2ContextCreate failed (code %d)", (int)err );
+		Fsr2DestroyContext( true );
+		return false;
+	}
+
+	// display-res output UAV (the one external write FSR2 makes) + its copy-back source role
+	VkImageCreateInfo ici = {};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &fsr2Out, &fsr2OutAlloc, NULL ), "vmaCreateImage(FSR2 output)" ) ) {
+		Fsr2DestroyContext( true );
+		return false;
+	}
+	VkImageViewCreateInfo vwi = {};
+	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vwi.image = fsr2Out;
+	vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vwi.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	vwi.subresourceRange.levelCount = 1;
+	vwi.subresourceRange.layerCount = 1;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &fsr2OutView ), "vkCreateImageView(FSR2 output)" ) ) {
+		Fsr2DestroyContext( true );
+		return false;
+	}
+
+	// R8 reactive mask (R1/D): written by FSR2's autogen pass (UAV), read by the dispatch.
+	// Created with the context so it always matches the render size; its absence simply
+	// disables the reactive path (RunFsr2 guards on it).
+	ici.format = VK_FORMAT_R8_UNORM;
+	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &fsr2Reactive, &fsr2ReactiveAlloc, NULL ), "vmaCreateImage(FSR2 reactive)" ) ) {
+		Fsr2DestroyContext( true );
+		return false;
+	}
+	vwi.image = fsr2Reactive;
+	vwi.format = VK_FORMAT_R8_UNORM;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &fsr2ReactiveView ), "vkCreateImageView(FSR2 reactive)" ) ) {
+		Fsr2DestroyContext( true );
+		return false;
+	}
+	fsr2ReactiveWritten = false;
+
+	fsr2W = w;
+	fsr2H = h;
+	fsr2OutWritten = false;
+	fsr2FirstDispatch = true;
+	common->Printf( "FSR2: context created (Native-AA %dx%d, scratch %zu KB)\n", w, h, scratchSize / 1024 );
+	return true;
+}
+
+/*
+====================
+VulkanBackend::Fsr2CaptureOpaque
+
+R1/D: snapshot the scene color at the opaque/translucent split as the auto-reactive
+mask's "opaque only" input. A straight vkCmdCopyImage in storage orientation — the
+M5 CopyFramebufferToImage capture is y-FLIPPED (GL bottom-up) and would row-mismatch
+the reactive comparison. Suspends the scene pass exactly like BeginTargetPass.
+====================
+*/
+void VulkanBackend::Fsr2CaptureOpaque( RenderTargetHandle sceneRT ) {
+	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame ) {
+		return;
+	}
+	RenderTarget *scene = LookupTarget( sceneRT );
+	if ( scene == NULL || !scene->colorTarget || scene->colorFormat[0] != VK_FORMAT_R16G16B16A16_SFLOAT ) {
+		return;
+	}
+
+	// (re)create the snapshot image on first use / size change; sized to the scene target,
+	// independent of the FSR2 context (the capture happens mid-view, before RunFsr2 may
+	// have created the context on the first frame)
+	if ( fsr2Opaque == VK_NULL_HANDLE || fsr2OpaqueW != scene->w || fsr2OpaqueH != scene->h ) {
+		if ( fsr2OpaqueView != VK_NULL_HANDLE || fsr2Opaque != VK_NULL_HANDLE ) {
+			retiredImages[frameIndex].push_back( { fsr2Opaque, fsr2OpaqueAlloc, fsr2OpaqueView } );
+			fsr2Opaque = VK_NULL_HANDLE; fsr2OpaqueAlloc = NULL; fsr2OpaqueView = VK_NULL_HANDLE;
+		}
+		VkImageCreateInfo ici = {};
+		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		ici.imageType = VK_IMAGE_TYPE_2D;
+		ici.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+		ici.extent = { (uint32_t)scene->w, (uint32_t)scene->h, 1 };
+		ici.mipLevels = 1;
+		ici.arrayLayers = 1;
+		ici.samples = VK_SAMPLE_COUNT_1_BIT;
+		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+		ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		VmaAllocationCreateInfo aci = {};
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &fsr2Opaque, &fsr2OpaqueAlloc, NULL ), "vmaCreateImage(FSR2 opaque)" ) ) {
+			fsr2Opaque = VK_NULL_HANDLE;
+			return;
+		}
+		VkImageViewCreateInfo vwi = {};
+		vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		vwi.image = fsr2Opaque;
+		vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		vwi.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+		vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		vwi.subresourceRange.levelCount = 1;
+		vwi.subresourceRange.layerCount = 1;
+		if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &fsr2OpaqueView ), "vkCreateImageView(FSR2 opaque)" ) ) {
+			vmaDestroyImage( vma, fsr2Opaque, fsr2OpaqueAlloc );
+			fsr2Opaque = VK_NULL_HANDLE; fsr2OpaqueAlloc = NULL;
+			return;
+		}
+		fsr2OpaqueW = scene->w;
+		fsr2OpaqueH = scene->h;
+		fsr2OpaqueWritten = false;
+	}
+
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );		// scene pass resumes on the next Draw (EnsureScenePass)
+		insideScenePass = false;
+	}
+	if ( insideTargetPass ) {
+		return;		// mid-target-pass capture would corrupt the pass; caller error
+	}
+
+	// scene color SHADER_READ_ONLY -> TRANSFER_SRC, snapshot -> TRANSFER_DST
+	VkImageMemoryBarrier pre[2] = {};
+	pre[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	pre[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	pre[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	pre[0].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	pre[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	pre[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	pre[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	pre[0].image = scene->colorImage[0];
+	pre[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	pre[0].subresourceRange.levelCount = 1;
+	pre[0].subresourceRange.layerCount = 1;
+	pre[1] = pre[0];
+	pre[1].srcAccessMask = fsr2OpaqueWritten ? VK_ACCESS_SHADER_READ_BIT : 0;
+	pre[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	pre[1].oldLayout = fsr2OpaqueWritten ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+	pre[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	pre[1].image = fsr2Opaque;
+	vkCmdPipelineBarrier( cb,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+			| VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, pre );
+
+	VkImageCopy region = {};
+	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.srcSubresource.layerCount = 1;
+	region.dstSubresource = region.srcSubresource;
+	region.extent = { (uint32_t)scene->w, (uint32_t)scene->h, 1 };
+	vkCmdCopyImage( cb, scene->colorImage[0], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		fsr2Opaque, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
+
+	// both back to SHADER_READ_ONLY (the between-pass resting layout / the SRV state the
+	// reactive autogen pass declares)
+	VkImageMemoryBarrier post[2] = {};
+	post[0] = pre[0];
+	post[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	post[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	post[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	post[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	post[1] = pre[1];
+	post[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	post[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	post[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	post[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+			| VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		0, 0, NULL, 0, NULL, 2, post );
+
+	fsr2OpaqueWritten = true;
+	fsr2OpaqueValid = true;
+}
+
+bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
+	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame ) {
+		return false;
+	}
+	if ( !haveSeparateDepthStencilLayouts ) {
+		// the vendored FSR2 VK backend barriers the sampled depth with a depth-only
+		// aspect, which a combined depth-stencil image only allows with this feature
+		if ( !fsr2WarnedNoFeature ) {
+			common->Warning( "FSR2: device lacks separateDepthStencilLayouts - r_fsr unavailable" );
+			fsr2WarnedNoFeature = true;
+		}
+		return false;
+	}
+	RenderTarget *scene = LookupTarget( args.sceneRT );
+	RenderTarget *vel = LookupTarget( args.velocityRT );
+	if ( scene == NULL || !scene->colorTarget || !scene->hasDepth
+	     || scene->colorFormat[0] != VK_FORMAT_R16G16B16A16_SFLOAT
+	     || vel == NULL || vel->colorCount < 3 || vel->colorFormat[2] != VK_FORMAT_R16G16_SFLOAT
+	     || vel->w != scene->w || vel->h != scene->h ) {
+		return false;
+	}
+	if ( !Fsr2EnsureContext( scene->w, scene->h ) ) {
+		return false;
+	}
+
+	// depth-only-aspect sampled view of the scene target's combined depth-stencil image,
+	// rebuilt when the target reallocs (dsImage changes); the old view is retired on the
+	// frame-slot fence like every mid-frame image teardown
+	if ( fsr2DepthView == VK_NULL_HANDLE || fsr2DepthSrc != scene->dsImage ) {
+		if ( fsr2DepthView != VK_NULL_HANDLE ) {
+			retiredImages[frameIndex].push_back( { VK_NULL_HANDLE, NULL, fsr2DepthView } );
+			fsr2DepthView = VK_NULL_HANDLE;
+		}
+		VkImageViewCreateInfo dvi = {};
+		dvi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		dvi.image = scene->dsImage;
+		dvi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		dvi.format = sceneDepthFormat;
+		dvi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		dvi.subresourceRange.levelCount = 1;
+		dvi.subresourceRange.layerCount = 1;
+		if ( !vkCheck( vkCreateImageView( device, &dvi, NULL, &fsr2DepthView ), "vkCreateImageView(FSR2 depth)" ) ) {
+			return false;
+		}
+		fsr2DepthSrc = scene->dsImage;
+	}
+
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	// FSR2 records compute; close any open render pass (the scene pass resumes on the
+	// next Draw through EnsureScenePass, same contract as BeginTargetPass)
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );
+		insideScenePass = false;
+	}
+	if ( insideTargetPass ) {
+		return false;		// caller error: mid-target-pass dispatch would corrupt the pass
+	}
+
+	const uint32_t w = (uint32_t)scene->w, h = (uint32_t)scene->h;
+
+	// Pre-dispatch layouts. Color + velocity attachments already rest in
+	// SHADER_READ_ONLY between passes (their render passes' finalLayout), which is
+	// exactly FFX_RESOURCE_STATE_COMPUTE_READ's layout — declared as such below, so
+	// FSR2's own barriers on them are same-layout no-ops. Depth sits in
+	// DEPTH_STENCIL_ATTACHMENT_OPTIMAL and must round-trip; the output enters as a
+	// discardable UAV (UNDEFINED on first use / TRANSFER_SRC after a copy-back).
+	VkImageMemoryBarrier pre[2] = {};
+	pre[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	pre[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	pre[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	pre[0].oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	pre[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	pre[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	pre[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	pre[0].image = scene->dsImage;
+	pre[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+	pre[0].subresourceRange.levelCount = 1;
+	pre[0].subresourceRange.layerCount = 1;
+	pre[1] = pre[0];
+	pre[1].srcAccessMask = fsr2OutWritten ? VK_ACCESS_TRANSFER_READ_BIT : 0;
+	pre[1].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	pre[1].oldLayout = fsr2OutWritten ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+	pre[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+	pre[1].image = fsr2Out;
+	pre[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	vkCmdPipelineBarrier( cb,
+		VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 2, pre );
+
+	FfxFsr2DispatchDescription dd = {};
+	dd.commandList = ffxGetCommandListVK( cb );
+	dd.color = ffxGetTextureResourceVK( fsr2Ctx, scene->colorImage[0], scene->colorSampleView[0] != VK_NULL_HANDLE ? scene->colorSampleView[0] : scene->colorView[0],
+		w, h, scene->colorFormat[0], L"FSR2_Color", FFX_RESOURCE_STATE_COMPUTE_READ );
+	dd.depth = ffxGetTextureResourceVK( fsr2Ctx, scene->dsImage, fsr2DepthView,
+		w, h, sceneDepthFormat, L"FSR2_Depth", FFX_RESOURCE_STATE_COMPUTE_READ );
+	dd.motionVectors = ffxGetTextureResourceVK( fsr2Ctx, vel->colorImage[2], vel->colorSampleView[2] != VK_NULL_HANDLE ? vel->colorSampleView[2] : vel->colorView[2],
+		w, h, vel->colorFormat[2], L"FSR2_MotionVectors", FFX_RESOURCE_STATE_COMPUTE_READ );
+	dd.output = ffxGetTextureResourceVK( fsr2Ctx, fsr2Out, fsr2OutView,
+		w, h, VK_FORMAT_R16G16B16A16_SFLOAT, L"FSR2_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS );
+	// exposure/transparencyAndComposition stay null (AUTO_EXPOSURE; hand-authored T&C mask
+	// is the potential V2 of increment D)
+
+	// R1/D auto-reactive: generate the reactive mask from opaque-vs-final before the main
+	// dispatch. Where translucent/additive content diverges from the opaque snapshot
+	// (particles, muzzle flashes, GUI screens), FSR2 trusts history less — killing ghost
+	// trails at the cost of accumulation there. Skipped unless this frame captured the
+	// opaque snapshot (Fsr2CaptureOpaque) and the caller enabled it (reactiveScale >= 0).
+	if ( args.reactiveScale >= 0.0f && fsr2OpaqueValid
+	     && fsr2Opaque != VK_NULL_HANDLE && fsr2Reactive != VK_NULL_HANDLE
+	     && fsr2OpaqueW == (int)w && fsr2OpaqueH == (int)h ) {
+		VkImageMemoryBarrier rb = {};
+		rb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		rb.srcAccessMask = fsr2ReactiveWritten ? VK_ACCESS_SHADER_READ_BIT : 0;
+		rb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		rb.oldLayout = fsr2ReactiveWritten ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+		rb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+		rb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		rb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		rb.image = fsr2Reactive;
+		rb.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		rb.subresourceRange.levelCount = 1;
+		rb.subresourceRange.layerCount = 1;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &rb );
+
+		FfxFsr2GenerateReactiveDescription gr = {};
+		gr.commandList = dd.commandList;
+		gr.colorOpaqueOnly = ffxGetTextureResourceVK( fsr2Ctx, fsr2Opaque, fsr2OpaqueView,
+			w, h, VK_FORMAT_R16G16B16A16_SFLOAT, L"FSR2_OpaqueOnly", FFX_RESOURCE_STATE_COMPUTE_READ );
+		gr.colorPreUpscale = dd.color;
+		gr.outReactive = ffxGetTextureResourceVK( fsr2Ctx, fsr2Reactive, fsr2ReactiveView,
+			w, h, VK_FORMAT_R8_UNORM, L"FSR2_Reactive", FFX_RESOURCE_STATE_UNORDERED_ACCESS );
+		gr.renderSize.width = w;
+		gr.renderSize.height = h;
+		gr.scale = args.reactiveScale;
+		// AMD reference defaults: binary mask (threshold 0.2 -> 0.9) over the per-channel
+		// max delta, compared in tonemapped space so HDR fireballs don't saturate the test
+		gr.cutoffThreshold = 0.2f;
+		gr.binaryValue = 0.9f;
+		gr.flags = FFX_FSR2_AUTOREACTIVEFLAGS_APPLY_TONEMAP
+		         | FFX_FSR2_AUTOREACTIVEFLAGS_APPLY_THRESHOLD
+		         | FFX_FSR2_AUTOREACTIVEFLAGS_USE_COMPONENTS_MAX;
+		const FfxErrorCode grErr = ffxFsr2ContextGenerateReactiveMask( fsr2Ctx, &gr );
+		if ( grErr == FFX_OK ) {
+			// dispatch reads it as an SRV; declared UAV so FSR2's own barrier does the transition
+			dd.reactive = ffxGetTextureResourceVK( fsr2Ctx, fsr2Reactive, fsr2ReactiveView,
+				w, h, VK_FORMAT_R8_UNORM, L"FSR2_Reactive", FFX_RESOURCE_STATE_UNORDERED_ACCESS );
+			fsr2ReactiveWritten = true;		// FSR2 leaves it SHADER_READ_ONLY after the SRV barrier
+		}
+	}
+
+	// Motion-vector scale, derived in the plan (docs/fsr-temporal-pipeline.md C2) and
+	// verified against the vendored shaders: A2 stores (currUV - prevUV) in +Y-up UV;
+	// FSR2 wants (prevUV - currUV) in top-left +Y-down UV, in PIXELS. Reversing the
+	// direction negates both axes; the Y-up -> Y-down flip negates Y again, so X gets
+	// -renderW and Y's two negations cancel to +renderH.
+	dd.motionVectorScale.x = -(float)w;
+	dd.motionVectorScale.y = (float)h;
+	// Jitter: FSR2's fJitter is the CONTENT's displacement in storage pixels (top-left,
+	// +y down): the accumulate pass samples the jittered input at fHrUv + fJitter/Size
+	// (ffx_fsr2_accumulate.h). The engine shifts the frustum WINDOW by +jitter
+	// (tr_main.cpp xmin/xmax += j), and with GL-style z_eye NEGATIVE in front the
+	// (r+l)/w term flips sign after the perspective divide — so the content moves
+	// OPPOSITE the applied jitter: -jx columns, and -jy in NDC+y-up = +jy rows under
+	// the negative-viewport flip (row 0 = top). Hence {-jx, +jy}. (Empirically gated:
+	// the inverted sign showed as micro-boiling on a static scene, 2026-08-18.)
+	dd.jitterOffset.x = -args.jitterX;
+	dd.jitterOffset.y = args.jitterY;
+	dd.renderSize.width = w;
+	dd.renderSize.height = h;
+	dd.enableSharpening = args.sharpness >= 0.0f;
+	dd.sharpness = args.sharpness >= 0.0f ? args.sharpness : 0.0f;
+	dd.frameTimeDelta = args.frameTimeMs;
+	dd.preExposure = 1.0f;
+	dd.reset = args.reset || fsr2FirstDispatch;
+	dd.cameraNear = args.zNear;
+	dd.cameraFar = 100000.0f;					// unused with FFX_FSR2_ENABLE_DEPTH_INFINITE
+	dd.cameraFovAngleVertical = args.fovYRadians;
+	dd.viewSpaceToMetersFactor = 0.0254f;		// 1 Doom unit ~= 1 inch
+
+	const FfxErrorCode err = ffxFsr2ContextDispatch( fsr2Ctx, &dd );
+	fsr2FirstDispatch = false;
+	if ( err != FFX_OK ) {
+		// restore depth for the rest of the frame even on failure
+		VkImageMemoryBarrier depthBack = pre[0];
+		depthBack.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		depthBack.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		depthBack.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		depthBack.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+			0, 0, NULL, 0, NULL, 1, &depthBack );
+		common->Warning( "FSR2: dispatch failed (code %d)", (int)err );
+		return false;
+	}
+
+	// Copy the resolved image back over the scene color (Native-AA: same size/format),
+	// and return depth to attachment layout. FSR2 leaves the output in GENERAL
+	// (UNORDERED_ACCESS was its last use) and the sampled inputs in SHADER_READ_ONLY.
+	VkImageMemoryBarrier toCopy[2] = {};
+	toCopy[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	toCopy[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	toCopy[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	toCopy[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+	toCopy[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	toCopy[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	toCopy[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	toCopy[0].image = fsr2Out;
+	toCopy[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	toCopy[0].subresourceRange.levelCount = 1;
+	toCopy[0].subresourceRange.layerCount = 1;
+	toCopy[1] = toCopy[0];
+	toCopy[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	toCopy[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	toCopy[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	toCopy[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	toCopy[1].image = scene->colorImage[0];
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0, 0, NULL, 0, NULL, 2, toCopy );
+
+	VkImageCopy region = {};
+	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.srcSubresource.layerCount = 1;
+	region.dstSubresource = region.srcSubresource;
+	region.extent = { w, h, 1 };
+	vkCmdCopyImage( cb, fsr2Out, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		scene->colorImage[0], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
+	fsr2OutWritten = true;		// next frame's pre-barrier: TRANSFER_SRC -> GENERAL
+
+	VkImageMemoryBarrier post[2] = {};
+	post[0] = toCopy[1];
+	post[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	post[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	post[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	post[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;	// the between-pass resting layout
+	post[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	post[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	post[1].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	post[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	post[1].newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	post[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	post[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	post[1].image = scene->dsImage;
+	post[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+	post[1].subresourceRange.levelCount = 1;
+	post[1].subresourceRange.layerCount = 1;
+	vkCmdPipelineBarrier( cb,
+		VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+			| VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+		0, 0, NULL, 0, NULL, 2, post );
+
+	return true;
+}
+
+/*
+====================
+VulkanBackend::Mrt3SelfTest
+
+r_mrt3Test: MRT/format plumbing validation for the R1 motion-vector work (A0,
+docs/fsr-temporal-pipeline.md). Creates the 3-attachment velocity gbuffer layout
+(RGBA8 normal @0 + RGBA8 SSR @1 + RG16F velocity @2 + depth) through the normal target
+lifecycle, then destroys it. Proves RG16F is an accepted color-attachment format on this
+driver and that the distinct 3-MRT pass class (8) builds a valid render pass + framebuffer
+without aliasing class 6 (the shipping 2-attachment SSR normal prepass). No velocity is
+emitted and the frontend is untouched; with r_mrt3Test 0 no 3-MRT target is ever created.
+====================
+*/
+void VulkanBackend::Mrt3SelfTest() {
+	if ( device == VK_NULL_HANDLE ) {
+		common->Printf( "VK MRT3 self-test: unavailable (no VK device)\n" );
+		return;
+	}
+
+	RenderTargetHandle rt = CreateRenderTargetColorDepth( IF_RGBA8, 256, 256, 3 );
+	if ( rt == 0 ) {
+		common->Warning( "VK MRT3 self-test: FAIL - 3-MRT RG16F target creation failed (driver may reject RG16F as a color attachment)" );
+		return;
+	}
+
+	RenderTarget *t = LookupTarget( rt );
+	common->Printf( "VK MRT3 self-test: PASS - 3-MRT target (RGBA8 + RGBA8 + RG16F + depth, passClass %u) created\n",
+		t ? (unsigned)t->passClass : 0 );
+
+	DestroyRenderTarget( rt );			// full teardown (VK objects + imageTable slots)
+}
+
+/*
+====================
 VulkanBackend::GetSampler
 
 Sampler from the engine's textureFilter_t/textureRepeat_t. The GL path's
@@ -5101,9 +5818,14 @@ void VulkanBackend::BeginTargetPass( RenderTargetHandle rt, const ClearArgs *cle
 
 	if ( t->colorTarget ) {
 		// clear each color attachment (fullscreen draws overwrite it anyway) + ds
-		VkClearValue cv[3] = {};
+		VkClearValue cv[4] = {};		// up to 3 color + 1 depth (R1/A0)
 		if ( clear != NULL && clear->color ) {
 			for ( int c = 0; c < t->colorCount; c++ ) {
+				// attachment 2 is the RG16F velocity MRT (R1/A2): sky/uncovered pixels are
+				// never drawn into the normal prepass, so they keep the clear value — which
+				// for velocity must be ZERO motion, not the flat-normal color the other
+				// attachments clear to. Leave cv[2] zero-initialised.
+				if ( c >= 2 ) { continue; }
 				cv[c].color.float32[0] = clear->rgba[0]; cv[c].color.float32[1] = clear->rgba[1];
 				cv[c].color.float32[2] = clear->rgba[2]; cv[c].color.float32[3] = clear->rgba[3];
 			}
@@ -5160,6 +5882,17 @@ void VulkanBackend::BeginCubeFacePass( RenderTargetHandle rt, int face, const Cl
 // the imageTable slot — that is cleared eagerly by DestroyRenderTarget so no
 // new draw samples a target being torn down.
 void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
+	// FSR2 (R1/C2) caches a depth-only view keyed on the scene target's dsImage. Drop the
+	// cache when that image dies: a recreated target could get the SAME handle value back
+	// from the driver (ABA), which would false-negative the rebuild check in RunFsr2 and
+	// leave FSR2 sampling a view of a destroyed image.
+	if ( t.dsImage != VK_NULL_HANDLE && t.dsImage == fsr2DepthSrc ) {
+		if ( fsr2DepthView != VK_NULL_HANDLE ) {
+			retiredImages[frameIndex].push_back( { VK_NULL_HANDLE, NULL, fsr2DepthView } );
+			fsr2DepthView = VK_NULL_HANDLE;
+		}
+		fsr2DepthSrc = VK_NULL_HANDLE;
+	}
 	for ( int f = 0; f < 6; f++ ) {
 		if ( t.fb[f] )       { vkDestroyFramebuffer( device, t.fb[f], NULL ); t.fb[f] = VK_NULL_HANDLE; }
 	}
@@ -5179,7 +5912,7 @@ void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
 		if ( t.colorLevelFb[L] )   { vkDestroyFramebuffer( device, t.colorLevelFb[L], NULL ); t.colorLevelFb[L] = VK_NULL_HANDLE; }
 		if ( t.colorLevelView[L] ) { vkDestroyImageView( device, t.colorLevelView[L], NULL ); t.colorLevelView[L] = VK_NULL_HANDLE; }
 	}
-	for ( int c = 0; c < 2; c++ ) {
+	for ( int c = 0; c < 3; c++ ) {		// R1/A0: incl. the 3rd (RG16F velocity) attachment on a 3-MRT; unused slots are null-guarded
 		if ( t.colorSampleView[c] ) { vkDestroyImageView( device, t.colorSampleView[c], NULL ); t.colorSampleView[c] = VK_NULL_HANDLE; }
 		if ( t.colorView[c] )  { vkDestroyImageView( device, t.colorView[c], NULL ); t.colorView[c] = VK_NULL_HANDLE; }
 		if ( t.colorImage[c] ) { vmaDestroyImage( vma, t.colorImage[c], t.colorAlloc[c] ); t.colorImage[c] = VK_NULL_HANDLE; t.colorAlloc[c] = NULL; }
@@ -5190,8 +5923,8 @@ void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
 
 // free every imageTable slot a target lent out (depth sample + color samples)
 void VulkanBackend::ReleaseTargetSampleSlots( RenderTarget &t ) {
-	ImageHandle handles[3] = { t.sampleImage, t.colorSampleImage[0], t.colorSampleImage[1] };
-	for ( int i = 0; i < 3; i++ ) {
+	ImageHandle handles[4] = { t.sampleImage, t.colorSampleImage[0], t.colorSampleImage[1], t.colorSampleImage[2] };
+	for ( int i = 0; i < 4; i++ ) {
 		ImageHandle h = handles[i];
 		if ( h >= 1 && h <= (ImageHandle)imageTable.size() ) {
 			imageTable[h - 1] = ImageRec();
@@ -5208,7 +5941,7 @@ void VulkanBackend::ReleaseTargetSampleSlots( RenderTarget &t ) {
 		t.colorLevelInput[L] = 0;
 	}
 	t.sampleImage = 0;
-	t.colorSampleImage[0] = t.colorSampleImage[1] = 0;
+	t.colorSampleImage[0] = t.colorSampleImage[1] = t.colorSampleImage[2] = 0;
 }
 
 void VulkanBackend::DestroyRenderTarget( RenderTargetHandle rt ) {
@@ -5294,6 +6027,7 @@ uint8_t VulkanBackend::PassClassFor( VkFormat colorFmt, bool hasDepth, int color
 	}
 	// RGBA8 family (SSAO buffers later)
 	if ( !hasDepth )      { return 4; }		// color-only RGBA8
+	if ( colorCount >= 3 ) { return 8; }	// 3-MRT velocity gbuffer (RGBA8+RGBA8+RG16F+depth): distinct layout, MUST NOT alias class 6
 	return colorCount >= 2 ? 6 : 5;			// color+depth (+MRT)
 }
 
@@ -5306,10 +6040,10 @@ bool VulkanBackend::BuildColorPasses( RenderTarget &t, bool frameCapable ) {
 		const bool clearColor = ( v == 0 );			// clear resets color; load/clearDS keep it
 		const bool clearDS    = ( v == 0 || v == 2 );
 
-		VkAttachmentDescription atts[3] = {};
-		VkAttachmentReference   colorRefs[2] = {};
+		VkAttachmentDescription atts[4] = {};		// up to 3 color + 1 depth (R1/A0)
+		VkAttachmentReference   colorRefs[3] = {};
 		for ( int c = 0; c < nColor; c++ ) {
-			atts[c].format = t.colorFormat;
+			atts[c].format = t.colorFormat[c];
 			atts[c].samples = VK_SAMPLE_COUNT_1_BIT;
 			atts[c].loadOp = clearColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 			atts[c].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -5377,8 +6111,8 @@ bool VulkanBackend::BuildColorPasses( RenderTarget &t, bool frameCapable ) {
 
 bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat colorFmt,
                                        int colorCount, bool wantDepthStencil, bool frameCapable,
-                                       int mipLevels ) {
-	if ( device == VK_NULL_HANDLE || colorCount < 1 || colorCount > 2 ) {
+                                       int mipLevels, const VkFormat *mrtFormats ) {
+	if ( device == VK_NULL_HANDLE || colorCount < 1 || colorCount > 3 ) {
 		return false;
 	}
 	if ( wantDepthStencil && sceneDepthFormat == VK_FORMAT_UNDEFINED ) {
@@ -5388,7 +6122,9 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 	const bool mipped = mipLevels > 1;
 	t.colorTarget = true;
 	t.colorCount = colorCount;
-	t.colorFormat = colorFmt;
+	for ( int c = 0; c < colorCount; c++ ) {
+		t.colorFormat[c] = mrtFormats ? mrtFormats[c] : colorFmt;	// NULL = broadcast (bit-identical for existing callers)
+	}
 	t.hasDepth = wantDepthStencil;
 	t.colorMipLevels = mipLevels;
 	t.w = w;
@@ -5402,7 +6138,7 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		VkImageCreateInfo ici = {};
 		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 		ici.imageType = VK_IMAGE_TYPE_2D;
-		ici.format = colorFmt;
+		ici.format = t.colorFormat[c];
 		ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
 		ici.mipLevels = (uint32_t)mipLevels;
 		ici.arrayLayers = 1;
@@ -5412,8 +6148,10 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		// _currentRender capture blits from it while this is the frame target. The SSAO
 		// Phase 1 mip chain renders each level as a COLOR_ATTACHMENT (already set), so no
 		// transfer-dst is needed — coarse levels are drawn by a downsample shader.
+		// TRANSFER_DST: the FSR2 resolve (R1/C2) copies its output back over the HDR scene
+		// buffer's attachment 0. Universally supported for color formats, so unconditional.
 		ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-		          | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		          | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &t.colorImage[c], &t.colorAlloc[c], NULL ),
 		               "vmaCreateImage(color target)" ) ) {
@@ -5425,7 +6163,7 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 		vwi.image = t.colorImage[c];
 		vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		vwi.format = colorFmt;
+		vwi.format = t.colorFormat[c];
 		vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		vwi.subresourceRange.levelCount = 1;
 		vwi.subresourceRange.layerCount = 1;
@@ -5480,7 +6218,7 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		return false;
 	}
 
-	VkImageView views[3] = {};
+	VkImageView views[4] = {};		// up to 3 color + 1 depth (R1/A0)
 	int nv = 0;
 	for ( int c = 0; c < colorCount; c++ ) { views[nv++] = t.colorView[c]; }
 	if ( wantDepthStencil ) { views[nv++] = t.dsView; }
@@ -5631,12 +6369,15 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetColorDepth( ImageFormat fmt,
 		common->Warning( "VK CreateRenderTargetColorDepth: only IF_RGBA8 supported" );
 		return 0;
 	}
-	if ( colorCount < 1 || colorCount > 2 ) {
-		common->Warning( "VK CreateRenderTargetColorDepth: colorCount must be 1 or 2" );
+	if ( colorCount < 1 || colorCount > 3 ) {
+		common->Warning( "VK CreateRenderTargetColorDepth: colorCount must be 1-3" );
 		return 0;
 	}
+	// colorCount 3 = the R1 velocity gbuffer: RGBA8 normal @0, RGBA8 SSR @1, RG16F velocity @2.
+	const VkFormat velFormats[3] = { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16_SFLOAT };
+	const VkFormat *mrt = ( colorCount == 3 ) ? velFormats : NULL;
 	int slot = AllocTargetSlot();
-	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R8G8B8A8_UNORM, colorCount, /*ds*/true, /*frameCapable*/false ) ) {
+	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R8G8B8A8_UNORM, colorCount, /*ds*/true, /*frameCapable*/false, /*mipLevels*/1, mrt ) ) {
 		targetTable[slot] = RenderTarget();
 		return 0;
 	}
@@ -5651,6 +6392,12 @@ ImageHandle VulkanBackend::GetRenderTargetImage2( RenderTargetHandle rt ) {
 	}
 	RenderTarget *t = LookupTarget( rt );
 	return ( t && t->colorCount >= 2 ) ? t->colorSampleImage[1] : 0;
+}
+
+// third color attachment = the RG16F velocity MRT of the 3-MRT normal prepass (R1/A2).
+ImageHandle VulkanBackend::GetRenderTargetImage3( RenderTargetHandle rt ) {
+	RenderTarget *t = LookupTarget( rt );
+	return ( t && t->colorCount >= 3 ) ? t->colorSampleImage[2] : 0;
 }
 
 // the color/depth image the current frame target resolves to (for M5 captures)
@@ -6223,7 +6970,7 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	// blend-attachment count must match the active subpass: 0 for the depth-only
 	// shadow pass, 1 for the scene / HDR / color targets, 2 for an MRT target. The
 	// MRT attachments share one blend config (the SSR material buffer isn't blended).
-	VkPipelineColorBlendAttachmentState attArr[2] = { att, att };
+	VkPipelineColorBlendAttachmentState attArr[3] = { att, att, att };	// up to 3 color attachments (R1/A0)
 	cb.attachmentCount = (uint32_t)curColorAtt;
 	cb.pAttachments = ( curColorAtt > 0 ) ? attArr : NULL;
 

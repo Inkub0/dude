@@ -48,7 +48,8 @@ enum ImageFormat {
 	IF_DEPTH24_STENCIL8,	// backend may substitute D32S8
 	IF_RGBA16F,				// Tier-3 HDR target (post stack)
 	IF_DEPTH24,				// depth-only; shadow-map target, sampler2DShadow-ready
-	IF_R16F					// single-channel half-float; SSAO linear-depth mip (Phase 2)
+	IF_R16F,				// single-channel half-float; SSAO linear-depth mip (Phase 2)
+	IF_RG16F				// two-channel half-float; motion-vector / velocity MRT (R1/A0)
 };
 
 enum VertexLayout {
@@ -138,6 +139,30 @@ struct ComputeArgs {
 	const void *	pushConstants;		// params bound at push-constant offset 0 (NULL = none)
 	int				pushConstantSize;	// bytes, <= 128
 	unsigned int	groupsX, groupsY, groupsZ;
+};
+
+// FSR2 Native-AA dispatch (docs/fsr-temporal-pipeline.md R1/C2). Vulkan only; the
+// GL3 backend returns false and the frame is unchanged. The backend reads sceneRT's
+// color[0] (pre-tonemap RGBA16F scene) + depth attachment and velocityRT's 3rd
+// attachment (RG16F per-object motion vectors, R1/A2), runs the FSR2 temporal
+// resolve, and copies the result back over sceneRT color[0] — so everything after
+// (eye adaptation, bloom, HUD composite, tonemap/grain at the resolve) consumes the
+// temporally-stabilised scene with no reorder of the frame. jitter[XY] is the applied
+// projection jitter in pixels, engine convention (+Y-up); the backend owns the sign
+// flips into FSR2's top-left convention (see RunFsr2's derivation comment).
+struct Fsr2DispatchArgs {
+	RenderTargetHandle	sceneRT;		// RGBA16F color + depth-stencil frame target (rhiHdrRT)
+	RenderTargetHandle	velocityRT;		// 3-MRT velocity gbuffer (attachment 2 = RG16F)
+	float	jitterX, jitterY;			// viewDef->jitter, pixels, +Y-up
+	float	frameTimeMs;				// wall-clock delta since the previous dispatch
+	float	fovYRadians;				// vertical field of view
+	float	zNear;						// near plane (Doom units)
+	bool	reset;						// camera cut / teleport / first frame: drop FSR2 history
+	float	sharpness;					// RCAS [0,1]; < 0 disables the sharpening pass
+	// R1/D auto-reactive: strength of the generated reactive mask (additive particles,
+	// muzzle flashes, GUI screens get less history = no ghost trails). < 0 disables; also
+	// inert unless Fsr2CaptureOpaque ran this frame (the mask needs the opaque-only copy).
+	float	reactiveScale;
 };
 
 class RHI {
@@ -299,6 +324,9 @@ public:
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt ) = 0;
 	// second color attachment of a colorCount-2 color+depth target (0 if absent)
 	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle rt ) = 0;
+	// third color attachment (RG16F velocity MRT, R1/A2). Non-pure: only the VK
+	// 3-MRT velocity gbuffer has one; every other target and the GL3 backend return 0.
+	virtual ImageHandle			GetRenderTargetImage3( RenderTargetHandle rt ) { return 0; }
 
 	// per-draw uniform ring: writes `size` bytes and returns the aligned
 	// offset (+ the ring's buffer in *buffer) for DrawArgs::uniformBuffer/
@@ -377,6 +405,16 @@ public:
 	// so the result is ready for a ReadBuffer immediately. For dev/validation and load-time
 	// GPU work; stalls the GPU, so never per-frame. GL3 no-ops.
 	virtual void	DispatchSync( const ComputeArgs &args ) {}
+	// FSR2 Native-AA temporal resolve over the scene target (R1/C2, Vulkan only; see
+	// Fsr2DispatchArgs). Records compute on the frame command buffer after closing any
+	// open render pass; returns true when the dispatch ran and sceneRT now holds the
+	// resolved image. GL3 returns false (frame unchanged).
+	virtual bool	RunFsr2( const Fsr2DispatchArgs &args ) { return false; }
+	// R1/D: snapshot the scene color as the OPAQUE-ONLY input for FSR2's auto-reactive
+	// mask. Called at the opaque/translucent split of the primary view (after the SSR
+	// composite, before particles/blends draw); a straight same-orientation copy, unlike
+	// the y-flipped _currentRender capture. Valid for this frame's RunFsr2 only. GL3 no-op.
+	virtual void	Fsr2CaptureOpaque( RenderTargetHandle sceneRT ) {}
 
 	// ---- screen copies (_currentRender / _currentDepth / _scratch, Phase 4 M5) ----
 	// The GL3 backend keeps the literal qglCopyTexSubImage2D path in idImage

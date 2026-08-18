@@ -109,7 +109,6 @@ idCVar r_gammaInShader( "r_gammaInShader", "1", CVAR_RENDERER | CVAR_ARCHIVE | C
 idCVar r_renderer( "r_renderer", "best", CVAR_RENDERER | CVAR_ARCHIVE, "hardware specific renderer path to use", r_rendererArgs, idCmdSystem::ArgCompletion_String<r_rendererArgs> );
 
 idCVar r_jitter( "r_jitter", "0", CVAR_RENDERER | CVAR_BOOL, "randomly subpixel jitter the projection matrix" );
-
 idCVar r_skipSuppress( "r_skipSuppress", "0", CVAR_RENDERER | CVAR_BOOL, "ignore the per-view suppressions" );
 idCVar r_skipPostProcess( "r_skipPostProcess", "0", CVAR_RENDERER | CVAR_BOOL, "skip all post-process renderings" );
 idCVar r_skipLightScale( "r_skipLightScale", "0", CVAR_RENDERER | CVAR_BOOL, "don't do any post-interaction light scaling, makes things dim on low-dynamic range cards" );
@@ -345,6 +344,13 @@ idCVar r_hdrAdaptDesat( "r_hdrAdaptDesat", "0.33", CVAR_RENDERER | CVAR_ARCHIVE 
 // Debug: draw the adapted exposure as a flat grayscale (exposure * 0.2, so mid-gray ~= 2.5) so you
 // can see whether it is pinned or actually tracking the scene. Needs r_hdrEyeAdaptation.
 idCVar r_hdrEyeAdaptDebug( "r_hdrEyeAdaptDebug", "0", CVAR_RENDERER | CVAR_BOOL, "debug: show the adapted exposure as a flat grayscale (needs r_hdrEyeAdaptation)" );
+idCVar r_fsr( "r_fsr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "AMD FSR2 temporal anti-aliasing (Native-AA; docs/fsr-temporal-pipeline.md R1; Vulkan only). Forces the RGBA16F scene buffer on (FSR2's HDR input), auto-enables motion vectors + sub-pixel jitter, resolves the scene before the HUD, and replaces FXAA/SMAA with FSR2's RCAS. Off = the frame is unchanged" );
+idCVar r_fsrSharpness( "r_fsrSharpness", "0.8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "FSR2 RCAS sharpening amount (needs r_fsr): 0 = off, 1 = maximum", 0.0f, 1.0f );
+// FSR2 auto-reactive mask (R1/D): snapshot the opaque scene at the translucent split, and let
+// FSR2 compare it against the final frame — where they diverge (additive particles, muzzle
+// flashes, GUI screens, fog) history is trusted less, killing temporal ghost trails.
+idCVar r_fsrReactive( "r_fsrReactive", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "FSR2 auto-reactive mask (needs r_fsr): deghosts additive/translucent content (particles, flashes, screens) by comparing an opaque-only snapshot against the final frame; off = plain accumulation everywhere" );
+idCVar r_fsrReactiveScale( "r_fsrReactiveScale", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "FSR2 auto-reactive mask strength (needs r_fsr + r_fsrReactive); higher = less ghosting on particles but more shimmer on them", 0.0f, 2.0f );
 
 // DUDE Phase 3.5 "specular tuning" enhancement (GL3/Vulkan interaction shader
 // only; inert on the legacy ARB2 path). Defaults reproduce vanilla exactly:
@@ -486,6 +492,10 @@ idCVar r_ssaoMergeNormal( "r_ssaoMergeNormal", "0", CVAR_RENDERER | CVAR_BOOL, "
 idCVar r_ssaoDebug( "r_ssaoDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "SSAO debug view: 0 = off, 1 = show the AO buffer, 2 = show bent normals, 3 = show the normal G-buffer", 0, 3 );
 idCVar r_ssaoTemporal( "r_ssaoTemporal", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "accumulate SSAO across frames via camera reprojection: smooths the horizon-search noise and lets slices/steps run lower for the same look. Static-world reprojection (no motion vectors); ghosting is bounded by a neighbourhood clamp. Non-vanilla; opengl3/Vulkan only" );
 idCVar r_ssaoTemporalFeedback( "r_ssaoTemporalFeedback", "0.9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "SSAO temporal history weight: fraction of the reprojected previous-frame AO kept each frame (higher = smoother/steadier but more latency and ghosting; 0 = no accumulation). Needs r_ssaoTemporal", 0.0f, 0.97f );
+idCVar r_temporalResetDist( "r_temporalResetDist", "128", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how far (world units) the view origin may jump in one rendered frame before the shared temporal history (SSAO/SSR reprojection, and later motion vectors / FSR2) is treated as a discontinuity and reset, killing cross-cut / teleport ghosting. 0 disables the check (history never force-resets). opengl3/Vulkan only", 0.0f, 100000.0f );
+idCVar r_motionVectors( "r_motionVectors", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "Vulkan: write per-object screen-space motion vectors into a 3rd MRT of the normal G-buffer prepass (docs/fsr-temporal-pipeline.md R1/A2). Foundation for FSR2 and reduced temporal SSAO/SSR ghosting on moving objects. Forces the normal prepass on (an extra opaque pass) even when SSAO/SSR are off. VK-only; a no-op on the GL3/legacy backends (no float-colour render target)" );
+idCVar r_mvDebug( "r_mvDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "motion-vector debug overlay (needs r_motionVectors): 0 = off, 1 = direction (red = +x, green = +y, grey = static), 2 = magnitude (black = no motion). STRAFE or walk forward over static geometry: the surfaces tint by depth (near > far); the tint flips when you reverse. A camera PAN concentrates velocity at the screen edges (perspective), so it is a poor test for the geometry", 0, 2 );
+idCVar r_mvDebugScale( "r_mvDebugScale", "1", CVAR_RENDERER | CVAR_FLOAT, "live gain multiplier for the r_mvDebug overlay. Per-frame screen velocities are tiny, so crank this up (e.g. 4-10) to see slow object / camera motion clearly. Debug only", 0.0f, 200.0f );
 // DUDE SSAO Phase 1: prefiltered linear-depth mip chain (docs/ssao-perf-optimization.md). The horizon
 // search reads a coarser mip for farther steps, so far taps touch a small cache-local footprint instead
 // of scattering across full-res _currentDepth. Visually near-identical; a GPU-time win that scales with

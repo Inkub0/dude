@@ -24,6 +24,12 @@ VARY(4) out vec2 var_TexCoverage;   // diffuse UV for perforated (alpha-tested) 
 // PN surface as zfill/interaction. Unconsumed by gbuffer.frag in the flat pipeline.
 VARY(5) out vec3 var_ModelPos;
 VARY(6) out vec4 var_ModelNormal;	// .w = UV-seam displacement mask
+// DUDE motion vectors (docs/fsr-temporal-pipeline.md R1/A2): current + previous frame's clip
+// position, interpolated perspective-correctly so gbuffer.frag divides per-pixel for the
+// velocity write. Harmless (discarded) on the non-tessellated SSAO/SSR-only path where no
+// velocity attachment is bound; the tessellation path regenerates them in gbuffer.tese.
+VARY(7) out vec4 var_CurClip;
+VARY(8) out vec4 var_PrevClip;
 
 void main() {
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
@@ -40,5 +46,12 @@ void main() {
 	var_ModelPos = attr_Position.xyz;
 	var_ModelNormal = vec4( attr_Normal, attr_Color.a );
 
-	gl_Position = u_mvpMatrix * attr_Position;
+	// motion vectors (R1/A2): project through this frame's MVP (== un-jittered while jitter is
+	// off; increment B must keep jitter out of the velocity) and the previous frame's cached
+	// un-jittered MVP for this space. u_prevMvpMatrix is 0 on non-velocity draws → a dummy
+	// prev clip that gbuffer.frag discards where there is no 3rd MRT.
+	vec4 curClip = u_mvpMatrix * attr_Position;
+	var_CurClip  = curClip;
+	var_PrevClip = u_prevMvpMatrix * attr_Position;
+	gl_Position  = curClip;
 }

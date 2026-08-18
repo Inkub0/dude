@@ -16,8 +16,10 @@
 //   unit 0 (u_curSSR)      = this frame's marched reflection (rgb + hit mask in a)
 //   unit 1 (u_history)     = previous frame's accumulated result
 //   unit 2 (u_currentDepth)= scene depth (view-pos reconstruction / reprojection)
+//   unit 3 (u_velocity)    = per-object screen-velocity MRT (R1/A2); used when u_localParam1.x > 0.5
 //   u_localParam0 = ( 1/proj00, 1/proj11, feedback, historyValid )
-//   u_modelViewMatrix     = reproj: current view space -> previous clip
+//   u_localParam1.x       = 1 -> reproject by velocity (also catches moving objects); 0 -> matrix
+//   u_modelViewMatrix     = reproj: current view space -> previous clip (camera-only fallback)
 //   u_screenCorrection.xy = 1 / ssrTargetSize      (gl_FragCoord -> [0,1] uv, texel size)
 //   u_depthTexRecip.xy    = ratio / depthUploadSize (gl_FragCoord -> _currentDepth tc)
 
@@ -26,6 +28,7 @@
 SAMPLER_BINDING(0) uniform sampler2D u_curSSR;
 SAMPLER_BINDING(1) uniform sampler2D u_history;
 SAMPLER_BINDING(2) uniform sampler2D u_currentDepth;
+SAMPLER_BINDING(3) uniform sampler2D u_velocity;      // R1/A2 per-object velocity (gated by u_localParam1.x)
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -46,23 +49,37 @@ void main() {
 		return;
 	}
 
-	// view-space position from depth (identical reconstruction to ssr.frag).
-	// u_windowCoord.z = view-Y sign (+1 GL / -1 Vulkan) for VK's top-down framebuffer.
-	float vz  = 1.0 / ( raw * depth_consts.x + depth_consts.y );      // negative
-	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
-	float d   = -vz;
-	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
+	// where this pixel's surface was last frame, in the history buffer's sampling convention.
+	vec2 prevUV;
+	bool reprojOk;
+	if ( u_localParam1.x > 0.5 ) {
+		// R1/A2: reproject by the per-object velocity buffer, which unlike the camera-only
+		// matrix path also follows MOVING objects. Velocity is currUV - prevUV in +Y-up UV;
+		// flip the row on Vulkan's top-down framebuffer, then step back to the history location.
+		vec2 vel = texture( u_velocity, var_TexCoord ).rg;
+		vel.y = ( u_windowCoord.z < 0.0 ) ? -vel.y : vel.y;
+		prevUV = var_TexCoord - vel;
+		reprojOk = true;
+	} else {
+		// view-space position from depth (identical reconstruction to ssr.frag).
+		// u_windowCoord.z = view-Y sign (+1 GL / -1 Vulkan) for VK's top-down framebuffer.
+		float vz  = 1.0 / ( raw * depth_consts.x + depth_consts.y );      // negative
+		vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
+		float d   = -vz;
+		vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
 
-	// reproject into the previous frame: current view space -> previous clip -> uv.
-	// prevUV is GL-convention (y-up); on Vulkan flip the row to address the device-
-	// oriented (top-down) history target. The in-range test below is flip-invariant.
-	vec4 prevClip = u_modelViewMatrix * vec4( P, 1.0 );
-	vec2 prevUV   = ( prevClip.xy / prevClip.w ) * 0.5 + 0.5;
-	if ( u_windowCoord.z < 0.0 ) {
-		prevUV.y = 1.0 - prevUV.y;
+		// reproject into the previous frame: current view space -> previous clip -> uv.
+		// prevUV is GL-convention (y-up); on Vulkan flip the row to address the device-
+		// oriented (top-down) history target. The in-range test below is flip-invariant.
+		vec4 prevClip = u_modelViewMatrix * vec4( P, 1.0 );
+		prevUV = ( prevClip.xy / prevClip.w ) * 0.5 + 0.5;
+		if ( u_windowCoord.z < 0.0 ) {
+			prevUV.y = 1.0 - prevUV.y;
+		}
+		reprojOk = prevClip.w > 0.0;
 	}
 
-	bool valid = u_localParam0.w > 0.5 && prevClip.w > 0.0
+	bool valid = u_localParam0.w > 0.5 && reprojOk
 	          && all( greaterThanEqual( prevUV, vec2( 0.0 ) ) )
 	          && all( lessThanEqual(    prevUV, vec2( 1.0 ) ) );
 

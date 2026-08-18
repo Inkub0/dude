@@ -17,9 +17,15 @@ VARY(1) in vec3 var_T;
 VARY(2) in vec3 var_B;
 VARY(3) in vec3 var_N;
 VARY(4) in vec2 var_TexCoverage;
+// motion vectors (R1/A2): perspective-correct current/previous clip for the per-pixel velocity
+// write. Present on every gbuffer draw; out_Velocity is discarded on the 1-/2-MRT SSAO/SSR-only
+// targets that carry no 3rd attachment.
+VARY(7) in vec4 var_CurClip;
+VARY(8) in vec4 var_PrevClip;
 
 layout(location = 0) out vec4 fragColor;
 layout(location = 1) out vec4 out_Material;   // SSR: (roughness, metalness, 0, 1)
+layout(location = 2) out vec2 out_Velocity;   // R1/A2 motion vector: currUV - prevUV, +Y-up
 
 void main() {
 	// Perforated surfaces (grates, cables, foliage) are flat cards whose diffuse alpha masks
@@ -45,4 +51,15 @@ void main() {
 
 	fragColor = vec4( N * 0.5 + 0.5, u_localParam0.x );   // A = AO mask (0 = weapon, skip)
 	out_Material = vec4( u_pbrParms.y, u_pbrParms.x, 0.0, 1.0 );
+
+	// per-pixel screen velocity (docs/fsr-temporal-pipeline.md R1/A2): divide each interpolated
+	// clip by its OWN w so large world triangles reproject correctly, take the NDC delta, scale
+	// by 0.5 into [0,1] UV units. Canonical +Y-up direction currUV - prevUV: the SSAO/SSR
+	// consumers fetch history at currentUV - velocity; the FSR2 dispatch (C2) applies the top-left
+	// Y-flip via motionVectorScale. u_localParam1.xy cancels the per-frame projection jitter (R1/B;
+	// 0 when r_temporalJitter is off) so the jitter never registers as motion. Zeroed on the depth-
+	// hacked view weapon (u_localParam0.x == 0, the same mask written to fragColor.a).
+	vec2 curUV  = var_CurClip.xy  / var_CurClip.w;
+	vec2 prevUV = var_PrevClip.xy / var_PrevClip.w;
+	out_Velocity = ( ( curUV - prevUV ) * 0.5 + u_localParam1.xy ) * u_localParam0.x;
 }
