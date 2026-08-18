@@ -83,6 +83,12 @@ extern idCVar r_fxaaStrength;
 extern idCVar r_hdrTonemap;
 extern idCVar r_hdrExposure;
 extern idCVar r_hdrOverbright;
+extern idCVar r_hdrOverbrightSat;
+extern idCVar r_hdrEyeAdaptation;
+extern idCVar r_hdrEyeAdaptDebug;
+extern idCVar r_hdrAdaptGrain;
+extern idCVar r_hdrAdaptDesat;
+extern idCVar r_hdrBloom;
 
 // DUDE gamma/brightness in shader (RenderSystem_init.cpp). On the core context
 // there is no fixed-function/ARB gamma and SDL3 has no hardware gamma ramp, so
@@ -759,6 +765,8 @@ static rhi::RenderTargetHandle	rhiHdrAaRT = 0;		// FXAA/SMAA output ping (RGBA16
 static int						rhiHdrW = 0, rhiHdrH = 0;
 static bool						rbHdrRtFloat = false;			// rhiHdrRT is RGBA16F (HDR) vs RGBA8 (off-HDR post) — recreate on change
 static bool						rbHdrAaFloat = false;			// rhiHdrAaRT is RGBA16F vs RGBA8 — must track rhiHdrRT's format
+static rhi::ImageHandle			rbEyeExposureImg = 0;			// B1 eye-adapt: 1x1 adapted exposure, measured at end of the primary 3D view, sampled by the resolve
+static rhi::ImageHandle			rbBloomImg = 0;					// Phase C bloom: half-res glow, produced at end of the primary 3D view, added by the resolve
 static bool						rbHdrActiveThisFrame = false;	// scene post-target bound *right now* (view pass)
 static bool						rbHdrFrameActive = false;		// this whole frame is a true float-HDR frame
 static bool						rbBerserkFrame = false;			// berserk material seen this frame → radial-blur the _scratch blit
@@ -831,6 +839,21 @@ static bool RB_RHI_FrameHasWorldScene( const emptyCommand_t *cmds ) {
 static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	rbHdrActiveThisFrame = false;
 	rbHdrFrameActive = false;
+
+	// Tonemap follows the HDR toggle (the curve is meaningless — and unreachable in the greyed-out
+	// combo — with r_hdr off). On the off edge clear it to faithful; on the on edge default it to
+	// Reinhard (the standard look). Both act whatever flipped r_hdr (menu, console, preset). A
+	// manual curve choice while HDR stays on persists; only an actual toggle re-defaults it. Init
+	// prev=true so a config loaded with r_hdr 0 + a stale curve self-corrects and a saved r_hdr-on
+	// curve is left alone (no false edge).
+	static bool rbPrevHdr = true;
+	const bool rbHdrNow = r_hdr.GetBool();
+	if ( rbPrevHdr && !rbHdrNow && r_hdrTonemap.GetInteger() != 0 ) {
+		r_hdrTonemap.SetInteger( 0 );			// HDR off -> faithful
+	} else if ( !rbPrevHdr && rbHdrNow && r_hdrTonemap.GetInteger() == 0 ) {
+		r_hdrTonemap.SetInteger( 1 );			// HDR on -> Reinhard
+	}
+	rbPrevHdr = rbHdrNow;
 
 	// Baking a glass reflection probe (bakeGlassProbe, tr.takingEnvProbe): the six
 	// 90-degree faces must be the clean scene, so they stay on the straight-to-
@@ -918,6 +941,8 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 
 	r->SetFrameTarget( rhiHdrRT );
 	rbHdrActiveThisFrame = true;
+	rbEyeExposureImg = 0;		// B1: recomputed at the end of the primary 3D view (0 = use static exposure)
+	rbBloomImg = 0;				// Phase C: recomputed at the end of the primary 3D view (0 = no bloom)
 	// only a true float-HDR frame forces _currentRender to RGBA16F; the off-HDR post
 	// target is RGBA8, so captures (glass refraction) keep the default 8-bit format
 	rbHdrFrameActive = wantHdr;	// stays true past HdrResolve so _currentRender keeps one format all frame
@@ -1022,6 +1047,11 @@ static bool RB_RHI_HdrResolveSmaaFused( rhi::RHI *r, int w, int h ) {
 	if ( r_rhiAA.GetInteger() != 2 || r_postChromaticAberration.GetFloat() > 0.0f || !rhiHdrRT ) {
 		return false;
 	}
+	// Eye adaptation (B1) and bloom (Phase C) are wired into the plain resolve only; fall through to
+	// it so their samplers are bound. SMAA still applies there (unfused, via RB_RHI_HdrSmaa).
+	if ( r_hdrEyeAdaptation.GetBool() || r_hdrBloom.GetFloat() > 0.0f ) {
+		return false;
+	}
 	rhi::ShaderHandle prog = r->LoadShader( "hdrresolve_smaa" );
 	if ( !prog ) {
 		return false;
@@ -1122,6 +1152,11 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	int w = glConfig.vidWidth;
 	int h = glConfig.vidHeight;
 
+	// Eye adaptation (Phase B1): the adapted exposure was computed at the end of the primary 3D
+	// view (scene-only, before the HUD/console). The resolve just samples that 1x1 here; 0 when
+	// adaptation is off, so the static r_hdrExposure is used.
+	rhi::ImageHandle eyeExposureImg = rbEyeExposureImg;
+
 	// Fused SMAA resolve (chroma off): the neighborhood blend + grain/gamma tail in one pass,
 	// dropping the rhiHdrAaRT round-trip. Falls through to the classic path when ineligible.
 	if ( RB_RHI_HdrResolveSmaaFused( r, w, h ) ) {
@@ -1168,6 +1203,12 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	parms.localParam0[3] = r_postChromaticAberration.GetFloat();
 	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
 	parms.localParam1[3] = (float)r_hdrTonemap.GetInteger();	// tonemap curve select
+	parms.windowCoord[0] = ( eyeExposureImg != 0 ) ? 1.0f : 0.0f;	// eye-adapt flag: sample the 1x1 adapted exposure
+	parms.windowCoord[1] = ( eyeExposureImg != 0 && r_hdrEyeAdaptDebug.GetBool() ) ? 1.0f : 0.0f;	// eye-adapt debug: overlay exposure/luma boxes
+	parms.color[0] = ( h > 0 ) ? (float)w / (float)h : 1.777f;	// aspect for square debug boxes (u_color.x)
+	parms.color[1] = r_hdrAdaptGrain.GetFloat();				// low-light grain boost at full brighten (u_color.y)
+	parms.color[2] = r_hdrAdaptDesat.GetFloat();				// low-light desaturation at full brighten (u_color.z)
+	parms.color[3] = ( rbBloomImg != 0 ) ? r_hdrBloom.GetFloat() : 0.0f;	// bloom strength (u_color.w); 0 = no bloom this frame
 	parms.windowCoord[2] = 0.5f;	// aberration center in uv
 	parms.windowCoord[3] = 0.5f;
 	// gamma / brightness: folded into the resolve on Vulkan (the backend has no separate
@@ -1217,6 +1258,12 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
 	da.textures[0] = r->GetRenderTargetImage( sourceRT );
+	// unit 1 = the 1x1 adapted exposure (Phase B1); a valid dummy (the scene) when adaptation is
+	// off, since the shader only samples it when the eye-adapt flag is set (windowCoord.x).
+	da.textures[1] = ( eyeExposureImg != 0 ) ? eyeExposureImg : da.textures[0];
+	// unit 2 = the half-res bloom glow (Phase C); dummy (scene) when off — the shader only samples
+	// it when the bloom strength (color.w) is > 0.
+	da.textures[2] = ( rbBloomImg != 0 ) ? rbBloomImg : da.textures[0];
 	r->Draw( da );
 
 	backEnd.pc.c_drawElements++;
@@ -2983,6 +3030,9 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			parms.color[0] *= ob;
 			parms.color[1] *= ob;
 			parms.color[2] *= ob;
+			// pre-saturate so the tonemap doesn't wash coloured emissive (fire/lava) to white;
+			// generic.frag reads localParam0.x (>1 = boost, white is unaffected).
+			parms.localParam0[0] = r_hdrOverbrightSat.GetFloat();
 		}
 
 		// fixed-function alpha test bits -> in-shader test (fail if a < ref)
@@ -3248,6 +3298,15 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		// weapon, on both backends and under HDR. Zero cost unless a reload is easing
 		// r_weaponReloadFocus above 0 (idPlayerView writes it).
 		RB_RHI_DepthOfField( r, viewDef );
+		// HDR eye adaptation (Phase B1): measure the SCENE luminance HERE — end of the primary
+		// 3D view, before the HUD / console / menus are composited into the HDR buffer — so the
+		// adapted exposure tracks the world, not the UI. The resolve samples rbEyeExposureImg.
+		if ( rbHdrActiveThisFrame && rhiHdrRT ) {
+			rbEyeExposureImg = RB_RHI_EyeAdaptExposure( r, r->GetRenderTargetImage( rhiHdrRT ) );
+			// HDR bloom (Phase C): same scene-only point — threshold + blur the bright scene into a
+			// half-res glow the resolve adds before the tonemap.
+			rbBloomImg = RB_RHI_Bloom( r, r->GetRenderTargetImage( rhiHdrRT ) );
+		}
 	}
 
 	// debug visualization (r_showTris, r_showNormals, debug lines/polygons, …)

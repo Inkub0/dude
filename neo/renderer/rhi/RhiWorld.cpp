@@ -4967,6 +4967,276 @@ void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_ForgetTexBinds();
 }
 
+// ---- HDR eye adaptation / auto-exposure (Phase B1, docs/hdr-pipeline.md) ----
+extern idCVar r_hdrEyeAdaptation;
+extern idCVar r_hdrAdaptSpeed;
+extern idCVar r_hdrExposure;
+extern idCVar r_hdrAdaptBrighten;
+extern idCVar r_hdrAdaptDarken;
+extern idCVar r_hdrAdaptKey;
+extern idCVar r_hdrAdaptCenter;
+extern idCVar r_hdrTonemap;
+
+// Single-level luma reduction targets (64 -> 8 -> 1), each 8x8-averaging into the next. Deliberately
+// NOT a mip-render chain (BeginTargetMipPass): that path has no write->read barrier between levels and
+// faulted the GPU (device-loss, black screen) when driven every frame. These go through the ordinary
+// BeginTargetPass path the resolve / SSAO-temporal / DoF use, which is properly synchronized.
+static rhi::RenderTargetHandle rhiLumaA = 0;				// 64x64 RGBA16F, .r = log-luma of the centre-cropped scene
+static rhi::RenderTargetHandle rhiLumaB = 0;				// 8x8 RGBA16F, .r = 8x8 average of A
+static rhi::RenderTargetHandle rhiLumaC = 0;				// 1x1 RGBA16F, .r = 8x8 average of B = geometric-mean log-luma
+static rhi::RenderTargetHandle rhiExposureRT[2] = { 0, 0 };	// 1x1 RGBA16F adapted-exposure ping-pong (.r)
+static bool rhiExposureValid = false;						// the read slot holds a usable previous exposure
+static int rhiExposureIdx = 0;								// write slot
+static int rhiExposureLastTick = -100000;					// Sys_Milliseconds() of the last update
+
+// Ensure the luma reduction targets + the 1x1 exposure ping-pong exist; invalidate on lost context.
+static bool RB_RHI_EnsureEyeAdaptTargets( rhi::RHI *r ) {
+	if ( rhiLumaA && r->GetRenderTargetImage( rhiLumaA ) == 0 ) {
+		rhiLumaA = rhiLumaB = rhiLumaC = 0;				// lost context (vid_restart)
+	}
+	if ( !rhiLumaA || !rhiLumaB || !rhiLumaC ) {
+		if ( rhiLumaA ) { r->DestroyRenderTarget( rhiLumaA ); rhiLumaA = 0; }
+		if ( rhiLumaB ) { r->DestroyRenderTarget( rhiLumaB ); rhiLumaB = 0; }
+		if ( rhiLumaC ) { r->DestroyRenderTarget( rhiLumaC ); rhiLumaC = 0; }
+		rhiLumaA = r->CreateRenderTarget( rhi::IF_RGBA16F, 64, 64 );
+		rhiLumaB = r->CreateRenderTarget( rhi::IF_RGBA16F, 8, 8 );
+		rhiLumaC = r->CreateRenderTarget( rhi::IF_RGBA16F, 1, 1 );
+		if ( !rhiLumaA || !rhiLumaB || !rhiLumaC ) {
+			if ( rhiLumaA ) { r->DestroyRenderTarget( rhiLumaA ); rhiLumaA = 0; }
+			if ( rhiLumaB ) { r->DestroyRenderTarget( rhiLumaB ); rhiLumaB = 0; }
+			if ( rhiLumaC ) { r->DestroyRenderTarget( rhiLumaC ); rhiLumaC = 0; }
+			return false;
+		}
+	}
+	if ( rhiExposureRT[0] && r->GetRenderTargetImage( rhiExposureRT[0] ) == 0 ) {
+		rhiExposureRT[0] = rhiExposureRT[1] = 0;
+		rhiExposureValid = false;
+	}
+	if ( !rhiExposureRT[0] || !rhiExposureRT[1] ) {
+		for ( int i = 0; i < 2; ++i ) {
+			if ( rhiExposureRT[i] ) { r->DestroyRenderTarget( rhiExposureRT[i] ); rhiExposureRT[i] = 0; }
+		}
+		// RGBA16F (not R16F): GL3 CreateRenderTarget has no single-channel colour target; 1x1 so size is trivial.
+		rhiExposureRT[0] = r->CreateRenderTarget( rhi::IF_RGBA16F, 1, 1 );
+		rhiExposureRT[1] = r->CreateRenderTarget( rhi::IF_RGBA16F, 1, 1 );
+		rhiExposureValid = false;								// nothing to ease from until one frame lands
+		if ( !rhiExposureRT[0] || !rhiExposureRT[1] ) {
+			for ( int i = 0; i < 2; ++i ) {
+				if ( rhiExposureRT[i] ) { r->DestroyRenderTarget( rhiExposureRT[i] ); rhiExposureRT[i] = 0; }
+			}
+			return false;
+		}
+		// clear both slots so the first prev-exposure read is defined on Vulkan (an unwritten
+		// colour target's layout is UNDEFINED and would trip validation), like the berserk trail.
+		rhi::ClearArgs clear;
+		memset( &clear, 0, sizeof( clear ) );
+		clear.color = true;
+		r->BeginTargetPass( rhiExposureRT[0], &clear ); r->EndPass();
+		r->BeginTargetPass( rhiExposureRT[1], &clear ); r->EndPass();
+		rhiExposureIdx = 0;
+		rhiExposureLastTick = -100000;
+	}
+	return true;
+}
+
+/*
+===================
+RB_RHI_EyeAdaptExposure
+
+HDR eye adaptation (Phase B1). Reduce the finished HDR scene to a 1x1 geometric-mean
+luminance (log-luma mip chain), then ease a per-frame adapted exposure toward the
+mid-gray target into a 1x1 ping-pong (the temporal lag is the eye-adapt feel), and
+return that 1x1 exposure image for the resolve to sample. Returns 0 (static exposure)
+when adaptation is off, no tonemap curve is active, or the targets can't be built.
+Mirrors the FXAA pattern (BeginTargetPass reading rhiHdrRT), so it is safe at resolve
+time; measured before the resolve's own SetFrameTarget(0).
+===================
+*/
+rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg ) {
+	if ( !r_hdrEyeAdaptation.GetBool() || r_hdrTonemap.GetInteger() < 1 || sceneImg == 0 ) {
+		return 0;
+	}
+	if ( !R_BackendSupportsEnhancements() || !RB_RHI_EnsureEyeAdaptTargets( r ) ) {
+		return 0;
+	}
+	rhi::ShaderHandle lumaProg = r->LoadShader( "hdrluma" );
+	rhi::ShaderHandle downProg = r->LoadShader( "hdrlumadown" );
+	rhi::ShaderHandle expProg  = r->LoadShader( "hdrexpose" );
+	if ( !lumaProg || !downProg || !expProg ) {
+		return 0;
+	}
+	// 1. luminance reduction: scene -> A (64x64 log-luma, centre-cropped) -> B (8x8) -> C (1x1),
+	// each an 8x8 box-average, through the ordinary BeginTargetPass path — target->target reads are
+	// properly synchronized there, unlike the barrier-less mip-render chain (which faulted the GPU
+	// when driven every frame). C.r ends as the geometric-mean log-luma.
+	rhi::RenderParams p;
+	memset( &p, 0, sizeof( p ) );
+	p.mvpMatrix[0] = p.mvpMatrix[5] = p.mvpMatrix[10] = p.mvpMatrix[15] = 1.0f;
+	p.localParam0[0] = idMath::ClampFloat( 0.05f, 1.0f, r_hdrAdaptCenter.GetFloat() );	// central metering crop (hdrluma)
+
+	r->BeginTargetPass( rhiLumaA, NULL );					// scene -> 64x64 log-luma
+	RB_RHI_DrawFullscreen( r, lumaProg, p, sceneImg );
+	r->EndPass();
+
+	r->BeginTargetPass( rhiLumaB, NULL );					// 64 -> 8 (each texel = 8x8 average)
+	RB_RHI_DrawFullscreen( r, downProg, p, r->GetRenderTargetImage( rhiLumaA ) );
+	r->EndPass();
+
+	r->BeginTargetPass( rhiLumaC, NULL );					// 8 -> 1 (8x8 average = geometric mean)
+	RB_RHI_DrawFullscreen( r, downProg, p, r->GetRenderTargetImage( rhiLumaB ) );
+	r->EndPass();
+
+	// 2. temporal adaptation into the 1x1 exposure ping-pong
+	int timeMs = Sys_Milliseconds();
+	int dt = timeMs - rhiExposureLastTick;
+	if ( dt > 1000 || dt < 0 ) { rhiExposureValid = false; dt = 16; }	// paused / first frame -> snap
+	if ( dt < 1 ) { dt = 1; }
+	rhiExposureLastTick = timeMs;
+	float speed = r_hdrAdaptSpeed.GetFloat();
+	if ( speed < 0.01f ) { speed = 0.01f; }
+	const float tau = 1.0f / speed;										// time constant, seconds
+	const float dtSec = (float)dt * 0.001f;
+	const float alpha = 1.0f - idMath::Pow( 2.71828183f, -dtSec / tau );
+
+	const int writeIdx = rhiExposureIdx;
+	const int readIdx  = 1 - writeIdx;
+
+	rhi::RenderParams ep;
+	memset( &ep, 0, sizeof( ep ) );
+	ep.mvpMatrix[0] = ep.mvpMatrix[5] = ep.mvpMatrix[10] = ep.mvpMatrix[15] = 1.0f;
+	ep.localParam0[0] = r_hdrExposure.GetFloat();						// neutral "mid" exposure
+	ep.localParam0[1] = r_hdrAdaptBrighten.GetFloat();					// added as the scene darkens
+	ep.localParam0[2] = r_hdrAdaptDarken.GetFloat();					// removed as the scene brightens
+	ep.localParam0[3] = alpha;
+	ep.localParam1[0] = rhiExposureValid ? 1.0f : 0.0f;					// ease from prev, else snap
+	ep.localParam1[1] = 0.0f;											// luma source is a single-level 1x1 target (lod 0)
+	ep.localParam1[2] = r_hdrAdaptKey.GetFloat();						// key: scene luminance mapping to r_hdrExposure
+
+	rhi::ImageHandle lumaAvg = r->GetRenderTargetImage( rhiLumaC );		// the 1x1 average
+
+	r->BeginTargetPass( rhiExposureRT[writeIdx], NULL );
+	RB_RHI_BindRTUnit( r, 1, rhiExposureRT[readIdx] );					// previous exposure on unit 1
+	RB_RHI_DrawFullscreen( r, expProg, ep, lumaAvg );					// luma 1x1 on unit 0
+	r->EndPass();
+
+	rhiExposureIdx  = readIdx;											// next frame writes the other slot
+	rhiExposureValid = true;
+	RB_RHI_ForgetTexBinds();
+
+	return r->GetRenderTargetImage( rhiExposureRT[writeIdx] );			// fresh exposure for the resolve
+}
+
+// ---- HDR bloom (Phase C, docs/hdr-pipeline.md) ----
+extern idCVar r_hdrBloom;
+extern idCVar r_hdrBloomThreshold;
+
+#define RHI_BLOOM_MAX 6
+static rhi::RenderTargetHandle rhiBloomD[RHI_BLOOM_MAX] = { 0 };	// downsample chain (threshold -> smaller)
+static rhi::RenderTargetHandle rhiBloomU[RHI_BLOOM_MAX] = { 0 };	// upsample-combine chain (result in [0])
+static int rhiBloomW[RHI_BLOOM_MAX] = { 0 };
+static int rhiBloomH[RHI_BLOOM_MAX] = { 0 };
+static int rhiBloomLevels = 0;
+static int rhiBloomBaseW = 0, rhiBloomBaseH = 0;					// vid size the chain was built for
+
+static void RB_RHI_DestroyBloom( rhi::RHI *r ) {
+	for ( int i = 0; i < RHI_BLOOM_MAX; i++ ) {
+		if ( rhiBloomD[i] ) { r->DestroyRenderTarget( rhiBloomD[i] ); rhiBloomD[i] = 0; }
+		if ( rhiBloomU[i] ) { r->DestroyRenderTarget( rhiBloomU[i] ); rhiBloomU[i] = 0; }
+	}
+	rhiBloomLevels = 0; rhiBloomBaseW = rhiBloomBaseH = 0;
+}
+
+// Ensure the down+up bloom chains exist at the current resolution; rebuild on resize / lost context.
+static bool RB_RHI_EnsureBloom( rhi::RHI *r ) {
+	const int vw = glConfig.vidWidth, vh = glConfig.vidHeight;
+	if ( rhiBloomD[0] && r->GetRenderTargetImage( rhiBloomD[0] ) == 0 ) {	// lost context (vid_restart)
+		for ( int i = 0; i < RHI_BLOOM_MAX; i++ ) { rhiBloomD[i] = rhiBloomU[i] = 0; }
+		rhiBloomLevels = 0; rhiBloomBaseW = rhiBloomBaseH = 0;
+	}
+	if ( rhiBloomLevels >= 2 && rhiBloomBaseW == vw && rhiBloomBaseH == vh ) {
+		return true;
+	}
+	RB_RHI_DestroyBloom( r );
+	int w = vw / 2, h = vh / 2, n = 0;
+	for ( ; n < RHI_BLOOM_MAX && w >= 8 && h >= 8; n++ ) {
+		rhiBloomD[n] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+		rhiBloomU[n] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+		if ( !rhiBloomD[n] || !rhiBloomU[n] ) { break; }
+		rhiBloomW[n] = w; rhiBloomH[n] = h;
+		w /= 2; h /= 2;
+	}
+	rhiBloomLevels = n;
+	if ( rhiBloomLevels < 2 ) { RB_RHI_DestroyBloom( r ); return false; }	// need at least down + up
+	rhiBloomBaseW = vw; rhiBloomBaseH = vh;
+	return true;
+}
+
+/*
+===================
+RB_RHI_Bloom
+
+HDR bloom (Phase C). Threshold the bright HDR scene at half res, downsample it through a chain
+of ever-smaller targets (the downsample IS the blur), then tent-upsample back up, adding each
+level's downsample content in-shader (VK BeginTargetPass always clears, so the up-chain writes a
+separate set of targets rather than accumulating in place). Returns the half-res glow
+(rhiBloomU[0]) for the resolve to bilinear-upsample and add before the tonemap; 0 when bloom is
+off. Runs at the end of the primary 3D view (scene-only), like eye adaptation.
+===================
+*/
+rhi::ImageHandle RB_RHI_Bloom( rhi::RHI *r, rhi::ImageHandle sceneImg ) {
+	if ( r_hdrBloom.GetFloat() <= 0.0f || sceneImg == 0 ) {
+		return 0;
+	}
+	if ( !R_BackendSupportsEnhancements() || !RB_RHI_EnsureBloom( r ) ) {
+		return 0;
+	}
+	rhi::ShaderHandle threshProg = r->LoadShader( "bloomthreshold" );
+	rhi::ShaderHandle downProg   = r->LoadShader( "bloomdown" );
+	rhi::ShaderHandle upProg     = r->LoadShader( "bloomup" );
+	if ( !threshProg || !downProg || !upProg ) {
+		return 0;
+	}
+	const int N = rhiBloomLevels;
+
+	// threshold: scene -> D[0] (half res, bright pixels only)
+	rhi::RenderParams p;
+	memset( &p, 0, sizeof( p ) );
+	p.mvpMatrix[0] = p.mvpMatrix[5] = p.mvpMatrix[10] = p.mvpMatrix[15] = 1.0f;
+	p.localParam0[0] = r_hdrBloomThreshold.GetFloat();
+	r->BeginTargetPass( rhiBloomD[0], NULL );
+	RB_RHI_DrawFullscreen( r, threshProg, p, sceneImg );
+	r->EndPass();
+
+	// downsample chain: D[i-1] -> D[i]
+	for ( int i = 1; i < N; i++ ) {
+		rhi::RenderParams dp;
+		memset( &dp, 0, sizeof( dp ) );
+		dp.mvpMatrix[0] = dp.mvpMatrix[5] = dp.mvpMatrix[10] = dp.mvpMatrix[15] = 1.0f;
+		dp.localParam0[0] = 1.0f / (float)rhiBloomW[i-1];		// source texel size
+		dp.localParam0[1] = 1.0f / (float)rhiBloomH[i-1];
+		r->BeginTargetPass( rhiBloomD[i], NULL );
+		RB_RHI_DrawFullscreen( r, downProg, dp, r->GetRenderTargetImage( rhiBloomD[i-1] ) );
+		r->EndPass();
+	}
+
+	// upsample-combine chain: U[i] = tent_up( src ) + D[i]; src = D[N-1] to start, then U[i+1]
+	for ( int i = N - 2; i >= 0; i-- ) {
+		rhi::RenderParams up;
+		memset( &up, 0, sizeof( up ) );
+		up.mvpMatrix[0] = up.mvpMatrix[5] = up.mvpMatrix[10] = up.mvpMatrix[15] = 1.0f;
+		up.localParam0[0] = 1.0f / (float)rhiBloomW[i+1];		// smaller-level texel size (tent offsets)
+		up.localParam0[1] = 1.0f / (float)rhiBloomH[i+1];
+		rhi::RenderTargetHandle srcRT = ( i == N - 2 ) ? rhiBloomD[N-1] : rhiBloomU[i+1];
+		r->BeginTargetPass( rhiBloomU[i], NULL );
+		RB_RHI_BindRTUnit( r, 1, rhiBloomD[i] );				// this level's downsample content -> unit 1 (u_add)
+		RB_RHI_DrawFullscreen( r, upProg, up, r->GetRenderTargetImage( srcRT ) );	// upsample source -> unit 0
+		r->EndPass();
+	}
+
+	RB_RHI_ForgetTexBinds();
+	return r->GetRenderTargetImage( rhiBloomU[0] );				// half-res glow (resolve bilinear-upsamples + adds)
+}
+
 /*
 ===================
 RB_RHI_DrawWorld

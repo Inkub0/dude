@@ -301,12 +301,50 @@ idCVar r_hdr( "r_hdr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "render th
 // HDR tonemap (needs r_hdr): static-exposure curve folded into the resolve. 0 = off/faithful
 // (bit-identical to the straight resolve), 1 = Reinhard, 2 = ACES, 3 = AgX, 4 = Khronos PBR Neutral.
 idCVar r_hdrTonemap( "r_hdrTonemap", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "HDR tonemap curve (needs r_hdr): 0=off/faithful, 1=Reinhard, 2=ACES, 3=AgX, 4=Khronos PBR Neutral", 0, 4 );
-idCVar r_hdrExposure( "r_hdrExposure", "2.33", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR static exposure multiplier applied before the tonemap curve (needs r_hdr + r_hdrTonemap>=1)", 0.1f, 8.0f );
+idCVar r_hdrExposure( "r_hdrExposure", "2.8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR static exposure multiplier applied before the tonemap curve (needs r_hdr + r_hdrTonemap>=1)", 0.1f, 8.0f );
 // HDR C-lite overbright (needs r_hdr + a tonemap curve): multiply additive self-illum stages
 // (blend add — lamps, screens, fire, glares) so they exceed 1.0 in the float scene buffer,
 // giving the tonemap curve real highlight range and eye-adaptation bright anchors. Only active
 // with r_hdrTonemap>=1 (like r_hdrExposure), so it never touches the faithful mode-0 look. 1=off.
-idCVar r_hdrOverbright( "r_hdrOverbright", "3.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright multiplier for additive self-illum stages (needs r_hdr + r_hdrTonemap>=1): pushes lamps/screens/fire above 1.0 for tonemap+adaptation range; 1=off. When active it auto-disables the legacy r_flareSize light haze", 1.0f, 8.0f );
+idCVar r_hdrOverbright( "r_hdrOverbright", "2.16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright multiplier for additive self-illum stages (needs r_hdr + r_hdrTonemap>=1): pushes lamps/screens/fire above 1.0 for tonemap+adaptation range; 1=off. When active it auto-disables the legacy r_flareSize light haze", 1.0f, 8.0f );
+// Overbright saturation: the tonemap desaturates the very bright colours overbright pushes into
+// (coloured fire/lava go white while white lights are fine). Pre-saturate the boosted additive
+// stages so the hue survives the curve. 1 = off; white is unaffected (no saturation to boost).
+idCVar r_hdrOverbrightSat( "r_hdrOverbrightSat", "1.30", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright saturation compensation for coloured emissive (fire/lava) that the tonemap washes out; 1 = off", 1.0f, 3.0f );
+// HDR bloom (needs r_hdr): threshold the bright HDR pixels, blur them through a downsample/upsample
+// chain, and add the glow back before the tonemap — the "punch" the curve otherwise rolls off.
+// Threshold sets the brightness that starts to bloom (lower it to catch fire/lava directly, which
+// can replace the emissive overbright). 0 = off.
+idCVar r_hdrBloom( "r_hdrBloom", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR bloom intensity: glow bled from bright pixels, added before the tonemap (needs r_hdr); 0 = off", 0.0f, 2.0f );
+idCVar r_hdrBloomThreshold( "r_hdrBloomThreshold", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR bloom brightness threshold: pixels above this bloom (lower to catch fire/lava directly)", 0.0f, 8.0f );
+// HDR eye adaptation / auto-exposure (Phase B1, needs r_hdr + r_hdrTonemap>=1): the scene's
+// average (log) luminance drives the tonemap exposure over time. r_hdrExposure becomes the
+// exposure at a mid-gray (~0.18) scene; brighter scenes expose down, darker expose up, clamped
+// to [min,max] and eased with a time constant ~1/speed seconds. Off = the static r_hdrExposure.
+idCVar r_hdrEyeAdaptation( "r_hdrEyeAdaptation", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "HDR auto-exposure / eye adaptation (needs r_hdr + r_hdrTonemap>=1): average scene luminance drives the tonemap exposure over time; off = static r_hdrExposure" );
+idCVar r_hdrAdaptSpeed( "r_hdrAdaptSpeed", "2.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation speed (higher = faster); the exposure lags with a time constant ~1/speed seconds", 0.1f, 10.0f );
+// Relative adaptation (no hard clamp): r_hdrExposure is the neutral "mid" exposure at a reference
+// scene luminance (r_hdrAdaptKey). As the scene darkens the exposure rises by up to +Brighten; as
+// it brightens it falls by up to -Darken. A smooth tanh rolloff self-limits both, so it eases to
+// the bounds instead of pinning. Darken is kept small for the "mildly less bright" look.
+idCVar r_hdrAdaptBrighten( "r_hdrAdaptBrighten", "1.22", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: max exposure ADDED to r_hdrExposure as the scene darkens (dark areas brighten)", 0.0f, 8.0f );
+idCVar r_hdrAdaptDarken( "r_hdrAdaptDarken", "0.85", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: max exposure REMOVED from r_hdrExposure as the scene brightens (bright scenes dim, keep mild)", 0.0f, 8.0f );
+// Reference luminance: the geometric-mean scene luminance mapped to r_hdrExposure (neutral). Doom 3
+// scenes are dark, so this is low. Raise it to treat brighter scenes as neutral, lower for darker.
+idCVar r_hdrAdaptKey( "r_hdrAdaptKey", "0.03", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation reference luminance mapped to r_hdrExposure (the neutral scene brightness)", 0.005f, 1.0f );
+// Metering region: fraction of the view width/height averaged for luminance, centred on the screen.
+// 1 = whole screen (dark periphery washes out what you look at); lower = center-weighted, so aiming
+// at a light or a dark corner actually moves the exposure — the "look at" behaviour.
+idCVar r_hdrAdaptCenter( "r_hdrAdaptCenter", "0.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation metering: central fraction of the view measured (1 = whole screen, lower = center-weighted)", 0.15f, 1.0f );
+// Low-light grain boost: as the dark-scene brightening ramps up, scale film grain (r_postFilmGrain)
+// with it — high-gain sensor/eye noise. 1 = grain (almost) doubles at full brightening; 0 = off.
+idCVar r_hdrAdaptGrain( "r_hdrAdaptGrain", "3.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: extra film grain at full low-light brightening (1 = ~double the grain, 0 = off; needs r_postFilmGrain)", 0.0f, 5.0f );
+// Low-light desaturation: as the dark-scene brightening ramps up, wash colours toward gray (scotopic
+// vision — rods take over from cones in the dark). 0.25 = colours drop to ~75% at full brightening.
+idCVar r_hdrAdaptDesat( "r_hdrAdaptDesat", "0.33", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: colour desaturation at full low-light brightening (0.25 = ~75% saturation, 0 = off)", 0.0f, 1.0f );
+// Debug: draw the adapted exposure as a flat grayscale (exposure * 0.2, so mid-gray ~= 2.5) so you
+// can see whether it is pinned or actually tracking the scene. Needs r_hdrEyeAdaptation.
+idCVar r_hdrEyeAdaptDebug( "r_hdrEyeAdaptDebug", "0", CVAR_RENDERER | CVAR_BOOL, "debug: show the adapted exposure as a flat grayscale (needs r_hdrEyeAdaptation)" );
 
 // DUDE Phase 3.5 "specular tuning" enhancement (GL3/Vulkan interaction shader
 // only; inert on the legacy ARB2 path). Defaults reproduce vanilla exactly:

@@ -233,6 +233,12 @@ void RB_RHI_FogAllLights( rhi::RHI *r, viewDef_s *viewDef );
 // Called at end-of-view so the scene passes don't overwrite it (RhiWorld.cpp).
 void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
 void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_s *viewDef );
+// HDR eye adaptation (Phase B1): measure scene luminance, update the adapted exposure,
+// return the 1x1 exposure image for the resolve to sample (0 = use the static r_hdrExposure).
+rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg );
+// HDR bloom (Phase C): threshold + blur the bright HDR scene, return the half-res glow for the
+// resolve to add before the tonemap (0 = bloom off).
+rhi::ImageHandle RB_RHI_Bloom( rhi::RHI *r, rhi::ImageHandle sceneImg );
 
 // DUDE screen-space reflections (docs/ssr.md): additive composite over the lit
 // opaque scene. Called at the shader-pass translucent split point (RhiWorld.cpp);
