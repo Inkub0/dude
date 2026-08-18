@@ -239,11 +239,13 @@ See **docs/antialiasing.md** for status + design. Summary:
   both the LDR and HDR rails; sharper pattern-classified edges, texture interiors untouched, no
   shimmer treatment (Toksvig covers that on PBR tiers). Kept alongside FXAA until TAA exists, then
   re-evaluate dropping FXAA.
-- **TAA later** — the specular-shimmer fix. ~80% wired via the temporal-SSAO path (ping-pong history,
-  camera reprojection, neighborhood clamp in `ssao_temporal.*`). Adds sub-pixel projection jitter +
-  a color resolve pass. **Real prerequisite: per-object motion vectors** — SSAO reprojection is
-  camera-only, so moving geometry/weapon will ghost without them. Keep SMAA 1x as the non-temporal
-  menu alternative.
+- **TAA — SHIPPED as FSR2 Native-AA (R1, 2026-08-18)**: `r_fsr` on Vulkan (temporal accumulation +
+  RCAS + auto-reactive deghosting), default in the Nightmare preset, SMAA kept as the GL3/opt-out
+  fallback. Full record: [fsr-temporal-pipeline.md](fsr-temporal-pipeline.md).
+- **PARKED — FSR2 sub-native upscaling** (render scale < 1.0, `fsrQuality` presets, the scene/HUD
+  reorder that replaces the Native-AA copy-back): pointless while the game is CPU-bound; the
+  customer is the RT era's per-pixel ray budget (67% scale ≈ half the rays). Work list in
+  [fsr-temporal-pipeline.md](fsr-temporal-pipeline.md) § "PARKED FOLLOW-UP".
 
 ---
 
