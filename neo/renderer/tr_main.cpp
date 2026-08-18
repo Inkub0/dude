@@ -1116,6 +1116,12 @@ struct rtModelInst_t {
 	float					mat[16];		// id column-major model matrix (world = M * local)
 };
 
+// persistent BLAS registry for the per-frame TLAS refresh (movers): filled by the
+// persistent-scene build, then walked every frame to re-instance with CURRENT entity poses
+struct rtModelBlas_t { const idRenderModel *model; rhi::BlasHandle blas; };
+static idList<rhi::BlasHandle>	s_rtAreaBlas;
+static idList<rtModelBlas_t>	s_rtModelBlas;
+
 // shared caster filter: opaque + shadow-casting (SurfaceCastsShadow() excludes noshadows
 // materials - critically the SKY, or every RT sun ray would end in the dome), CPU data resident
 static bool R_RtSurfCasts( const modelSurface_t *surf ) {
@@ -1331,11 +1337,18 @@ static bool R_RtInvertModelMatrix( const float *mm, float inv[12] ) {
 }
 
 // Build every BLAS (areas as identity instances, one per unique entity model) and the TLAS.
-// Returns the TLAS address (0 = failure); *blasFail counts failed BLAS builds.
+// Returns the TLAS address (0 = failure); *blasFail counts failed BLAS builds. When
+// registerForRefresh is set (the persistent build), the handles land in the refresh
+// registry so R_RtRefreshInstances can re-instance them per frame; the validator's
+// transient build must NOT touch the registry.
 static unsigned long long R_RtBuildScene( rhi::RHI *r,
 		const float *aPos, const int *aIdx, const rtAreaSlice_t *aSlices, int numASlices,
 		const float *mPos, const int *mIdx, rtModelSlice_t *mSlices, int numMSlices,
-		const rtModelInst_t *mInsts, int numMInsts, int *blasFail ) {
+		const rtModelInst_t *mInsts, int numMInsts, int *blasFail, bool registerForRefresh ) {
+	if ( registerForRefresh ) {
+		s_rtAreaBlas.Clear();
+		s_rtModelBlas.Clear();
+	}
 	const int maxInst = numASlices + numMInsts;
 	rhi::RHI::RtInstance *inst = (rhi::RHI::RtInstance *)Mem_Alloc16( ( maxInst > 0 ? maxInst : 1 ) * (int)sizeof( rhi::RHI::RtInstance ) );
 	int numInst = 0;
@@ -1352,12 +1365,20 @@ static unsigned long long R_RtBuildScene( rhi::RHI *r,
 		in.transform[0] = 1.0f; in.transform[5] = 1.0f; in.transform[10] = 1.0f;	// identity 3x4
 		in.blas = blas;
 		in.mask = 0xFF;
+		if ( registerForRefresh ) {
+			s_rtAreaBlas.Append( blas );
+		}
 	}
 	for ( int s = 0; s < numMSlices; s++ ) {
 		mSlices[s].blas = r->CreateBlas( mPos + mSlices[s].vertStart * 3, mSlices[s].numVerts,
 			3 * (int)sizeof( float ), mIdx + mSlices[s].idxStart, mSlices[s].numIdx );
 		if ( mSlices[s].blas == 0 ) {
 			( *blasFail )++;
+		} else if ( registerForRefresh ) {
+			rtModelBlas_t mb;
+			mb.model = mSlices[s].model;
+			mb.blas = mSlices[s].blas;
+			s_rtModelBlas.Append( mb );
 		}
 	}
 	for ( int i = 0; i < numMInsts; i++ ) {
@@ -1382,12 +1403,75 @@ static unsigned long long R_RtBuildScene( rhi::RHI *r,
 	return tlasAddr;
 }
 
+// Re-instance the TLAS with CURRENT entity transforms once per game frame (movers: doors,
+// lifts, crushers). Uses the BLAS registry the persistent build filled - geometry never
+// rebuilds, only the instance list; the backend records the TLAS build on the next frame's
+// command buffer (RHI::UpdateTlas), so this never stalls. Entities spawned after the scene
+// build have no BLAS yet and are skipped until the next rebuild.
+static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r ) {
+	static int lastFrame = -1;
+	if ( tr.frameCount == lastFrame ) {
+		return;						// subviews re-enter R_RenderView; once per frame is enough
+	}
+	lastFrame = tr.frameCount;
+	if ( s_rtAreaBlas.Num() == 0 && s_rtModelBlas.Num() == 0 ) {
+		return;
+	}
+	const int maxInst = s_rtAreaBlas.Num() + world->entityDefs.Num();
+	rhi::RHI::RtInstance *inst = (rhi::RHI::RtInstance *)Mem_Alloc16( ( maxInst > 0 ? maxInst : 1 ) * (int)sizeof( rhi::RHI::RtInstance ) );
+	int n = 0;
+	for ( int i = 0; i < s_rtAreaBlas.Num(); i++ ) {
+		rhi::RHI::RtInstance &in = inst[n++];
+		memset( &in, 0, sizeof( in ) );
+		in.transform[0] = 1.0f; in.transform[5] = 1.0f; in.transform[10] = 1.0f;	// identity 3x4
+		in.blas = s_rtAreaBlas[i];
+		in.mask = 0xFF;
+	}
+	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
+		const idRenderEntityLocal *def = world->entityDefs[i];
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow ) {
+			continue;
+		}
+		const idRenderModel *model = def->parms.hModel;
+		if ( model->IsStaticWorldModel() || model->IsDynamicModel() != DM_STATIC ) {
+			continue;
+		}
+		rhi::BlasHandle blas = 0;
+		for ( int u = 0; u < s_rtModelBlas.Num(); u++ ) {
+			if ( s_rtModelBlas[u].model == model ) {
+				blas = s_rtModelBlas[u].blas;
+				break;
+			}
+		}
+		if ( blas == 0 ) {
+			continue;
+		}
+		float mm[16];
+		R_AxisToModelMatrix( def->parms.axis, def->parms.origin, mm );
+		rhi::RHI::RtInstance &in = inst[n++];
+		memset( &in, 0, sizeof( in ) );
+		for ( int row = 0; row < 3; row++ ) {
+			in.transform[row * 4 + 0] = mm[row + 0];
+			in.transform[row * 4 + 1] = mm[row + 4];
+			in.transform[row * 4 + 2] = mm[row + 8];
+			in.transform[row * 4 + 3] = mm[row + 12];
+		}
+		in.blas = blas;
+		in.mask = 0xFF;
+	}
+	if ( n > 0 ) {
+		r->UpdateTlas( inst, n );
+	}
+	Mem_Free16( inst );
+}
+
 /*
 =================
 R_RtWorldUpdate
 
 Keeps the persistent world scene in sync with r_rtWorld / r_rtSunShadows: lazy build on the
 first primary view, rebuild on map change (mapName comparison), teardown when both are off.
+While the scene is live, every frame re-instances the TLAS with current mover poses.
 =================
 */
 static idStr s_rtWorldMap;
@@ -1403,6 +1487,8 @@ static void R_RtWorldUpdate( void ) {
 			r_rtSunShadows.ClearModified();
 			r->DestroyRtScene();		// switched off: free the scene (no-op when never built)
 			s_rtWorldMap.Clear();
+			s_rtAreaBlas.Clear();
+			s_rtModelBlas.Clear();
 		}
 		return;
 	}
@@ -1414,7 +1500,9 @@ static void R_RtWorldUpdate( void ) {
 		return;							// stays pending; a backend/hardware change re-evaluates
 	}
 	if ( r->GetTlasAddress() != 0 && s_rtWorldMap.Icmp( world->mapName ) == 0 ) {
-		return;							// scene live and current
+		// scene live and current: re-instance the TLAS with this frame's mover poses
+		R_RtRefreshInstances( world, r );
+		return;
 	}
 	r_rtWorld.ClearModified();
 	r_rtSunShadows.ClearModified();
@@ -1432,7 +1520,7 @@ static void R_RtWorldUpdate( void ) {
 	const int msStart = Sys_Milliseconds();
 	int blasFail = 0;
 	const unsigned long long tlasAddr = R_RtBuildScene( r, aPos, aIdx, aSlices, numASlices,
-		mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail );
+		mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail, true );
 	const int msBuild = Sys_Milliseconds() - msStart;
 	int mTris = 0;
 	for ( int s = 0; s < numMSlices; s++ ) {
@@ -1443,6 +1531,8 @@ static void R_RtWorldUpdate( void ) {
 	if ( tlasAddr == 0 ) {
 		common->Warning( "r_rtWorld: world scene build failed (%d BLAS failures) - disabling", blasFail );
 		r->DestroyRtScene();
+		s_rtAreaBlas.Clear();
+		s_rtModelBlas.Clear();
 		r_rtWorld.SetBool( false );
 		r_rtSunShadows.SetBool( false );
 		return;
@@ -1585,7 +1675,7 @@ static void R_RtWorldValidate( void ) {
 	} else {
 		const int msStart = Sys_Milliseconds();
 		tlasAddr = R_RtBuildScene( r, aPos, aIdx, aSlices, numASlices,
-			mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail );
+			mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail, false );
 		msBuild = Sys_Milliseconds() - msStart;
 	}
 	int mTris = 0;

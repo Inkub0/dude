@@ -440,8 +440,16 @@ public:
 	// or 0 on failure. Replaces any previous TLAS.
 	virtual unsigned long long	BuildTlas( const RtInstance *instances, int count ) { return 0; }
 	// Device address of the current scene TLAS (0 = none). Reads 0 after a backend restart
-	// dropped the scene - callers treat that as "rebuild needed".
+	// dropped the scene - callers treat that as "rebuild needed". While UpdateTlas runs per
+	// frame this returns the frame-slot TLAS the upcoming frame will read.
 	virtual unsigned long long	GetTlasAddress() { return 0; }
+	// Per-frame TLAS refresh (movers): re-instance the scene with CURRENT transforms.
+	// Asynchronous - the build is recorded at the start of the next frame's command buffer
+	// (AS-build -> fragment-shader barrier), so unlike BuildTlas it never stalls the queue.
+	// Call once per game frame from the frontend, between frames; instances referencing
+	// dead BLAS handles are skipped. The synchronous BuildTlas scene stays as the fallback
+	// when no per-frame build is live. VK-only; GL3 no-ops.
+	virtual void	UpdateTlas( const RtInstance *instances, int count ) {}
 	// Free the TLAS and every live BLAS (level transition / shutdown).
 	virtual void	DestroyRtScene() {}
 

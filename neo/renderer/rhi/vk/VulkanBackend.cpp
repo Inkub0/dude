@@ -248,6 +248,7 @@ private:
 	void			DestroyBlas( BlasHandle blas ) override;
 	unsigned long long	BuildTlas( const RtInstance *instances, int count ) override;
 	unsigned long long	GetTlasAddress() override;
+	void			UpdateTlas( const RtInstance *instances, int count ) override;
 	void			DestroyRtScene() override;
 	// FSR2 runtime (R1/C2): persistent context + output image, sized to the scene target.
 	bool			Fsr2EnsureContext( int w, int h );			// (re)create the FSR2 context + output image on size change
@@ -724,6 +725,7 @@ private:
 		VkBuffer			buf = VK_NULL_HANDLE;
 		VmaAllocation		alloc = NULL;
 		VkDeviceAddress		addr = 0;
+		void *				map = NULL;			// persistent host mapping (all RtBufs are host-visible)
 	};
 	struct RtBlas {
 		VkAccelerationStructureKHR	as = VK_NULL_HANDLE;	// VK_NULL_HANDLE = freed slot
@@ -733,7 +735,26 @@ private:
 	std::vector<RtBlas>			rtBlases;					// BlasHandle = index + 1
 	VkAccelerationStructureKHR	rtTlas = VK_NULL_HANDLE;
 	RtBuf						rtTlasBuf;
-	VkDeviceAddress				rtTlasAddr = 0;				// live TLAS address (GetTlasAddress)
+	VkDeviceAddress				rtTlasAddr = 0;				// synchronous-scene TLAS address (fallback)
+
+	// R3 per-frame TLAS lane (movers): a TLAS slot per frame-in-flight, fully rebuilt each
+	// frame from CURRENT instance transforms. UpdateTlas (frontend, between frames) waits the
+	// slot's fence (its last use was FRAMES_IN_FLIGHT frames ago), uploads the instances and
+	// arms the slot; BeginFrame records the build on the frame cb AHEAD of every draw, then
+	// barriers AS-build writes against fragment-shader ray reads. The synchronous rtTlas
+	// stays as the liveness anchor + address fallback when no per-frame build is live.
+	VkAccelerationStructureKHR	rtFrameTlas[FRAMES_IN_FLIGHT] = {};
+	RtBuf						rtFrameTlasBuf[FRAMES_IN_FLIGHT];
+	RtBuf						rtFrameInstBuf[FRAMES_IN_FLIGHT];
+	RtBuf						rtFrameScratch[FRAMES_IN_FLIGHT];
+	uint32_t					rtFrameCapacity[FRAMES_IN_FLIGHT] = {};	// instances each slot is sized for
+	uint32_t					rtFrameCount[FRAMES_IN_FLIGHT] = {};	// instances armed for the pending build
+	VkDeviceAddress				rtFrameAddr[FRAMES_IN_FLIGHT] = {};
+	bool						rtFrameBuilt[FRAMES_IN_FLIGHT] = {};	// slot holds a completed build (safe to traverse)
+	int							rtPendingSlot = -1;						// slot awaiting its BeginFrame build
+	VkDeviceAddress				rtCurrentAddr = 0;						// per-frame TLAS address (0 = use rtTlasAddr)
+	void	RecordFrameTlasBuild( VkCommandBuffer cb, int slot );		// build + AS-write -> frag-read barrier
+	void	DestroyRtFrameSlots();
 	bool	CreateRtBuffer( VkBufferUsageFlags usage, VkDeviceSize size, const void *data, RtBuf &rb );
 	void	DestroyRtBuffer( RtBuf &rb );
 	// size + create + build one AS on the upload cb, synchronously (scratch is transient)
@@ -2173,6 +2194,20 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	if ( framePool[frameIndex] ) {
 		vkResetDescriptorPool( device, framePool[frameIndex], 0 );
 	}
+
+	// R3 per-frame TLAS (movers): record the armed instance rebuild AHEAD of every draw
+	// (cb open, no render pass yet - the same pre-scene window the skin jobs use), then
+	// barrier the AS-build write against the fragment-shader ray reads of the mode-4
+	// interaction draws. An armed slot that is not this frame's (a skipped/lost frame)
+	// is dropped: its data was never built, so the address falls back to the static TLAS.
+	if ( rtPendingSlot == frameIndex && rtFrameTlas[frameIndex] != VK_NULL_HANDLE ) {
+		RecordFrameTlasBuild( f.cb, frameIndex );
+		rtPendingSlot = -1;
+	} else if ( rtPendingSlot >= 0 ) {
+		rtPendingSlot = -1;
+		rtCurrentAddr = 0;
+	}
+
 	boundPipeline = VK_NULL_HANDLE;
 	boundTexKey = 0;
 	boundTexSet = VK_NULL_HANDLE;
@@ -3939,6 +3974,7 @@ bool VulkanBackend::CreateRtBuffer( VkBufferUsageFlags usage, VkDeviceSize size,
 	if ( data ) {
 		memcpy( info.pMappedData, data, (size_t)size );
 	}
+	rb.map = info.pMappedData;
 	VkBufferDeviceAddressInfo bai = {};
 	bai.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
 	bai.buffer = rb.buf;
@@ -3953,6 +3989,7 @@ void VulkanBackend::DestroyRtBuffer( RtBuf &rb ) {
 	rb.buf = VK_NULL_HANDLE;
 	rb.alloc = NULL;
 	rb.addr = 0;
+	rb.map = NULL;
 }
 
 // Size, create and build one AS synchronously; the fence wait doubles as the build->consume
@@ -4133,7 +4170,181 @@ unsigned long long VulkanBackend::BuildTlas( const RtInstance *instances, int co
 }
 
 unsigned long long VulkanBackend::GetTlasAddress() {
-	return (unsigned long long)rtTlasAddr;
+	// the per-frame slot when its lane is live, else the synchronous scene
+	return (unsigned long long)( rtCurrentAddr ? rtCurrentAddr : rtTlasAddr );
+}
+
+// Per-frame TLAS refresh (movers): translate + upload the instances into the upcoming
+// frame slot's buffers and arm it; BeginFrame records the actual build. Called from the
+// frontend BETWEEN frames (frameOpen false), when frameIndex already names the slot the
+// next BeginFrame will use (Present advances it). The slot's fence is waited before its
+// buffers are touched - its last GPU use was FRAMES_IN_FLIGHT frames ago, so this is the
+// same (normally already-signaled) wait BeginFrame would do anyway, just earlier.
+void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
+	if ( !SupportsRayQuery() || instances == NULL || count <= 0 || frameOpen ) {
+		return;			// mid-frame callers skip a beat; the next frame re-arms
+	}
+	const int slot = frameIndex;
+
+	// translate to VK instances (same rules as BuildTlas: dead BLAS handles drop out)
+	std::vector<VkAccelerationStructureInstanceKHR> vkInst;
+	vkInst.reserve( (size_t)count );
+	for ( int i = 0; i < count; i++ ) {
+		const RtInstance &in = instances[i];
+		if ( in.blas == 0 || (size_t)in.blas > rtBlases.size() || rtBlases[in.blas - 1].as == VK_NULL_HANDLE ) {
+			continue;
+		}
+		VkAccelerationStructureInstanceKHR vi;
+		memset( &vi, 0, sizeof( vi ) );
+		memcpy( &vi.transform, in.transform, sizeof( in.transform ) );
+		vi.mask = in.mask & 0xFFu;
+		vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+		vi.accelerationStructureReference = rtBlases[in.blas - 1].addr;
+		vkInst.push_back( vi );
+	}
+	if ( vkInst.empty() ) {
+		return;
+	}
+	const uint32_t n = (uint32_t)vkInst.size();
+
+	vkWaitForFences( device, 1, &frames[slot].fence, VK_TRUE, UINT64_MAX );
+
+	// (re)create the slot's resources when it has none or the instance count outgrew them.
+	// Growth stalls the queue - rare (entity counts are near-constant within a map).
+	if ( rtFrameTlas[slot] == VK_NULL_HANDLE || n > rtFrameCapacity[slot] ) {
+		vkQueueWaitIdle( gfxQueue );
+		if ( rtFrameTlas[slot] != VK_NULL_HANDLE ) {
+			pfnDestroyAs( device, rtFrameTlas[slot], NULL );
+			rtFrameTlas[slot] = VK_NULL_HANDLE;
+		}
+		DestroyRtBuffer( rtFrameTlasBuf[slot] );
+		DestroyRtBuffer( rtFrameInstBuf[slot] );
+		DestroyRtBuffer( rtFrameScratch[slot] );
+		rtFrameCapacity[slot] = 0;
+		rtFrameAddr[slot] = 0;
+		rtFrameBuilt[slot] = false;			// fresh object: must prime before anything traverses it
+
+		const uint32_t cap = n + n / 2 + 16;
+		if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+				(VkDeviceSize)cap * sizeof( VkAccelerationStructureInstanceKHR ), NULL, rtFrameInstBuf[slot] ) ) {
+			return;
+		}
+		VkAccelerationStructureGeometryKHR geom = {};
+		geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+		geom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+		geom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+		geom.geometry.instances.arrayOfPointers = VK_FALSE;
+		VkAccelerationStructureBuildGeometryInfoKHR bgi = {};
+		bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+		bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+		bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+		bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+		bgi.geometryCount = 1;
+		bgi.pGeometries = &geom;
+		VkAccelerationStructureBuildSizesInfoKHR sizes = {};
+		sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+		pfnGetAsBuildSizes( device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, &cap, &sizes );
+		if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, rtFrameTlasBuf[slot] )
+			|| !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, rtFrameScratch[slot] ) ) {
+			DestroyRtBuffer( rtFrameTlasBuf[slot] );
+			DestroyRtBuffer( rtFrameInstBuf[slot] );
+			DestroyRtBuffer( rtFrameScratch[slot] );
+			return;
+		}
+		VkAccelerationStructureCreateInfoKHR asci = {};
+		asci.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+		asci.buffer = rtFrameTlasBuf[slot].buf;
+		asci.size = sizes.accelerationStructureSize;
+		asci.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+		if ( !vkCheck( pfnCreateAs( device, &asci, NULL, &rtFrameTlas[slot] ), "vkCreateAccelerationStructureKHR(frame)" ) ) {
+			rtFrameTlas[slot] = VK_NULL_HANDLE;
+			DestroyRtBuffer( rtFrameTlasBuf[slot] );
+			DestroyRtBuffer( rtFrameInstBuf[slot] );
+			DestroyRtBuffer( rtFrameScratch[slot] );
+			return;
+		}
+		VkAccelerationStructureDeviceAddressInfoKHR dai = {};
+		dai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+		dai.accelerationStructure = rtFrameTlas[slot];
+		rtFrameAddr[slot] = pfnGetAsDeviceAddress( device, &dai );
+		rtFrameCapacity[slot] = cap;
+	}
+
+	memcpy( rtFrameInstBuf[slot].map, vkInst.data(), (size_t)n * sizeof( VkAccelerationStructureInstanceKHR ) );
+	rtFrameCount[slot] = n;
+	if ( !rtFrameBuilt[slot] ) {
+		// prime a freshly created slot SYNCHRONOUSLY: out-of-band readers (the validator's
+		// DispatchSync executes before this frame's cb) must never traverse a never-built
+		// TLAS. Once per slot per (re)creation; steady-state frames take the async path.
+		vkResetCommandBuffer( uploadCb, 0 );
+		VkCommandBufferBeginInfo bbi = {};
+		bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		vkBeginCommandBuffer( uploadCb, &bbi );
+		RecordFrameTlasBuild( uploadCb, slot );
+		vkEndCommandBuffer( uploadCb );
+		VkSubmitInfo si = {};
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &uploadCb;
+		vkResetFences( device, 1, &uploadFence );
+		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		rtFrameBuilt[slot] = true;
+		rtPendingSlot = -1;					// the slot already holds this frame's poses
+	} else {
+		rtPendingSlot = slot;				// BeginFrame records the rebuild ahead of the draws
+	}
+	rtCurrentAddr = rtFrameAddr[slot];		// this frame's mode-4 parms read this slot
+}
+
+// Record the armed slot's TLAS rebuild + the barrier ordering it against fragment-shader
+// ray reads. Shared by BeginFrame (async lane) and the synchronous slot-priming path.
+void VulkanBackend::RecordFrameTlasBuild( VkCommandBuffer cb, int slot ) {
+	VkAccelerationStructureGeometryKHR geom = {};
+	geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+	geom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+	geom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+	geom.geometry.instances.arrayOfPointers = VK_FALSE;
+	geom.geometry.instances.data.deviceAddress = rtFrameInstBuf[slot].addr;
+	VkAccelerationStructureBuildGeometryInfoKHR bgi = {};
+	bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+	bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+	bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+	bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+	bgi.geometryCount = 1;
+	bgi.pGeometries = &geom;
+	bgi.dstAccelerationStructure = rtFrameTlas[slot];
+	bgi.scratchData.deviceAddress = ( rtFrameScratch[slot].addr + asScratchAlignment - 1 )
+		& ~(VkDeviceAddress)( asScratchAlignment - 1 );
+	VkAccelerationStructureBuildRangeInfoKHR range = {};
+	range.primitiveCount = rtFrameCount[slot];
+	const VkAccelerationStructureBuildRangeInfoKHR *pRange = &range;
+	pfnCmdBuildAs( cb, 1, &bgi, &pRange );
+	VkMemoryBarrier mb = {};
+	mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+	mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL );
+}
+
+void VulkanBackend::DestroyRtFrameSlots() {
+	for ( int s = 0; s < FRAMES_IN_FLIGHT; s++ ) {
+		if ( rtFrameTlas[s] != VK_NULL_HANDLE ) {
+			pfnDestroyAs( device, rtFrameTlas[s], NULL );
+			rtFrameTlas[s] = VK_NULL_HANDLE;
+		}
+		DestroyRtBuffer( rtFrameTlasBuf[s] );
+		DestroyRtBuffer( rtFrameInstBuf[s] );
+		DestroyRtBuffer( rtFrameScratch[s] );
+		rtFrameCapacity[s] = 0;
+		rtFrameCount[s] = 0;
+		rtFrameAddr[s] = 0;
+		rtFrameBuilt[s] = false;
+	}
+	rtPendingSlot = -1;
+	rtCurrentAddr = 0;
 }
 
 void VulkanBackend::DestroyRtScene() {
@@ -4149,6 +4360,7 @@ void VulkanBackend::DestroyRtScene() {
 	}
 	DestroyRtBuffer( rtTlasBuf );
 	rtTlasAddr = 0;
+	DestroyRtFrameSlots();
 	for ( size_t i = 0; i < rtBlases.size(); i++ ) {
 		if ( rtBlases[i].as != VK_NULL_HANDLE ) {
 			pfnDestroyAs( device, rtBlases[i].as, NULL );
