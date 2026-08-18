@@ -115,6 +115,9 @@ static idCVar r_vkIndirectTest( "r_vkIndirectTest", "0", CVAR_RENDERER | CVAR_BO
 static idCVar r_vkBdaTest( "r_vkBdaTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: run the buffer-device-address self-test (a compute kernel sums a storage buffer read through its raw GPU pointer, not a bound buffer) and print PASS/FAIL. Set to 1 to trigger. Validates the Phase-3.2b BDA primitive (docs/gpu-offload-plan.md)" );
 
+static idCVar r_rayQueryTest( "r_rayQueryTest", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: run the ray-query self-test - build a synthetic BLAS/TLAS (two known triangles), trace a 16x16 ray grid from a compute shader via GL_EXT_ray_query, and diff every hit's t + primitive index against a CPU reference. Prints PASS/FAIL. Set to 1 to trigger. Validates the R2 acceleration-structure foundation (docs/rtx-shadow-roadmap.md)" );
+
 static idCVar r_vkBdaZfill( "r_vkBdaZfill", "0", CVAR_RENDERER | CVAR_INTEGER,
 	"Vulkan backend: route the world-static depth prepass (zfill) through buffer-device-address geometry fetch. 0 = off (bound attributes); 1 = per-draw BDA vertex fetch; 2 = batched indirect (one vkCmdDrawIndirect over the solid-opaque bucket, indices+verts via BDA). Pixel-identical A/B; the Phase 3.2b consume (docs/gpu-offload-plan.md). Addressable persistent geometry only; animated/streamed/tessellated/perforated surfaces fall back." );
 
@@ -236,6 +239,7 @@ private:
 	void			BdaSelfTest();								// r_vkBdaTest: sum a buffer through its device-address pointer (Phase 3.2b BDA primitive)
 	void			Fsr2SelfTest();								// r_fsr2Test: init the vendored FSR2 VK backend + create/destroy a context
 	void			Mrt3SelfTest();								// r_mrt3Test: create/destroy a 3-MRT RG16F velocity gbuffer target
+	void			RayQuerySelfTest();							// r_rayQueryTest: BLAS/TLAS build + compute ray trace vs CPU reference (R2 foundation)
 	// FSR2 runtime (R1/C2): persistent context + output image, sized to the scene target.
 	bool			Fsr2EnsureContext( int w, int h );			// (re)create the FSR2 context + output image on size change
 	void			Fsr2DestroyContext( bool deviceIdle );		// tear down context/scratch/output (vid_restart, resize, shutdown)
@@ -689,6 +693,20 @@ private:
 	// scene target's combined depth-stencil image (a sampled view may carry only one
 	// aspect), keyed on fsr2DepthSrc so a target realloc rebuilds it.
 	bool						haveSeparateDepthStencilLayouts = false;	// core 1.2; FSR2's depth barriers need it
+
+	// R2 ray-query foundation (docs/rtx-shadow-roadmap.md): VK_KHR_acceleration_structure +
+	// VK_KHR_ray_query (+ their required VK_KHR_deferred_host_operations). Deliberately NOT the
+	// RT-pipeline/SBT extension - shadows trace inline from existing shaders. No fallback
+	// in-spec: pre-Turing/pre-RDNA2 hardware lacks the extensions and every RT feature stays
+	// off (capability gate, not emulation). Extension entry points are not exported by the
+	// loader, so they resolve via vkGetDeviceProcAddr after device creation.
+	bool						haveRayQuery = false;
+	uint32_t					asScratchAlignment = 256;	// minAccelerationStructureScratchOffsetAlignment
+	PFN_vkGetAccelerationStructureBuildSizesKHR		pfnGetAsBuildSizes = NULL;
+	PFN_vkCreateAccelerationStructureKHR			pfnCreateAs = NULL;
+	PFN_vkDestroyAccelerationStructureKHR			pfnDestroyAs = NULL;
+	PFN_vkCmdBuildAccelerationStructuresKHR			pfnCmdBuildAs = NULL;
+	PFN_vkGetAccelerationStructureDeviceAddressKHR	pfnGetAsDeviceAddress = NULL;
 	FfxFsr2Context *			fsr2Ctx = NULL;
 	void *						fsr2Scratch = NULL;
 	int							fsr2W = 0, fsr2H = 0;
@@ -1101,7 +1119,30 @@ bool VulkanBackend::CreateDeviceAndVma() {
 		queueCount++;
 	}
 
-	const char *devExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+	const char *devExts[4] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+	uint32_t devExtCount = 1;
+
+	// R2 ray-query foundation: probe for the RT extension trio. deferred_host_operations is a
+	// hard dependency of acceleration_structure even though we never use host builds. All other
+	// dependencies (BDA, descriptor indexing) are core on our 1.4 floor.
+	bool haveAccelExt = false, haveRayQueryExt = false, haveDeferredOpsExt = false;
+	{
+		uint32_t extCount = 0;
+		vkEnumerateDeviceExtensionProperties( physical, NULL, &extCount, NULL );
+		std::vector<VkExtensionProperties> extProps( extCount );
+		if ( extCount > 0 ) {
+			vkEnumerateDeviceExtensionProperties( physical, NULL, &extCount, extProps.data() );
+		}
+		for ( uint32_t i = 0; i < extCount; i++ ) {
+			if ( !strcmp( extProps[i].extensionName, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME ) ) {
+				haveAccelExt = true;
+			} else if ( !strcmp( extProps[i].extensionName, VK_KHR_RAY_QUERY_EXTENSION_NAME ) ) {
+				haveRayQueryExt = true;
+			} else if ( !strcmp( extProps[i].extensionName, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME ) ) {
+				haveDeferredOpsExt = true;
+			}
+		}
+	}
 
 	// optional features the M2+ paths use when present: sampler anisotropy
 	// (TF_DEFAULT textures) and line-fill mode (GLS_POLYMODE_LINE debug draws)
@@ -1161,6 +1202,16 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	VkPhysicalDeviceVulkan11Features supported11 = {};
 	supported11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
 	supported12.pNext = &supported11;
+	// R2: acceleration-structure + ray-query feature structs, chained into the query only when
+	// the extensions actually exist (an unrecognized pNext struct is not valid otherwise).
+	VkPhysicalDeviceAccelerationStructureFeaturesKHR supportedAccel = {};
+	supportedAccel.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+	VkPhysicalDeviceRayQueryFeaturesKHR supportedRq = {};
+	supportedRq.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+	if ( haveAccelExt && haveRayQueryExt && haveDeferredOpsExt ) {
+		supported11.pNext = &supportedAccel;
+		supportedAccel.pNext = &supportedRq;
+	}
 	VkPhysicalDeviceFeatures2 supported2 = {};
 	supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 	supported2.pNext = &supported13;
@@ -1204,12 +1255,33 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	enabled11.uniformAndStorageBuffer16BitAccess = supported11.uniformAndStorageBuffer16BitAccess;
 	enabled12.pNext = &enabled11;
 
+	// R2 ray-query foundation: enable the RT trio when the extensions AND both features AND BDA
+	// (AS builds consume raw device addresses) are all present. One flag gates every RT feature
+	// downstream; device creation is byte-identical on hardware that lacks any piece.
+	haveRayQuery = haveAccelExt && haveRayQueryExt && haveDeferredOpsExt
+		&& supportedAccel.accelerationStructure == VK_TRUE
+		&& supportedRq.rayQuery == VK_TRUE
+		&& haveBufferDeviceAddress;
+	VkPhysicalDeviceAccelerationStructureFeaturesKHR enabledAccel = {};
+	enabledAccel.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+	VkPhysicalDeviceRayQueryFeaturesKHR enabledRq = {};
+	enabledRq.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+	if ( haveRayQuery ) {
+		enabledAccel.accelerationStructure = VK_TRUE;
+		enabledRq.rayQuery = VK_TRUE;
+		enabled11.pNext = &enabledAccel;
+		enabledAccel.pNext = &enabledRq;
+		devExts[devExtCount++] = VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME;
+		devExts[devExtCount++] = VK_KHR_RAY_QUERY_EXTENSION_NAME;
+		devExts[devExtCount++] = VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME;
+	}
+
 	VkDeviceCreateInfo dci = {};
 	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 	dci.pNext = &enabled13;
 	dci.queueCreateInfoCount = queueCount;
 	dci.pQueueCreateInfos = queues;
-	dci.enabledExtensionCount = 1;
+	dci.enabledExtensionCount = devExtCount;
 	dci.ppEnabledExtensionNames = devExts;
 	dci.pEnabledFeatures = &enabled;
 
@@ -1218,6 +1290,39 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	}
 	vkGetDeviceQueue( device, gfxFamily, 0, &gfxQueue );
 	vkGetDeviceQueue( device, presentFamily, 0, &presentQueue );
+
+	// R2: resolve the acceleration-structure entry points and the scratch-alignment limit.
+	// If any entry point fails to resolve (broken loader/driver), drop the capability whole -
+	// partial RT support is worse than none.
+	if ( haveRayQuery ) {
+		pfnGetAsBuildSizes = (PFN_vkGetAccelerationStructureBuildSizesKHR)
+			vkGetDeviceProcAddr( device, "vkGetAccelerationStructureBuildSizesKHR" );
+		pfnCreateAs = (PFN_vkCreateAccelerationStructureKHR)
+			vkGetDeviceProcAddr( device, "vkCreateAccelerationStructureKHR" );
+		pfnDestroyAs = (PFN_vkDestroyAccelerationStructureKHR)
+			vkGetDeviceProcAddr( device, "vkDestroyAccelerationStructureKHR" );
+		pfnCmdBuildAs = (PFN_vkCmdBuildAccelerationStructuresKHR)
+			vkGetDeviceProcAddr( device, "vkCmdBuildAccelerationStructuresKHR" );
+		pfnGetAsDeviceAddress = (PFN_vkGetAccelerationStructureDeviceAddressKHR)
+			vkGetDeviceProcAddr( device, "vkGetAccelerationStructureDeviceAddressKHR" );
+		if ( !pfnGetAsBuildSizes || !pfnCreateAs || !pfnDestroyAs || !pfnCmdBuildAs || !pfnGetAsDeviceAddress ) {
+			common->Warning( "VK: acceleration-structure entry points failed to resolve - ray query disabled" );
+			haveRayQuery = false;
+		} else {
+			VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps = {};
+			asProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+			VkPhysicalDeviceProperties2 props2 = {};
+			props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+			props2.pNext = &asProps;
+			vkGetPhysicalDeviceProperties2( physical, &props2 );
+			if ( asProps.minAccelerationStructureScratchOffsetAlignment > 0 ) {
+				asScratchAlignment = asProps.minAccelerationStructureScratchOffsetAlignment;
+			}
+		}
+	}
+	common->Printf( "VK: ray query %s\n", haveRayQuery
+		? "available (KHR_acceleration_structure + KHR_ray_query)"
+		: "not available - RT features disabled" );
 
 	VmaAllocatorCreateInfo aci = {};
 	aci.physicalDevice = physical;
@@ -1890,6 +1995,13 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 		r_vkBdaTest.ClearModified();
 		if ( r_vkBdaTest.GetBool() ) {
 			BdaSelfTest();
+		}
+	}
+	// ray-query self-test (R2): same one-shot-on-toggle idiom.
+	if ( r_rayQueryTest.IsModified() ) {
+		r_rayQueryTest.ClearModified();
+		if ( r_rayQueryTest.GetBool() ) {
+			RayQuerySelfTest();
 		}
 	}
 	// BDA zfill consume (Phase 3.2b): load the manual-vertex-fetch zfill variant on first enable,
@@ -3755,6 +3867,301 @@ void VulkanBackend::BdaSelfTest() {
 	}
 	DestroyBuffer( src );
 	DestroyBuffer( out );
+}
+
+// r_rayQueryTest: validate the R2 acceleration-structure foundation end-to-end BEFORE anything
+// renders from it (docs/rtx-shadow-roadmap.md; the house validator-first pattern). Builds a BLAS
+// over two known triangles (prim 0 spans the ray grid at z=5; prim 1 sits behind it at z=9,
+// offset +x so some rays reach it alone), wraps it in a one-instance TLAS, then traces a 16x16
+// grid of +Z rays from a compute shader (GL_EXT_ray_query). The TLAS rides into the shader as a
+// raw device address in the push constant via the accelerationStructureEXT(uvec2) conversion
+// constructor - the same no-descriptor-changes trick the BDA path uses. Every ray's committed
+// t + primitive index is diffed against a CPU Moller-Trumbore reference; the grid deliberately
+// covers misses, single-triangle hits, and both-triangle rays (closest-hit commit order), and no
+// grid ray grazes a triangle edge (no watertightness ambiguity between GPU and CPU). Synchronous
+// one-shot (dev tool) - never call per-frame.
+void VulkanBackend::RayQuerySelfTest() {
+	if ( device == VK_NULL_HANDLE || computePipeLayout == VK_NULL_HANDLE || uploadCb == VK_NULL_HANDLE ) {
+		common->Printf( "VK ray-query self-test: unavailable (no compute lane)\n" );
+		return;
+	}
+	if ( !haveRayQuery ) {
+		common->Printf( "VK ray-query self-test: unavailable (device lacks KHR_acceleration_structure + KHR_ray_query)\n" );
+		return;
+	}
+
+	// prim 0: z=5, spans x/y [-2,2]; prim 1: z=9, x shifted +2.5 so x in (2, 2.8125] hits it alone
+	static const float kTris[2][3][3] = {
+		{ { -2.0f, -2.0f, 5.0f }, { 2.0f, -2.0f, 5.0f }, { 0.0f, 2.0f, 5.0f } },
+		{ {  0.5f, -2.0f, 9.0f }, { 4.5f, -2.0f, 9.0f }, { 2.5f, 2.0f, 9.0f } },
+	};
+	const int GRID = 16;
+	const int N = GRID * GRID;
+
+	struct RawBuf {
+		VkBuffer buf = VK_NULL_HANDLE;
+		VmaAllocation alloc = NULL;
+		VkDeviceAddress addr = 0;
+	};
+	RawBuf vb, blasBuf, blasScratch, instBuf, tlasBuf, tlasScratch;
+	VkAccelerationStructureKHR blas = VK_NULL_HANDLE, tlas = VK_NULL_HANDLE;
+	BufferHandle out = 0;
+
+	// host-visible + BDA raw buffer (AS inputs/storage/scratch need usage bits BufferHandle
+	// doesn't carry; sizes here are tiny so host-visible is fine even on the BAR heap)
+	auto createRaw = [&]( VkBufferUsageFlags usage, VkDeviceSize size, const void *data, RawBuf &rb ) -> bool {
+		VkBufferCreateInfo bci = {};
+		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bci.size = size;
+		bci.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+		bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		VmaAllocationCreateInfo aci = {};
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		VmaAllocationInfo info = {};
+		if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &rb.buf, &rb.alloc, &info ), "vmaCreateBuffer(rayquery test)" ) ) {
+			return false;
+		}
+		if ( data ) {
+			memcpy( info.pMappedData, data, (size_t)size );
+		}
+		VkBufferDeviceAddressInfo bai = {};
+		bai.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+		bai.buffer = rb.buf;
+		rb.addr = (VkDeviceAddress)vkGetBufferDeviceAddress( device, &bai );
+		return true;
+	};
+	auto cleanup = [&]() {
+		vkQueueWaitIdle( gfxQueue );
+		if ( tlas != VK_NULL_HANDLE ) { pfnDestroyAs( device, tlas, NULL ); }
+		if ( blas != VK_NULL_HANDLE ) { pfnDestroyAs( device, blas, NULL ); }
+		RawBuf *raws[6] = { &vb, &blasBuf, &blasScratch, &instBuf, &tlasBuf, &tlasScratch };
+		for ( int ri = 0; ri < 6; ri++ ) {
+			if ( raws[ri]->buf != VK_NULL_HANDLE ) { vmaDestroyBuffer( vma, raws[ri]->buf, raws[ri]->alloc ); }
+		}
+		if ( out != 0 ) { DestroyBuffer( out ); }
+	};
+	// size, create and build one AS on the upload cb, synchronously (mirrors DispatchSync's
+	// submit idiom); the fence wait between the BLAS and TLAS builds is the dependency barrier
+	auto buildAs = [&]( VkAccelerationStructureTypeKHR type, const VkAccelerationStructureGeometryKHR &geom,
+	                    uint32_t primCount, RawBuf &asBuf, RawBuf &scratch, VkAccelerationStructureKHR &as ) -> bool {
+		VkAccelerationStructureBuildGeometryInfoKHR bgi = {};
+		bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+		bgi.type = type;
+		bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+		bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+		bgi.geometryCount = 1;
+		bgi.pGeometries = &geom;
+		VkAccelerationStructureBuildSizesInfoKHR sizes = {};
+		sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+		pfnGetAsBuildSizes( device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, &primCount, &sizes );
+		if ( !createRaw( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, asBuf )
+			|| !createRaw( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, scratch ) ) {
+			return false;
+		}
+		VkAccelerationStructureCreateInfoKHR asci = {};
+		asci.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+		asci.buffer = asBuf.buf;
+		asci.size = sizes.accelerationStructureSize;
+		asci.type = type;
+		if ( !vkCheck( pfnCreateAs( device, &asci, NULL, &as ), "vkCreateAccelerationStructureKHR" ) ) {
+			return false;
+		}
+		bgi.dstAccelerationStructure = as;
+		bgi.scratchData.deviceAddress = ( scratch.addr + asScratchAlignment - 1 ) & ~(VkDeviceAddress)( asScratchAlignment - 1 );
+		VkAccelerationStructureBuildRangeInfoKHR range = {};
+		range.primitiveCount = primCount;
+		const VkAccelerationStructureBuildRangeInfoKHR *pRange = &range;
+		vkQueueWaitIdle( gfxQueue );
+		vkResetCommandBuffer( uploadCb, 0 );
+		VkCommandBufferBeginInfo bbi = {};
+		bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		vkBeginCommandBuffer( uploadCb, &bbi );
+		pfnCmdBuildAs( uploadCb, 1, &bgi, &pRange );
+		vkEndCommandBuffer( uploadCb );
+		VkSubmitInfo si = {};
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &uploadCb;
+		vkResetFences( device, 1, &uploadFence );
+		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		return true;
+	};
+
+	// BLAS over the two triangles (non-indexed, opaque)
+	if ( !createRaw( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, sizeof( kTris ), kTris, vb ) ) {
+		common->Printf( "VK ray-query self-test: FAIL (vertex buffer alloc)\n" );
+		cleanup();
+		return;
+	}
+	VkAccelerationStructureGeometryKHR triGeom = {};
+	triGeom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+	triGeom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+	triGeom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+	triGeom.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+	triGeom.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+	triGeom.geometry.triangles.vertexData.deviceAddress = vb.addr;
+	triGeom.geometry.triangles.vertexStride = 3 * sizeof( float );
+	triGeom.geometry.triangles.maxVertex = 5;
+	triGeom.geometry.triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
+	if ( !buildAs( VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, triGeom, 2, blasBuf, blasScratch, blas ) ) {
+		common->Printf( "VK ray-query self-test: FAIL (BLAS build)\n" );
+		cleanup();
+		return;
+	}
+
+	// one-instance TLAS (identity transform, facing cull off so winding can't hide a hit)
+	VkAccelerationStructureDeviceAddressInfoKHR dai = {};
+	dai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+	dai.accelerationStructure = blas;
+	VkAccelerationStructureInstanceKHR inst = {};
+	inst.transform.matrix[0][0] = 1.0f;
+	inst.transform.matrix[1][1] = 1.0f;
+	inst.transform.matrix[2][2] = 1.0f;
+	inst.mask = 0xFF;
+	inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+	inst.accelerationStructureReference = pfnGetAsDeviceAddress( device, &dai );
+	if ( !createRaw( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, sizeof( inst ), &inst, instBuf ) ) {
+		common->Printf( "VK ray-query self-test: FAIL (instance buffer alloc)\n" );
+		cleanup();
+		return;
+	}
+	VkAccelerationStructureGeometryKHR instGeom = {};
+	instGeom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+	instGeom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+	instGeom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+	instGeom.geometry.instances.arrayOfPointers = VK_FALSE;
+	instGeom.geometry.instances.data.deviceAddress = instBuf.addr;
+	if ( !buildAs( VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, instGeom, 1, tlasBuf, tlasScratch, tlas ) ) {
+		common->Printf( "VK ray-query self-test: FAIL (TLAS build)\n" );
+		cleanup();
+		return;
+	}
+	dai.accelerationStructure = tlas;
+	VkDeviceAddress tlasAddr = pfnGetAsDeviceAddress( device, &dai );
+
+	// trace the grid from compute; results land in a bound SSBO seeded with sentinels so a
+	// silently-dead dispatch reads as a mismatch, never a coincidental pass
+	static const char *kSrc =
+		"#version 460\n"
+		"#extension GL_EXT_ray_query : require\n"
+		"layout(local_size_x = 64) in;\n"
+		"struct Hit { float t; uint prim; };\n"
+		"layout(std430, binding = 0) writeonly buffer Out { Hit hits[]; } outb;\n"
+		"layout(push_constant) uniform PC { uvec2 tlas; uint count; } pc;\n"
+		"void main() {\n"
+		"    uint i = gl_GlobalInvocationID.x;\n"
+		"    if ( i >= pc.count ) { return; }\n"
+		"    float x = -3.0 + 6.0 * ( float( i % 16u ) + 0.5 ) / 16.0;\n"
+		"    float y = -3.0 + 6.0 * ( float( i / 16u ) + 0.5 ) / 16.0;\n"
+		"    rayQueryEXT rq;\n"
+		"    rayQueryInitializeEXT( rq, accelerationStructureEXT( pc.tlas ), gl_RayFlagsOpaqueEXT, 0xFFu,\n"
+		"                           vec3( x, y, 0.0 ), 0.001, vec3( 0.0, 0.0, 1.0 ), 100.0 );\n"
+		"    while ( rayQueryProceedEXT( rq ) ) { }\n"
+		"    if ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ) {\n"
+		"        outb.hits[i].t = rayQueryGetIntersectionTEXT( rq, true );\n"
+		"        outb.hits[i].prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );\n"
+		"    } else {\n"
+		"        outb.hits[i].t = -1.0;\n"
+		"        outb.hits[i].prim = 0xFFFFFFFFu;\n"
+		"    }\n"
+		"}\n";
+	ShaderHandle sh = CreateComputeShader( "cs_rayquerytest", kSrc );
+	if ( sh == 0 ) {
+		common->Printf( "VK ray-query self-test: FAIL (GL_EXT_ray_query compute shader did not compile)\n" );
+		cleanup();
+		return;
+	}
+	struct GpuHit { float t; uint32_t prim; };
+	GpuHit seed[N];
+	for ( int i = 0; i < N; i++ ) { seed[i].t = -2.0f; seed[i].prim = 0xDEADBEEFu; }
+	out = CreateBuffer( BU_STORAGE, N * (int)sizeof( GpuHit ), seed );
+	if ( out == 0 ) {
+		common->Printf( "VK ray-query self-test: FAIL (result buffer alloc)\n" );
+		cleanup();
+		return;
+	}
+	struct { uint32_t tlasLo, tlasHi, count; } pc;
+	pc.tlasLo = (uint32_t)( tlasAddr & 0xFFFFFFFFu );
+	pc.tlasHi = (uint32_t)( tlasAddr >> 32 );
+	pc.count = (uint32_t)N;
+	ComputeArgs ca = {};
+	ca.shader = sh;
+	ca.storage[0] = out;
+	ca.pushConstants = &pc;
+	ca.pushConstantSize = (int)sizeof( pc );
+	ca.groupsX = ( N + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
+	DispatchSync( ca );
+
+	GpuHit got[N];
+	if ( !ReadBuffer( out, got, N * (int)sizeof( GpuHit ) ) ) {
+		common->Printf( "VK ray-query self-test: FAIL (readback failed)\n" );
+		cleanup();
+		return;
+	}
+
+	// CPU reference: Moller-Trumbore closest-hit over the same grid, same [tmin,tmax] window
+	int mismatches = 0, hit0 = 0, hit1 = 0, miss = 0, firstBad = -1;
+	for ( int i = 0; i < N; i++ ) {
+		const float ox = -3.0f + 6.0f * ( (float)( i % GRID ) + 0.5f ) / (float)GRID;
+		const float oy = -3.0f + 6.0f * ( (float)( i / GRID ) + 0.5f ) / (float)GRID;
+		float bestT = 1e30f;
+		uint32_t bestPrim = 0xFFFFFFFFu;
+		for ( int tri = 0; tri < 2; tri++ ) {
+			const float *v0 = kTris[tri][0], *v1 = kTris[tri][1], *v2 = kTris[tri][2];
+			const float e1[3] = { v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2] };
+			const float e2[3] = { v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2] };
+			// dir = (0,0,1): pvec = cross(dir, e2), det = dot(e1, pvec)
+			const float pv[3] = { -e2[1], e2[0], 0.0f };
+			const float det = e1[0]*pv[0] + e1[1]*pv[1];
+			if ( det > -1e-8f && det < 1e-8f ) {
+				continue;
+			}
+			const float inv = 1.0f / det;
+			const float tv[3] = { ox - v0[0], oy - v0[1], 0.0f - v0[2] };
+			const float u = ( tv[0]*pv[0] + tv[1]*pv[1] ) * inv;
+			if ( u < 0.0f || u > 1.0f ) {
+				continue;
+			}
+			const float qv[3] = { tv[1]*e1[2] - tv[2]*e1[1], tv[2]*e1[0] - tv[0]*e1[2], tv[0]*e1[1] - tv[1]*e1[0] };
+			const float w = qv[2] * inv;		// dot(dir, qvec), dir = +Z
+			if ( w < 0.0f || u + w > 1.0f ) {
+				continue;
+			}
+			const float t = ( e2[0]*qv[0] + e2[1]*qv[1] + e2[2]*qv[2] ) * inv;
+			if ( t > 0.001f && t < 100.0f && t < bestT ) {
+				bestT = t;
+				bestPrim = (uint32_t)tri;
+			}
+		}
+		const bool refHit = bestPrim != 0xFFFFFFFFu;
+		if ( refHit ) { if ( bestPrim == 0 ) { hit0++; } else { hit1++; } } else { miss++; }
+		const bool gotHit = got[i].prim != 0xFFFFFFFFu && got[i].t >= 0.0f;
+		const bool ok = ( refHit == gotHit )
+			&& ( !refHit || ( got[i].prim == bestPrim && got[i].t > bestT - 1e-3f && got[i].t < bestT + 1e-3f ) );
+		if ( !ok ) {
+			mismatches++;
+			if ( firstBad < 0 ) {
+				firstBad = i;
+			}
+		}
+	}
+	if ( mismatches == 0 && hit0 > 0 && hit1 > 0 && miss > 0 ) {
+		common->Printf( "VK ray-query self-test: PASS (256 rays match the CPU reference: %d hit prim 0, %d hit prim 1, %d miss)\n",
+			hit0, hit1, miss );
+	} else if ( mismatches == 0 ) {
+		// all rays agree but a coverage class is empty - the scene setup regressed, not the GPU
+		common->Printf( "VK ray-query self-test: FAIL (degenerate coverage: %d/%d/%d hit0/hit1/miss - test scene broken)\n",
+			hit0, hit1, miss );
+	} else {
+		const int i = firstBad;
+		common->Printf( "VK ray-query self-test: FAIL (%d/%d rays mismatch; first at ray %d: GPU t=%.4f prim=0x%x)\n",
+			mismatches, N, i, got[i].t, got[i].prim );
+	}
+	cleanup();
 }
 
 /*
