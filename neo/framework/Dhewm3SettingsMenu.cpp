@@ -3765,6 +3765,22 @@ static void DrawDbgGroup_FSR()
 		}
 		AddTooltip( "FSR2's built-in sharpening pass, countering the slight softening of any "
 			"temporal accumulation. 0 disables the pass." );
+		bool reactive = r_fsrReactive.GetBool();
+		if ( ImGui::Checkbox( "Reactive Mask (r_fsrReactive)", &reactive ) ) {
+			r_fsrReactive.SetBool( reactive );
+		}
+		AddTooltip( "Deghosts additive/translucent content (particles, muzzle flashes, GUI "
+			"screens): an opaque-only snapshot is compared against the final frame, and where "
+			"they diverge FSR2 trusts its history less (R1/D auto-reactive)." );
+		{
+			ImGui::BeginDisabled( !r_fsrReactive.GetBool() );
+			float rs = r_fsrReactiveScale.GetFloat();
+			if ( ImGui::SliderFloat( "Reactive Strength (r_fsrReactiveScale)", &rs, 0.0f, 2.0f, "%.2f" ) ) {
+				r_fsrReactiveScale.SetFloat( rs );
+			}
+			AddTooltip( "Higher = less ghosting on particles but more shimmer on them." );
+			ImGui::EndDisabled();
+		}
 		ImGui::EndDisabled();
 	}
 	ImGui::Spacing();

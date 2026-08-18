@@ -346,6 +346,11 @@ idCVar r_hdrAdaptDesat( "r_hdrAdaptDesat", "0.33", CVAR_RENDERER | CVAR_ARCHIVE 
 idCVar r_hdrEyeAdaptDebug( "r_hdrEyeAdaptDebug", "0", CVAR_RENDERER | CVAR_BOOL, "debug: show the adapted exposure as a flat grayscale (needs r_hdrEyeAdaptation)" );
 idCVar r_fsr( "r_fsr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "AMD FSR2 temporal anti-aliasing (Native-AA; docs/fsr-temporal-pipeline.md R1; Vulkan only). Forces the RGBA16F scene buffer on (FSR2's HDR input), auto-enables motion vectors + sub-pixel jitter, resolves the scene before the HUD, and replaces FXAA/SMAA with FSR2's RCAS. Off = the frame is unchanged" );
 idCVar r_fsrSharpness( "r_fsrSharpness", "0.8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "FSR2 RCAS sharpening amount (needs r_fsr): 0 = off, 1 = maximum", 0.0f, 1.0f );
+// FSR2 auto-reactive mask (R1/D): snapshot the opaque scene at the translucent split, and let
+// FSR2 compare it against the final frame — where they diverge (additive particles, muzzle
+// flashes, GUI screens, fog) history is trusted less, killing temporal ghost trails.
+idCVar r_fsrReactive( "r_fsrReactive", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "FSR2 auto-reactive mask (needs r_fsr): deghosts additive/translucent content (particles, flashes, screens) by comparing an opaque-only snapshot against the final frame; off = plain accumulation everywhere" );
+idCVar r_fsrReactiveScale( "r_fsrReactiveScale", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "FSR2 auto-reactive mask strength (needs r_fsr + r_fsrReactive); higher = less ghosting on particles but more shimmer on them", 0.0f, 2.0f );
 
 // DUDE Phase 3.5 "specular tuning" enhancement (GL3/Vulkan interaction shader
 // only; inert on the legacy ARB2 path). Defaults reproduce vanilla exactly:

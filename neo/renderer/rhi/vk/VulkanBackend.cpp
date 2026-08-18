@@ -69,6 +69,15 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "ffx_fsr2.h"						// vendored FidelityFX FSR2 (docs/fsr-temporal-pipeline.md, R1)
 #include "vk/ffx_fsr2_vk.h"					// FSR2 Vulkan backend init (against our VkDevice)
 
+// auto-reactive mask flags (R1/D): CPU/shader ABI values from the vendored
+// shaders/ffx_fsr2_resources.h (a GLSL-shared header the C API doesn't re-export)
+#ifndef FFX_FSR2_AUTOREACTIVEFLAGS_APPLY_TONEMAP
+#define FFX_FSR2_AUTOREACTIVEFLAGS_APPLY_TONEMAP		1
+#define FFX_FSR2_AUTOREACTIVEFLAGS_APPLY_INVERSETONEMAP	2
+#define FFX_FSR2_AUTOREACTIVEFLAGS_APPLY_THRESHOLD		4
+#define FFX_FSR2_AUTOREACTIVEFLAGS_USE_COMPONENTS_MAX	8
+#endif
+
 #ifndef IMGUI_DISABLE
   #include "../../../libs/imgui/imgui.h"
   #include "../../../libs/imgui/backends/imgui_impl_vulkan.h"
@@ -209,6 +218,7 @@ public:
 	virtual void	Dispatch( const ComputeArgs &args );
 	virtual void	DispatchSync( const ComputeArgs &args );
 	virtual bool	RunFsr2( const Fsr2DispatchArgs &args );
+	virtual void	Fsr2CaptureOpaque( RenderTargetHandle sceneRT );
 	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth, bool hdrFloat );
 	virtual void	CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 	                                        int srcX, int srcY, int w, int h, bool depth );
@@ -690,6 +700,20 @@ private:
 	VkImageView					fsr2DepthView = VK_NULL_HANDLE;
 	bool						fsr2WarnedNoFeature = false;
 	bool						fsr2FirstDispatch = true;	// force reset on the first dispatch of a context
+	// R1/D auto-reactive: opaque-only scene snapshot (Fsr2CaptureOpaque, straight copy at
+	// the translucent split) + the R8 reactive mask FSR2 generates from opaque-vs-final.
+	// fsr2OpaqueValid is per-frame (cleared in BeginFrame): the mask is only meaningful
+	// when the snapshot came from THIS frame's opaque scene.
+	VkImage						fsr2Opaque = VK_NULL_HANDLE;
+	VmaAllocation				fsr2OpaqueAlloc = NULL;
+	VkImageView					fsr2OpaqueView = VK_NULL_HANDLE;
+	int							fsr2OpaqueW = 0, fsr2OpaqueH = 0;
+	bool						fsr2OpaqueWritten = false;	// layout: false = UNDEFINED, true = SHADER_READ_ONLY
+	bool						fsr2OpaqueValid = false;	// captured this frame (cleared each BeginFrame)
+	VkImage						fsr2Reactive = VK_NULL_HANDLE;
+	VmaAllocation				fsr2ReactiveAlloc = NULL;
+	VkImageView					fsr2ReactiveView = VK_NULL_HANDLE;
+	bool						fsr2ReactiveWritten = false;	// false = UNDEFINED, true = SHADER_READ_ONLY (post-dispatch)
 	// r_vkBdaZfill (Phase 3.2b): cached handles for the depth-prepass BDA consume.
 	// Loaded on the cvar's first enable; the flat zfill draw is identified by
 	// currentDesc.shader == zfillShaderHandle. zfillBdaShaderHandle 0 = variant absent.
@@ -1848,6 +1872,10 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	}
 	FrameSlot &f = frames[frameIndex];
 	vkWaitForFences( device, 1, &f.fence, VK_TRUE, UINT64_MAX );
+
+	// FSR2 auto-reactive (R1/D): the opaque snapshot is one-frame data — a new frame
+	// invalidates it until Fsr2CaptureOpaque runs again at this frame's translucent split
+	fsr2OpaqueValid = false;
 
 	// compute-lane self-test (Phase 1): one-shot on the cvar toggle. Runs on the synchronous
 	// upload cb (waits idle) — a dev validation path, so gate it to the modified edge.
@@ -3824,9 +3852,17 @@ void VulkanBackend::Fsr2DestroyContext( bool deviceIdle ) {
 	if ( fsr2OutView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2OutView, NULL ); fsr2OutView = VK_NULL_HANDLE; }
 	if ( fsr2Out != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Out, fsr2OutAlloc ); fsr2Out = VK_NULL_HANDLE; fsr2OutAlloc = NULL; }
 	if ( fsr2DepthView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2DepthView, NULL ); fsr2DepthView = VK_NULL_HANDLE; }
+	if ( fsr2OpaqueView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2OpaqueView, NULL ); fsr2OpaqueView = VK_NULL_HANDLE; }
+	if ( fsr2Opaque != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Opaque, fsr2OpaqueAlloc ); fsr2Opaque = VK_NULL_HANDLE; fsr2OpaqueAlloc = NULL; }
+	if ( fsr2ReactiveView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2ReactiveView, NULL ); fsr2ReactiveView = VK_NULL_HANDLE; }
+	if ( fsr2Reactive != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Reactive, fsr2ReactiveAlloc ); fsr2Reactive = VK_NULL_HANDLE; fsr2ReactiveAlloc = NULL; }
 	fsr2DepthSrc = VK_NULL_HANDLE;
 	fsr2W = fsr2H = 0;
+	fsr2OpaqueW = fsr2OpaqueH = 0;
 	fsr2OutWritten = false;
+	fsr2OpaqueWritten = false;
+	fsr2OpaqueValid = false;
+	fsr2ReactiveWritten = false;
 	fsr2FirstDispatch = true;
 }
 
@@ -3902,12 +3938,154 @@ bool VulkanBackend::Fsr2EnsureContext( int w, int h ) {
 		return false;
 	}
 
+	// R8 reactive mask (R1/D): written by FSR2's autogen pass (UAV), read by the dispatch.
+	// Created with the context so it always matches the render size; its absence simply
+	// disables the reactive path (RunFsr2 guards on it).
+	ici.format = VK_FORMAT_R8_UNORM;
+	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &fsr2Reactive, &fsr2ReactiveAlloc, NULL ), "vmaCreateImage(FSR2 reactive)" ) ) {
+		Fsr2DestroyContext( true );
+		return false;
+	}
+	vwi.image = fsr2Reactive;
+	vwi.format = VK_FORMAT_R8_UNORM;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &fsr2ReactiveView ), "vkCreateImageView(FSR2 reactive)" ) ) {
+		Fsr2DestroyContext( true );
+		return false;
+	}
+	fsr2ReactiveWritten = false;
+
 	fsr2W = w;
 	fsr2H = h;
 	fsr2OutWritten = false;
 	fsr2FirstDispatch = true;
 	common->Printf( "FSR2: context created (Native-AA %dx%d, scratch %zu KB)\n", w, h, scratchSize / 1024 );
 	return true;
+}
+
+/*
+====================
+VulkanBackend::Fsr2CaptureOpaque
+
+R1/D: snapshot the scene color at the opaque/translucent split as the auto-reactive
+mask's "opaque only" input. A straight vkCmdCopyImage in storage orientation — the
+M5 CopyFramebufferToImage capture is y-FLIPPED (GL bottom-up) and would row-mismatch
+the reactive comparison. Suspends the scene pass exactly like BeginTargetPass.
+====================
+*/
+void VulkanBackend::Fsr2CaptureOpaque( RenderTargetHandle sceneRT ) {
+	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame ) {
+		return;
+	}
+	RenderTarget *scene = LookupTarget( sceneRT );
+	if ( scene == NULL || !scene->colorTarget || scene->colorFormat[0] != VK_FORMAT_R16G16B16A16_SFLOAT ) {
+		return;
+	}
+
+	// (re)create the snapshot image on first use / size change; sized to the scene target,
+	// independent of the FSR2 context (the capture happens mid-view, before RunFsr2 may
+	// have created the context on the first frame)
+	if ( fsr2Opaque == VK_NULL_HANDLE || fsr2OpaqueW != scene->w || fsr2OpaqueH != scene->h ) {
+		if ( fsr2OpaqueView != VK_NULL_HANDLE || fsr2Opaque != VK_NULL_HANDLE ) {
+			retiredImages[frameIndex].push_back( { fsr2Opaque, fsr2OpaqueAlloc, fsr2OpaqueView } );
+			fsr2Opaque = VK_NULL_HANDLE; fsr2OpaqueAlloc = NULL; fsr2OpaqueView = VK_NULL_HANDLE;
+		}
+		VkImageCreateInfo ici = {};
+		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		ici.imageType = VK_IMAGE_TYPE_2D;
+		ici.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+		ici.extent = { (uint32_t)scene->w, (uint32_t)scene->h, 1 };
+		ici.mipLevels = 1;
+		ici.arrayLayers = 1;
+		ici.samples = VK_SAMPLE_COUNT_1_BIT;
+		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+		ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		VmaAllocationCreateInfo aci = {};
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &fsr2Opaque, &fsr2OpaqueAlloc, NULL ), "vmaCreateImage(FSR2 opaque)" ) ) {
+			fsr2Opaque = VK_NULL_HANDLE;
+			return;
+		}
+		VkImageViewCreateInfo vwi = {};
+		vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		vwi.image = fsr2Opaque;
+		vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		vwi.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+		vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		vwi.subresourceRange.levelCount = 1;
+		vwi.subresourceRange.layerCount = 1;
+		if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &fsr2OpaqueView ), "vkCreateImageView(FSR2 opaque)" ) ) {
+			vmaDestroyImage( vma, fsr2Opaque, fsr2OpaqueAlloc );
+			fsr2Opaque = VK_NULL_HANDLE; fsr2OpaqueAlloc = NULL;
+			return;
+		}
+		fsr2OpaqueW = scene->w;
+		fsr2OpaqueH = scene->h;
+		fsr2OpaqueWritten = false;
+	}
+
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );		// scene pass resumes on the next Draw (EnsureScenePass)
+		insideScenePass = false;
+	}
+	if ( insideTargetPass ) {
+		return;		// mid-target-pass capture would corrupt the pass; caller error
+	}
+
+	// scene color SHADER_READ_ONLY -> TRANSFER_SRC, snapshot -> TRANSFER_DST
+	VkImageMemoryBarrier pre[2] = {};
+	pre[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	pre[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	pre[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	pre[0].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	pre[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	pre[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	pre[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	pre[0].image = scene->colorImage[0];
+	pre[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	pre[0].subresourceRange.levelCount = 1;
+	pre[0].subresourceRange.layerCount = 1;
+	pre[1] = pre[0];
+	pre[1].srcAccessMask = fsr2OpaqueWritten ? VK_ACCESS_SHADER_READ_BIT : 0;
+	pre[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	pre[1].oldLayout = fsr2OpaqueWritten ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+	pre[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	pre[1].image = fsr2Opaque;
+	vkCmdPipelineBarrier( cb,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+			| VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, pre );
+
+	VkImageCopy region = {};
+	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.srcSubresource.layerCount = 1;
+	region.dstSubresource = region.srcSubresource;
+	region.extent = { (uint32_t)scene->w, (uint32_t)scene->h, 1 };
+	vkCmdCopyImage( cb, scene->colorImage[0], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		fsr2Opaque, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
+
+	// both back to SHADER_READ_ONLY (the between-pass resting layout / the SRV state the
+	// reactive autogen pass declares)
+	VkImageMemoryBarrier post[2] = {};
+	post[0] = pre[0];
+	post[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	post[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	post[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	post[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	post[1] = pre[1];
+	post[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	post[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	post[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	post[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+			| VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		0, 0, NULL, 0, NULL, 2, post );
+
+	fsr2OpaqueWritten = true;
+	fsr2OpaqueValid = true;
 }
 
 bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
@@ -4009,7 +4187,57 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 		w, h, vel->colorFormat[2], L"FSR2_MotionVectors", FFX_RESOURCE_STATE_COMPUTE_READ );
 	dd.output = ffxGetTextureResourceVK( fsr2Ctx, fsr2Out, fsr2OutView,
 		w, h, VK_FORMAT_R16G16B16A16_SFLOAT, L"FSR2_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS );
-	// exposure/reactive/transparencyAndComposition stay null (AUTO_EXPOSURE; masks are increment D)
+	// exposure/transparencyAndComposition stay null (AUTO_EXPOSURE; hand-authored T&C mask
+	// is the potential V2 of increment D)
+
+	// R1/D auto-reactive: generate the reactive mask from opaque-vs-final before the main
+	// dispatch. Where translucent/additive content diverges from the opaque snapshot
+	// (particles, muzzle flashes, GUI screens), FSR2 trusts history less — killing ghost
+	// trails at the cost of accumulation there. Skipped unless this frame captured the
+	// opaque snapshot (Fsr2CaptureOpaque) and the caller enabled it (reactiveScale >= 0).
+	if ( args.reactiveScale >= 0.0f && fsr2OpaqueValid
+	     && fsr2Opaque != VK_NULL_HANDLE && fsr2Reactive != VK_NULL_HANDLE
+	     && fsr2OpaqueW == (int)w && fsr2OpaqueH == (int)h ) {
+		VkImageMemoryBarrier rb = {};
+		rb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		rb.srcAccessMask = fsr2ReactiveWritten ? VK_ACCESS_SHADER_READ_BIT : 0;
+		rb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		rb.oldLayout = fsr2ReactiveWritten ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+		rb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+		rb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		rb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		rb.image = fsr2Reactive;
+		rb.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		rb.subresourceRange.levelCount = 1;
+		rb.subresourceRange.layerCount = 1;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &rb );
+
+		FfxFsr2GenerateReactiveDescription gr = {};
+		gr.commandList = dd.commandList;
+		gr.colorOpaqueOnly = ffxGetTextureResourceVK( fsr2Ctx, fsr2Opaque, fsr2OpaqueView,
+			w, h, VK_FORMAT_R16G16B16A16_SFLOAT, L"FSR2_OpaqueOnly", FFX_RESOURCE_STATE_COMPUTE_READ );
+		gr.colorPreUpscale = dd.color;
+		gr.outReactive = ffxGetTextureResourceVK( fsr2Ctx, fsr2Reactive, fsr2ReactiveView,
+			w, h, VK_FORMAT_R8_UNORM, L"FSR2_Reactive", FFX_RESOURCE_STATE_UNORDERED_ACCESS );
+		gr.renderSize.width = w;
+		gr.renderSize.height = h;
+		gr.scale = args.reactiveScale;
+		// AMD reference defaults: binary mask (threshold 0.2 -> 0.9) over the per-channel
+		// max delta, compared in tonemapped space so HDR fireballs don't saturate the test
+		gr.cutoffThreshold = 0.2f;
+		gr.binaryValue = 0.9f;
+		gr.flags = FFX_FSR2_AUTOREACTIVEFLAGS_APPLY_TONEMAP
+		         | FFX_FSR2_AUTOREACTIVEFLAGS_APPLY_THRESHOLD
+		         | FFX_FSR2_AUTOREACTIVEFLAGS_USE_COMPONENTS_MAX;
+		const FfxErrorCode grErr = ffxFsr2ContextGenerateReactiveMask( fsr2Ctx, &gr );
+		if ( grErr == FFX_OK ) {
+			// dispatch reads it as an SRV; declared UAV so FSR2's own barrier does the transition
+			dd.reactive = ffxGetTextureResourceVK( fsr2Ctx, fsr2Reactive, fsr2ReactiveView,
+				w, h, VK_FORMAT_R8_UNORM, L"FSR2_Reactive", FFX_RESOURCE_STATE_UNORDERED_ACCESS );
+			fsr2ReactiveWritten = true;		// FSR2 leaves it SHADER_READ_ONLY after the SRV barrier
+		}
+	}
 
 	// Motion-vector scale, derived in the plan (docs/fsr-temporal-pipeline.md C2) and
 	// verified against the vendored shaders: A2 stores (currUV - prevUV) in +Y-up UV;

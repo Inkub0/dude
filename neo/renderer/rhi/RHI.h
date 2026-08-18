@@ -159,6 +159,10 @@ struct Fsr2DispatchArgs {
 	float	zNear;						// near plane (Doom units)
 	bool	reset;						// camera cut / teleport / first frame: drop FSR2 history
 	float	sharpness;					// RCAS [0,1]; < 0 disables the sharpening pass
+	// R1/D auto-reactive: strength of the generated reactive mask (additive particles,
+	// muzzle flashes, GUI screens get less history = no ghost trails). < 0 disables; also
+	// inert unless Fsr2CaptureOpaque ran this frame (the mask needs the opaque-only copy).
+	float	reactiveScale;
 };
 
 class RHI {
@@ -406,6 +410,11 @@ public:
 	// open render pass; returns true when the dispatch ran and sceneRT now holds the
 	// resolved image. GL3 returns false (frame unchanged).
 	virtual bool	RunFsr2( const Fsr2DispatchArgs &args ) { return false; }
+	// R1/D: snapshot the scene color as the OPAQUE-ONLY input for FSR2's auto-reactive
+	// mask. Called at the opaque/translucent split of the primary view (after the SSR
+	// composite, before particles/blends draw); a straight same-orientation copy, unlike
+	// the y-flipped _currentRender capture. Valid for this frame's RunFsr2 only. GL3 no-op.
+	virtual void	Fsr2CaptureOpaque( RenderTargetHandle sceneRT ) {}
 
 	// ---- screen copies (_currentRender / _currentDepth / _scratch, Phase 4 M5) ----
 	// The GL3 backend keeps the literal qglCopyTexSubImage2D path in idImage

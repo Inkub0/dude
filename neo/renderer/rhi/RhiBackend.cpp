@@ -3192,6 +3192,32 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 
 /*
 =============
+RB_RHI_FsrCaptureOpaque
+
+R1/D: snapshot the opaque scene for FSR2's auto-reactive mask, at the opaque/translucent
+split of the primary fullscreen view. Only when this frame will actually dispatch FSR2
+(same conditions as the dispatch site) — otherwise the copy is wasted bandwidth.
+=============
+*/
+static void RB_RHI_FsrCaptureOpaque( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !r_fsr.GetBool() || !r_fsrReactive.GetBool() || !rbHdrActiveThisFrame || !rhiHdrRT
+	     || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		return;
+	}
+	if ( !viewDef->viewEntitys || viewDef->isSubview ) {
+		return;
+	}
+	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
+		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
+		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+	if ( !fullscreenView ) {
+		return;
+	}
+	r->Fsr2CaptureOpaque( rhiHdrRT );
+}
+
+/*
+=============
 RB_RHI_DrawView
 =============
 */
@@ -3255,11 +3281,15 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		if ( !ssrDone && drawSurfs[i]->material->GetSort() > SS_DECAL ) {
 			ssrDone = true;
 			RB_RHI_ScreenSpaceReflections( r, viewDef );
+			// R1/D: snapshot the opaque scene (incl. the SSR composite — reflections live on
+			// opaque surfaces) for FSR2's auto-reactive mask, before particles/blends draw
+			RB_RHI_FsrCaptureOpaque( r, viewDef );
 		}
 		RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, mvp );
 	}
 	if ( !ssrDone ) {
 		RB_RHI_ScreenSpaceReflections( r, viewDef );	// view had no translucent surfaces
+		RB_RHI_FsrCaptureOpaque( r, viewDef );			// fog/post still draw after this point
 	}
 
 	// fog and blend lights
@@ -3336,6 +3366,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 				fa.zNear = r_znear.GetFloat();
 				fa.reset = RB_RHI_TemporalFsrReset( viewDef );
 				fa.sharpness = r_fsrSharpness.GetFloat() > 0.0f ? r_fsrSharpness.GetFloat() : -1.0f;
+				// auto-reactive (R1/D): only meaningful when this frame's opaque snapshot was
+				// captured (the backend also guards on that); < 0 disables
+				fa.reactiveScale = r_fsrReactive.GetBool() ? r_fsrReactiveScale.GetFloat() : -1.0f;
 				rbFsrRanThisFrame = r->RunFsr2( fa );
 			}
 		}

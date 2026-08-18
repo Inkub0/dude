@@ -339,6 +339,22 @@ wrong — fix before trusting); early `AUTO_EXPOSURE` check on a bright/dark sce
 SMAA → user screenshot sign-off.
 
 ### D — reactive + transparency/composition masks (VK)
+
+**V1 (auto-reactive) BUILT (branch `feat/fsr2-dispatch`, pending user verify).** As-built:
+`Fsr2CaptureOpaque` snapshots the scene color at the opaque/translucent split of the primary
+view (right after the SSR composite — reflections live on opaque surfaces — and before
+particles/blends/fog draw; a straight same-orientation `vkCmdCopyImage`, NOT the y-flipped M5
+capture). `RunFsr2` then runs `ffxFsr2ContextGenerateReactiveMask` (opaque-vs-final, AMD
+reference constants: threshold 0.2 → binary 0.9, per-channel max, tonemapped compare) into a
+context-owned R8 mask fed to the dispatch as `reactive`. New cvars `r_fsrReactive` (default 1)
++ `r_fsrReactiveScale` (default 1.0); ImGui FSR group has both. The snapshot is one-frame data
+(invalidated each BeginFrame). The weapon keeps A2's zeroed velocity as its treatment. The
+hand-authored R8 + transparency-and-composition V2 below stays open if auto-reactive proves
+insufficient. Fog draws after the split, so fog regions read as reactive — acceptable
+(low-frequency content, nothing to shimmer).
+
+Original plan text:
+
 The real integration quality work: kill temporal ghosting on Doom 3's **additive-blended**
 content (muzzle flashes, plasma, particles, GUI screens, heat-haze/refraction) and the weapon
 view-model. V1 shortcut = FSR2's **auto-reactive** (needs an opaque-only color copy). V2 =
