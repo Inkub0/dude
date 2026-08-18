@@ -249,6 +249,30 @@ See **docs/antialiasing.md** for status + design. Summary:
 
 ---
 
+## Collision / model binary "generated" cache  **[parked 2026-08-18 — next load-time lever]**
+
+With `r_parallelImageLoad` shipped (image phase ~10x faster, user-verified), the biggest
+remaining load-time chunk is the entity-populate **cacheMedia** slice (~2.8s on hell1):
+per-prop collision models and the render models they drag in. Two deterministic,
+re-done-every-load costs:
+
+- **Runtime CM conversion** (`idCollisionModelManagerLocal::LoadRenderModel`,
+  CollisionModel_load.cpp): stock props ship no `.cm`, so every ASE/LWO moveable is
+  converted at load — per-tri winding + vertex/edge hash weld + axial BSP build — and the
+  result is discarded at map end.
+- **Text parsing everywhere**: ASE/LWO render models and even the map's cached `.cm` are
+  idLexer text parses.
+
+**Plan (BFG-style, engine-only):** (1) measure the split first — accumulating timers
+(render-model parse vs CM conversion) printed with the existing `load phases (msec)` line;
+(2) serialize built `cm_model_t` (and, if the split says so, binary render models) to the
+writable dude folder, CRC/timestamp-gated exactly like the map `.cm` already is.
+Parallelizing this phase was investigated and declined (Increment 3, thread-safety of
+renderModelManager/CM manager/allocators for ~2-3x); the disk cache gets more for less.
+Expectation: attacks the ~2.8s slice; the ~4.4s spawnDefs floor remains.
+
+---
+
 ## Codebase independence  **[planned]**
 
 A small phase to break free from third-party content and stale identity so a clean
