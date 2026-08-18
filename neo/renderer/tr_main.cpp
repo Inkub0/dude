@@ -1508,14 +1508,19 @@ static void R_RtWorldUpdate( void ) {
 	r_rtSunShadows.ClearModified();
 	r->DestroyRtScene();
 
+	// terrain-as-models maps (commoutside: the walkable ground is all func_static models,
+	// worldspawn is caulk/sky only) legitimately gather ZERO casting worldspawn surfaces -
+	// the scene must still build from the entity casters alone, so neither gather gates
+	// the other; only both-empty means there is nothing to trace
 	float *aPos; int *aIdx; rtAreaSlice_t *aSlices;
 	int numASlices, worldVerts, worldIndexes;
-	if ( !R_RtGatherWorld( world, aPos, aIdx, aSlices, numASlices, worldVerts, worldIndexes ) ) {
-		return;
-	}
+	R_RtGatherWorld( world, aPos, aIdx, aSlices, numASlices, worldVerts, worldIndexes );
 	float *mPos; int *mIdx; rtModelSlice_t *mSlices; rtModelInst_t *mInsts;
 	int numMSlices, numMInsts;
 	R_RtGatherEntities( world, mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts );
+	if ( numASlices == 0 && numMInsts == 0 ) {
+		return;
+	}
 
 	const int msStart = Sys_Milliseconds();
 	int blasFail = 0;
@@ -1655,15 +1660,18 @@ static void R_RtWorldValidate( void ) {
 		return;
 	}
 
+	// mirror R_RtWorldUpdate: worldspawn-empty maps (terrain-as-models) still validate
+	// against their entity casters; only both-empty means nothing to trace
 	float *aPos; int *aIdx; rtAreaSlice_t *aSlices;
 	int numASlices, worldVerts, worldIndexes;
-	if ( !R_RtGatherWorld( world, aPos, aIdx, aSlices, numASlices, worldVerts, worldIndexes ) ) {
-		common->Printf( "r_rtWorldTest: no opaque world geometry found\n" );
-		return;
-	}
+	R_RtGatherWorld( world, aPos, aIdx, aSlices, numASlices, worldVerts, worldIndexes );
 	float *mPos; int *mIdx; rtModelSlice_t *mSlices; rtModelInst_t *mInsts;
 	int numMSlices, numMInsts;
 	R_RtGatherEntities( world, mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts );
+	if ( numASlices == 0 && numMInsts == 0 ) {
+		common->Printf( "r_rtWorldTest: no shadow-casting geometry found\n" );
+		return;
+	}
 
 	// scene: reuse the persistent one when live (R_RtWorldUpdate ran just before us, so it
 	// is current for this map), else a transient build torn down at the end
