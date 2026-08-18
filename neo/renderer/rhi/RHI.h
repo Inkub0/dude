@@ -141,6 +141,26 @@ struct ComputeArgs {
 	unsigned int	groupsX, groupsY, groupsZ;
 };
 
+// FSR2 Native-AA dispatch (docs/fsr-temporal-pipeline.md R1/C2). Vulkan only; the
+// GL3 backend returns false and the frame is unchanged. The backend reads sceneRT's
+// color[0] (pre-tonemap RGBA16F scene) + depth attachment and velocityRT's 3rd
+// attachment (RG16F per-object motion vectors, R1/A2), runs the FSR2 temporal
+// resolve, and copies the result back over sceneRT color[0] — so everything after
+// (eye adaptation, bloom, HUD composite, tonemap/grain at the resolve) consumes the
+// temporally-stabilised scene with no reorder of the frame. jitter[XY] is the applied
+// projection jitter in pixels, engine convention (+Y-up); the backend owns the sign
+// flips into FSR2's top-left convention (see RunFsr2's derivation comment).
+struct Fsr2DispatchArgs {
+	RenderTargetHandle	sceneRT;		// RGBA16F color + depth-stencil frame target (rhiHdrRT)
+	RenderTargetHandle	velocityRT;		// 3-MRT velocity gbuffer (attachment 2 = RG16F)
+	float	jitterX, jitterY;			// viewDef->jitter, pixels, +Y-up
+	float	frameTimeMs;				// wall-clock delta since the previous dispatch
+	float	fovYRadians;				// vertical field of view
+	float	zNear;						// near plane (Doom units)
+	bool	reset;						// camera cut / teleport / first frame: drop FSR2 history
+	float	sharpness;					// RCAS [0,1]; < 0 disables the sharpening pass
+};
+
 class RHI {
 public:
 	virtual			~RHI() {}
@@ -381,6 +401,11 @@ public:
 	// so the result is ready for a ReadBuffer immediately. For dev/validation and load-time
 	// GPU work; stalls the GPU, so never per-frame. GL3 no-ops.
 	virtual void	DispatchSync( const ComputeArgs &args ) {}
+	// FSR2 Native-AA temporal resolve over the scene target (R1/C2, Vulkan only; see
+	// Fsr2DispatchArgs). Records compute on the frame command buffer after closing any
+	// open render pass; returns true when the dispatch ran and sceneRT now holds the
+	// resolved image. GL3 returns false (frame unchanged).
+	virtual bool	RunFsr2( const Fsr2DispatchArgs &args ) { return false; }
 
 	// ---- screen copies (_currentRender / _currentDepth / _scratch, Phase 4 M5) ----
 	// The GL3 backend keeps the literal qglCopyTexSubImage2D path in idImage

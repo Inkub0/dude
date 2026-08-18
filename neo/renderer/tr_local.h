@@ -878,7 +878,8 @@ extern idCVar r_postFilmGrainSize;		// grain cell size in pixels (1 = per-pixel)
 extern idCVar r_postChromaticAberration;	// chromatic aberration strength (0 = off)
 extern idCVar r_rhiAA;					// post-resolve antialiasing (0 = off, 1 = FXAA)
 extern idCVar r_hdr;					// HDR float scene buffer (removes banding); opengl3/Vulkan only
-extern idCVar r_fsr;					// AMD FSR2 temporal upscaler/AA (Vulkan only, R1). C1 = scene/HUD reorder passthrough
+extern idCVar r_fsr;					// AMD FSR2 temporal AA, Native-AA mode (Vulkan only, R1/C2)
+extern idCVar r_fsrSharpness;			// FSR2 RCAS sharpening amount (0 = off)
 extern idCVar r_fxaaStrength;			// FXAA subpixel smoothing amount (0 = edge-only .. 1)
 
 // DUDE Phase 3.5 specular tuning — GL3/Vulkan interaction shader only, vanilla at default

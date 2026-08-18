@@ -3736,6 +3736,26 @@ static void DrawDbgGroup_FSR()
 	}
 	ImGui::BeginDisabled( !isVulkan );
 
+	bool fsr = r_fsr.GetBool();
+	if ( ImGui::Checkbox( "FSR2 Native-AA (r_fsr)", &fsr ) ) {
+		r_fsr.SetBool( fsr );
+	}
+	AddTooltip( "AMD FSR2 temporal anti-aliasing at native resolution (R1/C2). Resolves the "
+		"specular/normal-map shimmer SMAA can't touch. Auto-enables motion vectors + sub-pixel "
+		"jitter, forces the HDR scene buffer, and replaces FXAA/SMAA with FSR2's RCAS sharpen." );
+
+	{
+		ImGui::BeginDisabled( !r_fsr.GetBool() );
+		float sharp = r_fsrSharpness.GetFloat();
+		if ( ImGui::SliderFloat( "RCAS Sharpness (r_fsrSharpness)", &sharp, 0.0f, 1.0f, "%.2f" ) ) {
+			r_fsrSharpness.SetFloat( sharp );
+		}
+		AddTooltip( "FSR2's built-in sharpening pass, countering the slight softening of any "
+			"temporal accumulation. 0 disables the pass." );
+		ImGui::EndDisabled();
+	}
+	ImGui::Spacing();
+
 	bool mv = r_motionVectors.GetBool();
 	if ( ImGui::Checkbox( "Motion Vectors (r_motionVectors)", &mv ) ) {
 		r_motionVectors.SetBool( mv );

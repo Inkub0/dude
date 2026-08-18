@@ -271,6 +271,43 @@ across HUD+world / console-over-game / PDA-over-game / letterboxed-cinematic-wit
 menu frames.
 
 ### C2 — FSR2 context/dispatch, Native-AA (VK)
+
+**BUILT (branch `feat/fsr2-dispatch`, pending in-game verify). As-built deltas from the plan
+below:**
+
+- **COPY-BACK, not the reorder.** The scene/HUD reorder (separate display-res composite
+  buffer, HUD retargeted into it) was NOT built. Instead `RunFsr2` (VulkanBackend) writes
+  FSR2's output to an internal RGBA16F storage image and **copies it back over `rhiHdrRT`'s
+  color attachment** — exact at Native-AA (same size/format, one ~0.1 ms copy), and the
+  entire frame after the dispatch is structurally untouched: HUD still composites in HDR
+  into `rhiHdrRT`, eye-adapt/bloom meter the (now stabilised) scene, tonemap/grain at the
+  resolve are unchanged. The reorder's only real payoff is render-res ≠ display-res, so it
+  moves to the future upscaling increment. This kills the reorder's whole OFF-path /
+  vid_restart risk class.
+- **Dispatch site**: end of the primary fullscreen world view, after `RB_RHI_DepthOfField`,
+  BEFORE the eye-adapt/bloom measurement (RhiBackend.cpp) — adaptation and bloom read the
+  FSR2-resolved scene, so bloom stops shimmering too.
+- **`separateDepthStencilLayouts` (core 1.2) now enabled when supported**: the vendored FSR2
+  VK backend barriers the sampled depth with a depth-ONLY aspect, which a combined
+  D24S8/D32S8 image only permits with the feature. `RunFsr2` refuses (one warning) without
+  it. The scene depth is sampled through a backend-owned depth-only view of `rhiHdrRT`'s
+  depth-stencil image, round-tripped ATTACHMENT_OPTIMAL → SHADER_READ_ONLY → back; all
+  inputs are declared in the states they already rest in, so FSR2's own barriers are
+  same-layout no-ops.
+- **Jitter Y is negated at the dispatch** (`jitterOffset = {+jx, −jy}`), NOT passed raw as
+  planned: the same +Y-up → top-left flip reasoning that produced the MV scale applies to
+  the jitter too (FSR2's convention applies its jitterY as `proj[2][1] -= 2·jy/h`).
+- **Auto-enable**: `r_fsr` implies the velocity gbuffer (RhiWorld `velWants`) and the
+  temporal Halton jitter (tr_main) on VK — MV/jitter are infrastructure, not user toggles
+  (per section E). It also bypasses FXAA/SMAA at the HDR resolve (`rbFsrRanThisFrame`).
+- **New cvar `r_fsrSharpness`** (0..1, default 0.8, 0 = off) drives RCAS. FSR/RCAS controls
+  in the ImGui FSR debug group.
+- **Reset**: `RB_RHI_TemporalFsrReset` (RhiWorld) reuses A1's shared camera-cut classify and
+  stages every frame even with temporal SSAO/SSR off; first dispatch of a context forces
+  reset. `frameTimeDelta` = wall-clock ms between dispatches, clamped [0.1, 200].
+
+Original plan text:
+
 The convergence point. **C2 also inherits the scene/HUD REORDER deferred from C1** (see C1's
 re-scope note): FSR2 reads the scene (`rhiHdrRT`) before the 2D overlays and writes a **display-res
 HDR (RGBA16F) composite** buffer; the HUD/console/menu then composite into THAT buffer **in HDR**

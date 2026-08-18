@@ -244,6 +244,11 @@ rhi::ImageHandle RB_RHI_Bloom( rhi::RHI *r, rhi::ImageHandle sceneImg );
 // velocity MRT over the finished 3D view. No-op unless r_motionVectors + r_mvDebug are on (VK).
 void RB_RHI_MotionVectorDebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
 
+// FSR2 dispatch inputs (R1/C2): this view's velocity 3-MRT target (0 = not produced) and
+// the shared temporal discontinuity (true = drop FSR2 history: first frame / cut / teleport).
+rhi::RenderTargetHandle RB_RHI_VelocityTargetThisView( void );
+bool RB_RHI_TemporalFsrReset( const viewDef_s *viewDef );
+
 // DUDE screen-space reflections (docs/ssr.md): additive composite over the lit
 // opaque scene. Called at the shader-pass translucent split point (RhiWorld.cpp);
 // no-op unless r_ssr produced this view's MRT G-buffer.

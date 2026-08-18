@@ -208,6 +208,7 @@ public:
 	}
 	virtual void	Dispatch( const ComputeArgs &args );
 	virtual void	DispatchSync( const ComputeArgs &args );
+	virtual bool	RunFsr2( const Fsr2DispatchArgs &args );
 	virtual ImageHandle	CreateCaptureImage( int w, int h, bool depth, bool hdrFloat );
 	virtual void	CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 	                                        int srcX, int srcY, int w, int h, bool depth );
@@ -225,6 +226,9 @@ private:
 	void			BdaSelfTest();								// r_vkBdaTest: sum a buffer through its device-address pointer (Phase 3.2b BDA primitive)
 	void			Fsr2SelfTest();								// r_fsr2Test: init the vendored FSR2 VK backend + create/destroy a context
 	void			Mrt3SelfTest();								// r_mrt3Test: create/destroy a 3-MRT RG16F velocity gbuffer target
+	// FSR2 runtime (R1/C2): persistent context + output image, sized to the scene target.
+	bool			Fsr2EnsureContext( int w, int h );			// (re)create the FSR2 context + output image on size change
+	void			Fsr2DestroyContext( bool deviceIdle );		// tear down context/scratch/output (vid_restart, resize, shutdown)
 
 	bool			CreateInstance();
 	bool			PickPhysicalDevice();
@@ -668,6 +672,24 @@ private:
 	// gates any drawCount>1. Universal on desktop; enabled when present, gated when not.
 	bool						haveDrawIndirectCount = false;
 	bool						haveBufferDeviceAddress = false;	// VK_KHR_buffer_device_address (core 1.2); gates BDA usage + the VMA flag
+	// FSR2 Native-AA runtime (docs/fsr-temporal-pipeline.md R1/C2). The context and its
+	// scratch persist across frames (they hold the temporal history); recreated when the
+	// scene-target size changes. fsr2Out is the display-res UAV FSR2 writes, copied back
+	// over the scene color each dispatch. fsr2DepthView is a depth-only-aspect view of the
+	// scene target's combined depth-stencil image (a sampled view may carry only one
+	// aspect), keyed on fsr2DepthSrc so a target realloc rebuilds it.
+	bool						haveSeparateDepthStencilLayouts = false;	// core 1.2; FSR2's depth barriers need it
+	FfxFsr2Context *			fsr2Ctx = NULL;
+	void *						fsr2Scratch = NULL;
+	int							fsr2W = 0, fsr2H = 0;
+	VkImage						fsr2Out = VK_NULL_HANDLE;
+	VmaAllocation				fsr2OutAlloc = NULL;
+	VkImageView					fsr2OutView = VK_NULL_HANDLE;
+	bool						fsr2OutWritten = false;		// false until first dispatch (layout UNDEFINED)
+	VkImage						fsr2DepthSrc = VK_NULL_HANDLE;
+	VkImageView					fsr2DepthView = VK_NULL_HANDLE;
+	bool						fsr2WarnedNoFeature = false;
+	bool						fsr2FirstDispatch = true;	// force reset on the first dispatch of a context
 	// r_vkBdaZfill (Phase 3.2b): cached handles for the depth-prepass BDA consume.
 	// Loaded on the cvar's first enable; the flat zfill draw is identified by
 	// currentDesc.shader == zfillShaderHandle. zfillBdaShaderHandle 0 = variant absent.
@@ -1145,6 +1167,11 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	// pipelines create. Enabled only when supported, so device creation is unchanged on GPUs
 	// that lack them, and the features are inert unless FSR2 actually runs.
 	enabled12.shaderFloat16 = supported12.shaderFloat16;
+	// FSR2 C2: the vendored VK backend emits depth-ONLY-aspect barriers on the sampled scene
+	// depth, which a combined D24S8/D32S8 image only permits with separateDepthStencilLayouts
+	// (core 1.2). Enable when supported; RunFsr2 refuses (once, with a warning) without it.
+	haveSeparateDepthStencilLayouts = supported12.separateDepthStencilLayouts == VK_TRUE;
+	enabled12.separateDepthStencilLayouts = haveSeparateDepthStencilLayouts ? VK_TRUE : VK_FALSE;
 	enabled13.pNext = &enabled12;
 
 	VkPhysicalDeviceVulkan11Features enabled11 = {};
@@ -1721,6 +1748,9 @@ void VulkanBackend::Shutdown() {
 		vkDeviceWaitIdle( device );
 		SavePipelineCache();		// persist this session's compiles before teardown
 	}
+
+	// FSR2 (R1/C2): the context owns device pipelines/images; free while the device lives
+	Fsr2DestroyContext( true );
 
 	// M6: ImGui device objects must die before the device. Normally sys_imgui
 	// shuts down first (it calls ImGuiShutdown through the glue); this is the
@@ -3766,6 +3796,323 @@ void VulkanBackend::Fsr2SelfTest() {
 
 /*
 ====================
+VulkanBackend::Fsr2EnsureContext / Fsr2DestroyContext / RunFsr2
+
+The FSR2 Native-AA runtime (R1/C2, docs/fsr-temporal-pipeline.md). The context holds
+FSR2's temporal history (internal upscaled color / lock / depth pyramids), so it
+persists across frames and is only recreated when the scene-target size changes.
+The output image is a same-size RGBA16F storage image; after the dispatch it is
+copied back over the scene target's color attachment 0, so the rest of the frame
+(eye adaptation, bloom, HUD composite, tonemap resolve) consumes the resolved scene
+with the frame structure unchanged (the render-scale reorder is deferred to the
+upscaling phase — Native-AA makes copy-back exact).
+====================
+*/
+void VulkanBackend::Fsr2DestroyContext( bool deviceIdle ) {
+	if ( fsr2Ctx != NULL ) {
+		if ( !deviceIdle && device != VK_NULL_HANDLE ) {
+			vkDeviceWaitIdle( device );		// context teardown frees pipelines the GPU may still use
+		}
+		ffxFsr2ContextDestroy( fsr2Ctx );
+		free( fsr2Ctx );
+		fsr2Ctx = NULL;
+	}
+	if ( fsr2Scratch != NULL ) {
+		free( fsr2Scratch );
+		fsr2Scratch = NULL;
+	}
+	if ( fsr2OutView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2OutView, NULL ); fsr2OutView = VK_NULL_HANDLE; }
+	if ( fsr2Out != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Out, fsr2OutAlloc ); fsr2Out = VK_NULL_HANDLE; fsr2OutAlloc = NULL; }
+	if ( fsr2DepthView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2DepthView, NULL ); fsr2DepthView = VK_NULL_HANDLE; }
+	fsr2DepthSrc = VK_NULL_HANDLE;
+	fsr2W = fsr2H = 0;
+	fsr2OutWritten = false;
+	fsr2FirstDispatch = true;
+}
+
+bool VulkanBackend::Fsr2EnsureContext( int w, int h ) {
+	if ( fsr2Ctx != NULL && fsr2W == w && fsr2H == h ) {
+		return true;
+	}
+	Fsr2DestroyContext( false );		// size changed (or first use): full rebuild
+
+	const size_t scratchSize = ffxFsr2GetScratchMemorySizeVK( physical );
+	if ( scratchSize == 0 ) {
+		return false;
+	}
+	fsr2Scratch = malloc( scratchSize );
+	fsr2Ctx = (FfxFsr2Context *)malloc( sizeof( FfxFsr2Context ) );
+	if ( fsr2Scratch == NULL || fsr2Ctx == NULL ) {
+		Fsr2DestroyContext( true );
+		return false;
+	}
+
+	FfxFsr2ContextDescription desc = {};
+	FfxErrorCode err = ffxFsr2GetInterfaceVK( &desc.callbacks, fsr2Scratch, scratchSize, physical, vkGetDeviceProcAddr );
+	if ( err != FFX_OK ) {
+		common->Warning( "FSR2: ffxFsr2GetInterfaceVK failed (code %d)", (int)err );
+		Fsr2DestroyContext( true );
+		return false;
+	}
+	desc.device = ffxGetDeviceVK( device );
+	desc.maxRenderSize.width = (uint32_t)w;
+	desc.maxRenderSize.height = (uint32_t)h;
+	desc.displaySize.width = (uint32_t)w;		// Native-AA: render == display
+	desc.displaySize.height = (uint32_t)h;
+	// Plan-verified flags: un-tonemapped linear HDR input, D3's far-plane-at-infinity
+	// non-reversed depth, FSR2's own auto-exposure (the engine's eye adaptation runs
+	// AFTER the resolve and is unaffected). NO jitter-cancellation flag: A2 already
+	// subtracts the jitter from the velocity buffer.
+	desc.flags = FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE | FFX_FSR2_ENABLE_DEPTH_INFINITE | FFX_FSR2_ENABLE_AUTO_EXPOSURE;
+	err = ffxFsr2ContextCreate( fsr2Ctx, &desc );
+	if ( err != FFX_OK ) {
+		common->Warning( "FSR2: ffxFsr2ContextCreate failed (code %d)", (int)err );
+		Fsr2DestroyContext( true );
+		return false;
+	}
+
+	// display-res output UAV (the one external write FSR2 makes) + its copy-back source role
+	VkImageCreateInfo ici = {};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &fsr2Out, &fsr2OutAlloc, NULL ), "vmaCreateImage(FSR2 output)" ) ) {
+		Fsr2DestroyContext( true );
+		return false;
+	}
+	VkImageViewCreateInfo vwi = {};
+	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vwi.image = fsr2Out;
+	vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vwi.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	vwi.subresourceRange.levelCount = 1;
+	vwi.subresourceRange.layerCount = 1;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &fsr2OutView ), "vkCreateImageView(FSR2 output)" ) ) {
+		Fsr2DestroyContext( true );
+		return false;
+	}
+
+	fsr2W = w;
+	fsr2H = h;
+	fsr2OutWritten = false;
+	fsr2FirstDispatch = true;
+	common->Printf( "FSR2: context created (Native-AA %dx%d, scratch %zu KB)\n", w, h, scratchSize / 1024 );
+	return true;
+}
+
+bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
+	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame ) {
+		return false;
+	}
+	if ( !haveSeparateDepthStencilLayouts ) {
+		// the vendored FSR2 VK backend barriers the sampled depth with a depth-only
+		// aspect, which a combined depth-stencil image only allows with this feature
+		if ( !fsr2WarnedNoFeature ) {
+			common->Warning( "FSR2: device lacks separateDepthStencilLayouts - r_fsr unavailable" );
+			fsr2WarnedNoFeature = true;
+		}
+		return false;
+	}
+	RenderTarget *scene = LookupTarget( args.sceneRT );
+	RenderTarget *vel = LookupTarget( args.velocityRT );
+	if ( scene == NULL || !scene->colorTarget || !scene->hasDepth
+	     || scene->colorFormat[0] != VK_FORMAT_R16G16B16A16_SFLOAT
+	     || vel == NULL || vel->colorCount < 3 || vel->colorFormat[2] != VK_FORMAT_R16G16_SFLOAT
+	     || vel->w != scene->w || vel->h != scene->h ) {
+		return false;
+	}
+	if ( !Fsr2EnsureContext( scene->w, scene->h ) ) {
+		return false;
+	}
+
+	// depth-only-aspect sampled view of the scene target's combined depth-stencil image,
+	// rebuilt when the target reallocs (dsImage changes); the old view is retired on the
+	// frame-slot fence like every mid-frame image teardown
+	if ( fsr2DepthView == VK_NULL_HANDLE || fsr2DepthSrc != scene->dsImage ) {
+		if ( fsr2DepthView != VK_NULL_HANDLE ) {
+			retiredImages[frameIndex].push_back( { VK_NULL_HANDLE, NULL, fsr2DepthView } );
+			fsr2DepthView = VK_NULL_HANDLE;
+		}
+		VkImageViewCreateInfo dvi = {};
+		dvi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		dvi.image = scene->dsImage;
+		dvi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		dvi.format = sceneDepthFormat;
+		dvi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		dvi.subresourceRange.levelCount = 1;
+		dvi.subresourceRange.layerCount = 1;
+		if ( !vkCheck( vkCreateImageView( device, &dvi, NULL, &fsr2DepthView ), "vkCreateImageView(FSR2 depth)" ) ) {
+			return false;
+		}
+		fsr2DepthSrc = scene->dsImage;
+	}
+
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	// FSR2 records compute; close any open render pass (the scene pass resumes on the
+	// next Draw through EnsureScenePass, same contract as BeginTargetPass)
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );
+		insideScenePass = false;
+	}
+	if ( insideTargetPass ) {
+		return false;		// caller error: mid-target-pass dispatch would corrupt the pass
+	}
+
+	const uint32_t w = (uint32_t)scene->w, h = (uint32_t)scene->h;
+
+	// Pre-dispatch layouts. Color + velocity attachments already rest in
+	// SHADER_READ_ONLY between passes (their render passes' finalLayout), which is
+	// exactly FFX_RESOURCE_STATE_COMPUTE_READ's layout — declared as such below, so
+	// FSR2's own barriers on them are same-layout no-ops. Depth sits in
+	// DEPTH_STENCIL_ATTACHMENT_OPTIMAL and must round-trip; the output enters as a
+	// discardable UAV (UNDEFINED on first use / TRANSFER_SRC after a copy-back).
+	VkImageMemoryBarrier pre[2] = {};
+	pre[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	pre[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	pre[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	pre[0].oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	pre[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	pre[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	pre[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	pre[0].image = scene->dsImage;
+	pre[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+	pre[0].subresourceRange.levelCount = 1;
+	pre[0].subresourceRange.layerCount = 1;
+	pre[1] = pre[0];
+	pre[1].srcAccessMask = fsr2OutWritten ? VK_ACCESS_TRANSFER_READ_BIT : 0;
+	pre[1].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	pre[1].oldLayout = fsr2OutWritten ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+	pre[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+	pre[1].image = fsr2Out;
+	pre[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	vkCmdPipelineBarrier( cb,
+		VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 2, pre );
+
+	FfxFsr2DispatchDescription dd = {};
+	dd.commandList = ffxGetCommandListVK( cb );
+	dd.color = ffxGetTextureResourceVK( fsr2Ctx, scene->colorImage[0], scene->colorSampleView[0] != VK_NULL_HANDLE ? scene->colorSampleView[0] : scene->colorView[0],
+		w, h, scene->colorFormat[0], L"FSR2_Color", FFX_RESOURCE_STATE_COMPUTE_READ );
+	dd.depth = ffxGetTextureResourceVK( fsr2Ctx, scene->dsImage, fsr2DepthView,
+		w, h, sceneDepthFormat, L"FSR2_Depth", FFX_RESOURCE_STATE_COMPUTE_READ );
+	dd.motionVectors = ffxGetTextureResourceVK( fsr2Ctx, vel->colorImage[2], vel->colorSampleView[2] != VK_NULL_HANDLE ? vel->colorSampleView[2] : vel->colorView[2],
+		w, h, vel->colorFormat[2], L"FSR2_MotionVectors", FFX_RESOURCE_STATE_COMPUTE_READ );
+	dd.output = ffxGetTextureResourceVK( fsr2Ctx, fsr2Out, fsr2OutView,
+		w, h, VK_FORMAT_R16G16B16A16_SFLOAT, L"FSR2_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS );
+	// exposure/reactive/transparencyAndComposition stay null (AUTO_EXPOSURE; masks are increment D)
+
+	// Motion-vector scale, derived in the plan (docs/fsr-temporal-pipeline.md C2) and
+	// verified against the vendored shaders: A2 stores (currUV - prevUV) in +Y-up UV;
+	// FSR2 wants (prevUV - currUV) in top-left +Y-down UV, in PIXELS. Reversing the
+	// direction negates both axes; the Y-up -> Y-down flip negates Y again, so X gets
+	// -renderW and Y's two negations cancel to +renderH.
+	dd.motionVectorScale.x = -(float)w;
+	dd.motionVectorScale.y = (float)h;
+	// Jitter, same coordinate reasoning: the engine's applied jitter is +Y-up pixels,
+	// FSR2's convention is +Y-down (its jitterY is applied proj[2][1] -= 2*jy/h), so X
+	// passes through and Y negates. (Validated empirically: a wrong sign shows as a
+	// one-pixel vibration / soft output on a static scene, wrong MV scale as smear.)
+	dd.jitterOffset.x = args.jitterX;
+	dd.jitterOffset.y = -args.jitterY;
+	dd.renderSize.width = w;
+	dd.renderSize.height = h;
+	dd.enableSharpening = args.sharpness >= 0.0f;
+	dd.sharpness = args.sharpness >= 0.0f ? args.sharpness : 0.0f;
+	dd.frameTimeDelta = args.frameTimeMs;
+	dd.preExposure = 1.0f;
+	dd.reset = args.reset || fsr2FirstDispatch;
+	dd.cameraNear = args.zNear;
+	dd.cameraFar = 100000.0f;					// unused with FFX_FSR2_ENABLE_DEPTH_INFINITE
+	dd.cameraFovAngleVertical = args.fovYRadians;
+	dd.viewSpaceToMetersFactor = 0.0254f;		// 1 Doom unit ~= 1 inch
+
+	const FfxErrorCode err = ffxFsr2ContextDispatch( fsr2Ctx, &dd );
+	fsr2FirstDispatch = false;
+	if ( err != FFX_OK ) {
+		// restore depth for the rest of the frame even on failure
+		VkImageMemoryBarrier depthBack = pre[0];
+		depthBack.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		depthBack.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		depthBack.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		depthBack.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+			0, 0, NULL, 0, NULL, 1, &depthBack );
+		common->Warning( "FSR2: dispatch failed (code %d)", (int)err );
+		return false;
+	}
+
+	// Copy the resolved image back over the scene color (Native-AA: same size/format),
+	// and return depth to attachment layout. FSR2 leaves the output in GENERAL
+	// (UNORDERED_ACCESS was its last use) and the sampled inputs in SHADER_READ_ONLY.
+	VkImageMemoryBarrier toCopy[2] = {};
+	toCopy[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	toCopy[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	toCopy[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	toCopy[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+	toCopy[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	toCopy[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	toCopy[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	toCopy[0].image = fsr2Out;
+	toCopy[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	toCopy[0].subresourceRange.levelCount = 1;
+	toCopy[0].subresourceRange.layerCount = 1;
+	toCopy[1] = toCopy[0];
+	toCopy[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	toCopy[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	toCopy[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	toCopy[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	toCopy[1].image = scene->colorImage[0];
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0, 0, NULL, 0, NULL, 2, toCopy );
+
+	VkImageCopy region = {};
+	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.srcSubresource.layerCount = 1;
+	region.dstSubresource = region.srcSubresource;
+	region.extent = { w, h, 1 };
+	vkCmdCopyImage( cb, fsr2Out, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		scene->colorImage[0], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
+	fsr2OutWritten = true;		// next frame's pre-barrier: TRANSFER_SRC -> GENERAL
+
+	VkImageMemoryBarrier post[2] = {};
+	post[0] = toCopy[1];
+	post[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	post[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	post[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	post[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;	// the between-pass resting layout
+	post[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	post[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	post[1].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	post[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	post[1].newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	post[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	post[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	post[1].image = scene->dsImage;
+	post[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+	post[1].subresourceRange.levelCount = 1;
+	post[1].subresourceRange.layerCount = 1;
+	vkCmdPipelineBarrier( cb,
+		VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+			| VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+		0, 0, NULL, 0, NULL, 2, post );
+
+	return true;
+}
+
+/*
+====================
 VulkanBackend::Mrt3SelfTest
 
 r_mrt3Test: MRT/format plumbing validation for the R1 motion-vector work (A0,
@@ -5558,8 +5905,10 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		// _currentRender capture blits from it while this is the frame target. The SSAO
 		// Phase 1 mip chain renders each level as a COLOR_ATTACHMENT (already set), so no
 		// transfer-dst is needed — coarse levels are drawn by a downsample shader.
+		// TRANSFER_DST: the FSR2 resolve (R1/C2) copies its output back over the HDR scene
+		// buffer's attachment 0. Universally supported for color formats, so unconditional.
 		ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-		          | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		          | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &t.colorImage[c], &t.colorAlloc[c], NULL ),
 		               "vmaCreateImage(color target)" ) ) {

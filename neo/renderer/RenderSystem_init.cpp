@@ -346,7 +346,8 @@ idCVar r_hdrAdaptDesat( "r_hdrAdaptDesat", "0.33", CVAR_RENDERER | CVAR_ARCHIVE 
 // Debug: draw the adapted exposure as a flat grayscale (exposure * 0.2, so mid-gray ~= 2.5) so you
 // can see whether it is pinned or actually tracking the scene. Needs r_hdrEyeAdaptation.
 idCVar r_hdrEyeAdaptDebug( "r_hdrEyeAdaptDebug", "0", CVAR_RENDERER | CVAR_BOOL, "debug: show the adapted exposure as a flat grayscale (needs r_hdrEyeAdaptation)" );
-idCVar r_fsr( "r_fsr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "AMD FSR2 temporal anti-aliasing / upscaler (docs/fsr-temporal-pipeline.md R1; Vulkan only). C1: forces the RGBA16F scene buffer on (FSR2's HDR input) — bit-identical to r_hdr on. The scene/HUD reorder and the FSR2 dispatch itself land in C2. Off = the frame is unchanged" );
+idCVar r_fsr( "r_fsr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "AMD FSR2 temporal anti-aliasing (Native-AA; docs/fsr-temporal-pipeline.md R1; Vulkan only). Forces the RGBA16F scene buffer on (FSR2's HDR input), auto-enables motion vectors + sub-pixel jitter, resolves the scene before the HUD, and replaces FXAA/SMAA with FSR2's RCAS. Off = the frame is unchanged" );
+idCVar r_fsrSharpness( "r_fsrSharpness", "0.8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "FSR2 RCAS sharpening amount (needs r_fsr): 0 = off, 1 = maximum", 0.0f, 1.0f );
 
 // DUDE Phase 3.5 "specular tuning" enhancement (GL3/Vulkan interaction shader
 // only; inert on the legacy ARB2 path). Defaults reproduce vanilla exactly:

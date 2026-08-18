@@ -436,6 +436,18 @@ static void RB_RHI_TemporalResetCam( void ) {
 	rhiTemporalCam.stagedFrame  = -1;
 }
 
+// R1/C2: the FSR2 dispatch (RhiBackend) consumes the shared discontinuity signal. Runs the
+// idempotent per-frame classify, then stages this frame unconditionally so prev keeps
+// advancing (and cuts keep being detected) even when no temporal SSAO/SSR consumer is
+// active. True = drop FSR2's history: first frame, lost history, or a cut/teleport.
+bool RB_RHI_TemporalFsrReset( const viewDef_s *viewDef ) {
+	float reproj[16];
+	bool prevUsable = false;
+	RB_RHI_TemporalReproj( viewDef, reproj, &prevUsable );
+	RB_RHI_TemporalStageCur( viewDef );
+	return !prevUsable;
+}
+
 // ---- per-object motion-vector cache (docs/fsr-temporal-pipeline.md, increment A2) ----
 // viewEntity_t is frame-temporary, so to build per-object motion vectors we copy each drawn
 // space's model->clip out of the normal prepass and read last frame's value back next frame.
@@ -3531,7 +3543,9 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// R1/A2: per-object motion vectors are VK-only (GL3 has no float-colour RT). When on they
 	// FORCE the normal prepass to run (for the velocity MRT) even if SSAO/SSR want nothing, and
 	// take the standalone 3-MRT path — never the depth-merged pass, which has no 3rd attachment.
-	const bool velWants = r_motionVectors.GetBool()
+	// r_fsr (C2) implies them: FSR2 is unusable without a velocity buffer, and MV/jitter are
+	// internal infrastructure, not user-facing toggles (plan section E).
+	const bool velWants = ( r_motionVectors.GetBool() || r_fsr.GetBool() )
 		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
 	if ( !ssaoWants && !ssrWants && !velWants ) {
 		return false;
@@ -5440,6 +5454,13 @@ inverted. No-op unless r_motionVectors + r_mvDebug are on and the standalone vel
 exists (VK only).
 ===================
 */
+// R1/C2: the standalone 3-MRT target whose attachment 2 holds this view's RG16F per-object
+// velocity, or 0 when it wasn't produced (MV off, GL3, subview, or the merged prepass ran).
+// The FSR2 dispatch reads it; same existence conditions the r_mvDebug overlay uses.
+rhi::RenderTargetHandle RB_RHI_VelocityTargetThisView( void ) {
+	return ( rhiNormalReadyThisView && rhiNormalVel ) ? rhiNormalResultRT : 0;
+}
+
 void RB_RHI_MotionVectorDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int mode = r_mvDebug.GetInteger();
 	if ( mode <= 0 || !r_motionVectors.GetBool() || !R_BackendSupportsEnhancements() ) {
