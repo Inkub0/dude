@@ -1101,15 +1101,33 @@ static idCVar r_rtWorldTest( "r_rtWorldTest", "0", CVAR_RENDERER | CVAR_BOOL,
 
 struct rtAreaSlice_t { int vertStart, numVerts, idxStart, numIdx; };
 
+// True when this view renders a world the persistent RT scene may bind to: the primary pass
+// of a world with a REAL loaded map. GUI render worlds (menu/PDA 3D scenes) also render
+// non-subview views and even claim tr.primaryWorld (RenderWorld.cpp RenderScene), but they
+// are ClearWorld()-built - one bare area, empty mapName - and their _areaN FindModel lookups
+// would resolve to the GAME map's models still resident in the global model manager. The
+// mapName gate excludes them outright (found the hard way: a menu view rebuilt the scene
+// down to _area0's 12 triangles).
+static idRenderWorldLocal *R_RtSceneWorld( void ) {
+	if ( tr.viewDef == NULL || tr.viewDef->isSubview || tr.viewDef->renderWorld == NULL ) {
+		return NULL;
+	}
+	idRenderWorldLocal *world = tr.viewDef->renderWorld;
+	if ( world->mapName.Length() == 0 || world->NumAreas() <= 0 ) {
+		return NULL;
+	}
+	return world;
+}
+
 // Gather the loaded map's opaque static world triangles (the _areaN models) into a packed
 // float3/int soup, indices area-local so each slice feeds CreateBlas directly. Returns false
 // with nothing allocated when there is no opaque world geometry; otherwise the caller
 // Mem_Free16's pos/idx/slices.
-static bool R_RtGatherWorld( float *&pos, int *&idx, rtAreaSlice_t *&slices, int &numSlices,
-		int &worldVerts, int &worldIndexes ) {
+static bool R_RtGatherWorld( const idRenderWorldLocal *world, float *&pos, int *&idx,
+		rtAreaSlice_t *&slices, int &numSlices, int &worldVerts, int &worldIndexes ) {
 	pos = NULL; idx = NULL; slices = NULL;
 	numSlices = 0; worldVerts = 0; worldIndexes = 0;
-	const int numAreas = tr.primaryWorld->NumAreas();
+	const int numAreas = world->NumAreas();
 	for ( int a = 0; a < numAreas; a++ ) {
 		const idRenderModel *model = renderModelManager->FindModel( va( "_area%i", a ) );
 		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
@@ -1208,14 +1226,14 @@ static void R_RtWorldUpdate( void ) {
 		}
 		return;
 	}
-	if ( tr.viewDef == NULL || tr.viewDef->isSubview || tr.primaryWorld == NULL
-		|| tr.primaryWorld->NumAreas() <= 0 ) {
-		return;
+	idRenderWorldLocal *world = R_RtSceneWorld();
+	if ( world == NULL ) {
+		return;							// GUI/subview/empty world: never bind the scene here
 	}
 	if ( !r->SupportsRayQuery() ) {
 		return;							// stays pending; a backend/hardware change re-evaluates
 	}
-	if ( r->GetTlasAddress() != 0 && s_rtWorldMap.Icmp( tr.primaryWorld->mapName ) == 0 ) {
+	if ( r->GetTlasAddress() != 0 && s_rtWorldMap.Icmp( world->mapName ) == 0 ) {
 		return;							// scene live and current
 	}
 	r_rtWorld.ClearModified();
@@ -1223,7 +1241,7 @@ static void R_RtWorldUpdate( void ) {
 
 	float *pos; int *idx; rtAreaSlice_t *slices;
 	int numSlices, worldVerts, worldIndexes;
-	if ( !R_RtGatherWorld( pos, idx, slices, numSlices, worldVerts, worldIndexes ) ) {
+	if ( !R_RtGatherWorld( world, pos, idx, slices, numSlices, worldVerts, worldIndexes ) ) {
 		return;
 	}
 	const int msStart = Sys_Milliseconds();
@@ -1236,7 +1254,7 @@ static void R_RtWorldUpdate( void ) {
 		r_rtWorld.SetBool( false );
 		return;
 	}
-	s_rtWorldMap = tr.primaryWorld->mapName;
+	s_rtWorldMap = world->mapName;
 	common->Printf( "r_rtWorld: %d BLAS, %d tris, %d ms build%s\n",
 		numSlices - blasFail, worldIndexes / 3, Sys_Milliseconds() - msStart,
 		blasFail ? va( " (%d BLAS failed)", blasFail ) : "" );
@@ -1302,8 +1320,9 @@ static void R_RtWorldValidate( void ) {
 		}
 		return;
 	}
-	if ( tr.viewDef == NULL || tr.viewDef->isSubview || tr.primaryWorld == NULL ) {
-		return;							// stay armed until a primary in-game view renders
+	idRenderWorldLocal *world = R_RtSceneWorld();
+	if ( world == NULL ) {
+		return;							// stay armed until a map-world primary view renders
 	}
 	// consume: run once, flip the cvar back off so a re-enable re-runs
 	r_rtWorldTest.SetBool( false );
@@ -1314,14 +1333,10 @@ static void R_RtWorldValidate( void ) {
 		common->Printf( "r_rtWorldTest: unavailable (needs Vulkan + KHR_ray_query hardware)\n" );
 		return;
 	}
-	if ( tr.primaryWorld->NumAreas() <= 0 ) {
-		common->Printf( "r_rtWorldTest: no map loaded\n" );
-		return;
-	}
 
 	float *pos; int *idx; rtAreaSlice_t *slices;
 	int numSlices, worldVerts, worldIndexes;
-	if ( !R_RtGatherWorld( pos, idx, slices, numSlices, worldVerts, worldIndexes ) ) {
+	if ( !R_RtGatherWorld( world, pos, idx, slices, numSlices, worldVerts, worldIndexes ) ) {
 		common->Printf( "r_rtWorldTest: no opaque world geometry found\n" );
 		return;
 	}
