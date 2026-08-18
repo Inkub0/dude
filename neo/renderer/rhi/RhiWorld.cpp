@@ -3507,13 +3507,21 @@ static bool RB_RHI_PointLightInBudget( const viewDef_t *viewDef, const viewLight
 
 static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h, bool wantMrt, bool wantVel ) {
 	if ( rhiNormalRT && r->GetRenderTargetImage( rhiNormalRT ) == 0 ) {
+		// TEMP DIAG (commoutside gbuffer churn): name the recreation reason - remove once found
+		common->Printf( "gbuffer DIAG: cached target %u lost its image (stale destroy elsewhere?) - recreating\n", rhiNormalRT );
 		rhiNormalRT = 0;					// lost context (vid_restart)
 		rhiNormalW = rhiNormalH = 0;
 	}
 	if ( rhiNormalRT && rhiNormalW == w && rhiNormalH == h && rhiNormalMrt == wantMrt && rhiNormalVel == wantVel ) {
 		return true;
 	}
-	if ( rhiNormalRT ) { r->DestroyRenderTarget( rhiNormalRT ); rhiNormalRT = 0; }
+	if ( rhiNormalRT ) {
+		// TEMP DIAG (commoutside gbuffer churn): remove once found
+		common->Printf( "gbuffer DIAG: key change %dx%d mrt %d vel %d -> %dx%d mrt %d vel %d - recreating\n",
+			rhiNormalW, rhiNormalH, (int)rhiNormalMrt, (int)rhiNormalVel, w, h, (int)wantMrt, (int)wantVel );
+		r->DestroyRenderTarget( rhiNormalRT );
+		rhiNormalRT = 0;
+	}
 	// wantMrt adds the SSR roughness/metalness attachment (docs/ssr.md); wantVel adds the RG16F
 	// velocity attachment (R1/A2) as a 3rd MRT. colorCount 3 selects A0's mixed-format layout
 	// [RGBA8, RGBA8, RG16F]; else the 1/2-attachment RGBA8 layout, byte-identical to before.
