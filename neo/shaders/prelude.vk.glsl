@@ -1,4 +1,7 @@
-#version 450
+// 460 (not 450): GL_EXT_ray_query declares its types only from GLSL 4.60 - under 450
+// the extension enables but rayQueryEXT stays undeclared. 460 is a strict superset of
+// 450 for everything this codebase writes; the SPIR-V target is vulkan1.4 either way.
+#version 460
 
 // Buffer references (GPU pointers) for manual vertex fetch — the Phase 3.2b BDA
 // path (zfill_bda, docs/gpu-offload-plan.md §3.2b). Declared once here because

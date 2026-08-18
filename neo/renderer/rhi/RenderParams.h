@@ -128,10 +128,18 @@ struct RenderParams {
 								// 3rd MRT. Filled ONLY by the VK normal prepass when r_motionVectors
 								// is on; 0 (unused) on every other draw. Appended LAST so no existing
 								// member's std140 offset shifts.
+
+	float	rtParms[4];			// DUDE RT sun shadows (docs/rtx-shadow-roadmap.md R3): x/y = the
+								// scene TLAS device address, low/high 32-bit halves BIT-CAST into
+								// the floats (memcpy here, floatBitsToUint in the shader - a value
+								// cast would mangle them through the 24-bit mantissa), z = ray-origin
+								// offset along the surface normal in world units (self-intersection
+								// guard - the receiving triangle is in the BLAS), w = max ray length.
+								// Filled only when shadowParms.x == 4 (VK + RT hardware); 0 elsewhere.
 };
 
-// 4 mat4 (256) + 46 vec4 (736) = 992 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 992, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 4 mat4 (256) + 47 vec4 (752) = 1008 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 1008, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

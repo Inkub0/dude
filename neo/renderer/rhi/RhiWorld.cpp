@@ -51,6 +51,7 @@ static struct {
 	rhi::BufferHandle	vb, ib;
 	int					vertOfs, idxOfs;
 	rhi::ShaderHandle	interactionProg;
+	rhi::ShaderHandle	interactionRtProg;	// ray-query variant (R3 RT sun shadows); 0 on non-RT hardware
 	rhi::ShaderHandle	ambientProg;
 	int					depthFuncBits;		// GLS_DEPTHFUNC_EQUAL, LESS for translucents
 	int					stencilState;		// rhi::StencilState for interaction pipelines
@@ -1012,6 +1013,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	memcpy( parms.mvpMatrix, ictx.mvp, sizeof( parms.mvpMatrix ) );
+	bool rtSun = false;			// mode-4 draw -> bind the ray-query interaction variant
 
 	memcpy( parms.localLightOrigin, din->localLightOrigin.ToFloatPtr(), 16 );
 	memcpy( parms.localViewOrigin, din->localViewOrigin.ToFloatPtr(), 16 );
@@ -1167,6 +1169,26 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			memcpy( parms.shadowProjectionQ, rawLp.ToFloatPtr(), 16 );
 			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, rhiSunPlanes[3], rawLp );
 			memcpy( parms.shadowFalloffS, rawLp.ToFloatPtr(), 16 );
+
+			// DUDE RT sun shadows (R3, docs/rtx-shadow-roadmap.md): keep every mode-3
+			// binding live (the sun map still renders this increment, so nothing stale
+			// gets bound), but hand the fragment shader the scene TLAS and flip to mode
+			// 4 - interaction_rt.frag traces the sun visibility instead of sampling the
+			// map. Needs the RT variant loaded and a live persistent world scene
+			// (R_RtWorldUpdate auto-builds it while r_rtSunShadows is on).
+			if ( r_rtSunShadows.GetBool() && ictx.interactionRtProg != 0 ) {
+				const unsigned long long tlas = ictx.r->GetTlasAddress();
+				if ( tlas != 0 ) {
+					parms.shadowParms[0] = 4.0f;
+					const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFu );
+					const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
+					memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );	// bit-cast, NOT a value cast
+					memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+					parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
+					parms.rtParms[3] = 100000.0f;
+					rtSun = true;
+				}
+			}
 		} else if ( ictx.lightShadowMapped ) {
 			parms.shadowParms[0] = 1.0f;		// projected/spot: 2D map on unit 7
 			parms.shadowParms[1] = ( rhiShadowMapSize > 0 ) ? 1.0f / (float)rhiShadowMapSize : 0.0f;
@@ -1359,7 +1381,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 
 	rhi::PipelineDesc pd;
 	pd.stateBits = GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE | GLS_DEPTHMASK | ictx.depthFuncBits;
-	pd.shader = din->ambientLight ? ictx.ambientProg : ictx.interactionProg;
+	pd.shader = din->ambientLight ? ictx.ambientProg : ( rtSun ? ictx.interactionRtProg : ictx.interactionProg );
 	pd.vertexLayout = rhi::VL_DRAWVERT;
 	pd.cullType = RB_RHI_CullFor( ictx.viewDef, CT_FRONT_SIDED );
 	pd.stencilState = ictx.stencilState;
@@ -5518,6 +5540,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	ictx.r = r;
 	ictx.viewDef = viewDef;
 	ictx.interactionProg = r->LoadShader( "interaction" );
+	// RT sun shadows (R3, docs/rtx-shadow-roadmap.md): the ray-query variant's SPIR-V
+	// capability only pipeline-creates on RT hardware, so it loads gated; 0 elsewhere
+	// and the mode-4 override in RB_RHI_DrawInteraction stays off.
+	ictx.interactionRtProg = r->SupportsRayQuery() ? r->LoadShader( "interaction_rt" ) : 0;
 	ictx.ambientProg = r->LoadShader( "ambientlight" );
 	ictx.stencilState = rhi::SS_ALWAYS;
 

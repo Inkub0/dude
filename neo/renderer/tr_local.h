@@ -964,6 +964,8 @@ extern idCVar r_shadowMapSun;				// oversize/parallel "sun" lights: per-view fit
 extern idCVar r_shadowMapSunBias;			// sun map depth-compare bias
 extern idCVar r_shadowMapSunRange;			// how far ahead of the camera the sun map covers (world units)
 extern idCVar r_shadowMapNormalOffset;		// normal-offset shadow bias in texels (cube + sun lookups; 0 = off)
+extern idCVar r_rtSunShadows;				// RT sun shadows: trace sun visibility per fragment (VK + RT hardware)
+extern idCVar r_rtSunShadowOffset;			// RT sun shadows: ray-origin normal offset (world units)
 
 // DUDE: emissive fill lights for interactive GUI screens (enhancement backends only)
 extern idCVar r_emissiveSurfaces;		// master toggle (emissive surfaces cast fill light)

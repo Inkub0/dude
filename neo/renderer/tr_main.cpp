@@ -1119,10 +1119,12 @@ static idRenderWorldLocal *R_RtSceneWorld( void ) {
 	return world;
 }
 
-// Gather the loaded map's opaque static world triangles (the _areaN models) into a packed
-// float3/int soup, indices area-local so each slice feeds CreateBlas directly. Returns false
-// with nothing allocated when there is no opaque world geometry; otherwise the caller
-// Mem_Free16's pos/idx/slices.
+// Gather the loaded map's opaque SHADOW-CASTING static world triangles (the _areaN models)
+// into a packed float3/int soup, indices area-local so each slice feeds CreateBlas directly.
+// SurfaceCastsShadow() excludes noshadows materials - critically the SKY, or every RT sun
+// ray would end in the sky dome and shadow the whole map. Returns false with nothing
+// allocated when there is no opaque world geometry; otherwise the caller Mem_Free16's
+// pos/idx/slices.
 static bool R_RtGatherWorld( const idRenderWorldLocal *world, float *&pos, int *&idx,
 		rtAreaSlice_t *&slices, int &numSlices, int &worldVerts, int &worldIndexes ) {
 	pos = NULL; idx = NULL; slices = NULL;
@@ -1133,6 +1135,7 @@ static bool R_RtGatherWorld( const idRenderWorldLocal *world, float *&pos, int *
 		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
 			const modelSurface_t *surf = model->Surface( s );
 			if ( surf->geometry == NULL || surf->shader == NULL || surf->shader->Coverage() != MC_OPAQUE
+				|| !surf->shader->SurfaceCastsShadow()
 				|| surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
 				continue;
 			}
@@ -1154,6 +1157,7 @@ static bool R_RtGatherWorld( const idRenderWorldLocal *world, float *&pos, int *
 		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
 			const modelSurface_t *surf = model->Surface( s );
 			if ( surf->geometry == NULL || surf->shader == NULL || surf->shader->Coverage() != MC_OPAQUE
+				|| !surf->shader->SurfaceCastsShadow()
 				|| surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
 				continue;
 			}
@@ -1218,9 +1222,11 @@ static void R_RtWorldUpdate( void ) {
 	if ( r == NULL ) {
 		return;
 	}
-	if ( !r_rtWorld.GetBool() ) {
-		if ( r_rtWorld.IsModified() ) {
+	// r_rtSunShadows (R3) implies the scene: the consumer auto-builds its prerequisite
+	if ( !r_rtWorld.GetBool() && !r_rtSunShadows.GetBool() ) {
+		if ( r_rtWorld.IsModified() || r_rtSunShadows.IsModified() ) {
 			r_rtWorld.ClearModified();
+			r_rtSunShadows.ClearModified();
 			r->DestroyRtScene();		// switched off: free the scene (no-op when never built)
 			s_rtWorldMap.Clear();
 		}
@@ -1237,6 +1243,7 @@ static void R_RtWorldUpdate( void ) {
 		return;							// scene live and current
 	}
 	r_rtWorld.ClearModified();
+	r_rtSunShadows.ClearModified();
 	r->DestroyRtScene();
 
 	float *pos; int *idx; rtAreaSlice_t *slices;
