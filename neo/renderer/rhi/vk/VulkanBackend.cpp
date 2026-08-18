@@ -5650,6 +5650,17 @@ void VulkanBackend::BeginCubeFacePass( RenderTargetHandle rt, int face, const Cl
 // the imageTable slot — that is cleared eagerly by DestroyRenderTarget so no
 // new draw samples a target being torn down.
 void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
+	// FSR2 (R1/C2) caches a depth-only view keyed on the scene target's dsImage. Drop the
+	// cache when that image dies: a recreated target could get the SAME handle value back
+	// from the driver (ABA), which would false-negative the rebuild check in RunFsr2 and
+	// leave FSR2 sampling a view of a destroyed image.
+	if ( t.dsImage != VK_NULL_HANDLE && t.dsImage == fsr2DepthSrc ) {
+		if ( fsr2DepthView != VK_NULL_HANDLE ) {
+			retiredImages[frameIndex].push_back( { VK_NULL_HANDLE, NULL, fsr2DepthView } );
+			fsr2DepthView = VK_NULL_HANDLE;
+		}
+		fsr2DepthSrc = VK_NULL_HANDLE;
+	}
 	for ( int f = 0; f < 6; f++ ) {
 		if ( t.fb[f] )       { vkDestroyFramebuffer( device, t.fb[f], NULL ); t.fb[f] = VK_NULL_HANDLE; }
 	}
