@@ -51,6 +51,7 @@ static struct {
 	rhi::BufferHandle	vb, ib;
 	int					vertOfs, idxOfs;
 	rhi::ShaderHandle	interactionProg;
+	rhi::ShaderHandle	interactionRtProg;	// ray-query variant (R3 RT sun shadows); 0 on non-RT hardware
 	rhi::ShaderHandle	ambientProg;
 	int					depthFuncBits;		// GLS_DEPTHFUNC_EQUAL, LESS for translucents
 	int					stencilState;		// rhi::StencilState for interaction pipelines
@@ -69,6 +70,11 @@ static struct {
 	// receiver must sample with those planes and take its compare depth from the virtual
 	// falloff plane (shader mode 3). Only meaningful while lightShadowMapped is set.
 	bool				lightSunShadow;
+	// RT sun shadows (R3): this light took the sun route WITHOUT a rendered map - the
+	// virtual-map fit declined (light inside the fitted view sphere) but the ray path
+	// serves it anyway. rhiSunPlanes/shadowImage are stale for this light; only shader
+	// mode 4 is valid, and the receiver fill downgrades to unshadowed if the TLAS died.
+	bool				lightRtOnly;
 	bool				lightShadowCube;
 	rhi::ImageHandle	shadowCubeImage;
 	// static/dynamic split (r_shadowMapCacheSplit): when a cached static point light also
@@ -574,8 +580,16 @@ static rhi::RenderTargetHandle rhiNormalRT = 0;		// RGBA8 view-normal + depth (c
 static rhi::RenderTargetHandle rhiNormalResultRT = 0;
 static int  rhiNormalW = 0, rhiNormalH = 0;			// full view resolution
 static bool rhiNormalReadyThisView = false;			// the normal buffer was produced for this view
-static bool rhiNormalMrt = false;					// has the SSR rough/metal attachment (docs/ssr.md)
-static bool rhiNormalVel = false;					// has the RG16F velocity attachment (R1/A2, r_motionVectors)
+// CACHE KEYS of the persistent standalone target (what rhiNormalRT was CREATED with).
+// Written only by EnsureNormalTarget + the full context reset - NEVER per view: resetting
+// them each view forced a key mismatch and a full-res target destroy/recreate EVERY FRAME
+// whenever the velocity path ran (found via the gbuffer DIAG spam; silent since R1/A2).
+static bool rhiNormalMrt = false;					// target has the SSR rough/metal attachment (docs/ssr.md)
+static bool rhiNormalVel = false;					// target has the RG16F velocity attachment (R1/A2)
+// what this view's ACTIVE normal result (standalone target OR merged handle) carries -
+// per-view state, reset each world draw, consumed by SSAO/SSR/FSR2
+static bool rhiNormalMrtThisView = false;
+static bool rhiNormalVelThisView = false;
 
 // ---- per-surface occlusion-map auto-load cache (docs/occlusion-maps.md) ----
 // Keyed by (render model, surface index) -- stable per model surface and shared across every
@@ -1012,6 +1026,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	memcpy( parms.mvpMatrix, ictx.mvp, sizeof( parms.mvpMatrix ) );
+	bool rtSun = false;			// mode-4 draw -> bind the ray-query interaction variant
 
 	memcpy( parms.localLightOrigin, din->localLightOrigin.ToFloatPtr(), 16 );
 	memcpy( parms.localViewOrigin, din->localViewOrigin.ToFloatPtr(), 16 );
@@ -1167,6 +1182,31 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			memcpy( parms.shadowProjectionQ, rawLp.ToFloatPtr(), 16 );
 			R_GlobalPlaneToLocal( din->surf->space->modelMatrix, rhiSunPlanes[3], rawLp );
 			memcpy( parms.shadowFalloffS, rawLp.ToFloatPtr(), 16 );
+
+			// DUDE RT sun shadows (R3, docs/rtx-shadow-roadmap.md): keep every mode-3
+			// binding live (the sun map still renders this increment, so nothing stale
+			// gets bound), but hand the fragment shader the scene TLAS and flip to mode
+			// 4 - interaction_rt.frag traces the sun visibility instead of sampling the
+			// map. Needs the RT variant loaded and a live persistent world scene
+			// (R_RtWorldUpdate auto-builds it while r_rtSunShadows is on).
+			if ( r_rtSunShadows.GetBool() && ictx.interactionRtProg != 0 ) {
+				const unsigned long long tlas = ictx.r->GetTlasAddress();
+				if ( tlas != 0 ) {
+					parms.shadowParms[0] = 4.0f;
+					const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFu );
+					const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
+					memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );	// bit-cast, NOT a value cast
+					memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+					parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
+					parms.rtParms[3] = 100000.0f;
+					rtSun = true;
+				}
+			}
+			if ( ictx.lightRtOnly && !rtSun ) {
+				// the RT-only route lost its TLAS mid-frame: rhiSunPlanes are stale for
+				// this light, so unshadowed beats sampling a map that was never fitted
+				parms.shadowParms[0] = 0.0f;
+			}
 		} else if ( ictx.lightShadowMapped ) {
 			parms.shadowParms[0] = 1.0f;		// projected/spot: 2D map on unit 7
 			parms.shadowParms[1] = ( rhiShadowMapSize > 0 ) ? 1.0f / (float)rhiShadowMapSize : 0.0f;
@@ -1359,7 +1399,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 
 	rhi::PipelineDesc pd;
 	pd.stateBits = GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE | GLS_DEPTHMASK | ictx.depthFuncBits;
-	pd.shader = din->ambientLight ? ictx.ambientProg : ictx.interactionProg;
+	pd.shader = din->ambientLight ? ictx.ambientProg : ( rtSun ? ictx.interactionRtProg : ictx.interactionProg );
 	pd.vertexLayout = rhi::VL_DRAWVERT;
 	pd.cullType = RB_RHI_CullFor( ictx.viewDef, CT_FRONT_SIDED );
 	pd.stencilState = ictx.stencilState;
@@ -3116,6 +3156,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 
 	rhiNormalRT = 0;			rhiNormalW = rhiNormalH = 0;
 	rhiNormalReadyThisView = false;	rhiNormalMrt = false;	rhiNormalVel = false;
+	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;
 
 	rhiBerserkTrailRT[0] = rhiBerserkTrailRT[1] = 0;
 	rhiBerserkIdx = 0;			rhiBerserkW = rhiBerserkH = 0;
@@ -3586,10 +3627,11 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		activeNormalRT = r->BeginNormalPrepass( w, h, &clear, ssrWants );
 		didMerge = ( activeNormalRT != 0 );	// non-zero → the gbuffer pass shares (seals) scene depth
 		if ( didMerge ) {
-			// the merged handle carries the MRT when ssrWants; track it so the SSR consumer
-			// (which gates on rhiNormalMrt + reads GetRenderTargetImage2) accepts it.
-			rhiNormalMrt = ssrWants;
-			rhiNormalVel = false;			// the merged pass carries no velocity attachment (R1/A2)
+			// the merged handle carries the MRT when ssrWants but never velocity; these are
+			// the PER-VIEW flags the consumers gate on - the standalone target's cache keys
+			// (rhiNormalMrt/Vel) describe a different object and must not be touched here
+			rhiNormalMrtThisView = ssrWants;
+			rhiNormalVelThisView = false;
 		}
 	}
 	if ( activeNormalRT == 0 ) {
@@ -3598,6 +3640,8 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 		r->BeginTargetPass( rhiNormalRT, &clear );
 		activeNormalRT = rhiNormalRT;
+		rhiNormalMrtThisView = ssrWants;
+		rhiNormalVelThisView = velWants;
 	}
 
 	rhi::PipelineDesc pd;
@@ -4464,7 +4508,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// needs this view's MRT G-buffer (normals + rough/metal) and captured depth. The result
 	// handle is the standalone rhiNormalRT or, under r_ssaoMergeNormal, the merged handle —
 	// both expose GetRenderTargetImage (normal) + GetRenderTargetImage2 (rough/metal).
-	if ( !rhiNormalReadyThisView || !rhiNormalMrt || rhiNormalResultRT == 0 ) {
+	if ( !rhiNormalReadyThisView || !rhiNormalMrtThisView || rhiNormalResultRT == 0 ) {
 		return;
 	}
 	const rhi::ImageHandle matImg = r->GetRenderTargetImage2( rhiNormalResultRT );
@@ -4659,7 +4703,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			// R1/A2 consumption: reproject the reflection history by the per-object velocity buffer
 			// when it exists (r_motionVectors, VK) so moving objects stop dragging a reflection
 			// ghost. Falls back to the camera-only matrix reproj (localParam1.x = 0).
-			rhi::ImageHandle velImg = ( rhiNormalVel && rhiNormalReadyThisView )
+			rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
 				? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
 			tempParms.localParam1[0] = velImg ? 1.0f : 0.0f;
 
@@ -5002,7 +5046,7 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			// R1/A2 consumption: reproject the AO history by the per-object velocity buffer when it
 			// exists (r_motionVectors, VK) so moving objects stop dragging their AO. Falls back to
 			// the camera-only matrix reproj (localParam1.x = 0).
-			rhi::ImageHandle velImg = ( rhiNormalVel && rhiNormalReadyThisView )
+			rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
 				? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
 			tempParms.localParam1[0] = velImg ? 1.0f : 0.0f;
 
@@ -5458,7 +5502,7 @@ exists (VK only).
 // velocity, or 0 when it wasn't produced (MV off, GL3, subview, or the merged prepass ran).
 // The FSR2 dispatch reads it; same existence conditions the r_mvDebug overlay uses.
 rhi::RenderTargetHandle RB_RHI_VelocityTargetThisView( void ) {
-	return ( rhiNormalReadyThisView && rhiNormalVel ) ? rhiNormalResultRT : 0;
+	return ( rhiNormalReadyThisView && rhiNormalVelThisView ) ? rhiNormalResultRT : 0;
 }
 
 void RB_RHI_MotionVectorDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
@@ -5467,7 +5511,7 @@ void RB_RHI_MotionVectorDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;		// velocity is produced by r_motionVectors OR implied by r_fsr (C2)
 	}
 	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN
-	     || !rhiNormalReadyThisView || !rhiNormalVel || !rhiNormalResultRT ) {
+	     || !rhiNormalReadyThisView || !rhiNormalVelThisView || !rhiNormalResultRT ) {
 		return;					// velocity MRT is VK-only and only exists when it was produced this view
 	}
 	rhi::ImageHandle velImg = r->GetRenderTargetImage3( rhiNormalResultRT );
@@ -5518,6 +5562,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	ictx.r = r;
 	ictx.viewDef = viewDef;
 	ictx.interactionProg = r->LoadShader( "interaction" );
+	// RT sun shadows (R3, docs/rtx-shadow-roadmap.md): the ray-query variant's SPIR-V
+	// capability only pipeline-creates on RT hardware, so it loads gated; 0 elsewhere
+	// and the mode-4 override in RB_RHI_DrawInteraction stays off.
+	ictx.interactionRtProg = r->SupportsRayQuery() ? r->LoadShader( "interaction_rt" ) : 0;
 	ictx.ambientProg = r->LoadShader( "ambientlight" );
 	ictx.stencilState = rhi::SS_ALWAYS;
 
@@ -5548,7 +5596,9 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// and we capture _currentDepth from its sealed depth; otherwise zfill seals depth as
 	// before. The return value is the single source of truth — no duplicate gate to drift,
 	// and a BeginNormalPrepass fallback (returns 0) cleanly leaves zfill to seal depth.
-	rhiNormalReadyThisView = false;	rhiNormalVel = false;	// R1/A2: recomputed by the prepass when it runs
+	// per-view state only - the target CACHE keys (rhiNormalMrt/Vel) stay untouched, or the
+	// standalone velocity target would key-mismatch and recreate every frame (the DIAG spam)
+	rhiNormalReadyThisView = false;	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;
 	const bool mergedDepth = RB_RHI_NormalPrepass( r, viewDef );
 	if ( mergedDepth ) {
 		RB_RHI_CaptureCurrentDepth( viewDef );
@@ -5635,6 +5685,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			// Reading lightDef->parms here is a read-only frontend query.
 			ictx.lightShadowMapped = false;
 			ictx.lightSunShadow = false;
+			ictx.lightRtOnly = false;
 			ictx.shadowImage = 0;
 			ictx.lightShadowCube = false;
 			ictx.shadowCubeImage = 0;
@@ -5699,6 +5750,19 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 					if ( RB_RHI_ShadowMapPassSun( r, vLight, shadowMapProg ) ) {
 						ictx.lightShadowMapped = true;
 						ictx.lightSunShadow = true;
+						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
+						dbgShadowMapped++;
+					} else if ( r_rtSunShadows.GetBool() && ictx.interactionRtProg != 0
+							&& r->GetTlasAddress() != 0 ) {
+						// RT sun shadows (R3): the virtual-map fit declined - the light
+						// sits inside the fitted view sphere (low "sun" omnis, e.g.
+						// commoutside) - but the ray path needs no fit geometry: one ray
+						// toward the light origin serves any light. Take the sun route
+						// RT-only; mode 4 samples no map, and a zero unit-7 handle takes
+						// the backend default binding exactly like mode-0 lights.
+						ictx.lightShadowMapped = true;
+						ictx.lightSunShadow = true;
+						ictx.lightRtOnly = true;
 						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
 						dbgShadowMapped++;
 					}

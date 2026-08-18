@@ -38,6 +38,8 @@ VARY(6) out vec3 var_TexHalfVec;
 VARY(7) out vec4 var_Color;
 VARY(8) out vec3 var_TexViewVec;
 VARY(9) out vec3 var_ShadowCubeVec;
+VARY(10) out vec3 var_ModelPos;		// RT sun shadows trace from the DISPLACED surface
+VARY(11) out vec4 var_ModelNormal;	// (matches the rasterized depth); .w = UV-seam mask
 VARY(12) out vec4 var_ShadowProjection;
 
 void main() {
@@ -91,6 +93,10 @@ void main() {
 	var_ShadowCubeVec = vec3( dot( u_modelMatrixRow0.xyz, fragToLight ),
 	                          dot( u_modelMatrixRow1.xyz, fragToLight ),
 	                          dot( u_modelMatrixRow2.xyz, fragToLight ) );
+
+	// RT sun shadows (interaction_rt.frag mode 4) trace from the displaced surface too
+	var_ModelPos = pos;
+	var_ModelNormal = vec4( geoN, seam );
 
 	gl_Position = u_mvpMatrix * vec4( pos, 1.0 );
 }

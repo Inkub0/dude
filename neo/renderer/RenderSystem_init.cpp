@@ -439,6 +439,12 @@ idCVar r_shadowMapSunBias( "r_shadowMapSunBias", "0.0008", CVAR_RENDERER | CVAR_
 idCVar r_shadowMapSunRange( "r_shadowMapSunRange", "3000", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how far ahead of the camera (world units) the sun shadow map covers; bigger = longer shadow reach but coarser texels", 512.0f, 16384.0f );
 idCVar r_shadowMapNormalOffset( "r_shadowMapNormalOffset", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "normal-offset shadow bias in shadow texels: the cube and sun shadow lookups sample from a point pushed along the surface normal by about this many texels' world size, killing grazing-angle acne geometrically instead of with a large depth bias. 0 = off", 0.0f, 8.0f );
 
+// DUDE RT sun shadows (docs/rtx-shadow-roadmap.md R3): ray-traced replacement for the sun
+// map's LOOKUP - the interaction shader traces one ray per fragment against the persistent
+// world acceleration structure (r_rtWorld auto-builds while this is on).
+idCVar r_rtSunShadows( "r_rtSunShadows", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "ray-traced sun shadows (Vulkan + RT hardware): the interaction shader traces one ray at the sun against the persistent world scene instead of sampling the fitted sun map - exact at any distance, no r_shadowMapSunRange cap or map aliasing. Static world casters only until the dynamic BLAS lane lands (monsters/movers cast no sun shadow yet). Rides the sun shadow-map path, so it needs r_shadowMapSun" );
+idCVar r_rtSunShadowOffset( "r_rtSunShadowOffset", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "RT sun shadows: ray-origin offset along the surface normal in world units - the self-intersection guard (the receiving triangle is itself in the acceleration structure)", 0.0f, 16.0f );
+
 // DUDE: emissive fill lights — interactive GUI screens (monitors, keypads, wall
 // panels) glow but cast no light in Doom 3's model, so they read as decals pasted
 // onto an unlit wall. These spawn a small shadowless point light per visible screen

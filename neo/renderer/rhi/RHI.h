@@ -25,6 +25,7 @@ typedef unsigned int ImageHandle;
 typedef unsigned int SamplerHandle;
 typedef unsigned int ShaderHandle;		// linked vert+frag program pair
 typedef unsigned int RenderTargetHandle;	// offscreen FBO; 0 = the backbuffer
+typedef unsigned int BlasHandle;		// bottom-level acceleration structure (R2 ray query); 0 = invalid
 
 enum BufferUsage {
 	BU_VERTEX,		// must stay 0 (the VK backend's switch default)
@@ -415,6 +416,42 @@ public:
 	// composite, before particles/blends draw); a straight same-orientation copy, unlike
 	// the y-flipped _currentRender capture. Valid for this frame's RunFsr2 only. GL3 no-op.
 	virtual void	Fsr2CaptureOpaque( RenderTargetHandle sceneRT ) {}
+
+	// ---- ray-query acceleration structures (R2, docs/rtx-shadow-roadmap.md) ----
+	// Vulkan-only, and only on RT-capable hardware (KHR_acceleration_structure +
+	// KHR_ray_query); GL3 and non-RT devices no-op. Gate all feature work on this.
+	virtual bool	SupportsRayQuery() { return false; }
+	// Build one BLAS over an indexed triangle soup, SYNCHRONOUSLY (load-time / validation;
+	// the per-frame refit lane comes with animated geometry). positions is a float3 array
+	// read with posStride bytes between vertices (pass sizeof(idDrawVert) to feed idDrawVert
+	// arrays in place); indexes is 3 ints per triangle. The input buffers are staged
+	// internally and freed after the build - the caller keeps ownership of its arrays.
+	virtual BlasHandle	CreateBlas( const float *positions, int numVerts, int posStride,
+	                                const int *indexes, int numIndexes ) { return 0; }
+	virtual void	DestroyBlas( BlasHandle blas ) {}
+	struct RtInstance {
+		float			transform[12];		// row-major 3x4 (VkTransformMatrixKHR layout)
+		BlasHandle		blas;
+		unsigned int	mask;				// 8-bit ray visibility mask (0xFF = all rays)
+	};
+	// (Re)build the single scene TLAS over `count` instances, synchronously for now (the
+	// per-frame rebuild moves onto the frame command buffer when R3 consumes it). Returns
+	// the TLAS device address - what accelerationStructureEXT(uvec2) wants in a shader -
+	// or 0 on failure. Replaces any previous TLAS.
+	virtual unsigned long long	BuildTlas( const RtInstance *instances, int count ) { return 0; }
+	// Device address of the current scene TLAS (0 = none). Reads 0 after a backend restart
+	// dropped the scene - callers treat that as "rebuild needed". While UpdateTlas runs per
+	// frame this returns the frame-slot TLAS the upcoming frame will read.
+	virtual unsigned long long	GetTlasAddress() { return 0; }
+	// Per-frame TLAS refresh (movers): re-instance the scene with CURRENT transforms.
+	// Asynchronous - the build is recorded at the start of the next frame's command buffer
+	// (AS-build -> fragment-shader barrier), so unlike BuildTlas it never stalls the queue.
+	// Call once per game frame from the frontend, between frames; instances referencing
+	// dead BLAS handles are skipped. The synchronous BuildTlas scene stays as the fallback
+	// when no per-frame build is live. VK-only; GL3 no-ops.
+	virtual void	UpdateTlas( const RtInstance *instances, int count ) {}
+	// Free the TLAS and every live BLAS (level transition / shutdown).
+	virtual void	DestroyRtScene() {}
 
 	// ---- screen copies (_currentRender / _currentDepth / _scratch, Phase 4 M5) ----
 	// The GL3 backend keeps the literal qglCopyTexSubImage2D path in idImage

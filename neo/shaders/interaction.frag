@@ -1,6 +1,13 @@
 // Translated from glprogs/interaction.vfp (fragment program).
 // Texture units preserved from the ARB program.
 
+#if defined(VULKAN) && defined(DUDE_RT_SUN)
+// DUDE RT sun shadows (docs/rtx-shadow-roadmap.md R3): only the interaction_rt variant
+// declares the ray-query capability - a SPIR-V module carrying it fails pipeline creation
+// on non-RT Vulkan hardware, so the base interaction shader must stay clean of it.
+#extension GL_EXT_ray_query : require
+#endif
+
 #include "renderparms.glsl"
 
 SAMPLER_BINDING(0) uniform samplerCube u_normalCubeMap; // normalization cube map
@@ -27,6 +34,8 @@ VARY(6) in vec3 var_TexHalfVec;
 VARY(7) in vec4 var_Color;
 VARY(8) in vec3 var_TexViewVec;
 VARY(9) in vec3 var_ShadowCubeVec;
+VARY(10) in vec3 var_ModelPos;		// model-space position (RT sun shadows rebuild world pos)
+VARY(11) in vec4 var_ModelNormal;	// model-space normal; .w = UV-seam mask (unused here)
 VARY(12) in vec4 var_ShadowProjection; // UNBAKED projection for the 2D shadow lookup
 
 layout(location = 0) out vec4 fragColor;
@@ -100,6 +109,37 @@ float shadowVisibility() {
 	if ( u_shadowParms.x == 0.0 ) {
 		return 1.0;
 	}
+#if defined(VULKAN) && defined(DUDE_RT_SUN)
+	if ( u_shadowParms.x > 3.5 ) {
+		// DUDE RT sun shadows (mode 4, docs/rtx-shadow-roadmap.md R3): trace one ray at the
+		// sun through the persistent world scene instead of sampling the fitted sun map -
+		// pixel-exact at any distance, no r_shadowMapSunRange cap, no map-resolution aliasing.
+		// Model-space position and the model-local light origin rebuild to world space via
+		// the model rows already in the UBO (a parallel light's local origin is the far-away
+		// parallel point, so the normalized difference IS the sun direction). The ray origin
+		// is offset along the world normal (u_rtParms.z) because the receiving triangle
+		// itself is in the BLAS. Opaque + terminate-on-first-hit: a shadow ray needs any
+		// occluder, not the nearest. Static world casters only until the dynamic BLAS lane.
+		vec4 mp = vec4( var_ModelPos, 1.0 );
+		vec3 wp = vec3( dot( u_modelMatrixRow0, mp ), dot( u_modelMatrixRow1, mp ), dot( u_modelMatrixRow2, mp ) );
+		vec4 lp = vec4( u_localLightOrigin.xyz, 1.0 );
+		vec3 wl = vec3( dot( u_modelMatrixRow0, lp ), dot( u_modelMatrixRow1, lp ), dot( u_modelMatrixRow2, lp ) );
+		vec3 toLight = wl - wp;
+		float distLight = max( length( toLight ), 1.0 );
+		vec3 wn = vec3( dot( u_modelMatrixRow0.xyz, var_ModelNormal.xyz ),
+		                dot( u_modelMatrixRow1.xyz, var_ModelNormal.xyz ),
+		                dot( u_modelMatrixRow2.xyz, var_ModelNormal.xyz ) );
+		float wnLen = length( wn );
+		wn = ( wnLen > 0.0 ) ? wn / wnLen : vec3( 0.0 );
+		rayQueryEXT rq;
+		rayQueryInitializeEXT( rq,
+			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+			gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu,
+			wp + wn * u_rtParms.z, 0.0, toLight / distLight, min( distLight - 1.0, u_rtParms.w ) );
+		while ( rayQueryProceedEXT( rq ) ) { }
+		return ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? 1.0 : 0.0;
+	}
+#endif
 	// Slope-scaled depth bias. A constant bias can't span the receiver's depth
 	// change across one shadow texel once the light grazes the surface (small
 	// angle between the light ray and the plane), so grazing floors/walls keep
