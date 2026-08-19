@@ -1,8 +1,10 @@
 /build*
 !/build.sh
 !/build-win.sh
+!/build-linux-release.sh
 /dist-win/
 /deps-mingw/
+/deps-linux-release/
 *~
 .*.swp
 *.pyc
