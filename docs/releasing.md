@@ -30,9 +30,14 @@ Staging layout (`dist/release-X.Y/`), one folder per platform, then zip/tar it:
 | **`base/zz_dude_menu.pk4`** — see below | ✓ | ✓ |
 | `COPYING.txt`, `README.md` | ✓ | ✓ |
 
-**Never include:** game pk4s (`pak000`–`pak008`, `game0x`) or generated asset packs
-(`z_baked_ao*`), `arbtool.exe`, `vulkan-1.dll` (ships with GPU drivers), the dev
-`base`/`d3xp` symlinks from `dist-win/`.
+**Never include in the platform archives:** game pk4s (`pak000`–`pak008`, `game0x`),
+`arbtool.exe`, `vulkan-1.dll` (ships with GPU drivers), the dev `base`/`d3xp` symlinks
+from `dist-win/`.
+
+**Separate optional asset — `dude-X.Y-baked-ao.zip`:** the generated AO packs
+(`base/z_baked_ao.pk4`, `_props`, `_weapons`, ~100 MB) attach to every release as their
+own download (the sanctioned release-attachment channel for generated assets — they
+never go in the repo or the platform archives). Same drop-in layout (`base/` folder).
 
 ### zz_dude_menu.pk4 — rebuild from the repo every release
 
