@@ -1,7 +1,7 @@
 # Phase: Publishing
 
-Status: **planned** (design record). Can run **at any time between the main phases** —
-it's low-coupling (repo/remote setup + license hygiene), not gated on renderer work.
+Status: **in progress (2026-08-19)** — license hygiene done; repo name decided: **dude**;
+remaining = the user's `gh auth login` + repo creation + push (never done by the agent).
 
 **Goal:** publish DUDE (dhewm-rt) as its own public **GPLv3** project — engine source
 only — so the work can be shared, without ever redistributing id/Bethesda game assets.
@@ -27,12 +27,14 @@ every Doom 3 engine fork (dhewm3 included) does this. Requirements:
   1999–2011) — intact; never strip them.
 - [x] Complete corresponding source — the public repo satisfies this (required if we
   ever distribute binaries).
-- [ ] **Note our modifications** (GPLv3 §5a): git history covers it; add a README line
+- [x] **Note our modifications** (GPLv3 §5a): README "License note" added 2026-08-19
   ("modified version of dhewm3, based on id Software's Doom 3 GPL source", with links).
-- [ ] **GPL headers on new DUDE source files** — new files (e.g. `neo/shaders/berserk*`,
-  `berserk_accum*`) carry only a descriptive comment. Not a strict blocker (`COPYING.txt`
-  + project-wide license covers the tree), but the tidy convention is to header each new
-  file, or state in the README that all project source is GPLv3. Batch-add before push.
+- [x] **GPL headers on new DUDE source files** — new .cpp/.h all carry the
+  "see ArbProgram.h for license header" pointer convention (ModCvarTranslation.{cpp,h}
+  were the only stragglers, fixed 2026-08-19). The 140 new shader files are covered by
+  the README statement that all DUDE-authored source incl. `neo/shaders/` is GPLv3
+  (the sanctioned alternative to per-file headers). Third-party (SMAA/ImGui/VMA/FSR2)
+  keep their own licenses.
 - The whole combined work stays GPLv3; our additions are copyleft-bound — no relicensing
   more restrictively, no added restrictions on the GPL rights.
 
@@ -44,6 +46,12 @@ Already `.gitignore`d (verified). The public repo stays **code-only**; users bri
 own Doom 3 install. Generated assets (baked-AO pk4s, `pbr/`, `envprobes/`) also stay out
 of the code repo — LFS / release attachments / a separate private repo (see the "assets
 in a separate repo" plan and docs/filesystem-path-strategy / packaging).
+
+**Decision 2026-08-19 — tracked menu GUIs stay in:** `base/guis/mainmenu.gui` (+
+`guis/dude/`) remain tracked at the user's call: heavily modified, derived via a
+community widescreen pack rather than raw id files, and slated for a complete
+from-scratch re-authoring (docs/main-menu-dude-button.md). Risk acknowledged: they
+still share lineage with id's GUI scripts; the full rewrite retires the concern.
 
 ## Steps (when we do it)
 

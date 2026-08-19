@@ -1,3 +1,9 @@
+/*
+===========================================================================
+Doom 3 GPL Source Code (see ArbProgram.h for license header)
+===========================================================================
+*/
+
 // DUDE: mod compatibility shim — cvar name translation + small per-mod tweaks.
 //
 // Some mods (e.g. tfphobos) ship stock-Doom3-era menus that reference cvars DUDE
