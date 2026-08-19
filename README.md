@@ -68,6 +68,13 @@ As with everything else in DUDE, the RTX path is additive: the faithful raster
 renderers remain, both as the default look and as the path for GPUs without ray
 tracing support.
 
+## Supporting the project
+
+If you enjoy DUDE, you can support development at
+**[buymeacoffee.com/Inkub0](https://buymeacoffee.com/Inkub0)** ☕ — donations go
+toward new hardware needed to build and test **real HDR output support** and the
+**RTX pipeline** above.
+
 ## Building
 
 Linux (native):
