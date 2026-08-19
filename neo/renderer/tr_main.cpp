@@ -1122,10 +1122,17 @@ struct rtModelBlas_t { const idRenderModel *model; rhi::BlasHandle blas; };
 static idList<rhi::BlasHandle>	s_rtAreaBlas;
 static idList<rtModelBlas_t>	s_rtModelBlas;
 
-// shared caster filter: opaque + shadow-casting (SurfaceCastsShadow() excludes noshadows
-// materials - critically the SKY, or every RT sun ray would end in the dome), CPU data resident
+// shared caster filter: opaque OR perforated + shadow-casting, CPU data resident.
+// PERFORATED (alpha-tested) surfaces cast too - Doom 3's own stencil shadows treat them as
+// SOLID occluders (the shadow volume is the full triangle silhouette, ignoring the alpha
+// holes), so admitting them as solid ray occluders is faithful, and it is essential for
+// characters: monster skins are mostly perforated (a body's 9 surfaces are typically 1 opaque
+// + 8 perforated), so an opaque-only filter cast a holey, glitchy partial silhouette or nothing.
+// Only TRANSLUCENT (glass/glows/additive) is excluded. SurfaceCastsShadow() still drops
+// noshadows materials - critically the SKY, or every RT sun ray would end in the dome.
 static bool R_RtSurfCasts( const modelSurface_t *surf ) {
-	return surf->geometry != NULL && surf->shader != NULL && surf->shader->Coverage() == MC_OPAQUE
+	return surf->geometry != NULL && surf->shader != NULL
+		&& ( surf->shader->Coverage() == MC_OPAQUE || surf->shader->Coverage() == MC_PERFORATED )
 		&& surf->shader->SurfaceCastsShadow()
 		&& surf->geometry->verts != NULL && surf->geometry->indexes != NULL;
 }
