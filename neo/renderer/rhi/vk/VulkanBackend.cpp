@@ -775,7 +775,8 @@ private:
 	uint32_t					rtFrameDynTris[FRAMES_IN_FLIGHT] = {};		// triangles armed for the pending build
 	VkDeviceAddress				rtFrameDynAddr[FRAMES_IN_FLIGHT] = {};
 	bool						rtFrameDynBuilt[FRAMES_IN_FLIGHT] = {};
-	int							rtDynArmedSlot = -1;						// slot whose dyn-BLAS UpdateTlas must append
+	int							rtDynArmedSlot = -1;						// slot whose dyn-BLAS UpdateTlas must append (one-shot)
+	int							rtDynPendingSlot = -1;						// slot whose dyn-BLAS BeginFrame must rebuild (steady state)
 	void	RecordFrameDynBlasBuild( VkCommandBuffer cb, int slot );		// rebuild + AS-write -> AS-read barrier
 	bool	CreateRtBuffer( VkBufferUsageFlags usage, VkDeviceSize size, const void *data, RtBuf &rb );
 	void	DestroyRtBuffer( RtBuf &rb );
@@ -2215,6 +2216,18 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	streamGen++;
 	if ( framePool[frameIndex] ) {
 		vkResetDescriptorPool( device, framePool[frameIndex], 0 );
+	}
+
+	// R3 animated casters (monsters): rebuild the slot's combined monster BLAS FIRST, so the
+	// TLAS build below reads the current-pose geometry. RecordFrameDynBlasBuild ends with an
+	// AS-write->AS-read barrier ordering it against that TLAS build. Fresh slots were primed
+	// synchronously in UpdateDynamicGeometry (rtDynPendingSlot -1 there); only steady slots
+	// rebuild here. A stale arm for a skipped frame is dropped.
+	if ( rtDynPendingSlot == frameIndex && rtFrameDynBlas[frameIndex] != VK_NULL_HANDLE ) {
+		RecordFrameDynBlasBuild( f.cb, frameIndex );
+		rtDynPendingSlot = -1;
+	} else if ( rtDynPendingSlot >= 0 ) {
+		rtDynPendingSlot = -1;
 	}
 
 	// R3 per-frame TLAS (movers): record the armed instance rebuild AHEAD of every draw
@@ -4366,10 +4379,12 @@ void VulkanBackend::UpdateDynamicGeometry( const float *worldPositions, int numV
 		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
 		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
 		rtFrameDynBuilt[slot] = true;
+		rtDynPendingSlot = -1;			// fresh slot already holds this frame's geometry
+	} else {
+		// steady slot: BeginFrame rebuilds this frame's geometry on the frame cb, AHEAD of the
+		// TLAS build that references it (RecordFrameDynBlasBuild ends with the AS-write->read barrier)
+		rtDynPendingSlot = slot;
 	}
-	// steady state: BeginFrame rebuilds this frame's geometry ahead of the TLAS build. Piggyback
-	// on rtPendingSlot? No — the dyn build must precede the TLAS build, so BeginFrame keys off the
-	// dyn-BLAS being present + this frame's geometry armed. rtFrameDynTris[slot] carries the count.
 }
 
 // Per-frame TLAS refresh (movers): translate + upload the instances into the upcoming
@@ -4383,10 +4398,13 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		return;			// mid-frame callers skip a beat; the next frame re-arms
 	}
 	const int slot = frameIndex;
+	// one-shot consume of the dyn-caster arm (set by UpdateDynamicGeometry this frame)
+	const bool appendDyn = ( rtDynArmedSlot == slot );
+	rtDynArmedSlot = -1;
 
 	// translate to VK instances (same rules as BuildTlas: dead BLAS handles drop out)
 	std::vector<VkAccelerationStructureInstanceKHR> vkInst;
-	vkInst.reserve( (size_t)count );
+	vkInst.reserve( (size_t)count + 1 );
 	for ( int i = 0; i < count; i++ ) {
 		const RtInstance &in = instances[i];
 		if ( in.blas == 0 || (size_t)in.blas > rtBlases.size() || rtBlases[in.blas - 1].as == VK_NULL_HANDLE ) {
@@ -4398,6 +4416,20 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		vi.mask = in.mask & 0xFFu;
 		vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 		vi.accelerationStructureReference = rtBlases[in.blas - 1].addr;
+		vkInst.push_back( vi );
+	}
+	// R3 animated casters: one identity instance for this slot's combined WORLD-space monster
+	// BLAS (verts pre-transformed on the CPU, so no per-instance transform). Appended BEFORE the
+	// empty check so a monster-only view still builds a TLAS.
+	if ( appendDyn && rtFrameDynBlas[slot] != VK_NULL_HANDLE && rtFrameDynTris[slot] > 0 ) {
+		VkAccelerationStructureInstanceKHR vi;
+		memset( &vi, 0, sizeof( vi ) );
+		vi.transform.matrix[0][0] = 1.0f;
+		vi.transform.matrix[1][1] = 1.0f;
+		vi.transform.matrix[2][2] = 1.0f;
+		vi.mask = 0xFFu;
+		vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+		vi.accelerationStructureReference = rtFrameDynAddr[slot];
 		vkInst.push_back( vi );
 	}
 	if ( vkInst.empty() ) {
@@ -4540,8 +4572,23 @@ void VulkanBackend::DestroyRtFrameSlots() {
 		rtFrameCount[s] = 0;
 		rtFrameAddr[s] = 0;
 		rtFrameBuilt[s] = false;
+		// R3 animated-caster dyn-BLAS slot
+		if ( rtFrameDynBlas[s] != VK_NULL_HANDLE ) {
+			pfnDestroyAs( device, rtFrameDynBlas[s], NULL );
+			rtFrameDynBlas[s] = VK_NULL_HANDLE;
+		}
+		DestroyRtBuffer( rtFrameDynBlasBuf[s] );
+		DestroyRtBuffer( rtFrameDynVb[s] );
+		DestroyRtBuffer( rtFrameDynIb[s] );
+		DestroyRtBuffer( rtFrameDynScratch[s] );
+		rtFrameDynVertCap[s] = rtFrameDynTriCap[s] = 0;
+		rtFrameDynVerts[s] = rtFrameDynTris[s] = 0;
+		rtFrameDynAddr[s] = 0;
+		rtFrameDynBuilt[s] = false;
 	}
 	rtPendingSlot = -1;
+	rtDynArmedSlot = -1;
+	rtDynPendingSlot = -1;
 	rtCurrentAddr = 0;
 }
 

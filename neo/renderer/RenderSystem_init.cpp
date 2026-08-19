@@ -444,6 +444,7 @@ idCVar r_shadowMapNormalOffset( "r_shadowMapNormalOffset", "1", CVAR_RENDERER | 
 // world acceleration structure (r_rtWorld auto-builds while this is on).
 idCVar r_rtSunShadows( "r_rtSunShadows", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "ray-traced sun shadows (Vulkan + RT hardware): the interaction shader traces one ray at the sun against the persistent world scene instead of sampling the fitted sun map - exact at any distance, no r_shadowMapSunRange cap or map aliasing. Static world casters only until the dynamic BLAS lane lands (monsters/movers cast no sun shadow yet). Rides the sun shadow-map path, so it needs r_shadowMapSun" );
 idCVar r_rtSunShadowOffset( "r_rtSunShadowOffset", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "RT sun shadows: ray-origin offset along the surface normal in world units - the self-intersection guard (the receiving triangle is itself in the acceleration structure)", 0.0f, 16.0f );
+idCVar r_rtMonsterShadows( "r_rtMonsterShadows", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "RT sun shadows: include animated characters (monsters) as casters. Each frame their current-pose CPU-skinned geometry is gathered into a per-frame dynamic acceleration structure. Needs r_rtSunShadows; only this-frame-visible characters cast" );
 
 // DUDE: emissive fill lights — interactive GUI screens (monitors, keypads, wall
 // panels) glow but cast no light in Doom 3's model, so they read as decals pasted

@@ -1403,11 +1403,81 @@ static unsigned long long R_RtBuildScene( rhi::RHI *r,
 	return tlasAddr;
 }
 
+// Gather this frame's visible animated characters (monsters) into ONE combined WORLD-space
+// triangle soup for the per-frame dynamic BLAS (R3 animated casters). Their model-space
+// CPU-skinned verts (always posed now - the position skin is never stripped, and IS the game's
+// hit surface) are transformed to world by each entity's matrix here, so the backend builds a
+// single identity-instance BLAS. Only DM_CACHED models posed THIS frame
+// (dynamicModelFrameCount == tr.frameCount) qualify - off-screen/not-updated characters are
+// skipped (their sun shadow is missed; a v1 limit). Returns false with nothing allocated when
+// there are no monster casters; else the caller Mem_Free16's pos/idx.
+static bool R_RtGatherMonstersWorld( const idRenderWorldLocal *world, float *&pos, int *&idx,
+		int &numVerts, int &numIndexes ) {
+	pos = NULL; idx = NULL; numVerts = 0; numIndexes = 0;
+
+	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
+		const idRenderEntityLocal *def = world->entityDefs[i];
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || def->parms.weaponDepthHack
+			|| def->parms.hModel->IsDynamicModel() != DM_CACHED
+			|| def->dynamicModel == NULL || def->dynamicModelFrameCount != tr.frameCount ) {
+			continue;
+		}
+		const idRenderModel *dm = def->dynamicModel;
+		for ( int s = 0; s < dm->NumSurfaces(); s++ ) {
+			if ( !R_RtSurfCasts( dm->Surface( s ) ) ) {
+				continue;
+			}
+			numVerts += dm->Surface( s )->geometry->numVerts;
+			numIndexes += dm->Surface( s )->geometry->numIndexes;
+		}
+	}
+	if ( numIndexes < 3 ) {
+		numVerts = numIndexes = 0;
+		return false;
+	}
+
+	pos = (float *)Mem_Alloc16( numVerts * 3 * (int)sizeof( float ) );
+	idx = (int *)Mem_Alloc16( numIndexes * (int)sizeof( int ) );
+	int vbase = 0, ibase = 0;
+	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
+		const idRenderEntityLocal *def = world->entityDefs[i];
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || def->parms.weaponDepthHack
+			|| def->parms.hModel->IsDynamicModel() != DM_CACHED
+			|| def->dynamicModel == NULL || def->dynamicModelFrameCount != tr.frameCount ) {
+			continue;
+		}
+		float mm[16];
+		R_AxisToModelMatrix( def->parms.axis, def->parms.origin, mm );	// id column-major: world = mm * local
+		const idRenderModel *dm = def->dynamicModel;
+		for ( int s = 0; s < dm->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = dm->Surface( s );
+			if ( !R_RtSurfCasts( surf ) ) {
+				continue;
+			}
+			const srfTriangles_t *tri = surf->geometry;
+			for ( int k = 0; k < tri->numVerts; k++ ) {
+				const idVec3 &v = tri->verts[k].xyz;
+				float *dst = pos + ( vbase + k ) * 3;
+				dst[0] = mm[0] * v.x + mm[4] * v.y + mm[8]  * v.z + mm[12];
+				dst[1] = mm[1] * v.x + mm[5] * v.y + mm[9]  * v.z + mm[13];
+				dst[2] = mm[2] * v.x + mm[6] * v.y + mm[10] * v.z + mm[14];
+			}
+			for ( int m = 0; m < tri->numIndexes; m++ ) {
+				idx[ibase + m] = vbase + tri->indexes[m];
+			}
+			vbase += tri->numVerts;
+			ibase += tri->numIndexes;
+		}
+	}
+	return true;
+}
+
 // Re-instance the TLAS with CURRENT entity transforms once per game frame (movers: doors,
 // lifts, crushers). Uses the BLAS registry the persistent build filled - geometry never
 // rebuilds, only the instance list; the backend records the TLAS build on the next frame's
 // command buffer (RHI::UpdateTlas), so this never stalls. Entities spawned after the scene
-// build have no BLAS yet and are skipped until the next rebuild.
+// build have no BLAS yet and are skipped until the next rebuild. Animated characters are added
+// separately via the per-frame dynamic BLAS (R_RtGatherMonstersWorld + UpdateDynamicGeometry).
 static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	static int lastFrame = -1;
 	if ( tr.frameCount == lastFrame ) {
@@ -1460,6 +1530,17 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 		in.mask = 0xFF;
 	}
 	if ( n > 0 ) {
+		// R3 animated casters: gather this frame's visible monsters into a world-space soup and
+		// hand it to the backend (rebuilds a per-frame dynamic BLAS + appends one identity
+		// instance to the TLAS). MUST precede UpdateTlas, which consumes the dyn-caster arm.
+		if ( r_rtSunShadows.GetBool() && r_rtMonsterShadows.GetBool() ) {
+			float *mpos; int *midx; int mnv, mni;
+			if ( R_RtGatherMonstersWorld( world, mpos, midx, mnv, mni ) ) {
+				r->UpdateDynamicGeometry( mpos, mnv, midx, mni );
+				Mem_Free16( mpos );
+				Mem_Free16( midx );
+			}
+		}
 		r->UpdateTlas( inst, n );
 	}
 	Mem_Free16( inst );
@@ -1499,8 +1580,10 @@ static void R_RtWorldUpdate( void ) {
 	if ( !r->SupportsRayQuery() ) {
 		return;							// stays pending; a backend/hardware change re-evaluates
 	}
-	if ( r->GetTlasAddress() != 0 && s_rtWorldMap.Icmp( world->mapName ) == 0 ) {
-		// scene live and current: re-instance the TLAS with this frame's mover poses
+	if ( r->GetStaticTlasAddress() != 0 && s_rtWorldMap.Icmp( world->mapName ) == 0 ) {
+		// static scene live and current: re-instance the per-frame TLAS with this frame's mover
+		// poses + animated-monster casters (GetStaticTlasAddress is the persistent-scene anchor;
+		// GetTlasAddress would return the per-frame slot address once the lane is running)
 		R_RtRefreshInstances( world, r );
 		return;
 	}
@@ -1673,13 +1756,16 @@ static void R_RtWorldValidate( void ) {
 		return;
 	}
 
-	// scene: reuse the persistent one when live (R_RtWorldUpdate ran just before us, so it
-	// is current for this map), else a transient build torn down at the end
-	const bool persistent = ( r_rtWorld.GetBool() || r_rtSunShadows.GetBool() ) && r->GetTlasAddress() != 0;
+	// scene: reuse the persistent STATIC one when live (R_RtWorldUpdate ran just before us, so
+	// it is current for this map), else a transient build torn down at the end. Deliberately the
+	// STATIC scene, not the per-frame TLAS: the CPU reference below is the static soup, so tracing
+	// the per-frame slot (which also carries animated monster casters) would false-positive every
+	// monster hit as a "genuine" mismatch.
+	const bool persistent = ( r_rtWorld.GetBool() || r_rtSunShadows.GetBool() ) && r->GetStaticTlasAddress() != 0;
 	int blasFail = 0, msBuild = 0;
 	unsigned long long tlasAddr;
 	if ( persistent ) {
-		tlasAddr = r->GetTlasAddress();
+		tlasAddr = r->GetStaticTlasAddress();
 	} else {
 		const int msStart = Sys_Milliseconds();
 		tlasAddr = R_RtBuildScene( r, aPos, aIdx, aSlices, numASlices,
