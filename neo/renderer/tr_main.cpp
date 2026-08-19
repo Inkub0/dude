@@ -1421,10 +1421,8 @@ static unsigned long long R_RtBuildScene( rhi::RHI *r,
 // the game's hit surface) are baked to world here, so the backend builds a single
 // identity-instance BLAS. Returns false with nothing allocated when there are no monster casters;
 // else the caller Mem_Free16's pos/idx.
-static int s_rtDbgMonsters;			// TEMP (flicker re-verify): monster casters gathered - remove once stable
 static bool R_RtGatherMonstersWorld( float *&pos, int *&idx, int &numVerts, int &numIndexes ) {
 	pos = NULL; idx = NULL; numVerts = 0; numIndexes = 0;
-	s_rtDbgMonsters = 0;
 	if ( tr.viewDef == NULL ) {
 		return false;
 	}
@@ -1459,13 +1457,11 @@ static bool R_RtGatherMonstersWorld( float *&pos, int *&idx, int &numVerts, int 
 		}
 		const float *mm = vEnt->modelMatrix;		// model->world (local coords to global coords), id column-major
 		const idRenderModel *dm = def->dynamicModel;
-		bool anyCast = false;
 		for ( int s = 0; s < dm->NumSurfaces(); s++ ) {
 			const modelSurface_t *surf = dm->Surface( s );
 			if ( !R_RtSurfCasts( surf ) ) {
 				continue;
 			}
-			anyCast = true;
 			const srfTriangles_t *tri = surf->geometry;
 			for ( int k = 0; k < tri->numVerts; k++ ) {
 				const idVec3 &v = tri->verts[k].xyz;
@@ -1480,7 +1476,6 @@ static bool R_RtGatherMonstersWorld( float *&pos, int *&idx, int &numVerts, int 
 			vbase += tri->numVerts;
 			ibase += tri->numIndexes;
 		}
-		if ( anyCast ) { s_rtDbgMonsters++; }
 	}
 	return true;
 }
@@ -1548,15 +1543,7 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 		// instance to the TLAS). MUST precede UpdateTlas, which consumes the dyn-caster arm.
 		if ( r_rtSunShadows.GetBool() && r_rtMonsterShadows.GetBool() ) {
 			float *mpos; int *midx; int mnv = 0, mni = 0;
-			const bool got = R_RtGatherMonstersWorld( mpos, midx, mnv, mni );
-			// TEMP DIAG (flicker re-verify): monster count + geometry once/sec. Remove once stable.
-			static int s_dbgLast = 0;
-			const int now = Sys_Milliseconds();
-			if ( now - s_dbgLast >= 1000 ) {
-				s_dbgLast = now;
-				common->Printf( "rt monsters: %d casting -> %d verts / %d tris\n", s_rtDbgMonsters, mnv, mni / 3 );
-			}
-			if ( got ) {
+			if ( R_RtGatherMonstersWorld( mpos, midx, mnv, mni ) ) {
 				r->UpdateDynamicGeometry( mpos, mnv, midx, mni );
 				Mem_Free16( mpos );
 				Mem_Free16( midx );
