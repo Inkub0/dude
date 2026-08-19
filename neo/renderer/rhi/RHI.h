@@ -443,6 +443,11 @@ public:
 	// dropped the scene - callers treat that as "rebuild needed". While UpdateTlas runs per
 	// frame this returns the frame-slot TLAS the upcoming frame will read.
 	virtual unsigned long long	GetTlasAddress() { return 0; }
+	// Address of the STATIC synchronous scene (BuildTlas result) — never the per-frame slot,
+	// so it excludes movers-at-current-pose and animated casters. The r_rtWorldTest validator
+	// uses this (its CPU reference is the static build-time soup) so it never traverses the
+	// per-frame dynamic BLAS and matches without mover-drift false positives. 0 = no scene.
+	virtual unsigned long long	GetStaticTlasAddress() { return 0; }
 	// Per-frame TLAS refresh (movers): re-instance the scene with CURRENT transforms.
 	// Asynchronous - the build is recorded at the start of the next frame's command buffer
 	// (AS-build -> fragment-shader barrier), so unlike BuildTlas it never stalls the queue.
@@ -450,6 +455,16 @@ public:
 	// dead BLAS handles are skipped. The synchronous BuildTlas scene stays as the fallback
 	// when no per-frame build is live. VK-only; GL3 no-ops.
 	virtual void	UpdateTlas( const RtInstance *instances, int count ) {}
+	// Per-frame ANIMATED casters (monsters, R3): hand the backend one combined WORLD-space
+	// triangle soup (all visible monsters, their model-space verts pre-transformed by each
+	// entity's matrix on the CPU). The backend rebuilds a single dynamic BLAS into the
+	// upcoming frame slot and, in the SAME UpdateTlas call that follows, appends one identity
+	// instance for it — so the monster geometry rides the per-frame TLAS with current poses.
+	// Rebuilt (not refit) each frame: negligible at Doom 3 scale, and no per-entity BLAS
+	// lifecycle. Call BEFORE UpdateTlas each frame; omit the call (or count 0) for no monsters.
+	// VK-only; GL3 no-ops.
+	virtual void	UpdateDynamicGeometry( const float *worldPositions, int numVerts,
+	                                       const int *indexes, int numIndexes ) {}
 	// Free the TLAS and every live BLAS (level transition / shutdown).
 	virtual void	DestroyRtScene() {}
 

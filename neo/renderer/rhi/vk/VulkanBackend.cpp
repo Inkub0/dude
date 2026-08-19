@@ -248,7 +248,10 @@ private:
 	void			DestroyBlas( BlasHandle blas ) override;
 	unsigned long long	BuildTlas( const RtInstance *instances, int count ) override;
 	unsigned long long	GetTlasAddress() override;
+	unsigned long long	GetStaticTlasAddress() override;
 	void			UpdateTlas( const RtInstance *instances, int count ) override;
+	void			UpdateDynamicGeometry( const float *worldPositions, int numVerts,
+	                                       const int *indexes, int numIndexes ) override;
 	void			DestroyRtScene() override;
 	// FSR2 runtime (R1/C2): persistent context + output image, sized to the scene target.
 	bool			Fsr2EnsureContext( int w, int h );			// (re)create the FSR2 context + output image on size change
@@ -755,6 +758,25 @@ private:
 	VkDeviceAddress				rtCurrentAddr = 0;						// per-frame TLAS address (0 = use rtTlasAddr)
 	void	RecordFrameTlasBuild( VkCommandBuffer cb, int slot );		// build + AS-write -> frag-read barrier
 	void	DestroyRtFrameSlots();
+
+	// R3 animated casters (monsters): one combined WORLD-space triangle-soup BLAS per frame
+	// slot, rebuilt each frame the frontend supplies geometry. The slot's dyn-BLAS build is
+	// recorded on the frame cb AHEAD of the TLAS build (dyn-BLAS-write -> TLAS-read barrier),
+	// and UpdateTlas appends one identity instance for it. Fresh slots prime synchronously so
+	// a fresh TLAS prime that references the dyn-BLAS finds it built.
+	VkAccelerationStructureKHR	rtFrameDynBlas[FRAMES_IN_FLIGHT] = {};
+	RtBuf						rtFrameDynBlasBuf[FRAMES_IN_FLIGHT];
+	RtBuf						rtFrameDynVb[FRAMES_IN_FLIGHT];
+	RtBuf						rtFrameDynIb[FRAMES_IN_FLIGHT];
+	RtBuf						rtFrameDynScratch[FRAMES_IN_FLIGHT];
+	uint32_t					rtFrameDynVertCap[FRAMES_IN_FLIGHT] = {};	// verts each slot's dyn-BLAS is sized for
+	uint32_t					rtFrameDynTriCap[FRAMES_IN_FLIGHT] = {};	// triangles ditto
+	uint32_t					rtFrameDynVerts[FRAMES_IN_FLIGHT] = {};		// verts armed for the pending build (maxVertex)
+	uint32_t					rtFrameDynTris[FRAMES_IN_FLIGHT] = {};		// triangles armed for the pending build
+	VkDeviceAddress				rtFrameDynAddr[FRAMES_IN_FLIGHT] = {};
+	bool						rtFrameDynBuilt[FRAMES_IN_FLIGHT] = {};
+	int							rtDynArmedSlot = -1;						// slot whose dyn-BLAS UpdateTlas must append
+	void	RecordFrameDynBlasBuild( VkCommandBuffer cb, int slot );		// rebuild + AS-write -> AS-read barrier
 	bool	CreateRtBuffer( VkBufferUsageFlags usage, VkDeviceSize size, const void *data, RtBuf &rb );
 	void	DestroyRtBuffer( RtBuf &rb );
 	// size + create + build one AS on the upload cb, synchronously (scratch is transient)
@@ -4183,6 +4205,171 @@ unsigned long long VulkanBackend::BuildTlas( const RtInstance *instances, int co
 unsigned long long VulkanBackend::GetTlasAddress() {
 	// the per-frame slot when its lane is live, else the synchronous scene
 	return (unsigned long long)( rtCurrentAddr ? rtCurrentAddr : rtTlasAddr );
+}
+
+unsigned long long VulkanBackend::GetStaticTlasAddress() {
+	return (unsigned long long)rtTlasAddr;		// synchronous scene only (no movers/monsters)
+}
+
+// Record the armed slot's dynamic (monster) BLAS rebuild + a barrier ordering its writes
+// against the TLAS build that reads it (both in the AS-build stage). Shared by BeginFrame
+// (async steady state) and the fresh-slot synchronous prime.
+void VulkanBackend::RecordFrameDynBlasBuild( VkCommandBuffer cb, int slot ) {
+	VkAccelerationStructureGeometryKHR geom = {};
+	geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+	geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+	geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+	geom.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+	geom.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+	geom.geometry.triangles.vertexData.deviceAddress = rtFrameDynVb[slot].addr;
+	geom.geometry.triangles.vertexStride = 3 * sizeof( float );
+	geom.geometry.triangles.maxVertex = ( rtFrameDynVerts[slot] > 0 ) ? rtFrameDynVerts[slot] - 1 : 0;
+	geom.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
+	geom.geometry.triangles.indexData.deviceAddress = rtFrameDynIb[slot].addr;
+	VkAccelerationStructureBuildGeometryInfoKHR bgi = {};
+	bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+	bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+	bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+	bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+	bgi.geometryCount = 1;
+	bgi.pGeometries = &geom;
+	bgi.dstAccelerationStructure = rtFrameDynBlas[slot];
+	bgi.scratchData.deviceAddress = ( rtFrameDynScratch[slot].addr + asScratchAlignment - 1 )
+		& ~(VkDeviceAddress)( asScratchAlignment - 1 );
+	VkAccelerationStructureBuildRangeInfoKHR range = {};
+	range.primitiveCount = rtFrameDynTris[slot];
+	const VkAccelerationStructureBuildRangeInfoKHR *pRange = &range;
+	pfnCmdBuildAs( cb, 1, &bgi, &pRange );
+	// the BLAS write must complete before the TLAS build (later on this cb) reads it
+	VkMemoryBarrier mb = {};
+	mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+	mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+		VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &mb, 0, NULL, 0, NULL );
+}
+
+// Per-frame animated casters (monsters, R3): rebuild ONE combined world-space triangle BLAS
+// into the upcoming frame slot from the soup the frontend supplies (all visible monsters,
+// verts already transformed to world space). Mirrors UpdateTlas's slot lifecycle: wait the
+// slot fence, (re)create the slot's dyn-BLAS on first use / growth, upload the geometry, then
+// prime synchronously on a fresh slot (so a fresh TLAS prime finds it built) or arm the
+// frame-cb rebuild for steady state. UpdateTlas (called right after) appends the identity
+// instance for it via the rtDynArmedSlot handshake.
+void VulkanBackend::UpdateDynamicGeometry( const float *worldPositions, int numVerts,
+		const int *indexes, int numIndexes ) {
+	if ( !SupportsRayQuery() || worldPositions == NULL || indexes == NULL
+		|| numVerts <= 0 || numIndexes < 3 || frameOpen ) {
+		return;
+	}
+	const int slot = frameIndex;
+	const uint32_t nv = (uint32_t)numVerts;
+	const uint32_t nt = (uint32_t)( numIndexes / 3 );
+
+	vkWaitForFences( device, 1, &frames[slot].fence, VK_TRUE, UINT64_MAX );
+
+	// (re)create the slot's dyn-BLAS when absent or outgrown (growth queue-idles; rare)
+	if ( rtFrameDynBlas[slot] == VK_NULL_HANDLE || nv > rtFrameDynVertCap[slot] || nt > rtFrameDynTriCap[slot] ) {
+		vkQueueWaitIdle( gfxQueue );
+		if ( rtFrameDynBlas[slot] != VK_NULL_HANDLE ) {
+			pfnDestroyAs( device, rtFrameDynBlas[slot], NULL );
+			rtFrameDynBlas[slot] = VK_NULL_HANDLE;
+		}
+		DestroyRtBuffer( rtFrameDynBlasBuf[slot] );
+		DestroyRtBuffer( rtFrameDynVb[slot] );
+		DestroyRtBuffer( rtFrameDynIb[slot] );
+		DestroyRtBuffer( rtFrameDynScratch[slot] );
+		rtFrameDynVertCap[slot] = rtFrameDynTriCap[slot] = 0;
+		rtFrameDynAddr[slot] = 0;
+		rtFrameDynBuilt[slot] = false;
+
+		const uint32_t vcap = nv + nv / 2 + 64;
+		const uint32_t tcap = nt + nt / 2 + 64;
+		if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+				(VkDeviceSize)vcap * 3 * sizeof( float ), NULL, rtFrameDynVb[slot] )
+			|| !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+				(VkDeviceSize)tcap * 3 * sizeof( int ), NULL, rtFrameDynIb[slot] ) ) {
+			DestroyRtBuffer( rtFrameDynVb[slot] );
+			DestroyRtBuffer( rtFrameDynIb[slot] );
+			return;
+		}
+		// size the AS + scratch for the worst-case tcap so a steady rebuild never needs to grow
+		VkAccelerationStructureGeometryKHR sgeom = {};
+		sgeom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+		sgeom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+		sgeom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+		sgeom.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+		sgeom.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+		sgeom.geometry.triangles.vertexStride = 3 * sizeof( float );
+		sgeom.geometry.triangles.maxVertex = vcap - 1;
+		sgeom.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
+		VkAccelerationStructureBuildGeometryInfoKHR sbgi = {};
+		sbgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+		sbgi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+		sbgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+		sbgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+		sbgi.geometryCount = 1;
+		sbgi.pGeometries = &sgeom;
+		VkAccelerationStructureBuildSizesInfoKHR sizes = {};
+		sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+		pfnGetAsBuildSizes( device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &sbgi, &tcap, &sizes );
+		if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, rtFrameDynBlasBuf[slot] )
+			|| !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, rtFrameDynScratch[slot] ) ) {
+			DestroyRtBuffer( rtFrameDynBlasBuf[slot] );
+			DestroyRtBuffer( rtFrameDynVb[slot] );
+			DestroyRtBuffer( rtFrameDynIb[slot] );
+			DestroyRtBuffer( rtFrameDynScratch[slot] );
+			return;
+		}
+		VkAccelerationStructureCreateInfoKHR asci = {};
+		asci.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+		asci.buffer = rtFrameDynBlasBuf[slot].buf;
+		asci.size = sizes.accelerationStructureSize;
+		asci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+		if ( !vkCheck( pfnCreateAs( device, &asci, NULL, &rtFrameDynBlas[slot] ), "vkCreateAccelerationStructureKHR(dynBlas)" ) ) {
+			rtFrameDynBlas[slot] = VK_NULL_HANDLE;
+			DestroyRtBuffer( rtFrameDynBlasBuf[slot] );
+			DestroyRtBuffer( rtFrameDynVb[slot] );
+			DestroyRtBuffer( rtFrameDynIb[slot] );
+			DestroyRtBuffer( rtFrameDynScratch[slot] );
+			return;
+		}
+		VkAccelerationStructureDeviceAddressInfoKHR dai = {};
+		dai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+		dai.accelerationStructure = rtFrameDynBlas[slot];
+		rtFrameDynAddr[slot] = pfnGetAsDeviceAddress( device, &dai );
+		rtFrameDynVertCap[slot] = vcap;
+		rtFrameDynTriCap[slot] = tcap;
+	}
+
+	memcpy( rtFrameDynVb[slot].map, worldPositions, (size_t)nv * 3 * sizeof( float ) );
+	memcpy( rtFrameDynIb[slot].map, indexes, (size_t)numIndexes * sizeof( int ) );
+	rtFrameDynVerts[slot] = nv;
+	rtFrameDynTris[slot] = nt;
+	rtDynArmedSlot = slot;			// tell the following UpdateTlas to append the identity instance
+
+	if ( !rtFrameDynBuilt[slot] ) {
+		// fresh slot: prime synchronously so a fresh TLAS prime that references this BLAS
+		// finds it built (steady-state frames rebuild it on the frame cb instead)
+		vkResetCommandBuffer( uploadCb, 0 );
+		VkCommandBufferBeginInfo bbi = {};
+		bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		vkBeginCommandBuffer( uploadCb, &bbi );
+		RecordFrameDynBlasBuild( uploadCb, slot );
+		vkEndCommandBuffer( uploadCb );
+		VkSubmitInfo si = {};
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &uploadCb;
+		vkResetFences( device, 1, &uploadFence );
+		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		rtFrameDynBuilt[slot] = true;
+	}
+	// steady state: BeginFrame rebuilds this frame's geometry ahead of the TLAS build. Piggyback
+	// on rtPendingSlot? No — the dyn build must precede the TLAS build, so BeginFrame keys off the
+	// dyn-BLAS being present + this frame's geometry armed. rtFrameDynTris[slot] carries the count.
 }
 
 // Per-frame TLAS refresh (movers): translate + upload the instances into the upcoming
