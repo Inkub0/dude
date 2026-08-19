@@ -52,6 +52,7 @@ include(TestBigEndian)
 option(CORE			"Build the core" ON)
 option(BASE			"Build the base game code" ON)
 option(D3XP			"Build the d3xp game code" ON)
+option(D3LE			"Build the d3le (The Lost Mission) game code" ON)
 if(MSVC)
 	option(TOOLS		"Build the tools game code (Visual Studio+SDL2/SDL3 only)" OFF)
 endif()
@@ -1257,6 +1258,19 @@ set(src_d3xp
 
 add_globbed_headers(src_d3xp "d3xp")
 
+# --- The Lost Mission (d3le) game code -------------------------------------
+# d3le is a full copy of the d3xp game tree (neo/d3le/) with the 12
+# Lost-Mission source files overlaid. It ships its own script events (e.g.
+# setHomingMissileGoal) and adds data members to idProjectile/idAI/idTrigger,
+# so it must be built as its own game lib rather than sharing d3xp headers.
+# The source list mirrors src_d3xp file-for-file with the d3xp/ prefix
+# remapped to d3le/ (headers included via the glob above).
+set(src_d3le "")
+foreach(_f ${src_d3xp})
+	string(REPLACE "d3xp/" "d3le/" _lf "${_f}")
+	list(APPEND src_d3le "${_lf}")
+endforeach()
+
 set(src_debuggerServer
 	tools/debugger/DebuggerBreakpoint.h
 	tools/debugger/DebuggerBreakpoint.cpp
@@ -1667,6 +1681,37 @@ if(D3XP AND NOT HARDLINK_GAME)
 
 	if(NOT APPLE AND NOT WIN32)
 		install(TARGETS d3xp
+				RUNTIME DESTINATION "${bindir}"
+				LIBRARY DESTINATION "${libdir}"
+				ARCHIVE DESTINATION "${libdir}"
+		)
+	endif()
+endif()
+
+if(D3LE AND NOT HARDLINK_GAME)
+	if (AROS)
+		add_executable(d3le ${src_d3le} sys/aros/aros_dynmodule.cpp sys/aros/aros_dynmodcommon.cpp)
+		target_link_libraries(d3le dynmodglue)
+		set_target_properties(d3le PROPERTIES OUTPUT_NAME "d3le.aros-${AROS_ARCH}")
+	else()
+		add_library(d3le SHARED ${src_d3le})
+	endif()
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} PREFIX neo FILES ${src_d3le})
+	set_target_properties(d3le PROPERTIES PREFIX "")
+	# same defines as d3xp: d3le is a d3xp/RoE derivative
+	set_target_properties(d3le PROPERTIES COMPILE_DEFINITIONS "GAME_DLL;_D3XP;CTF")
+	# d3le's own dir first so every TU sees the LM-modified headers, never d3xp's
+	target_include_directories(d3le PRIVATE "${CMAKE_SOURCE_DIR}/d3le")
+	set_target_properties(d3le PROPERTIES LINK_FLAGS "${ldflags}")
+	set_target_properties(d3le PROPERTIES INSTALL_NAME_DIR "@executable_path")
+	if (AROS)
+		target_link_libraries(d3le idlib dynmod)
+	else()
+		target_link_libraries(d3le idlib)
+	endif()
+
+	if(NOT APPLE AND NOT WIN32)
+		install(TARGETS d3le
 				RUNTIME DESTINATION "${bindir}"
 				LIBRARY DESTINATION "${libdir}"
 				ARCHIVE DESTINATION "${libdir}"
