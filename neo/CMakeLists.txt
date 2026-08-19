@@ -366,6 +366,34 @@ if(DHEWM3_VULKAN)
 	message(STATUS "Vulkan renderer backend enabled (headers: ${Vulkan_INCLUDE_DIRS}; SPIR-V via ${spv_compiler})")
 endif()
 
+# Embed every GLSL source (and, on Vulkan builds, every compiled SPIR-V blob)
+# into the executable. The RHI shader loaders consult the embedded table LAST
+# (VFS -> dev source dir -> embedded), so a bare binary always has working
+# GL3/Vulkan renderers - no shader pk4 or source tree needed at runtime.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(embed_shaders_out ${CMAKE_BINARY_DIR}/shaders_embedded.cpp)
+file(GLOB embed_glsl_sources
+	${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.vert
+	${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.frag
+	${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.tesc
+	${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.tese
+	${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.glsl)
+if(DHEWM3_VULKAN)
+	set(embed_spv_args --spv ${spv_dir})
+	set(embed_spv_deps ${spv_dir}/.stamp)
+else()
+	set(embed_spv_args)
+	set(embed_spv_deps)
+endif()
+add_custom_command(
+	OUTPUT ${embed_shaders_out}
+	COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/embed_shaders.py
+	        --glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders ${embed_spv_args} --out ${embed_shaders_out}
+	DEPENDS ${embed_glsl_sources} ${embed_spv_deps}
+	        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/embed_shaders.py
+	COMMENT "Embedding shaders into the binary (shaders_embedded.cpp)"
+	VERBATIM)
+
 if(DEFINED ENV{MSYSTEM})
 	message(STATUS "Detected MSYS or similar environment. Using alternate curl path")
 	set(CURL_NO_CURL_CMAKE ON)
@@ -1506,6 +1534,10 @@ if(CORE)
 
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} PREFIX neo FILES ${src_core} ${src_sys_base} ${src_sys_core} ${src_imgui} ${src_editor_tools})
 
+	# generated embedded-shader table - out-of-tree, so added via target_sources
+	# (source_group(TREE) rejects files outside the source dir)
+	target_sources(${DHEWM3BINARY} PRIVATE ${embed_shaders_out})
+
 	target_include_directories(${DHEWM3BINARY} PRIVATE "${CMAKE_SOURCE_DIR}/libs/imgui")
 
 if(DHEWM3_VULKAN)
@@ -1555,6 +1587,9 @@ if(DEDICATED)
 	)
 	
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} PREFIX neo FILES ${src_core} ${src_sys_base} ${src_stub_openal} ${src_stub_gl} ${src_debuggerServer})
+
+	# src_core compiles the RHI shader loaders, which reference the embedded table
+	target_sources(${DHEWM3BINARY}ded PRIVATE ${embed_shaders_out})
 
 if(HARDLINK_GAME)
 	set_target_properties(${DHEWM3BINARY}ded PROPERTIES COMPILE_DEFINITIONS "IMGUI_DISABLE;ID_DEDICATED")

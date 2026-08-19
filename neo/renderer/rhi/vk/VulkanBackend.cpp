@@ -3301,6 +3301,9 @@ VulkanBackend::LoadShader
 build-tree dev fallback the GLSL loader uses (DUDE_SHADER_SPV_DIR).
 ====================
 */
+// generated at build time by shaders/embed_shaders.py (shaders_embedded.cpp)
+extern "C" bool Dude_GetEmbeddedShader( const char *name, const unsigned char **data, int *len );
+
 static bool VK_ReadSpv( const char *fileName, std::vector<byte> &out ) {
 	void *buf = NULL;
 	int len = fileSystem->ReadFile( va( "shaders/spv/%s", fileName ), &buf, NULL );
@@ -3324,6 +3327,14 @@ static bool VK_ReadSpv( const char *fileName, std::vector<byte> &out ) {
 		fclose( f );
 	}
 #endif
+
+	// embedded table: the always-present fallback so a bare binary renders
+	const unsigned char *edata;
+	int elen;
+	if ( Dude_GetEmbeddedShader( va( "spv/%s", fileName ), &edata, &elen ) ) {
+		out.assign( edata, edata + elen );
+		return true;
+	}
 	return false;
 }
 
