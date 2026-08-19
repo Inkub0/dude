@@ -15,6 +15,14 @@ and gameplay faithful. Work in progress:
 The full plan lives in [docs/vulkan-port.md](docs/vulkan-port.md). DUDE is GPLv3, like
 its base — see COPYING.txt. It runs on the same classic _DOOM 3_ / _RoE_ game data.
 
+**License note:** DUDE is a modified version of [dhewm3](https://github.com/dhewm/dhewm3),
+based on id Software's Doom 3 GPL source release. All DUDE-authored source in this
+repository — including every file under `neo/shaders/` and files without an explicit
+license header — is licensed under the GNU GPLv3 (see COPYING.txt). Third-party
+components (Dear ImGui, VMA, FSR2, SMAA, stb) keep their original licenses, stated in
+their files. **No game assets are included or redistributable here**: the `base/*.pk4`
+game data is proprietary id/Bethesda content — bring your own Doom 3 installation.
+
 ## Key Technologies
 - C++ for core engine components
 - OpenGL 3.x for graphics rendering

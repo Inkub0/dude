@@ -1,3 +1,9 @@
+/*
+===========================================================================
+Doom 3 GPL Source Code (see ArbProgram.h for license header)
+===========================================================================
+*/
+
 // DUDE: mod compatibility shim — see ModCvarTranslation.h.
 
 #include "sys/platform.h"
