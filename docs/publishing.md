@@ -1,7 +1,9 @@
 # Phase: Publishing
 
-Status: **in progress (2026-08-19)** — license hygiene done; repo name decided: **dude**;
-remaining = the user's `gh auth login` + repo creation + push (never done by the agent).
+Status: **PUBLISHED (2026-08-19)** — live at https://github.com/Inkub0/dude as a public
+GitHub **fork of dhewm/dhewm3** (renamed to `dude`; the user opted for the fork route
+over a standalone repo). License hygiene shipped; `origin` = the fork, `upstream` =
+dhewm/dhewm3; merges continue within our fork, never into dhewm3.
 
 **Goal:** publish DUDE (dhewm-rt) as its own public **GPLv3** project — engine source
 only — so the work can be shared, without ever redistributing id/Bethesda game assets.
