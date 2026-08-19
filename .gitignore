@@ -47,6 +47,12 @@ savegames/
 !/base/guis/*.gui
 !/base/guis/*.pd
 !/base/guis/dude/
+# the main-menu hi-res logo: copyright-protected id artwork, tracked as a
+# documented exception (docs/publishing.md "Known exception") — referenced by
+# the tracked mainmenu.gui and shipped in zz_dude_menu.pk4.
+!/base/guis/assets/
+!/base/guis/assets/mainmenu/
+!/base/guis/assets/mainmenu/dude_logo.tga
 /base/guis/mpmain.gui
 *.pk4.orig
 *.pk4.bak
