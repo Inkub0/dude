@@ -5747,22 +5747,29 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 					// requires the light to sit OUTSIDE the fitted view sphere (a
 					// projection from the light toward the view) — a distant sky sun
 					// qualifies; a big omni you stand next to does not, and declines.
-					if ( RB_RHI_ShadowMapPassSun( r, vLight, shadowMapProg ) ) {
-						ictx.lightShadowMapped = true;
-						ictx.lightSunShadow = true;
-						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
-						dbgShadowMapped++;
-					} else if ( r_rtSunShadows.GetBool() && ictx.interactionRtProg != 0
-							&& r->GetTlasAddress() != 0 ) {
-						// RT sun shadows (R3): the virtual-map fit declined - the light
-						// sits inside the fitted view sphere (low "sun" omnis, e.g.
-						// commoutside) - but the ray path needs no fit geometry: one ray
-						// toward the light origin serves any light. Take the sun route
-						// RT-only; mode 4 samples no map, and a zero unit-7 handle takes
-						// the backend default binding exactly like mode-0 lights.
+					//
+					// RT sun shadows (R3): when the ray path is live it serves ANY sun
+					// with a single ray toward the light origin — no fitted map needed —
+					// so SKIP the sun-map render entirely (checked first). That map would
+					// only ever be sampled by the non-RT fallback. This is the perf win
+					// for fit-PASSING suns (parallel skies, mars_city1) that used to
+					// render a full 2048² depth pass and then ignore it in favour of rays;
+					// fit-DECLINED low omnis (commoutside) already took this route on
+					// decline. lightRtOnly marks "sun route, no map rendered": mode 4
+					// samples no map (unit 7 is a 0 handle, identical to unshadowed
+					// lights), and the receiver fill downgrades to unshadowed if the TLAS
+					// dies mid-frame. rhiSunPlanes stay stale-but-unread under mode 4.
+					const bool rtServesSun = r_rtSunShadows.GetBool()
+						&& ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0;
+					if ( rtServesSun ) {
 						ictx.lightShadowMapped = true;
 						ictx.lightSunShadow = true;
 						ictx.lightRtOnly = true;
+						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );	// 0 when no map rendered; unread by mode 4
+						dbgShadowMapped++;
+					} else if ( RB_RHI_ShadowMapPassSun( r, vLight, shadowMapProg ) ) {
+						ictx.lightShadowMapped = true;
+						ictx.lightSunShadow = true;
 						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
 						dbgShadowMapped++;
 					}
