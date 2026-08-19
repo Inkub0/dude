@@ -51,6 +51,9 @@ wins the search-path priority. If the menu ever grows new asset dependencies, ad
 here — test with a clean-sandbox launch (fresh `fs_basepath` with only stock pk4s +
 this pk4, fresh `fs_savepath`) before shipping.
 
+Note on `dude_logo.tga`: copyright-protected id/Bethesda logo artwork, shipped as a
+deliberate exception — see the "Known exception" paragraph in docs/publishing.md.
+
 ## 4. Release notes + publish (user action, never the agent)
 
 Notes template: `dist/release-0.9/notes.md` (highlights, bring-your-own-game-data —
