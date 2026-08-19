@@ -2,6 +2,7 @@
 !/build.sh
 !/build-win.sh
 /dist-win/
+/deps-mingw/
 *~
 .*.swp
 *.pyc
