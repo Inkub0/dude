@@ -102,15 +102,13 @@ void R_GpuSkinProfileAddStrip( int verts ) {
 static idCVar r_gpuSkinNoUpload( "r_gpuSkinNoUpload", "0", CVAR_RENDERER | CVAR_BOOL,
 	"skip the redundant CPU ambient-cache upload for GPU-skinned surfaces (draw from gpuSkinVB); needs r_gpuSkinning on (Vulkan)" );
 
-// Milestone D (docs/gpu-offload-plan.md): strip the redundant CPU position skin (TransformVerts +
-// R_BoundTriSurf + derive + ambient upload) for GPU-skinned surfaces the frame proves safe. This is
-// the piece that lets GPU skinning actually REMOVE CPU work instead of layering on top of it -- the
-// four-pin safety gate lives in idMD5Mesh::UpdateSurface. Non-archived + default off; Vulkan-only in
-// effect (needs r_gpuSkinning, itself VK-only). OFF = the stock CPU skinner, byte-for-byte.
-idCVar r_gpuSkinStripCpu( "r_gpuSkinStripCpu", "0", CVAR_RENDERER | CVAR_BOOL,
-	"strip the redundant CPU position skin for GPU-skinned surfaces (needs r_gpuSkinning, Vulkan)" );
-bool r_skinStripThisModel = false;			// armed per-entity by R_EntityDefDynamicModel around InstantiateDynamicModel
-bool r_viewHasStencilShadowLights = false;	// computed once per view at the top of R_AddModelSurfaces
+// Milestone D (r_gpuSkinStripCpu) RETIRED 2026-08-18: stripping the CPU POSITION skin left an
+// animated monster's tri->verts[].xyz at bind pose, and the game traces player hits against those
+// exact verts (combat clip model = render model, CONTENTS_RENDERMODEL -> ModelTrace -> R_LocalTrace)
+// -> monsters became invulnerable. The strip cannot be made safe (every living monster's render
+// mesh is its hit surface, unknowable to the renderer), so the cvar + its per-view stencil-light
+// probe + the per-entity arm are gone. GPU skinning still offloads the DRAW; the position skin
+// always runs (idMD5Mesh::UpdateSurface).
 
 /*
 ==================
@@ -1283,28 +1281,8 @@ idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def ) {
 	// if we don't have a snapshot of the dynamic model, generate it now
 	if ( !def->dynamicModel ) {
 
-		// Milestone D (docs/gpu-offload-plan.md): decide, for THIS entity, whether idMD5Mesh::UpdateSurface
-		// may strip the CPU position skin. Safe only when nothing will read tri->verts.xyz this frame:
-		// no overlay/decal on the entity (AddOverlaySurfacesToModel below stamps from posed verts every
-		// frame), and no stencil-shadow light in the view (R_CreateShadowVolume). The per-light-cull and
-		// bounds readers are handled inside the skin path itself (full-index lightTris + CalcBoundsFast).
-		// UpdateSurface adds the Vulkan + skin-data-ready gates and makes the final call. Armed only around
-		// the instantiate, then disarmed so no other InstantiateDynamicModel caller inherits the state.
-		// EDGE (documented, accepted for v1): the strip decision is cached with the dynamic model, so an
-		// entity instantiated in a non-stencil primary view and then re-seen in a stencil SUBVIEW the same
-		// frame would cast a wrong stencil volume. Unreachable with shadow mapping on (no stencil lights in
-		// either view) which is the preset default; only a mirror-with-stencil-lights-the-main-view-lacks
-		// could trip it, and the failure is a wrong shadow, not a crash (verts stays allocated).
-		r_skinStripThisModel =
-			r_gpuSkinStripCpu.GetBool()
-			&& r_gpuSkinning.GetBool()
-			&& !r_viewHasStencilShadowLights
-			&& !( def->overlay && !r_skipOverlays.GetBool() );
-
 		// instantiate the snapshot of the dynamic model, possibly reusing memory from the cached snapshot
 		def->cachedDynamicModel = model->InstantiateDynamicModel( &def->parms, tr.viewDef, def->cachedDynamicModel );
-
-		r_skinStripThisModel = false;
 
 		if ( def->cachedDynamicModel ) {
 
@@ -2372,24 +2350,6 @@ void R_AddModelSurfaces( void ) {
 	// DUDE GPU-offload Phase 3.2 (r_gpuCullLive): arm the live-cull collector for this view (at
 	// most once/sec). When armed, R_AddAmbientDrawsurfs records each cull candidate below.
 	R_GpuCull_ResetLive();
-
-	// DUDE Milestone D (r_gpuSkinStripCpu, docs/gpu-offload-plan.md): decide once for this view whether
-	// ANY light will build a CPU stencil shadow volume -- a per-frame reader of tri->verts.xyz that
-	// would break if an animated mesh stripped its CPU position skin. If none will, R_EntityDefDynamicModel
-	// (below, via the entity/interaction walk) may let meshes strip. Mirrors CreateInteraction's routing:
-	// a light only stencils when it casts shadows AND is not shadow-mapped (R_ShadowMapSkipStencilBuild).
-	// Conservative (per-entity noShadow ignored -> assume some caster exists); cheap (a few view lights).
-	r_viewHasStencilShadowLights = false;
-	if ( r_gpuSkinStripCpu.GetBool() ) {
-		for ( viewLight_t *vl = tr.viewDef->viewLights; vl; vl = vl->next ) {
-			const idRenderLightLocal *ld = vl->lightDef;
-			if ( ld && ld->lightShader && ld->lightShader->LightCastsShadows()
-			     && !R_ShadowMapSkipStencilBuild( ld, ld->lightShader ) ) {
-				r_viewHasStencilShadowLights = true;
-				break;
-			}
-		}
-	}
 
 	// go through each entity that is either visible to the view, or to
 	// any light that intersects the view (for shadows)

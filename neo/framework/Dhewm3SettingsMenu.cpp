@@ -3743,18 +3743,8 @@ static void DrawDbgGroup_GpuOffload()
 			r_gpuSkinning.SetBool( gpuSkin );
 		}
 		AddTooltip( "r_gpuSkinning: skin animated meshes on the GPU. Non-faithful (option-B TBN, not Doom 3's "
-			"exact CPU skin), so off by default. Prerequisite for the CPU-skin strip below, and for ray-tracing "
-			"animated geometry later. Takes effect on the next map load." );
-
-		ImGui::BeginDisabled( !r_gpuSkinning.GetBool() );
-		bool strip = r_gpuSkinStripCpu.GetBool();
-		if ( ImGui::Checkbox( "Strip redundant CPU skin", &strip ) ) {
-			r_gpuSkinStripCpu.SetBool( strip );
-		}
-		AddTooltip( "r_gpuSkinStripCpu: drop the now-redundant CPU position-skin for GPU-skinned surfaces. "
-			"Frees CPU time — measured ~+3% fps when CPU-bound (weaker GPU / low presets); no change when "
-			"GPU-bound. Needs GPU skinning on." );
-		ImGui::EndDisabled();
+			"exact CPU skin), so off by default. Offloads the DRAW; the CPU position skin still runs (it is the "
+			"monster hit surface). Prerequisite for ray-tracing animated geometry later. Next map load." );
 
 		ImGui::Separator();
 
