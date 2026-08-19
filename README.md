@@ -1,19 +1,13 @@
 # DUDE — Doom3 Unified Development Engine
 
-# Project Overview
-**DUDE** is a fork of [dhewm3](https://github.com/dhewm/dhewm3) (itself a GPL source
+**DUDE** is a fork of [dhewm3](https://github.com/dhewm/dhewm3) (itself the GPL source
 port of _DOOM 3_) that modernizes the renderer while keeping the classic _DOOM 3_ look
-and gameplay faithful. Work in progress:
-
-- A modernized **OpenGL 3.3 core** renderer and a **Vulkan** renderer (1.1 baseline for
-  wide hardware support, plus a modern `vulkan-rt` profile targeting ray tracing),
-  selectable via the `r_graphicsAPI` cvar.
-- ARB assembly shaders translated to a **shared GLSL source tree** (GL + SPIR-V).
-- Opt-in enhancements kept strictly separate from the faithful defaults (an
-  "Improvements over the classic engine" menu section).
-
-The full plan lives in [docs/vulkan-port.md](docs/vulkan-port.md). DUDE is GPLv3, like
-its base — see COPYING.txt. It runs on the same classic _DOOM 3_ / _RoE_ game data.
+and gameplay faithful. The stock renderer's ARB assembly shaders are translated to a
+shared GLSL source tree serving two new backends — **OpenGL 3.3 core** and **Vulkan**
+(1.4, with hardware ray tracing where available) — selectable via the `r_graphicsAPI`
+cvar, with the original ARB renderer kept intact as the faithful reference. All visual
+enhancements are **opt-in**, driven by in-game quality presets whose floor is the
+unmodified classic look.
 
 **License note:** DUDE is a modified version of [dhewm3](https://github.com/dhewm/dhewm3),
 based on id Software's Doom 3 GPL source release. All DUDE-authored source in this
@@ -23,96 +17,84 @@ components (Dear ImGui, VMA, FSR2, SMAA, stb) keep their original licenses, stat
 their files. **No game assets are included or redistributable here**: the `base/*.pk4`
 game data is proprietary id/Bethesda content — bring your own Doom 3 installation.
 
-## Key Technologies
-- C++ for core engine components
-- OpenGL 3.x for graphics rendering
-- Vulkan for alternative graphics API support
-- CMake for build system
-- Various third-party libraries (ImGui, miniz, etc.)
+## Features
 
-## Project Structure
+**Renderers** (`r_graphicsAPI opengl | opengl3 | vulkan`)
+- Legacy **OpenGL/ARB** path (`opengl`, the default) — untouched, the faithful reference.
+- **OpenGL 3.3 core** — the stock look re-expressed in GLSL, plus the enhancement suite.
+- **Vulkan 1.4** — same enhancement suite, plus Vulkan-only features below. VMA-managed
+  memory, persistent scene buffers, GPU timestamps (`r_vkGpuTime`).
+
+**Opt-in enhancement suite** (GL3 + Vulkan; presets *Potato → Nightmare* in the classic
+System menu, "Potato" = unmodified classic rendering)
+- Shadow maps: cube shadows with rotated-Vogel PCF, sun/parallel-light shadow maps
+  (stencil shadows remain the fallback and the faithful default).
+- HDR pipeline, SSAO, PBR (GGX) with screen-space reflections, parallax occlusion
+  mapping, soft particles, baked per-material AO maps.
+- Anti-aliasing: SMAA 1x / FXAA, and **AMD FSR2** in Native-AA mode (motion vectors +
+  jittered projection) on Vulkan.
+- Smaller touches: depth-of-field on weapon reload, self-lit pickup glow, emissive GUI
+  surfaces casting light, smoke-in-darkness blending, hi-res GUI font atlases.
+
+**Vulkan-only**
+- **Ray-traced sun shadows** (`r_rtSunShadows`) via `VK_KHR_ray_query` on RT-capable GPUs.
+- **GPU tessellation** for characters/monsters (PN triangles + displacement), GPU skinning.
+- Parallel image decode on level load, buffer-device-address batched indirect depth
+  prepass, and other GPU-driven experiments (see [docs/gpu-offload-plan.md](docs/gpu-offload-plan.md)).
+
+**Engine quality-of-life**
+- `com_interpolate` — render above 60 fps while the game simulates at its native 60 Hz.
+- `com_maxFPS` frame limiter, SSE4.1 SIMD baseline, runtime ARB→SPIR-V compilation so
+  classic mod shaders work on the new backends, cvar-translation shim for old mods.
+
+## Future development — the RTX pipeline
+
+The long-term goal is to progressively **replace the raster rendering pipeline with ray
+tracing** on RT-capable hardware. The foundation is already shipped: acceleration-structure
+infrastructure over the live game scene, `VK_KHR_ray_query` shading, ray-traced sun
+shadows, a GPU compute lane, and per-frame GPU-resident deformed geometry for animated
+models. From there the roadmap ([docs/rtx-shadow-roadmap.md](docs/rtx-shadow-roadmap.md))
+climbs tier by tier:
+
+1. **Ray-traced shadows for all lights** — replacing shadow maps and stencil volumes
+   with per-pixel traced visibility (the sun tier already works).
+2. **Ray-traced reflections** — replacing screen-space reflections and their
+   off-screen blind spots.
+3. **Ray-traced ambient occlusion and indirect lighting**, converging on a fully
+   ray-traced (path-traced) lighting pipeline in the spirit of the classic-game RTX
+   remasters.
+
+As with everything else in DUDE, the RTX path is additive: the faithful raster
+renderers remain, both as the default look and as the path for GPUs without ray
+tracing support.
+
+## Building
+
+Linux (native):
 ```
-.
-├── .continue/              # Continue-specific configuration
-├── base/                   # Base game assets and configurations
-├── build.sh                # Build script
-├── docs/                   # Documentation files
-├── neo/                    # Main engine source code
-│   ├── CMakeLists.txt      # CMake build configuration
-│   ├── framework/          # Core framework components
-│   ├── game/               # Game logic and entities
-│   ├── idlib/              # Utility libraries
-│   ├── renderer/           # Rendering system
-│   ├── shaders/            # Shader files
-│   └── sys/                # System-specific code
-├── scripts/                # Utility scripts
-└── *.md                    # Documentation files
+./build.sh              # GL3 + legacy renderers  -> build/dude
+./build.sh --vulkan     # + the Vulkan backend (needs Vulkan headers + glslang)
+./run.sh                # launch
 ```
 
-## Getting Started
+Windows (cross-compiled from Linux with mingw-w64):
+```
+./build-win.sh          # GL3 + Vulkan            -> dist-win/dude.exe (+ DLLs, self-contained)
+./build-win.sh --no-vulkan
+```
 
-### Prerequisites
-- C++ compiler (C++17 or later)
-- CMake 3.10 or higher
-- OpenGL 3.x compatible graphics hardware
-- Vulkan SDK (for Vulkan support)
-- SDL2 or similar windowing system
+Dependencies: CMake, GCC or Clang (C++17 for the Vulkan backend), SDL2 (SDL3 works as a
+fallback), OpenAL; Vulkan headers + `glslangValidator` for the Vulkan backend; optional
+`shaderc` for runtime mod-shader compilation on Vulkan.
 
-### Installation Instructions
-1. Clone the repository
-2. Run `./build.sh` to build the project
-3. Configure using CMake
-4. Build using your preferred build system
+## Running
 
-## Development Workflow
-
-### Coding Standards
-- C++17 compliant code
-- Follow id Tech 4 coding conventions
-- Modular design with clear separation of concerns
-- Memory management practices consistent with engine architecture
-
-### Testing Approach
-- Unit testing for core components
-- Integration testing for rendering and game systems
-- Performance testing for graphics subsystems
-- Cross-platform compatibility testing
-
-## Key Concepts
-
-### Domain-Specific Terminology
-- **pk4**: Game data archive files (similar to .pk3 in Quake 3)
-- **Renderer**: Graphics subsystem handling rendering pipeline
-- **Framework**: Core engine components (memory, math, file I/O)
-- **Game**: Game logic and entity definitions
-- **Shader**: Graphics program for rendering effects
-
-### Core Abstractions
-- Entity-component system for game objects
-- Modular renderer architecture supporting multiple backends
-- Resource management system for assets
-- Configuration system for engine settings
-
-## Common Tasks
-
-### Building the Project
-1. Ensure dependencies are installed
-2. Run `./build.sh` or `cmake . && make`
-3. Verify build completes successfully
-
-### Debugging Issues
-- Use logging system for debugging information
-- Utilize debugger to step through engine components
-- Check configuration files for incorrect settings
-- Review documentation for known issues
-
-## Troubleshooting
-
-### Common Issues and Solutions
-- **Build failures**: Ensure all dependencies are installed and CMake is configured properly
-- **Renderer issues**: Verify graphics hardware compatibility and driver versions
-- **Asset loading problems**: Check pk4 archive integrity and file paths
-- **Performance issues**: Profile rendering pipeline and optimize shaders
+DUDE needs the original _DOOM 3_ / _Resurrection of Evil_ game data (`base/*.pk4`,
+`d3xp/*.pk4`) from your own copy of the game (the Steam/GOG classic version, not the
+BFG edition). Point the engine at it with `+set fs_basepath /path/to/doom3`, or place
+the pk4s next to the executable. Writable data (configs, saves, screenshots) lives in
+its own "dude folder" (`~/.local/share/dude` on Linux, `Documents/My Games/dude` on
+Windows).
 
 # Upstream: dhewm3
 
