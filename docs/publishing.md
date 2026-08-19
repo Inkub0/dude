@@ -55,6 +55,14 @@ community widescreen pack rather than raw id files, and slated for a complete
 from-scratch re-authoring (docs/main-menu-dude-button.md). Risk acknowledged: they
 still share lineage with id's GUI scripts; the full rewrite retires the concern.
 
+**Known exception — `base/guis/assets/mainmenu/dude_logo.tga`:** the high-res DOOM 3
+logo used by the DUDE main menu. It is **technically copyright-protected id/Bethesda
+artwork** (the same logo art is distributed through other channels, e.g. the Steam
+store assets) — tracked in the repo and shipped in `zz_dude_menu.pk4` as a knowing,
+deliberate exception to the assets rule, on the theory that a game logo used to launch
+that same game is the lowest-risk asset class. If it ever draws a complaint, drop it
+from the repo/pk4 and let the menu fall back to text or a re-drawn original logo.
+
 ## Steps (when we do it)
 
 1. Create the empty public repo (standalone recommended; GitHub/GitLab/Codeberg).
