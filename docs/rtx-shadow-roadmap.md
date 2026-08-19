@@ -88,9 +88,18 @@ sun (opaque + terminate-on-first-hit) in a separate `interaction_rt` program (th
 ray-query capability fails pipeline creation on non-RT hardware, so the base shader stays
 clean). Serves BOTH sun species: parallel suns AND the low oversize omnis the virtual-map fit
 declines (`lightRtOnly` route — those lights render no sun map at all). TLAS address rides the
-RenderParams UBO bit-cast (floatBitsToUint). Static + mover casters; monsters pending (below).
-The sun-map render is now skipped for EVERY RT-served sun (both parallel and fit-declined),
-so RT suns render no map at all — pure ray path. Remaining: animated-monster casters; cube lights.
+RenderParams UBO bit-cast (floatBitsToUint). The sun-map render is now skipped for EVERY
+RT-served sun (both parallel and fit-declined), so RT suns render no map at all — pure ray path.
+
+**Animated monster casters DONE + user-verified 2026-08-18** (`r_rtMonsterShadows`, default on):
+each frame the view-entity chain's DM_CACHED characters are gathered (their always-posed
+CPU-skinned verts baked to world by `vEnt->modelMatrix`) into one combined world-space soup →
+a per-frame dynamic BLAS rebuilt on the frame cb ahead of the TLAS build, appended as one
+identity instance. Key lessons: (1) PERFORATED (alpha-tested) surfaces must cast — D3 characters
+are ~90% perforated and D3's own stencil treats them as solid occluders (R_RtSurfCasts admits
+OPAQUE||PERFORATED); (2) walk `viewEntitys` keyed on `dynamicModel != NULL`, NOT
+`dynamicModelFrameCount == tr.frameCount` — a held/idle pose isn't re-instantiated, which
+flickered. Remaining: cube/point lights; alpha-tested any-hit (holes in shadows) refinement.
 Inline query in the interaction path (shadow mode 4): **one ray toward the light**,
 `TerminateOnFirstHit | Opaque | SkipClosestHit`; alpha-tested casters marked non-opaque, resolved in
 the candidate loop (`rayQueryConfirmIntersectionEXT`). Deterministic, noise-free — **no denoiser, no
