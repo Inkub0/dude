@@ -1411,25 +1411,49 @@ static unsigned long long R_RtBuildScene( rhi::RHI *r,
 // (dynamicModelFrameCount == tr.frameCount) qualify - off-screen/not-updated characters are
 // skipped (their sun shadow is missed; a v1 limit). Returns false with nothing allocated when
 // there are no monster casters; else the caller Mem_Free16's pos/idx.
+// TEMP DIAG (monster casters not appearing): where do monsters drop out of the gather? Remove once found.
+static int s_rtDbgEnts, s_rtDbgCached, s_rtDbgFresh, s_rtDbgCasting, s_rtDbgOpaqueSurf, s_rtDbgPerfSurf;
 static bool R_RtGatherMonstersWorld( const idRenderWorldLocal *world, float *&pos, int *&idx,
 		int &numVerts, int &numIndexes ) {
 	pos = NULL; idx = NULL; numVerts = 0; numIndexes = 0;
+	s_rtDbgEnts = s_rtDbgCached = s_rtDbgFresh = s_rtDbgCasting = s_rtDbgOpaqueSurf = s_rtDbgPerfSurf = 0;
 
 	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
 		const idRenderEntityLocal *def = world->entityDefs[i];
-		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || def->parms.weaponDepthHack
+		if ( def == NULL || def->parms.hModel == NULL ) {
+			continue;
+		}
+		s_rtDbgEnts++;
+		const bool cached = def->parms.hModel->IsDynamicModel() == DM_CACHED;
+		if ( cached ) { s_rtDbgCached++; }
+		const bool fresh = cached && def->dynamicModel != NULL && def->dynamicModelFrameCount == tr.frameCount;
+		if ( fresh ) { s_rtDbgFresh++; }
+		if ( fresh && !def->parms.noShadow && !def->parms.weaponDepthHack ) {
+			const idRenderModel *dmd = def->dynamicModel;
+			for ( int s = 0; s < dmd->NumSurfaces(); s++ ) {
+				const modelSurface_t *sf = dmd->Surface( s );
+				if ( sf->geometry && sf->shader ) {
+					if ( sf->shader->Coverage() == MC_OPAQUE ) { s_rtDbgOpaqueSurf++; } else { s_rtDbgPerfSurf++; }
+				}
+			}
+		}
+
+		if ( def->parms.noShadow || def->parms.weaponDepthHack
 			|| def->parms.hModel->IsDynamicModel() != DM_CACHED
 			|| def->dynamicModel == NULL || def->dynamicModelFrameCount != tr.frameCount ) {
 			continue;
 		}
 		const idRenderModel *dm = def->dynamicModel;
+		bool anyCast = false;
 		for ( int s = 0; s < dm->NumSurfaces(); s++ ) {
 			if ( !R_RtSurfCasts( dm->Surface( s ) ) ) {
 				continue;
 			}
+			anyCast = true;
 			numVerts += dm->Surface( s )->geometry->numVerts;
 			numIndexes += dm->Surface( s )->geometry->numIndexes;
 		}
+		if ( anyCast ) { s_rtDbgCasting++; }
 	}
 	if ( numIndexes < 3 ) {
 		numVerts = numIndexes = 0;
@@ -1534,8 +1558,19 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 		// hand it to the backend (rebuilds a per-frame dynamic BLAS + appends one identity
 		// instance to the TLAS). MUST precede UpdateTlas, which consumes the dyn-caster arm.
 		if ( r_rtSunShadows.GetBool() && r_rtMonsterShadows.GetBool() ) {
-			float *mpos; int *midx; int mnv, mni;
-			if ( R_RtGatherMonstersWorld( world, mpos, midx, mnv, mni ) ) {
+			float *mpos; int *midx; int mnv = 0, mni = 0;
+			const bool got = R_RtGatherMonstersWorld( world, mpos, midx, mnv, mni );
+			// TEMP DIAG (monsters not casting): once/sec, where do they drop out? Remove once found.
+			static int s_dbgLast = 0;
+			const int now = Sys_Milliseconds();
+			if ( now - s_dbgLast >= 1000 ) {
+				s_dbgLast = now;
+				common->Printf( "rt monsters: %d ents, %d DM_CACHED, %d fresh-this-frame, %d casting "
+					"(surfs: %d opaque, %d perforated) -> %d verts / %d tris\n",
+					s_rtDbgEnts, s_rtDbgCached, s_rtDbgFresh, s_rtDbgCasting,
+					s_rtDbgOpaqueSurf, s_rtDbgPerfSurf, mnv, mni / 3 );
+			}
+			if ( got ) {
 				r->UpdateDynamicGeometry( mpos, mnv, midx, mni );
 				Mem_Free16( mpos );
 				Mem_Free16( midx );
