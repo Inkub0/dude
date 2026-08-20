@@ -4066,6 +4066,17 @@ static void DrawDbgGroup_ShadowMaps()
 			vram, autoBudget ? va( "%d MB (auto)", autoMB )
 			                 : ( budget == 0 ? "unlimited" : va( "%d MB", budget ) ) );
 	}
+
+	int dynDrop = idMath::ClampInt( 0, 2, r_shadowMapSplitDynDrop.GetInteger() );
+	if ( ImGui::Combo( "Movers' Layer Resolution", &dynDrop, "Same as static\0Half\0Quarter\0" ) ) {
+		r_shadowMapSplitDynDrop.SetInteger( dynDrop );
+	}
+	AddTooltip( "r_shadowMapSplitDynDrop: when a monster/mover shares a cached static light, its "
+		"shadow renders into a separate cube that regenerates every frame. Rendering that cube at "
+		"a lower resolution cuts the recurring per-frame cost; the moving shadow gets proportionally "
+		"softer (filter and bias scale to match) while the cached static shadows stay full-res. "
+		"Default: Half." );
+
 	ImGui::EndDisabled();	// cache on
 
 	ImGui::EndDisabled();	// shadow mapping on

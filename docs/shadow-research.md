@@ -262,6 +262,14 @@ work**, not interaction-pass tap count:
    thrash** — so rendering movers at half resolution is safe by construction and quarters the
    per-frame fill they pay. Matches HDRP/CoD budget-by-importance practice. Attacks (a)×(b)
    where they compound.
+   > **SHIPPED + user-verified 2026-08-20** (`r_shadowMapSplitDynDrop`, default **1** = half;
+   > 2 = quarter; ImGui knob in Debugging → Shadows → static-cache group). The ratio rides
+   > `u_pbrParms2.z` (the old 0/1 dyn gate), widening the dynamic cube's PCF disc + depth bias
+   > to its coarser texels — verified "reasonably well, cube-edge softness"; static shadows
+   > untouched via the min() combine. Measured on a single-zombie scene: ~0.04 ms (noise-floor,
+   > as predicted — the win scales with split-light count and debris load). A/B lesson re-learned:
+   > the GPU timer reads vsync-padded frames — **disable vsync before any r_vkGpuTime A/B**.
+   > This lever is now CLOSED; the remaining structural work is the Option A/B decision below.
 3. **Update scheduling** (Nth-frame refresh for low-importance lights, screen-size update
    frequency — the T2 item): confirmed still-current practice (UE5.7 VSM page caching, HDRP
    OnDemand/OnEnable update modes are the same idea industrialized). Attacks (b) by amortizing.
