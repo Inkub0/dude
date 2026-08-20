@@ -269,7 +269,10 @@ work**, not interaction-pass tap count:
    > untouched via the min() combine. Measured on a single-zombie scene: ~0.04 ms (noise-floor,
    > as predicted — the win scales with split-light count and debris load). A/B lesson re-learned:
    > the GPU timer reads vsync-padded frames — **disable vsync before any r_vkGpuTime A/B**.
-   > This lever is now CLOSED; the remaining structural work is the Option A/B decision below.
+   > Preset-wired 2026-08-20: every tier carries drop 1 (half) except **Nightmare, which keeps
+   > the movers' cube at full res** (drop 0) — the no-compromise tier absorbs the cost, the
+   > tiers below keep the trim. This lever is now CLOSED; the remaining structural work is the
+   > Option A/B decision below.
 3. **Update scheduling** (Nth-frame refresh for low-importance lights, screen-size update
    frequency — the T2 item): confirmed still-current practice (UE5.7 VSM page caching, HDRP
    OnDemand/OnEnable update modes are the same idea industrialized). Attacks (b) by amortizing.
