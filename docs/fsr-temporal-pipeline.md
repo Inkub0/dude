@@ -9,6 +9,22 @@ benefit both RHI backends. Legacy ARB is never touched. Every increment is cvar-
 **OFF == today's renderer, bit-for-bit**. Each increment section below carries its as-built
 record above the original plan text.
 
+## PARKED FOLLOW-UP — FSR2 optimisation wishlist (user-approved 2026-08-20, not scheduled)
+
+Three post-R1 improvements the user wants pursued eventually — parked deliberately, do not
+chase until FSR2 work reopens (limb ghosting sighting or the RT-era upscaling package):
+
+1. **Velocity into the merged normal prepass** (~0.3–0.5 ms GPU back): `r_fsr` currently
+   forces the STANDALONE 3-MRT G-buffer pass even when the merged-into-zfill normal path
+   could carry a 3rd attachment. Deliberately sidestepped in A2 because the merged pass owns
+   the depth-EQUAL / `RB_RHI_TessBumpForZfill` tessellation contract (the ember/acne bug
+   class) — the riskiest cheap win, needs that contract re-verified.
+2. **Kill the Native-AA copy-back** (~0.1 ms): needs the scene/HUD reorder below — bundle
+   with the upscaling work, not standalone.
+3. **Feed the engine's eye-adaptation exposure to FSR2** (drop `FFX_FSR2_ENABLE_AUTO_EXPOSURE`,
+   pass the 1x1 `rbEyeExposureImg` as the `exposure` resource) so accumulation weighting
+   matches the tonemap exactly. Small; only matters if brightness-transition artifacts show.
+
 ## PARKED FOLLOW-UP — sub-native upscaling (the "real FSR" fps lever)
 
 Deliberately NOT built in R1 (the game is CPU-front-end bound today, so a GPU-side fps win
