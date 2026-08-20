@@ -83,16 +83,18 @@ vec2 vogelDisc( int i, int n, float phi ) {
 // Hardware 2x2 depth-compare, optionally widened to a rotated-Vogel disc PCF
 // (u_specularParms.w taps). Factored out so the static and dynamic (lever B) cubes
 // filter identically. 0 = shadowed, 1 = lit.
-float sampleCubeShadow( samplerCubeShadow cube, vec3 L, float ref, float dist ) {
+float sampleCubeShadow( samplerCubeShadow cube, vec3 L, float ref, float dist, float texelScale ) {
 	int taps = int( u_specularParms.w + 0.5 );
 	if ( taps <= 1 ) {
 		return texture( cube, vec4( L, ref ) );		// single hardware 2x2 tap
 	}
 	// Disc PCF: perturb L within its tangent plane by a few texels' worth of angle and average.
+	// texelScale widens the disc for a coarser cube (the r_shadowMapSplitDynDrop dynamic
+	// layer), keeping the kernel the same width in ITS texels — softer, not blockier.
 	vec3 up = abs( L.y ) < 0.99 ? vec3( 0.0, 1.0, 0.0 ) : vec3( 1.0, 0.0, 0.0 );
 	vec3 tx = normalize( cross( up, L ) );
 	vec3 ty = cross( L, tx ) / dist;	// tx is unit and perpendicular to L, so |cross| == dist
-	float r = 4.0 * dist * u_shadowParms.y;	// one cube texel (2*dist/res) * ~2 texels spread
+	float r = 4.0 * dist * u_shadowParms.y * texelScale;	// one cube texel (2*dist/res) * ~2 texels spread
 
 	float phi = 6.2831853 * shadowHash( gl_FragCoord.xy );
 	vec3 txr = tx * r;
@@ -158,12 +160,16 @@ float shadowVisibility() {
 		vec3 L = var_ShadowCubeVec;
 		float dist = length( L );
 		float ref = dist / max( u_shadowParms.w, 1.0 ) - depthBias;
-		float vis = sampleCubeShadow( u_shadowCube, L, ref, dist );
+		float vis = sampleCubeShadow( u_shadowCube, L, ref, dist, 1.0 );
 		// DUDE static/dynamic split (lever B): when this light has a dynamic (movers-only) cube
 		// layer, min the two — the nearest occluder across both is identical to one combined cube.
-		// u_pbrParms2.z = hasDynamicLayer (0 = no dynamic layer -> the second sample is skipped).
+		// u_pbrParms2.z = the static/dynamic face-res ratio, doubling as the gate (0 = no
+		// dynamic layer -> the second sample is skipped; 1 = same size; >1 = the movers' cube
+		// is r_shadowMapSplitDynDrop tiers coarser, so widen its PCF disc and depth bias to
+		// its own texel size).
 		if ( u_pbrParms2.z > 0.5 ) {
-			vis = min( vis, sampleCubeShadow( u_shadowCubeDyn, L, ref, dist ) );
+			float refDyn = ref - depthBias * ( u_pbrParms2.z - 1.0 );
+			vis = min( vis, sampleCubeShadow( u_shadowCubeDyn, L, refDyn, dist, u_pbrParms2.z ) );
 		}
 		return vis;
 	}

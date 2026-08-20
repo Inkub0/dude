@@ -82,6 +82,7 @@ static struct {
 	// interaction shader samples min(u_shadowCube, u_shadowCubeDyn) when this is set.
 	bool				lightHasDynamicLayer;
 	rhi::ImageHandle	shadowCubeDynImage;
+	float				shadowCubeDynScale;	// static/dynamic face-res ratio (r_shadowMapSplitDynDrop)
 	float				lightRange;
 	// The player flashlight (light shader "lights/flashlight5", a narrow projected
 	// spot that hugs surfaces and sweeps every frame) self-shadows badly at the
@@ -116,6 +117,10 @@ static int rhiShadowCubeSize = 0;
 // the movers into this scratch cube (regenerated every frame). 0 = no dynamic layer this
 // light (the common case). The interaction pass samples min(rhiShadowCube, rhiShadowCubeDyn).
 static rhi::RenderTargetHandle rhiShadowCubeDyn = 0;
+// r_shadowMapSplitDynDrop: static-to-dynamic face-resolution ratio (1.0 = same size).
+// Rides u_pbrParms2.z into the shader, which widens the dynamic cube's PCF disc and
+// depth bias to its coarser texels.
+static float rhiShadowCubeDynScale = 1.0f;
 
 // r_shadowMapDebug: perforated (grate/fence) caster surfaces drawn into the map
 // this view — confirms the alpha-tested casters are actually reaching the pass.
@@ -1232,7 +1237,10 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			parms.shadowParms[3] = ictx.lightRange;	// radial-distance normalizer
 			// static/dynamic split: also sample the movers' cube (unit 12) and take the
 			// darker of the two. pbrParms2.z is the hasDynamicLayer flag the shader gates on.
-			parms.pbrParms2[2] = ( ictx.lightHasDynamicLayer && ictx.shadowCubeDynImage ) ? 1.0f : 0.0f;
+			// dynamic-layer gate doubling as the static/dynamic face-res ratio: 0 = no
+			// dynamic cube; >= 1 = sample it, widening its PCF disc + depth bias by this
+			// factor (r_shadowMapSplitDynDrop renders the movers' cube at a lower tier).
+			parms.pbrParms2[2] = ( ictx.lightHasDynamicLayer && ictx.shadowCubeDynImage ) ? ictx.shadowCubeDynScale : 0.0f;
 			// normal-offset bias (interaction.vert/.tese): strength in texels; the shader
 			// derives the world size per texel from 2*dist/res (exact for a cube face)
 			parms.pbrParms2[3] = r_shadowMapNormalOffset.GetFloat();
@@ -3133,7 +3141,7 @@ static void RB_RHI_ResetLightBudgetHyst();		// defined with the hysteresis helpe
 // the new context. Driven by RB_RHI_Shutdown (RhiBackend.cpp).
 void RB_RHI_ResetWorldTargets( void ) {
 	rhiShadowMap = 0;			rhiShadowMapSize = 0;
-	rhiShadowCube = 0;			rhiShadowCubeSize = 0;	rhiShadowCubeDyn = 0;
+	rhiShadowCube = 0;			rhiShadowCubeSize = 0;	rhiShadowCubeDyn = 0;	rhiShadowCubeDynScale = 1.0f;
 	for ( int i = 0; i < SHADOW_NTIERS; i++ ) {
 		rhiShadowMapPool[i].rt  = 0;	rhiShadowMapPool[i].size  = 0;
 		rhiShadowCubePool[i].rt = 0;	rhiShadowCubePool[i].size = 0;
@@ -3297,6 +3305,7 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	rhiShadowCube = target;
 	rhiShadowCubeSize = size;
 	rhiShadowCubeDyn = 0;			// set below only if this light renders a dynamic layer
+	rhiShadowCubeDynScale = 1.0f;
 	if ( target == 0 ) {
 		return false;
 	}
@@ -3376,11 +3385,25 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	// (this cube lives one frame). Failing to get a scratch target just drops the dynamic
 	// shadow this frame (the static shadow still shows); u_shadowCubeDyn stays unbound.
 	if ( splitActive ) {
-		const rhi::RenderTargetHandle dynTarget = RB_RHI_ShadowPoolTarget( r, true, tier, size );
+		// r_shadowMapSplitDynDrop: the dynamic cube re-renders every frame (it can never
+		// cache), so its resolution is a pure per-frame fill cost — render it N tiers
+		// below the static cube. Tier-canonical sizes keep the pool slots stable (no
+		// recreate churn); floors at pool tier 0. The shader widens the dynamic PCF disc
+		// and depth bias by the resulting ratio, so the movers' shadow reads as a
+		// proportionally softer version of the same filter, not a blockier one.
+		int tierDyn = tier;
+		int sizeDyn = size;
+		const int drop = idMath::ClampInt( 0, 2, r_shadowMapSplitDynDrop.GetInteger() );
+		if ( drop > 0 && tier > 0 ) {
+			tierDyn = ( tier - drop > 0 ) ? ( tier - drop ) : 0;
+			sizeDyn = RB_RHI_TierSize( base, tierDyn, 128, cubeHi );
+		}
+		const rhi::RenderTargetHandle dynTarget = RB_RHI_ShadowPoolTarget( r, true, tierDyn, sizeDyn );
 		if ( dynTarget != 0 && dynTarget != target ) {
 			const bool allFaces[6] = { true, true, true, true, true, true };
 			RB_RHI_RenderCubeFaces( r, vLight, prog, dynTarget, range, allFaces, /*faceCull=*/true, CF_DYNAMIC );
 			rhiShadowCubeDyn = dynTarget;
+			rhiShadowCubeDynScale = ( sizeDyn > 0 ) ? ( (float)size / (float)sizeDyn ) : 1.0f;
 		}
 	}
 	return true;
@@ -5215,6 +5238,80 @@ void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_ForgetTexBinds();
 }
 
+/*
+===================
+RB_RHI_ChromaticAberration
+
+DUDE chromatic aberration (r_postChromaticAberration) as a SCENE-ONLY pass at the
+end of the fullscreen 3D view — the same spot, and the same copy-the-scene-then-
+draw-it-back mechanic, as RB_RHI_DepthOfField above.
+
+Split out of the swap-time resolve so the radial RGB fringe only touches the
+rendered world. On Vulkan (always) and GL3 + r_hdr the scene lives in an offscreen
+buffer and the HUD / console / FPS counter composite into it AFTER this point; the
+resolve then tonemaps + grains scene and HUD together, so chroma folded into the
+resolve was splitting the HUD text and the FPS counter too. Running it here, before
+those 2D views land, keeps them clean. (Film grain stays full-frame in the resolve —
+that's the conventional look and it doesn't fringe.)
+
+Reuses postprocess.frag with grain forced to 0 (chroma-only); strength 0 collapses
+the three taps to one fetch, so it's a passthrough. In an HDR frame the scene capture
+is RGBA16F, so the split samples the un-banded float scene — the very reason chroma
+was folded into the resolve originally. GL3 without r_hdr keeps using RB_RHI_PostProcess
+(grain + chroma together), which already runs before the HUD; the caller gates this
+pass to the resolve-folded frames so the two never double up.
+===================
+*/
+void RB_RHI_ChromaticAberration( rhi::RHI *r, const viewDef_t *viewDef ) {
+	const float chroma = r_postChromaticAberration.GetFloat();
+	if ( chroma <= 0.0f || !R_BackendSupportsEnhancements() ) {
+		return;
+	}
+	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
+		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
+		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
+		return;		// primary world view only (not mirrors / GUI renderDefs)
+	}
+
+	rhi::ShaderHandle prog = r->LoadShader( "postprocess" );
+	if ( !prog ) {
+		return;
+	}
+
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+
+	// snapshot the finished scene colour (world + weapon, after DoF / FSR / the bloom
+	// measurement) so the pass reads-and-writes the one live scene target
+	globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1, viewDef->viewport.y1, w, h, true );
+
+	const int potW = globalImages->currentRenderImage->uploadWidth  > 0 ? globalImages->currentRenderImage->uploadWidth  : w;
+	const int potH = globalImages->currentRenderImage->uploadHeight > 0 ? globalImages->currentRenderImage->uploadHeight : h;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.screenCorrection[0] = (float)w / potW;		// viewport uv -> _currentRender (NPOT)
+	parms.screenCorrection[1] = (float)h / potH;
+	parms.windowCoord[2] = 0.5f;						// aberration center in uv
+	parms.windowCoord[3] = 0.5f;
+	parms.localParam0[0] = 0.0f;						// grain OFF here (the resolve grains the whole frame)
+	parms.localParam0[2] = chroma;						// chromatic aberration strength
+
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
+	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	RB_RHI_BindUnit( 0, globalImages->currentRenderImage );
+	RB_RHI_DrawFullscreen( r, prog, parms, globalImages->currentRenderImage->rhiHandle );
+
+	// direct binds above; forget the tmu cache so later 2D/GUI binds re-issue
+	RB_RHI_ForgetTexBinds();
+}
+
 // ---- HDR eye adaptation / auto-exposure (Phase B1, docs/hdr-pipeline.md) ----
 extern idCVar r_hdrEyeAdaptation;
 extern idCVar r_hdrAdaptSpeed;
@@ -5691,6 +5788,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			ictx.shadowCubeImage = 0;
 			ictx.lightHasDynamicLayer = false;
 			ictx.shadowCubeDynImage = 0;
+			ictx.shadowCubeDynScale = 1.0f;
 
 			// Flag the player flashlight so its interactions get the dedicated small
 			// shadow bias (see r_shadowMapFlashlightBias). Keyed on the light shader
@@ -5799,6 +5897,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 						if ( rhiShadowCubeDyn != 0 ) {
 							ictx.lightHasDynamicLayer = true;
 							ictx.shadowCubeDynImage = r->GetRenderTargetImage( rhiShadowCubeDyn );
+							ictx.shadowCubeDynScale = rhiShadowCubeDynScale;
 						}
 						ictx.lightRange = range;
 						rhiShadowCubeLights++;
