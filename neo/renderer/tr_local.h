@@ -966,6 +966,7 @@ extern idCVar r_shadowMapSunBias;			// sun map depth-compare bias
 extern idCVar r_shadowMapSunRange;			// how far ahead of the camera the sun map covers (world units)
 extern idCVar r_shadowMapNormalOffset;		// normal-offset shadow bias in texels (cube + sun lookups; 0 = off)
 extern idCVar r_rtSunShadows;				// RT sun shadows: trace sun visibility per fragment (VK + RT hardware)
+extern idCVar r_rtMovingLights;				// RT shadows for moving point lights: skip the un-cacheable cube re-render, trace instead
 extern idCVar r_rtSunShadowOffset;			// RT sun shadows: ray-origin normal offset (world units)
 extern idCVar r_rtMonsterShadows;			// RT sun shadows: include animated characters as per-frame casters
 

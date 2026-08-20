@@ -1541,7 +1541,7 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 		// R3 animated casters: gather this frame's visible monsters into a world-space soup and
 		// hand it to the backend (rebuilds a per-frame dynamic BLAS + appends one identity
 		// instance to the TLAS). MUST precede UpdateTlas, which consumes the dyn-caster arm.
-		if ( r_rtSunShadows.GetBool() && r_rtMonsterShadows.GetBool() ) {
+		if ( ( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() ) && r_rtMonsterShadows.GetBool() ) {
 			float *mpos; int *midx; int mnv = 0, mni = 0;
 			if ( R_RtGatherMonstersWorld( mpos, midx, mnv, mni ) ) {
 				r->UpdateDynamicGeometry( mpos, mnv, midx, mni );
@@ -1569,11 +1569,13 @@ static void R_RtWorldUpdate( void ) {
 	if ( r == NULL ) {
 		return;
 	}
-	// r_rtSunShadows (R3) implies the scene: the consumer auto-builds its prerequisite
-	if ( !r_rtWorld.GetBool() && !r_rtSunShadows.GetBool() ) {
-		if ( r_rtWorld.IsModified() || r_rtSunShadows.IsModified() ) {
+	// r_rtSunShadows (R3) / r_rtMovingLights (Option A) imply the scene: the consumers
+	// auto-build their prerequisite
+	if ( !r_rtWorld.GetBool() && !r_rtSunShadows.GetBool() && !r_rtMovingLights.GetBool() ) {
+		if ( r_rtWorld.IsModified() || r_rtSunShadows.IsModified() || r_rtMovingLights.IsModified() ) {
 			r_rtWorld.ClearModified();
 			r_rtSunShadows.ClearModified();
+			r_rtMovingLights.ClearModified();
 			r->DestroyRtScene();		// switched off: free the scene (no-op when never built)
 			s_rtWorldMap.Clear();
 			s_rtAreaBlas.Clear();
@@ -1769,7 +1771,7 @@ static void R_RtWorldValidate( void ) {
 	// STATIC scene, not the per-frame TLAS: the CPU reference below is the static soup, so tracing
 	// the per-frame slot (which also carries animated monster casters) would false-positive every
 	// monster hit as a "genuine" mismatch.
-	const bool persistent = ( r_rtWorld.GetBool() || r_rtSunShadows.GetBool() ) && r->GetStaticTlasAddress() != 0;
+	const bool persistent = ( r_rtWorld.GetBool() || r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() ) && r->GetStaticTlasAddress() != 0;
 	int blasFail = 0, msBuild = 0;
 	unsigned long long tlasAddr;
 	if ( persistent ) {

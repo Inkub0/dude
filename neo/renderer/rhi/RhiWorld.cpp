@@ -75,6 +75,9 @@ static struct {
 	// serves it anyway. rhiSunPlanes/shadowImage are stale for this light; only shader
 	// mode 4 is valid, and the receiver fill downgrades to unshadowed if the TLAS died.
 	bool				lightRtOnly;
+	// r_rtMovingLights: this point light's pose changed recently, so it renders no cube
+	// at all — the interaction shader traces one ray toward the light (mode 4) instead.
+	bool				lightRtPoint;
 	bool				lightShadowCube;
 	rhi::ImageHandle	shadowCubeImage;
 	// static/dynamic split (r_shadowMapCacheSplit): when a cached static point light also
@@ -1139,7 +1142,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// raw projection, so sampling with the baked cookie UV would slide the shadow
 	// across a static depth field (the fan-shadow bug). Left zero (memset) for stencil
 	// / unshadowed lights -> u_shadowParms.x == 0 -> visibility 1.
-	if ( ( ictx.lightShadowMapped || ictx.lightShadowCube ) && !din->ambientLight ) {
+	if ( ( ictx.lightShadowMapped || ictx.lightShadowCube || ictx.lightRtPoint ) && !din->ambientLight ) {
 		// Receiver-dependent acne bias: flat world/BSP surfaces tolerate the tight
 		// world bias; models (non-static-world entities) have curved, high-slope
 		// geometry that self-shadows and needs a larger bias. Perforated world
@@ -1210,6 +1213,25 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			if ( ictx.lightRtOnly && !rtSun ) {
 				// the RT-only route lost its TLAS mid-frame: rhiSunPlanes are stale for
 				// this light, so unshadowed beats sampling a map that was never fitted
+				parms.shadowParms[0] = 0.0f;
+			}
+		} else if ( ictx.lightRtPoint ) {
+			// RT moving point light (r_rtMovingLights): no cube was rendered at all —
+			// mode 4 traces one ray toward u_localLightOrigin, which for a point light
+			// IS the light position, so the sun ray code serves it unchanged (the ray
+			// stops just short of the origin; distLight bounds it, rtParms.w is inert).
+			// TLAS gone mid-frame downgrades to unshadowed, same as the sun RT route.
+			const unsigned long long tlas = ictx.r->GetTlasAddress();
+			if ( tlas != 0 && ictx.interactionRtProg != 0 ) {
+				parms.shadowParms[0] = 4.0f;
+				const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFu );
+				const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
+				memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );	// bit-cast, NOT a value cast
+				memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+				parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
+				parms.rtParms[3] = 100000.0f;
+				rtSun = true;		// bind the ray-query interaction variant for this draw
+			} else {
 				parms.shadowParms[0] = 0.0f;
 			}
 		} else if ( ictx.lightShadowMapped ) {
@@ -2725,6 +2747,7 @@ static int rhiCubeEvictions = 0;
 // r_shadowMapCacheDebug: point lights that used the static/dynamic split this view — a
 // moving-caster light kept CACHED for its world layer instead of bypassing the cache.
 static int rhiCubeCacheSplit = 0;
+static int rhiCubeCacheRtMoving = 0;	// point lights served by a ray instead of any cube (r_rtMovingLights)
 
 // depth24 cube cost: 6 faces, 4 bytes/texel (GL pads DEPTH_COMPONENT24 to 32-bit).
 static size_t RB_RHI_CubeBytes( int size ) {
@@ -3129,6 +3152,7 @@ already free GL objects.
 ===================
 */
 static void RB_RHI_ResetLightBudgetHyst();		// defined with the hysteresis helpers below
+static void RB_RHI_ResetRtMovingTrack();		// defined with the moving-light tracker below
 
 // Drop every CPU-side render-target handle the world backend caches across frames
 // (shadow map/cube + adaptive pools, SSAO + its temporal history, SSR + its history,
@@ -3186,6 +3210,7 @@ void RB_RHI_FreeShadowCubeCache() {
 	// light indices are reused by the next map; drop stale incumbency so a new level's
 	// lights don't inherit a phantom budget bonus from the old one.
 	RB_RHI_ResetLightBudgetHyst();
+	RB_RHI_ResetRtMovingTrack();	// same reuse hazard: stale pose baselines would misread as movement
 }
 
 // Render a point light's occluder depth into `cubeTarget`, one 90-degree face at a time.
@@ -3505,6 +3530,70 @@ static void RB_RHI_MarkLightBudgeted( int lightIndex ) {
 
 static void RB_RHI_ResetLightBudgetHyst() {
 	memset( rhiLightBudgetHyst, 0, sizeof( rhiLightBudgetHyst ) );
+}
+
+// ---- Moving-light detection (r_rtMovingLights) -----------------------------------
+// A point light whose POSE (origin/center/axis — intensity and colour deliberately
+// excluded, flicker is not movement) changed recently is "moving": the cube path can
+// never cache it (every pose change re-renders all its faces), so it routes to the
+// ray-query path instead, where a moving light costs the same as a still one. The
+// hysteresis window keeps a briefly-paused light on the ray path so the RT-hard vs
+// PCF-soft look doesn't flip-flop frame to frame; a light that genuinely stops
+// re-caches as a cube after the window (one cold render, then cache hits).
+// Same table idiom as the budget hysteresis above: keyed by persistent lightIndex,
+// linear probe, stalest-entry eviction, reset with the cache on world teardown.
+#define MAX_RT_MOVING_TRACK 256
+#define RT_MOVING_HYST_VIEWS 30
+struct rtMovingTrack_t {
+	int					lightIndex;
+	int					lastSeenFrame;		// 0 = empty slot
+	int					lastMoveFrame;		// last view the pose hash changed
+	unsigned long long	poseTok;
+};
+static rtMovingTrack_t rhiRtMovingTrack[MAX_RT_MOVING_TRACK];
+
+static void RB_RHI_ResetRtMovingTrack() {
+	memset( rhiRtMovingTrack, 0, sizeof( rhiRtMovingTrack ) );
+}
+
+static bool RB_RHI_LightIsMoving( const viewLight_t *vLight ) {
+	// pose-only hash: the same fields the cube token's light sub-hash folds, minus the
+	// settings (range/size/dither) that would masquerade as movement when tuned live
+	unsigned long long tok = 1469598103934665603ULL;
+	tok = RB_RHI_HashBytes( tok, vLight->globalLightOrigin.ToFloatPtr(), 3 * sizeof( float ) );
+	tok = RB_RHI_HashBytes( tok, vLight->lightDef->parms.lightCenter.ToFloatPtr(), 3 * sizeof( float ) );
+	tok = RB_RHI_HashBytes( tok, &vLight->lightDef->parms.axis, sizeof( idMat3 ) );
+
+	const int lightIndex = vLight->lightDef->index;
+	int free = -1, oldest = -1;
+	for ( int i = 0; i < MAX_RT_MOVING_TRACK; i++ ) {
+		rtMovingTrack_t &t = rhiRtMovingTrack[i];
+		if ( t.lastSeenFrame != 0 && t.lightIndex == lightIndex ) {
+			if ( t.poseTok != tok ) {
+				t.poseTok = tok;
+				t.lastMoveFrame = rhiCubeCacheFrameNo;
+			}
+			t.lastSeenFrame = rhiCubeCacheFrameNo;
+			return ( rhiCubeCacheFrameNo - t.lastMoveFrame ) <= RT_MOVING_HYST_VIEWS;
+		}
+		if ( t.lastSeenFrame == 0 ) {
+			if ( free < 0 ) { free = i; }
+		} else if ( oldest < 0 || t.lastSeenFrame < rhiRtMovingTrack[oldest].lastSeenFrame ) {
+			oldest = i;
+		}
+	}
+	// first sight: baseline the pose and report "not moving" — a brand-new light gets
+	// one cold cube render, and flips to the ray path the first view its pose changes
+	const int slot = ( free >= 0 ) ? free : oldest;
+	if ( slot >= 0 ) {
+		rhiRtMovingTrack[slot].lightIndex = lightIndex;
+		rhiRtMovingTrack[slot].lastSeenFrame = rhiCubeCacheFrameNo;
+		// impossibly old, NOT 0: frame counters start near 0 after a map load / cache
+		// reset, so a 0 baseline would read as "moved recently" for the first window
+		rhiRtMovingTrack[slot].lastMoveFrame = -( RT_MOVING_HYST_VIEWS + 1 );
+		rhiRtMovingTrack[slot].poseTok = tok;
+	}
+	return false;
 }
 
 // Effective ranking score: raw on-screen size, scaled up for a recent incumbent so it
@@ -5739,6 +5828,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	rhiCubeMissWarmLight = 0;
 	rhiCubeEvictions = 0;
 	rhiCubeCacheSplit = 0;
+	rhiCubeCacheRtMoving = 0;
 	rhiMapCacheHits = 0;
 	rhiMapCacheRendered = 0;
 	rhiCubeCacheFrameNo++;			// bump before the light loop so lastFrame == "this view"
@@ -5783,6 +5873,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			ictx.lightShadowMapped = false;
 			ictx.lightSunShadow = false;
 			ictx.lightRtOnly = false;
+			ictx.lightRtPoint = false;
 			ictx.shadowImage = 0;
 			ictx.lightShadowCube = false;
 			ictx.shadowCubeImage = 0;
@@ -5885,28 +5976,43 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				            // omni, not a distant sun): the adaptive tiers give it a usable
 				            // cube, and stencil stays the last resort. With r_shadowMapSun
 				            // off, oversize keeps the old direct-to-stencil routing for A/B.
-				            && ( !oversize || r_shadowMapSun.GetBool() )
-				            && RB_RHI_PointLightInBudget( viewDef, vLight ) ) {
-					// point / omni light: 6-face cube map, budgeted by on-screen
-					// importance (r_shadowMapPointLimit) so a busy room stays bounded
-					const float range = RB_RHI_PointLightRange( vLight );
-					if ( RB_RHI_ShadowMapPassCube( r, vLight, shadowCubeProg, range ) ) {
-						ictx.lightShadowCube = true;
-						ictx.shadowCubeImage = r->GetRenderTargetImage( rhiShadowCube );
-						// static/dynamic split: a second (movers) cube to min() with the static one
-						if ( rhiShadowCubeDyn != 0 ) {
-							ictx.lightHasDynamicLayer = true;
-							ictx.shadowCubeDynImage = r->GetRenderTargetImage( rhiShadowCubeDyn );
-							ictx.shadowCubeDynScale = rhiShadowCubeDynScale;
+				            && ( !oversize || r_shadowMapSun.GetBool() ) ) {
+					// RT moving lights (Option A, docs/shadow-research.md 2026-08): a point
+					// light whose pose changed recently can never cache-hit — the map path
+					// re-renders its whole cube every frame — so serve it with one ray
+					// toward the light instead (mode 4, no cube at all). Checked BEFORE the
+					// budget so ray-served lights don't consume cube slots. Costs nothing
+					// when still: the tracker's hysteresis re-caches paused lights.
+					const bool rtServesMoving = r_rtMovingLights.GetBool()
+						&& ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0
+						&& RB_RHI_LightIsMoving( vLight );
+					if ( rtServesMoving ) {
+						ictx.lightRtPoint = true;
+						ictx.lightRange = RB_RHI_PointLightRange( vLight );
+						rhiCubeCacheRtMoving++;
+						dbgShadowMapped++;
+					} else if ( RB_RHI_PointLightInBudget( viewDef, vLight ) ) {
+						// point / omni light: 6-face cube map, budgeted by on-screen
+						// importance (r_shadowMapPointLimit) so a busy room stays bounded
+						const float range = RB_RHI_PointLightRange( vLight );
+						if ( RB_RHI_ShadowMapPassCube( r, vLight, shadowCubeProg, range ) ) {
+							ictx.lightShadowCube = true;
+							ictx.shadowCubeImage = r->GetRenderTargetImage( rhiShadowCube );
+							// static/dynamic split: a second (movers) cube to min() with the static one
+							if ( rhiShadowCubeDyn != 0 ) {
+								ictx.lightHasDynamicLayer = true;
+								ictx.shadowCubeDynImage = r->GetRenderTargetImage( rhiShadowCubeDyn );
+								ictx.shadowCubeDynScale = rhiShadowCubeDynScale;
+							}
+							ictx.lightRange = range;
+							rhiShadowCubeLights++;
 						}
-						ictx.lightRange = range;
-						rhiShadowCubeLights++;
 					}
 				}
 			}
 
-			// either shadow-map technique replaces the stencil test for this light
-			const bool shadowMapped = ictx.lightShadowMapped || ictx.lightShadowCube;
+			// either shadow-map technique (or the ray route) replaces the stencil test
+			const bool shadowMapped = ictx.lightShadowMapped || ictx.lightShadowCube || ictx.lightRtPoint;
 
 			// r_shadowMapDebug 2: per-light readout so we can see, when a shadow blinks
 			// out, exactly what changed — is the light even here, did it get a map, and
@@ -5930,7 +6036,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				                vLight->lightDef->index,
 				                isPoint ? "point" : ( isParallel ? "parallel" : "projected" ),
 				                lightMayShadow ? "" : " (noShadow)",
-				                ictx.lightShadowCube ? "cube" : ( ictx.lightSunShadow ? "sun" : ( ictx.lightShadowMapped ? "2D" : ( oversize ? "stencil" : "none" ) ) ),
+				                ictx.lightRtPoint ? "rtMove" : ( ictx.lightShadowCube ? "cube" : ( ictx.lightSunShadow ? "sun" : ( ictx.lightShadowMapped ? "2D" : ( oversize ? "stencil" : "none" ) ) ) ),
 				                dbgRes,
 				                RB_RHI_CountLightChain( vLight->globalInteractions ),
 				                RB_RHI_CountLightChain( vLight->localInteractions ),
@@ -6021,7 +6127,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// per-frame spam. Hit% is over cached lookups (excludes scratch/dynamic lights, which
 	// never enter the cache). This is what says which caching lever is worth building.
 	if ( r_shadowMapCacheDebug.GetBool() ) {
-		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accFaces, accSplit, accFrames, accStartMs;
+		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accFaces, accSplit, accRtMoving, accFrames, accStartMs;
 		const int nowMs = Sys_Milliseconds();
 		if ( accStartMs == 0 ) { accStartMs = nowMs; }
 		accHits       += rhiCubeCacheHits;
@@ -6034,15 +6140,16 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 		accEvict      += rhiCubeEvictions;
 		accFaces      += rhiShadowCubeFaces;		// actual cube FACES rasterized -> the GPU cost per-face invalidation cuts
 		accSplit      += rhiCubeCacheSplit;			// moving-caster lights kept cached via the static/dynamic split
+		accRtMoving   += rhiCubeCacheRtMoving;		// moving lights served by a ray, no cube at all (r_rtMovingLights)
 		accFrames++;
 		if ( nowMs - accStartMs >= 1000 ) {
 			const int rendered = accCold + accWarmCaster + accWarmLight;
 			const int lookups  = accHits + rendered;
 			const int hitPct   = lookups > 0 ? ( 100 * accHits ) / lookups : 0;
-			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | faces %d | split %d, scratch %d, dynamic %d, deferred %d, evict %d | %d frames\n",
+			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | faces %d | split %d, rtMoving %d, scratch %d, dynamic %d, deferred %d, evict %d | %d frames\n",
 			                accHits, hitPct, rendered, accCold, accWarmCaster, accWarmLight, accFaces,
-			                accSplit, accScratch, accDynamic, accDeferred, accEvict, accFrames );
-			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accFaces = accSplit = accFrames = 0;
+			                accSplit, accRtMoving, accScratch, accDynamic, accDeferred, accEvict, accFrames );
+			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accFaces = accSplit = accRtMoving = accFrames = 0;
 			accStartMs = nowMs;
 		}
 	}

@@ -298,6 +298,17 @@ visual check; keep both alive until then.
   root. **Visual check required before committing**: RT hard shadows are exact/unfiltered — the
   moving-light look (muzzle flash, thrown barrels) must be eyeballed against the PCF-softened cube
   look for consistency.
+  > **BUILT 2026-08-20, pending user visual verify** (`r_rtMovingLights`, default 0, VK+RT):
+  > pose-hash tracker (origin/center/axis — intensity-blind, so flicker ≠ movement; 30-view
+  > hysteresis; budget-hyst table idiom, reset with the cache) classifies moving point lights
+  > in the cube routing; they skip cube + budget entirely and take interaction mode 4 — the
+  > existing RT sun ray code serves point lights unchanged since `u_localLightOrigin` IS the
+  > light position and `distLight` bounds the ray. TLAS auto-builds off the cvar (tr_main
+  > gates), monsters cast via the r_rtMonsterShadows dynamic BLAS. `cubeCache/s` gains an
+  > `rtMoving N` field; `r_shadowMapDebug 2` labels these lights `rtMove`. Known v1 edges:
+  > RT-hard vs PCF-soft look flips at the stop/start boundary (hysteresis softens it);
+  > alpha-tested casters shadow solid (same R3 limitation); a fresh light def pays one cold
+  > cube frame before classifying as moving.
 - **Option B — VRS on the interaction pass** (`VK_KHR_fragment_shading_rate`, Turing+/RDNA2+;
   VK-only, GL3.3 has nothing). *Not previously surveyed.* Doom Eternal (forward, like DUDE)
   shipped hardware VRS on its forward passes with substantial pixel-shader savings; Microsoft's
