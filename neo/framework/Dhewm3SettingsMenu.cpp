@@ -2811,9 +2811,26 @@ static void DrawEnhGroup_Particles()
 	}
 }
 
-// Antialiasing group: hardware MSAA + post-process FXAA/SMAA under one "Antialiasing" header.
-// Drawn OUTSIDE the enhancement-gated block so hardware MSAA stays usable on the legacy
-// backend; the post-process part is opengl3/Vulkan-only and greys out on the legacy renderer.
+// Antialiasing group: hardware MSAA + one effective post-AA selector under one
+// "Antialiasing" header. Drawn OUTSIDE the enhancement-gated block so hardware MSAA stays
+// usable on the legacy backend; the post part is opengl3/Vulkan-only and greys out on the
+// legacy renderer. The selector mirrors the classic System-menu AA row: ONE choice —
+// Off / FXAA / SMAA / FSR2 (VK) — even though two cvars sit underneath (r_fsr wins at the
+// resolve; r_rhiAA is kept as the GL3 / dispatch-failure fallback).
+// Apply one effective AA selection to the archived truth. Shared by the classic menu's
+// dudeAA command and the ImGui Antialiasing dropdown: 0-2 = r_rhiAA (FSR off), 3 = FSR2
+// (r_rhiAA left untouched — it is bypassed while FSR2 runs and is the GL3 / dispatch-
+// failure fallback, so switching back restores the previous post AA).
+static void Com_ApplyDudeAA( int v )
+{
+	if ( v >= 3 ) {
+		r_fsr.SetBool( true );
+		return;
+	}
+	r_fsr.SetBool( false );
+	r_rhiAA.SetInteger( idMath::ClampInt( 0, 2, v ) );
+}
+
 static void DrawGroup_Antialiasing()
 {
 	if ( BeginSettingsGroup( "Antialiasing" ) ) {
@@ -2833,23 +2850,33 @@ static void DrawGroup_Antialiasing()
 			"specular/normal-map shimmer. Needs a renderer restart to change (Apply at the bottom of the tab); "
 			"not all GPUs/drivers support every mode, especially 16x." );
 
-		// Post-process AA (FXAA/SMAA) — opengl3/Vulkan only, so it greys out on the legacy backend.
+		// Post AA — ONE effective selection (mirrors the classic System-menu AA row).
+		// opengl3/Vulkan only, so it greys out on the legacy backend; the FSR2 entry only
+		// exists on Vulkan. Underneath, FSR2 is r_fsr (r_rhiAA kept as the GL3/fallback
+		// post AA — bypassed while FSR2 runs, restored when switching back).
+		const bool isVulkan = glConfig.rhiBackend && !glConfig.coreProfile;
 		ImGui::BeginDisabled( !R_BackendSupportsEnhancements() );
-		int aa = r_rhiAA.GetInteger();
+		int aa = ( isVulkan && r_fsr.GetBool() ) ? 3 : idMath::ClampInt( 0, 2, r_rhiAA.GetInteger() );
 		ImGui::SetNextItemWidth( 220.0f );
-		if ( ImGui::Combo( "Post Antialiasing", &aa, "Off\0FXAA (fast, damps shimmer)\0SMAA (sharpest edges)\0" ) ) {
-			r_rhiAA.SetInteger( aa );
+		const char *aaItems = isVulkan
+			? "Off\0FXAA (fast, damps shimmer)\0SMAA (sharpest edges)\0FSR2 TAA (kills shimmer, temporal)\0"
+			: "Off\0FXAA (fast, damps shimmer)\0SMAA (sharpest edges)\0";
+		if ( ImGui::Combo( "Post Antialiasing", &aa, aaItems ) ) {
+			Com_ApplyDudeAA( aa );
 		}
-		AddTooltip( "Post-process antialiasing over the finished 3D view, on top of (and independent "
-			"from) the hardware MSAA above. FXAA is one cheap pass whose subpixel smoothing "
-			"also damps the specular/normal-map shimmer MSAA can't touch, at a slight overall softening. "
-			"SMAA reconstructs edges much more precisely and leaves texture detail sharp, but does not "
-			"treat shimmer (with PBR materials on, Toksvig already covers most of it). HUD and menus are "
-			"never affected. Non-vanilla; opengl3 only. (TAA planned - see docs/antialiasing.md.)" );
+		AddTooltip( "Post antialiasing over the finished 3D view, on top of (and independent from) "
+			"the hardware MSAA above; one effective choice. FXAA is one cheap pass whose subpixel "
+			"smoothing also damps the specular/normal-map shimmer MSAA can't touch, at a slight "
+			"overall softening. SMAA reconstructs edges much more precisely and leaves texture detail "
+			"sharp, but does not treat shimmer. FSR2 TAA (Vulkan only, non-vanilla) is AMD FSR2 at "
+			"native resolution: temporal accumulation + RCAS that resolves the shimmer structurally — "
+			"auto-enables motion vectors + sub-pixel jitter, ~1.7 ms GPU at 1440p, and keeps your "
+			"SMAA/FXAA choice as the fallback where it can't run. HUD and menus are never affected. "
+			"(docs/fsr-temporal-pipeline.md)" );
 
 		// Strength drives FXAA's subpixel term (the part that actually chases shimmer): 0 =
 		// edge-only FXAA (sharpest), higher = more subpixel smoothing at some texture softening.
-		ImGui::BeginDisabled( r_rhiAA.GetInteger() != 1 );
+		ImGui::BeginDisabled( aa != 1 );
 		float fxaaStrength = r_fxaaStrength.GetFloat();
 		ImGui::SetNextItemWidth( 220.0f );
 		if ( ImGui::SliderFloat( "FXAA Strength", &fxaaStrength, 0.0f, 1.0f, "%.2f" ) ) {
@@ -2860,54 +2887,38 @@ static void DrawGroup_Antialiasing()
 			"cutting more of the specular/normal-map crawl but softening textures slightly. ~0.75 is a "
 			"good balance." );
 		ImGui::EndDisabled();	// FXAA strength gate
-		ImGui::EndDisabled();	// post-process supported gate
 
-		// FSR2 temporal AA (R1; Vulkan only). When on it supersedes the post AA above
-		// (the resolve bypasses FXAA/SMAA — no stacking) and resolves the specular/
-		// normal-map shimmer neither of them can. Default on in the Nightmare preset.
+		// FSR2 sub-options — only meaningful while FSR2 TAA is the selection above.
 		{
-			const bool isVulkan = glConfig.rhiBackend && !glConfig.coreProfile;
-			ImGui::BeginDisabled( !isVulkan );
-			bool fsr = r_fsr.GetBool();
-			if ( ImGui::Checkbox( "FSR2 Temporal AA (Vulkan only)", &fsr ) ) {
-				r_fsr.SetBool( fsr );
+			ImGui::BeginDisabled( aa != 3 );
+			float sharp = r_fsrSharpness.GetFloat();
+			ImGui::SetNextItemWidth( 220.0f );
+			if ( ImGui::SliderFloat( "RCAS Sharpness", &sharp, 0.0f, 1.0f, "%.2f" ) ) {
+				r_fsrSharpness.SetFloat( sharp );
 			}
-			AddTooltip( "AMD FSR2 in native-resolution mode: temporal accumulation + RCAS sharpening "
-				"that resolves the specular/normal-map shimmer FXAA/SMAA structurally can't (Doom 3's "
-				"signature aliasing). Auto-enables motion vectors + sub-pixel jitter and replaces the "
-				"post antialiasing above while it runs. ~1.7 ms GPU at 1440p. Non-vanilla; Vulkan only "
-				"(docs/fsr-temporal-pipeline.md)." );
+			AddTooltip( "FSR2's built-in sharpening pass, countering the slight softening of any "
+				"temporal accumulation. 0 disables the pass. (r_fsrSharpness)" );
+			bool reactive = r_fsrReactive.GetBool();
+			if ( ImGui::Checkbox( "Reactive Mask", &reactive ) ) {
+				r_fsrReactive.SetBool( reactive );
+			}
+			AddTooltip( "Deghosts additive/translucent content (particles, muzzle flashes, GUI "
+				"screens): an opaque-only snapshot is compared against the final frame, and where "
+				"they diverge FSR2 trusts its history less. Leave on. (r_fsrReactive)" );
 			{
-				ImGui::BeginDisabled( !r_fsr.GetBool() );
-				float sharp = r_fsrSharpness.GetFloat();
+				ImGui::BeginDisabled( !r_fsrReactive.GetBool() );
+				float rs = r_fsrReactiveScale.GetFloat();
 				ImGui::SetNextItemWidth( 220.0f );
-				if ( ImGui::SliderFloat( "RCAS Sharpness", &sharp, 0.0f, 1.0f, "%.2f" ) ) {
-					r_fsrSharpness.SetFloat( sharp );
+				if ( ImGui::SliderFloat( "Reactive Strength", &rs, 0.0f, 2.0f, "%.2f" ) ) {
+					r_fsrReactiveScale.SetFloat( rs );
 				}
-				AddTooltip( "FSR2's built-in sharpening pass, countering the slight softening of any "
-					"temporal accumulation. 0 disables the pass. (r_fsrSharpness)" );
-				bool reactive = r_fsrReactive.GetBool();
-				if ( ImGui::Checkbox( "Reactive Mask", &reactive ) ) {
-					r_fsrReactive.SetBool( reactive );
-				}
-				AddTooltip( "Deghosts additive/translucent content (particles, muzzle flashes, GUI "
-					"screens): an opaque-only snapshot is compared against the final frame, and where "
-					"they diverge FSR2 trusts its history less. Leave on. (r_fsrReactive)" );
-				{
-					ImGui::BeginDisabled( !r_fsrReactive.GetBool() );
-					float rs = r_fsrReactiveScale.GetFloat();
-					ImGui::SetNextItemWidth( 220.0f );
-					if ( ImGui::SliderFloat( "Reactive Strength", &rs, 0.0f, 2.0f, "%.2f" ) ) {
-						r_fsrReactiveScale.SetFloat( rs );
-					}
-					AddTooltip( "Higher = less ghosting on particles but more shimmer on them. "
-						"(r_fsrReactiveScale)" );
-					ImGui::EndDisabled();
-				}
-				ImGui::EndDisabled();	// !r_fsr
+				AddTooltip( "Higher = less ghosting on particles but more shimmer on them. "
+					"(r_fsrReactiveScale)" );
+				ImGui::EndDisabled();
 			}
-			ImGui::EndDisabled();	// !isVulkan
+			ImGui::EndDisabled();	// aa != 3 (FSR2 not selected)
 		}
+		ImGui::EndDisabled();	// post-process supported gate
 		EndSettingsGroup();
 	}
 }
@@ -3743,18 +3754,8 @@ static void DrawDbgGroup_GpuOffload()
 			r_gpuSkinning.SetBool( gpuSkin );
 		}
 		AddTooltip( "r_gpuSkinning: skin animated meshes on the GPU. Non-faithful (option-B TBN, not Doom 3's "
-			"exact CPU skin), so off by default. Prerequisite for the CPU-skin strip below, and for ray-tracing "
-			"animated geometry later. Takes effect on the next map load." );
-
-		ImGui::BeginDisabled( !r_gpuSkinning.GetBool() );
-		bool strip = r_gpuSkinStripCpu.GetBool();
-		if ( ImGui::Checkbox( "Strip redundant CPU skin", &strip ) ) {
-			r_gpuSkinStripCpu.SetBool( strip );
-		}
-		AddTooltip( "r_gpuSkinStripCpu: drop the now-redundant CPU position-skin for GPU-skinned surfaces. "
-			"Frees CPU time — measured ~+3% fps when CPU-bound (weaker GPU / low presets); no change when "
-			"GPU-bound. Needs GPU skinning on." );
-		ImGui::EndDisabled();
+			"exact CPU skin), so off by default. Offloads the DRAW; the CPU position skin still runs (it is the "
+			"monster hit surface). Prerequisite for ray-tracing animated geometry later. Next map load." );
 
 		ImGui::Separator();
 
@@ -4894,14 +4895,7 @@ void Com_DudeAA_f( const idCmdArgs &args )
 	} else {
 		v = dude_aa.GetInteger();		// written live by the menu choiceDef
 	}
-	if ( v >= 3 ) {
-		// FSR2 (Vulkan only): RCAS replaces FXAA/SMAA, r_rhiAA is bypassed while it runs —
-		// leave it untouched so switching back restores the previous post AA.
-		r_fsr.SetBool( true );
-		return;
-	}
-	r_fsr.SetBool( false );
-	r_rhiAA.SetInteger( idMath::ClampInt( 0, 2, v ) );
+	Com_ApplyDudeAA( v );
 }
 
 static bool BeginTabChild( const char* name )

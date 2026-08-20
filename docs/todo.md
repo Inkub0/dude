@@ -249,6 +249,60 @@ See **docs/antialiasing.md** for status + design. Summary:
 
 ---
 
+## Collision / model binary "generated" cache  **[parked 2026-08-18 — next load-time lever]**
+
+With `r_parallelImageLoad` shipped (image phase ~10x faster, user-verified), the biggest
+remaining load-time chunk is the entity-populate **cacheMedia** slice (~2.8s on hell1):
+per-prop collision models and the render models they drag in. Two deterministic,
+re-done-every-load costs:
+
+- **Runtime CM conversion** (`idCollisionModelManagerLocal::LoadRenderModel`,
+  CollisionModel_load.cpp): stock props ship no `.cm`, so every ASE/LWO moveable is
+  converted at load — per-tri winding + vertex/edge hash weld + axial BSP build — and the
+  result is discarded at map end.
+- **Text parsing everywhere**: ASE/LWO render models and even the map's cached `.cm` are
+  idLexer text parses.
+
+**Plan (BFG-style, engine-only):** (1) measure the split first — accumulating timers
+(render-model parse vs CM conversion) printed with the existing `load phases (msec)` line;
+(2) serialize built `cm_model_t` (and, if the split says so, binary render models) to the
+writable dude folder, CRC/timestamp-gated exactly like the map `.cm` already is.
+Parallelizing this phase was investigated and declined (Increment 3, thread-safety of
+renderModelManager/CM manager/allocators for ~2-3x); the disk cache gets more for less.
+Expectation: attacks the ~2.8s slice; the ~4.4s spawnDefs floor remains.
+
+---
+
+## GPU skinning: recover the CPU-skin win via skin-on-demand  **[parked 2026-08-18 — low priority]**
+
+**Why it's parked:** the CPU-position-skin strip (`r_gpuSkinStripCpu`, "Milestone D") was
+GPU skinning's real CPU win — but it was *removed* (commit 4ab52781) because it broke monster
+hit detection. A living monster's player-hit collision **is its animated render mesh**
+(`idActor` combat clip = render-model handle, `CONTENTS_RENDERMODEL`; player attacks trace
+`MASK_SHOT_RENDERMODEL` → `idClip::TraceRenderModel` → `idRenderWorldLocal::ModelTrace` →
+`R_LocalTrace` reads `tri->verts[].xyz` directly, tr_trace.cpp:43). Stripping left those verts
+at bind pose → invulnerable monsters. So the CPU position skin now always runs, and with GPU
+skinning on it runs **redundantly** with the GPU skin (CPU for the trace/bounds/fallback, GPU
+for the draw) — the per-frame CPU-skin cost is back.
+
+**The recovery (proper design): skin on demand.** Let the GPU own the per-frame skin again
+(re-strip the CPU skin for the *draw*), but skin a monster's verts **just-in-time inside
+`ModelTrace`** when a hit is actually tested — hits are far rarer than every-frame-every-monster,
+so this recovers the strip's savings while keeping correctness. Sketch: keep the `cpuSkinStripped`
+signal; in `R_EntityDefDynamicModel`/`ModelTrace` (RenderWorld.cpp:~1083), when the fetched
+dynamic model is stripped, run `TransformVerts` for the traced surface(s) into scratch (joints
+are on `renderEntity.joints`) before `R_LocalTrace`. The strip cvar/menu were retired (9896868c);
+this phase would reintroduce a *safe* strip gated on the on-demand path existing. Vestigial infra
+kept for it: `idMD5Mesh::CalcBoundsFast` + the per-joint reach precompute + `R_GpuSkinProfileAddStrip`.
+
+**Worth it only for weak-CPU targets.** The strip's measured benefit was ~+3% fps *and only when
+CPU-bound* (weaker GPU / low presets); on a strong CPU + discrete GPU it's in the noise. GPU
+skinning stays valuable as **infrastructure** regardless (GPU-resident posed geometry for
+deform-once tessellation and future animated-RT-BLAS refits), just not as a CPU-time win until
+this lands. Full context: memory [[gpu-skinning-monster-invuln-bug]].
+
+---
+
 ## Codebase independence  **[planned]**
 
 A small phase to break free from third-party content and stale identity so a clean

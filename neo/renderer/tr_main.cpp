@@ -36,6 +36,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/platform.h"
 #include "framework/Session.h"
 #include "renderer/RenderWorld_local.h"
+#include "renderer/ModelManager.h"
 
 #include "renderer/tr_local.h"
 #include "renderer/rhi/RHI.h"
@@ -1075,6 +1076,845 @@ static void R_GpuCullLive( void ) {
 }
 
 /*
+=================
+R2 world ray-query scene + validator (docs/rtx-shadow-roadmap.md)
+
+r_rtWorld: build and KEEP the scene acceleration structure the RT shadow rays consume:
+one BLAS per _areaN world model (identity instances) PLUS one BLAS per unique STATIC
+ENTITY model (func_statics, inline brush models - doors, crates, rocks, buildings) with
+one TLAS instance per entity. Outdoor sun shadows come mostly from those entity models,
+not worldspawn - a worldspawn-only scene silently deletes them (found by the user on
+mars_city1). Movers are snapshotted at build time (a door captured closed stays closed
+to the rays) until the per-frame TLAS rebuild lands. Built lazily on the first primary
+view, rebuilt on map change, torn down when switched off; a vid_restart self-heals
+(backend owns the AS objects; GetTlasAddress()==0 here means rebuild).
+
+r_rtWorldTest: one-shot validator (self-clears). Traces an 8x8 ray grid across the
+CURRENT view frustum against the scene - the persistent one when live, else a transient
+build - and diffs every hit distance against a CPU Moller-Trumbore sweep over the same
+triangle soup, entity instances included (rays inverse-transformed into model space; the
+affine map preserves the ray parameter, so t compares directly). A hit/miss flip that a
+slightly perturbed CPU ray reproduces is bucketed boundary-FP, mirroring the GPU-cull
+validator; PASS iff 0 genuine. Caveat: against the persistent scene, an entity that
+MOVED since the build (a door) can flag genuine - re-run r_rtWorld to resync.
+Vulkan + RT hardware only.
+=================
+*/
+static idCVar r_rtWorld( "r_rtWorld", "0", CVAR_RENDERER | CVAR_BOOL,
+	"build + keep the world ray-query acceleration structure: worldspawn areas + static entity models (Vulkan + RT hardware; prereq for RT shadows, auto-implied by r_rtSunShadows)" );
+static idCVar r_rtWorldTest( "r_rtWorldTest", "0", CVAR_RENDERER | CVAR_BOOL,
+	"validate the ray-query world scene (areas + static entity instances) vs a CPU ray trace (Vulkan + RT hardware; one-shot, self-clears)" );
+
+struct rtAreaSlice_t { int vertStart, numVerts, idxStart, numIdx; };
+struct rtModelSlice_t {
+	const idRenderModel *	model;			// unique-model key
+	int						vertStart, numVerts, idxStart, numIdx;
+	rhi::BlasHandle			blas;			// filled by R_RtBuildScene
+};
+struct rtModelInst_t {
+	int						slice;			// index into the model-slice array
+	float					mat[16];		// id column-major model matrix (world = M * local)
+};
+
+// persistent BLAS registry for the per-frame TLAS refresh (movers): filled by the
+// persistent-scene build, then walked every frame to re-instance with CURRENT entity poses
+struct rtModelBlas_t { const idRenderModel *model; rhi::BlasHandle blas; };
+static idList<rhi::BlasHandle>	s_rtAreaBlas;
+static idList<rtModelBlas_t>	s_rtModelBlas;
+
+// shared caster filter: opaque OR perforated + shadow-casting, CPU data resident.
+// PERFORATED (alpha-tested) surfaces cast too - Doom 3's own stencil shadows treat them as
+// SOLID occluders (the shadow volume is the full triangle silhouette, ignoring the alpha
+// holes), so admitting them as solid ray occluders is faithful, and it is essential for
+// characters: monster skins are mostly perforated (a body's 9 surfaces are typically 1 opaque
+// + 8 perforated), so an opaque-only filter cast a holey, glitchy partial silhouette or nothing.
+// Only TRANSLUCENT (glass/glows/additive) is excluded. SurfaceCastsShadow() still drops
+// noshadows materials - critically the SKY, or every RT sun ray would end in the dome.
+static bool R_RtSurfCasts( const modelSurface_t *surf ) {
+	return surf->geometry != NULL && surf->shader != NULL
+		&& ( surf->shader->Coverage() == MC_OPAQUE || surf->shader->Coverage() == MC_PERFORATED )
+		&& surf->shader->SurfaceCastsShadow()
+		&& surf->geometry->verts != NULL && surf->geometry->indexes != NULL;
+}
+
+// True when this view renders a world the persistent RT scene may bind to: the primary pass
+// of a world with a REAL loaded map. GUI render worlds (menu/PDA 3D scenes) also render
+// non-subview views and even claim tr.primaryWorld (RenderWorld.cpp RenderScene), but they
+// are ClearWorld()-built - one bare area, empty mapName - and their _areaN FindModel lookups
+// would resolve to the GAME map's models still resident in the global model manager. The
+// mapName gate excludes them outright (found the hard way: a menu view rebuilt the scene
+// down to _area0's 12 triangles).
+static idRenderWorldLocal *R_RtSceneWorld( void ) {
+	if ( tr.viewDef == NULL || tr.viewDef->isSubview || tr.viewDef->renderWorld == NULL ) {
+		return NULL;
+	}
+	idRenderWorldLocal *world = tr.viewDef->renderWorld;
+	if ( world->mapName.Length() == 0 || world->NumAreas() <= 0 ) {
+		return NULL;
+	}
+	return world;
+}
+
+// Gather the loaded map's opaque shadow-casting worldspawn triangles (the _areaN models)
+// into a packed float3/int soup, indices area-local so each slice feeds CreateBlas directly.
+// Returns false with nothing allocated when there is no opaque world geometry; otherwise
+// the caller Mem_Free16's pos/idx/slices.
+static bool R_RtGatherWorld( const idRenderWorldLocal *world, float *&pos, int *&idx,
+		rtAreaSlice_t *&slices, int &numSlices, int &worldVerts, int &worldIndexes ) {
+	pos = NULL; idx = NULL; slices = NULL;
+	numSlices = 0; worldVerts = 0; worldIndexes = 0;
+	const int numAreas = world->NumAreas();
+	for ( int a = 0; a < numAreas; a++ ) {
+		const idRenderModel *model = renderModelManager->FindModel( va( "_area%i", a ) );
+		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
+			if ( !R_RtSurfCasts( model->Surface( s ) ) ) {
+				continue;
+			}
+			worldVerts += model->Surface( s )->geometry->numVerts;
+			worldIndexes += model->Surface( s )->geometry->numIndexes;
+		}
+	}
+	if ( worldIndexes < 3 ) {
+		return false;
+	}
+	pos = (float *)Mem_Alloc16( worldVerts * 3 * (int)sizeof( float ) );
+	idx = (int *)Mem_Alloc16( worldIndexes * (int)sizeof( int ) );
+	slices = (rtAreaSlice_t *)Mem_Alloc16( numAreas * (int)sizeof( rtAreaSlice_t ) );
+	int vertBase = 0, idxBase = 0;
+	for ( int a = 0; a < numAreas; a++ ) {
+		const idRenderModel *model = renderModelManager->FindModel( va( "_area%i", a ) );
+		rtAreaSlice_t sl;
+		sl.vertStart = vertBase; sl.idxStart = idxBase; sl.numVerts = 0; sl.numIdx = 0;
+		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = model->Surface( s );
+			if ( !R_RtSurfCasts( surf ) ) {
+				continue;
+			}
+			const srfTriangles_t *tri = surf->geometry;
+			for ( int k = 0; k < tri->numVerts; k++ ) {
+				const idVec3 &p = tri->verts[k].xyz;
+				float *dst = pos + ( sl.vertStart + sl.numVerts + k ) * 3;
+				dst[0] = p[0]; dst[1] = p[1]; dst[2] = p[2];
+			}
+			for ( int n = 0; n < tri->numIndexes; n++ ) {
+				idx[sl.idxStart + sl.numIdx + n] = sl.numVerts + tri->indexes[n];
+			}
+			sl.numVerts += tri->numVerts;
+			sl.numIdx += tri->numIndexes;
+		}
+		if ( sl.numIdx < 3 ) {
+			continue;
+		}
+		vertBase += sl.numVerts;
+		idxBase += sl.numIdx;
+		slices[numSlices++] = sl;
+	}
+	return numSlices > 0;
+}
+
+// Gather the STATIC ENTITY casters: every entityDef with a resident DM_STATIC model
+// (func_statics, inline brush models - doors/movers snapshot at their current pose) and
+// noShadow off. Unique models become soup slices (model space); every qualifying entity
+// becomes an instance carrying its model matrix. All outputs may legitimately be empty
+// (numSlices/numInsts 0, pointers NULL) - a map can have no static entity casters.
+// Caller Mem_Free16's pos/idx/slices/insts when non-NULL.
+static void R_RtGatherEntities( const idRenderWorldLocal *world, float *&pos, int *&idx,
+		rtModelSlice_t *&slices, int &numSlices, rtModelInst_t *&insts, int &numInsts ) {
+	pos = NULL; idx = NULL; slices = NULL; insts = NULL;
+	numSlices = 0; numInsts = 0;
+
+	// pass 1: qualifying entities, unique models, soup sizes
+	int entCount = 0, uniqueCount = 0, mVerts = 0, mIndexes = 0;
+	const int maxUnique = world->entityDefs.Num();
+	const idRenderModel **unique = (const idRenderModel **)Mem_Alloc16( ( maxUnique > 0 ? maxUnique : 1 ) * (int)sizeof( void * ) );
+	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
+		const idRenderEntityLocal *def = world->entityDefs[i];
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow ) {
+			continue;
+		}
+		const idRenderModel *model = def->parms.hModel;
+		if ( model->IsStaticWorldModel() || model->IsDynamicModel() != DM_STATIC ) {
+			continue;						// _areaN already gathered; animated/generated models later
+		}
+		int surfIdx = 0;
+		for ( int s = 0; s < model->NumSurfaces(); s++ ) {
+			if ( R_RtSurfCasts( model->Surface( s ) ) ) {
+				surfIdx += model->Surface( s )->geometry->numIndexes;
+			}
+		}
+		if ( surfIdx < 3 ) {
+			continue;
+		}
+		entCount++;
+		bool seen = false;
+		for ( int u = 0; u < uniqueCount; u++ ) {
+			if ( unique[u] == model ) { seen = true; break; }
+		}
+		if ( !seen ) {
+			unique[uniqueCount++] = model;
+			for ( int s = 0; s < model->NumSurfaces(); s++ ) {
+				if ( R_RtSurfCasts( model->Surface( s ) ) ) {
+					mVerts += model->Surface( s )->geometry->numVerts;
+					mIndexes += model->Surface( s )->geometry->numIndexes;
+				}
+			}
+		}
+	}
+	if ( entCount == 0 || mIndexes < 3 ) {
+		Mem_Free16( (void *)unique );
+		return;
+	}
+
+	// pass 2: fill slices (one per unique model) + instances
+	pos = (float *)Mem_Alloc16( mVerts * 3 * (int)sizeof( float ) );
+	idx = (int *)Mem_Alloc16( mIndexes * (int)sizeof( int ) );
+	slices = (rtModelSlice_t *)Mem_Alloc16( uniqueCount * (int)sizeof( rtModelSlice_t ) );
+	insts = (rtModelInst_t *)Mem_Alloc16( entCount * (int)sizeof( rtModelInst_t ) );
+	int vertBase = 0, idxBase = 0;
+	for ( int u = 0; u < uniqueCount; u++ ) {
+		const idRenderModel *model = unique[u];
+		rtModelSlice_t sl;
+		sl.model = model;
+		sl.vertStart = vertBase; sl.idxStart = idxBase; sl.numVerts = 0; sl.numIdx = 0;
+		sl.blas = 0;
+		for ( int s = 0; s < model->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = model->Surface( s );
+			if ( !R_RtSurfCasts( surf ) ) {
+				continue;
+			}
+			const srfTriangles_t *tri = surf->geometry;
+			for ( int k = 0; k < tri->numVerts; k++ ) {
+				const idVec3 &p = tri->verts[k].xyz;
+				float *dst = pos + ( sl.vertStart + sl.numVerts + k ) * 3;
+				dst[0] = p[0]; dst[1] = p[1]; dst[2] = p[2];
+			}
+			for ( int n = 0; n < tri->numIndexes; n++ ) {
+				idx[sl.idxStart + sl.numIdx + n] = sl.numVerts + tri->indexes[n];
+			}
+			sl.numVerts += tri->numVerts;
+			sl.numIdx += tri->numIndexes;
+		}
+		vertBase += sl.numVerts;
+		idxBase += sl.numIdx;
+		slices[numSlices++] = sl;
+	}
+	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
+		const idRenderEntityLocal *def = world->entityDefs[i];
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow ) {
+			continue;
+		}
+		const idRenderModel *model = def->parms.hModel;
+		if ( model->IsStaticWorldModel() || model->IsDynamicModel() != DM_STATIC ) {
+			continue;
+		}
+		int slice = -1;
+		for ( int u = 0; u < numSlices; u++ ) {
+			if ( slices[u].model == model ) { slice = u; break; }
+		}
+		if ( slice < 0 || slices[slice].numIdx < 3 ) {
+			continue;
+		}
+		rtModelInst_t &in = insts[numInsts++];
+		in.slice = slice;
+		R_AxisToModelMatrix( def->parms.axis, def->parms.origin, in.mat );
+	}
+	Mem_Free16( (void *)unique );
+}
+
+// 3x4 inverse of an id column-major model matrix (local = inv * world). Full 3x3 inverse,
+// so scaled/sheared entity axes stay exact; false on a degenerate matrix.
+static bool R_RtInvertModelMatrix( const float *mm, float inv[12] ) {
+	const float a = mm[0], b = mm[4], c = mm[8];
+	const float d = mm[1], e = mm[5], f = mm[9];
+	const float g = mm[2], h = mm[6], i = mm[10];
+	const float A = e * i - f * h, B = f * g - d * i, C = d * h - e * g;
+	const float det = a * A + b * B + c * C;
+	if ( det > -1e-12f && det < 1e-12f ) {
+		return false;
+	}
+	const float s = 1.0f / det;
+	inv[0] = A * s;               inv[1] = ( c * h - b * i ) * s; inv[2]  = ( b * f - c * e ) * s;
+	inv[4] = B * s;               inv[5] = ( a * i - c * g ) * s; inv[6]  = ( c * d - a * f ) * s;
+	inv[8] = C * s;               inv[9] = ( b * g - a * h ) * s; inv[10] = ( a * e - b * d ) * s;
+	const float tx = mm[12], ty = mm[13], tz = mm[14];
+	inv[3]  = -( inv[0] * tx + inv[1] * ty + inv[2]  * tz );
+	inv[7]  = -( inv[4] * tx + inv[5] * ty + inv[6]  * tz );
+	inv[11] = -( inv[8] * tx + inv[9] * ty + inv[10] * tz );
+	return true;
+}
+
+// Build every BLAS (areas as identity instances, one per unique entity model) and the TLAS.
+// Returns the TLAS address (0 = failure); *blasFail counts failed BLAS builds. When
+// registerForRefresh is set (the persistent build), the handles land in the refresh
+// registry so R_RtRefreshInstances can re-instance them per frame; the validator's
+// transient build must NOT touch the registry.
+static unsigned long long R_RtBuildScene( rhi::RHI *r,
+		const float *aPos, const int *aIdx, const rtAreaSlice_t *aSlices, int numASlices,
+		const float *mPos, const int *mIdx, rtModelSlice_t *mSlices, int numMSlices,
+		const rtModelInst_t *mInsts, int numMInsts, int *blasFail, bool registerForRefresh ) {
+	if ( registerForRefresh ) {
+		s_rtAreaBlas.Clear();
+		s_rtModelBlas.Clear();
+	}
+	const int maxInst = numASlices + numMInsts;
+	rhi::RHI::RtInstance *inst = (rhi::RHI::RtInstance *)Mem_Alloc16( ( maxInst > 0 ? maxInst : 1 ) * (int)sizeof( rhi::RHI::RtInstance ) );
+	int numInst = 0;
+	*blasFail = 0;
+	for ( int s = 0; s < numASlices; s++ ) {
+		rhi::BlasHandle blas = r->CreateBlas( aPos + aSlices[s].vertStart * 3, aSlices[s].numVerts,
+			3 * (int)sizeof( float ), aIdx + aSlices[s].idxStart, aSlices[s].numIdx );
+		if ( blas == 0 ) {
+			( *blasFail )++;
+			continue;
+		}
+		rhi::RHI::RtInstance &in = inst[numInst++];
+		memset( &in, 0, sizeof( in ) );
+		in.transform[0] = 1.0f; in.transform[5] = 1.0f; in.transform[10] = 1.0f;	// identity 3x4
+		in.blas = blas;
+		in.mask = 0xFF;
+		if ( registerForRefresh ) {
+			s_rtAreaBlas.Append( blas );
+		}
+	}
+	for ( int s = 0; s < numMSlices; s++ ) {
+		mSlices[s].blas = r->CreateBlas( mPos + mSlices[s].vertStart * 3, mSlices[s].numVerts,
+			3 * (int)sizeof( float ), mIdx + mSlices[s].idxStart, mSlices[s].numIdx );
+		if ( mSlices[s].blas == 0 ) {
+			( *blasFail )++;
+		} else if ( registerForRefresh ) {
+			rtModelBlas_t mb;
+			mb.model = mSlices[s].model;
+			mb.blas = mSlices[s].blas;
+			s_rtModelBlas.Append( mb );
+		}
+	}
+	for ( int i = 0; i < numMInsts; i++ ) {
+		const rtModelInst_t &mi = mInsts[i];
+		if ( mSlices[mi.slice].blas == 0 ) {
+			continue;
+		}
+		rhi::RHI::RtInstance &in = inst[numInst++];
+		memset( &in, 0, sizeof( in ) );
+		// id column-major mm -> row-major 3x4 (VkTransformMatrixKHR): row r = (mm[r], mm[r+4], mm[r+8], mm[r+12])
+		for ( int row = 0; row < 3; row++ ) {
+			in.transform[row * 4 + 0] = mi.mat[row + 0];
+			in.transform[row * 4 + 1] = mi.mat[row + 4];
+			in.transform[row * 4 + 2] = mi.mat[row + 8];
+			in.transform[row * 4 + 3] = mi.mat[row + 12];
+		}
+		in.blas = mSlices[mi.slice].blas;
+		in.mask = 0xFF;
+	}
+	unsigned long long tlasAddr = ( numInst > 0 ) ? r->BuildTlas( inst, numInst ) : 0;
+	Mem_Free16( inst );
+	return tlasAddr;
+}
+
+// Gather this frame's VIEW animated characters (monsters) into ONE combined WORLD-space
+// triangle soup for the per-frame dynamic BLAS (R3 animated casters). Walks the view-entity
+// chain (tr.viewDef->viewEntitys) - every entity affecting this view, INCLUDING off-screen
+// ones casting shadows in - so a visible monster always qualifies whether or not its pose was
+// re-instantiated THIS exact frame. (The old dynamicModelFrameCount == tr.frameCount gate
+// flickered: a held/idle pose is not regenerated, so a stationary monster dropped out on the
+// frames it wasn't re-posed - the sabaoth blinked on and off.) vEnt->modelMatrix is the exact
+// model->world render transform; the CPU-skinned verts (always posed - never stripped, they ARE
+// the game's hit surface) are baked to world here, so the backend builds a single
+// identity-instance BLAS. Returns false with nothing allocated when there are no monster casters;
+// else the caller Mem_Free16's pos/idx.
+static bool R_RtGatherMonstersWorld( float *&pos, int *&idx, int &numVerts, int &numIndexes ) {
+	pos = NULL; idx = NULL; numVerts = 0; numIndexes = 0;
+	if ( tr.viewDef == NULL ) {
+		return false;
+	}
+
+	for ( const viewEntity_t *vEnt = tr.viewDef->viewEntitys; vEnt; vEnt = vEnt->next ) {
+		const idRenderEntityLocal *def = vEnt->entityDef;
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || def->parms.weaponDepthHack
+			|| def->parms.hModel->IsDynamicModel() != DM_CACHED || def->dynamicModel == NULL ) {
+			continue;
+		}
+		const idRenderModel *dm = def->dynamicModel;
+		for ( int s = 0; s < dm->NumSurfaces(); s++ ) {
+			if ( R_RtSurfCasts( dm->Surface( s ) ) ) {
+				numVerts += dm->Surface( s )->geometry->numVerts;
+				numIndexes += dm->Surface( s )->geometry->numIndexes;
+			}
+		}
+	}
+	if ( numIndexes < 3 ) {
+		numVerts = numIndexes = 0;
+		return false;
+	}
+
+	pos = (float *)Mem_Alloc16( numVerts * 3 * (int)sizeof( float ) );
+	idx = (int *)Mem_Alloc16( numIndexes * (int)sizeof( int ) );
+	int vbase = 0, ibase = 0;
+	for ( const viewEntity_t *vEnt = tr.viewDef->viewEntitys; vEnt; vEnt = vEnt->next ) {
+		const idRenderEntityLocal *def = vEnt->entityDef;
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || def->parms.weaponDepthHack
+			|| def->parms.hModel->IsDynamicModel() != DM_CACHED || def->dynamicModel == NULL ) {
+			continue;
+		}
+		const float *mm = vEnt->modelMatrix;		// model->world (local coords to global coords), id column-major
+		const idRenderModel *dm = def->dynamicModel;
+		for ( int s = 0; s < dm->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = dm->Surface( s );
+			if ( !R_RtSurfCasts( surf ) ) {
+				continue;
+			}
+			const srfTriangles_t *tri = surf->geometry;
+			for ( int k = 0; k < tri->numVerts; k++ ) {
+				const idVec3 &v = tri->verts[k].xyz;
+				float *dst = pos + ( vbase + k ) * 3;
+				dst[0] = mm[0] * v.x + mm[4] * v.y + mm[8]  * v.z + mm[12];
+				dst[1] = mm[1] * v.x + mm[5] * v.y + mm[9]  * v.z + mm[13];
+				dst[2] = mm[2] * v.x + mm[6] * v.y + mm[10] * v.z + mm[14];
+			}
+			for ( int m = 0; m < tri->numIndexes; m++ ) {
+				idx[ibase + m] = vbase + tri->indexes[m];
+			}
+			vbase += tri->numVerts;
+			ibase += tri->numIndexes;
+		}
+	}
+	return true;
+}
+
+// Re-instance the TLAS with CURRENT entity transforms once per game frame (movers: doors,
+// lifts, crushers). Uses the BLAS registry the persistent build filled - geometry never
+// rebuilds, only the instance list; the backend records the TLAS build on the next frame's
+// command buffer (RHI::UpdateTlas), so this never stalls. Entities spawned after the scene
+// build have no BLAS yet and are skipped until the next rebuild. Animated characters are added
+// separately via the per-frame dynamic BLAS (R_RtGatherMonstersWorld + UpdateDynamicGeometry).
+static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r ) {
+	static int lastFrame = -1;
+	if ( tr.frameCount == lastFrame ) {
+		return;						// subviews re-enter R_RenderView; once per frame is enough
+	}
+	lastFrame = tr.frameCount;
+	if ( s_rtAreaBlas.Num() == 0 && s_rtModelBlas.Num() == 0 ) {
+		return;
+	}
+	const int maxInst = s_rtAreaBlas.Num() + world->entityDefs.Num();
+	rhi::RHI::RtInstance *inst = (rhi::RHI::RtInstance *)Mem_Alloc16( ( maxInst > 0 ? maxInst : 1 ) * (int)sizeof( rhi::RHI::RtInstance ) );
+	int n = 0;
+	for ( int i = 0; i < s_rtAreaBlas.Num(); i++ ) {
+		rhi::RHI::RtInstance &in = inst[n++];
+		memset( &in, 0, sizeof( in ) );
+		in.transform[0] = 1.0f; in.transform[5] = 1.0f; in.transform[10] = 1.0f;	// identity 3x4
+		in.blas = s_rtAreaBlas[i];
+		in.mask = 0xFF;
+	}
+	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
+		const idRenderEntityLocal *def = world->entityDefs[i];
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow ) {
+			continue;
+		}
+		const idRenderModel *model = def->parms.hModel;
+		if ( model->IsStaticWorldModel() || model->IsDynamicModel() != DM_STATIC ) {
+			continue;
+		}
+		rhi::BlasHandle blas = 0;
+		for ( int u = 0; u < s_rtModelBlas.Num(); u++ ) {
+			if ( s_rtModelBlas[u].model == model ) {
+				blas = s_rtModelBlas[u].blas;
+				break;
+			}
+		}
+		if ( blas == 0 ) {
+			continue;
+		}
+		float mm[16];
+		R_AxisToModelMatrix( def->parms.axis, def->parms.origin, mm );
+		rhi::RHI::RtInstance &in = inst[n++];
+		memset( &in, 0, sizeof( in ) );
+		for ( int row = 0; row < 3; row++ ) {
+			in.transform[row * 4 + 0] = mm[row + 0];
+			in.transform[row * 4 + 1] = mm[row + 4];
+			in.transform[row * 4 + 2] = mm[row + 8];
+			in.transform[row * 4 + 3] = mm[row + 12];
+		}
+		in.blas = blas;
+		in.mask = 0xFF;
+	}
+	if ( n > 0 ) {
+		// R3 animated casters: gather this frame's visible monsters into a world-space soup and
+		// hand it to the backend (rebuilds a per-frame dynamic BLAS + appends one identity
+		// instance to the TLAS). MUST precede UpdateTlas, which consumes the dyn-caster arm.
+		if ( r_rtSunShadows.GetBool() && r_rtMonsterShadows.GetBool() ) {
+			float *mpos; int *midx; int mnv = 0, mni = 0;
+			if ( R_RtGatherMonstersWorld( mpos, midx, mnv, mni ) ) {
+				r->UpdateDynamicGeometry( mpos, mnv, midx, mni );
+				Mem_Free16( mpos );
+				Mem_Free16( midx );
+			}
+		}
+		r->UpdateTlas( inst, n );
+	}
+	Mem_Free16( inst );
+}
+
+/*
+=================
+R_RtWorldUpdate
+
+Keeps the persistent world scene in sync with r_rtWorld / r_rtSunShadows: lazy build on the
+first primary view, rebuild on map change (mapName comparison), teardown when both are off.
+While the scene is live, every frame re-instances the TLAS with current mover poses.
+=================
+*/
+static idStr s_rtWorldMap;
+static void R_RtWorldUpdate( void ) {
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r == NULL ) {
+		return;
+	}
+	// r_rtSunShadows (R3) implies the scene: the consumer auto-builds its prerequisite
+	if ( !r_rtWorld.GetBool() && !r_rtSunShadows.GetBool() ) {
+		if ( r_rtWorld.IsModified() || r_rtSunShadows.IsModified() ) {
+			r_rtWorld.ClearModified();
+			r_rtSunShadows.ClearModified();
+			r->DestroyRtScene();		// switched off: free the scene (no-op when never built)
+			s_rtWorldMap.Clear();
+			s_rtAreaBlas.Clear();
+			s_rtModelBlas.Clear();
+		}
+		return;
+	}
+	idRenderWorldLocal *world = R_RtSceneWorld();
+	if ( world == NULL ) {
+		return;							// GUI/subview/empty world: never bind the scene here
+	}
+	if ( !r->SupportsRayQuery() ) {
+		return;							// stays pending; a backend/hardware change re-evaluates
+	}
+	if ( r->GetStaticTlasAddress() != 0 && s_rtWorldMap.Icmp( world->mapName ) == 0 ) {
+		// static scene live and current: re-instance the per-frame TLAS with this frame's mover
+		// poses + animated-monster casters (GetStaticTlasAddress is the persistent-scene anchor;
+		// GetTlasAddress would return the per-frame slot address once the lane is running)
+		R_RtRefreshInstances( world, r );
+		return;
+	}
+	r_rtWorld.ClearModified();
+	r_rtSunShadows.ClearModified();
+	r->DestroyRtScene();
+
+	// terrain-as-models maps (commoutside: the walkable ground is all func_static models,
+	// worldspawn is caulk/sky only) legitimately gather ZERO casting worldspawn surfaces -
+	// the scene must still build from the entity casters alone, so neither gather gates
+	// the other; only both-empty means there is nothing to trace
+	float *aPos; int *aIdx; rtAreaSlice_t *aSlices;
+	int numASlices, worldVerts, worldIndexes;
+	R_RtGatherWorld( world, aPos, aIdx, aSlices, numASlices, worldVerts, worldIndexes );
+	float *mPos; int *mIdx; rtModelSlice_t *mSlices; rtModelInst_t *mInsts;
+	int numMSlices, numMInsts;
+	R_RtGatherEntities( world, mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts );
+	if ( numASlices == 0 && numMInsts == 0 ) {
+		return;
+	}
+
+	const int msStart = Sys_Milliseconds();
+	int blasFail = 0;
+	const unsigned long long tlasAddr = R_RtBuildScene( r, aPos, aIdx, aSlices, numASlices,
+		mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail, true );
+	const int msBuild = Sys_Milliseconds() - msStart;
+	int mTris = 0;
+	for ( int s = 0; s < numMSlices; s++ ) {
+		mTris += mSlices[s].numIdx / 3;
+	}
+	Mem_Free16( aPos ); Mem_Free16( aIdx ); Mem_Free16( aSlices );
+	if ( mPos ) { Mem_Free16( mPos ); Mem_Free16( mIdx ); Mem_Free16( mSlices ); Mem_Free16( mInsts ); }
+	if ( tlasAddr == 0 ) {
+		common->Warning( "r_rtWorld: world scene build failed (%d BLAS failures) - disabling", blasFail );
+		r->DestroyRtScene();
+		s_rtAreaBlas.Clear();
+		s_rtModelBlas.Clear();
+		r_rtWorld.SetBool( false );
+		r_rtSunShadows.SetBool( false );
+		return;
+	}
+	s_rtWorldMap = world->mapName;
+	common->Printf( "r_rtWorld: %d area BLAS (%d tris) + %d model BLAS (%d tris, %d instances), %d ms build%s\n",
+		numASlices, worldIndexes / 3, numMSlices, mTris, numMInsts, msBuild,
+		blasFail ? va( " (%d BLAS failed)", blasFail ) : "" );
+}
+
+static const char *RTWORLD_SRC =
+	"#version 460\n"
+	"#extension GL_EXT_ray_query : require\n"
+	"layout(local_size_x = 64) in;\n"
+	"layout(std430, binding = 0) writeonly buffer Out { float t[]; } outb;\n"
+	"layout(std430, binding = 1) readonly buffer Rays { vec4 dir[]; } rays;\n"
+	"layout(push_constant) uniform PC { uvec2 tlas; uint count; float ox, oy, oz, tmax; } pc;\n"
+	"void main() {\n"
+	"    uint i = gl_GlobalInvocationID.x;\n"
+	"    if ( i >= pc.count ) { return; }\n"
+	"    rayQueryEXT rq;\n"
+	"    rayQueryInitializeEXT( rq, accelerationStructureEXT( pc.tlas ), gl_RayFlagsOpaqueEXT, 0xFFu,\n"
+	"                           vec3( pc.ox, pc.oy, pc.oz ), 0.0, rays.dir[i].xyz, pc.tmax );\n"
+	"    while ( rayQueryProceedEXT( rq ) ) { }\n"
+	"    outb.t[i] = ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )\n"
+	"        ? rayQueryGetIntersectionTEXT( rq, true ) : -1.0;\n"
+	"}\n";
+
+// Moller-Trumbore closest hit of one ray against a packed float3/int soup slice; returns
+// the closest t in (0, tmax) or -1. Same math as the synthetic self-test's reference.
+static float R_RtCpuTrace( const idVec3 &org, const idVec3 &dir, float tmax,
+		const float *pos, const int *idx, int idxStart, int idxCount, int vertStart ) {
+	float best = -1.0f;
+	for ( int n = idxStart; n < idxStart + idxCount; n += 3 ) {
+		const float *v0 = pos + ( vertStart + idx[n + 0] ) * 3;
+		const float *v1 = pos + ( vertStart + idx[n + 1] ) * 3;
+		const float *v2 = pos + ( vertStart + idx[n + 2] ) * 3;
+		const idVec3 e1( v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2] );
+		const idVec3 e2( v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2] );
+		const idVec3 pv = dir.Cross( e2 );
+		const float det = e1 * pv;
+		if ( det > -1e-8f && det < 1e-8f ) {
+			continue;
+		}
+		const float inv = 1.0f / det;
+		const idVec3 tv( org[0]-v0[0], org[1]-v0[1], org[2]-v0[2] );
+		const float u = ( tv * pv ) * inv;
+		if ( u < 0.0f || u > 1.0f ) {
+			continue;
+		}
+		const idVec3 qv = tv.Cross( e1 );
+		const float w = ( dir * qv ) * inv;
+		if ( w < 0.0f || u + w > 1.0f ) {
+			continue;
+		}
+		const float t = ( e2 * qv ) * inv;
+		if ( t > 0.0f && t < tmax && ( best < 0.0f || t < best ) ) {
+			best = t;
+		}
+	}
+	return best;
+}
+
+// CPU closest hit over the WHOLE scene: worldspawn slices (identity) + entity instances
+// (ray inverse-transformed into model space; the affine map preserves the ray parameter,
+// so the model-space t IS the world-space t - the direction is deliberately NOT renormalized).
+static float R_RtCpuSceneTrace( const idVec3 &org, const idVec3 &dir, float tmax,
+		const float *aPos, const int *aIdx, const rtAreaSlice_t *aSlices, int numASlices,
+		const float *mPos, const int *mIdx, const rtModelSlice_t *mSlices,
+		const rtModelInst_t *mInsts, int numMInsts ) {
+	float best = -1.0f;
+	for ( int s = 0; s < numASlices; s++ ) {
+		const float t = R_RtCpuTrace( org, dir, tmax,
+			aPos, aIdx, aSlices[s].idxStart, aSlices[s].numIdx, aSlices[s].vertStart );
+		if ( t > 0.0f && ( best < 0.0f || t < best ) ) {
+			best = t;
+		}
+	}
+	for ( int i = 0; i < numMInsts; i++ ) {
+		const rtModelInst_t &mi = mInsts[i];
+		float inv[12];
+		if ( !R_RtInvertModelMatrix( mi.mat, inv ) ) {
+			continue;
+		}
+		const idVec3 lorg(
+			inv[0] * org[0] + inv[1] * org[1] + inv[2]  * org[2] + inv[3],
+			inv[4] * org[0] + inv[5] * org[1] + inv[6]  * org[2] + inv[7],
+			inv[8] * org[0] + inv[9] * org[1] + inv[10] * org[2] + inv[11] );
+		const idVec3 ldir(
+			inv[0] * dir[0] + inv[1] * dir[1] + inv[2]  * dir[2],
+			inv[4] * dir[0] + inv[5] * dir[1] + inv[6]  * dir[2],
+			inv[8] * dir[0] + inv[9] * dir[1] + inv[10] * dir[2] );
+		const float t = R_RtCpuTrace( lorg, ldir, tmax,
+			mPos, mIdx, mSlices[mi.slice].idxStart, mSlices[mi.slice].numIdx, mSlices[mi.slice].vertStart );
+		if ( t > 0.0f && ( best < 0.0f || t < best ) ) {
+			best = t;
+		}
+	}
+	return best;
+}
+
+static void R_RtWorldValidate( void ) {
+	if ( !r_rtWorldTest.GetBool() ) {
+		if ( r_rtWorldTest.IsModified() ) {
+			r_rtWorldTest.ClearModified();
+		}
+		return;
+	}
+	idRenderWorldLocal *world = R_RtSceneWorld();
+	if ( world == NULL ) {
+		return;							// stay armed until a map-world primary view renders
+	}
+	// consume: run once, flip the cvar back off so a re-enable re-runs
+	r_rtWorldTest.SetBool( false );
+	r_rtWorldTest.ClearModified();
+
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r == NULL || !r->SupportsRayQuery() ) {
+		common->Printf( "r_rtWorldTest: unavailable (needs Vulkan + KHR_ray_query hardware)\n" );
+		return;
+	}
+
+	// mirror R_RtWorldUpdate: worldspawn-empty maps (terrain-as-models) still validate
+	// against their entity casters; only both-empty means nothing to trace
+	float *aPos; int *aIdx; rtAreaSlice_t *aSlices;
+	int numASlices, worldVerts, worldIndexes;
+	R_RtGatherWorld( world, aPos, aIdx, aSlices, numASlices, worldVerts, worldIndexes );
+	float *mPos; int *mIdx; rtModelSlice_t *mSlices; rtModelInst_t *mInsts;
+	int numMSlices, numMInsts;
+	R_RtGatherEntities( world, mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts );
+	if ( numASlices == 0 && numMInsts == 0 ) {
+		common->Printf( "r_rtWorldTest: no shadow-casting geometry found\n" );
+		return;
+	}
+
+	// scene: reuse the persistent STATIC one when live (R_RtWorldUpdate ran just before us, so
+	// it is current for this map), else a transient build torn down at the end. Deliberately the
+	// STATIC scene, not the per-frame TLAS: the CPU reference below is the static soup, so tracing
+	// the per-frame slot (which also carries animated monster casters) would false-positive every
+	// monster hit as a "genuine" mismatch.
+	const bool persistent = ( r_rtWorld.GetBool() || r_rtSunShadows.GetBool() ) && r->GetStaticTlasAddress() != 0;
+	int blasFail = 0, msBuild = 0;
+	unsigned long long tlasAddr;
+	if ( persistent ) {
+		tlasAddr = r->GetStaticTlasAddress();
+	} else {
+		const int msStart = Sys_Milliseconds();
+		tlasAddr = R_RtBuildScene( r, aPos, aIdx, aSlices, numASlices,
+			mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail, false );
+		msBuild = Sys_Milliseconds() - msStart;
+	}
+	int mTris = 0;
+	for ( int s = 0; s < numMSlices; s++ ) {
+		mTris += mSlices[s].numIdx / 3;
+	}
+	// single cleanup path: every exit below runs this
+	struct rtCleanup_t {
+		float *aPos; int *aIdx; rtAreaSlice_t *aSlices;
+		float *mPos; int *mIdx; rtModelSlice_t *mSlices; rtModelInst_t *mInsts;
+	} cl = { aPos, aIdx, aSlices, mPos, mIdx, mSlices, mInsts };
+	#define RTTEST_CLEANUP() do { \
+		Mem_Free16( cl.aPos ); Mem_Free16( cl.aIdx ); Mem_Free16( cl.aSlices ); \
+		if ( cl.mPos ) { Mem_Free16( cl.mPos ); Mem_Free16( cl.mIdx ); Mem_Free16( cl.mSlices ); Mem_Free16( cl.mInsts ); } \
+	} while ( 0 )
+
+	if ( tlasAddr == 0 || blasFail > 0 ) {
+		common->Printf( "r_rtWorldTest: FAIL (AS build: %d BLAS failed, tlas %s)\n",
+			blasFail, tlasAddr ? "ok" : "failed" );
+		if ( !persistent ) {
+			r->DestroyRtScene();
+		}
+		RTTEST_CLEANUP();
+		return;
+	}
+
+	// 8x8 ray grid across the live view frustum (0.9 x the half-FOV so every ray stays in-view)
+	const renderView_t &rv = tr.viewDef->renderView;
+	const float tanX = idMath::Tan( DEG2RAD( rv.fov_x * 0.5f ) ) * 0.9f;
+	const float tanY = idMath::Tan( DEG2RAD( rv.fov_y * 0.5f ) ) * 0.9f;
+	const int NR = 64;
+	const float TMAX = 100000.0f;
+	idVec3 dirs[NR];
+	float dirBlob[NR * 4];
+	for ( int i = 0; i < NR; i++ ) {
+		const float u = ( ( (float)( i % 8 ) + 0.5f ) / 8.0f * 2.0f - 1.0f ) * tanX;
+		const float v = ( ( (float)( i / 8 ) + 0.5f ) / 8.0f * 2.0f - 1.0f ) * tanY;
+		dirs[i] = rv.viewaxis[0] - u * rv.viewaxis[1] + v * rv.viewaxis[2];
+		dirs[i].Normalize();
+		dirBlob[i * 4 + 0] = dirs[i][0]; dirBlob[i * 4 + 1] = dirs[i][1];
+		dirBlob[i * 4 + 2] = dirs[i][2]; dirBlob[i * 4 + 3] = 0.0f;
+	}
+
+	static rhi::ShaderHandle s_shader = 0;
+	if ( s_shader == 0 ) {
+		s_shader = r->CreateComputeShader( "cs_rtworldtest", RTWORLD_SRC );
+	}
+	float gpuT[NR];
+	bool traced = false;
+	if ( s_shader != 0 ) {
+		float seed[NR];
+		for ( int i = 0; i < NR; i++ ) { seed[i] = -3.0f; }		// sentinel: dead dispatch != miss
+		rhi::BufferHandle bOut = r->CreateBuffer( rhi::BU_STORAGE, NR * (int)sizeof( float ), seed );
+		rhi::BufferHandle bRays = r->CreateBuffer( rhi::BU_STORAGE, NR * 4 * (int)sizeof( float ), dirBlob );
+		struct { unsigned int tlasLo, tlasHi, count; float ox, oy, oz, tmax; } pc;
+		pc.tlasLo = (unsigned int)( tlasAddr & 0xFFFFFFFFu );
+		pc.tlasHi = (unsigned int)( tlasAddr >> 32 );
+		pc.count = NR;
+		pc.ox = rv.vieworg[0]; pc.oy = rv.vieworg[1]; pc.oz = rv.vieworg[2];
+		pc.tmax = TMAX;
+		rhi::ComputeArgs ca;
+		memset( &ca, 0, sizeof( ca ) );
+		ca.shader = s_shader;
+		ca.storage[0] = bOut;
+		ca.storage[1] = bRays;
+		ca.pushConstants = &pc;
+		ca.pushConstantSize = (int)sizeof( pc );
+		ca.groupsX = 1; ca.groupsY = 1; ca.groupsZ = 1;
+		r->DispatchSync( ca );
+		traced = r->ReadBuffer( bOut, gpuT, NR * (int)sizeof( float ) );
+		r->DestroyBuffer( bOut );
+		r->DestroyBuffer( bRays );
+	}
+	if ( !traced ) {
+		common->Printf( "r_rtWorldTest: FAIL (trace dispatch/readback failed)\n" );
+		if ( !persistent ) {
+			r->DestroyRtScene();
+		}
+		RTTEST_CLEANUP();
+		return;
+	}
+
+	// CPU reference over the identical soup (areas + instances) + boundary classification
+	int gpuHits = 0, mismatch = 0, boundary = 0, genuine = 0, firstGenuine = -1;
+	for ( int i = 0; i < NR; i++ ) {
+		const float cpuT = R_RtCpuSceneTrace( rv.vieworg, dirs[i], TMAX,
+			aPos, aIdx, aSlices, numASlices, mPos, mIdx, mSlices, mInsts, numMInsts );
+		const bool gpuHit = gpuT[i] >= 0.0f;
+		if ( gpuHit ) {
+			gpuHits++;
+		}
+		const float tol = 0.05f + ( cpuT > 0.0f ? cpuT : 0.0f ) * 0.001f;
+		const bool ok = ( gpuHit == ( cpuT >= 0.0f ) )
+			&& ( !gpuHit || ( gpuT[i] > cpuT - tol && gpuT[i] < cpuT + tol ) );
+		if ( ok ) {
+			continue;
+		}
+		mismatch++;
+		// perturb the ray slightly; if any perturbed CPU trace reproduces the GPU result the
+		// ray grazes an edge/crack (legit FP divergence), not a broken AS
+		bool isBoundary = false;
+		for ( int p = 0; p < 4 && !isBoundary; p++ ) {
+			idVec3 pd = dirs[i]
+				+ ( ( p & 1 ) ? 0.002f : -0.002f ) * ( ( p & 2 ) ? rv.viewaxis[1] : rv.viewaxis[2] );
+			pd.Normalize();
+			const float pT = R_RtCpuSceneTrace( rv.vieworg, pd, TMAX,
+				aPos, aIdx, aSlices, numASlices, mPos, mIdx, mSlices, mInsts, numMInsts );
+			const float ptol = 0.05f + ( pT > 0.0f ? pT : 0.0f ) * 0.005f;	// looser: the ray moved
+			isBoundary = ( gpuHit == ( pT >= 0.0f ) )
+				&& ( !gpuHit || ( gpuT[i] > pT - ptol && gpuT[i] < pT + ptol ) );
+		}
+		if ( isBoundary ) {
+			boundary++;
+		} else {
+			genuine++;
+			if ( firstGenuine < 0 ) {
+				firstGenuine = i;
+			}
+		}
+	}
+
+	common->Printf( "r_rtWorldTest: %d area + %d model BLAS (%d world + %d model tris, %d instances, %s); "
+		"%d/%d rays hit -- %s (mismatch %d = %d boundary-FP + %d genuine, first genuine @%d)\n",
+		numASlices, numMSlices, worldIndexes / 3, mTris, numMInsts,
+		persistent ? "persistent scene" : va( "%d ms build", msBuild ),
+		gpuHits, NR,
+		( genuine == 0 && gpuHits > 0 ) ? "PASS" : "FAIL",
+		mismatch, boundary, genuine, firstGenuine );
+
+	if ( !persistent ) {
+		r->DestroyRtScene();
+	}
+	RTTEST_CLEANUP();
+	#undef RTTEST_CLEANUP
+}
+
+/*
 ==========================
 R_TransformModelToClip
 ==========================
@@ -1581,6 +2421,11 @@ void R_RenderView( viewDef_t *parms ) {
 	//   r_gpuCullLive (3.2): the REAL surfaces R_AddModelSurfaces just recorded — validates on live data.
 	R_GpuCullValidate();
 	R_GpuCullLive();
+	// R2 ray-query world scene + validator (docs/rtx-shadow-roadmap.md): r_rtWorld keeps the
+	// persistent static-world AS in sync (lazy build / map change / teardown); r_rtWorldTest
+	// is the one-shot GPU-vs-CPU ray diff. Both self-gate; Vulkan + RT hardware only.
+	R_RtWorldUpdate();
+	R_RtWorldValidate();
 
 	// any viewLight that didn't have visible surfaces can have it's shadows removed
 	R_RemoveUnecessaryViewLights();

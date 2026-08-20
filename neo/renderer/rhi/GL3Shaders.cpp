@@ -84,9 +84,13 @@ static const int GL3_NUM_BOOT_PROGRAMS = sizeof( gl3BootPrograms ) / sizeof( gl3
 =============
 GL3_ReadShaderFile
 
-VFS first (mods can override), then the source tree for dev runs.
+VFS first (mods can override), then the source tree for dev runs, then the
+table embedded in the binary (so a bare executable always renders).
 =============
 */
+// generated at build time by shaders/embed_shaders.py (shaders_embedded.cpp)
+extern "C" bool Dude_GetEmbeddedShader( const char *name, const unsigned char **data, int *len );
+
 static bool GL3_ReadShaderFile( const char *fileName, idStr &out ) {
 	void *buf = NULL;
 	int len = fileSystem->ReadFile( va( "shaders/%s", fileName ), &buf, NULL );
@@ -117,6 +121,15 @@ static bool GL3_ReadShaderFile( const char *fileName, idStr &out ) {
 		fclose( f );
 	}
 #endif
+
+	// embedded table: the always-present fallback so a bare binary renders
+	const unsigned char *edata;
+	int elen;
+	if ( Dude_GetEmbeddedShader( fileName, &edata, &elen ) ) {
+		out.Clear();
+		out.Append( (const char *)edata, elen );
+		return true;
+	}
 	return false;
 }
 

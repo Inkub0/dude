@@ -111,4 +111,9 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // (un-jittered). gbuffer.{vert,tese} write the per-object screen
 	                            // velocity (currUV - prevUV, +Y-up) into the 3rd MRT. Filled only by
 	                            // the VK normal prepass when r_motionVectors is on; 0 elsewhere.
+
+	vec4 u_rtParms;              // DUDE RT sun shadows (docs/rtx-shadow-roadmap.md R3): xy = the
+	                            // scene TLAS device address as raw bit patterns (floatBitsToUint),
+	                            // z = ray-origin normal offset (world units), w = max ray length.
+	                            // Read only by interaction_rt.frag when shadowParms.x == 4.
 };

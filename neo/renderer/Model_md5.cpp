@@ -1595,19 +1595,19 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	// rasterizes solely from gpuSkinVB, and the redundant CPU TransformVerts + R_DeriveTangents +
 	// ambient upload are all gone -- the actual per-frame CPU skin cost this whole project set out to
 	// remove. HARD-GATED on r_gpuSkinning so the OFF path is byte-for-byte the stock CPU skinner.
-	const bool stripCpu =
-		r_skinStripThisModel
-		&& r_gpuSkinning.GetBool()
-		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN
-		&& ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] == 0.0f
-		&& shader && shader->Deform() == DFRM_NONE			// vertex deforms (eyeBall on every char/monster eye mesh,
-		&& !shader->HasSubview() && !shader->HasGui()		// expand/move/turb) + subview/GUI precise-cull read tri->verts
-		&& skinExpandLocalTBN && skinWeightStart && skinExpandWDesc && skinExpandWeights
-		&& skinExpandCount > 0 && numOutputVerts == deformInfo->numOutputVerts
-		&& skinBoundJoint.Num() > 0
-		&& R_MD5_SkinShader( rhi::GetRHI() ) != 0		// gpuSkinVB must materialize below, else invisible
-		&& EnsureSkinBuffersUploaded();
-	tri->cpuSkinStripped = stripCpu;
+	// DUDE: the CPU POSITION skin (TransformVerts) is non-negotiable and can NEVER be stripped.
+	// A living monster's player-hit collision IS its animated render model: idActor's combat clip
+	// model is built from the render-model handle (CONTENTS_RENDERMODEL, d3xp/Actor.cpp), player
+	// attacks trace with MASK_SHOT_RENDERMODEL, and idClip::TraceRenderModel ->
+	// idRenderWorldLocal::ModelTrace -> R_LocalTrace reads tri->verts[].xyz DIRECTLY (tr_trace.cpp).
+	// The former r_gpuSkinStripCpu left those verts at BIND POSE, so every monster's hittable
+	// surface was a T-pose at the model origin and the player's shots passed straight through it
+	// -- monsters were invulnerable while still able to attack (user-found 2026-08-18). The old
+	// strip-safety audit only checked RENDER readers of tri->verts and missed this game hit path.
+	// So the position skin always runs. GPU skinning still offloads the DRAW (gpuSkinVB, below) and
+	// r_gpuSkinNoUpload still skips the redundant ambient upload -- both leave tri->verts posed.
+	const bool stripCpu = false;
+	tri->cpuSkinStripped = false;
 
 	if ( !stripCpu ) {
 		if ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f ) {

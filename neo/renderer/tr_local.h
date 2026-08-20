@@ -964,6 +964,9 @@ extern idCVar r_shadowMapSun;				// oversize/parallel "sun" lights: per-view fit
 extern idCVar r_shadowMapSunBias;			// sun map depth-compare bias
 extern idCVar r_shadowMapSunRange;			// how far ahead of the camera the sun map covers (world units)
 extern idCVar r_shadowMapNormalOffset;		// normal-offset shadow bias in texels (cube + sun lookups; 0 = off)
+extern idCVar r_rtSunShadows;				// RT sun shadows: trace sun visibility per fragment (VK + RT hardware)
+extern idCVar r_rtSunShadowOffset;			// RT sun shadows: ray-origin normal offset (world units)
+extern idCVar r_rtMonsterShadows;			// RT sun shadows: include animated characters as per-frame casters
 
 // DUDE: emissive fill lights for interactive GUI screens (enhancement backends only)
 extern idCVar r_emissiveSurfaces;		// master toggle (emissive surfaces cast fill light)
@@ -1021,12 +1024,6 @@ extern idCVar r_gpuSkinProfile;			// dev: size the Milestone-C prize (skinned-su
 void R_GpuSkinProfileAddDerive( double ms );	// accumulate one skinned-surface tangent-derive time (impl tr_light.cpp)
 void R_GpuSkinProfileAddStrip( int verts );		// Milestone D: count one CPU-skin-stripped surface (impl tr_light.cpp)
 
-// DUDE: Milestone D -- strip the redundant CPU position skin when GPU skinning is on (Vulkan only;
-// docs/gpu-offload-plan.md). Retires TransformVerts + R_BoundTriSurf + derive + ambient upload for
-// surfaces the frame proved safe (no stencil-shadow light in view, no overlay, non-deform, no scale).
-extern idCVar r_gpuSkinStripCpu;		// master toggle for the CPU-skin strip (needs r_gpuSkinning)
-extern bool   r_skinStripThisModel;		// transient: R_EntityDefDynamicModel arms it per-entity around InstantiateDynamicModel
-extern bool   r_viewHasStencilShadowLights;	// per-view: any light that will build a stencil volume this view (pin: stencil)
 // Shared stencil-build routing (Interaction.cpp CreateInteraction + the view-flag loop): true when the
 // light will be shadow-MAPPED, so its CPU stencil volume is never drawn and the build can be skipped.
 bool R_ShadowMapSkipStencilBuild( const idRenderLightLocal *lightDef, const idMaterial *lightShader );

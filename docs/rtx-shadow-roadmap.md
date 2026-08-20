@@ -54,7 +54,17 @@ hand-rolled-TAA plan (docs/antialiasing.md):
   latency and HUD compositing.
 (Until R1 lands, the RT soft tier runs spatial-only with mild flicker — acceptable, not final.)
 
-### R2. Ray-query foundation · LARGE · VK-only, RT-gated
+### R2. Ray-query foundation · LARGE · VK-only, RT-gated  **[DONE — shipped + user-verified 2026-08-18]**
+
+**As-built** (branch feat/rt-ray-query-foundation): extension trio gated behind one
+`haveRayQuery` capability; RHI AS API (`CreateBlas`/`BuildTlas`/`UpdateTlas`/`DestroyRtScene`);
+`r_rayQueryTest` synthetic validator + `r_rtWorldTest` world validator (GPU rays diffed vs a CPU
+Möller–Trumbore reference, entity instances included); persistent `r_rtWorld` scene = one BLAS
+per `_areaN` + one per unique static entity model with per-entity TLAS instances (movers
+re-instanced EVERY FRAME via the per-frame TLAS lane: slot per frame-in-flight, build recorded
+ahead of the frame's draws, verified with a kicked moveable casting a live moving shadow).
+~60-90 ms full-map builds; rays measured ~free on the 3080 Ti @1440p. Remaining from the
+original spec: BLAS compaction, animated-monster refit (below), TLAS instance culling.
 The minimum stack is `VK_KHR_acceleration_structure` + `VK_KHR_ray_query` only — **skip the
 RT-pipeline/SBT extension entirely** (inline queries from the existing forward interaction shader;
 consensus recommendation for shadow-only workloads).
@@ -71,7 +81,25 @@ consensus recommendation for shadow-only workloads).
 - **Validator first** (house pattern): `r_rayQueryTest` — trace a synthetic ray set, diff against a
   CPU reference before anything renders from it.
 
-### R3. RT hard shadows — first visible RTX feature · MED · depends R2
+### R3. RT hard shadows — first visible RTX feature · MED · depends R2  **[SUN SHADOWS SHIPPED + user-verified 2026-08-18]**
+
+**As-built:** `r_rtSunShadows` (opt-in, VK+RT): interaction shadow mode 4 traces one ray at the
+sun (opaque + terminate-on-first-hit) in a separate `interaction_rt` program (the SPIR-V
+ray-query capability fails pipeline creation on non-RT hardware, so the base shader stays
+clean). Serves BOTH sun species: parallel suns AND the low oversize omnis the virtual-map fit
+declines (`lightRtOnly` route — those lights render no sun map at all). TLAS address rides the
+RenderParams UBO bit-cast (floatBitsToUint). The sun-map render is now skipped for EVERY
+RT-served sun (both parallel and fit-declined), so RT suns render no map at all — pure ray path.
+
+**Animated monster casters DONE + user-verified 2026-08-18** (`r_rtMonsterShadows`, default on):
+each frame the view-entity chain's DM_CACHED characters are gathered (their always-posed
+CPU-skinned verts baked to world by `vEnt->modelMatrix`) into one combined world-space soup →
+a per-frame dynamic BLAS rebuilt on the frame cb ahead of the TLAS build, appended as one
+identity instance. Key lessons: (1) PERFORATED (alpha-tested) surfaces must cast — D3 characters
+are ~90% perforated and D3's own stencil treats them as solid occluders (R_RtSurfCasts admits
+OPAQUE||PERFORATED); (2) walk `viewEntitys` keyed on `dynamicModel != NULL`, NOT
+`dynamicModelFrameCount == tr.frameCount` — a held/idle pose isn't re-instantiated, which
+flickered. Remaining: cube/point lights; alpha-tested any-hit (holes in shadows) refinement.
 Inline query in the interaction path (shadow mode 4): **one ray toward the light**,
 `TerminateOnFirstHit | Opaque | SkipClosestHit`; alpha-tested casters marked non-opaque, resolved in
 the candidate loop (`rayQueryConfirmIntersectionEXT`). Deterministic, noise-free — **no denoiser, no

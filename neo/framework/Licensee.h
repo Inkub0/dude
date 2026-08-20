@@ -42,7 +42,7 @@ If you have questions concerning this license or the applicable additional terms
 #endif
 
 // DUDE - Doom3 Unified Development Engine (fork of dhewm3 1.5.5)
-#define ENGINE_VERSION					"DUDE 0.1"		// printed in console, used for window title
+#define ENGINE_VERSION					"DUDE 0.9.1"	// printed in console, used for window title
 
 #ifdef ID_REPRODUCIBLE_BUILD
 	// for reproducible builds we hardcode values that would otherwise come from __DATE__ and __TIME__
