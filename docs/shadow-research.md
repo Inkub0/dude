@@ -222,3 +222,113 @@ If we invest anywhere structural, motion vectors pay for two features.
 5. **Ray-query hybrid shadows** — hard RT first (beats shadow maps outright at 4+ lights per the RTG
    numbers, and our deform-once buffer already feeds the BLAS refit), then the FidelityFX-style
    ambiguous-band hybrid, then soft (SIGMA + STBN) once motion vectors land.
+
+---
+
+## 2026-08 recency check — cube-pass cost mitigation (settled; don't re-litigate)
+
+A fresh literature sweep (SIGGRAPH 2025 Advances, Eurographics/CGF 2025, i3D/EG 2026 catalogs,
+current shipping practice) targeted at the measured **~1.2 ms point-light cube pass** — the single
+biggest GPU pass at Nightmare. Conclusions recorded here so the survey stays the single source of
+truth.
+
+### Where the 1.2 ms actually lives (measured, r_vkGpuTime A/B)
+
+Three terms, and every mitigation must name which it attacks. Two A/Bs pin them down:
+halving `r_shadowMapPointSize` saved **~0.87 ms**, while cutting PCF taps 12→8 saved only
+**~0.1 ms** (the taps lever is measured DEAD — see `shadow-map-perf-and-stencil` memory). Taps
+don't move the needle but resolution does → the dominant cost is **resolution-quadratic face
+work**, not interaction-pass tap count:
+- **(a) Face-render fill + big-map bandwidth** — re-rendered 2048² faces (clear + depth fill,
+  quadratic in res) plus the cache-miss footprint of sampling huge maps (same tap count, wider
+  texel spread). The dominant term.
+- **(b) Re-renders for movers** — the split cache measures 85–100% hit through combat; the
+  irreducible churn is **moving lights** (muzzle flash, projectiles, monster-carried), which no
+  cache can ever serve (a moving light *must* re-render all its faces). (a) and (b) compound:
+  every un-cacheable re-render pays the resolution-quadratic fill.
+- **(c) Interaction-pass sampling + fixed per-face draw overhead** — measured small (the dead
+  taps lever); the draw side is a CPU story anyway.
+
+### Verdict 1 — cheap levers: what's left is smaller than it looks; nothing 2024–2026 supersedes it
+
+1. **Resolution-by-intrinsic-radius ALREADY EXISTS — don't rebuild it.** `r_shadowMapSizeScale`
+   (default on, `RB_RHI_ShadowTier`, ½×…4× tiers, cube + 2D pools) shipped long ago, and the
+   pivot tune (`r_shadowMapSizeScaleRadius` 340→480 on Ultra/Nightmare) already landed,
+   user-verified. Remaining headroom on this lever = raising the pivot further (per-user console
+   knob, area-dependent benefit) — not a new feature. (This sweep initially re-proposed it;
+   caught against the 2026-08-10 recon. The trap to avoid next time.)
+2. **Half-res dynamic scratch layer** (the one genuinely new cheap lever from this sweep): the
+   split cache's *dynamic* layer re-renders every frame regardless — it has **no cache key to
+   thrash** — so rendering movers at half resolution is safe by construction and quarters the
+   per-frame fill they pay. Matches HDRP/CoD budget-by-importance practice. Attacks (a)×(b)
+   where they compound.
+3. **Update scheduling** (Nth-frame refresh for low-importance lights, screen-size update
+   frequency — the T2 item): confirmed still-current practice (UE5.7 VSM page caching, HDRP
+   OnDemand/OnEnable update modes are the same idea industrialized). Attacks (b) by amortizing.
+4. **Castaño gather-PCF** (§2.5) — **demoted from perf lever to quality-per-ms upgrade** by the
+   dead-taps A/B: with taps 12→8 worth only ~0.1 ms, fewer fetches can't buy much. Its real value
+   is a *wider, softer kernel* at unchanged cost. Do it for looks whenever the shadow shaders are
+   next open; don't book perf for it.
+
+### Verdict 2 — two live options for the big structural win (BOTH kept open, decision pending)
+
+User leaning 2026-08: **RT-for-moving-lights is the way to go** — but the call is deferred until a
+visual check; keep both alive until then.
+
+- **Option A — RT for the un-cacheable lights** (refines R3's "then cube lights" into "***moving***
+  cube lights first"). The heavy-pass profile's honest gap was "a moving-light lever is a separate,
+  harder story" — this is that lever, and the cost decomposition above is squarely on its side: it
+  deletes the resolution-quadratic re-render fill (the measured dominant term) exactly where the
+  cache provably can't help. A moving light forces 6-face re-renders every frame on the map path,
+  while a ray costs the same whether the light moves or not — and a local cube light covers far
+  fewer pixels than the full-screen sun that measured +0.6 ms. Shipping practice corroborates the
+  trajectory (id Tech 8 fully ray-based for *The Dark Ages*; UE5 MegaLights using rays precisely
+  for the dynamic-light case). VK+RT-gated, feeds the R4 hybrid directly. Attacks (a)×(b) at the
+  root. **Visual check required before committing**: RT hard shadows are exact/unfiltered — the
+  moving-light look (muzzle flash, thrown barrels) must be eyeballed against the PCF-softened cube
+  look for consistency.
+- **Option B — VRS on the interaction pass** (`VK_KHR_fragment_shading_rate`, Turing+/RDNA2+;
+  VK-only, GL3.3 has nothing). *Not previously surveyed.* Doom Eternal (forward, like DUDE)
+  shipped hardware VRS on its forward passes with substantial pixel-shader savings; Microsoft's
+  2026 Dark Ages write-up shows the win eroded only after id moved to compute-deferred — forward
+  renderers are where VRS shines. 2×2 rate on interaction passes cuts per-pixel shading across
+  *all* lights. **Honest cap:** the dead-taps A/B says the cube pass's *sampling* term is small,
+  so VRS's win against the cube pass specifically is bounded — its real case is the whole
+  lighting/interaction cost (specular, PBR, POM), of which shadow sampling is one slice. Evaluate
+  it as a general lighting-pass lever, not a shadow fix. **Fidelity flag:** coarsens shading →
+  strictly an opt-in cvar per policy; FSR2's temporal resolve masks most softening on Nightmare.
+
+### Verdict 3 — checked and still overkill / still dead
+
+- **Stochastic many-light shadowing** — the 2025 crop (*Many-Light Rendering Using ReSTIR-Sampled
+  Shadow Maps*, EG 2025 · UE5 *MegaLights* · HypeHype stochastic tile-based lighting, both
+  SIGGRAPH 2025 Advances) all converge on importance-sampling which few lights get real shadow
+  work per frame, degrading the rest, leaning on temporal accumulation. At Doom 3 light counts
+  this is the same "genre change" verdict as ReSTIR DI (§Out). The transferable kernel —
+  importance-driven per-frame shadow budget — is exactly Tier-1 items 2–4, buildable with none of
+  the machinery.
+- **Reconfirmed dead ends, 2026-08 stamp:** multiview single-pass cube (still forfeits per-face
+  culling), EVSM/MSM (no revival anywhere), dual-paraboloid/tetrahedral (silence), UE5-style VSM
+  (5.7 makes non-Nanite viable but still assumes a GPU-driven submission pipeline — much-later
+  project at best). *Real-Time Importance Deep Shadow Maps* (CGF 2025) is transparent/volumetric
+  casters — niche for D3.
+
+### Recommended order (this sweep)
+
+Half-res dynamic scratch → T2 update scheduling (both cheap, cache-safe, attack the measured
+dominant term) → then the Option A vs B decision (user visual check pending; **A favored** — and
+the cost decomposition backs that instinct). Gather-PCF opportunistically, for quality not perf.
+
+Refs (2026-08 sweep): SIGGRAPH 2025 Advances course (https://advances.realtimerendering.com/s2025/) ·
+Zhang, Lin, Wyman, Yuksel, *Many-Light Rendering Using ReSTIR-Sampled Shadow Maps*, CGF/EG 2025
+(https://www.cemyuksel.com/research/papers/restir-shadow-maps-eg2025.pdf) ·
+Lempiäinen, *Stochastic Tile-Based Lighting in HypeHype*, SIGGRAPH 2025 Advances
+(https://advances.realtimerendering.com/s2025/content/s2025_stb_lighting_v1.1_notes.pdf) ·
+*Fast as Hell: idTech8 Global Illumination*, SIGGRAPH 2025 Advances ·
+Microsoft, *How Variable Rate Compute Shaders Improved GPU Performance in DOOM: The Dark Ages*, 2026
+(https://developer.microsoft.com/en-us/games/articles/2026/04/variable-rate-compute-shaders-doom-the-dark-ages/) ·
+Coenen, *DOOM Eternal Graphics Study* (https://simoncoenen.com/blog/programming/graphics/DoomEternalStudy) ·
+Kern, Brüll, Grosch, *Real-Time Importance Deep Shadow Maps with Hardware Ray Tracing*, CGF 2025 ·
+Stephano, *Sparse Virtual Shadow Maps* (https://ktstephano.github.io/rendering/stratusgfx/svsm) ·
+StraySpark, *VSM Optimization for Open Worlds in UE5.7*
+(https://www.strayspark.studio/blog/virtual-shadow-map-optimization-open-worlds-ue5-7).
