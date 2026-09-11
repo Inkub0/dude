@@ -1307,6 +1307,7 @@ void		RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds );
 // stay faithful to vanilla Doom 3, so these effects are suppressed whenever
 // this returns false.
 bool		R_BackendSupportsEnhancements();
+bool		R_SupportsRayTracing();		// active backend is Vulkan with ray-query hardware (RT-shadow gate)
 
 bool		GLimp_Init( glimpParms_t parms );
 #ifdef DHEWM3_VULKAN

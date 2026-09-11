@@ -556,6 +556,17 @@ bool R_BackendSupportsEnhancements() {
 	return glConfig.rhiBackend;
 }
 
+// True only when the active RHI is a backend with ray-query hardware support (Vulkan on
+// an RTX/RDNA2+ GPU). Gates the RT-shadow menu toggles so they grey out on GL3 and on
+// non-RT GPUs, where r_rtSunShadows / r_rtMovingLights are inert.
+bool R_SupportsRayTracing() {
+	if ( !glConfig.rhiBackend ) {
+		return false;
+	}
+	rhi::RHI *r = rhi::GetRHI();
+	return r != NULL && r->SupportsRayQuery();
+}
+
 // define qgl functions
 #define QGLPROC(name, rettype, args) rettype (APIENTRYP q##name) args;
 #include "renderer/qgl_proc.h"

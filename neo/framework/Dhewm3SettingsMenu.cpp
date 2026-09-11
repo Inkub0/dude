@@ -3165,6 +3165,35 @@ static void DrawEnhGroup_Shadows()
 			"render unshadowed (stencil shadows are fully off). Lower = faster in crowded "
 			"scenes. 0 = all point lights (default; most consistent, slowest)." );
 
+		// Ray-traced shadows (Vulkan + RT hardware). Greyed out on the legacy/GL3 backend
+		// and on non-RT GPUs, where the cvars are inert — a checkbox you can't toggle there
+		// reads clearer than one that silently does nothing. This is the Ultra Nightmare tier.
+		const bool rtCapable = R_SupportsRayTracing();
+		ImGui::SeparatorText( rtCapable ? "Ray Tracing (RTX)" : "Ray Tracing (RTX) - needs Vulkan + RT GPU" );
+		ImGui::BeginDisabled( !rtCapable );
+
+		bool rtSun = r_rtSunShadows.GetBool();
+		if ( ImGui::Checkbox( "RT Sun Shadows", &rtSun ) ) {
+			r_rtSunShadows.SetBool( rtSun );
+		}
+		AddTooltip( "Trace the sun's shadow with one ray per pixel instead of sampling the "
+			"fitted sun shadow map: pixel-exact at any distance, with no range cap and no "
+			"map-resolution aliasing. Serves parallel suns and the big oversize omnis the "
+			"sun-map fit declines. Vulkan + RT hardware only. Enabling it builds the persistent "
+			"ray-tracing scene for the map." );
+
+		bool rtMoving = r_rtMovingLights.GetBool();
+		if ( ImGui::Checkbox( "RT Moving-Light Shadows", &rtMoving ) ) {
+			r_rtMovingLights.SetBool( rtMoving );
+		}
+		AddTooltip( "Trace shadows for point lights that are moving (muzzle flashes, projectiles, "
+			"monster-carried lights) instead of re-rendering their 6-face cube map every frame - "
+			"the one case the shadow cache can never help, since a moving light must re-render "
+			"each frame. Still lights keep the cached cube map; a light that stops re-caches after "
+			"a moment. Vulkan + RT hardware only." );
+
+		ImGui::EndDisabled();
+
 		EndSettingsGroup();
 	}
 }
