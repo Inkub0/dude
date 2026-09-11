@@ -4637,8 +4637,8 @@ windowDef OptionsMenuParent {
 			// live by the choiceDef during HandleEvent) and applies the whole enhancement tier.
 			choiceDef OS1Primary {
 				rect		210, 1, 100, 14
-				choices		"Potato;Low;Medium;High;Ultra;Nightmare"
-				values		"0;1;2;3;4;5"
+				choices		"Potato;Low;Medium;High;Ultra;Nightmare;Ultra Nightmare"
+				values		"0;1;2;3;4;5;6"
 				cvar		"dude_preset"
 				updateGroup	render
 				choiceType	1

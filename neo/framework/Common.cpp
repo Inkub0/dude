@@ -100,9 +100,9 @@ idCVar com_version( "si_version", version.string, CVAR_SYSTEM|CVAR_ROM|CVAR_SERV
 idCVar com_skipRenderer( "com_skipRenderer", "0", CVAR_BOOL|CVAR_SYSTEM, "skip the renderer completely" );
 idCVar com_machineSpec( "com_machineSpec", "-1", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "hardware classification, -1 = not detected, 0 = low quality, 1 = medium quality, 2 = high quality, 3 = ultra quality" );
 // DUDE: chosen enhancement quality tier for the in-game quality selector (choiceDef in
-// mainmenu.gui binds to this). -1 = Custom/unset, 0 = Potato .. 5 = Nightmare. The
+// mainmenu.gui binds to this). -1 = Custom/unset, 0 = Potato .. 6 = Ultra Nightmare. The
 // "dudePreset" command applies it; see Dhewm3SettingsMenu.cpp.
-idCVar dude_preset( "dude_preset", "-1", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "DUDE enhancement quality tier: -1 = custom, 0 = Potato, 1 = Low, 2 = Medium, 3 = High, 4 = Ultra, 5 = Nightmare", -1, 5 );
+idCVar dude_preset( "dude_preset", "-1", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "DUDE enhancement quality tier: -1 = custom, 0 = Potato, 1 = Low, 2 = Medium, 3 = High, 4 = Ultra, 5 = Nightmare, 6 = Ultra Nightmare (VK + RT hardware)", -1, 6 );
 // DUDE: menu bridge for the RHI antialiasing selector (choiceDef in mainmenu.gui binds to
 // this on the opengl3/Vulkan backends; legacy keeps the MSAA r_multisamples row). NOT
 // archived — the truth lives in r_rhiAA + r_fsr (both archived); this is synced from them
@@ -2557,7 +2557,7 @@ void idCommonLocal::InitCommands( void ) {
 
 	cmdSystem->AddCommand( "editPbrMaterial", Com_EditPbrMaterial_f, CMD_FL_SYSTEM, "opens the in-game PBR material editor for the surface under the crosshair (docs/pbr-materials.md); bind it to a key" );
 
-	cmdSystem->AddCommand( "dudePreset", Com_DudePreset_f, CMD_FL_SYSTEM, "applies a DUDE enhancement quality preset by index (0 = Potato .. 5 = Nightmare); drives the in-game quality selector" );
+	cmdSystem->AddCommand( "dudePreset", Com_DudePreset_f, CMD_FL_SYSTEM, "applies a DUDE enhancement quality preset by index (0 = Potato .. 6 = Ultra Nightmare); drives the in-game quality selector" );
 
 	cmdSystem->AddCommand( "dudeAA", Com_DudeAA_f, CMD_FL_SYSTEM, "applies the dude_aa menu antialiasing selection to r_rhiAA / r_fsr; drives the in-game AA selector on the opengl3/Vulkan backends" );
 

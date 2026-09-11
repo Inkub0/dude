@@ -2498,6 +2498,7 @@ enum {
 	PRESET_HIGH,
 	PRESET_ULTRA,
 	PRESET_NIGHTMARE,
+	PRESET_ULTRA_NIGHTMARE,		// VK + RT-hardware tier: Nightmare + ray-traced shadows (inert on GL3/non-RT)
 	PRESET_COUNT
 };
 
@@ -2613,6 +2614,13 @@ struct EnhancementPreset {
 	// docs/shadow-research.md 2026-08 recency check). Nightmare alone keeps full res —
 	// the no-compromise tier. Inert on Potato/Low (shadow maps off), carried at 1 there.
 	int   splitDynDrop;             // r_shadowMapSplitDynDrop
+	// Ray-traced shadows (appended, see note above; Vulkan + RT hardware only, INERT on GL3
+	// and on non-RT GPUs — the cvars gate on SupportsRayQuery). Ultra Nightmare only: RT sun
+	// shadows (exact at any distance, no map aliasing) + RT shadows for moving point lights
+	// (deletes the un-cacheable per-frame cube re-render). Every lower tier carries 0, so a
+	// non-RT machine sees Ultra Nightmare == Nightmare visually rather than a broken tier.
+	bool  rtSunShadows;             // r_rtSunShadows
+	bool  rtMovingLights;           // r_rtMovingLights
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2621,13 +2629,14 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1 },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1 },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, false, true,  false, false, 1 },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, false, true,  false, false, 1 },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, false, true,  true,  false, 1 },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, false, true,  true,  true,  0 },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, false, true,  false, false, 1,     false, false },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, false, true,  false, false, 1,     false, false },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, false, true,  true,  false, 1,     false, false },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, false, true,  true,  true,  0,     false, false },
+	{ "Ultra Nightmare", true, true, true, true, true,  0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, false, true,  true,  true,  0,     true,  true  },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2708,6 +2717,11 @@ static void ApplyEnhancementPreset( int idx )
 
 	// split-cache movers' cube: half res everywhere, full res on Nightmare only.
 	r_shadowMapSplitDynDrop.SetInteger( p.splitDynDrop );
+
+	// ray-traced shadows (Ultra Nightmare only; VK + RT hardware, inert on GL3/non-RT):
+	// RT sun + RT moving point lights. The cvars auto-build the persistent world scene.
+	r_rtSunShadows.SetBool( p.rtSunShadows );
+	r_rtMovingLights.SetBool( p.rtMovingLights );
 }
 
 // Return the preset whose full cvar vector the live cvars currently match, or -1
@@ -2758,7 +2772,9 @@ static int DetectEnhancementPreset()
 			r_gpuSkinning.GetBool()            == p.gpuSkin &&
 			r_motionVectors.GetBool()          == p.motionVectors &&
 			r_fsr.GetBool()                    == p.fsr &&
-			r_shadowMapSplitDynDrop.GetInteger() == p.splitDynDrop;
+			r_shadowMapSplitDynDrop.GetInteger() == p.splitDynDrop &&
+			r_rtSunShadows.GetBool()           == p.rtSunShadows &&
+			r_rtMovingLights.GetBool()         == p.rtMovingLights;
 		if ( match ) {
 			return i;
 		}
@@ -3213,7 +3229,7 @@ static void DrawGraphicsMenu()
 
 		ImGui::SetNextItemWidth( 220.0f );
 		ImGui::Combo( "##enhPreset", &selPreset,
-			"Potato\0Low\0Medium\0High\0Ultra\0Nightmare\0" );
+			"Potato\0Low\0Medium\0High\0Ultra\0Nightmare\0Ultra Nightmare\0" );
 		ImGui::SameLine();
 		if ( ImGui::Button( "Apply Preset" ) ) {
 			ApplyEnhancementPreset( selPreset );
