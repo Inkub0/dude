@@ -233,6 +233,11 @@ void RB_RHI_FogAllLights( rhi::RHI *r, viewDef_s *viewDef );
 // Called at end-of-view so the scene passes don't overwrite it (RhiWorld.cpp).
 void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
 void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_s *viewDef );
+// Chromatic aberration (r_postChromaticAberration): scene-only fullscreen pass at the
+// end of the 3D view, before the HUD composites — so the RGB split never touches the
+// HUD / FPS counter. Split out of the swap-time resolve for the resolve-folded frames
+// (Vulkan always; GL3 + r_hdr); GL3 without HDR uses RB_RHI_PostProcess instead.
+void RB_RHI_ChromaticAberration( rhi::RHI *r, const viewDef_s *viewDef );
 // HDR eye adaptation (Phase B1): measure scene luminance, update the adapted exposure,
 // return the 1x1 exposure image for the resolve to sample (0 = use the static r_hdrExposure).
 rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg );

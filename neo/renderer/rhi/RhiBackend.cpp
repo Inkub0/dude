@@ -1042,17 +1042,18 @@ single hdrresolve_smaa pass reads the float scene + the weights, does the blend,
 resolve's grain/gamma tail straight to the backbuffer. That drops the separate rhiHdrAaRT
 round-trip the classic path needs (blend -> rhiHdrAaRT, then hdrresolve reads it back).
 
-Eligible only when SMAA is the active AA (r_rhiAA 2) and chromatic aberration is OFF — chroma
-samples the resolved image at radial offsets, which a single fused pass can't provide (it only has
-the AA'd colour at the current fragment). Returns false to fall through to the classic path when
-ineligible or when a shader/target is unavailable; true when it has fully resolved the frame.
+Eligible only when SMAA is the active AA (r_rhiAA 2). Returns false to fall through to the classic
+path when ineligible or when a shader/target is unavailable; true when it has fully resolved the frame.
 
-For zero-weight pixels the neighborhood blend is a pass-through, so with chroma off the fused output
-is bit-identical to the classic AA-pass + hdrresolve it replaces.
+Chromatic aberration used to disqualify this path — it samples the resolved image at radial offsets,
+which a single fused pass can't provide (it only has the AA'd colour at the current fragment). Chroma
+now runs as a scene-only pass before the HUD (RB_RHI_ChromaticAberration), independent of the resolve,
+so the fused path is eligible regardless of it. For zero-weight pixels the neighborhood blend is a
+pass-through, so the fused output is bit-identical to the classic AA-pass + hdrresolve it replaces.
 =============
 */
 static bool RB_RHI_HdrResolveSmaaFused( rhi::RHI *r, int w, int h ) {
-	if ( r_rhiAA.GetInteger() != 2 || r_postChromaticAberration.GetFloat() > 0.0f || !rhiHdrRT ) {
+	if ( r_rhiAA.GetInteger() != 2 || !rhiHdrRT ) {
 		return false;
 	}
 	// Eye adaptation (B1) and bloom (Phase C) are wired into the plain resolve only; fall through to
@@ -1204,13 +1205,15 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
-	// film grain + chromatic aberration are folded into the resolve here (RB_RHI_PostProcess
-	// is skipped in HDR mode) so they sample the smooth float buffer instead of the 8-bit
-	// _currentRender round-trip that was re-banding the image
+	// film grain is folded into the resolve here (RB_RHI_PostProcess is skipped in HDR mode) so
+	// it samples the smooth float buffer instead of the 8-bit _currentRender round-trip that was
+	// re-banding the image. Chromatic aberration is NOT folded here anymore: it runs as a
+	// scene-only pass at the end of the 3D view (RB_RHI_ChromaticAberration), before the HUD
+	// composites into this buffer, so the RGB split no longer fringes the HUD / FPS counter.
 	parms.localParam0[0] = r_hdrExposure.GetFloat();		// exposure, applied before the tonemap curve
 	parms.localParam0[1] = r_postFilmGrain.GetFloat();
 	parms.localParam0[2] = (float)( Sys_Milliseconds() & 0xffff ) * 0.001f;	// animated grain seed
-	parms.localParam0[3] = r_postChromaticAberration.GetFloat();
+	parms.localParam0[3] = 0.0f;							// chroma handled pre-HUD (RB_RHI_ChromaticAberration)
 	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
 	parms.localParam1[3] = (float)r_hdrTonemap.GetInteger();	// tonemap curve select
 	parms.windowCoord[0] = ( eyeExposureImg != 0 ) ? 1.0f : 0.0f;	// eye-adapt flag: sample the 1x1 adapted exposure
@@ -3380,6 +3383,15 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 			// HDR bloom (Phase C): same scene-only point — threshold + blur the bright scene into a
 			// half-res glow the resolve adds before the tonemap.
 			rbBloomImg = RB_RHI_Bloom( r, r->GetRenderTargetImage( rhiHdrRT ) );
+		}
+		// DUDE chromatic aberration, scene-only, BEFORE the HUD / console / FPS counter
+		// composite into the scene buffer — so the RGB split fringes the world, not the UI.
+		// Only on the resolve-folded frames (VK always; GL3 + r_hdr), where the resolve would
+		// otherwise fold chroma over scene+HUD together; GL3 without HDR already did chroma
+		// pre-HUD via RB_RHI_PostProcess above. Runs after FSR (clean temporal input) and the
+		// eye-adapt/bloom measurement (clean scene luminance). No-op at strength 0.
+		if ( rbHdrActiveThisFrame ) {
+			RB_RHI_ChromaticAberration( r, viewDef );
 		}
 		// r_mvDebug: overlay the per-object velocity buffer (R1/A2; VK-only, no-op otherwise)
 		RB_RHI_MotionVectorDebugOverlay( r, viewDef );

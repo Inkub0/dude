@@ -3,12 +3,12 @@
 // scene reaches the 8-bit backbuffer in ONE pass — no separate rhiHdrAaRT round-trip (the classic
 // path runs the blend into rhiHdrAaRT and then a second hdrresolve pass reads it back).
 //
-// Only used when chromatic aberration is OFF: chroma samples the resolved image at radial offsets,
-// and a single fused pass only has the AA'd colour at the current fragment. When chroma is on the
-// backend keeps the classic AA-pass + hdrresolve path, so the fused path stays bit-identical to it.
+// This pass never does chromatic aberration: chroma runs as a scene-only pass before the HUD
+// (RB_RHI_ChromaticAberration), independent of the resolve, so the fused path is used regardless
+// of the chroma setting (it used to be disqualified when chroma was on).
 //
 // For a pixel with zero SMAA blend weight the neighborhood blend is a pass-through, so the result is
-// exactly (scene colour -> grain -> gamma) — the same as the classic path with chroma off.
+// exactly (scene colour -> grain -> gamma) — the same as the classic path.
 //
 // u_localParam0    = SMAA_RT_METRICS (1/w, 1/h, w, h)   [shared with the vertex stage + the blend]
 // u_windowCoord.x  = film grain intensity; 0 = off      [localParam0 is taken by RT_METRICS, and

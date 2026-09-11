@@ -2,14 +2,16 @@
 // the RGBA16F scene buffer and writes it to the 8-bit backbuffer. The HDR target is
 // exactly screen-sized, so st 0..1 maps 1:1 and no NPOT correction is needed.
 //
-// In HDR mode the film-grain + chromatic-aberration post effects are folded in HERE
-// (not the separate postprocess pass), so they sample the smooth float buffer instead
-// of round-tripping through the 8-bit _currentRender image.
+// In HDR mode film grain is folded in HERE (not the separate postprocess pass) so it samples
+// the smooth float buffer instead of round-tripping through the 8-bit _currentRender image.
+// Chromatic aberration is NOT folded here anymore — it runs as a scene-only pass before the HUD
+// (RB_RHI_ChromaticAberration) so it doesn't fringe the HUD/FPS, and the backend passes
+// u_localParam0.w = 0 here. The radial-split branch below is kept only as a guarded no-op.
 //
 // u_localParam0.x = HDR exposure multiplier (r_hdrExposure, applied before the tonemap)
 // u_localParam0.y = film grain intensity; 0 = off
 // u_localParam0.z = grain time/seed (seconds)
-// u_localParam0.w = chromatic aberration strength; 0 = off
+// u_localParam0.w = chromatic aberration strength; 0 = off (backend now always passes 0)
 // u_localParam1.x = grain cell size in pixels (1 = per-pixel, ~1.5-2 = filmic clumps)
 // u_localParam1.y = r_brightness (1 = identity)
 // u_localParam1.z = 1.0 / r_gamma (1 = identity)
