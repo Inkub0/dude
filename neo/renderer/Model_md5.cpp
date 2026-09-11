@@ -50,13 +50,18 @@ static idCVar r_gpuSkinTest( "r_gpuSkinTest", "0", CVAR_RENDERER | CVAR_BOOL,
 // built, verified against idSIMD_SSE41::DeriveUnsmoothedTangents to 0.006 deg, and REMOVED: being
 // stock-exact, it also reproduced stock's refusal to weld dupVerts, so the seams still opened.
 // See docs/gpu-offload-plan.md "TBN source: why the faithful one lost" before rebuilding it.
-// Opt-in, off by default; Vulkan only (the compute lane) — GL3 always keeps the CPU skinner.
-// NOT archived during bring-up: this feature device-lost the GPU twice, so it must default to 0
-// on every launch and be enabled explicitly per-session (no persisted "1" can auto-enable it).
-// Global (extern in tr_local.h) so the quality-preset system can force it off — option-B TBN is a
-// fidelity divergence, so every preset that must match stock (Potato = the faithful floor) keeps it 0.
-idCVar r_gpuSkinning( "r_gpuSkinning", "0", CVAR_RENDERER | CVAR_BOOL,
-	"skin animated (MD5) models on the GPU via the compute lane (Vulkan only; option-B TBN, docs/gpu-offload-plan.md Phase 2)" );
+// Vulkan only (the compute lane) — GL3 always keeps the CPU skinner (the r_gpuSkinning term is
+// VK-gated everywhere it is read), so this cvar is inert on GL3 regardless of its value.
+// DEFAULT ON (Vulkan): the seam-weld work landed and the feature is verified, so GPU skinning is now
+// the Vulkan default. It offloads the per-frame skin DRAW to the GPU while the CPU position skin still
+// runs (that is the monster hit surface — r_gpuSkinStripCpu, which would have stripped it and left
+// monsters invulnerable, was retired 2026-08-18). Deliberately NOT archived: the debug toggle
+// (Enhancements tab) flips it per-session for A/B, but it always returns to ON at launch; the bring-up
+// device-losses that once pinned it to 0 are long fixed. Global (extern in tr_local.h) so the
+// quality-preset system can still force it off — option-B TBN is a fidelity divergence, so the
+// faithful-floor tiers (Potato/Low) keep it 0 while every enhanced tier turns it on.
+idCVar r_gpuSkinning( "r_gpuSkinning", "1", CVAR_RENDERER | CVAR_BOOL,
+	"skin animated (MD5) models on the GPU via the compute lane (Vulkan only, on by default; option-B TBN, docs/gpu-offload-plan.md Phase 2)" );
 
 // Roadmap B ("deform once, draw everywhere", docs/tessellation.md): evaluate PN + displacement once
 // per frame in a compute pass into a single expanded buffer every pass draws, instead of re-running
@@ -1670,8 +1675,8 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	// always-on CPU consumers (culling/shadow/bounds) read tri->verts.xyz only, so they are unaffected. Must
 	// run after normals exist and before R_CreateAmbientCache; R_DeriveUnsmoothedTangents sets
 	// tangentsCalculated, so the downstream ambient-cache derive will NOT re-run and clobber the welded normals.
-	if ( !stripCpu && ( r_tessDeform.GetBool() || r_gpuSkinning.GetBool()
-	     || ( r_tessellation.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) ) {
+	if ( !stripCpu && ( r_tessDeform.GetBool()
+	     || ( ( r_gpuSkinning.GetBool() || r_tessellation.GetBool() ) && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) ) {
 		// Derive first: this also sets tangentsCalculated so R_CreateAmbientCache below does NOT re-derive
 		// and clobber the normals we are about to write. (The decal copies both normal + tangents.)
 		if ( !tri->tangentsCalculated ) {

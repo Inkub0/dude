@@ -2582,11 +2582,13 @@ struct EnhancementPreset {
 	// it's off on Medium and full from High up. parallaxShadow is inert where parallax is off.
 	bool  parallax;                 // r_parallax
 	float parallaxShadow;           // r_parallaxShadow
-	// DUDE GPU MD5 skinning (appended, see note above; Vulkan-only, inert on GL3). Option-B TBN is a
-	// small fidelity divergence from stock's per-frame re-derive, so it is OFF on every preset for now
-	// — Potato/Low stay a faithful id-render, and the higher tiers only flip it on once it is a proven
-	// perf win (Milestone C strips the redundant CPU skin). Every preset forcing it 0 keeps the faithful
-	// floor bulletproof even if it was hand-enabled before switching presets.
+	// DUDE GPU MD5 skinning (appended, see note above; Vulkan-only, inert on GL3). ON from Medium up —
+	// it offloads the per-frame skin DRAW to the GPU (the CPU position skin still runs, so monster hit
+	// surfaces are unaffected), and the seam-weld work made it visually clean under tessellation. Its
+	// option-B TBN is a small fidelity divergence from stock's per-frame re-derive, so Potato/Low keep it
+	// OFF to stay a faithful id-render (the faithful floor); every preset writing it explicitly keeps that
+	// floor bulletproof even if it was hand-toggled before switching presets. The cvar's own default is on
+	// (Vulkan), so a fresh boot with no preset applied still gets it.
 	bool  gpuSkin;                  // r_gpuSkinning
 	// SSAO depth-mip acceleration (appended, see note above). On for every tier that runs SSAO
 	// (Medium/High/Ultra/Nightmare) — the ~25% AO speedup for near-invisible halos at the
@@ -2632,11 +2634,11 @@ static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov
 	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false },
 	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, false, true,  false, false, 1,     false, false },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, false, true,  false, false, 1,     false, false },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, false, true,  true,  false, 1,     false, false },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, false, true,  true,  true,  0,     false, false },
-	{ "Ultra Nightmare", true, true, true, true, true,  0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, false, true,  true,  true,  0,     true,  true  },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false },
+	{ "Ultra Nightmare", true, true, true, true, true,  0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     true,  true  },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2702,9 +2704,9 @@ static void ApplyEnhancementPreset( int idx )
 	r_parallax.SetBool( p.parallax );
 	r_parallaxShadow.SetFloat( p.parallaxShadow );
 
-	// GPU MD5 skinning (Vulkan-only; inert on GL3). OFF on every preset for now — option-B TBN is a
-	// fidelity divergence, so this keeps Potato (and every tier) a faithful id-render until it is a
-	// proven perf win and deliberately flipped on for the top tiers.
+	// GPU MD5 skinning (Vulkan-only; inert on GL3). ON from Medium up (the DRAW offload; CPU position
+	// skin still runs); Potato/Low keep it OFF because option-B TBN is a fidelity divergence and they
+	// are the faithful floor. The cvar default is also on (Vulkan), so no-preset boots get it too.
 	r_gpuSkinning.SetBool( p.gpuSkin );
 
 	// per-object motion vectors (Vulkan-only; inert on GL3): Ultra/Nightmare, where the
@@ -3808,9 +3810,10 @@ static void DrawDbgGroup_GpuOffload()
 		if ( ImGui::Checkbox( "GPU skinning", &gpuSkin ) ) {
 			r_gpuSkinning.SetBool( gpuSkin );
 		}
-		AddTooltip( "r_gpuSkinning: skin animated meshes on the GPU. Non-faithful (option-B TBN, not Doom 3's "
-			"exact CPU skin), so off by default. Offloads the DRAW; the CPU position skin still runs (it is the "
-			"monster hit surface). Prerequisite for ray-tracing animated geometry later. Next map load." );
+		AddTooltip( "r_gpuSkinning: skin animated meshes on the GPU. ON by default on Vulkan (and from the "
+			"Medium preset up); Potato/Low keep the exact CPU skin as the faithful floor (option-B TBN is a small "
+			"divergence from Doom 3's per-frame re-derive). Offloads the DRAW; the CPU position skin still runs (it "
+			"is the monster hit surface). Prerequisite for ray-tracing animated geometry later. Next map load." );
 
 		ImGui::Separator();
 

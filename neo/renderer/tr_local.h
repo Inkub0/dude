@@ -1022,7 +1022,7 @@ extern idCVar r_tessDebug;				// log each material name accepted for tessellatio
 extern idCVar r_tessDeform;				// deform tessellated meshes once/frame in a compute pass (vs per-pass .tesc/.tese)
 
 // DUDE: GPU MD5 skinning via the compute lane (Vulkan only; docs/gpu-offload-plan.md Phase 2)
-extern idCVar r_gpuSkinning;			// skin animated meshes on the GPU (option-B TBN; off = faithful CPU skin)
+extern idCVar r_gpuSkinning;			// skin animated meshes on the GPU (option-B TBN; on by default on Vulkan, off = faithful CPU skin)
 extern idCVar r_gpuSkinProfile;			// dev: size the Milestone-C prize (skinned-surface derive + ambient upload)
 void R_GpuSkinProfileAddDerive( double ms );	// accumulate one skinned-surface tangent-derive time (impl tr_light.cpp)
 void R_GpuSkinProfileAddStrip( int verts );		// Milestone D: count one CPU-skin-stripped surface (impl tr_light.cpp)
