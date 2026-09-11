@@ -1658,13 +1658,20 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	// the CPU-deform path; (2) crucially, a blood-overlay decal copies its normals straight off
 	// tri->verts (ModelOverlay.cpp), so welding here makes the decal follow the SAME welded PN surface
 	// as the GPU-skinned body (whose gpuSkinVB bind normals are welded) instead of clipping through it.
-	// Gated on deform/skinning so vanilla (tess-off) lighting is byte-identical. NORMAL ONLY: the body's
-	// gpuSkinVB keeps per-vertex (unwelded) tangents, so welding tangents would re-introduce a mismatch.
-	// With gpuSkinning on the body draws gpuSkinVB (not tri->verts), so this is a no-op on the drawn body
-	// -- it only changes the decal copy and the (unused) ambient cache; the always-on CPU consumers
-	// (culling/shadow/bounds) read tri->verts.xyz only. Must run after normals exist and before the CPU
-	// deform snapshot + R_CreateAmbientCache, so derive tangents first if r_useDeferredTangents deferred them.
-	if ( !stripCpu && ( r_tessDeform.GetBool() || r_gpuSkinning.GetBool() ) ) {
+	// Gated on tessellation/deform/skinning so vanilla (all-off) lighting is byte-identical. NORMAL ONLY:
+	// the body's gpuSkinVB keeps per-vertex (unwelded) tangents, so welding tangents would re-introduce a
+	// mismatch. With gpuSkinning on the body draws gpuSkinVB (not tri->verts), so the weld is a no-op on the
+	// drawn body -- it only changes the decal copy and the (unused) ambient cache. With plain tessellation
+	// (r_tessellation on, gpuSkinning off -- the shipped High+/Ultra preset path) the body instead draws
+	// tri->verts via the ambient cache, so this weld is exactly what closes the arm/shoulder seams. WITHOUT
+	// it, unsmoothed-tangent skins (labcoat/hazmat/marine/imp/... -- 39 of 52 stock character materials)
+	// reach the tessellator with disagreeing coincident normals -- R_DeriveTangents routes MD5 dominantTris
+	// meshes to R_DeriveUnsmoothedTangents, which never welds dupVerts -- and PN pulls the halves apart. The
+	// always-on CPU consumers (culling/shadow/bounds) read tri->verts.xyz only, so they are unaffected. Must
+	// run after normals exist and before R_CreateAmbientCache; R_DeriveUnsmoothedTangents sets
+	// tangentsCalculated, so the downstream ambient-cache derive will NOT re-run and clobber the welded normals.
+	if ( !stripCpu && ( r_tessDeform.GetBool() || r_gpuSkinning.GetBool()
+	     || ( r_tessellation.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) ) {
 		// Derive first: this also sets tangentsCalculated so R_CreateAmbientCache below does NOT re-derive
 		// and clobber the normals we are about to write. (The decal copies both normal + tangents.)
 		if ( !tri->tangentsCalculated ) {

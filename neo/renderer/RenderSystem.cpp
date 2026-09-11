@@ -290,6 +290,32 @@ static void R_CheckCvars( void ) {
 		GLimp_SetWindowResizable( r_windowResizable.GetBool() );
 		r_windowResizable.ClearModified();
 	}
+
+	// DUDE (docs/tessellation.md): both r_tessellation and r_gpuSkinning change baked per-vertex data in
+	// idMD5Mesh::UpdateSurface -- r_tessellation gates the coincident-seam normal weld that keeps tessellated
+	// characters' arms attached (and forces the derive that gives unlit surfaces real corner normals);
+	// r_gpuSkinning switches the draw between the CPU ambient cache and gpuSkinVB. MD5 models are DM_CACHED,
+	// so a live toggle only reached entities the game happened to re-animate that frame; a settled/idle NPC
+	// kept its cached snapshot and the change appeared to need a vid_restart. On change, force every cached
+	// dynamic model to regenerate next frame: R_ClearEntityDefDynamicModel drops the snapshot + its
+	// interaction surfaces (so UpdateSurface re-derives + welds normals and (re)creates/releases gpuSkinVB)
+	// while keeping the entity's area references, so nothing vanishes. One-shot, guarded by IsModified.
+	if ( r_tessellation.IsModified() || r_gpuSkinning.IsModified() ) {
+		r_tessellation.ClearModified();
+		r_gpuSkinning.ClearModified();
+		for ( int w = 0; w < tr.worlds.Num(); w++ ) {
+			idRenderWorldLocal *rw = tr.worlds[w];
+			if ( rw == NULL ) {
+				continue;
+			}
+			for ( int i = 0; i < rw->entityDefs.Num(); i++ ) {
+				idRenderEntityLocal *def = rw->entityDefs[i];
+				if ( def && def->parms.hModel && def->parms.hModel->IsDynamicModel() != DM_STATIC ) {
+					R_ClearEntityDefDynamicModel( def );
+				}
+			}
+		}
+	}
 }
 
 /*
