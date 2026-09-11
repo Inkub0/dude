@@ -1,4 +1,4 @@
-# DUDE 0.9.2 — ray tracing grows up, GPU skinning on by default
+# DUDE 0.9.2 — RTX elements, GPU skinning, and Lost Mission
 
 A feature release on top of [0.9.1](https://github.com/Inkub0/dude/releases/tag/v0.9.1).
 The big story is ray tracing: on a Vulkan RTX GPU, DUDE now ray-traces sun shadows,
@@ -7,6 +7,11 @@ moving-light shadows, and shadows cast by animated monsters, wrapped up in a new
 Mission_ now runs natively.
 
 ## Changed since 0.9.1
+
+### The Lost Mission
+
+- **_The Lost Mission_ (d3le) runs natively** on DUDE via a built-in game library — no
+  extra DLLs. Drop the Lost Mission data in and it loads by name.
 
 ### Ray tracing (Vulkan + RTX)
 
@@ -43,8 +48,6 @@ Mission_ now runs natively.
 
 ### Content & UI
 
-- **_The Lost Mission_ (d3le) runs natively** on DUDE via a built-in game library — no
-  extra DLLs. Drop the Lost Mission data in and it loads by name.
 - **Simpler anti-aliasing menu**: post-AA is now a single selector —
   **Off / FXAA / SMAA / FSR2 (TAA)** — instead of overlapping toggles.
 
