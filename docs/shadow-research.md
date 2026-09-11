@@ -298,7 +298,18 @@ visual check; keep both alive until then.
   root. **Visual check required before committing**: RT hard shadows are exact/unfiltered — the
   moving-light look (muzzle flash, thrown barrels) must be eyeballed against the PCF-softened cube
   look for consistency.
-  > **BUILT 2026-08-20, pending user visual verify** (`r_rtMovingLights`, default 0, VK+RT):
+  > **SHIPPED + USER-VERIFIED 2026-09-10 — "bellissimo"** (`r_rtMovingLights`, default 0, VK+RT).
+  > Controlled strafe-fire A/B (machinegun, crates, same choreography both ways): RT off =
+  > `warm[light]` 53–59/s (the flash cube re-rendered EVERY frame, exactly 6 faces per miss —
+  > per-face invalidation is powerless against light motion) with cache hit 63–76%; RT on =
+  > `warm[light]` 0–1/s, faces 275–364/s → 4–11/s (~40× fill cut), hit 94–100%, `rtMoving`
+  > tracking trigger bursts and exiting cleanly. GPU delta ~0.2 ms in-scene (small flash cube;
+  > rays + TLAS upkeep buy most of it back) — the win is structural: cache integrity under
+  > fire, flatter pacing, and it scales per moving light where cubes pay 6 faces each.
+  > Packaging: stays default 0; wire into the future RT-gated tier alongside r_rtSunShadows
+  > (TLAS upkeep already paid there). This settles the A-vs-B decision: **Option A is the
+  > shadow lever**; Option B (VRS) stays parked as a general lighting-pass idea only.
+  > As-built details:
   > pose-hash tracker (origin/center/axis — intensity-blind, so flicker ≠ movement; 30-view
   > hysteresis; budget-hyst table idiom, reset with the cache) classifies moving point lights
   > in the cube routing; they skip cube + budget entirely and take interaction mode 4 — the
