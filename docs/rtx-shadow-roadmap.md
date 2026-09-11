@@ -111,6 +111,12 @@ motion vectors needed.**
   (2080 Ti); the 3080 Ti does better. Single-light scenes favor maps ~2× — hence hybrid (R4).
 - This is where the reserved **"Ultra Nightmare"** preset tier finally means something: RT-gated,
   VK-only, opt-in per the fidelity policy.
+  > **SHIPPED 2026-08-20** — `PRESET_ULTRA_NIGHTMARE` (index 6) = Nightmare + `r_rtSunShadows` +
+  > `r_rtMovingLights`. First real content for the reserved name. Degrades to == Nightmare on
+  > GL3/non-RT (the RT cvars gate on `SupportsRayQuery`). Wired in both the ImGui combo and the
+  > classic `mainmenu.gui`. Alongside it, **TLAS dirty-flag** (`r_rtTlasDirty`) removes the
+  > ~0.2 ms/frame per-frame TLAS rebuild when nothing moves — RT is now ~free when idle, which
+  > is what makes leaving the tier's RT features on affordable.
 
 ### R4. Hybrid scheduling · MED · depends R3
 The AMD FidelityFX Hybrid Shadows model, adapted: keep shadow maps as the noise-free base where they

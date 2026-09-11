@@ -1486,6 +1486,27 @@ static bool R_RtGatherMonstersWorld( float *&pos, int *&idx, int &numVerts, int 
 // command buffer (RHI::UpdateTlas), so this never stalls. Entities spawned after the scene
 // build have no BLAS yet and are skipped until the next rebuild. Animated characters are added
 // separately via the per-frame dynamic BLAS (R_RtGatherMonstersWorld + UpdateDynamicGeometry).
+// TLAS dirty state (r_rtTlasDirty): the signature of the instance set last actually built,
+// so an idle frame (no mover moved, no animated caster) can skip the rebuild. File scope so
+// R_RtDirtyReset can clear it on a scene (re)build - a fresh map must never inherit a stale
+// signature and wrongly skip its first build.
+static unsigned long long	s_rtLastTlasSig = 0;
+static bool					s_rtTlasEverBuilt = false;
+static bool					s_rtLastHadDyn = false;
+static void R_RtDirtyReset( void ) {
+	s_rtTlasEverBuilt = false;
+	s_rtLastHadDyn = false;
+	s_rtLastTlasSig = 0;
+}
+static unsigned long long R_RtHashBytes( unsigned long long h, const void *data, size_t n ) {
+	const unsigned char *p = (const unsigned char *)data;
+	for ( size_t i = 0; i < n; i++ ) {
+		h ^= p[i];
+		h *= 1099511628211ULL;			// FNV-1a prime
+	}
+	return h;
+}
+
 static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	static int lastFrame = -1;
 	if ( tr.frameCount == lastFrame ) {
@@ -1538,18 +1559,62 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 		in.mask = 0xFF;
 	}
 	if ( n > 0 ) {
+		// Signature of the instance set we're about to consider: count + every instance's
+		// 3x4 transform + its BLAS handle. A still scene reproduces this bit-for-bit frame to
+		// frame (R_AxisToModelMatrix of a constant pose is deterministic), so an unchanged
+		// signature means no mover moved.
+		unsigned long long sig = 1469598103934665603ULL;	// FNV-1a basis
+		sig = R_RtHashBytes( sig, &n, sizeof( n ) );
+		for ( int i = 0; i < n; i++ ) {
+			sig = R_RtHashBytes( sig, inst[i].transform, sizeof( inst[i].transform ) );
+			sig = R_RtHashBytes( sig, &inst[i].blas, sizeof( inst[i].blas ) );
+		}
+
 		// R3 animated casters: gather this frame's visible monsters into a world-space soup and
 		// hand it to the backend (rebuilds a per-frame dynamic BLAS + appends one identity
 		// instance to the TLAS). MUST precede UpdateTlas, which consumes the dyn-caster arm.
+		// Also the dirty signal: an animated caster changes its geometry every frame, so its
+		// presence forces the rebuild (dyn == true never skips).
+		bool dyn = false;
 		if ( ( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() ) && r_rtMonsterShadows.GetBool() ) {
 			float *mpos; int *midx; int mnv = 0, mni = 0;
 			if ( R_RtGatherMonstersWorld( mpos, midx, mnv, mni ) ) {
 				r->UpdateDynamicGeometry( mpos, mnv, midx, mni );
 				Mem_Free16( mpos );
 				Mem_Free16( midx );
+				dyn = true;
 			}
 		}
-		r->UpdateTlas( inst, n );
+
+		// Dirty decision (r_rtTlasDirty): rebuild only when something changed. dyn forces it
+		// (animated geometry); s_rtLastHadDyn forces one more rebuild the frame AFTER monsters
+		// leave (to drop their instance from the TLAS); a changed static signature is a mover
+		// that moved. On a clean idle frame we skip UpdateTlas entirely - the backend's
+		// rtCurrentAddr still points at the last-built slot, which holds exactly these poses
+		// and references only persistent static BLASes, so the fragment rays read valid data.
+		const bool dirty = !s_rtTlasEverBuilt || dyn || s_rtLastHadDyn || sig != s_rtLastTlasSig;
+		static int accBuilt = 0, accSkipped = 0, accStartMs = 0;
+		if ( !r_rtTlasDirty.GetBool() || dirty ) {
+			r->UpdateTlas( inst, n );
+			s_rtLastTlasSig = sig;
+			s_rtLastHadDyn = dyn;
+			s_rtTlasEverBuilt = true;
+			accBuilt++;
+		} else {
+			accSkipped++;
+		}
+		// once/sec readout, shared with the cube-cache debug the shadow work already uses
+		if ( r_shadowMapCacheDebug.GetBool() ) {
+			const int nowMs = Sys_Milliseconds();
+			if ( accStartMs == 0 ) {
+				accStartMs = nowMs;
+			} else if ( nowMs - accStartMs >= 1000 ) {
+				common->Printf( "rtTlas/s: built %d, skipped %d (dirty-flag %s)\n",
+				                accBuilt, accSkipped, r_rtTlasDirty.GetBool() ? "on" : "OFF" );
+				accBuilt = accSkipped = 0;
+				accStartMs = nowMs;
+			}
+		}
 	}
 	Mem_Free16( inst );
 }
@@ -1599,6 +1664,7 @@ static void R_RtWorldUpdate( void ) {
 	}
 	r_rtWorld.ClearModified();
 	r_rtSunShadows.ClearModified();
+	r_rtMovingLights.ClearModified();
 	r->DestroyRtScene();
 
 	// terrain-as-models maps (commoutside: the walkable ground is all func_static models,
@@ -1636,6 +1702,7 @@ static void R_RtWorldUpdate( void ) {
 		return;
 	}
 	s_rtWorldMap = world->mapName;
+	R_RtDirtyReset();		// fresh scene: force the first per-frame TLAS build, drop any stale signature
 	common->Printf( "r_rtWorld: %d area BLAS (%d tris) + %d model BLAS (%d tris, %d instances), %d ms build%s\n",
 		numASlices, worldIndexes / 3, numMSlices, mTris, numMInsts, msBuild,
 		blasFail ? va( " (%d BLAS failed)", blasFail ) : "" );
