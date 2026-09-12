@@ -15,6 +15,7 @@
 //   2 = ACES             (Narkowicz fitted; the game-standard filmic look)
 //   3 = AgX              (Wrensch minimal AgX; neutral, gentle highlight rolloff)
 //   4 = Khronos PBR Neutral (hue-preserving; least colour shift of D3's authored art)
+//   5 = DUDE             (signature: faithful blacks/midtones, hue-preserving highlight shoulder)
 
 #ifndef DUDE_TONEMAP_GLSL
 #define DUDE_TONEMAP_GLSL
@@ -83,14 +84,46 @@ vec3 DudeTonemapPBRNeutral( vec3 color ) {
 	return mix( color, newPeak * vec3( 1.0 ), g );
 }
 
+// --- DUDE (signature curve) ---------------------------------------------------
+// Faithful blacks + midtones, hue-preserving filmic highlight shoulder. Doom 3's
+// art is authored to the LDR clamp: inky shadows and lamp / fire cores that saturate
+// at 1.0 are deliberate. So below the knee this is the identity (the vanilla look is
+// untouched); only the > knee highlights - the real > 1.0 energy that r_hdrOverbright
+// now injects - roll off along a shoulder that is C1-continuous with the identity
+// segment (value knee and slope 1 at the knee) and asymptotes to 1.0. Rescaling every
+// channel by a single peak-derived factor keeps hue, so coloured emissives (fire, lava,
+// hell reds, monitor greens) compress WITHOUT the per-channel wash toward white that
+// Reinhard / ACES apply. Exposure (applied before) slides the scene across the knee.
+// knee  (r_hdrDudeKnee):  identity below it; exponential shoulder above. Lower = roll off sooner.
+// desat (r_hdrDudeDesat): 0 = pure hue-preserving; >0 blends compressed highlights toward the
+//                         white-hot target so bright cores read as detail, not a saturated blob.
+// tint  (r_hdrDudeTint):  where "white-hot" points. 0 = neutral white (fully desaturated - can go
+//                         pink on saturated lava, since red->white passes through pink); 1 = keep
+//                         the highlight's own hue (no whitening). ~0.35 keeps molten cores warm.
+vec3 DudeTonemapDude( vec3 c, float knee, float desat, float tint ) {
+	knee = clamp( knee, 0.05, 0.95 );
+	float peak = max( c.r, max( c.g, c.b ) );
+	if ( peak <= knee ) return c;                       // faithful: shadows + midtones untouched
+	float mapped = 1.0 - ( 1.0 - knee ) * exp( -( peak - knee ) / ( 1.0 - knee ) );
+	vec3  col = c * ( mapped / peak );                  // hue-preserving highlight rolloff
+	// white-hot: the harder a highlight is compressed (peak - mapped), the more it fades toward the
+	// target, so fireball / lava cores gain internal gradient instead of clipping to a saturated blob.
+	// The target keeps `tint` of the highlight's own colour (tint 0 = neutral white), which stops a
+	// saturated red core going pink on the way to white. desat scales the ramp; 0 = pure hue-preserving.
+	vec3  target = mix( vec3( mapped ), col, clamp( tint, 0.0, 1.0 ) );
+	float g = 1.0 - 1.0 / ( desat * ( peak - mapped ) + 1.0 );
+	return mix( col, target, g );
+}
+
 // --- dispatch -----------------------------------------------------------------
-vec3 DudeTonemap( vec3 c, float exposure, int mode ) {
+vec3 DudeTonemap( vec3 c, float exposure, int mode, float dudeKnee, float dudeDesat, float dudeTint ) {
 	if ( mode == 0 ) return c;                          // pure passthrough (faithful); exposure only shapes the curves
 	c *= exposure;
 	if ( mode == 1 ) return c / ( c + vec3( 1.0 ) );   // Reinhard
 	if ( mode == 2 ) return DudeTonemapACES( c );
 	if ( mode == 3 ) return DudeTonemapAgX( c );
 	if ( mode == 4 ) return DudeTonemapPBRNeutral( c );
+	if ( mode == 5 ) return DudeTonemapDude( c, dudeKnee, dudeDesat, dudeTint );
 	return c;
 }
 

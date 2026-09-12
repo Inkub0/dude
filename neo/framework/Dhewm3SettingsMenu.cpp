@@ -1907,13 +1907,15 @@ static CVarOption postProcessOptions[] = {
 	// 0 = faithful (straight resolve, the default); the curves are opt-in cinematic looks.
 	CVarOption( "r_hdrTonemap", []( idCVar& cvar ) {
 		ImGui::BeginDisabled( !r_hdr.GetBool() );
-		int sel = idMath::ClampInt( 0, 4, cvar.GetInteger() );
-		if ( ImGui::Combo( "Tonemap", &sel, "Off (faithful)\0Reinhard\0ACES\0AgX\0Khronos PBR Neutral\0" ) ) {
+		int sel = idMath::ClampInt( 0, 5, cvar.GetInteger() );
+		if ( ImGui::Combo( "Tonemap", &sel, "Off (faithful)\0Reinhard\0ACES\0AgX\0Khronos PBR Neutral\0DUDE\0" ) ) {
 			cvar.SetInteger( sel );
 		}
 		const char* descr = "Compress the HDR scene's bright highlights into the display range with a filmic\n"
 			"curve, instead of hard-clipping them to white. Off reproduces the vanilla resolve\n"
 			"exactly; ACES is the game-standard look, AgX and PBR Neutral shift colour the least.\n"
+			"DUDE is our signature curve: it leaves blacks and midtones exactly as authored and\n"
+			"only rolls off the >1.0 highlights (hue-preserving), so it suits Doom 3's LDR art.\n"
 			"Exposure below feeds the curve (it does nothing while Tonemap is Off).";
 		AddCVarOptionTooltips( cvar, descr );
 
@@ -1926,6 +1928,33 @@ static CVarOption postProcessOptions[] = {
 		}
 		AddTooltip( "r_hdrExposure: linear exposure multiplier applied before the tonemap curve.\n"
 			"Raises or lowers the scene brightness feeding the curve; default 2.33. No effect while Tonemap is Off." );
+
+		// DUDE-curve dials (r_hdrTonemap 5 only): the knee sets where highlights start rolling
+		// off (blacks/midtones below it stay untouched), the desaturation gives bright cores a
+		// white-hot centre instead of a saturated blob. Shown only when DUDE is the active curve.
+		if ( sel == 5 ) {
+			float knee = cvarSystem->GetCVarFloat( "r_hdrDudeKnee" );
+			if ( ImGui::SliderFloat( "DUDE Knee", &knee, 0.05f, 0.95f, "%.2f" ) ) {
+				cvarSystem->SetCVarFloat( "r_hdrDudeKnee", knee );
+			}
+			AddTooltip( "r_hdrDudeKnee: where the DUDE curve begins rolling off highlights. Below it the scene\n"
+				"is untouched (faithful blacks + midtones); above it highlights compress toward white.\n"
+				"Lower = start sooner and keep more highlight range; higher = touch only the very brightest." );
+			float ddesat = cvarSystem->GetCVarFloat( "r_hdrDudeDesat" );
+			if ( ImGui::SliderFloat( "DUDE Highlight White-Hot", &ddesat, 0.0f, 4.0f, "%.2f" ) ) {
+				cvarSystem->SetCVarFloat( "r_hdrDudeDesat", ddesat );
+			}
+			AddTooltip( "r_hdrDudeDesat: how strongly bright cores (fireballs, lava, muzzle flash) fade toward\n"
+				"white as they compress, so they read as detail instead of a flat saturated blob.\n"
+				"0 = pure hue-preserving (the red-blob look); raise it to give hot cores a white centre." );
+			float dtint = cvarSystem->GetCVarFloat( "r_hdrDudeTint" );
+			if ( ImGui::SliderFloat( "DUDE White-Hot Tint", &dtint, 0.0f, 1.0f, "%.2f" ) ) {
+				cvarSystem->SetCVarFloat( "r_hdrDudeTint", dtint );
+			}
+			AddTooltip( "r_hdrDudeTint: what colour the white-hot centre is. 0 = neutral white, which can make a\n"
+				"saturated lava/fire core read pink on its way to white; 1 = keep the highlight's own hue.\n"
+				"~0.35 keeps molten cores a warm yellow-white. Raise it if bright colours look washed or pink." );
+		}
 
 		// Emissive overbright, same tonemap-gated block. Pushes additive self-illum
 		// surfaces above 1.0 so the curve rolls them off as real highlights; like
@@ -2691,6 +2720,10 @@ static void ApplyEnhancementPreset( int idx )
 	// rendering-pipeline tiers: HDR (Medium+), PBR (High+), SSR (Ultra+, at
 	// reduced march resolution — 1/2 Ultra, 2/3 Nightmare)
 	r_hdr.SetBool( p.hdr );
+	// Tonemap curve tracks the HDR flag: the HDR tiers (Medium+) get the DUDE signature curve,
+	// the faithful floor (Potato/Low, HDR off) stays on straight-resolve mode 0. Written
+	// explicitly so a hand-picked curve is reset to the tier's intent on preset switch.
+	cvarSystem->SetCVarInteger( "r_hdrTonemap", p.hdr ? 5 : 0 );
 	r_pbr.SetBool( p.pbr );
 	r_ssr.SetBool( p.ssr );
 	r_ssrResScale.SetFloat( p.ssrResScale );
@@ -2764,6 +2797,7 @@ static int DetectEnhancementPreset()
 			idMath::Fabs( r_specularScale.GetFloat() - p.specularScale ) < 0.01f &&
 			idMath::Fabs( r_specularExp.GetFloat() - p.specularExp ) < 0.5f &&
 			r_hdr.GetBool()                    == p.hdr &&
+			cvarSystem->GetCVarInteger( "r_hdrTonemap" ) == ( p.hdr ? 5 : 0 ) &&
 			r_pbr.GetBool()                    == p.pbr &&
 			r_ssr.GetBool()                    == p.ssr &&
 			idMath::Fabs( r_ssrResScale.GetFloat() - p.ssrResScale ) < 0.01f &&

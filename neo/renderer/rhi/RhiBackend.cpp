@@ -82,6 +82,9 @@ extern idCVar r_rhiAA;
 extern idCVar r_fxaaStrength;
 extern idCVar r_hdrTonemap;
 extern idCVar r_hdrExposure;
+extern idCVar r_hdrDudeKnee;
+extern idCVar r_hdrDudeDesat;
+extern idCVar r_hdrDudeTint;
 extern idCVar r_hdrOverbright;
 extern idCVar r_hdrOverbrightSat;
 extern idCVar r_hdrEyeAdaptation;
@@ -844,7 +847,7 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 
 	// Tonemap follows the HDR toggle (the curve is meaningless — and unreachable in the greyed-out
 	// combo — with r_hdr off). On the off edge clear it to faithful; on the on edge default it to
-	// Reinhard (the standard look). Both act whatever flipped r_hdr (menu, console, preset). A
+	// DUDE (our signature curve). Both act whatever flipped r_hdr (menu, console, preset). A
 	// manual curve choice while HDR stays on persists; only an actual toggle re-defaults it. Init
 	// prev=true so a config loaded with r_hdr 0 + a stale curve self-corrects and a saved r_hdr-on
 	// curve is left alone (no false edge).
@@ -853,7 +856,7 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	if ( rbPrevHdr && !rbHdrNow && r_hdrTonemap.GetInteger() != 0 ) {
 		r_hdrTonemap.SetInteger( 0 );			// HDR off -> faithful
 	} else if ( !rbPrevHdr && rbHdrNow && r_hdrTonemap.GetInteger() == 0 ) {
-		r_hdrTonemap.SetInteger( 1 );			// HDR on -> Reinhard
+		r_hdrTonemap.SetInteger( 5 );			// HDR on -> DUDE (our signature curve)
 	}
 	rbPrevHdr = rbHdrNow;
 
@@ -1098,6 +1101,9 @@ static bool RB_RHI_HdrResolveSmaaFused( rhi::RHI *r, int w, int h ) {
 	parms.localParam1[1] = 1.0f;	// brightness (identity)
 	parms.localParam1[2] = 1.0f;	// 1/gamma (identity)
 	parms.localParam1[3] = (float)r_hdrTonemap.GetInteger();	// tonemap curve select
+	parms.color[0] = r_hdrDudeKnee.GetFloat();		// DUDE tonemap knee (u_color is free in this pass)
+	parms.color[1] = r_hdrDudeDesat.GetFloat();		// DUDE tonemap highlight desaturation
+	parms.color[2] = r_hdrDudeTint.GetFloat();		// DUDE tonemap white-hot tint
 	// An active tonemap curve IS this frame's display transform; folding r_gamma/
 	// r_brightness on top of it skews the calibrated curve, so leave gamma identity
 	// while tonemapping (brightness is then the r_hdrExposure knob). Mode 0 / HDR-off
@@ -1213,7 +1219,7 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	parms.localParam0[0] = r_hdrExposure.GetFloat();		// exposure, applied before the tonemap curve
 	parms.localParam0[1] = r_postFilmGrain.GetFloat();
 	parms.localParam0[2] = (float)( Sys_Milliseconds() & 0xffff ) * 0.001f;	// animated grain seed
-	parms.localParam0[3] = 0.0f;							// chroma handled pre-HUD (RB_RHI_ChromaticAberration)
+	parms.localParam0[3] = r_hdrDudeTint.GetFloat();	// DUDE white-hot tint (chroma runs pre-HUD now, slot is free)
 	parms.localParam1[0] = r_postFilmGrainSize.GetFloat();
 	parms.localParam1[3] = (float)r_hdrTonemap.GetInteger();	// tonemap curve select
 	parms.windowCoord[0] = ( eyeExposureImg != 0 ) ? 1.0f : 0.0f;	// eye-adapt flag: sample the 1x1 adapted exposure
@@ -1222,8 +1228,8 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	parms.color[1] = r_hdrAdaptGrain.GetFloat();				// low-light grain boost at full brighten (u_color.y)
 	parms.color[2] = r_hdrAdaptDesat.GetFloat();				// low-light desaturation at full brighten (u_color.z)
 	parms.color[3] = ( rbBloomImg != 0 ) ? r_hdrBloom.GetFloat() : 0.0f;	// bloom strength (u_color.w); 0 = no bloom this frame
-	parms.windowCoord[2] = 0.5f;	// aberration center in uv
-	parms.windowCoord[3] = 0.5f;
+	parms.windowCoord[2] = r_hdrDudeKnee.GetFloat();	// DUDE tonemap knee (chroma runs pre-HUD, this slot is free)
+	parms.windowCoord[3] = r_hdrDudeDesat.GetFloat();	// DUDE tonemap highlight desaturation
 	// gamma / brightness: folded into the resolve on Vulkan (the backend has no separate
 	// LDR gamma tail — RB_RHI_GammaBrightness only runs on GL). GL passes identity here so
 	// its standalone gammabrightness pass at swap stays the single point of correction.

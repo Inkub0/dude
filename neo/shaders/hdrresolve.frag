@@ -11,13 +11,14 @@
 // u_localParam0.x = HDR exposure multiplier (r_hdrExposure, applied before the tonemap)
 // u_localParam0.y = film grain intensity; 0 = off
 // u_localParam0.z = grain time/seed (seconds)
-// u_localParam0.w = chromatic aberration strength; 0 = off (backend now always passes 0)
+// u_localParam0.w = DUDE tonemap white-hot tint (r_hdrDudeTint); was chroma (now a pre-HUD pass)
 // u_localParam1.x = grain cell size in pixels (1 = per-pixel, ~1.5-2 = filmic clumps)
 // u_localParam1.y = r_brightness (1 = identity)
 // u_localParam1.z = 1.0 / r_gamma (1 = identity)
-// u_localParam1.w = tonemap curve (r_hdrTonemap): 0 off, 1 Reinhard, 2 ACES, 3 AgX, 4 PBR Neutral
+// u_localParam1.w = tonemap curve (r_hdrTonemap): 0 off, 1 Reinhard, 2 ACES, 3 AgX, 4 PBR Neutral, 5 DUDE
 // u_windowCoord.x  = eye-adaptation flag: >0.5 = use the 1x1 adapted exposure below instead of localParam0.x
-// u_windowCoord.zw = aberration center in uv (0.5, 0.5)
+// u_windowCoord.z  = DUDE tonemap knee  (r_hdrDudeKnee)   [chroma center is gone, this slot is free]
+// u_windowCoord.w  = DUDE tonemap desat (r_hdrDudeDesat)
 
 #include "renderparms.glsl"
 #include "tonemap.glsl"
@@ -40,21 +41,10 @@ float hash12( vec2 p ) {
 void main() {
 	vec2 uv = var_TexCoord;
 
-	// chromatic aberration: radial RGB split growing quadratically toward the edges,
-	// sampling the float HDR buffer directly (same math as postprocess.frag, no NPOT adj).
-	// With aberration off the offset is exactly zero and the three taps collapse to the
-	// one fetch the plain resolve needs.
-	vec3 color;
-	if ( u_localParam0.w > 0.0 ) {
-		vec2  fromCenter = uv - u_windowCoord.zw;
-		float caStrength = u_localParam0.w * 0.024 * dot( fromCenter, fromCenter );
-		vec2  caOffset = normalize( fromCenter + vec2( 1e-6 ) ) * caStrength;
-		color = vec3( texture( u_hdrScene, uv + caOffset ).r,
-		              texture( u_hdrScene, uv ).g,
-		              texture( u_hdrScene, uv - caOffset ).b );
-	} else {
-		color = texture( u_hdrScene, uv ).rgb;
-	}
+	// Chromatic aberration used to be folded in here; it now runs as a scene-only pass before the
+	// HUD (RB_RHI_ChromaticAberration), so the resolve is a straight fetch and localParam0.w is free
+	// for the DUDE white-hot tint.
+	vec3 color = texture( u_hdrScene, uv ).rgb;
 
 	// HDR bloom (Phase C): add the half-res glow into the linear scene BEFORE exposure/tonemap, so
 	// it's exposed and rolled off by the curve like real light. u_color.w = strength; 0 = off. The
@@ -70,7 +60,7 @@ void main() {
 	// adapted-exposure texture instead of the static r_hdrExposure.
 	float exposure = ( u_windowCoord.x > 0.5 ) ? texelFetch( u_adaptedExposure, ivec2( 0 ), 0 ).r
 	                                            : u_localParam0.x;
-	color = DudeTonemap( color, exposure, int( u_localParam1.w + 0.5 ) );
+	color = DudeTonemap( color, exposure, int( u_localParam1.w + 0.5 ), u_windowCoord.z, u_windowCoord.w, u_localParam0.w );
 
 	// eye-adapt low-light response: brightenFrac (0 neutral .. ~1 at full dark boost) from the 1x1
 	// exposure's .b. Desaturate toward gray as it ramps (scotopic vision — colours wash out in the

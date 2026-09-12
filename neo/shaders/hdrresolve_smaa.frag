@@ -16,8 +16,11 @@
 // u_localParam1.x  = grain cell size in pixels (1 = per-pixel)
 // u_localParam1.y  = r_brightness (1 = identity)
 // u_localParam1.z  = 1.0 / r_gamma (1 = identity)
-// u_localParam1.w  = tonemap curve (r_hdrTonemap): 0 off, 1 Reinhard, 2 ACES, 3 AgX, 4 PBR Neutral
+// u_localParam1.w  = tonemap curve (r_hdrTonemap): 0 off, 1 Reinhard, 2 ACES, 3 AgX, 4 PBR Neutral, 5 DUDE
 // u_windowCoord.z  = HDR exposure multiplier (r_hdrExposure); windowCoord.x/y hold the grain parms
+// u_color.x        = DUDE tonemap knee  (r_hdrDudeKnee)   [u_color is otherwise unused in this pass]
+// u_color.y        = DUDE tonemap desat (r_hdrDudeDesat)
+// u_color.z        = DUDE tonemap white-hot tint (r_hdrDudeTint)
 
 #include "renderparms.glsl"
 #include "tonemap.glsl"
@@ -50,7 +53,7 @@ void main() {
 
 	// exposure + tonemap (identical to hdrresolve.frag; exposure lives in windowCoord.z here
 	// because localParam0 carries SMAA_RT_METRICS). Mode 0 + exposure 1.0 = passthrough.
-	color = DudeTonemap( color, u_windowCoord.z, int( u_localParam1.w + 0.5 ) );
+	color = DudeTonemap( color, u_windowCoord.z, int( u_localParam1.w + 0.5 ), u_color.x, u_color.y, u_color.z );
 
 	// film grain: identical curve/seed to hdrresolve.frag, only the parm slots differ (intensity +
 	// seed live in windowCoord.xy here because localParam0 carries SMAA_RT_METRICS)
