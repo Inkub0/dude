@@ -60,7 +60,10 @@ void main() {
 	// adapted-exposure texture instead of the static r_hdrExposure.
 	float exposure = ( u_windowCoord.x > 0.5 ) ? texelFetch( u_adaptedExposure, ivec2( 0 ), 0 ).r
 	                                            : u_localParam0.x;
-	color = DudeTonemap( color, exposure, int( u_localParam1.w + 0.5 ), u_windowCoord.z, u_windowCoord.w, u_localParam0.w );
+	// DUDE adaptive white point (r_hdrAdaptWhitePoint) rides the eye-adapt 1x1 .a; 0 when eye-adapt
+	// off or the feature is disabled, so the DUDE shoulder stays static.
+	float dudeWhitePoint = ( u_windowCoord.x > 0.5 ) ? texelFetch( u_adaptedExposure, ivec2( 0 ), 0 ).a : 0.0;
+	color = DudeTonemap( color, exposure, int( u_localParam1.w + 0.5 ), u_windowCoord.z, u_windowCoord.w, u_localParam0.w, dudeWhitePoint );
 
 	// eye-adapt low-light response: brightenFrac (0 neutral .. ~1 at full dark boost) from the 1x1
 	// exposure's .b. Desaturate toward gray as it ramps (scotopic vision — colours wash out in the

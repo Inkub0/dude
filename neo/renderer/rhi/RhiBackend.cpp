@@ -82,6 +82,7 @@ extern idCVar r_rhiAA;
 extern idCVar r_fxaaStrength;
 extern idCVar r_hdrTonemap;
 extern idCVar r_hdrExposure;
+extern idCVar r_hdrGamma;
 extern idCVar r_hdrDudeKnee;
 extern idCVar r_hdrDudeDesat;
 extern idCVar r_hdrDudeTint;
@@ -1104,12 +1105,15 @@ static bool RB_RHI_HdrResolveSmaaFused( rhi::RHI *r, int w, int h ) {
 	parms.color[0] = r_hdrDudeKnee.GetFloat();		// DUDE tonemap knee (u_color is free in this pass)
 	parms.color[1] = r_hdrDudeDesat.GetFloat();		// DUDE tonemap highlight desaturation
 	parms.color[2] = r_hdrDudeTint.GetFloat();		// DUDE tonemap white-hot tint
-	// An active tonemap curve IS this frame's display transform; folding r_gamma/
-	// r_brightness on top of it skews the calibrated curve, so leave gamma identity
-	// while tonemapping (brightness is then the r_hdrExposure knob). Mode 0 / HDR-off
-	// keep the gamma fold.
-	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN && r_gammaInShader.GetBool()
-	     && !( rbHdrFrameActive && r_hdrTonemap.GetInteger() >= 1 ) ) {
+	// Same gamma handling as RB_RHI_HdrResolve: while a tonemap curve is active the normal r_gamma
+	// path is bypassed, so r_hdrGamma is the HDR display gamma on top of the curve here too.
+	const bool rbFusedTonemapping = rbHdrFrameActive && r_hdrTonemap.GetInteger() >= 1;
+	if ( rbFusedTonemapping ) {
+		const float hg = r_hdrGamma.GetFloat();
+		if ( hg > 0.0f && hg != 1.0f ) {
+			parms.localParam1[2] = 1.0f / hg;
+		}
+	} else if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN && r_gammaInShader.GetBool() ) {
 		parms.localParam1[1] = r_brightness.GetFloat();
 		parms.localParam1[2] = ( r_gamma.GetFloat() > 0.0f ) ? 1.0f / r_gamma.GetFloat() : 1.0f;
 	}
@@ -1235,12 +1239,18 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	// its standalone gammabrightness pass at swap stays the single point of correction.
 	parms.localParam1[1] = 1.0f;	// brightness (identity)
 	parms.localParam1[2] = 1.0f;	// 1/gamma (identity)
-	// An active tonemap curve IS this frame's display transform; folding r_gamma/
-	// r_brightness on top of it skews the calibrated curve, so leave gamma identity
-	// while tonemapping (brightness is then the r_hdrExposure knob). Mode 0 / HDR-off
-	// keep the gamma fold.
-	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN && r_gammaInShader.GetBool()
-	     && !( rbHdrFrameActive && r_hdrTonemap.GetInteger() >= 1 ) ) {
+	const bool rbTonemapping = rbHdrFrameActive && r_hdrTonemap.GetInteger() >= 1;
+	if ( rbTonemapping ) {
+		// The tonemap curve IS this frame's display transform, so the normal r_gamma path is
+		// bypassed (GL standalone pass early-outs; VK fold skipped) to avoid skewing the calibrated
+		// curve. Expose r_hdrGamma HERE instead — a display gamma on top of the curve, so HDR still
+		// has a contrast/softness lever: >1 lifts shadows/midtones (softer, less punchy) and barely
+		// moves the near-white highlights; 1 = off. Both backends; brightness stays the exposure knob.
+		const float hg = r_hdrGamma.GetFloat();
+		if ( hg > 0.0f && hg != 1.0f ) {
+			parms.localParam1[2] = 1.0f / hg;
+		}
+	} else if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN && r_gammaInShader.GetBool() ) {
 		parms.localParam1[1] = r_brightness.GetFloat();
 		parms.localParam1[2] = ( r_gamma.GetFloat() > 0.0f ) ? 1.0f / r_gamma.GetFloat() : 1.0f;
 	}

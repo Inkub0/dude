@@ -5410,6 +5410,8 @@ extern idCVar r_hdrAdaptDarken;
 extern idCVar r_hdrAdaptKey;
 extern idCVar r_hdrAdaptCenter;
 extern idCVar r_hdrTonemap;
+extern idCVar r_hdrAdaptWhitePoint;
+extern idCVar r_hdrDudeKnee;
 
 // Single-level luma reduction targets (64 -> 8 -> 1), each 8x8-averaging into the next. Deliberately
 // NOT a mip-render chain (BeginTargetMipPass): that path has no write->read barrier between levels and
@@ -5545,6 +5547,8 @@ rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg
 	ep.localParam1[0] = rhiExposureValid ? 1.0f : 0.0f;					// ease from prev, else snap
 	ep.localParam1[1] = 0.0f;											// luma source is a single-level 1x1 target (lod 0)
 	ep.localParam1[2] = r_hdrAdaptKey.GetFloat();						// key: scene luminance mapping to r_hdrExposure
+	ep.localParam1[3] = r_hdrAdaptWhitePoint.GetFloat();				// DUDE adaptive white-point strength (0 = off)
+	ep.color[0]       = r_hdrDudeKnee.GetFloat();						// knee, for the static-equivalent white point W0
 
 	rhi::ImageHandle lumaAvg = r->GetRenderTargetImage( rhiLumaC );		// the 1x1 average
 

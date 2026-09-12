@@ -100,11 +100,19 @@ vec3 DudeTonemapPBRNeutral( vec3 color ) {
 // tint  (r_hdrDudeTint):  where "white-hot" points. 0 = neutral white (fully desaturated - can go
 //                         pink on saturated lava, since red->white passes through pink); 1 = keep
 //                         the highlight's own hue (no whitening). ~0.35 keeps molten cores warm.
-vec3 DudeTonemapDude( vec3 c, float knee, float desat, float tint ) {
+// whitePoint (r_hdrAdaptWhitePoint via eye-adaptation): 0 = static shoulder (decay = 1-knee). When
+// >knee it's the post-exposure luminance that should map to ~white, so the shoulder decay stretches
+// to reach ~0.99 there — a bright core keeps internal gradient instead of a flat disc. Clamped to
+// never roll off FASTER than static (extend-only), so enabling it can't crush highlights vs default.
+vec3 DudeTonemapDude( vec3 c, float knee, float desat, float tint, float whitePoint ) {
 	knee = clamp( knee, 0.05, 0.95 );
 	float peak = max( c.r, max( c.g, c.b ) );
 	if ( peak <= knee ) return c;                       // faithful: shadows + midtones untouched
-	float mapped = 1.0 - ( 1.0 - knee ) * exp( -( peak - knee ) / ( 1.0 - knee ) );
+	float tau = 1.0 - knee;                             // static shoulder decay
+	if ( whitePoint > knee + 0.05 ) {                   // adaptive: reach ~0.99 at peak == whitePoint
+		tau = max( ( whitePoint - knee ) / log( 100.0 * ( 1.0 - knee ) ), 1.0 - knee );
+	}
+	float mapped = 1.0 - ( 1.0 - knee ) * exp( -( peak - knee ) / tau );
 	vec3  col = c * ( mapped / peak );                  // hue-preserving highlight rolloff
 	// white-hot: the harder a highlight is compressed (peak - mapped), the more it fades toward the
 	// target, so fireball / lava cores gain internal gradient instead of clipping to a saturated blob.
@@ -116,14 +124,14 @@ vec3 DudeTonemapDude( vec3 c, float knee, float desat, float tint ) {
 }
 
 // --- dispatch -----------------------------------------------------------------
-vec3 DudeTonemap( vec3 c, float exposure, int mode, float dudeKnee, float dudeDesat, float dudeTint ) {
+vec3 DudeTonemap( vec3 c, float exposure, int mode, float dudeKnee, float dudeDesat, float dudeTint, float dudeWhitePoint ) {
 	if ( mode == 0 ) return c;                          // pure passthrough (faithful); exposure only shapes the curves
 	c *= exposure;
 	if ( mode == 1 ) return c / ( c + vec3( 1.0 ) );   // Reinhard
 	if ( mode == 2 ) return DudeTonemapACES( c );
 	if ( mode == 3 ) return DudeTonemapAgX( c );
 	if ( mode == 4 ) return DudeTonemapPBRNeutral( c );
-	if ( mode == 5 ) return DudeTonemapDude( c, dudeKnee, dudeDesat, dudeTint );
+	if ( mode == 5 ) return DudeTonemapDude( c, dudeKnee, dudeDesat, dudeTint, dudeWhitePoint );
 	return c;
 }
 

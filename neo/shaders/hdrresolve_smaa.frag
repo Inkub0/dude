@@ -53,7 +53,10 @@ void main() {
 
 	// exposure + tonemap (identical to hdrresolve.frag; exposure lives in windowCoord.z here
 	// because localParam0 carries SMAA_RT_METRICS). Mode 0 + exposure 1.0 = passthrough.
-	color = DudeTonemap( color, u_windowCoord.z, int( u_localParam1.w + 0.5 ), u_color.x, u_color.y, u_color.z );
+	// white point is 0 here: the fused SMAA resolve is disabled whenever eye-adaptation is on
+	// (RB_RHI_HdrResolveSmaaFused), and adaptive white point requires eye-adaptation, so the
+	// DUDE shoulder is always static on this path.
+	color = DudeTonemap( color, u_windowCoord.z, int( u_localParam1.w + 0.5 ), u_color.x, u_color.y, u_color.z, 0.0 );
 
 	// film grain: identical curve/seed to hdrresolve.frag, only the parm slots differ (intensity +
 	// seed live in windowCoord.xy here because localParam0 carries SMAA_RT_METRICS)

@@ -19,6 +19,8 @@ void main() {
 	vec2  uv   = 0.5 + ( var_TexCoord - 0.5 ) * u_localParam0.x;   // centred metering crop
 	vec3  c    = texture( u_hdrScene, uv ).rgb;
 	float luma = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
-	// log-luminance; floor keeps log() finite and bounds pure-black areas.
-	fragColor  = vec4( log( max( luma, 1e-4 ) ), 0.0, 0.0, 1.0 );
+	// .r = log-luminance (floor keeps log() finite) — box-averaged down the chain to a geometric mean.
+	// .g = LINEAR luminance — MAX'd down the chain to the scene's brightest metered spot, for the
+	// experimental DUDE adaptive white point (r_hdrAdaptWhitePoint). Cheap: rides the same reduction.
+	fragColor  = vec4( log( max( luma, 1e-4 ) ), luma, 0.0, 1.0 );
 }

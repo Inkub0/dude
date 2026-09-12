@@ -16,11 +16,14 @@ void main() {
 	ivec2 sz   = textureSize( u_src, 0 );
 	ivec2 mx   = sz - 1;
 	ivec2 base = ivec2( gl_FragCoord.xy ) * 8;   // top-left of this dest texel's 8x8 source block
-	float sum  = 0.0;
+	float sum  = 0.0;                            // .r: box-average the log-luma  (-> geometric mean)
+	float peak = 0.0;                            // .g: MAX the linear luma       (-> scene peak)
 	for ( int y = 0; y < 8; y++ ) {
 		for ( int x = 0; x < 8; x++ ) {
-			sum += texelFetch( u_src, min( base + ivec2( x, y ), mx ), 0 ).r;
+			vec2 s = texelFetch( u_src, min( base + ivec2( x, y ), mx ), 0 ).rg;
+			sum  += s.r;
+			peak  = max( peak, s.g );
 		}
 	}
-	fragColor = vec4( sum * ( 1.0 / 64.0 ), 0.0, 0.0, 1.0 );
+	fragColor = vec4( sum * ( 1.0 / 64.0 ), peak, 0.0, 1.0 );
 }

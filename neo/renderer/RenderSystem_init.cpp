@@ -300,15 +300,16 @@ idCVar r_hdr( "r_hdr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "render th
 // HDR tonemap (needs r_hdr): static-exposure curve folded into the resolve. 0 = off/faithful
 // (bit-identical to the straight resolve), 1 = Reinhard, 2 = ACES, 3 = AgX, 4 = Khronos PBR Neutral.
 idCVar r_hdrTonemap( "r_hdrTonemap", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "HDR tonemap curve (needs r_hdr): 0=off/faithful, 1=Reinhard, 2=ACES, 3=AgX, 4=Khronos PBR Neutral, 5=DUDE", 0, 5 );
-idCVar r_hdrExposure( "r_hdrExposure", "2.8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR static exposure multiplier applied before the tonemap curve (needs r_hdr + r_hdrTonemap>=1)", 0.1f, 8.0f );
-idCVar r_hdrDudeKnee( "r_hdrDudeKnee", "0.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "DUDE tonemap (r_hdrTonemap 5): highlight-rolloff knee. Below it the scene is untouched (faithful blacks/midtones); above it highlights roll off. Lower = start compressing sooner / preserve more highlight range", 0.05f, 0.95f );
+idCVar r_hdrExposure( "r_hdrExposure", "1.23", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR static exposure multiplier applied before the tonemap curve (needs r_hdr + r_hdrTonemap>=1). Default calibrated for the DUDE curve; other curves may want it higher", 0.1f, 8.0f );
+idCVar r_hdrGamma( "r_hdrGamma", "1.20", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR display gamma applied on TOP of the tonemap curve (the normal r_gamma is bypassed while a curve is active). >1 lifts shadows/midtones for a softer, less 'punchy' image (barely touches the faithful highlights); <1 deepens contrast; 1 = off. Both backends, any tonemap curve", 0.5f, 2.5f );
+idCVar r_hdrDudeKnee( "r_hdrDudeKnee", "0.57", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "DUDE tonemap (r_hdrTonemap 5): highlight-rolloff knee. Below it the scene is untouched (faithful blacks/midtones); above it highlights roll off. Lower = start compressing sooner / preserve more highlight range", 0.05f, 0.95f );
 idCVar r_hdrDudeDesat( "r_hdrDudeDesat", "0.20", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "DUDE tonemap (r_hdrTonemap 5): highlight white-hot desaturation. Bright cores (fireballs, lava) blend toward white as they compress so they read as detail, not a saturated blob. 0 = pure hue-preserving", 0.0f, 4.0f );
 idCVar r_hdrDudeTint( "r_hdrDudeTint", "0.65", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "DUDE tonemap (r_hdrTonemap 5): where the white-hot desaturation points. 0 = neutral white (a saturated lava/fire core can read pink en route to white); 1 = keep the highlight's own hue. ~0.65 keeps molten cores warm yellow-white instead of pink", 0.0f, 1.0f );
 // HDR C-lite overbright (needs r_hdr + a tonemap curve): multiply additive self-illum stages
 // (blend add — lamps, screens, fire, glares) so they exceed 1.0 in the float scene buffer,
 // giving the tonemap curve real highlight range and eye-adaptation bright anchors. Only active
 // with r_hdrTonemap>=1 (like r_hdrExposure), so it never touches the faithful mode-0 look. 1=off.
-idCVar r_hdrOverbright( "r_hdrOverbright", "2.16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright multiplier for additive self-illum stages (needs r_hdr + r_hdrTonemap>=1): pushes lamps/screens/fire above 1.0 for tonemap+adaptation range; 1=off. When active it auto-disables the legacy r_flareSize light haze", 1.0f, 8.0f );
+idCVar r_hdrOverbright( "r_hdrOverbright", "1.25", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright multiplier for additive self-illum stages (needs r_hdr + r_hdrTonemap>=1): pushes lamps/screens/fire above 1.0 for tonemap+adaptation range; 1=off. When active it auto-disables the legacy r_flareSize light haze", 1.0f, 8.0f );
 // Overbright saturation: the tonemap desaturates the very bright colours overbright pushes into
 // (coloured fire/lava go white while white lights are fine). Pre-saturate the boosted additive
 // stages so the hue survives the curve. 1 = off; white is unaffected (no saturation to boost).
@@ -344,6 +345,7 @@ idCVar r_hdrAdaptGrain( "r_hdrAdaptGrain", "3.0", CVAR_RENDERER | CVAR_ARCHIVE |
 // Low-light desaturation: as the dark-scene brightening ramps up, wash colours toward gray (scotopic
 // vision — rods take over from cones in the dark). 0.25 = colours drop to ~75% at full brightening.
 idCVar r_hdrAdaptDesat( "r_hdrAdaptDesat", "0.33", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation: colour desaturation at full low-light brightening (0.25 = ~75% saturation, 0 = off)", 0.0f, 1.0f );
+idCVar r_hdrAdaptWhitePoint( "r_hdrAdaptWhitePoint", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "EXPERIMENTAL (needs r_hdrEyeAdaptation + DUDE tonemap): the DUDE shoulder's white point tracks the scene's (smoothed) brightest metered spot, so a bright lamp/fire core keeps its internal gradient instead of flattening to a white disc when auto-exposure ramps up in the dark. 0 = off (static shoulder); 1 = full tracking. Extend-only (never rolls off harder than static)", 0.0f, 1.0f );
 // Debug: draw the adapted exposure as a flat grayscale (exposure * 0.2, so mid-gray ~= 2.5) so you
 // can see whether it is pinned or actually tracking the scene. Needs r_hdrEyeAdaptation.
 idCVar r_hdrEyeAdaptDebug( "r_hdrEyeAdaptDebug", "0", CVAR_RENDERER | CVAR_BOOL, "debug: show the adapted exposure as a flat grayscale (needs r_hdrEyeAdaptation)" );

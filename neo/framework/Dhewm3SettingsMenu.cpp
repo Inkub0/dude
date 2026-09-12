@@ -1927,7 +1927,18 @@ static CVarOption postProcessOptions[] = {
 			cvarSystem->SetCVarFloat( "r_hdrExposure", exposure );
 		}
 		AddTooltip( "r_hdrExposure: linear exposure multiplier applied before the tonemap curve.\n"
-			"Raises or lowers the scene brightness feeding the curve; default 2.33. No effect while Tonemap is Off." );
+			"Raises or lowers the scene brightness feeding the curve; default 1.23 (tuned for DUDE). No effect while Tonemap is Off." );
+
+		// HDR display gamma (any curve): the normal gamma slider is bypassed while tonemapping, so
+		// this is the contrast/softness lever in HDR. Applied AFTER the curve on the display value.
+		float hgamma = cvarSystem->GetCVarFloat( "r_hdrGamma" );
+		if ( ImGui::SliderFloat( "HDR Gamma", &hgamma, 0.5f, 2.5f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrGamma", hgamma );
+		}
+		AddTooltip( "r_hdrGamma: display gamma applied on top of the tonemap curve (the normal r_gamma is\n"
+			"bypassed while a curve is active). >1 lifts shadows/midtones for a softer, less 'punchy'\n"
+			"image while barely moving the faithful highlights; <1 deepens contrast; 1 = off. No effect\n"
+			"while Tonemap is Off." );
 
 		// DUDE-curve dials (r_hdrTonemap 5 only): the knee sets where highlights start rolling
 		// off (blacks/midtones below it stay untouched), the desaturation gives bright cores a
@@ -1965,8 +1976,8 @@ static CVarOption postProcessOptions[] = {
 		}
 		AddTooltip( "r_hdrOverbright: multiply additive self-illum surfaces (lamps, screens, fire, glares)\n"
 			"so they exceed 1.0 and the tonemap curve treats them as real highlights (and eye-adaptation\n"
-			"has bright anchors). 1 = off; ~3 is a good look. When active it auto-disables the legacy\n"
-			"light-flare/glare haze (r_flareSize). No effect while Tonemap is Off." );
+			"has bright anchors). 1 = off; ~1.25 default (tuned for DUDE). When active it auto-disables the\n"
+			"legacy light-flare/glare haze (r_flareSize). No effect while Tonemap is Off." );
 		float obsat = cvarSystem->GetCVarFloat( "r_hdrOverbrightSat" );
 		if ( ImGui::SliderFloat( "Overbright Saturation", &obsat, 1.0f, 3.0f, "%.2f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrOverbrightSat", obsat );
@@ -3813,6 +3824,17 @@ static void DrawDbgGroup_EyeAdaptation()
 		AddTooltip( "r_hdrAdaptDesat: wash colours toward gray as the dark-scene brightening ramps up\n"
 			"(scotopic vision — rods take over in the dark). 0.33 = colours drop to ~67% at full\n"
 			"brightening; 0 = off." );
+
+		float ewp = cvarSystem->GetCVarFloat( "r_hdrAdaptWhitePoint" );
+		if ( ImGui::SliderFloat( "DUDE Adaptive White Point (exp.)", &ewp, 0.0f, 1.0f, "%.2f" ) ) {
+			cvarSystem->SetCVarFloat( "r_hdrAdaptWhitePoint", ewp );
+		}
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaWP" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptWhitePoint", 0.0f ); }
+		AddTooltip( "r_hdrAdaptWhitePoint (EXPERIMENTAL, DUDE tonemap only): the DUDE shoulder's white point\n"
+			"tracks the scene's smoothed brightest metered spot, so a bright lamp/fire core keeps its\n"
+			"internal gradient instead of flattening to a white disc when auto-exposure ramps up in the\n"
+			"dark. 0 = off (static shoulder); 1 = full tracking. Extend-only — never rolls off harder\n"
+			"than the static curve, so turning it up can't crush highlights vs the default." );
 
 		ImGui::Spacing();
 		bool dbg = cvarSystem->GetCVarBool( "r_hdrEyeAdaptDebug" );

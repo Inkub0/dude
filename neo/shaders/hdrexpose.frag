@@ -15,6 +15,9 @@
 //   u_localParam1.x = previous exposure usable (1) or snap to target (0, first frame / reset)
 //   u_localParam1.y = luma source mip level (Vulkan single-level view -> 0; GL3 -> coarsest)
 //   u_localParam1.z = reference luminance (r_hdrAdaptKey): the scene luminance mapping to mid
+//   u_localParam1.w = DUDE adaptive white-point strength (r_hdrAdaptWhitePoint); 0 = off
+//   u_color.x       = DUDE knee (r_hdrDudeKnee) — needed for the static-equivalent white point W0
+// Output .a = the smoothed, post-exposure DUDE white point (0 = feature off); the resolve reads it.
 
 #include "renderparms.glsl"
 
@@ -49,6 +52,25 @@ void main() {
 	// how far into the low-light brightening we are (0 at neutral, ~1 at the Brighten cap). The
 	// resolve reads this to drive the low-light grain boost AND the low-light desaturation.
 	float brightenFrac = clamp( ( adapted - mid ) / max( brighten, 1e-3 ), 0.0, 1.0 );
-	// .r = adapted exposure (what the resolve uses); .g = log-luma (debug); .b = brighten fraction.
-	fragColor = vec4( adapted, logL, brightenFrac, 1.0 );
+
+	// Experimental DUDE adaptive white point (r_hdrAdaptWhitePoint). The DUDE shoulder's static
+	// decay (1-knee) already behaves like a fixed white point W0 = knee + (1-knee)*ln(100*(1-knee))
+	// in post-exposure units (the peak that maps to ~0.99). Track the scene's brightest metered spot
+	// (u_lumaAvg.g, MAX'd down the reduction) in post-exposure space and lerp W0 -> peak by strength,
+	// so a bright lamp/fire core in a dark, exposure-ramped scene keeps range instead of a flat disc.
+	// Smoothed on the SAME temporal ease as exposure (its own ping-pong state in .a) so it never
+	// pumps off a single-frame spike. .a = 0 when off, so the resolve falls back to the static shoulder.
+	float wpStrength = u_localParam1.w;
+	float whitePoint = 0.0;
+	if ( wpStrength > 0.0 ) {
+		float knee     = clamp( u_color.x, 0.05, 0.95 );
+		float W0       = knee + ( 1.0 - knee ) * log( 100.0 * ( 1.0 - knee ) );	// static-equivalent WP
+		float peakPost = texelFetch( u_lumaAvg, ivec2( 0 ), lod ).g * adapted;	// scene peak, post-exposure
+		float wpTarget = mix( W0, max( peakPost, W0 ), wpStrength );				// extend-only (>= W0)
+		float prevWp   = texelFetch( u_prevExposure, ivec2( 0 ), 0 ).a;
+		whitePoint = ( u_localParam1.x > 0.5 && prevWp > 0.0 ) ? mix( prevWp, wpTarget, u_localParam0.w ) : wpTarget;
+	}
+	// .r = adapted exposure (what the resolve uses); .g = log-luma (debug); .b = brighten fraction;
+	// .a = smoothed post-exposure DUDE white point (0 = off).
+	fragColor = vec4( adapted, logL, brightenFrac, whitePoint );
 }
