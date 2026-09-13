@@ -144,6 +144,7 @@ namespace rhi {
 // Forward declarations for the crash-dump helpers implemented later in this TU.
 static void WriteVulkanCrashDump( const char *what, VkResult res );
 static void WriteVulkanCrashDumpForced( const char *what, VkResult res );
+static void VkSampleTelemetry();		// advance the NVML telemetry ring (impl near the debug HUD)
 
 // Console command: force a CPU-only crash dump to disk. Useful to manually capture engine
 // state without waiting for an actual device-lost. Usage: vk_dump_state [label]
@@ -939,6 +940,28 @@ static const int VK_DEBUG_MSG_HISTORY = 64;
 static std::vector<idStr> vkDebugMsgHistory;
 static std::mutex vkDebugMsgMutex;
 
+// One GPU telemetry sample. The ring of these is the crash dump's most useful forensic signal:
+// it shows the P-state / clock / power trajectory in the seconds before a device loss, which is
+// exactly what a boost-transition (di/dt) hypothesis needs to confirm. Sampled ~10 Hz in
+// BeginFrame via NVML (implementation lives near the debug HUD at the end of this TU).
+struct VkTelemetrySample {
+	unsigned int       timeMs = 0;      // Sys_Milliseconds() when sampled
+	unsigned           smClockMHz = 0;
+	unsigned           memClockMHz = 0;
+	unsigned           tempC = 0;
+	unsigned           powerW = 0;      // instantaneous board draw (rounded)
+	unsigned           pstate = 32;     // NVML perf state P0..P15 (0 = max); 32 = unknown
+};
+static const int          VK_TELEMETRY_RING = 256;   // ~25 s of history at 10 Hz
+static VkTelemetrySample  vkTelemetryRing[VK_TELEMETRY_RING];
+static int                vkTelemetryHead = 0;        // next write slot
+static int                vkTelemetryCount = 0;
+static unsigned int       vkTelemetryLastMs = 0;
+// slow-changing extras for the HUD's power-limit / VRAM lines (refreshed ~1 Hz)
+static unsigned           vkTelemetryPowerLimitW = 0;
+static unsigned long long vkTelemetryMemUsedMB = 0, vkTelemetryMemTotalMB = 0;
+static unsigned int       vkTelemetryExtraMs = 0;
+
 /*
 ====================
 WriteVulkanCrashDumpBody
@@ -1012,6 +1035,33 @@ static void WriteVulkanCrashDumpBody( const char *what, VkResult res, const char
 		std::lock_guard<std::mutex> lock( vkDebugMsgMutex );
 		for ( size_t i = 0; i < vkDebugMsgHistory.size(); ++i ) {
 			fprintf( f, "  %s\n", vkDebugMsgHistory[i].c_str() );
+		}
+	}
+	if ( r_vkValidation.GetInteger() == 0 ) {
+		fprintf( f, "  (validation layer was OFF — set r_vkValidation 1 to capture messages here next time)\n" );
+	}
+	fprintf( f, "\n" );
+
+	// Telemetry trajectory: the clock / P-state / power history right before the event. For a
+	// suspected boost-transition (di/dt) crash this is the key signal — watch the P-state and SM
+	// clock in the newest rows (t-ms counts down to ~0 at the dump). A large P8->P0 jump / clock
+	// ramp immediately before the loss supports "a current spike on the way back up killed it".
+	fprintf( f, "GPU telemetry ring (~10 Hz; t-ms = ms before this dump, newest last):\n" );
+	if ( vkTelemetryCount == 0 ) {
+		fprintf( f, "  (none — NVML unavailable, or neither r_vkCrashLogging nor r_vkDebugHud was on before the crash)\n" );
+	} else {
+		fprintf( f, "  %8s  %-6s  %8s  %6s  %7s  %8s\n", "t-ms", "Pstate", "SMclkMHz", "TempC", "PowerW", "MEMclk" );
+		const int          n = vkTelemetryCount;
+		const int          newestIdx = ( vkTelemetryHead - 1 + VK_TELEMETRY_RING ) % VK_TELEMETRY_RING;
+		const unsigned int newestMs = vkTelemetryRing[newestIdx].timeMs;
+		const int          start = ( vkTelemetryHead - n + VK_TELEMETRY_RING * 2 ) % VK_TELEMETRY_RING;
+		for ( int k = 0; k < n; k++ ) {
+			const VkTelemetrySample &s = vkTelemetryRing[ ( start + k ) % VK_TELEMETRY_RING ];
+			char pst[8];
+			if ( s.pstate <= 15 ) { idStr::snPrintf( pst, sizeof( pst ), "P%u", s.pstate ); }
+			else                  { idStr::Copynz( pst, "P?", sizeof( pst ) ); }
+			fprintf( f, "  %8u  %-6s  %8u  %6u  %7u  %8u\n",
+				(unsigned)( newestMs - s.timeMs ), pst, s.smClockMHz, s.tempC, s.powerW, s.memClockMHz );
 		}
 	}
 	fprintf( f, "\n" );
@@ -2240,6 +2290,13 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	}
 	if ( device == VK_NULL_HANDLE || frameOpen ) {
 		return;
+	}
+
+	// Advance the NVML telemetry ring while the device is alive, so a crash dump can show the
+	// clock / P-state / power trajectory leading into a device loss. Cheap and throttled to ~10 Hz;
+	// only runs when the HUD or crash logging is on.
+	if ( r_vkCrashLogging.GetBool() || r_vkDebugHud.GetBool() ) {
+		VkSampleTelemetry();
 	}
 	FrameSlot &f = frames[frameIndex];
 	vkWaitForFences( device, 1, &f.fence, VK_TRUE, UINT64_MAX );
@@ -9155,17 +9212,6 @@ void VK_ImGuiShutdown() {
 // and the HUD shows N/A. It is the boost-clock / thermal / power canary the
 // device-loss hunt needs — Vulkan itself exposes none of those.
 // ---------------------------------------------------------------------------
-struct VkGpuTelemetry {
-	bool               available = false;   // NVML loaded + device handle obtained
-	unsigned           smClockMHz = 0;
-	unsigned           memClockMHz = 0;
-	unsigned           tempC = 0;
-	unsigned           powerW = 0;          // instantaneous board draw (rounded)
-	unsigned           powerLimitW = 0;
-	unsigned long long memUsedMB = 0;
-	unsigned long long memTotalMB = 0;
-};
-
 // NVML entry points we use (subset). Typedef'd locally so we don't need the NVML SDK headers.
 typedef int ( *PFN_nvmlInit )( void );                                // nvmlInit_v2
 typedef int ( *PFN_nvmlDeviceGetHandleByIndex )( unsigned, void ** ); // _v2
@@ -9174,6 +9220,7 @@ typedef int ( *PFN_nvmlDeviceGetTemperature )( void *, int, unsigned * );
 typedef int ( *PFN_nvmlDeviceGetPowerUsage )( void *, unsigned * );
 typedef int ( *PFN_nvmlDeviceGetEnforcedPowerLimit )( void *, unsigned * );
 typedef int ( *PFN_nvmlDeviceGetMemoryInfo )( void *, void * );
+typedef int ( *PFN_nvmlDeviceGetPerformanceState )( void *, int * );  // P0..P15 (0 = max perf)
 
 static struct NvmlApi {
 	bool      tried = false;
@@ -9186,6 +9233,7 @@ static struct NvmlApi {
 	PFN_nvmlDeviceGetPowerUsage         GetPower = NULL;
 	PFN_nvmlDeviceGetEnforcedPowerLimit GetPowerLimit = NULL;
 	PFN_nvmlDeviceGetMemoryInfo         GetMem = NULL;
+	PFN_nvmlDeviceGetPerformanceState   GetPstate = NULL;
 } nvml;
 
 static bool NvmlEnsure() {
@@ -9213,6 +9261,7 @@ static bool NvmlEnsure() {
 	nvml.GetPower      = (PFN_nvmlDeviceGetPowerUsage)         Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetPowerUsage" );
 	nvml.GetPowerLimit = (PFN_nvmlDeviceGetEnforcedPowerLimit) Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetEnforcedPowerLimit" );
 	nvml.GetMem        = (PFN_nvmlDeviceGetMemoryInfo)         Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetMemoryInfo" );
+	nvml.GetPstate     = (PFN_nvmlDeviceGetPerformanceState)  Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetPerformanceState" );
 
 	if ( !nvml.Init || !nvml.GetHandle || nvml.Init() != 0 /*NVML_SUCCESS==0*/ ) {
 		return false;
@@ -9224,43 +9273,55 @@ static bool NvmlEnsure() {
 	return true;
 }
 
-// Poll NVML into `out`, throttled to ~2 Hz (NVML queries have real latency). Returns availability.
-static bool VkPollGpuTelemetry( VkGpuTelemetry &out ) {
-	static VkGpuTelemetry cached;
-	static unsigned int   lastMs = 0;
-	static bool           have = false;
-
+// Sample NVML into the ring, throttled to ~10 Hz. Called once per frame from BeginFrame while the
+// device is alive (never after a loss — by then the ring already holds the pre-crash history).
+static void VkSampleTelemetry() {
 	if ( !NvmlEnsure() ) {
-		out = VkGpuTelemetry();
-		return false;
+		return;
 	}
-
 	unsigned int now = Sys_Milliseconds();
-	if ( have && ( now - lastMs ) < 500 ) {
-		out = cached;
-		return true;
+	if ( vkTelemetryCount > 0 && ( now - vkTelemetryLastMs ) < 100 ) {
+		return;
 	}
-	lastMs = now;
-	have = true;
+	vkTelemetryLastMs = now;
 
-	VkGpuTelemetry t;
-	t.available = true;
+	VkTelemetrySample s;
+	s.timeMs = now;
 	unsigned v = 0;
-	if ( nvml.GetClock      && nvml.GetClock( nvml.dev, 1 /*SM*/, &v ) == 0 )  { t.smClockMHz = v; }
-	if ( nvml.GetClock      && nvml.GetClock( nvml.dev, 2 /*MEM*/, &v ) == 0 ) { t.memClockMHz = v; }
-	if ( nvml.GetTemp       && nvml.GetTemp( nvml.dev, 0 /*GPU*/, &v ) == 0 )  { t.tempC = v; }
-	if ( nvml.GetPower      && nvml.GetPower( nvml.dev, &v ) == 0 )            { t.powerW = ( v + 500 ) / 1000; }
-	if ( nvml.GetPowerLimit && nvml.GetPowerLimit( nvml.dev, &v ) == 0 )       { t.powerLimitW = ( v + 500 ) / 1000; }
-	if ( nvml.GetMem ) {
-		// nvmlMemory_t (v1) = { unsigned long long total, free, used }; over-size the buffer defensively.
-		unsigned long long mem[8] = { 0 };
-		if ( nvml.GetMem( nvml.dev, mem ) == 0 ) {
-			t.memTotalMB = mem[0] / ( 1024ull * 1024ull );
-			t.memUsedMB  = mem[2] / ( 1024ull * 1024ull );
+	if ( nvml.GetClock  && nvml.GetClock( nvml.dev, 1 /*SM*/, &v ) == 0 )  { s.smClockMHz = v; }
+	if ( nvml.GetClock  && nvml.GetClock( nvml.dev, 2 /*MEM*/, &v ) == 0 ) { s.memClockMHz = v; }
+	if ( nvml.GetTemp   && nvml.GetTemp( nvml.dev, 0 /*GPU*/, &v ) == 0 )  { s.tempC = v; }
+	if ( nvml.GetPower  && nvml.GetPower( nvml.dev, &v ) == 0 )            { s.powerW = ( v + 500 ) / 1000; }
+	int ps = 32;
+	if ( nvml.GetPstate && nvml.GetPstate( nvml.dev, &ps ) == 0 )          { s.pstate = (unsigned)ps; }
+
+	vkTelemetryRing[vkTelemetryHead] = s;
+	vkTelemetryHead = ( vkTelemetryHead + 1 ) % VK_TELEMETRY_RING;
+	if ( vkTelemetryCount < VK_TELEMETRY_RING ) {
+		vkTelemetryCount++;
+	}
+
+	// slow-changing extras for the HUD's power-limit / VRAM lines (~1 Hz)
+	if ( vkTelemetryExtraMs == 0 || ( now - vkTelemetryExtraMs ) >= 1000 ) {
+		vkTelemetryExtraMs = now;
+		if ( nvml.GetPowerLimit && nvml.GetPowerLimit( nvml.dev, &v ) == 0 ) { vkTelemetryPowerLimitW = ( v + 500 ) / 1000; }
+		if ( nvml.GetMem ) {
+			// nvmlMemory_t (v1) = { unsigned long long total, free, used }; over-size the buffer defensively.
+			unsigned long long mem[8] = { 0 };
+			if ( nvml.GetMem( nvml.dev, mem ) == 0 ) {
+				vkTelemetryMemTotalMB = mem[0] / ( 1024ull * 1024ull );
+				vkTelemetryMemUsedMB  = mem[2] / ( 1024ull * 1024ull );
+			}
 		}
 	}
-	cached = t;
-	out = t;
+}
+
+// Newest ring sample for the HUD. Returns false if NVML is unavailable or nothing sampled yet.
+static bool VkLatestTelemetry( VkTelemetrySample &out ) {
+	if ( !NvmlEnsure() || vkTelemetryCount == 0 ) {
+		return false;
+	}
+	out = vkTelemetryRing[ ( vkTelemetryHead - 1 + VK_TELEMETRY_RING ) % VK_TELEMETRY_RING ];
 	return true;
 }
 
@@ -9283,8 +9344,8 @@ void VulkanBackend::DrawDebugHud() {
 		}
 	}
 
-	VkGpuTelemetry gpu;
-	VkPollGpuTelemetry( gpu );
+	VkTelemetrySample gpu;
+	const bool haveGpu = VkLatestTelemetry( gpu );
 
 	ImGui::SetNextWindowPos( ImVec2( 12.0f, 12.0f ), ImGuiCond_Always );
 	ImGui::SetNextWindowBgAlpha( 0.72f );
@@ -9306,16 +9367,21 @@ void VulkanBackend::DrawDebugHud() {
 	ImGui::Separator();
 
 	// --- GPU canary (NVML): clock coloured as it climbs toward the boost danger zone ---
-	if ( gpu.available ) {
+	if ( haveGpu ) {
 		ImVec4 clkCol( 0.55f, 0.95f, 0.55f, 1.0f );
 		if ( gpu.smClockMHz >= 1900 )      clkCol = ImVec4( 1.0f, 0.45f, 0.30f, 1.0f );
 		else if ( gpu.smClockMHz >= 1700 ) clkCol = ImVec4( 1.0f, 0.85f, 0.35f, 1.0f );
+		// P-state: a frame cap makes this oscillate P8<->P0, and the big up-ramps are the di/dt
+		// transients suspected of killing a marginal card. Colour it like the clock.
+		if ( gpu.pstate <= 15 ) {
+			ImGui::TextColored( clkCol, "P-state  : P%u", gpu.pstate );
+		}
 		ImGui::TextColored( clkCol, "SM clock : %u MHz", gpu.smClockMHz );
 		ImGui::Text( "Mem clock: %u MHz", gpu.memClockMHz );
 		ImVec4 tCol = ( gpu.tempC >= 83 ) ? ImVec4( 1.0f, 0.5f, 0.3f, 1.0f ) : ImVec4( 0.80f, 0.80f, 0.82f, 1.0f );
 		ImGui::TextColored( tCol, "Temp     : %u C", gpu.tempC );
-		if ( gpu.powerLimitW > 0 ) {
-			ImGui::Text( "Power    : %u / %u W", gpu.powerW, gpu.powerLimitW );
+		if ( vkTelemetryPowerLimitW > 0 ) {
+			ImGui::Text( "Power    : %u / %u W", gpu.powerW, vkTelemetryPowerLimitW );
 		} else {
 			ImGui::Text( "Power    : %u W", gpu.powerW );
 		}
@@ -9333,8 +9399,8 @@ void VulkanBackend::DrawDebugHud() {
 	} else {
 		ImGui::TextDisabled( "VRAM app : VMA budget N/A" );
 	}
-	if ( gpu.available && gpu.memTotalMB > 0 ) {
-		ImGui::Text( "VRAM GPU : %llu / %llu MB", (unsigned long long)gpu.memUsedMB, (unsigned long long)gpu.memTotalMB );
+	if ( haveGpu && vkTelemetryMemTotalMB > 0 ) {
+		ImGui::Text( "VRAM GPU : %llu / %llu MB", (unsigned long long)vkTelemetryMemUsedMB, (unsigned long long)vkTelemetryMemTotalMB );
 	}
 	if ( hostUsed > 0 ) {
 		ImGui::Text( "Host mem : %.0f MB", (double)hostUsed / ( 1024.0 * 1024.0 ) );
