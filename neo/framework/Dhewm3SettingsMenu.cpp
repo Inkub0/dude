@@ -3497,6 +3497,14 @@ static void DrawDbgGroup_RenderDebugging()
 	}
 	AddTooltip( "When enabled, writes a dudelog-crash-YYYYMMDD-HHMMSS.txt on device-lost events. Enable only when debugging driver resets." );
 
+	// Deep-dive debug HUD overlay (Vulkan only): live GPU clock/temp/power, VRAM and validation errors.
+	bool vkDebugHud = cvarSystem->GetCVarBool( "r_vkDebugHud" );
+	if ( ImGui::Checkbox( "Show Vulkan Deep-Dive HUD (GPU clock/temp/VRAM/errors)", &vkDebugHud ) ) {
+		cvarSystem->SetCVarBool( "r_vkDebugHud", vkDebugHud );
+	}
+	AddTooltip( "Always-on overlay with live GPU clock/temp/power (NVIDIA), VRAM usage and validation-error count. "
+		"The clock turns amber/red as it climbs toward the boost range — useful for telling a hardware/driver reset apart from a code fault." );
+
 	// Manual renderer restart: explicit user-driven restart is safer than an automatic in-process device re-create.
 	if ( ImGui::Button( "Restart Renderer (manual vid_restart)" ) ) {
 		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "vid_restart\n" );

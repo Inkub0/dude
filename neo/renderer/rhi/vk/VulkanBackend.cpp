@@ -57,6 +57,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #endif
 
 #include <vector>
+#include <mutex>
+#include <ctime>
 
 #include <unordered_map>
 
@@ -69,7 +71,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "ffx_fsr2.h"						// vendored FidelityFX FSR2 (docs/fsr-temporal-pipeline.md, R1)
 #include "vk/ffx_fsr2_vk.h"					// FSR2 Vulkan backend init (against our VkDevice)
 #include "framework/CmdSystem.h"              // cmdSystem for registering console commands
-#include "sys/posix/posix_public.h"             // Posix_GetSavePath() declaration (save path)
+#include "sys/sys_public.h"                     // Sys_DLL_Load (portable NVML load), Sys_Milliseconds
 
 // auto-reactive mask flags (R1/D): CPU/shader ABI values from the vendored
 // shaders/ffx_fsr2_resources.h (a GLSL-shared header the C API doesn't re-export)
@@ -109,6 +111,11 @@ static idCVar r_vkGpuTime( "r_vkGpuTime", "0", CVAR_RENDERER | CVAR_BOOL,
 // file into the save path when a device-lost occurs.
 static idCVar r_vkCrashLogging( "r_vkCrashLogging", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL,
 	"Vulkan: enable on-disk crash logging when device lost occurs (dev tool)" );
+
+// Deep-dive debug HUD overlay: GPU clock/temp/power (NVML), VRAM (VMA), validation errors +
+// recent messages. Archived so it survives a vid_restart while hunting a device-loss.
+static idCVar r_vkDebugHud( "r_vkDebugHud", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL,
+	"Vulkan: deep-dive debug HUD overlay (GPU clock/temp/power, VRAM, validation errors)" );
 
 static idCVar r_vkComputeTest( "r_vkComputeTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: run the compute-lane self-test (dispatch a kernel doubling a storage buffer, read back, verify) and print PASS/FAIL. Set to 1 to trigger (docs/gpu-offload-plan.md Phase 1)" );
@@ -892,6 +899,7 @@ public:
 	void						ImGuiShutdown();
 	bool						ImGuiUp() const { return imguiUp; }
 	void						ImGuiSetDrawData( void *dd ) { imguiDrawData = dd; }
+	void						DrawDebugHud();			// r_vkDebugHud overlay (telemetry / VRAM / errors)
 private:
 	bool						CreateImGuiTargets();	// pass + per-swap-image views/framebuffers
 	void						DestroyImGuiTargets();
@@ -916,51 +924,51 @@ static char vkVersionStr[128];
 
 static int vkValidationErrors = 0;
 
-// Whether a device-lost has been observed and a crash dump already emitted in this session.
-// Prevents repeated attempts to write the same crash dump and helps gate further handling.
+// Set the moment vkCheck sees VK_ERROR_DEVICE_LOST (independent of crash logging) so the
+// per-frame dead-device guards engage by default; cleared in Init() so vid_restart recovers.
 static bool vkDeviceDead = false;
 
-// Keep a short history of recent validation / debug messages so the crash dump can include them.
+// Once-only guard for the on-disk device-lost dump. Decoupled from vkDeviceDead so the
+// mitigation (guards) and the diagnostic (dump) never gate each other. Reset in Init().
+static bool vkCrashDumpWritten = false;
+
+// Short ring of recent validation / debug messages for the crash dump and the debug HUD.
+// Guarded by vkDebugMsgMutex: the debug-utils callback can run off the main thread while
+// the HUD / dump reads it.
 static const int VK_DEBUG_MSG_HISTORY = 64;
 static std::vector<idStr> vkDebugMsgHistory;
+static std::mutex vkDebugMsgMutex;
 
 /*
 ====================
-vkCheck
+WriteVulkanCrashDumpBody
+
+Best-effort, CPU-only crash dump written into fs_savepath. Avoids every Vulkan call (the
+device may be lost) and uses a portable save-path lookup (no Posix_* — this TU is also
+compiled for the Windows cross-build). `suffix` distinguishes the forced dump's filename.
 ====================
 */
-// Write a small CPU-only crash dump next to dudelog.txt. Best-effort only: avoid any Vulkan
-// calls here (device may be lost). Respects r_vkCrashLogging. Uses Posix_GetSavePath() for the
-// destination directory.
-static void WriteVulkanCrashDump( const char *what, VkResult res ) {
-	// Default behavior: only write when opt-in is enabled.
-	if ( !r_vkCrashLogging.GetBool() ) {
-		return;
-	}
-	if ( !r_vkCrashLogging.GetBool() ) {
-		return;
-	}
-	// guard: only emit once per session
-	if ( vkDeviceDead ) {
-		return;
-	}
-
-	const char *savePath = Posix_GetSavePath();
+static void WriteVulkanCrashDumpBody( const char *what, VkResult res, const char *suffix ) {
+	const char *savePath = cvarSystem->GetCVarString( "fs_savepath" );
 	if ( savePath == NULL || savePath[0] == '\0' ) {
 		return;
 	}
 
-	// timestamp
 	time_t now = time( NULL );
-	struct tm tmnow;
-	localtime_r( &now, &tmnow );
+	// one-shot crash path: plain localtime()'s static buffer is fine here, and it sidesteps
+	// the localtime_r (POSIX) vs localtime_s (Win) signature split for the cross-build.
+	struct tm *tmnow = localtime( &now );
 	char timestr[64];
-	idStr::snPrintf( timestr, sizeof(timestr), "%04d%02d%02d-%02d%02d%02d",
-			tmnow.tm_year + 1900, tmnow.tm_mon + 1, tmnow.tm_mday,
-			tmnow.tm_hour, tmnow.tm_min, tmnow.tm_sec );
+	if ( tmnow != NULL ) {
+		idStr::snPrintf( timestr, sizeof(timestr), "%04d%02d%02d-%02d%02d%02d",
+				tmnow->tm_year + 1900, tmnow->tm_mon + 1, tmnow->tm_mday,
+				tmnow->tm_hour, tmnow->tm_min, tmnow->tm_sec );
+	} else {
+		idStr::Copynz( timestr, "unknown-time", sizeof( timestr ) );
+	}
 
 	char fname[1024];
-	idStr::snPrintf( fname, sizeof(fname), "%s/dudelog-crash-%s.txt", savePath, timestr );
+	idStr::snPrintf( fname, sizeof(fname), "%s/dudelog-crash-%s%s.txt", savePath, timestr, suffix ? suffix : "" );
 
 	FILE *f = fopen( fname, "w" );
 	if ( !f ) {
@@ -974,11 +982,11 @@ static void WriteVulkanCrashDump( const char *what, VkResult res ) {
 	fprintf( f, "VkResult: %d\n\n", (int)res );
 
 	// Static / global runtime state we can safely gather without calling Vulkan.
-	#ifdef ID_DEDICATED
-		fprintf( f, "Engine build: dedicated\n" );
-	#else
-		fprintf( f, "Engine build: client\n" );
-	#endif
+#ifdef ID_DEDICATED
+	fprintf( f, "Engine build: dedicated\n" );
+#else
+	fprintf( f, "Engine build: client\n" );
+#endif
 	fprintf( f, "glConfig vendor: %s\n", glConfig.vendor_string );
 	fprintf( f, "glConfig renderer: %s\n", glConfig.renderer_string );
 	fprintf( f, "glConfig version: %s\n", glConfig.version_string );
@@ -996,10 +1004,15 @@ static void WriteVulkanCrashDump( const char *what, VkResult res ) {
 	fprintf( f, "  r_fsr2 = %d\n", cvarSystem->GetCVarInteger( "r_fsr2" ) );
 	fprintf( f, "\n" );
 
+	fprintf( f, "Validation errors this session: %d\n\n", vkValidationErrors );
+
 	// Include the last N validation/debug messages collected by the debug callback.
 	fprintf( f, "Recent Vulkan validation/debug messages (newest last):\n" );
-	for ( size_t i = 0; i < vkDebugMsgHistory.size(); ++i ) {
-		fprintf( f, "  %s\n", vkDebugMsgHistory[i].c_str() );
+	{
+		std::lock_guard<std::mutex> lock( vkDebugMsgMutex );
+		for ( size_t i = 0; i < vkDebugMsgHistory.size(); ++i ) {
+			fprintf( f, "  %s\n", vkDebugMsgHistory[i].c_str() );
+		}
 	}
 	fprintf( f, "\n" );
 
@@ -1010,73 +1023,20 @@ static void WriteVulkanCrashDump( const char *what, VkResult res ) {
 
 	fclose( f );
 	common->Printf( "VK: crash dump written to %s\n", fname );
-	vkDeviceDead = true; // mark we've handled it
 }
 
-// Forced variant: write the same crash dump regardless of r_vkCrashLogging and don't mark the device dead.
+// device-lost path: honors the r_vkCrashLogging opt-in and writes at most once per session.
+static void WriteVulkanCrashDump( const char *what, VkResult res ) {
+	if ( !r_vkCrashLogging.GetBool() || vkCrashDumpWritten ) {
+		return;
+	}
+	vkCrashDumpWritten = true;
+	WriteVulkanCrashDumpBody( what, res, NULL );
+}
+
+// forced (vk_dump_state console cmd): always writes a snapshot, regardless of the opt-in.
 static void WriteVulkanCrashDumpForced( const char *what, VkResult res ) {
-	const char *savePath = Posix_GetSavePath();
-	if ( savePath == NULL || savePath[0] == '\0' ) {
-		return;
-	}
-
-	// timestamp
-	time_t now = time( NULL );
-	struct tm tmnow;
-	localtime_r( &now, &tmnow );
-	char timestr[64];
-	idStr::snPrintf( timestr, sizeof(timestr), "%04d%02d%02d-%02d%02d%02d",
-			tmnow.tm_year + 1900, tmnow.tm_mon + 1, tmnow.tm_mday,
-			tmnow.tm_hour, tmnow.tm_min, tmnow.tm_sec );
-
-	char fname[1024];
-	idStr::snPrintf( fname, sizeof(fname), "%s/dudelog-crash-%s-forced.txt", savePath, timestr );
-
-	FILE *f = fopen( fname, "w" );
-	if ( !f ) {
-		common->Warning( "VK: failed to open forced crash dump file '%s' for writing", fname );
-		return;
-	}
-
-	fprintf( f, "DUDE Vulkan forced crash dump\n" );
-	fprintf( f, "Timestamp: %s\n", timestr );
-	fprintf( f, "Event: %s\n", what ? what : "(null)" );
-	fprintf( f, "VkResult: %d\n\n", (int)res );
-
-	#ifdef ID_DEDICATED
-		fprintf( f, "Engine build: dedicated\n" );
-	#else
-		fprintf( f, "Engine build: client\n" );
-	#endif
-	fprintf( f, "glConfig vendor: %s\n", glConfig.vendor_string );
-	fprintf( f, "glConfig renderer: %s\n", glConfig.renderer_string );
-	fprintf( f, "glConfig version: %s\n", glConfig.version_string );
-	fprintf( f, "glConfig maxTextureSize: %d\n", glConfig.maxTextureSize );
-	fprintf( f, "Estimated VRAM (glConfig.vidMemMB): %d MB\n\n", glConfig.vidMemMB );
-
-	fprintf( f, "CVar snapshot:\n" );
-	fprintf( f, "  r_vkValidation = %d\n", r_vkValidation.GetInteger() );
-	fprintf( f, "  r_vkCrashLogging = %d\n", r_vkCrashLogging.GetInteger() );
-	fprintf( f, "  r_hdr = %d\n", r_hdr.GetInteger() );
-	fprintf( f, "  r_shadows = %d\n", r_shadows.GetInteger() );
-	fprintf( f, "  r_ssr = %d\n", cvarSystem->GetCVarInteger( "r_ssr" ) );
-	fprintf( f, "  r_ssao = %d\n", cvarSystem->GetCVarInteger( "r_ssao" ) );
-	fprintf( f, "  r_fsr2 = %d\n", cvarSystem->GetCVarInteger( "r_fsr2" ) );
-	fprintf( f, "\n" );
-
-	fprintf( f, "Recent Vulkan validation/debug messages (newest last):\n" );
-	for ( size_t i = 0; i < vkDebugMsgHistory.size(); ++i ) {
-		fprintf( f, "  %s\n", vkDebugMsgHistory[i].c_str() );
-	}
-	fprintf( f, "\n" );
-
-	fprintf( f, "Notes:\n" );
-	fprintf( f, "  - This is a CPU-only best-effort dump. Vulkan objects are not queried because the device may be lost.\n" );
-	fprintf( f, "  - For vendor-specific details (Xid on NVIDIA / GPU hang reason) check kernel logs: dmesg or journalctl -k.\n" );
-	fprintf( f, "  - Re-run with r_vkValidation=1 and r_vkCrashLogging=1 to capture more validation messages next time.\n" );
-
-	fclose( f );
-	common->Printf( "VK: forced crash dump written to %s\n", fname );
+	WriteVulkanCrashDumpBody( what, res, "-forced" );
 }
 
 
@@ -1095,9 +1055,12 @@ static bool vkCheck( VkResult res, const char *what ) {
 	}
 	common->Warning( "VK: %s failed (VkResult %d)", what, (int)res );
 
-	// Detect a device-lost and emit a crash dump (best-effort, CPU-only). Avoid repeating.
+	// A device-lost is terminal: mark the device dead so the per-frame guards stop issuing
+	// Vulkan calls (this IS the mitigation, and it must engage regardless of crash logging),
+	// then emit a best-effort dump if the user opted in.
 	if ( res == VK_ERROR_DEVICE_LOST ) {
 		WriteVulkanCrashDump( what, res );
+		vkDeviceDead = true;
 	}
 	return false;
 }
@@ -1124,8 +1087,10 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
 		common->Warning( "VK %s: %s", loaderMsg ? "loader" : "validation", data->pMessage );
 	}
 
-	// Append to the in-memory history for later inclusion in crash dumps. Keep the ring bounded.
+	// Append to the in-memory history for the crash dump / debug HUD. Keep the ring bounded.
+	// Locked: this callback can run off the main thread while the HUD reads the ring.
 	if ( data->pMessage ) {
+		std::lock_guard<std::mutex> lock( vkDebugMsgMutex );
 		if ( vkDebugMsgHistory.size() >= VK_DEBUG_MSG_HISTORY ) {
 			vkDebugMsgHistory.erase( vkDebugMsgHistory.begin() );
 		}
@@ -2118,6 +2083,14 @@ bool VulkanBackend::Init() {
 		return true;
 	}
 	vkValidationErrors = 0;
+	// Clear any device-lost latch from a previous session so a vid_restart after a device
+	// loss actually recovers (BeginFrame/EndFrame/etc. bail while vkDeviceDead is set).
+	vkDeviceDead = false;
+	vkCrashDumpWritten = false;
+	{
+		std::lock_guard<std::mutex> lock( vkDebugMsgMutex );
+		vkDebugMsgHistory.clear();
+	}
 
 	if ( !CreateInstance() || !PickPhysicalDevice() || !CreateDeviceAndVma() ) {
 		Shutdown();
@@ -6793,24 +6766,20 @@ int VulkanBackend::ClampTargetSize( int size, const char *kind, bool cube ) cons
 	if ( size <= 0 ) {
 		return 1;
 	}
-	int limit = 4096;
-	if ( cube ) {
-		if ( physProps.limits.maxImageDimensionCube > 0 ) {
-			limit = (int)physProps.limits.maxImageDimensionCube;
-		}
-	} else if ( physProps.limits.maxImageDimension2D > 0 ) {
-		limit = (int)physProps.limits.maxImageDimension2D;
-	}
+	// Clamp to the actual device limit only. Exceeding maxImageDimension is guaranteed-invalid
+	// usage (a validation-error / device-lost path), so that is the real safety bound. Do NOT
+	// impose an arbitrary lower ceiling: color targets are screen-sized and a hard 4096 cap
+	// would squish the scene on high-res / ultrawide displays (this class of GPU reports far
+	// more than 4096, e.g. 16384-32768).
+	int limit = cube ? (int)physProps.limits.maxImageDimensionCube
+	                 : (int)physProps.limits.maxImageDimension2D;
 	if ( limit < 1 ) {
-		limit = 4096;
-	}
-	if ( limit > 4096 ) {
-		limit = 4096;
+		limit = 16384; // defensive fallback if the driver reported nothing
 	}
 	if ( size <= limit ) {
 		return size;
 	}
-	common->Warning( "VK: %s size %d exceeds the safe cap %d for this driver; clamping to %d to avoid a device-lost / invalid-usage path",
+	common->Warning( "VK: %s size %d exceeds the device limit %d; clamping to %d to avoid an invalid-usage / device-lost path",
 		kind, size, limit, limit );
 	return limit;
 }
@@ -9178,6 +9147,231 @@ bool VK_ImGuiInit() {
 void VK_ImGuiShutdown() {
 	vkBackend.ImGuiShutdown();
 }
+// ---------------------------------------------------------------------------
+// Deep-dive debug HUD (r_vkDebugHud) + optional NVIDIA telemetry via NVML.
+//
+// NVML (libnvidia-ml) is loaded lazily and is entirely optional: on non-NVIDIA
+// GPUs, or when the library isn't installed, every field reads back "unavailable"
+// and the HUD shows N/A. It is the boost-clock / thermal / power canary the
+// device-loss hunt needs — Vulkan itself exposes none of those.
+// ---------------------------------------------------------------------------
+struct VkGpuTelemetry {
+	bool               available = false;   // NVML loaded + device handle obtained
+	unsigned           smClockMHz = 0;
+	unsigned           memClockMHz = 0;
+	unsigned           tempC = 0;
+	unsigned           powerW = 0;          // instantaneous board draw (rounded)
+	unsigned           powerLimitW = 0;
+	unsigned long long memUsedMB = 0;
+	unsigned long long memTotalMB = 0;
+};
+
+// NVML entry points we use (subset). Typedef'd locally so we don't need the NVML SDK headers.
+typedef int ( *PFN_nvmlInit )( void );                                // nvmlInit_v2
+typedef int ( *PFN_nvmlDeviceGetHandleByIndex )( unsigned, void ** ); // _v2
+typedef int ( *PFN_nvmlDeviceGetClockInfo )( void *, int, unsigned * );
+typedef int ( *PFN_nvmlDeviceGetTemperature )( void *, int, unsigned * );
+typedef int ( *PFN_nvmlDeviceGetPowerUsage )( void *, unsigned * );
+typedef int ( *PFN_nvmlDeviceGetEnforcedPowerLimit )( void *, unsigned * );
+typedef int ( *PFN_nvmlDeviceGetMemoryInfo )( void *, void * );
+
+static struct NvmlApi {
+	bool      tried = false;
+	uintptr_t lib = 0;
+	void     *dev = NULL;
+	PFN_nvmlInit                        Init = NULL;
+	PFN_nvmlDeviceGetHandleByIndex      GetHandle = NULL;
+	PFN_nvmlDeviceGetClockInfo          GetClock = NULL;
+	PFN_nvmlDeviceGetTemperature        GetTemp = NULL;
+	PFN_nvmlDeviceGetPowerUsage         GetPower = NULL;
+	PFN_nvmlDeviceGetEnforcedPowerLimit GetPowerLimit = NULL;
+	PFN_nvmlDeviceGetMemoryInfo         GetMem = NULL;
+} nvml;
+
+static bool NvmlEnsure() {
+	if ( nvml.tried ) {
+		return nvml.dev != NULL;
+	}
+	nvml.tried = true; // only attempt to load once per session
+
+#ifdef _WIN32
+	nvml.lib = Sys_DLL_Load( "nvml.dll" );
+#else
+	nvml.lib = Sys_DLL_Load( "libnvidia-ml.so.1" );
+	if ( !nvml.lib ) {
+		nvml.lib = Sys_DLL_Load( "libnvidia-ml.so" );
+	}
+#endif
+	if ( !nvml.lib ) {
+		return false; // not an NVIDIA setup, or the management lib isn't installed
+	}
+
+	nvml.Init          = (PFN_nvmlInit)                        Sys_DLL_GetProcAddress( nvml.lib, "nvmlInit_v2" );
+	nvml.GetHandle     = (PFN_nvmlDeviceGetHandleByIndex)      Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetHandleByIndex_v2" );
+	nvml.GetClock      = (PFN_nvmlDeviceGetClockInfo)          Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetClockInfo" );
+	nvml.GetTemp       = (PFN_nvmlDeviceGetTemperature)        Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetTemperature" );
+	nvml.GetPower      = (PFN_nvmlDeviceGetPowerUsage)         Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetPowerUsage" );
+	nvml.GetPowerLimit = (PFN_nvmlDeviceGetEnforcedPowerLimit) Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetEnforcedPowerLimit" );
+	nvml.GetMem        = (PFN_nvmlDeviceGetMemoryInfo)         Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetMemoryInfo" );
+
+	if ( !nvml.Init || !nvml.GetHandle || nvml.Init() != 0 /*NVML_SUCCESS==0*/ ) {
+		return false;
+	}
+	if ( nvml.GetHandle( 0, &nvml.dev ) != 0 || nvml.dev == NULL ) {
+		nvml.dev = NULL;
+		return false;
+	}
+	return true;
+}
+
+// Poll NVML into `out`, throttled to ~2 Hz (NVML queries have real latency). Returns availability.
+static bool VkPollGpuTelemetry( VkGpuTelemetry &out ) {
+	static VkGpuTelemetry cached;
+	static unsigned int   lastMs = 0;
+	static bool           have = false;
+
+	if ( !NvmlEnsure() ) {
+		out = VkGpuTelemetry();
+		return false;
+	}
+
+	unsigned int now = Sys_Milliseconds();
+	if ( have && ( now - lastMs ) < 500 ) {
+		out = cached;
+		return true;
+	}
+	lastMs = now;
+	have = true;
+
+	VkGpuTelemetry t;
+	t.available = true;
+	unsigned v = 0;
+	if ( nvml.GetClock      && nvml.GetClock( nvml.dev, 1 /*SM*/, &v ) == 0 )  { t.smClockMHz = v; }
+	if ( nvml.GetClock      && nvml.GetClock( nvml.dev, 2 /*MEM*/, &v ) == 0 ) { t.memClockMHz = v; }
+	if ( nvml.GetTemp       && nvml.GetTemp( nvml.dev, 0 /*GPU*/, &v ) == 0 )  { t.tempC = v; }
+	if ( nvml.GetPower      && nvml.GetPower( nvml.dev, &v ) == 0 )            { t.powerW = ( v + 500 ) / 1000; }
+	if ( nvml.GetPowerLimit && nvml.GetPowerLimit( nvml.dev, &v ) == 0 )       { t.powerLimitW = ( v + 500 ) / 1000; }
+	if ( nvml.GetMem ) {
+		// nvmlMemory_t (v1) = { unsigned long long total, free, used }; over-size the buffer defensively.
+		unsigned long long mem[8] = { 0 };
+		if ( nvml.GetMem( nvml.dev, mem ) == 0 ) {
+			t.memTotalMB = mem[0] / ( 1024ull * 1024ull );
+			t.memUsedMB  = mem[2] / ( 1024ull * 1024ull );
+		}
+	}
+	cached = t;
+	out = t;
+	return true;
+}
+
+void VulkanBackend::DrawDebugHud() {
+#ifndef IMGUI_DISABLE
+	// VRAM from VMA's per-heap budget; sum device-local heaps for the "app VRAM" figure.
+	uint64_t vramUsed = 0, vramBudget = 0, hostUsed = 0;
+	if ( vma != NULL && physical != VK_NULL_HANDLE ) {
+		VkPhysicalDeviceMemoryProperties mp;
+		vkGetPhysicalDeviceMemoryProperties( physical, &mp );
+		VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+		vmaGetHeapBudgets( vma, budgets );
+		for ( uint32_t i = 0; i < mp.memoryHeapCount; ++i ) {
+			if ( mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ) {
+				vramUsed   += budgets[i].usage;
+				vramBudget += budgets[i].budget;
+			} else {
+				hostUsed   += budgets[i].usage;
+			}
+		}
+	}
+
+	VkGpuTelemetry gpu;
+	VkPollGpuTelemetry( gpu );
+
+	ImGui::SetNextWindowPos( ImVec2( 12.0f, 12.0f ), ImGuiCond_Always );
+	ImGui::SetNextWindowBgAlpha( 0.72f );
+	ImGui::SetNextWindowSizeConstraints( ImVec2( 250.0f, 0.0f ), ImVec2( 560.0f, 10000.0f ) );
+	const int flags = ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoDecoration
+		| ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing;
+	if ( !ImGui::Begin( "VkDebugHud", NULL, flags ) ) {
+		ImGui::End();
+		return;
+	}
+
+	ImGui::TextUnformatted( "VULKAN DEEP-DIVE" );
+	ImGui::SameLine();
+	if ( vkDeviceDead ) {
+		ImGui::TextColored( ImVec4( 1.0f, 0.30f, 0.30f, 1.0f ), "DEVICE LOST" );
+	} else {
+		ImGui::TextColored( ImVec4( 0.40f, 0.90f, 0.45f, 1.0f ), "device OK" );
+	}
+	ImGui::Separator();
+
+	// --- GPU canary (NVML): clock coloured as it climbs toward the boost danger zone ---
+	if ( gpu.available ) {
+		ImVec4 clkCol( 0.55f, 0.95f, 0.55f, 1.0f );
+		if ( gpu.smClockMHz >= 1900 )      clkCol = ImVec4( 1.0f, 0.45f, 0.30f, 1.0f );
+		else if ( gpu.smClockMHz >= 1700 ) clkCol = ImVec4( 1.0f, 0.85f, 0.35f, 1.0f );
+		ImGui::TextColored( clkCol, "SM clock : %u MHz", gpu.smClockMHz );
+		ImGui::Text( "Mem clock: %u MHz", gpu.memClockMHz );
+		ImVec4 tCol = ( gpu.tempC >= 83 ) ? ImVec4( 1.0f, 0.5f, 0.3f, 1.0f ) : ImVec4( 0.80f, 0.80f, 0.82f, 1.0f );
+		ImGui::TextColored( tCol, "Temp     : %u C", gpu.tempC );
+		if ( gpu.powerLimitW > 0 ) {
+			ImGui::Text( "Power    : %u / %u W", gpu.powerW, gpu.powerLimitW );
+		} else {
+			ImGui::Text( "Power    : %u W", gpu.powerW );
+		}
+	} else {
+		ImGui::TextDisabled( "GPU clock/temp/power: NVML N/A" );
+	}
+	ImGui::Separator();
+
+	// --- VRAM (VMA app view + NVML whole-GPU view) ---
+	if ( vramBudget > 0 ) {
+		const double usedMB = (double)vramUsed   / ( 1024.0 * 1024.0 );
+		const double budMB  = (double)vramBudget / ( 1024.0 * 1024.0 );
+		ImGui::Text( "VRAM app : %.0f / %.0f MB", usedMB, budMB );
+		ImGui::ProgressBar( (float)( (double)vramUsed / (double)vramBudget ), ImVec2( 210.0f, 0.0f ) );
+	} else {
+		ImGui::TextDisabled( "VRAM app : VMA budget N/A" );
+	}
+	if ( gpu.available && gpu.memTotalMB > 0 ) {
+		ImGui::Text( "VRAM GPU : %llu / %llu MB", (unsigned long long)gpu.memUsedMB, (unsigned long long)gpu.memTotalMB );
+	}
+	if ( hostUsed > 0 ) {
+		ImGui::Text( "Host mem : %.0f MB", (double)hostUsed / ( 1024.0 * 1024.0 ) );
+	}
+	ImGui::Separator();
+
+	// --- Validation errors + recent messages ---
+	const int errors = vkValidationErrors;
+	ImVec4 eCol = ( errors > 0 ) ? ImVec4( 1.0f, 0.5f, 0.3f, 1.0f ) : ImVec4( 0.40f, 0.90f, 0.45f, 1.0f );
+	ImGui::TextColored( eCol, "Validation errors: %d", errors );
+	{
+		std::lock_guard<std::mutex> lock( vkDebugMsgMutex );
+		const size_t n = vkDebugMsgHistory.size();
+		if ( n == 0 ) {
+			ImGui::TextDisabled( "no validation/debug messages" );
+		} else {
+			const size_t showN = ( n < 4 ) ? n : 4;
+			for ( size_t i = n - showN; i < n; ++i ) {
+				char buf[120];
+				idStr::Copynz( buf, vkDebugMsgHistory[i].c_str(), sizeof( buf ) );
+				ImGui::TextColored( ImVec4( 0.82f, 0.78f, 0.60f, 1.0f ), "- %s", buf );
+			}
+		}
+	}
+
+	ImGui::End();
+#endif
+}
+
+void VK_ImGuiDrawDebugHud() {
+#ifndef IMGUI_DISABLE
+	if ( vkBackend.ImGuiUp() ) {
+		vkBackend.DrawDebugHud();
+	}
+#endif
+}
+
 void VK_ImGuiNewFrame() {
 #ifndef IMGUI_DISABLE
 	if ( vkBackend.ImGuiUp() ) {

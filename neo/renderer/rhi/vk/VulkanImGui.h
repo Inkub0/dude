@@ -34,6 +34,10 @@ void VK_ImGuiNewFrame();
 // it until the next NewFrame).
 void VK_ImGuiSetDrawData( void *imDrawData );
 
+// Draw the deep-dive debug HUD overlay (r_vkDebugHud) into the current ImGui
+// frame: GPU clock/temp/power (NVML), VRAM (VMA), validation errors + messages.
+void VK_ImGuiDrawDebugHud();
+
 } // namespace rhi
 
 #endif /* !__VULKANIMGUI_H__ */
