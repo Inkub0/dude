@@ -3489,6 +3489,28 @@ static void DrawDbgGroup_RenderDebugging()
 		"On opengl3/Vulkan with Shadow Mapping enabled, shadows come from the shadow maps below instead, "
 		"so this only affects the stencil path." );
 
+	// Vulkan crash logging (opt-in) - writes a dudelog-crash-YYYYMMDD-HHMMSS.txt next to dudelog.txt
+	// when a VK_ERROR_DEVICE_LOST is detected by the backend. Default OFF.
+	bool vkCrashLog = cvarSystem->GetCVarBool( "r_vkCrashLogging" );
+	if ( ImGui::Checkbox( "Enable Vulkan Crash Logging (write crash dumps)", &vkCrashLog ) ) {
+		cvarSystem->SetCVarBool( "r_vkCrashLogging", vkCrashLog );
+	}
+	AddTooltip( "When enabled, writes a dudelog-crash-YYYYMMDD-HHMMSS.txt on device-lost events. Enable only when debugging driver resets." );
+
+	// Deep-dive debug HUD overlay (Vulkan only): live GPU clock/temp/power, VRAM and validation errors.
+	bool vkDebugHud = cvarSystem->GetCVarBool( "r_vkDebugHud" );
+	if ( ImGui::Checkbox( "Show Vulkan Deep-Dive HUD (GPU clock/temp/VRAM/errors)", &vkDebugHud ) ) {
+		cvarSystem->SetCVarBool( "r_vkDebugHud", vkDebugHud );
+	}
+	AddTooltip( "Always-on overlay with live GPU clock/temp/power (NVIDIA), VRAM usage and validation-error count. "
+		"The clock turns amber/red as it climbs toward the boost range — useful for telling a hardware/driver reset apart from a code fault." );
+
+	// Manual renderer restart: explicit user-driven restart is safer than an automatic in-process device re-create.
+	if ( ImGui::Button( "Restart Renderer (manual vid_restart)" ) ) {
+		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "vid_restart\n" );
+	}
+	AddTooltip( "Explicitly restart the renderer. Use this to recover after a device-lost or to apply backend changes." );
+
 	ImGui::Spacing();
 }
 

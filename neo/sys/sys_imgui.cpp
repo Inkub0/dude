@@ -381,11 +381,21 @@ void NewFrame()
 		EndFrame();
 	}
 
+	// An always-on overlay (the Vulkan deep-dive HUD, r_vkDebugHud) must keep the ImGui frame
+	// running even when no interactive window is open. It draws with NoInputs, so it never
+	// grabs the cursor or captures input (openImguiWindows stays 0 → ProcessEvent still bails).
+	bool wantAlwaysOnOverlay = false;
+#ifdef DHEWM3_VULKAN
+	if ( useVulkanBackend && cvarSystem->GetCVarBool( "r_vkDebugHud" ) ) {
+		wantAlwaysOnOverlay = true;
+	}
+#endif
+
 	// even if all windows are closed, still run a few frames
 	// so ImGui also recognizes internally that all windows are closed
 	// and e.g. ImGuiCond_Appearing works as intended
 	static int framesAfterAllWindowsClosed = 0;
-	if ( openImguiWindows == 0 ) {
+	if ( openImguiWindows == 0 && !wantAlwaysOnOverlay ) {
 		if ( framesAfterAllWindowsClosed > 1 )
 			return;
 		else
@@ -426,6 +436,12 @@ void NewFrame()
 	haveNewFrame = true;
 
 	UpdateWarningOverlay();
+
+#ifdef DHEWM3_VULKAN
+	if ( wantAlwaysOnOverlay ) {
+		rhi::VK_ImGuiDrawDebugHud();
+	}
+#endif
 
 	if (openImguiWindows & D3_ImGuiWin_Settings) {
 		Com_DrawDhewm3SettingsMenu();

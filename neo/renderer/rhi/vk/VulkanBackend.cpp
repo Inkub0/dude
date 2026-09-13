@@ -57,6 +57,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #endif
 
 #include <vector>
+#include <mutex>
+#include <ctime>
 
 #include <unordered_map>
 
@@ -68,6 +70,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "renderer/rhi/vk/VulkanImGui.h"	// M6: ImGui glue (impl at the end of this TU)
 #include "ffx_fsr2.h"						// vendored FidelityFX FSR2 (docs/fsr-temporal-pipeline.md, R1)
 #include "vk/ffx_fsr2_vk.h"					// FSR2 Vulkan backend init (against our VkDevice)
+#include "framework/CmdSystem.h"              // cmdSystem for registering console commands
+#include "sys/sys_public.h"                     // Sys_DLL_Load (portable NVML load), Sys_Milliseconds
 
 // auto-reactive mask flags (R1/D): CPU/shader ABI values from the vendored
 // shaders/ffx_fsr2_resources.h (a GLSL-shared header the C API doesn't re-export)
@@ -102,6 +106,17 @@ static idCVar r_vkDumpNextFrame( "r_vkDumpNextFrame", "0", CVAR_RENDERER | CVAR_
 static idCVar r_vkGpuTime( "r_vkGpuTime", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: print GPU frame time (ms), averaged once per second" );
 
+// Enable writing on-disk crash logs when a fatal Vulkan event (eg. VK_ERROR_DEVICE_LOST)
+// is observed. Default OFF; opt-in dev tool that writes a dudelog-crash-YYYYMMDD-HHMMSS.txt
+// file into the save path when a device-lost occurs.
+static idCVar r_vkCrashLogging( "r_vkCrashLogging", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL,
+	"Vulkan: enable on-disk crash logging when device lost occurs (dev tool)" );
+
+// Deep-dive debug HUD overlay: GPU clock/temp/power (NVML), VRAM (VMA), validation errors +
+// recent messages. Archived so it survives a vid_restart while hunting a device-loss.
+static idCVar r_vkDebugHud( "r_vkDebugHud", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL,
+	"Vulkan: deep-dive debug HUD overlay (GPU clock/temp/power, VRAM, validation errors)" );
+
 static idCVar r_vkComputeTest( "r_vkComputeTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: run the compute-lane self-test (dispatch a kernel doubling a storage buffer, read back, verify) and print PASS/FAIL. Set to 1 to trigger (docs/gpu-offload-plan.md Phase 1)" );
 static idCVar r_fsr2Test( "r_fsr2Test", "0", CVAR_RENDERER | CVAR_BOOL,
@@ -125,6 +140,21 @@ static idCVar r_vkBdaVerbose( "r_vkBdaVerbose", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: print the r_vkBdaZfill firing counter once/sec (per-draw / batched / fell-back) to confirm the BDA z-fill path is live. Diagnostic only, off by default so enabling the offload doesn't chatter to the console." );
 
 namespace rhi {
+
+// Forward declarations for the crash-dump helpers implemented later in this TU.
+static void WriteVulkanCrashDump( const char *what, VkResult res );
+static void WriteVulkanCrashDumpForced( const char *what, VkResult res );
+static void VkSampleTelemetry();		// advance the NVML telemetry ring (impl near the debug HUD)
+
+// Console command: force a CPU-only crash dump to disk. Useful to manually capture engine
+// state without waiting for an actual device-lost. Usage: vk_dump_state [label]
+static void Vk_ForceCrashDump_f( const idCmdArgs &args ) {
+	const char *label = ( args.Argc() > 1 ) ? args.Argv(1) : "manual";
+	char what[256];
+	idStr::snPrintf( what, sizeof(what), "Console-forced dump: %s", label );
+	WriteVulkanCrashDumpForced( what, VK_SUCCESS );
+}
+
 
 static const int FRAMES_IN_FLIGHT = 2;
 
@@ -621,7 +651,8 @@ private:
 			? &targetTable[h - 1] : NULL;
 	}
 	int				AllocTargetSlot();			// index of a free targetTable slot (grows the table if needed)
-	bool			CreateDepthTarget( RenderTarget &t, int w, int h, bool cube );
+	int			ClampTargetSize( int size, const char *kind, bool cube = false ) const;
+	bool		CreateDepthTarget( RenderTarget &t, int w, int h, bool cube );
 	// color target: colorCount 1-3 sampleable color attachments (colorFmt, or per-attachment
 	// via mrtFormats for the mixed 3-MRT velocity gbuffer), plus a depth-stencil attachment
 	// when wantDepthStencil. frameCapable builds the extra load/clearDS pass variants a
@@ -869,6 +900,7 @@ public:
 	void						ImGuiShutdown();
 	bool						ImGuiUp() const { return imguiUp; }
 	void						ImGuiSetDrawData( void *dd ) { imguiDrawData = dd; }
+	void						DrawDebugHud();			// r_vkDebugHud overlay (telemetry / VRAM / errors)
 private:
 	bool						CreateImGuiTargets();	// pass + per-swap-image views/framebuffers
 	void						DestroyImGuiTargets();
@@ -893,16 +925,193 @@ static char vkVersionStr[128];
 
 static int vkValidationErrors = 0;
 
+// Set the moment vkCheck sees VK_ERROR_DEVICE_LOST (independent of crash logging) so the
+// per-frame dead-device guards engage by default; cleared in Init() so vid_restart recovers.
+static bool vkDeviceDead = false;
+
+// Once-only guard for the on-disk device-lost dump. Decoupled from vkDeviceDead so the
+// mitigation (guards) and the diagnostic (dump) never gate each other. Reset in Init().
+static bool vkCrashDumpWritten = false;
+
+// Short ring of recent validation / debug messages for the crash dump and the debug HUD.
+// Guarded by vkDebugMsgMutex: the debug-utils callback can run off the main thread while
+// the HUD / dump reads it.
+static const int VK_DEBUG_MSG_HISTORY = 64;
+static std::vector<idStr> vkDebugMsgHistory;
+static std::mutex vkDebugMsgMutex;
+
+// One GPU telemetry sample. The ring of these is the crash dump's most useful forensic signal:
+// it shows the P-state / clock / power trajectory in the seconds before a device loss, which is
+// exactly what a boost-transition (di/dt) hypothesis needs to confirm. Sampled ~10 Hz in
+// BeginFrame via NVML (implementation lives near the debug HUD at the end of this TU).
+struct VkTelemetrySample {
+	unsigned int       timeMs = 0;      // Sys_Milliseconds() when sampled
+	unsigned           smClockMHz = 0;
+	unsigned           memClockMHz = 0;
+	unsigned           tempC = 0;
+	unsigned           powerW = 0;      // instantaneous board draw (rounded)
+	unsigned           pstate = 32;     // NVML perf state P0..P15 (0 = max); 32 = unknown
+};
+static const int          VK_TELEMETRY_RING = 256;   // ~25 s of history at 10 Hz
+static VkTelemetrySample  vkTelemetryRing[VK_TELEMETRY_RING];
+static int                vkTelemetryHead = 0;        // next write slot
+static int                vkTelemetryCount = 0;
+static unsigned int       vkTelemetryLastMs = 0;
+// slow-changing extras for the HUD's power-limit / VRAM lines (refreshed ~1 Hz)
+static unsigned           vkTelemetryPowerLimitW = 0;
+static unsigned long long vkTelemetryMemUsedMB = 0, vkTelemetryMemTotalMB = 0;
+static unsigned int       vkTelemetryExtraMs = 0;
+
 /*
 ====================
-vkCheck
+WriteVulkanCrashDumpBody
+
+Best-effort, CPU-only crash dump written into fs_savepath. Avoids every Vulkan call (the
+device may be lost) and uses a portable save-path lookup (no Posix_* — this TU is also
+compiled for the Windows cross-build). `suffix` distinguishes the forced dump's filename.
 ====================
 */
+static void WriteVulkanCrashDumpBody( const char *what, VkResult res, const char *suffix ) {
+	const char *savePath = cvarSystem->GetCVarString( "fs_savepath" );
+	if ( savePath == NULL || savePath[0] == '\0' ) {
+		return;
+	}
+
+	time_t now = time( NULL );
+	// one-shot crash path: plain localtime()'s static buffer is fine here, and it sidesteps
+	// the localtime_r (POSIX) vs localtime_s (Win) signature split for the cross-build.
+	struct tm *tmnow = localtime( &now );
+	char timestr[64];
+	if ( tmnow != NULL ) {
+		idStr::snPrintf( timestr, sizeof(timestr), "%04d%02d%02d-%02d%02d%02d",
+				tmnow->tm_year + 1900, tmnow->tm_mon + 1, tmnow->tm_mday,
+				tmnow->tm_hour, tmnow->tm_min, tmnow->tm_sec );
+	} else {
+		idStr::Copynz( timestr, "unknown-time", sizeof( timestr ) );
+	}
+
+	char fname[1024];
+	idStr::snPrintf( fname, sizeof(fname), "%s/dudelog-crash-%s%s.txt", savePath, timestr, suffix ? suffix : "" );
+
+	FILE *f = fopen( fname, "w" );
+	if ( !f ) {
+		common->Warning( "VK: failed to open crash dump file '%s' for writing", fname );
+		return;
+	}
+
+	fprintf( f, "DUDE Vulkan crash dump\n" );
+	fprintf( f, "Timestamp: %s\n", timestr );
+	fprintf( f, "Event: %s\n", what ? what : "(null)" );
+	fprintf( f, "VkResult: %d\n\n", (int)res );
+
+	// Static / global runtime state we can safely gather without calling Vulkan.
+#ifdef ID_DEDICATED
+	fprintf( f, "Engine build: dedicated\n" );
+#else
+	fprintf( f, "Engine build: client\n" );
+#endif
+	fprintf( f, "glConfig vendor: %s\n", glConfig.vendor_string );
+	fprintf( f, "glConfig renderer: %s\n", glConfig.renderer_string );
+	fprintf( f, "glConfig version: %s\n", glConfig.version_string );
+	fprintf( f, "glConfig maxTextureSize: %d\n", glConfig.maxTextureSize );
+	fprintf( f, "Estimated VRAM (glConfig.vidMemMB): %d MB\n\n", glConfig.vidMemMB );
+
+	// CVar summary useful for reproduction
+	fprintf( f, "CVar snapshot:\n" );
+	fprintf( f, "  r_vkValidation = %d\n", r_vkValidation.GetInteger() );
+	fprintf( f, "  r_vkCrashLogging = %d\n", r_vkCrashLogging.GetInteger() );
+	fprintf( f, "  r_hdr = %d\n", r_hdr.GetInteger() );
+	fprintf( f, "  r_shadows = %d\n", r_shadows.GetInteger() );
+	fprintf( f, "  r_ssr = %d\n", cvarSystem->GetCVarInteger( "r_ssr" ) );
+	fprintf( f, "  r_ssao = %d\n", cvarSystem->GetCVarInteger( "r_ssao" ) );
+	fprintf( f, "  r_fsr2 = %d\n", cvarSystem->GetCVarInteger( "r_fsr2" ) );
+	fprintf( f, "\n" );
+
+	fprintf( f, "Validation errors this session: %d\n\n", vkValidationErrors );
+
+	// Include the last N validation/debug messages collected by the debug callback.
+	fprintf( f, "Recent Vulkan validation/debug messages (newest last):\n" );
+	{
+		std::lock_guard<std::mutex> lock( vkDebugMsgMutex );
+		for ( size_t i = 0; i < vkDebugMsgHistory.size(); ++i ) {
+			fprintf( f, "  %s\n", vkDebugMsgHistory[i].c_str() );
+		}
+	}
+	if ( r_vkValidation.GetInteger() == 0 ) {
+		fprintf( f, "  (validation layer was OFF — set r_vkValidation 1 to capture messages here next time)\n" );
+	}
+	fprintf( f, "\n" );
+
+	// Telemetry trajectory: the clock / P-state / power history right before the event. For a
+	// suspected boost-transition (di/dt) crash this is the key signal — watch the P-state and SM
+	// clock in the newest rows (t-ms counts down to ~0 at the dump). A large P8->P0 jump / clock
+	// ramp immediately before the loss supports "a current spike on the way back up killed it".
+	fprintf( f, "GPU telemetry ring (~10 Hz; t-ms = ms before this dump, newest last):\n" );
+	if ( vkTelemetryCount == 0 ) {
+		fprintf( f, "  (none — NVML unavailable, or neither r_vkCrashLogging nor r_vkDebugHud was on before the crash)\n" );
+	} else {
+		fprintf( f, "  %8s  %-6s  %8s  %6s  %7s  %8s\n", "t-ms", "Pstate", "SMclkMHz", "TempC", "PowerW", "MEMclk" );
+		const int          n = vkTelemetryCount;
+		const int          newestIdx = ( vkTelemetryHead - 1 + VK_TELEMETRY_RING ) % VK_TELEMETRY_RING;
+		const unsigned int newestMs = vkTelemetryRing[newestIdx].timeMs;
+		const int          start = ( vkTelemetryHead - n + VK_TELEMETRY_RING * 2 ) % VK_TELEMETRY_RING;
+		for ( int k = 0; k < n; k++ ) {
+			const VkTelemetrySample &s = vkTelemetryRing[ ( start + k ) % VK_TELEMETRY_RING ];
+			char pst[8];
+			if ( s.pstate <= 15 ) { idStr::snPrintf( pst, sizeof( pst ), "P%u", s.pstate ); }
+			else                  { idStr::Copynz( pst, "P?", sizeof( pst ) ); }
+			fprintf( f, "  %8u  %-6s  %8u  %6u  %7u  %8u\n",
+				(unsigned)( newestMs - s.timeMs ), pst, s.smClockMHz, s.tempC, s.powerW, s.memClockMHz );
+		}
+	}
+	fprintf( f, "\n" );
+
+	fprintf( f, "Notes:\n" );
+	fprintf( f, "  - This is a CPU-only best-effort dump. Vulkan objects are not queried because the device may be lost.\n" );
+	fprintf( f, "  - For vendor-specific details (Xid on NVIDIA / GPU hang reason) check kernel logs: dmesg or journalctl -k.\n" );
+	fprintf( f, "  - Re-run with r_vkValidation=1 and r_vkCrashLogging=1 to capture more validation messages next time.\n" );
+
+	fclose( f );
+	common->Printf( "VK: crash dump written to %s\n", fname );
+}
+
+// device-lost path: honors the r_vkCrashLogging opt-in and writes at most once per session.
+static void WriteVulkanCrashDump( const char *what, VkResult res ) {
+	if ( !r_vkCrashLogging.GetBool() || vkCrashDumpWritten ) {
+		return;
+	}
+	vkCrashDumpWritten = true;
+	WriteVulkanCrashDumpBody( what, res, NULL );
+}
+
+// forced (vk_dump_state console cmd): always writes a snapshot, regardless of the opt-in.
+static void WriteVulkanCrashDumpForced( const char *what, VkResult res ) {
+	WriteVulkanCrashDumpBody( what, res, "-forced" );
+}
+
+
 static bool vkCheck( VkResult res, const char *what ) {
+	if ( vkDeviceDead ) {
+		// once the device is considered dead, avoid further Vulkan API usage and warn once
+		static bool warned = false;
+		if ( !warned ) {
+			common->Warning( "VK: device is dead, skipping Vulkan call check for %s", what );
+			warned = true;
+		}
+		return false;
+	}
 	if ( res == VK_SUCCESS ) {
 		return true;
 	}
 	common->Warning( "VK: %s failed (VkResult %d)", what, (int)res );
+
+	// A device-lost is terminal: mark the device dead so the per-frame guards stop issuing
+	// Vulkan calls (this IS the mitigation, and it must engage regardless of crash logging),
+	// then emit a best-effort dump if the user opted in.
+	if ( res == VK_ERROR_DEVICE_LOST ) {
+		WriteVulkanCrashDump( what, res );
+		vkDeviceDead = true;
+	}
 	return false;
 }
 
@@ -927,6 +1136,17 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
 	} else {
 		common->Warning( "VK %s: %s", loaderMsg ? "loader" : "validation", data->pMessage );
 	}
+
+	// Append to the in-memory history for the crash dump / debug HUD. Keep the ring bounded.
+	// Locked: this callback can run off the main thread while the HUD reads the ring.
+	if ( data->pMessage ) {
+		std::lock_guard<std::mutex> lock( vkDebugMsgMutex );
+		if ( vkDebugMsgHistory.size() >= VK_DEBUG_MSG_HISTORY ) {
+			vkDebugMsgHistory.erase( vkDebugMsgHistory.begin() );
+		}
+		vkDebugMsgHistory.emplace_back( data->pMessage );
+	}
+
 	return VK_FALSE;
 }
 
@@ -1913,6 +2133,14 @@ bool VulkanBackend::Init() {
 		return true;
 	}
 	vkValidationErrors = 0;
+	// Clear any device-lost latch from a previous session so a vid_restart after a device
+	// loss actually recovers (BeginFrame/EndFrame/etc. bail while vkDeviceDead is set).
+	vkDeviceDead = false;
+	vkCrashDumpWritten = false;
+	{
+		std::lock_guard<std::mutex> lock( vkDebugMsgMutex );
+		vkDebugMsgHistory.clear();
+	}
 
 	if ( !CreateInstance() || !PickPhysicalDevice() || !CreateDeviceAndVma() ) {
 		Shutdown();
@@ -1933,6 +2161,11 @@ bool VulkanBackend::Init() {
 
 	common->Printf( "VK: backend up - %s, %d MB VRAM, max tex %d\n",
 		glConfig.renderer_string, glConfig.vidMemMB, glConfig.maxTextureSize );
+
+	// Register developer console command to force a Vulkan crash-state dump into the save path.
+	// Registered here (after successful backend bring-up) so cmdSystem is available.
+	cmdSystem->AddCommand( "vk_dump_state", Vk_ForceCrashDump_f, CMD_FL_RENDERER, "Force a Vulkan crash-state dump to dudelog-crash-*.txt (dev)" );
+
 	return true;
 }
 
@@ -2051,8 +2284,19 @@ VulkanBackend::BeginFrame
 ====================
 */
 void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
+	if ( vkDeviceDead ) {
+		common->Warning( "VK: device is dead; skipping BeginFrame (use vid_restart)" );
+		return;
+	}
 	if ( device == VK_NULL_HANDLE || frameOpen ) {
 		return;
+	}
+
+	// Advance the NVML telemetry ring while the device is alive, so a crash dump can show the
+	// clock / P-state / power trajectory leading into a device loss. Cheap and throttled to ~10 Hz;
+	// only runs when the HUD or crash logging is on.
+	if ( r_vkCrashLogging.GetBool() || r_vkDebugHud.GetBool() ) {
+		VkSampleTelemetry();
 	}
 	FrameSlot &f = frames[frameIndex];
 	vkWaitForFences( device, 1, &f.fence, VK_TRUE, UINT64_MAX );
@@ -2277,6 +2521,10 @@ fresh scene image, where there is nothing to load yet).
 ====================
 */
 void VulkanBackend::BeginPass( const ClearArgs *clear ) {
+	if ( vkDeviceDead ) {
+		common->Warning( "VK: device is dead; skipping BeginPass" );
+		return;
+	}
 	if ( !frameOpen || skipFrame || insideScenePass ) {
 		return;
 	}
@@ -2342,6 +2590,10 @@ VulkanBackend::EndPass
 ====================
 */
 void VulkanBackend::EndPass() {
+	if ( vkDeviceDead ) {
+		common->Warning( "VK: device is dead; skipping EndPass" );
+		return;
+	}
 	if ( insideTargetPass ) {
 		// close the offscreen nested pass (shadow map / AA ping). The scene pass
 		// resumes on the next Draw (EnsureScenePass → load variant) against the
@@ -2387,6 +2639,14 @@ Blit the scene image onto the acquired swapchain image, submit, present.
 */
 void VulkanBackend::EndFrame() {
 	if ( !frameOpen ) {
+		return;
+	}
+	if ( vkDeviceDead ) {
+		// If the device is dead, gracefully abort EndFrame without issuing any Vulkan calls.
+		common->Warning( "VK: device is dead; skipping EndFrame (use vid_restart)" );
+		// ensure consistent state for the rest of the engine
+		frameOpen = false;
+		skipFrame = false;
 		return;
 	}
 	frameOpen = false;
@@ -6559,6 +6819,28 @@ bool VulkanBackend::EnsureShadowPass() {
 	return vkCheck( vkCreateRenderPass( device, &rpi, NULL, &shadowPass ), "vkCreateRenderPass(shadow)" );
 }
 
+int VulkanBackend::ClampTargetSize( int size, const char *kind, bool cube ) const {
+	if ( size <= 0 ) {
+		return 1;
+	}
+	// Clamp to the actual device limit only. Exceeding maxImageDimension is guaranteed-invalid
+	// usage (a validation-error / device-lost path), so that is the real safety bound. Do NOT
+	// impose an arbitrary lower ceiling: color targets are screen-sized and a hard 4096 cap
+	// would squish the scene on high-res / ultrawide displays (this class of GPU reports far
+	// more than 4096, e.g. 16384-32768).
+	int limit = cube ? (int)physProps.limits.maxImageDimensionCube
+	                 : (int)physProps.limits.maxImageDimension2D;
+	if ( limit < 1 ) {
+		limit = 16384; // defensive fallback if the driver reported nothing
+	}
+	if ( size <= limit ) {
+		return size;
+	}
+	common->Warning( "VK: %s size %d exceeds the device limit %d; clamping to %d to avoid an invalid-usage / device-lost path",
+		kind, size, limit, limit );
+	return limit;
+}
+
 // Allocate a depth image (2D or cube), its sample view + per-face render views,
 // framebuffer(s), and register the sampleable ImageRec. Returns false (and
 // leaves t clean) on failure.
@@ -6566,10 +6848,12 @@ bool VulkanBackend::CreateDepthTarget( RenderTarget &t, int w, int h, bool cube 
 	if ( device == VK_NULL_HANDLE || !EnsureShadowPass() ) {
 		return false;
 	}
+	const int safeW = ClampTargetSize( w, cube ? "cube shadow" : "shadow map", cube );
+	const int safeH = ClampTargetSize( h, cube ? "cube shadow" : "shadow map", cube );
 	const int layers = cube ? 6 : 1;
 	t.cube = cube;
-	t.w = w;
-	t.h = h;
+	t.w = safeW;
+	t.h = safeH;
 	t.depthFormat = VK_FORMAT_D32_SFLOAT;
 
 	VkImageCreateInfo ici = {};
@@ -6577,7 +6861,7 @@ bool VulkanBackend::CreateDepthTarget( RenderTarget &t, int w, int h, bool cube 
 	ici.flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
 	ici.imageType = VK_IMAGE_TYPE_2D;
 	ici.format = t.depthFormat;
-	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.extent = { (uint32_t)safeW, (uint32_t)safeH, 1 };
 	ici.mipLevels = 1;
 	ici.arrayLayers = (uint32_t)layers;
 	ici.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -6627,8 +6911,8 @@ bool VulkanBackend::CreateDepthTarget( RenderTarget &t, int w, int h, bool cube 
 		fbi.renderPass = shadowPass;
 		fbi.attachmentCount = 1;
 		fbi.pAttachments = &renderView;
-		fbi.width = (uint32_t)w;
-		fbi.height = (uint32_t)h;
+		fbi.width = (uint32_t)safeW;
+		fbi.height = (uint32_t)safeH;
 		fbi.layers = 1;
 		if ( !vkCheck( vkCreateFramebuffer( device, &fbi, NULL, &t.fb[f] ), "vkCreateFramebuffer(shadow)" ) ) {
 			FreeTargetObjects( t );
@@ -7150,6 +7434,8 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 	if ( wantDepthStencil && sceneDepthFormat == VK_FORMAT_UNDEFINED ) {
 		return false;
 	}
+	const int safeW = ClampTargetSize( w, "color target" );
+	const int safeH = ClampTargetSize( h, "color target" );
 	if ( mipLevels < 1 ) { mipLevels = 1; }
 	const bool mipped = mipLevels > 1;
 	t.colorTarget = true;
@@ -7159,8 +7445,8 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 	}
 	t.hasDepth = wantDepthStencil;
 	t.colorMipLevels = mipLevels;
-	t.w = w;
-	t.h = h;
+	t.w = safeW;
+	t.h = safeH;
 	t.passClass = PassClassFor( colorFmt, wantDepthStencil, colorCount );
 
 	VmaAllocationCreateInfo aci = {};
@@ -7171,7 +7457,7 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 		ici.imageType = VK_IMAGE_TYPE_2D;
 		ici.format = t.colorFormat[c];
-		ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+		ici.extent = { (uint32_t)safeW, (uint32_t)safeH, 1 };
 		ici.mipLevels = (uint32_t)mipLevels;
 		ici.arrayLayers = 1;
 		ici.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -7220,7 +7506,7 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 		ici.imageType = VK_IMAGE_TYPE_2D;
 		ici.format = sceneDepthFormat;
-		ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+		ici.extent = { (uint32_t)safeW, (uint32_t)safeH, 1 };
 		ici.mipLevels = 1;
 		ici.arrayLayers = 1;
 		ici.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -7259,8 +7545,8 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 	fbi.renderPass = t.colorClearPass;		// compatible with the load/clearDS variants
 	fbi.attachmentCount = (uint32_t)nv;
 	fbi.pAttachments = views;
-	fbi.width = (uint32_t)w;
-	fbi.height = (uint32_t)h;
+	fbi.width = (uint32_t)safeW;
+	fbi.height = (uint32_t)safeH;
 	fbi.layers = 1;
 	if ( !vkCheck( vkCreateFramebuffer( device, &fbi, NULL, &t.colorFb ), "vkCreateFramebuffer(color target)" ) ) {
 		FreeTargetObjects( t );
@@ -7282,8 +7568,8 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		rec.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		rec.isDepth = false;
 		rec.isColorTarget = true;
-		rec.width = w;
-		rec.height = h;
+		rec.width = safeW;
+		rec.height = safeH;
 		ImageHandle handle = 0;
 		for ( size_t i = 0; i < imageTable.size(); i++ ) {
 			if ( !imageTable[i].live ) { imageTable[i] = rec; handle = (ImageHandle)( i + 1 ); break; }
@@ -7301,8 +7587,8 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 	// Level 0 reuses colorView[0] (its framebuffer is colorFb, the linearize target).
 	if ( mipped ) {
 		for ( int L = 0; L < mipLevels; L++ ) {
-			const int lw = ( ( w >> L ) > 1 ) ? ( w >> L ) : 1;
-			const int lh = ( ( h >> L ) > 1 ) ? ( h >> L ) : 1;
+			const int lw = ( ( safeW >> L ) > 1 ) ? ( safeW >> L ) : 1;
+			const int lh = ( ( safeH >> L ) > 1 ) ? ( safeH >> L ) : 1;
 			VkImageView lv = t.colorView[0];
 			if ( L > 0 ) {
 				VkImageViewCreateInfo lvi = {};
@@ -8918,6 +9204,240 @@ bool VK_ImGuiInit() {
 void VK_ImGuiShutdown() {
 	vkBackend.ImGuiShutdown();
 }
+// ---------------------------------------------------------------------------
+// Deep-dive debug HUD (r_vkDebugHud) + optional NVIDIA telemetry via NVML.
+//
+// NVML (libnvidia-ml) is loaded lazily and is entirely optional: on non-NVIDIA
+// GPUs, or when the library isn't installed, every field reads back "unavailable"
+// and the HUD shows N/A. It is the boost-clock / thermal / power canary the
+// device-loss hunt needs — Vulkan itself exposes none of those.
+// ---------------------------------------------------------------------------
+// NVML entry points we use (subset). Typedef'd locally so we don't need the NVML SDK headers.
+typedef int ( *PFN_nvmlInit )( void );                                // nvmlInit_v2
+typedef int ( *PFN_nvmlDeviceGetHandleByIndex )( unsigned, void ** ); // _v2
+typedef int ( *PFN_nvmlDeviceGetClockInfo )( void *, int, unsigned * );
+typedef int ( *PFN_nvmlDeviceGetTemperature )( void *, int, unsigned * );
+typedef int ( *PFN_nvmlDeviceGetPowerUsage )( void *, unsigned * );
+typedef int ( *PFN_nvmlDeviceGetEnforcedPowerLimit )( void *, unsigned * );
+typedef int ( *PFN_nvmlDeviceGetMemoryInfo )( void *, void * );
+typedef int ( *PFN_nvmlDeviceGetPerformanceState )( void *, int * );  // P0..P15 (0 = max perf)
+
+static struct NvmlApi {
+	bool      tried = false;
+	uintptr_t lib = 0;
+	void     *dev = NULL;
+	PFN_nvmlInit                        Init = NULL;
+	PFN_nvmlDeviceGetHandleByIndex      GetHandle = NULL;
+	PFN_nvmlDeviceGetClockInfo          GetClock = NULL;
+	PFN_nvmlDeviceGetTemperature        GetTemp = NULL;
+	PFN_nvmlDeviceGetPowerUsage         GetPower = NULL;
+	PFN_nvmlDeviceGetEnforcedPowerLimit GetPowerLimit = NULL;
+	PFN_nvmlDeviceGetMemoryInfo         GetMem = NULL;
+	PFN_nvmlDeviceGetPerformanceState   GetPstate = NULL;
+} nvml;
+
+static bool NvmlEnsure() {
+	if ( nvml.tried ) {
+		return nvml.dev != NULL;
+	}
+	nvml.tried = true; // only attempt to load once per session
+
+#ifdef _WIN32
+	nvml.lib = Sys_DLL_Load( "nvml.dll" );
+#else
+	nvml.lib = Sys_DLL_Load( "libnvidia-ml.so.1" );
+	if ( !nvml.lib ) {
+		nvml.lib = Sys_DLL_Load( "libnvidia-ml.so" );
+	}
+#endif
+	if ( !nvml.lib ) {
+		return false; // not an NVIDIA setup, or the management lib isn't installed
+	}
+
+	nvml.Init          = (PFN_nvmlInit)                        Sys_DLL_GetProcAddress( nvml.lib, "nvmlInit_v2" );
+	nvml.GetHandle     = (PFN_nvmlDeviceGetHandleByIndex)      Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetHandleByIndex_v2" );
+	nvml.GetClock      = (PFN_nvmlDeviceGetClockInfo)          Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetClockInfo" );
+	nvml.GetTemp       = (PFN_nvmlDeviceGetTemperature)        Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetTemperature" );
+	nvml.GetPower      = (PFN_nvmlDeviceGetPowerUsage)         Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetPowerUsage" );
+	nvml.GetPowerLimit = (PFN_nvmlDeviceGetEnforcedPowerLimit) Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetEnforcedPowerLimit" );
+	nvml.GetMem        = (PFN_nvmlDeviceGetMemoryInfo)         Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetMemoryInfo" );
+	nvml.GetPstate     = (PFN_nvmlDeviceGetPerformanceState)  Sys_DLL_GetProcAddress( nvml.lib, "nvmlDeviceGetPerformanceState" );
+
+	if ( !nvml.Init || !nvml.GetHandle || nvml.Init() != 0 /*NVML_SUCCESS==0*/ ) {
+		return false;
+	}
+	if ( nvml.GetHandle( 0, &nvml.dev ) != 0 || nvml.dev == NULL ) {
+		nvml.dev = NULL;
+		return false;
+	}
+	return true;
+}
+
+// Sample NVML into the ring, throttled to ~10 Hz. Called once per frame from BeginFrame while the
+// device is alive (never after a loss — by then the ring already holds the pre-crash history).
+static void VkSampleTelemetry() {
+	if ( !NvmlEnsure() ) {
+		return;
+	}
+	unsigned int now = Sys_Milliseconds();
+	if ( vkTelemetryCount > 0 && ( now - vkTelemetryLastMs ) < 100 ) {
+		return;
+	}
+	vkTelemetryLastMs = now;
+
+	VkTelemetrySample s;
+	s.timeMs = now;
+	unsigned v = 0;
+	if ( nvml.GetClock  && nvml.GetClock( nvml.dev, 1 /*SM*/, &v ) == 0 )  { s.smClockMHz = v; }
+	if ( nvml.GetClock  && nvml.GetClock( nvml.dev, 2 /*MEM*/, &v ) == 0 ) { s.memClockMHz = v; }
+	if ( nvml.GetTemp   && nvml.GetTemp( nvml.dev, 0 /*GPU*/, &v ) == 0 )  { s.tempC = v; }
+	if ( nvml.GetPower  && nvml.GetPower( nvml.dev, &v ) == 0 )            { s.powerW = ( v + 500 ) / 1000; }
+	int ps = 32;
+	if ( nvml.GetPstate && nvml.GetPstate( nvml.dev, &ps ) == 0 )          { s.pstate = (unsigned)ps; }
+
+	vkTelemetryRing[vkTelemetryHead] = s;
+	vkTelemetryHead = ( vkTelemetryHead + 1 ) % VK_TELEMETRY_RING;
+	if ( vkTelemetryCount < VK_TELEMETRY_RING ) {
+		vkTelemetryCount++;
+	}
+
+	// slow-changing extras for the HUD's power-limit / VRAM lines (~1 Hz)
+	if ( vkTelemetryExtraMs == 0 || ( now - vkTelemetryExtraMs ) >= 1000 ) {
+		vkTelemetryExtraMs = now;
+		if ( nvml.GetPowerLimit && nvml.GetPowerLimit( nvml.dev, &v ) == 0 ) { vkTelemetryPowerLimitW = ( v + 500 ) / 1000; }
+		if ( nvml.GetMem ) {
+			// nvmlMemory_t (v1) = { unsigned long long total, free, used }; over-size the buffer defensively.
+			unsigned long long mem[8] = { 0 };
+			if ( nvml.GetMem( nvml.dev, mem ) == 0 ) {
+				vkTelemetryMemTotalMB = mem[0] / ( 1024ull * 1024ull );
+				vkTelemetryMemUsedMB  = mem[2] / ( 1024ull * 1024ull );
+			}
+		}
+	}
+}
+
+// Newest ring sample for the HUD. Returns false if NVML is unavailable or nothing sampled yet.
+static bool VkLatestTelemetry( VkTelemetrySample &out ) {
+	if ( !NvmlEnsure() || vkTelemetryCount == 0 ) {
+		return false;
+	}
+	out = vkTelemetryRing[ ( vkTelemetryHead - 1 + VK_TELEMETRY_RING ) % VK_TELEMETRY_RING ];
+	return true;
+}
+
+void VulkanBackend::DrawDebugHud() {
+#ifndef IMGUI_DISABLE
+	// VRAM from VMA's per-heap budget; sum device-local heaps for the "app VRAM" figure.
+	uint64_t vramUsed = 0, vramBudget = 0, hostUsed = 0;
+	if ( vma != NULL && physical != VK_NULL_HANDLE ) {
+		VkPhysicalDeviceMemoryProperties mp;
+		vkGetPhysicalDeviceMemoryProperties( physical, &mp );
+		VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+		vmaGetHeapBudgets( vma, budgets );
+		for ( uint32_t i = 0; i < mp.memoryHeapCount; ++i ) {
+			if ( mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ) {
+				vramUsed   += budgets[i].usage;
+				vramBudget += budgets[i].budget;
+			} else {
+				hostUsed   += budgets[i].usage;
+			}
+		}
+	}
+
+	VkTelemetrySample gpu;
+	const bool haveGpu = VkLatestTelemetry( gpu );
+
+	ImGui::SetNextWindowPos( ImVec2( 12.0f, 12.0f ), ImGuiCond_Always );
+	ImGui::SetNextWindowBgAlpha( 0.72f );
+	ImGui::SetNextWindowSizeConstraints( ImVec2( 250.0f, 0.0f ), ImVec2( 560.0f, 10000.0f ) );
+	const int flags = ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoDecoration
+		| ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing;
+	if ( !ImGui::Begin( "VkDebugHud", NULL, flags ) ) {
+		ImGui::End();
+		return;
+	}
+
+	ImGui::TextUnformatted( "VULKAN DEEP-DIVE" );
+	ImGui::SameLine();
+	if ( vkDeviceDead ) {
+		ImGui::TextColored( ImVec4( 1.0f, 0.30f, 0.30f, 1.0f ), "DEVICE LOST" );
+	} else {
+		ImGui::TextColored( ImVec4( 0.40f, 0.90f, 0.45f, 1.0f ), "device OK" );
+	}
+	ImGui::Separator();
+
+	// --- GPU canary (NVML): clock coloured as it climbs toward the boost danger zone ---
+	if ( haveGpu ) {
+		ImVec4 clkCol( 0.55f, 0.95f, 0.55f, 1.0f );
+		if ( gpu.smClockMHz >= 1900 )      clkCol = ImVec4( 1.0f, 0.45f, 0.30f, 1.0f );
+		else if ( gpu.smClockMHz >= 1700 ) clkCol = ImVec4( 1.0f, 0.85f, 0.35f, 1.0f );
+		// P-state: a frame cap makes this oscillate P8<->P0, and the big up-ramps are the di/dt
+		// transients suspected of killing a marginal card. Colour it like the clock.
+		if ( gpu.pstate <= 15 ) {
+			ImGui::TextColored( clkCol, "P-state  : P%u", gpu.pstate );
+		}
+		ImGui::TextColored( clkCol, "SM clock : %u MHz", gpu.smClockMHz );
+		ImGui::Text( "Mem clock: %u MHz", gpu.memClockMHz );
+		ImVec4 tCol = ( gpu.tempC >= 83 ) ? ImVec4( 1.0f, 0.5f, 0.3f, 1.0f ) : ImVec4( 0.80f, 0.80f, 0.82f, 1.0f );
+		ImGui::TextColored( tCol, "Temp     : %u C", gpu.tempC );
+		if ( vkTelemetryPowerLimitW > 0 ) {
+			ImGui::Text( "Power    : %u / %u W", gpu.powerW, vkTelemetryPowerLimitW );
+		} else {
+			ImGui::Text( "Power    : %u W", gpu.powerW );
+		}
+	} else {
+		ImGui::TextDisabled( "GPU clock/temp/power: NVML N/A" );
+	}
+	ImGui::Separator();
+
+	// --- VRAM (VMA app view + NVML whole-GPU view) ---
+	if ( vramBudget > 0 ) {
+		const double usedMB = (double)vramUsed   / ( 1024.0 * 1024.0 );
+		const double budMB  = (double)vramBudget / ( 1024.0 * 1024.0 );
+		ImGui::Text( "VRAM app : %.0f / %.0f MB", usedMB, budMB );
+		ImGui::ProgressBar( (float)( (double)vramUsed / (double)vramBudget ), ImVec2( 210.0f, 0.0f ) );
+	} else {
+		ImGui::TextDisabled( "VRAM app : VMA budget N/A" );
+	}
+	if ( haveGpu && vkTelemetryMemTotalMB > 0 ) {
+		ImGui::Text( "VRAM GPU : %llu / %llu MB", (unsigned long long)vkTelemetryMemUsedMB, (unsigned long long)vkTelemetryMemTotalMB );
+	}
+	if ( hostUsed > 0 ) {
+		ImGui::Text( "Host mem : %.0f MB", (double)hostUsed / ( 1024.0 * 1024.0 ) );
+	}
+	ImGui::Separator();
+
+	// --- Validation errors + recent messages ---
+	const int errors = vkValidationErrors;
+	ImVec4 eCol = ( errors > 0 ) ? ImVec4( 1.0f, 0.5f, 0.3f, 1.0f ) : ImVec4( 0.40f, 0.90f, 0.45f, 1.0f );
+	ImGui::TextColored( eCol, "Validation errors: %d", errors );
+	{
+		std::lock_guard<std::mutex> lock( vkDebugMsgMutex );
+		const size_t n = vkDebugMsgHistory.size();
+		if ( n == 0 ) {
+			ImGui::TextDisabled( "no validation/debug messages" );
+		} else {
+			const size_t showN = ( n < 4 ) ? n : 4;
+			for ( size_t i = n - showN; i < n; ++i ) {
+				char buf[120];
+				idStr::Copynz( buf, vkDebugMsgHistory[i].c_str(), sizeof( buf ) );
+				ImGui::TextColored( ImVec4( 0.82f, 0.78f, 0.60f, 1.0f ), "- %s", buf );
+			}
+		}
+	}
+
+	ImGui::End();
+#endif
+}
+
+void VK_ImGuiDrawDebugHud() {
+#ifndef IMGUI_DISABLE
+	if ( vkBackend.ImGuiUp() ) {
+		vkBackend.DrawDebugHud();
+	}
+#endif
+}
+
 void VK_ImGuiNewFrame() {
 #ifndef IMGUI_DISABLE
 	if ( vkBackend.ImGuiUp() ) {
