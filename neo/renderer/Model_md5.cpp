@@ -1782,8 +1782,26 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		if ( tri->gpuSkinVB && tri->gpuSkinFrame != tr.frameCount ) {
 			tri->gpuSkinFrame = tr.frameCount;
 			const int numJoints = ent->numJoints;
-			idJointMat *jointSnap = (idJointMat *)R_FrameAlloc( numJoints * (int)sizeof( idJointMat ) );
-			memcpy( jointSnap, entJoints, numJoints * sizeof( idJointMat ) );
+			// Share ONE frame-snapshot of the joint palette across all of this entity's sub-meshes.
+			// InstantiateDynamicModel updates a model's meshes contiguously with the same ent->joints,
+			// so memoizing the last (source,frame,count) snapshot hands every sub-mesh job the SAME
+			// jointData pointer -- RB_RHI_FlushSkinJobs then uploads the palette ONCE per entity instead
+			// of once per surface. The snapshot itself is still needed (the backend flush is deferred and
+			// ent->joints is game-owned); this only stops copying + uploading it N times. Single-threaded
+			// front-end (R_EntityDefDynamicModel), so the static memo is safe; the (ptr,frame,count) key
+			// re-snapshots on any entity/frame/joint-count change, and a snapshot is a plain copy so a
+			// shared pointer is always the correct palette. INPUT only -- each surface still writes its
+			// own gpuSkinVB (the per-surface skinned output a future RTX animated-BLAS path consumes).
+			static const idJointMat *s_snapSrc   = NULL;
+			static idJointMat       *s_snap      = NULL;
+			static int               s_snapFrame = -1;
+			static int               s_snapNum   = 0;
+			if ( s_snapSrc != entJoints || s_snapFrame != tr.frameCount || s_snapNum != numJoints ) {
+				s_snap = (idJointMat *)R_FrameAlloc( numJoints * (int)sizeof( idJointMat ) );
+				memcpy( s_snap, entJoints, numJoints * sizeof( idJointMat ) );
+				s_snapSrc = entJoints; s_snapFrame = tr.frameCount; s_snapNum = numJoints;
+			}
+			idJointMat *jointSnap = s_snap;
 			const float skinScale = ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f )
 			                      ? ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] : 1.0f;
 			RB_RHI_AddSkinJob( skinShader, tri->gpuSkinVB, numOut,

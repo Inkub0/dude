@@ -1496,11 +1496,29 @@ void RB_RHI_FlushSkinJobs( void ) {
 	}
 	rhi::RHI *r = rhi::GetRHI();
 	if ( r ) {
+		// The joint palette is per-ENTITY: UpdateSurface hands every sub-mesh job of an entity the SAME
+		// snapshot pointer (jobs added contiguously), so upload it ONCE and reuse that buffer for the run
+		// of jobs sharing it, instead of a create+upload+destroy per surface. Each Dispatch resolves the
+		// buffer handle at record time and DestroyBuffer is fence-retired, so destroying the previous
+		// run's buffer once its jobs are recorded is safe. A non-shared pointer simply starts a new run —
+		// worst case this is the old per-job behaviour, never wrong. INPUT palette only; the per-surface
+		// gpuSkinVB output each job writes is untouched (BDA/RTX-facing geometry stays per surface).
+		const void *curJointData = NULL;
+		int curNumJoints = 0;
+		rhi::BufferHandle jointsBuf = 0;
 		for ( int i = 0; i < rbSkinJobs.Num(); i++ ) {
 			const rbSkinJob_t &j = rbSkinJobs[i];
-			// per-frame joint palette (small; a shared batched buffer is a later optimisation)
-			rhi::BufferHandle jointsBuf = r->CreateBuffer( rhi::BU_STORAGE, j.numJoints * (int)sizeof( idJointMat ), j.jointData );
+			if ( jointsBuf == 0 || j.jointData != curJointData || j.numJoints != curNumJoints ) {
+				if ( jointsBuf ) {
+					r->DestroyBuffer( jointsBuf );	// prior run fully recorded; deferred/fence-retired
+					jointsBuf = 0;
+				}
+				jointsBuf = r->CreateBuffer( rhi::BU_STORAGE, j.numJoints * (int)sizeof( idJointMat ), j.jointData );
+				curJointData = j.jointData;
+				curNumJoints = j.numJoints;
+			}
 			if ( !jointsBuf ) {
+				curJointData = NULL;			// creation failed; force a retry on the next job
 				continue;
 			}
 			struct { unsigned int numVerts; float skinScale; } pc = { (unsigned int)j.numOutVerts, j.skinScale };
@@ -1515,10 +1533,11 @@ void RB_RHI_FlushSkinJobs( void ) {
 			ca.pushConstants = &pc;
 			ca.pushConstantSize = (int)sizeof( pc );
 			ca.groupsX = ( j.numOutVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
-			ca.deferBarrier = true;				// one barrier for the whole batch, below (each job writes its own buffer)
-			r->Dispatch( ca );					// records on the frame cb, no trailing barrier
-			r->DestroyBuffer( jointsBuf );		// deferred/fence-retired: safe right after recording
-
+			ca.deferBarrier = true;				// one barrier for the whole batch, below
+			r->Dispatch( ca );					// records on the frame cb, no trailing barrier; buffer reused across the entity's jobs
+		}
+		if ( jointsBuf ) {
+			r->DestroyBuffer( jointsBuf );		// last run's palette buffer (recorded; deferred destroy)
 		}
 		// single compute->vertex/compute barrier for the whole skin batch: the disjoint gpuSkinVB
 		// writes need no ordering between each other, only visibility before the draws read them
