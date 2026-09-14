@@ -1515,10 +1515,15 @@ void RB_RHI_FlushSkinJobs( void ) {
 			ca.pushConstants = &pc;
 			ca.pushConstantSize = (int)sizeof( pc );
 			ca.groupsX = ( j.numOutVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
-			r->Dispatch( ca );					// records on the frame cb + a compute->vertex barrier
+			ca.deferBarrier = true;				// one barrier for the whole batch, below (each job writes its own buffer)
+			r->Dispatch( ca );					// records on the frame cb, no trailing barrier
 			r->DestroyBuffer( jointsBuf );		// deferred/fence-retired: safe right after recording
 
 		}
+		// single compute->vertex/compute barrier for the whole skin batch: the disjoint gpuSkinVB
+		// writes need no ordering between each other, only visibility before the draws read them
+		// (and before RB_RHI_FlushTessJobs' deform dispatches read a surface's gpuSkinVB).
+		r->PostComputeBarrier();
 	}
 	rbSkinJobs.SetNum( 0 );
 }
@@ -1576,11 +1581,14 @@ void RB_RHI_FlushTessJobs( void ) {
 			ca.pushConstants = &pc;
 			ca.pushConstantSize = (int)sizeof( pc );
 			ca.groupsX = ( j.numOutVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
-			r->Dispatch( ca );					// records on the frame cb + a compute->vertex/compute barrier
+			ca.deferBarrier = true;				// one barrier for the whole batch, below (each job writes its own outVB)
+			r->Dispatch( ca );					// records on the frame cb, no trailing barrier
 			if ( ownSrc ) {
 				r->DestroyBuffer( srcBuf );		// deferred/fence-retired: safe right after recording
 			}
 		}
+		// single barrier making every deformed outVB visible to the draws that bind it
+		r->PostComputeBarrier();
 	}
 	rbTessJobs.SetNum( 0 );
 }

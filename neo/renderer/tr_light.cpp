@@ -85,10 +85,13 @@ void R_GpuSkinProfileAddStrip( int verts ) {
 
 // Milestone C (docs/gpu-offload-plan.md): when a surface is drawn from its compute-skinned
 // gpuSkinVB, its per-frame ambient-cache vertex upload (a fresh VK buffer + copy every frame) is
-// never drawn — skip it so the CPU stops re-streaming geometry the GPU already produced. Opt-in +
-// off by default: leaving ambientCache NULL arms ~a dozen "has geometry?" gates, so this stays an
-// A/B toggle until proven, and the OFF path is byte-for-byte unchanged. Vulkan-only in effect
-// (gpuSkinVB is only set there).
+// never drawn — skip it so the CPU stops re-streaming geometry the GPU already produced. DEFAULT ON
+// (2026-09-14): paired with r_gpuSkinning defaulting on, this is what makes GPU skinning actually
+// RELIEVE the CPU instead of doubling its work — without it the ambient cache is rebuilt + uploaded
+// every frame (host-visible memcpy) for a surface that rasterizes from gpuSkinVB and is never drawn.
+// Leaving ambientCache NULL arms ~a dozen "has geometry?" gates (all wired + verified); kept as a
+// cvar so it can be A/B'd or turned off if a gate is ever missed. Inert without gpuSkinVB, so a raw
+// default of 1 is a no-op on GL3 and whenever r_gpuSkinning is off (gpuSkinVB is only set on Vulkan).
 //
 // NOT the tangent derive — that stays. Its remaining CPU readers are decals (idRenderModelOverlay)
 // and deform materials. The third blocker this comment used to list, the tess weld, is GONE: the
@@ -99,8 +102,8 @@ void R_GpuSkinProfileAddStrip( int verts ) {
 // (tr_trisurf.cpp:1793), never the expensive smoothed one. ~0.1% of a frame against a real risk of
 // decal regressions. Don't re-litigate this without new numbers — see docs/gpu-offload-plan.md
 // "Milestone C", which also records that the engine is GPU-bound at these enemy counts.
-static idCVar r_gpuSkinNoUpload( "r_gpuSkinNoUpload", "0", CVAR_RENDERER | CVAR_BOOL,
-	"skip the redundant CPU ambient-cache upload for GPU-skinned surfaces (draw from gpuSkinVB); needs r_gpuSkinning on (Vulkan)" );
+static idCVar r_gpuSkinNoUpload( "r_gpuSkinNoUpload", "1", CVAR_RENDERER | CVAR_BOOL,
+	"skip the redundant CPU ambient-cache upload for GPU-skinned surfaces (draw from gpuSkinVB); on by default, needs r_gpuSkinning on (Vulkan)" );
 
 // Milestone D (r_gpuSkinStripCpu) RETIRED 2026-08-18: stripping the CPU POSITION skin left an
 // animated monster's tri->verts[].xyz at bind pose, and the game traces player hits against those

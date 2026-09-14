@@ -249,6 +249,7 @@ public:
 		       && haveDrawIndirectFirstInstance && haveMultiDrawIndirect;
 	}
 	virtual void	Dispatch( const ComputeArgs &args );
+	virtual void	PostComputeBarrier();
 	virtual void	DispatchSync( const ComputeArgs &args );
 	virtual bool	RunFsr2( const Fsr2DispatchArgs &args );
 	virtual void	Fsr2CaptureOpaque( RenderTargetHandle sceneRT );
@@ -4026,6 +4027,24 @@ void VulkanBackend::Dispatch( const ComputeArgs &args ) {
 	// make compute writes available to subsequent vertex fetch / shader reads this frame.
 	// COMPUTE_SHADER is in the destination set so a following dispatch can consume this one's
 	// output (the MD5 skin runs as position pass -> tangent-derive pass over the same buffer).
+	// deferBarrier: a batch of independent dispatches (skin/deform flush) writes disjoint
+	// buffers, so no barrier is needed between them — the caller emits one PostComputeBarrier()
+	// after the batch. Standalone dispatches (default) self-barrier here.
+	if ( !args.deferBarrier ) {
+		PostComputeBarrier();
+	}
+	retiredComputeSets[frameIndex].push_back( set );
+}
+
+// One compute->consumer barrier for a batch of deferBarrier dispatches (see ComputeArgs).
+// Identical masks to the per-dispatch barrier above: SHADER_WRITE -> vertex-attribute /
+// index / shader read+write, so the skinned/deformed vertex buffers are visible to the
+// draws (and to a following deform dispatch that reads a skin output).
+void VulkanBackend::PostComputeBarrier() {
+	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame || insideScenePass || insideTargetPass ) {
+		return;
+	}
+	VkCommandBuffer cb = frames[frameIndex].cb;
 	VkMemoryBarrier mb = {};
 	mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -4033,7 +4052,6 @@ void VulkanBackend::Dispatch( const ComputeArgs &args ) {
 	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		0, 1, &mb, 0, NULL, 0, NULL );
-	retiredComputeSets[frameIndex].push_back( set );
 }
 
 // Synchronous compute dispatch on the dedicated upload cb: record, barrier to HOST, submit,

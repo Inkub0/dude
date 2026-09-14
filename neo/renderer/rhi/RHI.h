@@ -140,6 +140,12 @@ struct ComputeArgs {
 	const void *	pushConstants;		// params bound at push-constant offset 0 (NULL = none)
 	int				pushConstantSize;	// bytes, <= 128
 	unsigned int	groupsX, groupsY, groupsZ;
+	// Batch hint: when true, Dispatch records the dispatch but omits its trailing
+	// compute->consumer barrier. The caller is then responsible for one PostComputeBarrier()
+	// after the whole batch — a fan of independent dispatches (each writing its own buffer)
+	// needs no barrier between them, only one before their results are read (MD5 skin/deform
+	// flush). Default false = self-barrier, the safe standalone behaviour.
+	bool			deferBarrier = false;
 };
 
 // FSR2 Native-AA dispatch (docs/fsr-temporal-pipeline.md R1/C2). Vulkan only; the
@@ -402,6 +408,10 @@ public:
 	// command buffer outside any render pass; the GL3 backend (no compute) no-ops.
 	// The foundational primitive for CPU->GPU offload (skinning / culling).
 	virtual void	Dispatch( const ComputeArgs &args ) {}
+	// Emit the single compute->consumer barrier for a batch of Dispatch(deferBarrier=true)
+	// calls: makes all preceding compute writes visible to vertex-attribute / index /
+	// shader reads this frame. Call once after the batch (the skin + deform flushes). GL3 no-ops.
+	virtual void	PostComputeBarrier() {}
 	// Like Dispatch but on a dedicated command buffer, submitted and WAITED ON (synchronous),
 	// so the result is ready for a ReadBuffer immediately. For dev/validation and load-time
 	// GPU work; stalls the GPU, so never per-frame. GL3 no-ops.
