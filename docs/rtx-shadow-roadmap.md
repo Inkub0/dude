@@ -190,14 +190,18 @@ T2 cube scheduling — opportunistic, low priority
 ```
 
 **Status (2026-09-14): R1 ✅, R2 ✅, R3 ✅ (sun + animated monster casters + moving point lights,
-"Ultra Nightmare" tier).** The monster casters ship via the CPU world-soup + per-frame full BLAS
-rebuild.
+"Ultra Nightmare" tier), R3.5 ✅ (animated BLAS from `gpuSkinVB`, `r_rtAnimBlas`, verified +
+perf-neutral).**
 
-**Recommended next big step: R3.5 — animated BLAS from `gpuSkinVB`** (deform-once refit; plan in
-[rtx-animated-blas.md](rtx-animated-blas.md)). Now that GPU skinning is solid + the Vulkan default,
-its per-surface skinned output is the geometry an animated BLAS wants. Doing this before R4/R5 and
-before RT reflections is deliberate: it turns monsters into GPU-resident TLAS instances, which is
-the shared prerequisite every RT-on-dynamic feature (reflections, GI, soft shadows on monsters)
-depends on — and it deletes R3's per-frame CPU gather + full rebuild. Validator-first (S2
-`r_rtAnimBlasTest`), so the mechanics land with zero visible change before the live shadow path
-moves in S4.
+**R3.5 — animated BLAS from `gpuSkinVB`** ([rtx-animated-blas.md](rtx-animated-blas.md)): DONE +
+verified. Monsters are now optional GPU-resident, model-space, per-entity TLAS instances (deform-once
+refit, not CPU-soup rebuild), behind `r_rtAnimBlas` (default 0; perf-neutral at Doom 3 scale so it
+stays opt-in until a consumer needs it). This is the shared prerequisite for every RT-on-dynamic
+feature.
+
+**Active next step: RT reflections on monsters** ([rtx-reflections.md](rtx-reflections.md)) — the
+first consumer of R3.5. Trace reflection rays into the TLAS and shade the dynamic (monster) hit from
+its `gpuSkinVB` attributes, so reflective surfaces show monsters SSR can't (off-screen / screen-
+occluded). Hybrid: RT augments SSR + env probes, doesn't replace them. Validator-first (RR0 geometry
+table → RR1 `r_rtReflTest` → RR2 monster reflections). Then R4/R5 (hybrid maps + soft shadows) and RT
+GI can build on the same geometry table + hit-shading substrate.
