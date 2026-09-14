@@ -490,6 +490,10 @@ public:
 	// Cumulative animated-BLAS lifecycle counters + current live BLAS count (r_shadowMapCacheDebug
 	// readout). VK + RT only; leaves the outputs at 0 otherwise.
 	virtual void	AnimBlasStats( int &builds, int &refits, int &retires, int &live ) { builds = refits = retires = live = 0; }
+	// RT reflections RR0 (docs/rtx-reflections.md): the per-instance geometry table's populated row
+	// count last frame + how many carry monster attributes (readout to confirm it tracks the TLAS
+	// instances before anything consumes it). VK + RT only; 0 otherwise.
+	virtual void	RtReflStats( int &geoRows, int &geoMonsterRows ) { geoRows = geoMonsterRows = 0; }
 	struct RtInstance {
 		float			transform[12];		// row-major 3x4 (VkTransformMatrixKHR layout)
 		BlasHandle		blas;

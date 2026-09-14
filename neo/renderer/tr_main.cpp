@@ -1660,8 +1660,10 @@ static void R_RtStageAnimCasters( void ) {
 		if ( accStartMs == 0 ) {
 			accStartMs = nowMs;
 		} else if ( nowMs - accStartMs >= 1000 ) {
-			common->Printf( "rtAnimBlas/s: %d builds, %d refits, %d retires; %d live\n",
-			                b - prevB, rf - prevR, ret - prevRet, live );
+			int geoRows = 0, geoMon = 0;
+			r->RtReflStats( geoRows, geoMon );		// RR0: per-instance geometry table population
+			common->Printf( "rtAnimBlas/s: %d builds, %d refits, %d retires; %d live | geoTable %d rows (%d monster)\n",
+			                b - prevB, rf - prevR, ret - prevRet, live, geoRows, geoMon );
 			prevB = b; prevR = rf; prevRet = ret; accStartMs = nowMs;
 		}
 	}

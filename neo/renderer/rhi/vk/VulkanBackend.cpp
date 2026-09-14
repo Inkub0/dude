@@ -814,6 +814,8 @@ private:
 	std::vector<AnimCasterStaged>	animStaged;			// this frame's staged casters (UpdateAnimCasters)
 	std::vector<BlasGeometry>		animStagedGeoms;	// flattened per-caster geometry
 	std::vector<VkAccelerationStructureInstanceKHR>	animPendInst;	// S4: this frame's animated TLAS instances (appended in RefreshAnimBlas)
+	std::vector<uint32_t>		animPendGeoFirst;	// RR0: parallel to animPendInst — geomFirst into animStagedGeoms
+	std::vector<uint32_t>		animPendGeoCount;	// RR0: parallel to animPendInst — geometry (surface) count
 	struct RetiredAs { VkAccelerationStructureKHR as; RtBuf buf; RtBuf scratch; int ttl; };
 	std::vector<RetiredAs>		retiredAnimAs;			// fence-safe deferred AS destroys (TTL = FRAMES_IN_FLIGHT)
 	int							animBlasFrameCounter = 0;
@@ -826,6 +828,7 @@ private:
 	void			UpdateAnimCasters( const AnimCaster *casters, int count ) override;
 	void			RefreshAnimBlas() override;
 	void			AnimBlasStats( int &builds, int &refits, int &retires, int &live ) override;
+	void			RtReflStats( int &geoRows, int &geoMonsterRows ) override;
 
 	// R3 per-frame TLAS lane (movers): a TLAS slot per frame-in-flight, fully rebuilt each
 	// frame from CURRENT instance transforms. UpdateTlas (frontend, between frames) waits the
@@ -839,6 +842,21 @@ private:
 	RtBuf						rtFrameScratch[FRAMES_IN_FLIGHT];
 	uint32_t					rtFrameCapacity[FRAMES_IN_FLIGHT] = {};	// instances each slot is sized for
 	uint32_t					rtFrameCount[FRAMES_IN_FLIGHT] = {};	// instances armed for the pending build
+	// RT reflections RR0 (docs/rtx-reflections.md): a per-slot geometry table parallel to the instance
+	// buffer. One RtGeoDesc row per (instance, geometry); each instance's instanceCustomIndex is its base
+	// row. Monster rows carry the surface's gpuSkinVB/index device addresses so the reflection shader can
+	// fetch + shade the hit; static/mover rows are zero (vtxAddr 0 = "no attributes, defer to SSR").
+	struct RtGeoDesc {			// std430 / GL_EXT_buffer_reference layout (24 B, 8-aligned)
+		uint64_t				vtxAddr;
+		uint64_t				idxAddr;
+		uint32_t				vtxStride;
+		uint32_t				flags;			// bit0 = has attributes (monster)
+	};
+	static const uint32_t		RT_GEO_MONSTER = 1u;
+	RtBuf						rtFrameGeoTable[FRAMES_IN_FLIGHT];		// device-addressable RtGeoDesc[]
+	uint32_t					rtFrameGeoCap[FRAMES_IN_FLIGHT] = {};	// rows each slot is sized for
+	uint32_t					rtFrameGeoRows[FRAMES_IN_FLIGHT] = {};	// rows filled this frame (running)
+	int							rtReflStatRows = 0, rtReflStatMonsterRows = 0;	// RR0 debug readout (last frame)
 	VkDeviceAddress				rtFrameAddr[FRAMES_IN_FLIGHT] = {};
 	bool						rtFrameBuilt[FRAMES_IN_FLIGHT] = {};	// slot holds a completed build (safe to traverse)
 	int							rtPendingSlot = -1;						// slot awaiting its BeginFrame build
@@ -848,6 +866,7 @@ private:
 	int							rtAnimTlasDeferredSlot = -1;
 	VkDeviceAddress				rtCurrentAddr = 0;						// per-frame TLAS address (0 = use rtTlasAddr)
 	void	RecordFrameTlasBuild( VkCommandBuffer cb, int slot );		// build + AS-write -> frag-read barrier
+	bool	EnsureFrameGeoTable( int slot, uint32_t rows );				// RR0: (re)create the per-slot RtGeoDesc table
 	void	DestroyRtFrameSlots();
 
 	// R3 animated casters (monsters): one combined WORLD-space triangle-soup BLAS per frame
@@ -4876,6 +4895,8 @@ void VulkanBackend::RefreshAnimBlas() {
 	}
 	animBlasFrameCounter++;
 	animPendInst.clear();
+	animPendGeoFirst.clear();
+	animPendGeoCount.clear();
 	VkCommandBuffer cb = frames[frameIndex].cb;
 	bool anyWrite = false;
 	for ( size_t i = 0; i < animStaged.size(); i++ ) {
@@ -4908,7 +4929,11 @@ void VulkanBackend::RefreshAnimBlas() {
 			vi.mask = s.mask & 0xFFu;
 			vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 			vi.accelerationStructureReference = e->addr;
+			// instanceCustomIndex (RR0 geo-table base row) is assigned in the append block below, where
+			// the running row offset is known; record this caster's geometry slice for the row fill.
 			animPendInst.push_back( vi );
+			animPendGeoFirst.push_back( (uint32_t)s.geomFirst );
+			animPendGeoCount.push_back( (uint32_t)s.geomCount );
 		}
 	}
 	// one batched AS-write -> AS-read barrier for every build/refit above, ordering them before the
@@ -4938,11 +4963,34 @@ void VulkanBackend::RefreshAnimBlas() {
 		const int slot = frameIndex;
 		if ( rtFrameTlas[slot] != VK_NULL_HANDLE && rtFrameInstBuf[slot].map != NULL ) {
 			VkAccelerationStructureInstanceKHR *dst = (VkAccelerationStructureInstanceKHR *)rtFrameInstBuf[slot].map;
+			RtGeoDesc *grows = ( rtFrameGeoTable[slot].map != NULL ) ? (RtGeoDesc *)rtFrameGeoTable[slot].map : NULL;
 			uint32_t nOut = rtFrameCount[slot];
+			uint32_t gRow = rtFrameGeoRows[slot];		// = static rows; monster rows begin here (RR0)
+			uint32_t monsterRows = 0;
 			for ( size_t i = 0; i < animPendInst.size() && nOut < rtFrameCapacity[slot]; i++ ) {
+				// RR0: fill this monster's geometry rows [gRow .. gRow+geomCount) with its gpuSkinVB/index
+				// device addresses, and point its instanceCustomIndex at the base row so the reflection
+				// shader resolves table[customIndex + geometryIndex] at a hit.
+				const uint32_t base = gRow;
+				const uint32_t gc = animPendGeoCount[i];
+				if ( grows ) {
+					for ( uint32_t g = 0; g < gc && base + g < rtFrameGeoCap[slot]; g++ ) {
+						const BlasGeometry &bg = animStagedGeoms[animPendGeoFirst[i] + g];
+						grows[base + g].vtxAddr = bg.vertexAddress;
+						grows[base + g].idxAddr = bg.indexAddress;
+						grows[base + g].vtxStride = bg.vertexStride;
+						grows[base + g].flags = RT_GEO_MONSTER;
+					}
+				}
+				animPendInst[i].instanceCustomIndex = base;
 				dst[nOut++] = animPendInst[i];
+				gRow += gc;
+				monsterRows += gc;
 			}
 			rtFrameCount[slot] = nOut;
+			rtFrameGeoRows[slot] = gRow;
+			rtReflStatRows = (int)gRow;
+			rtReflStatMonsterRows = (int)monsterRows;
 			RecordFrameTlasBuild( cb, slot );
 			rtFrameBuilt[slot] = true;
 		}
@@ -5244,6 +5292,7 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		vi.mask = in.mask & 0xFFu;
 		vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 		vi.accelerationStructureReference = rtBlases[in.blas - 1].addr;
+		vi.instanceCustomIndex = (uint32_t)vkInst.size();	// RR0: geometry-table row for this instance
 		vkInst.push_back( vi );
 	}
 	// R3 animated casters: one identity instance for this slot's combined WORLD-space monster
@@ -5258,6 +5307,7 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		vi.mask = 0xFFu;
 		vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 		vi.accelerationStructureReference = rtFrameDynAddr[slot];
+		vi.instanceCustomIndex = (uint32_t)vkInst.size();	// RR0: zero-attr row (CPU-soup positions only)
 		vkInst.push_back( vi );
 	}
 	// R3.5 S4: RefreshAnimBlas will append one instance per staged animated caster to this slot after
@@ -5269,6 +5319,11 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 	}
 	const uint32_t n = (uint32_t)vkInst.size();
 	const uint32_t nCap = n + ( willDefer ? (uint32_t)animStaged.size() : 0u );
+	// RR0: geometry-table rows = these n instances (1 row each) + every staged monster surface
+	// (RefreshAnimBlas appends those rows). Size the table for both.
+	uint32_t sumGeom = 0;
+	for ( size_t i = 0; i < animStaged.size(); i++ ) { sumGeom += (uint32_t)animStaged[i].geomCount; }
+	const uint32_t geoRowsNeeded = n + sumGeom;
 
 	vkWaitForFences( device, 1, &frames[slot].fence, VK_TRUE, UINT64_MAX );
 
@@ -5337,6 +5392,18 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		memcpy( rtFrameInstBuf[slot].map, vkInst.data(), (size_t)n * sizeof( VkAccelerationStructureInstanceKHR ) );
 	}
 	rtFrameCount[slot] = n;
+	// RR0: (re)size the geometry table + zero the static/mover/dyn-soup rows (no attributes — SSR and
+	// env probes own those pixels). RefreshAnimBlas fills the monster rows [n .. n+sumGeom) after skin.
+	EnsureFrameGeoTable( slot, geoRowsNeeded > 0 ? geoRowsNeeded : 1 );
+	if ( rtFrameGeoTable[slot].map != NULL ) {
+		RtGeoDesc *rows = (RtGeoDesc *)rtFrameGeoTable[slot].map;
+		for ( uint32_t i = 0; i < n; i++ ) {
+			rows[i].vtxAddr = 0; rows[i].idxAddr = 0; rows[i].vtxStride = 0; rows[i].flags = 0;
+		}
+	}
+	rtFrameGeoRows[slot] = n;
+	rtReflStatRows = (int)n;			// static rows now; RefreshAnimBlas adds the monster rows + updates
+	rtReflStatMonsterRows = 0;
 	if ( willDefer ) {
 		// R3.5 S4: hand this slot to RefreshAnimBlas (post skin flush) — it appends the animated
 		// instances after rtFrameCount[slot] and records the TLAS build on the frame cb, so the TLAS
@@ -5368,6 +5435,28 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		rtPendingSlot = slot;				// BeginFrame records the rebuild ahead of the draws
 	}
 	rtCurrentAddr = rtFrameAddr[slot];		// this frame's mode-4 parms read this slot
+}
+
+// RR0: (re)create the slot's RtGeoDesc table when absent or outgrown. Host-visible + device-addressable
+// (CreateRtBuffer adds SHADER_DEVICE_ADDRESS) so the reflection shader reads it via buffer_reference.
+// Called after the slot's fence wait, so the old table is not in flight when destroyed.
+bool VulkanBackend::EnsureFrameGeoTable( int slot, uint32_t rows ) {
+	if ( rtFrameGeoTable[slot].buf != VK_NULL_HANDLE && rows <= rtFrameGeoCap[slot] ) {
+		return true;
+	}
+	DestroyRtBuffer( rtFrameGeoTable[slot] );
+	rtFrameGeoCap[slot] = 0;
+	const uint32_t cap = rows + rows / 2 + 16;
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, (VkDeviceSize)cap * sizeof( RtGeoDesc ), NULL, rtFrameGeoTable[slot] ) ) {
+		return false;
+	}
+	rtFrameGeoCap[slot] = cap;
+	return true;
+}
+
+void VulkanBackend::RtReflStats( int &geoRows, int &geoMonsterRows ) {
+	geoRows = rtReflStatRows;
+	geoMonsterRows = rtReflStatMonsterRows;
 }
 
 // Record the armed slot's TLAS rebuild + the barrier ordering it against fragment-shader
@@ -5410,8 +5499,11 @@ void VulkanBackend::DestroyRtFrameSlots() {
 		DestroyRtBuffer( rtFrameTlasBuf[s] );
 		DestroyRtBuffer( rtFrameInstBuf[s] );
 		DestroyRtBuffer( rtFrameScratch[s] );
+		DestroyRtBuffer( rtFrameGeoTable[s] );		// RR0 per-instance geometry table
 		rtFrameCapacity[s] = 0;
 		rtFrameCount[s] = 0;
+		rtFrameGeoCap[s] = 0;
+		rtFrameGeoRows[s] = 0;
 		rtFrameAddr[s] = 0;
 		rtFrameBuilt[s] = false;
 		// R3 animated-caster dyn-BLAS slot
