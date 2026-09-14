@@ -123,6 +123,27 @@ the frame cb, with one persistent per-BLAS scratch sized to the (larger) build s
   GPU cost down (refit ≪ rebuild, gather gone); no device-loss across a heavy fight; then the
   payoff features (RT reflections / R5 soft shadows) can consume the now-resident monsters.
 
+## Results (measured 2026-09-14, RTX 3080 Ti)
+
+S0–S4 shipped behind `r_rtAnimBlas` (default 0) and verified end to end:
+- **Correctness:** `r_rtAnimBlasTest` PASS on zfat / z7 (static, 0.00000 delta) / cacodemon — build
+  AND refit trace-identical to the read-back `gpuSkinVB`. Live A/B (`r_rtAnimBlas 0` vs `1`) under a
+  sun light: monster shadows visually identical.
+- **Lifecycle at scale:** build-once → refit-every-frame → clean retire. `live` tracks the on-screen
+  monster count exactly (no leak); refits = live × fps; builds only on first sight; retires only on
+  leave. No VK validation errors / device loss across repeated toggles + a fight.
+- **Perf: neutral** — a 4-monster sun-lit scene ran ~18.7 ms GPU with the CPU soup vs ~18.8 ms with
+  the animated path: identical within frame-to-frame noise. Expected at Doom 3 scale — the per-frame
+  monster AS-build (rebuild *or* refit) is sub-millisecond either way, lost in a GPU-bound ~18 ms
+  frame, and the CPU gather/bake/upload saved doesn't show while GPU-bound. **No regression.**
+
+**Takeaway:** the payoff of this phase is architectural, not FPS — monsters are now optional
+GPU-resident, model-space, per-entity TLAS instances (the reusable layout RT reflections / GI / R5
+soft shadows need), and the CPU-soup throwaway is bypassed for them. Because it is perf-neutral and
+device-loss territory, `r_rtAnimBlas` stays **opt-in (default 0)** until a consuming feature needs it
+— flip the default then (that is S5; the redundant CPU path for `gpuSkinVB` casters is already skipped
+whenever the cvar is on).
+
 ## Risks & mitigations (extra care — this is device-loss territory)
 
 - **Sync hazards** (skin compute → AS build → ray read). Mitigation: the explicit RT-gated
