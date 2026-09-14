@@ -276,6 +276,8 @@ private:
 	bool			SupportsRayQuery() override;
 	BlasHandle		CreateBlas( const float *positions, int numVerts, int posStride,
 	                            const int *indexes, int numIndexes ) override;
+	BlasHandle		CreateBlasFromBuffers( const BlasGeometry *geoms, int count, bool allowUpdate ) override;
+	void			RefitBlas( BlasHandle blas, const BlasGeometry *geoms, int count ) override;
 	void			DestroyBlas( BlasHandle blas ) override;
 	unsigned long long	BuildTlas( const RtInstance *instances, int count ) override;
 	unsigned long long	GetTlasAddress() override;
@@ -766,6 +768,11 @@ private:
 		VkAccelerationStructureKHR	as = VK_NULL_HANDLE;	// VK_NULL_HANDLE = freed slot
 		RtBuf						buf;
 		VkDeviceAddress				addr = 0;				// AS device address (TLAS instances consume this)
+		// R3.5 animated (device-buffer-fed) BLAS: built with ALLOW_UPDATE and refit in place from
+		// gpuSkinVB each pose change. updateScratch is the persistent scratch RefitBlas reuses; both
+		// stay unset (0/false) for the synchronous CPU-fed CreateBlas path.
+		RtBuf						updateScratch;
+		bool						updatable = false;
 	};
 	std::vector<RtBlas>			rtBlases;					// BlasHandle = index + 1
 	VkAccelerationStructureKHR	rtTlas = VK_NULL_HANDLE;
@@ -4446,6 +4453,190 @@ BlasHandle VulkanBackend::CreateBlas( const float *positions, int numVerts, int 
 	return (BlasHandle)rtBlases.size();
 }
 
+// R3.5: an animated BLAS takes one geometry per surface; a Doom 3 character is ~6-10 srfTriangles,
+// so a fixed stack cap avoids per-frame heap churn in RefitBlas (the hot path). Well above any real
+// model's surface count; CreateBlasFromBuffers/RefitBlas reject a larger set rather than truncate.
+static const int MAX_BLAS_GEOMS = 64;
+
+// Fill the Vk triangle-geometry + build-range arrays for a device-buffer-fed BLAS from BlasGeometry[].
+// Shared by CreateBlasFromBuffers (BUILD) and RefitBlas (UPDATE) — only the mode/scratch/AS handles
+// differ between them, the per-surface geometry description is identical. Caller guarantees
+// count <= MAX_BLAS_GEOMS. xyz is the first 3 floats at vertexAddress; indices are 32-bit, surface-local.
+static void R_VkFillBlasGeoms( const RHI::BlasGeometry *geoms, int count,
+		VkAccelerationStructureGeometryKHR *vkGeoms, VkAccelerationStructureBuildRangeInfoKHR *ranges,
+		uint32_t *primCounts ) {
+	for ( int i = 0; i < count; i++ ) {
+		const RHI::BlasGeometry &g = geoms[i];
+		VkAccelerationStructureGeometryKHR &vg = vkGeoms[i];
+		memset( &vg, 0, sizeof( vg ) );
+		vg.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+		vg.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+		vg.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+		vg.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+		vg.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+		vg.geometry.triangles.vertexData.deviceAddress = (VkDeviceAddress)g.vertexAddress;
+		vg.geometry.triangles.vertexStride = (VkDeviceSize)g.vertexStride;
+		vg.geometry.triangles.maxVertex = g.vertexCount > 0 ? g.vertexCount - 1 : 0;
+		vg.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
+		vg.geometry.triangles.indexData.deviceAddress = (VkDeviceAddress)g.indexAddress;
+		memset( &ranges[i], 0, sizeof( ranges[i] ) );
+		ranges[i].primitiveCount = g.indexCount / 3;
+		primCounts[i] = g.indexCount / 3;
+	}
+}
+
+// Build one multi-geometry BLAS directly from GPU device buffers (gpuSkinVB + static index buffers),
+// synchronously on the upload cb. allowUpdate makes it refit-capable and allocates the persistent
+// update-scratch RefitBlas reuses. Rare (first sight / topology change); the per-frame path is RefitBlas.
+BlasHandle VulkanBackend::CreateBlasFromBuffers( const BlasGeometry *geoms, int count, bool allowUpdate ) {
+	if ( !SupportsRayQuery() || geoms == NULL || count <= 0 || count > MAX_BLAS_GEOMS ) {
+		return 0;
+	}
+	VkAccelerationStructureGeometryKHR vkGeoms[MAX_BLAS_GEOMS];
+	VkAccelerationStructureBuildRangeInfoKHR ranges[MAX_BLAS_GEOMS];
+	uint32_t primCounts[MAX_BLAS_GEOMS];
+	R_VkFillBlasGeoms( geoms, count, vkGeoms, ranges, primCounts );
+
+	VkBuildAccelerationStructureFlagsKHR flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+	if ( allowUpdate ) {
+		flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+	}
+	VkAccelerationStructureBuildGeometryInfoKHR bgi = {};
+	bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+	bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+	bgi.flags = flags;
+	bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+	bgi.geometryCount = (uint32_t)count;
+	bgi.pGeometries = vkGeoms;
+	VkAccelerationStructureBuildSizesInfoKHR sizes = {};
+	sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+	pfnGetAsBuildSizes( device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, primCounts, &sizes );
+
+	RtBlas blas;
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, blas.buf ) ) {
+		return 0;
+	}
+	RtBuf scratch;
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, scratch ) ) {
+		DestroyRtBuffer( blas.buf );
+		return 0;
+	}
+	if ( allowUpdate ) {
+		// persistent scratch sized for future in-place UPDATE builds (smaller than the build scratch)
+		if ( !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.updateScratchSize + asScratchAlignment, NULL, blas.updateScratch ) ) {
+			DestroyRtBuffer( blas.buf );
+			DestroyRtBuffer( scratch );
+			return 0;
+		}
+		blas.updatable = true;
+	}
+	VkAccelerationStructureCreateInfoKHR asci = {};
+	asci.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+	asci.buffer = blas.buf.buf;
+	asci.size = sizes.accelerationStructureSize;
+	asci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+	if ( !vkCheck( pfnCreateAs( device, &asci, NULL, &blas.as ), "vkCreateAccelerationStructureKHR(blasFromBuffers)" ) ) {
+		blas.as = VK_NULL_HANDLE;
+		DestroyRtBuffer( blas.buf );
+		DestroyRtBuffer( scratch );
+		DestroyRtBuffer( blas.updateScratch );
+		return 0;
+	}
+	bgi.dstAccelerationStructure = blas.as;
+	bgi.scratchData.deviceAddress = ( scratch.addr + asScratchAlignment - 1 ) & ~(VkDeviceAddress)( asScratchAlignment - 1 );
+	const VkAccelerationStructureBuildRangeInfoKHR *pRange = ranges;
+	vkQueueWaitIdle( gfxQueue );
+	vkResetCommandBuffer( uploadCb, 0 );
+	VkCommandBufferBeginInfo bbi = {};
+	bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer( uploadCb, &bbi );
+	pfnCmdBuildAs( uploadCb, 1, &bgi, &pRange );
+	vkEndCommandBuffer( uploadCb );
+	VkSubmitInfo si = {};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &uploadCb;
+	vkResetFences( device, 1, &uploadFence );
+	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	DestroyRtBuffer( scratch );
+
+	VkAccelerationStructureDeviceAddressInfoKHR dai = {};
+	dai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+	dai.accelerationStructure = blas.as;
+	blas.addr = pfnGetAsDeviceAddress( device, &dai );
+	for ( size_t i = 0; i < rtBlases.size(); i++ ) {
+		if ( rtBlases[i].as == VK_NULL_HANDLE ) {
+			rtBlases[i] = blas;
+			return (BlasHandle)( i + 1 );
+		}
+	}
+	rtBlases.push_back( blas );
+	return (BlasHandle)rtBlases.size();
+}
+
+// Refit an ALLOW_UPDATE BLAS in place from the same topology's current device buffers (skinning moved
+// the vertices; triangle count / index layout fixed). In-frame it records on the frame cb + an
+// AS-write -> AS-read barrier so the following TLAS build sees the refit; out of frame (validation) it
+// runs synchronously on the upload cb.
+void VulkanBackend::RefitBlas( BlasHandle blas, const BlasGeometry *geoms, int count ) {
+	if ( !SupportsRayQuery() || blas == 0 || (size_t)blas > rtBlases.size()
+		|| geoms == NULL || count <= 0 || count > MAX_BLAS_GEOMS ) {
+		return;
+	}
+	RtBlas &b = rtBlases[blas - 1];
+	if ( b.as == VK_NULL_HANDLE || !b.updatable ) {
+		return;
+	}
+	VkAccelerationStructureGeometryKHR vkGeoms[MAX_BLAS_GEOMS];
+	VkAccelerationStructureBuildRangeInfoKHR ranges[MAX_BLAS_GEOMS];
+	uint32_t primCounts[MAX_BLAS_GEOMS];
+	R_VkFillBlasGeoms( geoms, count, vkGeoms, ranges, primCounts );
+
+	VkAccelerationStructureBuildGeometryInfoKHR bgi = {};
+	bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+	bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+	// UPDATE build flags must match the original build's flags exactly.
+	bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+	bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+	bgi.srcAccelerationStructure = b.as;
+	bgi.dstAccelerationStructure = b.as;			// in-place refit
+	bgi.geometryCount = (uint32_t)count;
+	bgi.pGeometries = vkGeoms;
+	bgi.scratchData.deviceAddress = ( b.updateScratch.addr + asScratchAlignment - 1 ) & ~(VkDeviceAddress)( asScratchAlignment - 1 );
+	const VkAccelerationStructureBuildRangeInfoKHR *pRange = ranges;
+
+	if ( frameOpen && !skipFrame && !insideScenePass && !insideTargetPass ) {
+		// hot path: record the refit on the frame cb, ahead of the TLAS build that reads this BLAS.
+		VkCommandBuffer cb = frames[frameIndex].cb;
+		pfnCmdBuildAs( cb, 1, &bgi, &pRange );
+		VkMemoryBarrier mb = {};
+		mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+		mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+			VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &mb, 0, NULL, 0, NULL );
+		return;
+	}
+	// out of frame (validation): synchronous refit on the upload cb. Stalls; never per-frame.
+	vkQueueWaitIdle( gfxQueue );
+	vkResetCommandBuffer( uploadCb, 0 );
+	VkCommandBufferBeginInfo bbi = {};
+	bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer( uploadCb, &bbi );
+	pfnCmdBuildAs( uploadCb, 1, &bgi, &pRange );
+	vkEndCommandBuffer( uploadCb );
+	VkSubmitInfo si = {};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &uploadCb;
+	vkResetFences( device, 1, &uploadFence );
+	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+}
+
 void VulkanBackend::DestroyBlas( BlasHandle blas ) {
 	if ( blas == 0 || (size_t)blas > rtBlases.size() ) {
 		return;
@@ -4457,6 +4648,8 @@ void VulkanBackend::DestroyBlas( BlasHandle blas ) {
 		b.as = VK_NULL_HANDLE;
 	}
 	DestroyRtBuffer( b.buf );
+	DestroyRtBuffer( b.updateScratch );
+	b.updatable = false;
 	b.addr = 0;
 }
 
@@ -4911,6 +5104,7 @@ void VulkanBackend::DestroyRtScene() {
 			pfnDestroyAs( device, rtBlases[i].as, NULL );
 		}
 		DestroyRtBuffer( rtBlases[i].buf );
+		DestroyRtBuffer( rtBlases[i].updateScratch );	// R3.5 updatable BLAS scratch (no-op if unset)
 	}
 	rtBlases.clear();
 }

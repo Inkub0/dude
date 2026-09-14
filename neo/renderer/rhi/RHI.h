@@ -439,6 +439,31 @@ public:
 	virtual BlasHandle	CreateBlas( const float *positions, int numVerts, int posStride,
 	                                const int *indexes, int numIndexes ) { return 0; }
 	virtual void	DestroyBlas( BlasHandle blas ) {}
+	// One triangle geometry of a device-buffer-fed BLAS (R3.5 animated casters): a surface's
+	// GPU-resident skinned vertices + its static index buffer, both referenced by device address
+	// (GetBufferDeviceAddress). The first 3 floats at vertexAddress are xyz; vertexStride is the
+	// full vertex size (pass sizeof(idDrawVert)=60 to feed gpuSkinVB in place). indexCount is 3x
+	// triangles; the 32-bit indices are local to this surface's own vertices (0..vertexCount-1).
+	struct BlasGeometry {
+		unsigned long long	vertexAddress = 0;	// device address of vertex xyz (VkDeviceAddress)
+		unsigned int		vertexStride = 0;	// bytes between consecutive vertices
+		unsigned int		vertexCount = 0;	// vertices (drives maxVertex)
+		unsigned long long	indexAddress = 0;	// device address of the 32-bit index buffer
+		unsigned int		indexCount = 0;		// 3 * triangles
+	};
+	// Build ONE multi-geometry BLAS straight from GPU device buffers (no CPU staging), one geometry
+	// per surface. allowUpdate builds it refit-capable (ALLOW_UPDATE) and allocates the persistent
+	// update-scratch RefitBlas reuses. SYNCHRONOUS (load-time / first-sight / topology change; the
+	// per-frame hot path is RefitBlas). The source buffers must already hold the pose to capture, so
+	// order the skinning compute before this. Returns a BlasHandle or 0. VK + RT hardware only; else 0.
+	virtual BlasHandle	CreateBlasFromBuffers( const BlasGeometry *geoms, int count, bool allowUpdate ) { return 0; }
+	// Refit an ALLOW_UPDATE BLAS in place from the SAME topology's current device buffers (only the
+	// vertices moved — skinning). Inside an open frame it records on the frame command buffer (never
+	// stalls) with an AS-write->AS-read barrier for the following TLAS build, so call it after the skin
+	// compute + its compute->AS-build barrier and BEFORE the TLAS build that reads this BLAS. Called
+	// out of frame (validation) it runs synchronously on the upload queue. geoms must match the build's
+	// per-geometry vertex/primitive counts (topology fixed). VK + RT hardware only; else no-op.
+	virtual void	RefitBlas( BlasHandle blas, const BlasGeometry *geoms, int count ) {}
 	struct RtInstance {
 		float			transform[12];		// row-major 3x4 (VkTransformMatrixKHR layout)
 		BlasHandle		blas;
