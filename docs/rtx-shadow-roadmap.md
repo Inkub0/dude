@@ -118,6 +118,21 @@ motion vectors needed.**
   > ~0.2 ms/frame per-frame TLAS rebuild when nothing moves — RT is now ~free when idle, which
   > is what makes leaving the tier's RT features on affordable.
 
+### R3.5. Animated BLAS from `gpuSkinVB` (deform-once refit) · LARGE · depends R3 + GPU skinning  **[PLANNED — active next, 2026-09-14]**
+The "deform-once refit" lane named in the sequencing below, now unblocked because GPU skinning
+is solid + default-on (Vulkan). R3's monster casters currently round-trip through the CPU — each
+frame their CPU-skinned verts are baked to world space into one soup and a single combined BLAS is
+**full-rebuilt** (`RHI::UpdateDynamicGeometry`). Replace that with a **per-entity, model-space,
+multi-geometry BLAS built straight from the GPU-resident `gpuSkinVB`**, **refit** (not rebuilt) on
+pose change, instanced into the per-frame TLAS with each entity's `modelMatrix`. Model-space BLAS
+splits the motion: moving-same-pose → just re-instance (no BLAS work); animating → cheap refit.
+This makes animated geometry a **first-class TLAS citizen**, which is the prerequisite for RT
+reflections / GI / soft shadows *on monsters* (today's soup is shadow-only and throwaway). Staged
+validator-first (S0 prereqs → S1 GPU-buffer BLAS + refit RHI → S2 `r_rtAnimBlasTest` diff-vs-soup →
+S3 per-entity BLAS lifecycle → S4 TLAS wire-in w/ CPU-soup fallback → S5 retire the CPU path → S6
+verify). Gated on `SupportsRayQuery() && gpuSkinVB`; CPU soup stays as the never-drop-a-caster
+fallback. **Full detail: [rtx-animated-blas.md](rtx-animated-blas.md).**
+
 ### R4. Hybrid scheduling · MED · depends R3
 The AMD FidelityFX Hybrid Shadows model, adapted: keep shadow maps as the noise-free base where they
 are cheap (single/small lights, cached static cubes), trace where they are weak or wrong —
@@ -174,8 +189,15 @@ T1 unified-buffer caster pass — DEFERRED: only as Phase-3.2b pilot or for non-
 T2 cube scheduling — opportunistic, low priority
 ```
 
-**Recommended next big steps: R2 or R1, either order.** R2 is the item everything RTX hangs off
-(deform-once removes its hardest prerequisite; validator-first lets it land without touching a
-pixel). R1 now carries immediate user-visible value of its own (FSR2 Native-AA beats SMAA on the
-shimmer Doom 3 actually suffers from) and pre-pays the render-scale headroom the RT tiers will
-spend — a legitimate first pick if AA quality is the itch.
+**Status (2026-09-14): R1 ✅, R2 ✅, R3 ✅ (sun + animated monster casters + moving point lights,
+"Ultra Nightmare" tier).** The monster casters ship via the CPU world-soup + per-frame full BLAS
+rebuild.
+
+**Recommended next big step: R3.5 — animated BLAS from `gpuSkinVB`** (deform-once refit; plan in
+[rtx-animated-blas.md](rtx-animated-blas.md)). Now that GPU skinning is solid + the Vulkan default,
+its per-surface skinned output is the geometry an animated BLAS wants. Doing this before R4/R5 and
+before RT reflections is deliberate: it turns monsters into GPU-resident TLAS instances, which is
+the shared prerequisite every RT-on-dynamic feature (reflections, GI, soft shadows on monsters)
+depends on — and it deletes R3's per-frame CPU gather + full rebuild. Validator-first (S2
+`r_rtAnimBlasTest`), so the mechanics land with zero visible change before the live shadow path
+moves in S4.
