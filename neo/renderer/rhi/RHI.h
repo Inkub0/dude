@@ -500,6 +500,12 @@ public:
 	// VK-only; GL3 no-ops.
 	virtual void	UpdateDynamicGeometry( const float *worldPositions, int numVerts,
 	                                       const int *indexes, int numIndexes ) {}
+	// Build a throwaway TLAS that does NOT replace the persistent scene TLAS, for validators/tools
+	// that trace test geometry while the live scene stays intact. Instances reference BLAS handles
+	// from CreateBlas / CreateBlasFromBuffers. Synchronous; release with DestroyStandaloneTlas.
+	// Returns the TLAS device address or 0. VK + RT hardware only; else 0.
+	virtual unsigned long long	BuildStandaloneTlas( const RtInstance *instances, int count ) { return 0; }
+	virtual void	DestroyStandaloneTlas() {}
 	// Free the TLAS and every live BLAS (level transition / shutdown).
 	virtual void	DestroyRtScene() {}
 

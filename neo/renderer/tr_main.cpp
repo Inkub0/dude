@@ -37,6 +37,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/Session.h"
 #include "renderer/RenderWorld_local.h"
 #include "renderer/ModelManager.h"
+#include "renderer/VertexCache.h"		// R3.5 r_rtAnimBlasTest: index-buffer handle from tri->indexCache
 
 #include "renderer/tr_local.h"
 #include "renderer/rhi/RHI.h"
@@ -1104,6 +1105,8 @@ static idCVar r_rtWorld( "r_rtWorld", "0", CVAR_RENDERER | CVAR_BOOL,
 	"build + keep the world ray-query acceleration structure: worldspawn areas + static entity models (Vulkan + RT hardware; prereq for RT shadows, auto-implied by r_rtSunShadows)" );
 static idCVar r_rtWorldTest( "r_rtWorldTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"validate the ray-query world scene (areas + static entity instances) vs a CPU ray trace (Vulkan + RT hardware; one-shot, self-clears)" );
+static idCVar r_rtAnimBlasTest( "r_rtAnimBlasTest", "0", CVAR_RENDERER | CVAR_BOOL,
+	"validate an animated monster's BLAS built from its GPU-skinned gpuSkinVB (build + refit) vs a CPU trace of the same buffers (Vulkan + RT hardware; needs a GPU-skinned caster in view; one-shot, self-clears)" );
 
 struct rtAreaSlice_t { int vertStart, numVerts, idxStart, numIdx; };
 struct rtModelSlice_t {
@@ -1983,6 +1986,286 @@ static void R_RtWorldValidate( void ) {
 	#undef RTTEST_CLEANUP
 }
 
+// ---- r_rtAnimBlasTest (S2): validate a device-buffer-fed animated BLAS --------------------------
+// The claim S3+ stands on: a BLAS built/refit straight from a monster's GPU-skinned gpuSkinVB traces
+// the SAME geometry the buffers hold. We read gpuSkinVB back to CPU (the exact bytes the BLAS build
+// consumes), build a model-space CPU soup from it, then trace a grid against the GPU BLAS and diff
+// every hit vs a CPU Moller-Trumbore sweep of that soup. This isolates the device-buffer BLAS path
+// (build + in-place refit) from skin correctness (the GPU-skin work already established that) and
+// sidesteps any one-frame pose lag between gpuSkinVB and tri->verts.
+
+// One visible GPU-skinned shadow caster + its casting surfaces that have a gpuSkinVB and a
+// device-addressable static index buffer. NULL if none in view.
+static const idRenderEntityLocal *R_RtFindSkinnedCaster( idList<const srfTriangles_t *> &outSurfs ) {
+	outSurfs.Clear();
+	if ( tr.viewDef == NULL ) {
+		return NULL;
+	}
+	for ( const viewEntity_t *vEnt = tr.viewDef->viewEntitys; vEnt; vEnt = vEnt->next ) {
+		const idRenderEntityLocal *def = vEnt->entityDef;
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || def->parms.weaponDepthHack
+			|| def->parms.hModel->IsDynamicModel() != DM_CACHED || def->dynamicModel == NULL ) {
+			continue;
+		}
+		const idRenderModel *dm = def->dynamicModel;
+		idList<const srfTriangles_t *> surfs;
+		for ( int s = 0; s < dm->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = dm->Surface( s );
+			const srfTriangles_t *tri = surf->geometry;
+			if ( R_RtSurfCasts( surf ) && tri->gpuSkinVB != 0
+				&& tri->indexCache != NULL && tri->indexCache->vbo != 0 ) {
+				surfs.Append( tri );
+			}
+		}
+		if ( surfs.Num() > 0 ) {
+			outSurfs = surfs;
+			return def;
+		}
+	}
+	return NULL;
+}
+
+// Trace GxG rays from `origin` toward the bounds center-plane against tlasAddr on the GPU, and diff
+// each committed t vs a CPU trace of the same soup. Hit/miss flips a slightly-perturbed CPU ray
+// reproduces are bucketed boundary-FP (edge grazes), like the other RT validators. Accumulates.
+static bool R_RtAnimTraceCompare( rhi::RHI *r, rhi::ShaderHandle shader, unsigned long long tlasAddr,
+		const idVec3 &origin, int G, const idVec3 &center, float radius,
+		const float *cpuPos, const int *cpuIdx, int totalIdx,
+		int &hits, int &mismatch, int &boundary, int &genuine, int &firstBad ) {
+	const int NR = G * G;
+	const float TMAX = 100000.0f;
+	idVec3 D = center - origin;
+	D.Normalize();
+	idVec3 e1 = D.Cross( idVec3( 0.0f, 0.0f, 1.0f ) );
+	if ( e1.LengthSqr() < 1e-6f ) {
+		e1 = D.Cross( idVec3( 0.0f, 1.0f, 0.0f ) );
+	}
+	e1.Normalize();
+	idVec3 e2 = D.Cross( e1 );
+	e2.Normalize();
+	idVec3 *dirs = (idVec3 *)Mem_Alloc16( NR * (int)sizeof( idVec3 ) );
+	float *dirBlob = (float *)Mem_Alloc16( NR * 4 * (int)sizeof( float ) );
+	for ( int i = 0; i < NR; i++ ) {
+		const float sx = ( ( (float)( i % G ) + 0.5f ) / (float)G * 2.0f - 1.0f ) * 1.4f * radius;
+		const float sy = ( ( (float)( i / G ) + 0.5f ) / (float)G * 2.0f - 1.0f ) * 1.4f * radius;
+		idVec3 target = center + sx * e1 + sy * e2;
+		dirs[i] = target - origin;
+		dirs[i].Normalize();
+		dirBlob[i * 4 + 0] = dirs[i][0]; dirBlob[i * 4 + 1] = dirs[i][1];
+		dirBlob[i * 4 + 2] = dirs[i][2]; dirBlob[i * 4 + 3] = 0.0f;
+	}
+	float *gpuT = (float *)Mem_Alloc16( NR * (int)sizeof( float ) );
+	float *seed = (float *)Mem_Alloc16( NR * (int)sizeof( float ) );
+	for ( int i = 0; i < NR; i++ ) { seed[i] = -3.0f; }		// sentinel: dead dispatch != miss
+	rhi::BufferHandle bOut = r->CreateBuffer( rhi::BU_STORAGE, NR * (int)sizeof( float ), seed );
+	rhi::BufferHandle bRays = r->CreateBuffer( rhi::BU_STORAGE, NR * 4 * (int)sizeof( float ), dirBlob );
+	struct { unsigned int tlasLo, tlasHi, count; float ox, oy, oz, tmax; } pc;
+	pc.tlasLo = (unsigned int)( tlasAddr & 0xFFFFFFFFu );
+	pc.tlasHi = (unsigned int)( tlasAddr >> 32 );
+	pc.count = (unsigned int)NR;
+	pc.ox = origin[0]; pc.oy = origin[1]; pc.oz = origin[2];
+	pc.tmax = TMAX;
+	rhi::ComputeArgs ca;
+	memset( &ca, 0, sizeof( ca ) );
+	ca.shader = shader;
+	ca.storage[0] = bOut;
+	ca.storage[1] = bRays;
+	ca.pushConstants = &pc;
+	ca.pushConstantSize = (int)sizeof( pc );
+	ca.groupsX = ( NR + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
+	r->DispatchSync( ca );
+	const bool traced = r->ReadBuffer( bOut, gpuT, NR * (int)sizeof( float ) );
+	r->DestroyBuffer( bOut );
+	r->DestroyBuffer( bRays );
+	if ( traced ) {
+		for ( int i = 0; i < NR; i++ ) {
+			const float cpuT = R_RtCpuTrace( origin, dirs[i], TMAX, cpuPos, cpuIdx, 0, totalIdx, 0 );
+			const bool gpuHit = gpuT[i] >= 0.0f;
+			if ( gpuHit ) {
+				hits++;
+			}
+			const float tol = 0.05f + ( cpuT > 0.0f ? cpuT : 0.0f ) * 0.001f;
+			if ( ( gpuHit == ( cpuT >= 0.0f ) ) && ( !gpuHit || ( gpuT[i] > cpuT - tol && gpuT[i] < cpuT + tol ) ) ) {
+				continue;
+			}
+			mismatch++;
+			bool isBoundary = false;
+			for ( int p = 0; p < 4 && !isBoundary; p++ ) {
+				idVec3 pd = dirs[i] + ( ( p & 1 ) ? 0.002f : -0.002f ) * ( ( p & 2 ) ? e1 : e2 );
+				pd.Normalize();
+				const float pT = R_RtCpuTrace( origin, pd, TMAX, cpuPos, cpuIdx, 0, totalIdx, 0 );
+				const float ptol = 0.05f + ( pT > 0.0f ? pT : 0.0f ) * 0.005f;
+				isBoundary = ( gpuHit == ( pT >= 0.0f ) ) && ( !gpuHit || ( gpuT[i] > pT - ptol && gpuT[i] < pT + ptol ) );
+			}
+			if ( isBoundary ) {
+				boundary++;
+			} else {
+				genuine++;
+				if ( firstBad < 0 ) { firstBad = i; }
+			}
+		}
+	}
+	Mem_Free16( dirs );
+	Mem_Free16( dirBlob );
+	Mem_Free16( gpuT );
+	Mem_Free16( seed );
+	return traced;
+}
+
+static void R_RtAnimBlasValidate( void ) {
+	if ( !r_rtAnimBlasTest.GetBool() ) {
+		if ( r_rtAnimBlasTest.IsModified() ) {
+			r_rtAnimBlasTest.ClearModified();
+		}
+		return;
+	}
+	if ( R_RtSceneWorld() == NULL ) {
+		return;							// stay armed until a map-world primary view renders
+	}
+	r_rtAnimBlasTest.SetBool( false );	// consume: one-shot
+	r_rtAnimBlasTest.ClearModified();
+
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r == NULL || !r->SupportsRayQuery() ) {
+		common->Printf( "r_rtAnimBlasTest: unavailable (needs Vulkan + KHR_ray_query hardware)\n" );
+		return;
+	}
+	idList<const srfTriangles_t *> surfs;
+	const idRenderEntityLocal *def = R_RtFindSkinnedCaster( surfs );
+	if ( def == NULL ) {
+		common->Printf( "r_rtAnimBlasTest: no visible GPU-skinned shadow caster (need r_gpuSkinning on + a monster in view)\n" );
+		return;
+	}
+	const int MAXG = 64;			// mirrors the backend's MAX_BLAS_GEOMS
+	int nSurf = surfs.Num();
+	const bool truncated = nSurf > MAXG;
+	if ( truncated ) { nSurf = MAXG; }
+
+	// build BlasGeometry[] (device addresses) + a model-space CPU soup from the read-back gpuSkinVB
+	rhi::RHI::BlasGeometry geoms[64];
+	int totalVerts = 0, totalIdx = 0;
+	for ( int s = 0; s < nSurf; s++ ) {
+		totalVerts += surfs[s]->numVerts;
+		totalIdx += surfs[s]->numIndexes;
+	}
+	float *cpuPos = (float *)Mem_Alloc16( totalVerts * 3 * (int)sizeof( float ) );
+	int *cpuIdx = (int *)Mem_Alloc16( totalIdx * (int)sizeof( int ) );
+	idDrawVert *tmp = (idDrawVert *)Mem_Alloc16( totalVerts * (int)sizeof( idDrawVert ) );
+	int vbase = 0, ibase = 0;
+	float skinDelta = 0.0f;			// informational: |gpuSkinVB.xyz - tri->verts.xyz| (skin path + 1-frame lag)
+	bool readOk = true;
+	for ( int s = 0; s < nSurf; s++ ) {
+		const srfTriangles_t *tri = surfs[s];
+		geoms[s].vertexAddress = r->GetBufferDeviceAddress( tri->gpuSkinVB );
+		geoms[s].vertexStride = (unsigned int)sizeof( idDrawVert );
+		geoms[s].vertexCount = (unsigned int)tri->numVerts;
+		geoms[s].indexAddress = r->GetBufferDeviceAddress( (rhi::BufferHandle)tri->indexCache->vbo );
+		geoms[s].indexCount = (unsigned int)tri->numIndexes;
+		if ( geoms[s].vertexAddress == 0 || geoms[s].indexAddress == 0 ) {
+			readOk = false;			// S0 usage flags missing, or index buffer fell back to host memory
+			break;
+		}
+		idDrawVert *sv = tmp + vbase;
+		if ( !r->ReadBuffer( tri->gpuSkinVB, sv, tri->numVerts * (int)sizeof( idDrawVert ) ) ) {
+			readOk = false;
+			break;
+		}
+		for ( int k = 0; k < tri->numVerts; k++ ) {
+			float *dst = cpuPos + ( vbase + k ) * 3;
+			dst[0] = sv[k].xyz.x; dst[1] = sv[k].xyz.y; dst[2] = sv[k].xyz.z;
+			const idVec3 d = sv[k].xyz - tri->verts[k].xyz;
+			const float mlen = d.Length();
+			if ( mlen > skinDelta ) { skinDelta = mlen; }
+		}
+		for ( int m = 0; m < tri->numIndexes; m++ ) {
+			cpuIdx[ibase + m] = vbase + tri->indexes[m];
+		}
+		vbase += tri->numVerts;
+		ibase += tri->numIndexes;
+	}
+	Mem_Free16( tmp );
+	if ( !readOk ) {
+		common->Printf( "r_rtAnimBlasTest: FAIL (no device address / readback for gpuSkinVB or index buffer -- S0 usage flags?)\n" );
+		Mem_Free16( cpuPos ); Mem_Free16( cpuIdx );
+		return;
+	}
+
+	// model-space bounds of the soup -> synthetic ray origins (3 corners so rays hit >1 face)
+	idVec3 mn( idMath::INFINITY, idMath::INFINITY, idMath::INFINITY );
+	idVec3 mx( -idMath::INFINITY, -idMath::INFINITY, -idMath::INFINITY );
+	for ( int k = 0; k < totalVerts; k++ ) {
+		const idVec3 v( cpuPos[k * 3 + 0], cpuPos[k * 3 + 1], cpuPos[k * 3 + 2] );
+		mn.x = Min( mn.x, v.x ); mn.y = Min( mn.y, v.y ); mn.z = Min( mn.z, v.z );
+		mx.x = Max( mx.x, v.x ); mx.y = Max( mx.y, v.y ); mx.z = Max( mx.z, v.z );
+	}
+	const idVec3 center = ( mn + mx ) * 0.5f;
+	float radius = ( ( mx - mn ) * 0.5f ).Length();
+	if ( radius < 1.0f ) { radius = 1.0f; }
+	const float stand = 3.0f * radius;
+	idVec3 dirsCorner[3] = { idVec3( 1, 1, 1 ), idVec3( -1, -1, 1 ), idVec3( 1, -1, -1 ) };
+	idVec3 origins[3];
+	for ( int c = 0; c < 3; c++ ) {
+		idVec3 n = dirsCorner[c]; n.Normalize();
+		origins[c] = center + n * stand;
+	}
+
+	// build the GPU BLAS from gpuSkinVB, wrap in a standalone TLAS (does not touch the live scene)
+	rhi::BlasHandle blas = r->CreateBlasFromBuffers( geoms, nSurf, true );
+	if ( blas == 0 ) {
+		common->Printf( "r_rtAnimBlasTest: FAIL (CreateBlasFromBuffers)\n" );
+		Mem_Free16( cpuPos ); Mem_Free16( cpuIdx );
+		return;
+	}
+	rhi::RHI::RtInstance inst;
+	memset( &inst, 0, sizeof( inst ) );
+	inst.transform[0] = 1.0f; inst.transform[5] = 1.0f; inst.transform[10] = 1.0f;	// identity 3x4
+	inst.blas = blas;
+	inst.mask = 0xFF;
+
+	static rhi::ShaderHandle s_animShader = 0;
+	if ( s_animShader == 0 ) {
+		s_animShader = r->CreateComputeShader( "cs_rtanimblastest", RTWORLD_SRC );
+	}
+	const int G = 16;
+	int hits = 0, mm = 0, bd = 0, gen = 0, fb = -1;
+	bool traced = ( s_animShader != 0 );
+	unsigned long long tlas = r->BuildStandaloneTlas( &inst, 1 );
+	if ( tlas != 0 && traced ) {
+		for ( int c = 0; c < 3; c++ ) {
+			traced = R_RtAnimTraceCompare( r, s_animShader, tlas, origins[c], G, center, radius,
+				cpuPos, cpuIdx, totalIdx, hits, mm, bd, gen, fb ) && traced;
+		}
+	}
+
+	// refit the BLAS in place from the same buffers, rebuild the TLAS (bounds may shift), re-trace:
+	// proves the UPDATE path does not corrupt the AS
+	r->RefitBlas( blas, geoms, nSurf );		// out of frame -> synchronous
+	int rhits = 0, rmm = 0, rbd = 0, rgen = 0, rfb = -1;
+	bool rtraced = traced;
+	unsigned long long tlas2 = r->BuildStandaloneTlas( &inst, 1 );
+	if ( tlas2 != 0 && rtraced ) {
+		for ( int c = 0; c < 3; c++ ) {
+			rtraced = R_RtAnimTraceCompare( r, s_animShader, tlas2, origins[c], G, center, radius,
+				cpuPos, cpuIdx, totalIdx, rhits, rmm, rbd, rgen, rfb ) && rtraced;
+		}
+	}
+
+	const bool buildPass = traced && tlas != 0 && gen == 0 && hits > 0;
+	const bool refitPass = rtraced && tlas2 != 0 && rgen == 0 && rhits > 0;
+	common->Printf( "r_rtAnimBlasTest: '%s' %d surf%s, %d tris, %d verts; "
+		"build %s (%d/%d hit, mismatch %d = %d bFP + %d genuine@%d); "
+		"refit %s (%d/%d hit, %d genuine@%d); |gpuSkinVB-verts| max %.5f\n",
+		def->parms.hModel->Name(), nSurf, truncated ? "(capped)" : "", totalIdx / 3, totalVerts,
+		buildPass ? "PASS" : ( traced ? "FAIL" : "no-trace" ), hits, G * G * 3, mm, bd, gen, fb,
+		refitPass ? "PASS" : ( rtraced ? "FAIL" : "no-trace" ), rhits, G * G * 3, rgen, rfb,
+		skinDelta );
+
+	r->DestroyBlas( blas );
+	r->DestroyStandaloneTlas();
+	Mem_Free16( cpuPos );
+	Mem_Free16( cpuIdx );
+}
+
 /*
 ==========================
 R_TransformModelToClip
@@ -2495,6 +2778,9 @@ void R_RenderView( viewDef_t *parms ) {
 	// is the one-shot GPU-vs-CPU ray diff. Both self-gate; Vulkan + RT hardware only.
 	R_RtWorldUpdate();
 	R_RtWorldValidate();
+	// R3.5 animated-BLAS validator (docs/rtx-animated-blas.md S2): one-shot diff of a monster's
+	// gpuSkinVB-fed BLAS (build + refit) vs a CPU trace of the same buffers. Self-gates; VK + RT only.
+	R_RtAnimBlasValidate();
 
 	// any viewLight that didn't have visible surfaces can have it's shadows removed
 	R_RemoveUnecessaryViewLights();

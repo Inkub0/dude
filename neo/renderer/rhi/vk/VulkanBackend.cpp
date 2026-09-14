@@ -280,6 +280,8 @@ private:
 	void			RefitBlas( BlasHandle blas, const BlasGeometry *geoms, int count ) override;
 	void			DestroyBlas( BlasHandle blas ) override;
 	unsigned long long	BuildTlas( const RtInstance *instances, int count ) override;
+	unsigned long long	BuildStandaloneTlas( const RtInstance *instances, int count ) override;
+	void			DestroyStandaloneTlas() override;
 	unsigned long long	GetTlasAddress() override;
 	unsigned long long	GetStaticTlasAddress() override;
 	void			UpdateTlas( const RtInstance *instances, int count ) override;
@@ -778,6 +780,15 @@ private:
 	VkAccelerationStructureKHR	rtTlas = VK_NULL_HANDLE;
 	RtBuf						rtTlasBuf;
 	VkDeviceAddress				rtTlasAddr = 0;				// synchronous-scene TLAS address (fallback)
+	// R3.5 validator (r_rtAnimBlasTest): a throwaway TLAS built independently of the scene above, so a
+	// validator can trace test geometry without clobbering the live rtTlas / per-frame slots.
+	VkAccelerationStructureKHR	rtTestTlas = VK_NULL_HANDLE;
+	RtBuf						rtTestTlasBuf;
+	VkDeviceAddress				rtTestTlasAddr = 0;
+	// translate RtInstance[] -> VK instances + build one TLAS synchronously into the caller's target
+	// objects (shared by BuildTlas + BuildStandaloneTlas; the caller clears the target first)
+	unsigned long long	BuildTlasInto( const RtInstance *instances, int count,
+	                                   VkAccelerationStructureKHR &tlas, RtBuf &tlasBuf, VkDeviceAddress &tlasAddr );
 
 	// R3 per-frame TLAS lane (movers): a TLAS slot per frame-in-flight, fully rebuilt each
 	// frame from CURRENT instance transforms. UpdateTlas (frontend, between frames) waits the
@@ -4665,7 +4676,14 @@ unsigned long long VulkanBackend::BuildTlas( const RtInstance *instances, int co
 	}
 	DestroyRtBuffer( rtTlasBuf );
 	rtTlasAddr = 0;
+	return BuildTlasInto( instances, count, rtTlas, rtTlasBuf, rtTlasAddr );
+}
 
+// Translate RtInstance[] to VK instances (dead BLAS handles drop out), upload, and build ONE TLAS
+// synchronously into the caller's target objects. Shared by BuildTlas (persistent scene) and
+// BuildStandaloneTlas (throwaway validator TLAS). The caller must have cleared the target first.
+unsigned long long VulkanBackend::BuildTlasInto( const RtInstance *instances, int count,
+		VkAccelerationStructureKHR &tlas, RtBuf &tlasBuf, VkDeviceAddress &tlasAddr ) {
 	std::vector<VkAccelerationStructureInstanceKHR> vkInst( (size_t)count );
 	uint32_t live = 0;
 	for ( int i = 0; i < count; i++ ) {
@@ -4695,17 +4713,38 @@ unsigned long long VulkanBackend::BuildTlas( const RtInstance *instances, int co
 	geom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
 	geom.geometry.instances.arrayOfPointers = VK_FALSE;
 	geom.geometry.instances.data.deviceAddress = instBuf.addr;
-	const bool ok = BuildAsSync( VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, geom, live, rtTlasBuf, rtTlas );
+	const bool ok = BuildAsSync( VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, geom, live, tlasBuf, tlas );
 	DestroyRtBuffer( instBuf );
 	if ( !ok ) {
-		rtTlas = VK_NULL_HANDLE;
+		tlas = VK_NULL_HANDLE;
 		return 0;
 	}
 	VkAccelerationStructureDeviceAddressInfoKHR dai = {};
 	dai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
-	dai.accelerationStructure = rtTlas;
-	rtTlasAddr = pfnGetAsDeviceAddress( device, &dai );
-	return (unsigned long long)rtTlasAddr;
+	dai.accelerationStructure = tlas;
+	tlasAddr = pfnGetAsDeviceAddress( device, &dai );
+	return (unsigned long long)tlasAddr;
+}
+
+// Build a throwaway TLAS into dedicated members, WITHOUT touching the persistent rtTlas / per-frame
+// slots, so the r_rtAnimBlasTest validator can trace one monster's test BLAS while the live scene
+// stays intact. Synchronous; released by DestroyStandaloneTlas.
+unsigned long long VulkanBackend::BuildStandaloneTlas( const RtInstance *instances, int count ) {
+	if ( !SupportsRayQuery() || instances == NULL || count <= 0 ) {
+		return 0;
+	}
+	DestroyStandaloneTlas();
+	return BuildTlasInto( instances, count, rtTestTlas, rtTestTlasBuf, rtTestTlasAddr );
+}
+
+void VulkanBackend::DestroyStandaloneTlas() {
+	if ( rtTestTlas != VK_NULL_HANDLE ) {
+		vkQueueWaitIdle( gfxQueue );
+		pfnDestroyAs( device, rtTestTlas, NULL );
+		rtTestTlas = VK_NULL_HANDLE;
+	}
+	DestroyRtBuffer( rtTestTlasBuf );
+	rtTestTlasAddr = 0;
 }
 
 unsigned long long VulkanBackend::GetTlasAddress() {
@@ -5098,6 +5137,7 @@ void VulkanBackend::DestroyRtScene() {
 	}
 	DestroyRtBuffer( rtTlasBuf );
 	rtTlasAddr = 0;
+	DestroyStandaloneTlas();		// R3.5 validator TLAS (no-op if none live)
 	DestroyRtFrameSlots();
 	for ( size_t i = 0; i < rtBlases.size(); i++ ) {
 		if ( rtBlases[i].as != VK_NULL_HANDLE ) {
