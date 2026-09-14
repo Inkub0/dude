@@ -1107,6 +1107,8 @@ static idCVar r_rtWorldTest( "r_rtWorldTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"validate the ray-query world scene (areas + static entity instances) vs a CPU ray trace (Vulkan + RT hardware; one-shot, self-clears)" );
 static idCVar r_rtAnimBlasTest( "r_rtAnimBlasTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"validate an animated monster's BLAS built from its GPU-skinned gpuSkinVB (build + refit) vs a CPU trace of the same buffers (Vulkan + RT hardware; needs a GPU-skinned caster in view; one-shot, self-clears)" );
+static idCVar r_rtAnimBlas( "r_rtAnimBlas", "0", CVAR_RENDERER | CVAR_BOOL,
+	"S3 (docs/rtx-animated-blas.md): maintain a per-entity animated BLAS cache from GPU-skinned casters' gpuSkinVB (built/refit after the skin flush). Inert soak until S4 instances them into the TLAS; watch r_shadowMapCacheDebug for build/refit/retire stability (Vulkan + RT hardware)" );
 
 struct rtAreaSlice_t { int vertStart, numVerts, idxStart, numIdx; };
 struct rtModelSlice_t {
@@ -1620,6 +1622,129 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 		}
 	}
 	Mem_Free16( inst );
+}
+
+// R3.5 S3: stage this frame's GPU-skinned shadow casters for the backend's per-entity animated BLAS
+// cache. Runs once/frame regardless of the persistent-scene state (so the cache retires stale entries
+// when the feature or the view goes away). The backend copies the descriptors and builds/refits each
+// caster's BLAS from its gpuSkinVB after the skin flush (RefreshAnimBlas). Inert until S4 puts these
+// BLASes into the TLAS; for now it is a lifecycle soak (watch r_shadowMapCacheDebug).
+static void R_RtStageAnimCasters( void ) {
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r == NULL || !r->SupportsRayQuery() ) {
+		return;
+	}
+	static int lastFrame = -1;
+	if ( tr.frameCount == lastFrame ) {
+		return;						// subviews re-enter R_RenderView; once per frame is enough
+	}
+	lastFrame = tr.frameCount;
+
+	// once/sec lifecycle readout, shared with the cube-cache + rtTlas debug
+	if ( r_shadowMapCacheDebug.GetBool() ) {
+		static int accStartMs = 0, prevB = 0, prevR = 0, prevRet = 0;
+		int b, rf, ret, live;
+		r->AnimBlasStats( b, rf, ret, live );
+		const int nowMs = Sys_Milliseconds();
+		if ( accStartMs == 0 ) {
+			accStartMs = nowMs;
+		} else if ( nowMs - accStartMs >= 1000 ) {
+			common->Printf( "rtAnimBlas/s: %d builds, %d refits, %d retires; %d live\n",
+			                b - prevB, rf - prevR, ret - prevRet, live );
+			prevB = b; prevR = rf; prevRet = ret; accStartMs = nowMs;
+		}
+	}
+
+	if ( !r_rtAnimBlas.GetBool() || R_RtSceneWorld() == NULL || tr.viewDef == NULL ) {
+		r->UpdateAnimCasters( NULL, 0 );	// off / not a world view: clear staged, let the cache retire
+		return;
+	}
+
+	// pass 1: count eligible casters + their GPU-skinned casting surfaces
+	int nCaster = 0, nGeom = 0;
+	for ( const viewEntity_t *vEnt = tr.viewDef->viewEntitys; vEnt; vEnt = vEnt->next ) {
+		const idRenderEntityLocal *def = vEnt->entityDef;
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || def->parms.weaponDepthHack
+			|| def->parms.hModel->IsDynamicModel() != DM_CACHED || def->dynamicModel == NULL ) {
+			continue;
+		}
+		const idRenderModel *dm = def->dynamicModel;
+		int surfCount = 0;
+		for ( int s = 0; s < dm->NumSurfaces(); s++ ) {
+			const srfTriangles_t *tri = dm->Surface( s )->geometry;
+			if ( R_RtSurfCasts( dm->Surface( s ) ) && tri->gpuSkinVB != 0
+				&& tri->indexCache != NULL && tri->indexCache->vbo != 0 ) {
+				surfCount++;
+			}
+		}
+		if ( surfCount > 0 ) {
+			nCaster++;
+			nGeom += surfCount;
+		}
+	}
+	if ( nCaster == 0 ) {
+		r->UpdateAnimCasters( NULL, 0 );
+		return;
+	}
+
+	rhi::RHI::AnimCaster *casters = (rhi::RHI::AnimCaster *)Mem_Alloc16( nCaster * (int)sizeof( rhi::RHI::AnimCaster ) );
+	rhi::RHI::BlasGeometry *geoms = (rhi::RHI::BlasGeometry *)Mem_Alloc16( nGeom * (int)sizeof( rhi::RHI::BlasGeometry ) );
+	int ci = 0, gi = 0;
+	for ( const viewEntity_t *vEnt = tr.viewDef->viewEntitys; vEnt; vEnt = vEnt->next ) {
+		const idRenderEntityLocal *def = vEnt->entityDef;
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || def->parms.weaponDepthHack
+			|| def->parms.hModel->IsDynamicModel() != DM_CACHED || def->dynamicModel == NULL ) {
+			continue;
+		}
+		const idRenderModel *dm = def->dynamicModel;
+		const int gStart = gi;
+		// topology signature: model + each surface's gpuSkinVB handle + counts. A change (model swap /
+		// LOD / gpuSkinVB realloc) forces a rebuild instead of refitting a mismatched AS.
+		unsigned long long sig = 1469598103934665603ULL;			// FNV-1a basis
+		const void *modelPtr = dm;
+		sig = R_RtHashBytes( sig, &modelPtr, sizeof( modelPtr ) );
+		for ( int s = 0; s < dm->NumSurfaces() && ( gi - gStart ) < 64; s++ ) {
+			const srfTriangles_t *tri = dm->Surface( s )->geometry;
+			if ( !( R_RtSurfCasts( dm->Surface( s ) ) && tri->gpuSkinVB != 0
+				&& tri->indexCache != NULL && tri->indexCache->vbo != 0 ) ) {
+				continue;
+			}
+			const unsigned long long va = r->GetBufferDeviceAddress( tri->gpuSkinVB );
+			const unsigned long long ia = r->GetBufferDeviceAddress( (rhi::BufferHandle)tri->indexCache->vbo );
+			if ( va == 0 || ia == 0 ) {
+				continue;
+			}
+			geoms[gi].vertexAddress = va;
+			geoms[gi].vertexStride = (unsigned int)sizeof( idDrawVert );
+			geoms[gi].vertexCount = (unsigned int)tri->numVerts;
+			geoms[gi].indexAddress = ia;
+			geoms[gi].indexCount = (unsigned int)tri->numIndexes;
+			sig = R_RtHashBytes( sig, &tri->gpuSkinVB, sizeof( tri->gpuSkinVB ) );
+			sig = R_RtHashBytes( sig, &tri->numVerts, sizeof( tri->numVerts ) );
+			sig = R_RtHashBytes( sig, &tri->numIndexes, sizeof( tri->numIndexes ) );
+			gi++;
+		}
+		const int gCount = gi - gStart;
+		if ( gCount == 0 ) {
+			continue;					// no device-addressable GPU-skinned surface after all
+		}
+		rhi::RHI::AnimCaster &c = casters[ci++];
+		c.key = (unsigned int)( def->index + 1 );	// +1: key 0 marks a free cache slot
+		c.topoSig = sig;
+		c.geoms = geoms + gStart;
+		c.geomCount = gCount;
+		const float *mm = vEnt->modelMatrix;		// model->world, id column-major
+		for ( int row = 0; row < 3; row++ ) {
+			c.transform[row * 4 + 0] = mm[row + 0];
+			c.transform[row * 4 + 1] = mm[row + 4];
+			c.transform[row * 4 + 2] = mm[row + 8];
+			c.transform[row * 4 + 3] = mm[row + 12];
+		}
+		c.mask = 0xFF;
+	}
+	r->UpdateAnimCasters( casters, ci );
+	Mem_Free16( casters );
+	Mem_Free16( geoms );
 }
 
 /*
@@ -2781,6 +2906,9 @@ void R_RenderView( viewDef_t *parms ) {
 	// R3.5 animated-BLAS validator (docs/rtx-animated-blas.md S2): one-shot diff of a monster's
 	// gpuSkinVB-fed BLAS (build + refit) vs a CPU trace of the same buffers. Self-gates; VK + RT only.
 	R_RtAnimBlasValidate();
+	// R3.5 S3: stage GPU-skinned casters for the per-entity animated BLAS cache (backend builds/refits
+	// them after the skin flush). Runs every frame so the cache retires when off; gated by r_rtAnimBlas.
+	R_RtStageAnimCasters();
 
 	// any viewLight that didn't have visible surfaces can have it's shadows removed
 	R_RemoveUnecessaryViewLights();

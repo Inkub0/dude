@@ -790,6 +790,42 @@ private:
 	unsigned long long	BuildTlasInto( const RtInstance *instances, int count,
 	                                   VkAccelerationStructureKHR &tlas, RtBuf &tlasBuf, VkDeviceAddress &tlasAddr );
 
+	// R3.5 S3: per-entity animated BLAS cache. Each visible GPU-skinned monster gets one refit-capable
+	// BLAS built from its gpuSkinVB, keyed by a stable entity id + a topology signature. Built/refit on
+	// the frame cb in RefreshAnimBlas (after the skin flush), so it captures the current-frame pose.
+	struct AnimBlas {
+		uint32_t					key = 0;			// entity id (0 = free slot)
+		unsigned long long			topoSig = 0;		// model + per-surface counts + gpuSkinVB handles; change => rebuild
+		VkAccelerationStructureKHR	as = VK_NULL_HANDLE;
+		RtBuf						buf;				// AS storage
+		RtBuf						scratch;			// persistent scratch (sized to max(build,update); reused by refits)
+		VkDeviceAddress				addr = 0;
+		uint32_t					maxPrims = 0;		// triangles the AS was built for (refit must match)
+		int							lastSeenFrame = -1;
+	};
+	std::vector<AnimBlas>		animBlasCache;
+	struct AnimCasterStaged {						// a copy of one RHI::AnimCaster (backend-owned)
+		uint32_t					key;
+		unsigned long long			topoSig;
+		float						transform[12];
+		uint32_t					mask;
+		int							geomFirst, geomCount;	// slice into animStagedGeoms
+	};
+	std::vector<AnimCasterStaged>	animStaged;			// this frame's staged casters (UpdateAnimCasters)
+	std::vector<BlasGeometry>		animStagedGeoms;	// flattened per-caster geometry
+	struct RetiredAs { VkAccelerationStructureKHR as; RtBuf buf; RtBuf scratch; int ttl; };
+	std::vector<RetiredAs>		retiredAnimAs;			// fence-safe deferred AS destroys (TTL = FRAMES_IN_FLIGHT)
+	int							animBlasFrameCounter = 0;
+	int							animStatBuilds = 0, animStatRefits = 0, animStatRetires = 0;	// cumulative
+	AnimBlas *	FindOrAllocAnimBlas( uint32_t key );
+	bool		RecordAnimBlasBuild( AnimBlas &e, const BlasGeometry *geoms, int count, VkCommandBuffer cb );
+	void		RecordAnimBlasRefit( AnimBlas &e, const BlasGeometry *geoms, int count, VkCommandBuffer cb );
+	void		RetireAnimBlas( AnimBlas &e );				// move to retiredAnimAs (fence-safe destroy later)
+	void		DrainRetiredAnimAs( bool force );			// destroy retired ASes whose TTL elapsed
+	void			UpdateAnimCasters( const AnimCaster *casters, int count ) override;
+	void			RefreshAnimBlas() override;
+	void			AnimBlasStats( int &builds, int &refits, int &retires, int &live ) override;
+
 	// R3 per-frame TLAS lane (movers): a TLAS slot per frame-in-flight, fully rebuilt each
 	// frame from CURRENT instance transforms. UpdateTlas (frontend, between frames) waits the
 	// slot's fence (its last use was FRAMES_IN_FLIGHT frames ago), uploads the instances and
@@ -2457,6 +2493,7 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	DrainRetiredBuffers( false );		// age out static vertex/index blocks freed by the vertexCache
 	DrainRetiredImages( frameIndex );	// capture/cinematic images replaced by RetireImage
 	DrainRetiredTargets( frameIndex );	// shadow-map targets evicted by the shadow caches
+	DrainRetiredAnimAs( false );		// R3.5: age out retired animated-caster BLASes (fence-safe destroy)
 	if ( texturePool && !retiredTexSets[frameIndex].empty() ) {
 		// texture sets invalidated ~FRAMES_IN_FLIGHT frames ago: this slot's fence
 		// has passed, so nothing in flight still references them — free for reuse
@@ -4664,6 +4701,229 @@ void VulkanBackend::DestroyBlas( BlasHandle blas ) {
 	b.addr = 0;
 }
 
+// ---- R3.5 S3: per-entity animated BLAS cache -----------------------------------------------------
+
+VulkanBackend::AnimBlas *VulkanBackend::FindOrAllocAnimBlas( uint32_t key ) {
+	for ( size_t i = 0; i < animBlasCache.size(); i++ ) {
+		if ( animBlasCache[i].key == key && animBlasCache[i].as != VK_NULL_HANDLE ) {
+			return &animBlasCache[i];		// live entry for this entity
+		}
+	}
+	for ( size_t i = 0; i < animBlasCache.size(); i++ ) {
+		if ( animBlasCache[i].key == 0 && animBlasCache[i].as == VK_NULL_HANDLE ) {
+			animBlasCache[i] = AnimBlas();	// reuse a retired slot
+			animBlasCache[i].key = key;
+			return &animBlasCache[i];
+		}
+	}
+	animBlasCache.push_back( AnimBlas() );
+	animBlasCache.back().key = key;
+	return &animBlasCache.back();
+}
+
+// Build one refit-capable BLAS for an entity on the frame cb (first sight / topology change). Allocates
+// the AS + a persistent scratch sized to max(build,update) so subsequent refits reuse it. Records the
+// BUILD on cb (no wait) — it reads this frame's gpuSkinVB, so it must run after the skin flush.
+bool VulkanBackend::RecordAnimBlasBuild( AnimBlas &e, const BlasGeometry *geoms, int count, VkCommandBuffer cb ) {
+	VkAccelerationStructureGeometryKHR vkGeoms[MAX_BLAS_GEOMS];
+	VkAccelerationStructureBuildRangeInfoKHR ranges[MAX_BLAS_GEOMS];
+	uint32_t primCounts[MAX_BLAS_GEOMS];
+	R_VkFillBlasGeoms( geoms, count, vkGeoms, ranges, primCounts );
+	uint32_t totalPrims = 0;
+	for ( int i = 0; i < count; i++ ) { totalPrims += primCounts[i]; }
+
+	VkAccelerationStructureBuildGeometryInfoKHR bgi = {};
+	bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+	bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+	bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+	bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+	bgi.geometryCount = (uint32_t)count;
+	bgi.pGeometries = vkGeoms;
+	VkAccelerationStructureBuildSizesInfoKHR sizes = {};
+	sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+	pfnGetAsBuildSizes( device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, primCounts, &sizes );
+
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, e.buf ) ) {
+		return false;
+	}
+	VkDeviceSize scratchSz = ( sizes.buildScratchSize > sizes.updateScratchSize ? sizes.buildScratchSize : sizes.updateScratchSize )
+		+ asScratchAlignment;
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, scratchSz, NULL, e.scratch ) ) {
+		DestroyRtBuffer( e.buf );
+		return false;
+	}
+	VkAccelerationStructureCreateInfoKHR asci = {};
+	asci.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+	asci.buffer = e.buf.buf;
+	asci.size = sizes.accelerationStructureSize;
+	asci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+	if ( !vkCheck( pfnCreateAs( device, &asci, NULL, &e.as ), "vkCreateAccelerationStructureKHR(animBlas)" ) ) {
+		e.as = VK_NULL_HANDLE;
+		DestroyRtBuffer( e.buf );
+		DestroyRtBuffer( e.scratch );
+		return false;
+	}
+	bgi.dstAccelerationStructure = e.as;
+	bgi.scratchData.deviceAddress = ( e.scratch.addr + asScratchAlignment - 1 ) & ~(VkDeviceAddress)( asScratchAlignment - 1 );
+	const VkAccelerationStructureBuildRangeInfoKHR *pRange = ranges;
+	pfnCmdBuildAs( cb, 1, &bgi, &pRange );		// on the frame cb; RefreshAnimBlas emits the batched barrier
+	VkAccelerationStructureDeviceAddressInfoKHR dai = {};
+	dai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+	dai.accelerationStructure = e.as;
+	e.addr = pfnGetAsDeviceAddress( device, &dai );
+	e.maxPrims = totalPrims;
+	return true;
+}
+
+// In-place UPDATE (refit) of an entity's BLAS on the frame cb from its current gpuSkinVB. No per-refit
+// barrier — RefreshAnimBlas emits one batched AS-write->AS-read barrier after all builds/refits.
+void VulkanBackend::RecordAnimBlasRefit( AnimBlas &e, const BlasGeometry *geoms, int count, VkCommandBuffer cb ) {
+	VkAccelerationStructureGeometryKHR vkGeoms[MAX_BLAS_GEOMS];
+	VkAccelerationStructureBuildRangeInfoKHR ranges[MAX_BLAS_GEOMS];
+	uint32_t primCounts[MAX_BLAS_GEOMS];
+	R_VkFillBlasGeoms( geoms, count, vkGeoms, ranges, primCounts );
+	VkAccelerationStructureBuildGeometryInfoKHR bgi = {};
+	bgi.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+	bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+	bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+	bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+	bgi.srcAccelerationStructure = e.as;
+	bgi.dstAccelerationStructure = e.as;
+	bgi.geometryCount = (uint32_t)count;
+	bgi.pGeometries = vkGeoms;
+	bgi.scratchData.deviceAddress = ( e.scratch.addr + asScratchAlignment - 1 ) & ~(VkDeviceAddress)( asScratchAlignment - 1 );
+	const VkAccelerationStructureBuildRangeInfoKHR *pRange = ranges;
+	pfnCmdBuildAs( cb, 1, &bgi, &pRange );
+}
+
+// Move an entity's AS + buffers onto the fence-safe deferred-destroy list (a prior in-flight frame may
+// still reference it). Drained FRAMES_IN_FLIGHT frames later, once no submitted frame can touch it.
+void VulkanBackend::RetireAnimBlas( AnimBlas &e ) {
+	if ( e.as != VK_NULL_HANDLE ) {
+		RetiredAs r;
+		r.as = e.as;
+		r.buf = e.buf;
+		r.scratch = e.scratch;
+		r.ttl = FRAMES_IN_FLIGHT + 1;
+		retiredAnimAs.push_back( r );
+	}
+	e.as = VK_NULL_HANDLE;
+	e.addr = 0;
+	e.key = 0;
+	e.topoSig = 0;
+	e.maxPrims = 0;
+	e.lastSeenFrame = -1;
+	e.buf = RtBuf();			// ownership transferred to the retired entry
+	e.scratch = RtBuf();
+}
+
+void VulkanBackend::DrainRetiredAnimAs( bool force ) {
+	for ( size_t i = 0; i < retiredAnimAs.size(); ) {
+		if ( force || --retiredAnimAs[i].ttl <= 0 ) {
+			if ( retiredAnimAs[i].as != VK_NULL_HANDLE ) {
+				pfnDestroyAs( device, retiredAnimAs[i].as, NULL );
+			}
+			DestroyRtBuffer( retiredAnimAs[i].buf );
+			DestroyRtBuffer( retiredAnimAs[i].scratch );
+			retiredAnimAs[i] = retiredAnimAs.back();
+			retiredAnimAs.pop_back();
+		} else {
+			i++;
+		}
+	}
+}
+
+void VulkanBackend::UpdateAnimCasters( const AnimCaster *casters, int count ) {
+	animStaged.clear();
+	animStagedGeoms.clear();
+	if ( !SupportsRayQuery() || casters == NULL || count <= 0 ) {
+		return;
+	}
+	for ( int i = 0; i < count; i++ ) {
+		const AnimCaster &c = casters[i];
+		if ( c.geoms == NULL || c.geomCount <= 0 || c.geomCount > MAX_BLAS_GEOMS || c.key == 0 ) {
+			continue;
+		}
+		AnimCasterStaged s;
+		s.key = c.key;
+		s.topoSig = c.topoSig;
+		memcpy( s.transform, c.transform, sizeof( s.transform ) );
+		s.mask = c.mask;
+		s.geomFirst = (int)animStagedGeoms.size();
+		s.geomCount = c.geomCount;
+		for ( int g = 0; g < c.geomCount; g++ ) {
+			animStagedGeoms.push_back( c.geoms[g] );
+		}
+		animStaged.push_back( s );
+	}
+}
+
+// grace window before a caster gone from view is retired: covers brief off-screen dips / peeking so a
+// re-appearing monster refits its kept BLAS instead of paying a rebuild. Ample; retires stay rare.
+static const int ANIM_RETIRE_GRACE = 60;
+
+void VulkanBackend::RefreshAnimBlas() {
+	if ( !SupportsRayQuery() || !frameOpen || skipFrame || insideScenePass || insideTargetPass ) {
+		return;
+	}
+	if ( animStaged.empty() && animBlasCache.empty() ) {
+		return;
+	}
+	animBlasFrameCounter++;
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	bool anyWrite = false;
+	for ( size_t i = 0; i < animStaged.size(); i++ ) {
+		const AnimCasterStaged &s = animStaged[i];
+		const BlasGeometry *geoms = animStagedGeoms.data() + s.geomFirst;
+		AnimBlas *e = FindOrAllocAnimBlas( s.key );
+		if ( e->as == VK_NULL_HANDLE || e->topoSig != s.topoSig ) {
+			// first sight or topology change (model swap / LOD / gpuSkinVB realloc): (re)build
+			if ( e->as != VK_NULL_HANDLE ) {
+				RetireAnimBlas( *e );
+				e->key = s.key;		// RetireAnimBlas cleared it; this slot is still this entity's
+			}
+			if ( RecordAnimBlasBuild( *e, geoms, s.geomCount, cb ) ) {
+				e->topoSig = s.topoSig;
+				animStatBuilds++;
+				anyWrite = true;
+			}
+		} else {
+			RecordAnimBlasRefit( *e, geoms, s.geomCount, cb );
+			animStatRefits++;
+			anyWrite = true;
+		}
+		e->lastSeenFrame = animBlasFrameCounter;
+	}
+	// one batched AS-write -> AS-read barrier for every build/refit above, ordering them before the
+	// TLAS build (S4) / any ray read this frame. Disjoint BLASes need no barriers between each other.
+	if ( anyWrite ) {
+		VkMemoryBarrier mb = {};
+		mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+		mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+			VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &mb, 0, NULL, 0, NULL );
+	}
+	// retire entries not seen this frame beyond the grace window (fence-safe deferred destroy)
+	for ( size_t i = 0; i < animBlasCache.size(); i++ ) {
+		AnimBlas &e = animBlasCache[i];
+		if ( e.key != 0 && e.as != VK_NULL_HANDLE && animBlasFrameCounter - e.lastSeenFrame > ANIM_RETIRE_GRACE ) {
+			RetireAnimBlas( e );
+			animStatRetires++;
+		}
+	}
+}
+
+void VulkanBackend::AnimBlasStats( int &builds, int &refits, int &retires, int &live ) {
+	builds = animStatBuilds;
+	refits = animStatRefits;
+	retires = animStatRetires;
+	live = 0;
+	for ( size_t i = 0; i < animBlasCache.size(); i++ ) {
+		if ( animBlasCache[i].as != VK_NULL_HANDLE ) { live++; }
+	}
+}
+
 unsigned long long VulkanBackend::BuildTlas( const RtInstance *instances, int count ) {
 	if ( !SupportsRayQuery() || instances == NULL || count <= 0 ) {
 		return 0;
@@ -5138,6 +5398,14 @@ void VulkanBackend::DestroyRtScene() {
 	DestroyRtBuffer( rtTlasBuf );
 	rtTlasAddr = 0;
 	DestroyStandaloneTlas();		// R3.5 validator TLAS (no-op if none live)
+	// R3.5 S3: tear down the per-entity animated BLAS cache (idle already waited above)
+	for ( size_t i = 0; i < animBlasCache.size(); i++ ) {
+		RetireAnimBlas( animBlasCache[i] );
+	}
+	animBlasCache.clear();
+	animStaged.clear();
+	animStagedGeoms.clear();
+	DrainRetiredAnimAs( true );		// device is idle -> destroy them all now
 	DestroyRtFrameSlots();
 	for ( size_t i = 0; i < rtBlases.size(); i++ ) {
 		if ( rtBlases[i].as != VK_NULL_HANDLE ) {

@@ -464,6 +464,32 @@ public:
 	// out of frame (validation) it runs synchronously on the upload queue. geoms must match the build's
 	// per-geometry vertex/primitive counts (topology fixed). VK + RT hardware only; else no-op.
 	virtual void	RefitBlas( BlasHandle blas, const BlasGeometry *geoms, int count ) {}
+	// One animated (GPU-skinned) shadow caster staged for the per-entity BLAS cache (R3.5 S3).
+	// key identifies the entity across frames (stable id); topoSig captures model + per-surface
+	// counts + gpuSkinVB handles so a change (model swap / LOD / buffer realloc) forces a rebuild
+	// instead of a refit. geoms points at the caster's per-surface gpuSkinVB geometry, valid only
+	// for the UpdateAnimCasters call (the backend copies it). transform is the model->world 3x4 for
+	// the eventual TLAS instance (S4); mask is its ray visibility mask.
+	struct AnimCaster {
+		unsigned int		key = 0;
+		unsigned long long	topoSig = 0;
+		const BlasGeometry *geoms = NULL;
+		int					geomCount = 0;
+		float				transform[12] = {};
+		unsigned int		mask = 0xFF;
+	};
+	// Stage this frame's animated casters (frontend, BETWEEN frames — like UpdateTlas). Replaces the
+	// previous set; pass count 0 to clear (feature off / no casters). The backend copies the data and
+	// drives the per-entity BLAS cache in RefreshAnimBlas after the skin flush. VK + RT only; else no-op.
+	virtual void	UpdateAnimCasters( const AnimCaster *casters, int count ) {}
+	// Build/refit the staged animated casters' per-entity BLASes on the frame command buffer, then
+	// batch one AS-write->AS-read barrier and retire casters gone beyond the grace window. MUST be
+	// called once per frame AFTER the skin compute flush (so gpuSkinVB holds this frame's pose) and
+	// before the TLAS build that will reference them (S4). VK + RT only; else no-op.
+	virtual void	RefreshAnimBlas() {}
+	// Cumulative animated-BLAS lifecycle counters + current live BLAS count (r_shadowMapCacheDebug
+	// readout). VK + RT only; leaves the outputs at 0 otherwise.
+	virtual void	AnimBlasStats( int &builds, int &refits, int &retires, int &live ) { builds = refits = retires = live = 0; }
 	struct RtInstance {
 		float			transform[12];		// row-major 3x4 (VkTransformMatrixKHR layout)
 		BlasHandle		blas;

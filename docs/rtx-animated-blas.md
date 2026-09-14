@@ -69,6 +69,33 @@ instanced into the per-frame TLAS with the entity's `modelMatrix`.**
 - **Scratch buffer** for refit (a persistent per-BLAS or shared scratch sized to the largest
   `updateScratchSize`); refit scratch is smaller than build scratch.
 
+## Frame ordering (resolved during S2→S3) — refit AFTER the skin flush, not at BeginFrame
+
+The apparent tension between S4 ("wire into `UpdateTlas`", a frontend/between-frames call) and the design
+("skin → AS build/refit → TLAS → scene") resolves as follows. The backend frame is:
+
+```
+BeginFrame()            ← today records the per-frame dyn-BLAS + TLAS build here
+RB_RHI_FlushSkinJobs()  ← skin compute writes gpuSkinVB (THIS frame's pose) + PostComputeBarrier
+RB_RHI_FlushTessJobs()
+… RC_DRAW_VIEW …        ← interactions issue the shadow rays that read the TLAS
+```
+
+So `gpuSkinVB` only holds this frame's pose *after* `FlushSkinJobs`. A refit at `BeginFrame` (where the
+current CPU-soup dyn-BLAS builds) would read **last** frame's pose → a one-frame shadow lag on animated
+monsters (the shipping CPU-soup path has none, because the frontend bakes current-pose world verts). To
+stay lag-free, the animated **build/refit and the frame TLAS build move to a backend hook right after
+`FlushSkinJobs`/`FlushTessJobs`** (`RefreshAnimBlas`). The CPU-soup dyn-BLAS (fallback) can keep building
+at `BeginFrame` — it doesn't depend on the GPU skin — as long as the TLAS that references it is built in
+the post-skin hook. The frontend's role shrinks to *staging* per-entity descriptors (`UpdateAnimCasters`,
+between frames); the backend owns the cache + all AS recording, on the frame cb, no `vkQueueWaitIdle`.
+
+Consequence for first-sight builds: they must also record on the frame cb (after this frame's skin), not
+via the synchronous `CreateBlasFromBuffers` — a synchronous build mid-frame would `vkQueueWaitIdle` on
+*previously submitted* work and read stale/garbage `gpuSkinVB` (this frame's skin is recorded but not yet
+executed). So `RefreshAnimBlas` records both BUILD (first sight / topology change) and UPDATE (refit) on
+the frame cb, with one persistent per-BLAS scratch sized to the (larger) build scratch.
+
 ## Staged plan (validator-first, the way R2/R3 landed)
 
 - **S0 — prereqs (no behavior change):** `BU_SKIN`/index usage flags + the RT-gated

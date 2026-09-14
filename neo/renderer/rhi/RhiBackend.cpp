@@ -3479,6 +3479,10 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	// Roadmap B: deform-once tessellation dispatches, immediately AFTER the skin jobs so a deform that
 	// reads a surface's gpuSkinVB is ordered by the skin dispatch's trailing COMPUTE->COMPUTE barrier.
 	RB_RHI_FlushTessJobs();
+	// R3.5 S3 (docs/rtx-animated-blas.md): build/refit the per-entity animated BLASes from the
+	// now-current gpuSkinVB, on the frame cb, before any draw's shadow rays. Ordered after the skin
+	// flush by PostComputeBarrier's RT-gated compute->AS-build stage; inert when nothing was staged.
+	r->RefreshAnimBlas();
 
 	rbBerserkFrame = false;	// set when the berserk material is seen (crop overlay), read at the _scratch blit
 	rbHelltimeFrame = false;	// set when a bloodorbN hell-time material is seen, read at its cr_draw blit
