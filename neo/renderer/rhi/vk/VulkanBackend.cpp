@@ -813,6 +813,7 @@ private:
 	};
 	std::vector<AnimCasterStaged>	animStaged;			// this frame's staged casters (UpdateAnimCasters)
 	std::vector<BlasGeometry>		animStagedGeoms;	// flattened per-caster geometry
+	std::vector<VkAccelerationStructureInstanceKHR>	animPendInst;	// S4: this frame's animated TLAS instances (appended in RefreshAnimBlas)
 	struct RetiredAs { VkAccelerationStructureKHR as; RtBuf buf; RtBuf scratch; int ttl; };
 	std::vector<RetiredAs>		retiredAnimAs;			// fence-safe deferred AS destroys (TTL = FRAMES_IN_FLIGHT)
 	int							animBlasFrameCounter = 0;
@@ -841,6 +842,10 @@ private:
 	VkDeviceAddress				rtFrameAddr[FRAMES_IN_FLIGHT] = {};
 	bool						rtFrameBuilt[FRAMES_IN_FLIGHT] = {};	// slot holds a completed build (safe to traverse)
 	int							rtPendingSlot = -1;						// slot awaiting its BeginFrame build
+	// R3.5 S4: when animated casters are staged, UpdateTlas defers this slot's TLAS build to
+	// RefreshAnimBlas (after the skin flush), which appends one model-space instance per monster and
+	// records the build on the frame cb — capturing the current-frame pose. -1 when not deferred.
+	int							rtAnimTlasDeferredSlot = -1;
 	VkDeviceAddress				rtCurrentAddr = 0;						// per-frame TLAS address (0 = use rtTlasAddr)
 	void	RecordFrameTlasBuild( VkCommandBuffer cb, int slot );		// build + AS-write -> frag-read barrier
 	void	DestroyRtFrameSlots();
@@ -4870,6 +4875,7 @@ void VulkanBackend::RefreshAnimBlas() {
 		return;
 	}
 	animBlasFrameCounter++;
+	animPendInst.clear();
 	VkCommandBuffer cb = frames[frameIndex].cb;
 	bool anyWrite = false;
 	for ( size_t i = 0; i < animStaged.size(); i++ ) {
@@ -4893,9 +4899,20 @@ void VulkanBackend::RefreshAnimBlas() {
 			anyWrite = true;
 		}
 		e->lastSeenFrame = animBlasFrameCounter;
+		// S4: collect this caster's TLAS instance (model-space BLAS + its model->world transform).
+		// Copy by value now — e may dangle after the next FindOrAllocAnimBlas grows the cache vector.
+		if ( e->as != VK_NULL_HANDLE && e->addr != 0 ) {
+			VkAccelerationStructureInstanceKHR vi;
+			memset( &vi, 0, sizeof( vi ) );
+			memcpy( &vi.transform, s.transform, sizeof( s.transform ) );	// row-major 3x4
+			vi.mask = s.mask & 0xFFu;
+			vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+			vi.accelerationStructureReference = e->addr;
+			animPendInst.push_back( vi );
+		}
 	}
 	// one batched AS-write -> AS-read barrier for every build/refit above, ordering them before the
-	// TLAS build (S4) / any ray read this frame. Disjoint BLASes need no barriers between each other.
+	// TLAS build below / any ray read this frame. Disjoint BLASes need no barriers between each other.
 	if ( anyWrite ) {
 		VkMemoryBarrier mb = {};
 		mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -4911,6 +4928,25 @@ void VulkanBackend::RefreshAnimBlas() {
 			RetireAnimBlas( e );
 			animStatRetires++;
 		}
+	}
+	// S4: UpdateTlas deferred this slot's TLAS build to us. Append one instance per animated caster
+	// after the static+mover instances it already wrote, then record the build on the frame cb (reads
+	// the just-built/refit BLASes past the barrier above; ends with the AS-build -> fragment ray-read
+	// barrier). Always builds when deferred — even with 0 monsters appended — so the slot is never left
+	// a frame unbuilt. Host writes here land before EndFrame's submit, so the build sees them.
+	if ( rtAnimTlasDeferredSlot == frameIndex ) {
+		const int slot = frameIndex;
+		if ( rtFrameTlas[slot] != VK_NULL_HANDLE && rtFrameInstBuf[slot].map != NULL ) {
+			VkAccelerationStructureInstanceKHR *dst = (VkAccelerationStructureInstanceKHR *)rtFrameInstBuf[slot].map;
+			uint32_t nOut = rtFrameCount[slot];
+			for ( size_t i = 0; i < animPendInst.size() && nOut < rtFrameCapacity[slot]; i++ ) {
+				dst[nOut++] = animPendInst[i];
+			}
+			rtFrameCount[slot] = nOut;
+			RecordFrameTlasBuild( cb, slot );
+			rtFrameBuilt[slot] = true;
+		}
+		rtAnimTlasDeferredSlot = -1;
 	}
 }
 
@@ -5224,16 +5260,21 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		vi.accelerationStructureReference = rtFrameDynAddr[slot];
 		vkInst.push_back( vi );
 	}
-	if ( vkInst.empty() ) {
+	// R3.5 S4: RefreshAnimBlas will append one instance per staged animated caster to this slot after
+	// the skin flush. Reserve capacity for them now and keep going even if the static+mover set is empty
+	// (a monster-only view still needs a slot to append into).
+	const bool willDefer = !animStaged.empty();
+	if ( vkInst.empty() && !willDefer ) {
 		return;
 	}
 	const uint32_t n = (uint32_t)vkInst.size();
+	const uint32_t nCap = n + ( willDefer ? (uint32_t)animStaged.size() : 0u );
 
 	vkWaitForFences( device, 1, &frames[slot].fence, VK_TRUE, UINT64_MAX );
 
-	// (re)create the slot's resources when it has none or the instance count outgrew them.
+	// (re)create the slot's resources when it has none or the (static+animated) count outgrew them.
 	// Growth stalls the queue - rare (entity counts are near-constant within a map).
-	if ( rtFrameTlas[slot] == VK_NULL_HANDLE || n > rtFrameCapacity[slot] ) {
+	if ( rtFrameTlas[slot] == VK_NULL_HANDLE || nCap > rtFrameCapacity[slot] ) {
 		vkQueueWaitIdle( gfxQueue );
 		if ( rtFrameTlas[slot] != VK_NULL_HANDLE ) {
 			pfnDestroyAs( device, rtFrameTlas[slot], NULL );
@@ -5246,7 +5287,7 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		rtFrameAddr[slot] = 0;
 		rtFrameBuilt[slot] = false;			// fresh object: must prime before anything traverses it
 
-		const uint32_t cap = n + n / 2 + 16;
+		const uint32_t cap = nCap + nCap / 2 + 16;
 		if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
 				(VkDeviceSize)cap * sizeof( VkAccelerationStructureInstanceKHR ), NULL, rtFrameInstBuf[slot] ) ) {
 			return;
@@ -5292,9 +5333,18 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		rtFrameCapacity[slot] = cap;
 	}
 
-	memcpy( rtFrameInstBuf[slot].map, vkInst.data(), (size_t)n * sizeof( VkAccelerationStructureInstanceKHR ) );
+	if ( n > 0 ) {
+		memcpy( rtFrameInstBuf[slot].map, vkInst.data(), (size_t)n * sizeof( VkAccelerationStructureInstanceKHR ) );
+	}
 	rtFrameCount[slot] = n;
-	if ( !rtFrameBuilt[slot] ) {
+	if ( willDefer ) {
+		// R3.5 S4: hand this slot to RefreshAnimBlas (post skin flush) — it appends the animated
+		// instances after rtFrameCount[slot] and records the TLAS build on the frame cb, so the TLAS
+		// captures the current-frame pose. No sync prime, no BeginFrame arm; RefreshAnimBlas always
+		// builds this slot (even with 0 monsters appended), so the slot never goes a frame unbuilt.
+		rtAnimTlasDeferredSlot = slot;
+		rtPendingSlot = -1;
+	} else if ( !rtFrameBuilt[slot] ) {
 		// prime a freshly created slot SYNCHRONOUSLY: out-of-band readers (the validator's
 		// DispatchSync executes before this frame's cb) must never traverse a never-built
 		// TLAS. Once per slot per (re)creation; steady-state frames take the async path.
@@ -5381,6 +5431,7 @@ void VulkanBackend::DestroyRtFrameSlots() {
 	rtPendingSlot = -1;
 	rtDynArmedSlot = -1;
 	rtDynPendingSlot = -1;
+	rtAnimTlasDeferredSlot = -1;
 	rtCurrentAddr = 0;
 }
 

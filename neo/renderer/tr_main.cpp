@@ -1142,6 +1142,16 @@ static bool R_RtSurfCasts( const modelSurface_t *surf ) {
 		&& surf->geometry->verts != NULL && surf->geometry->indexes != NULL;
 }
 
+// R3.5 S4: a GPU-skinned casting surface the animated per-entity BLAS path owns (r_rtAnimBlas on,
+// device-addressable gpuSkinVB + static index buffer). The CPU-soup monster gather must SKIP these
+// (else a caster shows a duplicate shadow), and R_RtStageAnimCasters must gather exactly these — so
+// both call this one predicate to partition casting surfaces cleanly. Assumes R_RtSurfCasts already true.
+static bool R_RtSurfViaAnimBlas( const modelSurface_t *surf ) {
+	const srfTriangles_t *tri = surf->geometry;
+	return r_rtAnimBlas.GetBool() && tri != NULL && tri->gpuSkinVB != 0
+		&& tri->indexCache != NULL && tri->indexCache->vbo != 0;
+}
+
 // True when this view renders a world the persistent RT scene may bind to: the primary pass
 // of a world with a REAL loaded map. GUI render worlds (menu/PDA 3D scenes) also render
 // non-subview views and even claim tr.primaryWorld (RenderWorld.cpp RenderScene), but they
@@ -1440,7 +1450,8 @@ static bool R_RtGatherMonstersWorld( float *&pos, int *&idx, int &numVerts, int 
 		}
 		const idRenderModel *dm = def->dynamicModel;
 		for ( int s = 0; s < dm->NumSurfaces(); s++ ) {
-			if ( R_RtSurfCasts( dm->Surface( s ) ) ) {
+			// R3.5 S4: surfaces the animated per-entity BLAS owns are cast that way, not via this soup
+			if ( R_RtSurfCasts( dm->Surface( s ) ) && !R_RtSurfViaAnimBlas( dm->Surface( s ) ) ) {
 				numVerts += dm->Surface( s )->geometry->numVerts;
 				numIndexes += dm->Surface( s )->geometry->numIndexes;
 			}
@@ -1464,7 +1475,7 @@ static bool R_RtGatherMonstersWorld( float *&pos, int *&idx, int &numVerts, int 
 		const idRenderModel *dm = def->dynamicModel;
 		for ( int s = 0; s < dm->NumSurfaces(); s++ ) {
 			const modelSurface_t *surf = dm->Surface( s );
-			if ( !R_RtSurfCasts( surf ) ) {
+			if ( !R_RtSurfCasts( surf ) || R_RtSurfViaAnimBlas( surf ) ) {
 				continue;
 			}
 			const srfTriangles_t *tri = surf->geometry;
@@ -1671,9 +1682,7 @@ static void R_RtStageAnimCasters( void ) {
 		const idRenderModel *dm = def->dynamicModel;
 		int surfCount = 0;
 		for ( int s = 0; s < dm->NumSurfaces(); s++ ) {
-			const srfTriangles_t *tri = dm->Surface( s )->geometry;
-			if ( R_RtSurfCasts( dm->Surface( s ) ) && tri->gpuSkinVB != 0
-				&& tri->indexCache != NULL && tri->indexCache->vbo != 0 ) {
+			if ( R_RtSurfCasts( dm->Surface( s ) ) && R_RtSurfViaAnimBlas( dm->Surface( s ) ) ) {
 				surfCount++;
 			}
 		}
@@ -1705,8 +1714,7 @@ static void R_RtStageAnimCasters( void ) {
 		sig = R_RtHashBytes( sig, &modelPtr, sizeof( modelPtr ) );
 		for ( int s = 0; s < dm->NumSurfaces() && ( gi - gStart ) < 64; s++ ) {
 			const srfTriangles_t *tri = dm->Surface( s )->geometry;
-			if ( !( R_RtSurfCasts( dm->Surface( s ) ) && tri->gpuSkinVB != 0
-				&& tri->indexCache != NULL && tri->indexCache->vbo != 0 ) ) {
+			if ( !R_RtSurfCasts( dm->Surface( s ) ) || !R_RtSurfViaAnimBlas( dm->Surface( s ) ) ) {
 				continue;
 			}
 			const unsigned long long va = r->GetBufferDeviceAddress( tri->gpuSkinVB );
@@ -2901,14 +2909,15 @@ void R_RenderView( viewDef_t *parms ) {
 	// R2 ray-query world scene + validator (docs/rtx-shadow-roadmap.md): r_rtWorld keeps the
 	// persistent static-world AS in sync (lazy build / map change / teardown); r_rtWorldTest
 	// is the one-shot GPU-vs-CPU ray diff. Both self-gate; Vulkan + RT hardware only.
+	// R3.5 S3/S4: stage GPU-skinned casters for the per-entity animated BLAS cache BEFORE R_RtWorldUpdate
+	// (whose UpdateTlas reserves TLAS capacity for them and defers the build to RefreshAnimBlas). Runs
+	// every frame so the cache retires when off; gated by r_rtAnimBlas.
+	R_RtStageAnimCasters();
 	R_RtWorldUpdate();
 	R_RtWorldValidate();
 	// R3.5 animated-BLAS validator (docs/rtx-animated-blas.md S2): one-shot diff of a monster's
 	// gpuSkinVB-fed BLAS (build + refit) vs a CPU trace of the same buffers. Self-gates; VK + RT only.
 	R_RtAnimBlasValidate();
-	// R3.5 S3: stage GPU-skinned casters for the per-entity animated BLAS cache (backend builds/refits
-	// them after the skin flush). Runs every frame so the cache retires when off; gated by r_rtAnimBlas.
-	R_RtStageAnimCasters();
 
 	// any viewLight that didn't have visible surfaces can have it's shadows removed
 	R_RemoveUnecessaryViewLights();
