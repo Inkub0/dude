@@ -1109,6 +1109,8 @@ static idCVar r_rtAnimBlasTest( "r_rtAnimBlasTest", "0", CVAR_RENDERER | CVAR_BO
 	"validate an animated monster's BLAS built from its GPU-skinned gpuSkinVB (build + refit) vs a CPU trace of the same buffers (Vulkan + RT hardware; needs a GPU-skinned caster in view; one-shot, self-clears)" );
 static idCVar r_rtAnimBlas( "r_rtAnimBlas", "0", CVAR_RENDERER | CVAR_BOOL,
 	"S3 (docs/rtx-animated-blas.md): maintain a per-entity animated BLAS cache from GPU-skinned casters' gpuSkinVB (built/refit after the skin flush). Inert soak until S4 instances them into the TLAS; watch r_shadowMapCacheDebug for build/refit/retire stability (Vulkan + RT hardware)" );
+static idCVar r_rtReflTest( "r_rtReflTest", "0", CVAR_RENDERER | CVAR_BOOL,
+	"RR1 (docs/rtx-reflections.md): validate the reflection-hit attribute fetch — trace rays at a GPU-skinned monster, fetch the hit's interpolated world normal from gpuSkinVB via the geometry table + buffer_reference, and diff vs a CPU barycentric reference (Vulkan + RT hardware; needs a GPU-skinned monster in view; one-shot, self-clears)" );
 
 struct rtAreaSlice_t { int vertStart, numVerts, idxStart, numIdx; };
 struct rtModelSlice_t {
@@ -2401,6 +2403,305 @@ static void R_RtAnimBlasValidate( void ) {
 	Mem_Free16( cpuIdx );
 }
 
+// ---- r_rtReflTest (RR1): validate the reflection-hit attribute fetch --------------------------------
+// The crux RT reflections stands on: at a ray-query hit, resolve the geometry table by the hit's
+// instanceCustomIndex + geometryIndex, dereference the hit surface's gpuSkinVB by device address
+// (GL_EXT_buffer_reference), interpolate the triangle's vertex normals by the hit barycentrics, and
+// transform to world by ObjectToWorld. This shader does exactly that and writes the world normal + t;
+// the CPU reference (R_RtCpuTraceHitNormal) computes the same over the read-back soup. Standalone
+// (one identity instance, so ObjectToWorld = identity and both compare in model space), like
+// r_rtAnimBlasTest. idDrawVert: stride 60 B = 15 uints, normal at uint offset 5 (byte 20).
+static const char *RTREFL_TEST_SRC =
+	"#version 460\n"
+	"#extension GL_EXT_ray_query : require\n"
+	"#extension GL_EXT_buffer_reference : require\n"
+	"layout(local_size_x = 64) in;\n"
+	"layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertRef { uint w[]; };\n"
+	"layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IdxRef  { uint i[]; };\n"
+	"struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; };\n"
+	"layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer GeoTable { GeoDesc d[]; };\n"
+	"layout(std430, binding = 0) writeonly buffer Out  { vec4 hit[]; } outb;\n"
+	"layout(std430, binding = 1) readonly  buffer Rays { vec4 dir[]; } rays;\n"
+	"layout(push_constant) uniform PC { GeoTable geoTable; uvec2 tlas; uint count; float ox, oy, oz, tmax; } pc;\n"
+	"void main() {\n"
+	"    uint id = gl_GlobalInvocationID.x;\n"
+	"    if ( id >= pc.count ) { return; }\n"
+	"    rayQueryEXT rq;\n"
+	"    rayQueryInitializeEXT( rq, accelerationStructureEXT( pc.tlas ), gl_RayFlagsOpaqueEXT, 0xFFu,\n"
+	"                           vec3( pc.ox, pc.oy, pc.oz ), 0.0, rays.dir[id].xyz, pc.tmax );\n"
+	"    while ( rayQueryProceedEXT( rq ) ) { }\n"
+	"    if ( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT ) {\n"
+	"        outb.hit[id] = vec4( 0.0, 0.0, 0.0, -1.0 ); return;\n"		// miss
+	"    }\n"
+	"    uint ci   = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );\n"
+	"    uint gi   = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );\n"
+	"    uint prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );\n"
+	"    vec2 bc   = rayQueryGetIntersectionBarycentricsEXT( rq, true );\n"
+	"    mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT( rq, true );\n"
+	"    float t   = rayQueryGetIntersectionTEXT( rq, true );\n"
+	"    GeoDesc g = pc.geoTable.d[ ci + gi ];\n"
+	"    if ( ( g.flags & 1u ) == 0u ) { outb.hit[id] = vec4( 0.0, 0.0, 0.0, -2.0 ); return; }\n"	// static / no-attr row
+	"    uint s  = g.stride >> 2u;\n"		// uints per vertex (60/4 = 15)
+	"    uint i0 = g.ib.i[ 3u * prim + 0u ];\n"
+	"    uint i1 = g.ib.i[ 3u * prim + 1u ];\n"
+	"    uint i2 = g.ib.i[ 3u * prim + 2u ];\n"
+	"    vec3 n0 = vec3( uintBitsToFloat( g.vb.w[ i0*s + 5u ] ), uintBitsToFloat( g.vb.w[ i0*s + 6u ] ), uintBitsToFloat( g.vb.w[ i0*s + 7u ] ) );\n"
+	"    vec3 n1 = vec3( uintBitsToFloat( g.vb.w[ i1*s + 5u ] ), uintBitsToFloat( g.vb.w[ i1*s + 6u ] ), uintBitsToFloat( g.vb.w[ i1*s + 7u ] ) );\n"
+	"    vec3 n2 = vec3( uintBitsToFloat( g.vb.w[ i2*s + 5u ] ), uintBitsToFloat( g.vb.w[ i2*s + 6u ] ), uintBitsToFloat( g.vb.w[ i2*s + 7u ] ) );\n"
+	"    vec3 nm = ( 1.0 - bc.x - bc.y ) * n0 + bc.x * n1 + bc.y * n2;\n"
+	"    vec3 wn = mat3( o2w ) * nm;\n"
+	"    float l = length( wn );\n"
+	"    outb.hit[id] = vec4( ( l > 0.0 ) ? wn / l : vec3( 0.0 ), t );\n"
+	"}\n";
+
+// CPU closest-hit over the concatenated model-space soup, returning t and the barycentric-interpolated
+// (normalized) normal at the hit — the reference for the GPU fetch above. Same Moller-Trumbore + same
+// (1-u-v, u, v) -> (n0, n1, n2) weighting as the shader.
+static float R_RtCpuTraceHitNormal( const idVec3 &org, const idVec3 &dir, float tmax,
+		const float *pos, const int *idx, const float *nrm, int idxCount, idVec3 &outNormal ) {
+	float best = -1.0f;
+	int bi0 = 0, bi1 = 0, bi2 = 0;
+	float bu = 0.0f, bv = 0.0f;
+	for ( int n = 0; n < idxCount; n += 3 ) {
+		const int i0 = idx[n + 0], i1 = idx[n + 1], i2 = idx[n + 2];
+		const float *v0 = pos + i0 * 3, *v1 = pos + i1 * 3, *v2 = pos + i2 * 3;
+		const idVec3 e1( v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2] );
+		const idVec3 e2( v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2] );
+		const idVec3 pv = dir.Cross( e2 );
+		const float det = e1 * pv;
+		if ( det > -1e-8f && det < 1e-8f ) {
+			continue;
+		}
+		const float inv = 1.0f / det;
+		const idVec3 tv( org[0]-v0[0], org[1]-v0[1], org[2]-v0[2] );
+		const float u = ( tv * pv ) * inv;
+		if ( u < 0.0f || u > 1.0f ) {
+			continue;
+		}
+		const idVec3 qv = tv.Cross( e1 );
+		const float v = ( dir * qv ) * inv;
+		if ( v < 0.0f || u + v > 1.0f ) {
+			continue;
+		}
+		const float t = ( e2 * qv ) * inv;
+		if ( t > 0.0f && t < tmax && ( best < 0.0f || t < best ) ) {
+			best = t; bi0 = i0; bi1 = i1; bi2 = i2; bu = u; bv = v;
+		}
+	}
+	if ( best < 0.0f ) {
+		outNormal.Zero();
+		return -1.0f;
+	}
+	const float bw = 1.0f - bu - bv;
+	const idVec3 n0( nrm[bi0*3+0], nrm[bi0*3+1], nrm[bi0*3+2] );
+	const idVec3 n1( nrm[bi1*3+0], nrm[bi1*3+1], nrm[bi1*3+2] );
+	const idVec3 n2( nrm[bi2*3+0], nrm[bi2*3+1], nrm[bi2*3+2] );
+	idVec3 nm = bw * n0 + bu * n1 + bv * n2;
+	nm.Normalize();
+	outNormal = nm;
+	return best;
+}
+
+// Trace GxG reflection-probe rays from `origin` toward the bounds centre against tlasAddr, fetching the
+// hit's world normal on the GPU (RTREFL_TEST_SRC) via geoTableAddr; diff each vs the CPU normal at the
+// same hit. Same-hit gate: only compare normals when the GPU/CPU hit distances agree (else the ray
+// grazed an edge onto a different triangle — bucket boundary). Accumulates.
+static bool R_RtReflTraceCompare( rhi::RHI *r, rhi::ShaderHandle shader, unsigned long long tlasAddr,
+		unsigned long long geoTableAddr, const idVec3 &origin, int G, const idVec3 &center, float radius,
+		const float *cpuPos, const int *cpuIdx, const float *cpuNrm, int totalIdx,
+		int &hits, int &mismatch, int &boundary, int &genuine, float &maxAngErrDeg, int &firstBad ) {
+	const int NR = G * G;
+	const float TMAX = 100000.0f;
+	idVec3 D = center - origin; D.Normalize();
+	idVec3 e1 = D.Cross( idVec3( 0.0f, 0.0f, 1.0f ) );
+	if ( e1.LengthSqr() < 1e-6f ) { e1 = D.Cross( idVec3( 0.0f, 1.0f, 0.0f ) ); }
+	e1.Normalize();
+	idVec3 e2 = D.Cross( e1 ); e2.Normalize();
+	idVec3 *dirs = (idVec3 *)Mem_Alloc16( NR * (int)sizeof( idVec3 ) );
+	float *dirBlob = (float *)Mem_Alloc16( NR * 4 * (int)sizeof( float ) );
+	for ( int i = 0; i < NR; i++ ) {
+		const float sx = ( ( (float)( i % G ) + 0.5f ) / (float)G * 2.0f - 1.0f ) * 1.4f * radius;
+		const float sy = ( ( (float)( i / G ) + 0.5f ) / (float)G * 2.0f - 1.0f ) * 1.4f * radius;
+		idVec3 target = center + sx * e1 + sy * e2;
+		dirs[i] = target - origin; dirs[i].Normalize();
+		dirBlob[i*4+0] = dirs[i][0]; dirBlob[i*4+1] = dirs[i][1]; dirBlob[i*4+2] = dirs[i][2]; dirBlob[i*4+3] = 0.0f;
+	}
+	float *gpu = (float *)Mem_Alloc16( NR * 4 * (int)sizeof( float ) );	// vec4 per ray: xyz normal, w = t
+	float *seed = (float *)Mem_Alloc16( NR * 4 * (int)sizeof( float ) );
+	for ( int i = 0; i < NR * 4; i++ ) { seed[i] = -3.0f; }
+	rhi::BufferHandle bOut = r->CreateBuffer( rhi::BU_STORAGE, NR * 4 * (int)sizeof( float ), seed );
+	rhi::BufferHandle bRays = r->CreateBuffer( rhi::BU_STORAGE, NR * 4 * (int)sizeof( float ), dirBlob );
+	struct { unsigned long long geoTable; unsigned int tlasLo, tlasHi, count; float ox, oy, oz, tmax; } pc;
+	pc.geoTable = geoTableAddr;
+	pc.tlasLo = (unsigned int)( tlasAddr & 0xFFFFFFFFu );
+	pc.tlasHi = (unsigned int)( tlasAddr >> 32 );
+	pc.count = (unsigned int)NR;
+	pc.ox = origin[0]; pc.oy = origin[1]; pc.oz = origin[2]; pc.tmax = TMAX;
+	rhi::ComputeArgs ca;
+	memset( &ca, 0, sizeof( ca ) );
+	ca.shader = shader;
+	ca.storage[0] = bOut;
+	ca.storage[1] = bRays;
+	ca.pushConstants = &pc;
+	ca.pushConstantSize = (int)sizeof( pc );
+	ca.groupsX = ( NR + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
+	r->DispatchSync( ca );
+	const bool traced = r->ReadBuffer( bOut, gpu, NR * 4 * (int)sizeof( float ) );
+	r->DestroyBuffer( bOut );
+	r->DestroyBuffer( bRays );
+	if ( traced ) {
+		for ( int i = 0; i < NR; i++ ) {
+			const idVec3 gpuN( gpu[i*4+0], gpu[i*4+1], gpu[i*4+2] );
+			const float gpuT = gpu[i*4+3];
+			idVec3 cpuN;
+			const float cpuT = R_RtCpuTraceHitNormal( origin, dirs[i], TMAX, cpuPos, cpuIdx, cpuNrm, totalIdx, cpuN );
+			const bool gpuHit = gpuT >= 0.0f;
+			const bool cpuHit = cpuT >= 0.0f;
+			if ( gpuHit ) { hits++; }
+			// same-hit gate: both must hit at the same distance for the normals to be comparable
+			const float ttol = 0.05f + ( cpuT > 0.0f ? cpuT : 0.0f ) * 0.002f;
+			if ( gpuHit && cpuHit && idMath::Fabs( gpuT - cpuT ) < ttol ) {
+				const float d = idMath::ClampFloat( -1.0f, 1.0f, gpuN * cpuN );
+				const float ang = RAD2DEG( idMath::ACos( d ) );
+				if ( ang > maxAngErrDeg ) { maxAngErrDeg = ang; }
+				if ( d < 0.985f ) {			// > ~10 deg apart at the same hit point = a real fetch/interp error
+					mismatch++;
+					genuine++;
+					if ( firstBad < 0 ) { firstBad = i; }
+				}
+			} else if ( gpuHit || cpuHit ) {
+				// hit/miss flip, or both hit but at different distances (edge graze onto a different
+				// triangle) — legit FP divergence between the GPU traversal and the CPU sweep, not a fetch bug
+				mismatch++;
+				boundary++;
+			}
+		}
+	}
+	Mem_Free16( dirs ); Mem_Free16( dirBlob ); Mem_Free16( gpu ); Mem_Free16( seed );
+	return traced;
+}
+
+static void R_RtReflValidate( void ) {
+	if ( !r_rtReflTest.GetBool() ) {
+		if ( r_rtReflTest.IsModified() ) { r_rtReflTest.ClearModified(); }
+		return;
+	}
+	if ( R_RtSceneWorld() == NULL ) {
+		return;
+	}
+	r_rtReflTest.SetBool( false );
+	r_rtReflTest.ClearModified();
+
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r == NULL || !r->SupportsRayQuery() ) {
+		common->Printf( "r_rtReflTest: unavailable (needs Vulkan + KHR_ray_query hardware)\n" );
+		return;
+	}
+	idList<const srfTriangles_t *> surfs;
+	const idRenderEntityLocal *def = R_RtFindSkinnedCaster( surfs );
+	if ( def == NULL ) {
+		common->Printf( "r_rtReflTest: no visible GPU-skinned monster (need r_gpuSkinning on + a monster in view)\n" );
+		return;
+	}
+	const int MAXG = 64;
+	int nSurf = surfs.Num();
+	if ( nSurf > MAXG ) { nSurf = MAXG; }
+
+	// per-surface geometry table rows (device addresses) + a model-space CPU soup (pos + normal) from
+	// the read-back gpuSkinVB — the exact bytes the shader dereferences.
+	struct GeoRow { unsigned long long vtxAddr, idxAddr; unsigned int stride, flags; };	// matches shader GeoDesc
+	GeoRow *rows = (GeoRow *)Mem_Alloc16( nSurf * (int)sizeof( GeoRow ) );
+	int totalVerts = 0, totalIdx = 0;
+	for ( int s = 0; s < nSurf; s++ ) { totalVerts += surfs[s]->numVerts; totalIdx += surfs[s]->numIndexes; }
+	float *cpuPos = (float *)Mem_Alloc16( totalVerts * 3 * (int)sizeof( float ) );
+	float *cpuNrm = (float *)Mem_Alloc16( totalVerts * 3 * (int)sizeof( float ) );
+	int *cpuIdx = (int *)Mem_Alloc16( totalIdx * (int)sizeof( int ) );
+	rhi::RHI::BlasGeometry geoms[64];
+	idDrawVert *tmp = (idDrawVert *)Mem_Alloc16( totalVerts * (int)sizeof( idDrawVert ) );
+	int vbase = 0, ibase = 0;
+	bool readOk = true;
+	for ( int s = 0; s < nSurf; s++ ) {
+		const srfTriangles_t *tri = surfs[s];
+		const unsigned long long va = r->GetBufferDeviceAddress( tri->gpuSkinVB );
+		const unsigned long long ia = r->GetBufferDeviceAddress( (rhi::BufferHandle)tri->indexCache->vbo );
+		if ( va == 0 || ia == 0 || !r->ReadBuffer( tri->gpuSkinVB, tmp + vbase, tri->numVerts * (int)sizeof( idDrawVert ) ) ) {
+			readOk = false;
+			break;
+		}
+		geoms[s].vertexAddress = va; geoms[s].vertexStride = (unsigned int)sizeof( idDrawVert );
+		geoms[s].vertexCount = (unsigned int)tri->numVerts;
+		geoms[s].indexAddress = ia; geoms[s].indexCount = (unsigned int)tri->numIndexes;
+		rows[s].vtxAddr = va; rows[s].idxAddr = ia; rows[s].stride = (unsigned int)sizeof( idDrawVert ); rows[s].flags = 1u;
+		for ( int k = 0; k < tri->numVerts; k++ ) {
+			const idDrawVert &v = tmp[vbase + k];
+			cpuPos[(vbase+k)*3+0] = v.xyz.x; cpuPos[(vbase+k)*3+1] = v.xyz.y; cpuPos[(vbase+k)*3+2] = v.xyz.z;
+			cpuNrm[(vbase+k)*3+0] = v.normal.x; cpuNrm[(vbase+k)*3+1] = v.normal.y; cpuNrm[(vbase+k)*3+2] = v.normal.z;
+		}
+		for ( int m = 0; m < tri->numIndexes; m++ ) { cpuIdx[ibase + m] = vbase + tri->indexes[m]; }
+		vbase += tri->numVerts; ibase += tri->numIndexes;
+	}
+	Mem_Free16( tmp );
+	if ( !readOk ) {
+		common->Printf( "r_rtReflTest: FAIL (no device address / readback for gpuSkinVB or index buffer)\n" );
+		Mem_Free16( rows ); Mem_Free16( cpuPos ); Mem_Free16( cpuNrm ); Mem_Free16( cpuIdx );
+		return;
+	}
+
+	// device-addressable geometry table (customIndex 0 for the single standalone instance -> rows[0..])
+	rhi::BufferHandle geoBuf = r->CreateBuffer( rhi::BU_STORAGE, nSurf * (int)sizeof( GeoRow ), rows );
+	const unsigned long long geoAddr = geoBuf ? r->GetBufferDeviceAddress( geoBuf ) : 0;
+	rhi::BlasHandle blas = ( geoAddr != 0 ) ? r->CreateBlasFromBuffers( geoms, nSurf, false ) : 0;
+	if ( blas == 0 || geoAddr == 0 ) {
+		common->Printf( "r_rtReflTest: FAIL (%s)\n", geoAddr == 0 ? "geometry table buffer" : "CreateBlasFromBuffers" );
+		if ( geoBuf ) { r->DestroyBuffer( geoBuf ); }
+		if ( blas ) { r->DestroyBlas( blas ); }
+		Mem_Free16( rows ); Mem_Free16( cpuPos ); Mem_Free16( cpuNrm ); Mem_Free16( cpuIdx );
+		return;
+	}
+	rhi::RHI::RtInstance inst;
+	memset( &inst, 0, sizeof( inst ) );
+	inst.transform[0] = 1.0f; inst.transform[5] = 1.0f; inst.transform[10] = 1.0f;	// identity (customIndex 0)
+	inst.blas = blas; inst.mask = 0xFF;
+	const unsigned long long tlas = r->BuildStandaloneTlas( &inst, 1 );
+
+	static rhi::ShaderHandle s_reflShader = 0;
+	if ( s_reflShader == 0 ) { s_reflShader = r->CreateComputeShader( "cs_rtrefltest", RTREFL_TEST_SRC ); }
+
+	idVec3 mn( idMath::INFINITY, idMath::INFINITY, idMath::INFINITY ), mx( -idMath::INFINITY, -idMath::INFINITY, -idMath::INFINITY );
+	for ( int k = 0; k < totalVerts; k++ ) {
+		const idVec3 v( cpuPos[k*3+0], cpuPos[k*3+1], cpuPos[k*3+2] );
+		mn.x = Min( mn.x, v.x ); mn.y = Min( mn.y, v.y ); mn.z = Min( mn.z, v.z );
+		mx.x = Max( mx.x, v.x ); mx.y = Max( mx.y, v.y ); mx.z = Max( mx.z, v.z );
+	}
+	const idVec3 center = ( mn + mx ) * 0.5f;
+	float radius = ( ( mx - mn ) * 0.5f ).Length();
+	if ( radius < 1.0f ) { radius = 1.0f; }
+	const float stand = 3.0f * radius;
+	idVec3 corner[3] = { idVec3( 1, 1, 1 ), idVec3( -1, -1, 1 ), idVec3( 1, -1, -1 ) };
+
+	const int G = 16;
+	int hits = 0, mm = 0, bd = 0, gen = 0, fb = -1;
+	float maxAng = 0.0f;
+	bool traced = ( s_reflShader != 0 && tlas != 0 );
+	if ( traced ) {
+		for ( int c = 0; c < 3; c++ ) {
+			idVec3 nrm = corner[c]; nrm.Normalize();
+			const idVec3 origin = center + nrm * stand;
+			traced = R_RtReflTraceCompare( r, s_reflShader, tlas, geoAddr, origin, G, center, radius,
+				cpuPos, cpuIdx, cpuNrm, totalIdx, hits, mm, bd, gen, maxAng, fb ) && traced;
+		}
+	}
+	const bool pass = traced && gen == 0 && hits > 0;
+	common->Printf( "r_rtReflTest: '%s' %d surf, %d tris, %d verts; %s (%d/%d hit, mismatch %d = %d bFP + %d genuine@%d, max normal err %.2f deg)\n",
+		def->parms.hModel->Name(), nSurf, totalIdx / 3, totalVerts,
+		pass ? "PASS" : ( traced ? "FAIL" : "no-trace" ), hits, G * G * 3, mm, bd, gen, fb, maxAng );
+
+	r->DestroyBlas( blas );
+	r->DestroyStandaloneTlas();
+	r->DestroyBuffer( geoBuf );
+	Mem_Free16( rows ); Mem_Free16( cpuPos ); Mem_Free16( cpuNrm ); Mem_Free16( cpuIdx );
+}
+
 /*
 ==========================
 R_TransformModelToClip
@@ -2920,6 +3221,9 @@ void R_RenderView( viewDef_t *parms ) {
 	// R3.5 animated-BLAS validator (docs/rtx-animated-blas.md S2): one-shot diff of a monster's
 	// gpuSkinVB-fed BLAS (build + refit) vs a CPU trace of the same buffers. Self-gates; VK + RT only.
 	R_RtAnimBlasValidate();
+	// RT reflections RR1 (docs/rtx-reflections.md): one-shot diff of the reflection-hit attribute fetch
+	// (gpuSkinVB normal via the geometry table + buffer_reference) vs a CPU barycentric reference.
+	R_RtReflValidate();
 
 	// any viewLight that didn't have visible surfaces can have it's shadows removed
 	R_RemoveUnecessaryViewLights();
