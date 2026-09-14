@@ -3470,6 +3470,17 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 	if ( ( usage == BU_STORAGE || usage == BU_VERTEX || usage == BU_INDEX ) && haveBufferDeviceAddress ) {
 		usageBits |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 	}
+	// R3.5 animated BLAS: the GPU-skinned vertex output (BU_SKIN) and each surface's persistent
+	// static index buffer (BU_INDEX) feed a per-entity ray-tracing BLAS by device address, so they
+	// need SHADER_DEVICE_ADDRESS (BU_SKIN lacks it above) plus ACCELERATION_STRUCTURE_BUILD_INPUT.
+	// The AS-input usage bit is only legal when VK_KHR_acceleration_structure is enabled, so gate on
+	// haveRayQuery (which implies both that extension and buffer_device_address). Inert on non-RT
+	// devices; on RT hardware these are two extra usage bits with no behavior change until an
+	// animated BLAS actually consumes the buffers (S1+).
+	if ( haveRayQuery && ( usage == BU_SKIN || usage == BU_INDEX ) ) {
+		usageBits |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+		           | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+	}
 
 	VkBufferCreateInfo bci = {};
 	bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -4049,8 +4060,19 @@ void VulkanBackend::PostComputeBarrier() {
 	mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
 	mb.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+	VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT
+		| VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+	// R3.5 animated BLAS: also make the skinned vertex writes visible to an acceleration-structure
+	// build/refit that consumes gpuSkinVB as geometry this frame (skin compute -> AS build). The
+	// AS-build stage/access flags are only legal when the extension is enabled, so add them solely on
+	// RT-capable devices. When no AS build actually reads the skin this frame the widened dst scope is
+	// a harmless no-op (nothing waits in that stage). The existing AS-build -> fragment ray-read
+	// barrier then carries the skinned geometry into the shadow trace.
+	if ( haveRayQuery ) {
+		mb.dstAccessMask |= VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+		dstStage |= VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+	}
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, dstStage,
 		0, 1, &mb, 0, NULL, 0, NULL );
 }
 
