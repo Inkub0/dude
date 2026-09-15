@@ -5014,11 +5014,17 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			rp.color[0] = keyDir[0]; rp.color[1] = keyDir[1]; rp.color[2] = keyDir[2];
 			rp.color[3] = 0.28f;										// ambient term
 			rp.diffuseModifier[0] = rp.diffuseModifier[1] = rp.diffuseModifier[2] = 1.0f;	// key light colour
-			// unit 0 = SSR march result (miss gate, via DrawFullscreen), 1 = depth, 2/3 = G-buffer
+			// unit 0 = the ACCUMULATED SSR result (miss gate, via DrawFullscreen), 1 = depth, 2/3 = G-buffer.
+			// Gate on resultRT (the temporally-accumulated reflection the composite uses), NOT the raw
+			// per-frame march (rhiSsrRT): the march misses a grid of grout points every frame (bump-
+			// perturbed rays leave the screen there) that temporal has long since filled, so gating on the
+			// march made RT re-fill them with a sharp reflection on top of SSR's smooth one — a doubled
+			// firefly grid. Gating on the accumulated result means RT only adds where SSR's FINAL image is
+			// genuinely empty (off-screen content), seamless with SSR everywhere else.
 			RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 			RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
 			RB_RHI_BindRTImage( r, 3, matImg );
-			RB_RHI_DrawFullscreen( r, rtProg, rp, r->GetRenderTargetImage( rhiSsrRT ),
+			RB_RHI_DrawFullscreen( r, rtProg, rp, r->GetRenderTargetImage( resultRT ),
 			                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 		}
 	}
