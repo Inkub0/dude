@@ -1663,6 +1663,22 @@ static unsigned int R_RtMaterialBaseColor( const idMaterial *mat ) {
 	return c;
 }
 
+// RR4: the diffuse stage's texture handle (idImage::rhiHandle = the Vulkan backend's bindless slot + 1),
+// so a reflected monster hit samples its real diffuse at the interpolated st. 0 = no diffuse image yet
+// (not uploaded, or none) -> the reflection shader falls back to the RR3 average colour.
+static unsigned int R_RtMaterialTexIndex( const idMaterial *mat ) {
+	if ( mat != NULL ) {
+		const int n = mat->GetNumStages();
+		for ( int i = 0; i < n; i++ ) {
+			const shaderStage_t *st = mat->GetStage( i );
+			if ( st->lighting == SL_DIFFUSE && st->texture.image != NULL ) {
+				return (unsigned int)st->texture.image->rhiHandle;
+			}
+		}
+	}
+	return 0;
+}
+
 // R3.5 S3: stage this frame's GPU-skinned shadow casters for the backend's per-entity animated BLAS
 // cache. Runs once/frame regardless of the persistent-scene state (so the cache retires stale entries
 // when the feature or the view goes away). The backend copies the descriptors and builds/refits each
@@ -1758,6 +1774,7 @@ static void R_RtStageAnimCasters( void ) {
 			geoms[gi].indexAddress = ia;
 			geoms[gi].indexCount = (unsigned int)tri->numIndexes;
 			geoms[gi].baseColor = R_RtMaterialBaseColor( dm->Surface( s )->shader );	// RR3: skin colour
+			geoms[gi].texIndex = R_RtMaterialTexIndex( dm->Surface( s )->shader );	// RR4: diffuse bindless slot
 
 			sig = R_RtHashBytes( sig, &tri->gpuSkinVB, sizeof( tri->gpuSkinVB ) );
 			sig = R_RtHashBytes( sig, &tri->numVerts, sizeof( tri->numVerts ) );
@@ -2446,10 +2463,11 @@ static const char *RTREFL_TEST_SRC =
 	"layout(local_size_x = 64) in;\n"
 	"layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertRef { uint w[]; };\n"
 	"layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IdxRef  { uint i[]; };\n"
-	"struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; uint baseColor; uint pad; };\n"
+	"struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; uint baseColor; uint texIndex; };\n"
 	"layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer GeoTable { GeoDesc d[]; };\n"
-	"layout(std430, binding = 0) writeonly buffer Out  { vec4 hit[]; } outb;\n"
-	"layout(std430, binding = 1) readonly  buffer Rays { vec4 dir[]; } rays;\n"
+	"layout(std430, binding = 0) writeonly buffer Out   { vec4 hit[]; } outb;\n"
+	"layout(std430, binding = 1) readonly  buffer Rays  { vec4 dir[]; } rays;\n"
+	"layout(std430, binding = 2) writeonly buffer StOut { vec4 stt[]; } stb;\n"	// RR4: st.xy, texIndex, _
 	"layout(push_constant) uniform PC { GeoTable geoTable; uvec2 tlas; uint count; float ox, oy, oz, tmax; } pc;\n"
 	"void main() {\n"
 	"    uint id = gl_GlobalInvocationID.x;\n"
@@ -2459,7 +2477,7 @@ static const char *RTREFL_TEST_SRC =
 	"                           vec3( pc.ox, pc.oy, pc.oz ), 0.0, rays.dir[id].xyz, pc.tmax );\n"
 	"    while ( rayQueryProceedEXT( rq ) ) { }\n"
 	"    if ( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT ) {\n"
-	"        outb.hit[id] = vec4( 0.0, 0.0, 0.0, -1.0 ); return;\n"		// miss
+	"        outb.hit[id] = vec4( 0.0, 0.0, 0.0, -1.0 ); stb.stt[id] = vec4( 0.0 ); return;\n"		// miss
 	"    }\n"
 	"    uint ci   = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );\n"
 	"    uint gi   = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );\n"
@@ -2468,7 +2486,7 @@ static const char *RTREFL_TEST_SRC =
 	"    mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT( rq, true );\n"
 	"    float t   = rayQueryGetIntersectionTEXT( rq, true );\n"
 	"    GeoDesc g = pc.geoTable.d[ ci + gi ];\n"
-	"    if ( ( g.flags & 1u ) == 0u ) { outb.hit[id] = vec4( 0.0, 0.0, 0.0, -2.0 ); return; }\n"	// static / no-attr row
+	"    if ( ( g.flags & 1u ) == 0u ) { outb.hit[id] = vec4( 0.0, 0.0, 0.0, -2.0 ); stb.stt[id] = vec4( 0.0 ); return; }\n"	// static / no-attr row
 	"    uint s  = g.stride >> 2u;\n"		// uints per vertex (60/4 = 15)
 	"    uint i0 = g.ib.i[ 3u * prim + 0u ];\n"
 	"    uint i1 = g.ib.i[ 3u * prim + 1u ];\n"
@@ -2479,14 +2497,20 @@ static const char *RTREFL_TEST_SRC =
 	"    vec3 nm = ( 1.0 - bc.x - bc.y ) * n0 + bc.x * n1 + bc.y * n2;\n"
 	"    vec3 wn = mat3( o2w ) * nm;\n"
 	"    float l = length( wn );\n"
+	"    vec2 t0 = vec2( uintBitsToFloat( g.vb.w[ i0*s + 3u ] ), uintBitsToFloat( g.vb.w[ i0*s + 4u ] ) );\n"	// RR4: st at uint offset 3
+	"    vec2 t1 = vec2( uintBitsToFloat( g.vb.w[ i1*s + 3u ] ), uintBitsToFloat( g.vb.w[ i1*s + 4u ] ) );\n"
+	"    vec2 t2 = vec2( uintBitsToFloat( g.vb.w[ i2*s + 3u ] ), uintBitsToFloat( g.vb.w[ i2*s + 4u ] ) );\n"
+	"    vec2 stm = ( 1.0 - bc.x - bc.y ) * t0 + bc.x * t1 + bc.y * t2;\n"
 	"    outb.hit[id] = vec4( ( l > 0.0 ) ? wn / l : vec3( 0.0 ), t );\n"
+	"    stb.stt[id] = vec4( stm.x, stm.y, float( g.texIndex ), 0.0 );\n"
 	"}\n";
 
 // CPU closest-hit over the concatenated model-space soup, returning t and the barycentric-interpolated
 // (normalized) normal at the hit — the reference for the GPU fetch above. Same Moller-Trumbore + same
 // (1-u-v, u, v) -> (n0, n1, n2) weighting as the shader.
 static float R_RtCpuTraceHitNormal( const idVec3 &org, const idVec3 &dir, float tmax,
-		const float *pos, const int *idx, const float *nrm, int idxCount, idVec3 &outNormal ) {
+		const float *pos, const int *idx, const float *nrm, const float *stArr, int idxCount,
+		idVec3 &outNormal, idVec2 &outSt ) {
 	float best = -1.0f;
 	int bi0 = 0, bi1 = 0, bi2 = 0;
 	float bu = 0.0f, bv = 0.0f;
@@ -2518,6 +2542,7 @@ static float R_RtCpuTraceHitNormal( const idVec3 &org, const idVec3 &dir, float 
 	}
 	if ( best < 0.0f ) {
 		outNormal.Zero();
+		outSt.Zero();
 		return -1.0f;
 	}
 	const float bw = 1.0f - bu - bv;
@@ -2527,6 +2552,13 @@ static float R_RtCpuTraceHitNormal( const idVec3 &org, const idVec3 &dir, float 
 	idVec3 nm = bw * n0 + bu * n1 + bv * n2;
 	nm.Normalize();
 	outNormal = nm;
+	if ( stArr != NULL ) {
+		outSt = bw * idVec2( stArr[bi0*2+0], stArr[bi0*2+1] )
+		      + bu * idVec2( stArr[bi1*2+0], stArr[bi1*2+1] )
+		      + bv * idVec2( stArr[bi2*2+0], stArr[bi2*2+1] );
+	} else {
+		outSt.Zero();
+	}
 	return best;
 }
 
@@ -2536,8 +2568,9 @@ static float R_RtCpuTraceHitNormal( const idVec3 &org, const idVec3 &dir, float 
 // grazed an edge onto a different triangle — bucket boundary). Accumulates.
 static bool R_RtReflTraceCompare( rhi::RHI *r, rhi::ShaderHandle shader, unsigned long long tlasAddr,
 		unsigned long long geoTableAddr, const idVec3 &origin, int G, const idVec3 &center, float radius,
-		const float *cpuPos, const int *cpuIdx, const float *cpuNrm, int totalIdx,
-		int &hits, int &mismatch, int &boundary, int &genuine, float &maxAngErrDeg, int &firstBad ) {
+		const float *cpuPos, const int *cpuIdx, const float *cpuNrm, const float *cpuSt, int totalIdx,
+		int &hits, int &mismatch, int &boundary, int &genuine, float &maxAngErrDeg, int &firstBad,
+		float &maxStErr, int &stMismatch, int &texSeen ) {
 	const int NR = G * G;
 	const float TMAX = 100000.0f;
 	idVec3 D = center - origin; D.Normalize();
@@ -2559,6 +2592,8 @@ static bool R_RtReflTraceCompare( rhi::RHI *r, rhi::ShaderHandle shader, unsigne
 	for ( int i = 0; i < NR * 4; i++ ) { seed[i] = -3.0f; }
 	rhi::BufferHandle bOut = r->CreateBuffer( rhi::BU_STORAGE, NR * 4 * (int)sizeof( float ), seed );
 	rhi::BufferHandle bRays = r->CreateBuffer( rhi::BU_STORAGE, NR * 4 * (int)sizeof( float ), dirBlob );
+	float *gpuSt = (float *)Mem_Alloc16( NR * 4 * (int)sizeof( float ) );	// RR4: vec4/ray = st.xy, texIndex, _
+	rhi::BufferHandle bStTex = r->CreateBuffer( rhi::BU_STORAGE, NR * 4 * (int)sizeof( float ), seed );	// reuse the -3 seed
 	struct { unsigned long long geoTable; unsigned int tlasLo, tlasHi, count; float ox, oy, oz, tmax; } pc;
 	pc.geoTable = geoTableAddr;
 	pc.tlasLo = (unsigned int)( tlasAddr & 0xFFFFFFFFu );
@@ -2570,19 +2605,22 @@ static bool R_RtReflTraceCompare( rhi::RHI *r, rhi::ShaderHandle shader, unsigne
 	ca.shader = shader;
 	ca.storage[0] = bOut;
 	ca.storage[1] = bRays;
+	ca.storage[2] = bStTex;
 	ca.pushConstants = &pc;
 	ca.pushConstantSize = (int)sizeof( pc );
 	ca.groupsX = ( NR + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
 	r->DispatchSync( ca );
 	const bool traced = r->ReadBuffer( bOut, gpu, NR * 4 * (int)sizeof( float ) );
+	const bool gotSt = r->ReadBuffer( bStTex, gpuSt, NR * 4 * (int)sizeof( float ) );
 	r->DestroyBuffer( bOut );
 	r->DestroyBuffer( bRays );
+	r->DestroyBuffer( bStTex );
 	if ( traced ) {
 		for ( int i = 0; i < NR; i++ ) {
 			const idVec3 gpuN( gpu[i*4+0], gpu[i*4+1], gpu[i*4+2] );
 			const float gpuT = gpu[i*4+3];
-			idVec3 cpuN;
-			const float cpuT = R_RtCpuTraceHitNormal( origin, dirs[i], TMAX, cpuPos, cpuIdx, cpuNrm, totalIdx, cpuN );
+			idVec3 cpuN; idVec2 cpuStOut;
+			const float cpuT = R_RtCpuTraceHitNormal( origin, dirs[i], TMAX, cpuPos, cpuIdx, cpuNrm, cpuSt, totalIdx, cpuN, cpuStOut );
 			const bool gpuHit = gpuT >= 0.0f;
 			const bool cpuHit = cpuT >= 0.0f;
 			if ( gpuHit ) { hits++; }
@@ -2597,6 +2635,13 @@ static bool R_RtReflTraceCompare( rhi::RHI *r, rhi::ShaderHandle shader, unsigne
 					genuine++;
 					if ( firstBad < 0 ) { firstBad = i; }
 				}
+				// RR4: st fetched at the same hit must match the CPU-interpolated st; texIndex reads back nonzero
+				if ( gotSt ) {
+					const float se = Max( idMath::Fabs( gpuSt[i*4+0] - cpuStOut.x ), idMath::Fabs( gpuSt[i*4+1] - cpuStOut.y ) );
+					if ( se > maxStErr ) { maxStErr = se; }
+					if ( se > 0.01f ) { stMismatch++; }
+					if ( gpuSt[i*4+2] != 0.0f ) { texSeen++; }
+				}
 			} else if ( gpuHit || cpuHit ) {
 				// hit/miss flip, or both hit but at different distances (edge graze onto a different
 				// triangle) — legit FP divergence between the GPU traversal and the CPU sweep, not a fetch bug
@@ -2605,7 +2650,7 @@ static bool R_RtReflTraceCompare( rhi::RHI *r, rhi::ShaderHandle shader, unsigne
 			}
 		}
 	}
-	Mem_Free16( dirs ); Mem_Free16( dirBlob ); Mem_Free16( gpu ); Mem_Free16( seed );
+	Mem_Free16( dirs ); Mem_Free16( dirBlob ); Mem_Free16( gpu ); Mem_Free16( seed ); Mem_Free16( gpuSt );
 	return traced;
 }
 
@@ -2637,12 +2682,13 @@ static void R_RtReflValidate( void ) {
 
 	// per-surface geometry table rows (device addresses) + a model-space CPU soup (pos + normal) from
 	// the read-back gpuSkinVB — the exact bytes the shader dereferences.
-	struct GeoRow { unsigned long long vtxAddr, idxAddr; unsigned int stride, flags, baseColor, pad; };	// matches shader GeoDesc (32 B)
+	struct GeoRow { unsigned long long vtxAddr, idxAddr; unsigned int stride, flags, baseColor, texIndex; };	// matches shader GeoDesc (32 B)
 	GeoRow *rows = (GeoRow *)Mem_Alloc16( nSurf * (int)sizeof( GeoRow ) );
 	int totalVerts = 0, totalIdx = 0;
 	for ( int s = 0; s < nSurf; s++ ) { totalVerts += surfs[s]->numVerts; totalIdx += surfs[s]->numIndexes; }
 	float *cpuPos = (float *)Mem_Alloc16( totalVerts * 3 * (int)sizeof( float ) );
 	float *cpuNrm = (float *)Mem_Alloc16( totalVerts * 3 * (int)sizeof( float ) );
+	float *cpuSt = (float *)Mem_Alloc16( totalVerts * 2 * (int)sizeof( float ) );	// RR4: source st soup
 	int *cpuIdx = (int *)Mem_Alloc16( totalIdx * (int)sizeof( int ) );
 	rhi::RHI::BlasGeometry geoms[64];
 	idDrawVert *tmp = (idDrawVert *)Mem_Alloc16( totalVerts * (int)sizeof( idDrawVert ) );
@@ -2660,11 +2706,12 @@ static void R_RtReflValidate( void ) {
 		geoms[s].vertexCount = (unsigned int)tri->numVerts;
 		geoms[s].indexAddress = ia; geoms[s].indexCount = (unsigned int)tri->numIndexes;
 		rows[s].vtxAddr = va; rows[s].idxAddr = ia; rows[s].stride = (unsigned int)sizeof( idDrawVert );
-		rows[s].flags = 1u; rows[s].baseColor = 0u; rows[s].pad = 0u;
+		rows[s].flags = 1u; rows[s].baseColor = 0u; rows[s].texIndex = (unsigned int)( s + 1 );	// RR4: sentinel proves the field reads back
 		for ( int k = 0; k < tri->numVerts; k++ ) {
 			const idDrawVert &v = tmp[vbase + k];
 			cpuPos[(vbase+k)*3+0] = v.xyz.x; cpuPos[(vbase+k)*3+1] = v.xyz.y; cpuPos[(vbase+k)*3+2] = v.xyz.z;
 			cpuNrm[(vbase+k)*3+0] = v.normal.x; cpuNrm[(vbase+k)*3+1] = v.normal.y; cpuNrm[(vbase+k)*3+2] = v.normal.z;
+			cpuSt[(vbase+k)*2+0] = v.st.x; cpuSt[(vbase+k)*2+1] = v.st.y;
 		}
 		for ( int m = 0; m < tri->numIndexes; m++ ) { cpuIdx[ibase + m] = vbase + tri->indexes[m]; }
 		vbase += tri->numVerts; ibase += tri->numIndexes;
@@ -2672,7 +2719,7 @@ static void R_RtReflValidate( void ) {
 	Mem_Free16( tmp );
 	if ( !readOk ) {
 		common->Printf( "r_rtReflTest: FAIL (no device address / readback for gpuSkinVB or index buffer)\n" );
-		Mem_Free16( rows ); Mem_Free16( cpuPos ); Mem_Free16( cpuNrm ); Mem_Free16( cpuIdx );
+		Mem_Free16( rows ); Mem_Free16( cpuPos ); Mem_Free16( cpuNrm ); Mem_Free16( cpuIdx ); Mem_Free16( cpuSt );
 		return;
 	}
 
@@ -2684,7 +2731,7 @@ static void R_RtReflValidate( void ) {
 		common->Printf( "r_rtReflTest: FAIL (%s)\n", geoAddr == 0 ? "geometry table buffer" : "CreateBlasFromBuffers" );
 		if ( geoBuf ) { r->DestroyBuffer( geoBuf ); }
 		if ( blas ) { r->DestroyBlas( blas ); }
-		Mem_Free16( rows ); Mem_Free16( cpuPos ); Mem_Free16( cpuNrm ); Mem_Free16( cpuIdx );
+		Mem_Free16( rows ); Mem_Free16( cpuPos ); Mem_Free16( cpuNrm ); Mem_Free16( cpuIdx ); Mem_Free16( cpuSt );
 		return;
 	}
 	rhi::RHI::RtInstance inst;
@@ -2711,24 +2758,25 @@ static void R_RtReflValidate( void ) {
 	const int G = 16;
 	int hits = 0, mm = 0, bd = 0, gen = 0, fb = -1;
 	float maxAng = 0.0f;
+	float maxSt = 0.0f; int stmm = 0, texSeen = 0;	// RR4: st error + texIndex readback
 	bool traced = ( s_reflShader != 0 && tlas != 0 );
 	if ( traced ) {
 		for ( int c = 0; c < 3; c++ ) {
 			idVec3 nrm = corner[c]; nrm.Normalize();
 			const idVec3 origin = center + nrm * stand;
 			traced = R_RtReflTraceCompare( r, s_reflShader, tlas, geoAddr, origin, G, center, radius,
-				cpuPos, cpuIdx, cpuNrm, totalIdx, hits, mm, bd, gen, maxAng, fb ) && traced;
+				cpuPos, cpuIdx, cpuNrm, cpuSt, totalIdx, hits, mm, bd, gen, maxAng, fb, maxSt, stmm, texSeen ) && traced;
 		}
 	}
-	const bool pass = traced && gen == 0 && hits > 0;
-	common->Printf( "r_rtReflTest: '%s' %d surf, %d tris, %d verts; %s (%d/%d hit, mismatch %d = %d bFP + %d genuine@%d, max normal err %.2f deg)\n",
+	const bool pass = traced && gen == 0 && stmm == 0 && hits > 0;
+	common->Printf( "r_rtReflTest: '%s' %d surf, %d tris, %d verts; %s (%d/%d hit, mismatch %d = %d bFP + %d genuine@%d, max normal err %.2f deg; st max err %.4f, %d bad, texIndex seen %d)\n",
 		def->parms.hModel->Name(), nSurf, totalIdx / 3, totalVerts,
-		pass ? "PASS" : ( traced ? "FAIL" : "no-trace" ), hits, G * G * 3, mm, bd, gen, fb, maxAng );
+		pass ? "PASS" : ( traced ? "FAIL" : "no-trace" ), hits, G * G * 3, mm, bd, gen, fb, maxAng, maxSt, stmm, texSeen );
 
 	r->DestroyBlas( blas );
 	r->DestroyStandaloneTlas();
 	r->DestroyBuffer( geoBuf );
-	Mem_Free16( rows ); Mem_Free16( cpuPos ); Mem_Free16( cpuNrm ); Mem_Free16( cpuIdx );
+	Mem_Free16( rows ); Mem_Free16( cpuPos ); Mem_Free16( cpuNrm ); Mem_Free16( cpuIdx ); Mem_Free16( cpuSt );
 }
 
 /*

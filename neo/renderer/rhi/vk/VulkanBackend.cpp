@@ -545,6 +545,7 @@ private:
 	VkDescriptorPool			bindlessPool = VK_NULL_HANDLE;
 	VkDescriptorSet				bindlessSet = VK_NULL_HANDLE;
 	uint32_t					bindlessCapacity = 0;
+	void						SyncBindlessSlot( ImageHandle h );	// RR4: point slot h-1 at the image's view+sampler (or dummy)
 	// compute lane (docs/gpu-offload-plan.md Phase 1): one set of 8 storage-buffer
 	// bindings + a 128-byte push-constant range, its own pipeline layout, a pool for
 	// per-dispatch sets, and a shader-handle-keyed compute pipeline cache. Kept fully
@@ -861,7 +862,7 @@ private:
 		uint32_t				vtxStride;
 		uint32_t				flags;			// bit0 = has attributes (monster)
 		uint32_t				baseColor;		// RR3: material average colour, packed RGBA8 (unpackUnorm4x8)
-		uint32_t				pad;
+		uint32_t				texIndex;		// RR4: bindless texture slot+1 (0 = none -> shader uses baseColor)
 	};
 	static const uint32_t		RT_GEO_MONSTER = 1u;
 	RtBuf						rtFrameGeoTable[FRAMES_IN_FLIGHT];		// device-addressable RtGeoDesc[]
@@ -5067,7 +5068,7 @@ void VulkanBackend::RefreshAnimBlas() {
 						grows[base + g].vtxStride = bg.vertexStride;
 						grows[base + g].flags = RT_GEO_MONSTER;
 						grows[base + g].baseColor = bg.baseColor;	// RR3: material average colour
-						grows[base + g].pad = 0;
+						grows[base + g].texIndex = bg.texIndex;		// RR4: diffuse bindless slot for this surface
 					}
 				}
 				animPendInst[i].instanceCustomIndex = base;
@@ -5487,7 +5488,7 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		RtGeoDesc *rows = (RtGeoDesc *)rtFrameGeoTable[slot].map;
 		for ( uint32_t i = 0; i < n; i++ ) {
 			rows[i].vtxAddr = 0; rows[i].idxAddr = 0; rows[i].vtxStride = 0;
-			rows[i].flags = 0; rows[i].baseColor = 0; rows[i].pad = 0;
+			rows[i].flags = 0; rows[i].baseColor = 0; rows[i].texIndex = 0;
 		}
 	}
 	rtFrameGeoRows[slot] = n;
@@ -6727,14 +6728,56 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 	rec.height = h;
 
 	// reuse a freed slot when one exists
+	ImageHandle handle = 0;
 	for ( size_t i = 0; i < imageTable.size(); i++ ) {
 		if ( !imageTable[i].live ) {
 			imageTable[i] = rec;
-			return (ImageHandle)( i + 1 );
+			handle = (ImageHandle)( i + 1 );
+			break;
 		}
 	}
-	imageTable.push_back( rec );
-	return (ImageHandle)imageTable.size();
+	if ( handle == 0 ) {
+		imageTable.push_back( rec );
+		handle = (ImageHandle)imageTable.size();
+	}
+	SyncBindlessSlot( handle );		// RR4: register this texture in the bindless array (slot = handle-1)
+	return handle;
+}
+
+// RR4 bindless materials (docs/rtx-reflections.md): point bindless slot (h-1) at handle h's view+sampler,
+// or the 1x1 dummy when the handle is dead / out of range. UPDATE_AFTER_BIND makes the write legal even
+// while the set is bound in an in-flight frame — ssr_rt only samples slots for currently-resident diffuse
+// textures, never one being retired. No-op without descriptor indexing or before the bindless set exists.
+void VulkanBackend::SyncBindlessSlot( ImageHandle h ) {
+	if ( bindlessSet == VK_NULL_HANDLE || h < 1 ) {
+		return;
+	}
+	const uint32_t slot = (uint32_t)( h - 1 );
+	if ( slot >= bindlessCapacity ) {
+		return;		// beyond the array; the shader's texIndex fetch guards on this and falls back to baseColor
+	}
+	VkDescriptorImageInfo ii = {};
+	const ImageRec &rec = imageTable[h - 1];
+	if ( rec.live && rec.view != VK_NULL_HANDLE && rec.sampler != VK_NULL_HANDLE ) {
+		ii.sampler = rec.sampler;
+		ii.imageView = rec.view;
+	} else if ( dummyImage != 0 && dummyImage <= (ImageHandle)imageTable.size() ) {
+		const ImageRec &d = imageTable[dummyImage - 1];
+		ii.sampler = d.sampler;
+		ii.imageView = d.view;
+	} else {
+		return;		// nothing valid to bind yet (very early init); slot stays partially-bound
+	}
+	ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	VkWriteDescriptorSet w = {};
+	w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	w.dstSet = bindlessSet;
+	w.dstBinding = 0;
+	w.dstArrayElement = slot;
+	w.descriptorCount = 1;
+	w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	w.pImageInfo = &ii;
+	vkUpdateDescriptorSets( device, 1, &w, 0, NULL );
 }
 
 /*
@@ -6771,6 +6814,7 @@ void VulkanBackend::DestroyImage( ImageHandle h ) {
 		if ( rec.image ) { vmaDestroyImage( vma, rec.image, rec.alloc ); }
 	}
 	rec = ImageRec();
+	SyncBindlessSlot( h );		// RR4: the freed slot shows the dummy until reused
 	// drop the cross-frame texture-set cache: any cached set keyed on handle h is
 	// now stale, and reusing the slot would otherwise sample the wrong texture.
 	InvalidateTextureSets();
@@ -6792,6 +6836,7 @@ void VulkanBackend::RetireImage( ImageHandle h ) {
 	ImageRec &rec = imageTable[h - 1];
 	retiredImages[frameIndex].push_back( { rec.image, rec.alloc, rec.view } );
 	rec = ImageRec();
+	SyncBindlessSlot( h );		// RR4: the freed slot shows the dummy until reused
 	InvalidateTextureSets();	// handle h is now free for reuse; cached sets referencing it are stale
 }
 
