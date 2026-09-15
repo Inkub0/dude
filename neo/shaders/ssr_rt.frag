@@ -67,18 +67,32 @@ void main() {
 	vec3  N = normalize( nt.xyz * 2.0 - 1.0 );
 	vec3  V = normalize( -P );
 
+	// RT traces ONE sharp ray per pixel with no temporal pass to average it (unlike SSR). A single sharp
+	// ray can't sample the high-frequency BUMP normal without aliasing: off a tile-grout bevel adjacent
+	// pixels shoot wildly different rays that focus into a grid of firefly dots (worst on SMOOTH surfaces,
+	// which reflect sharpest). Drive the ray + Fresnel off the GEOMETRIC (bump-free) surface normal instead
+	// — reconstructed from screen-space depth derivatives of the view position — so the floor reflects the
+	// room as a stable planar mirror (the correct look for a polished floor; the bump belongs to direct
+	// lighting, not a point-sampled reflection). Fall back to the bump normal only at silhouettes, where the
+	// derivative spans a depth discontinuity and is unreliable.
+	vec3  gN   = cross( dFdx( P ), dFdy( P ) );
+	float gLen = length( gN );
+	vec3  geoN = ( gLen > 1e-6 ) ? ( gN / gLen ) : N;
+	if ( dot( geoN, N ) < 0.0 ) { geoN = -geoN; }
+	vec3  Nr   = ( dot( geoN, N ) > 0.2 ) ? geoN : N;					// planar mirror normal; bump only at silhouettes
+
 	// Schlick Fresnel + gloss window, same as ssr_composite (F0 0.9 for metal keeps untinted steel)
-	float ndv  = max( dot( N, V ), 0.0 );
+	float ndv  = max( dot( Nr, V ), 0.0 );
 	float F0   = mix( 0.04, 0.9, metal );
 	float fres = F0 + ( 1.0 - F0 ) * pow( 1.0 - ndv, 5.0 );
 	float weight = fres * gloss * u_localParam1.y;						// * r_ssrIntensity
 	if ( weight < 0.002 ) { fragColor = vec4( 0.0 ); return; }
 
 	// reflect in view space, lift to world (u_modelViewMatrix = inverse view = view->world)
-	vec3 Rv = reflect( -V, N );
+	vec3 Rv = reflect( -V, Nr );
 	vec3 wp = ( u_modelViewMatrix * vec4( P, 1.0 ) ).xyz;
 	vec3 wr = normalize( mat3( u_modelViewMatrix ) * Rv );
-	vec3 wN = normalize( mat3( u_modelViewMatrix ) * N );				// world surface normal (ray-origin bias)
+	vec3 wN = normalize( mat3( u_modelViewMatrix ) * Nr );				// world ray normal (ray-origin bias)
 
 	rayQueryEXT rq;
 	rayQueryInitializeEXT( rq,
