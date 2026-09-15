@@ -3641,11 +3641,12 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 	// R3.5 animated BLAS: the GPU-skinned vertex output (BU_SKIN) and each surface's persistent
 	// static index buffer (BU_INDEX) feed a per-entity ray-tracing BLAS by device address, so they
 	// need SHADER_DEVICE_ADDRESS (BU_SKIN lacks it above) plus ACCELERATION_STRUCTURE_BUILD_INPUT.
-	// The AS-input usage bit is only legal when VK_KHR_acceleration_structure is enabled, so gate on
-	// haveRayQuery (which implies both that extension and buffer_device_address). Inert on non-RT
-	// devices; on RT hardware these are two extra usage bits with no behavior change until an
-	// animated BLAS actually consumes the buffers (S1+).
-	if ( haveRayQuery && ( usage == BU_SKIN || usage == BU_INDEX ) ) {
+	// RR5 (RT world reflections): the static world's ambient VERTEX cache (BU_VERTEX) also feeds a
+	// per-surface world BLAS by device address, so it needs the AS-input bit too. The AS-input usage
+	// bit is only legal when VK_KHR_acceleration_structure is enabled, so gate on haveRayQuery (which
+	// implies both that extension and buffer_device_address). Inert on non-RT devices; on RT hardware
+	// these are extra usage bits with no behavior change until a BLAS actually consumes the buffers.
+	if ( haveRayQuery && ( usage == BU_SKIN || usage == BU_INDEX || usage == BU_VERTEX ) ) {
 		usageBits |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
 		           | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
 	}
