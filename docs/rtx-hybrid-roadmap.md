@@ -53,7 +53,7 @@ raw. **Every realistic RT effect needs a denoiser.** It is the single most-reuse
 | RT sun shadows (R3 ✅) | yes | the AS/ray-query foundation | the sun-only special case (folds into NEE) |
 | Animated BLAS (R3.5 ✅) | yes | **all** — monsters in the TLAS is mandatory for PT | nothing |
 | Geometry table + attribute fetch (RR0/RR1 ✅) | yes | **all** — PT fetches attributes at every hit | nothing |
-| **RR4 bindless materials** | yes | **all** — PT evaluates a material at every hit | nothing |
+| **RR4 bindless materials** (✅) | yes | **all** — PT evaluates a material at every hit | nothing |
 | **Denoiser + temporal (NRD)** | yes | **all** — PT is unusable without it | nothing |
 | **RT soft shadows (all lights)** | yes | ~**90–100%** — this *is* PT direct lighting (NEE) | nothing (becomes the direct-light stage) |
 | **RTAO** | yes | ~**80%** — same hemisphere sampling + denoise as GI | the AO output (GI supersedes it) |
@@ -71,10 +71,13 @@ Full-RT down-payment.
 
 - **H0 — foundations (DONE / in progress).** TLAS with all geometry (R2/R3.5 ✅), geometry table +
   attribute-fetch validator (RR0/RR1 ✅), per-material colour (RR3 ✅), reflections MVP (RR2 ✅).
-- **H1 — RR4 bindless materials.** `VK_EXT_descriptor_indexing` + a runtime descriptor array of the
-  resident textures + a per-geometry material/texture index in the geometry table. The RT shader (and
-  every future RT pass) samples the real diffuse/normal/emissive at a hit's `st`. *Prerequisite for
-  everything below.* See [rtx-reflections.md](rtx-reflections.md) RR4.
+- **H1 — RR4 bindless materials. DONE (validation-clean; visual pending).** Core-1.2 descriptor
+  indexing + a runtime `COMBINED_IMAGE_SAMPLER` array (set 2, `UPDATE_AFTER_BIND | PARTIALLY_BOUND`,
+  indexed by `ImageHandle-1`) + a per-geometry `texIndex` in the geometry table. The RT shader (and
+  every future RT pass) samples the real diffuse at a hit's `st`. Shipped RR4a (substrate) → RR4b
+  (populate + validate: `st` max err 0.0000, texIndex 32/32) → RR4c (sample), commits ebf886aa /
+  3503a4e7 / 68acbe54 on `feat/rtx-bindless-materials`. *Prerequisite for everything below.* See
+  [rtx-reflections.md](rtx-reflections.md) RR4.
 - **H2 — denoiser + temporal framework (NRD).** Integrate NRD into the VK backend; wire the G-buffer +
   motion vectors as guide inputs; stand up the history/accumulation pass and a validator on a synthetic
   noisy signal. Nothing user-visible yet — it's the substrate H3/H4/H5 render into.

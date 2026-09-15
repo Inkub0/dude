@@ -94,11 +94,29 @@ rows). The normal transform is NOT stored — the shader gets it from `ObjectToW
   the fixed key light + ambient (indoor Doom 3 has no sun; real per-light shading at a hit is RT-GI
   territory). **Verified visually 2026-09-15: RR2 geometry is pixel-perfect (user), so RR3 is a shading
   swap.**
-- **RR4 — bindless material substrate → per-texel textured reflections.** The real prize, and the one
-  genuine infra lift: add `VK_EXT_descriptor_indexing` (runtime descriptor array of the resident
-  textures) + a per-geometry texture index in the table, so the RT shader samples the actual diffuse
-  texture at the interpolated `st` (fetched from `gpuSkinVB`). Turns the coloured blob into a properly
-  textured monster reflection. This substrate is the prerequisite for RR5.
+- **RR4 — bindless material substrate → per-texel textured reflections. DONE (validation-clean; visual
+  pending).** The real prize, and the one genuine infra lift. Landed in three validator-first stages:
+  - **RR4a** (commit ebf886aa) — the substrate, inert. Enable the five core-1.2 descriptor-indexing
+    features behind a `haveDescriptorIndexing` gate; create a set-2 layout = one variable-count
+    `COMBINED_IMAGE_SAMPLER` array (cap 8192, `UPDATE_AFTER_BIND | PARTIALLY_BOUND`) + its pool + one
+    persistent set; extend the graphics `pipeLayout` from 2 to 3 sets. Nothing binds/samples it yet.
+    Verified validation-clean (5422 frames), rendering byte-identical.
+  - **RR4b** (commit 3503a4e7) — populate + thread. `SyncBindlessSlot(handle)` points bindless slot
+    `handle-1` at the image's view+sampler; hooked into `UploadTexture2DLevels` (register every disk
+    material texture) and `DestroyImage`/`RetireImage` (reset the freed slot to the dummy). Add
+    `texIndex` to `BlasGeometry` + `RtGeoDesc` (reusing the old `pad` word → row stays 32 B);
+    `R_RtMaterialTexIndex` captures the diffuse `idImage::rhiHandle` at anim-caster staging, copied into
+    the monster rows. `r_rtReflTest` extended to fetch `st` (words 3-4) and diff vs a CPU reference +
+    report `texIndex`. Verified: PASS, **st max err 0.0000**, texIndex 32/32, validation-clean over a
+    full level's texture load.
+  - **RR4c** (commit 68acbe54) — sample. `ssr_rt.frag` enables `GL_EXT_nonuniform_qualifier`, declares
+    the set-2 array, fetches `st` by barycentrics, and shades `albedo = texIndex ?
+    texture(u_rtTextures[nonuniformEXT(texIndex-1)], st).rgb : baseColor` (RR3 fallback). The backend
+    binds set 2 once per frame cb. Verified validation-clean with the full RT-reflection stack on
+    (18583 frames); the textured-reflection *look* awaits a user visual pass.
+
+  This substrate is the prerequisite for RR5 and for every later RT pass (H2 denoiser, H3 soft shadows,
+  H4 RTAO, H6 GI) that must evaluate a material at a hit.
 - **RR5 — RT WORLD reflections (replaces the snapshot glass system).** The user's goal: today glass /
   env reflections use baked env-probe cubemaps + `_currentRender` snapshots, which can't show anything
   dynamic or off-probe. Rebuild the **static world BLAS from full `idDrawVert`** (not positions-only, so
