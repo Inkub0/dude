@@ -71,7 +71,7 @@ Full-RT down-payment.
 
 - **H0 — foundations (DONE / in progress).** TLAS with all geometry (R2/R3.5 ✅), geometry table +
   attribute-fetch validator (RR0/RR1 ✅), per-material colour (RR3 ✅), reflections MVP (RR2 ✅).
-- **H1 — RR4 bindless materials. DONE (validation-clean; visual pending).** Core-1.2 descriptor
+- **H1 — RR4 bindless materials. DONE + user-verified 2026-09-15.** Core-1.2 descriptor
   indexing + a runtime `COMBINED_IMAGE_SAMPLER` array (set 2, `UPDATE_AFTER_BIND | PARTIALLY_BOUND`,
   indexed by `ImageHandle-1`) + a per-geometry `texIndex` in the geometry table. The RT shader (and
   every future RT pass) samples the real diffuse at a hit's `st`. Shipped RR4a (substrate) → RR4b

@@ -94,8 +94,9 @@ rows). The normal transform is NOT stored — the shader gets it from `ObjectToW
   the fixed key light + ambient (indoor Doom 3 has no sun; real per-light shading at a hit is RT-GI
   territory). **Verified visually 2026-09-15: RR2 geometry is pixel-perfect (user), so RR3 is a shading
   swap.**
-- **RR4 — bindless material substrate → per-texel textured reflections. DONE (validation-clean; visual
-  pending).** The real prize, and the one genuine infra lift. Landed in three validator-first stages:
+- **RR4 — bindless material substrate → per-texel textured reflections. DONE + user-verified 2026-09-15
+  ("looks right, with colour and all").** The real prize, and the one genuine infra lift. Landed in three
+  validator-first stages:
   - **RR4a** (commit ebf886aa) — the substrate, inert. Enable the five core-1.2 descriptor-indexing
     features behind a `haveDescriptorIndexing` gate; create a set-2 layout = one variable-count
     `COMBINED_IMAGE_SAMPLER` array (cap 8192, `UPDATE_AFTER_BIND | PARTIALLY_BOUND`) + its pool + one
@@ -113,10 +114,18 @@ rows). The normal transform is NOT stored — the shader gets it from `ObjectToW
     the set-2 array, fetches `st` by barycentrics, and shades `albedo = texIndex ?
     texture(u_rtTextures[nonuniformEXT(texIndex-1)], st).rgb : baseColor` (RR3 fallback). The backend
     binds set 2 once per frame cb. Verified validation-clean with the full RT-reflection stack on
-    (18583 frames); the textured-reflection *look* awaits a user visual pass.
+    (18583 frames) + user visual pass 2026-09-15 — textured, coloured, correct.
 
   This substrate is the prerequisite for RR5 and for every later RT pass (H2 denoiser, H3 soft shadows,
   H4 RTAO, H6 GI) that must evaluate a material at a hit.
+
+  **RR4 surfaced the RR5 gap (uncanny up close).** With the monster reflection now convincingly textured,
+  a reflective *floor* looks wrong when you stand near a monster: the floor's world reflection comes
+  *only* from SSR (screen-space), which fails for the off-screen world at close/steep angles, so the room
+  reflection vanishes while the RT monster keeps reflecting — a monster floating in a non-reflective void.
+  This is not an RR4 bug; RR4 made the monster real enough to expose that RT reflects only monsters, never
+  the off-screen world. **RR5 (below) is the fix** (shade world hits too); a cheap interim is an
+  env-probe / ambient backdrop fill in `ssr_rt` on non-monster hits.
 - **RR5 — RT WORLD reflections (replaces the snapshot glass system).** The user's goal: today glass /
   env reflections use baked env-probe cubemaps + `_currentRender` snapshots, which can't show anything
   dynamic or off-probe. Rebuild the **static world BLAS from full `idDrawVert`** (not positions-only, so
