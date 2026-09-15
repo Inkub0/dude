@@ -13,6 +13,7 @@
 // u_diffuseModifier.rgb = key light colour.
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_buffer_reference_uvec2 : require	// construct the geo-table pointer from u_rtParms.zw (uvec2)
+#extension GL_EXT_nonuniform_qualifier : require		// RR4: nonuniformEXT index into the bindless texture array
 
 #include "renderparms.glsl"
 
@@ -27,8 +28,13 @@ layout(location = 0) out vec4 fragColor;
 // idDrawVert as raw uints (stride 60 B = 15 uints): xyz @0, normal @5 (byte 20). Same view as zfill_batch.
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertRef { uint w[]; };
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IdxRef  { uint i[]; };
-struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; uint baseColor; uint pad; };	// RR0/RR3 geometry table row
+struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; uint baseColor; uint texIndex; };	// RR0/RR3/RR4 geometry table row
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer GeoTable { GeoDesc d[]; };
+
+// RR4 bindless materials: the resident texture set as one array, indexed by (texIndex - 1). Set 2 is
+// bound once per frame by the backend and populated by SyncBindlessSlot. nonuniformEXT because the index
+// varies per fragment — each reflective pixel can hit a different surface.
+layout(set = 2, binding = 0) uniform sampler2D u_rtTextures[];
 
 // Doom 3's fixed near / near-infinite far projection in GL clip depth -> linear eye z (negative).
 // Same constants as ssao.frag / ssr.frag / ssr_composite.frag.
@@ -99,13 +105,20 @@ void main() {
 	vec3 n1 = vec3( uintBitsToFloat( g.vb.w[ i1*s + 5u ] ), uintBitsToFloat( g.vb.w[ i1*s + 6u ] ), uintBitsToFloat( g.vb.w[ i1*s + 7u ] ) );
 	vec3 n2 = vec3( uintBitsToFloat( g.vb.w[ i2*s + 5u ] ), uintBitsToFloat( g.vb.w[ i2*s + 6u ] ), uintBitsToFloat( g.vb.w[ i2*s + 7u ] ) );
 	vec3 hitN = normalize( mat3( o2w ) * ( ( 1.0 - bc.x - bc.y ) * n0 + bc.x * n1 + bc.y * n2 ) );
+	// RR4: interpolate the hit triangle's texcoords (idDrawVert st at uint offset 3) for the diffuse fetch
+	vec2 st0 = vec2( uintBitsToFloat( g.vb.w[ i0*s + 3u ] ), uintBitsToFloat( g.vb.w[ i0*s + 4u ] ) );
+	vec2 st1 = vec2( uintBitsToFloat( g.vb.w[ i1*s + 3u ] ), uintBitsToFloat( g.vb.w[ i1*s + 4u ] ) );
+	vec2 st2 = vec2( uintBitsToFloat( g.vb.w[ i2*s + 3u ] ), uintBitsToFloat( g.vb.w[ i2*s + 4u ] ) );
+	vec2 hitST = ( 1.0 - bc.x - bc.y ) * st0 + bc.x * st1 + bc.y * st2;
 
-	// RR3 shade: the hit surface's material average colour (geo-table baseColor) lit by a fixed key
-	// light + ambient. The interpolated hit NORMAL (the RR1-validated fetch) gives the monster a shaded
-	// 3D look; per-texel diffuse texture is RR4 (needs the bindless material substrate).
+	// RR4 shade: sample the hit surface's real diffuse at the interpolated st (bindless slot texIndex-1),
+	// lit by a fixed key light + ambient; the interpolated hit NORMAL (RR1-validated) gives the 3D look.
+	// Falls back to the RR3 material average colour when the surface has no registered diffuse (texIndex 0).
 	vec3  keyDir = normalize( u_color.xyz );
 	float ndl    = max( dot( hitN, keyDir ), 0.0 );
-	vec3  albedo = unpackUnorm4x8( g.baseColor ).rgb;
+	vec3  albedo = ( g.texIndex != 0u )
+		? texture( u_rtTextures[ nonuniformEXT( g.texIndex - 1u ) ], hitST ).rgb
+		: unpackUnorm4x8( g.baseColor ).rgb;
 	vec3  lit    = albedo * ( vec3( u_color.w ) + ndl * u_diffuseModifier.rgb );
 	fragColor = vec4( lit * weight, 1.0 );
 }

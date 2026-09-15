@@ -963,6 +963,7 @@ private:
 	VkPipeline					boundPipeline = VK_NULL_HANDLE;
 	uint64_t					boundTexKey = 0;
 	VkDescriptorSet				boundTexSet = VK_NULL_HANDLE;
+	bool						bindlessBoundThisCb = false;	// RR4: set 2 (bindless array) bound once per frame cb
 	bool						dynStateDirty = true;	// (re)emit viewport+scissor before next draw
 	float						depthRangeMin = 0.0f;	// SetDepthRange window (weapon/model depth hacks)
 	float						depthRangeMax = 1.0f;
@@ -2600,6 +2601,7 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	boundPipeline = VK_NULL_HANDLE;
 	boundTexKey = 0;
 	boundTexSet = VK_NULL_HANDLE;
+	bindlessBoundThisCb = false;	// RR4: rebind the bindless set at the first draw of this frame's cb
 	dynStateDirty = true;
 	depthRangeMin = 0.0f;
 	depthRangeMax = 1.0f;
@@ -9581,6 +9583,14 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 	uint32_t dynOfs = (uint32_t)args.uniformOffset;
 	vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout,
 		0, 1, &uboSet[frameIndex], 1, &dynOfs );
+
+	// set 2 (RR4 bindless materials): bind the persistent bindless texture array once per frame cb. Only
+	// ssr_rt statically uses set 2; every other pipeline ignores it. Same pipeLayout, so the per-draw
+	// set 0/1 rebinds below never disturb it.
+	if ( bindlessSet != VK_NULL_HANDLE && !bindlessBoundThisCb ) {
+		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout, 2, 1, &bindlessSet, 0, NULL );
+		bindlessBoundThisCb = true;
+	}
 
 	// set 1: per-draw texture set from the frame pool (dummy in empty slots)
 	{
