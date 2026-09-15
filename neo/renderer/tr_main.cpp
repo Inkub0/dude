@@ -1128,6 +1128,11 @@ struct rtModelInst_t {
 struct rtModelBlas_t { const idRenderModel *model; rhi::BlasHandle blas; };
 static idList<rhi::BlasHandle>	s_rtAreaBlas;
 static idList<rtModelBlas_t>	s_rtModelBlas;
+// RR5: dedicated device-addressable buffers holding the static world's full idDrawVert + 32-bit indices,
+// feeding the per-surface world BLAS so a reflection ray can fetch st + material at a world hit. Persist
+// with the scene (the geo table references them each frame); freed on scene (re)build via R_RtFreeWorldGeo.
+static rhi::BufferHandle		s_rtWorldVB = 0;
+static rhi::BufferHandle		s_rtWorldIB = 0;
 
 // shared caster filter: opaque OR perforated + shadow-casting, CPU data resident.
 // PERFORATED (alpha-tested) surfaces cast too - Doom 3's own stencil shadows treat them as
@@ -1368,30 +1373,41 @@ static bool R_RtInvertModelMatrix( const float *mm, float inv[12] ) {
 static unsigned long long R_RtBuildScene( rhi::RHI *r,
 		const float *aPos, const int *aIdx, const rtAreaSlice_t *aSlices, int numASlices,
 		const float *mPos, const int *mIdx, rtModelSlice_t *mSlices, int numMSlices,
-		const rtModelInst_t *mInsts, int numMInsts, int *blasFail, bool registerForRefresh ) {
+		const rtModelInst_t *mInsts, int numMInsts, int *blasFail, bool registerForRefresh,
+		bool areasPreBuilt ) {
 	if ( registerForRefresh ) {
-		s_rtAreaBlas.Clear();
+		if ( !areasPreBuilt ) { s_rtAreaBlas.Clear(); }	// RR5: pre-built world areas already filled s_rtAreaBlas
 		s_rtModelBlas.Clear();
 	}
-	const int maxInst = numASlices + numMInsts;
+	const int maxInst = ( areasPreBuilt ? s_rtAreaBlas.Num() : numASlices ) + numMInsts;
 	rhi::RHI::RtInstance *inst = (rhi::RHI::RtInstance *)Mem_Alloc16( ( maxInst > 0 ? maxInst : 1 ) * (int)sizeof( rhi::RHI::RtInstance ) );
 	int numInst = 0;
 	*blasFail = 0;
-	for ( int s = 0; s < numASlices; s++ ) {
-		rhi::BlasHandle blas = r->CreateBlas( aPos + aSlices[s].vertStart * 3, aSlices[s].numVerts,
-			3 * (int)sizeof( float ), aIdx + aSlices[s].idxStart, aSlices[s].numIdx );
-		if ( blas == 0 ) {
-			( *blasFail )++;
-			continue;
+	// RR5: the world areas are either pre-built per-surface (persistent scene — s_rtAreaBlas already filled by
+	// R_RtBuildWorldAreaBlas, just instance them identity) or built here positions-only from the CPU soup (the
+	// r_rtWorldTest validator path).
+	const int nAreas = areasPreBuilt ? s_rtAreaBlas.Num() : numASlices;
+	for ( int s = 0; s < nAreas; s++ ) {
+		rhi::BlasHandle blas;
+		if ( areasPreBuilt ) {
+			blas = s_rtAreaBlas[s];
+			if ( blas == 0 ) { continue; }
+		} else {
+			blas = r->CreateBlas( aPos + aSlices[s].vertStart * 3, aSlices[s].numVerts,
+				3 * (int)sizeof( float ), aIdx + aSlices[s].idxStart, aSlices[s].numIdx );
+			if ( blas == 0 ) {
+				( *blasFail )++;
+				continue;
+			}
+			if ( registerForRefresh ) {
+				s_rtAreaBlas.Append( blas );
+			}
 		}
 		rhi::RHI::RtInstance &in = inst[numInst++];
 		memset( &in, 0, sizeof( in ) );
 		in.transform[0] = 1.0f; in.transform[5] = 1.0f; in.transform[10] = 1.0f;	// identity 3x4
 		in.blas = blas;
 		in.mask = 0xFF;
-		if ( registerForRefresh ) {
-			s_rtAreaBlas.Append( blas );
-		}
 	}
 	for ( int s = 0; s < numMSlices; s++ ) {
 		mSlices[s].blas = r->CreateBlas( mPos + mSlices[s].vertStart * 3, mSlices[s].numVerts,
@@ -1813,6 +1829,94 @@ first primary view, rebuild on map change (mapName comparison), teardown when bo
 While the scene is live, every frame re-instances the TLAS with current mover poses.
 =================
 */
+// RR5: free the dedicated world geometry buffers (called on scene teardown / before a rebuild; the device
+// is idle here — R_RtWorldUpdate always DestroyRtScene's first). No-op when never allocated.
+static void R_RtFreeWorldGeo( void ) {
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r == NULL ) { s_rtWorldVB = 0; s_rtWorldIB = 0; return; }
+	if ( s_rtWorldVB != 0 ) { r->DestroyBuffer( s_rtWorldVB ); s_rtWorldVB = 0; }
+	if ( s_rtWorldIB != 0 ) { r->DestroyBuffer( s_rtWorldIB ); s_rtWorldIB = 0; }
+}
+
+// RR5: build the static worldspawn (_areaN) as PER-SURFACE multi-geometry BLASes fed from device-
+// addressable buffers, so a reflection ray resolving table[customIndex+geometryIndex] can fetch the hit
+// surface's st + material texIndex (unlike the positions-only shadow BLAS). Gathers full idDrawVert from
+// tri->verts (always resident — covers non-visible areas the ambient cache never populated) into one
+// dedicated vertex + one index buffer, then chunks surfaces into <=MAX_BLAS_GEOMS-geometry BLASes. Fills
+// s_rtAreaBlas; the caller instances them (identity). Returns false (nothing built) on empty/failure.
+static bool R_RtBuildWorldAreaBlas( rhi::RHI *r, const idRenderWorldLocal *world, int &numAreaBlas, int &worldTris ) {
+	numAreaBlas = 0; worldTris = 0;
+	R_RtFreeWorldGeo();
+	s_rtAreaBlas.Clear();
+	const int numAreas = world->NumAreas();
+	int numSurfs = 0, totVerts = 0, totIdx = 0;
+	for ( int a = 0; a < numAreas; a++ ) {
+		const idRenderModel *model = renderModelManager->FindModel( va( "_area%i", a ) );
+		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
+			if ( !R_RtSurfCasts( model->Surface( s ) ) ) { continue; }
+			numSurfs++;
+			totVerts += model->Surface( s )->geometry->numVerts;
+			totIdx += model->Surface( s )->geometry->numIndexes;
+		}
+	}
+	if ( numSurfs == 0 || totIdx < 3 ) {
+		return false;
+	}
+	idDrawVert *verts = (idDrawVert *)Mem_Alloc16( totVerts * (int)sizeof( idDrawVert ) );
+	unsigned int *idxs = (unsigned int *)Mem_Alloc16( totIdx * (int)sizeof( unsigned int ) );
+	struct SurfDesc { int vOff, nV, iOff, nI; unsigned int tex, col; };
+	SurfDesc *sd = (SurfDesc *)Mem_Alloc16( numSurfs * (int)sizeof( SurfDesc ) );
+	int si = 0, vBase = 0, iBase = 0;
+	for ( int a = 0; a < numAreas; a++ ) {
+		const idRenderModel *model = renderModelManager->FindModel( va( "_area%i", a ) );
+		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = model->Surface( s );
+			if ( !R_RtSurfCasts( surf ) ) { continue; }
+			const srfTriangles_t *tri = surf->geometry;
+			memcpy( verts + vBase, tri->verts, tri->numVerts * (int)sizeof( idDrawVert ) );
+			for ( int m = 0; m < tri->numIndexes; m++ ) { idxs[iBase + m] = (unsigned int)tri->indexes[m]; }	// surface-local
+			sd[si].vOff = vBase; sd[si].nV = tri->numVerts;
+			sd[si].iOff = iBase; sd[si].nI = tri->numIndexes;
+			sd[si].tex = R_RtMaterialTexIndex( surf->shader );
+			sd[si].col = R_RtMaterialBaseColor( surf->shader );
+			si++; vBase += tri->numVerts; iBase += tri->numIndexes;
+		}
+	}
+	worldTris = totIdx / 3;
+	s_rtWorldVB = r->CreateBuffer( rhi::BU_VERTEX, totVerts * (int)sizeof( idDrawVert ), verts );
+	s_rtWorldIB = r->CreateBuffer( rhi::BU_INDEX, totIdx * (int)sizeof( unsigned int ), idxs );
+	Mem_Free16( verts ); Mem_Free16( idxs );
+	const unsigned long long vbAddr = ( s_rtWorldVB != 0 ) ? r->GetBufferDeviceAddress( s_rtWorldVB ) : 0;
+	const unsigned long long ibAddr = ( s_rtWorldIB != 0 ) ? r->GetBufferDeviceAddress( s_rtWorldIB ) : 0;
+	if ( vbAddr == 0 || ibAddr == 0 ) {
+		R_RtFreeWorldGeo();
+		Mem_Free16( sd );
+		return false;
+	}
+	const int MAXG = 64;			// mirrors the backend's MAX_BLAS_GEOMS
+	rhi::RHI::BlasGeometry geoms[64];
+	for ( int base = 0; base < numSurfs; base += MAXG ) {
+		const int cnt = ( numSurfs - base < MAXG ) ? ( numSurfs - base ) : MAXG;
+		for ( int g = 0; g < cnt; g++ ) {
+			const SurfDesc &d = sd[base + g];
+			geoms[g].vertexAddress = vbAddr + (unsigned long long)d.vOff * (unsigned long long)sizeof( idDrawVert );
+			geoms[g].vertexStride = (unsigned int)sizeof( idDrawVert );
+			geoms[g].vertexCount = (unsigned int)d.nV;
+			geoms[g].indexAddress = ibAddr + (unsigned long long)d.iOff * (unsigned long long)sizeof( unsigned int );
+			geoms[g].indexCount = (unsigned int)d.nI;
+			geoms[g].baseColor = d.col;
+			geoms[g].texIndex = d.tex;
+		}
+		rhi::BlasHandle blas = r->CreateBlasFromBuffers( geoms, cnt, false );
+		if ( blas != 0 ) {
+			s_rtAreaBlas.Append( blas );
+			numAreaBlas++;
+		}
+	}
+	Mem_Free16( sd );
+	return numAreaBlas > 0;
+}
+
 static idStr s_rtWorldMap;
 static void R_RtWorldUpdate( void ) {
 	rhi::RHI *r = rhi::GetRHI();
@@ -1830,6 +1934,7 @@ static void R_RtWorldUpdate( void ) {
 			s_rtWorldMap.Clear();
 			s_rtAreaBlas.Clear();
 			s_rtModelBlas.Clear();
+			R_RtFreeWorldGeo();			// RR5: drop the dedicated world geometry buffers
 		}
 		return;
 	}
@@ -1852,44 +1957,45 @@ static void R_RtWorldUpdate( void ) {
 	r_rtMovingLights.ClearModified();
 	r->DestroyRtScene();
 
-	// terrain-as-models maps (commoutside: the walkable ground is all func_static models,
-	// worldspawn is caulk/sky only) legitimately gather ZERO casting worldspawn surfaces -
-	// the scene must still build from the entity casters alone, so neither gather gates
-	// the other; only both-empty means there is nothing to trace
-	float *aPos; int *aIdx; rtAreaSlice_t *aSlices;
-	int numASlices, worldVerts, worldIndexes;
-	R_RtGatherWorld( world, aPos, aIdx, aSlices, numASlices, worldVerts, worldIndexes );
+	// RR5: build the static worldspawn as PER-SURFACE multi-geometry BLASes (device buffers), so a
+	// reflection ray can fetch st + material at a world hit and the RT reflection shader shades the real
+	// room (docs/rtx-reflections.md). Entities (func_static / movers) still gather positions-only for now.
+	// terrain-as-models maps legitimately have ZERO worldspawn surfaces — the scene still builds from the
+	// entity casters alone, so neither gates the other; only both-empty means there is nothing to trace.
+	int numAreaBlas = 0, worldTris = 0;
+	const bool areasOk = R_RtBuildWorldAreaBlas( r, world, numAreaBlas, worldTris );
 	float *mPos; int *mIdx; rtModelSlice_t *mSlices; rtModelInst_t *mInsts;
 	int numMSlices, numMInsts;
 	R_RtGatherEntities( world, mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts );
-	if ( numASlices == 0 && numMInsts == 0 ) {
+	if ( !areasOk && numMInsts == 0 ) {
+		R_RtFreeWorldGeo();
 		return;
 	}
 
 	const int msStart = Sys_Milliseconds();
 	int blasFail = 0;
-	const unsigned long long tlasAddr = R_RtBuildScene( r, aPos, aIdx, aSlices, numASlices,
-		mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail, true );
+	const unsigned long long tlasAddr = R_RtBuildScene( r, NULL, NULL, NULL, 0,
+		mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail, true, /*areasPreBuilt=*/true );
 	const int msBuild = Sys_Milliseconds() - msStart;
 	int mTris = 0;
 	for ( int s = 0; s < numMSlices; s++ ) {
 		mTris += mSlices[s].numIdx / 3;
 	}
-	Mem_Free16( aPos ); Mem_Free16( aIdx ); Mem_Free16( aSlices );
 	if ( mPos ) { Mem_Free16( mPos ); Mem_Free16( mIdx ); Mem_Free16( mSlices ); Mem_Free16( mInsts ); }
 	if ( tlasAddr == 0 ) {
 		common->Warning( "r_rtWorld: world scene build failed (%d BLAS failures) - disabling", blasFail );
 		r->DestroyRtScene();
 		s_rtAreaBlas.Clear();
 		s_rtModelBlas.Clear();
+		R_RtFreeWorldGeo();
 		r_rtWorld.SetBool( false );
 		r_rtSunShadows.SetBool( false );
 		return;
 	}
 	s_rtWorldMap = world->mapName;
 	R_RtDirtyReset();		// fresh scene: force the first per-frame TLAS build, drop any stale signature
-	common->Printf( "r_rtWorld: %d area BLAS (%d tris) + %d model BLAS (%d tris, %d instances), %d ms build%s\n",
-		numASlices, worldIndexes / 3, numMSlices, mTris, numMInsts, msBuild,
+	common->Printf( "r_rtWorld: %d area BLAS (%d tris, per-surface) + %d model BLAS (%d tris, %d instances), %d ms build%s\n",
+		numAreaBlas, worldTris, numMSlices, mTris, numMInsts, msBuild,
 		blasFail ? va( " (%d BLAS failed)", blasFail ) : "" );
 }
 
@@ -2031,7 +2137,7 @@ static void R_RtWorldValidate( void ) {
 	} else {
 		const int msStart = Sys_Milliseconds();
 		tlasAddr = R_RtBuildScene( r, aPos, aIdx, aSlices, numASlices,
-			mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail, false );
+			mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail, false, /*areasPreBuilt=*/false );
 		msBuild = Sys_Milliseconds() - msStart;
 	}
 	int mTris = 0;
