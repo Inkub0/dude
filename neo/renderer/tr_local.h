@@ -911,6 +911,7 @@ extern idCVar r_pbrEnvScale;			// Phase C.1 metal env floor GLOBAL base (per-cat
 extern idCVar r_ssr;					// enable; reflectivity follows the PBR material table
 extern idCVar r_ssrIntensity;			// reflection strength multiplier
 extern idCVar r_ssrMaxRoughness;		// gloss cutoff (v1 is sharp-only, keep low)
+extern idCVar r_ssrRoughnessFade;		// fade start as a fraction of the cutoff (lower = gentler transition)
 extern idCVar r_ssrSteps;				// ray-march samples per pixel
 extern idCVar r_ssrMaxDistance;			// ray reach, world units
 extern idCVar r_ssrThickness;			// assumed surface thickness for hit tests

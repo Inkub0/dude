@@ -52,7 +52,7 @@ void main() {
 	float rough = mt.x;
 	float metal = mt.y;
 	float maxRough = u_localParam1.z;
-	float gloss = 1.0 - smoothstep( maxRough * 0.7, maxRough, rough );
+	float gloss = 1.0 - smoothstep( maxRough * u_localParam0.z, maxRough, rough );	// .z = r_ssrRoughnessFade (frac of cutoff)
 	if ( gloss < 0.004 ) { fragColor = vec4( 0.0 ); return; }			// not reflective enough
 
 	// SSR already reflected here (screen-space hit) -> don't double-reflect; RT only fills SSR's misses

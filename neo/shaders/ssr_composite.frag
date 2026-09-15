@@ -7,7 +7,7 @@
 // material/Fresnel edges.
 //
 // Uniform packing (RB_RHI_ScreenSpaceReflections):
-//   u_localParam0.xy      = ( 1/proj00, 1/proj11 ) view-pos reconstruction
+//   u_localParam0.xy      = ( 1/proj00, 1/proj11 ) view-pos reconstruction; .z = roughness fade start (frac of cutoff)
 //   u_localParam1         = ( 0, intensity, maxRoughness, glossyMaxLod )
 //   u_screenCorrection.xy = 1 / viewSize (gl_FragCoord -> [0,1] uv)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth texcoord
@@ -48,9 +48,9 @@ void main() {
 	float rough = mt.x;
 	float metal = mt.y;
 
-	// gloss window: full strength up to 70% of the roughness cutoff, fading to 0 at it
+	// gloss window: full strength up to r_ssrRoughnessFade (localParam0.z) of the cutoff, fading to 0 at it
 	float maxRough = u_localParam1.z;
-	float gloss = 1.0 - smoothstep( maxRough * 0.7, maxRough, rough );
+	float gloss = 1.0 - smoothstep( maxRough * u_localParam0.z, maxRough, rough );
 	if ( gloss < 0.004 ) {
 		discard;
 	}
