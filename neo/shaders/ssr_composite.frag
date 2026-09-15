@@ -7,7 +7,7 @@
 // material/Fresnel edges.
 //
 // Uniform packing (RB_RHI_ScreenSpaceReflections):
-//   u_localParam0.xy      = ( 1/proj00, 1/proj11 ) view-pos reconstruction; .z = roughness fade start (frac of cutoff)
+//   u_localParam0.xy      = ( 1/proj00, 1/proj11 ) view-pos reconstruction; .z = roughness fade start (frac of cutoff); .w = firefly clamp (reflected-radiance cap, 0 = off)
 //   u_localParam1         = ( 0, intensity, maxRoughness, glossyMaxLod )
 //   u_screenCorrection.xy = 1 / viewSize (gl_FragCoord -> [0,1] uv)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth texcoord
@@ -87,6 +87,14 @@ void main() {
 		refl = mix( a, b, lod - l0 );
 	} else {
 		refl = texture( u_ssr, uv ).rgb;           // low-res march, bilinear upsample
+	}
+	// firefly clamp: cap the reflected HDR luminance so a bright reflected light / GUI / specular
+	// highlight can't spike into a hot speckle on the floor (r_ssrFireflyClamp; localParam0.w, 0 = off).
+	// Luminance-preserving, so the reflection keeps its hue.
+	float fcap = u_localParam0.w;
+	if ( fcap > 0.0 ) {
+		float lum = dot( refl, vec3( 0.2126, 0.7152, 0.0722 ) );
+		if ( lum > fcap ) { refl *= fcap / lum; }
 	}
 	fragColor = vec4( refl * ( F * gloss * u_localParam1.y ), 0.0 );
 }

@@ -4945,6 +4945,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	compParms.localParam0[0] = invP00;
 	compParms.localParam0[1] = invP11;
 	compParms.localParam0[2] = idMath::ClampFloat( 0.05f, 0.95f, r_ssrRoughnessFade.GetFloat() );	// roughness fade start
+	compParms.localParam0[3] = idMath::ClampFloat( 0.0f, 64.0f, r_ssrFireflyClamp.GetFloat() );	// reflected-radiance cap (fireflies)
 	compParms.localParam1[1] = r_ssrIntensity.GetFloat();
 	compParms.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
 	compParms.localParam1[3] = glossyMaxLod;	// r_ssrGlossy: >0 = sample the pyramid by roughness; 0 = sharp
