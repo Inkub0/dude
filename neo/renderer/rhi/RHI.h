@@ -494,6 +494,10 @@ public:
 	// count last frame + how many carry monster attributes (readout to confirm it tracks the TLAS
 	// instances before anything consumes it). VK + RT only; 0 otherwise.
 	virtual void	RtReflStats( int &geoRows, int &geoMonsterRows ) { geoRows = geoMonsterRows = 0; }
+	// RT reflections RR2: device address of the geometry table matching the TLAS GetTlasAddress()
+	// returns this frame (0 = none / no per-frame slot). The reflection shader reads it via
+	// buffer_reference to fetch a monster hit's gpuSkinVB attributes. VK + RT only; 0 otherwise.
+	virtual unsigned long long	GetRtGeoTableAddress() { return 0; }
 	struct RtInstance {
 		float			transform[12];		// row-major 3x4 (VkTransformMatrixKHR layout)
 		BlasHandle		blas;

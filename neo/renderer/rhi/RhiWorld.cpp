@@ -4592,6 +4592,38 @@ Fullscreen primary views only — the depth capture, G-buffer and screen mapping
 assume the whole framebuffer at the origin (same rule as SSAO).
 ===================
 */
+// General 4x4 inverse (column-major float[16], the GL matrix layout in/out). Returns false on a
+// singular matrix. RR2 uses it to invert the view matrix (view->world) so the RT reflection shader
+// can lift a reconstructed view-space hit back to the world-space TLAS. Standard cofactor expansion.
+static bool RB_RHI_InvertMatrix( const float m[16], float invOut[16] ) {
+	float inv[16];
+	inv[0]  =  m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+	inv[4]  = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+	inv[8]  =  m[4]*m[9]*m[15]  - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+	inv[12] = -m[4]*m[9]*m[14]  + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+	inv[1]  = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+	inv[5]  =  m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+	inv[9]  = -m[0]*m[9]*m[15]  + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+	inv[13] =  m[0]*m[9]*m[14]  - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+	inv[2]  =  m[1]*m[6]*m[15]  - m[1]*m[7]*m[14]  - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7]  - m[13]*m[3]*m[6];
+	inv[6]  = -m[0]*m[6]*m[15]  + m[0]*m[7]*m[14]  + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7]  + m[12]*m[3]*m[6];
+	inv[10] =  m[0]*m[5]*m[15]  - m[0]*m[7]*m[13]  - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7]  - m[12]*m[3]*m[5];
+	inv[14] = -m[0]*m[5]*m[14]  + m[0]*m[6]*m[13]  + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6]  + m[12]*m[2]*m[5];
+	inv[3]  = -m[1]*m[6]*m[11]  + m[1]*m[7]*m[10]  + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7]   + m[9]*m[3]*m[6];
+	inv[7]  =  m[0]*m[6]*m[11]  - m[0]*m[7]*m[10]  - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7]   - m[8]*m[3]*m[6];
+	inv[11] = -m[0]*m[5]*m[11]  + m[0]*m[7]*m[9]   + m[4]*m[1]*m[11] - m[4]*m[3]*m[9]  - m[8]*m[1]*m[7]   + m[8]*m[3]*m[5];
+	inv[15] =  m[0]*m[5]*m[10]  - m[0]*m[6]*m[9]   - m[4]*m[1]*m[10] + m[4]*m[2]*m[9]  + m[8]*m[1]*m[6]   - m[8]*m[2]*m[5];
+	float det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+	if ( det == 0.0f ) {
+		return false;
+	}
+	det = 1.0f / det;
+	for ( int i = 0; i < 16; i++ ) {
+		invOut[i] = inv[i] * det;
+	}
+	return true;
+}
+
 void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !r_ssr.GetBool() || !R_BackendSupportsEnhancements() ) {
 		return;
@@ -4945,6 +4977,48 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	RB_RHI_DrawFullscreen( r, compProg, compParms, r->GetRenderTargetImage( glossySrcRT ),
 	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
+
+	// ---- RR2: RT reflections on monsters (docs/rtx-reflections.md) ----
+	// After the SSR composite, trace a reflection ray for reflective pixels SSR could not serve (its
+	// marched result is 0 there — off-screen / screen-occluded) and shade a monster hit from its
+	// gpuSkinVB normal. Additive over the scene with the same Fresnel/gloss weighting. VK + RT +
+	// r_rtReflections; needs the per-frame TLAS + geometry table (r_rtAnimBlas on -> monsters instanced).
+	if ( vkMode && r_rtReflections.GetBool() && r->SupportsRayQuery() ) {
+		const unsigned long long tlasAddr = r->GetTlasAddress();
+		const unsigned long long geoAddr  = r->GetRtGeoTableAddress();
+		rhi::ShaderHandle rtProg = ( tlasAddr != 0 && geoAddr != 0 ) ? r->LoadShader( "ssr_rt" ) : 0;
+		float invView[16];
+		if ( rtProg != 0 && RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
+			rhi::RenderParams rp;
+			memset( &rp, 0, sizeof( rp ) );
+			rp.mvpMatrix[0] = rp.mvpMatrix[5] = rp.mvpMatrix[10] = rp.mvpMatrix[15] = 1.0f;
+			memcpy( rp.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world
+			rp.localParam0[0] = invP00;
+			rp.localParam0[1] = invP11;
+			rp.localParam1[1] = r_ssrIntensity.GetFloat();				// reflection strength (shared with SSR)
+			rp.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
+			rp.screenCorrection[0] = 1.0f / fullW;
+			rp.screenCorrection[1] = 1.0f / fullH;
+			rp.depthTexRecip[0] = 1.0f / uploadW;
+			rp.depthTexRecip[1] = 1.0f / uploadH;
+			rp.windowCoord[2] = viewYSign;
+			// TLAS + geo-table device addresses, bit-cast into the float slots (floatBitsToUint in the shader)
+			memcpy( &rp.rtParms[0], &tlasAddr, sizeof( tlasAddr ) );		// rtParms.x/y = TLAS
+			memcpy( &rp.rtParms[2], &geoAddr,  sizeof( geoAddr ) );		// rtParms.z/w = geo table
+			// fixed key light + ambient for the MVP shade (RR3 wires the scene's real sun)
+			idVec3 keyDir( 0.4f, 0.5f, 0.9f );
+			keyDir.Normalize();
+			rp.color[0] = keyDir[0]; rp.color[1] = keyDir[1]; rp.color[2] = keyDir[2];
+			rp.color[3] = 0.28f;										// ambient term
+			rp.diffuseModifier[0] = rp.diffuseModifier[1] = rp.diffuseModifier[2] = 1.0f;	// key light colour
+			// unit 0 = SSR march result (miss gate, via DrawFullscreen), 1 = depth, 2/3 = G-buffer
+			RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+			RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
+			RB_RHI_BindRTImage( r, 3, matImg );
+			RB_RHI_DrawFullscreen( r, rtProg, rp, r->GetRenderTargetImage( rhiSsrRT ),
+			                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
+		}
+	}
 	RB_RHI_ForgetTexBinds();
 }
 

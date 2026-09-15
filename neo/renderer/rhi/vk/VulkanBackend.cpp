@@ -829,6 +829,7 @@ private:
 	void			RefreshAnimBlas() override;
 	void			AnimBlasStats( int &builds, int &refits, int &retires, int &live ) override;
 	void			RtReflStats( int &geoRows, int &geoMonsterRows ) override;
+	unsigned long long	GetRtGeoTableAddress() override { return (unsigned long long)rtCurrentGeoAddr; }
 
 	// R3 per-frame TLAS lane (movers): a TLAS slot per frame-in-flight, fully rebuilt each
 	// frame from CURRENT instance transforms. UpdateTlas (frontend, between frames) waits the
@@ -865,6 +866,7 @@ private:
 	// records the build on the frame cb — capturing the current-frame pose. -1 when not deferred.
 	int							rtAnimTlasDeferredSlot = -1;
 	VkDeviceAddress				rtCurrentAddr = 0;						// per-frame TLAS address (0 = use rtTlasAddr)
+	VkDeviceAddress				rtCurrentGeoAddr = 0;					// RR2: geo table for the slot rtCurrentAddr names (0 = none)
 	void	RecordFrameTlasBuild( VkCommandBuffer cb, int slot );		// build + AS-write -> frag-read barrier
 	bool	EnsureFrameGeoTable( int slot, uint32_t rows );				// RR0: (re)create the per-slot RtGeoDesc table
 	void	DestroyRtFrameSlots();
@@ -2565,6 +2567,7 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	} else if ( rtPendingSlot >= 0 ) {
 		rtPendingSlot = -1;
 		rtCurrentAddr = 0;
+		rtCurrentGeoAddr = 0;
 	}
 
 	boundPipeline = VK_NULL_HANDLE;
@@ -5435,6 +5438,7 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		rtPendingSlot = slot;				// BeginFrame records the rebuild ahead of the draws
 	}
 	rtCurrentAddr = rtFrameAddr[slot];		// this frame's mode-4 parms read this slot
+	rtCurrentGeoAddr = rtFrameGeoTable[slot].addr;	// RR2: geometry table matching this slot's TLAS
 }
 
 // RR0: (re)create the slot's RtGeoDesc table when absent or outgrown. Host-visible + device-addressable
@@ -5525,6 +5529,7 @@ void VulkanBackend::DestroyRtFrameSlots() {
 	rtDynPendingSlot = -1;
 	rtAnimTlasDeferredSlot = -1;
 	rtCurrentAddr = 0;
+	rtCurrentGeoAddr = 0;
 }
 
 void VulkanBackend::DestroyRtScene() {
