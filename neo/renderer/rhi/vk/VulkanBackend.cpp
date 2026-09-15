@@ -537,6 +537,14 @@ private:
 	VkDescriptorSetLayout		setLayoutUbo = VK_NULL_HANDLE;
 	VkDescriptorSetLayout		setLayoutTex = VK_NULL_HANDLE;
 	VkPipelineLayout			pipeLayout = VK_NULL_HANDLE;
+	// RR4 bindless materials (docs/rtx-reflections.md): set 2 = a variable-count array of every
+	// resident texture, indexed by ImageHandle-1, sampled by the RT reflection shader at a ray hit.
+	// Present only when the device reports the 1.2 descriptor-indexing features (haveDescriptorIndexing).
+	bool						haveDescriptorIndexing = false;
+	VkDescriptorSetLayout		setLayoutBindless = VK_NULL_HANDLE;
+	VkDescriptorPool			bindlessPool = VK_NULL_HANDLE;
+	VkDescriptorSet				bindlessSet = VK_NULL_HANDLE;
+	uint32_t					bindlessCapacity = 0;
 	// compute lane (docs/gpu-offload-plan.md Phase 1): one set of 8 storage-buffer
 	// bindings + a 128-byte push-constant range, its own pipeline layout, a pool for
 	// per-dispatch sets, and a shader-handle-keyed compute pipeline cache. Kept fully
@@ -1626,6 +1634,22 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	// (core 1.2). Enable when supported; RunFsr2 refuses (once, with a warning) without it.
 	haveSeparateDepthStencilLayouts = supported12.separateDepthStencilLayouts == VK_TRUE;
 	enabled12.separateDepthStencilLayouts = haveSeparateDepthStencilLayouts ? VK_TRUE : VK_FALSE;
+	// RR4 bindless materials (docs/rtx-reflections.md): descriptor indexing lets the RT passes sample
+	// any resident texture from one variable-count set-2 array. All five bits are core Vulkan 1.2;
+	// enable when the device reports them (guaranteed on our 1.4 floor). haveDescriptorIndexing gates
+	// the set-2 layout + the pipeLayout's third set built later.
+	haveDescriptorIndexing = supported12.runtimeDescriptorArray
+		&& supported12.shaderSampledImageArrayNonUniformIndexing
+		&& supported12.descriptorBindingPartiallyBound
+		&& supported12.descriptorBindingSampledImageUpdateAfterBind
+		&& supported12.descriptorBindingVariableDescriptorCount;
+	if ( haveDescriptorIndexing ) {
+		enabled12.runtimeDescriptorArray = VK_TRUE;
+		enabled12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+		enabled12.descriptorBindingPartiallyBound = VK_TRUE;
+		enabled12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+		enabled12.descriptorBindingVariableDescriptorCount = VK_TRUE;
+	}
 	enabled13.pNext = &enabled12;
 
 	VkPhysicalDeviceVulkan11Features enabled11 = {};
@@ -3027,11 +3051,65 @@ bool VulkanBackend::CreateM2Resources() {
 			return false;
 		}
 	}
+	// set 2 (RR4 bindless materials, docs/rtx-reflections.md): a variable-count array of every
+	// resident texture (COMBINED_IMAGE_SAMPLER), indexed directly by ImageHandle-1. UPDATE_AFTER_BIND
+	// lets CreateTexture/DestroyImage rewrite a slot while earlier frames are still in flight;
+	// PARTIALLY_BOUND means only the slots we actually register need hold a valid descriptor. Built
+	// only when the device reports descriptor indexing (guaranteed on our 1.4 RT floor); otherwise the
+	// pipeLayout stays 2-set and the RT reflection shader keeps its RR3 per-material average colour.
+	if ( haveDescriptorIndexing ) {
+		bindlessCapacity = 8192;			// >> the ~2k textures a Doom 3 level resides; unwritten slots are free
+		VkDescriptorSetLayoutBinding bb = {};
+		bb.binding = 0;
+		bb.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		bb.descriptorCount = bindlessCapacity;
+		bb.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		VkDescriptorBindingFlags bfl = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+			| VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
+			| VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
+		VkDescriptorSetLayoutBindingFlagsCreateInfo bfi = {};
+		bfi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+		bfi.bindingCount = 1;
+		bfi.pBindingFlags = &bfl;
+		VkDescriptorSetLayoutCreateInfo li = {};
+		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		li.pNext = &bfi;
+		li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+		li.bindingCount = 1;
+		li.pBindings = &bb;
+		if ( !vkCheck( vkCreateDescriptorSetLayout( device, &li, NULL, &setLayoutBindless ), "vkCreateDescriptorSetLayout(bindless)" ) ) {
+			return false;
+		}
+		VkDescriptorPoolSize bps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, bindlessCapacity };
+		VkDescriptorPoolCreateInfo bpci = {};
+		bpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		bpci.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+		bpci.maxSets = 1;
+		bpci.poolSizeCount = 1;
+		bpci.pPoolSizes = &bps;
+		if ( !vkCheck( vkCreateDescriptorPool( device, &bpci, NULL, &bindlessPool ), "vkCreateDescriptorPool(bindless)" ) ) {
+			return false;
+		}
+		uint32_t varCount = bindlessCapacity;
+		VkDescriptorSetVariableDescriptorCountAllocateInfo vci = {};
+		vci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
+		vci.descriptorSetCount = 1;
+		vci.pDescriptorCounts = &varCount;
+		VkDescriptorSetAllocateInfo bai = {};
+		bai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		bai.pNext = &vci;
+		bai.descriptorPool = bindlessPool;
+		bai.descriptorSetCount = 1;
+		bai.pSetLayouts = &setLayoutBindless;
+		if ( !vkCheck( vkAllocateDescriptorSets( device, &bai, &bindlessSet ), "vkAllocateDescriptorSets(bindless)" ) ) {
+			return false;
+		}
+	}
 	{
-		VkDescriptorSetLayout sets[2] = { setLayoutUbo, setLayoutTex };
+		VkDescriptorSetLayout sets[3] = { setLayoutUbo, setLayoutTex, setLayoutBindless };
 		VkPipelineLayoutCreateInfo pli = {};
 		pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-		pli.setLayoutCount = 2;
+		pli.setLayoutCount = haveDescriptorIndexing ? 3 : 2;	// RR4: set 2 = bindless textures when present
 		pli.pSetLayouts = sets;
 		// Phase 3.2b: a small vertex-stage push-constant range carries a buffer_device_address
 		// (idDrawVert*) for the BDA manual-vertex-fetch zfill variant (r_vkBdaZfill). Backward-
@@ -3274,6 +3352,9 @@ void VulkanBackend::DestroyM2Resources() {
 	if ( pipeLayout )     { vkDestroyPipelineLayout( device, pipeLayout, NULL ); pipeLayout = VK_NULL_HANDLE; }
 	if ( setLayoutUbo )   { vkDestroyDescriptorSetLayout( device, setLayoutUbo, NULL ); setLayoutUbo = VK_NULL_HANDLE; }
 	if ( setLayoutTex )   { vkDestroyDescriptorSetLayout( device, setLayoutTex, NULL ); setLayoutTex = VK_NULL_HANDLE; }
+	// RR4 bindless materials: the pool owns bindlessSet, so destroying it frees the set
+	if ( bindlessPool )      { vkDestroyDescriptorPool( device, bindlessPool, NULL ); bindlessPool = VK_NULL_HANDLE; bindlessSet = VK_NULL_HANDLE; }
+	if ( setLayoutBindless ) { vkDestroyDescriptorSetLayout( device, setLayoutBindless, NULL ); setLayoutBindless = VK_NULL_HANDLE; }
 	// compute lane (Phase 1)
 	if ( computePool )       { vkDestroyDescriptorPool( device, computePool, NULL ); computePool = VK_NULL_HANDLE; }
 	if ( computePipeLayout ) { vkDestroyPipelineLayout( device, computePipeLayout, NULL ); computePipeLayout = VK_NULL_HANDLE; }
