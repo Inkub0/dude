@@ -779,6 +779,10 @@ private:
 		VkAccelerationStructureKHR	as = VK_NULL_HANDLE;	// VK_NULL_HANDLE = freed slot
 		RtBuf						buf;
 		VkDeviceAddress				addr = 0;				// AS device address (TLAS instances consume this)
+		// RR5: the per-geometry descriptors this BLAS was built from (device-buffer-fed BLASes only).
+		// UpdateTlas copies them into the geometry table so a reflection ray can fetch st + material at a
+		// world hit. Empty for CPU-fed CreateBlas (positions only) -> those instances get a zero defer row.
+		std::vector<BlasGeometry>	geoms;
 		// R3.5 animated (device-buffer-fed) BLAS: built with ALLOW_UPDATE and refit in place from
 		// gpuSkinVB each pose change. updateScratch is the persistent scratch RefitBlas reuses; both
 		// stay unset (0/false) for the synchronous CPU-fed CreateBlas path.
@@ -4728,6 +4732,7 @@ BlasHandle VulkanBackend::CreateBlasFromBuffers( const BlasGeometry *geoms, int 
 	dai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
 	dai.accelerationStructure = blas.as;
 	blas.addr = pfnGetAsDeviceAddress( device, &dai );
+	blas.geoms.assign( geoms, geoms + count );		// RR5: keep descriptors for the geo-table fill in UpdateTlas
 	for ( size_t i = 0; i < rtBlases.size(); i++ ) {
 		if ( rtBlases[i].as == VK_NULL_HANDLE ) {
 			rtBlases[i] = blas;
@@ -5372,7 +5377,10 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 
 	// translate to VK instances (same rules as BuildTlas: dead BLAS handles drop out)
 	std::vector<VkAccelerationStructureInstanceKHR> vkInst;
+	std::vector<BlasHandle> instBlas;					// RR5: parallel to vkInst — the BLAS behind each instance (0 = none)
 	vkInst.reserve( (size_t)count + 1 );
+	instBlas.reserve( (size_t)count + 1 );
+	uint32_t geoBase = 0;								// RR5: running geometry-table row (per-geometry, not per-instance)
 	for ( int i = 0; i < count; i++ ) {
 		const RtInstance &in = instances[i];
 		if ( in.blas == 0 || (size_t)in.blas > rtBlases.size() || rtBlases[in.blas - 1].as == VK_NULL_HANDLE ) {
@@ -5384,8 +5392,13 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		vi.mask = in.mask & 0xFFu;
 		vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 		vi.accelerationStructureReference = rtBlases[in.blas - 1].addr;
-		vi.instanceCustomIndex = (uint32_t)vkInst.size();	// RR0: geometry-table row for this instance
+		// RR0/RR5: instanceCustomIndex is this instance's BASE geometry-table row. A device-buffer-fed BLAS
+		// (RR5 world surfaces) contributes one attributed row per geometry; a positions-only BLAS one defer row.
+		const uint32_t rows = rtBlases[in.blas - 1].geoms.empty() ? 1u : (uint32_t)rtBlases[in.blas - 1].geoms.size();
+		vi.instanceCustomIndex = geoBase;
+		geoBase += rows;
 		vkInst.push_back( vi );
+		instBlas.push_back( in.blas );
 	}
 	// R3 animated casters: one identity instance for this slot's combined WORLD-space monster
 	// BLAS (verts pre-transformed on the CPU, so no per-instance transform). Appended BEFORE the
@@ -5399,8 +5412,10 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		vi.mask = 0xFFu;
 		vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 		vi.accelerationStructureReference = rtFrameDynAddr[slot];
-		vi.instanceCustomIndex = (uint32_t)vkInst.size();	// RR0: zero-attr row (CPU-soup positions only)
+		vi.instanceCustomIndex = geoBase;					// RR0: zero-attr defer row (CPU-soup positions only)
+		geoBase += 1u;
 		vkInst.push_back( vi );
+		instBlas.push_back( 0 );							// RR5: no stored descriptors -> defer row
 	}
 	// R3.5 S4: RefreshAnimBlas will append one instance per staged animated caster to this slot after
 	// the skin flush. Reserve capacity for them now and keep going even if the static+mover set is empty
@@ -5415,7 +5430,7 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 	// (RefreshAnimBlas appends those rows). Size the table for both.
 	uint32_t sumGeom = 0;
 	for ( size_t i = 0; i < animStaged.size(); i++ ) { sumGeom += (uint32_t)animStaged[i].geomCount; }
-	const uint32_t geoRowsNeeded = n + sumGeom;
+	const uint32_t geoRowsNeeded = geoBase + sumGeom;	// RR5: static rows are now per-geometry, not per-instance
 
 	vkWaitForFences( device, 1, &frames[slot].fence, VK_TRUE, UINT64_MAX );
 
@@ -5489,13 +5504,33 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 	EnsureFrameGeoTable( slot, geoRowsNeeded > 0 ? geoRowsNeeded : 1 );
 	if ( rtFrameGeoTable[slot].map != NULL ) {
 		RtGeoDesc *rows = (RtGeoDesc *)rtFrameGeoTable[slot].map;
-		for ( uint32_t i = 0; i < n; i++ ) {
-			rows[i].vtxAddr = 0; rows[i].idxAddr = 0; rows[i].vtxStride = 0;
-			rows[i].flags = 0; rows[i].baseColor = 0; rows[i].texIndex = 0;
+		uint32_t base = 0;
+		for ( size_t i = 0; i < vkInst.size() && base < geoBase; i++ ) {
+			const BlasHandle bh = instBlas[i];
+			const std::vector<BlasGeometry> *g = ( bh != 0 ) ? &rtBlases[bh - 1].geoms : NULL;
+			if ( g != NULL && !g->empty() ) {
+				// RR5: a device-buffer-fed BLAS (world surfaces) — one attributed row per geometry, so a
+				// reflection ray resolves table[customIndex + geometryIndex] and fetches st + material.
+				for ( size_t k = 0; k < g->size() && base < geoBase; k++ ) {
+					const BlasGeometry &bgeo = (*g)[k];
+					rows[base].vtxAddr = bgeo.vertexAddress;
+					rows[base].idxAddr = bgeo.indexAddress;
+					rows[base].vtxStride = bgeo.vertexStride;
+					rows[base].flags = RT_GEO_MONSTER;			// bit0 = has attributes -> shade the hit (RR5b)
+					rows[base].baseColor = bgeo.baseColor;
+					rows[base].texIndex = bgeo.texIndex;
+					base++;
+				}
+			} else {
+				// positions-only (movers) / dyn-soup: one zero defer row — SSR + env probes own those pixels
+				rows[base].vtxAddr = 0; rows[base].idxAddr = 0; rows[base].vtxStride = 0;
+				rows[base].flags = 0; rows[base].baseColor = 0; rows[base].texIndex = 0;
+				base++;
+			}
 		}
 	}
-	rtFrameGeoRows[slot] = n;
-	rtReflStatRows = (int)n;			// static rows now; RefreshAnimBlas adds the monster rows + updates
+	rtFrameGeoRows[slot] = geoBase;
+	rtReflStatRows = (int)geoBase;		// static rows now; RefreshAnimBlas adds the monster rows + updates
 	rtReflStatMonsterRows = 0;
 	if ( willDefer ) {
 		// R3.5 S4: hand this slot to RefreshAnimBlas (post skin flush) — it appends the animated
