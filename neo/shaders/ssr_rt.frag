@@ -27,7 +27,7 @@ layout(location = 0) out vec4 fragColor;
 // idDrawVert as raw uints (stride 60 B = 15 uints): xyz @0, normal @5 (byte 20). Same view as zfill_batch.
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertRef { uint w[]; };
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IdxRef  { uint i[]; };
-struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; };	// RR0 per-instance geometry table row
+struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; uint baseColor; uint pad; };	// RR0/RR3 geometry table row
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer GeoTable { GeoDesc d[]; };
 
 // Doom 3's fixed near / near-infinite far projection in GL clip depth -> linear eye z (negative).
@@ -100,11 +100,12 @@ void main() {
 	vec3 n2 = vec3( uintBitsToFloat( g.vb.w[ i2*s + 5u ] ), uintBitsToFloat( g.vb.w[ i2*s + 6u ] ), uintBitsToFloat( g.vb.w[ i2*s + 7u ] ) );
 	vec3 hitN = normalize( mat3( o2w ) * ( ( 1.0 - bc.x - bc.y ) * n0 + bc.x * n1 + bc.y * n2 ) );
 
-	// MVP shade: a flat albedo lit by a fixed key light + ambient. The interpolated hit NORMAL (the
-	// RR1-validated fetch) gives the monster a shaded, 3D look; real diffuse-texture colour is RR3.
+	// RR3 shade: the hit surface's material average colour (geo-table baseColor) lit by a fixed key
+	// light + ambient. The interpolated hit NORMAL (the RR1-validated fetch) gives the monster a shaded
+	// 3D look; per-texel diffuse texture is RR4 (needs the bindless material substrate).
 	vec3  keyDir = normalize( u_color.xyz );
 	float ndl    = max( dot( hitN, keyDir ), 0.0 );
-	vec3  albedo = vec3( 0.55 );
+	vec3  albedo = unpackUnorm4x8( g.baseColor ).rgb;
 	vec3  lit    = albedo * ( vec3( u_color.w ) + ndl * u_diffuseModifier.rgb );
 	fragColor = vec4( lit * weight, 1.0 );
 }

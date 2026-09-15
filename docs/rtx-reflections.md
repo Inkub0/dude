@@ -87,13 +87,27 @@ rows). The normal transform is NOT stored — the shader gets it from `ObjectToW
   shade (sun N·L + ambient from `gpuSkinVB` normal/colour) and write; else leave for SSR. Composite
   with the SSR Fresnel/gloss weighting. Gate `r_rtReflections`. **Visible:** monsters appear in
   reflective floors/metal, including off-screen.
-- **RR3 — quality + hybrid.** Roughness-driven glossy (ray jitter or the SSR colour-mip blur),
-  temporal reuse (the `ssr_temporal` history path + motion vectors), optional sun shadow-ray at the
-  hit, and world-hit shading (env-probe sample or geometric normal) so RT also fills SSR's off-screen
-  *static* misses — a true hybrid.
-- **RR4 — verify + measure + preset wiring.** A/B vs SSR-only; pixel-plausible monster reflections;
-  no device loss across a fight; cost measured; wire into Ultra Nightmare (RT-gated), `r_rtReflections`
-  default per the perf.
+- **RR3 — per-material colour, no bindless.** Replace the flat 0.55 albedo with each hit surface's
+  **material average colour** (`idImage::averageColor`, already computed per texture) stored in the
+  geometry table (one packed RGBA8 per row). Gives coloured monster reflections (brown zombie, grey
+  sec-bot) — approximate, not per-texel, but a big step from uniform grey with zero new infra. Keeps
+  the fixed key light + ambient (indoor Doom 3 has no sun; real per-light shading at a hit is RT-GI
+  territory). **Verified visually 2026-09-15: RR2 geometry is pixel-perfect (user), so RR3 is a shading
+  swap.**
+- **RR4 — bindless material substrate → per-texel textured reflections.** The real prize, and the one
+  genuine infra lift: add `VK_EXT_descriptor_indexing` (runtime descriptor array of the resident
+  textures) + a per-geometry texture index in the table, so the RT shader samples the actual diffuse
+  texture at the interpolated `st` (fetched from `gpuSkinVB`). Turns the coloured blob into a properly
+  textured monster reflection. This substrate is the prerequisite for RR5.
+- **RR5 — RT WORLD reflections (replaces the snapshot glass system).** The user's goal: today glass /
+  env reflections use baked env-probe cubemaps + `_currentRender` snapshots, which can't show anything
+  dynamic or off-probe. Rebuild the **static world BLAS from full `idDrawVert`** (not positions-only, so
+  `st`/normal are available) + give each world geometry a material/texture index in the table (RR4
+  bindless), then shade world hits with their real texture. Reflective surfaces trace the true room —
+  no probes, no snapshots. Also lets RT fill SSR's off-screen *static* misses (a true hybrid).
+- **RR6 — quality + verify + preset.** Roughness-driven glossy (SSR colour-mip blur), temporal reuse
+  (`ssr_temporal` history + motion vectors), seam softening across the SSR↔RT boundary; A/B + perf;
+  wire into Ultra Nightmare, `r_rtReflections` default per the measured cost.
 
 ## Risks & mitigations
 

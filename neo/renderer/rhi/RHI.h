@@ -450,6 +450,7 @@ public:
 		unsigned int		vertexCount = 0;	// vertices (drives maxVertex)
 		unsigned long long	indexAddress = 0;	// device address of the 32-bit index buffer
 		unsigned int		indexCount = 0;		// 3 * triangles
+		unsigned int		baseColor = 0;		// RR3: material average colour, packed RGBA8 (0 = leave, shader defaults)
 	};
 	// Build ONE multi-geometry BLAS straight from GPU device buffers (no CPU staging), one geometry
 	// per surface. allowUpdate builds it refit-capable (ALLOW_UPDATE) and allocates the persistent

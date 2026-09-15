@@ -1637,6 +1637,32 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 	Mem_Free16( inst );
 }
 
+// RR3: pack a surface material's diffuse average colour (idImage::averageColor, already computed per
+// texture) into RGBA8 for the geometry table, so a reflected monster hit shades with roughly its skin
+// colour instead of flat grey. Mid-grey fallback when the material has no diffuse image. Byte order
+// matches the shader's unpackUnorm4x8 (R at bits 0-7, G 8-15, B 16-23, A 24-31).
+static unsigned int R_RtMaterialBaseColor( const idMaterial *mat ) {
+	float rgb[3] = { 0.55f, 0.55f, 0.55f };
+	if ( mat != NULL ) {
+		const int n = mat->GetNumStages();
+		for ( int i = 0; i < n; i++ ) {
+			const shaderStage_t *st = mat->GetStage( i );
+			if ( st->lighting == SL_DIFFUSE && st->texture.image != NULL ) {
+				rgb[0] = st->texture.image->averageColor[0];
+				rgb[1] = st->texture.image->averageColor[1];
+				rgb[2] = st->texture.image->averageColor[2];
+				break;
+			}
+		}
+	}
+	unsigned int c = 0xFF000000u;	// A = 255
+	for ( int k = 0; k < 3; k++ ) {
+		const int v = (int)( idMath::ClampFloat( 0.0f, 1.0f, rgb[k] ) * 255.0f + 0.5f );
+		c |= ( (unsigned int)v ) << ( k * 8 );
+	}
+	return c;
+}
+
 // R3.5 S3: stage this frame's GPU-skinned shadow casters for the backend's per-entity animated BLAS
 // cache. Runs once/frame regardless of the persistent-scene state (so the cache retires stale entries
 // when the feature or the view goes away). The backend copies the descriptors and builds/refits each
@@ -1731,6 +1757,8 @@ static void R_RtStageAnimCasters( void ) {
 			geoms[gi].vertexCount = (unsigned int)tri->numVerts;
 			geoms[gi].indexAddress = ia;
 			geoms[gi].indexCount = (unsigned int)tri->numIndexes;
+			geoms[gi].baseColor = R_RtMaterialBaseColor( dm->Surface( s )->shader );	// RR3: skin colour
+
 			sig = R_RtHashBytes( sig, &tri->gpuSkinVB, sizeof( tri->gpuSkinVB ) );
 			sig = R_RtHashBytes( sig, &tri->numVerts, sizeof( tri->numVerts ) );
 			sig = R_RtHashBytes( sig, &tri->numIndexes, sizeof( tri->numIndexes ) );
@@ -2418,7 +2446,7 @@ static const char *RTREFL_TEST_SRC =
 	"layout(local_size_x = 64) in;\n"
 	"layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertRef { uint w[]; };\n"
 	"layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IdxRef  { uint i[]; };\n"
-	"struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; };\n"
+	"struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; uint baseColor; uint pad; };\n"
 	"layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer GeoTable { GeoDesc d[]; };\n"
 	"layout(std430, binding = 0) writeonly buffer Out  { vec4 hit[]; } outb;\n"
 	"layout(std430, binding = 1) readonly  buffer Rays { vec4 dir[]; } rays;\n"
@@ -2609,7 +2637,7 @@ static void R_RtReflValidate( void ) {
 
 	// per-surface geometry table rows (device addresses) + a model-space CPU soup (pos + normal) from
 	// the read-back gpuSkinVB — the exact bytes the shader dereferences.
-	struct GeoRow { unsigned long long vtxAddr, idxAddr; unsigned int stride, flags; };	// matches shader GeoDesc
+	struct GeoRow { unsigned long long vtxAddr, idxAddr; unsigned int stride, flags, baseColor, pad; };	// matches shader GeoDesc (32 B)
 	GeoRow *rows = (GeoRow *)Mem_Alloc16( nSurf * (int)sizeof( GeoRow ) );
 	int totalVerts = 0, totalIdx = 0;
 	for ( int s = 0; s < nSurf; s++ ) { totalVerts += surfs[s]->numVerts; totalIdx += surfs[s]->numIndexes; }
@@ -2631,7 +2659,8 @@ static void R_RtReflValidate( void ) {
 		geoms[s].vertexAddress = va; geoms[s].vertexStride = (unsigned int)sizeof( idDrawVert );
 		geoms[s].vertexCount = (unsigned int)tri->numVerts;
 		geoms[s].indexAddress = ia; geoms[s].indexCount = (unsigned int)tri->numIndexes;
-		rows[s].vtxAddr = va; rows[s].idxAddr = ia; rows[s].stride = (unsigned int)sizeof( idDrawVert ); rows[s].flags = 1u;
+		rows[s].vtxAddr = va; rows[s].idxAddr = ia; rows[s].stride = (unsigned int)sizeof( idDrawVert );
+		rows[s].flags = 1u; rows[s].baseColor = 0u; rows[s].pad = 0u;
 		for ( int k = 0; k < tri->numVerts; k++ ) {
 			const idDrawVert &v = tmp[vbase + k];
 			cpuPos[(vbase+k)*3+0] = v.xyz.x; cpuPos[(vbase+k)*3+1] = v.xyz.y; cpuPos[(vbase+k)*3+2] = v.xyz.z;

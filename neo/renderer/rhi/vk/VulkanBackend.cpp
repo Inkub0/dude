@@ -847,11 +847,13 @@ private:
 	// buffer. One RtGeoDesc row per (instance, geometry); each instance's instanceCustomIndex is its base
 	// row. Monster rows carry the surface's gpuSkinVB/index device addresses so the reflection shader can
 	// fetch + shade the hit; static/mover rows are zero (vtxAddr 0 = "no attributes, defer to SSR").
-	struct RtGeoDesc {			// std430 / GL_EXT_buffer_reference layout (24 B, 8-aligned)
+	struct RtGeoDesc {			// std430 / GL_EXT_buffer_reference layout (32 B, 8-aligned)
 		uint64_t				vtxAddr;
 		uint64_t				idxAddr;
 		uint32_t				vtxStride;
 		uint32_t				flags;			// bit0 = has attributes (monster)
+		uint32_t				baseColor;		// RR3: material average colour, packed RGBA8 (unpackUnorm4x8)
+		uint32_t				pad;
 	};
 	static const uint32_t		RT_GEO_MONSTER = 1u;
 	RtBuf						rtFrameGeoTable[FRAMES_IN_FLIGHT];		// device-addressable RtGeoDesc[]
@@ -4983,6 +4985,8 @@ void VulkanBackend::RefreshAnimBlas() {
 						grows[base + g].idxAddr = bg.indexAddress;
 						grows[base + g].vtxStride = bg.vertexStride;
 						grows[base + g].flags = RT_GEO_MONSTER;
+						grows[base + g].baseColor = bg.baseColor;	// RR3: material average colour
+						grows[base + g].pad = 0;
 					}
 				}
 				animPendInst[i].instanceCustomIndex = base;
@@ -5401,7 +5405,8 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 	if ( rtFrameGeoTable[slot].map != NULL ) {
 		RtGeoDesc *rows = (RtGeoDesc *)rtFrameGeoTable[slot].map;
 		for ( uint32_t i = 0; i < n; i++ ) {
-			rows[i].vtxAddr = 0; rows[i].idxAddr = 0; rows[i].vtxStride = 0; rows[i].flags = 0;
+			rows[i].vtxAddr = 0; rows[i].idxAddr = 0; rows[i].vtxStride = 0;
+			rows[i].flags = 0; rows[i].baseColor = 0; rows[i].pad = 0;
 		}
 	}
 	rtFrameGeoRows[slot] = n;
