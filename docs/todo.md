@@ -49,6 +49,7 @@ Design decisions taken:
 | SSR march resolution | — | — | — | — | 1/2 | 2/3 |
 | SSAO res scale | — | — | 1/2 | 2/3 | 3/4 | 4/5 |
 | SSAO directions / steps | — | — | 2 / 4 | 3 / 6 | 4 / 8 | 5 / 10 |
+| SSAO temporal trade (4/6 + temporal) | on* | on* | on | on | on | off |
 | SSAO radius (world) | — | — | 48 | 48 | 48 | 48 |
 | SSAO depth-mip accel | — | — | on | on | on | on |
 | SSAO normal G-buffer | — | — | off (depth reconstruct) | on | on | on |
@@ -67,7 +68,11 @@ Design decisions taken:
 manual feature flip from those tiers stays affordable. `*` = inert on that tier (stencil
 shadows in place of maps / grain intensity 0) but carried for determinism. `†` = dormant while PBR supersedes the specular model on
 High and up; still applied for determinism. Sub-Ultra tiers carry SSR march resolution
-1.0 so a hand-enabled SSR runs at the full-res default.)
+1.0 so a hand-enabled SSR runs at the full-res default. The SSAO temporal trade
+(`r_ssaoTemporalTrade`, docs/ssao-perf-optimization.md Phase 4) overrides the direction/step
+columns with a fixed 4/6 + temporal accumulation on the tiers where it's on; Nightmare and
+Ultra Nightmare keep the brute-force 5/10. Ultra Nightmare — otherwise Nightmare's column
+plus the RT toggles — additionally runs the AO buffer at full resolution, vs 4/5 here.)
 
 Shadow size-scaling (`r_shadowMapSizeScale`) stays **on at every tier**: it distributes the
 per-light resolution budget by light radius (a light at the pivot radius gets the tier's base

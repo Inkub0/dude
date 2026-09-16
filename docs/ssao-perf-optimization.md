@@ -196,18 +196,21 @@ fresh review of the shipped pipeline:
   data already linearized at exactly AO resolution, R16F. Sign differs (positive vs the raw
   path's negative) but `linDepth` is only differenced/ratioed, so weights are identical.
 
-## Phase 4 — temporal-funded sample budget (A/B, undecided)
+## Phase 4 — temporal-funded sample budget (DECIDED 2026-09-16)
 
-**Status: BUILT as a live toggle, awaiting the user's verdict.** `r_ssaoTemporalTrade`
-(bool, not archived, not preset-wired): when 1, the pass runs **4 slices × 6 steps with
-temporal accumulation forced on**, overriding `r_ssaoSlices/Steps/Temporal`; when 0, the
-current cvars apply. Rationale: Nightmare brute-forces 100 taps/pixel with temporal *off*,
-while Medium proves the temporal path reads clean at 2×4 — and Ultra/Nightmare already fund
-the per-object velocity MRT (`r_motionVectors`), so their `ssao_temporal.frag` reprojection
-tracks moving objects better than Medium's camera-only matrix. Expected ~40–50% off the
-horizon-search cost at equal or better stability; the trade is accumulation latency. Compare
-in-game (`r_ssaoTemporalTrade 0/1` on the Nightmare preset), then either promote the budget
-into the Ultra/Nightmare preset rows + retire the cvar, or delete it (trim-debug-cvars policy).
+**Status: SHIPPED, preset-wired.** `r_ssaoTemporalTrade` (bool, archived): when 1, the pass
+runs **4 slices × 6 steps with temporal accumulation forced on**, overriding
+`r_ssaoSlices/Steps/Temporal`; when 0, the plain cvars apply. Where the per-object velocity
+MRT exists (VK, `r_motionVectors`) the `ssao_temporal.frag` reprojection tracks moving
+objects; elsewhere it falls back to the camera-only matrix.
+
+**User verdict:** the trade looks *slightly softer* than brute force — good enough for the
+value tiers, not for the flagship look. Preset rows: **ON for Medium / High / Ultra** (and
+carried on Potato/Low per the cheap-sub-params convention, inert with SSAO off), **OFF for
+Nightmare / Ultra Nightmare**, which keep the brute-force 5×10 with temporal off. In the same
+retune **Ultra Nightmare's AO buffer went to full resolution** (`ssaoResScale` 0.8 → 1.0);
+Nightmare stays at 0.8. Note the trade overrides the slice/step columns at pass level, so on
+the trade tiers the Enhancements sliders for slices/steps are inert while it's on.
 
 ## Phasing / ROI
 
