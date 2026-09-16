@@ -78,7 +78,9 @@ Full-RT down-payment.
   (populate + validate: `st` max err 0.0000, texIndex 32/32) → RR4c (sample), commits ebf886aa /
   3503a4e7 / 68acbe54 on `feat/rtx-bindless-materials`. *Prerequisite for everything below.* See
   [rtx-reflections.md](rtx-reflections.md) RR4.
-- **H2 — denoiser + temporal framework (NRD).** Integrate NRD into the VK backend; wire the G-buffer +
+- **H2 — denoiser + temporal framework (NRD). IN PROGRESS — see [rtx-nrd.md](rtx-nrd.md).**
+  H2a (vendor NRD v4.18 + build integration) DONE 2026-09-16; H2b (VK translation layer),
+  H2c (guide inputs), H2d (validator) next. Integrate NRD into the VK backend; wire the G-buffer +
   motion vectors as guide inputs; stand up the history/accumulation pass and a validator on a synthetic
   noisy signal. Nothing user-visible yet — it's the substrate H3/H4/H5 render into.
 - **H3 — RT soft shadows, all lights.** Extend `r_rtSunShadows` (one hard sun ray) to **area-sampled**

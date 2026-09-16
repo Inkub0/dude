@@ -849,6 +849,56 @@ if(DHEWM3_VULKAN)
 		libs/fsr2/ffx_assert.cpp
 		libs/fsr2/vk/ffx_fsr2_vk.cpp
 		libs/fsr2/vk/shaders/ffx_fsr2_shaders_vk.cpp)
+
+	# Vendored NVIDIA NRD v4.18 (MIT) — the H2 denoiser framework of the RTX hybrid
+	# roadmap (docs/rtx-hybrid-roadmap.md, libs/nrd/README-DUDE.md). Same pattern as
+	# FSR2: sources + prebuilt embedded SPIR-V, no build-time shader toolchain. Built
+	# as its own static-lib target because its compile definitions (embed flags,
+	# register shifts, encoding config) must match the prebuilt shaders exactly and
+	# must not leak into engine sources. VK-only, like everything ray-traced.
+	add_library(nrd STATIC
+		libs/nrd/Source/InstanceImpl.cpp
+		libs/nrd/Source/Reblur.cpp
+		libs/nrd/Source/Reference.cpp
+		libs/nrd/Source/Relax.cpp
+		libs/nrd/Source/Sigma.cpp
+		libs/nrd/Source/Timer.cpp
+		libs/nrd/Source/Wrapper.cpp
+		libs/nrd/ShaderMake/ShaderBlob.cpp)
+	target_include_directories(nrd PUBLIC
+		"${CMAKE_SOURCE_DIR}/libs/nrd/Include"
+	)
+	target_include_directories(nrd PRIVATE
+		"${CMAKE_SOURCE_DIR}/libs/nrd"			# ShaderMake/ShaderBlob.h
+		"${CMAKE_SOURCE_DIR}/libs/nrd/Shaders"	# embedded *.cs.spirv.h
+		"${CMAKE_SOURCE_DIR}/libs/nrd/MathLib"
+		"${CMAKE_SOURCE_DIR}/libs/nrd/Resources"
+	)
+	target_compile_features(nrd PUBLIC cxx_std_17)
+	# MUST mirror the config the vendored SPIR-V was generated with (README-DUDE.md)
+	target_compile_definitions(nrd PRIVATE
+		NRD_EMBEDS_SPIRV_SHADERS=1
+		NRD_EMBEDS_DXIL_SHADERS=0
+		NRD_EMBEDS_DXBC_SHADERS=0
+		SPIRV_SREG_OFFSET=0
+		SPIRV_BREG_OFFSET=2
+		SPIRV_UREG_OFFSET=3
+		SPIRV_TREG_OFFSET=20
+		NRD_NORMAL_ENCODING=2
+		NRD_ROUGHNESS_ENCODING=1
+		NRD_SUPPORTS_VIEWPORT_OFFSET=0
+		NRD_SUPPORTS_CHECKERBOARD=1
+		NRD_SUPPORTS_HISTORY_CONFIDENCE=1
+		NRD_SUPPORTS_DISOCCLUSION_THRESHOLD_MIX=1
+		NRD_SUPPORTS_ANTIFIREFLY=1
+		NRD_SUPPORTS_QUAD_INTRINSICS=1
+		REBLUR_PERFORMANCE_MODE=0
+	)
+	target_compile_definitions(nrd PUBLIC NRD_STATIC_LIBRARY=1)
+	if(NOT MSVC)
+		target_compile_options(nrd PRIVATE -mssse3 -fPIC -fvisibility=hidden
+			-Wno-missing-field-initializers)
+	endif()
 endif()
 
 always_optimize_sourcefile(renderer/stblib_impls.c)
@@ -1557,6 +1607,9 @@ if(CORE)
 if(DHEWM3_VULKAN)
 	# vendored FSR2 headers so the Vulkan backend can #include "ffx_fsr2.h" / "vk/ffx_fsr2_vk.h"
 	target_include_directories(${DHEWM3BINARY} PRIVATE "${CMAKE_SOURCE_DIR}/libs/fsr2")
+	# vendored NRD (H2 denoiser): the VK backend #includes "NRD.h" via the nrd target's
+	# public include dir and links the static lib
+	target_link_libraries(${DHEWM3BINARY} nrd)
 endif()
 
 if(HARDLINK_GAME)
