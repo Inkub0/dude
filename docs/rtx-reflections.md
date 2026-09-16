@@ -269,6 +269,40 @@ identical. **Verify:** `r_vkValidation 1` soak in Ultra Nightmare (watch for lay
 targets), confirm RT reflections still look identical, check refraction/heat-haze surfaces are unchanged, and
 A/B `r_vkGpuTime` with `r_rtReflections 0↔1` — the march/temporal/glossy cost should vanish when RT is on.
 
+## RR5c — glass on RT reflections (drop the cube in the RT tier)
+
+The user's original goal for the whole RR5 arc: replace the baked env-probe/cube glass reflections with the
+real ray-traced room. Glass is **translucent** — it renders after the `SS_DECAL` split and is *not* in the
+G-buffer, so `ssr_rt` (which runs on opaque G-buffer pixels) can't reach it. Instead glass gets its **own
+forward RT shader**. The enabling fact: the shared scene TLAS already holds the fully-shadeable, textured
+world + monsters (RR5 world rows set `flags = RT_GEO_MONSTER` — bit 0 = "has attributes → shade the hit" — so
+`ssr_rt.frag`'s "static hit → SSR/probes own it" comment is stale; world hits *do* shade). So glass reuses
+`ssr_rt`'s exact trace-and-shade, just fed a ray from the glass surface.
+
+**Stage 1 (unbumped `environment` glass — the windows: `glass2`, `outdoor_glass1`, `mc_scannerglass`):**
+- New `environment_rt.{vert,frag}`. The vert reconstructs the glass **world** position (`M·localPos` via
+  `u_modelMatrixRow0-2`, full vec4 dot for the translation) + world normal + world view vector (rotate the
+  local vectors by `M`, matching `bumpyenvironment.vert`), and folds the stage colour into `var_Color` exactly
+  as `environment.vert` (so the RT reflection carries the material's dimming tint). The frag reflects off the
+  glass normal (flipped to the viewer-facing side), traces the TLAS from `worldPos + N·2`, and shades the hit
+  through the RR4 bindless substrate — a copy of `ssr_rt`'s hit block. On a **miss** (ray escapes to sky, or a
+  positions-only defer row) it fills with a dim sky/ambient tone (`RT_SKYFILL`), never black. Output is
+  `refl · var_Color` in the same `dst_alpha` blend slot the cube used.
+- Backend (`RB_RHI_RenderTexgenStage`, `TG_REFLECT_CUBE`): `rtGlass` engages when `vkMode &&
+  r_rtReflections && SupportsRayQuery() && !GetBumpStage()` and the TLAS/geo table/program are all present.
+  It sets `u_rtParms` (TLAS + geo addresses), **skips the probe swap + cube bind** (`environment_rt` samples no
+  unit-0 cube — only the bindless set-2, reachable from forward draws since RR4a made the graphics layout 3
+  sets), and overrides `pd.shader` to `environment_rt`. The switch is **per-draw at runtime**, so toggling the
+  preset flips glass between cube and RT with no `vid_restart`. `r_gl3ReflectionScale` still dims `var_Color`.
+- **Gating:** keyed on `r_rtReflections`, already Ultra-Nightmare-only. Nightmare and below keep the vanilla
+  cube untouched — the faithful default. Fidelity: UN glass genuinely changes (live traced reflections with
+  off-screen geometry vs the baked cube), which is the intended upgrade.
+- **Verified** (user, RTX 3080 Ti): `r_vkValidation` clean, interior + exterior (`comm1`/`alphalabs2`
+  `outdoor_glass1`) panes reflect the real room correctly, sky/ambient fill reads right on sky-facing panes.
+
+**Stage 2 (follow-up):** `bumpyenvironment_rt` for bumped glass (reuse its existing world-space frame +
+flatten toward the vertex normal for stability); optional Fresnel; a real sky/fog-colour miss fill.
+
 ## Risks & mitigations
 
 - **Shading an off-screen hit with no material texture.** MVP shades from `gpuSkinVB` vertex colour ×

@@ -2292,6 +2292,11 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 	parms.localViewOrigin[3] = 1.0f;
 
 	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	// RR5c: when set (in the TG_REFLECT_CUBE case) this unbumped glass stage traces the shared scene TLAS
+	// via environment_rt instead of sampling the baked cube/probe. Gated to the RT tier (r_rtReflections);
+	// Nightmare and below leave it false and keep the vanilla cube.
+	bool rtGlass = false;
+	rhi::ShaderHandle rtGlassProg = 0;
 	rhi::ImageHandle vkTex[2] = { 0, 0 };
 	if ( !vkMode ) {
 		rhi::gl3ActiveTexture( GL_TEXTURE0 );
@@ -2356,6 +2361,24 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 			float *dst = row == 0 ? parms.modelMatrixRow0 : ( row == 1 ? parms.modelMatrixRow1 : parms.modelMatrixRow2 );
 			dst[0] = mm[row]; dst[1] = mm[row + 4]; dst[2] = mm[row + 8]; dst[3] = mm[row + 12];
 		}
+		// RR5c: on the RT tier (r_rtReflections, Ultra Nightmare) unbumped glass traces the shared scene
+		// TLAS (environment_rt) instead of sampling the baked cube/probe (docs/rtx-reflections.md). Engage
+		// only when RT hardware + a built TLAS + geo table + the loaded program are ALL present; otherwise
+		// fall through to the vanilla cube path below. The model rows above give environment_rt.vert the
+		// world position/normal for the ray; u_rtParms carries the TLAS + geo-table device addresses.
+		if ( vkMode && r_rtReflections.GetBool() && r->SupportsRayQuery() && !surf->material->GetBumpStage() ) {
+			static rhi::ShaderHandle s_envRtProg = 0;
+			static bool s_envRtTried = false;
+			if ( !s_envRtTried ) { s_envRtTried = true; s_envRtProg = r->LoadShader( "environment_rt" ); }
+			const unsigned long long tlas = r->GetTlasAddress();
+			const unsigned long long geo  = r->GetRtGeoTableAddress();
+			if ( s_envRtProg != 0 && tlas != 0 && geo != 0 ) {
+				rtGlass = true;
+				rtGlassProg = s_envRtProg;
+				memcpy( &parms.rtParms[0], &tlas, sizeof( tlas ) );	// u_rtParms.xy = TLAS addr
+				memcpy( &parms.rtParms[2], &geo,  sizeof( geo ) );	// u_rtParms.zw = geo-table addr
+			}
+		}
 		// reflection cube on unit 0; with glass probes on, a baked room probe
 		// (docs/ssr.md) replaces the cube so panes reflect the actual room at
 		// any angle. Only the generic grey env/gen* cubes are swapped — other
@@ -2368,7 +2391,7 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		// r_ssrGlassProbeScale then applies as the glass-only intensity knob
 		// (bump-mapped glass ignores stage colour — vanilla behaviour).
 		idImage *cubeImg = pStage->texture.image;
-		if ( r_ssr.GetBool() && r_ssrGlassProbes.GetBool() && !surf->material->GetBumpStage()
+		if ( !rtGlass && r_ssr.GetBool() && r_ssrGlassProbes.GetBool() && !surf->material->GetBumpStage()
 		     && idStr::Icmpn( cubeImg->imgName, "env/gen", 7 ) == 0 ) {
 			float probeAvg = -1.0f;
 			idImage *probe = RB_RHI_GlassProbeForSurface( viewDef, surf, &probeAvg );
@@ -2385,9 +2408,13 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 				parms.color[2] *= ps;
 			}
 		}
-		cubeImg->Bind();
-		vkTex[0] = cubeImg->rhiHandle;
-		if ( vkMode && vkTex[0] == 0 ) {
+		// RR5c: skip the cube entirely when RT glass owns this stage (environment_rt samples no unit-0
+		// cube; it fetches hit textures from the bindless set-2). Leaves vkTex[0] = 0.
+		if ( !rtGlass ) {
+			cubeImg->Bind();
+			vkTex[0] = cubeImg->rhiHandle;
+		}
+		if ( !rtGlass && vkMode && vkTex[0] == 0 ) {
 			// a white-dummy fallback washes the pane out (additive white);
 			// say which cube failed to bridge instead of hiding it
 			static int warned = 0;
@@ -2434,7 +2461,7 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 			pd.stateBits |= GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
 		}
 	}
-	pd.shader = si.program;
+	pd.shader = rtGlass ? rtGlassProg : si.program;	// RR5c: environment_rt traces the TLAS in place of the cube
 	pd.vertexLayout = rhi::VL_DRAWVERT;
 	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
 	r->BindPipeline( pd );
