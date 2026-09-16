@@ -542,6 +542,21 @@ static int  rhiSsrHistIdx = 0;						// which slot receives this frame's resolve
 static int  rhiSsrHistW = 0, rhiSsrHistH = 0;
 static bool rhiSsrHistValid = false;				// the read slot holds a usable previous frame
 static float rhiSsrJitterPhase = 0.0f;				// per-frame march jitter rotation
+
+// RR6 RT reflections (docs/rtx-reflections.md): the RT reflection (ssr_rt) used to composite one
+// sharp ray straight onto the scene, so where SSR persistently misses (grout lines) it aliased into a
+// firefly grid. Give it the SAME temporal treatment SSR gets: render the RT contribution into its own
+// target (a = hit mask), accumulate it across frames through ssr_temporal against a reprojected history
+// ping-pong, then additively composite the smoothed result. Sized to the SSR march resolution so the
+// two layers share a grain (and scale together with r_ssrResScale). A per-frame ray jitter (ssr_rt,
+// r_rtReflJitter) gives the accumulation something to average, so the grid resolves rather than smears.
+static rhi::RenderTargetHandle rhiRtReflRT = 0;		// this frame's RT reflection contribution (a = hit mask)
+static int  rhiRtReflW = 0, rhiRtReflH = 0;
+static rhi::RenderTargetHandle rhiRtReflHistRT[2] = { 0, 0 };	// temporal history ping-pong
+static int  rhiRtReflHistIdx = 0;					// slot that receives this frame's resolve
+static int  rhiRtReflHistW = 0, rhiRtReflHistH = 0;
+static bool rhiRtReflHistValid = false;				// the read slot holds a usable previous frame
+
 // SSR Hi-Z (docs/ssao-perf-optimization.md, r_ssrHiZ): a min-Z (nearest-surface) linear-
 // depth mip chain at the SSR march resolution, so the march leaps provably-empty span.
 // Same machinery as the SSAO depth mip, with a MIN downsample instead of MAX.
@@ -3185,6 +3200,10 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsrHistRT[0] = rhiSsrHistRT[1] = 0;
 	rhiSsrHistIdx = 0;			rhiSsrHistW = rhiSsrHistH = 0;
 	rhiSsrHistValid = false;
+	rhiRtReflRT = 0;			rhiRtReflW = rhiRtReflH = 0;
+	rhiRtReflHistRT[0] = rhiRtReflHistRT[1] = 0;
+	rhiRtReflHistIdx = 0;		rhiRtReflHistW = rhiRtReflHistH = 0;
+	rhiRtReflHistValid = false;
 
 	rhiNormalRT = 0;			rhiNormalW = rhiNormalH = 0;
 	rhiNormalReadyThisView = false;	rhiNormalMrt = false;	rhiNormalVel = false;
@@ -4513,6 +4532,57 @@ static bool RB_RHI_EnsureSsrHistory( rhi::RHI *r, int w, int h ) {
 	return true;
 }
 
+// RR6: (re)allocate the RT-reflection contribution target (this frame's ssr_rt output before temporal).
+// RGBA16F to carry HDR reflected radiance; alpha holds the hit mask ssr_temporal's hit-aware feedback
+// reads. Sized to the SSR march resolution so RT and SSR share a grain. Mirrors RB_RHI_EnsureSsrTarget.
+static bool RB_RHI_EnsureRtReflTarget( rhi::RHI *r, int w, int h ) {
+	if ( rhiRtReflRT && r->GetRenderTargetImage( rhiRtReflRT ) == 0 ) {
+		rhiRtReflRT = 0;					// lost context (vid_restart)
+		rhiRtReflW = rhiRtReflH = 0;
+	}
+	if ( rhiRtReflRT && rhiRtReflW == w && rhiRtReflH == h ) {
+		return true;
+	}
+	if ( rhiRtReflRT ) { r->DestroyRenderTarget( rhiRtReflRT ); rhiRtReflRT = 0; }
+	rhiRtReflRT = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+	if ( !rhiRtReflRT ) {
+		rhiRtReflW = rhiRtReflH = 0;
+		return false;
+	}
+	rhiRtReflW = w;
+	rhiRtReflH = h;
+	return true;
+}
+
+// RR6: (re)allocate the RT-reflection temporal history ping-pong. Mirrors RB_RHI_EnsureSsrHistory —
+// two RGBA16F slots, invalidated (rhiRtReflHistValid=false) on realloc so the first blend reprojects
+// nothing and just passes the current frame through.
+static bool RB_RHI_EnsureRtReflHistory( rhi::RHI *r, int w, int h ) {
+	if ( rhiRtReflHistRT[0] && r->GetRenderTargetImage( rhiRtReflHistRT[0] ) == 0 ) {
+		rhiRtReflHistRT[0] = rhiRtReflHistRT[1] = 0;	// lost context (vid_restart)
+		rhiRtReflHistW = rhiRtReflHistH = 0;
+	}
+	if ( rhiRtReflHistRT[0] && rhiRtReflHistRT[1] && rhiRtReflHistW == w && rhiRtReflHistH == h ) {
+		return true;
+	}
+	for ( int i = 0; i < 2; i++ ) {
+		if ( rhiRtReflHistRT[i] ) { r->DestroyRenderTarget( rhiRtReflHistRT[i] ); rhiRtReflHistRT[i] = 0; }
+	}
+	rhiRtReflHistRT[0] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+	rhiRtReflHistRT[1] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+	rhiRtReflHistValid = false;	// freshly (re)allocated: nothing to reproject yet
+	if ( !rhiRtReflHistRT[0] || !rhiRtReflHistRT[1] ) {
+		for ( int i = 0; i < 2; i++ ) {
+			if ( rhiRtReflHistRT[i] ) { r->DestroyRenderTarget( rhiRtReflHistRT[i] ); rhiRtReflHistRT[i] = 0; }
+		}
+		rhiRtReflHistW = rhiRtReflHistH = 0;
+		return false;
+	}
+	rhiRtReflHistW = w;
+	rhiRtReflHistH = h;
+	return true;
+}
+
 // SSR Hi-Z (docs/ssao-perf-optimization.md, r_ssrHiZ): (re)allocate the min-Z depth pyramid
 // at the SSR march resolution. Mirrors RB_RHI_EnsureSsaoDepthMip exactly; returns false when
 // the backend has no mipped-target capability (CreateRenderTargetMipped -> 0), so the caller
@@ -4624,6 +4694,19 @@ static bool RB_RHI_InvertMatrix( const float m[16], float invOut[16] ) {
 	return true;
 }
 
+// Radical-inverse Halton sample in [0,1). RR6c uses Halton(2,3) as the per-frame sub-texel jitter for
+// the RT-reflection temporal upscale — a low-discrepancy 2D walk covers the sample grid evenly over a
+// short cycle (the same family the R1 FSR jitter uses).
+static float RB_RHI_Halton( int index, int base ) {
+	float f = 1.0f, r = 0.0f;
+	while ( index > 0 ) {
+		f /= (float)base;
+		r += f * (float)( index % base );
+		index /= base;
+	}
+	return r;
+}
+
 void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !r_ssr.GetBool() || !R_BackendSupportsEnhancements() ) {
 		return;
@@ -4640,6 +4723,13 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			common->Printf( "RHI backend: VK SSR (r_ssr) live - G-buffer march + composite\n" );
 		}
 	}
+	// RR7: RT reflections (VK + ray-query) REPLACE the SSR composite rather than riding it. When RT will
+	// render this frame it traces every reflective pixel itself, so SSR's screen-space composite is skipped
+	// (no double-reflection, and none of SSR's fractional-res coverage strobing/striping leaking through the
+	// old miss-gate). SSR's march still runs above to build the shared G-buffer/depth (skipping that compute
+	// + a true r_ssr-off path is the next step). rtWants is the intent; rtWillRender (below) also checks the
+	// TLAS/targets so a misconfigured RT (no TLAS) cleanly falls back to the SSR composite.
+	const bool rtWants = vkMode && r_rtReflections.GetBool() && r->SupportsRayQuery();
 	if ( !viewDef->viewEntitys || viewDef->isSubview ) {
 		return;
 	}
@@ -4671,9 +4761,15 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	const int fullW = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int fullH = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	// Snap the reflection resolution to an INTEGER DIVISOR of the view (full, 1/2, 1/4). A fractional
+	// ratio (2/3, 3/4) makes the low-res reflection upscale BEAT: the bilinear interpolation weights
+	// cycle over the sharp RT reflection and show as strobing (2/3) / stripes (3/4) that temporal
+	// accumulation can't fully resolve. Integer divisors upscale cleanly (2:1 / 4:1), so the slider +
+	// presets only ever pick these; this snap also catches any stray console/config value.
 	const float resScale = idMath::ClampFloat( 0.25f, 1.0f, r_ssrResScale.GetFloat() );
-	int ssrW = (int)( fullW * resScale + 0.5f );
-	int ssrH = (int)( fullH * resScale + 0.5f );
+	const int resDiv = ( resScale >= 0.75f ) ? 1 : ( resScale >= 0.375f ) ? 2 : 4;
+	int ssrW = fullW / resDiv;
+	int ssrH = fullH / resDiv;
 	if ( ssrW < 1 ) ssrW = 1;
 	if ( ssrH < 1 ) ssrH = 1;
 	if ( !RB_RHI_EnsureSsrTarget( r, ssrW, ssrH ) ) {
@@ -4938,7 +5034,20 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
 	}
 
-	// ---- stage 3: full-res additive composite over the lit scene ----
+	// RR7: front-load the RT-reflection preconditions so the SSR composite is skipped EXACTLY when RT
+	// will draw (RT replaces it). If RT is enabled but can't run this frame (no TLAS / target alloc /
+	// non-invertible view), rtWillRender is false and the SSR composite runs as a safe fallback.
+	const unsigned long long tlasAddr = rtWants ? r->GetTlasAddress() : 0;
+	const unsigned long long geoAddr  = rtWants ? r->GetRtGeoTableAddress() : 0;
+	rhi::ShaderHandle rtProg   = ( rtWants && tlasAddr != 0 && geoAddr != 0 ) ? r->LoadShader( "ssr_rt" ) : 0;
+	rhi::ShaderHandle copyProg = rtProg ? r->LoadShader( "ssr_rt_composite" ) : 0;	// RR6 additive re-composite (+RR6b blur)
+	float invView[16];
+	const bool rtWillRender = ( rtProg != 0 && copyProg != 0
+		&& RB_RHI_EnsureRtReflTarget( r, ssrW, ssrH )
+		&& RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) );
+
+	// ---- stage 3: full-res additive composite over the lit scene (skipped when RT takes over) ----
+	if ( !rtWillRender ) {
 	rhi::RenderParams compParms;
 	memset( &compParms, 0, sizeof( compParms ) );
 	compParms.mvpMatrix[0] = compParms.mvpMatrix[5] = compParms.mvpMatrix[10] = compParms.mvpMatrix[15] = 1.0f;
@@ -4979,18 +5088,30 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	RB_RHI_DrawFullscreen( r, compProg, compParms, r->GetRenderTargetImage( glossySrcRT ),
 	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
+	}	// end stage 3 (SSR composite) — skipped when RT takes over
 
-	// ---- RR2: RT reflections on monsters (docs/rtx-reflections.md) ----
-	// After the SSR composite, trace a reflection ray for reflective pixels SSR could not serve (its
-	// marched result is 0 there — off-screen / screen-occluded) and shade a monster hit from its
-	// gpuSkinVB normal. Additive over the scene with the same Fresnel/gloss weighting. VK + RT +
-	// r_rtReflections; needs the per-frame TLAS + geometry table (r_rtAnimBlas on -> monsters instanced).
-	if ( vkMode && r_rtReflections.GetBool() && r->SupportsRayQuery() ) {
-		const unsigned long long tlasAddr = r->GetTlasAddress();
-		const unsigned long long geoAddr  = r->GetRtGeoTableAddress();
-		rhi::ShaderHandle rtProg = ( tlasAddr != 0 && geoAddr != 0 ) ? r->LoadShader( "ssr_rt" ) : 0;
-		float invView[16];
-		if ( rtProg != 0 && RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
+	// ---- RR2/RR6/RR7: RT reflections on monsters + world (docs/rtx-reflections.md) ----
+	// RT traces EVERY reflective pixel itself (RR7: no SSR miss-gate — the gate made RT inherit SSR's
+	// fractional-res coverage strobing/striping) and shades the hit from its gpuSkinVB (monster) / world
+	// attributes. The contribution renders into its OWN target (a = hit mask), is temporally accumulated
+	// and UPSCALED to full res (RR6a/c) so it neither fireflies nor stripes, then composited additively —
+	// REPLACING the SSR composite above. Preconditions were front-loaded into rtWillRender, so tlasAddr /
+	// geoAddr / rtProg / copyProg / invView are ready.
+	if ( rtWillRender ) {
+		{
+			// RR6c per-frame sub-texel jitter for the temporal UPSCALE (Halton(2,3), in RT-target texels,
+			// scaled by r_rtReflJitter). Shifting the low-res sample grid each frame moves the fractional-
+			// upscale beat (the "striped" reflection at e.g. 3/4 res) to a different phase every frame, so the
+			// full-res history averages it out. Only meaningful WITH temporal accumulation, so zero when off.
+			const bool rtTemporal = r_rtReflTemporal.GetBool();
+			float jitterX = 0.0f, jitterY = 0.0f;
+			if ( rtTemporal ) {
+				const int   jidx   = ( tr.frameCount & 15 ) + 1;			// 16-frame Halton cycle (avoid index 0)
+				const float jscale = idMath::ClampFloat( 0.0f, 4.0f, r_rtReflJitter.GetFloat() );
+				jitterX = ( RB_RHI_Halton( jidx, 2 ) - 0.5f ) * jscale;		// ±0.5 texel at scale 1
+				jitterY = ( RB_RHI_Halton( jidx, 3 ) - 0.5f ) * jscale;
+			}
+
 			rhi::RenderParams rp;
 			memset( &rp, 0, sizeof( rp ) );
 			rp.mvpMatrix[0] = rp.mvpMatrix[5] = rp.mvpMatrix[10] = rp.mvpMatrix[15] = 1.0f;
@@ -5000,10 +5121,18 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			rp.localParam0[2] = idMath::ClampFloat( 0.05f, 0.95f, r_ssrRoughnessFade.GetFloat() );	// roughness fade start
 			rp.localParam1[1] = r_ssrIntensity.GetFloat();				// reflection strength (shared with SSR)
 			rp.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
-			rp.screenCorrection[0] = 1.0f / fullW;
-			rp.screenCorrection[1] = 1.0f / fullH;
-			rp.depthTexRecip[0] = 1.0f / uploadW;
-			rp.depthTexRecip[1] = 1.0f / uploadH;
+			// RR6c sample-grid jitter (windowCoord.xy, in RT-target texels): ssr_rt offsets its whole
+			// reconstruction by this, shifting the low-res grid so the fractional-upscale beat averages out
+			// across the full-res history (see ssr_rt.frag).
+			rp.windowCoord[0] = jitterX;
+			rp.windowCoord[1] = jitterY;
+			// RR6: the ssr_rt TRACE runs at the SSR march resolution (cheap ray-query; shares SSR's grain and
+			// scales with r_ssrResScale). RR6c then temporally upscales the result to full res, so the
+			// composite reads a full-res history — no bilinear upscale of the fractional-res buffer (the beat).
+			rp.screenCorrection[0] = 1.0f / ssrW;
+			rp.screenCorrection[1] = 1.0f / ssrH;
+			rp.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;
+			rp.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
 			rp.windowCoord[2] = viewYSign;
 			// TLAS + geo-table device addresses, bit-cast into the float slots (floatBitsToUint in the shader)
 			memcpy( &rp.rtParms[0], &tlasAddr, sizeof( tlasAddr ) );		// rtParms.x/y = TLAS
@@ -5014,17 +5143,109 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			rp.color[0] = keyDir[0]; rp.color[1] = keyDir[1]; rp.color[2] = keyDir[2];
 			rp.color[3] = 0.28f;										// ambient term
 			rp.diffuseModifier[0] = rp.diffuseModifier[1] = rp.diffuseModifier[2] = 1.0f;	// key light colour
-			// unit 0 = the ACCUMULATED SSR result (miss gate, via DrawFullscreen), 1 = depth, 2/3 = G-buffer.
-			// Gate on resultRT (the temporally-accumulated reflection the composite uses), NOT the raw
-			// per-frame march (rhiSsrRT): the march misses a grid of grout points every frame (bump-
-			// perturbed rays leave the screen there) that temporal has long since filled, so gating on the
-			// march made RT re-fill them with a sharp reflection on top of SSR's smooth one — a doubled
-			// firefly grid. Gating on the accumulated result means RT only adds where SSR's FINAL image is
-			// genuinely empty (off-screen content), seamless with SSR everywhere else.
+			rp.localParam1[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtReflBump.GetFloat() );	// RR10: bump-normal warp amount
+
+			// ---- Pass A: trace + shade into the dedicated RT target (replace; cleared to 0 = no
+			// contribution). unit 0 = the ACCUMULATED SSR result (miss gate, via DrawFullscreen),
+			// 1 = depth, 2/3 = G-buffer. Gate on resultRT (the temporally-accumulated reflection the
+			// composite uses), NOT the raw per-frame march (rhiSsrRT): RT only fills where SSR's FINAL
+			// image is genuinely empty (off-screen content), seamless with SSR everywhere else.
+			rhi::ClearArgs rtClear;
+			memset( &rtClear, 0, sizeof( rtClear ) );
+			rtClear.color = true;
+			r->BeginTargetPass( rhiRtReflRT, &rtClear );
 			RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 			RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
 			RB_RHI_BindRTImage( r, 3, matImg );
-			RB_RHI_DrawFullscreen( r, rtProg, rp, r->GetRenderTargetImage( resultRT ),
+			RB_RHI_DrawFullscreen( r, rtProg, rp, r->GetRenderTargetImage( resultRT ) );
+			r->EndPass();
+
+			rhi::RenderTargetHandle rtResultRT = rhiRtReflRT;
+			int rtResW = ssrW, rtResH = ssrH;		// resolution of rtResultRT (ssrRes until the upscale runs)
+
+			// ---- Pass B: temporal accumulation + UPSCALE (r_rtReflTemporal) — the SAME ssr_temporal
+			// machinery as SSR stage 2, but the history is FULL res: the ssrRes trace (unit 0) is bilinear-
+			// upsampled into a reprojected full-res history, and the per-frame sample-grid jitter makes the
+			// accumulation both resolve the firefly grid AND average away the fractional-upscale beat.
+			if ( rtTemporal && RB_RHI_EnsureRtReflHistory( r, fullW, fullH ) ) {
+				rhi::ShaderHandle tempProg = r->LoadShader( "ssr_temporal" );
+				if ( tempProg ) {
+					// reproject last frame by camera motion; RB_RHI_TemporalReproj advances prev<-staged
+					// only for the first temporal consumer of a frame, so calling it after SSR/SSAO
+					// already did just rebuilds this frame's reproj against the same prev (correct).
+					float reproj[16];
+					bool prevUsable;
+					const bool haveInv = RB_RHI_TemporalReproj( viewDef, reproj, &prevUsable );
+					const bool historyUsable = rhiRtReflHistValid && prevUsable && haveInv;
+
+					const int writeIdx = rhiRtReflHistIdx;
+					const int readIdx  = 1 - rhiRtReflHistIdx;
+
+					rhi::RenderParams tempParms = rp;
+					if ( haveInv ) {
+						memcpy( tempParms.modelViewMatrix, reproj, sizeof( reproj ) );
+					}
+					// RR6c: this resolve + the history run at FULL res; the current RT buffer (unit 0) is the
+					// ssrRes trace, bilinear-upsampled by the sampler. The 3x3 clip neighbourhood + depth
+					// reprojection are therefore full-res (override rp's ssrRes screen/depth mapping).
+					tempParms.screenCorrection[0] = 1.0f / fullW;
+					tempParms.screenCorrection[1] = 1.0f / fullH;
+					tempParms.depthTexRecip[0] = 1.0f / uploadW;
+					tempParms.depthTexRecip[1] = 1.0f / uploadH;
+					tempParms.localParam0[2] = idMath::ClampFloat( 0.0f, 0.97f, r_ssrTemporalFeedback.GetFloat() );
+					tempParms.localParam0[3] = historyUsable ? 1.0f : 0.0f;
+					// reproject moving objects by the per-object velocity MRT when it exists (R1/A2), else
+					// fall back to the camera-only matrix (localParam1.x = 0).
+					rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
+						? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
+					tempParms.localParam1[0] = velImg ? 1.0f : 0.0f;
+
+					// unit 0 = current RT contribution (via DrawFullscreen), 1 = history read slot,
+					// 2 = depth, 3 = velocity
+					r->BeginTargetPass( rhiRtReflHistRT[writeIdx], NULL );
+					RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
+					// first frame after (re)alloc the read slot was never written (VK layout UNDEFINED);
+					// bind the just-rendered cur (a written, SHADER_READ_ONLY target) until a real
+					// history slot exists — the shader early-outs on historyUsable = 0 anyway.
+					rhi::RenderTargetHandle histRT = historyUsable ? rhiRtReflHistRT[readIdx] : rhiRtReflRT;
+					RB_RHI_BindRTUnit( r, 1, histRT );
+					if ( velImg ) { RB_RHI_BindRTImage( r, 3, velImg ); }
+					else          { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
+					RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiRtReflRT ) );
+					r->EndPass();
+
+					rtResultRT = rhiRtReflHistRT[writeIdx];
+					rtResW = fullW; rtResH = fullH;		// the result is now the full-res upscaled history
+					rhiRtReflHistIdx = readIdx;
+					RB_RHI_TemporalStageCur( viewDef );
+					rhiRtReflHistValid = true;
+				}
+			} else {
+				rhiRtReflHistValid = false;		// temporal off: drop stale history so a re-enable starts clean
+			}
+
+			// ---- Pass C: additive composite of the (smoothed) RT reflection onto the lit scene.
+			// EndPass left the target's scissor; restore the full view before drawing to the scene
+			// (mirrors the SSR composite scissor set above).
+			r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+			               tr.viewportOffset[1] + viewDef->viewport.y1, fullW, fullH );
+			backEnd.currentScissor = viewDef->scissor;
+			rhi::RenderParams cp;
+			memset( &cp, 0, sizeof( cp ) );
+			cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+			// RR6b: box-blur strength + tap spacing; screenCorrection = the RESULT target's texel size so
+			// the blur offsets are in its texels (full-res after the RR6c upscale, ssrRes if temporal off).
+			// At r_rtReflBlur 0 the frag is a 1:1 additive passthrough.
+			cp.localParam0[0] = idMath::ClampFloat( 0.0f, 1.0f, r_rtReflBlur.GetFloat() );
+			cp.localParam0[1] = 1.0f;			// tap spacing (texels); ±2 taps -> a 5px spread at scale 1
+			// RR8: full-res material mask (roughness fade start + cutoff) so the low-res reflection can't
+			// halo past a reflective monster onto the non-reflective background (unit 1 = the G-buffer MRT).
+			cp.localParam0[2] = idMath::ClampFloat( 0.05f, 0.95f, r_ssrRoughnessFade.GetFloat() );
+			cp.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
+			cp.screenCorrection[0] = 1.0f / rtResW;
+			cp.screenCorrection[1] = 1.0f / rtResH;
+			RB_RHI_BindRTImage( r, 1, matImg );		// full-res roughness/metalness for the silhouette mask
+			RB_RHI_DrawFullscreen( r, copyProg, cp, r->GetRenderTargetImage( rtResultRT ),
 			                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 		}
 	}

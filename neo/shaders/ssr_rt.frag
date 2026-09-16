@@ -41,7 +41,14 @@ layout(set = 2, binding = 0) uniform sampler2D u_rtTextures[];
 const vec2 depth_consts = vec2( 0.33333333, -0.33316667 );
 
 void main() {
-	vec2 frag = gl_FragCoord.xy;
+	// RR6c temporal upscale: jitter the whole reconstruction by a per-frame sub-texel offset
+	// (u_windowCoord.xy, in this pass's target texels; Halton, scaled by r_rtReflJitter). This shifts
+	// the low-res sample GRID each frame, so the non-integer-upscale beat (the "striped" reflection at
+	// e.g. 3/4 res, where the bilinear weights cycle with period 4 over sharp content) lands at a
+	// different phase every frame and the FULL-RES temporal history averages it out — while accumulating
+	// the sub-pixel-shifted samples toward genuine full-res detail. Everything below reconstructs from
+	// this jittered frag, so origin + reflected direction shift coherently.
+	vec2 frag = gl_FragCoord.xy + u_windowCoord.xy;
 	float raw = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
 	if ( raw >= 0.9994 ) { fragColor = vec4( 0.0 ); return; }			// sky / no geometry
 	vec2 uv = frag * u_screenCorrection.xy;
@@ -55,8 +62,12 @@ void main() {
 	float gloss = 1.0 - smoothstep( maxRough * u_localParam0.z, maxRough, rough );	// .z = r_ssrRoughnessFade (frac of cutoff)
 	if ( gloss < 0.004 ) { fragColor = vec4( 0.0 ); return; }			// not reflective enough
 
-	// SSR already reflected here (screen-space hit) -> don't double-reflect; RT only fills SSR's misses
-	if ( dot( texture( u_ssr, uv ).rgb, vec3( 1.0 ) ) > 0.0001 ) { fragColor = vec4( 0.0 ); return; }
+	// RR7: NO miss-gate. RT used to defer to SSR here (skip where the screen-space march already
+	// reflected), but SSR's coverage PATTERN beats/flickers at a fractional r_ssrResScale (2/3 strobes,
+	// 3/4 stripes) and RT inherited it at the gate boundary — "SSR getting in the way". RT now reflects
+	// every reflective pixel independently by tracing the scene TLAS; the backend skips SSR's composite
+	// when RT renders, so there is no double-reflection to gate against. (u_ssr is retained only as a
+	// bound-but-unused slot; the backend keeps a valid image there.)
 
 	// view-space position + normal (same reconstruction as ssr_composite.frag; u_windowCoord.z flips
 	// the reconstructed Y on VK's top-down framebuffer so P agrees with the view-space G-buffer normal)
@@ -67,19 +78,20 @@ void main() {
 	vec3  N = normalize( nt.xyz * 2.0 - 1.0 );
 	vec3  V = normalize( -P );
 
-	// RT traces ONE sharp ray per pixel with no temporal pass to average it (unlike SSR). A single sharp
-	// ray can't sample the high-frequency BUMP normal without aliasing: off a tile-grout bevel adjacent
-	// pixels shoot wildly different rays that focus into a grid of firefly dots (worst on SMOOTH surfaces,
-	// which reflect sharpest). Drive the ray + Fresnel off the GEOMETRIC (bump-free) surface normal instead
-	// — reconstructed from screen-space depth derivatives of the view position — so the floor reflects the
-	// room as a stable planar mirror (the correct look for a polished floor; the bump belongs to direct
-	// lighting, not a point-sampled reflection). Fall back to the bump normal only at silhouettes, where the
-	// derivative spans a depth discontinuity and is unreliable.
+	// RT reflection normal: blend the GEOMETRIC (bump-free) normal toward the full BUMP normal N by
+	// r_rtReflBump (u_localParam1.w). geoN — reconstructed from screen-space depth derivatives — gives a
+	// stable planar mirror; N warps the reflection per the normal map exactly like SSR (tile/grout relief
+	// distorts the reflected image). The single-ray aliasing the bump normal used to cause (the firefly
+	// grid on grout bevels) turned out to be the SSR miss-gate + fractional-res upscale, both now gone
+	// (RR7 + integer-res) and any residual is averaged by the temporal upscale — so the bump normal is back
+	// on by default. At a SILHOUETTE the depth-derivative geoN is unreliable (spans a discontinuity), so
+	// use N there regardless.
 	vec3  gN   = cross( dFdx( P ), dFdy( P ) );
 	float gLen = length( gN );
 	vec3  geoN = ( gLen > 1e-6 ) ? ( gN / gLen ) : N;
 	if ( dot( geoN, N ) < 0.0 ) { geoN = -geoN; }
-	vec3  Nr   = ( dot( geoN, N ) > 0.2 ) ? geoN : N;					// planar mirror normal; bump only at silhouettes
+	float bump = clamp( u_localParam1.w, 0.0, 1.0 );
+	vec3  Nr   = ( dot( geoN, N ) < 0.2 ) ? N : normalize( mix( geoN, N, bump ) );	// N at silhouettes; bump-warp elsewhere
 
 	// Schlick Fresnel + gloss window, same as ssr_composite (F0 0.9 for metal keeps untinted steel)
 	float ndv  = max( dot( Nr, V ), 0.0 );
@@ -93,6 +105,8 @@ void main() {
 	vec3 wp = ( u_modelViewMatrix * vec4( P, 1.0 ) ).xyz;
 	vec3 wr = normalize( mat3( u_modelViewMatrix ) * Rv );
 	vec3 wN = normalize( mat3( u_modelViewMatrix ) * Nr );				// world ray normal (ray-origin bias)
+	// (RR6c replaced the RR6a ray-cone jitter with the sample-GRID jitter applied to `frag` at the top:
+	// shifting the whole reconstruction both feeds the temporal accumulation AND moves the upscale beat.)
 
 	rayQueryEXT rq;
 	rayQueryInitializeEXT( rq,

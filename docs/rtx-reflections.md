@@ -136,6 +136,77 @@ rows). The normal transform is NOT stored — the shader gets it from `ObjectToW
   (`ssr_temporal` history + motion vectors), seam softening across the SSR↔RT boundary; A/B + perf;
   wire into Ultra Nightmare, `r_rtReflections` default per the measured cost.
 
+  **RR6a — temporal RT reflections (the firefly fix). BUILT, user visual gate pending.** The residual
+  fireflies after RR5 were the RT layer compositing **one sharp ray straight onto the scene**: wherever
+  SSR *persistently* misses (grout lines the screen-space march can never reach), RT legitimately fills
+  the pixel, but a single point-sampled ray has no way to resolve, so it aliased into a static grid of
+  dots that stood out against SSR's temporally-smoothed neighbours. RR6a gives the RT layer the **same
+  temporal treatment SSR gets**:
+  - The RT contribution (`ssr_rt.frag`, unchanged shade path — RGB + hit-mask in alpha) now renders into
+    its own target `rhiRtReflRT` (sized to the SSR march resolution, so RT and SSR share a grain and
+    scale together with `r_ssrResScale`) instead of directly onto the scene.
+  - `r_rtReflTemporal` (default 1) then accumulates that target across frames through the **exact
+    `ssr_temporal` pipeline** SSR uses — camera + per-object velocity reprojection (`RB_RHI_TemporalReproj`,
+    the R1 motion-vector MRT), a history ping-pong (`rhiRtReflHistRT[2]`), variance clipping + hit-aware
+    feedback. The shared `rhiTemporalCam` advance-once-per-frame invariant already handles RT as a third
+    consumer after SSAO/SSR.
+  - `ssr_rt.frag` gained a small per-frame **ray jitter** (`r_rtReflJitter`, sub-degree cone, golden-ratio
+    phase) — *the* piece that makes the accumulation **resolve** the grid rather than smear a static image
+    (same reason SSR's march jitter lets its temporal resolve the march grain). Jitter is off unless
+    temporal is on.
+  - Finally the smoothed result is composited additively onto the scene (`smaa_copy`, 1:1). `r_rtReflTemporal 0`
+    restores the exact pre-RR6 look (at `r_ssrResScale 1` the new dedicated-target path is byte-identical to
+    the old direct-to-scene draw), giving a clean runtime A/B.
+
+  Landed on `feat/rtx-bindless-materials`; builds clean (shader recompiled + embedded + relinked).
+  **Gate result (user, 2026-09-15):** `r_rtReflTemporal 1` mitigates the grid, but a residual is *still
+  visible standing perfectly still* — temporal killed the motion/flicker component but not the spatial one.
+
+  **RR6b — spatial blur of the RT contribution (the static-residual fix). BUILT, gate pending.** Diagnosed
+  the standing-still residual: RT's shaded radiance is bounded (~albedo·(0.28 + N·L) ≤ ~1.3, ×weight ≤ ~0.64),
+  so it is **not** an HDR brightness spike — a firefly *clamp* (like `ssr_composite`'s `r_ssrFireflyClamp`,
+  threshold 3) would never even fire on it. The residual is a **spatial** step: RT fills SSR's isolated
+  single-pixel blind spots (grout) with a flat key-light approximation that differs from SSR's screen-space
+  reflection at the neighbours. That ~0.1–0.2 per-pixel step **clips toward white and vanishes in LDR but is
+  preserved by HDR** and tonemapped into a visible dot (the user's HDR hunch, correctly explained), and being
+  spatially static neither temporal nor jitter can dissolve it. Fix = a box blur of the RT target before the
+  additive composite (`ssr_rt_composite.{vert,frag}`, replacing the plain `smaa_copy` recomposite): it spreads
+  each fill into a low-frequency haze and dims ISOLATED speckles by peak/N² while large off-screen fills (every
+  tap contributing) keep their brightness — so the marquee off-screen-monster case survives while the grout
+  grid dissolves. `r_rtReflBlur` (0..1, default 0.6) is the strength; 0 = the sharp RR6a look. New shader files
+  → cmake reconfigure done. **Gate result (user):** the shimmer is "almost gone" and the rest is manageable
+  via SSR temporal — but exaggerating reflectivity exposed a new artifact: the reflection is **"striped"**, and
+  the user localised it precisely — *only at `r_ssrResScale 0.75`* (full res is clean), and *only with
+  `r_rtReflections` on* (it's the RT layer, not SSR).
+
+  **RR6c — temporal UPSCALE of the RT reflection (the striping fix). BUILT, gate pending.** Root cause: a
+  **non-integer upscale ratio**. The composite bilinear-upsamples the fractional-res RT buffer, and at 3/4 res
+  the interpolation weights cycle with period 4 output pixels — over sharp RT content that beats into a regular
+  horizontal stripe. (Integer ratios like 0.5 upsample cleanly; full res has no upscale.) It's RT-only because
+  RT is the *sharp* layer — SSR's march dither + glossy pyramid pre-soften its content so nothing survives to
+  beat. Fix = eliminate the fractional bilinear upscale by **temporally upscaling** the RT reflection:
+  - The ray-query **trace stays at `ssrRes`** (cheap — the whole point of the slider), but the temporal
+    **history is promoted to full res** (`RB_RHI_EnsureRtReflHistory(fullW, fullH)`). `ssr_temporal` bilinear-
+    upsamples the `ssrRes` trace into the reprojected full-res history each frame; the composite then reads a
+    full-res buffer 1:1 — **no fractional upscale, no beat**.
+  - The RR6a ray-cone jitter was replaced by a **sample-GRID jitter**: `ssr_rt` offsets its whole reconstruction
+    by a per-frame Halton(2,3) sub-texel amount (`r_rtReflJitter`, ±0.5 trace-texel at 1 = exactly one
+    interpolation cycle), so the residual per-frame beat lands at a different phase every frame and the full-res
+    history averages it out — while accumulating sub-pixel-shifted samples toward genuine detail (mini-TAAU).
+  - Cost is small and *cheaper than tracing at full res*: trace unchanged, only the fullscreen resolve/composite
+    + history go full-res (**~+0.1 ms, ~15–30 MB**). Directly answered the user's "unless it's much more
+    expensive" condition and their FSR2-for-reflections idea (a dedicated FSR2 instance was assessed as heavier
+    + quality-risky: it expects a full frame with matching MVs/depth, but a reflection's MVs/depth describe the
+    reflector, not the reflected content).
+  - **Honest limit:** `ssr_temporal`'s variance clip clamps history to the current (bilinear) neighbourhood, so
+    the recovered sharpness is "good bilinear+", not full native — stripe-free + stable, pushable sharper later
+    by loosening the clip. `r_rtReflTemporal 0` = the pre-RR6 look (stripes return).
+
+  **Gate:** at `r_ssrResScale 0.75`, user confirms the stripes are gone with `r_rtReflTemporal 1` and it holds
+  up in motion (watch for moving-monster ghosting from the wider full-res history). **Remaining RR6:** perf
+  measure, optional sharper reconstruction (loosen the clip / true un-jittered TAAU), preset wiring
+  (`r_rtReflections` into Ultra Nightmare).
+
 ## Risks & mitigations
 
 - **Shading an off-screen hit with no material texture.** MVP shades from `gpuSkinVB` vertex colour ×

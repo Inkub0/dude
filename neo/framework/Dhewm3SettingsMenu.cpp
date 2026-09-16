@@ -2663,6 +2663,14 @@ struct EnhancementPreset {
 	// non-RT machine sees Ultra Nightmare == Nightmare visually rather than a broken tier.
 	bool  rtSunShadows;             // r_rtSunShadows
 	bool  rtMovingLights;           // r_rtMovingLights
+	// RT reflections (appended, see note above; VK + RT hardware only, inert on GL3/non-RT). Ultra
+	// Nightmare only: trace reflections off the persistent world BLAS + animated-monster BLAS so
+	// reflective floors/metal show the real room + monsters (including off-screen), replacing the SSR
+	// composite at that tier (docs/rtx-reflections.md RR7). The TLAS comes from rtSunShadows (which
+	// auto-builds the per-surface world BLAS); the monster BLAS comes from r_rtAnimBlas, which is now
+	// default-ON and inert without a TLAS, so it is NOT preset-controlled (no tier can force it off and
+	// silently break monster reflections).
+	bool  rtReflections;            // r_rtReflections
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2671,14 +2679,14 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false },
-	{ "Ultra Nightmare", true, true, true, true, true,  0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.667f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     true,  true  },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false, false },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false },
+	{ "Ultra Nightmare", true, true, true, true, true,  0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     true,  true,  true  },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2738,6 +2746,10 @@ static void ApplyEnhancementPreset( int idx )
 	r_pbr.SetBool( p.pbr );
 	r_ssr.SetBool( p.ssr );
 	r_ssrResScale.SetFloat( p.ssrResScale );
+	// SSR vs RT reflection luminance: the ray-traced reflection (Ultra Nightmare, rtReflections) reads
+	// brighter than the screen-space one at the same intensity, so the SSR tiers use 0.8 and the RT tier
+	// 0.5 to match. Lower/SSR-off tiers carry 0.5 (the cvar default), inert until SSR is hand-enabled.
+	r_ssrIntensity.SetFloat( ( p.ssr && !p.rtReflections ) ? 0.8f : 0.5f );
 
 	// GPU tessellation (Vulkan-only; inert on GL3): character smoothing from High,
 	// normal-map displacement from Ultra.
@@ -2768,6 +2780,11 @@ static void ApplyEnhancementPreset( int idx )
 	// RT sun + RT moving point lights. The cvars auto-build the persistent world scene.
 	r_rtSunShadows.SetBool( p.rtSunShadows );
 	r_rtMovingLights.SetBool( p.rtMovingLights );
+
+	// RT reflections (Ultra Nightmare only; VK + RT hardware, inert on GL3/non-RT). rtSunShadows above
+	// built the persistent world BLAS this traces; the monster BLAS (r_rtAnimBlas) is default-on and inert
+	// without a TLAS, so it is left alone here (never preset-forced off — see the struct note).
+	r_rtReflections.SetBool( p.rtReflections );
 }
 
 // Return the preset whose full cvar vector the live cvars currently match, or -1
@@ -2812,6 +2829,7 @@ static int DetectEnhancementPreset()
 			r_pbr.GetBool()                    == p.pbr &&
 			r_ssr.GetBool()                    == p.ssr &&
 			idMath::Fabs( r_ssrResScale.GetFloat() - p.ssrResScale ) < 0.01f &&
+			idMath::Fabs( r_ssrIntensity.GetFloat() - ( ( p.ssr && !p.rtReflections ) ? 0.8f : 0.5f ) ) < 0.01f &&
 			r_tessellation.GetBool()           == p.tessellation &&
 			idMath::Fabs( r_tessDisplace.GetFloat() - p.tessDisplace ) < 0.01f &&
 			r_parallax.GetBool()               == p.parallax &&
@@ -2821,7 +2839,8 @@ static int DetectEnhancementPreset()
 			r_fsr.GetBool()                    == p.fsr &&
 			r_shadowMapSplitDynDrop.GetInteger() == p.splitDynDrop &&
 			r_rtSunShadows.GetBool()           == p.rtSunShadows &&
-			r_rtMovingLights.GetBool()         == p.rtMovingLights;
+			r_rtMovingLights.GetBool()         == p.rtMovingLights &&
+			r_rtReflections.GetBool()          == p.rtReflections;
 		if ( match ) {
 			return i;
 		}
@@ -3087,9 +3106,11 @@ static void DrawEnhGroup_Reflections()
 			"Reflections are screen-space, so off-screen objects can't appear and rays fade at "
 			"the screen edges. Works with PBR shading on or off; tuning sliders are in the "
 			"Developer tab. Non-vanilla; opengl3 only." ) ) {
-		// Resolution: discrete quality/perf stops for the reflection march buffer.
-		const float ssrResStops[]  = { 0.5f, 0.667f, 0.75f, 1.0f };
-		const char *ssrResLabels[] = { "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Full" };
+		// Resolution: discrete INTEGER-DIVISOR stops for the reflection buffer. Only 1/4, 1/2, Full —
+		// fractional ratios (2/3, 3/4) make the reflection upscale beat into strobing/stripes (the
+		// renderer snaps to these divisors regardless, docs/rtx-reflections.md RR7).
+		const float ssrResStops[]  = { 0.25f, 0.5f, 1.0f };
+		const char *ssrResLabels[] = { "Quarter (1/4)", "Half (1/2)", "Full" };
 		const int ssrNumStops = IM_ARRAYSIZE( ssrResStops );
 		const float ssrCurScale = r_ssrResScale.GetFloat();
 		int ssrResIdx = 0;
@@ -3715,6 +3736,88 @@ static void DrawDbgGroup_SSR()
 		"colour and the global Reflection Brightness; other reflective surfaces are unaffected." );
 
 	ImGui::EndDisabled();
+	EndSettingsGroup();
+	}
+}
+
+static void DrawDbgGroup_RTReflections()
+{
+	// Ray-traced reflections (docs/rtx-reflections.md). Traces the scene acceleration structure so
+	// reflective floors/metal show the real room + monsters, including geometry off-screen or hidden from
+	// the camera that screen-space SSR can't reach — the RT tier's reflection layer, which REPLACES the SSR
+	// composite on reflective surfaces when it renders. Vulkan + ray-query (RT) hardware only. Resolution
+	// is shared with SSR (Graphics -> Reflections -> Resolution). Prerequisites (r_ssr for the G-buffer,
+	// r_rtSunShadows for the TLAS, r_pbr) live in their own groups; this is the RT-reflection tuning.
+	const bool isVulkan = glConfig.rhiBackend && !glConfig.coreProfile;
+	if ( BeginSettingsGroup( "Ray-Traced Reflections" ) ) {
+
+	if ( !isVulkan ) {
+		ImGui::TextDisabled( "Requires the Vulkan backend + ray-query (RT) hardware." );
+	}
+	ImGui::BeginDisabled( !isVulkan );
+
+	bool rtRefl = r_rtReflections.GetBool();
+	if ( ImGui::Checkbox( "Enable RT Reflections (r_rtReflections)", &rtRefl ) ) {
+		r_rtReflections.SetBool( rtRefl );
+	}
+	AddTooltip( "r_rtReflections: trace the scene acceleration structure to reflect the room + monsters, "
+		"including geometry off-screen or occluded from the camera that screen-space SSR can't show. When "
+		"on it replaces the SSR composite on reflective surfaces. Needs SSR on (for the G-buffer) and an RT "
+		"scene (Ray-Traced Sun Shadows) for the acceleration structure." );
+
+	// prerequisite hints (only meaningful once RT reflections are switched on)
+	if ( r_rtReflections.GetBool() ) {
+		if ( !r_ssr.GetBool() ) {
+			ImGui::TextDisabled( "  (!) SSR is off - enable Reflections in the Graphics tab (RT rides its G-buffer)." );
+		}
+		if ( !r_rtSunShadows.GetBool() ) {
+			ImGui::TextDisabled( "  (!) No RT scene - enable Ray-Traced Sun Shadows so the world/monster BLAS is built." );
+		}
+	}
+
+	ImGui::BeginDisabled( !r_rtReflections.GetBool() );
+
+	bool rtTemporal = r_rtReflTemporal.GetBool();
+	if ( ImGui::Checkbox( "Temporal Upscale (r_rtReflTemporal)", &rtTemporal ) ) {
+		r_rtReflTemporal.SetBool( rtTemporal );
+	}
+	AddTooltip( "r_rtReflTemporal: accumulate the reflection across frames and reconstruct it at full "
+		"resolution (the ray-query trace itself stays at the SSR resolution for speed). Resolves the "
+		"single-ray grain and the fractional-resolution shimmer. Leave on." );
+
+	float bump = r_rtReflBump.GetFloat();
+	if ( ImGui::SliderFloat( "Normal-Map Warp (r_rtReflBump)", &bump, 0.0f, 1.0f, "%.2f" ) ) {
+		r_rtReflBump.SetFloat( bump );
+	}
+	AddTooltip( "r_rtReflBump: how much the reflection follows the surface normal map. 1 = full bump, "
+		"warping over tile/grout relief exactly like SSR; 0 = a flat, glassy mirror. Lower it if a rougher "
+		"surface sparkles." );
+
+	float jitter = r_rtReflJitter.GetFloat();
+	if ( ImGui::SliderFloat( "Ray Jitter (r_rtReflJitter)", &jitter, 0.0f, 4.0f, "%.2f" ) ) {
+		r_rtReflJitter.SetFloat( jitter );
+	}
+	AddTooltip( "r_rtReflJitter: per-frame sub-pixel jitter of the reflection sample grid so the temporal "
+		"upscale can reconstruct detail and the fractional-resolution beat averages out. Needs Temporal "
+		"Upscale. 1 = one sample cell; higher = softer, lower = sharper but more residual shimmer." );
+
+	float blur = r_rtReflBlur.GetFloat();
+	if ( ImGui::SliderFloat( "Blur (r_rtReflBlur)", &blur, 0.0f, 1.0f, "%.2f" ) ) {
+		r_rtReflBlur.SetFloat( blur );
+	}
+	AddTooltip( "r_rtReflBlur: a small box blur of the reflection before compositing, to soften any "
+		"residual single-pixel speckle. 0 = sharp." );
+
+	bool animBlas = cvarSystem->GetCVarBool( "r_rtAnimBlas" );
+	if ( ImGui::Checkbox( "Reflect Monsters (r_rtAnimBlas)", &animBlas ) ) {
+		cvarSystem->SetCVarBool( "r_rtAnimBlas", animBlas );
+	}
+	AddTooltip( "r_rtAnimBlas: put animated monsters into the ray-tracing acceleration structure so they "
+		"appear in reflections (and RT shadows). On by default - without it a monster shows as a black "
+		"silhouette in reflections. Turning it off saves the per-frame monster BLAS build." );
+
+	ImGui::EndDisabled();	// r_rtReflections
+	ImGui::EndDisabled();	// isVulkan
 	EndSettingsGroup();
 	}
 }
@@ -4560,6 +4663,7 @@ static void DrawShadowDebugMenu()
 	DrawDbgGroup_PBR();
 	DrawDbgGroup_Emissive();
 	DrawDbgGroup_SSR();
+	DrawDbgGroup_RTReflections();
 	DrawDbgGroup_DepthOfField();
 	DrawDbgGroup_EyeAdaptation();
 	DrawDbgGroup_FSR();

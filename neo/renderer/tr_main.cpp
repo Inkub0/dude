@@ -1107,8 +1107,8 @@ static idCVar r_rtWorldTest( "r_rtWorldTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"validate the ray-query world scene (areas + static entity instances) vs a CPU ray trace (Vulkan + RT hardware; one-shot, self-clears)" );
 static idCVar r_rtAnimBlasTest( "r_rtAnimBlasTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"validate an animated monster's BLAS built from its GPU-skinned gpuSkinVB (build + refit) vs a CPU trace of the same buffers (Vulkan + RT hardware; needs a GPU-skinned caster in view; one-shot, self-clears)" );
-static idCVar r_rtAnimBlas( "r_rtAnimBlas", "0", CVAR_RENDERER | CVAR_BOOL,
-	"S3 (docs/rtx-animated-blas.md): maintain a per-entity animated BLAS cache from GPU-skinned casters' gpuSkinVB (built/refit after the skin flush). Inert soak until S4 instances them into the TLAS; watch r_shadowMapCacheDebug for build/refit/retire stability (Vulkan + RT hardware)" );
+static idCVar r_rtAnimBlas( "r_rtAnimBlas", "1", CVAR_RENDERER | CVAR_BOOL,
+	"S3/S5 (docs/rtx-animated-blas.md): maintain a per-entity animated BLAS cache from GPU-skinned casters' gpuSkinVB (built/refit after the skin flush) and instance it into the TLAS. ON BY DEFAULT (S5 flip): its consumer landed - RT reflections need it to see monsters (without it a reflection ray hits a defer row and shades the monster BLACK). Inert on GL3 / non-RT hardware and when no RT scene (TLAS) is built, so it only costs where an RT feature is already active. 0 = monsters absent from the RT geometry table (black in reflections, no RT monster shadows)" );
 static idCVar r_rtReflTest( "r_rtReflTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"RR1 (docs/rtx-reflections.md): validate the reflection-hit attribute fetch — trace rays at a GPU-skinned monster, fetch the hit's interpolated world normal from gpuSkinVB via the geometry table + buffer_reference, and diff vs a CPU barycentric reference (Vulkan + RT hardware; needs a GPU-skinned monster in view; one-shot, self-clears)" );
 

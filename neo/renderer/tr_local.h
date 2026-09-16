@@ -969,6 +969,10 @@ extern idCVar r_shadowMapSunRange;			// how far ahead of the camera the sun map 
 extern idCVar r_shadowMapNormalOffset;		// normal-offset shadow bias in texels (cube + sun lookups; 0 = off)
 extern idCVar r_rtSunShadows;				// RT sun shadows: trace sun visibility per fragment (VK + RT hardware)
 extern idCVar r_rtReflections;				// RT reflections on monsters: trace + shade the dynamic hit (VK + RT; rides SSR)
+extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
+extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
+extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compositing (dissolves the static firefly grid)
+extern idCVar r_rtReflBump;					// RR10: how much the RT reflection follows the normal map (0 = flat mirror, 1 = full bump like SSR)
 extern idCVar r_rtMovingLights;				// RT shadows for moving point lights: skip the un-cacheable cube re-render, trace instead
 extern idCVar r_rtTlasDirty;				// skip the per-frame TLAS rebuild when no mover/monster changed this frame
 extern idCVar r_rtSunShadowOffset;			// RT sun shadows: ray-origin normal offset (world units)
