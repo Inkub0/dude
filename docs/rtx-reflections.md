@@ -303,6 +303,60 @@ world + monsters (RR5 world rows set `flags = RT_GEO_MONSTER` — bit 0 = "has a
 **Stage 2 (follow-up):** `bumpyenvironment_rt` for bumped glass (reuse its existing world-space frame +
 flatten toward the vertex normal for stability); optional Fresnel; a real sky/fog-colour miss fill.
 
+## Entity coverage — the room's props + dropped items should reflect too (PLANNED)
+
+Today reflective floors show the worldspawn (RR5) + monsters (RR2), but **static entity props reflect as
+nothing** and **runtime-dropped items don't either** — a reflection ray hits their positions-only defer row
+(`flags & 1 == 0`) and returns 0. Two items, one shared mechanism: give non-monster entities *attributed*
+BLASes so `ssr_rt`/`environment_rt` can shade the hit. The template is `R_RtBuildWorldAreaBlas`
+(`tr_main.cpp:1847`, RR5a-3), which already builds per-surface `CreateBlasFromBuffers` BLASes for the world.
+
+### Item 1 — `func_static` / map-placed props (the foundation)
+
+**Current state.** `R_RtGatherEntities` (`tr_main.cpp:1243`) gathers `DM_STATIC`, casting entities as a
+**positions-only** soup (3 floats/vert); `R_RtBuildScene`'s model loop (`~1413`) builds a positions-only
+`CreateBlas` per unique model, registers it in `s_rtModelBlas`, and instances it. `UpdateTlas` gives each a
+single zero-attr defer row → `ssr_rt.frag:125` returns 0.
+
+**Change.** Make the per-model BLASes **attributed**, mirroring `R_RtBuildWorldAreaBlas`:
+1. Add dedicated device buffers `s_rtEntityVB/IB` (like `s_rtWorldVB/IB`), freed in `R_RtFreeWorldGeo`.
+2. Gather **full `idDrawVert`** (model space) per *unique model* into `s_rtEntityVB/IB`, and build a per-surface
+   `RHI::BlasGeometry` for each casting surface: `vertexAddress = vbAddr + vOff*sizeof(idDrawVert)`,
+   `vertexStride = sizeof(idDrawVert)`, `indexAddress = ibAddr + iOff*4`, surface-local 32-bit indices,
+   `texIndex = R_RtMaterialTexIndex(surf->shader)`, `baseColor = R_RtMaterialBaseColor(surf->shader)` — exactly
+   as the world path (`1898-1915`), but keyed per model, not per area.
+3. Build each unique model's BLAS via `CreateBlasFromBuffers(geoms, cnt, /*allowUpdate*/false)` (chunk at
+   `MAXG=64` surfaces), store `model→blas` in `s_rtModelBlas`.
+
+**What already works unchanged** (this is why it's contained): the per-entity instancing +
+**`R_RtRefreshInstances`** (`1544`) re-instances `s_rtModelBlas` by model pointer with the *current* pose every
+frame (so movers/doors track — a model-space BLAS + per-frame transform is REQUIRED; a world-space bake would
+freeze the pose), and **`UpdateTlas`** (`VulkanBackend.cpp:5510`) fills one attributed row per geometry
+(`flags = has-attr`, `texIndex`, addrs) for any stored-descriptor BLAS. At a hit, `ssr_rt` applies
+`mat3(ObjectToWorld)` (the instance transform) to the interpolated model-space normal — same as monsters.
+
+**Recommended structure:** a new `R_RtBuildEntityModelBlas(r, world)` that mirrors `R_RtBuildWorldAreaBlas`
+(per unique model instead of per area, filling `s_rtModelBlas` with attributed handles), called right after it
+in `R_RtWorldUpdate` (`~1966`). Then the positions-only entity path in `R_RtGatherEntities` +
+`R_RtBuildScene` can retire for the persistent build (keep it only if the `r_rtWorldTest` validator still wants
+a positions-only entity trace — attributes are transparent to the CPU geometry trace, so the validator can use
+either). This keeps the diff parallel to the proven world path and avoids churning the `R_RtBuildScene`
+signature/callers (`~1969` persistent, `~2121` validator).
+
+**Verify:** `r_vkValidation` soak; a map with `func_static` props (crates/consoles) + a reflective floor under
+Ultra Nightmare — the props should now appear in reflections (were invisible). `r_rtWorldTest` still PASS.
+
+### Item 3 — runtime-dropped items (builds on item 1)
+
+The persistent scene builds once per map (`s_rtWorldMap` check at `1948`); items **dropped at runtime**
+(`idItem`/moveables spawned after that — the zombie's chainsaw) aren't in `entityDefs` at build time, and
+`R_RtRefreshInstances` only re-instances the *existing* `s_rtModelBlas`. Fix: **build-on-first-sight** — in the
+per-frame refresh, when a `DM_STATIC` casting entity's model isn't in `s_rtModelBlas` yet, build its attributed
+model BLAS then (reusing item 1's `R_RtBuildEntityModelBlas` machinery) and cache it by model, with a
+retire-after-grace lifecycle mirroring the animated-monster BLAS cache (`RefreshAnimBlas`, `ANIM_RETIRE_GRACE`).
+The model geometry is static, so only the per-frame transform updates. **Verify:** drop a chainsaw near a
+reflective floor under RT — it should appear in the reflection.
+
 ## Risks & mitigations
 
 - **Shading an off-screen hit with no material texture.** MVP shades from `gpuSkinVB` vertex colour ×

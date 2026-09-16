@@ -2297,6 +2297,8 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 	// Nightmare and below leave it false and keep the vanilla cube.
 	bool rtGlass = false;
 	rhi::ShaderHandle rtGlassProg = 0;
+	bool ssrGlass = false;					// RR5c-SSR: screen-space glass reflection (SSR tier, no RT)
+	rhi::ShaderHandle ssrGlassProg = 0;
 	rhi::ImageHandle vkTex[2] = { 0, 0 };
 	if ( !vkMode ) {
 		rhi::gl3ActiveTexture( GL_TEXTURE0 );
@@ -2379,6 +2381,40 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 				memcpy( &parms.rtParms[2], &geo,  sizeof( geo ) );	// u_rtParms.zw = geo-table addr
 			}
 		}
+
+		// RR5c-SSR: on the SSR tier (r_ssr on, no RT) unbumped glass reflects the LIVE scene via a
+		// screen-space march (environment_ssr) instead of the baked cube/probe — the SSR-tier analog of
+		// rtGlass. Needs the SSR pass's _currentRender + _currentDepth captures (present whenever r_ssr ran
+		// this view). VK for now; GL3 keeps the cube until the flip path is validated there.
+		if ( !rtGlass && vkMode && r_ssr.GetBool() && !surf->material->GetBumpStage()
+		     && globalImages->currentDepthImage->rhiCaptured && globalImages->currentRenderImage->rhiCaptured ) {
+			static rhi::ShaderHandle s_envSsrProg = 0;
+			static bool s_envSsrTried = false;
+			if ( !s_envSsrTried ) { s_envSsrTried = true; s_envSsrProg = r->LoadShader( "environment_ssr" ); }
+			if ( s_envSsrProg != 0 ) {
+				ssrGlass = true;
+				ssrGlassProg = s_envSsrProg;
+				// model->view for the vert; view->clip for the march projection
+				memcpy( parms.modelViewMatrix, surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
+				memcpy( parms.projectionMatrix, viewDef->projectionMatrix, sizeof( parms.projectionMatrix ) );
+				const int fW = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+				const int fH = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+				const int dW = globalImages->currentDepthImage->uploadWidth;
+				const int dH = globalImages->currentDepthImage->uploadHeight;
+				const int rW = globalImages->currentRenderImage->uploadWidth;
+				const int rH = globalImages->currentRenderImage->uploadHeight;
+				parms.localParam0[0] = idMath::ClampFloat( 64.0f, 8192.0f, r_ssrMaxDistance.GetFloat() );	// maxDist
+				parms.localParam0[1] = idMath::ClampFloat( 1.0f, 256.0f, r_ssrThickness.GetFloat() );		// thickness
+				parms.localParam0[2] = (float)idMath::ClampInt( 4, 48, r_ssrSteps.GetInteger() );			// steps
+				parms.screenCorrection[0] = 1.0f / (float)fW;
+				parms.screenCorrection[1] = 1.0f / (float)fH;
+				parms.screenCorrection[2] = rW > 0 ? (float)fW / (float)rW : 1.0f;	// -> _currentRender POT tc
+				parms.screenCorrection[3] = rH > 0 ? (float)fH / (float)rH : 1.0f;
+				parms.depthTexRecip[0] = dW > 0 ? 1.0f / (float)dW : 1.0f;			// frag -> depth tc
+				parms.depthTexRecip[1] = dH > 0 ? 1.0f / (float)dH : 1.0f;
+				parms.windowCoord[2] = -1.0f;	// VK view-Y sign (this path is VK-gated)
+			}
+		}
 		// reflection cube on unit 0; with glass probes on, a baked room probe
 		// (docs/ssr.md) replaces the cube so panes reflect the actual room at
 		// any angle. Only the generic grey env/gen* cubes are swapped — other
@@ -2391,7 +2427,7 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		// r_ssrGlassProbeScale then applies as the glass-only intensity knob
 		// (bump-mapped glass ignores stage colour — vanilla behaviour).
 		idImage *cubeImg = pStage->texture.image;
-		if ( !rtGlass && r_ssr.GetBool() && r_ssrGlassProbes.GetBool() && !surf->material->GetBumpStage()
+		if ( !rtGlass && !ssrGlass && r_ssr.GetBool() && r_ssrGlassProbes.GetBool() && !surf->material->GetBumpStage()
 		     && idStr::Icmpn( cubeImg->imgName, "env/gen", 7 ) == 0 ) {
 			float probeAvg = -1.0f;
 			idImage *probe = RB_RHI_GlassProbeForSurface( viewDef, surf, &probeAvg );
@@ -2408,13 +2444,16 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 				parms.color[2] *= ps;
 			}
 		}
-		// RR5c: skip the cube entirely when RT glass owns this stage (environment_rt samples no unit-0
-		// cube; it fetches hit textures from the bindless set-2). Leaves vkTex[0] = 0.
-		if ( !rtGlass ) {
+		// RR5c: skip the cube when RT or SSR glass owns this stage. environment_rt samples no unit-0 cube
+		// (bindless set-2); environment_ssr binds _currentRender + _currentDepth for its screen-space march.
+		if ( ssrGlass ) {
+			vkTex[0] = globalImages->currentRenderImage->rhiHandle;	// u_currentRender (lit scene)
+			vkTex[1] = globalImages->currentDepthImage->rhiHandle;	// u_currentDepth (the march)
+		} else if ( !rtGlass ) {
 			cubeImg->Bind();
 			vkTex[0] = cubeImg->rhiHandle;
 		}
-		if ( !rtGlass && vkMode && vkTex[0] == 0 ) {
+		if ( !rtGlass && !ssrGlass && vkMode && vkTex[0] == 0 ) {
 			// a white-dummy fallback washes the pane out (additive white);
 			// say which cube failed to bridge instead of hiding it
 			static int warned = 0;
@@ -2461,7 +2500,7 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 			pd.stateBits |= GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
 		}
 	}
-	pd.shader = rtGlass ? rtGlassProg : si.program;	// RR5c: environment_rt traces the TLAS in place of the cube
+	pd.shader = rtGlass ? rtGlassProg : ( ssrGlass ? ssrGlassProg : si.program );	// RR5c: RT/SSR glass replace the cube
 	pd.vertexLayout = rhi::VL_DRAWVERT;
 	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
 	r->BindPipeline( pd );
