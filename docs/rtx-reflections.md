@@ -244,6 +244,31 @@ reflective, monster-in-frame scene (the composite + `ssr_rt` are the touched hot
 image should be pixel-indistinguishable before/after. `ssr_temporal` and the `ssr` march are left as-is —
 already near-optimal for their algorithms (the march's `projectToFrag` was folded to ~5 muls earlier).
 
+## #4a — skip the dead SSR march when RT replaces the composite (the real perf lever)
+
+This is *fetch-elimination*, not equivalence shader-math, and the one change that actually moves `r_vkGpuTime`
+in the RT-on preset (Ultra Nightmare). Post-RR7, `ssr_rt` traces every reflective pixel itself and reads **none**
+of the SSR march's output, and the SSR composite is already gated off when `rtWillRender`. Yet the whole
+ssr-res chain — Hi-Z build, scene snapshot, the 64-step **march**, `ssr_temporal`, and the glossy pyramid —
+still ran and was thrown away. That is a full dependent-fetch-bound pass of pure waste under RT.
+
+`RB_RHI_ScreenSpaceReflections` now **hoists `rtWillRender` above the march** (all its inputs — `rtWants`, the
+TLAS/geo device addresses, `ssrW/H`, the invertible view — are known pre-march) and wraps the entire march
+chain **+** composite in `if ( !rtWillRender ) { … }`, following the exact non-reindent guard style the composite
+already used. When RT renders, that block is skipped wholesale; when RT can't run, the full SSR path executes
+exactly as before (safe fallback). Two knock-on details:
+- The RT pass's `u_ssr` slot (unit 0) is **unused** since RR7, but it used to bind `resultRT` — which is now
+  scoped inside the skipped block. It's rebound to the always-valid **normal G-buffer** as a harmless dummy.
+- The `_currentRender` snapshot is **preserved** (refreshed once at the top of the RT path, VK-only): downstream
+  refraction / heat-haze materials sample `_currentRender` and the RHI backend has no guaranteed per-view refresh
+  after SSR (the smoke-dark capture is conditional), so skipping it risked a stale-background regression. It's a
+  single cheap blit vs. the multi-ms march it replaces, so the win stands; skipping it too is a measured follow-up.
+
+Only the VK + `r_rtReflections` + ray-query path is affected; SSR-only presets (Nightmare and below) are byte-
+identical. **Verify:** `r_vkValidation 1` soak in Ultra Nightmare (watch for layout/barrier errors on the RT
+targets), confirm RT reflections still look identical, check refraction/heat-haze surfaces are unchanged, and
+A/B `r_vkGpuTime` with `r_rtReflections 0↔1` — the march/temporal/glossy cost should vanish when RT is on.
+
 ## Risks & mitigations
 
 - **Shading an off-screen hit with no material texture.** MVP shades from `gpuSkinVB` vertex colour ×

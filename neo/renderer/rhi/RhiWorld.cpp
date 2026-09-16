@@ -4723,12 +4723,13 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			common->Printf( "RHI backend: VK SSR (r_ssr) live - G-buffer march + composite\n" );
 		}
 	}
-	// RR7: RT reflections (VK + ray-query) REPLACE the SSR composite rather than riding it. When RT will
-	// render this frame it traces every reflective pixel itself, so SSR's screen-space composite is skipped
-	// (no double-reflection, and none of SSR's fractional-res coverage strobing/striping leaking through the
-	// old miss-gate). SSR's march still runs above to build the shared G-buffer/depth (skipping that compute
-	// + a true r_ssr-off path is the next step). rtWants is the intent; rtWillRender (below) also checks the
-	// TLAS/targets so a misconfigured RT (no TLAS) cleanly falls back to the SSR composite.
+	// RR7/#4a: RT reflections (VK + ray-query) REPLACE the SSR composite rather than riding it, and when RT
+	// will render this frame the entire SSR march chain (Hi-Z, scene snapshot, march, temporal, glossy) is
+	// SKIPPED — post-RR7 ssr_rt traces every reflective pixel itself and reads none of the march's output, so
+	// that whole pass is dead work under RT (no double-reflection, no fractional-res strobing leaking through
+	// the old miss-gate either). The shared G-buffer/depth RT DOES need is built by the normal prepass, not
+	// here. rtWants is the intent; rtWillRender (computed below, before the march) also checks TLAS/targets so
+	// a misconfigured RT (no TLAS) cleanly falls back to the full SSR path.
 	const bool rtWants = vkMode && r_rtReflections.GetBool() && r->SupportsRayQuery();
 	if ( !viewDef->viewEntitys || viewDef->isSubview ) {
 		return;
@@ -4780,6 +4781,25 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int uploadH = globalImages->currentDepthImage->uploadHeight;
 	const float invP00 = ( viewDef->projectionMatrix[0] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[0] : 1.0f;
 	const float invP11 = ( viewDef->projectionMatrix[5] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[5] : 1.0f;
+	const float viewYSign = vkMode ? -1.0f : 1.0f;		// +1 GL (bottom-up) / -1 VK (top-down FB): flips reconstructed Y
+
+	// #4a: decide RT-vs-SSR BEFORE the march so the whole SSR march chain below can be gated off when RT
+	// replaces the composite (post-RR7 ssr_rt reads none of the march's output — it's dead work under RT).
+	// Preconditions mirror the old post-march front-load (TLAS/geo device addrs, RT target, invertible view);
+	// all inputs are available here (ssrW/ssrH set + EnsureSsrTarget already ran). If RT is enabled but can't
+	// run, rtWillRender = false and the SSR path runs exactly as before.
+	const unsigned long long tlasAddr = rtWants ? r->GetTlasAddress() : 0;
+	const unsigned long long geoAddr  = rtWants ? r->GetRtGeoTableAddress() : 0;
+	rhi::ShaderHandle rtProg   = ( rtWants && tlasAddr != 0 && geoAddr != 0 ) ? r->LoadShader( "ssr_rt" ) : 0;
+	rhi::ShaderHandle copyProg = rtProg ? r->LoadShader( "ssr_rt_composite" ) : 0;	// RR6 additive re-composite (+blur)
+	float invView[16];
+	const bool rtWillRender = ( rtProg != 0 && copyProg != 0
+		&& RB_RHI_EnsureRtReflTarget( r, ssrW, ssrH )
+		&& RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) );
+
+	// ==== SSR march chain + composite: SKIPPED wholesale when RT replaces it (#4a). Interior keeps its
+	// indentation to match the existing composite-gate style below. ====
+	if ( !rtWillRender ) {
 
 	// ---- Hi-Z (r_ssrHiZ, docs/ssao-perf-optimization.md): build a min-Z (nearest-surface)
 	// linear-depth pyramid at the SSR march resolution so the march can leap provably-empty
@@ -4872,8 +4892,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// framebuffer). Flips the reconstructed view-space Y and the project-to-screen /
 	// capture-sample rows so the march matches the G-buffer normals (same idea as
 	// ssao.frag's u_windowCoord.z). Inert at +1 on GL.
-	const float viewYSign = vkMode ? -1.0f : 1.0f;
-	parms.windowCoord[2] = viewYSign;
+	parms.windowCoord[2] = viewYSign;		// viewYSign hoisted above the #4a guard
 	// Hi-Z leap LOD for ssr.frag (u_localParam1.w); 0 = feature off -> exact full-res march
 	parms.localParam1[3] = (float)ssrHiZLod;
 
@@ -5034,20 +5053,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
 	}
 
-	// RR7: front-load the RT-reflection preconditions so the SSR composite is skipped EXACTLY when RT
-	// will draw (RT replaces it). If RT is enabled but can't run this frame (no TLAS / target alloc /
-	// non-invertible view), rtWillRender is false and the SSR composite runs as a safe fallback.
-	const unsigned long long tlasAddr = rtWants ? r->GetTlasAddress() : 0;
-	const unsigned long long geoAddr  = rtWants ? r->GetRtGeoTableAddress() : 0;
-	rhi::ShaderHandle rtProg   = ( rtWants && tlasAddr != 0 && geoAddr != 0 ) ? r->LoadShader( "ssr_rt" ) : 0;
-	rhi::ShaderHandle copyProg = rtProg ? r->LoadShader( "ssr_rt_composite" ) : 0;	// RR6 additive re-composite (+RR6b blur)
-	float invView[16];
-	const bool rtWillRender = ( rtProg != 0 && copyProg != 0
-		&& RB_RHI_EnsureRtReflTarget( r, ssrW, ssrH )
-		&& RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) );
-
-	// ---- stage 3: full-res additive composite over the lit scene (skipped when RT takes over) ----
-	if ( !rtWillRender ) {
+	// ---- stage 3: full-res additive composite over the lit scene (inside the #4a !rtWillRender guard) ----
 	rhi::RenderParams compParms;
 	memset( &compParms, 0, sizeof( compParms ) );
 	compParms.mvpMatrix[0] = compParms.mvpMatrix[5] = compParms.mvpMatrix[10] = compParms.mvpMatrix[15] = 1.0f;
@@ -5088,7 +5094,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	RB_RHI_DrawFullscreen( r, compProg, compParms, r->GetRenderTargetImage( glossySrcRT ),
 	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
-	}	// end stage 3 (SSR composite) — skipped when RT takes over
+	}	// end #4a guard — entire SSR march chain + composite skipped when RT replaces it
 
 	// ---- RR2/RR6/RR7: RT reflections on monsters + world (docs/rtx-reflections.md) ----
 	// RT traces EVERY reflective pixel itself (RR7: no SSR miss-gate — the gate made RT inherit SSR's
@@ -5098,6 +5104,12 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// REPLACING the SSR composite above. Preconditions were front-loaded into rtWillRender, so tlasAddr /
 	// geoAddr / rtProg / copyProg / invView are ready.
 	if ( rtWillRender ) {
+		// #4a: the SSR snapshot into _currentRender was skipped with the march above; refresh it here so
+		// downstream refraction / heat-haze materials that sample _currentRender see the same lit-opaque scene
+		// the SSR path left them (rtWillRender implies VK). A single cheap blit — the expensive march /
+		// temporal / glossy passes stay skipped. Captured pre-reflection, exactly as the SSR snapshot was.
+		globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1, viewDef->viewport.y1,
+			fullW, fullH, true );
 		{
 			// RR6c per-frame sub-texel jitter for the temporal UPSCALE (Halton(2,3), in RT-target texels,
 			// scaled by r_rtReflJitter). Shifting the low-res sample grid each frame moves the fractional-
@@ -5146,10 +5158,9 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			rp.localParam1[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtReflBump.GetFloat() );	// RR10: bump-normal warp amount
 
 			// ---- Pass A: trace + shade into the dedicated RT target (replace; cleared to 0 = no
-			// contribution). unit 0 = the ACCUMULATED SSR result (miss gate, via DrawFullscreen),
-			// 1 = depth, 2/3 = G-buffer. Gate on resultRT (the temporally-accumulated reflection the
-			// composite uses), NOT the raw per-frame march (rhiSsrRT): RT only fills where SSR's FINAL
-			// image is genuinely empty (off-screen content), seamless with SSR everywhere else.
+			// contribution). unit 0 (u_ssr) is UNUSED by ssr_rt post-RR7 (no miss-gate); bind the always-
+			// valid normal G-buffer as a harmless dummy so the sampler slot stays valid even when #4a skipped
+			// the SSR march (resultRT is unwritten / out of scope then). 1 = depth, 2/3 = G-buffer.
 			rhi::ClearArgs rtClear;
 			memset( &rtClear, 0, sizeof( rtClear ) );
 			rtClear.color = true;
@@ -5157,7 +5168,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 			RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
 			RB_RHI_BindRTImage( r, 3, matImg );
-			RB_RHI_DrawFullscreen( r, rtProg, rp, r->GetRenderTargetImage( resultRT ) );
+			RB_RHI_DrawFullscreen( r, rtProg, rp, r->GetRenderTargetImage( rhiNormalResultRT ) );
 			r->EndPass();
 
 			rhi::RenderTargetHandle rtResultRT = rhiRtReflRT;
