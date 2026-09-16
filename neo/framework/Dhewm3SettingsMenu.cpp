@@ -3129,6 +3129,31 @@ static void DrawEnhGroup_Reflections()
 			"stops only soften the reflected image — Half is ~4x cheaper and pairs well with "
 			"Temporal Accumulation. Lower this first if reflections cost too much." );
 
+		// Ray-traced reflections (docs/rtx-reflections.md): replace the screen-space reflection (and the
+		// glass cube) with a real trace of the room + monsters, including off-screen geometry. VK +
+		// ray-query hardware; rides this SSR G-buffer, so it sits directly under the SSR quality. The
+		// Ultra Nightmare tier's reflection layer; detailed tuning stays in the Debug tab's group.
+		// Gray out unless the prerequisites are met: VK + ray-query hardware, the SSR G-buffer (r_ssr — the
+		// group master already grays the whole body when it's off), and a built RT scene / TLAS
+		// (r_rtSunShadows). Only Ultra Nightmare turns the RT scene on, so lower tiers read as unavailable.
+		const bool rtIsVulkan = glConfig.rhiBackend && !glConfig.coreProfile;
+		const bool rtSceneOn  = r_rtSunShadows.GetBool();
+		ImGui::BeginDisabled( !rtIsVulkan || !rtSceneOn );
+		bool rtRefl = r_rtReflections.GetBool();
+		if ( ImGui::Checkbox( "Ray-Traced Reflections", &rtRefl ) ) {
+			r_rtReflections.SetBool( rtRefl );
+		}
+		AddTooltip( "Trace the scene to reflect the real room + monsters, including geometry off-screen "
+			"or hidden from the camera that screen-space reflections can't show, and replace the glass "
+			"cube reflections with the same. Needs the Vulkan backend + ray-query (RT) hardware and rides "
+			"the reflection buffer above (keep Reflections on). The Ultra Nightmare tier; detailed tuning "
+			"(temporal, jitter, blur, reflect monsters) is in the Debug tab's Ray-Traced Reflections group." );
+		ImGui::EndDisabled();
+		// explain the gray-out when the RT scene is the only thing missing (VK + Reflections are already on)
+		if ( rtIsVulkan && r_ssr.GetBool() && !rtSceneOn ) {
+			ImGui::TextDisabled( "  (needs Ray-Traced Sun Shadows on to build the RT scene)" );
+		}
+
 		// Temporal accumulation: rotate the march jitter per frame and average the
 		// results (reprojected by camera motion) so the grain resolves.
 		bool ssrTemporal = r_ssrTemporal.GetBool();
@@ -3756,14 +3781,11 @@ static void DrawDbgGroup_RTReflections()
 	}
 	ImGui::BeginDisabled( !isVulkan );
 
-	bool rtRefl = r_rtReflections.GetBool();
-	if ( ImGui::Checkbox( "Enable RT Reflections (r_rtReflections)", &rtRefl ) ) {
-		r_rtReflections.SetBool( rtRefl );
+	// The on/off switch now lives in the Graphics tab (Reflections, right under the SSR Resolution slider);
+	// this group is the RT-reflection tuning. Point there when it's off so the knobs below aren't a dead end.
+	if ( !r_rtReflections.GetBool() ) {
+		ImGui::TextDisabled( "RT Reflections are off - enable \"Ray-Traced Reflections\" in the Graphics tab (Reflections)." );
 	}
-	AddTooltip( "r_rtReflections: trace the scene acceleration structure to reflect the room + monsters, "
-		"including geometry off-screen or occluded from the camera that screen-space SSR can't show. When "
-		"on it replaces the SSR composite on reflective surfaces. Needs SSR on (for the G-buffer) and an RT "
-		"scene (Ray-Traced Sun Shadows) for the acceleration structure." );
 
 	// prerequisite hints (only meaningful once RT reflections are switched on)
 	if ( r_rtReflections.GetBool() ) {
