@@ -5104,12 +5104,10 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// REPLACING the SSR composite above. Preconditions were front-loaded into rtWillRender, so tlasAddr /
 	// geoAddr / rtProg / copyProg / invView are ready.
 	if ( rtWillRender ) {
-		// #4a: the SSR snapshot into _currentRender was skipped with the march above; refresh it here so
-		// downstream refraction / heat-haze materials that sample _currentRender see the same lit-opaque scene
-		// the SSR path left them (rtWillRender implies VK). A single cheap blit — the expensive march /
-		// temporal / glossy passes stay skipped. Captured pre-reflection, exactly as the SSR snapshot was.
-		globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1, viewDef->viewport.y1,
-			fullW, fullH, true );
+		// item 6: the _currentRender snapshot #4a kept here (a safety net for downstream refraction /
+		// heat-haze, which sample _currentRender) is dropped — no pass in this function reads it under RT,
+		// and those materials re-capture _currentRender on demand. Saves the full-res blit. If a heat-haze /
+		// refraction surface ever reads a stale through-glass scene under RT, restore the CopyFramebuffer.
 		{
 			// RR6c per-frame sub-texel jitter for the temporal UPSCALE (Halton(2,3), in RT-target texels,
 			// scaled by r_rtReflJitter). Shifting the low-res sample grid each frame moves the fractional-
