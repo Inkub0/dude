@@ -277,7 +277,8 @@ private:
 	// NRD library — VK pipelines from its embedded SPIR-V, pooled textures, CB ring.
 	bool			NrdCreate( int w, int h );					// build all VK objects for the denoiser lineup at this resolution
 	void			NrdDestroy( bool deviceIdle );				// tear everything down (resize, vid_restart, shutdown)
-	void			NrdSelfTest();								// r_nrdTest: create -> enumerate dispatches -> destroy, PASS/FAIL
+	bool			NrdRecordDispatches( VkCommandBuffer cb, const nrd::Identifier *ids, uint32_t idCount );	// record a frame's denoiser dispatches
+	void			NrdSelfTest();								// r_nrdTest: create -> denoise a synthetic noisy signal on the GPU -> assert -> destroy, PASS/FAIL
 	void			Mrt3SelfTest();								// r_mrt3Test: create/destroy a 3-MRT RG16F velocity gbuffer target
 	void			RayQuerySelfTest();							// r_rayQueryTest: BLAS/TLAS build + compute ray trace vs CPU reference (R2 foundation)
 
@@ -948,6 +949,10 @@ private:
 	uint32_t					nrdCbStride = 0;	// constantBufferMaxDataSize, UBO-aligned
 	uint32_t					nrdCbSets = 0;		// ring capacity (= setsMaxNum)
 	int							nrdW = 0, nrdH = 0;
+	bool						nrdPoolsReady = false;	// pool images transitioned to GENERAL
+	// user (non-pool) resources for NrdRecordDispatches, indexed by nrd::ResourceType —
+	// the caller points these at its IN_*/OUT_* images (GENERAL layout) before recording
+	VkImageView					nrdUserViews[(uint32_t)nrd::ResourceType::MAX_NUM] = {};
 	bool						haveComputeDerivatives = false;	// VK_KHR_compute_shader_derivatives (quads)
 
 	FfxFsr2Context *			fsr2Ctx = NULL;
@@ -1605,6 +1610,11 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	} else {
 		common->Warning( "VK: device lacks shaderClipDistance - the depth prepass shader may fail" );
 	}
+
+	// H2b: NRD's compute shaders declare the Int16 capability (16-bit arithmetic in the
+	// packing helpers); enable when supported so their shader modules validate. Universal
+	// on the RT-capable hardware NRD is gated to.
+	enabled.shaderInt16 = supported.shaderInt16;
 
 	// GPU-offload hardening (docs/gpu-offload-plan.md): with robustBufferAccess an out-of-bounds
 	// vertex/index/storage fetch returns 0 / is clamped instead of faulting the device. The compute
@@ -6264,6 +6274,8 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 
 	nrdW = w;
 	nrdH = h;
+	nrdPoolsReady = false;		// fresh images: first record transitions them to GENERAL
+	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
 	return true;
 }
 
@@ -6312,22 +6324,220 @@ void VulkanBackend::NrdDestroy( bool deviceIdle ) {
 		nrdInstance = NULL;
 	}
 	nrdW = nrdH = 0;
+	nrdPoolsReady = false;
+	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
+}
+
+/*
+====================
+VulkanBackend::NrdRecordDispatches
+
+Records one frame of denoiser work into the given command buffer: queries NRD for the
+ordered dispatch list of the requested denoisers and, per dispatch, copies its constants
+into the CB ring, allocates + writes the two descriptor sets (resources / CB+samplers),
+binds the pipeline and vkCmdDispatches, with a compute->compute memory barrier after each
+so the next dispatch sees the writes. Pool textures live in GENERAL layout for their whole
+life (transitioned here on first use after a (re)create); user IN_ / OUT_ images must
+already be in GENERAL and registered in nrdUserViews. Resets the descriptor pool at entry,
+so at most one recorded frame may be in flight — fine for the self-test and for the
+in-frame single-consumer use planned for H3/H4 (revisit with a per-frame pool ring if a
+denoiser ever records twice per frame).
+====================
+*/
+bool VulkanBackend::NrdRecordDispatches( VkCommandBuffer cb, const nrd::Identifier *ids, uint32_t idCount ) {
+	if ( nrdInstance == NULL ) {
+		return false;
+	}
+	const nrd::InstanceDesc &inst = *nrd::GetInstanceDesc( *nrdInstance );
+	const nrd::LibraryDesc &lib = *nrd::GetLibraryDesc();
+	const uint32_t cbSpace  = inst.constantBufferAndSamplersSpaceIndex;
+	const uint32_t resSpace = inst.resourcesSpaceIndex;
+
+	const nrd::DispatchDesc *dispatches = NULL;
+	uint32_t dispatchCount = 0;
+	if ( nrd::GetComputeDispatches( *nrdInstance, ids, idCount, dispatches, dispatchCount ) != nrd::Result::SUCCESS ) {
+		common->Warning( "NRD: GetComputeDispatches failed" );
+		return false;
+	}
+	if ( dispatchCount == 0 ) {
+		return true;
+	}
+	if ( dispatchCount > nrdCbSets ) {
+		common->Warning( "NRD: %u dispatches exceed the %u-slot CB/descriptor ring", dispatchCount, nrdCbSets );
+		return false;
+	}
+
+	// first record after a (re)create: move every pool image to GENERAL for good
+	if ( !nrdPoolsReady ) {
+		std::vector<VkImageMemoryBarrier> barriers;
+		auto add = [&]( std::vector<NrdTexture> &pool ) {
+			for ( size_t i = 0; i < pool.size(); i++ ) {
+				VkImageMemoryBarrier b = {};
+				b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+				b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+				b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+				b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				b.image = pool[i].image;
+				b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+				b.subresourceRange.levelCount = 1;
+				b.subresourceRange.layerCount = 1;
+				b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+				barriers.push_back( b );
+			}
+		};
+		add( nrdPermTex );
+		add( nrdTransTex );
+		if ( !barriers.empty() ) {
+			vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				0, 0, NULL, 0, NULL, (uint32_t)barriers.size(), barriers.data() );
+		}
+		nrdPoolsReady = true;
+	}
+
+	// one recorded frame at a time (see header comment): reclaim all sets in one go
+	vkResetDescriptorPool( device, nrdDescPool, 0 );
+
+	uint32_t cbCursor = 0;
+	for ( uint32_t d = 0; d < dispatchCount; d++ ) {
+		const nrd::DispatchDesc &dd = dispatches[d];
+		const NrdPipe &pipe = nrdPipes[dd.pipelineIndex];
+
+		// constants into this dispatch's ring slice
+		uint32_t cbOffset = 0;
+		if ( dd.constantBufferDataSize > 0 && nrdCbMapped != NULL ) {
+			cbOffset = cbCursor * nrdCbStride;
+			memcpy( (byte *)nrdCbMapped + cbOffset, dd.constantBufferData, dd.constantBufferDataSize );
+			cbCursor++;
+		}
+
+		// the two sets for this dispatch
+		VkDescriptorSetLayout layouts[2];
+		layouts[0] = pipe.setLayout;
+		layouts[1] = nrdCbSetLayout;
+		VkDescriptorSet sets[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+		VkDescriptorSetAllocateInfo ai = {};
+		ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		ai.descriptorPool = nrdDescPool;
+		ai.descriptorSetCount = 2;
+		ai.pSetLayouts = layouts;
+		if ( !vkCheck( vkAllocateDescriptorSets( device, &ai, sets ), "vkAllocateDescriptorSets(NRD)" ) ) {
+			return false;
+		}
+
+		// resources, in range order (textures then storage as declared); each range's
+		// bindings restart at its own register offset
+		std::vector<VkWriteDescriptorSet> writes;
+		std::vector<VkDescriptorImageInfo> imageInfos;
+		imageInfos.reserve( dd.resourcesNum );
+		writes.reserve( dd.resourcesNum + 1 );
+		uint32_t texIdx = 0, storIdx = 0;
+		for ( uint32_t r = 0; r < dd.resourcesNum; r++ ) {
+			const nrd::ResourceDesc &res = dd.resources[r];
+			VkImageView view = VK_NULL_HANDLE;
+			if ( res.type == nrd::ResourceType::PERMANENT_POOL ) {
+				view = nrdPermTex[res.indexInPool].view;
+			} else if ( res.type == nrd::ResourceType::TRANSIENT_POOL ) {
+				view = nrdTransTex[res.indexInPool].view;
+			} else {
+				view = nrdUserViews[(uint32_t)res.type];
+			}
+			if ( view == VK_NULL_HANDLE ) {
+				common->Warning( "NRD: no image registered for resource type %u (dispatch '%s')",
+					(uint32_t)res.type, dd.name ? dd.name : "?" );
+				return false;
+			}
+			const bool storage = res.descriptorType == nrd::DescriptorType::STORAGE_TEXTURE;
+			VkDescriptorImageInfo ii = {};
+			ii.imageView = view;
+			ii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+			imageInfos.push_back( ii );
+			VkWriteDescriptorSet wr = {};
+			wr.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			wr.dstSet = sets[0];
+			wr.dstBinding = ( storage ? lib.spirvBindingOffsets.storageTextureAndBufferOffset + storIdx++
+			                          : lib.spirvBindingOffsets.textureOffset + texIdx++ )
+				+ inst.resourcesBaseRegisterIndex;
+			wr.descriptorCount = 1;
+			wr.descriptorType = storage ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+			wr.pImageInfo = &imageInfos.back();
+			writes.push_back( wr );
+		}
+		VkDescriptorBufferInfo bi = {};
+		if ( pipe.hasConstantData && nrdCb != VK_NULL_HANDLE ) {
+			bi.buffer = nrdCb;
+			bi.offset = cbOffset;
+			bi.range = nrdCbStride;
+			VkWriteDescriptorSet wr = {};
+			wr.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			wr.dstSet = sets[1];
+			wr.dstBinding = lib.spirvBindingOffsets.constantBufferOffset + inst.constantBufferRegisterIndex;
+			wr.descriptorCount = 1;
+			wr.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			wr.pBufferInfo = &bi;
+			writes.push_back( wr );
+		}
+		vkUpdateDescriptorSets( device, (uint32_t)writes.size(), writes.data(), 0, NULL );
+
+		VkDescriptorSet bound[2];
+		bound[resSpace] = sets[0];
+		bound[cbSpace]  = sets[1];
+		vkCmdBindPipeline( cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe.pipeline );
+		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe.layout, 0, 2, bound, 0, NULL );
+		vkCmdDispatch( cb, dd.gridWidth, dd.gridHeight, 1 );
+
+		// the next dispatch reads what this one wrote (simple + correct; batch later if
+		// the denoiser ever shows up in r_vkGpuTime)
+		VkMemoryBarrier mb = {};
+		mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			0, 1, &mb, 0, NULL, 0, NULL );
+	}
+	return true;
+}
+
+// float16 decode for the validator readback (handles zero/denorm/inf/nan)
+static float NrdHalfToFloat( uint16_t h ) {
+	const uint32_t sign = ( h >> 15 ) & 1;
+	const uint32_t exp  = ( h >> 10 ) & 0x1F;
+	const uint32_t man  = h & 0x3FF;
+	uint32_t bits;
+	if ( exp == 0 ) {
+		if ( man == 0 ) {
+			bits = sign << 31;								// +-0
+		} else {
+			// denormal: normalize
+			uint32_t e = 127 - 15 + 1, m = man;
+			while ( ( m & 0x400 ) == 0 ) { m <<= 1; e--; }
+			bits = ( sign << 31 ) | ( e << 23 ) | ( ( m & 0x3FF ) << 13 );
+		}
+	} else if ( exp == 31 ) {
+		bits = ( sign << 31 ) | 0x7F800000 | ( man << 13 );	// inf / nan
+	} else {
+		bits = ( sign << 31 ) | ( ( exp - 15 + 127 ) << 23 ) | ( man << 13 );
+	}
+	float f;
+	memcpy( &f, &bits, sizeof( f ) );
+	return f;
 }
 
 /*
 ====================
 VulkanBackend::NrdSelfTest
 
-r_nrdTest: bring-up validation for the H2b translation layer. Creates the full NRD context
-at the current resolution (every compute pipeline built from the embedded SPIR-V on this
-GPU, pools allocated), then exercises a frame's CPU side: benign CommonSettings + default
-denoiser settings, GetComputeDispatches for both denoisers, and prints what a real frame
-would record. No GPU submission (that is H2d's synthetic-signal validator); tears down and
-prints PASS/FAIL. Mirrors r_fsr2Test.
+r_nrdTest (H2b + H2d, docs/rtx-nrd.md): full validation of the NRD integration. Builds the
+context at a small test resolution, then denoises a SYNTHETIC noisy signal end to end on
+the GPU: a flat camera-facing plane (constant viewZ + constant packed normal), zero motion,
+and a per-pixel Bernoulli 0/1 hit-distance signal re-rolled every frame (mean 0.5,
+variance 0.25). Runs N frames of REBLUR_DIFFUSE_OCCLUSION through NrdRecordDispatches (one-shot
+submit + wait per frame, dev-only), reads the output back and asserts: no NaN/Inf, the
+spatial variance collapsed (temporal+spatial accumulation working), and the mean stayed
+near the signal's. Prints PASS/FAIL; tears everything down. Mirrors r_fsr2Test in spirit.
 ====================
 */
 void VulkanBackend::NrdSelfTest() {
-	if ( device == VK_NULL_HANDLE ) {
+	if ( device == VK_NULL_HANDLE || uploadCb == VK_NULL_HANDLE ) {
 		common->Printf( "NRD self-test: unavailable (no VK device)\n" );
 		return;
 	}
@@ -6336,61 +6546,288 @@ void VulkanBackend::NrdSelfTest() {
 		lib.versionMajor, lib.versionMinor, lib.versionBuild,
 		haveComputeDerivatives ? "available" : "MISSING" );
 
-	const int w = glConfig.vidWidth  > 0 ? glConfig.vidWidth  : 1920;
-	const int h = glConfig.vidHeight > 0 ? glConfig.vidHeight : 1080;
-	if ( !NrdCreate( w, h ) ) {
+	const int W = 256, H = 256;			// small fixed size: fast, readback-friendly
+	const int FRAMES = 16;
+	if ( !NrdCreate( W, H ) ) {
 		common->Printf( "NRD self-test: FAIL - NrdCreate (see warnings above)\n" );
 		return;
 	}
-
 	const nrd::InstanceDesc &inst = *nrd::GetInstanceDesc( *nrdInstance );
+	common->Printf( "NRD self-test: context %ux%u - %u pipelines, %u+%u pool textures, CB %u B x %u\n",
+		W, H, (uint32_t)nrdPipes.size(), (uint32_t)nrdPermTex.size(), (uint32_t)nrdTransTex.size(),
+		nrdCbStride, nrdCbSets );
 
-	// benign frame settings: identity camera, no motion, no jitter
+	// ---- synthetic user resources (all kept in GENERAL layout for their whole life) ----
+	struct TestImage {
+		VkImage image = VK_NULL_HANDLE;
+		VmaAllocation alloc = VK_NULL_HANDLE;
+		VkImageView view = VK_NULL_HANDLE;
+	};
+	TestImage imgMv, imgNormal, imgViewZ, imgNoise, imgOut;
+	VkBuffer stageBuf = VK_NULL_HANDLE, readBuf = VK_NULL_HANDLE;
+	VmaAllocation stageAlloc = VK_NULL_HANDLE, readAlloc = VK_NULL_HANDLE;
+	void *stageMap = NULL, *readMap = NULL;
+	bool ok = true;
+
+	auto makeImage = [&]( TestImage &t, VkFormat fmt ) {
+		if ( !ok ) { return; }
+		VkImageCreateInfo ici = {};
+		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		ici.imageType = VK_IMAGE_TYPE_2D;
+		ici.format = fmt;
+		ici.extent = { (uint32_t)W, (uint32_t)H, 1 };
+		ici.mipLevels = 1;
+		ici.arrayLayers = 1;
+		ici.samples = VK_SAMPLE_COUNT_1_BIT;
+		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+		ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT
+			| VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		VmaAllocationCreateInfo vci = {};
+		vci.usage = VMA_MEMORY_USAGE_AUTO;
+		if ( !vkCheck( vmaCreateImage( vma, &ici, &vci, &t.image, &t.alloc, NULL ), "vmaCreateImage(NRD test)" ) ) {
+			ok = false;
+			return;
+		}
+		VkImageViewCreateInfo vwi = {};
+		vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		vwi.image = t.image;
+		vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		vwi.format = fmt;
+		vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		vwi.subresourceRange.levelCount = 1;
+		vwi.subresourceRange.layerCount = 1;
+		if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &t.view ), "vkCreateImageView(NRD test)" ) ) {
+			ok = false;
+		}
+	};
+	makeImage( imgMv,     VK_FORMAT_R16G16B16A16_SFLOAT );		// zero motion
+	makeImage( imgNormal, VK_FORMAT_A2B10G10R10_UNORM_PACK32 );	// flat camera-facing plane
+	makeImage( imgViewZ,  VK_FORMAT_R32_SFLOAT );				// constant depth
+	makeImage( imgNoise,  VK_FORMAT_R16_SFLOAT );				// the noisy signal
+	makeImage( imgOut,    VK_FORMAT_R16_SFLOAT );				// denoised result
+
+	const VkDeviceSize signalBytes = (VkDeviceSize)W * H * 2;	// R16F
+	auto makeBuffer = [&]( VkBuffer &buf, VmaAllocation &alloc, void **map, VkBufferUsageFlags usage ) {
+		if ( !ok ) { return; }
+		VkBufferCreateInfo bci = {};
+		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bci.size = signalBytes;
+		bci.usage = usage;
+		VmaAllocationCreateInfo aci = {};
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		VmaAllocationInfo info = {};
+		if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &buf, &alloc, &info ), "vmaCreateBuffer(NRD test)" ) ) {
+			ok = false;
+			return;
+		}
+		*map = info.pMappedData;
+	};
+	makeBuffer( stageBuf, stageAlloc, &stageMap, VK_BUFFER_USAGE_TRANSFER_SRC_BIT );
+	makeBuffer( readBuf,  readAlloc,  &readMap,  VK_BUFFER_USAGE_TRANSFER_DST_BIT );
+
+	auto cleanup = [&]() {
+		vkQueueWaitIdle( gfxQueue );
+		TestImage *imgs[] = { &imgMv, &imgNormal, &imgViewZ, &imgNoise, &imgOut };
+		for ( int i = 0; i < 5; i++ ) {
+			if ( imgs[i]->view )  { vkDestroyImageView( device, imgs[i]->view, NULL ); }
+			if ( imgs[i]->image ) { vmaDestroyImage( vma, imgs[i]->image, imgs[i]->alloc ); }
+		}
+		if ( stageBuf ) { vmaDestroyBuffer( vma, stageBuf, stageAlloc ); }
+		if ( readBuf )  { vmaDestroyBuffer( vma, readBuf, readAlloc ); }
+		NrdDestroy( false );
+	};
+	if ( !ok ) {
+		common->Printf( "NRD self-test: FAIL - test resource creation\n" );
+		cleanup();
+		return;
+	}
+
+	// register the user resources with the recorder
+	nrdUserViews[(uint32_t)nrd::ResourceType::IN_MV]               = imgMv.view;
+	nrdUserViews[(uint32_t)nrd::ResourceType::IN_NORMAL_ROUGHNESS] = imgNormal.view;
+	nrdUserViews[(uint32_t)nrd::ResourceType::IN_VIEWZ]            = imgViewZ.view;
+	nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_HITDIST]     = imgNoise.view;
+	nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_HITDIST]    = imgOut.view;
+
+	// one-shot init: user images -> GENERAL, then constant clears for the static planes
+	{
+		vkQueueWaitIdle( gfxQueue );
+		vkResetCommandBuffer( uploadCb, 0 );
+		VkCommandBufferBeginInfo bbi = {};
+		bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		vkBeginCommandBuffer( uploadCb, &bbi );
+		VkImageMemoryBarrier barriers[5] = {};
+		VkImage images[5] = { imgMv.image, imgNormal.image, imgViewZ.image, imgNoise.image, imgOut.image };
+		for ( int i = 0; i < 5; i++ ) {
+			barriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			barriers[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			barriers[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+			barriers[i].srcQueueFamilyIndex = barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barriers[i].image = images[i];
+			barriers[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			barriers[i].subresourceRange.levelCount = 1;
+			barriers[i].subresourceRange.layerCount = 1;
+			barriers[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		}
+		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			0, 0, NULL, 0, NULL, 5, barriers );
+		VkImageSubresourceRange range = {};
+		range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		range.levelCount = 1;
+		range.layerCount = 1;
+		VkClearColorValue cv = {};
+		vkCmdClearColorImage( uploadCb, imgMv.image, VK_IMAGE_LAYOUT_GENERAL, &cv, 1, &range );	// no motion
+		// flat camera-facing plane: oct(0,0,1) packs to (0.5, 0.5); roughness 0.5; material 0
+		cv.float32[0] = 0.5f; cv.float32[1] = 0.5f; cv.float32[2] = 0.5f; cv.float32[3] = 0.0f;
+		vkCmdClearColorImage( uploadCb, imgNormal.image, VK_IMAGE_LAYOUT_GENERAL, &cv, 1, &range );
+		VkClearColorValue cz = {};
+		cz.float32[0] = 100.0f;																	// constant view depth
+		vkCmdClearColorImage( uploadCb, imgViewZ.image, VK_IMAGE_LAYOUT_GENERAL, &cz, 1, &range );
+		VkClearColorValue co = {};
+		vkCmdClearColorImage( uploadCb, imgOut.image, VK_IMAGE_LAYOUT_GENERAL, &co, 1, &range );
+		VkMemoryBarrier mb = {};
+		mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			0, 1, &mb, 0, NULL, 0, NULL );
+		vkEndCommandBuffer( uploadCb );
+		VkSubmitInfo si = {};
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &uploadCb;
+		vkResetFences( device, 1, &uploadFence );
+		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	}
+
+	// camera for a plausible frame: RH infinite-far perspective (fov 90, near 0.1),
+	// clip depth = z/w as NRD expects; identity world-to-view; zero motion/jitter
 	nrd::CommonSettings cs = {};
+	cs.viewToClipMatrix[0] = 1.0f;
+	cs.viewToClipMatrix[5] = 1.0f;
+	cs.viewToClipMatrix[11] = -1.0f;
+	cs.viewToClipMatrix[14] = 0.1f;
+	memcpy( cs.viewToClipMatrixPrev, cs.viewToClipMatrix, sizeof( cs.viewToClipMatrix ) );
 	for ( int i = 0; i < 4; i++ ) {
-		cs.viewToClipMatrix[i * 5] = cs.viewToClipMatrixPrev[i * 5] = 1.0f;
 		cs.worldToViewMatrix[i * 5] = cs.worldToViewMatrixPrev[i * 5] = 1.0f;
 	}
-	cs.resourceSize[0] = cs.resourceSizePrev[0] = cs.rectSize[0] = cs.rectSizePrev[0] = (uint16_t)w;
-	cs.resourceSize[1] = cs.resourceSizePrev[1] = cs.rectSize[1] = cs.rectSizePrev[1] = (uint16_t)h;
-	cs.frameIndex = 0;
-	cs.accumulationMode = nrd::AccumulationMode::CLEAR_AND_RESTART;
-	if ( nrd::SetCommonSettings( *nrdInstance, cs ) != nrd::Result::SUCCESS ) {
-		common->Printf( "NRD self-test: FAIL - SetCommonSettings rejected\n" );
-		NrdDestroy( false );
-		return;
-	}
+	cs.resourceSize[0] = cs.resourceSizePrev[0] = cs.rectSize[0] = cs.rectSizePrev[0] = (uint16_t)W;
+	cs.resourceSize[1] = cs.resourceSizePrev[1] = cs.rectSize[1] = cs.rectSizePrev[1] = (uint16_t)H;
+
 	nrd::ReblurSettings reblur = {};
-	nrd::SigmaSettings sigma = {};
-	if ( nrd::SetDenoiserSettings( *nrdInstance, NRD_ID_REBLUR_AO, &reblur ) != nrd::Result::SUCCESS
-			|| nrd::SetDenoiserSettings( *nrdInstance, NRD_ID_SIGMA_SHADOW, &sigma ) != nrd::Result::SUCCESS ) {
+	if ( nrd::SetDenoiserSettings( *nrdInstance, NRD_ID_REBLUR_AO, &reblur ) != nrd::Result::SUCCESS ) {
 		common->Printf( "NRD self-test: FAIL - SetDenoiserSettings rejected\n" );
-		NrdDestroy( false );
+		cleanup();
 		return;
 	}
 
-	const nrd::Identifier ids[] = { NRD_ID_REBLUR_AO, NRD_ID_SIGMA_SHADOW };
-	const nrd::DispatchDesc *dispatches = NULL;
-	uint32_t dispatchCount = 0;
-	if ( nrd::GetComputeDispatches( *nrdInstance, ids, 2, dispatches, dispatchCount ) != nrd::Result::SUCCESS ) {
-		common->Printf( "NRD self-test: FAIL - GetComputeDispatches rejected\n" );
-		NrdDestroy( false );
-		return;
-	}
-	uint32_t cbBytes = 0, maxResources = 0;
-	for ( uint32_t i = 0; i < dispatchCount; i++ ) {
-		cbBytes += dispatches[i].constantBufferDataSize;
-		if ( dispatches[i].resourcesNum > maxResources ) {
-			maxResources = dispatches[i].resourcesNum;
+	// ---- the frame loop: fresh Bernoulli noise every frame -> denoise -> (last frame) read back ----
+	uint32_t rng = 0x12345678;
+	const nrd::Identifier reblurId = NRD_ID_REBLUR_AO;
+	for ( int f = 0; f < FRAMES && ok; f++ ) {
+		// re-roll the noise: independent 0/1 realizations, mean 0.5, variance 0.25
+		uint16_t *noise = (uint16_t *)stageMap;
+		for ( int i = 0; i < W * H; i++ ) {
+			rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+			noise[i] = ( rng & 1 ) ? 0x3C00 : 0x0000;		// 1.0h : 0.0h
 		}
+
+		cs.frameIndex = (uint32_t)f;
+		cs.accumulationMode = ( f == 0 ) ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
+		if ( nrd::SetCommonSettings( *nrdInstance, cs ) != nrd::Result::SUCCESS ) {
+			common->Printf( "NRD self-test: FAIL - SetCommonSettings rejected (frame %d)\n", f );
+			ok = false;
+			break;
+		}
+
+		vkQueueWaitIdle( gfxQueue );
+		vkResetCommandBuffer( uploadCb, 0 );
+		VkCommandBufferBeginInfo bbi = {};
+		bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		vkBeginCommandBuffer( uploadCb, &bbi );
+
+		// upload this frame's noise into IN_DIFF_HITDIST
+		VkBufferImageCopy copy = {};
+		copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		copy.imageSubresource.layerCount = 1;
+		copy.imageExtent = { (uint32_t)W, (uint32_t)H, 1 };
+		vkCmdCopyBufferToImage( uploadCb, stageBuf, imgNoise.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy );
+		VkMemoryBarrier mb = {};
+		mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			0, 1, &mb, 0, NULL, 0, NULL );
+
+		if ( !NrdRecordDispatches( uploadCb, &reblurId, 1 ) ) {
+			common->Printf( "NRD self-test: FAIL - NrdRecordDispatches (frame %d)\n", f );
+			vkEndCommandBuffer( uploadCb );
+			ok = false;
+			break;
+		}
+
+		if ( f == FRAMES - 1 ) {
+			// read the denoised output back
+			mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+			vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+				0, 1, &mb, 0, NULL, 0, NULL );
+			vkCmdCopyImageToBuffer( uploadCb, imgOut.image, VK_IMAGE_LAYOUT_GENERAL, readBuf, 1, &copy );
+			mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+			vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+				0, 1, &mb, 0, NULL, 0, NULL );
+		}
+
+		vkEndCommandBuffer( uploadCb );
+		VkSubmitInfo si = {};
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &uploadCb;
+		vkResetFences( device, 1, &uploadFence );
+		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
+		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
 	}
 
-	common->Printf( "NRD self-test: PASS - %ux%u: %u pipelines, %u permanent + %u transient pool textures, "
-		"%u samplers, CB stride %u B x %u sets; frame = %u dispatches (%u CB bytes, max %u resources/dispatch)\n",
-		w, h, (uint32_t)nrdPipes.size(), (uint32_t)nrdPermTex.size(), (uint32_t)nrdTransTex.size(),
-		nrdSamplerCount, nrdCbStride, nrdCbSets, dispatchCount, cbBytes, maxResources );
+	if ( !ok ) {
+		cleanup();
+		return;
+	}
 
-	NrdDestroy( false );
+	// ---- asserts: no NaN/Inf, variance collapsed vs the 0.25 input, mean preserved ----
+	const uint16_t *out = (const uint16_t *)readMap;
+	double sum = 0.0, sumSq = 0.0;
+	int nanCount = 0;
+	const int N = W * H;
+	for ( int i = 0; i < N; i++ ) {
+		const float v = NrdHalfToFloat( out[i] );
+		if ( v != v || v > 1e30f || v < -1e30f ) {
+			nanCount++;
+			continue;
+		}
+		sum += v;
+		sumSq += (double)v * v;
+	}
+	const double mean = sum / N;
+	const double variance = sumSq / N - mean * mean;
+
+	const bool passNan  = nanCount == 0;
+	const bool passVar  = variance < 0.02;					// input variance 0.25 -> >12x reduction
+	const bool passMean = mean > 0.3 && mean < 0.7;			// signal mean 0.5 preserved
+	if ( passNan && passVar && passMean ) {
+		common->Printf( "NRD self-test: PASS - %d frames denoised: mean %.3f (signal 0.5), variance %.5f (input 0.25), no NaN\n",
+			FRAMES, mean, variance );
+	} else {
+		common->Printf( "NRD self-test: FAIL - mean %.3f (want 0.3..0.7), variance %.5f (want < 0.02), %d NaN/Inf texels\n",
+			mean, variance, nanCount );
+	}
+
+	cleanup();
 }
 
 /*

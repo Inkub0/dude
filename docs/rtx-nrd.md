@@ -27,8 +27,21 @@ substrate the later phases render into, proven by a synthetic-signal validator.
   device creation (`haveComputeDerivatives`); NrdCreate refuses without it. GPU dispatch
   RECORDING is deliberately not in H2b — it lands with H2d's validator, which is what can
   prove it.
-- **H2c — guide-input production.** World-normal/roughness, linear viewZ, MV packing.
-- **H2d — validator.** `r_nrdTest`: synthetic noisy signal → denoise → variance assert.
+- **H2c — guide-input production (REMAINING — lands with the first consumer, H3/H4).**
+  World-normal/roughness prep pass, linear viewZ, MV wiring (see the table below).
+- **H2d — dispatch recording + validator (DONE, this commit).** `NrdRecordDispatches`
+  records a frame of denoiser work (CB ring slices, two descriptor sets per dispatch,
+  pipeline + vkCmdDispatch, compute→compute barrier after each; pool images transitioned
+  to GENERAL on first use; descriptor pool reset per recorded frame — single-consumer
+  model, revisit if a denoiser ever records twice per frame). `r_nrdTest` now validates
+  END TO END on the GPU: a 256×256 flat-plane scene (constant viewZ 100, packed flat
+  normal, zero MV) with a per-pixel Bernoulli 0/1 hit-distance signal re-rolled each of 16
+  frames (mean 0.5, variance 0.25) denoised by REBLUR_DIFFUSE_OCCLUSION →
+  **PASS on the 3080 Ti: mean 0.498, variance 0.00027 (~900× reduction), zero NaN,
+  validation-layer clean.** Gotcha found: NRD shaders declare the SPIR-V `Int16`
+  capability → `VkPhysicalDeviceFeatures::shaderInt16` must be enabled (it is now);
+  without it every NRD shader module fails validation and the cascade corrupts
+  validation's cb state tracking into misleading downstream errors.
 
 ## How NRD integrates (the renderer-agnostic contract)
 
