@@ -230,7 +230,7 @@ public:
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt );
 	virtual void				SetFrameTarget( RenderTargetHandle rt );
 	virtual void				BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear );
-	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt );
+	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt, bool wantVel );
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt );
 	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle rt );
 	virtual ImageHandle			GetRenderTargetImage3( RenderTargetHandle rt );
@@ -736,7 +736,15 @@ private:
 	VkImageView		mergeMatView = VK_NULL_HANDLE;
 	ImageHandle		mergeMatSampleImage = 0;			// GetRenderTargetImage2 of the merged handle
 	bool			mergeNormalMrt = false;				// the merged image/pass/fb currently carry the MRT
-	bool			EnsureMergeNormal( int w, int h, bool wantMrt );
+	// optional 3rd color attachment (RG16F per-object velocity, R1/A2) so the merge also
+	// serves motion vectors / FSR2 — this is what lets Ultra/Nightmare fold the standalone
+	// normal pass away instead of being forced onto it by velWants
+	VkImage			mergeVelImage = VK_NULL_HANDLE;
+	VmaAllocation	mergeVelAlloc = NULL;
+	VkImageView		mergeVelView = VK_NULL_HANDLE;
+	ImageHandle		mergeVelSampleImage = 0;			// GetRenderTargetImage3 of the merged handle
+	bool			mergeNormalVel = false;				// the merged image/pass/fb currently carry velocity
+	bool			EnsureMergeNormal( int w, int h, bool wantMrt, bool wantVel );
 	void			DestroyMergeNormal();
 	ImageHandle		RegisterMergeSampleImage( VkImage img, VkImageView view, int w, int h );
 
@@ -7175,11 +7183,29 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 		return false;
 	}
 	RenderTarget *scene = LookupTarget( args.sceneRT );
-	RenderTarget *vel = LookupTarget( args.velocityRT );
+	// velocity source: the standalone 3-MRT target's attachment 2, or the merged prepass's
+	// velocity attachment when the merge carried it this view (same RG16F contract; the
+	// merged handle is a pseudo-handle with no targetTable entry, so LookupTarget can't see it)
+	VkImage velImage = VK_NULL_HANDLE;
+	VkImageView velView = VK_NULL_HANDLE;
+	int velW = 0, velH = 0;
+	if ( args.velocityRT != 0 && args.velocityRT == mergeNormalTarget && mergeNormalVel ) {
+		velImage = mergeVelImage;
+		velView = mergeVelView;
+		velW = mergeNormalW;
+		velH = mergeNormalH;
+	} else {
+		RenderTarget *vel = LookupTarget( args.velocityRT );
+		if ( vel != NULL && vel->colorCount >= 3 && vel->colorFormat[2] == VK_FORMAT_R16G16_SFLOAT ) {
+			velImage = vel->colorImage[2];
+			velView = vel->colorSampleView[2] != VK_NULL_HANDLE ? vel->colorSampleView[2] : vel->colorView[2];
+			velW = vel->w;
+			velH = vel->h;
+		}
+	}
 	if ( scene == NULL || !scene->colorTarget || !scene->hasDepth
 	     || scene->colorFormat[0] != VK_FORMAT_R16G16B16A16_SFLOAT
-	     || vel == NULL || vel->colorCount < 3 || vel->colorFormat[2] != VK_FORMAT_R16G16_SFLOAT
-	     || vel->w != scene->w || vel->h != scene->h ) {
+	     || velImage == VK_NULL_HANDLE || velW != scene->w || velH != scene->h ) {
 		return false;
 	}
 	if ( !Fsr2EnsureContext( scene->w, scene->h ) ) {
@@ -7256,8 +7282,8 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 		w, h, scene->colorFormat[0], L"FSR2_Color", FFX_RESOURCE_STATE_COMPUTE_READ );
 	dd.depth = ffxGetTextureResourceVK( fsr2Ctx, scene->dsImage, fsr2DepthView,
 		w, h, sceneDepthFormat, L"FSR2_Depth", FFX_RESOURCE_STATE_COMPUTE_READ );
-	dd.motionVectors = ffxGetTextureResourceVK( fsr2Ctx, vel->colorImage[2], vel->colorSampleView[2] != VK_NULL_HANDLE ? vel->colorSampleView[2] : vel->colorView[2],
-		w, h, vel->colorFormat[2], L"FSR2_MotionVectors", FFX_RESOURCE_STATE_COMPUTE_READ );
+	dd.motionVectors = ffxGetTextureResourceVK( fsr2Ctx, velImage, velView,
+		w, h, VK_FORMAT_R16G16_SFLOAT, L"FSR2_MotionVectors", FFX_RESOURCE_STATE_COMPUTE_READ );
 	dd.output = ffxGetTextureResourceVK( fsr2Ctx, fsr2Out, fsr2OutView,
 		w, h, VK_FORMAT_R16G16B16A16_SFLOAT, L"FSR2_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS );
 	// exposure/transparencyAndComposition stay null (AUTO_EXPOSURE; hand-authored T&C mask
@@ -9537,8 +9563,12 @@ ImageHandle VulkanBackend::GetRenderTargetImage2( RenderTargetHandle rt ) {
 	return ( t && t->colorCount >= 2 ) ? t->colorSampleImage[1] : 0;
 }
 
-// third color attachment = the RG16F velocity MRT of the 3-MRT normal prepass (R1/A2).
+// third color attachment = the RG16F velocity MRT of the 3-MRT normal prepass (R1/A2),
+// or the merged prepass's velocity attachment when the merge carries it.
 ImageHandle VulkanBackend::GetRenderTargetImage3( RenderTargetHandle rt ) {
+	if ( rt != 0 && rt == mergeNormalTarget ) {
+		return mergeVelSampleImage;			// merged velocity MRT (no targetTable entry; 0 when not carried)
+	}
 	RenderTarget *t = LookupTarget( rt );
 	return ( t && t->colorCount >= 3 ) ? t->colorSampleImage[2] : 0;
 }
@@ -9587,15 +9617,22 @@ void VulkanBackend::DestroyMergeNormal() {
 	if ( mergeNormalImage ) { vmaDestroyImage( vma, mergeNormalImage, mergeNormalAlloc ); mergeNormalImage = VK_NULL_HANDLE; mergeNormalAlloc = NULL; }
 	if ( mergeMatView )     { vkDestroyImageView( device, mergeMatView, NULL ); mergeMatView = VK_NULL_HANDLE; }
 	if ( mergeMatImage )    { vmaDestroyImage( vma, mergeMatImage, mergeMatAlloc ); mergeMatImage = VK_NULL_HANDLE; mergeMatAlloc = NULL; }
+	if ( mergeVelView )     { vkDestroyImageView( device, mergeVelView, NULL ); mergeVelView = VK_NULL_HANDLE; }
+	if ( mergeVelImage )    { vmaDestroyImage( vma, mergeVelImage, mergeVelAlloc ); mergeVelImage = VK_NULL_HANDLE; mergeVelAlloc = NULL; }
 	if ( mergeNormalSampleImage >= 1 && mergeNormalSampleImage <= (ImageHandle)imageTable.size() ) {
 		imageTable[mergeNormalSampleImage - 1].live = false;
 	}
 	if ( mergeMatSampleImage >= 1 && mergeMatSampleImage <= (ImageHandle)imageTable.size() ) {
 		imageTable[mergeMatSampleImage - 1].live = false;
 	}
+	if ( mergeVelSampleImage >= 1 && mergeVelSampleImage <= (ImageHandle)imageTable.size() ) {
+		imageTable[mergeVelSampleImage - 1].live = false;
+	}
 	mergeNormalSampleImage = 0;
 	mergeMatSampleImage = 0;
+	mergeVelSampleImage = 0;
 	mergeNormalMrt = false;
+	mergeNormalVel = false;
 	mergeNormalW = mergeNormalH = 0;
 	mergeNormalFbDepth = VK_NULL_HANDLE;
 	mergeNormalTarget = 0;
@@ -9621,12 +9658,16 @@ ImageHandle VulkanBackend::RegisterMergeSampleImage( VkImage img, VkImageView vi
 	return (ImageHandle)imageTable.size();
 }
 
-// (re)create the normal color image (+ optional SSR material MRT), the render pass, and
-// their sampleable ImageRecs at size w*h. The framebuffer (which binds the *scene* depth)
-// is (re)built lazily in BeginNormalPrepass since FrameDepthImage() changes with HDR mode.
-bool VulkanBackend::EnsureMergeNormal( int w, int h, bool wantMrt ) {
+// (re)create the normal color image (+ optional SSR material and velocity MRTs), the render
+// pass, and their sampleable ImageRecs at size w*h. The framebuffer (which binds the *scene*
+// depth) is (re)built lazily in BeginNormalPrepass since FrameDepthImage() changes with HDR
+// mode. wantVel implies the material attachment too (attachment order must mirror the
+// standalone 3-MRT target — normal 0, mat 1, velocity 2 — so the gbuffer pipeline's output
+// locations line up and the passClass is shared).
+bool VulkanBackend::EnsureMergeNormal( int w, int h, bool wantMrt, bool wantVel ) {
+	wantMrt = wantMrt || wantVel;
 	if ( mergeNormalImage != VK_NULL_HANDLE && mergeNormalW == w && mergeNormalH == h
-	     && mergeNormalMrt == wantMrt ) {
+	     && mergeNormalMrt == wantMrt && mergeNormalVel == wantVel ) {
 		return true;
 	}
 	DestroyMergeNormal();
@@ -9673,16 +9714,31 @@ bool VulkanBackend::EnsureMergeNormal( int w, int h, bool wantMrt ) {
 		}
 	}
 
+	// optional 3rd color attachment (RG16F per-object velocity, R1/A2), matching the
+	// standalone 3-MRT target's format
+	if ( wantVel ) {
+		ici.format = VK_FORMAT_R16G16_SFLOAT;
+		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &mergeVelImage, &mergeVelAlloc, NULL ), "vmaCreateImage(merge vel)" ) ) {
+			mergeVelImage = VK_NULL_HANDLE; DestroyMergeNormal(); return false;
+		}
+		vwi.image = mergeVelImage;
+		vwi.format = VK_FORMAT_R16G16_SFLOAT;
+		if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &mergeVelView ), "vkCreateImageView(merge vel)" ) ) {
+			DestroyMergeNormal(); return false;
+		}
+	}
+
 	// render pass: normal (+ mat) color (clear -> shader-read) + shared scene depth. The depth
 	// is CLEARed and sealed by the gbuffer geometry here, then STOREd so the resumed scene pass
 	// loads it for the depth-EQUAL interactions. (B1 used DON'T_CARE because it kept zfill to
 	// re-seal depth afterwards; steps 2-3 skip zfill, so this pass IS the seal and MUST preserve
 	// it — with DON'T_CARE the driver discards the sealed depth and the scene fails depth-EQUAL.)
-	const int nColor = wantMrt ? 2 : 1;
+	const int nColor = wantVel ? 3 : ( wantMrt ? 2 : 1 );
 	const int depthIdx = nColor;			// depth is the last attachment
-	VkAttachmentDescription atts[3] = {};
+	VkAttachmentDescription atts[4] = {};
+	const VkFormat colorFormats[3] = { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16_SFLOAT };
 	for ( int c = 0; c < nColor; c++ ) {
-		atts[c].format = VK_FORMAT_R8G8B8A8_UNORM;
+		atts[c].format = colorFormats[c];
 		atts[c].samples = VK_SAMPLE_COUNT_1_BIT;
 		atts[c].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
 		atts[c].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -9700,9 +9756,10 @@ bool VulkanBackend::EnsureMergeNormal( int w, int h, bool wantMrt ) {
 	atts[depthIdx].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	atts[depthIdx].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-	VkAttachmentReference colorRefs[2] = {
+	VkAttachmentReference colorRefs[3] = {
 		{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
 		{ 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+		{ 2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
 	};
 	VkAttachmentReference depthRef = { (uint32_t)depthIdx, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
 	VkSubpassDescription sub = {};
@@ -9737,13 +9794,17 @@ bool VulkanBackend::EnsureMergeNormal( int w, int h, bool wantMrt ) {
 		DestroyMergeNormal(); return false;
 	}
 
-	// sampleable ImageRecs so SSAO/SSR bind them via GetRenderTargetImage / GetRenderTargetImage2
+	// sampleable ImageRecs so SSAO/SSR/FSR2 bind them via GetRenderTargetImage / 2 / 3
 	mergeNormalSampleImage = RegisterMergeSampleImage( mergeNormalImage, mergeNormalView, w, h );
 	if ( wantMrt ) {
 		mergeMatSampleImage = RegisterMergeSampleImage( mergeMatImage, mergeMatView, w, h );
 	}
+	if ( wantVel ) {
+		mergeVelSampleImage = RegisterMergeSampleImage( mergeVelImage, mergeVelView, w, h );
+	}
 
 	mergeNormalMrt = wantMrt;
+	mergeNormalVel = wantVel;
 	mergeNormalW = w; mergeNormalH = h;
 	mergeNormalFb = VK_NULL_HANDLE;
 	mergeNormalFbDepth = VK_NULL_HANDLE;
@@ -9751,21 +9812,22 @@ bool VulkanBackend::EnsureMergeNormal( int w, int h, bool wantMrt ) {
 	return true;
 }
 
-RenderTargetHandle VulkanBackend::BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt ) {
+RenderTargetHandle VulkanBackend::BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt, bool wantVel ) {
 	if ( !frameOpen || skipFrame || device == VK_NULL_HANDLE || w <= 0 || h <= 0 ) {
 		return 0;
 	}
-	if ( !EnsureMergeNormal( w, h, wantMrt ) ) {
+	if ( !EnsureMergeNormal( w, h, wantMrt, wantVel ) ) {
 		return 0;
 	}
-	const int nColor = wantMrt ? 2 : 1;
+	const int nColor = wantVel ? 3 : ( wantMrt || wantVel ? 2 : 1 );
 	// (re)build the framebuffer when the scene depth image changes (HDR toggle / resize)
 	VkImage depthImg = FrameDepthImage();
 	if ( mergeNormalFb == VK_NULL_HANDLE || mergeNormalFbDepth != depthImg ) {
 		if ( mergeNormalFb ) { vkDestroyFramebuffer( device, mergeNormalFb, NULL ); mergeNormalFb = VK_NULL_HANDLE; }
-		VkImageView views[3];
+		VkImageView views[4];
 		views[0] = mergeNormalView;
-		if ( wantMrt ) { views[1] = mergeMatView; }
+		if ( wantMrt || wantVel ) { views[1] = mergeMatView; }
+		if ( wantVel ) { views[2] = mergeVelView; }
 		views[nColor] = FrameDepthView();
 		VkFramebufferCreateInfo fbi = {};
 		fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -9783,9 +9845,15 @@ RenderTargetHandle VulkanBackend::BeginNormalPrepass( int w, int h, const ClearA
 		vkCmdEndRenderPass( cb );			// suspend the scene pass (like BeginTargetPass)
 		insideScenePass = false;
 	}
-	VkClearValue cv[3] = {};
+	VkClearValue cv[4] = {};
 	if ( clear != NULL && clear->color ) {
 		for ( int c = 0; c < nColor; c++ ) {
+			// attachment 2 is the RG16F velocity MRT: sky/uncovered pixels keep the clear
+			// value, which for velocity must be ZERO motion, not the flat-normal color
+			// (same rule as BeginTargetPass's standalone 3-MRT clear)
+			if ( c == 2 ) {
+				continue;
+			}
 			cv[c].color.float32[0] = clear->rgba[0]; cv[c].color.float32[1] = clear->rgba[1];
 			cv[c].color.float32[2] = clear->rgba[2]; cv[c].color.float32[3] = clear->rgba[3];
 		}

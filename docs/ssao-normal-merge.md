@@ -121,6 +121,25 @@ minus the wasted `zfill` geometry pass — so the final scene depth and `_curren
 same, just one pass cheaper. Headless boot is validation-clean (212 frames, ep1/e1m1). Depth-
 EQUAL invariant + the fps delta are the user's visual/perf gate.
 
+## Status (2026-09-16): velocity attachment shipped — merge now the VK DEFAULT on every tier
+
+The last limitation fell: the merged prepass gained the **RG16F velocity attachment** (R1/A2),
+so `velWants` (r_motionVectors / r_fsr — the Ultra/Nightmare configs) no longer forces the
+standalone 3-MRT path. `EnsureMergeNormal/BeginNormalPrepass` take `wantVel`; attachment
+order mirrors the standalone target (normal 0, mat 1, velocity 2 — `wantVel` implies the mat
+attachment) so the gbuffer pipeline/passClass stay shared; velocity clears to ZERO motion
+like the standalone clear; `GetRenderTargetImage3` resolves the merged handle; and `RunFsr2`
+special-cases the merged pseudo-handle (it has no targetTable entry, so the old
+`LookupTarget` couldn't see it). **`r_ssaoMergeNormal` default flipped 0 → 1**: every VK tier
+now runs ONE opaque geometry pass (gbuffer seals scene depth + writes normal/mat/velocity)
+instead of zfill + a standalone normal pass. The standalone path remains as the A/B
+(`r_ssaoMergeNormal 0`) and the GL3 path. Verified: mars_city1 with the full
+SSAO+SSR+HDR+PBR+MV+FSR2 config — FSR2 creates its context off the merged velocity (its
+validation gate passes), ~21k frames, validation-error parity with the merge-off baseline
+(the residual map-load errors pre-date this change and reproduce identically with merge off).
+Pending user verify: visual parity (depth-EQUAL sacred — watch for z-fighting / vanishing
+surfaces) + the fps win on Ultra/Nightmare.
+
 ## Status (2026-08-11 later): SSR MRT extension shipped — merge now engages with SSR on
 
 `BeginNormalPrepass(w, h, clear, wantMrt)` gained an optional 2nd color attachment

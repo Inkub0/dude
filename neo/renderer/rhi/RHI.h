@@ -325,7 +325,7 @@ public:
 	// second color attachment (SSR roughness/metalness, GetRenderTargetImage2) so the
 	// merge also serves SSR; the pass then carries {normal, mat} + shared scene depth.
 	// End with EndPass. Vulkan-only; the default is a no-op returning 0.
-	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt = false ) { return 0; }
+	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt = false, bool wantVel = false ) { return 0; }
 	// the target's texture as a sampleable image handle — the same ImageHandle
 	// abstraction future material textures will use (Phase 4 image ownership).
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt ) = 0;

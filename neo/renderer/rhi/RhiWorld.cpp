@@ -3746,23 +3746,22 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	// r_ssaoMergeNormal (docs/ssao-normal-merge.md): on Vulkan, render the normal into a pass
 	// that shares the *scene* depth — one geometry pass producing depth + normal instead of a
-	// standalone target. wantMrt (= ssrWants) also carries SSR's rough/metal MRT attachment so
-	// the merge serves SSR too. BeginNormalPrepass returns 0 (→ standalone path) on GL3 or if
-	// unsupported.
+	// standalone target. wantMrt (= ssrWants) also carries SSR's rough/metal MRT attachment,
+	// and velWants adds the RG16F velocity attachment (R1/A2), so the merge serves SSR, motion
+	// vectors and FSR2 too — every tier can fold the standalone pass away. BeginNormalPrepass
+	// returns 0 (→ standalone path) on GL3 or if unsupported.
 	const bool wantMerge = r_ssaoMergeNormal.GetBool()
-		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN
-		&& !velWants;						// velocity needs the standalone 3-MRT (R1/A2)
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
 	rhi::RenderTargetHandle activeNormalRT = 0;
 	bool didMerge = false;
 	if ( wantMerge ) {
-		activeNormalRT = r->BeginNormalPrepass( w, h, &clear, ssrWants );
+		activeNormalRT = r->BeginNormalPrepass( w, h, &clear, ssrWants, velWants );
 		didMerge = ( activeNormalRT != 0 );	// non-zero → the gbuffer pass shares (seals) scene depth
 		if ( didMerge ) {
-			// the merged handle carries the MRT when ssrWants but never velocity; these are
-			// the PER-VIEW flags the consumers gate on - the standalone target's cache keys
+			// PER-VIEW flags the consumers gate on - the standalone target's cache keys
 			// (rhiNormalMrt/Vel) describe a different object and must not be touched here
 			rhiNormalMrtThisView = ssrWants;
-			rhiNormalVelThisView = false;
+			rhiNormalVelThisView = velWants;
 		}
 	}
 	if ( activeNormalRT == 0 ) {
