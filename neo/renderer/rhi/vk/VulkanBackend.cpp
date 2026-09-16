@@ -70,6 +70,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "renderer/rhi/vk/VulkanImGui.h"	// M6: ImGui glue (impl at the end of this TU)
 #include "ffx_fsr2.h"						// vendored FidelityFX FSR2 (docs/fsr-temporal-pipeline.md, R1)
 #include "vk/ffx_fsr2_vk.h"					// FSR2 Vulkan backend init (against our VkDevice)
+#include "NRD.h"							// vendored NVIDIA NRD v4.18 (H2 denoiser framework, docs/rtx-nrd.md)
 #include "framework/CmdSystem.h"              // cmdSystem for registering console commands
 #include "sys/sys_public.h"                     // Sys_DLL_Load (portable NVML load), Sys_Milliseconds
 
@@ -121,6 +122,8 @@ static idCVar r_vkComputeTest( "r_vkComputeTest", "0", CVAR_RENDERER | CVAR_BOOL
 	"Vulkan backend: run the compute-lane self-test (dispatch a kernel doubling a storage buffer, read back, verify) and print PASS/FAIL. Set to 1 to trigger (docs/gpu-offload-plan.md Phase 1)" );
 static idCVar r_fsr2Test( "r_fsr2Test", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: FSR2 bring-up self-test - size the scratch, build the FSR2 VK interface, create a Native-AA FSR2 context (no dispatch), destroy it, and print PASS/FAIL. Set to 1 to trigger (docs/fsr-temporal-pipeline.md, R1/C0)" );
+static idCVar r_nrdTest( "r_nrdTest", "0", CVAR_RENDERER | CVAR_BOOL,
+	"Vulkan backend: NRD bring-up self-test (H2b, docs/rtx-nrd.md) - create an NRD instance (REBLUR_DIFFUSE_OCCLUSION + SIGMA_SHADOW), build every compute pipeline from the embedded SPIR-V, allocate the texture pools + constant-buffer ring, enumerate a frame's dispatches CPU-side, tear it all down, and print PASS/FAIL. No rendering effect. Set to 1 to trigger" );
 static idCVar r_mrt3Test( "r_mrt3Test", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: MRT plumbing self-test - create + destroy a 3-attachment velocity gbuffer (RGBA8 normal + RGBA8 SSR + RG16F velocity + depth, a distinct pass class) and print PASS/FAIL. Proves RG16F color attachments work on this driver. Set to 1 to trigger (docs/fsr-temporal-pipeline.md, R1/A0)" );
 
@@ -269,6 +272,12 @@ private:
 	void			ComputeSelfTest();							// r_vkComputeTest: dispatch a trivial kernel, read back, verify
 	void			BdaSelfTest();								// r_vkBdaTest: sum a buffer through its device-address pointer (Phase 3.2b BDA primitive)
 	void			Fsr2SelfTest();								// r_fsr2Test: init the vendored FSR2 VK backend + create/destroy a context
+
+	// NRD denoiser framework (H2b, docs/rtx-nrd.md): translation layer for the vendored
+	// NRD library — VK pipelines from its embedded SPIR-V, pooled textures, CB ring.
+	bool			NrdCreate( int w, int h );					// build all VK objects for the denoiser lineup at this resolution
+	void			NrdDestroy( bool deviceIdle );				// tear everything down (resize, vid_restart, shutdown)
+	void			NrdSelfTest();								// r_nrdTest: create -> enumerate dispatches -> destroy, PASS/FAIL
 	void			Mrt3SelfTest();								// r_mrt3Test: create/destroy a 3-MRT RG16F velocity gbuffer target
 	void			RayQuerySelfTest();							// r_rayQueryTest: BLAS/TLAS build + compute ray trace vs CPU reference (R2 foundation)
 
@@ -910,6 +919,37 @@ private:
 	// size + create + build one AS on the upload cb, synchronously (scratch is transient)
 	bool	BuildAsSync( VkAccelerationStructureTypeKHR type, const VkAccelerationStructureGeometryKHR &geom,
 	                     uint32_t primCount, RtBuf &asBuf, VkAccelerationStructureKHR &as );
+	// NRD denoiser state (H2b, docs/rtx-nrd.md). One pipeline/texture per InstanceDesc
+	// entry; everything sized/rebuilt by NrdCreate and torn down by NrdDestroy.
+	struct NrdTexture {
+		VkImage			image = VK_NULL_HANDLE;
+		VmaAllocation	alloc = VK_NULL_HANDLE;
+		VkImageView		view = VK_NULL_HANDLE;
+		VkFormat		format = VK_FORMAT_UNDEFINED;
+		uint16_t		w = 0, h = 0;
+	};
+	struct NrdPipe {
+		VkDescriptorSetLayout	setLayout = VK_NULL_HANDLE;		// resources set (SRV/UAV space)
+		VkPipelineLayout		layout = VK_NULL_HANDLE;
+		VkPipeline				pipeline = VK_NULL_HANDLE;
+		bool					hasConstantData = false;
+	};
+	nrd::Instance *				nrdInstance = NULL;
+	VkDescriptorSetLayout		nrdCbSetLayout = VK_NULL_HANDLE;	// shared CB+samplers set (its own space)
+	std::vector<NrdPipe>		nrdPipes;
+	std::vector<NrdTexture>		nrdPermTex;			// survives across frames (history)
+	std::vector<NrdTexture>		nrdTransTex;		// scratch within one frame
+	VkSampler					nrdSamplers[8] = {};
+	uint32_t					nrdSamplerCount = 0;
+	VkDescriptorPool			nrdDescPool = VK_NULL_HANDLE;
+	VkBuffer					nrdCb = VK_NULL_HANDLE;			// per-dispatch constant ring
+	VmaAllocation				nrdCbAlloc = VK_NULL_HANDLE;
+	void *						nrdCbMapped = NULL;
+	uint32_t					nrdCbStride = 0;	// constantBufferMaxDataSize, UBO-aligned
+	uint32_t					nrdCbSets = 0;		// ring capacity (= setsMaxNum)
+	int							nrdW = 0, nrdH = 0;
+	bool						haveComputeDerivatives = false;	// VK_KHR_compute_shader_derivatives (quads)
+
 	FfxFsr2Context *			fsr2Ctx = NULL;
 	void *						fsr2Scratch = NULL;
 	int							fsr2W = 0, fsr2H = 0;
@@ -1512,13 +1552,16 @@ bool VulkanBackend::CreateDeviceAndVma() {
 		queueCount++;
 	}
 
-	const char *devExts[4] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+	const char *devExts[6] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 	uint32_t devExtCount = 1;
 
 	// R2 ray-query foundation: probe for the RT extension trio. deferred_host_operations is a
 	// hard dependency of acceleration_structure even though we never use host builds. All other
 	// dependencies (BDA, descriptor indexing) are core on our 1.4 floor.
+	// H2b: also probe VK_KHR_compute_shader_derivatives — NRD's vendored SPIR-V is built
+	// with quad intrinsics (libs/nrd/README-DUDE.md) and needs the quads feature bit.
 	bool haveAccelExt = false, haveRayQueryExt = false, haveDeferredOpsExt = false;
+	bool haveComputeDerivExt = false;
 	{
 		uint32_t extCount = 0;
 		vkEnumerateDeviceExtensionProperties( physical, NULL, &extCount, NULL );
@@ -1533,6 +1576,8 @@ bool VulkanBackend::CreateDeviceAndVma() {
 				haveRayQueryExt = true;
 			} else if ( !strcmp( extProps[i].extensionName, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME ) ) {
 				haveDeferredOpsExt = true;
+			} else if ( !strcmp( extProps[i].extensionName, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME ) ) {
+				haveComputeDerivExt = true;
 			}
 		}
 	}
@@ -1604,6 +1649,13 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	if ( haveAccelExt && haveRayQueryExt && haveDeferredOpsExt ) {
 		supported11.pNext = &supportedAccel;
 		supportedAccel.pNext = &supportedRq;
+	}
+	// H2b: compute-shader derivatives feature query (chained only when the ext exists)
+	VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR supportedCsd = {};
+	supportedCsd.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
+	if ( haveComputeDerivExt ) {
+		supportedCsd.pNext = supported11.pNext;
+		supported11.pNext = &supportedCsd;
 	}
 	VkPhysicalDeviceFeatures2 supported2 = {};
 	supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -1683,6 +1735,20 @@ bool VulkanBackend::CreateDeviceAndVma() {
 		devExts[devExtCount++] = VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME;
 		devExts[devExtCount++] = VK_KHR_RAY_QUERY_EXTENSION_NAME;
 		devExts[devExtCount++] = VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME;
+	}
+
+	// H2b: enable quad derivatives in compute when present — NRD's shaders require it
+	// (NRD_SUPPORTS_QUAD_INTRINSICS=1 in the vendored SPIR-V). Device creation is
+	// unchanged on hardware without the extension; NrdCreate refuses there.
+	haveComputeDerivatives = haveComputeDerivExt && supportedCsd.computeDerivativeGroupQuads == VK_TRUE;
+	VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR enabledCsd = {};
+	enabledCsd.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
+	if ( haveComputeDerivatives ) {
+		enabledCsd.computeDerivativeGroupQuads = VK_TRUE;
+		enabledCsd.computeDerivativeGroupLinear = supportedCsd.computeDerivativeGroupLinear;
+		enabledCsd.pNext = enabled11.pNext;
+		enabled11.pNext = &enabledCsd;
+		devExts[devExtCount++] = VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME;
 	}
 
 	VkDeviceCreateInfo dci = {};
@@ -2303,6 +2369,9 @@ void VulkanBackend::Shutdown() {
 	// FSR2 (R1/C2): the context owns device pipelines/images; free while the device lives
 	Fsr2DestroyContext( true );
 
+	// NRD (H2b): denoiser pipelines/pools must die before VMA/device too
+	NrdDestroy( true );
+
 	// R2: acceleration structures + their backing buffers must die before VMA/device
 	DestroyRtScene();
 
@@ -2475,6 +2544,14 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 		r_fsr2Test.ClearModified();
 		if ( r_fsr2Test.GetBool() ) {
 			Fsr2SelfTest();
+		}
+	}
+
+	// NRD bring-up self-test (H2b): one-shot on the cvar toggle.
+	if ( r_nrdTest.IsModified() ) {
+		r_nrdTest.ClearModified();
+		if ( r_nrdTest.GetBool() ) {
+			NrdSelfTest();
 		}
 	}
 
@@ -5862,6 +5939,458 @@ void VulkanBackend::RayQuerySelfTest() {
 	}
 	DestroyBuffer( out );
 	DestroyRtScene();
+}
+
+/*
+====================
+NRD denoiser framework (H2b, docs/rtx-nrd.md)
+
+Translation layer for the vendored NVIDIA NRD library (libs/nrd). NRD is graphics-API-free:
+it hands back an InstanceDesc describing compute pipelines (embedded SPIR-V), texture pools
+and samplers, plus per-frame DispatchDescs; everything GPU-side below is ours. The denoiser
+lineup instantiated here matches the roadmap: REBLUR_DIFFUSE_OCCLUSION (H4 RTAO + the H2d
+validator signal) and SIGMA_SHADOW (H3 soft shadows).
+====================
+*/
+
+// stable identifiers for the denoisers in our NRD instance (nrd::Identifier is uint32)
+static const nrd::Identifier NRD_ID_REBLUR_AO     = 0;
+static const nrd::Identifier NRD_ID_SIGMA_SHADOW  = 1;
+
+// nrd::Format -> VkFormat, table-ordered exactly like the enum in NRDDescs.h
+static VkFormat NrdFormatToVk( nrd::Format f ) {
+	static const VkFormat table[] = {
+		VK_FORMAT_R8_UNORM, VK_FORMAT_R8_SNORM, VK_FORMAT_R8_UINT, VK_FORMAT_R8_SINT,
+		VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_SNORM, VK_FORMAT_R8G8_UINT, VK_FORMAT_R8G8_SINT,
+		VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SNORM, VK_FORMAT_R8G8B8A8_UINT, VK_FORMAT_R8G8B8A8_SINT, VK_FORMAT_R8G8B8A8_SRGB,
+		VK_FORMAT_R16_UNORM, VK_FORMAT_R16_SNORM, VK_FORMAT_R16_UINT, VK_FORMAT_R16_SINT, VK_FORMAT_R16_SFLOAT,
+		VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16_SNORM, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16_SINT, VK_FORMAT_R16G16_SFLOAT,
+		VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16B16A16_SNORM, VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_R16G16B16A16_SINT, VK_FORMAT_R16G16B16A16_SFLOAT,
+		VK_FORMAT_R32_UINT, VK_FORMAT_R32_SINT, VK_FORMAT_R32_SFLOAT,
+		VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_SINT, VK_FORMAT_R32G32_SFLOAT,
+		VK_FORMAT_R32G32B32_UINT, VK_FORMAT_R32G32B32_SINT, VK_FORMAT_R32G32B32_SFLOAT,
+		VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_SINT, VK_FORMAT_R32G32B32A32_SFLOAT,
+		VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_A2B10G10R10_UINT_PACK32,
+		VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32,
+	};
+	const uint32_t i = (uint32_t)f;
+	if ( i >= sizeof( table ) / sizeof( table[0] ) ) {
+		return VK_FORMAT_UNDEFINED;
+	}
+	return table[i];
+}
+
+/*
+====================
+VulkanBackend::NrdCreate
+
+Builds every VK object the NRD instance describes, at the given render size: one compute
+pipeline per PipelineDesc (shader module straight from the embedded SPIR-V — NRD already
+resolved the ShaderMake permutation), descriptor-set layouts laid out by the library's
+SPIRV register shifts across its two register spaces / sets (resources set: textures t20+,
+storage u3+; shared CB+samplers set: CB b2, samplers s0+), the permanent/transient texture
+pools (VMA, SAMPLED|STORAGE), the two immutable samplers, a host-visible per-dispatch
+constant ring, and a descriptor pool sized from the instance's own limits. No command
+recording here.
+====================
+*/
+bool VulkanBackend::NrdCreate( int w, int h ) {
+	if ( nrdInstance != NULL && nrdW == w && nrdH == h ) {
+		return true;
+	}
+	NrdDestroy( false );
+
+	if ( !haveComputeDerivatives ) {
+		common->Warning( "NRD: device lacks VK_KHR_compute_shader_derivatives (quads) - denoiser disabled" );
+		return false;
+	}
+
+	const nrd::DenoiserDesc denoisers[] = {
+		{ NRD_ID_REBLUR_AO,    nrd::Denoiser::REBLUR_DIFFUSE_OCCLUSION },
+		{ NRD_ID_SIGMA_SHADOW, nrd::Denoiser::SIGMA_SHADOW },
+	};
+	nrd::InstanceCreationDesc icd = {};		// null callbacks -> NRD's own aligned malloc
+	icd.denoisers = denoisers;
+	icd.denoisersNum = sizeof( denoisers ) / sizeof( denoisers[0] );
+	if ( nrd::CreateInstance( icd, nrdInstance ) != nrd::Result::SUCCESS ) {
+		common->Warning( "NRD: CreateInstance failed" );
+		nrdInstance = NULL;
+		return false;
+	}
+
+	// the vendored SPIR-V was compiled with these register shifts + encodings and the C++
+	// lib's defines must agree (libs/nrd/README-DUDE.md); if this trips, the nrd target's
+	// compile definitions drifted from the prebuilt shaders
+	const nrd::LibraryDesc &lib = *nrd::GetLibraryDesc();
+	if ( lib.spirvBindingOffsets.samplerOffset != 0 || lib.spirvBindingOffsets.textureOffset != 20
+			|| lib.spirvBindingOffsets.constantBufferOffset != 2 || lib.spirvBindingOffsets.storageTextureAndBufferOffset != 3
+			|| lib.normalEncoding != nrd::NormalEncoding::R10_G10_B10_A2_UNORM ) {
+		common->Warning( "NRD: library config mismatch vs vendored shaders (offsets %u/%u/%u/%u, normal enc %u)",
+			lib.spirvBindingOffsets.samplerOffset, lib.spirvBindingOffsets.textureOffset,
+			lib.spirvBindingOffsets.constantBufferOffset, lib.spirvBindingOffsets.storageTextureAndBufferOffset,
+			(uint32_t)lib.normalEncoding );
+		NrdDestroy( false );
+		return false;
+	}
+
+	// NRD's SPIR-V splits its bindings across two register spaces = two descriptor sets:
+	// resources (SRV/UAV) in one, the constant buffer + samplers in the other (1/0 as
+	// built). Anything beyond two sets means the packaging changed — refuse.
+	const nrd::InstanceDesc &inst = *nrd::GetInstanceDesc( *nrdInstance );
+	const uint32_t cbSpace  = inst.constantBufferAndSamplersSpaceIndex;
+	const uint32_t resSpace = inst.resourcesSpaceIndex;
+	if ( cbSpace > 1 || resSpace > 1 || cbSpace == resSpace ) {
+		common->Warning( "NRD: unexpected register spaces (cb %u / resources %u)", cbSpace, resSpace );
+		NrdDestroy( false );
+		return false;
+	}
+
+	// immutable samplers (NEAREST_CLAMP / LINEAR_CLAMP today)
+	nrdSamplerCount = inst.samplersNum;
+	if ( nrdSamplerCount > sizeof( nrdSamplers ) / sizeof( nrdSamplers[0] ) ) {
+		common->Warning( "NRD: %u samplers exceed the static slot count", nrdSamplerCount );
+		NrdDestroy( false );
+		return false;
+	}
+	for ( uint32_t i = 0; i < nrdSamplerCount; i++ ) {
+		const bool linear = inst.samplers[i] == nrd::Sampler::LINEAR_CLAMP;
+		VkSamplerCreateInfo si = {};
+		si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		si.magFilter = si.minFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+		si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+		si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		if ( !vkCheck( vkCreateSampler( device, &si, NULL, &nrdSamplers[i] ), "vkCreateSampler(NRD)" ) ) {
+			NrdDestroy( false );
+			return false;
+		}
+	}
+
+	// shared CB+samplers set layout (identical for every pipeline; lives in its own
+	// register space = its own set). The CB binding exists even for pipelines without
+	// constant data — the set layout may declare bindings a shader never uses.
+	{
+		std::vector<VkDescriptorSetLayoutBinding> bindings;
+		VkDescriptorSetLayoutBinding cb = {};
+		cb.binding = lib.spirvBindingOffsets.constantBufferOffset + inst.constantBufferRegisterIndex;
+		cb.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		cb.descriptorCount = 1;
+		cb.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		bindings.push_back( cb );
+		for ( uint32_t i = 0; i < nrdSamplerCount; i++ ) {
+			VkDescriptorSetLayoutBinding b = {};
+			b.binding = lib.spirvBindingOffsets.samplerOffset + inst.samplersBaseRegisterIndex + i;
+			b.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+			b.descriptorCount = 1;
+			b.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+			b.pImmutableSamplers = &nrdSamplers[i];
+			bindings.push_back( b );
+		}
+		VkDescriptorSetLayoutCreateInfo li = {};
+		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		li.bindingCount = (uint32_t)bindings.size();
+		li.pBindings = bindings.data();
+		if ( !vkCheck( vkCreateDescriptorSetLayout( device, &li, NULL, &nrdCbSetLayout ), "vkCreateDescriptorSetLayout(NRD cb)" ) ) {
+			NrdDestroy( false );
+			return false;
+		}
+	}
+
+	// one tight resources set layout + pipeline per PipelineDesc
+	nrdPipes.resize( inst.pipelinesNum );
+	for ( uint32_t p = 0; p < inst.pipelinesNum; p++ ) {
+		const nrd::PipelineDesc &pd = inst.pipelines[p];
+		NrdPipe &pipe = nrdPipes[p];
+		pipe.hasConstantData = pd.hasConstantData;
+
+		std::vector<VkDescriptorSetLayoutBinding> bindings;
+		// each resource range restarts at register 0 of its own (t / u) space
+		for ( uint32_t r = 0; r < pd.resourceRangesNum; r++ ) {
+			const nrd::ResourceRangeDesc &range = pd.resourceRanges[r];
+			const bool storage = range.descriptorType == nrd::DescriptorType::STORAGE_TEXTURE;
+			const uint32_t base = ( storage ? lib.spirvBindingOffsets.storageTextureAndBufferOffset
+			                                : lib.spirvBindingOffsets.textureOffset )
+				+ inst.resourcesBaseRegisterIndex;
+			for ( uint32_t k = 0; k < range.descriptorsNum; k++ ) {
+				VkDescriptorSetLayoutBinding b = {};
+				b.binding = base + k;
+				b.descriptorType = storage ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+				b.descriptorCount = 1;
+				b.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+				bindings.push_back( b );
+			}
+		}
+
+		VkDescriptorSetLayoutCreateInfo li = {};
+		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		li.bindingCount = (uint32_t)bindings.size();
+		li.pBindings = bindings.data();
+		if ( !vkCheck( vkCreateDescriptorSetLayout( device, &li, NULL, &pipe.setLayout ), "vkCreateDescriptorSetLayout(NRD)" ) ) {
+			NrdDestroy( false );
+			return false;
+		}
+
+		// two sets, ordered by the library's space indices (resources 0, CB+samplers 1 as built)
+		VkDescriptorSetLayout setLayouts[2];
+		setLayouts[resSpace] = pipe.setLayout;
+		setLayouts[cbSpace]  = nrdCbSetLayout;
+		VkPipelineLayoutCreateInfo pli = {};
+		pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		pli.setLayoutCount = 2;
+		pli.pSetLayouts = setLayouts;
+		if ( !vkCheck( vkCreatePipelineLayout( device, &pli, NULL, &pipe.layout ), "vkCreatePipelineLayout(NRD)" ) ) {
+			NrdDestroy( false );
+			return false;
+		}
+
+		// NRD already resolved the ShaderMake permutation: bytecode is raw SPIR-V
+		VkShaderModuleCreateInfo smci = {};
+		smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		smci.codeSize = (size_t)pd.computeShaderSPIRV.size;
+		smci.pCode = (const uint32_t *)pd.computeShaderSPIRV.bytecode;
+		VkShaderModule module = VK_NULL_HANDLE;
+		if ( !vkCheck( vkCreateShaderModule( device, &smci, NULL, &module ), "vkCreateShaderModule(NRD)" ) ) {
+			NrdDestroy( false );
+			return false;
+		}
+
+		VkComputePipelineCreateInfo cpci = {};
+		cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+		cpci.stage.module = module;
+		cpci.stage.pName = inst.shaderEntryPoint;
+		cpci.layout = pipe.layout;
+		const bool ok = vkCheck( vkCreateComputePipelines( device, diskPipelineCache, 1, &cpci, NULL, &pipe.pipeline ),
+			"vkCreateComputePipelines(NRD)" );
+		vkDestroyShaderModule( device, module, NULL );
+		if ( !ok ) {
+			NrdDestroy( false );
+			return false;
+		}
+	}
+
+	// texture pools: permanent (history, survives frames) + transient (per-frame scratch)
+	auto createPool = [&]( const nrd::TextureDesc *descs, uint32_t count, std::vector<NrdTexture> &out, const char *what ) -> bool {
+		out.resize( count );
+		for ( uint32_t i = 0; i < count; i++ ) {
+			NrdTexture &t = out[i];
+			const uint16_t div = descs[i].downsampleFactor > 0 ? descs[i].downsampleFactor : 1;
+			t.w = (uint16_t)( ( w + div - 1 ) / div );
+			t.h = (uint16_t)( ( h + div - 1 ) / div );
+			t.format = NrdFormatToVk( descs[i].format );
+			if ( t.format == VK_FORMAT_UNDEFINED ) {
+				common->Warning( "NRD: unmapped nrd::Format %u (%s pool %u)", (uint32_t)descs[i].format, what, i );
+				return false;
+			}
+			VkImageCreateInfo ici = {};
+			ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+			ici.imageType = VK_IMAGE_TYPE_2D;
+			ici.format = t.format;
+			ici.extent.width = t.w;
+			ici.extent.height = t.h;
+			ici.extent.depth = 1;
+			ici.mipLevels = 1;
+			ici.arrayLayers = 1;
+			ici.samples = VK_SAMPLE_COUNT_1_BIT;
+			ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+			ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+			ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			VmaAllocationCreateInfo vci = {};
+			vci.usage = VMA_MEMORY_USAGE_AUTO;
+			if ( !vkCheck( vmaCreateImage( vma, &ici, &vci, &t.image, &t.alloc, NULL ), "vmaCreateImage(NRD pool)" ) ) {
+				return false;
+			}
+			VkImageViewCreateInfo vwi = {};
+			vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+			vwi.image = t.image;
+			vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			vwi.format = t.format;
+			vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			vwi.subresourceRange.levelCount = 1;
+			vwi.subresourceRange.layerCount = 1;
+			if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &t.view ), "vkCreateImageView(NRD pool)" ) ) {
+				return false;
+			}
+		}
+		return true;
+	};
+	if ( !createPool( inst.permanentPool, inst.permanentPoolSize, nrdPermTex, "permanent" )
+			|| !createPool( inst.transientPool, inst.transientPoolSize, nrdTransTex, "transient" ) ) {
+		NrdDestroy( false );
+		return false;
+	}
+
+	// per-dispatch constant ring: one UBO-aligned slice per descriptor set the frame can use
+	nrdCbSets = inst.descriptorPoolDesc.setsMaxNum > 0 ? inst.descriptorPoolDesc.setsMaxNum : 64;
+	const VkDeviceSize uboAlign = physProps.limits.minUniformBufferOffsetAlignment > 0
+		? physProps.limits.minUniformBufferOffsetAlignment : 256;
+	nrdCbStride = (uint32_t)( ( inst.constantBufferMaxDataSize + uboAlign - 1 ) & ~( uboAlign - 1 ) );
+	if ( nrdCbStride > 0 ) {
+		VkBufferCreateInfo bci = {};
+		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bci.size = (VkDeviceSize)nrdCbStride * nrdCbSets;
+		bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+		bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		VmaAllocationCreateInfo aci = {};
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		VmaAllocationInfo ai = {};
+		if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &nrdCb, &nrdCbAlloc, &ai ), "vmaCreateBuffer(NRD CB)" ) ) {
+			NrdDestroy( false );
+			return false;
+		}
+		nrdCbMapped = ai.pMappedData;
+	}
+
+	// descriptor pool sized from the instance's own tight-layout limits (+ the CB/samplers
+	// every set may carry)
+	{
+		VkDescriptorPoolSize sizes[4];
+		uint32_t sizeCount = 0;
+		sizes[sizeCount++] = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nrdCbSets };
+		sizes[sizeCount++] = { VK_DESCRIPTOR_TYPE_SAMPLER, nrdCbSets * ( nrdSamplerCount > 0 ? nrdSamplerCount : 1 ) };
+		sizes[sizeCount++] = { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, inst.descriptorPoolDesc.totalTexturesNum > 0 ? inst.descriptorPoolDesc.totalTexturesNum : 1 };
+		sizes[sizeCount++] = { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, inst.descriptorPoolDesc.totalStorageTexturesNum > 0 ? inst.descriptorPoolDesc.totalStorageTexturesNum : 1 };
+		VkDescriptorPoolCreateInfo dpci = {};
+		dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		dpci.maxSets = nrdCbSets * 2;		// each dispatch: one resources set + one CB/samplers set
+		dpci.poolSizeCount = sizeCount;
+		dpci.pPoolSizes = sizes;
+		if ( !vkCheck( vkCreateDescriptorPool( device, &dpci, NULL, &nrdDescPool ), "vkCreateDescriptorPool(NRD)" ) ) {
+			NrdDestroy( false );
+			return false;
+		}
+	}
+
+	nrdW = w;
+	nrdH = h;
+	return true;
+}
+
+/*
+====================
+VulkanBackend::NrdDestroy
+
+Tears down everything NrdCreate built (resize, vid_restart, shutdown). deviceIdle says the
+caller already drained the GPU; otherwise wait here so no in-flight frame still uses the
+pipelines/pool textures.
+====================
+*/
+void VulkanBackend::NrdDestroy( bool deviceIdle ) {
+	if ( nrdInstance == NULL && nrdPipes.empty() && nrdPermTex.empty() && nrdTransTex.empty() ) {
+		return;
+	}
+	if ( !deviceIdle && device != VK_NULL_HANDLE ) {
+		vkDeviceWaitIdle( device );
+	}
+	for ( size_t i = 0; i < nrdPipes.size(); i++ ) {
+		if ( nrdPipes[i].pipeline )  { vkDestroyPipeline( device, nrdPipes[i].pipeline, NULL ); }
+		if ( nrdPipes[i].layout )    { vkDestroyPipelineLayout( device, nrdPipes[i].layout, NULL ); }
+		if ( nrdPipes[i].setLayout ) { vkDestroyDescriptorSetLayout( device, nrdPipes[i].setLayout, NULL ); }
+	}
+	nrdPipes.clear();
+	if ( nrdCbSetLayout ) { vkDestroyDescriptorSetLayout( device, nrdCbSetLayout, NULL ); nrdCbSetLayout = VK_NULL_HANDLE; }
+	auto destroyPool = [&]( std::vector<NrdTexture> &pool ) {
+		for ( size_t i = 0; i < pool.size(); i++ ) {
+			if ( pool[i].view )  { vkDestroyImageView( device, pool[i].view, NULL ); }
+			if ( pool[i].image ) { vmaDestroyImage( vma, pool[i].image, pool[i].alloc ); }
+		}
+		pool.clear();
+	};
+	destroyPool( nrdPermTex );
+	destroyPool( nrdTransTex );
+	for ( uint32_t i = 0; i < nrdSamplerCount; i++ ) {
+		if ( nrdSamplers[i] ) { vkDestroySampler( device, nrdSamplers[i], NULL ); nrdSamplers[i] = VK_NULL_HANDLE; }
+	}
+	nrdSamplerCount = 0;
+	if ( nrdDescPool ) { vkDestroyDescriptorPool( device, nrdDescPool, NULL ); nrdDescPool = VK_NULL_HANDLE; }
+	if ( nrdCb )       { vmaDestroyBuffer( vma, nrdCb, nrdCbAlloc ); nrdCb = VK_NULL_HANDLE; nrdCbAlloc = VK_NULL_HANDLE; }
+	nrdCbMapped = NULL;
+	nrdCbStride = nrdCbSets = 0;
+	if ( nrdInstance ) {
+		nrd::DestroyInstance( *nrdInstance );
+		nrdInstance = NULL;
+	}
+	nrdW = nrdH = 0;
+}
+
+/*
+====================
+VulkanBackend::NrdSelfTest
+
+r_nrdTest: bring-up validation for the H2b translation layer. Creates the full NRD context
+at the current resolution (every compute pipeline built from the embedded SPIR-V on this
+GPU, pools allocated), then exercises a frame's CPU side: benign CommonSettings + default
+denoiser settings, GetComputeDispatches for both denoisers, and prints what a real frame
+would record. No GPU submission (that is H2d's synthetic-signal validator); tears down and
+prints PASS/FAIL. Mirrors r_fsr2Test.
+====================
+*/
+void VulkanBackend::NrdSelfTest() {
+	if ( device == VK_NULL_HANDLE ) {
+		common->Printf( "NRD self-test: unavailable (no VK device)\n" );
+		return;
+	}
+	const nrd::LibraryDesc &lib = *nrd::GetLibraryDesc();
+	common->Printf( "NRD self-test: library v%u.%u.%u, compute derivatives %s\n",
+		lib.versionMajor, lib.versionMinor, lib.versionBuild,
+		haveComputeDerivatives ? "available" : "MISSING" );
+
+	const int w = glConfig.vidWidth  > 0 ? glConfig.vidWidth  : 1920;
+	const int h = glConfig.vidHeight > 0 ? glConfig.vidHeight : 1080;
+	if ( !NrdCreate( w, h ) ) {
+		common->Printf( "NRD self-test: FAIL - NrdCreate (see warnings above)\n" );
+		return;
+	}
+
+	const nrd::InstanceDesc &inst = *nrd::GetInstanceDesc( *nrdInstance );
+
+	// benign frame settings: identity camera, no motion, no jitter
+	nrd::CommonSettings cs = {};
+	for ( int i = 0; i < 4; i++ ) {
+		cs.viewToClipMatrix[i * 5] = cs.viewToClipMatrixPrev[i * 5] = 1.0f;
+		cs.worldToViewMatrix[i * 5] = cs.worldToViewMatrixPrev[i * 5] = 1.0f;
+	}
+	cs.resourceSize[0] = cs.resourceSizePrev[0] = cs.rectSize[0] = cs.rectSizePrev[0] = (uint16_t)w;
+	cs.resourceSize[1] = cs.resourceSizePrev[1] = cs.rectSize[1] = cs.rectSizePrev[1] = (uint16_t)h;
+	cs.frameIndex = 0;
+	cs.accumulationMode = nrd::AccumulationMode::CLEAR_AND_RESTART;
+	if ( nrd::SetCommonSettings( *nrdInstance, cs ) != nrd::Result::SUCCESS ) {
+		common->Printf( "NRD self-test: FAIL - SetCommonSettings rejected\n" );
+		NrdDestroy( false );
+		return;
+	}
+	nrd::ReblurSettings reblur = {};
+	nrd::SigmaSettings sigma = {};
+	if ( nrd::SetDenoiserSettings( *nrdInstance, NRD_ID_REBLUR_AO, &reblur ) != nrd::Result::SUCCESS
+			|| nrd::SetDenoiserSettings( *nrdInstance, NRD_ID_SIGMA_SHADOW, &sigma ) != nrd::Result::SUCCESS ) {
+		common->Printf( "NRD self-test: FAIL - SetDenoiserSettings rejected\n" );
+		NrdDestroy( false );
+		return;
+	}
+
+	const nrd::Identifier ids[] = { NRD_ID_REBLUR_AO, NRD_ID_SIGMA_SHADOW };
+	const nrd::DispatchDesc *dispatches = NULL;
+	uint32_t dispatchCount = 0;
+	if ( nrd::GetComputeDispatches( *nrdInstance, ids, 2, dispatches, dispatchCount ) != nrd::Result::SUCCESS ) {
+		common->Printf( "NRD self-test: FAIL - GetComputeDispatches rejected\n" );
+		NrdDestroy( false );
+		return;
+	}
+	uint32_t cbBytes = 0, maxResources = 0;
+	for ( uint32_t i = 0; i < dispatchCount; i++ ) {
+		cbBytes += dispatches[i].constantBufferDataSize;
+		if ( dispatches[i].resourcesNum > maxResources ) {
+			maxResources = dispatches[i].resourcesNum;
+		}
+	}
+
+	common->Printf( "NRD self-test: PASS - %ux%u: %u pipelines, %u permanent + %u transient pool textures, "
+		"%u samplers, CB stride %u B x %u sets; frame = %u dispatches (%u CB bytes, max %u resources/dispatch)\n",
+		w, h, (uint32_t)nrdPipes.size(), (uint32_t)nrdPermTex.size(), (uint32_t)nrdTransTex.size(),
+		nrdSamplerCount, nrdCbStride, nrdCbSets, dispatchCount, cbBytes, maxResources );
+
+	NrdDestroy( false );
 }
 
 /*

@@ -15,7 +15,18 @@ substrate the later phases render into, proven by a synthetic-signal validator.
   prebuilt-shader config and must not leak) and linked into the binary under
   `DHEWM3_VULKAN`. Compiles clean on gcc/Linux; mingw cross-build untested (build-win.sh —
   check before the next Windows release).
-- **H2b — VK translation layer (NEXT).** `NrdIntegration` in the VK backend.
+- **H2b — VK translation layer (DONE, this commit).** NrdCreate/NrdDestroy/NrdSelfTest in
+  VulkanBackend.cpp (FSR2-section style, not a separate file — the backend class lives in
+  the .cpp). `r_nrdTest 1` self-test **PASS on the 3080 Ti**: 18 compute pipelines from the
+  embedded SPIR-V, 6 permanent + 10 transient pool textures, 2 immutable samplers, 960 B ×
+  35-set CB ring, 29 dispatches/frame enumerated for the two denoisers. Discovery vs the
+  plan: NRD's SPIR-V uses **two register spaces = two descriptor sets** (resources set 0:
+  textures t20+/storage u3+; CB+samplers set 1: CB b2, samplers s0+), so the layer builds a
+  shared CB/samplers set layout + per-pipeline resource layouts, and each dispatch will
+  consume two sets. `VK_KHR_compute_shader_derivatives` (quads) is probed and enabled at
+  device creation (`haveComputeDerivatives`); NrdCreate refuses without it. GPU dispatch
+  RECORDING is deliberately not in H2b — it lands with H2d's validator, which is what can
+  prove it.
 - **H2c — guide-input production.** World-normal/roughness, linear viewZ, MV packing.
 - **H2d — validator.** `r_nrdTest`: synthetic noisy signal → denoise → variance assert.
 
