@@ -169,6 +169,46 @@ compute capability + a compute shader + tiling). **Risk:** high; Vulkan-only. Do
 
 ---
 
+## Phase 1b — weapon-mask bake + mip-chain trims (2026-09-16)
+
+**Status: BUILT (perf/ssao-followups), pending user A/B.** Three perf-only follow-ups from a
+fresh review of the shipped pipeline:
+
+- **Weapon-mask bake (the big one).** The weapon exclusion (04ecbe52) predates Phase 1 and was
+  never folded in: on the normal-buffer path every horizon tap called `weaponTexel()` — a
+  *scattered full-res RGBA8 fetch* of the normal G-buffer *before* the coarse-mip depth read.
+  At Nightmare (5×10×2 = 100 taps/pixel) that per-tap fetch was exactly the access pattern the
+  depth mip was built to remove. Now `ssao_depthmip.frag` samples the normal buffer's alpha
+  during the level-0 linearize and writes weapon texels as **far depth (60000**, past the
+  ~30000 sky depth, inside R16F range); the march's radius falloff zeroes far occluders, which
+  is semantically identical to the old per-tap skip. `ssao.frag` only evaluates `weaponTexel`
+  on the raw-depth path now (`perTapMask = useNormalBuffer && mip off`); the centre-pixel
+  weapon skip (leave the gun unoccluded) is unchanged. One nuance: at coarse mips the max
+  (farthest) downsample spreads the baked far depth across a coarse texel straddling the
+  weapon silhouette, so far taps near the gun's edge lose a sliver of world occlusion the
+  per-tap full-res mask kept — bounded by `maxLod 2` (4×4 AO texels) and smoothed by the blur.
+- **Chain follows the cap.** `RB_RHI_EnsureSsaoDepthMip` built 6 levels but the march clamps
+  its LOD to `r_ssaoDepthMipMaxLod` (default 2), so levels 3–5 were rendered every frame and
+  never sampled. The chain is now `maxLod + 1` levels (rebuilds when the cvar changes).
+- **Blur reads the mip.** `ssao_blur.frag`'s edge-stopping weights re-derived linear depth
+  from full-res `_currentDepth` per tap (10 fetches + divides per pixel over both passes).
+  With the mip on, unit 1 now holds the mip and the blur `textureLod`s level 0 — the same
+  data already linearized at exactly AO resolution, R16F. Sign differs (positive vs the raw
+  path's negative) but `linDepth` is only differenced/ratioed, so weights are identical.
+
+## Phase 4 — temporal-funded sample budget (A/B, undecided)
+
+**Status: BUILT as a live toggle, awaiting the user's verdict.** `r_ssaoTemporalTrade`
+(bool, not archived, not preset-wired): when 1, the pass runs **4 slices × 6 steps with
+temporal accumulation forced on**, overriding `r_ssaoSlices/Steps/Temporal`; when 0, the
+current cvars apply. Rationale: Nightmare brute-forces 100 taps/pixel with temporal *off*,
+while Medium proves the temporal path reads clean at 2×4 — and Ultra/Nightmare already fund
+the per-object velocity MRT (`r_motionVectors`), so their `ssao_temporal.frag` reprojection
+tracks moving objects better than Medium's camera-only matrix. Expected ~40–50% off the
+horizon-search cost at equal or better stability; the trade is accumulation latency. Compare
+in-game (`r_ssaoTemporalTrade 0/1` on the Nightmare preset), then either promote the budget
+into the Ultra/Nightmare preset rows + retire the cvar, or delete it (trim-debug-cvars policy).
+
 ## Phasing / ROI
 
 1. **Phase 1 (depth mip)** — biggest cache win, portable, moderate effort. Ship first; it also

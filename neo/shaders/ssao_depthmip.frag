@@ -9,6 +9,9 @@
 #include "renderparms.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
+// normal G-buffer, for the weapon/AO mask in .a (gbuffer.frag writes 0 on the view weapon).
+// Bound only when one exists this view (u_windowCoord.x > 0.5); a dummy otherwise, unread.
+SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -21,6 +24,18 @@ void main() {
 	// gl_FragCoord is at the AO-buffer resolution; u_depthTexRecip.xy maps it into the
 	// POT _currentDepth texcoords exactly as ssao.frag's rawDepth() does.
 	vec2  frag = gl_FragCoord.xy;
+
+	// Weapon-mask bake: the view weapon must never occlude — its depth-hacked, pulled-close
+	// depth casts a false AO halo on the world behind it that slides as the gun sways.
+	// Weapon texels become far depth in the whole chain, which the march's radius falloff
+	// zeroes exactly like the old per-tap skip; ssao.frag can then drop its per-tap
+	// full-res weaponTexel() fetch, the scattered read pattern this mip exists to remove.
+	// 60000 sits past the ~30000 sky depth and inside R16F range (max 65504).
+	if ( u_windowCoord.x > 0.5 && texture( u_normalBuffer, frag * u_screenCorrection.xy ).a < 0.5 ) {
+		fragColor = vec4( 60000.0, 0.0, 0.0, 1.0 );
+		return;
+	}
+
 	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
 	// vz is negative (eye looks down -z). Store positive linear depth: it keeps half-float
 	// precision densest near the camera (where AO matters most) and averages cleanly.

@@ -117,7 +117,9 @@ vec3 sampleViewNormal( vec2 frag, vec3 P ) {
 // G-buffer's alpha (gbuffer.frag writes 0 there, 1 elsewhere). Used to drop the weapon
 // as an OCCLUDER during the horizon search: the gun's depth-hacked, pulled-close depth
 // otherwise casts a false AO halo on the world behind it that slides/jitters as the
-// weapon sways. Only meaningful when the normal buffer is bound (useNormalBuffer).
+// weapon sways. Only sampled on the RAW-depth march (normal buffer bound, depth mip
+// off): with the mip on, ssao_depthmip.frag bakes weapon texels as far depth instead,
+// so the march never pays this scattered full-res fetch per tap.
 bool weaponTexel( vec2 frag ) {
 	return texture( u_normalBuffer, frag * u_screenCorrection.xy ).a < 0.5;
 }
@@ -154,6 +156,12 @@ void main() {
 		N = sampleViewNormal( frag, P );         // depth-reconstruct fallback
 	}
 	vec3 V = normalize( -P );                    // toward the eye
+
+	// per-tap weapon exclusion is only needed on the raw-depth march: the depth mip
+	// (u_depthTexRecip.z >= 0.5) carries the weapon bake from ssao_depthmip.frag, so
+	// there the mask fetch — a scattered full-res read per tap that defeated the mip's
+	// cache win — is skipped entirely. Draw-coherent uniforms, free on the GPU.
+	bool perTapMask = useNormalBuffer && u_depthTexRecip.z < 0.5;
 
 	int   numSlices = int( u_localParam1.z );
 	int   numSteps  = int( u_localParam1.y );
@@ -209,11 +217,11 @@ void main() {
 			float lod = clamp( log2( max( distPix * u_depthTexRecip.w, 1.0 ) ), 0.0, u_depthTexRecip.z );
 
 			// Drop occluders that land on the view weapon so the depth-hacked gun never
-			// darkens the world behind it (the source of the sway/move jitter). Only the
-			// normal-buffer path has a weapon mask; the depth-reconstruct fallback can't
-			// tell, so it keeps the old behaviour (weaponTexel is never evaluated then).
+			// darkens the world behind it (the source of the sway/move jitter). Checked
+			// per tap only on the raw-depth march (perTapMask); the mip path bakes the
+			// exclusion, and the depth-reconstruct fallback has no mask to consult.
 			vec2  sp  = frag + duv;
-			if ( !useNormalBuffer || !weaponTexel( sp ) ) {
+			if ( !perTapMask || !weaponTexel( sp ) ) {
 				vec3  Dp  = viewPosStep( sp, lod ) - P;
 				float l2p = dot( Dp, Dp );
 				if ( l2p > 1e-6 ) {
@@ -223,7 +231,7 @@ void main() {
 				}
 			}
 			vec2  sn  = frag - duv;
-			if ( !useNormalBuffer || !weaponTexel( sn ) ) {
+			if ( !perTapMask || !weaponTexel( sn ) ) {
 				vec3  Dn  = viewPosStep( sn, lod ) - P;
 				float l2n = dot( Dn, Dn );
 				if ( l2n > 1e-6 ) {

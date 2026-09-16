@@ -4050,15 +4050,18 @@ static bool RB_RHI_EnsureSsaoDepthMip( rhi::RHI *r, int w, int h ) {
 		rhiSsaoDepthMipRT = 0;
 		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
 	}
-	if ( rhiSsaoDepthMipRT && rhiSsaoDepthMipW == w && rhiSsaoDepthMipH == h ) {
+	// enough levels to cover the horizon radius in coarse mips, but no more than the march
+	// can ever read: r_ssaoDepthMipMaxLod clamps its LOD, so levels past the cap would be
+	// rendered every frame and never sampled. 6 levels (1/32 footprint) stays the ceiling.
+	const int maxLevels = idMath::ClampInt( 2, 6, r_ssaoDepthMipMaxLod.GetInteger() + 1 );
+	int levels = 1;
+	for ( int d = ( w > h ? w : h ); d > 1 && levels < maxLevels; d >>= 1 ) { levels++; }
+
+	if ( rhiSsaoDepthMipRT && rhiSsaoDepthMipW == w && rhiSsaoDepthMipH == h
+			&& rhiSsaoDepthMipLevels == levels ) {
 		return true;
 	}
 	if ( rhiSsaoDepthMipRT ) { r->DestroyRenderTarget( rhiSsaoDepthMipRT ); rhiSsaoDepthMipRT = 0; }
-
-	// enough levels to cover the horizon radius in coarse mips, capped so the chain (and
-	// its per-level blit) stays short — 6 levels already reaches a 1/32 footprint.
-	int levels = 1;
-	for ( int d = ( w > h ? w : h ); d > 1 && levels < 6; d >>= 1 ) { levels++; }
 
 	// R16F (Phase 2): only .r is ever written/read (linear eye depth), so single-channel
 	// half-float is bit-identical to the RGBA16F first cut at a quarter the bandwidth —
@@ -5324,9 +5327,14 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
 	}
 
-	// horizon-search sample budget (clamped to the shader's MAX_SLICES / MAX_STEPS)
-	const int slices = idMath::ClampInt( 1, 8,  r_ssaoSlices.GetInteger() );
-	const int steps  = idMath::ClampInt( 1, 12, r_ssaoSteps.GetInteger() );
+	// horizon-search sample budget (clamped to the shader's MAX_SLICES / MAX_STEPS).
+	// r_ssaoTemporalTrade (A/B, docs/ssao-perf-optimization.md Phase 4) overrides it with
+	// a fixed 4x6 budget funded by forced temporal accumulation, so the brute-force
+	// preset budgets can be compared live against the cheaper temporal look.
+	const bool temporalTrade = r_ssaoTemporalTrade.GetBool();
+	const bool temporalOn    = r_ssaoTemporal.GetBool() || temporalTrade;
+	const int slices = temporalTrade ? 4 : idMath::ClampInt( 1, 8,  r_ssaoSlices.GetInteger() );
+	const int steps  = temporalTrade ? 6 : idMath::ClampInt( 1, 12, r_ssaoSteps.GetInteger() );
 
 	const float *proj  = viewDef->projectionMatrix;
 	const float invP00 = ( proj[0] != 0.0f ) ? 1.0f / proj[0] : 1.0f;
@@ -5372,7 +5380,7 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// per-frame noise rotation for temporal accumulation: advance a golden-ratio walk so
 	// each frame's horizon search jitters differently, giving the temporal pass distinct
 	// samples to average. 0 when temporal is off -> ssao.frag falls back to the plain dither.
-	if ( r_ssaoTemporal.GetBool() ) {
+	if ( temporalOn ) {
 		rhiSsaoJitterPhase += 0.61803399f;
 		rhiSsaoJitterPhase -= (float)(int)rhiSsaoJitterPhase;	// keep in [0,1)
 		parms.windowCoord[1] = rhiSsaoJitterPhase;
@@ -5382,9 +5390,19 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// box-average it down the chain. Done before the horizon search so ssao.frag can
 	// textureLod a coarser mip for its far steps (the cache win).
 	if ( doDepthMip ) {
-		// level 0: linearize _currentDepth into the mip target
+		// level 0: linearize _currentDepth into the mip target. The normal G-buffer rides
+		// on unit 1 so ssao_depthmip.frag bakes the weapon mask into the chain (weapon
+		// texels -> far depth) and the horizon march skips its per-tap full-res mask
+		// fetch; a dummy when no normal buffer exists this view (the shader gates on
+		// windowCoord.x and never samples it, but Vulkan validates the descriptor slot).
 		r->BeginTargetPass( rhiSsaoDepthMipRT, NULL );
 		RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+		if ( useNormalBuf ) {
+			RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+			backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
+		} else {
+			RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+		}
 		RB_RHI_DrawFullscreen( r, depthMipProg, parms, 0 );
 		r->EndPass();
 		// levels 1..N-1: max-downsample from the previous level (a conservative farthest-
@@ -5429,17 +5447,30 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// separable bilateral denoise: horizontal (rhiSsaoRT -> rhiSsaoBlurRT) then vertical
 	// (rhiSsaoBlurRT -> rhiSsaoRT), so the finished AO lands back in rhiSsaoRT. Half the
 	// tap count of the old NxN box for the same reach. localParam0.x picks the axis; the
-	// AO texture is unit 0 (via DrawFullscreen), depth is unit 1.
+	// AO texture is unit 0 (via DrawFullscreen), depth is unit 1 — the linear mip's
+	// level 0 when it exists (already linear, AO-res, R16F: cheaper than re-deriving
+	// from full-res _currentDepth per tap; blurParms.depthTexRecip.z routes the shader),
+	// _currentDepth otherwise.
 	rhi::RenderParams blurParms = parms;
 	blurParms.localParam0[0] = 0.0f;	// horizontal
 	r->BeginTargetPass( rhiSsaoBlurRT, NULL );
-	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	if ( doDepthMip ) {
+		RB_RHI_BindRTUnit( r, 1, rhiSsaoDepthMipRT );
+		backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
+	} else {
+		RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	}
 	RB_RHI_DrawFullscreen( r, blurProg, blurParms, r->GetRenderTargetImage( rhiSsaoRT ) );
 	r->EndPass();
 
 	blurParms.localParam0[0] = 1.0f;	// vertical
 	r->BeginTargetPass( rhiSsaoRT, NULL );
-	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	if ( doDepthMip ) {
+		RB_RHI_BindRTUnit( r, 1, rhiSsaoDepthMipRT );
+		backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
+	} else {
+		RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	}
 	RB_RHI_DrawFullscreen( r, blurProg, blurParms, r->GetRenderTargetImage( rhiSsaoBlurRT ) );
 	r->EndPass();
 
@@ -5450,7 +5481,7 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// motion, into a ping-ponged history buffer that then feeds the lighting. Static
 	// world -> the only motion is the camera, so a single reproj matrix (current view
 	// space -> previous clip) suffices; the shader neighbourhood-clamps to kill ghosting.
-	if ( r_ssaoTemporal.GetBool() && RB_RHI_EnsureSsaoHistory( r, aoW, aoH ) ) {
+	if ( temporalOn && RB_RHI_EnsureSsaoHistory( r, aoW, aoH ) ) {
 		rhi::ShaderHandle tempProg = r->LoadShader( "ssao_temporal" );
 		if ( tempProg ) {
 			// reproject last frame's AO by camera motion; the shared camera state

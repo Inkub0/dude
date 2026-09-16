@@ -7,11 +7,12 @@
 //   u_localParam0.x       = axis (0 = horizontal, 1 = vertical)
 //   u_screenCorrection.xy = 1 / aoTargetSize      (texel size / gl_FragCoord -> uv)
 //   u_depthTexRecip.xy    = ratio / depthUploadSize (gl_FragCoord -> _currentDepth tc)
+//   u_depthTexRecip.z     = >= 0.5 -> unit 1 holds the SSAO linear-depth mip instead
 
 #include "renderparms.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_ssao;          // AO + bent normal (this axis' input)
-SAMPLER_BINDING(1) uniform sampler2D u_currentDepth;  // for edge-stopping weights
+SAMPLER_BINDING(1) uniform sampler2D u_currentDepth;  // for edge-stopping weights (see linDepth)
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -21,7 +22,15 @@ layout(location = 0) out vec4 fragColor;
 
 const vec2 depth_consts = vec2( 0.33333333, -0.33316667 );
 
+// When the SSAO depth mip exists (u_depthTexRecip.z >= 0.5) the backend binds its level 0
+// on unit 1 instead of _currentDepth: already-linear eye depth at exactly this AO
+// resolution — a cheaper R16F fetch with no reconstruction divide. It is POSITIVE where
+// the raw path returns negative, but linDepth is only ever differenced and ratioed, so
+// the sign flip cancels and the edge-stopping weights are identical either way.
 float linDepth( vec2 frag ) {
+	if ( u_depthTexRecip.z >= 0.5 ) {
+		return textureLod( u_currentDepth, frag * u_screenCorrection.xy, 0.0 ).r;
+	}
 	float raw = min( texture( u_currentDepth, frag * u_depthTexRecip.xy ).x, 0.9994 );
 	return 1.0 / ( raw * depth_consts.x + depth_consts.y );       // negative
 }

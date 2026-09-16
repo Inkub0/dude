@@ -1007,6 +1007,7 @@ extern idCVar r_ssaoSpecular;			// also attenuate specular in occluded areas
 extern idCVar r_ssaoDebug;				// 1=show AO buffer, 2=show bent normals
 extern idCVar r_ssaoTemporal;			// accumulate AO across frames via camera reprojection
 extern idCVar r_ssaoTemporalFeedback;	// temporal history weight (0..0.97)
+extern idCVar r_ssaoTemporalTrade;		// A/B: temporal-funded 4x6 budget vs the current cvars
 extern idCVar r_temporalResetDist;		// view-origin jump (world units) that resets temporal history (cut/teleport); 0 = never
 extern idCVar r_motionVectors;			// VK: per-object screen-velocity MRT in the normal prepass (R1/A2, feeds FSR2 / temporal SSAO+SSR)
 extern idCVar r_mvDebug;				// visualize the velocity buffer: 0=off, 1=direction, 2=magnitude
