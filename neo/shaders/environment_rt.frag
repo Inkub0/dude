@@ -34,7 +34,12 @@ layout(set = 2, binding = 0) uniform sampler2D u_rtTextures[];
 
 const vec3  RT_KEYDIR  = vec3( 0.42640f, 0.53300f, 0.72760f );	// normalize(0.4,0.5,0.9) — matches ssr_rt
 const float RT_AMBIENT = 0.28f;									// ambient term, matches ssr_rt MVP shade
-const vec3  RT_SKYFILL = vec3( 0.10f, 0.11f, 0.13f );			// dim sky/ambient on a ray miss (no cube)
+// item 4: a subtle sky GRADIENT on a ray miss (no cube) -- lighter looking up, darker looking down,
+// centred on the flat fill that read right -- plus a grazing Fresnel boost so glass reflects more at
+// glancing angles like real glass.
+const vec3  RT_SKY_UP   = vec3( 0.13f, 0.14f, 0.16f );			// reflection points up (ceiling / sky)
+const vec3  RT_SKY_DOWN = vec3( 0.07f, 0.08f, 0.09f );			// reflection points down (floor / ground)
+const float RT_GRAZE    = 1.0f;									// added reflectivity at grazing angles
 
 void main() {
 	vec3 N = normalize( var_WorldNormal );
@@ -42,6 +47,12 @@ void main() {
 	if ( dot( N, V ) < 0.0 ) { N = -N; }				// reflect off the viewer-facing side (glass is thin/2-sided)
 	vec3 R = reflect( -V, N );							// world reflection direction
 	vec3 origin = var_WorldPos + N * 2.0;				// bias off the surface (same as ssr_rt) to avoid self-hit
+	// item 4: sky gradient for a ray miss (up lighter, down darker) + Schlick grazing boost (head-on
+	// unchanged -> boost ~0, grazing edges reflect more, like real glass Fresnel).
+	vec3  skyFill = mix( RT_SKY_DOWN, RT_SKY_UP, clamp( R.z * 0.5 + 0.5, 0.0, 1.0 ) );
+	float ndv     = clamp( dot( N, V ), 0.0, 1.0 );
+	float m       = 1.0 - ndv;
+	float graze   = 1.0 + RT_GRAZE * ( m * m ) * ( m * m ) * m;	// pow(1-ndv,5) as muls (RR11-style)
 
 	rayQueryEXT rq;
 	rayQueryInitializeEXT( rq,
@@ -49,14 +60,14 @@ void main() {
 		gl_RayFlagsOpaqueEXT, 0xFFu, origin, 0.0, R, 8192.0 );
 	while ( rayQueryProceedEXT( rq ) ) { }
 
-	vec3 refl = RT_SKYFILL;								// default: miss -> sky/ambient fill (never black)
+	vec3 refl = skyFill;								// default: miss -> sky/ambient fill (never black)
 	if ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ) {
 		uint ci = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
 		uint gi = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
 		GeoTable table = GeoTable( uvec2( floatBitsToUint( u_rtParms.z ), floatBitsToUint( u_rtParms.w ) ) );
 		GeoDesc g = table.d[ ci + gi ];
 		if ( ( g.flags & 1u ) == 0u ) {
-			refl = RT_SKYFILL;							// positions-only/defer row (no attributes) -> sky fill
+			refl = skyFill;							// positions-only/defer row (no attributes) -> sky fill
 		} else {
 			uint prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
 			vec2 bc   = rayQueryGetIntersectionBarycentricsEXT( rq, true );
@@ -86,5 +97,5 @@ void main() {
 
 	// modulate by the stage tint exactly as the cube path did (environment.frag: cube * var_Color),
 	// so brightness/hue track the material's dimming; keep the pane's own alpha for the dst blend.
-	fragColor = vec4( refl * var_Color.rgb, var_Color.a );
+	fragColor = vec4( refl * var_Color.rgb * graze, var_Color.a );
 }

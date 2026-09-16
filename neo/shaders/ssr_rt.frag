@@ -122,7 +122,7 @@ void main() {
 	uint gi = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
 	GeoTable table = GeoTable( uvec2( floatBitsToUint( u_rtParms.z ), floatBitsToUint( u_rtParms.w ) ) );
 	GeoDesc g = table.d[ ci + gi ];
-	if ( ( g.flags & 1u ) == 0u ) { fragColor = vec4( 0.0 ); return; }	// static hit -> SSR/probes own it
+	if ( ( g.flags & 1u ) == 0u ) { fragColor = vec4( 0.0 ); return; }	// no-attr defer row (mover/prop) -> not shadeable yet
 
 	uint prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
 	vec2 bc   = rayQueryGetIntersectionBarycentricsEXT( rq, true );
