@@ -28,10 +28,6 @@ VARY(0) in vec2 var_TexCoord;
 
 layout(location = 0) out vec4 fragColor;
 
-// Doom 3's fixed near / near-infinite far projection in GL clip depth -> linear
-// eye z (negative). Same constants as ssao.frag / ssr.frag.
-const vec2 depth_consts = vec2( 0.33333333, -0.33316667 );
-
 void main() {
 	vec2  frag = gl_FragCoord.xy;
 	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
@@ -55,15 +51,14 @@ void main() {
 		discard;
 	}
 
-	// view-space position for NdotV (same reconstruction as ssr.frag). u_windowCoord.z
-	// is the view-Y sign (+1 GL / -1 Vulkan): flips the reconstructed Y so NdotV agrees
-	// with the view-space G-buffer normal on VK's top-down framebuffer.
-	float vz  = 1.0 / ( raw * depth_consts.x + depth_consts.y );      // negative
+	// View direction for NdotV. The view-space position is P = depth * dir with
+	// dir = ( ndc.x/proj00, ndc.y*ySign/proj11, -1 ) and depth > 0, so V = normalize(-P)
+	// is INVARIANT to the (positive) depth: this pass only needs the ray's DIRECTION, never
+	// its length, so the linear-eye-z divide the other SSR passes compute is unnecessary here
+	// (raw is still used for the sky discard above). u_windowCoord.z = view-Y sign (VK flip).
 	vec2  ndc = uv * 2.0 - 1.0;
-	float d   = -vz;
-	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
 	vec3  N   = normalize( nt.xyz * 2.0 - 1.0 );
-	vec3  V   = normalize( -P );
+	vec3  V   = normalize( vec3( -ndc.x * u_localParam0.x, -ndc.y * u_windowCoord.z * u_localParam0.y, 1.0 ) );
 
 	// Schlick Fresnel: dielectrics (floor tiles) reflect mostly at grazing angles,
 	// metals at all angles. F0 0.9 (not albedo — no albedo buffer) keeps untinted

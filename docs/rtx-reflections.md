@@ -231,6 +231,13 @@ spherical-gaussian Fresnel (an *approximation*, not equivalent) and YCoCg/k-DOP 
   shared third barycentric `w0 = 1−bc.x−bc.y` (used by both the normal and texcoord interpolation). Pure
   common-subexpression elimination — bit-exact; the compiler likely already folds it, so this is mostly
   intent/readability plus a belt-and-suspenders guarantee for shaderc.
+- **D — `ssr_composite` view direction drops the depth divide.** This pass reconstructs a view-space `P` only
+  to form `V = normalize(−P)` for the Fresnel `NdotV`. Since `P = depth · dir` with `depth > 0`, `normalize` is
+  invariant to the positive depth: `V = normalize(−dir)`, `dir = (ndc.x/proj00, ndc.y·ySign/proj11, −1)`. So the
+  linear-eye-z divide `1/(raw·c.x + c.y)` is dead work here (only `ssr`/`ssr_rt`/`ssr_temporal`, which use `P`'s
+  *magnitude* to march/offset/reproject, still need it). Mathematically exact; FP-wise it differs only by the
+  rounding of one `normalize`, invisible in a smooth reflectance term. Removes a divide per reflective pixel on
+  the full-res composite (and the now-unused `depth_consts`).
 
 **Verify:** build clean (`SPIR-V: 4 compiled … 0 failures`). A/B the GPU cost with `r_vkGpuTime` on a
 reflective, monster-in-frame scene (the composite + `ssr_rt` are the touched hot paths); the reflection
