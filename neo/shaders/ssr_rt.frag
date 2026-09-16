@@ -96,7 +96,9 @@ void main() {
 	// Schlick Fresnel + gloss window, same as ssr_composite (F0 0.9 for metal keeps untinted steel)
 	float ndv  = max( dot( Nr, V ), 0.0 );
 	float F0   = mix( 0.04, 0.9, metal );
-	float fres = F0 + ( 1.0 - F0 ) * pow( 1.0 - ndv, 5.0 );
+	float m    = 1.0 - ndv;
+	float m2   = m * m;
+	float fres = F0 + ( 1.0 - F0 ) * ( m2 * m2 * m );					// pow(1-ndv,5) as 3 muls: exact, no exp2/log2
 	float weight = fres * gloss * u_localParam1.y;						// * r_ssrIntensity
 	if ( weight < 0.002 ) { fragColor = vec4( 0.0 ); return; }
 
@@ -126,18 +128,20 @@ void main() {
 	vec2 bc   = rayQueryGetIntersectionBarycentricsEXT( rq, true );
 	mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
 	uint s  = g.stride >> 2u;
-	uint i0 = g.ib.i[ 3u * prim + 0u ];
-	uint i1 = g.ib.i[ 3u * prim + 1u ];
-	uint i2 = g.ib.i[ 3u * prim + 2u ];
-	vec3 n0 = vec3( uintBitsToFloat( g.vb.w[ i0*s + 5u ] ), uintBitsToFloat( g.vb.w[ i0*s + 6u ] ), uintBitsToFloat( g.vb.w[ i0*s + 7u ] ) );
-	vec3 n1 = vec3( uintBitsToFloat( g.vb.w[ i1*s + 5u ] ), uintBitsToFloat( g.vb.w[ i1*s + 6u ] ), uintBitsToFloat( g.vb.w[ i1*s + 7u ] ) );
-	vec3 n2 = vec3( uintBitsToFloat( g.vb.w[ i2*s + 5u ] ), uintBitsToFloat( g.vb.w[ i2*s + 6u ] ), uintBitsToFloat( g.vb.w[ i2*s + 7u ] ) );
-	vec3 hitN = normalize( mat3( o2w ) * ( ( 1.0 - bc.x - bc.y ) * n0 + bc.x * n1 + bc.y * n2 ) );
+	uint p3 = 3u * prim;
+	uint b0 = g.ib.i[ p3 + 0u ] * s;					// base word index of each hit vertex (idDrawVert = s words)
+	uint b1 = g.ib.i[ p3 + 1u ] * s;
+	uint b2 = g.ib.i[ p3 + 2u ] * s;
+	float w0 = 1.0 - bc.x - bc.y;						// third barycentric, shared by normal + texcoord interp
+	vec3 n0 = vec3( uintBitsToFloat( g.vb.w[ b0 + 5u ] ), uintBitsToFloat( g.vb.w[ b0 + 6u ] ), uintBitsToFloat( g.vb.w[ b0 + 7u ] ) );
+	vec3 n1 = vec3( uintBitsToFloat( g.vb.w[ b1 + 5u ] ), uintBitsToFloat( g.vb.w[ b1 + 6u ] ), uintBitsToFloat( g.vb.w[ b1 + 7u ] ) );
+	vec3 n2 = vec3( uintBitsToFloat( g.vb.w[ b2 + 5u ] ), uintBitsToFloat( g.vb.w[ b2 + 6u ] ), uintBitsToFloat( g.vb.w[ b2 + 7u ] ) );
+	vec3 hitN = normalize( mat3( o2w ) * ( w0 * n0 + bc.x * n1 + bc.y * n2 ) );
 	// RR4: interpolate the hit triangle's texcoords (idDrawVert st at uint offset 3) for the diffuse fetch
-	vec2 st0 = vec2( uintBitsToFloat( g.vb.w[ i0*s + 3u ] ), uintBitsToFloat( g.vb.w[ i0*s + 4u ] ) );
-	vec2 st1 = vec2( uintBitsToFloat( g.vb.w[ i1*s + 3u ] ), uintBitsToFloat( g.vb.w[ i1*s + 4u ] ) );
-	vec2 st2 = vec2( uintBitsToFloat( g.vb.w[ i2*s + 3u ] ), uintBitsToFloat( g.vb.w[ i2*s + 4u ] ) );
-	vec2 hitST = ( 1.0 - bc.x - bc.y ) * st0 + bc.x * st1 + bc.y * st2;
+	vec2 st0 = vec2( uintBitsToFloat( g.vb.w[ b0 + 3u ] ), uintBitsToFloat( g.vb.w[ b0 + 4u ] ) );
+	vec2 st1 = vec2( uintBitsToFloat( g.vb.w[ b1 + 3u ] ), uintBitsToFloat( g.vb.w[ b1 + 4u ] ) );
+	vec2 st2 = vec2( uintBitsToFloat( g.vb.w[ b2 + 3u ] ), uintBitsToFloat( g.vb.w[ b2 + 4u ] ) );
+	vec2 hitST = w0 * st0 + bc.x * st1 + bc.y * st2;
 
 	// RR4 shade: sample the hit surface's real diffuse at the interpolated st (bindless slot texIndex-1),
 	// lit by a fixed key light + ambient; the interpolated hit NORMAL (RR1-validated) gives the 3D look.

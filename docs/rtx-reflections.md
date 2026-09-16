@@ -207,6 +207,36 @@ rows). The normal transform is NOT stored — the shader gets it from `ObjectToW
   measure, optional sharper reconstruction (loosen the clip / true un-jittered TAAU), preset wiring
   (`r_rtReflections` into Ultra Nightmare).
 
+## RR11 — shader micro-optimisation (mathematically equivalent, cheaper)
+
+A literature-informed audit pass (real-time blur/TAA/Fresnel references) for **same output, fewer
+resources**. Every change is either bit-exact or exact-in-intent-and-more-accurate — no visual change is
+intended; the RT-reflection look is frozen at the RR6–RR10 result. Deliberately NOT taken: the Karis
+spherical-gaussian Fresnel (an *approximation*, not equivalent) and YCoCg/k-DOP variance clipping (a
+*quality* change to `ssr_temporal`, not a cost reduction). Both are noted as future options.
+
+- **A — `ssr_rt_composite` box blur: 25 point taps → 8 bilinear taps + reused centre.** The RR6b blur is
+  a contiguous 5×5 box (shipped tap spacing = 1 texel, `RhiWorld.cpp` `localParam0.y = 1`). A box is
+  separable, and the RT target is sampled **LINEAR + CLAMP_TO_EDGE** (`VulkanBackend.cpp` render targets:
+  `GetSampler(TF_LINEAR,…)`), so a bilinear fetch at the **midpoint** of two adjacent texels returns their
+  exact 50/50 average. Grouping each axis `{-2,-1},{0},{+1,+2}` → `{pair, centre, pair}` with per-axis
+  weights `{2,1,2}/5` reproduces the 25-texel equal average **bit-for-bit**: corner taps average a 2×2
+  (weight 4/25), edge taps a 1×2 (2/25), centre is the lone texel (1/25, reuse the already-fetched `c`).
+  ~3× fewer texture fetches on the full-res composite. Exact at spacing 1; a dilated spacing degrades to an
+  equivalent smooth box (not the sparse dilated one), which is fine — spacing is not exposed as a cvar.
+- **B — Schlick Fresnel `pow(1−c, 5.0)` → `m²·m²·m` (3 muls)** in `ssr_rt`, `ssr_composite`, `ssr`. glslang
+  emits a real `Pow` (exp2∘log2) for a constant integer exponent; the multiply form is **exact and *more*
+  accurate** (no transcendental round-trip) as well as cheaper, per reflective pixel across three shaders.
+- **C — `ssr_rt` hit-vertex fetch CSE.** Hoist the per-vertex base word index `i·s` into `b0/b1/b2` and the
+  shared third barycentric `w0 = 1−bc.x−bc.y` (used by both the normal and texcoord interpolation). Pure
+  common-subexpression elimination — bit-exact; the compiler likely already folds it, so this is mostly
+  intent/readability plus a belt-and-suspenders guarantee for shaderc.
+
+**Verify:** build clean (`SPIR-V: 4 compiled … 0 failures`). A/B the GPU cost with `r_vkGpuTime` on a
+reflective, monster-in-frame scene (the composite + `ssr_rt` are the touched hot paths); the reflection
+image should be pixel-indistinguishable before/after. `ssr_temporal` and the `ssr` march are left as-is —
+already near-optimal for their algorithms (the march's `projectToFrag` was folded to ~5 muls earlier).
+
 ## Risks & mitigations
 
 - **Shading an off-screen hit with no material texture.** MVP shades from `gpuSkinVB` vertex colour ×

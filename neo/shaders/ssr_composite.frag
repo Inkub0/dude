@@ -70,7 +70,9 @@ void main() {
 	// metal reflections, which reads right on Doom 3's grey steel.
 	float NdotV = clamp( dot( N, V ), 0.0, 1.0 );
 	float F0 = mix( 0.04, 0.9, metal );
-	float F  = F0 + ( 1.0 - F0 ) * pow( 1.0 - NdotV, 5.0 );
+	float m  = 1.0 - NdotV;
+	float m2 = m * m;
+	float F  = F0 + ( 1.0 - F0 ) * ( m2 * m2 * m );	// pow(1-NdotV,5) as 3 muls: exact, no exp2/log2
 
 	// reflection colour. Sharp path (glossyMaxLod == 0): a single-level bilinear
 	// upsample, byte-identical to the pre-glossy build. Glossy path: sample the

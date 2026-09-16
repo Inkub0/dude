@@ -43,16 +43,23 @@ void main() {
 	if ( amt <= 0.0 ) {
 		result = c;						// r_rtReflBlur 0: sharp 1:1 (the mask below still applies)
 	} else {
-		// fixed 5x5 box (compile-time unrolled), tap spacing scaled by u_localParam0.y so the spread can
-		// be tuned without changing the tap count.
-		vec2 step = u_screenCorrection.xy * max( u_localParam0.y, 0.0 );
-		vec4 sum = vec4( 0.0 );
-		for ( int y = -2; y <= 2; ++y ) {
-			for ( int x = -2; x <= 2; ++x ) {
-				sum += texture( u_rtRefl, var_TexCoord + vec2( float( x ), float( y ) ) * step );
-			}
-		}
-		sum *= ( 1.0 / 25.0 );
+		// 5x5 box as 8 BILINEAR taps + the already-fetched centre, instead of 25 point taps (RR11).
+		// A contiguous box (the shipped tap spacing is 1 texel, u_localParam0.y = 1) is separable, and a
+		// bilinear fetch at the MIDPOINT of two adjacent texels returns their exact average. Grouping each
+		// axis as {-2,-1},{0},{+1,+2} -> {pair, centre, pair} with per-axis weights {2,1,2}/5 reproduces the
+		// 25-texel equal average bit-for-bit: every source texel still contributes 1/25. Corner taps average
+		// a 2x2 block (weight 4/25), edge taps a 1x2 pair (2/25), the centre is the lone texel (1/25 -> reuse
+		// c). Exact at spacing 1; a dilated spacing turns it into an equivalent smooth box, not the sparse one.
+		vec2 o = 1.5 * u_screenCorrection.xy * max( u_localParam0.y, 0.0 );	// midpoint of texels +/-1 and +/-2
+		vec4 sum = c * ( 1.0 / 25.0 )
+			+ ( texture( u_rtRefl, var_TexCoord + vec2( -o.x,  0.0 ) )
+			  + texture( u_rtRefl, var_TexCoord + vec2(  o.x,  0.0 ) )
+			  + texture( u_rtRefl, var_TexCoord + vec2(  0.0, -o.y ) )
+			  + texture( u_rtRefl, var_TexCoord + vec2(  0.0,  o.y ) ) ) * ( 2.0 / 25.0 )
+			+ ( texture( u_rtRefl, var_TexCoord + vec2( -o.x, -o.y ) )
+			  + texture( u_rtRefl, var_TexCoord + vec2(  o.x, -o.y ) )
+			  + texture( u_rtRefl, var_TexCoord + vec2( -o.x,  o.y ) )
+			  + texture( u_rtRefl, var_TexCoord + vec2(  o.x,  o.y ) ) ) * ( 4.0 / 25.0 );
 		result = mix( c, sum, amt );	// blend sharp<->blurred by strength
 	}
 
