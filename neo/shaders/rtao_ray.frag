@@ -58,12 +58,22 @@ void main() {
 		return;
 	}
 
-	// view-space position (ssao.frag reconstruction, incl. the VK view-Y sign) + normal
+	// view-space position (ssao.frag reconstruction, incl. the VK view-Y sign) + normal.
+	// HANG GUARD: a degenerate G-buffer normal would normalize() to NaN, and a ray query
+	// launched with a NaN direction is undefined behaviour that can hang RT traversal
+	// outright (driver kills the context: Xid 109 / VK_ERROR_DEVICE_LOST). Any such pixel
+	// reads unoccluded instead of tracing.
 	float vz  = 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y );   // negative
 	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
 	float d   = -vz;
 	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
-	vec3  N   = normalize( nt.xyz * 2.0 - 1.0 );
+	vec3  Nraw = nt.xyz * 2.0 - 1.0;
+	float nl2  = dot( Nraw, Nraw );
+	if ( !( nl2 > 1e-4 ) ) {					// also catches NaN (comparisons with NaN are false)
+		fragColor = vec4( 1.0 );
+		return;
+	}
+	vec3  N   = Nraw * inversesqrt( nl2 );
 
 	// lift to world (u_modelViewMatrix = inverse view), like ssr_rt.frag
 	vec3 Pw = ( u_modelViewMatrix * vec4( P, 1.0 ) ).xyz;
@@ -79,7 +89,13 @@ void main() {
 	float cosT = sqrt( 1.0 - r2 );
 	vec3 T, B;
 	onb( Nw, T, B );
-	vec3 dir = normalize( T * ( cos( phi ) * sinT ) + B * ( sin( phi ) * sinT ) + Nw * cosT );
+	vec3 dir = T * ( cos( phi ) * sinT ) + B * ( sin( phi ) * sinT ) + Nw * cosT;
+	float dl2 = dot( dir, dir );
+	if ( !( dl2 > 1e-6 ) ) {					// same NaN/degenerate guard for the ray itself
+		fragColor = vec4( 1.0 );
+		return;
+	}
+	dir *= inversesqrt( dl2 );
 
 	// closest hit inside the AO radius (opaque only). Origin biased along the normal so
 	// the surface never self-occludes (localParam1.z, world units).

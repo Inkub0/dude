@@ -19,8 +19,16 @@ layout(location = 0) out vec4 fragColor;
 
 void main() {
 	vec4 nt = texture( u_normalBuffer, gl_FragCoord.xy * u_screenCorrection.xy );
-	vec3 N  = normalize( nt.xyz * 2.0 - 1.0 );
-	vec3 n  = normalize( mat3( u_modelViewMatrix ) * N );		// world-space
+	// degenerate-normal guard (mirrors rtao_ray.frag): a NaN here would poison the
+	// denoiser's history through temporal accumulation — fall back to world up
+	vec3  Nraw = nt.xyz * 2.0 - 1.0;
+	float nl2  = dot( Nraw, Nraw );
+	vec3  n;
+	if ( !( nl2 > 1e-4 ) ) {
+		n = vec3( 0.0, 0.0, 1.0 );
+	} else {
+		n = normalize( mat3( u_modelViewMatrix ) * ( Nraw * inversesqrt( nl2 ) ) );	// world-space
+	}
 
 	// _NRD_EncodeNormalRoughness101010( n, roughness=1 ), materialID 0
 	n /= abs( n.x ) + abs( n.y ) + abs( n.z );
