@@ -59,7 +59,18 @@ void main() {
 	// Y-flip via motionVectorScale. u_localParam1.xy cancels the per-frame projection jitter (R1/B;
 	// 0 when r_temporalJitter is off) so the jitter never registers as motion. Zeroed on the depth-
 	// hacked view weapon (u_localParam0.x == 0, the same mask written to fragColor.a).
-	vec2 curUV  = var_CurClip.xy  / var_CurClip.w;
-	vec2 prevUV = var_PrevClip.xy / var_PrevClip.w;
-	out_Velocity = ( ( curUV - prevUV ) * 0.5 + u_localParam1.xy ) * u_localParam0.x;
+	// Zero the depth-hacked view weapon (u_localParam0.x == 0) and any degenerate clip w
+	// (a dummy/zero previous MVP, or a vertex on/behind the near plane) by BRANCHING, not
+	// by multiplying the result by the mask: prevUV = xy/w is NaN/Inf when w is 0, and
+	// NaN * 0.0 is still NaN — so the old `* u_localParam0.x` left the weapon's velocity
+	// as NaN. That NaN poisoned every consumer: FSR2 resolved the weapon to black and a
+	// NaN reaching its compute could device-lost (the "FSR + motion vectors" crash), and
+	// the SSAO/RTAO temporal reprojections smeared. A hard zero = "no motion here."
+	if ( u_localParam0.x < 0.5 || var_CurClip.w <= 0.0 || var_PrevClip.w <= 0.0 ) {
+		out_Velocity = vec2( 0.0 );
+	} else {
+		vec2 curUV  = var_CurClip.xy  / var_CurClip.w;
+		vec2 prevUV = var_PrevClip.xy / var_PrevClip.w;
+		out_Velocity = ( curUV - prevUV ) * 0.5 + u_localParam1.xy;
+	}
 }
