@@ -381,6 +381,17 @@ static rhi::RenderTargetHandle rhiRtaoRayRT = 0;
 static int   rhiRtaoW = 0, rhiRtaoH = 0;
 static bool  rhiRtaoRanThisView = false;			// ray output produced this view (overlay gate)
 static float rhiRtaoJitterPhase = 0.0f;				// per-frame golden-ratio noise rotation
+// H4b guide inputs + H4c denoise state: NRD's IN_VIEWZ (signed linear Z, R16F) and
+// IN_NORMAL_ROUGHNESS (world-space encoding-2 pack, RGBA16F) targets, plus the previous
+// frame's camera for the denoiser's reprojection (its own staging — the shared temporal
+// cam state advances on a different schedule).
+static rhi::RenderTargetHandle rhiRtaoViewzRT = 0;
+static rhi::RenderTargetHandle rhiRtaoPackRT = 0;
+static bool  rhiRtaoDenoisedThisView = false;		// NRD ran: GetRtaoOutputImage is current
+static float rhiRtaoPrevProj[16];
+static float rhiRtaoPrevView[16];
+static float rhiRtaoPrevJitter[2] = { 0.0f, 0.0f };
+static bool  rhiRtaoPrevValid = false;
 
 // ---- shared camera temporal state (docs/fsr-temporal-pipeline.md, increment A1) ----
 // The SSAO and SSR temporal resolves both reproject last frame's history by pure camera
@@ -3203,6 +3214,8 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
 	rhiRtaoRanThisView = false;
+	rhiRtaoViewzRT = 0;			rhiRtaoPackRT = 0;
+	rhiRtaoDenoisedThisView = false;	rhiRtaoPrevValid = false;
 
 	rhiSsrRT = 0;				rhiSsrW = rhiSsrH = 0;
 	rhiSsrDepthMinRT = 0;		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
@@ -5657,8 +5670,84 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
 	r->EndPass();
-
 	rhiRtaoRanThisView = true;
+
+	// ---- H4b guide inputs + H4c NRD denoise (docs/rtx-rtao.md) ----
+	// The denoiser needs motion vectors for its reprojection; without the velocity MRT
+	// (r_motionVectors / r_fsr off) only the raw ray pass runs (r_rtaoDebug 1).
+	rhiRtaoDenoisedThisView = false;
+	rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
+		? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
+	rhi::ShaderHandle vzProg = r->LoadShader( "rtao_viewz" );
+	rhi::ShaderHandle pkProg = r->LoadShader( "rtao_pack" );
+	if ( velImg != 0 && vzProg != 0 && pkProg != 0 ) {
+		// (re)create the two guide targets alongside the ray target's size
+		if ( rhiRtaoViewzRT && r->GetRenderTargetImage( rhiRtaoViewzRT ) == 0 ) { rhiRtaoViewzRT = 0; }
+		if ( rhiRtaoPackRT && r->GetRenderTargetImage( rhiRtaoPackRT ) == 0 )  { rhiRtaoPackRT = 0; }
+		if ( rhiRtaoViewzRT == 0 ) { rhiRtaoViewzRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, 1 ); }
+		if ( rhiRtaoPackRT == 0 )  { rhiRtaoPackRT = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, 1 ); }
+	}
+	if ( velImg != 0 && vzProg != 0 && pkProg != 0 && rhiRtaoViewzRT != 0 && rhiRtaoPackRT != 0 ) {
+		// IN_VIEWZ: signed linear view Z
+		rhi::RenderParams gp;
+		memset( &gp, 0, sizeof( gp ) );
+		gp.mvpMatrix[0] = gp.mvpMatrix[5] = gp.mvpMatrix[10] = gp.mvpMatrix[15] = 1.0f;
+		gp.depthTexRecip[0] = 1.0f / uploadW;
+		gp.depthTexRecip[1] = 1.0f / uploadH;
+		r->BeginTargetPass( rhiRtaoViewzRT, NULL );
+		RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+		RB_RHI_DrawFullscreen( r, vzProg, gp, 0 );
+		r->EndPass();
+
+		// IN_NORMAL_ROUGHNESS: world-space NRD encoding-2 pack from the G-buffer normal
+		rhi::RenderParams pp;
+		memset( &pp, 0, sizeof( pp ) );
+		pp.mvpMatrix[0] = pp.mvpMatrix[5] = pp.mvpMatrix[10] = pp.mvpMatrix[15] = 1.0f;
+		memcpy( pp.modelViewMatrix, invView, sizeof( invView ) );
+		pp.screenCorrection[0] = 1.0f / w;
+		pp.screenCorrection[1] = 1.0f / h;
+		r->BeginTargetPass( rhiRtaoPackRT, NULL );
+		RB_RHI_BindRTUnit( r, 0, rhiNormalResultRT );
+		backEnd.glState.tmu[0].current2DMap = -1;
+		RB_RHI_DrawFullscreen( r, pkProg, pp, 0 );
+		r->EndPass();
+
+		// H4c: the ReBLUR denoise on the frame command buffer
+		rhi::RtaoDenoiseArgs da;
+		memset( &da, 0, sizeof( da ) );
+		da.rayRT = rhiRtaoRayRT;
+		da.viewzRT = rhiRtaoViewzRT;
+		da.normalRT = rhiRtaoPackRT;
+		da.velImage = velImg;
+		da.w = w;
+		da.h = h;
+		memcpy( da.viewToClip, viewDef->projectionMatrix, sizeof( da.viewToClip ) );
+		memcpy( da.worldToView, viewDef->worldSpace.modelViewMatrix, sizeof( da.worldToView ) );
+		memcpy( da.viewToClipPrev, rhiRtaoPrevValid ? rhiRtaoPrevProj : da.viewToClip, sizeof( da.viewToClipPrev ) );
+		memcpy( da.worldToViewPrev, rhiRtaoPrevValid ? rhiRtaoPrevView : da.worldToView, sizeof( da.worldToViewPrev ) );
+		// jitter: engine +Y-up pixels -> the top-left convention (the FSR2-verified mapping)
+		da.jitterX = -viewDef->jitter[0];
+		da.jitterY = viewDef->jitter[1];
+		da.jitterPrevX = rhiRtaoPrevValid ? -rhiRtaoPrevJitter[0] : da.jitterX;
+		da.jitterPrevY = rhiRtaoPrevValid ? rhiRtaoPrevJitter[1] : da.jitterY;
+		// engine velocity = (currUV - prevUV) in +Y-up UV; NRD wants prevUV = uv + mv in
+		// top-down UV: x negates, y's two flips cancel -> scale (-1, +1)
+		da.mvScaleX = -1.0f;
+		da.mvScaleY = 1.0f;
+		da.hitDistA = 0.5f * radius;			// mirrors rtao_ray.frag's normalization
+		da.hitDistB = 0.1f;
+		da.denoisingRange = 20000.0f;			// < the ~30000 sky depth: sky excluded
+		da.frameIndex = (unsigned int)tr.frameCount;
+		da.reset = !rhiRtaoPrevValid;
+		rhiRtaoDenoisedThisView = r->RtaoDenoise( da );
+	}
+	// stage this frame's camera for next frame's reprojection
+	memcpy( rhiRtaoPrevProj, viewDef->projectionMatrix, sizeof( rhiRtaoPrevProj ) );
+	memcpy( rhiRtaoPrevView, viewDef->worldSpace.modelViewMatrix, sizeof( rhiRtaoPrevView ) );
+	rhiRtaoPrevJitter[0] = viewDef->jitter[0];
+	rhiRtaoPrevJitter[1] = viewDef->jitter[1];
+	rhiRtaoPrevValid = true;
+
 	RB_RHI_ForgetTexBinds();
 	backEnd.currentScissor = viewDef->scissor;
 }
@@ -5675,6 +5764,15 @@ ssao_debug fullscreen program (mode 1 shows the red channel as the AO scalar).
 void RB_RHI_RtaoDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int mode = r_rtaoDebug.GetInteger();
 	if ( mode <= 0 || !rhiRtaoRanThisView || rhiRtaoRayRT == 0 ) {
+		return;
+	}
+	// 1 = the raw noisy ray output; 2 = the NRD-denoised result (falls back to raw
+	// while the denoiser hasn't run — no velocity buffer, non-RT hardware, etc.)
+	rhi::ImageHandle srcImg = r->GetRenderTargetImage( rhiRtaoRayRT );
+	if ( mode >= 2 && rhiRtaoDenoisedThisView && r->GetRtaoOutputImage() != 0 ) {
+		srcImg = r->GetRtaoOutputImage();
+	}
+	if ( srcImg == 0 ) {
 		return;
 	}
 	rhi::ShaderHandle prog = r->LoadShader( "ssao_debug" );
@@ -5695,7 +5793,7 @@ void RB_RHI_RtaoDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
 	backEnd.currentScissor = viewDef->scissor;
 
-	RB_RHI_DrawFullscreen( r, prog, parms, r->GetRenderTargetImage( rhiRtaoRayRT ) );
+	RB_RHI_DrawFullscreen( r, prog, parms, srcImg );
 	RB_RHI_ForgetTexBinds();
 }
 

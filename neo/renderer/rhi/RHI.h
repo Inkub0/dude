@@ -172,6 +172,28 @@ struct Fsr2DispatchArgs {
 	float	reactiveScale;
 };
 
+// H4 RTAO denoise (docs/rtx-rtao.md H4c). Vulkan + RT hardware only; other backends
+// return false. The backend runs the NRD REBLUR_DIFFUSE_OCCLUSION instance over the
+// caller-produced guide inputs and the noisy ray pass, writing the denoised occlusion
+// into a backend-owned R16F storage image exposed via GetRtaoOutputImage(). Matrices are
+// column-major GL-style float[16], Doom world units throughout (viewZ negative, RH).
+struct RtaoDenoiseArgs {
+	RenderTargetHandle	rayRT;			// IN_DIFF_HITDIST: the noisy normalized-hit-distance R16F
+	RenderTargetHandle	viewzRT;		// IN_VIEWZ: signed linear view Z, R16F
+	RenderTargetHandle	normalRT;		// IN_NORMAL_ROUGHNESS: NRD encoding-2 pack, RGBA16F
+	ImageHandle			velImage;		// IN_MV: RG16F screen-space velocity (+Y-up engine values)
+	int		w, h;
+	float	viewToClip[16], viewToClipPrev[16];
+	float	worldToView[16], worldToViewPrev[16];
+	float	jitterX, jitterY;			// applied projection jitter, pixels
+	float	jitterPrevX, jitterPrevY;
+	float	mvScaleX, mvScaleY;			// engine velocity -> NRD mv (sign/convention flips)
+	float	hitDistA, hitDistB;			// MUST match the ray shader's normalization
+	float	denoisingRange;				// world units; sky lies beyond
+	unsigned int frameIndex;
+	bool	reset;						// history invalid: CLEAR_AND_RESTART
+};
+
 class RHI {
 public:
 	virtual			~RHI() {}
@@ -421,6 +443,11 @@ public:
 	// open render pass; returns true when the dispatch ran and sceneRT now holds the
 	// resolved image. GL3 returns false (frame unchanged).
 	virtual bool	RunFsr2( const Fsr2DispatchArgs &args ) { return false; }
+
+	// H4 RTAO (docs/rtx-rtao.md): denoise the noisy AO rays via NRD (see RtaoDenoiseArgs);
+	// the result is sampled through GetRtaoOutputImage (0 until the first successful run)
+	virtual bool		RtaoDenoise( const RtaoDenoiseArgs &args ) { return false; }
+	virtual ImageHandle	GetRtaoOutputImage() { return 0; }
 	// R1/D: snapshot the scene color as the OPAQUE-ONLY input for FSR2's auto-reactive
 	// mask. Called at the opaque/translucent split of the primary view (after the SSR
 	// composite, before particles/blends draw); a straight same-orientation copy, unlike

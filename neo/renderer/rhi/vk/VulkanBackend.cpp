@@ -950,17 +950,34 @@ private:
 	std::vector<NrdTexture>		nrdTransTex;		// scratch within one frame
 	VkSampler					nrdSamplers[8] = {};
 	uint32_t					nrdSamplerCount = 0;
-	VkDescriptorPool			nrdDescPool = VK_NULL_HANDLE;
+	// per-frame-slot descriptor pools + CB ring slices: a recorded frame's sets/constants
+	// must survive until that slot's fence has been waited (the self-test's submit-and-wait
+	// hid this; per-frame use with FRAMES_IN_FLIGHT would otherwise reset live sets)
+	VkDescriptorPool			nrdDescPools[FRAMES_IN_FLIGHT] = {};
 	VkBuffer					nrdCb = VK_NULL_HANDLE;			// per-dispatch constant ring
 	VmaAllocation				nrdCbAlloc = VK_NULL_HANDLE;
 	void *						nrdCbMapped = NULL;
 	uint32_t					nrdCbStride = 0;	// constantBufferMaxDataSize, UBO-aligned
-	uint32_t					nrdCbSets = 0;		// ring capacity (= setsMaxNum)
+	uint32_t					nrdCbSets = 0;		// ring capacity per frame slot (= setsMaxNum)
 	int							nrdW = 0, nrdH = 0;
 	bool						nrdPoolsReady = false;	// pool images transitioned to GENERAL
 	// user (non-pool) resources for NrdRecordDispatches, indexed by nrd::ResourceType —
 	// the caller points these at its IN_*/OUT_* images (GENERAL layout) before recording
 	VkImageView					nrdUserViews[(uint32_t)nrd::ResourceType::MAX_NUM] = {};
+
+	// H4 RTAO (docs/rtx-rtao.md): denoised-occlusion output — an R16F STORAGE image NRD's
+	// last dispatch writes; lives in GENERAL for its whole life and is sampled by the
+	// resolve/debug passes via rtaoOutSampleImage. Recreated on resize.
+	virtual bool		RtaoDenoise( const rhi::RtaoDenoiseArgs &args );
+	virtual ImageHandle	GetRtaoOutputImage() { return rtaoOutSampleImage; }
+	bool				RtaoEnsureOutput( int w, int h );
+	void				RtaoDestroyOutput();
+	VkImage				rtaoOutImage = VK_NULL_HANDLE;
+	VmaAllocation		rtaoOutAlloc = VK_NULL_HANDLE;
+	VkImageView			rtaoOutView = VK_NULL_HANDLE;
+	ImageHandle			rtaoOutSampleImage = 0;
+	int					rtaoOutW = 0, rtaoOutH = 0;
+	bool				rtaoOutReady = false;	// transitioned UNDEFINED->GENERAL
 	bool						haveComputeDerivatives = false;	// VK_KHR_compute_shader_derivatives (quads)
 
 	FfxFsr2Context *			fsr2Ctx = NULL;
@@ -2389,6 +2406,7 @@ void VulkanBackend::Shutdown() {
 
 	// NRD (H2b): denoiser pipelines/pools must die before VMA/device too
 	NrdDestroy( true );
+	RtaoDestroyOutput();		// the H4 RTAO output image rides the same lifetime
 
 	// R2: acceleration structures + their backing buffers must die before VMA/device
 	DestroyRtScene();
@@ -6238,7 +6256,8 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 		return false;
 	}
 
-	// per-dispatch constant ring: one UBO-aligned slice per descriptor set the frame can use
+	// per-dispatch constant ring: one UBO-aligned slice per descriptor set, per frame slot
+	// (a recorded frame's constants must survive until its fence is waited)
 	nrdCbSets = inst.descriptorPoolDesc.setsMaxNum > 0 ? inst.descriptorPoolDesc.setsMaxNum : 64;
 	const VkDeviceSize uboAlign = physProps.limits.minUniformBufferOffsetAlignment > 0
 		? physProps.limits.minUniformBufferOffsetAlignment : 256;
@@ -6246,7 +6265,7 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 	if ( nrdCbStride > 0 ) {
 		VkBufferCreateInfo bci = {};
 		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-		bci.size = (VkDeviceSize)nrdCbStride * nrdCbSets;
+		bci.size = (VkDeviceSize)nrdCbStride * nrdCbSets * FRAMES_IN_FLIGHT;
 		bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 		bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 		VmaAllocationCreateInfo aci = {};
@@ -6260,9 +6279,9 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 		nrdCbMapped = ai.pMappedData;
 	}
 
-	// descriptor pool sized from the instance's own tight-layout limits (+ the CB/samplers
-	// every set may carry)
-	{
+	// descriptor pools sized from the instance's own tight-layout limits (+ the CB/samplers
+	// every set may carry) — one pool per frame slot (see the member comment)
+	for ( int f = 0; f < FRAMES_IN_FLIGHT; f++ ) {
 		VkDescriptorPoolSize sizes[4];
 		uint32_t sizeCount = 0;
 		sizes[sizeCount++] = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nrdCbSets };
@@ -6274,7 +6293,7 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 		dpci.maxSets = nrdCbSets * 2;		// each dispatch: one resources set + one CB/samplers set
 		dpci.poolSizeCount = sizeCount;
 		dpci.pPoolSizes = sizes;
-		if ( !vkCheck( vkCreateDescriptorPool( device, &dpci, NULL, &nrdDescPool ), "vkCreateDescriptorPool(NRD)" ) ) {
+		if ( !vkCheck( vkCreateDescriptorPool( device, &dpci, NULL, &nrdDescPools[f] ), "vkCreateDescriptorPool(NRD)" ) ) {
 			NrdDestroy( false );
 			return false;
 		}
@@ -6323,7 +6342,9 @@ void VulkanBackend::NrdDestroy( bool deviceIdle ) {
 		if ( nrdSamplers[i] ) { vkDestroySampler( device, nrdSamplers[i], NULL ); nrdSamplers[i] = VK_NULL_HANDLE; }
 	}
 	nrdSamplerCount = 0;
-	if ( nrdDescPool ) { vkDestroyDescriptorPool( device, nrdDescPool, NULL ); nrdDescPool = VK_NULL_HANDLE; }
+	for ( int f = 0; f < FRAMES_IN_FLIGHT; f++ ) {
+		if ( nrdDescPools[f] ) { vkDestroyDescriptorPool( device, nrdDescPools[f], NULL ); nrdDescPools[f] = VK_NULL_HANDLE; }
+	}
 	if ( nrdCb )       { vmaDestroyBuffer( vma, nrdCb, nrdCbAlloc ); nrdCb = VK_NULL_HANDLE; nrdCbAlloc = VK_NULL_HANDLE; }
 	nrdCbMapped = NULL;
 	nrdCbStride = nrdCbSets = 0;
@@ -6402,8 +6423,11 @@ bool VulkanBackend::NrdRecordDispatches( VkCommandBuffer cb, const nrd::Identifi
 		nrdPoolsReady = true;
 	}
 
-	// one recorded frame at a time (see header comment): reclaim all sets in one go
-	vkResetDescriptorPool( device, nrdDescPool, 0 );
+	// one recorded frame per SLOT at a time: this slot's fence was waited when the frame
+	// began, so its pool/CB slice are no longer referenced by the GPU and can be reused
+	VkDescriptorPool descPool = nrdDescPools[frameIndex];
+	const uint32_t cbBase = (uint32_t)frameIndex * nrdCbSets * nrdCbStride;
+	vkResetDescriptorPool( device, descPool, 0 );
 
 	uint32_t cbCursor = 0;
 	for ( uint32_t d = 0; d < dispatchCount; d++ ) {
@@ -6413,7 +6437,7 @@ bool VulkanBackend::NrdRecordDispatches( VkCommandBuffer cb, const nrd::Identifi
 		// constants into this dispatch's ring slice
 		uint32_t cbOffset = 0;
 		if ( dd.constantBufferDataSize > 0 && nrdCbMapped != NULL ) {
-			cbOffset = cbCursor * nrdCbStride;
+			cbOffset = cbBase + cbCursor * nrdCbStride;
 			memcpy( (byte *)nrdCbMapped + cbOffset, dd.constantBufferData, dd.constantBufferDataSize );
 			cbCursor++;
 		}
@@ -6425,7 +6449,7 @@ bool VulkanBackend::NrdRecordDispatches( VkCommandBuffer cb, const nrd::Identifi
 		VkDescriptorSet sets[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
 		VkDescriptorSetAllocateInfo ai = {};
 		ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-		ai.descriptorPool = nrdDescPool;
+		ai.descriptorPool = descPool;
 		ai.descriptorSetCount = 2;
 		ai.pSetLayouts = layouts;
 		if ( !vkCheck( vkAllocateDescriptorSets( device, &ai, sets ), "vkAllocateDescriptorSets(NRD)" ) ) {
@@ -6502,6 +6526,200 @@ bool VulkanBackend::NrdRecordDispatches( VkCommandBuffer cb, const nrd::Identifi
 		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 			0, 1, &mb, 0, NULL, 0, NULL );
 	}
+	return true;
+}
+
+/*
+====================
+VulkanBackend::RtaoEnsureOutput / RtaoDestroyOutput / RtaoDenoise
+
+H4c (docs/rtx-rtao.md): run the NRD REBLUR_DIFFUSE_OCCLUSION instance over the caller's
+guide inputs + noisy rays, on the FRAME command buffer, between render passes. The output
+is a backend-owned R16F storage image (NRD writes UAVs) that lives in GENERAL layout for
+its whole life and is sampled by the resolve/debug passes via its ImageRec handle. Input
+render targets rest in SHADER_READ_ONLY between passes; they are transitioned to GENERAL
+around the denoiser (NRD's descriptors are written with GENERAL) and back after, so every
+other consumer keeps its layout assumptions.
+====================
+*/
+bool VulkanBackend::RtaoEnsureOutput( int w, int h ) {
+	if ( rtaoOutImage != VK_NULL_HANDLE && rtaoOutW == w && rtaoOutH == h ) {
+		return true;
+	}
+	RtaoDestroyOutput();
+
+	VkImageCreateInfo ici = {};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_R16_SFLOAT;
+	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &rtaoOutImage, &rtaoOutAlloc, NULL ), "vmaCreateImage(RTAO out)" ) ) {
+		rtaoOutImage = VK_NULL_HANDLE;
+		return false;
+	}
+	VkImageViewCreateInfo vwi = {};
+	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vwi.image = rtaoOutImage;
+	vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vwi.format = VK_FORMAT_R16_SFLOAT;
+	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	vwi.subresourceRange.levelCount = 1;
+	vwi.subresourceRange.layerCount = 1;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &rtaoOutView ), "vkCreateImageView(RTAO out)" ) ) {
+		RtaoDestroyOutput();
+		return false;
+	}
+	// registered with the standard SHADER_READ_ONLY resting layout — the fullscreen-draw
+	// descriptor path hardcodes it, so the denoiser transitions GENERAL only around its
+	// own storage writes and parks the image back afterwards
+	rtaoOutSampleImage = RegisterMergeSampleImage( rtaoOutImage, rtaoOutView, w, h );
+	rtaoOutW = w;
+	rtaoOutH = h;
+	rtaoOutReady = false;
+	return true;
+}
+
+void VulkanBackend::RtaoDestroyOutput() {
+	if ( rtaoOutView )  { vkDestroyImageView( device, rtaoOutView, NULL ); rtaoOutView = VK_NULL_HANDLE; }
+	if ( rtaoOutImage ) { vmaDestroyImage( vma, rtaoOutImage, rtaoOutAlloc ); rtaoOutImage = VK_NULL_HANDLE; rtaoOutAlloc = NULL; }
+	if ( rtaoOutSampleImage >= 1 && rtaoOutSampleImage <= (ImageHandle)imageTable.size() ) {
+		imageTable[rtaoOutSampleImage - 1].live = false;
+	}
+	rtaoOutSampleImage = 0;
+	rtaoOutW = rtaoOutH = 0;
+	rtaoOutReady = false;
+}
+
+bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
+	if ( !frameOpen || skipFrame || device == VK_NULL_HANDLE || !haveComputeDerivatives ) {
+		return false;
+	}
+	if ( !NrdCreate( a.w, a.h ) || !RtaoEnsureOutput( a.w, a.h ) ) {
+		return false;
+	}
+
+	// resolve the caller's images (color attachment 0 of each single-color target)
+	RenderTarget *ray  = LookupTarget( a.rayRT );
+	RenderTarget *vz   = LookupTarget( a.viewzRT );
+	RenderTarget *norm = LookupTarget( a.normalRT );
+	if ( ray == NULL || vz == NULL || norm == NULL
+			|| a.velImage < 1 || a.velImage > (ImageHandle)imageTable.size()
+			|| !imageTable[a.velImage - 1].live ) {
+		return false;
+	}
+	ImageRec &vel = imageTable[a.velImage - 1];
+	auto targetView = []( RenderTarget *t ) {
+		return t->colorSampleView[0] != VK_NULL_HANDLE ? t->colorSampleView[0] : t->colorView[0];
+	};
+
+	// frame settings
+	nrd::CommonSettings cs = {};
+	memcpy( cs.viewToClipMatrix,      a.viewToClip,      sizeof( cs.viewToClipMatrix ) );
+	memcpy( cs.viewToClipMatrixPrev,  a.viewToClipPrev,  sizeof( cs.viewToClipMatrixPrev ) );
+	memcpy( cs.worldToViewMatrix,     a.worldToView,     sizeof( cs.worldToViewMatrix ) );
+	memcpy( cs.worldToViewMatrixPrev, a.worldToViewPrev, sizeof( cs.worldToViewMatrixPrev ) );
+	cs.motionVectorScale[0] = a.mvScaleX;
+	cs.motionVectorScale[1] = a.mvScaleY;
+	cs.motionVectorScale[2] = 0.0f;					// 2D screen-space motion
+	cs.cameraJitter[0] = a.jitterX;
+	cs.cameraJitter[1] = a.jitterY;
+	cs.cameraJitterPrev[0] = a.jitterPrevX;
+	cs.cameraJitterPrev[1] = a.jitterPrevY;
+	cs.resourceSize[0] = cs.resourceSizePrev[0] = cs.rectSize[0] = cs.rectSizePrev[0] = (uint16_t)a.w;
+	cs.resourceSize[1] = cs.resourceSizePrev[1] = cs.rectSize[1] = cs.rectSizePrev[1] = (uint16_t)a.h;
+	cs.denoisingRange = a.denoisingRange;
+	cs.frameIndex = a.frameIndex;
+	cs.accumulationMode = a.reset ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
+	cs.isMotionVectorInWorldSpace = false;
+	if ( nrd::SetCommonSettings( *nrdInstance, cs ) != nrd::Result::SUCCESS ) {
+		return false;
+	}
+	nrd::ReblurSettings rs = {};
+	rs.hitDistanceParameters.A = a.hitDistA;		// MUST mirror rtao_ray.frag's normalization
+	rs.hitDistanceParameters.B = a.hitDistB;
+	rs.enableAntiFirefly = true;
+	if ( nrd::SetDenoiserSettings( *nrdInstance, NRD_ID_REBLUR_AO, &rs ) != nrd::Result::SUCCESS ) {
+		return false;
+	}
+
+	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
+	nrdUserViews[(uint32_t)nrd::ResourceType::IN_MV]               = vel.view;
+	nrdUserViews[(uint32_t)nrd::ResourceType::IN_NORMAL_ROUGHNESS] = targetView( norm );
+	nrdUserViews[(uint32_t)nrd::ResourceType::IN_VIEWZ]            = targetView( vz );
+	nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_HITDIST]     = targetView( ray );
+	nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_HITDIST]    = rtaoOutView;
+
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );					// dispatches are illegal inside a render pass
+		insideScenePass = false;
+	}
+
+	// inputs: SHADER_READ_ONLY -> GENERAL (NRD's descriptors are written with GENERAL);
+	// output: first use UNDEFINED -> GENERAL, then a WAR barrier vs last frame's sampling
+	VkImageMemoryBarrier pre[5] = {};
+	uint32_t preCount = 0;
+	auto addPre = [&]( VkImage img, VkImageLayout oldL ) {
+		VkImageMemoryBarrier &b = pre[preCount++];
+		b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		b.oldLayout = oldL;
+		b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+		b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		b.image = img;
+		b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		b.subresourceRange.levelCount = 1;
+		b.subresourceRange.layerCount = 1;
+		b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+		b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+	};
+	addPre( ray->colorImage[0],  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPre( vz->colorImage[0],   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPre( norm->colorImage[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPre( vel.image,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPre( rtaoOutImage,        rtaoOutReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
+	vkCmdPipelineBarrier( cb,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		0, 0, NULL, 0, NULL, preCount, pre );
+	rtaoOutReady = true;
+
+	if ( !NrdRecordDispatches( cb, &NRD_ID_REBLUR_AO, 1 ) ) {
+		return false;
+	}
+
+	// output -> fragment sampling; inputs back to SHADER_READ_ONLY for their other consumers
+	VkImageMemoryBarrier post[5] = {};
+	uint32_t postCount = 0;
+	auto addPost = [&]( VkImage img, VkImageLayout newL ) {
+		VkImageMemoryBarrier &b = post[postCount++];
+		b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		b.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+		b.newLayout = newL;
+		b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		b.image = img;
+		b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		b.subresourceRange.levelCount = 1;
+		b.subresourceRange.layerCount = 1;
+		b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	};
+	addPost( ray->colorImage[0],  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPost( vz->colorImage[0],   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPost( norm->colorImage[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPost( vel.image,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPost( rtaoOutImage,        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	vkCmdPipelineBarrier( cb,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		0, 0, NULL, 0, NULL, postCount, post );
 	return true;
 }
 
