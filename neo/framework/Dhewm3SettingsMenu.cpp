@@ -3093,6 +3093,44 @@ static void DrawEnhGroup_AmbientOcclusion()
 			"Trade-off: a faint dark halo can appear around object silhouettes, since one coarse "
 			"depth texel can't represent both surfaces at an edge. Off = the exact full-resolution "
 			"depth march (most accurate, most expensive). Recommended on. Non-vanilla; opengl3/Vulkan." );
+
+		// Ray-traced AO (docs/rtx-rtao.md H4). Same idiom as the Shadows group's RT section:
+		// greyed on the legacy/GL3 backend and non-RT GPUs, where the cvars are inert.
+		// Enabling it REPLACES the screen-space producer above (those sampling sliders stop
+		// applying); intensity and the light-response sliders in the Developer tab still do.
+		{
+			const bool rtCapable = R_SupportsRayTracing();
+			ImGui::SeparatorText( rtCapable ? "Ray Tracing (RTX)" : "Ray Tracing (RTX) - needs Vulkan + RT GPU" );
+			ImGui::BeginDisabled( !rtCapable );
+
+			bool rtao = r_rtao.GetBool();
+			if ( ImGui::Checkbox( "RT Ambient Occlusion", &rtao ) ) {
+				r_rtao.SetBool( rtao );
+			}
+			AddTooltip( "Replace the screen-space occlusion above with one traced hemisphere ray per "
+				"pixel against the real scene, denoised across frames: contact shading from geometry "
+				"that is off-screen or behind the camera, no screen-edge artifacts, and cheaper than "
+				"the full-resolution march at the top tiers. The Intensity slider still applies; the "
+				"sampling controls above (Directions/Steps/Resolution, Depth-Mip) are screen-space-"
+				"only and stop mattering. Needs Motion Vectors or FSR on for the denoiser; enabling "
+				"it builds the ray-tracing scene for the map. Vulkan + RT hardware only." );
+
+			float rtRad = r_rtaoRadius.GetFloat();
+			if ( ImGui::SliderFloat( "Ray Length##rtao", &rtRad, 8.0f, 256.0f, "%.0f units" ) ) {
+				r_rtaoRadius.SetFloat( rtRad );
+			}
+			AddTooltip( "How far each occlusion ray reaches, in world units. Longer rays gather "
+				"broader, more grounded darkening from distant geometry; shorter keeps the effect "
+				"to tight contact shadows. The default (80) reaches further than the screen-space "
+				"radius ever could." );
+
+			ImGui::EndDisabled();
+			// explain the gray-out cases the checkbox itself can't (mirrors the RT Reflections hint)
+			if ( rtCapable && r_rtao.GetBool()
+					&& !( r_motionVectors.GetBool() || r_fsr.GetBool() ) ) {
+				ImGui::TextDisabled( "  (needs Motion Vectors or FSR on for the denoiser - using screen-space AO)" );
+			}
+		}
 		ImGui::EndDisabled();
 
 		// Baked occlusion maps: independent of SSAO (works with it off). Inert unless a
