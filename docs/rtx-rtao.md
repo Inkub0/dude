@@ -63,13 +63,19 @@ hardware allows.
 
 ### Phasing / verification
 
-- **H4a** ray pass + `r_rtaoDebug 1` overlay — verify: noisy but plausibly-shaped AO
-  in-game, cost via r_vkGpuTime (expect ~1–2 ms full-res on the 3080 Ti).
-- **H4b+c** guides + denoise + `r_rtaoDebug 2` — verify: the noise resolves, no smearing
-  under camera motion (velocity reprojection working).
-- **H4d** composite + GTAO skip — verify: `r_ssaoDebug 1` looks like stable AO, lighting
-  identical in character to GTAO, and the frame drops by (GTAO cost − RTAO cost) ≈ 2–3 ms.
-- **H4e** preset row + docs/todo.md table.
+- **H4a** ray pass + `r_rtaoDebug 1` overlay — DONE (5db32cc2), raw output USER-VERIFIED.
+- **H4b+c** guides + denoise + `r_rtaoDebug 2` — DONE (4cfd48b4 + the 4686135d jitter
+  fix: NRD needs NON-jittered matrices, the engine bakes FSR2's Halton jitter into the
+  projection shear terms — with r_fsr on this rejected history every frame and the output
+  degenerated to drifting raw dots). Denoised output USER-VERIFIED: "looks really
+  amazing".
+- **H4d** composite + GTAO skip — DONE: rtao_resolve writes the STANDARD AO buffer
+  (.r = pow(occ, r_ssaoIntensity) exactly like ssao.frag, .gba = the G-buffer surface
+  normal so bent-normal consumers degrade to a no-op; sky/weapon unoccluded). RtaoPass
+  runs BEFORE the GTAO pass, which returns immediately when RTAO composited — any RTAO
+  failure falls through to GTAO unchanged. Smoke-tested validation-clean. PENDING USER:
+  in-game lighting look + the r_vkGpuTime delta (expect ~10.7 → ~7–8 ms at UN).
+- **H4e** preset row + docs/todo.md table — after the H4d verdict.
 
 ### Risks / notes
 

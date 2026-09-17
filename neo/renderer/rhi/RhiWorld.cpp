@@ -387,6 +387,7 @@ static float rhiRtaoJitterPhase = 0.0f;				// per-frame golden-ratio noise rotat
 // cam state advances on a different schedule).
 static rhi::RenderTargetHandle rhiRtaoViewzRT = 0;
 static rhi::RenderTargetHandle rhiRtaoPackRT = 0;
+static rhi::RenderTargetHandle rhiRtaoResolveRT = 0;	// H4d: the composited standard-AO buffer
 static bool  rhiRtaoDenoisedThisView = false;		// NRD ran: GetRtaoOutputImage is current
 static float rhiRtaoPrevProj[16];
 static float rhiRtaoPrevView[16];
@@ -3214,7 +3215,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
 	rhiRtaoRanThisView = false;
-	rhiRtaoViewzRT = 0;			rhiRtaoPackRT = 0;
+	rhiRtaoViewzRT = 0;			rhiRtaoPackRT = 0;		rhiRtaoResolveRT = 0;
 	rhiRtaoDenoisedThisView = false;	rhiRtaoPrevValid = false;
 
 	rhiSsrRT = 0;				rhiSsrW = rhiSsrH = 0;
@@ -5302,6 +5303,12 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !r_ssao.GetBool() || !R_BackendSupportsEnhancements() ) {
 		return;
 	}
+	// H4d (docs/rtx-rtao.md): RTAO produced, denoised and composited this view's AO —
+	// the whole GTAO chain (depth mip, horizon march, blur, temporal) is skipped. RTAO
+	// failing for any reason leaves the flag false and GTAO runs exactly as before.
+	if ( rhiRtaoDenoisedThisView ) {
+		return;
+	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
 		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
 		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
@@ -5583,6 +5590,7 @@ r_rtao joined the RT-world implication gate (tr_main R_RtWorldUpdate).
 */
 static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiRtaoRanThisView = false;
+	rhiRtaoDenoisedThisView = false;	// reset on EVERY early-out path — RB_RHI_SSAOPass gates on it
 	if ( !r_rtao.GetBool() || !r_ssao.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
 		return;
 	}
@@ -5675,7 +5683,6 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// ---- H4b guide inputs + H4c NRD denoise (docs/rtx-rtao.md) ----
 	// The denoiser needs motion vectors for its reprojection; without the velocity MRT
 	// (r_motionVectors / r_fsr off) only the raw ray pass runs (r_rtaoDebug 1).
-	rhiRtaoDenoisedThisView = false;
 	rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
 		? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
 	rhi::ShaderHandle vzProg = r->LoadShader( "rtao_viewz" );
@@ -5742,6 +5749,41 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.frameIndex = (unsigned int)tr.frameCount;
 		da.reset = !rhiRtaoPrevValid;
 		rhiRtaoDenoisedThisView = r->RtaoDenoise( da );
+
+		// ---- H4d: composite into the STANDARD AO buffer and hand it to the lighting ----
+		// After this, RB_RHI_SSAOPass (which runs next) sees rhiRtaoDenoisedThisView and
+		// skips the whole GTAO chain — RTAO owns this view's AO.
+		rhi::ShaderHandle resProg = rhiRtaoDenoisedThisView ? r->LoadShader( "rtao_resolve" ) : 0;
+		if ( resProg != 0 && r->GetRtaoOutputImage() != 0 ) {
+			if ( rhiRtaoResolveRT && r->GetRenderTargetImage( rhiRtaoResolveRT ) == 0 ) { rhiRtaoResolveRT = 0; }
+			if ( rhiRtaoResolveRT == 0 ) { rhiRtaoResolveRT = r->CreateRenderTargetMipped( rhi::IF_RGBA8, w, h, 1 ); }
+			if ( rhiRtaoResolveRT != 0 ) {
+				rhi::RenderParams rp;
+				memset( &rp, 0, sizeof( rp ) );
+				rp.mvpMatrix[0] = rp.mvpMatrix[5] = rp.mvpMatrix[10] = rp.mvpMatrix[15] = 1.0f;
+				rp.localParam0[0] = r_ssaoIntensity.GetFloat();
+				rp.screenCorrection[0] = 1.0f / w;
+				rp.screenCorrection[1] = 1.0f / h;
+				rp.depthTexRecip[0] = 1.0f / uploadW;
+				rp.depthTexRecip[1] = 1.0f / uploadH;
+				r->BeginTargetPass( rhiRtaoResolveRT, NULL );
+				RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+				backEnd.glState.tmu[1].current2DMap = -1;
+				RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
+				RB_RHI_DrawFullscreen( r, resProg, rp, r->GetRtaoOutputImage() );
+				r->EndPass();
+
+				// the consumers' contract (identical to the GTAO tail of RB_RHI_SSAOPass)
+				rhiSsaoResultRT = rhiRtaoResolveRT;
+				rhiSsaoViewW = w;
+				rhiSsaoViewH = h;
+				rhiSsaoAppliedThisView = true;
+			} else {
+				rhiRtaoDenoisedThisView = false;	// no resolve target -> let GTAO run instead
+			}
+		} else if ( rhiRtaoDenoisedThisView ) {
+			rhiRtaoDenoisedThisView = false;		// no resolve program -> let GTAO run instead
+		}
 	} else {
 		// bring-up observability: the debug overlay falls back to the raw rays when the
 		// denoise can't run, which looks like "denoiser broken" — say why, once
@@ -6406,8 +6448,11 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// the ambient/interaction passes that consume it (docs/ssao-gtao.md). Each view
 	// starts with no AO; the pass sets rhiSsaoAppliedThisView when it produces one.
 	rhiSsaoAppliedThisView = false;
+	// RTAO first (docs/rtx-rtao.md H4d): when it rays+denoises+composites this view's AO,
+	// the GTAO pass sees the flag and skips its whole chain; any RTAO failure falls
+	// through to GTAO unchanged.
+	RB_RHI_RtaoPass( r, viewDef );
 	RB_RHI_SSAOPass( r, viewDef );
-	RB_RHI_RtaoPass( r, viewDef );		// H4a: the noisy RT-AO ray pass (docs/rtx-rtao.md)
 
 	// Bind the AO buffer on unit 9 for the whole per-light loop: both the ambient and
 	// interaction shaders sample u_ssao there, and nothing in the loop touches unit 9
