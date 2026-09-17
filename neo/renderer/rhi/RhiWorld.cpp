@@ -5721,7 +5721,9 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.velImage = velImg;
 		da.w = w;
 		da.h = h;
-		memcpy( da.viewToClip, viewDef->projectionMatrix, sizeof( da.viewToClip ) );
+		// NRD requires NON-JITTERED matrices (the FSR2 Halton jitter lives in the shear
+		// terms of projectionMatrix); the jitter itself rides cameraJitter below
+		memcpy( da.viewToClip, viewDef->unjitteredProjectionMatrix, sizeof( da.viewToClip ) );
 		memcpy( da.worldToView, viewDef->worldSpace.modelViewMatrix, sizeof( da.worldToView ) );
 		memcpy( da.viewToClipPrev, rhiRtaoPrevValid ? rhiRtaoPrevProj : da.viewToClip, sizeof( da.viewToClipPrev ) );
 		memcpy( da.worldToViewPrev, rhiRtaoPrevValid ? rhiRtaoPrevView : da.worldToView, sizeof( da.worldToViewPrev ) );
@@ -5740,9 +5742,18 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.frameIndex = (unsigned int)tr.frameCount;
 		da.reset = !rhiRtaoPrevValid;
 		rhiRtaoDenoisedThisView = r->RtaoDenoise( da );
+	} else {
+		// bring-up observability: the debug overlay falls back to the raw rays when the
+		// denoise can't run, which looks like "denoiser broken" — say why, once
+		static bool warnedPrereq = false;
+		if ( !warnedPrereq ) {
+			warnedPrereq = true;
+			common->Warning( "RTAO: denoise prerequisites missing (velocity %d, viewz prog %d, pack prog %d, viewzRT %d, packRT %d)",
+				velImg != 0, vzProg != 0, pkProg != 0, rhiRtaoViewzRT != 0, rhiRtaoPackRT != 0 );
+		}
 	}
-	// stage this frame's camera for next frame's reprojection
-	memcpy( rhiRtaoPrevProj, viewDef->projectionMatrix, sizeof( rhiRtaoPrevProj ) );
+	// stage this frame's camera for next frame's reprojection (un-jittered, as passed)
+	memcpy( rhiRtaoPrevProj, viewDef->unjitteredProjectionMatrix, sizeof( rhiRtaoPrevProj ) );
 	memcpy( rhiRtaoPrevView, viewDef->worldSpace.modelViewMatrix, sizeof( rhiRtaoPrevView ) );
 	rhiRtaoPrevJitter[0] = viewDef->jitter[0];
 	rhiRtaoPrevJitter[1] = viewDef->jitter[1];

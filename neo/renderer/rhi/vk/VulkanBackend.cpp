@@ -6599,11 +6599,21 @@ void VulkanBackend::RtaoDestroyOutput() {
 }
 
 bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
-	if ( !frameOpen || skipFrame || device == VK_NULL_HANDLE || !haveComputeDerivatives ) {
+	// bring-up observability: every failure branch says WHY once (the caller's debug
+	// overlay silently falls back to the raw rays, which masks a dead denoiser)
+	static int warned = 0;
+	#define RTAO_FAIL( bit, msg ) { if ( !( warned & ( 1 << bit ) ) ) { warned |= 1 << bit; common->Warning( "RTAO denoise: %s", msg ); } return false; }
+	if ( !frameOpen || skipFrame || device == VK_NULL_HANDLE ) {
 		return false;
 	}
-	if ( !NrdCreate( a.w, a.h ) || !RtaoEnsureOutput( a.w, a.h ) ) {
-		return false;
+	if ( !haveComputeDerivatives ) {
+		RTAO_FAIL( 0, "device lacks compute-shader derivatives (quads)" );
+	}
+	if ( !NrdCreate( a.w, a.h ) ) {
+		RTAO_FAIL( 1, "NrdCreate failed (see warnings above)" );
+	}
+	if ( !RtaoEnsureOutput( a.w, a.h ) ) {
+		RTAO_FAIL( 2, "output image creation failed" );
 	}
 
 	// resolve the caller's images (color attachment 0 of each single-color target)
@@ -6613,7 +6623,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	if ( ray == NULL || vz == NULL || norm == NULL
 			|| a.velImage < 1 || a.velImage > (ImageHandle)imageTable.size()
 			|| !imageTable[a.velImage - 1].live ) {
-		return false;
+		RTAO_FAIL( 3, "input target/velocity lookup failed" );
 	}
 	ImageRec &vel = imageTable[a.velImage - 1];
 	auto targetView = []( RenderTarget *t ) {
@@ -6640,14 +6650,14 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	cs.accumulationMode = a.reset ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
 	cs.isMotionVectorInWorldSpace = false;
 	if ( nrd::SetCommonSettings( *nrdInstance, cs ) != nrd::Result::SUCCESS ) {
-		return false;
+		RTAO_FAIL( 4, "nrd::SetCommonSettings rejected the frame settings" );
 	}
 	nrd::ReblurSettings rs = {};
 	rs.hitDistanceParameters.A = a.hitDistA;		// MUST mirror rtao_ray.frag's normalization
 	rs.hitDistanceParameters.B = a.hitDistB;
 	rs.enableAntiFirefly = true;
 	if ( nrd::SetDenoiserSettings( *nrdInstance, NRD_ID_REBLUR_AO, &rs ) != nrd::Result::SUCCESS ) {
-		return false;
+		RTAO_FAIL( 5, "nrd::SetDenoiserSettings rejected the ReBLUR settings" );
 	}
 
 	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
@@ -6692,8 +6702,13 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	rtaoOutReady = true;
 
 	if ( !NrdRecordDispatches( cb, &NRD_ID_REBLUR_AO, 1 ) ) {
-		return false;
+		RTAO_FAIL( 6, "NrdRecordDispatches failed (see warnings above)" );
 	}
+	if ( !( warned & ( 1 << 7 ) ) ) {
+		warned |= 1 << 7;
+		common->Printf( "RTAO: NRD ReBLUR denoise active (%dx%d)\n", a.w, a.h );
+	}
+	#undef RTAO_FAIL
 
 	// output -> fragment sampling; inputs back to SHADER_READ_ONLY for their other consumers
 	VkImageMemoryBarrier post[5] = {};
