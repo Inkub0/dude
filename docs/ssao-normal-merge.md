@@ -152,7 +152,7 @@ the *scene* depth, so the weapon was sealed at full-range depth while its intera
 half range → depth-`EQUAL` failed → no lighting. Exactly the "Depth-EQUAL invariance" risk below.
 Fix: `targetHonorsDepthRange` — set by `BeginNormalPrepass`, cleared by `EnterTargetPass` — lets
 that one target pass apply `SetDepthRange` like the scene pass. (The standalone path never showed
-it because zfill, in the scene pass, sealed the weapon.) Pending user visual verify.
+it because zfill, in the scene pass, sealed the weapon.) **User-verified 2026-09-17.**
 
 ## Status (2026-08-11 later): SSR MRT extension shipped — merge now engages with SSR on
 
