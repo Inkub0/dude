@@ -1626,9 +1626,19 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 		// that moved. On a clean idle frame we skip UpdateTlas entirely - the backend's
 		// rtCurrentAddr still points at the last-built slot, which holds exactly these poses
 		// and references only persistent static BLASes, so the fragment rays read valid data.
+		//
+		// RTAO EXCEPTION (2026-09-17, user-verified): the idle-skip PINS rtCurrentAddr to one
+		// slot across idle frames; the next dirty frame that lands on that slot rebuilds it
+		// (and host-memcpys its instance/geo buffers) while a still-in-flight previous frame
+		// is tracing it — a device-lost race (Xid 109/31) that the sparse pre-RTAO consumers
+		// hit too rarely to notice, but RTAO (a ray from every pixel, every frame) hits almost
+		// always. Forcing per-frame rebuild when r_rtao is on keeps every frame on its own
+		// freshly-built slot (disjoint, fence-safe), sidestepping the whole class including the
+		// host-write races a GPU barrier can't order. RTAO traces every pixel every frame, so
+		// the "RT free at rest" idle-skip premise doesn't apply here anyway — no real cost.
 		const bool dirty = !s_rtTlasEverBuilt || dyn || s_rtLastHadDyn || sig != s_rtLastTlasSig;
 		static int accBuilt = 0, accSkipped = 0, accStartMs = 0;
-		if ( !r_rtTlasDirty.GetBool() || dirty ) {
+		if ( !r_rtTlasDirty.GetBool() || dirty || r_rtao.GetBool() ) {
 			r->UpdateTlas( inst, n );
 			s_rtLastTlasSig = sig;
 			s_rtLastHadDyn = dyn;
