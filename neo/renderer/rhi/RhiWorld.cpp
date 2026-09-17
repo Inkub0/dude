@@ -374,6 +374,14 @@ static int  rhiSsaoHistW = 0, rhiSsaoHistH = 0;		// history buffer size (matches
 static bool rhiSsaoHistValid = false;				// the read slot holds a usable previous frame
 static float rhiSsaoJitterPhase = 0.0f;				// per-frame noise rotation (golden-ratio walk in [0,1))
 
+// H4 RTAO (docs/rtx-rtao.md): the ray pass's noisy normalized-hit-distance target (R16F,
+// view res). H4a produces it (one cosine hemisphere ray/pixel against the TLAS); H4c
+// denoises it via NRD ReBLUR; H4d composites into the standard AO buffer. VK + RT only.
+static rhi::RenderTargetHandle rhiRtaoRayRT = 0;
+static int   rhiRtaoW = 0, rhiRtaoH = 0;
+static bool  rhiRtaoRanThisView = false;			// ray output produced this view (overlay gate)
+static float rhiRtaoJitterPhase = 0.0f;				// per-frame golden-ratio noise rotation
+
 // ---- shared camera temporal state (docs/fsr-temporal-pipeline.md, increment A1) ----
 // The SSAO and SSR temporal resolves both reproject last frame's history by pure camera
 // motion, so both need the previous rendered frame's world->clip. They kept two private
@@ -3193,6 +3201,8 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistRT[0] = rhiSsaoHistRT[1] = 0;
 	rhiSsaoHistIdx = 0;			rhiSsaoHistW = rhiSsaoHistH = 0;
 	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
+	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
+	rhiRtaoRanThisView = false;
 
 	rhiSsrRT = 0;				rhiSsrW = rhiSsrH = 0;
 	rhiSsrDepthMinRT = 0;		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
@@ -5547,6 +5557,150 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 /*
 ===================
+RB_RHI_RtaoPass
+
+H4a of RTAO (docs/rtx-rtao.md): the noisy ray pass. One cosine-weighted hemisphere
+occlusion ray per pixel against the scene TLAS, written to an R16F target as NRD's
+normalized hit distance (miss/sky/weapon = 1.0). Runs right after the GTAO pass point,
+once _currentDepth and the normal G-buffer exist for this view. Produces INPUT for the
+H4c NRD denoise — nothing consumes it yet beyond the r_rtaoDebug overlay, so H4a is
+visually inert in normal play. VK + RT hardware only; the TLAS is auto-built because
+r_rtao joined the RT-world implication gate (tr_main R_RtWorldUpdate).
+===================
+*/
+static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
+	rhiRtaoRanThisView = false;
+	if ( !r_rtao.GetBool() || !r_ssao.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		return;
+	}
+	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
+		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
+		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
+		return;
+	}
+	if ( globalImages->currentDepthImage->uploadWidth <= 0
+			|| !rhiNormalReadyThisView || rhiNormalResultRT == 0 ) {
+		return;		// needs the sealed depth + the bump-mapped normal G-buffer
+	}
+	const unsigned long long tlas = r->GetTlasAddress();
+	if ( tlas == 0 ) {
+		return;		// no RT scene (non-RT hardware, or the world build hasn't run yet)
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "rtao_ray" );
+	if ( !prog ) {
+		return;
+	}
+
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	// (re)create the R16F ray target on first use / resize / lost context
+	if ( rhiRtaoRayRT && r->GetRenderTargetImage( rhiRtaoRayRT ) == 0 ) {
+		rhiRtaoRayRT = 0;
+		rhiRtaoW = rhiRtaoH = 0;
+	}
+	if ( rhiRtaoRayRT && ( rhiRtaoW != w || rhiRtaoH != h ) ) {
+		r->DestroyRenderTarget( rhiRtaoRayRT );
+		rhiRtaoRayRT = 0;
+	}
+	if ( !rhiRtaoRayRT ) {
+		rhiRtaoRayRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, 1 );
+		if ( !rhiRtaoRayRT ) {
+			return;
+		}
+		rhiRtaoW = w;
+		rhiRtaoH = h;
+	}
+
+	float invView[16];
+	if ( !RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
+		return;
+	}
+
+	const float *proj  = viewDef->projectionMatrix;
+	const float invP00 = ( proj[0] != 0.0f ) ? 1.0f / proj[0] : 1.0f;
+	const float invP11 = ( proj[5] != 0.0f ) ? 1.0f / proj[5] : 1.0f;
+	const float radius = r_rtaoRadius.GetFloat();
+
+	// per-frame noise rotation so the (H4c) temporal accumulation sees fresh directions
+	rhiRtaoJitterPhase += 0.61803399f;
+	rhiRtaoJitterPhase -= (float)(int)rhiRtaoJitterPhase;
+
+	const int uploadW = globalImages->currentDepthImage->uploadWidth;
+	const int uploadH = globalImages->currentDepthImage->uploadHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world
+	// TLAS device address: bit-cast into the rtParms lanes (ssr_rt idiom, NOT a value cast)
+	const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFull );
+	const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
+	memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );
+	memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+	parms.localParam0[0] = invP00;
+	parms.localParam0[1] = invP11;
+	parms.localParam0[2] = radius;
+	parms.localParam0[3] = 0.5f * radius;			// hitDist normalization A — MUST match the
+	parms.localParam1[1] = 0.1f;					// ... ReblurHitDistanceParameters (H4c)
+	parms.localParam1[0] = rhiRtaoJitterPhase;
+	parms.localParam1[2] = 1.0f;					// ray-origin normal offset (world units)
+	parms.screenCorrection[0] = 1.0f / w;
+	parms.screenCorrection[1] = 1.0f / h;
+	parms.depthTexRecip[0] = 1.0f / uploadW;
+	parms.depthTexRecip[1] = 1.0f / uploadH;
+	parms.windowCoord[2] = -1.0f;					// VK-only pass: top-down view-Y sign
+
+	r->BeginTargetPass( rhiRtaoRayRT, NULL );
+	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
+	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
+	r->EndPass();
+
+	rhiRtaoRanThisView = true;
+	RB_RHI_ForgetTexBinds();
+	backEnd.currentScissor = viewDef->scissor;
+}
+
+/*
+===================
+RB_RHI_RtaoDebugOverlay
+
+r_rtaoDebug visualization: blit the RTAO chain's intermediates over the finished view
+(1 = the raw noisy ray output; 2 = the NRD-denoised result once H4c lands). Reuses the
+ssao_debug fullscreen program (mode 1 shows the red channel as the AO scalar).
+===================
+*/
+void RB_RHI_RtaoDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
+	const int mode = r_rtaoDebug.GetInteger();
+	if ( mode <= 0 || !rhiRtaoRanThisView || rhiRtaoRayRT == 0 ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "ssao_debug" );
+	if ( !prog ) {
+		return;
+	}
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.localParam0[0] = 1.0f;					// ssao_debug mode 1: show the AO scalar (.r)
+
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
+	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	RB_RHI_DrawFullscreen( r, prog, parms, r->GetRenderTargetImage( rhiRtaoRayRT ) );
+	RB_RHI_ForgetTexBinds();
+}
+
+/*
+===================
 RB_RHI_SSAODebugOverlay
 
 r_ssaoDebug visualization: blit the finished AO buffer over the scene (1 = AO scalar,
@@ -6144,6 +6298,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// starts with no AO; the pass sets rhiSsaoAppliedThisView when it produces one.
 	rhiSsaoAppliedThisView = false;
 	RB_RHI_SSAOPass( r, viewDef );
+	RB_RHI_RtaoPass( r, viewDef );		// H4a: the noisy RT-AO ray pass (docs/rtx-rtao.md)
 
 	// Bind the AO buffer on unit 9 for the whole per-light loop: both the ambient and
 	// interaction shaders sample u_ssao there, and nothing in the loop touches unit 9

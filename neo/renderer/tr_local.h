@@ -969,6 +969,9 @@ extern idCVar r_shadowMapSunRange;			// how far ahead of the camera the sun map 
 extern idCVar r_shadowMapNormalOffset;		// normal-offset shadow bias in texels (cube + sun lookups; 0 = off)
 extern idCVar r_rtSunShadows;				// RT sun shadows: trace sun visibility per fragment (VK + RT hardware)
 extern idCVar r_rtReflections;				// RT reflections on monsters: trace + shade the dynamic hit (VK + RT; rides SSR)
+extern idCVar r_rtao;						// H4 RTAO: ray-traced AO producer replacing GTAO at the RT tier
+extern idCVar r_rtaoRadius;					// RTAO ray length (world units)
+extern idCVar r_rtaoDebug;					// RTAO debug view (1 raw rays, 2 denoised)
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
 extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compositing (dissolves the static firefly grid)

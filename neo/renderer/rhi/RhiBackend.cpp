@@ -3446,6 +3446,8 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		// r_ssaoDebug: overlay the AO buffer on top of the finished view. RHI fullscreen
 		// draw, so it works on both backends (the SSAO buffer is produced on Vulkan too).
 		RB_RHI_SSAODebugOverlay( r, viewDef );
+		// r_rtaoDebug: overlay the RTAO chain's intermediates (H4a raw rays / H4c denoised)
+		RB_RHI_RtaoDebugOverlay( r, viewDef );
 		// DUDE weapon-reload depth-of-field (r_dof): after the full scene incl. the
 		// weapon, on both backends and under HDR. Zero cost unless a reload is easing
 		// r_weaponReloadFocus above 0 (idPlayerView writes it).

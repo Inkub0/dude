@@ -87,9 +87,13 @@ Full-RT down-payment.
   shadow rays for every light (a few rays to random points on the light's area → penumbra), denoised
   with SIGMA. Replaces/augments the shadow-map + stencil path per light. *Highest Full-RT reuse — this
   becomes the path tracer's next-event estimation.* Extends [rtx-shadow-roadmap.md](rtx-shadow-roadmap.md) R5.
-- **H4 — RTAO.** Cosine-weighted hemisphere occlusion rays against the TLAS, denoised (ReBLUR),
-  darkening the ambient term. Replaces SSAO (which misses off-screen occluders, like SSR). *Machinery
-  is ~80% of RT indirect diffuse — the GI seed.*
+- **H4 — RTAO. IN PROGRESS — pulled forward past H3 (see [rtx-rtao.md](rtx-rtao.md)).** The
+  2026-09-17 profile measured full-res GTAO at ~4.3 ms / 40% of the UN frame while shadows
+  (H3's target) are a solved 0.5 ms; the user's direction is that UN drops screen-space AO
+  for RT. H4a (noisy ray pass + r_rtaoDebug) DONE. Cosine-weighted hemisphere occlusion rays
+  against the TLAS, denoised (ReBLUR), darkening the ambient term. Replaces SSAO at the RT
+  tier (screen-space AO misses off-screen occluders, like SSR). *Machinery is ~80% of RT
+  indirect diffuse — the GI seed.*
 - **H5 — RT reflections finish.** RR5 (world reflections: rebuild the static world BLAS with full
   attributes + materials, shade world hits → **replaces the env-probe/snapshot glass system**) and RR6
   (glossy via roughness-driven blur + reflection denoise, temporal, SSR↔RT seam softening).

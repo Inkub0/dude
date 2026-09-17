@@ -232,6 +232,7 @@ void RB_RHI_FogAllLights( rhi::RHI *r, viewDef_s *viewDef );
 // GTAO debug overlay (r_ssaoDebug): blit the AO buffer over the finished 3D view.
 // Called at end-of-view so the scene passes don't overwrite it (RhiWorld.cpp).
 void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
+void RB_RHI_RtaoDebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
 void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_s *viewDef );
 // Chromatic aberration (r_postChromaticAberration): scene-only fullscreen pass at the
 // end of the 3D view, before the HUD composites — so the RGB split never touches the
