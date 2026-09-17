@@ -5761,7 +5761,9 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				rhi::RenderParams rp;
 				memset( &rp, 0, sizeof( rp ) );
 				rp.mvpMatrix[0] = rp.mvpMatrix[5] = rp.mvpMatrix[10] = rp.mvpMatrix[15] = 1.0f;
-				rp.localParam0[0] = r_ssaoIntensity.GetFloat();
+				// RTAO's own intensity (default neutral 1.0) — r_ssaoIntensity's 1.2 compensates
+				// for the screen-space march and stays GTAO-only (user decision 2026-09-17)
+				rp.localParam0[0] = r_rtaoIntensity.GetFloat();
 				rp.screenCorrection[0] = 1.0f / w;
 				rp.screenCorrection[1] = 1.0f / h;
 				rp.depthTexRecip[0] = 1.0f / uploadW;

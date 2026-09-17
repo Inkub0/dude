@@ -3110,10 +3110,11 @@ static void DrawEnhGroup_AmbientOcclusion()
 			AddTooltip( "Replace the screen-space occlusion above with one traced hemisphere ray per "
 				"pixel against the real scene, denoised across frames: contact shading from geometry "
 				"that is off-screen or behind the camera, no screen-edge artifacts, and cheaper than "
-				"the full-resolution march at the top tiers. The Intensity slider still applies; the "
-				"sampling controls above (Directions/Steps/Resolution, Depth-Mip) are screen-space-"
-				"only and stop mattering. Needs Motion Vectors or FSR on for the denoiser; enabling "
-				"it builds the ray-tracing scene for the map. Vulkan + RT hardware only." );
+				"the full-resolution march at the top tiers. Has its OWN Intensity below (neutral "
+				"1.0 — the traced result needs no boost); the sampling controls above "
+				"(Directions/Steps/Resolution, Depth-Mip) are screen-space-only and stop mattering. "
+				"Needs Motion Vectors or FSR on for the denoiser; enabling it builds the ray-tracing "
+				"scene for the map. Vulkan + RT hardware only." );
 
 			float rtRad = r_rtaoRadius.GetFloat();
 			if ( ImGui::SliderFloat( "Ray Length##rtao", &rtRad, 8.0f, 256.0f, "%.0f units" ) ) {
@@ -3123,6 +3124,15 @@ static void DrawEnhGroup_AmbientOcclusion()
 				"broader, more grounded darkening from distant geometry; shorter keeps the effect "
 				"to tight contact shadows. The default (80) reaches further than the screen-space "
 				"radius ever could." );
+
+			float rtInt = r_rtaoIntensity.GetFloat();
+			if ( ImGui::SliderFloat( "Intensity##rtao", &rtInt, 0.0f, 4.0f, "%.2f" ) ) {
+				r_rtaoIntensity.SetFloat( rtInt );
+			}
+			AddTooltip( "RTAO strength. The traced occlusion is already physically grounded, so the "
+				"neutral 1.00 default shows it as-is — unlike the screen-space Intensity (1.2), "
+				"which compensates for the march and applies only when RTAO is off. Raise for "
+				"deeper creases, lower to soften." );
 
 			ImGui::EndDisabled();
 			// explain the gray-out cases the checkbox itself can't (mirrors the RT Reflections hint)

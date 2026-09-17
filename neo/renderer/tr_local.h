@@ -971,6 +971,7 @@ extern idCVar r_rtSunShadows;				// RT sun shadows: trace sun visibility per fra
 extern idCVar r_rtReflections;				// RT reflections on monsters: trace + shade the dynamic hit (VK + RT; rides SSR)
 extern idCVar r_rtao;						// H4 RTAO: ray-traced AO producer replacing GTAO at the RT tier
 extern idCVar r_rtaoRadius;					// RTAO ray length (world units)
+extern idCVar r_rtaoIntensity;				// RTAO strength (1.0 neutral; r_ssaoIntensity stays GTAO-only)
 extern idCVar r_rtaoDebug;					// RTAO debug view (1 raw rays, 2 denoised)
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
