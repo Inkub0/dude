@@ -1049,6 +1049,10 @@ private:
 	// NOT Y-flipped (unlike the scene pass) and uses the target's height, so the
 	// projective shadow write/read stays self-consistent — matching GL exactly.
 	bool						insideTargetPass = false;
+	// The merged normal prepass (BeginNormalPrepass) is a target pass that seals the *scene*
+	// depth, so unlike every other target it must honour SetDepthRange: the interactions
+	// depth-EQUAL against it WITH the weapon/model depth hack applied, exactly as zfill does.
+	bool						targetHonorsDepthRange = false;
 	int							curRenderH = 0;			// viewport/scissor height of the active pass
 	bool						curFlipY = true;		// scene = flipped; offscreen target = not
 	int							savedVpRect[4] = { 0, 0, 0, 0 };	// restored by the target's EndPass
@@ -9264,6 +9268,7 @@ void VulkanBackend::EnterTargetPass( int w, int h, bool flipY, VkRenderPass pipe
 	curPassClass = passClass;
 	curColorAtt = colorAtt;
 	insideTargetPass = true;
+	targetHonorsDepthRange = false;
 	dynStateDirty = true;
 }
 
@@ -10177,6 +10182,9 @@ RenderTargetHandle VulkanBackend::BeginNormalPrepass( int w, int h, const ClearA
 	// same passClass as the standalone RGBA8+depth normal target (colorCount 1 or 2) so the
 	// gbuffer pipeline is shared with the standalone path
 	EnterTargetPass( w, h, /*flipY*/true, mergeNormalPass, PassClassFor( VK_FORMAT_R8G8B8A8_UNORM, true, nColor ), /*colorAtt*/nColor );
+	// this pass replaces zfill as the scene-depth seal: the view weapon's depth-range hack
+	// must land in it, or its interactions fail depth-EQUAL and the weapon renders unlit (black)
+	targetHonorsDepthRange = true;
 	return mergeNormalTarget;
 }
 
@@ -10878,9 +10886,11 @@ void VulkanBackend::ApplyDynState( VkCommandBuffer cb, bool effFlipY ) {
 		v.height = (float)vpRect[3];
 	}
 	// shadow-map passes always want the full [0,1] depth range: the weapon/model
-	// depth hack (SetDepthRange) is a scene-only concern
-	v.minDepth = insideTargetPass ? 0.0f : depthRangeMin;
-	v.maxDepth = insideTargetPass ? 1.0f : depthRangeMax;
+	// depth hack (SetDepthRange) is a scene-only concern — except the merged normal
+	// prepass, which seals the scene depth itself (targetHonorsDepthRange)
+	const bool fullRange = insideTargetPass && !targetHonorsDepthRange;
+	v.minDepth = fullRange ? 0.0f : depthRangeMin;
+	v.maxDepth = fullRange ? 1.0f : depthRangeMax;
 	vkCmdSetViewport( cb, 0, 1, &v );
 
 	VkRect2D sc = {};

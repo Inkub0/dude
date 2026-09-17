@@ -140,6 +140,20 @@ validation gate passes), ~21k frames, validation-error parity with the merge-off
 Pending user verify: visual parity (depth-EQUAL sacred — watch for z-fighting / vanishing
 surfaces) + the fps win on Ultra/Nightmare.
 
+## Status (2026-09-17): black view weapon — merged pass dropped the weapon depth-range hack
+
+Once the merge became the VK default (2026-09-16) every tier that runs the normal prepass
+(High and up: `r_ssaoNormalBuffer`, SSR, motion vectors, FSR2) rendered the view weapon + hands
+**black except their self-lit stages** (ammo display). Cause: `RB_RHI_NormalPrepass` *calls*
+`RB_EnterWeaponDepthHack` (→ `SetDepthRange( 0, 0.5 )`), but `VulkanBackend::ApplyDynState`
+forced the viewport depth range to [0,1] inside **every** target pass (right for shadow maps and
+the standalone normal target, which own their depth). The merged pass is a target pass that seals
+the *scene* depth, so the weapon was sealed at full-range depth while its interactions drew at
+half range → depth-`EQUAL` failed → no lighting. Exactly the "Depth-EQUAL invariance" risk below.
+Fix: `targetHonorsDepthRange` — set by `BeginNormalPrepass`, cleared by `EnterTargetPass` — lets
+that one target pass apply `SetDepthRange` like the scene pass. (The standalone path never showed
+it because zfill, in the scene pass, sealed the weapon.) Pending user visual verify.
+
 ## Status (2026-08-11 later): SSR MRT extension shipped — merge now engages with SSR on
 
 `BeginNormalPrepass(w, h, clear, wantMrt)` gained an optional 2nd color attachment
