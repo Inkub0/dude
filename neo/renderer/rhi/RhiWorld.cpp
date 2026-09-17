@@ -5623,6 +5623,12 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( rhiRtaoRayRT && ( rhiRtaoW != w || rhiRtaoH != h ) ) {
 		r->DestroyRenderTarget( rhiRtaoRayRT );
 		rhiRtaoRayRT = 0;
+		// the guide + resolve targets share the ray target's size — recreate them too
+		// (workflow audit: they were only recreated on a lost context, so a resolution
+		// change would have NRD reading out-of-bounds guides)
+		if ( rhiRtaoViewzRT )   { r->DestroyRenderTarget( rhiRtaoViewzRT );   rhiRtaoViewzRT = 0; }
+		if ( rhiRtaoPackRT )    { r->DestroyRenderTarget( rhiRtaoPackRT );    rhiRtaoPackRT = 0; }
+		if ( rhiRtaoResolveRT ) { r->DestroyRenderTarget( rhiRtaoResolveRT ); rhiRtaoResolveRT = 0; }
 	}
 	if ( !rhiRtaoRayRT ) {
 		rhiRtaoRayRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, 1 );

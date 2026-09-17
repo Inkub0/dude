@@ -2689,6 +2689,27 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 		vkResetDescriptorPool( device, framePool[frameIndex], 0 );
 	}
 
+	// Xid-109 ROOT-CAUSE FIX (workflow rtao-device-lost-hunt, 2026-09-17): a pipeline
+	// barrier's FIRST synchronization scope covers all PREVIOUSLY SUBMITTED commands on the
+	// queue, so this orders the previous frame's fragment/compute ray-query traversal (and
+	// its BDA geo-table reads) BEFORE this frame's in-place AS rebuilds. Without it, the
+	// r_rtTlasDirty idle-skip pins rtCurrentAddr to a slot the still-executing previous
+	// frame traces while this frame rebuilds that same slot's TLAS / refits the monster
+	// BLAS — traversal over a structure being rewritten wedges the channel (NVRM Xid 109
+	// CTX SWITCH TIMEOUT). RTAO exposed it by tracing every pixel of every frame; the fix
+	// protects every ray consumer. Recorded only on frames that actually build.
+	if ( ( rtDynPendingSlot == frameIndex && rtFrameDynBlas[frameIndex] != VK_NULL_HANDLE )
+			|| ( rtPendingSlot == frameIndex && rtFrameTlas[frameIndex] != VK_NULL_HANDLE ) ) {
+		VkMemoryBarrier preBuild = {};
+		preBuild.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		preBuild.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_SHADER_READ_BIT;
+		preBuild.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+		vkCmdPipelineBarrier( f.cb,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+			0, 1, &preBuild, 0, NULL, 0, NULL );
+	}
+
 	// R3 animated casters (monsters): rebuild the slot's combined monster BLAS FIRST, so the
 	// TLAS build below reads the current-pose geometry. RecordFrameDynBlasBuild ends with an
 	// AS-write->AS-read barrier ordering it against that TLAS build. Fresh slots were primed
@@ -5547,6 +5568,18 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 
 	vkWaitForFences( device, 1, &frames[slot].fence, VK_TRUE, UINT64_MAX );
 
+	// Xid-109 root-cause companion (workflow rtao-device-lost-hunt): with r_rtTlasDirty
+	// idle-skipping, the PREVIOUS frame (other slot index) may still be in flight tracing
+	// THIS slot's pinned TLAS and reading its instance/geometry buffers via device address.
+	// The host memcpys below can't be ordered by pipeline barriers — when this slot's TLAS
+	// is the pinned one, drain ALL in-flight fences first. Rare (only the first dirty frame
+	// after an idle stretch), so the stall is acceptable.
+	if ( rtCurrentAddr != 0 && rtFrameTlas[slot] != VK_NULL_HANDLE && rtCurrentAddr == rtFrameAddr[slot] ) {
+		for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) {
+			vkWaitForFences( device, 1, &frames[i].fence, VK_TRUE, UINT64_MAX );
+		}
+	}
+
 	// (re)create the slot's resources when it has none or the (static+animated) count outgrew them.
 	// Growth stalls the queue - rare (entity counts are near-constant within a map).
 	if ( rtFrameTlas[slot] == VK_NULL_HANDLE || nCap > rtFrameCapacity[slot] ) {
@@ -6588,11 +6621,20 @@ bool VulkanBackend::RtaoEnsureOutput( int w, int h ) {
 }
 
 void VulkanBackend::RtaoDestroyOutput() {
+	if ( rtaoOutImage == VK_NULL_HANDLE && rtaoOutView == VK_NULL_HANDLE ) {
+		return;
+	}
+	// an in-flight frame may still sample the image (resolve/debug passes); resize is
+	// rare, so a full drain is the simple safe teardown
+	if ( device != VK_NULL_HANDLE ) {
+		vkDeviceWaitIdle( device );
+	}
 	if ( rtaoOutView )  { vkDestroyImageView( device, rtaoOutView, NULL ); rtaoOutView = VK_NULL_HANDLE; }
 	if ( rtaoOutImage ) { vmaDestroyImage( vma, rtaoOutImage, rtaoOutAlloc ); rtaoOutImage = VK_NULL_HANDLE; rtaoOutAlloc = NULL; }
 	if ( rtaoOutSampleImage >= 1 && rtaoOutSampleImage <= (ImageHandle)imageTable.size() ) {
 		imageTable[rtaoOutSampleImage - 1].live = false;
 	}
+	InvalidateTextureSets();	// cached descriptor sets referencing the freed handle are stale
 	rtaoOutSampleImage = 0;
 	rtaoOutW = rtaoOutH = 0;
 	rtaoOutReady = false;
@@ -6672,6 +6714,12 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		vkCmdEndRenderPass( cb );					// dispatches are illegal inside a render pass
 		insideScenePass = false;
 	}
+	if ( insideTargetPass ) {
+		// a target pass mid-recording can't be resumed from here (same rule as Dispatch());
+		// callers sequence RtaoDenoise between EndPass and the next pass, so this is a
+		// defensive bail — GTAO takes over the view
+		RTAO_FAIL( 8, "called inside a target pass — recorded nothing" );
+	}
 
 	// inputs: SHADER_READ_ONLY -> GENERAL (NRD's descriptors are written with GENERAL);
 	// output: first use UNDEFINED -> GENERAL, then a WAR barrier vs last frame's sampling
@@ -6701,13 +6749,14 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		0, 0, NULL, 0, NULL, preCount, pre );
 	rtaoOutReady = true;
 
-	if ( !NrdRecordDispatches( cb, &NRD_ID_REBLUR_AO, 1 ) ) {
-		RTAO_FAIL( 6, "NrdRecordDispatches failed (see warnings above)" );
-	}
-	if ( !( warned & ( 1 << 7 ) ) ) {
+	const bool recorded = NrdRecordDispatches( cb, &NRD_ID_REBLUR_AO, 1 );
+	if ( recorded && !( warned & ( 1 << 7 ) ) ) {
 		warned |= 1 << 7;
 		common->Printf( "RTAO: NRD ReBLUR denoise active (%dx%d)\n", a.w, a.h );
 	}
+	// on record failure we still fall through to the restore barriers below — the inputs
+	// were already transitioned to GENERAL and MUST go back to SHADER_READ_ONLY, or every
+	// later consumer (FSR2, SSR, the GTAO fallback itself) samples them in the wrong layout
 	#undef RTAO_FAIL
 
 	// output -> fragment sampling; inputs back to SHADER_READ_ONLY for their other consumers
@@ -6731,11 +6780,13 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	addPost( norm->colorImage[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPost( vel.image,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPost( rtaoOutImage,        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	// dst includes COMPUTE: FSR2 consumes the velocity image (and could consume others)
+	// from compute later in the frame
 	vkCmdPipelineBarrier( cb,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		0, 0, NULL, 0, NULL, postCount, post );
-	return true;
+	return recorded;
 }
 
 // float16 decode for the validator readback (handles zero/denorm/inf/nan)

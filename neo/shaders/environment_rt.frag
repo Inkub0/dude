@@ -42,7 +42,12 @@ const vec3  RT_SKY_DOWN = vec3( 0.07f, 0.08f, 0.09f );			// reflection points do
 const float RT_GRAZE    = 1.0f;									// added reflectivity at grazing angles
 
 void main() {
-	vec3 N = normalize( var_WorldNormal );
+	// degenerate-normal hang guard (mirrors rtao_ray.frag): an interpolated vertex normal
+	// can underflow to ~zero on degenerate triangles; normalize() then yields NaN and the
+	// ray direction below becomes UB that can wedge RT traversal
+	float nl2 = dot( var_WorldNormal, var_WorldNormal );
+	if ( !( nl2 > 1e-6 ) ) { fragColor = vec4( 0.0 ); return; }
+	vec3 N = var_WorldNormal * inversesqrt( nl2 );
 	vec3 V = normalize( var_WorldToEye );
 	if ( dot( N, V ) < 0.0 ) { N = -N; }				// reflect off the viewer-facing side (glass is thin/2-sided)
 	vec3 R = reflect( -V, N );							// world reflection direction

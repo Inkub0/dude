@@ -75,7 +75,12 @@ void main() {
 	vec2  ndc = uv * 2.0 - 1.0;
 	float dd  = -vz;
 	vec3  P = vec3( ndc.x * dd * u_localParam0.x, ndc.y * u_windowCoord.z * dd * u_localParam0.y, vz );
-	vec3  N = normalize( nt.xyz * 2.0 - 1.0 );
+	// degenerate-normal hang guard (mirrors rtao_ray.frag): a NaN here reaches
+	// rayQueryInitializeEXT's direction below, which is UB that can wedge RT traversal
+	vec3  Ndec = nt.xyz * 2.0 - 1.0;
+	float nl2  = dot( Ndec, Ndec );
+	if ( !( nl2 > 1e-4 ) ) { fragColor = vec4( 0.0 ); return; }
+	vec3  N = Ndec * inversesqrt( nl2 );
 	vec3  V = normalize( -P );
 
 	// RT reflection normal: blend the GEOMETRIC (bump-free) normal toward the full BUMP normal N by
