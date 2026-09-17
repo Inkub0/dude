@@ -62,6 +62,7 @@ Design decisions taken:
 | film grain / chroma | off | 0.05 / off | 0.05 / 0.2 | 0.05 / 0.2 | 0.05 / 0.2 | 0.05 / 0.2 |
 | film grain size | 1.5* | 1.5 | 1.5 | 1.5 | 1.5 | 1.5 |
 | post antialiasing | off | SMAA | SMAA | SMAA | SMAA | SMAA |
+| render interpolation (com_interpolate) | off (stock 60Hz) | on | on | on | on | on |
 | reflection scale | 1.0 | 1.0 | 0.7 | 0.7 | 0.7 | 0.7 |
 
 (Potato/Low carry the cheap Medium SSAO/shadow sub-params under the off toggles so a
