@@ -5127,6 +5127,29 @@ void VulkanBackend::RefreshAnimBlas() {
 	animPendGeoFirst.clear();
 	animPendGeoCount.clear();
 	VkCommandBuffer cb = frames[frameIndex].cb;
+
+	// Xid-109 combat-path fix (workflow rtao-device-lost-hunt, 2026-09-17): this is the
+	// build path taken when monsters are present — UpdateTlas clears rtPendingSlot and
+	// defers to us, so BeginFrame's pre-build barrier does NOT run. The per-entity anim
+	// BLASes below are refit IN PLACE and are NOT slot-double-buffered, so a refit here
+	// races the PREVIOUS in-flight frame's ray traversal of the same BLAS (and the
+	// deferred TLAS build races its traversal of the TLAS) with no ordering: traversal
+	// over a structure being rewritten wedges the channel (NVRM Xid 109). A barrier's
+	// first sync scope covers all previously-submitted commands on the queue, so this
+	// orders the previous frame's fragment/compute ray reads before every build/refit in
+	// this function. Emitted once, ahead of all of them (we passed the empty early-out,
+	// so there is anim work).
+	{
+		VkMemoryBarrier preBuild = {};
+		preBuild.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		preBuild.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_SHADER_READ_BIT;
+		preBuild.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+		vkCmdPipelineBarrier( cb,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+			0, 1, &preBuild, 0, NULL, 0, NULL );
+	}
+
 	bool anyWrite = false;
 	for ( size_t i = 0; i < animStaged.size(); i++ ) {
 		const AnimCasterStaged &s = animStaged[i];
