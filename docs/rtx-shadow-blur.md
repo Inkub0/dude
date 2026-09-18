@@ -133,15 +133,16 @@ pre-existing caller. Kelly's window never showed it because both lights' rects w
 ## Cvars
 
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
-- `r_rtShadowBlurIntensity` (1.0, 0..4; menu "Blur Intensity"): scales the blur width. Replaced
+- `r_rtShadowBlurIntensity` (1.5, 0..4; Debugging -> RT Shadows -> "Blur Intensity"): scales the blur width. Replaced
   the "Light Size" / sun-angle pair (user, 2026-09-18: with the emitter model gone a "light size"
   has no reason to exist - it is a blur amount). Internally the width is still
   `3 * intensity * dOcc / (dLight - dOcc)` world units (point lights x `max(1, largest radius axis
   / 256)`; parallel suns 1 degree x intensity), so contact hardening is unchanged.
-- `r_rtShadowBlurCurve` (1.0, 0.25..4; menu "Blur Falloff Curve"): the exponent on the gap ratio -
+- `r_rtShadowBlurCurve` (1.45, 0.25..4; Debugging -> RT Shadows -> "Blur Falloff Curve"): the exponent on the gap ratio -
   width = `blurScale * g^curve`, `g = dOcc / (dLight - dOcc)` (caster-to-surface over
   caster-to-light distance). 1 = geometric growth; < 1 softens sooner then levels off; > 1 stays
-  crisp longer near the caster. g is usually < 1 indoors (casters sit nearer the surface than the
+  crisp longer near the caster. Defaults 1.5 / 1.45 are the user's tuned look (2026-09-18); the
+  Graphics tab keeps only the on/off toggle. g is usually < 1 indoors (casters sit nearer the surface than the
   light), which is the range those descriptions assume; for g > 1 the effect inverts.
 
 ## Limits

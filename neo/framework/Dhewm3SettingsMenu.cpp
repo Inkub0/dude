@@ -3378,25 +3378,8 @@ static void DrawEnhGroup_Shadows()
 			"the gap grows, by up to 24 pixels. Same rays, no noise and nothing accumulated over "
 			"frames - off gives back exactly the hard ray-traced shadows. Changes the look of "
 			"shadows (the stock game's are hard-edged). Needs SSAO, RTAO or Motion Vectors on "
-			"(their depth/normal prepass). Other lights are not affected." );
-		ImGui::BeginDisabled( !r_rtShadowBlur.GetBool() );
-		float rtBlurAmt = r_rtShadowBlurIntensity.GetFloat();
-		if ( ImGui::SliderFloat( "Blur Intensity", &rtBlurAmt, 0.0f, 4.0f, "%.2f" ) ) {
-			r_rtShadowBlurIntensity.SetFloat( rtBlurAmt );
-		}
-		AddTooltip( "How strongly the ray-traced shadows are blurred. The blur still follows the "
-			"scene - none where an object touches the surface, more as the gap grows - this scales "
-			"all of it. It tops out at 24 pixels, so high values mostly soften the edges near "
-			"contact further. 0 = hard shadows, 1 = default." );
-		float rtBlurCurve = r_rtShadowBlurCurve.GetFloat();
-		if ( ImGui::SliderFloat( "Blur Falloff Curve", &rtBlurCurve, 0.25f, 4.0f, "%.2f" ) ) {
-			r_rtShadowBlurCurve.SetFloat( rtBlurCurve );
-		}
-		AddTooltip( "How quickly a shadow softens as it gets further from the object casting it. "
-			"1 = the natural growth of a real light. Lower = soft almost straight away, then "
-			"levelling off (a more even blur). Higher = crisp for longer near the object, then "
-			"widening fast. Blur Intensity sets how much; this sets where." );
-		ImGui::EndDisabled();
+			"(their depth/normal prepass). Other lights are not affected. Blur Intensity and the "
+			"falloff curve are tuned in Debugging -> RT Shadows." );
 		ImGui::EndDisabled();
 
 		ImGui::EndDisabled();
@@ -3954,6 +3937,46 @@ static void DrawDbgGroup_RTReflections()
 
 	ImGui::EndDisabled();	// r_rtReflections
 	ImGui::EndDisabled();	// isVulkan
+	EndSettingsGroup();
+	}
+}
+
+static void DrawDbgGroup_RTShadows()
+{
+	// Live tuning for r_rtShadowBlur (docs/rtx-shadow-blur.md). The on/off toggle lives in
+	// Graphics -> Shadows -> Ray Tracing ("Soften RT Shadows"); these shape the blur.
+	const bool rtCapable = R_SupportsRayTracing();
+	if ( BeginSettingsGroup( "RT Shadows" ) ) {
+
+	if ( !rtCapable ) {
+		ImGui::TextDisabled( "Requires the Vulkan backend + ray-query (RT) hardware." );
+	}
+	ImGui::BeginDisabled( !rtCapable );
+	if ( !r_rtShadowBlur.GetBool() ) {
+		ImGui::TextDisabled( "Soften RT Shadows is off - enable it in Graphics -> Shadows -> Ray Tracing (RTX)." );
+	}
+	ImGui::BeginDisabled( !r_rtShadowBlur.GetBool() );
+
+	float rtBlurAmt = r_rtShadowBlurIntensity.GetFloat();
+	if ( ImGui::SliderFloat( "Blur Intensity", &rtBlurAmt, 0.0f, 4.0f, "%.2f" ) ) {
+		r_rtShadowBlurIntensity.SetFloat( rtBlurAmt );
+	}
+	AddTooltip( "How strongly the ray-traced shadows are blurred. The blur still follows the "
+		"scene - none where an object touches the surface, more as the gap grows - this scales "
+		"all of it. It tops out at 24 pixels, so high values mostly soften the edges near "
+		"contact further. 0 = hard shadows. Default 1.5." );
+
+	float rtBlurCurve = r_rtShadowBlurCurve.GetFloat();
+	if ( ImGui::SliderFloat( "Blur Falloff Curve", &rtBlurCurve, 0.25f, 4.0f, "%.2f" ) ) {
+		r_rtShadowBlurCurve.SetFloat( rtBlurCurve );
+	}
+	AddTooltip( "How quickly a shadow softens as it gets further from the object casting it. "
+		"1 = the natural growth of a real light. Lower = soft almost straight away, then "
+		"levelling off (a more even blur). Higher = crisp for longer near the object, then "
+		"widening fast. Blur Intensity sets how much; this sets where. Default 1.45." );
+
+	ImGui::EndDisabled();	// r_rtShadowBlur
+	ImGui::EndDisabled();	// rtCapable
 	EndSettingsGroup();
 	}
 }
@@ -4793,6 +4816,7 @@ static void DrawShadowDebugMenu()
 	// calls to change the on-screen order.
 	DrawDbgGroup_RenderDebugging();
 	DrawDbgGroup_ShadowMaps();
+	DrawDbgGroup_RTShadows();
 	DrawDbgGroup_SSAO();
 	DrawDbgGroup_OcclusionMaps();
 	DrawDbgGroup_Tessellation();
