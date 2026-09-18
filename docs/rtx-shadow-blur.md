@@ -210,9 +210,9 @@ The flicker was the clue: a staggered light alternates between its mask and - wh
 stored view distance doesn't validate - the inline fallback ray. Shadows appearing every other
 frame meant the fallback was firing, i.e. the mask's view distance was wrong for those pixels.
 It was wrong for ALL pixels: `rtshadow_ray` turned window depth into view distance with the
-constants `(0.33333333, -0.33316667)`, which encode `r_znear = 3`. **Cinematics set
-`renderView.cramZNear`, which quarters the near plane** (tr_main.cpp), so every reconstructed
-point landed 4x too far along its view ray - rays started somewhere behind the scene, most failed
+constants `(0.33333333, -0.33316667)`, which encode `r_znear = 3`. **The game sets `r_znear` to 1
+while a cinematic camera is active** (`idGameLocal::SetCamera`), so every reconstructed
+point landed 3x too far along its view ray - rays started somewhere behind the scene, most failed
 the light-volume test ("lit" = shadows gone), the rest hit unrelated geometry (soft patches).
 Fix: the pair now comes from the view's own projection, `1/vz = raw * (-2/P14) + (1 - P10)/P14`
 (`u_depthTexRecip.zw`); the far-distance depth-quantization bias scales with it.
@@ -220,7 +220,9 @@ A first guess - the ray-origin offset following the G-buffer bump normal instead
 one - changed nothing and was reverted. **Fix USER-VERIFIED 2026-09-18 ("the cinematic looks right").**
 
 The same hard-coded pair lives in every other depth-reading shader (SSAO, RTAO, SSR, soft
-particles, ...): they are all off by 4x in cinematics too. Not touched here.
+particles, ...): they were all off by 3x in cinematics too - fixed
+separately, see [cinematic-depth.md](cinematic-depth.md). (This section first blamed
+`renderView.cramZNear` and "4x": wrong mechanism, the game never sets it.)
 
 ## Cvars
 

@@ -119,11 +119,12 @@ UBO_BINDING(0) uniform RenderParams {
 
 	vec4 u_depthParms;           // window depth -> view z for THIS view: 1/vz = raw * x + y, from its
 	                            // projection ( -2/P[14], (1-P[10])/P[14] ). NOT a constant: the
-	                            // near plane is r_znear (3) in play - which gives the pair
+	                            // near plane is r_znear = 3 in play - which gives the pair
 	                            // (0.33333333, -0.33316667) every depth-reading shader used to
-	                            // hard-code - but a QUARTER of that in cinematics
-	                            // (renderView.cramZNear), where the constants put every
-	                            // reconstructed point 4x too far away. x == 0 = not provided:
+	                            // hard-code - but the game sets r_znear to 1 while a cinematic
+	                            // camera is active (idGameLocal::SetCamera), where the constants
+	                            // put every reconstructed point 3x too far away (and
+	                            // renderView.cramZNear would quarter it again). x == 0 = not provided:
 	                            // use DUDE_DEPTH_CONSTS( ) below, which falls back to the play pair.
 };
 

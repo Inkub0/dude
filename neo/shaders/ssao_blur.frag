@@ -20,8 +20,8 @@ layout(location = 0) out vec4 fragColor;
 
 #define BLUR_RADIUS 2
 
-// depth -> view z pair of THIS view (renderparms.glsl u_depthParms): cinematics quarter the near
-// plane, so it is not the constant ( 0.33333333, -0.33316667 ) it used to be hard-coded as
+// depth -> view z pair of THIS view (renderparms.glsl u_depthParms): the game lowers the near plane
+// for cinematic cameras, so it is not the constant ( 0.33333333, -0.33316667 ) it used to be hard-coded as
 #define depth_consts DUDE_DEPTH_CONSTS()
 
 // When the SSAO depth mip exists (u_depthTexRecip.z >= 0.5) the backend binds its level 0

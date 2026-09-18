@@ -38,9 +38,9 @@
 //                           near the caster, then widening fast
 //   u_screenCorrection.xy = 1 / viewSize
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
-//   u_depthParms.xy       = window depth -> 1 / view z for THIS view (renderparms.glsl): cinematics
-//                           quarter the near plane, and a hard-coded play-time pair rebuilt every point
-//                           4x too far along its view ray
+//   u_depthParms.xy       = window depth -> 1 / view z for THIS view (renderparms.glsl): the game
+//                           lowers the near plane for cinematic cameras (r_znear 3 -> 1), and a hard-coded
+//                           play-time pair rebuilt every point 3x too far along its view ray
 #extension GL_EXT_ray_query : require
 
 #include "renderparms.glsl"

@@ -140,14 +140,15 @@ struct RenderParams {
 	float	depthParms[4];		// window depth -> view z for this view: 1/vz = raw * x + y, from the
 								// view's projection (RB_RHI_FillDepthParms). Every depth-reading pass
 								// fills it; the shaders fall back to the play-time constants when
-								// x == 0. Cinematics quarter the near plane (renderView.cramZNear),
-								// which the old hard-coded pair ignored. Appended LAST.
+								// x == 0. The game sets r_znear to 1 for cinematic cameras
+								// (idGameLocal::SetCamera), which the old hard-coded pair - valid for
+								// r_znear 3 only - ignored. Appended LAST.
 };
 
 // window depth -> view z for a view, from its projection matrix (column-major GL layout):
 //   z_ndc = -P10 - P14 / vz,  raw = ( z_ndc + 1 ) / 2   =>   1/vz = raw * ( -2 / P14 ) + ( 1 - P10 ) / P14
-// In play (r_znear 3) that is ( 0.33333333, -0.33316667 ); cinematics (renderView.cramZNear)
-// quarter the near plane. Leaves x == 0 (= shader falls back to the play pair) on a degenerate matrix.
+// In play (r_znear 3) that is ( 0.33333333, -0.33316667 ); the game lowers r_znear to 1 for cinematic
+// cameras, and renderView.cramZNear would quarter it again. Leaves x == 0 (= shader falls back to the play pair) on a degenerate matrix.
 inline void FillDepthParms( RenderParams &p, const float *proj ) {
 	if ( proj != 0 && proj[14] != 0.0f ) {
 		p.depthParms[0] = -2.0f / proj[14];
