@@ -2691,6 +2691,11 @@ struct EnhancementPreset {
 	// velocity buffer for the denoiser (r_fsr, on here). Every lower tier carries 0, so a
 	// non-RT machine sees UN == Nightmare AO rather than a broken tier.
 	bool  rtao;                     // r_rtao
+	// RT shadow blur (appended; VK + RT hardware only, inert elsewhere): softens the two hard
+	// ray-traced shadow routes above in screen space (docs/rtx-shadow-blur.md). Ultra Nightmare
+	// only - it needs those routes (on at this tier only) and changes the look of shadows.
+	// Measured ~+0.9 ms per full-screen ray-served light at 1440p on a 3080 Ti.
+	bool  rtShadowBlur;             // r_rtShadowBlur
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2699,14 +2704,14 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false },
-	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     true,  true,  true,  false, true , true  },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false },
+	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     true,  true,  true,  false, true , true, true  },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2808,6 +2813,7 @@ static void ApplyEnhancementPreset( int idx )
 	r_ssaoTemporalTrade.SetBool( p.ssaoTemporalTrade );
 	com_interpolate.SetBool( p.interpolate );
 	r_rtao.SetBool( p.rtao );
+	r_rtShadowBlur.SetBool( p.rtShadowBlur );
 }
 
 // Return the preset whose full cvar vector the live cvars currently match, or -1
@@ -2866,7 +2872,8 @@ static int DetectEnhancementPreset()
 			r_rtReflections.GetBool()          == p.rtReflections &&
 			r_ssaoTemporalTrade.GetBool()      == p.ssaoTemporalTrade &&
 			com_interpolate.GetBool()          == p.interpolate &&
-			r_rtao.GetBool()                   == p.rtao;
+			r_rtao.GetBool()                   == p.rtao &&
+			r_rtShadowBlur.GetBool()           == p.rtShadowBlur;
 		if ( match ) {
 			return i;
 		}
@@ -3360,7 +3367,7 @@ static void DrawEnhGroup_Shadows()
 			"a moment. Vulkan + RT hardware only." );
 
 		// r_rtShadowBlur (docs/rtx-shadow-blur.md): a toggle ON TOP of the two ray-traced shadow
-		// routes above - opt-in, never rewrites a preset-owned cvar
+		// routes above; preset-owned (on at Ultra Nightmare), so flipping it by hand reads "Custom"
 		ImGui::BeginDisabled( !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() ) );
 		bool rtBlur = r_rtShadowBlur.GetBool();
 		if ( ImGui::Checkbox( "Soften RT Shadows", &rtBlur ) ) {

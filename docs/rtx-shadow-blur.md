@@ -70,7 +70,7 @@ could not affect the image:
 Still per light and unavoidable in this design: the ray pass is closest-hit (mode 4 stops at the
 first hit), three view-sized target clears, and five render-pass switches.
 
-`r_rtShadowBlurDebug` splits what is left: **1** = rays only (tiles + blur skipped, hard mask) -
+`r_rtShadowBlurDebug` (since removed) split what was left: **1** = rays only (tiles + blur skipped, hard mask) -
 `r_vkGpuTime` vs. 0 is the blur's cost, vs. `r_rtShadowBlur 0` the ray pass's; **2** = per-second
 readout of lights blurred per view and the screen area their rects add up to.
 
@@ -98,13 +98,24 @@ numbers, so the gain is visible as "blurred rects cover X screens (light scissor
 near Y in a scene, that light really does shade the whole screen and ~1.2 ms per full-screen light
 at 1440p is this design's floor (one ray pass, tile pass, two blur passes, three target clears).
 
+**Final numbers, Kelly's window (user, `r_vkGpuTime`, 1440p, 3080 Ti):** blur off ~8.88 ms, on
+~10.62 ms = **+1.74 ms for two full-screen ray-served lights (~0.9 ms each)**. Both lights
+genuinely shade the whole view ("blurred rects cover 2.00 screens (light scissors: 2.00)" - the
+viewer's own room crosses the near plane, so projected bounds cannot tighten it). The user's
+budget for this scene: *"less than 2 ms is ok to sacrifice for blurred shadows"* - accepted, so
+no half-res / fidelity trade was built.
+
+A fourth pass (horizontal pass discarding in unflagged tiles + raw fallback) measured no gain
+(10.6 ms before and after) and was reverted; the `r_rtShadowBlurDebug` cost-split cvar is removed.
+What remains per full-screen light is fixed: one ray pass, the tile passes, two blur passes, three
+target clears. Lights with small lit areas pay proportionally less.
+
 ## Cvars
 
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
 - `r_rtShadowBlurLightSize` (3): light sphere radius in world units = the softness. Point lights
   scale it by `max(1, largest light_radius axis / 256)`.
 - `r_rtShadowBlurSunAngle` (1.0): angular radius of parallel suns, degrees.
-- `r_rtShadowBlurDebug` (0, not archived): 1 = rays only, 2 = lights/coverage readout (remove once the cost is settled).
 
 ## Limits
 
@@ -114,6 +125,6 @@ at 1440p is this design's floor (one ray pass, tile pass, two blur passes, three
 
 ## Status
 
-**USER-VERIFIED 2026-09-18** ("the blurring seems great"). Fidelity: changes the look of shadows,
-so opt-in. Open: GPU-time delta on/off (`r_vkGpuTime`) not yet reported; Ultra Nightmare preset row
-+ docs/todo.md table not wired yet.
+**USER-VERIFIED 2026-09-18** ("the blurring seems great"); cost accepted at +1.74 ms worst case
+measured. Fidelity: changes the look of shadows, so it is on only in the **Ultra Nightmare** preset
+(with the RT shadow routes it builds on) and a menu toggle everywhere else; docs/todo.md row added.

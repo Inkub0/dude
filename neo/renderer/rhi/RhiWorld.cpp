@@ -397,9 +397,6 @@ static struct {
 	float				invView[16];
 	rhi::ShaderHandle	rayProg, tileProg, blurProg;
 } rhiRtBlur;
-// r_rtShadowBlurDebug 2: per-second readout accumulators (views, blurred lights, rect pixels)
-static int    rhiRtBlurDbgViews = 0, rhiRtBlurDbgLights = 0, rhiRtBlurDbgStartMs = 0;
-static double rhiRtBlurDbgCoverage = 0.0, rhiRtBlurDbgScissor = 0.0;
 static rhi::RenderTargetHandle rhiRtaoRayRT = 0;
 static int   rhiRtaoW = 0, rhiRtaoH = 0;
 static bool  rhiRtaoRanThisView = false;			// ray output produced this view (overlay gate)
@@ -5931,22 +5928,6 @@ static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !rhiRtBlurTileRT[1] ) { rhiRtBlurTileRT[1] = r->CreateRenderTargetMipped( rhi::IF_RGBA8, tw, th, 1 ); }
 	rhiRtBlurThisView = rhiRtBlurRayRT && rhiRtBlurPingRT && rhiRtBlurMaskRT && rhiRtBlurTileRT[0] && rhiRtBlurTileRT[1];
 
-	// r_rtShadowBlurDebug 2: what the feature is being asked to do, once per second - how many
-	// lights it blurs per view and how much of the screen their rects add up to (1.0 = one
-	// full screen of rays + blur; cost scales with this number, not with the light count)
-	if ( r_rtShadowBlurDebug.GetInteger() >= 2 ) {
-		const int nowMs = Sys_Milliseconds();
-		if ( rhiRtBlurDbgStartMs == 0 ) { rhiRtBlurDbgStartMs = nowMs; }
-		if ( nowMs - rhiRtBlurDbgStartMs >= 1000 && rhiRtBlurDbgViews > 0 ) {
-			common->Printf( "rtShadowBlur/s: %d views | %.1f lights blurred per view | blurred rects cover %.2f screens per view (light scissors: %.2f)\n",
-				rhiRtBlurDbgViews, (float)rhiRtBlurDbgLights / rhiRtBlurDbgViews, rhiRtBlurDbgCoverage / rhiRtBlurDbgViews,
-				rhiRtBlurDbgScissor / rhiRtBlurDbgViews );
-			rhiRtBlurDbgViews = rhiRtBlurDbgLights = 0;
-			rhiRtBlurDbgCoverage = rhiRtBlurDbgScissor = 0.0;
-			rhiRtBlurDbgStartMs = nowMs;
-		}
-		rhiRtBlurDbgViews++;
-	}
 }
 
 // The screen rect the blur actually has to cover for one light. vLight->scissorRect is the union of
@@ -6085,18 +6066,6 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	RB_RHI_DrawFullscreen( r, rhiRtBlur.rayProg, parms, 0 );
 	r->EndPass();
 
-	if ( r_rtShadowBlurDebug.GetInteger() >= 2 ) {
-		const idScreenRect &fr = vLight->scissorRect;
-		rhiRtBlurDbgLights++;
-		rhiRtBlurDbgCoverage += (double)( lr.x2 - lr.x1 + 1 ) * (double)( lr.y2 - lr.y1 + 1 ) / ( (double)w * (double)h );
-		rhiRtBlurDbgScissor += (double)( fr.x2 - fr.x1 + 1 ) * (double)( fr.y2 - fr.y1 + 1 ) / ( (double)w * (double)h );
-	}
-	if ( r_rtShadowBlurDebug.GetInteger() == 1 ) {
-		// cost split: rays only - the mask is the raw hard visibility, tiles + blur skipped
-		backEnd.currentScissor = viewDef->scissor;
-		return r->GetRenderTargetImage( rhiRtBlurRayRT );
-	}
-
 	rhi::RenderParams tp;
 	memset( &tp, 0, sizeof( tp ) );
 	tp.mvpMatrix[0] = tp.mvpMatrix[5] = tp.mvpMatrix[10] = tp.mvpMatrix[15] = 1.0f;
@@ -6134,6 +6103,9 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		r->EndPass();
 	}
 
+	// drop the tile target from the recorded units: the next blurred light renders INTO it, and a
+	// later draw that doesn't rebind unit 1 must not carry an attachment along
+	RB_RHI_BindRTImage( r, 1, 0 );
 	backEnd.currentScissor = viewDef->scissor;	// the loop re-applies the light's scissor right after
 	return r->GetRenderTargetImage( rhiRtBlurMaskRT );
 }
