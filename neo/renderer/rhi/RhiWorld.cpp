@@ -6610,6 +6610,14 @@ rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg
 	if ( !r_hdrEyeAdaptation.GetBool() || r_hdrTonemap.GetInteger() < 1 || sceneImg == 0 ) {
 		return 0;
 	}
+	// Cinematics never adapt: the director lit and graded each shot, and an auto-exposure that
+	// re-meters on every camera cut pumps the brightness across the edit. The cvar is NOT touched -
+	// the pass just stands down (static exposure, as if it were off) while a cinematic camera is
+	// the main view, and picks up again by itself when gameplay returns; the adapted exposure it
+	// had reached is still in its history, so it resumes from there.
+	if ( RB_RHI_CinematicView() ) {
+		return 0;
+	}
 	if ( !R_BackendSupportsEnhancements() || !RB_RHI_EnsureEyeAdaptTargets( r ) ) {
 		return 0;
 	}

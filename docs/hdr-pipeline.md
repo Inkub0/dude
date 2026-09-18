@@ -295,6 +295,15 @@ split in mind (exposure/curve separated from the final encode) keeps this path c
   path needs the sampler). ImGui: toggle + Adapt Speed / Exposure Min / Max under the Tonemap combo.
   GL3 + Vulkan, opt-in. Now that C-lite overbright pushes lights past 1.0, adaptation has real
   range to measure. **Pending user in-engine verify** (esp. VK, the swap-time offscreen passes).
+  **Cinematics never adapt (2026-09-18).** While the main world view is a cinematic camera the
+  pass stands down (static exposure, exactly as if it were off) and resumes by itself when
+  gameplay returns - `r_hdrEyeAdaptation` is never touched, so there is nothing to restore and
+  nothing to leak into the config if the game quits mid-cutscene. Detected from the view itself
+  (`RB_RHI_CinematicView`, latched in `RB_RHI_DrawView`): `viewID == 0` (not a first-person eye)
+  AND a near plane below 2 (`idGameLocal::SetCamera` sets `r_znear` to 1 for the duration of a
+  cinematic, in every SDK-derived game DLL) - so it works with mods and needs no game-side
+  signal. The adapted exposure stays in the pass's history, so gameplay resumes from where it
+  was. Expect a one-frame exposure step at the cut into / out of a cutscene.
 - **Phase C** — ✅ **C-lite BUILT** (`r_hdrOverbright`, additive self-illum overbright, default
   off; see the "C-lite" section above). Full Phase C (light injection + bloom) still planned.
 - **HDR display output** (HDR10/scRGB) — separate future feature, **not started**; the only

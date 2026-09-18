@@ -3335,8 +3335,26 @@ static void RB_RHI_FsrCaptureOpaque( rhi::RHI *r, const viewDef_t *viewDef ) {
 RB_RHI_DrawView
 =============
 */
+static bool rhiCinematicView = false;
+
+bool RB_RHI_CinematicView( void ) {
+	return rhiCinematicView;
+}
+
 static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	backEnd.viewDef = viewDef;	// engine helpers (cinematics, counters) read this
+
+	// Is the main world view a cinematic camera? Read off the VIEW itself, so it works with any
+	// game DLL (mods included) and needs no game-side signal:
+	//   - viewID 0: not a player's first-person eye (cameras, third person, death cam), and
+	//   - near plane below 2: idGameLocal::SetCamera sets r_znear to 1 for as long as a cinematic
+	//     camera is active and restores 3 when it ends (stock behaviour in every SDK-derived DLL;
+	//     taken from the projection that was actually built: P[14] = -2 * zNear).
+	// Latched per main view (world, not a subview); the HDR resolve that consumes it runs after
+	// the HUD's 2D view, whose viewDef would say nothing about the scene.
+	if ( viewDef->viewEntitys && !viewDef->isSubview ) {
+		rhiCinematicView = viewDef->renderView.viewID == 0 && viewDef->projectionMatrix[14] > -4.0f;
+	}
 
 	// window clipping, matching RB_BeginDrawingView
 	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,

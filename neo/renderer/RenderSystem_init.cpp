@@ -324,7 +324,7 @@ idCVar r_hdrBloomThreshold( "r_hdrBloomThreshold", "1.0", CVAR_RENDERER | CVAR_A
 // average (log) luminance drives the tonemap exposure over time. r_hdrExposure becomes the
 // exposure at a mid-gray (~0.18) scene; brighter scenes expose down, darker expose up, clamped
 // to [min,max] and eased with a time constant ~1/speed seconds. Off = the static r_hdrExposure.
-idCVar r_hdrEyeAdaptation( "r_hdrEyeAdaptation", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "HDR auto-exposure / eye adaptation (needs r_hdr + r_hdrTonemap>=1): average scene luminance drives the tonemap exposure over time; off = static r_hdrExposure" );
+idCVar r_hdrEyeAdaptation( "r_hdrEyeAdaptation", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "HDR auto-exposure / eye adaptation (needs r_hdr + r_hdrTonemap>=1): average scene luminance drives the tonemap exposure over time; off = static r_hdrExposure Always inactive while a cinematic camera is the view (cutscenes keep their authored exposure); it resumes by itself afterwards - this cvar is never changed for that" );
 idCVar r_hdrAdaptSpeed( "r_hdrAdaptSpeed", "2.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "eye-adaptation speed (higher = faster); the exposure lags with a time constant ~1/speed seconds", 0.1f, 10.0f );
 // Relative adaptation (no hard clamp): r_hdrExposure is the neutral "mid" exposure at a reference
 // scene luminance (r_hdrAdaptKey). As the scene darkens the exposure rises by up to +Brighten; as
