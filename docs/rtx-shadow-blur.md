@@ -81,10 +81,22 @@ blur**.
 
 Perf pass 2: the finished mask is now its own single-channel R16F target (the vertical pass used
 to write back into the RGBA16F ray target) - every lit fragment of the light samples it, at a
-quarter of the bytes, and the vertical pass writes a quarter of the bytes. `Debug 3` = the ray
-stops at the FIRST hit like mode 4: the `r_vkGpuTime` difference tells what closest-hit costs,
-which decides whether a two-phase ray (first-hit everywhere, closest-hit only in edge tiles) is
-worth building.
+quarter of the bytes, and the vertical pass writes a quarter of the bytes. `Debug 3` (first-hit rays) was added here to price closest-hit; see below.
+
+**Sgt Kelly's window (user, `Debug 2`):** 2 lights blurred per view, their scissors covering 2.00
+screens - two full-screen lights, ~1.2 ms each. `Debug 3` (first-hit rays, since removed) ran at
+the same frame rate as closest-hit (88-89 vs 91 views/s): **closest-hit costs nothing measurable**,
+so the ray premium is not traversal - it is a screen pass doing work the inline ray never did.
+
+Perf pass 3: `vLight->scissorRect` is the union of the light's surface SCISSORS, and a surface's
+scissor is its whole area's portal rect - one lit wall of the viewer's room makes the light "full
+screen". The inline ray only ever ran on the fragments of lit surfaces; every screen pass here paid
+for the full rect. `RB_RHI_RtShadowBlurRect` now uses the union of the PROJECTED BOUNDS of the
+light's opaque interaction surfaces (each clipped to its scissor; near-plane crossers keep their
+scissor; padded for jitter + 4 world units of tessellation displacement). `Debug 2` prints both
+numbers, so the gain is visible as "blurred rects cover X screens (light scissors: Y)". If X stays
+near Y in a scene, that light really does shade the whole screen and ~1.2 ms per full-screen light
+at 1440p is this design's floor (one ray pass, tile pass, two blur passes, three target clears).
 
 ## Cvars
 
@@ -92,7 +104,7 @@ worth building.
 - `r_rtShadowBlurLightSize` (3): light sphere radius in world units = the softness. Point lights
   scale it by `max(1, largest light_radius axis / 256)`.
 - `r_rtShadowBlurSunAngle` (1.0): angular radius of parallel suns, degrees.
-- `r_rtShadowBlurDebug` (0, not archived): 1 = rays only, 2 = lights/coverage readout, 3 = first-hit rays (remove once the cost is settled).
+- `r_rtShadowBlurDebug` (0, not archived): 1 = rays only, 2 = lights/coverage readout (remove once the cost is settled).
 
 ## Limits
 

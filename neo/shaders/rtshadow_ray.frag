@@ -31,9 +31,7 @@
 //   u_lightProjectionS/T/Q, u_lightFalloffS = the light's WORLD-space projection planes
 //                           (vLight->lightProject[0..3]) - the light-volume test
 //   u_localParam0         = ( 1/proj00, 1/proj11, lightRadius, world units -> pixels at view distance 1 )
-//   u_localParam1         = ( max half-width in pixels, proj[8], proj[9], 1 = first-hit ray like mode 4
-//                           (r_rtShadowBlurDebug 3, cost split: the penumbra is then sized by whichever occluder
-//                           traversal met first, not the nearest) )
+//   u_localParam1         = ( max half-width in pixels, proj[8], proj[9], 0 )
 //   u_screenCorrection.xy = 1 / viewSize
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 #extension GL_EXT_ray_query : require
@@ -126,8 +124,7 @@ void main() {
 	rayQueryEXT rq;
 	rayQueryInitializeEXT( rq,
 		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-		( u_localParam1.w > 0.5 ) ? ( gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT ) : gl_RayFlagsOpaqueEXT,
-		0xFFu, O, 0.0, Ldir, min( max( dL - 1.0, 0.01 ), 100000.0 ) );
+		gl_RayFlagsOpaqueEXT, 0xFFu, O, 0.0, Ldir, min( max( dL - 1.0, 0.01 ), 100000.0 ) );
 	while ( rayQueryProceedEXT( rq ) ) { }
 	if ( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT ) {
 		return;									// reached the light: lit

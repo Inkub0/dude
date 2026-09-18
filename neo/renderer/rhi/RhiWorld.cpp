@@ -399,7 +399,7 @@ static struct {
 } rhiRtBlur;
 // r_rtShadowBlurDebug 2: per-second readout accumulators (views, blurred lights, rect pixels)
 static int    rhiRtBlurDbgViews = 0, rhiRtBlurDbgLights = 0, rhiRtBlurDbgStartMs = 0;
-static double rhiRtBlurDbgCoverage = 0.0;
+static double rhiRtBlurDbgCoverage = 0.0, rhiRtBlurDbgScissor = 0.0;
 static rhi::RenderTargetHandle rhiRtaoRayRT = 0;
 static int   rhiRtaoW = 0, rhiRtaoH = 0;
 static bool  rhiRtaoRanThisView = false;			// ray output produced this view (overlay gate)
@@ -5938,23 +5938,84 @@ static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 		const int nowMs = Sys_Milliseconds();
 		if ( rhiRtBlurDbgStartMs == 0 ) { rhiRtBlurDbgStartMs = nowMs; }
 		if ( nowMs - rhiRtBlurDbgStartMs >= 1000 && rhiRtBlurDbgViews > 0 ) {
-			common->Printf( "rtShadowBlur/s: %d views | %.1f lights blurred per view | their rects cover %.2f screens per view\n",
-				rhiRtBlurDbgViews, (float)rhiRtBlurDbgLights / rhiRtBlurDbgViews, rhiRtBlurDbgCoverage / rhiRtBlurDbgViews );
+			common->Printf( "rtShadowBlur/s: %d views | %.1f lights blurred per view | blurred rects cover %.2f screens per view (light scissors: %.2f)\n",
+				rhiRtBlurDbgViews, (float)rhiRtBlurDbgLights / rhiRtBlurDbgViews, rhiRtBlurDbgCoverage / rhiRtBlurDbgViews,
+				rhiRtBlurDbgScissor / rhiRtBlurDbgViews );
 			rhiRtBlurDbgViews = rhiRtBlurDbgLights = 0;
-			rhiRtBlurDbgCoverage = 0.0;
+			rhiRtBlurDbgCoverage = rhiRtBlurDbgScissor = 0.0;
 			rhiRtBlurDbgStartMs = nowMs;
 		}
 		rhiRtBlurDbgViews++;
 	}
 }
 
+// The screen rect the blur actually has to cover for one light. vLight->scissorRect is the union of
+// its surfaces' SCISSORS, and a surface's scissor is its whole area's portal rect - so one wall of
+// the room the viewer stands in makes the light "full screen" even if the lit surfaces fill a
+// corner of it. The inline mode-4 ray never paid for that (it only runs on the fragments of lit
+// surfaces); a screen-space pass does, for every pass. So: the union of the PROJECTED BOUNDS of the
+// opaque interaction surfaces (the only fragments that sample the mask - translucent ones keep the
+// inline ray), each clipped to its scissor. A surface crossing the near plane keeps its scissor.
+static idScreenRect RB_RHI_RtShadowBlurRect( const viewDef_t *viewDef, const viewLight_t *vLight, int w, int h ) {
+	idScreenRect u;
+	u.Clear();
+	const float *p = viewDef->projectionMatrix;
+	const drawSurf_t *chains[2] = { vLight->localInteractions, vLight->globalInteractions };
+	for ( int c = 0; c < 2; c++ ) {
+		for ( const drawSurf_t *surf = chains[c]; surf; surf = surf->nextOnLight ) {
+			idScreenRect sr = surf->scissorRect;
+			const srfTriangles_t *tri = surf->geo;
+			if ( tri != NULL && surf->space != NULL && !tri->bounds.IsCleared() ) {
+				const float *mv = surf->space->modelViewMatrix;
+				float minX = 1e30f, minY = 1e30f, maxX = -1e30f, maxY = -1e30f, minW = 1e30f;
+				bool behind = false;
+				for ( int i = 0; i < 8 && !behind; i++ ) {
+					const float x = tri->bounds[i & 1][0], y = tri->bounds[( i >> 1 ) & 1][1], z = tri->bounds[( i >> 2 ) & 1][2];
+					const float ex = mv[0] * x + mv[4] * y + mv[8] * z + mv[12];
+					const float ey = mv[1] * x + mv[5] * y + mv[9] * z + mv[13];
+					const float ez = mv[2] * x + mv[6] * y + mv[10] * z + mv[14];
+					const float cw = p[3] * ex + p[7] * ey + p[11] * ez + p[15];
+					if ( !( cw > 1.0f ) ) {
+						behind = true;		// at / behind the near plane: the projection is meaningless
+						break;
+					}
+					const float px = ( ( p[0] * ex + p[4] * ey + p[8] * ez + p[12] ) / cw * 0.5f + 0.5f ) * (float)w;
+					const float py = ( ( p[1] * ex + p[5] * ey + p[9] * ez + p[13] ) / cw * 0.5f + 0.5f ) * (float)h;
+					minW = Min( minW, cw );
+					minX = Min( minX, px );	maxX = Max( maxX, px );
+					minY = Min( minY, py );	maxY = Max( maxY, py );
+				}
+				if ( !behind ) {
+					// pad: sub-pixel jitter, plus 4 world units at the nearest corner for geometry the
+					// GPU moves past its CPU bounds (tessellation displacement)
+					const float pad = 8.0f + 4.0f * p[0] * 0.5f * (float)w / minW;
+					idScreenRect br;
+					br.x1 = (short)idMath::ClampFloat( 0.0f, (float)( w - 1 ), minX - pad );
+					br.y1 = (short)idMath::ClampFloat( 0.0f, (float)( h - 1 ), minY - pad );
+					br.x2 = (short)idMath::ClampFloat( 0.0f, (float)( w - 1 ), maxX + pad );
+					br.y2 = (short)idMath::ClampFloat( 0.0f, (float)( h - 1 ), maxY + pad );
+					sr.Intersect( br );
+				}
+			}
+			if ( sr.x2 >= sr.x1 && sr.y2 >= sr.y1 ) {
+				u.Union( sr );
+			}
+		}
+	}
+	u.Intersect( vLight->scissorRect );
+	return u;
+}
+
 static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *viewDef, const viewLight_t *vLight ) {
-	const idScreenRect &lr = vLight->scissorRect;
 	const unsigned long long tlas = r->GetTlasAddress();
-	if ( lr.x2 < lr.x1 || lr.y2 < lr.y1 || tlas == 0 || !vLight->lightDef ) {
+	if ( tlas == 0 || !vLight->lightDef ) {
 		return 0;
 	}
 	const int w = rhiRtBlurW, h = rhiRtBlurH;
+	const idScreenRect lr = RB_RHI_RtShadowBlurRect( viewDef, vLight, w, h );
+	if ( lr.x2 < lr.x1 || lr.y2 < lr.y1 ) {
+		return 0;		// no opaque surface of this light on screen: nothing would sample a mask
+	}
 	const int blurTaps = 16;		// = K in rtshadow_blur.frag: taps per side = the widest half-width, pixels
 
 	// The light's size. Doom 3 lights are dimensionless points, so this radius IS the softness
@@ -5996,7 +6057,6 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	parms.localParam1[0] = (float)blurTaps;
 	parms.localParam1[1] = proj[8];		// the projection's shear terms = this frame's FSR2 jitter
 	parms.localParam1[2] = proj[9];
-	parms.localParam1[3] = ( r_rtShadowBlurDebug.GetInteger() == 3 ) ? 1.0f : 0.0f;	// cost split: first-hit rays
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
@@ -6025,8 +6085,12 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	RB_RHI_DrawFullscreen( r, rhiRtBlur.rayProg, parms, 0 );
 	r->EndPass();
 
-	rhiRtBlurDbgLights++;
-	rhiRtBlurDbgCoverage += (double)( lr.x2 - lr.x1 + 1 ) * (double)( lr.y2 - lr.y1 + 1 ) / ( (double)w * (double)h );
+	if ( r_rtShadowBlurDebug.GetInteger() >= 2 ) {
+		const idScreenRect &fr = vLight->scissorRect;
+		rhiRtBlurDbgLights++;
+		rhiRtBlurDbgCoverage += (double)( lr.x2 - lr.x1 + 1 ) * (double)( lr.y2 - lr.y1 + 1 ) / ( (double)w * (double)h );
+		rhiRtBlurDbgScissor += (double)( fr.x2 - fr.x1 + 1 ) * (double)( fr.y2 - fr.y1 + 1 ) / ( (double)w * (double)h );
+	}
 	if ( r_rtShadowBlurDebug.GetInteger() == 1 ) {
 		// cost split: rays only - the mask is the raw hard visibility, tiles + blur skipped
 		backEnd.currentScissor = viewDef->scissor;
