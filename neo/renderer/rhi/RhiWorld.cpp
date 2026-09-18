@@ -75,6 +75,7 @@ static struct {
 	// serves it anyway. rhiSunPlanes/shadowImage are stale for this light; only shader
 	// mode 4 is valid, and the receiver fill downgrades to unshadowed if the TLAS died.
 	bool				lightRtOnly;
+	// r_rtAllLights: any shadow-casting light, of any species, routed to the inline ray - or
 	// r_rtMovingLights: this point light's pose changed recently, so it renders no cube
 	// at all — the interaction shader traces one ray toward the light (mode 4) instead.
 	bool				lightRtPoint;
@@ -5885,7 +5886,8 @@ Units 0-1 are rebound by each interaction draw (Vulkan binds record unconditiona
 static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiRtBlurThisView = false;
 	if ( !r_rtShadowBlur.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN
-			|| r_skipInteractions.GetBool() || !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() ) ) {
+			|| r_skipInteractions.GetBool()
+			|| !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtAllLights.GetBool() ) ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
@@ -6057,14 +6059,30 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	memset( &clearZero, 0, sizeof( clearZero ) );
 	clearZero.color = true;
 
-	// Each stage reads blurTaps pixels beyond what the next one writes: rays + horizontal blur
-	// cover that much more than the vertical blur / the interactions need. Color target passes
-	// flip like the scene pass, so the GL bottom-up scissorRect goes in as-is.
+	// The rects, all GL convention (bottom-up; the backend converts). Each stage reads blurTaps
+	// pixels beyond what the next one writes:
+	//   vRect  = the light's rect + 3            what the interactions sample; vertical blur writes it
+	//   hRect  = vRect grown by blurTaps in y    horizontal blur writes it (the vertical pass reads that far)
+	//   rayRect = the light's rect + blurTaps + 3, grown to whole 8x8 TILES (tiles count from the
+	//            TOP row, so the alignment is done in top-down rows) - rays write it, and the tile
+	//            classification reads exactly these tiles, never a pixel outside
+	// Every pass on a view-sized target is restricted to its rect (SetNextTargetPassArea): with
+	// every light ray-traced (r_rtAllLights) a view holds many of these per frame, and three
+	// full-target clears per light were the bulk of a small light's cost. Outside a pass's area
+	// the target is undefined - which is why no stage may read beyond the previous one's rect.
 	const int wide = blurTaps + 3, tight = 3;
+	const int vx1 = Max( 0, lr.x1 - tight ), vx2 = Min( w - 1, lr.x2 + tight );
+	const int vy1 = Max( 0, lr.y1 - tight ), vy2 = Min( h - 1, lr.y2 + tight );
+	const int hy1 = Max( 0, lr.y1 - wide ),  hy2 = Min( h - 1, lr.y2 + wide );
+	const int rx1 = ( Max( 0, lr.x1 - wide ) / 8 ) * 8;
+	const int rx2 = Min( w - 1, ( Min( w - 1, lr.x2 + wide ) / 8 ) * 8 + 7 );
+	const int rTop = ( ( h - 1 - Min( h - 1, lr.y2 + wide ) ) / 8 ) * 8;				// top-down rows
+	const int rBot = Min( h - 1, ( ( h - 1 - Max( 0, lr.y1 - wide ) ) / 8 ) * 8 + 7 );
+	const int ry1 = h - 1 - rBot, ry2 = h - 1 - rTop;								// back to GL rows
+
+	r->SetNextTargetPassArea( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );
 	r->BeginTargetPass( rhiRtBlurRayRT, &clearLit );
-	r->SetScissor( Max( 0, lr.x1 - wide ), Max( 0, lr.y1 - wide ),
-	               Min( w - 1, lr.x2 + wide ) - Max( 0, lr.x1 - wide ) + 1,
-	               Min( h - 1, lr.y2 + wide ) - Max( 0, lr.y1 - wide ) + 1 );
+	r->SetScissor( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
 	RB_RHI_DrawFullscreen( r, rhiRtBlur.rayProg, parms, 0 );
@@ -6074,17 +6092,14 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	memset( &tp, 0, sizeof( tp ) );
 	tp.mvpMatrix[0] = tp.mvpMatrix[5] = tp.mvpMatrix[10] = tp.mvpMatrix[15] = 1.0f;
 	for ( int pass = 0; pass < 2; pass++ ) {
+		// exactly the ray rect's tiles, both passes (pass 1 reads 64 ray texels per tile; pass 2's
+		// reach search reads tiles beyond them, which the full clear of these small targets left
+		// at "no blur"). The tile targets are 1/64 of the view: they clear whole.
+		const int th = ( h + 7 ) / 8;
+		const int tyTop = rTop / 8, tyBot = rBot / 8;
 		tp.localParam0[0] = (float)pass;
 		r->BeginTargetPass( rhiRtBlurTileRT[pass], &clearZero );
-		{
-			// only the tiles under the light's rect (+ the reach search's 3 tiles, + 1 for a view height
-			// that isn't a multiple of 8): pass 1 reads 64 texels per tile, which over the whole
-			// screen would cost a small light as much as a full-screen one. Cleared = "no blur".
-			const int tw = ( w + 7 ) / 8, th = ( h + 7 ) / 8;
-			const int tx1 = Max( 0, lr.x1 / 8 - 4 ), ty1 = Max( 0, lr.y1 / 8 - 4 );
-			const int tx2 = Min( tw - 1, lr.x2 / 8 + 4 ), ty2 = Min( th - 1, lr.y2 / 8 + 4 );
-			r->SetScissor( tx1, ty1, tx2 - tx1 + 1, ty2 - ty1 + 1 );
-		}
+		r->SetScissor( rx1 / 8, th - 1 - tyBot, rx2 / 8 - rx1 / 8 + 1, tyBot - tyTop + 1 );
 		RB_RHI_DrawFullscreen( r, rhiRtBlur.tileProg, tp,
 			r->GetRenderTargetImage( ( pass == 0 ) ? rhiRtBlurRayRT : rhiRtBlurTileRT[0] ) );
 		r->EndPass();
@@ -6094,13 +6109,12 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	memset( &bp, 0, sizeof( bp ) );
 	bp.mvpMatrix[0] = bp.mvpMatrix[5] = bp.mvpMatrix[10] = bp.mvpMatrix[15] = 1.0f;
 	for ( int pass = 0; pass < 2; pass++ ) {
-		const int padY = ( pass == 0 ) ? wide : tight;
+		const int py1 = ( pass == 0 ) ? hy1 : vy1, py2 = ( pass == 0 ) ? hy2 : vy2;
 		bp.localParam0[0] = ( pass == 0 ) ? 1.0f : 0.0f;		// axis
 		bp.localParam0[1] = ( pass == 0 ) ? 0.0f : 1.0f;
+		r->SetNextTargetPassArea( vx1, py1, vx2 - vx1 + 1, py2 - py1 + 1 );
 		r->BeginTargetPass( ( pass == 0 ) ? rhiRtBlurPingRT : rhiRtBlurMaskRT, &clearLit );
-		r->SetScissor( Max( 0, lr.x1 - tight ), Max( 0, lr.y1 - padY ),
-		               Min( w - 1, lr.x2 + tight ) - Max( 0, lr.x1 - tight ) + 1,
-		               Min( h - 1, lr.y2 + padY ) - Max( 0, lr.y1 - padY ) + 1 );
+		r->SetScissor( vx1, py1, vx2 - vx1 + 1, py2 - py1 + 1 );
 		RB_RHI_BindRTUnit( r, 1, rhiRtBlurTileRT[1] );
 		RB_RHI_DrawFullscreen( r, rhiRtBlur.blurProg, bp,
 			r->GetRenderTargetImage( ( pass == 0 ) ? rhiRtBlurRayRT : rhiRtBlurPingRT ) );
@@ -6898,7 +6912,23 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			const bool oversize = smEnabled && smStencilRadius > 0.0f
 			    && lightMaxAxis > smStencilRadius && !ictx.lightIsFlashlight;
 
-			if ( smEnabled && lightMayShadow && hasInteractions ) {
+			// r_rtAllLights: EVERY shadow-casting light takes the ray route - checked ahead of all
+			// the map routes and independent of r_shadowMapping. Mode 4 traces one ray from the lit
+			// fragment toward u_localLightOrigin, which is right for every species: a point light's
+			// position, a projected light's apex, and for a parallel light the far-away parallel
+			// point (the normalized difference IS its direction) - the same code the sun and
+			// moving-light routes already run. No map of any kind is rendered, and no stencil
+			// volumes are drawn. Without the RT variant / a live TLAS the light falls through to
+			// its usual route.
+			const bool rtServesAll = r_rtAllLights.GetBool() && lightMayShadow && hasInteractions
+				&& ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0;
+			if ( rtServesAll ) {
+				ictx.lightRtPoint = true;
+				ictx.lightRange = isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
+				dbgShadowMapped++;
+			}
+
+			if ( !rtServesAll && smEnabled && lightMayShadow && hasInteractions ) {
 				if ( ( oversize || isParallel ) && r_shadowMapSun.GetBool() ) {
 					// DUDE sun shadow maps (docs/shadow-research.md item 1): oversize
 					// "sun replacement" omnis and parallel lights render a per-view
@@ -7015,7 +7045,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				                vLight->lightDef->index,
 				                isPoint ? "point" : ( isParallel ? "parallel" : "projected" ),
 				                lightMayShadow ? "" : " (noShadow)",
-				                ictx.lightRtPoint ? "rtMove" : ( ictx.lightShadowCube ? "cube" : ( ictx.lightSunShadow ? "sun" : ( ictx.lightShadowMapped ? "2D" : ( oversize ? "stencil" : "none" ) ) ) ),
+				                ictx.lightRtPoint ? ( rtServesAll ? "rtAll" : "rtMove" ) : ( ictx.lightShadowCube ? "cube" : ( ictx.lightSunShadow ? "sun" : ( ictx.lightShadowMapped ? "2D" : ( oversize ? "stencil" : "none" ) ) ) ),
 				                dbgRes,
 				                RB_RHI_CountLightChain( vLight->globalInteractions ),
 				                RB_RHI_CountLightChain( vLight->localInteractions ),

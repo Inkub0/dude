@@ -3366,14 +3366,27 @@ static void DrawEnhGroup_Shadows()
 			"each frame. Still lights keep the cached cube map; a light that stops re-caches after "
 			"a moment. Vulkan + RT hardware only." );
 
+		// r_rtAllLights: opt-in until it is verified + costed - never rewrites a preset-owned cvar
+		bool rtAll = r_rtAllLights.GetBool();
+		if ( ImGui::Checkbox( "RT Shadows for All Lights", &rtAll ) ) {
+			r_rtAllLights.SetBool( rtAll );
+		}
+		AddTooltip( "Every shadow-casting light gets ray-traced shadows - one hard ray per lit pixel "
+			"toward the light, like the two options above - and no shadow maps are rendered at all. "
+			"Pixel-exact shadows from every light, no map resolution or bias artefacts. Heavier in "
+			"rooms with many lights: a still light's cached shadow map is nearly free, a ray is paid "
+			"every frame. Grates and fences stop casting (that is a shadow-map feature). Changes "
+			"the look of shadows: hard-edged unless Soften RT Shadows is on, which then softens all "
+			"of them. Vulkan + RT hardware only." );
+
 		// r_rtShadowBlur (docs/rtx-shadow-blur.md): a toggle ON TOP of the two ray-traced shadow
 		// routes above; preset-owned (on at Ultra Nightmare), so flipping it by hand reads "Custom"
-		ImGui::BeginDisabled( !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() ) );
+		ImGui::BeginDisabled( !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtAllLights.GetBool() ) );
 		bool rtBlur = r_rtShadowBlur.GetBool();
 		if ( ImGui::Checkbox( "Soften RT Shadows", &rtBlur ) ) {
 			r_rtShadowBlur.SetBool( rtBlur );
 		}
-		AddTooltip( "Blurs the ray-traced shadows above (RT Sun / RT Moving-Light) in screen space: "
+		AddTooltip( "Blurs the ray-traced shadows above (RT Sun / RT Moving-Light / All Lights) in screen space: "
 			"the edge stays sharp where an object touches the surface it shadows and softens as "
 			"the gap grows, by up to 24 pixels. Same rays, no noise and nothing accumulated over "
 			"frames - off gives back exactly the hard ray-traced shadows. Changes the look of "

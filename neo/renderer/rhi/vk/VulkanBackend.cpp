@@ -187,6 +187,7 @@ public:
 	virtual void	EndPass();
 	virtual void	SetViewport( int x, int y, int w, int h );
 	virtual void	SetScissor( int x, int y, int w, int h );
+	virtual void	SetNextTargetPassArea( int x, int y, int w, int h );
 	virtual void	SetDepthRange( float minDepth, float maxDepth );
 	virtual void	SetPolygonOffset( bool enable, float factor, float units );
 	virtual void	ClearStencilBuffer( int value );
@@ -1058,6 +1059,7 @@ private:
 	bool						targetHonorsDepthRange = false;
 	int							curRenderH = 0;			// viewport/scissor height of the active pass
 	bool						curFlipY = true;		// scene = flipped; offscreen target = not
+	int							nextPassArea[4] = { 0, 0, 0, 0 };	// SetNextTargetPassArea (GL rect); w <= 0 = none pending
 	int							savedVpRect[4] = { 0, 0, 0, 0 };	// restored by the target's EndPass
 	int							savedScRect[4] = { 0, 0, 0, 0 };
 
@@ -9280,6 +9282,10 @@ void VulkanBackend::EnterTargetPass( int w, int h, bool flipY, VkRenderPass pipe
 // go through BeginCubeFacePass. Suspends the scene pass; the scene resumes on the
 // next Draw's EnsureScenePass (or this target's EndPass).
 void VulkanBackend::BeginTargetPass( RenderTargetHandle rt, const ClearArgs *clear ) {
+	// one-shot sub-rect (SetNextTargetPassArea): consumed HERE, before any early-out, so a
+	// skipped pass can never leak its area onto some later, unrelated target pass
+	const int passArea[4] = { nextPassArea[0], nextPassArea[1], nextPassArea[2], nextPassArea[3] };
+	nextPassArea[2] = nextPassArea[3] = 0;
 	if ( !frameOpen || skipFrame ) {
 		return;
 	}
@@ -9297,7 +9303,21 @@ void VulkanBackend::BeginTargetPass( RenderTargetHandle rt, const ClearArgs *cle
 	VkRenderPassBeginInfo rbi = {};
 	rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 	rbi.renderArea.extent = { (uint32_t)t->w, (uint32_t)t->h };
-
+	// SetNextTargetPassArea: clear + render only a sub-rect of a color target. The GL bottom-up
+	// rect converts to the target's top-down rows (color targets store the view upright) and is
+	// clamped to the target; an empty result falls back to the whole target. One-shot.
+	if ( passArea[2] > 0 && passArea[3] > 0 && t->colorTarget ) {
+		int ax = passArea[0], ay = t->h - ( passArea[1] + passArea[3] );
+		int aw = passArea[2], ah = passArea[3];
+		if ( ax < 0 ) { aw += ax; ax = 0; }
+		if ( ay < 0 ) { ah += ay; ay = 0; }
+		if ( ax + aw > t->w ) { aw = t->w - ax; }
+		if ( ay + ah > t->h ) { ah = t->h - ay; }
+		if ( aw > 0 && ah > 0 ) {
+			rbi.renderArea.offset = { ax, ay };
+			rbi.renderArea.extent = { (uint32_t)aw, (uint32_t)ah };
+		}
+	}
 	if ( t->colorTarget ) {
 		// clear each color attachment (fullscreen draws overwrite it anyway) + ds
 		VkClearValue cv[4] = {};		// up to 3 color + 1 depth (R1/A0)
@@ -10577,6 +10597,10 @@ void VulkanBackend::SetViewport( int x, int y, int w, int h ) {
 void VulkanBackend::SetScissor( int x, int y, int w, int h ) {
 	scRect[0] = x; scRect[1] = y; scRect[2] = w; scRect[3] = h;
 	dynStateDirty = true;
+}
+
+void VulkanBackend::SetNextTargetPassArea( int x, int y, int w, int h ) {
+	nextPassArea[0] = x; nextPassArea[1] = y; nextPassArea[2] = w; nextPassArea[3] = h;
 }
 
 void VulkanBackend::SetDepthRange( float minDepth, float maxDepth ) {

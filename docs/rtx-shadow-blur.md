@@ -130,8 +130,38 @@ draw (`effFlipY`). Scissor converts on `curFlipY`; the un-mirrored viewport keep
 (`y = H - (y + h)`, positive height). Bit-identical for full-target rects, i.e. for every
 pre-existing caller. Kelly's window never showed it because both lights' rects were full screen.
 
+## RT shadows for ALL lights - `r_rtAllLights` (2026-09-18, opt-in, not preset-wired yet)
+
+User request: every remaining shadow-casting light ray-traced like the sun / moving lights, behind
+its own toggle (Graphics -> Shadows -> Ray Tracing -> "RT Shadows for All Lights"), in two phases.
+
+**Phase 1 - hard RT shadows.** In the light loop, ahead of every map route and independent of
+`r_shadowMapping`: a light that may cast shadows and has interactions sets `ictx.lightRtPoint` -
+the moving-light route, which is species-agnostic (mode 4 traces from the lit fragment toward
+`u_localLightOrigin`: a point light's position, a projected light's apex, a parallel light's
+far-away parallel point). No shadow map of any kind is rendered and no stencil volumes are drawn.
+The cvar joins the RT-scene implication gates in tr_main.cpp (auto-builds the TLAS, gathers
+monster casters). `r_shadowMapDebug 2` prints `map=rtAll`.
+Known differences from the map path: perforated grates/fences stop casting (they are `noShadows`
+surfaces the shadow-map path special-cases; they are not in the TLAS), and the cost model
+inverts - a still light's cached cube map is ~free, a ray is paid per lit pixel per light per frame.
+
+**Phase 2 - blur.** Nothing to route: `r_rtShadowBlur` keys on "ray-served light", so these lights
+are softened by the same passes. What changes is the COUNT - a view can now hold a dozen blurred
+lights instead of one or two - so the per-light fixed cost matters. Each light's passes on the
+view-sized targets used to begin with a full-target clear (2x RGBA16F + R16F = ~66 MB of writes
+per light at 1440p, whatever the light's size). New RHI call `SetNextTargetPassArea` (one-shot;
+Vulkan: the render pass's `renderArea`, GL3: ignored) restricts the clear + the pass to the
+light's rect; outside it the target is undefined, so the rects are nested so that no stage reads
+beyond the previous one's area, and the ray rect is grown to whole 8x8 tiles (top-down aligned)
+so the tile classification reads exactly what the rays wrote.
+
+Status: builds. **NOT runtime-tested**; cost unmeasured - needs the user's `r_vkGpuTime` with
+All Lights on, blur off vs on, in a light-dense room.
+
 ## Cvars
 
+- `r_rtAllLights` (0): ray-trace every shadow-casting light (see above).
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
 - `r_rtShadowBlurIntensity` (1.5, 0..4; Debugging -> RT Shadows -> "Blur Intensity"): scales the blur width. Replaced
   the "Light Size" / sun-angle pair (user, 2026-09-18: with the emitter model gone a "light size"

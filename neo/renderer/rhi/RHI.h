@@ -216,6 +216,13 @@ public:
 	// backbuffer and the previous viewport. Nests one level under the main pass
 	// (a plain FBO bind/unbind in GL terms), keeping the begin/end-scoped model.
 	virtual void	BeginTargetPass( RenderTargetHandle rt, const ClearArgs *clear ) = 0;
+	// Restrict the NEXT BeginTargetPass on a color target to a sub-rectangle (GL convention,
+	// origin bottom-left, in target pixels): only that area is cleared and may be drawn to - the
+	// caller MUST keep its scissor inside it - and the target's contents outside it become
+	// UNDEFINED. For passes that touch a small part of a big target many times a frame (a
+	// per-light screen-space mask): a full-target clear each time is pure bandwidth. One-shot;
+	// backends without the notion ignore it (the pass then clears the whole target as usual).
+	virtual void	SetNextTargetPassArea( int x, int y, int w, int h ) {}
 	virtual void	EndPass() = 0;
 	virtual void	SetViewport( int x, int y, int w, int h ) = 0;
 	virtual void	SetScissor( int x, int y, int w, int h ) = 0;

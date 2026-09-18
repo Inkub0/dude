@@ -1610,7 +1610,7 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 		// Also the dirty signal: an animated caster changes its geometry every frame, so its
 		// presence forces the rebuild (dyn == true never skips).
 		bool dyn = false;
-		if ( ( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtao.GetBool() ) && r_rtMonsterShadows.GetBool() ) {
+		if ( ( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtAllLights.GetBool() || r_rtao.GetBool() ) && r_rtMonsterShadows.GetBool() ) {
 			float *mpos; int *midx; int mnv = 0, mni = 0;
 			if ( R_RtGatherMonstersWorld( mpos, midx, mnv, mni ) ) {
 				r->UpdateDynamicGeometry( mpos, mnv, midx, mni );
@@ -1937,13 +1937,14 @@ static void R_RtWorldUpdate( void ) {
 	if ( r == NULL ) {
 		return;
 	}
-	// r_rtSunShadows (R3) / r_rtMovingLights (Option A) / r_rtao (H4) imply the scene:
+	// r_rtSunShadows (R3) / r_rtMovingLights (Option A) / r_rtAllLights / r_rtao (H4) imply the scene:
 	// the consumers auto-build their prerequisite
-	if ( !r_rtWorld.GetBool() && !r_rtSunShadows.GetBool() && !r_rtMovingLights.GetBool() && !r_rtao.GetBool() ) {
-		if ( r_rtWorld.IsModified() || r_rtSunShadows.IsModified() || r_rtMovingLights.IsModified() || r_rtao.IsModified() ) {
+	if ( !r_rtWorld.GetBool() && !r_rtSunShadows.GetBool() && !r_rtMovingLights.GetBool() && !r_rtAllLights.GetBool() && !r_rtao.GetBool() ) {
+		if ( r_rtWorld.IsModified() || r_rtSunShadows.IsModified() || r_rtMovingLights.IsModified() || r_rtAllLights.IsModified() || r_rtao.IsModified() ) {
 			r_rtWorld.ClearModified();
 			r_rtSunShadows.ClearModified();
 			r_rtMovingLights.ClearModified();
+			r_rtAllLights.ClearModified();
 			r_rtao.ClearModified();
 			r->DestroyRtScene();		// switched off: free the scene (no-op when never built)
 			s_rtWorldMap.Clear();
@@ -1970,6 +1971,7 @@ static void R_RtWorldUpdate( void ) {
 	r_rtWorld.ClearModified();
 	r_rtSunShadows.ClearModified();
 	r_rtMovingLights.ClearModified();
+	r_rtAllLights.ClearModified();
 	r->DestroyRtScene();
 
 	// RR5: build the static worldspawn as PER-SURFACE multi-geometry BLASes (device buffers), so a
@@ -2144,7 +2146,7 @@ static void R_RtWorldValidate( void ) {
 	// STATIC scene, not the per-frame TLAS: the CPU reference below is the static soup, so tracing
 	// the per-frame slot (which also carries animated monster casters) would false-positive every
 	// monster hit as a "genuine" mismatch.
-	const bool persistent = ( r_rtWorld.GetBool() || r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() ) && r->GetStaticTlasAddress() != 0;
+	const bool persistent = ( r_rtWorld.GetBool() || r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtAllLights.GetBool() ) && r->GetStaticTlasAddress() != 0;
 	int blasFail = 0, msBuild = 0;
 	unsigned long long tlasAddr;
 	if ( persistent ) {
