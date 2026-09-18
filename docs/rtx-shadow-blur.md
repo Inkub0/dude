@@ -29,7 +29,7 @@ suspended exactly as for a shadow-map render):
    the light's centre (deterministic), closest hit so the occluder distance is known. RGBA16F:
    visibility, penumbra half-width in pixels per screen axis, view distance. The interactions then
    look the mask up (mode 5, unit 13) instead of tracing, so the ray count is unchanged - it moved.
-   Half-width = `lightRadius * dOcc / (dLight - dOcc)`: zero at contact, growing with the gap;
+   Half-width = `blurScale * dOcc / (dLight - dOcc)`: zero at contact, growing with the gap;
    projected to pixels at the pixel's depth and foreshortened per axis by the geometric normal.
    The origin is rebuilt from the depth buffer, so the unprojection includes the FSR2 jitter
    (projection shear terms) and a distance-growing bias - without them far terrain flickers.
@@ -133,9 +133,11 @@ pre-existing caller. Kelly's window never showed it because both lights' rects w
 ## Cvars
 
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
-- `r_rtShadowBlurLightSize` (3): light sphere radius in world units = the softness. Point lights
-  scale it by `max(1, largest light_radius axis / 256)`.
-- `r_rtShadowBlurSunAngle` (1.0): angular radius of parallel suns, degrees.
+- `r_rtShadowBlurIntensity` (1.0, 0..4; menu "Blur Intensity"): scales the blur width. Replaced
+  the "Light Size" / sun-angle pair (user, 2026-09-18: with the emitter model gone a "light size"
+  has no reason to exist - it is a blur amount). Internally the width is still
+  `3 * intensity * dOcc / (dLight - dOcc)` world units (point lights x `max(1, largest radius axis
+  / 256)`; parallel suns 1 degree x intensity), so contact hardening is unchanged.
 
 ## Limits
 

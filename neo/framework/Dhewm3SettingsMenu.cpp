@@ -3380,13 +3380,14 @@ static void DrawEnhGroup_Shadows()
 			"shadows (the stock game's are hard-edged). Needs SSAO, RTAO or Motion Vectors on "
 			"(their depth/normal prepass). Other lights are not affected." );
 		ImGui::BeginDisabled( !r_rtShadowBlur.GetBool() );
-		float rtBlurSize = r_rtShadowBlurLightSize.GetFloat();
-		if ( ImGui::SliderFloat( "Light Size", &rtBlurSize, 0.25f, 16.0f, "%.2f units" ) ) {
-			r_rtShadowBlurLightSize.SetFloat( rtBlurSize );
+		float rtBlurAmt = r_rtShadowBlurIntensity.GetFloat();
+		if ( ImGui::SliderFloat( "Blur Intensity", &rtBlurAmt, 0.0f, 4.0f, "%.2f" ) ) {
+			r_rtShadowBlurIntensity.SetFloat( rtBlurAmt );
 		}
-		AddTooltip( "Radius of the glowing sphere standing in for each light - Doom 3 lights are "
-			"dimensionless points, so this IS the softness. Larger = wider penumbrae; big lights "
-			"scale it up automatically. Suns use r_rtShadowBlurSunAngle instead." );
+		AddTooltip( "How strongly the ray-traced shadows are blurred. The blur still follows the "
+			"scene - none where an object touches the surface, more as the gap grows - this scales "
+			"all of it. It tops out at 16 pixels, so high values mostly soften the edges near "
+			"contact further. 0 = hard shadows, 1 = default." );
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 

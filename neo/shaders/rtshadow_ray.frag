@@ -10,7 +10,7 @@
 //   G = penumbra half-width on screen, HORIZONTAL, in pixels (0 = lit: nothing to spread)
 //   B = view distance d (the blur's depth guide; 0 = never traced)
 //   A = penumbra half-width on screen, VERTICAL, in pixels
-// Half-width = lightRadius * dOccluder / ( dLight - dOccluder ): zero where the caster touches the
+// Half-width = blurScale * dOccluder / ( dLight - dOccluder ): zero where the caster touches the
 // receiver, growing with the gap - projected to pixels at this depth and foreshortened per screen
 // axis by the receiver's geometric normal (a floor at a grazing angle blurs far less vertically).
 //
@@ -30,7 +30,7 @@
 //   u_localLightOrigin    = WORLD-space light origin
 //   u_lightProjectionS/T/Q, u_lightFalloffS = the light's WORLD-space projection planes
 //                           (vLight->lightProject[0..3]) - the light-volume test
-//   u_localParam0         = ( 1/proj00, 1/proj11, lightRadius, world units -> pixels at view distance 1 )
+//   u_localParam0         = ( 1/proj00, 1/proj11, blurScale (world units, from r_rtShadowBlurIntensity), world units -> pixels at view distance 1 )
 //   u_localParam1         = ( max half-width in pixels, proj[8], proj[9], 0 )
 //   u_screenCorrection.xy = 1 / viewSize
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc

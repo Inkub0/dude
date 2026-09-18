@@ -5999,15 +5999,18 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	}
 	const int blurTaps = 16;		// = K in rtshadow_blur.frag: taps per side = the widest half-width, pixels
 
-	// The light's size. Doom 3 lights are dimensionless points, so this radius IS the softness
-	// control: a base size for ordinary fixtures, growing with the light's own volume so a
-	// 5000-unit "sun replacement" omni isn't a 3-unit bulb. Parallel suns sit 100000 units out
-	// along their direction: radius = distance * tan(angular radius).
+	// How wide the blur gets. The width follows the geometry - 0 where the caster touches the
+	// receiver, growing with the gap: halfWidth = blurScale * dOccluder / ( dLight - dOccluder ) -
+	// and r_rtShadowBlurIntensity scales it. blurScale is a length in world units (it is the radius
+	// a physical light would need to cast that penumbra, but it is only a blur amount here): 3 at
+	// intensity 1 for ordinary fixtures, growing with the light's own volume so a 5000-unit "sun
+	// replacement" omni doesn't get a bulb-sized blur. Parallel suns sit 100000 units out along
+	// their direction: 1 degree of angular radius at intensity 1.
 	const renderLight_t &lp = vLight->lightDef->parms;
 	const idVec3 &lorg = vLight->globalLightOrigin;
-	float lightRadius = r_rtShadowBlurLightSize.GetFloat();
+	float lightRadius = 3.0f * r_rtShadowBlurIntensity.GetFloat();
 	if ( lp.parallel ) {
-		lightRadius = ( lorg - viewDef->renderView.vieworg ).Length() * idMath::Tan( DEG2RAD( r_rtShadowBlurSunAngle.GetFloat() ) );
+		lightRadius = ( lorg - viewDef->renderView.vieworg ).Length() * idMath::Tan( DEG2RAD( 1.0f ) ) * r_rtShadowBlurIntensity.GetFloat();
 	} else if ( lp.pointLight ) {
 		const float maxAxis = Max( lp.lightRadius.x, Max( lp.lightRadius.y, lp.lightRadius.z ) );
 		lightRadius *= Max( 1.0f, maxAxis / 256.0f );
