@@ -61,4 +61,5 @@ In play the computed pair equals the old constants to within one float ulp
 Doom 3 intro cinematic and the RoE intro, Vulkan and GL3, with SSAO (or RTAO), SSR and soft
 particles on: AO on the actors should now look like gameplay AO; then any gameplay scene to
 confirm nothing changed there. Builds; SPIR-V validates; `validate.py` shows the same six
-Vulkan-only GL failures as master. **Not runtime-tested.**
+Vulkan-only GL failures as master. **USER-VERIFIED 2026-09-18 ("it all looks right")**, together
+with eye adaptation standing down in cinematics (docs/hdr-pipeline.md).
