@@ -141,6 +141,10 @@ shortens rays to the ambiguous band, budget-capped. The shadow-map system we jus
 throwaway: it is the hybrid's raster tier and the non-RT fallback, permanently.
 
 ### R5. RT soft shadows — the endgame · MED–LARGE · depends R3 (+R1 for final quality)
+> **2026-09-18:** the STBN + SIGMA design below was built and abandoned (unmerged). Shipped instead:
+> `r_rtShadowBlur` — the analytic-penumbra half of this plan (occluder hit-distance → blur width)
+> as a deterministic screen-space blur over the hard RT shadows. See [rtx-shadow-blur.md](rtx-shadow-blur.md).
+
 1 ray/pixel with **STBN** (spatiotemporal blue-noise) light sampling — free, a texture lookup — +
 **analytic penumbra from occluder hit-distance** (PCSS geometry, no cone sampling) + **NRD SIGMA**'s
 penumbra-guided spatial denoise (~0.4 ms @1440p on a 4080; ~0.5–0.7 ms est. on the 3080 Ti). Runs

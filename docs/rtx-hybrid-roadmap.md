@@ -87,6 +87,13 @@ Full-RT down-payment.
   shadow rays for every light (a few rays to random points on the light's area → penumbra), denoised
   with SIGMA. Replaces/augments the shadow-map + stencil path per light. *Highest Full-RT reuse — this
   becomes the path tracer's next-event estimation.* Extends [rtx-shadow-roadmap.md](rtx-shadow-roadmap.md) R5.
+  **STATUS 2026-09-18: built, then ABANDONED and never merged.** The area-sampled + SIGMA
+  implementation (and a deterministic per-light successor) never lost a shadow "stagger" under
+  camera motion and cost too much once every light traced per frame instead of using its cached
+  shadow map. What shipped instead is [rtx-shadow-blur.md](rtx-shadow-blur.md): `r_rtShadowBlur`,
+  a stateless screen-space blur on top of the existing hard RT shadows (sun + moving lights only).
+  The Full-RT down-payment argument above still stands for a future attempt; the ledger of what
+  went wrong lives in that doc's first section.
 - **H4 — RTAO. IN PROGRESS — pulled forward past H3 (see [rtx-rtao.md](rtx-rtao.md)).** The
   2026-09-17 profile measured full-res GTAO at ~4.3 ms / 40% of the UN frame while shadows
   (H3's target) are a solved 0.5 ms; the user's direction is that UN drops screen-space AO
