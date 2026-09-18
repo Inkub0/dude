@@ -3359,6 +3359,30 @@ static void DrawEnhGroup_Shadows()
 			"each frame. Still lights keep the cached cube map; a light that stops re-caches after "
 			"a moment. Vulkan + RT hardware only." );
 
+		// r_rtShadowBlur (docs/rtx-shadow-blur.md): a toggle ON TOP of the two ray-traced shadow
+		// routes above - opt-in, never rewrites a preset-owned cvar
+		ImGui::BeginDisabled( !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() ) );
+		bool rtBlur = r_rtShadowBlur.GetBool();
+		if ( ImGui::Checkbox( "Soften RT Shadows", &rtBlur ) ) {
+			r_rtShadowBlur.SetBool( rtBlur );
+		}
+		AddTooltip( "Blurs the ray-traced shadows above (RT Sun / RT Moving-Light) in screen space: "
+			"the edge stays sharp where an object touches the surface it shadows and softens as "
+			"the gap grows, by up to 16 pixels. Same rays, no noise and nothing accumulated over "
+			"frames - off gives back exactly the hard ray-traced shadows. Changes the look of "
+			"shadows (the stock game's are hard-edged). Needs SSAO, RTAO or Motion Vectors on "
+			"(their depth/normal prepass). Other lights are not affected." );
+		ImGui::BeginDisabled( !r_rtShadowBlur.GetBool() );
+		float rtBlurSize = r_rtShadowBlurLightSize.GetFloat();
+		if ( ImGui::SliderFloat( "Light Size", &rtBlurSize, 0.25f, 16.0f, "%.2f units" ) ) {
+			r_rtShadowBlurLightSize.SetFloat( rtBlurSize );
+		}
+		AddTooltip( "Radius of the glowing sphere standing in for each light - Doom 3 lights are "
+			"dimensionless points, so this IS the softness. Larger = wider penumbrae; big lights "
+			"scale it up automatically. Suns use r_rtShadowBlurSunAngle instead." );
+		ImGui::EndDisabled();
+		ImGui::EndDisabled();
+
 		ImGui::EndDisabled();
 
 		EndSettingsGroup();

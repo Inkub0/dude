@@ -23,6 +23,13 @@ SAMPLER_BINDING(9) uniform sampler2D u_ssao;            // DUDE GTAO buffer (R =
 SAMPLER_BINDING(10) uniform sampler2D u_occlusionMap;   // DUDE baked AO map (R = visibility)
 SAMPLER_BINDING(11) uniform sampler2D u_parallaxMap;   // DUDE parallax height map (R = height)
 SAMPLER_BINDING(12) uniform samplerCubeShadow u_shadowCubeDyn; // DUDE static/dynamic split (lever B): movers-only cube
+#if defined(VULKAN)
+// DUDE RT shadow blur (r_rtShadowBlur, docs/rtx-shadow-blur.md): this light's hard ray
+// visibility, traced per screen pixel and blurred right before the light draws. Vulkan only -
+// the GL3 program never declares the sampler, so its unit table is untouched. Sampling a mask
+// needs no ray-query capability, so mode 5 lives in the base shader.
+SAMPLER_BINDING(13) uniform sampler2D u_shadowMask;
+#endif
 
 VARY(0) in vec3 var_TexLightVec;
 VARY(1) in vec2 var_TexBump;
@@ -49,6 +56,9 @@ layout(location = 0) out vec4 fragColor;
 //   3 = sun (oversize-omni / parallel light): 2D map through a per-view fitted
 //       virtual projection; UV like mode 1 but the compare reference is the
 //       virtual depth plane (var_ShadowProjection.z) instead of the light falloff
+//   4 = RT hard shadow (interaction_rt variant only): one inline ray at the light
+//   5 = blurred RT shadow (Vulkan, r_rtShadowBlur): the same ray, pre-traced per screen
+//       pixel and blurred - a mask lookup on unit 13; u_shadowParms.yz = 1/viewSize
 // Every tap is a hardware depth-compare (2x2 bilinear PCF in the TMU); the multi-tap
 // kernels below only decide WHERE those taps land.
 //
@@ -111,6 +121,15 @@ float shadowVisibility() {
 	if ( u_shadowParms.x == 0.0 ) {
 		return 1.0;
 	}
+#if defined(VULKAN)
+	if ( u_shadowParms.x > 4.5 ) {
+		// DUDE RT shadow blur (mode 5): the same hard ray mode 4 traces inline was traced for
+		// every screen pixel of this light and blurred in screen space. Opaque surfaces draw
+		// depth-EQUAL, so this fragment IS the pixel the mask was traced for.
+		// u_shadowParms.yz = 1 / viewSize (gl_FragCoord -> mask uv).
+		return texture( u_shadowMask, gl_FragCoord.xy * u_shadowParms.yz ).r;
+	}
+#endif
 #if defined(VULKAN) && defined(DUDE_RT_SUN)
 	if ( u_shadowParms.x > 3.5 ) {
 		// DUDE RT sun shadows (mode 4, docs/rtx-shadow-roadmap.md R3): trace one ray at the

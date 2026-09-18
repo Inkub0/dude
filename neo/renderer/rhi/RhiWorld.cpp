@@ -78,6 +78,12 @@ static struct {
 	// r_rtMovingLights: this point light's pose changed recently, so it renders no cube
 	// at all — the interaction shader traces one ray toward the light (mode 4) instead.
 	bool				lightRtPoint;
+	// r_rtShadowBlur (docs/rtx-shadow-blur.md): this ray-served light (either route above) had
+	// its hard ray traced per screen pixel and blurred right before its interactions draw -
+	// they look the result up (shader mode 5, shadowMaskImage on unit 13) instead of tracing
+	// inline. Surfaces the screen-space mask can't describe keep the inline mode-4 ray.
+	bool				lightRtBlur;
+	rhi::ImageHandle	shadowMaskImage;
 	bool				lightShadowCube;
 	rhi::ImageHandle	shadowCubeImage;
 	// static/dynamic split (r_shadowMapCacheSplit): when a cached static point light also
@@ -377,6 +383,19 @@ static float rhiSsaoJitterPhase = 0.0f;				// per-frame noise rotation (golden-r
 // H4 RTAO (docs/rtx-rtao.md): the ray pass's noisy normalized-hit-distance target (R16F,
 // view res). H4a produces it (one cosine hemisphere ray/pixel against the TLAS); H4c
 // denoises it via NRD ReBLUR; H4d composites into the standard AO buffer. VK + RT only.
+// r_rtShadowBlur (docs/rtx-shadow-blur.md): ONE set of view-sized targets shared by every
+// blurred light of a view - each light's mask is built inside the light loop right before its
+// interactions draw (the shadow maps share their target the same way), and nothing survives the
+// frame. Ray = RGBA16F visibility / half-widths / view distance, which the vertical blur pass
+// writes back into (its .r is the finished mask); Ping = the horizontal pass; Tile = the 8x8
+// edge classification (raw, then dilated).
+static rhi::RenderTargetHandle rhiRtBlurRayRT = 0, rhiRtBlurPingRT = 0, rhiRtBlurTileRT[2] = { 0, 0 };
+static int   rhiRtBlurW = 0, rhiRtBlurH = 0;
+static bool  rhiRtBlurThisView = false;
+static struct {
+	float				invView[16];
+	rhi::ShaderHandle	rayProg, tileProg, blurProg;
+} rhiRtBlur;
 static rhi::RenderTargetHandle rhiRtaoRayRT = 0;
 static int   rhiRtaoW = 0, rhiRtaoH = 0;
 static bool  rhiRtaoRanThisView = false;			// ray output produced this view (overlay gate)
@@ -1070,6 +1089,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	memset( &parms, 0, sizeof( parms ) );
 	memcpy( parms.mvpMatrix, ictx.mvp, sizeof( parms.mvpMatrix ) );
 	bool rtSun = false;			// mode-4 draw -> bind the ray-query interaction variant
+	bool blurMask = false;		// mode-5 draw -> this light's blurred ray mask on unit 13
 
 	memcpy( parms.localLightOrigin, din->localLightOrigin.ToFloatPtr(), 16 );
 	memcpy( parms.localViewOrigin, din->localViewOrigin.ToFloatPtr(), 16 );
@@ -1202,6 +1222,13 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		// the spare pbrParms2.y slot; 0 keeps the old constant bias.
 		parms.pbrParms2[1] = r_shadowMapSlopeBias.GetFloat();
 
+		// r_rtShadowBlur: the mask was traced from the OPAQUE depth buffer, so it only describes
+		// fragments that ARE that depth - opaque chains (drawn depth-EQUAL) outside the weapon /
+		// model depth-range hacks. Translucent interactions (depth-LESS, floating in front of the
+		// traced surface) and depth-hacked view weapons keep the inline hard ray (mode 4).
+		blurMask = ictx.lightRtBlur && ictx.depthFuncBits == GLS_DEPTHFUNC_EQUAL
+			&& !din->surf->space->weaponDepthHack && din->surf->space->modelDepthHack == 0.0f;
+
 		if ( ictx.lightShadowMapped && ictx.lightSunShadow ) {
 			// DUDE sun shadow map (mode 3): the map was rendered through the per-view
 			// fitted VIRTUAL projection (rhiSunPlanes), so the lookup must use those
@@ -1232,7 +1259,11 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			// 4 - interaction_rt.frag traces the sun visibility instead of sampling the
 			// map. Needs the RT variant loaded and a live persistent world scene
 			// (R_RtWorldUpdate auto-builds it while r_rtSunShadows is on).
-			if ( r_rtSunShadows.GetBool() && ictx.interactionRtProg != 0 ) {
+			if ( blurMask ) {
+				parms.shadowParms[0] = 5.0f;		// blurred ray mask on unit 13
+				parms.shadowParms[1] = ( rhiRtBlurW > 0 ) ? 1.0f / rhiRtBlurW : 0.0f;
+				parms.shadowParms[2] = ( rhiRtBlurH > 0 ) ? 1.0f / rhiRtBlurH : 0.0f;
+			} else if ( r_rtSunShadows.GetBool() && ictx.interactionRtProg != 0 ) {
 				const unsigned long long tlas = ictx.r->GetTlasAddress();
 				if ( tlas != 0 ) {
 					parms.shadowParms[0] = 4.0f;
@@ -1245,7 +1276,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 					rtSun = true;
 				}
 			}
-			if ( ictx.lightRtOnly && !rtSun ) {
+			if ( ictx.lightRtOnly && !rtSun && !blurMask ) {
 				// the RT-only route lost its TLAS mid-frame: rhiSunPlanes are stale for
 				// this light, so unshadowed beats sampling a map that was never fitted
 				parms.shadowParms[0] = 0.0f;
@@ -1257,7 +1288,11 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			// stops just short of the origin; distLight bounds it, rtParms.w is inert).
 			// TLAS gone mid-frame downgrades to unshadowed, same as the sun RT route.
 			const unsigned long long tlas = ictx.r->GetTlasAddress();
-			if ( tlas != 0 && ictx.interactionRtProg != 0 ) {
+			if ( blurMask ) {
+				parms.shadowParms[0] = 5.0f;		// blurred ray mask on unit 13
+				parms.shadowParms[1] = ( rhiRtBlurW > 0 ) ? 1.0f / rhiRtBlurW : 0.0f;
+				parms.shadowParms[2] = ( rhiRtBlurH > 0 ) ? 1.0f / rhiRtBlurH : 0.0f;
+			} else if ( tlas != 0 && ictx.interactionRtProg != 0 ) {
 				parms.shadowParms[0] = 4.0f;
 				const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFu );
 				const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
@@ -1489,6 +1524,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		if ( ictx.lightHasDynamicLayer && ictx.shadowCubeDynImage ) {
 			da.shadowCubeDyn = ictx.shadowCubeDynImage;	// movers' cube for u_shadowCubeDyn (unit 12)
 		}
+	}
+	if ( blurMask ) {
+		da.shadowMask = ictx.shadowMaskImage;	// blurred RT shadow mask for u_shadowMask (unit 13)
 	}
 	ictx.r->Draw( da );
 
@@ -3214,6 +3252,8 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistIdx = 0;			rhiSsaoHistW = rhiSsaoHistH = 0;
 	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
+	rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;
+	rhiRtBlurW = rhiRtBlurH = 0;	rhiRtBlurThisView = false;
 	rhiRtaoRanThisView = false;
 	rhiRtaoViewzRT = 0;			rhiRtaoPackRT = 0;		rhiRtaoResolveRT = 0;
 	rhiRtaoDenoisedThisView = false;	rhiRtaoPrevValid = false;
@@ -5815,6 +5855,187 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 /*
 ===================
+RB_RHI_RtShadowBlurBegin / RB_RHI_RtShadowBlurLight
+
+r_rtShadowBlur (docs/rtx-shadow-blur.md): a screen-space blur ON TOP of the hard ray-traced
+shadows the engine already has (r_rtSunShadows, r_rtMovingLights - shader mode 4, one inline
+ray per lit fragment). Which lights are ray-served, and everything about every other light, is
+untouched; with the cvar off nothing here runs.
+
+A forward, per-light renderer multiplies the shadow term into the light inside the interaction
+shader, so "blur the shadow" needs the shadow as an image first. Per blurred light, right before
+its interactions draw:
+  1. rtshadow_ray   - the mode-4 ray for every screen pixel in the light's rect (closest hit, so
+                      the occluder distance sizes the penumbra). Same ray count as the inline
+                      path; the interactions then skip theirs.
+  2. rtshadow_tiles - 8x8 tile classification (raw, then dilated by the blur's reach)
+  3. rtshadow_blur  - horizontal then vertical; early-outs on one tile fetch wherever no shadow
+                      edge is within reach, which is nearly everywhere
+The mask is deterministic and lives for one light of one frame: no history, no noise.
+
+Begin: once per view, before the light loop. Needs the normal G-buffer (ray-origin offset, the
+view-weapon mask) - present whenever SSAO / RTAO / motion vectors run their prepass; without it
+(or on any other failure) rhiRtBlurThisView stays false and every light keeps its inline ray.
+
+Light: must NOT RB_RHI_ForgetTexBinds() - the loop's AO buffer rides unit 9 for every light.
+Units 0-1 are rebound by each interaction draw (Vulkan binds record unconditionally).
+===================
+*/
+static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
+	rhiRtBlurThisView = false;
+	if ( !r_rtShadowBlur.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN
+			|| r_skipInteractions.GetBool() || !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() ) ) {
+		return;
+	}
+	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
+		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
+		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
+		return;		// the mask is addressed by gl_FragCoord of the main view
+	}
+	if ( globalImages->currentDepthImage->uploadWidth <= 0
+			|| !rhiNormalReadyThisView || rhiNormalResultRT == 0 || r->GetTlasAddress() == 0 ) {
+		return;
+	}
+	rhiRtBlur.rayProg  = r->LoadShader( "rtshadow_ray" );
+	rhiRtBlur.tileProg = r->LoadShader( "rtshadow_tiles" );
+	rhiRtBlur.blurProg = r->LoadShader( "rtshadow_blur" );
+	if ( !rhiRtBlur.rayProg || !rhiRtBlur.tileProg || !rhiRtBlur.blurProg
+			|| !RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, rhiRtBlur.invView ) ) {
+		return;
+	}
+
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	if ( rhiRtBlurRayRT && r->GetRenderTargetImage( rhiRtBlurRayRT ) == 0 ) {
+		rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;	// lost context
+	}
+	if ( w != rhiRtBlurW || h != rhiRtBlurH ) {
+		if ( rhiRtBlurRayRT )     { r->DestroyRenderTarget( rhiRtBlurRayRT );     rhiRtBlurRayRT = 0; }
+		if ( rhiRtBlurPingRT )    { r->DestroyRenderTarget( rhiRtBlurPingRT );    rhiRtBlurPingRT = 0; }
+		if ( rhiRtBlurTileRT[0] ) { r->DestroyRenderTarget( rhiRtBlurTileRT[0] ); rhiRtBlurTileRT[0] = 0; }
+		if ( rhiRtBlurTileRT[1] ) { r->DestroyRenderTarget( rhiRtBlurTileRT[1] ); rhiRtBlurTileRT[1] = 0; }
+		rhiRtBlurW = w;
+		rhiRtBlurH = h;
+	}
+	const int tw = ( w + 7 ) / 8, th = ( h + 7 ) / 8;
+	if ( !rhiRtBlurRayRT )     { rhiRtBlurRayRT     = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, 1 ); }
+	if ( !rhiRtBlurPingRT )    { rhiRtBlurPingRT    = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, 1 ); }
+	if ( !rhiRtBlurTileRT[0] ) { rhiRtBlurTileRT[0] = r->CreateRenderTargetMipped( rhi::IF_RGBA8, tw, th, 1 ); }
+	if ( !rhiRtBlurTileRT[1] ) { rhiRtBlurTileRT[1] = r->CreateRenderTargetMipped( rhi::IF_RGBA8, tw, th, 1 ); }
+	rhiRtBlurThisView = rhiRtBlurRayRT && rhiRtBlurPingRT && rhiRtBlurTileRT[0] && rhiRtBlurTileRT[1];
+}
+
+static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *viewDef, const viewLight_t *vLight ) {
+	const idScreenRect &lr = vLight->scissorRect;
+	const unsigned long long tlas = r->GetTlasAddress();
+	if ( lr.x2 < lr.x1 || lr.y2 < lr.y1 || tlas == 0 || !vLight->lightDef ) {
+		return 0;
+	}
+	const int w = rhiRtBlurW, h = rhiRtBlurH;
+	const int blurTaps = 16;		// = K in rtshadow_blur.frag: taps per side = the widest half-width, pixels
+
+	// The light's size. Doom 3 lights are dimensionless points, so this radius IS the softness
+	// control: a base size for ordinary fixtures, growing with the light's own volume so a
+	// 5000-unit "sun replacement" omni isn't a 3-unit bulb. Parallel suns sit 100000 units out
+	// along their direction: radius = distance * tan(angular radius).
+	const renderLight_t &lp = vLight->lightDef->parms;
+	const idVec3 &lorg = vLight->globalLightOrigin;
+	float lightRadius = r_rtShadowBlurLightSize.GetFloat();
+	if ( lp.parallel ) {
+		lightRadius = ( lorg - viewDef->renderView.vieworg ).Length() * idMath::Tan( DEG2RAD( r_rtShadowBlurSunAngle.GetFloat() ) );
+	} else if ( lp.pointLight ) {
+		const float maxAxis = Max( lp.lightRadius.x, Max( lp.lightRadius.y, lp.lightRadius.z ) );
+		lightRadius *= Max( 1.0f, maxAxis / 256.0f );
+	}
+
+	const float *proj = viewDef->projectionMatrix;
+	const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFull );
+	const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	memcpy( parms.modelViewMatrix, rhiRtBlur.invView, sizeof( rhiRtBlur.invView ) );	// view -> world
+	memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );		// bit-cast, NOT a value cast
+	memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+	parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();			// ray-origin normal offset, shared with mode 4
+	parms.localLightOrigin[0] = lorg.x;		// WORLD space here (fullscreen pass, no model)
+	parms.localLightOrigin[1] = lorg.y;
+	parms.localLightOrigin[2] = lorg.z;
+	parms.localLightOrigin[3] = 1.0f;
+	memcpy( parms.lightProjectionS, vLight->lightProject[0].ToFloatPtr(), 4 * sizeof( float ) );
+	memcpy( parms.lightProjectionT, vLight->lightProject[1].ToFloatPtr(), 4 * sizeof( float ) );
+	memcpy( parms.lightProjectionQ, vLight->lightProject[2].ToFloatPtr(), 4 * sizeof( float ) );
+	memcpy( parms.lightFalloffS,    vLight->lightProject[3].ToFloatPtr(), 4 * sizeof( float ) );
+	parms.localParam0[0] = ( proj[0] != 0.0f ) ? 1.0f / proj[0] : 1.0f;
+	parms.localParam0[1] = ( proj[5] != 0.0f ) ? 1.0f / proj[5] : 1.0f;
+	parms.localParam0[2] = lightRadius;
+	parms.localParam0[3] = proj[0] * 0.5f * (float)w;			// world units -> pixels at view distance 1
+	parms.localParam1[0] = (float)blurTaps;
+	parms.localParam1[1] = proj[8];		// the projection's shear terms = this frame's FSR2 jitter
+	parms.localParam1[2] = proj[9];
+	parms.screenCorrection[0] = 1.0f / w;
+	parms.screenCorrection[1] = 1.0f / h;
+	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
+	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
+
+	// "lit, nothing to spread, never traced": what the big targets clear to (color targets
+	// always clear on begin) and what the tile + blur passes skip
+	rhi::ClearArgs clearLit;
+	memset( &clearLit, 0, sizeof( clearLit ) );
+	clearLit.color = true;
+	clearLit.rgba[0] = 1.0f;
+	rhi::ClearArgs clearZero;
+	memset( &clearZero, 0, sizeof( clearZero ) );
+	clearZero.color = true;
+
+	// Each stage reads blurTaps pixels beyond what the next one writes: rays + horizontal blur
+	// cover that much more than the vertical blur / the interactions need. Color target passes
+	// flip like the scene pass, so the GL bottom-up scissorRect goes in as-is.
+	const int wide = blurTaps + 3, tight = 3;
+	r->BeginTargetPass( rhiRtBlurRayRT, &clearLit );
+	r->SetScissor( Max( 0, lr.x1 - wide ), Max( 0, lr.y1 - wide ),
+	               Min( w - 1, lr.x2 + wide ) - Max( 0, lr.x1 - wide ) + 1,
+	               Min( h - 1, lr.y2 + wide ) - Max( 0, lr.y1 - wide ) + 1 );
+	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+	RB_RHI_DrawFullscreen( r, rhiRtBlur.rayProg, parms, 0 );
+	r->EndPass();
+
+	rhi::RenderParams tp;
+	memset( &tp, 0, sizeof( tp ) );
+	tp.mvpMatrix[0] = tp.mvpMatrix[5] = tp.mvpMatrix[10] = tp.mvpMatrix[15] = 1.0f;
+	for ( int pass = 0; pass < 2; pass++ ) {
+		tp.localParam0[0] = (float)pass;
+		r->BeginTargetPass( rhiRtBlurTileRT[pass], &clearZero );
+		RB_RHI_DrawFullscreen( r, rhiRtBlur.tileProg, tp,
+			r->GetRenderTargetImage( ( pass == 0 ) ? rhiRtBlurRayRT : rhiRtBlurTileRT[0] ) );
+		r->EndPass();
+	}
+
+	rhi::RenderParams bp;
+	memset( &bp, 0, sizeof( bp ) );
+	bp.mvpMatrix[0] = bp.mvpMatrix[5] = bp.mvpMatrix[10] = bp.mvpMatrix[15] = 1.0f;
+	for ( int pass = 0; pass < 2; pass++ ) {
+		const int padY = ( pass == 0 ) ? wide : tight;
+		bp.localParam0[0] = ( pass == 0 ) ? 1.0f : 0.0f;		// axis
+		bp.localParam0[1] = ( pass == 0 ) ? 0.0f : 1.0f;
+		r->BeginTargetPass( ( pass == 0 ) ? rhiRtBlurPingRT : rhiRtBlurRayRT, &clearLit );
+		r->SetScissor( Max( 0, lr.x1 - tight ), Max( 0, lr.y1 - padY ),
+		               Min( w - 1, lr.x2 + tight ) - Max( 0, lr.x1 - tight ) + 1,
+		               Min( h - 1, lr.y2 + padY ) - Max( 0, lr.y1 - padY ) + 1 );
+		RB_RHI_BindRTUnit( r, 1, rhiRtBlurTileRT[1] );
+		RB_RHI_DrawFullscreen( r, rhiRtBlur.blurProg, bp,
+			r->GetRenderTargetImage( ( pass == 0 ) ? rhiRtBlurRayRT : rhiRtBlurPingRT ) );
+		r->EndPass();
+	}
+
+	backEnd.currentScissor = viewDef->scissor;	// the loop re-applies the light's scissor right after
+	return r->GetRenderTargetImage( rhiRtBlurRayRT );
+}
+
+/*
+===================
 RB_RHI_RtaoDebugOverlay
 
 r_rtaoDebug visualization: blit the RTAO chain's intermediates over the finished view
@@ -6461,6 +6682,9 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// through to GTAO unchanged.
 	RB_RHI_RtaoPass( r, viewDef );
 	RB_RHI_SSAOPass( r, viewDef );
+	// r_rtShadowBlur: validate the view + size the shared targets; the light loop builds each
+	// ray-served light's mask on demand (RB_RHI_RtShadowBlurLight)
+	RB_RHI_RtShadowBlurBegin( r, viewDef );
 
 	// Bind the AO buffer on unit 9 for the whole per-light loop: both the ambient and
 	// interaction shaders sample u_ssao there, and nothing in the loop touches unit 9
@@ -6538,6 +6762,8 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			ictx.lightSunShadow = false;
 			ictx.lightRtOnly = false;
 			ictx.lightRtPoint = false;
+			ictx.lightRtBlur = false;
+			ictx.shadowMaskImage = 0;
 			ictx.shadowImage = 0;
 			ictx.lightShadowCube = false;
 			ictx.shadowCubeImage = 0;
@@ -6676,6 +6902,15 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			}
 
 			// either shadow-map technique (or the ray route) replaces the stencil test
+			// r_rtShadowBlur: a light one of the ray routes above just claimed gets its hard ray
+			// traced per screen pixel + blurred NOW (the scene pass is suspended exactly as for a
+			// shadow-map render); its interactions then look the mask up instead of tracing inline.
+			// Any failure leaves the light on its inline hard ray, unchanged.
+			if ( rhiRtBlurThisView && ( ictx.lightRtOnly || ictx.lightRtPoint ) ) {
+				ictx.shadowMaskImage = RB_RHI_RtShadowBlurLight( r, viewDef, vLight );
+				ictx.lightRtBlur = ictx.shadowMaskImage != 0;
+			}
+
 			const bool shadowMapped = ictx.lightShadowMapped || ictx.lightShadowCube || ictx.lightRtPoint;
 
 			// r_shadowMapDebug 2: per-light readout so we can see, when a shadow blinks

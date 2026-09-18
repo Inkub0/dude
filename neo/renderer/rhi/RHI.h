@@ -121,6 +121,7 @@ struct DrawArgs {
 	ImageHandle		occlusion;		// baked occlusion map; bound to unit 10 (0 = unbound)
 	ImageHandle		parallax;		// parallax height map; bound to unit 11 (0 = unbound)
 	ImageHandle		shadowCubeDyn;	// static/dynamic split (lever B): movers-only cube depth; bound to unit 12 (0 = unbound)
+	ImageHandle		shadowMask;		// r_rtShadowBlur: this light's blurred screen-space RT shadow mask; bound to unit 13 (0 = unbound, VK only)
 };
 
 struct ClearArgs {

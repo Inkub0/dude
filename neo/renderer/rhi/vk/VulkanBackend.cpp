@@ -423,6 +423,9 @@ private:
 	static const int STAGING_RING_SIZE = 2 << 20;	// mid-frame texture updates (cinematics)
 	static const int INDIRECT_RING_SIZE = 1 << 20;	// r_vkIndirectTest 1-command-per-draw ring (~52k draws; grows)
 	static const int MAX_FRAME_SETS = 4096;			// per-draw texture sets per frame
+	// set-1 combined image samplers: units 0-7, shadow cube 8, SSAO 9, occlusion 10,
+	// parallax 11, dynamic shadow cube 12, blurred RT shadow mask 13 (r_rtShadowBlur)
+	static const int VK_TEX_BINDINGS = 14;
 
 	struct RingBuf {
 		VkBuffer		buffer = VK_NULL_HANDLE;
@@ -3181,8 +3184,8 @@ bool VulkanBackend::CreateM2Resources() {
 	// occlusion map at 10, parallax height map at 11 (interaction declares 9/10/11;
 	// dummies bound where a shader doesn't sample them)
 	{
-		VkDescriptorSetLayoutBinding b[13] = {};
-		for ( int i = 0; i < 13; i++ ) {
+		VkDescriptorSetLayoutBinding b[VK_TEX_BINDINGS] = {};
+		for ( int i = 0; i < VK_TEX_BINDINGS; i++ ) {
 			b[i].binding = (uint32_t)i;
 			b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 			b[i].descriptorCount = 1;
@@ -3190,7 +3193,7 @@ bool VulkanBackend::CreateM2Resources() {
 		}
 		VkDescriptorSetLayoutCreateInfo li = {};
 		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-		li.bindingCount = 13;
+		li.bindingCount = VK_TEX_BINDINGS;
 		li.pBindings = b;
 		if ( !vkCheck( vkCreateDescriptorSetLayout( device, &li, NULL, &setLayoutTex ), "vkCreateDescriptorSetLayout(tex)" ) ) {
 			return false;
@@ -3352,7 +3355,7 @@ bool VulkanBackend::CreateM2Resources() {
 	// for repeated texture combinations, which is the common case and avoids
 	// the per-frame allocation churn that otherwise stresses the pool.
 	{
-		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * 13 * 4 };
+		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * VK_TEX_BINDINGS * 4 };
 		VkDescriptorPoolCreateInfo pci = {};
 		pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		pci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
@@ -3366,7 +3369,7 @@ bool VulkanBackend::CreateM2Resources() {
 	// per-frame texture-set pools (reset wholesale each BeginFrame) for fallback
 	// allocations if the persistent pool is exhausted.
 	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) {
-		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * 11 };
+		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * VK_TEX_BINDINGS };
 		VkDescriptorPoolCreateInfo pci = {};
 		pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		pci.maxSets = MAX_FRAME_SETS;
@@ -10994,6 +10997,7 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 		mixKey( key, (uint32_t)args.occlusion );
 		mixKey( key, (uint32_t)args.parallax );
 		mixKey( key, (uint32_t)args.shadowCubeDyn );
+		mixKey( key, (uint32_t)args.shadowMask );
 		bool needsTexBind = true;
 		if ( boundTexSet != VK_NULL_HANDLE && boundTexKey == key ) {
 			texSet = boundTexSet;
@@ -11031,10 +11035,10 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 				// shaders statically declare: unit 7 is interaction.frag's sampler2DShadow
 				// and 8 its samplerCubeShadow (depth-compare dummies until M7 shadow maps);
 				// everything else is sampler2D (white). Real handles always win.
-				VkDescriptorImageInfo infos[13];
-				VkWriteDescriptorSet writes[13];
+				VkDescriptorImageInfo infos[VK_TEX_BINDINGS];
+				VkWriteDescriptorSet writes[VK_TEX_BINDINGS];
 				const ImageRec &dummy = imageTable[dummyImage - 1];
-				for ( int i = 0; i < 13; i++ ) {
+				for ( int i = 0; i < VK_TEX_BINDINGS; i++ ) {
 					VkSampler sampler = dummy.sampler;
 					VkImageView view = dummy.view;
 					if ( i < 8 && args.textures[i] >= 1 && args.textures[i] <= (ImageHandle)imageTable.size()
@@ -11082,6 +11086,11 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 							sampler = dummyShadowCube.sampler;
 							view = dummyShadowCube.view;
 						}
+					} else if ( i == 13 && args.shadowMask >= 1 && args.shadowMask <= (ImageHandle)imageTable.size()
+					            && imageTable[args.shadowMask - 1].live ) {
+						const ImageRec &rec = imageTable[args.shadowMask - 1];	// blurred RT shadow mask (else white = lit)
+						sampler = rec.sampler;
+						view = rec.view;
 					}
 					infos[i] = {};
 					infos[i].sampler = sampler;
@@ -11095,7 +11104,7 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 					writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 					writes[i].pImageInfo = &infos[i];
 				}
-				vkUpdateDescriptorSets( device, 13, writes, 0, NULL );
+				vkUpdateDescriptorSets( device, VK_TEX_BINDINGS, writes, 0, NULL );
 				textureSetCache[key] = texSet;
 			}
 			boundTexSet = texSet;
@@ -11226,10 +11235,10 @@ void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int
 			if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
 				return;
 			}
-			VkDescriptorImageInfo infos[13];
-			VkWriteDescriptorSet writes[13];
+			VkDescriptorImageInfo infos[VK_TEX_BINDINGS];
+			VkWriteDescriptorSet writes[VK_TEX_BINDINGS];
 			const ImageRec &dummy = imageTable[dummyImage - 1];
-			for ( int i = 0; i < 13; i++ ) {
+			for ( int i = 0; i < VK_TEX_BINDINGS; i++ ) {
 				// units 8 and 12 are samplerCubeShadow -> the cube depth dummy; 7 is the 2D shadow dummy
 				const bool cubeShadow = ( i == 8 || i == 12 );
 				infos[i] = {};
@@ -11244,7 +11253,7 @@ void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int
 				writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 				writes[i].pImageInfo = &infos[i];
 			}
-			vkUpdateDescriptorSets( device, 13, writes, 0, NULL );
+			vkUpdateDescriptorSets( device, VK_TEX_BINDINGS, writes, 0, NULL );
 			textureSetCache[key] = texSet;
 		}
 		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout, 1, 1, &texSet, 0, NULL );

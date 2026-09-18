@@ -978,6 +978,9 @@ extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone
 extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compositing (dissolves the static firefly grid)
 extern idCVar r_rtReflBump;					// RR10: how much the RT reflection follows the normal map (0 = flat mirror, 1 = full bump like SSR)
 extern idCVar r_rtMovingLights;				// RT shadows for moving point lights: skip the un-cacheable cube re-render, trace instead
+extern idCVar r_rtShadowBlur;				// screen-space blur on top of the hard RT shadows (sun / moving lights), docs/rtx-shadow-blur.md
+extern idCVar r_rtShadowBlurLightSize;		// light sphere radius (world units) = the softness
+extern idCVar r_rtShadowBlurSunAngle;		// angular radius of parallel (sun) lights, degrees
 extern idCVar r_rtTlasDirty;				// skip the per-frame TLAS rebuild when no mover/monster changed this frame
 extern idCVar r_rtSunShadowOffset;			// RT sun shadows: ray-origin normal offset (world units)
 extern idCVar r_rtMonsterShadows;			// RT sun shadows: include animated characters as per-frame casters

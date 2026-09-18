@@ -37,6 +37,22 @@ def expand_includes(text, depth=0):
     return "".join(out)
 
 
+def include_mtime(path, depth=0):
+    # newest mtime among the stage-file includes of `path` (e.g. interaction_rt.frag is a
+    # one-line wrapper around interaction.frag). The .glsl headers are covered globally by
+    # deps_mtime; without this a wrapper's .spv stayed stale when its included SOURCE changed.
+    if depth > 8:
+        return 0.0
+    newest = 0.0
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith('#include "') and stripped.endswith('"'):
+            inc = SHADER_DIR / stripped[len('#include "'):-1]
+            if inc.exists():
+                newest = max(newest, inc.stat().st_mtime, include_mtime(inc, depth + 1))
+    return newest
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--compiler", required=True)
@@ -64,7 +80,7 @@ def main():
         if f.suffix not in (".vert", ".frag", ".tesc", ".tese"):
             continue
         spv = outdir / (f.name + ".spv")
-        if spv.exists() and spv.stat().st_mtime >= max(f.stat().st_mtime, deps_mtime):
+        if spv.exists() and spv.stat().st_mtime >= max(f.stat().st_mtime, deps_mtime, include_mtime(f)):
             skipped += 1
             continue
 

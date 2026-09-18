@@ -1794,6 +1794,10 @@ static void R_RtStageAnimCasters( void ) {
 			if ( va == 0 || ia == 0 ) {
 				continue;
 			}
+			// value-initialize FIRST: this array is raw Mem_Alloc16 memory, so a BlasGeometry field
+			// added later and not assigned below would be garbage (it happened once: random md5
+			// surfaces were built non-opaque and rays passed through them)
+			geoms[gi] = rhi::RHI::BlasGeometry();
 			geoms[gi].vertexAddress = va;
 			geoms[gi].vertexStride = (unsigned int)sizeof( idDrawVert );
 			geoms[gi].vertexCount = (unsigned int)tri->numVerts;
