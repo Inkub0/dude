@@ -1928,7 +1928,7 @@ static CVarOption postProcessOptions[] = {
 			cvarSystem->SetCVarFloat( "r_hdrExposure", exposure );
 		}
 		AddTooltip( "r_hdrExposure: linear exposure multiplier applied before the tonemap curve.\n"
-			"Raises or lowers the scene brightness feeding the curve; default 1.23 (tuned for DUDE). No effect while Tonemap is Off." );
+			"Raises or lowers the scene brightness feeding the curve; default 1.5 (tuned for DUDE). No effect while Tonemap is Off." );
 
 		// HDR display gamma (any curve): the normal gamma slider is bypassed while tonemapping, so
 		// this is the contrast/softness lever in HDR. Applied AFTER the curve on the display value.

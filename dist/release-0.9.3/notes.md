@@ -68,7 +68,7 @@ else Ultra Nightmare still falls back cleanly to the Nightmare raster path.
 - **Eye adaptation stands down during cutscenes** and resumes by itself afterwards, so the
   exposure no longer pumps across camera cuts.
 - **New "DUDE" tonemap curve** (`r_hdrTonemap 5`), HDR gamma control and an experimental adaptive
-  white point.
+  white point. Default HDR exposure raised to 1.5 (`r_hdrExposure`).
 - **Smooth rendering above 60 fps by default**: render interpolation (`com_interpolate`) is now
   part of every preset above Potato.
 - **Cheaper ambient occlusion**: the normal pre-pass is merged with the depth pre-pass on Vulkan
