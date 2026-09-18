@@ -268,8 +268,8 @@ idCVar r_useSoftParticles( "r_useSoftParticles", "1", CVAR_RENDERER | CVAR_ARCHI
 // when the material name reads as smoke, so additive fire/sparks/glares stay bright.
 // Builds on soft particles (reuses the captured-scene render path); opengl3/Vulkan only.
 idCVar r_smokeDarkBlend( "r_smokeDarkBlend", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "GL3: fade smoke/steam/dust particles into darkness. On a black background they show at only r_smokeDarkBlendFloor opacity, ramping to full by r_smokeDarkBlendKnee background brightness. Alpha smoke always; additive smoke matched by material name (fire/sparks/glares stay bright). Needs Soft Particles. Non-vanilla, opengl3/Vulkan only." );
-idCVar r_smokeDarkBlendFloor( "r_smokeDarkBlendFloor", "0.6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "GL3: smoke opacity over a fully black background, as a fraction (0.6 = 60%). 1 = no dimming. See r_smokeDarkBlend.", 0.0f, 1.0f );
-idCVar r_smokeDarkBlendKnee( "r_smokeDarkBlendKnee", "0.15", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "GL3: background luminance (0..1) at which smoke returns to full opacity (0.15 = 15%). Lower = smoke recovers full opacity in dimmer light. See r_smokeDarkBlend.", 0.05f, 1.0f );
+idCVar r_smokeDarkBlendFloor( "r_smokeDarkBlendFloor", "0.55", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "GL3: smoke opacity over a fully black background, as a fraction (0.55 = 55%). 1 = no dimming. See r_smokeDarkBlend.", 0.0f, 1.0f );
+idCVar r_smokeDarkBlendKnee( "r_smokeDarkBlendKnee", "0.2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "GL3: background luminance (0..1) at which smoke returns to full opacity (0.2 = 20%). Lower = smoke recovers full opacity in dimmer light. See r_smokeDarkBlend.", 0.05f, 1.0f );
 
 idCVar r_glDebugContext( "r_glDebugContext", "0", CVAR_RENDERER | CVAR_BOOL, "Enable OpenGL Debug context - requires vid_restart, needs SDL2" );
 
