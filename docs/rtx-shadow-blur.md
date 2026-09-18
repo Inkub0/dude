@@ -110,6 +110,26 @@ A fourth pass (horizontal pass discarding in unflagged tiles + raw fallback) mea
 What remains per full-screen light is fixed: one ray pass, the tile passes, two blur passes, three
 target clears. Lights with small lit areas pay proportionally less.
 
+## The "shadows cut along a horizontal line" bug (2026-09-18) - a backend scissor bug, fixed
+
+User, Site 2 Transfer Area, blur on: the top half of the far columns' shadows missing, split along
+a screen-horizontal line. The same signature had appeared with the abandoned soft shadows.
+
+Root cause, `VulkanBackend::ApplyDynState`: the GL bottom-up -> Vulkan top-down conversion of the
+SCISSOR was keyed on `effFlipY`, the per-draw flag that cancels the viewport's negative-height
+mirror when a fullscreen pass samples a color target on unit 0. So any such pass got its scissor
+rect taken as top-down: vertically mirrored. With a full-target rect nobody could tell (every
+post pass until now); with a light's partial rect, the tile + blur passes (unit 0 = the ray / ping
+target) wrote a mirrored band, and the part of the light's real rect outside it kept the clear
+value - "lit" - so shadows vanished above/below a horizontal line. (The ray pass itself has
+`_currentDepth` on unit 0 and converted correctly, which is why `Debug 1` never showed it.) The
+soft-shadow upsample pass had the identical setup.
+
+Fix: where a rect lands follows the TARGET's convention (`curFlipY`); only the mirror follows the
+draw (`effFlipY`). Scissor converts on `curFlipY`; the un-mirrored viewport keeps its region
+(`y = H - (y + h)`, positive height). Bit-identical for full-target rects, i.e. for every
+pre-existing caller. Kelly's window never showed it because both lights' rects were full screen.
+
 ## Cvars
 
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.

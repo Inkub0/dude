@@ -10881,9 +10881,18 @@ void VulkanBackend::ApplyDynState( VkCommandBuffer cb, bool effFlipY ) {
 	VkViewport v = {};
 	v.x = (float)vpRect[0];
 	v.width = (float)vpRect[2];
+	// Two separate questions. WHERE the GL bottom-up rect lands in the top-down framebuffer
+	// depends on the target (curFlipY: the scene and color targets store the view upright, so
+	// the rect converts; shadow maps don't). Whether the viewport is MIRRORED (negative height)
+	// depends on the draw (effFlipY: a fullscreen pass sampling a color target cancels the
+	// mirror). Cancelling the mirror must not move the rect: for a full-target rect the two
+	// used to coincide, for a partial one the un-mirrored pass landed vertically mirrored.
 	if ( effFlipY ) {
 		v.y = (float)renderH - (float)vpRect[1];
 		v.height = -(float)vpRect[3];
+	} else if ( curFlipY ) {
+		v.y = (float)renderH - (float)( vpRect[1] + vpRect[3] );
+		v.height = (float)vpRect[3];
 	} else {
 		v.y = (float)vpRect[1];
 		v.height = (float)vpRect[3];
@@ -10900,7 +10909,12 @@ void VulkanBackend::ApplyDynState( VkCommandBuffer cb, bool effFlipY ) {
 	int sx = scRect[0], sy = scRect[1], sw = scRect[2], sh = scRect[3];
 	if ( sw < 0 ) { sw = 0; }
 	if ( sh < 0 ) { sh = 0; }
-	int top = effFlipY ? ( renderH - ( sy + sh ) ) : sy;
+	// the scissor is a framebuffer-space rect: it follows the TARGET's convention only. Keyed on
+	// effFlipY it silently stopped converting for any pass with a color target on unit 0 - every
+	// partial-rect fullscreen pass that samples a render target (r_rtShadowBlur's tile + blur
+	// passes; the abandoned soft-shadow upsample before it) wrote a vertically mirrored band and
+	// left the rest at its clear value: the "shadows cut along a horizontal line" bug.
+	int top = curFlipY ? ( renderH - ( sy + sh ) ) : sy;
 	if ( sx < 0 ) { sw += sx; sx = 0; }
 	if ( top < 0 ) { sh += top; top = 0; }
 	if ( sw < 0 ) { sw = 0; }
