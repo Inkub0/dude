@@ -34,7 +34,7 @@ suspended exactly as for a shadow-map render):
    The origin is rebuilt from the depth buffer, so the unprojection includes the FSR2 jitter
    (projection shear terms) and a distance-growing bias - without them far terrain flickers.
 2. **`rtshadow_tiles`** - 8x8 tiles: "holds a lit pixel" / "holds a shadowed pixel that can
-   spread", then the reach search (the kernel reaches up to 32 px = 4 tiles). A penumbra only exists near a
+   spread", then the reach search (the kernel reaches up to 24 px = 3 tiles). A penumbra only exists near a
    shadow edge; this is what lets the blur skip everything else on ONE fetch.
 3. **`rtshadow_blur`** - horizontal then vertical, 33 taps, only in flagged tiles: which shadowed
    neighbours *reach* this pixel (neighbour at x px counts if its half-width >= x), their mean
@@ -146,10 +146,11 @@ pre-existing caller. Kelly's window never showed it because both lights' rects w
 
 ## Limits
 
-- Half-width capped at 32 pixels (16 until the user asked for more, 2026-09-18): the cap is the
+- Half-width capped at 24 pixels (16 at first; 32 measured ~+2.2 ms GPU in the user's scene, so
+  24 is being tried, 2026-09-18): the cap is the
   blur's tap count per side and the tile search radius. Because the sweep is bounded by the widest
   shadow that actually reaches a tile, the higher cap only costs where a penumbra really is that
-  wide (up to 65 taps per pass there); narrow shadows cost what they did before.
+  wide (up to 49 taps per pass there); narrow shadows cost what they did before.
 - A blur of a centre-ray shadow cannot show an emitter partly visible around a thin occluder.
 - Only ray-served lights soften; shadow-mapped lights keep their PCF edge.
 

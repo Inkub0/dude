@@ -32,7 +32,7 @@ VARY(0) in vec2 var_TexCoord;
 
 layout(location = 0) out vec4 fragColor;
 
-const int   K         = 32;		// the widest penumbra half-width, in pixels (= HW_MAX in rtshadow_tiles.frag)
+const int   K         = 24;		// the widest penumbra half-width, in pixels (= HW_MAX in rtshadow_tiles.frag)
 const float DEPTH_TOL = 0.02;	// relative 1/d mismatch where a tap's weight falls to 1/e (5% = gone)
 
 float depthWeight( float iz, float expected, float izc ) {

@@ -5997,7 +5997,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	if ( lr.x2 < lr.x1 || lr.y2 < lr.y1 ) {
 		return 0;		// no opaque surface of this light on screen: nothing would sample a mask
 	}
-	const int blurTaps = 32;		// = K in rtshadow_blur.frag = HW_MAX in rtshadow_tiles.frag: the widest half-width, pixels
+	const int blurTaps = 24;		// = K in rtshadow_blur.frag = HW_MAX in rtshadow_tiles.frag: the widest half-width, pixels
 
 	// How wide the blur gets. The width follows the geometry - 0 where the caster touches the
 	// receiver, growing with the gap: halfWidth = blurScale * dOccluder / ( dLight - dOccluder ) -
@@ -6077,12 +6077,12 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		tp.localParam0[0] = (float)pass;
 		r->BeginTargetPass( rhiRtBlurTileRT[pass], &clearZero );
 		{
-			// only the tiles under the light's rect (+ the reach search's 4 tiles, + 1 for a view height
+			// only the tiles under the light's rect (+ the reach search's 3 tiles, + 1 for a view height
 			// that isn't a multiple of 8): pass 1 reads 64 texels per tile, which over the whole
 			// screen would cost a small light as much as a full-screen one. Cleared = "no blur".
 			const int tw = ( w + 7 ) / 8, th = ( h + 7 ) / 8;
-			const int tx1 = Max( 0, lr.x1 / 8 - 5 ), ty1 = Max( 0, lr.y1 / 8 - 5 );
-			const int tx2 = Min( tw - 1, lr.x2 / 8 + 5 ), ty2 = Min( th - 1, lr.y2 / 8 + 5 );
+			const int tx1 = Max( 0, lr.x1 / 8 - 4 ), ty1 = Max( 0, lr.y1 / 8 - 4 );
+			const int tx2 = Min( tw - 1, lr.x2 / 8 + 4 ), ty2 = Min( th - 1, lr.y2 / 8 + 4 );
 			r->SetScissor( tx1, ty1, tx2 - tx1 + 1, ty2 - ty1 + 1 );
 		}
 		RB_RHI_DrawFullscreen( r, rhiRtBlur.tileProg, tp,
