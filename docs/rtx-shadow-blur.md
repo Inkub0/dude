@@ -169,9 +169,12 @@ The user ruled out capping the number of blurred lights (a light flipping betwee
 hard would show) and asked instead for distance tiers: **closest shadows every frame, distant ones
 every 2nd, very far ones every 3rd.**
 
-- **Tier** = distance from the viewer to the light's VOLUME (`frustumTris` bounds; 0 inside it):
-  `< r_rtShadowBlurStaggerNear` (256) every frame, `< r_rtShadowBlurStaggerFar` (768) every 2nd,
-  beyond every 3rd. The refresh frame is offset by the light's index so refreshes spread out
+- **Tier** = distance from the viewer to the light's ORIGIN (parallel suns: always every frame):
+  `< r_rtShadowBlurStaggerNear` (320) every frame, `< r_rtShadowBlurStaggerFar` (800) every 2nd,
+  beyond every 3rd. *The first cut measured to the light's VOLUME - 0 for every light the viewer
+  stands inside, which indoors is nearly all of them: the user measured no saving at all (10.10 ->
+  15.7 ms), because nothing was ever staggered.* `r_rtShadowBlurStagger 2` prints lights per tier
+  and masks rendered vs reused once per second, so that can't happen silently again. The refresh frame is offset by the light's index so refreshes spread out
   instead of spiking one frame in two.
 - **State.** The shared targets can't outlive a frame, so a staggered light owns a slot: a
   view-sized **RGBA8 mask** (R = visibility, GB = log2 of the view distance it was traced for, 16
@@ -188,16 +191,16 @@ every 2nd, very far ones every 3rd.**
 - **What it cannot fix:** shadows of MOVING casters under a staggered light update at the light's
   reduced rate (one or two frames late, alternating with exact frames); fallback pixels are
   hard-edged for a frame. Both are confined to lights beyond `StaggerNear`.
-- **Expected saving - limited by design:** the expensive lights are the ones whose volume contains
-  the viewer (full-screen rects), and those are distance 0 = every frame. `StaggerNear 0` staggers
-  them too.
-- Menu: Graphics -> Shadows -> Ray Tracing -> "Refresh Distant Soft Shadows Less Often"; the two
-  distances in Debugging -> RT Shadows. Builds; **NOT runtime-tested.**
+- **Saving** scales with how much of the blurred screen area sits beyond `StaggerNear`: a light
+  rendered every 2nd frame costs half, every 3rd a third. Both distances at 0 = everything at a
+  third of the rate (the floor: ~1/3 of the blur's cost).
+- Menu: Graphics -> Shadows -> Ray Tracing -> "Refresh Distant Soft Shadows Less Often" with the two
+  distance sliders ("Half Rate Beyond", "Third Rate Beyond") right under it. Builds; **NOT runtime-tested.**
 
 ## Cvars
 
 - `r_rtAllLights` (0): ray-trace every shadow-casting light (see above).
-- `r_rtShadowBlurStagger` (0) / `r_rtShadowBlurStaggerNear` (256) / `r_rtShadowBlurStaggerFar` (768): see above.
+- `r_rtShadowBlurStagger` (0; 1 = on, 2 = on + readout) / `r_rtShadowBlurStaggerNear` (320) / `r_rtShadowBlurStaggerFar` (800): see above.
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
 - `r_rtShadowBlurIntensity` (1.5, 0..4; Debugging -> RT Shadows -> "Blur Intensity"): scales the blur width. Replaced
   the "Light Size" / sun-angle pair (user, 2026-09-18: with the emitter model gone a "light size"

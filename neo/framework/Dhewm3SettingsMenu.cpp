@@ -3396,17 +3396,32 @@ static void DrawEnhGroup_Shadows()
 
 		// r_rtShadowBlurStagger: gated perf option, opt-in - never rewrites a preset-owned cvar
 		ImGui::BeginDisabled( !r_rtShadowBlur.GetBool() );
-		bool rtBlurStagger = r_rtShadowBlurStagger.GetBool();
+		bool rtBlurStagger = r_rtShadowBlurStagger.GetInteger() > 0;
 		if ( ImGui::Checkbox( "Refresh Distant Soft Shadows Less Often", &rtBlurStagger ) ) {
-			r_rtShadowBlurStagger.SetBool( rtBlurStagger );
+			r_rtShadowBlurStagger.SetInteger( rtBlurStagger ? 1 : 0 );
 		}
-		AddTooltip( "Performance option for Soften RT Shadows: nearby lights still refresh their "
-			"soft shadows every frame, distant ones every 2nd frame, very far ones every 3rd. "
-			"Reused shadows are re-projected to the current camera, and pixels they cannot cover "
-			"get a hard-edged ray for that frame - so watch for brief hard edges or slightly late "
-			"shadows from moving things in the distance. Uses ~15 MB of VRAM per distant light at "
-			"1440p. The two distances are in Debugging -> RT Shadows." );
-		ImGui::EndDisabled();
+		AddTooltip( "Performance option for Soften RT Shadows: lights close to you still refresh their "
+			"soft shadows every frame, farther ones every 2nd frame, the farthest every 3rd - set "
+			"the two distances below. Reused shadows are re-projected to the current camera, and "
+			"pixels they cannot cover get a hard-edged ray for that frame - so watch for brief hard "
+			"edges or slightly late shadows from moving things. Uses ~15 MB of VRAM per staggered "
+			"light at 1440p. (r_rtShadowBlurStagger 2 prints how many lights land in each tier.)" );
+		ImGui::BeginDisabled( r_rtShadowBlurStagger.GetInteger() <= 0 );
+		float rtStagNear = r_rtShadowBlurStaggerNear.GetFloat();
+		if ( ImGui::SliderFloat( "Half Rate Beyond", &rtStagNear, 0.0f, 2048.0f, "%.0f units" ) ) {
+			r_rtShadowBlurStaggerNear.SetFloat( rtStagNear );
+		}
+		AddTooltip( "Lights whose centre is farther from you than this refresh their soft shadows every "
+			"2nd frame (nearer ones every frame). For scale: the player is ~74 units tall, a typical "
+			"room 300-600 across. 0 = every light at half rate or less." );
+		float rtStagFar = r_rtShadowBlurStaggerFar.GetFloat();
+		if ( ImGui::SliderFloat( "Third Rate Beyond", &rtStagFar, 0.0f, 4096.0f, "%.0f units" ) ) {
+			r_rtShadowBlurStaggerFar.SetFloat( rtStagFar );
+		}
+		AddTooltip( "Lights whose centre is farther from you than this refresh every 3rd frame. "
+			"0 = every light at a third of the rate." );
+		ImGui::EndDisabled();	// stagger off
+		ImGui::EndDisabled();	// blur off
 		ImGui::EndDisabled();
 
 		ImGui::EndDisabled();
@@ -4001,21 +4016,6 @@ static void DrawDbgGroup_RTShadows()
 		"1 = the natural growth of a real light. Lower = soft almost straight away, then "
 		"levelling off (a more even blur). Higher = crisp for longer near the object, then "
 		"widening fast. Blur Intensity sets how much; this sets where. Default 1.45." );
-
-	ImGui::BeginDisabled( !r_rtShadowBlurStagger.GetBool() );
-	float rtStagNear = r_rtShadowBlurStaggerNear.GetFloat();
-	if ( ImGui::SliderFloat( "Stagger: Every Frame Within", &rtStagNear, 0.0f, 2048.0f, "%.0f units" ) ) {
-		r_rtShadowBlurStaggerNear.SetFloat( rtStagNear );
-	}
-	AddTooltip( "Lights whose volume is nearer than this refresh their soft shadows every frame "
-		"(a light you are standing inside counts as distance 0). Beyond it: every 2nd frame. "
-		"0 = stagger even the lights you stand in - the biggest saving, and the easiest to notice." );
-	float rtStagFar = r_rtShadowBlurStaggerFar.GetFloat();
-	if ( ImGui::SliderFloat( "Stagger: Every 3rd Frame Beyond", &rtStagFar, 0.0f, 4096.0f, "%.0f units" ) ) {
-		r_rtShadowBlurStaggerFar.SetFloat( rtStagFar );
-	}
-	AddTooltip( "Lights whose volume is farther than this refresh every 3rd frame." );
-	ImGui::EndDisabled();	// r_rtShadowBlurStagger
 
 	ImGui::EndDisabled();	// r_rtShadowBlur
 	ImGui::EndDisabled();	// rtCapable
