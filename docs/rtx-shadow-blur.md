@@ -217,7 +217,7 @@ the light-volume test ("lit" = shadows gone), the rest hit unrelated geometry (s
 Fix: the pair now comes from the view's own projection, `1/vz = raw * (-2/P14) + (1 - P10)/P14`
 (`u_depthTexRecip.zw`); the far-distance depth-quantization bias scales with it.
 A first guess - the ray-origin offset following the G-buffer bump normal instead of a geometric
-one - changed nothing and was reverted.
+one - changed nothing and was reverted. **Fix USER-VERIFIED 2026-09-18 ("the cinematic looks right").**
 
 The same hard-coded pair lives in every other depth-reading shader (SSAO, RTAO, SSR, soft
 particles, ...): they are all off by 4x in cinematics too. Not touched here.
