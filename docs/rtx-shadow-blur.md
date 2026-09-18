@@ -64,5 +64,6 @@ motion vectors); without it, or on any failure, lights keep their hard ray.
 
 ## Status
 
-Builds, SPIR-V validates. **Not runtime-tested** (the game is the user's to run). Fidelity: changes
-the look of shadows, so opt-in; candidate for the Ultra Nightmare row once verified.
+**USER-VERIFIED 2026-09-18** ("the blurring seems great"). Fidelity: changes the look of shadows,
+so opt-in. Open: GPU-time delta on/off (`r_vkGpuTime`) not yet reported; Ultra Nightmare preset row
++ docs/todo.md table not wired yet.
