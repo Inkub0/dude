@@ -3375,7 +3375,7 @@ static void DrawEnhGroup_Shadows()
 		}
 		AddTooltip( "Blurs the ray-traced shadows above (RT Sun / RT Moving-Light) in screen space: "
 			"the edge stays sharp where an object touches the surface it shadows and softens as "
-			"the gap grows, by up to 16 pixels. Same rays, no noise and nothing accumulated over "
+			"the gap grows, by up to 32 pixels. Same rays, no noise and nothing accumulated over "
 			"frames - off gives back exactly the hard ray-traced shadows. Changes the look of "
 			"shadows (the stock game's are hard-edged). Needs SSAO, RTAO or Motion Vectors on "
 			"(their depth/normal prepass). Other lights are not affected." );
@@ -3386,7 +3386,7 @@ static void DrawEnhGroup_Shadows()
 		}
 		AddTooltip( "How strongly the ray-traced shadows are blurred. The blur still follows the "
 			"scene - none where an object touches the surface, more as the gap grows - this scales "
-			"all of it. It tops out at 16 pixels, so high values mostly soften the edges near "
+			"all of it. It tops out at 32 pixels, so high values mostly soften the edges near "
 			"contact further. 0 = hard shadows, 1 = default." );
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();

@@ -6,11 +6,12 @@
 //
 //   u_localParam0.x = 0: pass 1, ray target -> tiles.
 //                        R = any pixel lit, G = any pixel shadowed with something to spread,
-//                        B = the widest half-width in the tile / 16
+//                        B = the widest half-width in the tile / HW_MAX
 //                   = 1: pass 2, tiles -> tiles.
 //                        G = the widest half-width among the tiles whose shadows REACH this tile
 //                            (itself; a neighbour n tiles away only if its half-width spans the
-//                            ( n - 1 ) * 8 pixel gap) / 16 - the blur's sweep length
+//                            ( n - 1 ) * 8 pixel gap) / HW_MAX - the blur's sweep length
+//                        (searched out to HW_MAX / 8 = 4 tiles - 81 fetches, at 1/64 of the pixels)
 //                        R = 1 when such a shadow exists AND a lit pixel lies within that reach:
 //                            anywhere else no pixel's value can change
 #include "renderparms.glsl"
@@ -21,7 +22,8 @@ VARY(0) in vec2 var_TexCoord;
 
 layout(location = 0) out vec4 fragColor;
 
-const float HW_MAX = 16.0;		// = K in rtshadow_blur.frag
+const float HW_MAX = 32.0;		// = K in rtshadow_blur.frag
+const int   TILE_REACH = 4;		// HW_MAX / 8: how many tiles away the widest shadow still reaches
 
 void main() {
 	ivec2 tp = ivec2( gl_FragCoord.xy );
@@ -48,8 +50,8 @@ void main() {
 		return;
 	}
 	float reachHW = 0.0;
-	for ( int y = -2; y <= 2; y++ ) {
-		for ( int x = -2; x <= 2; x++ ) {
+	for ( int y = -TILE_REACH; y <= TILE_REACH; y++ ) {
+		for ( int x = -TILE_REACH; x <= TILE_REACH; x++ ) {
 			ivec2 q = tp + ivec2( x, y );
 			if ( q.x < 0 || q.y < 0 || q.x > hi.x || q.y > hi.y ) {
 				continue;
@@ -63,7 +65,7 @@ void main() {
 	}
 	float anyLit = 0.0;
 	if ( reachHW > 0.0 ) {
-		int tr = ( reachHW > 8.0 ) ? 2 : 1;
+		int tr = clamp( int( ceil( reachHW / 8.0 ) ), 1, TILE_REACH );
 		for ( int y = -tr; y <= tr; y++ ) {
 			for ( int x = -tr; x <= tr; x++ ) {
 				ivec2 q = clamp( tp + ivec2( x, y ), ivec2( 0 ), hi );
