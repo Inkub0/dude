@@ -77,16 +77,31 @@ void main() {
 	// depth quantization: ~2e-8 * d^2 world units along the view ray, doubled by the float32
 	// cancellation in the linearization - err in FRONT of the surface, never behind it
 	P *= max( 1.0 - 6e-8 * d * d / max( length( P ), 1.0 ), 0.5 );
-	// geometric normal from the depth derivatives, taken before any further branching
+	// GEOMETRIC normal from the depth derivatives (taken before any further branching), turned to
+	// face the camera. This - not the G-buffer's bump normal - is what the ray origin is offset
+	// along, exactly like the inline mode-4 ray, which uses the mesh's geometric normal. The bump
+	// normal is a SHADING normal: on a character it can tilt far from the surface, and on some
+	// meshes (cinematic actors have shipped with missing / underived tangent frames) it is plain
+	// wrong - a 1-unit step along it lands the origin inside the body, and the ray then hits the
+	// far inner side of the mesh: a soft shadow patch that shouldn't exist, or a real shadow lost.
+	// Only where the depth is discontinuous (a silhouette: the derivative spans two surfaces) is
+	// the bump normal trusted instead, if it is usable at all.
 	vec3  gN   = cross( dFdx( P ), dFdy( P ) );
+	float dStep = abs( dFdx( d ) ) + abs( dFdy( d ) );
+	float gLen = length( gN );
+	vec3  gn   = ( gLen > 1e-6 ) ? gN / gLen : vec3( 0.0, 0.0, 1.0 );		// view space
+	if ( dot( gn, P ) > 0.0 ) {
+		gn = -gn;								// face the eye (view-space origin)
+	}
 	vec3  Nraw = nt.xyz * 2.0 - 1.0;
 	float nl2  = dot( Nraw, Nraw );
-	if ( !( nl2 > 1e-4 ) ) {
-		return;
-	}
-	vec3 N  = Nraw * inversesqrt( nl2 );
+	bool  bumpOk = nl2 > 0.25;					// a stored unit normal; (0,0,0) / garbage is not
+	vec3  N  = bumpOk ? Nraw * inversesqrt( nl2 ) : gn;
+	bool  geoOk = gLen > 1e-6 && dStep < 0.05 * d;
+	vec3  offN = ( geoOk || !bumpOk ) ? gn : N;
 	vec3 Pw = ( u_modelViewMatrix * vec4( P, 1.0 ) ).xyz;
 	vec3 Nw = normalize( mat3( u_modelViewMatrix ) * N );
+	vec3 offNw = normalize( mat3( u_modelViewMatrix ) * offN );
 
 	// outside the light's volume nothing is lit by it, so nothing needs a shadow
 	vec4  Pw4 = vec4( Pw, 1.0 );
@@ -102,7 +117,7 @@ void main() {
 		return;
 	}
 
-	vec3  O    = Pw + Nw * ( u_rtParms.z + 5e-4 * d );
+	vec3  O    = Pw + offNw * ( u_rtParms.z + 5e-4 * d );
 	vec3  toL  = u_localLightOrigin.xyz - O;
 	float dL2  = dot( toL, toL );
 	if ( !( dL2 > 1.0 ) ) {						// on top of the light (also catches NaN)
@@ -113,12 +128,10 @@ void main() {
 
 	// surfaces facing away from the light receive exactly zero from it (the interaction multiplies
 	// by N.L): no ray. Bump normal AND geometric normal must agree, so only whole faces are skipped.
-	float gLen = length( gN );
-	vec3  gn   = ( gLen > 1e-6 ) ? gN / gLen : vec3( 0.0, 0.0, 1.0 );		// view space
-	if ( dot( Nw, Ldir ) < -0.05 ) {
+	// (both normals must be trustworthy, or the pixel simply traces)
+	if ( bumpOk && geoOk && dot( Nw, Ldir ) < -0.05 ) {
 		vec3 gNw = mat3( u_modelViewMatrix ) * gn;
-		if ( dot( gNw, Nw ) < 0.0 ) { gNw = -gNw; }
-		if ( gLen > 1e-6 && dot( gNw, Ldir ) < -0.15 ) {
+		if ( dot( gNw, Ldir ) < -0.15 ) {
 			return;
 		}
 	}

@@ -200,6 +200,24 @@ every 2nd, very far ones every 3rd.**
   **12.80 ms (-2.8 ms, about half the blur's cost)**, *"I don't see evident change in perceived
   shadows"*. Their tuned distances, 192 / 380, are the defaults. **User-tested 2026-09-18.**
 
+## Animated characters: stray soft patches / missing self-shadow (2026-09-18, fix pending verify)
+
+User, intro CINEMATIC, blur on vs off: the scientist's coat gains two soft shadow patches it
+shouldn't have, the marine loses the chin shadow on his neck; the inline hard ray (blur off) is
+right. Both paths trace the same ray through the same TLAS from the same displaced surface
+position - the one difference was the NORMAL the ray origin is offset along: the inline ray uses
+the mesh's geometric normal (`var_ModelNormal` / the tese's `geoN`), the screen pass used the
+G-buffer's **bump** normal. On characters that is a strongly tilted shading normal, and cinematic
+actors have shipped with missing / underived tangent frames before (see the RoE intro
+tessellation fix) - a 1-unit step along a wrong normal starts the ray inside the body, where it
+hits the far inner side of the mesh: a SOFT patch (the hit is far away), or a lost shadow. It
+also early-outed "lit" on a zero stored normal.
+Fix: offset along the depth-derivative geometric normal, turned to face the eye; the bump normal
+is used only across a depth discontinuity (where derivatives span two surfaces) and only if it is
+a usable unit vector; a bad bump normal no longer skips the ray. If the artefact survives this,
+the other character-specific suspect is the staggered refresh (reprojecting a stale mask onto an
+animating receiver) - A/B with `r_rtShadowBlurStagger 0`.
+
 ## Cvars
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every
