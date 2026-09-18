@@ -38,12 +38,9 @@
 //                           near the caster, then widening fast
 //   u_screenCorrection.xy = 1 / viewSize
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
-//   u_depthTexRecip.zw    = window depth -> 1 / view z:  1/vz = raw * z + w, from THIS view's
-//                           projection ( -2 / P[14], ( 1 - P[10] ) / P[14] ). NOT a constant: the
-//                           near plane is r_znear (3) in play but a quarter of it in cinematics
-//                           (renderView.cramZNear) - with the usual hard-coded play-time pair every
-//                           reconstructed point came out 4x too far along its view ray, so the rays
-//                           started somewhere behind the scene: shadows missing, stray soft patches
+//   u_depthParms.xy       = window depth -> 1 / view z for THIS view (renderparms.glsl): cinematics
+//                           quarter the near plane, and a hard-coded play-time pair rebuilt every point
+//                           4x too far along its view ray
 #extension GL_EXT_ray_query : require
 
 #include "renderparms.glsl"
@@ -56,7 +53,7 @@ VARY(0) in vec2 var_TexCoord;
 layout(location = 0) out vec4 fragColor;
 
 // Doom 3's near-infinite far projection in GL clip depth -> linear eye z. The pair comes from the
-// view's own projection (u_depthTexRecip.zw); ( 0.33333333, -0.33316667 ) is its play-time value.
+// view's own projection (u_depthParms); ( 0.33333333, -0.33316667 ) is its play-time value.
 
 void main() {
 	fragColor = vec4( 1.0, 0.0, 0.0, 0.0 );		// every early-out = lit
@@ -72,7 +69,7 @@ void main() {
 		return;
 	}
 
-	float vz  = 1.0 / ( min( raw, 0.9994 ) * u_depthTexRecip.z + u_depthTexRecip.w );   // negative
+	float vz  = 1.0 / ( min( raw, 0.9994 ) * DUDE_DEPTH_CONSTS().x + DUDE_DEPTH_CONSTS().y );   // negative
 	float d   = -vz;
 	fragColor.b = min( d, 65000.0 );			// lit or not, this pixel has a surface the blur can weigh
 	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
@@ -82,7 +79,7 @@ void main() {
 	// depth quantization: ~2e-8 * d^2 world units along the view ray, doubled by the float32
 	// cancellation in the linearization - err in FRONT of the surface, never behind it
 	// (the 6e-8 is for the play-time near plane; depth resolution scales with 1 / zNear)
-	P *= max( 1.0 - 6e-8 * ( u_depthTexRecip.z * 3.0 ) * d * d / max( length( P ), 1.0 ), 0.5 );
+	P *= max( 1.0 - 6e-8 * ( DUDE_DEPTH_CONSTS().x * 3.0 ) * d * d / max( length( P ), 1.0 ), 0.5 );
 	// geometric normal from the depth derivatives, taken before any further branching
 	vec3  gN   = cross( dFdx( P ), dFdy( P ) );
 	vec3  Nraw = nt.xyz * 2.0 - 1.0;

@@ -20,7 +20,9 @@ layout(location = 0) out vec4 fragColor;
 
 #define BLUR_RADIUS 2
 
-const vec2 depth_consts = vec2( 0.33333333, -0.33316667 );
+// depth -> view z pair of THIS view (renderparms.glsl u_depthParms): cinematics quarter the near
+// plane, so it is not the constant ( 0.33333333, -0.33316667 ) it used to be hard-coded as
+#define depth_consts DUDE_DEPTH_CONSTS()
 
 // When the SSAO depth mip exists (u_depthTexRecip.z >= 0.5) the backend binds its level 0
 // on unit 1 instead of _currentDepth: already-linear eye depth at exactly this AO

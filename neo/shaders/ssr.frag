@@ -33,7 +33,9 @@ layout(location = 0) out vec4 fragColor;
 
 // Doom 3's fixed near / near-infinite far projection in GL clip depth -> linear
 // eye z (negative). Same constants as ssao.frag / softparticle.frag.
-const vec2 depth_consts = vec2( 0.33333333, -0.33316667 );
+// depth -> view z pair of THIS view (renderparms.glsl u_depthParms): cinematics quarter the near
+// plane, so it is not the constant ( 0.33333333, -0.33316667 ) it used to be hard-coded as
+#define depth_consts DUDE_DEPTH_CONSTS()
 
 float rawDepth( vec2 frag ) {
 	return texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;

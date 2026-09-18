@@ -2411,6 +2411,7 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 				parms.screenCorrection[2] = rW > 0 ? (float)fW / (float)rW : 1.0f;	// -> _currentRender POT tc
 				parms.screenCorrection[3] = rH > 0 ? (float)fH / (float)rH : 1.0f;
 				parms.depthTexRecip[0] = dW > 0 ? 1.0f / (float)dW : 1.0f;			// frag -> depth tc
+				rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 				parms.depthTexRecip[1] = dH > 0 ? 1.0f / (float)dH : 1.0f;
 				parms.windowCoord[2] = -1.0f;	// VK view-Y sign (this path is VK-gated)
 			}
@@ -2649,6 +2650,7 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	// env[22].xy: reciprocal of the (power-of-two) _currentDepth size, mapping
 	// gl_FragCoord to a depth texcoord (RB_SetProgramEnvironment / #3877).
 	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
+	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
 
 	// DUDE smoke-darkness blend: dim smoke/steam/dust where the scene behind it is

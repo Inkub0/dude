@@ -136,10 +136,27 @@ struct RenderParams {
 								// offset along the surface normal in world units (self-intersection
 								// guard - the receiving triangle is in the BLAS), w = max ray length.
 								// Filled only when shadowParms.x == 4 (VK + RT hardware); 0 elsewhere.
+
+	float	depthParms[4];		// window depth -> view z for this view: 1/vz = raw * x + y, from the
+								// view's projection (RB_RHI_FillDepthParms). Every depth-reading pass
+								// fills it; the shaders fall back to the play-time constants when
+								// x == 0. Cinematics quarter the near plane (renderView.cramZNear),
+								// which the old hard-coded pair ignored. Appended LAST.
 };
 
-// 4 mat4 (256) + 47 vec4 (752) = 1008 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 1008, "RenderParams must match the std140 layout of renderparms.glsl" );
+// window depth -> view z for a view, from its projection matrix (column-major GL layout):
+//   z_ndc = -P10 - P14 / vz,  raw = ( z_ndc + 1 ) / 2   =>   1/vz = raw * ( -2 / P14 ) + ( 1 - P10 ) / P14
+// In play (r_znear 3) that is ( 0.33333333, -0.33316667 ); cinematics (renderView.cramZNear)
+// quarter the near plane. Leaves x == 0 (= shader falls back to the play pair) on a degenerate matrix.
+inline void FillDepthParms( RenderParams &p, const float *proj ) {
+	if ( proj != 0 && proj[14] != 0.0f ) {
+		p.depthParms[0] = -2.0f / proj[14];
+		p.depthParms[1] = ( 1.0f - proj[10] ) / proj[14];
+	}
+}
+
+// 4 mat4 (256) + 48 vec4 (768) = 1024 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 1024, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

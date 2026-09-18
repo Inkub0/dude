@@ -4935,6 +4935,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 				memset( &pyr, 0, sizeof( pyr ) );
 				pyr.mvpMatrix[0] = pyr.mvpMatrix[5] = pyr.mvpMatrix[10] = pyr.mvpMatrix[15] = 1.0f;
 				pyr.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;	// SSR frag -> depth tc
+				rhi::FillDepthParms( pyr, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 				pyr.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
 				// level 0: linearize _currentDepth into the min-Z target
 				r->BeginTargetPass( rhiSsrDepthMinRT, NULL );
@@ -4996,6 +4997,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.screenCorrection[2] = potW > 0 ? (float)fullW / potW : 1.0f;
 	parms.screenCorrection[3] = potH > 0 ? (float)fullH / potH : 1.0f;
 	parms.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;		// gl_FragCoord (SSR) -> depth tc
+	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 	parms.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
 	// per-frame jitter rotation so temporal accumulation averages different march
 	// offsets (golden-ratio walk, same scheme as SSAO); 0 keeps the static dither
@@ -5184,6 +5186,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	compParms.screenCorrection[0] = 1.0f / fullW;
 	compParms.screenCorrection[1] = 1.0f / fullH;
 	compParms.depthTexRecip[0] = 1.0f / uploadW;
+	rhi::FillDepthParms( compParms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 	compParms.depthTexRecip[1] = 1.0f / uploadH;
 	compParms.windowCoord[2] = viewYSign;		// view-Y sign for the NdotV reconstruction (VK)
 
@@ -5259,6 +5262,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			rp.screenCorrection[0] = 1.0f / ssrW;
 			rp.screenCorrection[1] = 1.0f / ssrH;
 			rp.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;
+			rhi::FillDepthParms( rp, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 			rp.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
 			rp.windowCoord[2] = viewYSign;
 			// TLAS + geo-table device addresses, bit-cast into the float slots (floatBitsToUint in the shader)
@@ -5317,6 +5321,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 					tempParms.screenCorrection[0] = 1.0f / fullW;
 					tempParms.screenCorrection[1] = 1.0f / fullH;
 					tempParms.depthTexRecip[0] = 1.0f / uploadW;
+					rhi::FillDepthParms( tempParms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 					tempParms.depthTexRecip[1] = 1.0f / uploadH;
 					tempParms.localParam0[2] = idMath::ClampFloat( 0.0f, 0.97f, r_ssrTemporalFeedback.GetFloat() );
 					tempParms.localParam0[3] = historyUsable ? 1.0f : 0.0f;
@@ -5468,6 +5473,7 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	memset( &parms, 0, sizeof( parms ) );
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
 	parms.depthTexRecip[0]    = ( (float)fullW / aoW ) / uploadW;	// gl_FragCoord (AO) -> depth tc
+	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 	parms.depthTexRecip[1]    = ( (float)fullH / aoH ) / uploadH;
 	// SSAO Phase 1: .z = depth-mip max LOD (0 = off, ssao.frag uses the raw path), .w = LOD bias.
 	// r_ssaoDepthMipMaxLod caps how coarse the march may go — the coarsest (box-averaged) mips are
@@ -5766,6 +5772,7 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / uploadW;
+	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 	parms.depthTexRecip[1] = 1.0f / uploadH;
 	parms.windowCoord[2] = -1.0f;					// VK-only pass: top-down view-Y sign
 
@@ -5797,6 +5804,7 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		memset( &gp, 0, sizeof( gp ) );
 		gp.mvpMatrix[0] = gp.mvpMatrix[5] = gp.mvpMatrix[10] = gp.mvpMatrix[15] = 1.0f;
 		gp.depthTexRecip[0] = 1.0f / uploadW;
+		rhi::FillDepthParms( gp, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 		gp.depthTexRecip[1] = 1.0f / uploadH;
 		r->BeginTargetPass( rhiRtaoViewzRT, NULL );
 		RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
@@ -5864,6 +5872,7 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				rp.screenCorrection[0] = 1.0f / w;
 				rp.screenCorrection[1] = 1.0f / h;
 				rp.depthTexRecip[0] = 1.0f / uploadW;
+				rhi::FillDepthParms( rp, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 				rp.depthTexRecip[1] = 1.0f / uploadH;
 				r->BeginTargetPass( rhiRtaoResolveRT, NULL );
 				RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
@@ -6173,19 +6182,8 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
+	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
-	// window depth -> 1 / view z from THIS view's projection: z_ndc = -P10 - P14 / vz and
-	// raw = ( z_ndc + 1 ) / 2  =>  1/vz = raw * ( -2 / P14 ) + ( 1 - P10 ) / P14. In play that is
-	// the familiar ( 0.3333, -0.33317 ); cinematics cram the near plane to a quarter
-	// (renderView.cramZNear) and a hard-coded pair rebuilt every point 4x too far away.
-	if ( proj[14] != 0.0f ) {
-		parms.depthTexRecip[2] = -2.0f / proj[14];
-		parms.depthTexRecip[3] = ( 1.0f - proj[10] ) / proj[14];
-	} else {
-		parms.depthTexRecip[2] = 0.33333333f;
-		parms.depthTexRecip[3] = -0.33316667f;
-	}
-
 	// "lit, nothing to spread, never traced": what the big targets clear to (color targets
 	// always clear on begin) and what the tile + blur passes skip
 	rhi::ClearArgs clearLit;

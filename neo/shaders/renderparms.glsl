@@ -116,4 +116,16 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // scene TLAS device address as raw bit patterns (floatBitsToUint),
 	                            // z = ray-origin normal offset (world units), w = max ray length.
 	                            // Read only by interaction_rt.frag when shadowParms.x == 4.
+
+	vec4 u_depthParms;           // window depth -> view z for THIS view: 1/vz = raw * x + y, from its
+	                            // projection ( -2/P[14], (1-P[10])/P[14] ). NOT a constant: the
+	                            // near plane is r_znear (3) in play - which gives the pair
+	                            // (0.33333333, -0.33316667) every depth-reading shader used to
+	                            // hard-code - but a QUARTER of that in cinematics
+	                            // (renderView.cramZNear), where the constants put every
+	                            // reconstructed point 4x too far away. x == 0 = not provided:
+	                            // use DUDE_DEPTH_CONSTS( ) below, which falls back to the play pair.
 };
+
+// the depth-linearisation pair for this draw (see u_depthParms)
+#define DUDE_DEPTH_CONSTS() ( ( u_depthParms.x != 0.0 ) ? u_depthParms.xy : vec2( 0.33333333, -0.33316667 ) )

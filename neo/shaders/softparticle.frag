@@ -18,7 +18,7 @@ VARY(1) in vec4 var_Color;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-	const vec2 depth_consts = vec2(0.33333333, -0.33316667);
+	vec2 depth_consts = DUDE_DEPTH_CONSTS();	// this view's pair (u_depthParms); falls back to the play-time constants
 	 vec2 depthTc = gl_FragCoord.xy * u_depthTexRecip.xy;
 	 float rawSceneDepth = min(texture(u_currentDepth, depthTc).x, 0.9994);
 
