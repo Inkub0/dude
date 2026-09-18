@@ -130,7 +130,7 @@ draw (`effFlipY`). Scissor converts on `curFlipY`; the un-mirrored viewport keep
 (`y = H - (y + h)`, positive height). Bit-identical for full-target rects, i.e. for every
 pre-existing caller. Kelly's window never showed it because both lights' rects were full screen.
 
-## RT shadows for ALL lights - `r_rtAllLights` (2026-09-18, opt-in, not preset-wired yet)
+## RT shadows for ALL lights - `r_rtAllLights` (2026-09-18; on in the Ultra Nightmare preset)
 
 User request: every remaining shadow-casting light ray-traced like the sun / moving lights, behind
 its own toggle (Graphics -> Shadows -> Ray Tracing -> "RT Shadows for All Lights"), in two phases.
@@ -202,7 +202,8 @@ every 2nd, very far ones every 3rd.**
 
 ## Cvars
 
-- `r_rtAllLights` (0): ray-trace every shadow-casting light (see above).
+- `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every
+  shadow-casting light (see above). `r_rtShadowBlurStagger` is NOT preset-owned - manual opt-in.
 - `r_rtShadowBlurStagger` (0; 1 = on, 2 = on + readout) / `r_rtShadowBlurStaggerNear` (192) / `r_rtShadowBlurStaggerFar` (380): see above.
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
 - `r_rtShadowBlurIntensity` (1.5, 0..4; Debugging -> RT Shadows -> "Blur Intensity"): scales the blur width. Replaced
