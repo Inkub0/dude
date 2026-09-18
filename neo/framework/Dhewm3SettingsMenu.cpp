@@ -2706,8 +2706,7 @@ struct EnhancementPreset {
 	// rtShadowBlur): lights beyond r_rtShadowBlurStaggerNear / Far refresh every 2nd / 3rd frame,
 	// reprojected in between. Ultra Nightmare only - it is what makes blurring EVERY light
 	// affordable there (user-measured 15.6 -> 12.8 ms, no visible change). The preset owns the
-	// on/off only; the two distances are free tuning knobs (Debugging -> RT Shadows). The cvar is
-	// an integer (2 = on + console readout): the preset writes 1, and any non-zero value matches.
+	// on/off only; the two distances are free tuning knobs (Debugging -> RT Shadows).
 	bool  rtBlurStagger;            // r_rtShadowBlurStagger
 };
 
@@ -2828,10 +2827,7 @@ static void ApplyEnhancementPreset( int idx )
 	r_rtao.SetBool( p.rtao );
 	r_rtShadowBlur.SetBool( p.rtShadowBlur );
 	r_rtAllLights.SetBool( p.rtAllLights );
-	// keep a live readout (2) when the tier wants it on; otherwise plain on / off
-	if ( p.rtBlurStagger != ( r_rtShadowBlurStagger.GetInteger() > 0 ) ) {
-		r_rtShadowBlurStagger.SetInteger( p.rtBlurStagger ? 1 : 0 );
-	}
+	r_rtShadowBlurStagger.SetBool( p.rtBlurStagger );
 }
 
 // Return the preset whose full cvar vector the live cvars currently match, or -1
@@ -2893,7 +2889,7 @@ static int DetectEnhancementPreset()
 			r_rtao.GetBool()                   == p.rtao &&
 			r_rtShadowBlur.GetBool()           == p.rtShadowBlur &&
 			r_rtAllLights.GetBool()            == p.rtAllLights &&
-			( r_rtShadowBlurStagger.GetInteger() > 0 ) == p.rtBlurStagger;
+			r_rtShadowBlurStagger.GetBool()    == p.rtBlurStagger;
 		if ( match ) {
 			return i;
 		}
@@ -3416,16 +3412,16 @@ static void DrawEnhGroup_Shadows()
 
 		// r_rtShadowBlurStagger: preset-owned (on at Ultra Nightmare), so flipping it by hand reads "Custom"
 		ImGui::BeginDisabled( !r_rtShadowBlur.GetBool() );
-		bool rtBlurStagger = r_rtShadowBlurStagger.GetInteger() > 0;
+		bool rtBlurStagger = r_rtShadowBlurStagger.GetBool();
 		if ( ImGui::Checkbox( "Refresh Distant Soft Shadows Less Often", &rtBlurStagger ) ) {
-			r_rtShadowBlurStagger.SetInteger( rtBlurStagger ? 1 : 0 );
+			r_rtShadowBlurStagger.SetBool( rtBlurStagger );
 		}
 		AddTooltip( "Performance option for Soften RT Shadows: lights close to you still refresh their "
 			"soft shadows every frame, farther ones every 2nd frame, the farthest every 3rd - set "
 			"the two distances in Debugging -> RT Shadows. Reused shadows are re-projected to the current camera, and "
 			"pixels they cannot cover get a hard-edged ray for that frame - so watch for brief hard "
 			"edges or slightly late shadows from moving things. Uses ~15 MB of VRAM per staggered "
-			"light at 1440p. (r_rtShadowBlurStagger 2 prints how many lights land in each tier.)" );
+			"light at 1440p." );
 		ImGui::EndDisabled();	// blur off
 		ImGui::EndDisabled();
 
@@ -4022,8 +4018,8 @@ static void DrawDbgGroup_RTShadows()
 		"levelling off (a more even blur). Higher = crisp for longer near the object, then "
 		"widening fast. Blur Intensity sets how much; this sets where. Default 1.45." );
 
-	ImGui::BeginDisabled( r_rtShadowBlurStagger.GetInteger() <= 0 );
-	if ( r_rtShadowBlurStagger.GetInteger() <= 0 ) {
+	ImGui::BeginDisabled( !r_rtShadowBlurStagger.GetBool() );
+	if ( !r_rtShadowBlurStagger.GetBool() ) {
 		ImGui::TextDisabled( "Refresh Distant Soft Shadows Less Often is off (Graphics -> Shadows -> Ray Tracing)." );
 	}
 	float rtStagNear = r_rtShadowBlurStaggerNear.GetFloat();

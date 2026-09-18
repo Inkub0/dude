@@ -420,9 +420,6 @@ struct rtBlurSlot_t {
 };
 static rtBlurSlot_t rhiRtBlurSlots[RT_BLUR_MAX_SLOTS];
 static int  rhiRtBlurFrame = 0;				// main views that ran the blur
-// r_rtShadowBlurStagger 2: per-second readout - masks rendered vs reused, per tier (0 = every frame)
-static int  rhiRtBlurDbgRefreshed[3] = { 0, 0, 0 }, rhiRtBlurDbgReused[3] = { 0, 0, 0 };
-static int  rhiRtBlurDbgViews = 0, rhiRtBlurDbgStartMs = 0;
 static bool rhiRtBlurLastStale = false;		// out-params of the last RB_RHI_RtShadowBlurLight
 static float rhiRtBlurLastViewProj[16];
 static rhi::RenderTargetHandle rhiRtaoRayRT = 0;
@@ -5966,28 +5963,6 @@ static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurMaskRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;	// lost context
 	}
 	rhiRtBlurFrame++;
-	// r_rtShadowBlurStagger 2: is the staggering actually biting? Lights per view by tier, and how
-	// many of their masks were rendered vs reused. "every frame" lights can only ever be rendered.
-	if ( r_rtShadowBlurStagger.GetInteger() >= 2 ) {
-		const int nowMs = Sys_Milliseconds();
-		if ( rhiRtBlurDbgStartMs == 0 ) { rhiRtBlurDbgStartMs = nowMs; }
-		if ( nowMs - rhiRtBlurDbgStartMs >= 1000 && rhiRtBlurDbgViews > 0 ) {
-			const float v = (float)rhiRtBlurDbgViews;
-			common->Printf( "rtBlurStagger/s: %d views | per view: every-frame %.1f lights | every-2nd %.1f rendered + %.1f reused | every-3rd %.1f rendered + %.1f reused\n",
-				rhiRtBlurDbgViews, rhiRtBlurDbgRefreshed[0] / v,
-				rhiRtBlurDbgRefreshed[1] / v, rhiRtBlurDbgReused[1] / v,
-				rhiRtBlurDbgRefreshed[2] / v, rhiRtBlurDbgReused[2] / v );
-			memset( rhiRtBlurDbgRefreshed, 0, sizeof( rhiRtBlurDbgRefreshed ) );
-			memset( rhiRtBlurDbgReused, 0, sizeof( rhiRtBlurDbgReused ) );
-			rhiRtBlurDbgViews = 0;
-			rhiRtBlurDbgStartMs = nowMs;
-		}
-		rhiRtBlurDbgViews++;
-	} else {
-		memset( rhiRtBlurDbgRefreshed, 0, sizeof( rhiRtBlurDbgRefreshed ) );
-		memset( rhiRtBlurDbgReused, 0, sizeof( rhiRtBlurDbgReused ) );
-		rhiRtBlurDbgViews = 0;	rhiRtBlurDbgStartMs = 0;
-	}
 	myGlMultMatrix( viewDef->worldSpace.modelViewMatrix, viewDef->projectionMatrix, rhiRtBlur.viewProj );
 	// staggered-mask slots: gone with a resize / lost context / the option; idle ones are freed
 	for ( int i = 0; i < RT_BLUR_MAX_SLOTS; i++ ) {
@@ -5996,7 +5971,7 @@ static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 			continue;
 		}
 		const bool lost = sl.maskRT && r->GetRenderTargetImage( sl.maskRT ) == 0;
-		if ( lost || w != rhiRtBlurW || h != rhiRtBlurH || r_rtShadowBlurStagger.GetInteger() <= 0
+		if ( lost || w != rhiRtBlurW || h != rhiRtBlurH || !r_rtShadowBlurStagger.GetBool()
 				|| rhiRtBlurFrame - sl.lastUsedFrame > RT_BLUR_SLOT_IDLE_FRAMES ) {
 			if ( sl.maskRT && !lost ) { r->DestroyRenderTarget( sl.maskRT ); }
 			memset( &sl, 0, sizeof( sl ) );
@@ -6100,13 +6075,11 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	// frame. A mask is NEVER reused when the light itself moved or changed size, or when it is
 	// older than its interval allows.
 	rtBlurSlot_t *slot = NULL;
-	int staggerTier = 0;
-	if ( r_rtShadowBlurStagger.GetInteger() > 0 && ictx.interactionRtProg != 0 ) {
+	if ( r_rtShadowBlurStagger.GetBool() && ictx.interactionRtProg != 0 ) {
 		const float dist = vLight->lightDef->parms.parallel ? 0.0f
 			: ( vLight->globalLightOrigin - viewDef->renderView.vieworg ).Length();
 		const int interval = ( dist < r_rtShadowBlurStaggerNear.GetFloat() ) ? 1
 		                   : ( dist < r_rtShadowBlurStaggerFar.GetFloat() ) ? 2 : 3;
-		staggerTier = interval - 1;
 		if ( interval > 1 ) {
 			unsigned long long tok = 1469598103934665603ULL;
 			tok = RB_RHI_HashBytes( tok, vLight->globalLightOrigin.ToFloatPtr(), 3 * sizeof( float ) );
@@ -6144,7 +6117,6 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 				const bool scheduled = ( ( rhiRtBlurFrame + lightIndex ) % interval ) == 0;
 				const bool reusable = slot->lastUpdateFrame != 0 && age < interval && slot->poseTok == tok && !scheduled;
 				if ( reusable ) {
-					rhiRtBlurDbgReused[staggerTier]++;
 					rhiRtBlurLastStale = true;
 					memcpy( rhiRtBlurLastViewProj, slot->viewProj, sizeof( rhiRtBlurLastViewProj ) );
 					return r->GetRenderTargetImage( slot->maskRT );
@@ -6171,8 +6143,6 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		const float maxAxis = Max( lp.lightRadius.x, Max( lp.lightRadius.y, lp.lightRadius.z ) );
 		lightRadius *= Max( 1.0f, maxAxis / 256.0f );
 	}
-
-	rhiRtBlurDbgRefreshed[staggerTier]++;
 
 	const float *proj = viewDef->projectionMatrix;
 	const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFull );

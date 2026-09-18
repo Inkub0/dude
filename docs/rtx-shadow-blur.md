@@ -173,8 +173,8 @@ every 2nd, very far ones every 3rd.**
   `< r_rtShadowBlurStaggerNear` (192) every frame, `< r_rtShadowBlurStaggerFar` (380) every 2nd,
   beyond every 3rd. *The first cut measured to the light's VOLUME - 0 for every light the viewer
   stands inside, which indoors is nearly all of them: the user measured no saving at all (10.10 ->
-  15.7 ms), because nothing was ever staggered.* `r_rtShadowBlurStagger 2` prints lights per tier
-  and masks rendered vs reused once per second, so that can't happen silently again. The refresh frame is offset by the light's index so refreshes spread out
+  15.7 ms), because nothing was ever staggered.* (A temporary per-second readout of lights per
+  tier / masks rendered vs reused confirmed the fix; removed once the cost was settled.) The refresh frame is offset by the light's index so refreshes spread out
   instead of spiking one frame in two.
 - **State.** The shared targets can't outlive a frame, so a staggered light owns a slot: a
   view-sized **RGBA8 mask** (R = visibility, GB = log2 of the view distance it was traced for, 16
@@ -204,7 +204,7 @@ every 2nd, very far ones every 3rd.**
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every
   shadow-casting light (see above). `r_rtShadowBlurStagger` is on there too (the preset owns the on/off, not the two distances).
-- `r_rtShadowBlurStagger` (0; 1 = on, 2 = on + readout) / `r_rtShadowBlurStaggerNear` (192) / `r_rtShadowBlurStaggerFar` (380): see above.
+- `r_rtShadowBlurStagger` (0) / `r_rtShadowBlurStaggerNear` (192) / `r_rtShadowBlurStaggerFar` (380): see above.
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
 - `r_rtShadowBlurIntensity` (1.5, 0..4; Debugging -> RT Shadows -> "Blur Intensity"): scales the blur width. Replaced
   the "Light Size" / sun-angle pair (user, 2026-09-18: with the emitter model gone a "light size"
