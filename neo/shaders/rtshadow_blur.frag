@@ -22,10 +22,17 @@
 // centre's 1/d extrapolated along the axis with the local slope - floors at grazing angles keep
 // their whole kernel, while anything off that plane (another object, a silhouette) drops out.
 //
+// Unflagged tiles cost almost nothing: pass 1 DISCARDS there before reading anything but the tile
+// (the ping target was cleared to an "unwritten" marker, view distance -1); pass 2 copies the raw
+// visibility straight from the ray target, and any of its taps that lands on an unwritten ping
+// texel reads the ray target instead - the exact texel pass 1 would have passed through.
+//
 //   u_localParam0.xy = pass axis, (1,0) or (0,1)
+//   u_localParam0.z  = 0: pass 1 (discard in unflagged tiles); 1: pass 2 (u_raw fallback)
 #include "renderparms.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_src;
+SAMPLER_BINDING(2) uniform sampler2D u_raw;		// pass 2: the ray target (pass 1's input)
 SAMPLER_BINDING(1) uniform sampler2D u_tiles;		// per 8x8 tile: R = 1 a shadow edge is within reach, G = that reach / 16
 
 VARY(0) in vec2 var_TexCoord;
@@ -41,20 +48,34 @@ float depthWeight( float iz, float expected, float izc ) {
 }
 
 vec4 fetchTap( ivec2 q, ivec2 hi ) {
-	return ( q.x < 0 || q.y < 0 || q.x > hi.x || q.y > hi.y ) ? vec4( 1.0, 0.0, 0.0, 0.0 ) : texelFetch( u_src, q, 0 );
+	if ( q.x < 0 || q.y < 0 || q.x > hi.x || q.y > hi.y ) {
+		return vec4( 1.0, 0.0, 0.0, 0.0 );
+	}
+	vec4 t = texelFetch( u_src, q, 0 );
+	if ( t.b < -0.5 ) {
+		// pass 2 only: pass 1 discarded here (unflagged tile) - what it would have written
+		vec4 raw = texelFetch( u_raw, q, 0 );
+		t = vec4( raw.r, raw.a, raw.b, 0.0 );
+	}
+	return t;
 }
 
 void main() {
 	ivec2 ip = ivec2( gl_FragCoord.xy );
+	vec4 tile = texelFetch( u_tiles, ip >> 3, 0 );
+	if ( tile.r < 0.5 ) {
+		// no shadow edge can reach this tile: nothing changes here
+		if ( u_localParam0.z < 0.5 ) {
+			discard;
+		}
+		fragColor = vec4( texelFetch( u_raw, ip, 0 ).r, 0.0, 0.0, 0.0 );
+		return;
+	}
 	vec4  c  = texelFetch( u_src, ip, 0 );
 	// pass-through: visibility as is, the other axis' half-width moves into G for pass 2
 	fragColor = vec4( c.r, c.a, c.b, 0.0 );
 	if ( !( c.b > 0.0 ) ) {
 		return;
-	}
-	vec4 tile = texelFetch( u_tiles, ip >> 3, 0 );
-	if ( tile.r < 0.5 ) {
-		return;									// no shadow edge can reach this tile
 	}
 	// sweep only as far as the widest shadow that reaches this tile (+1: the reach test's soft
 	// edge). Most penumbrae are a few pixels wide, so this is usually a handful of taps, not 33.

@@ -6124,16 +6124,28 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		const int padY = ( pass == 0 ) ? wide : tight;
 		bp.localParam0[0] = ( pass == 0 ) ? 1.0f : 0.0f;		// axis
 		bp.localParam0[1] = ( pass == 0 ) ? 0.0f : 1.0f;
-		r->BeginTargetPass( ( pass == 0 ) ? rhiRtBlurPingRT : rhiRtBlurMaskRT, &clearLit );
+		bp.localParam0[2] = (float)pass;						// 0: discard in unflagged tiles, 1: u_raw fallback
+		// pass 1 only writes flagged tiles: everything else keeps this "unwritten" marker
+		// (view distance -1), which pass 2 resolves from the ray target
+		rhi::ClearArgs clearUnwritten = clearLit;
+		clearUnwritten.rgba[2] = -1.0f;
+		r->BeginTargetPass( ( pass == 0 ) ? rhiRtBlurPingRT : rhiRtBlurMaskRT, ( pass == 0 ) ? &clearUnwritten : &clearLit );
 		r->SetScissor( Max( 0, lr.x1 - tight ), Max( 0, lr.y1 - padY ),
 		               Min( w - 1, lr.x2 + tight ) - Max( 0, lr.x1 - tight ) + 1,
 		               Min( h - 1, lr.y2 + padY ) - Max( 0, lr.y1 - padY ) + 1 );
 		RB_RHI_BindRTUnit( r, 1, rhiRtBlurTileRT[1] );
+		// unit 2 = the ray target: pass 2's source for unflagged tiles. Pass 1 samples it on unit 0
+		// already, and must not see the ping target it is writing on any unit.
+		RB_RHI_BindRTUnit( r, 2, rhiRtBlurRayRT );
 		RB_RHI_DrawFullscreen( r, rhiRtBlur.blurProg, bp,
 			r->GetRenderTargetImage( ( pass == 0 ) ? rhiRtBlurRayRT : rhiRtBlurPingRT ) );
 		r->EndPass();
 	}
 
+	// drop the working targets from the recorded units: the next blurred light renders INTO them,
+	// and a later draw that doesn't rebind units 1-2 must not carry an attachment along
+	RB_RHI_BindRTImage( r, 1, 0 );
+	RB_RHI_BindRTImage( r, 2, 0 );
 	backEnd.currentScissor = viewDef->scissor;	// the loop re-applies the light's scissor right after
 	return r->GetRenderTargetImage( rhiRtBlurMaskRT );
 }
