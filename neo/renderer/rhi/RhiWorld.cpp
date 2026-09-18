@@ -6041,6 +6041,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	parms.localParam1[0] = (float)blurTaps;
 	parms.localParam1[1] = proj[8];		// the projection's shear terms = this frame's FSR2 jitter
 	parms.localParam1[2] = proj[9];
+	parms.localParam1[3] = r_rtShadowBlurCurve.GetFloat();	// how the width grows with the gap (1 = geometric)
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;

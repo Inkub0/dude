@@ -3388,6 +3388,14 @@ static void DrawEnhGroup_Shadows()
 			"scene - none where an object touches the surface, more as the gap grows - this scales "
 			"all of it. It tops out at 32 pixels, so high values mostly soften the edges near "
 			"contact further. 0 = hard shadows, 1 = default." );
+		float rtBlurCurve = r_rtShadowBlurCurve.GetFloat();
+		if ( ImGui::SliderFloat( "Blur Falloff Curve", &rtBlurCurve, 0.25f, 4.0f, "%.2f" ) ) {
+			r_rtShadowBlurCurve.SetFloat( rtBlurCurve );
+		}
+		AddTooltip( "How quickly a shadow softens as it gets further from the object casting it. "
+			"1 = the natural growth of a real light. Lower = soft almost straight away, then "
+			"levelling off (a more even blur). Higher = crisp for longer near the object, then "
+			"widening fast. Blur Intensity sets how much; this sets where." );
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 

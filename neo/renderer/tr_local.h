@@ -980,6 +980,7 @@ extern idCVar r_rtReflBump;					// RR10: how much the RT reflection follows the 
 extern idCVar r_rtMovingLights;				// RT shadows for moving point lights: skip the un-cacheable cube re-render, trace instead
 extern idCVar r_rtShadowBlur;				// screen-space blur on top of the hard RT shadows (sun / moving lights), docs/rtx-shadow-blur.md
 extern idCVar r_rtShadowBlurIntensity;		// blur width multiplier (0 = hard, 1 = default)
+extern idCVar r_rtShadowBlurCurve;			// exponent on the gap ratio: how the blur grows with distance from the caster (1 = geometric)
 extern idCVar r_rtTlasDirty;				// skip the per-frame TLAS rebuild when no mover/monster changed this frame
 extern idCVar r_rtSunShadowOffset;			// RT sun shadows: ray-origin normal offset (world units)
 extern idCVar r_rtMonsterShadows;			// RT sun shadows: include animated characters as per-frame casters

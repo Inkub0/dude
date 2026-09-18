@@ -31,7 +31,11 @@
 //   u_lightProjectionS/T/Q, u_lightFalloffS = the light's WORLD-space projection planes
 //                           (vLight->lightProject[0..3]) - the light-volume test
 //   u_localParam0         = ( 1/proj00, 1/proj11, blurScale (world units, from r_rtShadowBlurIntensity), world units -> pixels at view distance 1 )
-//   u_localParam1         = ( max half-width in pixels, proj[8], proj[9], 0 )
+//   u_localParam1         = ( max half-width in pixels, proj[8], proj[9], curve exponent )
+//                           curve shapes HOW the blur grows with the gap (r_rtShadowBlurCurve): the width is
+//                           blurScale * g^curve, g = dOccluder / ( dLight - dOccluder ). 1 = the geometric
+//                           (physical) growth; < 1 = soft sooner, then levelling off; > 1 = crisp for longer
+//                           near the caster, then widening fast
 //   u_screenCorrection.xy = 1 / viewSize
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 #extension GL_EXT_ray_query : require
@@ -131,7 +135,8 @@ void main() {
 	}
 
 	float dOcc = rayQueryGetIntersectionTEXT( rq, true );
-	float halfW = u_localParam0.z * dOcc / max( dL - dOcc, 1e-3 );
+	float gap   = dOcc / max( dL - dOcc, 1e-3 );
+	float halfW = u_localParam0.z * pow( gap, max( u_localParam1.w, 0.05 ) );
 	float rPx  = min( halfW * u_localParam0.w / max( d, 1.0 ), u_localParam1.x );
 	// per screen axis, the extent of a disc lying in the receiver's plane: r * sqrt( 1 - n.axis^2 )
 	vec2  ext  = sqrt( max( vec2( 1.0 ) - gn.xy * gn.xy, vec2( 0.04 ) ) );
