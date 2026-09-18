@@ -85,6 +85,10 @@ static struct {
 	// inline. Surfaces the screen-space mask can't describe keep the inline mode-4 ray.
 	bool				lightRtBlur;
 	rhi::ImageHandle	shadowMaskImage;
+	// r_rtShadowBlurStagger: the mask was made on an EARLIER frame - interactions look it up
+	// reprojected (shader mode 6) through that frame's world-to-clip matrix
+	bool				shadowMaskStale;
+	float				shadowMaskViewProj[16];
 	bool				lightShadowCube;
 	rhi::ImageHandle	shadowCubeImage;
 	// static/dynamic split (r_shadowMapCacheSplit): when a cached static point light also
@@ -396,8 +400,28 @@ static int   rhiRtBlurW = 0, rhiRtBlurH = 0;
 static bool  rhiRtBlurThisView = false;
 static struct {
 	float				invView[16];
+	float				viewProj[16];		// this view's world-to-clip (jitter included): stored with a staggered mask
 	rhi::ShaderHandle	rayProg, tileProg, blurProg;
 } rhiRtBlur;
+// r_rtShadowBlurStagger: lights far from the viewer refresh their mask every 2nd / 3rd frame. That
+// needs what the shared targets deliberately don't have - a mask that outlives the frame - so each
+// staggered light owns a view-sized RGBA8 mask (visibility + the view distance it was traced for)
+// plus the camera it was made with. Slots are keyed by the light's persistent index and dropped
+// after a few seconds unused.
+#define RT_BLUR_MAX_SLOTS 64
+#define RT_BLUR_SLOT_IDLE_FRAMES 300
+struct rtBlurSlot_t {
+	int						lightIndex;
+	rhi::RenderTargetHandle	maskRT;
+	int						lastUpdateFrame;	// rhiRtBlurFrame when the mask was last rendered
+	int						lastUsedFrame;		// 0 = free slot
+	unsigned long long		poseTok;			// light pose + size the mask was made for
+	float					viewProj[16];
+};
+static rtBlurSlot_t rhiRtBlurSlots[RT_BLUR_MAX_SLOTS];
+static int  rhiRtBlurFrame = 0;				// main views that ran the blur
+static bool rhiRtBlurLastStale = false;		// out-params of the last RB_RHI_RtShadowBlurLight
+static float rhiRtBlurLastViewProj[16];
 static rhi::RenderTargetHandle rhiRtaoRayRT = 0;
 static int   rhiRtaoW = 0, rhiRtaoH = 0;
 static bool  rhiRtaoRanThisView = false;			// ray output produced this view (overlay gate)
@@ -1078,6 +1102,34 @@ static bool RB_RHI_TessOrDeform( const drawSurf_t *surf, const srfTriangles_t *t
 	return cand && !outUseDeform;
 }
 
+// r_rtShadowBlur: shader parms for an interaction that looks this light's blurred mask up
+// (unit 13). A mask made THIS frame is addressed by gl_FragCoord (mode 5). A staggered light's
+// mask from an earlier frame (r_rtShadowBlurStagger) is addressed by reprojection through that
+// frame's world-to-clip matrix (mode 6) - and because it cannot answer for points that were
+// hidden / off screen / outside the light's rect back then, that draw binds the ray-query variant
+// with the TLAS, exactly like a mode-4 draw, so the shader can fall back to the hard ray.
+static void RB_RHI_FillBlurMaskParms( rhi::RenderParams &parms, bool &rtSun ) {
+	parms.shadowParms[0] = 5.0f;
+	parms.shadowParms[1] = ( rhiRtBlurW > 0 ) ? 1.0f / rhiRtBlurW : 0.0f;
+	parms.shadowParms[2] = ( rhiRtBlurH > 0 ) ? 1.0f / rhiRtBlurH : 0.0f;
+	if ( !ictx.shadowMaskStale ) {
+		return;
+	}
+	const unsigned long long tlas = ictx.r->GetTlasAddress();
+	if ( tlas == 0 || ictx.interactionRtProg == 0 ) {
+		return;		// no fallback available: the unreprojected lookup beats no shadow at all
+	}
+	parms.shadowParms[0] = 6.0f;
+	memcpy( parms.prevMvpMatrix, ictx.shadowMaskViewProj, sizeof( parms.prevMvpMatrix ) );
+	const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFu );
+	const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
+	memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );	// bit-cast, NOT a value cast
+	memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+	parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
+	parms.rtParms[3] = 100000.0f;
+	rtSun = true;
+}
+
 /*
 ===================
 RB_RHI_DrawInteraction
@@ -1262,9 +1314,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			// map. Needs the RT variant loaded and a live persistent world scene
 			// (R_RtWorldUpdate auto-builds it while r_rtSunShadows is on).
 			if ( blurMask ) {
-				parms.shadowParms[0] = 5.0f;		// blurred ray mask on unit 13
-				parms.shadowParms[1] = ( rhiRtBlurW > 0 ) ? 1.0f / rhiRtBlurW : 0.0f;
-				parms.shadowParms[2] = ( rhiRtBlurH > 0 ) ? 1.0f / rhiRtBlurH : 0.0f;
+				RB_RHI_FillBlurMaskParms( parms, rtSun );
 			} else if ( r_rtSunShadows.GetBool() && ictx.interactionRtProg != 0 ) {
 				const unsigned long long tlas = ictx.r->GetTlasAddress();
 				if ( tlas != 0 ) {
@@ -1291,9 +1341,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			// TLAS gone mid-frame downgrades to unshadowed, same as the sun RT route.
 			const unsigned long long tlas = ictx.r->GetTlasAddress();
 			if ( blurMask ) {
-				parms.shadowParms[0] = 5.0f;		// blurred ray mask on unit 13
-				parms.shadowParms[1] = ( rhiRtBlurW > 0 ) ? 1.0f / rhiRtBlurW : 0.0f;
-				parms.shadowParms[2] = ( rhiRtBlurH > 0 ) ? 1.0f / rhiRtBlurH : 0.0f;
+				RB_RHI_FillBlurMaskParms( parms, rtSun );
 			} else if ( tlas != 0 && ictx.interactionRtProg != 0 ) {
 				parms.shadowParms[0] = 4.0f;
 				const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFu );
@@ -3256,6 +3304,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
 	rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurMaskRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;
 	rhiRtBlurW = rhiRtBlurH = 0;	rhiRtBlurThisView = false;
+	memset( rhiRtBlurSlots, 0, sizeof( rhiRtBlurSlots ) );		// handles died with the context
 	rhiRtaoRanThisView = false;
 	rhiRtaoViewzRT = 0;			rhiRtaoPackRT = 0;		rhiRtaoResolveRT = 0;
 	rhiRtaoDenoisedThisView = false;	rhiRtaoPrevValid = false;
@@ -5913,6 +5962,21 @@ static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( rhiRtBlurRayRT && r->GetRenderTargetImage( rhiRtBlurRayRT ) == 0 ) {
 		rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurMaskRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;	// lost context
 	}
+	rhiRtBlurFrame++;
+	myGlMultMatrix( viewDef->worldSpace.modelViewMatrix, viewDef->projectionMatrix, rhiRtBlur.viewProj );
+	// staggered-mask slots: gone with a resize / lost context / the option; idle ones are freed
+	for ( int i = 0; i < RT_BLUR_MAX_SLOTS; i++ ) {
+		rtBlurSlot_t &sl = rhiRtBlurSlots[i];
+		if ( sl.lastUsedFrame == 0 ) {
+			continue;
+		}
+		const bool lost = sl.maskRT && r->GetRenderTargetImage( sl.maskRT ) == 0;
+		if ( lost || w != rhiRtBlurW || h != rhiRtBlurH || !r_rtShadowBlurStagger.GetBool()
+				|| rhiRtBlurFrame - sl.lastUsedFrame > RT_BLUR_SLOT_IDLE_FRAMES ) {
+			if ( sl.maskRT && !lost ) { r->DestroyRenderTarget( sl.maskRT ); }
+			memset( &sl, 0, sizeof( sl ) );
+		}
+	}
 	if ( w != rhiRtBlurW || h != rhiRtBlurH ) {
 		if ( rhiRtBlurRayRT )     { r->DestroyRenderTarget( rhiRtBlurRayRT );     rhiRtBlurRayRT = 0; }
 		if ( rhiRtBlurPingRT )    { r->DestroyRenderTarget( rhiRtBlurPingRT );    rhiRtBlurPingRT = 0; }
@@ -5998,6 +6062,73 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	const idScreenRect lr = RB_RHI_RtShadowBlurRect( viewDef, vLight, w, h );
 	if ( lr.x2 < lr.x1 || lr.y2 < lr.y1 ) {
 		return 0;		// no opaque surface of this light on screen: nothing would sample a mask
+	}
+	rhiRtBlurLastStale = false;
+
+	// ---- r_rtShadowBlurStagger: how often does this light's mask refresh? By the distance from the
+	// viewer to the light's VOLUME (0 inside it - a light you stand in shadows things right next to
+	// you, however far its centre): nearer than StaggerNear every frame, up to StaggerFar every 2nd,
+	// beyond every 3rd. Which frame a light refreshes on is offset by its index, so the refreshes
+	// spread evenly instead of all landing on the same frame. A mask is NEVER reused when the light
+	// itself moved or changed size, or when it is older than its interval allows.
+	rtBlurSlot_t *slot = NULL;
+	if ( r_rtShadowBlurStagger.GetBool() && ictx.interactionRtProg != 0 ) {
+		float dist = 0.0f;
+		if ( vLight->frustumTris != NULL && !vLight->frustumTris->bounds.IsCleared() ) {
+			const idBounds &lb = vLight->frustumTris->bounds;
+			const idVec3 &vo = viewDef->renderView.vieworg;
+			idVec3 dv;
+			for ( int a = 0; a < 3; a++ ) {
+				dv[a] = Max( 0.0f, Max( lb[0][a] - vo[a], vo[a] - lb[1][a] ) );
+			}
+			dist = dv.Length();
+		}
+		const int interval = ( dist < r_rtShadowBlurStaggerNear.GetFloat() ) ? 1
+		                   : ( dist < r_rtShadowBlurStaggerFar.GetFloat() ) ? 2 : 3;
+		if ( interval > 1 ) {
+			unsigned long long tok = 1469598103934665603ULL;
+			tok = RB_RHI_HashBytes( tok, vLight->globalLightOrigin.ToFloatPtr(), 3 * sizeof( float ) );
+			tok = RB_RHI_HashBytes( tok, vLight->lightDef->parms.lightCenter.ToFloatPtr(), 3 * sizeof( float ) );
+			tok = RB_RHI_HashBytes( tok, &vLight->lightDef->parms.axis, sizeof( idMat3 ) );
+			tok = RB_RHI_HashBytes( tok, vLight->lightDef->parms.lightRadius.ToFloatPtr(), 3 * sizeof( float ) );
+			const int lightIndex = vLight->lightDef->index;
+			int freeSlot = -1;
+			for ( int i = 0; i < RT_BLUR_MAX_SLOTS; i++ ) {
+				if ( rhiRtBlurSlots[i].lastUsedFrame != 0 && rhiRtBlurSlots[i].lightIndex == lightIndex ) {
+					slot = &rhiRtBlurSlots[i];
+					break;
+				}
+				if ( rhiRtBlurSlots[i].lastUsedFrame == 0 && freeSlot < 0 ) {
+					freeSlot = i;
+				}
+			}
+			if ( slot == NULL && freeSlot >= 0 ) {
+				slot = &rhiRtBlurSlots[freeSlot];
+				memset( slot, 0, sizeof( *slot ) );
+				slot->lightIndex = lightIndex;
+			}
+			if ( slot != NULL ) {
+				if ( !slot->maskRT ) {
+					slot->maskRT = r->CreateRenderTargetMipped( rhi::IF_RGBA8, w, h, 1 );
+					slot->lastUpdateFrame = 0;
+				}
+				if ( !slot->maskRT ) {
+					slot = NULL;		// out of memory: this light simply refreshes every frame
+				}
+			}
+			if ( slot != NULL ) {
+				slot->lastUsedFrame = rhiRtBlurFrame;
+				const int age = rhiRtBlurFrame - slot->lastUpdateFrame;
+				const bool scheduled = ( ( rhiRtBlurFrame + lightIndex ) % interval ) == 0;
+				const bool reusable = slot->lastUpdateFrame != 0 && age < interval && slot->poseTok == tok && !scheduled;
+				if ( reusable ) {
+					rhiRtBlurLastStale = true;
+					memcpy( rhiRtBlurLastViewProj, slot->viewProj, sizeof( rhiRtBlurLastViewProj ) );
+					return r->GetRenderTargetImage( slot->maskRT );
+				}
+				slot->poseTok = tok;
+			}
+		}
 	}
 	const int blurTaps = 24;		// = K in rtshadow_blur.frag = HW_MAX in rtshadow_tiles.frag: the widest half-width, pixels
 
@@ -6112,8 +6243,15 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		const int py1 = ( pass == 0 ) ? hy1 : vy1, py2 = ( pass == 0 ) ? hy2 : vy2;
 		bp.localParam0[0] = ( pass == 0 ) ? 1.0f : 0.0f;		// axis
 		bp.localParam0[1] = ( pass == 0 ) ? 0.0f : 1.0f;
-		r->SetNextTargetPassArea( vx1, py1, vx2 - vx1 + 1, py2 - py1 + 1 );
-		r->BeginTargetPass( ( pass == 0 ) ? rhiRtBlurPingRT : rhiRtBlurMaskRT, &clearLit );
+		// a staggered light's final pass goes into ITS mask, cleared WHOLE (no area): outside this
+		// frame's rect it must read "lit, view distance 1" = no valid data, never an older frame's
+		// leftovers - a later frame may reproject anywhere onto it
+		const bool intoSlot = ( pass == 1 && slot != NULL );
+		bp.localParam0[2] = intoSlot ? 1.0f : 0.0f;			// pack the view distance into GB
+		if ( !intoSlot ) {
+			r->SetNextTargetPassArea( vx1, py1, vx2 - vx1 + 1, py2 - py1 + 1 );
+		}
+		r->BeginTargetPass( ( pass == 0 ) ? rhiRtBlurPingRT : ( intoSlot ? slot->maskRT : rhiRtBlurMaskRT ), &clearLit );
 		r->SetScissor( vx1, py1, vx2 - vx1 + 1, py2 - py1 + 1 );
 		RB_RHI_BindRTUnit( r, 1, rhiRtBlurTileRT[1] );
 		RB_RHI_DrawFullscreen( r, rhiRtBlur.blurProg, bp,
@@ -6125,6 +6263,11 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	// later draw that doesn't rebind unit 1 must not carry an attachment along
 	RB_RHI_BindRTImage( r, 1, 0 );
 	backEnd.currentScissor = viewDef->scissor;	// the loop re-applies the light's scissor right after
+	if ( slot != NULL ) {
+		slot->lastUpdateFrame = rhiRtBlurFrame;
+		memcpy( slot->viewProj, rhiRtBlur.viewProj, sizeof( slot->viewProj ) );
+		return r->GetRenderTargetImage( slot->maskRT );
+	}
 	return r->GetRenderTargetImage( rhiRtBlurMaskRT );
 }
 
@@ -6858,6 +7001,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			ictx.lightRtPoint = false;
 			ictx.lightRtBlur = false;
 			ictx.shadowMaskImage = 0;
+			ictx.shadowMaskStale = false;
 			ictx.shadowImage = 0;
 			ictx.lightShadowCube = false;
 			ictx.shadowCubeImage = 0;
@@ -7019,6 +7163,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			if ( rhiRtBlurThisView && ( ictx.lightRtOnly || ictx.lightRtPoint ) ) {
 				ictx.shadowMaskImage = RB_RHI_RtShadowBlurLight( r, viewDef, vLight );
 				ictx.lightRtBlur = ictx.shadowMaskImage != 0;
+				ictx.shadowMaskStale = ictx.lightRtBlur && rhiRtBlurLastStale;
+				if ( ictx.shadowMaskStale ) {
+					memcpy( ictx.shadowMaskViewProj, rhiRtBlurLastViewProj, sizeof( ictx.shadowMaskViewProj ) );
+				}
 			}
 
 			const bool shadowMapped = ictx.lightShadowMapped || ictx.lightShadowCube || ictx.lightRtPoint;

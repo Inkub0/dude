@@ -23,6 +23,7 @@
 // their whole kernel, while anything off that plane (another object, a silhouette) drops out.
 //
 //   u_localParam0.xy = pass axis, (1,0) or (0,1)
+//   u_localParam0.z  = 1: final pass into a reusable RGBA8 mask (see main)
 #include "renderparms.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_src;
@@ -44,7 +45,7 @@ vec4 fetchTap( ivec2 q, ivec2 hi ) {
 	return ( q.x < 0 || q.y < 0 || q.x > hi.x || q.y > hi.y ) ? vec4( 1.0, 0.0, 0.0, 0.0 ) : texelFetch( u_src, q, 0 );
 }
 
-void main() {
+void blurMain() {
 	ivec2 ip = ivec2( gl_FragCoord.xy );
 	vec4  c  = texelFetch( u_src, ip, 0 );
 	// pass-through: visibility as is, the other axis' half-width moves into G for pass 2
@@ -113,5 +114,18 @@ void main() {
 	}
 	if ( vW > 1e-4 ) {
 		fragColor.r = vSum / vW;
+	}
+}
+
+// r_rtShadowBlurStagger: a mask that will be REUSED on later frames also carries the view distance
+// it was made for, so a later frame can tell whether the texel it reprojects onto really was this
+// surface (interaction.frag mode 6). RGBA8 target: R = visibility, GB = log2( d ) / 16 in 16 bits.
+//   u_localParam0.z = 1: final (vertical) pass into such a mask
+void main() {
+	blurMain();
+	if ( u_localParam0.z > 0.5 ) {
+		float v  = clamp( log2( max( fragColor.b, 1.0 ) ) / 16.0, 0.0, 1.0 ) * 65535.0;
+		float hi = floor( v / 256.0 );
+		fragColor = vec4( fragColor.r, hi / 255.0, ( v - hi * 256.0 ) / 255.0, 0.0 );
 	}
 }

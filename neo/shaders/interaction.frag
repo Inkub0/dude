@@ -59,6 +59,8 @@ layout(location = 0) out vec4 fragColor;
 //   4 = RT hard shadow (interaction_rt variant only): one inline ray at the light
 //   5 = blurred RT shadow (Vulkan, r_rtShadowBlur): the same ray, pre-traced per screen
 //       pixel and blurred - a mask lookup on unit 13; u_shadowParms.yz = 1/viewSize
+//   6 = the same from a mask made on an EARLIER frame (r_rtShadowBlurStagger, interaction_rt
+//       variant only): reprojected lookup, inline hard ray where the mask can't answer
 // Every tap is a hardware depth-compare (2x2 bilinear PCF in the TMU); the multi-tap
 // kernels below only decide WHERE those taps land.
 //
@@ -122,7 +124,7 @@ float shadowVisibility() {
 		return 1.0;
 	}
 #if defined(VULKAN)
-	if ( u_shadowParms.x > 4.5 ) {
+	if ( u_shadowParms.x > 4.5 && u_shadowParms.x < 5.5 ) {
 		// DUDE RT shadow blur (mode 5): the same hard ray mode 4 traces inline was traced for
 		// every screen pixel of this light and blurred in screen space. Opaque surfaces draw
 		// depth-EQUAL, so this fragment IS the pixel the mask was traced for.
@@ -131,7 +133,32 @@ float shadowVisibility() {
 	}
 #endif
 #if defined(VULKAN) && defined(DUDE_RT_SUN)
-	if ( u_shadowParms.x > 3.5 ) {
+	bool traceInline = u_shadowParms.x > 3.5 && u_shadowParms.x < 4.5;
+	if ( u_shadowParms.x > 5.5 ) {
+		// DUDE RT shadow blur, STALE mask (mode 6, r_rtShadowBlurStagger): this light's mask was
+		// made on an earlier frame. It is a screen-space image of THAT frame, so it is looked up
+		// where this surface point was on screen then: world position -> that frame's clip space
+		// (u_prevMvpMatrix = its world-to-clip, jitter included) -> its pixel. The mask carries the
+		// view distance it was traced for (GB, log2 in 16 bits): if the texel belongs to another
+		// surface - this point was hidden, off screen, or outside the light's rect back then - the
+		// mask can't answer, and this fragment traces the hard ray instead for this one frame.
+		traceInline = true;
+		vec4 smp = vec4( var_ModelPos, 1.0 );
+		vec3 swp = vec3( dot( u_modelMatrixRow0, smp ), dot( u_modelMatrixRow1, smp ), dot( u_modelMatrixRow2, smp ) );
+		vec4 pc  = u_prevMvpMatrix * vec4( swp, 1.0 );
+		if ( pc.w > 1.0 ) {
+			vec2 ndc = pc.xy / pc.w;
+			if ( abs( ndc.x ) < 1.0 && abs( ndc.y ) < 1.0 ) {
+				vec2  uv = vec2( ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5 );		// the mask is stored top-down
+				vec4  mn = texelFetch( u_shadowMask, ivec2( uv * vec2( textureSize( u_shadowMask, 0 ) ) ), 0 );
+				float dThen = exp2( ( mn.g * 255.0 * 256.0 + mn.b * 255.0 ) * ( 16.0 / 65535.0 ) );
+				if ( abs( dThen - pc.w ) < 0.03 * pc.w + 1.0 ) {
+					return texture( u_shadowMask, uv ).r;
+				}
+			}
+		}
+	}
+	if ( traceInline ) {
 		// DUDE RT sun shadows (mode 4, docs/rtx-shadow-roadmap.md R3): trace one ray at the
 		// sun through the persistent world scene instead of sampling the fitted sun map -
 		// pixel-exact at any distance, no r_shadowMapSunRange cap, no map-resolution aliasing.

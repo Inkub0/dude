@@ -159,9 +159,45 @@ so the tile classification reads exactly what the rays wrote.
 Status: builds. **NOT runtime-tested**; cost unmeasured - needs the user's `r_vkGpuTime` with
 All Lights on, blur off vs on, in a light-dense room.
 
+**Measured by the user (Mars City, busy scene, 1440p, 3080 Ti):** baseline 10.05 ms; All Lights
+hard **10.30 ms (+0.25)** - the rays themselves are nearly free once no shadow map renders; All
+Lights + blur **15.50 ms (+5.2)** - the blur's per-light screen passes are the whole cost.
+
+## Staggered refresh - `r_rtShadowBlurStagger` (2026-09-18, gated, opt-in)
+
+The user ruled out capping the number of blurred lights (a light flipping between blurred and
+hard would show) and asked instead for distance tiers: **closest shadows every frame, distant ones
+every 2nd, very far ones every 3rd.**
+
+- **Tier** = distance from the viewer to the light's VOLUME (`frustumTris` bounds; 0 inside it):
+  `< r_rtShadowBlurStaggerNear` (256) every frame, `< r_rtShadowBlurStaggerFar` (768) every 2nd,
+  beyond every 3rd. The refresh frame is offset by the light's index so refreshes spread out
+  instead of spiking one frame in two.
+- **State.** The shared targets can't outlive a frame, so a staggered light owns a slot: a
+  view-sized **RGBA8 mask** (R = visibility, GB = log2 of the view distance it was traced for, 16
+  bits), the world-to-clip matrix (jitter included) of the frame that made it, and a pose hash.
+  ~15 MB per staggered light at 1440p; up to 64 slots, freed after 300 idle frames, on resize, or
+  when the option goes off. A light that moved or changed size never reuses its mask.
+- **Reuse is reprojected, not screen-locked** (the abandoned branch's staggering reused the mask
+  at the same screen position and visibly lagged under camera motion - the user rejected it within
+  the hour). Interaction **mode 6** (`interaction_rt` variant): world position -> the mask frame's
+  clip space -> its texel; if the stored view distance doesn't match this point's distance in that
+  frame (hidden then, off screen then, outside the light's rect then, or a receiver that moved),
+  the fragment **traces the inline hard ray** for that frame. A staggered mask is cleared whole on
+  refresh so unwritten texels read "distance 1" = never valid.
+- **What it cannot fix:** shadows of MOVING casters under a staggered light update at the light's
+  reduced rate (one or two frames late, alternating with exact frames); fallback pixels are
+  hard-edged for a frame. Both are confined to lights beyond `StaggerNear`.
+- **Expected saving - limited by design:** the expensive lights are the ones whose volume contains
+  the viewer (full-screen rects), and those are distance 0 = every frame. `StaggerNear 0` staggers
+  them too.
+- Menu: Graphics -> Shadows -> Ray Tracing -> "Refresh Distant Soft Shadows Less Often"; the two
+  distances in Debugging -> RT Shadows. Builds; **NOT runtime-tested.**
+
 ## Cvars
 
 - `r_rtAllLights` (0): ray-trace every shadow-casting light (see above).
+- `r_rtShadowBlurStagger` (0) / `r_rtShadowBlurStaggerNear` (256) / `r_rtShadowBlurStaggerFar` (768): see above.
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
 - `r_rtShadowBlurIntensity` (1.5, 0..4; Debugging -> RT Shadows -> "Blur Intensity"): scales the blur width. Replaced
   the "Light Size" / sun-angle pair (user, 2026-09-18: with the emitter model gone a "light size"
