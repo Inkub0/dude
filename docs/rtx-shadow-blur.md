@@ -163,7 +163,7 @@ All Lights on, blur off vs on, in a light-dense room.
 hard **10.30 ms (+0.25)** - the rays themselves are nearly free once no shadow map renders; All
 Lights + blur **15.50 ms (+5.2)** - the blur's per-light screen passes are the whole cost.
 
-## Staggered refresh - `r_rtShadowBlurStagger` (2026-09-18, gated, opt-in)
+## Staggered refresh - `r_rtShadowBlurStagger` (2026-09-18; on in the Ultra Nightmare preset)
 
 The user ruled out capping the number of blurred lights (a light flipping between blurred and
 hard would show) and asked instead for distance tiers: **closest shadows every frame, distant ones
@@ -203,7 +203,7 @@ every 2nd, very far ones every 3rd.**
 ## Cvars
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every
-  shadow-casting light (see above). `r_rtShadowBlurStagger` is NOT preset-owned - manual opt-in.
+  shadow-casting light (see above). `r_rtShadowBlurStagger` is on there too (the preset owns the on/off, not the two distances).
 - `r_rtShadowBlurStagger` (0; 1 = on, 2 = on + readout) / `r_rtShadowBlurStaggerNear` (192) / `r_rtShadowBlurStaggerFar` (380): see above.
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
 - `r_rtShadowBlurIntensity` (1.5, 0..4; Debugging -> RT Shadows -> "Blur Intensity"): scales the blur width. Replaced

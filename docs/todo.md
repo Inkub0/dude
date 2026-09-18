@@ -66,6 +66,7 @@ Design decisions taken:
 | RT ambient occlusion (r_rtao) | — | — | — | — | — | on (RTX) |
 | RT shadows for all lights (r_rtAllLights) | — | — | — | — | — | on (RTX) |
 | RT shadow blur (r_rtShadowBlur) | — | — | — | — | — | on (RTX) |
+| RT shadow blur staggered refresh (r_rtShadowBlurStagger) | — | — | — | — | — | on (RTX) |
 | reflection scale | 1.0 | 1.0 | 0.7 | 0.7 | 0.7 | 0.7 |
 
 (Potato/Low carry the cheap Medium SSAO/shadow sub-params under the off toggles so a
