@@ -98,16 +98,6 @@ numbers, so the gain is visible as "blurred rects cover X screens (light scissor
 near Y in a scene, that light really does shade the whole screen and ~1.2 ms per full-screen light
 at 1440p is this design's floor (one ray pass, tile pass, two blur passes, three target clears).
 
-**Result at Kelly's window:** blurred rects still 2.00 screens (scissors 2.00) - both lights
-genuinely shade the whole view (the room's own surfaces cross the near plane, so their bounds can't
-tighten anything); 94 views/s = ~10.6 ms, toll ~**+2.0 ms**. User's budget for this scene:
-**"less than 2 ms is ok to sacrifice for blurred shadows"** - so no half-res / fidelity trade.
-
-Perf pass 4 (image-neutral): unflagged tiles no longer pay for pass-through. The horizontal pass
-DISCARDS there after one tile fetch (ping is cleared to an "unwritten" marker, view distance -1);
-the vertical pass copies raw visibility from the ray target, and a tap landing on an unwritten ping
-texel reads the ray target instead - the exact value the pass-through used to write.
-
 ## Cvars
 
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
