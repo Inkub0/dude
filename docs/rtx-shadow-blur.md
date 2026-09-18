@@ -49,12 +49,38 @@ state. Translucent interactions and depth-hacked view weapons keep the inline mo
 mask describes the opaque depth buffer only). Needs the normal G-buffer prepass (SSAO / RTAO /
 motion vectors); without it, or on any failure, lights keep their hard ray.
 
+## Perf pass 1 (2026-09-18: user measured 8.6 -> 16.4 ms GPU with the blur on)
+
+Not profiled by me (the game is the user's to run); fixed by reading the first cut for work that
+could not affect the image:
+
+- **The sweep was always 33 taps**, in every flagged tile, although a tap further away than the
+  shadow's own half-width has zero weight - and typical half-widths are a few pixels. Tiles now
+  carry the widest half-width that can REACH them (`rtshadow_tiles` pass 2, G channel) and the blur
+  sweeps only that far (+1). Same output, usually 7-13 taps instead of 33.
+- **Tiles were flagged in a blanket 5x5 (40 px) around any shadow**, so in a room full of shadow
+  edges most of the screen ran the sweep. A neighbour n tiles away now only counts if its
+  half-width spans the (n-1)*8 px gap, and a tile is flagged only if a lit pixel lies within that
+  reach (a fully shadowed neighbourhood cannot change).
+- **`vec4 tap[33]`** (528 bytes per invocation) spilled to slow local memory. Removed: each loop
+  fetches its own taps (the second fetch is a texture-cache hit).
+- **Tile pass 1 read the whole screen per light** (64 texels x every tile): a fixed cost that made
+  a small moving light as expensive as a full-screen one. Scissored to the light's rect.
+
+Still per light and unavoidable in this design: the ray pass is closest-hit (mode 4 stops at the
+first hit), three view-sized target clears, and five render-pass switches.
+
+`r_rtShadowBlurDebug` splits what is left: **1** = rays only (tiles + blur skipped, hard mask) -
+`r_vkGpuTime` vs. 0 is the blur's cost, vs. `r_rtShadowBlur 0` the ray pass's; **2** = per-second
+readout of lights blurred per view and the screen area their rects add up to.
+
 ## Cvars
 
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
 - `r_rtShadowBlurLightSize` (3): light sphere radius in world units = the softness. Point lights
   scale it by `max(1, largest light_radius axis / 256)`.
 - `r_rtShadowBlurSunAngle` (1.0): angular radius of parallel suns, degrees.
+- `r_rtShadowBlurDebug` (0, not archived): 1 = rays only, 2 = lights/coverage readout (remove once the cost is settled).
 
 ## Limits
 

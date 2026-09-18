@@ -981,6 +981,7 @@ extern idCVar r_rtMovingLights;				// RT shadows for moving point lights: skip t
 extern idCVar r_rtShadowBlur;				// screen-space blur on top of the hard RT shadows (sun / moving lights), docs/rtx-shadow-blur.md
 extern idCVar r_rtShadowBlurLightSize;		// light sphere radius (world units) = the softness
 extern idCVar r_rtShadowBlurSunAngle;		// angular radius of parallel (sun) lights, degrees
+extern idCVar r_rtShadowBlurDebug;			// 1 = rays only (cost split), 2 = per-second lights/coverage readout
 extern idCVar r_rtTlasDirty;				// skip the per-frame TLAS rebuild when no mover/monster changed this frame
 extern idCVar r_rtSunShadowOffset;			// RT sun shadows: ray-origin normal offset (world units)
 extern idCVar r_rtMonsterShadows;			// RT sun shadows: include animated characters as per-frame casters
