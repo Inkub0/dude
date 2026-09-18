@@ -386,10 +386,11 @@ static float rhiSsaoJitterPhase = 0.0f;				// per-frame noise rotation (golden-r
 // r_rtShadowBlur (docs/rtx-shadow-blur.md): ONE set of view-sized targets shared by every
 // blurred light of a view - each light's mask is built inside the light loop right before its
 // interactions draw (the shadow maps share their target the same way), and nothing survives the
-// frame. Ray = RGBA16F visibility / half-widths / view distance, which the vertical blur pass
-// writes back into (its .r is the finished mask); Ping = the horizontal pass; Tile = the 8x8
-// edge classification (raw, then dilated).
-static rhi::RenderTargetHandle rhiRtBlurRayRT = 0, rhiRtBlurPingRT = 0, rhiRtBlurTileRT[2] = { 0, 0 };
+// frame. Ray = RGBA16F visibility / half-widths / view distance; Ping = the horizontal pass;
+// Mask = the vertical pass = the finished visibility, single-channel R16F because every lit
+// fragment of the light samples it (a quarter of the bytes of the RGBA16F working targets);
+// Tile = the 8x8 edge classification (raw, then reach).
+static rhi::RenderTargetHandle rhiRtBlurRayRT = 0, rhiRtBlurPingRT = 0, rhiRtBlurMaskRT = 0, rhiRtBlurTileRT[2] = { 0, 0 };
 static int   rhiRtBlurW = 0, rhiRtBlurH = 0;
 static bool  rhiRtBlurThisView = false;
 static struct {
@@ -3255,7 +3256,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistIdx = 0;			rhiSsaoHistW = rhiSsaoHistH = 0;
 	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
-	rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;
+	rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurMaskRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;
 	rhiRtBlurW = rhiRtBlurH = 0;	rhiRtBlurThisView = false;
 	rhiRtaoRanThisView = false;
 	rhiRtaoViewzRT = 0;			rhiRtaoPackRT = 0;		rhiRtaoResolveRT = 0;
@@ -5911,11 +5912,12 @@ static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
 	if ( rhiRtBlurRayRT && r->GetRenderTargetImage( rhiRtBlurRayRT ) == 0 ) {
-		rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;	// lost context
+		rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurMaskRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;	// lost context
 	}
 	if ( w != rhiRtBlurW || h != rhiRtBlurH ) {
 		if ( rhiRtBlurRayRT )     { r->DestroyRenderTarget( rhiRtBlurRayRT );     rhiRtBlurRayRT = 0; }
 		if ( rhiRtBlurPingRT )    { r->DestroyRenderTarget( rhiRtBlurPingRT );    rhiRtBlurPingRT = 0; }
+		if ( rhiRtBlurMaskRT )    { r->DestroyRenderTarget( rhiRtBlurMaskRT );    rhiRtBlurMaskRT = 0; }
 		if ( rhiRtBlurTileRT[0] ) { r->DestroyRenderTarget( rhiRtBlurTileRT[0] ); rhiRtBlurTileRT[0] = 0; }
 		if ( rhiRtBlurTileRT[1] ) { r->DestroyRenderTarget( rhiRtBlurTileRT[1] ); rhiRtBlurTileRT[1] = 0; }
 		rhiRtBlurW = w;
@@ -5924,9 +5926,10 @@ static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int tw = ( w + 7 ) / 8, th = ( h + 7 ) / 8;
 	if ( !rhiRtBlurRayRT )     { rhiRtBlurRayRT     = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, 1 ); }
 	if ( !rhiRtBlurPingRT )    { rhiRtBlurPingRT    = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, 1 ); }
+	if ( !rhiRtBlurMaskRT )    { rhiRtBlurMaskRT    = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, 1 ); }
 	if ( !rhiRtBlurTileRT[0] ) { rhiRtBlurTileRT[0] = r->CreateRenderTargetMipped( rhi::IF_RGBA8, tw, th, 1 ); }
 	if ( !rhiRtBlurTileRT[1] ) { rhiRtBlurTileRT[1] = r->CreateRenderTargetMipped( rhi::IF_RGBA8, tw, th, 1 ); }
-	rhiRtBlurThisView = rhiRtBlurRayRT && rhiRtBlurPingRT && rhiRtBlurTileRT[0] && rhiRtBlurTileRT[1];
+	rhiRtBlurThisView = rhiRtBlurRayRT && rhiRtBlurPingRT && rhiRtBlurMaskRT && rhiRtBlurTileRT[0] && rhiRtBlurTileRT[1];
 
 	// r_rtShadowBlurDebug 2: what the feature is being asked to do, once per second - how many
 	// lights it blurs per view and how much of the screen their rects add up to (1.0 = one
@@ -5993,6 +5996,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	parms.localParam1[0] = (float)blurTaps;
 	parms.localParam1[1] = proj[8];		// the projection's shear terms = this frame's FSR2 jitter
 	parms.localParam1[2] = proj[9];
+	parms.localParam1[3] = ( r_rtShadowBlurDebug.GetInteger() == 3 ) ? 1.0f : 0.0f;	// cost split: first-hit rays
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
@@ -6056,7 +6060,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		const int padY = ( pass == 0 ) ? wide : tight;
 		bp.localParam0[0] = ( pass == 0 ) ? 1.0f : 0.0f;		// axis
 		bp.localParam0[1] = ( pass == 0 ) ? 0.0f : 1.0f;
-		r->BeginTargetPass( ( pass == 0 ) ? rhiRtBlurPingRT : rhiRtBlurRayRT, &clearLit );
+		r->BeginTargetPass( ( pass == 0 ) ? rhiRtBlurPingRT : rhiRtBlurMaskRT, &clearLit );
 		r->SetScissor( Max( 0, lr.x1 - tight ), Max( 0, lr.y1 - padY ),
 		               Min( w - 1, lr.x2 + tight ) - Max( 0, lr.x1 - tight ) + 1,
 		               Min( h - 1, lr.y2 + padY ) - Max( 0, lr.y1 - padY ) + 1 );
@@ -6067,7 +6071,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	}
 
 	backEnd.currentScissor = viewDef->scissor;	// the loop re-applies the light's scissor right after
-	return r->GetRenderTargetImage( rhiRtBlurRayRT );
+	return r->GetRenderTargetImage( rhiRtBlurMaskRT );
 }
 
 /*
