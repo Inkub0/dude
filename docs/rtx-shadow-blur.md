@@ -170,7 +170,7 @@ hard would show) and asked instead for distance tiers: **closest shadows every f
 every 2nd, very far ones every 3rd.**
 
 - **Tier** = distance from the viewer to the light's ORIGIN (parallel suns: always every frame):
-  `< r_rtShadowBlurStaggerNear` (320) every frame, `< r_rtShadowBlurStaggerFar` (800) every 2nd,
+  `< r_rtShadowBlurStaggerNear` (192) every frame, `< r_rtShadowBlurStaggerFar` (380) every 2nd,
   beyond every 3rd. *The first cut measured to the light's VOLUME - 0 for every light the viewer
   stands inside, which indoors is nearly all of them: the user measured no saving at all (10.10 ->
   15.7 ms), because nothing was ever staggered.* `r_rtShadowBlurStagger 2` prints lights per tier
@@ -194,13 +194,16 @@ every 2nd, very far ones every 3rd.**
 - **Saving** scales with how much of the blurred screen area sits beyond `StaggerNear`: a light
   rendered every 2nd frame costs half, every 3rd a third. Both distances at 0 = everything at a
   third of the rate (the floor: ~1/3 of the blur's cost).
-- Menu: Graphics -> Shadows -> Ray Tracing -> "Refresh Distant Soft Shadows Less Often" with the two
-  distance sliders ("Half Rate Beyond", "Third Rate Beyond") right under it. Builds; **NOT runtime-tested.**
+- Menu: Graphics -> Shadows -> Ray Tracing -> "Refresh Distant Soft Shadows Less Often"; the two
+  distance sliders ("Half Rate Beyond", "Third Rate Beyond") live in Debugging -> RT Shadows.
+- **Measured by the user (same busy Mars City scene):** blur without staggering 15.60 ms, with it
+  **12.80 ms (-2.8 ms, about half the blur's cost)**, *"I don't see evident change in perceived
+  shadows"*. Their tuned distances, 192 / 380, are the defaults. **User-tested 2026-09-18.**
 
 ## Cvars
 
 - `r_rtAllLights` (0): ray-trace every shadow-casting light (see above).
-- `r_rtShadowBlurStagger` (0; 1 = on, 2 = on + readout) / `r_rtShadowBlurStaggerNear` (320) / `r_rtShadowBlurStaggerFar` (800): see above.
+- `r_rtShadowBlurStagger` (0; 1 = on, 2 = on + readout) / `r_rtShadowBlurStaggerNear` (192) / `r_rtShadowBlurStaggerFar` (380): see above.
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
 - `r_rtShadowBlurIntensity` (1.5, 0..4; Debugging -> RT Shadows -> "Blur Intensity"): scales the blur width. Replaced
   the "Light Size" / sun-angle pair (user, 2026-09-18: with the emitter model gone a "light size"
