@@ -899,6 +899,11 @@ if(DHEWM3_VULKAN)
 		target_compile_options(nrd PRIVATE -mssse3 -fPIC -fvisibility=hidden
 			-Wno-missing-field-initializers)
 	endif()
+	if(MINGW)
+		# MinGW exposes only C's int abs(int) globally in these TUs: NRD's HLSL-style
+		# `abs( float )` would truncate (and one call fails to compile). See the header.
+		target_compile_options(nrd PRIVATE -include "${CMAKE_SOURCE_DIR}/libs/nrd/dude_mingw_abs.h")
+	endif()
 endif()
 
 always_optimize_sourcefile(renderer/stblib_impls.c)
