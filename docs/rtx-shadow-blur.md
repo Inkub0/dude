@@ -200,6 +200,28 @@ every 2nd, very far ones every 3rd.**
   **12.80 ms (-2.8 ms, about half the blur's cost)**, *"I don't see evident change in perceived
   shadows"*. Their tuned distances, 192 / 380, are the defaults. **User-tested 2026-09-18.**
 
+## Cinematics: shadows vanish / stray soft patches (2026-09-18) - hard-coded depth constants
+
+User, intro CINEMATIC: with the blur on, characters lose real shadows (the marine's chin shadow)
+and gain soft patches that don't belong; paused on another frame the blur removed the shadows
+outright, and the staggered refresh made them FLICKER. The inline hard ray was right throughout.
+
+The flicker was the clue: a staggered light alternates between its mask and - where the mask's
+stored view distance doesn't validate - the inline fallback ray. Shadows appearing every other
+frame meant the fallback was firing, i.e. the mask's view distance was wrong for those pixels.
+It was wrong for ALL pixels: `rtshadow_ray` turned window depth into view distance with the
+constants `(0.33333333, -0.33316667)`, which encode `r_znear = 3`. **Cinematics set
+`renderView.cramZNear`, which quarters the near plane** (tr_main.cpp), so every reconstructed
+point landed 4x too far along its view ray - rays started somewhere behind the scene, most failed
+the light-volume test ("lit" = shadows gone), the rest hit unrelated geometry (soft patches).
+Fix: the pair now comes from the view's own projection, `1/vz = raw * (-2/P14) + (1 - P10)/P14`
+(`u_depthTexRecip.zw`); the far-distance depth-quantization bias scales with it.
+A first guess - the ray-origin offset following the G-buffer bump normal instead of a geometric
+one - changed nothing and was reverted.
+
+The same hard-coded pair lives in every other depth-reading shader (SSAO, RTAO, SSR, soft
+particles, ...): they are all off by 4x in cinematics too. Not touched here.
+
 ## Cvars
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every

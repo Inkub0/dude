@@ -6174,6 +6174,17 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
 	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
+	// window depth -> 1 / view z from THIS view's projection: z_ndc = -P10 - P14 / vz and
+	// raw = ( z_ndc + 1 ) / 2  =>  1/vz = raw * ( -2 / P14 ) + ( 1 - P10 ) / P14. In play that is
+	// the familiar ( 0.3333, -0.33317 ); cinematics cram the near plane to a quarter
+	// (renderView.cramZNear) and a hard-coded pair rebuilt every point 4x too far away.
+	if ( proj[14] != 0.0f ) {
+		parms.depthTexRecip[2] = -2.0f / proj[14];
+		parms.depthTexRecip[3] = ( 1.0f - proj[10] ) / proj[14];
+	} else {
+		parms.depthTexRecip[2] = 0.33333333f;
+		parms.depthTexRecip[3] = -0.33316667f;
+	}
 
 	// "lit, nothing to spread, never traced": what the big targets clear to (color targets
 	// always clear on begin) and what the tile + blur passes skip
