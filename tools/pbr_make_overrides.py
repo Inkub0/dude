@@ -193,7 +193,7 @@ MATERIALS_HEADER = """\
 # pbr/pbr_overrides.cfg loads on top and wins on collision. This is the shippable
 # base config — running pbr_classify.py again regenerates a fresh classifier
 # baseline and DISCARDS the hand-tuning below, so fold overrides in instead:
-#   tools/pbr_make_overrides.py --bake --table <this file> --out <overrides> ...
+#   python3 tools/pbr_bake_inplace.py      (in place; keeps the @cat rows)
 #
 # Columns: <material> <metalness> <roughness> <category> <wetness> <env>
 # '*' = inherit (slider-driven categories track their live cvar); explicit numbers
@@ -207,7 +207,7 @@ OVERRIDES_EMPTY_HEADER = """\
 # game-specific or experimental per-material tweaks. The in-game editor
 # (editPbrMaterial) writes here. Empty by default: the base tuning lives in
 # pbr_materials.cfg. Fold accumulated edits back down with:
-#   tools/pbr_make_overrides.py --bake --table <materials> --out <this file> ...
+#   python3 tools/pbr_bake_inplace.py
 #
 # Columns: <material> <metalness> <roughness> <category> <wetness> <env>; '*' = inherit.
 """
@@ -252,6 +252,16 @@ def main():
     args = ap.parse_args()
 
     merge_path = args.merge if args.merge is not None else args.out
+
+    # --bake regenerates the table from parse_file(), which predates the "@cat <name> m r w e"
+    # category-default rows and reads them as ONE material named "@cat" - the block would be lost
+    if args.bake:
+        for path in (args.table, merge_path):
+            if path and os.path.exists(path):
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    if any(line.split("#")[0].split()[:1] == ["@cat"] for line in fh):
+                        sys.exit("pbr_make_overrides: %s has @cat category rows, which --bake would "
+                                 "corrupt; use tools/pbr_bake_inplace.py instead" % path)
 
     merged = parse_file(args.table)
     for key, e in parse_file(merge_path).items():

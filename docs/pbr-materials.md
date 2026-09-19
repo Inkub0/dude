@@ -258,7 +258,23 @@ game (the base tuning lives in `pbr_materials.cfg`). Re-running `pbr_classify.py
 overwrites `pbr_materials.cfg` with a fresh baseline and **discards** the baked
 tuning, so the workflow is: bootstrap once → tune in-game (writes overrides) →
 **bake** the overrides down into `pbr_materials.cfg` and reset the override to
-empty (`tools/pbr_make_overrides.py --bake`).
+empty:
+
+```
+python3 tools/pbr_bake_inplace.py --dry-run     # what would change
+python3 tools/pbr_bake_inplace.py --reset       # bake, verify, reset the dude-folder override file
+git commit base/pbr/pbr_materials.cfg -m "pbr: bake the live material overrides of <date> into pbr_materials.cfg"
+```
+
+`pbr_bake_inplace.py` edits the table **in place** — an overridden material's row is replaced
+where it stands (tagged `# baked from live overrides <date>`), new materials are appended in a
+dated section, `@cat` category-default rows are updated in the head block — so the diff *is*
+the edit. Nothing is written unless the result is **runtime-identical**: table + overrides and
+the baked table alone must parse to the same values under the engine's rules (later row wins,
+an override row replaces the whole entry). By default it reads the override file the editor
+actually writes, in the dude folder (`~/.local/share/dude/base/pbr/pbr_overrides.cfg`), which
+shadows the tracked stub. Don't use `pbr_make_overrides.py --bake` for this: it regenerates and
+reformats the whole table and predates the `@cat` rows (it refuses to run when it sees them).
 
 **RoE / mods — one common config, DRY (option 2).** Only `base/` is the shipped
 config, and a mod's file search falls back to `base/`, so **RoE keeps no
