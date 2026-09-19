@@ -313,6 +313,55 @@ this lands. Full context: memory [[gpu-skinning-monster-invuln-bug]].
 
 ---
 
+## Decals: reflections on wet blood, wet wounds on characters  **[parked 2026-09-19 — nice to have]**
+
+The decal work of 2026-09-19 is closed and shipped on master (see
+[readme-changes.md](readme-changes.md) 1.5–1.7: decal sheen control, the decal surface mask,
+the wet blood film — user-verified on stock and texture-pack blood). Two follow-ups were
+deliberately left out; neither is scheduled.
+
+**1. Reflections on wet blood.** The film is *direct light only*: each blood decal is drawn
+once more per overlapping light through the regular interaction path, so every glint is the
+highlight of a real light source. Screen-space and RT reflections never see it. They work
+from the opaque prepass's per-pixel data — depth, the normal G-buffer, the rough/metal buffer —
+and a blood decal is a translucent overlay that writes none of it, so to the reflection pass a
+pixel under blood is *the wall*. Worse, the decal surface mask treats blood like dirt for the
+surface underneath (rougher, non-metal), so on a polished floor the reflection **fades out**
+under a pool: glints from lights, but no mirror image of the room or a monster.
+
+- *What it takes:* a small "decal G-buffer" pass after the opaque prepass that writes the
+  film's **own** surface into those targets at blood texels, coverage-weighted: the relief
+  normal (`RB_RHI_BloodRelief`, rotated tangent → view space) and a low roughness. Reflections
+  composite at the translucent split, *after* the decals are down (`RhiBackend.cpp`, the
+  `GetSort() > SS_DECAL` break in the shader-pass loop), so a reflection on blood lands on top
+  of it at full brightness — no transmittance compensation needed, unlike the film's glint.
+- *The trap, already hit once:* lowering roughness **without** replacing the normal makes RT
+  reflections march the wall's bumped normal and draws its grooves across the splat
+  (readme-changes 1.7, "Dead end"). Normal first, roughness second — or not at all.
+- *Worth it?* Medium work, about the size of the decal mask pass. In Doom 3's dark rooms the
+  light glints carry the wet look; mirror reflections would show mainly on large floor pools
+  near something bright. The texture packs' cube-map stage (a generic environment texture, not
+  the scene) already fakes it on map-placed blood, under `r_decalBloodSheen`.
+
+**2. Wet wounds on characters.** Blood wounds on bodies are overlays
+(`idRenderModelOverlay`), and the film skips them. Less is missing than it looks:
+
+- overlay vertices already carry the base mesh's normal and tangents (`ModelOverlay.cpp`, added
+  for the tessellation work) — they just never set `tri->tangentsCalculated`, which is the
+  film's geometry gate. The tangents follow the *skin's* UVs rather than the wound's
+  projection; for an isotropic relief nobody can tell.
+- the wound materials are not "blood" to `R_DecalIsBlood`: `textures/decals/hurt02` & co.
+  (`mtr_wound_flesh`) have neither the `blood` flag nor a blood-like name. They are filter
+  blends, which the film already handles (mode 2). Needs an explicit list, or a flesh-wound rule.
+- on tessellated characters the blend pass tessellates the overlay so it follows the displaced
+  mesh, and the film refuses surfaces whose blend pass tessellates. The film draw would have to
+  tessellate identically — the interaction shader has a tess variant, so it is plumbing
+  (`pd.tessellate` + `RB_RHI_SetTessParms` in the film path), not new shaders.
+- then judge the look: a wound is small and sits on skin that already has a wet PBR category
+  (`skin`, wetness 2.0), so the gain may be slight.
+
+---
+
 ## Codebase independence  **[planned]**
 
 A small phase to break free from third-party content and stale identity so a clean
