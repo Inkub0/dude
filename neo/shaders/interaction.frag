@@ -9,6 +9,7 @@
 #endif
 
 #include "renderparms.glsl"
+#include "decalsurface.glsl"
 
 SAMPLER_BINDING(0) uniform samplerCube u_normalCubeMap; // normalization cube map
 SAMPLER_BINDING(1) uniform sampler2D u_bumpMap;
@@ -29,6 +30,10 @@ SAMPLER_BINDING(12) uniform samplerCubeShadow u_shadowCubeDyn; // DUDE static/dy
 // the GL3 program never declares the sampler, so its unit table is untouched. Sampling a mask
 // needs no ray-query capability, so mode 5 lives in the base shader.
 SAMPLER_BINDING(13) uniform sampler2D u_shadowMask;
+// DUDE decal surface mask: screen-space retention of the surface's PBR response under overlay
+// decals (decalsurface.glsl), view-sized, written by decalmask.frag before the light loop. Read
+// only when u_pbrParms.z > 1.5.
+SAMPLER_BINDING(14) uniform sampler2D u_decalMask;
 #endif
 
 VARY(0) in vec3 var_TexLightVec;
@@ -393,7 +398,16 @@ void main() {
 		float NdotH = max( dot( N, H ), 0.0 );
 		float VdotH = max( dot( V, H ), 0.0 );
 
-		float rough = clamp( u_pbrParms.y, 0.03, 1.0 );
+		// dirt on metal is not metal, and it is not polished either: a decal's coverage strips
+		// the metalness under it and roughens the lobe, so the stain stops mirroring the light the
+		// clean plate around it still does
+		float rough = u_pbrParms.y;
+		float metal = u_pbrParms.x;
+		if ( u_pbrParms.z > 1.5 ) {
+			vec3 keep = texture( u_decalMask, gl_FragCoord.xy / vec2( textureSize( u_decalMask, 0 ) ) ).rgb;
+			dudeDecalSurface( keep, rough, metal );
+		}
+		rough = clamp( rough, 0.03, 1.0 );
 		float alpha = rough * rough;
 		// Toksvig widening with a calibrated baseline (in-game A/B, 2026-07-30):
 		// on stock DXT5nm assets the normal-length variance carries a codec-noise
@@ -411,7 +425,6 @@ void main() {
 		float variance = max( ( 1.0 - nLen ) / nLen - u_localParam1.z, 0.0 );
 		float alpha2 = min( alpha * alpha + variance, 1.0 );
 
-		float metal = u_pbrParms.x;
 		vec3 F0 = mix( vec3( 0.04 ), diffuse.rgb, metal );
 		vec3 F = F0 + ( 1.0 - F0 ) * pow( 1.0 - VdotH, 5.0 );
 		float d = NdotH * NdotH * ( alpha2 - 1.0 ) + 1.0;

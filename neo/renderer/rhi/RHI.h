@@ -122,6 +122,7 @@ struct DrawArgs {
 	ImageHandle		parallax;		// parallax height map; bound to unit 11 (0 = unbound)
 	ImageHandle		shadowCubeDyn;	// static/dynamic split (lever B): movers-only cube depth; bound to unit 12 (0 = unbound)
 	ImageHandle		shadowMask;		// r_rtShadowBlur: this light's blurred screen-space RT shadow mask; bound to unit 13 (0 = unbound, VK only)
+	ImageHandle		decalMask;		// r_decalMetalMask: screen-space metal retention under decals; bound to unit 14 (VK; GL3 raw-binds it. 0 = unbound -> white = untouched)
 };
 
 struct ClearArgs {

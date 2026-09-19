@@ -426,7 +426,7 @@ private:
 	static const int MAX_FRAME_SETS = 4096;			// per-draw texture sets per frame
 	// set-1 combined image samplers: units 0-7, shadow cube 8, SSAO 9, occlusion 10,
 	// parallax 11, dynamic shadow cube 12, blurred RT shadow mask 13 (r_rtShadowBlur)
-	static const int VK_TEX_BINDINGS = 14;
+	static const int VK_TEX_BINDINGS = 15;
 
 	struct RingBuf {
 		VkBuffer		buffer = VK_NULL_HANDLE;
@@ -11036,6 +11036,7 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 		mixKey( key, (uint32_t)args.parallax );
 		mixKey( key, (uint32_t)args.shadowCubeDyn );
 		mixKey( key, (uint32_t)args.shadowMask );
+		mixKey( key, (uint32_t)args.decalMask );
 		bool needsTexBind = true;
 		if ( boundTexSet != VK_NULL_HANDLE && boundTexKey == key ) {
 			texSet = boundTexSet;
@@ -11127,6 +11128,11 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 					} else if ( i == 13 && args.shadowMask >= 1 && args.shadowMask <= (ImageHandle)imageTable.size()
 					            && imageTable[args.shadowMask - 1].live ) {
 						const ImageRec &rec = imageTable[args.shadowMask - 1];	// blurred RT shadow mask (else white = lit)
+						sampler = rec.sampler;
+						view = rec.view;
+					} else if ( i == 14 && args.decalMask >= 1 && args.decalMask <= (ImageHandle)imageTable.size()
+					            && imageTable[args.decalMask - 1].live ) {
+						const ImageRec &rec = imageTable[args.decalMask - 1];	// decal metal retention (else white = untouched)
 						sampler = rec.sampler;
 						view = rec.view;
 					}

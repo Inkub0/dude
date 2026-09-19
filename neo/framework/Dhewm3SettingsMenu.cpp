@@ -4662,6 +4662,26 @@ static void DrawDbgGroup_Glass()
 	AddTooltip( "Dirt, stain and drip decals get no specular highlight and no cube reflection. "
 		"Off = as authored by the mod pack." );
 
+	float decalMetal = r_decalMetalMask.GetFloat();
+	if ( ImGui::SliderFloat( "Decals dull metal", &decalMetal, 0.0f, 1.0f, "%.2f" ) ) {
+		r_decalMetalMask.SetFloat( decalMetal );
+	}
+	AddTooltip( "Dirt on metal is not metal: a decal removes the metalness of the surface under it by its "
+		"coverage, so stains read matte against the clean plate around them. Stock and mod decals alike. "
+		"0.00 = off, 1.00 = default. Needs PBR materials (High preset and up)." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##decalmetal" ) ) { r_decalMetalMask.SetFloat( 1.0f ); }
+
+	float decalRough = r_decalRoughen.GetFloat();
+	if ( ImGui::SliderFloat( "Decals roughen surfaces", &decalRough, 0.0f, 1.0f, "%.2f" ) ) {
+		r_decalRoughen.SetFloat( decalRough );
+	}
+	AddTooltip( "Dirt scatters light: a decal roughens the surface under it by its coverage, so highlights and "
+		"reflections break up across stains - on metal and on glossy non-metals alike. "
+		"0.00 = off, 1.00 = default. Needs PBR materials (High preset and up)." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##decalrough" ) ) { r_decalRoughen.SetFloat( 1.0f ); }
+
 	ImGui::EndDisabled();	// glass reflections (backend supported)
 	EndSettingsGroup();
 	}

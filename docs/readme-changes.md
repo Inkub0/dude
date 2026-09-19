@@ -95,6 +95,32 @@ fidelity impact.
 - **Files:** `RenderSystem_init.cpp`, `rhi/RhiWorld.cpp` (`RB_RHI_DrawInteraction`),
   `rhi/RhiBackend.cpp`, `shaders/bumpyenvironment.frag`; sliders in Debugging → Glass Reflections.
 
+### 1.6 Decal surface mask (`r_decalMetalMask`, `r_decalRoughen`)
+- **Legacy / plain PBR:** a wall's metalness and roughness are one value per material, and the
+  forward renderer lights the wall before any decal blends over it — a dirt stain on a steel
+  plate darkens it, but the plate still mirrors the light straight through the stain.
+- **Ours:** before the light loop `RB_RHI_DecalMaskPass` draws every overlay decal
+  (translucent, `SS_DECAL` or polygon-offset; stock and mod alike) into a view-sized
+  *retention* buffer, multiply-blended so overlaps compound (`shaders/decalsurface.glsl`):
+  - **R — metalness kept** (`r_decalMetalMask`, 1): dirt, blood and soot are dielectrics.
+  - **G — smoothness kept** (`r_decalRoughen`, 1): dirt scatters; roughness climbs to 0.85,
+    on metals and glossy non-metals alike.
+  Coverage is whatever the decal's own unlit blend hides: alpha for `blend blend`, luminance
+  for the darken blend (`gl_zero, gl_one_minus_src_color`), `1 - luminance` for filter blends;
+  stage + vertex colour included, so fading game decals give the surface back. Additive and
+  lit stages are skipped. The target has no depth, so `decalmask.frag` tests against
+  `_currentDepth` in linear units.
+- **Consumers:** `interaction.frag` (sampler unit 14, gated by `u_pbrParms.z == 2`), and the
+  SSR / RT-reflection passes through `RB_RHI_DecalResolveMaterial`, which resolves the
+  G-buffer's rough/metal attachment through the mask once per view (`decalmat.frag`,
+  texel-exact) so reflections and highlights agree about the same stain.
+- **Scope:** PBR only (`r_pbr`), primary fullscreen view.
+- **Fidelity impact:** non-vanilla; refines surfaces only under decals. Both at 0 restore
+  plain PBR.
+- **Files:** `rhi/RhiWorld.cpp`, `shaders/decalmask.*`, `shaders/decalmat.*`,
+  `shaders/decalsurface.glsl`, `shaders/interaction.frag`, `rhi/RHI.h` +
+  `rhi/vk/VulkanBackend.cpp` (texture binding 14); sliders in Debugging → Glass Reflections.
+
 ---
 
 ## 2. Equivalent result, different mechanism

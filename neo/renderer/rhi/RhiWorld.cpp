@@ -364,6 +364,10 @@ static int  rhiSsaoW = 0, rhiSsaoH = 0;				// AO buffer size (may be < view for 
 static int  rhiSsaoViewW = 0, rhiSsaoViewH = 0;		// full view size the AO covers
 static bool rhiSsaoAppliedThisView = false;			// AO was produced for the view being drawn
 
+// r_decalMetalMask: this view's screen-space metal retention under decals (RB_RHI_DecalMaskPass);
+// 0 = none, interactions keep full metalness. Up here because RB_RHI_DrawInteraction binds it.
+static rhi::ImageHandle rhiDecalMaskImage = 0;
+
 // SSAO Phase 1 prefiltered depth mip chain (docs/ssao-perf-optimization.md, r_ssaoDepthMip).
 // A single AO-resolution RGBA16F target holding LINEAR view-space eye depth in R with a
 // render-generated mip chain: level 0 is written by ssao_depthmip.frag, coarser levels by
@@ -1219,7 +1223,8 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		// specular — the clay render should read metal and non-metal surfaces the same
 		parms.pbrParms[0] = clayWorld ? 0.0f : metal;
 		parms.pbrParms[1] = rough;
-		parms.pbrParms[2] = 1.0f;
+		// 1 = PBR; 2 = PBR + the decal metal mask is bound on unit 14 (r_decalMetalMask)
+		parms.pbrParms[2] = rhiDecalMaskImage ? 2.0f : 1.0f;
 		parms.pbrParms[3] = specScale;
 		// metal diffuse-kill strength kd: 1 = physical (metals lose all diffuse
 		// colour), <1 keeps that share of the asset albedo so metals aren't dark
@@ -1585,6 +1590,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	if ( blurMask ) {
 		da.shadowMask = ictx.shadowMaskImage;	// blurred RT shadow mask for u_shadowMask (unit 13)
 	}
+	da.decalMask = rhiDecalMaskImage;			// decal metal retention for u_decalMask (unit 14); VK only, GL3 raw-binds it
 	ictx.r->Draw( da );
 
 	backEnd.pc.c_drawElements++;
@@ -1794,7 +1800,9 @@ static void RB_RHI_CaptureCurrentDepth( const viewDef_t *viewDef ) {
 	bool getDepthCapture = r_enableDepthCapture.GetInteger() == 1
 		|| ( r_enableDepthCapture.GetInteger() == -1
 		     && ( r_useSoftParticles.GetBool()
-		          || ( ( r_ssao.GetBool() || r_ssr.GetBool() ) && R_BackendSupportsEnhancements() ) ) );
+		          || ( ( r_ssao.GetBool() || r_ssr.GetBool()
+		                 || ( r_pbr.GetBool() && ( r_decalMetalMask.GetFloat() > 0.0f || r_decalRoughen.GetFloat() > 0.0f ) ) )
+		               && R_BackendSupportsEnhancements() ) ) );
 	if ( getDepthCapture && viewDef->renderView.viewID >= 0
 	     && ( qglReadBuffer != NULL || rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) {
 		globalImages->currentDepthImage->CopyDepthbuffer( viewDef->viewport.x1,
@@ -4297,6 +4305,53 @@ static void RB_RHI_DrawFullscreen( rhi::RHI *r, rhi::ShaderHandle prog,
 	backEnd.pc.c_drawElements++;
 }
 
+// Decal surface mask -> SSR. The reflection passes read roughness/metalness from the G-buffer's
+// material attachment, which knows nothing about decals; resolve it through this view's decal
+// retention buffer once (decalmat.frag) and hand every consumer the result, so a stain that is
+// dull under direct light is not a mirror in the reflection. Returns matImg untouched when no
+// decal drew this view.
+static rhi::RenderTargetHandle rhiDecalMatRT = 0;
+static int rhiDecalMatW = 0, rhiDecalMatH = 0;
+
+static rhi::ImageHandle RB_RHI_DecalResolveMaterial( rhi::RHI *r, rhi::ImageHandle matImg, int w, int h ) {
+	if ( rhiDecalMaskImage == 0 || matImg == 0 ) {
+		return matImg;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "decalmat" );
+	if ( !prog ) {
+		return matImg;
+	}
+	if ( rhiDecalMatRT && r->GetRenderTargetImage( rhiDecalMatRT ) == 0 ) {
+		rhiDecalMatRT = 0;					// lost context (vid_restart)
+	}
+	if ( !rhiDecalMatRT || rhiDecalMatW != w || rhiDecalMatH != h ) {
+		if ( rhiDecalMatRT ) { r->DestroyRenderTarget( rhiDecalMatRT ); }
+		rhiDecalMatRT = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+		rhiDecalMatW = w;
+		rhiDecalMatH = h;
+		if ( !rhiDecalMatRT ) {
+			rhiDecalMatW = rhiDecalMatH = 0;
+			return matImg;
+		}
+	}
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	r->BeginTargetPass( rhiDecalMatRT, NULL );
+	r->SetViewport( 0, 0, w, h );
+	r->SetScissor( 0, 0, w, h );
+	RB_RHI_BindRTImage( r, 1, rhiDecalMaskImage );
+	RB_RHI_DrawFullscreen( r, prog, parms, matImg );
+	r->EndPass();
+	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+		backEnd.glState.tmu[0].current2DMap = -1;	// direct binds bypassed the tmu cache
+	}
+	RB_RHI_ForgetTexBinds();
+	return r->GetRenderTargetImage( rhiDecalMatRT );
+}
+
 // (re)allocate the berserk temporal trail ping-pong. Both slots are cleared to black on
 // creation so the first history read is defined on Vulkan (an unwritten color target's
 // layout is UNDEFINED and would trip validation) and starts from nothing on GL.
@@ -4870,7 +4925,9 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !rhiNormalReadyThisView || !rhiNormalMrtThisView || rhiNormalResultRT == 0 ) {
 		return;
 	}
-	const rhi::ImageHandle matImg = r->GetRenderTargetImage2( rhiNormalResultRT );
+	// rough/metal as the decals left it (dirt is no mirror); the raw attachment when none drew
+	const rhi::ImageHandle matImg = RB_RHI_DecalResolveMaterial( r, r->GetRenderTargetImage2( rhiNormalResultRT ),
+		viewDef->viewport.x2 - viewDef->viewport.x1 + 1, viewDef->viewport.y2 - viewDef->viewport.y1 + 1 );
 	// depth capture: uploadWidth on GL; rhiCaptured on VK (a demand-load can set
 	// uploadWidth there without a real capture), matching the soft-particle idiom
 	const bool depthCaptured = vkMode ? globalImages->currentDepthImage->rhiCaptured
@@ -6871,6 +6928,232 @@ void RB_RHI_MotionVectorDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 /*
 ===================
+RB_RHI_DecalMaskPass
+
+DUDE decal metal mask (r_decalMetalMask, docs/readme-changes.md 1.6). Dirt on metal is not
+metal: before the light loop, every overlay decal's coverage is drawn into a screen-space
+"metal retention" buffer (1 = untouched, multiply-blended so overlaps compound), and the PBR
+interaction scales its metalness by it (unit 14, gated by u_pbrParms.z). A forward renderer
+lights the wall long before the decal blends over it, so this is the only point where the
+decal can change how the wall underneath responds to light.
+
+Coverage comes from the decal's own unlit blend stages - whatever that blend would hide of the
+surface (alpha / darken / filter; see decalmask.frag). Additive stages (glows, scorch embers)
+hide nothing and are skipped, as are lit stages: a translucent lit decal adds light on top of
+the wall rather than covering it, and its diffuse alpha is rarely authored.
+
+Primary fullscreen view only, like the other screen-space buffers. The target has no depth,
+so decalmask.frag tests against _currentDepth - the pass stands down without that capture.
+===================
+*/
+static rhi::RenderTargetHandle rhiDecalMaskRT = 0;
+static int  rhiDecalMaskW = 0, rhiDecalMaskH = 0;
+
+static bool RB_RHI_DecalMaskStageMode( const shaderStage_t *pStage, float &mode ) {
+	const int src = pStage->drawStateBits & GLS_SRCBLEND_BITS;
+	const int dst = pStage->drawStateBits & GLS_DSTBLEND_BITS;
+	if ( src == GLS_SRCBLEND_SRC_ALPHA && dst == GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA ) {
+		mode = 0.0f;
+		return true;
+	}
+	if ( src == GLS_SRCBLEND_ZERO && dst == GLS_DSTBLEND_ONE_MINUS_SRC_COLOR ) {
+		mode = 1.0f;
+		return true;
+	}
+	if ( ( src == GLS_SRCBLEND_DST_COLOR && dst == GLS_DSTBLEND_ZERO )
+		|| ( src == GLS_SRCBLEND_ZERO && dst == GLS_DSTBLEND_SRC_COLOR ) ) {
+		mode = 2.0f;
+		return true;
+	}
+	return false;
+}
+
+static void RB_RHI_DecalMaskPass( rhi::RHI *r, const viewDef_t *viewDef ) {
+	rhiDecalMaskImage = 0;
+	const float strength = idMath::ClampFloat( 0.0f, 1.0f, r_decalMetalMask.GetFloat() );
+	const float roughen = idMath::ClampFloat( 0.0f, 1.0f, r_decalRoughen.GetFloat() );
+	// metalness / roughness only exist on the PBR path
+	if ( ( strength <= 0.0f && roughen <= 0.0f ) || !r_pbr.GetBool() || !R_BackendSupportsEnhancements() ) {
+		if ( rhiDecalMaskRT ) { r->DestroyRenderTarget( rhiDecalMaskRT ); rhiDecalMaskRT = 0; rhiDecalMaskW = rhiDecalMaskH = 0; }
+		return;
+	}
+	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
+		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
+		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView || viewDef->renderView.viewID < 0 ) {
+		return;
+	}
+	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	idImage *depthImg = globalImages->currentDepthImage;
+	const bool depthCaptured = vkMode ? ( depthImg->rhiCaptured && depthImg->rhiHandle != 0 )
+	                                  : ( depthImg->uploadWidth > 0 && depthImg->texnum != idImage::TEXTURE_NOT_LOADED );
+	if ( !depthCaptured ) {
+		return;
+	}
+
+	// anything to draw? most views have no qualifying decal - skip the target pass entirely
+	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
+	int first = -1;
+	for ( int i = 0; i < viewDef->numDrawSurfs; i++ ) {
+		const idMaterial *shader = drawSurfs[i]->material;
+		if ( shader->Coverage() == MC_TRANSLUCENT && shader->IsDrawn() && !shader->HasGui()
+			&& ( shader->GetSort() == SS_DECAL || shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) ) {
+			first = i;
+			break;
+		}
+	}
+	if ( first < 0 ) {
+		return;
+	}
+
+	rhi::ShaderHandle prog = r->LoadShader( "decalmask" );
+	if ( !prog ) {
+		return;
+	}
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	if ( rhiDecalMaskRT && r->GetRenderTargetImage( rhiDecalMaskRT ) == 0 ) {
+		rhiDecalMaskRT = 0;					// lost context (vid_restart)
+	}
+	if ( !rhiDecalMaskRT || rhiDecalMaskW != w || rhiDecalMaskH != h ) {
+		if ( rhiDecalMaskRT ) { r->DestroyRenderTarget( rhiDecalMaskRT ); }
+		rhiDecalMaskRT = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
+		rhiDecalMaskW = w;
+		rhiDecalMaskH = h;
+		if ( !rhiDecalMaskRT ) {
+			rhiDecalMaskW = rhiDecalMaskH = 0;
+			return;
+		}
+	}
+
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.color = true;
+	clear.rgba[0] = clear.rgba[1] = clear.rgba[2] = clear.rgba[3] = 1.0f;	// full retention
+	r->BeginTargetPass( rhiDecalMaskRT, &clear );
+	r->SetViewport( 0, 0, w, h );
+	r->SetScissor( 0, 0, w, h );
+
+	const viewEntity_t *currentSpace = NULL;
+	float mvp[16];
+	for ( int i = first; i < viewDef->numDrawSurfs; i++ ) {
+		const drawSurf_t *surf = drawSurfs[i];
+		const srfTriangles_t *tri = surf->geo;
+		const idMaterial *shader = surf->material;
+		if ( shader->Coverage() != MC_TRANSLUCENT || !shader->IsDrawn() || shader->HasGui()
+			|| !( shader->GetSort() == SS_DECAL || shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) ) {
+			continue;
+		}
+		// the view weapon's depth-hacked depth would never match the capture
+		if ( surf->space->weaponDepthHack || surf->space->modelDepthHack != 0.0f ) {
+			continue;
+		}
+		if ( !tri->numIndexes || !tri->ambientCache ) {
+			continue;
+		}
+		const float *regs = surf->shaderRegisters;
+
+		bool streamed = false;
+		rhi::BufferHandle vb = 0, ib = 0;
+		int vertOfs = 0, idxOfs = 0;
+
+		for ( int stage = 0; stage < shader->GetNumStages(); stage++ ) {
+			const shaderStage_t *pStage = shader->GetStage( stage );
+			float mode;
+			if ( pStage->lighting != SL_AMBIENT || regs[pStage->conditionRegister] == 0
+				|| pStage->newStage != NULL || pStage->texture.image == NULL
+				|| pStage->texture.cinematic != NULL || pStage->texture.texgen != TG_EXPLICIT
+				|| !RB_RHI_DecalMaskStageMode( pStage, mode ) ) {
+				continue;
+			}
+
+			if ( surf->space != currentSpace ) {
+				currentSpace = surf->space;
+				RB_RHI_SpaceMvp( viewDef, surf->space, mvp );
+			}
+			if ( !streamed ) {
+				RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
+				streamed = true;
+			}
+
+			rhi::RenderParams parms;
+			memset( &parms, 0, sizeof( parms ) );
+			memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
+			if ( pStage->texture.hasMatrix ) {
+				parms.diffuseMatrixS[0] = regs[pStage->texture.matrix[0][0]];
+				parms.diffuseMatrixS[1] = regs[pStage->texture.matrix[0][1]];
+				parms.diffuseMatrixS[3] = regs[pStage->texture.matrix[0][2]];
+				parms.diffuseMatrixT[0] = regs[pStage->texture.matrix[1][0]];
+				parms.diffuseMatrixT[1] = regs[pStage->texture.matrix[1][1]];
+				parms.diffuseMatrixT[3] = regs[pStage->texture.matrix[1][2]];
+				if ( parms.diffuseMatrixS[3] < -40.0f || parms.diffuseMatrixS[3] > 40.0f ) parms.diffuseMatrixS[3] -= (int)parms.diffuseMatrixS[3];
+				if ( parms.diffuseMatrixT[3] < -40.0f || parms.diffuseMatrixT[3] > 40.0f ) parms.diffuseMatrixT[3] -= (int)parms.diffuseMatrixT[3];
+			} else {
+				parms.diffuseMatrixS[0] = 1.0f;
+				parms.diffuseMatrixT[1] = 1.0f;
+			}
+			// stage + vertex colour exactly as the decal itself draws: game decals fade out
+			// through them, and the metal comes back as they do
+			parms.color[0] = regs[pStage->color.registers[0]];
+			parms.color[1] = regs[pStage->color.registers[1]];
+			parms.color[2] = regs[pStage->color.registers[2]];
+			parms.color[3] = regs[pStage->color.registers[3]];
+			switch ( pStage->vertexColor ) {
+			case SVC_IGNORE:
+				parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
+				break;
+			case SVC_MODULATE:
+				parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = 1.0f;
+				break;
+			case SVC_INVERSE_MODULATE:
+				parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = -1.0f;
+				parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
+				break;
+			}
+			parms.localParam0[0] = mode;
+			parms.localParam0[1] = strength;		// r: metalness
+			parms.localParam0[2] = roughen;			// g: smoothness
+			parms.depthTexRecip[0] = 1.0f / depthImg->uploadWidth;
+			parms.depthTexRecip[1] = 1.0f / depthImg->uploadHeight;
+			rhi::FillDepthParms( parms, viewDef->projectionMatrix );
+
+			rhi::PipelineDesc pd;
+			// retention multiplies into the buffer; no depth attachment to test or write
+			pd.stateBits = GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO | GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+			pd.shader = prog;
+			pd.vertexLayout = rhi::VL_DRAWVERT;
+			pd.cullType = RB_RHI_CullFor( viewDef, shader->GetCullType() );
+			r->BindPipeline( pd );
+
+			RB_RHI_BindUnit( 0, pStage->texture.image );
+			RB_RHI_BindUnit( 1, depthImg );
+
+			rhi::BufferHandle ub;
+			int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+			rhi::DrawArgs da;
+			memset( &da, 0, sizeof( da ) );
+			da.vertexBuffer = vb;
+			da.vertexOffset = vertOfs;
+			da.indexBuffer = ib;
+			da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+			da.indexCount = tri->numIndexes;
+			da.uniformBuffer = ub;
+			da.uniformOffset = uniOfs;
+			da.uniformSize = sizeof( parms );
+			RB_RHI_VkTextures( da );
+			r->Draw( da );
+			backEnd.pc.c_drawElements++;
+		}
+	}
+
+	r->EndPass();
+	RB_RHI_ForgetTexBinds();
+	rhiDecalMaskImage = r->GetRenderTargetImage( rhiDecalMaskRT );
+}
+
+
+/*
+===================
 RB_RHI_DrawWorld
 
 Depth prepass + stencil shadows + per-light interactions, following the
@@ -6941,6 +7224,16 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// r_rtShadowBlur: validate the view + size the shared targets; the light loop builds each
 	// ray-served light's mask on demand (RB_RHI_RtShadowBlurLight)
 	RB_RHI_RtShadowBlurBegin( r, viewDef );
+	// r_decalMetalMask: decal coverage -> metal retention, consumed by the PBR interactions below
+	RB_RHI_DecalMaskPass( r, viewDef );
+	if ( rhiDecalMaskImage && !vkMode ) {
+		// GL3: raw-bind on unit 14 for the whole light loop (nothing in it touches that unit);
+		// VK carries it per draw as DrawArgs::decalMask
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 14 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)rhiDecalMaskImage );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+	}
 
 	// Bind the AO buffer on unit 9 for the whole per-light loop: both the ambient and
 	// interaction shaders sample u_ssao there, and nothing in the loop touches unit 9

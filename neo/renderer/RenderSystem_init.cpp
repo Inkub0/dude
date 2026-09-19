@@ -587,6 +587,11 @@ idCVar r_gl3ReflectionScale( "r_gl3ReflectionScale", "0.7", CVAR_RENDERER | CVAR
 idCVar r_decalBloodSheen( "r_decalBloodSheen", "0.35", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "sheen (specular highlight + cube reflection) on blood decals: 0 = matte, 1 = as authored by the material (non-vanilla, opengl3/Vulkan only; only mod-pack decals have any sheen to scale)", 0.0f, 1.0f );
 idCVar r_decalMatte( "r_decalMatte", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "translucent non-blood decals (dirt, stains, drips) get no specular highlight and no cube reflection (non-vanilla, opengl3/Vulkan only; 0 = as authored by the material)" );
 
+// DUDE: dirt on metal is not metal. Overlay decals (stock or mod) strip the PBR metalness of the
+// surface under them by their coverage, so stains read matte against the plate around them.
+idCVar r_decalMetalMask( "r_decalMetalMask", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how much an overlay decal's coverage removes the metalness of the surface under it: 0 = off, 1 = a fully opaque decal leaves bare dielectric (non-vanilla, opengl3/Vulkan only; needs r_pbr)", 0.0f, 1.0f );
+idCVar r_decalRoughen( "r_decalRoughen", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how much an overlay decal's coverage roughens the surface under it, breaking up its highlight and its reflection: 0 = off, 1 = a fully opaque decal leaves a matte surface (non-vanilla, opengl3/Vulkan only; needs r_pbr)", 0.0f, 1.0f );
+
 /*
 ===================
 R_DecalSheenScale

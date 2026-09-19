@@ -1072,6 +1072,8 @@ extern idCVar r_parallaxShadow;			// DUDE: POM self-shadow strength (0 = off)
 void R_ResetOcclusionMapCache( void );
 
 extern idCVar r_decalBloodSheen;			// sheen on blood decals (0=matte, 1=as authored)
+extern idCVar r_decalMetalMask;			// overlay decal coverage strips the PBR metalness under it (0=off)
+extern idCVar r_decalRoughen;			// overlay decal coverage roughens the PBR surface under it (0=off)
 extern idCVar r_decalMatte;				// translucent non-blood decals lose specular + cube reflection
 // sheen multiplier for a material's specular interaction and texgen-reflect stage (1 = not a decal)
 float R_DecalSheenScale( const idMaterial *material );
