@@ -4643,6 +4643,25 @@ static void DrawDbgGroup_Glass()
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##reflscale" ) ) { r_gl3ReflectionScale.SetFloat( 0.7f ); }
 
+	ImGui::Spacing();
+	ImGui::TextDisabled( "Decal sheen: texture mod packs make blood and dirt decals shiny. No effect on the stock assets." );
+
+	float bloodSheen = r_decalBloodSheen.GetFloat();
+	if ( ImGui::SliderFloat( "Blood decal sheen", &bloodSheen, 0.0f, 1.0f, "%.2f" ) ) {
+		r_decalBloodSheen.SetFloat( bloodSheen );
+	}
+	AddTooltip( "Specular highlight + cube reflection on blood splats, smears and pools. "
+		"0.00 = matte, 1.00 = as authored by the mod pack; 0.35 = default." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##bloodsheen" ) ) { r_decalBloodSheen.SetFloat( 0.35f ); }
+
+	bool decalMatte = r_decalMatte.GetBool();
+	if ( ImGui::Checkbox( "Matte dirt decals", &decalMatte ) ) {
+		r_decalMatte.SetBool( decalMatte );
+	}
+	AddTooltip( "Dirt, stain and drip decals get no specular highlight and no cube reflection. "
+		"Off = as authored by the mod pack." );
+
 	ImGui::EndDisabled();	// glass reflections (backend supported)
 	EndSettingsGroup();
 	}

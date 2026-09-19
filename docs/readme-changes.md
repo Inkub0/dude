@@ -77,6 +77,24 @@ fidelity impact.
   `TG_REFLECT_CUBE` stages (glass, some reflective decals).
 - **Files:** `neo/renderer/rhi/RhiBackend.cpp` (`RB_RHI_RenderTexgenStage`).
 
+### 1.5 Decal sheen control (mod-pack blood / dirt decals)
+- **Legacy:** a decal material is drawn exactly as authored. Texture mod packs give
+  overlay decals a `specularmap` + heightmap `bumpmap` and an additive
+  `texgen reflect` cube stage, so every blood splat and dirt stain shines like chrome
+  under any light, on every preset.
+- **Ours:** `R_DecalSheenScale` classifies `SS_DECAL` materials. Blood (the `blood`
+  content flag, or a name containing blood/splat/smear/handprint) scales **both** sheen
+  sources by `r_decalBloodSheen` (default **0.35**; 1 = as authored): the interaction's
+  specular modifier, and the reflect-cube stage (stage colour for `environment`,
+  `u_localParam0.w` for `bumpyenvironment`, which ignores stage colour like vanilla).
+  Every other *translucent* decal goes fully matte with `r_decalMatte` (default **1**).
+  Opaque decals (vents, wires, posters, bullet holes) are untouched.
+- **Fidelity impact:** none on the stock assets (their overlay decals have neither a
+  specularmap nor a cube stage). With a mod pack the decals are deliberately less shiny
+  than authored; `r_decalBloodSheen 1; r_decalMatte 0` restores the pack's look.
+- **Files:** `RenderSystem_init.cpp`, `rhi/RhiWorld.cpp` (`RB_RHI_DrawInteraction`),
+  `rhi/RhiBackend.cpp`, `shaders/bumpyenvironment.frag`; sliders in Debugging → Glass Reflections.
+
 ---
 
 ## 2. Equivalent result, different mechanism

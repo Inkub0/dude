@@ -2283,6 +2283,27 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		parms.color[2] *= s;
 	}
 
+	// DUDE: decal sheen control (R_DecalSheenScale). Mod-pack blood/dirt decals add an additive
+	// reflect-cube stage; scale it, or drop the stage outright when the decal is matte. The plain
+	// environment shader takes the scale through the stage colour; the bumpy one ignores stage
+	// colour (vanilla), so it gets the attenuation in u_localParam0.w (0 = untouched, zero-init safe).
+	// A scaled decal also stays off the RT/SSR/probe glass reroutes below — those ignore the stage
+	// colour too, and a blood splat is not a window pane.
+	bool sheenDecal = false;
+	if ( si.texgen == TG_REFLECT_CUBE ) {
+		const float decalSheen = R_DecalSheenScale( surf->material );
+		if ( decalSheen <= 0.0f ) {
+			return;
+		}
+		if ( decalSheen != 1.0f ) {
+			sheenDecal = true;
+			parms.color[0] *= decalSheen;
+			parms.color[1] *= decalSheen;
+			parms.color[2] *= decalSheen;
+			parms.localParam0[3] = 1.0f - decalSheen;
+		}
+	}
+
 	// view origin in this surface's local space (skybox/reflection direction)
 	idVec3 localViewOrigin;
 	R_GlobalPointToLocal( surf->space->modelMatrix, viewDef->renderView.vieworg, localViewOrigin );
@@ -2368,7 +2389,7 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		// only when RT hardware + a built TLAS + geo table + the loaded program are ALL present; otherwise
 		// fall through to the vanilla cube path below. The model rows above give environment_rt.vert the
 		// world position/normal for the ray; u_rtParms carries the TLAS + geo-table device addresses.
-		if ( vkMode && r_rtReflections.GetBool() && r->SupportsRayQuery() && !surf->material->GetBumpStage() ) {
+		if ( !sheenDecal && vkMode && r_rtReflections.GetBool() && r->SupportsRayQuery() && !surf->material->GetBumpStage() ) {
 			static rhi::ShaderHandle s_envRtProg = 0;
 			static bool s_envRtTried = false;
 			if ( !s_envRtTried ) { s_envRtTried = true; s_envRtProg = r->LoadShader( "environment_rt" ); }
@@ -2386,7 +2407,7 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		// screen-space march (environment_ssr) instead of the baked cube/probe — the SSR-tier analog of
 		// rtGlass. Needs the SSR pass's _currentRender + _currentDepth captures (present whenever r_ssr ran
 		// this view). VK for now; GL3 keeps the cube until the flip path is validated there.
-		if ( !rtGlass && vkMode && r_ssr.GetBool() && !surf->material->GetBumpStage()
+		if ( !sheenDecal && !rtGlass && vkMode && r_ssr.GetBool() && !surf->material->GetBumpStage()
 		     && globalImages->currentDepthImage->rhiCaptured && globalImages->currentRenderImage->rhiCaptured ) {
 			static rhi::ShaderHandle s_envSsrProg = 0;
 			static bool s_envSsrTried = false;
@@ -2428,7 +2449,7 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		// r_ssrGlassProbeScale then applies as the glass-only intensity knob
 		// (bump-mapped glass ignores stage colour — vanilla behaviour).
 		idImage *cubeImg = pStage->texture.image;
-		if ( !rtGlass && !ssrGlass && r_ssr.GetBool() && r_ssrGlassProbes.GetBool() && !surf->material->GetBumpStage()
+		if ( !sheenDecal && !rtGlass && !ssrGlass && r_ssr.GetBool() && r_ssrGlassProbes.GetBool() && !surf->material->GetBumpStage()
 		     && idStr::Icmpn( cubeImg->imgName, "env/gen", 7 ) == 0 ) {
 			float probeAvg = -1.0f;
 			idImage *probe = RB_RHI_GlassProbeForSurface( viewDef, surf, &probeAvg );

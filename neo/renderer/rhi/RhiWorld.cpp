@@ -1182,6 +1182,13 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		memcpy( parms.diffuseModifier, din->diffuseColor.ToFloatPtr(), 16 );
 		memcpy( parms.specularModifier, din->specularColor.ToFloatPtr(), 16 );
 	}
+	// DUDE: decal sheen control — both the vanilla and the GGX lobe multiply by this modifier
+	const float decalSheen = R_DecalSheenScale( din->surf->material );
+	if ( decalSheen != 1.0f ) {
+		parms.specularModifier[0] *= decalSheen;
+		parms.specularModifier[1] *= decalSheen;
+		parms.specularModifier[2] *= decalSheen;
+	}
 
 	// DUDE Phase 3.5 specular tuning (interaction.frag). Defaults reproduce
 	// vanilla: scale 1, shading model 0 (the N.H lookup table). Only consumed by

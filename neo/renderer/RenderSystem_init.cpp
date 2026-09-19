@@ -579,6 +579,39 @@ idCVar r_parallaxShadow( "r_parallaxShadow", "0.6", CVAR_RENDERER | CVAR_ARCHIVE
 // reflection reads too strong; 0.7 (-30%) matches the legacy look, 1.0 is untouched.
 idCVar r_gl3ReflectionScale( "r_gl3ReflectionScale", "0.7", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "GL3: brightness of cube-map glass reflections (1 = untouched; 0.7 compensates for the brighter enhanced scene; non-vanilla, opengl3/Vulkan only)", 0.0f, 2.0f );
 
+// DUDE: decal sheen control. Texture mod packs give overlay decals a specularmap (and often an
+// additive "texgen reflect" cube stage) so blood reads wet — but it also turns every splat and
+// dirt stain into chrome under any light. Blood decals scale both sources by r_decalBloodSheen;
+// every other translucent decal (dirt, stains, drips) goes matte with r_decalMatte. Inert on the
+// stock assets: their overlay decals carry neither a specularmap nor a cube stage.
+idCVar r_decalBloodSheen( "r_decalBloodSheen", "0.35", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "sheen (specular highlight + cube reflection) on blood decals: 0 = matte, 1 = as authored by the material (non-vanilla, opengl3/Vulkan only; only mod-pack decals have any sheen to scale)", 0.0f, 1.0f );
+idCVar r_decalMatte( "r_decalMatte", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "translucent non-blood decals (dirt, stains, drips) get no specular highlight and no cube reflection (non-vanilla, opengl3/Vulkan only; 0 = as authored by the material)" );
+
+/*
+===================
+R_DecalSheenScale
+
+1 for everything that is not an overlay decal. Blood is told apart by the "blood" content flag
+or by name (the packs tag only some of their blood materials). Opaque non-blood decals are left
+alone: those are vents, wires, posters and bullet holes — real objects whose shine is intended.
+===================
+*/
+float R_DecalSheenScale( const idMaterial *material ) {
+	if ( material == NULL || material->GetSort() != SS_DECAL ) {
+		return 1.0f;
+	}
+	const char *name = material->GetName();
+	if ( ( material->GetContentFlags() & CONTENTS_BLOOD )
+		|| idStr::FindText( name, "blood", false ) >= 0 || idStr::FindText( name, "splat", false ) >= 0
+		|| idStr::FindText( name, "smear", false ) >= 0 || idStr::FindText( name, "handprint", false ) >= 0 ) {
+		return r_decalBloodSheen.GetFloat();
+	}
+	if ( material->Coverage() == MC_TRANSLUCENT && r_decalMatte.GetBool() ) {
+		return 0.0f;
+	}
+	return 1.0f;
+}
+
 // DUDE: gate for the non-vanilla "Enhancements" (see tr_local.h). True for the
 // RHI backends — opengl3 today, vulkan once it lands (Phase 4); the legacy ARB2
 // path stays vanilla-faithful.

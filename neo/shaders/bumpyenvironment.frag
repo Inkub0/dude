@@ -27,5 +27,7 @@ void main() {
     vec3 globalEye = normalize(var_ToEyeGlobal);
     vec3 r = reflect(-globalEye, globalNormal);
 
-    fragColor = vec4(texture(u_environmentCubeMap, r).xyz, 1.0);
+    // DUDE: u_localParam0.w = decal sheen attenuation (R_DecalSheenScale); 0 everywhere else, so
+    // bumpy glass keeps the vanilla behaviour of ignoring the stage colour
+    fragColor = vec4(texture(u_environmentCubeMap, r).xyz * (1.0 - u_localParam0.w), 1.0);
 }
