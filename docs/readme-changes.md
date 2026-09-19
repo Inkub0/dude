@@ -138,7 +138,7 @@ fidelity impact.
   interaction path, so shadow maps, RT shadows and PBR all apply:
   - **relief** = the material's authored bump stage when it has one, else
     `smoothnormals(heightmap(<cover image>, 4))` (inverted for filter blends) generated with the
-    engine's image programs; `r_decalWetBloodRelief` (0.17, 0..2) scales the slope in the shader.
+    engine's image programs; `r_decalWetBloodRelief` (0.17, 0..1) scales the slope in the shader.
   - **film** = dielectric GGX at `r_decalWetBloodRough` (0.18), strength `r_decalWetBlood`
     (0.057, 0..0.5).
   - **coverage + gain** come from the decal's own cover image on the diffuse unit

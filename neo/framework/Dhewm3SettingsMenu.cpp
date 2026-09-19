@@ -4696,7 +4696,7 @@ static void DrawDbgGroup_Glass()
 
 	ImGui::BeginDisabled( r_decalWetBlood.GetFloat() <= 0.0f );
 	float bloodRelief = r_decalWetBloodRelief.GetFloat();
-	if ( ImGui::SliderFloat( "Wet blood relief", &bloodRelief, 0.0f, 2.0f, "%.2f" ) ) {
+	if ( ImGui::SliderFloat( "Wet blood relief", &bloodRelief, 0.0f, 1.0f, "%.2f" ) ) {
 		r_decalWetBloodRelief.SetFloat( bloodRelief );
 	}
 	AddTooltip( "How strongly the film follows the blood's own height - bulging edges, ripples inside. Higher = the glint "

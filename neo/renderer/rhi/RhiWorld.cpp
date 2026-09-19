@@ -1295,7 +1295,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			parms.pbrParms[3] = 1.0f;
 			parms.occlusionParms[3] = 0.0f;
 			parms.channelMask[0] = rhiFilmDraw->mode;
-			parms.channelMask[1] = idMath::ClampFloat( 0.0f, 2.0f, r_decalWetBloodRelief.GetFloat() );
+			parms.channelMask[1] = idMath::ClampFloat( 0.0f, 1.0f, r_decalWetBloodRelief.GetFloat() );
 			// zw: the coverage window the film feathers in over. The floor keeps the film off the
 			// faint mist splat textures trail off into - blood too thin to see should not glint.
 			const float filmFloor = idMath::ClampFloat( 0.0f, 0.95f, r_decalWetBloodThreshold.GetFloat() );
