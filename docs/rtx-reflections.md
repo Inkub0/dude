@@ -126,7 +126,9 @@ rows). The normal transform is NOT stored — the shader gets it from `ObjectToW
   This is not an RR4 bug; RR4 made the monster real enough to expose that RT reflects only monsters, never
   the off-screen world. **RR5 (below) is the fix** (shade world hits too); a cheap interim is an
   env-probe / ambient backdrop fill in `ssr_rt` on non-monster hits.
-- **RR5 — RT WORLD reflections (replaces the snapshot glass system).** The user's goal: today glass /
+- **RR5 — RT WORLD reflections (replaces the snapshot glass system). SHIPPED** (RR5a-3 world BLAS
+  846eb443, RR5c stage 1 glass fac2a939; still open: entity coverage + RR5c stage 2, sequenced with the
+  RR12–RR15 fidelity stages in "Fidelity follow-ups" below). The user's goal: today glass /
   env reflections use baked env-probe cubemaps + `_currentRender` snapshots, which can't show anything
   dynamic or off-probe. Rebuild the **static world BLAS from full `idDrawVert`** (not positions-only, so
   `st`/normal are available) + give each world geometry a material/texture index in the table (RR4
@@ -259,10 +261,13 @@ already used. When RT renders, that block is skipped wholesale; when RT can't ru
 exactly as before (safe fallback). Two knock-on details:
 - The RT pass's `u_ssr` slot (unit 0) is **unused** since RR7, but it used to bind `resultRT` — which is now
   scoped inside the skipped block. It's rebound to the always-valid **normal G-buffer** as a harmless dummy.
-- The `_currentRender` snapshot is **preserved** (refreshed once at the top of the RT path, VK-only): downstream
-  refraction / heat-haze materials sample `_currentRender` and the RHI backend has no guaranteed per-view refresh
-  after SSR (the smoke-dark capture is conditional), so skipping it risked a stale-background regression. It's a
-  single cheap blit vs. the multi-ms march it replaces, so the win stands; skipping it too is a measured follow-up.
+- The `_currentRender` snapshot was originally **preserved** here (a safety net for downstream refraction /
+  heat-haze materials, which sample `_currentRender`), on the reasoning that the backend has no guaranteed
+  per-view refresh after SSR. **Item 6 (a later change) then dropped it under RT** — no pass in the
+  `rtWillRender` block reads it and those materials re-capture on demand — reclaiming the full-res blit
+  (see the `item 6` comment in `RhiWorld.cpp`'s RT block). **Consequence for RR12:** the lit scene is *not*
+  snapshotted under RT, so RR12 samples the **live** HDR scene-colour target rather than re-adding a blit
+  (RR12b′ in the fidelity section).
 
 Only the VK + `r_rtReflections` + ray-query path is affected; SSR-only presets (Nightmare and below) are byte-
 identical. **Verify:** `r_vkValidation 1` soak in Ultra Nightmare (watch for layout/barrier errors on the RT
@@ -356,6 +361,280 @@ model BLAS then (reusing item 1's `R_RtBuildEntityModelBlas` machinery) and cach
 retire-after-grace lifecycle mirroring the animated-monster BLAS cache (`RefreshAnimBlas`, `ANIM_RETIRE_GRACE`).
 The model geometry is static, so only the per-frame transform updates. **Verify:** drop a chainsaw near a
 reflective floor under RT — it should appear in the reflection.
+
+## Fidelity follow-ups — RR12–RR15, sequenced around the open RR5 work (PLANNED 2026-09-19)
+
+**Where the arc stands.** RR0–RR11, #4a and RR5c stage 1 are shipped: under Ultra Nightmare every
+reflective opaque pixel and every unbumped glass pane traces the real, textured room + monsters. What is
+still **open from the RR5 arc**: entity coverage (Item 1 props, Item 3 dropped items, above) and RR5c
+stage 2 (bumped glass). This section adds four fidelity stages and slots them around those two, so nothing
+gets built — or visually gated — twice. No new assets anywhere; everything reads data the engine already has.
+
+**What the RT tier still gets wrong** (read off `ssr_rt.frag` / `ssr_rt_composite.frag` as of 76bb37ec):
+
+1. **The reflected scene is lit by a fake light.** `ssr_rt.frag:156-161` shades every hit as
+   `albedo · (ambient + N·L_key)` — a fixed key direction, no real lights, no shadows, no specular, no
+   decals, no emissive. A red-lit corridor reflects as a neutrally lit one; a dark corner reflects bright;
+   a glowing GUI screen or light fixture reflects as a dull textured panel. With the geometry now
+   pixel-perfect this is the largest remaining error in the image.
+2. **Ultra Nightmare lost glossy reflections.** `r_ssrGlossy`'s colour pyramid lives inside the SSR chain
+   that #4a skips when RT renders; the RT composite only has the fixed 5×5 `r_rtReflBlur` box. So at UN a
+   polished floor and brushed metal reflect equally sharp — roughness only *dims* (the gloss window), it
+   never *blurs*. The tier below (Ultra/Nightmare, SSR) handles this better than the top tier.
+3. **Reflections ignore occlusion.** Neither composite reads the AO term, so crevices, the undersides of
+   props and the contact line under a monster's feet reflect at full strength — reflective surfaces "glow"
+   exactly where the ambient term was just darkened by RTAO/GTAO.
+4. **Wet blood reflects lights but not the room** (parked in [todo.md](todo.md), "Decals: reflections on
+   wet blood").
+
+### Order, and why
+
+| # | Stage | Depends on | Tier | Size |
+|---|---|---|---|---|
+| 1 | **Entity coverage Item 1** (props) — as planned above | — | UN | M |
+| 2 | **RR12** — lit-scene reuse at the hit (+ RR12b emissive flag) | best judged after 1 | UN | S–M |
+| 3 | **Entity coverage Item 3** (dropped items) | 1 | UN | S |
+| 4 | **RR5c stage 2** (bumped glass) | RR12's shared hit-shade include | UN | S–M |
+| 5 | **RR13** — roughness-driven glossy for the RT tier | 2 (tune blur on correctly-lit content) | UN | M |
+| 6 | **RR14** — specular occlusion on reflections | — (independent; can jump the queue) | Ultra+ (SSR **and** RT), GL3+VK | S |
+| 7 | **RR15** — reflections on wet blood (the parked decal G-buffer) | RR13 | Ultra+ | M, optional |
+
+The rule behind the order is **coverage → shading → filtering → occlusion**: every stage's visual gate is
+judged by eye (the user's), and a gate on an incomplete image tunes against the wrong thing. Props that
+return 0 (`ssr_rt.frag:132`) read as holes in the reflection; RR12 changes the brightness and colour of
+everything RR13 will blur; RR13's blur radius decides how visible RR14's contact darkening is. RR14 has no
+code dependency and is the smallest, so it is the natural filler if a bigger stage is blocked on a gate.
+RR5c stage 2 moves *behind* RR12 on purpose: `environment_rt.frag` carries a copy of `ssr_rt`'s hit block,
+and a third copy (`bumpyenvironment_rt`) should not be made before the block is factored out.
+
+### RR12 — lit-scene reuse at the hit. BUILT 2026-09-19 (core), user visual + `r_vkValidation` gate pending.
+
+The standard hybrid trick, inverted from how SSR uses it: RT finds the hit **exactly** (no march, no
+thickness heuristics), then asks "is that world point on screen?" If so, the frame already contains its
+true radiance — real lights, real shadows, decals, wet blood, PBR specular, emissive stages.
+
+**What shipped (commit pending on `feat/rt-specular-occlusion`):** the core RR12b + RR12b′ in `ssr_rt.frag`
++ backend. The live-target read landed *clean, with no new barriers* — the HDR frame target already rests
+in `SHADER_READ_ONLY` when its scene pass is suspended for the RT pass (VulkanBackend `FrameColorBetweenLayout`),
+exactly how `RB_RHI_Fxaa` samples `rhiHdrRT`. A new RHI accessor `GetFrameColorSampleImage()` returns that
+image (or 0 on the swapchain path / non-HDR, so RR12 self-disables where the scene isn't sampleable). The hit
+view-pos is computed directly as `P + Nr·2 + Rv·t` (rigid ray → world t == view t), so **no matrix inverse**.
+Cvar `r_rtReflSceneReuse` (default 1). **Deferred:** RR12a (factor the shade into a shared `rt_hit_shade.glsl`
+— done inline for now; glass `environment_rt` keeps the key-light shade until that factoring), RR12c (the
+emissive off-screen flag), and the `r_rtReflDebug` confidence view. **Gate risk to watch:** one write-after-read
+on the scene image between the trace pass (samples it) and the composite (writes it two passes later) — the
+intervening temporal pass gives slack and the resume carries a layout transition, but confirm under
+`r_vkValidation 1` (sync); if it flags, the fix is a scoped dependency on the scene-pass resume.
+
+- **RR12a — factor the hit shade.** Move the attribute fetch + shade (`ssr_rt.frag:134-161`, duplicated in
+  `environment_rt.frag`) into a shared `rt_hit_shade.glsl` include. No behaviour change; build must stay
+  byte-identical in output (A/B by eye is not needed — it is a textual move; validation soak only).
+- **RR12b — reuse, cheap-path first.** At a committed, attributed hit compute `hitWorld = origin + dir·t`
+  (from the ray `t`, **no** geometry fetch yet) → view space (forward view = the rigid inverse of
+  `u_modelViewMatrix`, transpose-rotate; no new matrix uniform) → screen uv via the projection scalars
+  already in `u_localParam0.xy`. **Confidence** = on-screen (edge fade of a few percent, like SSR's) ×
+  depth agreement (`|sceneViewZ(uv) − hitViewZ| < k·|hitViewZ|`, k ≈ 1–2 %; rejects "the hit is behind
+  something the camera sees") × not-the-view-weapon (normal-buffer alpha) — all from **one depth fetch**,
+  before any attribute read. Then branch:
+  - **confidence ≥ HIGH (on-screen):** `radiance = sceneColour(uv)` — one colour fetch and **return**,
+    skipping the BDA geometry fetch + bindless diffuse sample entirely. This is the common case for a
+    reflective floor facing the room, and it is *cheaper* than today's RR4c shade.
+  - **confidence < HIGH:** run the factored fallback (`rt_hit_shade` — the RR4c geometry fetch + bindless +
+    key light) and `radiance = mix( fallback, sceneColour(uv), confidence )`, the colour fetch predicated
+    away when confidence is 0 (a genuinely off-screen hit pays only the fallback + the one depth fetch).
+    The expensive dependent BDA read runs only where the screen cannot answer.
+  Apply `r_ssrFireflyClamp` to the sampled radiance (HDR; the key-light path never needed it).
+- **RR12b′ — the scene colour is the LIVE target, not a re-added blit (this corrects the earlier draft).**
+  The first draft claimed the `_currentRender` snapshot is "already refreshed at the top of the RT path."
+  It is **not** — #4a deliberately *drops* that snapshot under RT (item 6 of the `rtWillRender` block in
+  `RhiWorld.cpp`) to save the full-res blit. The proper solution keeps that saving: bind the **live HDR
+  scene-colour target** (the one the RT composite already writes into) as a sampled input on **unit 0** —
+  the `DrawFullscreen` image arg that has been a throwaway normal-buffer dummy since RR7 — with a layout
+  transition COLOR_ATTACHMENT → SHADER_READ before the `ssr_rt` trace pass, and back for the additive
+  composite. No copy. The ordering is a clean read-then-write across two passes (Pass A *samples* the lit
+  opaque scene; the composite, two passes later, *adds* onto it), so there is no same-pass hazard and no
+  feedback loop: a reflective pixel reflects *other* pixels, which carry this frame's lit-but-pre-reflection
+  colour — single-bounce, as intended. `environment_rt` (glass) forward-renders after the opaque scene is
+  complete, so the same live target is valid there through the shared include.
+- **RR12c — emissive fallback for off-screen hits.** One more bit in `RtGeoDesc.flags` (bit 0 is "has
+  attributes"): "unlit/self-illuminated" — set at BLAS staging when the material has no lit stages (GUI
+  surfaces, light fixtures, `_emission`-style additive-only materials). The fallback then shades
+  `albedo · 1` instead of `albedo · (ambient + N·L)`. Off-screen light fixtures stop reflecting as grey panels.
+- **Known, accepted error:** view-dependent terms in the reused colour (specular highlights, Fresnel) were
+  evaluated for the camera, not for the reflected ray. SSR has always had exactly this error and nobody has
+  flagged it; diffuse-dominant Doom 3 surfaces make it minor.
+- **Monte-Carlo (Full-RT) alignment — where the effort should sit.** The screen-reuse path is a hybrid
+  *accelerator* and explicitly transitional: the path tracer retires it, because a reflection is a specular
+  bounce whose hit must be shaded by next-event estimation (sample a light → trace a visibility ray →
+  accumulate + denoise), never by reading the screen — the hit is often off-screen, and the screen colour
+  carries the camera-view-dependent terms noted just above (the very reason PT must shade at the hit). So
+  keep the reuse path cheap to write *and cheap to delete*, and build nothing durable on it. The
+  **fallback** hit-shade is the seam that grows into NEE: today a fake key light + ambient; tomorrow a
+  sampled real light + a shadow ray (the H3/H5 shadow-ray machinery) evaluated against the **RR4 bindless
+  material** at the hit — which is the actual Full-RT down-payment (the reuse-ledger "materials + geometry
+  table" row, carried 100%; see [rtx-hybrid-roadmap.md](rtx-hybrid-roadmap.md)). Concretely: route the
+  fallback through `rt_hit_shade` (RR12a) with the material fetch intact, and treat the confidence gate +
+  screen reuse as removable scaffolding. Per that ledger reflections are low Full-RT leverage — RR12 is
+  worth building for image quality now, and its one lasting piece is the material-shaded fallback, not the
+  reuse. (This is also why RR13's stochastic-GGX + NRD-specular is deferred to land *with* H6, not here: the
+  denoised-radiance path is the same one NEE will feed.)
+- **Seam risk:** where confidence falls to 0 (screen edge, occluded hits) the reflection hands over to the
+  key-light shade, which has a different brightness → a visible boundary that moves with the camera. Two
+  mitigations, in order: the confidence ramp + the existing temporal accumulation smear it; if that is not
+  enough, **calibrate the fallback** — scale the key-light shade by a slowly-adapting ratio of
+  (mean reused luminance / mean fallback luminance) measured on confident pixels (the eye-adaptation
+  reduction machinery already exists). Do not start with the calibration; gate first.
+- **Cvar** `r_rtReflSceneReuse` (default 1 once gated; 0 = today's look for A/B) + a debug view
+  (`r_rtReflDebug`: confidence as green→red) so the user can see *where* reuse engages without guessing.
+- **Cost (with the cheap-path structure):** the trace (the dominant cost) is unchanged; RR12 only changes
+  the shade. An on-screen hit is one depth + one colour fetch and *skips* the BDA geometry fetch + bindless
+  sample today's shade always does → in an on-screen-dominant view (a reflective floor facing the room) a
+  wash-to-modest **win**; an off-screen-heavy view (reflecting behind-camera geometry — where RT earns its
+  keep over SSR) pays the full fallback + one wasted depth fetch → a slight loss. Net: scene-dependent,
+  roughly a wash, *not* the flat add the naive structure implied, and with **no re-added blit** (the
+  live-target bind, RR12b′). One scattered HDR fetch is the only new bandwidth. A/B `r_vkGpuTime` on
+  `r_rtReflSceneReuse`.
+
+### RR16 — real lighting at the reflection hit (the NEE seam, chosen 2026-09-19)
+
+**Why.** RR12's gate proved the screen-reuse limitation the plan warned about: reuse can only shade a hit
+whose reflected surface is *on screen*, so an off-screen-reflected surface drops to the fixed key light —
+a soft-edged "overlay" of correct lighting that hugs the on-screen geometry, with the rest of the
+reflection flat/dim. The user chose the proper fix: **shade the hit with the scene's real lights**, so a
+reflection is lit correctly whether or not the reflected surface is on screen. This is the fallback the
+Monte-Carlo note already named as "the NEE seam" — building it here is a direct Full-RT down-payment (it
+*is* the path tracer's direct-lighting stage evaluated at a reflection bounce), not a transitional pass.
+
+**Why it needs new infrastructure.** RT shadows (`r_rtAllLights`) trace their ray *per light, inside the
+raster interaction loop*, where that one light's data is already bound — there is no all-lights buffer a
+fullscreen pass can iterate. The reflection pass is fullscreen and hits arbitrary surfaces, so it needs
+the view's lights gathered into a **device buffer it can loop** — read via `buffer_reference`, exactly
+like the RR4/RR5 geo table (address bit-cast into a param, no descriptor).
+
+**Staged (validator-first, opt-in, VK+RT only, gate each). RR16a+b BUILT 2026-09-19 (commit f7f6657a, gate
+pending); RR16c–e deferred.**
+- **RR16a — light buffer. BUILT.** Each view, gather `viewDef->viewLights` into a device buffer: per light
+  `{ vec3 worldOrigin, float radius, vec3 color, uint flags }` (32 B). `worldOrigin = globalLightOrigin`;
+  `color` from `vLight->shaderRegisters` × the light shader's colour stage (mirror `RhiWorld.cpp`'s light
+  colour eval ~8117-8124); `radius = lightDef->parms.lightRadius.Length()`. Create per-view (host-visible,
+  pre-filled) + retire fenced (the temp-buffer idiom); pass its device address + count in a free param
+  (`color`/`diffuseModifier` free up once the key light goes). Validator `r_rtReflLightTest`: count ==
+  view light count, addresses non-zero, no validation errors, inert on GL3/non-RT.
+- **RR16b — diffuse point-light shade (no shadows).** In `ssr_rt.frag`, at the attributed hit compute the
+  **world** hit (`wp + wN·2 + wr·t` — the world vectors already exist) and loop the light buffer:
+  `L = origin − hitWorld`, `atten = sat(1 − |L|/radius)²` (Doom-ish inverse falloff), add
+  `color · atten · max(N·L,0) · albedo`, plus a small ambient. This **replaces the fixed key light** as
+  the shade — reflections now carry real light colour/direction on and off screen. Keep `r_rtReflSceneReuse`
+  as the *exact* on-screen path over the top (the reuse↔real-shade seam is now tiny — both ≈ correct — so
+  judge whether to keep the hybrid or default reuse off for one consistent method). Gate: off-screen
+  reflections lit by the right lights; the RR12 overlay boundary gone.
+- **RR16c — projected-light reach (faithfulness).** A point approximation over-lights: a Doom spot/box
+  light reaches only inside its frustum. Add the 4 world-space `lightProject` planes (S/T/Q/falloff) to the
+  buffer and gate the contribution on the hit projecting inside `[0,1]` (uniform-within-frustum; the
+  projection/falloff *textures* — the gobo pattern — are a later bindless refinement, like RR4). Restores
+  which surfaces a light may touch. Fidelity: opt-in, UN only.
+- **RR16d — shadow rays (r_rtReflShadows).** Per contributing light, trace hit→light against the TLAS;
+  zero the term if occluded. Reflected surfaces gain contact shadows. The dominant new cost (a ray per
+  light per reflective pixel), so it is its own toggle; start off. This is literally NEE visibility — the
+  H3/H5 shadow ray at a reflection bounce.
+- **RR16e — reconcile + preset.** Decide reuse-on (hybrid) vs reuse-off (pure real-shade) by eye; specular
+  term at the hit (GGX using the hit roughness) if worthwhile; perf; wire into Ultra Nightmare.
+
+**Cost.** Diffuse loop is a few lights × a few ALU per reflective pixel — cheap. Shadow rays (RR16d) are
+the real cost and stay opt-in. The trace that finds the hit is unchanged. **Retires** the fixed key light
+and shrinks the reuse to an optional accelerator; in Full RT this shade *is* the specular-bounce direct
+lighting, kept whole.
+- **Side effect worth noting:** this delivers "blood / decals *in* reflections" for free whenever the
+  decal is on screen — distinct from RR15, which is reflections *on* blood.
+
+### RR13 — roughness-driven glossy for the RT tier
+
+Restore at UN what `r_ssrGlossy` gives the SSR tier, on the RT buffer.
+
+- Build the `ssr_colordown` pyramid over the **temporal-upscaled RT result** (the full-res history that the
+  composite reads today) into a mipped target, and have `ssr_rt_composite` sample it at
+  `LOD = glossyMaxLod · r_ssrGlossyScale · f(roughness)` — the same mapping `ssr_composite` uses
+  (`RhiWorld.cpp` stage 2.5, `localParam1[3]`), so the two tiers agree on what a given roughness looks like.
+  Reuse `r_ssrGlossy` / `r_ssrGlossyScale`; no new user-facing knobs.
+- **Alpha matters here and not in SSR's pyramid:** the RT buffer is *weighted radiance + hit mask in
+  alpha*, and `ssr_colordown` is a plain 4-tap average. Averaging hit and miss texels darkens every
+  reflection edge at high LOD. The buffer is effectively premultiplied, so the fix is in the composite,
+  not the downsample: `rgb / max(a, ε) · smoothstep(a)` — renormalise by the blurred coverage, then fade by
+  it. Verify on a reflection with a hard miss boundary (sky through a window) before anything else.
+- The RR6b box blur **stays** as the LOD-0 floor (its job is the static firefly grid, not glossiness); the
+  RR8 full-res material mask stays last, unchanged — it is what keeps a blurred reflection from haloing
+  past its surface, and it matters more once the blur is wide.
+- **RR13b — contact hardening (optional, after the gate).** Real glossy reflections are sharp at the
+  contact point and blur with distance. Pack the hit distance into the RT target's alpha (alpha is only
+  tested `> 0` today — confirm in `ssr_temporal`'s hit-aware feedback before repurposing it) and scale the
+  LOD by `saturate( t / refDist )`. A monster's feet reflect crisp, its head soft. Cheap, and the single
+  biggest "this is ray traced" cue after RR12.
+- **Deliberately not now:** stochastic GGX rays + NRD ReBLUR-specular. It is the physically right answer
+  and a genuine Full-RT down-payment (see [rtx-hybrid-roadmap.md](rtx-hybrid-roadmap.md)), but it needs
+  hit-distance + spec-MV guides, multiplies the denoiser cost, and re-opens the device-lost surface H4
+  just closed. Revisit it *with* H6 (GI), which needs the same NRD radiance plumbing; the pyramid is
+  retired then, not before.
+- **Cost:** the pyramid is ~6 successively-halved passes, but over a **full-res** source (SSR's runs at
+  `ssrRes`), so do not assume SSR's number carries over — measure with `r_vkGpuTime`, A/B on `r_ssrGlossy`.
+  If it is too dear, start the chain from a half-res first level (glossy content has no full-res detail).
+
+### RR14 — specular occlusion on reflections. DONE + user-verified 2026-09-19 ("0.7 is fine").
+
+- Scale the reflection by a roughness-aware specular-occlusion term (Lagarde, *Moving Frostbite to PBR*:
+  `saturate( pow( NdotV + ao, exp2( −16·rough − 1 ) ) − 1 + ao )`) read from the frame's finished AO
+  buffer (`rhiSsaoResultRT` — GTAO or the RTAO resolve, whichever ran), blended by `r_specOcclusion`
+  (0..1). A near-mirror's tight lobe is barely occluded (exponent → 0.5, forgiving); a rough-glossy lobe
+  is occluded like the diffuse hemisphere (exponent → 0, term → `ao`). Mirror in a crevice still mirrors;
+  rough-glossy floors/metal lose the reflected "glow" in corners and under props.
+- **Where it's applied (differs from the first sketch, which said `ssr_rt_composite`).** The term needs
+  `NdotV` + roughness, which the RT *composite* (`ssr_rt_composite.frag`) does not have — it only sees the
+  finished RT radiance + the material buffer. So the two tiers apply it where those values already exist:
+  - **SSR tier:** `ssr_composite.frag` — has N, V, roughness; term folded into the final
+    `refl · (F · gloss · intensity · specOcc)`.
+  - **RT tier:** `ssr_rt.frag` (the trace+shade pass, *not* the composite) — has `Nr`, V, roughness; term
+    folded into `weight` **after** the `weight < 0.002` discard gate (so coverage is unchanged) and
+    **before** the temporal/blur passes, so the occlusion is accumulated and blurred with the reflection.
+  Both take the strength in `localParam1.x` and sample AO on **unit 4** (`SAMPLER_BINDING(4) u_aoBuffer`,
+  R channel). The backend (`RhiWorld.cpp`) binds `rhiSsaoResultRT` there when `rhiSsaoAppliedThisView`,
+  else `globalImages->whiteImage` (ao = 1 → term = 1) and forces strength 0 — doubly inert with no AO.
+  SSR path mirrors the Hi-Z unit-4 idiom (GL3 tmu-cache invalidation); the RT path is VK-only.
+- **Scope, stated honestly:** *reflections only* — the indirect specular. Direct specular from the
+  interaction pass is **not** AO'd (that would be physically wrong, and it is the wet-blood glint path the
+  user just tuned). Cube-map `environment` stages on opaque surfaces + glass (`environment_rt`) are
+  possible later consumers; left out until the gate.
+- Works on GL3 + VK, SSR and RT tiers alike (the only stage here not UN-only). Inert when AO is off this
+  view or `r_specOcclusion 0` (the default) — every current preset stays byte-identical.
+- **Default + exposure (post-gate).** `r_specOcclusion` default is **0.7** (user-approved). It is a global
+  reflection tuning knob, **not** preset-wired — exactly like `r_ssrIntensity` / `r_rtReflBlur`: the presets
+  own the on/off masters (`r_ssr`, `r_rtReflections`, `r_ssao`) and this rides them (inert wherever
+  reflections or AO are off, so it self-activates at Ultra via GTAO and Ultra Nightmare via RTAO). A
+  **"Specular Occlusion"** slider sits in the Debugging tab → *Screen-Space Reflections (SSR)* group,
+  beside Reflection Intensity / Roughness Cutoff (the other knobs shared by both reflection tiers); the
+  group disables with `r_ssr`, which gates the whole reflection pipeline.
+- **Verify (build side):** clean build; `SPIR-V … 0 failures`; `spirv-dis` confirms `u_aoBuffer` at
+  Binding 4 in the recompiled `ssr_composite`/`ssr_rt` blobs. A/B any time with `r_specOcclusion 0`.
+
+### RR15 — reflections on wet blood (optional)
+
+The design is already written up in [todo.md](todo.md) (decal G-buffer pass: **normal first, roughness
+second**, per the dead end recorded in readme-changes 1.7). It belongs *after* RR13 because a blood pool
+is a rough-glossy reflector — without roughness-driven blur it would mirror like chrome, which is the
+look the decal work spent a day getting away from. Stays parked unless the user pulls it.
+
+### Verification pattern (same for every stage)
+
+Build + static checks only on this side: clean build, `SPIR-V … 0 failures`, **re-run cmake when a new
+shader file is added** (new files are not dependencies until reconfigure), confirm `build/dude` mtime.
+Every visual and runtime gate — `r_vkValidation 1` soak, `r_vkGpuTime` A/B, and all "does it look right"
+judgements — is the user's; each stage ships a cvar that restores the previous look exactly so the A/B is
+one console line. No stage is preset-wired before its gate passes.
+
+### Not reflection work — tracked in todo.md, not here
+
+The same fidelity review also produced items outside this document's scope: screen-space **contact
+shadows** for the raster tiers (pointless at UN, where `r_rtAllLights` already traces every light),
+**volumetric light shafts**, and **skin/flesh shading**. RT GI is H6 in
+[rtx-hybrid-roadmap.md](rtx-hybrid-roadmap.md). See [todo.md](todo.md), "Fidelity backlog".
 
 ## Risks & mitigations
 

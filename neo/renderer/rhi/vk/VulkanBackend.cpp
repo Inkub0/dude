@@ -230,6 +230,7 @@ public:
 	virtual ImageHandle			GetRenderTargetMipImage( RenderTargetHandle rt, int mipLevel );
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt );
 	virtual void				SetFrameTarget( RenderTargetHandle rt );
+	virtual ImageHandle			GetFrameColorSampleImage();		// RR12: lit scene, sampleable, or 0
 	virtual void				BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear );
 	virtual RenderTargetHandle	BeginNormalPrepass( int w, int h, const ClearArgs *clear, bool wantMrt, bool wantVel );
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt );
@@ -10245,6 +10246,21 @@ void VulkanBackend::SetFrameTarget( RenderTargetHandle rt ) {
 	}
 	curFlipY = true;
 	dynStateDirty = true;
+}
+
+// RR12 (docs/rtx-reflections.md): the lit scene as a sampleable image, but only when it is genuinely
+// safe to sample this instant. A frame target (the HDR RGBA16F scene buffer) rests in SHADER_READ_ONLY
+// between passes, so while the scene pass is suspended for the RT reflection pass it can be sampled with
+// no barrier (exactly how RB_RHI_Fxaa reads rhiHdrRT). The swapchain sceneColor path rests in
+// TRANSFER_SRC and is NOT sampleable, so return 0 there and let the caller fall back.
+rhi::ImageHandle VulkanBackend::GetFrameColorSampleImage() {
+	if ( frameTarget == 0 ) {
+		return 0;								// swapchain sceneColor path (TRANSFER_SRC between passes)
+	}
+	if ( FrameColorBetweenLayout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ) {
+		return 0;								// not resting sampleable this frame
+	}
+	return GetRenderTargetImage( frameTarget );	// the frame target's sampleable color image
 }
 
 /*

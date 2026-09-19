@@ -23,6 +23,7 @@ SAMPLER_BINDING(0) uniform sampler2D u_ssr;             // marched reflection (L
 SAMPLER_BINDING(1) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(2) uniform sampler2D u_normalBuffer;    // xyz = view normal, a = weapon mask
 SAMPLER_BINDING(3) uniform sampler2D u_materialBuffer;  // x = roughness, y = metalness
+SAMPLER_BINDING(4) uniform sampler2D u_aoBuffer;        // RR14: R = ambient visibility (GTAO / RTAO); white when no AO / off
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -93,5 +94,16 @@ void main() {
 		float lum = dot( refl, vec3( 0.2126, 0.7152, 0.0722 ) );
 		if ( lum > fcap ) { refl *= fcap / lum; }
 	}
-	fragColor = vec4( refl * ( F * gloss * u_localParam1.y ), 0.0 );
+
+	// RR14 specular occlusion (Lagarde, "Moving Frostbite to PBR"): dim the reflection by the AO
+	// buffer, roughness-aware. A near-mirror's tight reflection lobe is barely occluded by the
+	// hemisphere-wide AO (exponent -> 0.5, forgiving); a rough-glossy lobe is occluded like the
+	// diffuse hemisphere (exponent -> 0, term -> ao). Inert when u_localParam1.x (r_specOcclusion)
+	// is 0 OR when u_aoBuffer is the white dummy the backend binds with no AO this view (ao = 1 ->
+	// so = 1). Reflections only; direct specular from the interaction pass is never touched.
+	float ao = texture( u_aoBuffer, uv ).r;
+	float so = clamp( pow( NdotV + ao, exp2( -16.0 * rough - 1.0 ) ) - 1.0 + ao, 0.0, 1.0 );
+	float specOcc = mix( 1.0, so, u_localParam1.x );
+
+	fragColor = vec4( refl * ( F * gloss * u_localParam1.y * specOcc ), 0.0 );
 }

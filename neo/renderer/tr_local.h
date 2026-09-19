@@ -927,6 +927,7 @@ extern idCVar r_ssrGlassProbes;			// glass reflects baked per-area room cubemaps
 extern idCVar r_ssrGlassProbeBake;		// auto-capture missing probes (one-time hitch per area)
 extern idCVar r_ssrGlassProbeSize;		// probe face resolution
 extern idCVar r_ssrGlassProbeScale;		// probe brightness on glass (glass-only intensity)
+extern idCVar r_specOcclusion;			// RR14: roughness-aware AO dimming of SSR + RT reflections
 
 // DUDE glass probes (docs/ssr.md): fs_savepath-relative extensionless base path
 // for a map area's probe faces (envprobes/<map>/area<N>; + _px.tga etc), and the
@@ -976,6 +977,11 @@ extern idCVar r_rtaoDebug;					// RTAO debug view (1 raw rays, 2 denoised)
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
 extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compositing (dissolves the static firefly grid)
+extern idCVar r_rtReflSceneReuse;			// RR12: shade an on-screen RT reflection hit with the real lit scene instead of the fake key light
+extern idCVar r_rtReflDebug;				// RR12 debug: paint reflection by reuse confidence (green = reuse, red = key-light fallback)
+extern idCVar r_rtReflRealLights;			// RR16: shade an RT reflection hit with the scene's real lights (not a fixed key light)
+extern idCVar r_rtReflLightScale;			// RR16: overall brightness of the real-light diffuse at an RT reflection hit (compensates the point-light approximation)
+extern idCVar r_rtReflEmissive;				// RR16f: brightness of self-lit light-source surfaces (neon/ceiling tiles) in RT reflections
 extern idCVar r_rtReflBump;					// RR10: how much the RT reflection follows the normal map (0 = flat mirror, 1 = full bump like SSR)
 extern idCVar r_rtMovingLights;				// RT shadows for moving point lights: skip the un-cacheable cube re-render, trace instead
 extern idCVar r_rtAllLights;				// RT shadows for EVERY shadow-casting light (mode 4 inline ray), no shadow maps at all

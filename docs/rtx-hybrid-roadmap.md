@@ -104,6 +104,12 @@ Full-RT down-payment.
 - **H5 — RT reflections finish.** RR5 (world reflections: rebuild the static world BLAS with full
   attributes + materials, shade world hits → **replaces the env-probe/snapshot glass system**) and RR6
   (glossy via roughness-driven blur + reflection denoise, temporal, SSR↔RT seam softening).
+  **STATUS 2026-09-19:** RR5 world reflections, RR5c stage 1 glass and RR6–RR11 temporal/perf are
+  shipped. Open: entity coverage (props, dropped items), RR5c stage 2 (bumped glass), and the fidelity
+  stages RR12 (lit-scene reuse at the hit — the reflected room is still lit by a fake key light),
+  RR13 (roughness-driven glossy — #4a dropped the SSR pyramid at UN), RR14 (specular occlusion);
+  ordered in [rtx-reflections.md](rtx-reflections.md) "Fidelity follow-ups". Stochastic-GGX +
+  NRD-specular is deferred to land *with* H6, which needs the same radiance plumbing.
 - **H6 — RT GI (bridge to Full RT).** Extend the RTAO ray (H4) from "did I hit something" to "gather the
   incoming radiance at the hit" (one indirect diffuse bounce), denoised (ReLAX/ReBLUR). This is the
   moment the hybrid scene starts looking *lit by physics* — and it's already the indirect stage of the

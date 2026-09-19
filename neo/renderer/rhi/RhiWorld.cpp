@@ -19,6 +19,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 
 #include "sys/platform.h"
 #include "renderer/tr_local.h"
+#include "renderer/RenderWorld_local.h"			// RR16: iterate the render world's lightDefs (off-screen lights for reflections)
 #include "renderer/VertexCache.h"
 #include "renderer/Model.h"
 #include "renderer/rhi/RHI.h"
@@ -647,6 +648,14 @@ static float rhiSsrJitterPhase = 0.0f;				// per-frame march jitter rotation
 // two layers share a grain (and scale together with r_ssrResScale). A per-frame ray jitter (ssr_rt,
 // r_rtReflJitter) gives the accumulation something to average, so the grid resolves rather than smears.
 static rhi::RenderTargetHandle rhiRtReflRT = 0;		// this frame's RT reflection contribution (a = hit mask)
+// RR16 (docs/rtx-reflections.md): the view's lights gathered into a device buffer the fullscreen RT
+// reflection pass loops (buffer_reference), so an off-screen-reflected hit is lit by the REAL scene
+// lights, not a fixed key light. Ring across a few frame slots because UpdateBuffer is a bare coherent
+// memcpy (no fence): writing a fresh slot each frame can't race the prior frame's in-flight GPU read.
+#define RT_REFL_MAX_LIGHTS   256
+#define RT_REFL_LIGHT_SLOTS  3
+static rhi::BufferHandle    s_rtReflLightBuf  = 0;
+static unsigned long long   s_rtReflLightAddr = 0;
 static int  rhiRtReflW = 0, rhiRtReflH = 0;
 static rhi::RenderTargetHandle rhiRtReflHistRT[2] = { 0, 0 };	// temporal history ping-pong
 static int  rhiRtReflHistIdx = 0;					// slot that receives this frame's resolve
@@ -3439,6 +3448,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsrHistIdx = 0;			rhiSsrHistW = rhiSsrHistH = 0;
 	rhiSsrHistValid = false;
 	rhiRtReflRT = 0;			rhiRtReflW = rhiRtReflH = 0;
+	s_rtReflLightBuf = 0;		s_rtReflLightAddr = 0;		// RR16: handle is stale after a lost context; recreated lazily
 	rhiRtReflHistRT[0] = rhiRtReflHistRT[1] = 0;
 	rhiRtReflHistIdx = 0;		rhiRtReflHistW = rhiRtReflHistH = 0;
 	rhiRtReflHistValid = false;
@@ -4931,6 +4941,76 @@ static bool RB_RHI_EnsureSsrColorMip( rhi::RHI *r, int w, int h ) {
 	return true;
 }
 
+// RR16: gather the lights that can illuminate the reflection into the ring buffer's current slot; return
+// the count and point *outAddr at that slot's device address (0 = nothing to light with). We iterate the
+// WHOLE render world's lightDefs, NOT viewDef->viewLights: the latter is frustum-culled, so a light whose
+// volume doesn't reach the on-screen frustum is dropped even though the reflection can see a surface it
+// lights (the user's "off-screen lights are evicted in the reflection"). Instead relevance-cull by distance
+// so an off-screen light near the player still lights the reflection. (No shadow rays yet, so a light behind
+// a wall can leak - that is the RR16d follow-up; the falloff radius bounds most of it.) Point-light model:
+// world origin + reach radius + colour (constant-register lights: summed stage colour; the common
+// shaderParm-driven lights: the base RGB parms). fog/blend/ambient cast no directional diffuse -> skipped.
+struct RtReflLightGPU { float pos[3]; float radius; float color[3]; unsigned int flags; };	// std430, 32 B
+
+static int RB_RHI_GatherReflLights( rhi::RHI *r, const viewDef_t *viewDef, unsigned long long *outAddr ) {
+	*outAddr = 0;
+	if ( viewDef == NULL || viewDef->renderWorld == NULL ) {
+		return 0;
+	}
+	if ( s_rtReflLightBuf == 0 ) {
+		s_rtReflLightBuf  = r->CreateBuffer( rhi::BU_STORAGE,
+			RT_REFL_LIGHT_SLOTS * RT_REFL_MAX_LIGHTS * (int)sizeof( RtReflLightGPU ), NULL );
+		s_rtReflLightAddr = ( s_rtReflLightBuf != 0 ) ? r->GetBufferDeviceAddress( s_rtReflLightBuf ) : 0;
+	}
+	if ( s_rtReflLightBuf == 0 || s_rtReflLightAddr == 0 ) {
+		return 0;
+	}
+	const idRenderWorldLocal *rw = viewDef->renderWorld;
+	const idVec3 viewOrg = viewDef->renderView.vieworg;
+	const float  REACH   = 2048.0f;					// how far off-screen a light's reach may still touch the reflection
+	static RtReflLightGPU lights[ RT_REFL_MAX_LIGHTS ];
+	int n = 0;
+	for ( int i = 0; i < rw->lightDefs.Num() && n < RT_REFL_MAX_LIGHTS; i++ ) {
+		const idRenderLightLocal *ld = rw->lightDefs[ i ];
+		if ( ld == NULL ) { continue; }
+		const idMaterial *ls = ld->lightShader;
+		if ( ls == NULL || ls->IsFogLight() || ls->IsBlendLight() || ls->IsAmbientLight() ) { continue; }
+		const float lr = ld->parms.lightRadius.Length();
+		const float reach = ( lr > 1.0f ? lr : 320.0f ) + REACH;	// the light's own reach can bring it into play
+		if ( ( ld->globalLightOrigin - viewOrg ).LengthSqr() > reach * reach ) { continue; }	// too far to matter
+		idVec3 col;
+		const float *cregs = ls->ConstantRegisters();
+		if ( cregs != NULL ) {						// constant-colour light material: sum its stage colours
+			col.Zero();
+			for ( int s = 0; s < ls->GetNumStages(); s++ ) {
+				const shaderStage_t *st = ls->GetStage( s );
+				if ( st == NULL ) { continue; }
+				col[0] += cregs[ st->color.registers[0] ];
+				col[1] += cregs[ st->color.registers[1] ];
+				col[2] += cregs[ st->color.registers[2] ];
+			}
+		} else {									// parametric (the usual case): the light's base RGB shader parms
+			col.Set( ld->parms.shaderParms[SHADERPARM_RED], ld->parms.shaderParms[SHADERPARM_GREEN], ld->parms.shaderParms[SHADERPARM_BLUE] );
+		}
+		if ( col[0] <= 0.0f && col[1] <= 0.0f && col[2] <= 0.0f ) { continue; }	// dark / off
+		RtReflLightGPU &L = lights[ n++ ];
+		L.pos[0] = ld->globalLightOrigin[0];
+		L.pos[1] = ld->globalLightOrigin[1];
+		L.pos[2] = ld->globalLightOrigin[2];
+		L.radius = ( lr > 1.0f ) ? lr : 320.0f;					// a sane reach for degenerate/zero radii
+		L.color[0] = col[0]; L.color[1] = col[1]; L.color[2] = col[2];
+		L.flags = ld->parms.parallel ? 1u : 0u;					// bit0 = parallel/sun (no distance falloff)
+	}
+	if ( n == 0 ) {
+		return 0;
+	}
+	const int slot      = (int)( tr.frameCount % RT_REFL_LIGHT_SLOTS );
+	const int slotBytes = RT_REFL_MAX_LIGHTS * (int)sizeof( RtReflLightGPU );
+	r->UpdateBuffer( s_rtReflLightBuf, slot * slotBytes, n * (int)sizeof( RtReflLightGPU ), lights );
+	*outAddr = s_rtReflLightAddr + (unsigned long long)( slot * slotBytes );
+	return n;
+}
+
 /*
 ===================
 RB_RHI_ScreenSpaceReflections
@@ -5355,6 +5435,8 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	compParms.localParam1[1] = r_ssrIntensity.GetFloat();
 	compParms.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
 	compParms.localParam1[3] = glossyMaxLod;	// r_ssrGlossy: >0 = sample the pyramid by roughness; 0 = sharp
+	// RR14 specular occlusion strength (localParam1.x): 0 when no AO ran this view so ssr_composite is a no-op
+	compParms.localParam1[0] = ( rhiSsaoAppliedThisView ? idMath::ClampFloat( 0.0f, 1.0f, r_specOcclusion.GetFloat() ) : 0.0f );
 	compParms.screenCorrection[0] = 1.0f / fullW;
 	compParms.screenCorrection[1] = 1.0f / fullH;
 	compParms.depthTexRecip[0] = 1.0f / uploadW;
@@ -5383,6 +5465,14 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		backEnd.glState.currenttmu = 0;
 		backEnd.glState.tmu[2].current2DMap = -1;
 		backEnd.glState.tmu[3].current2DMap = -1;
+	}
+	// RR14: AO buffer on unit 4 for specular occlusion. When AO ran this view bind it (roughness-aware
+	// dim in ssr_composite.frag); otherwise bind white so ao = 1 leaves the reflection unchanged.
+	if ( rhiSsaoAppliedThisView ) {
+		RB_RHI_BindRTUnit( r, 4, rhiSsaoResultRT );
+		if ( !vkMode ) { backEnd.glState.tmu[4].current2DMap = -1; }	// direct bind bypassed the tmu cache (mirrors the Hi-Z idiom above)
+	} else {
+		RB_RHI_BindUnit( 4, globalImages->whiteImage );
 	}
 	RB_RHI_DrawFullscreen( r, compProg, compParms, r->GetRenderTargetImage( glossySrcRT ),
 	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
@@ -5440,18 +5530,36 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			// TLAS + geo-table device addresses, bit-cast into the float slots (floatBitsToUint in the shader)
 			memcpy( &rp.rtParms[0], &tlasAddr, sizeof( tlasAddr ) );		// rtParms.x/y = TLAS
 			memcpy( &rp.rtParms[2], &geoAddr,  sizeof( geoAddr ) );		// rtParms.z/w = geo table
-			// fixed key light + ambient for the MVP shade (RR3 wires the scene's real sun)
-			idVec3 keyDir( 0.4f, 0.5f, 0.9f );
-			keyDir.Normalize();
-			rp.color[0] = keyDir[0]; rp.color[1] = keyDir[1]; rp.color[2] = keyDir[2];
+			// RR16: gather the scene's real lights into the ring buffer; ssr_rt loops them to light the hit
+			// (so an off-screen-reflected surface is lit correctly, not by a fixed key light). color = (light-
+			// buffer device addr lo/hi bit-cast, count, ambient); diffuseModifier = (RR16f emissive glow scale,
+			// _, _, real-lights enable). The r_rtReflRealLights 0 key light is a fixed dir hardcoded in-shader.
+			unsigned long long rtLightAddr = 0;
+			const int rtNumLights = r_rtReflRealLights.GetBool() ? RB_RHI_GatherReflLights( r, viewDef, &rtLightAddr ) : 0;
+			memcpy( &rp.color[0], &rtLightAddr, sizeof( rtLightAddr ) );	// color.xy = light-buffer device address
+			rp.color[2] = (float)rtNumLights;
 			rp.color[3] = 0.28f;										// ambient term
-			rp.diffuseModifier[0] = rp.diffuseModifier[1] = rp.diffuseModifier[2] = 1.0f;	// key light colour
+			rp.diffuseModifier[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtReflEmissive.GetFloat() );	// RR16f: self-illumination glow scale
+			rp.diffuseModifier[1] = idMath::ClampFloat( 0.0f, 8.0f, r_rtReflLightScale.GetFloat() );	// RR16: real-light diffuse brightness scale
+			rp.diffuseModifier[3] = ( rtNumLights > 0 ) ? 1.0f : 0.0f;	// real-lights enable (else the fixed key-light fallback)
 			rp.localParam1[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtReflBump.GetFloat() );	// RR10: bump-normal warp amount
+			rp.localParam1[0] = ( rhiSsaoAppliedThisView ? idMath::ClampFloat( 0.0f, 1.0f, r_specOcclusion.GetFloat() ) : 0.0f );	// RR14 specular occlusion strength (0 when no AO this view)
+
+			// RR12 lit-scene reuse: GetFrameColorSampleImage() is the live HDR scene buffer when it rests
+			// sampleable (it does under HDR, which RT reflections require) or 0 otherwise. When available +
+			// enabled, ssr_rt shades an ON-SCREEN hit from the real lit scene (unit 0) instead of the fake key
+			// light; localParam0.w flags it on, windowCoord.w carries the firefly clamp for the reused HDR.
+			const rhi::ImageHandle rtSceneImg = r->GetFrameColorSampleImage();
+			const bool rtReuse = ( rtSceneImg != 0 && r_rtReflSceneReuse.GetBool() );
+			// localParam0.w: 0 = reuse off, 1 = reuse, 2 = reuse + confidence debug (green reuse / red fallback)
+			rp.localParam0[3] = rtReuse ? ( r_rtReflDebug.GetBool() ? 2.0f : 1.0f ) : 0.0f;
+			rp.windowCoord[3] = idMath::ClampFloat( 0.0f, 64.0f, r_ssrFireflyClamp.GetFloat() );
 
 			// ---- Pass A: trace + shade into the dedicated RT target (replace; cleared to 0 = no
-			// contribution). unit 0 (u_ssr) is UNUSED by ssr_rt post-RR7 (no miss-gate); bind the always-
-			// valid normal G-buffer as a harmless dummy so the sampler slot stays valid even when #4a skipped
-			// the SSR march (resultRT is unwritten / out of scope then). 1 = depth, 2/3 = G-buffer.
+			// contribution). unit 0 = the live lit scene (RR12) when reuse is on, else the normal G-buffer as a
+			// harmless dummy (ssr_rt only samples unit 0 when localParam0.w > 0.5). 1 = depth, 2/3 = G-buffer.
+			// Sampling the frame target here is safe: while its scene pass is suspended for this target pass it
+			// rests in SHADER_READ (like RB_RHI_Fxaa reading rhiHdrRT). 4 = AO (RR14).
 			rhi::ClearArgs rtClear;
 			memset( &rtClear, 0, sizeof( rtClear ) );
 			rtClear.color = true;
@@ -5459,7 +5567,13 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 			RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
 			RB_RHI_BindRTImage( r, 3, matImg );
-			RB_RHI_DrawFullscreen( r, rtProg, rp, r->GetRenderTargetImage( rhiNormalResultRT ) );
+			// RR14: AO buffer on unit 4 for specular occlusion (VK-only RT path; white dummy when no AO ran)
+			if ( rhiSsaoAppliedThisView ) {
+				RB_RHI_BindRTUnit( r, 4, rhiSsaoResultRT );
+			} else {
+				RB_RHI_BindUnit( 4, globalImages->whiteImage );
+			}
+			RB_RHI_DrawFullscreen( r, rtProg, rp, rtReuse ? rtSceneImg : r->GetRenderTargetImage( rhiNormalResultRT ) );
 			r->EndPass();
 
 			rhi::RenderTargetHandle rtResultRT = rhiRtReflRT;

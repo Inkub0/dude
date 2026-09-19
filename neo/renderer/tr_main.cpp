@@ -1669,6 +1669,7 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 // matches the shader's unpackUnorm4x8 (R at bits 0-7, G 8-15, B 16-23, A 24-31).
 static unsigned int R_RtMaterialBaseColor( const idMaterial *mat ) {
 	float rgb[3] = { 0.55f, 0.55f, 0.55f };
+	bool  emissive = false;			// RR16f: A flags a self-illuminated (glow) surface
 	if ( mat != NULL ) {
 		const int n = mat->GetNumStages();
 		for ( int i = 0; i < n; i++ ) {
@@ -1680,8 +1681,24 @@ static unsigned int R_RtMaterialBaseColor( const idMaterial *mat ) {
 				break;
 			}
 		}
+		// RR16f: an ADDITIVE stage (blend add: src ONE, dst ONE) with a texture is self-illumination - a
+		// light-source surface (neon tube, ceiling light tile). It is lit by no external light (it lights
+		// the room, not itself), so albedo*lights leaves it ~dark and it vanishes in an off-screen
+		// reflection. Flag it + carry ITS colour (the glow may differ from the diffuse) so the shader
+		// adds the glow back. Prefer the last additive stage (the dominant glow over any base).
+		for ( int i = 0; i < n; i++ ) {
+			const shaderStage_t *st = mat->GetStage( i );
+			const bool additive = ( st->drawStateBits & GLS_SRCBLEND_BITS ) == GLS_SRCBLEND_ONE
+			                   && ( st->drawStateBits & GLS_DSTBLEND_BITS ) == GLS_DSTBLEND_ONE;
+			if ( additive && st->texture.image != NULL ) {
+				rgb[0] = st->texture.image->averageColor[0];
+				rgb[1] = st->texture.image->averageColor[1];
+				rgb[2] = st->texture.image->averageColor[2];
+				emissive = true;
+			}
+		}
 	}
-	unsigned int c = 0xFF000000u;	// A = 255
+	unsigned int c = emissive ? 0xFF000000u : 0x00000000u;	// RR16f: A = self-illumination flag (0 = lit only)
 	for ( int k = 0; k < 3; k++ ) {
 		const int v = (int)( idMath::ClampFloat( 0.0f, 1.0f, rgb[k] ) * 255.0f + 0.5f );
 		c |= ( (unsigned int)v ) << ( k * 8 );

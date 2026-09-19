@@ -362,6 +362,30 @@ under a pool: glints from lights, but no mirror image of the room or a monster.
 
 ---
 
+## Fidelity backlog (no new assets)  **[proposed 2026-09-19 — nothing scheduled]**
+
+From the fidelity review after the decal work. The reflection items became a staged plan —
+RR12 lit-scene reuse at the RT hit, RR13 roughness-driven glossy for the RT tier, RR14 specular
+occlusion, RR15 reflections on wet blood — sequenced around the open RR5 work in
+**[rtx-reflections.md](rtx-reflections.md)** ("Fidelity follow-ups"). The rest, in rough order of
+gain per effort; every one is an opt-in toggle, preset-wired only after a visual pass:
+
+- **Screen-space contact shadows** (GL3 + VK, raster tiers). A short depth-buffer march toward each
+  light inside the interaction pass grounds what shadow maps are too coarse for — pickups, small
+  props, weapon detail, feet. *Not* for Ultra Nightmare: `r_rtAllLights` already traces a hard ray
+  per light there, so this is a Medium→Nightmare feature. Cost scales with lights × lit pixels
+  (it runs per interaction), so budget ~8 steps and gate by light radius. Fidelity: purely additive
+  darkening, but a look change → toggle.
+- **Skin / flesh shading.** A `skin` PBR category already exists (wetness 2.0); give it wrap
+  lighting or a cheap pre-integrated SSS term so faces and Hell flesh stop reading as painted
+  plastic under GGX. Classifier-driven, no assets. Small shader change; the risk is taste, not code.
+- **Volumetric light shafts** for projected/spot lights — froxel or per-light raymarch through the
+  existing shadow maps (or RT rays at UN), modulated by the existing fog volumes. Biggest mood win,
+  biggest departure from stock, real cost: top presets only, strictly opt-in, needs its own plan doc.
+- **RT GI (one bounce)** — already H6 in [rtx-hybrid-roadmap.md](rtx-hybrid-roadmap.md).
+
+---
+
 ## Codebase independence  **[planned]**
 
 A small phase to break free from third-party content and stale identity so a clean

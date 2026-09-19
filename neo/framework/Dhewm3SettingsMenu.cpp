@@ -2620,7 +2620,9 @@ struct EnhancementPreset {
 	float tessDisplace;             // r_tessDisplace
 	// DUDE parallax occlusion mapping (appended, see note above; GL3 + Vulkan): world-surface
 	// relief from Medium up. Self-shadowing (the second, half-step march) is the cost swing, so
-	// it's off on Medium and full from High up. parallaxShadow is inert where parallax is off.
+	// it's off on Medium and full from High up, EXCEPT Ultra Nightmare, which eases it to 0.5:
+	// there RTAO already occludes the relief's crevices, so full POM self-shadow double-darkens.
+	// parallaxShadow is inert where parallax is off.
 	bool  parallax;                 // r_parallax
 	float parallaxShadow;           // r_parallaxShadow
 	// DUDE GPU MD5 skinning (appended, see note above; Vulkan-only, inert on GL3). ON from Medium up —
@@ -2723,7 +2725,7 @@ static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false },
 	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false },
 	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false },
-	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     true,  true,  true,  false, true , true, true, true, true  },
+	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 0.5f, true, true,  true,  true,  0,     true,  true,  true,  false, true , true, true, true, true  },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -3862,6 +3864,18 @@ static void DrawDbgGroup_SSR()
 	AddTooltip( "r_ssrMaxRoughness: surfaces rougher than this reflect nothing (fade starts at 70% of it). "
 		"Reflections are currently sharp-only, so keep this low — rough painted walls showing crisp mirror "
 		"images reads wrong. Raise it to let more of the world reflect." );
+
+	// RR14: shared by SSR + RT reflections (like Intensity / Roughness Cutoff above), so it lives in this
+	// group rather than duplicated in the RT group. Needs an AO buffer this view or it's inert.
+	float specOcc = r_specOcclusion.GetFloat();
+	if ( ImGui::SliderFloat( "Specular Occlusion", &specOcc, 0.0f, 1.0f, "%.2f" ) ) {
+		r_specOcclusion.SetFloat( specOcc );
+	}
+	AddTooltip( "r_specOcclusion: dim reflections by ambient occlusion, roughness-aware — a polished floor "
+		"or metal stops glowing in creases and under props/at contact, while a near-mirror is barely "
+		"touched. Applies to both SSR and RT reflections. Needs Ambient Occlusion on (Graphics tab, or RTAO "
+		"at Ultra Nightmare); does nothing without it. Direct specular from lights is never occluded. "
+		"0 = off, 0.7 = default." );
 
 	int ssrSteps = r_ssrSteps.GetInteger();
 	if ( ImGui::SliderInt( "March Steps", &ssrSteps, 4, 64 ) ) {

@@ -344,6 +344,13 @@ public:
 	// clears into it and EndPass returns to it after nested target passes (shadow maps,
 	// SSAO). rt == 0 restores the backbuffer. BeginFrame resets this to 0.
 	virtual void				SetFrameTarget( RenderTargetHandle rt ) = 0;
+	// The current frame target's color as a shader-sampleable image, IFF it is safe to sample right
+	// now: a frame target is set and it rests in SHADER_READ between passes (the HDR scene buffer).
+	// 0 when the scene is on the swapchain sceneColor path (TRANSFER_SRC, not sampleable) or no frame
+	// target is set. RR12 (docs/rtx-reflections.md): the RT reflection pass reads the lit scene here to
+	// shade an on-screen hit with its real radiance instead of a fake key light. Default 0 (backends
+	// without a sampleable scene target — e.g. GL3, where RT reflections never run — opt out cleanly).
+	virtual ImageHandle			GetFrameColorSampleImage() { return 0; }
 	// begin a pass into one face (0..5 = +X,-X,+Y,-Y,+Z,-Z) of a cube target.
 	// EndPass restores the backbuffer + viewport exactly like BeginTargetPass.
 	virtual void				BeginCubeFacePass( RenderTargetHandle rt, int face, const ClearArgs *clear ) = 0;
