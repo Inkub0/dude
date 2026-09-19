@@ -17,7 +17,7 @@ layout(location = 0) out vec4 fragColor;
 void main() {
 	ivec2 p = ivec2( gl_FragCoord.xy );
 	vec4 mt = texelFetch( u_materialBuffer, p, 0 );
-	vec3 keep = texelFetch( u_decalMask, p, 0 ).rgb;
+	vec2 keep = texelFetch( u_decalMask, p, 0 ).rg;
 	dudeDecalSurface( keep, mt.x, mt.y );
 	fragColor = mt;
 }

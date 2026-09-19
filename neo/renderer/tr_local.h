@@ -1074,6 +1074,11 @@ void R_ResetOcclusionMapCache( void );
 extern idCVar r_decalBloodSheen;			// sheen on blood decals (0=matte, 1=as authored)
 extern idCVar r_decalMetalMask;			// overlay decal coverage strips the PBR metalness under it (0=off)
 extern idCVar r_decalRoughen;			// overlay decal coverage roughens the PBR surface under it (0=off)
+extern idCVar r_decalWetBlood;			// wet blood film: blood decals glint as wet surfaces of their own (strength, 0=off)
+extern idCVar r_decalWetBloodRelief;	// wet blood film: slope multiplier on the blood's generated relief
+extern idCVar r_decalWetBloodThreshold;	// wet blood film: minimum decal coverage that shows any film
+extern idCVar r_decalWetBloodRough;		// wet blood film: roughness of the film
+bool R_DecalIsBlood( const idMaterial *material );	// "blood" content flag or a blood-like name
 extern idCVar r_decalMatte;				// translucent non-blood decals lose specular + cube reflection
 // sheen multiplier for a material's specular interaction and texgen-reflect stage (1 = not a decal)
 float R_DecalSheenScale( const idMaterial *material );
@@ -1566,6 +1571,10 @@ void RB_DrawShaderPasses( drawSurf_t **drawSurfs, int numDrawSurfs );
 void RB_LoadShaderTextureMatrix( const float *shaderRegisters, const textureStage_t *texture );
 void RB_GetShaderTextureMatrix( const float *shaderRegisters, const textureStage_t *texture, float matrix[16] );
 void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInteraction)(const drawInteraction_t *) );
+// DUDE wet blood film: a synthesized specular-only interaction for a blood decal (RHI backends)
+void RB_CreateFilmDrawInteractions( const drawSurf_t *surf, const shaderStage_t *coverStage,
+									idImage *reliefImage, const shaderStage_t *reliefStage, float strength,
+									void (*DrawInteraction)(const drawInteraction_t *) );
 
 const shaderStage_t *RB_SetLightTexture( const idRenderLightLocal *light );
 

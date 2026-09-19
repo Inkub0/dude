@@ -121,6 +121,46 @@ fidelity impact.
   `shaders/decalsurface.glsl`, `shaders/interaction.frag`, `rhi/RHI.h` +
   `rhi/vk/VulkanBackend.cpp` (texture binding 14); sliders in Debugging → Glass Reflections.
 
+### 1.7 Wet blood film (`r_decalWetBlood`)
+- **Legacy:** blood is a matte darkening stain. Texture packs fake wetness per material
+  (specular + heightmap bump + a cube stage) — but only on map-placed decals: every splat the
+  game *spawns* is a projected decal (`idRenderModelDecal`), which the frontend never lights
+  and which carried no tangent space at all, so no material can make those shine.
+- **Dead end, recorded:** wetness as a property of the wall underneath (lower its roughness /
+  level its normal under the blood). The glint then traces the *wall's* relief, RT reflections
+  draw its grooves across the splat, and a levelled film under Doom 3's point lights shows
+  nothing at all — a flat mirror only glints at a light's exact mirror angle. Blood reads wet
+  because its **own** relief always has some facet catching a light.
+- **Ours:** every blood decal (`R_DecalIsBlood`; darken or filter blend) is lit as a surface
+  of its own. `RB_RHI_DecalMaskPass` collects them; after each light's translucent chain
+  `RB_RHI_DrawFilmInteractions` culls them against the light and submits a synthesized
+  specular-only interaction (`RB_CreateFilmDrawInteractions`) through the regular
+  interaction path, so shadow maps, RT shadows and PBR all apply:
+  - **relief** = the material's authored bump stage when it has one, else
+    `smoothnormals(heightmap(<cover image>, 4))` (inverted for filter blends) generated with the
+    engine's image programs; `r_decalWetBloodRelief` (0.17, 0..2) scales the slope in the shader.
+  - **film** = dielectric GGX at `r_decalWetBloodRough` (0.18), strength `r_decalWetBlood`
+    (0.057, 0..0.5).
+  - **coverage + gain** come from the decal's own cover image on the diffuse unit
+    (`interaction.frag` film mode, `u_channelMask`): coverage is shaped into an even film that
+    feathers in above `r_decalWetBloodThreshold` (0.3) — splat textures trail off into a mist
+    too faint to see, and without that floor the bare floor around a splat glints as if wet —
+    and the glint is pre-divided per channel by the blend's transmittance —
+    it is drawn in the light loop, *before* the decal's blend multiplies the framebuffer.
+  - projected decals get a tangent frame at creation (`R_DecalWindingFrame`), and the draw
+    uses the ambient pass's polygon offset to win depth-LESS against its coplanar wall.
+  - when a map-placed decal's material authors its own specular (texture packs), the film
+    replaces that highlight; the pack's cube sheen stays on `r_decalBloodSheen`.
+- **Scope:** PBR only, primary fullscreen view; not overlays on characters (no tangent space),
+  not decals whose blend pass tessellates. Up to 96 decals per view, one draw per decal per
+  overlapping light.
+- **Defaults:** all four values are the project owner's in-game tuning (2026-09-19).
+- **Fidelity impact:** non-vanilla and visibly changes stock blood. **On by default, but only
+  where PBR runs** (High preset and up) — Potato..Medium keep the matte, faithful blood.
+  `r_decalWetBlood 0` turns it off.
+- **Files:** `ModelDecal.cpp`, `tr_render.cpp`, `rhi/RhiWorld.cpp`, `shaders/interaction.frag`;
+  sliders in Debugging → Glass Reflections.
+
 ---
 
 ## 2. Equivalent result, different mechanism

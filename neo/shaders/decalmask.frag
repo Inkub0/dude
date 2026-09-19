@@ -6,7 +6,7 @@
 //   0  alpha blend (src_alpha, 1-src_alpha)   -> alpha
 //   1  darken (zero, 1-src_color)             -> luminance
 //   2  filter / modulate (dst_color, zero)    -> 1 - luminance
-// u_localParam0.yzw = how hard coverage bites on metalness / smoothness / dryness. The target has no depth attachment, so occlusion is tested here
+// u_localParam0.yz = how hard coverage bites on metalness / smoothness. The target has no depth attachment, so occlusion is tested here
 // against the sealed scene depth (_currentDepth), in linear view units like softparticle.frag.
 
 #include "renderparms.glsl"
@@ -39,5 +39,5 @@ void main() {
 	} else if ( u_localParam0.x > 0.5 ) {
 		cov = lum;
 	}
-	fragColor = vec4( 1.0 - clamp( cov * u_localParam0.yzw, 0.0, 1.0 ), 1.0 );
+	fragColor = vec4( 1.0 - clamp( cov * u_localParam0.yz, 0.0, 1.0 ), 1.0, 1.0 );
 }

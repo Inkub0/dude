@@ -591,6 +591,14 @@ idCVar r_decalMatte( "r_decalMatte", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BO
 // surface under them by their coverage, so stains read matte against the plate around them.
 idCVar r_decalMetalMask( "r_decalMetalMask", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how much an overlay decal's coverage removes the metalness of the surface under it: 0 = off, 1 = a fully opaque decal leaves bare dielectric (non-vanilla, opengl3/Vulkan only; needs r_pbr)", 0.0f, 1.0f );
 idCVar r_decalRoughen( "r_decalRoughen", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how much an overlay decal's coverage roughens the surface under it, breaking up its highlight and its reflection: 0 = off, 1 = a fully opaque decal leaves a matte surface (non-vanilla, opengl3/Vulkan only; needs r_pbr)", 0.0f, 1.0f );
+// DUDE wet blood film (docs/readme-changes.md 1.7): blood decals are lit as wet surfaces of their
+// own, off relief generated from the splat itself. Defaults are the user's in-game tuning
+// (2026-09-19). On by default, but it only ever runs where r_pbr does (High preset and up), so
+// the Potato..Medium presets keep their matte, faithful blood.
+idCVar r_decalWetBlood( "r_decalWetBlood", "0.057", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "wet blood: every blood decal - stock or mod, map-placed or spawned by the game - glints off the lights around it as a wet film with its own relief. Strength of the highlight, 0 = off (non-vanilla, opengl3/Vulkan only; needs r_pbr)", 0.0f, 0.5f );
+idCVar r_decalWetBloodRelief( "r_decalWetBloodRelief", "0.17", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "wet blood: how strongly the film's surface follows the blood's own height (bulging edges, ripples inside). 0 = a flat film, which only glints at the exact mirror angle of a light", 0.0f, 2.0f );
+idCVar r_decalWetBloodThreshold( "r_decalWetBloodThreshold", "0.3", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "wet blood: how much blood a texel must carry before the film shows at all (0..1 of the decal's own coverage; the film feathers in over the next 0.25). Splat textures trail off into a mist too faint to see - without a floor the floor around a splat glints as if wet", 0.0f, 0.95f );
+idCVar r_decalWetBloodRough( "r_decalWetBloodRough", "0.18", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "wet blood: roughness of the film. Lower = tighter, sharper glints (fresh blood); higher = a broad soft sheen (drying blood)", 0.05f, 1.0f );
 
 /*
 ===================
@@ -601,14 +609,21 @@ or by name (the packs tag only some of their blood materials). Opaque non-blood 
 alone: those are vents, wires, posters and bullet holes — real objects whose shine is intended.
 ===================
 */
+bool R_DecalIsBlood( const idMaterial *material ) {
+	const char *name = material->GetName();
+	if ( idStr::FindText( name, "glow", false ) >= 0 ) {
+		return false;	// the alpha-blended "glow splats" are plasma / hell goo, not blood
+	}
+	return ( material->GetContentFlags() & CONTENTS_BLOOD )
+		|| idStr::FindText( name, "blood", false ) >= 0 || idStr::FindText( name, "splat", false ) >= 0
+		|| idStr::FindText( name, "smear", false ) >= 0 || idStr::FindText( name, "handprint", false ) >= 0;
+}
+
 float R_DecalSheenScale( const idMaterial *material ) {
 	if ( material == NULL || material->GetSort() != SS_DECAL ) {
 		return 1.0f;
 	}
-	const char *name = material->GetName();
-	if ( ( material->GetContentFlags() & CONTENTS_BLOOD )
-		|| idStr::FindText( name, "blood", false ) >= 0 || idStr::FindText( name, "splat", false ) >= 0
-		|| idStr::FindText( name, "smear", false ) >= 0 || idStr::FindText( name, "handprint", false ) >= 0 ) {
+	if ( R_DecalIsBlood( material ) ) {
 		return r_decalBloodSheen.GetFloat();
 	}
 	if ( material->Coverage() == MC_TRANSLUCENT && r_decalMatte.GetBool() ) {

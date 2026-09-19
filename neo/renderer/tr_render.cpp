@@ -926,6 +926,120 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 
 /*
 =============
+RB_CreateFilmDrawInteractions
+
+DUDE wet blood film (r_decalWetBlood). Synthesizes one specular-only interaction per light
+stage for a blood decal, as a surface of its own. The frontend cannot do it: a projected decal
+gets no interactions at all, and stock blood materials have no lit stages to decompose.
+  bump     = the blood's relief (reliefStage's matrix when the material authors one,
+             else the cover stage's)
+  diffuse  = the decal's COVER stage image with its raw stage colour and vertex-colour mode.
+             It contributes no light - interaction.frag (film mode) reads it for the film's
+             coverage and transmittance, then zeroes the diffuse term
+  specular = white, at the light's colour * strength
+Everything the light contributes mirrors RB_CreateSingleDrawInteractions. Submits straight to
+DrawInteraction: RB_SubmittInteraction's debug image swaps (r_whiteWorld, r_skipDiffuse) would
+turn the cover image, and with it the whole decal quad, into film.
+=============
+*/
+void RB_CreateFilmDrawInteractions( const drawSurf_t *surf, const shaderStage_t *coverStage,
+									idImage *reliefImage, const shaderStage_t *reliefStage, float strength,
+									void (*DrawInteraction)(const drawInteraction_t *) ) {
+	const float			*surfaceRegs = surf->shaderRegisters;
+	const viewLight_t	*vLight = backEnd.vLight;
+	const idMaterial	*lightShader = vLight->lightShader;
+	const float			*lightRegs = vLight->shaderRegisters;
+	drawInteraction_t	inter;
+
+	if ( r_skipInteractions.GetBool() || r_skipSpecular.GetBool() || !surf->geo || !surf->geo->ambientCache
+		|| !coverStage || !reliefImage || strength <= 0.0f || lightShader->IsAmbientLight() ) {
+		return;
+	}
+
+	// DG: support lights nospecular parm - a film is nothing but specular
+	const int noSpecVar = r_supportNoSpecular.GetInteger();
+	const bool allowNoSpecular = ( noSpecVar == 1 ) || ( noSpecVar == -1 && tr.allowNoSpecular );
+	if ( allowNoSpecular && vLight->lightDef->parms.noSpecular ) {
+		return;
+	}
+
+	if ( surf->space != backEnd.currentSpace ) {
+		backEnd.currentSpace = surf->space;
+	}
+
+	// change the scissor if needed
+	if ( r_useScissor.GetBool() && !backEnd.currentScissor.Equals( surf->scissorRect ) ) {
+		backEnd.currentScissor = surf->scissorRect;
+		rhi::GetRHI()->SetScissor( backEnd.viewDef->viewport.x1 + backEnd.currentScissor.x1,
+			backEnd.viewDef->viewport.y1 + backEnd.currentScissor.y1,
+			backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
+			backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
+	}
+
+	inter.surf = surf;
+	inter.lightFalloffImage = vLight->falloffImage;
+
+	R_GlobalPointToLocal( surf->space->modelMatrix, vLight->globalLightOrigin, inter.localLightOrigin.ToVec3() );
+	R_GlobalPointToLocal( surf->space->modelMatrix, backEnd.viewDef->renderView.vieworg, inter.localViewOrigin.ToVec3() );
+	inter.localLightOrigin[3] = 0;
+	inter.localViewOrigin[3] = 1;
+	inter.ambientLight = false;
+
+	// the base projections may be modified by texture matrix on light stages
+	idPlane lightProject[4];
+	for ( int i = 0 ; i < 4 ; i++ ) {
+		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[i], lightProject[i] );
+	}
+
+	// the surface side is the same for every light stage
+	idImage *coverImage = NULL;
+	idImage *unused = NULL;
+	float coverColor[4];
+	R_SetDrawInteraction( coverStage, surfaceRegs, &coverImage, inter.diffuseMatrix, coverColor );
+	R_SetDrawInteraction( reliefStage ? reliefStage : coverStage, surfaceRegs, &unused, inter.bumpMatrix, NULL );
+	inter.specularMatrix[0].Set( 1.0f, 0.0f, 0.0f, 0.0f );
+	inter.specularMatrix[1].Set( 0.0f, 1.0f, 0.0f, 0.0f );
+	if ( !coverImage ) {
+		return;
+	}
+
+	for ( int lightStageNum = 0 ; lightStageNum < lightShader->GetNumStages() ; lightStageNum++ ) {
+		const shaderStage_t	*lightStage = lightShader->GetStage( lightStageNum );
+
+		// ignore stages that fail the condition
+		if ( !lightRegs[ lightStage->conditionRegister ] ) {
+			continue;
+		}
+
+		inter.lightImage = lightStage->texture.image;
+
+		memcpy( inter.lightProjection, lightProject, sizeof( inter.lightProjection ) );
+		// now multiply the texgen by the light texture matrix
+		if ( lightStage->texture.hasMatrix ) {
+			RB_GetShaderTextureMatrix( lightRegs, &lightStage->texture, backEnd.lightTextureMatrix );
+			RB_BakeTextureMatrixIntoTexgen( reinterpret_cast<class idPlane *>(inter.lightProjection), backEnd.lightTextureMatrix );
+		}
+
+		inter.bumpImage = reliefImage;
+		inter.diffuseImage = coverImage;
+		inter.specularImage = globalImages->whiteImage;
+		inter.vertexColor = coverStage->vertexColor;
+		for ( int i = 0 ; i < 4 ; i++ ) {
+			inter.diffuseColor[i] = coverColor[i];		// NOT lit: the cover's own stage colour
+		}
+		inter.specularColor[0] = strength * backEnd.lightScale * lightRegs[ lightStage->color.registers[0] ];
+		inter.specularColor[1] = strength * backEnd.lightScale * lightRegs[ lightStage->color.registers[1] ];
+		inter.specularColor[2] = strength * backEnd.lightScale * lightRegs[ lightStage->color.registers[2] ];
+		inter.specularColor[3] = lightRegs[ lightStage->color.registers[3] ];
+
+		if ( inter.specularColor[0] > 0.0f || inter.specularColor[1] > 0.0f || inter.specularColor[2] > 0.0f ) {
+			DrawInteraction( &inter );
+		}
+	}
+}
+
+/*
+=============
 RB_DrawView
 =============
 */

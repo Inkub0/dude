@@ -3,15 +3,16 @@
 // multiply-blended so overlapping decals compound:
 //   r  metalness kept        dirt, blood and soot are dielectrics
 //   g  smoothness kept       dirt scatters: roughness climbs to DUDE_DECAL_DIRT_ROUGH
-//   b  dryness kept          wet blood films over: roughness drops to DUDE_DECAL_WET_ROUGH
 // Shared by interaction.frag (direct light) and decalmat.frag (the SSR/RT rough-metal buffer)
 // so highlights and reflections agree about the same stain.
+//
+// Wetness is NOT a property of the surface underneath (tried, three ways: a wet wall glints
+// along the WALL's relief, and a levelled film under point lights shows nothing at all). Wet
+// blood is lit as its own surface - see the film path in interaction.frag.
 
 #define DUDE_DECAL_DIRT_ROUGH 0.85
-#define DUDE_DECAL_WET_ROUGH  0.12
 
-void dudeDecalSurface( vec3 keep, inout float rough, inout float metal ) {
+void dudeDecalSurface( vec2 keep, inout float rough, inout float metal ) {
 	metal *= keep.r;
 	rough = mix( max( rough, DUDE_DECAL_DIRT_ROUGH ), rough, keep.g );
-	rough = mix( min( rough, DUDE_DECAL_WET_ROUGH ), rough, keep.b );
 }

@@ -203,6 +203,73 @@ void idRenderModelDecal::GlobalProjectionInfoToLocal( decalProjectionInfo_t &loc
 
 /*
 =================
+R_DecalWindingFrame
+
+DUDE wet blood film (r_decalWetBlood): a projected decal carried no tangent space at all - the
+frontend never lights one, so stock never needed it. Give each winding the frame of the triangle
+it was clipped from: that triangle's plane normal (same point order as R_DeriveFacePlanes, so
+it faces the way the wall does) and tangents along the projected S / T, the way
+R_DeriveTangents builds them, so the backend can light the decal as a surface of its own.
+=================
+*/
+static void R_DecalWindingFrame( const idWinding &w, idVec3 &normal, idVec3 tangents[2] ) {
+	const int n = w.GetNumPoints();
+	if ( n < 3 ) {
+		normal.Set( 0.0f, 0.0f, 1.0f );
+		tangents[0].Set( 1.0f, 0.0f, 0.0f );
+		tangents[1].Set( 0.0f, 1.0f, 0.0f );
+		return;
+	}
+	const idVec3 p0 = w[0].ToVec3();
+
+	// the fan triangle with the largest area: clipping leaves slivers at the winding's start
+	int best = 1;
+	float bestArea = -1.0f;
+	for ( int i = 1; i + 1 < n; i++ ) {
+		const float area = ( w[i].ToVec3() - p0 ).Cross( w[i+1].ToVec3() - p0 ).LengthSqr();
+		if ( area > bestArea ) {
+			bestArea = area;
+			best = i;
+		}
+	}
+	const idVec5 &a = w[0];
+	const idVec5 &b = w[best];
+	const idVec5 &c = w[best+1];
+
+	idPlane plane;
+	if ( !plane.FromPoints( a.ToVec3(), b.ToVec3(), c.ToVec3() ) ) {
+		normal.Set( 0.0f, 0.0f, 1.0f );
+		tangents[0].Set( 1.0f, 0.0f, 0.0f );
+		tangents[1].Set( 0.0f, 1.0f, 0.0f );
+		return;
+	}
+	normal = plane.Normal();
+
+	const idVec3 d0 = b.ToVec3() - a.ToVec3();
+	const idVec3 d1 = c.ToVec3() - a.ToVec3();
+	const float ds0 = b.s - a.s, dt0 = b.t - a.t;
+	const float ds1 = c.s - a.s, dt1 = c.t - a.t;
+	const float area = ds0 * dt1 - dt0 * ds1;
+	if ( idMath::Fabs( area ) < 1e-12f ) {
+		// the projection collapsed onto this triangle (edge-on): any frame in the plane will do
+		normal.NormalVectors( tangents[0], tangents[1] );
+		return;
+	}
+	const float inva = area < 0.0f ? -1.0f : 1.0f;		// mirrored projection
+	tangents[0] = ( d0 * dt1 - d1 * dt0 ) * inva;
+	tangents[1] = ( d1 * ds0 - d0 * ds1 ) * inva;
+	// square them up against the normal; an oblique projection skews S / T on the surface
+	for ( int i = 0; i < 2; i++ ) {
+		tangents[i] -= ( tangents[i] * normal ) * normal;
+		if ( tangents[i].Normalize() < 1e-8f ) {
+			normal.NormalVectors( tangents[0], tangents[1] );
+			return;
+		}
+	}
+}
+
+/*
+=================
 idRenderModelDecal::AddWinding
 =================
 */
@@ -221,6 +288,11 @@ void idRenderModelDecal::AddWinding( const idWinding &w, const idMaterial *decal
 		decalInfo = material->GetDecalInfo();
 		invFadeDepth = -1.0f / fadeDepth;
 
+		// DUDE: tangent space for the backend's film lighting (see R_DecalWindingFrame)
+		idVec3 frameNormal, frameTangents[2];
+		R_DecalWindingFrame( w, frameNormal, frameTangents );
+		tri.tangentsCalculated = true;
+
 		for ( i = 0; i < w.GetNumPoints(); i++ ) {
 			fade = fadePlanes[0].Distance( w[i].ToVec3() ) * invFadeDepth;
 			if ( fade < 0.0f ) {
@@ -236,6 +308,9 @@ void idRenderModelDecal::AddWinding( const idWinding &w, const idMaterial *decal
 			tri.verts[tri.numVerts + i].xyz = w[i].ToVec3();
 			tri.verts[tri.numVerts + i].st[0] = w[i].s;
 			tri.verts[tri.numVerts + i].st[1] = w[i].t;
+			tri.verts[tri.numVerts + i].normal = frameNormal;
+			tri.verts[tri.numVerts + i].tangents[0] = frameTangents[0];
+			tri.verts[tri.numVerts + i].tangents[1] = frameTangents[1];
 			for ( int k = 0 ; k < 4 ; k++ ) {
 				int icolor = idMath::FtoiFast( decalInfo.start[k] * fade * 255.0f );
 				if ( icolor < 0 ) {

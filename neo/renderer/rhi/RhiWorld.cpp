@@ -368,6 +368,33 @@ static bool rhiSsaoAppliedThisView = false;			// AO was produced for the view be
 // 0 = none, interactions keep full metalness. Up here because RB_RHI_DrawInteraction binds it.
 static rhi::ImageHandle rhiDecalMaskImage = 0;
 
+// DUDE wet blood film (r_decalWetBlood, docs/readme-changes.md 1.7). This view's blood decals,
+// collected by RB_RHI_DecalMaskPass and lit once per light by RB_RHI_DrawFilmInteractions as
+// surfaces of their own. rhiFilmDraw is set while one of them is being submitted, so
+// RB_RHI_DrawInteraction knows the draw is a film and not the material it nominally belongs to.
+struct rhiFilmSurf_t {
+	const drawSurf_t *		surf;
+	const shaderStage_t *	cover;			// the unlit blend stage that draws the blood
+	const shaderStage_t *	reliefStage;	// the material's own bump stage (for its matrix), or NULL
+	idImage *				relief;			// normal map of the blood's own height
+	float					mode;			// 1 darken (zero, 1-src_color), 2 filter: interaction.frag's film mode
+	idBounds				bounds;			// local space, for the per-light cull
+};
+static idList<rhiFilmSurf_t>	rhiFilmSurfs;
+static const rhiFilmSurf_t *	rhiFilmDraw = NULL;
+
+// the frontend lights this surface itself (a map-placed decal whose material authors bump +
+// specular, as the texture packs do): the film replaces that highlight rather than doubling it.
+// din->surf is a per-light copy, so match on what it shares with the ambient surface.
+static bool RB_RHI_SurfHasFilm( const drawSurf_t *surf ) {
+	for ( int i = 0; i < rhiFilmSurfs.Num(); i++ ) {
+		if ( rhiFilmSurfs[i].surf->material == surf->material && rhiFilmSurfs[i].surf->space == surf->space ) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // SSAO Phase 1 prefiltered depth mip chain (docs/ssao-perf-optimization.md, r_ssaoDepthMip).
 // A single AO-resolution RGBA16F target holding LINEAR view-space eye depth in R with a
 // render-generated mip chain: level 0 is written by ssao_depthmip.frag, coarser levels by
@@ -1187,7 +1214,11 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		memcpy( parms.specularModifier, din->specularColor.ToFloatPtr(), 16 );
 	}
 	// DUDE: decal sheen control — both the vanilla and the GGX lobe multiply by this modifier
-	const float decalSheen = R_DecalSheenScale( din->surf->material );
+	float decalSheen = rhiFilmDraw ? 1.0f : R_DecalSheenScale( din->surf->material );
+	if ( !rhiFilmDraw && rhiFilmSurfs.Num() > 0 && din->surf->material->GetSort() == SS_DECAL
+		&& RB_RHI_SurfHasFilm( din->surf ) ) {
+		decalSheen = 0.0f;		// wet blood film on: it IS this decal's highlight
+	}
 	if ( decalSheen != 1.0f ) {
 		parms.specularModifier[0] *= decalSheen;
 		parms.specularModifier[1] *= decalSheen;
@@ -1252,6 +1283,24 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			pbrOrganicSpecFallback = true;
 			parms.specularModifier[0] = parms.specularModifier[1] =
 			parms.specularModifier[2] = parms.specularModifier[3] = 1.0f;
+		}
+
+		// DUDE wet blood film: this draw is a blood decal lit as its own surface, not the material
+		// it nominally belongs to - a smooth dielectric film, no category, no dielectric dimming.
+		// u_channelMask (free in the interaction shaders) switches interaction.frag to film mode.
+		if ( rhiFilmDraw ) {
+			pbrOrganicSpecFallback = false;
+			parms.pbrParms[0] = 0.0f;
+			parms.pbrParms[1] = idMath::ClampFloat( 0.05f, 1.0f, r_decalWetBloodRough.GetFloat() );
+			parms.pbrParms[3] = 1.0f;
+			parms.occlusionParms[3] = 0.0f;
+			parms.channelMask[0] = rhiFilmDraw->mode;
+			parms.channelMask[1] = idMath::ClampFloat( 0.0f, 2.0f, r_decalWetBloodRelief.GetFloat() );
+			// zw: the coverage window the film feathers in over. The floor keeps the film off the
+			// faint mist splat textures trail off into - blood too thin to see should not glint.
+			const float filmFloor = idMath::ClampFloat( 0.0f, 0.95f, r_decalWetBloodThreshold.GetFloat() );
+			parms.channelMask[2] = filmFloor;
+			parms.channelMask[3] = Min( filmFloor + 0.25f, 1.0f );
 		}
 	}
 
@@ -1621,6 +1670,64 @@ static void RB_RHI_CreateDrawInteractions( const drawSurf_t *surf ) {
 
 /*
 ===================
+RB_RHI_DrawFilmInteractions
+
+DUDE wet blood film (r_decalWetBlood): lights this view's blood decals as surfaces of their own
+under backEnd.vLight. Blood only reads wet when something on it mirrors a light to the eye, and
+Doom 3's lights are points - so the glint has to come off the blood's OWN relief (bulging
+edges, ripples inside), which a wall underneath cannot supply. The frontend cannot light these:
+a projected decal (every splat the game spawns, stock or mod) gets no interactions at all, and
+stock blood materials have no lit stages. So the backend synthesizes a specular-only interaction
+per decal per overlapping light and runs it through the regular interaction path - shadows, RT
+modes and PBR all apply. Called with the translucent-chain state (depth LESS, no stencil); the
+decal is coplanar with its wall, so it needs the ambient pass's polygon offset to win that test.
+===================
+*/
+// scales r_decalWetBlood onto the specular colour. Calibrated blind and far too hot: tuned
+// in-game, the cvar's default landed at 0.057 - hence its 0..0.5 range. Left alone so tuned
+// values keep their look.
+static const float RHI_FILM_GAIN = 3.0f;
+
+static void RB_RHI_DrawFilmInteractions( rhi::RHI *r, const viewDef_t *viewDef, const viewLight_t *vLight ) {
+	const float strength = r_decalWetBlood.GetFloat();
+	if ( rhiFilmSurfs.Num() == 0 || strength <= 0.0f || !vLight->lightDef ) {
+		return;
+	}
+	for ( int i = 0; i < rhiFilmSurfs.Num(); i++ ) {
+		const rhiFilmSurf_t &film = rhiFilmSurfs[i];
+		const drawSurf_t *surf = film.surf;
+		if ( R_CullLocalBox( film.bounds, surf->space->modelMatrix, 6, vLight->lightDef->frustum ) ) {
+			continue;
+		}
+		RB_RHI_SpaceMvp( viewDef, surf->space, ictx.mvp );
+		RB_RHI_StreamAmbient( r, surf->geo, ictx.vb, ictx.vertOfs, ictx.ib, ictx.idxOfs );
+
+		const idMaterial *shader = surf->material;
+		const bool polyOffset = shader->TestMaterialFlag( MF_POLYGONOFFSET );
+		if ( polyOffset ) {
+			if ( qglEnable != NULL ) {
+				qglEnable( GL_POLYGON_OFFSET_FILL );
+				qglPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+			}
+			r->SetPolygonOffset( true, r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * shader->GetPolygonOffset() );
+		}
+
+		rhiFilmDraw = &film;
+		RB_CreateFilmDrawInteractions( surf, film.cover, film.relief, film.reliefStage,
+		                               strength * RHI_FILM_GAIN, RB_RHI_DrawInteraction );
+		rhiFilmDraw = NULL;
+
+		if ( polyOffset ) {
+			if ( qglDisable != NULL ) {
+				qglDisable( GL_POLYGON_OFFSET_FILL );
+			}
+			r->SetPolygonOffset( false, 0.0f, 0.0f );
+		}
+	}
+}
+
+/*
+===================
 RB_RHI_StencilShadowPass
 
 Mirrors RB_StencilShadowPass/RB_T_Shadow, always through StencilOpSeparate
@@ -1801,7 +1908,8 @@ static void RB_RHI_CaptureCurrentDepth( const viewDef_t *viewDef ) {
 		|| ( r_enableDepthCapture.GetInteger() == -1
 		     && ( r_useSoftParticles.GetBool()
 		          || ( ( r_ssao.GetBool() || r_ssr.GetBool()
-		                 || ( r_pbr.GetBool() && ( r_decalMetalMask.GetFloat() > 0.0f || r_decalRoughen.GetFloat() > 0.0f ) ) )
+		                 || ( r_pbr.GetBool() && ( r_decalMetalMask.GetFloat() > 0.0f || r_decalRoughen.GetFloat() > 0.0f
+		                                        || r_decalWetBlood.GetFloat() > 0.0f ) ) )
 		               && R_BackendSupportsEnhancements() ) ) );
 	if ( getDepthCapture && viewDef->renderView.viewID >= 0
 	     && ( qglReadBuffer != NULL || rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) {
@@ -6949,6 +7057,52 @@ so decalmask.frag tests against _currentDepth - the pass stands down without tha
 static rhi::RenderTargetHandle rhiDecalMaskRT = 0;
 static int  rhiDecalMaskW = 0, rhiDecalMaskH = 0;
 
+/*
+===================
+RB_RHI_BloodRelief
+
+The wet blood film's relief: a normal map of the blood's own height. A material that authors
+a bump stage (the texture packs' heightmap( splat )) keeps it; everything else - all of stock,
+and every splat the game spawns - gets one generated from its cover image with the engine's own
+image programs. Brighter = thicker for the darken blend, darker = thicker for a filter blend;
+smoothnormals() takes the JPEG / mottling noise out so the film ripples instead of sparkling.
+The bake is moderate on purpose: r_decalWetBloodRelief scales the slope in the shader, live.
+Resolved once per material stage; idImage and idMaterial pointers live as long as the renderer.
+===================
+*/
+struct rhiReliefEntry_t {
+	const idMaterial *	material;
+	int					stageNum;
+	idImage *			image;
+};
+static idList<rhiReliefEntry_t> rhiReliefCache;
+
+static idImage *RB_RHI_BloodRelief( const idMaterial *shader, int stageNum, const shaderStage_t *cover, float mode ) {
+	for ( int i = 0; i < rhiReliefCache.Num(); i++ ) {
+		if ( rhiReliefCache[i].material == shader && rhiReliefCache[i].stageNum == stageNum ) {
+			return rhiReliefCache[i].image;
+		}
+	}
+	idImage *image = NULL;
+	const shaderStage_t *bumpStage = shader->GetBumpStage();
+	if ( bumpStage && bumpStage->texture.image ) {
+		image = bumpStage->texture.image;
+	} else if ( cover->texture.image && cover->texture.image->imgName.Length() > 0 ) {
+		idStr source = cover->texture.image->imgName;
+		if ( mode > 1.5f ) {
+			source = idStr( "invertColor(" ) + source + ")";
+		}
+		const idStr program = idStr( "smoothnormals(heightmap(" ) + source + ", 4))";
+		image = globalImages->ImageFromFile( program.c_str(), TF_DEFAULT, true, cover->texture.image->repeat, TD_BUMP );
+	}
+	rhiReliefEntry_t e;
+	e.material = shader;
+	e.stageNum = stageNum;
+	e.image = image;
+	rhiReliefCache.Append( e );
+	return image;
+}
+
 static bool RB_RHI_DecalMaskStageMode( const shaderStage_t *pStage, float &mode ) {
 	const int src = pStage->drawStateBits & GLS_SRCBLEND_BITS;
 	const int dst = pStage->drawStateBits & GLS_DSTBLEND_BITS;
@@ -6970,10 +7124,12 @@ static bool RB_RHI_DecalMaskStageMode( const shaderStage_t *pStage, float &mode 
 
 static void RB_RHI_DecalMaskPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiDecalMaskImage = 0;
+	rhiFilmSurfs.SetNum( 0, false );
 	const float strength = idMath::ClampFloat( 0.0f, 1.0f, r_decalMetalMask.GetFloat() );
 	const float roughen = idMath::ClampFloat( 0.0f, 1.0f, r_decalRoughen.GetFloat() );
+	const float wetBlood = r_decalWetBlood.GetFloat();
 	// metalness / roughness only exist on the PBR path
-	if ( ( strength <= 0.0f && roughen <= 0.0f ) || !r_pbr.GetBool() || !R_BackendSupportsEnhancements() ) {
+	if ( ( strength <= 0.0f && roughen <= 0.0f && wetBlood <= 0.0f ) || !r_pbr.GetBool() || !R_BackendSupportsEnhancements() ) {
 		if ( rhiDecalMaskRT ) { r->DestroyRenderTarget( rhiDecalMaskRT ); rhiDecalMaskRT = 0; rhiDecalMaskW = rhiDecalMaskH = 0; }
 		return;
 	}
@@ -7054,6 +7210,7 @@ static void RB_RHI_DecalMaskPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		const float *regs = surf->shaderRegisters;
 
 		bool streamed = false;
+		bool filmed = false;
 		rhi::BufferHandle vb = 0, ib = 0;
 		int vertOfs = 0, idxOfs = 0;
 
@@ -7065,6 +7222,36 @@ static void RB_RHI_DecalMaskPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				|| pStage->texture.cinematic != NULL || pStage->texture.texgen != TG_EXPLICIT
 				|| !RB_RHI_DecalMaskStageMode( pStage, mode ) ) {
 				continue;
+			}
+
+			// r_decalWetBlood: hand this blood decal to the light loop as a film of its own
+			// (RB_RHI_DrawFilmInteractions). Darken / filter blends only - alpha-blended "glow
+			// splats" are not blood - and only geometry that carries a tangent space: world and
+			// model surfaces, and projected decals since R_DecalWindingFrame (overlays do not).
+			// A decal whose blend pass tessellates rides a displaced mesh the flat film would miss.
+			if ( wetBlood > 0.0f && !filmed && mode >= 1.0f && tri->tangentsCalculated && tri->verts
+				&& rhiFilmSurfs.Num() < 96 && R_DecalIsBlood( shader ) && !RB_RHI_TessellateSurf( surf, true ) ) {
+				idImage *relief = RB_RHI_BloodRelief( shader, stage, pStage, mode );
+				if ( relief ) {
+					rhiFilmSurf_t film;
+					film.surf = surf;
+					film.cover = pStage;
+					film.reliefStage = shader->GetBumpStage();
+					film.relief = relief;
+					film.mode = mode;
+					// a projected decal never computes its bounds (nothing culls one); a model
+					// surface - dmap merges an area's same-material decals into one - has them
+					if ( tri->numVerts <= 64 ) {
+						film.bounds.Clear();
+						for ( int v = 0; v < tri->numVerts; v++ ) {
+							film.bounds.AddPoint( tri->verts[v].xyz );
+						}
+					} else {
+						film.bounds = tri->bounds;
+					}
+					rhiFilmSurfs.Append( film );
+					filmed = true;
+				}
 			}
 
 			if ( surf->space != currentSpace ) {
@@ -7576,6 +7763,8 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			ictx.stencilState = rhi::SS_ALWAYS;
 			ictx.depthFuncBits = GLS_DEPTHFUNC_LESS;
 			RB_RHI_CreateDrawInteractions( vLight->translucentInteractions );
+			// r_decalWetBlood: blood decals glint off this light as surfaces of their own
+			RB_RHI_DrawFilmInteractions( r, viewDef, vLight );
 		}
 	}
 	backEnd.vLight = NULL;

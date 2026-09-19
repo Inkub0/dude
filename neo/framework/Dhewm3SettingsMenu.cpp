@@ -4682,6 +4682,48 @@ static void DrawDbgGroup_Glass()
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##decalrough" ) ) { r_decalRoughen.SetFloat( 1.0f ); }
 
+	float wetBlood = r_decalWetBlood.GetFloat();
+	if ( ImGui::SliderFloat( "Wet blood", &wetBlood, 0.0f, 0.5f, "%.3f" ) ) {
+		r_decalWetBlood.SetFloat( wetBlood );
+	}
+	AddTooltip( "Blood decals glint off the lights around them as a wet film with its own relief - every blood decal, "
+		"stock or mod, map-placed or splattered during play. Strength of the highlight; 0 = off (matte, "
+		"stock-faithful blood), 0.057 = default. "
+		"With a texture pack, it replaces the pack's own blood highlight "
+		"(the pack's environment sheen still follows Blood decal sheen). Needs PBR materials." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##wetblood" ) ) { r_decalWetBlood.SetFloat( 0.057f ); }
+
+	ImGui::BeginDisabled( r_decalWetBlood.GetFloat() <= 0.0f );
+	float bloodRelief = r_decalWetBloodRelief.GetFloat();
+	if ( ImGui::SliderFloat( "Wet blood relief", &bloodRelief, 0.0f, 2.0f, "%.2f" ) ) {
+		r_decalWetBloodRelief.SetFloat( bloodRelief );
+	}
+	AddTooltip( "How strongly the film follows the blood's own height - bulging edges, ripples inside. Higher = the glint "
+		"breaks into more sparkles, visible from more angles; 0.00 = a flat film that only glints at a light's exact "
+		"mirror angle. 0.17 = default." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##bloodrelief" ) ) { r_decalWetBloodRelief.SetFloat( 0.17f ); }
+
+	float bloodFloor = r_decalWetBloodThreshold.GetFloat();
+	if ( ImGui::SliderFloat( "Wet blood threshold", &bloodFloor, 0.0f, 0.95f, "%.2f" ) ) {
+		r_decalWetBloodThreshold.SetFloat( bloodFloor );
+	}
+	AddTooltip( "How much blood there must be before it glints at all. Splat textures trail off into a mist too faint "
+		"to see; raise this until the bare floor around a splat stops looking wet. The film feathers in just above "
+		"the threshold. 0.30 = default." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##bloodfloor" ) ) { r_decalWetBloodThreshold.SetFloat( 0.3f ); }
+
+	float bloodRough = r_decalWetBloodRough.GetFloat();
+	if ( ImGui::SliderFloat( "Wet blood roughness", &bloodRough, 0.05f, 0.8f, "%.2f" ) ) {
+		r_decalWetBloodRough.SetFloat( bloodRough );
+	}
+	AddTooltip( "Lower = tight, sharp glints (fresh blood); higher = a broad soft sheen (drying blood). 0.18 = default." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##bloodrough" ) ) { r_decalWetBloodRough.SetFloat( 0.18f ); }
+	ImGui::EndDisabled();
+
 	ImGui::EndDisabled();	// glass reflections (backend supported)
 	EndSettingsGroup();
 	}

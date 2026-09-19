@@ -369,6 +369,31 @@ void main() {
 	// and unshadowed lights, u_shadowParms.x == 0) fold into one scalar that
 	// scales the light projection / falloff product below.
 	float lightScale;
+
+	// DUDE wet blood film (r_decalWetBlood, RB_RHI_DrawFilmInteractions). u_channelMask.x > 0
+	// marks a SYNTHESIZED draw of a blood decal as its own lit surface: a specular-only film whose
+	// relief is the splat's own height (unit 1), whose cover image rides the diffuse unit with the
+	// stage colour in u_diffuseModifier and the decal's fade in var_Color, and which contributes
+	// no diffuse light. x = the cover stage's blend (1 darken: zero, 1-src_color; 2 filter),
+	// y = relief multiplier on the baked height-map normal, zw = the coverage window the film
+	// feathers in over (r_decalWetBloodThreshold .. +0.25).
+	//  - coverage: what that blend hides, shaped into a film - a liquid is evenly wet wherever
+	//    it lies, only its edge feathers, whatever the mottling of the texture inside. The
+	//    window's floor keeps it off the mist a splat trails off into: blood too thin to see
+	//    must not glint, or the bare floor around a splat reads wet.
+	//  - gain: this draw lands in the light loop, BEFORE the decal's own blend multiplies the
+	//    framebuffer by its transmittance; pre-divide per channel so the glint comes out the
+	//    colour of the light, not dimmed and dyed by the blood under it (floored: <= ~8x).
+	float filmMode = u_channelMask.x;
+	vec3 filmGain = vec3( 0.0 );
+	if ( filmMode > 0.5 ) {
+		vec3 cover = clamp( ( diffuse * var_Color ).rgb, 0.0, 1.0 );
+		float coverLum = dot( cover, vec3( 0.2126, 0.7152, 0.0722 ) );
+		float cov = ( filmMode > 1.5 ) ? 1.0 - coverLum : coverLum;
+		vec3 transmit = ( filmMode > 1.5 ) ? cover : vec3( 1.0 ) - cover;
+		filmGain = smoothstep( u_channelMask.z, u_channelMask.w, cov ) / max( transmit, vec3( 0.12 ) );
+		diffuse = vec4( 0.0 );
+	}
 	vec4 spec;
 
 	if ( u_pbrParms.z > 0.5 ) {
@@ -390,6 +415,11 @@ void main() {
 		//    it into GGX alpha^2 for free per-texel roughness on stock assets.
 		float nLen = clamp( length( localNormal ), 1e-4, 1.0 );
 		vec3 N = localNormal / nLen;
+		if ( filmMode > 0.5 ) {
+			// the film's relief: point lights only glint where a facet mirrors them to the eye, so
+			// it is the bulging edges and the ripples inside that make blood read wet from anywhere
+			N = normalize( vec3( N.xy * u_channelMask.y, N.z ) );
+		}
 		vec3 L = normalize( var_TexLightVec );
 		vec3 V = normalize( var_TexViewVec );
 		vec3 H = normalize( L + V );
@@ -403,8 +433,9 @@ void main() {
 		// clean plate around it still does
 		float rough = u_pbrParms.y;
 		float metal = u_pbrParms.x;
-		if ( u_pbrParms.z > 1.5 ) {
-			vec3 keep = texture( u_decalMask, gl_FragCoord.xy / vec2( textureSize( u_decalMask, 0 ) ) ).rgb;
+		// (the film is its own surface on top of all that - the mask describes the wall under it)
+		if ( u_pbrParms.z > 1.5 && filmMode < 0.5 ) {
+			vec2 keep = texture( u_decalMask, gl_FragCoord.xy / vec2( textureSize( u_decalMask, 0 ) ) ).rg;
 			dudeDecalSurface( keep, rough, metal );
 		}
 		rough = clamp( rough, 0.03, 1.0 );
@@ -508,6 +539,9 @@ void main() {
 	           * lightScale * parallaxSelfShadow;
 
 	vec4 specMap = texture( u_specularMap, uvSpecular );
+	if ( filmMode > 0.5 ) {
+		specMap.rgb *= filmGain;	// film coverage + transmittance pre-compensation (see filmMode above)
+	}
 
 	// DUDE GTAO on direct light (docs/ssao-gtao.md Phase C). Doom 3 is almost all dynamic
 	// light with ~no ambient, so occluding the ambient pass alone is invisible; this
