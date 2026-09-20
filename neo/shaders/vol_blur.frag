@@ -33,7 +33,13 @@ void main() {
 		for ( int i = -radius; i <= radius; i++ ) {
 			vec2  t  = clamp( c + vec2( i, j ), vec2( 0.0 ), lowSize - 1.0 );
 			float zt = viewDepthLow( t );
-			float w  = max( 1.0 - abs( zt - zc ) / ( 0.12 * zc + 8.0 ), 0.0 );	// same-surface taps ~1, across a silhouette 0
+			// Reject only a real SILHOUETTE (a near railing against a far wall: depth ratio >> 2), never a
+			// slope: on a grazing cave wall / receding floor adjacent march texels differ by 20-40 % in
+			// depth, and a tight tolerance switched the blur off over the whole area - the raw dither
+			// (interleaved gradient noise is visibly STRIPED un-blurred) showed through as a banded patch.
+			// The haze in front of a surface barely depends on that surface anyway.
+			float rel = abs( zt - zc ) / ( min( zt, zc ) + 16.0 );
+			float w   = 1.0 - smoothstep( 0.6, 1.2, rel );
 			w = max( w, ( i == 0 && j == 0 ) ? 1.0 : 0.0 );
 			sum  += texture( u_volume, ( t + 0.5 ) / lowSize ) * w;
 			wsum += w;
