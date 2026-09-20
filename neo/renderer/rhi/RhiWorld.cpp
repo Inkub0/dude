@@ -5111,6 +5111,15 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		        | ( ld->parms.pointLight ? 0u : 2u )			// bit1 = projected (spot) light: falloff runs along the frustum axis
 		        | ( ld->parms.noShadows ? 4u : 0u )				// bit2 = casts no shadows in stock: volumetrics skip its visibility ray
 		        | ( ld->parms.allowLightInViewID ? 8u : 0u );	// bit3 = first-person weapon light (flashlight, muzzle flash)
+		{
+			// bits 8..15 = volumetric haze scale (0..255). A HUGE light (a cave-wide "sky glow", an outdoor
+			// fill) is ambience, not a shaft: integrated over its whole volume it washes the view in its own
+			// colour. Its haze fades with size beyond r_volLargeLightRadius; room-scale lights stay at 1.
+			const float ref = r_volLargeLightRadius.GetFloat();
+			float vs = ( ref > 0.0f && cullRad > ref ) ? ( ref / cullRad ) : 1.0f;
+			vs *= vs;
+			L.flags |= ( (unsigned int)idMath::ClampInt( 0, 255, (int)( vs * 255.0f + 0.5f ) ) ) << 8;
+		}
 		for ( int p = 0; p < 4; p++ ) {							// RR16c: global-space S/T/Q/falloff planes
 			L.proj[p][0] = ld->lightProject[p][0];
 			L.proj[p][1] = ld->lightProject[p][1];
@@ -5999,6 +6008,7 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 			? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
 		tp.localParam1[0] = velImg ? 1.0f : 0.0f;
 		tp.localParam1[1] = (float)resDiv;
+		tp.particleRadius[0] = 1.0f;									// volumetric buffer: accumulate sky pixels too (lit air in front of the sky)
 		tp.windowCoord[2] = -1.0f;
 		tp.screenCorrection[0] = 1.0f / fullW;
 		tp.screenCorrection[1] = 1.0f / fullH;

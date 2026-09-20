@@ -108,6 +108,7 @@ vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], vec4 sp
 		// pointScale: omni fill lights are many and large, so unscaled they drown the authored cones
 		float scale = ( ( fl & ( DUDE_LIGHT_PROJECTED | DUDE_LIGHT_PARALLEL ) ) != 0u ) ? 1.0 : pointScale;
 		if ( ( fl & DUDE_LIGHT_VIEWWEAPON ) != 0u ) { scale *= weaponScale; }	// the player's own flashlight / muzzle flash
+		scale *= float( ( fl >> 8 ) & 255u ) * ( 1.0 / 255.0 );					// huge ambience lights fade out of the haze (set by the gather)
 		vec3 contrib = lights.l[ li ].color * ( atten * scale * dudeVolPhase( dot( ldir, viewDir ), g ) );
 		// the visibility ray is the expensive part: never trace for a contribution too faint to see
 		if ( max( contrib.r, max( contrib.g, contrib.b ) ) < 0.004 ) { continue; }

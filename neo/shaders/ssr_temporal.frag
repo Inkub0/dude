@@ -22,6 +22,7 @@
 //   u_localParam1.y       = current-buffer texel size in OUTPUT pixels (RT temporal upscale: 1/2/4 for a
 //                           Full/Half/Quarter trace; <=1 = same res). The variance-clip taps step by this.
 //   u_localParam1.zw      = un-jitter uv offset for the current buffer (RT sample-grid jitter; 0 = none)
+//   u_particleRadius.x    = 1 -> also accumulate SKY pixels (volumetric lighting); 0 -> pass them through
 //   u_modelViewMatrix     = reproj: current view space -> previous clip (camera-only fallback)
 //   u_screenCorrection.xy = 1 / ssrTargetSize      (gl_FragCoord -> [0,1] uv, texel size)
 //   u_depthTexRecip.xy    = ratio / depthUploadSize (gl_FragCoord -> _currentDepth tc)
@@ -51,16 +52,24 @@ void main() {
 	vec4 cur  = texture( u_curSSR, curUV );
 	float raw = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
 
-	// sky / no geometry: nothing to reproject, just pass the current value through
+	// sky / no geometry: a REFLECTION has nothing there, pass the current value through. A volumetric
+	// buffer (u_particleRadius.x > 0.5) does have signal in front of the sky - lit air - and left
+	// un-accumulated its per-frame march jitter shows as a dot pattern over every sky opening; accumulate
+	// it, reprojected as a very distant point (camera rotation only - the velocity buffer holds nothing there).
+	bool skyAccum = false;
 	if ( raw >= 0.9994 ) {
-		fragColor = cur;
-		return;
+		if ( u_particleRadius.x < 0.5 ) {
+			fragColor = cur;
+			return;
+		}
+		skyAccum = true;
+		raw = 0.9994;
 	}
 
 	// where this pixel's surface was last frame, in the history buffer's sampling convention.
 	vec2 prevUV;
 	bool reprojOk;
-	if ( u_localParam1.x > 0.5 ) {
+	if ( u_localParam1.x > 0.5 && !skyAccum ) {
 		// R1/A2: reproject by the per-object velocity buffer, which unlike the camera-only
 		// matrix path also follows MOVING objects. Velocity is currUV - prevUV in +Y-up UV;
 		// flip the row on Vulkan's top-down framebuffer, then step back to the history location.

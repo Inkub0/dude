@@ -992,6 +992,7 @@ extern idCVar r_volMaxDist;
 extern idCVar r_volExtinction;
 extern idCVar r_volPointLightScale;
 extern idCVar r_volFlashlightScale;
+extern idCVar r_volLargeLightRadius;
 extern idCVar r_volAoIntensity;
 extern idCVar r_volFogPointLightScale;
 extern idCVar r_volPointShadows;

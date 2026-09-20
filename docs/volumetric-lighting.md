@@ -175,6 +175,17 @@ with resolution × steps × lights.
   point of use — neither `r_rtaoIntensity` nor `r_ssaoIntensity` is rewritten, presets stay "matched", and
   turning the haze off restores them. Menu: "AO Intensity With Haze"; 0 = leave AO alone.
 
+- **Hell lava cave (hell1) — dots + a pale-cyan veil (user screenshots, 2026-09-20).** Diagnosis from the
+  map: the cave is lit by one **huge pale-cyan point light** (`lights/cloudscroll3`, radius 3600×4200×1032,
+  colour 0.85 0.96 0.95) — a sky-glow ambience light; the lava is an *emissive surface + a thin orange fog
+  slab*, **not a light**, so nothing orange reaches the haze. Two fixes: (1) **dots** = sky pixels:
+  `ssr_temporal` passed sky through un-accumulated (right for reflections, wrong for lit air in front of
+  the sky) → `u_particleRadius.x = 1` makes it accumulate them, reprojected as a distant point.
+  (2) **veil** = a light integrated over a cave-sized volume: `r_volLargeLightRadius` (1200) fades a
+  light's haze by `(ref / size)²` beyond that bounding radius (packed into flags bits 8..15 by the gather);
+  room-scale lights are untouched. **Open (colour):** making lava/emissive surfaces feed the haze needs
+  emissive surfaces as light sources (cf. `r_emissiveSurfaces`) — not built.
+
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
 scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a
 rejected light still costs a 16 B read, so 256 × 12 samples × 230 k px ≈ 10 GB of buffer reads per frame in a
