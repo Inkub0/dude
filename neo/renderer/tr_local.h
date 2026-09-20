@@ -982,6 +982,7 @@ extern idCVar r_rtReflDebug;				// RR12 debug: paint reflection by reuse confide
 extern idCVar r_rtReflRealLights;			// RR16: shade an RT reflection hit with the scene's real lights (not a fixed key light)
 extern idCVar r_rtReflLightScale;			// RR16: overall brightness of the real-light diffuse at an RT reflection hit (compensates the point-light approximation)
 extern idCVar r_rtReflEmissive;				// RR16f: brightness of self-lit light-source surfaces (neon/ceiling tiles) in RT reflections
+extern idCVar r_rtReflResScale;				// RT reflection trace resolution (fraction of screen; unsnapped, temporally upscaled)
 extern idCVar r_rtReflBump;					// RR10: how much the RT reflection follows the normal map (0 = flat mirror, 1 = full bump like SSR)
 extern idCVar r_rtMovingLights;				// RT shadows for moving point lights: skip the un-cacheable cube re-render, trace instead
 extern idCVar r_rtAllLights;				// RT shadows for EVERY shadow-casting light (mode 4 inline ray), no shadow maps at all

@@ -5131,12 +5131,13 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	const int fullW = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int fullH = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-	// Snap the reflection resolution to an INTEGER DIVISOR of the view (full, 1/2, 1/4). A fractional
-	// ratio (2/3, 3/4) makes the low-res reflection upscale BEAT: the bilinear interpolation weights
-	// cycle over the sharp RT reflection and show as strobing (2/3) / stripes (3/4) that temporal
-	// accumulation can't fully resolve. Integer divisors upscale cleanly (2:1 / 4:1), so the slider +
-	// presets only ever pick these; this snap also catches any stray console/config value.
-	const float resScale = idMath::ClampFloat( 0.25f, 1.0f, r_ssrResScale.GetFloat() );
+	// Snap the reflection resolution to an INTEGER DIVISOR of the view (full, 1/2, 1/4). A fractional ratio
+	// (2/3, 3/4) makes the low-res reflection upscale BEAT into strobing/stripes that even the RT temporal
+	// upscale doesn't fully resolve (user-confirmed 2026-09-20), so both paths only ever pick clean 2:1 / 4:1
+	// divisors. RT uses its OWN scale (r_rtReflResScale) so the trace resolution is independent of the SSR
+	// march resolution (r_ssrResScale); everything else (targets, temporal upscale to full res) follows ssrW/H.
+	const float resScale = idMath::ClampFloat( 0.25f, 1.0f,
+		rtWants ? r_rtReflResScale.GetFloat() : r_ssrResScale.GetFloat() );
 	const int resDiv = ( resScale >= 0.75f ) ? 1 : ( resScale >= 0.375f ) ? 2 : 4;
 	int ssrW = fullW / resDiv;
 	int ssrH = fullH / resDiv;

@@ -3253,6 +3253,32 @@ static void DrawEnhGroup_Reflections()
 			ImGui::TextDisabled( "  (needs Ray-Traced Sun Shadows on to build the RT scene)" );
 		}
 
+		// RT reflection resolution (r_rtReflResScale): the RT trace runs at this fraction of the screen and is
+		// temporally upscaled back to full. Discrete INTEGER-DIVISOR stops (Full/Half/Quarter) exactly like
+		// the SSR Resolution above - fractional ratios strobe the reflection - but a SEPARATE value so the RT
+		// trace scales independently of the SSR march. Sits under the RT toggle; the biggest single saving on
+		// the RT reflection pass.
+		const float rtResStops[]  = { 0.25f, 0.5f, 1.0f };
+		const char *rtResLabels[] = { "Quarter (1/4)", "Half (1/2)", "Full" };
+		const int rtNumStops = IM_ARRAYSIZE( rtResStops );
+		const float rtCurScale = r_rtReflResScale.GetFloat();
+		int rtResIdx = 0;
+		float rtResBest = 1e9f;
+		for ( int i = 0; i < rtNumStops; i++ ) {
+			const float d = idMath::Fabs( rtCurScale - rtResStops[i] );
+			if ( d < rtResBest ) { rtResBest = d; rtResIdx = i; }
+		}
+		ImGui::BeginDisabled( !rtIsVulkan || !rtSceneOn || !r_rtReflections.GetBool() );
+		if ( ImGui::SliderInt( "RT Resolution", &rtResIdx, 0, rtNumStops - 1,
+				rtResLabels[rtResIdx], ImGuiSliderFlags_NoInput ) ) {
+			rtResIdx = rtResIdx < 0 ? 0 : ( rtResIdx >= rtNumStops ? rtNumStops - 1 : rtResIdx );
+			r_rtReflResScale.SetFloat( rtResStops[rtResIdx] );
+		}
+		AddTooltip( "Resolution the ray-traced reflection is traced at, then temporally upscaled to full. "
+			"Half is ~4x cheaper on the reflection pass with a modest softening; Quarter cheaper still. "
+			"Independent of the SSR Resolution above; the biggest single lever on RT reflection cost." );
+		ImGui::EndDisabled();
+
 		// Temporal accumulation: rotate the march jitter per frame and average the
 		// results (reprojected by camera motion) so the grain resolves.
 		bool ssrTemporal = r_ssrTemporal.GetBool();
@@ -3924,9 +3950,10 @@ static void DrawDbgGroup_RTReflections()
 	// Ray-traced reflections (docs/rtx-reflections.md). Traces the scene acceleration structure so
 	// reflective floors/metal show the real room + monsters, including geometry off-screen or hidden from
 	// the camera that screen-space SSR can't reach — the RT tier's reflection layer, which REPLACES the SSR
-	// composite on reflective surfaces when it renders. Vulkan + ray-query (RT) hardware only. Resolution
-	// is shared with SSR (Graphics -> Reflections -> Resolution). Prerequisites (r_ssr for the G-buffer,
-	// r_rtSunShadows for the TLAS, r_pbr) live in their own groups; this is the RT-reflection tuning.
+	// composite on reflective surfaces when it renders. Vulkan + ray-query (RT) hardware only. The RT
+	// reflection has its OWN trace resolution (r_rtReflResScale, in the Graphics tab's Reflections group),
+	// unsnapped and temporally upscaled, separate from SSR's r_ssrResScale. Prerequisites (r_ssr for the
+	// G-buffer, r_rtSunShadows for the TLAS, r_pbr) live in their own groups; this is the RT-reflection tuning.
 	const bool isVulkan = glConfig.rhiBackend && !glConfig.coreProfile;
 	if ( BeginSettingsGroup( "Ray-Traced Reflections" ) ) {
 
@@ -3952,6 +3979,9 @@ static void DrawDbgGroup_RTReflections()
 	}
 
 	ImGui::BeginDisabled( !r_rtReflections.GetBool() );
+
+	// (Trace resolution lives in the Graphics tab's Reflections group, next to the SSR Resolution + the
+	// RT toggle - the user-facing quality control. This group is the fine tuning.)
 
 	bool rtTemporal = r_rtReflTemporal.GetBool();
 	if ( ImGui::Checkbox( "Temporal Upscale (r_rtReflTemporal)", &rtTemporal ) ) {
