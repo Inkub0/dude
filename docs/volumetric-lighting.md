@@ -214,6 +214,13 @@ with resolution × steps × lights.
   not slopes. **Rule: for a blur + short-temporal pipeline, use uncorrelated per-frame noise; never animate
   IGN by a value/phase shift.**
 
+- **White noise was too coarse (2026-09-20, same session).** The (pixel, frame) hash removed the stripes but
+  at quarter res its low-frequency energy survives even a 7×7 blur as huge blotchy pixels. Final scheme:
+  **IGN per frame (so one frame + the 3×3 blur is clean), re-ORIENTED per frame** — axes swapped / mirrored
+  (4 distinct stripe directions) at a hashed offset (PCG of the frame index) — so successive frames are not
+  shifts of one pattern and their residues do not reinforce. Revised rule: *spatially structured (IGN),
+  temporally re-oriented — not shifted, not white.*
+
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
 scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a
 rejected light still costs a 16 B read, so 256 × 12 samples × 230 k px ≈ 10 GB of buffer reads per frame in a

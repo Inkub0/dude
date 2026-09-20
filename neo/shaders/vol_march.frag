@@ -66,17 +66,23 @@ void main() {
 	uint  nFogCand = ( lightMode >= 2u )
 		? dudeVolCullFogRay( lights, nLights, uint( u_color.w ), eyeW, viewDir, dist, fogIdx, fogSph ) : 0u;
 
-	// Per-pixel, per-FRAME offset of the sample positions inside each step's own slice (the march is
-	// stratified, so the offset only has to be uncorrelated). It must be uncorrelated across FRAMES too: a
-	// structured dither (interleaved gradient noise) shifted per frame leaves a residual with its own -
-	// striped - structure in the temporal accumulation, worst where the steps are longest (sky, far
-	// walls); before that, a constant shift made the residual drift up the screen. An integer hash of
-	// (pixel, frame) has no structure to leave behind; the low-res blur + temporal pass average it out.
-	uvec3 hv = uvec3( uvec2( frag ), uint( u_windowCoord.x ) ) * 1664525u + 1013904223u;
-	hv.x += hv.y * hv.z;	hv.y += hv.z * hv.x;	hv.z += hv.x * hv.y;
-	hv ^= hv >> 16u;
-	hv.x += hv.y * hv.z;
-	float jitter = float( hv.x >> 8u ) * ( 1.0 / 16777216.0 );
+	// Per-pixel, per-FRAME offset of the sample positions inside each step's own slice. Three lessons:
+	//  - SPATIALLY it should be interleaved gradient noise: any 3x3 window of IGN holds well-spread values,
+	//    so the low-res blur resolves one frame almost completely. White noise does not - at quarter res
+	//    its low-frequency energy survives even a 7x7 blur as huge blotchy pixels.
+	//  - ACROSS FRAMES it must not be the same pattern shifted (adding a phase to IGN's value = sliding the
+	//    pattern): a constant shift made the residue drift up the screen, a jumping one left it striped.
+	//  - so each frame uses IGN in a different ORIENTATION (axes swapped / mirrored: 4 distinct stripe
+	//    directions) at a hashed offset. Every frame still blurs cleanly; the per-frame residues point in
+	//    different directions and average out in the accumulation instead of reinforcing one another.
+	uint  fh = uint( u_windowCoord.x ) * 747796405u + 2891336453u;
+	fh = ( ( fh >> ( ( fh >> 28u ) + 4u ) ) ^ fh ) * 277803737u;
+	fh = ( fh >> 22u ) ^ fh;
+	vec2  jc = frag + vec2( float( ( fh >> 3u ) & 1023u ), float( ( fh >> 13u ) & 1023u ) );
+	if ( ( fh & 1u ) != 0u ) { jc = jc.yx; }
+	if ( ( fh & 2u ) != 0u ) { jc.x = -jc.x; }
+	if ( ( fh & 4u ) != 0u ) { jc.y = -jc.y; }
+	float jitter = fract( 52.9829189 * fract( dot( jc, vec2( 0.06711056, 0.00583715 ) ) ) );
 
 	// quadratic step distribution over the LIT stretch: denser toward the eye, where a shaft's edge subtends more pixels
 	vec3  rgb = vec3( 0.0 );
