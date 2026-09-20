@@ -2937,8 +2937,11 @@ static void DrawEnhGroup_Lighting()
 			}
 
 			ImGui::BeginDisabled( !vol );
+			// discrete-stop slider (the Resolution sliders' idiom): r_volLights 1 / 2
+			const char *volLightLabels[] = { "Spot lights only", "All lights" };
 			int volLights = r_volLights.GetInteger() >= 2 ? 1 : 0;
-			if ( ImGui::Combo( "Lights In The Haze", &volLights, "Spot lights only\0All lights\0" ) ) {
+			if ( ImGui::SliderInt( "Lights In The Haze", &volLights, 0, 1, volLightLabels[volLights], ImGuiSliderFlags_NoInput ) ) {
+				volLights = volLights < 0 ? 0 : ( volLights > 1 ? 1 : volLights );
 				r_volLights.SetInteger( volLights + 1 );
 			}
 			AddTooltip( "Spot lights only: just the projected lights (and sun-style parallel lights) - the "
