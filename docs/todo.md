@@ -397,6 +397,9 @@ gain per effort; every one is an opt-in toggle, preset-wired only after a visual
 - **Volumetric light shafts** for projected/spot lights — froxel or per-light raymarch through the
   existing shadow maps (or RT rays at UN), modulated by the existing fog volumes. Biggest mood win,
   biggest departure from stock, real cost: top presets only, strictly opt-in, needs its own plan doc.
+  **Plan written 2026-09-20: [volumetric-lighting.md](volumetric-lighting.md)** — two routes (quarter-res ray
+  march reusing the RR16 light buffer + ray queries, vs a true froxel grid needing new RHI 3D/storage
+  images); route decision pending.
 - **RT GI (one bounce)** — already H6 in [rtx-hybrid-roadmap.md](rtx-hybrid-roadmap.md).
 
 ---
