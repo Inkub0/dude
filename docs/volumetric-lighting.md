@@ -131,6 +131,19 @@ with resolution × steps × lights.
   the list holds 16, and `r_volPointLightScale` (user-tuned 0.2) keeps the many large omni lights a faint ambience under
   the authored cones.
 
+- **Flashlight "bobbing square" (2026-09-20).** Two causes. (1) The gather ignored the per-view light gating
+  (`suppressLightInViewID` / `allowLightInViewID`), so the player's **third-person** flashlight — attached
+  to the body model, bobbing with the walk cycle, suppressed in their own view by the frontend — was in the
+  buffer (a latent RR16a bug: it lit reflections too). Now gated exactly like `tr_light.cpp`. (2) Without
+  the projection texture a spot's volume is a square pyramid; `dudeLightAtten(..., roundSpot)` windows
+  projected lights radially for volumetrics (reflections keep the verified square window). Also
+  `r_volFlashlightScale` (0.5; flags bit3 = first-person weapon light) since the flashlight fogs the air
+  right at the eye.
+- **Measured cost (user, 1440p UN, user defaults): +1.7 ms** (10.6 → 12.3 ms) — above the 0.6–1.2 ms
+  estimate. First trim: no visibility ray for a contribution below ~0.004 (`vol_scatter.glsl`). Next
+  candidates if needed: fewer steps (temporal now hides it), the three full-res passes (upsample, temporal,
+  composite), per-light ray budget.
+
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
 scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a
 rejected light still costs a 16 B read, so 256 × 12 samples × 230 k px ≈ 10 GB of buffer reads per frame in a

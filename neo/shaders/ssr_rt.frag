@@ -242,7 +242,7 @@ void main() {
 			dudeLightDir( lights, li, hitWorld, ldir, dl );
 			float ndl = max( dot( hitN, ldir ), 0.0 );
 			if ( ndl <= 0.0 ) { continue; }									// back-facing: skip the plane reads
-			float atten = dudeLightAtten( lights, li, hitWorld, dl, lights.l[ li ].flags, gate );
+			float atten = dudeLightAtten( lights, li, hitWorld, dl, lights.l[ li ].flags, gate, false );
 			if ( atten <= 0.0 ) { continue; }
 			// u_diffuseModifier.y = r_rtReflLightScale compensates the point approximation's missing
 			// projected-light central brightness, so reflected surfaces match their on-screen brightness.

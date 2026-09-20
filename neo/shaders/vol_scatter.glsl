@@ -47,8 +47,9 @@ uint dudeVolCullRay( RtLights lights, uint nLights, uint lightMode, vec3 eye, ve
 //   idx/count the candidate list (dudeVolCullRay, or a froxel cluster list)
 //   viewDir   unit eye -> p
 //   pointScale brightness of point (omni) lights relative to projected/parallel ones
+//   weaponScale brightness of first-person weapon lights (the flashlight fogs the air right at the eye)
 vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], uint count, uvec2 tlasAddr, bool shadows,
-                       vec3 p, vec3 viewDir, float g, float pointScale ) {
+                       vec3 p, vec3 viewDir, float g, float pointScale, float weaponScale ) {
 	vec3 sum = vec3( 0.0 );
 	for ( uint k = 0u; k < count; k++ ) {
 		uint li = idx[ k ];
@@ -56,8 +57,14 @@ vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], uint co
 		uint fl = lights.l[ li ].flags;
 		vec3  ldir; float dl;
 		dudeLightDir( lights, li, p, ldir, dl );
-		float atten = dudeLightAtten( lights, li, p, dl, fl, true );
+		float atten = dudeLightAtten( lights, li, p, dl, fl, true, true );
 		if ( atten <= 0.002 ) { continue; }
+		// pointScale: omni fill lights are many and large, so unscaled they drown the authored cones
+		float scale = ( ( fl & ( DUDE_LIGHT_PROJECTED | DUDE_LIGHT_PARALLEL ) ) != 0u ) ? 1.0 : pointScale;
+		if ( ( fl & DUDE_LIGHT_VIEWWEAPON ) != 0u ) { scale *= weaponScale; }	// the player's own flashlight / muzzle flash
+		vec3 contrib = lights.l[ li ].color * ( atten * scale * dudeVolPhase( dot( ldir, viewDir ), g ) );
+		// the visibility ray is the expensive part: never trace for a contribution too faint to see
+		if ( max( contrib.r, max( contrib.g, contrib.b ) ) < 0.004 ) { continue; }
 		if ( shadows && ( fl & DUDE_LIGHT_NOSHADOWS ) == 0u ) {
 			// cheapest ray there is: opaque-only, first hit ends it. Stop short of the light so the
 			// fixture's own geometry does not shadow its light; a parallel light's origin is far away.
@@ -70,9 +77,7 @@ vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], uint co
 				if ( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionNoneEXT ) { continue; }
 			}
 		}
-		// pointScale: omni fill lights are many and large, so unscaled they drown the authored cones
-		float scale = ( ( fl & ( DUDE_LIGHT_PROJECTED | DUDE_LIGHT_PARALLEL ) ) != 0u ) ? 1.0 : pointScale;
-		sum += lights.l[ li ].color * ( atten * scale * dudeVolPhase( dot( ldir, viewDir ), g ) );
+		sum += contrib;
 	}
 	return sum;
 }

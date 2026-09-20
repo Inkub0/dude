@@ -18,6 +18,7 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Rt
 const uint DUDE_LIGHT_PARALLEL  = 1u;	// sun-style: no distance falloff
 const uint DUDE_LIGHT_PROJECTED = 2u;	// spot: falloff runs along the frustum axis, lightRadius unused
 const uint DUDE_LIGHT_NOSHADOWS = 4u;	// the light casts no shadows in stock either: skip visibility rays
+const uint DUDE_LIGHT_VIEWWEAPON = 8u;	// first-person weapon light: the player's flashlight, muzzle flashes
 
 // Can light li reach world point p at all? (bounding sphere of its volume; reads 16 B)
 bool dudeLightInRange( RtLights lights, uint li, vec3 p ) {
@@ -37,7 +38,10 @@ void dudeLightDir( RtLights lights, uint li, vec3 p, out vec3 ldir, out float dl
 // with frustumGate the term is confined to the light's projection volume, soft-edged as every Doom light
 // texture fades to black at its border (uniform inside: the gobo/falloff TEXTURES are not sampled). A spot
 // drops the radial term for an axial 1-f start->end falloff and rejects points behind its apex.
-float dudeLightAtten( RtLights lights, uint li, vec3 p, float dl, uint flags, bool frustumGate ) {
+// roundSpot: window a projected light radially in (s,t) instead of per axis - a round cone. Doom's spot
+// textures are overwhelmingly round blobs on a black square; until the projection TEXTURE itself is sampled
+// the square pyramid is right for surface lighting (RR16c, verified) but reads as a box beam in the air.
+float dudeLightAtten( RtLights lights, uint li, vec3 p, float dl, uint flags, bool frustumGate, bool roundSpot ) {
 	float atten = ( ( flags & DUDE_LIGHT_PARALLEL ) != 0u ) ? 1.0
 	            : max( 1.0 - dl / max( lights.l[ li ].radius, 1.0 ), 0.0 );
 	if ( frustumGate ) {
@@ -47,7 +51,12 @@ float dudeLightAtten( RtLights lights, uint li, vec3 p, float dl, uint flags, bo
 		vec3  stf = vec3( dot( hw, lights.l[ li ].projS ) / q, dot( hw, lights.l[ li ].projT ) / q, dot( hw, lights.l[ li ].projF ) );
 		vec3  e   = smoothstep( vec3( 0.0 ), vec3( 0.15 ), min( stf, vec3( 1.0 ) - stf ) );	// 0 at/outside a face
 		if ( ( flags & DUDE_LIGHT_PROJECTED ) != 0u ) {
-			atten = e.x * e.y * step( 0.0, stf.z ) * clamp( 1.0 - stf.z, 0.0, 1.0 );	// spot: axial falloff
+			float win = e.x * e.y;
+			if ( roundSpot ) {
+				float rr = length( stf.xy * 2.0 - 1.0 );						// 0 on the axis, 1 at the frustum side
+				win = 1.0 - smoothstep( 0.55, 1.0, rr );
+			}
+			atten = win * step( 0.0, stf.z ) * clamp( 1.0 - stf.z, 0.0, 1.0 );	// spot: axial falloff
 		} else {
 			atten *= e.x * e.y * e.z;											// point/parallel: clipped to the light box
 		}

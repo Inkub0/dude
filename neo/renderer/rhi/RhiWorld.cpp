@@ -5014,6 +5014,12 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		if ( ld == NULL ) { continue; }
 		const idMaterial *ls = ld->lightShader;
 		if ( ls == NULL || ls->IsFogLight() || ls->IsBlendLight() || ls->IsAmbientLight() ) { continue; }
+		// honour the per-view light gating exactly like the frontend (tr_light.cpp): the player's THIRD-person
+		// flashlight / muzzle flash is suppressed in their own view, first-person weapon lights exist only in
+		// it. Skipping this put the body-attached world flashlight (it bobs with the walk cycle) in the buffer.
+		const int viewID = viewDef->renderView.viewID;
+		if ( ld->parms.suppressLightInViewID && ld->parms.suppressLightInViewID == viewID ) { continue; }
+		if ( ld->parms.allowLightInViewID && ld->parms.allowLightInViewID != viewID ) { continue; }
 		const float lr = ld->parms.lightRadius.Length();
 		idVec3 cullOrg = ld->globalLightOrigin;					// bounding sphere of the real light volume (frustum
 		float  cullRad = ( lr > 1.0f ) ? lr : 320.0f;			// hull when built: a spot does not use lightRadius)
@@ -5062,7 +5068,8 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		L.color[0] = col[0]; L.color[1] = col[1]; L.color[2] = col[2];
 		L.flags = ( ld->parms.parallel ? 1u : 0u )				// bit0 = parallel/sun (no distance falloff)
 		        | ( ld->parms.pointLight ? 0u : 2u )			// bit1 = projected (spot) light: falloff runs along the frustum axis
-		        | ( ld->parms.noShadows ? 4u : 0u );			// bit2 = casts no shadows in stock: volumetrics skip its visibility ray
+		        | ( ld->parms.noShadows ? 4u : 0u )				// bit2 = casts no shadows in stock: volumetrics skip its visibility ray
+		        | ( ld->parms.allowLightInViewID ? 8u : 0u );	// bit3 = first-person weapon light (flashlight, muzzle flash)
 		for ( int p = 0; p < 4; p++ ) {							// RR16c: global-space S/T/Q/falloff planes
 			L.proj[p][0] = ld->lightProject[p][0];
 			L.proj[p][1] = ld->lightProject[p][1];
@@ -5888,6 +5895,7 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	mp.windowCoord[2] = -1.0f;											// VK-only pass: top-down view-Y sign
 	mp.windowCoord[3] = idMath::ClampFloat( 0.0f, 4.0f, r_volExtinction.GetFloat() );
 	mp.diffuseModifier[0] = idMath::ClampFloat( 0.0f, 4.0f, r_volPointLightScale.GetFloat() );
+	mp.diffuseModifier[1] = idMath::ClampFloat( 0.0f, 4.0f, r_volFlashlightScale.GetFloat() );
 	mp.screenCorrection[0] = 1.0f / volW;
 	mp.screenCorrection[1] = 1.0f / volH;
 	mp.depthTexRecip[0] = ( (float)fullW / volW ) / uploadW;
