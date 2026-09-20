@@ -10,7 +10,7 @@
 //   u_localParam0      = (1/proj00, 1/proj11, scattering coefficient per world unit, intensity)
 //   u_localParam1      = (steps, max march distance, HG anisotropy g, shadows enable)
 //   u_windowCoord      = (per-frame jitter phase, light mode, view-Y sign, extinction scale)
-//   u_diffuseModifier.xy = (point-light, first-person weapon light) brightness scales
+//   u_diffuseModifier   = (point-light scale, first-person weapon light scale, point-light shadows enable, _)
 //   u_screenCorrection = 1 / target size; u_depthTexRecip = target px -> depth-texture tc
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_buffer_reference_uvec2 : require
@@ -55,7 +55,8 @@ void main() {
 
 	// the lights that can touch THIS view ray, culled once - the march below never loops the full buffer
 	uint  cand[ DUDE_VOL_MAX_LIGHTS ];
-	uint  nCand = dudeVolCullRay( lights, nLights, lightMode, eyeW, viewDir, dist, cand );
+	vec4  candSph[ DUDE_VOL_MAX_LIGHTS ];
+	uint  nCand = dudeVolCullRay( lights, nLights, lightMode, eyeW, viewDir, dist, cand, candSph );
 	if ( nCand == 0u ) { fragColor = vec4( 0.0, 0.0, 0.0, exp( -sigmaT * dist ) ); return; }	// unlit ray: extinction only
 
 	// per-pixel + per-frame offset of the sample positions (interleaved gradient noise + golden-ratio
@@ -73,7 +74,7 @@ void main() {
 		float a  = b0 + jitter * inv;
 		float dt = dist * ( b1 * b1 - b0 * b0 );
 		vec3  p  = eyeW + viewDir * ( dist * a * a );
-		rgb += dudeVolInScatter( lights, cand, nCand, tlasAddr, shadows, p, viewDir, g, u_diffuseModifier.x, u_diffuseModifier.y ) * ( T * sigmaS * dt );
+		rgb += dudeVolInScatter( lights, cand, candSph, nCand, tlasAddr, shadows, u_diffuseModifier.z > 0.5, p, viewDir, g, u_diffuseModifier.x, u_diffuseModifier.y ) * ( T * sigmaS * dt );
 		T   *= exp( -sigmaT * dt );
 	}
 	fragColor = vec4( rgb * u_localParam0.w, T );

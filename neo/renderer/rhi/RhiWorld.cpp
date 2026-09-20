@@ -5896,6 +5896,7 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	mp.windowCoord[3] = idMath::ClampFloat( 0.0f, 4.0f, r_volExtinction.GetFloat() );
 	mp.diffuseModifier[0] = idMath::ClampFloat( 0.0f, 4.0f, r_volPointLightScale.GetFloat() );
 	mp.diffuseModifier[1] = idMath::ClampFloat( 0.0f, 4.0f, r_volFlashlightScale.GetFloat() );
+	mp.diffuseModifier[2] = r_volPointShadows.GetBool() ? 1.0f : 0.0f;
 	mp.screenCorrection[0] = 1.0f / volW;
 	mp.screenCorrection[1] = 1.0f / volH;
 	mp.depthTexRecip[0] = ( (float)fullW / volW ) / uploadW;

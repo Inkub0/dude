@@ -144,6 +144,13 @@ with resolution × steps × lights.
   candidates if needed: fewer steps (temporal now hides it), the three full-res passes (upsample, temporal,
   composite), per-light ray budget.
 
+- **Cost breakdown (user, 1440p UN, 2026-09-20; off = 10.6 ms):** spots only (`r_volLights 1`) **+0.5 ms**
+  (the fixed pipeline: march + 3 full-res passes); point lights add **+0.4 ms** evaluation and **+0.8 ms**
+  visibility rays; 12 → 8 steps saves only ~0.3 ms. Responses: `dudeVolCullRay` now returns each
+  candidate's bounding sphere so the per-sample range test is a local read, not a buffer read; and
+  `r_volPointShadows` (default 1) lets the faint point-light ambience go unshadowed (saves most of the ray
+  cost; risk = a fill light's glow showing faintly through a wall inside its light box).
+
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
 scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a
 rejected light still costs a 16 B read, so 256 × 12 samples × 230 k px ≈ 10 GB of buffer reads per frame in a

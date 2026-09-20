@@ -25,8 +25,10 @@ const uint DUDE_VOL_MAX_LIGHTS = 16u;
 // Candidate lights for the view-ray segment eye + viewDir * [0, dist]: volume bounding sphere vs segment,
 // plus the light-mode filter. One pass over the buffer per PIXEL. Returns the count written to idx[].
 // lightMode 1 = projected/spot + parallel lights only; 2 = also point lights.
+// sph[] returns each candidate's bounding sphere, so the per-sample range test reads a local instead of
+// going back to the buffer (12 steps x 16 candidates of 16 B reads per pixel were ~a quarter of the cost).
 uint dudeVolCullRay( RtLights lights, uint nLights, uint lightMode, vec3 eye, vec3 viewDir, float dist,
-                     out uint idx[ DUDE_VOL_MAX_LIGHTS ] ) {
+                     out uint idx[ DUDE_VOL_MAX_LIGHTS ], out vec4 sph[ DUDE_VOL_MAX_LIGHTS ] ) {
 	uint n = 0u;
 	for ( uint li = 0u; li < nLights && n < DUDE_VOL_MAX_LIGHTS; li++ ) {
 		vec4  cs = lights.l[ li ].cull;
@@ -35,7 +37,9 @@ uint dudeVolCullRay( RtLights lights, uint nLights, uint lightMode, vec3 eye, ve
 		vec3  d  = oc - viewDir * t;
 		if ( dot( d, d ) > cs.w * cs.w ) { continue; }
 		if ( lightMode < 2u && ( lights.l[ li ].flags & ( DUDE_LIGHT_PROJECTED | DUDE_LIGHT_PARALLEL ) ) == 0u ) { continue; }
-		idx[ n++ ] = li;
+		idx[ n ] = li;
+		sph[ n ] = cs;
+		n++;
 	}
 	return n;
 }
@@ -44,16 +48,19 @@ uint dudeVolCullRay( RtLights lights, uint nLights, uint lightMode, vec3 eye, ve
 // colour * attenuation-inside-the-light-volume * visibility * phase.
 //   tlasAddr  scene TLAS device address (only dereferenced when shadows is true)
 //   shadows   trace one any-hit visibility ray p -> light (lights flagged NOSHADOWS never trace)
+//   pointShadows  also trace for point (omni) lights; false = their faint ambience is unshadowed (cheaper)
 //   idx/count the candidate list (dudeVolCullRay, or a froxel cluster list)
 //   viewDir   unit eye -> p
 //   pointScale brightness of point (omni) lights relative to projected/parallel ones
 //   weaponScale brightness of first-person weapon lights (the flashlight fogs the air right at the eye)
-vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], uint count, uvec2 tlasAddr, bool shadows,
+vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], vec4 sph[ DUDE_VOL_MAX_LIGHTS ], uint count,
+                       uvec2 tlasAddr, bool shadows, bool pointShadows,
                        vec3 p, vec3 viewDir, float g, float pointScale, float weaponScale ) {
 	vec3 sum = vec3( 0.0 );
 	for ( uint k = 0u; k < count; k++ ) {
+		vec3 cd = sph[ k ].xyz - p;
+		if ( dot( cd, cd ) > sph[ k ].w * sph[ k ].w ) { continue; }		// outside this light's volume sphere (local read)
 		uint li = idx[ k ];
-		if ( !dudeLightInRange( lights, li, p ) ) { continue; }
 		uint fl = lights.l[ li ].flags;
 		vec3  ldir; float dl;
 		dudeLightDir( lights, li, p, ldir, dl );
@@ -65,7 +72,8 @@ vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], uint co
 		vec3 contrib = lights.l[ li ].color * ( atten * scale * dudeVolPhase( dot( ldir, viewDir ), g ) );
 		// the visibility ray is the expensive part: never trace for a contribution too faint to see
 		if ( max( contrib.r, max( contrib.g, contrib.b ) ) < 0.004 ) { continue; }
-		if ( shadows && ( fl & DUDE_LIGHT_NOSHADOWS ) == 0u ) {
+		bool isPoint = ( fl & ( DUDE_LIGHT_PROJECTED | DUDE_LIGHT_PARALLEL ) ) == 0u;
+		if ( shadows && ( fl & DUDE_LIGHT_NOSHADOWS ) == 0u && ( pointShadows || !isPoint ) ) {
 			// cheapest ray there is: opaque-only, first hit ends it. Stop short of the light so the
 			// fixture's own geometry does not shadow its light; a parallel light's origin is far away.
 			float tmax = min( dl - 4.0, 16384.0 );
