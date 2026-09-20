@@ -2710,6 +2710,11 @@ struct EnhancementPreset {
 	// affordable there (user-measured 15.6 -> 12.8 ms, no visible change). The preset owns the
 	// on/off only; the two distances are free tuning knobs (Debugging -> RT Shadows).
 	bool  rtBlurStagger;            // r_rtShadowBlurStagger
+	// Volumetric lighting (appended; docs/volumetric-lighting.md): the air scatters the scene's real
+	// lights - cones, shafts, a visible flashlight beam. Ultra Nightmare only: it needs the RT scene that
+	// tier already builds (visibility rays) and HDR. The preset owns the on/off only; which lights
+	// scatter, the haze density and the other r_vol* knobs are free tuning (Graphics -> Lighting).
+	bool  volumetrics;              // r_volumetrics
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2719,13 +2724,13 @@ struct EnhancementPreset {
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false },
-	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 0.5f, true, true,  true,  true,  0,     true,  true,  true,  false, true , true, true, true, true  },
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false },
+	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 0.5f, true, true,  true,  true,  0,     true,  true,  true,  false, true , true, true, true, true, true  },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2834,6 +2839,7 @@ static void ApplyEnhancementPreset( int idx )
 	r_rtShadowBlur.SetBool( p.rtShadowBlur );
 	r_rtAllLights.SetBool( p.rtAllLights );
 	r_rtShadowBlurStagger.SetBool( p.rtBlurStagger );
+	r_volumetrics.SetBool( p.volumetrics );
 }
 
 // Return the preset whose full cvar vector the live cvars currently match, or -1
@@ -2896,7 +2902,8 @@ static int DetectEnhancementPreset()
 			r_rtao.GetBool()                   == p.rtao &&
 			r_rtShadowBlur.GetBool()           == p.rtShadowBlur &&
 			r_rtAllLights.GetBool()            == p.rtAllLights &&
-			r_rtShadowBlurStagger.GetBool()    == p.rtBlurStagger;
+			r_rtShadowBlurStagger.GetBool()    == p.rtBlurStagger &&
+			r_volumetrics.GetBool()            == p.volumetrics;
 		if ( match ) {
 			return i;
 		}
@@ -2916,7 +2923,7 @@ static void DrawEnhGroup_Lighting()
 
 		// Volumetric lighting (docs/volumetric-lighting.md). Same idiom as the Shadows / Ambient Occlusion /
 		// Reflections groups' RT sections: greyed on the legacy/GL3 backend and non-RT GPUs, where the cvars
-		// are inert. Opt-in - no preset turns it on (it adds light the stock game never had).
+		// are inert. Preset-owned on/off (on at Ultra Nightmare only), so flipping it by hand reads "Custom".
 		{
 			const bool rtCapable = R_SupportsRayTracing();
 			ImGui::SeparatorText( rtCapable ? "Ray Tracing (RTX)" : "Ray Tracing (RTX) - needs Vulkan + RT GPU" );
@@ -2929,7 +2936,7 @@ static void DrawEnhGroup_Lighting()
 			AddTooltip( "The air scatters the scene's real lights toward you: visible cones under spot lights, "
 				"shafts through grates, monsters and railings cutting dark wedges out of the lit haze, a "
 				"flashlight beam you can see. Changes the look of the game - the stock game has no lit air, and "
-				"haze lifts the blacks inside lit volumes - so no quality preset turns it on. Costs about "
+				"haze lifts the blacks inside lit volumes; only the Ultra Nightmare preset turns it on. Costs about "
 				"0.5 ms with spot lights only, ~1.2 ms with all lights (1440p). Needs the Vulkan backend, "
 				"ray-query (RT) hardware and HDR; shadows in the haze need the RT scene (RT Sun Shadows on)." );
 			if ( rtCapable && vol && !r_rtSunShadows.GetBool() && !r_rtAllLights.GetBool() && !r_rtao.GetBool() ) {
