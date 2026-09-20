@@ -1,7 +1,7 @@
 # Volumetric lighting (light shafts) — plan
 
 **Status: Route A SHIPPED (opt-in) 2026-09-20 — V0–V4 built, user-verified, merged to master. `r_volumetrics`
-default 0, no preset; Graphics → Lighting → Ray Tracing (RTX). Not built: fog-volume density boost, light
+default 0, no preset; Graphics → Lighting → Ray Tracing (RTX). Not built: light
 projection textures (gobos), raster-tier visibility, Route B (froxels) — the includes are kept Route-B-ready.**
 Backlog origin: [todo.md](todo.md) "Fidelity backlog — Volumetric light shafts".
 
@@ -158,6 +158,68 @@ with resolution × steps × lights.
   within noise. Perf work parked here.
 - **V4 menu (built).** Graphics → Lighting → "Ray Tracing (RTX)" section: Volumetric Lighting toggle, Lights
   In The Haze (spots / all), Haze Density, Point Light Haze, Flashlight Beam; hint line when no RT scene.
+
+- **Fog-volume boost (2026-09-20, user spec).** `r_volPointLightScale` default **0.12**; inside a stock
+  fog-light volume it rises toward `r_volFogPointLightScale` (**0.3**) — foggy rooms glow more. The gather
+  appends up to 8 fog-volume rows *behind* the lights in the same buffer slot (outside the light count, so RT
+  reflections never see them; flag bit4; `color.x` = strength `clamp(500 / fogOpaqueDistance, 0.2, 1)`;
+  the box planes + bounding sphere). `vol_scatter.glsl` mirrors the light pattern: `dudeVolCullFogRay` once
+  per ray (≤4), `dudeVolFogFactor` per sample (soft-edged box); only when `r_volLights 2`. Menu: "Point Light
+  Haze In Fog". Black fog counts too (it is still fog). Only the point-light scale is boosted — not density,
+  not spot cones.
+
+- **User look pass (2026-09-20):** defaults → `r_volDensity` 0.5, `r_volPointLightScale` 0.09,
+  `r_volFogPointLightScale` 0.5, `r_volFlashlightScale` 0.5. **AO coupling:** the haze flattens contact
+  shading, so while volumetrics is active the AO producer (RTAO resolve / GTAO) uses `r_volAoIntensity`
+  (**1.75**) when that exceeds its own intensity cvar (`RB_RHI_AoIntensityWithVolumetrics`). Applied at the
+  point of use — neither `r_rtaoIntensity` nor `r_ssaoIntensity` is rewritten, presets stay "matched", and
+  turning the haze off restores them. Menu: "AO Intensity With Haze"; 0 = leave AO alone.
+
+- **Hell lava cave (hell1) — dots + a pale-cyan veil (user screenshots, 2026-09-20).** Diagnosis from the
+  map: the cave is lit by one **huge pale-cyan point light** (`lights/cloudscroll3`, radius 3600×4200×1032,
+  colour 0.85 0.96 0.95) — a sky-glow ambience light; the lava is an *emissive surface + a thin orange fog
+  slab*, **not a light**, so nothing orange reaches the haze. Two fixes: (1) **dots** = sky pixels:
+  `ssr_temporal` passed sky through un-accumulated (right for reflections, wrong for lit air in front of
+  the sky) → `u_particleRadius.x = 1` makes it accumulate them, reprojected as a distant point.
+  (2) **veil** = a light integrated over a cave-sized volume: `r_volLargeLightRadius` (1200) fades a
+  light's haze by `(ref / size)²` beyond that bounding radius (packed into flags bits 8..15 by the gather);
+  room-scale lights are untouched. **Open (colour):** making lava/emissive surfaces feed the haze needs
+  emissive surfaces as light sources (cf. `r_emissiveSurfaces`) — not built.
+
+- **"Moving dots compose the haze" (2026-09-20) → low-res blur.** Not NRD (volumetrics never used it, and
+  NRD's denoisers are surface-guided — lit air has no surface): it was our `ssr_temporal` being asked to do
+  everything. The march dithers per *low-res* pixel (IGN), each noisy texel upsamples to a 4×4-px dot, and
+  at the user's responsive feedback (0.8 ≈ 5 frames) the accumulation cannot hide it. Added
+  `vol_blur.frag`: a depth-aware box blur **at march resolution, before the upsample** (`r_volBlur` = radius,
+  default 1 = 3×3 — IGN is built so a 3×3 window holds well-spread offsets, i.e. ~9× the steps; 2 = 5×5).
+  ~18 fetches × 230 k px: negligible. Pipeline is now march → blur → depth-aware upsample → temporal →
+  composite.
+
+- **"The haze is blotchy and moves vertically" (2026-09-20).** Root cause: the per-frame jitter was
+  `fract( IGN(px) + frame · 0.618 )`. Adding a constant to IGN's *value* is the same as **translating its
+  pattern** — `IGN = fract(52.98 · fract(0.0671x + 0.00584y))`, so Δvalue 0.618 ≡ Δy ≈ 1.2 march texels
+  (≈5 screen px) per frame. The residual noise (after blur + a short temporal window) therefore drifted
+  steadily up the screen, and the eye tracks coherent motion; a wider blur only made bigger blotches.
+  Fix: the phase is now the **base-2 radical inverse** of the frame index (0.5, 0.25, 0.75, …): jumps back
+  and forth, no coherent motion, still stratified per pixel. Plus variance reduction: `dudeVolCullRay`
+  returns the **[near, far] stretch of the ray the candidate spheres cover** and the march spends its 12
+  steps there instead of over the whole view distance.
+
+- **Stripes against sky / distant walls, only with the temporal pass on (2026-09-20).** Second half of the
+  same lesson: *any* per-frame shift of a structured dither (IGN + radical-inverse phase) leaves a residual
+  with the dither's own striped structure in an exponentially-weighted accumulation, largest where steps are
+  longest. The march jitter is now an **integer hash of (pixel, frame)** — uncorrelated in space and time;
+  the march is stratified already, and the low-res blur + temporal pass average white noise without any
+  coherent residue. Also: the blur's depth tolerance now rejects only real silhouettes (depth ratio ≳ 2),
+  not slopes. **Rule: for a blur + short-temporal pipeline, use uncorrelated per-frame noise; never animate
+  IGN by a value/phase shift.**
+
+- **White noise was too coarse (2026-09-20, same session).** The (pixel, frame) hash removed the stripes but
+  at quarter res its low-frequency energy survives even a 7×7 blur as huge blotchy pixels. Final scheme:
+  **IGN per frame (so one frame + the 3×3 blur is clean), re-ORIENTED per frame** — axes swapped / mirrored
+  (4 distinct stripe directions) at a hashed offset (PCG of the frame index) — so successive frames are not
+  shifts of one pattern and their residues do not reinforce. **User-verified ("chef's kiss").** Revised rule: *spatially structured (IGN),
+  temporally re-oriented — not shifted, not white.*
 
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
 scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a

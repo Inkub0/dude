@@ -28,7 +28,10 @@ const uint DUDE_VOL_MAX_LIGHTS = 16u;
 // sph[] returns each candidate's bounding sphere, so the per-sample range test reads a local instead of
 // going back to the buffer (12 steps x 16 candidates of 16 B reads per pixel were ~a quarter of the cost).
 uint dudeVolCullRay( RtLights lights, uint nLights, uint lightMode, vec3 eye, vec3 viewDir, float dist,
-                     out uint idx[ DUDE_VOL_MAX_LIGHTS ], out vec4 sph[ DUDE_VOL_MAX_LIGHTS ] ) {
+                     out uint idx[ DUDE_VOL_MAX_LIGHTS ], out vec4 sph[ DUDE_VOL_MAX_LIGHTS ], out vec2 range ) {
+	// range = the stretch [near, far] of the ray that the candidates' spheres cover: the march spends its
+	// steps there instead of spreading them over air no light can reach (fewer wasted steps = less noise).
+	range = vec2( dist, 0.0 );
 	uint n = 0u;
 	for ( uint li = 0u; li < nLights && n < DUDE_VOL_MAX_LIGHTS; li++ ) {
 		vec4  cs = lights.l[ li ].cull;
@@ -40,8 +43,53 @@ uint dudeVolCullRay( RtLights lights, uint nLights, uint lightMode, vec3 eye, ve
 		idx[ n ] = li;
 		sph[ n ] = cs;
 		n++;
+		float tc   = dot( oc, viewDir );									// unclamped closest approach
+		float dc2  = dot( oc, oc ) - tc * tc;
+		float half_ = sqrt( max( cs.w * cs.w - dc2, 0.0 ) );				// half chord through the sphere
+		range.x = min( range.x, tc - half_ );
+		range.y = max( range.y, tc + half_ );
+	}
+	range = vec2( clamp( range.x, 0.0, dist ), clamp( range.y, 0.0, dist ) );
+	return n;
+}
+
+// ---- stock fog volumes: the haze is thicker inside them --------------------------------------------------
+// Fog rows sit behind the lights in the same buffer (index firstFog .. firstFog + nFog); color.x carries the
+// fog's strength (0.2 thin .. 1 thick, from its own opaque distance). Same two-step shape as the lights:
+// cull once per ray, evaluate per sample from the short list.
+const uint DUDE_VOL_MAX_FOGS = 4u;
+
+uint dudeVolCullFogRay( RtLights lights, uint firstFog, uint nFog, vec3 eye, vec3 viewDir, float dist,
+                        out uint idx[ DUDE_VOL_MAX_FOGS ], out vec4 sph[ DUDE_VOL_MAX_FOGS ] ) {
+	uint n = 0u;
+	for ( uint k = 0u; k < nFog && n < DUDE_VOL_MAX_FOGS; k++ ) {
+		vec4  cs = lights.l[ firstFog + k ].cull;
+		vec3  oc = cs.xyz - eye;
+		float t  = clamp( dot( oc, viewDir ), 0.0, dist );
+		vec3  d  = oc - viewDir * t;
+		if ( dot( d, d ) > cs.w * cs.w ) { continue; }
+		idx[ n ] = firstFog + k;
+		sph[ n ] = cs;
+		n++;
 	}
 	return n;
+}
+
+// 0 outside every fog volume .. the fog's strength well inside one (soft-edged box, like a light volume)
+float dudeVolFogFactor( RtLights lights, uint idx[ DUDE_VOL_MAX_FOGS ], vec4 sph[ DUDE_VOL_MAX_FOGS ], uint count, vec3 p ) {
+	float f = 0.0;
+	for ( uint k = 0u; k < count; k++ ) {
+		vec3 cd = sph[ k ].xyz - p;
+		if ( dot( cd, cd ) > sph[ k ].w * sph[ k ].w ) { continue; }
+		uint  li = idx[ k ];
+		vec4  hw = vec4( p, 1.0 );
+		float q  = dot( hw, lights.l[ li ].projQ );
+		if ( q <= 1e-4 ) { continue; }
+		vec3  stf = vec3( dot( hw, lights.l[ li ].projS ) / q, dot( hw, lights.l[ li ].projT ) / q, dot( hw, lights.l[ li ].projF ) );
+		vec3  e   = smoothstep( vec3( 0.0 ), vec3( 0.15 ), min( stf, vec3( 1.0 ) - stf ) );
+		f = max( f, e.x * e.y * e.z * lights.l[ li ].color.x );
+	}
+	return f;
 }
 
 // In-scattered radiance at p per unit scattering coefficient: sum over the CANDIDATE lights of
@@ -69,6 +117,7 @@ vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], vec4 sp
 		// pointScale: omni fill lights are many and large, so unscaled they drown the authored cones
 		float scale = ( ( fl & ( DUDE_LIGHT_PROJECTED | DUDE_LIGHT_PARALLEL ) ) != 0u ) ? 1.0 : pointScale;
 		if ( ( fl & DUDE_LIGHT_VIEWWEAPON ) != 0u ) { scale *= weaponScale; }	// the player's own flashlight / muzzle flash
+		scale *= float( ( fl >> 8 ) & 255u ) * ( 1.0 / 255.0 );					// huge ambience lights fade out of the haze (set by the gather)
 		vec3 contrib = lights.l[ li ].color * ( atten * scale * dudeVolPhase( dot( ldir, viewDir ), g ) );
 		// the visibility ray is the expensive part: never trace for a contribution too faint to see
 		if ( max( contrib.r, max( contrib.g, contrib.b ) ) < 0.004 ) { continue; }

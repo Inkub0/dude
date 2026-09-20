@@ -2962,6 +2962,12 @@ static void DrawEnhGroup_Lighting()
 			}
 			AddTooltip( "Brightness of point lights in the haze relative to spot lights. Rooms hold many large "
 				"fill lights; kept low they are a faint ambience under the spot-light cones instead of drowning them." );
+			float volFogPoint = r_volFogPointLightScale.GetFloat();
+			if ( ImGui::SliderFloat( "Point Light Haze In Fog", &volFogPoint, 0.0f, 1.0f, "%.2f" ) ) {
+				r_volFogPointLightScale.SetFloat( volFogPoint );
+			}
+			AddTooltip( "What Point Light Haze rises to inside the game's own fog volumes: foggy rooms hold more "
+				"haze, so their lights glow more in the air. Follows each fog's thickness and fades in at its edges." );
 			ImGui::EndDisabled();
 
 			float volFlash = r_volFlashlightScale.GetFloat();
@@ -2971,6 +2977,14 @@ static void DrawEnhGroup_Lighting()
 			AddTooltip( "Brightness of your own flashlight beam (and muzzle flashes) in the haze. The beam starts "
 				"at your eyes, so it fogs the view more than any other light; 0 = the flashlight lights surfaces "
 				"but never the air." );
+			float volAo = r_volAoIntensity.GetFloat();
+			if ( ImGui::SliderFloat( "AO Intensity With Haze", &volAo, 0.0f, 3.0f, "%.2f" ) ) {
+				r_volAoIntensity.SetFloat( volAo );
+			}
+			AddTooltip( "Ambient-occlusion intensity used while Volumetric Lighting is on (when higher than the "
+				"Ambient Occlusion group's own intensity). The haze adds light inside lit volumes and flattens "
+				"contact shading; stronger AO puts the grounding back. Your AO settings are not changed - turn "
+				"the haze off and they apply again. 0 = leave AO alone." );
 			ImGui::EndDisabled();	// volumetrics off
 
 			ImGui::EndDisabled();	// !rtCapable
