@@ -28,7 +28,10 @@ const uint DUDE_VOL_MAX_LIGHTS = 16u;
 // sph[] returns each candidate's bounding sphere, so the per-sample range test reads a local instead of
 // going back to the buffer (12 steps x 16 candidates of 16 B reads per pixel were ~a quarter of the cost).
 uint dudeVolCullRay( RtLights lights, uint nLights, uint lightMode, vec3 eye, vec3 viewDir, float dist,
-                     out uint idx[ DUDE_VOL_MAX_LIGHTS ], out vec4 sph[ DUDE_VOL_MAX_LIGHTS ] ) {
+                     out uint idx[ DUDE_VOL_MAX_LIGHTS ], out vec4 sph[ DUDE_VOL_MAX_LIGHTS ], out vec2 range ) {
+	// range = the stretch [near, far] of the ray that the candidates' spheres cover: the march spends its
+	// steps there instead of spreading them over air no light can reach (fewer wasted steps = less noise).
+	range = vec2( dist, 0.0 );
 	uint n = 0u;
 	for ( uint li = 0u; li < nLights && n < DUDE_VOL_MAX_LIGHTS; li++ ) {
 		vec4  cs = lights.l[ li ].cull;
@@ -40,7 +43,13 @@ uint dudeVolCullRay( RtLights lights, uint nLights, uint lightMode, vec3 eye, ve
 		idx[ n ] = li;
 		sph[ n ] = cs;
 		n++;
+		float tc   = dot( oc, viewDir );									// unclamped closest approach
+		float dc2  = dot( oc, oc ) - tc * tc;
+		float half_ = sqrt( max( cs.w * cs.w - dc2, 0.0 ) );				// half chord through the sphere
+		range.x = min( range.x, tc - half_ );
+		range.y = max( range.y, tc + half_ );
 	}
+	range = vec2( clamp( range.x, 0.0, dist ), clamp( range.y, 0.0, dist ) );
 	return n;
 }
 

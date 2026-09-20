@@ -57,8 +57,9 @@ void main() {
 	// the lights that can touch THIS view ray, culled once - the march below never loops the full buffer
 	uint  cand[ DUDE_VOL_MAX_LIGHTS ];
 	vec4  candSph[ DUDE_VOL_MAX_LIGHTS ];
-	uint  nCand = dudeVolCullRay( lights, nLights, lightMode, eyeW, viewDir, dist, cand, candSph );
-	if ( nCand == 0u ) { fragColor = vec4( 0.0, 0.0, 0.0, exp( -sigmaT * dist ) ); return; }	// unlit ray: extinction only
+	vec2  lit;																// [near, far] of the ray the candidate lights cover
+	uint  nCand = dudeVolCullRay( lights, nLights, lightMode, eyeW, viewDir, dist, cand, candSph, lit );
+	if ( nCand == 0u || lit.y <= lit.x ) { fragColor = vec4( 0.0, 0.0, 0.0, exp( -sigmaT * dist ) ); return; }	// unlit ray: extinction only
 	// stock fog volumes on this ray (rows behind the lights): inside one, the point-light haze thickens
 	uint  fogIdx[ DUDE_VOL_MAX_FOGS ];
 	vec4  fogSph[ DUDE_VOL_MAX_FOGS ];
@@ -70,7 +71,7 @@ void main() {
 	// filtered, instead of banding into visible slices.
 	float jitter = fract( 52.9829189 * fract( dot( frag, vec2( 0.06711056, 0.00583715 ) ) ) + u_windowCoord.x );
 
-	// quadratic step distribution: denser near the eye, where a shaft's edge subtends more pixels
+	// quadratic step distribution over the LIT stretch: denser toward the eye, where a shaft's edge subtends more pixels
 	vec3  rgb = vec3( 0.0 );
 	float T   = 1.0;
 	float inv = 1.0 / float( steps );
@@ -78,8 +79,9 @@ void main() {
 		float b0 = float( i ) * inv;
 		float b1 = b0 + inv;
 		float a  = b0 + jitter * inv;
-		float dt = dist * ( b1 * b1 - b0 * b0 );
-		vec3  p  = eyeW + viewDir * ( dist * a * a );
+		float span = lit.y - lit.x;
+		float dt = span * ( b1 * b1 - b0 * b0 );
+		vec3  p  = eyeW + viewDir * ( lit.x + span * a * a );
 		float pointScale = u_diffuseModifier.x;
 		if ( nFogCand > 0u ) {
 			pointScale = mix( pointScale, max( pointScale, u_diffuseModifier.w ), dudeVolFogFactor( lights, fogIdx, fogSph, nFogCand, p ) );
@@ -87,5 +89,6 @@ void main() {
 		rgb += dudeVolInScatter( lights, cand, candSph, nCand, tlasAddr, shadows, u_diffuseModifier.z > 0.5, p, viewDir, g, pointScale, u_diffuseModifier.y ) * ( T * sigmaS * dt );
 		T   *= exp( -sigmaT * dt );
 	}
+	T *= exp( -sigmaT * ( dist - ( lit.y - lit.x ) ) );					// extinction over the unlit remainder of the ray
 	fragColor = vec4( rgb * u_localParam0.w, T );
 }

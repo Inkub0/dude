@@ -195,6 +195,16 @@ with resolution × steps × lights.
   ~18 fetches × 230 k px: negligible. Pipeline is now march → blur → depth-aware upsample → temporal →
   composite.
 
+- **"The haze is blotchy and moves vertically" (2026-09-20).** Root cause: the per-frame jitter was
+  `fract( IGN(px) + frame · 0.618 )`. Adding a constant to IGN's *value* is the same as **translating its
+  pattern** — `IGN = fract(52.98 · fract(0.0671x + 0.00584y))`, so Δvalue 0.618 ≡ Δy ≈ 1.2 march texels
+  (≈5 screen px) per frame. The residual noise (after blur + a short temporal window) therefore drifted
+  steadily up the screen, and the eye tracks coherent motion; a wider blur only made bigger blotches.
+  Fix: the phase is now the **base-2 radical inverse** of the frame index (0.5, 0.25, 0.75, …): jumps back
+  and forth, no coherent motion, still stratified per pixel. Plus variance reduction: `dudeVolCullRay`
+  returns the **[near, far] stretch of the ray the candidate spheres cover** and the march spends its 12
+  steps there instead of over the whole view distance.
+
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
 scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a
 rejected light still costs a 16 B read, so 256 × 12 samples × 230 k px ≈ 10 GB of buffer reads per frame in a
