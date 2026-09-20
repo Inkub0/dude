@@ -5643,10 +5643,9 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 					// The clip neighbourhood steps in TRACE texels (Quarter: 4 output px) so its taps are distinct
 					// traced samples, and the trace's sample-grid jitter is undone when reading it - without
 					// both, a Quarter trace never accumulates and shimmers.
-					const int rtFix = r_rtReflTemporalFix.GetInteger();
-					tempParms.localParam1[1] = ( rtFix >= 1 ) ? (float)fullW / (float)ssrW : 1.0f;
-					tempParms.localParam1[2] = ( rtFix >= 2 ) ? jitterX / (float)ssrW : 0.0f;
-					tempParms.localParam1[3] = ( rtFix >= 2 ) ? jitterY / (float)ssrH : 0.0f;
+					tempParms.localParam1[1] = (float)fullW / (float)ssrW;
+					tempParms.localParam1[2] = jitterX / (float)ssrW;
+					tempParms.localParam1[3] = jitterY / (float)ssrH;
 
 					// unit 0 = current RT contribution (via DrawFullscreen), 1 = history read slot,
 					// 2 = depth, 3 = velocity

@@ -203,6 +203,16 @@ rows). The normal transform is NOT stored — the shader gets it from `ObjectToW
   - **Honest limit:** `ssr_temporal`'s variance clip clamps history to the current (bilinear) neighbourhood, so
     the recovered sharpness is "good bilinear+", not full native — stripe-free + stable, pushable sharper later
     by loosening the clip. `r_rtReflTemporal 0` = the pre-RR6 look (stripes return).
+  - **Quarter-res shimmer fix (2026-09-20, user-verified).** At a Quarter trace the reflection shimmered
+    because the variance-clip's 3×3 taps were spaced one *output* pixel apart: over a 4×-upscaled trace all
+    nine fall inside one bilinear cell, the deviation collapses, the clip box pins history to the current
+    frame, accumulation stops and the per-frame grid jitter shows through. `ssr_temporal` now steps the taps
+    by the **trace texel** (`u_localParam1.y` = output px per trace texel; 1 for plain SSR, whose history
+    matches its march) and reads the trace **un-jittered** (`u_localParam1.zw`) — the "true un-jittered TAAU"
+    once listed as remaining. Shimmer largely gone; a residue survives only on near-mirror surfaces with
+    tiled normal maps (one bump normal stands in for a 4×4 footprint) — accepted. Un-jitter made no visible
+    difference over the tap spacing alone but is the correct read and free; `r_rtReflJitter` stays 0.5.
+    Makes **Quarter a usable setting** (1/16 of the rays).
 
   **Gate:** at `r_ssrResScale 0.75`, user confirms the stripes are gone with `r_rtReflTemporal 1` and it holds
   up in motion (watch for moving-monster ghosting from the wider full-res history). **Remaining RR6:** perf
