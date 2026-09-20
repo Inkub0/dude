@@ -1,6 +1,7 @@
 # Volumetric lighting (light shafts) — plan
 
-**Status: PLAN ONLY (2026-09-20). No code. Decide the route after reading.**
+**Status: Route A chosen 2026-09-20 (kept Route-B-ready). V0 + V1 + V2 BUILT on `feat/volumetric-lighting`,
+user gate pending; V3 (temporal + depth-aware upsample) and V4 (look, menu) next.**
 Backlog origin: [todo.md](todo.md) "Fidelity backlog — Volumetric light shafts".
 
 ## 1. What and why
@@ -98,6 +99,28 @@ with resolution × steps × lights.
 - **V4 — look + controls.** Density/phase/intensity defaults by eye; fog-volume boost; `r_volLights 2`
   trial; menu group (Graphics → Lighting → Ray Tracing (RTX) section, off by default); docs + changelog.
   Preset wiring is a *separate, later* decision.
+
+**Built so far (2026-09-20):**
+- **V0** — `rt_light_eval.glsl` (row layout + `dudeLightInRange` / `dudeLightDir` / `dudeLightAtten`);
+  `ssr_rt.frag` includes it (same math, same early-out order). The gather is now
+  `RB_RHI_GatherSceneLights`, cached per view (reflections fill it, volumetrics reuse it), adds flag bit2 =
+  `noShadows`, and — one deliberate behaviour change — takes a light's colour from its **evaluated shader
+  registers** when the light is also in the view, so flickering / strobing / fading lights do the same in
+  reflections and in their shafts (off-view lights keep the static colour).
+- **V1 + V2** — `vol_scatter.glsl` (`dudeVolInScatter`: light loop + any-hit visibility ray + HG phase),
+  `vol_march.frag` (jittered quadratic-spaced march, rgb in-scatter + a transmittance),
+  `vol_composite.frag` (ONE / SRC_ALPHA), `RB_RHI_VolumetricLighting` called right after
+  `RB_RHI_FogAllLights`. `r_volShadows 0` is the V1 look (unshadowed, leaks expected), `1` is V2.
+  Requires VK + ray query + `r_hdr`; without a TLAS it runs unshadowed.
+
+**Route-B readiness contract.** `rt_light_eval.glsl` and `vol_scatter.glsl` are **stage-agnostic**: no
+`gl_FragCoord`, samplers, uniforms or derivatives — every input is a function argument. A froxel inject
+kernel includes both unchanged and calls `dudeVolInScatter( lights, n, tlas, shadows, mode, froxelCentre,
+viewDir, g )`. Everything Route-A-specific (the march loop, step distribution, screen jitter, low-res
+target, composite) lives only in `vol_march.frag` / `vol_composite.frag` / `RB_RHI_VolumetricLighting`.
+The light buffer, the cvars (`r_volDensity`, `r_volAnisotropy`, `r_volLights`, `r_volShadows`, …) and their
+units (scattering coefficient per world unit) carry over as-is. Keep it that way: anything added to the
+shading goes in the includes, anything added to the march stays out of them.
 
 ## 4. Route B — true froxel grid (compute, 3D textures)
 

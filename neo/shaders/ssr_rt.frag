@@ -18,6 +18,8 @@
 #extension GL_EXT_nonuniform_qualifier : require		// RR4: nonuniformEXT index into the bindless texture array
 
 #include "renderparms.glsl"
+// RR16: scene-light buffer row + evaluation (shared with volumetric lighting)
+#include "rt_light_eval.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_sceneColor;     // RR12: live lit HDR scene (reuse); dummy G-buffer when reuse off
 SAMPLER_BINDING(1) uniform sampler2D u_currentDepth;
@@ -33,14 +35,6 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Ver
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IdxRef  { uint i[]; };
 struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; uint baseColor; uint texIndex; };	// RR0/RR3/RR4 geometry table row
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer GeoTable { GeoDesc d[]; };
-// RR16 light-buffer row (std430, 112 B; flags bit0 = parallel/sun, bit1 = projected/spot). RR16c: projS/T/Q/F
-// are the light's world-space lightProject planes - s = S.p/Q.p, t = T.p/Q.p, falloff f = F.p, all in [0,1]
-// inside the light volume (a spot's pyramid, a point light's box).
-// cull = bounding sphere (centre, radius) of the light volume, FIRST in the row: the loop reads only these
-// 16 B for a light that cannot reach the hit, so the per-pixel memory traffic stays below RR16b's.
-struct RtLight { vec4 cull; vec3 pos; float radius; vec3 color; uint flags; vec4 projS; vec4 projT; vec4 projQ; vec4 projF; };
-layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer RtLights { RtLight l[]; };
-
 // RR4 bindless materials: the resident texture set as one array, indexed by (texIndex - 1). Set 2 is
 // bound once per frame by the backend and populated by SyncBindlessSlot. nonuniformEXT because the index
 // varies per fragment — each reflective pixel can hit a different surface.
@@ -241,39 +235,17 @@ void main() {
 		vec3  hitWorld = wp + wN * 2.0 + wr * thit;
 		RtLights lights = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
 		uint nLights = uint( u_color.z );
+		bool gate = u_diffuseModifier.z > 0.5;							// r_rtReflLightFrustum (RR16c)
 		for ( uint li = 0u; li < nLights; li++ ) {
-			// Field-wise reads, never a whole-row copy: the row is 112 B and most lights miss the hit.
-			if ( u_diffuseModifier.z > 0.5 ) {								// RR16c: outside the light volume's bounding sphere
-				vec4 cs = lights.l[ li ].cull;
-				vec3 cd = cs.xyz - hitWorld;
-				if ( dot( cd, cd ) > cs.w * cs.w ) { continue; }
-			}
-			vec3    Lpos   = lights.l[ li ].pos;
-			float   Lrad   = lights.l[ li ].radius;
-			uint    Lflags = lights.l[ li ].flags;
-			vec3    d  = Lpos - hitWorld;
-			float   dl = length( d );
-			vec3    ldir  = ( dl > 1e-3 ) ? ( d / dl ) : vec3( 0.0, 0.0, 1.0 );
-			float   atten = ( ( Lflags & 1u ) != 0u ) ? 1.0							// parallel/sun: no distance falloff
-			                                            : max( 1.0 - dl / max( Lrad, 1.0 ), 0.0 );
-			// linear falloff (Doom's falloff ramp is ~linear; the old quadratic under-lit the mid-range).
+			if ( gate && !dudeLightInRange( lights, li, hitWorld ) ) { continue; }
+			vec3  ldir; float dl;
+			dudeLightDir( lights, li, hitWorld, ldir, dl );
+			float ndl = max( dot( hitN, ldir ), 0.0 );
+			if ( ndl <= 0.0 ) { continue; }									// back-facing: skip the plane reads
+			float atten = dudeLightAtten( lights, li, hitWorld, dl, lights.l[ li ].flags, gate );
+			if ( atten <= 0.0 ) { continue; }
 			// u_diffuseModifier.y = r_rtReflLightScale compensates the point approximation's missing
 			// projected-light central brightness, so reflected surfaces match their on-screen brightness.
-			float   ndl = max( dot( hitN, ldir ), 0.0 );
-			if ( ndl <= 0.0 ) { continue; }										// back-facing: skip the plane reads
-			if ( u_diffuseModifier.z > 0.5 ) {								// r_rtReflLightFrustum
-				vec4  hw = vec4( hitWorld, 1.0 );
-				float q  = dot( hw, lights.l[ li ].projQ );
-				if ( q <= 1e-4 ) { continue; }									// behind a spot's apex
-				vec3  stf = vec3( dot( hw, lights.l[ li ].projS ) / q, dot( hw, lights.l[ li ].projT ) / q, dot( hw, lights.l[ li ].projF ) );
-				vec3  e   = smoothstep( vec3( 0.0 ), vec3( 0.15 ), min( stf, vec3( 1.0 ) - stf ) );	// 0 at/outside a face
-				if ( ( Lflags & 2u ) != 0u ) {
-					atten = e.x * e.y * step( 0.0, stf.z ) * clamp( 1.0 - stf.z, 0.0, 1.0 );	// spot: axial falloff start->end
-				} else {
-					atten *= e.x * e.y * e.z;									// point/parallel: clipped to the light box
-				}
-			}
-			if ( atten <= 0.0 ) { continue; }
 			lit += albedo * lights.l[ li ].color * ( atten * ndl * u_diffuseModifier.y );
 		}
 	} else {

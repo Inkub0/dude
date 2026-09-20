@@ -3448,6 +3448,10 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	// fog and blend lights
 	if ( viewDef->viewEntitys ) {
 		RB_RHI_FogAllLights( r, viewDef );
+		// DUDE volumetric lighting (r_volumetrics): after the stock fog, BEFORE the post-process-sort
+		// surfaces so heat haze distorts the shafts with the scene and no 2D/HUD is ever touched; FSR2,
+		// eye adaptation and bloom downstream all see the shafts as part of the scene.
+		RB_RHI_VolumetricLighting( r, viewDef );
 	}
 
 	// post-process-sort surfaces, now that fog is down; copy _currentRender
