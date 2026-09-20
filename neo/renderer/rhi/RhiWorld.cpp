@@ -654,7 +654,19 @@ static rhi::RenderTargetHandle rhiVolHistRT[2] = { 0, 0 };	// full-res temporal 
 static int   rhiVolHistIdx = 0;
 static int   rhiVolFullW = 0, rhiVolFullH = 0;
 static bool  rhiVolHistValid = false;
-static float rhiVolJitterPhase = 0.0f;					// per-frame golden-ratio rotation of the march sample offsets
+static float rhiVolJitterPhase = 0.0f;
+
+// Volumetric lighting lifts light everywhere inside lit volumes, which flattens contact shading, so while it
+// is active the AO producers (GTAO / RTAO) use r_volAoIntensity when that is higher than their own
+// intensity cvar. Nothing is written back: volumetrics off -> each producer's own value again. Same
+// activity test as RB_RHI_VolumetricLighting (cvar + VK + ray query + HDR frame).
+static float RB_RHI_AoIntensityWithVolumetrics( rhi::RHI *r, float ownIntensity ) {
+	if ( r_volumetrics.GetBool() && r_volAoIntensity.GetFloat() > ownIntensity
+			&& rhi::GetActiveBackendType() == rhi::BT_VULKAN && r->SupportsRayQuery() && RB_RHI_HdrCaptureActive() ) {
+		return r_volAoIntensity.GetFloat();
+	}
+	return ownIntensity;
+}					// per-frame golden-ratio rotation of the march sample offsets
 static rhi::RenderTargetHandle rhiRtReflRT = 0;		// this frame's RT reflection contribution (a = hit mask)
 // RR16 (docs/rtx-reflections.md): the view's lights gathered into a device buffer the fullscreen RT
 // reflection pass loops (buffer_reference), so an off-screen-reflected hit is lit by the REAL scene
@@ -6125,7 +6137,7 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[0] = invP00;
 	parms.localParam0[1] = invP11;
 	parms.localParam0[2] = radius;
-	parms.localParam0[3] = r_ssaoIntensity.GetFloat();
+	parms.localParam0[3] = RB_RHI_AoIntensityWithVolumetrics( r, r_ssaoIntensity.GetFloat() );
 	parms.localParam1[0] = radiusPixFactor;
 	parms.localParam1[1] = (float)steps;
 	parms.localParam1[2] = (float)slices;
@@ -6505,7 +6517,7 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				rp.mvpMatrix[0] = rp.mvpMatrix[5] = rp.mvpMatrix[10] = rp.mvpMatrix[15] = 1.0f;
 				// RTAO's own intensity (default neutral 1.0) — r_ssaoIntensity's 1.2 compensates
 				// for the screen-space march and stays GTAO-only (user decision 2026-09-17)
-				rp.localParam0[0] = r_rtaoIntensity.GetFloat();
+				rp.localParam0[0] = RB_RHI_AoIntensityWithVolumetrics( r, r_rtaoIntensity.GetFloat() );
 				rp.screenCorrection[0] = 1.0f / w;
 				rp.screenCorrection[1] = 1.0f / h;
 				rp.depthTexRecip[0] = 1.0f / uploadW;

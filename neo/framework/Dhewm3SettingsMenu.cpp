@@ -2977,6 +2977,14 @@ static void DrawEnhGroup_Lighting()
 			AddTooltip( "Brightness of your own flashlight beam (and muzzle flashes) in the haze. The beam starts "
 				"at your eyes, so it fogs the view more than any other light; 0 = the flashlight lights surfaces "
 				"but never the air." );
+			float volAo = r_volAoIntensity.GetFloat();
+			if ( ImGui::SliderFloat( "AO Intensity With Haze", &volAo, 0.0f, 3.0f, "%.2f" ) ) {
+				r_volAoIntensity.SetFloat( volAo );
+			}
+			AddTooltip( "Ambient-occlusion intensity used while Volumetric Lighting is on (when higher than the "
+				"Ambient Occlusion group's own intensity). The haze adds light inside lit volumes and flattens "
+				"contact shading; stronger AO puts the grounding back. Your AO settings are not changed - turn "
+				"the haze off and they apply again. 0 = leave AO alone." );
 			ImGui::EndDisabled();	// volumetrics off
 
 			ImGui::EndDisabled();	// !rtCapable

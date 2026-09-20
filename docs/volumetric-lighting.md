@@ -168,6 +168,13 @@ with resolution × steps × lights.
   Haze In Fog". Black fog counts too (it is still fog). Only the point-light scale is boosted — not density,
   not spot cones.
 
+- **User look pass (2026-09-20):** defaults → `r_volDensity` 0.5, `r_volPointLightScale` 0.09,
+  `r_volFogPointLightScale` 0.5, `r_volFlashlightScale` 0.5. **AO coupling:** the haze flattens contact
+  shading, so while volumetrics is active the AO producer (RTAO resolve / GTAO) uses `r_volAoIntensity`
+  (**1.75**) when that exceeds its own intensity cvar (`RB_RHI_AoIntensityWithVolumetrics`). Applied at the
+  point of use — neither `r_rtaoIntensity` nor `r_ssaoIntensity` is rewritten, presets stay "matched", and
+  turning the haze off restores them. Menu: "AO Intensity With Haze"; 0 = leave AO alone.
+
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
 scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a
 rejected light still costs a 16 B read, so 256 × 12 samples × 230 k px ≈ 10 GB of buffer reads per frame in a
