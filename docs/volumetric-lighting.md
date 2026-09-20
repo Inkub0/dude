@@ -151,6 +151,13 @@ with resolution × steps × lights.
   `r_volPointShadows` (default 1) lets the faint point-light ambience go unshadowed (saves most of the ray
   cost; risk = a fill light's glow showing faintly through a wall inside its light box).
 
+- **Re-measure after the local-sphere change (user, noisy ±0.5 ms):** all lights ≈ **+1.2 ms** (was +1.7),
+  spots only ≈ +0.5; `r_volShadows 0` no longer measurably cheaper → the rays are not the bottleneck any
+  more, so `r_volPointShadows` stays **1** (no leak risk for no gain). 16 steps ≈ +1 ms over 12; 8 ≈ 12
+  within noise. Perf work parked here.
+- **V4 menu (built).** Graphics → Lighting → "Ray Tracing (RTX)" section: Volumetric Lighting toggle, Lights
+  In The Haze (spots / all), Haze Density, Point Light Haze, Flashlight Beam; hint line when no RT scene.
+
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
 scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a
 rejected light still costs a 16 B read, so 256 × 12 samples × 230 k px ≈ 10 GB of buffer reads per frame in a

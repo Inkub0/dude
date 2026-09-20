@@ -2913,6 +2913,65 @@ static void DrawEnhGroup_Lighting()
 {
 	if ( BeginSettingsGroup( "Lighting" ) ) {
 		DrawOptions( lightingOptions, IM_ARRAYSIZE( lightingOptions ) );
+
+		// Volumetric lighting (docs/volumetric-lighting.md). Same idiom as the Shadows / Ambient Occlusion /
+		// Reflections groups' RT sections: greyed on the legacy/GL3 backend and non-RT GPUs, where the cvars
+		// are inert. Opt-in - no preset turns it on (it adds light the stock game never had).
+		{
+			const bool rtCapable = R_SupportsRayTracing();
+			ImGui::SeparatorText( rtCapable ? "Ray Tracing (RTX)" : "Ray Tracing (RTX) - needs Vulkan + RT GPU" );
+			ImGui::BeginDisabled( !rtCapable );
+
+			bool vol = r_volumetrics.GetBool();
+			if ( ImGui::Checkbox( "Volumetric Lighting", &vol ) ) {
+				r_volumetrics.SetBool( vol );
+			}
+			AddTooltip( "The air scatters the scene's real lights toward you: visible cones under spot lights, "
+				"shafts through grates, monsters and railings cutting dark wedges out of the lit haze, a "
+				"flashlight beam you can see. Changes the look of the game - the stock game has no lit air, and "
+				"haze lifts the blacks inside lit volumes - so no quality preset turns it on. Costs about "
+				"0.5 ms with spot lights only, ~1.2 ms with all lights (1440p). Needs the Vulkan backend, "
+				"ray-query (RT) hardware and HDR; shadows in the haze need the RT scene (RT Sun Shadows on)." );
+			if ( rtCapable && vol && !r_rtSunShadows.GetBool() && !r_rtAllLights.GetBool() && !r_rtao.GetBool() ) {
+				ImGui::TextDisabled( "  (no RT scene: the haze is unshadowed - enable RT Sun Shadows)" );
+			}
+
+			ImGui::BeginDisabled( !vol );
+			int volLights = r_volLights.GetInteger() >= 2 ? 1 : 0;
+			if ( ImGui::Combo( "Lights In The Haze", &volLights, "Spot lights only\0All lights\0" ) ) {
+				r_volLights.SetInteger( volLights + 1 );
+			}
+			AddTooltip( "Spot lights only: just the projected lights (and sun-style parallel lights) - the "
+				"authored feature lights whose cones read as shafts; cheapest, but the stock maps have few of "
+				"them. All lights: point lights too, as a fainter ambience (Point Light Haze below) - far more "
+				"presence, about twice the cost." );
+
+			float volDensity = r_volDensity.GetFloat();
+			if ( ImGui::SliderFloat( "Haze Density", &volDensity, 0.0f, 4.0f, "%.2f" ) ) {
+				r_volDensity.SetFloat( volDensity );
+			}
+			AddTooltip( "How much haze is in the air. Low = a hint of light in the cones; high = a smoke machine." );
+
+			ImGui::BeginDisabled( r_volLights.GetInteger() < 2 );
+			float volPoint = r_volPointLightScale.GetFloat();
+			if ( ImGui::SliderFloat( "Point Light Haze", &volPoint, 0.0f, 1.0f, "%.2f" ) ) {
+				r_volPointLightScale.SetFloat( volPoint );
+			}
+			AddTooltip( "Brightness of point lights in the haze relative to spot lights. Rooms hold many large "
+				"fill lights; kept low they are a faint ambience under the spot-light cones instead of drowning them." );
+			ImGui::EndDisabled();
+
+			float volFlash = r_volFlashlightScale.GetFloat();
+			if ( ImGui::SliderFloat( "Flashlight Beam", &volFlash, 0.0f, 2.0f, "%.2f" ) ) {
+				r_volFlashlightScale.SetFloat( volFlash );
+			}
+			AddTooltip( "Brightness of your own flashlight beam (and muzzle flashes) in the haze. The beam starts "
+				"at your eyes, so it fogs the view more than any other light; 0 = the flashlight lights surfaces "
+				"but never the air." );
+			ImGui::EndDisabled();	// volumetrics off
+
+			ImGui::EndDisabled();	// !rtCapable
+		}
 		EndSettingsGroup();
 	}
 }
