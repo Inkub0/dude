@@ -3233,57 +3233,6 @@ static void DrawEnhGroup_Reflections()
 			"stops only soften the reflected image — Half is ~4x cheaper and pairs well with "
 			"Temporal Accumulation. Lower this first if reflections cost too much." );
 
-		// Ray-traced reflections (docs/rtx-reflections.md): replace the screen-space reflection (and the
-		// glass cube) with a real trace of the room + monsters, including off-screen geometry. VK +
-		// ray-query hardware; rides this SSR G-buffer, so it sits directly under the SSR quality. The
-		// Ultra Nightmare tier's reflection layer; detailed tuning stays in the Debug tab's group.
-		// Gray out unless the prerequisites are met: VK + ray-query hardware, the SSR G-buffer (r_ssr — the
-		// group master already grays the whole body when it's off), and a built RT scene / TLAS
-		// (r_rtSunShadows). Only Ultra Nightmare turns the RT scene on, so lower tiers read as unavailable.
-		const bool rtIsVulkan = glConfig.rhiBackend && !glConfig.coreProfile;
-		const bool rtSceneOn  = r_rtSunShadows.GetBool();
-		ImGui::BeginDisabled( !rtIsVulkan || !rtSceneOn );
-		bool rtRefl = r_rtReflections.GetBool();
-		if ( ImGui::Checkbox( "Ray-Traced Reflections", &rtRefl ) ) {
-			r_rtReflections.SetBool( rtRefl );
-		}
-		AddTooltip( "Trace the scene to reflect the real room + monsters, including geometry off-screen "
-			"or hidden from the camera that screen-space reflections can't show, and replace the glass "
-			"cube reflections with the same. Needs the Vulkan backend + ray-query (RT) hardware and rides "
-			"the reflection buffer above (keep Reflections on). The Ultra Nightmare tier; detailed tuning "
-			"(temporal, jitter, blur, reflect monsters) is in the Debug tab's Ray-Traced Reflections group." );
-		ImGui::EndDisabled();
-		// explain the gray-out when the RT scene is the only thing missing (VK + Reflections are already on)
-		if ( rtIsVulkan && r_ssr.GetBool() && !rtSceneOn ) {
-			ImGui::TextDisabled( "  (needs Ray-Traced Sun Shadows on to build the RT scene)" );
-		}
-
-		// RT reflection resolution (r_rtReflResScale): the RT trace runs at this fraction of the screen and is
-		// temporally upscaled back to full. Discrete INTEGER-DIVISOR stops (Full/Half/Quarter) exactly like
-		// the SSR Resolution above - fractional ratios strobe the reflection - but a SEPARATE value so the RT
-		// trace scales independently of the SSR march. Sits under the RT toggle; the biggest single saving on
-		// the RT reflection pass.
-		const float rtResStops[]  = { 0.25f, 0.5f, 1.0f };
-		const char *rtResLabels[] = { "Quarter (1/4)", "Half (1/2)", "Full" };
-		const int rtNumStops = IM_ARRAYSIZE( rtResStops );
-		const float rtCurScale = r_rtReflResScale.GetFloat();
-		int rtResIdx = 0;
-		float rtResBest = 1e9f;
-		for ( int i = 0; i < rtNumStops; i++ ) {
-			const float d = idMath::Fabs( rtCurScale - rtResStops[i] );
-			if ( d < rtResBest ) { rtResBest = d; rtResIdx = i; }
-		}
-		ImGui::BeginDisabled( !rtIsVulkan || !rtSceneOn || !r_rtReflections.GetBool() );
-		if ( ImGui::SliderInt( "RT Resolution", &rtResIdx, 0, rtNumStops - 1,
-				rtResLabels[rtResIdx], ImGuiSliderFlags_NoInput ) ) {
-			rtResIdx = rtResIdx < 0 ? 0 : ( rtResIdx >= rtNumStops ? rtNumStops - 1 : rtResIdx );
-			r_rtReflResScale.SetFloat( rtResStops[rtResIdx] );
-		}
-		AddTooltip( "Resolution the ray-traced reflection is traced at, then temporally upscaled to full. "
-			"Half is ~4x cheaper on the reflection pass with a modest softening; Quarter cheaper still. "
-			"Independent of the SSR Resolution above; the biggest single lever on RT reflection cost." );
-		ImGui::EndDisabled();
-
 		// Temporal accumulation: rotate the march jitter per frame and average the
 		// results (reprojected by camera motion) so the grain resolves.
 		bool ssrTemporal = r_ssrTemporal.GetBool();
@@ -3319,6 +3268,60 @@ static void DrawEnhGroup_Reflections()
 			"cubemap - panes mirror the real room at any viewing angle. Re-capture an area with "
 			"the bakeGlassProbe console command; brightness slider in the Developer tab. "
 			"Non-vanilla; opengl3 only." );
+
+		// Ray-traced reflections (docs/rtx-reflections.md): replace the screen-space reflection (and the
+		// glass cube) with a real trace of the room + monsters, including off-screen geometry. VK +
+		// ray-query hardware; rides this SSR G-buffer. Its own "Ray Tracing (RTX)" section, last in the
+		// group - the same idiom as the Shadows / Ambient Occlusion groups. The Ultra Nightmare tier's
+		// reflection layer; detailed tuning stays in the Debug tab's group.
+		// Gray out unless the prerequisites are met: VK + ray-query hardware, the SSR G-buffer (r_ssr — the
+		// group master already grays the whole body when it's off), and a built RT scene / TLAS
+		// (r_rtSunShadows). Only Ultra Nightmare turns the RT scene on, so lower tiers read as unavailable.
+		const bool rtCapable  = R_SupportsRayTracing();
+		ImGui::SeparatorText( rtCapable ? "Ray Tracing (RTX)" : "Ray Tracing (RTX) - needs Vulkan + RT GPU" );
+		const bool rtIsVulkan = rtCapable && glConfig.rhiBackend && !glConfig.coreProfile;
+		const bool rtSceneOn  = r_rtSunShadows.GetBool();
+		ImGui::BeginDisabled( !rtIsVulkan || !rtSceneOn );
+		bool rtRefl = r_rtReflections.GetBool();
+		if ( ImGui::Checkbox( "Ray-Traced Reflections", &rtRefl ) ) {
+			r_rtReflections.SetBool( rtRefl );
+		}
+		AddTooltip( "Trace the scene to reflect the real room + monsters, including geometry off-screen "
+			"or hidden from the camera that screen-space reflections can't show, and replace the glass "
+			"cube reflections with the same. Needs the Vulkan backend + ray-query (RT) hardware and rides "
+			"the reflection buffer of this group (keep Reflections on). The Ultra Nightmare tier; detailed tuning "
+			"(temporal, jitter, blur, reflect monsters) is in the Debug tab's Ray-Traced Reflections group." );
+		ImGui::EndDisabled();
+		// explain the gray-out when the RT scene is the only thing missing (VK + Reflections are already on)
+		if ( rtIsVulkan && r_ssr.GetBool() && !rtSceneOn ) {
+			ImGui::TextDisabled( "  (needs Ray-Traced Sun Shadows on to build the RT scene)" );
+		}
+
+		// RT reflection resolution (r_rtReflResScale): the RT trace runs at this fraction of the screen and is
+		// temporally upscaled back to full. Discrete INTEGER-DIVISOR stops (Full/Half/Quarter) exactly like
+		// the SSR Resolution at the top of the group - fractional ratios strobe the reflection - but a SEPARATE value so the RT
+		// trace scales independently of the SSR march. Sits under the RT toggle; the biggest single saving on
+		// the RT reflection pass.
+		const float rtResStops[]  = { 0.25f, 0.5f, 1.0f };
+		const char *rtResLabels[] = { "Quarter (1/4)", "Half (1/2)", "Full" };
+		const int rtNumStops = IM_ARRAYSIZE( rtResStops );
+		const float rtCurScale = r_rtReflResScale.GetFloat();
+		int rtResIdx = 0;
+		float rtResBest = 1e9f;
+		for ( int i = 0; i < rtNumStops; i++ ) {
+			const float d = idMath::Fabs( rtCurScale - rtResStops[i] );
+			if ( d < rtResBest ) { rtResBest = d; rtResIdx = i; }
+		}
+		ImGui::BeginDisabled( !rtIsVulkan || !rtSceneOn || !r_rtReflections.GetBool() );
+		if ( ImGui::SliderInt( "RT Reflection Resolution", &rtResIdx, 0, rtNumStops - 1,
+				rtResLabels[rtResIdx], ImGuiSliderFlags_NoInput ) ) {
+			rtResIdx = rtResIdx < 0 ? 0 : ( rtResIdx >= rtNumStops ? rtNumStops - 1 : rtResIdx );
+			r_rtReflResScale.SetFloat( rtResStops[rtResIdx] );
+		}
+		AddTooltip( "Resolution the ray-traced reflection is traced at, then temporally upscaled to full. "
+			"Half is ~4x cheaper on the reflection pass with a modest softening; Quarter cheaper still. "
+			"Independent of the screen-space Resolution at the top of this group; the biggest single lever on RT reflection cost." );
+		ImGui::EndDisabled();
 		EndSettingsGroup();
 	}
 }
@@ -3967,10 +3970,10 @@ static void DrawDbgGroup_RTReflections()
 	}
 	ImGui::BeginDisabled( !isVulkan );
 
-	// The on/off switch now lives in the Graphics tab (Reflections, right under the SSR Resolution slider);
+	// The on/off switch now lives in the Graphics tab (Reflections -> Ray Tracing (RTX));
 	// this group is the RT-reflection tuning. Point there when it's off so the knobs below aren't a dead end.
 	if ( !r_rtReflections.GetBool() ) {
-		ImGui::TextDisabled( "RT Reflections are off - enable \"Ray-Traced Reflections\" in the Graphics tab (Reflections)." );
+		ImGui::TextDisabled( "RT Reflections are off - enable \"Ray-Traced Reflections\" in Graphics -> Reflections -> Ray Tracing (RTX)." );
 	}
 
 	// prerequisite hints (only meaningful once RT reflections are switched on)
@@ -3985,7 +3988,7 @@ static void DrawDbgGroup_RTReflections()
 
 	ImGui::BeginDisabled( !r_rtReflections.GetBool() );
 
-	// (Trace resolution lives in the Graphics tab's Reflections group, next to the SSR Resolution + the
+	// (Trace resolution lives in the Graphics tab's Reflections group, Ray Tracing (RTX) section, with the
 	// RT toggle - the user-facing quality control. This group is the fine tuning.)
 
 	bool rtTemporal = r_rtReflTemporal.GetBool();
