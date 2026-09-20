@@ -1,8 +1,10 @@
 # Volumetric lighting (light shafts) — plan
 
-**Status: Route A SHIPPED (opt-in) 2026-09-20 — V0–V4 built, user-verified, merged to master. `r_volumetrics`
-default 0, no preset; Graphics → Lighting → Ray Tracing (RTX). Not built: light
-projection textures (gobos), raster-tier visibility, Route B (froxels) — the includes are kept Route-B-ready.**
+**Status: Route A SHIPPED 2026-09-20 — V0–V4 + look pass built, user-verified, merged. `r_volumetrics` defaults
+to 0 and is turned **on by the Ultra Nightmare preset only** (user decision 2026-09-20; the tier already builds
+the RT scene + HDR it needs; ~+0.5 ms at the default spots-only mode). Graphics → Lighting → Ray Tracing (RTX).
+Not built: light projection textures (gobos), emissive surfaces (lava) lighting the haze, raster-tier
+visibility, Route B (froxels) — the includes are kept Route-B-ready.**
 Backlog origin: [todo.md](todo.md) "Fidelity backlog — Volumetric light shafts".
 
 ## 1. What and why

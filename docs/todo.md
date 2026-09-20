@@ -68,6 +68,7 @@ Design decisions taken:
 | RT shadow blur (r_rtShadowBlur) | — | — | — | — | — | on (RTX) |
 | RT shadow blur staggered refresh (r_rtShadowBlurStagger) | — | — | — | — | — | on (RTX) |
 | RT reflection trace resolution (r_rtReflResScale) | — | — | — | — | — | 1/2 (RTX) |
+| volumetric lighting (r_volumetrics) | — | — | — | — | — | on (RTX) |
 | reflection scale | 1.0 | 1.0 | 0.7 | 0.7 | 0.7 | 0.7 |
 
 (Potato/Low carry the cheap Medium SSAO/shadow sub-params under the off toggles so a
@@ -399,7 +400,7 @@ gain per effort; every one is an opt-in toggle, preset-wired only after a visual
   biggest departure from stock, real cost: top presets only, strictly opt-in, needs its own plan doc.
   **Plan written 2026-09-20: [volumetric-lighting.md](volumetric-lighting.md)** — two routes (quarter-res ray
   march reusing the RR16 light buffer + ray queries, vs a true froxel grid needing new RHI 3D/storage
-  images). **Route A SHIPPED 2026-09-20** as opt-in `r_volumetrics` (+0.5 ms spots only, ~+1.2 ms all lights
+  images). **Route A SHIPPED 2026-09-20** as `r_volumetrics` (on at Ultra Nightmare since 2026-09-20, off elsewhere) (+0.5 ms spots only, ~+1.2 ms all lights
   @1440p); froxels / gobo textures / fog boost / raster tiers remain open there.
 - **RT GI (one bounce)** — already H6 in [rtx-hybrid-roadmap.md](rtx-hybrid-roadmap.md).
 
