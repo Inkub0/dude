@@ -1,7 +1,8 @@
 # Volumetric lighting (light shafts) — plan
 
-**Status: Route A chosen 2026-09-20 (kept Route-B-ready). V0–V2 user-gated (work, no crash after the per-ray light cull); V3 BUILT on
-`feat/volumetric-lighting`, gate pending; V4 (look, defaults, menu) next.**
+**Status: Route A SHIPPED (opt-in) 2026-09-20 — V0–V4 built, user-verified, merged to master. `r_volumetrics`
+default 0, no preset; Graphics → Lighting → Ray Tracing (RTX). Not built: fog-volume density boost, light
+projection textures (gobos), raster-tier visibility, Route B (froxels) — the includes are kept Route-B-ready.**
 Backlog origin: [todo.md](todo.md) "Fidelity backlog — Volumetric light shafts".
 
 ## 1. What and why
