@@ -15,19 +15,44 @@ float dudeVolPhase( float cosTheta, float g ) {
 	return ( 1.0 - g2 ) / ( d * sqrt( d ) );
 }
 
-// In-scattered radiance at p per unit scattering coefficient: sum over the scene lights of
+// A caller NEVER loops the whole scene-light buffer per sample: the buffer holds every light near the
+// player (up to 256) and even a rejected light costs a 16 B read, so samples x lights x pixels of memory
+// traffic stalls the GPU for seconds in a light-dense map (device lost - learned the hard way). Instead it
+// builds a short CANDIDATE LIST once per view ray (Route A, dudeVolCullRay) or per froxel cluster (Route B)
+// and every sample iterates only that.
+const uint DUDE_VOL_MAX_LIGHTS = 12u;
+
+// Candidate lights for the view-ray segment eye + viewDir * [0, dist]: volume bounding sphere vs segment,
+// plus the light-mode filter. One pass over the buffer per PIXEL. Returns the count written to idx[].
+// lightMode 1 = projected/spot + parallel lights only; 2 = also point lights.
+uint dudeVolCullRay( RtLights lights, uint nLights, uint lightMode, vec3 eye, vec3 viewDir, float dist,
+                     out uint idx[ DUDE_VOL_MAX_LIGHTS ] ) {
+	uint n = 0u;
+	for ( uint li = 0u; li < nLights && n < DUDE_VOL_MAX_LIGHTS; li++ ) {
+		vec4  cs = lights.l[ li ].cull;
+		vec3  oc = cs.xyz - eye;
+		float t  = clamp( dot( oc, viewDir ), 0.0, dist );			// closest point of the segment to the centre
+		vec3  d  = oc - viewDir * t;
+		if ( dot( d, d ) > cs.w * cs.w ) { continue; }
+		if ( lightMode < 2u && ( lights.l[ li ].flags & ( DUDE_LIGHT_PROJECTED | DUDE_LIGHT_PARALLEL ) ) == 0u ) { continue; }
+		idx[ n++ ] = li;
+	}
+	return n;
+}
+
+// In-scattered radiance at p per unit scattering coefficient: sum over the CANDIDATE lights of
 // colour * attenuation-inside-the-light-volume * visibility * phase.
 //   tlasAddr  scene TLAS device address (only dereferenced when shadows is true)
 //   shadows   trace one any-hit visibility ray p -> light (lights flagged NOSHADOWS never trace)
-//   lightMode 1 = projected/spot + parallel lights only (the authored "feature" lights); 2 = also point lights
+//   idx/count the candidate list (dudeVolCullRay, or a froxel cluster list)
 //   viewDir   unit eye -> p
-vec3 dudeVolInScatter( RtLights lights, uint nLights, uvec2 tlasAddr, bool shadows, uint lightMode,
+vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], uint count, uvec2 tlasAddr, bool shadows,
                        vec3 p, vec3 viewDir, float g ) {
 	vec3 sum = vec3( 0.0 );
-	for ( uint li = 0u; li < nLights; li++ ) {
+	for ( uint k = 0u; k < count; k++ ) {
+		uint li = idx[ k ];
 		if ( !dudeLightInRange( lights, li, p ) ) { continue; }
 		uint fl = lights.l[ li ].flags;
-		if ( lightMode < 2u && ( fl & ( DUDE_LIGHT_PROJECTED | DUDE_LIGHT_PARALLEL ) ) == 0u ) { continue; }
 		vec3  ldir; float dl;
 		dudeLightDir( lights, li, p, ldir, dl );
 		float atten = dudeLightAtten( lights, li, p, dl, fl, true );

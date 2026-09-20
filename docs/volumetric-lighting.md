@@ -113,10 +113,19 @@ with resolution × steps × lights.
   `RB_RHI_FogAllLights`. `r_volShadows 0` is the V1 look (unshadowed, leaks expected), `1` is V2.
   Requires VK + ray query + `r_hdr`; without a TLAS it runs unshadowed.
 
+**Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
+scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a
+rejected light still costs a 16 B read, so 256 × 12 samples × 230 k px ≈ 10 GB of buffer reads per frame in a
+light-dense map (`mc_underground`) — a multi-second frame, killed by the driver. Same lesson as RR16c's
++1.5 ms, twelve times over: **these loops are memory-bound.** Fix: `dudeVolCullRay` builds a ≤12-light
+candidate list once per view ray (bounding sphere vs the ray segment + the light-mode filter) and
+`dudeVolInScatter` iterates only that list; rays with no candidate return immediately. For Route B the
+same function takes a per-froxel-cluster list — which is what a froxel pipeline wants anyway.
+
 **Route-B readiness contract.** `rt_light_eval.glsl` and `vol_scatter.glsl` are **stage-agnostic**: no
 `gl_FragCoord`, samplers, uniforms or derivatives — every input is a function argument. A froxel inject
-kernel includes both unchanged and calls `dudeVolInScatter( lights, n, tlas, shadows, mode, froxelCentre,
-viewDir, g )`. Everything Route-A-specific (the march loop, step distribution, screen jitter, low-res
+kernel includes both unchanged and calls `dudeVolInScatter( lights, clusterList, count, tlas, shadows,
+froxelCentre, viewDir, g )`. Everything Route-A-specific (the march loop, step distribution, screen jitter, low-res
 target, composite) lives only in `vol_march.frag` / `vol_composite.frag` / `RB_RHI_VolumetricLighting`.
 The light buffer, the cvars (`r_volDensity`, `r_volAnisotropy`, `r_volLights`, `r_volShadows`, …) and their
 units (scattering coefficient per world unit) carry over as-is. Keep it that way: anything added to the

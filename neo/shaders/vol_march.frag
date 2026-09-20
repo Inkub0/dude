@@ -52,6 +52,11 @@ void main() {
 	float g          = u_localParam1.z;
 	int   steps      = int( u_localParam1.x );
 
+	// the lights that can touch THIS view ray, culled once - the march below never loops the full buffer
+	uint  cand[ DUDE_VOL_MAX_LIGHTS ];
+	uint  nCand = dudeVolCullRay( lights, nLights, lightMode, eyeW, viewDir, dist, cand );
+	if ( nCand == 0u ) { fragColor = vec4( 0.0, 0.0, 0.0, exp( -sigmaT * dist ) ); return; }	// unlit ray: extinction only
+
 	// per-pixel + per-frame offset of the sample positions (interleaved gradient noise + golden-ratio
 	// phase): neighbouring pixels sample different depths, so a dozen steps resolve like many more once
 	// filtered, instead of banding into visible slices.
@@ -67,7 +72,7 @@ void main() {
 		float a  = b0 + jitter * inv;
 		float dt = dist * ( b1 * b1 - b0 * b0 );
 		vec3  p  = eyeW + viewDir * ( dist * a * a );
-		rgb += dudeVolInScatter( lights, nLights, tlasAddr, shadows, lightMode, p, viewDir, g ) * ( T * sigmaS * dt );
+		rgb += dudeVolInScatter( lights, cand, nCand, tlasAddr, shadows, p, viewDir, g ) * ( T * sigmaS * dt );
 		T   *= exp( -sigmaT * dt );
 	}
 	fragColor = vec4( rgb * u_localParam0.w, T );
