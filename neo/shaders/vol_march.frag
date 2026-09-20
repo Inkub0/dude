@@ -9,7 +9,7 @@
 //   u_modelViewMatrix  = inverse view (view -> world)
 //   u_localParam0      = (1/proj00, 1/proj11, scattering coefficient per world unit, intensity)
 //   u_localParam1      = (steps, max march distance, HG anisotropy g, shadows enable)
-//   u_windowCoord      = (per-frame jitter phase, light mode, view-Y sign, extinction scale)
+//   u_windowCoord      = (frame index for the jitter hash, light mode, view-Y sign, extinction scale)
 //   u_diffuseModifier   = (point-light scale, first-person weapon light scale, point-light shadows enable,
 //                          point-light scale inside stock fog volumes)
 //   u_screenCorrection = 1 / target size; u_depthTexRecip = target px -> depth-texture tc
@@ -66,10 +66,17 @@ void main() {
 	uint  nFogCand = ( lightMode >= 2u )
 		? dudeVolCullFogRay( lights, nLights, uint( u_color.w ), eyeW, viewDir, dist, fogIdx, fogSph ) : 0u;
 
-	// per-pixel + per-frame offset of the sample positions (interleaved gradient noise + golden-ratio
-	// phase): neighbouring pixels sample different depths, so a dozen steps resolve like many more once
-	// filtered, instead of banding into visible slices.
-	float jitter = fract( 52.9829189 * fract( dot( frag, vec2( 0.06711056, 0.00583715 ) ) ) + u_windowCoord.x );
+	// Per-pixel, per-FRAME offset of the sample positions inside each step's own slice (the march is
+	// stratified, so the offset only has to be uncorrelated). It must be uncorrelated across FRAMES too: a
+	// structured dither (interleaved gradient noise) shifted per frame leaves a residual with its own -
+	// striped - structure in the temporal accumulation, worst where the steps are longest (sky, far
+	// walls); before that, a constant shift made the residual drift up the screen. An integer hash of
+	// (pixel, frame) has no structure to leave behind; the low-res blur + temporal pass average it out.
+	uvec3 hv = uvec3( uvec2( frag ), uint( u_windowCoord.x ) ) * 1664525u + 1013904223u;
+	hv.x += hv.y * hv.z;	hv.y += hv.z * hv.x;	hv.z += hv.x * hv.y;
+	hv ^= hv >> 16u;
+	hv.x += hv.y * hv.z;
+	float jitter = float( hv.x >> 8u ) * ( 1.0 / 16777216.0 );
 
 	// quadratic step distribution over the LIT stretch: denser toward the eye, where a shaft's edge subtends more pixels
 	vec3  rgb = vec3( 0.0 );

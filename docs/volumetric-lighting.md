@@ -205,6 +205,15 @@ with resolution × steps × lights.
   returns the **[near, far] stretch of the ray the candidate spheres cover** and the march spends its 12
   steps there instead of over the whole view distance.
 
+- **Stripes against sky / distant walls, only with the temporal pass on (2026-09-20).** Second half of the
+  same lesson: *any* per-frame shift of a structured dither (IGN + radical-inverse phase) leaves a residual
+  with the dither's own striped structure in an exponentially-weighted accumulation, largest where steps are
+  longest. The march jitter is now an **integer hash of (pixel, frame)** — uncorrelated in space and time;
+  the march is stratified already, and the low-res blur + temporal pass average white noise without any
+  coherent residue. Also: the blur's depth tolerance now rejects only real silhouettes (depth ratio ≳ 2),
+  not slopes. **Rule: for a blur + short-temporal pipeline, use uncorrelated per-frame noise; never animate
+  IGN by a value/phase shift.**
+
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
 scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a
 rejected light still costs a 16 B read, so 256 × 12 samples × 230 k px ≈ 10 GB of buffer reads per frame in a

@@ -5916,12 +5916,9 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	const bool doTemporal = wantTemporal && tempProg && rhiVolHistRT[0] && rhiVolHistRT[1];
 	if ( doTemporal ) {
-		// fresh sample depths every frame, so the accumulation integrates ~1/(1-feedback) x the steps.
-		// NOT a constant increment: the march dither is interleaved gradient noise, and adding a constant
-		// to IGN's VALUE equals sliding its PATTERN (~1.2 march texels per frame along y for the golden
-		// ratio) - the residual noise then visibly drifts up the screen. The base-2 radical inverse jumps
-		// back and forth (0.5, 0.25, 0.75, ...): no coherent motion, and still stratified per pixel.
-		rhiVolJitterPhase = RB_RHI_Halton( ( tr.frameCount & 63 ) + 1, 2 );
+		// fresh, UNCORRELATED sample offsets every frame (vol_march.frag hashes pixel + this index); a
+		// structured dither animated per frame left drifting, then striped, residue in the accumulation
+		rhiVolJitterPhase = (float)( tr.frameCount & 1023 );
 	} else {
 		rhiVolHistValid = false;
 	}
