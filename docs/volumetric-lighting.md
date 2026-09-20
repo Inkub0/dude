@@ -186,6 +186,15 @@ with resolution × steps × lights.
   room-scale lights are untouched. **Open (colour):** making lava/emissive surfaces feed the haze needs
   emissive surfaces as light sources (cf. `r_emissiveSurfaces`) — not built.
 
+- **"Moving dots compose the haze" (2026-09-20) → low-res blur.** Not NRD (volumetrics never used it, and
+  NRD's denoisers are surface-guided — lit air has no surface): it was our `ssr_temporal` being asked to do
+  everything. The march dithers per *low-res* pixel (IGN), each noisy texel upsamples to a 4×4-px dot, and
+  at the user's responsive feedback (0.8 ≈ 5 frames) the accumulation cannot hide it. Added
+  `vol_blur.frag`: a depth-aware box blur **at march resolution, before the upsample** (`r_volBlur` = radius,
+  default 1 = 3×3 — IGN is built so a 3×3 window holds well-spread offsets, i.e. ~9× the steps; 2 = 5×5).
+  ~18 fetches × 230 k px: negligible. Pipeline is now march → blur → depth-aware upsample → temporal →
+  composite.
+
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
 scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a
 rejected light still costs a 16 B read, so 256 × 12 samples × 230 k px ≈ 10 GB of buffer reads per frame in a

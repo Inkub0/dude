@@ -649,6 +649,7 @@ static float rhiSsrJitterPhase = 0.0f;				// per-frame march jitter rotation
 // r_rtReflJitter) gives the accumulation something to average, so the grid resolves rather than smears.
 static rhi::RenderTargetHandle rhiVolRT = 0;			// volumetric lighting march result (rgb in-scatter, a transmittance)
 static int   rhiVolW = 0, rhiVolH = 0;
+static rhi::RenderTargetHandle rhiVolBlurRT = 0;			// low-res depth-aware blur of the march (resolves the per-pixel dither)
 static rhi::RenderTargetHandle rhiVolUpRT = 0;			// depth-aware upsample of the march (full res) = the temporal pass's "current"
 static rhi::RenderTargetHandle rhiVolHistRT[2] = { 0, 0 };	// full-res temporal history ping-pong
 static int   rhiVolHistIdx = 0;
@@ -3470,7 +3471,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsrHistIdx = 0;			rhiSsrHistW = rhiSsrHistH = 0;
 	rhiSsrHistValid = false;
 	rhiRtReflRT = 0;			rhiRtReflW = rhiRtReflH = 0;
-	rhiVolRT = 0;				rhiVolW = rhiVolH = 0;
+	rhiVolRT = 0;	rhiVolBlurRT = 0;	rhiVolW = rhiVolH = 0;
 	rhiVolUpRT = 0;	rhiVolHistRT[0] = rhiVolHistRT[1] = 0;	rhiVolFullW = rhiVolFullH = 0;	rhiVolHistValid = false;
 	s_rtReflLightBuf = 0;		s_rtReflLightAddr = 0;		// RR16: handle is stale after a lost context; recreated lazily
 	rhiRtReflHistRT[0] = rhiRtReflHistRT[1] = 0;
@@ -5866,11 +5867,12 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int volW = Max( 1, fullW / resDiv );
 	const int volH = Max( 1, fullH / resDiv );
 	if ( rhiVolRT && r->GetRenderTargetImage( rhiVolRT ) == 0 ) {
-		rhiVolRT = 0;	rhiVolW = rhiVolH = 0;			// lost context (vid_restart)
+		rhiVolRT = 0;	rhiVolBlurRT = 0;	rhiVolW = rhiVolH = 0;			// lost context (vid_restart)
 	}
 	if ( rhiVolRT && ( rhiVolW != volW || rhiVolH != volH ) ) {
 		r->DestroyRenderTarget( rhiVolRT );
 		rhiVolRT = 0;
+		if ( rhiVolBlurRT ) { r->DestroyRenderTarget( rhiVolBlurRT ); rhiVolBlurRT = 0; }
 	}
 	if ( !rhiVolRT ) {
 		rhiVolRT = r->CreateRenderTarget( rhi::IF_RGBA16F, volW, volH );
@@ -5966,6 +5968,34 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_DrawFullscreen( r, marchProg, mp, 0 );
 	r->EndPass();
 
+	// ---- 1b. low-res depth-aware blur (vol_blur.frag): resolves the march's per-pixel dither spatially, so
+	// the temporal pass only has to clean up the remainder (r_volBlur = radius in low-res texels, 0 = off)
+	rhi::RenderTargetHandle volLowRT = rhiVolRT;
+	const int blurRadius = idMath::ClampInt( 0, 3, r_volBlur.GetInteger() );
+	if ( blurRadius > 0 ) {
+		rhi::ShaderHandle blurProg = r->LoadShader( "vol_blur" );
+		if ( blurProg && !rhiVolBlurRT ) {
+			rhiVolBlurRT = r->CreateRenderTarget( rhi::IF_RGBA16F, volW, volH );
+		}
+		if ( blurProg && rhiVolBlurRT ) {
+			rhi::RenderParams bp;
+			memset( &bp, 0, sizeof( bp ) );
+			bp.mvpMatrix[0] = bp.mvpMatrix[5] = bp.mvpMatrix[10] = bp.mvpMatrix[15] = 1.0f;
+			bp.localParam0[0] = (float)volW;
+			bp.localParam0[1] = (float)volH;
+			bp.localParam0[2] = (float)resDiv;
+			bp.localParam0[3] = (float)blurRadius;
+			bp.depthTexRecip[0] = 1.0f / uploadW;
+			bp.depthTexRecip[1] = 1.0f / uploadH;
+			rhi::FillDepthParms( bp, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
+			r->BeginTargetPass( rhiVolBlurRT, NULL );
+			RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+			RB_RHI_DrawFullscreen( r, blurProg, bp, r->GetRenderTargetImage( rhiVolRT ) );
+			r->EndPass();
+			volLowRT = rhiVolBlurRT;
+		}
+	}
+
 	// ---- 2. depth-aware upsample to full res (vol_upsample.frag): no shaft bleed across silhouettes
 	rhi::RenderParams up;
 	memset( &up, 0, sizeof( up ) );
@@ -5978,7 +6008,7 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::FillDepthParms( up, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
 	r->BeginTargetPass( rhiVolUpRT, NULL );
 	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
-	RB_RHI_DrawFullscreen( r, upProg, up, r->GetRenderTargetImage( rhiVolRT ) );
+	RB_RHI_DrawFullscreen( r, upProg, up, r->GetRenderTargetImage( volLowRT ) );
 	r->EndPass();
 	rhi::RenderTargetHandle volResultRT = rhiVolUpRT;
 
