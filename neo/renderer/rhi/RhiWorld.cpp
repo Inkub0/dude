@@ -4950,7 +4950,12 @@ static bool RB_RHI_EnsureSsrColorMip( rhi::RHI *r, int w, int h ) {
 // a wall can leak - that is the RR16d follow-up; the falloff radius bounds most of it.) Point-light model:
 // world origin + reach radius + colour (constant-register lights: summed stage colour; the common
 // shaderParm-driven lights: the base RGB parms). fog/blend/ambient cast no directional diffuse -> skipped.
-struct RtReflLightGPU { float pos[3]; float radius; float color[3]; unsigned int flags; };	// std430, 32 B
+// RR16c: the 4 world-space lightProject planes (S, T, Q, falloff) ride along so the shader can confine each
+// light to its real volume - a Doom light only reaches inside its projection frustum (a spot's pyramid, a
+// point light's BOX), which the origin+radius sphere over-reaches.
+// cull[] = bounding sphere of the light volume, first in the row so the shader rejects a light that cannot
+// reach the hit after reading 16 B (the full row per light per pixel cost ~1.5 ms).
+struct RtReflLightGPU { float cull[4]; float pos[3]; float radius; float color[3]; unsigned int flags; float proj[4][4]; };	// std430, 112 B
 
 static int RB_RHI_GatherReflLights( rhi::RHI *r, const viewDef_t *viewDef, unsigned long long *outAddr ) {
 	*outAddr = 0;
@@ -4976,8 +4981,14 @@ static int RB_RHI_GatherReflLights( rhi::RHI *r, const viewDef_t *viewDef, unsig
 		const idMaterial *ls = ld->lightShader;
 		if ( ls == NULL || ls->IsFogLight() || ls->IsBlendLight() || ls->IsAmbientLight() ) { continue; }
 		const float lr = ld->parms.lightRadius.Length();
-		const float reach = ( lr > 1.0f ? lr : 320.0f ) + REACH;	// the light's own reach can bring it into play
-		if ( ( ld->globalLightOrigin - viewOrg ).LengthSqr() > reach * reach ) { continue; }	// too far to matter
+		idVec3 cullOrg = ld->globalLightOrigin;					// bounding sphere of the real light volume (frustum
+		float  cullRad = ( lr > 1.0f ) ? lr : 320.0f;			// hull when built: a spot does not use lightRadius)
+		if ( ld->frustumTris != NULL && !ld->frustumTris->bounds.IsCleared() ) {
+			cullOrg = ld->frustumTris->bounds.GetCenter();
+			cullRad = ld->frustumTris->bounds.GetRadius( cullOrg );
+		}
+		const float reach = cullRad + REACH;					// the light's own reach can bring it into play
+		if ( ( cullOrg - viewOrg ).LengthSqr() > reach * reach ) { continue; }	// too far to matter
 		idVec3 col;
 		const float *cregs = ls->ConstantRegisters();
 		if ( cregs != NULL ) {						// constant-colour light material: sum its stage colours
@@ -4994,12 +5005,20 @@ static int RB_RHI_GatherReflLights( rhi::RHI *r, const viewDef_t *viewDef, unsig
 		}
 		if ( col[0] <= 0.0f && col[1] <= 0.0f && col[2] <= 0.0f ) { continue; }	// dark / off
 		RtReflLightGPU &L = lights[ n++ ];
+		L.cull[0] = cullOrg[0]; L.cull[1] = cullOrg[1]; L.cull[2] = cullOrg[2]; L.cull[3] = cullRad;
 		L.pos[0] = ld->globalLightOrigin[0];
 		L.pos[1] = ld->globalLightOrigin[1];
 		L.pos[2] = ld->globalLightOrigin[2];
 		L.radius = ( lr > 1.0f ) ? lr : 320.0f;					// a sane reach for degenerate/zero radii
 		L.color[0] = col[0]; L.color[1] = col[1]; L.color[2] = col[2];
-		L.flags = ld->parms.parallel ? 1u : 0u;					// bit0 = parallel/sun (no distance falloff)
+		L.flags = ( ld->parms.parallel ? 1u : 0u )				// bit0 = parallel/sun (no distance falloff)
+		        | ( ld->parms.pointLight ? 0u : 2u );			// bit1 = projected (spot) light: falloff runs along the frustum axis
+		for ( int p = 0; p < 4; p++ ) {							// RR16c: global-space S/T/Q/falloff planes
+			L.proj[p][0] = ld->lightProject[p][0];
+			L.proj[p][1] = ld->lightProject[p][1];
+			L.proj[p][2] = ld->lightProject[p][2];
+			L.proj[p][3] = ld->lightProject[p][3];
+		}
 	}
 	if ( n == 0 ) {
 		return 0;
@@ -5534,7 +5553,8 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			// RR16: gather the scene's real lights into the ring buffer; ssr_rt loops them to light the hit
 			// (so an off-screen-reflected surface is lit correctly, not by a fixed key light). color = (light-
 			// buffer device addr lo/hi bit-cast, count, ambient); diffuseModifier = (RR16f emissive glow scale,
-			// _, _, real-lights enable). The r_rtReflRealLights 0 key light is a fixed dir hardcoded in-shader.
+			// light brightness scale, RR16c frustum gate, real-lights enable). The r_rtReflRealLights 0 key light
+			// is a fixed dir hardcoded in-shader.
 			unsigned long long rtLightAddr = 0;
 			const int rtNumLights = r_rtReflRealLights.GetBool() ? RB_RHI_GatherReflLights( r, viewDef, &rtLightAddr ) : 0;
 			memcpy( &rp.color[0], &rtLightAddr, sizeof( rtLightAddr ) );	// color.xy = light-buffer device address
@@ -5542,6 +5562,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			rp.color[3] = 0.28f;										// ambient term
 			rp.diffuseModifier[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtReflEmissive.GetFloat() );	// RR16f: self-illumination glow scale
 			rp.diffuseModifier[1] = idMath::ClampFloat( 0.0f, 8.0f, r_rtReflLightScale.GetFloat() );	// RR16: real-light diffuse brightness scale
+			rp.diffuseModifier[2] = r_rtReflLightFrustum.GetBool() ? 1.0f : 0.0f;	// RR16c: confine each light to its projection frustum
 			rp.diffuseModifier[3] = ( rtNumLights > 0 ) ? 1.0f : 0.0f;	// real-lights enable (else the fixed key-light fallback)
 			rp.localParam1[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtReflBump.GetFloat() );	// RR10: bump-normal warp amount
 			rp.localParam1[0] = ( rhiSsaoAppliedThisView ? idMath::ClampFloat( 0.0f, 1.0f, r_specOcclusion.GetFloat() ) : 0.0f );	// RR14 specular occlusion strength (0 when no AO this view)

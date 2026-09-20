@@ -980,6 +980,7 @@ extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compo
 extern idCVar r_rtReflSceneReuse;			// RR12: shade an on-screen RT reflection hit with the real lit scene instead of the fake key light
 extern idCVar r_rtReflDebug;				// RR12 debug: paint reflection by reuse confidence (green = reuse, red = key-light fallback)
 extern idCVar r_rtReflRealLights;			// RR16: shade an RT reflection hit with the scene's real lights (not a fixed key light)
+extern idCVar r_rtReflLightFrustum;		// RR16c: confine each real light to its projection frustum (spot pyramid / point-light box) at an RT reflection hit
 extern idCVar r_rtReflLightScale;			// RR16: overall brightness of the real-light diffuse at an RT reflection hit (compensates the point-light approximation)
 extern idCVar r_rtReflEmissive;				// RR16f: brightness of self-lit light-source surfaces (neon/ceiling tiles) in RT reflections
 extern idCVar r_rtReflResScale;				// RT reflection trace resolution (fraction of screen; unsnapped, temporally upscaled)

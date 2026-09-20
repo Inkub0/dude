@@ -12,7 +12,7 @@
 // RR12 scene-reuse enable); u_localParam1 = (RR14 specOcclusion, intensity, maxRoughness, RR10 bump);
 // u_windowCoord = (jitterX, jitterY, view-Y sign (VK), RR12 firefly clamp); u_color = (RR16 light-buffer
 // device addr lo/hi, light count, ambient); u_diffuseModifier = (RR16f emissive glow scale, RR16 light
-// brightness scale, _, RR16 real-lights enable); u_depthTexRecip/u_screenCorrection size the buffers.
+// brightness scale, RR16c frustum gate, RR16 real-lights enable); u_depthTexRecip/u_screenCorrection size the buffers.
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_buffer_reference_uvec2 : require	// construct the geo-table pointer from u_rtParms.zw (uvec2)
 #extension GL_EXT_nonuniform_qualifier : require		// RR4: nonuniformEXT index into the bindless texture array
@@ -33,7 +33,12 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Ver
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IdxRef  { uint i[]; };
 struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; uint baseColor; uint texIndex; };	// RR0/RR3/RR4 geometry table row
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer GeoTable { GeoDesc d[]; };
-struct RtLight { vec3 pos; float radius; vec3 color; uint flags; };		// RR16 light-buffer row (std430, 32 B; flags bit0 = parallel/sun)
+// RR16 light-buffer row (std430, 112 B; flags bit0 = parallel/sun, bit1 = projected/spot). RR16c: projS/T/Q/F
+// are the light's world-space lightProject planes - s = S.p/Q.p, t = T.p/Q.p, falloff f = F.p, all in [0,1]
+// inside the light volume (a spot's pyramid, a point light's box).
+// cull = bounding sphere (centre, radius) of the light volume, FIRST in the row: the loop reads only these
+// 16 B for a light that cannot reach the hit, so the per-pixel memory traffic stays below RR16b's.
+struct RtLight { vec4 cull; vec3 pos; float radius; vec3 color; uint flags; vec4 projS; vec4 projT; vec4 projQ; vec4 projF; };
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer RtLights { RtLight l[]; };
 
 // RR4 bindless materials: the resident texture set as one array, indexed by (texIndex - 1). Set 2 is
@@ -225,24 +230,51 @@ void main() {
 	// RR16: shade the hit with the scene's REAL lights, so an OFF-screen-reflected surface is lit correctly
 	// (not by a fixed key light) - the fix for r_rtReflSceneReuse's screen-space limitation. World hit =
 	// wp + wN*2 + wr*t (the world ray vectors already exist). u_color = (lightBuf addr lo/hi, count, ambient);
-	// u_diffuseModifier = (RR16f glow scale, _, _, realLightsEnable). Point-light diffuse approximation (no
-	// projected-light frustum or shadow rays yet - RR16c/d). The RR12 on-screen reuse still overrides this.
+	// u_diffuseModifier = (RR16f glow scale, light scale, RR16c frustum gate, realLightsEnable). Diffuse only,
+	// no shadow rays (RR16d, parked). The RR12 on-screen reuse still overrides this.
+	// RR16c: a Doom light reaches only inside its projection volume, so the hit is projected through the
+	// light's S/T/Q/falloff planes and the term windowed to [0,1] - soft-edged, as every light texture fades
+	// to black at its border. Uniform inside (the gobo/falloff TEXTURES are not sampled). A spot's falloff
+	// runs along its axis (1-f) rather than radially from a lightRadius it doesn't use.
 	vec3  lit = albedo * u_color.w;										// ambient floor
 	if ( u_diffuseModifier.w > 0.5 ) {									// r_rtReflRealLights: loop the light buffer
 		vec3  hitWorld = wp + wN * 2.0 + wr * thit;
 		RtLights lights = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
 		uint nLights = uint( u_color.z );
 		for ( uint li = 0u; li < nLights; li++ ) {
-			RtLight L  = lights.l[ li ];
-			vec3    d  = L.pos - hitWorld;
+			// Field-wise reads, never a whole-row copy: the row is 112 B and most lights miss the hit.
+			if ( u_diffuseModifier.z > 0.5 ) {								// RR16c: outside the light volume's bounding sphere
+				vec4 cs = lights.l[ li ].cull;
+				vec3 cd = cs.xyz - hitWorld;
+				if ( dot( cd, cd ) > cs.w * cs.w ) { continue; }
+			}
+			vec3    Lpos   = lights.l[ li ].pos;
+			float   Lrad   = lights.l[ li ].radius;
+			uint    Lflags = lights.l[ li ].flags;
+			vec3    d  = Lpos - hitWorld;
 			float   dl = length( d );
 			vec3    ldir  = ( dl > 1e-3 ) ? ( d / dl ) : vec3( 0.0, 0.0, 1.0 );
-			float   atten = ( ( L.flags & 1u ) != 0u ) ? 1.0							// parallel/sun: no distance falloff
-			                                            : max( 1.0 - dl / max( L.radius, 1.0 ), 0.0 );
+			float   atten = ( ( Lflags & 1u ) != 0u ) ? 1.0							// parallel/sun: no distance falloff
+			                                            : max( 1.0 - dl / max( Lrad, 1.0 ), 0.0 );
 			// linear falloff (Doom's falloff ramp is ~linear; the old quadratic under-lit the mid-range).
 			// u_diffuseModifier.y = r_rtReflLightScale compensates the point approximation's missing
 			// projected-light central brightness, so reflected surfaces match their on-screen brightness.
-			lit += albedo * L.color * ( atten * max( dot( hitN, ldir ), 0.0 ) * u_diffuseModifier.y );
+			float   ndl = max( dot( hitN, ldir ), 0.0 );
+			if ( ndl <= 0.0 ) { continue; }										// back-facing: skip the plane reads
+			if ( u_diffuseModifier.z > 0.5 ) {								// r_rtReflLightFrustum
+				vec4  hw = vec4( hitWorld, 1.0 );
+				float q  = dot( hw, lights.l[ li ].projQ );
+				if ( q <= 1e-4 ) { continue; }									// behind a spot's apex
+				vec3  stf = vec3( dot( hw, lights.l[ li ].projS ) / q, dot( hw, lights.l[ li ].projT ) / q, dot( hw, lights.l[ li ].projF ) );
+				vec3  e   = smoothstep( vec3( 0.0 ), vec3( 0.15 ), min( stf, vec3( 1.0 ) - stf ) );	// 0 at/outside a face
+				if ( ( Lflags & 2u ) != 0u ) {
+					atten = e.x * e.y * step( 0.0, stf.z ) * clamp( 1.0 - stf.z, 0.0, 1.0 );	// spot: axial falloff start->end
+				} else {
+					atten *= e.x * e.y * e.z;									// point/parallel: clipped to the light box
+				}
+			}
+			if ( atten <= 0.0 ) { continue; }
+			lit += albedo * lights.l[ li ].color * ( atten * ndl * u_diffuseModifier.y );
 		}
 	} else {
 		float ndl = max( dot( hitN, normalize( vec3( 0.4, 0.5, 0.9 ) ) ), 0.0 );	// r_rtReflRealLights 0: the old fixed key light
