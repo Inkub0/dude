@@ -2824,6 +2824,10 @@ static void ApplyEnhancementPreset( int idx )
 	// built the persistent world BLAS this traces; the monster BLAS (r_rtAnimBlas) is default-on and inert
 	// without a TLAS, so it is left alone here (never preset-forced off — see the struct note).
 	r_rtReflections.SetBool( p.rtReflections );
+	// RT reflection trace resolution: Half wherever the preset turns RT reflections on (Ultra Nightmare) - a
+	// quarter of the rays, temporally upscaled to full res with no visible loss (docs/rtx-reflections.md RR6c).
+	// Inert on the other tiers, which get the Full default back.
+	r_rtReflResScale.SetFloat( p.rtReflections ? 0.5f : 1.0f );
 	r_ssaoTemporalTrade.SetBool( p.ssaoTemporalTrade );
 	com_interpolate.SetBool( p.interpolate );
 	r_rtao.SetBool( p.rtao );
@@ -2886,6 +2890,7 @@ static int DetectEnhancementPreset()
 			r_rtSunShadows.GetBool()           == p.rtSunShadows &&
 			r_rtMovingLights.GetBool()         == p.rtMovingLights &&
 			r_rtReflections.GetBool()          == p.rtReflections &&
+			( !p.rtReflections || idMath::Fabs( r_rtReflResScale.GetFloat() - 0.5f ) < 0.01f ) &&
 			r_ssaoTemporalTrade.GetBool()      == p.ssaoTemporalTrade &&
 			com_interpolate.GetBool()          == p.interpolate &&
 			r_rtao.GetBool()                   == p.rtao &&
