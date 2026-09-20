@@ -512,7 +512,7 @@ the view's lights gathered into a **device buffer it can loop** — read via `bu
 like the RR4/RR5 geo table (address bit-cast into a param, no descriptor).
 
 **Staged (validator-first, opt-in, VK+RT only, gate each). RR16a+b BUILT 2026-09-19 (commit f7f6657a, gate
-pending); RR16c BUILT 2026-09-20 (`r_rtReflLightFrustum`, gate pending) — this closes reflections for now;
+pending); RR16c BUILT + user-verified 2026-09-20 (`r_rtReflLightFrustum`) — this closes reflections for now;
 RR16d parked as nice-to-have ([todo.md](todo.md)); RR16e deferred.**
 - **RR16a — light buffer. BUILT.** Each view, gather `viewDef->viewLights` into a device buffer: per light
   `{ vec3 worldOrigin, float radius, vec3 color, uint flags }` (32 B). `worldOrigin = globalLightOrigin`;
@@ -543,7 +543,12 @@ RR16d parked as nice-to-have ([todo.md](todo.md)); RR16e deferred.**
   sphere over-reached past the box faces too. Point/parallel lights keep the RR16b radial falloff × the box
   window (core brightness unchanged, so `r_rtReflLightScale` needs no retune); spots (flags bit1) drop the
   radial term — they do not use `lightRadius` — for an axial `1 − f` start→end falloff, and hits behind the
-  apex (`Q·p ≤ 0`) are rejected. Cost: three dot products + a smoothstep per light per shaded hit.
+  apex (`Q·p ≤ 0`) are rejected.
+  **Perf lesson:** the first cut copied the whole 96 B row per light per reflective pixel and cost **+1.5 ms** —
+  the loop is memory-bound, not ALU-bound. Fix: the row leads with the light volume's bounding sphere
+  (`frustumTris->bounds`; 112 B total), the shader rejects on those 16 B, reads the other fields individually
+  and skips the plane reads for back-facing hits; the CPU gather culls by the same sphere. Verified: frustum
+  on is now *cheaper* than the RR16b sphere (`r_rtReflLightFrustum 0`), and looks right.
 - **RR16d — shadow rays (r_rtReflShadows). PARKED 2026-09-20 — nice to have** (reflections judged excellent
   as-is; see [todo.md](todo.md)). Per contributing light, trace hit→light against the TLAS;
   zero the term if occluded. Reflected surfaces gain contact shadows. The dominant new cost (a ray per
