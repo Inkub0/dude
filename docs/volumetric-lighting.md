@@ -1,7 +1,7 @@
 # Volumetric lighting (light shafts) — plan
 
 **Status: Route A SHIPPED (opt-in) 2026-09-20 — V0–V4 built, user-verified, merged to master. `r_volumetrics`
-default 0, no preset; Graphics → Lighting → Ray Tracing (RTX). Not built: fog-volume density boost, light
+default 0, no preset; Graphics → Lighting → Ray Tracing (RTX). Not built: light
 projection textures (gobos), raster-tier visibility, Route B (froxels) — the includes are kept Route-B-ready.**
 Backlog origin: [todo.md](todo.md) "Fidelity backlog — Volumetric light shafts".
 
@@ -158,6 +158,15 @@ with resolution × steps × lights.
   within noise. Perf work parked here.
 - **V4 menu (built).** Graphics → Lighting → "Ray Tracing (RTX)" section: Volumetric Lighting toggle, Lights
   In The Haze (spots / all), Haze Density, Point Light Haze, Flashlight Beam; hint line when no RT scene.
+
+- **Fog-volume boost (2026-09-20, user spec).** `r_volPointLightScale` default **0.12**; inside a stock
+  fog-light volume it rises toward `r_volFogPointLightScale` (**0.3**) — foggy rooms glow more. The gather
+  appends up to 8 fog-volume rows *behind* the lights in the same buffer slot (outside the light count, so RT
+  reflections never see them; flag bit4; `color.x` = strength `clamp(500 / fogOpaqueDistance, 0.2, 1)`;
+  the box planes + bounding sphere). `vol_scatter.glsl` mirrors the light pattern: `dudeVolCullFogRay` once
+  per ray (≤4), `dudeVolFogFactor` per sample (soft-edged box); only when `r_volLights 2`. Menu: "Point Light
+  Haze In Fog". Black fog counts too (it is still fog). Only the point-light scale is boosted — not density,
+  not spot cones.
 
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
 scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a

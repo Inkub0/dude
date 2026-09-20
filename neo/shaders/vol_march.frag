@@ -5,12 +5,13 @@
 //
 // VK + ray-query only (RhiWorld.cpp RB_RHI_VolumetricLighting). Uniform packing:
 //   u_rtParms.xy       = scene TLAS device address, bit-cast (0 -> shadows forced off by the backend)
-//   u_color            = (scene-light buffer address lo/hi bit-cast, light count, _)
+//   u_color            = (scene-light buffer address lo/hi bit-cast, light count, fog-volume row count)
 //   u_modelViewMatrix  = inverse view (view -> world)
 //   u_localParam0      = (1/proj00, 1/proj11, scattering coefficient per world unit, intensity)
 //   u_localParam1      = (steps, max march distance, HG anisotropy g, shadows enable)
 //   u_windowCoord      = (per-frame jitter phase, light mode, view-Y sign, extinction scale)
-//   u_diffuseModifier   = (point-light scale, first-person weapon light scale, point-light shadows enable, _)
+//   u_diffuseModifier   = (point-light scale, first-person weapon light scale, point-light shadows enable,
+//                          point-light scale inside stock fog volumes)
 //   u_screenCorrection = 1 / target size; u_depthTexRecip = target px -> depth-texture tc
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_buffer_reference_uvec2 : require
@@ -58,6 +59,11 @@ void main() {
 	vec4  candSph[ DUDE_VOL_MAX_LIGHTS ];
 	uint  nCand = dudeVolCullRay( lights, nLights, lightMode, eyeW, viewDir, dist, cand, candSph );
 	if ( nCand == 0u ) { fragColor = vec4( 0.0, 0.0, 0.0, exp( -sigmaT * dist ) ); return; }	// unlit ray: extinction only
+	// stock fog volumes on this ray (rows behind the lights): inside one, the point-light haze thickens
+	uint  fogIdx[ DUDE_VOL_MAX_FOGS ];
+	vec4  fogSph[ DUDE_VOL_MAX_FOGS ];
+	uint  nFogCand = ( lightMode >= 2u )
+		? dudeVolCullFogRay( lights, nLights, uint( u_color.w ), eyeW, viewDir, dist, fogIdx, fogSph ) : 0u;
 
 	// per-pixel + per-frame offset of the sample positions (interleaved gradient noise + golden-ratio
 	// phase): neighbouring pixels sample different depths, so a dozen steps resolve like many more once
@@ -74,7 +80,11 @@ void main() {
 		float a  = b0 + jitter * inv;
 		float dt = dist * ( b1 * b1 - b0 * b0 );
 		vec3  p  = eyeW + viewDir * ( dist * a * a );
-		rgb += dudeVolInScatter( lights, cand, candSph, nCand, tlasAddr, shadows, u_diffuseModifier.z > 0.5, p, viewDir, g, u_diffuseModifier.x, u_diffuseModifier.y ) * ( T * sigmaS * dt );
+		float pointScale = u_diffuseModifier.x;
+		if ( nFogCand > 0u ) {
+			pointScale = mix( pointScale, max( pointScale, u_diffuseModifier.w ), dudeVolFogFactor( lights, fogIdx, fogSph, nFogCand, p ) );
+		}
+		rgb += dudeVolInScatter( lights, cand, candSph, nCand, tlasAddr, shadows, u_diffuseModifier.z > 0.5, p, viewDir, g, pointScale, u_diffuseModifier.y ) * ( T * sigmaS * dt );
 		T   *= exp( -sigmaT * dt );
 	}
 	fragColor = vec4( rgb * u_localParam0.w, T );

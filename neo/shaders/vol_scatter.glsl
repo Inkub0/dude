@@ -44,6 +44,45 @@ uint dudeVolCullRay( RtLights lights, uint nLights, uint lightMode, vec3 eye, ve
 	return n;
 }
 
+// ---- stock fog volumes: the haze is thicker inside them --------------------------------------------------
+// Fog rows sit behind the lights in the same buffer (index firstFog .. firstFog + nFog); color.x carries the
+// fog's strength (0.2 thin .. 1 thick, from its own opaque distance). Same two-step shape as the lights:
+// cull once per ray, evaluate per sample from the short list.
+const uint DUDE_VOL_MAX_FOGS = 4u;
+
+uint dudeVolCullFogRay( RtLights lights, uint firstFog, uint nFog, vec3 eye, vec3 viewDir, float dist,
+                        out uint idx[ DUDE_VOL_MAX_FOGS ], out vec4 sph[ DUDE_VOL_MAX_FOGS ] ) {
+	uint n = 0u;
+	for ( uint k = 0u; k < nFog && n < DUDE_VOL_MAX_FOGS; k++ ) {
+		vec4  cs = lights.l[ firstFog + k ].cull;
+		vec3  oc = cs.xyz - eye;
+		float t  = clamp( dot( oc, viewDir ), 0.0, dist );
+		vec3  d  = oc - viewDir * t;
+		if ( dot( d, d ) > cs.w * cs.w ) { continue; }
+		idx[ n ] = firstFog + k;
+		sph[ n ] = cs;
+		n++;
+	}
+	return n;
+}
+
+// 0 outside every fog volume .. the fog's strength well inside one (soft-edged box, like a light volume)
+float dudeVolFogFactor( RtLights lights, uint idx[ DUDE_VOL_MAX_FOGS ], vec4 sph[ DUDE_VOL_MAX_FOGS ], uint count, vec3 p ) {
+	float f = 0.0;
+	for ( uint k = 0u; k < count; k++ ) {
+		vec3 cd = sph[ k ].xyz - p;
+		if ( dot( cd, cd ) > sph[ k ].w * sph[ k ].w ) { continue; }
+		uint  li = idx[ k ];
+		vec4  hw = vec4( p, 1.0 );
+		float q  = dot( hw, lights.l[ li ].projQ );
+		if ( q <= 1e-4 ) { continue; }
+		vec3  stf = vec3( dot( hw, lights.l[ li ].projS ) / q, dot( hw, lights.l[ li ].projT ) / q, dot( hw, lights.l[ li ].projF ) );
+		vec3  e   = smoothstep( vec3( 0.0 ), vec3( 0.15 ), min( stf, vec3( 1.0 ) - stf ) );
+		f = max( f, e.x * e.y * e.z * lights.l[ li ].color.x );
+	}
+	return f;
+}
+
 // In-scattered radiance at p per unit scattering coefficient: sum over the CANDIDATE lights of
 // colour * attenuation-inside-the-light-volume * visibility * phase.
 //   tlasAddr  scene TLAS device address (only dereferenced when shadows is true)

@@ -2962,6 +2962,12 @@ static void DrawEnhGroup_Lighting()
 			}
 			AddTooltip( "Brightness of point lights in the haze relative to spot lights. Rooms hold many large "
 				"fill lights; kept low they are a faint ambience under the spot-light cones instead of drowning them." );
+			float volFogPoint = r_volFogPointLightScale.GetFloat();
+			if ( ImGui::SliderFloat( "Point Light Haze In Fog", &volFogPoint, 0.0f, 1.0f, "%.2f" ) ) {
+				r_volFogPointLightScale.SetFloat( volFogPoint );
+			}
+			AddTooltip( "What Point Light Haze rises to inside the game's own fog volumes: foggy rooms hold more "
+				"haze, so their lights glow more in the air. Follows each fog's thickness and fades in at its edges." );
 			ImGui::EndDisabled();
 
 			float volFlash = r_volFlashlightScale.GetFloat();

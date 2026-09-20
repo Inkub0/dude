@@ -18,6 +18,7 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Rt
 const uint DUDE_LIGHT_PARALLEL  = 1u;	// sun-style: no distance falloff
 const uint DUDE_LIGHT_PROJECTED = 2u;	// spot: falloff runs along the frustum axis, lightRadius unused
 const uint DUDE_LIGHT_NOSHADOWS = 4u;	// the light casts no shadows in stock either: skip visibility rays
+const uint DUDE_LIGHT_FOGVOLUME  = 16u;	// not a light: a stock fog volume row (stored AFTER the lights, outside the light count)
 const uint DUDE_LIGHT_VIEWWEAPON = 8u;	// first-person weapon light: the player's flashlight, muzzle flashes
 
 // Can light li reach world point p at all? (bounding sphere of its volume; reads 16 B)
