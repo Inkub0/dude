@@ -4953,7 +4953,9 @@ static bool RB_RHI_EnsureSsrColorMip( rhi::RHI *r, int w, int h ) {
 // RR16c: the 4 world-space lightProject planes (S, T, Q, falloff) ride along so the shader can confine each
 // light to its real volume - a Doom light only reaches inside its projection frustum (a spot's pyramid, a
 // point light's BOX), which the origin+radius sphere over-reaches.
-struct RtReflLightGPU { float pos[3]; float radius; float color[3]; unsigned int flags; float proj[4][4]; };	// std430, 96 B
+// cull[] = bounding sphere of the light volume, first in the row so the shader rejects a light that cannot
+// reach the hit after reading 16 B (the full row per light per pixel cost ~1.5 ms).
+struct RtReflLightGPU { float cull[4]; float pos[3]; float radius; float color[3]; unsigned int flags; float proj[4][4]; };	// std430, 112 B
 
 static int RB_RHI_GatherReflLights( rhi::RHI *r, const viewDef_t *viewDef, unsigned long long *outAddr ) {
 	*outAddr = 0;
@@ -4979,8 +4981,14 @@ static int RB_RHI_GatherReflLights( rhi::RHI *r, const viewDef_t *viewDef, unsig
 		const idMaterial *ls = ld->lightShader;
 		if ( ls == NULL || ls->IsFogLight() || ls->IsBlendLight() || ls->IsAmbientLight() ) { continue; }
 		const float lr = ld->parms.lightRadius.Length();
-		const float reach = ( lr > 1.0f ? lr : 320.0f ) + REACH;	// the light's own reach can bring it into play
-		if ( ( ld->globalLightOrigin - viewOrg ).LengthSqr() > reach * reach ) { continue; }	// too far to matter
+		idVec3 cullOrg = ld->globalLightOrigin;					// bounding sphere of the real light volume (frustum
+		float  cullRad = ( lr > 1.0f ) ? lr : 320.0f;			// hull when built: a spot does not use lightRadius)
+		if ( ld->frustumTris != NULL && !ld->frustumTris->bounds.IsCleared() ) {
+			cullOrg = ld->frustumTris->bounds.GetCenter();
+			cullRad = ld->frustumTris->bounds.GetRadius( cullOrg );
+		}
+		const float reach = cullRad + REACH;					// the light's own reach can bring it into play
+		if ( ( cullOrg - viewOrg ).LengthSqr() > reach * reach ) { continue; }	// too far to matter
 		idVec3 col;
 		const float *cregs = ls->ConstantRegisters();
 		if ( cregs != NULL ) {						// constant-colour light material: sum its stage colours
@@ -4997,6 +5005,7 @@ static int RB_RHI_GatherReflLights( rhi::RHI *r, const viewDef_t *viewDef, unsig
 		}
 		if ( col[0] <= 0.0f && col[1] <= 0.0f && col[2] <= 0.0f ) { continue; }	// dark / off
 		RtReflLightGPU &L = lights[ n++ ];
+		L.cull[0] = cullOrg[0]; L.cull[1] = cullOrg[1]; L.cull[2] = cullOrg[2]; L.cull[3] = cullRad;
 		L.pos[0] = ld->globalLightOrigin[0];
 		L.pos[1] = ld->globalLightOrigin[1];
 		L.pos[2] = ld->globalLightOrigin[2];
