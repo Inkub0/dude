@@ -128,7 +128,7 @@ with resolution × steps × lights.
   makes genuinely off-screen flickering lights correct in reflections. (2) *With `r_volLights 2` the teal
   spot cones got dimmer than the point lights:* the per-ray candidate list filled with fill lights in buffer
   order and could drop the spot. The buffer is now **sorted: projected/parallel first, then nearest first**,
-  the list holds 16, and `r_volPointLightScale` (0.4) keeps the many large omni lights a faint ambience under
+  the list holds 16, and `r_volPointLightScale` (user-tuned 0.2) keeps the many large omni lights a faint ambience under
   the authored cones.
 
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
