@@ -1,0 +1,81 @@
+// DUDE volumetric lighting, Route A (docs/volumetric-lighting.md): low-res ray march of the view ray from
+// the eye to the opaque depth, accumulating the light the air scatters toward the camera. The per-sample
+// shading lives in vol_scatter.glsl (shared with the future froxel route); this file is only the march.
+// Output rgb = in-scattered radiance (HDR), a = transmittance of the scene behind (1 unless r_volExtinction).
+//
+// VK + ray-query only (RhiWorld.cpp RB_RHI_VolumetricLighting). Uniform packing:
+//   u_rtParms.xy       = scene TLAS device address, bit-cast (0 -> shadows forced off by the backend)
+//   u_color            = (scene-light buffer address lo/hi bit-cast, light count, _)
+//   u_modelViewMatrix  = inverse view (view -> world)
+//   u_localParam0      = (1/proj00, 1/proj11, scattering coefficient per world unit, intensity)
+//   u_localParam1      = (steps, max march distance, HG anisotropy g, shadows enable)
+//   u_windowCoord      = (per-frame jitter phase, light mode, view-Y sign, extinction scale)
+//   u_diffuseModifier   = (point-light scale, first-person weapon light scale, point-light shadows enable, _)
+//   u_screenCorrection = 1 / target size; u_depthTexRecip = target px -> depth-texture tc
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+#include "renderparms.glsl"
+#include "rt_light_eval.glsl"
+#include "vol_scatter.glsl"
+
+SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
+
+VARY(0) in vec2 var_TexCoord;
+layout(location = 0) out vec4 fragColor;
+
+#define depth_consts DUDE_DEPTH_CONSTS()
+
+void main() {
+	vec2  frag = gl_FragCoord.xy;
+	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
+	float maxDist = u_localParam1.y;
+	// view depth to march to: the opaque surface, or the distance cap over sky / far geometry
+	float zEnd = ( raw >= 0.9994 ) ? maxDist : min( -1.0 / ( raw * depth_consts.x + depth_consts.y ), maxDist );
+
+	// world-space view ray. dirV is the view-space ray per unit of view depth (z = -1), so its world
+	// length converts view depth to distance along the ray (same reconstruction as ssr_rt / rtao_ray).
+	vec2  ndc  = frag * u_screenCorrection.xy * 2.0 - 1.0;
+	vec3  dirV = vec3( ndc.x * u_localParam0.x, ndc.y * u_windowCoord.z * u_localParam0.y, -1.0 );
+	vec3  eyeW = ( u_modelViewMatrix * vec4( 0.0, 0.0, 0.0, 1.0 ) ).xyz;
+	vec3  dW   = mat3( u_modelViewMatrix ) * dirV;
+	float perZ = length( dW );
+	vec3  viewDir = dW / perZ;
+	float dist = zEnd * perZ;
+
+	RtLights lights  = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
+	uint  nLights    = uint( u_color.z );
+	uvec2 tlasAddr   = uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) );
+	bool  shadows    = u_localParam1.w > 0.5;
+	uint  lightMode  = uint( u_windowCoord.y );
+	float sigmaS     = u_localParam0.z;
+	float sigmaT     = sigmaS * u_windowCoord.w;
+	float g          = u_localParam1.z;
+	int   steps      = int( u_localParam1.x );
+
+	// the lights that can touch THIS view ray, culled once - the march below never loops the full buffer
+	uint  cand[ DUDE_VOL_MAX_LIGHTS ];
+	vec4  candSph[ DUDE_VOL_MAX_LIGHTS ];
+	uint  nCand = dudeVolCullRay( lights, nLights, lightMode, eyeW, viewDir, dist, cand, candSph );
+	if ( nCand == 0u ) { fragColor = vec4( 0.0, 0.0, 0.0, exp( -sigmaT * dist ) ); return; }	// unlit ray: extinction only
+
+	// per-pixel + per-frame offset of the sample positions (interleaved gradient noise + golden-ratio
+	// phase): neighbouring pixels sample different depths, so a dozen steps resolve like many more once
+	// filtered, instead of banding into visible slices.
+	float jitter = fract( 52.9829189 * fract( dot( frag, vec2( 0.06711056, 0.00583715 ) ) ) + u_windowCoord.x );
+
+	// quadratic step distribution: denser near the eye, where a shaft's edge subtends more pixels
+	vec3  rgb = vec3( 0.0 );
+	float T   = 1.0;
+	float inv = 1.0 / float( steps );
+	for ( int i = 0; i < steps; i++ ) {
+		float b0 = float( i ) * inv;
+		float b1 = b0 + inv;
+		float a  = b0 + jitter * inv;
+		float dt = dist * ( b1 * b1 - b0 * b0 );
+		vec3  p  = eyeW + viewDir * ( dist * a * a );
+		rgb += dudeVolInScatter( lights, cand, candSph, nCand, tlasAddr, shadows, u_diffuseModifier.z > 0.5, p, viewDir, g, u_diffuseModifier.x, u_diffuseModifier.y ) * ( T * sigmaS * dt );
+		T   *= exp( -sigmaT * dt );
+	}
+	fragColor = vec4( rgb * u_localParam0.w, T );
+}

@@ -647,6 +647,14 @@ static float rhiSsrJitterPhase = 0.0f;				// per-frame march jitter rotation
 // ping-pong, then additively composite the smoothed result. Sized to the SSR march resolution so the
 // two layers share a grain (and scale together with r_ssrResScale). A per-frame ray jitter (ssr_rt,
 // r_rtReflJitter) gives the accumulation something to average, so the grid resolves rather than smears.
+static rhi::RenderTargetHandle rhiVolRT = 0;			// volumetric lighting march result (rgb in-scatter, a transmittance)
+static int   rhiVolW = 0, rhiVolH = 0;
+static rhi::RenderTargetHandle rhiVolUpRT = 0;			// depth-aware upsample of the march (full res) = the temporal pass's "current"
+static rhi::RenderTargetHandle rhiVolHistRT[2] = { 0, 0 };	// full-res temporal history ping-pong
+static int   rhiVolHistIdx = 0;
+static int   rhiVolFullW = 0, rhiVolFullH = 0;
+static bool  rhiVolHistValid = false;
+static float rhiVolJitterPhase = 0.0f;					// per-frame golden-ratio rotation of the march sample offsets
 static rhi::RenderTargetHandle rhiRtReflRT = 0;		// this frame's RT reflection contribution (a = hit mask)
 // RR16 (docs/rtx-reflections.md): the view's lights gathered into a device buffer the fullscreen RT
 // reflection pass loops (buffer_reference), so an off-screen-reflected hit is lit by the REAL scene
@@ -3448,6 +3456,8 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsrHistIdx = 0;			rhiSsrHistW = rhiSsrHistH = 0;
 	rhiSsrHistValid = false;
 	rhiRtReflRT = 0;			rhiRtReflW = rhiRtReflH = 0;
+	rhiVolRT = 0;				rhiVolW = rhiVolH = 0;
+	rhiVolUpRT = 0;	rhiVolHistRT[0] = rhiVolHistRT[1] = 0;	rhiVolFullW = rhiVolFullH = 0;	rhiVolHistValid = false;
 	s_rtReflLightBuf = 0;		s_rtReflLightAddr = 0;		// RR16: handle is stale after a lost context; recreated lazily
 	rhiRtReflHistRT[0] = rhiRtReflHistRT[1] = 0;
 	rhiRtReflHistIdx = 0;		rhiRtReflHistW = rhiRtReflHistH = 0;
@@ -4957,7 +4967,18 @@ static bool RB_RHI_EnsureSsrColorMip( rhi::RHI *r, int w, int h ) {
 // reach the hit after reading 16 B (the full row per light per pixel cost ~1.5 ms).
 struct RtReflLightGPU { float cull[4]; float pos[3]; float radius; float color[3]; unsigned int flags; float proj[4][4]; };	// std430, 112 B
 
-static int RB_RHI_GatherReflLights( rhi::RHI *r, const viewDef_t *viewDef, unsigned long long *outAddr ) {
+// Shared by RT reflections (RR16) and volumetric lighting (docs/volumetric-lighting.md): the first caller in
+// a view fills the slot, later callers in the same view get the cached address/count.
+static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsigned long long *outAddr ) {
+	static const viewDef_t *   cacheView  = NULL;
+	static int                 cacheFrame = -1;
+	static int                 cacheCount = 0;
+	static unsigned long long  cacheAddr  = 0;
+	if ( viewDef != NULL && cacheView == viewDef && cacheFrame == tr.frameCount && s_rtReflLightBuf != 0 ) {
+		*outAddr = cacheAddr;
+		return cacheCount;
+	}
+	cacheView = viewDef;	cacheFrame = tr.frameCount;	cacheCount = 0;	cacheAddr = 0;
 	*outAddr = 0;
 	if ( viewDef == NULL || viewDef->renderWorld == NULL ) {
 		return 0;
@@ -4974,12 +4995,31 @@ static int RB_RHI_GatherReflLights( rhi::RHI *r, const viewDef_t *viewDef, unsig
 	const idVec3 viewOrg = viewDef->renderView.vieworg;
 	const float  REACH   = 2048.0f;					// how far off-screen a light's reach may still touch the reflection
 	static RtReflLightGPU lights[ RT_REFL_MAX_LIGHTS ];
+	static RtReflLightGPU sorted[ RT_REFL_MAX_LIGHTS ];
+	static float          sortKey[ RT_REFL_MAX_LIGHTS ];
 	int n = 0;
+	// Lights that are ALSO in this view carry evaluated shader registers: use them so a flickering /
+	// strobing / fading light does the same in the reflection and in its volumetric shaft. Off-view lights
+	// have no registers this frame and fall back to their static colour below.
+	const int numDefs = rw->lightDefs.Num();
+	const viewLight_t **viewLightOf = (const viewLight_t **)_alloca( ( numDefs + 1 ) * sizeof( viewLight_t * ) );
+	memset( viewLightOf, 0, ( numDefs + 1 ) * sizeof( viewLight_t * ) );
+	for ( const viewLight_t *vl = viewDef->viewLights; vl != NULL; vl = vl->next ) {
+		if ( vl->lightDef != NULL && vl->lightDef->index >= 0 && vl->lightDef->index < numDefs ) {
+			viewLightOf[ vl->lightDef->index ] = vl;
+		}
+	}
 	for ( int i = 0; i < rw->lightDefs.Num() && n < RT_REFL_MAX_LIGHTS; i++ ) {
 		const idRenderLightLocal *ld = rw->lightDefs[ i ];
 		if ( ld == NULL ) { continue; }
 		const idMaterial *ls = ld->lightShader;
 		if ( ls == NULL || ls->IsFogLight() || ls->IsBlendLight() || ls->IsAmbientLight() ) { continue; }
+		// honour the per-view light gating exactly like the frontend (tr_light.cpp): the player's THIRD-person
+		// flashlight / muzzle flash is suppressed in their own view, first-person weapon lights exist only in
+		// it. Skipping this put the body-attached world flashlight (it bobs with the walk cycle) in the buffer.
+		const int viewID = viewDef->renderView.viewID;
+		if ( ld->parms.suppressLightInViewID && ld->parms.suppressLightInViewID == viewID ) { continue; }
+		if ( ld->parms.allowLightInViewID && ld->parms.allowLightInViewID != viewID ) { continue; }
 		const float lr = ld->parms.lightRadius.Length();
 		idVec3 cullOrg = ld->globalLightOrigin;					// bounding sphere of the real light volume (frustum
 		float  cullRad = ( lr > 1.0f ) ? lr : 320.0f;			// hull when built: a spot does not use lightRadius)
@@ -4990,20 +5030,35 @@ static int RB_RHI_GatherReflLights( rhi::RHI *r, const viewDef_t *viewDef, unsig
 		const float reach = cullRad + REACH;					// the light's own reach can bring it into play
 		if ( ( cullOrg - viewOrg ).LengthSqr() > reach * reach ) { continue; }	// too far to matter
 		idVec3 col;
-		const float *cregs = ls->ConstantRegisters();
-		if ( cregs != NULL ) {						// constant-colour light material: sum its stage colours
+		const viewLight_t *vl = viewLightOf[ i ];
+		const float *cregs = ( vl != NULL && vl->shaderRegisters != NULL ) ? vl->shaderRegisters : ls->ConstantRegisters();
+		const int SCENE_LIGHT_MAX_REGS = 4096;		// == MAX_EXPRESSION_REGISTERS (ui/Window.h), not visible here
+		if ( cregs == NULL && ls->GetNumRegisters() <= SCENE_LIGHT_MAX_REGS ) {
+			// Not in the view's light list and not constant: evaluate the light shader here. "Not in the list"
+			// does NOT mean off-screen - the frontend also DROPS a light whose stages evaluate to black
+			// (tr_light.cpp), which is exactly a blinking light's off phase; falling back to its static
+			// colour then lit the haze at full strength while the light was off.
+			static float scratchRegs[ SCENE_LIGHT_MAX_REGS ];
+			ls->EvaluateRegisters( scratchRegs, ld->parms.shaderParms, viewDef, ld->parms.referenceSound );
+			cregs = scratchRegs;
+		}
+		if ( cregs != NULL ) {						// evaluated (in-view) or constant registers: sum the live stage colours
 			col.Zero();
 			for ( int s = 0; s < ls->GetNumStages(); s++ ) {
 				const shaderStage_t *st = ls->GetStage( s );
-				if ( st == NULL ) { continue; }
-				col[0] += cregs[ st->color.registers[0] ];
-				col[1] += cregs[ st->color.registers[1] ];
-				col[2] += cregs[ st->color.registers[2] ];
+				if ( st == NULL || cregs[ st->conditionRegister ] == 0.0f ) { continue; }
+				col[0] += Max( cregs[ st->color.registers[0] ], 0.0f );
+				col[1] += Max( cregs[ st->color.registers[1] ], 0.0f );
+				col[2] += Max( cregs[ st->color.registers[2] ], 0.0f );
 			}
 		} else {									// parametric (the usual case): the light's base RGB shader parms
 			col.Set( ld->parms.shaderParms[SHADERPARM_RED], ld->parms.shaderParms[SHADERPARM_GREEN], ld->parms.shaderParms[SHADERPARM_BLUE] );
 		}
-		if ( col[0] <= 0.0f && col[1] <= 0.0f && col[2] <= 0.0f ) { continue; }	// dark / off
+		if ( col[0] < 0.001f && col[1] < 0.001f && col[2] < 0.001f ) { continue; }	// dark / off (the frontend's own threshold)
+		// order: projected/parallel (the authored feature lights) first, then nearest first - consumers that
+		// keep only a short candidate list per ray (volumetrics) must not lose a spot to a crowd of fill lights
+		sortKey[ n ] = ( ( ld->parms.pointLight && !ld->parms.parallel ) ? 1.0e9f : 0.0f )
+		             + Max( ( cullOrg - viewOrg ).Length() - cullRad, 0.0f );
 		RtReflLightGPU &L = lights[ n++ ];
 		L.cull[0] = cullOrg[0]; L.cull[1] = cullOrg[1]; L.cull[2] = cullOrg[2]; L.cull[3] = cullRad;
 		L.pos[0] = ld->globalLightOrigin[0];
@@ -5012,7 +5067,9 @@ static int RB_RHI_GatherReflLights( rhi::RHI *r, const viewDef_t *viewDef, unsig
 		L.radius = ( lr > 1.0f ) ? lr : 320.0f;					// a sane reach for degenerate/zero radii
 		L.color[0] = col[0]; L.color[1] = col[1]; L.color[2] = col[2];
 		L.flags = ( ld->parms.parallel ? 1u : 0u )				// bit0 = parallel/sun (no distance falloff)
-		        | ( ld->parms.pointLight ? 0u : 2u );			// bit1 = projected (spot) light: falloff runs along the frustum axis
+		        | ( ld->parms.pointLight ? 0u : 2u )			// bit1 = projected (spot) light: falloff runs along the frustum axis
+		        | ( ld->parms.noShadows ? 4u : 0u )				// bit2 = casts no shadows in stock: volumetrics skip its visibility ray
+		        | ( ld->parms.allowLightInViewID ? 8u : 0u );	// bit3 = first-person weapon light (flashlight, muzzle flash)
 		for ( int p = 0; p < 4; p++ ) {							// RR16c: global-space S/T/Q/falloff planes
 			L.proj[p][0] = ld->lightProject[p][0];
 			L.proj[p][1] = ld->lightProject[p][1];
@@ -5023,10 +5080,18 @@ static int RB_RHI_GatherReflLights( rhi::RHI *r, const viewDef_t *viewDef, unsig
 	if ( n == 0 ) {
 		return 0;
 	}
+	int order[ RT_REFL_MAX_LIGHTS ];
+	for ( int i = 0; i < n; i++ ) {					// insertion sort of indices by key (n <= 256, mostly a handful)
+		int j = i;
+		while ( j > 0 && sortKey[ order[ j - 1 ] ] > sortKey[ i ] ) { order[ j ] = order[ j - 1 ]; j--; }
+		order[ j ] = i;
+	}
+	for ( int i = 0; i < n; i++ ) { sorted[ i ] = lights[ order[ i ] ]; }
 	const int slot      = (int)( tr.frameCount % RT_REFL_LIGHT_SLOTS );
 	const int slotBytes = RT_REFL_MAX_LIGHTS * (int)sizeof( RtReflLightGPU );
-	r->UpdateBuffer( s_rtReflLightBuf, slot * slotBytes, n * (int)sizeof( RtReflLightGPU ), lights );
+	r->UpdateBuffer( s_rtReflLightBuf, slot * slotBytes, n * (int)sizeof( RtReflLightGPU ), sorted );
 	*outAddr = s_rtReflLightAddr + (unsigned long long)( slot * slotBytes );
+	cacheCount = n;	cacheAddr = *outAddr;
 	return n;
 }
 
@@ -5558,7 +5623,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			// light brightness scale, RR16c frustum gate, real-lights enable). The r_rtReflRealLights 0 key light
 			// is a fixed dir hardcoded in-shader.
 			unsigned long long rtLightAddr = 0;
-			const int rtNumLights = r_rtReflRealLights.GetBool() ? RB_RHI_GatherReflLights( r, viewDef, &rtLightAddr ) : 0;
+			const int rtNumLights = r_rtReflRealLights.GetBool() ? RB_RHI_GatherSceneLights( r, viewDef, &rtLightAddr ) : 0;
 			memcpy( &rp.color[0], &rtLightAddr, sizeof( rtLightAddr ) );	// color.xy = light-buffer device address
 			rp.color[2] = (float)rtNumLights;
 			rp.color[3] = 0.28f;										// ambient term
@@ -5696,6 +5761,229 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 		}
 	}
+	RB_RHI_ForgetTexBinds();
+}
+
+/*
+===================
+RB_RHI_VolumetricLighting
+
+DUDE volumetric lighting, Route A (docs/volumetric-lighting.md): the air scatters the scene's real lights
+toward the camera - visible cones under spots, shafts through grates, occluders cutting dark wedges.
+  1. march (vol_march.frag) at r_volResScale: per pixel, step the view ray to the opaque depth; each step
+     evaluates the shared scene-light buffer (RB_RHI_GatherSceneLights - the same rows RT reflections
+     use) and, with r_volShadows, one any-hit visibility ray per reaching light against the scene TLAS.
+  2. composite (vol_composite.frag) into the live scene target: scene * transmittance + in-scatter.
+The per-sample shading is vol_scatter.glsl, deliberately stage-agnostic so the future froxel route
+(Route B) moves it into a compute inject kernel unchanged; everything in THIS function is Route A only.
+
+Vulkan + ray-query hardware, HDR scene buffer (the in-scatter is additive HDR radiance), fullscreen primary
+view. Visibility needs the RT scene (a TLAS - r_rtSunShadows / r_rtAllLights / r_rtao build it); without
+one the march still runs, unshadowed. Opt-in, no preset enables it (fidelity: adds light stock never had).
+===================
+*/
+void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !r_volumetrics.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN || !r->SupportsRayQuery() ) {
+		return;
+	}
+	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
+		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
+		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView || !RB_RHI_HdrCaptureActive() ) {
+		return;
+	}
+	if ( !globalImages->currentDepthImage->rhiCaptured ) {
+		return;
+	}
+	unsigned long long lightAddr = 0;
+	const int numLights = RB_RHI_GatherSceneLights( r, viewDef, &lightAddr );
+	if ( numLights <= 0 || lightAddr == 0 ) {
+		return;
+	}
+	rhi::ShaderHandle marchProg = r->LoadShader( "vol_march" );
+	rhi::ShaderHandle compProg  = r->LoadShader( "vol_composite" );
+	float invView[16];
+	if ( !marchProg || !compProg || !RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
+		return;
+	}
+
+	const int fullW = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int fullH = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	// integer divisors only (Half / Quarter), like the reflection buffers: fractional ratios beat on upscale
+	const int resDiv = ( r_volResScale.GetFloat() >= 0.375f ) ? 2 : 4;
+	const int volW = Max( 1, fullW / resDiv );
+	const int volH = Max( 1, fullH / resDiv );
+	if ( rhiVolRT && r->GetRenderTargetImage( rhiVolRT ) == 0 ) {
+		rhiVolRT = 0;	rhiVolW = rhiVolH = 0;			// lost context (vid_restart)
+	}
+	if ( rhiVolRT && ( rhiVolW != volW || rhiVolH != volH ) ) {
+		r->DestroyRenderTarget( rhiVolRT );
+		rhiVolRT = 0;
+	}
+	if ( !rhiVolRT ) {
+		rhiVolRT = r->CreateRenderTarget( rhi::IF_RGBA16F, volW, volH );
+		if ( !rhiVolRT ) {
+			rhiVolW = rhiVolH = 0;
+			return;
+		}
+		rhiVolW = volW;	rhiVolH = volH;
+	}
+
+	// V3 full-res targets: the depth-aware upsample + the temporal history pair (r_volTemporal)
+	const bool wantTemporal = r_volTemporal.GetBool();
+	if ( rhiVolUpRT && r->GetRenderTargetImage( rhiVolUpRT ) == 0 ) {
+		rhiVolUpRT = 0;	rhiVolHistRT[0] = rhiVolHistRT[1] = 0;	rhiVolFullW = rhiVolFullH = 0;	// lost context
+	}
+	if ( rhiVolUpRT && ( rhiVolFullW != fullW || rhiVolFullH != fullH ) ) {
+		r->DestroyRenderTarget( rhiVolUpRT );	rhiVolUpRT = 0;
+		for ( int i = 0; i < 2; i++ ) {
+			if ( rhiVolHistRT[i] ) { r->DestroyRenderTarget( rhiVolHistRT[i] ); rhiVolHistRT[i] = 0; }
+		}
+	}
+	if ( !rhiVolUpRT ) {
+		rhiVolUpRT = r->CreateRenderTarget( rhi::IF_RGBA16F, fullW, fullH );
+		rhiVolHistValid = false;
+		if ( !rhiVolUpRT ) {
+			rhiVolFullW = rhiVolFullH = 0;
+			return;
+		}
+		rhiVolFullW = fullW;	rhiVolFullH = fullH;
+	}
+	if ( wantTemporal && ( !rhiVolHistRT[0] || !rhiVolHistRT[1] ) ) {
+		for ( int i = 0; i < 2; i++ ) {
+			if ( !rhiVolHistRT[i] ) { rhiVolHistRT[i] = r->CreateRenderTarget( rhi::IF_RGBA16F, fullW, fullH ); }
+		}
+		rhiVolHistValid = false;
+	}
+	rhi::ShaderHandle upProg   = r->LoadShader( "vol_upsample" );
+	rhi::ShaderHandle tempProg = wantTemporal ? r->LoadShader( "ssr_temporal" ) : 0;
+	if ( !upProg ) {
+		return;
+	}
+	const bool doTemporal = wantTemporal && tempProg && rhiVolHistRT[0] && rhiVolHistRT[1];
+	if ( doTemporal ) {
+		// fresh sample depths every frame, so the accumulation integrates ~1/(1-feedback) x the steps
+		rhiVolJitterPhase += 0.61803399f;
+		rhiVolJitterPhase -= (float)(int)rhiVolJitterPhase;
+	} else {
+		rhiVolHistValid = false;
+	}
+
+	const unsigned long long tlasAddr = r->GetTlasAddress();
+	const int uploadW = globalImages->currentDepthImage->uploadWidth;
+	const int uploadH = globalImages->currentDepthImage->uploadHeight;
+
+	rhi::RenderParams mp;
+	memset( &mp, 0, sizeof( mp ) );
+	mp.mvpMatrix[0] = mp.mvpMatrix[5] = mp.mvpMatrix[10] = mp.mvpMatrix[15] = 1.0f;
+	memcpy( mp.modelViewMatrix, invView, sizeof( invView ) );			// view -> world
+	memcpy( &mp.rtParms[0], &tlasAddr, sizeof( tlasAddr ) );			// bit-cast device addresses
+	memcpy( &mp.color[0], &lightAddr, sizeof( lightAddr ) );
+	mp.color[2] = (float)numLights;
+	mp.localParam0[0] = ( viewDef->projectionMatrix[0] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[0] : 1.0f;
+	mp.localParam0[1] = ( viewDef->projectionMatrix[5] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[5] : 1.0f;
+	// r_volDensity 1 = a scattering coefficient of 0.001 per world unit: a ~500-unit room scatters about
+	// half of a full-strength light toward the eye - thin haze, by design
+	mp.localParam0[2] = 0.001f * idMath::ClampFloat( 0.0f, 16.0f, r_volDensity.GetFloat() );
+	mp.localParam0[3] = idMath::ClampFloat( 0.0f, 16.0f, r_volIntensity.GetFloat() );
+	mp.localParam1[0] = (float)idMath::ClampInt( 4, 64, r_volSteps.GetInteger() );
+	mp.localParam1[1] = idMath::ClampFloat( 128.0f, 16384.0f, r_volMaxDist.GetFloat() );
+	mp.localParam1[2] = idMath::ClampFloat( -0.9f, 0.9f, r_volAnisotropy.GetFloat() );
+	mp.localParam1[3] = ( r_volShadows.GetBool() && tlasAddr != 0 ) ? 1.0f : 0.0f;
+	mp.windowCoord[0] = rhiVolJitterPhase;								// advances per frame only while the temporal pass runs
+	mp.windowCoord[1] = ( r_volLights.GetInteger() >= 2 ) ? 2.0f : 1.0f;
+	mp.windowCoord[2] = -1.0f;											// VK-only pass: top-down view-Y sign
+	mp.windowCoord[3] = idMath::ClampFloat( 0.0f, 4.0f, r_volExtinction.GetFloat() );
+	mp.diffuseModifier[0] = idMath::ClampFloat( 0.0f, 4.0f, r_volPointLightScale.GetFloat() );
+	mp.diffuseModifier[1] = idMath::ClampFloat( 0.0f, 4.0f, r_volFlashlightScale.GetFloat() );
+	mp.diffuseModifier[2] = r_volPointShadows.GetBool() ? 1.0f : 0.0f;
+	mp.screenCorrection[0] = 1.0f / volW;
+	mp.screenCorrection[1] = 1.0f / volH;
+	mp.depthTexRecip[0] = ( (float)fullW / volW ) / uploadW;
+	mp.depthTexRecip[1] = ( (float)fullH / volH ) / uploadH;
+	rhi::FillDepthParms( mp, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// cinematics cram the near plane
+
+	// ---- 1. march
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.color = true;
+	r->BeginTargetPass( rhiVolRT, &clear );
+	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	RB_RHI_DrawFullscreen( r, marchProg, mp, 0 );
+	r->EndPass();
+
+	// ---- 2. depth-aware upsample to full res (vol_upsample.frag): no shaft bleed across silhouettes
+	rhi::RenderParams up;
+	memset( &up, 0, sizeof( up ) );
+	up.mvpMatrix[0] = up.mvpMatrix[5] = up.mvpMatrix[10] = up.mvpMatrix[15] = 1.0f;
+	up.localParam0[0] = (float)volW;
+	up.localParam0[1] = (float)volH;
+	up.localParam0[2] = (float)resDiv;
+	up.depthTexRecip[0] = 1.0f / uploadW;
+	up.depthTexRecip[1] = 1.0f / uploadH;
+	rhi::FillDepthParms( up, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
+	r->BeginTargetPass( rhiVolUpRT, NULL );
+	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	RB_RHI_DrawFullscreen( r, upProg, up, r->GetRenderTargetImage( rhiVolRT ) );
+	r->EndPass();
+	rhi::RenderTargetHandle volResultRT = rhiVolUpRT;
+
+	// ---- 3. temporal accumulation (the shared ssr_temporal): resolves the per-frame-jittered march grain.
+	// Reprojected by the OPAQUE surface behind the fog - the wrong depth for the medium itself, harmless for
+	// a signal this low-frequency (docs/volumetric-lighting.md). The clip taps step by the march texel so
+	// they land on distinct marched samples (the Quarter-res lesson from the RT reflections).
+	if ( doTemporal ) {
+		float reproj[16];
+		bool prevUsable;
+		const bool haveInv = RB_RHI_TemporalReproj( viewDef, reproj, &prevUsable );
+		const bool historyUsable = rhiVolHistValid && prevUsable && haveInv;
+		const int writeIdx = rhiVolHistIdx;
+		const int readIdx  = 1 - rhiVolHistIdx;
+
+		rhi::RenderParams tp;
+		memset( &tp, 0, sizeof( tp ) );
+		tp.mvpMatrix[0] = tp.mvpMatrix[5] = tp.mvpMatrix[10] = tp.mvpMatrix[15] = 1.0f;
+		if ( haveInv ) {
+			memcpy( tp.modelViewMatrix, reproj, sizeof( reproj ) );
+		}
+		tp.localParam0[0] = mp.localParam0[0];
+		tp.localParam0[1] = mp.localParam0[1];
+		tp.localParam0[2] = idMath::ClampFloat( 0.0f, 0.97f, r_volTemporalFeedback.GetFloat() );
+		tp.localParam0[3] = historyUsable ? 1.0f : 0.0f;
+		rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
+			? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
+		tp.localParam1[0] = velImg ? 1.0f : 0.0f;
+		tp.localParam1[1] = (float)resDiv;
+		tp.windowCoord[2] = -1.0f;
+		tp.screenCorrection[0] = 1.0f / fullW;
+		tp.screenCorrection[1] = 1.0f / fullH;
+		tp.depthTexRecip[0] = 1.0f / uploadW;
+		tp.depthTexRecip[1] = 1.0f / uploadH;
+		rhi::FillDepthParms( tp, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
+
+		r->BeginTargetPass( rhiVolHistRT[writeIdx], NULL );
+		RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
+		RB_RHI_BindRTUnit( r, 1, historyUsable ? rhiVolHistRT[readIdx] : rhiVolUpRT );	// never an unwritten slot
+		if ( velImg ) { RB_RHI_BindRTImage( r, 3, velImg ); }
+		else          { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
+		RB_RHI_DrawFullscreen( r, tempProg, tp, r->GetRenderTargetImage( rhiVolUpRT ) );
+		r->EndPass();
+
+		volResultRT = rhiVolHistRT[writeIdx];
+		rhiVolHistIdx = readIdx;
+		RB_RHI_TemporalStageCur( viewDef );
+		rhiVolHistValid = true;
+	}
+
+	// ---- 4. composite onto the scene: dst * transmittance + in-scatter
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, fullW, fullH );
+	backEnd.currentScissor = viewDef->scissor;
+	rhi::RenderParams cp;
+	memset( &cp, 0, sizeof( cp ) );
+	cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+	RB_RHI_DrawFullscreen( r, compProg, cp, r->GetRenderTargetImage( volResultRT ),
+	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_SRC_ALPHA );
 	RB_RHI_ForgetTexBinds();
 }
 

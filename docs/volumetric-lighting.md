@@ -1,6 +1,8 @@
 # Volumetric lighting (light shafts) — plan
 
-**Status: PLAN ONLY (2026-09-20). No code. Decide the route after reading.**
+**Status: Route A SHIPPED (opt-in) 2026-09-20 — V0–V4 built, user-verified, merged to master. `r_volumetrics`
+default 0, no preset; Graphics → Lighting → Ray Tracing (RTX). Not built: fog-volume density boost, light
+projection textures (gobos), raster-tier visibility, Route B (froxels) — the includes are kept Route-B-ready.**
 Backlog origin: [todo.md](todo.md) "Fidelity backlog — Volumetric light shafts".
 
 ## 1. What and why
@@ -98,6 +100,82 @@ with resolution × steps × lights.
 - **V4 — look + controls.** Density/phase/intensity defaults by eye; fog-volume boost; `r_volLights 2`
   trial; menu group (Graphics → Lighting → Ray Tracing (RTX) section, off by default); docs + changelog.
   Preset wiring is a *separate, later* decision.
+
+**Built so far (2026-09-20):**
+- **V0** — `rt_light_eval.glsl` (row layout + `dudeLightInRange` / `dudeLightDir` / `dudeLightAtten`);
+  `ssr_rt.frag` includes it (same math, same early-out order). The gather is now
+  `RB_RHI_GatherSceneLights`, cached per view (reflections fill it, volumetrics reuse it), adds flag bit2 =
+  `noShadows`, and — one deliberate behaviour change — takes a light's colour from its **evaluated shader
+  registers** when the light is also in the view, so flickering / strobing / fading lights do the same in
+  reflections and in their shafts (off-view lights keep the static colour).
+- **V1 + V2** — `vol_scatter.glsl` (`dudeVolInScatter`: light loop + any-hit visibility ray + HG phase),
+  `vol_march.frag` (jittered quadratic-spaced march, rgb in-scatter + a transmittance),
+  `vol_composite.frag` (ONE / SRC_ALPHA), `RB_RHI_VolumetricLighting` called right after
+  `RB_RHI_FogAllLights`. `r_volShadows 0` is the V1 look (unshadowed, leaks expected), `1` is V2.
+  Requires VK + ray query + `r_hdr`; without a TLAS it runs unshadowed.
+
+- **V3 (built 2026-09-20, gate pending)** — per-frame golden-ratio rotation of the march jitter;
+  `vol_upsample.frag` (depth-aware 4-tap upsample to full res, *before* the temporal pass so history is
+  accumulated per full-res pixel with the right side of each silhouette); the shared `ssr_temporal` with a
+  full-res history pair and clip taps spaced by the march texel; composite reads the accumulated result.
+  `r_volTemporal` (1) / `r_volTemporalFeedback` (0.9). First-gate feedback that drove it: shafts showed a
+  visible dot pattern (raw jitter) and were *rare* — stock maps have few projected lights, so
+  `r_volLights 2` (point lights) is the setting to judge the look with; default to be decided in V4.
+
+- **V3 gate feedback → fixes (2026-09-20).** (1) *A blinking light left its haze on during the off phase:*
+  the frontend **drops a light from `viewLights` when its stages evaluate to black** (`tr_light.cpp`), so
+  "not in the view list" was read as "off-screen" and the static colour (full on) was used. The gather now
+  evaluates the light shader itself (`EvaluateRegisters`) for any light without view registers — which also
+  makes genuinely off-screen flickering lights correct in reflections. (2) *With `r_volLights 2` the teal
+  spot cones got dimmer than the point lights:* the per-ray candidate list filled with fill lights in buffer
+  order and could drop the spot. The buffer is now **sorted: projected/parallel first, then nearest first**,
+  the list holds 16, and `r_volPointLightScale` (user-tuned 0.2) keeps the many large omni lights a faint ambience under
+  the authored cones.
+
+- **Flashlight "bobbing square" (2026-09-20).** Two causes. (1) The gather ignored the per-view light gating
+  (`suppressLightInViewID` / `allowLightInViewID`), so the player's **third-person** flashlight — attached
+  to the body model, bobbing with the walk cycle, suppressed in their own view by the frontend — was in the
+  buffer (a latent RR16a bug: it lit reflections too). Now gated exactly like `tr_light.cpp`. (2) Without
+  the projection texture a spot's volume is a square pyramid; `dudeLightAtten(..., roundSpot)` windows
+  projected lights radially for volumetrics (reflections keep the verified square window). Also
+  `r_volFlashlightScale` (0.5; flags bit3 = first-person weapon light) since the flashlight fogs the air
+  right at the eye.
+- **Measured cost (user, 1440p UN, user defaults): +1.7 ms** (10.6 → 12.3 ms) — above the 0.6–1.2 ms
+  estimate. First trim: no visibility ray for a contribution below ~0.004 (`vol_scatter.glsl`). Next
+  candidates if needed: fewer steps (temporal now hides it), the three full-res passes (upsample, temporal,
+  composite), per-light ray budget.
+
+- **Cost breakdown (user, 1440p UN, 2026-09-20; off = 10.6 ms):** spots only (`r_volLights 1`) **+0.5 ms**
+  (the fixed pipeline: march + 3 full-res passes); point lights add **+0.4 ms** evaluation and **+0.8 ms**
+  visibility rays; 12 → 8 steps saves only ~0.3 ms. Responses: `dudeVolCullRay` now returns each
+  candidate's bounding sphere so the per-sample range test is a local read, not a buffer read; and
+  `r_volPointShadows` (default 1) lets the faint point-light ambience go unshadowed (saves most of the ray
+  cost; risk = a fill light's glow showing faintly through a wall inside its light box).
+
+- **Re-measure after the local-sphere change (user, noisy ±0.5 ms):** all lights ≈ **+1.2 ms** (was +1.7),
+  spots only ≈ +0.5; `r_volShadows 0` no longer measurably cheaper → the rays are not the bottleneck any
+  more, so `r_volPointShadows` stays **1** (no leak risk for no gain). 16 steps ≈ +1 ms over 12; 8 ≈ 12
+  within noise. Perf work parked here.
+- **V4 menu (built).** Graphics → Lighting → "Ray Tracing (RTX)" section: Volumetric Lighting toggle, Lights
+  In The Haze (spots / all), Haze Density, Point Light Haze, Flashlight Beam; hint line when no RT scene.
+
+**Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
+scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a
+rejected light still costs a 16 B read, so 256 × 12 samples × 230 k px ≈ 10 GB of buffer reads per frame in a
+light-dense map (`mc_underground`) — a multi-second frame, killed by the driver. Same lesson as RR16c's
++1.5 ms, twelve times over: **these loops are memory-bound.** Fix: `dudeVolCullRay` builds a ≤12-light
+candidate list once per view ray (bounding sphere vs the ray segment + the light-mode filter) and
+`dudeVolInScatter` iterates only that list; rays with no candidate return immediately. For Route B the
+same function takes a per-froxel-cluster list — which is what a froxel pipeline wants anyway.
+
+**Route-B readiness contract.** `rt_light_eval.glsl` and `vol_scatter.glsl` are **stage-agnostic**: no
+`gl_FragCoord`, samplers, uniforms or derivatives — every input is a function argument. A froxel inject
+kernel includes both unchanged and calls `dudeVolInScatter( lights, clusterList, count, tlas, shadows,
+froxelCentre, viewDir, g )`. Everything Route-A-specific (the march loop, step distribution, screen jitter, low-res
+target, composite) lives only in `vol_march.frag` / `vol_composite.frag` / `RB_RHI_VolumetricLighting`.
+The light buffer, the cvars (`r_volDensity`, `r_volAnisotropy`, `r_volLights`, `r_volShadows`, …) and their
+units (scattering coefficient per world unit) carry over as-is. Keep it that way: anything added to the
+shading goes in the includes, anything added to the march stays out of them.
 
 ## 4. Route B — true froxel grid (compute, 3D textures)
 
