@@ -5349,6 +5349,8 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			}
 			tempParms.localParam0[2] = idMath::ClampFloat( 0.0f, 0.97f, r_ssrTemporalFeedback.GetFloat() );
 			tempParms.localParam0[3] = historyUsable ? 1.0f : 0.0f;
+			tempParms.localParam1[1] = 1.0f;		// history == march resolution: clip taps one texel apart
+			tempParms.localParam1[2] = tempParms.localParam1[3] = 0.0f;	// no sample-grid jitter to undo
 
 			// R1/A2 consumption: reproject the reflection history by the per-object velocity buffer
 			// when it exists (r_motionVectors, VK) so moving objects stop dragging a reflection
@@ -5638,6 +5640,13 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 					rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
 						? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
 					tempParms.localParam1[0] = velImg ? 1.0f : 0.0f;
+					// The clip neighbourhood steps in TRACE texels (Quarter: 4 output px) so its taps are distinct
+					// traced samples, and the trace's sample-grid jitter is undone when reading it - without
+					// both, a Quarter trace never accumulates and shimmers.
+					const int rtFix = r_rtReflTemporalFix.GetInteger();
+					tempParms.localParam1[1] = ( rtFix >= 1 ) ? (float)fullW / (float)ssrW : 1.0f;
+					tempParms.localParam1[2] = ( rtFix >= 2 ) ? jitterX / (float)ssrW : 0.0f;
+					tempParms.localParam1[3] = ( rtFix >= 2 ) ? jitterY / (float)ssrH : 0.0f;
 
 					// unit 0 = current RT contribution (via DrawFullscreen), 1 = history read slot,
 					// 2 = depth, 3 = velocity
