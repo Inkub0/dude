@@ -362,6 +362,20 @@ under a pool: glints from lights, but no mirror image of the room or a monster.
 
 ---
 
+## RT reflections: shadow rays at the hit (RR16d)  **[parked 2026-09-20 — nice to have]**
+
+RT reflections are closed for now with RR16c (`r_rtReflLightFrustum`: each real light shading a
+reflection hit is confined to its projection frustum / light box). The one remaining lighting
+step, **RR16d**, is deliberately left out: per contributing light, trace hit → light against the
+TLAS and zero the term when occluded, so reflected surfaces gain contact shadows and a light
+behind a wall stops leaking into the reflection. It is the dominant new cost of the RR16 family
+(a ray per light per reflective pixel), so it would be its own toggle (`r_rtReflShadows`, off by
+default, Ultra Nightmare only at most). Reflections were judged excellent without it; the RR12
+on-screen reuse already carries real shadows wherever the reflected surface is on screen. Plan:
+[rtx-reflections.md](rtx-reflections.md), RR16.
+
+---
+
 ## Fidelity backlog (no new assets)  **[proposed 2026-09-19 — nothing scheduled]**
 
 From the fidelity review after the decal work. The reflection items became a staged plan —

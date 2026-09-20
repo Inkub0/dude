@@ -512,7 +512,8 @@ the view's lights gathered into a **device buffer it can loop** — read via `bu
 like the RR4/RR5 geo table (address bit-cast into a param, no descriptor).
 
 **Staged (validator-first, opt-in, VK+RT only, gate each). RR16a+b BUILT 2026-09-19 (commit f7f6657a, gate
-pending); RR16c–e deferred.**
+pending); RR16c BUILT 2026-09-20 (`r_rtReflLightFrustum`, gate pending) — this closes reflections for now;
+RR16d parked as nice-to-have ([todo.md](todo.md)); RR16e deferred.**
 - **RR16a — light buffer. BUILT.** Each view, gather `viewDef->viewLights` into a device buffer: per light
   `{ vec3 worldOrigin, float radius, vec3 color, uint flags }` (32 B). `worldOrigin = globalLightOrigin`;
   `color` from `vLight->shaderRegisters` × the light shader's colour stage (mirror `RhiWorld.cpp`'s light
@@ -533,7 +534,18 @@ pending); RR16c–e deferred.**
   buffer and gate the contribution on the hit projecting inside `[0,1]` (uniform-within-frustum; the
   projection/falloff *textures* — the gobo pattern — are a later bindless refinement, like RR4). Restores
   which surfaces a light may touch. Fidelity: opt-in, UN only.
-- **RR16d — shadow rays (r_rtReflShadows).** Per contributing light, trace hit→light against the TLAS;
+  **BUILT 2026-09-20** (`r_rtReflLightFrustum`, default 1 inside the already opt-in `r_rtReflRealLights`; 0 =
+  the RR16b sphere for A/B). The light-buffer row grows 32 → 96 B with the four global-space `lightProject`
+  planes. In `ssr_rt.frag` the world hit is projected `s = S·p/Q·p, t = T·p/Q·p, f = F·p` and the term
+  windowed to `[0,1]` with a soft 15 % border (every Doom light texture fades to black at its edge, so a
+  hard box would be *less* faithful than a soft one). It applies to **every** light, not just spots: a Doom
+  point light is a *box* (`lightProject` S/T span X/Y, falloff spans Z), so the RR16b `lightRadius.Length()`
+  sphere over-reached past the box faces too. Point/parallel lights keep the RR16b radial falloff × the box
+  window (core brightness unchanged, so `r_rtReflLightScale` needs no retune); spots (flags bit1) drop the
+  radial term — they do not use `lightRadius` — for an axial `1 − f` start→end falloff, and hits behind the
+  apex (`Q·p ≤ 0`) are rejected. Cost: three dot products + a smoothstep per light per shaded hit.
+- **RR16d — shadow rays (r_rtReflShadows). PARKED 2026-09-20 — nice to have** (reflections judged excellent
+  as-is; see [todo.md](todo.md)). Per contributing light, trace hit→light against the TLAS;
   zero the term if occluded. Reflected surfaces gain contact shadows. The dominant new cost (a ray per
   light per reflective pixel), so it is its own toggle; start off. This is literally NEE visibility — the
   H3/H5 shadow ray at a reflection bounce.
