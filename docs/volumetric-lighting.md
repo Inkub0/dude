@@ -121,6 +121,16 @@ with resolution × steps × lights.
   visible dot pattern (raw jitter) and were *rare* — stock maps have few projected lights, so
   `r_volLights 2` (point lights) is the setting to judge the look with; default to be decided in V4.
 
+- **V3 gate feedback → fixes (2026-09-20).** (1) *A blinking light left its haze on during the off phase:*
+  the frontend **drops a light from `viewLights` when its stages evaluate to black** (`tr_light.cpp`), so
+  "not in the view list" was read as "off-screen" and the static colour (full on) was used. The gather now
+  evaluates the light shader itself (`EvaluateRegisters`) for any light without view registers — which also
+  makes genuinely off-screen flickering lights correct in reflections. (2) *With `r_volLights 2` the teal
+  spot cones got dimmer than the point lights:* the per-ray candidate list filled with fill lights in buffer
+  order and could drop the spot. The buffer is now **sorted: projected/parallel first, then nearest first**,
+  the list holds 16, and `r_volPointLightScale` (0.4) keeps the many large omni lights a faint ambience under
+  the authored cones.
+
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
 scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a
 rejected light still costs a 16 B read, so 256 × 12 samples × 230 k px ≈ 10 GB of buffer reads per frame in a

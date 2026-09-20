@@ -20,7 +20,7 @@ float dudeVolPhase( float cosTheta, float g ) {
 // traffic stalls the GPU for seconds in a light-dense map (device lost - learned the hard way). Instead it
 // builds a short CANDIDATE LIST once per view ray (Route A, dudeVolCullRay) or per froxel cluster (Route B)
 // and every sample iterates only that.
-const uint DUDE_VOL_MAX_LIGHTS = 12u;
+const uint DUDE_VOL_MAX_LIGHTS = 16u;
 
 // Candidate lights for the view-ray segment eye + viewDir * [0, dist]: volume bounding sphere vs segment,
 // plus the light-mode filter. One pass over the buffer per PIXEL. Returns the count written to idx[].
@@ -46,8 +46,9 @@ uint dudeVolCullRay( RtLights lights, uint nLights, uint lightMode, vec3 eye, ve
 //   shadows   trace one any-hit visibility ray p -> light (lights flagged NOSHADOWS never trace)
 //   idx/count the candidate list (dudeVolCullRay, or a froxel cluster list)
 //   viewDir   unit eye -> p
+//   pointScale brightness of point (omni) lights relative to projected/parallel ones
 vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], uint count, uvec2 tlasAddr, bool shadows,
-                       vec3 p, vec3 viewDir, float g ) {
+                       vec3 p, vec3 viewDir, float g, float pointScale ) {
 	vec3 sum = vec3( 0.0 );
 	for ( uint k = 0u; k < count; k++ ) {
 		uint li = idx[ k ];
@@ -69,7 +70,9 @@ vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], uint co
 				if ( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionNoneEXT ) { continue; }
 			}
 		}
-		sum += lights.l[ li ].color * ( atten * dudeVolPhase( dot( ldir, viewDir ), g ) );
+		// pointScale: omni fill lights are many and large, so unscaled they drown the authored cones
+		float scale = ( ( fl & ( DUDE_LIGHT_PROJECTED | DUDE_LIGHT_PARALLEL ) ) != 0u ) ? 1.0 : pointScale;
+		sum += lights.l[ li ].color * ( atten * scale * dudeVolPhase( dot( ldir, viewDir ), g ) );
 	}
 	return sum;
 }

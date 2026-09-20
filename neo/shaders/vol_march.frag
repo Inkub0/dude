@@ -10,6 +10,7 @@
 //   u_localParam0      = (1/proj00, 1/proj11, scattering coefficient per world unit, intensity)
 //   u_localParam1      = (steps, max march distance, HG anisotropy g, shadows enable)
 //   u_windowCoord      = (per-frame jitter phase, light mode, view-Y sign, extinction scale)
+//   u_diffuseModifier.x = point-light brightness scale
 //   u_screenCorrection = 1 / target size; u_depthTexRecip = target px -> depth-texture tc
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_buffer_reference_uvec2 : require
@@ -72,7 +73,7 @@ void main() {
 		float a  = b0 + jitter * inv;
 		float dt = dist * ( b1 * b1 - b0 * b0 );
 		vec3  p  = eyeW + viewDir * ( dist * a * a );
-		rgb += dudeVolInScatter( lights, cand, nCand, tlasAddr, shadows, p, viewDir, g ) * ( T * sigmaS * dt );
+		rgb += dudeVolInScatter( lights, cand, nCand, tlasAddr, shadows, p, viewDir, g, u_diffuseModifier.x ) * ( T * sigmaS * dt );
 		T   *= exp( -sigmaT * dt );
 	}
 	fragColor = vec4( rgb * u_localParam0.w, T );

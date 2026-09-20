@@ -4995,6 +4995,8 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	const idVec3 viewOrg = viewDef->renderView.vieworg;
 	const float  REACH   = 2048.0f;					// how far off-screen a light's reach may still touch the reflection
 	static RtReflLightGPU lights[ RT_REFL_MAX_LIGHTS ];
+	static RtReflLightGPU sorted[ RT_REFL_MAX_LIGHTS ];
+	static float          sortKey[ RT_REFL_MAX_LIGHTS ];
 	int n = 0;
 	// Lights that are ALSO in this view carry evaluated shader registers: use them so a flickering /
 	// strobing / fading light does the same in the reflection and in its volumetric shaft. Off-view lights
@@ -5024,19 +5026,33 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		idVec3 col;
 		const viewLight_t *vl = viewLightOf[ i ];
 		const float *cregs = ( vl != NULL && vl->shaderRegisters != NULL ) ? vl->shaderRegisters : ls->ConstantRegisters();
+		const int SCENE_LIGHT_MAX_REGS = 4096;		// == MAX_EXPRESSION_REGISTERS (ui/Window.h), not visible here
+		if ( cregs == NULL && ls->GetNumRegisters() <= SCENE_LIGHT_MAX_REGS ) {
+			// Not in the view's light list and not constant: evaluate the light shader here. "Not in the list"
+			// does NOT mean off-screen - the frontend also DROPS a light whose stages evaluate to black
+			// (tr_light.cpp), which is exactly a blinking light's off phase; falling back to its static
+			// colour then lit the haze at full strength while the light was off.
+			static float scratchRegs[ SCENE_LIGHT_MAX_REGS ];
+			ls->EvaluateRegisters( scratchRegs, ld->parms.shaderParms, viewDef, ld->parms.referenceSound );
+			cregs = scratchRegs;
+		}
 		if ( cregs != NULL ) {						// evaluated (in-view) or constant registers: sum the live stage colours
 			col.Zero();
 			for ( int s = 0; s < ls->GetNumStages(); s++ ) {
 				const shaderStage_t *st = ls->GetStage( s );
 				if ( st == NULL || cregs[ st->conditionRegister ] == 0.0f ) { continue; }
-				col[0] += cregs[ st->color.registers[0] ];
-				col[1] += cregs[ st->color.registers[1] ];
-				col[2] += cregs[ st->color.registers[2] ];
+				col[0] += Max( cregs[ st->color.registers[0] ], 0.0f );
+				col[1] += Max( cregs[ st->color.registers[1] ], 0.0f );
+				col[2] += Max( cregs[ st->color.registers[2] ], 0.0f );
 			}
 		} else {									// parametric (the usual case): the light's base RGB shader parms
 			col.Set( ld->parms.shaderParms[SHADERPARM_RED], ld->parms.shaderParms[SHADERPARM_GREEN], ld->parms.shaderParms[SHADERPARM_BLUE] );
 		}
-		if ( col[0] <= 0.0f && col[1] <= 0.0f && col[2] <= 0.0f ) { continue; }	// dark / off
+		if ( col[0] < 0.001f && col[1] < 0.001f && col[2] < 0.001f ) { continue; }	// dark / off (the frontend's own threshold)
+		// order: projected/parallel (the authored feature lights) first, then nearest first - consumers that
+		// keep only a short candidate list per ray (volumetrics) must not lose a spot to a crowd of fill lights
+		sortKey[ n ] = ( ( ld->parms.pointLight && !ld->parms.parallel ) ? 1.0e9f : 0.0f )
+		             + Max( ( cullOrg - viewOrg ).Length() - cullRad, 0.0f );
 		RtReflLightGPU &L = lights[ n++ ];
 		L.cull[0] = cullOrg[0]; L.cull[1] = cullOrg[1]; L.cull[2] = cullOrg[2]; L.cull[3] = cullRad;
 		L.pos[0] = ld->globalLightOrigin[0];
@@ -5057,9 +5073,16 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	if ( n == 0 ) {
 		return 0;
 	}
+	int order[ RT_REFL_MAX_LIGHTS ];
+	for ( int i = 0; i < n; i++ ) {					// insertion sort of indices by key (n <= 256, mostly a handful)
+		int j = i;
+		while ( j > 0 && sortKey[ order[ j - 1 ] ] > sortKey[ i ] ) { order[ j ] = order[ j - 1 ]; j--; }
+		order[ j ] = i;
+	}
+	for ( int i = 0; i < n; i++ ) { sorted[ i ] = lights[ order[ i ] ]; }
 	const int slot      = (int)( tr.frameCount % RT_REFL_LIGHT_SLOTS );
 	const int slotBytes = RT_REFL_MAX_LIGHTS * (int)sizeof( RtReflLightGPU );
-	r->UpdateBuffer( s_rtReflLightBuf, slot * slotBytes, n * (int)sizeof( RtReflLightGPU ), lights );
+	r->UpdateBuffer( s_rtReflLightBuf, slot * slotBytes, n * (int)sizeof( RtReflLightGPU ), sorted );
 	*outAddr = s_rtReflLightAddr + (unsigned long long)( slot * slotBytes );
 	cacheCount = n;	cacheAddr = *outAddr;
 	return n;
@@ -5864,6 +5887,7 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	mp.windowCoord[1] = ( r_volLights.GetInteger() >= 2 ) ? 2.0f : 1.0f;
 	mp.windowCoord[2] = -1.0f;											// VK-only pass: top-down view-Y sign
 	mp.windowCoord[3] = idMath::ClampFloat( 0.0f, 4.0f, r_volExtinction.GetFloat() );
+	mp.diffuseModifier[0] = idMath::ClampFloat( 0.0f, 4.0f, r_volPointLightScale.GetFloat() );
 	mp.screenCorrection[0] = 1.0f / volW;
 	mp.screenCorrection[1] = 1.0f / volH;
 	mp.depthTexRecip[0] = ( (float)fullW / volW ) / uploadW;

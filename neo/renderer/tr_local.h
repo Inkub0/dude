@@ -990,6 +990,7 @@ extern idCVar r_volSteps;
 extern idCVar r_volResScale;
 extern idCVar r_volMaxDist;
 extern idCVar r_volExtinction;
+extern idCVar r_volPointLightScale;
 extern idCVar r_volTemporal;
 extern idCVar r_volTemporalFeedback;
 extern idCVar r_rtReflLightFrustum;		// RR16c: confine each real light to its projection frustum (spot pyramid / point-light box) at an RT reflection hit
