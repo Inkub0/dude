@@ -649,6 +649,11 @@ static float rhiSsrJitterPhase = 0.0f;				// per-frame march jitter rotation
 // r_rtReflJitter) gives the accumulation something to average, so the grid resolves rather than smears.
 static rhi::RenderTargetHandle rhiVolRT = 0;			// volumetric lighting march result (rgb in-scatter, a transmittance)
 static int   rhiVolW = 0, rhiVolH = 0;
+static rhi::RenderTargetHandle rhiVolUpRT = 0;			// depth-aware upsample of the march (full res) = the temporal pass's "current"
+static rhi::RenderTargetHandle rhiVolHistRT[2] = { 0, 0 };	// full-res temporal history ping-pong
+static int   rhiVolHistIdx = 0;
+static int   rhiVolFullW = 0, rhiVolFullH = 0;
+static bool  rhiVolHistValid = false;
 static float rhiVolJitterPhase = 0.0f;					// per-frame golden-ratio rotation of the march sample offsets
 static rhi::RenderTargetHandle rhiRtReflRT = 0;		// this frame's RT reflection contribution (a = hit mask)
 // RR16 (docs/rtx-reflections.md): the view's lights gathered into a device buffer the fullscreen RT
@@ -3452,6 +3457,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsrHistValid = false;
 	rhiRtReflRT = 0;			rhiRtReflW = rhiRtReflH = 0;
 	rhiVolRT = 0;				rhiVolW = rhiVolH = 0;
+	rhiVolUpRT = 0;	rhiVolHistRT[0] = rhiVolHistRT[1] = 0;	rhiVolFullW = rhiVolFullH = 0;	rhiVolHistValid = false;
 	s_rtReflLightBuf = 0;		s_rtReflLightAddr = 0;		// RR16: handle is stale after a lost context; recreated lazily
 	rhiRtReflHistRT[0] = rhiRtReflHistRT[1] = 0;
 	rhiRtReflHistIdx = 0;		rhiRtReflHistW = rhiRtReflHistH = 0;
@@ -5793,6 +5799,46 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiVolW = volW;	rhiVolH = volH;
 	}
 
+	// V3 full-res targets: the depth-aware upsample + the temporal history pair (r_volTemporal)
+	const bool wantTemporal = r_volTemporal.GetBool();
+	if ( rhiVolUpRT && r->GetRenderTargetImage( rhiVolUpRT ) == 0 ) {
+		rhiVolUpRT = 0;	rhiVolHistRT[0] = rhiVolHistRT[1] = 0;	rhiVolFullW = rhiVolFullH = 0;	// lost context
+	}
+	if ( rhiVolUpRT && ( rhiVolFullW != fullW || rhiVolFullH != fullH ) ) {
+		r->DestroyRenderTarget( rhiVolUpRT );	rhiVolUpRT = 0;
+		for ( int i = 0; i < 2; i++ ) {
+			if ( rhiVolHistRT[i] ) { r->DestroyRenderTarget( rhiVolHistRT[i] ); rhiVolHistRT[i] = 0; }
+		}
+	}
+	if ( !rhiVolUpRT ) {
+		rhiVolUpRT = r->CreateRenderTarget( rhi::IF_RGBA16F, fullW, fullH );
+		rhiVolHistValid = false;
+		if ( !rhiVolUpRT ) {
+			rhiVolFullW = rhiVolFullH = 0;
+			return;
+		}
+		rhiVolFullW = fullW;	rhiVolFullH = fullH;
+	}
+	if ( wantTemporal && ( !rhiVolHistRT[0] || !rhiVolHistRT[1] ) ) {
+		for ( int i = 0; i < 2; i++ ) {
+			if ( !rhiVolHistRT[i] ) { rhiVolHistRT[i] = r->CreateRenderTarget( rhi::IF_RGBA16F, fullW, fullH ); }
+		}
+		rhiVolHistValid = false;
+	}
+	rhi::ShaderHandle upProg   = r->LoadShader( "vol_upsample" );
+	rhi::ShaderHandle tempProg = wantTemporal ? r->LoadShader( "ssr_temporal" ) : 0;
+	if ( !upProg ) {
+		return;
+	}
+	const bool doTemporal = wantTemporal && tempProg && rhiVolHistRT[0] && rhiVolHistRT[1];
+	if ( doTemporal ) {
+		// fresh sample depths every frame, so the accumulation integrates ~1/(1-feedback) x the steps
+		rhiVolJitterPhase += 0.61803399f;
+		rhiVolJitterPhase -= (float)(int)rhiVolJitterPhase;
+	} else {
+		rhiVolHistValid = false;
+	}
+
 	const unsigned long long tlasAddr = r->GetTlasAddress();
 	const int uploadW = globalImages->currentDepthImage->uploadWidth;
 	const int uploadH = globalImages->currentDepthImage->uploadHeight;
@@ -5814,7 +5860,7 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	mp.localParam1[1] = idMath::ClampFloat( 128.0f, 16384.0f, r_volMaxDist.GetFloat() );
 	mp.localParam1[2] = idMath::ClampFloat( -0.9f, 0.9f, r_volAnisotropy.GetFloat() );
 	mp.localParam1[3] = ( r_volShadows.GetBool() && tlasAddr != 0 ) ? 1.0f : 0.0f;
-	mp.windowCoord[0] = rhiVolJitterPhase;								// static until the temporal stage (V3) animates it
+	mp.windowCoord[0] = rhiVolJitterPhase;								// advances per frame only while the temporal pass runs
 	mp.windowCoord[1] = ( r_volLights.GetInteger() >= 2 ) ? 2.0f : 1.0f;
 	mp.windowCoord[2] = -1.0f;											// VK-only pass: top-down view-Y sign
 	mp.windowCoord[3] = idMath::ClampFloat( 0.0f, 4.0f, r_volExtinction.GetFloat() );
@@ -5833,14 +5879,77 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_DrawFullscreen( r, marchProg, mp, 0 );
 	r->EndPass();
 
-	// ---- 2. composite onto the scene: dst * transmittance + in-scatter
+	// ---- 2. depth-aware upsample to full res (vol_upsample.frag): no shaft bleed across silhouettes
+	rhi::RenderParams up;
+	memset( &up, 0, sizeof( up ) );
+	up.mvpMatrix[0] = up.mvpMatrix[5] = up.mvpMatrix[10] = up.mvpMatrix[15] = 1.0f;
+	up.localParam0[0] = (float)volW;
+	up.localParam0[1] = (float)volH;
+	up.localParam0[2] = (float)resDiv;
+	up.depthTexRecip[0] = 1.0f / uploadW;
+	up.depthTexRecip[1] = 1.0f / uploadH;
+	rhi::FillDepthParms( up, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
+	r->BeginTargetPass( rhiVolUpRT, NULL );
+	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	RB_RHI_DrawFullscreen( r, upProg, up, r->GetRenderTargetImage( rhiVolRT ) );
+	r->EndPass();
+	rhi::RenderTargetHandle volResultRT = rhiVolUpRT;
+
+	// ---- 3. temporal accumulation (the shared ssr_temporal): resolves the per-frame-jittered march grain.
+	// Reprojected by the OPAQUE surface behind the fog - the wrong depth for the medium itself, harmless for
+	// a signal this low-frequency (docs/volumetric-lighting.md). The clip taps step by the march texel so
+	// they land on distinct marched samples (the Quarter-res lesson from the RT reflections).
+	if ( doTemporal ) {
+		float reproj[16];
+		bool prevUsable;
+		const bool haveInv = RB_RHI_TemporalReproj( viewDef, reproj, &prevUsable );
+		const bool historyUsable = rhiVolHistValid && prevUsable && haveInv;
+		const int writeIdx = rhiVolHistIdx;
+		const int readIdx  = 1 - rhiVolHistIdx;
+
+		rhi::RenderParams tp;
+		memset( &tp, 0, sizeof( tp ) );
+		tp.mvpMatrix[0] = tp.mvpMatrix[5] = tp.mvpMatrix[10] = tp.mvpMatrix[15] = 1.0f;
+		if ( haveInv ) {
+			memcpy( tp.modelViewMatrix, reproj, sizeof( reproj ) );
+		}
+		tp.localParam0[0] = mp.localParam0[0];
+		tp.localParam0[1] = mp.localParam0[1];
+		tp.localParam0[2] = idMath::ClampFloat( 0.0f, 0.97f, r_volTemporalFeedback.GetFloat() );
+		tp.localParam0[3] = historyUsable ? 1.0f : 0.0f;
+		rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
+			? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
+		tp.localParam1[0] = velImg ? 1.0f : 0.0f;
+		tp.localParam1[1] = (float)resDiv;
+		tp.windowCoord[2] = -1.0f;
+		tp.screenCorrection[0] = 1.0f / fullW;
+		tp.screenCorrection[1] = 1.0f / fullH;
+		tp.depthTexRecip[0] = 1.0f / uploadW;
+		tp.depthTexRecip[1] = 1.0f / uploadH;
+		rhi::FillDepthParms( tp, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
+
+		r->BeginTargetPass( rhiVolHistRT[writeIdx], NULL );
+		RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
+		RB_RHI_BindRTUnit( r, 1, historyUsable ? rhiVolHistRT[readIdx] : rhiVolUpRT );	// never an unwritten slot
+		if ( velImg ) { RB_RHI_BindRTImage( r, 3, velImg ); }
+		else          { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
+		RB_RHI_DrawFullscreen( r, tempProg, tp, r->GetRenderTargetImage( rhiVolUpRT ) );
+		r->EndPass();
+
+		volResultRT = rhiVolHistRT[writeIdx];
+		rhiVolHistIdx = readIdx;
+		RB_RHI_TemporalStageCur( viewDef );
+		rhiVolHistValid = true;
+	}
+
+	// ---- 4. composite onto the scene: dst * transmittance + in-scatter
 	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
 	               tr.viewportOffset[1] + viewDef->viewport.y1, fullW, fullH );
 	backEnd.currentScissor = viewDef->scissor;
 	rhi::RenderParams cp;
 	memset( &cp, 0, sizeof( cp ) );
 	cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
-	RB_RHI_DrawFullscreen( r, compProg, cp, r->GetRenderTargetImage( rhiVolRT ),
+	RB_RHI_DrawFullscreen( r, compProg, cp, r->GetRenderTargetImage( volResultRT ),
 	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_SRC_ALPHA );
 	RB_RHI_ForgetTexBinds();
 }

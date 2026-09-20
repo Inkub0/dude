@@ -990,6 +990,8 @@ extern idCVar r_volSteps;
 extern idCVar r_volResScale;
 extern idCVar r_volMaxDist;
 extern idCVar r_volExtinction;
+extern idCVar r_volTemporal;
+extern idCVar r_volTemporalFeedback;
 extern idCVar r_rtReflLightFrustum;		// RR16c: confine each real light to its projection frustum (spot pyramid / point-light box) at an RT reflection hit
 extern idCVar r_rtReflLightScale;			// RR16: overall brightness of the real-light diffuse at an RT reflection hit (compensates the point-light approximation)
 extern idCVar r_rtReflEmissive;				// RR16f: brightness of self-lit light-source surfaces (neon/ceiling tiles) in RT reflections

@@ -1,7 +1,7 @@
 # Volumetric lighting (light shafts) — plan
 
-**Status: Route A chosen 2026-09-20 (kept Route-B-ready). V0 + V1 + V2 BUILT on `feat/volumetric-lighting`,
-user gate pending; V3 (temporal + depth-aware upsample) and V4 (look, menu) next.**
+**Status: Route A chosen 2026-09-20 (kept Route-B-ready). V0–V2 user-gated (work, no crash after the per-ray light cull); V3 BUILT on
+`feat/volumetric-lighting`, gate pending; V4 (look, defaults, menu) next.**
 Backlog origin: [todo.md](todo.md) "Fidelity backlog — Volumetric light shafts".
 
 ## 1. What and why
@@ -112,6 +112,14 @@ with resolution × steps × lights.
   `vol_composite.frag` (ONE / SRC_ALPHA), `RB_RHI_VolumetricLighting` called right after
   `RB_RHI_FogAllLights`. `r_volShadows 0` is the V1 look (unshadowed, leaks expected), `1` is V2.
   Requires VK + ray query + `r_hdr`; without a TLAS it runs unshadowed.
+
+- **V3 (built 2026-09-20, gate pending)** — per-frame golden-ratio rotation of the march jitter;
+  `vol_upsample.frag` (depth-aware 4-tap upsample to full res, *before* the temporal pass so history is
+  accumulated per full-res pixel with the right side of each silhouette); the shared `ssr_temporal` with a
+  full-res history pair and clip taps spaced by the march texel; composite reads the accumulated result.
+  `r_volTemporal` (1) / `r_volTemporalFeedback` (0.9). First-gate feedback that drove it: shafts showed a
+  visible dot pattern (raw jitter) and were *rare* — stock maps have few projected lights, so
+  `r_volLights 2` (point lights) is the setting to judge the look with; default to be decided in V4.
 
 **Device-lost at the first gate (2026-09-20) → per-ray light culling.** The first cut looped the *whole*
 scene-light buffer at every march sample. The buffer holds every light within ~2000 units (up to 256) and a
