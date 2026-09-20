@@ -19,6 +19,9 @@
 //   unit 3 (u_velocity)    = per-object screen-velocity MRT (R1/A2); used when u_localParam1.x > 0.5
 //   u_localParam0 = ( 1/proj00, 1/proj11, feedback, historyValid )
 //   u_localParam1.x       = 1 -> reproject by velocity (also catches moving objects); 0 -> matrix
+//   u_localParam1.y       = current-buffer texel size in OUTPUT pixels (RT temporal upscale: 1/2/4 for a
+//                           Full/Half/Quarter trace; <=1 = same res). The variance-clip taps step by this.
+//   u_localParam1.zw      = un-jitter uv offset for the current buffer (RT sample-grid jitter; 0 = none)
 //   u_modelViewMatrix     = reproj: current view space -> previous clip (camera-only fallback)
 //   u_screenCorrection.xy = 1 / ssrTargetSize      (gl_FragCoord -> [0,1] uv, texel size)
 //   u_depthTexRecip.xy    = ratio / depthUploadSize (gl_FragCoord -> _currentDepth tc)
@@ -42,7 +45,10 @@ layout(location = 0) out vec4 fragColor;
 
 void main() {
 	vec2 frag = gl_FragCoord.xy;
-	vec4 cur  = texture( u_curSSR, var_TexCoord );
+	// The RT trace shifts its whole sample grid by a per-frame sub-texel jitter, so its buffer shows the scene
+	// displaced by that jitter: read it back un-shifted, or the upscaled image wobbles frame to frame.
+	vec2 curUV = var_TexCoord - u_localParam1.zw;
+	vec4 cur  = texture( u_curSSR, curUV );
 	float raw = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
 
 	// sky / no geometry: nothing to reproject, just pass the current value through
@@ -92,7 +98,10 @@ void main() {
 
 	// variance clipping: first + second moments of the 3x3 current-frame
 	// neighbourhood; the clip box is mean +- gamma*stddev per channel
-	vec2 texel = u_screenCorrection.xy;
+	// The taps must land on DISTINCT traced samples: when the current buffer is a lower-res trace being
+	// upscaled, output-pixel spacing keeps all nine inside one bilinear cell - the deviation collapses, the
+	// clip box pins history to the current frame, accumulation stops and the jitter shimmers through.
+	vec2 texel = u_screenCorrection.xy * max( u_localParam1.y, 1.0 );
 	vec4 m1 = cur;
 	vec4 m2 = cur * cur;
 	for ( int y = -1; y <= 1; ++y ) {
@@ -100,7 +109,7 @@ void main() {
 			if ( x == 0 && y == 0 ) {
 				continue;			// center tap is cur, already seeded above
 			}
-			vec4 s = texture( u_curSSR, var_TexCoord + vec2( x, y ) * texel );
+			vec4 s = texture( u_curSSR, curUV + vec2( x, y ) * texel );
 			m1 += s;
 			m2 += s * s;
 		}
