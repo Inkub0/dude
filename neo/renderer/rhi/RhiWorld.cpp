@@ -6467,6 +6467,7 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[1] = 0.1f;					// ... ReblurHitDistanceParameters (H4c)
 	parms.localParam1[0] = rhiRtaoJitterPhase;
 	parms.localParam1[2] = 1.0f;					// ray-origin normal offset (world units)
+	parms.localParam1[3] = r_rtaoOriginFix.GetBool() ? 0.004f : 0.0f;	// > 0: pull the origin toward the eye (per unit depth) instead - no crease leak
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / uploadW;
