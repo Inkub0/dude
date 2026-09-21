@@ -6398,6 +6398,19 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !prog ) {
 		return;
 	}
+	// The traced rays are only ever CONSUMED through the NRD denoise + resolve below, which needs the
+	// velocity MRT (r_motionVectors / r_fsr) and the two guide programs. Without them the screen-space GTAO
+	// chain runs instead (RB_RHI_SSAOPass) - so do not trace a full-res ray pass first just to throw it
+	// away: that was the one case where BOTH AO producers cost GPU time in the same frame. The raw-ray debug
+	// overlay (r_rtaoDebug 1) is the only consumer of an un-denoised ray buffer.
+	{
+		const bool canDenoise = rhiNormalVelThisView
+			&& r->GetRenderTargetImage3( rhiNormalResultRT ) != 0
+			&& r->LoadShader( "rtao_viewz" ) != 0 && r->LoadShader( "rtao_pack" ) != 0;
+		if ( !canDenoise && r_rtaoDebug.GetInteger() != 1 ) {
+			return;
+		}
+	}
 
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
