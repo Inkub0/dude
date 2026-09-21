@@ -28,7 +28,6 @@
 
 SAMPLER_BINDING(0) uniform sampler2D u_src;
 SAMPLER_BINDING(1) uniform sampler2D u_tiles;		// per 8x8 tile: R = 1 a shadow edge is within reach, G = that reach / K
-SAMPLER_BINDING(2) uniform sampler2D u_summary;	// the ray pass's RG8 summary: R = hard visibility (perf: the vertical pass reads it for pass-through pixels instead of the 8-byte ping)
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -48,23 +47,14 @@ vec4 fetchTap( ivec2 q, ivec2 hi ) {
 
 void blurMain() {
 	ivec2 ip = ivec2( gl_FragCoord.xy );
-	vec4  tile = texelFetch( u_tiles, ip >> 3, 0 );
-	bool  flagged = tile.r >= 0.5;
-	// perf (r_rtShadowBlurCompact, u_localParam0.w): the vertical pass (u_localParam0.y) writing the
-	// plain mask (not a staggered slot, u_localParam0.z) reads the cheap RG8 summary for pass-through
-	// pixels instead of the 8-byte ping. For an unflagged pixel ping.r == the ray pass's hard
-	// visibility == u_summary.r by construction, so this is bit-identical and skips the wide read.
-	if ( u_localParam0.w > 0.5 && u_localParam0.y > 0.5 && u_localParam0.z < 0.5 && !flagged ) {
-		fragColor = vec4( texelFetch( u_summary, ip, 0 ).r, 0.0, 0.0, 0.0 );
-		return;
-	}
 	vec4  c  = texelFetch( u_src, ip, 0 );
 	// pass-through: visibility as is, the other axis' half-width moves into G for pass 2
 	fragColor = vec4( c.r, c.a, c.b, 0.0 );
 	if ( !( c.b > 0.0 ) ) {
 		return;
 	}
-	if ( !flagged ) {
+	vec4 tile = texelFetch( u_tiles, ip >> 3, 0 );
+	if ( tile.r < 0.5 ) {
 		return;									// no shadow edge can reach this tile
 	}
 	// sweep only as far as the widest shadow that reaches this tile (+1: the reach test's soft
