@@ -299,8 +299,21 @@ shader. Now (a) the pre-grate ray is back as its own code path with constant
 `R_RtBoundsTouchPerforated( vLight->frustumTris->bounds )` against this frame's perforated-caster
 bounds (world surfaces + transformed static-model bounds, refreshed with the TLAS instances). A
 light with no grate in its volume traces exactly what it traced before grates existed.
-UNCONFIRMED hypothesis - pending the user's `r_rtPerforatedShadows` 0/1 numbers at a grate spot and
-at a no-grate spot.
+**User numbers after pass 2:** near a grate 13.7 (off) vs 14.4 ms (on); NO grate in sight 12.75 vs
+13.30 - the tax really is on every pixel, and the gating wasn't engaging. Pass 3 (per-TRIANGLE world
+bounds - a world surface spans its whole map area - plus the `r_rtPerforatedDebug` readout) showed
+why: "4 ray-traced lights, 1 on the grate path", tripped by `textures/decals/pipecap2a` - a 28-unit
+see-through pipe cap 179 units from the light. One small object in a light's box taxed every pixel
+the light shades.
+
+**Perf pass 4: the decision moved to the PIXEL.** Per light the CPU gathers the boxes of the grates
+inside its volume (`R_RtGatherPerforatedBoxes`, up to 16, the last swallowing any overflow, padded 2
+units) into a per-frame storage buffer (4 frame slots x 256 lights); address in
+`u_shadowProjectionQ.xy`, count in `u_shadowFalloffS.w`. Both shadow rays slab-test their segment
+against those boxes (`dudeSegmentMeetsPerforated`): only a pixel whose segment to the light passes
+through a grate's box traces the grate-aware ray, every other pixel the fixed force-opaque ray. No
+caster is dropped, the image is unchanged. **Pending the user's numbers.** Once settled: remove
+`r_rtPerforatedDebug` + the now-unused `R_RtBoundsTouchPerforated` / material lists.
 
 ## Cvars
 

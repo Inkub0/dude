@@ -1006,6 +1006,7 @@ extern idCVar r_rtReflEmissive;				// RR16f: brightness of self-lit light-source
 extern idCVar r_rtReflResScale;				// RT reflection trace resolution (fraction of screen; unsnapped, temporally upscaled)
 extern idCVar r_rtReflBump;					// RR10: how much the RT reflection follows the normal map (0 = flat mirror, 1 = full bump like SSR)
 extern idCVar r_rtMovingLights;				// RT shadows for moving point lights: skip the un-cacheable cube re-render, trace instead
+int  R_RtGatherPerforatedBoxes( const idBounds &b, idBounds *out, int maxOut );	// tr_main.cpp: the perforated RT casters inside a box; returns the total found
 bool R_RtBoundsTouchPerforated( const idBounds &b, const idMaterial **whoMat = NULL, idBounds *whoBounds = NULL );	// tr_main.cpp: any perforated RT caster inside this world-space box this frame?
 extern idCVar r_rtPerforatedDebug;
 extern idCVar r_rtPerforatedShadows;		// alpha-tested grate/fence casters in the RT shadow rays

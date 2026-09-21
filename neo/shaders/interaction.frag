@@ -205,6 +205,13 @@ float shadowVisibility( bool canReceive ) {
 		bool  perfOn   = u_shadowFalloffS.z > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
 		float tMax     = min( distLight - 1.0, u_rtParms.w );
 		float perfVis  = 1.0;
+		// per pixel: u_shadowFalloffS.w boxes of this light's grates at u_shadowProjectionQ.xy - a
+		// segment that passes through none of them can't meet a grate ( w < 0: no list, all pixels )
+		if ( perfOn && u_shadowFalloffS.w > 0.5 ) {
+			perfOn = dudeSegmentMeetsPerforated(
+				uvec2( floatBitsToUint( u_shadowProjectionQ.x ), floatBitsToUint( u_shadowProjectionQ.y ) ),
+				int( u_shadowFalloffS.w + 0.5 ), wp + wn * u_rtParms.z, toLight / distLight, tMax );
+		}
 		if ( !perfOn ) {
 			// no grate in this light's volume (decided per light on the CPU): the ray every light
 			// traced before grates existed, flags and mask CONSTANT - a ray that forces everything

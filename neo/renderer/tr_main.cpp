@@ -1947,6 +1947,23 @@ bool R_RtBoundsTouchPerforated( const idBounds &b, const idMaterial **whoMat, id
 	return false;
 }
 
+// The perforated casters inside a world-space box (a light's volume), up to maxOut of them; returns
+// how many there ARE (may exceed maxOut - the caller then knows its list is incomplete).
+int R_RtGatherPerforatedBoxes( const idBounds &b, idBounds *out, int maxOut ) {
+	int n = 0;
+	for ( int i = 0; i < s_rtPerfFrameBounds.Num(); i++ ) {
+		if ( s_rtPerfFrameBounds[i].IntersectsBounds( b ) ) {
+			if ( n < maxOut ) {
+				out[n] = s_rtPerfFrameBounds[i];
+			} else {
+				out[maxOut - 1].AddBounds( s_rtPerfFrameBounds[i] );	// overflow: the last box swallows the rest (conservative)
+			}
+			n++;
+		}
+	}
+	return n;
+}
+
 static void R_RtFreeWorldGeo( void ) {
 	rhi::RHI *r = rhi::GetRHI();
 	s_rtPerfAreaBlas.Clear();		// the BLASes themselves die with DestroyRtScene, like s_rtAreaBlas

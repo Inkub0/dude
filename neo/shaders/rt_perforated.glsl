@@ -19,6 +19,28 @@ layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Per
 
 layout(set = 2, binding = 0) uniform sampler2D u_rtTextures[];
 
+// Per-pixel gate: the boxes of the grates inside this light's volume ( min.xyz, max.xyz pairs, padded
+// on the CPU ). Only a shadow segment that passes through one of them can meet a grate, so only it
+// needs the grate-aware ray; everything else keeps the fixed force-opaque ray - the hardware's fastest
+// traversal. A slab test per box costs a few dozen flops against a whole slower ray.
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer PerfBoxes { vec4 b[]; };
+
+bool dudeSegmentMeetsPerforated( uvec2 boxAddr, int count, vec3 O, vec3 dir, float tMax ) {
+	vec3 inv = 1.0 / mix( dir, vec3( 1e-8 ), lessThan( abs( dir ), vec3( 1e-8 ) ) );
+	PerfBoxes boxes = PerfBoxes( boxAddr );
+	for ( int i = 0; i < count; i++ ) {
+		vec3 t0 = ( boxes.b[ 2 * i ].xyz - O ) * inv;
+		vec3 t1 = ( boxes.b[ 2 * i + 1 ].xyz - O ) * inv;
+		vec3 tn = min( t0, t1 ), tf = max( t0, t1 );
+		float tNear = max( max( tn.x, tn.y ), max( tn.z, 0.0 ) );
+		float tFar  = min( min( tf.x, tf.y ), min( tf.z, tMax ) );
+		if ( tNear <= tFar ) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // Is the candidate triangle ( instance custom index ci, geometry gi, primitive prim, barycentrics bc )
 // a SOLID texel of a perforated caster? False for holes and for any row that isn't alpha-tested.
 bool dudePerforatedSolid( uvec2 geoAddr, uint ci, uint gi, uint prim, vec2 bc ) {

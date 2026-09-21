@@ -41,6 +41,7 @@
 //                           near the caster, then widening fast
 //   u_shadowFalloffS      = perforated casters (rt_perforated.glsl): xy = geometry-table address,
 //                           z = their shadow strength (r_shadowMapPerforatedStrength); 0 = off
+//   u_shadowProjectionQ.xy = address of this light's grate boxes; u_shadowFalloffS.w = how many
 //   u_screenCorrection.xy = 1 / viewSize
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 //   u_depthParms.xy       = window depth -> 1 / view z for THIS view (renderparms.glsl): the game
@@ -158,6 +159,13 @@ void main() {
 	float tMax    = min( max( dL - 1.0, 0.01 ), 100000.0 );
 	bool  solidHit;
 	float tSolid  = 0.0;
+	// per pixel: u_shadowFalloffS.w boxes of this light's grates at u_shadowProjectionQ.xy - a segment
+	// that passes through none of them can't meet a grate ( w < 0: no list, all pixels )
+	if ( perfOn && u_shadowFalloffS.w > 0.5 ) {
+		perfOn = dudeSegmentMeetsPerforated(
+			uvec2( floatBitsToUint( u_shadowProjectionQ.x ), floatBitsToUint( u_shadowProjectionQ.y ) ),
+			int( u_shadowFalloffS.w + 0.5 ), O, Ldir, tMax );
+	}
 	if ( !perfOn ) {
 		// no grate in this light's volume (decided per light on the CPU): the ray this pass always
 		// traced, flags and mask CONSTANT - forcing everything opaque is the hardware's fastest

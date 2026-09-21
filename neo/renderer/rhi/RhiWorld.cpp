@@ -1171,6 +1171,18 @@ static bool RB_RHI_TessOrDeform( const drawSurf_t *surf, const srfTriangles_t *t
 // everything opaque, and a ray traced without that flag loses the hardware's fastest traversal -
 // paid by every pixel the light shades, grate or no grate. Every other light keeps the fixed
 // force-opaque ray it always had. Decided once per light per frame (the fill runs per surface).
+// PER PIXEL (perf pass 4): the shader also gets the boxes of the grates inside the light's volume
+// (up to RT_PERF_MAX_BOXES, the last one swallowing any overflow) and only a pixel whose segment to
+// the light passes through one of them traces the grate-aware ray. One small see-through object in
+// a light's box (measured: a 28-unit pipe cap 179 units away) no longer taxes every pixel it shades.
+// The boxes ride a small per-frame storage buffer (frame slots like the reflection light list); its
+// address goes in u_shadowProjectionQ.xy, the count in u_shadowFalloffS.w - both unread by RT modes.
+#define RT_PERF_MAX_BOXES	16
+#define RT_PERF_MAX_LIGHTS	256
+#define RT_PERF_SLOTS		4
+static rhi::BufferHandle	s_rtPerfBoxBuf = 0;
+static unsigned long long	s_rtPerfBoxAddr = 0;
+
 static void RB_RHI_FillPerforatedParms( rhi::RHI *r, rhi::RenderParams &parms, const viewLight_t *vLight ) {
 	memset( parms.shadowFalloffS, 0, sizeof( parms.shadowFalloffS ) );
 	if ( !r_rtPerforatedShadows.GetBool() || !r_shadowMapPerforated.GetBool() ) {
@@ -1178,47 +1190,66 @@ static void RB_RHI_FillPerforatedParms( rhi::RHI *r, rhi::RenderParams &parms, c
 	}
 	static const viewLight_t *cachedLight = NULL;
 	static int cachedFrame = -1;
-	static bool cachedTouches = false;
+	static int cachedCount = 0;					// boxes uploaded for this light; 0 = no grate in its volume
+	static unsigned long long cachedAddr = 0;
+	static int frameLights = 0, frameOfLights = -1;
 	if ( vLight != cachedLight || tr.frameCount != cachedFrame ) {
+		if ( tr.frameCount != frameOfLights ) {
+			frameOfLights = tr.frameCount;
+			frameLights = 0;
+		}
 		cachedLight = vLight;
 		cachedFrame = tr.frameCount;
-		// no volume to test = assume it does
-		const idMaterial *whoMat = NULL;
-		idBounds whoBounds;
-		whoBounds.Clear();
-		cachedTouches = ( vLight == NULL || vLight->frustumTris == NULL )
-			? true : R_RtBoundsTouchPerforated( vLight->frustumTris->bounds, &whoMat, &whoBounds );
+		cachedCount = 0;
+		cachedAddr = 0;
+		idBounds boxes[RT_PERF_MAX_BOXES];
+		int total = 0;
+		if ( vLight != NULL && vLight->frustumTris != NULL ) {
+			total = R_RtGatherPerforatedBoxes( vLight->frustumTris->bounds, boxes, RT_PERF_MAX_BOXES );
+		}
+		if ( total > 0 ) {
+			if ( s_rtPerfBoxBuf == 0 ) {
+				s_rtPerfBoxBuf = r->CreateBuffer( rhi::BU_STORAGE,
+					RT_PERF_SLOTS * RT_PERF_MAX_LIGHTS * RT_PERF_MAX_BOXES * 8 * (int)sizeof( float ), NULL );
+				s_rtPerfBoxAddr = ( s_rtPerfBoxBuf != 0 ) ? r->GetBufferDeviceAddress( s_rtPerfBoxBuf ) : 0;
+			}
+			const int n = Min( total, RT_PERF_MAX_BOXES );
+			if ( s_rtPerfBoxAddr != 0 && frameLights < RT_PERF_MAX_LIGHTS ) {
+				float data[RT_PERF_MAX_BOXES * 8];
+				for ( int i = 0; i < n; i++ ) {
+					// padded: the ray starts a little off the surface, and a flat grate is a zero-thickness box
+					data[i * 8 + 0] = boxes[i][0].x - 2.0f; data[i * 8 + 1] = boxes[i][0].y - 2.0f; data[i * 8 + 2] = boxes[i][0].z - 2.0f; data[i * 8 + 3] = 0.0f;
+					data[i * 8 + 4] = boxes[i][1].x + 2.0f; data[i * 8 + 5] = boxes[i][1].y + 2.0f; data[i * 8 + 6] = boxes[i][1].z + 2.0f; data[i * 8 + 7] = 0.0f;
+				}
+				const int slot = (int)( tr.frameCount % RT_PERF_SLOTS );
+				const int ofs = ( slot * RT_PERF_MAX_LIGHTS + frameLights ) * RT_PERF_MAX_BOXES * 8 * (int)sizeof( float );
+				r->UpdateBuffer( s_rtPerfBoxBuf, ofs, n * 8 * (int)sizeof( float ), data );
+				cachedAddr = s_rtPerfBoxAddr + (unsigned long long)ofs;
+				cachedCount = n;
+				frameLights++;
+			} else {
+				cachedCount = -1;				// no list to hand over: every pixel of this light takes the grate-aware ray
+			}
+		}
 		// r_rtPerforatedDebug: is the gating engaging? (remove once settled)
 		if ( r_rtPerforatedDebug.GetBool() ) {
-			static int dbgLights = 0, dbgTouch = 0, dbgFrames = 0, dbgLastFrame = -1, dbgLastMs = 0;
-			static idStr dbgWho;		// the FIRST caster found in each touching light's volume, one whole frame
+			static int dbgLights = 0, dbgTouch = 0, dbgBoxes = 0, dbgFrames = 0, dbgLastFrame = -1, dbgLastMs = 0;
 			if ( tr.frameCount != dbgLastFrame ) {
-				// a new frame starts: the previous one's list is complete - report once a second
 				const int now = Sys_Milliseconds();
 				if ( now - dbgLastMs >= 1000 && dbgFrames > 0 ) {
-					common->Printf( "%s", dbgWho.c_str() );
-					common->Printf( "rtPerforated: per frame %.1f ray-traced lights, %.1f of them on the grate path\n",
-						(float)dbgLights / dbgFrames, (float)dbgTouch / dbgFrames );
-					dbgLights = dbgTouch = dbgFrames = 0;
+					common->Printf( "rtPerforated: per frame %.1f ray-traced lights, %.1f with a grate in their volume (%.1f boxes handed to the shader)\n",
+						(float)dbgLights / dbgFrames, (float)dbgTouch / dbgFrames, (float)dbgBoxes / dbgFrames );
+					dbgLights = dbgTouch = dbgBoxes = dbgFrames = 0;
 					dbgLastMs = now;
 				}
 				dbgLastFrame = tr.frameCount;
 				dbgFrames++;
-				dbgWho.Clear();
 			}
 			dbgLights++;
-			if ( cachedTouches ) { dbgTouch++; }
-			if ( cachedTouches && whoMat != NULL && vLight != NULL && dbgWho.Length() < 3000 ) {
-				const idVec3 sz = whoBounds[1] - whoBounds[0];
-				const float dist = ( whoBounds.GetCenter() - vLight->globalLightOrigin ).Length();
-				const idVec3 lsz = vLight->frustumTris->bounds[1] - vLight->frustumTris->bounds[0];
-				dbgWho += va( "   light %4d (box %.0fx%.0fx%.0f): %s, size %.0fx%.0fx%.0f, %.0f units from the light\n",
-					vLight->lightDef ? vLight->lightDef->index : -1, lsz.x, lsz.y, lsz.z,
-					whoMat->GetName(), sz.x, sz.y, sz.z, dist );
-			}
+			if ( total > 0 ) { dbgTouch++; dbgBoxes += Max( cachedCount, 0 ); }
 		}
 	}
-	if ( !cachedTouches ) {
+	if ( cachedCount == 0 ) {
 		return;
 	}
 	const unsigned long long geoTable = r->GetRtGeoTableAddress();
@@ -1230,6 +1261,12 @@ static void RB_RHI_FillPerforatedParms( rhi::RHI *r, rhi::RenderParams &parms, c
 	memcpy( &parms.shadowFalloffS[0], &geoLo, sizeof( geoLo ) );	// bit-cast, NOT a value cast
 	memcpy( &parms.shadowFalloffS[1], &geoHi, sizeof( geoHi ) );
 	parms.shadowFalloffS[2] = idMath::ClampFloat( 0.0f, 1.0f, r_shadowMapPerforatedStrength.GetFloat() );
+	parms.shadowFalloffS[3] = (float)cachedCount;					// > 0: test the segment against that many boxes; < 0: no list
+	const unsigned int boxLo = (unsigned int)( cachedAddr & 0xFFFFFFFFull );
+	const unsigned int boxHi = (unsigned int)( cachedAddr >> 32 );
+	memset( parms.shadowProjectionQ, 0, sizeof( parms.shadowProjectionQ ) );
+	memcpy( &parms.shadowProjectionQ[0], &boxLo, sizeof( boxLo ) );
+	memcpy( &parms.shadowProjectionQ[1], &boxHi, sizeof( boxHi ) );
 }
 
 // r_rtShadowBlur: shader parms for an interaction that looks this light's blurred mask up
@@ -3543,6 +3580,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiRtReflRT = 0;			rhiRtReflW = rhiRtReflH = 0;
 	rhiVolRT = 0;	rhiVolBlurRT = 0;	rhiVolW = rhiVolH = 0;
 	rhiVolUpRT = 0;	rhiVolHistRT[0] = rhiVolHistRT[1] = 0;	rhiVolFullW = rhiVolFullH = 0;	rhiVolHistValid = false;
+	s_rtPerfBoxBuf = 0;			s_rtPerfBoxAddr = 0;		// perforated-caster boxes: same
 	s_rtReflLightBuf = 0;		s_rtReflLightAddr = 0;		// RR16: handle is stale after a lost context; recreated lazily
 	rhiRtReflHistRT[0] = rhiRtReflHistRT[1] = 0;
 	rhiRtReflHistIdx = 0;		rhiRtReflHistW = rhiRtReflHistH = 0;
