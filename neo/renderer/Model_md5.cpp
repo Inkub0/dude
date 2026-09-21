@@ -101,7 +101,10 @@ static const char *MD5_SKIN_SRC =
 	"layout(std430, binding = 3) readonly buffer WStart   { uint wstart[]; };\n"
 	"layout(std430, binding = 4)          buffer OutVert  { float v[]; };\n"
 	"layout(std430, binding = 5) readonly buffer LocalTBN { vec4 lt[]; };\n"
-	"layout(push_constant) uniform PC { uint numVerts; float skinScale; } pc;\n"
+	"#ifdef PREVPOS\n"							// skinned motion vectors: last frame's model-space position per vert
+	"layout(std430, binding = 6)          buffer PrevPos  { vec4 pp[]; };\n"
+	"#endif\n"
+	"layout(push_constant) uniform PC { uint numVerts; float skinScale; uint prevValid; } pc;\n"
 	"vec3 jrot( uint b, vec3 n ) {\n"		// rotate n by the joint's 3x3 (rows), no translation
 	"    return vec3( dot(vec3(jm[b+0u], jm[b+1u], jm[b+2u]),  n),\n"
 	"                 dot(vec3(jm[b+4u], jm[b+5u], jm[b+6u]),  n),\n"
@@ -128,6 +131,9 @@ static const char *MD5_SKIN_SRC =
 	"    }\n"
 	"    nrm = normalize( nrm );  t0 = normalize( t0 );  t1 = normalize( t1 );\n"
 	"    uint o = i*15u;\n"
+	"#ifdef PREVPOS\n"							// what is in the output buffer right now IS last frame's pose
+	"    pp[i] = ( pc.prevValid != 0u ) ? vec4( v[o+0u], v[o+1u], v[o+2u], 1.0 ) : vec4( p, 1.0 );\n"
+	"#endif\n"
 	"    v[o+0u]=p.x;   v[o+1u]=p.y;   v[o+2u]=p.z;\n"		// st = v[o+3..4] (seeded, untouched)
 	"    v[o+5u]=nrm.x; v[o+6u]=nrm.y; v[o+7u]=nrm.z;\n"
 	"    v[o+8u]=t0.x;  v[o+9u]=t0.y;  v[o+10u]=t0.z;\n"
@@ -136,6 +142,10 @@ static const char *MD5_SKIN_SRC =
 
 static rhi::ShaderHandle r_md5SkinShader = 0;		// compiled once, shared by all meshes
 static bool r_md5SkinShaderTried = false;
+static rhi::ShaderHandle r_md5SkinPrevShader = 0;	// PREVPOS variant (skinned motion vectors): binding 6 must be bound
+static bool r_md5SkinPrevShaderTried = false;
+
+idCVar r_skinnedMotionVectors( "r_skinnedMotionVectors", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "GPU-skinned characters write per-BONE motion into the velocity buffer: the skin kernel keeps each vertex's previous-frame position and the normal/velocity prepass projects THAT through the previous frame's matrices, instead of assuming the mesh moved rigidly with its entity. Removes the ghosting / smearing of swinging limbs in everything temporal (RTAO denoiser, FSR2, reflection + haze accumulation). Needs r_gpuSkinning (Vulkan) and a velocity consumer (r_fsr / r_motionVectors); ~16 bytes per skinned vertex" );
 
 // Lazily compile the shared skinning compute shader (once). Returns 0 if there is no compute
 // lane (GL3) or it failed to compile — callers then keep the CPU skinner.
@@ -158,6 +168,18 @@ static ID_INLINE idVec3 R_MD5_InvRotate( const float *m, const idVec3 &v ) {
 	return idVec3( m[0*4+0]*v[0] + m[1*4+0]*v[1] + m[2*4+0]*v[2],
 	               m[0*4+1]*v[0] + m[1*4+1]*v[1] + m[2*4+1]*v[2],
 	               m[0*4+2]*v[0] + m[1*4+2]*v[1] + m[2*4+2]*v[2] );
+}
+
+// The PREVPOS variant of the skin kernel (same source, one #define after the #version line). Separate
+// program because a storage binding a shader statically uses must be bound at dispatch.
+static rhi::ShaderHandle R_MD5_SkinPrevShader( rhi::RHI *r ) {
+	if ( !r_md5SkinPrevShaderTried ) {
+		r_md5SkinPrevShaderTried = true;
+		idStr src = MD5_SKIN_SRC;
+		src.Replace( "#version 450\n", "#version 450\n#define PREVPOS 1\n" );
+		r_md5SkinPrevShader = r->CreateComputeShader( "cs_md5skin_prevpos", src.c_str() );
+	}
+	return r_md5SkinPrevShader;
 }
 
 static const char *MD5_SnapshotName = "_MD5_Snapshot_";
@@ -1761,6 +1783,8 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		tri->gpuSkinVB = 0;
 		tri->gpuSkinVerts = 0;
 		tri->gpuSkinFrame = -1;
+		if ( tri->gpuSkinPrevVB ) { rhi::GetRHI()->DestroyBuffer( tri->gpuSkinPrevVB ); }
+		tri->gpuSkinPrevVB = 0;	tri->gpuSkinPrevAddr = 0;	tri->gpuSkinPrevValid = false;
 	}
 
 	if ( r_gpuSkinning.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN
@@ -1772,6 +1796,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		if ( tri->gpuSkinVB && tri->gpuSkinVerts != numOut ) {
 			r->DestroyBuffer( tri->gpuSkinVB );
 			tri->gpuSkinVB = 0;
+			if ( tri->gpuSkinPrevVB ) { r->DestroyBuffer( tri->gpuSkinPrevVB ); tri->gpuSkinPrevVB = 0; tri->gpuSkinPrevAddr = 0; }
 		}
 		if ( !tri->gpuSkinVB ) {
 			tri->gpuSkinVB = r->CreateBuffer( rhi::BU_SKIN, numOut * (int)sizeof( idDrawVert ), skinTemplate );
@@ -1779,7 +1804,29 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			tri->gpuSkinFrame = -1;
 		}
 		// one dispatch per surface per frame (an entity in several views instantiates once)
+		// skinned motion vectors: a second per-surface buffer receives last frame's positions (the kernel
+		// copies them out of gpuSkinVB before overwriting it). Needs a device address for gbuffer.vert.
+		rhi::ShaderHandle jobShader = skinShader;
+		if ( r_skinnedMotionVectors.GetBool() && tri->gpuSkinVB && R_MD5_SkinPrevShader( r ) != 0 ) {
+			if ( !tri->gpuSkinPrevVB ) {
+				tri->gpuSkinPrevVB   = r->CreateBuffer( rhi::BU_STORAGE, numOut * 16, NULL );
+				tri->gpuSkinPrevAddr = tri->gpuSkinPrevVB ? r->GetBufferDeviceAddress( tri->gpuSkinPrevVB ) : 0;
+				tri->gpuSkinPrevValid = false;
+				if ( tri->gpuSkinPrevVB && tri->gpuSkinPrevAddr == 0 ) {		// no buffer-device-address: unusable
+					r->DestroyBuffer( tri->gpuSkinPrevVB );
+					tri->gpuSkinPrevVB = 0;
+				}
+			}
+			if ( tri->gpuSkinPrevVB ) { jobShader = r_md5SkinPrevShader; }
+		} else if ( tri->gpuSkinPrevVB ) {										// toggled off
+			r->DestroyBuffer( tri->gpuSkinPrevVB );
+			tri->gpuSkinPrevVB = 0;	tri->gpuSkinPrevAddr = 0;	tri->gpuSkinPrevValid = false;
+		}
 		if ( tri->gpuSkinVB && tri->gpuSkinFrame != tr.frameCount ) {
+			// gpuSkinVB holds the PREVIOUS frame's pose only if it was skinned last frame too; after a gap
+			// (entity out of view) the kernel stores the current pose instead = zero animation velocity
+			const bool prevPoseInVB = ( tri->gpuSkinFrame == tr.frameCount - 1 );
+			tri->gpuSkinPrevValid = ( tri->gpuSkinPrevVB != 0 );
 			tri->gpuSkinFrame = tr.frameCount;
 			const int numJoints = ent->numJoints;
 			// Share ONE frame-snapshot of the joint palette across all of this entity's sub-meshes.
@@ -1804,9 +1851,10 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			idJointMat *jointSnap = s_snap;
 			const float skinScale = ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f )
 			                      ? ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] : 1.0f;
-			RB_RHI_AddSkinJob( skinShader, tri->gpuSkinVB, numOut,
+			RB_RHI_AddSkinJob( jobShader, tri->gpuSkinVB, numOut,
 			                   skinGpuWeights, skinGpuWDesc, skinGpuWStart, skinGpuLocalTBN,
-			                   jointSnap, numJoints, skinScale );
+			                   jointSnap, numJoints, skinScale,
+			                   ( jobShader != skinShader ) ? tri->gpuSkinPrevVB : 0, prevPoseInVB );
 		}
 	}
 

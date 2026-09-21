@@ -1473,6 +1473,8 @@ static void RB_RHI_StreamStore( rhi::RHI *r, const void *vertKey, const void *id
 struct rbSkinJob_t {
 	rhi::ShaderHandle	shader;
 	rhi::BufferHandle	outVB, weights, wdesc, wstart, localTbn;
+	rhi::BufferHandle	prevPos;			// skinned motion vectors: receives last frame's positions (0 = plain kernel)
+	bool				prevPoseInVB;		// outVB still holds last frame's pose (skinned in consecutive frames)
 	const void *		jointData;			// R_FrameAlloc snapshot, valid this frame
 	int					numJoints;
 	int					numOutVerts;
@@ -1482,8 +1484,10 @@ static idList<rbSkinJob_t>	rbSkinJobs;
 
 void RB_RHI_AddSkinJob( unsigned int shader, unsigned int outVB, int numOutVerts,
                         unsigned int weightsBuf, unsigned int wdescBuf, unsigned int wstartBuf, unsigned int localTbnBuf,
-                        const void *jointData, int numJoints, float skinScale ) {
+                        const void *jointData, int numJoints, float skinScale,
+                        unsigned int prevPosBuf, bool prevPoseInVB ) {
 	rbSkinJob_t j;
+	j.prevPos = prevPosBuf; j.prevPoseInVB = prevPoseInVB;
 	j.shader = shader; j.outVB = outVB; j.numOutVerts = numOutVerts;
 	j.weights = weightsBuf; j.wdesc = wdescBuf; j.wstart = wstartBuf; j.localTbn = localTbnBuf;
 	j.jointData = jointData; j.numJoints = numJoints; j.skinScale = skinScale;
@@ -1521,7 +1525,7 @@ void RB_RHI_FlushSkinJobs( void ) {
 				curJointData = NULL;			// creation failed; force a retry on the next job
 				continue;
 			}
-			struct { unsigned int numVerts; float skinScale; } pc = { (unsigned int)j.numOutVerts, j.skinScale };
+			struct { unsigned int numVerts; float skinScale; unsigned int prevValid; } pc = { (unsigned int)j.numOutVerts, j.skinScale, j.prevPoseInVB ? 1u : 0u };
 			rhi::ComputeArgs ca = {};
 			ca.shader = j.shader;
 			ca.storage[0] = jointsBuf;
@@ -1530,6 +1534,7 @@ void RB_RHI_FlushSkinJobs( void ) {
 			ca.storage[3] = j.wstart;
 			ca.storage[4] = j.outVB;
 			ca.storage[5] = j.localTbn;
+			ca.storage[6] = j.prevPos;			// 0 with the plain kernel (binding 6 not declared there)
 			ca.pushConstants = &pc;
 			ca.pushConstantSize = (int)sizeof( pc );
 			ca.groupsX = ( j.numOutVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;

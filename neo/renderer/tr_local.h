@@ -973,6 +973,7 @@ extern idCVar r_rtReflections;				// RT reflections on monsters: trace + shade t
 extern idCVar r_rtao;						// H4 RTAO: ray-traced AO producer replacing GTAO at the RT tier
 extern idCVar r_rtaoRadius;					// RTAO ray length (world units)
 extern idCVar r_rtaoIntensity;				// RTAO strength (1.0 neutral; r_ssaoIntensity stays GTAO-only)
+extern idCVar r_skinnedMotionVectors;		// GPU-skinned characters write per-bone motion into the velocity buffer
 extern idCVar r_rtaoDebug;					// RTAO debug view (1 raw rays, 2 denoised)
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
@@ -1930,7 +1931,8 @@ void R_StaticFree( void *data );
 // this frame's joint palette. Vulkan only; no-op on GL3. Impl in rhi/RhiBackend.cpp.
 void RB_RHI_AddSkinJob( unsigned int shader, unsigned int outVB, int numOutVerts,
                         unsigned int weightsBuf, unsigned int wdescBuf, unsigned int wstartBuf, unsigned int localTbnBuf,
-                        const void *jointData, int numJoints, float skinScale );
+                        const void *jointData, int numJoints, float skinScale,
+                        unsigned int prevPosBuf = 0, bool prevPoseInVB = false );	// prevPosBuf: skinned motion vectors (kernel variant PREVPOS)
 void RB_RHI_FlushSkinJobs( void );		// dispatch + clear the recorded jobs (backend, pre-scene)
 
 // Roadmap B compute deform-once tessellation (docs/tessellation.md; Vulkan only, no-op on GL3). Records

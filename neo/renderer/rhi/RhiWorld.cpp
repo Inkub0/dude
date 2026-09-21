@@ -4176,6 +4176,16 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		int vertOfs, idxOfs;
 		RB_RHI_StreamAmbient( r, tri, vb, vertOfs, ib, idxOfs );
 
+		// Skinned motion vectors (r_skinnedMotionVectors): a GPU-skinned surface carries a buffer of its
+		// verts' PREVIOUS-frame model-space positions (written by this frame's skin dispatch); hand its
+		// device address to gbuffer.vert so the velocity includes the ANIMATION's motion, not only the
+		// entity's rigid motion. Only when the draw really uses gpuSkinVB at offset 0 (gl_VertexIndex is
+		// the index into that buffer) - not the deform-once expansion - and the pose was skinned this frame.
+		if ( velWants && !useDeform && tri->gpuSkinVB && vb == tri->gpuSkinVB && tri->gpuSkinPrevValid
+				&& tri->gpuSkinPrevAddr != 0 && tri->gpuSkinFrame == tr.frameCount ) {
+			memcpy( &parms.rtParms[0], &tri->gpuSkinPrevAddr, sizeof( tri->gpuSkinPrevAddr ) );
+		}
+
 		// Layered surfaces (decals, signs, details) sit coplanar on walls and rely on
 		// polygon offset to win the depth test — same as the depth prepass. Without it
 		// they z-fight in the normal buffer and their normals flicker against the wall's.

@@ -393,6 +393,13 @@ void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 		}
 		tri->gpuSkinVB = 0;
 	}
+	if ( tri->gpuSkinPrevVB ) {					// skinned motion vectors: owner-only, never inherited
+		rhi::RHI *r = rhi::GetRHI();
+		if ( r ) { r->DestroyBuffer( tri->gpuSkinPrevVB ); }
+		tri->gpuSkinPrevVB = 0;
+		tri->gpuSkinPrevAddr = 0;
+		tri->gpuSkinPrevValid = false;
+	}
 
 	// Roadmap B deform-once buffers: same ownership as gpuSkinVB -- R_CreateLightTris copies the owning
 	// ambient surface's handles into every interaction surface, so only the owner (ambientSurface==NULL)

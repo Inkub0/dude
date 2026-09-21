@@ -505,3 +505,33 @@ per-pixel ray budget once R2/R3 land). Motion vectors also feed the eventual RT-
 (SIGMA temporal, R5). Frame generation (FSR3.1 FG) stays **parked** behind `com_interpolate`,
 which already renders *real* frames above the 60 Hz sim. Next big step after R1 is **R2 — the
 ray-query foundation** ([rtx-shadow-roadmap.md](rtx-shadow-roadmap.md)).
+
+
+## Skinned motion vectors (2026-09-21, `r_skinnedMotionVectors`, gate pending)
+
+**Problem.** The velocity MRT (R1/A2) projected the *current* vertex position through the previous frame's
+per-space MVP — correct for rigid motion, blind to **skeletal animation**. A monster's swinging limbs therefore
+reprojected wrong and ghosted *on the monster itself* in every temporal consumer: the RTAO denoiser (where the
+user reported it), FSR2, the reflection / haze accumulation. (Retuning NRD's history was tried first and
+reverted: it traded that ghosting for noise everywhere else and did not touch the cause.)
+
+**Fix, GPU-skinned surfaces (Vulkan, `r_gpuSkinning`).**
+- The skin compute kernel gets a `PREVPOS` variant (`cs_md5skin_prevpos`, same source + one `#define`; a
+  separate program because a statically-used storage binding must be bound). Before overwriting vertex *i* in
+  `gpuSkinVB` it copies the position found there — **last frame's pose** — into a per-surface
+  `gpuSkinPrevVB` (`vec4` per vert, `BU_STORAGE` for the device address). After a gap (surface not skinned in
+  the previous frame: `gpuSkinFrame != frameCount − 1`) it stores the *current* position instead → zero
+  animation velocity rather than a stale pose.
+- `gbuffer.vert` (Vulkan only, `#ifdef VULKAN`) receives that buffer's device address bit-cast in
+  `u_rtParms.xy` (0 = rigid/static/CPU-skinned), reads `prev[gl_VertexIndex]` — `gpuSkinVB` is bound at byte
+  offset 0 with no base vertex, so the vertex index *is* the buffer index — and projects
+  `prevMvp · (pos + prevDelta)`.
+- **Tessellated monsters:** the vertex stage also emits `var_PrevDelta` (previous − current model position,
+  location 9); `gbuffer.tesc` passes it through and `gbuffer.tese` interpolates it across the patch and adds
+  it to the PN-curved, displaced position before the previous-frame projection.
+- The prepass only hands the address over when the draw really uses `gpuSkinVB` (not the deform-once
+  expansion) and the pose was dispatched this frame. Buffers are owner-only and freed with `gpuSkinVB`
+  (`R_FreeStaticTriSurf`, resize, `r_gpuSkinning` off, cvar off).
+- Cost: one extra storage write per skinned vertex in a kernel that already touches it, 16 B per skinned
+  vertex of memory, one address in the per-draw uniforms. **Not covered:** CPU-skinned meshes (GL3,
+  `r_gpuSkinning 0`), deform-once tessellation (`r_tessDeform`), vertex-deform materials, particles.
