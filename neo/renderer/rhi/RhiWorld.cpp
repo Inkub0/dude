@@ -455,7 +455,9 @@ static int  rhiRtBlurFrame = 0;				// main views that ran the blur
 static bool rhiRtBlurLastStale = false;		// out-params of the last RB_RHI_RtShadowBlurLight
 static float rhiRtBlurLastViewProj[16];
 static rhi::RenderTargetHandle rhiRtaoRayRT = 0;
-static int   rhiRtaoW = 0, rhiRtaoH = 0;
+static int   rhiRtaoW = 0, rhiRtaoH = 0;			// the RESOLUTION the ray pass + NRD run at (scaled by r_rtaoResScale)
+static rhi::RenderTargetHandle rhiRtaoVelRT = 0;	// r_rtaoResScale < 1: full-res velocity downsampled to the ray/NRD resolution for NRD's IN_MV
+static int   rhiRtaoVelW = 0, rhiRtaoVelH = 0;
 static bool  rhiRtaoRanThisView = false;			// ray output produced this view (overlay gate)
 static float rhiRtaoJitterPhase = 0.0f;				// per-frame golden-ratio noise rotation
 // H4b guide inputs + H4c denoise state: NRD's IN_VIEWZ (signed linear Z, R16F) and
@@ -463,6 +465,7 @@ static float rhiRtaoJitterPhase = 0.0f;				// per-frame golden-ratio noise rotat
 // frame's camera for the denoiser's reprojection (its own staging — the shared temporal
 // cam state advances on a different schedule).
 static rhi::RenderTargetHandle rhiRtaoResolveRT = 0;	// H4d: the composited standard-AO buffer
+static int   rhiRtaoResolveW = 0, rhiRtaoResolveH = 0;	// resolve target is full-res, tracked separately from the scaled ray/NRD size
 static bool  rhiRtaoDenoisedThisView = false;		// NRD ran: GetRtaoOutputImage is current
 static float rhiRtaoPrevProj[16];
 static float rhiRtaoPrevView[16];
@@ -3547,11 +3550,12 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistIdx = 0;			rhiSsaoHistW = rhiSsaoHistH = 0;
 	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
+	rhiRtaoVelRT = 0;			rhiRtaoVelW = rhiRtaoVelH = 0;
 	rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurMaskRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;
 	rhiRtBlurW = rhiRtBlurH = 0;	rhiRtBlurThisView = false;
 	memset( rhiRtBlurSlots, 0, sizeof( rhiRtBlurSlots ) );		// handles died with the context
 	rhiRtaoRanThisView = false;
-	rhiRtaoResolveRT = 0;
+	rhiRtaoResolveRT = 0;		rhiRtaoResolveW = rhiRtaoResolveH = 0;
 	rhiRtaoDenoisedThisView = false;	rhiRtaoPrevValid = false;
 
 	rhiSsrRT = 0;				rhiSsrW = rhiSsrH = 0;
@@ -6529,27 +6533,48 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-	// (re)create the R16F ray target on first use / resize / lost context
+	// r_rtaoResScale: trace the rays AND run the NRD denoiser (the bulk of RTAO's cost) at a
+	// fraction of the screen, then bilinearly upscale the denoised occlusion in the resolve. AO is
+	// low-frequency so a fractional scale is fine here. 1.0 -> rw==w: the path below is byte-identical.
+	const float resScale = idMath::ClampFloat( 0.25f, 1.0f, r_rtaoResScale.GetFloat() );
+	int rw = (int)( w * resScale + 0.5f ), rh = (int)( h * resScale + 0.5f );
+	if ( rw < 1 ) rw = 1;
+	if ( rh < 1 ) rh = 1;
+	bool rtaoScaled = ( rw != w || rh != h );
+	// scaled velocity for NRD's IN_MV FIRST: NRD runs at the ray resolution, so its motion-vector
+	// input must match. Downsample the full-res velocity (normal prepass attachment) with a plain
+	// copy. If the target can't be allocated, fall back to full res this frame (a full-res velocity
+	// must never feed a scaled NRD).
+	if ( rhiRtaoVelRT && r->GetRenderTargetImage( rhiRtaoVelRT ) == 0 ) { rhiRtaoVelRT = 0; rhiRtaoVelW = rhiRtaoVelH = 0; }
+	if ( rhiRtaoVelRT && ( !rtaoScaled || rhiRtaoVelW != rw || rhiRtaoVelH != rh ) ) {
+		r->DestroyRenderTarget( rhiRtaoVelRT ); rhiRtaoVelRT = 0; rhiRtaoVelW = rhiRtaoVelH = 0;
+	}
+	if ( rtaoScaled && !rhiRtaoVelRT ) {
+		rhiRtaoVelRT = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh );
+		if ( rhiRtaoVelRT ) { rhiRtaoVelW = rw; rhiRtaoVelH = rh; }
+		else { rw = w; rh = h; rtaoScaled = false; }		// OOM: this frame runs full res
+	}
+	// (re)create the R16F ray target on first use / resize / scale change / lost context
 	if ( rhiRtaoRayRT && r->GetRenderTargetImage( rhiRtaoRayRT ) == 0 ) {
 		rhiRtaoRayRT = 0;
 		rhiRtaoW = rhiRtaoH = 0;
 	}
 	// The ray target is a 3-attachment MRT: the ray pass writes the two NRD guides itself (view z @1, packed
 	// world normal @2) - it already fetches depth + normal per pixel - instead of two more fullscreen passes.
-	if ( rhiRtaoRayRT && ( rhiRtaoW != w || rhiRtaoH != h ) ) {
+	if ( rhiRtaoRayRT && ( rhiRtaoW != rw || rhiRtaoH != rh ) ) {
 		r->DestroyRenderTarget( rhiRtaoRayRT );
 		rhiRtaoRayRT = 0;
-		// the resolve target shares the ray target's size — recreate it too (workflow audit: it was
-		// only recreated on a lost context, so a resolution change would have NRD reading stale sizes)
-		if ( rhiRtaoResolveRT ) { r->DestroyRenderTarget( rhiRtaoResolveRT ); rhiRtaoResolveRT = 0; }
+		// the resolve target is full-res (it upscales); recreate it only if truly lost. But NRD is
+		// sized to the ray resolution, so a scale change must reset its history (old-res reprojection).
+		rhiRtaoPrevValid = false;
 	}
 	if ( !rhiRtaoRayRT ) {
-		rhiRtaoRayRT = r->CreateRenderTargetRtaoMrt( w, h );
+		rhiRtaoRayRT = r->CreateRenderTargetRtaoMrt( rw, rh );
 		if ( !rhiRtaoRayRT ) {
 			return;
 		}
-		rhiRtaoW = w;
-		rhiRtaoH = h;
+		rhiRtaoW = rw;
+		rhiRtaoH = rh;
 	}
 
 	float invView[16];
@@ -6585,11 +6610,13 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[1] = 0.1f;					// ... ReblurHitDistanceParameters (H4c)
 	parms.localParam1[0] = rhiRtaoJitterPhase;
 	parms.localParam1[3] = 0.004f;					// ray origin pulled toward the eye, per unit of view depth (no crease leak; see rtao_ray.frag)
-	parms.screenCorrection[0] = 1.0f / w;
-	parms.screenCorrection[1] = 1.0f / h;
-	parms.depthTexRecip[0] = 1.0f / uploadW;
+	// the ray pass runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, and -> the full-res depth tc
+	// carries the (w/rw) stretch (mirrors RB_RHI_SSAOPass's scaled march). At scale 1 this is 1/w, 1/uploadW.
+	parms.screenCorrection[0] = 1.0f / rw;
+	parms.screenCorrection[1] = 1.0f / rh;
+	parms.depthTexRecip[0] = ( (float)w / rw ) / uploadW;
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
-	parms.depthTexRecip[1] = 1.0f / uploadH;
+	parms.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
 	parms.windowCoord[2] = -1.0f;					// VK-only pass: top-down view-Y sign
 
 	r->BeginTargetPass( rhiRtaoRayRT, NULL );
@@ -6608,26 +6635,45 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( velImg != 0 ) {
 		// (H4b guide inputs: written by the ray pass above into attachments 1/2 of rhiRtaoRayRT)
 
+		// r_rtaoResScale: NRD's IN_MV must match the ray/denoise resolution. Downsample the full-res
+		// velocity into rhiRtaoVelRT with a plain copy (smaa_copy = texture(src, uv)). u_screenCorrection
+		// (1,1) makes it sample the whole source; the smaller target bilinearly downsamples.
+		rhi::ImageHandle nrdVel = velImg;
+		if ( rtaoScaled && rhiRtaoVelRT != 0 ) {
+			rhi::ShaderHandle copyProg = r->LoadShader( "smaa_copy" );
+			if ( copyProg != 0 ) {
+				rhi::RenderParams cp;
+				memset( &cp, 0, sizeof( cp ) );
+				cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+				cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
+				r->BeginTargetPass( rhiRtaoVelRT, NULL );
+				RB_RHI_DrawFullscreen( r, copyProg, cp, velImg );
+				r->EndPass();
+				nrdVel = r->GetRenderTargetImage( rhiRtaoVelRT );
+			}
+		}
+
 		// H4c: the ReBLUR denoise on the frame command buffer
 		rhi::RtaoDenoiseArgs da;
 		memset( &da, 0, sizeof( da ) );
 		da.rayRT = rhiRtaoRayRT;
 		da.viewzRT  = rhiRtaoRayRT;		da.viewzAtt  = 1;		// the guides are attachments 1/2 of the ray target
 		da.normalRT = rhiRtaoRayRT;		da.normalAtt = 2;
-		da.velImage = velImg;
-		da.w = w;
-		da.h = h;
+		da.velImage = nrdVel;
+		da.w = rw;
+		da.h = rh;
 		// NRD requires NON-JITTERED matrices (the FSR2 Halton jitter lives in the shear
 		// terms of projectionMatrix); the jitter itself rides cameraJitter below
 		memcpy( da.viewToClip, viewDef->unjitteredProjectionMatrix, sizeof( da.viewToClip ) );
 		memcpy( da.worldToView, viewDef->worldSpace.modelViewMatrix, sizeof( da.worldToView ) );
 		memcpy( da.viewToClipPrev, rhiRtaoPrevValid ? rhiRtaoPrevProj : da.viewToClip, sizeof( da.viewToClipPrev ) );
 		memcpy( da.worldToViewPrev, rhiRtaoPrevValid ? rhiRtaoPrevView : da.worldToView, sizeof( da.worldToViewPrev ) );
-		// jitter: engine +Y-up pixels -> the top-left convention (the FSR2-verified mapping)
-		da.jitterX = -viewDef->jitter[0];
-		da.jitterY = viewDef->jitter[1];
-		da.jitterPrevX = rhiRtaoPrevValid ? -rhiRtaoPrevJitter[0] : da.jitterX;
-		da.jitterPrevY = rhiRtaoPrevValid ? rhiRtaoPrevJitter[1] : da.jitterY;
+		// jitter: engine +Y-up pixels -> the top-left convention (the FSR2-verified mapping). NRD's
+		// cameraJitter is in pixels of the render (ray) resolution, so scale by resScale when reduced.
+		da.jitterX = -viewDef->jitter[0] * resScale;
+		da.jitterY = viewDef->jitter[1] * resScale;
+		da.jitterPrevX = rhiRtaoPrevValid ? -rhiRtaoPrevJitter[0] * resScale : da.jitterX;
+		da.jitterPrevY = rhiRtaoPrevValid ?  rhiRtaoPrevJitter[1] * resScale : da.jitterY;
 		// engine velocity = (currUV - prevUV) in +Y-up UV; NRD wants prevUV = uv + mv in
 		// top-down UV: x negates, y's two flips cancel -> scale (-1, +1)
 		da.mvScaleX = -1.0f;
@@ -6644,8 +6690,16 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// skips the whole GTAO chain — RTAO owns this view's AO.
 		rhi::ShaderHandle resProg = rhiRtaoDenoisedThisView ? r->LoadShader( "rtao_resolve" ) : 0;
 		if ( resProg != 0 && r->GetRtaoOutputImage() != 0 ) {
-			if ( rhiRtaoResolveRT && r->GetRenderTargetImage( rhiRtaoResolveRT ) == 0 ) { rhiRtaoResolveRT = 0; }
-			if ( rhiRtaoResolveRT == 0 ) { rhiRtaoResolveRT = r->CreateRenderTargetMipped( rhi::IF_RGBA8, w, h, 1 ); }
+			// the resolve target is FULL-res (it upscales the scaled NRD output) - independent of the ray/NRD
+			// scale, so it recreates only on a lost context or a real view resize
+			if ( rhiRtaoResolveRT && r->GetRenderTargetImage( rhiRtaoResolveRT ) == 0 ) { rhiRtaoResolveRT = 0; rhiRtaoResolveW = rhiRtaoResolveH = 0; }
+			if ( rhiRtaoResolveRT && ( rhiRtaoResolveW != w || rhiRtaoResolveH != h ) ) {
+				r->DestroyRenderTarget( rhiRtaoResolveRT ); rhiRtaoResolveRT = 0; rhiRtaoResolveW = rhiRtaoResolveH = 0;
+			}
+			if ( rhiRtaoResolveRT == 0 ) {
+				rhiRtaoResolveRT = r->CreateRenderTargetMipped( rhi::IF_RGBA8, w, h, 1 );
+				if ( rhiRtaoResolveRT ) { rhiRtaoResolveW = w; rhiRtaoResolveH = h; }
+			}
 			if ( rhiRtaoResolveRT != 0 ) {
 				rhi::RenderParams rp;
 				memset( &rp, 0, sizeof( rp ) );

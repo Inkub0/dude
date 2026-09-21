@@ -9215,6 +9215,7 @@ RenderTargetHandle VulkanBackend::CreateRenderTarget( ImageFormat fmt, int w, in
 	}
 	VkFormat cf = ( fmt == IF_RGBA16F ) ? VK_FORMAT_R16G16B16A16_SFLOAT
 	            : ( fmt == IF_R16F ) ? VK_FORMAT_R16_SFLOAT
+	            : ( fmt == IF_RG16F ) ? VK_FORMAT_R16G16_SFLOAT
 	            : ( fmt == IF_RGBA8 ) ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_UNDEFINED;
 	if ( cf == VK_FORMAT_UNDEFINED ) {
 		return 0;

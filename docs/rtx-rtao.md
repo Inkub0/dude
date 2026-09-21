@@ -145,3 +145,38 @@ AO *rays* are not where RTAO's time goes (short 80-unit rays are cheap on this h
 full-resolution denoiser + passes, which checkerboarding does not touch. Branch deleted, nothing merged.
 **Do not retry.** The only lever that attacks the real cost is **half-resolution RTAO** (rays + guides + NRD on
 a quarter of the pixels, depth-aware upsample in the resolve) — unscheduled.
+
+## RTAO resolution scale (2026-09-21, `r_rtaoResScale`, default 1.0)
+
+RTAO's cost is dominated by the **NRD denoiser**, not the rays — the earlier checkerboard experiment
+(half the rays, full-res NRD) saved ~0. So the lever that actually pays is running the WHOLE chain
+at reduced resolution: the ray pass, the NRD guides (view-z / normal, written by the ray pass), and
+the NRD denoise all at `rw x rh = round(view * r_rtaoResScale)`, then the resolve
+(`rtao_resolve.frag`, already sampling `u_rtao` at normalized uv) bilinearly upscales the denoised
+occlusion to full res. Textures, geometry and direct lighting stay native - only the AO signal is
+low-res (docs/rtx-rtao.md; the "decoupled signal" idea).
+
+- **Ray pass** runs at `rw x rh`: `screenCorrection = 1/rw`, `depthTexRecip = (w/rw)/uploadW`
+  (mirrors the scaled GTAO march in `RB_RHI_SSAOPass`). `rtao_ray.frag` is unchanged - it is already
+  resolution-parametrised by those uniforms.
+- **Velocity** for NRD's `IN_MV` is the full-res prepass velocity downsampled to `rw x rh` with a
+  plain copy (`smaa_copy`); NRD's jitter is scaled by the ratio (it is in render pixels). The engine
+  velocity is UV-space, so it is resolution-independent.
+- **NRD** runs at `rw x rh` (`NrdCreate` sizes to it); a scale change resets its history.
+- **Resolve** stays full-res and upscales the scaled NRD output for free.
+- `r_rtaoResScale 1.0` -> `rw == w`: the path is byte-identical to before.
+
+### Non-integer scale is fine here (unlike reflections)
+
+`r_ssrResScale` / `r_rtReflResScale` **snap to integer divisors** because a reflection is a *sharp*
+image reconstructed by a *temporal* upscale with per-frame jitter - a fractional ratio beats the
+jitter grid into strobing stripes. AO is the opposite: a **low-frequency** signal, and the upscale
+is a plain **bilinear** (spatial) filter with no jitter reconstruction, so there is nothing to beat.
+That is why `r_ssaoResScale` already runs fine at 0.75, and why `r_rtaoResScale` is a **free float**
+(0.25 .. 1.0), not snapped. NRD's temporal accumulation runs at the low res but its output is still
+smooth low-frequency AO, so bilinear upscaling it is clean.
+
+**Watch for:** halos / AO bleeding across depth silhouettes at aggressive scales (0.5 and below) -
+the bilinear upscale isn't depth-aware. If it shows, the resolve can be upgraded to a bilateral
+(depth+normal guided) upsample; it already binds both. **Pending the user's `r_vkGpuTime 2` on the
+`ao (rtao/gtao)` scope + a look at 0.75 / 0.5.**
