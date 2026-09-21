@@ -25,6 +25,10 @@ SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;   // xyz = view-space norma
 VARY(0) in vec2 var_TexCoord;
 
 layout(location = 0) out vec4 fragColor;
+// NRD guide inputs, written by THIS pass (it already fetches depth + the G-buffer normal for every pixel)
+// instead of two more fullscreen passes (the former rtao_viewz.frag / rtao_pack.frag, kept for reference):
+layout(location = 1) out vec4 outViewZ;		// IN_VIEWZ: signed linear view z (negative), R16F
+layout(location = 2) out vec4 outNormal;	// IN_NORMAL_ROUGHNESS: world normal, NRD encoding 2 (signed octahedron), RGBA16F
 
 // Doom 3's fixed near / near-infinite far projection in GL clip depth -> linear eye z.
 // Same constants as ssao.frag / ssr_rt.frag.
@@ -47,14 +51,39 @@ void onb( vec3 n, out vec3 t, out vec3 b ) {
 	b = vec3( c, s + n.y * n.y * a, -n.y );
 }
 
+// world normal -> NRD normal/roughness encoding 2 (ported verbatim from rtao_pack.frag)
+vec4 packNrdNormal( vec3 Nraw ) {
+	float nl2 = dot( Nraw, Nraw );
+	vec3  n;
+	if ( !( nl2 > 1e-4 ) ) {
+		n = vec3( 0.0, 0.0, 1.0 );
+	} else {
+		n = normalize( mat3( u_modelViewMatrix ) * ( Nraw * inversesqrt( nl2 ) ) );	// world-space
+	}
+	n /= abs( n.x ) + abs( n.y ) + abs( n.z );
+	vec3 r;
+	r.y = n.y * 0.5 + 0.5;
+	r.x = n.x * 0.5 + r.y;
+	r.y -= n.x * 0.5;
+	float roughness = 1.0;										// can't be 0: z carries n.z's sign
+	float s = n.z < 0.0 ? -roughness : roughness;
+	r.z = s * 0.5 + 0.5;
+	return vec4( r, 0.0 );										// w = materialID/3 = 0
+}
+
 void main() {
 	vec2  frag = gl_FragCoord.xy;
 	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
+	// guides first, for EVERY pixel (sky, weapon and degenerate-normal early-outs included) - exactly what
+	// the two standalone guide passes wrote
+	vec4 ntGuide = texture( u_normalBuffer, frag * u_screenCorrection.xy );
+	outViewZ  = vec4( 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y ), 0.0, 0.0, 1.0 );
+	outNormal = packNrdNormal( ntGuide.xyz * 2.0 - 1.0 );
 	if ( raw >= 0.9994 ) {						// sky / no geometry -> unoccluded
 		fragColor = vec4( 1.0 );
 		return;
 	}
-	vec4 nt = texture( u_normalBuffer, frag * u_screenCorrection.xy );
+	vec4 nt = ntGuide;
 	if ( nt.a < 0.5 ) {							// view weapon: skip AO (mirrors ssao.frag)
 		fragColor = vec4( 1.0 );
 		return;

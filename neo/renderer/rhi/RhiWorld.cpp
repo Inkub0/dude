@@ -462,6 +462,7 @@ static float rhiRtaoJitterPhase = 0.0f;				// per-frame golden-ratio noise rotat
 // IN_NORMAL_ROUGHNESS (world-space encoding-2 pack, RGBA16F) targets, plus the previous
 // frame's camera for the denoiser's reprojection (its own staging — the shared temporal
 // cam state advances on a different schedule).
+static bool rhiRtaoRayIsMrt = false;				// rhiRtaoRayRT carries the NRD guides in attachments 1/2 (r_rtaoGuideMrt)
 static rhi::RenderTargetHandle rhiRtaoViewzRT = 0;
 static rhi::RenderTargetHandle rhiRtaoPackRT = 0;
 static rhi::RenderTargetHandle rhiRtaoResolveRT = 0;	// H4d: the composited standard-AO buffer
@@ -6406,7 +6407,7 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	{
 		const bool canDenoise = rhiNormalVelThisView
 			&& r->GetRenderTargetImage3( rhiNormalResultRT ) != 0
-			&& r->LoadShader( "rtao_viewz" ) != 0 && r->LoadShader( "rtao_pack" ) != 0;
+			&& ( r_rtaoGuideMrt.GetBool() || ( r->LoadShader( "rtao_viewz" ) != 0 && r->LoadShader( "rtao_pack" ) != 0 ) );
 		if ( !canDenoise && r_rtaoDebug.GetInteger() != 1 ) {
 			return;
 		}
@@ -6419,7 +6420,10 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiRtaoRayRT = 0;
 		rhiRtaoW = rhiRtaoH = 0;
 	}
-	if ( rhiRtaoRayRT && ( rhiRtaoW != w || rhiRtaoH != h ) ) {
+	// r_rtaoGuideMrt: the ray pass writes the two NRD guides itself as extra MRT outputs (one pass instead of
+	// three). Switching the mode recreates the ray target (different attachment layout).
+	const bool wantGuideMrt = r_rtaoGuideMrt.GetBool();
+	if ( rhiRtaoRayRT && ( rhiRtaoW != w || rhiRtaoH != h || rhiRtaoRayIsMrt != wantGuideMrt ) ) {
 		r->DestroyRenderTarget( rhiRtaoRayRT );
 		rhiRtaoRayRT = 0;
 		// the guide + resolve targets share the ray target's size — recreate them too
@@ -6430,7 +6434,11 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( rhiRtaoResolveRT ) { r->DestroyRenderTarget( rhiRtaoResolveRT ); rhiRtaoResolveRT = 0; }
 	}
 	if ( !rhiRtaoRayRT ) {
-		rhiRtaoRayRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, 1 );
+		rhiRtaoRayRT = wantGuideMrt ? r->CreateRenderTargetRtaoMrt( w, h ) : 0;
+		rhiRtaoRayIsMrt = ( rhiRtaoRayRT != 0 );
+		if ( !rhiRtaoRayRT ) {
+			rhiRtaoRayRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, 1 );	// legacy: separate guide passes below
+		}
 		if ( !rhiRtaoRayRT ) {
 			return;
 		}
@@ -6493,14 +6501,15 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
 	rhi::ShaderHandle vzProg = r->LoadShader( "rtao_viewz" );
 	rhi::ShaderHandle pkProg = r->LoadShader( "rtao_pack" );
-	if ( velImg != 0 && vzProg != 0 && pkProg != 0 ) {
-		// (re)create the two guide targets alongside the ray target's size
+	if ( !rhiRtaoRayIsMrt && velImg != 0 && vzProg != 0 && pkProg != 0 ) {
+		// legacy (r_rtaoGuideMrt 0): (re)create the two guide targets alongside the ray target's size
 		if ( rhiRtaoViewzRT && r->GetRenderTargetImage( rhiRtaoViewzRT ) == 0 ) { rhiRtaoViewzRT = 0; }
 		if ( rhiRtaoPackRT && r->GetRenderTargetImage( rhiRtaoPackRT ) == 0 )  { rhiRtaoPackRT = 0; }
 		if ( rhiRtaoViewzRT == 0 ) { rhiRtaoViewzRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, 1 ); }
 		if ( rhiRtaoPackRT == 0 )  { rhiRtaoPackRT = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, 1 ); }
 	}
-	if ( velImg != 0 && vzProg != 0 && pkProg != 0 && rhiRtaoViewzRT != 0 && rhiRtaoPackRT != 0 ) {
+	if ( velImg != 0 && ( rhiRtaoRayIsMrt || ( vzProg != 0 && pkProg != 0 && rhiRtaoViewzRT != 0 && rhiRtaoPackRT != 0 ) ) ) {
+		if ( !rhiRtaoRayIsMrt ) {
 		// IN_VIEWZ: signed linear view Z
 		rhi::RenderParams gp;
 		memset( &gp, 0, sizeof( gp ) );
@@ -6525,13 +6534,16 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		backEnd.glState.tmu[0].current2DMap = -1;
 		RB_RHI_DrawFullscreen( r, pkProg, pp, 0 );
 		r->EndPass();
+		}	// legacy guide passes
 
 		// H4c: the ReBLUR denoise on the frame command buffer
 		rhi::RtaoDenoiseArgs da;
 		memset( &da, 0, sizeof( da ) );
 		da.rayRT = rhiRtaoRayRT;
-		da.viewzRT = rhiRtaoViewzRT;
-		da.normalRT = rhiRtaoPackRT;
+		da.viewzRT  = rhiRtaoRayIsMrt ? rhiRtaoRayRT : rhiRtaoViewzRT;	// MRT: guides are attachments 1/2 of the ray target
+		da.normalRT = rhiRtaoRayIsMrt ? rhiRtaoRayRT : rhiRtaoPackRT;
+		da.viewzAtt  = rhiRtaoRayIsMrt ? 1 : 0;
+		da.normalAtt = rhiRtaoRayIsMrt ? 2 : 0;
 		da.velImage = velImg;
 		da.w = w;
 		da.h = h;
