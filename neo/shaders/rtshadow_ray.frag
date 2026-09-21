@@ -155,30 +155,50 @@ void main() {
 	uvec2 geoAddr = uvec2( floatBitsToUint( u_shadowFalloffS.x ), floatBitsToUint( u_shadowFalloffS.y ) );
 	bool  perfOn  = u_shadowFalloffS.z > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
 	float tPerf   = -1.0;
-	rayQueryEXT rq;
-	rayQueryInitializeEXT( rq,
-		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-		perfOn ? gl_RayFlagsNoneEXT : gl_RayFlagsOpaqueEXT, perfOn ? 0xFFu : 0xFDu,
-		O, 0.0, Ldir, min( max( dL - 1.0, 0.01 ), 100000.0 ) );
-	while ( rayQueryProceedEXT( rq ) ) {
-		if ( perfOn && rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT ) {
-			float tc = rayQueryGetIntersectionTEXT( rq, false );
-			if ( tc < dL - 8.0 && ( tPerf < 0.0 || tc < tPerf )
-					&& dudePerforatedSolid( geoAddr,
-						uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),
-						uint( rayQueryGetIntersectionGeometryIndexEXT( rq, false ) ),
-						uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) ),
-						rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) ) {
-				tPerf = tc;
+	float tMax    = min( max( dL - 1.0, 0.01 ), 100000.0 );
+	bool  solidHit;
+	float tSolid  = 0.0;
+	if ( !perfOn ) {
+		// no grate in this light's volume (decided per light on the CPU): the ray this pass always
+		// traced, flags and mask CONSTANT - forcing everything opaque is the hardware's fastest
+		// traversal, and a runtime-selected flag word can't promise the driver that
+		rayQueryEXT rqo;
+		rayQueryInitializeEXT( rqo,
+			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+			gl_RayFlagsOpaqueEXT, 0xFDu, O, 0.0, Ldir, tMax );
+		while ( rayQueryProceedEXT( rqo ) ) { }
+		solidHit = rayQueryGetIntersectionTypeEXT( rqo, true ) == gl_RayQueryCommittedIntersectionTriangleEXT;
+		if ( solidHit ) {
+			tSolid = rayQueryGetIntersectionTEXT( rqo, true );
+		}
+	} else {
+		rayQueryEXT rq;
+		rayQueryInitializeEXT( rq,
+			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+			gl_RayFlagsNoneEXT, 0xFFu, O, 0.0, Ldir, tMax );
+		while ( rayQueryProceedEXT( rq ) ) {
+			if ( rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT ) {
+				float tc = rayQueryGetIntersectionTEXT( rq, false );
+				if ( tc < dL - 8.0 && ( tPerf < 0.0 || tc < tPerf )
+						&& dudePerforatedSolid( geoAddr,
+							uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),
+							uint( rayQueryGetIntersectionGeometryIndexEXT( rq, false ) ),
+							uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) ),
+							rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) ) {
+					tPerf = tc;
+				}
 			}
 		}
+		solidHit = rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT;
+		if ( solidHit ) {
+			tSolid = rayQueryGetIntersectionTEXT( rq, true );
+		}
 	}
-	bool  solidHit = rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT;
 	if ( !solidHit && tPerf < 0.0 ) {
 		return;									// reached the light: lit
 	}
 
-	float dOcc = solidHit ? rayQueryGetIntersectionTEXT( rq, true ) : tPerf;
+	float dOcc = solidHit ? tSolid : tPerf;
 	float gap   = dOcc / max( dL - dOcc, 1e-3 );
 	float halfW = u_localParam0.z * pow( gap, max( u_localParam1.w, 0.05 ) );
 	float rPx  = min( halfW * u_localParam0.w / max( d, 1.0 ), u_localParam1.x );

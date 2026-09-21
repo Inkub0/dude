@@ -205,15 +205,27 @@ float shadowVisibility( bool canReceive ) {
 		bool  perfOn   = u_shadowFalloffS.z > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
 		float tMax     = min( distLight - 1.0, u_rtParms.w );
 		float perfVis  = 1.0;
+		if ( !perfOn ) {
+			// no grate in this light's volume (decided per light on the CPU): the ray every light
+			// traced before grates existed, flags and mask CONSTANT - a ray that forces everything
+			// opaque is the hardware's fastest traversal, and a runtime-selected flag word can't
+			// promise the driver that
+			rayQueryEXT rqo;
+			rayQueryInitializeEXT( rqo,
+				accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+				gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu,
+				wp + wn * u_rtParms.z, 0.0, toLight / distLight, tMax );
+			while ( rayQueryProceedEXT( rqo ) ) { }
+			return ( rayQueryGetIntersectionTypeEXT( rqo, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? 1.0 : 0.0;
+		}
 		rayQueryEXT rq;
 		rayQueryInitializeEXT( rq,
 			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-			perfOn ? gl_RayFlagsTerminateOnFirstHitEXT : ( gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT ),
-			perfOn ? 0xFFu : 0xFDu,
+			gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu,
 			wp + wn * u_rtParms.z, 0.0, toLight / distLight, tMax );
 		while ( rayQueryProceedEXT( rq ) ) {
 			// perfVis < 1: a solid grate texel was already found - further grates can't dim it more
-			if ( perfOn && perfVis == 1.0
+			if ( perfVis == 1.0
 					&& rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
 					&& rayQueryGetIntersectionTEXT( rq, false ) < distLight - 8.0
 					&& dudePerforatedSolid( geoAddr,

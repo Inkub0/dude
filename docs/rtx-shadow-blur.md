@@ -288,6 +288,20 @@ resolves holes in hardware and the shader never sees a candidate (each candidate
 traversal, does ~10 buffer fetches and a texture sample).
 **Pending the user's new number.**
 
+**Perf pass 2 (2026-09-21): per-light gating + the fixed force-opaque ray restored.** Opacity
+micromaps were built and measured first ([rtx-opacity-micromaps.md](rtx-opacity-micromaps.md)): no
+gain on the user's 3080 Ti, and forcing 2-state - which removes every shader alpha test - changed
+nothing. So the alpha tests were never the cost; the suspect is the ray itself: to see grates it
+can't force everything opaque, and pass 1 picked flags + mask with a runtime ternary in EVERY light's
+shader. Now (a) the pre-grate ray is back as its own code path with constant
+`gl_RayFlagsOpaque[ | TerminateOnFirstHit ]` + mask 0xFD, in both `interaction.frag` and
+`rtshadow_ray.frag`; (b) which path a light takes is decided on the CPU, once per light per frame:
+`R_RtBoundsTouchPerforated( vLight->frustumTris->bounds )` against this frame's perforated-caster
+bounds (world surfaces + transformed static-model bounds, refreshed with the TLAS instances). A
+light with no grate in its volume traces exactly what it traced before grates existed.
+UNCONFIRMED hypothesis - pending the user's `r_rtPerforatedShadows` 0/1 numbers at a grate spot and
+at a no-grate spot.
+
 ## Cvars
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every

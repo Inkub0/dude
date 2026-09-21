@@ -1132,6 +1132,13 @@ static idList<rtModelBlas_t>	s_rtModelBlas;
 static idList<rhi::BlasHandle>	s_rtPerfAreaBlas;
 static idList<rtModelBlas_t>	s_rtPerfModelBlas;
 static rhi::BufferHandle		s_rtPerfVB = 0;
+// where the perforated casters ARE, so a light can tell whether any grate is in its volume at all
+// (R_RtBoundsTouchPerforated): only such a light's shadow rays take the grate-aware path, every
+// other light keeps the fixed force-opaque ray. World surfaces + per-model local bounds at build;
+// the world-space list of THIS frame's instances is refreshed with them.
+static idList<idBounds>			s_rtPerfWorldBounds;
+static idList<idBounds>			s_rtPerfModelBounds;	// parallel to s_rtPerfModelBlas, model space
+static idList<idBounds>			s_rtPerfFrameBounds;
 static rhi::BufferHandle		s_rtPerfIB = 0;
 // RR5: dedicated device-addressable buffers holding the static world's full idDrawVert + 32-bit indices,
 // feeding the per-surface world BLAS so a reflection ray can fetch st + material at a world hit. Persist
@@ -1559,6 +1566,7 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 	// cost the other RT consumers nothing either way - RT_MASK_SOLID_RAYS skips them.
 	const bool wantPerf = r_rtPerforatedShadows.GetBool() && r_shadowMapPerforated.GetBool()
 		&& ( s_rtPerfAreaBlas.Num() > 0 || s_rtPerfModelBlas.Num() > 0 );
+	s_rtPerfFrameBounds.SetNum( 0, false );
 	const int maxInst = s_rtAreaBlas.Num() + world->entityDefs.Num()
 		+ ( wantPerf ? s_rtPerfAreaBlas.Num() + world->entityDefs.Num() : 0 );
 	rhi::RHI::RtInstance *inst = (rhi::RHI::RtInstance *)Mem_Alloc16( ( maxInst > 0 ? maxInst : 1 ) * (int)sizeof( rhi::RHI::RtInstance ) );
@@ -1610,6 +1618,9 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 			in.blas = s_rtPerfAreaBlas[i];
 			in.mask = rhi::RHI::RT_MASK_PERFORATED;
 		}
+		for ( int i = 0; i < s_rtPerfWorldBounds.Num(); i++ ) {
+			s_rtPerfFrameBounds.Append( s_rtPerfWorldBounds[i] );
+		}
 		for ( int i = 0; s_rtPerfModelBlas.Num() > 0 && i < world->entityDefs.Num(); i++ ) {
 			const idRenderEntityLocal *def = world->entityDefs[i];
 			if ( def == NULL || def->parms.hModel == NULL ) {
@@ -1619,6 +1630,9 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 			for ( int u = 0; u < s_rtPerfModelBlas.Num(); u++ ) {
 				if ( s_rtPerfModelBlas[u].model == def->parms.hModel ) {
 					blas = s_rtPerfModelBlas[u].blas;
+					idBounds wb;
+					wb.FromTransformedBounds( s_rtPerfModelBounds[u], def->parms.origin, def->parms.axis );
+					s_rtPerfFrameBounds.Append( wb );
 					break;
 				}
 			}
@@ -1917,10 +1931,23 @@ While the scene is live, every frame re-instances the TLAS with current mover po
 // identity instances; static entity models one BLAS per unique model, instanced per entity.
 // (s_rtPerfAreaBlas / s_rtPerfModelBlas / s_rtPerfVB / s_rtPerfIB are declared with the scene registries above)
 
+// Does this world-space box (a light's volume) hold any perforated caster this frame?
+bool R_RtBoundsTouchPerforated( const idBounds &b ) {
+	for ( int i = 0; i < s_rtPerfFrameBounds.Num(); i++ ) {
+		if ( s_rtPerfFrameBounds[i].IntersectsBounds( b ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static void R_RtFreeWorldGeo( void ) {
 	rhi::RHI *r = rhi::GetRHI();
 	s_rtPerfAreaBlas.Clear();		// the BLASes themselves die with DestroyRtScene, like s_rtAreaBlas
 	s_rtPerfModelBlas.Clear();
+	s_rtPerfWorldBounds.Clear();
+	s_rtPerfModelBounds.Clear();
+	s_rtPerfFrameBounds.Clear();
 	if ( r == NULL ) { s_rtWorldVB = 0; s_rtWorldIB = 0; s_rtPerfVB = 0; s_rtPerfIB = 0; return; }
 	if ( s_rtWorldVB != 0 ) { r->DestroyBuffer( s_rtWorldVB ); s_rtWorldVB = 0; }
 	if ( s_rtWorldIB != 0 ) { r->DestroyBuffer( s_rtWorldIB ); s_rtWorldIB = 0; }
@@ -2055,8 +2082,14 @@ static void R_RtBuildPerforatedBlas( rhi::RHI *r, const idRenderWorldLocal *worl
 	while ( i < descs.Num() ) {
 		const idRenderModel *owner = descs[i].model;
 		int cnt = 0;
+		idBounds ownerBounds;
+		ownerBounds.Clear();
 		while ( i + cnt < descs.Num() && descs[i + cnt].model == owner && cnt < MAXG ) {
 			const SurfDesc &d = descs[i + cnt];
+			ownerBounds.AddBounds( d.tri->bounds );
+			if ( owner == NULL ) {
+				s_rtPerfWorldBounds.Append( d.tri->bounds );
+			}
 			rhi::RHI::BlasGeometry &g = geoms[cnt];
 			g = rhi::RHI::BlasGeometry();
 			g.vertexAddress = vbAddr + (unsigned long long)vOff[i + cnt] * (unsigned long long)sizeof( idDrawVert );
@@ -2078,6 +2111,7 @@ static void R_RtBuildPerforatedBlas( rhi::RHI *r, const idRenderWorldLocal *worl
 				mb.model = owner;
 				mb.blas = blas;
 				s_rtPerfModelBlas.Append( mb );
+				s_rtPerfModelBounds.Append( ownerBounds );
 			}
 			numBlas++;
 		}

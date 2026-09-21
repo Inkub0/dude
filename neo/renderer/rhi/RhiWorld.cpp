@@ -1166,9 +1166,27 @@ static bool RB_RHI_TessOrDeform( const drawSurf_t *surf, const srfTriangles_t *t
 // Perforated casters in the RT shadow rays (rt_perforated.glsl): hand a ray-tracing draw the geometry
 // table (st + coverage texture of a grate candidate) and the grates' shadow strength. They ride
 // u_shadowFalloffS, which only the shadow-MAP modes read. All zero = the ray ignores grates.
-static void RB_RHI_FillPerforatedParms( rhi::RHI *r, rhi::RenderParams &parms ) {
+//
+// PER LIGHT: only a light with a grate inside its volume gets them. The grate-aware ray can't force
+// everything opaque, and a ray traced without that flag loses the hardware's fastest traversal -
+// paid by every pixel the light shades, grate or no grate. Every other light keeps the fixed
+// force-opaque ray it always had. Decided once per light per frame (the fill runs per surface).
+static void RB_RHI_FillPerforatedParms( rhi::RHI *r, rhi::RenderParams &parms, const viewLight_t *vLight ) {
 	memset( parms.shadowFalloffS, 0, sizeof( parms.shadowFalloffS ) );
 	if ( !r_rtPerforatedShadows.GetBool() || !r_shadowMapPerforated.GetBool() ) {
+		return;
+	}
+	static const viewLight_t *cachedLight = NULL;
+	static int cachedFrame = -1;
+	static bool cachedTouches = false;
+	if ( vLight != cachedLight || tr.frameCount != cachedFrame ) {
+		cachedLight = vLight;
+		cachedFrame = tr.frameCount;
+		// no volume to test = assume it does
+		cachedTouches = ( vLight == NULL || vLight->frustumTris == NULL )
+			? true : R_RtBoundsTouchPerforated( vLight->frustumTris->bounds );
+	}
+	if ( !cachedTouches ) {
 		return;
 	}
 	const unsigned long long geoTable = r->GetRtGeoTableAddress();
@@ -1207,7 +1225,7 @@ static void RB_RHI_FillBlurMaskParms( rhi::RenderParams &parms, bool &rtSun ) {
 	memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
 	parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
 	parms.rtParms[3] = 100000.0f;
-	RB_RHI_FillPerforatedParms( ictx.r, parms );
+	RB_RHI_FillPerforatedParms( ictx.r, parms, backEnd.vLight );
 	rtSun = true;
 }
 
@@ -1436,7 +1454,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 					memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
 					parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
 					parms.rtParms[3] = 100000.0f;
-					RB_RHI_FillPerforatedParms( ictx.r, parms );	// after the mode-3 fill above: the ray modes own u_shadowFalloffS
+					RB_RHI_FillPerforatedParms( ictx.r, parms, backEnd.vLight );	// after the mode-3 fill above: the ray modes own u_shadowFalloffS
 					rtSun = true;
 				}
 			}
@@ -1462,7 +1480,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 				memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
 				parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
 				parms.rtParms[3] = 100000.0f;
-				RB_RHI_FillPerforatedParms( ictx.r, parms );
+				RB_RHI_FillPerforatedParms( ictx.r, parms, backEnd.vLight );
 				rtSun = true;		// bind the ray-query interaction variant for this draw
 			} else {
 				parms.shadowParms[0] = 0.0f;
@@ -6891,7 +6909,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	parms.localParam1[1] = proj[8];		// the projection's shear terms = this frame's FSR2 jitter
 	parms.localParam1[2] = proj[9];
 	parms.localParam1[3] = r_rtShadowBlurCurve.GetFloat();	// how the width grows with the gap (1 = geometric)
-	RB_RHI_FillPerforatedParms( r, parms );
+	RB_RHI_FillPerforatedParms( r, parms, vLight );
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
