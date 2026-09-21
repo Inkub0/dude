@@ -1231,23 +1231,6 @@ static void RB_RHI_FillPerforatedParms( rhi::RHI *r, rhi::RenderParams &parms, c
 				cachedCount = -1;				// no list to hand over: every pixel of this light takes the grate-aware ray
 			}
 		}
-		// r_rtPerforatedDebug: is the gating engaging? (remove once settled)
-		if ( r_rtPerforatedDebug.GetBool() ) {
-			static int dbgLights = 0, dbgTouch = 0, dbgBoxes = 0, dbgFrames = 0, dbgLastFrame = -1, dbgLastMs = 0;
-			if ( tr.frameCount != dbgLastFrame ) {
-				const int now = Sys_Milliseconds();
-				if ( now - dbgLastMs >= 1000 && dbgFrames > 0 ) {
-					common->Printf( "rtPerforated: per frame %.1f ray-traced lights, %.1f with a grate in their volume (%.1f boxes handed to the shader)\n",
-						(float)dbgLights / dbgFrames, (float)dbgTouch / dbgFrames, (float)dbgBoxes / dbgFrames );
-					dbgLights = dbgTouch = dbgBoxes = dbgFrames = 0;
-					dbgLastMs = now;
-				}
-				dbgLastFrame = tr.frameCount;
-				dbgFrames++;
-			}
-			dbgLights++;
-			if ( total > 0 ) { dbgTouch++; dbgBoxes += Max( cachedCount, 0 ); }
-		}
 	}
 	if ( cachedCount == 0 ) {
 		return;

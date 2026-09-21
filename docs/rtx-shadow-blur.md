@@ -286,8 +286,6 @@ Needs a scene rebuild (map load) to take effect. If a grate is still too dear af
 structural fix is `VK_EXT_opacity_micromap`: bake the coverage alpha into the BLAS so traversal
 resolves holes in hardware and the shader never sees a candidate (each candidate today suspends
 traversal, does ~10 buffer fetches and a texture sample).
-**Pending the user's new number.**
-
 **Perf pass 2 (2026-09-21): per-light gating + the fixed force-opaque ray restored.** Opacity
 micromaps were built and measured first ([rtx-opacity-micromaps.md](rtx-opacity-micromaps.md)): no
 gain on the user's 3080 Ti, and forcing 2-state - which removes every shader alpha test - changed
@@ -312,8 +310,11 @@ units) into a per-frame storage buffer (4 frame slots x 256 lights); address in
 `u_shadowProjectionQ.xy`, count in `u_shadowFalloffS.w`. Both shadow rays slab-test their segment
 against those boxes (`dudeSegmentMeetsPerforated`): only a pixel whose segment to the light passes
 through a grate's box traces the grate-aware ray, every other pixel the fixed force-opaque ray. No
-caster is dropped, the image is unchanged. **Pending the user's numbers.** Once settled: remove
-`r_rtPerforatedDebug` + the now-unused `R_RtBoundsTouchPerforated` / material lists.
+caster is dropped, the image is unchanged.
+
+**User-measured after pass 4 (2026-09-21): +0.24 ms looking at a grate, +0.1 ms not looking at one
+(was +0.7 / +0.55) - accepted ("I would say it's fine").** `r_rtPerforatedDebug` and the per-light
+touch helper are removed.
 
 ## Cvars
 

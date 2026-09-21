@@ -1139,7 +1139,6 @@ static rhi::BufferHandle		s_rtPerfVB = 0;
 static idList<idBounds>			s_rtPerfWorldBounds;
 static idList<idBounds>			s_rtPerfModelBounds;	// parallel to s_rtPerfModelBlas, model space
 static idList<idBounds>			s_rtPerfFrameBounds;
-static idList<const idMaterial *>	s_rtPerfWorldMats, s_rtPerfModelMats, s_rtPerfFrameMats;	// r_rtPerforatedDebug: who is it (parallel lists)
 static rhi::BufferHandle		s_rtPerfIB = 0;
 // RR5: dedicated device-addressable buffers holding the static world's full idDrawVert + 32-bit indices,
 // feeding the per-surface world BLAS so a reflection ray can fetch st + material at a world hit. Persist
@@ -1568,7 +1567,6 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 	const bool wantPerf = r_rtPerforatedShadows.GetBool() && r_shadowMapPerforated.GetBool()
 		&& ( s_rtPerfAreaBlas.Num() > 0 || s_rtPerfModelBlas.Num() > 0 );
 	s_rtPerfFrameBounds.SetNum( 0, false );
-	s_rtPerfFrameMats.SetNum( 0, false );
 	const int maxInst = s_rtAreaBlas.Num() + world->entityDefs.Num()
 		+ ( wantPerf ? s_rtPerfAreaBlas.Num() + world->entityDefs.Num() : 0 );
 	rhi::RHI::RtInstance *inst = (rhi::RHI::RtInstance *)Mem_Alloc16( ( maxInst > 0 ? maxInst : 1 ) * (int)sizeof( rhi::RHI::RtInstance ) );
@@ -1622,7 +1620,6 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 		}
 		for ( int i = 0; i < s_rtPerfWorldBounds.Num(); i++ ) {
 			s_rtPerfFrameBounds.Append( s_rtPerfWorldBounds[i] );
-			s_rtPerfFrameMats.Append( s_rtPerfWorldMats[i] );
 		}
 		for ( int i = 0; s_rtPerfModelBlas.Num() > 0 && i < world->entityDefs.Num(); i++ ) {
 			const idRenderEntityLocal *def = world->entityDefs[i];
@@ -1636,7 +1633,6 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 					idBounds wb;
 					wb.FromTransformedBounds( s_rtPerfModelBounds[u], def->parms.origin, def->parms.axis );
 					s_rtPerfFrameBounds.Append( wb );
-					s_rtPerfFrameMats.Append( s_rtPerfModelMats[u] );
 					break;
 				}
 			}
@@ -1935,18 +1931,6 @@ While the scene is live, every frame re-instances the TLAS with current mover po
 // identity instances; static entity models one BLAS per unique model, instanced per entity.
 // (s_rtPerfAreaBlas / s_rtPerfModelBlas / s_rtPerfVB / s_rtPerfIB are declared with the scene registries above)
 
-// Does this world-space box (a light's volume) hold any perforated caster this frame?
-bool R_RtBoundsTouchPerforated( const idBounds &b, const idMaterial **whoMat, idBounds *whoBounds ) {
-	for ( int i = 0; i < s_rtPerfFrameBounds.Num(); i++ ) {
-		if ( s_rtPerfFrameBounds[i].IntersectsBounds( b ) ) {
-			if ( whoMat ) { *whoMat = s_rtPerfFrameMats[i]; }
-			if ( whoBounds ) { *whoBounds = s_rtPerfFrameBounds[i]; }
-			return true;
-		}
-	}
-	return false;
-}
-
 // The perforated casters inside a world-space box (a light's volume), up to maxOut of them; returns
 // how many there ARE (may exceed maxOut - the caller then knows its list is incomplete).
 int R_RtGatherPerforatedBoxes( const idBounds &b, idBounds *out, int maxOut ) {
@@ -1971,7 +1955,6 @@ static void R_RtFreeWorldGeo( void ) {
 	s_rtPerfWorldBounds.Clear();
 	s_rtPerfModelBounds.Clear();
 	s_rtPerfFrameBounds.Clear();
-	s_rtPerfWorldMats.Clear(); s_rtPerfModelMats.Clear(); s_rtPerfFrameMats.Clear();
 	if ( r == NULL ) { s_rtWorldVB = 0; s_rtWorldIB = 0; s_rtPerfVB = 0; s_rtPerfIB = 0; return; }
 	if ( s_rtWorldVB != 0 ) { r->DestroyBuffer( s_rtWorldVB ); s_rtWorldVB = 0; }
 	if ( s_rtWorldIB != 0 ) { r->DestroyBuffer( s_rtWorldIB ); s_rtWorldIB = 0; }
@@ -2122,7 +2105,6 @@ static void R_RtBuildPerforatedBlas( rhi::RHI *r, const idRenderWorldLocal *worl
 					tb.AddPoint( d.tri->verts[d.tri->indexes[t + 1]].xyz );
 					tb.AddPoint( d.tri->verts[d.tri->indexes[t + 2]].xyz );
 					s_rtPerfWorldBounds.Append( tb );
-					s_rtPerfWorldMats.Append( d.mat );
 				}
 			}
 			rhi::RHI::BlasGeometry &g = geoms[cnt];
@@ -2147,7 +2129,6 @@ static void R_RtBuildPerforatedBlas( rhi::RHI *r, const idRenderWorldLocal *worl
 				mb.blas = blas;
 				s_rtPerfModelBlas.Append( mb );
 				s_rtPerfModelBounds.Append( ownerBounds );
-				s_rtPerfModelMats.Append( descs[i].mat );
 			}
 			numBlas++;
 		}
