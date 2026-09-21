@@ -6466,7 +6466,7 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[3] = 0.5f * radius;			// hitDist normalization A — MUST match the
 	parms.localParam1[1] = 0.1f;					// ... ReblurHitDistanceParameters (H4c)
 	parms.localParam1[0] = rhiRtaoJitterPhase;
-	parms.localParam1[2] = 1.0f;					// ray-origin normal offset (world units)
+	parms.localParam1[3] = 0.004f;					// ray origin pulled toward the eye, per unit of view depth (no crease leak; see rtao_ray.frag)
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / uploadW;

@@ -130,11 +130,20 @@ void main() {
 
 	// closest hit inside the AO radius (opaque only). Origin biased along the normal so
 	// the surface never self-occludes (localParam1.z, world units).
+	// Ray origin. Lifting it off the surface along the (bump-mapped) NORMAL leaks at every concave crease:
+	// within the lift distance of an adjoining face - sooner where the normal map's bevel tilts the normal
+	// toward it - the origin lands BEHIND that face, world faces are single-sided, the hemisphere looks into
+	// the void and the rays miss: a thin WHITE line exactly where the contact should be darkest. Pull the
+	// origin back toward the EYE instead (u_localParam1.w per unit depth): the camera sees this point, so the segment
+	// back to it is unobstructed by construction and the origin can never be inside geometry. The pull-back
+	// grows with depth like the depth buffer's own error; a tiny normal lift remains against self-hits.
+	vec3  eyeW   = ( u_modelViewMatrix * vec4( 0.0, 0.0, 0.0, 1.0 ) ).xyz;
+	vec3  rayOrg = Pw + normalize( eyeW - Pw ) * ( 0.25 + d * u_localParam1.w ) + Nw * 0.05;
 	float radius = u_localParam0.z;
 	rayQueryEXT rq;
 	rayQueryInitializeEXT( rq,
 		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-		gl_RayFlagsOpaqueEXT, 0xFFu, Pw + Nw * u_localParam1.z, 0.0, dir, radius );
+		gl_RayFlagsOpaqueEXT, 0xFFu, rayOrg, 0.0, dir, radius );
 	while ( rayQueryProceedEXT( rq ) ) { }
 
 	// NRD REBLUR normalized hit distance: saturate(hitT / (A + |viewZ|*B)) — MUST match the
