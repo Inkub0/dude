@@ -1185,6 +1185,20 @@ static void RB_RHI_FillPerforatedParms( rhi::RHI *r, rhi::RenderParams &parms, c
 		// no volume to test = assume it does
 		cachedTouches = ( vLight == NULL || vLight->frustumTris == NULL )
 			? true : R_RtBoundsTouchPerforated( vLight->frustumTris->bounds );
+		// r_rtPerforatedDebug: is the gating engaging? (remove once settled)
+		if ( r_rtPerforatedDebug.GetBool() ) {
+			static int dbgLights = 0, dbgTouch = 0, dbgFrames = 0, dbgLastFrame = -1, dbgLastMs = 0;
+			dbgLights++;
+			if ( cachedTouches ) { dbgTouch++; }
+			if ( tr.frameCount != dbgLastFrame ) { dbgLastFrame = tr.frameCount; dbgFrames++; }
+			const int now = Sys_Milliseconds();
+			if ( now - dbgLastMs >= 1000 && dbgFrames > 0 ) {
+				common->Printf( "rtPerforated: per frame %.1f ray-traced lights, %.1f of them on the grate path\n",
+					(float)dbgLights / dbgFrames, (float)dbgTouch / dbgFrames );
+				dbgLights = dbgTouch = dbgFrames = 0;
+				dbgLastMs = now;
+			}
+		}
 	}
 	if ( !cachedTouches ) {
 		return;

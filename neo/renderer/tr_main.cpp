@@ -2088,7 +2088,17 @@ static void R_RtBuildPerforatedBlas( rhi::RHI *r, const idRenderWorldLocal *worl
 			const SurfDesc &d = descs[i + cnt];
 			ownerBounds.AddBounds( d.tri->bounds );
 			if ( owner == NULL ) {
-				s_rtPerfWorldBounds.Append( d.tri->bounds );
+				// PER TRIANGLE: a world "surface" is every triangle of one material in a whole map
+				// area, so its bounds span the area and every light in it would "touch a grate"
+				// (measured: the per-light gating saved nothing with per-surface bounds)
+				for ( int t = 0; t + 2 < d.tri->numIndexes; t += 3 ) {
+					idBounds tb;
+					tb.Clear();
+					tb.AddPoint( d.tri->verts[d.tri->indexes[t + 0]].xyz );
+					tb.AddPoint( d.tri->verts[d.tri->indexes[t + 1]].xyz );
+					tb.AddPoint( d.tri->verts[d.tri->indexes[t + 2]].xyz );
+					s_rtPerfWorldBounds.Append( tb );
+				}
 			}
 			rhi::RHI::BlasGeometry &g = geoms[cnt];
 			g = rhi::RHI::BlasGeometry();
