@@ -2322,6 +2322,7 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 	// via environment_rt instead of sampling the baked cube/probe. Gated to the RT tier (r_rtReflections);
 	// Nightmare and below leave it false and keep the vanilla cube.
 	bool rtGlass = false;
+	bool rtGlassBump = false;				// RR5c stage 2: the RT glass is the BUMPED variant (bump map on unit 0)
 	rhi::ShaderHandle rtGlassProg = 0;
 	bool ssrGlass = false;					// RR5c-SSR: screen-space glass reflection (SSR tier, no RT)
 	rhi::ShaderHandle ssrGlassProg = 0;
@@ -2403,6 +2404,26 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 			if ( s_envRtProg != 0 && tlas != 0 && geo != 0 ) {
 				rtGlass = true;
 				rtGlassProg = s_envRtProg;
+				memcpy( &parms.rtParms[0], &tlas, sizeof( tlas ) );	// u_rtParms.xy = TLAS addr
+				memcpy( &parms.rtParms[2], &geo,  sizeof( geo ) );	// u_rtParms.zw = geo-table addr
+			}
+		}
+
+		// RR5c stage 2: BUMPED glass (chrome / textured panes, GetBumpStage != NULL — the case the unbumped
+		// path above deliberately excludes) traces the same scene TLAS via bumpyenvironment_rt, building the
+		// reflection normal from the bump map (flattened toward the flat normal for ray stability) instead of
+		// sampling the baked cube. Same RT gating; the bump map binds on unit 0 (the cube is skipped, so unit
+		// 0 is free — avoids a novel unit-1-without-0 descriptor). VK + RT only.
+		if ( !sheenDecal && !rtGlass && vkMode && r_rtReflections.GetBool() && r->SupportsRayQuery() && surf->material->GetBumpStage() ) {
+			static rhi::ShaderHandle s_envRtBumpProg = 0;
+			static bool s_envRtBumpTried = false;
+			if ( !s_envRtBumpTried ) { s_envRtBumpTried = true; s_envRtBumpProg = r->LoadShader( "bumpyenvironment_rt" ); }
+			const unsigned long long tlas = r->GetTlasAddress();
+			const unsigned long long geo  = r->GetRtGeoTableAddress();
+			if ( s_envRtBumpProg != 0 && tlas != 0 && geo != 0 ) {
+				rtGlass = true;
+				rtGlassBump = true;
+				rtGlassProg = s_envRtBumpProg;
 				memcpy( &parms.rtParms[0], &tlas, sizeof( tlas ) );	// u_rtParms.xy = TLAS addr
 				memcpy( &parms.rtParms[2], &geo,  sizeof( geo ) );	// u_rtParms.zw = geo-table addr
 			}
@@ -2494,7 +2515,10 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		if ( bumpStage ) {
 			if ( vkMode ) {
 				bumpStage->texture.image->Bind();	// upload trigger only
-				vkTex[1] = bumpStage->texture.image->rhiHandle;
+				// RR5c stage 2: bumpyenvironment_rt samples the bump on unit 0 (it skips the cube, unlike the
+				// vanilla bumpy shader which keeps the cube on unit 0 + bump on unit 1). Bind accordingly.
+				if ( rtGlassBump ) { vkTex[0] = bumpStage->texture.image->rhiHandle; }
+				else { vkTex[1] = bumpStage->texture.image->rhiHandle; }
 			} else {
 				rhi::gl3ActiveTexture( GL_TEXTURE1 );
 				backEnd.glState.currenttmu = 1;
