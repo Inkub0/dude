@@ -104,8 +104,8 @@ static idCVar r_vkDevice( "r_vkDevice", "-1", CVAR_RENDERER | CVAR_ARCHIVE | CVA
 static idCVar r_vkDumpNextFrame( "r_vkDumpNextFrame", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan: write the next frame's scene image to vkdump.tga (dev)" );
 
-static idCVar r_vkGpuTime( "r_vkGpuTime", "0", CVAR_RENDERER | CVAR_BOOL,
-	"Vulkan backend: print GPU frame time (ms), averaged once per second" );
+static idCVar r_vkGpuTime( "r_vkGpuTime", "0", CVAR_RENDERER | CVAR_INTEGER,
+	"Vulkan backend: 1 = print GPU frame time (ms), averaged once per second; 2 = also the named GPU scopes (per-pass breakdown: ms per frame and calls per frame)" );
 
 // Enable writing on-disk crash logs when a fatal Vulkan event (eg. VK_ERROR_DEVICE_LOST)
 // is observed. Default OFF; opt-in dev tool that writes a dudelog-crash-YYYYMMDD-HHMMSS.txt
@@ -388,6 +388,17 @@ private:
 	int							gpuTimeSamples = 0;
 	unsigned int				gpuTimeLastPrint = 0;
 	void						GpuTimerReadback( int slot );
+	// named scopes (r_vkGpuTime 2): begin/end stamp pairs after the per-slot frame pairs in the same pool
+	static const int			GPU_SCOPE_MAX_PAIRS = 256;
+	const char *				gpuScopeName[FRAMES_IN_FLIGHT][GPU_SCOPE_MAX_PAIRS] = {};
+	int							gpuScopeCount[FRAMES_IN_FLIGHT] = {};
+	bool						gpuScopesActive = false;	// this frame records scopes
+	bool						gpuScopeOpen = false;
+	struct GpuScopeAccum { const char *name; double ms; int calls; };
+	std::vector<GpuScopeAccum>	gpuScopeAccum;
+	uint32_t					GpuScopeQuery( int slot, int pair ) const { return (uint32_t)( 2 * FRAMES_IN_FLIGHT + ( slot * GPU_SCOPE_MAX_PAIRS + pair ) * 2 ); }
+	void						GpuScopeBegin( const char *name ) override;
+	void						GpuScopeEnd() override;
 
 	// ================= M2: rings / shaders / pipelines / images =================
 
@@ -2484,11 +2495,56 @@ now guaranteed done by BeginFrame's fence wait — so no WAIT bit, no stall),
 converts the tick delta to ms, and prints a running average once per second.
 ====================
 */
+void VulkanBackend::GpuScopeBegin( const char *name ) {
+	if ( !gpuScopesActive || gpuScopeOpen || !frameOpen || skipFrame || gpuScopeCount[frameIndex] >= GPU_SCOPE_MAX_PAIRS ) {
+		return;
+	}
+	const int pair = gpuScopeCount[frameIndex];
+	gpuScopeName[frameIndex][pair] = name;
+	vkCmdWriteTimestamp( frames[frameIndex].cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuTimerPool, GpuScopeQuery( frameIndex, pair ) );
+	gpuScopeOpen = true;
+}
+
+void VulkanBackend::GpuScopeEnd() {
+	if ( !gpuScopeOpen ) {
+		return;
+	}
+	const int pair = gpuScopeCount[frameIndex];
+	vkCmdWriteTimestamp( frames[frameIndex].cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuTimerPool, GpuScopeQuery( frameIndex, pair ) + 1 );
+	gpuScopeCount[frameIndex] = pair + 1;
+	gpuScopeOpen = false;
+}
+
 void VulkanBackend::GpuTimerReadback( int slot ) {
 	if ( !gpuTimerBusy[slot] ) {
 		return;
 	}
 	gpuTimerBusy[slot] = false;
+	// named scopes of that frame: add each pair to its name's running total
+	if ( gpuScopeCount[slot] > 0 ) {
+		static uint64_t scopeStamps[2 * GPU_SCOPE_MAX_PAIRS];
+		const int n = gpuScopeCount[slot];
+		if ( vkGetQueryPoolResults( device, gpuTimerPool, GpuScopeQuery( slot, 0 ), (uint32_t)( 2 * n ),
+		         sizeof( uint64_t ) * 2 * n, scopeStamps, sizeof( uint64_t ), VK_QUERY_RESULT_64_BIT ) == VK_SUCCESS ) {
+			for ( int i = 0; i < n; i++ ) {
+				const uint64_t d = ( scopeStamps[2 * i + 1] & gpuTimerMask ) - ( scopeStamps[2 * i] & gpuTimerMask );
+				const double ms = ( (double)d * gpuTimerPeriodNs ) / 1000000.0;
+				size_t k = 0;
+				for ( ; k < gpuScopeAccum.size(); k++ ) {
+					if ( gpuScopeAccum[k].name == gpuScopeName[slot][i] || !strcmp( gpuScopeAccum[k].name, gpuScopeName[slot][i] ) ) {
+						break;
+					}
+				}
+				if ( k == gpuScopeAccum.size() ) {
+					GpuScopeAccum a = { gpuScopeName[slot][i], 0.0, 0 };
+					gpuScopeAccum.push_back( a );
+				}
+				gpuScopeAccum[k].ms += ms;
+				gpuScopeAccum[k].calls++;
+			}
+		}
+		gpuScopeCount[slot] = 0;
+	}
 	uint64_t stamps[2] = { 0, 0 };
 	if ( vkGetQueryPoolResults( device, gpuTimerPool, 2 * slot, 2,
 	         sizeof( stamps ), stamps, sizeof( uint64_t ), VK_QUERY_RESULT_64_BIT ) != VK_SUCCESS ) {
@@ -2501,6 +2557,11 @@ void VulkanBackend::GpuTimerReadback( int slot ) {
 	if ( now - gpuTimeLastPrint >= 1000 ) {
 		common->Printf( "VK GPU: %.2f ms (%d samples)\n",
 		                gpuTimeAccumMs / gpuTimeSamples, gpuTimeSamples );
+		for ( size_t k = 0; k < gpuScopeAccum.size(); k++ ) {
+			common->Printf( "   %-22s %6.3f ms  (%.1f calls/frame)\n", gpuScopeAccum[k].name,
+				gpuScopeAccum[k].ms / gpuTimeSamples, (double)gpuScopeAccum[k].calls / gpuTimeSamples );
+		}
+		gpuScopeAccum.clear();
 		gpuTimeAccumMs = 0.0;
 		gpuTimeSamples = 0;
 		gpuTimeLastPrint = now;
@@ -2662,6 +2723,13 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	gpuTimerActive = false;
 	if ( gpuTimerSupported ) {
 		GpuTimerReadback( frameIndex );
+		gpuScopesActive = false;
+		gpuScopeOpen = false;
+		gpuScopeCount[frameIndex] = 0;
+		if ( r_vkGpuTime.GetInteger() >= 2 ) {
+			vkCmdResetQueryPool( f.cb, gpuTimerPool, GpuScopeQuery( frameIndex, 0 ), 2 * GPU_SCOPE_MAX_PAIRS );
+			gpuScopesActive = true;
+		}
 		if ( r_vkGpuTime.GetBool() ) {
 			vkCmdResetQueryPool( f.cb, gpuTimerPool, 2 * frameIndex, 2 );
 			vkCmdWriteTimestamp( f.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, gpuTimerPool, 2 * frameIndex );
@@ -3110,7 +3178,7 @@ bool VulkanBackend::CreateM2Resources() {
 		VkQueryPoolCreateInfo qpi = {};
 		qpi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
 		qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
-		qpi.queryCount = 2 * FRAMES_IN_FLIGHT;		// begin+end per slot
+		qpi.queryCount = 2 * FRAMES_IN_FLIGHT + 2 * FRAMES_IN_FLIGHT * GPU_SCOPE_MAX_PAIRS;		// begin+end per slot, then the named scopes
 		if ( !vkCheck( vkCreateQueryPool( device, &qpi, NULL, &gpuTimerPool ), "vkCreateQueryPool(timer)" ) ) {
 			gpuTimerPool = VK_NULL_HANDLE;
 			gpuTimerSupported = false;

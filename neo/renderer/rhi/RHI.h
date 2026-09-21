@@ -257,6 +257,11 @@ public:
 	// unified vertex buffer (docs/gpu-offload-plan.md §3.2b). 0 = unsupported (GL 3.3 has no
 	// equivalent, device lacks the feature) or invalid handle.
 	virtual unsigned long long	GetBufferDeviceAddress( BufferHandle b ) { return 0; }
+	// Named GPU timing scopes (VK; r_vkGpuTime 2): bracket a stretch of GPU work, anywhere in the
+	// frame, render pass open or not. Same-named scopes add up within a frame, so a per-light pass
+	// reports its total plus how many times it ran. Not nestable. name must be a string literal.
+	virtual void			GpuScopeBegin( const char *name ) {}
+	virtual void			GpuScopeEnd() {}
 	virtual ImageHandle		CreateImage( ImageFormat fmt, int w, int h, const void *pixels ) = 0;
 	virtual void			DestroyImage( ImageHandle i ) = 0;
 

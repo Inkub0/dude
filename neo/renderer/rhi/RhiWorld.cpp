@@ -7025,6 +7025,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		}
 	}
 
+	r->GpuScopeBegin( "rtblur.ray" );
 	r->SetNextTargetPassArea( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );
 	r->BeginTargetPass( rhiRtBlurRayRT, &clearLit );
 	r->SetScissor( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );
@@ -7034,6 +7035,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	RB_RHI_BindUnit( 3, atProjImg );
 	RB_RHI_DrawFullscreen( r, rhiRtBlur.rayProg, parms, 0 );
 	r->EndPass();
+	r->GpuScopeEnd();
 
 	rhi::RenderParams tp;
 	memset( &tp, 0, sizeof( tp ) );
@@ -7045,11 +7047,13 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		const int th = ( h + 7 ) / 8;
 		const int tyTop = rTop / 8, tyBot = rBot / 8;
 		tp.localParam0[0] = (float)pass;
+		r->GpuScopeBegin( "rtblur.tiles" );
 		r->BeginTargetPass( rhiRtBlurTileRT[pass], &clearZero );
 		r->SetScissor( rx1 / 8, th - 1 - tyBot, rx2 / 8 - rx1 / 8 + 1, tyBot - tyTop + 1 );
 		RB_RHI_DrawFullscreen( r, rhiRtBlur.tileProg, tp,
 			r->GetRenderTargetImage( ( pass == 0 ) ? rhiRtBlurRayRT : rhiRtBlurTileRT[0] ) );
 		r->EndPass();
+		r->GpuScopeEnd();
 	}
 
 	rhi::RenderParams bp;
@@ -7064,6 +7068,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		// leftovers - a later frame may reproject anywhere onto it
 		const bool intoSlot = ( pass == 1 && slot != NULL );
 		bp.localParam0[2] = intoSlot ? 1.0f : 0.0f;			// pack the view distance into GB
+		r->GpuScopeBegin( ( pass == 0 ) ? "rtblur.blurH" : ( intoSlot ? "rtblur.blurV(slot)" : "rtblur.blurV" ) );
 		if ( !intoSlot ) {
 			r->SetNextTargetPassArea( vx1, py1, vx2 - vx1 + 1, py2 - py1 + 1 );
 		}
@@ -7073,6 +7078,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		RB_RHI_DrawFullscreen( r, rhiRtBlur.blurProg, bp,
 			r->GetRenderTargetImage( ( pass == 0 ) ? rhiRtBlurRayRT : rhiRtBlurPingRT ) );
 		r->EndPass();
+		r->GpuScopeEnd();
 	}
 
 	// drop the tile target from the recorded units: the next blurred light renders INTO it, and a
@@ -8033,12 +8039,14 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// per-view state only - the target CACHE keys (rhiNormalMrt/Vel) stay untouched, or the
 	// standalone velocity target would key-mismatch and recreate every frame (the DIAG spam)
 	rhiNormalReadyThisView = false;	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;
+	r->GpuScopeBegin( "prepass (depth+gbuffer)" );
 	const bool mergedDepth = RB_RHI_NormalPrepass( r, viewDef );
 	if ( mergedDepth ) {
 		RB_RHI_CaptureCurrentDepth( viewDef );
 	} else {
 		RB_RHI_FillDepthBuffer( r, viewDef );
 	}
+	r->GpuScopeEnd();
 
 	// SSAO (GTAO) builds the AO buffer from the just-captured scene depth, before
 	// the ambient/interaction passes that consume it (docs/ssao-gtao.md). Each view
@@ -8047,8 +8055,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// RTAO first (docs/rtx-rtao.md H4d): when it rays+denoises+composites this view's AO,
 	// the GTAO pass sees the flag and skips its whole chain; any RTAO failure falls
 	// through to GTAO unchanged.
+	r->GpuScopeBegin( "ao (rtao/gtao)" );
 	RB_RHI_RtaoPass( r, viewDef );
 	RB_RHI_SSAOPass( r, viewDef );
+	r->GpuScopeEnd();
 	// r_rtShadowBlur: validate the view + size the shared targets; the light loop builds each
 	// ray-served light's mask on demand (RB_RHI_RtShadowBlurLight)
 	RB_RHI_RtShadowBlurBegin( r, viewDef );
