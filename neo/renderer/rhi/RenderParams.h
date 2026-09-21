@@ -143,6 +143,13 @@ struct RenderParams {
 								// x == 0. The game sets r_znear to 1 for cinematic cameras
 								// (idGameLocal::SetCamera), which the old hard-coded pair - valid for
 								// r_znear 3 only - ignored. Appended LAST.
+
+	float	skinParms[4];		// DUDE skin / flesh subsurface scattering (docs/skin-shading.md):
+								// x = blend strength (0 = off; only skin/flesh-classified materials,
+								// direct light, non-film draws carry a non-zero value), yzw = the
+								// per-channel diffuse wrap widths (red widest -> warm terminator).
+								// interaction.frag adds the wrapped-diffuse EXCESS over Lambert as
+								// extra diffuse light; 0 on every other draw. Appended LAST.
 };
 
 // window depth -> view z for a view, from its projection matrix (column-major GL layout):
@@ -156,8 +163,8 @@ inline void FillDepthParms( RenderParams &p, const float *proj ) {
 	}
 }
 
-// 4 mat4 (256) + 48 vec4 (768) = 1024 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 1024, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 4 mat4 (256) + 49 vec4 (784) = 1040 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 1040, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 
