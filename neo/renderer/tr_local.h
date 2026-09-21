@@ -1014,6 +1014,7 @@ extern idCVar r_rtShadowBlurStagger;		// far lights refresh their blurred mask e
 extern idCVar r_rtShadowBlurStaggerNear;	// nearer than this (viewer -> light volume): every frame
 extern idCVar r_rtShadowBlurStaggerFar;		// farther than this: every 3rd frame; between: every 2nd
 extern idCVar r_rtShadowBlurIntensity;		// blur width multiplier (0 = hard, 1 = default)
+extern idCVar r_rtShadowBlurCompact;			// vertical blur reads the compact summary for pass-through pixels
 extern idCVar r_rtShadowBlurFastTiles;		// tile pass reads the compact RG8 summary instead of the RGBA16F ray target
 extern idCVar r_rtShadowBlurCurve;			// exponent on the gap ratio: how the blur grows with distance from the caster (1 = geometric)
 extern idCVar r_rtTlasDirty;				// skip the per-frame TLAS rebuild when no mover/monster changed this frame

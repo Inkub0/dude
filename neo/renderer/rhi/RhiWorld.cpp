@@ -7079,6 +7079,10 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		// leftovers - a later frame may reproject anywhere onto it
 		const bool intoSlot = ( pass == 1 && slot != NULL );
 		bp.localParam0[2] = intoSlot ? 1.0f : 0.0f;			// pack the view distance into GB
+		// perf: the plain (non-slot) vertical pass reads the ray pass's cheap RG8 summary for
+		// pass-through pixels instead of the 8-byte ping (rtshadow_blur.frag). Needs the MRT summary.
+		const rhi::ImageHandle blurSummary = r->GetRenderTargetImage2( rhiRtBlurRayRT );
+		bp.localParam0[3] = ( pass == 1 && !intoSlot && r_rtShadowBlurCompact.GetBool() && blurSummary != 0 ) ? 1.0f : 0.0f;
 		r->GpuScopeBegin( ( pass == 0 ) ? "rtblur.blurH" : ( intoSlot ? "rtblur.blurV(slot)" : "rtblur.blurV" ) );
 		if ( !intoSlot ) {
 			r->SetNextTargetPassArea( vx1, py1, vx2 - vx1 + 1, py2 - py1 + 1 );
@@ -7086,6 +7090,9 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		r->BeginTargetPass( ( pass == 0 ) ? rhiRtBlurPingRT : ( intoSlot ? slot->maskRT : rhiRtBlurMaskRT ), &clearLit );
 		r->SetScissor( vx1, py1, vx2 - vx1 + 1, py2 - py1 + 1 );
 		RB_RHI_BindRTUnit( r, 1, rhiRtBlurTileRT[1] );
+		if ( bp.localParam0[3] > 0.5f ) {
+			RB_RHI_BindRTImage( r, 2, blurSummary );		// u_summary (the vertical fast path)
+		}
 		RB_RHI_DrawFullscreen( r, rhiRtBlur.blurProg, bp,
 			r->GetRenderTargetImage( ( pass == 0 ) ? rhiRtBlurRayRT : rhiRtBlurPingRT ) );
 		r->EndPass();
@@ -7095,6 +7102,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	// drop the tile target from the recorded units: the next blurred light renders INTO it, and a
 	// later draw that doesn't rebind unit 1 must not carry an attachment along
 	RB_RHI_BindRTImage( r, 1, 0 );
+	RB_RHI_BindRTImage( r, 2, 0 );		// same for the summary unit (the compact vertical fast path)
 	backEnd.currentScissor = viewDef->scissor;	// the loop re-applies the light's scissor right after
 	if ( slot != NULL ) {
 		slot->lastUpdateFrame = rhiRtBlurFrame;

@@ -328,6 +328,22 @@ stored reach caps at 254/255 of HW_MAX = 23.9 px vs 24). `r_rtShadowBlurFastTile
 the old RGBA16F path for A/B; the ray target is the MRT either way (the summary write is ~2 bytes).
 GPU scope `rtblur.tiles` under `r_vkGpuTime 2` shows the delta. **Pending the user's numbers.**
 
+## Perf: compact vertical pass-through (2026-09-21, `r_rtShadowBlurCompact`, option 1)
+
+`blurH`/`blurV` are bandwidth-bound over the light's projected-surface rect, which is ~2 screens
+even when the shadowed part is small (a lit wall of the viewer's own room fills the scissor). The
+tile early-out skips the *kernel* there, but every pass-through pixel still read the 8-byte ping and
+wrote the mask. The plain (non-slot) vertical pass now reads the ray pass's **RG8 summary** (2 bytes,
+`u_summary` = attachment 1) for pass-through pixels instead of the 8-byte ping. For an unflagged
+pixel `ping.r` == the ray pass's hard visibility == `summary.r` by construction, so it is
+bit-identical and drops the pass's dominant read from 8 to 2 bytes over the bulk of the rect. The
+tile buffer is fetched first so the wide read is skipped entirely on those pixels. Only the
+every-frame (non-slot) lights benefit; a staggered slot pass still packs the view distance and reads
+the ping. `r_rtShadowBlurCompact` (default 1) keeps the old path for A/B. GPU scope `rtblur.blurV`.
+**Pending the user's numbers.** The larger lever left - skipping the pass-through *tiles* entirely
+via an indirect flagged-tile draw + a no-clear pass - is deliberately NOT built here: it needs new
+backend primitives and can't be verified without running, so it waits on these two measurements.
+
 ## Cvars
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every
