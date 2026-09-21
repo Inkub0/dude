@@ -316,6 +316,18 @@ caster is dropped, the image is unchanged.
 (was +0.7 / +0.55) - accepted ("I would say it's fine").** `r_rtPerforatedDebug` and the per-light
 touch helper are removed.
 
+## Perf: cheaper tile classification (2026-09-21, `r_rtShadowBlurFastTiles`, option 2)
+
+The tile pass 0 reduced the full-res RGBA16F ray target (8 bytes/texel, 64 fetches/tile) into the
+per-tile summary - reading every pixel of the ray rect. The ray pass now also writes a compact
+**RG8 per-pixel summary** as a second attachment (`CreateRenderTargetBlurRay` = {RGBA16F, RG8};
+`rtshadow_ray.frag` `out_summary` = R visibility, G half-width / HW_MAX, G = 1.0 the "never traced"
+sentinel that replaces the old `B == 0` test). Tile pass 0 reads that (2 bytes/texel) instead, an
+8 -> 2 byte cut on the pass's dominant read. Image-identical (the only rounding: a max-width tile's
+stored reach caps at 254/255 of HW_MAX = 23.9 px vs 24). `r_rtShadowBlurFastTiles` (default 1) keeps
+the old RGBA16F path for A/B; the ray target is the MRT either way (the summary write is ~2 bytes).
+GPU scope `rtblur.tiles` under `r_vkGpuTime 2` shows the delta. **Pending the user's numbers.**
+
 ## Cvars
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every

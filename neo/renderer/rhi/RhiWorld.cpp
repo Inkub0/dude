@@ -6779,7 +6779,12 @@ static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiRtBlurH = h;
 	}
 	const int tw = ( w + 7 ) / 8, th = ( h + 7 ) / 8;
-	if ( !rhiRtBlurRayRT )     { rhiRtBlurRayRT     = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, 1 ); }
+	if ( !rhiRtBlurRayRT ) {
+		// the MRT variant carries the RG8 summary attachment for the fast tile pass; fall back to
+		// the plain RGBA16F target (summary attachment absent -> the tile pass reads attachment 0)
+		rhiRtBlurRayRT = r->CreateRenderTargetBlurRay( w, h );
+		if ( !rhiRtBlurRayRT ) { rhiRtBlurRayRT = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, 1 ); }
+	}
 	if ( !rhiRtBlurPingRT )    { rhiRtBlurPingRT    = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, 1 ); }
 	if ( !rhiRtBlurMaskRT )    { rhiRtBlurMaskRT    = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, 1 ); }
 	if ( !rhiRtBlurTileRT[0] ) { rhiRtBlurTileRT[0] = r->CreateRenderTargetMipped( rhi::IF_RGBA8, tw, th, 1 ); }
@@ -7047,11 +7052,17 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		const int th = ( h + 7 ) / 8;
 		const int tyTop = rTop / 8, tyBot = rBot / 8;
 		tp.localParam0[0] = (float)pass;
+		// pass 0 reads the ray pass's compact RG8 summary (attachment 1, 2 B/texel) instead of the
+		// 8-byte RGBA16F, when the MRT target carried it and r_rtShadowBlurFastTiles is on
+		const rhi::ImageHandle summaryImg = r->GetRenderTargetImage2( rhiRtBlurRayRT );
+		const bool fastTiles = ( pass == 0 ) && r_rtShadowBlurFastTiles.GetBool() && summaryImg != 0;
+		tp.localParam0[1] = fastTiles ? 1.0f : 0.0f;
 		r->GpuScopeBegin( "rtblur.tiles" );
 		r->BeginTargetPass( rhiRtBlurTileRT[pass], &clearZero );
 		r->SetScissor( rx1 / 8, th - 1 - tyBot, rx2 / 8 - rx1 / 8 + 1, tyBot - tyTop + 1 );
 		RB_RHI_DrawFullscreen( r, rhiRtBlur.tileProg, tp,
-			r->GetRenderTargetImage( ( pass == 0 ) ? rhiRtBlurRayRT : rhiRtBlurTileRT[0] ) );
+			( pass == 0 ) ? ( fastTiles ? summaryImg : r->GetRenderTargetImage( rhiRtBlurRayRT ) )
+			              : r->GetRenderTargetImage( rhiRtBlurTileRT[0] ) );
 		r->EndPass();
 		r->GpuScopeEnd();
 	}

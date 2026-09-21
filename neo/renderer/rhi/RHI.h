@@ -342,6 +342,12 @@ public:
 	// distance @0, R16F signed view z @1, RGBA16F packed world normal @2 - so the ray pass writes the
 	// denoiser's guides itself. Attachments 1/2 are read back with GetRenderTargetImage2/3. VK only.
 	virtual RenderTargetHandle	CreateRenderTargetRtaoMrt( int w, int h ) { return 0; }
+	// RT shadow blur ray target (docs/rtx-shadow-blur.md, perf): attachment 0 = RGBA16F
+	// (vis / hwX / dist / hwY, the blur's working data), attachment 1 = RG8 per-pixel SUMMARY
+	// (R = visibility, G = penumbra half-width / HW_MAX, or 1.0 = untraced) so the tile
+	// classification reads 2 bytes/texel instead of the 8-byte attachment 0. Attachment 1 is
+	// read with GetRenderTargetImage2. VK only; 0 elsewhere → the caller uses the plain path.
+	virtual RenderTargetHandle	CreateRenderTargetBlurRay( int w, int h ) { return 0; }
 	// Begin a fullscreen pass rendering into a specific mip LEVEL of a mipped target
 	// (level 1..mipLevels-1; level 0 uses BeginTargetPass). Paired with EndPass.
 	virtual void				BeginTargetMipPass( RenderTargetHandle rt, int mipLevel, const ClearArgs *clear ) {}

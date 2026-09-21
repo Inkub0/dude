@@ -227,6 +227,7 @@ public:
 	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h );
 	virtual RenderTargetHandle	CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels );
 	virtual RenderTargetHandle	CreateRenderTargetRtaoMrt( int w, int h );
+	virtual RenderTargetHandle	CreateRenderTargetBlurRay( int w, int h );
 	virtual void				BeginTargetMipPass( RenderTargetHandle rt, int mipLevel, const ClearArgs *clear );
 	virtual ImageHandle			GetRenderTargetMipImage( RenderTargetHandle rt, int mipLevel );
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt );
@@ -9257,6 +9258,20 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetMipped( ImageFormat fmt, int
 }
 
 // RTAO ray + NRD guide MRT: R16F hit distance, R16F view z, RGBA16F packed normal; color-only.
+RenderTargetHandle VulkanBackend::CreateRenderTargetBlurRay( int w, int h ) {
+	if ( device == VK_NULL_HANDLE ) {
+		return 0;
+	}
+	// @0 = the blur's RGBA16F working data; @1 = the RG8 per-pixel summary the tile pass reads
+	static const VkFormat fmts[2] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8_UNORM };
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R16G16B16A16_SFLOAT, 2, /*ds*/false, /*frameCapable*/false, /*mipLevels*/1, fmts ) ) {
+		targetTable[slot] = RenderTarget();
+		return 0;
+	}
+	return (RenderTargetHandle)( slot + 1 );
+}
+
 RenderTargetHandle VulkanBackend::CreateRenderTargetRtaoMrt( int w, int h ) {
 	if ( device == VK_NULL_HANDLE ) {
 		return 0;

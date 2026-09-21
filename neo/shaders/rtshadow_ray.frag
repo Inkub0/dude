@@ -62,12 +62,19 @@ SAMPLER_BINDING(3) uniform sampler2D u_lightProjection; // the light's projectio
 VARY(0) in vec2 var_TexCoord;
 
 layout(location = 0) out vec4 fragColor;
+// perf: a compact per-pixel SUMMARY for the tile classification (rtshadow_tiles.frag pass 0) so it
+// reads 2 bytes/texel here instead of the 8-byte fragColor. R = visibility, G = penumbra half-width
+// / HW_MAX (0 = lit, nothing to spread), and G = 1.0 is the reserved "this pixel was never traced"
+// sentinel (sky / weapon / outside the light) - the tile pass skips those, matching fragColor.b == 0.
+layout(location = 1) out vec2 out_summary;
+const float RTSHADOW_HW_MAX = 24.0;		// = HW_MAX in rtshadow_tiles.frag / K in rtshadow_blur.frag
 
 // Doom 3's near-infinite far projection in GL clip depth -> linear eye z. The pair comes from the
 // view's own projection (u_depthParms); ( 0.33333333, -0.33316667 ) is its play-time value.
 
 void main() {
 	fragColor = vec4( 1.0, 0.0, 0.0, 0.0 );		// every early-out = lit
+	out_summary = vec2( 1.0, 1.0 );				// until proven traced: lit, G = untraced sentinel
 	vec2  frag = gl_FragCoord.xy;
 	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
 	if ( raw >= 0.9994 ) {						// sky / no geometry
@@ -83,6 +90,7 @@ void main() {
 	float vz  = 1.0 / ( min( raw, 0.9994 ) * DUDE_DEPTH_CONSTS().x + DUDE_DEPTH_CONSTS().y );   // negative
 	float d   = -vz;
 	fragColor.b = min( d, 65000.0 );			// lit or not, this pixel has a surface the blur can weigh
+	out_summary.y = 0.0;						// traced from here on (G < 1); lit until a width is found
 	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
 	// jitter-exact unprojection (VK: top-down window y, hence the sign): ndc.x = P00*x/d - P8
 	vec3  P   = vec3( ( ndc.x + u_localParam1.y ) * d * u_localParam0.x,
@@ -215,4 +223,6 @@ void main() {
 	fragColor.r = solidHit ? 0.0 : 1.0 - u_shadowFalloffS.z;	// behind a grate only: dimmed, not dark
 	fragColor.g = rPx * ext.x;
 	fragColor.a = rPx * ext.y;
+	out_summary.x = fragColor.r;
+	out_summary.y = min( max( fragColor.g, fragColor.a ) / RTSHADOW_HW_MAX, 254.0 / 255.0 );	// < the untraced sentinel
 }
