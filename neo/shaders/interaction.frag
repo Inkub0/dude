@@ -124,7 +124,11 @@ float sampleCubeShadow( samplerCubeShadow cube, vec3 L, float ref, float dist, f
 	return sum / float( taps );
 }
 
-float shadowVisibility() {
+// canReceive: false when this fragment gets exactly nothing from the light whatever the
+// visibility (faces away from it, or its projection * falloff is black here - the corners of the
+// light's box outside the round falloff). Only the inline RAY is skipped on it; the map / mask
+// modes are cheap lookups and stay in uniform control flow.
+float shadowVisibility( bool canReceive ) {
 	if ( u_shadowParms.x == 0.0 ) {
 		return 1.0;
 	}
@@ -164,6 +168,9 @@ float shadowVisibility() {
 		}
 	}
 	if ( traceInline ) {
+		if ( !canReceive ) {
+			return 0.0;		// the light term is 0 here with or without a shadow: don't trace for it
+		}
 		// DUDE RT sun shadows (mode 4, docs/rtx-shadow-roadmap.md R3): trace one ray at the
 		// sun through the persistent world scene instead of sampling the fitted sun map -
 		// pixel-exact at any distance, no r_shadowMapSunRange cap, no map-resolution aliasing.
@@ -370,6 +377,12 @@ void main() {
 	// scales the light projection / falloff product below.
 	float lightScale;
 
+	// the light's projection * falloff, fetched up front (it was fetched further down anyway) so
+	// the inline shadow ray can be skipped where it is black
+	vec4 lightAtten = textureProj( u_lightProjection, var_TexProjection )
+	                * texture( u_lightFalloff, var_TexFalloff );
+	bool lightReaches = ( lightAtten.r + lightAtten.g + lightAtten.b ) > 0.0;
+
 	// DUDE wet blood film (r_decalWetBlood, RB_RHI_DrawFilmInteractions). u_channelMask.x > 0
 	// marks a SYNTHESIZED draw of a blood decal as its own lit surface: a specular-only film whose
 	// relief is the splat's own height (unit 1), whose cover image rides the diffuse unit with the
@@ -504,7 +517,7 @@ void main() {
 		// that fraction of the albedo colour while the metallic specular still rides
 		// on top. kd 1 = physical, kd 0 = full albedo retained (docs sec. 5).
 		diffuse.rgb *= ( 1.0 - F ) * ( 1.0 - metal * u_pbrParms2.x );
-		lightScale = NdotL * shadowVisibility();
+		lightScale = NdotL * shadowVisibility( lightReaches && NdotL > 0.0 );
 	} else {
 		// half angle is normalized with math (matches the ARB program, which
 		// deliberately avoided the normalization cubemap here)
@@ -513,7 +526,8 @@ void main() {
 		// light vector through the normalization cube map, as the original did
 		vec3 lightV = texture( u_normalCubeMap, var_TexLightVec ).xyz * 2.0 - 1.0;
 
-		lightScale = dot( lightV, localNormal ) * shadowVisibility();
+		float rawNdotL = dot( lightV, localNormal );
+		lightScale = rawNdotL * shadowVisibility( lightReaches && rawNdotL > 0.0 );
 
 		// specular term. Shading model selected by u_specularParms.z:
 		//   0 = vanilla dependent LUT read on N.H (faithful default)
@@ -534,9 +548,7 @@ void main() {
 		spec *= u_specularModifier * ( u_specularParms.x * 2.0 );
 	}
 
-	vec4 light = textureProj( u_lightProjection, var_TexProjection )
-	           * texture( u_lightFalloff, var_TexFalloff )
-	           * lightScale * parallaxSelfShadow;
+	vec4 light = lightAtten * lightScale * parallaxSelfShadow;
 
 	vec4 specMap = texture( u_specularMap, uvSpecular );
 	if ( filmMode > 0.5 ) {

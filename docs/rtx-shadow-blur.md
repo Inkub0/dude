@@ -224,6 +224,27 @@ particles, ...): they were all off by 3x in cinematics too - fixed
 separately, see [cinematic-depth.md](cinematic-depth.md). (This section first blamed
 `renderView.cramZNear` and "4x": wrong mechanism, the game never sets it.)
 
+## No ray where the light is black (2026-09-21, branch `perf/rt-shadow-ray-skip-unlit`, UNMEASURED)
+
+A Doom 3 light volume is a box; its projection x falloff is usually round. Pixels in the box's
+corners get exactly zero from the light, shadowed or not - but both ray paths traced for them:
+
+- **Inline ray (mode 4, and mode 6's fallback), `interaction.frag`:** the projection * falloff
+  product is now fetched up front (it was fetched further down anyway) and the ray is skipped when
+  it is black or N.L <= 0. The final colour is `light * ...` with `light` = that same product, so
+  the output is bit-identical. Map / mask modes are untouched (cheap, and they stay in uniform
+  control flow).
+- **Blur ray pass, `rtshadow_ray.frag`:** same test, when the light has one active stage with a
+  plain 2D projection image (no texture matrix, no cinematic) - `u_rtParms.w = 1`, images on units
+  2/3, read with `textureLod(.., 2.0)` so the zero region is conservative. Skipped pixels are
+  written "lit", exactly like pixels outside the volume already were; the only difference is the
+  blur's neighbourhood at the rim where the light is ~0 anyway. Other lights trace the whole
+  volume as before.
+
+Expected gain: proportional to how much of each light's on-screen box is black (up to ~20-45% of
+the rays for round lights); nothing for lights whose images fill the box. **Pending the user's
+`r_vkGpuTime` A/B against master.**
+
 ## Cvars
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every
