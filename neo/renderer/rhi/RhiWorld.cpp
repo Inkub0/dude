@@ -4022,7 +4022,21 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// and velWants adds the RG16F velocity attachment (R1/A2), so the merge serves SSR, motion
 	// vectors and FSR2 too — every tier can fold the standalone pass away. BeginNormalPrepass
 	// returns 0 (→ standalone path) on GL3 or if unsupported.
-	const bool wantMerge = r_ssaoMergeNormal.GetBool()
+	//
+	// NOT when this view looks at a mirror / portal surface (SS_SUBVIEW): the subview was rendered
+	// into the scene colour first, over its whole screen RECT, and it is the zfill prepass that
+	// cuts it down to the mirror's shape - it draws every other surface BLACK into the colour
+	// buffer before the lights add onto it. The merged pass never touches the scene colour, so the
+	// reflection stayed on the walls around an obliquely-seen mirror (mars_city1 restroom). Such a
+	// view takes the standalone target + zfill, exactly as with r_ssaoMergeNormal 0.
+	bool viewHasSubviewSurf = false;
+	for ( int i = 0; i < viewDef->numDrawSurfs; i++ ) {
+		if ( viewDef->drawSurfs[i]->material->GetSort() == SS_SUBVIEW ) {
+			viewHasSubviewSurf = true;
+			break;
+		}
+	}
+	const bool wantMerge = r_ssaoMergeNormal.GetBool() && !viewHasSubviewSurf
 		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
 	rhi::RenderTargetHandle activeNormalRT = 0;
 	bool didMerge = false;
