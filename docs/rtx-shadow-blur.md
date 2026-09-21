@@ -326,7 +326,20 @@ sentinel that replaces the old `B == 0` test). Tile pass 0 reads that (2 bytes/t
 8 -> 2 byte cut on the pass's dominant read. Image-identical (the only rounding: a max-width tile's
 stored reach caps at 254/255 of HW_MAX = 23.9 px vs 24). `r_rtShadowBlurFastTiles` (default 1) keeps
 the old RGBA16F path for A/B; the ray target is the MRT either way (the summary write is ~2 bytes).
-GPU scope `rtblur.tiles` under `r_vkGpuTime 2` shows the delta. **Pending the user's numbers.**
+GPU scope `rtblur.tiles` under `r_vkGpuTime 2` shows the delta.
+
+**Measured by the user (RTX 3080 Ti, 2026-09-21, 4 lights blurred/frame, look identical):**
+`rtblur.tiles` **0.573 -> 0.274 ms (-0.30 ms)** - the read shrink helped more than the "half
+overhead-bound" guess feared. Frame ~10.38 -> ~10.10. Kept on.
+
+### Compact vertical pass-through (tried, reverted - no gain)
+The same idea was applied to the vertical blur's pass-through pixels (read the 2-byte summary instead
+of the 8-byte ping): `r_rtShadowBlurCompact`. Measured a WASH - `rtblur.blurV` 0.529 -> 0.513 ms
+(noise), and `blurH` (untouched) sat at the same 0.53 ms, so the vertical pass is not bottlenecked on
+the pass-through *read* - it is the mask write + the kernel on flagged pixels. Reverted (commit
+12ca9fd9 + its revert). Do not re-try the read-shrink on the blur passes; the only lever left there
+is skipping the pass-through pixels' *write* (the indirect flagged-tile + no-clear approach), a
+larger backend build.
 
 ## Cvars
 
