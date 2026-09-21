@@ -26,6 +26,9 @@
 // Uniform packing (RB_RHI_RtShadowBlurLight):
 //   u_rtParms.xy          = TLAS device address (bit-cast lo/hi)
 //   u_rtParms.z           = ray-origin normal offset (r_rtSunShadowOffset, shared with mode 4)
+//   u_rtParms.w           = 1: units 2/3 hold this light's falloff / projection images and the lookup
+//                           is the plain one (single stage, no texture matrix) - skip the ray where
+//                           they are black
 //   u_modelViewMatrix     = inverse view (view -> world)
 //   u_localLightOrigin    = WORLD-space light origin
 //   u_lightProjectionS/T/Q, u_lightFalloffS = the light's WORLD-space projection planes
@@ -47,6 +50,8 @@
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;   // xyz = view-space normal, a = weapon/AO mask
+SAMPLER_BINDING(2) uniform sampler2D u_lightFalloff;   // the light's falloff image      } read only when
+SAMPLER_BINDING(3) uniform sampler2D u_lightProjection; // the light's projection image  } u_rtParms.w = 1
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -103,6 +108,17 @@ void main() {
 	const float M = 0.02;
 	if ( s < -M || s > 1.0 + M || t < -M || t > 1.0 + M || f < -M || f > 1.0 + M ) {
 		return;
+	}
+	// inside the box but where the light's images are black (the corners around a round falloff):
+	// the interaction multiplies by exactly this product, so no shadow can show. Read two mips
+	// down - explicit lod, this is non-uniform control flow - so the zero region is the
+	// conservative one: a texel the interaction's filtered fetch could still see stays traced.
+	if ( u_rtParms.w > 0.5 ) {
+		vec3 at = textureLod( u_lightProjection, vec2( s, t ), 2.0 ).rgb
+		        * textureLod( u_lightFalloff, vec2( f, 0.5 ), 2.0 ).rgb;
+		if ( !( at.r + at.g + at.b > 0.0 ) ) {
+			return;
+		}
 	}
 
 	vec3  O    = Pw + Nw * ( u_rtParms.z + 5e-4 * d );

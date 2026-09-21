@@ -6891,11 +6891,39 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	const int rBot = Min( h - 1, ( ( h - 1 - Max( 0, lr.y1 - wide ) ) / 8 ) * 8 + 7 );
 	const int ry1 = h - 1 - rBot, ry2 = h - 1 - rTop;								// back to GL rows
 
+	// No ray where the light is black: a light's volume is a box, its projection * falloff usually
+	// round, so the box's corners receive exactly nothing - shadowed or not. The ray pass can test
+	// that itself when the light has ONE active stage with a plain 2D projection image (no texture
+	// matrix: a rotating gobo's lookup isn't the raw lightProject planes; no cinematic). Anything
+	// else keeps tracing the whole volume, as before.
+	idImage *atProjImg = globalImages->whiteImage;
+	idImage *atFalloffImg = vLight->falloffImage ? vLight->falloffImage : globalImages->whiteImage;
+	{
+		const idMaterial *ls = vLight->lightShader;
+		const float *lregs = vLight->shaderRegisters;
+		const shaderStage_t *only = NULL;
+		int active = 0;
+		for ( int i = 0; ls && lregs && i < ls->GetNumStages(); i++ ) {
+			const shaderStage_t *st = ls->GetStage( i );
+			if ( lregs[st->conditionRegister] != 0 ) {
+				only = st;
+				active++;
+			}
+		}
+		if ( active == 1 && vLight->falloffImage && only->texture.image && !only->texture.hasMatrix
+				&& !only->texture.cinematic && only->texture.image->type == TT_2D ) {
+			atProjImg = only->texture.image;
+			parms.rtParms[3] = 1.0f;
+		}
+	}
+
 	r->SetNextTargetPassArea( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );
 	r->BeginTargetPass( rhiRtBlurRayRT, &clearLit );
 	r->SetScissor( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+	RB_RHI_BindUnit( 2, atFalloffImg );
+	RB_RHI_BindUnit( 3, atProjImg );
 	RB_RHI_DrawFullscreen( r, rhiRtBlur.rayProg, parms, 0 );
 	r->EndPass();
 
