@@ -134,3 +134,14 @@ single-sided, the hemisphere looks into the void and the rays miss → unocclude
 origin back **toward the eye** (`0.25 + depth · 0.004`, plus a 0.05 normal lift against self-hits) — the camera
 sees the point, so the segment back to it is unobstructed by construction and the origin can never be inside
 geometry. The cosine hemisphere still uses the bump normal, so normal-map AO detail is unchanged.
+
+## 2026-09-21 — checkerboard rays: tried, measured, REVERTED
+
+NRD's checkerboard mode (`ReblurSettings::checkerboardMode = BLACK`; the vendored NRD already has
+`NRD_SUPPORTS_CHECKERBOARD 1`) was built as `r_rtaoCheckerboard` with a menu checkbox: trace every other pixel,
+noisy input packed to the left half of its texture (texel `(x', y)` = full-res pixel
+`(2x' + ((y ^ frameIndex) & 1), y)`), guides still full-res. **User-measured GPU-time saving: ≈ 0** — so the
+AO *rays* are not where RTAO's time goes (short 80-unit rays are cheap on this hardware); the cost is the
+full-resolution denoiser + passes, which checkerboarding does not touch. Branch deleted, nothing merged.
+**Do not retry.** The only lever that attacks the real cost is **half-resolution RTAO** (rays + guides + NRD on
+a quarter of the pixels, depth-aware upsample in the resolve) — unscheduled.
