@@ -124,3 +124,13 @@ view z + world normal for its ray, so the two standalone fullscreen guide passes
   play without a device loss. The A/B cvar, the legacy three-pass branch and the two guide shaders
   (`rtao_viewz`, `rtao_pack`) were then removed.
 - Still open for real savings: checkerboard tracing, half-res RTAO (see the 2026-09-21 discussion).
+
+## 2026-09-21 — bright line along concave creases (fixed, user-verified)
+
+The RTAO buffer showed a thin *bright* line exactly at wall/floor and wall/wall contacts, where GTAO is darkest.
+Cause: the ray origin was lifted 1 unit along the **bump-mapped normal**; within that distance of an adjoining face
+(sooner where a normal-map bevel tilts the normal toward it) the origin lands *behind* that face, world faces are
+single-sided, the hemisphere looks into the void and the rays miss → unoccluded. Fix (`rtao_ray.frag`): pull the
+origin back **toward the eye** (`0.25 + depth · 0.004`, plus a 0.05 normal lift against self-hits) — the camera
+sees the point, so the segment back to it is unobstructed by construction and the origin can never be inside
+geometry. The cosine hemisphere still uses the bump normal, so normal-map AO detail is unchanged.

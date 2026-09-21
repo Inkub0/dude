@@ -134,17 +134,11 @@ void main() {
 	// within the lift distance of an adjoining face - sooner where the normal map's bevel tilts the normal
 	// toward it - the origin lands BEHIND that face, world faces are single-sided, the hemisphere looks into
 	// the void and the rays miss: a thin WHITE line exactly where the contact should be darkest. Pull the
-	// origin back toward the EYE instead (u_localParam1.w > 0): the camera sees this point, so the segment
+	// origin back toward the EYE instead (u_localParam1.w per unit depth): the camera sees this point, so the segment
 	// back to it is unobstructed by construction and the origin can never be inside geometry. The pull-back
 	// grows with depth like the depth buffer's own error; a tiny normal lift remains against self-hits.
-	vec3  rayOrg;
-	if ( u_localParam1.w > 0.0 ) {
-		vec3 eyeW = ( u_modelViewMatrix * vec4( 0.0, 0.0, 0.0, 1.0 ) ).xyz;
-		vec3 toEye = normalize( eyeW - Pw );
-		rayOrg = Pw + toEye * ( 0.25 + d * u_localParam1.w ) + Nw * 0.05;
-	} else {
-		rayOrg = Pw + Nw * u_localParam1.z;									// previous behaviour (A/B)
-	}
+	vec3  eyeW   = ( u_modelViewMatrix * vec4( 0.0, 0.0, 0.0, 1.0 ) ).xyz;
+	vec3  rayOrg = Pw + normalize( eyeW - Pw ) * ( 0.25 + d * u_localParam1.w ) + Nw * 0.05;
 	float radius = u_localParam0.z;
 	rayQueryEXT rq;
 	rayQueryInitializeEXT( rq,
