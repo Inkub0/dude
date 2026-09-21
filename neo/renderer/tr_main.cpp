@@ -1128,6 +1128,15 @@ struct rtModelInst_t {
 struct rtModelBlas_t { const idRenderModel *model; rhi::BlasHandle blas; };
 static idList<rhi::BlasHandle>	s_rtAreaBlas;
 static idList<rtModelBlas_t>	s_rtModelBlas;
+// Entity coverage Item 3 (docs/rtx-reflections.md): items DROPPED at runtime (a monster's chainsaw etc.)
+// spawn AFTER the once-per-map scene build, so they are absent from s_rtModelBlas. Build their attributed
+// BLAS on FIRST SIGHT in the per-frame refresh and cache it here, keyed by model + a lightweight topology
+// signature (guards the rare model-pointer reuse). No mid-map destroy (DestroyBlas stalls) — a first-sight
+// entry lives until the map's DestroyRtScene frees every BLAS; its dedicated VB/IB are tracked in
+// s_rtEntityExtraBufs and freed by R_RtFreeWorldGeo. Cleared alongside s_rtModelBlas on teardown/rebuild.
+struct rtDroppedBlas_t { const idRenderModel *model; rhi::BlasHandle blas; unsigned long long sig; };
+static idList<rtDroppedBlas_t>	s_rtDroppedBlas;
+static idList<rhi::BufferHandle> s_rtEntityExtraBufs;
 // perforated casters (alpha-tested grates/fences; see R_RtBuildPerforatedBlas)
 static idList<rhi::BlasHandle>	s_rtPerfAreaBlas;
 static idList<rtModelBlas_t>	s_rtPerfModelBlas;
@@ -1145,6 +1154,12 @@ static rhi::BufferHandle		s_rtPerfIB = 0;
 // with the scene (the geo table references them each frame); freed on scene (re)build via R_RtFreeWorldGeo.
 static rhi::BufferHandle		s_rtWorldVB = 0;
 static rhi::BufferHandle		s_rtWorldIB = 0;
+// Entity coverage (docs/rtx-reflections.md "Entity coverage" Item 1): the static entity props' full
+// idDrawVert + 32-bit indices, feeding one attributed per-model BLAS each so a reflection ray fetches
+// st + material at a prop hit (before this the props were positions-only defer rows -> black). Persist
+// with the scene alongside s_rtWorldVB/IB; freed on scene (re)build via R_RtFreeWorldGeo.
+static rhi::BufferHandle		s_rtEntityVB = 0;
+static rhi::BufferHandle		s_rtEntityIB = 0;
 
 // shared caster filter: opaque OR perforated + shadow-casting, CPU data resident.
 // PERFORATED (alpha-tested) surfaces cast too - Doom 3's own stencil shadows treat them as
@@ -1386,10 +1401,13 @@ static unsigned long long R_RtBuildScene( rhi::RHI *r,
 		const float *aPos, const int *aIdx, const rtAreaSlice_t *aSlices, int numASlices,
 		const float *mPos, const int *mIdx, rtModelSlice_t *mSlices, int numMSlices,
 		const rtModelInst_t *mInsts, int numMInsts, int *blasFail, bool registerForRefresh,
-		bool areasPreBuilt ) {
+		bool areasPreBuilt, bool modelsPreBuilt ) {
 	if ( registerForRefresh ) {
 		if ( !areasPreBuilt ) { s_rtAreaBlas.Clear(); }	// RR5: pre-built world areas already filled s_rtAreaBlas
-		s_rtModelBlas.Clear();
+		// Entity coverage Item 1: when modelsPreBuilt, s_rtModelBlas already holds this scene's ATTRIBUTED
+		// per-model BLASes (R_RtBuildEntityModelBlas ran first) — do not clear or rebuild them here; the
+		// instance loop below just looks each up by model. Else (validator transient build) fill it positions-only.
+		if ( !modelsPreBuilt ) { s_rtModelBlas.Clear(); }
 	}
 	const int maxInst = ( areasPreBuilt ? s_rtAreaBlas.Num() : numASlices ) + numMInsts;
 	rhi::RHI::RtInstance *inst = (rhi::RHI::RtInstance *)Mem_Alloc16( ( maxInst > 0 ? maxInst : 1 ) * (int)sizeof( rhi::RHI::RtInstance ) );
@@ -1421,7 +1439,7 @@ static unsigned long long R_RtBuildScene( rhi::RHI *r,
 		in.blas = blas;
 		in.mask = 0xFF;
 	}
-	for ( int s = 0; s < numMSlices; s++ ) {
+	for ( int s = 0; s < numMSlices && !modelsPreBuilt; s++ ) {	// modelsPreBuilt: BLASes are attributed in s_rtModelBlas already
 		mSlices[s].blas = r->CreateBlas( mPos + mSlices[s].vertStart * 3, mSlices[s].numVerts,
 			3 * (int)sizeof( float ), mIdx + mSlices[s].idxStart, mSlices[s].numIdx );
 		if ( mSlices[s].blas == 0 ) {
@@ -1435,7 +1453,16 @@ static unsigned long long R_RtBuildScene( rhi::RHI *r,
 	}
 	for ( int i = 0; i < numMInsts; i++ ) {
 		const rtModelInst_t &mi = mInsts[i];
-		if ( mSlices[mi.slice].blas == 0 ) {
+		// resolve this instance's BLAS: pre-built attributed models are keyed by model in s_rtModelBlas
+		// (Item 1), else it is the slice's positions-only BLAS just built above (validator path).
+		rhi::BlasHandle blas = mSlices[mi.slice].blas;
+		if ( modelsPreBuilt ) {
+			blas = 0;
+			for ( int u = 0; u < s_rtModelBlas.Num(); u++ ) {
+				if ( s_rtModelBlas[u].model == mSlices[mi.slice].model ) { blas = s_rtModelBlas[u].blas; break; }
+			}
+		}
+		if ( blas == 0 ) {
 			continue;
 		}
 		rhi::RHI::RtInstance &in = inst[numInst++];
@@ -1447,7 +1474,7 @@ static unsigned long long R_RtBuildScene( rhi::RHI *r,
 			in.transform[row * 4 + 2] = mi.mat[row + 8];
 			in.transform[row * 4 + 3] = mi.mat[row + 12];
 		}
-		in.blas = mSlices[mi.slice].blas;
+		in.blas = blas;
 		in.mask = 0xFF;
 	}
 	unsigned long long tlasAddr = ( numInst > 0 ) ? r->BuildTlas( inst, numInst ) : 0;
@@ -1553,6 +1580,30 @@ static unsigned long long R_RtHashBytes( unsigned long long h, const void *data,
 	return h;
 }
 
+// Item 3: a lightweight topology signature of a static model's CASTING surfaces (pointer + surface count +
+// each casting surface's vert/index counts). If a first-sight model pointer is freed and reused for
+// DIFFERENT geometry within a map, this changes, so R_RtRefreshInstances rebuilds the stale entry instead
+// of instancing the wrong shape into a reflection. Same idea as the animated-BLAS cache's topoSig.
+static unsigned long long R_RtModelTopoSig( const idRenderModel *model ) {
+	unsigned long long sig = 1469598103934665603ULL;	// FNV-1a basis
+	const void *p = model;
+	sig = R_RtHashBytes( sig, &p, sizeof( p ) );
+	const int ns = model->NumSurfaces();
+	sig = R_RtHashBytes( sig, &ns, sizeof( ns ) );
+	for ( int s = 0; s < ns; s++ ) {
+		const modelSurface_t *surf = model->Surface( s );
+		if ( !R_RtSurfCasts( surf ) ) { continue; }
+		const int nv = surf->geometry->numVerts, ni = surf->geometry->numIndexes;
+		sig = R_RtHashBytes( sig, &nv, sizeof( nv ) );
+		sig = R_RtHashBytes( sig, &ni, sizeof( ni ) );
+	}
+	return sig;
+}
+// Item 3: build ONE static model's attributed BLAS (dedicated VB/IB, tracked for teardown). Defined with
+// the batch builder R_RtBuildEntityModelBlas (needs the material helpers below); forward-declared so the
+// per-frame refresh can call it for a first-sight dropped item.
+static rhi::BlasHandle R_RtBuildOneEntityModelBlas( rhi::RHI *r, const idRenderModel *model );
+
 static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	static int lastFrame = -1;
 	if ( tr.frameCount == lastFrame ) {
@@ -1594,8 +1645,34 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 				break;
 			}
 		}
+		// Item 3: a DM_STATIC caster the map build never saw — an item DROPPED at runtime. Build its
+		// attributed BLAS on first sight (synchronous, a brief one-time stall) and cache it so it reflects
+		// + casts like a map-placed prop. A reused model pointer whose topology changed rebuilds the entry.
 		if ( blas == 0 ) {
-			continue;
+			const unsigned long long sig = R_RtModelTopoSig( model );
+			bool found = false;
+			for ( int u = 0; u < s_rtDroppedBlas.Num(); u++ ) {
+				if ( s_rtDroppedBlas[u].model == model ) {
+					found = true;
+					if ( s_rtDroppedBlas[u].sig != sig ) {
+						// pointer reused for different geometry -> rebuild (old handle orphaned until map change)
+						s_rtDroppedBlas[u].blas = R_RtBuildOneEntityModelBlas( r, model );
+						s_rtDroppedBlas[u].sig = sig;
+					}
+					blas = s_rtDroppedBlas[u].blas;		// may be 0 for a model that can't be built (cached below)
+					break;
+				}
+			}
+			if ( !found ) {
+				// cache the result even when 0 (no castable surfaces / >64 surfaces / device failure), so a
+				// non-buildable dropped model is not retried — and re-stalled — every frame.
+				rtDroppedBlas_t d; d.model = model; d.blas = R_RtBuildOneEntityModelBlas( r, model ); d.sig = sig;
+				s_rtDroppedBlas.Append( d );
+				blas = d.blas;
+			}
+		}
+		if ( blas == 0 ) {
+			continue;						// still nothing (build failed / >64 surfaces): skip
 		}
 		float mm[16];
 		R_AxisToModelMatrix( def->parms.axis, def->parms.origin, mm );
@@ -1955,9 +2032,16 @@ static void R_RtFreeWorldGeo( void ) {
 	s_rtPerfWorldBounds.Clear();
 	s_rtPerfModelBounds.Clear();
 	s_rtPerfFrameBounds.Clear();
-	if ( r == NULL ) { s_rtWorldVB = 0; s_rtWorldIB = 0; s_rtPerfVB = 0; s_rtPerfIB = 0; return; }
+	s_rtDroppedBlas.Clear();		// Item 3: first-sight dropped-item BLASes die with DestroyRtScene, like s_rtModelBlas
+	if ( r == NULL ) { s_rtEntityExtraBufs.Clear(); s_rtWorldVB = 0; s_rtWorldIB = 0; s_rtEntityVB = 0; s_rtEntityIB = 0; s_rtPerfVB = 0; s_rtPerfIB = 0; return; }
+	for ( int i = 0; i < s_rtEntityExtraBufs.Num(); i++ ) {	// Item 3: dedicated first-sight VB/IB (deferred-safe destroy)
+		if ( s_rtEntityExtraBufs[i] != 0 ) { r->DestroyBuffer( s_rtEntityExtraBufs[i] ); }
+	}
+	s_rtEntityExtraBufs.Clear();
 	if ( s_rtWorldVB != 0 ) { r->DestroyBuffer( s_rtWorldVB ); s_rtWorldVB = 0; }
 	if ( s_rtWorldIB != 0 ) { r->DestroyBuffer( s_rtWorldIB ); s_rtWorldIB = 0; }
+	if ( s_rtEntityVB != 0 ) { r->DestroyBuffer( s_rtEntityVB ); s_rtEntityVB = 0; }
+	if ( s_rtEntityIB != 0 ) { r->DestroyBuffer( s_rtEntityIB ); s_rtEntityIB = 0; }
 	if ( s_rtPerfVB != 0 ) { r->DestroyBuffer( s_rtPerfVB ); s_rtPerfVB = 0; }
 	if ( s_rtPerfIB != 0 ) { r->DestroyBuffer( s_rtPerfIB ); s_rtPerfIB = 0; }
 }
@@ -2217,6 +2301,200 @@ static bool R_RtBuildWorldAreaBlas( rhi::RHI *r, const idRenderWorldLocal *world
 	return numAreaBlas > 0;
 }
 
+// Entity coverage (docs/rtx-reflections.md "Entity coverage" Item 1): the static-entity counterpart of
+// R_RtBuildWorldAreaBlas. Build every map-placed DM_STATIC shadow-casting prop (func_static crates /
+// consoles, inline brush movers) as an ATTRIBUTED per-unique-model BLAS — full idDrawVert (so st + normal
+// are available) + surface-local 32-bit indices in the dedicated s_rtEntityVB/IB, each geometry carrying
+// its material's texIndex + baseColor exactly as the world path. Fills s_rtModelBlas keyed by model, so
+// R_RtRefreshInstances re-instances each with its entity's CURRENT pose every frame (a model-space BLAS +
+// per-frame transform is what lets movers track) and UpdateTlas gives every geometry an attributed
+// geo-table row. Before this, entity models were positions-only defer rows (flags & 1 == 0) and a
+// reflection ray hitting one returned 0 -> the prop reflected as black. Runs right after the world areas
+// (which already freed the stale buffers via R_RtFreeWorldGeo); may legitimately find nothing (a map with
+// no static entity casters) and return false. The same unique-model set R_RtGatherEntities enumerates, so
+// the static-anchor instance loop (R_RtBuildScene modelsPreBuilt) resolves every instance here.
+static bool R_RtBuildEntityModelBlas( rhi::RHI *r, const idRenderWorldLocal *world, int &numModelBlas, int &modelTris ) {
+	numModelBlas = 0; modelTris = 0;
+	s_rtModelBlas.Clear();
+	if ( s_rtEntityVB != 0 ) { r->DestroyBuffer( s_rtEntityVB ); s_rtEntityVB = 0; }	// normally already 0 (R_RtFreeWorldGeo ran); defensive
+	if ( s_rtEntityIB != 0 ) { r->DestroyBuffer( s_rtEntityIB ); s_rtEntityIB = 0; }
+
+	// pass 1: unique DM_STATIC casting models + their surface/soup sizes (same filter as R_RtGatherEntities)
+	const int maxUnique = world->entityDefs.Num();
+	const idRenderModel **unique = (const idRenderModel **)Mem_Alloc16( ( maxUnique > 0 ? maxUnique : 1 ) * (int)sizeof( void * ) );
+	int uniqueCount = 0, numSurfs = 0, totVerts = 0, totIdx = 0;
+	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
+		const idRenderEntityLocal *def = world->entityDefs[i];
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow ) {
+			continue;
+		}
+		const idRenderModel *model = def->parms.hModel;
+		if ( model->IsStaticWorldModel() || model->IsDynamicModel() != DM_STATIC ) {
+			continue;						// _areaN already gathered; animated/generated models are cast elsewhere
+		}
+		int entIdx = 0;
+		for ( int s = 0; s < model->NumSurfaces(); s++ ) {
+			if ( R_RtSurfCasts( model->Surface( s ) ) ) { entIdx += model->Surface( s )->geometry->numIndexes; }
+		}
+		if ( entIdx < 3 ) {
+			continue;
+		}
+		bool seen = false;
+		for ( int u = 0; u < uniqueCount; u++ ) {
+			if ( unique[u] == model ) { seen = true; break; }
+		}
+		if ( seen ) {
+			continue;
+		}
+		unique[uniqueCount++] = model;
+		for ( int s = 0; s < model->NumSurfaces(); s++ ) {
+			if ( R_RtSurfCasts( model->Surface( s ) ) ) {
+				numSurfs++;
+				totVerts += model->Surface( s )->geometry->numVerts;
+				totIdx += model->Surface( s )->geometry->numIndexes;
+			}
+		}
+	}
+	if ( uniqueCount == 0 || numSurfs == 0 || totIdx < 3 ) {
+		Mem_Free16( (void *)unique );
+		return false;
+	}
+
+	// pass 2: pack full idDrawVert + surface-local indices into the dedicated entity buffers; one SurfDesc
+	// per casting surface, tagged with its owning model so the BLAS loop groups a model's surfaces together.
+	idDrawVert *verts = (idDrawVert *)Mem_Alloc16( totVerts * (int)sizeof( idDrawVert ) );
+	unsigned int *idxs = (unsigned int *)Mem_Alloc16( totIdx * (int)sizeof( unsigned int ) );
+	struct SurfDesc { const idRenderModel *model; int vOff, nV, iOff, nI; unsigned int tex, col; };
+	SurfDesc *sd = (SurfDesc *)Mem_Alloc16( numSurfs * (int)sizeof( SurfDesc ) );
+	int si = 0, vBase = 0, iBase = 0;
+	for ( int u = 0; u < uniqueCount; u++ ) {
+		const idRenderModel *model = unique[u];
+		for ( int s = 0; s < model->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = model->Surface( s );
+			if ( !R_RtSurfCasts( surf ) ) { continue; }
+			const srfTriangles_t *tri = surf->geometry;
+			memcpy( verts + vBase, tri->verts, tri->numVerts * (int)sizeof( idDrawVert ) );
+			for ( int m = 0; m < tri->numIndexes; m++ ) { idxs[iBase + m] = (unsigned int)tri->indexes[m]; }	// surface-local
+			sd[si].model = model;
+			sd[si].vOff = vBase; sd[si].nV = tri->numVerts;
+			sd[si].iOff = iBase; sd[si].nI = tri->numIndexes;
+			sd[si].tex = R_RtMaterialTexIndex( surf->shader );
+			sd[si].col = R_RtMaterialBaseColor( surf->shader );
+			si++; vBase += tri->numVerts; iBase += tri->numIndexes;
+		}
+	}
+	modelTris = totIdx / 3;
+	s_rtEntityVB = r->CreateBuffer( rhi::BU_VERTEX, totVerts * (int)sizeof( idDrawVert ), verts );
+	s_rtEntityIB = r->CreateBuffer( rhi::BU_INDEX, totIdx * (int)sizeof( unsigned int ), idxs );
+	Mem_Free16( verts ); Mem_Free16( idxs );
+	const unsigned long long vbAddr = ( s_rtEntityVB != 0 ) ? r->GetBufferDeviceAddress( s_rtEntityVB ) : 0;
+	const unsigned long long ibAddr = ( s_rtEntityIB != 0 ) ? r->GetBufferDeviceAddress( s_rtEntityIB ) : 0;
+	if ( vbAddr == 0 || ibAddr == 0 ) {
+		if ( s_rtEntityVB != 0 ) { r->DestroyBuffer( s_rtEntityVB ); s_rtEntityVB = 0; }
+		if ( s_rtEntityIB != 0 ) { r->DestroyBuffer( s_rtEntityIB ); s_rtEntityIB = 0; }
+		Mem_Free16( sd ); Mem_Free16( (void *)unique );
+		return false;
+	}
+
+	// one attributed multi-geometry BLAS per unique model. MAXG mirrors the backend's MAX_BLAS_GEOMS; a
+	// model with >64 casting surfaces (very rare for a prop) caps at 64 — the world path chunks such a case
+	// across several identity area BLASes, but an entity model is ONE per-entity-instanced BLAS, so it caps.
+	const int MAXG = 64;
+	rhi::RHI::BlasGeometry geoms[64];
+	for ( int u = 0; u < uniqueCount; u++ ) {
+		const idRenderModel *model = unique[u];
+		int cnt = 0;
+		for ( int base = 0; base < numSurfs && cnt < MAXG; base++ ) {
+			if ( sd[base].model != model ) { continue; }
+			geoms[cnt] = rhi::RHI::BlasGeometry();
+			geoms[cnt].vertexAddress = vbAddr + (unsigned long long)sd[base].vOff * (unsigned long long)sizeof( idDrawVert );
+			geoms[cnt].vertexStride = (unsigned int)sizeof( idDrawVert );
+			geoms[cnt].vertexCount = (unsigned int)sd[base].nV;
+			geoms[cnt].indexAddress = ibAddr + (unsigned long long)sd[base].iOff * (unsigned long long)sizeof( unsigned int );
+			geoms[cnt].indexCount = (unsigned int)sd[base].nI;
+			geoms[cnt].baseColor = sd[base].col;
+			geoms[cnt].texIndex = sd[base].tex;
+			cnt++;
+		}
+		if ( cnt == 0 ) { continue; }
+		rhi::BlasHandle blas = r->CreateBlasFromBuffers( geoms, cnt, false );
+		if ( blas != 0 ) {
+			rtModelBlas_t mb;
+			mb.model = model;
+			mb.blas = blas;
+			s_rtModelBlas.Append( mb );
+			numModelBlas++;
+		}
+	}
+	Mem_Free16( sd ); Mem_Free16( (void *)unique );
+	return numModelBlas > 0;
+}
+
+// Item 3: the single-model builder the per-frame refresh calls for a runtime-dropped item (forward-declared
+// up by R_RtRefreshInstances). Same attributed packing as R_RtBuildEntityModelBlas but for ONE model into
+// its own dedicated VB/IB (tracked in s_rtEntityExtraBufs, freed at scene teardown). CreateBlasFromBuffers
+// is synchronous (a brief stall) — fine for the rare first sight. Returns 0 when there is nothing castable,
+// on device failure, or when the model has >64 casting surfaces (can't fit one per-entity BLAS).
+static rhi::BlasHandle R_RtBuildOneEntityModelBlas( rhi::RHI *r, const idRenderModel *model ) {
+	if ( r == NULL || model == NULL ) { return 0; }
+	int numSurfs = 0, totVerts = 0, totIdx = 0;
+	for ( int s = 0; s < model->NumSurfaces(); s++ ) {
+		if ( R_RtSurfCasts( model->Surface( s ) ) ) {
+			numSurfs++;
+			totVerts += model->Surface( s )->geometry->numVerts;
+			totIdx += model->Surface( s )->geometry->numIndexes;
+		}
+	}
+	if ( numSurfs == 0 || totIdx < 3 || numSurfs > 64 ) { return 0; }
+	idDrawVert *verts = (idDrawVert *)Mem_Alloc16( totVerts * (int)sizeof( idDrawVert ) );
+	unsigned int *idxs = (unsigned int *)Mem_Alloc16( totIdx * (int)sizeof( unsigned int ) );
+	struct SurfDesc { int vOff, nV, iOff, nI; unsigned int tex, col; };
+	SurfDesc sd[64];
+	int si = 0, vBase = 0, iBase = 0;
+	for ( int s = 0; s < model->NumSurfaces(); s++ ) {
+		const modelSurface_t *surf = model->Surface( s );
+		if ( !R_RtSurfCasts( surf ) ) { continue; }
+		const srfTriangles_t *tri = surf->geometry;
+		memcpy( verts + vBase, tri->verts, tri->numVerts * (int)sizeof( idDrawVert ) );
+		for ( int m = 0; m < tri->numIndexes; m++ ) { idxs[iBase + m] = (unsigned int)tri->indexes[m]; }	// surface-local
+		sd[si].vOff = vBase; sd[si].nV = tri->numVerts;
+		sd[si].iOff = iBase; sd[si].nI = tri->numIndexes;
+		sd[si].tex = R_RtMaterialTexIndex( surf->shader );
+		sd[si].col = R_RtMaterialBaseColor( surf->shader );
+		si++; vBase += tri->numVerts; iBase += tri->numIndexes;
+	}
+	rhi::BufferHandle vb = r->CreateBuffer( rhi::BU_VERTEX, totVerts * (int)sizeof( idDrawVert ), verts );
+	rhi::BufferHandle ib = r->CreateBuffer( rhi::BU_INDEX, totIdx * (int)sizeof( unsigned int ), idxs );
+	Mem_Free16( verts ); Mem_Free16( idxs );
+	const unsigned long long vbAddr = ( vb != 0 ) ? r->GetBufferDeviceAddress( vb ) : 0;
+	const unsigned long long ibAddr = ( ib != 0 ) ? r->GetBufferDeviceAddress( ib ) : 0;
+	if ( vbAddr == 0 || ibAddr == 0 ) {
+		if ( vb != 0 ) { r->DestroyBuffer( vb ); }
+		if ( ib != 0 ) { r->DestroyBuffer( ib ); }
+		return 0;
+	}
+	rhi::RHI::BlasGeometry geoms[64];
+	for ( int g = 0; g < si; g++ ) {
+		geoms[g] = rhi::RHI::BlasGeometry();
+		geoms[g].vertexAddress = vbAddr + (unsigned long long)sd[g].vOff * (unsigned long long)sizeof( idDrawVert );
+		geoms[g].vertexStride = (unsigned int)sizeof( idDrawVert );
+		geoms[g].vertexCount = (unsigned int)sd[g].nV;
+		geoms[g].indexAddress = ibAddr + (unsigned long long)sd[g].iOff * (unsigned long long)sizeof( unsigned int );
+		geoms[g].indexCount = (unsigned int)sd[g].nI;
+		geoms[g].baseColor = sd[g].col;
+		geoms[g].texIndex = sd[g].tex;
+	}
+	rhi::BlasHandle blas = r->CreateBlasFromBuffers( geoms, si, false );
+	if ( blas == 0 ) {
+		r->DestroyBuffer( vb );		// deferred-safe
+		r->DestroyBuffer( ib );
+		return 0;
+	}
+	s_rtEntityExtraBufs.Append( vb );	// freed at scene teardown (R_RtFreeWorldGeo)
+	s_rtEntityExtraBufs.Append( ib );
+	return blas;
+}
+
 static idStr s_rtWorldMap;
 static void R_RtWorldUpdate( void ) {
 	rhi::RHI *r = rhi::GetRHI();
@@ -2262,28 +2540,29 @@ static void R_RtWorldUpdate( void ) {
 
 	// RR5: build the static worldspawn as PER-SURFACE multi-geometry BLASes (device buffers), so a
 	// reflection ray can fetch st + material at a world hit and the RT reflection shader shades the real
-	// room (docs/rtx-reflections.md). Entities (func_static / movers) still gather positions-only for now.
-	// terrain-as-models maps legitimately have ZERO worldspawn surfaces — the scene still builds from the
-	// entity casters alone, so neither gates the other; only both-empty means there is nothing to trace.
+	// room (docs/rtx-reflections.md). Entity coverage Item 1: the map's func_static props / inline movers
+	// are now built the SAME attributed way (R_RtBuildEntityModelBlas -> s_rtModelBlas), so they reflect
+	// their real texture instead of black. terrain-as-models maps legitimately have ZERO worldspawn
+	// surfaces — the scene still builds from the entity casters alone, so neither gates the other; only
+	// both-empty means there is nothing to trace.
 	int numAreaBlas = 0, worldTris = 0;
 	const bool areasOk = R_RtBuildWorldAreaBlas( r, world, numAreaBlas, worldTris );
+	int numModelBlas = 0, entTris = 0;
+	R_RtBuildEntityModelBlas( r, world, numModelBlas, entTris );	// fills s_rtModelBlas attributed + s_rtEntityVB/IB
 	float *mPos; int *mIdx; rtModelSlice_t *mSlices; rtModelInst_t *mInsts;
 	int numMSlices, numMInsts;
-	R_RtGatherEntities( world, mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts );
+	R_RtGatherEntities( world, mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts );	// per-entity instance list for the static anchor
 	if ( !areasOk && numMInsts == 0 ) {
 		R_RtFreeWorldGeo();
+		s_rtModelBlas.Clear();
 		return;
 	}
 
 	const int msStart = Sys_Milliseconds();
 	int blasFail = 0;
 	const unsigned long long tlasAddr = R_RtBuildScene( r, NULL, NULL, NULL, 0,
-		mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail, true, /*areasPreBuilt=*/true );
+		mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail, true, /*areasPreBuilt=*/true, /*modelsPreBuilt=*/true );
 	const int msBuild = Sys_Milliseconds() - msStart;
-	int mTris = 0;
-	for ( int s = 0; s < numMSlices; s++ ) {
-		mTris += mSlices[s].numIdx / 3;
-	}
 	if ( mPos ) { Mem_Free16( mPos ); Mem_Free16( mIdx ); Mem_Free16( mSlices ); Mem_Free16( mInsts ); }
 	if ( tlasAddr == 0 ) {
 		common->Warning( "r_rtWorld: world scene build failed (%d BLAS failures) - disabling", blasFail );
@@ -2301,8 +2580,8 @@ static void R_RtWorldUpdate( void ) {
 	// the static anchor TLAS above stays solid-only (it is what the CPU-reference validators trace)
 	int numPerfBlas = 0, perfTris = 0;
 	R_RtBuildPerforatedBlas( r, world, numPerfBlas, perfTris );
-	common->Printf( "r_rtWorld: %d area BLAS (%d tris, per-surface) + %d model BLAS (%d tris, %d instances) + %d perforated BLAS (%d tris, alpha-tested), %d ms build%s\n",
-		numAreaBlas, worldTris, numMSlices, mTris, numMInsts, numPerfBlas, perfTris, msBuild,
+	common->Printf( "r_rtWorld: %d area BLAS (%d tris, per-surface) + %d model BLAS (%d tris, %d instances, attributed) + %d perforated BLAS (%d tris, alpha-tested), %d ms build%s\n",
+		numAreaBlas, worldTris, numModelBlas, entTris, numMInsts, numPerfBlas, perfTris, msBuild,
 		blasFail ? va( " (%d BLAS failed)", blasFail ) : "" );
 }
 
@@ -2444,7 +2723,7 @@ static void R_RtWorldValidate( void ) {
 	} else {
 		const int msStart = Sys_Milliseconds();
 		tlasAddr = R_RtBuildScene( r, aPos, aIdx, aSlices, numASlices,
-			mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail, false, /*areasPreBuilt=*/false );
+			mPos, mIdx, mSlices, numMSlices, mInsts, numMInsts, &blasFail, false, /*areasPreBuilt=*/false, /*modelsPreBuilt=*/false );
 		msBuild = Sys_Milliseconds() - msStart;
 	}
 	int mTris = 0;
