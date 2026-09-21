@@ -224,7 +224,7 @@ particles, ...): they were all off by 3x in cinematics too - fixed
 separately, see [cinematic-depth.md](cinematic-depth.md). (This section first blamed
 `renderView.cramZNear` and "4x": wrong mechanism, the game never sets it.)
 
-## No ray where the light is black (2026-09-21, branch `perf/rt-shadow-ray-skip-unlit`, UNMEASURED)
+## No ray where the light is black (2026-09-21, branch `perf/rt-shadow-ray-skip-unlit`, user-measured)
 
 A Doom 3 light volume is a box; its projection x falloff is usually round. Pixels in the box's
 corners get exactly zero from the light, shadowed or not - but both ray paths traced for them:
@@ -242,8 +242,10 @@ corners get exactly zero from the light, shadowed or not - but both ray paths tr
   volume as before.
 
 Expected gain: proportional to how much of each light's on-screen box is black (up to ~20-45% of
-the rays for round lights); nothing for lights whose images fill the box. **Pending the user's
-`r_vkGpuTime` A/B against master.**
+the rays for round lights); nothing for lights whose images fill the box.
+
+**Measured by the user (`r_vkGpuTime`, 2026-09-21):** the RT-shadows-vs-shadow-maps gap fell from
+**~0.9 ms to ~0.5-0.6 ms** (about a third of the toll), no visible change reported.
 
 ## Cvars
 
