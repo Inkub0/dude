@@ -11,14 +11,14 @@ record above the original plan text.
 
 ## PARKED FOLLOW-UP — FSR2 optimisation wishlist (user-approved 2026-08-20, not scheduled)
 
-Three post-R1 improvements the user wants pursued eventually — parked deliberately, do not
+Three post-R1 improvements the user wants pursued eventually (item 1 since shipped) — parked deliberately, do not
 chase until FSR2 work reopens (limb ghosting sighting or the RT-era upscaling package):
 
-1. **Velocity into the merged normal prepass** (~0.3–0.5 ms GPU back): `r_fsr` currently
-   forces the STANDALONE 3-MRT G-buffer pass even when the merged-into-zfill normal path
-   could carry a 3rd attachment. Deliberately sidestepped in A2 because the merged pass owns
-   the depth-EQUAL / `RB_RHI_TessBumpForZfill` tessellation contract (the ember/acne bug
-   class) — the riskiest cheap win, needs that contract re-verified.
+1. ~~**Velocity into the merged normal prepass**~~ — **DONE 2026-09-16** (`r_ssaoMergeNormal`,
+   VK default on every tier): the merged depth+normal pass gained the RG16F velocity
+   attachment, so `r_fsr` no longer forces the standalone 3-MRT G-buffer pass. Record:
+   [ssao-normal-merge.md](ssao-normal-merge.md). The standalone target remains only as the
+   fallback (`r_ssaoMergeNormal 0` / merge unavailable).
 2. **Kill the Native-AA copy-back** (~0.1 ms): needs the scene/HUD reorder below — bundle
    with the upscaling work, not standalone.
 3. **Feed the engine's eye-adaptation exposure to FSR2** (drop `FFX_FSR2_ENABLE_AUTO_EXPOSURE`,

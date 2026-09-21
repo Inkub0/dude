@@ -3984,8 +3984,9 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const bool ssaoWants = r_ssao.GetBool()
 		&& ( r_ssaoNormalBuffer.GetBool() || r_ssaoDebug.GetInteger() == 3 );
 	// R1/A2: per-object motion vectors are VK-only (GL3 has no float-colour RT). When on they
-	// FORCE the normal prepass to run (for the velocity MRT) even if SSAO/SSR want nothing, and
-	// take the standalone 3-MRT path — never the depth-merged pass, which has no 3rd attachment.
+	// FORCE the normal prepass to run (for the velocity MRT) even if SSAO/SSR want nothing. The
+	// depth-merged pass carries the RG16F attachment too (docs/ssao-normal-merge.md, 2026-09-16),
+	// so velocity rides the merge by default; the standalone 3-MRT target is only the fallback.
 	// r_fsr (C2) implies them: FSR2 is unusable without a velocity buffer, and MV/jitter are
 	// internal infrastructure, not user-facing toggles (plan section E).
 	const bool velWants = ( r_motionVectors.GetBool() || r_fsr.GetBool() )
@@ -7489,8 +7490,9 @@ inverted. No-op unless r_motionVectors + r_mvDebug are on and the standalone vel
 exists (VK only).
 ===================
 */
-// R1/C2: the standalone 3-MRT target whose attachment 2 holds this view's RG16F per-object
-// velocity, or 0 when it wasn't produced (MV off, GL3, subview, or the merged prepass ran).
+// R1/C2: the target whose RG16F attachment holds this view's per-object velocity - the merged
+// prepass's pseudo-handle by default, else the standalone 3-MRT target (attachment 2) - or 0
+// when it wasn't produced (MV off, GL3, subview).
 // The FSR2 dispatch reads it; same existence conditions the r_mvDebug overlay uses.
 rhi::RenderTargetHandle RB_RHI_VelocityTargetThisView( void ) {
 	return ( rhiNormalReadyThisView && rhiNormalVelThisView ) ? rhiNormalResultRT : 0;
