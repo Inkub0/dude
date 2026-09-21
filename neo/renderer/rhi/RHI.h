@@ -194,6 +194,7 @@ struct RtaoDenoiseArgs {
 	float	denoisingRange;				// world units; sky lies beyond
 	unsigned int frameIndex;
 	bool	reset;						// history invalid: CLEAR_AND_RESTART
+	int		viewzAtt, normalAtt;		// colour-attachment index of the guide inside viewzRT / normalRT (0 = a single-colour target)
 };
 
 class RHI {
@@ -332,6 +333,10 @@ public:
 	// explicit textureLod (a mip-spanning sampler). Default returns 0 so a backend
 	// without the capability degrades to the non-mipped path.
 	virtual RenderTargetHandle	CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels ) { return 0; }
+	// RTAO ray + NRD guide MRT (docs/rtx-rtao.md): three colour attachments, no depth - R16F normalised hit
+	// distance @0, R16F signed view z @1, RGBA16F packed world normal @2 - so the ray pass writes the
+	// denoiser's guides itself. Attachments 1/2 are read back with GetRenderTargetImage2/3. VK only.
+	virtual RenderTargetHandle	CreateRenderTargetRtaoMrt( int w, int h ) { return 0; }
 	// Begin a fullscreen pass rendering into a specific mip LEVEL of a mipped target
 	// (level 1..mipLevels-1; level 0 uses BeginTargetPass). Paired with EndPass.
 	virtual void				BeginTargetMipPass( RenderTargetHandle rt, int mipLevel, const ClearArgs *clear ) {}

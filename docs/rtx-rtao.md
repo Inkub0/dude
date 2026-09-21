@@ -104,3 +104,23 @@ no other code path is keyed on `r_ssao` for GPU work. What remains is shared and
 and GTAO then ran as the fallback: both producers in one frame. The pass now checks the denoise prerequisites
 first and returns before tracing (unless `r_rtaoDebug 1`, the only consumer of raw rays). Not the case at
 Ultra Nightmare (FSR on → velocity present), so no change there.
+
+
+## 2026-09-21 — guide passes folded into the ray pass (user-verified, merged)
+
+RTAO saves less than GTAO cost because it replaces one chain with five passes (rays, view-z guide, packed-normal
+guide, NRD, resolve). First trim, zero quality change: the **ray pass now writes both NRD guides itself** as
+extra render-target outputs — it already fetched depth and the G-buffer normal for every pixel and computed the
+view z + world normal for its ray, so the two standalone fullscreen guide passes (`rtao_viewz.frag`,
+`rtao_pack.frag`: two more depth/normal fetches per pixel, two pass begins, barriers) disappear.
+- *Why not into the geometry prepass (the first idea):* MRT writes there happen per rasterised fragment
+  (overdraw) and would touch every gbuffer pipeline/tess variant and the merged-prepass render pass; the ray
+  pass is one fullscreen draw with no overdraw and no variants.
+- New RHI target `CreateRenderTargetRtaoMrt` (R16F hit distance @0, R16F view z @1, RGBA16F packed normal @2,
+  VK pass class 9); `RtaoDenoiseArgs.viewzAtt/normalAtt` tell the denoiser which attachment holds each guide.
+  Guides are written on every path (sky / weapon / degenerate-normal early-outs included), identical values
+  to the old passes.
+- **Verified 2026-09-21:** identical AO, a small GPU-time gain (~0.1–0.3 ms as predicted), several minutes of
+  play without a device loss. The A/B cvar, the legacy three-pass branch and the two guide shaders
+  (`rtao_viewz`, `rtao_pack`) were then removed.
+- Still open for real savings: checkerboard tracing, half-res RTAO (see the 2026-09-21 discussion).

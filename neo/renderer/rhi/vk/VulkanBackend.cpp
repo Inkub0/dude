@@ -226,6 +226,7 @@ public:
 	virtual RenderTargetHandle	CreateRenderTargetColorDepth( ImageFormat fmt, int w, int h, int colorCount );
 	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h );
 	virtual RenderTargetHandle	CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels );
+	virtual RenderTargetHandle	CreateRenderTargetRtaoMrt( int w, int h );
 	virtual void				BeginTargetMipPass( RenderTargetHandle rt, int mipLevel, const ClearArgs *clear );
 	virtual ImageHandle			GetRenderTargetMipImage( RenderTargetHandle rt, int mipLevel );
 	virtual void				DestroyRenderTarget( RenderTargetHandle rt );
@@ -6701,8 +6702,13 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		RTAO_FAIL( 3, "input target/velocity lookup failed" );
 	}
 	ImageRec &vel = imageTable[a.velImage - 1];
-	auto targetView = []( RenderTarget *t ) {
-		return t->colorSampleView[0] != VK_NULL_HANDLE ? t->colorSampleView[0] : t->colorView[0];
+	// the guides may live in attachments 1/2 of the ray target itself (CreateRenderTargetRtaoMrt)
+	const int vzAtt = a.viewzAtt, nmAtt = a.normalAtt;
+	if ( vzAtt < 0 || vzAtt >= vz->colorCount || nmAtt < 0 || nmAtt >= norm->colorCount ) {
+		RTAO_FAIL( 9, "guide attachment index out of range" );
+	}
+	auto targetView = []( RenderTarget *t, int att ) {
+		return t->colorSampleView[att] != VK_NULL_HANDLE ? t->colorSampleView[att] : t->colorView[att];
 	};
 
 	// frame settings
@@ -6737,9 +6743,9 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 
 	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_MV]               = vel.view;
-	nrdUserViews[(uint32_t)nrd::ResourceType::IN_NORMAL_ROUGHNESS] = targetView( norm );
-	nrdUserViews[(uint32_t)nrd::ResourceType::IN_VIEWZ]            = targetView( vz );
-	nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_HITDIST]     = targetView( ray );
+	nrdUserViews[(uint32_t)nrd::ResourceType::IN_NORMAL_ROUGHNESS] = targetView( norm, nmAtt );
+	nrdUserViews[(uint32_t)nrd::ResourceType::IN_VIEWZ]            = targetView( vz, vzAtt );
+	nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_HITDIST]     = targetView( ray, 0 );
 	nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_HITDIST]    = rtaoOutView;
 
 	VkCommandBuffer cb = frames[frameIndex].cb;
@@ -6772,8 +6778,8 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 	};
 	addPre( ray->colorImage[0],  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-	addPre( vz->colorImage[0],   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-	addPre( norm->colorImage[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPre( vz->colorImage[vzAtt],   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPre( norm->colorImage[nmAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPre( vel.image,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPre( rtaoOutImage,        rtaoOutReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
 	vkCmdPipelineBarrier( cb,
@@ -6809,8 +6815,8 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 	};
 	addPost( ray->colorImage[0],  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-	addPost( vz->colorImage[0],   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-	addPost( norm->colorImage[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPost( vz->colorImage[vzAtt],   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPost( norm->colorImage[nmAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPost( vel.image,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPost( rtaoOutImage,        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	// dst includes COMPUTE: FSR2 consumes the velocity image (and could consume others)
@@ -9177,6 +9183,20 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetMipped( ImageFormat fmt, int
 	return (RenderTargetHandle)( slot + 1 );
 }
 
+// RTAO ray + NRD guide MRT: R16F hit distance, R16F view z, RGBA16F packed normal; color-only.
+RenderTargetHandle VulkanBackend::CreateRenderTargetRtaoMrt( int w, int h ) {
+	if ( device == VK_NULL_HANDLE ) {
+		return 0;
+	}
+	static const VkFormat fmts[3] = { VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT };
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R16_SFLOAT, 3, /*ds*/false, /*frameCapable*/false, /*mipLevels*/1, fmts ) ) {
+		targetTable[slot] = RenderTarget();
+		return 0;
+	}
+	return (RenderTargetHandle)( slot + 1 );
+}
+
 // Begin a fullscreen pass rendering into mip LEVEL of a mipped color target (level >= 1;
 // level 0 is the linearize pass via BeginTargetPass). Uses the level's own framebuffer.
 // The color-target render pass's external dependencies serialize this write against the
@@ -9526,7 +9546,9 @@ uint8_t VulkanBackend::PassClassFor( VkFormat colorFmt, bool hasDepth, int color
 		return hasDepth ? 2 : 3;			// HDR scene buffer / RGBA16F color-only (AA ping, SSR)
 	}
 	if ( colorFmt == VK_FORMAT_R16_SFLOAT ) {
-		return 7;							// single-channel half-float (SSAO linear-depth mip, Phase 2)
+		// 9 = the RTAO ray + guide MRT (R16F + R16F + RGBA16F): a different attachment layout, so its
+		// pipelines MUST NOT share a cache key with the single R16F class
+		return colorCount >= 3 ? 9 : 7;		// 7 = single-channel half-float (SSAO linear-depth mip, RTAO legacy)
 	}
 	// RGBA8 family (SSAO buffers later)
 	if ( !hasDepth )      { return 4; }		// color-only RGBA8
