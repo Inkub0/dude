@@ -227,6 +227,7 @@ public:
 	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h );
 	virtual RenderTargetHandle	CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels );
 	virtual RenderTargetHandle	CreateRenderTargetRtaoMrt( int w, int h );
+	virtual RenderTargetHandle	CreateRenderTargetRtgiMrt( int w, int h );
 	virtual RenderTargetHandle	CreateRenderTargetBlurRay( int w, int h );
 	virtual void				BeginTargetMipPass( RenderTargetHandle rt, int mipLevel, const ClearArgs *clear );
 	virtual ImageHandle			GetRenderTargetMipImage( RenderTargetHandle rt, int mipLevel );
@@ -9280,6 +9281,22 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetRtaoMrt( int w, int h ) {
 	static const VkFormat fmts[3] = { VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT };
 	int slot = AllocTargetSlot();
 	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R16_SFLOAT, 3, /*ds*/false, /*frameCapable*/false, /*mipLevels*/1, fmts ) ) {
+		targetTable[slot] = RenderTarget();
+		return 0;
+	}
+	return (RenderTargetHandle)( slot + 1 );
+}
+
+// RT GI radiance MRT (docs/rtx-rtgi.md H6): attachment 0 = RGBA16F radiance (vs the RTAO MRT's R16F
+// occlusion) so a bounce hit's colour fits; 1 = R16F signed view z, 2 = RGBA16F packed world normal -
+// the same NRD guides the RTAO ray writes, so the H6b DIFFUSE denoise drops in with the RTAO wiring. VK only.
+RenderTargetHandle VulkanBackend::CreateRenderTargetRtgiMrt( int w, int h ) {
+	if ( device == VK_NULL_HANDLE ) {
+		return 0;
+	}
+	static const VkFormat fmts[3] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT };
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R16G16B16A16_SFLOAT, 3, /*ds*/false, /*frameCapable*/false, /*mipLevels*/1, fmts ) ) {
 		targetTable[slot] = RenderTarget();
 		return 0;
 	}

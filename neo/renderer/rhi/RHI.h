@@ -342,6 +342,9 @@ public:
 	// distance @0, R16F signed view z @1, RGBA16F packed world normal @2 - so the ray pass writes the
 	// denoiser's guides itself. Attachments 1/2 are read back with GetRenderTargetImage2/3. VK only.
 	virtual RenderTargetHandle	CreateRenderTargetRtaoMrt( int w, int h ) { return 0; }
+	// RT GI radiance MRT (docs/rtx-rtgi.md H6): like the RTAO MRT but attachment 0 is RGBA16F radiance
+	// (vs R16F occlusion) so a bounce hit's colour fits; 1/2 are the same NRD guides (viewZ R16F, normal RGBA16F). VK only.
+	virtual RenderTargetHandle	CreateRenderTargetRtgiMrt( int w, int h ) { return 0; }
 	// RT shadow blur ray target (docs/rtx-shadow-blur.md, perf): attachment 0 = RGBA16F
 	// (vis / hwX / dist / hwY, the blur's working data), attachment 1 = RG8 per-pixel SUMMARY
 	// (R = visibility, G = penumbra half-width / HW_MAX, or 1.0 = untraced) so the tile

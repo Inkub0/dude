@@ -981,6 +981,11 @@ extern idCVar r_rtaoResScale;			// RTAO render/denoise resolution fraction (bili
 extern idCVar r_rtaoIntensity;				// RTAO strength (1.0 neutral; r_ssaoIntensity stays GTAO-only)
 extern idCVar r_skinnedMotionVectors;		// GPU-skinned characters write per-bone motion into the velocity buffer
 extern idCVar r_rtaoDebug;					// RTAO debug view (1 raw rays, 2 denoised)
+extern idCVar r_rtgi;						// H6 RT GI: one-bounce ray-traced global illumination (gathers radiance at the hemisphere hit)
+extern idCVar r_rtgiRadius;					// RT GI gather ray length (world units)
+extern idCVar r_rtgiLightScale;				// RT GI: brightness of the diffuse lighting at a bounce hit
+extern idCVar r_rtgiEmissive;				// RT GI: self-illuminated surface contribution at a bounce hit
+extern idCVar r_rtgiDebug;					// RT GI debug view (H6a: 1 = raw radiance-gather buffer)
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
 extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compositing (dissolves the static firefly grid)
