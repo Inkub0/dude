@@ -1191,26 +1191,30 @@ static void RB_RHI_FillPerforatedParms( rhi::RHI *r, rhi::RenderParams &parms, c
 		// r_rtPerforatedDebug: is the gating engaging? (remove once settled)
 		if ( r_rtPerforatedDebug.GetBool() ) {
 			static int dbgLights = 0, dbgTouch = 0, dbgFrames = 0, dbgLastFrame = -1, dbgLastMs = 0;
-			static idStr dbgWho;		// the FIRST caster found in each touching light's volume, latest frame only
+			static idStr dbgWho;		// the FIRST caster found in each touching light's volume, one whole frame
+			if ( tr.frameCount != dbgLastFrame ) {
+				// a new frame starts: the previous one's list is complete - report once a second
+				const int now = Sys_Milliseconds();
+				if ( now - dbgLastMs >= 1000 && dbgFrames > 0 ) {
+					common->Printf( "%s", dbgWho.c_str() );
+					common->Printf( "rtPerforated: per frame %.1f ray-traced lights, %.1f of them on the grate path\n",
+						(float)dbgLights / dbgFrames, (float)dbgTouch / dbgFrames );
+					dbgLights = dbgTouch = dbgFrames = 0;
+					dbgLastMs = now;
+				}
+				dbgLastFrame = tr.frameCount;
+				dbgFrames++;
+				dbgWho.Clear();
+			}
 			dbgLights++;
 			if ( cachedTouches ) { dbgTouch++; }
-			if ( tr.frameCount != dbgLastFrame ) { dbgLastFrame = tr.frameCount; dbgFrames++; dbgWho.Clear(); }
-			const int now = Sys_Milliseconds();
-			if ( cachedTouches && whoMat != NULL && vLight != NULL && dbgWho.Length() < 1500 ) {
+			if ( cachedTouches && whoMat != NULL && vLight != NULL && dbgWho.Length() < 3000 ) {
 				const idVec3 sz = whoBounds[1] - whoBounds[0];
 				const float dist = ( whoBounds.GetCenter() - vLight->globalLightOrigin ).Length();
 				const idVec3 lsz = vLight->frustumTris->bounds[1] - vLight->frustumTris->bounds[0];
 				dbgWho += va( "   light %4d (box %.0fx%.0fx%.0f): %s, size %.0fx%.0fx%.0f, %.0f units from the light\n",
 					vLight->lightDef ? vLight->lightDef->index : -1, lsz.x, lsz.y, lsz.z,
 					whoMat->GetName(), sz.x, sz.y, sz.z, dist );
-			}
-			if ( now - dbgLastMs >= 1000 && dbgFrames > 0 ) {
-				common->Printf( "%s", dbgWho.c_str() );
-				dbgWho.Clear();
-				common->Printf( "rtPerforated: per frame %.1f ray-traced lights, %.1f of them on the grate path\n",
-					(float)dbgLights / dbgFrames, (float)dbgTouch / dbgFrames );
-				dbgLights = dbgTouch = dbgFrames = 0;
-				dbgLastMs = now;
 			}
 		}
 	}
