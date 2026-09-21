@@ -39,14 +39,20 @@
 //                           blurScale * g^curve, g = dOccluder / ( dLight - dOccluder ). 1 = the geometric
 //                           (physical) growth; < 1 = soft sooner, then levelling off; > 1 = crisp for longer
 //                           near the caster, then widening fast
+//   u_shadowFalloffS      = perforated casters (rt_perforated.glsl): xy = geometry-table address,
+//                           z = their shadow strength (r_shadowMapPerforatedStrength); 0 = off
+//   u_shadowProjectionQ.xy = address of this light's grate boxes; u_shadowFalloffS.w = how many
 //   u_screenCorrection.xy = 1 / viewSize
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 //   u_depthParms.xy       = window depth -> 1 / view z for THIS view (renderparms.glsl): the game
 //                           lowers the near plane for cinematic cameras (r_znear 3 -> 1), and a hard-coded
 //                           play-time pair rebuilt every point 3x too far along its view ray
 #extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference_uvec2 : require	// perforated casters: geo-table pointer
+#extension GL_EXT_nonuniform_qualifier : require		// perforated casters: bindless coverage texture
 
 #include "renderparms.glsl"
+#include "rt_perforated.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;   // xyz = view-space normal, a = weapon/AO mask
@@ -56,12 +62,19 @@ SAMPLER_BINDING(3) uniform sampler2D u_lightProjection; // the light's projectio
 VARY(0) in vec2 var_TexCoord;
 
 layout(location = 0) out vec4 fragColor;
+// perf: a compact per-pixel SUMMARY for the tile classification (rtshadow_tiles.frag pass 0) so it
+// reads 2 bytes/texel here instead of the 8-byte fragColor. R = visibility, G = penumbra half-width
+// / HW_MAX (0 = lit, nothing to spread), and G = 1.0 is the reserved "this pixel was never traced"
+// sentinel (sky / weapon / outside the light) - the tile pass skips those, matching fragColor.b == 0.
+layout(location = 1) out vec2 out_summary;
+const float RTSHADOW_HW_MAX = 24.0;		// = HW_MAX in rtshadow_tiles.frag / K in rtshadow_blur.frag
 
 // Doom 3's near-infinite far projection in GL clip depth -> linear eye z. The pair comes from the
 // view's own projection (u_depthParms); ( 0.33333333, -0.33316667 ) is its play-time value.
 
 void main() {
 	fragColor = vec4( 1.0, 0.0, 0.0, 0.0 );		// every early-out = lit
+	out_summary = vec2( 1.0, 1.0 );				// until proven traced: lit, G = untraced sentinel
 	vec2  frag = gl_FragCoord.xy;
 	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
 	if ( raw >= 0.9994 ) {						// sky / no geometry
@@ -77,6 +90,7 @@ void main() {
 	float vz  = 1.0 / ( min( raw, 0.9994 ) * DUDE_DEPTH_CONSTS().x + DUDE_DEPTH_CONSTS().y );   // negative
 	float d   = -vz;
 	fragColor.b = min( d, 65000.0 );			// lit or not, this pixel has a surface the blur can weigh
+	out_summary.y = 0.0;						// traced from here on (G < 1); lit until a width is found
 	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
 	// jitter-exact unprojection (VK: top-down window y, hence the sign): ndc.x = P00*x/d - P8
 	vec3  P   = vec3( ( ndc.x + u_localParam1.y ) * d * u_localParam0.x,
@@ -144,22 +158,71 @@ void main() {
 
 	// the mode-4 ray, except CLOSEST hit instead of first hit: the penumbra is sized by the
 	// occluder nearest the receiver. Stops 1 unit short of the light, like mode 4.
-	rayQueryEXT rq;
-	rayQueryInitializeEXT( rq,
-		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-		gl_RayFlagsOpaqueEXT, 0xFFu, O, 0.0, Ldir, min( max( dL - 1.0, 0.01 ), 100000.0 ) );
-	while ( rayQueryProceedEXT( rq ) ) { }
-	if ( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT ) {
+	// Perforated casters (grates / fences): their triangles arrive as candidates; a solid texel is
+	// never confirmed - it dims the light to 1 - strength, and the nearest one sizes the penumbra
+	// when no real occluder does. One within 8 units of the light is its own cage, not a caster.
+	uvec2 geoAddr = uvec2( floatBitsToUint( u_shadowFalloffS.x ), floatBitsToUint( u_shadowFalloffS.y ) );
+	bool  perfOn  = u_shadowFalloffS.z > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
+	float tPerf   = -1.0;
+	float tMax    = min( max( dL - 1.0, 0.01 ), 100000.0 );
+	bool  solidHit;
+	float tSolid  = 0.0;
+	// per pixel: u_shadowFalloffS.w boxes of this light's grates at u_shadowProjectionQ.xy - a segment
+	// that passes through none of them can't meet a grate ( w < 0: no list, all pixels )
+	if ( perfOn && u_shadowFalloffS.w > 0.5 ) {
+		perfOn = dudeSegmentMeetsPerforated(
+			uvec2( floatBitsToUint( u_shadowProjectionQ.x ), floatBitsToUint( u_shadowProjectionQ.y ) ),
+			int( u_shadowFalloffS.w + 0.5 ), O, Ldir, tMax );
+	}
+	if ( !perfOn ) {
+		// no grate in this light's volume (decided per light on the CPU): the ray this pass always
+		// traced, flags and mask CONSTANT - forcing everything opaque is the hardware's fastest
+		// traversal, and a runtime-selected flag word can't promise the driver that
+		rayQueryEXT rqo;
+		rayQueryInitializeEXT( rqo,
+			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+			gl_RayFlagsOpaqueEXT, 0xFDu, O, 0.0, Ldir, tMax );
+		while ( rayQueryProceedEXT( rqo ) ) { }
+		solidHit = rayQueryGetIntersectionTypeEXT( rqo, true ) == gl_RayQueryCommittedIntersectionTriangleEXT;
+		if ( solidHit ) {
+			tSolid = rayQueryGetIntersectionTEXT( rqo, true );
+		}
+	} else {
+		rayQueryEXT rq;
+		rayQueryInitializeEXT( rq,
+			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+			gl_RayFlagsNoneEXT, 0xFFu, O, 0.0, Ldir, tMax );
+		while ( rayQueryProceedEXT( rq ) ) {
+			if ( rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT ) {
+				float tc = rayQueryGetIntersectionTEXT( rq, false );
+				if ( tc < dL - 8.0 && ( tPerf < 0.0 || tc < tPerf )
+						&& dudePerforatedSolid( geoAddr,
+							uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),
+							uint( rayQueryGetIntersectionGeometryIndexEXT( rq, false ) ),
+							uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) ),
+							rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) ) {
+					tPerf = tc;
+				}
+			}
+		}
+		solidHit = rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT;
+		if ( solidHit ) {
+			tSolid = rayQueryGetIntersectionTEXT( rq, true );
+		}
+	}
+	if ( !solidHit && tPerf < 0.0 ) {
 		return;									// reached the light: lit
 	}
 
-	float dOcc = rayQueryGetIntersectionTEXT( rq, true );
+	float dOcc = solidHit ? tSolid : tPerf;
 	float gap   = dOcc / max( dL - dOcc, 1e-3 );
 	float halfW = u_localParam0.z * pow( gap, max( u_localParam1.w, 0.05 ) );
 	float rPx  = min( halfW * u_localParam0.w / max( d, 1.0 ), u_localParam1.x );
 	// per screen axis, the extent of a disc lying in the receiver's plane: r * sqrt( 1 - n.axis^2 )
 	vec2  ext  = sqrt( max( vec2( 1.0 ) - gn.xy * gn.xy, vec2( 0.04 ) ) );
-	fragColor.r = 0.0;
+	fragColor.r = solidHit ? 0.0 : 1.0 - u_shadowFalloffS.z;	// behind a grate only: dimmed, not dark
 	fragColor.g = rPx * ext.x;
 	fragColor.a = rPx * ext.y;
+	out_summary.x = fragColor.r;
+	out_summary.y = min( max( fragColor.g, fragColor.a ) / RTSHADOW_HW_MAX, 254.0 / 255.0 );	// < the untraced sentinel
 }

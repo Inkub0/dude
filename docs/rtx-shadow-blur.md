@@ -247,6 +247,100 @@ the rays for round lights); nothing for lights whose images fill the box.
 **Measured by the user (`r_vkGpuTime`, 2026-09-21):** the RT-shadows-vs-shadow-maps gap fell from
 **~0.9 ms to ~0.5-0.6 ms** (about a third of the toll), no visible change reported.
 
+## Perforated casters - grates and fences under ray-traced lights (2026-09-21, `r_rtPerforatedShadows`)
+
+Grates / fences are alpha-tested `noShadows` surfaces: stencil could never punch their holes, the
+shadow-map path lets them cast through `r_shadowMapPerforated`, and the RT scene simply never held
+them - so under `r_rtAllLights` (and the RT sun / moving-light routes) they stopped casting. The
+acceleration-structure side is a port of the abandoned soft-shadow branch's work (83da373d); the
+ray side is new.
+
+- **Scene (`tr_main.cpp`, `R_RtBuildPerforatedBlas`):** perforated + noShadows surfaces of the world
+  areas and of static entity models build into their OWN BLASes as **non-opaque** geometry
+  (`BlasGeometry::alphaTest` = alpha ref * 255; geo-table row flags bit1 + ref in bits 8-15;
+  `texIndex` = the COVERAGE image). Instanced on the per-frame TLAS with `RT_MASK_PERFORATED`
+  (0x02) while `r_rtPerforatedShadows && r_shadowMapPerforated`.
+- **Everyone else** (RTAO, RT reflections, env probes, volumetric shadows) traces with cull mask
+  `0xFD`: grates stay invisible to them, exactly as before.
+- **Shadow rays** (`rt_perforated.glsl`; the inline mode-4/6 ray in `interaction.frag` and
+  `rtshadow_ray.frag`): drop `gl_RayFlagsOpaque`, mask 0xFF. Solid geometry is built opaque and is
+  still committed by traversal; only grate triangles arrive as candidates. Each is resolved against
+  the coverage texture (st from the geometry table, alpha from the bindless array, lod 0). A solid
+  texel is **never confirmed**: it dims the light to `1 - r_shadowMapPerforatedStrength` and the
+  ray carries on to find a real occluder - the deterministic counterpart of the shadow-map path's
+  dithered caster, no noise. A grate within 8 units of the light is its own cage and is ignored.
+  The geometry-table address + strength ride `u_shadowFalloffS` (read only by the shadow-MAP modes).
+- **Blur:** a grate-only pixel writes visibility `1 - strength` and a penumbra width from the
+  grate's distance; `rtshadow_tiles.frag` counts a partial pixel as both lit and shadowed.
+
+Cost: nothing for rays that cross no grate (the opaque fast path is unchanged for solid geometry);
+one table fetch + texture sample per grate triangle crossed. Known limits: coverage stages with a
+scrolling texture matrix sample unscrolled; lod 0 means a fine mesh far away can alias in a hard
+shadow (the blur hides most of it); animated (MD5) models' perforated surfaces are not included.
+**Perf pass 1 (2026-09-21, user: "roughly 0.85 ms to look at a grate"):** (a) two-sided materials get
+a reversed COPY of each surface appended by `FinishSurfaces` (`ShouldCreateBackSides`), and grates
+are two-sided - every crossing ray alpha-tested each grate twice. Instances trace with facing-cull
+disabled, so the twin (same material / counts / bounds) is now left out of the perforated BLASes.
+(b) the inline ray stops alpha-testing once one solid texel was found (the result can't change).
+Needs a scene rebuild (map load) to take effect. If a grate is still too dear after this, the
+structural fix is `VK_EXT_opacity_micromap`: bake the coverage alpha into the BLAS so traversal
+resolves holes in hardware and the shader never sees a candidate (each candidate today suspends
+traversal, does ~10 buffer fetches and a texture sample).
+**Perf pass 2 (2026-09-21): per-light gating + the fixed force-opaque ray restored.** Opacity
+micromaps were built and measured first ([rtx-opacity-micromaps.md](rtx-opacity-micromaps.md)): no
+gain on the user's 3080 Ti, and forcing 2-state - which removes every shader alpha test - changed
+nothing. So the alpha tests were never the cost; the suspect is the ray itself: to see grates it
+can't force everything opaque, and pass 1 picked flags + mask with a runtime ternary in EVERY light's
+shader. Now (a) the pre-grate ray is back as its own code path with constant
+`gl_RayFlagsOpaque[ | TerminateOnFirstHit ]` + mask 0xFD, in both `interaction.frag` and
+`rtshadow_ray.frag`; (b) which path a light takes is decided on the CPU, once per light per frame:
+`R_RtBoundsTouchPerforated( vLight->frustumTris->bounds )` against this frame's perforated-caster
+bounds (world surfaces + transformed static-model bounds, refreshed with the TLAS instances). A
+light with no grate in its volume traces exactly what it traced before grates existed.
+**User numbers after pass 2:** near a grate 13.7 (off) vs 14.4 ms (on); NO grate in sight 12.75 vs
+13.30 - the tax really is on every pixel, and the gating wasn't engaging. Pass 3 (per-TRIANGLE world
+bounds - a world surface spans its whole map area - plus the `r_rtPerforatedDebug` readout) showed
+why: "4 ray-traced lights, 1 on the grate path", tripped by `textures/decals/pipecap2a` - a 28-unit
+see-through pipe cap 179 units from the light. One small object in a light's box taxed every pixel
+the light shades.
+
+**Perf pass 4: the decision moved to the PIXEL.** Per light the CPU gathers the boxes of the grates
+inside its volume (`R_RtGatherPerforatedBoxes`, up to 16, the last swallowing any overflow, padded 2
+units) into a per-frame storage buffer (4 frame slots x 256 lights); address in
+`u_shadowProjectionQ.xy`, count in `u_shadowFalloffS.w`. Both shadow rays slab-test their segment
+against those boxes (`dudeSegmentMeetsPerforated`): only a pixel whose segment to the light passes
+through a grate's box traces the grate-aware ray, every other pixel the fixed force-opaque ray. No
+caster is dropped, the image is unchanged.
+
+**User-measured after pass 4 (2026-09-21): +0.24 ms looking at a grate, +0.1 ms not looking at one
+(was +0.7 / +0.55) - accepted ("I would say it's fine").** `r_rtPerforatedDebug` and the per-light
+touch helper are removed.
+
+## Perf: cheaper tile classification (2026-09-21, `r_rtShadowBlurFastTiles`, option 2)
+
+The tile pass 0 reduced the full-res RGBA16F ray target (8 bytes/texel, 64 fetches/tile) into the
+per-tile summary - reading every pixel of the ray rect. The ray pass now also writes a compact
+**RG8 per-pixel summary** as a second attachment (`CreateRenderTargetBlurRay` = {RGBA16F, RG8};
+`rtshadow_ray.frag` `out_summary` = R visibility, G half-width / HW_MAX, G = 1.0 the "never traced"
+sentinel that replaces the old `B == 0` test). Tile pass 0 reads that (2 bytes/texel) instead, an
+8 -> 2 byte cut on the pass's dominant read. Image-identical (the only rounding: a max-width tile's
+stored reach caps at 254/255 of HW_MAX = 23.9 px vs 24). `r_rtShadowBlurFastTiles` (default 1) keeps
+the old RGBA16F path for A/B; the ray target is the MRT either way (the summary write is ~2 bytes).
+GPU scope `rtblur.tiles` under `r_vkGpuTime 2` shows the delta.
+
+**Measured by the user (RTX 3080 Ti, 2026-09-21, 4 lights blurred/frame, look identical):**
+`rtblur.tiles` **0.573 -> 0.274 ms (-0.30 ms)** - the read shrink helped more than the "half
+overhead-bound" guess feared. Frame ~10.38 -> ~10.10. Kept on.
+
+### Compact vertical pass-through (tried, reverted - no gain)
+The same idea was applied to the vertical blur's pass-through pixels (read the 2-byte summary instead
+of the 8-byte ping): `r_rtShadowBlurCompact`. Measured a WASH - `rtblur.blurV` 0.529 -> 0.513 ms
+(noise), and `blurH` (untouched) sat at the same 0.53 ms, so the vertical pass is not bottlenecked on
+the pass-through *read* - it is the mask write + the kernel on flagged pixels. Reverted (commit
+12ca9fd9 + its revert). Do not re-try the read-shrink on the blur passes; the only lever left there
+is skipping the pass-through pixels' *write* (the indirect flagged-tile + no-clear approach), a
+larger backend build.
+
 ## Cvars
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every

@@ -1006,12 +1006,15 @@ extern idCVar r_rtReflEmissive;				// RR16f: brightness of self-lit light-source
 extern idCVar r_rtReflResScale;				// RT reflection trace resolution (fraction of screen; unsnapped, temporally upscaled)
 extern idCVar r_rtReflBump;					// RR10: how much the RT reflection follows the normal map (0 = flat mirror, 1 = full bump like SSR)
 extern idCVar r_rtMovingLights;				// RT shadows for moving point lights: skip the un-cacheable cube re-render, trace instead
+int  R_RtGatherPerforatedBoxes( const idBounds &b, idBounds *out, int maxOut );	// tr_main.cpp: the perforated RT casters inside a box; returns the total found
+extern idCVar r_rtPerforatedShadows;		// alpha-tested grate/fence casters in the RT shadow rays
 extern idCVar r_rtAllLights;				// RT shadows for EVERY shadow-casting light (mode 4 inline ray), no shadow maps at all
 extern idCVar r_rtShadowBlur;				// screen-space blur on top of the hard RT shadows (sun / moving lights), docs/rtx-shadow-blur.md
 extern idCVar r_rtShadowBlurStagger;		// far lights refresh their blurred mask every 2nd / 3rd frame (reprojected reuse)
 extern idCVar r_rtShadowBlurStaggerNear;	// nearer than this (viewer -> light volume): every frame
 extern idCVar r_rtShadowBlurStaggerFar;		// farther than this: every 3rd frame; between: every 2nd
 extern idCVar r_rtShadowBlurIntensity;		// blur width multiplier (0 = hard, 1 = default)
+extern idCVar r_rtShadowBlurFastTiles;		// tile pass reads the compact RG8 summary instead of the RGBA16F ray target
 extern idCVar r_rtShadowBlurCurve;			// exponent on the gap ratio: how the blur grows with distance from the caster (1 = geometric)
 extern idCVar r_rtTlasDirty;				// skip the per-frame TLAS rebuild when no mover/monster changed this frame
 extern idCVar r_rtSunShadowOffset;			// RT sun shadows: ray-origin normal offset (world units)

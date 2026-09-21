@@ -29,7 +29,11 @@ void main() {
 	ivec2 tp = ivec2( gl_FragCoord.xy );
 	ivec2 hi = textureSize( u_src, 0 ) - 1;
 	if ( u_localParam0.x < 0.5 ) {
-		float anyLit = 0.0, maxHW = 0.0;
+		// u_localParam0.y = 1: read the ray pass's RG8 SUMMARY (rtshadow_ray.frag out_summary), 2
+		// bytes/texel (R = visibility, G = half-width / HW_MAX, G >= sentinel = never traced) instead
+		// of the 8-byte RGBA16F ray target. 0 = the old path (reads the RGBA16F: B = traced flag).
+		float anyLit = 0.0, maxHWn = 0.0;
+		bool  fromSummary = u_localParam0.y > 0.5;
 		for ( int y = 0; y < 8; y++ ) {
 			for ( int x = 0; x < 8; x++ ) {
 				ivec2 q = tp * 8 + ivec2( x, y );
@@ -37,15 +41,27 @@ void main() {
 					continue;
 				}
 				vec4 t = texelFetch( u_src, q, 0 );
-				if ( !( t.b > 0.0 ) ) {
-					continue;					// never traced: neither
+				if ( fromSummary ) {
+					if ( t.g > 0.998 ) {
+						continue;				// the untraced sentinel: neither lit nor shadowed
+					}
+					// the width is already normalised (/ HW_MAX) and 0 for a lit pixel, so a plain
+					// max reproduces "max over shadowed pixels" without a separate visibility test
+					if ( t.r > 0.001 ) { anyLit = 1.0; }
+					maxHWn = max( maxHWn, t.g );
+				} else {
+					if ( !( t.b > 0.0 ) ) {
+						continue;				// never traced: neither
+					}
+					// a grate's dimmed shadow (0 < r < 1) is both: light to spread into a darker
+					// neighbour, and a shadow to spread into a lit one
+					if ( t.r > 0.001 ) { anyLit = 1.0; }
+					if ( t.r < 0.999 ) { maxHWn = max( maxHWn, max( t.g, t.a ) / HW_MAX ); }
 				}
-				if ( t.r > 0.5 ) { anyLit = 1.0; }
-				else { maxHW = max( maxHW, max( t.g, t.a ) ); }
 			}
 		}
 		// ceil to the 8-bit grid so the stored width never under-reports
-		float hwEnc = ( maxHW > 0.35 ) ? ceil( min( maxHW, HW_MAX ) / HW_MAX * 255.0 ) / 255.0 : 0.0;
+		float hwEnc = ( maxHWn * HW_MAX > 0.35 ) ? ceil( min( maxHWn, 1.0 ) * 255.0 ) / 255.0 : 0.0;
 		fragColor = vec4( anyLit, ( hwEnc > 0.0 ) ? 1.0 : 0.0, hwEnc, 1.0 );
 		return;
 	}

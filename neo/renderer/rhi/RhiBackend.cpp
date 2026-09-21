@@ -3533,7 +3533,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 				// auto-reactive (R1/D): only meaningful when this frame's opaque snapshot was
 				// captured (the backend also guards on that); < 0 disables
 				fa.reactiveScale = r_fsrReactive.GetBool() ? r_fsrReactiveScale.GetFloat() : -1.0f;
+				r->GpuScopeBegin( "fsr2" );
 				rbFsrRanThisFrame = r->RunFsr2( fa );
+				r->GpuScopeEnd();
 			}
 		}
 		// HDR eye adaptation (Phase B1): measure the SCENE luminance HERE — end of the primary

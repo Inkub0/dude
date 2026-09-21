@@ -1163,6 +1163,95 @@ static bool RB_RHI_TessOrDeform( const drawSurf_t *surf, const srfTriangles_t *t
 	return cand && !outUseDeform;
 }
 
+// Perforated casters in the RT shadow rays (rt_perforated.glsl): hand a ray-tracing draw the geometry
+// table (st + coverage texture of a grate candidate) and the grates' shadow strength. They ride
+// u_shadowFalloffS, which only the shadow-MAP modes read. All zero = the ray ignores grates.
+//
+// PER LIGHT: only a light with a grate inside its volume gets them. The grate-aware ray can't force
+// everything opaque, and a ray traced without that flag loses the hardware's fastest traversal -
+// paid by every pixel the light shades, grate or no grate. Every other light keeps the fixed
+// force-opaque ray it always had. Decided once per light per frame (the fill runs per surface).
+// PER PIXEL (perf pass 4): the shader also gets the boxes of the grates inside the light's volume
+// (up to RT_PERF_MAX_BOXES, the last one swallowing any overflow) and only a pixel whose segment to
+// the light passes through one of them traces the grate-aware ray. One small see-through object in
+// a light's box (measured: a 28-unit pipe cap 179 units away) no longer taxes every pixel it shades.
+// The boxes ride a small per-frame storage buffer (frame slots like the reflection light list); its
+// address goes in u_shadowProjectionQ.xy, the count in u_shadowFalloffS.w - both unread by RT modes.
+#define RT_PERF_MAX_BOXES	16
+#define RT_PERF_MAX_LIGHTS	256
+#define RT_PERF_SLOTS		4
+static rhi::BufferHandle	s_rtPerfBoxBuf = 0;
+static unsigned long long	s_rtPerfBoxAddr = 0;
+
+static void RB_RHI_FillPerforatedParms( rhi::RHI *r, rhi::RenderParams &parms, const viewLight_t *vLight ) {
+	memset( parms.shadowFalloffS, 0, sizeof( parms.shadowFalloffS ) );
+	if ( !r_rtPerforatedShadows.GetBool() || !r_shadowMapPerforated.GetBool() ) {
+		return;
+	}
+	static const viewLight_t *cachedLight = NULL;
+	static int cachedFrame = -1;
+	static int cachedCount = 0;					// boxes uploaded for this light; 0 = no grate in its volume
+	static unsigned long long cachedAddr = 0;
+	static int frameLights = 0, frameOfLights = -1;
+	if ( vLight != cachedLight || tr.frameCount != cachedFrame ) {
+		if ( tr.frameCount != frameOfLights ) {
+			frameOfLights = tr.frameCount;
+			frameLights = 0;
+		}
+		cachedLight = vLight;
+		cachedFrame = tr.frameCount;
+		cachedCount = 0;
+		cachedAddr = 0;
+		idBounds boxes[RT_PERF_MAX_BOXES];
+		int total = 0;
+		if ( vLight != NULL && vLight->frustumTris != NULL ) {
+			total = R_RtGatherPerforatedBoxes( vLight->frustumTris->bounds, boxes, RT_PERF_MAX_BOXES );
+		}
+		if ( total > 0 ) {
+			if ( s_rtPerfBoxBuf == 0 ) {
+				s_rtPerfBoxBuf = r->CreateBuffer( rhi::BU_STORAGE,
+					RT_PERF_SLOTS * RT_PERF_MAX_LIGHTS * RT_PERF_MAX_BOXES * 8 * (int)sizeof( float ), NULL );
+				s_rtPerfBoxAddr = ( s_rtPerfBoxBuf != 0 ) ? r->GetBufferDeviceAddress( s_rtPerfBoxBuf ) : 0;
+			}
+			const int n = Min( total, RT_PERF_MAX_BOXES );
+			if ( s_rtPerfBoxAddr != 0 && frameLights < RT_PERF_MAX_LIGHTS ) {
+				float data[RT_PERF_MAX_BOXES * 8];
+				for ( int i = 0; i < n; i++ ) {
+					// padded: the ray starts a little off the surface, and a flat grate is a zero-thickness box
+					data[i * 8 + 0] = boxes[i][0].x - 2.0f; data[i * 8 + 1] = boxes[i][0].y - 2.0f; data[i * 8 + 2] = boxes[i][0].z - 2.0f; data[i * 8 + 3] = 0.0f;
+					data[i * 8 + 4] = boxes[i][1].x + 2.0f; data[i * 8 + 5] = boxes[i][1].y + 2.0f; data[i * 8 + 6] = boxes[i][1].z + 2.0f; data[i * 8 + 7] = 0.0f;
+				}
+				const int slot = (int)( tr.frameCount % RT_PERF_SLOTS );
+				const int ofs = ( slot * RT_PERF_MAX_LIGHTS + frameLights ) * RT_PERF_MAX_BOXES * 8 * (int)sizeof( float );
+				r->UpdateBuffer( s_rtPerfBoxBuf, ofs, n * 8 * (int)sizeof( float ), data );
+				cachedAddr = s_rtPerfBoxAddr + (unsigned long long)ofs;
+				cachedCount = n;
+				frameLights++;
+			} else {
+				cachedCount = -1;				// no list to hand over: every pixel of this light takes the grate-aware ray
+			}
+		}
+	}
+	if ( cachedCount == 0 ) {
+		return;
+	}
+	const unsigned long long geoTable = r->GetRtGeoTableAddress();
+	if ( geoTable == 0 ) {
+		return;
+	}
+	const unsigned int geoLo = (unsigned int)( geoTable & 0xFFFFFFFFull );
+	const unsigned int geoHi = (unsigned int)( geoTable >> 32 );
+	memcpy( &parms.shadowFalloffS[0], &geoLo, sizeof( geoLo ) );	// bit-cast, NOT a value cast
+	memcpy( &parms.shadowFalloffS[1], &geoHi, sizeof( geoHi ) );
+	parms.shadowFalloffS[2] = idMath::ClampFloat( 0.0f, 1.0f, r_shadowMapPerforatedStrength.GetFloat() );
+	parms.shadowFalloffS[3] = (float)cachedCount;					// > 0: test the segment against that many boxes; < 0: no list
+	const unsigned int boxLo = (unsigned int)( cachedAddr & 0xFFFFFFFFull );
+	const unsigned int boxHi = (unsigned int)( cachedAddr >> 32 );
+	memset( parms.shadowProjectionQ, 0, sizeof( parms.shadowProjectionQ ) );
+	memcpy( &parms.shadowProjectionQ[0], &boxLo, sizeof( boxLo ) );
+	memcpy( &parms.shadowProjectionQ[1], &boxHi, sizeof( boxHi ) );
+}
+
 // r_rtShadowBlur: shader parms for an interaction that looks this light's blurred mask up
 // (unit 13). A mask made THIS frame is addressed by gl_FragCoord (mode 5). A staggered light's
 // mask from an earlier frame (r_rtShadowBlurStagger) is addressed by reprojection through that
@@ -1188,6 +1277,7 @@ static void RB_RHI_FillBlurMaskParms( rhi::RenderParams &parms, bool &rtSun ) {
 	memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
 	parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
 	parms.rtParms[3] = 100000.0f;
+	RB_RHI_FillPerforatedParms( ictx.r, parms, backEnd.vLight );
 	rtSun = true;
 }
 
@@ -1416,6 +1506,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 					memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
 					parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
 					parms.rtParms[3] = 100000.0f;
+					RB_RHI_FillPerforatedParms( ictx.r, parms, backEnd.vLight );	// after the mode-3 fill above: the ray modes own u_shadowFalloffS
 					rtSun = true;
 				}
 			}
@@ -1441,6 +1532,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 				memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
 				parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
 				parms.rtParms[3] = 100000.0f;
+				RB_RHI_FillPerforatedParms( ictx.r, parms, backEnd.vLight );
 				rtSun = true;		// bind the ray-query interaction variant for this draw
 			} else {
 				parms.shadowParms[0] = 0.0f;
@@ -3471,6 +3563,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiRtReflRT = 0;			rhiRtReflW = rhiRtReflH = 0;
 	rhiVolRT = 0;	rhiVolBlurRT = 0;	rhiVolW = rhiVolH = 0;
 	rhiVolUpRT = 0;	rhiVolHistRT[0] = rhiVolHistRT[1] = 0;	rhiVolFullW = rhiVolFullH = 0;	rhiVolHistValid = false;
+	s_rtPerfBoxBuf = 0;			s_rtPerfBoxAddr = 0;		// perforated-caster boxes: same
 	s_rtReflLightBuf = 0;		s_rtReflLightAddr = 0;		// RR16: handle is stale after a lost context; recreated lazily
 	rhiRtReflHistRT[0] = rhiRtReflHistRT[1] = 0;
 	rhiRtReflHistIdx = 0;		rhiRtReflHistW = rhiRtReflHistH = 0;
@@ -6686,7 +6779,12 @@ static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiRtBlurH = h;
 	}
 	const int tw = ( w + 7 ) / 8, th = ( h + 7 ) / 8;
-	if ( !rhiRtBlurRayRT )     { rhiRtBlurRayRT     = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, 1 ); }
+	if ( !rhiRtBlurRayRT ) {
+		// the MRT variant carries the RG8 summary attachment for the fast tile pass; fall back to
+		// the plain RGBA16F target (summary attachment absent -> the tile pass reads attachment 0)
+		rhiRtBlurRayRT = r->CreateRenderTargetBlurRay( w, h );
+		if ( !rhiRtBlurRayRT ) { rhiRtBlurRayRT = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, 1 ); }
+	}
 	if ( !rhiRtBlurPingRT )    { rhiRtBlurPingRT    = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, 1 ); }
 	if ( !rhiRtBlurMaskRT )    { rhiRtBlurMaskRT    = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, 1 ); }
 	if ( !rhiRtBlurTileRT[0] ) { rhiRtBlurTileRT[0] = r->CreateRenderTargetMipped( rhi::IF_RGBA8, tw, th, 1 ); }
@@ -6869,6 +6967,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	parms.localParam1[1] = proj[8];		// the projection's shear terms = this frame's FSR2 jitter
 	parms.localParam1[2] = proj[9];
 	parms.localParam1[3] = r_rtShadowBlurCurve.GetFloat();	// how the width grows with the gap (1 = geometric)
+	RB_RHI_FillPerforatedParms( r, parms, vLight );
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
@@ -6931,6 +7030,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		}
 	}
 
+	r->GpuScopeBegin( "rtblur.ray" );
 	r->SetNextTargetPassArea( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );
 	r->BeginTargetPass( rhiRtBlurRayRT, &clearLit );
 	r->SetScissor( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );
@@ -6940,6 +7040,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	RB_RHI_BindUnit( 3, atProjImg );
 	RB_RHI_DrawFullscreen( r, rhiRtBlur.rayProg, parms, 0 );
 	r->EndPass();
+	r->GpuScopeEnd();
 
 	rhi::RenderParams tp;
 	memset( &tp, 0, sizeof( tp ) );
@@ -6951,11 +7052,19 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		const int th = ( h + 7 ) / 8;
 		const int tyTop = rTop / 8, tyBot = rBot / 8;
 		tp.localParam0[0] = (float)pass;
+		// pass 0 reads the ray pass's compact RG8 summary (attachment 1, 2 B/texel) instead of the
+		// 8-byte RGBA16F, when the MRT target carried it and r_rtShadowBlurFastTiles is on
+		const rhi::ImageHandle summaryImg = r->GetRenderTargetImage2( rhiRtBlurRayRT );
+		const bool fastTiles = ( pass == 0 ) && r_rtShadowBlurFastTiles.GetBool() && summaryImg != 0;
+		tp.localParam0[1] = fastTiles ? 1.0f : 0.0f;
+		r->GpuScopeBegin( "rtblur.tiles" );
 		r->BeginTargetPass( rhiRtBlurTileRT[pass], &clearZero );
 		r->SetScissor( rx1 / 8, th - 1 - tyBot, rx2 / 8 - rx1 / 8 + 1, tyBot - tyTop + 1 );
 		RB_RHI_DrawFullscreen( r, rhiRtBlur.tileProg, tp,
-			r->GetRenderTargetImage( ( pass == 0 ) ? rhiRtBlurRayRT : rhiRtBlurTileRT[0] ) );
+			( pass == 0 ) ? ( fastTiles ? summaryImg : r->GetRenderTargetImage( rhiRtBlurRayRT ) )
+			              : r->GetRenderTargetImage( rhiRtBlurTileRT[0] ) );
 		r->EndPass();
+		r->GpuScopeEnd();
 	}
 
 	rhi::RenderParams bp;
@@ -6970,6 +7079,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		// leftovers - a later frame may reproject anywhere onto it
 		const bool intoSlot = ( pass == 1 && slot != NULL );
 		bp.localParam0[2] = intoSlot ? 1.0f : 0.0f;			// pack the view distance into GB
+		r->GpuScopeBegin( ( pass == 0 ) ? "rtblur.blurH" : ( intoSlot ? "rtblur.blurV(slot)" : "rtblur.blurV" ) );
 		if ( !intoSlot ) {
 			r->SetNextTargetPassArea( vx1, py1, vx2 - vx1 + 1, py2 - py1 + 1 );
 		}
@@ -6979,6 +7089,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		RB_RHI_DrawFullscreen( r, rhiRtBlur.blurProg, bp,
 			r->GetRenderTargetImage( ( pass == 0 ) ? rhiRtBlurRayRT : rhiRtBlurPingRT ) );
 		r->EndPass();
+		r->GpuScopeEnd();
 	}
 
 	// drop the tile target from the recorded units: the next blurred light renders INTO it, and a
@@ -7939,12 +8050,14 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// per-view state only - the target CACHE keys (rhiNormalMrt/Vel) stay untouched, or the
 	// standalone velocity target would key-mismatch and recreate every frame (the DIAG spam)
 	rhiNormalReadyThisView = false;	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;
+	r->GpuScopeBegin( "prepass (depth+gbuffer)" );
 	const bool mergedDepth = RB_RHI_NormalPrepass( r, viewDef );
 	if ( mergedDepth ) {
 		RB_RHI_CaptureCurrentDepth( viewDef );
 	} else {
 		RB_RHI_FillDepthBuffer( r, viewDef );
 	}
+	r->GpuScopeEnd();
 
 	// SSAO (GTAO) builds the AO buffer from the just-captured scene depth, before
 	// the ambient/interaction passes that consume it (docs/ssao-gtao.md). Each view
@@ -7953,8 +8066,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// RTAO first (docs/rtx-rtao.md H4d): when it rays+denoises+composites this view's AO,
 	// the GTAO pass sees the flag and skips its whole chain; any RTAO failure falls
 	// through to GTAO unchanged.
+	r->GpuScopeBegin( "ao (rtao/gtao)" );
 	RB_RHI_RtaoPass( r, viewDef );
 	RB_RHI_SSAOPass( r, viewDef );
+	r->GpuScopeEnd();
 	// r_rtShadowBlur: validate the view + size the shared targets; the light loop builds each
 	// ray-served light's mask on demand (RB_RHI_RtShadowBlurLight)
 	RB_RHI_RtShadowBlurBegin( r, viewDef );

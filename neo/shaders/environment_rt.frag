@@ -62,7 +62,7 @@ void main() {
 	rayQueryEXT rq;
 	rayQueryInitializeEXT( rq,
 		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-		gl_RayFlagsOpaqueEXT, 0xFFu, origin, 0.0, R, 8192.0 );
+		gl_RayFlagsOpaqueEXT, 0xFDu /* solid rays: skip perforated-caster instances (mask 0x02), only an alpha-testing ray may hit those */, origin, 0.0, R, 8192.0 );
 	while ( rayQueryProceedEXT( rq ) ) { }
 
 	vec3 refl = skyFill;								// default: miss -> sky/ambient fill (never black)

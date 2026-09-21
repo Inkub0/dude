@@ -6,9 +6,14 @@
 // declares the ray-query capability - a SPIR-V module carrying it fails pipeline creation
 // on non-RT Vulkan hardware, so the base interaction shader must stay clean of it.
 #extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference_uvec2 : require	// perforated casters: geo-table pointer
+#extension GL_EXT_nonuniform_qualifier : require		// perforated casters: bindless coverage texture
 #endif
 
 #include "renderparms.glsl"
+#if defined(VULKAN) && defined(DUDE_RT_SUN)
+#include "rt_perforated.glsl"
+#endif
 #include "decalsurface.glsl"
 
 SAMPLER_BINDING(0) uniform samplerCube u_normalCubeMap; // normalization cube map
@@ -191,13 +196,54 @@ float shadowVisibility( bool canReceive ) {
 		                dot( u_modelMatrixRow2.xyz, var_ModelNormal.xyz ) );
 		float wnLen = length( wn );
 		wn = ( wnLen > 0.0 ) ? wn / wnLen : vec3( 0.0 );
+		// Perforated casters (rt_perforated.glsl): u_shadowFalloffS - unused by the RT modes - carries
+		// xy = the geometry-table address, z = their shadow strength; 0 = off, and the ray then forces
+		// everything opaque under the solid-only mask exactly as before. With them on, grate triangles
+		// arrive as candidates: a solid texel dims the light and the ray goes on looking for a real
+		// occluder. One within 8 units of the light is its own cage - fixture, not caster.
+		uvec2 geoAddr  = uvec2( floatBitsToUint( u_shadowFalloffS.x ), floatBitsToUint( u_shadowFalloffS.y ) );
+		bool  perfOn   = u_shadowFalloffS.z > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
+		float tMax     = min( distLight - 1.0, u_rtParms.w );
+		float perfVis  = 1.0;
+		// per pixel: u_shadowFalloffS.w boxes of this light's grates at u_shadowProjectionQ.xy - a
+		// segment that passes through none of them can't meet a grate ( w < 0: no list, all pixels )
+		if ( perfOn && u_shadowFalloffS.w > 0.5 ) {
+			perfOn = dudeSegmentMeetsPerforated(
+				uvec2( floatBitsToUint( u_shadowProjectionQ.x ), floatBitsToUint( u_shadowProjectionQ.y ) ),
+				int( u_shadowFalloffS.w + 0.5 ), wp + wn * u_rtParms.z, toLight / distLight, tMax );
+		}
+		if ( !perfOn ) {
+			// no grate in this light's volume (decided per light on the CPU): the ray every light
+			// traced before grates existed, flags and mask CONSTANT - a ray that forces everything
+			// opaque is the hardware's fastest traversal, and a runtime-selected flag word can't
+			// promise the driver that
+			rayQueryEXT rqo;
+			rayQueryInitializeEXT( rqo,
+				accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+				gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu,
+				wp + wn * u_rtParms.z, 0.0, toLight / distLight, tMax );
+			while ( rayQueryProceedEXT( rqo ) ) { }
+			return ( rayQueryGetIntersectionTypeEXT( rqo, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? 1.0 : 0.0;
+		}
 		rayQueryEXT rq;
 		rayQueryInitializeEXT( rq,
 			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-			gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu,
-			wp + wn * u_rtParms.z, 0.0, toLight / distLight, min( distLight - 1.0, u_rtParms.w ) );
-		while ( rayQueryProceedEXT( rq ) ) { }
-		return ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? 1.0 : 0.0;
+			gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu,
+			wp + wn * u_rtParms.z, 0.0, toLight / distLight, tMax );
+		while ( rayQueryProceedEXT( rq ) ) {
+			// perfVis < 1: a solid grate texel was already found - further grates can't dim it more
+			if ( perfVis == 1.0
+					&& rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
+					&& rayQueryGetIntersectionTEXT( rq, false ) < distLight - 8.0
+					&& dudePerforatedSolid( geoAddr,
+						uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),
+						uint( rayQueryGetIntersectionGeometryIndexEXT( rq, false ) ),
+						uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) ),
+						rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) ) {
+				perfVis = 1.0 - u_shadowFalloffS.z;		// min over grates, not a product: a candidate may be reported twice
+			}
+		}
+		return ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? perfVis : 0.0;
 	}
 #endif
 	// Slope-scaled depth bias. A constant bias can't span the receiver's depth

@@ -129,7 +129,7 @@ vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], vec4 sp
 			if ( tmax > 1.0 ) {
 				rayQueryEXT rq;
 				rayQueryInitializeEXT( rq, accelerationStructureEXT( tlasAddr ),
-					gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu, p, 0.0, ldir, tmax );
+					gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu /* solid rays: skip perforated-caster instances (mask 0x02), only an alpha-testing ray may hit those */, p, 0.0, ldir, tmax );
 				while ( rayQueryProceedEXT( rq ) ) { }
 				if ( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionNoneEXT ) { continue; }
 			}

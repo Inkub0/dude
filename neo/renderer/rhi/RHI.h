@@ -257,6 +257,11 @@ public:
 	// unified vertex buffer (docs/gpu-offload-plan.md §3.2b). 0 = unsupported (GL 3.3 has no
 	// equivalent, device lacks the feature) or invalid handle.
 	virtual unsigned long long	GetBufferDeviceAddress( BufferHandle b ) { return 0; }
+	// Named GPU timing scopes (VK; r_vkGpuTime 2): bracket a stretch of GPU work, anywhere in the
+	// frame, render pass open or not. Same-named scopes add up within a frame, so a per-light pass
+	// reports its total plus how many times it ran. Not nestable. name must be a string literal.
+	virtual void			GpuScopeBegin( const char *name ) {}
+	virtual void			GpuScopeEnd() {}
 	virtual ImageHandle		CreateImage( ImageFormat fmt, int w, int h, const void *pixels ) = 0;
 	virtual void			DestroyImage( ImageHandle i ) = 0;
 
@@ -337,6 +342,12 @@ public:
 	// distance @0, R16F signed view z @1, RGBA16F packed world normal @2 - so the ray pass writes the
 	// denoiser's guides itself. Attachments 1/2 are read back with GetRenderTargetImage2/3. VK only.
 	virtual RenderTargetHandle	CreateRenderTargetRtaoMrt( int w, int h ) { return 0; }
+	// RT shadow blur ray target (docs/rtx-shadow-blur.md, perf): attachment 0 = RGBA16F
+	// (vis / hwX / dist / hwY, the blur's working data), attachment 1 = RG8 per-pixel SUMMARY
+	// (R = visibility, G = penumbra half-width / HW_MAX, or 1.0 = untraced) so the tile
+	// classification reads 2 bytes/texel instead of the 8-byte attachment 0. Attachment 1 is
+	// read with GetRenderTargetImage2. VK only; 0 elsewhere → the caller uses the plain path.
+	virtual RenderTargetHandle	CreateRenderTargetBlurRay( int w, int h ) { return 0; }
 	// Begin a fullscreen pass rendering into a specific mip LEVEL of a mipped target
 	// (level 1..mipLevels-1; level 0 uses BeginTargetPass). Paired with EndPass.
 	virtual void				BeginTargetMipPass( RenderTargetHandle rt, int mipLevel, const ClearArgs *clear ) {}
@@ -500,7 +511,20 @@ public:
 		unsigned int		indexCount = 0;		// 3 * triangles
 		unsigned int		baseColor = 0;		// RR3: material average colour, packed RGBA8 (0 = leave, shader defaults)
 		unsigned int		texIndex = 0;		// RR4: diffuse image handle (bindless slot+1); 0 = none
+		// perforated casters (grates/fences): 0 = opaque geometry (the default - traversal never
+		// surfaces it as a candidate); 1..255 = alpha-tested: the geometry is built NON-opaque and
+		// this is the material's alpha reference * 255. A ray that doesn't force gl_RayFlagsOpaque
+		// gets each triangle as a candidate and confirms it by sampling texIndex's alpha at the
+		// hit st (texIndex must then be the COVERAGE image). Instance such BLASes with
+		// RT_MASK_PERFORATED so the opaque-forcing consumers never see them as solid.
+		unsigned int		alphaTest = 0;
 	};
+	// Ray visibility mask bits. Ordinary instances use 0xFF (every ray). Perforated-caster
+	// instances use RT_MASK_PERFORATED alone, and every consumer that can't alpha-test traces
+	// with cull mask RT_MASK_SOLID_RAYS (0xFD in the shaders) - so grates stay invisible to the
+	// hard shadow ray / RTAO / reflections exactly as before they entered the scene.
+	static const unsigned int RT_MASK_PERFORATED = 0x02;
+	static const unsigned int RT_MASK_SOLID_RAYS = 0xFD;
 	// Build ONE multi-geometry BLAS straight from GPU device buffers (no CPU staging), one geometry
 	// per surface. allowUpdate builds it refit-capable (ALLOW_UPDATE) and allocates the persistent
 	// update-scratch RefitBlas reuses. SYNCHRONOUS (load-time / first-sight / topology change; the
