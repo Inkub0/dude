@@ -194,3 +194,16 @@ The extension above provides that attachment.
   the VK scene target is single-sample (`RGBA8 + D24S8`), so fine now.
 - **Subviews / non-fullscreen views** keep the plain `zfill` path (no normal wanted).
 - **SSR** rides the same attachment set — validate it in lockstep, not after.
+
+## Status (2026-09-21): mirror reflection spilling onto the walls — merge stands down for subview views
+
+**Symptom (user, mars_city1 restroom, VK High+):** the mirror's reflection wasn't cut to the
+mirror - it showed, lit over, on the wall around an obliquely-seen mirror, as an axis-aligned
+rectangle. **Cause:** a subview renders into the scene colour over its whole screen *rect*; the
+stock `zfill` prepass is what trims it to the mirror's shape, by drawing every non-`SS_SUBVIEW`
+surface **black** into the colour buffer before the lights add on. The merged pass writes only
+normal/material/velocity + depth, never the scene colour, so the rectangle survived. **Fix:**
+`RB_RHI_NormalPrepass` declines the merge when the view holds an `SS_SUBVIEW` surface; that view
+takes the standalone target + `zfill` (the `r_ssaoMergeNormal 0` path). Cost: the ~0.65 ms merge
+saving is forgone only while a mirror/portal surface is in view, and the standalone G-buffer
+target gets allocated the first time that happens. Pending user verification.
