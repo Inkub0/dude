@@ -2,7 +2,19 @@
 // bump-mapped view-space normal, so SSAO uses real per-pixel normals (including normal-map
 // detail) instead of reconstructing flat geometry from depth. Foundation for POM/displacement.
 
+#ifdef VULKAN
+#extension GL_EXT_buffer_reference_uvec2 : require	// skinned motion vectors: previous-pose buffer by device address
+#endif
+
 #include "renderparms.glsl"
+
+#ifdef VULKAN
+// Skinned motion vectors (r_skinnedMotionVectors): for a GPU-skinned surface the skin kernel keeps each
+// vertex's PREVIOUS-frame model-space position in a per-surface buffer; its device address arrives
+// bit-cast in u_rtParms.xy (0 = none: rigid / static / CPU-skinned geometry). gpuSkinVB is bound at byte
+// offset 0 with no base vertex, so gl_VertexIndex indexes that buffer directly.
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer PrevPosRef { vec4 p[]; };
+#endif
 
 layout(location = 0) in vec4 attr_Position;
 layout(location = 1) in vec2 attr_TexCoord;
@@ -30,6 +42,10 @@ VARY(6) out vec4 var_ModelNormal;	// .w = UV-seam displacement mask
 // velocity attachment is bound; the tessellation path regenerates them in gbuffer.tese.
 VARY(7) out vec4 var_CurClip;
 VARY(8) out vec4 var_PrevClip;
+// previous-frame minus current model-space position (the ANIMATION's own motion; 0 for rigid geometry).
+// The flat pipeline folds it into var_PrevClip below; the tessellation stages interpolate it across the
+// patch and add it to the displaced position (gbuffer.tese), so skinned + tessellated monsters work too.
+VARY(9) out vec3 var_PrevDelta;
 
 void main() {
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
@@ -50,8 +66,16 @@ void main() {
 	// off; increment B must keep jitter out of the velocity) and the previous frame's cached
 	// un-jittered MVP for this space. u_prevMvpMatrix is 0 on non-velocity draws → a dummy
 	// prev clip that gbuffer.frag discards where there is no 3rd MRT.
+	vec3 prevDelta = vec3( 0.0 );
+#ifdef VULKAN
+	uvec2 prevAddr = uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) );
+	if ( ( prevAddr.x | prevAddr.y ) != 0u ) {
+		prevDelta = PrevPosRef( prevAddr ).p[ gl_VertexIndex ].xyz - attr_Position.xyz;
+	}
+#endif
+	var_PrevDelta = prevDelta;
 	vec4 curClip = u_mvpMatrix * attr_Position;
 	var_CurClip  = curClip;
-	var_PrevClip = u_prevMvpMatrix * attr_Position;
+	var_PrevClip = u_prevMvpMatrix * vec4( attr_Position.xyz + prevDelta, 1.0 );
 	gl_Position  = curClip;
 }

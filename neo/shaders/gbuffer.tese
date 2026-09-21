@@ -21,6 +21,7 @@ VARY(3) in vec3 i_N[];
 VARY(4) in vec2 i_TexCoverage[];
 VARY(5) in vec3 i_ModelPos[];
 VARY(6) in vec4 i_ModelNormal[];
+VARY(9) in vec3 i_PrevDelta[];		// skinned motion vectors: previous - current model-space position per corner
 
 VARY(0) out vec2 var_TexBump;
 VARY(1) out vec3 var_T;
@@ -60,6 +61,9 @@ void main() {
 	// true screen motion. gbuffer.frag does the per-pixel divide.
 	vec4 curClip = u_mvpMatrix * vec4( pos, 1.0 );
 	var_CurClip  = curClip;
-	var_PrevClip = u_prevMvpMatrix * vec4( pos, 1.0 );
+	// skinned motion vectors: the animation moved each corner by -i_PrevDelta since last frame; the PN
+	// curve and the displacement ride along, so the interpolated delta is the previous position's offset
+	vec3 prevDelta = i_PrevDelta[0] * tc.x + i_PrevDelta[1] * tc.y + i_PrevDelta[2] * tc.z;
+	var_PrevClip = u_prevMvpMatrix * vec4( pos + prevDelta, 1.0 );
 	gl_Position  = curClip;
 }

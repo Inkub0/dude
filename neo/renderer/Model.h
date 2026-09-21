@@ -148,6 +148,13 @@ typedef struct srfTriangles_s {
 	unsigned int				gpuSkinVB;				// rhi::BufferHandle (0 = none)
 	int							gpuSkinVerts;			// vert count the buffer was sized for (realloc on change)
 	int							gpuSkinFrame;			// tr.frameCount it was last dispatched (skin once/frame)
+	// Skinned motion vectors (r_skinnedMotionVectors): the skin kernel saves each vertex's PREVIOUS-frame
+	// model-space position here (vec4 per vert) before overwriting gpuSkinVB, and gbuffer.vert reads it by
+	// device address - so the velocity buffer carries per-BONE animation motion, not just the entity's
+	// rigid motion. Owner-only (never copied into interaction surfaces). 0 = none.
+	unsigned int				gpuSkinPrevVB;			// rhi::BufferHandle (0 = none)
+	unsigned long long			gpuSkinPrevAddr;		// its device address (0 = no BDA / none)
+	bool						gpuSkinPrevValid;		// the buffer holds LAST frame's pose (skinned in consecutive frames)
 
 	// Milestone D (docs/gpu-offload-plan.md; Vulkan only, opt-in r_gpuSkinStripCpu): when true the CPU
 	// position skin (TransformVerts) was SKIPPED this frame for this surface — verts[].xyz is invalid
