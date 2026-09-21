@@ -3,8 +3,9 @@
 Design reference for **cheap, asset-free subsurface scattering (SSS)** on skin and Hell flesh,
 in the per-light interaction pass on both RHI backends (opengl3 + Vulkan). Same enhancement
 framing as the rest of the suite (PBR in [pbr-materials.md](pbr-materials.md), parallax in
-[parallax.md](parallax.md)): built on the shared interaction shader, **opt-in and off by
-default** (`r_skinShading 0`), driven by cvars and preset-gated.
+[parallax.md](parallax.md)): built on the shared interaction shader, driven by cvars and
+preset-gated. Defaults **on** at `r_skinShading 0.6` (the Low+ preset value, so a no-preset boot
+matches the enhanced tiers); the **Potato** preset alone forces it to `0` — the faithful floor.
 
 ## The problem: skin reads as plastic under GGX
 
@@ -109,8 +110,8 @@ written); `0` (memset) on every non-skin draw.
 
 | Cvar | Default | Range | Meaning |
 |------|---------|-------|---------|
-| `r_skinShading` | `0` | 0..1 | SSS strength on skin/flesh materials (0 = vanilla, 1 = full). Preset-owned. |
-| `r_skinScatter` | `0.3` | 0..1 | Red-channel scatter reach (how far the wrap bleeds past the terminator; g/b derive shorter). Free tuning knob. |
+| `r_skinShading` | `0.6` | 0..1 | SSS strength on skin/flesh materials (0 = vanilla, 1 = full). Defaults on; preset-owned. |
+| `r_skinScatter` | `0.4` | 0..1 | Red-channel scatter reach (how far the wrap bleeds past the terminator; g/b derive shorter). Free tuning knob. |
 
 Both are `CVAR_ARCHIVE`, live (no reload), and exposed in **Graphics → Lighting** (a strength
 slider; the reach slider greys out while strength is 0). The whole risk here is **taste**, not
@@ -120,9 +121,10 @@ code — both knobs are meant to be dialled in-game.
 
 `r_skinShading` is preset-owned, **on from Low up** at `0.6`; **Potato keeps it `0`** — the
 faithful id-render floor (it changes the diffuse falloff, a deliberate deviation from stock
-Lambert). `r_skinScatter` stays the cvar default across tiers (pure taste, no cost tier).
-`0.6` is a conservative starting strength chosen to avoid a haloed terminator; verify and
-retune in-game.
+Lambert). The **cvar default is also `0.6`**, so a fresh boot with no preset applied gets the
+enhanced look rather than an unlit-looking face. `r_skinScatter` stays the cvar default (`0.4`)
+across tiers (pure taste, no cost tier). `0.6 / 0.4` are the tuned starting values; both remain
+live knobs in **Graphics → Lighting**.
 
 ## Files
 
