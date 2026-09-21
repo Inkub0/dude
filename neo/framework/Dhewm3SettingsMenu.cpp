@@ -1844,17 +1844,32 @@ static CVarOption lightingOptions[] = {
 	// DUDE skin / flesh subsurface scattering (docs/skin-shading.md). A wrapped diffuse on the
 	// classifier's skin/flesh materials that warms the lighting terminator so faces and Hell flesh
 	// stop reading as plastic under the GGX lobe. Diffuse-only, so it works on every shading model
-	// (not just PBR). The reach slider greys out while the strength is 0.
+	// (not just PBR). Master on/off checkbox up top; the strength/reach sliders grey out while off.
 	CVarOption( "r_skinShading", []( idCVar& cvar ) {
-		float f = cvar.GetFloat();
-		if ( ImGui::SliderFloat( "Skin Subsurface (SSS)", &f, 0.0f, 1.0f, "%.2f", 0 ) ) {
-			cvar.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, f ) );
+		// r_skinShading doubles as strength AND enable, so the master checkbox toggles between 0 and
+		// the last non-zero strength (remembered so an off/on round-trip restores the amount; falls
+		// back to 0.6, the preset value).
+		static float lastOn = 0.6f;
+		float cur = cvar.GetFloat();
+		if ( cur > 0.0f ) {
+			lastOn = cur;
+		}
+		bool on = cur > 0.0f;
+		if ( ImGui::Checkbox( "Skin Subsurface Scattering (SSS)", &on ) ) {
+			cvar.SetFloat( on ? ( lastOn > 0.0f ? lastOn : 0.6f ) : 0.0f );
 		}
 		const char* descr = "Faces and Hell flesh scatter light under the skin, so their shading terminator glows\n"
 			"a soft red instead of cutting off hard and plastic-looking. Keyed off the material\n"
 			"classifier's skin/flesh tags (no per-map setup) and works on every tier, not just PBR.\n"
-			"0 = vanilla (off), 1 = full. Purely a look; tune to taste.";
+			"Purely a look; the strength and reach below tune it.";
 		AddCVarOptionTooltips( cvar, descr );
+		// strength, greyed while the feature is off
+		ImGui::BeginDisabled( cvar.GetFloat() <= 0.0f );
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Skin SSS Strength", &f, 0.0f, 1.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, f ) );
+		}
+		ImGui::EndDisabled();
 	} ),
 	CVarOption( "r_skinScatter", []( idCVar& cvar ) {
 		ImGui::BeginDisabled( r_skinShading.GetFloat() <= 0.0f );

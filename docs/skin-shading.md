@@ -113,9 +113,11 @@ written); `0` (memset) on every non-skin draw.
 | `r_skinShading` | `0.6` | 0..1 | SSS strength on skin/flesh materials (0 = vanilla, 1 = full). Defaults on; preset-owned. |
 | `r_skinScatter` | `0.4` | 0..1 | Red-channel scatter reach (how far the wrap bleeds past the terminator; g/b derive shorter). Free tuning knob. |
 
-Both are `CVAR_ARCHIVE`, live (no reload), and exposed in **Graphics → Lighting** (a strength
-slider; the reach slider greys out while strength is 0). The whole risk here is **taste**, not
-code — both knobs are meant to be dialled in-game.
+Both are `CVAR_ARCHIVE`, live (no reload), and exposed in **Graphics → Lighting**: a master
+**"Skin Subsurface Scattering (SSS)"** checkbox (toggles the feature between off and the last
+strength, remembered so an off/on round-trip restores the amount), with the **strength** and
+**reach** sliders below it, greyed while off. The whole risk here is **taste**, not code — both
+knobs are meant to be dialled in-game.
 
 ## Preset gating
 
