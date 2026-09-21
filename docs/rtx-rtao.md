@@ -145,3 +145,55 @@ AO *rays* are not where RTAO's time goes (short 80-unit rays are cheap on this h
 full-resolution denoiser + passes, which checkerboarding does not touch. Branch deleted, nothing merged.
 **Do not retry.** The only lever that attacks the real cost is **half-resolution RTAO** (rays + guides + NRD on
 a quarter of the pixels, depth-aware upsample in the resolve) — unscheduled.
+
+## RTAO resolution scale (2026-09-21, `r_rtaoResScale`, default 1.0)
+
+RTAO's cost is dominated by the **NRD denoiser**, not the rays — the earlier checkerboard experiment
+(half the rays, full-res NRD) saved ~0. So the lever that actually pays is running the WHOLE chain
+at reduced resolution: the ray pass, the NRD guides (view-z / normal, written by the ray pass), and
+the NRD denoise all at `rw x rh = round(view * r_rtaoResScale)`, then the resolve
+(`rtao_resolve.frag`, already sampling `u_rtao` at normalized uv) bilinearly upscales the denoised
+occlusion to full res. Textures, geometry and direct lighting stay native - only the AO signal is
+low-res (docs/rtx-rtao.md; the "decoupled signal" idea).
+
+- **Ray pass** runs at `rw x rh`: `screenCorrection = 1/rw`, `depthTexRecip = (w/rw)/uploadW`
+  (mirrors the scaled GTAO march in `RB_RHI_SSAOPass`). `rtao_ray.frag` is unchanged - it is already
+  resolution-parametrised by those uniforms.
+- **Velocity** for NRD's `IN_MV` is the full-res prepass velocity downsampled to `rw x rh` with a
+  plain copy (`smaa_copy`); NRD's jitter is scaled by the ratio (it is in render pixels). The engine
+  velocity is UV-space, so it is resolution-independent.
+- **NRD** runs at `rw x rh` (`NrdCreate` sizes to it); a scale change resets its history.
+- **Resolve** stays full-res and upscales the scaled NRD output for free.
+- `r_rtaoResScale 1.0` -> `rw == w`: the path is byte-identical to before.
+
+### Non-integer scale is fine here (unlike reflections)
+
+`r_ssrResScale` / `r_rtReflResScale` **snap to integer divisors** because a reflection is a *sharp*
+image reconstructed by a *temporal* upscale with per-frame jitter - a fractional ratio beats the
+jitter grid into strobing stripes. AO is the opposite: a **low-frequency** signal, and the upscale
+is a plain **bilinear** (spatial) filter with no jitter reconstruction, so there is nothing to beat.
+That is why `r_ssaoResScale` already runs fine at 0.75, and why `r_rtaoResScale` is a **free float**
+(0.25 .. 1.0), not snapped. NRD's temporal accumulation runs at the low res but its output is still
+smooth low-frequency AO, so bilinear upscaling it is clean.
+
+**Watch for:** halos / AO bleeding across depth silhouettes at aggressive scales (0.5 and below) -
+the bilinear upscale isn't depth-aware. If it shows, the resolve can be upgraded to a bilateral
+(depth+normal guided) upsample; it already binds both.
+
+**Measured by the user (RTX 3080 Ti, 2026-09-21, `ao (rtao/gtao)` scope):** full 1.0 ~2.20 ms;
+**0.75 ~1.34 ms (-0.86 ms)**; **0.5 ~0.71 ms (-1.49 ms)** - the denoiser scales with pixel count
+exactly as expected, and non-integer 0.75 works with no strobing (AO is low-frequency). Frame
+~14.6 -> ~13.6 (0.75) -> ~13.1 ms (0.5). Look at 0.75: "pretty close to native", with a slight THICKER 45-degree-line noise on small far
+details - the interleaved-gradient-noise diagonal magnified by the upscale.
+
+### The 45-degree residue: reoriented IGN (2026-09-21)
+
+`rtao_ray.frag` dithered the ray direction with IGN decorrelated across frames by a value-phase
+*slide* - which (as `vol_march.frag` already documents for the volumetric march) leaves IGN's fixed
+45-degree diagonal in the per-frame residue. NRD's temporal accumulation keeps averaging the same
+diagonal, so it survives; upscaling from a reduced `r_rtaoResScale` then magnifies it into visible
+lines on small far details. Fix: the exact volumetric-march trick - each frame uses IGN in a
+different ORIENTATION (axes swapped / mirrored at a hashed offset, `u_localParam1.x` = frame index),
+so successive residues point different ways and accumulate to isotropic grain. No blue-noise texture
+(there is none in the tree; the fog "blue noise" is this reoriented IGN). This also very slightly
+changes full-res RTAO's noise character (an improvement). A preset column for 0.75: pending.

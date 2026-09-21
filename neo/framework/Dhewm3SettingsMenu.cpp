@@ -2715,6 +2715,10 @@ struct EnhancementPreset {
 	// tier already builds (visibility rays) and HDR. The preset owns the on/off only; which lights
 	// scatter, the haze density and the other r_vol* knobs are free tuning (Graphics -> Lighting).
 	bool  volumetrics;              // r_volumetrics
+	// RTAO resolution (appended; docs/rtx-rtao.md): the fraction of the screen RTAO runs its rays
+	// and the NRD denoiser at (the occlusion is upscaled). Only meaningful where rtao is on, so
+	// only the Ultra Nightmare tier carries < 1.0; every other tier is 1.0 (full res).
+	float rtaoResScale;            // r_rtaoResScale
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2723,14 +2727,14 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false },
-	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 0.5f, true, true,  true,  true,  0,     true,  true,  true,  false, true , true, true, true, true, true  },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger  volum  rtaoRes
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f },
+	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 0.5f, true, true,  true,  true,  0,     true,  true,  true,  false, true , true, true, true, true, true, 0.75f },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2836,6 +2840,7 @@ static void ApplyEnhancementPreset( int idx )
 	r_ssaoTemporalTrade.SetBool( p.ssaoTemporalTrade );
 	com_interpolate.SetBool( p.interpolate );
 	r_rtao.SetBool( p.rtao );
+	r_rtaoResScale.SetFloat( p.rtaoResScale );
 	r_rtShadowBlur.SetBool( p.rtShadowBlur );
 	r_rtAllLights.SetBool( p.rtAllLights );
 	r_rtShadowBlurStagger.SetBool( p.rtBlurStagger );
@@ -2900,6 +2905,7 @@ static int DetectEnhancementPreset()
 			r_ssaoTemporalTrade.GetBool()      == p.ssaoTemporalTrade &&
 			com_interpolate.GetBool()          == p.interpolate &&
 			r_rtao.GetBool()                   == p.rtao &&
+			( !p.rtao || idMath::Fabs( r_rtaoResScale.GetFloat() - p.rtaoResScale ) < 0.01f ) &&
 			r_rtShadowBlur.GetBool()           == p.rtShadowBlur &&
 			r_rtAllLights.GetBool()            == p.rtAllLights &&
 			r_rtShadowBlurStagger.GetBool()    == p.rtBlurStagger &&
@@ -3255,6 +3261,30 @@ static void DrawEnhGroup_AmbientOcclusion()
 				"neutral 1.00 default shows it as-is — unlike the screen-space Intensity (1.2), "
 				"which compensates for the march and applies only when RTAO is off. Raise for "
 				"deeper creases, lower to soften." );
+
+			// Resolution: RTAO runs the rays AND the NRD denoiser (its dominant cost) at this fraction
+			// of the screen, then upscales the occlusion. AO is low-frequency, so fractional stops work
+			// without the strobing that forces reflections to integer divisors.
+			const float rtaoResStops[]  = { 0.5f, 0.667f, 0.75f, 0.8f, 1.0f };
+			const char *rtaoResLabels[] = { "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Four-fifths (4/5)", "Full" };
+			const int rtaoNumStops = IM_ARRAYSIZE( rtaoResStops );
+			const float curRtaoScale = r_rtaoResScale.GetFloat();
+			int rtaoResIdx = 0;
+			float rtaoResBest = 1e9f;
+			for ( int i = 0; i < rtaoNumStops; i++ ) {
+				const float d = idMath::Fabs( curRtaoScale - rtaoResStops[i] );
+				if ( d < rtaoResBest ) { rtaoResBest = d; rtaoResIdx = i; }
+			}
+			if ( ImGui::SliderInt( "Resolution##rtao", &rtaoResIdx, 0, rtaoNumStops - 1,
+					rtaoResLabels[rtaoResIdx], ImGuiSliderFlags_NoInput ) ) {
+				rtaoResIdx = rtaoResIdx < 0 ? 0 : ( rtaoResIdx >= rtaoNumStops ? rtaoNumStops - 1 : rtaoResIdx );
+				r_rtaoResScale.SetFloat( rtaoResStops[rtaoResIdx] );
+			}
+			AddTooltip( "Resolution RTAO runs its rays AND the NRD denoiser at, as a fraction of the "
+				"screen; the occlusion is upscaled to full res. The denoiser is the bulk of RTAO's "
+				"cost, so Three-quarter is ~a third cheaper and Half ~two-thirds cheaper for little "
+				"visible change (AO is low-frequency). Lower this first if RTAO costs too much. "
+				"Default Full; Ultra Nightmare uses Three-quarter." );
 
 			ImGui::EndDisabled();
 			// explain the gray-out cases the checkbox itself can't (mirrors the RT Reflections hint)
