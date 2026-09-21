@@ -106,7 +106,7 @@ first and returns before tracing (unless `r_rtaoDebug 1`, the only consumer of r
 Ultra Nightmare (FSR on → velocity present), so no change there.
 
 
-## 2026-09-21 — guide passes folded into the ray pass (`r_rtaoGuideMrt`, temporary A/B)
+## 2026-09-21 — guide passes folded into the ray pass (user-verified, merged)
 
 RTAO saves less than GTAO cost because it replaces one chain with five passes (rays, view-z guide, packed-normal
 guide, NRD, resolve). First trim, zero quality change: the **ray pass now writes both NRD guides itself** as
@@ -120,6 +120,7 @@ view z + world normal for its ray, so the two standalone fullscreen guide passes
   VK pass class 9); `RtaoDenoiseArgs.viewzAtt/normalAtt` tell the denoiser which attachment holds each guide.
   Guides are written on every path (sky / weapon / degenerate-normal early-outs included), identical values
   to the old passes.
-- `r_rtaoGuideMrt 0` = the previous three-pass layout, for one `r_vkGpuTime` A/B; remove the cvar + the legacy
-  branch + the two guide shaders once verified.
+- **Verified 2026-09-21:** identical AO, a small GPU-time gain (~0.1–0.3 ms as predicted), several minutes of
+  play without a device loss. The A/B cvar, the legacy three-pass branch and the two guide shaders
+  (`rtao_viewz`, `rtao_pack`) were then removed.
 - Still open for real savings: checkerboard tracing, half-res RTAO (see the 2026-09-21 discussion).

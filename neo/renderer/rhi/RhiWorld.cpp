@@ -462,9 +462,6 @@ static float rhiRtaoJitterPhase = 0.0f;				// per-frame golden-ratio noise rotat
 // IN_NORMAL_ROUGHNESS (world-space encoding-2 pack, RGBA16F) targets, plus the previous
 // frame's camera for the denoiser's reprojection (its own staging — the shared temporal
 // cam state advances on a different schedule).
-static bool rhiRtaoRayIsMrt = false;				// rhiRtaoRayRT carries the NRD guides in attachments 1/2 (r_rtaoGuideMrt)
-static rhi::RenderTargetHandle rhiRtaoViewzRT = 0;
-static rhi::RenderTargetHandle rhiRtaoPackRT = 0;
 static rhi::RenderTargetHandle rhiRtaoResolveRT = 0;	// H4d: the composited standard-AO buffer
 static bool  rhiRtaoDenoisedThisView = false;		// NRD ran: GetRtaoOutputImage is current
 static float rhiRtaoPrevProj[16];
@@ -3462,7 +3459,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiRtBlurW = rhiRtBlurH = 0;	rhiRtBlurThisView = false;
 	memset( rhiRtBlurSlots, 0, sizeof( rhiRtBlurSlots ) );		// handles died with the context
 	rhiRtaoRanThisView = false;
-	rhiRtaoViewzRT = 0;			rhiRtaoPackRT = 0;		rhiRtaoResolveRT = 0;
+	rhiRtaoResolveRT = 0;
 	rhiRtaoDenoisedThisView = false;	rhiRtaoPrevValid = false;
 
 	rhiSsrRT = 0;				rhiSsrW = rhiSsrH = 0;
@@ -6400,14 +6397,13 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	// The traced rays are only ever CONSUMED through the NRD denoise + resolve below, which needs the
-	// velocity MRT (r_motionVectors / r_fsr) and the two guide programs. Without them the screen-space GTAO
+	// velocity MRT (r_motionVectors / r_fsr). Without it the screen-space GTAO
 	// chain runs instead (RB_RHI_SSAOPass) - so do not trace a full-res ray pass first just to throw it
 	// away: that was the one case where BOTH AO producers cost GPU time in the same frame. The raw-ray debug
 	// overlay (r_rtaoDebug 1) is the only consumer of an un-denoised ray buffer.
 	{
 		const bool canDenoise = rhiNormalVelThisView
-			&& r->GetRenderTargetImage3( rhiNormalResultRT ) != 0
-			&& ( r_rtaoGuideMrt.GetBool() || ( r->LoadShader( "rtao_viewz" ) != 0 && r->LoadShader( "rtao_pack" ) != 0 ) );
+			&& r->GetRenderTargetImage3( rhiNormalResultRT ) != 0;
 		if ( !canDenoise && r_rtaoDebug.GetInteger() != 1 ) {
 			return;
 		}
@@ -6420,25 +6416,17 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiRtaoRayRT = 0;
 		rhiRtaoW = rhiRtaoH = 0;
 	}
-	// r_rtaoGuideMrt: the ray pass writes the two NRD guides itself as extra MRT outputs (one pass instead of
-	// three). Switching the mode recreates the ray target (different attachment layout).
-	const bool wantGuideMrt = r_rtaoGuideMrt.GetBool();
-	if ( rhiRtaoRayRT && ( rhiRtaoW != w || rhiRtaoH != h || rhiRtaoRayIsMrt != wantGuideMrt ) ) {
+	// The ray target is a 3-attachment MRT: the ray pass writes the two NRD guides itself (view z @1, packed
+	// world normal @2) - it already fetches depth + normal per pixel - instead of two more fullscreen passes.
+	if ( rhiRtaoRayRT && ( rhiRtaoW != w || rhiRtaoH != h ) ) {
 		r->DestroyRenderTarget( rhiRtaoRayRT );
 		rhiRtaoRayRT = 0;
-		// the guide + resolve targets share the ray target's size — recreate them too
-		// (workflow audit: they were only recreated on a lost context, so a resolution
-		// change would have NRD reading out-of-bounds guides)
-		if ( rhiRtaoViewzRT )   { r->DestroyRenderTarget( rhiRtaoViewzRT );   rhiRtaoViewzRT = 0; }
-		if ( rhiRtaoPackRT )    { r->DestroyRenderTarget( rhiRtaoPackRT );    rhiRtaoPackRT = 0; }
+		// the resolve target shares the ray target's size — recreate it too (workflow audit: it was
+		// only recreated on a lost context, so a resolution change would have NRD reading stale sizes)
 		if ( rhiRtaoResolveRT ) { r->DestroyRenderTarget( rhiRtaoResolveRT ); rhiRtaoResolveRT = 0; }
 	}
 	if ( !rhiRtaoRayRT ) {
-		rhiRtaoRayRT = wantGuideMrt ? r->CreateRenderTargetRtaoMrt( w, h ) : 0;
-		rhiRtaoRayIsMrt = ( rhiRtaoRayRT != 0 );
-		if ( !rhiRtaoRayRT ) {
-			rhiRtaoRayRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, 1 );	// legacy: separate guide passes below
-		}
+		rhiRtaoRayRT = r->CreateRenderTargetRtaoMrt( w, h );
 		if ( !rhiRtaoRayRT ) {
 			return;
 		}
@@ -6499,51 +6487,15 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// (r_motionVectors / r_fsr off) only the raw ray pass runs (r_rtaoDebug 1).
 	rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
 		? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
-	rhi::ShaderHandle vzProg = r->LoadShader( "rtao_viewz" );
-	rhi::ShaderHandle pkProg = r->LoadShader( "rtao_pack" );
-	if ( !rhiRtaoRayIsMrt && velImg != 0 && vzProg != 0 && pkProg != 0 ) {
-		// legacy (r_rtaoGuideMrt 0): (re)create the two guide targets alongside the ray target's size
-		if ( rhiRtaoViewzRT && r->GetRenderTargetImage( rhiRtaoViewzRT ) == 0 ) { rhiRtaoViewzRT = 0; }
-		if ( rhiRtaoPackRT && r->GetRenderTargetImage( rhiRtaoPackRT ) == 0 )  { rhiRtaoPackRT = 0; }
-		if ( rhiRtaoViewzRT == 0 ) { rhiRtaoViewzRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, 1 ); }
-		if ( rhiRtaoPackRT == 0 )  { rhiRtaoPackRT = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, 1 ); }
-	}
-	if ( velImg != 0 && ( rhiRtaoRayIsMrt || ( vzProg != 0 && pkProg != 0 && rhiRtaoViewzRT != 0 && rhiRtaoPackRT != 0 ) ) ) {
-		if ( !rhiRtaoRayIsMrt ) {
-		// IN_VIEWZ: signed linear view Z
-		rhi::RenderParams gp;
-		memset( &gp, 0, sizeof( gp ) );
-		gp.mvpMatrix[0] = gp.mvpMatrix[5] = gp.mvpMatrix[10] = gp.mvpMatrix[15] = 1.0f;
-		gp.depthTexRecip[0] = 1.0f / uploadW;
-		rhi::FillDepthParms( gp, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
-		gp.depthTexRecip[1] = 1.0f / uploadH;
-		r->BeginTargetPass( rhiRtaoViewzRT, NULL );
-		RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
-		RB_RHI_DrawFullscreen( r, vzProg, gp, 0 );
-		r->EndPass();
-
-		// IN_NORMAL_ROUGHNESS: world-space NRD encoding-2 pack from the G-buffer normal
-		rhi::RenderParams pp;
-		memset( &pp, 0, sizeof( pp ) );
-		pp.mvpMatrix[0] = pp.mvpMatrix[5] = pp.mvpMatrix[10] = pp.mvpMatrix[15] = 1.0f;
-		memcpy( pp.modelViewMatrix, invView, sizeof( invView ) );
-		pp.screenCorrection[0] = 1.0f / w;
-		pp.screenCorrection[1] = 1.0f / h;
-		r->BeginTargetPass( rhiRtaoPackRT, NULL );
-		RB_RHI_BindRTUnit( r, 0, rhiNormalResultRT );
-		backEnd.glState.tmu[0].current2DMap = -1;
-		RB_RHI_DrawFullscreen( r, pkProg, pp, 0 );
-		r->EndPass();
-		}	// legacy guide passes
+	if ( velImg != 0 ) {
+		// (H4b guide inputs: written by the ray pass above into attachments 1/2 of rhiRtaoRayRT)
 
 		// H4c: the ReBLUR denoise on the frame command buffer
 		rhi::RtaoDenoiseArgs da;
 		memset( &da, 0, sizeof( da ) );
 		da.rayRT = rhiRtaoRayRT;
-		da.viewzRT  = rhiRtaoRayIsMrt ? rhiRtaoRayRT : rhiRtaoViewzRT;	// MRT: guides are attachments 1/2 of the ray target
-		da.normalRT = rhiRtaoRayIsMrt ? rhiRtaoRayRT : rhiRtaoPackRT;
-		da.viewzAtt  = rhiRtaoRayIsMrt ? 1 : 0;
-		da.normalAtt = rhiRtaoRayIsMrt ? 2 : 0;
+		da.viewzRT  = rhiRtaoRayRT;		da.viewzAtt  = 1;		// the guides are attachments 1/2 of the ray target
+		da.normalRT = rhiRtaoRayRT;		da.normalAtt = 2;
 		da.velImage = velImg;
 		da.w = w;
 		da.h = h;
@@ -6612,8 +6564,7 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		static bool warnedPrereq = false;
 		if ( !warnedPrereq ) {
 			warnedPrereq = true;
-			common->Warning( "RTAO: denoise prerequisites missing (velocity %d, viewz prog %d, pack prog %d, viewzRT %d, packRT %d)",
-				velImg != 0, vzProg != 0, pkProg != 0, rhiRtaoViewzRT != 0, rhiRtaoPackRT != 0 );
+			common->Warning( "RTAO: denoise prerequisite missing (velocity buffer: r_motionVectors / r_fsr)" );
 		}
 	}
 	// stage this frame's camera for next frame's reprojection (un-jittered, as passed)

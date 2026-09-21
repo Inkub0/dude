@@ -26,7 +26,7 @@ VARY(0) in vec2 var_TexCoord;
 
 layout(location = 0) out vec4 fragColor;
 // NRD guide inputs, written by THIS pass (it already fetches depth + the G-buffer normal for every pixel)
-// instead of two more fullscreen passes (the former rtao_viewz.frag / rtao_pack.frag, kept for reference):
+// instead of two more fullscreen passes (the former rtao_viewz / rtao_pack shaders, removed 2026-09-21):
 layout(location = 1) out vec4 outViewZ;		// IN_VIEWZ: signed linear view z (negative), R16F
 layout(location = 2) out vec4 outNormal;	// IN_NORMAL_ROUGHNESS: world normal, NRD encoding 2 (signed octahedron), RGBA16F
 
@@ -51,7 +51,7 @@ void onb( vec3 n, out vec3 t, out vec3 b ) {
 	b = vec3( c, s + n.y * n.y * a, -n.y );
 }
 
-// world normal -> NRD normal/roughness encoding 2 (ported verbatim from rtao_pack.frag)
+// world normal -> NRD normal/roughness encoding 2 (NRD_NORMAL_ENCODING 2: signed octahedron, z sign in roughness)
 vec4 packNrdNormal( vec3 Nraw ) {
 	float nl2 = dot( Nraw, Nraw );
 	vec3  n;
