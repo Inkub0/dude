@@ -315,7 +315,7 @@ world + monsters (RR5 world rows set `flags = RT_GEO_MONSTER` — bit 0 = "has a
 - **Verified** (user, RTX 3080 Ti): `r_vkValidation` clean, interior + exterior (`comm1`/`alphalabs2`
   `outdoor_glass1`) panes reflect the real room correctly, sky/ambient fill reads right on sky-facing panes.
 
-**Stage 2 (BUILT 2026-09-21, user gate pending):** `bumpyenvironment_rt.{vert,frag}` for bumped glass
+**Stage 2 (DONE + user-verified 2026-09-21):** `bumpyenvironment_rt.{vert,frag}` for bumped glass
 (chrome / textured panes — the `GetBumpStage() != NULL` case stage 1 excludes). The vert merges
 `environment_rt.vert`'s world-position/tint fold with `bumpyenvironment.vert`'s tangent→global rows; the
 frag builds the reflection normal exactly as `bumpyenvironment.frag` (sample bump, rotate to world) then
@@ -325,9 +325,13 @@ origin along the stable flat normal, and reuses the stage-1 trace-and-shade + sk
 when a bump stage is present, binds the bump map on **unit 0** (the cube is skipped, so unit 0 is free —
 avoids a novel unit-1-without-0 descriptor) and overrides `pd.shader` to `bumpyenvironment_rt`. Per-draw
 runtime flip like stage 1; SPIR-V confirms bump at set 1/binding 0 + bindless at set 2. Optional Fresnel /
-real fog-colour miss fill remain future polish.
+real fog-colour miss fill remain future polish. **Bumped `reflect`+`bumpmap` materials are RARE in stock D3
+(12 of 65 .mtr):** the reachable ones are reflective goggles/visors — `male_npc/security/gog` +
+`hazmat/visor` (living NPCs, Mars City intro), `zsecurity/zsgogs2` (zombie-sec enemies, also exercises the
+skinned path) — plus a few statics (`textures/outside/outfactory_new2`, `textures/sfx/tramwall2env`,
+`mapobjects/enpro/dm_sat`). User-verified on those 2026-09-21.
 
-## Entity coverage — the room's props + dropped items should reflect too (BUILT 2026-09-21, user gate pending)
+## Entity coverage — the room's props + dropped items should reflect too (DONE + user-verified 2026-09-21)
 
 Today reflective floors show the worldspawn (RR5) + monsters (RR2), but **static entity props reflect as
 nothing** and **runtime-dropped items don't either** — a reflection ray hits their positions-only defer row
@@ -342,8 +346,8 @@ BLASes so `ssr_rt`/`environment_rt` can shade the hit. The template is `R_RtBuil
 honest). `R_RtBuildOneEntityModelBlas` + the first-sight cache in `R_RtRefreshInstances` (Item 3) build a
 dropped item's attributed BLAS the frame it appears (synchronous — a brief one-time stall), keyed by model
 + a topology signature that guards model-pointer reuse; no mid-map destroy (a first-sight entry lives until
-the map's `DestroyRtScene`, dedicated buffers freed by `R_RtFreeWorldGeo`). Build + shader-validator clean;
-the reflect/shadow "does it look right" gate is the user's.
+the map's `DestroyRtScene`, dedicated buffers freed by `R_RtFreeWorldGeo`). **User-verified 2026-09-21:
+dropped items read correctly in a reflective floor** (same attributed-shade path as the static props).
 
 ### Item 1 — `func_static` / map-placed props (the foundation)
 
@@ -395,8 +399,8 @@ reflective floor under RT — it should appear in the reflection.
 
 **Where the arc stands.** RR0–RR11, #4a and RR5c stage 1 are shipped: under Ultra Nightmare every
 reflective opaque pixel and every unbumped glass pane traces the real, textured room + monsters. Entity
-coverage (Item 1 props, Item 3 dropped items) and RR5c stage 2 (bumped glass) are now **BUILT** (2026-09-21,
-`feat/rt-refl-entity-coverage-bumped-glass`, user visual gate pending) — see the sections above. This
+coverage (Item 1 props, Item 3 dropped items) and RR5c stage 2 (bumped glass) are now **DONE + user-verified**
+(2026-09-21, `feat/rt-refl-entity-coverage-bumped-glass`) — see the sections above. This
 section adds four fidelity stages and slots them around those, so nothing gets built — or visually gated —
 twice. No new assets anywhere; everything reads data the engine already has.
 
@@ -421,10 +425,10 @@ twice. No new assets anywhere; everything reads data the engine already has.
 
 | # | Stage | Depends on | Tier | Size |
 |---|---|---|---|---|
-| 1 | **Entity coverage Item 1** (props) — **BUILT 2026-09-21** | — | UN | M |
+| 1 | **Entity coverage Item 1** (props) — **DONE + verified 2026-09-21** | — | UN | M |
 | 2 | **RR12** — lit-scene reuse at the hit (+ RR12b emissive flag) | best judged after 1 | UN | S–M |
-| 3 | **Entity coverage Item 3** (dropped items) — **BUILT 2026-09-21** | 1 | UN | S |
-| 4 | **RR5c stage 2** (bumped glass) — **BUILT 2026-09-21** (own hit-shade copy; RR12a factor still TODO) | RR12's shared hit-shade include | UN | S–M |
+| 3 | **Entity coverage Item 3** (dropped items) — **DONE + verified 2026-09-21** | 1 | UN | S |
+| 4 | **RR5c stage 2** (bumped glass) — **DONE + verified 2026-09-21** (own hit-shade copy; RR12a factor still TODO) | RR12's shared hit-shade include | UN | S–M |
 | 5 | **RR13** — roughness-driven glossy for the RT tier | 2 (tune blur on correctly-lit content) | UN | M |
 | 6 | **RR14** — specular occlusion on reflections | — (independent; can jump the queue) | Ultra+ (SSR **and** RT), GL3+VK | S |
 | 7 | **RR15** — reflections on wet blood (the parked decal G-buffer) | RR13 | Ultra+ | M, optional |
