@@ -206,4 +206,4 @@ normal/material/velocity + depth, never the scene colour, so the rectangle survi
 `RB_RHI_NormalPrepass` declines the merge when the view holds an `SS_SUBVIEW` surface; that view
 takes the standalone target + `zfill` (the `r_ssaoMergeNormal 0` path). Cost: the ~0.65 ms merge
 saving is forgone only while a mirror/portal surface is in view, and the standalone G-buffer
-target gets allocated the first time that happens. Pending user verification.
+target gets allocated the first time that happens. **User-verified 2026-09-21**, merged to master.
