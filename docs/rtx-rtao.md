@@ -183,4 +183,17 @@ the bilinear upscale isn't depth-aware. If it shows, the resolve can be upgraded
 **Measured by the user (RTX 3080 Ti, 2026-09-21, `ao (rtao/gtao)` scope):** full 1.0 ~2.20 ms;
 **0.75 ~1.34 ms (-0.86 ms)**; **0.5 ~0.71 ms (-1.49 ms)** - the denoiser scales with pixel count
 exactly as expected, and non-integer 0.75 works with no strobing (AO is low-frequency). Frame
-~14.6 -> ~13.6 (0.75) -> ~13.1 ms (0.5). Look verification (halos at 0.5) + a preset column: pending.
+~14.6 -> ~13.6 (0.75) -> ~13.1 ms (0.5). Look at 0.75: "pretty close to native", with a slight THICKER 45-degree-line noise on small far
+details - the interleaved-gradient-noise diagonal magnified by the upscale.
+
+### The 45-degree residue: reoriented IGN (2026-09-21)
+
+`rtao_ray.frag` dithered the ray direction with IGN decorrelated across frames by a value-phase
+*slide* - which (as `vol_march.frag` already documents for the volumetric march) leaves IGN's fixed
+45-degree diagonal in the per-frame residue. NRD's temporal accumulation keeps averaging the same
+diagonal, so it survives; upscaling from a reduced `r_rtaoResScale` then magnifies it into visible
+lines on small far details. Fix: the exact volumetric-march trick - each frame uses IGN in a
+different ORIENTATION (axes swapped / mirrored at a hashed offset, `u_localParam1.x` = frame index),
+so successive residues point different ways and accumulate to isotropic grain. No blue-noise texture
+(there is none in the tree; the fog "blue noise" is this reoriented IGN). This also very slightly
+changes full-res RTAO's noise character (an improvement). A preset column for 0.75: pending.

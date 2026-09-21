@@ -11,7 +11,7 @@
 //   u_rtParms.xy          = TLAS device address (bit-cast lo/hi)
 //   u_modelViewMatrix     = inverse view (view -> world)
 //   u_localParam0         = ( 1/proj00, 1/proj11, rayRadius, hitDistA )
-//   u_localParam1         = ( noisePhase, hitDistB, normalOffset, 0 )
+//   u_localParam1         = ( frameIndex (hashed for the per-frame IGN reorientation), hitDistB, normalOffset, 0 )
 //   u_screenCorrection.xy = 1 / viewSize        (gl_FragCoord -> [0,1] uv)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 //   u_windowCoord.z       = view-Y sign (+1 GL, -1 Vulkan top-down)
@@ -36,8 +36,9 @@ layout(location = 2) out vec4 outNormal;	// IN_NORMAL_ROUGHNESS: world normal, N
 // for cinematic cameras, so it is not the constant ( 0.33333333, -0.33316667 ) it used to be hard-coded as
 #define depth_consts DUDE_DEPTH_CONSTS()
 
-// interleaved gradient noise (ssao.frag) — per-pixel dither, rotated per frame by the
-// golden-ratio phase so the denoiser's temporal accumulation sees fresh sample directions
+// interleaved gradient noise (ssao.frag): per-pixel dither whose 3x3 neighbourhood holds
+// well-spread values (denoiser-friendly). The per-frame variation is a reorientation at the
+// call site (see below), not a value phase here.
 float ign( vec2 p ) {
 	return fract( 52.9829189 * fract( dot( p, vec2( 0.06711056, 0.00583715 ) ) ) );
 }
@@ -110,11 +111,21 @@ void main() {
 	vec3 Pw = ( u_modelViewMatrix * vec4( P, 1.0 ) ).xyz;
 	vec3 Nw = normalize( mat3( u_modelViewMatrix ) * N );
 
-	// one cosine-weighted hemisphere direction; two decorrelated IGN streams, both
-	// rotated by the per-frame golden-ratio phase (localParam1.x)
-	float phase = u_localParam1.x;
-	float r1 = fract( ign( frag ) + phase );
-	float r2 = fract( ign( frag.yx + vec2( 37.0, 17.0 ) ) + phase );
+	// one cosine-weighted hemisphere direction; two decorrelated IGN streams. Per-frame decorrelation
+	// re-ORIENTS the IGN each frame (axes swapped / mirrored at a hashed offset - vol_march.frag), NOT
+	// a value-phase slide: a slide leaves IGN's fixed 45-degree diagonal in the per-frame residue, and
+	// when the denoised AO is upscaled from a reduced r_rtaoResScale that diagonal shows as thick lines
+	// on small far details. Re-orienting points each frame's residue a different way, so NRD's temporal
+	// accumulation averages it to isotropic grain. u_localParam1.x = frame index (hashed).
+	uint  fh = uint( u_localParam1.x ) * 747796405u + 2891336453u;
+	fh = ( ( fh >> ( ( fh >> 28u ) + 4u ) ) ^ fh ) * 277803737u;
+	fh = ( fh >> 22u ) ^ fh;
+	vec2  jc = frag + vec2( float( ( fh >> 3u ) & 1023u ), float( ( fh >> 13u ) & 1023u ) );
+	if ( ( fh & 1u ) != 0u ) { jc = jc.yx; }
+	if ( ( fh & 2u ) != 0u ) { jc.x = -jc.x; }
+	if ( ( fh & 4u ) != 0u ) { jc.y = -jc.y; }
+	float r1 = ign( jc );
+	float r2 = ign( jc.yx + vec2( 37.0, 17.0 ) );
 	float phi  = 6.28318530718 * r1;
 	float sinT = sqrt( r2 );
 	float cosT = sqrt( 1.0 - r2 );

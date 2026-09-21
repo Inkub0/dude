@@ -459,7 +459,6 @@ static int   rhiRtaoW = 0, rhiRtaoH = 0;			// the RESOLUTION the ray pass + NRD 
 static rhi::RenderTargetHandle rhiRtaoVelRT = 0;	// r_rtaoResScale < 1: full-res velocity downsampled to the ray/NRD resolution for NRD's IN_MV
 static int   rhiRtaoVelW = 0, rhiRtaoVelH = 0;
 static bool  rhiRtaoRanThisView = false;			// ray output produced this view (overlay gate)
-static float rhiRtaoJitterPhase = 0.0f;				// per-frame golden-ratio noise rotation
 // H4b guide inputs + H4c denoise state: NRD's IN_VIEWZ (signed linear Z, R16F) and
 // IN_NORMAL_ROUGHNESS (world-space encoding-2 pack, RGBA16F) targets, plus the previous
 // frame's camera for the denoiser's reprojection (its own staging — the shared temporal
@@ -6587,9 +6586,9 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const float invP11 = ( proj[5] != 0.0f ) ? 1.0f / proj[5] : 1.0f;
 	const float radius = r_rtaoRadius.GetFloat();
 
-	// per-frame noise rotation so the (H4c) temporal accumulation sees fresh directions
-	rhiRtaoJitterPhase += 0.61803399f;
-	rhiRtaoJitterPhase -= (float)(int)rhiRtaoJitterPhase;
+	// per-frame index for rtao_ray's IGN reorientation (the temporal accumulation sees a differently
+	// oriented dither each frame - no 45-degree residue to survive the r_rtaoResScale upscale)
+	const float rtaoFrameIndex = (float)( tr.frameCount & 0xFFFF );
 
 	const int uploadW = globalImages->currentDepthImage->uploadWidth;
 	const int uploadH = globalImages->currentDepthImage->uploadHeight;
@@ -6608,7 +6607,7 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[2] = radius;
 	parms.localParam0[3] = 0.5f * radius;			// hitDist normalization A — MUST match the
 	parms.localParam1[1] = 0.1f;					// ... ReblurHitDistanceParameters (H4c)
-	parms.localParam1[0] = rhiRtaoJitterPhase;
+	parms.localParam1[0] = rtaoFrameIndex;
 	parms.localParam1[3] = 0.004f;					// ray origin pulled toward the eye, per unit of view depth (no crease leak; see rtao_ray.frag)
 	// the ray pass runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, and -> the full-res depth tc
 	// carries the (w/rw) stretch (mirrors RB_RHI_SSAOPass's scaled march). At scale 1 this is 1/w, 1/uploadW.
