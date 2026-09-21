@@ -1841,6 +1841,48 @@ static CVarOption lightingOptions[] = {
 			"0 = vanilla (no light), 1 = full faint glow. Only noticeable in near-total darkness.";
 		AddCVarOptionTooltips( cvar, descr );
 	} ),
+	// DUDE skin / flesh subsurface scattering (docs/skin-shading.md). A wrapped diffuse on the
+	// classifier's skin/flesh materials that warms the lighting terminator so faces and Hell flesh
+	// stop reading as plastic under the GGX lobe. Diffuse-only, so it works on every shading model
+	// (not just PBR). Master on/off checkbox up top; the strength/reach sliders grey out while off.
+	CVarOption( "r_skinShading", []( idCVar& cvar ) {
+		// r_skinShading doubles as strength AND enable, so the master checkbox toggles between 0 and
+		// the last non-zero strength (remembered so an off/on round-trip restores the amount; falls
+		// back to 0.6, the preset value).
+		static float lastOn = 0.6f;
+		float cur = cvar.GetFloat();
+		if ( cur > 0.0f ) {
+			lastOn = cur;
+		}
+		bool on = cur > 0.0f;
+		if ( ImGui::Checkbox( "Skin Subsurface Scattering (SSS)", &on ) ) {
+			cvar.SetFloat( on ? ( lastOn > 0.0f ? lastOn : 0.6f ) : 0.0f );
+		}
+		const char* descr = "Faces and Hell flesh scatter light under the skin, so their shading terminator glows\n"
+			"a soft red instead of cutting off hard and plastic-looking. Keyed off the material\n"
+			"classifier's skin/flesh tags (no per-map setup) and works on every tier, not just PBR.\n"
+			"Purely a look; the strength and reach below tune it.";
+		AddCVarOptionTooltips( cvar, descr );
+		// strength, greyed while the feature is off
+		ImGui::BeginDisabled( cvar.GetFloat() <= 0.0f );
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Skin SSS Strength", &f, 0.0f, 1.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, f ) );
+		}
+		ImGui::EndDisabled();
+	} ),
+	CVarOption( "r_skinScatter", []( idCVar& cvar ) {
+		ImGui::BeginDisabled( r_skinShading.GetFloat() <= 0.0f );
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Skin Scatter Reach", &f, 0.0f, 1.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, f ) );
+		}
+		const char* descr = "How far light wraps around the terminator on skin/flesh: higher = a softer, redder,\n"
+			"wider glow, lower = tighter. Flesh scatters a little deeper than face skin.\n"
+			"Only active when Skin Subsurface is above 0.";
+		AddCVarOptionTooltips( cvar, descr );
+		ImGui::EndDisabled();
+	} ),
 };
 
 // NOTE: the Shadows section is hand-drawn in DrawGraphicsMenu() (a burger group under
@@ -2719,6 +2761,13 @@ struct EnhancementPreset {
 	// and the NRD denoiser at (the occlusion is upscaled). Only meaningful where rtao is on, so
 	// only the Ultra Nightmare tier carries < 1.0; every other tier is 1.0 (full res).
 	float rtaoResScale;            // r_rtaoResScale
+	// Skin / flesh subsurface scattering (appended, see note above; GL3 + Vulkan, all tiers). A
+	// wrapped diffuse that warms the lighting terminator on classifier-tagged skin/flesh so faces
+	// and Hell flesh stop reading as plastic. Cheap and diffuse-only, so it rides every shading
+	// model; ON from Low up. Potato alone keeps it 0 — the faithful id-render floor (it changes the
+	// diffuse falloff, a deliberate deviation from stock Lambert). The reach knob stays the cvar
+	// default across tiers; only the strength is preset-owned.
+	float skinShading;             // r_skinShading
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2727,14 +2776,14 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger  volum  rtaoRes
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f },
-	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 0.5f, true, true,  true,  true,  0,     true,  true,  true,  false, true , true, true, true, true, true, 0.75f },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger  volum  rtaoRes  skin
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f },
+	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 0.5f, true, true,  true,  true,  0,     true,  true,  true,  false, true , true, true, true, true, true, 0.75f, 0.6f },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2845,6 +2894,12 @@ static void ApplyEnhancementPreset( int idx )
 	r_rtAllLights.SetBool( p.rtAllLights );
 	r_rtShadowBlurStagger.SetBool( p.rtBlurStagger );
 	r_volumetrics.SetBool( p.volumetrics );
+
+	// skin / flesh subsurface scattering (GL3 + Vulkan, all tiers): a wrapped diffuse that warms
+	// the terminator on classifier-tagged skin/flesh. ON from Low up; Potato keeps it 0 (the
+	// faithful floor). Only the strength is preset-owned — the reach (r_skinScatter) stays a free
+	// tuning knob (Graphics -> Lighting), since it is pure taste with no cost or fidelity tier.
+	r_skinShading.SetFloat( p.skinShading );
 }
 
 // Return the preset whose full cvar vector the live cvars currently match, or -1
@@ -2909,7 +2964,8 @@ static int DetectEnhancementPreset()
 			r_rtShadowBlur.GetBool()           == p.rtShadowBlur &&
 			r_rtAllLights.GetBool()            == p.rtAllLights &&
 			r_rtShadowBlurStagger.GetBool()    == p.rtBlurStagger &&
-			r_volumetrics.GetBool()            == p.volumetrics;
+			r_volumetrics.GetBool()            == p.volumetrics &&
+			idMath::Fabs( r_skinShading.GetFloat() - p.skinShading ) < 0.01f;
 		if ( match ) {
 			return i;
 		}

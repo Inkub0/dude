@@ -382,6 +382,16 @@ idCVar r_pbrMetalDiffuse( "r_pbrMetalDiffuse", "0.75", CVAR_RENDERER | CVAR_ARCH
 idCVar r_pbrToksvigBase( "r_pbrToksvigBase", "0.08", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "normal-variance baseline subtracted before the Toksvig specular widening. Low = more anti-firefly widening but softer highlights; high = tighter highlights but white pixel spikes on seams return. 0.08 = calibrated split alongside the 2026-08-01 SSR/reflection retune (docs/pbr-materials.md sec. 4)", 0.0f, 0.6f );
 idCVar r_pbrFireflyClamp( "r_pbrFireflyClamp", "12", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "upper bound on the GGX specular lobe. Prevents isolated normal-map texels from spiking to clipped white; also the ceiling that skin/tight-roughness highlight cores ride at. Raise for hotter highlight cores (pairs well with r_hdr), lower to flatten", 1.0f, 16.0f );
 
+// DUDE skin / flesh subsurface scattering (docs/skin-shading.md). A per-channel WRAPPED diffuse
+// on materials the PBR classifier already tags skin or flesh (no new assets): the lighting
+// terminator softens and warms to red, the way light that entered the lit side and scattered a
+// short way under the skin leaves in shadow. Kills the "plastic" read faces and Hell flesh get
+// under the tight GGX lobe. Diffuse-only, so it works on every shading model (all tiers, not just
+// r_pbr) and never touches the specular. Cheap (a few ALU per lit skin pixel); the whole risk is
+// taste, so both the strength and the reach are live knobs.
+idCVar r_skinShading( "r_skinShading", "0.6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "subsurface-scattering strength on skin/flesh-classified materials: a wrapped diffuse that warms and softens the lighting terminator so faces and Hell flesh stop reading as plastic. Defaults to 0.6 (on); 0 = off (vanilla), 1 = full. Non-vanilla; opengl3/Vulkan. Direct light only; keyed off the PBR classifier categories, so it needs the pbr table (no r_pbr required). Every preset writes it (Potato 0 = faithful floor, Low+ 0.6)", 0.0f, 1.0f );
+idCVar r_skinScatter( "r_skinScatter", "0.4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how far light wraps around the terminator on r_skinShading surfaces (the red channel's scatter reach; green/blue derive shorter for the warm falloff). Higher = a softer, redder, wider terminator glow; lower = tighter. Flesh scatters ~30% deeper than face skin. Only active when r_skinShading > 0", 0.0f, 1.0f );
+
 // Per-category PBR defaults (metalness/roughness/wetness/env) moved OUT of cvars into a
 // table persisted in the pbr config (docs/pbr-materials.md) — edited via the 8x4 grid in
 // the Developer tab / material editor, not individual cvars. r_pbrEnvScale (below) stays

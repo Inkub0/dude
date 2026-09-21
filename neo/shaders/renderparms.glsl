@@ -126,6 +126,12 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // put every reconstructed point 3x too far away (and
 	                            // renderView.cramZNear would quarter it again). x == 0 = not provided:
 	                            // use DUDE_DEPTH_CONSTS( ) below, which falls back to the play pair.
+
+	vec4 u_skinParms;            // DUDE skin / flesh subsurface scattering (docs/skin-shading.md):
+	                            // x = blend strength (0 = off), yzw = per-channel diffuse wrap widths
+	                            // (red widest, so the shading terminator warms to red like real skin).
+	                            // interaction.frag adds the wrapped-diffuse excess over Lambert; 0 on
+	                            // every non-skin/flesh, ambient or film draw. Appended LAST.
 };
 
 // the depth-linearisation pair for this draw (see u_depthParms)

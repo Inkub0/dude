@@ -907,6 +907,11 @@ extern idCVar r_pbrFireflyClamp;		// GGX lobe ceiling (spike suppression / highl
 // R_PbrCategoryDefaults), persisted as @cat rows in the pbr config — not cvars.
 extern idCVar r_pbrEnvScale;			// Phase C.1 metal env floor GLOBAL base (per-category env rides on top)
 
+// DUDE skin / flesh subsurface scattering (docs/skin-shading.md) — wrapped diffuse on the
+// classifier's skin/flesh categories; diffuse-only, works on every shading model (all tiers)
+extern idCVar r_skinShading;			// SSS strength on skin/flesh materials (0 = off .. 1 = full)
+extern idCVar r_skinScatter;			// terminator wrap reach (red channel; g/b derive shorter)
+
 // DUDE PBR Phase C.2 screen-space reflections (docs/ssr.md) — GL3 backend only
 extern idCVar r_ssr;					// enable; reflectivity follows the PBR material table
 extern idCVar r_ssrIntensity;			// reflection strength multiplier

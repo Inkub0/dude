@@ -383,6 +383,33 @@ float parallaxShadow( vec2 uv, vec3 lightTS, float hitDepth, vec2 dPx, vec2 dPy 
 	return clamp( 1.0 - shadow * 6.0, 0.0, 1.0 );			// gain to bring the soft shadow into range
 }
 
+// DUDE skin / flesh subsurface scattering (docs/skin-shading.md). Faces and Hell flesh read as
+// plastic under the tight GGX lobe because Lambert cuts the diffuse off HARD at the terminator
+// (N.L = 0), where real skin instead glows a soft red: light that entered the lit side scatters a
+// short way through the dermis and leaves on the shadow side, reddened because red penetrates
+// living tissue furthest. Pre-integrating that scatter over the hemisphere is the Penner (2011)
+// skin model, which needs a curvature + N.L lookup texture; with no assets we approximate its
+// signature analytically with a per-channel WRAPPED diffuse — red wraps furthest around the
+// terminator, green less, blue least — so the terminator warms to red exactly as the diffusion
+// profile does. Returns the EXTRA diffuse cosine over plain Lambert (>= 0 per channel, ~0 except
+// near the terminator); the caller adds it on top of the existing combine, so the lit interior
+// and the whole specular path are untouched. u_skinParms.x = blend strength (0 = off, a hard
+// early-out for every non-skin draw), .yzw = the per-channel wrap widths (the scatter reach).
+vec3 skinScatterExcess( float NdotLsigned ) {
+	if ( u_skinParms.x <= 0.0 ) {
+		return vec3( 0.0 );
+	}
+	vec3 w = u_skinParms.yzw;
+	// wrapped cosine per channel: (N.L + w) / (1 + w). At N.L = 1 it is 1 (the fully-lit interior
+	// is unchanged); it stays positive down to N.L = -w, filling the near-terminator shadow with
+	// a warm, per-channel falloff. Clamped so a channel with a tiny width can't go negative.
+	vec3 wrapped = clamp( ( vec3( NdotLsigned ) + w ) / ( vec3( 1.0 ) + w ), 0.0, 1.0 );
+	// excess over plain clamped Lambert — this is what we ADD, so summing it with the existing
+	// N.L diffuse term reconstructs `wrapped` exactly. max() guards the [0, inf) HDR floor.
+	vec3 excess = max( wrapped - vec3( max( NdotLsigned, 0.0 ) ), vec3( 0.0 ) );
+	return excess * u_skinParms.x;
+}
+
 void main() {
 	// DUDE parallax occlusion mapping: march the height map along the tangent-space view
 	// ray and shift all surface UVs by the result before any surface fetch. Off (enable 0)
@@ -422,6 +449,11 @@ void main() {
 	// and unshadowed lights, u_shadowParms.x == 0) fold into one scalar that
 	// scales the light projection / falloff product below.
 	float lightScale;
+	// DUDE skin/flesh SSS: the shadow visibility is split back out of lightScale (below) so the
+	// wrapped-diffuse excess can ride the SAME shadow term without the N.L that lightScale folds
+	// in, and the per-channel excess itself. Both stay at their no-op defaults on non-skin draws.
+	float shadowVis = 1.0;
+	vec3 sssExcess = vec3( 0.0 );
 
 	// the light's projection * falloff, fetched up front (it was fetched further down anyway) so
 	// the inline shadow ray can be skipped where it is black
@@ -482,7 +514,8 @@ void main() {
 		vec3 L = normalize( var_TexLightVec );
 		vec3 V = normalize( var_TexViewVec );
 		vec3 H = normalize( L + V );
-		float NdotL = max( dot( N, L ), 0.0 );
+		float NdotLsigned = dot( N, L );		// kept signed for the skin scatter wrap
+		float NdotL = max( NdotLsigned, 0.0 );
 		float NdotV = max( dot( N, V ), 1e-4 );
 		float NdotH = max( dot( N, H ), 0.0 );
 		float VdotH = max( dot( V, H ), 0.0 );
@@ -563,7 +596,9 @@ void main() {
 		// that fraction of the albedo colour while the metallic specular still rides
 		// on top. kd 1 = physical, kd 0 = full albedo retained (docs sec. 5).
 		diffuse.rgb *= ( 1.0 - F ) * ( 1.0 - metal * u_pbrParms2.x );
-		lightScale = NdotL * shadowVisibility( lightReaches && NdotL > 0.0 );
+		shadowVis = shadowVisibility( lightReaches && NdotL > 0.0 );
+		lightScale = NdotL * shadowVis;
+		sssExcess = skinScatterExcess( NdotLsigned );	// 0 unless this is a skin/flesh draw
 	} else {
 		// half angle is normalized with math (matches the ARB program, which
 		// deliberately avoided the normalization cubemap here)
@@ -573,7 +608,9 @@ void main() {
 		vec3 lightV = texture( u_normalCubeMap, var_TexLightVec ).xyz * 2.0 - 1.0;
 
 		float rawNdotL = dot( lightV, localNormal );
-		lightScale = rawNdotL * shadowVisibility( lightReaches && rawNdotL > 0.0 );
+		shadowVis = shadowVisibility( lightReaches && rawNdotL > 0.0 );
+		lightScale = rawNdotL * shadowVis;
+		sssExcess = skinScatterExcess( rawNdotL );		// 0 unless this is a skin/flesh draw
 
 		// specular term. Shading model selected by u_specularParms.z:
 		//   0 = vanilla dependent LUT read on N.H (faithful default)
@@ -637,4 +674,17 @@ void main() {
 	// bug. max() restores the [0, inf) floor while keeping HDR's >1 highlights; it's a
 	// no-op on the 8-bit path, which already floored here.
 	fragColor = max( light * color * var_Color, vec4( 0.0 ) );
+
+	// DUDE skin/flesh SSS (see skinScatterExcess). Add the wrapped-diffuse EXCESS as extra
+	// diffuse light. It rides EXACTLY the modulation the Lambert diffuse already got — the light's
+	// projection*falloff (lightAtten), this light's shadow visibility, the parallax self-shadow and
+	// the vertex colour — but with the scatter cosine instead of the N.L that `light` folds in, so
+	// summing it with the existing diffuse term relights the albedo by the warm `wrapped` cosine
+	// while the specular lobe keeps the true N.L. Uses the final AO-weighted diffuse albedo, and is
+	// non-negative, so the [0, inf) floor above holds. sssExcess is 0 on every non-skin draw, so
+	// the branch is a strict no-op there (and skipped entirely by the guard).
+	if ( u_skinParms.x > 0.0 ) {
+		fragColor.rgb += diffuse.rgb * sssExcess * lightAtten.rgb
+		               * ( shadowVis * parallaxSelfShadow ) * var_Color.rgb;
+	}
 }

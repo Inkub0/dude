@@ -1426,6 +1426,34 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		}
 	}
 
+	// DUDE skin / flesh subsurface scattering (docs/skin-shading.md): a per-channel wrapped
+	// diffuse that warms and softens the lighting terminator on faces and Hell flesh so they
+	// stop reading as plastic under the GGX lobe. Deliberately OUTSIDE the r_pbr block above —
+	// it only softens the DIFFUSE cosine (never the specular), so it rides every shading model
+	// and works on the Blinn tiers too (all tiers). Keyed off the same classifier categories the
+	// PBR table already tags, so it needs no new assets. Skipped on the ambient fill pass (a
+	// direct-light effect: interaction.frag, not ambientlight.frag, carries the term) and on the
+	// wet-blood film draw (which zeroes diffuse). 0 (memset) everywhere else = a strict no-op.
+	if ( r_skinShading.GetFloat() > 0.0f && !din->ambientLight && !rhiFilmDraw ) {
+		const int skinCat = din->surf->material->GetPbrCategory();
+		if ( skinCat == PBR_CAT_SKIN || skinCat == PBR_CAT_FLESH ) {
+			parms.skinParms[0] = idMath::ClampFloat( 0.0f, 1.0f, r_skinShading.GetFloat() );
+			// The RGB wrap-width ratio IS the terminator's warm colour: red light penetrates the
+			// dermis deepest, green less, blue least (the classic skin diffusion profile). Hell
+			// flesh (gibs, raw meat, imp hide) scatters deeper and redder than face skin.
+			const float rad = r_skinScatter.GetFloat();		// red-channel scatter reach
+			if ( skinCat == PBR_CAT_FLESH ) {
+				parms.skinParms[1] = rad * 1.30f;
+				parms.skinParms[2] = rad * 0.30f;
+				parms.skinParms[3] = rad * 0.15f;
+			} else {
+				parms.skinParms[1] = rad * 1.00f;
+				parms.skinParms[2] = rad * 0.35f;
+				parms.skinParms[3] = rad * 0.20f;
+			}
+		}
+	}
+
 	// shadow mapping (DUDE Phase 3.5): only the regular interaction shader samples
 	// the depth map — the ambientLight pass has no shadow term. The 2D lookup uses a
 	// SEPARATE, unbaked projection texgen (shadowProjection[], filled below), NOT the
