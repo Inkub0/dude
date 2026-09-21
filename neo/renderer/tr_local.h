@@ -983,6 +983,7 @@ extern idCVar r_skinnedMotionVectors;		// GPU-skinned characters write per-bone 
 extern idCVar r_rtaoDebug;					// RTAO debug view (1 raw rays, 2 denoised)
 extern idCVar r_rtgi;						// H6 RT GI: one-bounce ray-traced global illumination (gathers radiance at the hemisphere hit)
 extern idCVar r_rtgiRadius;					// RT GI gather ray length (world units)
+extern idCVar r_rtgiResScale;				// RT GI gather/denoise resolution fraction (biggest cost lever)
 extern idCVar r_rtgiLightScale;				// RT GI: brightness of the diffuse lighting at a bounce hit
 extern idCVar r_rtgiEmissive;				// RT GI: self-illuminated surface contribution at a bounce hit
 extern idCVar r_rtgiDebug;					// RT GI debug view (H6a: 1 = raw radiance-gather buffer)

@@ -6824,20 +6824,26 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-	// (re)create the RGBA16F radiance MRT on first use / resize / lost context. H6a runs full res; the
-	// r_rtaoResScale-style reduced-res trace + NRD land with the denoise in H6b.
+	// r_rtgiResScale: trace the gather at a fraction of the screen - bounce light is very low-frequency, so
+	// a reduced-res gather + bilinear upscale is nearly free of visible quality but the biggest cost lever (a
+	// full-res single sample was ~4 ms). The debug overlay upscales via smaa_copy; H6b's NRD runs at this res.
+	const float resScale = idMath::ClampFloat( 0.25f, 1.0f, r_rtgiResScale.GetFloat() );
+	int rw = (int)( w * resScale + 0.5f ), rh = (int)( h * resScale + 0.5f );
+	if ( rw < 1 ) rw = 1;
+	if ( rh < 1 ) rh = 1;
+	// (re)create the RGBA16F radiance MRT on first use / resize / scale change / lost context.
 	if ( rhiRtgiRayRT && r->GetRenderTargetImage( rhiRtgiRayRT ) == 0 ) {
 		rhiRtgiRayRT = 0; rhiRtgiW = rhiRtgiH = 0;
 	}
-	if ( rhiRtgiRayRT && ( rhiRtgiW != w || rhiRtgiH != h ) ) {
+	if ( rhiRtgiRayRT && ( rhiRtgiW != rw || rhiRtgiH != rh ) ) {
 		r->DestroyRenderTarget( rhiRtgiRayRT ); rhiRtgiRayRT = 0; rhiRtgiW = rhiRtgiH = 0;
 	}
 	if ( !rhiRtgiRayRT ) {
-		rhiRtgiRayRT = r->CreateRenderTargetRtgiMrt( w, h );
+		rhiRtgiRayRT = r->CreateRenderTargetRtgiMrt( rw, rh );
 		if ( !rhiRtgiRayRT ) {
 			return;
 		}
-		rhiRtgiW = w; rhiRtgiH = h;
+		rhiRtgiW = rw; rhiRtgiH = rh;
 	}
 
 	float invView[16];
@@ -6866,11 +6872,13 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[2] = radius;
 	parms.localParam1[0] = giFrameIndex;
 	parms.localParam1[3] = 0.004f;					// ray origin pulled toward the eye per unit depth (crease-leak fix)
-	parms.screenCorrection[0] = 1.0f / w;
-	parms.screenCorrection[1] = 1.0f / h;
-	parms.depthTexRecip[0] = 1.0f / uploadW;
+	// the gather runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, and -> the full-res depth tc carries
+	// the (w/rw) stretch (mirrors RB_RHI_RtaoPass / RB_RHI_SSAOPass's scaled march). At scale 1: 1/w, 1/uploadW.
+	parms.screenCorrection[0] = 1.0f / rw;
+	parms.screenCorrection[1] = 1.0f / rh;
+	parms.depthTexRecip[0] = ( (float)w / rw ) / uploadW;
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair
-	parms.depthTexRecip[1] = 1.0f / uploadH;
+	parms.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
 	parms.windowCoord[2] = -1.0f;					// VK-only pass: top-down view-Y sign
 
 	// scene lights to shade the hit (shared buffer with RT reflections / volumetrics; cached per view)
