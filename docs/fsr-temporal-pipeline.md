@@ -507,7 +507,7 @@ which already renders *real* frames above the 60 Hz sim. Next big step after R1 
 ray-query foundation** ([rtx-shadow-roadmap.md](rtx-shadow-roadmap.md)).
 
 
-## Skinned motion vectors (2026-09-21, `r_skinnedMotionVectors`, gate pending)
+## Skinned motion vectors (2026-09-21, `r_skinnedMotionVectors`, user-verified + merged)
 
 **Problem.** The velocity MRT (R1/A2) projected the *current* vertex position through the previous frame's
 per-space MVP — correct for rigid motion, blind to **skeletal animation**. A monster's swinging limbs therefore
