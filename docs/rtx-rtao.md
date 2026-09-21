@@ -89,3 +89,18 @@ hardware allows.
   r_rtAnimBlas (default on, inert without TLAS). AO from monsters follows automatically.
 - **1 spp**: if ReBLUR needs more, first lever is `hitDistanceReconstruction` mode in
   ReblurSettings, second is 2 rays half-res + checkerboard — not first-cut concerns.
+
+
+## 2026-09-21 audit — "is any of the SSAO pipeline still running under RTAO?"
+
+Checked on request. **When RTAO denoises successfully, nothing of GTAO runs:** `RB_RHI_RtaoPass` runs first
+and `RB_RHI_SSAOPass` returns on `rhiRtaoDenoisedThisView` *before* any of its work — the depth-mip pyramid
+(`r_ssaoDepthMip`), the horizon march, the bilateral blur and the temporal pass all live behind that gate, and
+no other code path is keyed on `r_ssao` for GPU work. What remains is shared and needed: the normal prepass
+(RTAO reads its normals; velocity feeds NRD) and the AO buffer's consumers.
+
+**One real double-cost case, fixed:** when the denoise *cannot* run — no velocity MRT (`r_motionVectors` and
+`r_fsr` both off) or a missing guide program — RTAO still traced its full-res ray pass, threw the result away,
+and GTAO then ran as the fallback: both producers in one frame. The pass now checks the denoise prerequisites
+first and returns before tracing (unless `r_rtaoDebug 1`, the only consumer of raw rays). Not the case at
+Ultra Nightmare (FSR on → velocity present), so no change there.
