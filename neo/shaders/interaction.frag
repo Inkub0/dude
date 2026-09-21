@@ -212,7 +212,9 @@ float shadowVisibility( bool canReceive ) {
 			perfOn ? 0xFFu : 0xFDu,
 			wp + wn * u_rtParms.z, 0.0, toLight / distLight, tMax );
 		while ( rayQueryProceedEXT( rq ) ) {
-			if ( perfOn && rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
+			// perfVis < 1: a solid grate texel was already found - further grates can't dim it more
+			if ( perfOn && perfVis == 1.0
+					&& rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
 					&& rayQueryGetIntersectionTEXT( rq, false ) < distLight - 8.0
 					&& dudePerforatedSolid( geoAddr,
 						uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),

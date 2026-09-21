@@ -277,7 +277,16 @@ Cost: nothing for rays that cross no grate (the opaque fast path is unchanged fo
 one table fetch + texture sample per grate triangle crossed. Known limits: coverage stages with a
 scrolling texture matrix sample unscrolled; lod 0 means a fine mesh far away can alias in a hard
 shadow (the blur hides most of it); animated (MD5) models' perforated surfaces are not included.
-**Not runtime-tested; pending user verification.**
+**Perf pass 1 (2026-09-21, user: "roughly 0.85 ms to look at a grate"):** (a) two-sided materials get
+a reversed COPY of each surface appended by `FinishSurfaces` (`ShouldCreateBackSides`), and grates
+are two-sided - every crossing ray alpha-tested each grate twice. Instances trace with facing-cull
+disabled, so the twin (same material / counts / bounds) is now left out of the perforated BLASes.
+(b) the inline ray stops alpha-testing once one solid texel was found (the result can't change).
+Needs a scene rebuild (map load) to take effect. If a grate is still too dear after this, the
+structural fix is `VK_EXT_opacity_micromap`: bake the coverage alpha into the BLAS so traversal
+resolves holes in hardware and the shader never sees a candidate (each candidate today suspends
+traversal, does ~10 buffer fetches and a texture sample).
+**Pending the user's new number.**
 
 ## Cvars
 

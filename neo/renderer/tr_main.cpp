@@ -1967,7 +1967,7 @@ static bool R_RtPerforatedCoverage( const idMaterial *mat, unsigned int &texInde
 
 static void R_RtBuildPerforatedBlas( rhi::RHI *r, const idRenderWorldLocal *world, int &numBlas, int &numTris ) {
 	numBlas = 0; numTris = 0;
-	struct SurfDesc { const srfTriangles_t *tri; unsigned int tex, ref; const idRenderModel *model; };	// model NULL = world area
+	struct SurfDesc { const srfTriangles_t *tri; unsigned int tex, ref; const idRenderModel *model; const idMaterial *mat; };	// model NULL = world area
 	idList<SurfDesc> descs;
 	auto gather = [&]( const idRenderModel *model, const idRenderModel *owner ) {
 		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
@@ -1978,6 +1978,25 @@ static void R_RtBuildPerforatedBlas( rhi::RHI *r, const idRenderWorldLocal *worl
 			}
 			d.tri = surf->geometry;
 			d.model = owner;
+			// A two-sided material gets a REVERSED COPY of each of its surfaces appended to the model
+			// (idRenderModelStatic::FinishSurfaces, ShouldCreateBackSides) - and grates are two-sided.
+			// Instances are traced with facing-cull disabled, so one copy already stops a ray from
+			// either side; the twin would only hand every crossing ray a second candidate to
+			// alpha-test (measured: ~0.85 ms looking at a grate). Same material, same counts, same
+			// bounds = the twin.
+			bool twin = false;
+			for ( int k = descs.Num() - 1; k >= 0 && descs[k].model == owner; k-- ) {
+				const srfTriangles_t *o = descs[k].tri;
+				if ( descs[k].mat == surf->shader && o->numVerts == d.tri->numVerts && o->numIndexes == d.tri->numIndexes
+						&& o->bounds[0].Compare( d.tri->bounds[0], 0.01f ) && o->bounds[1].Compare( d.tri->bounds[1], 0.01f ) ) {
+					twin = true;
+					break;
+				}
+			}
+			if ( twin ) {
+				continue;
+			}
+			d.mat = surf->shader;
 			descs.Append( d );
 		}
 	};
