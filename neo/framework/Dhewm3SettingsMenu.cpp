@@ -3510,9 +3510,21 @@ static void DrawEnhGroup_Shadows()
 			"toward the light, like the two options above - and no shadow maps are rendered at all. "
 			"Pixel-exact shadows from every light, no map resolution or bias artefacts. Heavier in "
 			"rooms with many lights: a still light's cached shadow map is nearly free, a ray is paid "
-			"every frame. Grates and fences stop casting (that is a shadow-map feature). Changes "
+			"every frame. Changes "
 			"the look of shadows: hard-edged unless Soften RT Shadows is on, which then softens all "
 			"of them. Vulkan + RT hardware only." );
+
+		// r_rtPerforatedShadows: not preset-owned (default on; it only matters while a light is ray-traced)
+		ImGui::BeginDisabled( !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtAllLights.GetBool() ) );
+		bool rtPerf = r_rtPerforatedShadows.GetBool();
+		if ( ImGui::Checkbox( "RT Grate & Fence Shadows", &rtPerf ) ) {
+			r_rtPerforatedShadows.SetBool( rtPerf );
+		}
+		ImGui::EndDisabled();
+		AddTooltip( "Grates, fences and other see-through surfaces cast shadows under ray-traced lights "
+			"too: the shadow ray reads the grate's texture where it crosses one, so light passes through "
+			"the holes. How dark these shadows get follows the Perforated Shadow Strength setting of the "
+			"shadow maps. Off = grates cast nothing under ray-traced lights (slightly cheaper)." );
 
 		// r_rtShadowBlur (docs/rtx-shadow-blur.md): a toggle ON TOP of the two ray-traced shadow
 		// routes above; preset-owned (on at Ultra Nightmare), so flipping it by hand reads "Custom"

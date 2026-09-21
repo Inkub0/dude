@@ -40,8 +40,10 @@ void main() {
 				if ( !( t.b > 0.0 ) ) {
 					continue;					// never traced: neither
 				}
-				if ( t.r > 0.5 ) { anyLit = 1.0; }
-				else { maxHW = max( maxHW, max( t.g, t.a ) ); }
+				// a grate's dimmed shadow (0 < r < 1, rtshadow_ray.frag) is both: light to spread
+				// into a darker neighbour, and a shadow to spread into a lit one
+				if ( t.r > 0.001 ) { anyLit = 1.0; }
+				if ( t.r < 0.999 ) { maxHW = max( maxHW, max( t.g, t.a ) ); }
 			}
 		}
 		// ceil to the 8-bit grid so the stored width never under-reports

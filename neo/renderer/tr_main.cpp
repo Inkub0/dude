@@ -1128,6 +1128,11 @@ struct rtModelInst_t {
 struct rtModelBlas_t { const idRenderModel *model; rhi::BlasHandle blas; };
 static idList<rhi::BlasHandle>	s_rtAreaBlas;
 static idList<rtModelBlas_t>	s_rtModelBlas;
+// perforated casters (alpha-tested grates/fences; see R_RtBuildPerforatedBlas)
+static idList<rhi::BlasHandle>	s_rtPerfAreaBlas;
+static idList<rtModelBlas_t>	s_rtPerfModelBlas;
+static rhi::BufferHandle		s_rtPerfVB = 0;
+static rhi::BufferHandle		s_rtPerfIB = 0;
 // RR5: dedicated device-addressable buffers holding the static world's full idDrawVert + 32-bit indices,
 // feeding the per-surface world BLAS so a reflection ray can fetch st + material at a world hit. Persist
 // with the scene (the geo table references them each frame); freed on scene (re)build via R_RtFreeWorldGeo.
@@ -1550,7 +1555,12 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 	if ( s_rtAreaBlas.Num() == 0 && s_rtModelBlas.Num() == 0 ) {
 		return;
 	}
-	const int maxInst = s_rtAreaBlas.Num() + world->entityDefs.Num();
+	// perforated casters (grates/fences) join while the RT shadow rays may alpha-test them. They
+	// cost the other RT consumers nothing either way - RT_MASK_SOLID_RAYS skips them.
+	const bool wantPerf = r_rtPerforatedShadows.GetBool() && r_shadowMapPerforated.GetBool()
+		&& ( s_rtPerfAreaBlas.Num() > 0 || s_rtPerfModelBlas.Num() > 0 );
+	const int maxInst = s_rtAreaBlas.Num() + world->entityDefs.Num()
+		+ ( wantPerf ? s_rtPerfAreaBlas.Num() + world->entityDefs.Num() : 0 );
 	rhi::RHI::RtInstance *inst = (rhi::RHI::RtInstance *)Mem_Alloc16( ( maxInst > 0 ? maxInst : 1 ) * (int)sizeof( rhi::RHI::RtInstance ) );
 	int n = 0;
 	for ( int i = 0; i < s_rtAreaBlas.Num(); i++ ) {
@@ -1591,6 +1601,43 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 		}
 		in.blas = blas;
 		in.mask = 0xFF;
+	}
+	if ( wantPerf ) {
+		for ( int i = 0; i < s_rtPerfAreaBlas.Num(); i++ ) {
+			rhi::RHI::RtInstance &in = inst[n++];
+			memset( &in, 0, sizeof( in ) );
+			in.transform[0] = 1.0f; in.transform[5] = 1.0f; in.transform[10] = 1.0f;	// identity 3x4
+			in.blas = s_rtPerfAreaBlas[i];
+			in.mask = rhi::RHI::RT_MASK_PERFORATED;
+		}
+		for ( int i = 0; s_rtPerfModelBlas.Num() > 0 && i < world->entityDefs.Num(); i++ ) {
+			const idRenderEntityLocal *def = world->entityDefs[i];
+			if ( def == NULL || def->parms.hModel == NULL ) {
+				continue;		// parms.noShadow deliberately NOT checked (perforated override)
+			}
+			rhi::BlasHandle blas = 0;
+			for ( int u = 0; u < s_rtPerfModelBlas.Num(); u++ ) {
+				if ( s_rtPerfModelBlas[u].model == def->parms.hModel ) {
+					blas = s_rtPerfModelBlas[u].blas;
+					break;
+				}
+			}
+			if ( blas == 0 ) {
+				continue;
+			}
+			float mm[16];
+			R_AxisToModelMatrix( def->parms.axis, def->parms.origin, mm );
+			rhi::RHI::RtInstance &in = inst[n++];
+			memset( &in, 0, sizeof( in ) );
+			for ( int row = 0; row < 3; row++ ) {
+				in.transform[row * 4 + 0] = mm[row + 0];
+				in.transform[row * 4 + 1] = mm[row + 4];
+				in.transform[row * 4 + 2] = mm[row + 8];
+				in.transform[row * 4 + 3] = mm[row + 12];
+			}
+			in.blas = blas;
+			in.mask = rhi::RHI::RT_MASK_PERFORATED;
+		}
 	}
 	if ( n > 0 ) {
 		// Signature of the instance set we're about to consider: count + every instance's
@@ -1862,11 +1909,163 @@ While the scene is live, every frame re-instances the TLAS with current mover po
 */
 // RR5: free the dedicated world geometry buffers (called on scene teardown / before a rebuild; the device
 // is idle here — R_RtWorldUpdate always DestroyRtScene's first). No-op when never allocated.
+// Perforated casters (docs/rtx-shadow-blur.md): the noShadows grates/fences the shadow-map
+// path lets cast through its perforated override (RB_RHI_ShadowCasterAllowed). They live in their
+// OWN alpha-tested BLASes (BlasGeometry::alphaTest -> non-opaque geometry + a geo-table row carrying
+// the coverage texture + alpha reference), instanced with RT_MASK_PERFORATED so only the shadow
+// rays - the consumers that alpha-test their candidates - ever see them. World-area surfaces are
+// identity instances; static entity models one BLAS per unique model, instanced per entity.
+// (s_rtPerfAreaBlas / s_rtPerfModelBlas / s_rtPerfVB / s_rtPerfIB are declared with the scene registries above)
+
 static void R_RtFreeWorldGeo( void ) {
 	rhi::RHI *r = rhi::GetRHI();
-	if ( r == NULL ) { s_rtWorldVB = 0; s_rtWorldIB = 0; return; }
+	s_rtPerfAreaBlas.Clear();		// the BLASes themselves die with DestroyRtScene, like s_rtAreaBlas
+	s_rtPerfModelBlas.Clear();
+	if ( r == NULL ) { s_rtWorldVB = 0; s_rtWorldIB = 0; s_rtPerfVB = 0; s_rtPerfIB = 0; return; }
 	if ( s_rtWorldVB != 0 ) { r->DestroyBuffer( s_rtWorldVB ); s_rtWorldVB = 0; }
 	if ( s_rtWorldIB != 0 ) { r->DestroyBuffer( s_rtWorldIB ); s_rtWorldIB = 0; }
+	if ( s_rtPerfVB != 0 ) { r->DestroyBuffer( s_rtPerfVB ); s_rtPerfVB = 0; }
+	if ( s_rtPerfIB != 0 ) { r->DestroyBuffer( s_rtPerfIB ); s_rtPerfIB = 0; }
+}
+
+// A perforated caster the SOLID scene doesn't hold: alpha-tested coverage, and a material flagged
+// noShadows (which is why R_RtSurfCasts rejects it - the flag only ever served stencil volumes,
+// which can't punch holes). Perforated materials that DO cast stay solid in the main BLASes,
+// matching stencil (character skins are ~90% perforated).
+static bool R_RtSurfPerforated( const modelSurface_t *surf ) {
+	return surf->geometry != NULL && surf->shader != NULL
+		&& surf->shader->Coverage() == MC_PERFORATED
+		&& !surf->shader->SurfaceCastsShadow()
+		&& surf->geometry->verts != NULL && surf->geometry->indexes != NULL
+		&& surf->geometry->numIndexes >= 3;
+}
+
+// The coverage texture + alpha reference of a perforated material: its first alpha-tested stage
+// (the same stage RB_RHI_SetupCasterCoverage routes into the shadow-map caster). The reference is
+// read from the material's constant registers; animated ones fall back to the customary 0.5.
+// False when there is no uploaded coverage image - the surface then stays out of the scene.
+static bool R_RtPerforatedCoverage( const idMaterial *mat, unsigned int &texIndex, unsigned int &alphaRef ) {
+	const float *regs = mat->ConstantRegisters();
+	for ( int i = 0; i < mat->GetNumStages(); i++ ) {
+		const shaderStage_t *st = mat->GetStage( i );
+		if ( !st->hasAlphaTest || st->texture.image == NULL ) {
+			continue;
+		}
+		if ( regs != NULL && regs[st->conditionRegister] == 0 ) {
+			continue;
+		}
+		if ( st->texture.image->rhiHandle == 0 ) {
+			return false;
+		}
+		const float ref = ( regs != NULL ) ? regs[st->alphaTestRegister] : 0.5f;
+		texIndex = (unsigned int)st->texture.image->rhiHandle;
+		alphaRef = (unsigned int)idMath::ClampInt( 1, 255, (int)( ref * 255.0f + 0.5f ) );
+		return true;
+	}
+	return false;
+}
+
+static void R_RtBuildPerforatedBlas( rhi::RHI *r, const idRenderWorldLocal *world, int &numBlas, int &numTris ) {
+	numBlas = 0; numTris = 0;
+	struct SurfDesc { const srfTriangles_t *tri; unsigned int tex, ref; const idRenderModel *model; };	// model NULL = world area
+	idList<SurfDesc> descs;
+	auto gather = [&]( const idRenderModel *model, const idRenderModel *owner ) {
+		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = model->Surface( s );
+			SurfDesc d;
+			if ( !R_RtSurfPerforated( surf ) || !R_RtPerforatedCoverage( surf->shader, d.tex, d.ref ) ) {
+				continue;
+			}
+			d.tri = surf->geometry;
+			d.model = owner;
+			descs.Append( d );
+		}
+	};
+	for ( int a = 0; a < world->NumAreas(); a++ ) {
+		gather( renderModelManager->FindModel( va( "_area%i", a ) ), NULL );
+	}
+	const int numWorldDescs = descs.Num();
+	idList<const idRenderModel *> unique;
+	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
+		// NOT gated on parms.noShadow: the perforated override ignores it, like the shadow-map path
+		const idRenderEntityLocal *def = world->entityDefs[i];
+		if ( def == NULL || def->parms.hModel == NULL ) {
+			continue;
+		}
+		const idRenderModel *model = def->parms.hModel;
+		if ( model->IsStaticWorldModel() || model->IsDynamicModel() != DM_STATIC || unique.FindIndex( model ) >= 0 ) {
+			continue;
+		}
+		unique.Append( model );
+		gather( model, model );
+	}
+	if ( descs.Num() == 0 ) {
+		return;
+	}
+	int totVerts = 0, totIdx = 0;
+	for ( int i = 0; i < descs.Num(); i++ ) {
+		totVerts += descs[i].tri->numVerts;
+		totIdx += descs[i].tri->numIndexes;
+	}
+	idDrawVert *verts = (idDrawVert *)Mem_Alloc16( totVerts * (int)sizeof( idDrawVert ) );
+	unsigned int *idxs = (unsigned int *)Mem_Alloc16( totIdx * (int)sizeof( unsigned int ) );
+	idList<int> vOff, iOff;
+	int vBase = 0, iBase = 0;
+	for ( int i = 0; i < descs.Num(); i++ ) {
+		const srfTriangles_t *tri = descs[i].tri;
+		memcpy( verts + vBase, tri->verts, tri->numVerts * (int)sizeof( idDrawVert ) );
+		for ( int m = 0; m < tri->numIndexes; m++ ) { idxs[iBase + m] = (unsigned int)tri->indexes[m]; }	// surface-local
+		vOff.Append( vBase ); iOff.Append( iBase );
+		vBase += tri->numVerts; iBase += tri->numIndexes;
+	}
+	s_rtPerfVB = r->CreateBuffer( rhi::BU_VERTEX, totVerts * (int)sizeof( idDrawVert ), verts );
+	s_rtPerfIB = r->CreateBuffer( rhi::BU_INDEX, totIdx * (int)sizeof( unsigned int ), idxs );
+	Mem_Free16( verts ); Mem_Free16( idxs );
+	const unsigned long long vbAddr = ( s_rtPerfVB != 0 ) ? r->GetBufferDeviceAddress( s_rtPerfVB ) : 0;
+	const unsigned long long ibAddr = ( s_rtPerfIB != 0 ) ? r->GetBufferDeviceAddress( s_rtPerfIB ) : 0;
+	if ( vbAddr == 0 || ibAddr == 0 ) {
+		if ( s_rtPerfVB != 0 ) { r->DestroyBuffer( s_rtPerfVB ); s_rtPerfVB = 0; }
+		if ( s_rtPerfIB != 0 ) { r->DestroyBuffer( s_rtPerfIB ); s_rtPerfIB = 0; }
+		return;
+	}
+	const int MAXG = 64;			// mirrors the backend's MAX_BLAS_GEOMS
+	rhi::RHI::BlasGeometry geoms[64];
+	// one BLAS per run of descs sharing an owner (world run chunked to MAXG; a model's surfaces
+	// beyond MAXG are dropped - no Doom 3 model has 64 perforated surfaces)
+	int i = 0;
+	while ( i < descs.Num() ) {
+		const idRenderModel *owner = descs[i].model;
+		int cnt = 0;
+		while ( i + cnt < descs.Num() && descs[i + cnt].model == owner && cnt < MAXG ) {
+			const SurfDesc &d = descs[i + cnt];
+			rhi::RHI::BlasGeometry &g = geoms[cnt];
+			g = rhi::RHI::BlasGeometry();
+			g.vertexAddress = vbAddr + (unsigned long long)vOff[i + cnt] * (unsigned long long)sizeof( idDrawVert );
+			g.vertexStride = (unsigned int)sizeof( idDrawVert );
+			g.vertexCount = (unsigned int)d.tri->numVerts;
+			g.indexAddress = ibAddr + (unsigned long long)iOff[i + cnt] * (unsigned long long)sizeof( unsigned int );
+			g.indexCount = (unsigned int)d.tri->numIndexes;
+			g.texIndex = d.tex;			// the COVERAGE image (alpha), not necessarily the diffuse stage
+			g.alphaTest = d.ref;
+			numTris += d.tri->numIndexes / 3;
+			cnt++;
+		}
+		rhi::BlasHandle blas = r->CreateBlasFromBuffers( geoms, cnt, false );
+		if ( blas != 0 ) {
+			if ( owner == NULL ) {
+				s_rtPerfAreaBlas.Append( blas );
+			} else {
+				rtModelBlas_t mb;
+				mb.model = owner;
+				mb.blas = blas;
+				s_rtPerfModelBlas.Append( mb );
+			}
+			numBlas++;
+		}
+		i += cnt;
+		while ( owner != NULL && i < descs.Num() && descs[i].model == owner ) { i++; }	// overflow of one model
+	}
+	(void)numWorldDescs;
 }
 
 // RR5: build the static worldspawn (_areaN) as PER-SURFACE multi-geometry BLASes fed from device-
@@ -2028,8 +2227,12 @@ static void R_RtWorldUpdate( void ) {
 	}
 	s_rtWorldMap = world->mapName;
 	R_RtDirtyReset();		// fresh scene: force the first per-frame TLAS build, drop any stale signature
-	common->Printf( "r_rtWorld: %d area BLAS (%d tris, per-surface) + %d model BLAS (%d tris, %d instances), %d ms build%s\n",
-		numAreaBlas, worldTris, numMSlices, mTris, numMInsts, msBuild,
+	// the alpha-tested perforated casters (grates/fences) ride the per-frame TLAS lane only -
+	// the static anchor TLAS above stays solid-only (it is what the CPU-reference validators trace)
+	int numPerfBlas = 0, perfTris = 0;
+	R_RtBuildPerforatedBlas( r, world, numPerfBlas, perfTris );
+	common->Printf( "r_rtWorld: %d area BLAS (%d tris, per-surface) + %d model BLAS (%d tris, %d instances) + %d perforated BLAS (%d tris, alpha-tested), %d ms build%s\n",
+		numAreaBlas, worldTris, numMSlices, mTris, numMInsts, numPerfBlas, perfTris, msBuild,
 		blasFail ? va( " (%d BLAS failed)", blasFail ) : "" );
 }
 

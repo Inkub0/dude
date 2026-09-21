@@ -500,7 +500,20 @@ public:
 		unsigned int		indexCount = 0;		// 3 * triangles
 		unsigned int		baseColor = 0;		// RR3: material average colour, packed RGBA8 (0 = leave, shader defaults)
 		unsigned int		texIndex = 0;		// RR4: diffuse image handle (bindless slot+1); 0 = none
+		// perforated casters (grates/fences): 0 = opaque geometry (the default - traversal never
+		// surfaces it as a candidate); 1..255 = alpha-tested: the geometry is built NON-opaque and
+		// this is the material's alpha reference * 255. A ray that doesn't force gl_RayFlagsOpaque
+		// gets each triangle as a candidate and confirms it by sampling texIndex's alpha at the
+		// hit st (texIndex must then be the COVERAGE image). Instance such BLASes with
+		// RT_MASK_PERFORATED so the opaque-forcing consumers never see them as solid.
+		unsigned int		alphaTest = 0;
 	};
+	// Ray visibility mask bits. Ordinary instances use 0xFF (every ray). Perforated-caster
+	// instances use RT_MASK_PERFORATED alone, and every consumer that can't alpha-test traces
+	// with cull mask RT_MASK_SOLID_RAYS (0xFD in the shaders) - so grates stay invisible to the
+	// hard shadow ray / RTAO / reflections exactly as before they entered the scene.
+	static const unsigned int RT_MASK_PERFORATED = 0x02;
+	static const unsigned int RT_MASK_SOLID_RAYS = 0xFD;
 	// Build ONE multi-geometry BLAS straight from GPU device buffers (no CPU staging), one geometry
 	// per surface. allowUpdate builds it refit-capable (ALLOW_UPDATE) and allocates the persistent
 	// update-scratch RefitBlas reuses. SYNCHRONOUS (load-time / first-sight / topology change; the

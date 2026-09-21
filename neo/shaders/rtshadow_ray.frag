@@ -39,14 +39,19 @@
 //                           blurScale * g^curve, g = dOccluder / ( dLight - dOccluder ). 1 = the geometric
 //                           (physical) growth; < 1 = soft sooner, then levelling off; > 1 = crisp for longer
 //                           near the caster, then widening fast
+//   u_shadowFalloffS      = perforated casters (rt_perforated.glsl): xy = geometry-table address,
+//                           z = their shadow strength (r_shadowMapPerforatedStrength); 0 = off
 //   u_screenCorrection.xy = 1 / viewSize
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 //   u_depthParms.xy       = window depth -> 1 / view z for THIS view (renderparms.glsl): the game
 //                           lowers the near plane for cinematic cameras (r_znear 3 -> 1), and a hard-coded
 //                           play-time pair rebuilt every point 3x too far along its view ray
 #extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference_uvec2 : require	// perforated casters: geo-table pointer
+#extension GL_EXT_nonuniform_qualifier : require		// perforated casters: bindless coverage texture
 
 #include "renderparms.glsl"
+#include "rt_perforated.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;   // xyz = view-space normal, a = weapon/AO mask
@@ -144,22 +149,42 @@ void main() {
 
 	// the mode-4 ray, except CLOSEST hit instead of first hit: the penumbra is sized by the
 	// occluder nearest the receiver. Stops 1 unit short of the light, like mode 4.
+	// Perforated casters (grates / fences): their triangles arrive as candidates; a solid texel is
+	// never confirmed - it dims the light to 1 - strength, and the nearest one sizes the penumbra
+	// when no real occluder does. One within 8 units of the light is its own cage, not a caster.
+	uvec2 geoAddr = uvec2( floatBitsToUint( u_shadowFalloffS.x ), floatBitsToUint( u_shadowFalloffS.y ) );
+	bool  perfOn  = u_shadowFalloffS.z > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
+	float tPerf   = -1.0;
 	rayQueryEXT rq;
 	rayQueryInitializeEXT( rq,
 		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-		gl_RayFlagsOpaqueEXT, 0xFFu, O, 0.0, Ldir, min( max( dL - 1.0, 0.01 ), 100000.0 ) );
-	while ( rayQueryProceedEXT( rq ) ) { }
-	if ( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT ) {
+		perfOn ? gl_RayFlagsNoneEXT : gl_RayFlagsOpaqueEXT, perfOn ? 0xFFu : 0xFDu,
+		O, 0.0, Ldir, min( max( dL - 1.0, 0.01 ), 100000.0 ) );
+	while ( rayQueryProceedEXT( rq ) ) {
+		if ( perfOn && rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT ) {
+			float tc = rayQueryGetIntersectionTEXT( rq, false );
+			if ( tc < dL - 8.0 && ( tPerf < 0.0 || tc < tPerf )
+					&& dudePerforatedSolid( geoAddr,
+						uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),
+						uint( rayQueryGetIntersectionGeometryIndexEXT( rq, false ) ),
+						uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) ),
+						rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) ) {
+				tPerf = tc;
+			}
+		}
+	}
+	bool  solidHit = rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT;
+	if ( !solidHit && tPerf < 0.0 ) {
 		return;									// reached the light: lit
 	}
 
-	float dOcc = rayQueryGetIntersectionTEXT( rq, true );
+	float dOcc = solidHit ? rayQueryGetIntersectionTEXT( rq, true ) : tPerf;
 	float gap   = dOcc / max( dL - dOcc, 1e-3 );
 	float halfW = u_localParam0.z * pow( gap, max( u_localParam1.w, 0.05 ) );
 	float rPx  = min( halfW * u_localParam0.w / max( d, 1.0 ), u_localParam1.x );
 	// per screen axis, the extent of a disc lying in the receiver's plane: r * sqrt( 1 - n.axis^2 )
 	vec2  ext  = sqrt( max( vec2( 1.0 ) - gn.xy * gn.xy, vec2( 0.04 ) ) );
-	fragColor.r = 0.0;
+	fragColor.r = solidHit ? 0.0 : 1.0 - u_shadowFalloffS.z;	// behind a grate only: dimmed, not dark
 	fragColor.g = rPx * ext.x;
 	fragColor.a = rPx * ext.y;
 }

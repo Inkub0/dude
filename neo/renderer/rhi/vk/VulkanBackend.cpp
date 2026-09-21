@@ -888,7 +888,7 @@ private:
 		uint64_t				vtxAddr;
 		uint64_t				idxAddr;
 		uint32_t				vtxStride;
-		uint32_t				flags;			// bit0 = has attributes (monster)
+		uint32_t				flags;			// bit0 = has attributes (monster); bit1 = alpha-tested perforated caster, bits 8-15 = its alpha ref * 255
 		uint32_t				baseColor;		// RR3: material average colour, packed RGBA8 (unpackUnorm4x8)
 		uint32_t				texIndex;		// RR4: bindless texture slot+1 (0 = none -> shader uses baseColor)
 	};
@@ -4782,7 +4782,9 @@ static void R_VkFillBlasGeoms( const RHI::BlasGeometry *geoms, int count,
 		memset( &vg, 0, sizeof( vg ) );
 		vg.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
 		vg.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-		vg.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+		// perforated casters: alpha-tested geometry is NON-opaque so an alpha-testing ray receives
+		// its triangles as candidates (BlasGeometry::alphaTest)
+		vg.flags = ( g.alphaTest != 0 ) ? 0 : VK_GEOMETRY_OPAQUE_BIT_KHR;
 		vg.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
 		vg.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
 		vg.geometry.triangles.vertexData.deviceAddress = (VkDeviceAddress)g.vertexAddress;
@@ -5697,6 +5699,9 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 					rows[base].idxAddr = bgeo.indexAddress;
 					rows[base].vtxStride = bgeo.vertexStride;
 					rows[base].flags = RT_GEO_MONSTER;			// bit0 = has attributes -> shade the hit (RR5b)
+				if ( bgeo.alphaTest != 0 ) {
+					rows[base].flags |= 2u | ( ( bgeo.alphaTest & 0xFFu ) << 8 );	// alpha-tested caster + its reference
+				}
 					rows[base].baseColor = bgeo.baseColor;
 					rows[base].texIndex = bgeo.texIndex;
 					base++;
