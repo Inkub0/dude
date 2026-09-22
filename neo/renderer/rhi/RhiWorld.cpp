@@ -7628,14 +7628,26 @@ void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
 	parms.localParam0[0] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiIntensity.GetFloat() );
 	// GI (reduced res) + albedo (full res) both sample at gl_FragCoord/(viewW,viewH): the GI buffer
-	// bilinear-upscales, albedo is 1:1. depth uses the POT _currentDepth tc for the sky skip.
+	// upscales, albedo is 1:1. depth uses the POT _currentDepth tc for the sky skip.
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / uploadW;
 	parms.depthTexRecip[1] = 1.0f / uploadH;
+	// Joint-bilateral upscale (r_rtgiBilateralUpscale): only when the GI is actually reduced-res; at full res a
+	// bilinear 1:1 fetch is exact and the bilateral would just self-blur. Needs the GI buffer size + the normal.
+	const bool bilat = r_rtgiBilateralUpscale.GetBool() && ( rhiRtgiW < w || rhiRtgiH < h ) && rhiNormalResultRT != 0;
+	parms.localParam0[1] = bilat ? 1.0f : 0.0f;
+	parms.localParam0[2] = ( rhiRtgiW > 0 ) ? 1.0f / rhiRtgiW : 1.0f / w;	// GI reduced-res texel (2x2 footprint)
+	parms.localParam0[3] = ( rhiRtgiH > 0 ) ? 1.0f / rhiRtgiH : 1.0f / h;
+	parms.localParam1[0] = 24.0f;							// depth sensitivity: ~4% relative depth diff halves the weight
+	parms.localParam1[1] = 8.0f;							// normal power: sharply rejects across creases
 
 	RB_RHI_BindRTImage( r, 1, albedoImg );					// unit 1 = receiver albedo (prepass att3)
-	RB_RHI_BindUnit( 2, globalImages->currentDepthImage );	// unit 2 = depth (sky skip)
+	RB_RHI_BindUnit( 2, globalImages->currentDepthImage );	// unit 2 = depth (sky skip + bilateral)
+	// unit 3 = full-res view normal (bilateral weight). Bound even when bilat is off (the shader just doesn't
+	// sample it then) so the descriptor set is always complete; falls back to depth if the normal RT is absent.
+	RB_RHI_BindRTUnit( r, 3, rhiNormalResultRT != 0 ? rhiNormalResultRT : rhiRtgiRayRT );
+	backEnd.glState.tmu[3].current2DMap = -1;				// direct bind bypassed the tmu cache
 	// unit 0 = GI radiance (rtInput0); additive (ONE/ONE) into the live HDR scene target
 	RB_RHI_DrawFullscreen( r, prog, parms, giImg, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 	RB_RHI_ForgetTexBinds();
