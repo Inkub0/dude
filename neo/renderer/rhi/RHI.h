@@ -195,6 +195,7 @@ struct RtaoDenoiseArgs {
 	unsigned int frameIndex;
 	bool	reset;						// history invalid: CLEAR_AND_RESTART
 	int		viewzAtt, normalAtt;		// colour-attachment index of the guide inside viewzRT / normalRT (0 = a single-colour target)
+	bool	giMode;						// H6b: denoise GI (REBLUR_DIFFUSE, RGBA16F radiance+hitdist in rayRT att0) into GetRtgiOutputImage, instead of RTAO occlusion
 };
 
 class RHI {
@@ -485,6 +486,9 @@ public:
 	// the result is sampled through GetRtaoOutputImage (0 until the first successful run)
 	virtual bool		RtaoDenoise( const RtaoDenoiseArgs &args ) { return false; }
 	virtual ImageHandle	GetRtaoOutputImage() { return 0; }
+	// H6b RT GI (docs/rtx-rtgi.md): the RtaoDenoise giMode path writes the denoised GI radiance
+	// (RGBA16F: radiance .rgb, occlusion .w) here; 0 until the first successful GI denoise
+	virtual ImageHandle	GetRtgiOutputImage() { return 0; }
 	// R1/D: snapshot the scene color as the OPAQUE-ONLY input for FSR2's auto-reactive
 	// mask. Called at the opaque/translucent split of the primary view (after the SSR
 	// composite, before particles/blends draw); a straight same-orientation copy, unlike

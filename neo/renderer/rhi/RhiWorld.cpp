@@ -477,6 +477,15 @@ static bool  rhiRtaoPrevValid = false;
 static rhi::RenderTargetHandle rhiRtgiRayRT = 0;
 static int  rhiRtgiW = 0, rhiRtgiH = 0;
 static bool rhiRtgiRanThisView = false;
+// H6b (docs/rtx-rtgi.md): NRD REBLUR_DIFFUSE denoise state — a reduced-res velocity for IN_MV and the
+// previous-frame camera for the reprojection, mirroring the rhiRtao* denoise statics.
+static rhi::RenderTargetHandle rhiRtgiVelRT = 0;
+static int  rhiRtgiVelW = 0, rhiRtgiVelH = 0;
+static bool rhiRtgiDenoisedThisView = false;		// the GI NRD denoise ran; GetRtgiOutputImage is current
+static float rhiRtgiPrevProj[16];
+static float rhiRtgiPrevView[16];
+static float rhiRtgiPrevJitter[2] = { 0.0f, 0.0f };
+static bool  rhiRtgiPrevValid = false;
 
 // ---- shared camera temporal state (docs/fsr-temporal-pipeline.md, increment A1) ----
 // The SSAO and SSR temporal resolves both reproject last frame's history by pure camera
@@ -6580,7 +6589,10 @@ r_rtao joined the RT-world implication gate (tr_main R_RtWorldUpdate).
 static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiRtaoRanThisView = false;
 	rhiRtaoDenoisedThisView = false;	// reset on EVERY early-out path — RB_RHI_SSAOPass gates on it
-	if ( !r_rtao.GetBool() || !r_ssao.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+	// H6b (docs/rtx-rtgi.md): when r_rtgi is on, GI REPLACES RTAO — the single NRD instance denoises GI this
+	// frame (never both denoisers in one frame), and screen-space GTAO (RB_RHI_SSAOPass, which runs next)
+	// fills the scalar AO the ambient/reflections still consume. RTAO stands down whenever GI is active.
+	if ( !r_rtao.GetBool() || !r_ssao.GetBool() || r_rtgi.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
@@ -6848,6 +6860,7 @@ normal play and the shipped RTAO path are untouched. VK + RT hardware only; shar
 */
 static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiRtgiRanThisView = false;
+	rhiRtgiDenoisedThisView = false;	// reset on every early-out (the apply gates on it)
 	if ( !r_rtgi.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
 		return;
 	}
@@ -6948,6 +6961,64 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );		// set 2 (bindless materials) is auto-bound by the backend
 	r->EndPass();
 	rhiRtgiRanThisView = true;
+	rhiRtgiDenoisedThisView = false;
+
+	// ---- H6b: NRD REBLUR_DIFFUSE denoise (docs/rtx-rtgi.md), mirroring RB_RHI_RtaoPass's denoise ----
+	// Needs the velocity MRT (r_fsr / r_motionVectors) for IN_MV; without it the raw gather is used (grainy).
+	rhi::ImageHandle giVelImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
+		? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
+	if ( giVelImg != 0 ) {
+		rhi::ImageHandle nrdVel = giVelImg;
+		if ( rw != w || rh != h ) {
+			// downsample the full-res velocity to the GI ray/NRD resolution (smaa_copy = texture(src, uv))
+			if ( rhiRtgiVelRT && r->GetRenderTargetImage( rhiRtgiVelRT ) == 0 ) { rhiRtgiVelRT = 0; rhiRtgiVelW = rhiRtgiVelH = 0; }
+			if ( rhiRtgiVelRT && ( rhiRtgiVelW != rw || rhiRtgiVelH != rh ) ) { r->DestroyRenderTarget( rhiRtgiVelRT ); rhiRtgiVelRT = 0; rhiRtgiVelW = rhiRtgiVelH = 0; }
+			if ( !rhiRtgiVelRT ) {
+				rhiRtgiVelRT = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh );
+				if ( rhiRtgiVelRT ) { rhiRtgiVelW = rw; rhiRtgiVelH = rh; }
+			}
+			rhi::ShaderHandle copyProg = rhiRtgiVelRT ? r->LoadShader( "smaa_copy" ) : 0;
+			if ( copyProg != 0 ) {
+				rhi::RenderParams cp;
+				memset( &cp, 0, sizeof( cp ) );
+				cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+				cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
+				r->BeginTargetPass( rhiRtgiVelRT, NULL );
+				RB_RHI_DrawFullscreen( r, copyProg, cp, giVelImg );
+				r->EndPass();
+				nrdVel = r->GetRenderTargetImage( rhiRtgiVelRT );
+			}
+		}
+
+		rhi::RtaoDenoiseArgs da;
+		memset( &da, 0, sizeof( da ) );
+		da.giMode = true;								// denoise GI radiance (REBLUR_DIFFUSE), not RTAO occlusion
+		da.rayRT = rhiRtgiRayRT;						// att0 = RGBA16F radiance+hitdist; guides in att1/att2
+		da.viewzRT  = rhiRtgiRayRT;		da.viewzAtt  = 1;
+		da.normalRT = rhiRtgiRayRT;		da.normalAtt = 2;
+		da.velImage = nrdVel;
+		da.w = rw;	da.h = rh;
+		memcpy( da.viewToClip,  viewDef->unjitteredProjectionMatrix, sizeof( da.viewToClip ) );
+		memcpy( da.worldToView, viewDef->worldSpace.modelViewMatrix, sizeof( da.worldToView ) );
+		memcpy( da.viewToClipPrev,  rhiRtgiPrevValid ? rhiRtgiPrevProj : da.viewToClip,  sizeof( da.viewToClipPrev ) );
+		memcpy( da.worldToViewPrev, rhiRtgiPrevValid ? rhiRtgiPrevView : da.worldToView, sizeof( da.worldToViewPrev ) );
+		da.jitterX = -viewDef->jitter[0] * resScale;
+		da.jitterY =  viewDef->jitter[1] * resScale;
+		da.jitterPrevX = rhiRtgiPrevValid ? -rhiRtgiPrevJitter[0] * resScale : da.jitterX;
+		da.jitterPrevY = rhiRtgiPrevValid ?  rhiRtgiPrevJitter[1] * resScale : da.jitterY;
+		da.mvScaleX = -1.0f;	da.mvScaleY = 1.0f;
+		da.hitDistA = 0.5f * radius;	da.hitDistB = 0.1f;		// MUST match rtgi_ray.frag's normHitDist
+		da.denoisingRange = 20000.0f;
+		da.frameIndex = (unsigned int)tr.frameCount;
+		da.reset = !rhiRtgiPrevValid;
+		rhiRtgiDenoisedThisView = r->RtaoDenoise( da );			// giMode -> GI diffuse denoise into GetRtgiOutputImage
+	}
+	// stage this frame's camera for next frame's GI reprojection (un-jittered, as passed)
+	memcpy( rhiRtgiPrevProj, viewDef->unjitteredProjectionMatrix, sizeof( rhiRtgiPrevProj ) );
+	memcpy( rhiRtgiPrevView, viewDef->worldSpace.modelViewMatrix, sizeof( rhiRtgiPrevView ) );
+	rhiRtgiPrevJitter[0] = viewDef->jitter[0];
+	rhiRtgiPrevJitter[1] = viewDef->jitter[1];
+	rhiRtgiPrevValid = true;
 
 	RB_RHI_ForgetTexBinds();
 	backEnd.currentScissor = viewDef->scissor;
@@ -7424,7 +7495,9 @@ void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !rhiRtgiRanThisView || rhiRtgiRayRT == 0 || !rhiNormalAlbedoThisView ) {
 		return;			// no gather / no receiver-albedo attachment this view
 	}
-	const rhi::ImageHandle giImg = r->GetRenderTargetImage( rhiRtgiRayRT );
+	// H6b: the DENOISED GI radiance (GetRtgiOutputImage) when the NRD pass ran this view; else the raw gather.
+	const rhi::ImageHandle giImg = rhiRtgiDenoisedThisView ? r->GetRtgiOutputImage()
+		: r->GetRenderTargetImage( rhiRtgiRayRT );
 	const rhi::ImageHandle albedoImg = r->GetRenderTargetImage4( rhiNormalResultRT );
 	if ( giImg == 0 || albedoImg == 0 ) {
 		return;

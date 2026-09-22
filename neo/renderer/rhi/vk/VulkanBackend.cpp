@@ -998,6 +998,17 @@ private:
 	ImageHandle			rtaoOutSampleImage = 0;
 	int					rtaoOutW = 0, rtaoOutH = 0;
 	bool				rtaoOutReady = false;	// transitioned UNDEFINED->GENERAL
+	// H6b RT GI (docs/rtx-rtgi.md): denoised GI radiance — RGBA16F STORAGE (radiance .rgb, occlusion .w)
+	// that REBLUR_DIFFUSE writes via the RtaoDenoise giMode path; same lifecycle as the RTAO output.
+	virtual ImageHandle	GetRtgiOutputImage() { return rtgiOutSampleImage; }
+	bool				RtgiEnsureOutput( int w, int h );
+	void				RtgiDestroyOutput();
+	VkImage				rtgiOutImage = VK_NULL_HANDLE;
+	VmaAllocation		rtgiOutAlloc = VK_NULL_HANDLE;
+	VkImageView			rtgiOutView = VK_NULL_HANDLE;
+	ImageHandle			rtgiOutSampleImage = 0;
+	int					rtgiOutW = 0, rtgiOutH = 0;
+	bool				rtgiOutReady = false;
 	bool						haveComputeDerivatives = false;	// VK_KHR_compute_shader_derivatives (quads)
 
 	FfxFsr2Context *			fsr2Ctx = NULL;
@@ -2432,6 +2443,7 @@ void VulkanBackend::Shutdown() {
 	// NRD (H2b): denoiser pipelines/pools must die before VMA/device too
 	NrdDestroy( true );
 	RtaoDestroyOutput();		// the H4 RTAO output image rides the same lifetime
+	RtgiDestroyOutput();		// H6b: the RT GI denoised-radiance output rides the same lifetime
 
 	// R2: acceleration structures + their backing buffers must die before VMA/device
 	DestroyRtScene();
@@ -6135,6 +6147,7 @@ validator signal) and SIGMA_SHADOW (H3 soft shadows).
 // stable identifiers for the denoisers in our NRD instance (nrd::Identifier is uint32)
 static const nrd::Identifier NRD_ID_REBLUR_AO     = 0;
 static const nrd::Identifier NRD_ID_SIGMA_SHADOW  = 1;
+static const nrd::Identifier NRD_ID_REBLUR_GI     = 2;	// H6b RT GI: REBLUR_DIFFUSE (radiance+hitdist), docs/rtx-rtgi.md
 
 // nrd::Format -> VkFormat, table-ordered exactly like the enum in NRDDescs.h
 static VkFormat NrdFormatToVk( nrd::Format f ) {
@@ -6184,9 +6197,13 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 		return false;
 	}
 
+	// One instance hosts every denoiser; a given frame dispatches exactly ONE ReBLUR variant
+	// (RTAO occlusion OR GI diffuse, never both — the r_rtgi swap), so there is no two-denoiser
+	// resolution thrash or descriptor-pool conflict. REBLUR_DIFFUSE is the H6b GI denoiser.
 	const nrd::DenoiserDesc denoisers[] = {
 		{ NRD_ID_REBLUR_AO,    nrd::Denoiser::REBLUR_DIFFUSE_OCCLUSION },
 		{ NRD_ID_SIGMA_SHADOW, nrd::Denoiser::SIGMA_SHADOW },
+		{ NRD_ID_REBLUR_GI,    nrd::Denoiser::REBLUR_DIFFUSE },
 	};
 	nrd::InstanceCreationDesc icd = {};		// null callbacks -> NRD's own aligned malloc
 	icd.denoisers = denoisers;
@@ -6750,6 +6767,68 @@ void VulkanBackend::RtaoDestroyOutput() {
 	rtaoOutReady = false;
 }
 
+// H6b RT GI (docs/rtx-rtgi.md): the denoised GI radiance output — mirrors RtaoEnsureOutput but RGBA16F
+// (radiance .rgb + occlusion .w), the format REBLUR_DIFFUSE's OUT_DIFF_RADIANCE_HITDIST writes.
+bool VulkanBackend::RtgiEnsureOutput( int w, int h ) {
+	if ( rtgiOutImage != VK_NULL_HANDLE && rtgiOutW == w && rtgiOutH == h ) {
+		return true;
+	}
+	RtgiDestroyOutput();
+
+	VkImageCreateInfo ici = {};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &rtgiOutImage, &rtgiOutAlloc, NULL ), "vmaCreateImage(RTGI out)" ) ) {
+		rtgiOutImage = VK_NULL_HANDLE;
+		return false;
+	}
+	VkImageViewCreateInfo vwi = {};
+	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vwi.image = rtgiOutImage;
+	vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vwi.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	vwi.subresourceRange.levelCount = 1;
+	vwi.subresourceRange.layerCount = 1;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &rtgiOutView ), "vkCreateImageView(RTGI out)" ) ) {
+		RtgiDestroyOutput();
+		return false;
+	}
+	rtgiOutSampleImage = RegisterMergeSampleImage( rtgiOutImage, rtgiOutView, w, h );
+	rtgiOutW = w;
+	rtgiOutH = h;
+	rtgiOutReady = false;
+	return true;
+}
+
+void VulkanBackend::RtgiDestroyOutput() {
+	if ( rtgiOutImage == VK_NULL_HANDLE && rtgiOutView == VK_NULL_HANDLE ) {
+		return;
+	}
+	if ( device != VK_NULL_HANDLE ) {
+		vkDeviceWaitIdle( device );
+	}
+	if ( rtgiOutView )  { vkDestroyImageView( device, rtgiOutView, NULL ); rtgiOutView = VK_NULL_HANDLE; }
+	if ( rtgiOutImage ) { vmaDestroyImage( vma, rtgiOutImage, rtgiOutAlloc ); rtgiOutImage = VK_NULL_HANDLE; rtgiOutAlloc = NULL; }
+	if ( rtgiOutSampleImage >= 1 && rtgiOutSampleImage <= (ImageHandle)imageTable.size() ) {
+		imageTable[rtgiOutSampleImage - 1].live = false;
+	}
+	InvalidateTextureSets();
+	rtgiOutSampleImage = 0;
+	rtgiOutW = rtgiOutH = 0;
+	rtgiOutReady = false;
+}
+
 bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	// bring-up observability: every failure branch says WHY once (the caller's debug
 	// overlay silently falls back to the raw rays, which masks a dead denoiser)
@@ -6764,7 +6843,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	if ( !NrdCreate( a.w, a.h ) ) {
 		RTAO_FAIL( 1, "NrdCreate failed (see warnings above)" );
 	}
-	if ( !RtaoEnsureOutput( a.w, a.h ) ) {
+	if ( !( a.giMode ? RtgiEnsureOutput( a.w, a.h ) : RtaoEnsureOutput( a.w, a.h ) ) ) {
 		RTAO_FAIL( 2, "output image creation failed" );
 	}
 
@@ -6786,6 +6865,14 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	auto targetView = []( RenderTarget *t, int att ) {
 		return t->colorSampleView[att] != VK_NULL_HANDLE ? t->colorSampleView[att] : t->colorView[att];
 	};
+
+	// H6b (docs/rtx-rtgi.md): giMode swaps the output image + denoiser id + the DIFF resource enums so the
+	// single NRD instance denoises GI radiance this frame instead of RTAO occlusion. RTAO (giMode false)
+	// is byte-identical below.
+	VkImage      outImg   = a.giMode ? rtgiOutImage : rtaoOutImage;
+	VkImageView  outView  = a.giMode ? rtgiOutView  : rtaoOutView;
+	bool        &outReady = a.giMode ? rtgiOutReady : rtaoOutReady;
+	const nrd::Identifier denId = a.giMode ? NRD_ID_REBLUR_GI : NRD_ID_REBLUR_AO;
 
 	// frame settings
 	nrd::CommonSettings cs = {};
@@ -6813,7 +6900,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	rs.hitDistanceParameters.A = a.hitDistA;		// MUST mirror rtao_ray.frag's normalization
 	rs.hitDistanceParameters.B = a.hitDistB;
 	rs.enableAntiFirefly = true;
-	if ( nrd::SetDenoiserSettings( *nrdInstance, NRD_ID_REBLUR_AO, &rs ) != nrd::Result::SUCCESS ) {
+	if ( nrd::SetDenoiserSettings( *nrdInstance, denId, &rs ) != nrd::Result::SUCCESS ) {
 		RTAO_FAIL( 5, "nrd::SetDenoiserSettings rejected the ReBLUR settings" );
 	}
 
@@ -6821,8 +6908,13 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_MV]               = vel.view;
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_NORMAL_ROUGHNESS] = targetView( norm, nmAtt );
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_VIEWZ]            = targetView( vz, vzAtt );
-	nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_HITDIST]     = targetView( ray, 0 );
-	nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_HITDIST]    = rtaoOutView;
+	if ( a.giMode ) {
+		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST]  = targetView( ray, 0 );	// RGBA16F radiance+hitdist
+		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST] = outView;
+	} else {
+		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_HITDIST]  = targetView( ray, 0 );
+		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_HITDIST] = outView;
+	}
 
 	VkCommandBuffer cb = frames[frameIndex].cb;
 	if ( insideScenePass ) {
@@ -6857,17 +6949,17 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	addPre( vz->colorImage[vzAtt],   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPre( norm->colorImage[nmAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPre( vel.image,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-	addPre( rtaoOutImage,        rtaoOutReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
+	addPre( outImg,              outReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
 	vkCmdPipelineBarrier( cb,
 		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		0, 0, NULL, 0, NULL, preCount, pre );
-	rtaoOutReady = true;
+	outReady = true;
 
-	const bool recorded = NrdRecordDispatches( cb, &NRD_ID_REBLUR_AO, 1 );
+	const bool recorded = NrdRecordDispatches( cb, &denId, 1 );
 	if ( recorded && !( warned & ( 1 << 7 ) ) ) {
 		warned |= 1 << 7;
-		common->Printf( "RTAO: NRD ReBLUR denoise active (%dx%d)\n", a.w, a.h );
+		common->Printf( "%s: NRD ReBLUR denoise active (%dx%d)\n", a.giMode ? "RTGI" : "RTAO", a.w, a.h );
 	}
 	// on record failure we still fall through to the restore barriers below — the inputs
 	// were already transitioned to GENERAL and MUST go back to SHADER_READ_ONLY, or every
@@ -6894,7 +6986,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	addPost( vz->colorImage[vzAtt],   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPost( norm->colorImage[nmAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPost( vel.image,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-	addPost( rtaoOutImage,        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPost( outImg,              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	// dst includes COMPUTE: FSR2 consumes the velocity image (and could consume others)
 	// from compute later in the frame
 	vkCmdPipelineBarrier( cb,

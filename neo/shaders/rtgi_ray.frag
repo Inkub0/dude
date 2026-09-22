@@ -207,8 +207,8 @@ void main() {
 	}
 	if ( bcol.a > 0.5 ) { Li += bcol.rgb * u_diffuseModifier.x; }	// self-illuminated source (neon, light tile)
 
-	// H6a: opaque alpha so the r_rtgiDebug overlay (an alpha-blended blit) shows the PURE gathered radiance
-	// instead of compositing it translucently over the scene. H6b writes the NRD normalized hit distance
-	// here instead: clamp( thit / ( 0.5 * radius + d * 0.1 ), 0.0, 1.0 )  (same A/B form as rtao_ray.frag).
-	fragColor = vec4( Li, 1.0 );
+	// H6b: normalized hit distance in alpha for the NRD REBLUR_DIFFUSE denoise — saturate( thit / (A + |viewZ|*B) ),
+	// A = 0.5*radius, B = 0.1, MUST match the ReblurHitDistanceParameters set in RB_RHI_RtgiPass. Radiance is fed
+	// LINEAR in .rgb (consumed linearly by rtgi_apply; NRD's YCoCg anti-firefly packing is a later refinement).
+	fragColor = vec4( Li, clamp( thit / ( 0.5 * radius + d * 0.1 ), 0.0, 1.0 ) );
 }
