@@ -66,6 +66,18 @@ reflections and volumetrics.
   "RT Global Illumination" toggle + Intensity / Fake-Ambient Keep / Ray Length / Resolution / GI Shadows
   sliders in the Enhancements → Ray Tracing section.
 
+- **H6f — NRD history confidence (edge-ghosting antilag). DONE (tuning).** At full res the 1-bounce GI still
+  trailed lit silhouettes under small camera motion: ReBLUR's depth/normal disocclusion passes a moving lit
+  edge as "same geometry" and keeps accumulating stale radiance across it. Fix per NRD's own guidance (history
+  confidence is "the best way to mitigate temporal lags", and an app should not rely solely on the built-in
+  antilag): a `rtgi_confidence` pass runs between the gather and the denoise, reprojects last frame's DENOISED
+  GI (`GetRtgiOutputImage`, still valid until this frame overwrites it) by the motion vectors, compares its
+  luminance to this frame's bounce, and writes a per-pixel `IN_DIFF_CONFIDENCE` (0..1, `isHistoryConfidenceAvailable`)
+  so NRD drops history only where the lighting actually moved — no flat-area dimming like a global antilag.
+  Both signals are NRD-YCoCg so `.x` is luminance. A **noise deadzone** (rel-diff below ~0.35 ignored) keeps
+  the noisy 1-spp current signal from starving history on stable surfaces; a **floor** (0.1) stops edge
+  "frying". Cvar `r_rtgiConfidence` (default 4, 0 = off). GI path only; RTAO byte-identical.
+
 ## Fidelity note (per policy)
 
 GI adds bounce light Doom 3 never had and lifts blacks in lit rooms — a real departure from its inky

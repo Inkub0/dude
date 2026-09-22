@@ -6857,6 +6857,11 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		RTAO_FAIL( 3, "input target/velocity lookup failed" );
 	}
 	ImageRec &vel = imageTable[a.velImage - 1];
+	// H6f: optional per-pixel history confidence (GI path only). Present only when the caller ran the
+	// confidence pass this frame (needs a prior denoised frame to reproject) — otherwise NRD antilag only.
+	const bool haveConf = a.giMode && a.confImage >= 1 && a.confImage <= (ImageHandle)imageTable.size()
+		&& imageTable[a.confImage - 1].live;
+	ImageRec *conf = haveConf ? &imageTable[a.confImage - 1] : NULL;
 	// the guides may live in attachments 1/2 of the ray target itself (CreateRenderTargetRtaoMrt)
 	const int vzAtt = a.viewzAtt, nmAtt = a.normalAtt;
 	if ( vzAtt < 0 || vzAtt >= vz->colorCount || nmAtt < 0 || nmAtt >= norm->colorCount ) {
@@ -6893,6 +6898,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	cs.frameIndex = a.frameIndex;
 	cs.accumulationMode = a.reset ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
 	cs.isMotionVectorInWorldSpace = false;
+	cs.isHistoryConfidenceAvailable = haveConf;			// H6f: feed IN_DIFF_CONFIDENCE (GI edge-ghosting antilag)
 	if ( nrd::SetCommonSettings( *nrdInstance, cs ) != nrd::Result::SUCCESS ) {
 		RTAO_FAIL( 4, "nrd::SetCommonSettings rejected the frame settings" );
 	}
@@ -6900,6 +6906,18 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	rs.hitDistanceParameters.A = a.hitDistA;		// MUST mirror rtao_ray.frag's normalization
 	rs.hitDistanceParameters.B = a.hitDistB;
 	rs.enableAntiFirefly = true;
+	// GI only (r_rtgiHistory): cap ReBLUR's accumulation window. This is the ONE lever we expose — it trades
+	// noise ("frying pixels" at short history) against how long a switched-off light or a stale bounce lingers
+	// (~this many frames). Aggressive antilag / fast-history clamping was tried to also kill motion trails, but
+	// on this 1-spp half-res signal it just made the GI DIM/flicker while strafing (it rejects history on any
+	// luminance change, including the natural variation under motion), which is worse than the mild residual
+	// smear — so the clamp/antilag stay at NRD defaults. RTAO leaves everything default (maxAccumFrames 0).
+	if ( a.giMode && a.maxAccumFrames > 0 ) {
+		uint32_t hist = (uint32_t)a.maxAccumFrames;
+		if ( hist > 63 ) { hist = 63; }
+		rs.maxAccumulatedFrameNum = hist;
+		if ( rs.maxFastAccumulatedFrameNum > hist ) { rs.maxFastAccumulatedFrameNum = hist; }	// fast history must be <= main
+	}
 	if ( nrd::SetDenoiserSettings( *nrdInstance, denId, &rs ) != nrd::Result::SUCCESS ) {
 		RTAO_FAIL( 5, "nrd::SetDenoiserSettings rejected the ReBLUR settings" );
 	}
@@ -6908,6 +6926,9 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_MV]               = vel.view;
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_NORMAL_ROUGHNESS] = targetView( norm, nmAtt );
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_VIEWZ]            = targetView( vz, vzAtt );
+	if ( haveConf ) {
+		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_CONFIDENCE] = conf->view;	// H6f
+	}
 	if ( a.giMode ) {
 		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST]  = targetView( ray, 0 );	// RGBA16F radiance+hitdist
 		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST] = outView;
@@ -6930,7 +6951,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 
 	// inputs: SHADER_READ_ONLY -> GENERAL (NRD's descriptors are written with GENERAL);
 	// output: first use UNDEFINED -> GENERAL, then a WAR barrier vs last frame's sampling
-	VkImageMemoryBarrier pre[5] = {};
+	VkImageMemoryBarrier pre[6] = {};
 	uint32_t preCount = 0;
 	auto addPre = [&]( VkImage img, VkImageLayout oldL ) {
 		VkImageMemoryBarrier &b = pre[preCount++];
@@ -6949,6 +6970,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	addPre( vz->colorImage[vzAtt],   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPre( norm->colorImage[nmAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPre( vel.image,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	if ( haveConf ) { addPre( conf->image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// H6f
 	addPre( outImg,              outReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
 	vkCmdPipelineBarrier( cb,
 		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,

@@ -486,6 +486,10 @@ static bool rhiRtgiAppliedThisView = false;
 // previous-frame camera for the reprojection, mirroring the rhiRtao* denoise statics.
 static rhi::RenderTargetHandle rhiRtgiVelRT = 0;
 static int  rhiRtgiVelW = 0, rhiRtgiVelH = 0;
+// H6f: per-pixel history-confidence for NRD (IN_DIFF_CONFIDENCE), computed from this frame's raw bounce vs
+// last frame's reprojected denoised GI — kills edge ghosting without the flat-area dimming of a global antilag.
+static rhi::RenderTargetHandle rhiRtgiConfRT = 0;
+static int  rhiRtgiConfW = 0, rhiRtgiConfH = 0;
 static bool rhiRtgiDenoisedThisView = false;		// the GI NRD denoise ran; GetRtgiOutputImage is current
 static float rhiRtgiPrevProj[16];
 static float rhiRtgiPrevView[16];
@@ -6997,6 +7001,41 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			}
 		}
 
+		// H6f: history-confidence pass (docs/rtx-rtgi.md). Compare this frame's raw bounce luminance against
+		// last frame's DENOISED GI reprojected by the motion vectors, and write a per-pixel confidence that
+		// tells NRD to drop history where the lighting moved (a lit silhouette under the camera) but keep it
+		// on stable surfaces — killing the edge smear without the flat dimming a global antilag would cause.
+		// Needs a prior denoised frame (GetRtgiOutputImage != 0, still last frame's until RtaoDenoise below
+		// overwrites it) and the velocity we just resolved. r_rtgiConfidence 0 disables it (NRD antilag only).
+		rhi::ImageHandle giConfImg = 0;
+		const rhi::ImageHandle giPrevDenoised = r->GetRtgiOutputImage();
+		if ( r_rtgiConfidence.GetFloat() > 0.0f && rhiRtgiPrevValid && giPrevDenoised != 0 ) {
+			if ( rhiRtgiConfRT && r->GetRenderTargetImage( rhiRtgiConfRT ) == 0 ) { rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
+			if ( rhiRtgiConfRT && ( rhiRtgiConfW != rw || rhiRtgiConfH != rh ) ) { r->DestroyRenderTarget( rhiRtgiConfRT ); rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
+			if ( !rhiRtgiConfRT ) {
+				rhiRtgiConfRT = r->CreateRenderTarget( rhi::IF_R16F, rw, rh );	// R8+ per NRD; R16F is the single-channel target we have
+				if ( rhiRtgiConfRT ) { rhiRtgiConfW = rw; rhiRtgiConfH = rh; }
+			}
+			rhi::ShaderHandle confProg = rhiRtgiConfRT ? r->LoadShader( "rtgi_confidence" ) : 0;
+			if ( confProg != 0 ) {
+				rhi::RenderParams confParms;
+				memset( &confParms, 0, sizeof( confParms ) );
+				confParms.mvpMatrix[0] = confParms.mvpMatrix[5] = confParms.mvpMatrix[10] = confParms.mvpMatrix[15] = 1.0f;
+				confParms.screenCorrection[0] = 1.0f / rw;			// texel size for the 3x3 tap of the noisy current signal
+				confParms.screenCorrection[1] = 1.0f / rh;
+				confParms.localParam0[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiConfidence.GetFloat() );	// sensitivity
+				confParms.localParam0[1] = 0.1f;					// confidence floor: never fully reject history (avoids edge frying)
+				confParms.localParam0[2] = 0.35f;					// noise deadzone: ignore sub-noise relative diffs so stable surfaces keep full history
+				confParms.windowCoord[2] = -1.0f;					// VK top-down: flip the velocity row (ssr_temporal convention)
+				r->BeginTargetPass( rhiRtgiConfRT, NULL );
+				RB_RHI_BindRTImage( r, 1, giPrevDenoised );			// unit 1 = last frame's denoised GI (YCoCg)
+				RB_RHI_BindRTImage( r, 2, nrdVel );					// unit 2 = motion vectors at GI res
+				RB_RHI_DrawFullscreen( r, confProg, confParms, r->GetRenderTargetImage( rhiRtgiRayRT ) );	// unit 0 = this frame's raw gather
+				r->EndPass();
+				giConfImg = r->GetRenderTargetImage( rhiRtgiConfRT );
+			}
+		}
+
 		rhi::RtaoDenoiseArgs da;
 		memset( &da, 0, sizeof( da ) );
 		da.giMode = true;								// denoise GI radiance (REBLUR_DIFFUSE), not RTAO occlusion
@@ -7015,6 +7054,8 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.jitterPrevY = rhiRtgiPrevValid ?  rhiRtgiPrevJitter[1] * resScale : da.jitterY;
 		da.mvScaleX = -1.0f;	da.mvScaleY = 1.0f;
 		da.hitDistA = 0.5f * radius;	da.hitDistB = 0.1f;		// MUST match rtgi_ray.frag's normHitDist
+		da.maxAccumFrames = r_rtgiHistory.GetInteger();			// GI-only ReBLUR history cap (ghosting vs noise lever)
+		da.confImage = giConfImg;								// H6f: IN_DIFF_CONFIDENCE (0 = not provided this frame)
 		da.denoisingRange = 20000.0f;
 		da.frameIndex = (unsigned int)tr.frameCount;
 		da.reset = !rhiRtgiPrevValid;
