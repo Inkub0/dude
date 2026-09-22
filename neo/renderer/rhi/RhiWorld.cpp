@@ -6310,7 +6310,11 @@ capture and screen mapping assume the whole framebuffer at the origin).
 ===================
 */
 static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
-	if ( !r_ssao.GetBool() || !R_BackendSupportsEnhancements() ) {
+	// RTGI supersedes screen-space AO: it grounds the scene with real one-bounce occlusion + bounce light, and
+	// the fake cube-map ambient GTAO used to darken is fully replaced by GI (r_rtgiAmbientKeep). So AO is one
+	// technique at a time — RTAO already stands down for r_rtgi, and GTAO stands down here too (no wasted pass;
+	// consumers gate on rhiSsaoAppliedThisView so they simply apply no AO this view).
+	if ( !r_ssao.GetBool() || r_rtgi.GetBool() || !R_BackendSupportsEnhancements() ) {
 		return;
 	}
 	// H4d (docs/rtx-rtao.md): RTAO produced, denoised and composited this view's AO —

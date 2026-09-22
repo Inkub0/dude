@@ -3241,6 +3241,9 @@ static void DrawEnhGroup_AmbientOcclusion()
 
 		// Resolution: discrete quality/perf stops from half to full screen resolution.
 		ImGui::BeginDisabled( !r_ssao.GetBool() );
+		// AO is one technique at a time: RT Ambient Occlusion or RT Global Illumination (below) each REPLACE
+		// the screen-space GTAO, so its sampling sliders are inert while either is on.
+		ImGui::BeginDisabled( r_rtao.GetBool() || r_rtgi.GetBool() );
 		const float ssaoResStops[]  = { 0.5f, 0.667f, 0.75f, 0.8f, 1.0f };
 		const char *ssaoResLabels[] = { "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Four-fifths (4/5)", "Full" };
 		const int ssaoNumStops = IM_ARRAYSIZE( ssaoResStops );
@@ -3286,6 +3289,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 			"Trade-off: a faint dark halo can appear around object silhouettes, since one coarse "
 			"depth texel can't represent both surfaces at an edge. Off = the exact full-resolution "
 			"depth march (most accurate, most expensive). Recommended on. Non-vanilla; opengl3/Vulkan." );
+		ImGui::EndDisabled();	// SSAO sliders superseded by RTAO / RTGI
 
 		// Ray-traced AO (docs/rtx-rtao.md H4). Same idiom as the Shadows group's RT section:
 		// greyed on the legacy/GL3 backend and non-RT GPUs, where the cvars are inert.
@@ -3296,6 +3300,9 @@ static void DrawEnhGroup_AmbientOcclusion()
 			ImGui::SeparatorText( rtCapable ? "Ray Tracing (RTX)" : "Ray Tracing (RTX) - needs Vulkan + RT GPU" );
 			ImGui::BeginDisabled( !rtCapable );
 
+			// RT GI supersedes RT AO (below): one denoiser, and GI grounds the scene itself. Grey RTAO out
+			// while GI is on so it is clear only one runs.
+			ImGui::BeginDisabled( r_rtgi.GetBool() );
 			bool rtao = r_rtao.GetBool();
 			if ( ImGui::Checkbox( "RT Ambient Occlusion", &rtao ) ) {
 				r_rtao.SetBool( rtao );
@@ -3351,9 +3358,11 @@ static void DrawEnhGroup_AmbientOcclusion()
 				"visible change (AO is low-frequency). Lower this first if RTAO costs too much. "
 				"Default Full; Ultra Nightmare uses Three-quarter." );
 
+			ImGui::EndDisabled();	// RTAO greyed while RTGI on
+
 			// Ray-traced GI (docs/rtx-rtgi.md H6). One traced bounce of indirect diffuse, denoised through
-			// the SAME NRD instance as RTAO - so enabling it makes GI REPLACE RTAO (the single denoiser does
-			// diffuse instead of occlusion; screen-space GTAO fills the scalar AO reflections use).
+			// the SAME NRD instance as RTAO - so enabling it makes GI REPLACE RTAO (and the screen-space GTAO):
+			// GI grounds the scene with real one-bounce occlusion + bounce light, so no AO pass runs alongside.
 			ImGui::Spacing();
 			bool rtgi = r_rtgi.GetBool();
 			if ( ImGui::Checkbox( "RT Global Illumination", &rtgi ) ) {
@@ -3361,10 +3370,11 @@ static void DrawEnhGroup_AmbientOcclusion()
 			}
 			AddTooltip( "One traced bounce of indirect light, denoised: surfaces are lit by the colour "
 				"bouncing off everything around them (a red panel tints the nearby grey wall), and dark "
-				"corners fill in softly the way real light does - which Doom 3 never computed. REPLACES "
-				"RT Ambient Occlusion while on (the one denoiser does GI instead; screen-space AO fills "
-				"the occlusion reflections need). Needs Motion Vectors or FSR on for the denoiser, and "
-				"builds the ray-tracing scene. NON-VANILLA look - lifts blacks in lit rooms. Vulkan + RT only." );
+				"corners fill in softly the way real light does - which Doom 3 never computed. REPLACES both "
+				"RT Ambient Occlusion AND screen-space SSAO while on - it grounds the scene with real "
+				"one-bounce occlusion + bounce light, so no separate AO pass runs. Needs Motion Vectors or "
+				"FSR on for the denoiser, and builds the ray-tracing scene. NON-VANILLA look - lifts blacks "
+				"in lit rooms. Vulkan + RT only." );
 
 			float giInt = r_rtgiIntensity.GetFloat();
 			if ( ImGui::SliderFloat( "Intensity##rtgi", &giInt, 0.0f, 4.0f, "%.2f" ) ) {
