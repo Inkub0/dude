@@ -18,6 +18,8 @@
 //   u_localParam0.x       = sensitivity (r_rtgiConfidence); u_localParam0.y = confidence floor
 //   u_localParam0.z       = noise deadzone: relative differences below this are treated as 1-spp noise, not a
 //                           real lighting change, so STABLE surfaces keep full confidence (no flat dimming)
+//   u_localParam0.w       = H6g checkerboard parity: 0 off, 1 even, 2 odd. When on, only this frame's traced
+//                           cells get a computed confidence (read from the packed left half); the rest = 1
 //   u_screenCorrection.xy = 1 / (rw, rh) texel size (3x3 tap of the noisy current signal)
 //   u_windowCoord.z       = view-Y sign (-1 Vulkan top-down): flip the velocity row like ssr_temporal
 
@@ -34,16 +36,29 @@ layout(location = 0) out vec4 fragColor;	// R8 confidence 0..1
 void main() {
 	vec2 uv = var_TexCoord;
 
-	// this frame's bounce luminance. The 1-spp gather is noisy, so average a 3x3 neighbourhood (GI is very
-	// low-frequency, so this barely blurs) to keep the confidence itself from flickering pixel to pixel.
-	vec2  texel = u_screenCorrection.xy;
-	float curL  = 0.0;
-	for ( int j = -1; j <= 1; j++ ) {
-		for ( int i = -1; i <= 1; i++ ) {
-			curL += max( texture( u_currentGI, uv + vec2( float( i ), float( j ) ) * texel ).x, 0.0 );
+	// this frame's bounce luminance.
+	vec2  texel  = u_screenCorrection.xy;
+	int   cbMode = int( u_localParam0.w + 0.5 );		// H6g: 0 = off, 1 = even frame, 2 = odd frame
+	float curL;
+	if ( cbMode > 0 ) {
+		// checkerboard: only THIS frame's traced cells have a fresh sample (the gather packed them into the
+		// left half). Reconstructed cells have no new info this frame, so trust history there (confidence 1).
+		float px = floor( gl_FragCoord.x ), py = floor( gl_FragCoord.y );
+		uint  traced = ( ( uint( px ) ^ uint( py ) ) ^ uint( cbMode - 1 ) ) & 1u;	// 0 = traced (matches the gather's BLACK cells)
+		if ( traced != 0u ) { fragColor = vec4( 1.0 ); return; }
+		float packedCol = floor( px * 0.5 );			// screen 2*gx+parity was packed into column gx = px>>1
+		curL = max( texture( u_currentGI, vec2( ( packedCol + 0.5 ) * texel.x, ( py + 0.5 ) * texel.y ) ).x, 0.0 );
+	} else {
+		// resScale: the 1-spp gather is noisy, so average a 3x3 neighbourhood (GI is very low-frequency, so
+		// this barely blurs) to keep the confidence itself from flickering pixel to pixel.
+		curL = 0.0;
+		for ( int j = -1; j <= 1; j++ ) {
+			for ( int i = -1; i <= 1; i++ ) {
+				curL += max( texture( u_currentGI, uv + vec2( float( i ), float( j ) ) * texel ).x, 0.0 );
+			}
 		}
+		curL *= ( 1.0 / 9.0 );
 	}
-	curL *= ( 1.0 / 9.0 );
 
 	// reproject to last frame (ssr_temporal.frag convention: velocity = currUV - prevUV in +Y-up UV, flip
 	// the row on Vulkan's top-down target).

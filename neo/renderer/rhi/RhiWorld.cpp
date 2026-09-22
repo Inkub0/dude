@@ -7061,10 +7061,10 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// overwrites it) and the velocity we just resolved. r_rtgiConfidence 0 disables it (NRD antilag only).
 		rhi::ImageHandle giConfImg = 0;
 		const rhi::ImageHandle giPrevDenoised = r->GetRtgiOutputImage();
-		// (v1) the confidence pass compares a full-res raw gather vs the reprojected denoised history; in
-		// checkerboard the raw is half-packed, so skip it there for now — full-res guides already give NRD
-		// much better disocclusion than the resScale path had.
-		if ( !cbActive && r_rtgiConfidence.GetFloat() > 0.0f && rhiRtgiPrevValid && giPrevDenoised != 0 ) {
+		// Runs for both paths. In checkerboard the raw is half-packed, so the shader (u_localParam0.w = parity)
+		// only computes confidence at this frame's TRACED cells (reading the packed sample) and trusts history
+		// on the reconstructed cells.
+		if ( r_rtgiConfidence.GetFloat() > 0.0f && rhiRtgiPrevValid && giPrevDenoised != 0 ) {
 			if ( rhiRtgiConfRT && r->GetRenderTargetImage( rhiRtgiConfRT ) == 0 ) { rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
 			if ( rhiRtgiConfRT && ( rhiRtgiConfW != rw || rhiRtgiConfH != rh ) ) { r->DestroyRenderTarget( rhiRtgiConfRT ); rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
 			if ( !rhiRtgiConfRT ) {
@@ -7081,6 +7081,7 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				confParms.localParam0[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiConfidence.GetFloat() );	// sensitivity
 				confParms.localParam0[1] = 0.1f;					// confidence floor: never fully reject history (avoids edge frying)
 				confParms.localParam0[2] = 0.35f;					// noise deadzone: ignore sub-noise relative diffs so stable surfaces keep full history
+				confParms.localParam0[3] = cbActive ? (float)( 1 + ( (int)tr.frameCount & 1 ) ) : 0.0f;	// H6g: checkerboard parity (0 = off, packed-read for traced cells)
 				confParms.windowCoord[2] = -1.0f;					// VK top-down: flip the velocity row (ssr_temporal convention)
 				r->BeginTargetPass( rhiRtgiConfRT, NULL );
 				RB_RHI_BindRTImage( r, 1, giPrevDenoised );			// unit 1 = last frame's denoised GI (YCoCg)
