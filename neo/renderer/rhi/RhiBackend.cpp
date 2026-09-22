@@ -3519,7 +3519,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		}
 		// H6c RT GI apply (docs/rtx-rtgi.md): add albedo * gathered irradiance into the HDR scene,
 		// scene-wide, before DoF/FSR2/bloom so they pick it up. No-op unless r_rtgi is on.
+		r->GpuScopeBegin( "rtgi apply" );
 		RB_RHI_RtgiApply( r, viewDef );
+		r->GpuScopeEnd();
 		// r_ssaoDebug: overlay the AO buffer on top of the finished view. RHI fullscreen
 		// draw, so it works on both backends (the SSAO buffer is produced on Vulkan too).
 		RB_RHI_SSAODebugOverlay( r, viewDef );

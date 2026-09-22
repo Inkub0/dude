@@ -7544,11 +7544,15 @@ void RB_RHI_RtgiDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( r_rtgiDebug.GetInteger() <= 0 || !rhiRtgiRanThisView || rhiRtgiRayRT == 0 ) {
 		return;
 	}
-	rhi::ImageHandle srcImg = r->GetRenderTargetImage( rhiRtgiRayRT );
+	// mode 1 = the raw noisy gather; mode 2 = the NRD-denoised output (falls back to raw when the denoise
+	// didn't run). Both buffers are NRD-YCoCg-packed, so rtgi_debug decodes them to linear.
+	rhi::ImageHandle srcImg = ( r_rtgiDebug.GetInteger() >= 2 && rhiRtgiDenoisedThisView && r->GetRtgiOutputImage() != 0 )
+		? r->GetRtgiOutputImage()
+		: r->GetRenderTargetImage( rhiRtgiRayRT );
 	if ( srcImg == 0 ) {
 		return;
 	}
-	rhi::ShaderHandle prog = r->LoadShader( "smaa_copy" );
+	rhi::ShaderHandle prog = r->LoadShader( "rtgi_debug" );
 	if ( !prog ) {
 		return;
 	}
@@ -7558,7 +7562,7 @@ void RB_RHI_RtgiDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
-	parms.screenCorrection[0] = 1.0f;				// smaa_copy samples the whole source (mirrors the RTAO vel-copy)
+	parms.screenCorrection[0] = 1.0f;				// rtgi_debug samples at var_TexCoord (0..1); screenCorrection unused
 	parms.screenCorrection[1] = 1.0f;
 
 	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,

@@ -28,31 +28,37 @@ reflections and volumetrics.
 
 ## Slice plan
 
-- **H6a — noisy radiance gather + debug view. DONE (feat/rt-gi-onebounce), build-verified, not user-tested.**
-  New `rtgi_ray.frag` gathers one bounce into an RGBA16F target (`CreateRenderTargetRtgiMrt`); dispatched
-  by `RB_RHI_RtgiPass` (RhiWorld.cpp) right after the AO passes, in its own `r_vkGpuTime 2` scope "rtgi".
-  Visualised by `r_rtgiDebug 1` (`RB_RHI_RtgiDebugOverlay`, a `smaa_copy` blit of the raw radiance).
-  Nothing consumes it in normal play, so `r_rtgi 0` (default) leaves play + the RTAO path byte-identical.
-  Cvars: `r_rtgi`, `r_rtgiRadius` (512), `r_rtgiLightScale` (1), `r_rtgiEmissive` (1), `r_rtgiDebug`.
-  Mirrors how RTAO shipped H4a (raw ray + `r_rtaoDebug`, visually inert).
-- **H6b — NRD DIFFUSE denoise + reduced-res.** Switch the denoiser from `REBLUR_DIFFUSE_OCCLUSION`
-  (scalar) to `REBLUR_DIFFUSE` (RGBA16F radiance + hit distance): a second NRD identifier in the
-  VulkanBackend lineup, the `nrdUserViews` mapping swapped to `IN_DIFF_RADIANCE_HITDIST` /
-  `OUT_DIFF_RADIANCE_HITDIST`, and the `r_rtaoResScale`-style reduced-res trace + velocity downsample +
-  history reproject (all already built for RTAO). The `rtgi_ray.frag` already writes the guides and a
-  normalised hit distance in alpha for this.
-- **H6c — apply + reconcile the fake fills.** Add the denoised radiance to the ambient term
-  (`ambientlight.frag:65`, `outRgb *= ao;` → `outRgb = outRgb * ao + gi * outRgb`), gated so **GI replaces
-  RTAO** (one AO producer, not both). Then dial down / disable the fills GI now supersedes so the room
-  doesn't go milky: `r_itemGlow`, `r_emissiveSurfaces`, the flat `_ambient`. This reconciliation *is* the
-  work of H6c — the ray cost is the easy part. **Measure the GI-vs-RTAO delta with `r_vkGpuTime 2` on
-  `mars_city1` nightmare before committing** (estimate ~1–3 ms at 0.75 res-scale).
-- **H6d — one dominant-light shadow ray.** The scene-light buffer path casts no shadow ray at the hit
-  yet (`ssr_rt.frag` RR16d, parked), so bounced light leaks through walls. Trace one shadow ray toward
-  the nearest/dominant reaching light at the bounce hit (`r_rtgiShadow`). Cheap: one extra ray, only for
-  the dominant light, not full NEE.
-- **H6e — preset + perf.** Wire `r_rtgi` into the Ultra Nightmare preset (replacing `r_rtao` there),
-  fold `r_rtgiIntensity`/tuning into the in-game menu, and take the final `r_vkGpuTime 2` numbers.
+(Built in the order H6a → H6c → H6b; numbered here for readability. H6a–c are done and user-verified.)
+
+- **H6a — noisy radiance gather. DONE + user-verified.** `rtgi_ray.frag` gathers one bounce into an RGBA16F
+  MRT (`CreateRenderTargetRtgiMrt`: att0 radiance+hitdist, att1/att2 the NRD guides); dispatched by
+  `RB_RHI_RtgiPass` in its own `r_vkGpuTime 2` scope "rtgi". Res-scaled by `r_rtgiResScale` (0.5) — a full-res
+  single sample was ~4.1 ms, 0.5 ≈ 1.2 ms (the knee; 0.25 read too grainy raw). Cvars: `r_rtgi`,
+  `r_rtgiRadius` (512), `r_rtgiResScale` (0.5), `r_rtgiLightScale` (1), `r_rtgiEmissive` (1), `r_rtgiDebug`.
+- **H6b — NRD `REBLUR_DIFFUSE` denoise. DONE + user-verified.** ONE NRD instance, denoiser SWAPPED by config:
+  `REBLUR_DIFFUSE` added to the instance; `RtaoDenoise` gained a `giMode` flag swapping the output image
+  (RGBA16F `rtgiOut*` / `GetRtgiOutputImage`), the denoiser id, and the `IN/OUT_DIFF_RADIANCE_HITDIST` enums
+  (RTAO path byte-identical when off). Only one ReBLUR dispatches per frame — no resolution thrash /
+  descriptor-pool conflict. **GI replaces RTAO** when on: `RB_RHI_RtaoPass` stands down, screen-space GTAO
+  fills the scalar AO the ambient/reflections consume, and the GI radiance itself grounds the scene. Radiance
+  is NRD-YCoCg-packed (`_NRD_LinearToYCoCg` in the gather, `_NRD_YCoCgToLinear` in the apply/debug) — feeding
+  it linear caused a pink cast. Needs the velocity MRT (`r_fsr` / `r_motionVectors`) for NRD's IN_MV.
+- **H6c — scene-wide apply with a receiver-albedo G-buffer. DONE + user-verified.** Doom 3 has NO global
+  ambient (the ambient shader runs only inside ambient-light volumes → patchy), so GI is applied by a
+  FULLSCREEN additive pass, not the per-light shader. Correct per-pixel albedo needed a 4th prepass
+  attachment: the VK backend was widened 3→4 color attachments (RenderTarget arrays, CreateColorTarget /
+  BuildColorPasses, a new pass class, the pipeline blend array) + `GetRenderTargetImage4`. `gbuffer.frag`
+  writes `out_Albedo` (discarded on the 1/2/3-att targets, the same trick `out_Material`/`out_Velocity` use);
+  `RB_RHI_NormalPrepass` forces the standalone 4-att target + fills the SL_DIFFUSE stage when `r_rtgi` is on
+  (merged 3-att path untouched, `r_rtgi` off byte-identical). `rtgi_apply.frag` adds
+  `albedo * gathered-irradiance * r_rtgiIntensity` into `rhiHdrRT` before FSR2/tonemap (own "rtgi apply"
+  scope). Reconcile: `ambientlight.frag` dims the fake cube-map ambient by `r_rtgiAmbientKeep`
+  (carried in the otherwise-unused `u_color.x`, +1 encoded so 0 = GI-off) so real GI doesn't double-count.
+- **H6d — one dominant-light shadow ray. TODO.** The scene-light loop casts no shadow ray at the bounce hit
+  yet (`ssr_rt.frag` RR16d, parked), so bounced light leaks through thin walls. Trace one shadow ray toward
+  the nearest/dominant reaching light (`r_rtgiShadow`): one extra ray, dominant light only, not full NEE.
+- **H6e — preset + menu. TODO.** Wire `r_rtgi` into the Ultra Nightmare preset (replacing `r_rtao` there),
+  fold the tuning into the in-game menu, take the final `r_vkGpuTime 2` numbers.
 
 ## Fidelity note (per policy)
 
@@ -62,8 +68,15 @@ under it (H6c) so the net exposure stays close to the shipped look, not brighter
 
 ## Files
 
-- `neo/shaders/rtgi_ray.frag` — the gather (setup from `rtao_ray.frag`, hit shading from `ssr_rt.frag`).
-- `RhiWorld.cpp` — `RB_RHI_RtgiPass` (dispatch), `RB_RHI_RtgiDebugOverlay`, the `rhiRtgi*` statics.
-- `VulkanBackend.cpp` / `RHI.h` — `CreateRenderTargetRtgiMrt` (RGBA16F radiance + the two NRD guides).
-- `RenderSystem_init.cpp` / `tr_local.h` — the `r_rtgi*` cvars.
+- `neo/shaders/rtgi_ray.frag` — the gather (setup from `rtao_ray.frag`, hit shading from `ssr_rt.frag`;
+  YCoCg-packs radiance + writes normHitDist for NRD).
+- `neo/shaders/rtgi_apply.{vert,frag}` — the fullscreen additive apply (`albedo * YCoCg-unpacked GI * intensity`).
+- `neo/shaders/rtgi_debug.{vert,frag}` — the `r_rtgiDebug` overlay (YCoCg-decoded raw / denoised blit).
+- `neo/shaders/gbuffer.frag` — `out_Albedo` (4th prepass attachment); `ambientlight.frag` — the `r_rtgiAmbientKeep` reconcile.
+- `RhiWorld.cpp` — `RB_RHI_RtgiPass` (gather + `giMode` NRD denoise), `RB_RHI_RtgiApply`, `RB_RHI_RtgiDebugOverlay`,
+  the `rhiRtgi*` statics, `RB_RHI_NormalPrepass` (4-att albedo), `RB_RHI_RtaoPass` (stands down when `r_rtgi`).
+- `VulkanBackend.cpp` / `RHI.h` — `CreateRenderTargetRtgiMrt`; the 3→4 color-attachment widening +
+  `GetRenderTargetImage4`; `RtaoDenoise` `giMode` + `RtgiEnsureOutput` / `GetRtgiOutputImage`; `NRD_ID_REBLUR_GI`.
+- `RenderSystem_init.cpp` / `tr_local.h` — the `r_rtgi*` cvars (`r_rtgi`, `r_rtgiRadius`, `r_rtgiResScale`,
+  `r_rtgiLightScale`, `r_rtgiEmissive`, `r_rtgiIntensity`, `r_rtgiAmbientKeep`, `r_rtgiDebug`).
 - `tr_main.cpp` — `r_rtgi` in the RT-world implication gate + the per-frame TLAS-rebuild exception.
