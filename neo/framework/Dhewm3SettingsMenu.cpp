@@ -3343,11 +3343,75 @@ static void DrawEnhGroup_AmbientOcclusion()
 				"visible change (AO is low-frequency). Lower this first if RTAO costs too much. "
 				"Default Full; Ultra Nightmare uses Three-quarter." );
 
+			// Ray-traced GI (docs/rtx-rtgi.md H6). One traced bounce of indirect diffuse, denoised through
+			// the SAME NRD instance as RTAO - so enabling it makes GI REPLACE RTAO (the single denoiser does
+			// diffuse instead of occlusion; screen-space GTAO fills the scalar AO reflections use).
+			ImGui::Spacing();
+			bool rtgi = r_rtgi.GetBool();
+			if ( ImGui::Checkbox( "RT Global Illumination", &rtgi ) ) {
+				r_rtgi.SetBool( rtgi );
+			}
+			AddTooltip( "One traced bounce of indirect light, denoised: surfaces are lit by the colour "
+				"bouncing off everything around them (a red panel tints the nearby grey wall), and dark "
+				"corners fill in softly the way real light does - which Doom 3 never computed. REPLACES "
+				"RT Ambient Occlusion while on (the one denoiser does GI instead; screen-space AO fills "
+				"the occlusion reflections need). Needs Motion Vectors or FSR on for the denoiser, and "
+				"builds the ray-tracing scene. NON-VANILLA look - lifts blacks in lit rooms. Vulkan + RT only." );
+
+			float giInt = r_rtgiIntensity.GetFloat();
+			if ( ImGui::SliderFloat( "Intensity##rtgi", &giInt, 0.0f, 4.0f, "%.2f" ) ) {
+				r_rtgiIntensity.SetFloat( giInt );
+			}
+			AddTooltip( "Strength of the bounced light added to the scene. 1.00 is the physical one-bounce "
+				"result; raise for punchier colour bleed, lower for a subtle fill." );
+
+			float giKeep = r_rtgiAmbientKeep.GetFloat();
+			if ( ImGui::SliderFloat( "Fake-Ambient Keep##rtgi", &giKeep, 0.0f, 1.0f, "%.2f" ) ) {
+				r_rtgiAmbientKeep.SetFloat( giKeep );
+			}
+			AddTooltip( "How much of Doom 3's original FAKE cube-map ambient to keep once real GI is added, "
+				"so the two don't double-count. 1.00 stacks GI on top of the full fake ambient (brightest); "
+				"0.00 lets GI fully replace it (most physical, but a corner GI can't reach goes darker). "
+				"Lower it if lit rooms look washed out." );
+
+			float giRad = r_rtgiRadius.GetFloat();
+			if ( ImGui::SliderFloat( "Ray Length##rtgi", &giRad, 64.0f, 2048.0f, "%.0f units" ) ) {
+				r_rtgiRadius.SetFloat( giRad );
+			}
+			AddTooltip( "How far a bounce ray looks for the surface whose light it gathers. Longer = broader "
+				"colour bleed and more distant bounce (room-scale); shorter concentrates GI on nearby "
+				"surfaces and is a little cheaper. Default 512." );
+
+			// GI resolution: same low-frequency reasoning as RTAO. 0.5 is the cost/quality knee (a full-res
+			// single sample is ~4x its cost; 0.25 starts to smear fine contact bleed).
+			const float rtgiResStops[]  = { 0.25f, 0.5f, 0.667f, 0.75f, 1.0f };
+			const char *rtgiResLabels[] = { "Quarter (1/4)", "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Full" };
+			const int rtgiNumStops = IM_ARRAYSIZE( rtgiResStops );
+			const float curRtgiScale = r_rtgiResScale.GetFloat();
+			int rtgiResIdx = 1;
+			float rtgiResBest = 1e9f;
+			for ( int i = 0; i < rtgiNumStops; i++ ) {
+				const float d = idMath::Fabs( curRtgiScale - rtgiResStops[i] );
+				if ( d < rtgiResBest ) { rtgiResBest = d; rtgiResIdx = i; }
+			}
+			if ( ImGui::SliderInt( "Resolution##rtgi", &rtgiResIdx, 0, rtgiNumStops - 1,
+					rtgiResLabels[rtgiResIdx], ImGuiSliderFlags_NoInput ) ) {
+				rtgiResIdx = rtgiResIdx < 0 ? 0 : ( rtgiResIdx >= rtgiNumStops ? rtgiNumStops - 1 : rtgiResIdx );
+				r_rtgiResScale.SetFloat( rtgiResStops[rtgiResIdx] );
+			}
+			AddTooltip( "Resolution the GI gather AND its denoiser run at, upscaled to full res. GI is very "
+				"low-frequency, so Half is the sweet spot; Quarter is cheaper still but starts to smear fine "
+				"contact bleed. Default Half." );
+
 			ImGui::EndDisabled();
 			// explain the gray-out cases the checkbox itself can't (mirrors the RT Reflections hint)
-			if ( rtCapable && r_rtao.GetBool()
+			if ( rtCapable && r_rtao.GetBool() && !r_rtgi.GetBool()
 					&& !( r_motionVectors.GetBool() || r_fsr.GetBool() ) ) {
 				ImGui::TextDisabled( "  (needs Motion Vectors or FSR on for the denoiser - using screen-space AO)" );
+			}
+			if ( rtCapable && r_rtgi.GetBool()
+					&& !( r_motionVectors.GetBool() || r_fsr.GetBool() ) ) {
+				ImGui::TextDisabled( "  (GI needs Motion Vectors or FSR on for the denoiser - showing raw grainy GI)" );
 			}
 		}
 		ImGui::EndDisabled();
