@@ -6942,6 +6942,7 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[0] = invP00;
 	parms.localParam0[1] = invP11;
 	parms.localParam0[2] = radius;
+	parms.localParam0[3] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissiveClamp.GetFloat() );	// emissive peak clamp (pre-NRD variance cut)
 	parms.localParam1[0] = giFrameIndex;
 	parms.localParam1[1] = r_rtgiShadow.GetBool() ? 1.0f : 0.0f;	// H6d: dominant-light shadow ray at the bounce hit
 	parms.localParam1[3] = 0.004f;					// ray origin pulled toward the eye per unit depth (crease-leak fix)

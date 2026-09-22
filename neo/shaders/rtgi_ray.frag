@@ -13,7 +13,7 @@
 //   u_rtParms.xy          = TLAS device address (bit-cast lo/hi)
 //   u_rtParms.zw          = geo-table device address (bit-cast lo/hi)   [vs rtao_ray: NEW]
 //   u_modelViewMatrix     = inverse view (view -> world)
-//   u_localParam0         = ( 1/proj00, 1/proj11, gatherRadius, 0 )
+//   u_localParam0         = ( 1/proj00, 1/proj11, gatherRadius, emissive peak clamp )
 //   u_localParam1         = ( frameIndex (hashed for the IGN reorientation), 0, 0, eye-pullback per unit depth )
 //   u_color               = ( scene-light buffer addr lo/hi bit-cast, light count, ambient floor at the hit )
 //   u_diffuseModifier     = ( emissive glow scale, light brightness scale, frustum gate, real-lights enable )
@@ -219,7 +219,16 @@ void main() {
 			if ( lum > domLum ) { domLum = lum; domContrib = contrib; domDir = ldir; domDist = dl; }
 		}
 	}
-	if ( bcol.a > 0.5 ) { Li += bcol.rgb * u_diffuseModifier.x; }	// self-illuminated source (neon, light tile); not shadowed
+	if ( bcol.a > 0.5 ) {											// self-illuminated source (neon, light tile); not shadowed
+		// Small bright emitters are the worst input for a 1-spp gather: a ray either hits one (spike) or
+		// misses (zero), and that variance denoises into grain/colour blotches. Clamp the PEAK channel
+		// (u_localParam0.w = r_rtgiEmissiveClamp), scaling the whole colour so the hue is preserved, so NRD
+		// sees a bounded signal it can resolve cleanly. High clamp = effectively off.
+		vec3  e  = bcol.rgb * u_diffuseModifier.x;
+		float ep = max( max( e.r, e.g ), e.b );
+		if ( ep > u_localParam0.w ) { e *= u_localParam0.w / ep; }
+		Li += e;
+	}
 
 	// H6d (docs/rtx-rtgi.md): one shadow ray at the bounce hit toward the DOMINANT reaching light, so a light
 	// behind a thin wall stops leaking indirect light through it. Only the brightest light is tested (cheap:
