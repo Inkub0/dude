@@ -64,6 +64,13 @@ void onb( vec3 n, out vec3 t, out vec3 b ) {
 	b = vec3( c, s + n.y * n.y * a, -n.y );
 }
 
+// NRD REBLUR radiance encoding (REBLUR_FrontEnd_PackRadianceAndNormHitDist -> _NRD_LinearToYCoCg):
+// REBLUR_DIFFUSE filters and OUTPUTS in YCoCg, so its IN_DIFF_RADIANCE_HITDIST input must be YCoCg too.
+// rtgi_apply decodes with the exact inverse. (Feeding linear here shifted the denoised result toward red.)
+vec3 nrdLinearToYCoCg( vec3 c ) {
+	return vec3( dot( c, vec3( 0.25, 0.5, 0.25 ) ), dot( c, vec3( 0.5, 0.0, -0.5 ) ), dot( c, vec3( -0.25, 0.5, -0.25 ) ) );
+}
+
 // world normal -> NRD normal/roughness encoding 2 (signed octahedron, z sign in roughness)
 vec4 packNrdNormal( vec3 Nraw ) {
 	float nl2 = dot( Nraw, Nraw );
@@ -208,7 +215,8 @@ void main() {
 	if ( bcol.a > 0.5 ) { Li += bcol.rgb * u_diffuseModifier.x; }	// self-illuminated source (neon, light tile)
 
 	// H6b: normalized hit distance in alpha for the NRD REBLUR_DIFFUSE denoise — saturate( thit / (A + |viewZ|*B) ),
-	// A = 0.5*radius, B = 0.1, MUST match the ReblurHitDistanceParameters set in RB_RHI_RtgiPass. Radiance is fed
-	// LINEAR in .rgb (consumed linearly by rtgi_apply; NRD's YCoCg anti-firefly packing is a later refinement).
-	fragColor = vec4( Li, clamp( thit / ( 0.5 * radius + d * 0.1 ), 0.0, 1.0 ) );
+	// A = 0.5*radius, B = 0.1, MUST match the ReblurHitDistanceParameters set in RB_RHI_RtgiPass. Radiance is
+	// packed to NRD's YCoCg in .rgb (rtgi_apply unpacks); max() guards negatives into the denoiser.
+	float nhd = clamp( thit / ( 0.5 * radius + d * 0.1 ), 0.0, 1.0 );
+	fragColor = vec4( nrdLinearToYCoCg( max( Li, vec3( 0.0 ) ) ), nhd );
 }

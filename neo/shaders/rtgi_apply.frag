@@ -23,13 +23,20 @@ layout(location = 0) out vec4 fragColor;
 
 #define depth_consts DUDE_DEPTH_CONSTS()
 
+// NRD REBLUR radiance decode (REBLUR_BackEnd_UnpackRadianceAndNormHitDist -> _NRD_YCoCgToLinear): the GI
+// buffer (denoised output OR the raw gather, both written YCoCg by rtgi_ray.frag) is YCoCg; return linear.
+vec3 nrdYCoCgToLinear( vec3 c ) {
+	float t = c.x - c.z;
+	return max( vec3( t + c.y, c.x + c.z, t - c.y ), vec3( 0.0 ) );
+}
+
 void main() {
 	vec2  frag = gl_FragCoord.xy;
 	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
 	if ( raw >= 0.9994 ) { fragColor = vec4( 0.0 ); return; }	// sky / no geometry: no receiver, no indirect
 
 	vec2 uv     = frag * u_screenCorrection.xy;
-	vec3 gi     = texture( u_gi, uv ).rgb;
+	vec3 gi     = nrdYCoCgToLinear( texture( u_gi, uv ).rgb );	// H6b: NRD output is YCoCg-packed
 	vec3 albedo = texture( u_albedo, uv ).rgb;
 
 	// indirect diffuse = receiver albedo * incoming irradiance, scaled by r_rtgiIntensity. Additive.
