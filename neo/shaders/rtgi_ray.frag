@@ -4,9 +4,10 @@
 // reconstruction and NRD guides are identical to rtao_ray.frag; the hit-shading is lifted from
 // ssr_rt.frag (geo-table fetch -> bindless albedo -> scene-light loop -> emissive).
 //
-// H6a is a bring-up slice: the raw radiance is only shown by r_rtgiDebug 1. It is denoised by the NRD
-// DIFFUSE pass (H6b) and applied fullscreen with the fake-fill reconcile (H6c) - so with r_rtgi 0
-// (default) this pass never runs and the shipped RTAO path is untouched. VK + RT hardware only (ray_query).
+// H6a is a bring-up slice: the raw radiance is only shown by r_rtgiDebug 1. Nothing consumes it in
+// normal play yet - the NRD DIFFUSE denoise is H6b, the ambient apply + fake-fill reconcile is H6c,
+// the one-dominant-light shadow ray is H6d - so with r_rtgi 0 (default) this pass never runs and the
+// shipped RTAO path is untouched. VK + RT hardware only (ray_query).
 //
 // Uniform packing (RB_RHI_RtgiPass):
 //   u_rtParms.xy          = TLAS device address (bit-cast lo/hi)
@@ -195,6 +196,10 @@ void main() {
 	// and the 1/pi * pi (cosine-sampling) factors are applied at the H6c consume site, so here we return
 	// the hit's lit colour. u_color.w is a small ambient floor (0 keeps it a pure bounce).
 	vec3  Li = albedo * u_color.w;
+	vec3  domContrib = vec3( 0.0 );			// H6d: the brightest reaching light's contribution, for one shadow ray
+	vec3  domDir = vec3( 0.0 );
+	float domDist = 0.0;
+	float domLum = -1.0;
 	if ( u_diffuseModifier.w > 0.5 ) {									// r_rtgi real scene lights
 		RtLights lights = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
 		uint nLights = uint( u_color.z );
@@ -207,10 +212,29 @@ void main() {
 			if ( ndl <= 0.0 ) { continue; }
 			float atten = dudeLightAtten( lights, li, hitWorld, dl, lights.l[ li ].flags, gate, false );
 			if ( atten <= 0.0 ) { continue; }
-			Li += albedo * lights.l[ li ].color * ( atten * ndl * u_diffuseModifier.y );
+			vec3 contrib = albedo * lights.l[ li ].color * ( atten * ndl * u_diffuseModifier.y );
+			Li += contrib;
+			// track the DOMINANT (brightest) reaching light at this hit for the H6d shadow ray
+			float lum = dot( contrib, vec3( 0.299, 0.587, 0.114 ) );
+			if ( lum > domLum ) { domLum = lum; domContrib = contrib; domDir = ldir; domDist = dl; }
 		}
 	}
 	if ( bcol.a > 0.5 ) { Li += bcol.rgb * u_diffuseModifier.x; }	// self-illuminated source (neon, light tile); not shadowed
+
+	// H6d (docs/rtx-rtgi.md): one shadow ray at the bounce hit toward the DOMINANT reaching light, so a light
+	// behind a thin wall stops leaking indirect light through it. Only the brightest light is tested (cheap:
+	// one extra ray regardless of light count) and, if occluded, its contribution is removed. u_localParam1.y gates it.
+	if ( u_localParam1.y > 0.5 && domLum > 0.0 ) {
+		vec3 sOrg = hitWorld + hitN * 0.2 + domDir * 0.05;			// bias off the surface + a touch toward the light
+		rayQueryEXT srq;
+		rayQueryInitializeEXT( srq,
+			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+			gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu, sOrg, 0.0, domDir, max( domDist - 1.0, 0.1 ) );
+		while ( rayQueryProceedEXT( srq ) ) { }
+		if ( rayQueryGetIntersectionTypeEXT( srq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ) {
+			Li = max( Li - domContrib, vec3( 0.0 ) );				// dominant light occluded: drop its leaked contribution
+		}
+	}
 
 	// H6b: normalized hit distance in alpha for the NRD REBLUR_DIFFUSE denoise — saturate( thit / (A + |viewZ|*B) ),
 	// A = 0.5*radius, B = 0.1, MUST match the ReblurHitDistanceParameters set in RB_RHI_RtgiPass. Radiance is

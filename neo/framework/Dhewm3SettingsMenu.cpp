@@ -3411,6 +3411,14 @@ static void DrawEnhGroup_AmbientOcclusion()
 				"low-frequency, so Half is the sweet spot; Quarter is cheaper still but starts to smear fine "
 				"contact bleed. Default Half." );
 
+			bool giShadow = r_rtgiShadow.GetBool();
+			if ( ImGui::Checkbox( "GI Shadows", &giShadow ) ) {
+				r_rtgiShadow.SetBool( giShadow );
+			}
+			AddTooltip( "Trace one shadow ray at each bounce point toward the brightest light reaching it, so a "
+				"light behind a thin wall stops leaking bounced light through it. One extra ray per pixel; off "
+				"is a little cheaper but lets light bleed through walls." );
+
 			ImGui::EndDisabled();
 			// explain the gray-out cases the checkbox itself can't (mirrors the RT Reflections hint)
 			if ( rtCapable && r_rtao.GetBool() && !r_rtgi.GetBool()
