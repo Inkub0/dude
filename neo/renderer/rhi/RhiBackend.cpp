@@ -3463,14 +3463,25 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		if ( !ssrDone && drawSurfs[i]->material->GetSort() > SS_DECAL ) {
 			ssrDone = true;
 			RB_RHI_ScreenSpaceReflections( r, viewDef );
+			// H6c RT GI apply, HERE (before the snapshot) rather than after post: the bounce is additive
+			// opaque-surface lighting, so it must be part of FSR2's opaque snapshot — added afterwards it
+			// looked like flash/particle content to the auto-reactive mask and got de-ghosted into a
+			// blocky "square" over strong-GI regions. No-op unless r_rtgi is on; idempotent per view.
+			r->GpuScopeBegin( "rtgi apply" );
+			RB_RHI_RtgiApply( r, viewDef );
+			r->GpuScopeEnd();
 			// R1/D: snapshot the opaque scene (incl. the SSR composite — reflections live on
-			// opaque surfaces) for FSR2's auto-reactive mask, before particles/blends draw
+			// opaque surfaces, as does the GI bounce just applied) for FSR2's auto-reactive mask,
+			// before particles/blends draw
 			RB_RHI_FsrCaptureOpaque( r, viewDef );
 		}
 		RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, mvp );
 	}
 	if ( !ssrDone ) {
 		RB_RHI_ScreenSpaceReflections( r, viewDef );	// view had no translucent surfaces
+		r->GpuScopeBegin( "rtgi apply" );				// GI into the opaque snapshot (see the split above)
+		RB_RHI_RtgiApply( r, viewDef );
+		r->GpuScopeEnd();
 		RB_RHI_FsrCaptureOpaque( r, viewDef );			// fog/post still draw after this point
 	}
 
@@ -3517,8 +3528,10 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 			RB_RHI_AAPass( r, viewDef );
 			RB_RHI_PostProcess( r, viewDef );
 		}
-		// H6c RT GI apply (docs/rtx-rtgi.md): add albedo * gathered irradiance into the HDR scene,
-		// scene-wide, before DoF/FSR2/bloom so they pick it up. No-op unless r_rtgi is on.
+		// H6c RT GI apply FALLBACK: normally the apply already ran at the opaque/translucent split above
+		// (so it lands in FSR2's opaque snapshot). This covers the one path that has no split — r_ssr off,
+		// where no snapshot is taken anyway, so applying here before DoF/FSR2/bloom is fine. Idempotent:
+		// a no-op when the split already applied it. No-op unless r_rtgi is on.
 		r->GpuScopeBegin( "rtgi apply" );
 		RB_RHI_RtgiApply( r, viewDef );
 		r->GpuScopeEnd();

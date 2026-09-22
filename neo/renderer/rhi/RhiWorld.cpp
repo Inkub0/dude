@@ -477,6 +477,11 @@ static bool  rhiRtaoPrevValid = false;
 static rhi::RenderTargetHandle rhiRtgiRayRT = 0;
 static int  rhiRtgiW = 0, rhiRtgiH = 0;
 static bool rhiRtgiRanThisView = false;
+// H6c: the fullscreen GI apply is called once per view but from two sites (before FSR2's opaque snapshot
+// so the additive bounce is IN the snapshot and FSR2's auto-reactive mask doesn't flag it as flash/particle
+// content — the "square" artifact; and a fallback after post when SSR is off and no snapshot fires). This
+// makes RB_RHI_RtgiApply idempotent per view so whichever site fires first wins and it never double-adds.
+static bool rhiRtgiAppliedThisView = false;
 // H6b (docs/rtx-rtgi.md): NRD REBLUR_DIFFUSE denoise state — a reduced-res velocity for IN_MV and the
 // previous-frame camera for the reprojection, mirroring the rhiRtao* denoise statics.
 static rhi::RenderTargetHandle rhiRtgiVelRT = 0;
@@ -6861,6 +6866,7 @@ normal play and the shipped RTAO path are untouched. VK + RT hardware only; shar
 static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiRtgiRanThisView = false;
 	rhiRtgiDenoisedThisView = false;	// reset on every early-out (the apply gates on it)
+	rhiRtgiAppliedThisView = false;		// re-armed each view: the apply fires once from whichever site is first
 	if ( !r_rtgi.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
 		return;
 	}
@@ -7492,6 +7498,9 @@ void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !r_rtgi.GetBool() || r_rtgiDebug.GetInteger() > 0 || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
 		return;			// off, or the debug overlay owns the screen instead of the apply
 	}
+	if ( rhiRtgiAppliedThisView ) {
+		return;			// already added this view (called before the FSR2 snapshot; the post-chain site is a no-op)
+	}
 	if ( !rhiRtgiRanThisView || rhiRtgiRayRT == 0 || !rhiNormalAlbedoThisView ) {
 		return;			// no gather / no receiver-albedo attachment this view
 	}
@@ -7527,6 +7536,7 @@ void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// unit 0 = GI radiance (rtInput0); additive (ONE/ONE) into the live HDR scene target
 	RB_RHI_DrawFullscreen( r, prog, parms, giImg, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 	RB_RHI_ForgetTexBinds();
+	rhiRtgiAppliedThisView = true;			// once per view: the other call site now no-ops
 }
 
 /*
