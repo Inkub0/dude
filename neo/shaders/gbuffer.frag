@@ -11,6 +11,7 @@
 
 SAMPLER_BINDING(0) uniform sampler2D u_bumpMap;
 SAMPLER_BINDING(1) uniform sampler2D u_coverageMap;   // diffuse alpha for perforated surfaces
+SAMPLER_BINDING(2) uniform sampler2D u_diffuseAlbedo; // RTGI (docs/rtx-rtgi.md H6c): surface diffuse, written to out_Albedo
 
 VARY(0) in vec2 var_TexBump;
 VARY(1) in vec3 var_T;
@@ -26,6 +27,7 @@ VARY(8) in vec4 var_PrevClip;
 layout(location = 0) out vec4 fragColor;
 layout(location = 1) out vec4 out_Material;   // SSR: (roughness, metalness, 0, 1)
 layout(location = 2) out vec2 out_Velocity;   // R1/A2 motion vector: currUV - prevUV, +Y-up
+layout(location = 3) out vec4 out_Albedo;     // RTGI H6c: receiver albedo; only attached on the 4-MRT RTGI prepass (else GL discards the write)
 
 void main() {
 	// Perforated surfaces (grates, cables, foliage) are flat cards whose diffuse alpha masks
@@ -73,4 +75,10 @@ void main() {
 		vec2 prevUV = var_PrevClip.xy / var_PrevClip.w;
 		out_Velocity = ( curUV - prevUV ) * 0.5 + u_localParam1.xy;
 	}
+
+	// RTGI receiver albedo (docs/rtx-rtgi.md H6c): the surface's diffuse colour, so the fullscreen GI
+	// apply can shade albedo * gathered-irradiance per pixel. u_localParam0.y gates it (1 only on the
+	// 4-MRT RTGI prepass); var_TexCoverage is the diffuse-matrix UV (filled for every surface there).
+	// On the 1/2/3-attachment prepass targets there is no 4th attachment, so the write is discarded.
+	out_Albedo = ( u_localParam0.y > 0.5 ) ? vec4( texture( u_diffuseAlbedo, var_TexCoverage ).rgb, 1.0 ) : vec4( 0.0 );
 }

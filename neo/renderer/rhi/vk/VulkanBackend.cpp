@@ -239,6 +239,7 @@ public:
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt );
 	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle rt );
 	virtual ImageHandle			GetRenderTargetImage3( RenderTargetHandle rt );
+	virtual ImageHandle			GetRenderTargetImage4( RenderTargetHandle rt );
 
 	virtual int		AllocUniforms( const void *data, int size, BufferHandle *buffer );
 	virtual int		AllocVertices( const void *data, int size, BufferHandle *buffer );
@@ -650,10 +651,10 @@ private:
 		//     served by colorClearPass alone.
 		bool			colorTarget = false;
 		int				colorCount = 0;					// 1-3 color attachments (3 = velocity gbuffer, R1/A0)
-		VkFormat		colorFormat[3] = {};			// per-attachment format (mixed for the 3-MRT velocity target)
-		VkImage			colorImage[3] = {};
-		VmaAllocation	colorAlloc[3] = {};
-		VkImageView		colorView[3] = {};				// level-0 attachment view (framebuffer)
+		VkFormat		colorFormat[4] = {};			// per-attachment format (mixed for the 3-MRT velocity target; [3] = RTGI albedo, docs/rtx-rtgi.md H6c)
+		VkImage			colorImage[4] = {};
+		VmaAllocation	colorAlloc[4] = {};
+		VkImageView		colorView[4] = {};				// level-0 attachment view (framebuffer)
 		// SSAO Phase 1 mip chain (colorMipLevels > 1, colorImage[0] only). colorView[0]
 		// stays level-0-only for the linearize framebuffer; colorSampleView[0] spans every
 		// level so the sampleable ImageRec can textureLod into coarser mips. The chain is
@@ -662,11 +663,11 @@ private:
 		// the next level's source. 1 = plain single-mip (none of the mip fields used).
 		int				colorMipLevels = 1;
 		static const int MAX_MIP = 8;
-		VkImageView		colorSampleView[3] = {};		// all-levels sample view (= colorView[] when 1 mip)
+		VkImageView		colorSampleView[4] = {};		// all-levels sample view (= colorView[] when 1 mip)
 		VkImageView		colorLevelView[MAX_MIP] = {};	// per-level single-level attachment/sample views (L>=1)
 		VkFramebuffer	colorLevelFb[MAX_MIP] = {};		// per-level downsample framebuffers (L>=1)
 		ImageHandle		colorLevelInput[MAX_MIP] = {};	// per-level single-level sampleable handles (source binds)
-		ImageHandle		colorSampleImage[3] = { 0, 0, 0 };	// handles GetRenderTargetImage / 2 return
+		ImageHandle		colorSampleImage[4] = { 0, 0, 0, 0 };	// handles GetRenderTargetImage / 2 / 3 / 4 return
 		bool			hasDepth = false;				// depth or depth-stencil attachment present
 		VkImage			dsImage = VK_NULL_HANDLE;
 		VmaAllocation	dsAlloc = NULL;
@@ -2872,7 +2873,7 @@ void VulkanBackend::BeginPass( const ClearArgs *clear ) {
 	const bool wantColorClear = ( clear != NULL && clear->color ) || !everWritten;
 	const bool wantDsClear = ( clear != NULL && ( clear->depth || clear->stencil ) ) || !everWritten;
 
-	VkClearValue cv[3] = {};
+	VkClearValue cv[5] = {};		// up to 4 color (RTGI albedo) + 1 depth
 	const int nColor = ft ? ft->colorCount : 1;
 	const bool hasDS = ft ? ft->hasDepth : true;	// sceneColor always carries depth-stencil
 	if ( clear != NULL && clear->color ) {
@@ -9447,7 +9448,7 @@ void VulkanBackend::BeginTargetPass( RenderTargetHandle rt, const ClearArgs *cle
 	}
 	if ( t->colorTarget ) {
 		// clear each color attachment (fullscreen draws overwrite it anyway) + ds
-		VkClearValue cv[4] = {};		// up to 3 color + 1 depth (R1/A0)
+		VkClearValue cv[5] = {};		// up to 4 color (RTGI albedo) + 1 depth
 		if ( clear != NULL && clear->color ) {
 			for ( int c = 0; c < t->colorCount; c++ ) {
 				// attachment 2 is the RG16F velocity MRT (R1/A2): sky/uncovered pixels are
@@ -9658,6 +9659,7 @@ uint8_t VulkanBackend::PassClassFor( VkFormat colorFmt, bool hasDepth, int color
 	}
 	// RGBA8 family (SSAO buffers later)
 	if ( !hasDepth )      { return 4; }		// color-only RGBA8
+	if ( colorCount >= 4 ) { return 10; }	// 4-MRT gbuffer + RTGI albedo (RGBA8+RGBA8+RG16F+RGBA8+depth, docs/rtx-rtgi.md H6c): distinct layout, MUST NOT alias class 8
 	if ( colorCount >= 3 ) { return 8; }	// 3-MRT velocity gbuffer (RGBA8+RGBA8+RG16F+depth): distinct layout, MUST NOT alias class 6
 	return colorCount >= 2 ? 6 : 5;			// color+depth (+MRT)
 }
@@ -9671,8 +9673,8 @@ bool VulkanBackend::BuildColorPasses( RenderTarget &t, bool frameCapable ) {
 		const bool clearColor = ( v == 0 );			// clear resets color; load/clearDS keep it
 		const bool clearDS    = ( v == 0 || v == 2 );
 
-		VkAttachmentDescription atts[4] = {};		// up to 3 color + 1 depth (R1/A0)
-		VkAttachmentReference   colorRefs[3] = {};
+		VkAttachmentDescription atts[5] = {};		// up to 4 color (RTGI albedo) + 1 depth
+		VkAttachmentReference   colorRefs[4] = {};
 		for ( int c = 0; c < nColor; c++ ) {
 			atts[c].format = t.colorFormat[c];
 			atts[c].samples = VK_SAMPLE_COUNT_1_BIT;
@@ -9743,7 +9745,7 @@ bool VulkanBackend::BuildColorPasses( RenderTarget &t, bool frameCapable ) {
 bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat colorFmt,
                                        int colorCount, bool wantDepthStencil, bool frameCapable,
                                        int mipLevels, const VkFormat *mrtFormats ) {
-	if ( device == VK_NULL_HANDLE || colorCount < 1 || colorCount > 3 ) {
+	if ( device == VK_NULL_HANDLE || colorCount < 1 || colorCount > 4 ) {
 		return false;
 	}
 	if ( wantDepthStencil && sceneDepthFormat == VK_FORMAT_UNDEFINED ) {
@@ -9851,7 +9853,7 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		return false;
 	}
 
-	VkImageView views[4] = {};		// up to 3 color + 1 depth (R1/A0)
+	VkImageView views[5] = {};		// up to 4 color (RTGI albedo) + 1 depth
 	int nv = 0;
 	for ( int c = 0; c < colorCount; c++ ) { views[nv++] = t.colorView[c]; }
 	if ( wantDepthStencil ) { views[nv++] = t.dsView; }
@@ -10002,13 +10004,15 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetColorDepth( ImageFormat fmt,
 		common->Warning( "VK CreateRenderTargetColorDepth: only IF_RGBA8 supported" );
 		return 0;
 	}
-	if ( colorCount < 1 || colorCount > 3 ) {
-		common->Warning( "VK CreateRenderTargetColorDepth: colorCount must be 1-3" );
+	if ( colorCount < 1 || colorCount > 4 ) {
+		common->Warning( "VK CreateRenderTargetColorDepth: colorCount must be 1-4" );
 		return 0;
 	}
 	// colorCount 3 = the R1 velocity gbuffer: RGBA8 normal @0, RGBA8 SSR @1, RG16F velocity @2.
+	// colorCount 4 adds RGBA8 albedo @3 (docs/rtx-rtgi.md H6c: receiver albedo for the RT GI apply).
 	const VkFormat velFormats[3] = { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16_SFLOAT };
-	const VkFormat *mrt = ( colorCount == 3 ) ? velFormats : NULL;
+	const VkFormat albedoFormats[4] = { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM };
+	const VkFormat *mrt = ( colorCount == 4 ) ? albedoFormats : ( colorCount == 3 ) ? velFormats : NULL;
 	int slot = AllocTargetSlot();
 	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R8G8B8A8_UNORM, colorCount, /*ds*/true, /*frameCapable*/false, /*mipLevels*/1, mrt ) ) {
 		targetTable[slot] = RenderTarget();
@@ -10035,6 +10039,13 @@ ImageHandle VulkanBackend::GetRenderTargetImage3( RenderTargetHandle rt ) {
 	}
 	RenderTarget *t = LookupTarget( rt );
 	return ( t && t->colorCount >= 3 ) ? t->colorSampleImage[2] : 0;
+}
+
+// fourth color attachment = the RGBA8 receiver-albedo of the 4-MRT RTGI prepass (docs/rtx-rtgi.md H6c).
+// No merged-target branch: the albedo prepass forces the standalone target, so it is never the merge.
+ImageHandle VulkanBackend::GetRenderTargetImage4( RenderTargetHandle rt ) {
+	RenderTarget *t = LookupTarget( rt );
+	return ( t && t->colorCount >= 4 ) ? t->colorSampleImage[3] : 0;
 }
 
 // the color/depth image the current frame target resolves to (for M5 captures)
@@ -10663,7 +10674,7 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	// blend-attachment count must match the active subpass: 0 for the depth-only
 	// shadow pass, 1 for the scene / HDR / color targets, 2 for an MRT target. The
 	// MRT attachments share one blend config (the SSR material buffer isn't blended).
-	VkPipelineColorBlendAttachmentState attArr[3] = { att, att, att };	// up to 3 color attachments (R1/A0)
+	VkPipelineColorBlendAttachmentState attArr[4] = { att, att, att, att };	// up to 4 color attachments (RTGI albedo, docs/rtx-rtgi.md H6c)
 	cb.attachmentCount = (uint32_t)curColorAtt;
 	cb.pAttachments = ( curColorAtt > 0 ) ? attArr : NULL;
 

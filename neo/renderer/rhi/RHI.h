@@ -391,6 +391,8 @@ public:
 	// third color attachment (RG16F velocity MRT, R1/A2). Non-pure: only the VK
 	// 3-MRT velocity gbuffer has one; every other target and the GL3 backend return 0.
 	virtual ImageHandle			GetRenderTargetImage3( RenderTargetHandle rt ) { return 0; }
+	// fourth color attachment = the RGBA8 receiver-albedo of the 4-MRT RTGI prepass (docs/rtx-rtgi.md H6c). VK only.
+	virtual ImageHandle			GetRenderTargetImage4( RenderTargetHandle rt ) { return 0; }
 
 	// per-draw uniform ring: writes `size` bytes and returns the aligned
 	// offset (+ the ring's buffer in *buffer) for DrawArgs::uniformBuffer/

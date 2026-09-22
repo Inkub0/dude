@@ -74,5 +74,12 @@ void main() {
 		outRgb *= mix( 1.0, aoMap, u_occlusionParms.y );
 	}
 
+	// RTGI reconcile (docs/rtx-rtgi.md H6c): when r_rtgi is on, the fullscreen GI apply adds real bounce
+	// light on top of this FAKE cube-map ambient. Dim the fake ambient by r_rtgiAmbientKeep so the two do
+	// not double-count. u_color.x carries (keep + 1) when GI is on, so 0 = GI off = keep 1 (no change).
+	if ( u_color.x > 0.5 ) {
+		outRgb *= ( u_color.x - 1.0 );
+	}
+
 	fragColor = vec4( outRgb, 1.0 );
 }

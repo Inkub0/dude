@@ -744,10 +744,12 @@ static bool rhiNormalReadyThisView = false;			// the normal buffer was produced 
 // whenever the velocity path ran (found via the gbuffer DIAG spam; silent since R1/A2).
 static bool rhiNormalMrt = false;					// target has the SSR rough/metal attachment (docs/ssr.md)
 static bool rhiNormalVel = false;					// target has the RG16F velocity attachment (R1/A2)
+static bool rhiNormalAlbedo = false;				// target has the RGBA8 RTGI receiver-albedo attachment (docs/rtx-rtgi.md H6c)
 // what this view's ACTIVE normal result (standalone target OR merged handle) carries -
 // per-view state, reset each world draw, consumed by SSAO/SSR/FSR2
 static bool rhiNormalMrtThisView = false;
 static bool rhiNormalVelThisView = false;
+static bool rhiNormalAlbedoThisView = false;		// RTGI H6c: this view's normal target carries the albedo attachment (GetRenderTargetImage4)
 
 // ---- per-surface occlusion-map auto-load cache (docs/occlusion-maps.md) ----
 // Keyed by (render model, surface index) -- stable per model surface and shared across every
@@ -1690,6 +1692,14 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		// direct-diffuse strength (interaction.frag reads .z); left 0 on the ambient pass
 		parms.occlusionParms[2] = din->ambientLight ? 0.0f
 			: scale * idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapDirect.GetFloat() );
+	}
+
+	// RTGI reconcile (docs/rtx-rtgi.md H6c): on an AMBIENT draw with r_rtgi on, the fullscreen GI apply
+	// (RB_RHI_RtgiApply) adds real bounce light on top of this fake cube-map ambient. Hand ambientlight.frag
+	// r_rtgiAmbientKeep in the otherwise-unused u_color.x, encoded +1 so 0 = "GI off, keep 1 (no dim)", and
+	// it scales the fake ambient down so the two do not double-count.
+	if ( din->ambientLight && r_rtgi.GetBool() ) {
+		parms.color[0] = idMath::ClampFloat( 0.0f, 1.0f, r_rtgiAmbientKeep.GetFloat() ) + 1.0f;
 	}
 
 	// DUDE parallax occlusion mapping (docs/parallax.md). The interaction pass marches the
@@ -3608,8 +3618,8 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiRtReflHistValid = false;
 
 	rhiNormalRT = 0;			rhiNormalW = rhiNormalH = 0;
-	rhiNormalReadyThisView = false;	rhiNormalMrt = false;	rhiNormalVel = false;
-	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;
+	rhiNormalReadyThisView = false;	rhiNormalMrt = false;	rhiNormalVel = false;	rhiNormalAlbedo = false;
+	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;	rhiNormalAlbedoThisView = false;
 
 	rhiBerserkTrailRT[0] = rhiBerserkTrailRT[1] = 0;
 	rhiBerserkIdx = 0;			rhiBerserkW = rhiBerserkH = 0;
@@ -4057,19 +4067,21 @@ static bool RB_RHI_PointLightInBudget( const viewDef_t *viewDef, const viewLight
 	return inBudget;
 }
 
-static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h, bool wantMrt, bool wantVel ) {
+static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h, bool wantMrt, bool wantVel, bool wantAlbedo ) {
 	if ( rhiNormalRT && r->GetRenderTargetImage( rhiNormalRT ) == 0 ) {
 		rhiNormalRT = 0;					// lost context (vid_restart)
 		rhiNormalW = rhiNormalH = 0;
 	}
-	if ( rhiNormalRT && rhiNormalW == w && rhiNormalH == h && rhiNormalMrt == wantMrt && rhiNormalVel == wantVel ) {
+	if ( rhiNormalRT && rhiNormalW == w && rhiNormalH == h && rhiNormalMrt == wantMrt && rhiNormalVel == wantVel && rhiNormalAlbedo == wantAlbedo ) {
 		return true;
 	}
 	if ( rhiNormalRT ) { r->DestroyRenderTarget( rhiNormalRT ); rhiNormalRT = 0; }
 	// wantMrt adds the SSR roughness/metalness attachment (docs/ssr.md); wantVel adds the RG16F
 	// velocity attachment (R1/A2) as a 3rd MRT. colorCount 3 selects A0's mixed-format layout
 	// [RGBA8, RGBA8, RG16F]; else the 1/2-attachment RGBA8 layout, byte-identical to before.
-	const int colorCount = wantVel ? 3 : ( wantMrt ? 2 : 1 );
+	// wantAlbedo (docs/rtx-rtgi.md H6c) forces the fixed 4-attachment layout normal/mat/vel/albedo (RGBA8,
+	// RGBA8, RG16F, RGBA8): the caller also forced wantMrt + wantVel, so att1/att2 exist under att3.
+	const int colorCount = wantAlbedo ? 4 : ( wantVel ? 3 : ( wantMrt ? 2 : 1 ) );
 	rhiNormalRT = r->CreateRenderTargetColorDepth( rhi::IF_RGBA8, w, h, colorCount );
 	if ( !rhiNormalRT ) {
 		rhiNormalW = rhiNormalH = 0;
@@ -4079,6 +4091,7 @@ static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h, bool wantMrt, 
 	rhiNormalH = h;
 	rhiNormalMrt = wantMrt;
 	rhiNormalVel = wantVel;
+	rhiNormalAlbedo = wantAlbedo;
 	return true;
 }
 
@@ -4111,7 +4124,12 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// rough/metal attachment).
 	// M7: SSR now runs on Vulkan too (RB_RHI_ScreenSpaceReflections), so build the
 	// MRT rough/metal attachment on both backends when r_ssr wants it
-	const bool ssrWants = r_ssr.GetBool();
+	// RTGI H6c (docs/rtx-rtgi.md): when r_rtgi is on, the fullscreen GI apply needs a per-pixel receiver
+	// albedo, produced as a 4th attachment on the normal prepass. It forces the SSR + velocity attachments
+	// (so the layout is fixed normal/mat/vel/albedo) and the STANDALONE path (the merged pass keeps its
+	// 3-attachment layout untouched). On the RT tier ssr + velocity are already on, so this only adds att3.
+	const bool wantAlbedo = r_rtgi.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	const bool ssrWants = r_ssr.GetBool() || wantAlbedo;
 	const bool ssaoWants = r_ssao.GetBool()
 		&& ( r_ssaoNormalBuffer.GetBool() || r_ssaoDebug.GetInteger() == 3 );
 	// R1/A2: per-object motion vectors are VK-only (GL3 has no float-colour RT). When on they
@@ -4120,8 +4138,8 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// so velocity rides the merge by default; the standalone 3-MRT target is only the fallback.
 	// r_fsr (C2) implies them: FSR2 is unusable without a velocity buffer, and MV/jitter are
 	// internal infrastructure, not user-facing toggles (plan section E).
-	const bool velWants = ( r_motionVectors.GetBool() || r_fsr.GetBool() )
-		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	const bool velWants = ( ( r_motionVectors.GetBool() || r_fsr.GetBool() )
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN ) || wantAlbedo;
 	if ( !ssaoWants && !ssrWants && !velWants ) {
 		return false;
 	}
@@ -4168,7 +4186,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 	}
 	const bool wantMerge = r_ssaoMergeNormal.GetBool() && !viewHasSubviewSurf
-		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN && !wantAlbedo;	// RTGI albedo needs the standalone 4-attachment target
 	rhi::RenderTargetHandle activeNormalRT = 0;
 	bool didMerge = false;
 	if ( wantMerge ) {
@@ -4179,16 +4197,18 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			// (rhiNormalMrt/Vel) describe a different object and must not be touched here
 			rhiNormalMrtThisView = ssrWants;
 			rhiNormalVelThisView = velWants;
+			rhiNormalAlbedoThisView = false;	// merged path never carries the RTGI albedo (wantAlbedo forces standalone)
 		}
 	}
 	if ( activeNormalRT == 0 ) {
-		if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants, velWants ) ) {
+		if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants, velWants, wantAlbedo ) ) {
 			return false;
 		}
 		r->BeginTargetPass( rhiNormalRT, &clear );
 		activeNormalRT = rhiNormalRT;
 		rhiNormalMrtThisView = ssrWants;
 		rhiNormalVelThisView = velWants;
+		rhiNormalAlbedoThisView = wantAlbedo;
 	}
 
 	rhi::PipelineDesc pd;
@@ -4305,6 +4325,34 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			parms.pbrParms[1] = rough;
 		}
 
+		// RTGI receiver albedo (docs/rtx-rtgi.md H6c): flag gbuffer.frag to write out_Albedo and fill the
+		// diffuse stage's texture matrix so var_TexCoverage samples the diffuse for EVERY surface (opaque
+		// included; the perforated coverage draws below overwrite the matrix with their own, fine). The
+		// diffuse IMAGE binds on unit 2 below (whiteImage when GI is off; sampled only if u_localParam0.y>0.5).
+		idImage *rtgiDiffuseImg = globalImages->whiteImage;
+		if ( wantAlbedo ) {
+			parms.localParam0[1] = 1.0f;
+			for ( int s = 0; s < shader->GetNumStages(); s++ ) {
+				const shaderStage_t *dst = shader->GetStage( s );
+				if ( dst->lighting != SL_DIFFUSE || dst->texture.image == NULL || regs[dst->conditionRegister] == 0 ) {
+					continue;
+				}
+				rtgiDiffuseImg = dst->texture.image;
+				if ( dst->texture.hasMatrix ) {
+					parms.diffuseMatrixS[0] = regs[dst->texture.matrix[0][0]];
+					parms.diffuseMatrixS[1] = regs[dst->texture.matrix[0][1]];
+					parms.diffuseMatrixS[3] = regs[dst->texture.matrix[0][2]];
+					parms.diffuseMatrixT[0] = regs[dst->texture.matrix[1][0]];
+					parms.diffuseMatrixT[1] = regs[dst->texture.matrix[1][1]];
+					parms.diffuseMatrixT[3] = regs[dst->texture.matrix[1][2]];
+				} else {
+					parms.diffuseMatrixS[0] = 1.0f; parms.diffuseMatrixS[1] = 0.0f; parms.diffuseMatrixS[3] = 0.0f;
+					parms.diffuseMatrixT[0] = 0.0f; parms.diffuseMatrixT[1] = 1.0f; parms.diffuseMatrixT[3] = 0.0f;
+				}
+				break;
+			}
+		}
+
 		// DUDE tessellation: subdivide character/monster surfaces here identically to the
 		// depth prepass (same PN + displacement) so SSAO's normals follow the rounded
 		// silhouette the lit passes draw — otherwise the AO hugs the flat, un-tessellated
@@ -4361,6 +4409,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 
 		RB_RHI_BindUnit( 0, bumpImg );
+		RB_RHI_BindUnit( 2, rtgiDiffuseImg );	// RTGI H6c: receiver-albedo source (gbuffer.frag samples it only when u_localParam0.y>0.5)
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
@@ -7359,6 +7408,56 @@ void RB_RHI_RtaoDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 /*
 ===================
+RB_RHI_RtgiApply
+
+H6c of RT GI (docs/rtx-rtgi.md): add one bounce of indirect diffuse into the lit HDR scene, scene-wide.
+For each pixel indirect = receiver albedo (the RTGI prepass's 4th attachment, GetRenderTargetImage4) *
+the gathered irradiance (rtgi_ray.frag: raw in H6a, NRD-denoised in H6b). Additive into the live rhiHdrRT,
+after world lighting and before FSR2/tonemap, so DoF/FSR2/bloom pick it up. No-op unless r_rtgi is on and
+both the gather and the albedo attachment were produced this view. VK + RT hardware only.
+===================
+*/
+void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !r_rtgi.GetBool() || r_rtgiDebug.GetInteger() > 0 || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		return;			// off, or the debug overlay owns the screen instead of the apply
+	}
+	if ( !rhiRtgiRanThisView || rhiRtgiRayRT == 0 || !rhiNormalAlbedoThisView ) {
+		return;			// no gather / no receiver-albedo attachment this view
+	}
+	const rhi::ImageHandle giImg = r->GetRenderTargetImage( rhiRtgiRayRT );
+	const rhi::ImageHandle albedoImg = r->GetRenderTargetImage4( rhiNormalResultRT );
+	if ( giImg == 0 || albedoImg == 0 ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "rtgi_apply" );
+	if ( !prog ) {
+		return;
+	}
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	const int uploadW = globalImages->currentDepthImage->uploadWidth;
+	const int uploadH = globalImages->currentDepthImage->uploadHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.localParam0[0] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiIntensity.GetFloat() );
+	// GI (reduced res) + albedo (full res) both sample at gl_FragCoord/(viewW,viewH): the GI buffer
+	// bilinear-upscales, albedo is 1:1. depth uses the POT _currentDepth tc for the sky skip.
+	parms.screenCorrection[0] = 1.0f / w;
+	parms.screenCorrection[1] = 1.0f / h;
+	parms.depthTexRecip[0] = 1.0f / uploadW;
+	parms.depthTexRecip[1] = 1.0f / uploadH;
+
+	RB_RHI_BindRTImage( r, 1, albedoImg );					// unit 1 = receiver albedo (prepass att3)
+	RB_RHI_BindUnit( 2, globalImages->currentDepthImage );	// unit 2 = depth (sky skip)
+	// unit 0 = GI radiance (rtInput0); additive (ONE/ONE) into the live HDR scene target
+	RB_RHI_DrawFullscreen( r, prog, parms, giImg, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
+	RB_RHI_ForgetTexBinds();
+}
+
+/*
+===================
 RB_RHI_RtgiDebugOverlay
 
 r_rtgiDebug (H6a): blit the raw noisy radiance-gather buffer over the finished view so the GI gather can
@@ -8299,7 +8398,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// and a BeginNormalPrepass fallback (returns 0) cleanly leaves zfill to seal depth.
 	// per-view state only - the target CACHE keys (rhiNormalMrt/Vel) stay untouched, or the
 	// standalone velocity target would key-mismatch and recreate every frame (the DIAG spam)
-	rhiNormalReadyThisView = false;	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;
+	rhiNormalReadyThisView = false;	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;	rhiNormalAlbedoThisView = false;
 	r->GpuScopeBegin( "prepass (depth+gbuffer)" );
 	const bool mergedDepth = RB_RHI_NormalPrepass( r, viewDef );
 	if ( mergedDepth ) {

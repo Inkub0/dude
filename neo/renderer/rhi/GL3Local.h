@@ -233,6 +233,7 @@ void RB_RHI_FogAllLights( rhi::RHI *r, viewDef_s *viewDef );
 // Called at end-of-view so the scene passes don't overwrite it (RhiWorld.cpp).
 void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
 void RB_RHI_RtaoDebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
+void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_s *viewDef );
 void RB_RHI_RtgiDebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
 void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_s *viewDef );
 // DUDE volumetric lighting (docs/volumetric-lighting.md): light shafts marched into the HDR scene, after fog

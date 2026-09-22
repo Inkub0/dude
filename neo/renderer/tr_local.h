@@ -987,6 +987,8 @@ extern idCVar r_rtgiResScale;				// RT GI gather/denoise resolution fraction (bi
 extern idCVar r_rtgiLightScale;				// RT GI: brightness of the diffuse lighting at a bounce hit
 extern idCVar r_rtgiEmissive;				// RT GI: self-illuminated surface contribution at a bounce hit
 extern idCVar r_rtgiDebug;					// RT GI debug view (H6a: 1 = raw radiance-gather buffer)
+extern idCVar r_rtgiIntensity;				// RT GI apply strength (bounced radiance multiplier, H6c)
+extern idCVar r_rtgiAmbientKeep;			// RT GI reconcile: fraction of the fake cube-map ambient to retain (H6c)
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
 extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compositing (dissolves the static firefly grid)
