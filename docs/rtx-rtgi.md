@@ -54,11 +54,17 @@ reflections and volumetrics.
   `albedo * gathered-irradiance * r_rtgiIntensity` into `rhiHdrRT` before FSR2/tonemap (own "rtgi apply"
   scope). Reconcile: `ambientlight.frag` dims the fake cube-map ambient by `r_rtgiAmbientKeep`
   (carried in the otherwise-unused `u_color.x`, +1 encoded so 0 = GI-off) so real GI doesn't double-count.
-- **H6d — one dominant-light shadow ray. TODO.** The scene-light loop casts no shadow ray at the bounce hit
-  yet (`ssr_rt.frag` RR16d, parked), so bounced light leaks through thin walls. Trace one shadow ray toward
-  the nearest/dominant reaching light (`r_rtgiShadow`): one extra ray, dominant light only, not full NEE.
-- **H6e — preset + menu. TODO.** Wire `r_rtgi` into the Ultra Nightmare preset (replacing `r_rtao` there),
-  fold the tuning into the in-game menu, take the final `r_vkGpuTime 2` numbers.
+- **H6d — one dominant-light shadow ray. DONE.** `r_rtgiShadow` (default 1): the light loop tracks the
+  BRIGHTEST reaching light at the bounce hit, then traces one shadow ray toward it (`gl_RayFlagsTerminateOnFirstHitEXT`,
+  bias off the surface + toward the light); if occluded, that light's contribution is dropped. One extra
+  ray per gather ray regardless of light count — not full NEE, but it kills the through-thin-wall leak.
+  Menu: a "GI Shadows" checkbox.
+- **H6e — preset + menu. DONE (numbers still worth a final pass).** `r_rtgi` wired into the Ultra Nightmare
+  preset (new `rtgi` column in `enhancementPresets`, threaded through Apply/Detect), and that tier's
+  `rtao=false` — GI replaces RTAO (the one NRD instance denoises GI; screen-space GTAO fills the scalar AO).
+  Every lower tier carries `rtgi=false`, so a non-RT machine still sees UN == Nightmare AO. Menu: the
+  "RT Global Illumination" toggle + Intensity / Fake-Ambient Keep / Ray Length / Resolution / GI Shadows
+  sliders in the Enhancements → Ray Tracing section.
 
 ## Fidelity note (per policy)
 
