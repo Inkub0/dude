@@ -93,11 +93,28 @@ vec4 packNrdNormal( vec3 Nraw ) {
 
 void main() {
 	vec2  frag = gl_FragCoord.xy;
-	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
-	// NRD guides first, for EVERY pixel (mirrors rtao_ray.frag), so H6b can drop the denoise in unchanged
-	vec4 ntGuide = texture( u_normalBuffer, frag * u_screenCorrection.xy );
+	// H6g checkerboard: when on, each packed pixel stands for a screen pixel 2*gx + (row+frame) parity at the
+	// RTGI resolution (rw x rh, set by r_rtgiResScale) — NRD reconstructs the other half. u_localParam1.z = 0
+	// off (resScale path: sfrag == frag), 1 = on even frame, 2 = on odd frame. sfrag is in rw x rh space, and
+	// u_screenCorrection (1/rw) / u_depthTexRecip ((w/rw)/uploadW) map it to the buffer + full-res depth just
+	// like the resScale path — so checkerboard and resScale compose.
+	vec2  sfrag = frag;
+	int   cbMode = int( u_localParam1.z + 0.5 );
+	if ( cbMode > 0 ) {
+		float gx = floor( frag.x ), gy = floor( frag.y );
+		float parity = mod( gy + float( cbMode - 1 ), 2.0 );
+		sfrag = vec2( gx * 2.0 + parity + 0.5, gy + 0.5 );
+	}
+	float raw  = texture( u_currentDepth, sfrag * u_depthTexRecip.xy ).x;
+	// NRD guides first, for EVERY pixel (mirrors rtao_ray.frag), so H6b can drop the denoise in unchanged.
+	// (In checkerboard mode these are ignored — the full-res rtgi_guides pass feeds NRD instead — but writing
+	// them is harmless and keeps the resScale path identical.)
+	vec4 ntGuide = texture( u_normalBuffer, sfrag * u_screenCorrection.xy );
 	outViewZ  = vec4( 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y ), 0.0, 0.0, 1.0 );
 	outNormal = packNrdNormal( ntGuide.xyz * 2.0 - 1.0 );
+	// checkerboard: the packed samples live in the LEFT HALF only (NRD reconstructs the rest), so the right
+	// half traces nothing — this is where the ray saving comes from (half the pixels, at full resolution).
+	if ( cbMode > 0 && frag.x * u_screenCorrection.x >= 0.5 ) { fragColor = vec4( 0.0 ); return; }
 	// sky / the view weapon / a degenerate normal gather no indirect bounce -> zero radiance
 	if ( raw >= 0.9994 ) { fragColor = vec4( 0.0 ); return; }
 	vec4 nt = ntGuide;
@@ -107,7 +124,7 @@ void main() {
 	// G-buffer normal would normalize() to NaN and a NaN ray direction can hang RT traversal (device lost),
 	// so any such pixel returns zero radiance instead of tracing.
 	float vz  = 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y );   // negative
-	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
+	vec2  ndc = sfrag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
 	float d   = -vz;
 	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
 	vec3  Nraw = nt.xyz * 2.0 - 1.0;
@@ -121,14 +138,18 @@ void main() {
 
 	// one cosine-weighted hemisphere direction, IGN re-oriented per frame (rtao_ray.frag: a value-phase
 	// slide leaves IGN's 45-degree diagonal in the residue and shows as lines under the res-scale upscale;
-	// re-orienting points each frame's residue a different way so the temporal accumulation averages it out)
+	// re-orienting points each frame's residue a different way so the temporal accumulation averages it out).
+	// H6g: ROTATE the IGN sample lattice by a per-frame GOLDEN-ANGLE instead of the old discrete 8-way flip
+	// (swap + 2 negations). The flip has only 8 orientations, so ~8 traces are needed to average the diagonal
+	// out; checkerboard traces each pixel only every OTHER frame, so that was ~16 frames (the "45-degree
+	// checkered halo" at short history). A continuous low-discrepancy rotation points the diagonal a fresh way
+	// every frame, so the residue averages in a handful of frames — helping the resScale path too.
 	uint  fh = uint( u_localParam1.x ) * 747796405u + 2891336453u;
 	fh = ( ( fh >> ( ( fh >> 28u ) + 4u ) ) ^ fh ) * 277803737u;
 	fh = ( fh >> 22u ) ^ fh;
-	vec2  jc = frag + vec2( float( ( fh >> 3u ) & 1023u ), float( ( fh >> 13u ) & 1023u ) );
-	if ( ( fh & 1u ) != 0u ) { jc = jc.yx; }
-	if ( ( fh & 2u ) != 0u ) { jc.x = -jc.x; }
-	if ( ( fh & 4u ) != 0u ) { jc.y = -jc.y; }
+	float gAng = fract( float( uint( u_localParam1.x ) & 255u ) * 0.61803399 ) * 6.28318531;	// golden-ratio sequence -> low-discrepancy angle
+	float gcs = cos( gAng ), gsn = sin( gAng );
+	vec2  jc = mat2( gcs, -gsn, gsn, gcs ) * sfrag + vec2( float( ( fh >> 3u ) & 1023u ), float( ( fh >> 13u ) & 1023u ) );
 	float r1 = ign( jc );
 	float r2 = ign( jc.yx + vec2( 37.0, 17.0 ) );
 	float phi  = 6.28318530718 * r1;

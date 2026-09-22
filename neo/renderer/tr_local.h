@@ -984,6 +984,7 @@ extern idCVar r_rtaoDebug;					// RTAO debug view (1 raw rays, 2 denoised)
 extern idCVar r_rtgi;						// H6 RT GI: one-bounce ray-traced global illumination (gathers radiance at the hemisphere hit)
 extern idCVar r_rtgiRadius;					// RT GI gather ray length (world units)
 extern idCVar r_rtgiResScale;				// RT GI gather/denoise resolution fraction (biggest cost lever)
+extern idCVar r_rtgiCheckerboard;			// RT GI: full-res horizontal checkerboard gather + NRD reconstruct (sharp edges vs resScale blur)
 extern idCVar r_rtgiHistory;				// RT GI denoiser (ReBLUR) max accumulated history frames; lower = less ghosting, more noise
 extern idCVar r_rtgiConfidence;				// RT GI denoiser history-confidence sensitivity (IN_DIFF_CONFIDENCE); kills edge ghosting without flat dimming; 0 = off
 extern idCVar r_rtgiLightScale;				// RT GI: brightness of the diffuse lighting at a bounce hit

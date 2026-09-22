@@ -198,6 +198,7 @@ struct RtaoDenoiseArgs {
 	bool	giMode;						// H6b: denoise GI (REBLUR_DIFFUSE, RGBA16F radiance+hitdist in rayRT att0) into GetRtgiOutputImage, instead of RTAO occlusion
 	int		maxAccumFrames;				// GI only (giMode): ReBLUR max accumulated history frames (r_rtgiHistory); shorter = less ghosting, more noise. 0 = NRD default (RTAO path)
 	ImageHandle	confImage;				// GI only (giMode): IN_DIFF_CONFIDENCE, per-pixel history confidence 0..1 (r_rtgiConfidence). 0 = not provided (NRD antilag only)
+	int		checkerboard;				// GI only (giMode): 0 = off; 1 = ReBLUR checkerboard BLACK (even frame); 2 = WHITE (odd frame). rayRT holds the packed half-res radiance, guides are full-res
 };
 
 class RHI {

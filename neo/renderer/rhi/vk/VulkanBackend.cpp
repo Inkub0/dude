@@ -6918,6 +6918,11 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		rs.maxAccumulatedFrameNum = hist;
 		if ( rs.maxFastAccumulatedFrameNum > hist ) { rs.maxFastAccumulatedFrameNum = hist; }	// fast history must be <= main
 	}
+	if ( a.giMode && a.checkerboard > 0 ) {
+		// H6g: NRD reconstructs the full-res diffuse from the horizontal checkerboard packed in rayRT's left
+		// half. Mode = orientation of even frames; the caller alternates BLACK/WHITE by frame parity.
+		rs.checkerboardMode = ( a.checkerboard == 1 ) ? nrd::CheckerboardMode::BLACK : nrd::CheckerboardMode::WHITE;
+	}
 	if ( nrd::SetDenoiserSettings( *nrdInstance, denId, &rs ) != nrd::Result::SUCCESS ) {
 		RTAO_FAIL( 5, "nrd::SetDenoiserSettings rejected the ReBLUR settings" );
 	}

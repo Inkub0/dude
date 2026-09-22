@@ -490,6 +490,10 @@ static int  rhiRtgiVelW = 0, rhiRtgiVelH = 0;
 // last frame's reprojected denoised GI — kills edge ghosting without the flat-area dimming of a global antilag.
 static rhi::RenderTargetHandle rhiRtgiConfRT = 0;
 static int  rhiRtgiConfW = 0, rhiRtgiConfH = 0;
+// H6g: full-res NRD guides (viewZ + normal) for checkerboard mode, where the radiance is half-packed and can
+// no longer carry the guides at its own resolution. Reuses the gather MRT layout (att1 viewZ, att2 normal).
+static rhi::RenderTargetHandle rhiRtgiGuideRT = 0;
+static int  rhiRtgiGuideW = 0, rhiRtgiGuideH = 0;
 static bool rhiRtgiDenoisedThisView = false;		// the GI NRD denoise ran; GetRtgiOutputImage is current
 static float rhiRtgiPrevProj[16];
 static float rhiRtgiPrevView[16];
@@ -6899,10 +6903,19 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// r_rtgiResScale: trace the gather at a fraction of the screen - bounce light is very low-frequency, so
 	// a reduced-res gather + bilinear upscale is nearly free of visible quality but the biggest cost lever (a
 	// full-res single sample was ~4 ms). The debug overlay upscales via smaa_copy; H6b's NRD runs at this res.
+	// H6g checkerboard: trace a full-res horizontal checkerboard (half the pixels, packed left) instead of a
+	// uniform downscale — sharp edges at ~half the rays. Needs the velocity MRT (NRD IN_MV) and a full-res
+	// guide pass; falls back to resScale if the velocity is missing. When active the gather target is FULL res
+	// (the left half holds the packed samples), so the resScale downscale is bypassed.
+	const bool cbActive = r_rtgiCheckerboard.GetBool() && rhiNormalVelThisView && rhiNormalReadyThisView;
 	const float resScale = idMath::ClampFloat( 0.25f, 1.0f, r_rtgiResScale.GetFloat() );
-	int rw = (int)( w * resScale + 0.5f ), rh = (int)( h * resScale + 0.5f );
+	// resScale is the RTGI internal resolution for BOTH paths; checkerboard just traces half of those pixels
+	// (so its sharp-edge win is greatest at resScale 1, softer as resScale drops - it is a res, not a fixed).
+	int rw = (int)( w * resScale + 0.5f );
+	int rh = (int)( h * resScale + 0.5f );
 	if ( rw < 1 ) rw = 1;
 	if ( rh < 1 ) rh = 1;
+	if ( cbActive ) { rw &= ~1; if ( rw < 2 ) rw = 2; }		// even width: the 2x1 checkerboard packs cleanly into the left half
 	// (re)create the RGBA16F radiance MRT on first use / resize / scale change / lost context.
 	if ( rhiRtgiRayRT && r->GetRenderTargetImage( rhiRtgiRayRT ) == 0 ) {
 		rhiRtgiRayRT = 0; rhiRtgiW = rhiRtgiH = 0;
@@ -6945,6 +6958,10 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[3] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissiveClamp.GetFloat() );	// emissive peak clamp (pre-NRD variance cut)
 	parms.localParam1[0] = giFrameIndex;
 	parms.localParam1[1] = r_rtgiShadow.GetBool() ? 1.0f : 0.0f;	// H6d: dominant-light shadow ray at the bounce hit
+	// H6g checkerboard parity: 0 = off (resScale path), 1 = even frame, 2 = odd frame. The gather packs the
+	// left half of the rw x rh buffer accordingly; NRD's constant BLACK mode + frameIndex reconstructs it (the
+	// screenCorrection/depthTexRecip below are the same resScale mapping). MUST use the same frameIndex NRD gets.
+	parms.localParam1[2] = cbActive ? (float)( 1 + ( (int)tr.frameCount & 1 ) ) : 0.0f;
 	parms.localParam1[3] = 0.004f;					// ray origin pulled toward the eye per unit depth (crease-leak fix)
 	// the gather runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, and -> the full-res depth tc carries
 	// the (w/rw) stretch (mirrors RB_RHI_RtaoPass / RB_RHI_SSAOPass's scaled march). At scale 1: 1/w, 1/uploadW.
@@ -6974,6 +6991,36 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->EndPass();
 	rhiRtgiRanThisView = true;
 	rhiRtgiDenoisedThisView = false;
+
+	// H6g: full-res NRD guides for checkerboard (the half-packed gather can't carry them). Ray-free pass over
+	// depth + normal into a full-res MRT (att1 viewZ, att2 normal), which the denoise points NRD's guides at.
+	rhi::RenderTargetHandle giGuideRT = 0;
+	if ( cbActive ) {
+		// the guides are NRD's "full resolution" for checkerboard = the rw x rh gather resolution (the radiance
+		// is the half-packed part). Same coordinate mapping as the gather so guide and radiance line up.
+		if ( rhiRtgiGuideRT && r->GetRenderTargetImage( rhiRtgiGuideRT ) == 0 ) { rhiRtgiGuideRT = 0; rhiRtgiGuideW = rhiRtgiGuideH = 0; }
+		if ( rhiRtgiGuideRT && ( rhiRtgiGuideW != rw || rhiRtgiGuideH != rh ) ) { r->DestroyRenderTarget( rhiRtgiGuideRT ); rhiRtgiGuideRT = 0; rhiRtgiGuideW = rhiRtgiGuideH = 0; }
+		if ( !rhiRtgiGuideRT ) {
+			rhiRtgiGuideRT = r->CreateRenderTargetRtgiMrt( rw, rh );
+			if ( rhiRtgiGuideRT ) { rhiRtgiGuideW = rw; rhiRtgiGuideH = rh; }
+		}
+		rhi::ShaderHandle guideProg = rhiRtgiGuideRT ? r->LoadShader( "rtgi_guides" ) : 0;
+		if ( guideProg != 0 ) {
+			rhi::RenderParams gp;
+			memset( &gp, 0, sizeof( gp ) );
+			gp.mvpMatrix[0] = gp.mvpMatrix[5] = gp.mvpMatrix[10] = gp.mvpMatrix[15] = 1.0f;
+			memcpy( gp.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world (normal encode)
+			gp.screenCorrection[0] = 1.0f / rw;	gp.screenCorrection[1] = 1.0f / rh;
+			gp.depthTexRecip[0] = ( (float)w / rw ) / uploadW;	gp.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
+			r->BeginTargetPass( rhiRtgiGuideRT, NULL );
+			RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+			RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+			backEnd.glState.tmu[1].current2DMap = -1;
+			RB_RHI_DrawFullscreen( r, guideProg, gp, 0 );
+			r->EndPass();
+			giGuideRT = rhiRtgiGuideRT;
+		}
+	}
 
 	// ---- H6b: NRD REBLUR_DIFFUSE denoise (docs/rtx-rtgi.md), mirroring RB_RHI_RtaoPass's denoise ----
 	// Needs the velocity MRT (r_fsr / r_motionVectors) for IN_MV; without it the raw gather is used (grainy).
@@ -7010,7 +7057,10 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// overwrites it) and the velocity we just resolved. r_rtgiConfidence 0 disables it (NRD antilag only).
 		rhi::ImageHandle giConfImg = 0;
 		const rhi::ImageHandle giPrevDenoised = r->GetRtgiOutputImage();
-		if ( r_rtgiConfidence.GetFloat() > 0.0f && rhiRtgiPrevValid && giPrevDenoised != 0 ) {
+		// (v1) the confidence pass compares a full-res raw gather vs the reprojected denoised history; in
+		// checkerboard the raw is half-packed, so skip it there for now — full-res guides already give NRD
+		// much better disocclusion than the resScale path had.
+		if ( !cbActive && r_rtgiConfidence.GetFloat() > 0.0f && rhiRtgiPrevValid && giPrevDenoised != 0 ) {
 			if ( rhiRtgiConfRT && r->GetRenderTargetImage( rhiRtgiConfRT ) == 0 ) { rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
 			if ( rhiRtgiConfRT && ( rhiRtgiConfW != rw || rhiRtgiConfH != rh ) ) { r->DestroyRenderTarget( rhiRtgiConfRT ); rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
 			if ( !rhiRtgiConfRT ) {
@@ -7041,8 +7091,13 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		memset( &da, 0, sizeof( da ) );
 		da.giMode = true;								// denoise GI radiance (REBLUR_DIFFUSE), not RTAO occlusion
 		da.rayRT = rhiRtgiRayRT;						// att0 = RGBA16F radiance+hitdist; guides in att1/att2
-		da.viewzRT  = rhiRtgiRayRT;		da.viewzAtt  = 1;
-		da.normalRT = rhiRtgiRayRT;		da.normalAtt = 2;
+		// resScale path: guides ride in the gather MRT (att1/att2). Checkerboard: radiance is half-packed, so
+		// the guides come from the full-res rtgi_guides pass instead (same att1/att2 layout). da.checkerboard =
+		// constant BLACK (1); the gather already packed the left half to match NRD's frameIndex parity.
+		const bool cbDenoise = cbActive && giGuideRT != 0;
+		da.viewzRT  = cbDenoise ? giGuideRT : rhiRtgiRayRT;	da.viewzAtt  = 1;
+		da.normalRT = cbDenoise ? giGuideRT : rhiRtgiRayRT;	da.normalAtt = 2;
+		da.checkerboard = cbDenoise ? 1 : 0;			// 1 = BLACK (constant); NRD flips per frameIndex
 		da.velImage = nrdVel;
 		da.w = rw;	da.h = rh;
 		memcpy( da.viewToClip,  viewDef->unjitteredProjectionMatrix, sizeof( da.viewToClip ) );
