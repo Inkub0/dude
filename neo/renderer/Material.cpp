@@ -1523,9 +1523,14 @@ DUDE (docs/parallax.md): read the bake magnitude N out of a `heightmap( <program
 sub-expression in a bump stage's image program, used as the per-material parallax
 height scale. Returns false when the program carries no heightmap() operand (a plain
 normal map), in which case the caller applies a default.
+
+When outSource is given and the heightmap operand is a plain file path (not a nested
+image program), it also hands back that path: the *authored* height map the normals
+were baked from, which the parallax generator can blend back in instead of relying
+only on the height it integrates out of the combined normal.
 ===============
 */
-static bool R_BumpHeightScale( const char *imageProgram, float &outScale ) {
+static bool R_BumpHeightScale( const char *imageProgram, float &outScale, idStr *outSource = NULL ) {
 	idLexer src;
 	src.LoadMemory( imageProgram, strlen( imageProgram ), "heightmapScan" );
 	src.SetFlags( LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_NOSTRINGESCAPECHARS | LEXFL_ALLOWPATHNAMES );
@@ -1540,6 +1545,8 @@ static bool R_BumpHeightScale( const char *imageProgram, float &outScale ) {
 			return false;
 		}
 		int depth = 0;
+		int operandTokens = 0;
+		idStr firstOperand;
 		while ( src.ReadToken( &token ) ) {
 			if ( token == "," && depth == 0 ) {
 				break;
@@ -1552,6 +1559,15 @@ static bool R_BumpHeightScale( const char *imageProgram, float &outScale ) {
 				}
 				depth--;
 			}
+			if ( operandTokens == 0 ) {
+				firstOperand = token;
+			}
+			operandTokens++;
+		}
+		// a lone token is a plain file path -- the authored height map. Anything else
+		// (invertColor(x), a nested program) is not a file we can load on its own.
+		if ( outSource && operandTokens == 1 && depth == 0 ) {
+			*outSource = firstOperand;
 		}
 		if ( !src.ReadToken( &token ) ) {
 			return false;
@@ -2092,12 +2108,31 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 		ts->image = globalImages->defaultImage;
 	}
 
-	// DUDE: parallax occlusion mapping height source (non-vanilla; Vulkan). Only resolved
+	// DUDE: parallax occlusion mapping height source (non-vanilla; opengl3/Vulkan). Only resolved
 	// when r_parallax is enabled at parse time, so "off" stays bit-for-bit vanilla with no
 	// extra resident textures. The height texture is loaded uncompressed (TD_HIGH_QUALITY)
 	// to avoid the stepping a DXT'd height field would produce under the POM march. Toggling
 	// r_parallax takes effect on the next reloadDecls/map load. See docs/parallax.md.
 	if ( r_parallax.GetBool() && ss->lighting == SL_BUMP ) {
+		// One scan of the bump program yields the heightmap() bake magnitude N (the
+		// per-material scale) and, when that operand is a plain file, the authored height
+		// map `_h` the normals were baked from.
+		float bakeScale = 0.0f;
+		idStr authoredHeight;
+		const bool hasBake = imageName[0] && R_BumpHeightScale( imageName, bakeScale, &authoredHeight );
+
+		// Which height source to march (docs/parallax.md). When the bump program carries a
+		// real authored normal map -- addnormals( _local, heightmap(...) ) or a plain _local
+		// file -- the fine relief lives in that normal, so we integrate the height field out
+		// of the *combined* normal map. But when the normal is generated purely from a height
+		// map (a lone heightmap(_h,N) with no _local), integrating a height back out of it is
+		// a lossy round-trip of _h; the authored _h *is* the ground truth, so march it
+		// directly. The file system already resolves an HD pack's _h over the stock one, so
+		// "use the custom height if present, else the stock one" falls out for free.
+		const bool generatedNormal = imageName[0]
+			&& idStr::FindText( imageName, "heightmap", false ) >= 0
+			&& idStr::FindText( imageName, "addnormals", false ) < 0;
+
 		idImage *height = NULL;
 		if ( parallaxName[0] ) {
 			// explicit `parallaxmap` override: author-supplied height, loaded as a file
@@ -2105,17 +2140,26 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 			if ( height == globalImages->defaultImage ) {
 				height = NULL;
 			}
+		} else if ( generatedNormal && authoredHeight[0] ) {
+			// normal came from _h alone: march the authored height map itself, not a field
+			// re-derived from a normal that was made from it.
+			height = globalImages->ImageFromFile( authoredHeight, TF_DEFAULT, allowPicmip, trp, TD_HIGH_QUALITY, CF_2D );
+			if ( height == globalImages->defaultImage ) {
+				height = NULL;			// _h referenced but not shipped
+			}
+			if ( !height && imageName[0] ) {
+				height = R_CreateParallaxHeightImage( imageName );	// fall back to the derived field
+			}
 		} else if ( imageName[0] ) {
-			// auto-capture: derive the height from this bump stage's *combined* normal map
-			// (the detailed map SSAO shows), not the coarse _h source (docs/parallax.md).
+			// authored normal present: integrate the height from this bump stage's *combined*
+			// normal map (the detailed map SSAO shows), where the real relief lives.
 			height = R_CreateParallaxHeightImage( imageName );
 		}
 		if ( height ) {
 			ss->parallaxImage = height;
 			// heightmap() bake magnitude if the bump carried one, else a sane default; the
 			// per-material knob feeding r_parallaxScale in the interaction pass.
-			float n = 0.0f;
-			ss->parallaxScale = R_BumpHeightScale( imageName, n ) ? n : 5.0f;
+			ss->parallaxScale = hasBake ? bakeScale : 5.0f;
 		}
 	}
 }

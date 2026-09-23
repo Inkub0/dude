@@ -3079,10 +3079,11 @@ static void DrawEnhGroup_SurfaceRelief()
 {
 	if ( BeginSettingsGroup( "Surface Relief (Parallax)", &r_parallax,
 			"Per-pixel surface relief on world walls, floors and panels: a height field is\n"
-			"derived from each material's normal map and marched to fake real depth. Opaque\n"
-			"world (BSP) geometry only - props and characters are left to Tessellation, where\n"
-			"parallax would deform their curved surfaces. Takes effect on the next map load.\n"
-			"Off = vanilla." ) ) {
+			"taken from each material's authored height map, or built from its normal map\n"
+			"when the normal carries the detail, then marched to fake real depth. Opaque\n"
+			"world (BSP) geometry only - props and characters are left to Tessellation,\n"
+			"where parallax would deform their curved surfaces. Takes effect on the next\n"
+			"map load. Off = vanilla." ) ) {
 		DrawOptions( parallaxOptions, IM_ARRAYSIZE( parallaxOptions ) );
 		EndSettingsGroup();
 	}

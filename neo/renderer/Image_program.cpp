@@ -812,6 +812,7 @@ static void R_ParallaxHeightImage( idImage *image ) {
 	}
 
 	R_NormalMapToHeightMap( pic, w, hgt );
+
 	image->GenerateImage( pic, w, hgt, TF_DEFAULT, true, TR_REPEAT, TD_HIGH_QUALITY );
 	R_StaticFree( pic );
 }
@@ -824,6 +825,11 @@ Build (or fetch) the parallax height image derived from a bump stage's combined
 normal-map program. Returns NULL if the program is empty. The generated image is
 named with a `_parallaxHeight/` prefix so it never collides with the bump image
 that shares the same underlying program string (docs/parallax.md).
+
+Used for bump stages that carry a real authored normal map (addnormals/_local): the
+relief lives in the normal, so we integrate the height field out of it. Bump stages
+whose normal is generated purely from a height map march that authored `_h` directly
+instead (see idMaterial::ParseStage).
 ===============
 */
 idImage *R_CreateParallaxHeightImage( const char *bumpProgram ) {

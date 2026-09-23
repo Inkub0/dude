@@ -223,7 +223,61 @@ low-frequency integration drift for free. Cache the result as the stage's `paral
 `_h` capture and explicit `parallaxmap` keyword remain as overrides/fallbacks. Everything else
 (unit-11 plumbing, the POM march, cvars) is unchanged — only the *height source* changes.
 
+> **Refined by Phase B.6 (below):** discarding `_h` outright is right only when the normal
+> carries authored detail. When the normal was itself generated from `_h`, B.6 marches that
+> `_h` directly instead of re-deriving a worse copy of it from the normal.
+
 Feature stays **off by default** (`r_parallax 0`); generation only runs when it is enabled at parse.
+
+## Phase B.6 (2026-09-23) — pick the height source per material, no blend
+
+Phase B.5 swung the height source all the way from `_h` to a field integrated out of the
+combined normal map. That fixed the "whole floor sinks" failure on materials whose relief
+lives in an authored `_local` normal. An earlier B.6 tried to *blend* the authored `_h` back
+under that derived field (a weighted crossfade with a tuning cvar); it was replaced because
+the blend was machinery — a cvar, a slider, a bake-time generation step and a targeted-reload
+command — solving a problem that only one class of material actually has.
+
+The observation that collapses it: **a height field is only worth deriving from a normal map
+when that normal map carries authored detail.** Doom 3 bump stages come in two shapes:
+
+- `addnormals( <file>_local, heightmap(<file>_h, N) )` or a plain `_local` file — a **real
+  authored normal**. The fine relief is in `_local`; integrate the height field out of the
+  combined normal (B.5). ~91% of stock bump stages.
+- `heightmap(<file>_h, N)` alone — the normal is **generated from the height map**. Deriving
+  a height back out of it is a lossy round-trip of `_h`; the authored `_h` *is* the ground
+  truth, so march it directly. ~9% of stock bump stages (and many of those are on
+  models/monsters, which parallax skips — world BSP only).
+
+So `idMaterial::ParseStage` routes per material:
+
+```
+generatedNormal = program has heightmap(...)  AND  program has no addnormals(...)
+
+parallaxmap <file>      -> load <file>            (explicit override, unchanged)
+generatedNormal + _h    -> load the authored _h   (ImageFromFile, uncompressed)
+otherwise               -> R_CreateParallaxHeightImage(program)   (derive from normal, B.5)
+```
+
+The detection is a case-insensitive substring test on the bump program string; every stock
+`heightmap`-only stage is a plain top-level `heightmap(file, N)`, with no `smoothnormals(...)`
+or nested wrapping, so the test is exact in practice. If the `_h` of a generated-normal
+material is referenced but not shipped, it falls back to the derived field.
+
+**"Custom vs stock" is free.** The authored path loads `_h` by name through the virtual file
+system, so an HD pack's `_h` (a higher-priority pk4) automatically wins over the stock one;
+if the pack doesn't override that texture, the stock `_h` is returned. No engine logic needed
+to prefer one over the other.
+
+**Why no blend, no `_h`-marching regression.** The B.5 "sinking" failure was specific to
+`addnormals` materials, where `_h` is coarse *next to the detail in `_local`* — those keep the
+derived field. A generated-normal material has no `_local`, so its `_h` isn't a coarsening of
+anything; it is the source. Each material uses the one source that is actually meaningful for
+it, so there is nothing to crossfade.
+
+**Cost.** Authored-normal materials: unchanged from B.5 (one derived-field generation at level
+load / `reloadImages`). Generated-normal materials: just an ordinary texture load of `_h`, no
+generation pass. Nothing at draw time — the shader is untouched.
 
 ## Non-goals (initial)
 
