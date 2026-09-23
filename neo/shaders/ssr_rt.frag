@@ -215,7 +215,8 @@ void main() {
 	vec2 hitST = w0 * st0 + bc.x * st1 + bc.y * st2;
 
 	// RR4: albedo from the hit surface's real diffuse (bindless slot texIndex-1), else the RR3 material average.
-	// RR16f: baseColor.a flags a self-illuminated (glow) surface; baseColor.rgb then carries the glow colour.
+	// RR16g: baseColor.rgb is the DIFFUSE average (fallback albedo only); the self-illum glow is sampled
+	// per-pixel below from its own bindless slot, so nothing here carries a flat glow colour any more.
 	vec4  bcol = unpackUnorm4x8( g.baseColor );
 	vec3  albedo = ( g.texIndex != 0u )
 		? texture( u_rtTextures[ nonuniformEXT( g.texIndex - 1u ) ], hitST ).rgb
@@ -252,10 +253,17 @@ void main() {
 		float ndl = max( dot( hitN, normalize( vec3( 0.4, 0.5, 0.9 ) ) ), 0.0 );	// r_rtReflRealLights 0: the old fixed key light
 		lit += albedo * ndl;
 	}
-	// RR16f: a self-illuminated light source (neon tube, ceiling light tile) is lit by nothing above, so add
-	// back its own glow (baseColor.rgb) scaled by r_rtReflEmissive - otherwise it goes dark / "missing" in an
-	// off-screen reflection where the RR12 scene reuse can't cover it.
-	if ( bcol.a > 0.5 ) { lit += bcol.rgb * u_diffuseModifier.x; }
+	// RR16g: add back the surface's own self-illumination, sampled PER-PIXEL from the additive glow stage's
+	// texture (bindless slot in flags bits 16-31) at the hit st, scaled by r_rtReflEmissive. A self-lit surface
+	// is lit by nothing above, so under albedo*lights it shades ~dark and goes "missing" in an off-screen
+	// reflection - this restores it. Per-pixel (vs the old flat per-surface average) means only the glowing
+	// texels are bright: a console panel's LED readouts glow, the dark metal around them stays dark - instead of
+	// the whole reflected footprint washing to the glow average (white when that average, or an uncomputed
+	// dynamic/GUI image, was bright). textureLod 0: a ray hit has no screen-space st derivatives for auto-mip.
+	uint emit = ( g.flags >> 16 ) & 0xFFFFu;
+	if ( emit != 0u ) {
+		lit += textureLod( u_rtTextures[ nonuniformEXT( emit - 1u ) ], hitST, 0.0 ).rgb * u_diffuseModifier.x;
+	}
 	lit = mix( lit, sceneCol, conf );						// RR12: partial reuse near the frame edge / soft depth boundary
 	fragColor = vec4( lit * weight, 1.0 );
 }
