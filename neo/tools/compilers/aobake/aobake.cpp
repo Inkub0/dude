@@ -42,6 +42,7 @@ idCVar r_occlusionMapBakeRays( "r_occlusionMapBakeRays", "128", CVAR_RENDERER | 
 idCVar r_occlusionMapBakeDist( "r_occlusionMapBakeDist", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "AO baker: max occlusion ray distance in world units (0 = auto: 25% of the model's longest bounds axis)", 0.0f, 100000.0f );
 idCVar r_occlusionMapBakeContrast( "r_occlusionMapBakeContrast", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "AO baker: contrast/gamma applied to the visibility term (>1 deepens creases)", 0.1f, 8.0f );
 idCVar r_occlusionMapBakeDilate( "r_occlusionMapBakeDilate", "4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "AO baker: pixels of edge dilation/padding across UV seams so bilinear/mips don't bleed", 0, 32 );
+idCVar r_occlusionMapBakeContact( "r_occlusionMapBakeContact", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "AO baker: buried-texel contact distance in world units (0 = off). A texel whose hemisphere is mostly blocked within this distance sits under a co-located sub-mesh (a zombie's skull/ribs under its skin, armour plates over a body) and is not baked - it is invisible in-game, and baking it black only bleeds dark blotches onto the visible skin around it. Scaled down on small models (capped at 2% of the model's longest axis)", 0.0f, 16.0f );
 idCVar r_occlusionMapBakeDetail( "r_occlusionMapBakeDetail", "1.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "AO baker: strength of surface-detail cavity taken from the material's bump/normal map (0 = geometry only; grooves/seams/rivets in the normal map darken the AO)", 0.0f, 4.0f );
 // NOT archived on purpose: the ideal worker count is a property of the machine, and archiving it
 // would freeze whatever value a past run happened to use. 0 = auto (all hardware threads).
@@ -295,8 +296,14 @@ static void AO_Basis( const idVec3 &n, idVec3 &t, idVec3 &b ) {
 }
 
 // Integrate visibility at a surface point. 1 = fully open, 0 = fully occluded.
+// `contact` (> 0) enables the buried-texel test: when more than half of the rays hit within that
+// distance the point sits under a co-located sub-mesh (a zombie's skull or ribs modelled a
+// fraction of a unit under its skin, a goggle shell over a face, armour over a body) rather than
+// in a cavity, and *buried is set. Such texels are hidden in-game; baking them black only bleeds
+// dark blotches onto the visible skin next to them through bilinear/mip filtering. Real creases
+// keep their contact darkening: their near hits come from one side, not the whole hemisphere.
 static float AO_SampleVisibility( const aoGrid_t &g, aoTraceCtx_t &ctx, const idVec3 &point, const idVec3 &normal,
-                                  int rays, float maxDist, float bias ) {
+                                  int rays, float maxDist, float bias, float contact, bool *buried ) {
 	idVec3 n = normal;
 	n.Normalize();
 	idVec3 t, b;
@@ -304,13 +311,20 @@ static float AO_SampleVisibility( const aoGrid_t &g, aoTraceCtx_t &ctx, const id
 	idVec3 orig = point + n * bias;			// lift off the source surface
 
 	float occ = 0.0f;
+	int nearHits = 0;
 	for ( int i = 0; i < rays; i++ ) {
 		idVec3 local = AO_CosineHemisphere( i, rays );
 		idVec3 dir = t * local.x + b * local.y + n * local.z;
 		float d = AO_TraceNearest( g, ctx, orig, dir, maxDist );
 		if ( d > 0.0f ) {
 			occ += 1.0f - ( d / maxDist );		// distance falloff: near hits occlude most
+			if ( d < contact ) {
+				nearHits++;
+			}
 		}
+	}
+	if ( buried ) {
+		*buried = ( contact > 0.0f ) && ( nearHits * 2 > rays );
 	}
 	return 1.0f - occ / (float)rays;
 }
@@ -523,7 +537,7 @@ struct aoTriSetup_t {
 // byte-identical to a serial bake regardless of how rows are scheduled.
 static void AO_BakeRow( int y, const aoGrid_t &g, const idList<aoTriSetup_t> &setups,
                         byte *ao, byte *covered, int size, int rays, float maxDist, float bias,
-                        float contrast, const aoBump_t *bump, float detail,
+                        float contrast, const aoBump_t *bump, float detail, float contact,
                         aoTraceCtx_t &ctx, bool &wroteAny ) {
 	const float py = y + 0.5f;
 	for ( int ti = 0; ti < setups.Num(); ti++ ) {
@@ -543,7 +557,14 @@ static void AO_BakeRow( int y, const aoGrid_t &g, const idList<aoTriSetup_t> &se
 			idVec3 point  = s.p0 * w0 + s.p1 * w1 + s.p2 * w2;
 			idVec3 normal = s.n0 * w0 + s.n1 * w1 + s.n2 * w2;
 
-			float vis = AO_SampleVisibility( g, ctx, point, normal, rays, maxDist, bias );
+			bool buried = false;
+			float vis = AO_SampleVisibility( g, ctx, point, normal, rays, maxDist, bias, contact, &buried );
+			if ( buried ) {
+				// hidden under a co-located sub-mesh (see AO_SampleVisibility): leave the texel
+				// unwritten so the seam dilation pads it from its visible neighbours instead of
+				// a black texel bleeding outward; wide buried regions stay at the white background
+				continue;
+			}
 
 			// surface-detail cavity from the bump/normal map (grooves/seams darken).
 			if ( bump && detail > 0.0f ) {
@@ -571,7 +592,7 @@ static void AO_BakeRow( int y, const aoGrid_t &g, const idList<aoTriSetup_t> &se
 // NULL (no bump stage) -> geometry-only AO.
 static bool AO_BakeSurface( const aoGrid_t &g, const srfTriangles_t *tri, const char *outPath,
                             int size, int rays, float maxDist, float bias, float contrast, int dilate,
-                            const aoBump_t *bump, float detail ) {
+                            const aoBump_t *bump, float detail, float contact ) {
 	if ( !tri || !tri->verts || !tri->indexes || tri->numIndexes < 3 ) {
 		return false;
 	}
@@ -639,7 +660,7 @@ static bool AO_BakeSurface( const aoGrid_t &g, const srfTriangles_t *tri, const 
 		aoTraceCtx_t ctx;
 		for ( int y = 0; y < size; y++ ) {
 			AO_BakeRow( y, g, setups, aoPtr, covPtr, size, rays, maxDist, bias, contrast,
-			            bump, detail, ctx, wroteAny );
+			            bump, detail, contact, ctx, wroteAny );
 		}
 	} else {
 		std::atomic<int> nextRow( 0 );
@@ -659,7 +680,7 @@ static bool AO_BakeSurface( const aoGrid_t &g, const srfTriangles_t *tri, const 
 						break;
 					}
 					AO_BakeRow( y, g, setups, aoPtr, covPtr, size, rays, maxDist, bias, contrast,
-					            bump, detail, ctx, wrote );
+					            bump, detail, contact, ctx, wrote );
 				}
 				wroteFlags[t] = wrote ? 1 : 0;
 			} );
@@ -800,6 +821,9 @@ static bool AO_BakeGeoModel( const idRenderModel *geoModel, const char *pathName
 		maxDist = 8.0f;
 	}
 	const float bias = Max( longest * 1e-4f, 0.05f );
+	// buried-texel contact distance (see AO_SampleVisibility): the cvar in world units, capped at
+	// 2% of the model's longest axis so a tiny prop's real creases aren't mistaken for burial
+	const float contact = Min( r_occlusionMapBakeContact.GetFloat(), longest * 0.02f );
 
 	int reqThreads = r_occlusionMapBakeThreads.GetInteger();
 	int effThreads = ( reqThreads > 0 ) ? reqThreads : (int)std::thread::hardware_concurrency();
@@ -849,7 +873,7 @@ static bool AO_BakeGeoModel( const idRenderModel *geoModel, const char *pathName
 		const bool hasBump = ( detail > 0.0f ) && AO_LoadBump( bumpMat, bump );
 		if ( AO_BakeSurface( grid, surf->geometry, outPath.c_str(),
 		                     size, rays, maxDist, bias, contrast, dilate,
-		                     hasBump ? &bump : NULL, detail ) ) {
+		                     hasBump ? &bump : NULL, detail, contact ) ) {
 			any = true;
 		}
 		if ( hasBump ) {
