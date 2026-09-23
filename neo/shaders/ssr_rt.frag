@@ -1,16 +1,17 @@
-// DUDE RT reflections (docs/rtx-reflections.md RR2): the dynamic layer of the reflection stack. For
-// reflective pixels that screen-space SSR could not serve (its marched result is 0 here — off-screen
-// or screen-occluded), trace a reflection ray into the scene TLAS and, on a MONSTER hit, shade it from
-// the hit's GPU-skinned gpuSkinVB normal (the fetch r_rtReflTest/RR1 validated). Additive over the lit
-// scene with the same Fresnel/gloss weighting as ssr_composite, so material response matches SSR.
+// DUDE RT reflections (docs/rtx-reflections.md): the sole reflection technique when r_rtReflections is on.
+// For EVERY reflective pixel, trace a reflection ray into the scene TLAS and shade the hit at the hit point
+// (real per-light diffuse + per-pixel diffuse/emissive material). Since 2026-09-23 RT owns all reflective
+// pixels: the screen-space SSR march is skipped and the RR12 on-screen "lit-scene reuse" is retired, so there
+// is no screen-space dependency and no reuse<->shade seam. Additive over the lit scene with the same
+// Fresnel/gloss weighting as ssr_composite, so the material response matches the old SSR path.
 //
 // VK + RT hardware only (ray_query): the backend loads this program solely when the device supports
 // KHR_ray_query, and only draws it when r_rtReflections is on. buffer_reference is enabled by the
 // prelude; ray_query is added here (same idiom as interaction.frag). Uniform packing (RhiWorld.cpp
 // RB_RHI_ScreenSpaceReflections): u_rtParms = { TLAS addr lo/hi, geo-table addr lo/hi } bit-cast;
 // u_modelViewMatrix = inverse view (view->world); u_localParam0 = (1/proj00, 1/proj11, roughnessFade,
-// RR12 scene-reuse enable); u_localParam1 = (RR14 specOcclusion, intensity, maxRoughness, RR10 bump);
-// u_windowCoord = (jitterX, jitterY, view-Y sign (VK), RR12 firefly clamp); u_color = (RR16 light-buffer
+// unused - was RR12 reuse enable); u_localParam1 = (RR14 specOcclusion, intensity, maxRoughness, RR10 bump);
+// u_windowCoord = (jitterX, jitterY, view-Y sign (VK), unused - was RR12 firefly clamp); u_color = (RR16 light-buffer
 // device addr lo/hi, light count, ambient); u_diffuseModifier = (RR16f emissive glow scale, RR16 light
 // brightness scale, RR16c frustum gate, RR16 real-lights enable); u_depthTexRecip/u_screenCorrection size the buffers.
 #extension GL_EXT_ray_query : require
@@ -21,7 +22,7 @@
 // RR16: scene-light buffer row + evaluation (shared with volumetric lighting)
 #include "rt_light_eval.glsl"
 
-SAMPLER_BINDING(0) uniform sampler2D u_sceneColor;     // RR12: live lit HDR scene (reuse); dummy G-buffer when reuse off
+SAMPLER_BINDING(0) uniform sampler2D u_unused0;        // was RR12 lit-scene reuse (retired 2026-09-23); unit 0 now a harmless bound dummy
 SAMPLER_BINDING(1) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(2) uniform sampler2D u_normalBuffer;   // xyz = view-space normal, a = weapon mask
 SAMPLER_BINDING(3) uniform sampler2D u_materialBuffer; // x = roughness, y = metalness
@@ -146,54 +147,12 @@ void main() {
 	GeoDesc g = table.d[ ci + gi ];
 	if ( ( g.flags & 1u ) == 0u ) { fragColor = vec4( 0.0 ); return; }	// no-attr defer row (mover/prop) -> not shadeable yet
 
-	// RR12 lit-scene reuse: if this hit is on-screen this frame, the scene already holds its TRUE radiance
-	// (real lights/shadows/decals/emissive) - reproject the hit and read it, far more correct than the fixed
-	// key light below. On HIGH confidence take it and RETURN, skipping the geometry fetch + bindless sample
-	// (the cheap path). u_localParam0.w = r_rtReflSceneReuse AND a sampleable scene target; else conf stays 0
-	// and the fixed-key-light fallback runs unchanged. hitView is exact: the ray is rigid, so world t == view
-	// t, and the world origin (wp + wN*2) is P + Nr*2 in view space.
-	float thit = rayQueryGetIntersectionTEXT( rq, true );			// RR12/RR16: hit distance, shared by reuse reproject + world-hit shade
-	float conf = 0.0;
-	vec3  sceneCol = vec3( 0.0 );
-	if ( u_localParam0.w > 0.5 ) {
-		vec3  hitView = P + Nr * 2.0 + Rv * thit;
-		float dd2 = -hitView.z;											// forward distance; the reprojection divides by it
-		// Guard the divide BEFORE it can blow up: as a hit nears the eye plane the denominator dd2 -> 0, so ruv
-		// races off-screen and the coverage would collapse over a hairline of pitch (the "horizontal cut that
-		// moves when you look up/down"). Only reproject once dd2 is comfortably positive; the fade below then
-		// dissolves reuse into the fallback as a smooth band, never a hard line.
-		if ( dd2 > 0.5 ) {
-			vec2  ruv = vec2( hitView.x / ( dd2 * u_localParam0.x ),
-			                  hitView.y / ( dd2 * u_localParam0.y * u_windowCoord.z ) ) * 0.5 + 0.5;
-			// coverage: a WIDE screen-edge fade (10%) + a gentle near-plane fade in view space, so the seam is a
-			// gradient a viewer can't localise, not a moving line. (dd2 fade starts well before the divide guard.)
-			vec2  ef  = smoothstep( vec2( 0.0 ), vec2( 0.10 ), ruv ) * smoothstep( vec2( 0.0 ), vec2( 0.10 ), 1.0 - ruv );
-			float onScreen = ef.x * ef.y * smoothstep( 0.5, 2.0, dd2 );
-			if ( onScreen > 0.0 ) {
-				// depth agreement: the hit must be the surface the camera sees at ruv (reject in-front occluders)
-				vec2  dtc  = ruv * ( u_depthTexRecip.xy / u_screenCorrection.xy );	// normalized uv -> POT depth texcoord
-				float sraw = texture( u_currentDepth, dtc ).x;
-				float svz  = 1.0 / ( sraw * depth_consts.x + depth_consts.y );		// scene view z (negative)
-				float depthOk = 1.0 - smoothstep( 0.02 * dd2, 0.06 * dd2, abs( svz - hitView.z ) );
-				float wmask   = step( 0.5, texture( u_normalBuffer, ruv ).a );		// not the view weapon
-				conf     = onScreen * depthOk * wmask;
-				sceneCol = texture( u_sceneColor, ruv ).rgb;
-				float fcap = u_windowCoord.w;								// firefly-clamp the reused HDR radiance (0 = off)
-				if ( fcap > 0.0 ) {
-					float lum = dot( sceneCol, vec3( 0.2126, 0.7152, 0.0722 ) );
-					if ( lum > fcap ) { sceneCol *= fcap / lum; }
-				}
-			}
-		}
-	}
-	if ( u_localParam0.w > 1.5 ) {									// r_rtReflDebug: green = reuse, red = key-light fallback
-		fragColor = vec4( 1.0 - conf, conf, 0.0, 1.0 );
-		return;
-	}
-	if ( conf >= 0.995 ) {
-		fragColor = vec4( sceneCol * weight, 1.0 );					// pure reuse: skip the geometry fetch + bindless sample
-		return;
-	}
+	// The hit is shaded ENTIRELY at the hit point below (real lights + per-pixel diffuse + emissive). The RR12
+	// on-screen "lit-scene reuse" path was retired 2026-09-23: it only served hits that happened to be on screen,
+	// so it produced a moving reuse<->shade seam (the very thing the user asked to sunset), and the docs already
+	// flagged it as removable scaffolding whose lasting piece is this material-shaded fallback (the NEE seam).
+	// RT now owns every reflective pixel with ONE consistent shading model - no screen-space dependency, no seam.
+	float thit = rayQueryGetIntersectionTEXT( rq, true );			// RR16: hit distance for the world-hit shade below
 
 	uint prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
 	vec2 bc   = rayQueryGetIntersectionBarycentricsEXT( rq, true );
@@ -222,11 +181,11 @@ void main() {
 		? texture( u_rtTextures[ nonuniformEXT( g.texIndex - 1u ) ], hitST ).rgb
 		: bcol.rgb;
 
-	// RR16: shade the hit with the scene's REAL lights, so an OFF-screen-reflected surface is lit correctly
-	// (not by a fixed key light) - the fix for r_rtReflSceneReuse's screen-space limitation. World hit =
-	// wp + wN*2 + wr*t (the world ray vectors already exist). u_color = (lightBuf addr lo/hi, count, ambient);
-	// u_diffuseModifier = (RR16f glow scale, light scale, RR16c frustum gate, realLightsEnable). Diffuse only,
-	// no shadow rays (RR16d, parked). The RR12 on-screen reuse still overrides this.
+	// RR16: shade the hit with the scene's REAL lights, so EVERY reflected surface is lit correctly whether or
+	// not it is on screen (not by a fixed key light). World hit = wp + wN*2 + wr*t (the world ray vectors
+	// already exist). u_color = (lightBuf addr lo/hi, count, ambient); u_diffuseModifier = (RR16f glow scale,
+	// light scale, RR16c frustum gate, realLightsEnable). Diffuse only, no shadow rays (RR16d, parked). This is
+	// now the SOLE hit-shading path (RR12 on-screen reuse retired 2026-09-23).
 	// RR16c: a Doom light reaches only inside its projection volume, so the hit is projected through the
 	// light's S/T/Q/falloff planes and the term windowed to [0,1] - soft-edged, as every light texture fades
 	// to black at its border. Uniform inside (the gobo/falloff TEXTURES are not sampled). A spot's falloff
@@ -264,6 +223,5 @@ void main() {
 	if ( emit != 0u ) {
 		lit += textureLod( u_rtTextures[ nonuniformEXT( emit - 1u ) ], hitST, 0.0 ).rgb * u_diffuseModifier.x;
 	}
-	lit = mix( lit, sceneCol, conf );						// RR12: partial reuse near the frame edge / soft depth boundary
 	fragColor = vec4( lit * weight, 1.0 );
 }

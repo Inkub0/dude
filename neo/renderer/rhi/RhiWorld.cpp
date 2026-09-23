@@ -2098,7 +2098,7 @@ static void RB_RHI_CaptureCurrentDepth( const viewDef_t *viewDef ) {
 	bool getDepthCapture = r_enableDepthCapture.GetInteger() == 1
 		|| ( r_enableDepthCapture.GetInteger() == -1
 		     && ( r_useSoftParticles.GetBool()
-		          || ( ( r_ssao.GetBool() || r_ssr.GetBool()
+		          || ( ( r_ssao.GetBool() || r_ssr.GetBool() || r_rtReflections.GetBool()	// RT reflections read _currentDepth (decoupled from r_ssr 2026-09-23)
 		                 || ( r_pbr.GetBool() && ( r_decalMetalMask.GetFloat() > 0.0f || r_decalRoughen.GetFloat() > 0.0f
 		                                        || r_decalWetBlood.GetFloat() > 0.0f ) ) )
 		               && R_BackendSupportsEnhancements() ) ) );
@@ -4151,7 +4151,12 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// (so the layout is fixed normal/mat/vel/albedo) and the STANDALONE path (the merged pass keeps its
 	// 3-attachment layout untouched). On the RT tier ssr + velocity are already on, so this only adds att3.
 	const bool wantAlbedo = r_rtgi.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN;
-	const bool ssrWants = r_ssr.GetBool() || wantAlbedo;
+	// RT reflections read the normal + rough/metal MRT this pass fills. Since 2026-09-23 they run decoupled from
+	// r_ssr (RT owns the reflective pixels), so gate the prepass on them too — else RT-only mode (r_ssr off) has
+	// no G-buffer to reflect about.
+	const bool rtReflWants = r_rtReflections.GetBool()
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN && r->SupportsRayQuery();
+	const bool ssrWants = r_ssr.GetBool() || wantAlbedo || rtReflWants;
 	const bool ssaoWants = r_ssao.GetBool()
 		&& ( r_ssaoNormalBuffer.GetBool() || r_ssaoDebug.GetInteger() == 3 );
 	// R1/A2: per-object motion vectors are VK-only (GL3 has no float-colour RT). When on they
@@ -5437,7 +5442,7 @@ static float RB_RHI_Halton( int index, int base ) {
 }
 
 void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
-	if ( !r_ssr.GetBool() || !R_BackendSupportsEnhancements() ) {
+	if ( !R_BackendSupportsEnhancements() ) {
 		return;
 	}
 	// M7: SSR runs on both backends now. On Vulkan the G-buffer / scene-copy binds
@@ -5445,21 +5450,26 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// raw GL multitexture, and the shaders carry a view-Y sign + capture row-flip
 	// for VK's top-down framebuffer vs the GL-layout _currentRender snapshot.
 	const bool vkMode = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
-	if ( vkMode ) {
+	// RR7/#4a: RT reflections (VK + ray-query) REPLACE the SSR composite rather than riding it, and when RT
+	// will render this frame the entire SSR march chain (Hi-Z, scene snapshot, march, temporal, glossy) is
+	// SKIPPED — post-RR7 ssr_rt traces every reflective pixel itself and reads none of the march's output, so
+	// that whole pass is dead work under RT (no double-reflection, no fractional-res strobing). rtWants is the
+	// intent; rtWillRender (computed below, before the march) also checks TLAS/targets so a misconfigured RT
+	// (no TLAS) with r_ssr on cleanly falls back to the full SSR path.
+	// Decoupled from r_ssr 2026-09-23: RT reflections no longer RIDE the SSR pass — they own every reflective
+	// pixel, so the pass runs when EITHER SSR or RT wants it, and RT works with r_ssr off entirely. The shared
+	// G-buffer/depth RT needs is built by the normal prepass (which now also runs for RT, not just r_ssr).
+	const bool rtWants = vkMode && r_rtReflections.GetBool() && r->SupportsRayQuery();
+	if ( !r_ssr.GetBool() && !rtWants ) {
+		return;
+	}
+	if ( vkMode && r_ssr.GetBool() ) {
 		static bool ssrLiveLogged = false;
 		if ( !ssrLiveLogged ) {
 			ssrLiveLogged = true;
 			common->Printf( "RHI backend: VK SSR (r_ssr) live - G-buffer march + composite\n" );
 		}
 	}
-	// RR7/#4a: RT reflections (VK + ray-query) REPLACE the SSR composite rather than riding it, and when RT
-	// will render this frame the entire SSR march chain (Hi-Z, scene snapshot, march, temporal, glossy) is
-	// SKIPPED — post-RR7 ssr_rt traces every reflective pixel itself and reads none of the march's output, so
-	// that whole pass is dead work under RT (no double-reflection, no fractional-res strobing leaking through
-	// the old miss-gate either). The shared G-buffer/depth RT DOES need is built by the normal prepass, not
-	// here. rtWants is the intent; rtWillRender (computed below, before the march) also checks TLAS/targets so
-	// a misconfigured RT (no TLAS) cleanly falls back to the full SSR path.
-	const bool rtWants = vkMode && r_rtReflections.GetBool() && r->SupportsRayQuery();
 	if ( !viewDef->viewEntitys || viewDef->isSubview ) {
 		return;
 	}
@@ -5529,9 +5539,11 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		&& RB_RHI_EnsureRtReflTarget( r, ssrW, ssrH )
 		&& RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) );
 
-	// ==== SSR march chain + composite: SKIPPED wholesale when RT replaces it (#4a). Interior keeps its
+	// ==== SSR march chain + composite: only when screen-space SSR is enabled AND RT isn't replacing it (#4a).
+	// Gated on r_ssr so RT-only mode (r_ssr off, r_rtReflections on) never runs the march even on a frame RT
+	// can't render (no TLAS yet) — that frame simply has no reflection, no stray SSR. Interior keeps its
 	// indentation to match the existing composite-gate style below. ====
-	if ( !rtWillRender ) {
+	if ( r_ssr.GetBool() && !rtWillRender ) {
 
 	// ---- Hi-Z (r_ssrHiZ, docs/ssao-perf-optimization.md): build a min-Z (nearest-surface)
 	// linear-depth pyramid at the SSR march resolution so the march can leap provably-empty
@@ -5912,21 +5924,15 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			rp.localParam1[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtReflBump.GetFloat() );	// RR10: bump-normal warp amount
 			rp.localParam1[0] = ( rhiSsaoAppliedThisView ? idMath::ClampFloat( 0.0f, 1.0f, r_specOcclusion.GetFloat() ) : 0.0f );	// RR14 specular occlusion strength (0 when no AO this view)
 
-			// RR12 lit-scene reuse: GetFrameColorSampleImage() is the live HDR scene buffer when it rests
-			// sampleable (it does under HDR, which RT reflections require) or 0 otherwise. When available +
-			// enabled, ssr_rt shades an ON-SCREEN hit from the real lit scene (unit 0) instead of the fake key
-			// light; localParam0.w flags it on, windowCoord.w carries the firefly clamp for the reused HDR.
-			const rhi::ImageHandle rtSceneImg = r->GetFrameColorSampleImage();
-			const bool rtReuse = ( rtSceneImg != 0 && r_rtReflSceneReuse.GetBool() );
-			// localParam0.w: 0 = reuse off, 1 = reuse, 2 = reuse + confidence debug (green reuse / red fallback)
-			rp.localParam0[3] = rtReuse ? ( r_rtReflDebug.GetBool() ? 2.0f : 1.0f ) : 0.0f;
-			rp.windowCoord[3] = idMath::ClampFloat( 0.0f, 64.0f, r_ssrFireflyClamp.GetFloat() );
+			// RR12 lit-scene reuse RETIRED 2026-09-23: RT now shades every reflective pixel at the hit (real
+			// lights + per-pixel diffuse + emissive) with ONE consistent model, so there is no on-screen reuse
+			// to feed, no reuse<->shade seam, and no dependency on a sampleable scene buffer. localParam0.w /
+			// windowCoord.w (the old reuse-enable + reused-HDR firefly clamp) stay 0 from the memset; ssr_rt
+			// no longer reads them.
 
 			// ---- Pass A: trace + shade into the dedicated RT target (replace; cleared to 0 = no
-			// contribution). unit 0 = the live lit scene (RR12) when reuse is on, else the normal G-buffer as a
-			// harmless dummy (ssr_rt only samples unit 0 when localParam0.w > 0.5). 1 = depth, 2/3 = G-buffer.
-			// Sampling the frame target here is safe: while its scene pass is suspended for this target pass it
-			// rests in SHADER_READ (like RB_RHI_Fxaa reading rhiHdrRT). 4 = AO (RR14).
+			// contribution). unit 0 is an unused-but-bound dummy (reuse retired): bind the normal G-buffer so
+			// the fixed VK_TEX_BINDINGS slot holds a valid image. 1 = depth, 2/3 = G-buffer, 4 = AO (RR14).
 			rhi::ClearArgs rtClear;
 			memset( &rtClear, 0, sizeof( rtClear ) );
 			rtClear.color = true;
@@ -5940,7 +5946,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			} else {
 				RB_RHI_BindUnit( 4, globalImages->whiteImage );
 			}
-			RB_RHI_DrawFullscreen( r, rtProg, rp, rtReuse ? rtSceneImg : r->GetRenderTargetImage( rhiNormalResultRT ) );
+			RB_RHI_DrawFullscreen( r, rtProg, rp, r->GetRenderTargetImage( rhiNormalResultRT ) );
 			r->EndPass();
 
 			rhi::RenderTargetHandle rtResultRT = rhiRtReflRT;
