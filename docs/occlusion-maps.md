@@ -236,6 +236,20 @@ the legacy backend regardless of preset, and does nothing where no baked/authore
       pose (global joint matrices rebuilt from the relative default pose) to get a static snapshot,
       which is baked and keyed by mesh id. Runtime resolves via the entity's `dynamicModel`
       snapshot. Validated on the imp (`imp_s0.tga`): full AO gradient, deep sockets/rib creases.
+- [x] **Occluder winding fix (2026-09-23).** The baker built each occluder's geometric normal as
+      `(v1 - v0) x (v2 - v0)`, the exact negative of the engine's `R_DeriveFacePlanes` convention
+      `(v2 - v0) x (v1 - v0)`, so the front-face cull ran inverted: rays toward a real cavity were
+      skipped (maps too white, no armpit/socket AO) while a texel that sits inside a neighbouring
+      mesh in the bind pose — a face under its goggles, a scalp inside the separate skull mesh,
+      overlapping thighs/arms — saw that mesh's inner walls as front faces at distance ~0 and baked
+      hard black. Visible in-game as dark blotches on characters on every preset that has
+      `r_occlusionMaps` on (Low and up; Potato is clean). Now uses the engine winding, and orients
+      the normal against the summed vertex normals as a guard. **Every map baked before this date
+      (the three shipped `z_baked_ao*.pk4` packs) carries the artefact and must be re-baked**
+      (`./bake_ao.sh +bakeAOFolder models/md5 +bakeAOFolder models/mapobjects +bakeAOFolder
+      models/weapons`, then repack). Expect the corrected maps to darken creases noticeably more
+      than the old ones: `r_occlusionMapScale` / `r_occlusionMapDirect` were tuned against the
+      too-white bakes and may want easing.
 - [ ] Mass bake of every static prop (full `generated/aomaps` coverage) — see [todo.md](todo.md)
       "Bake AO for every possible asset".
 - [ ] Optional: specular occlusion from the map (mirroring `r_ssaoSpecular`). Diffuse-only for now.

@@ -142,8 +142,25 @@ static void AO_BuildGrid( const idRenderModel *model, aoGrid_t &g ) {
 			at.v[0] = tri->verts[ tri->indexes[i + 0] ].xyz;
 			at.v[1] = tri->verts[ tri->indexes[i + 1] ].xyz;
 			at.v[2] = tri->verts[ tri->indexes[i + 2] ].xyz;
-			at.normal = ( at.v[1] - at.v[0] ).Cross( at.v[2] - at.v[0] );
+			// Geometric normal in the ENGINE's winding: R_DeriveFacePlanes builds a face plane
+			// as (v2 - v0) x (v1 - v0) (tr_trisurf.cpp), and the vertex normals it accumulates
+			// from those planes point OUTWARD on every shipped model. The backface cull below
+			// compares this normal with the ray, so it must use the same convention: the
+			// original (v1 - v0) x (v2 - v0) was the exact negative, which inverted the cull
+			// (real cavities skipped -> maps too white; a texel sitting inside a neighbouring
+			// mesh, like a face under its goggles or a scalp inside the skull mesh, saw that
+			// mesh's inner walls as front faces at distance ~0 -> hard-black patches).
+			at.normal = ( at.v[2] - at.v[0] ).Cross( at.v[1] - at.v[0] );
 			at.normal.Normalize();
+			// Belt and braces: if the model carries vertex normals (always, once tangents are
+			// derived), orient the face normal to agree with them, so a mesh with an odd
+			// winding still culls its back faces rather than its front ones.
+			const idVec3 vn = tri->verts[ tri->indexes[i + 0] ].normal
+			                + tri->verts[ tri->indexes[i + 1] ].normal
+			                + tri->verts[ tri->indexes[i + 2] ].normal;
+			if ( vn * at.normal < 0.0f ) {
+				at.normal = -at.normal;
+			}
 			int idx = g.tris.Append( at );
 			AO_InsertTri( g, idx );
 		}
