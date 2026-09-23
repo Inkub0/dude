@@ -2019,7 +2019,7 @@ static CVarOption postProcessOptions[] = {
 		}
 		AddTooltip( "r_hdrOverbright: multiply additive self-illum surfaces (lamps, screens, fire, glares)\n"
 			"so they exceed 1.0 and the tonemap curve treats them as real highlights (and eye-adaptation\n"
-			"has bright anchors). 1 = off; ~1.25 default (tuned for DUDE). When active it auto-disables the\n"
+			"has bright anchors). 1 = off; ~1.60 default (tuned for DUDE). When active it auto-disables the\n"
 			"legacy light-flare/glare haze (r_flareSize). No effect while Tonemap is Off." );
 		float obsat = cvarSystem->GetCVarFloat( "r_hdrOverbrightSat" );
 		if ( ImGui::SliderFloat( "Overbright Saturation", &obsat, 1.0f, 3.0f, "%.2f" ) ) {
@@ -2774,6 +2774,12 @@ struct EnhancementPreset {
 	// scene + velocity buffer (r_fsr, on here). Every lower tier carries false. Intensity / ambient-keep /
 	// resolution are free tuning knobs (Graphics -> the RT section), like volumetrics.
 	bool  rtgi;                     // r_rtgi
+	// HDR display gamma (appended, see note above; a live shader uniform, effective wherever the
+	// DUDE tonemap curve is on — Medium up). Ultra Nightmare eases it to 1.0 (neutral) because its
+	// one traced GI bounce lifts the scene's overall radiance; every other tier carries the cvar
+	// default (1.20). Exposure is deliberately NOT tiered — it is a plain cvar default (1.3) across
+	// every tier. Inert on Potato/Low (tonemap off), carried at the default there.
+	float hdrGamma;                 // r_hdrGamma
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2782,14 +2788,14 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger  volum  rtaoRes  skin   rtgi
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f, false },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false },
-	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 0.5f, true, true,  true,  true,  0,     true,  true,  true,  false, true , false, true, true, true, true, 0.75f, 0.6f, true },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger  volum  rtaoRes  skin   rtgi  hdrGam
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f, false, 1.20f },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f },
+	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 0.5f, true, true,  true,  true,  0,     true,  true,  true,  false, true , false, true, true, true, true, 0.75f, 0.6f, true, 1.0f },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2846,6 +2852,10 @@ static void ApplyEnhancementPreset( int idx )
 	// the faithful floor (Potato/Low, HDR off) stays on straight-resolve mode 0. Written
 	// explicitly so a hand-picked curve is reset to the tier's intent on preset switch.
 	cvarSystem->SetCVarInteger( "r_hdrTonemap", p.hdr ? 5 : 0 );
+	// HDR display gamma: preset-owned so Ultra Nightmare can neutralize it (1.0) for its brighter,
+	// GI-lit scene while every other tier keeps 1.20. Live shader uniform, shows immediately; inert
+	// on Potato/Low (no curve). Exposure is a plain cvar default (1.3), not tiered.
+	cvarSystem->SetCVarFloat( "r_hdrGamma", p.hdrGamma );
 	r_pbr.SetBool( p.pbr );
 	r_ssr.SetBool( p.ssr );
 	r_ssrResScale.SetFloat( p.ssrResScale );
@@ -2948,6 +2958,7 @@ static int DetectEnhancementPreset()
 			idMath::Fabs( r_specularExp.GetFloat() - p.specularExp ) < 0.5f &&
 			r_hdr.GetBool()                    == p.hdr &&
 			cvarSystem->GetCVarInteger( "r_hdrTonemap" ) == ( p.hdr ? 5 : 0 ) &&
+			idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - p.hdrGamma ) < 0.01f &&
 			r_pbr.GetBool()                    == p.pbr &&
 			r_ssr.GetBool()                    == p.ssr &&
 			idMath::Fabs( r_ssrResScale.GetFloat() - p.ssrResScale ) < 0.01f &&
