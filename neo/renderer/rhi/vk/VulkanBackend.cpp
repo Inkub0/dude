@@ -902,7 +902,7 @@ private:
 		uint64_t				vtxAddr;
 		uint64_t				idxAddr;
 		uint32_t				vtxStride;
-		uint32_t				flags;			// bit0 = has attributes (monster); bit1 = alpha-tested perforated caster, bits 8-15 = its alpha ref * 255
+		uint32_t				flags;			// bit0 = has attributes (monster); bit1 = alpha-tested perforated caster, bits 8-15 = its alpha ref * 255; bits 16-31 = RR16g self-illum glow bindless slot+1 (0 = none)
 		uint32_t				baseColor;		// RR3: material average colour, packed RGBA8 (unpackUnorm4x8)
 		uint32_t				texIndex;		// RR4: bindless texture slot+1 (0 = none -> shader uses baseColor)
 	};
@@ -5327,7 +5327,7 @@ void VulkanBackend::RefreshAnimBlas() {
 						grows[base + g].vtxAddr = bg.vertexAddress;
 						grows[base + g].idxAddr = bg.indexAddress;
 						grows[base + g].vtxStride = bg.vertexStride;
-						grows[base + g].flags = RT_GEO_MONSTER;
+						grows[base + g].flags = RT_GEO_MONSTER | ( ( bg.emitIndex & 0xFFFFu ) << 16 );	// RR16g: glow slot in bits 16-31
 						grows[base + g].baseColor = bg.baseColor;	// RR3: material average colour
 						grows[base + g].texIndex = bg.texIndex;		// RR4: diffuse bindless slot for this surface
 					}
@@ -5785,6 +5785,7 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 				if ( bgeo.alphaTest != 0 ) {
 					rows[base].flags |= 2u | ( ( bgeo.alphaTest & 0xFFu ) << 8 );	// alpha-tested caster + its reference
 				}
+					rows[base].flags |= ( bgeo.emitIndex & 0xFFFFu ) << 16;	// RR16g: self-illum glow bindless slot (bits 16-31; 0 = none)
 					rows[base].baseColor = bgeo.baseColor;
 					rows[base].texIndex = bgeo.texIndex;
 					base++;

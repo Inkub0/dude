@@ -203,6 +203,7 @@ void main() {
 	vec2 hitST = w0 * st0 + bc.x * st1 + bc.y * st2;
 
 	// RR4: albedo from the hit's real diffuse (bindless slot texIndex-1), else the RR3 material average.
+	// RR16g: baseColor.rgb is the diffuse average (fallback albedo only); self-illum is sampled per-pixel below.
 	vec4  bcol = unpackUnorm4x8( g.baseColor );
 	vec3  albedo = ( g.texIndex != 0u )
 		? texture( u_rtTextures[ nonuniformEXT( g.texIndex - 1u ) ], hitST ).rgb
@@ -240,12 +241,17 @@ void main() {
 			if ( lum > domLum ) { domLum = lum; domContrib = contrib; domDir = ldir; domDist = dl; }
 		}
 	}
-	if ( bcol.a > 0.5 ) {											// self-illuminated source (neon, light tile); not shadowed
+	// RR16g: self-illumination sampled PER-PIXEL from the additive glow stage (bindless slot in flags bits
+	// 16-31) at the hit st - only the lit texels emit (a panel's LEDs, not the dark metal), so a bounce off a
+	// partly-emissive surface carries its real glow pattern instead of a flat per-surface average.
+	uint emit = ( g.flags >> 16 ) & 0xFFFFu;
+	if ( emit != 0u ) {											// self-illuminated source (neon, light tile, LED readout); not shadowed
 		// Small bright emitters are the worst input for a 1-spp gather: a ray either hits one (spike) or
 		// misses (zero), and that variance denoises into grain/colour blotches. Clamp the PEAK channel
 		// (u_localParam0.w = r_rtgiEmissiveClamp), scaling the whole colour so the hue is preserved, so NRD
-		// sees a bounded signal it can resolve cleanly. High clamp = effectively off.
-		vec3  e  = bcol.rgb * u_diffuseModifier.x;
+		// sees a bounded signal it can resolve cleanly. High clamp = effectively off. textureLod 0: a ray hit
+		// has no screen-space st derivatives for auto-mip selection.
+		vec3  e  = textureLod( u_rtTextures[ nonuniformEXT( emit - 1u ) ], hitST, 0.0 ).rgb * u_diffuseModifier.x;
 		float ep = max( max( e.r, e.g ), e.b );
 		if ( ep > u_localParam0.w ) { e *= u_localParam0.w / ep; }
 		Li += e;

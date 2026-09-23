@@ -3452,7 +3452,13 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	// are added before glass and particles draw over them.
 	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
 	int i;
-	bool ssrDone = !viewDef->viewEntitys || !r_ssr.GetBool();
+	// Dispatch the reflection pass (RB_RHI_ScreenSpaceReflections) at the opaque/translucent split when EITHER
+	// screen-space SSR or RT reflections want it. RT reflections are decoupled from r_ssr since 2026-09-23 (they
+	// own every reflective pixel and skip the SSR march), so r_ssr off + r_rtReflections on must still reach the
+	// pass - else RT-only mode draws no reflections.
+	const bool rtReflWants = r_rtReflections.GetBool()
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN && r->SupportsRayQuery();
+	bool ssrDone = !viewDef->viewEntitys || ( !r_ssr.GetBool() && !rtReflWants );
 	for ( i = 0; i < viewDef->numDrawSurfs; i++ ) {
 		if ( drawSurfs[i]->material->SuppressInSubview() ) {
 			continue;

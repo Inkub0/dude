@@ -523,6 +523,9 @@ public:
 		unsigned int		indexCount = 0;		// 3 * triangles
 		unsigned int		baseColor = 0;		// RR3: material average colour, packed RGBA8 (0 = leave, shader defaults)
 		unsigned int		texIndex = 0;		// RR4: diffuse image handle (bindless slot+1); 0 = none
+		unsigned int		emitIndex = 0;		// RR16g: self-illum (additive glow) stage image handle (bindless slot+1); 0 = none.
+											// Carried into the geo row's flags bits 16-31 so the reflection samples the glow PER-PIXEL
+											// (only the lit texels bright) instead of a flat per-surface average that white-washes emissive parts.
 		// perforated casters (grates/fences): 0 = opaque geometry (the default - traversal never
 		// surfaces it as a candidate); 1..255 = alpha-tested: the geometry is built NON-opaque and
 		// this is the material's alpha reference * 255. A ray that doesn't force gl_RayFlagsOpaque

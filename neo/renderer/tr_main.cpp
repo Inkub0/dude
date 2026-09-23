@@ -1808,6 +1808,7 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 static unsigned int R_RtMaterialBaseColor( const idMaterial *mat ) {
 	float rgb[3] = { 0.55f, 0.55f, 0.55f };
 	bool  emissive = false;			// RR16f: A flags a self-illuminated (glow) surface
+	bool  haveDiffuse = false;
 	if ( mat != NULL ) {
 		const int n = mat->GetNumStages();
 		for ( int i = 0; i < n; i++ ) {
@@ -1816,23 +1817,30 @@ static unsigned int R_RtMaterialBaseColor( const idMaterial *mat ) {
 				rgb[0] = st->texture.image->averageColor[0];
 				rgb[1] = st->texture.image->averageColor[1];
 				rgb[2] = st->texture.image->averageColor[2];
+				haveDiffuse = true;
 				break;
 			}
 		}
-		// RR16f: an ADDITIVE stage (blend add: src ONE, dst ONE) with a texture is self-illumination - a
-		// light-source surface (neon tube, ceiling light tile). It is lit by no external light (it lights
-		// the room, not itself), so albedo*lights leaves it ~dark and it vanishes in an off-screen
-		// reflection. Flag it + carry ITS colour (the glow may differ from the diffuse) so the shader
-		// adds the glow back. Prefer the last additive stage (the dominant glow over any base).
+		// RR16f/RR16g: an ADDITIVE stage (blend add: src ONE, dst ONE) with a texture is self-illumination -
+		// a light source (neon tube, ceiling tile) OR the glowing PART of an otherwise-lit surface (a console
+		// panel's LED readouts). Flag it so the reflection adds its glow back (an off-screen self-lit surface
+		// shades ~dark under albedo*lights and would otherwise vanish). baseColor.rgb is left as the DIFFUSE
+		// average (the fallback albedo), NOT overwritten with the glow average: RR16g samples the glow texture
+		// per-pixel (R_RtMaterialEmitIndex), so a flat per-surface average is no longer needed - and using it
+		// as albedo was what white-washed panels whose glow texture (or an uncomputed dynamic/GUI image, which
+		// defaults averageColor to white) averaged bright. Only when there is NO diffuse stage (a pure light
+		// source) does the glow average stand in as the fallback albedo.
 		for ( int i = 0; i < n; i++ ) {
 			const shaderStage_t *st = mat->GetStage( i );
 			const bool additive = ( st->drawStateBits & GLS_SRCBLEND_BITS ) == GLS_SRCBLEND_ONE
 			                   && ( st->drawStateBits & GLS_DSTBLEND_BITS ) == GLS_DSTBLEND_ONE;
 			if ( additive && st->texture.image != NULL ) {
-				rgb[0] = st->texture.image->averageColor[0];
-				rgb[1] = st->texture.image->averageColor[1];
-				rgb[2] = st->texture.image->averageColor[2];
 				emissive = true;
+				if ( !haveDiffuse ) {
+					rgb[0] = st->texture.image->averageColor[0];
+					rgb[1] = st->texture.image->averageColor[1];
+					rgb[2] = st->texture.image->averageColor[2];
+				}
 			}
 		}
 	}
@@ -1842,6 +1850,27 @@ static unsigned int R_RtMaterialBaseColor( const idMaterial *mat ) {
 		c |= ( (unsigned int)v ) << ( k * 8 );
 	}
 	return c;
+}
+
+// RR16g: the self-illum (additive glow) stage's bindless texture handle (idImage::rhiHandle = the backend's
+// bindless slot + 1), so a reflection hit on a partly-emissive surface samples the glow texture at the hit st
+// and adds only its lit texels - the console LEDs glow, the dark panel around them stays dark - instead of a
+// flat per-surface average that painted the whole reflected footprint (white, when that average was bright or
+// an uncomputed dynamic image). 0 = no additive stage / not resident (the shader then adds no glow). Prefer the
+// FIRST additive stage: it is the dominant readout glow (later ADD stages are usually faint animated overlays).
+static unsigned int R_RtMaterialEmitIndex( const idMaterial *mat ) {
+	if ( mat != NULL ) {
+		const int n = mat->GetNumStages();
+		for ( int i = 0; i < n; i++ ) {
+			const shaderStage_t *st = mat->GetStage( i );
+			const bool additive = ( st->drawStateBits & GLS_SRCBLEND_BITS ) == GLS_SRCBLEND_ONE
+			                   && ( st->drawStateBits & GLS_DSTBLEND_BITS ) == GLS_DSTBLEND_ONE;
+			if ( additive && st->texture.image != NULL && st->texture.image->rhiHandle != 0 ) {
+				return (unsigned int)st->texture.image->rhiHandle;
+			}
+		}
+	}
+	return 0;
 }
 
 // RR4: the diffuse stage's texture handle (idImage::rhiHandle = the Vulkan backend's bindless slot + 1),
@@ -1960,6 +1989,7 @@ static void R_RtStageAnimCasters( void ) {
 			geoms[gi].indexCount = (unsigned int)tri->numIndexes;
 			geoms[gi].baseColor = R_RtMaterialBaseColor( dm->Surface( s )->shader );	// RR3: skin colour
 			geoms[gi].texIndex = R_RtMaterialTexIndex( dm->Surface( s )->shader );	// RR4: diffuse bindless slot
+			geoms[gi].emitIndex = R_RtMaterialEmitIndex( dm->Surface( s )->shader );	// RR16g: self-illum glow bindless slot
 
 			sig = R_RtHashBytes( sig, &tri->gpuSkinVB, sizeof( tri->gpuSkinVB ) );
 			sig = R_RtHashBytes( sig, &tri->numVerts, sizeof( tri->numVerts ) );
@@ -2248,7 +2278,7 @@ static bool R_RtBuildWorldAreaBlas( rhi::RHI *r, const idRenderWorldLocal *world
 	}
 	idDrawVert *verts = (idDrawVert *)Mem_Alloc16( totVerts * (int)sizeof( idDrawVert ) );
 	unsigned int *idxs = (unsigned int *)Mem_Alloc16( totIdx * (int)sizeof( unsigned int ) );
-	struct SurfDesc { int vOff, nV, iOff, nI; unsigned int tex, col; };
+	struct SurfDesc { int vOff, nV, iOff, nI; unsigned int tex, col, emit; };
 	SurfDesc *sd = (SurfDesc *)Mem_Alloc16( numSurfs * (int)sizeof( SurfDesc ) );
 	int si = 0, vBase = 0, iBase = 0;
 	for ( int a = 0; a < numAreas; a++ ) {
@@ -2263,6 +2293,7 @@ static bool R_RtBuildWorldAreaBlas( rhi::RHI *r, const idRenderWorldLocal *world
 			sd[si].iOff = iBase; sd[si].nI = tri->numIndexes;
 			sd[si].tex = R_RtMaterialTexIndex( surf->shader );
 			sd[si].col = R_RtMaterialBaseColor( surf->shader );
+			sd[si].emit = R_RtMaterialEmitIndex( surf->shader );	// RR16g: self-illum glow bindless slot
 			si++; vBase += tri->numVerts; iBase += tri->numIndexes;
 		}
 	}
@@ -2290,6 +2321,7 @@ static bool R_RtBuildWorldAreaBlas( rhi::RHI *r, const idRenderWorldLocal *world
 			geoms[g].indexCount = (unsigned int)d.nI;
 			geoms[g].baseColor = d.col;
 			geoms[g].texIndex = d.tex;
+			geoms[g].emitIndex = d.emit;			// RR16g
 		}
 		rhi::BlasHandle blas = r->CreateBlasFromBuffers( geoms, cnt, false );
 		if ( blas != 0 ) {
@@ -2364,7 +2396,7 @@ static bool R_RtBuildEntityModelBlas( rhi::RHI *r, const idRenderWorldLocal *wor
 	// per casting surface, tagged with its owning model so the BLAS loop groups a model's surfaces together.
 	idDrawVert *verts = (idDrawVert *)Mem_Alloc16( totVerts * (int)sizeof( idDrawVert ) );
 	unsigned int *idxs = (unsigned int *)Mem_Alloc16( totIdx * (int)sizeof( unsigned int ) );
-	struct SurfDesc { const idRenderModel *model; int vOff, nV, iOff, nI; unsigned int tex, col; };
+	struct SurfDesc { const idRenderModel *model; int vOff, nV, iOff, nI; unsigned int tex, col, emit; };
 	SurfDesc *sd = (SurfDesc *)Mem_Alloc16( numSurfs * (int)sizeof( SurfDesc ) );
 	int si = 0, vBase = 0, iBase = 0;
 	for ( int u = 0; u < uniqueCount; u++ ) {
@@ -2380,6 +2412,7 @@ static bool R_RtBuildEntityModelBlas( rhi::RHI *r, const idRenderWorldLocal *wor
 			sd[si].iOff = iBase; sd[si].nI = tri->numIndexes;
 			sd[si].tex = R_RtMaterialTexIndex( surf->shader );
 			sd[si].col = R_RtMaterialBaseColor( surf->shader );
+			sd[si].emit = R_RtMaterialEmitIndex( surf->shader );	// RR16g: self-illum glow bindless slot
 			si++; vBase += tri->numVerts; iBase += tri->numIndexes;
 		}
 	}
@@ -2414,6 +2447,7 @@ static bool R_RtBuildEntityModelBlas( rhi::RHI *r, const idRenderWorldLocal *wor
 			geoms[cnt].indexCount = (unsigned int)sd[base].nI;
 			geoms[cnt].baseColor = sd[base].col;
 			geoms[cnt].texIndex = sd[base].tex;
+			geoms[cnt].emitIndex = sd[base].emit;		// RR16g
 			cnt++;
 		}
 		if ( cnt == 0 ) { continue; }
@@ -2448,7 +2482,7 @@ static rhi::BlasHandle R_RtBuildOneEntityModelBlas( rhi::RHI *r, const idRenderM
 	if ( numSurfs == 0 || totIdx < 3 || numSurfs > 64 ) { return 0; }
 	idDrawVert *verts = (idDrawVert *)Mem_Alloc16( totVerts * (int)sizeof( idDrawVert ) );
 	unsigned int *idxs = (unsigned int *)Mem_Alloc16( totIdx * (int)sizeof( unsigned int ) );
-	struct SurfDesc { int vOff, nV, iOff, nI; unsigned int tex, col; };
+	struct SurfDesc { int vOff, nV, iOff, nI; unsigned int tex, col, emit; };
 	SurfDesc sd[64];
 	int si = 0, vBase = 0, iBase = 0;
 	for ( int s = 0; s < model->NumSurfaces(); s++ ) {
@@ -2461,6 +2495,7 @@ static rhi::BlasHandle R_RtBuildOneEntityModelBlas( rhi::RHI *r, const idRenderM
 		sd[si].iOff = iBase; sd[si].nI = tri->numIndexes;
 		sd[si].tex = R_RtMaterialTexIndex( surf->shader );
 		sd[si].col = R_RtMaterialBaseColor( surf->shader );
+		sd[si].emit = R_RtMaterialEmitIndex( surf->shader );	// RR16g: self-illum glow bindless slot
 		si++; vBase += tri->numVerts; iBase += tri->numIndexes;
 	}
 	rhi::BufferHandle vb = r->CreateBuffer( rhi::BU_VERTEX, totVerts * (int)sizeof( idDrawVert ), verts );
@@ -2483,6 +2518,7 @@ static rhi::BlasHandle R_RtBuildOneEntityModelBlas( rhi::RHI *r, const idRenderM
 		geoms[g].indexCount = (unsigned int)sd[g].nI;
 		geoms[g].baseColor = sd[g].col;
 		geoms[g].texIndex = sd[g].tex;
+		geoms[g].emitIndex = sd[g].emit;		// RR16g
 	}
 	rhi::BlasHandle blas = r->CreateBlasFromBuffers( geoms, si, false );
 	if ( blas == 0 ) {

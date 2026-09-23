@@ -998,8 +998,6 @@ extern idCVar r_rtgiAmbientKeep;			// RT GI reconcile: fraction of the fake cube
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
 extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compositing (dissolves the static firefly grid)
-extern idCVar r_rtReflSceneReuse;			// RR12: shade an on-screen RT reflection hit with the real lit scene instead of the fake key light
-extern idCVar r_rtReflDebug;				// RR12 debug: paint reflection by reuse confidence (green = reuse, red = key-light fallback)
 extern idCVar r_rtReflRealLights;			// RR16: shade an RT reflection hit with the scene's real lights (not a fixed key light)
 extern idCVar r_volumetrics;				// volumetric lighting master (docs/volumetric-lighting.md); VK + RT, opt-in
 extern idCVar r_volShadows;					// one visibility ray per reaching light per march sample (needs the RT scene)
