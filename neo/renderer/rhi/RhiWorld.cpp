@@ -471,6 +471,35 @@ static float rhiRtaoPrevView[16];
 static float rhiRtaoPrevJitter[2] = { 0.0f, 0.0f };
 static bool  rhiRtaoPrevValid = false;
 
+// H6 RT GI (docs/rtx-rtgi.md): the radiance-gather ray target (attachment 0 RGBA16F radiance, 1/2 the
+// same NRD guides RTAO writes). Full-res in H6a (no NRD / resScale yet); rhiRtgiRanThisView gates the
+// r_rtgiDebug overlay. With r_rtgi 0 (default) none of this allocates.
+static rhi::RenderTargetHandle rhiRtgiRayRT = 0;
+static int  rhiRtgiW = 0, rhiRtgiH = 0;
+static bool rhiRtgiRanThisView = false;
+// H6c: the fullscreen GI apply is called once per view but from two sites (before FSR2's opaque snapshot
+// so the additive bounce is IN the snapshot and FSR2's auto-reactive mask doesn't flag it as flash/particle
+// content — the "square" artifact; and a fallback after post when SSR is off and no snapshot fires). This
+// makes RB_RHI_RtgiApply idempotent per view so whichever site fires first wins and it never double-adds.
+static bool rhiRtgiAppliedThisView = false;
+// H6b (docs/rtx-rtgi.md): NRD REBLUR_DIFFUSE denoise state — a reduced-res velocity for IN_MV and the
+// previous-frame camera for the reprojection, mirroring the rhiRtao* denoise statics.
+static rhi::RenderTargetHandle rhiRtgiVelRT = 0;
+static int  rhiRtgiVelW = 0, rhiRtgiVelH = 0;
+// H6f: per-pixel history-confidence for NRD (IN_DIFF_CONFIDENCE), computed from this frame's raw bounce vs
+// last frame's reprojected denoised GI — kills edge ghosting without the flat-area dimming of a global antilag.
+static rhi::RenderTargetHandle rhiRtgiConfRT = 0;
+static int  rhiRtgiConfW = 0, rhiRtgiConfH = 0;
+// H6g: full-res NRD guides (viewZ + normal) for checkerboard mode, where the radiance is half-packed and can
+// no longer carry the guides at its own resolution. Reuses the gather MRT layout (att1 viewZ, att2 normal).
+static rhi::RenderTargetHandle rhiRtgiGuideRT = 0;
+static int  rhiRtgiGuideW = 0, rhiRtgiGuideH = 0;
+static bool rhiRtgiDenoisedThisView = false;		// the GI NRD denoise ran; GetRtgiOutputImage is current
+static float rhiRtgiPrevProj[16];
+static float rhiRtgiPrevView[16];
+static float rhiRtgiPrevJitter[2] = { 0.0f, 0.0f };
+static bool  rhiRtgiPrevValid = false;
+
 // ---- shared camera temporal state (docs/fsr-temporal-pipeline.md, increment A1) ----
 // The SSAO and SSR temporal resolves both reproject last frame's history by pure camera
 // motion, so both need the previous rendered frame's world->clip. They kept two private
@@ -737,10 +766,12 @@ static bool rhiNormalReadyThisView = false;			// the normal buffer was produced 
 // whenever the velocity path ran (found via the gbuffer DIAG spam; silent since R1/A2).
 static bool rhiNormalMrt = false;					// target has the SSR rough/metal attachment (docs/ssr.md)
 static bool rhiNormalVel = false;					// target has the RG16F velocity attachment (R1/A2)
+static bool rhiNormalAlbedo = false;				// target has the RGBA8 RTGI receiver-albedo attachment (docs/rtx-rtgi.md H6c)
 // what this view's ACTIVE normal result (standalone target OR merged handle) carries -
 // per-view state, reset each world draw, consumed by SSAO/SSR/FSR2
 static bool rhiNormalMrtThisView = false;
 static bool rhiNormalVelThisView = false;
+static bool rhiNormalAlbedoThisView = false;		// RTGI H6c: this view's normal target carries the albedo attachment (GetRenderTargetImage4)
 
 // ---- per-surface occlusion-map auto-load cache (docs/occlusion-maps.md) ----
 // Keyed by (render model, surface index) -- stable per model surface and shared across every
@@ -1683,6 +1714,14 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		// direct-diffuse strength (interaction.frag reads .z); left 0 on the ambient pass
 		parms.occlusionParms[2] = din->ambientLight ? 0.0f
 			: scale * idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapDirect.GetFloat() );
+	}
+
+	// RTGI reconcile (docs/rtx-rtgi.md H6c): on an AMBIENT draw with r_rtgi on, the fullscreen GI apply
+	// (RB_RHI_RtgiApply) adds real bounce light on top of this fake cube-map ambient. Hand ambientlight.frag
+	// r_rtgiAmbientKeep in the otherwise-unused u_color.x, encoded +1 so 0 = "GI off, keep 1 (no dim)", and
+	// it scales the fake ambient down so the two do not double-count.
+	if ( din->ambientLight && r_rtgi.GetBool() ) {
+		parms.color[0] = idMath::ClampFloat( 0.0f, 1.0f, r_rtgiAmbientKeep.GetFloat() ) + 1.0f;
 	}
 
 	// DUDE parallax occlusion mapping (docs/parallax.md). The interaction pass marches the
@@ -3601,8 +3640,8 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiRtReflHistValid = false;
 
 	rhiNormalRT = 0;			rhiNormalW = rhiNormalH = 0;
-	rhiNormalReadyThisView = false;	rhiNormalMrt = false;	rhiNormalVel = false;
-	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;
+	rhiNormalReadyThisView = false;	rhiNormalMrt = false;	rhiNormalVel = false;	rhiNormalAlbedo = false;
+	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;	rhiNormalAlbedoThisView = false;
 
 	rhiBerserkTrailRT[0] = rhiBerserkTrailRT[1] = 0;
 	rhiBerserkIdx = 0;			rhiBerserkW = rhiBerserkH = 0;
@@ -4050,19 +4089,21 @@ static bool RB_RHI_PointLightInBudget( const viewDef_t *viewDef, const viewLight
 	return inBudget;
 }
 
-static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h, bool wantMrt, bool wantVel ) {
+static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h, bool wantMrt, bool wantVel, bool wantAlbedo ) {
 	if ( rhiNormalRT && r->GetRenderTargetImage( rhiNormalRT ) == 0 ) {
 		rhiNormalRT = 0;					// lost context (vid_restart)
 		rhiNormalW = rhiNormalH = 0;
 	}
-	if ( rhiNormalRT && rhiNormalW == w && rhiNormalH == h && rhiNormalMrt == wantMrt && rhiNormalVel == wantVel ) {
+	if ( rhiNormalRT && rhiNormalW == w && rhiNormalH == h && rhiNormalMrt == wantMrt && rhiNormalVel == wantVel && rhiNormalAlbedo == wantAlbedo ) {
 		return true;
 	}
 	if ( rhiNormalRT ) { r->DestroyRenderTarget( rhiNormalRT ); rhiNormalRT = 0; }
 	// wantMrt adds the SSR roughness/metalness attachment (docs/ssr.md); wantVel adds the RG16F
 	// velocity attachment (R1/A2) as a 3rd MRT. colorCount 3 selects A0's mixed-format layout
 	// [RGBA8, RGBA8, RG16F]; else the 1/2-attachment RGBA8 layout, byte-identical to before.
-	const int colorCount = wantVel ? 3 : ( wantMrt ? 2 : 1 );
+	// wantAlbedo (docs/rtx-rtgi.md H6c) forces the fixed 4-attachment layout normal/mat/vel/albedo (RGBA8,
+	// RGBA8, RG16F, RGBA8): the caller also forced wantMrt + wantVel, so att1/att2 exist under att3.
+	const int colorCount = wantAlbedo ? 4 : ( wantVel ? 3 : ( wantMrt ? 2 : 1 ) );
 	rhiNormalRT = r->CreateRenderTargetColorDepth( rhi::IF_RGBA8, w, h, colorCount );
 	if ( !rhiNormalRT ) {
 		rhiNormalW = rhiNormalH = 0;
@@ -4072,6 +4113,7 @@ static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h, bool wantMrt, 
 	rhiNormalH = h;
 	rhiNormalMrt = wantMrt;
 	rhiNormalVel = wantVel;
+	rhiNormalAlbedo = wantAlbedo;
 	return true;
 }
 
@@ -4104,7 +4146,12 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// rough/metal attachment).
 	// M7: SSR now runs on Vulkan too (RB_RHI_ScreenSpaceReflections), so build the
 	// MRT rough/metal attachment on both backends when r_ssr wants it
-	const bool ssrWants = r_ssr.GetBool();
+	// RTGI H6c (docs/rtx-rtgi.md): when r_rtgi is on, the fullscreen GI apply needs a per-pixel receiver
+	// albedo, produced as a 4th attachment on the normal prepass. It forces the SSR + velocity attachments
+	// (so the layout is fixed normal/mat/vel/albedo) and the STANDALONE path (the merged pass keeps its
+	// 3-attachment layout untouched). On the RT tier ssr + velocity are already on, so this only adds att3.
+	const bool wantAlbedo = r_rtgi.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	const bool ssrWants = r_ssr.GetBool() || wantAlbedo;
 	const bool ssaoWants = r_ssao.GetBool()
 		&& ( r_ssaoNormalBuffer.GetBool() || r_ssaoDebug.GetInteger() == 3 );
 	// R1/A2: per-object motion vectors are VK-only (GL3 has no float-colour RT). When on they
@@ -4113,8 +4160,8 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// so velocity rides the merge by default; the standalone 3-MRT target is only the fallback.
 	// r_fsr (C2) implies them: FSR2 is unusable without a velocity buffer, and MV/jitter are
 	// internal infrastructure, not user-facing toggles (plan section E).
-	const bool velWants = ( r_motionVectors.GetBool() || r_fsr.GetBool() )
-		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	const bool velWants = ( ( r_motionVectors.GetBool() || r_fsr.GetBool() )
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN ) || wantAlbedo;
 	if ( !ssaoWants && !ssrWants && !velWants ) {
 		return false;
 	}
@@ -4161,7 +4208,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 	}
 	const bool wantMerge = r_ssaoMergeNormal.GetBool() && !viewHasSubviewSurf
-		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN && !wantAlbedo;	// RTGI albedo needs the standalone 4-attachment target
 	rhi::RenderTargetHandle activeNormalRT = 0;
 	bool didMerge = false;
 	if ( wantMerge ) {
@@ -4172,16 +4219,18 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			// (rhiNormalMrt/Vel) describe a different object and must not be touched here
 			rhiNormalMrtThisView = ssrWants;
 			rhiNormalVelThisView = velWants;
+			rhiNormalAlbedoThisView = false;	// merged path never carries the RTGI albedo (wantAlbedo forces standalone)
 		}
 	}
 	if ( activeNormalRT == 0 ) {
-		if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants, velWants ) ) {
+		if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants, velWants, wantAlbedo ) ) {
 			return false;
 		}
 		r->BeginTargetPass( rhiNormalRT, &clear );
 		activeNormalRT = rhiNormalRT;
 		rhiNormalMrtThisView = ssrWants;
 		rhiNormalVelThisView = velWants;
+		rhiNormalAlbedoThisView = wantAlbedo;
 	}
 
 	rhi::PipelineDesc pd;
@@ -4298,6 +4347,34 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			parms.pbrParms[1] = rough;
 		}
 
+		// RTGI receiver albedo (docs/rtx-rtgi.md H6c): flag gbuffer.frag to write out_Albedo and fill the
+		// diffuse stage's texture matrix so var_TexCoverage samples the diffuse for EVERY surface (opaque
+		// included; the perforated coverage draws below overwrite the matrix with their own, fine). The
+		// diffuse IMAGE binds on unit 2 below (whiteImage when GI is off; sampled only if u_localParam0.y>0.5).
+		idImage *rtgiDiffuseImg = globalImages->whiteImage;
+		if ( wantAlbedo ) {
+			parms.localParam0[1] = 1.0f;
+			for ( int s = 0; s < shader->GetNumStages(); s++ ) {
+				const shaderStage_t *dst = shader->GetStage( s );
+				if ( dst->lighting != SL_DIFFUSE || dst->texture.image == NULL || regs[dst->conditionRegister] == 0 ) {
+					continue;
+				}
+				rtgiDiffuseImg = dst->texture.image;
+				if ( dst->texture.hasMatrix ) {
+					parms.diffuseMatrixS[0] = regs[dst->texture.matrix[0][0]];
+					parms.diffuseMatrixS[1] = regs[dst->texture.matrix[0][1]];
+					parms.diffuseMatrixS[3] = regs[dst->texture.matrix[0][2]];
+					parms.diffuseMatrixT[0] = regs[dst->texture.matrix[1][0]];
+					parms.diffuseMatrixT[1] = regs[dst->texture.matrix[1][1]];
+					parms.diffuseMatrixT[3] = regs[dst->texture.matrix[1][2]];
+				} else {
+					parms.diffuseMatrixS[0] = 1.0f; parms.diffuseMatrixS[1] = 0.0f; parms.diffuseMatrixS[3] = 0.0f;
+					parms.diffuseMatrixT[0] = 0.0f; parms.diffuseMatrixT[1] = 1.0f; parms.diffuseMatrixT[3] = 0.0f;
+				}
+				break;
+			}
+		}
+
 		// DUDE tessellation: subdivide character/monster surfaces here identically to the
 		// depth prepass (same PN + displacement) so SSAO's normals follow the rounded
 		// silhouette the lit passes draw — otherwise the AO hugs the flat, un-tessellated
@@ -4354,6 +4431,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 
 		RB_RHI_BindUnit( 0, bumpImg );
+		RB_RHI_BindUnit( 2, rtgiDiffuseImg );	// RTGI H6c: receiver-albedo source (gbuffer.frag samples it only when u_localParam0.y>0.5)
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
@@ -6232,7 +6310,11 @@ capture and screen mapping assume the whole framebuffer at the origin).
 ===================
 */
 static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
-	if ( !r_ssao.GetBool() || !R_BackendSupportsEnhancements() ) {
+	// RTGI supersedes screen-space AO: it grounds the scene with real one-bounce occlusion + bounce light, and
+	// the fake cube-map ambient GTAO used to darken is fully replaced by GI (r_rtgiAmbientKeep). So AO is one
+	// technique at a time — RTAO already stands down for r_rtgi, and GTAO stands down here too (no wasted pass;
+	// consumers gate on rhiSsaoAppliedThisView so they simply apply no AO this view).
+	if ( !r_ssao.GetBool() || r_rtgi.GetBool() || !R_BackendSupportsEnhancements() ) {
 		return;
 	}
 	// H4d (docs/rtx-rtao.md): RTAO produced, denoised and composited this view's AO —
@@ -6524,7 +6606,10 @@ r_rtao joined the RT-world implication gate (tr_main R_RtWorldUpdate).
 static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiRtaoRanThisView = false;
 	rhiRtaoDenoisedThisView = false;	// reset on EVERY early-out path — RB_RHI_SSAOPass gates on it
-	if ( !r_rtao.GetBool() || !r_ssao.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+	// H6b (docs/rtx-rtgi.md): when r_rtgi is on, GI REPLACES RTAO — the single NRD instance denoises GI this
+	// frame (never both denoisers in one frame), and screen-space GTAO (RB_RHI_SSAOPass, which runs next)
+	// fills the scalar AO the ambient/reflections still consume. RTAO stands down whenever GI is active.
+	if ( !r_rtao.GetBool() || !r_ssao.GetBool() || r_rtgi.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
@@ -6772,6 +6857,277 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiRtaoPrevJitter[0] = viewDef->jitter[0];
 	rhiRtaoPrevJitter[1] = viewDef->jitter[1];
 	rhiRtaoPrevValid = true;
+
+	RB_RHI_ForgetTexBinds();
+	backEnd.currentScissor = viewDef->scissor;
+}
+
+/*
+===================
+RB_RHI_RtgiPass
+
+H6a of RT GI (docs/rtx-rtgi.md): the noisy radiance-gather pass. One cosine-weighted hemisphere ray
+per pixel against the scene TLAS - the SAME ray as RTAO, but the hit is SHADED (bindless albedo *
+scene lights + emissive, lifted from ssr_rt) and its incoming radiance returned into an RGBA16F target
+instead of an occlusion scalar. Produces the noisy INPUT for the H6b NRD DIFFUSE denoise; for now the
+only consumer is the r_rtgiDebug overlay, so with r_rtgi 0 (default) the pass never runs and both
+normal play and the shipped RTAO path are untouched. VK + RT hardware only; shares RTAO's TLAS
+(r_rtgi joined the RT-world implication gate + the per-frame-rebuild exception in tr_main).
+===================
+*/
+static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
+	rhiRtgiRanThisView = false;
+	rhiRtgiDenoisedThisView = false;	// reset on every early-out (the apply gates on it)
+	rhiRtgiAppliedThisView = false;		// re-armed each view: the apply fires once from whichever site is first
+	if ( !r_rtgi.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		return;
+	}
+	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
+		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
+		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
+		return;
+	}
+	if ( globalImages->currentDepthImage->uploadWidth <= 0
+			|| !rhiNormalReadyThisView || rhiNormalResultRT == 0 ) {
+		return;		// needs the sealed depth + the bump-mapped normal G-buffer (same as RTAO)
+	}
+	const unsigned long long tlas = r->GetTlasAddress();
+	const unsigned long long geoTable = r->GetRtGeoTableAddress();
+	if ( tlas == 0 || geoTable == 0 ) {
+		return;		// no RT scene / geo table yet (non-RT hardware, or the world build hasn't run)
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "rtgi_ray" );
+	if ( !prog ) {
+		return;
+	}
+
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	// r_rtgiResScale: trace the gather at a fraction of the screen - bounce light is very low-frequency, so
+	// a reduced-res gather + bilinear upscale is nearly free of visible quality but the biggest cost lever (a
+	// full-res single sample was ~4 ms). The debug overlay upscales via smaa_copy; H6b's NRD runs at this res.
+	// H6g checkerboard: trace a full-res horizontal checkerboard (half the pixels, packed left) instead of a
+	// uniform downscale — sharp edges at ~half the rays. Needs the velocity MRT (NRD IN_MV) and a full-res
+	// guide pass; falls back to resScale if the velocity is missing. When active the gather target is FULL res
+	// (the left half holds the packed samples), so the resScale downscale is bypassed.
+	const bool cbActive = r_rtgiCheckerboard.GetBool() && rhiNormalVelThisView && rhiNormalReadyThisView;
+	const float resScale = idMath::ClampFloat( 0.25f, 1.0f, r_rtgiResScale.GetFloat() );
+	// resScale is the RTGI internal resolution for BOTH paths; checkerboard just traces half of those pixels
+	// (so its sharp-edge win is greatest at resScale 1, softer as resScale drops - it is a res, not a fixed).
+	int rw = (int)( w * resScale + 0.5f );
+	int rh = (int)( h * resScale + 0.5f );
+	if ( rw < 1 ) rw = 1;
+	if ( rh < 1 ) rh = 1;
+	if ( cbActive ) { rw &= ~1; if ( rw < 2 ) rw = 2; }		// even width: the 2x1 checkerboard packs cleanly into the left half
+	// (re)create the RGBA16F radiance MRT on first use / resize / scale change / lost context.
+	if ( rhiRtgiRayRT && r->GetRenderTargetImage( rhiRtgiRayRT ) == 0 ) {
+		rhiRtgiRayRT = 0; rhiRtgiW = rhiRtgiH = 0;
+	}
+	if ( rhiRtgiRayRT && ( rhiRtgiW != rw || rhiRtgiH != rh ) ) {
+		r->DestroyRenderTarget( rhiRtgiRayRT ); rhiRtgiRayRT = 0; rhiRtgiW = rhiRtgiH = 0;
+	}
+	if ( !rhiRtgiRayRT ) {
+		rhiRtgiRayRT = r->CreateRenderTargetRtgiMrt( rw, rh );
+		if ( !rhiRtgiRayRT ) {
+			return;
+		}
+		rhiRtgiW = rw; rhiRtgiH = rh;
+	}
+
+	float invView[16];
+	if ( !RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
+		return;
+	}
+	const float *proj  = viewDef->projectionMatrix;
+	const float invP00 = ( proj[0] != 0.0f ) ? 1.0f / proj[0] : 1.0f;
+	const float invP11 = ( proj[5] != 0.0f ) ? 1.0f / proj[5] : 1.0f;
+	const float radius = idMath::ClampFloat( 8.0f, 4096.0f, r_rtgiRadius.GetFloat() );
+	const float giFrameIndex = (float)( tr.frameCount & 0xFFFF );	// IGN reorientation, same as RTAO
+	const int uploadW = globalImages->currentDepthImage->uploadWidth;
+	const int uploadH = globalImages->currentDepthImage->uploadHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world
+	const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFull );
+	const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
+	memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );			// rtParms.x/y = TLAS (bit-cast)
+	memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+	memcpy( &parms.rtParms[2], &geoTable, sizeof( geoTable ) );		// rtParms.z/w = geo table (bit-cast)
+	parms.localParam0[0] = invP00;
+	parms.localParam0[1] = invP11;
+	parms.localParam0[2] = radius;
+	parms.localParam0[3] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissiveClamp.GetFloat() );	// emissive peak clamp (pre-NRD variance cut)
+	parms.localParam1[0] = giFrameIndex;
+	parms.localParam1[1] = r_rtgiShadow.GetBool() ? 1.0f : 0.0f;	// H6d: dominant-light shadow ray at the bounce hit
+	// H6g checkerboard parity: 0 = off (resScale path), 1 = even frame, 2 = odd frame. The gather packs the
+	// left half of the rw x rh buffer accordingly; NRD's constant BLACK mode + frameIndex reconstructs it (the
+	// screenCorrection/depthTexRecip below are the same resScale mapping). MUST use the same frameIndex NRD gets.
+	parms.localParam1[2] = cbActive ? (float)( 1 + ( (int)tr.frameCount & 1 ) ) : 0.0f;
+	parms.localParam1[3] = 0.004f;					// ray origin pulled toward the eye per unit depth (crease-leak fix)
+	// the gather runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, and -> the full-res depth tc carries
+	// the (w/rw) stretch (mirrors RB_RHI_RtaoPass / RB_RHI_SSAOPass's scaled march). At scale 1: 1/w, 1/uploadW.
+	parms.screenCorrection[0] = 1.0f / rw;
+	parms.screenCorrection[1] = 1.0f / rh;
+	parms.depthTexRecip[0] = ( (float)w / rw ) / uploadW;
+	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair
+	parms.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
+	parms.windowCoord[2] = -1.0f;					// VK-only pass: top-down view-Y sign
+
+	// scene lights to shade the hit (shared buffer with RT reflections / volumetrics; cached per view)
+	unsigned long long giLightAddr = 0;
+	const int giNumLights = RB_RHI_GatherSceneLights( r, viewDef, &giLightAddr );
+	memcpy( &parms.color[0], &giLightAddr, sizeof( giLightAddr ) );	// color.xy = light-buffer device address
+	parms.color[2] = (float)giNumLights;
+	parms.color[3] = 0.0f;							// no ambient floor at the hit: a pure bounce (only lit surfaces contribute)
+	parms.diffuseModifier[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissive.GetFloat() );	// self-illum glow scale
+	parms.diffuseModifier[1] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiLightScale.GetFloat() );	// diffuse brightness at the hit
+	parms.diffuseModifier[2] = 1.0f;				// confine each light to its Doom projection volume (RR16c-style)
+	parms.diffuseModifier[3] = ( giNumLights > 0 ) ? 1.0f : 0.0f;	// real-lights enable
+
+	r->BeginTargetPass( rhiRtgiRayRT, NULL );
+	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
+	RB_RHI_DrawFullscreen( r, prog, parms, 0 );		// set 2 (bindless materials) is auto-bound by the backend
+	r->EndPass();
+	rhiRtgiRanThisView = true;
+	rhiRtgiDenoisedThisView = false;
+
+	// H6g: full-res NRD guides for checkerboard (the half-packed gather can't carry them). Ray-free pass over
+	// depth + normal into a full-res MRT (att1 viewZ, att2 normal), which the denoise points NRD's guides at.
+	rhi::RenderTargetHandle giGuideRT = 0;
+	if ( cbActive ) {
+		// the guides are NRD's "full resolution" for checkerboard = the rw x rh gather resolution (the radiance
+		// is the half-packed part). Same coordinate mapping as the gather so guide and radiance line up.
+		if ( rhiRtgiGuideRT && r->GetRenderTargetImage( rhiRtgiGuideRT ) == 0 ) { rhiRtgiGuideRT = 0; rhiRtgiGuideW = rhiRtgiGuideH = 0; }
+		if ( rhiRtgiGuideRT && ( rhiRtgiGuideW != rw || rhiRtgiGuideH != rh ) ) { r->DestroyRenderTarget( rhiRtgiGuideRT ); rhiRtgiGuideRT = 0; rhiRtgiGuideW = rhiRtgiGuideH = 0; }
+		if ( !rhiRtgiGuideRT ) {
+			rhiRtgiGuideRT = r->CreateRenderTargetRtgiMrt( rw, rh );
+			if ( rhiRtgiGuideRT ) { rhiRtgiGuideW = rw; rhiRtgiGuideH = rh; }
+		}
+		rhi::ShaderHandle guideProg = rhiRtgiGuideRT ? r->LoadShader( "rtgi_guides" ) : 0;
+		if ( guideProg != 0 ) {
+			rhi::RenderParams gp;
+			memset( &gp, 0, sizeof( gp ) );
+			gp.mvpMatrix[0] = gp.mvpMatrix[5] = gp.mvpMatrix[10] = gp.mvpMatrix[15] = 1.0f;
+			memcpy( gp.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world (normal encode)
+			gp.screenCorrection[0] = 1.0f / rw;	gp.screenCorrection[1] = 1.0f / rh;
+			gp.depthTexRecip[0] = ( (float)w / rw ) / uploadW;	gp.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
+			r->BeginTargetPass( rhiRtgiGuideRT, NULL );
+			RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+			RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+			backEnd.glState.tmu[1].current2DMap = -1;
+			RB_RHI_DrawFullscreen( r, guideProg, gp, 0 );
+			r->EndPass();
+			giGuideRT = rhiRtgiGuideRT;
+		}
+	}
+
+	// ---- H6b: NRD REBLUR_DIFFUSE denoise (docs/rtx-rtgi.md), mirroring RB_RHI_RtaoPass's denoise ----
+	// Needs the velocity MRT (r_fsr / r_motionVectors) for IN_MV; without it the raw gather is used (grainy).
+	rhi::ImageHandle giVelImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
+		? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
+	if ( giVelImg != 0 ) {
+		rhi::ImageHandle nrdVel = giVelImg;
+		if ( rw != w || rh != h ) {
+			// downsample the full-res velocity to the GI ray/NRD resolution (smaa_copy = texture(src, uv))
+			if ( rhiRtgiVelRT && r->GetRenderTargetImage( rhiRtgiVelRT ) == 0 ) { rhiRtgiVelRT = 0; rhiRtgiVelW = rhiRtgiVelH = 0; }
+			if ( rhiRtgiVelRT && ( rhiRtgiVelW != rw || rhiRtgiVelH != rh ) ) { r->DestroyRenderTarget( rhiRtgiVelRT ); rhiRtgiVelRT = 0; rhiRtgiVelW = rhiRtgiVelH = 0; }
+			if ( !rhiRtgiVelRT ) {
+				rhiRtgiVelRT = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh );
+				if ( rhiRtgiVelRT ) { rhiRtgiVelW = rw; rhiRtgiVelH = rh; }
+			}
+			rhi::ShaderHandle copyProg = rhiRtgiVelRT ? r->LoadShader( "smaa_copy" ) : 0;
+			if ( copyProg != 0 ) {
+				rhi::RenderParams cp;
+				memset( &cp, 0, sizeof( cp ) );
+				cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+				cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
+				r->BeginTargetPass( rhiRtgiVelRT, NULL );
+				RB_RHI_DrawFullscreen( r, copyProg, cp, giVelImg );
+				r->EndPass();
+				nrdVel = r->GetRenderTargetImage( rhiRtgiVelRT );
+			}
+		}
+
+		// H6f: history-confidence pass (docs/rtx-rtgi.md). Compare this frame's raw bounce luminance against
+		// last frame's DENOISED GI reprojected by the motion vectors, and write a per-pixel confidence that
+		// tells NRD to drop history where the lighting moved (a lit silhouette under the camera) but keep it
+		// on stable surfaces — killing the edge smear without the flat dimming a global antilag would cause.
+		// Needs a prior denoised frame (GetRtgiOutputImage != 0, still last frame's until RtaoDenoise below
+		// overwrites it) and the velocity we just resolved. r_rtgiConfidence 0 disables it (NRD antilag only).
+		rhi::ImageHandle giConfImg = 0;
+		const rhi::ImageHandle giPrevDenoised = r->GetRtgiOutputImage();
+		// Runs for both paths. In checkerboard the raw is half-packed, so the shader (u_localParam0.w = parity)
+		// only computes confidence at this frame's TRACED cells (reading the packed sample) and trusts history
+		// on the reconstructed cells.
+		if ( r_rtgiConfidence.GetFloat() > 0.0f && rhiRtgiPrevValid && giPrevDenoised != 0 ) {
+			if ( rhiRtgiConfRT && r->GetRenderTargetImage( rhiRtgiConfRT ) == 0 ) { rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
+			if ( rhiRtgiConfRT && ( rhiRtgiConfW != rw || rhiRtgiConfH != rh ) ) { r->DestroyRenderTarget( rhiRtgiConfRT ); rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
+			if ( !rhiRtgiConfRT ) {
+				rhiRtgiConfRT = r->CreateRenderTarget( rhi::IF_R16F, rw, rh );	// R8+ per NRD; R16F is the single-channel target we have
+				if ( rhiRtgiConfRT ) { rhiRtgiConfW = rw; rhiRtgiConfH = rh; }
+			}
+			rhi::ShaderHandle confProg = rhiRtgiConfRT ? r->LoadShader( "rtgi_confidence" ) : 0;
+			if ( confProg != 0 ) {
+				rhi::RenderParams confParms;
+				memset( &confParms, 0, sizeof( confParms ) );
+				confParms.mvpMatrix[0] = confParms.mvpMatrix[5] = confParms.mvpMatrix[10] = confParms.mvpMatrix[15] = 1.0f;
+				confParms.screenCorrection[0] = 1.0f / rw;			// texel size for the 3x3 tap of the noisy current signal
+				confParms.screenCorrection[1] = 1.0f / rh;
+				confParms.localParam0[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiConfidence.GetFloat() );	// sensitivity
+				confParms.localParam0[1] = 0.1f;					// confidence floor: never fully reject history (avoids edge frying)
+				confParms.localParam0[2] = 0.35f;					// noise deadzone: ignore sub-noise relative diffs so stable surfaces keep full history
+				confParms.localParam0[3] = cbActive ? (float)( 1 + ( (int)tr.frameCount & 1 ) ) : 0.0f;	// H6g: checkerboard parity (0 = off, packed-read for traced cells)
+				confParms.windowCoord[2] = -1.0f;					// VK top-down: flip the velocity row (ssr_temporal convention)
+				r->BeginTargetPass( rhiRtgiConfRT, NULL );
+				RB_RHI_BindRTImage( r, 1, giPrevDenoised );			// unit 1 = last frame's denoised GI (YCoCg)
+				RB_RHI_BindRTImage( r, 2, nrdVel );					// unit 2 = motion vectors at GI res
+				RB_RHI_DrawFullscreen( r, confProg, confParms, r->GetRenderTargetImage( rhiRtgiRayRT ) );	// unit 0 = this frame's raw gather
+				r->EndPass();
+				giConfImg = r->GetRenderTargetImage( rhiRtgiConfRT );
+			}
+		}
+
+		rhi::RtaoDenoiseArgs da;
+		memset( &da, 0, sizeof( da ) );
+		da.giMode = true;								// denoise GI radiance (REBLUR_DIFFUSE), not RTAO occlusion
+		da.rayRT = rhiRtgiRayRT;						// att0 = RGBA16F radiance+hitdist; guides in att1/att2
+		// resScale path: guides ride in the gather MRT (att1/att2). Checkerboard: radiance is half-packed, so
+		// the guides come from the full-res rtgi_guides pass instead (same att1/att2 layout). da.checkerboard =
+		// constant BLACK (1); the gather already packed the left half to match NRD's frameIndex parity.
+		const bool cbDenoise = cbActive && giGuideRT != 0;
+		da.viewzRT  = cbDenoise ? giGuideRT : rhiRtgiRayRT;	da.viewzAtt  = 1;
+		da.normalRT = cbDenoise ? giGuideRT : rhiRtgiRayRT;	da.normalAtt = 2;
+		da.checkerboard = cbDenoise ? 1 : 0;			// 1 = BLACK (constant); NRD flips per frameIndex
+		da.velImage = nrdVel;
+		da.w = rw;	da.h = rh;
+		memcpy( da.viewToClip,  viewDef->unjitteredProjectionMatrix, sizeof( da.viewToClip ) );
+		memcpy( da.worldToView, viewDef->worldSpace.modelViewMatrix, sizeof( da.worldToView ) );
+		memcpy( da.viewToClipPrev,  rhiRtgiPrevValid ? rhiRtgiPrevProj : da.viewToClip,  sizeof( da.viewToClipPrev ) );
+		memcpy( da.worldToViewPrev, rhiRtgiPrevValid ? rhiRtgiPrevView : da.worldToView, sizeof( da.worldToViewPrev ) );
+		da.jitterX = -viewDef->jitter[0] * resScale;
+		da.jitterY =  viewDef->jitter[1] * resScale;
+		da.jitterPrevX = rhiRtgiPrevValid ? -rhiRtgiPrevJitter[0] * resScale : da.jitterX;
+		da.jitterPrevY = rhiRtgiPrevValid ?  rhiRtgiPrevJitter[1] * resScale : da.jitterY;
+		da.mvScaleX = -1.0f;	da.mvScaleY = 1.0f;
+		da.hitDistA = 0.5f * radius;	da.hitDistB = 0.1f;		// MUST match rtgi_ray.frag's normHitDist
+		da.maxAccumFrames = r_rtgiHistory.GetInteger();			// GI-only ReBLUR history cap (ghosting vs noise lever)
+		da.confImage = giConfImg;								// H6f: IN_DIFF_CONFIDENCE (0 = not provided this frame)
+		da.denoisingRange = 20000.0f;
+		da.frameIndex = (unsigned int)tr.frameCount;
+		da.reset = !rhiRtgiPrevValid;
+		rhiRtgiDenoisedThisView = r->RtaoDenoise( da );			// giMode -> GI diffuse denoise into GetRtgiOutputImage
+	}
+	// stage this frame's camera for next frame's GI reprojection (un-jittered, as passed)
+	memcpy( rhiRtgiPrevProj, viewDef->unjitteredProjectionMatrix, sizeof( rhiRtgiPrevProj ) );
+	memcpy( rhiRtgiPrevView, viewDef->worldSpace.modelViewMatrix, sizeof( rhiRtgiPrevView ) );
+	rhiRtgiPrevJitter[0] = viewDef->jitter[0];
+	rhiRtgiPrevJitter[1] = viewDef->jitter[1];
+	rhiRtgiPrevValid = true;
 
 	RB_RHI_ForgetTexBinds();
 	backEnd.currentScissor = viewDef->scissor;
@@ -7219,6 +7575,120 @@ void RB_RHI_RtaoDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	memset( &parms, 0, sizeof( parms ) );
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
 	parms.localParam0[0] = 1.0f;					// ssao_debug mode 1: show the AO scalar (.r)
+
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
+	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	RB_RHI_DrawFullscreen( r, prog, parms, srcImg );
+	RB_RHI_ForgetTexBinds();
+}
+
+/*
+===================
+RB_RHI_RtgiApply
+
+H6c of RT GI (docs/rtx-rtgi.md): add one bounce of indirect diffuse into the lit HDR scene, scene-wide.
+For each pixel indirect = receiver albedo (the RTGI prepass's 4th attachment, GetRenderTargetImage4) *
+the gathered irradiance (rtgi_ray.frag: raw in H6a, NRD-denoised in H6b). Additive into the live rhiHdrRT,
+after world lighting and before FSR2/tonemap, so DoF/FSR2/bloom pick it up. No-op unless r_rtgi is on and
+both the gather and the albedo attachment were produced this view. VK + RT hardware only.
+===================
+*/
+void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !r_rtgi.GetBool() || r_rtgiDebug.GetInteger() > 0 || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		return;			// off, or the debug overlay owns the screen instead of the apply
+	}
+	if ( rhiRtgiAppliedThisView ) {
+		return;			// already added this view (called before the FSR2 snapshot; the post-chain site is a no-op)
+	}
+	if ( !rhiRtgiRanThisView || rhiRtgiRayRT == 0 || !rhiNormalAlbedoThisView ) {
+		return;			// no gather / no receiver-albedo attachment this view
+	}
+	// H6b: the DENOISED GI radiance (GetRtgiOutputImage) when the NRD pass ran this view; else the raw gather.
+	const rhi::ImageHandle giImg = rhiRtgiDenoisedThisView ? r->GetRtgiOutputImage()
+		: r->GetRenderTargetImage( rhiRtgiRayRT );
+	const rhi::ImageHandle albedoImg = r->GetRenderTargetImage4( rhiNormalResultRT );
+	if ( giImg == 0 || albedoImg == 0 ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "rtgi_apply" );
+	if ( !prog ) {
+		return;
+	}
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	const int uploadW = globalImages->currentDepthImage->uploadWidth;
+	const int uploadH = globalImages->currentDepthImage->uploadHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.localParam0[0] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiIntensity.GetFloat() );
+	// GI (reduced res) + albedo (full res) both sample at gl_FragCoord/(viewW,viewH): the GI buffer
+	// upscales, albedo is 1:1. depth uses the POT _currentDepth tc for the sky skip.
+	parms.screenCorrection[0] = 1.0f / w;
+	parms.screenCorrection[1] = 1.0f / h;
+	parms.depthTexRecip[0] = 1.0f / uploadW;
+	parms.depthTexRecip[1] = 1.0f / uploadH;
+	// Joint-bilateral upscale (r_rtgiBilateralUpscale): only when the GI is actually reduced-res; at full res a
+	// bilinear 1:1 fetch is exact and the bilateral would just self-blur. Needs the GI buffer size + the normal.
+	const bool bilat = r_rtgiBilateralUpscale.GetBool() && ( rhiRtgiW < w || rhiRtgiH < h ) && rhiNormalResultRT != 0;
+	parms.localParam0[1] = bilat ? 1.0f : 0.0f;
+	parms.localParam0[2] = ( rhiRtgiW > 0 ) ? 1.0f / rhiRtgiW : 1.0f / w;	// GI reduced-res texel (2x2 footprint)
+	parms.localParam0[3] = ( rhiRtgiH > 0 ) ? 1.0f / rhiRtgiH : 1.0f / h;
+	parms.localParam1[0] = 24.0f;							// depth sensitivity: ~4% relative depth diff halves the weight
+	parms.localParam1[1] = 8.0f;							// normal power: sharply rejects across creases
+
+	RB_RHI_BindRTImage( r, 1, albedoImg );					// unit 1 = receiver albedo (prepass att3)
+	RB_RHI_BindUnit( 2, globalImages->currentDepthImage );	// unit 2 = depth (sky skip + bilateral)
+	// unit 3 = full-res view normal (bilateral weight). Bound even when bilat is off (the shader just doesn't
+	// sample it then) so the descriptor set is always complete; falls back to depth if the normal RT is absent.
+	RB_RHI_BindRTUnit( r, 3, rhiNormalResultRT != 0 ? rhiNormalResultRT : rhiRtgiRayRT );
+	backEnd.glState.tmu[3].current2DMap = -1;				// direct bind bypassed the tmu cache
+	// unit 0 = GI radiance (rtInput0); additive (ONE/ONE) into the live HDR scene target
+	RB_RHI_DrawFullscreen( r, prog, parms, giImg, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
+	RB_RHI_ForgetTexBinds();
+	rhiRtgiAppliedThisView = true;			// once per view: the other call site now no-ops
+}
+
+/*
+===================
+RB_RHI_RtgiDebugOverlay
+
+r_rtgiDebug (H6a): blit the raw noisy radiance-gather buffer over the finished view so the GI gather can
+be eyeballed before the NRD denoise (H6b) and the ambient apply (H6c) land. RGB radiance, so it uses
+smaa_copy (a plain texture blit) rather than ssao_debug's scalar view; HDR values above 1 clip on the
+LDR overlay, which is fine for a bring-up readout. No-op unless r_rtgi + the debug cvar are on and the
+pass produced a buffer this view.
+===================
+*/
+void RB_RHI_RtgiDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( r_rtgiDebug.GetInteger() <= 0 || !rhiRtgiRanThisView || rhiRtgiRayRT == 0 ) {
+		return;
+	}
+	// mode 1 = the raw noisy gather; mode 2 = the NRD-denoised output (falls back to raw when the denoise
+	// didn't run). Both buffers are NRD-YCoCg-packed, so rtgi_debug decodes them to linear.
+	rhi::ImageHandle srcImg = ( r_rtgiDebug.GetInteger() >= 2 && rhiRtgiDenoisedThisView && r->GetRtgiOutputImage() != 0 )
+		? r->GetRtgiOutputImage()
+		: r->GetRenderTargetImage( rhiRtgiRayRT );
+	if ( srcImg == 0 ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "rtgi_debug" );
+	if ( !prog ) {
+		return;
+	}
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.screenCorrection[0] = 1.0f;				// rtgi_debug samples at var_TexCoord (0..1); screenCorrection unused
+	parms.screenCorrection[1] = 1.0f;
 
 	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
 	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
@@ -8130,7 +8600,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// and a BeginNormalPrepass fallback (returns 0) cleanly leaves zfill to seal depth.
 	// per-view state only - the target CACHE keys (rhiNormalMrt/Vel) stay untouched, or the
 	// standalone velocity target would key-mismatch and recreate every frame (the DIAG spam)
-	rhiNormalReadyThisView = false;	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;
+	rhiNormalReadyThisView = false;	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;	rhiNormalAlbedoThisView = false;
 	r->GpuScopeBegin( "prepass (depth+gbuffer)" );
 	const bool mergedDepth = RB_RHI_NormalPrepass( r, viewDef );
 	if ( mergedDepth ) {
@@ -8150,6 +8620,11 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	r->GpuScopeBegin( "ao (rtao/gtao)" );
 	RB_RHI_RtaoPass( r, viewDef );
 	RB_RHI_SSAOPass( r, viewDef );
+	r->GpuScopeEnd();
+	// H6a RT GI (docs/rtx-rtgi.md): the radiance-gather pass (behind r_rtgi, default off). Runs after the
+	// AO passes since it reuses the same sealed depth + normal G-buffer; own scope for r_vkGpuTime 2.
+	r->GpuScopeBegin( "rtgi" );
+	RB_RHI_RtgiPass( r, viewDef );
 	r->GpuScopeEnd();
 	// r_rtShadowBlur: validate the view + size the shared targets; the light loop builds each
 	// ray-served light's mask on demand (RB_RHI_RtShadowBlurLight)

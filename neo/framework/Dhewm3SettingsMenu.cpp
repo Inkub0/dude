@@ -2019,7 +2019,7 @@ static CVarOption postProcessOptions[] = {
 		}
 		AddTooltip( "r_hdrOverbright: multiply additive self-illum surfaces (lamps, screens, fire, glares)\n"
 			"so they exceed 1.0 and the tonemap curve treats them as real highlights (and eye-adaptation\n"
-			"has bright anchors). 1 = off; ~1.25 default (tuned for DUDE). When active it auto-disables the\n"
+			"has bright anchors). 1 = off; ~1.60 default (tuned for DUDE). When active it auto-disables the\n"
 			"legacy light-flare/glare haze (r_flareSize). No effect while Tonemap is Off." );
 		float obsat = cvarSystem->GetCVarFloat( "r_hdrOverbrightSat" );
 		if ( ImGui::SliderFloat( "Overbright Saturation", &obsat, 1.0f, 3.0f, "%.2f" ) ) {
@@ -2768,6 +2768,18 @@ struct EnhancementPreset {
 	// diffuse falloff, a deliberate deviation from stock Lambert). The reach knob stays the cvar
 	// default across tiers; only the strength is preset-owned.
 	float skinShading;             // r_skinShading
+	// RT Global Illumination (appended; docs/rtx-rtgi.md H6): Ultra Nightmare only - one traced bounce of
+	// indirect diffuse, denoised, which REPLACES RTAO there (so the tier also carries rtao=false; the single
+	// NRD instance does GI instead, and screen-space GTAO fills the scalar AO reflections use). Needs the RT
+	// scene + velocity buffer (r_fsr, on here). Every lower tier carries false. Intensity / ambient-keep /
+	// resolution are free tuning knobs (Graphics -> the RT section), like volumetrics.
+	bool  rtgi;                     // r_rtgi
+	// HDR display gamma (appended, see note above; a live shader uniform, effective wherever the
+	// DUDE tonemap curve is on — Medium up). Ultra Nightmare eases it to 1.0 (neutral) because its
+	// one traced GI bounce lifts the scene's overall radiance; every other tier carries the cvar
+	// default (1.20). Exposure is deliberately NOT tiered — it is a plain cvar default (1.3) across
+	// every tier. Inert on Potato/Low (tonemap off), carried at the default there.
+	float hdrGamma;                 // r_hdrGamma
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -2776,14 +2788,14 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger  volum  rtaoRes  skin
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f },
-	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 0.5f, true, true,  true,  true,  0,     true,  true,  true,  false, true , true, true, true, true, true, 0.75f, 0.6f },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger  volum  rtaoRes  skin   rtgi  hdrGam
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f, false, 1.20f },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.0f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.0f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  -0.25f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f },
+	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  -0.25f, true, 0.5f, true, true,  true,  true,  0,     true,  true,  true,  false, true , false, true, true, true, true, 0.75f, 0.6f, true, 1.0f },
 };
 
 static void ApplyEnhancementPreset( int idx )
@@ -2840,6 +2852,10 @@ static void ApplyEnhancementPreset( int idx )
 	// the faithful floor (Potato/Low, HDR off) stays on straight-resolve mode 0. Written
 	// explicitly so a hand-picked curve is reset to the tier's intent on preset switch.
 	cvarSystem->SetCVarInteger( "r_hdrTonemap", p.hdr ? 5 : 0 );
+	// HDR display gamma: preset-owned so Ultra Nightmare can neutralize it (1.0) for its brighter,
+	// GI-lit scene while every other tier keeps 1.20. Live shader uniform, shows immediately; inert
+	// on Potato/Low (no curve). Exposure is a plain cvar default (1.3), not tiered.
+	cvarSystem->SetCVarFloat( "r_hdrGamma", p.hdrGamma );
 	r_pbr.SetBool( p.pbr );
 	r_ssr.SetBool( p.ssr );
 	r_ssrResScale.SetFloat( p.ssrResScale );
@@ -2890,6 +2906,7 @@ static void ApplyEnhancementPreset( int idx )
 	com_interpolate.SetBool( p.interpolate );
 	r_rtao.SetBool( p.rtao );
 	r_rtaoResScale.SetFloat( p.rtaoResScale );
+	r_rtgi.SetBool( p.rtgi );		// H6e: Ultra Nightmare enables GI (and carries rtao=false — GI replaces it)
 	r_rtShadowBlur.SetBool( p.rtShadowBlur );
 	r_rtAllLights.SetBool( p.rtAllLights );
 	r_rtShadowBlurStagger.SetBool( p.rtBlurStagger );
@@ -2941,6 +2958,7 @@ static int DetectEnhancementPreset()
 			idMath::Fabs( r_specularExp.GetFloat() - p.specularExp ) < 0.5f &&
 			r_hdr.GetBool()                    == p.hdr &&
 			cvarSystem->GetCVarInteger( "r_hdrTonemap" ) == ( p.hdr ? 5 : 0 ) &&
+			idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - p.hdrGamma ) < 0.01f &&
 			r_pbr.GetBool()                    == p.pbr &&
 			r_ssr.GetBool()                    == p.ssr &&
 			idMath::Fabs( r_ssrResScale.GetFloat() - p.ssrResScale ) < 0.01f &&
@@ -2961,6 +2979,7 @@ static int DetectEnhancementPreset()
 			com_interpolate.GetBool()          == p.interpolate &&
 			r_rtao.GetBool()                   == p.rtao &&
 			( !p.rtao || idMath::Fabs( r_rtaoResScale.GetFloat() - p.rtaoResScale ) < 0.01f ) &&
+			r_rtgi.GetBool()                   == p.rtgi &&
 			r_rtShadowBlur.GetBool()           == p.rtShadowBlur &&
 			r_rtAllLights.GetBool()            == p.rtAllLights &&
 			r_rtShadowBlurStagger.GetBool()    == p.rtBlurStagger &&
@@ -3233,6 +3252,9 @@ static void DrawEnhGroup_AmbientOcclusion()
 
 		// Resolution: discrete quality/perf stops from half to full screen resolution.
 		ImGui::BeginDisabled( !r_ssao.GetBool() );
+		// AO is one technique at a time: RT Ambient Occlusion or RT Global Illumination (below) each REPLACE
+		// the screen-space GTAO, so its sampling sliders are inert while either is on.
+		ImGui::BeginDisabled( r_rtao.GetBool() || r_rtgi.GetBool() );
 		const float ssaoResStops[]  = { 0.5f, 0.667f, 0.75f, 0.8f, 1.0f };
 		const char *ssaoResLabels[] = { "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Four-fifths (4/5)", "Full" };
 		const int ssaoNumStops = IM_ARRAYSIZE( ssaoResStops );
@@ -3278,6 +3300,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 			"Trade-off: a faint dark halo can appear around object silhouettes, since one coarse "
 			"depth texel can't represent both surfaces at an edge. Off = the exact full-resolution "
 			"depth march (most accurate, most expensive). Recommended on. Non-vanilla; opengl3/Vulkan." );
+		ImGui::EndDisabled();	// SSAO sliders superseded by RTAO / RTGI
 
 		// Ray-traced AO (docs/rtx-rtao.md H4). Same idiom as the Shadows group's RT section:
 		// greyed on the legacy/GL3 backend and non-RT GPUs, where the cvars are inert.
@@ -3288,6 +3311,9 @@ static void DrawEnhGroup_AmbientOcclusion()
 			ImGui::SeparatorText( rtCapable ? "Ray Tracing (RTX)" : "Ray Tracing (RTX) - needs Vulkan + RT GPU" );
 			ImGui::BeginDisabled( !rtCapable );
 
+			// RT GI supersedes RT AO (below): one denoiser, and GI grounds the scene itself. Grey RTAO out
+			// while GI is on so it is clear only one runs.
+			ImGui::BeginDisabled( r_rtgi.GetBool() );
 			bool rtao = r_rtao.GetBool();
 			if ( ImGui::Checkbox( "RT Ambient Occlusion", &rtao ) ) {
 				r_rtao.SetBool( rtao );
@@ -3343,11 +3369,86 @@ static void DrawEnhGroup_AmbientOcclusion()
 				"visible change (AO is low-frequency). Lower this first if RTAO costs too much. "
 				"Default Full; Ultra Nightmare uses Three-quarter." );
 
+			ImGui::EndDisabled();	// RTAO greyed while RTGI on
+
+			// Ray-traced GI (docs/rtx-rtgi.md H6). One traced bounce of indirect diffuse, denoised through
+			// the SAME NRD instance as RTAO - so enabling it makes GI REPLACE RTAO (and the screen-space GTAO):
+			// GI grounds the scene with real one-bounce occlusion + bounce light, so no AO pass runs alongside.
+			ImGui::Spacing();
+			bool rtgi = r_rtgi.GetBool();
+			if ( ImGui::Checkbox( "RT Global Illumination", &rtgi ) ) {
+				r_rtgi.SetBool( rtgi );
+			}
+			AddTooltip( "One traced bounce of indirect light, denoised: surfaces are lit by the colour "
+				"bouncing off everything around them (a red panel tints the nearby grey wall), and dark "
+				"corners fill in softly the way real light does - which Doom 3 never computed. REPLACES both "
+				"RT Ambient Occlusion AND screen-space SSAO while on - it grounds the scene with real "
+				"one-bounce occlusion + bounce light, so no separate AO pass runs. Needs Motion Vectors or "
+				"FSR on for the denoiser, and builds the ray-tracing scene. NON-VANILLA look - lifts blacks "
+				"in lit rooms. Vulkan + RT only." );
+
+			float giInt = r_rtgiIntensity.GetFloat();
+			if ( ImGui::SliderFloat( "Intensity##rtgi", &giInt, 0.0f, 4.0f, "%.2f" ) ) {
+				r_rtgiIntensity.SetFloat( giInt );
+			}
+			AddTooltip( "Strength of the bounced light added to the scene. 1.00 is the physical one-bounce "
+				"result; raise for punchier colour bleed, lower for a subtle fill." );
+
+			float giKeep = r_rtgiAmbientKeep.GetFloat();
+			if ( ImGui::SliderFloat( "Fake-Ambient Keep##rtgi", &giKeep, 0.0f, 1.0f, "%.2f" ) ) {
+				r_rtgiAmbientKeep.SetFloat( giKeep );
+			}
+			AddTooltip( "How much of Doom 3's original FAKE cube-map ambient to keep once real GI is added, "
+				"so the two don't double-count. 1.00 stacks GI on top of the full fake ambient (brightest); "
+				"0.00 lets GI fully replace it (most physical, but a corner GI can't reach goes darker). "
+				"Lower it if lit rooms look washed out." );
+
+			float giRad = r_rtgiRadius.GetFloat();
+			if ( ImGui::SliderFloat( "Ray Length##rtgi", &giRad, 64.0f, 2048.0f, "%.0f units" ) ) {
+				r_rtgiRadius.SetFloat( giRad );
+			}
+			AddTooltip( "How far a bounce ray looks for the surface whose light it gathers. Longer = broader "
+				"colour bleed and more distant bounce (room-scale); shorter concentrates GI on nearby "
+				"surfaces and is a little cheaper. Default 512." );
+
+			// GI resolution: same low-frequency reasoning as RTAO. 0.5 is the cost/quality knee (a full-res
+			// single sample is ~4x its cost; 0.25 starts to smear fine contact bleed).
+			const float rtgiResStops[]  = { 0.25f, 0.5f, 0.667f, 0.75f, 1.0f };
+			const char *rtgiResLabels[] = { "Quarter (1/4)", "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Full" };
+			const int rtgiNumStops = IM_ARRAYSIZE( rtgiResStops );
+			const float curRtgiScale = r_rtgiResScale.GetFloat();
+			int rtgiResIdx = 1;
+			float rtgiResBest = 1e9f;
+			for ( int i = 0; i < rtgiNumStops; i++ ) {
+				const float d = idMath::Fabs( curRtgiScale - rtgiResStops[i] );
+				if ( d < rtgiResBest ) { rtgiResBest = d; rtgiResIdx = i; }
+			}
+			if ( ImGui::SliderInt( "Resolution##rtgi", &rtgiResIdx, 0, rtgiNumStops - 1,
+					rtgiResLabels[rtgiResIdx], ImGuiSliderFlags_NoInput ) ) {
+				rtgiResIdx = rtgiResIdx < 0 ? 0 : ( rtgiResIdx >= rtgiNumStops ? rtgiNumStops - 1 : rtgiResIdx );
+				r_rtgiResScale.SetFloat( rtgiResStops[rtgiResIdx] );
+			}
+			AddTooltip( "Resolution the GI gather AND its denoiser run at, upscaled to full res. GI is very "
+				"low-frequency, so Half is the sweet spot; Quarter is cheaper still but starts to smear fine "
+				"contact bleed. Default Half." );
+
+			bool giShadow = r_rtgiShadow.GetBool();
+			if ( ImGui::Checkbox( "GI Shadows", &giShadow ) ) {
+				r_rtgiShadow.SetBool( giShadow );
+			}
+			AddTooltip( "Trace one shadow ray at each bounce point toward the brightest light reaching it, so a "
+				"light behind a thin wall stops leaking bounced light through it. One extra ray per pixel; off "
+				"is a little cheaper but lets light bleed through walls." );
+
 			ImGui::EndDisabled();
 			// explain the gray-out cases the checkbox itself can't (mirrors the RT Reflections hint)
-			if ( rtCapable && r_rtao.GetBool()
+			if ( rtCapable && r_rtao.GetBool() && !r_rtgi.GetBool()
 					&& !( r_motionVectors.GetBool() || r_fsr.GetBool() ) ) {
 				ImGui::TextDisabled( "  (needs Motion Vectors or FSR on for the denoiser - using screen-space AO)" );
+			}
+			if ( rtCapable && r_rtgi.GetBool()
+					&& !( r_motionVectors.GetBool() || r_fsr.GetBool() ) ) {
+				ImGui::TextDisabled( "  (GI needs Motion Vectors or FSR on for the denoiser - showing raw grainy GI)" );
 			}
 		}
 		ImGui::EndDisabled();

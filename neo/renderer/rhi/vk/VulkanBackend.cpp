@@ -227,6 +227,7 @@ public:
 	virtual RenderTargetHandle	CreateRenderTargetColorDepthStencil( ImageFormat fmt, int w, int h );
 	virtual RenderTargetHandle	CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels );
 	virtual RenderTargetHandle	CreateRenderTargetRtaoMrt( int w, int h );
+	virtual RenderTargetHandle	CreateRenderTargetRtgiMrt( int w, int h );
 	virtual RenderTargetHandle	CreateRenderTargetBlurRay( int w, int h );
 	virtual void				BeginTargetMipPass( RenderTargetHandle rt, int mipLevel, const ClearArgs *clear );
 	virtual ImageHandle			GetRenderTargetMipImage( RenderTargetHandle rt, int mipLevel );
@@ -238,6 +239,7 @@ public:
 	virtual ImageHandle			GetRenderTargetImage( RenderTargetHandle rt );
 	virtual ImageHandle			GetRenderTargetImage2( RenderTargetHandle rt );
 	virtual ImageHandle			GetRenderTargetImage3( RenderTargetHandle rt );
+	virtual ImageHandle			GetRenderTargetImage4( RenderTargetHandle rt );
 
 	virtual int		AllocUniforms( const void *data, int size, BufferHandle *buffer );
 	virtual int		AllocVertices( const void *data, int size, BufferHandle *buffer );
@@ -649,10 +651,10 @@ private:
 		//     served by colorClearPass alone.
 		bool			colorTarget = false;
 		int				colorCount = 0;					// 1-3 color attachments (3 = velocity gbuffer, R1/A0)
-		VkFormat		colorFormat[3] = {};			// per-attachment format (mixed for the 3-MRT velocity target)
-		VkImage			colorImage[3] = {};
-		VmaAllocation	colorAlloc[3] = {};
-		VkImageView		colorView[3] = {};				// level-0 attachment view (framebuffer)
+		VkFormat		colorFormat[4] = {};			// per-attachment format (mixed for the 3-MRT velocity target; [3] = RTGI albedo, docs/rtx-rtgi.md H6c)
+		VkImage			colorImage[4] = {};
+		VmaAllocation	colorAlloc[4] = {};
+		VkImageView		colorView[4] = {};				// level-0 attachment view (framebuffer)
 		// SSAO Phase 1 mip chain (colorMipLevels > 1, colorImage[0] only). colorView[0]
 		// stays level-0-only for the linearize framebuffer; colorSampleView[0] spans every
 		// level so the sampleable ImageRec can textureLod into coarser mips. The chain is
@@ -661,11 +663,11 @@ private:
 		// the next level's source. 1 = plain single-mip (none of the mip fields used).
 		int				colorMipLevels = 1;
 		static const int MAX_MIP = 8;
-		VkImageView		colorSampleView[3] = {};		// all-levels sample view (= colorView[] when 1 mip)
+		VkImageView		colorSampleView[4] = {};		// all-levels sample view (= colorView[] when 1 mip)
 		VkImageView		colorLevelView[MAX_MIP] = {};	// per-level single-level attachment/sample views (L>=1)
 		VkFramebuffer	colorLevelFb[MAX_MIP] = {};		// per-level downsample framebuffers (L>=1)
 		ImageHandle		colorLevelInput[MAX_MIP] = {};	// per-level single-level sampleable handles (source binds)
-		ImageHandle		colorSampleImage[3] = { 0, 0, 0 };	// handles GetRenderTargetImage / 2 return
+		ImageHandle		colorSampleImage[4] = { 0, 0, 0, 0 };	// handles GetRenderTargetImage / 2 / 3 / 4 return
 		bool			hasDepth = false;				// depth or depth-stencil attachment present
 		VkImage			dsImage = VK_NULL_HANDLE;
 		VmaAllocation	dsAlloc = NULL;
@@ -996,6 +998,17 @@ private:
 	ImageHandle			rtaoOutSampleImage = 0;
 	int					rtaoOutW = 0, rtaoOutH = 0;
 	bool				rtaoOutReady = false;	// transitioned UNDEFINED->GENERAL
+	// H6b RT GI (docs/rtx-rtgi.md): denoised GI radiance — RGBA16F STORAGE (radiance .rgb, occlusion .w)
+	// that REBLUR_DIFFUSE writes via the RtaoDenoise giMode path; same lifecycle as the RTAO output.
+	virtual ImageHandle	GetRtgiOutputImage() { return rtgiOutSampleImage; }
+	bool				RtgiEnsureOutput( int w, int h );
+	void				RtgiDestroyOutput();
+	VkImage				rtgiOutImage = VK_NULL_HANDLE;
+	VmaAllocation		rtgiOutAlloc = VK_NULL_HANDLE;
+	VkImageView			rtgiOutView = VK_NULL_HANDLE;
+	ImageHandle			rtgiOutSampleImage = 0;
+	int					rtgiOutW = 0, rtgiOutH = 0;
+	bool				rtgiOutReady = false;
 	bool						haveComputeDerivatives = false;	// VK_KHR_compute_shader_derivatives (quads)
 
 	FfxFsr2Context *			fsr2Ctx = NULL;
@@ -2430,6 +2443,7 @@ void VulkanBackend::Shutdown() {
 	// NRD (H2b): denoiser pipelines/pools must die before VMA/device too
 	NrdDestroy( true );
 	RtaoDestroyOutput();		// the H4 RTAO output image rides the same lifetime
+	RtgiDestroyOutput();		// H6b: the RT GI denoised-radiance output rides the same lifetime
 
 	// R2: acceleration structures + their backing buffers must die before VMA/device
 	DestroyRtScene();
@@ -2871,7 +2885,7 @@ void VulkanBackend::BeginPass( const ClearArgs *clear ) {
 	const bool wantColorClear = ( clear != NULL && clear->color ) || !everWritten;
 	const bool wantDsClear = ( clear != NULL && ( clear->depth || clear->stencil ) ) || !everWritten;
 
-	VkClearValue cv[3] = {};
+	VkClearValue cv[5] = {};		// up to 4 color (RTGI albedo) + 1 depth
 	const int nColor = ft ? ft->colorCount : 1;
 	const bool hasDS = ft ? ft->hasDepth : true;	// sceneColor always carries depth-stencil
 	if ( clear != NULL && clear->color ) {
@@ -6133,6 +6147,7 @@ validator signal) and SIGMA_SHADOW (H3 soft shadows).
 // stable identifiers for the denoisers in our NRD instance (nrd::Identifier is uint32)
 static const nrd::Identifier NRD_ID_REBLUR_AO     = 0;
 static const nrd::Identifier NRD_ID_SIGMA_SHADOW  = 1;
+static const nrd::Identifier NRD_ID_REBLUR_GI     = 2;	// H6b RT GI: REBLUR_DIFFUSE (radiance+hitdist), docs/rtx-rtgi.md
 
 // nrd::Format -> VkFormat, table-ordered exactly like the enum in NRDDescs.h
 static VkFormat NrdFormatToVk( nrd::Format f ) {
@@ -6182,9 +6197,13 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 		return false;
 	}
 
+	// One instance hosts every denoiser; a given frame dispatches exactly ONE ReBLUR variant
+	// (RTAO occlusion OR GI diffuse, never both — the r_rtgi swap), so there is no two-denoiser
+	// resolution thrash or descriptor-pool conflict. REBLUR_DIFFUSE is the H6b GI denoiser.
 	const nrd::DenoiserDesc denoisers[] = {
 		{ NRD_ID_REBLUR_AO,    nrd::Denoiser::REBLUR_DIFFUSE_OCCLUSION },
 		{ NRD_ID_SIGMA_SHADOW, nrd::Denoiser::SIGMA_SHADOW },
+		{ NRD_ID_REBLUR_GI,    nrd::Denoiser::REBLUR_DIFFUSE },
 	};
 	nrd::InstanceCreationDesc icd = {};		// null callbacks -> NRD's own aligned malloc
 	icd.denoisers = denoisers;
@@ -6748,6 +6767,68 @@ void VulkanBackend::RtaoDestroyOutput() {
 	rtaoOutReady = false;
 }
 
+// H6b RT GI (docs/rtx-rtgi.md): the denoised GI radiance output — mirrors RtaoEnsureOutput but RGBA16F
+// (radiance .rgb + occlusion .w), the format REBLUR_DIFFUSE's OUT_DIFF_RADIANCE_HITDIST writes.
+bool VulkanBackend::RtgiEnsureOutput( int w, int h ) {
+	if ( rtgiOutImage != VK_NULL_HANDLE && rtgiOutW == w && rtgiOutH == h ) {
+		return true;
+	}
+	RtgiDestroyOutput();
+
+	VkImageCreateInfo ici = {};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &rtgiOutImage, &rtgiOutAlloc, NULL ), "vmaCreateImage(RTGI out)" ) ) {
+		rtgiOutImage = VK_NULL_HANDLE;
+		return false;
+	}
+	VkImageViewCreateInfo vwi = {};
+	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vwi.image = rtgiOutImage;
+	vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vwi.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	vwi.subresourceRange.levelCount = 1;
+	vwi.subresourceRange.layerCount = 1;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &rtgiOutView ), "vkCreateImageView(RTGI out)" ) ) {
+		RtgiDestroyOutput();
+		return false;
+	}
+	rtgiOutSampleImage = RegisterMergeSampleImage( rtgiOutImage, rtgiOutView, w, h );
+	rtgiOutW = w;
+	rtgiOutH = h;
+	rtgiOutReady = false;
+	return true;
+}
+
+void VulkanBackend::RtgiDestroyOutput() {
+	if ( rtgiOutImage == VK_NULL_HANDLE && rtgiOutView == VK_NULL_HANDLE ) {
+		return;
+	}
+	if ( device != VK_NULL_HANDLE ) {
+		vkDeviceWaitIdle( device );
+	}
+	if ( rtgiOutView )  { vkDestroyImageView( device, rtgiOutView, NULL ); rtgiOutView = VK_NULL_HANDLE; }
+	if ( rtgiOutImage ) { vmaDestroyImage( vma, rtgiOutImage, rtgiOutAlloc ); rtgiOutImage = VK_NULL_HANDLE; rtgiOutAlloc = NULL; }
+	if ( rtgiOutSampleImage >= 1 && rtgiOutSampleImage <= (ImageHandle)imageTable.size() ) {
+		imageTable[rtgiOutSampleImage - 1].live = false;
+	}
+	InvalidateTextureSets();
+	rtgiOutSampleImage = 0;
+	rtgiOutW = rtgiOutH = 0;
+	rtgiOutReady = false;
+}
+
 bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	// bring-up observability: every failure branch says WHY once (the caller's debug
 	// overlay silently falls back to the raw rays, which masks a dead denoiser)
@@ -6762,7 +6843,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	if ( !NrdCreate( a.w, a.h ) ) {
 		RTAO_FAIL( 1, "NrdCreate failed (see warnings above)" );
 	}
-	if ( !RtaoEnsureOutput( a.w, a.h ) ) {
+	if ( !( a.giMode ? RtgiEnsureOutput( a.w, a.h ) : RtaoEnsureOutput( a.w, a.h ) ) ) {
 		RTAO_FAIL( 2, "output image creation failed" );
 	}
 
@@ -6776,6 +6857,11 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		RTAO_FAIL( 3, "input target/velocity lookup failed" );
 	}
 	ImageRec &vel = imageTable[a.velImage - 1];
+	// H6f: optional per-pixel history confidence (GI path only). Present only when the caller ran the
+	// confidence pass this frame (needs a prior denoised frame to reproject) — otherwise NRD antilag only.
+	const bool haveConf = a.giMode && a.confImage >= 1 && a.confImage <= (ImageHandle)imageTable.size()
+		&& imageTable[a.confImage - 1].live;
+	ImageRec *conf = haveConf ? &imageTable[a.confImage - 1] : NULL;
 	// the guides may live in attachments 1/2 of the ray target itself (CreateRenderTargetRtaoMrt)
 	const int vzAtt = a.viewzAtt, nmAtt = a.normalAtt;
 	if ( vzAtt < 0 || vzAtt >= vz->colorCount || nmAtt < 0 || nmAtt >= norm->colorCount ) {
@@ -6784,6 +6870,14 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	auto targetView = []( RenderTarget *t, int att ) {
 		return t->colorSampleView[att] != VK_NULL_HANDLE ? t->colorSampleView[att] : t->colorView[att];
 	};
+
+	// H6b (docs/rtx-rtgi.md): giMode swaps the output image + denoiser id + the DIFF resource enums so the
+	// single NRD instance denoises GI radiance this frame instead of RTAO occlusion. RTAO (giMode false)
+	// is byte-identical below.
+	VkImage      outImg   = a.giMode ? rtgiOutImage : rtaoOutImage;
+	VkImageView  outView  = a.giMode ? rtgiOutView  : rtaoOutView;
+	bool        &outReady = a.giMode ? rtgiOutReady : rtaoOutReady;
+	const nrd::Identifier denId = a.giMode ? NRD_ID_REBLUR_GI : NRD_ID_REBLUR_AO;
 
 	// frame settings
 	nrd::CommonSettings cs = {};
@@ -6804,6 +6898,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	cs.frameIndex = a.frameIndex;
 	cs.accumulationMode = a.reset ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
 	cs.isMotionVectorInWorldSpace = false;
+	cs.isHistoryConfidenceAvailable = haveConf;			// H6f: feed IN_DIFF_CONFIDENCE (GI edge-ghosting antilag)
 	if ( nrd::SetCommonSettings( *nrdInstance, cs ) != nrd::Result::SUCCESS ) {
 		RTAO_FAIL( 4, "nrd::SetCommonSettings rejected the frame settings" );
 	}
@@ -6811,7 +6906,24 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	rs.hitDistanceParameters.A = a.hitDistA;		// MUST mirror rtao_ray.frag's normalization
 	rs.hitDistanceParameters.B = a.hitDistB;
 	rs.enableAntiFirefly = true;
-	if ( nrd::SetDenoiserSettings( *nrdInstance, NRD_ID_REBLUR_AO, &rs ) != nrd::Result::SUCCESS ) {
+	// GI only (r_rtgiHistory): cap ReBLUR's accumulation window. This is the ONE lever we expose — it trades
+	// noise ("frying pixels" at short history) against how long a switched-off light or a stale bounce lingers
+	// (~this many frames). Aggressive antilag / fast-history clamping was tried to also kill motion trails, but
+	// on this 1-spp half-res signal it just made the GI DIM/flicker while strafing (it rejects history on any
+	// luminance change, including the natural variation under motion), which is worse than the mild residual
+	// smear — so the clamp/antilag stay at NRD defaults. RTAO leaves everything default (maxAccumFrames 0).
+	if ( a.giMode && a.maxAccumFrames > 0 ) {
+		uint32_t hist = (uint32_t)a.maxAccumFrames;
+		if ( hist > 63 ) { hist = 63; }
+		rs.maxAccumulatedFrameNum = hist;
+		if ( rs.maxFastAccumulatedFrameNum > hist ) { rs.maxFastAccumulatedFrameNum = hist; }	// fast history must be <= main
+	}
+	if ( a.giMode && a.checkerboard > 0 ) {
+		// H6g: NRD reconstructs the full-res diffuse from the horizontal checkerboard packed in rayRT's left
+		// half. Mode = orientation of even frames; the caller alternates BLACK/WHITE by frame parity.
+		rs.checkerboardMode = ( a.checkerboard == 1 ) ? nrd::CheckerboardMode::BLACK : nrd::CheckerboardMode::WHITE;
+	}
+	if ( nrd::SetDenoiserSettings( *nrdInstance, denId, &rs ) != nrd::Result::SUCCESS ) {
 		RTAO_FAIL( 5, "nrd::SetDenoiserSettings rejected the ReBLUR settings" );
 	}
 
@@ -6819,8 +6931,16 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_MV]               = vel.view;
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_NORMAL_ROUGHNESS] = targetView( norm, nmAtt );
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_VIEWZ]            = targetView( vz, vzAtt );
-	nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_HITDIST]     = targetView( ray, 0 );
-	nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_HITDIST]    = rtaoOutView;
+	if ( haveConf ) {
+		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_CONFIDENCE] = conf->view;	// H6f
+	}
+	if ( a.giMode ) {
+		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST]  = targetView( ray, 0 );	// RGBA16F radiance+hitdist
+		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST] = outView;
+	} else {
+		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_HITDIST]  = targetView( ray, 0 );
+		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_HITDIST] = outView;
+	}
 
 	VkCommandBuffer cb = frames[frameIndex].cb;
 	if ( insideScenePass ) {
@@ -6836,7 +6956,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 
 	// inputs: SHADER_READ_ONLY -> GENERAL (NRD's descriptors are written with GENERAL);
 	// output: first use UNDEFINED -> GENERAL, then a WAR barrier vs last frame's sampling
-	VkImageMemoryBarrier pre[5] = {};
+	VkImageMemoryBarrier pre[6] = {};
 	uint32_t preCount = 0;
 	auto addPre = [&]( VkImage img, VkImageLayout oldL ) {
 		VkImageMemoryBarrier &b = pre[preCount++];
@@ -6855,17 +6975,18 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	addPre( vz->colorImage[vzAtt],   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPre( norm->colorImage[nmAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPre( vel.image,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-	addPre( rtaoOutImage,        rtaoOutReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
+	if ( haveConf ) { addPre( conf->image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// H6f
+	addPre( outImg,              outReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
 	vkCmdPipelineBarrier( cb,
 		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		0, 0, NULL, 0, NULL, preCount, pre );
-	rtaoOutReady = true;
+	outReady = true;
 
-	const bool recorded = NrdRecordDispatches( cb, &NRD_ID_REBLUR_AO, 1 );
+	const bool recorded = NrdRecordDispatches( cb, &denId, 1 );
 	if ( recorded && !( warned & ( 1 << 7 ) ) ) {
 		warned |= 1 << 7;
-		common->Printf( "RTAO: NRD ReBLUR denoise active (%dx%d)\n", a.w, a.h );
+		common->Printf( "%s: NRD ReBLUR denoise active (%dx%d)\n", a.giMode ? "RTGI" : "RTAO", a.w, a.h );
 	}
 	// on record failure we still fall through to the restore barriers below — the inputs
 	// were already transitioned to GENERAL and MUST go back to SHADER_READ_ONLY, or every
@@ -6892,7 +7013,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	addPost( vz->colorImage[vzAtt],   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPost( norm->colorImage[nmAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPost( vel.image,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-	addPost( rtaoOutImage,        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	addPost( outImg,              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	// dst includes COMPUTE: FSR2 consumes the velocity image (and could consume others)
 	// from compute later in the frame
 	vkCmdPipelineBarrier( cb,
@@ -9286,6 +9407,22 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetRtaoMrt( int w, int h ) {
 	return (RenderTargetHandle)( slot + 1 );
 }
 
+// RT GI radiance MRT (docs/rtx-rtgi.md H6): attachment 0 = RGBA16F radiance (vs the RTAO MRT's R16F
+// occlusion) so a bounce hit's colour fits; 1 = R16F signed view z, 2 = RGBA16F packed world normal -
+// the same NRD guides the RTAO ray writes, so the H6b DIFFUSE denoise drops in with the RTAO wiring. VK only.
+RenderTargetHandle VulkanBackend::CreateRenderTargetRtgiMrt( int w, int h ) {
+	if ( device == VK_NULL_HANDLE ) {
+		return 0;
+	}
+	static const VkFormat fmts[3] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT };
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R16G16B16A16_SFLOAT, 3, /*ds*/false, /*frameCapable*/false, /*mipLevels*/1, fmts ) ) {
+		targetTable[slot] = RenderTarget();
+		return 0;
+	}
+	return (RenderTargetHandle)( slot + 1 );
+}
+
 // Begin a fullscreen pass rendering into mip LEVEL of a mipped color target (level >= 1;
 // level 0 is the linearize pass via BeginTargetPass). Uses the level's own framebuffer.
 // The color-target render pass's external dependencies serialize this write against the
@@ -9430,7 +9567,7 @@ void VulkanBackend::BeginTargetPass( RenderTargetHandle rt, const ClearArgs *cle
 	}
 	if ( t->colorTarget ) {
 		// clear each color attachment (fullscreen draws overwrite it anyway) + ds
-		VkClearValue cv[4] = {};		// up to 3 color + 1 depth (R1/A0)
+		VkClearValue cv[5] = {};		// up to 4 color (RTGI albedo) + 1 depth
 		if ( clear != NULL && clear->color ) {
 			for ( int c = 0; c < t->colorCount; c++ ) {
 				// attachment 2 is the RG16F velocity MRT (R1/A2): sky/uncovered pixels are
@@ -9641,6 +9778,7 @@ uint8_t VulkanBackend::PassClassFor( VkFormat colorFmt, bool hasDepth, int color
 	}
 	// RGBA8 family (SSAO buffers later)
 	if ( !hasDepth )      { return 4; }		// color-only RGBA8
+	if ( colorCount >= 4 ) { return 10; }	// 4-MRT gbuffer + RTGI albedo (RGBA8+RGBA8+RG16F+RGBA8+depth, docs/rtx-rtgi.md H6c): distinct layout, MUST NOT alias class 8
 	if ( colorCount >= 3 ) { return 8; }	// 3-MRT velocity gbuffer (RGBA8+RGBA8+RG16F+depth): distinct layout, MUST NOT alias class 6
 	return colorCount >= 2 ? 6 : 5;			// color+depth (+MRT)
 }
@@ -9654,8 +9792,8 @@ bool VulkanBackend::BuildColorPasses( RenderTarget &t, bool frameCapable ) {
 		const bool clearColor = ( v == 0 );			// clear resets color; load/clearDS keep it
 		const bool clearDS    = ( v == 0 || v == 2 );
 
-		VkAttachmentDescription atts[4] = {};		// up to 3 color + 1 depth (R1/A0)
-		VkAttachmentReference   colorRefs[3] = {};
+		VkAttachmentDescription atts[5] = {};		// up to 4 color (RTGI albedo) + 1 depth
+		VkAttachmentReference   colorRefs[4] = {};
 		for ( int c = 0; c < nColor; c++ ) {
 			atts[c].format = t.colorFormat[c];
 			atts[c].samples = VK_SAMPLE_COUNT_1_BIT;
@@ -9726,7 +9864,7 @@ bool VulkanBackend::BuildColorPasses( RenderTarget &t, bool frameCapable ) {
 bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat colorFmt,
                                        int colorCount, bool wantDepthStencil, bool frameCapable,
                                        int mipLevels, const VkFormat *mrtFormats ) {
-	if ( device == VK_NULL_HANDLE || colorCount < 1 || colorCount > 3 ) {
+	if ( device == VK_NULL_HANDLE || colorCount < 1 || colorCount > 4 ) {
 		return false;
 	}
 	if ( wantDepthStencil && sceneDepthFormat == VK_FORMAT_UNDEFINED ) {
@@ -9834,7 +9972,7 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		return false;
 	}
 
-	VkImageView views[4] = {};		// up to 3 color + 1 depth (R1/A0)
+	VkImageView views[5] = {};		// up to 4 color (RTGI albedo) + 1 depth
 	int nv = 0;
 	for ( int c = 0; c < colorCount; c++ ) { views[nv++] = t.colorView[c]; }
 	if ( wantDepthStencil ) { views[nv++] = t.dsView; }
@@ -9985,13 +10123,15 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetColorDepth( ImageFormat fmt,
 		common->Warning( "VK CreateRenderTargetColorDepth: only IF_RGBA8 supported" );
 		return 0;
 	}
-	if ( colorCount < 1 || colorCount > 3 ) {
-		common->Warning( "VK CreateRenderTargetColorDepth: colorCount must be 1-3" );
+	if ( colorCount < 1 || colorCount > 4 ) {
+		common->Warning( "VK CreateRenderTargetColorDepth: colorCount must be 1-4" );
 		return 0;
 	}
 	// colorCount 3 = the R1 velocity gbuffer: RGBA8 normal @0, RGBA8 SSR @1, RG16F velocity @2.
+	// colorCount 4 adds RGBA8 albedo @3 (docs/rtx-rtgi.md H6c: receiver albedo for the RT GI apply).
 	const VkFormat velFormats[3] = { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16_SFLOAT };
-	const VkFormat *mrt = ( colorCount == 3 ) ? velFormats : NULL;
+	const VkFormat albedoFormats[4] = { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM };
+	const VkFormat *mrt = ( colorCount == 4 ) ? albedoFormats : ( colorCount == 3 ) ? velFormats : NULL;
 	int slot = AllocTargetSlot();
 	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R8G8B8A8_UNORM, colorCount, /*ds*/true, /*frameCapable*/false, /*mipLevels*/1, mrt ) ) {
 		targetTable[slot] = RenderTarget();
@@ -10018,6 +10158,13 @@ ImageHandle VulkanBackend::GetRenderTargetImage3( RenderTargetHandle rt ) {
 	}
 	RenderTarget *t = LookupTarget( rt );
 	return ( t && t->colorCount >= 3 ) ? t->colorSampleImage[2] : 0;
+}
+
+// fourth color attachment = the RGBA8 receiver-albedo of the 4-MRT RTGI prepass (docs/rtx-rtgi.md H6c).
+// No merged-target branch: the albedo prepass forces the standalone target, so it is never the merge.
+ImageHandle VulkanBackend::GetRenderTargetImage4( RenderTargetHandle rt ) {
+	RenderTarget *t = LookupTarget( rt );
+	return ( t && t->colorCount >= 4 ) ? t->colorSampleImage[3] : 0;
 }
 
 // the color/depth image the current frame target resolves to (for M5 captures)
@@ -10646,7 +10793,7 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	// blend-attachment count must match the active subpass: 0 for the depth-only
 	// shadow pass, 1 for the scene / HDR / color targets, 2 for an MRT target. The
 	// MRT attachments share one blend config (the SSR material buffer isn't blended).
-	VkPipelineColorBlendAttachmentState attArr[3] = { att, att, att };	// up to 3 color attachments (R1/A0)
+	VkPipelineColorBlendAttachmentState attArr[4] = { att, att, att, att };	// up to 4 color attachments (RTGI albedo, docs/rtx-rtgi.md H6c)
 	cb.attachmentCount = (uint32_t)curColorAtt;
 	cb.pAttachments = ( curColorAtt > 0 ) ? attArr : NULL;
 

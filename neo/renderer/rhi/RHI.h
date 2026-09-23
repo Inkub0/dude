@@ -195,6 +195,10 @@ struct RtaoDenoiseArgs {
 	unsigned int frameIndex;
 	bool	reset;						// history invalid: CLEAR_AND_RESTART
 	int		viewzAtt, normalAtt;		// colour-attachment index of the guide inside viewzRT / normalRT (0 = a single-colour target)
+	bool	giMode;						// H6b: denoise GI (REBLUR_DIFFUSE, RGBA16F radiance+hitdist in rayRT att0) into GetRtgiOutputImage, instead of RTAO occlusion
+	int		maxAccumFrames;				// GI only (giMode): ReBLUR max accumulated history frames (r_rtgiHistory); shorter = less ghosting, more noise. 0 = NRD default (RTAO path)
+	ImageHandle	confImage;				// GI only (giMode): IN_DIFF_CONFIDENCE, per-pixel history confidence 0..1 (r_rtgiConfidence). 0 = not provided (NRD antilag only)
+	int		checkerboard;				// GI only (giMode): 0 = off; 1 = ReBLUR checkerboard BLACK (even frame); 2 = WHITE (odd frame). rayRT holds the packed half-res radiance, guides are full-res
 };
 
 class RHI {
@@ -342,6 +346,9 @@ public:
 	// distance @0, R16F signed view z @1, RGBA16F packed world normal @2 - so the ray pass writes the
 	// denoiser's guides itself. Attachments 1/2 are read back with GetRenderTargetImage2/3. VK only.
 	virtual RenderTargetHandle	CreateRenderTargetRtaoMrt( int w, int h ) { return 0; }
+	// RT GI radiance MRT (docs/rtx-rtgi.md H6): like the RTAO MRT but attachment 0 is RGBA16F radiance
+	// (vs R16F occlusion) so a bounce hit's colour fits; 1/2 are the same NRD guides (viewZ R16F, normal RGBA16F). VK only.
+	virtual RenderTargetHandle	CreateRenderTargetRtgiMrt( int w, int h ) { return 0; }
 	// RT shadow blur ray target (docs/rtx-shadow-blur.md, perf): attachment 0 = RGBA16F
 	// (vis / hwX / dist / hwY, the blur's working data), attachment 1 = RG8 per-pixel SUMMARY
 	// (R = visibility, G = penumbra half-width / HW_MAX, or 1.0 = untraced) so the tile
@@ -388,6 +395,8 @@ public:
 	// third color attachment (RG16F velocity MRT, R1/A2). Non-pure: only the VK
 	// 3-MRT velocity gbuffer has one; every other target and the GL3 backend return 0.
 	virtual ImageHandle			GetRenderTargetImage3( RenderTargetHandle rt ) { return 0; }
+	// fourth color attachment = the RGBA8 receiver-albedo of the 4-MRT RTGI prepass (docs/rtx-rtgi.md H6c). VK only.
+	virtual ImageHandle			GetRenderTargetImage4( RenderTargetHandle rt ) { return 0; }
 
 	// per-draw uniform ring: writes `size` bytes and returns the aligned
 	// offset (+ the ring's buffer in *buffer) for DrawArgs::uniformBuffer/
@@ -480,6 +489,9 @@ public:
 	// the result is sampled through GetRtaoOutputImage (0 until the first successful run)
 	virtual bool		RtaoDenoise( const RtaoDenoiseArgs &args ) { return false; }
 	virtual ImageHandle	GetRtaoOutputImage() { return 0; }
+	// H6b RT GI (docs/rtx-rtgi.md): the RtaoDenoise giMode path writes the denoised GI radiance
+	// (RGBA16F: radiance .rgb, occlusion .w) here; 0 until the first successful GI denoise
+	virtual ImageHandle	GetRtgiOutputImage() { return 0; }
 	// R1/D: snapshot the scene color as the OPAQUE-ONLY input for FSR2's auto-reactive
 	// mask. Called at the opaque/translucent split of the primary view (after the SSR
 	// composite, before particles/blends draw); a straight same-orientation copy, unlike

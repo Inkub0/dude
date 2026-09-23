@@ -1776,7 +1776,7 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 		// the "RT free at rest" idle-skip premise doesn't apply here anyway — no real cost.
 		const bool dirty = !s_rtTlasEverBuilt || dyn || s_rtLastHadDyn || sig != s_rtLastTlasSig;
 		static int accBuilt = 0, accSkipped = 0, accStartMs = 0;
-		if ( !r_rtTlasDirty.GetBool() || dirty || r_rtao.GetBool() ) {
+		if ( !r_rtTlasDirty.GetBool() || dirty || r_rtao.GetBool() || r_rtgi.GetBool() ) {
 			r->UpdateTlas( inst, n );
 			s_rtLastTlasSig = sig;
 			s_rtLastHadDyn = dyn;
@@ -2503,13 +2503,14 @@ static void R_RtWorldUpdate( void ) {
 	}
 	// r_rtSunShadows (R3) / r_rtMovingLights (Option A) / r_rtAllLights / r_rtao (H4) imply the scene:
 	// the consumers auto-build their prerequisite
-	if ( !r_rtWorld.GetBool() && !r_rtSunShadows.GetBool() && !r_rtMovingLights.GetBool() && !r_rtAllLights.GetBool() && !r_rtao.GetBool() ) {
-		if ( r_rtWorld.IsModified() || r_rtSunShadows.IsModified() || r_rtMovingLights.IsModified() || r_rtAllLights.IsModified() || r_rtao.IsModified() ) {
+	if ( !r_rtWorld.GetBool() && !r_rtSunShadows.GetBool() && !r_rtMovingLights.GetBool() && !r_rtAllLights.GetBool() && !r_rtao.GetBool() && !r_rtgi.GetBool() ) {
+		if ( r_rtWorld.IsModified() || r_rtSunShadows.IsModified() || r_rtMovingLights.IsModified() || r_rtAllLights.IsModified() || r_rtao.IsModified() || r_rtgi.IsModified() ) {
 			r_rtWorld.ClearModified();
 			r_rtSunShadows.ClearModified();
 			r_rtMovingLights.ClearModified();
 			r_rtAllLights.ClearModified();
 			r_rtao.ClearModified();
+			r_rtgi.ClearModified();
 			r->DestroyRtScene();		// switched off: free the scene (no-op when never built)
 			s_rtWorldMap.Clear();
 			s_rtAreaBlas.Clear();
