@@ -180,6 +180,7 @@ public:
 	// ---- frame ----
 	virtual void	BeginFrame( int windowWidth, int windowHeight );
 	virtual void	EndFrame();
+	virtual void	SetFramePresent( bool present );
 
 	// ---- passes ----
 	virtual void	BeginPass( const ClearArgs *clear );
@@ -372,6 +373,8 @@ private:
 	// per-frame state
 	bool						frameOpen = false;
 	bool						skipFrame = false;			// minimized / acquire failed
+	bool						framePresent = true;		// SetFramePresent: one-shot, consumed by BeginFrame
+	bool						frameWillPresent = true;	// this frame acquires a swapchain image and presents
 	bool						insideScenePass = false;
 	bool						sceneWritten = false;
 	int							fakePassDepth = 0;			// balanced no-op target passes
@@ -2596,6 +2599,10 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	if ( device == VK_NULL_HANDLE || frameOpen ) {
 		return;
 	}
+	// one-shot from SetFramePresent: a swap-less command list (CaptureRenderToFile) records and
+	// submits like any frame but never touches the swapchain — see the acquire below and EndFrame
+	frameWillPresent = framePresent;
+	framePresent = true;
 
 	// Advance the NVML telemetry ring while the device is alive, so a crash dump can show the
 	// clock / P-state / power trajectory leading into a device loss. Cheap and throttled to ~10 Hz;
@@ -2707,22 +2714,28 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 		return;
 	}
 
-	VkResult ar = vkAcquireNextImageKHR( device, swapchain, UINT64_MAX, f.acquireSem, VK_NULL_HANDLE, &imageIndex );
-	if ( ar == VK_ERROR_OUT_OF_DATE_KHR ) {
-		if ( !RecreateSwapchain() ) {
+	// Acquire a swapchain image only for a presenting frame. Acquiring for a capture-only
+	// issue would commit EndFrame to a present, which is exactly the GL-divergent flash: GL
+	// only swaps in the frontend's RC_SWAP_BUFFERS case.
+	VkResult ar = VK_SUCCESS;
+	if ( frameWillPresent ) {
+		ar = vkAcquireNextImageKHR( device, swapchain, UINT64_MAX, f.acquireSem, VK_NULL_HANDLE, &imageIndex );
+		if ( ar == VK_ERROR_OUT_OF_DATE_KHR ) {
+			if ( !RecreateSwapchain() ) {
+				skipFrame = true;
+				frameOpen = true;
+				return;
+			}
+			ar = vkAcquireNextImageKHR( device, swapchain, UINT64_MAX, f.acquireSem, VK_NULL_HANDLE, &imageIndex );
+		}
+		if ( ar == VK_SUBOPTIMAL_KHR ) {
+			swapchainDirty = true;			// present this frame, rebuild next
+		} else if ( ar != VK_SUCCESS ) {
+			vkCheck( ar, "vkAcquireNextImageKHR" );
 			skipFrame = true;
 			frameOpen = true;
 			return;
 		}
-		ar = vkAcquireNextImageKHR( device, swapchain, UINT64_MAX, f.acquireSem, VK_NULL_HANDLE, &imageIndex );
-	}
-	if ( ar == VK_SUBOPTIMAL_KHR ) {
-		swapchainDirty = true;			// present this frame, rebuild next
-	} else if ( ar != VK_SUCCESS ) {
-		vkCheck( ar, "vkAcquireNextImageKHR" );
-		skipFrame = true;
-		frameOpen = true;
-		return;
 	}
 
 	vkResetFences( device, 1, &f.fence );
@@ -3000,6 +3013,30 @@ void VulkanBackend::EndFrame() {
 	}
 
 	FrameSlot &f = frames[frameIndex];
+
+	if ( !frameWillPresent ) {
+		// capture-only issue (no swapchain image acquired): close and submit so the scene
+		// image holds the finished content for the readback (ReadPixelsRGB waits on the
+		// queue), but never blit or present — GL doesn't swap for these either.
+		if ( insideScenePass ) {
+			vkCmdEndRenderPass( f.cb );
+			insideScenePass = false;
+		}
+		if ( gpuTimerActive ) {
+			vkCmdWriteTimestamp( f.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuTimerPool, 2 * frameIndex + 1 );
+			gpuTimerBusy[frameIndex] = true;
+			gpuTimerActive = false;
+		}
+		vkEndCommandBuffer( f.cb );
+		VkSubmitInfo si = {};
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &f.cb;
+		vkCheck( vkQueueSubmit( gfxQueue, 1, &si, f.fence ), "vkQueueSubmit" );
+		imguiDrawData = NULL;
+		frameIndex = ( frameIndex + 1 ) % FRAMES_IN_FLIGHT;
+		return;
+	}
 
 	// every presented frame must be defined, even a draw-less one
 	if ( !sceneWritten ) {
@@ -10474,6 +10511,19 @@ RenderTargetHandle VulkanBackend::BeginNormalPrepass( int w, int h, const ClearA
 // SetFrameTarget: route the whole scene into an offscreen color target (HDR), or
 // back to the swapchain sceneColor path (rt == 0). Any open scene pass is closed
 // so the next Draw re-opens against the new destination.
+/*
+====================
+VulkanBackend::SetFramePresent
+
+One-shot, consumed by the next BeginFrame: false for a swap-less command list
+(CaptureRenderToFile), which then records and submits without acquiring or
+presenting a swapchain image.
+====================
+*/
+void VulkanBackend::SetFramePresent( bool present ) {
+	framePresent = present;
+}
+
 void VulkanBackend::SetFrameTarget( RenderTargetHandle rt ) {
 	if ( !frameOpen || skipFrame ) {
 		frameTarget = rt;		// remembered; takes effect when a frame is open
