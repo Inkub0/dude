@@ -4320,6 +4320,16 @@ static void DrawDbgGroup_RTReflections()
 		"appear in reflections (and RT shadows). On by default - without it a monster shows as a black "
 		"silhouette in reflections. Turning it off saves the per-frame monster BLAS build." );
 
+	float rtGlass = r_rtReflGlassScale.GetFloat();
+	if ( ImGui::SliderFloat( "Glass Intensity (r_rtReflGlassScale)", &rtGlass, 0.0f, 4.0f, "%.2f" ) ) {
+		r_rtReflGlassScale.SetFloat( rtGlass );
+	}
+	AddTooltip( "r_rtReflGlassScale: brightness of the RT reflection on GLASS panes only - goggles/visors, "
+		"the dropship cockpit. Those reflect a nearly-black cube in vanilla (that darkness is their authored "
+		"glass reflectivity), scaled by its perceptual brightness so the pane reads as subtle glass rather than "
+		"a mirror (windows stay shinier than goggles). Default 2 = the calibrated glass look, 1 = subtler, "
+		"higher = shinier toward a mirror, 0 = clear pane. Other reflective surfaces (floors, metal) are unaffected." );
+
 	ImGui::EndDisabled();	// r_rtReflections
 	ImGui::EndDisabled();	// isVulkan
 	EndSettingsGroup();
