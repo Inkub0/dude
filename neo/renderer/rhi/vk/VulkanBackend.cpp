@@ -435,7 +435,9 @@ private:
 	void			ApplyDynState( VkCommandBuffer cb, bool effFlipY );	// viewport/scissor/depth-bias (shared by BindForDraw + DrawZfillBatch)
 	int				AllocFromRing( RingBuf &ring, const void *data, int size, int align,
 	                               int wrapReserve, BufferHandle *buffer );
-	VkSampler		GetSampler( int textureFilter, int textureRepeat, bool hasMips );
+	VkSampler		BuildSampler( int textureFilter, int textureRepeat, bool hasMips );	// create (no cache)
+	VkSampler		GetSampler( int textureFilter, int textureRepeat, bool hasMips );	// cached
+	void			RefreshAnisotropySamplers();	// rebuild TF_DEFAULT samplers when image_anisotropy changes (live)
 	VkPipeline		GetPipeline( const PipelineDesc &desc );
 	VkBuffer		LookupBuffer( BufferHandle h ) const {
 		return ( h >= 1 && h <= (BufferHandle)bufferTable.size() ) ? bufferTable[h - 1] : VK_NULL_HANDLE;
@@ -576,6 +578,12 @@ private:
 	std::vector<ShaderRec>		shaderTable;			// handle = index + 1
 
 	std::vector<std::pair<unsigned int, VkSampler> >	samplerCache;	// key = filter|repeat|mips
+	// Live anisotropy (image_anisotropy): GL sets it per texture object, but VK bakes it into the
+	// sampler, so a change needs the TF_DEFAULT samplers rebuilt. Old handles retire here for a
+	// fence-safe destroy (same slot-cycle rule as retiredTexSets). appliedAnisotropy is the value
+	// the current samplers were built with; -1 = adopt the live value on the first frame (no rebuild).
+	std::vector<VkSampler>		retiredSamplers[FRAMES_IN_FLIGHT];
+	float						appliedAnisotropy = -1.0f;
 
 	// descriptor model (prelude.vk.glsl): set 0 = per-draw UBO (dynamic
 	// offset), set 1 = combined image samplers, units 0-7 + cube at 8
@@ -2372,6 +2380,15 @@ void VulkanBackend::FillGlConfig() {
 	glConfig.version_string = vkVersionStr;
 	glConfig.maxTextureSize = (int)physProps.limits.maxImageDimension2D;
 	glConfig.maxCubeMapSize = (int)physProps.limits.maxImageDimensionCube;
+	// Anisotropic filtering: the shared image manager and the settings menu read these GL-named
+	// fields to clamp image_anisotropy and to decide whether to offer the slider. On VK they must
+	// come from the device (sampler anisotropy is optional), not the never-populated GL defaults —
+	// without this the menu greys the slider out ("not supported") and ChangeTextureFilter clamps
+	// textureAnisotropy back to 1, so VK samplers never get any anisotropy at all.
+	glConfig.anisotropicAvailable = haveAnisotropy;
+	glConfig.maxTextureAnisotropy = haveAnisotropy ? physProps.limits.maxSamplerAnisotropy : 1.0f;
+	// re-adopt the live anisotropy on the first frame after (re)init instead of forcing a rebuild
+	appliedAnisotropy = -1.0f;
 
 	VkPhysicalDeviceMemoryProperties mem;
 	vkGetPhysicalDeviceMemoryProperties( physical, &mem );
@@ -2807,6 +2824,27 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 		vkFreeDescriptorSets( device, computePool, (uint32_t)retiredComputeSets[frameIndex].size(),
 			retiredComputeSets[frameIndex].data() );
 		retiredComputeSets[frameIndex].clear();
+	}
+	if ( !retiredSamplers[frameIndex].empty() ) {
+		// anisotropy-rebuild retirees from ~FRAMES_IN_FLIGHT frames ago: this slot's fence has
+		// passed and the texture sets that referenced them were freed above, so destroy them now
+		for ( size_t i = 0; i < retiredSamplers[frameIndex].size(); i++ ) {
+			vkDestroySampler( device, retiredSamplers[frameIndex][i], NULL );
+		}
+		retiredSamplers[frameIndex].clear();
+	}
+	// Live anisotropy: image_anisotropy (slider or quality preset) feeds globalImages->textureAnisotropy
+	// via ChangeTextureFilter, already reclamped to glConfig.maxTextureAnisotropy. When it moves, rebuild
+	// the anisotropic samplers here — no cb is recording yet and this slot is fenced off, so retiring and
+	// re-pointing is safe. The first frame after (re)init just adopts the value (see appliedAnisotropy).
+	if ( haveAnisotropy && globalImages != NULL ) {
+		const float wantAniso = (float)globalImages->textureAnisotropy;
+		if ( appliedAnisotropy < 0.0f ) {
+			appliedAnisotropy = wantAniso;			// samplers already built with this value
+		} else if ( wantAniso != appliedAnisotropy ) {
+			RefreshAnisotropySamplers();
+			appliedAnisotropy = wantAniso;
+		}
 	}
 	uboRing[frameIndex].offset = 0;
 	vertRing[frameIndex].offset = 0;
@@ -3632,6 +3670,13 @@ void VulkanBackend::DestroyM2Resources() {
 		vkDestroySampler( device, samplerCache[i].second, NULL );
 	}
 	samplerCache.clear();
+	// device is idle here; drop any anisotropy-rebuild retirees that haven't reached their drain slot
+	for ( int fs = 0; fs < FRAMES_IN_FLIGHT; fs++ ) {
+		for ( size_t i = 0; i < retiredSamplers[fs].size(); i++ ) {
+			vkDestroySampler( device, retiredSamplers[fs][i], NULL );
+		}
+		retiredSamplers[fs].clear();
+	}
 
 	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) {
 		if ( framePool[i] ) { vkDestroyDescriptorPool( device, framePool[i], NULL ); framePool[i] = VK_NULL_HANDLE; }
@@ -8060,16 +8105,15 @@ Sampler from the engine's textureFilter_t/textureRepeat_t. The GL path's
 per-texture filter knobs (image_filter etc.) collapse to their defaults here.
 ====================
 */
-VkSampler VulkanBackend::GetSampler( int textureFilter, int textureRepeat, bool hasMips ) {
-	const unsigned int key = ( (unsigned int)textureFilter << 8 )
-	                       | ( (unsigned int)textureRepeat << 1 )
-	                       | ( hasMips ? 1u : 0u );
-	for ( size_t i = 0; i < samplerCache.size(); i++ ) {
-		if ( samplerCache[i].first == key ) {
-			return samplerCache[i].second;
-		}
-	}
+// (filter, repeat, mips) packed into the samplerCache key. RefreshAnisotropySamplers decodes it
+// with the inverse shifts to find the TF_DEFAULT entries, so keep the two in step.
+static inline unsigned int VkSamplerCacheKey( int textureFilter, int textureRepeat, bool hasMips ) {
+	return ( (unsigned int)textureFilter << 8 )
+	     | ( (unsigned int)textureRepeat << 1 )
+	     | ( hasMips ? 1u : 0u );
+}
 
+VkSampler VulkanBackend::BuildSampler( int textureFilter, int textureRepeat, bool hasMips ) {
 	VkSamplerCreateInfo si = {};
 	si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
 	switch ( textureFilter ) {
@@ -8118,8 +8162,81 @@ VkSampler VulkanBackend::GetSampler( int textureFilter, int textureRepeat, bool 
 	if ( !vkCheck( vkCreateSampler( device, &si, NULL, &sampler ), "vkCreateSampler" ) ) {
 		return VK_NULL_HANDLE;
 	}
+	return sampler;
+}
+
+VkSampler VulkanBackend::GetSampler( int textureFilter, int textureRepeat, bool hasMips ) {
+	const unsigned int key = VkSamplerCacheKey( textureFilter, textureRepeat, hasMips );
+	for ( size_t i = 0; i < samplerCache.size(); i++ ) {
+		if ( samplerCache[i].first == key ) {
+			return samplerCache[i].second;
+		}
+	}
+
+	VkSampler sampler = BuildSampler( textureFilter, textureRepeat, hasMips );
+	if ( sampler == VK_NULL_HANDLE ) {
+		return VK_NULL_HANDLE;
+	}
 	samplerCache.push_back( std::make_pair( key, sampler ) );
 	return sampler;
+}
+
+/*
+====================
+VulkanBackend::RefreshAnisotropySamplers
+
+Live image_anisotropy change: only TF_DEFAULT samplers carry anisotropy, so recreate just those
+in place with the new globalImages->textureAnisotropy. The old handles are retired for a fence-safe
+destroy and remapped old->new, so every live texture record and its bindless slot (the two things
+that borrow a cache sampler) is re-pointed at the fresh sampler, then the per-frame texture sets are
+invalidated so they get rewritten. Called from BeginFrame at a fenced-off, no-cb-recording point.
+====================
+*/
+void VulkanBackend::RefreshAnisotropySamplers() {
+	if ( device == VK_NULL_HANDLE || !haveAnisotropy ) {
+		return;
+	}
+
+	std::vector<std::pair<VkSampler, VkSampler> > remap;	// old -> new, TF_DEFAULT entries only
+	for ( size_t i = 0; i < samplerCache.size(); i++ ) {
+		const unsigned int key = samplerCache[i].first;
+		if ( (int)( key >> 8 ) != TF_DEFAULT ) {
+			continue;								// TF_LINEAR/TF_NEAREST RT samplers are anisotropy-independent
+		}
+		const int  repeat = (int)( ( key >> 1 ) & 0x7Fu );	// inverse of VkSamplerCacheKey
+		const bool mips   = ( key & 1u ) != 0;
+		VkSampler oldS = samplerCache[i].second;
+		VkSampler newS = BuildSampler( TF_DEFAULT, repeat, mips );	// reads the new textureAnisotropy
+		if ( newS == VK_NULL_HANDLE ) {
+			continue;								// keep the old sampler rather than break its bindings
+		}
+		samplerCache[i].second = newS;				// the cache now hands out the rebuilt sampler
+		retiredSamplers[frameIndex].push_back( oldS );
+		remap.push_back( std::make_pair( oldS, newS ) );
+	}
+	if ( remap.empty() ) {
+		return;
+	}
+
+	// Re-point every live record that borrowed a retired sampler and refresh its bindless slot
+	// (SyncBindlessSlot is UPDATE_AFTER_BIND-safe). Records on non-cache samplers (shadow-compare,
+	// dummies) never match the remap and are left alone.
+	for ( size_t i = 0; i < imageTable.size(); i++ ) {
+		ImageRec &rec = imageTable[i];
+		if ( !rec.live || rec.sampler == VK_NULL_HANDLE ) {
+			continue;
+		}
+		for ( size_t r = 0; r < remap.size(); r++ ) {
+			if ( rec.sampler == remap[r].first ) {
+				rec.sampler = remap[r].second;
+				SyncBindlessSlot( (ImageHandle)( i + 1 ) );
+				break;
+			}
+		}
+	}
+
+	// the cached per-frame texture descriptor sets still hold the old rec.sampler handles
+	InvalidateTextureSets();
 }
 
 /*

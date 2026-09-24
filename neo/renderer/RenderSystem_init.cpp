@@ -1506,6 +1506,19 @@ void R_InitOpenGL( void ) {
 		glConfig.texture3DAvailable = qglTexImage3D != NULL;
 		glConfig.textureNonPowerOfTwoAvailable = true;
 
+		// Anisotropic filtering: same story — the image path gates the TexParameter on
+		// anisotropicAvailable and ChangeTextureFilter clamps image_anisotropy to
+		// maxTextureAnisotropy, both left at 0/false here without the probe, so AF would be
+		// dead on GL3 and the settings slider greyed out. GL_EXT_texture_filter_anisotropic
+		// (ARB_ variant core since 4.6) is present on effectively every GL 3.3 driver.
+		glConfig.anisotropicAvailable =
+			strstr( glConfig.extensions_string, "GL_EXT_texture_filter_anisotropic" ) != NULL
+			|| strstr( glConfig.extensions_string, "GL_ARB_texture_filter_anisotropic" ) != NULL;
+		glConfig.maxTextureAnisotropy = 1;
+		if ( glConfig.anisotropicAvailable ) {
+			qglGetFloatv( GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &glConfig.maxTextureAnisotropy );
+		}
+
 		// Phase 3 Chunk B: bring up the backend proper — core function
 		// pointers, GLSL program cache, per-draw UBO ring, VAOs. Runs again
 		// after vid_restart with the fresh context.
