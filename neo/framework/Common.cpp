@@ -154,11 +154,11 @@ extern int com_frameNumber;
 struct hitchAccum_t { const char *step; double ms; int count; };
 static hitchAccum_t hitchAccum[32];
 static int hitchAccumNum = 0;
-void R_HitchTrace( const char *step, const char *what, double ms ) {
+void R_HitchTrace( const char *step, const char *what, double ms, double forceMs ) {
 	if ( r_hitchTrace.GetInteger() <= 0 ) {
 		return;
 	}
-	if ( ms >= r_hitchTrace.GetInteger() ) {
+	if ( ms >= r_hitchTrace.GetInteger() || ( forceMs > 0.0 && ms >= forceMs ) ) {
 		common->Printf( "hitchTrace f%d: %-14s %-44s %7.2f ms\n", com_frameNumber, step, what ? what : "", ms );
 	}
 	int i;

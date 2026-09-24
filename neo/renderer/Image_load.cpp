@@ -1797,7 +1797,7 @@ On exit, the idImage will have a valid OpenGL texture number that can be bound
 ===============
 */
 void	idImage::ActuallyLoadImage( bool checkForPrecompressed, bool fromBackEnd ) {
-	idHitchScope hitchScope( "imageLoad", imgName.c_str() );	// TEMPORARY diagnostic (r_hitchTrace)
+	idHitchScope hitchScope( fromBackEnd ? "imageLoadBE" : "imageLoad", imgName.c_str(), 2.0 );	// TEMPORARY diagnostic (r_hitchTrace): names every load >= 2 ms
 	int		width, height;
 	byte	*pic;
 

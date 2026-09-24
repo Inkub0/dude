@@ -9,7 +9,8 @@
 #include "framework/CVarSystem.h"
 
 extern idCVar r_hitchTrace;
-void R_HitchTrace( const char *step, const char *what, double ms );
+// forceMs > 0: also print when ms >= forceMs, below the cvar threshold (names the small loads)
+void R_HitchTrace( const char *step, const char *what, double ms, double forceMs = 0.0 );
 // per-frame sums of every step (regardless of the print threshold), drained by the benchmark's
 // long-frame marker so bursts of sub-threshold work (many small pipelines / uploads) show up
 void R_HitchTraceFrameSummary( idStr &out );
@@ -17,11 +18,12 @@ void R_HitchTraceFrameSummary( idStr &out );
 // scoped timer: reports the enclosing block on exit
 class idHitchScope {
 public:
-	idHitchScope( const char *step, const char *what ) : step( step ), what( what ), t0( Sys_MillisecondsPrecise() ) {}
-	~idHitchScope() { R_HitchTrace( step, what, Sys_MillisecondsPrecise() - t0 ); }
+	idHitchScope( const char *step, const char *what, double forceMs = 0.0 ) : step( step ), what( what ), forceMs( forceMs ), t0( Sys_MillisecondsPrecise() ) {}
+	~idHitchScope() { R_HitchTrace( step, what, Sys_MillisecondsPrecise() - t0, forceMs ); }
 private:
 	const char *step;
 	const char *what;
+	double forceMs;
 	double t0;
 };
 
