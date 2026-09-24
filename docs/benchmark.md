@@ -57,7 +57,7 @@ Sound stays muted in both modes, as before.
 | CPU frontend / backend ms | `renderFrameStats_t` (new sub-millisecond `pc.frontEndMs`, `backEnd.pc.ms`) |
 | GPU frame time | the backend frame timer (`GL_TIME_ELAPSED` on opengl3, timestamp queries on Vulkan), kept running by `SetGpuTimerRequested` without the `r_*GpuTime` prints |
 | draw calls, triangles, lights, entities, views | the `tr.pc` / `backEnd.pc` counters |
-| recorded span | first and last demo `renderView.time` |
+| demo length | demo frames x 2 tics on the 60 Hz tic clock (game time runs 16 ms/tic, 4% shorter, so `renderView.time` would understate it) |
 
 The RHI executor (`RB_RHI_ExecuteBackEndCommands`) never timed itself before, so `com_speeds`'s
 `bk:` column was always 0 on opengl3/Vulkan. It is filled now.
@@ -77,11 +77,11 @@ DUDE 0.9.3  |  2026-09-24 15:30:12
 backend: vulkan  |  GPU: NVIDIA GeForce RTX 3080 Ti (driver ...)
 display: 2560x1440 fullscreen, vsync off, com_maxFPS 0
 preset: Ultra Nightmare (6)  |  active: r_rhiAA=2 r_fsr=1 r_hdr=1 r_pbr=1 ...
-playback: real-time (30 Hz demo clock, rendering decoupled)  |  demo: 2234 frames, 74.5 s recorded, played in 74.6 s
+playback: real-time (30 Hz demo clock, rendering decoupled)  |  demo: 2148 frames = 71.6 s, played in 71.6 s
 frames rendered: 9345 in 74.6 s = 125.3 fps
 frame time (ms): avg 7.98  median 7.71  min 4.12  max 41.20
 1% low: 62.1 fps (99th percentile 16.10 ms)   0.1% low: 30.4 fps (99.9th percentile 32.90 ms)
-hitches (frame > 2.5x median, 19.3 ms): 12 frames, worst 41.2 ms
+hitches (frame > 19.3 ms = max(2.5x median, median + 5 ms)): 12 frames, worst 41.2 ms
 CPU renderer (ms/frame): frontend 1.92  backend 2.41  total 4.33 (56% of the median frame)
 GPU (ms/frame): avg 6.81  max 20.10  (88% of the median frame -> GPU-bound)
 scene (per frame avg): 412 draw calls, 180k triangles, 12.3 lights, 61.0 entities, 1.0 views
@@ -92,12 +92,23 @@ Definitions:
 
 - **1% low / 0.1% low**: 1000 divided by the 99th / 99.9th percentile frame time (the RTSS /
   reviewer convention), not the mean of the slowest 1%.
-- **hitches**: frames longer than 2.5x the median.
+- **hitches**: frames longer than 2.5x the median, but never less than median + 5 ms (at
+  1000 fps a 2 ms frame is not a hitch).
 - **GPU-bound / CPU-bound**: GPU time above 85% / below 60% of the median frame. A hint, not a
   verdict; vsync or `com_maxFPS` cap the result and the header says so.
 - **CPU renderer total** is frontend + backend only; game logic does not run during a render demo.
 - Triangle counts on the RHI backends only cover the draw paths that report indexes; treat them as
   a lower bound. The legacy `opengl` backend has no GPU timer.
 
-The in-game results box shows the average, the 1% low, the frame count and the GPU average; the
-rest is in the console and the file.
+The in-game results box shows the average, the 1% low, the frame count, the GPU average and the
+report file name; the rest is in the console and the file.
+
+## Where to find the data after a run
+
+- **Console**: the whole report is printed just before the results box. Open the console and
+  scroll up (PgUp), or run `condump <name>` to write the console to `<name>.txt`.
+- **stdout**: everything the console prints also goes to the terminal that launched DUDE.
+- **Files**: `benchmarks/` inside the game folder under `fs_savepath`. With `run.sh` that is the
+  repository (`base/benchmarks/`, or `d3xp/benchmarks/` when playing the expansion); with a stock
+  launch it is `~/.local/share/dude/base/benchmarks/`. One `<demo>-<timestamp>.txt` per run,
+  followed by the full renderer/system cvar dump, plus the running `history.csv`.

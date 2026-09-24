@@ -105,8 +105,6 @@ typedef struct {
 	double			backEndMs;
 	double			drawCalls, tris, lights, entities, views;	// scene counter sums
 	int				statFrames;			// frames the sums above cover
-	int				firstViewTime;		// renderView.time of the first/last demo frame (-1 = none):
-	int				lastViewTime;		//   the demo's recorded duration
 } timeDemoStats_t;
 const int CONNECT_TRANSMIT_TIME		= 1000;
 const int MAX_LOGGED_USERCMDS		= 60*60*60;	// one hour of single player, 15 minutes of four player

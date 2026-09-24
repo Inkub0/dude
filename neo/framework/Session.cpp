@@ -364,7 +364,6 @@ void idSessionLocal::Clear() {
 	timeDemoStats.gpuMs.Clear();
 	memset( &timeDemoStats, 0, sizeof( timeDemoStats ) ); // idLists: zeroed == empty
 	timeDemoStats.lastFrameStart = -1.0;
-	timeDemoStats.firstViewTime = timeDemoStats.lastViewTime = -1;
 	waitingOnBind = false;
 	lastPacifierTime = 0;
 
@@ -885,6 +884,7 @@ void idSessionLocal::StopPlayingRenderDemo() {
 
 	// Record the stop time before doing anything that could be time consuming
 	int timeDemoStopTime = Sys_Milliseconds();
+	idStr demoName = readDemo->GetName();	// before Close() drops the file (and with it the name)
 
 	EndAVICapture();
 
@@ -893,8 +893,7 @@ void idSessionLocal::StopPlayingRenderDemo() {
 	sw->StopAllSounds();
 	soundSystem->SetPlayingSoundWorld( menuSoundWorld );
 
-	common->Printf( "stopped playing %s.\n", readDemo->GetName() );
-	idStr demoName = readDemo->GetName();
+	common->Printf( "stopped playing %s.\n", demoName.c_str() );
 	delete readDemo;
 	readDemo = NULL;
 
@@ -1031,7 +1030,6 @@ void idSessionLocal::TimeRenderDemo( const char *demoName, bool twice ) {
 	timeDemoStats.gpuMs.Clear();
 	memset( &timeDemoStats, 0, sizeof( timeDemoStats ) );
 	timeDemoStats.lastFrameStart = -1.0;
-	timeDemoStats.firstViewTime = timeDemoStats.lastViewTime = -1;
 	renderSystem->SetGpuTimerRequested( true );
 	renderFrameStats_t fs;
 	renderSystem->GetFrameStats( fs );
@@ -1149,13 +1147,15 @@ idStr idSessionLocal::TimeDemoReport( const char *demoName, float demoSeconds ) 
 	report += va( "preset: %s (%i)  |  active: %s\n", presetName, preset, features.Length() ? features.c_str() : "(none)" );
 
 	// ---- playback ----
-	const float recordedSeconds = ( st.firstViewTime >= 0 && st.lastViewTime > st.firstViewTime )
-		? ( st.lastViewTime - st.firstViewTime ) * 0.001f : 0.0f;
+	// the demo's length on the clock it plays back on: one demo frame per USERCMD_PER_DEMO_FRAME
+	// tics of the 60 Hz wall-clock tic timer (game time runs 16 ms/tic, 4% shorter, so the
+	// renderView times would understate it)
+	const float recordedSeconds = numDemoFrames * USERCMD_PER_DEMO_FRAME / (float)USERCMD_HZ;
 	const bool realTime = com_timeDemoRealTime.GetBool();
-	report += va( "playback: %s  |  demo: %i frames, %.1f s recorded, played in %.1f s%s\n",
+	report += va( "playback: %s  |  demo: %i frames = %.1f s, played in %.1f s%s\n",
 		realTime ? "real-time (30 Hz demo clock, rendering decoupled)" : "classic (one demo frame per rendered frame)",
 		numDemoFrames, recordedSeconds, demoSeconds,
-		( realTime && recordedSeconds > 0.0f && demoSeconds > recordedSeconds * 1.05f ) ? "  (slower than real time: frames were dropped to keep up)" : "" );
+		( realTime && demoSeconds > recordedSeconds * 1.05f ) ? "  (slower than real time: frames were dropped to keep up)" : "" );
 
 	// ---- frame rate / frame time ----
 	const int frames = st.renderedFrames;
@@ -1176,7 +1176,7 @@ idStr idSessionLocal::TimeDemoReport( const char *demoName, float demoSeconds ) 
 		const float p999 = TimeDemo_Percentile( sorted, 0.999f );
 		p1Low = ( p99 > 0.0f ) ? 1000.0f / p99 : 0.0f;
 		p01Low = ( p999 > 0.0f ) ? 1000.0f / p999 : 0.0f;
-		const float hitchMs = median * 2.5f;
+		const float hitchMs = Max( median * 2.5f, median + 5.0f );
 		for ( int i = sorted.Num() - 1; i >= 0 && sorted[i] > hitchMs; i-- ) {
 			hitches++;
 		}
@@ -1185,7 +1185,7 @@ idStr idSessionLocal::TimeDemoReport( const char *demoName, float demoSeconds ) 
 			sum / sorted.Num(), median, sorted[0], hitchWorst );
 		report += va( "1%% low: %.1f fps (99th percentile %.2f ms)   0.1%% low: %.1f fps (99.9th percentile %.2f ms)\n",
 			p1Low, p99, p01Low, p999 );
-		report += va( "hitches (frame > 2.5x median, %.1f ms): %i frames, worst %.1f ms\n", hitchMs, hitches, hitchWorst );
+		report += va( "hitches (frame > %.1f ms = max(2.5x median, median + 5 ms)): %i frames, worst %.1f ms\n", hitchMs, hitches, hitchWorst );
 	}
 
 	// ---- CPU / GPU split ----
@@ -1220,7 +1220,9 @@ idStr idSessionLocal::TimeDemoReport( const char *demoName, float demoSeconds ) 
 	// ---- files ----
 	idStr fileName = va( "benchmarks/%s-%s.txt", base.c_str(), stampFile );
 	idFile *f = fileSystem->OpenFileWrite( fileName );
+	bool reportSaved = false;
 	if ( f ) {
+		reportSaved = true;
 		f->Write( report.c_str(), report.Length() );
 		// the exact config for reproducing / diffing runs
 		idStr cfg = "\n---- renderer + system cvars ----\n";
@@ -1252,7 +1254,7 @@ idStr idSessionLocal::TimeDemoReport( const char *demoName, float demoSeconds ) 
 	if ( gpuAvg > 0.0f ) {
 		summary += va( ", GPU %.2f ms/frame", gpuAvg );
 	}
-	summary += "\nfull report in the console and benchmarks/";
+	summary += reportSaved ? va( "\nfull report: console + %s", fileName.c_str() ) : "\nfull report in the console";
 	return summary;
 }
 
@@ -2667,13 +2669,6 @@ void idSessionLocal::AdvanceRenderDemo( bool singleFrameOnly ) {
 				// a view is ready to render
 				skipFrames--;
 				numDemoFrames++;
-				if ( timeDemo ) {
-					// DUDE benchmark: the demo's recorded span, from its own view clock
-					if ( timeDemoStats.firstViewTime < 0 ) {
-						timeDemoStats.firstViewTime = currentDemoRenderView.time;
-					}
-					timeDemoStats.lastViewTime = currentDemoRenderView.time;
-				}
 			}
 			continue;
 		}
