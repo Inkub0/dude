@@ -29,6 +29,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "framework/FileSystem.h"
 #include "framework/DeclSkin.h"					// idDeclSkin (entity skin -> AO name for lazy bake)
 #include "tools/compilers/aobake/aobake.h"		// AO_BakeModelToCache (lazy occlusion-map baking)
+#include "framework/HitchTrace.h"					// TEMPORARY diagnostic (r_hitchTrace)
 
 extern idCVar r_useCarmacksReverse;		// defined in RenderSystem_init.cpp, no tr_local decl
 
@@ -900,7 +901,7 @@ static idImage *RB_RHI_SurfaceOcclusion( const idRenderModel *model, const idRen
 		if ( !exists && r_occlusionMapsAutoBake.GetBool()
 		     && rhiAoBakedModels.FindIndex( bakedKey ) < 0 ) {
 			rhiAoBakedModels.Append( bakedKey );
-			AO_BakeModelToCache( model, skin );
+			{ idHitchScope hitchBake( "aoBake", model ? model->Name() : NULL ); AO_BakeModelToCache( model, skin ); }	// TEMPORARY diagnostic
 			exists = RB_RHI_AoFileExists( path.c_str() );
 		}
 		if ( exists ) {
@@ -1846,6 +1847,7 @@ the idTech4 stage decomposition runs unchanged.
 ===================
 */
 static void RB_RHI_CreateDrawInteractions( const drawSurf_t *surf ) {
+	idHitchScope hitchScope( "interactions", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	for ( ; surf; surf = surf->nextOnLight ) {
 		if ( !surf->geo || ( !surf->geo->ambientCache && !surf->geo->gpuSkinVB ) ) {
 			continue;
@@ -1927,6 +1929,7 @@ GL3 backend can't run on anyway).
 ===================
 */
 static void RB_RHI_StencilShadowPass( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *drawSurfs, rhi::ShaderHandle shadowProg ) {
+	idHitchScope hitchScope( "stencilShadow", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	if ( !r_shadows.GetBool() || !drawSurfs ) {
 		return;
 	}
@@ -2112,6 +2115,7 @@ static void RB_RHI_CaptureCurrentDepth( const viewDef_t *viewDef ) {
 }
 
 static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
+	idHitchScope hitchScope( "depthFill", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	rhi::ShaderHandle zfill = r->LoadShader( "zfill" );
 
 	// subview near-clip plane (mirror / camera views): the legacy path forces
@@ -2693,6 +2697,7 @@ Returns false (→ caller uses the stencil path) if the target can't be created.
 ===================
 */
 static bool RB_RHI_ShadowMapPass( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderHandle prog ) {
+	idHitchScope hitchScope( "smProjected", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	// cap at the GL context's 2D texture limit so large requests degrade gracefully
 	const int mapHi = idMath::ClampInt( 256, 4096, glConfig.maxTextureSize );
 	const int base = idMath::ClampInt( 256, mapHi, r_shadowMapSize.GetInteger() );
@@ -2772,6 +2777,7 @@ is the fps win.
 ===================
 */
 static bool RB_RHI_ShadowMapPassSun( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderHandle prog ) {
+	idHitchScope hitchScope( "smSun", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	const viewDef_t *viewDef = backEnd.viewDef;
 	if ( !vLight->shadowMapCasters || !vLight->lightDef ) {
 		return false;
@@ -3725,6 +3731,7 @@ min of the two). Returns false (→ stencil fallback) if the cube target can't b
 ===================
 */
 static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::ShaderHandle prog, float range ) {
+	idHitchScope hitchScope( "smCube", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	// cap the upper bound at what the GL context actually supports for cube maps, so
 	// an 8192 request degrades gracefully on cards reporting less (GL 3.3 only
 	// guarantees 1024). maxCubeMapSize is queried once at init.
@@ -4137,6 +4144,7 @@ the coverage the depth prepass seals.
 // false for the standalone-normal-target path (or when it does nothing), where zfill still
 // seals depth as usual.
 static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
+	idHitchScope hitchScope( "prepass", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	if ( !R_BackendSupportsEnhancements() ) {
 		return false;
 	}
@@ -6067,6 +6075,7 @@ one the march still runs, unshadowed. Opt-in, no preset enables it (fidelity: ad
 ===================
 */
 void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
+	idHitchScope hitchScope( "volumetrics", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	if ( !r_volumetrics.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN || !r->SupportsRayQuery() ) {
 		return;
 	}
@@ -6316,6 +6325,7 @@ capture and screen mapping assume the whole framebuffer at the origin).
 ===================
 */
 static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
+	idHitchScope hitchScope( "ssao", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	// RTGI supersedes screen-space AO: it grounds the scene with real one-bounce occlusion + bounce light, and
 	// the fake cube-map ambient GTAO used to darken is fully replaced by GI (r_rtgiAmbientKeep). So AO is one
 	// technique at a time — RTAO already stands down for r_rtgi, and GTAO stands down here too (no wasted pass;
@@ -8690,6 +8700,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	}
 	if ( !r_skipInteractions.GetBool() ) {
 		for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
+			idHitchScope hitchLight( "light", NULL );	// TEMPORARY diagnostic (r_hitchTrace): whole per-light block
 			backEnd.vLight = vLight;
 
 			// fogging / blend lights happen after shader passes (Chunk F)
@@ -9375,6 +9386,7 @@ path guarantees no double-fogging by scissor alone).
 ===================
 */
 void RB_RHI_FogAllLights( rhi::RHI *r, viewDef_t *viewDef ) {
+	idHitchScope hitchScope( "fog", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	// note: r_skipFogLights skips the whole function (blend lights too) exactly
 	// as legacy RB_STD_FogAllLights; r_skipBlendLights is checked per blend light
 	if ( r_skipFogLights.GetBool() || r_showOverDraw.GetInteger() != 0 || viewDef->isXraySubview ) {

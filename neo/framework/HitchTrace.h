@@ -10,6 +10,9 @@
 
 extern idCVar r_hitchTrace;
 void R_HitchTrace( const char *step, const char *what, double ms );
+// per-frame sums of every step (regardless of the print threshold), drained by the benchmark's
+// long-frame marker so bursts of sub-threshold work (many small pipelines / uploads) show up
+void R_HitchTraceFrameSummary( idStr &out );
 
 // scoped timer: reports the enclosing block on exit
 class idHitchScope {

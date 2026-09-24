@@ -476,6 +476,7 @@ Same _currentRender snapshot + fullscreen-quad path as RB_RHI_PostProcess.
 =============
 */
 static void RB_RHI_AAPass( rhi::RHI *r, const viewDef_t *viewDef ) {
+	idHitchScope hitchScope( "aa", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	if ( r_rhiAA.GetInteger() <= 0 ) {
 		return;		// off → exact passthrough, skip the copy+draw entirely
 	}
@@ -567,6 +568,7 @@ is an exact passthrough, so this is skipped unless a toggle is on.
 =============
 */
 static void RB_RHI_PostProcess( rhi::RHI *r, const viewDef_t *viewDef ) {
+	idHitchScope hitchScope( "post", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	float grain = r_postFilmGrain.GetFloat();
 	float chroma = r_postChromaticAberration.GetFloat();
 	if ( grain <= 0.0f && chroma <= 0.0f ) {
@@ -2905,6 +2907,7 @@ pairs. Mirrors RB_STD_T_RenderShaderPasses stage for stage.
 */
 static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf,
                                        const viewEntity_t *&currentSpace, float mvp[16] ) {
+	idHitchScope hitchScope( "shaderPass", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	const srfTriangles_t *tri = surf->geo;
 	const idMaterial *shader = surf->material;
 

@@ -151,10 +151,48 @@ idCVar com_interpolateAnim( "com_interpolateAnim", "1", CVAR_BOOL | CVAR_SYSTEM 
 idCVar r_hitchTrace( "r_hitchTrace", "0", CVAR_SYSTEM | CVAR_INTEGER | CVAR_ARCHIVE,
 	"print instrumented steps (pipeline creation, image/sound loads, GPU-skin setup, demo advance) that take >= N ms, and mark benchmark frames >= N ms with a phase split; 0 = off" );
 extern int com_frameNumber;
+struct hitchAccum_t { const char *step; double ms; int count; };
+static hitchAccum_t hitchAccum[32];
+static int hitchAccumNum = 0;
 void R_HitchTrace( const char *step, const char *what, double ms ) {
-	if ( r_hitchTrace.GetInteger() > 0 && ms >= r_hitchTrace.GetInteger() ) {
+	if ( r_hitchTrace.GetInteger() <= 0 ) {
+		return;
+	}
+	if ( ms >= r_hitchTrace.GetInteger() ) {
 		common->Printf( "hitchTrace f%d: %-14s %-44s %7.2f ms\n", com_frameNumber, step, what ? what : "", ms );
 	}
+	int i;
+	for ( i = 0; i < hitchAccumNum; i++ ) {
+		if ( hitchAccum[i].step == step || !strcmp( hitchAccum[i].step, step ) ) {
+			break;
+		}
+	}
+	if ( i == hitchAccumNum ) {
+		if ( hitchAccumNum == 32 ) {
+			return;
+		}
+		hitchAccum[i].step = step; hitchAccum[i].ms = 0.0; hitchAccum[i].count = 0;
+		hitchAccumNum++;
+	}
+	hitchAccum[i].ms += ms;
+	hitchAccum[i].count++;
+}
+void R_HitchTraceFrameSummary( idStr &out ) {
+	// largest first, anything over 1 ms
+	for ( int n = 0; n < hitchAccumNum; n++ ) {
+		int best = -1;
+		for ( int i = 0; i < hitchAccumNum; i++ ) {
+			if ( hitchAccum[i].count > 0 && ( best < 0 || hitchAccum[i].ms > hitchAccum[best].ms ) ) {
+				best = i;
+			}
+		}
+		if ( best < 0 || hitchAccum[best].ms < 1.0 ) {
+			break;
+		}
+		out += va( "  %s %dx %.1f", hitchAccum[best].step, hitchAccum[best].count, hitchAccum[best].ms );
+		hitchAccum[best].count = 0;
+	}
+	hitchAccumNum = 0;
 }
 
 idCVar com_maxFPS( "com_maxFPS", "0", CVAR_INTEGER | CVAR_SYSTEM | CVAR_ARCHIVE, "cap the render frame rate (0 = uncapped). Best paired with vsync off; set it to your monitor's refresh or a clean divisor of it for even, tear-minimized pacing", 0, 1000 );

@@ -1061,10 +1061,14 @@ void idSessionLocal::TimeDemoFrame() {
 		// step prints (which precede this line) can be paired with them
 		extern int com_frameNumber;
 		const int trace = r_hitchTrace.GetInteger();
-		if ( trace > 0 && ms >= trace ) {
-			const double other = ms - st.hitchAdvanceMs - st.hitchDrawMs - st.hitchEndFrameMs;
-			common->Printf( "hitchTrace f%d: --- FRAME %.1f ms (demo frame %i): advance %.1f (render cmds %.1f, sound cmds %.1f)  draw %.1f  endFrame %.1f  other %.1f ---\n",
-				com_frameNumber, ms, numDemoFrames, st.hitchAdvanceMs, st.hitchAdvRenderMs, st.hitchAdvSoundMs, st.hitchDrawMs, st.hitchEndFrameMs, other );
+		if ( trace > 0 ) {
+			idStr steps;
+			R_HitchTraceFrameSummary( steps );
+			if ( ms >= trace ) {
+				const double other = ms - st.hitchAdvanceMs - st.hitchDrawMs - st.hitchEndFrameMs;
+				common->Printf( "hitchTrace f%d: --- FRAME %.1f ms (demo frame %i): advance %.1f (render cmds %.1f, sound cmds %.1f)  draw %.1f  endFrame %.1f  other %.1f --- steps:%s\n",
+					com_frameNumber, ms, numDemoFrames, st.hitchAdvanceMs, st.hitchAdvRenderMs, st.hitchAdvSoundMs, st.hitchDrawMs, st.hitchEndFrameMs, other, steps.c_str() );
+			}
 		}
 	}
 	st.hitchAdvanceMs = st.hitchAdvRenderMs = st.hitchAdvSoundMs = st.hitchDrawMs = st.hitchEndFrameMs = 0.0;
