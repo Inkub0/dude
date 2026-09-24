@@ -1959,29 +1959,13 @@ static CVarOption postProcessOptions[] = {
 			"exactly; ACES is the game-standard look, AgX and PBR Neutral shift colour the least.\n"
 			"DUDE is our signature curve: it leaves blacks and midtones exactly as authored and\n"
 			"only rolls off the >1.0 highlights (hue-preserving), so it suits Doom 3's LDR art.\n"
-			"Exposure below feeds the curve (it does nothing while Tonemap is Off).";
+			"Exposure (in the Display group) feeds the curve; it does nothing while Tonemap is Off.";
 		AddCVarOptionTooltips( cvar, descr );
 
-		// Exposure knob, right under the curve dropdown. Exposure only shapes the tonemap
-		// curves (mode 0 stays a pure passthrough), so it greys out when Tonemap is Off.
+		// Exposure and HDR Gamma moved to the Display group (they are the HDR counterparts of
+		// Brightness / Gamma and now sit right under them). This block stays tonemap-gated: the DUDE
+		// dials, emissive overbright and eye-adaptation below only do anything with a curve on.
 		ImGui::BeginDisabled( sel == 0 );
-		float exposure = cvarSystem->GetCVarFloat( "r_hdrExposure" );
-		if ( ImGui::SliderFloat( "Exposure", &exposure, 0.1f, 8.0f, "%.2f" ) ) {
-			cvarSystem->SetCVarFloat( "r_hdrExposure", exposure );
-		}
-		AddTooltip( "r_hdrExposure: linear exposure multiplier applied before the tonemap curve.\n"
-			"Raises or lowers the scene brightness feeding the curve; default 1.5 (tuned for DUDE). No effect while Tonemap is Off." );
-
-		// HDR display gamma (any curve): the normal gamma slider is bypassed while tonemapping, so
-		// this is the contrast/softness lever in HDR. Applied AFTER the curve on the display value.
-		float hgamma = cvarSystem->GetCVarFloat( "r_hdrGamma" );
-		if ( ImGui::SliderFloat( "HDR Gamma", &hgamma, 0.5f, 2.5f, "%.2f" ) ) {
-			cvarSystem->SetCVarFloat( "r_hdrGamma", hgamma );
-		}
-		AddTooltip( "r_hdrGamma: display gamma applied on top of the tonemap curve (the normal r_gamma is\n"
-			"bypassed while a curve is active). >1 lifts shadows/midtones for a softer, less 'punchy'\n"
-			"image while barely moving the faithful highlights; <1 deepens contrast; 1 = off. No effect\n"
-			"while Tonemap is Off." );
 
 		// DUDE-curve dials (r_hdrTonemap 5 only): the knee sets where highlights start rolling
 		// off (blacks/midtones below it stay untouched), the desaturation gives bright cores a
@@ -2030,7 +2014,7 @@ static CVarOption postProcessOptions[] = {
 			"1 = off. Only acts on overbright additive stages." );
 
 		// Eye adaptation (Phase B1): auto-exposure driven by the scene's average luminance. The
-		// Exposure slider above becomes the mid-gray target; brighter scenes expose down over time.
+		// Exposure slider (Display group) becomes the mid-gray target; brighter scenes expose down over time.
 		ImGui::Spacing();
 		bool eye = cvarSystem->GetCVarBool( "r_hdrEyeAdaptation" );
 		if ( ImGui::Checkbox( "Eye Adaptation (auto-exposure)", &eye ) ) {
@@ -3771,6 +3755,43 @@ static void DrawEnhGroup_Shadows()
 	}
 }
 
+// Display colour controls: Brightness / Gamma and their HDR counterparts (Exposure / HDR Gamma).
+// An active HDR tonemap curve (r_hdr + r_hdrTonemap>=1) is the frame's display transform, so
+// RB_RHI_GammaBrightness / the VK resolve skip r_gamma/r_brightness then - grey the LDR pair out
+// in that case and enable the HDR pair instead (they only shape the image with a curve on).
+static void DrawDisplayColorControls()
+{
+	const bool hdrCurve = r_hdr.GetBool() && cvarSystem->GetCVarInteger( "r_hdrTonemap" ) >= 1;
+
+	// LDR Brightness + Gamma (displayColorOptions[0..1]) - live; bypassed under an active HDR curve.
+	ImGui::BeginDisabled( hdrCurve );
+	DrawOptions( &displayColorOptions[0], 2 );
+	ImGui::EndDisabled();
+
+	// HDR Exposure + Gamma (moved here from Post-Processing): the HDR equivalents of the two sliders
+	// above. They only shape the image with a tonemap curve on, so they enable exactly when the LDR
+	// pair greys out.
+	ImGui::BeginDisabled( !hdrCurve );
+	float exposure = cvarSystem->GetCVarFloat( "r_hdrExposure" );
+	if ( ImGui::SliderFloat( "Exposure", &exposure, 0.1f, 8.0f, "%.2f" ) ) {
+		cvarSystem->SetCVarFloat( "r_hdrExposure", exposure );
+	}
+	AddTooltip( "r_hdrExposure: linear exposure multiplier applied before the tonemap curve.\n"
+		"Raises or lowers the scene brightness feeding the curve; default 1.5 (tuned for DUDE). "
+		"Needs HDR + a tonemap curve (see Post-Processing)." );
+	float hgamma = cvarSystem->GetCVarFloat( "r_hdrGamma" );
+	if ( ImGui::SliderFloat( "HDR Gamma", &hgamma, 0.5f, 2.5f, "%.2f" ) ) {
+		cvarSystem->SetCVarFloat( "r_hdrGamma", hgamma );
+	}
+	AddTooltip( "r_hdrGamma: display gamma applied on top of the tonemap curve (the normal Gamma\n"
+		"above is bypassed while a curve is active). >1 lifts shadows/midtones for a softer image;\n"
+		"<1 deepens contrast; 1 = off. Needs HDR + a tonemap curve (see Post-Processing)." );
+	ImGui::EndDisabled();
+
+	// r_gammaInShader (displayColorOptions[2]) - technical toggle, always available.
+	DrawOptions( &displayColorOptions[2], 1 );
+}
+
 static void DrawGraphicsMenu()
 {
 	ImGui::Spacing();
@@ -3780,116 +3801,25 @@ static void DrawGraphicsMenu()
 	DrawRendererBackend();
 	DrawOpenGLInfo();
 
-	// Display / windowing / output settings — a collapsible "burger" group like the
-	// enhancement groups below. Renderer Backend stays pinned above it.
+	// Display / windowing / output settings - a collapsible "burger" group like the enhancement
+	// groups below. Renderer Backend stays pinned above it.
 	if ( BeginSettingsGroup( "Display" ) ) {
 		DrawDisplaySettings();
-		// Brightness / Gamma (live). These took the spot the MSAA slider used to hold; MSAA
-		// now lives in the "Antialiasing" group further down.
-		DrawOptions( displayColorOptions, IM_ARRAYSIZE( displayColorOptions ) );
+		// Brightness / Gamma plus their HDR counterparts (Exposure / HDR Gamma); the LDR pair greys
+		// out under an active HDR tonemap curve and the HDR pair takes over (DrawDisplayColorControls).
+		DrawDisplayColorControls();
 		EndSettingsGroup();
 	}
 
-	ImGui::Spacing();
-	ImGui::TextDisabled( "Enhancements that deviate from vanilla Doom 3." );
-	ImGui::Spacing();
-
-	const bool supported = R_BackendSupportsEnhancements();
-	if ( !supported ) {
-		ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
-			"These settings don't apply on the current (legacy) backend." );
-		ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
-			"Choose OpenGL 3.3 as the Renderer Backend at the top of this tab to enable them." );
-		ImGui::Spacing();
-	}
-
-	// grey everything out (and make it non-interactive) when the running backend
-	// can't use these effects - they simply don't apply then.
-	ImGui::BeginDisabled( !supported );
-
-	// One-click quality presets for the whole enhancement suite. The combo is the
-	// user's target; the status line reflects the live cvars (so hand-tweaking any
-	// slider below reads back as "Custom"). Nothing is applied until "Apply".
-	ImGui::SeparatorText( "Quality Preset" );
-	{
-		static int selPreset = -1;
-		static int lastDetected = -2;	// -2 = "not seen yet" -> forces a first-frame sync
-
-		// The live enhancement cvars are the shared source of truth. Re-detect every
-		// frame so an external actor snaps this combo into agreement: the classic Doom
-		// quality selector (its choiceDef drives dude_preset, then applies) or a console
-		// "dudePreset". Detection returning -1 means "Custom" (a slider was hand-tweaked),
-		// which isn't a valid combo index - leave the combo where the user left it then.
-		const int detected = DetectEnhancementPreset();
-		if ( selPreset < 0 ) {
-			selPreset = ( detected >= 0 ) ? detected : PRESET_HIGH;
-		}
-		if ( detected >= 0 && detected != lastDetected ) {
-			selPreset = detected;
-		}
-		lastDetected = detected;
-
-		ImGui::SetNextItemWidth( 220.0f );
-		ImGui::Combo( "##enhPreset", &selPreset,
-			"Potato\0Low\0Medium\0High\0Ultra\0Nightmare\0Ultra Nightmare\0" );
-		ImGui::SameLine();
-		if ( ImGui::Button( "Apply Preset" ) ) {
-			ApplyEnhancementPreset( selPreset );
-			// keep the shared cvar honest so the classic Doom selector agrees at once;
-			// mark it as ours so this frame's re-detect isn't treated as external.
-			dude_preset.SetInteger( selPreset );
-			lastDetected = selPreset;
-		}
-		AddTooltip( "One-click tiers for the whole enhancement suite (SSAO, shadow maps, emissive "
-			"fill light, soft particles, post-FX, specular look) plus the rendering pipeline: HDR "
-			"from Medium up, PBR materials from High up, screen-space reflections from Ultra up "
-			"(at half march resolution; two-thirds on Nightmare). 'Potato' is the "
-			"vanilla-faithful floor (everything off, vanilla specular) and the fastest. Presets set "
-			"the shading look and the performance levers; your fine-tuning (SSAO radii, emissive "
-			"reach/tint, shadow biases, PBR category sliders) is left alone. Tweaking any slider "
-			"afterwards shows 'Custom'." );
-
-		if ( detected < 0 ) {
-			ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ), "Current: Custom (hand-tuned)" );
-		} else {
-			ImGui::TextDisabled( "Current: %s", enhancementPresets[detected].name );
-		}
-	}
-	ImGui::Spacing();
-
-	// Collapsible "burger" groups, ordered for a typical player (most visible impact
-	// first). Reorder these calls to change the on-screen order.
-	DrawEnhGroup_Shadows();
-	DrawEnhGroup_AmbientOcclusion();
-	DrawEnhGroup_SurfaceRelief();
-	DrawEnhGroup_Tessellation();
-	DrawEnhGroup_Particles();
-	DrawEnhGroup_Lighting();
-	DrawEnhGroup_Reflections();
-	DrawEnhGroup_PostProcess();
-
-	ImGui::EndDisabled();
-
-	// Antialiasing (hardware MSAA + post-process FXAA/SMAA). Outside the enhancement gate so
-	// MSAA stays usable on the legacy backend; the post-process part greys out there.
-	DrawGroup_Antialiasing();
-
-	// Anisotropic Filtering — its own small collapsible group (works on every backend, live).
-	if ( BeginSettingsGroup( "Anisotropic Filtering" ) ) {
-		DrawOptions( anisoOptions, IM_ARRAYSIZE( anisoOptions ) );
-		EndSettingsGroup();
-	}
-
-	// Texture Options — works on every backend, so it sits at the bottom outside the
-	// enhancement-only block, as its own collapsible group.
+	// Texture Options + the shared Apply / Reset sit right under Display: the other "every backend"
+	// video settings that need a renderer restart, kept together at the top of the tab.
 	if ( BeginSettingsGroup( "Texture Options" ) ) {
 		DrawTextureOptions();
 		EndSettingsGroup();
 	}
 
-	// Shared Apply / Reset for all the video settings that need a renderer restart
-	// (resolution, window mode, fullscreen-desktop, MSAA, textures). Frame Rate Cap and
-	// Vertical Sync take effect live and are not covered here.
+	// Shared Apply / Reset for the video settings that need a renderer restart (resolution, window
+	// mode, fullscreen-desktop, textures, MSAA). Frame Rate Cap and Vertical Sync take effect live.
 	if ( !GraphicsHasApplyableChanges() ) {
 		ImGui::BeginDisabled();
 		ImGui::Button( "Apply" );
@@ -3913,6 +3843,82 @@ static void DrawGraphicsMenu()
 		}
 		AddTooltip( "Restore the display / texture settings to what they were when this menu was opened" );
 	}
+
+	ImGui::Spacing();
+
+	const bool supported = R_BackendSupportsEnhancements();
+	if ( !supported ) {
+		ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
+			"These settings don't apply on the current (legacy) backend." );
+		ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
+			"Choose OpenGL 3.3 as the Renderer Backend at the top of this tab to enable them." );
+		ImGui::Spacing();
+	}
+
+	// One-click quality presets for the whole enhancement suite. Gated to the RHI backends (the
+	// presets only touch enhancement cvars). The combo is the target; the status line reflects the
+	// live cvars, so hand-tweaking any slider below reads back as "Custom".
+	ImGui::BeginDisabled( !supported );
+	ImGui::SeparatorText( "Quality Preset" );
+	{
+		static int selPreset = -1;
+		static int lastDetected = -2; // -2 = "not seen yet" -> forces a first-frame sync
+
+		const int detected = DetectEnhancementPreset();
+		if ( selPreset < 0 ) {
+			selPreset = ( detected >= 0 ) ? detected : PRESET_HIGH;
+		}
+		if ( detected >= 0 && detected != lastDetected ) {
+			selPreset = detected;
+		}
+		lastDetected = detected;
+
+		ImGui::SetNextItemWidth( 220.0f );
+		ImGui::Combo( "##enhPreset", &selPreset,
+			"Potato\0Low\0Medium\0High\0Ultra\0Nightmare\0Ultra Nightmare\0" );
+		ImGui::SameLine();
+		if ( ImGui::Button( "Apply Preset" ) ) {
+			ApplyEnhancementPreset( selPreset );
+			dude_preset.SetInteger( selPreset );
+			lastDetected = selPreset;
+		}
+		AddTooltip( "One-click tiers for the whole enhancement suite (SSAO, shadow maps, emissive "
+			"fill light, soft particles, post-FX, specular look) plus the rendering pipeline: HDR "
+			"from Medium up, PBR materials from High up, screen-space reflections from Ultra up "
+			"(at half march resolution; two-thirds on Nightmare). 'Potato' is the "
+			"vanilla-faithful floor (everything off, vanilla specular) and the fastest. Presets set "
+			"the shading look and the performance levers; your fine-tuning (SSAO radii, emissive "
+			"reach/tint, shadow biases, PBR category sliders) is left alone. Tweaking any slider "
+			"afterwards shows 'Custom'." );
+
+		if ( detected < 0 ) {
+			ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ), "Current: Custom (hand-tuned)" );
+		} else {
+			ImGui::TextDisabled( "Current: %s", enhancementPresets[detected].name );
+		}
+	}
+	ImGui::EndDisabled();
+	ImGui::Spacing();
+
+	// Groups below the preset, in the user-set on-screen order. Anisotropic Filtering and Antialiasing
+	// work on every backend (legacy included), so they stay OUTSIDE the enhancement gate; the rest are
+	// enhancement-only and grey out on the legacy backend.
+	if ( BeginSettingsGroup( "Anisotropic Filtering" ) ) {
+		DrawOptions( anisoOptions, IM_ARRAYSIZE( anisoOptions ) );
+		EndSettingsGroup();
+	}
+	DrawGroup_Antialiasing();
+
+	ImGui::BeginDisabled( !supported );
+	DrawEnhGroup_SurfaceRelief();
+	DrawEnhGroup_Tessellation();
+	DrawEnhGroup_Shadows();
+	DrawEnhGroup_AmbientOcclusion();
+	DrawEnhGroup_Lighting();
+	DrawEnhGroup_Reflections();
+	DrawEnhGroup_Particles();
+	DrawEnhGroup_PostProcess();
+	ImGui::EndDisabled();
 
 	// GUI and Layout — plain section (not a burger), just above Screenshots.
 	ImGui::Spacing();
