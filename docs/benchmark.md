@@ -109,6 +109,19 @@ Definitions:
 The in-game results box shows the average, the 1% low, the frame count, the GPU average and the
 report file name; the rest is in the console and the file.
 
+## Occlusion-map precache
+
+r_hitchTrace attributed demo1's remaining 20-36 ms frames to baked occlusion maps
+(`generated/aomaps/<model>_sN`) loaded on the render thread the first time each never-before-lit
+model was drawn (7-27 ms each; the per-skin name is resolved at draw time so the level-load image
+preload missed them). `RB_RHI_PrecacheOcclusionMapsForModel`, called from the model manager's
+`EndLevelLoad` while the image manager is still `insideLevelLoad`, touches every existing AO file
+for the level's loaded models so the following `globalImages->EndLevelLoad` loads them on the
+parallel loader, resident before play. It only loads existing files (never bakes), reuses the same
+idImage the draw path resolves, and honors `r_occlusionMaps` and the new `r_occlusionMapPrecache`
+(default 1) live, so the in-game quality toggles keep working and a mid-game enable falls back to
+the old lazy load. Same fix removes the equivalent hitch when walking into a new area in play.
+
 ## Where to find the data after a run
 
 - **Console**: the whole report is printed just before the results box. Open the console and

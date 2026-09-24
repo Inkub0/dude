@@ -566,6 +566,18 @@ void idRenderModelManagerLocal::EndLevelLoad() {
 		}
 	}
 
+	// DUDE (docs/benchmark.md): precache this level's baked occlusion maps now, while the image
+	// manager is still insideLevelLoad, so they load on the parallel loader in the globalImages
+	// EndLevelLoad that follows instead of hitching the render thread on first sight. No-op on the
+	// legacy backend or when r_occlusionMaps / r_occlusionMapPrecache are off (checked live).
+	extern void RB_RHI_PrecacheOcclusionMapsForModel( const idRenderModel *model );
+	for ( int i = 0 ; i < models.Num() ; i++ ) {
+		idRenderModel *model = models[i];
+		if ( model->IsLevelLoadReferenced() && model->IsLoaded() ) {
+			RB_RHI_PrecacheOcclusionMapsForModel( model );
+		}
+	}
+
 	// _D3XP added this
 	int	end = Sys_Milliseconds();
 	common->Printf( "%5i models purged from previous level, ", purgeCount );

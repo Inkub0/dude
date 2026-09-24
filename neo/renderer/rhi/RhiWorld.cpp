@@ -793,6 +793,7 @@ void R_ResetOcclusionMapCache( void ) {
 	rhiAoBakedModels.Clear();
 }
 
+extern idCVar r_occlusionMapPrecache;
 static bool RB_RHI_AoFileExists( const char *path ) {
 	ID_TIME_T ts;
 	return fileSystem->ReadFile( path, NULL, &ts ) >= 0;
@@ -916,6 +917,46 @@ static idImage *RB_RHI_SurfaceOcclusion( const idRenderModel *model, const idRen
 	const int idx = rhiAoCache.Append( e );
 	rhiAoCacheHash.Add( key, idx );
 	return img;
+}
+
+/*
+===================
+RB_RHI_PrecacheOcclusionMapsForModel
+
+DUDE benchmark/hitch fix (docs/benchmark.md): the baked occlusion maps (generated/aomaps/<model>_sN)
+were loaded on the render thread the first time a light's interaction pass bound each one, so a demo
+or a walk into a new area hitched ~7-27 ms per never-before-lit model. Called from the model
+manager's EndLevelLoad (image manager still insideLevelLoad), this touches every existing AO file
+for a loaded model so globalImages->EndLevelLoad then loads them on the parallel loader, resident
+before play. Load only (never bakes: the r_occlusionMapsAutoBake dev path stays lazy). Same
+ImageFromFile params as the draw-time RB_RHI_LoadAo so the exact same idImage is reused, not
+duplicated. Respects the live cvars: off when occlusion maps or precaching are disabled, so the
+in-game quality toggles keep working (a mid-game enable just falls back to the old lazy load).
+===================
+*/
+void RB_RHI_PrecacheOcclusionMapsForModel( const idRenderModel *model ) {
+	if ( !glConfig.rhiBackend || !model ) {
+		return;
+	}
+	if ( !r_occlusionMaps.GetBool() || !r_occlusionMapPrecache.GetBool() ) {
+		return;
+	}
+	// probe surfaces from 0 up; AO bakes are contiguous (static: surface index; MD5: mesh id),
+	// so stop after a few consecutive misses. Cap keeps a pathological model bounded.
+	const int MAX_SURF = 64;
+	const int MISS_STOP = 4;
+	int misses = 0;
+	for ( int s = 0; s < MAX_SURF && misses < MISS_STOP; s++ ) {
+		idStr path;
+		AO_GeneratedPathForSurface( model->Name(), s, path );
+		if ( !RB_RHI_AoFileExists( path.c_str() ) ) {
+			misses++;
+			continue;
+		}
+		misses = 0;
+		// identical params to RB_RHI_LoadAo -> the resolve path finds this same image, already resident
+		globalImages->ImageFromFile( path.c_str(), TF_DEFAULT, true, TR_CLAMP, TD_HIGH_QUALITY );
+	}
 }
 
 /*
