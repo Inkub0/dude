@@ -35,11 +35,13 @@ SAMPLER_BINDING(12) uniform samplerCubeShadow u_shadowCubeDyn; // DUDE static/dy
 // the GL3 program never declares the sampler, so its unit table is untouched. Sampling a mask
 // needs no ray-query capability, so mode 5 lives in the base shader.
 SAMPLER_BINDING(13) uniform sampler2D u_shadowMask;
+#endif
 // DUDE decal surface mask: screen-space retention of the surface's PBR response under overlay
 // decals (decalsurface.glsl), view-sized, written by decalmask.frag before the light loop. Read
-// only when u_pbrParms.z > 1.5.
+// only when u_pbrParms.z > 1.5. Declared for BOTH backends: GL3 raw-binds the mask on unit 14 for
+// the light loop (RB_RHI_DrawWorld), VK carries it per draw. Declaring it under VULKAN only left
+// the GL3 program referencing an undeclared sampler, so interaction.frag failed to compile there.
 SAMPLER_BINDING(14) uniform sampler2D u_decalMask;
-#endif
 
 VARY(0) in vec3 var_TexLightVec;
 VARY(1) in vec2 var_TexBump;
