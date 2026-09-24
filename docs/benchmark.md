@@ -122,6 +122,11 @@ idImage the draw path resolves, and honors `r_occlusionMaps` and the new `r_occl
 (default 1) live, so the in-game quality toggles keep working and a mid-game enable falls back to
 the old lazy load. Same fix removes the equivalent hitch when walking into a new area in play.
 
+A render demo never does a level load (it streams its models in as it plays), so `EndLevelLoad`'s
+precache never runs for it. `timeDemo ... twice` loads all the demo's models in the un-timed pass,
+so `TimeRenderDemo` calls the same precache once more before timing starts; a plain `timeDemo`
+without `twice` can't (the models aren't loaded yet), so use `twice` for a representative run.
+
 ## Where to find the data after a run
 
 - **Console**: the whole report is printed just before the results box. Open the console and

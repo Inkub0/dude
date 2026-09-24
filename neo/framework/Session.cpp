@@ -1022,6 +1022,14 @@ void idSessionLocal::TimeRenderDemo( const char *demoName, bool twice ) {
 		return;
 	}
 
+	// DUDE benchmark (docs/benchmark.md): a render demo never does a level load, so the
+	// occlusion-map precache in EndLevelLoad never runs for it; its models were streamed in
+	// during the (twice) precache pass above. Touch their baked occlusion maps now, before
+	// timing starts, so the timed pass doesn't hitch loading them on first sight. A no-op
+	// without `twice` (no models loaded yet) and when occlusion / precache are off.
+	extern void R_PrecacheAllOcclusionMaps( void );
+	R_PrecacheAllOcclusionMaps();
+
 	timeDemo = TD_YES;
 
 	// DUDE benchmark: fresh sample set; the GPU timer starts now so its first samples
