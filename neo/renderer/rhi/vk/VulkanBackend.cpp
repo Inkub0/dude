@@ -393,7 +393,19 @@ private:
 	double						gpuTimeAccumMs = 0.0;		// summed since last print
 	int							gpuTimeSamples = 0;
 	unsigned int				gpuTimeLastPrint = 0;
+	bool						gpuTimerRequested = false;	// benchmark wants the timer even with r_vkGpuTime off
+	double						gpuLastFrameMs = 0.0;		// latest completed frame's GPU time
+	int							gpuLastSerial = 0;			// bumps per new sample (0 = none yet)
 	void						GpuTimerReadback( int slot );
+	void						SetGpuTimerRequested( bool on ) override { gpuTimerRequested = on; }
+	bool						GetGpuFrameMs( double &ms, int &serial ) override {
+		if ( !gpuLastSerial ) {
+			return false;
+		}
+		ms = gpuLastFrameMs;
+		serial = gpuLastSerial;
+		return true;
+	}
 	// named scopes (r_vkGpuTime 2): begin/end stamp pairs after the per-slot frame pairs in the same pool
 	static const int			GPU_SCOPE_MAX_PAIRS = 256;
 	const char *				gpuScopeName[FRAMES_IN_FLIGHT][GPU_SCOPE_MAX_PAIRS] = {};
@@ -2569,7 +2581,17 @@ void VulkanBackend::GpuTimerReadback( int slot ) {
 		return;		// VK_NOT_READY not expected post-fence; skip this sample
 	}
 	uint64_t delta = ( stamps[1] & gpuTimerMask ) - ( stamps[0] & gpuTimerMask );
-	gpuTimeAccumMs += ( (double)delta * gpuTimerPeriodNs ) / 1000000.0;
+	const double frameMs = ( (double)delta * gpuTimerPeriodNs ) / 1000000.0;
+	gpuLastFrameMs = frameMs;
+	gpuLastSerial++;
+	if ( !r_vkGpuTime.GetBool() ) {
+		// benchmark-only sampling (SetGpuTimerRequested): nothing to print
+		gpuScopeAccum.clear();
+		gpuTimeAccumMs = 0.0;
+		gpuTimeSamples = 0;
+		return;
+	}
+	gpuTimeAccumMs += frameMs;
 	gpuTimeSamples++;
 	unsigned int now = Sys_Milliseconds();
 	if ( now - gpuTimeLastPrint >= 1000 ) {
@@ -2758,7 +2780,7 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 			vkCmdResetQueryPool( f.cb, gpuTimerPool, GpuScopeQuery( frameIndex, 0 ), 2 * GPU_SCOPE_MAX_PAIRS );
 			gpuScopesActive = true;
 		}
-		if ( r_vkGpuTime.GetBool() ) {
+		if ( r_vkGpuTime.GetBool() || gpuTimerRequested ) {
 			vkCmdResetQueryPool( f.cb, gpuTimerPool, 2 * frameIndex, 2 );
 			vkCmdWriteTimestamp( f.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, gpuTimerPool, 2 * frameIndex );
 			gpuTimerActive = true;

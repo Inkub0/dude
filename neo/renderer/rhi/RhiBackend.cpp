@@ -3633,6 +3633,9 @@ Backend-neutral: drives whichever rhi::RHI is active (GL3 today, Vulkan later).
 */
 void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	rhi::RHI *r = rhi::GetRHI();
+	// backend CPU time (com_speeds bk:, the timeDemo benchmark); the legacy executor
+	// times itself the same way in RB_ExecuteBackEndCommands
+	const double backEndStartF = Sys_MillisecondsPrecise();
 
 	// Phase 4 M3 (docs/vulkan-backend.md): the Vulkan backend draws 2D views
 	// and, for world views, the depth prepass + ambient shader passes
@@ -3776,6 +3779,9 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	}
 
 	r->EndFrame();
+
+	backEnd.pc.ms = Sys_MillisecondsPrecise() - backEndStartF;
+	backEnd.pc.msec = (int)backEnd.pc.ms;
 
 	// M6: Vulkan swap capture (screenshots / tiled captures) — the GL path
 	// reads the back buffer in the RC_SWAP_BUFFERS case above; here the scene

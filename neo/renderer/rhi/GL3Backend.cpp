@@ -105,6 +105,9 @@ class GL3Backend : public RHI {
 	double			gpuTimeAccum;		// ms summed since the last print
 	int				gpuTimeSamples;
 	unsigned int	gpuTimeLastPrint;
+	bool			gpuTimerRequested;	// benchmark wants the timer even with r_gl3GpuTime off
+	double			gpuLastFrameMs;		// latest completed frame's GPU time
+	int				gpuLastSerial;		// bumps per new sample (0 = none yet)
 
 	// offscreen render targets (shadow maps now; Phase 11 post stack later).
 	// Handle is a 1-based index into this array (handle 0 == the backbuffer);
@@ -140,6 +143,9 @@ public:
 		gpuTimeAccum = 0.0;
 		gpuTimeSamples = 0;
 		gpuTimeLastPrint = 0;
+		gpuTimerRequested = false;
+		gpuLastFrameMs = 0.0;
+		gpuLastSerial = 0;
 		memset( renderTargets, 0, sizeof( renderTargets ) );
 		activeTarget = 0;
 		frameTarget = 0;
@@ -305,6 +311,17 @@ public:
 	}
 	virtual void EndFrame() {
 		EndGpuTimer();
+	}
+	virtual void SetGpuTimerRequested( bool on ) {
+		gpuTimerRequested = on;
+	}
+	virtual bool GetGpuFrameMs( double &ms, int &serial ) {
+		if ( !gpuLastSerial ) {
+			return false;
+		}
+		ms = gpuLastFrameMs;
+		serial = gpuLastSerial;
+		return true;
 	}
 
 	// shared clear: a masked write channel makes glClear a no-op on that buffer,
@@ -1043,7 +1060,7 @@ private:
 	// query entry points are both available.
 	void BeginGpuTimer() {
 		gpuTimerActive = false;
-		if ( !gpuTimers[0] || !r_gl3GpuTime.GetBool() ) {
+		if ( !gpuTimers[0] || ( !r_gl3GpuTime.GetBool() && !gpuTimerRequested ) ) {
 			return;
 		}
 		int slot = gpuTimerFrame % GPU_TIMER_RING;
@@ -1072,6 +1089,14 @@ private:
 	}
 
 	void AccumGpuTime( double ms ) {
+		gpuLastFrameMs = ms;
+		gpuLastSerial++;
+		if ( !r_gl3GpuTime.GetBool() ) {
+			// benchmark-only sampling: nothing to print, keep the running average from growing
+			gpuTimeAccum = 0.0;
+			gpuTimeSamples = 0;
+			return;
+		}
 		gpuTimeAccum += ms;
 		gpuTimeSamples++;
 		unsigned int now = Sys_Milliseconds();

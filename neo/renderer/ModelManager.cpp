@@ -57,6 +57,8 @@ public:
 
 	virtual	void			PrintMemInfo( MemInfo_t *mi );
 
+	void					PrecacheOcclusionMaps();	// DUDE (docs/benchmark.md): load baked AO maps up front
+
 private:
 	idList<idRenderModel*>	models;
 	idHashIndex				hash;
@@ -516,6 +518,29 @@ void idRenderModelManagerLocal::BeginLevelLoad() {
 idRenderModelManagerLocal::EndLevelLoad
 =================
 */
+// DUDE (docs/benchmark.md): touch every loaded model's baked occlusion maps so they load up front
+// instead of hitching the render thread the first time each model is lit. Shared by EndLevelLoad
+// (real play, while the image manager is insideLevelLoad -> parallel loader) and the timeDemo
+// benchmark (render demos never do a level load, so they call this once the demo's models are
+// loaded). No-op on the legacy backend or when r_occlusionMaps / r_occlusionMapPrecache are off.
+void idRenderModelManagerLocal::PrecacheOcclusionMaps() {
+	extern void RB_RHI_PrecacheOcclusionMapsForModel( const idRenderModel *model );
+	for ( int i = 0 ; i < models.Num() ; i++ ) {
+		idRenderModel *model = models[i];
+		if ( model->IsLoaded() ) {
+			RB_RHI_PrecacheOcclusionMapsForModel( model );
+		}
+	}
+	// decal bump images (blood splats etc.) stall the same way on first projection; precache them too
+	extern void R_PrecacheDecalImages( void );
+	R_PrecacheDecalImages();
+}
+
+// free wrapper so non-renderer TUs (the timeDemo path in Session.cpp) can trigger it
+void R_PrecacheAllOcclusionMaps( void ) {
+	localModelManager.PrecacheOcclusionMaps();
+}
+
 void idRenderModelManagerLocal::EndLevelLoad() {
 	common->Printf( "----- idRenderModelManagerLocal::EndLevelLoad -----\n" );
 
@@ -565,6 +590,11 @@ void idRenderModelManagerLocal::EndLevelLoad() {
 			}
 		}
 	}
+
+	// DUDE (docs/benchmark.md): precache this level's baked occlusion maps now, while the image
+	// manager is still insideLevelLoad, so they load on the parallel loader in the globalImages
+	// EndLevelLoad that follows instead of hitching the render thread on first sight.
+	PrecacheOcclusionMaps();
 
 	// _D3XP added this
 	int	end = Sys_Milliseconds();

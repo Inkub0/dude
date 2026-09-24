@@ -35,6 +35,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/EventLoop.h"
 #include "renderer/ModelManager.h"
 
+#include "framework/Licensee.h"
 #include "framework/Session_local.h"
 
 #if defined(__AROS__)
@@ -50,6 +51,13 @@ idCVar	idSessionLocal::com_minTics( "com_minTics", "1", CVAR_SYSTEM, "" );
 idCVar	idSessionLocal::com_showTics( "com_showTics", "0", CVAR_SYSTEM | CVAR_BOOL, "" );
 idCVar	idSessionLocal::com_fixedTic( "com_fixedTic", "0", CVAR_SYSTEM | CVAR_INTEGER | CVAR_ARCHIVE, "", -1, 10 );
 extern idCVar com_interpolate; // declared in Common.cpp; when set, don't block waiting for the next game tic
+
+// DUDE benchmark (docs/benchmark.md). Doom 3's timedemo consumed one 30 Hz demo frame per
+// rendered frame, which fast-forwards the demo on anything quicker than 30 fps and, with
+// rendering decoupled from the game tic in DUDE, no longer resembles play. Real-time mode
+// keeps the demo on its recorded clock and renders as many frames as it can in between.
+idCVar com_timeDemoRealTime( "com_timeDemoRealTime", "1", CVAR_SYSTEM | CVAR_BOOL | CVAR_ARCHIVE,
+	"timeDemo plays the demo at its recorded speed (30 Hz demo clock) and renders as many frames as it can in between, like real gameplay. 0 = classic Doom 3 timedemo: one demo frame per rendered frame, so the demo fast-forwards on fast hardware" );
 idCVar	idSessionLocal::com_showDemo( "com_showDemo", "0", CVAR_SYSTEM | CVAR_BOOL, "" );
 idCVar	idSessionLocal::com_skipGameDraw( "com_skipGameDraw", "0", CVAR_SYSTEM | CVAR_BOOL, "" );
 idCVar	idSessionLocal::com_aviDemoSamples( "com_aviDemoSamples", "16", CVAR_SYSTEM, "" );
@@ -352,6 +360,10 @@ void idSessionLocal::Clear() {
 	guiActive = NULL;
 	aviCaptureMode = false;
 	timeDemo = TD_NO;
+	timeDemoStats.frameMs.Clear();
+	timeDemoStats.gpuMs.Clear();
+	memset( &timeDemoStats, 0, sizeof( timeDemoStats ) ); // idLists: zeroed == empty
+	timeDemoStats.lastFrameStart = -1.0;
 	waitingOnBind = false;
 	lastPacifierTime = 0;
 
@@ -872,6 +884,7 @@ void idSessionLocal::StopPlayingRenderDemo() {
 
 	// Record the stop time before doing anything that could be time consuming
 	int timeDemoStopTime = Sys_Milliseconds();
+	idStr demoName = readDemo->GetName();	// before Close() drops the file (and with it the name)
 
 	EndAVICapture();
 
@@ -880,17 +893,18 @@ void idSessionLocal::StopPlayingRenderDemo() {
 	sw->StopAllSounds();
 	soundSystem->SetPlayingSoundWorld( menuSoundWorld );
 
-	common->Printf( "stopped playing %s.\n", readDemo->GetName() );
+	common->Printf( "stopped playing %s.\n", demoName.c_str() );
 	delete readDemo;
 	readDemo = NULL;
 
 	if ( timeDemo ) {
-		// report the stats
+		// report the stats (DUDE benchmark: TimeDemoReport prints the full report and
+		// writes it under benchmarks/; the message box gets the summary)
+		renderSystem->SetGpuTimerRequested( false );
 		float	demoSeconds = ( timeDemoStopTime - timeDemoStartTime ) * 0.001f;
-		float	demoFPS = numDemoFrames / demoSeconds;
-		idStr	message = va( "%i frames rendered in %3.1f seconds = %3.1f fps\n", numDemoFrames, demoSeconds, demoFPS );
+		idStr	message = TimeDemoReport( demoName, demoSeconds );
 
-		common->Printf( "%s", message.c_str() );
+		common->Printf( "%s\n", message.c_str() );
 		if ( timeDemo == TD_YES_THEN_QUIT ) {
 			cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "quit\n" );
 		} else {
@@ -1007,7 +1021,263 @@ void idSessionLocal::TimeRenderDemo( const char *demoName, bool twice ) {
 		return;
 	}
 
+	// DUDE benchmark (docs/benchmark.md): a render demo never does a level load, so the
+	// occlusion-map precache in EndLevelLoad never runs for it; its models were streamed in
+	// during the (twice) precache pass above. Touch their baked occlusion maps now, before
+	// timing starts, so the timed pass doesn't hitch loading them on first sight. A no-op
+	// without `twice` (no models loaded yet) and when occlusion / precache are off.
+	extern void R_PrecacheAllOcclusionMaps( void );
+	R_PrecacheAllOcclusionMaps();
+
 	timeDemo = TD_YES;
+
+	// DUDE benchmark: fresh sample set; the GPU timer starts now so its first samples
+	// (which lag by the in-flight depth) belong to the demo, and any sample the backend
+	// already holds from the loading frames is skipped by serial
+	timeDemoStats.frameMs.Clear();
+	timeDemoStats.gpuMs.Clear();
+	memset( &timeDemoStats, 0, sizeof( timeDemoStats ) );
+	timeDemoStats.lastFrameStart = -1.0;
+	renderSystem->SetGpuTimerRequested( true );
+	renderFrameStats_t fs;
+	renderSystem->GetFrameStats( fs );
+	timeDemoStats.lastGpuSerial = fs.gpuValid ? fs.gpuSerial : 0;
+	common->Printf( "timeDemo: %s playback of %s\n",
+		com_timeDemoRealTime.GetBool() ? "real-time" : "classic (one demo frame per rendered frame)", demo.c_str() );
+}
+
+/*
+================
+idSessionLocal::TimeDemoFrame
+
+DUDE benchmark: called once per rendered frame while a timeDemo plays (before the demo
+advances), samples the wall frame time and the renderer's last-frame statistics.
+================
+*/
+void idSessionLocal::TimeDemoFrame() {
+	timeDemoStats_t &st = timeDemoStats;
+	const double now = Sys_MillisecondsPrecise();
+	// the first frames of the demo carry one-time setup (render targets, FSR2 context, compute
+	// shaders, pipelines: ~380 ms measured) that no later frame repeats; keep them out of the
+	// frame-time statistics so the percentiles and the worst frame describe steady play
+	const int WARMUP_FRAMES = 3;
+	if ( st.lastFrameStart >= 0.0 && st.renderedFrames > WARMUP_FRAMES ) {
+		const float ms = (float)( now - st.lastFrameStart );
+		st.frameMs.Append( ms );
+	}
+	st.lastFrameStart = now;
+	st.renderedFrames++;
+
+	renderFrameStats_t fs;
+	renderSystem->GetFrameStats( fs );
+	st.frontEndMs += fs.frontEndMs;
+	st.backEndMs += fs.backEndMs;
+	st.statFrames++;
+	// Scene counters describe the demo's content, so sample them once per demo frame: in
+	// real-time mode a demo frame is re-rendered as often as the fps allows, and averaging
+	// over rendered frames would weight cheap scenes (more re-renders) over heavy ones -
+	// differently on each backend, making the numbers incomparable. The frame just rendered
+	// was the first render of demo frame numDemoFrames when that changed since the last sample.
+	if ( numDemoFrames != st.lastSceneDemoFrame ) {
+		st.drawCalls += fs.drawCalls;
+		st.tris += fs.drawTris;
+		st.lights += fs.viewLights;
+		st.entities += fs.viewEntities;
+		st.views += fs.numViews;
+		st.sceneFrames++;
+		st.lastSceneDemoFrame = numDemoFrames;
+	}
+	if ( fs.gpuValid && fs.gpuSerial != st.lastGpuSerial ) {
+		st.gpuMs.Append( (float)fs.gpuMs );
+		st.lastGpuSerial = fs.gpuSerial;
+	}
+}
+
+static int TimeDemo_SortFloat( const float *a, const float *b ) {
+	return ( *a < *b ) ? -1 : ( *a > *b ) ? 1 : 0;
+}
+
+static float TimeDemo_Percentile( const idList<float> &sorted, float p ) {
+	if ( !sorted.Num() ) {
+		return 0.0f;
+	}
+	int i = (int)( p * ( sorted.Num() - 1 ) + 0.5f );
+	i = idMath::ClampInt( 0, sorted.Num() - 1, i );
+	return sorted[i];
+}
+
+// "name=value" for every listed cvar that exists and is non-zero
+static void TimeDemo_ActiveCvars( idStr &out, const char * const *names, int count ) {
+	for ( int i = 0; i < count; i++ ) {
+		const char *v = cvarSystem->GetCVarString( names[i] );
+		if ( !v[0] || !strcmp( v, "0" ) ) {
+			continue;
+		}
+		if ( out.Length() ) {
+			out += " ";
+		}
+		out += va( "%s=%s", names[i], v );
+	}
+}
+
+/*
+================
+idSessionLocal::TimeDemoReport
+
+DUDE benchmark: turns the samples into the report (printed to the console and written to
+benchmarks/<demo>-<timestamp>.txt plus a row in benchmarks/history.csv under fs_savepath).
+Returns the short summary shown in the results message box.
+================
+*/
+idStr idSessionLocal::TimeDemoReport( const char *demoName, float demoSeconds ) {
+	timeDemoStats_t &st = timeDemoStats;
+	idStr report, summary;
+
+	idStr base = demoName;
+	base.StripPath();
+	base.StripFileExtension();
+
+	char stamp[32], stampFile[32];
+	time_t now = time( NULL );
+	strftime( stamp, sizeof( stamp ), "%Y-%m-%d %H:%M:%S", localtime( &now ) );
+	strftime( stampFile, sizeof( stampFile ), "%Y%m%d-%H%M%S", localtime( &now ) );
+
+	// ---- environment ----
+	renderFrameStats_t fs;
+	renderSystem->GetFrameStats( fs );
+	static const char *presetNames[] = { "Potato", "Low", "Medium", "High", "Ultra", "Nightmare", "Ultra Nightmare" };
+	const int preset = cvarSystem->GetCVarInteger( "dude_preset" );
+	const char *presetName = ( preset >= 0 && preset < 7 ) ? presetNames[preset] : "custom";
+	const int vsync = cvarSystem->GetCVarInteger( "r_swapInterval" );
+	const int maxFps = cvarSystem->GetCVarInteger( "com_maxFPS" );
+
+	report += va( "==== DUDE benchmark: %s ====\n", base.c_str() );
+	report += va( "%s  |  %s\n", ENGINE_VERSION, stamp );
+	report += va( "backend: %s  |  GPU: %s (driver %s)\n", cvarSystem->GetCVarString( "r_graphicsAPI" ),
+		( fs.gpuName && fs.gpuName[0] ) ? fs.gpuName : "unknown", ( fs.gpuDriver && fs.gpuDriver[0] ) ? fs.gpuDriver : "?" );
+	report += va( "display: %ix%i %s, vsync %s, com_maxFPS %i%s\n", renderSystem->GetScreenWidth(), renderSystem->GetScreenHeight(),
+		renderSystem->IsFullScreen() ? "fullscreen" : "windowed", vsync ? "ON (caps the result)" : "off", maxFps,
+		maxFps ? " (caps the result)" : "" );
+	static const char * const featureCvars[] = {
+		"r_multiSamples", "r_rhiAA", "r_fsr", "r_hdr", "r_pbr", "r_ssao", "r_ssr", "r_shadowMapping", "r_volumetrics",
+		"r_parallax", "r_tessellation", "r_gpuSkinning", "r_occlusionMaps", "r_skinShading", "r_dof", "r_useSoftParticles",
+		"r_rtWorld", "r_rtAllLights", "r_rtSunShadows", "r_rtShadowBlur", "r_rtao", "r_rtgi", "r_rtReflections",
+		"r_rtPerforatedShadows", "r_rtOpacityMicromaps"
+	};
+	idStr features;
+	TimeDemo_ActiveCvars( features, featureCvars, sizeof( featureCvars ) / sizeof( featureCvars[0] ) );
+	report += va( "preset: %s (%i)  |  active: %s\n", presetName, preset, features.Length() ? features.c_str() : "(none)" );
+
+	// ---- playback ----
+	// the demo's length on the clock it plays back on: one demo frame per USERCMD_PER_DEMO_FRAME
+	// tics of the 60 Hz wall-clock tic timer (game time runs 16 ms/tic, 4% shorter, so the
+	// renderView times would understate it)
+	const float recordedSeconds = numDemoFrames * USERCMD_PER_DEMO_FRAME / (float)USERCMD_HZ;
+	const bool realTime = com_timeDemoRealTime.GetBool();
+	report += va( "playback: %s  |  demo: %i frames = %.1f s, played in %.1f s%s\n",
+		realTime ? "real-time (30 Hz demo clock, rendering decoupled)" : "classic (one demo frame per rendered frame)",
+		numDemoFrames, recordedSeconds, demoSeconds,
+		( realTime && demoSeconds > recordedSeconds * 1.05f ) ? "  (slower than real time: frames were dropped to keep up)" : "" );
+
+	// ---- frame rate / frame time ----
+	const int frames = st.renderedFrames;
+	const float avgFps = ( demoSeconds > 0.0f ) ? frames / demoSeconds : 0.0f;
+	report += va( "frames rendered: %i in %.1f s = %.1f fps\n", frames, demoSeconds, avgFps );
+
+	idList<float> sorted = st.frameMs;
+	sorted.Sort( TimeDemo_SortFloat );
+	float p1Low = 0.0f, p01Low = 0.0f, median = 0.0f, hitchWorst = 0.0f;
+	int hitches = 0;
+	if ( sorted.Num() ) {
+		double sum = 0.0;
+		for ( int i = 0; i < sorted.Num(); i++ ) {
+			sum += sorted[i];
+		}
+		median = TimeDemo_Percentile( sorted, 0.5f );
+		const float p99 = TimeDemo_Percentile( sorted, 0.99f );
+		const float p999 = TimeDemo_Percentile( sorted, 0.999f );
+		p1Low = ( p99 > 0.0f ) ? 1000.0f / p99 : 0.0f;
+		p01Low = ( p999 > 0.0f ) ? 1000.0f / p999 : 0.0f;
+		const float hitchMs = Max( median * 2.5f, median + 5.0f );
+		for ( int i = sorted.Num() - 1; i >= 0 && sorted[i] > hitchMs; i-- ) {
+			hitches++;
+		}
+		hitchWorst = sorted[sorted.Num() - 1];
+		report += va( "frame time (ms): avg %.2f  median %.2f  min %.2f  max %.2f  (first 3 frames excluded: one-time setup)\n",
+			sum / sorted.Num(), median, sorted[0], hitchWorst );
+		report += va( "1%% low: %.1f fps (99th percentile %.2f ms)   0.1%% low: %.1f fps (99.9th percentile %.2f ms)\n",
+			p1Low, p99, p01Low, p999 );
+		report += va( "hitches (frame > %.1f ms = max(2.5x median, median + 5 ms)): %i frames, worst %.1f ms\n", hitchMs, hitches, hitchWorst );
+	}
+
+	// ---- CPU / GPU split ----
+	const float frameMedian = median; // the reference frame: robust to hitches
+	if ( st.statFrames ) {
+		const float fe = (float)( st.frontEndMs / st.statFrames );
+		const float be = (float)( st.backEndMs / st.statFrames );
+		report += va( "CPU renderer (ms/frame): frontend %.2f  backend %.2f  total %.2f%s\n", fe, be, fe + be,
+			frameMedian > 0.0f ? va( " (%.0f%% of the median frame)", 100.0f * ( fe + be ) / frameMedian ) : "" );
+	}
+	float gpuAvg = 0.0f;
+	if ( st.gpuMs.Num() ) {
+		double sum = 0.0;
+		float gmax = 0.0f;
+		for ( int i = 0; i < st.gpuMs.Num(); i++ ) {
+			sum += st.gpuMs[i];
+			gmax = Max( gmax, st.gpuMs[i] );
+		}
+		gpuAvg = (float)( sum / st.gpuMs.Num() );
+		const float share = frameMedian > 0.0f ? 100.0f * gpuAvg / frameMedian : 0.0f;
+		report += va( "GPU (ms/frame): avg %.2f  max %.2f  (%.0f%% of the median frame%s)\n", gpuAvg, gmax, share,
+			share >= 85.0f ? " -> GPU-bound" : share <= 60.0f ? " -> CPU-bound" : "" );
+	} else {
+		report += "GPU (ms/frame): n/a (frame timer needs the opengl3 or vulkan backend)\n";
+	}
+	if ( st.sceneFrames ) {
+		report += va( "scene (per demo frame avg, %i sampled): %.0f draw calls, %.0fk triangles, %.1f lights, %.1f entities, %.1f views\n",
+			st.sceneFrames, st.drawCalls / st.sceneFrames, st.tris / st.sceneFrames * 0.001, st.lights / st.sceneFrames,
+			st.entities / st.sceneFrames, st.views / st.sceneFrames );
+	}
+
+	// ---- files ----
+	idStr fileName = va( "benchmarks/%s-%s.txt", base.c_str(), stampFile );
+	idFile *f = fileSystem->OpenFileWrite( fileName );
+	bool reportSaved = false;
+	if ( f ) {
+		reportSaved = true;
+		f->Write( report.c_str(), report.Length() );
+		// the exact config for reproducing / diffing runs
+		idStr cfg = "\n---- renderer + system cvars ----\n";
+		f->Write( cfg.c_str(), cfg.Length() );
+		cvarSystem->WriteFlaggedVariables( CVAR_RENDERER | CVAR_SYSTEM, "set", f );
+		fileSystem->CloseFile( f );
+		report += va( "report: %s (fs_savepath)\n", fileName.c_str() );
+	}
+	const char *histName = "benchmarks/history.csv";
+	idFile *probe = fileSystem->OpenFileRead( histName );
+	const bool newHistory = ( probe == NULL );
+	if ( probe ) {
+		fileSystem->CloseFile( probe );
+	}
+	idFile *h = fileSystem->OpenFileAppend( histName, false, "fs_savepath" );
+	if ( h ) {
+		if ( newHistory ) {
+			h->Printf( "date,demo,backend,preset,width,height,vsync,mode,frames,seconds,avg_fps,p1_low_fps,p01_low_fps,median_ms,cpu_ms,gpu_ms\n" );
+		}
+		h->Printf( "%s,%s,%s,%i,%i,%i,%i,%s,%i,%.2f,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f\n",
+			stamp, base.c_str(), cvarSystem->GetCVarString( "r_graphicsAPI" ), preset,
+			renderSystem->GetScreenWidth(), renderSystem->GetScreenHeight(), vsync, realTime ? "realtime" : "classic",
+			frames, demoSeconds, avgFps, p1Low, p01Low, median,
+			st.statFrames ? ( st.frontEndMs + st.backEndMs ) / st.statFrames : 0.0, gpuAvg );
+		fileSystem->CloseFile( h );
+	}
+
+	summary = va( "%s: %.1f fps average, 1%% low %.1f fps\n%i frames in %.1f s", base.c_str(), avgFps, p1Low, frames, demoSeconds );
+	if ( gpuAvg > 0.0f ) {
+		summary += va( ", GPU %.2f ms/frame", gpuAvg );
+	}
+	summary += reportSaved ? va( "\nfull report: console + %s", fileName.c_str() ) : "\nfull report in the console";
+	return summary;
 }
 
 
@@ -2385,15 +2655,21 @@ void idSessionLocal::AdvanceRenderDemo( bool singleFrameOnly ) {
 
 	int skipFrames = 0;
 
-	if ( !aviCaptureMode && !timeDemo && !singleFrameOnly ) {
+	// DUDE benchmark: a real-time timeDemo advances on the tic clock like normal playback
+	// (skipFrames < 0 = no demo frame due yet, the current view is rendered again), so the
+	// demo runs at its recorded speed however fast or slow the frames come
+	const bool realTimeDemo = ( timeDemo != TD_NO ) && com_timeDemoRealTime.GetBool();
+
+	if ( !aviCaptureMode && ( !timeDemo || realTimeDemo ) && !singleFrameOnly ) {
 		skipFrames = ( (latchedTicNumber - lastDemoTic) / USERCMD_PER_DEMO_FRAME ) - 1;
 		// never skip too many frames, just let it go into slightly slow motion
-		if ( skipFrames > 4 ) {
+		// (not for the benchmark: it stays on the demo's clock and drops frames instead)
+		if ( skipFrames > 4 && !realTimeDemo ) {
 			skipFrames = 4;
 		}
 		lastDemoTic = latchedTicNumber - latchedTicNumber % USERCMD_PER_DEMO_FRAME;
 	} else {
-		// always advance a single frame with avidemo and timedemo
+		// always advance a single frame with avidemo and classic timedemo
 		lastDemoTic = latchedTicNumber;
 	}
 
@@ -2505,6 +2781,33 @@ void idSessionLocal::PacifierUpdate() {
 
 /*
 ===============
+Demo_FitViewToScreen
+
+DUDE: a render demo carries the field of view of the display it was recorded on (demo1 is
+4:3: fov_x 90, fov_y 73.7) and its view rect is mapped onto the whole current screen by
+RenderViewToViewport, so on any other aspect ratio the projection comes out stretched. Keep
+the recorded vertical fov and derive fov_x from the real pixel aspect of the viewport the
+rect maps to - the same Hor+ rule the game applies in play (idGameLocal::CalcFov, auto mode).
+A demo played at the aspect it was recorded on is unchanged.
+===============
+*/
+static void Demo_FitViewToScreen( renderView_t &view ) {
+	if ( view.width <= 0 || view.height <= 0 || view.fov_y <= 0.0f ) {
+		return;
+	}
+	const float screenW = renderSystem->GetScreenWidth();
+	const float screenH = renderSystem->GetScreenHeight();
+	if ( screenW <= 0.0f || screenH <= 0.0f ) {
+		return;
+	}
+	// the 640x480-virtual rect scales by (screenW/640, screenH/480) into pixels
+	const float aspect = ( view.width * screenW / SCREEN_WIDTH ) / ( view.height * screenH / SCREEN_HEIGHT );
+	const float halfY = tanf( DEG2RAD( view.fov_y ) * 0.5f );
+	view.fov_x = RAD2DEG( 2.0f * atanf( halfY * aspect ) );
+}
+
+/*
+===============
 idSessionLocal::Draw
 ===============
 */
@@ -2540,7 +2843,10 @@ void idSessionLocal::Draw() {
 
 		guiActive->Redraw( com_frameTime );
 	} else if ( readDemo ) {
-		rw->RenderScene( &currentDemoRenderView );
+		// DUDE: fit the recorded view to this screen's aspect ratio instead of stretching it
+		renderView_t view = currentDemoRenderView;
+		Demo_FitViewToScreen( view );
+		rw->RenderScene( &view );
 		renderSystem->DrawDemoPics();
 	} else if ( mapSpawned ) {
 		bool gameDraw = false;
@@ -2785,6 +3091,9 @@ void idSessionLocal::Frame() {
 
 	// advance demos
 	if ( readDemo ) {
+		if ( timeDemo ) {
+			TimeDemoFrame();	// DUDE benchmark sample for the frame just rendered
+		}
 		AdvanceRenderDemo( false );
 		return;
 	}
@@ -3009,8 +3318,8 @@ void idSessionLocal::Init() {
 	cmdSystem->AddCommand( "recordDemo", Session_RecordDemo_f, CMD_FL_SYSTEM, "records a demo" );
 	cmdSystem->AddCommand( "stopRecording", Session_StopRecordingDemo_f, CMD_FL_SYSTEM, "stops demo recording" );
 	cmdSystem->AddCommand( "playDemo", Session_PlayDemo_f, CMD_FL_SYSTEM, "plays back a demo", idCmdSystem::ArgCompletion_DemoName );
-	cmdSystem->AddCommand( "timeDemo", Session_TimeDemo_f, CMD_FL_SYSTEM, "times a demo", idCmdSystem::ArgCompletion_DemoName );
-	cmdSystem->AddCommand( "timeDemoQuit", Session_TimeDemoQuit_f, CMD_FL_SYSTEM, "times a demo and quits", idCmdSystem::ArgCompletion_DemoName );
+	cmdSystem->AddCommand( "timeDemo", Session_TimeDemo_f, CMD_FL_SYSTEM, "benchmarks a demo (timeDemo demo1 [twice]): real-time playback, frame-time percentiles, CPU/GPU split; report in benchmarks/ (see com_timeDemoRealTime)", idCmdSystem::ArgCompletion_DemoName );
+	cmdSystem->AddCommand( "timeDemoQuit", Session_TimeDemoQuit_f, CMD_FL_SYSTEM, "benchmarks a demo and quits", idCmdSystem::ArgCompletion_DemoName );
 	cmdSystem->AddCommand( "aviDemo", Session_AVIDemo_f, CMD_FL_SYSTEM, "writes AVIs for a demo", idCmdSystem::ArgCompletion_DemoName );
 	cmdSystem->AddCommand( "compressDemo", Session_CompressDemo_f, CMD_FL_SYSTEM, "compresses a demo file", idCmdSystem::ArgCompletion_DemoName );
 #endif

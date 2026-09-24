@@ -271,6 +271,12 @@ public:
 	// reports its total plus how many times it ran. Not nestable. name must be a string literal.
 	virtual void			GpuScopeBegin( const char *name ) {}
 	virtual void			GpuScopeEnd() {}
+	// DUDE benchmark (timeDemo; docs/benchmark.md): keep the GPU frame timer running while the
+	// r_*GpuTime print cvars are off, and hand out the latest completed frame's GPU time.
+	// serial increments once per new sample so a per-frame poller can tell repeats apart.
+	// Backends without a timer (or none read back yet) return false.
+	virtual void			SetGpuTimerRequested( bool on ) {}
+	virtual bool			GetGpuFrameMs( double &ms, int &serial ) { return false; }
 	virtual ImageHandle		CreateImage( ImageFormat fmt, int w, int h, const void *pixels ) = 0;
 	virtual void			DestroyImage( ImageHandle i ) = 0;
 

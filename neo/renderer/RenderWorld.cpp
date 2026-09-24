@@ -703,6 +703,7 @@ void idRenderWorldLocal::RenderScene( const renderView_t *renderView ) {
 	tr.guiModel->Clear();
 
 	int startTime = Sys_Milliseconds();
+	const double startTimeF = Sys_MillisecondsPrecise();
 
 	// setup view parms for the initial view
 	//
@@ -805,6 +806,7 @@ void idRenderWorldLocal::RenderScene( const renderView_t *renderView ) {
 	int endTime = Sys_Milliseconds();
 
 	tr.pc.frontEndMsec += endTime - startTime;
+	tr.pc.frontEndMs += Sys_MillisecondsPrecise() - startTimeF;
 
 	// prepare for any 2D drawing after this
 	tr.guiModel->Clear();

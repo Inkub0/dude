@@ -145,6 +145,7 @@ idCVar com_interpolateAnim( "com_interpolateAnim", "1", CVAR_BOOL | CVAR_SYSTEM 
 // motion stays smooth even without a clean vsync — the intended companion to running vsync
 // off (r_swapInterval 0) on a multi-monitor X11 setup where vsync clamps to the wrong
 // (lowest) refresh. 0 = uncapped. Only ever adds delay, never speeds anything up.
+
 idCVar com_maxFPS( "com_maxFPS", "0", CVAR_INTEGER | CVAR_SYSTEM | CVAR_ARCHIVE, "cap the render frame rate (0 = uncapped). Best paired with vsync off; set it to your monitor's refresh or a clean divisor of it for even, tear-minimized pacing", 0, 1000 );
 
 // in the high-fps branch, the next three values will be set based on com_gameHz
@@ -2757,7 +2758,10 @@ void idCommonLocal::Frame( void ) {
 		if ( com_editors == 0 )
 #endif
 		{
-			if ( com_interpolate.GetBool() ) {
+			if ( com_interpolate.GetBool() || sessLocal.timeDemo != TD_NO ) {
+				// (a timeDemo benchmark free-runs the same way: the demo advances on the
+				// tic clock inside AdvanceRenderDemo, so waiting for a tic here would
+				// just cap the measured fps at the tic rate)
 				// Decoupled rendering: draw as fast as the display allows and let the sim
 				// advance only when a tic is actually due (session->Frame no longer blocks
 				// for one, see idSessionLocal::Frame). Don't sleep to the next tic here;

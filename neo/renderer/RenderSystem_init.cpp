@@ -605,6 +605,7 @@ idCVar r_ssaoDepthMipMaxLod( "r_ssaoDepthMipMaxLod", "2", CVAR_RENDERER | CVAR_A
 // the `occlusionmap` material keyword, multiplied into the ambient (and, scaled, direct-
 // light diffuse) exactly like SSAO. Non-vanilla; enhancement backends only. Inert on stock
 // assets, which never declare an occlusion stage. See docs/occlusion-maps.md.
+idCVar r_occlusionMapPrecache( "r_occlusionMapPrecache", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "load a level's baked occlusion maps up front at level load instead of lazily on first sight (removes the per-model hitch the first time each entity is lit). Needs r_occlusionMaps; 1 = precache, 0 = lazy. opengl3/Vulkan only" );
 idCVar r_occlusionMaps( "r_occlusionMaps", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use per-material baked ambient-occlusion maps (the `occlusionmap` material stage) to darken creases in the ambient and direct-light diffuse. Complements SSAO; only affects materials that ship an occlusion map (none in stock Doom 3). Non-vanilla; opengl3/Vulkan only" );
 idCVar r_occlusionMapScale( "r_occlusionMapScale", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "strength of baked occlusion maps on the ambient term, 0..1 (0 = off, 1 = the map at full darkening)", 0.0f, 1.0f );
 idCVar r_occlusionMapDirect( "r_occlusionMapDirect", "0.9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how strongly baked occlusion maps darken direct (dynamic) light's diffuse, 0..1, as a fraction of r_occlusionMapScale. Doom 3 is mostly dynamic light, so this is what makes the map visible; lower it if AO looks baked-in under moving lights, 0 = ambient-only", 0.0f, 1.0f );
@@ -3234,6 +3235,7 @@ void idRenderSystemLocal::Clear( void ) {
 	ambientCubeImage = NULL;
 	viewDef = NULL;
 	memset( &pc, 0, sizeof( pc ) );
+	memset( &lastFrameStats, 0, sizeof( lastFrameStats ) );
 	memset( &lockSurfacesCmd, 0, sizeof( lockSurfacesCmd ) );
 	memset( &identitySpace, 0, sizeof( identitySpace ) );
 	stencilIncr = 0;

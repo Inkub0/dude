@@ -29,6 +29,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "framework/FileSystem.h"
 #include "framework/DeclSkin.h"					// idDeclSkin (entity skin -> AO name for lazy bake)
 #include "tools/compilers/aobake/aobake.h"		// AO_BakeModelToCache (lazy occlusion-map baking)
+#include "framework/DeclManager.h"					// DECL_MATERIAL enumeration (decal image precache)
 
 extern idCVar r_useCarmacksReverse;		// defined in RenderSystem_init.cpp, no tr_local decl
 
@@ -792,6 +793,7 @@ void R_ResetOcclusionMapCache( void ) {
 	rhiAoBakedModels.Clear();
 }
 
+extern idCVar r_occlusionMapPrecache;
 static bool RB_RHI_AoFileExists( const char *path ) {
 	ID_TIME_T ts;
 	return fileSystem->ReadFile( path, NULL, &ts ) >= 0;
@@ -915,6 +917,87 @@ static idImage *RB_RHI_SurfaceOcclusion( const idRenderModel *model, const idRen
 	const int idx = rhiAoCache.Append( e );
 	rhiAoCacheHash.Add( key, idx );
 	return img;
+}
+
+/*
+===================
+RB_RHI_PrecacheOcclusionMapsForModel
+
+DUDE benchmark/hitch fix (docs/benchmark.md): the baked occlusion maps (generated/aomaps/<model>_sN)
+were loaded on the render thread the first time a light's interaction pass bound each one, so a demo
+or a walk into a new area hitched ~7-27 ms per never-before-lit model. Called from the model
+manager's EndLevelLoad (image manager still insideLevelLoad), this touches every existing AO file
+for a loaded model so globalImages->EndLevelLoad then loads them on the parallel loader, resident
+before play. Load only (never bakes: the r_occlusionMapsAutoBake dev path stays lazy). Same
+ImageFromFile params as the draw-time RB_RHI_LoadAo so the exact same idImage is reused, not
+duplicated. Respects the live cvars: off when occlusion maps or precaching are disabled, so the
+in-game quality toggles keep working (a mid-game enable just falls back to the old lazy load).
+===================
+*/
+void RB_RHI_PrecacheOcclusionMapsForModel( const idRenderModel *model ) {
+	if ( !glConfig.rhiBackend || !model ) {
+		return;
+	}
+	if ( !r_occlusionMaps.GetBool() || !r_occlusionMapPrecache.GetBool() ) {
+		return;
+	}
+	// probe surfaces from 0 up; AO bakes are contiguous (static: surface index; MD5: mesh id),
+	// so stop after a few consecutive misses. Cap keeps a pathological model bounded.
+	const int MAX_SURF = 64;
+	const int MISS_STOP = 4;
+	int misses = 0;
+	for ( int s = 0; s < MAX_SURF && misses < MISS_STOP; s++ ) {
+		idStr path;
+		AO_GeneratedPathForSurface( model->Name(), s, path );
+		if ( !RB_RHI_AoFileExists( path.c_str() ) ) {
+			misses++;
+			continue;
+		}
+		misses = 0;
+		// identical params to RB_RHI_LoadAo -> the resolve path finds this same image, already resident
+		globalImages->ImageFromFile( path.c_str(), TF_DEFAULT, true, TR_CLAMP, TD_HIGH_QUALITY );
+	}
+}
+
+/*
+===================
+R_PrecacheDecalImages
+
+DUDE (docs/benchmark.md): decal materials (textures/decals/*, e.g. the blood splats) carry
+generated bump images -- smoothnormals(heightmap(...)) -- computed on the CPU the first time the
+decal is projected and bound, which stalled the render thread ~8-12 ms per new splat type. Walk the
+already-parsed materials this level pulled in and force-load any unloaded decal-texture image up
+front, on the main thread at load time (or, for a render demo, before timing starts). Only touches
+parsed materials (so nothing unused is pulled in) and honors image_preload (off = keep lazy).
+===================
+*/
+void R_PrecacheDecalImages( void ) {
+	if ( !cvarSystem->GetCVarBool( "image_preload" ) ) {
+		return;		// user opted into fully lazy image loading
+	}
+	const int n = declManager->GetNumDecls( DECL_MATERIAL );
+	for ( int i = 0; i < n; i++ ) {
+		const idDecl *d = declManager->DeclByIndex( DECL_MATERIAL, i, false );
+		if ( !d || d->GetState() != DS_PARSED ) {
+			continue;		// unreferenced this level -> don't parse/load it
+		}
+		const idMaterial *mat = static_cast<const idMaterial *>( d );
+		for ( int s = 0; s < mat->GetNumStages(); s++ ) {
+			const shaderStage_t *st = mat->GetStage( s );
+			idImage *img = st->texture.image;
+			if ( !img || img->texnum != idImage::TEXTURE_NOT_LOADED ) {
+				continue;	// no image or already resident
+			}
+			// the generated bump program embeds the source path, so match the substring
+			if ( strstr( img->imgName.c_str(), "textures/decals/" ) == NULL ) {
+				continue;
+			}
+			// this decal is referenced by the level, so keep it: without the flag the
+			// globalImages->EndLevelLoad purge that follows (real-play path) would drop it
+			img->levelLoadReferenced = true;
+			img->ActuallyLoadImage( true, false );	// main-thread, load-time: no timed-frame stall
+		}
+	}
 }
 
 /*
