@@ -2429,6 +2429,31 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 			}
 		}
 
+		// RR5c: reflectivity for the RT glass paths. environment_rt / bumpyenvironment_rt shade a
+		// FULL-BRIGHTNESS ray-traced scene hit, but the cube these panes sample in vanilla is nearly black —
+		// env/bland (goggles/visor) ~0.035, env/gen1 (dropship cockpit) ~0.022 — and that darkness IS the
+		// material's authored glass reflectivity (an additive/dst-alpha reflect stage with no dimming stage
+		// colour). Left raw, a pane reflects the scene like a mirror ("insane" reflectivity on visors and the
+		// ship cockpit). We scale the RT reflection by that cube's brightness, but the LINEAR average is so
+		// tiny it reads as no reflection at all — so use its PERCEPTUAL brightness sqrt(envAvg) (~gamma 2, i.e.
+		// how bright the gamma-displayed cube looked to the artist who judged the pane's shininess): env/gen1
+		// 0.022 -> 0.15, env/bland 0.035 -> 0.19, env/gen2 windows 0.295 -> 0.54, a genuine chrome cube ~1 ->
+		// 1. That keeps the per-material ordering (windows shinier than goggles, chrome a mirror) while
+		// lifting the near-black glass to a visible-but-subtle level, plus the shader's grazing Fresnel boost.
+		// r_rtReflGlassScale (default 1 = this baseline) is the taste knob: 0 = clear pane, >1 shinier toward
+		// a mirror. Both RT vert shaders fold parms.color into var_Color and the frags do
+		// refl*var_Color.rgb*graze, so this needs no shader change. A cube whose files can't be read
+		// (envAvg < 0) is left untouched. Cf. the probe swap below, which energy-matches a captured room cube.
+		if ( rtGlass ) {
+			const float envAvg = RB_RHI_EnvCubeAvg( pStage->texture.image->imgName );
+			if ( envAvg > 0.0f ) {
+				const float gs = idMath::Sqrt( envAvg ) * r_rtReflGlassScale.GetFloat();
+				parms.color[0] *= gs;
+				parms.color[1] *= gs;
+				parms.color[2] *= gs;
+			}
+		}
+
 		// RR5c-SSR: on the SSR tier (r_ssr on, no RT) unbumped glass reflects the LIVE scene via a
 		// screen-space march (environment_ssr) instead of the baked cube/probe — the SSR-tier analog of
 		// rtGlass. Needs the SSR pass's _currentRender + _currentDepth captures (present whenever r_ssr ran

@@ -1028,6 +1028,7 @@ extern idCVar r_rtReflLightScale;			// RR16: overall brightness of the real-ligh
 extern idCVar r_rtReflEmissive;				// RR16f: brightness of self-lit light-source surfaces (neon/ceiling tiles) in RT reflections
 extern idCVar r_rtReflResScale;				// RT reflection trace resolution (fraction of screen; unsnapped, temporally upscaled)
 extern idCVar r_rtReflBump;					// RR10: how much the RT reflection follows the normal map (0 = flat mirror, 1 = full bump like SSR)
+extern idCVar r_rtReflGlassScale;			// RR5c: taste knob on the RT glass (goggles/visor/cockpit) reflection, on top of the replaced cube's energy normalization
 extern idCVar r_rtMovingLights;				// RT shadows for moving point lights: skip the un-cacheable cube re-render, trace instead
 int  R_RtGatherPerforatedBoxes( const idBounds &b, idBounds *out, int maxOut );	// tr_main.cpp: the perforated RT casters inside a box; returns the total found
 extern idCVar r_rtPerforatedShadows;		// alpha-tested grate/fence casters in the RT shadow rays

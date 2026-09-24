@@ -331,6 +331,30 @@ real fog-colour miss fill remain future polish. **Bumped `reflect`+`bumpmap` mat
 skinned path) — plus a few statics (`textures/outside/outfactory_new2`, `textures/sfx/tramwall2env`,
 `mapobjects/enpro/dm_sat`). User-verified on those 2026-09-21.
 
+**Energy-budget normalization (2026-09-24) — glass must not read as a mirror.** `environment_rt` /
+`bumpyenvironment_rt` shade a *full-brightness* scene hit (`albedo·(RT_AMBIENT+ndl)`, ≈0.3–1.0), then apply
+only the stage tint. But the cube these panes sample in vanilla is **nearly black**, and that darkness *is*
+the material's authored glass reflectivity — an additive / `dst_alpha` `reflect` stage with a white (no
+dimming) stage colour, so the vanilla reflection brightness *is* the cube's average:
+`env/bland` (`security/gog`, `hazmat/visor`) ≈ **0.035**, `env/gen1` (`mapobjects/dropship/dropshipglassns`
+cockpit) ≈ **0.022**. Dropping that budget made visors and the dropship cockpit reflect the scene like a
+mirror. Fix (`RB_RHI_RenderTexgenStage`, both `rtGlass` paths): scale `parms.color` by the replaced cube's
+brightness (`RB_RHI_EnvCubeAvg`, cached per name — the same value the glass-probe swap uses to preserve
+energy), so a pane reflects the *real* scene but at its authored glass strength, with the shader's grazing
+Fresnel boost on top. Shader-free — both RT vert shaders already fold `parms.color` into `var_Color` and the
+frags do `refl·var_Color.rgb·graze`.
+
+**Perceptual remap (2026-09-24, round 2 — first cut was invisible).** Scaling by the *linear* cube average
+(0.022–0.035) made the glass reflect nothing perceptible ("no perceivable reflection now"), and the knob's
+useful range bunched at the top. Fixed by using the cube's **perceptual** brightness `sqrt(envAvg)` (≈ gamma 2
+— how bright the gamma-displayed cube looked to the artist who set the pane's shininess): `env/gen1` 0.022→0.15,
+`env/bland` 0.035→0.19, `env/gen2` windows 0.295→0.54, a genuine chrome cube ~1→1. This lifts the near-black
+glass to a **visible-but-subtle** default while keeping the per-material ordering (windows shinier than goggles,
+chrome still a mirror). `r_rtReflGlassScale` (range 0–4, archived; Debugging → Ray-Traced Reflections → "Glass
+Intensity") is the taste knob: **0 = clear pane, 1 = subtle visible glass, higher → mirror.** **Default 2** —
+user-calibrated 2026-09-24 on the goggles + dropship cockpit (`sqrt(envAvg)` baseline read a touch subtle at 1).
+A cube whose files can't be read (envAvg < 0) is left untouched.
+
 ## Entity coverage — the room's props + dropped items should reflect too (DONE + user-verified 2026-09-21)
 
 Today reflective floors show the worldspawn (RR5) + monsters (RR2), but **static entity props reflect as
