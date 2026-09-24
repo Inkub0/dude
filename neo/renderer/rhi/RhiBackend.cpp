@@ -3641,6 +3641,20 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	// their milestones.
 	const bool vkMode = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
 
+	// Present only when this command list ends in RC_SWAP_BUFFERS. The frontend also issues
+	// swap-less lists — CaptureRenderToFile -> R_IssueRenderCommands (the PDA objective cam
+	// shots, savegame previews). GL only swaps in the RC_SWAP_BUFFERS case, so those never
+	// reach the screen there; the Vulkan backend used to present every EndFrame, flashing the
+	// cropped capture (plus any stale 2D gui-model content the crop flushed with it) for a frame.
+	bool wantPresent = false;
+	for ( const emptyCommand_t *c = cmds; c; c = (const emptyCommand_t *)c->next ) {
+		if ( c->commandId == RC_SWAP_BUFFERS ) {
+			wantPresent = true;
+			break;
+		}
+	}
+	r->SetFramePresent( wantPresent );
+
 	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
 
 	// Phase 2 GPU skinning: dispatch all recorded MD5 skin jobs now, in the pre-scene window

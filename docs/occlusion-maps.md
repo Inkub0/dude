@@ -182,6 +182,7 @@ for release.
 | `r_occlusionMapBakeContrast` | 1.0 | 0.1–8 | baker: contrast/gamma on the visibility term |
 | `r_occlusionMapBakeDilate` | 4 | 0–32 | baker: seam padding in pixels |
 | `r_occlusionMapBakeDetail` | 1.5 | 0–4 | baker: bump/normal-map cavity strength (0 = geometry only) |
+| `r_occlusionMapBakeContact` | 1.0 | 0–16 | baker: buried-texel contact distance, world units (capped at 2% of the model's longest axis); a texel mostly blocked within it sits under a co-located sub-mesh and is skipped (0 = off) |
 
 Ambient strength = `r_occlusionMapScale`; direct-diffuse strength =
 `r_occlusionMapScale × r_occlusionMapDirect`.
@@ -236,6 +237,27 @@ the legacy backend regardless of preset, and does nothing where no baked/authore
       pose (global joint matrices rebuilt from the relative default pose) to get a static snapshot,
       which is baked and keyed by mesh id. Runtime resolves via the entity's `dynamicModel`
       snapshot. Validated on the imp (`imp_s0.tga`): full AO gradient, deep sockets/rib creases.
+- [x] **Buried texels under co-located sub-meshes (2026-09-23).** Dark blotches on characters on
+      every preset with `r_occlusionMaps` on (Low and up; Potato, which has it off, is clean).
+      Cause: several character models carry a second mesh a fraction of a unit under the skin —
+      the morgue zombie's `skeleton01` (skull + ribs, shown through its wounds), goggle shells over
+      a face, armour over a body. Every hemisphere ray from the skin texel under it hits that mesh
+      at 0.1–0.8 units, so the texel bakes hard black (visibility ~0.02 at any cull rule); the texel
+      itself is hidden in-game, but bilinear/mip filtering bleeds the black onto the visible skin
+      next to it. Fix: `r_occlusionMapBakeContact` (default 1.0 world units, capped at 2% of the
+      model's longest axis, 0 = off) — a texel with more than half its rays hitting within that
+      distance is *buried* and left unwritten, so seam dilation pads it from its visible neighbours
+      and wide buried regions stay white. Offline check on the morgue body: 29 of the 30 blackest
+      triangles flagged, 7.5% of random texels, real creases untouched. **Every map baked before
+      this date (the three shipped `z_baked_ao*.pk4` packs) carries the artefact and must be
+      re-baked** (`./bake_ao.sh +bakeAOFolder models/md5 +bakeAOFolder models/mapobjects
+      +bakeAOFolder models/weapons`, then repack).
+- [x] **Occluder winding (same day).** The baker built each occluder's geometric normal as
+      `(v1 - v0) x (v2 - v0)`, the negative of the engine's `R_DeriveFacePlanes` convention
+      `(v2 - v0) x (v1 - v0)`, so its front-face cull ran inverted (cavities were seen through
+      their far wall instead of their near one). Corrected — small, mostly lightening change on
+      the bakes; it was not the cause of the blotches above. The normal is also oriented against
+      the summed vertex normals as a guard.
 - [ ] Mass bake of every static prop (full `generated/aomaps` coverage) — see [todo.md](todo.md)
       "Bake AO for every possible asset".
 - [ ] Optional: specular occlusion from the map (mirroring `r_ssaoSpecular`). Diffuse-only for now.

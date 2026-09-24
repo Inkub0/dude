@@ -214,6 +214,11 @@ public:
 	// ---- frame ----
 	virtual void	BeginFrame( int windowWidth, int windowHeight ) = 0;
 	virtual void	EndFrame() = 0;						// present handled by glimp/swapchain
+	// Whether the command list about to run ends in a present (RC_SWAP_BUFFERS). The frontend
+	// also issues swap-less lists (CaptureRenderToFile: objective cam shots, savegame previews);
+	// GL only swaps in the RC_SWAP_BUFFERS case, so a backend that owns its presentation (Vulkan)
+	// must not present those either. One-shot: consumed by the next BeginFrame, defaults to true.
+	virtual void	SetFramePresent( bool present ) {}
 
 	// ---- passes (begin/end-scoped; backend decides render-pass objects) ----
 	virtual void	BeginPass( const ClearArgs *clear ) = 0;	// NULL = load existing
