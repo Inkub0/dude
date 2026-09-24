@@ -187,6 +187,27 @@ const int SCREEN_HEIGHT			= 480;
 class idRenderWorld;
 
 
+// DUDE benchmark (timeDemo; docs/benchmark.md): renderer statistics of the last completed
+// frame, snapshotted by EndFrame before the per-frame counters are cleared. Per-frame values
+// are the raw counters; a caller averages them itself. The CPU times are sub-millisecond
+// (Sys_MillisecondsPrecise); GPU time is only present on backends with a frame timer
+// (opengl3 / Vulkan) and lags the CPU frame by the in-flight depth, so callers should key
+// off gpuSerial (bumps per new GPU sample) rather than pairing it with this frame.
+typedef struct {
+	float			frontEndMs;			// CPU: RenderScene (frontend) time
+	float			backEndMs;			// CPU: backend command execution time
+	int				drawCalls;			// surface + shadow draws issued
+	int				drawTris;			// triangles issued (all passes)
+	int				viewLights;
+	int				viewEntities;
+	int				numViews;			// main + subviews (mirrors, remote cameras)
+	bool			gpuValid;
+	double			gpuMs;				// latest completed frame's GPU time
+	int				gpuSerial;
+	const char *	gpuName;			// renderer / driver strings (static)
+	const char *	gpuDriver;
+} renderFrameStats_t;
+
 class idRenderSystem {
 public:
 
@@ -290,6 +311,12 @@ public:
 	// texture filter / mipmapping / repeat won't be modified by the upload
 	// returns false if the image wasn't found
 	virtual bool			UploadImage( const char *imageName, const byte *data, int width, int height ) = 0;
+
+	// DUDE benchmark (timeDemo): statistics of the last completed frame, see renderFrameStats_t.
+	// Appended after the original API so game DLLs built against it keep their vtable offsets.
+	virtual void			GetFrameStats( renderFrameStats_t &stats ) = 0;
+	// keep the backend GPU frame timer running for the benchmark (no-op on the legacy GL path)
+	virtual void			SetGpuTimerRequested( bool on ) = 0;
 };
 
 extern idRenderSystem *			renderSystem;

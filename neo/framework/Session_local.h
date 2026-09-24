@@ -92,6 +92,22 @@ typedef enum {
 } timeDemo_t;
 
 const int USERCMD_PER_DEMO_FRAME	= 2;
+
+// DUDE benchmark (timeDemo; docs/benchmark.md): per-frame samples gathered while a
+// timeDemo plays, turned into the console/file report by TimeDemoReport().
+typedef struct {
+	int				renderedFrames;		// frames drawn while the demo ran (>= demo frames in real-time mode)
+	double			lastFrameStart;		// Sys_MillisecondsPrecise at the previous benchmark frame (-1 = none yet)
+	idList<float>	frameMs;			// wall time of each rendered frame
+	idList<float>	gpuMs;				// GPU time per frame (opengl3/Vulkan frame timer)
+	int				lastGpuSerial;		// last GPU sample consumed (renderFrameStats_t::gpuSerial)
+	double			frontEndMs;			// CPU renderer time sums (per-frame averages in the report)
+	double			backEndMs;
+	double			drawCalls, tris, lights, entities, views;	// scene counter sums
+	int				statFrames;			// frames the sums above cover
+	int				firstViewTime;		// renderView.time of the first/last demo frame (-1 = none):
+	int				lastViewTime;		//   the demo's recorded duration
+} timeDemoStats_t;
 const int CONNECT_TRANSMIT_TIME		= 1000;
 const int MAX_LOGGED_USERCMDS		= 60*60*60;	// one hour of single player, 15 minutes of four player
 
@@ -244,6 +260,7 @@ public:
 
 	timeDemo_t			timeDemo;
 	int					timeDemoStartTime;
+	timeDemoStats_t		timeDemoStats;		// DUDE benchmark samples (TimeDemoFrame / TimeDemoReport)
 	int					numDemoFrames;		// for timeDemo and demoShot
 	int					demoTimeOffset;
 	renderView_t		currentDemoRenderView;
@@ -297,6 +314,8 @@ public:
 	void				TimeCmdDemo( const char *demoName);
 	void				SaveCmdDemoToFile(idFile *file);
 	void				LoadCmdDemoFromFile(idFile *file);
+	void				TimeDemoFrame();
+	idStr				TimeDemoReport( const char *demoName, float demoSeconds );
 	void				StartRecordingRenderDemo( const char *name );
 	void				StopRecordingRenderDemo();
 	void				StartPlayingRenderDemo( idStr name );

@@ -2757,7 +2757,10 @@ void idCommonLocal::Frame( void ) {
 		if ( com_editors == 0 )
 #endif
 		{
-			if ( com_interpolate.GetBool() ) {
+			if ( com_interpolate.GetBool() || sessLocal.timeDemo != TD_NO ) {
+				// (a timeDemo benchmark free-runs the same way: the demo advances on the
+				// tic clock inside AdvanceRenderDemo, so waiting for a tic here would
+				// just cap the measured fps at the tic rate)
 				// Decoupled rendering: draw as fast as the display allows and let the sim
 				// advance only when a tic is actually due (session->Frame no longer blocks
 				// for one, see idSessionLocal::Frame). Don't sleep to the next tic here;

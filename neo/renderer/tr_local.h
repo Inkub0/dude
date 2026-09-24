@@ -608,6 +608,7 @@ typedef struct {
 	int		c_entityUpdates, c_lightUpdates, c_entityReferences, c_lightReferences;
 	int		c_guiSurfs;
 	int		frontEndMsec;		// sum of time in all RE_RenderScene's in a frame
+	double	frontEndMs;			// same, sub-millisecond (DUDE benchmark)
 } performanceCounters_t;
 
 
@@ -657,6 +658,7 @@ typedef struct {
 
 	float	maxLightValue;	// for light scale
 	int		msec;			// total msec for backend run
+	double	ms;				// same, sub-millisecond (DUDE benchmark)
 } backEndCounters_t;
 
 // all state modified by the back end is separated
@@ -746,6 +748,8 @@ public:
 	virtual void			DrawDemoPics();
 	virtual void			BeginFrame( int windowWidth, int windowHeight );
 	virtual void			EndFrame( int *frontEndMsec, int *backEndMsec );
+	virtual void			GetFrameStats( renderFrameStats_t &stats );
+	virtual void			SetGpuTimerRequested( bool on );
 	virtual void			TakeScreenshot( int width, int height, const char *fileName, int downSample, renderView_t *ref );
 	virtual void			CropRenderSize( int width, int height, bool makePowerOfTwo = false, bool forceDimensions = false );
 	virtual void			CaptureRenderToImage( const char *imageName );
@@ -808,6 +812,7 @@ public:
 	viewDef_t *				viewDef;
 
 	performanceCounters_t	pc;					// performance counters
+	renderFrameStats_t		lastFrameStats;		// DUDE benchmark: EndFrame snapshot (GetFrameStats)
 
 	drawSurfsCommand_t		lockSurfacesCmd;	// use this when r_lockSurfaces = 1
 	//renderView_t			lockSurfacesRenderView;

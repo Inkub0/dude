@@ -741,6 +741,23 @@ void idRenderSystemLocal::DrawDemoPics() {
 
 /*
 =============
+idRenderSystemLocal::GetFrameStats / SetGpuTimerRequested
+
+DUDE benchmark (timeDemo): see renderFrameStats_t in RenderSystem.h
+=============
+*/
+void idRenderSystemLocal::GetFrameStats( renderFrameStats_t &stats ) {
+	stats = lastFrameStats;
+}
+
+void idRenderSystemLocal::SetGpuTimerRequested( bool on ) {
+	if ( glConfig.rhiBackend ) {
+		rhi::GetRHI()->SetGpuTimerRequested( on );
+	}
+}
+
+/*
+=============
 EndFrame
 
 Returns the number of msec spent in the back end
@@ -764,6 +781,23 @@ void idRenderSystemLocal::EndFrame( int *frontEndMsec, int *backEndMsec ) {
 	if ( backEndMsec ) {
 		*backEndMsec = backEnd.pc.msec;
 	}
+
+	// DUDE benchmark: snapshot the counters before R_PerformanceCounters clears them.
+	// The frontend numbers are this frame's; the backend ones are from the command list
+	// issued at the end of the previous EndFrame (R_IssueRenderCommands runs below).
+	lastFrameStats.frontEndMs = (float)pc.frontEndMs;
+	lastFrameStats.backEndMs = (float)backEnd.pc.ms;
+	lastFrameStats.drawCalls = backEnd.pc.c_drawElements + backEnd.pc.c_shadowElements;
+	lastFrameStats.drawTris = ( backEnd.pc.c_drawIndexes + backEnd.pc.c_shadowIndexes ) / 3;
+	lastFrameStats.viewLights = pc.c_viewLights;
+	lastFrameStats.viewEntities = pc.c_visibleViewEntities;
+	lastFrameStats.numViews = pc.c_numViews;
+	lastFrameStats.gpuValid = false;
+	if ( glConfig.rhiBackend ) {
+		lastFrameStats.gpuValid = rhi::GetRHI()->GetGpuFrameMs( lastFrameStats.gpuMs, lastFrameStats.gpuSerial );
+	}
+	lastFrameStats.gpuName = glConfig.renderer_string;
+	lastFrameStats.gpuDriver = glConfig.version_string;
 
 	// print any other statistics and clear all of them
 	R_PerformanceCounters();
