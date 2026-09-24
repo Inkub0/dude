@@ -34,6 +34,16 @@ demo at its recorded speed with the renderer running the way it does in play.
 `com_timeDemoRealTime 0` restores the classic one-demo-frame-per-frame behaviour for comparison
 with old numbers.
 
+### Aspect ratio
+
+A render demo carries the field of view of the display it was recorded on (`demo1` is 4:3:
+fov_x 90, fov_y 73.7) and its view rect is mapped onto the whole screen, so vanilla playback on
+a widescreen display is stretched horizontally. `Demo_FitViewToScreen` (all demo playback, not
+just the benchmark) keeps the recorded vertical fov and derives fov_x from the real viewport
+aspect, the same Hor+ rule `idGameLocal::CalcFov` applies in play, so the 3D view has the same
+proportions and field of view the game would have at that resolution. The recorded 2D HUD
+overlay is still a 640x480 GUI stretched like any other, as in play.
+
 `timeDemo demo1 twice` (any second argument) still plays the demo once un-timed to precache.
 Sound stays muted in both modes, as before.
 

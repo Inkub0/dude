@@ -2764,6 +2764,33 @@ void idSessionLocal::PacifierUpdate() {
 
 /*
 ===============
+Demo_FitViewToScreen
+
+DUDE: a render demo carries the field of view of the display it was recorded on (demo1 is
+4:3: fov_x 90, fov_y 73.7) and its view rect is mapped onto the whole current screen by
+RenderViewToViewport, so on any other aspect ratio the projection comes out stretched. Keep
+the recorded vertical fov and derive fov_x from the real pixel aspect of the viewport the
+rect maps to - the same Hor+ rule the game applies in play (idGameLocal::CalcFov, auto mode).
+A demo played at the aspect it was recorded on is unchanged.
+===============
+*/
+static void Demo_FitViewToScreen( renderView_t &view ) {
+	if ( view.width <= 0 || view.height <= 0 || view.fov_y <= 0.0f ) {
+		return;
+	}
+	const float screenW = renderSystem->GetScreenWidth();
+	const float screenH = renderSystem->GetScreenHeight();
+	if ( screenW <= 0.0f || screenH <= 0.0f ) {
+		return;
+	}
+	// the 640x480-virtual rect scales by (screenW/640, screenH/480) into pixels
+	const float aspect = ( view.width * screenW / SCREEN_WIDTH ) / ( view.height * screenH / SCREEN_HEIGHT );
+	const float halfY = tanf( DEG2RAD( view.fov_y ) * 0.5f );
+	view.fov_x = RAD2DEG( 2.0f * atanf( halfY * aspect ) );
+}
+
+/*
+===============
 idSessionLocal::Draw
 ===============
 */
@@ -2799,7 +2826,10 @@ void idSessionLocal::Draw() {
 
 		guiActive->Redraw( com_frameTime );
 	} else if ( readDemo ) {
-		rw->RenderScene( &currentDemoRenderView );
+		// DUDE: fit the recorded view to this screen's aspect ratio instead of stretching it
+		renderView_t view = currentDemoRenderView;
+		Demo_FitViewToScreen( view );
+		rw->RenderScene( &view );
 		renderSystem->DrawDemoPics();
 	} else if ( mapSpawned ) {
 		bool gameDraw = false;
