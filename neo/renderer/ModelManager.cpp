@@ -531,6 +531,9 @@ void idRenderModelManagerLocal::PrecacheOcclusionMaps() {
 			RB_RHI_PrecacheOcclusionMapsForModel( model );
 		}
 	}
+	// decal bump images (blood splats etc.) stall the same way on first projection; precache them too
+	extern void R_PrecacheDecalImages( void );
+	R_PrecacheDecalImages();
 }
 
 // free wrapper so non-renderer TUs (the timeDemo path in Session.cpp) can trigger it
