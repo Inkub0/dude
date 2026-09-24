@@ -1050,7 +1050,13 @@ void idSessionLocal::TimeDemoFrame() {
 	timeDemoStats_t &st = timeDemoStats;
 	const double now = Sys_MillisecondsPrecise();
 	if ( st.lastFrameStart >= 0.0 ) {
-		st.frameMs.Append( (float)( now - st.lastFrameStart ) );
+		const float ms = (float)( now - st.lastFrameStart );
+		st.frameMs.Append( ms );
+		// TEMPORARY diagnostic (r_gpuSkinTrace): mark long frames so the step prints can be paired with them
+		const int trace = cvarSystem->GetCVarInteger( "r_gpuSkinTrace" );
+		if ( trace > 0 && ms >= trace ) {
+			common->Printf( "gpuSkinTrace: --- FRAME %.1f ms (demo frame %i) ---\n", ms, numDemoFrames );
+		}
 	}
 	st.lastFrameStart = now;
 	st.renderedFrames++;

@@ -3662,14 +3662,23 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 
 	// Phase 2 GPU skinning: dispatch all recorded MD5 skin jobs now, in the pre-scene window
 	// (frame cb open, no render pass yet) so the compute->vertex barrier lands before any draw.
-	RB_RHI_FlushSkinJobs();
-	// Roadmap B: deform-once tessellation dispatches, immediately AFTER the skin jobs so a deform that
-	// reads a surface's gpuSkinVB is ordered by the skin dispatch's trailing COMPUTE->COMPUTE barrier.
-	RB_RHI_FlushTessJobs();
-	// R3.5 S3 (docs/rtx-animated-blas.md): build/refit the per-entity animated BLASes from the
-	// now-current gpuSkinVB, on the frame cb, before any draw's shadow rays. Ordered after the skin
-	// flush by PostComputeBarrier's RT-gated compute->AS-build stage; inert when nothing was staged.
-	r->RefreshAnimBlas();
+	{
+		extern void R_GpuSkinTrace( const char *step, const char *what, double ms );	// TEMPORARY diagnostic (r_gpuSkinTrace)
+		double t0 = Sys_MillisecondsPrecise();
+		RB_RHI_FlushSkinJobs();
+		double t1 = Sys_MillisecondsPrecise();
+		R_GpuSkinTrace( "flushSkin", NULL, t1 - t0 );
+		// Roadmap B: deform-once tessellation dispatches, immediately AFTER the skin jobs so a deform that
+		// reads a surface's gpuSkinVB is ordered by the skin dispatch's trailing COMPUTE->COMPUTE barrier.
+		RB_RHI_FlushTessJobs();
+		double t2 = Sys_MillisecondsPrecise();
+		R_GpuSkinTrace( "flushTess", NULL, t2 - t1 );
+		// R3.5 S3 (docs/rtx-animated-blas.md): build/refit the per-entity animated BLASes from the
+		// now-current gpuSkinVB, on the frame cb, before any draw's shadow rays. Ordered after the skin
+		// flush by PostComputeBarrier's RT-gated compute->AS-build stage; inert when nothing was staged.
+		r->RefreshAnimBlas();
+		R_GpuSkinTrace( "animBlas", NULL, Sys_MillisecondsPrecise() - t2 );
+	}
 
 	rbBerserkFrame = false;	// set when the berserk material is seen (crop overlay), read at the _scratch blit
 	rbHelltimeFrame = false;	// set when a bloodorbN hell-time material is seen, read at its cr_draw blit
