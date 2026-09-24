@@ -36,6 +36,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/ModelManager.h"
 
 #include "framework/Licensee.h"
+#include "framework/HitchTrace.h"	// TEMPORARY diagnostic (r_hitchTrace)
 #include "framework/Session_local.h"
 
 #if defined(__AROS__)
@@ -1052,12 +1053,17 @@ void idSessionLocal::TimeDemoFrame() {
 	if ( st.lastFrameStart >= 0.0 ) {
 		const float ms = (float)( now - st.lastFrameStart );
 		st.frameMs.Append( ms );
-		// TEMPORARY diagnostic (r_gpuSkinTrace): mark long frames so the step prints can be paired with them
-		const int trace = cvarSystem->GetCVarInteger( "r_gpuSkinTrace" );
+		// TEMPORARY diagnostic (r_hitchTrace): mark long frames with where the time went, so the
+		// step prints (which precede this line) can be paired with them
+		extern int com_frameNumber;
+		const int trace = r_hitchTrace.GetInteger();
 		if ( trace > 0 && ms >= trace ) {
-			common->Printf( "gpuSkinTrace: --- FRAME %.1f ms (demo frame %i) ---\n", ms, numDemoFrames );
+			const double other = ms - st.hitchAdvanceMs - st.hitchDrawMs - st.hitchEndFrameMs;
+			common->Printf( "hitchTrace f%d: --- FRAME %.1f ms (demo frame %i): advance %.1f (render cmds %.1f, sound cmds %.1f)  draw %.1f  endFrame %.1f  other %.1f ---\n",
+				com_frameNumber, ms, numDemoFrames, st.hitchAdvanceMs, st.hitchAdvRenderMs, st.hitchAdvSoundMs, st.hitchDrawMs, st.hitchEndFrameMs, other );
 		}
 	}
+	st.hitchAdvanceMs = st.hitchAdvRenderMs = st.hitchAdvSoundMs = st.hitchDrawMs = st.hitchEndFrameMs = 0.0;
 	st.lastFrameStart = now;
 	st.renderedFrames++;
 
@@ -2680,15 +2686,19 @@ void idSessionLocal::AdvanceRenderDemo( bool singleFrameOnly ) {
 			break;
 		}
 		if ( ds == DS_RENDER ) {
+			const double t0 = Sys_MillisecondsPrecise();	// TEMPORARY diagnostic (r_hitchTrace)
 			if ( rw->ProcessDemoCommand( readDemo, &currentDemoRenderView, &demoTimeOffset ) ) {
 				// a view is ready to render
 				skipFrames--;
 				numDemoFrames++;
 			}
+			timeDemoStats.hitchAdvRenderMs += Sys_MillisecondsPrecise() - t0;
 			continue;
 		}
 		if ( ds == DS_SOUND ) {
+			const double t0 = Sys_MillisecondsPrecise();	// TEMPORARY diagnostic (r_hitchTrace)
 			sw->ProcessDemoCommand( readDemo );
+			timeDemoStats.hitchAdvSoundMs += Sys_MillisecondsPrecise() - t0;
 			continue;
 		}
 		// appears in v1.2, with savegame format 17
@@ -2937,7 +2947,10 @@ void idSessionLocal::UpdateScreen( bool outOfSequence ) {
 	D3P_EndCPUSample(Render_BeginFrame);
 
 	// draw everything
+	const double tDraw = Sys_MillisecondsPrecise();	// TEMPORARY diagnostic (r_hitchTrace)
 	Draw();
+	const double tEnd = Sys_MillisecondsPrecise();
+	timeDemoStats.hitchDrawMs += tEnd - tDraw;
 
 	D3P_BeginCPUSample(Render_EndFrame);
 	if ( com_speeds.GetBool() ) {
@@ -2945,6 +2958,7 @@ void idSessionLocal::UpdateScreen( bool outOfSequence ) {
 	} else {
 		renderSystem->EndFrame( NULL, NULL );
 	}
+	timeDemoStats.hitchEndFrameMs += Sys_MillisecondsPrecise() - tEnd;
 	D3P_EndCPUSample(Render_EndFrame);
 
 	insideUpdateScreen = false;
@@ -3087,7 +3101,9 @@ void idSessionLocal::Frame() {
 		if ( timeDemo ) {
 			TimeDemoFrame();	// DUDE benchmark sample for the frame just rendered
 		}
+		const double t0 = Sys_MillisecondsPrecise();	// TEMPORARY diagnostic (r_hitchTrace)
 		AdvanceRenderDemo( false );
+		timeDemoStats.hitchAdvanceMs += Sys_MillisecondsPrecise() - t0;
 		return;
 	}
 

@@ -61,6 +61,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include <ctime>
 
 #include <unordered_map>
+#include "framework/HitchTrace.h"	// TEMPORARY diagnostic (r_hitchTrace)
 
 #include "framework/FileSystem.h"
 #include "renderer/tr_local.h"
@@ -4417,6 +4418,7 @@ VkPipeline VulkanBackend::GetComputePipeline( ShaderHandle shader ) {
 		cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
 		cpci.stage = stage;
 		cpci.layout = computePipeLayout;
+		idHitchScope hs( "compPipeline", NULL );
 		if ( !vkCheck( vkCreateComputePipelines( device, diskPipelineCache, 1, &cpci, NULL, &pipeline ), "vkCreateComputePipelines" ) ) {
 			pipeline = VK_NULL_HANDLE;
 		}
@@ -10905,9 +10907,12 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	pci.subpass = 0;
 
 	VkPipeline pipeline = VK_NULL_HANDLE;
-	if ( !vkCheck( vkCreateGraphicsPipelines( device, diskPipelineCache, 1, &pci, NULL, &pipeline ),
-	               va( "vkCreateGraphicsPipelines(%s)", sh.name.c_str() ) ) ) {
-		pipeline = VK_NULL_HANDLE;
+	{
+		idHitchScope hs( "gfxPipeline", sh.name.c_str() );
+		if ( !vkCheck( vkCreateGraphicsPipelines( device, diskPipelineCache, 1, &pci, NULL, &pipeline ),
+		               va( "vkCreateGraphicsPipelines(%s)", sh.name.c_str() ) ) ) {
+			pipeline = VK_NULL_HANDLE;
+		}
 	}
 	pipelineCache[key] = pipeline;
 	return pipeline;

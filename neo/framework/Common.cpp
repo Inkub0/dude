@@ -44,6 +44,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/async/NetworkSystem.h"
 #include "framework/BuildVersion.h"
 #include "framework/Licensee.h"
+#include "framework/HitchTrace.h"	// TEMPORARY diagnostic (r_hitchTrace)
 #include "framework/Console.h"
 #include "framework/Session.h"
 #include "framework/Game.h"
@@ -145,6 +146,17 @@ idCVar com_interpolateAnim( "com_interpolateAnim", "1", CVAR_BOOL | CVAR_SYSTEM 
 // motion stays smooth even without a clean vsync — the intended companion to running vsync
 // off (r_swapInterval 0) on a multi-monitor X11 setup where vsync clamps to the wrong
 // (lowest) refresh. 0 = uncapped. Only ever adds delay, never speeds anything up.
+// TEMPORARY diagnostic (benchmark hitch hunt, 2026-09-24): see framework/HitchTrace.h. Archived
+// only so it survives the relaunches the hunt needs; goes away with the rest of it.
+idCVar r_hitchTrace( "r_hitchTrace", "0", CVAR_SYSTEM | CVAR_INTEGER | CVAR_ARCHIVE,
+	"print instrumented steps (pipeline creation, image/sound loads, GPU-skin setup, demo advance) that take >= N ms, and mark benchmark frames >= N ms with a phase split; 0 = off" );
+extern int com_frameNumber;
+void R_HitchTrace( const char *step, const char *what, double ms ) {
+	if ( r_hitchTrace.GetInteger() > 0 && ms >= r_hitchTrace.GetInteger() ) {
+		common->Printf( "hitchTrace f%d: %-14s %-44s %7.2f ms\n", com_frameNumber, step, what ? what : "", ms );
+	}
+}
+
 idCVar com_maxFPS( "com_maxFPS", "0", CVAR_INTEGER | CVAR_SYSTEM | CVAR_ARCHIVE, "cap the render frame rate (0 = uncapped). Best paired with vsync off; set it to your monitor's refresh or a clean divisor of it for even, tear-minimized pacing", 0, 1000 );
 
 // in the high-fps branch, the next three values will be set based on com_gameHz

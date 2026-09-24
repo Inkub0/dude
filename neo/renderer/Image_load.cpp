@@ -29,6 +29,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/platform.h"
 #include "idlib/hashing/MD4.h"
 #include "renderer/tr_local.h"
+#include "framework/HitchTrace.h"	// TEMPORARY diagnostic (r_hitchTrace)
 
 #include "renderer/Image.h"
 #include "renderer/rhi/RHI.h"		// DUDE Phase 4 M2: Vulkan-backend image uploads
@@ -1796,6 +1797,7 @@ On exit, the idImage will have a valid OpenGL texture number that can be bound
 ===============
 */
 void	idImage::ActuallyLoadImage( bool checkForPrecompressed, bool fromBackEnd ) {
+	idHitchScope hitchScope( "imageLoad", imgName.c_str() );	// TEMPORARY diagnostic (r_hitchTrace)
 	int		width, height;
 	byte	*pic;
 

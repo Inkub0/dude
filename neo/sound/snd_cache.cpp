@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/FileSystem.h"
 
 #include "sound/snd_local.h"
+#include "framework/HitchTrace.h"	// TEMPORARY diagnostic (r_hitchTrace)
 
 #define USE_SOUND_CACHE_ALLOCATOR
 
@@ -431,6 +432,7 @@ Loads based on name, possibly doing a MakeDefault if necessary
 ===================
 */
 void idSoundSample::Load( void ) {
+	idHitchScope hitchScope( "soundLoad", name.c_str() );	// TEMPORARY diagnostic (r_hitchTrace)
 	defaultSound = false;
 	purged = false;
 	hardwareBuffer = false;
