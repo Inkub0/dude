@@ -1050,7 +1050,11 @@ advances), samples the wall frame time and the renderer's last-frame statistics.
 void idSessionLocal::TimeDemoFrame() {
 	timeDemoStats_t &st = timeDemoStats;
 	const double now = Sys_MillisecondsPrecise();
-	if ( st.lastFrameStart >= 0.0 ) {
+	// the first frames of the demo carry one-time setup (render targets, FSR2 context, compute
+	// shaders, pipelines: ~380 ms measured) that no later frame repeats; keep them out of the
+	// frame-time statistics so the percentiles and the worst frame describe steady play
+	const int WARMUP_FRAMES = 3;
+	if ( st.lastFrameStart >= 0.0 && st.renderedFrames > WARMUP_FRAMES ) {
 		const float ms = (float)( now - st.lastFrameStart );
 		st.frameMs.Append( ms );
 		// TEMPORARY diagnostic (r_hitchTrace): mark long frames with where the time went, so the
@@ -1202,7 +1206,7 @@ idStr idSessionLocal::TimeDemoReport( const char *demoName, float demoSeconds ) 
 			hitches++;
 		}
 		hitchWorst = sorted[sorted.Num() - 1];
-		report += va( "frame time (ms): avg %.2f  median %.2f  min %.2f  max %.2f\n",
+		report += va( "frame time (ms): avg %.2f  median %.2f  min %.2f  max %.2f  (first 3 frames excluded: one-time setup)\n",
 			sum / sorted.Num(), median, sorted[0], hitchWorst );
 		report += va( "1%% low: %.1f fps (99th percentile %.2f ms)   0.1%% low: %.1f fps (99.9th percentile %.2f ms)\n",
 			p1Low, p99, p01Low, p999 );

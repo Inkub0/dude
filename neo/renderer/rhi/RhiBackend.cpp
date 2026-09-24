@@ -3659,7 +3659,10 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	}
 	r->SetFramePresent( wantPresent );
 
-	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
+	{
+		idHitchScope hs( "vkBeginFrame", NULL );	// TEMPORARY diagnostic: fence wait + swapchain acquire
+		r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
+	}
 
 	// Phase 2 GPU skinning: dispatch all recorded MD5 skin jobs now, in the pre-scene window
 	// (frame cb open, no render pass yet) so the compute->vertex barrier lands before any draw.
@@ -3693,6 +3696,7 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	}
 
 	for ( ; cmds; cmds = (const emptyCommand_t *)cmds->next ) {
+		idHitchScope hsCmd( "backendCmd", cmds->commandId == RC_DRAW_VIEW ? "drawView" : cmds->commandId == RC_SWAP_BUFFERS ? "swap" : "other" );	// TEMPORARY diagnostic
 		switch ( cmds->commandId ) {
 		case RC_NOP:
 			break;
@@ -3787,7 +3791,10 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 		}
 	}
 
-	r->EndFrame();
+	{
+		idHitchScope hs( "vkEndFrame", NULL );		// TEMPORARY diagnostic: submit + present
+		r->EndFrame();
+	}
 
 	backEnd.pc.ms = Sys_MillisecondsPrecise() - backEndStartF;
 	backEnd.pc.msec = (int)backEnd.pc.ms;
