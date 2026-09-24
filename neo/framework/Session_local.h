@@ -103,8 +103,10 @@ typedef struct {
 	int				lastGpuSerial;		// last GPU sample consumed (renderFrameStats_t::gpuSerial)
 	double			frontEndMs;			// CPU renderer time sums (per-frame averages in the report)
 	double			backEndMs;
-	double			drawCalls, tris, lights, entities, views;	// scene counter sums
-	int				statFrames;			// frames the sums above cover
+	int				statFrames;			// rendered frames the CPU sums cover
+	double			drawCalls, tris, lights, entities, views;	// scene counter sums, sampled once per DEMO frame
+	int				sceneFrames;		// demo frames the scene sums cover
+	int				lastSceneDemoFrame;	// numDemoFrames at the last scene sample
 } timeDemoStats_t;
 const int CONNECT_TRANSMIT_TIME		= 1000;
 const int MAX_LOGGED_USERCMDS		= 60*60*60;	// one hour of single player, 15 minutes of four player

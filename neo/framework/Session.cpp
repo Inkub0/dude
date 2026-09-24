@@ -1059,12 +1059,21 @@ void idSessionLocal::TimeDemoFrame() {
 	renderSystem->GetFrameStats( fs );
 	st.frontEndMs += fs.frontEndMs;
 	st.backEndMs += fs.backEndMs;
-	st.drawCalls += fs.drawCalls;
-	st.tris += fs.drawTris;
-	st.lights += fs.viewLights;
-	st.entities += fs.viewEntities;
-	st.views += fs.numViews;
 	st.statFrames++;
+	// Scene counters describe the demo's content, so sample them once per demo frame: in
+	// real-time mode a demo frame is re-rendered as often as the fps allows, and averaging
+	// over rendered frames would weight cheap scenes (more re-renders) over heavy ones -
+	// differently on each backend, making the numbers incomparable. The frame just rendered
+	// was the first render of demo frame numDemoFrames when that changed since the last sample.
+	if ( numDemoFrames != st.lastSceneDemoFrame ) {
+		st.drawCalls += fs.drawCalls;
+		st.tris += fs.drawTris;
+		st.lights += fs.viewLights;
+		st.entities += fs.viewEntities;
+		st.views += fs.numViews;
+		st.sceneFrames++;
+		st.lastSceneDemoFrame = numDemoFrames;
+	}
 	if ( fs.gpuValid && fs.gpuSerial != st.lastGpuSerial ) {
 		st.gpuMs.Append( (float)fs.gpuMs );
 		st.lastGpuSerial = fs.gpuSerial;
@@ -1211,10 +1220,10 @@ idStr idSessionLocal::TimeDemoReport( const char *demoName, float demoSeconds ) 
 	} else {
 		report += "GPU (ms/frame): n/a (frame timer needs the opengl3 or vulkan backend)\n";
 	}
-	if ( st.statFrames ) {
-		report += va( "scene (per frame avg): %.0f draw calls, %.0fk triangles, %.1f lights, %.1f entities, %.1f views\n",
-			st.drawCalls / st.statFrames, st.tris / st.statFrames * 0.001, st.lights / st.statFrames,
-			st.entities / st.statFrames, st.views / st.statFrames );
+	if ( st.sceneFrames ) {
+		report += va( "scene (per demo frame avg, %i sampled): %.0f draw calls, %.0fk triangles, %.1f lights, %.1f entities, %.1f views\n",
+			st.sceneFrames, st.drawCalls / st.sceneFrames, st.tris / st.sceneFrames * 0.001, st.lights / st.sceneFrames,
+			st.entities / st.sceneFrames, st.views / st.sceneFrames );
 	}
 
 	// ---- files ----

@@ -56,7 +56,7 @@ Sound stays muted in both modes, as before.
 | wall frame time | `Sys_MillisecondsPrecise` between consecutive frames |
 | CPU frontend / backend ms | `renderFrameStats_t` (new sub-millisecond `pc.frontEndMs`, `backEnd.pc.ms`) |
 | GPU frame time | the backend frame timer (`GL_TIME_ELAPSED` on opengl3, timestamp queries on Vulkan), kept running by `SetGpuTimerRequested` without the `r_*GpuTime` prints |
-| draw calls, triangles, lights, entities, views | the `tr.pc` / `backEnd.pc` counters |
+| draw calls, triangles, lights, entities, views | the `tr.pc` / `backEnd.pc` counters, sampled once per **demo** frame (see below) |
 | demo length | demo frames x 2 tics on the 60 Hz tic clock (game time runs 16 ms/tic, 4% shorter, so `renderView.time` would understate it) |
 
 The RHI executor (`RB_RHI_ExecuteBackEndCommands`) never timed itself before, so `com_speeds`'s
@@ -84,7 +84,7 @@ frame time (ms): avg 7.98  median 7.71  min 4.12  max 41.20
 hitches (frame > 19.3 ms = max(2.5x median, median + 5 ms)): 12 frames, worst 41.2 ms
 CPU renderer (ms/frame): frontend 1.92  backend 2.41  total 4.33 (56% of the median frame)
 GPU (ms/frame): avg 6.81  max 20.10  (88% of the median frame -> GPU-bound)
-scene (per frame avg): 412 draw calls, 180k triangles, 12.3 lights, 61.0 entities, 1.0 views
+scene (per demo frame avg, 2148 sampled): 412 draw calls, 180k triangles, 12.3 lights, 61.0 entities, 1.0 views
 report: benchmarks/demo1-20260924-153012.txt (fs_savepath)
 ```
 
@@ -97,6 +97,12 @@ Definitions:
 - **GPU-bound / CPU-bound**: GPU time above 85% / below 60% of the median frame. A hint, not a
   verdict; vsync or `com_maxFPS` cap the result and the header says so.
 - **CPU renderer total** is frontend + backend only; game logic does not run during a render demo.
+- **scene averages** are per demo frame, not per rendered frame. In real-time mode a demo frame
+  is re-rendered as often as the fps allows, and averaging over rendered frames would weight cheap
+  scenes (more re-renders) over heavy ones, differently on each backend. Sampled once per demo
+  frame they describe the demo's content; lights and entities are frontend counts and should match
+  across backends, draw calls and triangles are incremented at backend-specific sites (post passes,
+  the Vulkan Z-fill) and are comparable within a backend rather than across.
 - Triangle counts on the RHI backends only cover the draw paths that report indexes; treat them as
   a lower bound. The legacy `opengl` backend has no GPU timer.
 
