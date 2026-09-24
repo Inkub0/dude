@@ -111,7 +111,7 @@ report file name; the rest is in the console and the file.
 
 ## Occlusion-map precache
 
-r_hitchTrace attributed demo1's remaining 20-36 ms frames to baked occlusion maps
+Profiling attributed demo1's remaining 20-36 ms frames to baked occlusion maps
 (`generated/aomaps/<model>_sN`) loaded on the render thread the first time each never-before-lit
 model was drawn (7-27 ms each; the per-skin name is resolved at draw time so the level-load image
 preload missed them). `RB_RHI_PrecacheOcclusionMapsForModel`, called from the model manager's

@@ -140,8 +140,6 @@ static const char *MD5_SKIN_SRC =
 	"    v[o+11u]=t1.x; v[o+12u]=t1.y; v[o+13u]=t1.z;\n"	// color = v[o+14] (seeded, untouched)
 	"}\n";
 
-#include "framework/HitchTrace.h"	// TEMPORARY diagnostic (r_hitchTrace)
-
 static rhi::ShaderHandle r_md5SkinShader = 0;		// compiled once, shared by all meshes
 static bool r_md5SkinShaderTried = false;
 static rhi::ShaderHandle r_md5SkinPrevShader = 0;	// PREVPOS variant (skinned motion vectors): binding 6 must be bound
@@ -154,9 +152,7 @@ idCVar r_skinnedMotionVectors( "r_skinnedMotionVectors", "1", CVAR_RENDERER | CV
 static rhi::ShaderHandle R_MD5_SkinShader( rhi::RHI *r ) {
 	if ( !r_md5SkinShaderTried ) {
 		r_md5SkinShaderTried = true;
-		const double t0 = Sys_MillisecondsPrecise();
 		r_md5SkinShader = r->CreateComputeShader( "cs_md5skin", MD5_SKIN_SRC );
-		R_HitchTrace( "shader", "cs_md5skin", Sys_MillisecondsPrecise() - t0 );
 		if ( r_md5SkinShader == 0 ) {
 			common->Printf( "gpuSkin: no compute lane (GL3, or the kernel failed to compile)\n" );
 		}
@@ -181,9 +177,7 @@ static rhi::ShaderHandle R_MD5_SkinPrevShader( rhi::RHI *r ) {
 		r_md5SkinPrevShaderTried = true;
 		idStr src = MD5_SKIN_SRC;
 		src.Replace( "#version 450\n", "#version 450\n#define PREVPOS 1\n" );
-		const double t0 = Sys_MillisecondsPrecise();
 		r_md5SkinPrevShader = r->CreateComputeShader( "cs_md5skin_prevpos", src.c_str() );
-		R_HitchTrace( "shader", "cs_md5skin_prevpos", Sys_MillisecondsPrecise() - t0 );
 	}
 	return r_md5SkinPrevShader;
 }
@@ -726,12 +720,10 @@ bool idMD5Mesh::EnsureSkinBuffersUploaded( void ) {
 		return false;
 	}
 	const int E = skinExpandCount;
-	const double t0 = Sys_MillisecondsPrecise();
 	skinGpuWeights  = r->CreateBuffer( rhi::BU_STORAGE, E * (int)sizeof( idVec4 ), skinExpandWeights );
 	skinGpuWDesc    = r->CreateBuffer( rhi::BU_STORAGE, E * 2 * (int)sizeof( int ), skinExpandWDesc );
 	skinGpuWStart   = r->CreateBuffer( rhi::BU_STORAGE, numOutputVerts * (int)sizeof( unsigned int ), skinWeightStart );
 	skinGpuLocalTBN = r->CreateBuffer( rhi::BU_STORAGE, E * 3 * (int)sizeof( idVec4 ), skinExpandLocalTBN );
-	R_HitchTrace( "meshUpload", shader ? shader->GetName() : NULL, Sys_MillisecondsPrecise() - t0 );
 	if ( !skinGpuWeights || !skinGpuWDesc || !skinGpuWStart || !skinGpuLocalTBN ) {
 		if ( skinGpuWeights )  { r->DestroyBuffer( skinGpuWeights ); }
 		if ( skinGpuWDesc )    { r->DestroyBuffer( skinGpuWDesc ); }
@@ -1807,9 +1799,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			if ( tri->gpuSkinPrevVB ) { r->DestroyBuffer( tri->gpuSkinPrevVB ); tri->gpuSkinPrevVB = 0; tri->gpuSkinPrevAddr = 0; }
 		}
 		if ( !tri->gpuSkinVB ) {
-			const double t0 = Sys_MillisecondsPrecise();
 			tri->gpuSkinVB = r->CreateBuffer( rhi::BU_SKIN, numOut * (int)sizeof( idDrawVert ), skinTemplate );
-			R_HitchTrace( "entitySkinVB", shader ? shader->GetName() : NULL, Sys_MillisecondsPrecise() - t0 );
 			tri->gpuSkinVerts = numOut;
 			tri->gpuSkinFrame = -1;
 		}
@@ -1819,9 +1809,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		rhi::ShaderHandle jobShader = skinShader;
 		if ( r_skinnedMotionVectors.GetBool() && tri->gpuSkinVB && R_MD5_SkinPrevShader( r ) != 0 ) {
 			if ( !tri->gpuSkinPrevVB ) {
-				const double t0 = Sys_MillisecondsPrecise();
 				tri->gpuSkinPrevVB   = r->CreateBuffer( rhi::BU_STORAGE, numOut * 16, NULL );
-				R_HitchTrace( "entityPrevVB", shader ? shader->GetName() : NULL, Sys_MillisecondsPrecise() - t0 );
 				tri->gpuSkinPrevAddr = tri->gpuSkinPrevVB ? r->GetBufferDeviceAddress( tri->gpuSkinPrevVB ) : 0;
 				tri->gpuSkinPrevValid = false;
 				if ( tri->gpuSkinPrevVB && tri->gpuSkinPrevAddr == 0 ) {		// no buffer-device-address: unusable
@@ -1911,9 +1899,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		if ( !tri->tessDeformVB ) {
 			idDrawVert *seed = (idDrawVert *)Mem_Alloc16( numTessV * sizeof( idDrawVert ) );
 			for ( int k = 0; k < numTessV; k++ ) { seed[k].Clear(); }
-			const double t0 = Sys_MillisecondsPrecise();
 			tri->tessDeformVB = r->CreateBuffer( rhi::BU_SKIN, numTessV * (int)sizeof( idDrawVert ), seed );
-			R_HitchTrace( "entityTessVB", shader ? shader->GetName() : NULL, Sys_MillisecondsPrecise() - t0 );
 			Mem_Free16( seed );
 			tri->tessDeformIB = r->CreateBuffer( rhi::BU_INDEX, numTessIdx * (int)sizeof( glIndex_t ), tessExpandIndexes );
 			tri->tessDeformVerts = numTessV;

@@ -28,7 +28,6 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "framework/CmdSystem.h"
 #include "renderer/RenderWorld_local.h"
 #include "renderer/tr_local.h"
-#include "framework/HitchTrace.h"	// TEMPORARY diagnostic (r_hitchTrace)
 #include "renderer/VertexCache.h"
 #include "renderer/Cinematic.h"
 #include "renderer/rhi/RHI.h"
@@ -476,7 +475,6 @@ Same _currentRender snapshot + fullscreen-quad path as RB_RHI_PostProcess.
 =============
 */
 static void RB_RHI_AAPass( rhi::RHI *r, const viewDef_t *viewDef ) {
-	idHitchScope hitchScope( "aa", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	if ( r_rhiAA.GetInteger() <= 0 ) {
 		return;		// off → exact passthrough, skip the copy+draw entirely
 	}
@@ -568,7 +566,6 @@ is an exact passthrough, so this is skipped unless a toggle is on.
 =============
 */
 static void RB_RHI_PostProcess( rhi::RHI *r, const viewDef_t *viewDef ) {
-	idHitchScope hitchScope( "post", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	float grain = r_postFilmGrain.GetFloat();
 	float chroma = r_postChromaticAberration.GetFloat();
 	if ( grain <= 0.0f && chroma <= 0.0f ) {
@@ -2907,7 +2904,6 @@ pairs. Mirrors RB_STD_T_RenderShaderPasses stage for stage.
 */
 static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf,
                                        const viewEntity_t *&currentSpace, float mvp[16] ) {
-	idHitchScope hitchScope( "shaderPass", NULL );	// TEMPORARY diagnostic (r_hitchTrace)
 	const srfTriangles_t *tri = surf->geo;
 	const idMaterial *shader = surf->material;
 
@@ -3662,29 +3658,18 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	}
 	r->SetFramePresent( wantPresent );
 
-	{
-		idHitchScope hs( "vkBeginFrame", NULL );	// TEMPORARY diagnostic: fence wait + swapchain acquire
-		r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
-	}
+	r->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
 
 	// Phase 2 GPU skinning: dispatch all recorded MD5 skin jobs now, in the pre-scene window
 	// (frame cb open, no render pass yet) so the compute->vertex barrier lands before any draw.
-	{
-		double t0 = Sys_MillisecondsPrecise();
-		RB_RHI_FlushSkinJobs();
-		double t1 = Sys_MillisecondsPrecise();
-		R_HitchTrace( "flushSkin", NULL, t1 - t0 );
-		// Roadmap B: deform-once tessellation dispatches, immediately AFTER the skin jobs so a deform that
-		// reads a surface's gpuSkinVB is ordered by the skin dispatch's trailing COMPUTE->COMPUTE barrier.
-		RB_RHI_FlushTessJobs();
-		double t2 = Sys_MillisecondsPrecise();
-		R_HitchTrace( "flushTess", NULL, t2 - t1 );
-		// R3.5 S3 (docs/rtx-animated-blas.md): build/refit the per-entity animated BLASes from the
-		// now-current gpuSkinVB, on the frame cb, before any draw's shadow rays. Ordered after the skin
-		// flush by PostComputeBarrier's RT-gated compute->AS-build stage; inert when nothing was staged.
-		r->RefreshAnimBlas();
-		R_HitchTrace( "animBlas", NULL, Sys_MillisecondsPrecise() - t2 );
-	}
+	RB_RHI_FlushSkinJobs();
+	// Roadmap B: deform-once tessellation dispatches, immediately AFTER the skin jobs so a deform that
+	// reads a surface's gpuSkinVB is ordered by the skin dispatch's trailing COMPUTE->COMPUTE barrier.
+	RB_RHI_FlushTessJobs();
+	// R3.5 S3 (docs/rtx-animated-blas.md): build/refit the per-entity animated BLASes from the
+	// now-current gpuSkinVB, on the frame cb, before any draw's shadow rays. Ordered after the skin
+	// flush by PostComputeBarrier's RT-gated compute->AS-build stage; inert when nothing was staged.
+	r->RefreshAnimBlas();
 
 	rbBerserkFrame = false;	// set when the berserk material is seen (crop overlay), read at the _scratch blit
 	rbHelltimeFrame = false;	// set when a bloodorbN hell-time material is seen, read at its cr_draw blit
@@ -3699,7 +3684,6 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	}
 
 	for ( ; cmds; cmds = (const emptyCommand_t *)cmds->next ) {
-		idHitchScope hsCmd( "backendCmd", cmds->commandId == RC_DRAW_VIEW ? "drawView" : cmds->commandId == RC_SWAP_BUFFERS ? "swap" : "other" );	// TEMPORARY diagnostic
 		switch ( cmds->commandId ) {
 		case RC_NOP:
 			break;
@@ -3794,10 +3778,7 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 		}
 	}
 
-	{
-		idHitchScope hs( "vkEndFrame", NULL );		// TEMPORARY diagnostic: submit + present
-		r->EndFrame();
-	}
+	r->EndFrame();
 
 	backEnd.pc.ms = Sys_MillisecondsPrecise() - backEndStartF;
 	backEnd.pc.msec = (int)backEnd.pc.ms;
