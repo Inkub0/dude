@@ -483,6 +483,29 @@ halves of a seam therefore displace by exactly 0 and stay welded, while displace
 full one triangle in. Mirror-seam verts need nothing — `UpdateSurface` replicates them by copying
 the whole source vertex, texcoord included, so they already sample the same texel.
 
+**Correction (2026-09-25): that last sentence was the intent, not the behaviour.** `dupVerts` is not
+just the UV splits. `R_DuplicateMirroredVertexes` splits every mirror-seam vert but leaves the sil
+indexes pointing at the original (its own header says *"Silindexes are unchanged by this"*), so the
+`R_CreateDupVerts` pass that runs straight after records each mirror **copy** as a dupVert paired
+with its original — and the stamp zeroed both. Every mirrored character was therefore pinned to zero
+displacement along its whole centreline: measured **100% of the mirror verts** on betruger /
+playerhead / scihead02, forming one exactly-coplanar curve (y-spread 0.000 on betruger) that runs
+crown → forehead → nose → chin across the head's full extent.
+
+The stamp now tests the actual condition — *do the two coincident verts disagree on UV?* — instead of
+dupVerts membership. A mirror copy has no `st` yet when the stamp runs (the replication that fills it
+comes later), so it resolves through `mirroredVerts` to the texcoord it will carry. Bit-identical
+texcoords mean the identical texel and therefore the identical height, so such a pair provably cannot
+pull apart. Share of source verts pinned, before → after: **imp 49.5% → 44.4%, betruger head 16.9% →
+5.3%, player head 13.6% → 0%, scientist head02 40.4% → 0%.** Bodies barely move, because their pinning
+really is UV charts; heads go to zero, because on a head essentially every dupVerts pair *was* the
+mirror centreline. This matters more since `r_tessMinEdge` dropped to 0.1 and faces tessellate ~100%
+instead of ~52%.
+
+Note this was **not** the "line down the middle of the face" — `r_tessDisplace 0` leaves that line
+unchanged, and `dudeTessDisplace` is the mask's only consumer. See the elimination ledger for that
+separate, older artifact.
+
 The mask must be identical in every pass or depth-EQUAL breaks, so all seven displacing chains
 (`zfill` / `interaction` / `ambientlight` / `gbuffer` / `fog` / `shadow_sm` / `shadow_sm_cube`)
 carry it; `generic.{vert,tesc,tese}` is left alone because the blend pass never displaced.

@@ -451,6 +451,16 @@ one triangle in from the seam instead of stepping.
 
 Mirror-seam verts need nothing: UpdateSurface / BuildGpuSkinData replicate them by copying
 the whole source vertex, texcoord included, so a mirror pair samples the same texel already.
+That was always the intent, but until 2026-09-25 the code pinned them anyway, because dupVerts
+is NOT just the UV splits: R_DuplicateMirroredVertexes leaves silIndexes pointing at the
+original ("Silindexes are unchanged by this", tr_trisurf.cpp), so the R_CreateDupVerts pass
+that follows records every mirror COPY as a dupVert paired with its original -- and the stamp
+zeroed both. Measured cost: 100% of the mirror verts on betruger / playerhead / scihead02, one
+exactly-coplanar curve (y-spread 0.000 on betruger) running crown to chin over the head's full
+extent, held at zero displacement while the surface around it displaced. So pin on the real
+condition instead -- the two coincident verts disagree on UV -- rather than on dupVerts
+membership. Bit-identical texcoords mean the identical texel and so the identical height; such
+a pair cannot diverge, and pinning it only costs relief.
 
 FIDELITY NOTE: md5 verts are Clear()ed to color 0, so vertex colour on a base md5 surface
 would render black (SVC_MODULATE) -- and sure enough nothing uses it: every vertexColor /
@@ -458,17 +468,34 @@ inverseVertexColor stage in the stock materials is either world/terrain blending
 DECAL_MACRO, or an additive spawn effect (alpha ignored), never an md5 body/head skin. The
 alpha byte is therefore free real estate here; RGB is left untouched, so even a mod material
 reading vertexColor sees the same rgb it does today. The real cost is reduced relief in a band
-around each UV seam, which on the imp is 44% of the verts -- not narrow. Kept unconditional
+around each UV seam, which on the imp is still 44% of the verts -- not narrow. Kept unconditional
 anyway: a partial pin leaves a proportionally smaller gap, which is still a gap.
+
+Measured effect of the UV-difference rule (share of source verts pinned, before -> after):
+imp 49.5% -> 44.4%, betruger head 16.9% -> 5.3%, player head 13.6% -> 0%, scientist head02
+40.4% -> 0%. Bodies barely move because their pinning really is UV charts; HEADS go to zero,
+because on a head essentially every dupVerts pair was the mirror centreline. That matters more
+since r_tessMinEdge dropped to 0.1 and faces tessellate ~100% instead of ~52%.
 ====================
 */
 void idMD5Mesh::StampTessSeamMask( idDrawVert *verts ) const {
 	for ( int i = 0; i < deformInfo->numSourceVerts; i++ ) {
 		verts[i].color[3] = 255;
 	}
+	const int mirBase = deformInfo->numOutputVerts - deformInfo->numMirroredVerts;
 	for ( int i = 0; i < deformInfo->numDupVerts; i++ ) {
-		verts[deformInfo->dupVerts[i * 2 + 0]].color[3] = 0;
-		verts[deformInfo->dupVerts[i * 2 + 1]].color[3] = 0;
+		const int a = deformInfo->dupVerts[i * 2 + 0];
+		const int b = deformInfo->dupVerts[i * 2 + 1];
+		// A mirror copy has no st of its own yet -- the replication that fills it runs after this
+		// stamp -- but by construction it is a verbatim copy of its source, so resolve through
+		// mirroredVerts to compare the texcoord it WILL carry.
+		const int sa = ( a >= mirBase && deformInfo->mirroredVerts ) ? deformInfo->mirroredVerts[a - mirBase] : a;
+		const int sb = ( b >= mirBase && deformInfo->mirroredVerts ) ? deformInfo->mirroredVerts[b - mirBase] : b;
+		if ( verts[sa].st == verts[sb].st ) {
+			continue;		// same texel => same height => this pair cannot pull apart
+		}
+		verts[a].color[3] = 0;
+		verts[b].color[3] = 0;
 	}
 }
 
@@ -570,9 +597,10 @@ void idMD5Mesh::BuildGpuSkinData( const idJointMat *bindJoints ) {
 	// Pre-weld the baked bind-pose normals across every authored coincident group (dupVerts =
 	// UV splits, mirroredVerts = mirror seams). Coincident verts share a weight run, so giving them
 	// one identical bind normal makes their skinned normals bit-identical at any pose -- the pair
-	// physically cannot pull apart under PN tessellation. Deliberately NOT R_WeldSeamNormals: its
-	// dot-product gate (default 0.7 ~ 45 deg) rejects exactly the worst pairs, and the 49.54 deg
-	// split measured on the cracking mesh sits just past it. Union-find because a 3-way coincident
+	// physically cannot pull apart under PN tessellation. Deliberately NO angle gate: a dot-product
+	// threshold rejects exactly the worst pairs -- the 49.54 deg split measured on the cracking mesh
+	// sits just past the 45 deg an 0.7 gate allows. (A gated variant shipped briefly as
+	// r_tessWeldSeams and was deleted 2026-09-25, unused.) Union-find because a 3-way coincident
 	// group welded pairwise in the wrong order leaves two members disagreeing.
 	if ( deformInfo->numDupVerts > 0 || numMir > 0 ) {
 		int *parent  = (int *)Mem_Alloc16( numOut * sizeof( int ) );
