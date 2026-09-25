@@ -1844,7 +1844,8 @@ static CVarOption lightingOptions[] = {
 	// DUDE skin / flesh subsurface scattering (docs/skin-shading.md). A wrapped diffuse on the
 	// classifier's skin/flesh materials that warms the lighting terminator so faces and Hell flesh
 	// stop reading as plastic under the GGX lobe. Diffuse-only, so it works on every shading model
-	// (not just PBR). Master on/off checkbox up top; the strength/reach sliders grey out while off.
+	// (not just PBR). Only the on/off lives here -- strength and reach are live-tuning knobs and
+	// sit in the Debugging tab with the rest of them (DrawDbgGroup_SkinSSS).
 	CVarOption( "r_skinShading", []( idCVar& cvar ) {
 		// r_skinShading doubles as strength AND enable, so the master checkbox toggles between 0 and
 		// the last non-zero strength (remembered so an off/on round-trip restores the amount; falls
@@ -1861,27 +1862,8 @@ static CVarOption lightingOptions[] = {
 		const char* descr = "Faces and Hell flesh scatter light under the skin, so their shading terminator glows\n"
 			"a soft red instead of cutting off hard and plastic-looking. Keyed off the material\n"
 			"classifier's skin/flesh tags (no per-map setup) and works on every tier, not just PBR.\n"
-			"Purely a look; the strength and reach below tune it.";
+			"Purely a look; strength and reach are tuned in the Debugging tab.";
 		AddCVarOptionTooltips( cvar, descr );
-		// strength, greyed while the feature is off
-		ImGui::BeginDisabled( cvar.GetFloat() <= 0.0f );
-		float f = cvar.GetFloat();
-		if ( ImGui::SliderFloat( "Skin SSS Strength", &f, 0.0f, 1.0f, "%.2f", 0 ) ) {
-			cvar.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, f ) );
-		}
-		ImGui::EndDisabled();
-	} ),
-	CVarOption( "r_skinScatter", []( idCVar& cvar ) {
-		ImGui::BeginDisabled( r_skinShading.GetFloat() <= 0.0f );
-		float f = cvar.GetFloat();
-		if ( ImGui::SliderFloat( "Skin Scatter Reach", &f, 0.0f, 1.0f, "%.2f", 0 ) ) {
-			cvar.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, f ) );
-		}
-		const char* descr = "How far light wraps around the terminator on skin/flesh: higher = a softer, redder,\n"
-			"wider glow, lower = tighter. Flesh scatters a little deeper than face skin.\n"
-			"Only active when Skin Subsurface is above 0.";
-		AddCVarOptionTooltips( cvar, descr );
-		ImGui::EndDisabled();
 	} ),
 };
 
@@ -4076,6 +4058,41 @@ static void DrawDbgGroup_Tessellation()
 	}
 }
 
+static void DrawDbgGroup_SkinSSS()
+{
+	// DUDE skin / flesh subsurface scattering (docs/skin-shading.md). The on/off lives in the
+	// Graphics tab (Lighting); these are the two live-tuning knobs. Both are per-draw uniforms, so
+	// they apply instantly -- dial them in-game and report the good ones back.
+	if ( BeginSettingsGroup( "Skin Subsurface Scattering" ) ) {
+
+	if ( r_skinShading.GetFloat() <= 0.0f ) {
+		ImGui::TextDisabled( "Skin SSS is off - enable \"Skin Subsurface Scattering (SSS)\" in the Graphics tab first." );
+	}
+	ImGui::BeginDisabled( r_skinShading.GetFloat() <= 0.0f );
+
+	float sss = r_skinShading.GetFloat();
+	if ( ImGui::SliderFloat( "Skin SSS Strength", &sss, 0.0f, 1.0f, "%.2f" ) ) {
+		r_skinShading.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, sss ) );
+	}
+	AddTooltip( "r_skinShading: how strongly skin and flesh scatter light under the surface, warming and "
+		"softening the lighting terminator so faces stop reading as plastic. Doubles as the on/off, so "
+		"dragging this to 0 also unticks it in the Graphics tab. Default 0.6. Preset-owned (Potato 0 = "
+		"faithful floor, Low+ 0.6), so moving it reads as a Custom preset." );
+
+	float reach = r_skinScatter.GetFloat();
+	if ( ImGui::SliderFloat( "Skin Scatter Reach", &reach, 0.0f, 1.0f, "%.2f" ) ) {
+		r_skinScatter.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, reach ) );
+	}
+	AddTooltip( "r_skinScatter: how far light wraps around the terminator - higher = a softer, redder, "
+		"wider glow, lower = tighter. The red channel's reach; green and blue derive shorter, which is "
+		"what makes the falloff warm. Flesh scatters ~30% deeper than face skin. Default 0.32. NOT "
+		"preset-owned, so it survives a preset change." );
+
+	ImGui::EndDisabled();
+	EndSettingsGroup();
+	}
+}
+
 static void DrawDbgGroup_PBR()
 {
 	// DUDE PBR materials (docs/pbr-materials.md): every live tuning knob for the
@@ -5316,6 +5333,7 @@ static void DrawShadowDebugMenu()
 	DrawDbgGroup_OcclusionMaps();
 	DrawDbgGroup_Tessellation();
 	DrawDbgGroup_PBR();
+	DrawDbgGroup_SkinSSS();
 	DrawDbgGroup_Emissive();
 	DrawDbgGroup_SSR();
 	DrawDbgGroup_RTReflections();
