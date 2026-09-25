@@ -459,7 +459,7 @@ private:
 	static const int MAX_FRAME_SETS = 4096;			// per-draw texture sets per frame
 	// set-1 combined image samplers: units 0-7, shadow cube 8, SSAO 9, occlusion 10,
 	// parallax 11, dynamic shadow cube 12, blurred RT shadow mask 13 (r_rtShadowBlur)
-	static const int VK_TEX_BINDINGS = 15;
+	static const int VK_TEX_BINDINGS = 16;	// 0-7 material units, 8-14 named, 15 = tess height (DUDE)
 
 	struct RingBuf {
 		VkBuffer		buffer = VK_NULL_HANDLE;
@@ -626,6 +626,10 @@ private:
 	bool						framePoolWarned = false;
 	ImageHandle					dummyImage = 0;			// 1x1 white for unused sampler slots
 	ImageHandle					dummyCube = 0;			// 1x1 white cube (samplerCube slots)
+	// DUDE: unit 15 (tess height) must fall back to MID-GREY, not white. The tess-eval
+	// shader displaces by (h - 0.5), so a white dummy would push every tessellated
+	// surface out by the full strength instead of leaving it PN-smooth.
+	ImageHandle					dummyGrey = 0;			// 1x1 mid-grey (signed-height slots)
 
 	// M4: shaders statically use sampler2DShadow / samplerCubeShadow (unit 7/8
 	// of interaction.frag) even when the runtime path never samples them, so
@@ -3590,6 +3594,13 @@ bool VulkanBackend::CreateM2Resources() {
 		dummyImage = CreateTexture2D( 1, 1, white, TF_NEAREST, TR_REPEAT, false );
 		if ( !dummyImage ) {
 			common->Warning( "VK: couldn't create the dummy texture" );
+			return false;
+		}
+		// DUDE: signed-height dummy for unit 15 -- (h - 0.5) == 0 => no displacement
+		const byte grey[4] = { 128, 128, 128, 255 };
+		dummyGrey = CreateTexture2D( 1, 1, grey, TF_NEAREST, TR_REPEAT, false );
+		if ( !dummyGrey ) {
+			common->Warning( "VK: couldn't create the grey dummy texture" );
 			return false;
 		}
 		// M4: typed dummies for slots the interaction shaders statically use —
@@ -11501,6 +11512,7 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 		mixKey( key, (uint32_t)args.shadowCubeDyn );
 		mixKey( key, (uint32_t)args.shadowMask );
 		mixKey( key, (uint32_t)args.decalMask );
+		mixKey( key, (uint32_t)args.tessHeight );
 		bool needsTexBind = true;
 		if ( boundTexSet != VK_NULL_HANDLE && boundTexKey == key ) {
 			texSet = boundTexSet;
@@ -11599,6 +11611,20 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 						const ImageRec &rec = imageTable[args.decalMask - 1];	// decal metal retention (else white = untouched)
 						sampler = rec.sampler;
 						view = rec.view;
+					} else if ( i == 15 ) {
+						// DUDE tess displacement height. Falls back to the MID-GREY dummy, not
+						// the white one: the shader displaces by (h - 0.5) (docs/tessellation.md).
+						if ( args.tessHeight >= 1 && args.tessHeight <= (ImageHandle)imageTable.size()
+						     && imageTable[args.tessHeight - 1].live ) {
+							const ImageRec &rec = imageTable[args.tessHeight - 1];
+							sampler = rec.sampler;
+							view = rec.view;
+						} else if ( dummyGrey >= 1 && dummyGrey <= (ImageHandle)imageTable.size()
+						            && imageTable[dummyGrey - 1].live ) {
+							const ImageRec &rec = imageTable[dummyGrey - 1];
+							sampler = rec.sampler;
+							view = rec.view;
+						}
 					}
 					infos[i] = {};
 					infos[i].sampler = sampler;
@@ -11747,11 +11773,15 @@ void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int
 			VkWriteDescriptorSet writes[VK_TEX_BINDINGS];
 			const ImageRec &dummy = imageTable[dummyImage - 1];
 			for ( int i = 0; i < VK_TEX_BINDINGS; i++ ) {
-				// units 8 and 12 are samplerCubeShadow -> the cube depth dummy; 7 is the 2D shadow dummy
+				// units 8 and 12 are samplerCubeShadow -> the cube depth dummy; 7 is the 2D shadow dummy.
+				// DUDE: unit 15 is the signed tess height -> mid-grey, so even this all-dummy set
+				// can never read as "displace everything outward" (docs/tessellation.md).
 				const bool cubeShadow = ( i == 8 || i == 12 );
+				const bool greySlot = ( i == 15 && dummyGrey >= 1 && dummyGrey <= (ImageHandle)imageTable.size() );
+				const ImageRec &slotDummy = greySlot ? imageTable[dummyGrey - 1] : dummy;
 				infos[i] = {};
-				infos[i].sampler = ( i == 7 ) ? dummyShadow2D.sampler : ( cubeShadow ? dummyShadowCube.sampler : dummy.sampler );
-				infos[i].imageView = ( i == 7 ) ? dummyShadow2D.view : ( cubeShadow ? dummyShadowCube.view : dummy.view );
+				infos[i].sampler = ( i == 7 ) ? dummyShadow2D.sampler : ( cubeShadow ? dummyShadowCube.sampler : slotDummy.sampler );
+				infos[i].imageView = ( i == 7 ) ? dummyShadow2D.view : ( cubeShadow ? dummyShadowCube.view : slotDummy.view );
 				infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 				writes[i] = {};
 				writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;

@@ -1084,6 +1084,7 @@ extern idCVar r_ssaoDepthMipMaxLod;		// depth-mip coarseness cap (kills far-tap 
 
 // DUDE: GPU tessellation of enemy/prop meshes (Vulkan only; docs/tessellation.md)
 extern idCVar r_tessellation;			// master toggle: PN-triangle smooth enemy/prop meshes
+extern idCVar r_tessEyeOffset;			// DUDE: lift the iris decal clear of a tessellated face
 extern idCVar r_tessLevel;				// subdivision level (1 = flat .. capped by device / 32)
 extern idCVar r_tessMaxDist;			// distance the subdivision starts rolling back toward flat
 extern idCVar r_tessMinEdge;			// min triangle edge length (world units) to tessellate (anti eye-bulge)

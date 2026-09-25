@@ -123,6 +123,10 @@ struct DrawArgs {
 	ImageHandle		shadowCubeDyn;	// static/dynamic split (lever B): movers-only cube depth; bound to unit 12 (0 = unbound)
 	ImageHandle		shadowMask;		// r_rtShadowBlur: this light's blurred screen-space RT shadow mask; bound to unit 13 (0 = unbound, VK only)
 	ImageHandle		decalMask;		// r_decalMetalMask: screen-space metal retention under decals; bound to unit 14 (VK; GL3 raw-binds it. 0 = unbound -> white = untouched)
+	ImageHandle		tessHeight;		// DUDE: SIGNED height map the tessellation-eval stage displaces with; bound to unit 15
+									// (VK only -- GL3 has no tess stages). 0 = unbound -> MID-GREY, not white:
+									// the shader computes (h - 0.5), so a white dummy would shove every tessellated
+									// surface out by full strength. See docs/tessellation.md.
 };
 
 struct ClearArgs {

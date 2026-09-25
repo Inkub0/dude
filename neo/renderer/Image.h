@@ -568,4 +568,21 @@ const char *R_ParsePastImageProgram( idLexer &src );
 // program into a scalar height field (docs/parallax.md). NULL if the program is empty.
 idImage *R_CreateParallaxHeightImage( const char *bumpProgram );
 
+// DUDE: build the SIGNED height image tessellation displaces with (docs/tessellation.md).
+// Prefers the authored `_h` the bump was baked from; falls back to integrating the height
+// out of the combined normal map. Re-centred so 0.5 is the flat level in every material.
+// NULL only when neither source is usable.
+idImage *R_CreateTessHeightImage( const char *bumpProgram, const char *authoredHeight );
+
+// DUDE: 1x1 mid-grey "no height data" image; (h - 0.5) == 0 => PN smoothing, no displacement.
+idImage *R_TessFlatHeightImage( void );
+
+// DUDE: drop the cached flat-height pointer; MUST be called wherever idImage objects
+// are destroyed (idImageManager::Shutdown) or the cache dangles across a vid_restart.
+void R_TessFlatHeightForget( void );
+
+// DUDE: the same pixels the tess height image uploads, for CPU-side sampling (the
+// r_tessDeform pre-deform path, which must match dudeTessDisplace). Caller R_StaticFree()s *pic.
+bool R_TessHeightPixelsForImage( const idImage *image, byte **pic, int *w, int *h );
+
 #endif

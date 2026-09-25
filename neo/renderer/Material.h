@@ -231,6 +231,13 @@ typedef struct {
 	// Consumed only by the enhancement backends; see docs/parallax.md.
 	idImage *			parallaxImage;
 	float				parallaxScale;
+
+	// DUDE: SIGNED height source for tessellation displacement (docs/tessellation.md).
+	// Also lives on the SL_BUMP stage. 0.5 = flat, >0.5 raised, <0.5 recessed -- unlike
+	// parallaxImage this is re-centred to a zero mean, so the tess shader uses a fixed
+	// zero point. Prefers the authored `_h`; otherwise integrated from the normal map.
+	// NULL unless r_tessellation was set when the material was parsed.
+	idImage *			tessHeightImage;
 } shaderStage_t;
 
 typedef enum {

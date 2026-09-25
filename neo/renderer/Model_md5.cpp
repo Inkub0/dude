@@ -1175,9 +1175,11 @@ static idVec3 R_TessPN_CpuRef( const idVec3 &p0, const idVec3 &p1, const idVec3 
 	     + b111 * ( 6.0f * a * b * c );
 }
 
-// Bilinear sample of a normal-map's blue channel (relief source, tess.glsl dudeTessDisplace).
-// uv wraps (repeat) to match the material sampler; returns relief = (1 - clamp(bz,0,1)) with
-// bz = blue*2-1, BEFORE the seam scale (applied by the caller). pic is RGBA8, row-major.
+// Bilinear sample of the SIGNED tess height map (mirrors tess.glsl dudeTessDisplace).
+// uv wraps (repeat) to match the material sampler; returns (h - 0.5) with h the red channel,
+// BEFORE the seam scale (applied by the caller). pic is RGBA8, row-major.
+// MUST stay in lockstep with dudeTessDisplace: this feeds the r_tessDeform pre-deform path,
+// which draws into the same depth the fixed-function tess passes seal.
 static float R_TessSampleRelief( const byte *pic, int w, int h, float u, float v ) {
 	if ( !pic || w <= 0 || h <= 0 ) {
 		return 0.0f;
@@ -1195,15 +1197,13 @@ static float R_TessSampleRelief( const byte *pic, int w, int h, float u, float v
 	const int iy0 = ( ( y0 % h ) + h ) % h;
 	const int ix1 = ( ix0 + 1 ) % w;
 	const int iy1 = ( iy0 + 1 ) % h;
-	const float b00 = pic[( iy0 * w + ix0 ) * 4 + 2] / 255.0f;
-	const float b10 = pic[( iy0 * w + ix1 ) * 4 + 2] / 255.0f;
-	const float b01 = pic[( iy1 * w + ix0 ) * 4 + 2] / 255.0f;
-	const float b11 = pic[( iy1 * w + ix1 ) * 4 + 2] / 255.0f;
-	const float blue = ( b00 * ( 1.0f - tx ) + b10 * tx ) * ( 1.0f - ty )
-	                 + ( b01 * ( 1.0f - tx ) + b11 * tx ) * ty;
-	const float bz = blue * 2.0f - 1.0f;
-	float relief = 1.0f - idMath::ClampFloat( 0.0f, 1.0f, bz );
-	return relief;
+	const float b00 = pic[( iy0 * w + ix0 ) * 4 + 0] / 255.0f;
+	const float b10 = pic[( iy0 * w + ix1 ) * 4 + 0] / 255.0f;
+	const float b01 = pic[( iy1 * w + ix0 ) * 4 + 0] / 255.0f;
+	const float b11 = pic[( iy1 * w + ix1 ) * 4 + 0] / 255.0f;
+	const float hs = ( b00 * ( 1.0f - tx ) + b10 * tx ) * ( 1.0f - ty )
+	               + ( b01 * ( 1.0f - tx ) + b11 * tx ) * ty;
+	return hs - 0.5f;			// 0.5 = flat; >0 raised, <0 recessed
 }
 
 /*
@@ -1294,8 +1294,11 @@ void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
 	if ( shader ) {
 		for ( int s = 0; s < shader->GetNumStages(); s++ ) {
 			const shaderStage_t *st = shader->GetStage( s );
-			if ( st && st->lighting == SL_BUMP && st->texture.image && st->texture.image->imgName.Length() ) {
-				R_LoadImageProgram( st->texture.image->imgName.c_str(), &bumpPic, &bumpW, &bumpH, NULL, NULL );
+			if ( st && st->lighting == SL_BUMP && st->tessHeightImage ) {
+				// DUDE: the SIGNED height field, NOT the normal map -- the same pixels the
+				// fixed-function tess passes sample, so this pre-deform path displaces
+				// identically (docs/tessellation.md).
+				R_TessHeightPixelsForImage( st->tessHeightImage, &bumpPic, &bumpW, &bumpH );
 				break;
 			}
 		}

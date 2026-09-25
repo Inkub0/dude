@@ -13,6 +13,10 @@
 // are the fog distance ramp + enter fade). Same image + texel zfill.tese samples,
 // so the displacement is identical.
 SAMPLER_BINDING(2) uniform sampler2D u_bumpMap;
+SAMPLER_BINDING(15) uniform sampler2D u_tessHeightMap;	// DUDE: SIGNED displacement height
+											// (0.5 = flat). Same unit in EVERY tess pass so
+											// the displaced depth stays bit-identical and
+											// depth-EQUAL holds. See docs/tessellation.md.
 
 layout(triangles, fractional_odd_spacing, cw) in;
 
@@ -38,7 +42,7 @@ void main() {
 	vec2 texBump = i_TexBump[0] * tc.x + i_TexBump[1] * tc.y + i_TexBump[2] * tc.z;
 	vec3 geoN = normalize( n0 * tc.x + n1 * tc.y + n2 * tc.z );
 	float seam = i_ModelNormal[0].w * tc.x + i_ModelNormal[1].w * tc.y + i_ModelNormal[2].w * tc.z;
-	pos = dudeTessDisplace( pos, geoN, u_bumpMap, texBump, seam );
+	pos = dudeTessDisplace( pos, geoN, u_tessHeightMap, texBump, seam );
 
 	// fog texgen from the displaced model-space position (the flat fog.vert
 	// computes the same dot products from attr_Position)

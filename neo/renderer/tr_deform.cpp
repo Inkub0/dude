@@ -31,6 +31,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/VertexCache.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/rhi/RHI.h"	// DUDE: backend check for the tessellated-face iris lift
 
 
 /*
@@ -1016,6 +1017,29 @@ static void R_EyeballDeform( drawSurf_t *surf ) {
 			texVec[j].Normalize();
 		}
 
+		// DUDE (docs/tessellation.md "The iris is a decal"): lift the iris clear of a
+		// TESSELLATED face.
+		//
+		// This surface is not an eyeball. It is a translucent `blend filter` decal at
+		// `sort decal` -- an iris that tints the eye white painted into the FACE texture --
+		// and its rim sits about 0.008 world units off the skin. When the face tessellates, PN
+		// bulges the skin between its vertices by up to ~0.1 units, more than ten times that
+		// gap: the face crosses the card and the iris is occluded or z-fights. A decal on a
+		// separate mesh cannot follow the deformation -- PN evaluates a patch from its OWN
+		// corners -- so the only way to keep it in front is to move it.
+		//
+		// `dir` already points from the eye origin toward its focus, i.e. straight out of the
+		// eye, so it is the axis to lift along; no extra normal needed. The texcoord projection
+		// below keeps using the ORIGINAL position, so the iris does not slide on the eye.
+		//
+		// Off unless the face can actually move: r_tessellation on, and a backend that has
+		// tessellation stages. Otherwise this is bit-for-bit vanilla.
+		idVec3 tessLift( 0.0f, 0.0f, 0.0f );
+		if ( r_tessellation.GetBool() && r_tessEyeOffset.GetFloat() > 0.0f
+		     && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+			tessLift = dir * r_tessEyeOffset.GetFloat();
+		}
+
 		// emit these triangles, generating the projected texcoords
 
 		for ( j = 0 ; j < islands[i].numTris ; j++ ) {
@@ -1025,7 +1049,7 @@ static void R_EyeballDeform( drawSurf_t *surf ) {
 				index = tri->indexes[index+k];
 				newTri->indexes[newTri->numIndexes++] = index;
 
-				ac[index].xyz = tri->verts[index].xyz;
+				ac[index].xyz = tri->verts[index].xyz + tessLift;
 
 				idVec3	local = tri->verts[index].xyz - origin;
 
