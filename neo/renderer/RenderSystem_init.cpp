@@ -163,7 +163,7 @@ idCVar r_testGammaBias( "r_testGammaBias", "0", CVAR_RENDERER | CVAR_FLOAT, "if 
 idCVar r_testStepGamma( "r_testStepGamma", "0", CVAR_RENDERER | CVAR_FLOAT, "if > 0 draw a grid pattern to test gamma levels" );
 idCVar r_lightScale( "r_lightScale", "2", CVAR_RENDERER | CVAR_FLOAT, "all light intensities are multiplied by this" );
 idCVar r_lightSourceRadius( "r_lightSourceRadius", "0", CVAR_RENDERER | CVAR_FLOAT, "for soft-shadow sampling" );
-idCVar r_flareSize( "r_flareSize", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "size of light flares/glares from the material deform (1 = vanilla Doom 3, lower to dampen, 0 = off)" );
+idCVar r_flareSize( "r_flareSize", "0.25", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "size of light flares/glares from the material deform (1 = vanilla Doom 3, lower to dampen, 0 = off)" );
 
 idCVar r_useExternalShadows( "r_useExternalShadows", "1", CVAR_RENDERER | CVAR_INTEGER, "1 = skip drawing caps when outside the light volume, 2 = force to no caps for testing", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
 idCVar r_useOptimizedShadows( "r_useOptimizedShadows", "1", CVAR_RENDERER | CVAR_BOOL, "use the dmap generated static shadow volumes" );
@@ -309,16 +309,16 @@ idCVar r_hdrDudeTint( "r_hdrDudeTint", "0.4", CVAR_RENDERER | CVAR_ARCHIVE | CVA
 // (blend add — lamps, screens, fire, glares) so they exceed 1.0 in the float scene buffer,
 // giving the tonemap curve real highlight range and eye-adaptation bright anchors. Only active
 // with r_hdrTonemap>=1 (like r_hdrExposure), so it never touches the faithful mode-0 look. 1=off.
-idCVar r_hdrOverbright( "r_hdrOverbright", "1.60", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright multiplier for additive self-illum stages (needs r_hdr + r_hdrTonemap>=1): pushes lamps/screens/fire above 1.0 for tonemap+adaptation range; 1=off. When active it auto-disables the legacy r_flareSize light haze", 1.0f, 8.0f );
+idCVar r_hdrOverbright( "r_hdrOverbright", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright multiplier for additive self-illum stages (needs r_hdr + r_hdrTonemap>=1): pushes lamps/screens/fire above 1.0 for tonemap+adaptation range; 1=off. When active it auto-disables the legacy r_flareSize light haze", 1.0f, 8.0f );
 // Overbright saturation: the tonemap desaturates the very bright colours overbright pushes into
 // (coloured fire/lava go white while white lights are fine). Pre-saturate the boosted additive
 // stages so the hue survives the curve. 1 = off; white is unaffected (no saturation to boost).
-idCVar r_hdrOverbrightSat( "r_hdrOverbrightSat", "1.13", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright saturation compensation for coloured emissive (fire/lava) that the tonemap washes out; 1 = off", 1.0f, 3.0f );
+idCVar r_hdrOverbrightSat( "r_hdrOverbrightSat", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright saturation compensation for coloured emissive (fire/lava) that the tonemap washes out; 1 = off", 1.0f, 3.0f );
 // HDR bloom (needs r_hdr): threshold the bright HDR pixels, blur them through a downsample/upsample
 // chain, and add the glow back before the tonemap — the "punch" the curve otherwise rolls off.
 // Threshold sets the brightness that starts to bloom (lower it to catch fire/lava directly, which
 // can replace the emissive overbright). 0 = off.
-idCVar r_hdrBloom( "r_hdrBloom", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR bloom intensity: glow bled from bright pixels, added before the tonemap (needs r_hdr); 0 = off", 0.0f, 2.0f );
+idCVar r_hdrBloom( "r_hdrBloom", "0.1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR bloom intensity: glow bled from bright pixels, added before the tonemap (needs r_hdr); 0 = off", 0.0f, 2.0f );
 idCVar r_hdrBloomThreshold( "r_hdrBloomThreshold", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR bloom brightness threshold: pixels above this bloom (lower to catch fire/lava directly)", 0.0f, 8.0f );
 // HDR eye adaptation / auto-exposure (Phase B1, needs r_hdr + r_hdrTonemap>=1): the scene's
 // average (log) luminance drives the tonemap exposure over time. r_hdrExposure becomes the
