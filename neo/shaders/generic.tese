@@ -7,14 +7,18 @@
 //     zfill.tese and therefore lands on the sealed depth instead of failing EQUAL
 //     everywhere the surface is displaced (which left the ember only on flat patches
 //     like the soles of the feet);
-//   - a blood-overlay decal — a separate surface with no bump stage — is bound
-//     flatNormalMap on unit 1, so dudeTessDisplace sees relief 0 and it merely
-//     PN-follows the deformed base with no normal-map push (unchanged behaviour).
+//   - a blood-overlay decal — a separate surface with no bump stage — has no height
+//     source, so it is bound the mid-grey flat-height image: dudeTessDisplace sees
+//     (h - 0.5) == 0 and it merely PN-follows the deformed base with no push.
 
 #include "renderparms.glsl"
 #include "tess.glsl"
 
 SAMPLER_BINDING(1) uniform sampler2D u_bumpMap;	// displacement source (flatNormalMap => no push)
+SAMPLER_BINDING(15) uniform sampler2D u_tessHeightMap;	// DUDE: SIGNED displacement height
+											// (0.5 = flat). Same unit in EVERY tess pass so
+											// the displaced depth stays bit-identical and
+											// depth-EQUAL holds. See docs/tessellation.md.
 
 layout(triangles, fractional_odd_spacing, cw) in;	// fractional = smooth LOD:
 										// new verts slide in as the distance factor changes instead of popping.
@@ -48,7 +52,7 @@ void main() {
 	vec2 texBump = i_TexBump[0] * tc.x + i_TexBump[1] * tc.y + i_TexBump[2] * tc.z;
 	vec3 geoN = normalize( n0 * tc.x + n1 * tc.y + n2 * tc.z );
 	float seam = i_ModelNormal[0].w * tc.x + i_ModelNormal[1].w * tc.y + i_ModelNormal[2].w * tc.z;
-	pos = dudeTessDisplace( pos, geoN, u_bumpMap, texBump, seam );
+	pos = dudeTessDisplace( pos, geoN, u_tessHeightMap, texBump, seam );
 
 	gl_Position = u_mvpMatrix * vec4( pos, 1.0 );
 }

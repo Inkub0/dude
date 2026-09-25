@@ -3347,6 +3347,13 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			bumpImg->Bind();		// upload trigger under Vulkan
 			da.textures[1] = bumpImg->rhiHandle ? bumpImg->rhiHandle
 			                                    : globalImages->flatNormalMap->rhiHandle;
+			// DUDE: unit 15 = the SIGNED displacement height generic.tese actually pushes
+			// with. Set straight on DrawArgs (this pass never went through RB_RHI_BindUnit),
+			// and with the SAME image the zfill prepass used for this surface, or the blend
+			// stage displaces to a different depth and fails depth-EQUAL against the seal.
+			idImage *heightImg = RB_RHI_TessHeightImage( surf, true );
+			heightImg->Bind();		// upload trigger under Vulkan
+			da.tessHeight = heightImg->rhiHandle;
 		}
 		if ( isBerserkBlit ) {
 			// unit 1 = the ghost trail (Vulkan needs it in DrawArgs; GL already bound it

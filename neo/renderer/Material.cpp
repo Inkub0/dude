@@ -1191,6 +1191,7 @@ void idMaterial::ClearStage( shaderStage_t *ss ) {
 	// pointer from a previously parsed material (docs/parallax.md).
 	ss->parallaxImage = NULL;
 	ss->parallaxScale = 0.0f;
+	ss->tessHeightImage = NULL;		// same stale-pointer hazard (docs/tessellation.md)
 }
 
 /*
@@ -2161,6 +2162,36 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 			// per-material knob feeding r_parallaxScale in the interaction pass.
 			ss->parallaxScale = hasBake ? bakeScale : 5.0f;
 		}
+	}
+
+	// DUDE: signed height source for tessellation displacement (docs/tessellation.md).
+	// Resolved independently of the parallax block above: the two want DIFFERENT
+	// normalization (parallax marches a [min,max]-stretched, wrap-blurred field tuned for
+	// tiling world textures; tessellation needs a zero-mean field so 0.5 is the flat level
+	// on a character UV atlas), so they do not share an image even when both are on.
+	// Gated at parse time like parallax, so off = no extra resident textures and
+	// bit-for-bit vanilla; toggling r_tessellation takes effect on the next map load.
+	if ( r_tessellation.GetBool() && ss->lighting == SL_BUMP ) {
+		float tessBake = 0.0f;
+		idStr tessAuthored;
+		if ( imageName[0] ) {
+			R_BumpHeightScale( imageName, tessBake, &tessAuthored );
+		}
+		// Same source rule the parallax path uses (docs/parallax.md), and for the same
+		// reason. An `_h` inside addnormals( _local, heightmap( _h, N ) ) is only a COARSE
+		// SECONDARY layer -- the real surface detail lives in the authored `_local`. On the
+		// stock skeleton's skull the `_h` is nearly featureless (std 6.8/255, deepest
+		// pockets 0.06 below flat) while the height integrated out of the COMBINED normal
+		// carries 2.7x the variation and 3.3x deeper pockets (std 18.4, 0.21 below flat).
+		// Displacing from the `_h` there barely moves anything.
+		// Only when the normal was generated from a height map ALONE is the authored `_h`
+		// the ground truth -- integrating a height back out of a normal that was built from
+		// it is a lossy round trip.
+		const bool generatedNormal = imageName[0]
+			&& idStr::FindText( imageName, "heightmap", false ) >= 0
+			&& idStr::FindText( imageName, "addnormals", false ) < 0;
+		ss->tessHeightImage = R_CreateTessHeightImage( imageName,
+			generatedNormal ? tessAuthored.c_str() : "" );
 	}
 }
 

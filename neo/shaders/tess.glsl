@@ -72,14 +72,30 @@ vec3 dudeTessPN( vec3 p0, vec3 p1, vec3 p2, vec3 n0, vec3 n1, vec3 n2, vec3 tc )
 	     + b111 * ( 6.0 * a * b * c );
 }
 
-// Normal-map displacement (docs/tessellation.md Phase 2). Doom 3 ships no runtime
-// height maps, so this approximates one from the bump (normal) map: the tangent-
-// space up component (blue channel, unaffected by the RXGB swizzle the fragment
-// path uses) is ~1 on flat areas and drops on detailed slopes, so relief = 1 - z
-// pushes detail along the geometric normal. u_tessParms.z is the signed strength
-// in world units (0 = off; + raises detail, - carves it in). Sampled at an
-// explicit LOD (no derivatives in a tese) so every pass reads the same texel and
-// the displaced depth stays identical across zfill / interaction / ambient.
+// Signed displacement (docs/tessellation.md "Signed displacement").
+//
+// This used to approximate a height as `1 - N.z` off the bump map. N.z is cos(tilt),
+// an EVEN function of the height gradient, so that expression measures slope
+// MAGNITUDE and says nothing about whether a feature is a bump or a pit -- a rising
+// and a falling wall of equal steepness got the identical push. Measured against the
+// authored height of the stock skeleton, `1 - N.z` correlated with real height at
+// r = +0.01, and the deepest 5% of the surface displaced LESS than the highest 5%.
+//
+// What that looked like: an eye socket is a steep annular rim around a FLAT floor.
+// The rim carries all the gradient and the floor carries none, so a negative strength
+// carved the rim in while the floor stayed put -- leaving the socket floor standing
+// proud of its own rim. A ring-shaped moat with the eyeball popping out of it.
+//
+// heightMap is now a real SIGNED field, re-centred at bake time so 0.5 is the flat
+// level in every material (R_CreateTessHeightImage): >0.5 raised, <0.5 recessed. It
+// comes from the authored `_h` the bump was baked from where one exists (most stock
+// characters ship one), else from a Poisson integration of the normal map. So a pit
+// is a pit, and u_tessParms.z is now an honest signed amplitude: POSITIVE reproduces
+// the authored relief, negative inverts it.
+//
+// Sampled at an explicit LOD (no derivatives in a tese) so every pass reads the same
+// texel and the displaced depth stays identical across zfill / interaction / ambient /
+// gbuffer / fog / both shadow-map passes -- the depth-EQUAL requirement.
 //
 // seam is the interpolated per-vertex UV-seam mask (var_ModelNormal.w, stamped by
 // idMD5Mesh into the vertex alpha): 1 in the interior of a UV chart, 0 on a chart
@@ -92,14 +108,15 @@ vec3 dudeTessPN( vec3 p0, vec3 p1, vec3 p2, vec3 n0, vec3 n1, vec3 n2, vec3 tc )
 // triangle away from the seam rather than stepping. Deliberately not dialable:
 // anything short of a full pin leaves a proportionally smaller gap, which is still a
 // gap, so the only useful setting is the one that closes it.
-vec3 dudeTessDisplace( vec3 pos, vec3 geoN, sampler2D bumpMap, vec2 uv, float seam ) {
+vec3 dudeTessDisplace( vec3 pos, vec3 geoN, sampler2D heightMap, vec2 uv, float seam ) {
 	if ( u_tessParms.z == 0.0 ) {
 		return pos;
 	}
-	float bz = textureLod( bumpMap, uv, 0.0 ).z * 2.0 - 1.0;
-	float relief = 1.0 - clamp( bz, 0.0, 1.0 );
-	relief *= clamp( seam, 0.0, 1.0 );
-	return pos + geoN * ( relief * u_tessParms.z );
+	// 0.5 = flat. Materials with no usable height source bind a mid-grey image, so this
+	// is exactly 0 and the surface PN-smooths without displacing.
+	float h = textureLod( heightMap, uv, 0.0 ).r - 0.5;
+	h *= clamp( seam, 0.0, 1.0 );
+	return pos + geoN * ( h * u_tessParms.z );
 }
 
 #endif

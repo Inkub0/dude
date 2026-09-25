@@ -27,10 +27,18 @@ void RB_RHI_SetTessParms( rhi::RenderParams &parms );
 
 // Copy the surface's bump-stage texture matrix into parms (so the pass builds the SAME
 // bump texcoord the lit passes displace with) and return the bump image to bind on the
-// displacement sampler unit. A surface with no bump stage returns flatNormalMap, which
-// dudeTessDisplace reads as relief 0 (no push). Shared by the zfill prepass, the fog
+// bump sampler unit. A surface with no bump stage returns flatNormalMap. (The DISPLACEMENT
+// itself no longer comes from here -- see RB_RHI_TessHeightImage.) Shared by the zfill prepass, the fog
 // interaction pass and the blended material pass (so on-body ember/emissive stages
 // displace bit-identically and hold depth-EQUAL).
 idImage *RB_RHI_TessBumpForZfill( const drawSurf_s *surf, rhi::RenderParams &parms );
+
+// DUDE: the SIGNED height image the tess-eval stage displaces with (docs/tessellation.md).
+// 0.5 = flat; >0.5 raised, <0.5 recessed. Returns the material's baked height when it has
+// one, otherwise the mid-grey flat image -- NEVER NULL and never a normal map, because the
+// shader computes (h - 0.5) and anything brighter than mid-grey pushes the surface outward.
+// Every pass that tessellates a surface must bind THIS image for it, or that pass displaces
+// differently from the depth prepass and the lit draw fails depth-EQUAL.
+idImage *RB_RHI_TessHeightImage( const drawSurf_s *surf, bool tess );
 
 #endif /* !__RHITESS_H__ */

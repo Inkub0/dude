@@ -10,6 +10,10 @@
 
 // displacement source, bound on unit 1 (unit 0 is the perforated-coverage map).
 SAMPLER_BINDING(1) uniform sampler2D u_bumpMap;
+SAMPLER_BINDING(15) uniform sampler2D u_tessHeightMap;	// DUDE: SIGNED displacement height
+											// (0.5 = flat). Same unit in EVERY tess pass so
+											// the displaced depth stays bit-identical and
+											// depth-EQUAL holds. See docs/tessellation.md.
 
 layout(triangles, fractional_odd_spacing, cw) in;
 
@@ -33,7 +37,7 @@ void main() {
 	vec2 texBump = i_TexBump[0] * tc.x + i_TexBump[1] * tc.y + i_TexBump[2] * tc.z;
 	vec3 geoN = normalize( n0 * tc.x + n1 * tc.y + n2 * tc.z );
 	float seam = i_ModelNormal[0].w * tc.x + i_ModelNormal[1].w * tc.y + i_ModelNormal[2].w * tc.z;
-	pos = dudeTessDisplace( pos, geoN, u_bumpMap, texBump, seam );
+	pos = dudeTessDisplace( pos, geoN, u_tessHeightMap, texBump, seam );
 
 	// light-relative vector from the displaced position (model->world rotation)
 	vec3 d = pos - u_localLightOrigin.xyz;

@@ -845,3 +845,270 @@ idImage *R_CreateParallaxHeightImage( const char *bumpProgram ) {
 	r_parallaxSources.Set( name, source );
 	return globalImages->ImageFromFunction( name, R_ParallaxHeightImage );
 }
+
+/*
+===============================================================================
+
+	DUDE: signed height source for tessellation displacement
+	(docs/tessellation.md "Signed displacement").
+
+	dudeTessDisplace used to approximate height as `1 - N.z` off the bump map.
+	N.z is cos(tilt), an EVEN function of the height gradient, so that expression
+	measures slope MAGNITUDE and carries no information about whether a feature is
+	a bump or a pit: a rising and a falling wall of equal steepness produce the
+	identical push. Measured against the authored height map of the stock skeleton
+	(models/monsters/skeleton/skeleton01_h.tga), `1 - N.z` correlates with the real
+	height at r = +0.01 -- i.e. not at all -- and the deepest 5% of the surface got
+	LESS displacement than the highest 5%.
+
+	The visible failure is concave features turning inside out. An eye socket is a
+	steep annular rim around a flat floor: the rim carries all the gradient, the
+	floor carries none, so with a negative strength the rim is carved in while the
+	floor stays put and ends up standing proud of its own rim -- a ring-shaped moat
+	with the eyeball popping out of it.
+
+	The fix is a real signed height field, centred so that 0.5 is the flat level:
+
+	  1. normally, the height INTEGRATED out of the combined normal map by
+	     R_NormalMapToHeightMap (Poisson, lap(H) = div(slope), by Jacobi relaxation)
+	     -- the same solver the parallax path already uses, and for the same reason:
+	     that is where the real surface detail lives. An `_h` appearing inside
+	     `addnormals( _local, heightmap( _h, N ) )` is only a COARSE SECONDARY layer.
+	     Measured on the stock skeleton's skull the `_h` is nearly featureless
+	     (std 6.8/255, deepest pockets 0.06 below flat) while the integrated height
+	     carries 2.7x the variation and 3.3x deeper pockets (std 18.4, 0.21).
+	  2. the AUTHORED `_h` only when the normal was generated from a height map ALONE
+	     (a lone `heightmap( _h, N )`, no `_local`), where integrating a height back out
+	     of a normal built from it would be a lossy round trip of that very `_h`.
+
+	Both are then re-centred so that 0.5 is the flat level and the shader is just
+	`(h - 0.5) * strength`. (Re-centring is the step NVIDIA's "Generating displacement
+	from normal map for use in 3D games", SIGGRAPH 2011 Talks, calls out: without it
+	each material carries a different DC bias and displacement inflates or deflates the
+	whole model.) An authored `_h` keeps its own amplitude -- `heightmap( _h, N )`
+	already encodes an intended magnitude -- while an integrated height, being in
+	arbitrary units, is normalized.
+
+	Kept separate from the parallax height image on purpose: that one is normalized
+	to [min,max] over the whole image and high-passed with a wrap-around blur tuned
+	for TILING world textures, which is wrong for a character UV atlas (disjoint
+	charts, no wrap continuity).
+
+===============================================================================
+*/
+
+// generated tess-height image name -> "<authored _h path>|<bump program>". Either
+// side may be empty; the generator prefers the authored height.
+static idHashTable<idStr>	r_tessHeightSources;
+
+/*
+===============
+R_CenterHeight
+
+Re-centre a greyscale height plane (RGBA8, height in .r == .g == .b) in place so the
+surface's flat level lands on exactly 128, which is what dudeTessDisplace treats as
+zero displacement. `stretch` additionally normalizes the amplitude to the full range;
+pass it only for a height in arbitrary units (an integrated one), never for an
+authored `_h` whose magnitude the artist chose.
+===============
+*/
+static void R_CenterHeight( byte *data, int width, int height, bool stretch ) {
+	const int n = width * height;
+	if ( n <= 0 ) {
+		return;
+	}
+	// MEDIAN, not mean, as the flat level. A character height map is a UV ATLAS: a
+	// third of it is typically unused filler (black), and filler that large drags a
+	// mean far off the real surface level -- measured on a stock 256x256 `_h` with 30%
+	// black filler, the mean moved 38/255 while the median moved 2/255. A skewed zero
+	// point pushes the whole visible body outward, which is the class of bug this
+	// whole change exists to fix, so it is worth the histogram.
+	int hist[256] = { 0 };
+	for ( int i = 0; i < n; i++ ) {
+		hist[ data[ i * 4 ] ]++;
+	}
+	int seen = 0, mid = 0;
+	for ( int v = 0; v < 256; v++ ) {
+		seen += hist[v];
+		if ( seen * 2 >= n ) {
+			mid = v;
+			break;
+		}
+	}
+	const float flat = (float)mid;
+
+	// stretch=false (an AUTHORED `_h`): re-centre only, keeping the artist's own
+	// amplitude. `heightmap( _h, N )` already carries an intended magnitude, and
+	// normalizing every material to full range would flatten that distinction and
+	// amplify subtle maps -- on the stock skeleton a symmetric stretch would have
+	// exaggerated the authored relief 2.6x. r_tessDisplace is the one global amplitude.
+	//
+	// stretch=true (an INTEGRATED height): the Poisson solution is in arbitrary units,
+	// so it has to be normalized to something. Symmetric about the flat level, so the
+	// deepest pit and the highest peak both survive without clipping.
+	float scale = 1.0f;
+	if ( stretch ) {
+		float maxDev = 0.0f;
+		for ( int i = 0; i < n; i++ ) {
+			const float d = idMath::Fabs( (float)data[ i * 4 ] - flat );
+			if ( d > maxDev ) {
+				maxDev = d;
+			}
+		}
+		scale = ( maxDev > 1e-3f ) ? ( 127.0f / maxDev ) : 0.0f;
+	}
+
+	for ( int i = 0; i < n; i++ ) {
+		int v = (int)( 128.0f + ( (float)data[ i * 4 ] - flat ) * scale + 0.5f );
+		v = v < 0 ? 0 : ( v > 255 ? 255 : v );
+		data[ i*4 + 0 ] = data[ i*4 + 1 ] = data[ i*4 + 2 ] = (byte)v;
+		data[ i*4 + 3 ] = 255;
+	}
+}
+
+/*
+===============
+R_TessHeightImage
+
+ImageFromFunction generator for the tessellation height map.
+===============
+*/
+static bool R_LoadTessHeightPixels( const char *generatedName, byte **outPic, int *outW, int *outH ) {
+	*outPic = NULL;
+	*outW = *outH = 0;
+	idStr *spec = NULL;
+	if ( !generatedName || !generatedName[0]
+	     || !r_tessHeightSources.Get( generatedName, &spec ) || !spec ) {
+		return false;
+	}
+	idStr authored = *spec;
+	idStr bumpProgram;
+	const int bar = authored.Find( '|' );
+	if ( bar >= 0 ) {
+		bumpProgram = authored.Right( authored.Length() - bar - 1 );
+		authored.CapLength( bar );
+	}
+	byte *pic = NULL;
+	int w = 0, hgt = 0;
+	bool integrated = false;
+	if ( authored.Length() ) {
+		// lone-heightmap material: the authored _h IS the ground truth, in the artist's own
+		// amplitude. Re-centre it, do not rescale it.
+		R_LoadImageProgram( authored.c_str(), &pic, &w, &hgt, NULL, NULL );
+	}
+	if ( !pic && bumpProgram.Length() ) {
+		// no authored height (or the _h is referenced but not shipped): integrate one
+		// out of the combined normal map. Arbitrary units, so this one gets normalized.
+		R_LoadImageProgram( bumpProgram.c_str(), &pic, &w, &hgt, NULL, NULL );
+		if ( pic ) {
+			R_NormalMapToHeightMap( pic, w, hgt );
+			integrated = true;
+		}
+	}
+	if ( !pic ) {
+		return false;
+	}
+	R_CenterHeight( pic, w, hgt, integrated );
+	*outPic = pic;
+	*outW = w;
+	*outH = hgt;
+	return true;
+}
+
+/*
+===============
+R_TessHeightPixelsForImage
+
+Public entry: the same pixels R_TessHeightImage uploads, for callers that need to
+sample the height on the CPU (the r_tessDeform pre-deform path in Model_md5.cpp,
+which must stay bit-compatible with dudeTessDisplace). Caller R_StaticFree()s *pic.
+===============
+*/
+bool R_TessHeightPixelsForImage( const idImage *image, byte **pic, int *w, int *h ) {
+	if ( !image ) {
+		*pic = NULL; *w = *h = 0;
+		return false;
+	}
+	return R_LoadTessHeightPixels( image->imgName.c_str(), pic, w, h );
+}
+
+/*
+===============
+R_TessHeightImage
+
+ImageFromFunction generator for the tessellation height map.
+===============
+*/
+static void R_TessHeightImage( idImage *image ) {
+	byte *pic = NULL;
+	int w = 0, hgt = 0;
+	if ( !R_LoadTessHeightPixels( image->imgName.c_str(), &pic, &w, &hgt ) ) {
+		// flat: (h - 0.5) == 0 everywhere, so displacement collapses to pure PN smoothing
+		byte flat[4] = { 128, 128, 128, 255 };
+		image->GenerateImage( flat, 1, 1, TF_DEFAULT, true, TR_REPEAT, TD_HIGH_QUALITY );
+		return;
+	}
+	image->GenerateImage( pic, w, hgt, TF_DEFAULT, true, TR_REPEAT, TD_HIGH_QUALITY );
+	R_StaticFree( pic );
+}
+
+/*
+===============
+R_CreateTessHeightImage
+
+Build (or fetch) the signed height image a bump stage displaces with.
+`authoredHeight` is the `_h` file pulled out of the bump program by
+R_BumpHeightScale (may be NULL/empty); `bumpProgram` is the combined normal-map
+program used as the fallback integration source. Returns NULL only when neither
+source is usable.
+===============
+*/
+idImage *R_CreateTessHeightImage( const char *bumpProgram, const char *authoredHeight ) {
+	const bool haveAuthored = authoredHeight && authoredHeight[0];
+	const bool haveBump = bumpProgram && bumpProgram[0];
+	if ( !haveAuthored && !haveBump ) {
+		return NULL;
+	}
+	// Distinct prefix so this never collides with the bump image or the parallax
+	// height that share the same underlying program string.
+	idStr name = idStr( "_tessHeight/" ) + ( haveAuthored ? authoredHeight : bumpProgram );
+	name.Replace( ".tga", "" );
+	name.BackSlashesToSlashes();
+
+	idStr source = haveAuthored ? idStr( authoredHeight ) : idStr( "" );
+	source += "|";
+	source += haveBump ? bumpProgram : "";
+	r_tessHeightSources.Set( name, source );
+	return globalImages->ImageFromFunction( name, R_TessHeightImage );
+}
+
+/*
+===============
+R_TessFlatHeightImage
+
+1x1 mid-grey: the "no height data" binding. (h - 0.5) == 0, so a surface with no
+usable height source PN-smooths but never displaces, instead of being pushed by
+whatever happened to be left in the descriptor slot.
+===============
+*/
+static void R_TessFlatHeightGen( idImage *image ) {
+	byte flat[4] = { 128, 128, 128, 255 };
+	image->GenerateImage( flat, 1, 1, TF_DEFAULT, true, TR_REPEAT, TD_HIGH_QUALITY );
+}
+
+static idImage *r_tessFlatHeight = NULL;
+
+idImage *R_TessFlatHeightImage( void ) {
+	// Cached: every draw that does NOT tessellate still binds this to reset unit 15, so
+	// the lookup is on the hot path and ImageFromFunction hashes the name each call.
+	// idImageManager::Shutdown() deletes every idImage, so the pointer MUST be dropped
+	// there -- R_TessFlatHeightForget() below, called from Shutdown.
+	if ( !r_tessFlatHeight ) {
+		r_tessFlatHeight = globalImages->ImageFromFunction( "_tessFlatHeight", R_TessFlatHeightGen );
+	}
+	return r_tessFlatHeight;
+}
+
+void R_TessFlatHeightForget( void ) {
+	r_tessFlatHeight = NULL;
+}

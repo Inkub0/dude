@@ -7,6 +7,10 @@
 #include "tess.glsl"
 
 SAMPLER_BINDING(1) uniform sampler2D u_bumpMap;	// normal map, for Phase 2 displacement
+SAMPLER_BINDING(15) uniform sampler2D u_tessHeightMap;	// DUDE: SIGNED displacement height
+											// (0.5 = flat). Same unit in EVERY tess pass so
+											// the displaced depth stays bit-identical and
+											// depth-EQUAL holds. See docs/tessellation.md.
 
 layout(triangles, fractional_odd_spacing, cw) in;	// fractional = smooth LOD:
 										// new verts slide in as the distance factor changes instead of popping.
@@ -54,7 +58,7 @@ void main() {
 	// optional normal-map displacement along the interpolated geometric normal
 	vec3 geoN = normalize( n0 * tc.x + n1 * tc.y + n2 * tc.z );
 	float seam = i_ModelNormal[0].w * tc.x + i_ModelNormal[1].w * tc.y + i_ModelNormal[2].w * tc.z;
-	pos = dudeTessDisplace( pos, geoN, u_bumpMap, var_TexBump, seam );
+	pos = dudeTessDisplace( pos, geoN, u_tessHeightMap, var_TexBump, seam );
 
 	gl_Position = u_mvpMatrix * vec4( pos, 1.0 );
 }

@@ -2046,6 +2046,7 @@ Shutdown
 ===============
 */
 void idImageManager::Shutdown() {
+	R_TessFlatHeightForget();		// DUDE: cached raw idImage * would dangle past this
 	images.DeleteContents( true );
 }
 

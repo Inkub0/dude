@@ -17,16 +17,20 @@ so a patch-list + tessellation-state variant is a contained extension rather tha
 ## What tessellation actually buys us here
 
 Plain tessellation subdivides each triangle into more **coplanar** triangles — pixel-identical
-output — unless the new vertices are moved. Doom 3 ships **no height/displacement maps**; all
-its surface detail lives in tangent-space normal maps. So the useful forms are:
+output — unless the new vertices are moved. Doom 3 ships no *runtime* displacement maps, but
+it does ship the **authored `_h` height maps its normal maps were baked from**: 133 of 189
+stock character/monster bump stages are `addnormals( X_local.tga, heightmap( X_h.tga, N ) )`
+and the `_h` is in the pk4s. So the useful forms are:
 
 1. **PN-triangles / Phong tessellation** *(base feature).* Curves the surface using the
    existing per-vertex normals (cubic Bézier for position, quadratic for normal), rounding
    out low-poly silhouettes — imp shoulders, pinky snout, pipe props — with **no new art
    assets**. This is the real visual win.
-2. **Normal-map displacement** *(optional layer).* Derive a pseudo-height from the bound bump
-   map and push the generated vertices along the interpolated normal. Adds surface relief but
-   is fiddly and can look wrong; conservative strength, separately gated.
+2. **Height displacement** *(optional layer).* Push the generated vertices along the
+   interpolated normal by a **signed** height field — the authored `_h` where the material has
+   one, otherwise a height integrated out of the normal map. Adds real surface relief;
+   conservative strength, separately gated. See **Signed displacement** below for why the
+   original `1 - N.z` pseudo-height had to go.
 
 Scope: **enemies (md5 skinned) + static props.**
 
@@ -69,6 +73,149 @@ ever built, the device feature is left disabled). When on:
 See the [fidelity note policy](shadow-system.md).
 
 ---
+
+## Signed displacement *(fixed 2026-09-24)*
+
+**Symptom.** Concave facial features on tessellated characters turned inside out — most
+visibly the skeleton's and zombies' eye sockets, which bulged *outward* instead of receding.
+
+**Cause.** The displacement height was approximated as `relief = 1 - N.z` off the bump map.
+`N.z` is `cos(tilt)`, an **even function of the height gradient**, so that expression measures
+slope *magnitude* and carries no information about whether a feature is a bump or a pit: a
+rising and a falling wall of equal steepness produced the identical push. There was no
+concavity test to get wrong — there was none at all.
+
+Measured against the authored height map of the stock skeleton
+(`models/monsters/skeleton/skeleton01_h.tga`), on the engine-composited runtime bump:
+
+| quantity | vs. true height |
+|---|---|
+| `relief = 1 - N.z` (what shipped) | **r = +0.01** |
+| deepest 5% of surface | mean relief 0.226 |
+| highest 5% of surface | mean relief 0.298 |
+
+So peaks displaced *more* than pits — an active inversion, not merely a blind spot.
+
+**Why that reads as popping eyes.** An eye socket is a steep annular rim around a *flat*
+floor. The rim carries all the gradient; the floor and the surrounding brow carry none. With
+the old negative strength the rim was carved in hardest while the floor stayed put, leaving
+the socket floor standing proud of its own rim — a ring-shaped moat with the eyeball popping
+out of it. Modelling an idealised socket at the old `r_tessDisplace -0.25`, the floor ended up
+**0.034 world units prouder than its own rim wall**. `r_tessMinEdge` (whose internal comment
+read *"anti eye-bulge"*) was a prior attempt to paper over this by gating small triangles out
+of tessellation entirely.
+
+**Not the cause:** `dudeTessPN` was cleared. It matches Vlachos et al. 2001 §2.1 exactly, is
+plane-reproducing, and is **invariant to the sign of the corner normals** (every term is
+`dot(d, ni) * ni`), so it cannot push a socket outward. It is also byte-identical across all
+eight `.tesc`/`.tese` pairs and the two mirrors in `Model_md5.cpp`.
+
+**Fix.** Displace by a real **signed** height, `(h - 0.5) * r_tessDisplace`, from a per-bump-stage
+image built by `R_CreateTessHeightImage` ([Image_program.cpp](../neo/renderer/Image_program.cpp)):
+
+1. normally, a height **integrated** out of the **combined normal map** by `R_NormalMapToHeightMap`,
+   the Poisson solver (`lap(H) = div(slope)`, Jacobi) the parallax path already ships — standard
+   gradient-field reconstruction: Frankot & Chellappa, *IEEE TPAMI* 10(4), 1988; survey in
+   Queau, Durou & Aujol, arXiv:1709.05940;
+2. the **authored `_h`** only when the normal was generated from a height map *alone*
+   (a lone `heightmap( _h, N )` with no `_local`), where re-integrating would be a lossy
+   round trip of that same `_h`.
+
+This is the same source rule the parallax path uses, and picking it wrong matters: an `_h`
+inside `addnormals( _local, heightmap( _h, N ) )` is only a **coarse secondary layer**. On the
+stock skeleton's skull the `_h` is nearly featureless (std 6.8/255, deepest pockets 0.06 below
+the flat level) while the integrated height carries **2.7× the variation and 3.3× deeper
+pockets** (std 18.4, 0.21). Driving displacement from the `_h` there barely moves anything —
+which is exactly why the first cut of this fix left the eye sockets still bulging.
+
+Both are re-centred so **0.5 is the flat level**, per the re-centring step in NVIDIA's
+"Generating displacement from normal map for use in 3D games" (SIGGRAPH 2011 Talks) — without
+it each material carries a different DC bias and inflates or deflates the whole model.
+
+Two details that are easy to get wrong, and were measured rather than assumed:
+
+- **Median, not mean, as the flat level.** A character height map is a UV *atlas* and a large
+  fraction is unused filler. On a stock `_h` with 30% black filler the mean moved 38/255 while
+  the median moved 2/255 — a mean would shove the entire visible body outward.
+- **Authored `_h` keeps its own amplitude.** `heightmap( _h, N )` already encodes an intended
+  magnitude; normalizing every material to full range would flatten that distinction and
+  amplify subtle maps (2.6× on the skeleton). Only the *integrated* height, being in arbitrary
+  units, is normalized. `r_tessDisplace` is the single global amplitude.
+
+This is **not** the parallax height image: that one is `[min,max]`-stretched and high-passed
+with a wrap-around blur tuned for *tiling world textures*, which is wrong for a character atlas
+(disjoint charts, no wrap continuity). A naive global FFT integration of the skeleton atlas
+diverged outright (r = −0.14, ranking inverted), which is why the two stay separate images.
+
+**Binding.** Unit **15** in every tess-eval shader, same slot everywhere so the displaced depth
+stays bit-identical and depth-EQUAL holds. Unbound falls back to **mid-grey, not white** — the
+shader computes `(h - 0.5)`, so a white dummy would push every tessellated surface out at full
+strength. `RB_RHI_BindTessHeight` is called at every tess draw site with `tess` false as well as
+true, because `rhiVkUnits[]` persists between draws and a tessellated draw that inherited the
+previous surface's height map would displace differently from the prepass and vanish.
+
+
+## The iris is a decal, not an eyeball *(2026-09-25)*
+
+**Symptom.** Character eyes clipping, at any `r_tessDisplace` including 0.
+
+**What the asset actually is.** `r_tessDebug` identified the character
+(`h2.md5mesh`, face skin drawn as `oldscihead02` via a skin remap), and its eye material is:
+
+```
+models/characters/common/righthead02
+{
+    translucent
+    noshadows
+    deform eyeBall
+    sort decal
+
+    { blend filter   map models/characters/common/green.tga }
+}
+```
+
+It is **not an eyeball**. It is a translucent filter-blend **decal** — an iris that tints the
+eye white *painted into the face texture* — and `deform eyeBall` slides it so the iris tracks
+the player. It is a 7-vertex card, 0.3 × 1.0 world units, whose rim sits **0.008 units** off
+the face skin.
+
+**Why this breaks under tessellation.** PN interpolates its corners but bulges the surface
+*between* them, by up to ~0.1 units on a face — more than ten times that 0.008 gap. The face
+crosses the card, and the iris is occluded or z-fights.
+
+A decal on a **separate mesh cannot follow the deformation**: PN evaluates a patch from its
+own corners and normals, so subdividing the card produces the card's curve, not the face's.
+Two meshes only stay glued together if the same function deforms both.
+
+**Fix.** Lift the card clear instead. `R_EyeballDeform` already computes `dir`, pointing from
+the eye origin to its focus — straight out of the eye — so the vertices are offset along it by
+`r_tessEyeOffset` (default 0.035, tuned in-game — the worst-case bulge is ~0.1, but the
+iris sits where the face moves far less). The texcoord projection keeps
+using the original position, so the iris does not slide on the eye. Gated on `r_tessellation`
+and a backend with tessellation stages, so it is bit-for-bit vanilla otherwise.
+
+### What was tried first, and why it is all a dead end
+
+Everything below attacked the *shape of the face* and is reverted. They are recorded because
+each one is individually reasonable and rules out a whole family of approaches:
+
+| approach | result |
+|---|---|
+| per-vertex PN mask, distance ramp around frozen parts | rim movement 0.067 → 0.007; needed a 1.5u radius, froze 49–64% of the face |
+| damp inward normal motion only | wrong: with no clearance there is no safe direction — outward lifts the lid off the card as visibly as inward sinks it |
+| damp inward + tangential | tangential is as large as inward (0.102 vs 0.107) and slides the lid margin sideways |
+| pin whole triangles touching a frozen part | the only rule that reaches **0.000** at the rim — and it freezes the eyes, nose and mouth, which is the part of a face worth tessellating |
+| `r_tessEyes`: tessellate the eye too | inert. `MC_TRANSLUCENT` and no lit stage both reject it from the opaque passes, correctly. And PN on its own two triangles would not follow the face anyway |
+| curvature-based cavity detection | a uniform-Laplacian measure called 83% of a head concave, with no separation between sockets and cheeks |
+
+Two facts worth keeping, both established by measurement:
+
+- **Faces are closed at the eyes.** Every head skin has exactly one hole, the neck. The extra
+  loops that appear around the eyes on betruger/campbell/swann are **UV seams** — weld
+  coincident positions before counting boundary edges.
+- **95% of the eye card's edges are below `r_tessMinEdge`** (0.72), a gate tuned specifically
+  to keep eyeballs flat.
+
 
 ## Phase 1 — pipeline plumbing  *(planned)*
 
@@ -158,14 +305,14 @@ displacement layer.
   emit model-space pos+normal (and a bump texcoord) for the PN net. The tese linearly
   interpolates the varyings (matches the flat rasterizer) and recomputes `gl_Position`
   (`invariant`). **Displacement:** each tese pushes the PN position along the
-  interpolated geometric normal by `r_tessDisplace` × a pseudo-height (Doom 3 ships no
-  runtime height maps, so height ≈ `1 - bumpN.z` from the bump map's blue channel,
-  sampled with `textureLod(...,0)` so it's derivative-free and identical across passes).
-  All three depth-EQUAL passes (zfill/interaction/ambient) bind the same bump map on
-  unit 1 with the same bump matrix and apply the same displacement, so the prepass and
-  lit passes still agree bit-for-bit. `r_tessDisplace 0` = pure PN smoothing.
+  interpolated geometric normal by `r_tessDisplace` × `(h - 0.5)`, with `h` a **signed**
+  height sampled from the material's baked tess height map on **unit 15**, using
+  `textureLod(...,0)` so it's derivative-free and identical across passes. Every pass that
+  can tessellate binds that same image for that surface (`RB_RHI_TessHeightImage`), so the
+  prepass and the lit passes still agree bit-for-bit. `r_tessDisplace 0` = pure PN smoothing.
 - **Phase 3 (controls) — built.** `r_tessellation` (0) / `r_tessLevel` (5) /
-  `r_tessMinEdge` (0.72) / `r_tessMaxDist` (160) / `r_tessDisplace` (-0.25) / `r_tessDebug` (0). `RB_RHI_TessellateSurf`
+  `r_tessMinEdge` (0.72) / `r_tessMaxDist` (160) / `r_tessDisplace` (0.10) /
+  `r_tessEyeOffset` (0.035) / `r_tessDebug` (0). `RB_RHI_TessellateSurf`
   routes by **asset path** — only `models/characters/` and `models/monsters/` (real skinned
   actors); worldspawn BSP, all `models/mapobjects/` props, view-model, translucent, GUI,
   and the named facial sub-meshes are excluded. Emissive: only **purely** emissive surfaces

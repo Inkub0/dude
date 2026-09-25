@@ -259,7 +259,8 @@ static int RB_RHI_CountLightChain( const drawSurf_t *surf ) {
 // Vulkan (Phase 4 M3): RB_RHI_BindUnit records image handles here instead of
 // touching GL; RB_RHI_VkTextures copies them into a draw's DrawArgs. Handles
 // persist across draws exactly like GL binds do.
-static rhi::ImageHandle rhiVkUnits[13];	// units 0-7 + shadow cube 8 + SSAO 9 + occlusion 10 + parallax 11 + dynamic shadow cube 12
+static rhi::ImageHandle rhiVkUnits[16];	// units 0-7 + shadow cube 8 + SSAO 9 + occlusion 10 + parallax 11 + dynamic shadow cube 12
+										// + 13/14 set straight on DrawArgs + tess height 15 (DUDE)
 
 static void RB_RHI_VkTextures( rhi::DrawArgs &da ) {
 	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
@@ -273,6 +274,7 @@ static void RB_RHI_VkTextures( rhi::DrawArgs &da ) {
 	da.occlusion = rhiVkUnits[10];
 	da.parallax = rhiVkUnits[11];
 	da.shadowCubeDyn = rhiVkUnits[12];
+	da.tessHeight = rhiVkUnits[15];		// DUDE signed tess displacement height
 }
 
 static void RB_RHI_ForgetTexBinds() {
@@ -292,7 +294,7 @@ RB_RHI_BindUnit
 static void RB_RHI_BindUnit( int unit, idImage *image ) {
 	// Vulkan: demand-load and record the handle for RB_RHI_VkTextures; no GL
 	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		if ( unit >= 0 && unit < 12 && image != NULL ) {
+		if ( unit >= 0 && unit < 16 && image != NULL ) {
 			image->Bind();		// upload trigger only under Vulkan
 			if ( image->rhiHandle == 0 ) {
 				// a white fallback silently breaks shading (e.g. a white
@@ -1238,7 +1240,9 @@ void RB_RHI_SetTessParms( rhi::RenderParams &parms ) {
 	parms.tessParms[0] = r_tessLevel.GetFloat();
 	parms.tessParms[1] = r_tessMaxDist.GetFloat();
 	parms.tessParms[2] = r_tessDisplace.GetFloat();	// Phase 2 displacement strength
-	parms.tessParms[3] = r_tessMinEdge.GetFloat();	// min edge length to subdivide (anti eye-bulge)
+	parms.tessParms[3] = r_tessMinEdge.GetFloat();	// min edge length to subdivide (perf/LOD guard;
+													// the eye-bulge it was added for is fixed properly now
+													// by signed displacement, docs/tessellation.md)
 }
 
 // For a tessellated surface, copy the bump stage's texture matrix into parms (so the
@@ -1266,6 +1270,39 @@ idImage *RB_RHI_TessBumpForZfill( const drawSurf_t *surf, rhi::RenderParams &par
 		}
 	}
 	return bumpImg;
+}
+
+/*
+=================
+RB_RHI_BindTessHeight
+
+DUDE (docs/tessellation.md): bind the SIGNED height map the tess-eval stage displaces
+with, on unit 15, for EVERY pass that can tessellate.
+
+Must be called at every tess draw site, with `tess` false as well as true. rhiVkUnits[]
+persists between draws, so a tessellated draw that skipped this would inherit the
+PREVIOUS surface's height map -- and if zfill and the interaction pass ever displaced a
+surface with different heights, the lit draw would fail its depth-EQUAL test and the
+character's surfaces would vanish. Binding the flat mid-grey image when a surface does
+not tessellate (or has no height source) resets that state and means "no displacement".
+=================
+*/
+idImage *RB_RHI_TessHeightImage( const drawSurf_s *surf, bool tess ) {
+	idImage *height = NULL;
+	if ( tess && surf && surf->material ) {
+		const shaderStage_t *bumpStage = surf->material->GetBumpStage();
+		if ( bumpStage ) {
+			height = bumpStage->tessHeightImage;
+		}
+	}
+	return height ? height : R_TessFlatHeightImage();	// mid-grey: (h - 0.5) == 0
+}
+
+static void RB_RHI_BindTessHeight( const drawSurf_t *surf, bool tess ) {
+	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		return;			// GL3 has no tessellation stages
+	}
+	RB_RHI_BindUnit( 15, RB_RHI_TessHeightImage( surf, tess ) );
 }
 
 // Roadmap B (docs/tessellation.md): classify a surface for the tessellated draw. Returns whether to
@@ -1889,6 +1926,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	pd.cullType = RB_RHI_CullFor( ictx.viewDef, CT_FRONT_SIDED );
 	pd.stencilState = ictx.stencilState;
 	pd.tessellate = tess;
+	RB_RHI_BindTessHeight( din->surf, tess );	// DUDE: unit 15 signed height (docs/tessellation.md)
 	ictx.r->BindPipeline( pd );
 
 	rhi::DrawArgs da;
@@ -2336,6 +2374,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		pd.cullType = RB_RHI_CullFor( viewDef, CT_FRONT_SIDED );
 		pd.stencilState = rhi::SS_ALWAYS;	// stencil test on, always pass (GL parity)
 		pd.tessellate = tess;
+		RB_RHI_BindTessHeight( surf, tess );	// DUDE: unit 15 signed height (docs/tessellation.md)
 
 		rhi::DrawArgs da;
 		memset( &da, 0, sizeof( da ) );
@@ -2731,6 +2770,7 @@ static void RB_RHI_ShadowCasterChain( rhi::RHI *r, const drawSurf_t *surf, rhi::
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = smCull;
 		pd.tessellate = tess;
+		RB_RHI_BindTessHeight( surf, tess );	// DUDE: unit 15 signed height (docs/tessellation.md)
 
 		RB_RHI_BindUnit( 0, coverImage );
 		if ( tess ) {
@@ -3146,6 +3186,7 @@ static void RB_RHI_ShadowCasterChainCube( rhi::RHI *r, const drawSurf_t *surf, r
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = smCull;
 		pd.tessellate = tess;
+		RB_RHI_BindTessHeight( surf, tess );	// DUDE: unit 15 signed height (docs/tessellation.md)
 
 		RB_RHI_BindUnit( 0, coverImage );
 		if ( tess ) {
@@ -4475,6 +4516,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			RB_RHI_SetTessParms( parms );
 		}
 		pd.tessellate = tess;
+		RB_RHI_BindTessHeight( surf, tess );	// DUDE: unit 15 signed height (docs/tessellation.md)
 
 		rhi::BufferHandle vb, ib;
 		int vertOfs, idxOfs;
@@ -9356,6 +9398,7 @@ static void RB_RHI_FogChain( rhi::RHI *r, const viewDef_t *viewDef, const drawSu
 		pd.vertexLayout = rhi::VL_DRAWVERT;
 		pd.cullType = RB_RHI_CullFor( viewDef, cull );
 		pd.tessellate = tess;
+		RB_RHI_BindTessHeight( surf, tess );	// DUDE: unit 15 signed height (docs/tessellation.md)
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
