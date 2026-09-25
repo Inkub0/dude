@@ -76,6 +76,47 @@ asset, with zero scatter. **A bug produces scatter. An exact, universal algebrai
 convention, not a defect.** "Exact and universal" was read as strong evidence *for* a bug when it
 was strong evidence *against* one.
 
+## Attempts 5 and 6 (2026-09-25, same day) — vertex-space blending. Also failed.
+
+The user's design, and a good one: leave one half exactly as authored, let the other bleed toward
+its partner over a narrow band. Built as `r_mirrorSeamFade` on `feat/mirror-seam-bleed`, **branch
+deleted, never merged.** Three forms, all rejected on sight:
+
+| form | what it did | why it failed |
+|---|---|---|
+| scale tangents to `−1` at the seam | meant to reach the partner's reading | negating gives `M·W`, the *mirror* of the partner's normal — a different vector at a point on the plane. Inverted a whole half; visually the rejected attempt-four flip |
+| scale tangents to `0` | removes the inversion | just deletes relief; the untouched half still has full relief at the seam, so no continuity either |
+| **rotate** the frame onto the partner's | mathematically correct: if B shades with A's frame it produces A's normal exactly | correct at the seam, but the blend washed the relief out across the band |
+
+**The number that explains all three:** a tangent and its mirrored target differ by a
+**median of 82.2°** on betruger's head (p10 28.4, p90 156.5, max 178.9). The two halves' frames are
+most of a right angle apart. There was never a small correction available, and any blend between
+them over a band destroys the relief in the middle of that band:
+
+| `t` | median \|lerp\| | faces below 0.3 |
+|---|---|---|
+| 0.5 | 0.753 | 17.9% |
+| 1.0 (seam) | 1.000 | 0% |
+
+The endpoint is clean — at the seam it is the partner's frame exactly, at full strength — so the
+damage is purely mid-ramp. Renormalising the lerp avoids the dip but forces unit length on an
+intermediate frame corresponding to no real parameterisation, which reads in game as the relief
+swivelling. Lerp washes out; slerp swivels. There is no third option in vertex space.
+
+**The actual lesson, and it is about resolution, not maths.** The user asked for the blend in the
+NORMAL MAP over a 2-pixel band, and picked a second-texture layout to make it possible. I
+substituted a per-vertex frame blend because it was smaller, and argued it was equivalent. It is
+equivalent in *output* and not in *resolution*: on a 207-vertex head the narrowest expressible band
+is one triangle ring, which is most of a cheek. Even `r_mirrorSeamFade 0.01` (seam ring only, the
+minimum) still washed a full triangle band. **A 2-texel band is not expressible in vertex space.**
+
+**Still untried, and the only remaining option with an argument behind it:** the texture route the
+user asked for. The risky part is already validated offline — solving map B per texel so half B
+reproduces half A's normal lands at median 0.00° over 53639 texels, and confining it to a 2-texel
+rim touches 3.3% of texels instead of 99.6%. TBN handedness identifies the half per-vertex 100%
+reliably with 0% near-degenerate, so no new vertex attribute is needed. What remains is plumbing:
+generate map B at load, a texture unit through the Vulkan descriptor path, and a per-fragment pick.
+
 ## If anyone picks this up again
 
 1. **Verify the premise before building.** The premise to test is *"does the baked normal map
