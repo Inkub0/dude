@@ -95,7 +95,8 @@ void R_GpuSkinProfileAddStrip( int verts ) {
 //
 // NOT the tangent derive — that stays. Its remaining CPU readers are decals (idRenderModelOverlay)
 // and deform materials. The third blocker this comment used to list, the tess weld, is GONE: the
-// bake weld in idMD5Mesh::BuildGpuSkinData superseded r_tessWeldSeams. Both survivors are per-SURFACE
+// bake weld in idMD5Mesh::BuildGpuSkinData superseded it (the standalone weld cvar + its unused
+// R_WeldSeamNormals were deleted 2026-09-25). Both survivors are per-SURFACE
 // conditions (overlay present / material deforms), so the derive IS gateable — it is just not worth
 // gating: r_gpuSkinProfile measured it at ~0.007 ms/frame in a 5-enemy fight, because MD5 meshes
 // carry dominantTris and so take the cheap O(verts) R_DeriveUnsmoothedTangents path

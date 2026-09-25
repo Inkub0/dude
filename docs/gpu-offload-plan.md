@@ -205,12 +205,12 @@ Two ways to get a skinned TBN, both built and A/B'd in-engine:
    one bind normal. Coincident verts share a weight run ⇒ identical bind normal ⇒ bit-identical
    skinned normal at every pose ⇒ the seam *cannot* open. Costs a small shading divergence.
 
-Dead ends worth not repeating: `R_WeldSeamNormals`' dot gate (default `0.7` ≈ 45°) rejects precisely
-the pairs that crack — the measured offender was **49.54°**, just past it. And `r_tessWeldSeams`
-welds in `UpdateSurface`, which the derive pass then overwrote, so it appeared to "do nothing"
-whenever GPU skinning was on. **`r_tessWeldSeams` / `r_tessWeldThreshold` are now dead weight** —
-the bake weld supersedes them entirely, and they are still listed as a blocker for retiring the CPU
-tangent derive (see Milestone C below), so removing them is worth real points, not just tidiness.
+Dead ends worth not repeating: the old `R_WeldSeamNormals`' dot gate (`0.7` ≈ 45°) rejected precisely
+the pairs that crack — the measured offender was **49.54°**, just past it — which is why the surviving
+welds have no angle gate. And `r_tessWeldSeams` welded in `UpdateSurface`, which the derive pass then
+overwrote, so it appeared to "do nothing" whenever GPU skinning was on. **`r_tessWeldSeams` /
+`r_tessWeldThreshold` and `R_WeldSeamNormals` were DELETED 2026-09-25** — superseded by the bake weld,
+and the function turned out to have had no callers at all.
 
 Note the *normal* weld was only half the seam story: it fixed the direction coincident verts move
 in, not the distance. Displacement pulled them apart anyway because the height is sampled at the
@@ -283,7 +283,7 @@ Given that, the two remaining pieces are architectural, not performance work:
 2. **The tangent derive — deliberately NOT done.** It needs *per-surface gating*, not a flag.
    `tr_light.cpp:78` lists its blockers as decals (`idRenderModelOverlay`), deform materials, and the
    tess weld. **The tess-weld blocker is now gone** — `r_tessWeldSeams` was superseded by the bake
-   weld — leaving two conditions that are both testable per surface. But at ~0.007 ms it buys
+   weld and deleted 2026-09-25 — leaving two conditions that are both testable per surface. But at ~0.007 ms it buys
    ~0.1% of a frame while risking decal regressions, so the user's standing decision is to leave it.
 
 **Where the real leverage went instead (RTX reframe).** GPU residency of skinned geometry — the thing

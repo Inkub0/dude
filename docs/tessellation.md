@@ -450,26 +450,20 @@ bump, so they ride the silhouette but not the displacement — polygon offset hi
 small residual). Classifier gates on `models/md5/monsters/` `models/md5/characters/`
 (the md5 file paths) via the `monsters/` / `characters/` substrings.
 
-### Seam welding (2026-08-04) — `r_tessWeldSeams` (off by default) — **SUPERSEDED, now dead weight**
-> Kept for the record only. The bake-time weld in `idMD5Mesh::BuildGpuSkinData` (see
-> [gpu-offload-plan.md](gpu-offload-plan.md), "TBN source") replaced this entirely, and does it
-> better: welding the *bind* normals means coincident verts share a weight run and therefore stay
-> bit-identical at every pose, where this per-frame weld only fixed the pose it ran on — and was
-> silently overwritten whenever GPU skinning was on. Its dot-product gate also rejects exactly the
-> pairs that crack (the measured offender was 49.54°, just past the 0.7 ≈ 45° default).
-> **Worth removing:** `tr_light.cpp:78` still lists "the tess weld" as a blocker for retiring the
-> CPU tangent derive, so deleting these two cvars removes one of only three obstacles to a real
-> Milestone-C win.
+### Seam welding (2026-08-04) — `r_tessWeldSeams` — **DELETED 2026-09-25**
 
-Doom 3 md5 meshes are built from mirrored / UV-split halves — coincident vertices that
-get independent normals, so PN + displacement pull the seam open (displacement worse,
-since the two sides also sample different UVs). `R_WeldSeamNormals`
-([tr_trisurf.cpp](../neo/renderer/tr_trisurf.cpp)) averages coincident-vertex normals
-whose normals are **near-parallel** (`dot >= r_tessWeldThreshold`, default 0.7) so the
-mesh deforms as one piece; the threshold preserves genuine hard creases. Runs in
-`idMD5Mesh::UpdateSurface` (md5 only — world lighting untouched), only when the cvar is
-on (vanilla is byte-identical off). Closes PN seams fully; displacement across a UV seam
-keeps a small residual (different heights). Threshold is a Debugging-tab slider.
+> Removed, with its `R_WeldSeamNormals` (`tr_trisurf.cpp`) and `r_tessWeldThreshold`. It had been
+> superseded long before by the bake-time weld in `idMD5Mesh::BuildGpuSkinData` (see
+> [gpu-offload-plan.md](gpu-offload-plan.md), "TBN source"), but the cvars, the function and a
+> Graphics-tab checkbox + slider were all left behind — and **nothing ever called the function**,
+> so the toggle had done literally nothing since the day the bake weld landed.
+>
+> Two lessons worth keeping. The bake weld is strictly stronger: welding the *bind* normals means
+> coincident verts share a weight run and therefore stay bit-identical at **every** pose, where a
+> per-frame weld only fixed the pose it ran on and was silently overwritten whenever GPU skinning
+> was on. And its dot-product gate rejected exactly the pairs that crack — the measured offender
+> was 49.54°, just past the 45° a 0.7 gate allows — which is why the surviving welds have **no**
+> angle gate.
 
 ### UV-seam displacement pinning (2026-08-09) — unconditional
 The residual noted above turned out not to be small: it is what opens the visible gaps around

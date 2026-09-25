@@ -4071,23 +4071,6 @@ static void DrawDbgGroup_Tessellation()
 	AddTooltip( "r_tessDebug: print each material name accepted for tessellation once (with model type and "
 		"entity index) to the console, so a mis-tessellated surface can be identified. Vulkan only." );
 
-	bool tessWeld = r_tessWeldSeams.GetBool();
-	if ( ImGui::Checkbox( "Weld Seam Normals", &tessWeld ) ) {
-		r_tessWeldSeams.SetBool( tessWeld );
-	}
-	AddTooltip( "r_tessWeldSeams: average coincident vertex normals on animated meshes so a model built from "
-		"mirrored/UV-split halves deforms as one piece (no seam opening) under tessellation + displacement. "
-		"Off = vanilla normals." );
-
-	ImGui::BeginDisabled( !r_tessWeldSeams.GetBool() );
-	float tessWeldThr = r_tessWeldThreshold.GetFloat();
-	if ( ImGui::SliderFloat( "Seam Weld Threshold", &tessWeldThr, 0.0f, 1.0f, "%.2f", 0 ) ) {
-		r_tessWeldThreshold.SetFloat( tessWeldThr );
-	}
-	AddTooltip( "r_tessWeldThreshold: only coincident normals whose dot product is at least this get welded. "
-		"1 = weld only identical normals; lower also welds sharper creases (0.7 closes seams while keeping "
-		"hard edges)." );
-	ImGui::EndDisabled();
 	ImGui::EndDisabled();
 	EndSettingsGroup();
 	}
