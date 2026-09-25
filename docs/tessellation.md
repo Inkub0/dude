@@ -311,7 +311,7 @@ displacement layer.
   can tessellate binds that same image for that surface (`RB_RHI_TessHeightImage`), so the
   prepass and the lit passes still agree bit-for-bit. `r_tessDisplace 0` = pure PN smoothing.
 - **Phase 3 (controls) — built.** `r_tessellation` (0) / `r_tessLevel` (5) /
-  `r_tessMinEdge` (0.72) / `r_tessMaxDist` (160) / `r_tessDisplace` (0.10) /
+  `r_tessMinEdge` (0.1) / `r_tessMaxDist` (160) / `r_tessDisplace` (0.10) /
   `r_tessEyeOffset` (0.035) / `r_tessDebug` (0). `RB_RHI_TessellateSurf`
   routes by **asset path** — only `models/characters/` and `models/monsters/` (real skinned
   actors); worldspawn BSP, all `models/mapobjects/` props, view-model, translucent, GUI,
