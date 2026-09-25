@@ -450,26 +450,20 @@ bump, so they ride the silhouette but not the displacement — polygon offset hi
 small residual). Classifier gates on `models/md5/monsters/` `models/md5/characters/`
 (the md5 file paths) via the `monsters/` / `characters/` substrings.
 
-### Seam welding (2026-08-04) — `r_tessWeldSeams` (off by default) — **SUPERSEDED, now dead weight**
-> Kept for the record only. The bake-time weld in `idMD5Mesh::BuildGpuSkinData` (see
-> [gpu-offload-plan.md](gpu-offload-plan.md), "TBN source") replaced this entirely, and does it
-> better: welding the *bind* normals means coincident verts share a weight run and therefore stay
-> bit-identical at every pose, where this per-frame weld only fixed the pose it ran on — and was
-> silently overwritten whenever GPU skinning was on. Its dot-product gate also rejects exactly the
-> pairs that crack (the measured offender was 49.54°, just past the 0.7 ≈ 45° default).
-> **Worth removing:** `tr_light.cpp:78` still lists "the tess weld" as a blocker for retiring the
-> CPU tangent derive, so deleting these two cvars removes one of only three obstacles to a real
-> Milestone-C win.
+### Seam welding (2026-08-04) — `r_tessWeldSeams` — **DELETED 2026-09-25**
 
-Doom 3 md5 meshes are built from mirrored / UV-split halves — coincident vertices that
-get independent normals, so PN + displacement pull the seam open (displacement worse,
-since the two sides also sample different UVs). `R_WeldSeamNormals`
-([tr_trisurf.cpp](../neo/renderer/tr_trisurf.cpp)) averages coincident-vertex normals
-whose normals are **near-parallel** (`dot >= r_tessWeldThreshold`, default 0.7) so the
-mesh deforms as one piece; the threshold preserves genuine hard creases. Runs in
-`idMD5Mesh::UpdateSurface` (md5 only — world lighting untouched), only when the cvar is
-on (vanilla is byte-identical off). Closes PN seams fully; displacement across a UV seam
-keeps a small residual (different heights). Threshold is a Debugging-tab slider.
+> Removed, with its `R_WeldSeamNormals` (`tr_trisurf.cpp`) and `r_tessWeldThreshold`. It had been
+> superseded long before by the bake-time weld in `idMD5Mesh::BuildGpuSkinData` (see
+> [gpu-offload-plan.md](gpu-offload-plan.md), "TBN source"), but the cvars, the function and a
+> Graphics-tab checkbox + slider were all left behind — and **nothing ever called the function**,
+> so the toggle had done literally nothing since the day the bake weld landed.
+>
+> Two lessons worth keeping. The bake weld is strictly stronger: welding the *bind* normals means
+> coincident verts share a weight run and therefore stay bit-identical at **every** pose, where a
+> per-frame weld only fixed the pose it ran on and was silently overwritten whenever GPU skinning
+> was on. And its dot-product gate rejected exactly the pairs that crack — the measured offender
+> was 49.54°, just past the 45° a 0.7 gate allows — which is why the surviving welds have **no**
+> angle gate.
 
 ### UV-seam displacement pinning (2026-08-09) — unconditional
 The residual noted above turned out not to be small: it is what opens the visible gaps around
@@ -488,6 +482,29 @@ passes it through, and each tese interpolates it barycentrically and scales `rel
 halves of a seam therefore displace by exactly 0 and stay welded, while displacement ramps back to
 full one triangle in. Mirror-seam verts need nothing — `UpdateSurface` replicates them by copying
 the whole source vertex, texcoord included, so they already sample the same texel.
+
+**Correction (2026-09-25): that last sentence was the intent, not the behaviour.** `dupVerts` is not
+just the UV splits. `R_DuplicateMirroredVertexes` splits every mirror-seam vert but leaves the sil
+indexes pointing at the original (its own header says *"Silindexes are unchanged by this"*), so the
+`R_CreateDupVerts` pass that runs straight after records each mirror **copy** as a dupVert paired
+with its original — and the stamp zeroed both. Every mirrored character was therefore pinned to zero
+displacement along its whole centreline: measured **100% of the mirror verts** on betruger /
+playerhead / scihead02, forming one exactly-coplanar curve (y-spread 0.000 on betruger) that runs
+crown → forehead → nose → chin across the head's full extent.
+
+The stamp now tests the actual condition — *do the two coincident verts disagree on UV?* — instead of
+dupVerts membership. A mirror copy has no `st` yet when the stamp runs (the replication that fills it
+comes later), so it resolves through `mirroredVerts` to the texcoord it will carry. Bit-identical
+texcoords mean the identical texel and therefore the identical height, so such a pair provably cannot
+pull apart. Share of source verts pinned, before → after: **imp 49.5% → 44.4%, betruger head 16.9% →
+5.3%, player head 13.6% → 0%, scientist head02 40.4% → 0%.** Bodies barely move, because their pinning
+really is UV charts; heads go to zero, because on a head essentially every dupVerts pair *was* the
+mirror centreline. This matters more since `r_tessMinEdge` dropped to 0.1 and faces tessellate ~100%
+instead of ~52%.
+
+Note this was **not** the "line down the middle of the face" — `r_tessDisplace 0` leaves that line
+unchanged, and `dudeTessDisplace` is the mask's only consumer. See the elimination ledger for that
+separate, older artifact.
 
 The mask must be identical in every pass or depth-EQUAL breaks, so all seven displacing chains
 (`zfill` / `interaction` / `ambientlight` / `gbuffer` / `fog` / `shadow_sm` / `shadow_sm_cube`)
