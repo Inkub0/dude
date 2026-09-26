@@ -9849,7 +9849,7 @@ void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
 		if ( t.colorLevelFb[L] )   { vkDestroyFramebuffer( device, t.colorLevelFb[L], NULL ); t.colorLevelFb[L] = VK_NULL_HANDLE; }
 		if ( t.colorLevelView[L] ) { vkDestroyImageView( device, t.colorLevelView[L], NULL ); t.colorLevelView[L] = VK_NULL_HANDLE; }
 	}
-	for ( int c = 0; c < 3; c++ ) {		// R1/A0: incl. the 3rd (RG16F velocity) attachment on a 3-MRT; unused slots are null-guarded
+	for ( int c = 0; c < t.colorCount; c++ ) {
 		if ( t.colorSampleView[c] ) { vkDestroyImageView( device, t.colorSampleView[c], NULL ); t.colorSampleView[c] = VK_NULL_HANDLE; }
 		if ( t.colorView[c] )  { vkDestroyImageView( device, t.colorView[c], NULL ); t.colorView[c] = VK_NULL_HANDLE; }
 		if ( t.colorImage[c] ) { vmaDestroyImage( vma, t.colorImage[c], t.colorAlloc[c] ); t.colorImage[c] = VK_NULL_HANDLE; t.colorAlloc[c] = NULL; }
@@ -9860,9 +9860,9 @@ void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
 
 // free every imageTable slot a target lent out (depth sample + color samples)
 void VulkanBackend::ReleaseTargetSampleSlots( RenderTarget &t ) {
-	ImageHandle handles[4] = { t.sampleImage, t.colorSampleImage[0], t.colorSampleImage[1], t.colorSampleImage[2] };
-	for ( int i = 0; i < 4; i++ ) {
-		ImageHandle h = handles[i];
+	const ImageHandle handles[] = { t.sampleImage, t.colorSampleImage[0], t.colorSampleImage[1],
+	                                t.colorSampleImage[2], t.colorSampleImage[3] };
+	for ( ImageHandle h : handles ) {
 		if ( h >= 1 && h <= (ImageHandle)imageTable.size() ) {
 			imageTable[h - 1] = ImageRec();
 			imageTable[h - 1].live = false;
@@ -9878,7 +9878,7 @@ void VulkanBackend::ReleaseTargetSampleSlots( RenderTarget &t ) {
 		t.colorLevelInput[L] = 0;
 	}
 	t.sampleImage = 0;
-	t.colorSampleImage[0] = t.colorSampleImage[1] = t.colorSampleImage[2] = 0;
+	t.colorSampleImage[0] = t.colorSampleImage[1] = t.colorSampleImage[2] = t.colorSampleImage[3] = 0;
 }
 
 void VulkanBackend::DestroyRenderTarget( RenderTargetHandle rt ) {
