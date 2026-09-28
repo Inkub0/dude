@@ -663,14 +663,18 @@ void idRenderModelStatic::FinishSurfaces() {
 	}
 
 	// add up the total surface area for development information
-	for ( i = 0 ; i < surfaces.Num() ; i++ ) {
-		const modelSurface_t	*surf = &surfaces[i];
-		srfTriangles_t	*tri = surf->geometry;
+	// DUDE: listSurfaceAreas is the only reader, so skip this per-triangle walk (a cross product
+	// + sqrt for every triangle of every model, at every load) unless developer is on
+	if ( com_developer.GetBool() ) {
+		for ( i = 0 ; i < surfaces.Num() ; i++ ) {
+			const modelSurface_t	*surf = &surfaces[i];
+			srfTriangles_t	*tri = surf->geometry;
 
-		for ( int j = 0 ; j < tri->numIndexes ; j += 3 ) {
-			float	area = idWinding::TriangleArea( tri->verts[tri->indexes[j]].xyz,
-				 tri->verts[tri->indexes[j+1]].xyz,  tri->verts[tri->indexes[j+2]].xyz );
-			const_cast<idMaterial *>(surf->shader)->AddToSurfaceArea( area );
+			for ( int j = 0 ; j < tri->numIndexes ; j += 3 ) {
+				float	area = idWinding::TriangleArea( tri->verts[tri->indexes[j]].xyz,
+					 tri->verts[tri->indexes[j+1]].xyz,  tri->verts[tri->indexes[j+2]].xyz );
+				const_cast<idMaterial *>(surf->shader)->AddToSurfaceArea( area );
+			}
 		}
 	}
 

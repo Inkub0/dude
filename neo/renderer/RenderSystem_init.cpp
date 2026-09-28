@@ -1909,6 +1909,13 @@ void R_ReportSurfaceAreas_f( const idCmdArgs &args ) {
 		}
 	}
 
+	// DUDE: the per-triangle area walk is gated behind developer at model load (Model.cpp
+	// FinishSurfaces) -- say so instead of printing an empty list
+	if ( i == count ) {
+		common->Printf( "no surface areas accumulated (only totalled at map load, and only with developer 1)\n" );
+		return;
+	}
+
 	for ( ; i < count ; i++ ) {
 		// report size in "editor blocks"
 		int	blocks = list[i]->GetSurfaceArea() / 4096.0;
