@@ -254,10 +254,12 @@ See **docs/antialiasing.md** for status + design. Summary:
 - **TAA — SHIPPED as FSR2 Native-AA (R1, 2026-08-18)**: `r_fsr` on Vulkan (temporal accumulation +
   RCAS + auto-reactive deghosting), default in the Nightmare preset, SMAA kept as the GL3/opt-out
   fallback. Full record: [fsr-temporal-pipeline.md](fsr-temporal-pipeline.md).
-- **PARKED — FSR2 sub-native upscaling** (render scale < 1.0, `fsrQuality` presets, the scene/HUD
-  reorder that replaces the Native-AA copy-back): pointless while the game is CPU-bound; the
-  customer is the RT era's per-pixel ray budget (67% scale ≈ half the rays). Work list in
-  [fsr-temporal-pipeline.md](fsr-temporal-pipeline.md) § "PARKED FOLLOW-UP".
+- **SHIPPED 2026-09-28 — FSR2 sub-native upscaling** (`r_fsrScale`, render scale < 1.0, the scene/HUD
+  reorder that replaced the Native-AA copy-back, and a "Upscaling" menu group under Display: Quality 67% /
+  Balanced 59% / Performance 50% / Custom + a mirrored RCAS sharpness slider). User-verified (1.0 pixel-
+  identical, 0.67 correct) and merged to master (`fa4f6542`). Presets left untouched — it's a manual knob
+  whose real customer is the RT tier's per-pixel ray budget. Full record:
+  [fsr-temporal-pipeline.md](fsr-temporal-pipeline.md) § "Sub-native upscaling — `r_fsrScale`".
 
 ---
 
@@ -402,8 +404,9 @@ on-screen reuse already carries real shadows wherever the reflected surface is o
 ## Fidelity backlog (no new assets)  **[proposed 2026-09-19 — nothing scheduled]**
 
 From the fidelity review after the decal work. The reflection items became a staged plan —
-RR12 lit-scene reuse at the RT hit, RR13 roughness-driven glossy for the RT tier, RR14 specular
-occlusion, RR15 reflections on wet blood — sequenced around the open RR5 work in
+RR12 lit-scene reuse at the RT hit, RR13 roughness-driven glossy for the RT tier, **RR14 specular
+occlusion (DONE + user-verified 2026-09-19, `r_specOcclusion` 0.7)**, RR15 reflections on wet blood —
+sequenced around the open RR5 work in
 **[rtx-reflections.md](rtx-reflections.md)** ("Fidelity follow-ups"). The rest, in rough order of
 gain per effort; every one is an opt-in toggle, preset-wired only after a visual pass:
 

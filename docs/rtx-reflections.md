@@ -454,7 +454,7 @@ twice. No new assets anywhere; everything reads data the engine already has.
 | 3 | **Entity coverage Item 3** (dropped items) — **DONE + verified 2026-09-21** | 1 | UN | S |
 | 4 | **RR5c stage 2** (bumped glass) — **DONE + verified 2026-09-21** (own hit-shade copy; RR12a factor still TODO) | RR12's shared hit-shade include | UN | S–M |
 | 5 | **RR13** — roughness-driven glossy for the RT tier | 2 (tune blur on correctly-lit content) | UN | M |
-| 6 | **RR14** — specular occlusion on reflections | — (independent; can jump the queue) | Ultra+ (SSR **and** RT), GL3+VK | S |
+| 6 | **RR14** — specular occlusion on reflections — **DONE + user-verified 2026-09-19** (`r_specOcclusion` 0.7) | — (independent; jumped the queue) | Ultra+ (SSR **and** RT), GL3+VK | S |
 | 7 | **RR15** — reflections on wet blood (the parked decal G-buffer) | RR13 | Ultra+ | M, optional |
 
 The rule behind the order is **coverage → shading → filtering → occlusion**: every stage's visual gate is
