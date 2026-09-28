@@ -64,9 +64,12 @@ its serial fallback):
   fallback for a missing source is preserved (a worker failure would otherwise have produced the
   checkerboard default).
 
-Expected: the material parse drops from ~8.5 s to ~0.3 s; the `media` phase grows by the generation
-divided by the worker count. The `EndLevelLoad` summary prints
-`N of them height fields generated here, not in the material parse` so a run shows it happened.
+**Measured (hell1, cold start, 2026-09-28):** total load **11310 → 2458 ms**; material parse 8482 →
+**7 ms**; `proc` 1079 → 95 (the world's own materials were generating too); `media` ~1030 → 1126 — the
+`EndLevelLoad` summary printed `305 of them height fields generated here, not in the material parse`
+inside a 1.1 s image phase alongside 1157 regular textures. **Visually unchanged, user-confirmed.** (That
+run parsed fewer decls than the earlier ones — 534 vs 649 materials — so the exact ratio is soft; the
+per-material figure is not.)
 
 **Rejected:** caching the derived height fields on disk. At source resolution that is 256 KB–4 MB per
 material — roughly 0.6 GB for stock and up to ~10 GB with a 2K texture pack — and it would have left

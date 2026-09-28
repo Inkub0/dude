@@ -261,7 +261,7 @@ See **docs/antialiasing.md** for status + design. Summary:
 
 ---
 
-## Binary model cache  **[BUILT 2026-09-28 — `r_binaryModelCache`, awaiting user load numbers]**
+## Binary model cache  **[SHIPPED 2026-09-28 — `r_binaryModelCache`; verified, ~0.5 s. The real lever was the height fields, below]**
 
 **Measured first (commit `79961c6d` split the load phases), and the measurement overturned the
 plan below:** on hell1 the render-model parse is **6.8 s of an 11.8 s load** (551 models, ~12.4 ms
@@ -276,9 +276,10 @@ kept below for reference.
 **Then the model cache verified at only ~0.5 s saved, and the next split found the real lever:** the
 "model parse" was 8.5 s of *material* parsing — every bump material was generating its parallax and
 tessellation height fields (a 2K decode + a 64-iteration Poisson solve, twice) *inside* the material
-parse, because they registered via the immediate-generate `ImageFromFunction`. **BUILT 2026-09-28:**
+parse, because they registered via the immediate-generate `ImageFromFunction`. **SHIPPED 2026-09-28
+(verified: hell1 cold load 11.3 s → 2.46 s, 305 height fields produced on the workers, visually unchanged):**
 `ImageFromLevelGenerator` defers them to `EndLevelLoad`, produces them on the parallel-loader workers, and
-purges them like file images (`r_deferLevelGenerators`). Awaiting user verification; the MD5 cache is dead
+purges them like file images (`r_deferLevelGenerators`). The MD5 cache is dead
 (all 551 models' geometry costs 118 ms). Full account: **[load-time-decl-parse.md](load-time-decl-parse.md)**.
 
 ### Original plan: collision / model binary "generated" cache  *(superseded above)*

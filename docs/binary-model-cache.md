@@ -20,6 +20,13 @@ at the wrong thing: converting a prop's ASE/LWO into a `cm_model_t` costs 153 ms
 costs 6.8 s is text-lexing 551 ASE/LWO files and re-deriving their sil edges, mirrored/dup verts,
 face planes and tangents (`R_CleanupTriangles`) on every single load. That is what this caches.
 
+> **Correction (2026-09-28, later the same day):** that `modelParse=6808 ms` was found to be mostly the
+> *material decl first-parse* the models triggered — `FindMaterial` inside `InitFromFile` was accounted
+> to the model in both paths — and the true geometry cost of all 551 models is ~118 ms with the cache,
+> ~0.6 s without. The cache is correct and stays, but it is a small win; the 8.5 s was the parallax /
+> tessellation height fields being generated inside the material parse. Full account:
+> [load-time-decl-parse.md](load-time-decl-parse.md).
+
 ## What it does
 
 After a static model (`.ase` / `.lwo` / `.flt` / `.ma`) is parsed and `FinishSurfaces()` has run,
