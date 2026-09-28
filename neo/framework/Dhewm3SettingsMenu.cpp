@@ -3865,6 +3865,21 @@ static void DrawGraphicsMenu()
 			}
 		}
 
+		// The sharpening knob mirrored here for convenience: it is the SAME setting as under
+		// Antialiasing (both read and write r_fsrSharpness), because FSR2's RCAS pass runs on the
+		// upscaled image in every mode -- a lower render scale softens more, so this is the knob
+		// to reach for right after picking a quality level.
+		ImGui::Spacing();
+		float sharp = r_fsrSharpness.GetFloat();
+		ImGui::SetNextItemWidth( 220.0f );
+		if ( ImGui::SliderFloat( "RCAS Sharpness", &sharp, 0.0f, 1.0f, "%.2f" ) ) {
+			r_fsrSharpness.SetFloat( sharp );
+		}
+		AddTooltip( "FSR2's built-in contrast-adaptive sharpening (RCAS), applied to the upscaled "
+			"image at display resolution in every mode - the same control as under Antialiasing. "
+			"Lower render scales soften more, so you may want a little more here at 50-67%. "
+			"0 disables the pass. (r_fsrSharpness)" );
+
 		ImGui::EndDisabled();	// FSR2-on gate
 		EndSettingsGroup();
 	}
