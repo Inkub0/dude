@@ -3724,7 +3724,13 @@ static void RB_RHI_ResetRtMovingTrack();		// defined with the moving-light track
 // freed by GL3Backend::Shutdown in one sweep over the whole table — this only forgets
 // the handles + their cached sizes/validity so each buffer is lazily recreated against
 // the new context. Driven by RB_RHI_Shutdown (RhiBackend.cpp).
+// DUDE sub-native FSR2: the chromatic-aberration pass's own display-size capture of the upscaled
+// composite (RB_RHI_ChromaticAberration), so _currentRender stays at the render size all frame
+static rhi::ImageHandle	rhiChromaCompositeCap = 0;
+static int				rhiChromaCapW = 0, rhiChromaCapH = 0;
+
 void RB_RHI_ResetWorldTargets( void ) {
+	rhiChromaCompositeCap = 0;	rhiChromaCapW = rhiChromaCapH = 0;		// the backend freed the image
 	rhiShadowMap = 0;			rhiShadowMapSize = 0;
 	rhiShadowCube = 0;			rhiShadowCubeSize = 0;	rhiShadowCubeDyn = 0;	rhiShadowCubeDynScale = 1.0f;
 	for ( int i = 0; i < SHADOW_NTIERS; i++ ) {
@@ -8006,10 +8012,33 @@ void RB_RHI_ChromaticAberration( rhi::RHI *r, const viewDef_t *viewDef, const id
 
 	// snapshot the finished scene colour (world + weapon, after DoF / FSR / the bloom
 	// measurement) so the pass reads-and-writes the one live scene target
-	globalImages->currentRenderImage->CopyFramebuffer( vp.x1, vp.y1, w, h, true );
-
-	const int potW = globalImages->currentRenderImage->uploadWidth  > 0 ? globalImages->currentRenderImage->uploadWidth  : w;
-	const int potH = globalImages->currentRenderImage->uploadHeight > 0 ? globalImages->currentRenderImage->uploadHeight : h;
+	rhi::ImageHandle srcImg = 0;
+	int potW = w, potH = h;
+	if ( rectOverride ) {
+		// sub-native FSR2: the composite is display-size while _currentRender was just captured at
+		// the (smaller) render size by DoF / haze / smoke this same frame -- sharing it would
+		// reallocate the capture image on every frame. The upscaled pass keeps its own exact-size
+		// snapshot; forgotten with the world targets on vid_restart (the backend frees the image).
+		if ( rhiChromaCompositeCap != 0 && ( rhiChromaCapW != w || rhiChromaCapH != h ) ) {
+			r->RetireImage( rhiChromaCompositeCap );
+			rhiChromaCompositeCap = 0;
+		}
+		if ( rhiChromaCompositeCap == 0 ) {
+			rhiChromaCompositeCap = r->CreateCaptureImage( w, h, false, true );
+			rhiChromaCapW = w;
+			rhiChromaCapH = h;
+		}
+		if ( rhiChromaCompositeCap == 0 ) {
+			return;
+		}
+		r->CopyFramebufferToImage( rhiChromaCompositeCap, 0, 0, vp.x1, vp.y1, w, h, false );
+		srcImg = rhiChromaCompositeCap;
+	} else {
+		globalImages->currentRenderImage->CopyFramebuffer( vp.x1, vp.y1, w, h, true );
+		potW = globalImages->currentRenderImage->uploadWidth  > 0 ? globalImages->currentRenderImage->uploadWidth  : w;
+		potH = globalImages->currentRenderImage->uploadHeight > 0 ? globalImages->currentRenderImage->uploadHeight : h;
+		srcImg = globalImages->currentRenderImage->rhiHandle;
+	}
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
@@ -8027,8 +8056,10 @@ void RB_RHI_ChromaticAberration( rhi::RHI *r, const viewDef_t *viewDef, const id
 	               tr.viewportOffset[1] + vp.y1, w, h );
 	backEnd.currentScissor = viewDef->scissor;
 
-	RB_RHI_BindUnit( 0, globalImages->currentRenderImage );
-	RB_RHI_DrawFullscreen( r, prog, parms, globalImages->currentRenderImage->rhiHandle );
+	if ( !rectOverride ) {
+		RB_RHI_BindUnit( 0, globalImages->currentRenderImage );
+	}
+	RB_RHI_DrawFullscreen( r, prog, parms, srcImg );
 
 	// direct binds above; forget the tmu cache so later 2D/GUI binds re-issue
 	RB_RHI_ForgetTexBinds();

@@ -8753,8 +8753,20 @@ void VulkanBackend::CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
 		return;
 	}
 
-	const int sceneW = (int)sceneExtent.width;
-	const int sceneH = (int)sceneExtent.height;
+	// The source is the active frame color: the frame target when one is set (the HDR scene
+	// buffer, which under sub-native FSR2 is the WORLD render size, smaller than the window),
+	// else sceneColor at the window size. Clip and flip against THAT image -- against the window
+	// a render-size frame put every _currentRender / _currentDepth capture rows off, breaking
+	// everything that reads them (RT shadow origins, SSAO, glass, reflections, haze).
+	int sceneW = (int)sceneExtent.width;
+	int sceneH = (int)sceneExtent.height;
+	if ( frameTarget != 0 ) {
+		const RenderTarget *ft = LookupTarget( frameTarget );
+		if ( ft != NULL ) {
+			sceneW = ft->w;
+			sceneH = ft->h;
+		}
+	}
 	// clip against the scene image (GL coords) and the destination
 	if ( srcX < 0 ) { w += srcX; dstX -= srcX; srcX = 0; }
 	if ( srcY < 0 ) { h += srcY; dstY -= srcY; srcY = 0; }
@@ -11149,11 +11161,18 @@ void VulkanBackend::ClearStencilBuffer( int value ) {
 	int sx = scRect[0], sy = scRect[1], sw = scRect[2], sh = scRect[3];
 	if ( sw < 0 ) { sw = 0; }
 	if ( sh < 0 ) { sh = 0; }
-	int top = (int)sceneExtent.height - ( sy + sh );
+	// the current framebuffer's extent: the frame target's (the render-size HDR scene under
+	// sub-native FSR2), else the window's
+	int fbW = (int)sceneExtent.width, fbH = (int)sceneExtent.height;
+	if ( frameTarget != 0 ) {
+		const RenderTarget *ft = LookupTarget( frameTarget );
+		if ( ft != NULL ) { fbW = ft->w; fbH = ft->h; }
+	}
+	int top = fbH - ( sy + sh );
 	if ( sx < 0 ) { sw += sx; sx = 0; }
 	if ( top < 0 ) { sh += top; top = 0; }
-	if ( sx + sw > (int)sceneExtent.width )  { sw = (int)sceneExtent.width - sx; }
-	if ( top + sh > (int)sceneExtent.height ) { sh = (int)sceneExtent.height - top; }
+	if ( sx + sw > fbW ) { sw = fbW - sx; }
+	if ( top + sh > fbH ) { sh = fbH - top; }
 	if ( sw <= 0 || sh <= 0 ) {
 		return;
 	}
@@ -11769,7 +11788,7 @@ void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int
 	VkCommandBuffer cb = frames[frameIndex].cb;
 
 	if ( dynStateDirty ) {
-		const float fbH = (float)sceneExtent.height;
+		const float fbH = (float)curRenderH;		// the frame target's height (see ApplyDynState), not the window's
 		VkViewport v = {};
 		v.x = (float)vpRect[0];
 		v.y = fbH - (float)vpRect[1];
@@ -11780,7 +11799,7 @@ void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int
 		vkCmdSetViewport( cb, 0, 1, &v );
 		VkRect2D sc = {};
 		int sx = scRect[0], sy = scRect[1], sw = scRect[2], sh = scRect[3];
-		int top = (int)sceneExtent.height - ( sy + sh );
+		int top = curRenderH - ( sy + sh );
 		if ( sx < 0 ) { sw += sx; sx = 0; }
 		if ( top < 0 ) { sh += top; top = 0; }
 		if ( sw < 0 ) { sw = 0; }
