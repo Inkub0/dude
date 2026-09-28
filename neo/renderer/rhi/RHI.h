@@ -164,8 +164,11 @@ struct ComputeArgs {
 // projection jitter in pixels, engine convention (+Y-up); the backend owns the sign
 // flips into FSR2's top-left convention (see RunFsr2's derivation comment).
 struct Fsr2DispatchArgs {
-	RenderTargetHandle	sceneRT;		// RGBA16F color + depth-stencil frame target (rhiHdrRT)
+	RenderTargetHandle	sceneRT;		// RGBA16F color + depth-stencil frame target (rhiHdrRT), the RENDER size
 	RenderTargetHandle	velocityRT;		// 3-MRT velocity gbuffer (attachment 2 = RG16F)
+	// DUDE sub-native: the display-size RGBA16F target the upscaled output is written to (its
+	// size is FSR2's display size). 0 = Native-AA copy-back over sceneRT (render == display).
+	RenderTargetHandle	outputRT;
 	float	jitterX, jitterY;			// viewDef->jitter, pixels, +Y-up
 	float	frameTimeMs;				// wall-clock delta since the previous dispatch
 	float	fovYRadians;				// vertical field of view

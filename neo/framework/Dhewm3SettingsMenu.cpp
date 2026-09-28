@@ -3793,6 +3793,97 @@ static void DrawGraphicsMenu()
 		EndSettingsGroup();
 	}
 
+	// DUDE FSR2 sub-native upscaling (docs/fsr-temporal-pipeline.md): the 3D scene renders at a
+	// fraction of the display size and FSR2 upscales it, so every screen-space and ray-traced pass
+	// pays for the render pixels only; the HUD, film grain and chromatic aberration stay at display
+	// resolution. Vulkan + FSR2 TAA only -- the group greys out otherwise and says why. Takes effect
+	// live (no restart): the scene buffer and the FSR2 context rebuild on the next frame.
+	if ( BeginSettingsGroup( "Upscaling" ) ) {
+		const bool isVulkan = glConfig.rhiBackend && !glConfig.coreProfile;
+		const bool fsrOn = isVulkan && r_fsr.GetBool();
+		if ( !isVulkan ) {
+			ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ), "Needs the Vulkan renderer backend (top of this tab)." );
+		} else if ( !fsrOn ) {
+			ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ), "Select FSR2 TAA under Antialiasing to enable upscaling." );
+		}
+		ImGui::BeginDisabled( !fsrOn );
+
+		// The quality levels are render scales (the AMD naming, plus Ultra Quality at 75%); any
+		// other value reads back as Custom, and picking Custom keeps the current scale and frees
+		// the slider. Detection is per frame from the live cvar, so console changes show up too.
+		static const char* qualityItems =
+			"Native AA (100%)\0Ultra Quality (75%)\0Quality (67%)\0Balanced (59%)\0Performance (50%)\0Custom\0";
+		static const float qualityScales[] = { 1.0f, 0.75f, 0.67f, 0.59f, 0.5f };
+		static bool customMode = false;
+		const float scale = r_fsrScale.GetFloat();
+		int detected = 5;		// Custom
+		for ( int i = 0; i < 5; i++ ) {
+			if ( idMath::Fabs( scale - qualityScales[i] ) < 0.005f ) {
+				detected = i;
+				break;
+			}
+		}
+		int sel = customMode ? 5 : detected;
+		ImGui::SetNextItemWidth( 220.0f );
+		if ( ImGui::Combo( "FSR2 Quality", &sel, qualityItems ) ) {
+			if ( sel < 5 ) {
+				customMode = false;
+				r_fsrScale.SetFloat( qualityScales[sel] );
+			} else {
+				customMode = true;
+			}
+		}
+		AddTooltip( "How much of the display resolution the 3D scene is rendered at before FSR2 "
+			"upscales it. Native AA renders every pixel (FSR2 acts as temporal antialiasing only). "
+			"Ultra Quality 75%, Quality 67%, Balanced 59% and Performance 50% render fewer pixels - "
+			"at 67% roughly 45% of them - and every screen-space and ray-traced pass (reflections, "
+			"GI, ambient occlusion, volumetrics, soft shadows) gets cheaper by about that much, so "
+			"this is the biggest single frame-rate lever on the Ultra Nightmare tier. The HUD, "
+			"menus, film grain and chromatic aberration always stay at full display resolution. "
+			"Custom keeps whatever scale is set and unlocks the slider below. (r_fsrScale)" );
+
+		ImGui::BeginDisabled( !( customMode || detected == 5 ) );
+		float custom = scale;
+		ImGui::SetNextItemWidth( 220.0f );
+		if ( ImGui::SliderFloat( "Render Scale", &custom, 0.5f, 1.0f, "%.2f" ) ) {
+			r_fsrScale.SetFloat( custom );
+		}
+		AddTooltip( "The render scale directly, 0.50 - 1.00 of the display size per axis. "
+			"Only editable with Custom selected above. (r_fsrScale)" );
+		ImGui::EndDisabled();	// custom slider gate
+
+		// what the scene actually renders at, for the current window
+		{
+			const int dw = glConfig.vidWidth, dh = glConfig.vidHeight;
+			const float s = idMath::ClampFloat( 0.5f, 1.0f, scale );
+			const int rw = ( s < 0.999f ) ? Max( 1, (int)floorf( (float)dw * s + 0.5f ) ) : dw;
+			const int rh = ( s < 0.999f ) ? Max( 1, (int)floorf( (float)dh * s + 0.5f ) ) : dh;
+			if ( rw == dw && rh == dh ) {
+				ImGui::TextDisabled( "Renders at %d x %d (native)", dw, dh );
+			} else {
+				ImGui::TextDisabled( "Renders at %d x %d, upscaled to %d x %d", rw, rh, dw, dh );
+			}
+		}
+
+		// The sharpening knob mirrored here for convenience: it is the SAME setting as under
+		// Antialiasing (both read and write r_fsrSharpness), because FSR2's RCAS pass runs on the
+		// upscaled image in every mode -- a lower render scale softens more, so this is the knob
+		// to reach for right after picking a quality level.
+		ImGui::Spacing();
+		float sharp = r_fsrSharpness.GetFloat();
+		ImGui::SetNextItemWidth( 220.0f );
+		if ( ImGui::SliderFloat( "RCAS Sharpness", &sharp, 0.0f, 1.0f, "%.2f" ) ) {
+			r_fsrSharpness.SetFloat( sharp );
+		}
+		AddTooltip( "FSR2's built-in contrast-adaptive sharpening (RCAS), applied to the upscaled "
+			"image at display resolution in every mode - the same control as under Antialiasing. "
+			"Lower render scales soften more, so you may want a little more here at 50-67%. "
+			"0 disables the pass. (r_fsrSharpness)" );
+
+		ImGui::EndDisabled();	// FSR2-on gate
+		EndSettingsGroup();
+	}
+
 	// Texture Options + the shared Apply / Reset sit right under Display: the other "every backend"
 	// video settings that need a renderer restart, kept together at the top of the tab.
 	if ( BeginSettingsGroup( "Texture Options" ) ) {

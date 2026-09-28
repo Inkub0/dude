@@ -351,6 +351,11 @@ idCVar r_hdrAdaptWhitePoint( "r_hdrAdaptWhitePoint", "0", CVAR_RENDERER | CVAR_A
 idCVar r_hdrEyeAdaptDebug( "r_hdrEyeAdaptDebug", "0", CVAR_RENDERER | CVAR_BOOL, "debug: show the adapted exposure as a flat grayscale (needs r_hdrEyeAdaptation)" );
 idCVar r_fsr( "r_fsr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "AMD FSR2 temporal anti-aliasing (Native-AA; docs/fsr-temporal-pipeline.md R1; Vulkan only). Forces the RGBA16F scene buffer on (FSR2's HDR input), auto-enables motion vectors + sub-pixel jitter, resolves the scene before the HUD, and replaces FXAA/SMAA with FSR2's RCAS. Off = the frame is unchanged" );
 idCVar r_fsrSharpness( "r_fsrSharpness", "0.8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "FSR2 RCAS sharpening amount (needs r_fsr): 0 = off, 1 = maximum", 0.0f, 1.0f );
+// DUDE FSR2 sub-native upscaling (docs/fsr-temporal-pipeline.md): the primary world view renders
+// at this fraction of the display size and FSR2 upscales it. Every screen-space and ray-traced
+// pass scales with it; the HUD, film grain and chromatic aberration stay at display resolution.
+idCVar r_fsrScale( "r_fsrScale", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "FSR2 render scale (Vulkan, needs r_fsr): the 3D scene renders at this fraction of the display size and FSR2 upscales it to the display. 1.0 = Native-AA (render == display, the shipped path); 0.67 = 'Quality', 0.59 = 'Balanced', 0.5 = 'Performance'. Every screen-space and ray-traced pass scales with it; the HUD, film grain and chromatic aberration stay at display resolution", 0.5f, 1.0f );
+
 // FSR2 auto-reactive mask (R1/D): snapshot the opaque scene at the translucent split, and let
 // FSR2 compare it against the final frame — where they diverge (additive particles, muzzle
 // flashes, GUI screens, fog) history is trusted less, killing temporal ghost trails.
