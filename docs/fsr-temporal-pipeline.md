@@ -25,7 +25,7 @@ chase until FSR2 work reopens (limb ghosting sighting or the RT-era upscaling pa
    pass the 1x1 `rbEyeExposureImg` as the `exposure` resource) so accumulation weighting
    matches the tonemap exactly. Small; only matters if brightness-transition artifacts show.
 
-## Sub-native upscaling — `r_fsrScale`  **[BUILT 2026-09-28 on `perf/fsr2-subnative`, awaiting user verification]**
+## Sub-native upscaling — `r_fsrScale`  **[USER-VERIFIED 2026-09-28 on `perf/fsr2-subnative`: 1.0 identical, 0.67 correct after `a836ce25`]**
 
 **As built.** `r_fsrScale` (default 1.0 = Native-AA; 0.67 / 0.59 / 0.5 = Quality / Balanced /
 Performance; Vulkan, needs `r_fsr`). The primary fullscreen world view renders at
@@ -57,8 +57,14 @@ Performance; Vulkan, needs `r_fsr`). The primary fullscreen world view renders a
   is display-size, the reactive mask render-size; `motionVectorScale` and `renderSize` are the
   render size as before.
 - **Fallbacks / caveats.** No composite or FSR2 not run on a scaled frame → the render-size
-  scene resolves with a plain stretch (soft, never a crash). Not wired into any preset or menu
-  yet — that follows the visual pass, per the fidelity policy.
+  scene resolves with a plain stretch (soft, never a crash).
+- **Menu (2026-09-28, after the user's visual pass).** Graphics → **Upscaling**, a collapsible
+  group directly below Display: an *FSR2 Quality* combo — Native AA 100% · Ultra Quality 75% ·
+  Quality 67% · Balanced 59% · Performance 50% · Custom — driving `r_fsrScale`, a *Render Scale*
+  slider unlocked by Custom (or any non-preset value), and a "Renders at W×H, upscaled to W×H"
+  readout. Greys out with a hint unless the backend is Vulkan and FSR2 TAA is selected under
+  Antialiasing; takes effect live. RCAS sharpness and the reactive mask stay under Antialiasing.
+  **Presets deliberately untouched**: the scale is an independent choice a preset does not reset.
 - **Found on the first test (user, 2026-09-28): every RT feature broke at 0.67** — flickering
   shadows, glass and floor reflections not matching. Cause: the Vulkan backend's main draw flips
   GL-convention rects against the frame target's height (`curRenderH`), but three paths still
