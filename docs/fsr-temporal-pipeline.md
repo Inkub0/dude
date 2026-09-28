@@ -63,7 +63,9 @@ Performance; Vulkan, needs `r_fsr`). The primary fullscreen world view renders a
   Quality 67% · Balanced 59% · Performance 50% · Custom — driving `r_fsrScale`, a *Render Scale*
   slider unlocked by Custom (or any non-preset value), and a "Renders at W×H, upscaled to W×H"
   readout. Greys out with a hint unless the backend is Vulkan and FSR2 TAA is selected under
-  Antialiasing; takes effect live. RCAS sharpness and the reactive mask stay under Antialiasing.
+  Antialiasing; takes effect live. The RCAS sharpness slider is mirrored here (same `r_fsrSharpness`
+  as under Antialiasing — RCAS runs on the upscaled image in every mode, and lower scales soften
+  more); the reactive mask stays under Antialiasing only.
   **Presets deliberately untouched**: the scale is an independent choice a preset does not reset.
 - **Found on the first test (user, 2026-09-28): every RT feature broke at 0.67** — flickering
   shadows, glass and floor reflections not matching. Cause: the Vulkan backend's main draw flips
