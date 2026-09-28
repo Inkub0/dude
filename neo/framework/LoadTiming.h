@@ -47,6 +47,12 @@ struct loadTiming_t {
 	// print can name the next lever without another instrumentation pass
 	double	declParseTypeMs[LOADTIMING_DECL_TYPES];
 	int		declParseTypeCount[LOADTIMING_DECL_TYPES];
+	// filesystem opens (FileSystem.cpp OpenFileReadFlags): every search-path walk, including the
+	// existence probes (a NULL-buffer ReadFile) -- misses walk the whole path. Not accumulated
+	// while the parallel image loader's thread-safe window is on (those are the image reads).
+	double	fsOpenMs;
+	int		fsOpenCount;
+	int		fsOpenMisses;
 	double	cmConvertMs;		// EXCLUSIVE: ASE/LWO -> cm_model_t build for props that ship no .cm
 	int		cmConvertCount;		// (the render-model parse it triggers is counted above, not here)
 	double	aasLoadMs;			// .aas text-lexer parse

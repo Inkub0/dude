@@ -47,6 +47,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "idlib/hashing/MD4.h"
 #include "framework/Licensee.h"
+#include "framework/LoadTiming.h"		// DUDE: search-path open timing
 #include "framework/Unzip.h"
 #include "framework/EventLoop.h"
 #include "framework/DeclEntityDef.h"
@@ -3256,7 +3257,18 @@ namespace {
 
 idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int searchFlags, pack_t **foundInPak, bool allowCopyFiles, const char* gamedir ) {
 	FsGate _g;
+	// DUDE: time the search-path walk. Serial phases only -- skipped while the parallel image
+	// loader's thread-safe window is on, when these are the worker-thread image reads.
+	const bool timeIt = !fs_threadSafe.load( std::memory_order_relaxed );
+	const double t0 = timeIt ? Sys_MillisecondsPrecise() : 0.0;
 	idFile *result = OpenFileReadFlagsRaw( relativePath, searchFlags, foundInPak, allowCopyFiles, gamedir );
+	if ( timeIt ) {
+		loadTiming.fsOpenMs += Sys_MillisecondsPrecise() - t0;
+		loadTiming.fsOpenCount++;
+		if ( result == NULL ) {
+			loadTiming.fsOpenMisses++;
+		}
+	}
 
 	// DUDE: mod-compat script-compile dedup — mark a .script basename as
 	// successfully opened so a later top-level ReadFile(x, NULL) pre-check

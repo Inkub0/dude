@@ -2025,6 +2025,9 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 			common->Printf( "  decl by type (msec):%s\n", byType.c_str() );
 		}
 	}
+	// DUDE: search-path walks (serial phases only) -- how much of the decl/sound cost is just probing
+	common->Printf( "  fs opens (msec): %.0f (%d opens, %d misses)\n",
+		loadTiming.fsOpenMs, loadTiming.fsOpenCount, loadTiming.fsOpenMisses );
 	// DUDE: inside the md5 bucket -- the remainder is the text lex + joints + weights + bounds
 	common->Printf( "  md5 split (msec): deformInfo=%.0f (%d) gpuSkinBake=%.0f (%d) tessBake=%.0f (%d)\n",
 		loadTiming.md5DeformInfoMs, loadTiming.md5DeformInfoCount,
