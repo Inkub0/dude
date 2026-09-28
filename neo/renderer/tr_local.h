@@ -1849,6 +1849,13 @@ void				R_AllocStaticTriSurfVerts( srfTriangles_t *tri, int numVerts );
 void				R_AllocStaticTriSurfIndexes( srfTriangles_t *tri, int numIndexes );
 void				R_AllocStaticTriSurfShadowVerts( srfTriangles_t *tri, int numVerts );
 void				R_AllocStaticTriSurfPlanes( srfTriangles_t *tri, int numIndexes );
+// DUDE binary model cache (Model.cpp LoadBinaryModel): the derived arrays must come from the
+// very pools R_ReallyFreeStaticTriSurf frees them into
+void				R_AllocStaticTriSurfSilIndexes( srfTriangles_t *tri, int numIndexes );
+void				R_AllocStaticTriSurfSilEdges( srfTriangles_t *tri, int numSilEdges );
+void				R_AllocStaticTriSurfDominantTris( srfTriangles_t *tri, int numVerts );
+void				R_AllocStaticTriSurfMirroredVerts( srfTriangles_t *tri, int numMirroredVerts );
+void				R_AllocStaticTriSurfDupVerts( srfTriangles_t *tri, int numDupVerts );
 void				R_ResizeStaticTriSurfVerts( srfTriangles_t *tri, int numVerts );
 void				R_ResizeStaticTriSurfIndexes( srfTriangles_t *tri, int numIndexes );
 void				R_ResizeStaticTriSurfShadowVerts( srfTriangles_t *tri, int numVerts );

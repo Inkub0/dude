@@ -655,6 +655,42 @@ void R_AllocStaticTriSurfPlanes( srfTriangles_t *tri, int numIndexes ) {
 
 /*
 =================
+DUDE binary model cache allocators
+
+Model.cpp's LoadBinaryModel rebuilds a finished surface straight from disk, so it needs to
+allocate the derived arrays R_CleanupTriangles normally produces -- from the same pools
+R_ReallyFreeStaticTriSurf frees them into, or the free corrupts the pool. Same shape as the
+verts/indexes/planes helpers above.
+=================
+*/
+void R_AllocStaticTriSurfSilIndexes( srfTriangles_t *tri, int numIndexes ) {
+	assert( tri->silIndexes == NULL );
+	tri->silIndexes = triSilIndexAllocator.Alloc( numIndexes );
+}
+
+void R_AllocStaticTriSurfSilEdges( srfTriangles_t *tri, int numSilEdges ) {
+	assert( tri->silEdges == NULL );
+	tri->silEdges = triSilEdgeAllocator.Alloc( numSilEdges );
+}
+
+void R_AllocStaticTriSurfDominantTris( srfTriangles_t *tri, int numVerts ) {
+	assert( tri->dominantTris == NULL );
+	tri->dominantTris = triDominantTrisAllocator.Alloc( numVerts );
+}
+
+void R_AllocStaticTriSurfMirroredVerts( srfTriangles_t *tri, int numMirroredVerts ) {
+	assert( tri->mirroredVerts == NULL );
+	tri->mirroredVerts = triMirroredVertAllocator.Alloc( numMirroredVerts );
+}
+
+// dupVerts holds PAIRS (first vertex, duplicate vertex) -- two ints per dup
+void R_AllocStaticTriSurfDupVerts( srfTriangles_t *tri, int numDupVerts ) {
+	assert( tri->dupVerts == NULL );
+	tri->dupVerts = triDupVertAllocator.Alloc( numDupVerts * 2 );
+}
+
+/*
+=================
 R_ResizeStaticTriSurfVerts
 =================
 */

@@ -261,7 +261,19 @@ See **docs/antialiasing.md** for status + design. Summary:
 
 ---
 
-## Collision / model binary "generated" cache  **[parked 2026-08-18 — next load-time lever]**
+## Binary model cache  **[BUILT 2026-09-28 — `r_binaryModelCache`, awaiting user load numbers]**
+
+**Measured first (commit `79961c6d` split the load phases), and the measurement overturned the
+plan below:** on hell1 the render-model parse is **6.8 s of an 11.8 s load** (551 models, ~12.4 ms
+each), while the collision conversion this section was named for is **153 ms** and `.aas` parsing
+42 ms. So the cache built is a **binary render-model cache** (BFG-style, the post-`FinishSurfaces`
+surfaces to `generated/*.bmodel` in the dude folder, keyed on source timestamp + format/engine
+version + struct sizes + welding cvars), not a collision cache — full design and format in
+**[binary-model-cache.md](binary-model-cache.md)**. The collision cache is not worth building on
+its own; the `.aas` sidecar and the warm-up-frame tuning (`settle=0`) are dead. Original plan
+kept below for reference.
+
+### Original plan: collision / model binary "generated" cache  *(superseded above)*
 
 With `r_parallelImageLoad` shipped (image phase ~10x faster, user-verified), the biggest
 remaining load-time chunk is the entity-populate **cacheMedia** slice (~2.8s on hell1):

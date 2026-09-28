@@ -297,6 +297,14 @@ idRenderModel *idRenderModelManagerLocal::GetModel( const char *modelName, bool 
 
 	// DUDE: time the parse (InitFromFile + FinishSurfaces); the hash hit above is not a parse
 	idLoadTimingScope parseScope( loadTiming.modelParseMs, loadTiming.modelParseCount );
+	// and bucket the same time by type (static vs md5 vs other) so the binary model cache work
+	// can see what is left once the static models come from the cache
+	const bool isStaticType = ( extension.Icmp( "ase" ) == 0 ) || ( extension.Icmp( "lwo" ) == 0 )
+		|| ( extension.Icmp( "flt" ) == 0 ) || ( extension.Icmp( "ma" ) == 0 );
+	const bool isMd5Type = ( extension.Icmp( MD5_MESH_EXT ) == 0 );
+	idLoadTimingScope typeScope(
+		isStaticType ? loadTiming.modelStaticMs : isMd5Type ? loadTiming.modelMd5Ms : loadTiming.modelOtherMs,
+		isStaticType ? loadTiming.modelStaticCount : isMd5Type ? loadTiming.modelMd5Count : loadTiming.modelOtherCount );
 
 	if ( ( extension.Icmp( "ase" ) == 0 ) || ( extension.Icmp( "lwo" ) == 0 ) || ( extension.Icmp( "flt" ) == 0 ) ) {
 		model = new idRenderModelStatic;

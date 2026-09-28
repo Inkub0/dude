@@ -37,6 +37,8 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/VertexCache.h"
 
 #include "renderer/Model.h"
+#include "framework/LoadTiming.h"		// DUDE: binary model cache hit/miss/write timing
+#include "framework/Licensee.h"		// DUDE: ENGINE_VERSION keys the binary model cache
 
 idCVar idRenderModelStatic::r_mergeModelSurfaces( "r_mergeModelSurfaces", "1", CVAR_BOOL|CVAR_RENDERER, "combine model surfaces with the same material" );
 idCVar idRenderModelStatic::r_slopVertex( "r_slopVertex", "0.01", CVAR_RENDERER, "merge xyz coordinates this far apart" );
@@ -263,6 +265,379 @@ void idRenderModelStatic::MakeDefaultModel() {
 }
 
 /*
+===============================================================================
+
+	DUDE binary model cache
+
+A stock prop's ASE/LWO is text-lexed and its sil edges / tangents re-derived on EVERY map load
+(measured on hell1: 551 models, 6.8 s of an 11.8 s load). Cache the finished result, BFG-style:
+after a successful parse + FinishSurfaces the surfaces are serialized to generated/<model>.bmodel
+in the writable dude folder (fs_savepath); the next load reads that straight back into the same
+tri-surf pools and skips both the parse and FinishSurfaces. Output-identical by construction --
+it IS the parse result. Keyed on the source file's timestamp plus the format version,
+ENGINE_VERSION, the struct sizes and the ASE/LWO welding cvars; any mismatch silently re-parses
+and rewrites. Local-only: a reformat of the game's own geometry is never shipped
+(docs/releasing.md). Every field is a raw native byte image -- reader and writer are symmetric
+and the file never leaves this machine.
+
+===============================================================================
+*/
+
+idCVar r_binaryModelCache( "r_binaryModelCache", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL,
+	"cache parsed static models (ASE/LWO/FLT/MA) as generated/*.bmodel in the dude folder and load those instead of re-parsing the text on every map load; 0 = always parse and never write" );
+
+static const int BMODEL_MAGIC = ( 'D' ) | ( 'B' << 8 ) | ( 'M' << 16 ) | ( '1' << 24 );
+// Bump when the serialized layout OR any load-time derive changes (R_CleanupTriangles and what it
+// calls: sil indexes/edges, mirrored/dup verts, face planes, tangents), else stale caches keep the
+// old derived data. ENGINE_VERSION in the header also re-derives everything on each release.
+static const int BMODEL_VERSION = 1;
+
+static idStr BinaryModelPath( const char *modelName ) {
+	idStr path = "generated/";
+	path += modelName;
+	path += ".bmodel";
+	return path;
+}
+
+// bounds-checked cursor over the whole .bmodel in memory: any read past the end (a truncated or
+// corrupt file) trips `failed` and the load unwinds cleanly to the text parse
+class idBinaryModelReader {
+public:
+	idBinaryModelReader( const byte *data, int len ) : data( data ), len( len ), pos( 0 ), failed( false ) {}
+	bool	Read( void *dst, int bytes ) {
+		if ( failed || bytes < 0 || pos + bytes > len ) {
+			failed = true;
+			return false;
+		}
+		memcpy( dst, data + pos, bytes );
+		pos += bytes;
+		return true;
+	}
+	int		ReadInt( void ) {
+		int v = 0;
+		Read( &v, sizeof( v ) );
+		return v;
+	}
+	bool	ReadString( idStr &s ) {
+		const int n = ReadInt();
+		if ( failed || n < 0 || pos + n > len ) {
+			failed = true;
+			return false;
+		}
+		s.Empty();
+		s.Append( (const char *)data + pos, n );
+		pos += n;
+		return true;
+	}
+	bool	Failed( void ) const { return failed; }
+private:
+	const byte	*data;
+	int			len;
+	int			pos;
+	bool		failed;
+};
+
+static void BModel_WriteString( idFile *f, const char *s ) {
+	const int n = (int)strlen( s );
+	f->Write( &n, sizeof( n ) );
+	f->Write( s, n );
+}
+
+// one finished surface's triangles: everything R_CleanupTriangles left behind that the renderer
+// and the collision converter read; runtime-only fields (vertex caches, ambientSurface, the GPU
+// skin/tess handles) stay at R_AllocStaticTriSurf's zero
+static void BModel_WriteTri( idFile *f, const srfTriangles_t *tri ) {
+	f->Write( &tri->bounds, sizeof( tri->bounds ) );
+	const int flags = ( tri->generateNormals ? 1 : 0 ) | ( tri->tangentsCalculated ? 2 : 0 )
+		| ( tri->facePlanesCalculated ? 4 : 0 ) | ( tri->perfectHull ? 8 : 0 );
+	f->Write( &flags, sizeof( flags ) );
+
+	f->Write( &tri->numVerts, sizeof( int ) );
+	f->Write( tri->verts, tri->numVerts * sizeof( idDrawVert ) );
+	f->Write( &tri->numIndexes, sizeof( int ) );
+	f->Write( tri->indexes, tri->numIndexes * sizeof( glIndex_t ) );
+
+	int has = ( tri->silIndexes != NULL ) ? 1 : 0;
+	f->Write( &has, sizeof( has ) );
+	if ( has ) {
+		f->Write( tri->silIndexes, tri->numIndexes * sizeof( glIndex_t ) );
+	}
+	f->Write( &tri->numMirroredVerts, sizeof( int ) );
+	if ( tri->numMirroredVerts > 0 ) {
+		f->Write( tri->mirroredVerts, tri->numMirroredVerts * sizeof( int ) );
+	}
+	f->Write( &tri->numDupVerts, sizeof( int ) );
+	if ( tri->numDupVerts > 0 ) {
+		f->Write( tri->dupVerts, tri->numDupVerts * 2 * sizeof( int ) );
+	}
+	f->Write( &tri->numSilEdges, sizeof( int ) );
+	if ( tri->numSilEdges > 0 ) {
+		f->Write( tri->silEdges, tri->numSilEdges * sizeof( silEdge_t ) );
+	}
+	has = ( tri->facePlanes != NULL ) ? 1 : 0;
+	f->Write( &has, sizeof( has ) );
+	if ( has ) {
+		f->Write( tri->facePlanes, ( tri->numIndexes / 3 ) * sizeof( idPlane ) );
+	}
+	has = ( tri->dominantTris != NULL ) ? 1 : 0;
+	f->Write( &has, sizeof( has ) );
+	if ( has ) {
+		f->Write( tri->dominantTris, tri->numVerts * sizeof( dominantTri_t ) );
+	}
+	f->Write( &tri->numShadowIndexesNoFrontCaps, sizeof( int ) );
+	f->Write( &tri->numShadowIndexesNoCaps, sizeof( int ) );
+	f->Write( &tri->shadowCapPlaneBits, sizeof( int ) );
+}
+
+// mirror of BModel_WriteTri into a fresh R_AllocStaticTriSurf; on any failure the caller frees
+// the tri (R_FreeStaticTriSurf releases whichever pools were allocated so far)
+static bool BModel_ReadTri( idBinaryModelReader &r, srfTriangles_t *tri ) {
+	if ( !r.Read( &tri->bounds, sizeof( tri->bounds ) ) ) {
+		return false;
+	}
+	const int flags = r.ReadInt();
+
+	const int numVerts = r.ReadInt();
+	if ( r.Failed() || numVerts <= 0 || numVerts > ( 1 << 24 ) ) {
+		return false;
+	}
+	R_AllocStaticTriSurfVerts( tri, numVerts );
+	tri->numVerts = numVerts;
+	if ( !r.Read( tri->verts, numVerts * sizeof( idDrawVert ) ) ) {
+		return false;
+	}
+	const int numIndexes = r.ReadInt();
+	if ( r.Failed() || numIndexes <= 0 || numIndexes > ( 1 << 26 ) ) {
+		return false;
+	}
+	R_AllocStaticTriSurfIndexes( tri, numIndexes );
+	tri->numIndexes = numIndexes;
+	if ( !r.Read( tri->indexes, numIndexes * sizeof( glIndex_t ) ) ) {
+		return false;
+	}
+
+	if ( r.ReadInt() ) {
+		R_AllocStaticTriSurfSilIndexes( tri, numIndexes );
+		if ( !r.Read( tri->silIndexes, numIndexes * sizeof( glIndex_t ) ) ) {
+			return false;
+		}
+	}
+	const int numMirrored = r.ReadInt();
+	if ( r.Failed() || numMirrored < 0 || numMirrored > numVerts ) {
+		return false;
+	}
+	if ( numMirrored > 0 ) {
+		R_AllocStaticTriSurfMirroredVerts( tri, numMirrored );
+		if ( !r.Read( tri->mirroredVerts, numMirrored * sizeof( int ) ) ) {
+			return false;
+		}
+	}
+	tri->numMirroredVerts = numMirrored;
+	const int numDup = r.ReadInt();
+	if ( r.Failed() || numDup < 0 || numDup > numVerts ) {
+		return false;
+	}
+	if ( numDup > 0 ) {
+		R_AllocStaticTriSurfDupVerts( tri, numDup );
+		if ( !r.Read( tri->dupVerts, numDup * 2 * sizeof( int ) ) ) {
+			return false;
+		}
+	}
+	tri->numDupVerts = numDup;
+	// every edge belongs to at least one triangle, at most three per triangle -> <= numIndexes
+	const int numSilEdges = r.ReadInt();
+	if ( r.Failed() || numSilEdges < 0 || numSilEdges > numIndexes ) {
+		return false;
+	}
+	if ( numSilEdges > 0 ) {
+		R_AllocStaticTriSurfSilEdges( tri, numSilEdges );
+		if ( !r.Read( tri->silEdges, numSilEdges * sizeof( silEdge_t ) ) ) {
+			return false;
+		}
+	}
+	tri->numSilEdges = numSilEdges;
+	if ( r.ReadInt() ) {
+		R_AllocStaticTriSurfPlanes( tri, numIndexes );
+		if ( !r.Read( tri->facePlanes, ( numIndexes / 3 ) * sizeof( idPlane ) ) ) {
+			return false;
+		}
+	}
+	if ( r.ReadInt() ) {
+		R_AllocStaticTriSurfDominantTris( tri, numVerts );
+		if ( !r.Read( tri->dominantTris, numVerts * sizeof( dominantTri_t ) ) ) {
+			return false;
+		}
+	}
+	tri->numShadowIndexesNoFrontCaps = r.ReadInt();
+	tri->numShadowIndexesNoCaps = r.ReadInt();
+	tri->shadowCapPlaneBits = r.ReadInt();
+	if ( r.Failed() ) {
+		return false;
+	}
+	tri->generateNormals = ( flags & 1 ) != 0;
+	tri->tangentsCalculated = ( flags & 2 ) != 0;
+	tri->facePlanesCalculated = ( flags & 4 ) != 0;
+	tri->perfectHull = ( flags & 8 ) != 0;
+	return true;
+}
+
+/*
+================
+idRenderModelStatic::WriteBinaryModel
+
+Called after a successful parse + FinishSurfaces. Failure to write is silent: the next load just
+parses again.
+================
+*/
+void idRenderModelStatic::WriteBinaryModel( void ) const {
+	int i;
+
+	// a deformedSurface points into ANOTHER surface's arrays -- never true for a file-loaded static
+	// model's own geometry, but if it ever were, serializing it would alias on read. Refuse.
+	for ( i = 0; i < surfaces.Num(); i++ ) {
+		if ( surfaces[i].geometry == NULL || surfaces[i].shader == NULL || surfaces[i].geometry->deformedSurface ) {
+			return;
+		}
+	}
+
+	idFile *f = fileSystem->OpenFileWrite( BinaryModelPath( name ) );
+	if ( !f ) {
+		return;
+	}
+
+	f->Write( &BMODEL_MAGIC, sizeof( BMODEL_MAGIC ) );
+	f->Write( &BMODEL_VERSION, sizeof( BMODEL_VERSION ) );
+	BModel_WriteString( f, ENGINE_VERSION );
+	f->Write( &timeStamp, sizeof( timeStamp ) );
+	const int sizes[6] = { (int)sizeof( idDrawVert ), (int)sizeof( glIndex_t ), (int)sizeof( silEdge_t ),
+		(int)sizeof( dominantTri_t ), (int)sizeof( idPlane ), (int)sizeof( ID_TIME_T ) };
+	f->Write( sizes, sizeof( sizes ) );
+	// the ASE/LWO conversion welds verts by these, so a changed setting must miss the cache
+	const int merge = r_mergeModelSurfaces.GetBool() ? 1 : 0;
+	f->Write( &merge, sizeof( merge ) );
+	const float slops[3] = { r_slopVertex.GetFloat(), r_slopTexCoord.GetFloat(), r_slopNormal.GetFloat() };
+	f->Write( slops, sizeof( slops ) );
+	const int fl = fastLoad ? 1 : 0;		// LoadFLT sets it mid-parse; restoring it keeps the hit identical
+	f->Write( &fl, sizeof( fl ) );
+	f->Write( &bounds, sizeof( bounds ) );
+
+	const int numSurfs = surfaces.Num();
+	f->Write( &numSurfs, sizeof( numSurfs ) );
+	for ( i = 0; i < numSurfs; i++ ) {
+		const modelSurface_t &surf = surfaces[i];
+		f->Write( &surf.id, sizeof( surf.id ) );
+		BModel_WriteString( f, surf.shader->GetName() );
+		BModel_WriteTri( f, surf.geometry );
+	}
+
+	fileSystem->CloseFile( f );
+}
+
+/*
+================
+idRenderModelStatic::LoadBinaryModel
+
+Returns true with the surfaces + bounds installed exactly as FinishSurfaces would have left them.
+Any header mismatch or corruption returns false with the model untouched, so InitFromFile falls
+through to the text parse (which then rewrites the cache).
+================
+*/
+bool idRenderModelStatic::LoadBinaryModel( ID_TIME_T sourceTimestamp ) {
+	void *buf = NULL;
+	const int len = fileSystem->ReadFile( BinaryModelPath( name ), &buf, NULL );
+	if ( len <= 0 || buf == NULL ) {
+		return false;
+	}
+
+	idBinaryModelReader r( (const byte *)buf, len );
+	const int base = surfaces.Num();
+	bool ok = false;
+	int i;
+
+	do {
+		const int magic = r.ReadInt();
+		const int version = r.ReadInt();
+		if ( r.Failed() || magic != BMODEL_MAGIC || version != BMODEL_VERSION ) {
+			break;
+		}
+		idStr engineVersion;
+		if ( !r.ReadString( engineVersion ) || engineVersion != ENGINE_VERSION ) {
+			break;
+		}
+		ID_TIME_T ts;
+		if ( !r.Read( &ts, sizeof( ts ) ) || ts != sourceTimestamp ) {
+			break;
+		}
+		int sizes[6];
+		if ( !r.Read( sizes, sizeof( sizes ) ) ) {
+			break;
+		}
+		if ( sizes[0] != (int)sizeof( idDrawVert ) || sizes[1] != (int)sizeof( glIndex_t )
+			|| sizes[2] != (int)sizeof( silEdge_t ) || sizes[3] != (int)sizeof( dominantTri_t )
+			|| sizes[4] != (int)sizeof( idPlane ) || sizes[5] != (int)sizeof( ID_TIME_T ) ) {
+			break;
+		}
+		const int merge = r.ReadInt();
+		float slops[3];
+		if ( !r.Read( slops, sizeof( slops ) ) ) {
+			break;
+		}
+		if ( merge != ( r_mergeModelSurfaces.GetBool() ? 1 : 0 ) || slops[0] != r_slopVertex.GetFloat()
+			|| slops[1] != r_slopTexCoord.GetFloat() || slops[2] != r_slopNormal.GetFloat() ) {
+			break;
+		}
+		const int fl = r.ReadInt();
+		idBounds b;
+		if ( !r.Read( &b, sizeof( b ) ) ) {
+			break;
+		}
+		const int numSurfs = r.ReadInt();
+		if ( r.Failed() || numSurfs <= 0 || numSurfs > 4096 ) {
+			break;
+		}
+
+		bool bad = false;
+		for ( i = 0; i < numSurfs; i++ ) {
+			modelSurface_t surf;
+			surf.id = r.ReadInt();
+			idStr shaderName;
+			if ( !r.ReadString( shaderName ) ) {
+				bad = true;
+				break;
+			}
+			surf.shader = declManager->FindMaterial( shaderName );
+			srfTriangles_t *tri = R_AllocStaticTriSurf();
+			if ( !BModel_ReadTri( r, tri ) ) {
+				R_FreeStaticTriSurf( tri );
+				bad = true;
+				break;
+			}
+			surf.geometry = tri;
+			AddSurface( surf );
+		}
+		if ( bad ) {
+			break;
+		}
+
+		fastLoad = ( fl != 0 );
+		bounds = b;
+		ok = true;
+	} while ( 0 );
+
+	fileSystem->FreeFile( buf );
+
+	if ( !ok ) {
+		// unwind whatever this attempt added so the text parse starts from a clean model
+		for ( i = base; i < surfaces.Num(); i++ ) {
+			R_FreeStaticTriSurf( surfaces[i].geometry );
+		}
+		surfaces.SetNum( base );
+		return false;
+	}
+	return true;
+}
+
+/*
 ================
 idRenderModelStatic::PartialInitFromFile
 ================
@@ -286,6 +661,24 @@ void idRenderModelStatic::InitFromFile( const char *fileName ) {
 	// FIXME: load new .proc map format
 
 	name.ExtractFileExtension( extension );
+
+	// DUDE binary model cache: for the file-backed static types, try the cached finished surfaces
+	// first. Not for the renderbump partial path (fastLoad already set) -- it wants the bare parse.
+	// A hit skips both the text parse and FinishSurfaces.
+	const bool cacheableType = ( extension.Icmp( "ase" ) == 0 ) || ( extension.Icmp( "lwo" ) == 0 )
+		|| ( extension.Icmp( "flt" ) == 0 ) || ( extension.Icmp( "ma" ) == 0 );
+	const bool useCache = cacheableType && !fastLoad && r_binaryModelCache.GetBool();
+	if ( useCache ) {
+		ID_TIME_T sourceTimestamp = 0;
+		if ( fileSystem->ReadFile( name, NULL, &sourceTimestamp ) != -1 && LoadBinaryModel( sourceTimestamp ) ) {
+			loadTiming.bmodelHits++;
+			reloadable = true;
+			timeStamp = sourceTimestamp;
+			purged = false;
+			return;
+		}
+		loadTiming.bmodelMisses++;
+	}
 
 	if ( extension.Icmp( "ase" ) == 0 ) {
 		loaded		= LoadASE( name );
@@ -315,6 +708,12 @@ void idRenderModelStatic::InitFromFile( const char *fileName ) {
 
 	// create the bounds for culling and dynamic surface creation
 	FinishSurfaces();
+
+	// DUDE binary model cache: this was a miss (or the cache was stale) -- bank the finished result
+	if ( useCache ) {
+		idLoadTimingScope writeScope( loadTiming.bmodelWriteMs, loadTiming.bmodelWrites );
+		WriteBinaryModel();
+	}
 }
 
 /*

@@ -16,6 +16,19 @@ Engine-side only -- never referenced from the game DLL.
 struct loadTiming_t {
 	double	modelParseMs;		// render-model parse + FinishSurfaces, whatever triggered it
 	int		modelParseCount;
+	// per-type split of the above: static = ase/lwo/flt/ma (InitFromFile), md5 = .md5mesh,
+	// other = md3/prt/liquid/default -- tells the binary model cache work what remains
+	double	modelStaticMs;
+	int		modelStaticCount;
+	double	modelMd5Ms;
+	int		modelMd5Count;
+	double	modelOtherMs;
+	int		modelOtherCount;
+	// binary model cache (r_binaryModelCache, Model.cpp): a hit skips the text parse + FinishSurfaces
+	int		bmodelHits;
+	int		bmodelMisses;
+	double	bmodelWriteMs;		// spent WRITING caches on misses -- the first-load population cost
+	int		bmodelWrites;
 	double	cmConvertMs;		// EXCLUSIVE: ASE/LWO -> cm_model_t build for props that ship no .cm
 	int		cmConvertCount;		// (the render-model parse it triggers is counted above, not here)
 	double	aasLoadMs;			// .aas text-lexer parse
