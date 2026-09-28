@@ -787,15 +787,19 @@ static void R_NormalMapToHeightMap( byte *data, int width, int height ) {
 
 /*
 ===============
-R_ParallaxHeightImage
+R_ParallaxHeightCpu
 
-Generator: load the source bump program's *combined* normal map and convert it to
-a height field (docs/parallax.md). Re-runs on level load / vid_restart like any
-other generated image. Falls back to a flat mid-gray (no relief) if the source is
-unknown or fails to load.
+The CPU half of the parallax height generator: load the source bump program's
+*combined* normal map and integrate it into a height field (docs/parallax.md).
+Pixels only, no GPU work, so the parallel level loader can run it on a worker
+thread: the source lookup is a read-only hash probe (materials are all parsed
+before EndLevelLoad), the load is the same R_LoadImageProgram the loader already
+runs on workers, and the solve uses private buffers. A missing or unloadable
+source yields a 1x1 flat mid-grey -- parallax offset collapses to zero -- which is
+exactly what the classic generator uploads. Caller R_StaticFree()s *outPic.
 ===============
 */
-static void R_ParallaxHeightImage( idImage *image ) {
+static bool R_ParallaxHeightCpu( idImage *image, byte **outPic, int *outW, int *outH ) {
 	idStr *bumpProgram = NULL;
 	byte  *pic = NULL;
 	int    w = 0, hgt = 0;
@@ -806,13 +810,36 @@ static void R_ParallaxHeightImage( idImage *image ) {
 
 	if ( !pic ) {
 		// flat height: parallax offset collapses to zero
-		byte flat[4] = { 128, 128, 128, 255 };
-		image->GenerateImage( flat, 1, 1, TF_DEFAULT, true, TR_REPEAT, TD_HIGH_QUALITY );
-		return;
+		pic = (byte *)R_StaticAlloc( 4 );
+		pic[0] = pic[1] = pic[2] = 128;
+		pic[3] = 255;
+		w = hgt = 1;
+	} else {
+		R_NormalMapToHeightMap( pic, w, hgt );
 	}
 
-	R_NormalMapToHeightMap( pic, w, hgt );
+	*outPic = pic;
+	*outW = w;
+	*outH = hgt;
+	return true;
+}
 
+/*
+===============
+R_ParallaxHeightImage
+
+Generator, the serial path (reloadImages / vid_restart / a non-parallel level load):
+the same pixels as R_ParallaxHeightCpu, uploaded in place. During a level load the
+image is instead deferred to EndLevelLoad, where the parallel loader runs the CPU
+half on a worker and uploads on the main thread (r_deferLevelGenerators) -- the
+8.5 s hell1 spent solving these inside the material parse.
+===============
+*/
+static void R_ParallaxHeightImage( idImage *image ) {
+	byte *pic = NULL;
+	int w = 0, hgt = 0;
+
+	R_ParallaxHeightCpu( image, &pic, &w, &hgt );
 	image->GenerateImage( pic, w, hgt, TF_DEFAULT, true, TR_REPEAT, TD_HIGH_QUALITY );
 	R_StaticFree( pic );
 }
@@ -843,7 +870,9 @@ idImage *R_CreateParallaxHeightImage( const char *bumpProgram ) {
 	name.BackSlashesToSlashes();
 	idStr source = bumpProgram;
 	r_parallaxSources.Set( name, source );
-	return globalImages->ImageFromFunction( name, R_ParallaxHeightImage );
+	// level content, not a permanent built-in: deferred out of the material parse, produced on
+	// a worker under the parallel level load, purged when a level stops using it
+	return globalImages->ImageFromLevelGenerator( name, R_ParallaxHeightImage, R_ParallaxHeightCpu );
 }
 
 /*
@@ -1039,15 +1068,27 @@ R_TessHeightImage
 ImageFromFunction generator for the tessellation height map.
 ===============
 */
+// The CPU half (worker-safe, see R_ParallaxHeightCpu): R_LoadTessHeightPixels already is
+// the produce-pixels stage; a missing source becomes the same 1x1 flat the classic
+// generator uploads. Caller R_StaticFree()s *outPic.
+static bool R_TessHeightCpu( idImage *image, byte **outPic, int *outW, int *outH ) {
+	if ( !R_LoadTessHeightPixels( image->imgName.c_str(), outPic, outW, outH ) ) {
+		// flat: (h - 0.5) == 0 everywhere, so displacement collapses to pure PN smoothing
+		byte *flat = (byte *)R_StaticAlloc( 4 );
+		flat[0] = flat[1] = flat[2] = 128;
+		flat[3] = 255;
+		*outPic = flat;
+		*outW = *outH = 1;
+	}
+	return true;
+}
+
+// generator, the serial path; the level load defers to EndLevelLoad + R_TessHeightCpu
 static void R_TessHeightImage( idImage *image ) {
 	byte *pic = NULL;
 	int w = 0, hgt = 0;
-	if ( !R_LoadTessHeightPixels( image->imgName.c_str(), &pic, &w, &hgt ) ) {
-		// flat: (h - 0.5) == 0 everywhere, so displacement collapses to pure PN smoothing
-		byte flat[4] = { 128, 128, 128, 255 };
-		image->GenerateImage( flat, 1, 1, TF_DEFAULT, true, TR_REPEAT, TD_HIGH_QUALITY );
-		return;
-	}
+
+	R_TessHeightCpu( image, &pic, &w, &hgt );
 	image->GenerateImage( pic, w, hgt, TF_DEFAULT, true, TR_REPEAT, TD_HIGH_QUALITY );
 	R_StaticFree( pic );
 }
@@ -1079,7 +1120,8 @@ idImage *R_CreateTessHeightImage( const char *bumpProgram, const char *authoredH
 	source += "|";
 	source += haveBump ? bumpProgram : "";
 	r_tessHeightSources.Set( name, source );
-	return globalImages->ImageFromFunction( name, R_TessHeightImage );
+	// level content like the parallax height: deferred, worker-produced, purgeable
+	return globalImages->ImageFromLevelGenerator( name, R_TessHeightImage, R_TessHeightCpu );
 }
 
 /*

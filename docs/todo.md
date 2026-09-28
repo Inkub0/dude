@@ -273,6 +273,14 @@ version + struct sizes + welding cvars), not a collision cache — full design a
 its own; the `.aas` sidecar and the warm-up-frame tuning (`settle=0`) are dead. Original plan
 kept below for reference.
 
+**Then the model cache verified at only ~0.5 s saved, and the next split found the real lever:** the
+"model parse" was 8.5 s of *material* parsing — every bump material was generating its parallax and
+tessellation height fields (a 2K decode + a 64-iteration Poisson solve, twice) *inside* the material
+parse, because they registered via the immediate-generate `ImageFromFunction`. **BUILT 2026-09-28:**
+`ImageFromLevelGenerator` defers them to `EndLevelLoad`, produces them on the parallel-loader workers, and
+purges them like file images (`r_deferLevelGenerators`). Awaiting user verification; the MD5 cache is dead
+(all 551 models' geometry costs 118 ms). Full account: **[load-time-decl-parse.md](load-time-decl-parse.md)**.
+
 ### Original plan: collision / model binary "generated" cache  *(superseded above)*
 
 With `r_parallelImageLoad` shipped (image phase ~10x faster, user-verified), the biggest

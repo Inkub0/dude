@@ -249,6 +249,11 @@ public:
 	// submit stays serial. Mirrors the Vulkan branch of ActuallyLoadImage/GenerateImage.
 	bool		LoadImageCpu();
 	void		UploadImageCpu();
+	// DUDE: a classic generator (_white, _fog, ...) is permanent: never purged, never level
+	// loaded. One with a generatorCpu hook is LEVEL content (the parallax / tessellation
+	// height fields): deferred past the material parse, purged and reloaded like a file
+	// image, and produced on a worker thread when the level load is parallel.
+	bool		IsPermanentGenerator( void ) const { return generatorFunction != NULL && generatorCpu == NULL; }
 
 	// data commonly accessed is grouped here
 	static const int TEXTURE_NOT_LOADED = -1;
@@ -272,6 +277,7 @@ public:
 	// parameters that define this image
 	idStr				imgName;				// game path, including extension (except for cube maps), may be an image program
 	void				(*generatorFunction)( idImage *image );	// NULL for files
+	bool				(*generatorCpu)( idImage *image, byte **pic, int *width, int *height );	// DUDE: level-asset generator's produce-pixels half, NULL otherwise (see IsPermanentGenerator)
 	bool				allowDownSize;			// this also doubles as a don't-partially-load flag
 	textureFilter_t		filter;
 	textureRepeat_t		repeat;
@@ -335,6 +341,7 @@ ID_INLINE idImage::idImage() {
 	bglNext = NULL;
 	imgName[0] = '\0';
 	generatorFunction = NULL;
+	generatorCpu = NULL;		// DUDE: NULL = a classic (permanent) generator or a file
 	allowDownSize = false;
 	filter = TF_DEFAULT;
 	repeat = TR_REPEAT;
@@ -385,6 +392,12 @@ public:
 	// The callback will be issued immediately, and later if images are reloaded or vid_restart
 	// The callback function should call one of the idImage::Generate* functions to fill in the data
 	idImage *			ImageFromFunction( const char *name, void (*generatorFunction)( idImage *image ));
+	// DUDE: a generated image that is LEVEL content, not a permanent built-in: deferred past
+	// the material parse to EndLevelLoad, purged when a level stops referencing it, and produced
+	// on a worker thread by generatorCpu under r_parallelImageLoad (Vulkan). generatorFunction
+	// stays the serial / reloadImages path and must upload the same pixels.
+	idImage *			ImageFromLevelGenerator( const char *name, void (*generatorFunction)( idImage *image ),
+							bool (*generatorCpu)( idImage *image, byte **pic, int *width, int *height ) );
 
 	// called once a frame to allow any background loads that have been completed
 	// to turn into textures.

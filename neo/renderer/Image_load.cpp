@@ -1909,6 +1909,13 @@ bool idImage::LoadImageCpu() {
 
 	const bool isVulkan = ( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN );
 
+	// DUDE level-content generators have no file to read precompressed: on GL3 they take the
+	// serial generate on the main thread, like any non-.dds GL image
+	if ( generatorCpu && !isVulkan ) {
+		parallelData->needsSerial = true;
+		return true;
+	}
+
 	// 1) GL3 backend: precompressed .dds path. Read + inflate the file here on the
 	//    worker; the main thread uploads the compressed blocks (UploadPrecompressedImage
 	//    is qgl-based, a no-op on Vulkan, so this branch is GL-only). Non-.dds GL images
@@ -1930,7 +1937,13 @@ bool idImage::LoadImageCpu() {
 	byte *pic = NULL;
 	int width = 0, height = 0;
 
-	R_LoadImageProgram( imgName, &pic, &width, &height, &timestamp, &depth );
+	if ( generatorCpu ) {
+		// DUDE level-content generator (parallax / tessellation height field): produce the
+		// pixels here on the worker instead of decoding a file; everything below is identical
+		generatorCpu( this, &pic, &width, &height );
+	} else {
+		R_LoadImageProgram( imgName, &pic, &width, &height, &timestamp, &depth );
+	}
 
 	if ( pic == NULL ) {
 		parallelData->failed = true;
