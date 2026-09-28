@@ -25,7 +25,50 @@ chase until FSR2 work reopens (limb ghosting sighting or the RT-era upscaling pa
    pass the 1x1 `rbEyeExposureImg` as the `exposure` resource) so accumulation weighting
    matches the tonemap exactly. Small; only matters if brightness-transition artifacts show.
 
-## PARKED FOLLOW-UP — sub-native upscaling (the "real FSR" fps lever)
+## Sub-native upscaling — `r_fsrScale`  **[BUILT 2026-09-28 on `perf/fsr2-subnative`, awaiting user verification]**
+
+**As built.** `r_fsrScale` (default 1.0 = Native-AA; 0.67 / 0.59 / 0.5 = Quality / Balanced /
+Performance; Vulkan, needs `r_fsr`). The primary fullscreen world view renders at
+`glConfig.vid* × scale`; FSR2 upscales it to the display; everything 2D stays at display size.
+
+- **Frontend.** `R_FsrRenderScale` (tr_main.cpp) latches the scale once per rendered frame so the
+  frontend and backend agree; `R_FsrWorldSize` is the world render size. `RenderScene` scales a
+  view's viewport only when it covers the whole window — screenshots, env probes, remote cameras
+  and the berserk sub-window all render through a crop and keep their size. The scissor and every
+  rect the frontend projects (surface scissors, light rects) are viewport-relative, so they
+  follow for free; the projection is untouched (same aspect). The jitter phase count is
+  `8 · (display/render)²` as `ffxFsr2GetJitterPhaseCount` defines it (8 at 1.0, 18 at 0.67).
+- **Backend.** The thirteen "is this the primary fullscreen view" tests (`viewport.x2 >=
+  vidWidth-1 …`) that gate SSAO, SSR, the RT passes, DoF, chroma and FSR2 itself would all have
+  silently failed against a render-size viewport; they now compare against `RB_RHI_WorldW/H`.
+  `rhiHdrRT` is the world render size. On an FSR2 frame a display-size RGBA16F composite
+  (`rhiHdrCompositeRT`, depth-stencil so the resumed frame pass can load it) receives the
+  upscaled output — `RunFsr2` takes `outputRT`, and the copy that used to go back over the
+  scene lands there — and `SetFrameTarget` switches to it: the eye-adapt/bloom measurement,
+  chromatic aberration (over the composite's rect, not the render-size viewport), the HUD /
+  console / menus (in HDR, as before) and the resolve all consume the upscaled image. **This is
+  the scene/HUD reorder** that the copy-back stood in for; at scale 1.0 both buffers are the
+  display size and the frame must be pixel-identical to the old path (the U0 gate).
+- **Film grain stays out of FSR2** (user requirement): it is folded into `hdrresolve.frag`
+  over the display-size composite, after the upscale, with its cell size in display pixels.
+  Chroma likewise runs after the upscale so its RGB split never enters the temporal history.
+- **FSR2 context.** `Fsr2EnsureContext( rw, rh, dw, dh )` keys on both sizes and rebuilds on
+  any change; `maxRenderSize` = the render size, `displaySize` = the display; the output image
+  is display-size, the reactive mask render-size; `motionVectorScale` and `renderSize` are the
+  render size as before.
+- **Fallbacks / caveats.** No composite or FSR2 not run on a scaled frame → the render-size
+  scene resolves with a plain stretch (soft, never a crash). Debug overlays drawn after the
+  switch (`r_showTris`, `r_mvDebug`) still use the view's render-size viewport. Not wired into
+  any preset or menu yet — that follows the visual pass, per the fidelity policy.
+
+**Verification (user).** (1) `r_fsr 1`, `r_fsrScale 1.0`: pixel-identical to before — HUD,
+console, PDA and menus over the game, letterbox, eye-adapt, bloom, grain, chroma all present and
+unchanged; `r_vkValidation` clean. (2) `r_fsrScale 0.67`: the console prints `FSR2: context
+created (render 1715x965 -> display 2560x1440, 67%)`; every RT / screen-space pass still runs;
+HUD, grain and chroma crisp at native; heat haze, glass, smoke, mirrors and subviews correct;
+then the frame-time gain on the benchmark.
+
+Original plan text:
 
 Deliberately NOT built in R1 (the game is CPU-front-end bound today, so a GPU-side fps win
 buys nothing; the customer is the RT era, where per-pixel ray budgets make 67% scale ≈ half
