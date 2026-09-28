@@ -24,11 +24,27 @@ struct loadTiming_t {
 	int		modelMd5Count;
 	double	modelOtherMs;
 	int		modelOtherCount;
+	// md5 sub-split (Model_md5.cpp ParseMesh): decides what an MD5 cache has to store
+	double	md5DeformInfoMs;	// R_BuildDeformInfo: sil edges / mirrored + dup verts on the bind pose
+	int		md5DeformInfoCount;
+	double	md5GpuSkinMs;		// BuildGpuSkinData: the Vulkan GPU-skin bake (runs at load on VK)
+	int		md5GpuSkinCount;
+	double	md5TessMs;			// BuildTessTopology: the deform-once tess bake (only if enabled)
+	int		md5TessCount;
 	// binary model cache (r_binaryModelCache, Model.cpp): a hit skips the text parse + FinishSurfaces
 	int		bmodelHits;
 	int		bmodelMisses;
 	double	bmodelWriteMs;		// spent WRITING caches on misses -- the first-load population cost
 	int		bmodelWrites;
+	// decl first-parse (DeclManager.cpp idDeclLocal::ParseLocal): the material/skin/etc TEXT parse a
+	// model load merely TRIGGERS on first reference. It nests inside the model scopes, which are made
+	// EXCLUSIVE of it -- so modelParse is pure geometry and this is the material cost, separately.
+	double	declParseMs;		// every decl type
+	int		declParseCount;
+	double	declParseMaterialMs;	// of which DECL_MATERIAL
+	int		declParseMaterialCount;
+	double	declParseOtherMs;		// every other decl type (tables, skins, entityDefs, ...)
+	int		declParseOtherCount;
 	double	cmConvertMs;		// EXCLUSIVE: ASE/LWO -> cm_model_t build for props that ship no .cm
 	int		cmConvertCount;		// (the render-model parse it triggers is counted above, not here)
 	double	aasLoadMs;			// .aas text-lexer parse

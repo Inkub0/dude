@@ -32,6 +32,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/rhi/RHI.h"
 
 #include "renderer/Model_local.h"
+#include "framework/LoadTiming.h"		// DUDE: md5 load sub-split timers
 
 // Phase 2 (docs/gpu-offload-plan.md): validate GPU MD5 skinning against the CPU. Once/sec
 // (r_gpuSkinTest) a mesh being skinned is ALSO skinned on the GPU via the compute lane and
@@ -417,17 +418,26 @@ void idMD5Mesh::ParseMesh( idLexer &parser, int numJoints, const idJointMat *joi
 		verts[i].st = texCoords[i];
 	}
 	TransformVerts( verts, joints );
-	deformInfo = R_BuildDeformInfo( texCoords.Num(), verts, tris.Num(), tris.Ptr(), shader->UseUnsmoothedTangents() );
+	{
+		// DUDE: time the deform-template build -- the sil-edge / mirror / dup-vert pass over the
+		// bind pose that an MD5 binary cache would skip
+		idLoadTimingScope deformScope( loadTiming.md5DeformInfoMs, loadTiming.md5DeformInfoCount );
+		deformInfo = R_BuildDeformInfo( texCoords.Num(), verts, tris.Num(), tris.Ptr(), shader->UseUnsmoothedTangents() );
+	}
 	Mem_FreeA( verts, onStack );
 
 	// Phase 2 (docs/gpu-offload-plan.md): retain the bind-pose data the GPU skinning kernel
 	// needs but the stock CPU path discards. Vulkan only (the sole backend with a compute
 	// lane); GL3 never pays the memory. Uses the just-built deformInfo + the bind joints.
 	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-		BuildGpuSkinData( joints );
+		{
+			idLoadTimingScope skinScope( loadTiming.md5GpuSkinMs, loadTiming.md5GpuSkinCount );	// DUDE: md5 split
+			BuildGpuSkinData( joints );
+		}
 		// Roadmap B: bake the uniform-level deform topology when the feature (or its validator) is on.
 		// Needs the bind pose here (BuildTessTopology is pose-invariant but reads bind-pose st/seam).
 		if ( r_tessDeform.GetBool() || r_tessDeformTest.GetBool() ) {
+			idLoadTimingScope tessScope( loadTiming.md5TessMs, loadTiming.md5TessCount );	// DUDE: md5 split
 			BuildTessTopology( joints );
 		}
 	}

@@ -1996,13 +1996,24 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 		t_proc - start, t_game - t_proc, t_media - t_game, msec - ( t_media - start ) );
 	// DUDE: the asset-parse work a binary cache would attack, totalled over the whole load --
 	// render-model parse (any trigger), EXCLUSIVE collision conversion, .aas parse.
-	common->Printf( "  asset parse (msec): modelParse=%.0f (%d) [static=%.0f/%d md5=%.0f/%d other=%.0f/%d] cmConvert=%.0f (%d) aasLoad=%.0f (%d)\n",
+	// modelGeom is EXCLUSIVE of the decl first-parse a model triggers (next line) -- pure geometry.
+	common->Printf( "  asset parse (msec): modelGeom=%.0f (%d) [static=%.0f/%d md5=%.0f/%d other=%.0f/%d] cmConvert=%.0f (%d) aasLoad=%.0f (%d)\n",
 		loadTiming.modelParseMs, loadTiming.modelParseCount,
 		loadTiming.modelStaticMs, loadTiming.modelStaticCount,
 		loadTiming.modelMd5Ms, loadTiming.modelMd5Count,
 		loadTiming.modelOtherMs, loadTiming.modelOtherCount,
 		loadTiming.cmConvertMs, loadTiming.cmConvertCount,
 		loadTiming.aasLoadMs, loadTiming.aasLoadCount );
+	// DUDE: the material/decl TEXT parse triggered on first reference -- what modelGeom excludes
+	common->Printf( "  decl parse (msec): all=%.0f (%d) material=%.0f (%d) other=%.0f (%d)\n",
+		loadTiming.declParseMs, loadTiming.declParseCount,
+		loadTiming.declParseMaterialMs, loadTiming.declParseMaterialCount,
+		loadTiming.declParseOtherMs, loadTiming.declParseOtherCount );
+	// DUDE: inside the md5 bucket -- the remainder is the text lex + joints + weights + bounds
+	common->Printf( "  md5 split (msec): deformInfo=%.0f (%d) gpuSkinBake=%.0f (%d) tessBake=%.0f (%d)\n",
+		loadTiming.md5DeformInfoMs, loadTiming.md5DeformInfoCount,
+		loadTiming.md5GpuSkinMs, loadTiming.md5GpuSkinCount,
+		loadTiming.md5TessMs, loadTiming.md5TessCount );
 	common->Printf( "  bmodel cache: %d hits, %d misses, %.0f msec writing %d\n",
 		loadTiming.bmodelHits, loadTiming.bmodelMisses, loadTiming.bmodelWriteMs, loadTiming.bmodelWrites );
 

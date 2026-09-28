@@ -295,8 +295,11 @@ idRenderModel *idRenderModelManagerLocal::GetModel( const char *modelName, bool 
 
 	canonical.ExtractFileExtension( extension );
 
-	// DUDE: time the parse (InitFromFile + FinishSurfaces); the hash hit above is not a parse
-	idLoadTimingScope parseScope( loadTiming.modelParseMs, loadTiming.modelParseCount );
+	// DUDE: time the parse (InitFromFile + FinishSurfaces); the hash hit above is not a parse.
+	// EXCLUSIVE of decl first-parse: a model's FindMaterial calls trigger the material TEXT parse on
+	// first reference, which is not geometry work and which no model cache can remove -- it is
+	// accounted under loadTiming.declParseMs instead, so these buckets are pure geometry.
+	idLoadTimingScope parseScope( loadTiming.modelParseMs, loadTiming.modelParseCount, &loadTiming.declParseMs );
 	// and bucket the same time by type (static vs md5 vs other) so the binary model cache work
 	// can see what is left once the static models come from the cache
 	const bool isStaticType = ( extension.Icmp( "ase" ) == 0 ) || ( extension.Icmp( "lwo" ) == 0 )
@@ -304,7 +307,8 @@ idRenderModel *idRenderModelManagerLocal::GetModel( const char *modelName, bool 
 	const bool isMd5Type = ( extension.Icmp( MD5_MESH_EXT ) == 0 );
 	idLoadTimingScope typeScope(
 		isStaticType ? loadTiming.modelStaticMs : isMd5Type ? loadTiming.modelMd5Ms : loadTiming.modelOtherMs,
-		isStaticType ? loadTiming.modelStaticCount : isMd5Type ? loadTiming.modelMd5Count : loadTiming.modelOtherCount );
+		isStaticType ? loadTiming.modelStaticCount : isMd5Type ? loadTiming.modelMd5Count : loadTiming.modelOtherCount,
+		&loadTiming.declParseMs );
 
 	if ( ( extension.Icmp( "ase" ) == 0 ) || ( extension.Icmp( "lwo" ) == 0 ) || ( extension.Icmp( "flt" ) == 0 ) ) {
 		model = new idRenderModelStatic;
