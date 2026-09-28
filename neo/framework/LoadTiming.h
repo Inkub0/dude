@@ -13,6 +13,8 @@ Engine-side only -- never referenced from the game DLL.
 
 #include "sys/sys_public.h"
 
+static const int LOADTIMING_DECL_TYPES = 32;	// >= DECL_MAX_TYPES; slot 31 = out-of-range catch-all
+
 struct loadTiming_t {
 	double	modelParseMs;		// render-model parse + FinishSurfaces, whatever triggered it
 	int		modelParseCount;
@@ -41,10 +43,10 @@ struct loadTiming_t {
 	// EXCLUSIVE of it -- so modelParse is pure geometry and this is the material cost, separately.
 	double	declParseMs;		// every decl type
 	int		declParseCount;
-	double	declParseMaterialMs;	// of which DECL_MATERIAL
-	int		declParseMaterialCount;
-	double	declParseOtherMs;		// every other decl type (tables, skins, entityDefs, ...)
-	int		declParseOtherCount;
+	// per decl TYPE, indexed by declType_t (the last slot catches anything out of range), so the
+	// print can name the next lever without another instrumentation pass
+	double	declParseTypeMs[LOADTIMING_DECL_TYPES];
+	int		declParseTypeCount[LOADTIMING_DECL_TYPES];
 	double	cmConvertMs;		// EXCLUSIVE: ASE/LWO -> cm_model_t build for props that ship no .cm
 	int		cmConvertCount;		// (the render-model parse it triggers is counted above, not here)
 	double	aasLoadMs;			// .aas text-lexer parse

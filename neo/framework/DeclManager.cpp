@@ -2180,11 +2180,10 @@ void idDeclLocal::ParseLocal( void ) {
 	// decl parse it nests (a material pulling in a table) by subtracting the total accumulator's
 	// growth during its own lifetime, so the slices sum to true wall time. The model-load scopes
 	// subtract declParseMs in turn, so a model's first-reference material cost lands HERE, not in
-	// modelGeom -- it is not geometry work and no model cache can remove it.
+	// modelGeom -- it is not geometry work and no model cache can remove it. Bucketed per type.
 	idLoadTimingScope declScope( loadTiming.declParseMs, loadTiming.declParseCount, &loadTiming.declParseMs );
-	idLoadTimingScope declBucket(
-		type == DECL_MATERIAL ? loadTiming.declParseMaterialMs : loadTiming.declParseOtherMs,
-		type == DECL_MATERIAL ? loadTiming.declParseMaterialCount : loadTiming.declParseOtherCount,
+	const int typeSlot = ( (int)type >= 0 && (int)type < LOADTIMING_DECL_TYPES ) ? (int)type : LOADTIMING_DECL_TYPES - 1;
+	idLoadTimingScope declBucket( loadTiming.declParseTypeMs[typeSlot], loadTiming.declParseTypeCount[typeSlot],
 		&loadTiming.declParseMs );
 
 	bool generatedDefaultText = false;
