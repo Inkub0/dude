@@ -57,9 +57,19 @@ Performance; Vulkan, needs `r_fsr`). The primary fullscreen world view renders a
   is display-size, the reactive mask render-size; `motionVectorScale` and `renderSize` are the
   render size as before.
 - **Fallbacks / caveats.** No composite or FSR2 not run on a scaled frame → the render-size
-  scene resolves with a plain stretch (soft, never a crash). Debug overlays drawn after the
-  switch (`r_showTris`, `r_mvDebug`) still use the view's render-size viewport. Not wired into
-  any preset or menu yet — that follows the visual pass, per the fidelity policy.
+  scene resolves with a plain stretch (soft, never a crash). Not wired into any preset or menu
+  yet — that follows the visual pass, per the fidelity policy.
+- **Found on the first test (user, 2026-09-28): every RT feature broke at 0.67** — flickering
+  shadows, glass and floor reflections not matching. Cause: the Vulkan backend's main draw flips
+  GL-convention rects against the frame target's height (`curRenderH`), but three paths still
+  used the *window* (`sceneExtent`): `CopyFramebufferToImage` — so every `_currentRender` /
+  `_currentDepth` capture landed rows off, and the RT shadow rays rebuild their origin from that
+  depth while SSAO, glass, the reflections and haze read it — plus `ClearStencilBuffer` and
+  `DrawImmediate`. All three now use the frame target's extent (`a836ce25`), which also fixes
+  the debug overlays. The post-upscale chroma pass keeps its own display-size capture so
+  `_currentRender` is never grown to the display's power-of-two size (~48 MB at 1440p / 0.67).
+  This was a latent backend limitation ("frame targets are window-size") that the env-probe
+  path had already documented and worked around; the reorder was the first to hit it in play.
 
 **Verification (user).** (1) `r_fsr 1`, `r_fsrScale 1.0`: pixel-identical to before — HUD,
 console, PDA and menus over the game, letterbox, eye-adapt, bloom, grain, chroma all present and
