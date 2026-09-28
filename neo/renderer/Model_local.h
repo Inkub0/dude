@@ -95,6 +95,11 @@ public:
 	bool						LoadFLT( const char *fileName );
 	bool						LoadMA( const char *filename );
 
+	// DUDE binary model cache (r_binaryModelCache): the post-FinishSurfaces surfaces serialized to
+	// generated/<name>.bmodel in the writable dude folder, keyed on the source file's timestamp
+	bool						LoadBinaryModel( ID_TIME_T sourceTimestamp );
+	void						WriteBinaryModel( void ) const;
+
 	bool						ConvertASEToModelSurfaces( const struct aseModel_s *ase );
 	bool						ConvertLWOToModelSurfaces( const struct st_lwObject *lwo );
 	bool						ConvertMAToModelSurfaces (const struct maModel_s *ma );

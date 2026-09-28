@@ -1528,6 +1528,63 @@ idImage *idImageManager::ImageFromFunction( const char *_name, void (*generatorF
 }
 
 /*
+==================
+ImageFromLevelGenerator
+
+DUDE. A generated image that is level content -- the parallax / tessellation height
+fields a bump material derives from its normal map -- rather than a permanent built-in.
+ImageFromFunction generates on the spot (image_preload), which inside a level load means
+inside the material parse: measured on hell1, 649 materials spent 8.5 s of an 11 s load
+solving height fields one at a time on the main thread. Here, during a level load, the
+image is only marked referenced; EndLevelLoad then produces it with everything else --
+on a worker thread under r_parallelImageLoad (Vulkan), via generatorCpu -- and purges it
+when a later level stops referencing it. Outside a level load (reloadDecls, vid_restart)
+it generates immediately as before.
+==================
+*/
+idCVar r_deferLevelGenerators( "r_deferLevelGenerators", "1", CVAR_RENDERER | CVAR_BOOL,
+	"defer the parallax / tessellation height-field generation from the material parse to the level-load image phase (parallel on Vulkan); 0 = generate inside the parse as before" );
+
+idImage *idImageManager::ImageFromLevelGenerator( const char *_name, void (*generatorFunction)( idImage *image ),
+		bool (*generatorCpu)( idImage *image, byte **pic, int *width, int *height ) ) {
+	idStr name;
+	idImage	*image;
+	int	hash;
+
+	// same name normalization as ImageFromFunction, so the generators' imgName lookups agree
+	name = _name;
+	name.Replace( ".tga", "" );
+	name.BackSlashesToSlashes();
+
+	hash = name.FileNameHash();
+	for ( image = imageHashTable[hash] ; image; image = image->hashNext ) {
+		if ( name.Icmp( image->imgName ) == 0 ) {
+			// a copy purged by a previous level reloads in EndLevelLoad like any texture
+			image->levelLoadReferenced = true;
+			return image;
+		}
+	}
+
+	image = AllocImage( name );
+	image->generatorFunction = generatorFunction;
+	image->generatorCpu = generatorCpu;
+	// the texture parameters the worker path (LoadImageCpu / UploadImageCpu) reads; they are
+	// exactly what the classic generators pass to GenerateImage
+	image->filter = TF_DEFAULT;
+	image->allowDownSize = true;
+	image->repeat = TR_REPEAT;
+	image->depth = TD_HIGH_QUALITY;
+	image->cubeFiles = CF_2D;
+	image->levelLoadReferenced = true;
+
+	if ( !( insideLevelLoad && r_deferLevelGenerators.GetBool() ) && image_preload.GetBool() ) {
+		image->ActuallyLoadImage( true, false );
+	}
+
+	return image;
+}
+
+/*
 ===============
 ImageFromFile
 
@@ -2066,8 +2123,9 @@ void idImageManager::BeginLevelLoad() {
 	for ( int i = 0 ; i < images.Num() ; i++ ) {
 		idImage	*image = images[ i ];
 
-		// generator function images are always kept around
-		if ( image->generatorFunction ) {
+		// generator function images are always kept around (DUDE: the level-content ones are
+		// not -- they follow the file-image purge/reload cycle, see IsPermanentGenerator)
+		if ( image->IsPermanentGenerator() ) {
 			continue;
 		}
 
@@ -2106,11 +2164,12 @@ void idImageManager::EndLevelLoad() {
 	int		purgeCount = 0;
 	int		keepCount = 0;
 	int		loadCount = 0;
+	int		genCount = 0;		// DUDE: level-content generators produced here instead of in the material parse
 
 	// purge the ones we don't need
 	for ( int i = 0 ; i < images.Num() ; i++ ) {
 		idImage	*image = images[ i ];
-		if ( image->generatorFunction ) {
+		if ( image->IsPermanentGenerator() ) {
 			continue;
 		}
 
@@ -2139,12 +2198,15 @@ void idImageManager::EndLevelLoad() {
 
 		for ( int i = 0 ; i < images.Num() ; i++ ) {
 			idImage	*image = images[ i ];
-			if ( image->generatorFunction ) {
+			if ( image->IsPermanentGenerator() ) {
 				continue;
 			}
 			if ( image->levelLoadReferenced && image->texnum == idImage::TEXTURE_NOT_LOADED && !image->partialImage ) {
+				if ( image->generatorCpu ) {
+					genCount++;
+				}
 				if ( image->cubeFiles == CF_2D && !image->isPartialImage ) {
-					par.push_back( image );		// worker-decodable
+					par.push_back( image );		// worker-decodable (level generators produce their pixels on the worker too)
 				} else {
 					// cube maps / partial-companion images stay serial (they touch the
 					// precompressed / GL paths directly)
@@ -2217,12 +2279,15 @@ void idImageManager::EndLevelLoad() {
 	} else {
 		for ( int i = 0 ; i < images.Num() ; i++ ) {
 			idImage	*image = images[ i ];
-			if ( image->generatorFunction ) {
+			if ( image->IsPermanentGenerator() ) {
 				continue;
 			}
 
 			if ( image->levelLoadReferenced && image->texnum == idImage::TEXTURE_NOT_LOADED && !image->partialImage ) {
 	//			common->Printf( "Loading %s\n", image->imgName.c_str() );
+				if ( image->generatorCpu ) {
+					genCount++;		// serial path: ActuallyLoadImage runs the classic generator
+				}
 				loadCount++;
 				image->ActuallyLoadImage( true, false );
 
@@ -2237,6 +2302,9 @@ void idImageManager::EndLevelLoad() {
 	common->Printf( "%5i purged from previous\n", purgeCount );
 	common->Printf( "%5i kept from previous\n", keepCount );
 	common->Printf( "%5i new loaded\n", loadCount );
+	if ( genCount ) {
+		common->Printf( "%5i of them height fields generated here, not in the material parse (r_deferLevelGenerators)\n", genCount );
+	}
 	common->Printf( "all images loaded in %5.1f seconds\n", (end-start) * 0.001 );
 }
 

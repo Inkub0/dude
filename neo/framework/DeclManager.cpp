@@ -33,6 +33,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "idlib/BitMsg.h"
 #include "framework/FileSystem.h"
 #include "framework/CVarSystem.h"
+#include "framework/LoadTiming.h"		// DUDE: decl first-parse load timing
 #include "framework/DeclAF.h"
 #include "framework/DeclEntityDef.h"
 #include "framework/DeclFX.h"
@@ -2175,6 +2176,16 @@ idDeclLocal::ParseLocal
 =================
 */
 void idDeclLocal::ParseLocal( void ) {
+	// DUDE: load timing -- the decl TEXT parse on first reference. Each scope is EXCLUSIVE of any
+	// decl parse it nests (a material pulling in a table) by subtracting the total accumulator's
+	// growth during its own lifetime, so the slices sum to true wall time. The model-load scopes
+	// subtract declParseMs in turn, so a model's first-reference material cost lands HERE, not in
+	// modelGeom -- it is not geometry work and no model cache can remove it. Bucketed per type.
+	idLoadTimingScope declScope( loadTiming.declParseMs, loadTiming.declParseCount, &loadTiming.declParseMs );
+	const int typeSlot = ( (int)type >= 0 && (int)type < LOADTIMING_DECL_TYPES ) ? (int)type : LOADTIMING_DECL_TYPES - 1;
+	idLoadTimingScope declBucket( loadTiming.declParseTypeMs[typeSlot], loadTiming.declParseTypeCount[typeSlot],
+		&loadTiming.declParseMs );
+
 	bool generatedDefaultText = false;
 
 	AllocateSelf();

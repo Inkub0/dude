@@ -36,7 +36,15 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/ModelManager.h"
 
 #include "framework/Licensee.h"
+#include "framework/LoadTiming.h"
 #include "framework/Session_local.h"
+
+// DUDE: load-phase sub-timers (LoadTiming.h); reset at the top of ExecuteMapChange
+loadTiming_t loadTiming;
+
+void LoadTiming_Reset( void ) {
+	memset( &loadTiming, 0, sizeof( loadTiming ) );
+}
 
 #if defined(__AROS__)
 #define CDKEY_FILEPATH CDKEY_FILE
@@ -1911,6 +1919,7 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	}
 
 	int start = Sys_Milliseconds();
+	LoadTiming_Reset();		// DUDE: load phase timing
 
 	common->Printf( "----- Map Initialization -----\n" );
 	common->Printf( "Map: %s\n", mapString.c_str() );
@@ -1985,6 +1994,47 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	// model/image/sound EndLevelLoad; settle = the 10 warm-up RunFrame()s.
 	common->Printf( "  load phases (msec): proc=%d game=%d media=%d settle=%d\n",
 		t_proc - start, t_game - t_proc, t_media - t_game, msec - ( t_media - start ) );
+	// DUDE: the asset-parse work a binary cache would attack, totalled over the whole load --
+	// render-model parse (any trigger), EXCLUSIVE collision conversion, .aas parse.
+	// modelGeom is EXCLUSIVE of the decl first-parse a model triggers (next line) -- pure geometry.
+	common->Printf( "  asset parse (msec): modelGeom=%.0f (%d) [static=%.0f/%d md5=%.0f/%d other=%.0f/%d] cmConvert=%.0f (%d) aasLoad=%.0f (%d)\n",
+		loadTiming.modelParseMs, loadTiming.modelParseCount,
+		loadTiming.modelStaticMs, loadTiming.modelStaticCount,
+		loadTiming.modelMd5Ms, loadTiming.modelMd5Count,
+		loadTiming.modelOtherMs, loadTiming.modelOtherCount,
+		loadTiming.cmConvertMs, loadTiming.cmConvertCount,
+		loadTiming.aasLoadMs, loadTiming.aasLoadCount );
+	// DUDE: the material/decl TEXT parse triggered on first reference -- what modelGeom excludes
+	{
+		const double matMs = loadTiming.declParseTypeMs[DECL_MATERIAL];
+		const int matCount = loadTiming.declParseTypeCount[DECL_MATERIAL];
+		common->Printf( "  decl parse (msec): all=%.0f (%d) material=%.0f (%d) other=%.0f (%d)\n",
+			loadTiming.declParseMs, loadTiming.declParseCount, matMs, matCount,
+			loadTiming.declParseMs - matMs, loadTiming.declParseCount - matCount );
+		// and the rest by type, so the next lever is visible without another instrumentation pass
+		idStr byType;
+		for ( int t = 0; t < LOADTIMING_DECL_TYPES; t++ ) {
+			if ( t == DECL_MATERIAL || loadTiming.declParseTypeCount[t] == 0 ) {
+				continue;
+			}
+			// a slot only accrues when a decl of that (registered) type parsed, so the name lookup is safe
+			const char *typeName = ( t < LOADTIMING_DECL_TYPES - 1 ) ? declManager->GetDeclNameFromType( (declType_t)t ) : "?";
+			byType += va( " %s=%.0f/%d", typeName, loadTiming.declParseTypeMs[t], loadTiming.declParseTypeCount[t] );
+		}
+		if ( byType.Length() ) {
+			common->Printf( "  decl by type (msec):%s\n", byType.c_str() );
+		}
+	}
+	// DUDE: search-path walks (serial phases only) -- how much of the decl/sound cost is just probing
+	common->Printf( "  fs opens (msec): %.0f (%d opens, %d misses)\n",
+		loadTiming.fsOpenMs, loadTiming.fsOpenCount, loadTiming.fsOpenMisses );
+	// DUDE: inside the md5 bucket -- the remainder is the text lex + joints + weights + bounds
+	common->Printf( "  md5 split (msec): deformInfo=%.0f (%d) gpuSkinBake=%.0f (%d) tessBake=%.0f (%d)\n",
+		loadTiming.md5DeformInfoMs, loadTiming.md5DeformInfoCount,
+		loadTiming.md5GpuSkinMs, loadTiming.md5GpuSkinCount,
+		loadTiming.md5TessMs, loadTiming.md5TessCount );
+	common->Printf( "  bmodel cache: %d hits, %d misses, %.0f msec writing %d\n",
+		loadTiming.bmodelHits, loadTiming.bmodelMisses, loadTiming.bmodelWriteMs, loadTiming.bmodelWrites );
 
 	// let the renderSystem generate interactions now that everything is spawned
 	rw->GenerateAllInteractions();

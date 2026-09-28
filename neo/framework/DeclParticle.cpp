@@ -106,8 +106,14 @@ void idDeclParticle::GetStageBounds( idParticleStage *stage ) {
 	idRandom	steppingRandom;
 	steppingRandom.SetSeed( 0 );
 
-	// just step through a lot of possible particles as a representative sampling
-	for ( int i = 0 ; i < 1000 ; i++ ) {
+	// DUDE: stock stepped "1000 possible particles as a representative sampling" -- but
+	// steppingRandom is never advanced inside the loop (only the size sweep below steps it),
+	// so every iteration reseeded g.random identically and recomputed the very same origins.
+	// ParticleOrigin depends on nothing else that varies per iteration, so ONE pass yields
+	// bit-identical bounds at 1/1000 the cost: measured 352 ms of a hell1 load across 115
+	// particle decls, ~3 ms each, inside the decl parse.
+	const int numSamples = 1;
+	for ( int i = 0 ; i < numSamples ; i++ ) {
 		g.random = g.originalRandom = steppingRandom;
 
 		int	maxMsec = stage->particleLife * 1000;
