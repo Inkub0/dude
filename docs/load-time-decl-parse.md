@@ -75,7 +75,25 @@ per-material figure is not.)
 material — roughly 0.6 GB for stock and up to ~10 GB with a 2K texture pack — and it would have left
 the first load of every map at 8.5 s.
 
-## What remains on the load-time ledger
+## The per-type split, and two more findings
 
-`other` decls ~1 s (entityDefs, skins, sounds), `media` ~1 s, the `.proc` world ~1.1 s, spawn/script
-~2.4 s. None is a single lever like this one was.
+The `decl by type` line then resolved the ~960 ms of non-material decls (full-content cold run,
+11310 → 2919 ms): **sound 395** (401 shaders — `FindSound` loads and decodes the sample inside the
+shader parse, stock behaviour), **particle 352** (115 decls), **model 203** (44 game-side modelDefs
+parsing their `.md5anim` text), everything else ~10. The "2.4 s spawn/script floor" turned out to be
+these same parses.
+
+- **Particle bounds — fixed.** `idDeclParticle::GetStageBounds` stepped "1000 possible particles as a
+  representative sampling", but never advanced its `steppingRandom` inside that loop, so all 1000
+  iterations reseeded identically and recomputed the same origins. One sample is bit-identical at
+  1/1000 the cost: **352 → 5 ms**, load **2919 → 2571 ms** (4.4× vs the original 11.3 s).
+- **Filesystem probes — measured, not a lever.** `fs opens (msec)` on the same load: 52 ms for 10,320
+  opens (6,503 misses), ~5 µs each. The search-path walks are cheap, so the sound bucket is genuine
+  decoding, and its fix would be sound-cache surgery (a thread-safe sample allocator and decoder pool,
+  and splitting the OpenAL upload out of `Load`) for ~300 ms at real audio-glitch risk. Held.
+
+## What remains on the load-time ledger (2.57 s)
+
+`media` 1.4 s (images incl. the height fields, sound purge), sound decode 0.41 s, modelDef animation
+parsing 0.21 s (game-DLL code, three copies), collision conversion 0.16 s, all model geometry 0.12 s.
+Nothing left is both large and low-risk; this is the stopping point for the 0.9.5 load-time work.
