@@ -50,6 +50,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/Model.h"
 #include "renderer/ModelManager.h"
 #include "renderer/RenderWorld.h"
+#include "framework/LoadTiming.h"
 
 #include "cm/CollisionModel_local.h"
 
@@ -3093,6 +3094,10 @@ cm_model_t *idCollisionModelManagerLocal::LoadRenderModel( const char *fileName 
 	if ( !renderModelManager->CheckModel( fileName ) ) {
 		return NULL;
 	}
+
+	// DUDE: time the conversion EXCLUSIVE of the render-model parse FindModel may trigger
+	// (that is counted under modelParse); placed after the guards so the count is real conversions
+	idLoadTimingScope cmScope( loadTiming.cmConvertMs, loadTiming.cmConvertCount, &loadTiming.modelParseMs );
 
 	renderModel = renderModelManager->FindModel( fileName );
 

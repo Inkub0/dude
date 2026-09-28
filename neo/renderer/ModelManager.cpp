@@ -34,6 +34,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/tr_local.h"	// just for R_FreeWorldInteractions and R_CreateWorldInteractions
 
 #include "renderer/ModelManager.h"
+#include "framework/LoadTiming.h"
 
 class idRenderModelManagerLocal : public idRenderModelManager {
 public:
@@ -273,6 +274,7 @@ idRenderModel *idRenderModelManagerLocal::GetModel( const char *modelName, bool 
 		if ( canonical.Icmp( model->Name() ) == 0 ) {
 			if ( !model->IsLoaded() ) {
 				// reload it if it was purged
+				idLoadTimingScope parseScope( loadTiming.modelParseMs, loadTiming.modelParseCount );
 				model->LoadModel();
 			} else if ( insideLevelLoad && !model->IsLevelLoadReferenced() ) {
 				// we are reusing a model already in memory, but
@@ -292,6 +294,9 @@ idRenderModel *idRenderModelManagerLocal::GetModel( const char *modelName, bool 
 	idRenderModel	*model;
 
 	canonical.ExtractFileExtension( extension );
+
+	// DUDE: time the parse (InitFromFile + FinishSurfaces); the hash hit above is not a parse
+	idLoadTimingScope parseScope( loadTiming.modelParseMs, loadTiming.modelParseCount );
 
 	if ( ( extension.Icmp( "ase" ) == 0 ) || ( extension.Icmp( "lwo" ) == 0 ) || ( extension.Icmp( "flt" ) == 0 ) ) {
 		model = new idRenderModelStatic;

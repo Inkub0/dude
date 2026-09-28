@@ -36,7 +36,15 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/ModelManager.h"
 
 #include "framework/Licensee.h"
+#include "framework/LoadTiming.h"
 #include "framework/Session_local.h"
+
+// DUDE: load-phase sub-timers (LoadTiming.h); reset at the top of ExecuteMapChange
+loadTiming_t loadTiming;
+
+void LoadTiming_Reset( void ) {
+	memset( &loadTiming, 0, sizeof( loadTiming ) );
+}
 
 #if defined(__AROS__)
 #define CDKEY_FILEPATH CDKEY_FILE
@@ -1911,6 +1919,7 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	}
 
 	int start = Sys_Milliseconds();
+	LoadTiming_Reset();		// DUDE: load phase timing
 
 	common->Printf( "----- Map Initialization -----\n" );
 	common->Printf( "Map: %s\n", mapString.c_str() );
@@ -1985,6 +1994,12 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	// model/image/sound EndLevelLoad; settle = the 10 warm-up RunFrame()s.
 	common->Printf( "  load phases (msec): proc=%d game=%d media=%d settle=%d\n",
 		t_proc - start, t_game - t_proc, t_media - t_game, msec - ( t_media - start ) );
+	// DUDE: the asset-parse work a binary cache would attack, totalled over the whole load --
+	// render-model parse (any trigger), EXCLUSIVE collision conversion, .aas parse.
+	common->Printf( "  asset parse (msec): modelParse=%.0f (%d) cmConvert=%.0f (%d) aasLoad=%.0f (%d)\n",
+		loadTiming.modelParseMs, loadTiming.modelParseCount,
+		loadTiming.cmConvertMs, loadTiming.cmConvertCount,
+		loadTiming.aasLoadMs, loadTiming.aasLoadCount );
 
 	// let the renderSystem generate interactions now that everything is spawned
 	rw->GenerateAllInteractions();

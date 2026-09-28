@@ -29,6 +29,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/platform.h"
 #include "framework/FileSystem.h"
 #include "framework/DeclEntityDef.h"
+#include "framework/LoadTiming.h"
 
 #include "tools/compilers/aas/AASFile_local.h"
 
@@ -1111,6 +1112,9 @@ bool idAASFileLocal::Load( const idStr &fileName, unsigned int mapFileCRC ) {
 
 	common->Printf( "[Load AAS]\n" );
 	common->Printf( "loading %s\n", name.c_str() );
+
+	// DUDE: time the whole text parse, file read included
+	idLoadTimingScope aasScope( loadTiming.aasLoadMs, loadTiming.aasLoadCount );
 
 	if ( !src.LoadFile( name ) ) {
 		return false;
