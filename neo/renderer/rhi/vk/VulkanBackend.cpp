@@ -1095,6 +1095,7 @@ private:
 	VkPipeline					boundPipeline = VK_NULL_HANDLE;
 	uint64_t					boundTexKey = 0;
 	VkDescriptorSet				boundTexSet = VK_NULL_HANDLE;
+	VkBuffer					boundIb = VK_NULL_HANDLE;	// DUDE: last-bound index buffer; the sole vkCmdBindIndexBuffer site skips a repeat
 	bool						bindlessBoundThisCb = false;	// RR4: set 2 (bindless array) bound once per frame cb
 	bool						dynStateDirty = true;	// (re)emit viewport+scissor before next draw
 	float						depthRangeMin = 0.0f;	// SetDepthRange window (weapon/model depth hacks)
@@ -2910,6 +2911,7 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	boundPipeline = VK_NULL_HANDLE;
 	boundTexKey = 0;
 	boundTexSet = VK_NULL_HANDLE;
+	boundIb = VK_NULL_HANDLE;		// DUDE: the cb was re-begun, its index binding is gone
 	bindlessBoundThisCb = false;	// RR4: rebind the bindless set at the first draw of this frame's cb
 	dynStateDirty = true;
 	depthRangeMin = 0.0f;
@@ -11652,7 +11654,15 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 
 	VkDeviceSize vbOfs = (VkDeviceSize)args.vertexOffset;
 	vkCmdBindVertexBuffers( cb, 0, 1, &vb, &vbOfs );
-	vkCmdBindIndexBuffer( cb, ib, 0, VK_INDEX_TYPE_UINT32 );
+	// DUDE: skip the redundant index-buffer rebind. The IB is always bound at offset 0 /
+	// UINT32 and this is the ONLY vkCmdBindIndexBuffer in the backend, so the cb's index
+	// binding changes nowhere else; consecutive draws off the shared static IB share it.
+	// (The VB bind above is NOT cached -- its offset varies per draw.) Invalidated with the
+	// other bind caches when the frame cb is re-begun.
+	if ( ib != boundIb ) {
+		vkCmdBindIndexBuffer( cb, ib, 0, VK_INDEX_TYPE_UINT32 );
+		boundIb = ib;
+	}
 	cbOut = cb;
 	return true;
 }

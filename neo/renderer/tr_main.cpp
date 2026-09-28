@@ -34,6 +34,7 @@ If you have questions concerning this license or the applicable additional terms
 #endif
 
 #include "sys/platform.h"
+#include <algorithm>		// DUDE: std::sort for R_SortDrawSurfs
 #include "framework/Session.h"
 #include "renderer/RenderWorld_local.h"
 #include "renderer/ModelManager.h"
@@ -3914,36 +3915,18 @@ DRAWSURF SORTING
 
 
 /*
-=======================
-R_QsortSurfaces
-
-=======================
-*/
-static int R_QsortSurfaces( const void *a, const void *b ) {
-	const drawSurf_t	*ea, *eb;
-
-	ea = *(drawSurf_t **)a;
-	eb = *(drawSurf_t **)b;
-
-	if ( ea->sort < eb->sort ) {
-		return -1;
-	}
-	if ( ea->sort > eb->sort ) {
-		return 1;
-	}
-	return 0;
-}
-
-
-/*
 =================
 R_SortDrawSurfs
 =================
 */
 static void R_SortDrawSurfs( void ) {
 	// sort the drawsurfs by sort type, then orientation, then shader
-	qsort( tr.viewDef->drawSurfs, tr.viewDef->numDrawSurfs, sizeof( tr.viewDef->drawSurfs[0] ),
-		R_QsortSurfaces );
+	// DUDE: std::sort with an inlined comparator instead of qsort's indirect call per
+	// comparison. Same single float key, same (unstable) semantics -- the engine never
+	// depended on qsort's tie order among equal `sort` values, so the frame is unchanged.
+	drawSurf_t **first = tr.viewDef->drawSurfs;
+	std::sort( first, first + tr.viewDef->numDrawSurfs,
+		[]( const drawSurf_t *a, const drawSurf_t *b ) { return a->sort < b->sort; } );
 }
 
 
