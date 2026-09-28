@@ -242,7 +242,7 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_s *viewDef );
 // end of the 3D view, before the HUD composites — so the RGB split never touches the
 // HUD / FPS counter. Split out of the swap-time resolve for the resolve-folded frames
 // (Vulkan always; GL3 + r_hdr); GL3 without HDR uses RB_RHI_PostProcess instead.
-void RB_RHI_ChromaticAberration( rhi::RHI *r, const viewDef_s *viewDef );
+void RB_RHI_ChromaticAberration( rhi::RHI *r, const viewDef_s *viewDef, const idScreenRect *rectOverride = NULL );	// DUDE sub-native FSR2: rect of the display-size composite once the frame target switched to it
 // HDR eye adaptation (Phase B1): measure scene luminance, update the adapted exposure,
 // return the 1x1 exposure image for the resolve to sample (0 = use the static r_hdrExposure).
 rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg );

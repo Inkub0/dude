@@ -1575,6 +1575,15 @@ void RB_RHI_Shutdown( void );
 // doesn't thrash-realloc between the view and gamma passes). Both false on the legacy
 // backend / when r_hdr is off.
 bool RB_RHI_HdrCaptureActive( void );
+
+extern idCVar r_fsrScale;				// FSR2 render scale: the world view's size as a fraction of the display (1.0 = Native-AA)
+
+// DUDE FSR2 sub-native upscaling (tr_main.cpp): the latched per-frame render scale, the world
+// render size, and the backend's "primary fullscreen view" reference size
+float	R_FsrRenderScale( void );
+void	R_FsrWorldSize( int &w, int &h );
+int		RB_RHI_WorldW( void );
+int		RB_RHI_WorldH( void );
 bool RB_RHI_HdrFrameActive( void );
 
 void R_CreateEntityRefs( idRenderEntityLocal *def );

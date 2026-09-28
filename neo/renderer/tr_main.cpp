@@ -3732,6 +3732,58 @@ static const int R_JITTER_PHASE = 8;
 
 /*
 ===============
+R_FsrRenderScale / R_FsrWorldSize / RB_RHI_WorldW / RB_RHI_WorldH
+
+DUDE FSR2 sub-native upscaling (docs/fsr-temporal-pipeline.md, the parked "real FSR" lever):
+the primary fullscreen world view renders at glConfig.vid* x r_fsrScale and FSR2 upscales it
+to the display; every 2D view, screenshot, env probe and cropped render stays at the display
+size. The scale is latched once per rendered frame so the frontend (RenderScene's viewport)
+and the backend (scene-target size, every "primary fullscreen view" test) agree even if the
+cvar changes mid-frame. 1.0 = Native-AA, exactly the path that shipped.
+===============
+*/
+float R_FsrRenderScale( void ) {
+	static int		latchedFrame = -1;
+	static float	latched = 1.0f;
+	if ( latchedFrame != tr.frameCount ) {
+		latchedFrame = tr.frameCount;
+		latched = 1.0f;
+		if ( r_fsr.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN
+		     && !tr.takingEnvProbe && !tr.takingScreenshot ) {
+			const float s = idMath::ClampFloat( 0.5f, 1.0f, r_fsrScale.GetFloat() );
+			if ( s < 0.999f ) {
+				latched = s;
+			}
+		}
+	}
+	return latched;
+}
+
+void R_FsrWorldSize( int &w, int &h ) {
+	const float s = R_FsrRenderScale();
+	w = glConfig.vidWidth;
+	h = glConfig.vidHeight;
+	if ( s < 1.0f ) {
+		w = Max( 1, (int)floorf( (float)glConfig.vidWidth  * s + 0.5f ) );
+		h = Max( 1, (int)floorf( (float)glConfig.vidHeight * s + 0.5f ) );
+	}
+}
+
+// the world render size the backend's "is this the primary fullscreen view" tests compare against
+int RB_RHI_WorldW( void ) {
+	int w, h;
+	R_FsrWorldSize( w, h );
+	return w;
+}
+
+int RB_RHI_WorldH( void ) {
+	int w, h;
+	R_FsrWorldSize( w, h );
+	return h;
+}
+
+/*
+===============
 R_SetupProjection
 
 This uses the "infinite far z" trick
@@ -3759,7 +3811,16 @@ void R_SetupProjection( viewDef_t * viewDef ) {
 		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN
 		&& !viewDef->isSubview && !tr.takingEnvProbe && !tr.takingScreenshot;
 	if ( wantTemporalJitter ) {
-		const int idx = ( tr.frameCount % R_JITTER_PHASE ) + 1;		// Halton is 1-indexed
+		// the phase count grows with the upscale ratio, as ffxFsr2GetJitterPhaseCount does:
+		// 8 * (display / render)^2 -- 8 at Native-AA, 18 at 0.67, 32 at 0.5
+		int ww, wh;
+		R_FsrWorldSize( ww, wh );
+		const float ratio = ( ww > 0 ) ? (float)glConfig.vidWidth / (float)ww : 1.0f;
+		int phase = (int)( (float)R_JITTER_PHASE * ratio * ratio );
+		if ( phase < R_JITTER_PHASE ) {
+			phase = R_JITTER_PHASE;
+		}
+		const int idx = ( tr.frameCount % phase ) + 1;		// Halton is 1-indexed
 		jitterPixX = R_Halton( idx, 2 ) - 0.5f;
 		jitterPixY = R_Halton( idx, 3 ) - 0.5f;
 	} else if ( r_jitter.GetBool() ) {

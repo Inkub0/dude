@@ -306,7 +306,7 @@ private:
 	                                       const int *indexes, int numIndexes ) override;
 	void			DestroyRtScene() override;
 	// FSR2 runtime (R1/C2): persistent context + output image, sized to the scene target.
-	bool			Fsr2EnsureContext( int w, int h );			// (re)create the FSR2 context + output image on size change
+	bool			Fsr2EnsureContext( int rw, int rh, int dw, int dh );	// (re)create the FSR2 context + output image on a render/display size change
 	void			Fsr2DestroyContext( bool deviceIdle );		// tear down context/scratch/output (vid_restart, resize, shutdown)
 
 	bool			CreateInstance();
@@ -1040,7 +1040,8 @@ private:
 
 	FfxFsr2Context *			fsr2Ctx = NULL;
 	void *						fsr2Scratch = NULL;
-	int							fsr2W = 0, fsr2H = 0;
+	int							fsr2W = 0, fsr2H = 0;			// the context's RENDER size (the scene target)
+	int							fsr2DispW = 0, fsr2DispH = 0;	// its DISPLAY size (the output image); == render at Native-AA
 	VkImage						fsr2Out = VK_NULL_HANDLE;
 	VmaAllocation				fsr2OutAlloc = NULL;
 	VkImageView					fsr2OutView = VK_NULL_HANDLE;
@@ -7575,6 +7576,7 @@ void VulkanBackend::Fsr2DestroyContext( bool deviceIdle ) {
 	if ( fsr2Reactive != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Reactive, fsr2ReactiveAlloc ); fsr2Reactive = VK_NULL_HANDLE; fsr2ReactiveAlloc = NULL; }
 	fsr2DepthSrc = VK_NULL_HANDLE;
 	fsr2W = fsr2H = 0;
+	fsr2DispW = fsr2DispH = 0;
 	fsr2OpaqueW = fsr2OpaqueH = 0;
 	fsr2OutWritten = false;
 	fsr2OpaqueWritten = false;
@@ -7583,8 +7585,8 @@ void VulkanBackend::Fsr2DestroyContext( bool deviceIdle ) {
 	fsr2FirstDispatch = true;
 }
 
-bool VulkanBackend::Fsr2EnsureContext( int w, int h ) {
-	if ( fsr2Ctx != NULL && fsr2W == w && fsr2H == h ) {
+bool VulkanBackend::Fsr2EnsureContext( int rw, int rh, int dw, int dh ) {
+	if ( fsr2Ctx != NULL && fsr2W == rw && fsr2H == rh && fsr2DispW == dw && fsr2DispH == dh ) {
 		return true;
 	}
 	Fsr2DestroyContext( false );		// size changed (or first use): full rebuild
@@ -7608,10 +7610,12 @@ bool VulkanBackend::Fsr2EnsureContext( int w, int h ) {
 		return false;
 	}
 	desc.device = ffxGetDeviceVK( device );
-	desc.maxRenderSize.width = (uint32_t)w;
-	desc.maxRenderSize.height = (uint32_t)h;
-	desc.displaySize.width = (uint32_t)w;		// Native-AA: render == display
-	desc.displaySize.height = (uint32_t)h;
+	// sub-native (r_fsrScale): render < display; the context is rebuilt on any size change, so
+	// maxRenderSize is exactly the render size (no headroom to size internal buffers for)
+	desc.maxRenderSize.width = (uint32_t)rw;
+	desc.maxRenderSize.height = (uint32_t)rh;
+	desc.displaySize.width = (uint32_t)dw;
+	desc.displaySize.height = (uint32_t)dh;
 	// Plan-verified flags: un-tonemapped linear HDR input, D3's far-plane-at-infinity
 	// non-reversed depth, FSR2's own auto-exposure (the engine's eye adaptation runs
 	// AFTER the resolve and is unaffected). NO jitter-cancellation flag: A2 already
@@ -7624,12 +7628,12 @@ bool VulkanBackend::Fsr2EnsureContext( int w, int h ) {
 		return false;
 	}
 
-	// display-res output UAV (the one external write FSR2 makes) + its copy-back source role
+	// display-res output UAV (the one external write FSR2 makes) + its copy source role
 	VkImageCreateInfo ici = {};
 	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	ici.imageType = VK_IMAGE_TYPE_2D;
 	ici.format = VK_FORMAT_R16G16B16A16_SFLOAT;
-	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.extent = { (uint32_t)dw, (uint32_t)dh, 1 };		// the output is DISPLAY size
 	ici.mipLevels = 1;
 	ici.arrayLayers = 1;
 	ici.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -7660,6 +7664,7 @@ bool VulkanBackend::Fsr2EnsureContext( int w, int h ) {
 	// disables the reactive path (RunFsr2 guards on it).
 	ici.format = VK_FORMAT_R8_UNORM;
 	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.extent = { (uint32_t)rw, (uint32_t)rh, 1 };		// the reactive mask is a RENDER-size input
 	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &fsr2Reactive, &fsr2ReactiveAlloc, NULL ), "vmaCreateImage(FSR2 reactive)" ) ) {
 		Fsr2DestroyContext( true );
 		return false;
@@ -7672,11 +7677,18 @@ bool VulkanBackend::Fsr2EnsureContext( int w, int h ) {
 	}
 	fsr2ReactiveWritten = false;
 
-	fsr2W = w;
-	fsr2H = h;
+	fsr2W = rw;
+	fsr2H = rh;
+	fsr2DispW = dw;
+	fsr2DispH = dh;
 	fsr2OutWritten = false;
 	fsr2FirstDispatch = true;
-	common->Printf( "FSR2: context created (Native-AA %dx%d, scratch %zu KB)\n", w, h, scratchSize / 1024 );
+	if ( rw == dw && rh == dh ) {
+		common->Printf( "FSR2: context created (Native-AA %dx%d, scratch %zu KB)\n", rw, rh, scratchSize / 1024 );
+	} else {
+		common->Printf( "FSR2: context created (render %dx%d -> display %dx%d, %.0f%%, scratch %zu KB)\n",
+			rw, rh, dw, dh, 100.0f * (float)rw / (float)dw, scratchSize / 1024 );
+	}
 	return true;
 }
 
@@ -7844,7 +7856,17 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 	     || velImage == VK_NULL_HANDLE || velW != scene->w || velH != scene->h ) {
 		return false;
 	}
-	if ( !Fsr2EnsureContext( scene->w, scene->h ) ) {
+	// sub-native: the upscaled output goes to the caller's display-size composite; without one
+	// it is copied back over the scene (Native-AA, render == display) exactly as before
+	RenderTarget *out = ( args.outputRT != 0 ) ? LookupTarget( args.outputRT ) : NULL;
+	if ( args.outputRT != 0 && ( out == NULL || !out->colorTarget
+	                             || out->colorFormat[0] != VK_FORMAT_R16G16B16A16_SFLOAT
+	                             || out->w < scene->w || out->h < scene->h ) ) {
+		return false;
+	}
+	const uint32_t dw = out ? (uint32_t)out->w : (uint32_t)scene->w;
+	const uint32_t dh = out ? (uint32_t)out->h : (uint32_t)scene->h;
+	if ( !Fsr2EnsureContext( scene->w, scene->h, (int)dw, (int)dh ) ) {
 		return false;
 	}
 
@@ -7921,7 +7943,7 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 	dd.motionVectors = ffxGetTextureResourceVK( fsr2Ctx, velImage, velView,
 		w, h, VK_FORMAT_R16G16_SFLOAT, L"FSR2_MotionVectors", FFX_RESOURCE_STATE_COMPUTE_READ );
 	dd.output = ffxGetTextureResourceVK( fsr2Ctx, fsr2Out, fsr2OutView,
-		w, h, VK_FORMAT_R16G16B16A16_SFLOAT, L"FSR2_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS );
+		dw, dh, VK_FORMAT_R16G16B16A16_SFLOAT, L"FSR2_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS );
 	// exposure/transparencyAndComposition stay null (AUTO_EXPOSURE; hand-authored T&C mask
 	// is the potential V2 of increment D)
 
@@ -8019,9 +8041,12 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 		return false;
 	}
 
-	// Copy the resolved image back over the scene color (Native-AA: same size/format),
-	// and return depth to attachment layout. FSR2 leaves the output in GENERAL
-	// (UNORDERED_ACCESS was its last use) and the sampled inputs in SHADER_READ_ONLY.
+	// Copy the resolved image into the display-size composite (sub-native), or back over the
+	// scene color (Native-AA: same size/format), and return depth to attachment layout. FSR2
+	// leaves the output in GENERAL (UNORDERED_ACCESS was its last use) and the sampled inputs
+	// in SHADER_READ_ONLY. The composite's previous contents are irrelevant (the copy covers
+	// the whole image), so it transitions from UNDEFINED whatever it held.
+	const VkImage dstImage = out ? out->colorImage[0] : scene->colorImage[0];
 	VkImageMemoryBarrier toCopy[2] = {};
 	toCopy[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 	toCopy[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -8035,11 +8060,11 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 	toCopy[0].subresourceRange.levelCount = 1;
 	toCopy[0].subresourceRange.layerCount = 1;
 	toCopy[1] = toCopy[0];
-	toCopy[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	toCopy[1].srcAccessMask = out ? 0 : VK_ACCESS_SHADER_READ_BIT;
 	toCopy[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	toCopy[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	toCopy[1].oldLayout = out ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	toCopy[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	toCopy[1].image = scene->colorImage[0];
+	toCopy[1].image = dstImage;
 	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 		0, 0, NULL, 0, NULL, 2, toCopy );
 
@@ -8047,12 +8072,12 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	region.srcSubresource.layerCount = 1;
 	region.dstSubresource = region.srcSubresource;
-	region.extent = { w, h, 1 };
+	region.extent = { dw, dh, 1 };
 	vkCmdCopyImage( cb, fsr2Out, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		scene->colorImage[0], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
+		dstImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
 	fsr2OutWritten = true;		// next frame's pre-barrier: TRANSFER_SRC -> GENERAL
 
-	VkImageMemoryBarrier post[2] = {};
+	VkImageMemoryBarrier post[3] = {};
 	post[0] = toCopy[1];
 	post[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	post[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -8069,11 +8094,22 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 	post[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
 	post[1].subresourceRange.levelCount = 1;
 	post[1].subresourceRange.layerCount = 1;
+	uint32_t numPost = 2;
+	if ( out != NULL && out->hasDepth && out->dsImage != VK_NULL_HANDLE ) {
+		// the composite becomes the frame target from here on and the resumed frame pass LOADS
+		// its depth-stencil, so it must rest in attachment layout; its contents are irrelevant
+		// (nothing after the upscale depth-tests against the scene), so transition from UNDEFINED
+		post[2] = post[1];
+		post[2].srcAccessMask = 0;
+		post[2].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		post[2].image = out->dsImage;
+		numPost = 3;
+	}
 	vkCmdPipelineBarrier( cb,
 		VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
 			| VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-		0, 0, NULL, 0, NULL, 2, post );
+		0, 0, NULL, 0, NULL, numPost, post );
 
 	return true;
 }

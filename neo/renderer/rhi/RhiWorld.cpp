@@ -4295,8 +4295,8 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return false;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
-		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
+		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return false;
 	}
@@ -5599,8 +5599,8 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
-		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
+		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
 	if ( !fullscreenView ) {
 		return;
 	}
@@ -6196,8 +6196,8 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
-		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
+		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView || !RB_RHI_HdrCaptureActive() ) {
 		return;
 	}
@@ -6455,8 +6455,8 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
-		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
+		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return;
 	}
@@ -6744,8 +6744,8 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
-		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
+		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return;
 	}
@@ -7014,8 +7014,8 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
-		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
+		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return;
 	}
@@ -7300,8 +7300,8 @@ static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
-		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
+		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return;		// the mask is addressed by gl_FragCoord of the main view
 	}
@@ -7897,8 +7897,8 @@ void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;		// not reloading -> nothing to blur
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
-		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
+		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return;		// primary world view only (not mirrors / GUI renderDefs)
 	}
@@ -7980,14 +7980,17 @@ was folded into the resolve originally. GL3 without r_hdr keeps using RB_RHI_Pos
 pass to the resolve-folded frames so the two never double up.
 ===================
 */
-void RB_RHI_ChromaticAberration( rhi::RHI *r, const viewDef_t *viewDef ) {
+// DUDE sub-native FSR2: `rectOverride` is the display-size composite's rect once the frame target
+// has switched to it after the upscale -- the pass then covers the whole upscaled image instead
+// of the view's (smaller, render-size) viewport. NULL = the viewport, as before.
+void RB_RHI_ChromaticAberration( rhi::RHI *r, const viewDef_t *viewDef, const idScreenRect *rectOverride ) {
 	const float chroma = r_postChromaticAberration.GetFloat();
 	if ( chroma <= 0.0f || !R_BackendSupportsEnhancements() ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
-		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
+		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return;		// primary world view only (not mirrors / GUI renderDefs)
 	}
@@ -7997,12 +8000,13 @@ void RB_RHI_ChromaticAberration( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 
-	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
-	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	const idScreenRect vp = rectOverride ? *rectOverride : viewDef->viewport;
+	const int w = vp.x2 - vp.x1 + 1;
+	const int h = vp.y2 - vp.y1 + 1;
 
 	// snapshot the finished scene colour (world + weapon, after DoF / FSR / the bloom
 	// measurement) so the pass reads-and-writes the one live scene target
-	globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1, viewDef->viewport.y1, w, h, true );
+	globalImages->currentRenderImage->CopyFramebuffer( vp.x1, vp.y1, w, h, true );
 
 	const int potW = globalImages->currentRenderImage->uploadWidth  > 0 ? globalImages->currentRenderImage->uploadWidth  : w;
 	const int potH = globalImages->currentRenderImage->uploadHeight > 0 ? globalImages->currentRenderImage->uploadHeight : h;
@@ -8017,10 +8021,10 @@ void RB_RHI_ChromaticAberration( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[0] = 0.0f;						// grain OFF here (the resolve grains the whole frame)
 	parms.localParam0[2] = chroma;						// chromatic aberration strength
 
-	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
-	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetViewport( tr.viewportOffset[0] + vp.x1,
+	                tr.viewportOffset[1] + vp.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + vp.x1,
+	               tr.viewportOffset[1] + vp.y1, w, h );
 	backEnd.currentScissor = viewDef->scissor;
 
 	RB_RHI_BindUnit( 0, globalImages->currentRenderImage );
@@ -8474,8 +8478,8 @@ static void RB_RHI_DecalMaskPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
-		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
+		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView || viewDef->renderView.viewID < 0 ) {
 		return;
 	}

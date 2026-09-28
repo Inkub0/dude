@@ -717,6 +717,22 @@ void idRenderWorldLocal::RenderScene( const renderView_t *renderView ) {
 	// set up viewport, adjusted for resolution and OpenGL style 0 at the bottom
 	tr.RenderViewToViewport( &parms->renderView, &parms->viewport );
 
+	// DUDE FSR2 sub-native upscaling (r_fsrScale < 1): the primary fullscreen world view renders
+	// at the render resolution and FSR2 upscales it to the display. Only a view covering the whole
+	// window is scaled -- screenshots, env probes, remote cameras and the berserk sub-window all
+	// render through a crop and keep their size -- and the scissor derived below, plus every rect
+	// the frontend projects into this viewport, follow it for free.
+	{
+		int ww, wh;
+		R_FsrWorldSize( ww, wh );
+		if ( ( ww != glConfig.vidWidth || wh != glConfig.vidHeight )
+		     && parms->viewport.x1 == 0 && parms->viewport.y1 == 0
+		     && parms->viewport.x2 == glConfig.vidWidth - 1 && parms->viewport.y2 == glConfig.vidHeight - 1 ) {
+			parms->viewport.x2 = ww - 1;
+			parms->viewport.y2 = wh - 1;
+		}
+	}
+
 	// the scissor bounds may be shrunk in subviews even if
 	// the viewport stays the same
 	// this scissor range is local inside the viewport

@@ -766,7 +766,13 @@ passthrough resolve (shaders/hdrresolve.*); Phase B folds exposure + tonemap int
 */
 static rhi::RenderTargetHandle	rhiHdrRT = 0;		// scene buffer (RGBA16F HDR, or RGBA8 for the VK off-HDR post pass) + depth-stencil
 static rhi::RenderTargetHandle	rhiHdrAaRT = 0;		// FXAA/SMAA output ping (RGBA16F in HDR, RGBA8 for the VK off-HDR post pass; color only)
-static int						rhiHdrW = 0, rhiHdrH = 0;
+static int						rhiHdrW = 0, rhiHdrH = 0;	// the scene buffer's size = the WORLD render size (R_FsrWorldSize)
+// DUDE FSR2 sub-native (r_fsrScale, docs/fsr-temporal-pipeline.md): the display-size RGBA16F
+// composite FSR2's output lands in and the HUD / 2D views then draw into (the scene/HUD reorder
+// the copy-back stood in for at Native-AA); the resolve reads it. Only exists on FSR2 frames.
+static rhi::RenderTargetHandle	rhiHdrCompositeRT = 0;
+static int						rhiHdrCompW = 0, rhiHdrCompH = 0;
+static bool						rbHdrCompositeActive = false;	// FSR2 ran: the frame target is the composite from here on
 static bool						rbHdrRtFloat = false;			// rhiHdrRT is RGBA16F (HDR) vs RGBA8 (off-HDR post) — recreate on change
 static bool						rbHdrAaFloat = false;			// rhiHdrAaRT is RGBA16F vs RGBA8 — must track rhiHdrRT's format
 static rhi::ImageHandle			rbEyeExposureImg = 0;			// B1 eye-adapt: 1x1 adapted exposure, measured at end of the primary 3D view, sampled by the resolve
@@ -833,8 +839,8 @@ static bool RB_RHI_FrameHasWorldScene( const emptyCommand_t *cmds ) {
 			continue;
 		}
 		if ( vd->viewport.x1 <= 0 && vd->viewport.y1 <= 0
-		     && vd->viewport.x2 >= glConfig.vidWidth - 1
-		     && vd->viewport.y2 >= glConfig.vidHeight - 1 ) {
+		     && vd->viewport.x2 >= RB_RHI_WorldW() - 1
+		     && vd->viewport.y2 >= RB_RHI_WorldH() - 1 ) {
 			return true;
 		}
 	}
@@ -845,6 +851,7 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	rbHdrActiveThisFrame = false;
 	rbFsrRanThisFrame = false;
 	rbHdrFrameActive = false;
+	rbHdrCompositeActive = false;
 
 	// Tonemap follows the HDR toggle (the curve is meaningless — and unreachable in the greyed-out
 	// combo — with r_hdr off). On the off edge clear it to faithful; on the on edge default it to
@@ -913,8 +920,14 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 		return;
 	}
 
-	int w = glConfig.vidWidth;
-	int h = glConfig.vidHeight;
+	// DUDE FSR2 sub-native (r_fsrScale): the scene buffer is the WORLD render size -- the display
+	// size unless the primary view was scaled (R_FsrWorldSize latches it per frame, the same
+	// value RenderScene sized the viewport with). On an FSR2 frame the display-size composite
+	// below receives FSR2's output and the HUD; at scale 1.0 both are the display size and the
+	// frame is pixel-identical to the copy-back path this replaces.
+	int w, h;
+	R_FsrWorldSize( w, h );
+	const bool wantFsr = wantHdr && r_fsr.GetBool() && vkMode;
 
 	// (re)create on resolution change, a format change (HDR toggled on/off — the
 	// off-HDR post target is RGBA8, the HDR one RGBA16F), or a lost context (vid_restart
@@ -933,6 +946,20 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	}
 	if ( !rhiHdrRT ) {
 		return;		// creation failed (no RGBA16F support?) → fall back to the backbuffer
+	}
+
+	// the display-size HDR composite: FSR2's output + everything drawn after it (HUD, console,
+	// menus over the game, in HDR as before). Freed when FSR2 is off, on resize, on context loss.
+	const int dw = glConfig.vidWidth, dh = glConfig.vidHeight;
+	if ( rhiHdrCompositeRT && ( !wantFsr || rhiHdrCompW != dw || rhiHdrCompH != dh
+	                            || r->GetRenderTargetImage( rhiHdrCompositeRT ) == 0 ) ) {
+		r->DestroyRenderTarget( rhiHdrCompositeRT );
+		rhiHdrCompositeRT = 0;
+	}
+	if ( wantFsr && !rhiHdrCompositeRT ) {
+		rhiHdrCompositeRT = r->CreateRenderTargetColorDepthStencil( rhi::IF_RGBA16F, dw, dh );
+		rhiHdrCompW = dw;
+		rhiHdrCompH = dh;
 	}
 
 	// AA scratch: a ping buffer so FXAA/SMAA (r_rhiAA) run scene->scene before the
@@ -1195,7 +1222,9 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	// image; the resolve then reads the AA buffer instead of the raw scene buffer. Off → the
 	// scratch buffer doesn't exist and we read the scene buffer directly. Mode 2 = SMAA,
 	// falling back to FXAA if its shaders/targets are unavailable.
-	rhi::RenderTargetHandle sourceRT = rhiHdrRT;
+	// sub-native FSR2: the frame ended in the display-size composite, resolve THAT (film grain,
+	// gamma, tonemap all run here at display pixels, after and outside the upscale)
+	rhi::RenderTargetHandle sourceRT = rbHdrCompositeActive ? rhiHdrCompositeRT : rhiHdrRT;
 	if ( !rbFsrRanThisFrame && r_rhiAA.GetInteger() > 0 && rhiHdrAaRT ) {
 		if ( r_rhiAA.GetInteger() != 2 || !RB_RHI_HdrSmaa( r ) ) {
 			RB_RHI_HdrFxaa( r );
@@ -1326,6 +1355,9 @@ void RB_RHI_Shutdown( void ) {
 	rhiHdrRT = 0;
 	rhiHdrAaRT = 0;
 	rhiHdrW = rhiHdrH = 0;
+	rhiHdrCompositeRT = 0;
+	rhiHdrCompW = rhiHdrCompH = 0;
+	rbHdrCompositeActive = false;
 
 	// SMAA edge/weight/scene targets + LUTs (this file's statics). On GL3 the LUTs
 	// are raw GL names GL3Backend::Shutdown() doesn't track, so delete them here
@@ -2772,9 +2804,12 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 		parms.localParam1[1] = rh > 0.0f ? 1.0f / rh : 0.0f;
 		if ( vkMode && rh > 0.0f ) {
 			// Vulkan gl_FragCoord is top-down but the capture keeps GL's
-			// bottom-up layout: y' = (vidHeight - fragY) / rh
+			// bottom-up layout: y' = (targetHeight - fragY) / rh -- the height of the target this
+			// pass draws into: the scene buffer (the world render size under sub-native FSR2), else
+			// the window
+			const int targetH = ( rbHdrActiveThisFrame && !rbHdrCompositeActive ) ? rhiHdrH : glConfig.vidHeight;
 			parms.localParam1[1] = -1.0f / rh;
-			parms.localParam1[3] = (float)glConfig.vidHeight / rh;
+			parms.localParam1[3] = (float)targetH / rh;
 		}
 	}
 
@@ -3404,8 +3439,8 @@ static void RB_RHI_FsrCaptureOpaque( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
-		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
+		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
 	if ( !fullscreenView ) {
 		return;
 	}
@@ -3554,8 +3589,8 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	// with it, and cropped GUI-renderDef models (the menu planet) aren't the
 	// scene — same fullscreen-and-not-subview test RhiWorld uses.
 	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= glConfig.vidWidth - 1
-		&& viewDef->viewport.y2 >= glConfig.vidHeight - 1;
+		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
+		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
 	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView ) {
 		// The GL per-view post chain (AA / film grain / chromatic aberration) is GL-only
 		// here; Vulkan folds grain/chroma into the scene resolve instead (RB_RHI_HdrResolve,
@@ -3615,19 +3650,31 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 				// auto-reactive (R1/D): only meaningful when this frame's opaque snapshot was
 				// captured (the backend also guards on that); < 0 disables
 				fa.reactiveScale = r_fsrReactive.GetBool() ? r_fsrReactiveScale.GetFloat() : -1.0f;
+				// sub-native: the display-size composite receives the output (0 = the Native-AA
+				// copy-back over the scene, kept as the fallback when no composite exists)
+				fa.outputRT = rhiHdrCompositeRT;
 				r->GpuScopeBegin( "fsr2" );
 				rbFsrRanThisFrame = r->RunFsr2( fa );
 				r->GpuScopeEnd();
+				// the scene/HUD reorder: from here on the frame draws into the display-size
+				// composite -- the eye-adapt/bloom measurement, chroma, the HUD / console / menus,
+				// and the resolve all consume the upscaled scene. Film grain stays where it was:
+				// folded into the resolve over THIS display-size image, never inside FSR2's input.
+				if ( rbFsrRanThisFrame && rhiHdrCompositeRT ) {
+					r->SetFrameTarget( rhiHdrCompositeRT );
+					rbHdrCompositeActive = true;
+				}
 			}
 		}
 		// HDR eye adaptation (Phase B1): measure the SCENE luminance HERE — end of the primary
 		// 3D view, before the HUD / console / menus are composited into the HDR buffer — so the
 		// adapted exposure tracks the world, not the UI. The resolve samples rbEyeExposureImg.
 		if ( rbHdrActiveThisFrame && rhiHdrRT ) {
-			rbEyeExposureImg = RB_RHI_EyeAdaptExposure( r, r->GetRenderTargetImage( rhiHdrRT ) );
+			const rhi::ImageHandle sceneImg = r->GetRenderTargetImage( rbHdrCompositeActive ? rhiHdrCompositeRT : rhiHdrRT );
+			rbEyeExposureImg = RB_RHI_EyeAdaptExposure( r, sceneImg );
 			// HDR bloom (Phase C): same scene-only point — threshold + blur the bright scene into a
 			// half-res glow the resolve adds before the tonemap.
-			rbBloomImg = RB_RHI_Bloom( r, r->GetRenderTargetImage( rhiHdrRT ) );
+			rbBloomImg = RB_RHI_Bloom( r, sceneImg );
 		}
 		// DUDE chromatic aberration, scene-only, BEFORE the HUD / console / FPS counter
 		// composite into the scene buffer — so the RGB split fringes the world, not the UI.
@@ -3636,7 +3683,14 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		// pre-HUD via RB_RHI_PostProcess above. Runs after FSR (clean temporal input) and the
 		// eye-adapt/bloom measurement (clean scene luminance). No-op at strength 0.
 		if ( rbHdrActiveThisFrame ) {
-			RB_RHI_ChromaticAberration( r, viewDef );
+			// sub-native FSR2: the frame target is now the display-size composite, so the pass
+			// covers THAT rect (the view's viewport is the smaller render size)
+			idScreenRect compositeRect;
+			compositeRect.x1 = 0;
+			compositeRect.y1 = 0;
+			compositeRect.x2 = rhiHdrCompW - 1;
+			compositeRect.y2 = rhiHdrCompH - 1;
+			RB_RHI_ChromaticAberration( r, viewDef, rbHdrCompositeActive ? &compositeRect : NULL );
 		}
 		// r_mvDebug: overlay the per-object velocity buffer (R1/A2; VK-only, no-op otherwise)
 		RB_RHI_MotionVectorDebugOverlay( r, viewDef );
