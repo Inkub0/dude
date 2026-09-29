@@ -132,6 +132,12 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // (red widest, so the shading terminator warms to red like real skin).
 	                            // interaction.frag adds the wrapped-diffuse excess over Lambert; 0 on
 	                            // every non-skin/flesh, ambient or film draw. Appended LAST.
+
+	vec4 u_contactParms;         // DUDE screen-space contact shadows (docs/contact-shadows.md):
+	                            // x = march step count (0 = off), y = march length (world units),
+	                            // z = depth-compare thickness (world units), w = darkening strength
+	                            // (0..1). interaction.frag marches _currentDepth (unit 16) from the
+	                            // fragment toward the light; 0 on ambient/film/every non-enabled draw.
 };
 
 // the depth-linearisation pair for this draw (see u_depthParms)
