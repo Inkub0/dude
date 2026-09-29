@@ -4513,12 +4513,16 @@ static void DrawDbgGroup_ContactShadows()
 	if ( BeginSettingsGroup( "Contact Shadows", &r_contactShadows,
 			"r_contactShadows: march the depth buffer from each lit pixel toward the light and darken where a "
 			"nearer occluder is found. Grounds small props/pickups/weapon detail/feet that shadow maps are too "
-			"coarse to catch. opengl3/Vulkan only. Redundant with r_rtAllLights - leave off at Ultra Nightmare." ) ) {
+			"coarse to catch. opengl3/Vulkan only. Automatically disabled while RT all-lights is on "
+			"(Ultra Nightmare's per-light RT rays supersede it)." ) ) {
 
+		const bool rtAll = r_rtAllLights.GetBool();
 		if ( !backendOk ) {
 			ImGui::TextDisabled( "Needs the opengl3 or Vulkan backend." );
+		} else if ( rtAll ) {
+			ImGui::TextDisabled( "Superseded by RT all-lights (Ultra Nightmare) - inactive while that is on." );
 		}
-		ImGui::BeginDisabled( !backendOk );
+		ImGui::BeginDisabled( !backendOk || rtAll );
 
 		float strength = r_contactShadowStrength.GetFloat();
 		if ( ImGui::SliderFloat( "Strength", &strength, 0.0f, 1.0f, "%.2f" ) ) {

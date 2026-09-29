@@ -1800,8 +1800,12 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// Opt-in, non-ambient (direct-light) draws only, raster tiers (Ultra Nightmare uses
 	// r_rtAllLights). Fills the view-space march transforms (model->view, view->clip), the depth
 	// linearisation pair, the depth-texel scale and the view-Y sign, mirroring the SSR conventions.
+	// r_rtAllLights (Ultra Nightmare) traces a real hard ray per light through interaction_rt.frag,
+	// which strictly supersedes this screen-space approximation - so skip contact shadows wholesale
+	// whenever it is on (a true no-op, not just redundant), regardless of preset.
 	bool contactShadows = false;
-	if ( r_contactShadows.GetBool() && !din->ambientLight && R_BackendSupportsEnhancements() ) {
+	if ( r_contactShadows.GetBool() && !r_rtAllLights.GetBool()
+	     && !din->ambientLight && R_BackendSupportsEnhancements() ) {
 		idImage *cd = globalImages->currentDepthImage;
 		const bool vkModeCS = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
 		const bool depthReady = cd && cd->uploadWidth > 0 && cd->uploadHeight > 0
@@ -8858,7 +8862,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// whole light loop. GL3 raw-binds it (nothing in the loop touches unit 16); VK carries it per
 	// draw as DrawArgs::contactDepth. interaction.frag's contactShadowTerm only samples it when
 	// r_contactShadows filled contactParms this surface, so the bind is harmless when the feature is off.
-	if ( r_contactShadows.GetBool() && !vkMode && R_BackendSupportsEnhancements()
+	if ( r_contactShadows.GetBool() && !r_rtAllLights.GetBool() && !vkMode && R_BackendSupportsEnhancements()
 	     && globalImages->currentDepthImage->uploadWidth > 0 ) {
 		rhi::gl3ActiveTexture( GL_TEXTURE0 + 16 );
 		qglBindTexture( GL_TEXTURE_2D, globalImages->currentDepthImage->texnum );

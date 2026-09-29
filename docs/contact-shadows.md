@@ -6,9 +6,11 @@ depth march inside the interaction pass darkens a lit pixel when a nearer occlud
 and the light. GL3 + Vulkan (the RHI enhanced path); off by default.
 
 **Cvar:** `r_contactShadows` (0). **Tiers:** intended for Medium → Nightmare. **Not** Ultra
-Nightmare — there `r_rtAllLights` already traces a real hard ray per light, which is strictly better,
-so leave contact shadows off at UN (enabling both just does redundant work; the raster march never
-runs on the RT-served lights anyway, which use the `interaction_rt` variant).
+Nightmare — there `r_rtAllLights` already traces a real hard ray per light, which is strictly better.
+The feature is **automatically disabled whenever `r_rtAllLights` is on** (a hard gate in
+`RB_RHI_DrawInteraction` / the GL3 loop-global bind, and the Debug-tab group greys out and says so),
+so it is a true no-op at UN regardless of preset — not merely redundant. (It never ran on the
+RT-served lights anyway, which use the `interaction_rt` variant that has no contact-shadow code.)
 
 ## Why it lives in the interaction pass
 
