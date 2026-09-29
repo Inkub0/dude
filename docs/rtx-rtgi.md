@@ -78,7 +78,8 @@ reflections and volumetrics.
   the noisy 1-spp current signal from starving history on stable surfaces; a **floor** (0.1) stops edge
   "frying". Cvar `r_rtgiConfidence` (default 4, 0 = off). GI path only; RTAO byte-identical.
 
-- **H6g — full-res checkerboard gather (opt-in). BUILT, awaiting test.** `r_rtgiCheckerboard` (default 0):
+- **H6g — full-res checkerboard gather. SHIPPED — default on, in the H6 GI merge (0.9.4).** `r_rtgiCheckerboard`
+  (**default 1**, tuned on in `0af93d43` alongside resScale 0.75 / history 6 / intensity 1.35):
   instead of `r_rtgiResScale`'s uniform downscale (which blurs silhouette edges via coarse guides + bilinear
   upscale), trace a horizontal CHECKERBOARD — half the pixels at FULL resolution, packed into the left half of
   a full-res radiance target — and let NRD's `ReblurSettings::checkerboardMode` reconstruct the rest. Sharp
@@ -87,9 +88,8 @@ reflections and volumetrics.
   ((x^y)^frame)&1`, constant BLACK mode → valid bit 0); a ray-free full-res `rtgi_guides` pass writes the NRD
   guides (viewZ att1, normal att2) the half-packed gather can no longer carry; `RtaoDenoise` gains
   `checkerboard` (BLACK) + points the guides at that full-res target; velocity is used full-res (no downsample).
-  v1 limitation: the H6f confidence pass is bypassed in checkerboard (its raw input would be half-packed).
-  RISK to verify: the pack PHASE — a residual half-pixel error shows as a fine checkerboard shimmer, fixable by
-  flipping the parity / mode.
+  The v1 limitation is **resolved**: the H6f history-confidence pass was wired into checkerboard mode
+  (`c326e914`), so it is no longer bypassed.
 
 ## Fidelity note (per policy)
 
