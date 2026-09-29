@@ -59,16 +59,18 @@ void main() {
 	// by 0.5 into [0,1] UV units. Canonical +Y-up direction currUV - prevUV: the SSAO/SSR
 	// consumers fetch history at currentUV - velocity; the FSR2 dispatch (C2) applies the top-left
 	// Y-flip via motionVectorScale. u_localParam1.xy cancels the per-frame projection jitter (R1/B;
-	// 0 when r_temporalJitter is off) so the jitter never registers as motion. Zeroed on the depth-
-	// hacked view weapon (u_localParam0.x == 0, the same mask written to fragColor.a).
-	// Zero the depth-hacked view weapon (u_localParam0.x == 0) and any degenerate clip w
-	// (a dummy/zero previous MVP, or a vertex on/behind the near plane) by BRANCHING, not
-	// by multiplying the result by the mask: prevUV = xy/w is NaN/Inf when w is 0, and
-	// NaN * 0.0 is still NaN — so the old `* u_localParam0.x` left the weapon's velocity
-	// as NaN. That NaN poisoned every consumer: FSR2 resolved the weapon to black and a
-	// NaN reaching its compute could device-lost (the "FSR + motion vectors" crash), and
-	// the SSAO/RTAO temporal reprojections smeared. A hard zero = "no motion here."
-	if ( u_localParam0.x < 0.5 || var_CurClip.w <= 0.0 || var_PrevClip.w <= 0.0 ) {
+	// 0 when r_temporalJitter is off) so the jitter never registers as motion.
+	// Zero velocity by BRANCHING, not by multiplying by a mask (prevUV = xy/w is NaN/Inf when w is 0,
+	// and NaN * 0.0 is still NaN, which poisoned every consumer — FSR2 black weapon + possible
+	// device-lost, smeared SSAO/RTAO), when either:
+	//   - the clip w is degenerate: a dummy/zero previous MVP (first sighting / despawn gap) or a
+	//     vertex on/behind the near plane. This alone covers the NaN sources.
+	//   - u_localParam0.z is set: the caller force-zeroes this surface's velocity. Used ONLY for the
+	//     depth-hacked view weapon when r_weaponMotionVectors is off (the old behaviour). Default the
+	//     weapon gets REAL motion vectors — its depth hack touches Z only, so xy/w velocity is valid,
+	//     and without it FSR2 garbles the weapon's bob/sway and the GUI displays on it. The AO/weapon
+	//     mask (u_localParam0.x -> fragColor.a) is a SEPARATE signal and is unchanged either way.
+	if ( u_localParam0.z > 0.5 || var_CurClip.w <= 0.0 || var_PrevClip.w <= 0.0 ) {
 		out_Velocity = vec2( 0.0 );
 	} else {
 		vec2 curUV  = var_CurClip.xy  / var_CurClip.w;

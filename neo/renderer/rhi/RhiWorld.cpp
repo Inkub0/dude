@@ -4513,6 +4513,12 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// AO mask (gbuffer.frag alpha): 0 on the view weapon so SSAO skips it — its
 		// depth-hacked depth makes the horizon search read far geometry (desk edges etc.)
 		parms.localParam0[0] = surf->space->weaponDepthHack ? 0.0f : 1.0f;
+		// R1/A2 velocity force-zero (gbuffer.frag localParam0.z): SEPARATE from the AO mask above.
+		// The view weapon gets REAL motion vectors by default so FSR2 / temporal reprojection stop
+		// garbling its bob/sway and the GUI displays on it (the depth hack only touches Z, so the
+		// xy/w velocity is valid; degenerate near-plane w is still guarded per-pixel). Only force it
+		// back to zero (the old behaviour) when r_weaponMotionVectors is off, for an instant A/B.
+		parms.localParam0[2] = ( surf->space->weaponDepthHack && !r_weaponMotionVectors.GetBool() ) ? 1.0f : 0.0f;
 		// SSR material attachment (docs/ssr.md): the surface's resolved PBR response,
 		// same chain as the lit path. gbuffer.frag echoes pbrParms into MRT output 1;
 		// without the second attachment GL discards that write, so filling is free.
