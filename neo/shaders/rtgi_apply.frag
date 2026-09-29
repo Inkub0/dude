@@ -42,6 +42,11 @@ void main() {
 	if ( raw >= 0.9994 ) { fragColor = vec4( 0.0 ); return; }	// sky / no geometry: no receiver, no indirect
 
 	vec2 uv     = frag * u_screenCorrection.xy;
+	// View weapon (normal-buffer alpha = the weapon/AO mask, 0 on the depth-hacked weapon): the gather
+	// already zeroed it (rtgi_ray.frag), but the GI buffer is reduced-res, so the bilinear/bilateral
+	// upscale here would pull neighbouring WORLD texels' bounce onto the weapon — RTGI "through" it.
+	// Skip, exactly as the gather and the SSAO/SSR passes skip the weapon. Full-res normal, sampled 1:1.
+	if ( texture( u_normalBuffer, uv ).a < 0.5 ) { fragColor = vec4( 0.0 ); return; }
 	vec3 gi;
 	if ( u_localParam0.y > 0.5 ) {
 		// Joint-bilateral upscale: the GI is low-res, so a plain bilinear stretch bleeds it across silhouettes

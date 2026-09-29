@@ -54,6 +54,21 @@ reflections and volumetrics.
   `albedo * gathered-irradiance * r_rtgiIntensity` into `rhiHdrRT` before FSR2/tonemap (own "rtgi apply"
   scope). Reconcile: `ambientlight.frag` dims the fake cube-map ambient by `r_rtgiAmbientKeep`
   (carried in the otherwise-unused `u_color.x`, +1 encoded so 0 = GI-off) so real GI doesn't double-count.
+
+  **View-weapon leak fix (user-verified 2026-09-29).** The GI bled onto the first-person weapon (the
+  world's panel/rail lines ghosting across the barrels). Two causes, both fixed:
+  1. `rtgi_apply.frag` never checked the view-weapon mask (normal-buffer alpha, 0 on the weapon), so the
+     reduced-res upscale pulled neighbouring world GI onto weapon pixels — the gather already skips the
+     weapon (`rtgi_ray.frag` `nt.a < 0.5`), so the apply now skips it the same way.
+  2. The real root cause: RTGI forces the **standalone** 4-attachment normal prepass (`wantAlbedo`), which
+     goes through `BeginTargetPass` — and target passes force the full `[0,1]` depth range, dropping the
+     view weapon's `SetDepthRange(0,0.5)` hack (only the *merged* prepass, `BeginNormalPrepass`, kept it —
+     which is why SSAO was unaffected). So the depth-hacked weapon landed too far in the RTGI prepass and
+     close world geometry won the depth test over it, writing world mask (and world normals → world GI) at
+     weapon pixels. Fix: a one-shot `RHI::SetNextTargetHonorsDepthRange()` (VK `nextTargetHonorsDepthRange`,
+     consumed in `EnterTargetPass`) that the standalone normal prepass requests, so it keeps the weapon
+     depth hack like the merged prepass and the color pass. The weapon then wins the depth test and its
+     `mask=0` covers the whole weapon. GL3 ignores it (its `glDepthRange` is global and already applies).
 - **H6d — one dominant-light shadow ray. DONE.** `r_rtgiShadow` (default 1): the light loop tracks the
   BRIGHTEST reaching light at the bounce hit, then traces one shadow ray toward it (`gl_RayFlagsTerminateOnFirstHitEXT`,
   bias off the surface + toward the light); if occluded, that light's contribution is dropped. One extra

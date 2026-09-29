@@ -189,6 +189,7 @@ public:
 	virtual void	SetViewport( int x, int y, int w, int h );
 	virtual void	SetScissor( int x, int y, int w, int h );
 	virtual void	SetNextTargetPassArea( int x, int y, int w, int h );
+	virtual void	SetNextTargetHonorsDepthRange();
 	virtual void	SetDepthRange( float minDepth, float maxDepth );
 	virtual void	SetPolygonOffset( bool enable, float factor, float units );
 	virtual void	ClearStencilBuffer( int value );
@@ -1116,6 +1117,9 @@ private:
 	int							curRenderH = 0;			// viewport/scissor height of the active pass
 	bool						curFlipY = true;		// scene = flipped; offscreen target = not
 	int							nextPassArea[4] = { 0, 0, 0, 0 };	// SetNextTargetPassArea (GL rect); w <= 0 = none pending
+	bool						nextTargetHonorsDepthRange = false;	// SetNextTargetHonorsDepthRange: the NEXT BeginTargetPass
+																	// keeps the weapon/model depth-range hack (scene-depth-sealing
+																	// prepasses), instead of the shadow-map default of full [0,1]
 	int							savedVpRect[4] = { 0, 0, 0, 0 };	// restored by the target's EndPass
 	int							savedScRect[4] = { 0, 0, 0, 0 };
 
@@ -9758,7 +9762,12 @@ void VulkanBackend::EnterTargetPass( int w, int h, bool flipY, VkRenderPass pipe
 	curPassClass = passClass;
 	curColorAtt = colorAtt;
 	insideTargetPass = true;
-	targetHonorsDepthRange = false;
+	// The weapon/model depth-range hack (SetDepthRange) is dropped in a target pass by default
+	// (shadow maps want the full [0,1] range). A scene-depth-sealing normal prepass must keep it,
+	// or the depth-hacked view weapon lands at the wrong depth in that buffer and world geometry
+	// intersects it (SSAO/RTGI leak onto the weapon). Requested one-shot via SetNextTargetHonorsDepthRange.
+	targetHonorsDepthRange = nextTargetHonorsDepthRange;
+	nextTargetHonorsDepthRange = false;
 	dynStateDirty = true;
 }
 
@@ -11122,6 +11131,10 @@ void VulkanBackend::SetViewport( int x, int y, int w, int h ) {
 void VulkanBackend::SetScissor( int x, int y, int w, int h ) {
 	scRect[0] = x; scRect[1] = y; scRect[2] = w; scRect[3] = h;
 	dynStateDirty = true;
+}
+
+void VulkanBackend::SetNextTargetHonorsDepthRange() {
+	nextTargetHonorsDepthRange = true;	// consumed by the next EnterTargetPass (weapon depth hack in the normal prepass)
 }
 
 void VulkanBackend::SetNextTargetPassArea( int x, int y, int w, int h ) {

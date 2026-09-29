@@ -4402,6 +4402,10 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( !RB_RHI_EnsureNormalTarget( r, w, h, ssrWants, velWants, wantAlbedo ) ) {
 			return false;
 		}
+		// This standalone prepass SEALS the scene depth (like BeginNormalPrepass / zfill), so it must
+		// keep the view weapon's depth-range hack — otherwise the weapon lands at the wrong depth here
+		// and close world geometry intersects it, leaking SSAO/RTGI onto the weapon (docs/rtx-rtgi.md).
+		r->SetNextTargetHonorsDepthRange();
 		r->BeginTargetPass( rhiNormalRT, &clear );
 		activeNormalRT = rhiNormalRT;
 		rhiNormalMrtThisView = ssrWants;
