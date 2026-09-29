@@ -246,8 +246,18 @@ identical for cur and prev) — **preferably via a separate small UBO/push path 
 passes only**, to avoid charging +64 B to every one of the thousands of non-MV draws the
 `gl3-perf-ubo-stall` work tuned. Velocity is the **RG16F 3rd MRT** on `RB_RHI_NormalPrepass`
 using A0's pass class; `gbuffer.{vert,frag,tese}` write `MV = currUV − prevUV` in the **one
-canonical +Y-up convention**, zero for `weaponDepthHack` surfaces, never for `viewEntitys==NULL`
-(HUD/2D). Forcing the prepass on **must** reuse `RB_RHI_TessBumpForZfill` (depth-EQUAL contract).
+canonical +Y-up convention**, never for `viewEntitys==NULL` (HUD/2D). Forcing the prepass on
+**must** reuse `RB_RHI_TessBumpForZfill` (depth-EQUAL contract).
+
+**Weapon motion vectors (`r_weaponMotionVectors`, default 1, user-verified 2026-09-29).** The
+depth-hacked view weapon originally wrote **zero** velocity — a crude NaN guard that also made FSR2
+treat the weapon as screen-static, so its bob/sway (and the GUI displays on it) garbled under motion.
+The zero was redundant: the per-pixel `w <= 0` branch already catches the real NaN sources (dummy/
+first-frame MVP, near-plane verts), and the depth hack only compresses Z, so the weapon's screen-space
+`xy/w` velocity is valid. The weapon-velocity kill was decoupled from the AO/SSR weapon mask (both were
+`localParam0.x`): the mask stays on `localParam0.x` → `fragColor.a`; the force-zero moved to
+`localParam0.z`, set only for the weapon when `r_weaponMotionVectors 0` (the A/B revert). Default on,
+the weapon gets real motion vectors and FSR2 resolves it cleanly.
 Feeds VK temporal SSAO (:4772) and SSR (:4441). **Validators (`r_motionVectors`, `r_mvDebug`):**
 static camera → velocity ≈ 0 (hard assert); moving camera over static geo → matches A1
 camera-only reproj within a perceptual threshold (not bit-exact — RG16F quantization); moving

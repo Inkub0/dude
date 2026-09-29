@@ -1083,6 +1083,7 @@ extern idCVar r_ssaoTemporalFeedback;	// temporal history weight (0..0.97)
 extern idCVar r_ssaoTemporalTrade;		// A/B: temporal-funded 4x6 budget vs the current cvars
 extern idCVar r_temporalResetDist;		// view-origin jump (world units) that resets temporal history (cut/teleport); 0 = never
 extern idCVar r_motionVectors;			// VK: per-object screen-velocity MRT in the normal prepass (R1/A2, feeds FSR2 / temporal SSAO+SSR)
+extern idCVar r_weaponMotionVectors;	// give the view weapon real motion vectors (fix FSR2 garbling its displays); 0 = old zero-velocity weapon
 extern idCVar r_mvDebug;				// visualize the velocity buffer: 0=off, 1=direction, 2=magnitude
 extern idCVar r_mvDebugScale;			// live gain multiplier for the r_mvDebug overlay (crank up to see slow motion)
 extern idCVar r_ssaoDepthMip;			// march the horizon search over a prefiltered linear-depth mip chain (Phase 1)
