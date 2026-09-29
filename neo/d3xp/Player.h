@@ -397,6 +397,26 @@ public:
 	idMat3					gravityViewAxisPrev;	// previous tic
 	bool					renderViewInterpolatable;
 
+	// render interpolation (com_interpolate): the cinematic / camera renderView from the previous and
+	// current tic. A camera pan is committed once per 60Hz tic like any mover, so with the actors gliding
+	// sub-tic (stage 3) a stepped camera made moving actors judder during pans -- worst on vertical motion
+	// (an actor descending stairs). InterpolateRenderView glides this camera view by the same frac so the
+	// camera stays in step with the interpolated world. Captured in CalculateRenderView on the camera path.
+	idVec3					renderViewCameraOrigin;
+	idVec3					renderViewCameraOriginPrev;
+	idMat3					renderViewCameraAxis;
+	idMat3					renderViewCameraAxisPrev;
+	// the FINAL aspect-corrected fov as GetViewParms produced it (already ran CalcFov); interpolate both
+	// components directly -- re-running CalcFov on fov_x would double-apply the widescreen widening
+	float					renderViewCameraFovX;
+	float					renderViewCameraFovXPrev;
+	float					renderViewCameraFovY;
+	float					renderViewCameraFovYPrev;
+	bool					renderViewCameraInterpolatable;	// this tic's renderView came from a camera (glide it)
+	bool					renderViewHadCamera;			// previous tic was a camera view (else snap across the entry)
+	const idCamera *		renderViewCameraEntity;			// the camera that drove last tic's view (a switch forces a snap)
+	int						renderViewCameraCutSerial;		// last tic's idCamera shot serial (a hard cut forces a snap)
+
 	idDragEntity			dragEntity;
 
 #ifdef _D3XP
