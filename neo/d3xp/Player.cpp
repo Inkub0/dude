@@ -1284,6 +1284,18 @@ idPlayer::idPlayer() {
 	gravityViewAxis.Identity();
 	gravityViewAxisPrev.Identity();
 	renderViewInterpolatable	= false;
+	renderViewCameraOrigin		= vec3_zero;
+	renderViewCameraOriginPrev	= vec3_zero;
+	renderViewCameraAxis.Identity();
+	renderViewCameraAxisPrev.Identity();
+	renderViewCameraFovX		= 0.0f;
+	renderViewCameraFovXPrev	= 0.0f;
+	renderViewCameraFovY		= 0.0f;
+	renderViewCameraFovYPrev	= 0.0f;
+	renderViewCameraInterpolatable	= false;
+	renderViewHadCamera			= false;
+	renderViewCameraEntity		= NULL;
+	renderViewCameraCutSerial	= 0;
 
 	hipJoint				= INVALID_JOINT;
 	chestJoint				= INVALID_JOINT;
@@ -8772,16 +8784,60 @@ void idPlayer::CalculateRenderView( void ) {
 	// only a plain first-person view may be interpolated between tics; camera, cinematic
 	// and third-person views have their own motion and must be left untouched
 	renderViewInterpolatable = false;
+	renderViewCameraInterpolatable = false;
 
 	// check if we should be drawing from a camera's POV
 	if ( !noclip && (gameLocal.GetCamera() || privateCameraView) ) {
+		idCamera *activeCamera = privateCameraView ? privateCameraView : gameLocal.GetCamera();
 		// get origin, axis, and fov
 		if ( privateCameraView ) {
 			privateCameraView->GetViewParms( renderView );
 		} else {
 			gameLocal.GetCamera()->GetViewParms( renderView );
 		}
+
+		// com_interpolate: the camera pan is committed once per 60Hz tic like any mover. With the actors
+		// gliding sub-tic (stage 3) a stepped camera makes moving actors judder during pans, so snapshot
+		// the view the camera just produced and let InterpolateRenderView glide it by the same frac. Age
+		// prev<-cur while the shot is CONTINUOUS; otherwise snap prev=cur so the discontinuity tic renders
+		// exactly (no smear). A shot is continuous only when the same camera drives it (no switch), no hard
+		// cut fired inside it (GetViewCutSerial unchanged), and the pose moved less than a teleport-sized
+		// step (the same 64u / ~45deg guard as the first-person view catches any cut the serial misses).
+		// fov is captured as its FINAL aspect-corrected value (GetViewParms already ran CalcFov) and both
+		// components are lerped directly in InterpolateRenderView -- re-running CalcFov would double-widen.
+		// A camera can Stop()-chain to a DIFFERENT camera from inside GetViewParms above; activeCamera was
+		// sampled before that call, so detect the switch here (pointer compare only, null-safe) and force a
+		// snap. Covers a chained target whose activation does not itself re-enter CalculateRenderView.
+		const bool cameraSwitched = !privateCameraView && ( gameLocal.GetCamera() != activeCamera );
+		const int camCutSerial = activeCamera->GetViewCutSerial();
+		const bool camContinuous = renderViewHadCamera
+			&& !cameraSwitched
+			&& renderViewCameraEntity == activeCamera
+			&& renderViewCameraCutSerial == camCutSerial
+			&& ( renderView->vieworg - renderViewCameraOrigin ).LengthSqr() <= Square( 64.0f )
+			&& ( renderView->viewaxis[0] * renderViewCameraAxis[0] ) >= 0.7f;
+		if ( camContinuous ) {
+			renderViewCameraOriginPrev	= renderViewCameraOrigin;
+			renderViewCameraAxisPrev	= renderViewCameraAxis;
+			renderViewCameraFovXPrev	= renderViewCameraFovX;
+			renderViewCameraFovYPrev	= renderViewCameraFovY;
+		} else {
+			renderViewCameraOriginPrev	= renderView->vieworg;
+			renderViewCameraAxisPrev	= renderView->viewaxis;
+			renderViewCameraFovXPrev	= renderView->fov_x;
+			renderViewCameraFovYPrev	= renderView->fov_y;
+		}
+		renderViewCameraOrigin	= renderView->vieworg;
+		renderViewCameraAxis	= renderView->viewaxis;
+		renderViewCameraFovX	= renderView->fov_x;
+		renderViewCameraFovY	= renderView->fov_y;
+		renderViewCameraEntity	= activeCamera;
+		renderViewCameraCutSerial = camCutSerial;
+		renderViewCameraInterpolatable = true;
+		renderViewHadCamera = true;
 	} else {
+		renderViewHadCamera = false;	// leaving the camera path: next entry snaps instead of interpolating from a stale view
+		renderViewCameraEntity = NULL;
 		if ( g_stopTime.GetBool() ) {
 			renderView->vieworg = firstPersonViewOrigin;
 			renderView->viewaxis = firstPersonViewAxis;
@@ -8834,7 +8890,28 @@ the past; it never extrapolates, avoiding overshoot on direction changes.
 ==================
 */
 void idPlayer::InterpolateRenderView( float frac ) {
-	if ( !renderView || !renderViewInterpolatable ) {
+	if ( !renderView ) {
+		return;
+	}
+
+	// Cinematic / camera view: glide the camera pan between its previous and current tic so it stays in
+	// step with the interpolated actors (stage 3) instead of stepping at the 60Hz tic rate. Same
+	// prev + frac*(cur - prev) form as the world entities; prev == cur across a camera cut, so this is
+	// an exact no-op there (no smear across a hard cut).
+	if ( renderViewCameraInterpolatable ) {
+		renderView->vieworg = renderViewCameraOriginPrev + frac * ( renderViewCameraOrigin - renderViewCameraOriginPrev );
+		idQuat cq;
+		cq.Slerp( renderViewCameraAxisPrev.ToQuat(), renderViewCameraAxis.ToQuat(), frac );
+		renderView->viewaxis = cq.ToMat3();
+		// lerp the FINAL (already aspect-corrected) fov components directly. GetViewParms ran CalcFov
+		// before we snapshotted these, so re-running CalcFov here would double-apply the widescreen
+		// widening; at frac==1 (prev==cur) this reproduces the tic's fov_x/fov_y byte-for-byte.
+		renderView->fov_x = renderViewCameraFovXPrev + frac * ( renderViewCameraFovX - renderViewCameraFovXPrev );
+		renderView->fov_y = renderViewCameraFovYPrev + frac * ( renderViewCameraFovY - renderViewCameraFovYPrev );
+		return;
+	}
+
+	if ( !renderViewInterpolatable ) {
 		return;
 	}
 
