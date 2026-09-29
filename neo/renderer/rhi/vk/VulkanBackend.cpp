@@ -459,7 +459,7 @@ private:
 	static const int MAX_FRAME_SETS = 4096;			// per-draw texture sets per frame
 	// set-1 combined image samplers: units 0-7, shadow cube 8, SSAO 9, occlusion 10,
 	// parallax 11, dynamic shadow cube 12, blurred RT shadow mask 13 (r_rtShadowBlur)
-	static const int VK_TEX_BINDINGS = 16;	// 0-7 material units, 8-14 named, 15 = tess height (DUDE)
+	static const int VK_TEX_BINDINGS = 17;	// 0-7 material units, 8-14 named, 15 = tess height, 16 = contact-shadow depth (DUDE)
 
 	struct RingBuf {
 		VkBuffer		buffer = VK_NULL_HANDLE;
@@ -11570,6 +11570,7 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 		mixKey( key, (uint32_t)args.shadowMask );
 		mixKey( key, (uint32_t)args.decalMask );
 		mixKey( key, (uint32_t)args.tessHeight );
+		mixKey( key, (uint32_t)args.contactDepth );
 		bool needsTexBind = true;
 		if ( boundTexSet != VK_NULL_HANDLE && boundTexKey == key ) {
 			texSet = boundTexSet;
@@ -11682,6 +11683,11 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 							sampler = rec.sampler;
 							view = rec.view;
 						}
+					} else if ( i == 16 && args.contactDepth >= 1 && args.contactDepth <= (ImageHandle)imageTable.size()
+					            && imageTable[args.contactDepth - 1].live ) {
+						const ImageRec &rec = imageTable[args.contactDepth - 1];	// captured scene depth (else white = raw 1 = lit)
+						sampler = rec.sampler;
+						view = rec.view;
 					}
 					infos[i] = {};
 					infos[i].sampler = sampler;

@@ -42,6 +42,12 @@ SAMPLER_BINDING(13) uniform sampler2D u_shadowMask;
 // the light loop (RB_RHI_DrawWorld), VK carries it per draw. Declaring it under VULKAN only left
 // the GL3 program referencing an undeclared sampler, so interaction.frag failed to compile there.
 SAMPLER_BINDING(14) uniform sampler2D u_decalMask;
+// DUDE screen-space contact shadows (docs/contact-shadows.md): the frame's captured scene
+// depth (_currentDepth), sampled by the per-light view-space march. Unit 15 is the tess height
+// map (.tese stage), so this takes unit 16 - declared for BOTH backends: GL3 raw-binds the
+// depth on unit 16 for the light loop, VK carries it per draw (DrawArgs::contactDepth, set-1
+// binding 16). White when unbound -> raw depth 1 -> no occluder found -> fully lit.
+SAMPLER_BINDING(16) uniform sampler2D u_contactDepth;
 
 VARY(0) in vec3 var_TexLightVec;
 VARY(1) in vec2 var_TexBump;
@@ -308,6 +314,69 @@ float shadowVisibility( bool canReceive ) {
 		sum += texture( u_shadowMap, vec3( uv + vogelDisc( i, 4, phi ) * u_shadowParms.y, ref ) );
 	}
 	return sum * 0.25;
+}
+
+// DUDE screen-space contact shadows (docs/contact-shadows.md). A short view-space march from
+// this fragment TOWARD the light samples the captured scene depth (u_contactDepth) for a nearer
+// occluder, grounding the small geometry a shadow map is too coarse to resolve -- pickups, thin
+// props, weapon detail, feet. Opt-in (r_contactShadows), raster tiers only (Ultra Nightmare uses
+// r_rtAllLights, a real per-light ray). Returns light visibility, 1 = lit, (1 - strength) when a
+// contact occluder is found (faded by march distance so a nearer occluder darkens more).
+//
+// The conventions mirror ssr.frag (proven on GL3 + VK): the fragment and light are taken to view
+// space through u_modelViewMatrix (model->view; both var_ModelPos and u_localLightOrigin live in
+// the same model-local space), each march point is projected with u_projectionMatrix, and the
+// resulting row is re-oriented for Vulkan's top-down depth buffer (u_windowCoord.z = view-Y sign)
+// and scaled to the depth texture's texel space (u_depthTexRecip.xy = viewSize / uploadSize, so
+// the GL power-of-two depth copy is addressed correctly). Depth is linearised by DUDE_DEPTH_CONSTS.
+// u_contactParms = ( steps [0 = off], marchLength, thickness, strength ), all set by the backend.
+float contactShadowTerm( bool canReceive ) {
+	if ( u_contactParms.x < 0.5 || !canReceive ) {
+		return 1.0;			// disabled, or the light contributes nothing here anyway
+	}
+	int steps = int( u_contactParms.x + 0.5 );
+	// fragment + light in view space (negative Z is forward, matching ssr.frag)
+	vec3 Pv = ( u_modelViewMatrix * vec4( var_ModelPos, 1.0 ) ).xyz;
+	vec3 Lv = ( u_modelViewMatrix * vec4( u_localLightOrigin.xyz, 1.0 ) ).xyz;
+	vec3 toL = Lv - Pv;
+	float distL = length( toL );
+	if ( distL < 1e-3 ) {
+		return 1.0;
+	}
+	vec3 dir = toL / distL;
+	float marchLen = min( u_contactParms.y, distL );	// never march past the light itself
+	float stepLen = marchLen / float( steps );
+	vec2 dc = DUDE_DEPTH_CONSTS();
+	// per-pixel dither on the start offset turns the step banding into fine grain (same hash the
+	// shadow-map PCF uses); it also biases the first sample off the surface (self-shadow guard).
+	float jitter = shadowHash( gl_FragCoord.xy );
+	vec3 rayPos = Pv + dir * stepLen * ( 0.5 + jitter );
+	float thick = u_contactParms.z;
+	// constant loop bound (steps <= 32 by the cvar clamp) keeps the loop uniform across drivers
+	for ( int i = 0; i < 32; i++ ) {
+		if ( i >= steps ) {
+			break;
+		}
+		vec4 clip = u_projectionMatrix * vec4( rayPos, 1.0 );
+		if ( clip.w > 0.0 ) {
+			vec2 uv01 = ( clip.xy / clip.w ) * 0.5 + 0.5;
+			if ( uv01.x > 0.0 && uv01.x < 1.0 && uv01.y > 0.0 && uv01.y < 1.0 ) {
+				// GL bottom-up / VK top-down row, then scale into the depth texel space
+				float row = ( u_windowCoord.z > 0.0 ) ? uv01.y : ( 1.0 - uv01.y );
+				float raw = texture( u_contactDepth, vec2( uv01.x, row ) * u_depthTexRecip.xy ).x;
+				float sceneZ = 1.0 / ( min( raw, 0.9994 ) * dc.x + dc.y );	// negative
+				// both negative; a surface NEARER the camera than the ray point (sceneZ less
+				// negative -> sceneZ > rayPos.z) that sits within the thickness band occludes.
+				float d = sceneZ - rayPos.z;
+				if ( d > 0.05 * stepLen && d < thick ) {
+					float fade = 1.0 - float( i ) / float( steps );	// nearer occluder -> darker
+					return clamp( 1.0 - u_contactParms.w * fade, 0.0, 1.0 );
+				}
+			}
+		}
+		rayPos += dir * stepLen;
+	}
+	return 1.0;
 }
 
 // DUDE parallax occlusion mapping (docs/parallax.md). Marches the height field along the
@@ -599,6 +668,10 @@ void main() {
 		// on top. kd 1 = physical, kd 0 = full albedo retained (docs sec. 5).
 		diffuse.rgb *= ( 1.0 - F ) * ( 1.0 - metal * u_pbrParms2.x );
 		shadowVis = shadowVisibility( lightReaches && NdotL > 0.0 );
+		// DUDE contact shadows: fold the short screen-space march into this light's visibility so it
+		// stacks with the shadow map and rides the same shadowVis the skin scatter reuses. Skipped on
+		// the wet-blood film draw (a decal glint, not a shadow receiver).
+		shadowVis *= contactShadowTerm( lightReaches && NdotL > 0.0 && filmMode < 0.5 );
 		lightScale = NdotL * shadowVis;
 		sssExcess = skinScatterExcess( NdotLsigned );	// 0 unless this is a skin/flesh draw
 	} else {
@@ -611,6 +684,8 @@ void main() {
 
 		float rawNdotL = dot( lightV, localNormal );
 		shadowVis = shadowVisibility( lightReaches && rawNdotL > 0.0 );
+		// DUDE contact shadows (see the PBR branch): fold the screen-space march into shadowVis.
+		shadowVis *= contactShadowTerm( lightReaches && rawNdotL > 0.0 && filmMode < 0.5 );
 		lightScale = rawNdotL * shadowVis;
 		sssExcess = skinScatterExcess( rawNdotL );		// 0 unless this is a skin/flesh draw
 

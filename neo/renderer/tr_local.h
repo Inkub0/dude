@@ -939,6 +939,13 @@ extern idCVar r_ssrGlassProbeSize;		// probe face resolution
 extern idCVar r_ssrGlassProbeScale;		// probe brightness on glass (glass-only intensity)
 extern idCVar r_specOcclusion;			// RR14: roughness-aware AO dimming of SSR + RT reflections
 
+// DUDE screen-space contact shadows (docs/contact-shadows.md): per-light depth-buffer march grounding
+extern idCVar r_contactShadows;			// master toggle (opt-in, raster tiers; UN uses r_rtAllLights)
+extern idCVar r_contactShadowStrength;	// darkening on a found occluder (0..1)
+extern idCVar r_contactShadowLength;	// march length toward the light (world units)
+extern idCVar r_contactShadowThickness;	// occluder thickness band (world units)
+extern idCVar r_contactShadowSteps;		// march steps per lit pixel (2..32)
+
 // DUDE glass probes (docs/ssr.md): fs_savepath-relative extensionless base path
 // for a map area's probe faces (envprobes/<map>/area<N>; + _px.tga etc), and the
 // backend cache invalidation the bake command calls after writing new faces

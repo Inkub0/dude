@@ -150,6 +150,16 @@ struct RenderParams {
 								// per-channel diffuse wrap widths (red widest -> warm terminator).
 								// interaction.frag adds the wrapped-diffuse EXCESS over Lambert as
 								// extra diffuse light; 0 on every other draw. Appended LAST.
+
+	float	contactParms[4];	// DUDE screen-space contact shadows (docs/contact-shadows.md): a short
+								// view-space march from the fragment toward the light samples _currentDepth
+								// (unit 16) for a nearer occluder, grounding small geometry shadow maps
+								// miss. x = step count (0 = off - the shader early-outs), y = march length
+								// (world units), z = depth-compare thickness (world units), w = darkening
+								// strength (0..1). Filled only on non-ambient interaction draws when
+								// r_contactShadows is on and the depth capture is ready; needs modelView/
+								// projection/depthParms/depthTexRecip/windowCoord.z, filled alongside.
+								// Raster tiers only (UN uses r_rtAllLights). 0 = off. Appended LAST.
 };
 
 // window depth -> view z for a view, from its projection matrix (column-major GL layout):
@@ -163,8 +173,8 @@ inline void FillDepthParms( RenderParams &p, const float *proj ) {
 	}
 }
 
-// 4 mat4 (256) + 49 vec4 (784) = 1040 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 1040, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 4 mat4 (256) + 50 vec4 (800) = 1056 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 1056, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

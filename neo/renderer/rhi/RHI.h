@@ -127,6 +127,9 @@ struct DrawArgs {
 									// (VK only -- GL3 has no tess stages). 0 = unbound -> MID-GREY, not white:
 									// the shader computes (h - 0.5), so a white dummy would shove every tessellated
 									// surface out by full strength. See docs/tessellation.md.
+	ImageHandle		contactDepth;	// DUDE contact shadows (docs/contact-shadows.md): the captured scene depth
+									// (_currentDepth) the interaction pass marches; bound to unit 16 (VK; GL3
+									// raw-binds it loop-global). 0 = unbound -> white = raw depth 1 = no occluder = lit.
 };
 
 struct ClearArgs {

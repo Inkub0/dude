@@ -4503,6 +4503,58 @@ static void DrawDbgGroup_RTShadows()
 	}
 }
 
+static void DrawDbgGroup_ContactShadows()
+{
+	// Screen-space contact shadows (docs/contact-shadows.md): a short per-light depth march that
+	// grounds the small geometry shadow maps miss - dropped pickups, thin props, weapon detail,
+	// feet. Raster tiers (opengl3 + Vulkan); at Ultra Nightmare r_rtAllLights covers it, so leave
+	// this off there. Not preset-wired - a look change, tuned live here.
+	const bool backendOk = R_BackendSupportsEnhancements();
+	if ( BeginSettingsGroup( "Contact Shadows", &r_contactShadows,
+			"r_contactShadows: march the depth buffer from each lit pixel toward the light and darken where a "
+			"nearer occluder is found. Grounds small props/pickups/weapon detail/feet that shadow maps are too "
+			"coarse to catch. opengl3/Vulkan only. Redundant with r_rtAllLights - leave off at Ultra Nightmare." ) ) {
+
+		if ( !backendOk ) {
+			ImGui::TextDisabled( "Needs the opengl3 or Vulkan backend." );
+		}
+		ImGui::BeginDisabled( !backendOk );
+
+		float strength = r_contactShadowStrength.GetFloat();
+		if ( ImGui::SliderFloat( "Strength", &strength, 0.0f, 1.0f, "%.2f" ) ) {
+			r_contactShadowStrength.SetFloat( strength );
+		}
+		AddTooltip( "r_contactShadowStrength: how much a found occluder dims the light (0 = none, 1 = full black "
+			"at the contact). Faded by march distance so a nearer occluder darkens more. Default 0.8." );
+
+		float length = r_contactShadowLength.GetFloat();
+		if ( ImGui::SliderFloat( "March Length", &length, 1.0f, 128.0f, "%.0f" ) ) {
+			r_contactShadowLength.SetFloat( length );
+		}
+		AddTooltip( "r_contactShadowLength: how far toward the light the depth march reaches, world units. Short "
+			"= tight contact grounding; long = broader but coarser and dearer. Clamped to the distance to the "
+			"light. Default 12." );
+
+		float thickness = r_contactShadowThickness.GetFloat();
+		if ( ImGui::SliderFloat( "Occluder Thickness", &thickness, 0.5f, 128.0f, "%.0f" ) ) {
+			r_contactShadowThickness.SetFloat( thickness );
+		}
+		AddTooltip( "r_contactShadowThickness: a depth sample nearer than the ray by more than this is treated as "
+			"background, not an occluder. Too low = shadows drop out behind thin geometry; too high = haloing / "
+			"over-occlusion. Default 8." );
+
+		int steps = r_contactShadowSteps.GetInteger();
+		if ( ImGui::SliderInt( "March Steps", &steps, 2, 32 ) ) {
+			r_contactShadowSteps.SetInteger( steps );
+		}
+		AddTooltip( "r_contactShadowSteps: depth-march samples per lit pixel. More = smoother/further-reaching, "
+			"dearer. Runs per light, so keep it low (watch r_gl3GpuTime / r_vkGpuTime). Default 8." );
+
+		ImGui::EndDisabled();	// backendOk
+		EndSettingsGroup();
+	}
+}
+
 static void DrawDbgGroup_DepthOfField()
 {
 	// Weapon-reload depth-of-field (r_dof): as a weapon reloads, the world beyond it
@@ -5419,6 +5471,7 @@ static void DrawShadowDebugMenu()
 	// calls to change the on-screen order.
 	DrawDbgGroup_RenderDebugging();
 	DrawDbgGroup_ShadowMaps();
+	DrawDbgGroup_ContactShadows();
 	DrawDbgGroup_RTShadows();
 	DrawDbgGroup_SSAO();
 	DrawDbgGroup_OcclusionMaps();

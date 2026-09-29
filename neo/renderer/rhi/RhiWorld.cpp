@@ -1793,6 +1793,40 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		}
 	}
 
+	// DUDE screen-space contact shadows (docs/contact-shadows.md). interaction.frag's
+	// contactShadowTerm marches the captured scene depth (_currentDepth, unit 16 - already
+	// sampleable, SSAO consumed it earlier this frame) from the fragment toward the light and
+	// darkens where a nearer occluder is found, grounding small geometry the shadow map misses.
+	// Opt-in, non-ambient (direct-light) draws only, raster tiers (Ultra Nightmare uses
+	// r_rtAllLights). Fills the view-space march transforms (model->view, view->clip), the depth
+	// linearisation pair, the depth-texel scale and the view-Y sign, mirroring the SSR conventions.
+	bool contactShadows = false;
+	if ( r_contactShadows.GetBool() && !din->ambientLight && R_BackendSupportsEnhancements() ) {
+		idImage *cd = globalImages->currentDepthImage;
+		const bool vkModeCS = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+		const bool depthReady = cd && cd->uploadWidth > 0 && cd->uploadHeight > 0
+			&& ( vkModeCS ? ( cd->rhiCaptured && cd->rhiHandle != 0 ) : true );
+		if ( depthReady ) {
+			contactShadows = true;
+			const int steps = idMath::ClampInt( 2, 32, r_contactShadowSteps.GetInteger() );
+			parms.contactParms[0] = (float)steps;
+			parms.contactParms[1] = r_contactShadowLength.GetFloat();
+			parms.contactParms[2] = r_contactShadowThickness.GetFloat();
+			parms.contactParms[3] = idMath::ClampFloat( 0.0f, 1.0f, r_contactShadowStrength.GetFloat() );
+			// view-space march transforms: this surface's model->view and the view's view->clip
+			memcpy( parms.modelViewMatrix, din->surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
+			memcpy( parms.projectionMatrix, ictx.viewDef->projectionMatrix, sizeof( parms.projectionMatrix ) );
+			rhi::FillDepthParms( parms, ictx.viewDef->projectionMatrix );	// window depth -> view z (cinematics cram the near plane)
+			// map a march point's view-[0,1] uv into the depth texture's texel space: the GL capture
+			// is power-of-two padded, the VK capture is native (ratio ~1). fullView / uploadSize.
+			const int fullW = ictx.viewDef->viewport.x2 - ictx.viewDef->viewport.x1 + 1;
+			const int fullH = ictx.viewDef->viewport.y2 - ictx.viewDef->viewport.y1 + 1;
+			parms.depthTexRecip[0] = (float)fullW / (float)cd->uploadWidth;
+			parms.depthTexRecip[1] = (float)fullH / (float)cd->uploadHeight;
+			parms.windowCoord[2] = vkModeCS ? -1.0f : 1.0f;	// view-Y sign for the top-down VK depth buffer (deviceRow)
+		}
+	}
+
 	// DUDE material AO map (docs/occlusion-maps.md). A per-surface baked occlusion texture
 	// (the material's `occlusionmap` stage) darkens the ambient term, and -- scaled by
 	// r_occlusionMapDirect -- the direct-light diffuse, reusing the SSAO application path in
@@ -1952,6 +1986,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		da.shadowMask = ictx.shadowMaskImage;	// blurred RT shadow mask for u_shadowMask (unit 13)
 	}
 	da.decalMask = rhiDecalMaskImage;			// decal metal retention for u_decalMask (unit 14); VK only, GL3 raw-binds it
+	if ( contactShadows && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		da.contactDepth = globalImages->currentDepthImage->rhiHandle;	// captured scene depth for u_contactDepth (unit 16); GL3 raw-binds it loop-global
+	}
 	ictx.r->Draw( da );
 
 	backEnd.pc.c_drawElements++;
@@ -8814,6 +8851,19 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 		// GL: raw-bind on unit 9. VK: record into rhiVkUnits[9] so every interaction/
 		// ambient draw's RB_RHI_VkTextures carries it as DrawArgs::ssao for the loop.
 		RB_RHI_BindRTUnit( r, 9, rhiSsaoResultRT );
+	}
+
+	// DUDE screen-space contact shadows (docs/contact-shadows.md): bind the captured scene depth
+	// (_currentDepth, already sampleable - SSAO consumed it earlier this frame) on unit 16 for the
+	// whole light loop. GL3 raw-binds it (nothing in the loop touches unit 16); VK carries it per
+	// draw as DrawArgs::contactDepth. interaction.frag's contactShadowTerm only samples it when
+	// r_contactShadows filled contactParms this surface, so the bind is harmless when the feature is off.
+	if ( r_contactShadows.GetBool() && !vkMode && R_BackendSupportsEnhancements()
+	     && globalImages->currentDepthImage->uploadWidth > 0 ) {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 16 );
+		qglBindTexture( GL_TEXTURE_2D, globalImages->currentDepthImage->texnum );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
 	}
 
 	// per-light shadowing and adding (matches RB_ARB2_DrawInteractions)
