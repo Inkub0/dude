@@ -67,6 +67,11 @@ extern void SetScale( float scale );
 // disappears after a few seconds or when a key is pressed or the mouse is moved
 extern void ShowWarningOverlay( const char* text );
 
+// DUDE: the SDL game controllers ImGui polls for its gamepad navigation, as chosen by
+// sys/events.cpp (all connected pads merged, or the one in_gamepadDevice selects).
+// May be called before Init() and on hotplug; the selection is remembered.
+extern void SetGamepads( void* const* gamepads, int num );
+
 enum Style {
 	Dhewm3,
 	ImGui_Default,
@@ -121,6 +126,8 @@ inline float GetScale() { return 1.0f; }
 inline void SetScale( float scale ) {}
 
 inline void ShowWarningOverlay( const char* text ) {}
+
+inline void SetGamepads( void* const* gamepads, int num ) {}
 
 inline bool WriteUserStyle() { return false; }
 

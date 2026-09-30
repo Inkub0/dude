@@ -12,6 +12,7 @@
 
 #include "KeyInput.h"
 #include "UsercmdGen.h" // key bindings
+#include "FileSystem.h" // DUDE: default gamepad bindings cfg
 #include "DeclEntityDef.h"
 #include "Session_local.h" // sessLocal.GetActiveMenu()
 
@@ -1247,6 +1248,122 @@ static void UpdateKeyBindingsInEntries() {
 }
 
 
+// DUDE: reset the gamepad bindings to the default Xbox-style layout that ships in
+// base/gamepad.cfg (Doom 3) or base/gamepad-d3xp.cfg (Resurrection of Evil, the Lost
+// Mission and mods built on d3xp - their weapon slots differ). The cfg is parsed here
+// instead of exec'd so the change is synchronous and the bindings table updates at once;
+// only JOY_* keys are touched, keyboard/mouse bindings stay as they are.
+static bool IsD3XPBasedGame()
+{
+	const char* game = cvarSystem->GetCVarString( "fs_game" );
+	const char* gameBase = cvarSystem->GetCVarString( "fs_game_base" );
+	return idStr::Icmp( game, "d3xp" ) == 0 || idStr::Icmp( game, "d3le" ) == 0
+		   || idStr::Icmp( gameBase, "d3xp" ) == 0;
+}
+
+static const char* DefaultGamepadCfgName()
+{
+	return IsD3XPBasedGame() ? "gamepad-d3xp.cfg" : "gamepad.cfg";
+}
+
+// returns the number of bindings applied, or -1 if the cfg couldn't be read
+static int ApplyDefaultGamepadBindings()
+{
+	const char* cfgName = DefaultGamepadCfgName();
+	char* buf = NULL;
+	int len = fileSystem->ReadFile( cfgName, (void**)&buf, NULL );
+	if ( len <= 0 || buf == NULL ) {
+		return -1;
+	}
+
+	// clean slate, so old custom bindings don't linger on buttons the defaults leave free
+	for ( int k = K_FIRST_JOY; k <= K_LAST_JOY; ++k ) {
+		if ( k != K_JOY_BTN_START ) {
+			idKeyInput::SetBinding( k, "" );
+		}
+	}
+
+	int numBound = 0;
+	idLexer lex( buf, len, cfgName, LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_NOSTRINGESCAPECHARS | LEXFL_ALLOWPATHNAMES );
+	idToken tok, key, cmd;
+	while ( lex.ReadToken( &tok ) ) {
+		if ( tok.Icmp( "bind" ) == 0 && lex.ReadTokenOnLine( &key ) && lex.ReadTokenOnLine( &cmd ) ) {
+			int keyNum = idKeyInput::StringToKeyNum( key.c_str() );
+			if ( keyNum >= K_FIRST_JOY && keyNum <= K_LAST_JOY && keyNum != K_JOY_BTN_START ) {
+				idKeyInput::SetBinding( keyNum, cmd.c_str() );
+				++numBound;
+			}
+		}
+		lex.SkipRestOfLine();
+	}
+	fileSystem->FreeFile( buf );
+	return numBound;
+}
+
+static void DrawResetGamepadBindings()
+{
+	static int lastResult = -2; // -2: not applied yet this session
+	static idStr lastCfg;
+	static bool justOpened = false;
+	const char* popupTitle = "Reset Gamepad Bindings###resetGamepadBinds";
+
+	if ( ImGui::Button( "Reset Gamepad Bindings to Xbox-style Defaults" ) ) {
+		ImGui::OpenPopup( popupTitle );
+		justOpened = true;
+	}
+	{
+		// names of the face buttons as the current pad calls them (A/X/Back on xbox)
+		idStr btnSouth = Sys_GetLocalizedJoyKeyName( K_JOY_BTN_SOUTH );
+		idStr btnWest = Sys_GetLocalizedJoyKeyName( K_JOY_BTN_WEST );
+		idStr btnBack = Sys_GetLocalizedJoyKeyName( K_JOY_BTN_BACK );
+		AddTooltip( idStr::Format( "Replaces all gamepad bindings with the default layout from %s:\n"
+								   "Left Stick: Move (click: Run)    Right Stick: Look (click: Crouch)\n"
+								   "%s: Jump    %s: Reload    %s: PDA\n"
+								   "Left/Right Shoulder: Previous/Next Weapon    D-Pad: Weapon shortcuts\n"
+								   "Left Trigger: Flashlight    Right Trigger: Attack",
+								   DefaultGamepadCfgName(), btnSouth.c_str(), btnWest.c_str(), btnBack.c_str() ).c_str() );
+	}
+
+	if ( ImGui::BeginPopupModal( popupTitle, NULL, ImGuiWindowFlags_AlwaysAutoResize ) )
+	{
+		ImGui::Text( "Replace ALL current gamepad bindings with the defaults from %s ?", DefaultGamepadCfgName() );
+		ImGui::NewLine();
+		ImGui::Text( "Press Enter (or %s) to confirm, or\nEscape (or %s) to cancel.",
+					 GetGamepadBindNowButtonName(), GetGamepadCancelButtonNames() );
+		ImGui::NewLine();
+
+		// center the Ok and Cancel buttons
+		float dialogButtonWidth = CalcDialogButtonWidth();
+		float spaceBetweenButtons = ImGui::GetFontSize();
+		float buttonOffset = (ImGui::GetWindowWidth() - 2.0f*dialogButtonWidth - spaceBetweenButtons) * 0.5f;
+		ImGui::SetCursorPosX( buttonOffset );
+
+		// not on the frame the popup opened: the button press that opened it would confirm at once
+		bool confirmedByKey = !justOpened && !ImGui::IsAnyItemFocused() && IsConfirmKeyPressed();
+		justOpened = false;
+		if ( ImGui::Button( "Ok", ImVec2(dialogButtonWidth, 0) ) || confirmedByKey ) {
+			lastCfg = DefaultGamepadCfgName();
+			lastResult = ApplyDefaultGamepadBindings();
+			UpdateKeyBindingsInEntries();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SetItemDefaultFocus();
+		ImGui::SameLine( 0.0f, spaceBetweenButtons );
+		if ( ImGui::Button( "Cancel", ImVec2(dialogButtonWidth, 0) ) || IsCancelKeyPressed() ) {
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+
+	if ( lastResult == -1 ) {
+		ImGui::SameLine();
+		ImGui::TextColored( ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Couldn't read %s!", lastCfg.c_str() );
+	} else if ( lastResult >= 0 ) {
+		ImGui::SameLine();
+		ImGui::TextDisabled( "Applied %d bindings from %s", lastResult, lastCfg.c_str() );
+	}
+}
+
 static void DrawBindingsMenu()
 {
 	if ( !bindingsMenuAlreadyOpen ) { // TODO: could go into some init function
@@ -1279,6 +1396,8 @@ static void DrawBindingsMenu()
 		// (it contains the command, while the other columns contain the keys bound to that command)
 		displayNameBGColor = ImGui::GetColorU32( ImGuiCol_TableHeaderBg, 0.5f );
 
+
+		DrawResetGamepadBindings();
 
 		if ( ImGui::TreeNode("Usage Help") ) {
 			ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
@@ -1658,6 +1777,47 @@ static CVarOption controlOptions[] = {
 
 	CVarOption("Gamepad Settings"),
 	CVarOption("in_useGamepad", "Enable Gamepad Support", OT_BOOL),
+	CVarOption("in_gamepadDevice", [](idCVar& cvar) {
+			// DUDE: which connected pad feeds the game and this menu (empty = all merged)
+			const char* cur = cvar.GetString();
+			const int numPads = Sys_GetNumGamepads();
+			int sel = -1; // -1 = all
+			idStr preview;
+			if ( cur[0] == '\0' ) {
+				preview = ( numPads > 1 ) ? idStr::Format( "All connected gamepads (%d)", numPads )
+										  : idStr( "All connected gamepads" );
+			} else {
+				for ( int i = 0; i < numPads; ++i ) {
+					if ( idStr::Icmp( Sys_GetGamepadGUID( i ), cur ) == 0 || idStr::Icmp( Sys_GetGamepadName( i ), cur ) == 0 ) {
+						sel = i;
+						break;
+					}
+				}
+				preview = ( sel >= 0 ) ? idStr( Sys_GetGamepadName( sel ) )
+									   : idStr::Format( "Not connected: %s (using all)", cur );
+			}
+			if ( ImGui::BeginCombo( "Gamepad Device", preview.c_str() ) ) {
+				if ( ImGui::Selectable( "All connected gamepads", sel == -1 ) ) {
+					cvar.SetString( "" );
+				}
+				for ( int i = 0; i < numPads; ++i ) {
+					const char* path = Sys_GetGamepadPath( i );
+					idStr label = idStr::Format( "%s%s%s%s###pad%d", Sys_GetGamepadName( i ),
+												 path[0] ? " (" : "", path, path[0] ? ")" : "", i );
+					if ( ImGui::Selectable( label.c_str(), sel == i ) ) {
+						cvar.SetString( Sys_GetGamepadGUID( i ) );
+					}
+					AddTooltip( idStr::Format( "GUID: %s", Sys_GetGamepadGUID( i ) ).c_str() );
+				}
+				if ( numPads == 0 ) {
+					ImGui::TextDisabled( "(no gamepad connected)" );
+				}
+				ImGui::EndCombo();
+			}
+			AddCVarOptionTooltips( cvar, "Which gamepad drives the game and this menu.\n"
+										 "Useful when two show up, e.g. a pad's wireless dongle and its USB cable:\n"
+										 "pick the one you actually hold. 'All' merges the input of every connected pad." );
+		}),
 	CVarOption("joy_gamepadLayout", [](idCVar& cvar) {
 			int sel = cvar.GetInteger() + 1; // -1 .. 3 => 0 .. 4
 			int selOrig = sel;

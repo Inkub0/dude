@@ -242,6 +242,14 @@ int Sys_GetKeynumForScancodeName( const char* name );
 // with SDL3 it will return the "real" button name
 const char* Sys_GetLocalizedJoyKeyName( int key );
 
+// DUDE: the connected gamepads (for the settings menu and listGamepads).
+// in_gamepadDevice picks which of them feed input, Sys_IsGamepadActive() tells.
+int				Sys_GetNumGamepads();
+const char*		Sys_GetGamepadName( int idx ); // "" if idx is out of range
+const char*		Sys_GetGamepadGUID( int idx );
+const char*		Sys_GetGamepadPath( int idx ); // OS device path, may be ""
+bool			Sys_IsGamepadActive( int idx );
+
 // keyboard input polling
 int				Sys_PollKeyboardInputEvents( void );
 int				Sys_ReturnKeyboardInputEvent( const int n, int &ch, bool &state );
