@@ -5926,7 +5926,7 @@ windowDef NewGameParent {
 		text		"ULTRA NIGHTMARE"
 		textscale	0.25
 		textaligny	-5
-		forecolor	1, 1, 1, 0.5
+		forecolor	0.9, 0.15, 0.1, 0.5
 		visible 	0
 		
 		onMouseEnter {
@@ -5946,11 +5946,11 @@ windowDef NewGameParent {
 		text		"ULTRA NIGHTMARE"
 		textscale	0.25
 		textaligny	-5
-		forecolor	0.6, 1, 1, 1
+		forecolor	0.9, 0.15, 0.1, 1
 		visible 	0
 
 		onMouseEnter {
-			transition "forecolor" "0.6 1 1 1" "1 1 1 1" "250" ;
+			transition "forecolor" "0.9 0.15 0.1 1" "1 0.45 0.35 1" "250" ;
 			transition "NGBtn5EdgeG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
 			transition "NGBtn5BorderG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
 			transition "NGBtn5CornerG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
@@ -5962,7 +5962,7 @@ windowDef NewGameParent {
 			set "ToolTip2::text" "ULTRA NIGHTMARE-One life, no saves, no mercy" ;
 		}
 		onMouseExit {
-			transition "forecolor" "1 1 1 1" "0.6 1 1 1" "250" ;
+			transition "forecolor" "1 0.45 0.35 1" "0.9 0.15 0.1 1" "250" ;
 			transition "NGBtn5EdgeG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
 			transition "NGBtn5BorderG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
 			transition "NGBtn5CornerG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
@@ -20950,10 +20950,10 @@ windowDef MultiplayerLANParent {
 				transition "NGBtn5BorderG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 0.5" "200" ;
 				transition "NGBtn5CornerG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 0.5" "200" ;
 				set "NGBtnText5::visible" "1" ;
-				transition "NGBtnText5::forecolor" "1 1 1 1" "0.6 1 1 1" "200" ;
+				transition "NGBtnText5::forecolor" "1 1 1 1" "0.9 0.15 0.1 1" "200" ;
 			} else {
 				set "NGBtnText5Alt::visible" "1" ;
-				transition "NGBtnText5Alt::forecolor" "1 1 1 1" "1 1 1 0.4" "200" ;
+				transition "NGBtnText5Alt::forecolor" "1 1 1 1" "0.9 0.15 0.1 0.4" "200" ;
 			}
 		}
 		onTime 800 {
