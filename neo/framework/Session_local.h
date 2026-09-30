@@ -256,6 +256,9 @@ public:
 	// DUDE: Ultra Nightmare run state
 	bool				ultraNightmare;			// the running game is an Ultra Nightmare run
 	idStr				ultraNightmareSave;		// file name (no path/extension) of the run's single checkpoint slot
+	bool				restartMenuUltraNightmare;	// the restart (death) menu is up for an Ultra Nightmare death: main menu only
+	idStr				restartMenuQuitRect;		// the menu's own "Quit" / "Quit2" rects, saved while that row sits in the top slot
+	idStr				restartMenuQuitHintRect;
 
 	idFile *			cmdDemoFile;		// if non-zero, we are reading commands from a file
 
@@ -287,7 +290,6 @@ public:
 	idUserInterface *	guiMainMenu;
 	idListGUI *			guiMainMenu_MapList;		// easy map list handling
 	idUserInterface *	guiRestartMenu;
-	idUserInterface *	guiUltraNightmareRestart;	// DUDE: death screen of an Ultra Nightmare run (main menu only)
 	idUserInterface *	guiLoading;
 	idUserInterface *	guiIntro;
 	idUserInterface *	guiGameOver;
@@ -376,6 +378,9 @@ public:
 	void				HandleChatMenuCommands( const char *menuCommand );
 	void				HandleIntroMenuCommands( const char *menuCommand );
 	void				HandleRestartMenuCommands( const char *menuCommand );
+	// DUDE: the same restart.gui serves both deaths; an Ultra Nightmare death hides its Restart and
+	// Load rows and moves Main Menu into the top slot, a normal death puts everything back
+	void				ConfigureRestartMenu( bool ultraNightmareDeath );
 	void				HandleMsgCommands( const char *menuCommand );
 	void				HandleNoteCommands( const char *menuCommand );
 	void				GetSaveGameList( idStrList &fileList, idList<fileTIME_T> &fileTimes );

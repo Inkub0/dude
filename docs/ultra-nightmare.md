@@ -11,7 +11,7 @@ sets `g_nightmare 1`); until then the row shows as locked.
 | damage taken, health drain to 25, no medkits, Soul Cube / Bloodstone at start | yes | yes (identical) |
 | manual saves (menu, `savegame`, quicksave F5) | yes | **no** — a message box explains |
 | autosaves | one `Autosave_<map>` per map, kept | **one checkpoint slot per run**, rewritten at every map start |
-| death | restart menu: replay level / load / main menu | **the run is over**: the checkpoint is erased, the death screen offers only *Main Menu* |
+| death | restart menu: replay level / load / main menu | **the run is over**: the checkpoint is erased, the same restart menu offers only *Main Menu* |
 | `com_disableAutoSaves` | honoured | ignored — the map-start checkpoint is part of the mode |
 
 A run's checkpoint shows up in Load Game as `Ultra Nightmare: <map name>` (red tag). Loading it
@@ -44,23 +44,27 @@ engine keeps enforcing the save/death rules below.
 - `LoadGame`: reads and strips that header tag; a tagged file re-enters the mode and
   becomes the slot, an untagged one leaves it. Older saves are untouched (no format change).
 - `RunGameTic` `"died"`: in a run, `EndUltraNightmareRun( true )` deletes the slot's
-  `.save/.txt/.tga`, then the session shows `guis/restart_ultranightmare.gui`. If that GUI is
-  missing it drops straight to the main menu instead. The GUI speaks the restart menu's
-  command set (`DispatchCommand` routes it to `HandleRestartMenuCommands`).
+  `.save/.txt/.tga`, then shows the game's own restart menu (`guis/restart.gui`, whichever
+  variant is loaded) through `ConfigureRestartMenu( true )`: its `Restart` and `Replay` (load)
+  rows are hidden and `Quit` / `Quit2` (Main Menu and its hint) move into the top row's place.
+  `HandleRestartMenuCommands` also refuses `restart` / `loadGame` / `saveGame` / `deleteGame`
+  while that state is set, in case a mod's menu names its windows differently. A normal death
+  calls `ConfigureRestartMenu( false )`, which restores the rows (one gui instance serves both).
 - `SetMainMenuGuiVars` publishes `gui::ultraNightmare` (1 while a run is live) so the
   in-game menu can lock Save Game.
 
 **GUIs** (`base/guis/`, mirrored into `fs_savepath` at startup like the rest of the DUDE menu,
-shipped in `zz_dude_menu.pk4` — `docs/releasing.md`):
+`mainmenu.gui` ships in `zz_dude_menu.pk4` — `docs/releasing.md`):
 
 - `mainmenu.gui`: the New Game difficulty panel moved up one row (its frame is now 101 px
   tall from y=298) and gained row 5, `NGBtn5*` / `NGBtnText5` / `NGBtnText5Alt`, a clone of the
   Nightmare row that sets `gui::skill 4`; the reveal (`onTime 500/550`) and hide lists were
   extended. In-game, `SaveGameBtnText` hides and `SaveGameBtnTextUN` (greyed, error blip,
   tooltip) shows while `gui::ultraNightmare == 1`; the button frames use the grey variants.
-- `restart_ultranightmare.gui`: clean-authored death screen — title, verdict line, one
-  *Main Menu* button (`exec disconnect`), ESC does the same. Stock materials/fonts/sounds by
-  name only; `cstAnchor` centred for widescreen.
+- The death screen is not a separate file. A first version shipped a clean-authored
+  `restart_ultranightmare.gui`; it was dropped after the first in-game look (solid scanline
+  stripes, 4:3 pillarbox) in favour of reusing the real restart menu, which is identical to a
+  normal death by construction and needs no shipped asset.
 
 ## Known limits
 
@@ -80,6 +84,6 @@ shipped in `zz_dude_menu.pk4` — `docs/releasing.md`):
    prints the checkpoint slot name. Load Game lists `Ultra Nightmare: Mars City`.
 2. F5 / the in-game Save Game button / `savegame foo` all refuse with the message box.
 3. A map transition rewrites the same slot (still one Ultra Nightmare entry in Load Game).
-4. Die: the red death screen appears with only *Main Menu*; the slot is gone from Load Game
+4. Die: the normal death menu appears with only *Main Menu* (in the top row); the slot is gone from Load Game
    and from `savegames/` on disk.
 5. Load a normal save afterwards: saving works again.

@@ -34,6 +34,8 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/Game.h"
 #include "sound/sound.h"
 #include "ui/UserInterface.h"
+#include "ui/Window.h"				// DUDE: ConfigureRestartMenu edits the restart menu's windows
+#include "ui/UserInterfaceLocal.h"
 
 #include "framework/Session_local.h"
 #include "framework/ModCvarTranslation.h"
@@ -487,6 +489,69 @@ bool idSessionLocal::HandleSaveGameMenuCommand( idCmdArgs &args, int &icmd ) {
 
 /*
 ==============
+idSessionLocal::ConfigureRestartMenu
+
+DUDE: Ultra Nightmare uses the game's own restart (death) menu -- whichever restart.gui is
+loaded: stock, widescreen, RoE -- so it looks exactly like any other death. Only the rows change:
+"Restart" (replay the level) and "Replay" (load a save) are hidden and "Quit" (main menu),
+with its hint line "Quit2", moves up into the top row's place. A normal death restores the
+menu, since one gui instance serves both. Window names a mod's restart.gui does not have are
+simply skipped; HandleRestartMenuCommands refuses the hidden rows' commands regardless.
+==============
+*/
+static bool RestartMenu_ReadRect( idWindow *desktop, const char *name, idStr &rect ) {
+	drawWin_t *dw = desktop->FindChildByName( name );
+	idWinVar *wv = NULL;
+	if ( dw && dw->simp ) {
+		wv = dw->simp->GetWinVarByName( "rect" );
+	} else if ( dw && dw->win ) {
+		wv = dw->win->GetWinVarByName( "rect" );
+	}
+	if ( !wv ) {
+		return false;
+	}
+	rect = wv->c_str();
+	return true;
+}
+
+void idSessionLocal::ConfigureRestartMenu( bool ultraNightmareDeath ) {
+	restartMenuUltraNightmare = ultraNightmareDeath;
+	if ( !guiRestartMenu ) {
+		return;
+	}
+	idWindow *desktop = static_cast<idUserInterfaceLocal *>( guiRestartMenu )->GetDesktop();
+	if ( !desktop ) {
+		return;
+	}
+
+	const char *visible = ultraNightmareDeath ? "0" : "1";
+	desktop->SetChildWinVarVal( "Restart", "visible", visible );
+	desktop->SetChildWinVarVal( "Replay", "visible", visible );
+
+	if ( ultraNightmareDeath ) {
+		// remember where the Main Menu row belongs (once: it may already sit in the top slot)
+		if ( !restartMenuQuitRect.Length() ) {
+			if ( !RestartMenu_ReadRect( desktop, "Quit", restartMenuQuitRect )
+			     || !RestartMenu_ReadRect( desktop, "Quit2", restartMenuQuitHintRect ) ) {
+				restartMenuQuitRect.Clear();
+				restartMenuQuitHintRect.Clear();
+			}
+		}
+		idStr topRect, topHintRect;
+		if ( restartMenuQuitRect.Length()
+		     && RestartMenu_ReadRect( desktop, "Restart", topRect )
+		     && RestartMenu_ReadRect( desktop, "Restart2", topHintRect ) ) {
+			desktop->SetChildWinVarVal( "Quit", "rect", topRect );
+			desktop->SetChildWinVarVal( "Quit2", "rect", topHintRect );
+		}
+	} else if ( restartMenuQuitRect.Length() ) {
+		desktop->SetChildWinVarVal( "Quit", "rect", restartMenuQuitRect );
+		desktop->SetChildWinVarVal( "Quit2", "rect", restartMenuQuitHintRect );
+	}
+}
+
+/*
+==============
 idSessionLocal::HandleRestartMenuCommands
 
 Executes any commands returned by the gui
@@ -501,6 +566,15 @@ void idSessionLocal::HandleRestartMenuCommands( const char *menuCommand ) {
 
 	for( icmd = 0; icmd < args.Argc(); ) {
 		const char *cmd = args.Argv( icmd++ );
+
+		// DUDE: after an Ultra Nightmare death only the way back to the main menu is honoured.
+		// The other rows are hidden (ConfigureRestartMenu), but a mod's restart.gui may name its
+		// windows differently, so replaying the level and the savegame commands are refused here too.
+		if ( restartMenuUltraNightmare
+		     && ( !idStr::Icmp( cmd, "restart" ) || !idStr::Icmp( cmd, "loadGame" )
+		          || !idStr::Icmp( cmd, "saveGame" ) || !idStr::Icmp( cmd, "deleteGame" ) ) ) {
+			continue;
+		}
 
 		if ( HandleSaveGameMenuCommand( args, icmd ) ) {
 			continue;
@@ -1187,8 +1261,7 @@ void idSessionLocal::DispatchCommand( idUserInterface *gui, const char *menuComm
 		HandleMsgCommands( menuCommand );
 	} else if ( gui == guiTakeNotes ) {
 		HandleNoteCommands( menuCommand );
-	} else if ( gui == guiRestartMenu || ( guiUltraNightmareRestart && gui == guiUltraNightmareRestart ) ) {
-		// DUDE: the Ultra Nightmare death screen speaks the restart menu's command set
+	} else if ( gui == guiRestartMenu ) {
 		HandleRestartMenuCommands( menuCommand );
 	} else if ( game && guiActive && guiActive->State().GetBool( "gameDraw" ) ) {
 		const char *cmd = game->HandleGuiCommands( menuCommand );

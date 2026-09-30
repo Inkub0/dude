@@ -350,6 +350,7 @@ void idSessionLocal::Clear() {
 
 	ultraNightmare = false;
 	ultraNightmareSave.Clear();
+	restartMenuUltraNightmare = false;
 
 	currentMapName.Clear();
 	aviDemoShortName.Clear();
@@ -405,7 +406,7 @@ idSessionLocal::idSessionLocal
 */
 idSessionLocal::idSessionLocal() {
 	guiInGame = guiMainMenu = guiIntro \
-		= guiRestartMenu = guiUltraNightmareRestart = guiLoading = guiGameOver = guiActive \
+		= guiRestartMenu = guiLoading = guiGameOver = guiActive \
 		= guiTest = guiMsg = guiMsgRestore = guiTakeNotes = NULL;
 
 	menuSoundWorld = NULL;
@@ -3431,21 +3432,16 @@ void idSessionLocal::RunGameTic() {
 			mapSpawnData.serverInfo.Set( "devmap", "1" );
 			MoveToNewMap( args.Argv(1) );
 		} else if ( !idStr::Icmp( args.Argv(0), "died" ) ) {
-			if ( ultraNightmare ) {
-				// DUDE: Ultra Nightmare — death ends the run: erase its checkpoint and offer
-				// nothing but the way back to the main menu
+			// DUDE: Ultra Nightmare — death ends the run: erase its checkpoint. The player then gets
+			// the very same restart menu as any other death, reduced to its Main Menu row.
+			const bool ultraNightmareDeath = ultraNightmare;
+			if ( ultraNightmareDeath ) {
 				EndUltraNightmareRun( true );
-				UnloadMap();
-				if ( guiUltraNightmareRestart ) {
-					SetGUI( guiUltraNightmareRestart, NULL );
-				} else {
-					cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "disconnect" );
-				}
-			} else {
-				// restart on the same map
-				UnloadMap();
-				SetGUI(guiRestartMenu, NULL);
 			}
+			// restart on the same map
+			UnloadMap();
+			ConfigureRestartMenu( ultraNightmareDeath );
+			SetGUI(guiRestartMenu, NULL);
 		} else if ( !idStr::Icmp( args.Argv(0), "disconnect" ) ) {
 			cmdSystem->BufferCommandText( CMD_EXEC_INSERT, "stoprecording ; disconnect" );
 		}
@@ -3524,12 +3520,10 @@ void idSessionLocal::Init() {
 	guiMainMenu_MapList->Config( guiMainMenu, "mapList" );
 	idAsyncNetwork::client.serverList.GUIConfig( guiMainMenu, "serverList" );
 	guiRestartMenu = uiManager->FindGui( "guis/restart.gui", true, false, true );
-	// DUDE: Ultra Nightmare death screen (base/guis, mirrored into savepath like mainmenu.gui).
-	// Without it a dead run still ends; we just drop straight back to the main menu.
-	guiUltraNightmareRestart = NULL;
-	if ( uiManager->CheckGui( "guis/restart_ultranightmare.gui" ) ) {
-		guiUltraNightmareRestart = uiManager->FindGui( "guis/restart_ultranightmare.gui", true, false, true );
-	}
+	// DUDE: a freshly loaded restart menu has all its rows where its file puts them
+	restartMenuUltraNightmare = false;
+	restartMenuQuitRect.Clear();
+	restartMenuQuitHintRect.Clear();
 	guiGameOver = uiManager->FindGui( "guis/gameover.gui", true, false, true );
 	guiMsg = uiManager->FindGui( "guis/msg.gui", true, false, true );
 	guiTakeNotes = uiManager->FindGui( "guis/takeNotes.gui", true, false, true );
