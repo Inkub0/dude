@@ -103,6 +103,8 @@ If you have questions concerning this license or the applicable additional terms
   #define SDL_GameControllerGetVendor SDL_GetGamepadVendor
   #define SDL_GameControllerGetProduct SDL_GetGamepadProduct
   #define SDL_GameControllerOpen SDL_OpenGamepad
+  #define SDL_GameControllerClose SDL_CloseGamepad
+  #define SDL_GameControllerPath SDL_GetGamepadPath
 
   #define SDL_CONTROLLERAXISMOTION SDL_EVENT_GAMEPAD_AXIS_MOTION
   #define SDL_CONTROLLERBUTTONDOWN SDL_EVENT_GAMEPAD_BUTTON_DOWN
@@ -180,6 +182,10 @@ idCVar in_grabKeyboard("in_grabKeyboard", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR
 
 idCVar joy_gamepadLayout("joy_gamepadLayout", "-1", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_NOCHEAT | CVAR_INTEGER,
 		"Button layout of gamepad. -1: auto (needs SDL 2.0.12 or newer), 0: XBox-style, 1: Nintendo-style, 2: PS4/5-style, 3: PS2/3-style", idCmdSystem::ArgCompletion_Integer<-1, 3> );
+
+// DUDE: which connected gamepad drives the game and the ImGui menus (see AddGamepad() below)
+idCVar in_gamepadDevice("in_gamepadDevice", "", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_NOCHEAT,
+		"Gamepad to use: empty = all connected gamepads merged, or the GUID or name of one gamepad (see listGamepads)");
 
 // set in handleMouseGrab(), used in Sys_GetEvent() to decide what kind of internal mouse event to generate
 static bool in_relativeMouseMode = true;
@@ -858,53 +864,243 @@ enum {
 };
 #endif // ! SDL_VERSION_ATLEAST(2, 24, 0)
 
-static void setGamepadType( SDL_GameController* gc )
+static D3_Gamepad_Type detectGamepadType( SDL_GameController* gc, const char** typestrOut )
 {
+	D3_Gamepad_Type ret = D3_GAMEPAD_XINPUT;
+	const char* typestr = "XBox-like";
 #if SDL_VERSION_ATLEAST(2, 0, 12)
-	const char* typestr = NULL;
 	switch( SDL_GameControllerGetType( gc ) ) {
 		default: // the other controller like luna, stadia, whatever, have a very similar layout
 		case SDL_CONTROLLER_TYPE_UNKNOWN:
 		case SDL_CONTROLLER_TYPE_XBOX360:
 		case SDL_CONTROLLER_TYPE_XBOXONE:
-			gamepadType = D3_GAMEPAD_XINPUT;
-			typestr = "XBox-like";
 			break;
 
 		case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
 		case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
 		case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
 		case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
-			gamepadType = D3_GAMEPAD_NINTENDO;
+			ret = D3_GAMEPAD_NINTENDO;
 			typestr = "Nintendo-like";
 			break;
 
 		case SDL_CONTROLLER_TYPE_PS3:
-			gamepadType = D3_GAMEPAD_PLAYSTATION_OLD;
+			ret = D3_GAMEPAD_PLAYSTATION_OLD;
 			typestr = "Playstation2/3-like";
 			break;
 		case SDL_CONTROLLER_TYPE_PS4:
 		case SDL_CONTROLLER_TYPE_PS5:
-			gamepadType = D3_GAMEPAD_PLAYSTATION;
+			ret = D3_GAMEPAD_PLAYSTATION;
 			typestr = "Playstation-like";
 			break;
 	}
-
-	common->Printf( "Detected Gamepad %s as type %s\n", SDL_GameControllerName( gc ), typestr );
-	SDL_Joystick* joy = SDL_GameControllerGetJoystick( gc );
-	SDL_JoystickGUID guid = SDL_JoystickGetGUID( joy );
-	char guidstr[34] = {};
-	SDL_JoystickGetGUIDString( guid, guidstr, sizeof(guidstr) );
-	Uint16 vendor = SDL_GameControllerGetVendor( gc );
-	Uint16 product = SDL_GameControllerGetProduct( gc );
-	const char* joyname = SDL_JoystickName( joy );
-
-	common->Printf( "  USB IDs: %.4hx:%.4hx Joystick Name: \"%s\" GUID: %s\n", vendor, product, joyname, guidstr );
-
 #endif // SDL_VERSION_ATLEAST(2, 0, 12)
+	if ( typestrOut != NULL ) {
+		*typestrOut = typestr;
+	}
+	return ret;
+}
+
+// DUDE: every SDL game controller gets opened and registered here. in_gamepadDevice
+// decides which of them feeds the game and the ImGui menus: all of them merged (the
+// default), or one pad picked by GUID or name - handy when the same pad is plugged in
+// twice, e.g. through its wireless dongle *and* its USB cable, and the idle one would
+// otherwise be the "first" controller ImGui listens to.
+struct gamepadInfo_t {
+	SDL_GameController* gc;
+	SDL_JoystickID instanceId;
+	idStr name;
+	idStr guid;
+	idStr path; // OS device path (SDL 2.24+), tells apart two pads with the same name
+};
+
+static idList<gamepadInfo_t> gamepads;
+static int activeGamepad = -1; // index into gamepads, -1 = all of them
+
+static int FindGamepadByInstance( SDL_JoystickID instanceId )
+{
+	for ( int i = 0; i < gamepads.Num(); ++i ) {
+		if ( gamepads[i].instanceId == instanceId ) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+// tell ImGui which controller handles to poll for its gamepad navigation
+static void PushGamepadSelectionToImGui()
+{
+	static idList<void*> handles;
+	handles.SetNum( 0, false );
+	if ( activeGamepad >= 0 ) {
+		handles.Append( (void*)gamepads[activeGamepad].gc );
+	} else {
+		for ( int i = 0; i < gamepads.Num(); ++i ) {
+			handles.Append( (void*)gamepads[i].gc );
+		}
+	}
+	D3::ImGuiHooks::SetGamepads( handles.Ptr(), handles.Num() );
+}
+
+// resolve in_gamepadDevice against the connected pads (called whenever either changes)
+static void UpdateActiveGamepad( bool verbose )
+{
+	int newActive = -1;
+	const char* wanted = in_gamepadDevice.GetString();
+	if ( wanted[0] != '\0' ) {
+		for ( int i = 0; i < gamepads.Num() && newActive < 0; ++i ) {
+			if ( gamepads[i].guid.Icmp( wanted ) == 0 ) {
+				newActive = i;
+			}
+		}
+		for ( int i = 0; i < gamepads.Num() && newActive < 0; ++i ) {
+			if ( gamepads[i].name.Icmp( wanted ) == 0 ) {
+				newActive = i;
+			}
+		}
+		if ( newActive < 0 && verbose ) {
+			common->Printf( "in_gamepadDevice '%s' is not connected, using all connected gamepads\n", wanted );
+		}
+	}
+	activeGamepad = newActive;
+
+	if ( gamepads.Num() > 0 ) {
+		// the auto-detected button naming layout (joy_gamepadLayout -1) follows the pad
+		// in charge, or the most recently added one while all pads are merged
+		const gamepadInfo_t& gp = gamepads[ activeGamepad >= 0 ? activeGamepad : gamepads.Num() - 1 ];
+		gamepadType = detectGamepadType( gp.gc, NULL );
+		if ( verbose ) {
+			if ( activeGamepad >= 0 ) {
+				common->Printf( "Using gamepad: %s (GUID %s)\n", gp.name.c_str(), gp.guid.c_str() );
+			} else if ( gamepads.Num() > 1 ) {
+				common->Printf( "Using all %d connected gamepads\n", gamepads.Num() );
+			}
+		}
+	}
+
+	PushGamepadSelectionToImGui();
+}
+
+// which: SDL2 = joystick device index (Sys_InitInput() loop and SDL_JOYDEVICEADDED),
+//        SDL3 = joystick instance id
+static void AddGamepad( int which )
+{
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+	SDL_JoystickID instanceId = (SDL_JoystickID)which;
+#else
+	SDL_JoystickID instanceId = SDL_JoystickGetDeviceInstanceID( which );
+	if ( instanceId < 0 ) {
+		return;
+	}
+#endif
+	// SDL2 also queues SDL_JOYDEVICEADDED for the pads Sys_InitInput() already opened
+	if ( FindGamepadByInstance( instanceId ) >= 0 ) {
+		return;
+	}
+
+	SDL_GameController* gc = SDL_GameControllerOpen( which );
+	if ( gc == NULL ) {
+		return; // not a game controller (or opening it failed)
+	}
+
+	gamepadInfo_t gp;
+	gp.gc = gc;
+	gp.instanceId = instanceId;
+	const char* name = SDL_GameControllerName( gc );
+	gp.name = ( name != NULL && name[0] != '\0' ) ? name : "Unknown Gamepad";
+	SDL_Joystick* joy = SDL_GameControllerGetJoystick( gc );
+	char guidstr[34] = {};
+	SDL_JoystickGetGUIDString( SDL_JoystickGetGUID( joy ), guidstr, sizeof(guidstr) );
+	gp.guid = guidstr;
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+	const char* path = SDL_GameControllerPath( gc );
+	if ( path != NULL ) {
+		gp.path = path;
+	}
+#endif
+
+	const char* typestr = NULL;
+	detectGamepadType( gc, &typestr );
+	common->Printf( "Detected Gamepad %s as type %s\n", gp.name.c_str(), typestr );
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+	common->Printf( "  USB IDs: %.4hx:%.4hx Joystick Name: \"%s\" GUID: %s%s%s\n",
+					SDL_GameControllerGetVendor( gc ), SDL_GameControllerGetProduct( gc ),
+					SDL_JoystickName( joy ), guidstr,
+					gp.path.Length() > 0 ? " Path: " : "", gp.path.c_str() );
+#endif
+
+	gamepads.Append( gp );
+	UpdateActiveGamepad( true );
+}
+
+static void RemoveGamepad( SDL_JoystickID instanceId )
+{
+	int idx = FindGamepadByInstance( instanceId );
+	if ( idx < 0 ) {
+		return;
+	}
+	SDL_GameController* gc = gamepads[idx].gc;
+	common->Printf( "Gamepad %s disconnected\n", gamepads[idx].name.c_str() );
+	gamepads.RemoveIndex( idx );
+	// hand ImGui the new selection before the handle goes away
+	UpdateActiveGamepad( true );
+	SDL_GameControllerClose( gc );
+}
+
+static void CloseAllGamepads()
+{
+	activeGamepad = -1;
+	D3::ImGuiHooks::SetGamepads( NULL, 0 );
+	for ( int i = 0; i < gamepads.Num(); ++i ) {
+		SDL_GameControllerClose( gamepads[i].gc );
+	}
+	gamepads.Clear();
+}
+
+int Sys_GetNumGamepads() {
+	return gamepads.Num();
+}
+
+const char* Sys_GetGamepadName( int idx ) {
+	return ( idx >= 0 && idx < gamepads.Num() ) ? gamepads[idx].name.c_str() : "";
+}
+
+const char* Sys_GetGamepadGUID( int idx ) {
+	return ( idx >= 0 && idx < gamepads.Num() ) ? gamepads[idx].guid.c_str() : "";
+}
+
+const char* Sys_GetGamepadPath( int idx ) {
+	return ( idx >= 0 && idx < gamepads.Num() ) ? gamepads[idx].path.c_str() : "";
+}
+
+bool Sys_IsGamepadActive( int idx ) {
+	return idx >= 0 && idx < gamepads.Num() && ( activeGamepad < 0 || activeGamepad == idx );
+}
+
+static void ListGamepads_f( const idCmdArgs& args )
+{
+	if ( gamepads.Num() == 0 ) {
+		common->Printf( "No gamepads connected\n" );
+		return;
+	}
+	for ( int i = 0; i < gamepads.Num(); ++i ) {
+		const gamepadInfo_t& gp = gamepads[i];
+		common->Printf( "%s %d: %s  GUID: %s%s%s\n", Sys_IsGamepadActive( i ) ? "*" : " ", i,
+						gp.name.c_str(), gp.guid.c_str(),
+						gp.path.Length() > 0 ? "  Path: " : "", gp.path.c_str() );
+	}
+	common->Printf( "* = feeding input. Set in_gamepadDevice to a GUID or name to use one pad only, or to \"\" for all of them.\n" );
 }
 
 #endif // SDL2+ gamecontroller code
+
+#if !SDL_VERSION_ATLEAST(2, 0, 0) // SDL1.2 has no gamepads
+int Sys_GetNumGamepads() { return 0; }
+const char* Sys_GetGamepadName( int idx ) { return ""; }
+const char* Sys_GetGamepadGUID( int idx ) { return ""; }
+const char* Sys_GetGamepadPath( int idx ) { return ""; }
+bool Sys_IsGamepadActive( int idx ) { return false; }
+#endif
 
 static void PushConsoleEvent(const char *s) {
 	char *b;
@@ -966,10 +1162,7 @@ void Sys_InitInput() {
 	SDL_JoystickID* joysticks = SDL_GetJoysticks(&numJoysticks);
 	for( int i = 0; i < numJoysticks; ++i )
 	{
-		SDL_GameController* gc = SDL_GameControllerOpen( joysticks[i] );
-		if ( gc != NULL ) {
-			setGamepadType( gc );
-		}
+		AddGamepad( (int)joysticks[i] );
 	}
 	SDL_free(joysticks);
 
@@ -982,12 +1175,15 @@ void Sys_InitInput() {
 	const int NumJoysticks = SDL_NumJoysticks();
 	for( int i = 0; i < NumJoysticks; ++i )
 	{
-		SDL_GameController* gc = SDL_GameControllerOpen( i );
-		if ( gc != NULL ) {
-			setGamepadType( gc );
-		}
+		AddGamepad( i );
 	}
 #endif // gamecontroller/gamepad not supported in SDL1
+
+#if SDL_VERSION_ATLEAST(2, 0, 0)
+	in_gamepadDevice.ClearModified(); // AddGamepad() already applied it
+	cmdSystem->AddCommand( "listGamepads", ListGamepads_f, CMD_FL_SYSTEM,
+						   "lists the connected gamepads and which of them feed input (see in_gamepadDevice)" );
+#endif
 }
 
 /*
@@ -1000,6 +1196,9 @@ void Sys_ShutdownInput() {
 	mouse_polls.Clear();
 	joystick_polls.Clear();
 	event_overflow.Clear();
+#if SDL_VERSION_ATLEAST(2, 0, 0)
+	CloseAllGamepads();
+#endif
 }
 
 /*
@@ -1556,6 +1755,9 @@ sysEvent_t Sys_GetEvent() {
 				common->Warning( "Gamepad support is disabled! Set the in_useGamepad CVar to 1 to enable it!\n" );
 				continue;
 			}
+			if ( activeGamepad >= 0 && ev.cbutton.which != gamepads[activeGamepad].instanceId ) {
+				continue; // from a pad other than the one selected by in_gamepadDevice
+			}
 
 			isDown = IS_SDL_BTN_DOWN(ev.cbutton);
 
@@ -1597,6 +1799,9 @@ sysEvent_t Sys_GetEvent() {
 				// not printing a message here, I guess we get lots of spurious axis events..
 				// TODO: or print a message if value is big enough?
 				continue;
+			}
+			if ( activeGamepad >= 0 && ev.caxis.which != gamepads[activeGamepad].instanceId ) {
+				continue; // from a pad other than the one selected by in_gamepadDevice
 			}
 
 			sys_jEvents jEvent = mapjoyaxis( (SDL_GameControllerAxis)ev.caxis.axis);
@@ -1649,18 +1854,10 @@ sysEvent_t Sys_GetEvent() {
 		break;
 
 		case SDL_JOYDEVICEADDED:
-		{
-			SDL_GameController* gc = SDL_GameControllerOpen( ev.jdevice.which );
-			if ( gc != NULL ) {
-				setGamepadType( gc );
-			}
-			// TODO: hot swapping maybe.
-			//lbOnControllerPlugIn(event.jdevice.which);
+			AddGamepad( ev.jdevice.which );
 			break;
-		}
 		case SDL_JOYDEVICEREMOVED:
-			// TODO: hot swapping maybe.
-			//lbOnControllerUnPlug(event.jdevice.which);
+			RemoveGamepad( ev.jdevice.which );
 			break;
 #endif // SDL2+
 
@@ -1805,6 +2002,13 @@ void Sys_GenerateEvents() {
 	D3P_ScopedCPUSample(Sys_GenerateEvents);
 
 	handleMouseGrab();
+
+#if SDL_VERSION_ATLEAST(2, 0, 0)
+	if ( in_gamepadDevice.IsModified() ) {
+		in_gamepadDevice.ClearModified();
+		UpdateActiveGamepad( true );
+	}
+#endif
 
 	char *s = Sys_ConsoleInput();
 

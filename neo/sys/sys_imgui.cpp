@@ -29,6 +29,9 @@
   #define ImGui_ImplSDLx_Shutdown ImGui_ImplSDL3_Shutdown
   #define ImGui_ImplSDLx_NewFrame ImGui_ImplSDL3_NewFrame
   #define ImGui_ImplSDLx_ProcessEvent ImGui_ImplSDL3_ProcessEvent
+  #define ImGui_ImplSDLx_SetGamepadMode ImGui_ImplSDL3_SetGamepadMode
+  #define ImGui_ImplSDLx_GamepadMode_Manual ImGui_ImplSDL3_GamepadMode_Manual
+  #define ImGuiSDLxGamepad SDL_Gamepad
 #else
   #include "../libs/imgui/backends/imgui_impl_sdl2.h"
   #define ImGui_ImplSDLx_InitForOpenGL ImGui_ImplSDL2_InitForOpenGL
@@ -36,6 +39,9 @@
   #define ImGui_ImplSDLx_Shutdown ImGui_ImplSDL2_Shutdown
   #define ImGui_ImplSDLx_NewFrame ImGui_ImplSDL2_NewFrame
   #define ImGui_ImplSDLx_ProcessEvent ImGui_ImplSDL2_ProcessEvent
+  #define ImGui_ImplSDLx_SetGamepadMode ImGui_ImplSDL2_SetGamepadMode
+  #define ImGui_ImplSDLx_GamepadMode_Manual ImGui_ImplSDL2_GamepadMode_Manual
+  #define ImGuiSDLxGamepad SDL_GameController
 #endif
 
 // DUDE Phase 4 M6: ImGui on the Vulkan backend (renderer side lives in
@@ -231,6 +237,31 @@ void SetScale( float scale )
 
 static bool imgui_initialized = false;
 
+// DUDE: the SDL game controllers this menu polls for gamepad navigation, handed over by
+// sys/events.cpp (all connected pads merged, or the one selected by in_gamepadDevice).
+// Kept here because input init and hotplug can happen before Init() / after Shutdown().
+// Manual mode means the SDL2/3 backend polls exactly these handles and never closes
+// them - they belong to the input layer.
+static idList<void*> selectedGamepads;
+
+static void ApplyGamepadSelection()
+{
+	if ( !imgui_initialized ) {
+		return;
+	}
+	ImGui_ImplSDLx_SetGamepadMode( ImGui_ImplSDLx_GamepadMode_Manual,
+								   (ImGuiSDLxGamepad**)selectedGamepads.Ptr(), selectedGamepads.Num() );
+}
+
+void SetGamepads( void* const* gamepads, int num )
+{
+	selectedGamepads.SetNum( 0, false );
+	for ( int i = 0; i < num; ++i ) {
+		selectedGamepads.Append( gamepads[i] );
+	}
+	ApplyGamepadSelection();
+}
+
 // using void* instead of SDL_Window and SDL_GLContext to avoid dragging SDL headers into sys_imgui.h
 bool Init(void* _sdlWindow, void* sdlGlContext)
 {
@@ -340,6 +371,9 @@ bool Init(void* _sdlWindow, void* sdlGlContext)
 	}
 
 	imgui_initialized = true;
+
+	// the input layer may have registered gamepads before we existed (Vulkan path)
+	ApplyGamepadSelection();
 	return true;
 }
 
