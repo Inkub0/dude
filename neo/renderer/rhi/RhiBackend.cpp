@@ -2909,21 +2909,25 @@ material-level dual pattern at the top of RB_RHI_RenderShaderPasses. End restore
 material-level offset (or none) rather than leaving the stage's value latched, because
 on VK the dynamic depth bias persists per-draw and would bleed into the following stages.
 
-CRUCIAL EXCLUSION: skip DEPTHFUNC_EQUAL stages. Polygon offset only orders geometry
-under an *inequality* depth test; at EQUAL a stage must match the zfill prepass depth
-exactly, and the prepass carries no per-stage offset, so any bias makes the stage FAIL
-EQUAL and vanish. The imp "burning corpse" fire stage is exactly this — privatePolygonOffset
--1 AND drawn at EQUAL (against the deform-once zfill, docs/tessellation.md) — so applying
-the offset drops the ember. (Material-level MF_POLYGONOFFSET is fine at EQUAL: the RHI zfill
-applies that same offset, so prepass and stage still match.)
+DEPTHFUNC_EQUAL stages take the offset too (docs/burn-away-ember.md). At EQUAL a stage
+must match the sealed prepass depth exactly, so the depth prepasses (RB_RHI_FillDepthBuffer
+and the merged gbuffer prepass) bracket every live alpha-tested stage with this SAME
+per-stage offset -- stock RB_T_FillDepthBuffer does it via RB_PrepareStageTexturing. That
+is the whole burning-corpse mechanism: the imp's two "if parm7" dissolve stages alpha-test
+the same imp_dis map at thresholds 0.05+0.3t (skin, no offset) and 0.3t (fire,
+privatePolygonOffset -1 = pushed AWAY). The prepass seals the skin at depth D and the
+thin band where only the lower threshold passes at D+bias; the lit interaction passes
+match only D, the fire stage (also biased) matches only the band. So the ember shows
+ONLY along the receding edge, exactly as vanilla. Skipping the offset here (or in the
+prepass) collapses both thresholds onto one depth and the ember floods the whole body.
+Material-level MF_POLYGONOFFSET composes the same way: the prepass applies it as well.
 =============
 */
-static bool RB_RHI_StageWantsPolyOffset( const shaderStage_t *pStage ) {
-	return pStage->privatePolygonOffset != 0.0f
-	    && ( pStage->drawStateBits & GLS_DEPTHFUNC_EQUAL ) == 0;
+bool RB_RHI_StageWantsPolyOffset( const shaderStage_t *pStage ) {
+	return pStage->privatePolygonOffset != 0.0f;
 }
 
-static void RB_RHI_StagePolyOffsetBegin( rhi::RHI *r, const shaderStage_t *pStage ) {
+void RB_RHI_StagePolyOffsetBegin( rhi::RHI *r, const shaderStage_t *pStage ) {
 	if ( !RB_RHI_StageWantsPolyOffset( pStage ) ) {
 		return;
 	}
@@ -2934,7 +2938,7 @@ static void RB_RHI_StagePolyOffsetBegin( rhi::RHI *r, const shaderStage_t *pStag
 	r->SetPolygonOffset( true, r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * pStage->privatePolygonOffset );
 }
 
-static void RB_RHI_StagePolyOffsetEnd( rhi::RHI *r, const shaderStage_t *pStage, const idMaterial *shader ) {
+void RB_RHI_StagePolyOffsetEnd( rhi::RHI *r, const shaderStage_t *pStage, const idMaterial *shader ) {
 	if ( !RB_RHI_StageWantsPolyOffset( pStage ) ) {
 		return;
 	}
@@ -3159,7 +3163,9 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		// per-stage polygon offset (privatePolygonOffset: dissolve/burning corpse,
 		// some weapon stages) wraps the actual draw below — the soft-particle helper
 		// or the generic stage. Restored at each exit so it never latches into the
-		// next stage on Vulkan's persistent dynamic depth bias.
+		// next stage on Vulkan's persistent dynamic depth bias. The depth prepasses
+		// apply the same offset to the stage's alpha-tested coverage, so an EQUAL
+		// stage (the burning-corpse fire) lands on its own biased depth band.
 		RB_RHI_StagePolyOffsetBegin( r, pStage );
 
 		// soft particles (#3878): fade this quad against captured scene depth

@@ -12,9 +12,11 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // RhiBackend.cpp (the blended material/decal pass, so blood-overlay decals can
 // follow the tessellated base).
 
+#include "renderer/Material.h"		// shaderStage_t (anonymous typedef -- not forward-declarable)
+
 struct drawSurf_s;
 class idImage;
-namespace rhi { struct RenderParams; }
+namespace rhi { struct RenderParams; class RHI; }
 
 // Should this surface route through the PN-triangle tessellation pipeline?
 // forBlendPass relaxes the opaque-only guards (translucent + pure-emissive), which
@@ -40,5 +42,17 @@ idImage *RB_RHI_TessBumpForZfill( const drawSurf_s *surf, rhi::RenderParams &par
 // Every pass that tessellates a surface must bind THIS image for it, or that pass displaces
 // differently from the depth prepass and the lit draw fails depth-EQUAL.
 idImage *RB_RHI_TessHeightImage( const drawSurf_s *surf, bool tess );
+
+// Not tessellation, but the same two-TU sharing: the PER-STAGE polygon offset bracket
+// (Material privatePolygonOffset), defined in RhiBackend.cpp. Every pass that draws a
+// stage's alpha-tested coverage into scene depth (RB_RHI_FillDepthBuffer, the merged
+// gbuffer prepass) and the blended stage pass that later draws that stage at
+// DEPTHFUNC_EQUAL must wrap the draw in Begin/End so the stage sits at ONE biased depth
+// in every pass. This is what confines the burning-corpse ember to the receding edge
+// (docs/burn-away-ember.md). End restores the material-level MF_POLYGONOFFSET bias, or
+// clears the bias, so nothing latches into the next draw on VK's persistent dynamic bias.
+bool RB_RHI_StageWantsPolyOffset( const shaderStage_t *pStage );
+void RB_RHI_StagePolyOffsetBegin( rhi::RHI *r, const shaderStage_t *pStage );
+void RB_RHI_StagePolyOffsetEnd( rhi::RHI *r, const shaderStage_t *pStage, const idMaterial *shader );
 
 #endif /* !__RHITESS_H__ */

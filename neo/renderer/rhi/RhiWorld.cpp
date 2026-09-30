@@ -2450,7 +2450,11 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 
 		if ( shader->Coverage() == MC_PERFORATED ) {
-			// alpha-tested stages; if none were live, fall back to solid
+			// alpha-tested stages; if none were live, fall back to solid. Each stage draws
+			// under its OWN privatePolygonOffset (stock RB_PrepareStageTexturing parity):
+			// the burning-corpse dissolve seals its skin threshold at depth D and its fire
+			// threshold at D+bias, so the lit passes and the fire stage -- both at
+			// DEPTHFUNC_EQUAL -- each match only their own band (docs/burn-away-ember.md).
 			bool didDraw = false;
 			for ( stage = 0; stage < shader->GetNumStages(); stage++ ) {
 				const shaderStage_t *pStage = shader->GetStage( stage );
@@ -2494,6 +2498,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 				rhi::BufferHandle ub;
 				int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
+				RB_RHI_StagePolyOffsetBegin( r, pStage );
 				RB_RHI_BindUnit( 0, pStage->texture.image );
 				if ( tess ) {
 					RB_RHI_BindUnit( 1, tessBump );
@@ -2505,6 +2510,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 				da.uniformSize = sizeof( parms );
 				r->Draw( da );
 				backEnd.pc.c_drawElements++;
+				RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 			}
 			if ( !didDraw ) {
 				drawSolid = true;
@@ -4634,6 +4640,9 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// mask, binding its diffuse map on unit 1 so gbuffer.frag discards the transparent
 		// texels. Mirrors the depth prepass (RB_RHI_FillDepthBuffer) so the normal buffer's
 		// coverage matches the sealed depth. Without it the whole card writes a flat normal.
+		// Also mirrors its per-stage privatePolygonOffset: when this pass IS the sealed scene
+		// depth, the burning-corpse fire threshold must land at D+bias here too, or the
+		// EQUAL-drawn ember floods the whole body (docs/burn-away-ember.md).
 		bool drewCoverage = false;
 		if ( shader->Coverage() == MC_PERFORATED ) {
 			for ( int s = 0; s < shader->GetNumStages(); s++ ) {
@@ -4657,12 +4666,14 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 				rhi::BufferHandle ub;
 				int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+				RB_RHI_StagePolyOffsetBegin( r, pStage );
 				RB_RHI_BindUnit( 1, pStage->texture.image );
 				da.uniformBuffer = ub;
 				da.uniformOffset = uniOfs;
 				RB_RHI_VkTextures( da );	// VK: units 0 (bump) + 1 (diffuse coverage) from rhiVkUnits
 				r->Draw( da );
 				backEnd.pc.c_drawElements++;
+				RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 				drewCoverage = true;
 			}
 		}
