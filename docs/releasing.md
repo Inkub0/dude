@@ -66,6 +66,7 @@ The DUDE main menu + high-res logo. Users get it merged into their `base/`:
 cd base && zip -q ../dist/release-X.Y/zz_dude_menu.pk4 \
   guis/mainmenu.gui \
   guis/dude/mainmenu.gui \
+  guis/restart_ultranightmare.gui \
   guis/_dude_anchor.pd \
   guis/assets/mainmenu/dude_logo.tga
 ```

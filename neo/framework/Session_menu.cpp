@@ -337,6 +337,8 @@ void idSessionLocal::SetMainMenuGuiVars( void ) {
 	} else {
 		guiMainMenu->SetStateString( "inGame", "0" );
 	}
+	// DUDE: an Ultra Nightmare run is in progress — the in-game menu locks Save Game
+	guiMainMenu->SetStateString( "ultraNightmare", ( mapSpawned && ultraNightmare ) ? "1" : "0" );
 
 	SetCDKeyGuiVars( );
 	guiMainMenu->SetStateString( "nightmare", cvarSystem->GetCVarBool( "g_nightmare" ) ? "1" : "0" );
@@ -1185,7 +1187,8 @@ void idSessionLocal::DispatchCommand( idUserInterface *gui, const char *menuComm
 		HandleMsgCommands( menuCommand );
 	} else if ( gui == guiTakeNotes ) {
 		HandleNoteCommands( menuCommand );
-	} else if ( gui == guiRestartMenu ) {
+	} else if ( gui == guiRestartMenu || ( guiUltraNightmareRestart && gui == guiUltraNightmareRestart ) ) {
+		// DUDE: the Ultra Nightmare death screen speaks the restart menu's command set
 		HandleRestartMenuCommands( menuCommand );
 	} else if ( game && guiActive && guiActive->State().GetBool( "gameDraw" ) ) {
 		const char *cmd = game->HandleGuiCommands( menuCommand );

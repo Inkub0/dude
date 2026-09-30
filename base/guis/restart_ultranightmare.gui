@@ -1,0 +1,172 @@
+// DUDE: Ultra Nightmare death screen.
+//
+// The engine session shows this instead of the stock restart menu when an Ultra
+// Nightmare run (g_skill 4) ends; by then the run's checkpoint is already erased
+// (neo/framework/Session.cpp, "died"). Clean-authored for DUDE — no id or CstDoom3
+// gui text; it references stock Doom 3 materials, fonts and gui sounds by name only.
+// The single way out is the main menu. See docs/ultra-nightmare.md.
+//
+// Dev harness: `testGUI guis/restart_ultranightmare.gui` from the console.
+windowDef Desktop {
+	#include "guis/_dude_anchor.pd"
+	scaleto43	0
+	rect		0, 0, 640, 480
+	backcolor	0, 0, 0, 1
+	menugui		1
+	float		"activate2"	0
+
+	onActivate {
+		if ("activate2" == 0) {
+			set "activate2" "1" ;
+			resetTime "Open" "0" ;
+		}
+	}
+
+	onESC {
+		set "cmd" "play guisounds_ping2" ;
+		set "cmd" "exec disconnect" ;
+	}
+
+	// timeline: black -> backdrop -> title -> the one button
+	windowDef Open {
+		rect		0, 0, 0, 0
+		visible		0
+		notime		1
+
+		onTime 100 {
+			transition "BlackFade::backcolor" "0 0 0 1" "0 0 0 0" "1200" ;
+		}
+		onTime 1300 {
+			resetTime "Title" "0" ;
+		}
+		onTime 2100 {
+			set "BlackFade::rect" "0 0 0 0" ;
+			resetTime "MainMenuBtn" "0" ;
+		}
+	}
+
+	// ---- backdrop: dark blood wash, a slow pentagram, scanlines, vignette, grime ----
+	windowDef Blood1 {
+		rect		-320, -120, 1280, 720
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		background	"gui/bloodtest1"
+		matcolor	0.35, 0, 0, 0.25
+		noevents	1
+	}
+	windowDef Blood2 {
+		rect		-320, -120, 1280, 720
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		background	"gui/bloodtest2"
+		matcolor	1, 1, 1, 0.12
+		noevents	1
+	}
+	windowDef Pentagram {
+		rect		80, 0, 480, 480
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		background	"gui/pentagram"
+		matcolor	0.14, 0.02, 0.02, 1
+		rotate		time * 0.01
+		noevents	1
+	}
+	windowDef Scanlines {
+		rect		-320, -120, 1280, 720
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		background	"gui/test/gui_scanlines4"
+		matcolor	1, 1, 1, 0.5
+		matscaley	3.75
+		noevents	1
+	}
+	windowDef Vignette {
+		rect		-320, -120, 1280, 720
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		background	"guis/assets/common/outershadow"
+		matcolor	1, 1, 1, 1
+		noevents	1
+	}
+	windowDef Dirt {
+		rect		-320, -120, 1280, 720
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		background	"guis/assets/common/dirt3"
+		matcolor	1, 1, 1, 0.6
+		noevents	1
+	}
+
+	// ---- title + verdict ----
+	windowDef Title {
+		rect		40, 140, 560, 70
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		text		"ULTRA NIGHTMARE"
+		font		"fonts/bank"
+		textscale	0.9
+		textalign	1
+		forecolor	0.85, 0.1, 0.05, 0
+		noevents	1
+		notime		1
+
+		onTime 0 {
+			transition "forecolor" "0.85 0.1 0.05 0" "0.85 0.1 0.05 1" "600" ;
+		}
+		onTime 500 {
+			transition "Verdict::forecolor" "0.8 0.75 0.7 0" "0.8 0.75 0.7 0.85" "600" ;
+		}
+	}
+	windowDef Verdict {
+		rect		40, 216, 560, 20
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		text		"You died. The run is over and its checkpoint has been erased."
+		font		"fonts/bank"
+		textscale	0.27
+		textalign	1
+		forecolor	0.8, 0.75, 0.7, 0
+		noevents	1
+	}
+
+	// ---- the only button ----
+	windowDef MainMenuBtn {
+		rect		200, 300, 240, 26
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		text		"Main Menu"
+		font		"fonts/bank"
+		textscale	0.38
+		textalign	1
+		textaligny	-2
+		forecolor	1, 1, 1, 0
+		noevents	1
+		notime		1
+
+		onTime 0 {
+			transition "forecolor" "1 1 1 0" "1 1 1 0.6" "400" ;
+			set "noevents" "0" ;
+		}
+		onMouseEnter {
+			transition "forecolor" "1 1 1 0.6" "1 1 1 1" "250" ;
+			transition "MainMenuHint::forecolor" "1 1 1 0" "1 1 1 0.5" "250" ;
+			set "cmd" "play guisounds_ping" ;
+		}
+		onMouseExit {
+			transition "forecolor" "1 1 1 1" "1 1 1 0.6" "250" ;
+			transition "MainMenuHint::forecolor" "1 1 1 0.5" "1 1 1 0" "250" ;
+		}
+		onAction {
+			set "cmd" "play guisounds_ping2" ;
+			set "cmd" "exec disconnect" ;
+		}
+	}
+	windowDef MainMenuHint {
+		rect		170, 328, 300, 20
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		text		"Return to the main menu"
+		font		"fonts/bank"
+		textscale	0.24
+		textalign	1
+		forecolor	1, 1, 1, 0
+		noevents	1
+	}
+
+	// swallows clicks until the reveal is done, then Open zeroes its rect
+	windowDef BlackFade {
+		rect		-320, -120, 1280, 720
+		cstAnchor	CST_ANCHOR_CENTER_CENTER
+		backcolor	0, 0, 0, 1
+	}
+}

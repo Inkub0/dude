@@ -1969,7 +1969,7 @@ void idPlayer::Spawn( void ) {
 #endif
 			g_armorProtection.SetFloat( ( g_skill.GetInteger() < 2 ) ? 0.4f : 0.2f );
 
-			if ( g_skill.GetInteger() == 3 ) {
+			if ( g_skill.GetInteger() >= 3 ) {
 				healthTake = true;
 				nextHealthTake = gameLocal.time + g_healthTakeTime.GetInteger() * 1000;
 			}
@@ -4052,7 +4052,7 @@ void idPlayer::UpdatePowerUps( void ) {
 		healthPulse = true;
 	}
 
-	if ( !gameLocal.inCinematic && influenceActive == 0 && g_skill.GetInteger() == 3 && gameLocal.time > nextHealthTake && !AI_DEAD && health > g_healthTakeLimit.GetInteger() ) {
+	if ( !gameLocal.inCinematic && influenceActive == 0 && g_skill.GetInteger() >= 3 && gameLocal.time > nextHealthTake && !AI_DEAD && health > g_healthTakeLimit.GetInteger() ) {
 		assert( !gameLocal.isClient );	// healthPool never be set on client
 
 #ifdef _D3XP
@@ -8016,6 +8016,7 @@ void idPlayer::CalcDamagePoints( idEntity *inflictor, idEntity *attacker, const 
 					damage *= 1.70f;
 					break;
 				case 3:
+				case 4:	// DUDE: Ultra Nightmare = Nightmare rules (permadeath is enforced by the engine session)
 					damage *= 3.5f;
 					break;
 				default:

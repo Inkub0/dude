@@ -8,6 +8,8 @@
 // DUDE additions over the community base: DUDE Settings entry, DUDE logo,
 // quality-preset + FPS/VSync cyclers in the System options page, button-label
 // nudges (docs/main-menu-dude-button.md has the reproducible edit rules).
+// Ultra Nightmare difficulty row + locked Save Game during such a run
+// (docs/ultra-nightmare.md).
 //
 // This loose file overrides every pak copy (the engine mirrors it into
 // fs_savepath at startup — InstallGuiOverrides in neo/framework/FileSystem.cpp
@@ -907,7 +909,7 @@ windowDef PrimaryMenuParent {
 			background	"gui/mainmenu/button_edge"
 			matcolor	0.45 ,0.45 ,0.45 ,0.3
 			noevents	1
-			visible		("gui::inGame" == 2)
+			visible		("gui::inGame" == 2 || "gui::ultraNightmare" == 1)
 		}
 		//new game button left edge
 		windowDef NewGameBtnLCornerBG {
@@ -915,7 +917,7 @@ windowDef PrimaryMenuParent {
 			background	"gui/mainmenu/button_edge"
 			matcolor	0.45 ,0.55 ,0.7 ,0.3
 			noevents	1
-			visible		("gui::inGame" != 2)
+			visible		("gui::inGame" != 2 && "gui::ultraNightmare" == 0)
 		}
 
 		//new game button left edge HIGHLIGHT
@@ -924,7 +926,7 @@ windowDef PrimaryMenuParent {
 			background	"gui/mainmenu/button_edge"
 			matcolor	1, 1, 1 ,0
 			noevents	1
-			visible		("gui::inGame" != 2)
+			visible		("gui::inGame" != 2 && "gui::ultraNightmare" == 0)
 		}
 
 		//new game button left edge Glow
@@ -933,7 +935,7 @@ windowDef PrimaryMenuParent {
 			background	"gui/mainmenu/buttong_edge"
 			matcolor	0.55 ,0.65 ,0.75 ,0.5
 			noevents	1
-			visible		("gui::inGame" != 2)
+			visible		("gui::inGame" != 2 && "gui::ultraNightmare" == 0)
 		}
 	}
 
@@ -948,7 +950,7 @@ windowDef PrimaryMenuParent {
 			background	"gui/mainmenu/button_middle"
 			matcolor	0.45 ,0.45 ,0.45 ,0.3
 			noevents	1
-			visible		("gui::inGame" == 2)
+			visible		("gui::inGame" == 2 || "gui::ultraNightmare" == 1)
 		}
 		//new game button middle
 		windowDef NewGameBtnMiddleBG {
@@ -956,7 +958,7 @@ windowDef PrimaryMenuParent {
 			background	"gui/mainmenu/button_middle"
 			matcolor	0.45 ,0.55 ,0.7 ,0.3
 			noevents	1
-			visible		("gui::inGame" != 2)
+			visible		("gui::inGame" != 2 && "gui::ultraNightmare" == 0)
 		}
 
 		//new game button middle HIGHLIGHT
@@ -965,7 +967,7 @@ windowDef PrimaryMenuParent {
 			background	"gui/mainmenu/button_middle"
 			matcolor	1, 1, 1 ,0
 			noevents	1
-			visible		("gui::inGame" != 2)
+			visible		("gui::inGame" != 2 && "gui::ultraNightmare" == 0)
 		}
 
 		//new game button middle Glow
@@ -974,7 +976,7 @@ windowDef PrimaryMenuParent {
 			background	"gui/mainmenu/buttong_middle"
 			matcolor	0.55 ,0.65 ,0.75 ,0.5
 			noevents	1
-			visible		("gui::inGame" != 2)
+			visible		("gui::inGame" != 2 && "gui::ultraNightmare" == 0)
 		}
 	}
 
@@ -989,7 +991,7 @@ windowDef PrimaryMenuParent {
 			background	"gui/mainmenu/button_edge"
 			matcolor	0.45 ,0.45 ,0.45 ,0.3
 			noevents	1
-			visible		("gui::inGame" == 2)
+			visible		("gui::inGame" == 2 || "gui::ultraNightmare" == 1)
 		}
 		//new game button right edge
 		windowDef NewGameBtnRCornerBG {
@@ -997,7 +999,7 @@ windowDef PrimaryMenuParent {
 			background	"gui/mainmenu/button_edge"
 			matcolor	0.45 ,0.55 ,0.7 ,0.3
 			noevents	1
-			visible		("gui::inGame" != 2)
+			visible		("gui::inGame" != 2 && "gui::ultraNightmare" == 0)
 		}
 
 		//new game button right edge HIGHLIGHT
@@ -1006,7 +1008,7 @@ windowDef PrimaryMenuParent {
 			background	"gui/mainmenu/button_edge"
 			matcolor	1, 1, 1 ,0
 			noevents	1
-			visible		("gui::inGame" != 2)
+			visible		("gui::inGame" != 2 && "gui::ultraNightmare" == 0)
 		}
 
 		//new game button right edge Glow
@@ -1015,7 +1017,7 @@ windowDef PrimaryMenuParent {
 			background	"gui/mainmenu/buttong_edge"
 			matcolor	0.55 ,0.65 ,0.75 ,0.5
 			noevents	1
-			visible		("gui::inGame" != 2)
+			visible		("gui::inGame" != 2 && "gui::ultraNightmare" == 0)
 		}
 	}
 
@@ -5564,34 +5566,34 @@ windowDef NewGameParent {
 
 //BUTTON 1 BG
 	windowDef NGBtn1Border {
-		rect		34, 335, 161, 19
+		rect		34, 315, 161, 19
 		backcolor	0.45 ,0.55 ,0.7 ,0.3
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn1Corner {
-		rect		195, 329, 16, 32
+		rect		195, 309, 16, 32
 		background	"gui/mainmenu/button_cornerangle"
 		matcolor	0.45 ,0.55 ,0.7 ,0.3
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn1EdgeG {
-		rect		30, 329, 16, 32
+		rect		30, 309, 16, 32
 		background	"gui/mainmenu/buttong_cornersquare"
 		matcolor	0.55 ,0.65 ,0.75 ,0.5
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn1BorderG {
-		rect		46, 329, 149, 32
+		rect		46, 309, 149, 32
 		background	"gui/mainmenu/buttong_middlesm"
 		matcolor	0.55 ,0.65 ,0.75 ,0.5
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn1CornerG {
-		rect		195, 329, 16, 32
+		rect		195, 309, 16, 32
 		background	"gui/mainmenu/buttong_cornerangle"
 		matcolor	0.55 ,0.65 ,0.75 ,0.5
 		noevents	1
@@ -5599,34 +5601,34 @@ windowDef NewGameParent {
 	}
 //BUTTON 2 BG
 	windowDef NGBtn2Border {
-		rect		34, 355, 161, 19
+		rect		34, 335, 161, 19
 		backcolor	0.45 ,0.55 ,0.7 ,0.3
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn2Corner {
-		rect		195, 349, 16, 32
+		rect		195, 329, 16, 32
 		background	"gui/mainmenu/button_cornerangle"
 		matcolor	0.45 ,0.55 ,0.7 ,0.3
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn2EdgeG {
-		rect		30, 349, 16, 32
+		rect		30, 329, 16, 32
 		background	"gui/mainmenu/buttong_cornersquare"
 		matcolor	0.55 ,0.65 ,0.75 ,0.5
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn2BorderG {
-		rect		46, 349, 149, 32
+		rect		46, 329, 149, 32
 		background	"gui/mainmenu/buttong_middlesm"
 		matcolor	0.55 ,0.65 ,0.75 ,0.5
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn2CornerG {
-		rect		195, 349, 16, 32
+		rect		195, 329, 16, 32
 		background	"gui/mainmenu/buttong_cornerangle"
 		matcolor	0.55 ,0.65 ,0.75 ,0.5
 		noevents	1
@@ -5634,34 +5636,34 @@ windowDef NewGameParent {
 	}
 //BUTTON 3 BG
 	windowDef NGBtn3Border {
-		rect		34, 375, 161, 19
+		rect		34, 355, 161, 19
 		backcolor	0.45 ,0.55 ,0.7 ,0.3
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn3Corner {
-		rect		195, 369, 16, 32
+		rect		195, 349, 16, 32
 		background	"gui/mainmenu/button_cornerangle"
 		matcolor	0.45 ,0.55 ,0.7 ,0.3
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn3EdgeG {
-		rect		30, 369, 16, 32
+		rect		30, 349, 16, 32
 		background	"gui/mainmenu/buttong_cornersquare"
 		matcolor	0.55 ,0.65 ,0.75 ,0.5
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn3BorderG {
-		rect		46, 369, 149, 32
+		rect		46, 349, 149, 32
 		background	"gui/mainmenu/buttong_middlesm"
 		matcolor	0.55 ,0.65 ,0.75 ,0.5
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn3CornerG {
-		rect		195, 369, 16, 32
+		rect		195, 349, 16, 32
 		background	"gui/mainmenu/buttong_cornerangle"
 		matcolor	0.55 ,0.65 ,0.75 ,0.5
 		noevents	1
@@ -5669,33 +5671,68 @@ windowDef NewGameParent {
 	}
 //BUTTON 4 BG
 	windowDef NGBtn4Border {
-		rect		34, 395, 161, 19
+		rect		34, 375, 161, 19
 		backcolor	0.45 ,0.55 ,0.7 ,0.3
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn4Corner {
-		rect		195, 389, 16, 32
+		rect		195, 369, 16, 32
 		background	"gui/mainmenu/button_cornerangle"
 		matcolor	0.45 ,0.55 ,0.7 ,0.3
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn4EdgeG {
-		rect		30, 389, 16, 32
+		rect		30, 369, 16, 32
 		background	"gui/mainmenu/buttong_cornersquare"
 		matcolor	0.55 ,0.65 ,0.75 ,0.5
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn4BorderG {
-		rect		46, 389, 149, 32
+		rect		46, 369, 149, 32
 		background	"gui/mainmenu/buttong_middlesm"
 		matcolor	0.55 ,0.65 ,0.75 ,0.5
 		noevents	1
 		visible		0
 	}
 	windowDef NGBtn4CornerG {
+		rect		195, 369, 16, 32
+		background	"gui/mainmenu/buttong_cornerangle"
+		matcolor	0.55 ,0.65 ,0.75 ,0.5
+		noevents	1
+		visible		0
+	}
+//BUTTON 5 BG (DUDE: Ultra Nightmare row, docs/ultra-nightmare.md)
+	windowDef NGBtn5Border {
+		rect		34, 395, 161, 19
+		backcolor	0.45 ,0.55 ,0.7 ,0.3
+		noevents	1
+		visible		0
+	}
+	windowDef NGBtn5Corner {
+		rect		195, 389, 16, 32
+		background	"gui/mainmenu/button_cornerangle"
+		matcolor	0.45 ,0.55 ,0.7 ,0.3
+		noevents	1
+		visible		0
+	}
+	windowDef NGBtn5EdgeG {
+		rect		30, 389, 16, 32
+		background	"gui/mainmenu/buttong_cornersquare"
+		matcolor	0.55 ,0.65 ,0.75 ,0.5
+		noevents	1
+		visible		0
+	}
+	windowDef NGBtn5BorderG {
+		rect		46, 389, 149, 32
+		background	"gui/mainmenu/buttong_middlesm"
+		matcolor	0.55 ,0.65 ,0.75 ,0.5
+		noevents	1
+		visible		0
+	}
+	windowDef NGBtn5CornerG {
 		rect		195, 389, 16, 32
 		background	"gui/mainmenu/buttong_cornerangle"
 		matcolor	0.55 ,0.65 ,0.75 ,0.5
@@ -5704,7 +5741,7 @@ windowDef NewGameParent {
 	}
 //BUTTON TEXT
 	windowDef NGBtnText0 {
-		rect		36, 319, 170, 13
+		rect		36, 299, 170, 13
 		text		"#str_04088"
 		textscale	0.25
 		textaligny	-5
@@ -5713,7 +5750,7 @@ windowDef NewGameParent {
 		visible 	0
 	}
 	windowDef NGBtnText1 {
-		rect		46, 339, 170, 13
+		rect		46, 319, 170, 13
 		text		"#str_04089"
 		textscale	0.25
 		textaligny	-5
@@ -5751,7 +5788,7 @@ windowDef NewGameParent {
 		}
 	}
 	windowDef NGBtnText2 {
-		rect		46, 359, 170, 13
+		rect		46, 339, 170, 13
 		text		"#str_04091"
 		textscale	0.25
 		textaligny	-5
@@ -5789,7 +5826,7 @@ windowDef NewGameParent {
 	}
 
 	windowDef NGBtnText3 {
-		rect		46, 379, 170, 13
+		rect		46, 359, 170, 13
 		text		"#str_04093"
 		textscale	0.25
 		textaligny	-5
@@ -5826,7 +5863,7 @@ windowDef NewGameParent {
 		}
 	}
 	windowDef NGBtnText4Alt {
-		rect		46, 399, 170, 13
+		rect		46, 379, 170, 13
 		text		"#str_04095"
 		textscale	0.25
 		textaligny	-5
@@ -5846,7 +5883,7 @@ windowDef NewGameParent {
 		}		
 	}
 	windowDef NGBtnText4 {
-		rect		46, 399, 170, 13
+		rect		46, 379, 170, 13
 		text		"#str_04095"
 		textscale	0.25
 		textaligny	-5
@@ -5879,6 +5916,65 @@ windowDef NewGameParent {
 		onAction {
 			set	"cmd"	"play guisounds_menuclickup" ; 
 			set "gui::skill" "3" ;
+			resetTime "AnimNewGame" "0" ;
+		}
+	}
+
+	// DUDE: Ultra Nightmare — Nightmare rules plus permadeath; unlocked together with Nightmare
+	windowDef NGBtnText5Alt {
+		rect		46, 399, 170, 13
+		text		"ULTRA NIGHTMARE"
+		textscale	0.25
+		textaligny	-5
+		forecolor	1, 1, 1, 0.5
+		visible 	0
+		
+		onMouseEnter {
+			resetTime "ToolTip1" "0" ;
+			set "ToolTip1::text" "Ultra Nightmare mode locked" ;
+			set "ToolTip2::text" "Ultra Nightmare mode locked" ;
+		}
+		onMouseExit {
+			resetTime "ToolTip2" "0" ;
+		}
+		onAction {
+			set	"cmd"	"play guisounds_error" ; 
+		}		
+	}
+	windowDef NGBtnText5 {
+		rect		46, 399, 170, 13
+		text		"ULTRA NIGHTMARE"
+		textscale	0.25
+		textaligny	-5
+		forecolor	0.6, 1, 1, 1
+		visible 	0
+
+		onMouseEnter {
+			transition "forecolor" "0.6 1 1 1" "1 1 1 1" "250" ;
+			transition "NGBtn5EdgeG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+			transition "NGBtn5BorderG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+			transition "NGBtn5CornerG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
+			transition "NGBtn5Border::backcolor" "0.45 0.55 0.7 0.3" "0.55 0.65 0.75 0.5" "200" ;
+			transition "NGBtn5Corner::matcolor" "0.45 0.55 0.7 0.3" "0.55 0.65 0.75 0.5" "200" ;
+	
+			resetTime "ToolTip1" "0" ;
+			set "ToolTip1::text" "ULTRA NIGHTMARE-One life, no saves, no mercy" ;
+			set "ToolTip2::text" "ULTRA NIGHTMARE-One life, no saves, no mercy" ;
+		}
+		onMouseExit {
+			transition "forecolor" "1 1 1 1" "0.6 1 1 1" "250" ;
+			transition "NGBtn5EdgeG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+			transition "NGBtn5BorderG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+			transition "NGBtn5CornerG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
+			transition "NGBtn5Border::backcolor" "0.55 0.65 0.75 0.5" "0.45 0.55 0.7 0.3" "400" ;
+			transition "NGBtn5Corner::matcolor" "0.55 0.65 0.75 0.5" "0.45 0.55 0.7 0.3" "400" ;
+	
+			resetTime "ToolTip2" "0" ;
+		}
+
+		onAction {
+			set	"cmd"	"play guisounds_menuclickup" ; 
+			set "gui::skill" "4" ;
 			resetTime "AnimNewGame" "0" ;
 		}
 	}
@@ -8132,7 +8228,7 @@ windowDef MultiplayerNavParent {
 		textalign	1
 		textaligny	-1
 		forecolor	1, 1, 1, 1
-		visible		("gui::inGame" == 1)
+		visible		("gui::inGame" == 1 && "gui::ultraNightmare" == 0)
 		float "exitanim" 0
 
 		onMouseEnter {
@@ -8220,6 +8316,30 @@ windowDef MultiplayerNavParent {
 		}
 	}
 
+
+	// DUDE: Ultra Nightmare run in progress — Save Game is locked (only the engine's
+	// map-start checkpoint exists); greyed label, error blip and a tooltip instead.
+	windowDef SaveGameBtnTextUN {
+		rect		53, 415, 160, 21
+		text		"#str_02179"
+		textscale	0.26
+		textalign	1
+		textaligny	-1
+		forecolor	1, 1, 1, 0.4
+		visible		("gui::inGame" == 1 && "gui::ultraNightmare" == 1)
+
+		onMouseEnter {
+			resetTime "ToolTip1" "0" ;
+			set "ToolTip1::text" "Ultra Nightmare has no manual saves" ;
+			set "ToolTip2::text" "Ultra Nightmare has no manual saves" ;
+		}
+		onMouseExit {
+			resetTime "ToolTip2" "0" ;
+		}
+		onAction {
+			set	"cmd"	"play guisounds_error" ;
+		}
+	}
 
 	//load game button Text
 	windowDef LoadBtnText {
@@ -20676,11 +20796,11 @@ windowDef MultiplayerLANParent {
 			transition "MultiplayerBtnMiddleG::matcolor" "0.55 0.65 0.75 0.5" "0.55 0.65 0.75 0" "200" ;
 			transition "MultiplayerBtnRCornerG::matcolor" "0.55 0.65 0.75 0.5" "0.55 0.65 0.75 0" "200" ;
 
-			transition "NGBtnMBorder::rect" "185 415 21 0" "34 334 172 81" "300" "0.2" "0.8" ;
-			transition "NGBtnTlCorner::rect" "185 399 16 16" "34 318 16 16" "300" "0.2" "0.8" ;
-			transition "NGBtnTBorder::rect" "200 399 6 16" "50 318 156 16" "300" "0.2" "0.8" ;
-			transition "NGBtnTrCorner::rect" "206 399 8 16" "206 318 8 16" "300" "0.2" "0.8" ;
-			transition "NGBtnSBorder::rect" "206 415 7 0" "206 334 7 81" "300" "0.2" "0.8" ;
+			transition "NGBtnMBorder::rect" "185 415 21 0" "34 314 172 101" "300" "0.2" "0.8" ;
+			transition "NGBtnTlCorner::rect" "185 399 16 16" "34 298 16 16" "300" "0.2" "0.8" ;
+			transition "NGBtnTBorder::rect" "200 399 6 16" "50 298 156 16" "300" "0.2" "0.8" ;
+			transition "NGBtnTrCorner::rect" "206 399 8 16" "206 298 8 16" "300" "0.2" "0.8" ;
+			transition "NGBtnSBorder::rect" "206 415 7 0" "206 314 7 101" "300" "0.2" "0.8" ;
 
 			transition "NewGameBtnLCornerG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "250" ;
 			transition "NewGameBtnMiddleG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0" "250" ;
@@ -20710,7 +20830,7 @@ windowDef MultiplayerLANParent {
 		}
 
 		onTime 300 {
-			transition "NGBtnMBorder::rect" "34 334 172 81" "34 415 172 0" "150" ;
+			transition "NGBtnMBorder::rect" "34 314 172 101" "34 415 172 0" "150" ;
 		set "NGBtnText0::visible" "1" ;
 			set "NGBtn1Border::visible" "1" ;
 			set "NGBtn1Corner::visible" "1" ;
@@ -20799,6 +20919,20 @@ windowDef MultiplayerLANParent {
 				set "NGBtnText4Alt::visible" "1" ;
 				transition "NGBtnText4Alt::forecolor" "1 1 1 1" "1 1 1 0.4" "200" ;
 			}
+
+			// DUDE: Ultra Nightmare row
+			set "NGBtn5Border::visible" "1" ;
+			set "NGBtn5Corner::visible" "1" ;
+			transition "NGBtn5Border::backcolor" "1 1 1 0.7" "0.45 0.55 0.7 0.3" "50" ;
+			transition "NGBtn5Corner::matcolor" "1 1 1 0.7" "0.45 0.55 0.7 0.3" "50" ;
+			if ("gui::nightmare" == 1) {
+				set "NGBtn5EdgeG::visible" "1" ;
+				set "NGBtn5BorderG::visible" "1" ;
+				set "NGBtn5CornerG::visible" "1" ;
+				transition "NGBtn5EdgeG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 0.5" "50" ;
+				transition "NGBtn5BorderG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 0.5" "50" ;
+				transition "NGBtn5CornerG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 0.5" "50" ;
+			}
 		}
 		onTime 510 {
 			set "NewGameBtnLCornerH::matcolor" "0.55 0.65 0.75 0" ;
@@ -20807,6 +20941,21 @@ windowDef MultiplayerLANParent {
 
 			set "ClickCatcher::rect" "0 414 640 66"			
 		}	
+		onTime 550 {
+			// DUDE: Ultra Nightmare label (locked look until Nightmare is unlocked)
+			transition "NGBtn5Border::backcolor" "1 1 1 0.7" "0.45 0.55 0.7 0.3" "200" ;
+			transition "NGBtn5Corner::matcolor" "1 1 1 0.7" "0.45 0.55 0.7 0.3" "200" ;
+			if ("gui::nightmare" == 1) {
+				transition "NGBtn5EdgeG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 0.5" "200" ;
+				transition "NGBtn5BorderG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 0.5" "200" ;
+				transition "NGBtn5CornerG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 0.5" "200" ;
+				set "NGBtnText5::visible" "1" ;
+				transition "NGBtnText5::forecolor" "1 1 1 1" "0.6 1 1 1" "200" ;
+			} else {
+				set "NGBtnText5Alt::visible" "1" ;
+				transition "NGBtnText5Alt::forecolor" "1 1 1 1" "1 1 1 0.4" "200" ;
+			}
+		}
 		onTime 800 {
 			if ("AnimMPUp::clickcatch" == 0) {			
 				set "ClickCatcher::rect" "0 0 0 0" ;
@@ -20849,6 +20998,13 @@ windowDef MultiplayerLANParent {
 			set "NGBtn4CornerG::visible" "0" ;
 			set "NGBtnText4::visible" "0" ;
 			set "NGBtnText4Alt::visible" "0" ;
+			set "NGBtn5Border::visible" "0" ;
+			set "NGBtn5Corner::visible" "0" ;
+			set "NGBtn5EdgeG::visible" "0" ;
+			set "NGBtn5BorderG::visible" "0" ;
+			set "NGBtn5CornerG::visible" "0" ;
+			set "NGBtnText5::visible" "0" ;
+			set "NGBtnText5Alt::visible" "0" ;
 
 			set "NewGameBtnLCornerH::visible" "1" ;
 			set "NewGameBtnMiddleH::visible" "1" ;
@@ -20869,11 +21025,11 @@ windowDef MultiplayerLANParent {
 				transition "MultiplayerBtnRCornerG::matcolor" "0.55 0.65 0.75 0" "0.55 0.65 0.75 0.5" "300" ;
 			}
 
-			transition "NGBtnMBorder::rect" "34 334 172 81" "184 415 22 0" "300" "0.2" "0.8" ;
-			transition "NGBtnTlCorner::rect" "34 318 16 16" "184 415 16 0" "300" "0.2" "0.8" ;
-			transition "NGBtnTBorder::rect" "50 318 156 16" "200 415 6 0" "300" "0.2" "0.8" ;
-			transition "NGBtnTrCorner::rect" "206 318 8 16" "206 415 8 0" "300" "0.2" "0.8" ;
-			transition "NGBtnSBorder::rect" "206 334 7 81" "206 415 7 0" "300" "0.2" "0.8" ;
+			transition "NGBtnMBorder::rect" "34 314 172 101" "184 415 22 0" "300" "0.2" "0.8" ;
+			transition "NGBtnTlCorner::rect" "34 298 16 16" "184 415 16 0" "300" "0.2" "0.8" ;
+			transition "NGBtnTBorder::rect" "50 298 156 16" "200 415 6 0" "300" "0.2" "0.8" ;
+			transition "NGBtnTrCorner::rect" "206 298 8 16" "206 415 8 0" "300" "0.2" "0.8" ;
+			transition "NGBtnSBorder::rect" "206 314 7 101" "206 415 7 0" "300" "0.2" "0.8" ;
 	
 			transition "NewGameBtnLCornerBG::matcolor" "1 1 1 0.4" "0.45 0.55 0.7 0.3" "50" ;
 			transition "NewGameBtnMiddleBG::matcolor" "1 1 1 0.4" "0.45 0.55 0.7 0.3" "50" ;

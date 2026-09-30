@@ -3605,7 +3605,7 @@ bool idGameLocal::InhibitEntitySpawn( idDict &spawnArgs ) {
 	} else {
 		spawnArgs.GetBool( "not_hard", "0", result );
 #ifdef _D3XP
-		if ( !result && g_skill.GetInteger() == 3 ) {
+		if ( !result && g_skill.GetInteger() >= 3 ) {
 			spawnArgs.GetBool( "not_nightmare", "0", result );
 		}
 #endif
@@ -3613,7 +3613,7 @@ bool idGameLocal::InhibitEntitySpawn( idDict &spawnArgs ) {
 
 
 	const char *name;
-	if ( g_skill.GetInteger() == 3 ) {
+	if ( g_skill.GetInteger() >= 3 ) {
 		name = spawnArgs.GetString( "classname" );
 		// _D3XP :: remove moveable medkit packs also
 		if ( idStr::Icmp( name, "item_medkit" ) == 0 || idStr::Icmp( name, "item_medkit_small" ) == 0 ||
@@ -3643,8 +3643,8 @@ void idGameLocal::SetSkill( int value ) {
 
 	if ( value < 0 ) {
 		skill_level = 0;
-	} else if ( value > 3 ) {
-		skill_level = 3;
+	} else if ( value > 4 ) {	// DUDE: 4 = Ultra Nightmare
+		skill_level = 4;
 	} else {
 		skill_level = value;
 	}

@@ -36,6 +36,11 @@ System menu, "Potato" = unmodified classic rendering)
 - Smaller touches: depth-of-field on weapon reload, self-lit pickup glow, emissive GUI
   surfaces casting light, smoke-in-darkness blending, hi-res GUI font atlases.
 
+**Gameplay**
+- **Ultra Nightmare** difficulty (unlocked with Nightmare): Nightmare rules plus permadeath —
+  one checkpoint per run written at map starts only, no manual saves, erased when you die
+  (docs/ultra-nightmare.md).
+
 **Vulkan-only**
 - **Ray-traced sun shadows** (`r_rtSunShadows`) via `VK_KHR_ray_query` on RT-capable GPUs.
 - **GPU tessellation** for characters/monsters (PN triangles + displacement), GPU skinning.
