@@ -97,31 +97,26 @@ Unpack `guis/mainmenu.gui` from the pak, replace the `windowDef dhewm3set1 { ...
 block with the "Ours" version above, then update that single entry back into the pak
 (`zip -X <pak> guis/mainmenu.gui`).
 
-## Button-label vertical nudge (all buttons +2)
+## Button-label vertical nudge — REVERTED (2026-09-30)
 
-Beyond the settings button, every **button/tab label** in `mainmenu.gui` was moved
-**down 2 points** so the text sits better on its button graphic. This is a rule, not
-a hand-edit of ~80 blocks:
+For a while every **button/tab label** in `mainmenu.gui` carried a blanket
+`textaligny` **+2** (difficulty selectors net +1; ~80 blocks, applied by a brace-aware
+pass over each block's own-level `textaligny`). It was a workaround, not a design
+choice: with `gui_hiResFonts` on, `SetFontByScale()` took the hi-res sheet's own
+`maxHeight` as the layout metric, and because the 12/24/48 pt sheets are not
+normalized in their tallest glyph, every baseline drifted up ~2 virtual px above
+720p. The engine now keeps the vanilla sheet's layout metrics and only swaps the
+sampled atlas (`neo/ui/DeviceContext.cpp`, `SelectFontSheet`), so the nudge became a
+2 px error in the other direction and was removed.
 
-1. **+2 to `textaligny`** on every text `windowDef` whose name contains `Btn`,
-   `Button`, or `Tab` (73 buttons + 5 LAN tabs). Where a block had no `textaligny`,
-   insert `textaligny 2` (absent == 0).
-2. **Exclusions:** the `dhewm3set1` DUDE-Settings button (positioned separately,
-   above), and pure titles (`*TitleText`), tooltips (`ToolTip*`/`*Tip`), credits
-   (`Credits*`), column headers, and dialog body text.
-3. The four main nav buttons (`NewGameBtnText`, `LoadBtnText`, `MultiplayerBtnText`,
-   `OptionsBtnText`) got the same +2 first, so they're already at the target.
-4. **Settings-list rows** (the `*Title` entries inside option lists — control binds,
-   video/audio/system settings, ~100 of them) were **left as-is** — they're list
-   content, not buttons.
-5. **Difficulty selectors** then nudged back **−1** (net +1 vs. stock): `NGBtnText1`
-   (Recruit), `NGBtnText2` (Marine), `NGBtnText3` (Veteran), `NGBtnText4` +
-   `NGBtnText4Alt` (Nightmare). The `NGBtnText0` "LEVEL OF DIFFICULTY" header keeps
-   the +2.
-
-Apply it with a brace-aware pass that only touches each block's **own-level**
-`textaligny` (never `textaligny` inside nested `onAction`/`set` handlers), e.g. the
-`shift.py`/`ng.py` transformers used during this work.
+Current rule: `mainmenu.gui` button labels use the **CstDoom3 pak values verbatim**
+(the 2026-07-21 `zWideGuis_D3.pk4` copy is the reference). Elements DUDE added follow
+their un-nudged siblings: `OSBtnVideoTab`/`OSBtnSnd` = 4 like `OSBtn1`/`OSBtn2`,
+`SNDYesBtnText` = −1 like the dialog Yes/Cancel buttons, `SNDTitleText` = −3 like every
+0.32-scale title, option-list rows keep the mod's −6. `dudeset1` keeps its own −6 (a
+text button with no stock reference). The clean re-author `base/guis/dude/mainmenu.gui`
+(`nav*Text`) was reset the same way. `mpmain.gui` was never nudged. Never compensate a
+font-selection bug by moving GUI text.
 
 ## Main-menu logo swap (higher-res DOOM 3 logo)
 

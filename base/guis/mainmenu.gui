@@ -1563,7 +1563,7 @@ windowDef OptionsMenuParent {
 			text		"#str_04062"
 			textscale	0.26
 			textalign	1
-			textaligny	-1
+			textaligny	-3
 			forecolor	0.6, 1, 1, 1
 			float "exitanim" 0
 	
@@ -1637,7 +1637,7 @@ windowDef OptionsMenuParent {
 			text		"#str_02091"
 			textscale	0.24
 			textalign	2
-			textaligny	-1
+			textaligny	-3
 			forecolor	1, 1, 1, 1
 			noevents	1
 
@@ -1675,7 +1675,7 @@ windowDef OptionsMenuParent {
 			text		"#str_02092"
 			textscale	0.24
 			textalign	2
-			textaligny	-1
+			textaligny	-3
 			forecolor	0.6, 1, 1, 1
 
 			onMouseEnter {
@@ -1712,7 +1712,7 @@ windowDef OptionsMenuParent {
 			text		"#str_02094"
 			textscale	0.24
 			textalign	2
-			textaligny	-1
+			textaligny	-3
 			forecolor	0.6, 1, 1, 1
 
 			onMouseEnter {
@@ -1749,7 +1749,7 @@ windowDef OptionsMenuParent {
 			text		"#str_04064"
 			textscale	0.24
 			textalign	2
-			textaligny	-1
+			textaligny	-3
 			forecolor	0.6, 1, 1, 1
 
 			onMouseEnter {
@@ -3792,7 +3792,7 @@ windowDef OptionsMenuParent {
 		text		"#str_04072"
 		textscale	0.26
 		textalign	1
-		textaligny	-1
+		textaligny	-3
 		forecolor	0.6, 1, 1, 1
 		float "exitanim" 0
 
@@ -4271,7 +4271,7 @@ windowDef OptionsMenuParent {
 		text		"#str_04062"
 		textscale	0.26
 		textalign	1
-		textaligny	-1
+		textaligny	-3
 		forecolor	0.6, 1, 1, 1
 		float "exitanim" 0
 		float "vidrestrt" 0
@@ -4369,7 +4369,7 @@ windowDef OptionsMenuParent {
 			text		"VIDEO"
 			textscale	0.25
 			textalign	1
-			textaligny	6
+			textaligny	4
 			forecolor	1, 1, 1, 1
 			noevents	1
 
@@ -4399,7 +4399,7 @@ windowDef OptionsMenuParent {
 			text		"SOUND"
 			textscale	0.25
 			textalign	1
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 1
 			float "exitanim" 0
 
@@ -4463,7 +4463,7 @@ windowDef OptionsMenuParent {
 			text		"ADVANCED"
 			textscale	0.25
 			textalign	1
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 1
 			float "exitanim" 0
 
@@ -5104,7 +5104,7 @@ windowDef OptionsMenuParent {
 			rect		184, 195, 190, 28
 			text		"#str_02156"
 			textscale	0.25
-			textaligny	6
+			textaligny	4
 			forecolor	1, 1, 1, 0.5
 			noevents	1
 			float activebtn 0
@@ -5179,7 +5179,7 @@ windowDef OptionsMenuParent {
 		rect		5, 356, 120, 13
 		text		"#str_02164"
 		textscale	0.25
-		textaligny	-3
+		textaligny	-5
 		forecolor	0.6, 1, 1, 1
 		visible 	0
 
@@ -5267,7 +5267,7 @@ windowDef OptionsMenuParent {
 		rect		5, 376, 120, 13
 		text		"#str_02129"
 		textscale	0.25
-		textaligny	-3
+		textaligny	-5
 		forecolor	0.6, 1, 1, 1
 		visible 	0
 
@@ -5356,7 +5356,7 @@ windowDef OptionsMenuParent {
 		rect		5, 396, 120, 13
 		text		"#str_00167"
 		textscale	0.25
-		textaligny	-3
+		textaligny	-5
 		forecolor	0.6, 1, 1, 1
 		visible 	0
 
@@ -5445,7 +5445,7 @@ windowDef OptionsMenuParent {
 		rect		5, 416, 120, 13
 		text		"#str_04086"
 		textscale	0.25
-		textaligny	-3
+		textaligny	-5
 		forecolor	0.6, 1, 1, 1
 		visible 	0
 		float "exitanim" 0
@@ -5707,7 +5707,7 @@ windowDef NewGameParent {
 		rect		36, 319, 170, 13
 		text		"#str_04088"
 		textscale	0.25
-		textaligny	-3
+		textaligny	-5
 		font "fonts/bank"
 		forecolor	1, 1, 1, 0//0.25
 		visible 	0
@@ -5716,7 +5716,7 @@ windowDef NewGameParent {
 		rect		46, 339, 170, 13
 		text		"#str_04089"
 		textscale	0.25
-		textaligny	-4
+		textaligny	-5
 		forecolor	0.6, 1, 1, 1
 		visible 	0
 
@@ -5754,7 +5754,7 @@ windowDef NewGameParent {
 		rect		46, 359, 170, 13
 		text		"#str_04091"
 		textscale	0.25
-		textaligny	-4
+		textaligny	-5
 		forecolor	0.6, 1, 1, 1
 		visible 	0
 
@@ -5792,7 +5792,7 @@ windowDef NewGameParent {
 		rect		46, 379, 170, 13
 		text		"#str_04093"
 		textscale	0.25
-		textaligny	-4
+		textaligny	-5
 		forecolor	0.6, 1, 1, 1
 		visible 	0
 
@@ -5829,7 +5829,7 @@ windowDef NewGameParent {
 		rect		46, 399, 170, 13
 		text		"#str_04095"
 		textscale	0.25
-		textaligny	-4
+		textaligny	-5
 		forecolor	1, 1, 1, 0.5
 		visible 	0
 		
@@ -5849,7 +5849,7 @@ windowDef NewGameParent {
 		rect		46, 399, 170, 13
 		text		"#str_04095"
 		textscale	0.25
-		textaligny	-4
+		textaligny	-5
 		forecolor	0.6, 1, 1, 1
 		visible 	0
 
@@ -6028,7 +6028,7 @@ windowDef ModsMenuParent {
 			rect		70, 284, 110, 28
 			text		"#str_04099" // Load
 			textscale	0.25
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 1
 
 			onTime 0 {
@@ -6101,7 +6101,7 @@ windowDef ModsMenuParent {
 			rect		180, 284, 80, 28
 			text		"#str_04216" // Load
 			textscale	0.25
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 1
 			float "anim" 0
 
@@ -6438,7 +6438,7 @@ windowDef SaveGameParent {
 			rect		303, 290, 110, 28
 			text		"#str_02185" // Save Game
 			textscale	0.25
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 1
 
 			onTime 0 {
@@ -6837,7 +6837,7 @@ windowDef LoadGameParent {
 			rect		418, 244, 110, 28
 			text		"#str_02188" // Load Game
 			textscale	0.25
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 1
 
 			onTime 0 {
@@ -6910,7 +6910,7 @@ windowDef LoadGameParent {
 			rect		418, 266, 110, 28
 			text		"#str_02190" // Delete
 			textscale	0.25
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 1
 
 			onTime 0 {
@@ -7482,7 +7482,7 @@ windowDef MultiplayerNavParent {
 			rect		180, 230, 140, 28
 			text		"#str_04103"
 			textscale	0.25
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 1
 	
 			onMouseEnter {
@@ -7707,7 +7707,7 @@ windowDef MultiplayerNavParent {
 		rect		418, 359, 200, 13
 		text		"#str_02198"
 		textscale	0.25
-		textaligny	-3
+		textaligny	-5
 		forecolor	0.6, 1, 1, 1
 		visible 	0
 
@@ -7754,7 +7754,7 @@ windowDef MultiplayerNavParent {
 		rect		418, 379, 200, 13
 		text		"#str_02200"
 		textscale	0.25
-		textaligny	-3
+		textaligny	-5
 		forecolor	0.6, 1, 1, 1
 		visible 	0
 
@@ -7798,7 +7798,7 @@ windowDef MultiplayerNavParent {
 		rect		418, 379, 202, 13
 		text		"#str_04104"
 		textscale	0.25
-		textaligny	-3
+		textaligny	-5
 		forecolor	0.6, 1, 1, 1
 		visible 	0
 
@@ -7838,7 +7838,7 @@ windowDef MultiplayerNavParent {
 		rect		418, 399, 200, 13
 		text		"#str_04100"
 		textscale	0.25
-		textaligny	-3
+		textaligny	-5
 		forecolor	0.6, 1, 1, 1
 		visible 	0
 
@@ -7917,7 +7917,6 @@ windowDef MultiplayerNavParent {
 		text		"#str_00186"
 		textscale	0.26
 		textalign	1
-		textaligny	2
 		forecolor	1, 1, 1, 0.4
 		float "exitanim" 0
 
@@ -8022,7 +8021,7 @@ windowDef MultiplayerNavParent {
 		text		"#str_02207"
 		textscale	0.26
 		textalign	1
-		textaligny	1
+		textaligny	-1
 		forecolor	1, 1, 1, 1
 		visible		("gui::inGame" == 0)
 		float "exitanim" 0
@@ -8131,7 +8130,7 @@ windowDef MultiplayerNavParent {
 		text		"#str_02179"
 		textscale	0.26
 		textalign	1
-		textaligny	1
+		textaligny	-1
 		forecolor	1, 1, 1, 1
 		visible		("gui::inGame" == 1)
 		float "exitanim" 0
@@ -8228,7 +8227,7 @@ windowDef MultiplayerNavParent {
 		text		"#str_02187"
 		textscale	0.26
 		textalign	1
-		textaligny	1
+		textaligny	-1
 		forecolor	1, 1, 1, 1
 		visible		("gui::inGame" != 2)
 		float "exitanim" 0
@@ -8333,7 +8332,7 @@ windowDef MultiplayerNavParent {
 		text		"#str_00253"
 		textscale	0.26
 		textalign	1
-		textaligny	1
+		textaligny	-1
 		forecolor	1, 1, 1, 1
 		visible		("gui::inGame" == 0 || "gui::inGame" == 2)
 		float "exitanim" 0
@@ -8440,7 +8439,7 @@ windowDef MultiplayerNavParent {
 		text		"#str_02216"
 		textscale	0.26
 		textalign	1
-		textaligny	1
+		textaligny	-1
 		forecolor	1, 1, 1, 1
 		float "mouseout" 0
 		visible		("gui::inGame" == 1)
@@ -8539,7 +8538,6 @@ windowDef MultiplayerNavParent {
 		text		"#str_04106"
 		textscale	0.26
 		textalign	1
-		textaligny	2
 		forecolor	1, 1, 1, 0.4
 		visible		("gui::inGame" != 0)
 
@@ -8569,7 +8567,6 @@ windowDef MultiplayerNavParent {
 		text		"#str_04098"
 		textscale	0.25
 		textalign	1
-		textaligny	2
 		forecolor	1, 1, 1, 0.4
 		visible		("gui::inGame" == 0)
 
@@ -8622,7 +8619,6 @@ windowDef MultiplayerNavParent {
 		text		"#str_04837"
 		textscale	0.25
 		textalign	1
-		textaligny	2
 		forecolor	1, 1, 1, 0.4
 		visible		("gui::inGame" == 0)
 		notime 1
@@ -8661,7 +8657,6 @@ windowDef MultiplayerNavParent {
 		text		"#str_02218"
 		textscale	0.25
 		textalign	1
-		textaligny	2
 		forecolor	1, 1, 1, 0.4
 		visible		("gui::inGame" == 0)
 
@@ -8716,7 +8711,6 @@ windowDef MultiplayerNavParent {
 		text		"#str_01248"
 		textscale	0.25
 		textalign	1
-		textaligny	2
 		forecolor	1, 1, 1, 0.4
 
 		onMouseEnter {
@@ -10220,7 +10214,6 @@ visible 1
 		text		"#str_02261"
 		textscale	0.26
 		textalign	1
-		textaligny	2
 		forecolor	1, 1, 1, 0.8
 		visible 0
 
@@ -10274,7 +10267,6 @@ visible 1
 		text		"#str_02262"
 		textscale	0.26
 		textalign	1
-		textaligny	2
 		forecolor	1, 1, 1, 0.8
 		visible		0
 
@@ -10390,7 +10382,6 @@ visible 1
 		text		"#str_02263"
 		textscale	0.26
 		textalign	1
-		textaligny	2
 		forecolor	1, 1, 1, 0.8
 
 		onMouseEnter {
@@ -10845,7 +10836,6 @@ windowDef MultiplayerLANParent {
 		text		"#str_02265"
 		textscale	0.26
 		textalign	1
-		textaligny	2
 		forecolor	1, 1, 1, 0
 
 		onMouseEnter {
@@ -10906,7 +10896,6 @@ windowDef MultiplayerLANParent {
 		text		"#str_02200"
 		textscale	0.26
 		textalign	1
-		textaligny	2
 		forecolor	1, 1, 1, 0
 
 		onMouseEnter {
@@ -11138,7 +11127,7 @@ windowDef MultiplayerLANParent {
 			text		"#str_02268"
 			font		"fonts/bank"
 			textscale	0.25
-			textaligny	-3
+			textaligny	-5
 			forecolor	0.6, 0.8, 0.8, 1
 
 			onMouseEnter {
@@ -11178,7 +11167,7 @@ windowDef MultiplayerLANParent {
 			text		"#str_01990"
 			font		"fonts/bank"
 			textscale	0.25
-			textaligny	-3
+			textaligny	-5
 			forecolor	0.6, 0.8, 0.8, 1
 
 			onMouseEnter {
@@ -11219,7 +11208,7 @@ windowDef MultiplayerLANParent {
 			text		"#str_02048"
 			font		"fonts/bank"
 			textscale	0.25
-			textaligny	-3
+			textaligny	-5
 			forecolor	0.6, 0.8, 0.8, 1
 
 			onMouseEnter {
@@ -11260,7 +11249,7 @@ windowDef MultiplayerLANParent {
 			text		"#str_02272"
 			font		"fonts/bank"
 			textscale	0.25
-			textaligny	-3
+			textaligny	-5
 			forecolor	0.6, 0.8, 0.8, 1
 
 			onMouseEnter {
@@ -11301,7 +11290,7 @@ windowDef MultiplayerLANParent {
 			text		"#str_02274"
 			font		"fonts/bank"
 			textscale	0.25
-			textaligny	-3
+			textaligny	-5
 			forecolor	0.6, 0.8, 0.8, 1
 
 			onMouseEnter {
@@ -11411,7 +11400,7 @@ windowDef MultiplayerLANParent {
 			text		"#str_02276"
 			textscale	0.25
 			textalign	1
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 1
 	
 			onMouseEnter {
@@ -11483,7 +11472,7 @@ windowDef MultiplayerLANParent {
 			rect		130, 180, 127, 28
 			text		"#str_02278"
 			textscale	0.25
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 1
 	
 			onMouseEnter {
@@ -11556,7 +11545,7 @@ windowDef MultiplayerLANParent {
 			rect		458, 0, 90, 15
 			text		"#str_02280"
 			textscale	0.25
-			textaligny	-2
+			textaligny	-4
 			forecolor	1, 1, 1, 0.8
 			noevents	1
 			
@@ -11603,7 +11592,7 @@ windowDef MultiplayerLANParent {
 			rect		550, 0, 50, 15
 			text		"#str_02282"
 			textscale	0.25
-			textaligny	-2
+			textaligny	-4
 			forecolor	1, 1, 1, 0.5
 
 			onMouseEnter {
@@ -11649,7 +11638,7 @@ windowDef MultiplayerLANParent {
 			rect		140, 205, 120, 28
 			text		"#str_02284"
 			textscale	0.25
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 0.5
 			noevents	1
 			float activebtn 0
@@ -11717,7 +11706,7 @@ windowDef MultiplayerLANParent {
 			textalign	1
 			text		"#str_02286"
 			textscale	0.25
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 0.5
 			noevents	1
 
@@ -11795,7 +11784,7 @@ windowDef MultiplayerLANParent {
 			//textalign	1
 			text		"#str_02288"
 			textscale	0.25
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 1
 
 			onTime 0 {
@@ -12988,7 +12977,7 @@ windowDef MultiplayerLANParent {
 			rect		176, 262, 260, 28
 			text		"#str_04109"
 			textscale	0.25
-			textaligny	6
+			textaligny	4
 			forecolor	0.6, 1, 1, 1
 			float "exitanim" 0
 	
@@ -13055,7 +13044,7 @@ windowDef MultiplayerLANParent {
 			textalign	1
 			text		"#str_04111"
 			textscale	0.25
-			textaligny	7
+			textaligny	5
 			forecolor	0.6, 1, 1, 1
 			wantenter	1
 	
@@ -13590,7 +13579,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_04119"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -13659,7 +13648,7 @@ windowDef MultiplayerLANParent {
 		text		"#str_02305"
 		textscale	0.26
 		textalign	1
-		textaligny	3
+		textaligny	1
 		forecolor	1, 1, 1, 0.4
 
 		onMouseEnter {
@@ -13697,7 +13686,7 @@ windowDef MultiplayerLANParent {
 		text		"#str_01975"
 		textscale	0.26
 		textalign	1
-		textaligny	3
+		textaligny	1
 		forecolor	1, 1, 1, 0.4
 
 		onMouseEnter {
@@ -13915,7 +13904,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_02308"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -13964,7 +13953,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_00124"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -14197,7 +14186,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_02315"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -14249,7 +14238,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_00124"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -14662,7 +14651,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_04129"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -15003,7 +14992,7 @@ windowDef MultiplayerLANParent {
 				text		"CLOSE SOUND OPTIONS"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -15227,7 +15216,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_02322"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -15276,7 +15265,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_00124"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -15462,7 +15451,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_02013"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -15598,7 +15587,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_04138"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -15662,7 +15651,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_00124"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -15894,7 +15883,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_02308"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -15957,7 +15946,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_04144"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -16146,7 +16135,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_02013"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -16372,7 +16361,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_02308"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -16428,7 +16417,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_04144"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -16651,7 +16640,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_02308"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
@@ -16695,7 +16684,7 @@ windowDef MultiplayerLANParent {
 				text		"#str_04144"
 				textscale	0.25
 				textalign	1
-				textaligny	1
+				textaligny	-1
 				forecolor	0.6, 1, 1, 1
 				visible 	1
 				wantenter	1
