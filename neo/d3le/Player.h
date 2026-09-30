@@ -397,6 +397,45 @@ public:
 	idMat3					gravityViewAxisPrev;	// previous tic
 	bool					renderViewInterpolatable;
 
+	// render interpolation (com_interpolate): the cinematic / camera renderView from the previous and
+	// current tic. A camera pan is committed once per 60Hz tic like any mover, so with the actors gliding
+	// sub-tic (stage 3) a stepped camera made moving actors judder during pans -- worst on vertical motion
+	// (an actor descending stairs). InterpolateRenderView glides this camera view by the same frac so the
+	// camera stays in step with the interpolated world. Captured in CalculateRenderView on the camera path.
+	idVec3					renderViewCameraOrigin;
+	idVec3					renderViewCameraOriginPrev;
+	idMat3					renderViewCameraAxis;
+	idMat3					renderViewCameraAxisPrev;
+	// the FINAL aspect-corrected fov as GetViewParms produced it (already ran CalcFov); interpolate both
+	// components directly -- re-running CalcFov on fov_x would double-apply the widescreen widening
+	float					renderViewCameraFovX;
+	float					renderViewCameraFovXPrev;
+	float					renderViewCameraFovY;
+	float					renderViewCameraFovYPrev;
+	bool					renderViewCameraInterpolatable;	// this tic's renderView came from a camera (glide it)
+	bool					renderViewHadCamera;			// previous tic was a camera view (else snap across the entry)
+	const idCamera *		renderViewCameraEntity;			// the camera that drove last tic's view (a switch forces a snap)
+	int						renderViewCameraCutSerial;		// last tic's idCamera shot serial (a hard cut forces a snap)
+
+	// render interpolation (com_interpolate): the third-person / death-cam view (OffsetThirdPersonView)
+	// also steps at 60Hz. Rather than lerp its final post-trace pose (which kinks and lags), InterpolateRenderView
+	// RE-DERIVES the camera each rendered frame from the interpolated eye (firstPersonViewOrigin) and real-time
+	// view angles via ComputeThirdPersonView, re-tracing the walls -- so the orbit inherits first-person
+	// smoothness and re-fits to ridden movers. These cache the per-tic inputs the re-derivation needs.
+	idAngles				renderViewOffsetViewAngles;		// this tic's raw view angles (orbit direction)
+	idAngles				renderViewOffsetViewAnglesPrev;	// previous tic
+	float					renderViewOffsetAngle;			// OffsetThirdPersonView params for this tic's mode
+	float					renderViewOffsetHeight;
+	bool					renderViewOffsetClip;
+	float					renderViewOffsetRange;			// lerped between tics (the death cam ramps it)
+	float					renderViewOffsetRangePrev;
+	float					renderViewOffsetFovX;			// final aspect-corrected fov, lerped directly
+	float					renderViewOffsetFovXPrev;
+	float					renderViewOffsetFovY;
+	float					renderViewOffsetFovYPrev;
+	bool					renderViewOffsetInterpolatable;	// this tic's renderView is a third-person / death view
+	bool					renderViewHadOffset;			// previous tic was one (else snap the orbit angles at entry)
+
 	idDragEntity			dragEntity;
 
 #ifdef _D3XP
@@ -493,6 +532,9 @@ public:
 	idVec3					GetEyePosition( void ) const;
 	void					GetViewPos( idVec3 &origin, idMat3 &axis ) const;
 	void					OffsetThirdPersonView( float angle, float range, float height, bool clip );
+	// com_interpolate: pure third-person view builder shared by the per-tic OffsetThirdPersonView and the
+	// per-frame re-derivation in InterpolateRenderView (see the render-interpolation cache members above).
+	void					ComputeThirdPersonView( const idVec3 &eyeOrigin, const idAngles &viewAng, const idMat3 &gravityAxis, float angle, float range, float height, bool clip );
 
 	bool					Give( const char *statname, const char *value );
 	bool					GiveItem( idItem *item );
