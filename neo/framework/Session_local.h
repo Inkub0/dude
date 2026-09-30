@@ -190,6 +190,14 @@ public:
 	bool				QuickSave();
 	bool				QuickLoad();
 
+	// DUDE: Ultra Nightmare (g_skill 4) = Nightmare rules + permadeath, enforced by the session:
+	// one checkpoint slot per run, written only at map starts, erased when the player dies.
+	// See docs/ultra-nightmare.md.
+	bool				IsUltraNightmare( void ) const { return ultraNightmare; }
+	void				BeginUltraNightmareRun( void );
+	void				EndUltraNightmareRun( bool wipeSave );
+	idStr				GetUltraNightmareSaveName( const char *mapName ) const;
+
 	const char			*GetAuthMsg( void );
 
 	//=====================================
@@ -244,6 +252,16 @@ public:
 	bool				loadingSaveGame;	// currently loading map from a SaveGame
 	idFile *			savegameFile;		// this is the savegame file to load from
 	int					savegameVersion;
+
+	// DUDE: Ultra Nightmare run state
+	bool				ultraNightmare;			// the running game is an Ultra Nightmare run
+	idStr				ultraNightmareSave;		// file name (no path/extension) of the run's single checkpoint slot
+	bool				restartMenuUltraNightmare;	// the restart (death) menu is up for an Ultra Nightmare death: main menu only
+	bool				restartMenuBannerSaved;		// the menu's own "Restart2" hint line is saved below (it doubles as the GAME OVER banner)
+	idStr				restartMenuBannerRect;
+	idStr				restartMenuBannerText;
+	idStr				restartMenuBannerColor;
+	idStr				restartMenuBannerScale;
 
 	idFile *			cmdDemoFile;		// if non-zero, we are reading commands from a file
 
@@ -363,6 +381,9 @@ public:
 	void				HandleChatMenuCommands( const char *menuCommand );
 	void				HandleIntroMenuCommands( const char *menuCommand );
 	void				HandleRestartMenuCommands( const char *menuCommand );
+	// DUDE: the same restart.gui serves both deaths; an Ultra Nightmare death hides its Restart and
+	// Load rows and shows a red GAME OVER banner in their place, a normal death puts everything back
+	void				ConfigureRestartMenu( bool ultraNightmareDeath );
 	void				HandleMsgCommands( const char *menuCommand );
 	void				HandleNoteCommands( const char *menuCommand );
 	void				GetSaveGameList( idStrList &fileList, idList<fileTIME_T> &fileTimes );

@@ -348,6 +348,11 @@ void idSessionLocal::Clear() {
 	savegameFile = NULL;
 	savegameVersion = 0;
 
+	ultraNightmare = false;
+	ultraNightmareSave.Clear();
+	restartMenuUltraNightmare = false;
+	restartMenuBannerSaved = false;
+
 	currentMapName.Clear();
 	aviDemoShortName.Clear();
 	msgFireBack[ 0 ].Clear();
@@ -1497,6 +1502,14 @@ void idSessionLocal::StartNewGame( const char *mapName, bool devmap ) {
 	mapSpawnData.syncedCVars.Clear();
 	mapSpawnData.syncedCVars = *cvarSystem->MoveCVarsToDict( CVAR_NETWORKSYNC );
 
+	// DUDE: a new game started at g_skill 4 is an Ultra Nightmare run; anything else ends
+	// whatever run state a previous game left behind.
+	if ( cvarSystem->GetCVarInteger( "g_skill" ) >= 4 ) {
+		BeginUltraNightmareRun();
+	} else {
+		EndUltraNightmareRun( false );
+	}
+
 	MoveToNewMap( mapName );
 #endif
 }
@@ -1518,6 +1531,60 @@ idStr idSessionLocal::GetAutoSaveName( const char *mapName ) const {
 
 /*
 ===============
+idSessionLocal::GetUltraNightmareSaveName
+
+DUDE: display name of an Ultra Nightmare checkpoint (the .txt description line)
+===============
+*/
+idStr idSessionLocal::GetUltraNightmareSaveName( const char *mapName ) const {
+	const idDecl *mapDecl = declManager->FindType( DECL_MAPDEF, mapName, false );
+	const idDeclEntityDef *mapDef = static_cast<const idDeclEntityDef *>( mapDecl );
+	if ( mapDef ) {
+		mapName = common->GetLanguageDict()->GetString( mapDef->dict.GetString( "name", mapName ) );
+	}
+	return va( "^1Ultra Nightmare:^0 %s", mapName );
+}
+
+/*
+===============
+idSessionLocal::BeginUltraNightmareRun
+
+DUDE: a fresh Ultra Nightmare run gets its own checkpoint slot, named after the
+run's start time so two runs on one machine never overwrite each other.
+===============
+*/
+void idSessionLocal::BeginUltraNightmareRun( void ) {
+	time_t now = time( NULL );
+	char stamp[32];
+	strftime( stamp, sizeof( stamp ), "%Y%m%d_%H%M%S", localtime( &now ) );
+	ultraNightmare = true;
+	ultraNightmareSave = va( "UltraNightmare_%s", stamp );
+	common->Printf( "Ultra Nightmare run started, checkpoint slot '%s'\n", ultraNightmareSave.c_str() );
+}
+
+/*
+===============
+idSessionLocal::EndUltraNightmareRun
+
+DUDE: leaves Ultra Nightmare mode; on death the run's checkpoint is erased so the
+playthrough cannot be resumed.
+===============
+*/
+void idSessionLocal::EndUltraNightmareRun( bool wipeSave ) {
+	if ( wipeSave && ultraNightmareSave.Length() ) {
+		idStr slot = ultraNightmareSave;
+		ScrubSaveGameFileName( slot );
+		fileSystem->RemoveFile( va( "savegames/%s.save", slot.c_str() ) );
+		fileSystem->RemoveFile( va( "savegames/%s.tga", slot.c_str() ) );
+		fileSystem->RemoveFile( va( "savegames/%s.txt", slot.c_str() ) );
+		common->Printf( "Ultra Nightmare run over, checkpoint '%s' erased\n", slot.c_str() );
+	}
+	ultraNightmare = false;
+	ultraNightmareSave.Clear();
+}
+
+/*
+===============
 idSessionLocal::MoveToNewMap
 
 Leaves the existing userinfo and serverinfo
@@ -1528,7 +1595,14 @@ void idSessionLocal::MoveToNewMap( const char *mapName ) {
 
 	ExecuteMapChange();
 
-	if ( !com_disableAutoSaves.GetBool() && !mapSpawnData.serverInfo.GetBool("devmap") ) {
+	if ( ultraNightmare ) {
+		// DUDE: Ultra Nightmare — the map-start checkpoint is the run's only save and part of
+		// the mode's rules, so it ignores com_disableAutoSaves. Every map start rewrites the
+		// run's single slot, so a run never has more than one file on disk.
+		if ( !mapSpawnData.serverInfo.GetBool( "devmap" ) ) {
+			SaveGame( GetUltraNightmareSaveName( mapName ), true, ultraNightmareSave );
+		}
+	} else if ( !com_disableAutoSaves.GetBool() && !mapSpawnData.serverInfo.GetBool("devmap") ) {
 		// Autosave at the beginning of the level - DG: unless disabled with "com_disableAutoSaves 1"
 
 		// DG: set an explicit savename to avoid problems with autosave names
@@ -2277,6 +2351,14 @@ bool idSessionLocal::SaveGame( const char *saveName, bool autosave, const char* 
 		return false;
 	}
 
+	// DUDE: Ultra Nightmare — nothing but the session's own map-start checkpoint may be written
+	// (covers the menu, the savegame command and quicksaves alike).
+	if ( ultraNightmare && !autosave ) {
+		MessageBox( MSG_OK, "Ultra Nightmare has no manual saves. The run is checkpointed only at the start of each map.", "Unable to save", true );
+		common->Printf( "Saving is disabled in Ultra Nightmare\n" );
+		return false;
+	}
+
 	if ( Sys_GetDriveFreeSpace( cvarSystem->GetCVarString( "fs_savepath" ) ) < 25 ) {
 		MessageBox( MSG_OK, common->GetLanguageDict()->GetString ( "#str_04313" ), common->GetLanguageDict()->GetString ( "#str_04314" ), true );
 		common->Printf( "Not enough drive space to save the game\n" );
@@ -2329,8 +2411,14 @@ bool idSessionLocal::SaveGame( const char *saveName, bool autosave, const char* 
 	// persistent player info
 	for ( i = 0; i < MAX_ASYNC_CLIENTS; i++ ) {
 		mapSpawnData.persistentPlayerInfo[i] = game->GetPersistentPlayerInfo( i );
+		if ( i == 0 && ultraNightmare ) {
+			// DUDE: tag the header so loading this file re-enters Ultra Nightmare mode without
+			// needing anything from the game DLL (the tag never reaches the game's own copy)
+			mapSpawnData.persistentPlayerInfo[i].Set( "dude_ultraNightmare", "1" );
+		}
 		mapSpawnData.persistentPlayerInfo[i].WriteToFileHandle( fileOut );
 	}
+	mapSpawnData.persistentPlayerInfo[0].Delete( "dude_ultraNightmare" );
 
 	// let the game save its state
 	game->SaveGame( fileOut );
@@ -2458,6 +2546,21 @@ bool idSessionLocal::LoadGame( const char *saveName ) {
 	// persistent player info
 	for ( i = 0; i < MAX_ASYNC_CLIENTS; i++ ) {
 		mapSpawnData.persistentPlayerInfo[i].ReadFromFileHandle( savegameFile );
+	}
+
+	// DUDE: an Ultra Nightmare checkpoint carries a header tag (see SaveGame); loading one
+	// resumes that run and makes this file its slot again, so later map starts overwrite it
+	// and dying erases it. Loading anything else leaves Ultra Nightmare mode.
+	{
+		const bool un = mapSpawnData.persistentPlayerInfo[0].GetBool( "dude_ultraNightmare" );
+		mapSpawnData.persistentPlayerInfo[0].Delete( "dude_ultraNightmare" );
+		ultraNightmare = un;
+		ultraNightmareSave.Clear();
+		if ( un ) {
+			ultraNightmareSave = loadFile;
+			ultraNightmareSave.StripFileExtension();
+			common->Printf( "Resuming Ultra Nightmare run, checkpoint slot '%s'\n", ultraNightmareSave.c_str() );
+		}
 	}
 
 	// check the version, if it doesn't match, cancel the loadgame,
@@ -3330,8 +3433,15 @@ void idSessionLocal::RunGameTic() {
 			mapSpawnData.serverInfo.Set( "devmap", "1" );
 			MoveToNewMap( args.Argv(1) );
 		} else if ( !idStr::Icmp( args.Argv(0), "died" ) ) {
+			// DUDE: Ultra Nightmare — death ends the run: erase its checkpoint. The player then gets
+			// the very same restart menu as any other death, reduced to its Main Menu row.
+			const bool ultraNightmareDeath = ultraNightmare;
+			if ( ultraNightmareDeath ) {
+				EndUltraNightmareRun( true );
+			}
 			// restart on the same map
 			UnloadMap();
+			ConfigureRestartMenu( ultraNightmareDeath );
 			SetGUI(guiRestartMenu, NULL);
 		} else if ( !idStr::Icmp( args.Argv(0), "disconnect" ) ) {
 			cmdSystem->BufferCommandText( CMD_EXEC_INSERT, "stoprecording ; disconnect" );
@@ -3411,6 +3521,9 @@ void idSessionLocal::Init() {
 	guiMainMenu_MapList->Config( guiMainMenu, "mapList" );
 	idAsyncNetwork::client.serverList.GUIConfig( guiMainMenu, "serverList" );
 	guiRestartMenu = uiManager->FindGui( "guis/restart.gui", true, false, true );
+	// DUDE: a freshly loaded restart menu has all its rows where its file puts them
+	restartMenuUltraNightmare = false;
+	restartMenuBannerSaved = false;
 	guiGameOver = uiManager->FindGui( "guis/gameover.gui", true, false, true );
 	guiMsg = uiManager->FindGui( "guis/msg.gui", true, false, true );
 	guiTakeNotes = uiManager->FindGui( "guis/takeNotes.gui", true, false, true );

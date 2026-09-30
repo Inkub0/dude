@@ -34,6 +34,8 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/Game.h"
 #include "sound/sound.h"
 #include "ui/UserInterface.h"
+#include "ui/Window.h"				// DUDE: ConfigureRestartMenu edits the restart menu's windows
+#include "ui/UserInterfaceLocal.h"
 
 #include "framework/Session_local.h"
 #include "framework/ModCvarTranslation.h"
@@ -337,6 +339,8 @@ void idSessionLocal::SetMainMenuGuiVars( void ) {
 	} else {
 		guiMainMenu->SetStateString( "inGame", "0" );
 	}
+	// DUDE: an Ultra Nightmare run is in progress — the in-game menu locks Save Game
+	guiMainMenu->SetStateString( "ultraNightmare", ( mapSpawned && ultraNightmare ) ? "1" : "0" );
 
 	SetCDKeyGuiVars( );
 	guiMainMenu->SetStateString( "nightmare", cvarSystem->GetCVarBool( "g_nightmare" ) ? "1" : "0" );
@@ -485,6 +489,94 @@ bool idSessionLocal::HandleSaveGameMenuCommand( idCmdArgs &args, int &icmd ) {
 
 /*
 ==============
+idSessionLocal::ConfigureRestartMenu
+
+DUDE: Ultra Nightmare uses the game's own restart (death) menu -- whichever restart.gui is
+loaded: stock, widescreen, RoE -- so it looks exactly like any other death. Only the rows change:
+"Restart" (replay the level) and "Replay" (load a save) are hidden, and the space they leave
+between the logo and "Quit" (Main Menu, untouched) shows a red GAME OVER banner at twice the
+Main Menu label's text scale. The engine cannot add a window to a gui, so the banner borrows
+"Restart2", the hint line of the hidden Restart row: same font and centring, and nothing can
+fade it while its row is hidden. A normal death restores everything, since one gui instance
+serves both. Window names a mod's restart.gui does not have are simply skipped;
+HandleRestartMenuCommands refuses the hidden rows' commands regardless.
+==============
+*/
+static bool RestartMenu_ReadVar( idWindow *desktop, const char *name, const char *var, idStr &value ) {
+	drawWin_t *dw = desktop->FindChildByName( name );
+	idWinVar *wv = NULL;
+	if ( dw && dw->simp ) {
+		wv = dw->simp->GetWinVarByName( var );
+	} else if ( dw && dw->win ) {
+		wv = dw->win->GetWinVarByName( var );
+	}
+	if ( !wv ) {
+		return false;
+	}
+	value = wv->c_str();
+	return true;
+}
+
+void idSessionLocal::ConfigureRestartMenu( bool ultraNightmareDeath ) {
+	restartMenuUltraNightmare = ultraNightmareDeath;
+	if ( !guiRestartMenu ) {
+		return;
+	}
+	idWindow *desktop = static_cast<idUserInterfaceLocal *>( guiRestartMenu )->GetDesktop();
+	if ( !desktop ) {
+		return;
+	}
+
+	const char *visible = ultraNightmareDeath ? "0" : "1";
+	desktop->SetChildWinVarVal( "Restart", "visible", visible );
+	desktop->SetChildWinVarVal( "Replay", "visible", visible );
+
+	if ( !ultraNightmareDeath ) {
+		if ( restartMenuBannerSaved ) {
+			desktop->SetChildWinVarVal( "Restart2", "rect", restartMenuBannerRect );
+			desktop->SetChildWinVarVal( "Restart2", "text", restartMenuBannerText );
+			desktop->SetChildWinVarVal( "Restart2", "foreColor", restartMenuBannerColor );
+			desktop->SetChildWinVarVal( "Restart2", "textScale", restartMenuBannerScale );
+		}
+		return;
+	}
+
+	// remember the hint line as the file defines it (once: it may already be the banner)
+	if ( !restartMenuBannerSaved ) {
+		restartMenuBannerSaved = RestartMenu_ReadVar( desktop, "Restart2", "rect", restartMenuBannerRect )
+			&& RestartMenu_ReadVar( desktop, "Restart2", "text", restartMenuBannerText )
+			&& RestartMenu_ReadVar( desktop, "Restart2", "foreColor", restartMenuBannerColor )
+			&& RestartMenu_ReadVar( desktop, "Restart2", "textScale", restartMenuBannerScale );
+	}
+
+	// lay the banner out from the menu's own rows, so every variant (the RoE menu sits lower)
+	// gets it centred in the gap the two hidden rows leave
+	idStr topRect, midRect, quitScale;
+	float tx, ty, tw, th, mx, my, mw, mh;
+	if ( !restartMenuBannerSaved
+	     || !RestartMenu_ReadVar( desktop, "Restart", "rect", topRect )
+	     || !RestartMenu_ReadVar( desktop, "Replay", "rect", midRect )
+	     || !RestartMenu_ReadVar( desktop, "Quit", "textScale", quitScale )
+	     || sscanf( topRect.c_str(), "%f %f %f %f", &tx, &ty, &tw, &th ) != 4
+	     || sscanf( midRect.c_str(), "%f %f %f %f", &mx, &my, &mw, &mh ) != 4 ) {
+		return;
+	}
+	const float scale = 2.0f * (float)atof( quitScale.c_str() );	// twice the Main Menu label
+	if ( scale <= 0.0f ) {
+		return;
+	}
+	const float textH = 48.0f * scale;			// the font sheets are 48 px tall at scale 1
+	const float width = 380.0f;					// GAME OVER is ~220 wide at 0.70; never wraps
+	const float x = tx + 0.5f * tw - 0.5f * width;
+	const float y = ty + 0.5f * ( ( my + mh ) - ty - textH );
+	desktop->SetChildWinVarVal( "Restart2", "rect", va( "%g %g %g %g", x, y, width, textH + 8.0f ) );
+	desktop->SetChildWinVarVal( "Restart2", "text", "GAME OVER" );
+	desktop->SetChildWinVarVal( "Restart2", "foreColor", "0.9 0.15 0.1 1" );
+	desktop->SetChildWinVarVal( "Restart2", "textScale", va( "%g", scale ) );
+}
+
+/*
+==============
 idSessionLocal::HandleRestartMenuCommands
 
 Executes any commands returned by the gui
@@ -499,6 +591,15 @@ void idSessionLocal::HandleRestartMenuCommands( const char *menuCommand ) {
 
 	for( icmd = 0; icmd < args.Argc(); ) {
 		const char *cmd = args.Argv( icmd++ );
+
+		// DUDE: after an Ultra Nightmare death only the way back to the main menu is honoured.
+		// The other rows are hidden (ConfigureRestartMenu), but a mod's restart.gui may name its
+		// windows differently, so replaying the level and the savegame commands are refused here too.
+		if ( restartMenuUltraNightmare
+		     && ( !idStr::Icmp( cmd, "restart" ) || !idStr::Icmp( cmd, "loadGame" )
+		          || !idStr::Icmp( cmd, "saveGame" ) || !idStr::Icmp( cmd, "deleteGame" ) ) ) {
+			continue;
+		}
 
 		if ( HandleSaveGameMenuCommand( args, icmd ) ) {
 			continue;
