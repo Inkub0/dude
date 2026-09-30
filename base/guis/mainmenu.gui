@@ -605,6 +605,20 @@ windowDef PrimaryMenuParent {
 		//Arl; end
 
 	// DG: moved gridFile and TOP BORDER behind PrimaryMenuParent so it can stretch over the whole width
+	// DUDE: gridFile is back where the stock menu has it, as the FIRST (lowest) child of
+	// PrimaryMenuParent. Its 73 hover strips make it a real (scripted) window, and the
+	// engine hands mouse-over to the topmost event-enabled window under the cursor and
+	// stops there (idWindow::RouteMouseCoords) — placed after PrimaryMenuParent it swallowed
+	// hover for every menu panel above y=400 (difficulty rows, options, load/save buttons).
+	// Below the panels it only reacts over empty menu space, like stock; the widescreen
+	// side margins lose the (barely visible) grid flicker, nothing else.
+	//external grid mouse enter/exit transitions
+	windowDef gridFile {
+		rect		0,0,640,400
+
+	#include "guis/test/grid3b.pd"
+
+	}
 
 //BOTTOM BUTTON BORDER
 
@@ -8857,14 +8871,6 @@ windowDef MultiplayerNavParent {
 
 //TOP MAIN SCREEN BORDER
 
-	// DG: moved this out of PrimaryMenuParent so it works on whole window, not just center region
-	//external grid mouse enter/exit transitions
-	windowDef gridFile {
-		rect		0,0,640,400
-
-	#include "guis/test/grid3b.pd"
-
-	}
 
 	//top border bar
 	windowDef TopSmallBorder {
