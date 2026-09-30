@@ -79,6 +79,24 @@ Performance; Vulkan, needs `r_fsr`). The primary fullscreen world view renders a
   This was a latent backend limitation ("frame targets are window-size") that the env-probe
   path had already documented and worked around; the reorder was the first to hit it in play.
 
+**Cropped renders and the primary view (fixed + user-verified 2026-09-30, `fix/fsr2-subnative-crop-primary`).**
+The backend's full-screen scene passes (HDR routing, SSAO / RT / NRD, FSR2, post) used to find the
+primary view by comparing its viewport against the *world render size* with `>=`. At scale 1.0 that
+size is the window, so no crop can qualify. Sub-native shrinks it, and a cropped render that is at
+least that large then passes: the level-change wipe (`idSessionLocal::StartWipe`) crops to the window
+rounded down to a power of two, 2048x1024 at 2560x1440, which satisfies a 1715x965 test (every scale
+of 0.71 and below at 1440p; 0.75 is safe because 1024 < 1080). The frame then held two "primary" views
+of different sizes, every size-keyed resource (velocity / normal targets, the NRD instance, the FSR2
+context) was rebuilt mid-frame under the command buffer still referencing the old ones, and the GPU
+hung: kernel `Xid 109 CTX SWITCH TIMEOUT` (once `Xid 31` MMU fault), seen as a frozen frame on the
+exit elevator and "device is dead" a few seconds later, or on the first frame after a load (the
+second wipe at the end of `ExecuteMapChange`). OpenGL 3 has no FSR2 and was never affected.
+Two rules now hold: (1) the primary view is decided once, in `RenderScene`, as
+`viewDef_t::isWindowView` (covers the window, evaluated before scaling) and the thirteen backend tests
+read that flag; never compare a viewport against the scaled size. (2) `CropRenderSize` limits a crop to
+the world scene buffer (`R_FsrWorldSize`) instead of the window, so a cropped render always fits the
+target it is drawn into; at scale 1.0 both are unchanged.
+
 **Verification (user).** (1) `r_fsr 1`, `r_fsrScale 1.0`: pixel-identical to before — HUD,
 console, PDA and menus over the game, letterbox, eye-adapt, bloom, grain, chroma all present and
 unchanged; `r_vkValidation` clean. (2) `r_fsrScale 0.67`: the console prints `FSR2: context
