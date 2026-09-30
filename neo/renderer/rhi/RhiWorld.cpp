@@ -4347,9 +4347,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !ssaoWants && !ssrWants && !velWants ) {
 		return false;
 	}
-	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
-		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
+	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return false;
 	}
@@ -5666,9 +5664,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !viewDef->viewEntitys || viewDef->isSubview ) {
 		return;
 	}
-	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
-		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
+	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
 	if ( !fullscreenView ) {
 		return;
 	}
@@ -6263,9 +6259,7 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !r_volumetrics.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN || !r->SupportsRayQuery() ) {
 		return;
 	}
-	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
-		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
+	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView || !RB_RHI_HdrCaptureActive() ) {
 		return;
 	}
@@ -6522,9 +6516,7 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( rhiRtaoDenoisedThisView ) {
 		return;
 	}
-	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
-		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
+	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return;
 	}
@@ -6811,9 +6803,7 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !r_rtao.GetBool() || !r_ssao.GetBool() || r_rtgi.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
 		return;
 	}
-	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
-		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
+	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return;
 	}
@@ -7081,9 +7071,7 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !r_rtgi.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
 		return;
 	}
-	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
-		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
+	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return;
 	}
@@ -7367,9 +7355,7 @@ static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 			|| !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtAllLights.GetBool() ) ) {
 		return;
 	}
-	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
-		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
+	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return;		// the mask is addressed by gl_FragCoord of the main view
 	}
@@ -7964,9 +7950,7 @@ void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( focus <= 0.0f ) {
 		return;		// not reloading -> nothing to blur
 	}
-	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
-		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
+	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return;		// primary world view only (not mirrors / GUI renderDefs)
 	}
@@ -8056,9 +8040,7 @@ void RB_RHI_ChromaticAberration( rhi::RHI *r, const viewDef_t *viewDef, const id
 	if ( chroma <= 0.0f || !R_BackendSupportsEnhancements() ) {
 		return;
 	}
-	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
-		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
+	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return;		// primary world view only (not mirrors / GUI renderDefs)
 	}
@@ -8570,9 +8552,7 @@ static void RB_RHI_DecalMaskPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( rhiDecalMaskRT ) { r->DestroyRenderTarget( rhiDecalMaskRT ); rhiDecalMaskRT = 0; rhiDecalMaskW = rhiDecalMaskH = 0; }
 		return;
 	}
-	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
-		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
+	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView || viewDef->renderView.viewID < 0 ) {
 		return;
 	}

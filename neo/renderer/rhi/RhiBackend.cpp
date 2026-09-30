@@ -838,9 +838,7 @@ static bool RB_RHI_FrameHasWorldScene( const emptyCommand_t *cmds ) {
 		if ( !vd || !vd->viewEntitys || vd->isSubview ) {
 			continue;
 		}
-		if ( vd->viewport.x1 <= 0 && vd->viewport.y1 <= 0
-		     && vd->viewport.x2 >= RB_RHI_WorldW() - 1
-		     && vd->viewport.y2 >= RB_RHI_WorldH() - 1 ) {
+		if ( vd->isWindowView ) {	// the primary scene view (set by RenderScene)
 			return true;
 		}
 	}
@@ -3444,9 +3442,7 @@ static void RB_RHI_FsrCaptureOpaque( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !viewDef->viewEntitys || viewDef->isSubview ) {
 		return;
 	}
-	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
-		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
+	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
 	if ( !fullscreenView ) {
 		return;
 	}
@@ -3594,9 +3590,7 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	// subviews (mirrors, camera monitors) are composited into it and grained
 	// with it, and cropped GUI-renderDef models (the menu planet) aren't the
 	// scene — same fullscreen-and-not-subview test RhiWorld uses.
-	const bool fullscreenView = viewDef->viewport.x1 <= 0 && viewDef->viewport.y1 <= 0
-		&& viewDef->viewport.x2 >= RB_RHI_WorldW() - 1
-		&& viewDef->viewport.y2 >= RB_RHI_WorldH() - 1;
+	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
 	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView ) {
 		// The GL per-view post chain (AA / film grain / chromatic aberration) is GL-only
 		// here; Vulkan folds grain/chroma into the scene resolve instead (RB_RHI_HdrResolve,

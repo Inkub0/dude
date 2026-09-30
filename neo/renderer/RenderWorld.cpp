@@ -725,9 +725,17 @@ void idRenderWorldLocal::RenderScene( const renderView_t *renderView ) {
 	{
 		int ww, wh;
 		R_FsrWorldSize( ww, wh );
-		if ( ( ww != glConfig.vidWidth || wh != glConfig.vidHeight )
-		     && parms->viewport.x1 == 0 && parms->viewport.y1 == 0
-		     && parms->viewport.x2 == glConfig.vidWidth - 1 && parms->viewport.y2 == glConfig.vidHeight - 1 ) {
+		const bool scaled = ( ww != glConfig.vidWidth || wh != glConfig.vidHeight );
+		const bool exactWindow = parms->viewport.x1 == 0 && parms->viewport.y1 == 0
+		     && parms->viewport.x2 == glConfig.vidWidth - 1 && parms->viewport.y2 == glConfig.vidHeight - 1;
+		// the primary-view flag the backend's full-screen scene passes key on (viewDef_t::isWindowView).
+		// Unscaled it keeps the tolerant covers-the-window test those passes always used (tiled
+		// screenshots render through an oversized viewport); scaled, only the view that is actually
+		// resized below qualifies, so a cropped render larger than the FSR2 render size never does.
+		parms->isWindowView = scaled ? exactWindow
+			: ( parms->viewport.x1 <= 0 && parms->viewport.y1 <= 0
+			    && parms->viewport.x2 >= glConfig.vidWidth - 1 && parms->viewport.y2 >= glConfig.vidHeight - 1 );
+		if ( scaled && exactWindow ) {
 			parms->viewport.x2 = ww - 1;
 			parms->viewport.y2 = wh - 1;
 		}
