@@ -351,6 +351,7 @@ void idSessionLocal::Clear() {
 	ultraNightmare = false;
 	ultraNightmareSave.Clear();
 	restartMenuUltraNightmare = false;
+	restartMenuBannerSaved = false;
 
 	currentMapName.Clear();
 	aviDemoShortName.Clear();
@@ -3522,8 +3523,7 @@ void idSessionLocal::Init() {
 	guiRestartMenu = uiManager->FindGui( "guis/restart.gui", true, false, true );
 	// DUDE: a freshly loaded restart menu has all its rows where its file puts them
 	restartMenuUltraNightmare = false;
-	restartMenuQuitRect.Clear();
-	restartMenuQuitHintRect.Clear();
+	restartMenuBannerSaved = false;
 	guiGameOver = uiManager->FindGui( "guis/gameover.gui", true, false, true );
 	guiMsg = uiManager->FindGui( "guis/msg.gui", true, false, true );
 	guiTakeNotes = uiManager->FindGui( "guis/takeNotes.gui", true, false, true );

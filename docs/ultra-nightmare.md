@@ -46,10 +46,14 @@ engine keeps enforcing the save/death rules below.
 - `RunGameTic` `"died"`: in a run, `EndUltraNightmareRun( true )` deletes the slot's
   `.save/.txt/.tga`, then shows the game's own restart menu (`guis/restart.gui`, whichever
   variant is loaded) through `ConfigureRestartMenu( true )`: its `Restart` and `Replay` (load)
-  rows are hidden and `Quit` / `Quit2` (Main Menu and its hint) move into the top row's place.
+  rows are hidden, `Quit` (Main Menu) stays where it is, and the gap between it and the logo shows
+  a red **GAME OVER** banner at twice the Main Menu label's text scale. The engine cannot add a
+  window to a gui, so the banner borrows `Restart2` (the hidden Restart row's hint line: same
+  font, centring and widescreen anchor) by setting its rect / text / foreColor / textScale.
   `HandleRestartMenuCommands` also refuses `restart` / `loadGame` / `saveGame` / `deleteGame`
   while that state is set, in case a mod's menu names its windows differently. A normal death
-  calls `ConfigureRestartMenu( false )`, which restores the rows (one gui instance serves both).
+  calls `ConfigureRestartMenu( false )`, which restores the rows and the hint line (one gui
+  instance serves both).
 - `SetMainMenuGuiVars` publishes `gui::ultraNightmare` (1 while a run is live) so the
   in-game menu can lock Save Game.
 
@@ -84,6 +88,6 @@ engine keeps enforcing the save/death rules below.
    prints the checkpoint slot name. Load Game lists `Ultra Nightmare: Mars City`.
 2. F5 / the in-game Save Game button / `savegame foo` all refuse with the message box.
 3. A map transition rewrites the same slot (still one Ultra Nightmare entry in Load Game).
-4. Die: the normal death menu appears with only *Main Menu* (in the top row); the slot is gone from Load Game
+4. Die: the normal death menu appears with a red *GAME OVER* under the logo and only *Main Menu* below it; the slot is gone from Load Game
    and from `savegames/` on disk.
 5. Load a normal save afterwards: saving works again.
