@@ -3732,14 +3732,15 @@ static const int R_JITTER_PHASE = 8;
 
 /*
 ===============
-R_FsrRenderScale / R_FsrWorldSize / RB_RHI_WorldW / RB_RHI_WorldH
+R_FsrRenderScale / R_FsrWorldSize
 
 DUDE FSR2 sub-native upscaling (docs/fsr-temporal-pipeline.md, the parked "real FSR" lever):
 the primary fullscreen world view renders at glConfig.vid* x r_fsrScale and FSR2 upscales it
 to the display; every 2D view, screenshot, env probe and cropped render stays at the display
 size. The scale is latched once per rendered frame so the frontend (RenderScene's viewport)
-and the backend (scene-target size, every "primary fullscreen view" test) agree even if the
-cvar changes mid-frame. 1.0 = Native-AA, exactly the path that shipped.
+and the backend (scene-target size) agree even if the cvar changes mid-frame. Which view IS
+the primary one is decided once, in RenderScene (viewDef_t::isWindowView) -- never by comparing
+a viewport against this size, which a large cropped render also satisfies. 1.0 = Native-AA, exactly the path that shipped.
 ===============
 */
 float R_FsrRenderScale( void ) {
@@ -3767,19 +3768,6 @@ void R_FsrWorldSize( int &w, int &h ) {
 		w = Max( 1, (int)floorf( (float)glConfig.vidWidth  * s + 0.5f ) );
 		h = Max( 1, (int)floorf( (float)glConfig.vidHeight * s + 0.5f ) );
 	}
-}
-
-// the world render size the backend's "is this the primary fullscreen view" tests compare against
-int RB_RHI_WorldW( void ) {
-	int w, h;
-	R_FsrWorldSize( w, h );
-	return w;
-}
-
-int RB_RHI_WorldH( void ) {
-	int w, h;
-	R_FsrWorldSize( w, h );
-	return h;
 }
 
 /*

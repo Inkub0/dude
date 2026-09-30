@@ -409,6 +409,14 @@ typedef struct viewDef_s {
 	bool				isSubview;				// true if this view is not the main view
 	bool				isMirror;				// the portal is a mirror, invert the face culling
 	bool				isXraySubview;
+	// DUDE: this world view covers the whole window -- THE primary scene view. Set once by
+	// RenderScene, against the WINDOW and before any FSR2 sub-native scaling; it is the one view
+	// RenderScene scales to the FSR2 render size and the only one the full-screen scene passes
+	// (HDR routing, SSAO / RT / NRD, FSR2, post) may treat as primary. Testing the viewport
+	// against the scaled world size instead misclassified any cropped render at least that
+	// large: the level-change wipe capture is 2048x1024 on a 1440p window, which passes a
+	// 1715x965 (r_fsrScale 0.67) test. Subviews inherit it; every test also excludes isSubview.
+	bool				isWindowView;
 
 	bool				isEditor;
 
@@ -1590,8 +1598,6 @@ extern idCVar r_fsrScale;				// FSR2 render scale: the world view's size as a fr
 // render size, and the backend's "primary fullscreen view" reference size
 float	R_FsrRenderScale( void );
 void	R_FsrWorldSize( int &w, int &h );
-int		RB_RHI_WorldW( void );
-int		RB_RHI_WorldH( void );
 bool RB_RHI_HdrFrameActive( void );
 
 void R_CreateEntityRefs( idRenderEntityLocal *def );

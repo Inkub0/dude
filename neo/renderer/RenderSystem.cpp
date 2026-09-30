@@ -935,10 +935,16 @@ void	idRenderSystemLocal::CropRenderSize( int width, int height, bool makePowerO
 	renderCrop_t	*rc = &renderCrops[currentRenderCrop];
 
 	// we might want to clip these to the crop window instead
-	while ( width > glConfig.vidWidth ) {
+	// DUDE: a crop must fit the surface the scene is rendered into. Under sub-native FSR2
+	// (r_fsrScale) that is the scaled world scene buffer, not the window: the level-change wipe
+	// crops to the window rounded down to a power of two (2048x1024 at 1440p), which overflowed a
+	// 1715x965 scene buffer. At scale 1.0 the limit is the window size, exactly as before.
+	int limitW, limitH;
+	R_FsrWorldSize( limitW, limitH );
+	while ( width > limitW ) {
 		width >>= 1;
 	}
-	while ( height > glConfig.vidHeight ) {
+	while ( height > limitH ) {
 		height >>= 1;
 	}
 
