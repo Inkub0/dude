@@ -692,9 +692,10 @@ User A/B on an imp surfaced two gaps, both fixed:
   Both are no-ops on the drawn body (it draws `gpuSkinVB`, not `tri->verts`) and on the always-on CPU
   consumers (culling/shadow/bounds read xyz only); only the decal copy + the unused ambient cache change.
   `R_DeriveTangents` runs first so `R_CreateAmbientCache` can't re-derive over the written normals.
-  Separately, `RB_RHI_RenderShaderPasses` drops stage-level `privatePolygonOffset` (a real RHI gap that
-  affects the *burning-corpse dissolve*, not this live decal which uses material-level `MF_POLYGONOFFSET`)
-  — logged as a follow-up.
+  Separately, `RB_RHI_RenderShaderPasses` dropped stage-level `privatePolygonOffset` (a real RHI gap that
+  affected the *burning-corpse dissolve*, not this live decal which uses material-level `MF_POLYGONOFFSET`)
+  — closed: the per-stage offset is now applied in the depth prepasses AND the stage pass, which is what
+  confines the ember to the receding edge ([burn-away-ember.md](burn-away-ember.md)).
 
   **Accepted final residual (user-verified ~99% covered).** After both parts the decal tracks the body
   through animation; the remaining ~1% is the **displacement** gap — the decal carries no bump map so
@@ -710,6 +711,9 @@ User A/B on an imp surfaced two gaps, both fixed:
   `RB_RHI_TessellateSurf(surf,false)` — **not** the forBlendPass=true call, whose all-additive exclusion
   would reject the glow — plus `tri->tessDeformVB`), matching the sealed depth. The blood decal (separate
   surface, no deform buffer) keeps its own fixed-function `generic.tese` path.
+  **Follow-up (2026-09-30):** the "full-body ember" this restored was itself wrong -- stock confines the
+  fire to a thin band at the dissolve edge via the fire stage's `privatePolygonOffset`, which the RHI
+  prepass never applied. See [burn-away-ember.md](burn-away-ember.md).
 
 Review: 0/5 confirmed on both. **Known remaining gap:** the four per-stage sub-draw helpers in
 `RB_RHI_RenderShaderPasses` (custom-ARB / builtin-ARB / texgen / soft-particle) still draw the base
