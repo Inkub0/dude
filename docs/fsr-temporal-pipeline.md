@@ -79,7 +79,7 @@ Performance; Vulkan, needs `r_fsr`). The primary fullscreen world view renders a
   This was a latent backend limitation ("frame targets are window-size") that the env-probe
   path had already documented and worked around; the reorder was the first to hit it in play.
 
-**Cropped renders and the primary view (fixed 2026-09-30, `fix/fsr2-subnative-crop-primary`).**
+**Cropped renders and the primary view (fixed + user-verified 2026-09-30, `fix/fsr2-subnative-crop-primary`).**
 The backend's full-screen scene passes (HDR routing, SSAO / RT / NRD, FSR2, post) used to find the
 primary view by comparing its viewport against the *world render size* with `>=`. At scale 1.0 that
 size is the window, so no crop can qualify. Sub-native shrinks it, and a cropped render that is at
