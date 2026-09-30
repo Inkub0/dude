@@ -745,7 +745,6 @@ windowDef Desktop {
 			text		"#str_00186"
 			textscale	0.26
 			textalign	1
-			textaligny	2
 			forecolor	1, 1, 1, 0.4
 			float "exitanim" 0
 
@@ -841,7 +840,7 @@ windowDef Desktop {
 			text		"#str_02207"
 			textscale	0.26
 			textalign	1
-			textaligny	1
+			textaligny	-1
 			forecolor	1, 1, 1, 1
 			visible		("gui::inGame" == 0)
 			float "exitanim" 0
@@ -939,7 +938,7 @@ windowDef Desktop {
 			text		"#str_02179"
 			textscale	0.26
 			textalign	1
-			textaligny	1
+			textaligny	-1
 			forecolor	1, 1, 1, 1
 			visible		("gui::inGame" == 1)
 			float "exitanim" 0
@@ -1026,7 +1025,7 @@ windowDef Desktop {
 			text		"#str_02187"
 			textscale	0.26
 			textalign	1
-			textaligny	1
+			textaligny	-1
 			forecolor	1, 1, 1, 1
 			visible		("gui::inGame" != 2)
 			float "exitanim" 0
@@ -1122,7 +1121,7 @@ windowDef Desktop {
 			text		"#str_00253"
 			textscale	0.26
 			textalign	1
-			textaligny	1
+			textaligny	-1
 			forecolor	1, 1, 1, 1
 			visible		("gui::inGame" == 0 || "gui::inGame" == 2)
 			float "exitanim" 0
@@ -1218,7 +1217,7 @@ windowDef Desktop {
 			text		"#str_02216"
 			textscale	0.26
 			textalign	1
-			textaligny	1
+			textaligny	-1
 			forecolor	1, 1, 1, 1
 			float "mouseout" 0
 			visible		("gui::inGame" == 1)
@@ -1300,7 +1299,6 @@ windowDef Desktop {
 			text		"#str_04106"
 			textscale	0.26
 			textalign	1
-			textaligny	2
 			forecolor	1, 1, 1, 0.4
 			visible		("gui::inGame" != 0)
 
@@ -1327,7 +1325,6 @@ windowDef Desktop {
 			text		"#str_04098"
 			textscale	0.25
 			textalign	1
-			textaligny	2
 			forecolor	1, 1, 1, 0.4
 			visible		("gui::inGame" == 0)
 
@@ -1375,7 +1372,6 @@ windowDef Desktop {
 			text		"#str_04837"
 			textscale	0.25
 			textalign	1
-			textaligny	2
 			forecolor	1, 1, 1, 0.4
 			visible		("gui::inGame" == 0)
 			notime		1
@@ -1408,7 +1404,6 @@ windowDef Desktop {
 			text		"#str_02218"
 			textscale	0.25
 			textalign	1
-			textaligny	2
 			forecolor	1, 1, 1, 0.4
 			visible		("gui::inGame" == 0)
 
@@ -1456,7 +1451,6 @@ windowDef Desktop {
 			text		"#str_01248"
 			textscale	0.25
 			textalign	1
-			textaligny	2
 			forecolor	1, 1, 1, 0.4
 
 			onMouseEnter {

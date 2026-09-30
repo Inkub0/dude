@@ -789,33 +789,62 @@ void idDeviceContext::PaintChar(float x,float y,float width,float height,float s
 }
 
 
+// DUDE: vanilla sheet selection - picks the 12/24/48 pt atlas for a selection
+// scale and hands back that sheet's layout metrics (tallest glyph / widest advance).
+static void SelectFontSheet( fontInfoEx_t *font, float scale, fontInfo_t *&sheet, int &maxHeight, int &maxWidth ) {
+	if (scale <= gui_smallFontLimit.GetFloat()) {
+		sheet = &font->fontInfoSmall;
+		maxHeight = font->maxHeightSmall;
+		maxWidth = font->maxWidthSmall;
+	} else if (scale <= gui_mediumFontLimit.GetFloat()) {
+		sheet = &font->fontInfoMedium;
+		maxHeight = font->maxHeightMedium;
+		maxWidth = font->maxWidthMedium;
+	} else {
+		sheet = &font->fontInfoLarge;
+		maxHeight = font->maxHeightLarge;
+		maxWidth = font->maxWidthLarge;
+	}
+}
+
 void idDeviceContext::SetFontByScale(float scale) {
+	// the vanilla pick decides the layout: every caller places text from these
+	// metrics (line height = baseline offset, max char width = cursor skip)
+	fontInfo_t *sheet;
+	int maxHeight, maxWidth;
+	SelectFontSheet( activeFont, scale, sheet, maxHeight, maxWidth );
+
 	// DUDE: the GUI is authored for 640x480 and upscaled to the display, so a fixed
 	// scale samples the same atlas regardless of resolution. Above a 720p baseline,
 	// scale the (local) selection value by the vertical resolution so hi-dpi displays
-	// pull the crisper 24/48px sheets. 'scale' is by value; the caller derives the
-	// displayed size from its own scale * the picked sheet's glyphScale, so size is
-	// unchanged - this only affects which atlas is chosen.
+	// pull the crisper 24/48px sheets. Only the sampled atlas changes: the caller
+	// derives the displayed size from its own scale * the picked sheet's glyphScale,
+	// and the layout metrics stay those of the vanilla sheet, re-expressed in the
+	// hi-res sheet's glyph units. The sheets' tallest glyphs are NOT normalized
+	// across point sizes (fonts/micro: 60/52/51 virtual px at 12/24/48 pt), so using
+	// the hi-res sheet's own maxHeight moved every baseline - the HUD health/armor
+	// readouts drifted up off their icons.
 	if ( gui_hiResFonts.GetBool() ) {
 		const float baseHeight = 720.0f;
 		float h = renderSystem->GetScreenHeight();
 		if ( h > baseHeight ) {
-			scale *= h / baseHeight;
+			fontInfo_t *hiSheet;
+			int hiMaxHeight, hiMaxWidth;
+			SelectFontSheet( activeFont, scale * ( h / baseHeight ), hiSheet, hiMaxHeight, hiMaxWidth );
+			if ( hiSheet != sheet ) {
+				// glyphScale is 48/pt (4, 2, 1): the ratio is an exact 2 or 4, so
+				// maxHeight * hiSheet->glyphScale == vanilla maxHeight * sheet->glyphScale
+				const float unitRatio = sheet->glyphScale / hiSheet->glyphScale;
+				maxHeight = idMath::FtoiFast( maxHeight * unitRatio );
+				maxWidth = idMath::FtoiFast( maxWidth * unitRatio );
+				sheet = hiSheet;
+			}
 		}
 	}
-	if (scale <= gui_smallFontLimit.GetFloat()) {
-		useFont = &activeFont->fontInfoSmall;
-		activeFont->maxHeight = activeFont->maxHeightSmall;
-		activeFont->maxWidth = activeFont->maxWidthSmall;
-	} else if (scale <= gui_mediumFontLimit.GetFloat()) {
-		useFont = &activeFont->fontInfoMedium;
-		activeFont->maxHeight = activeFont->maxHeightMedium;
-		activeFont->maxWidth = activeFont->maxWidthMedium;
-	} else {
-		useFont = &activeFont->fontInfoLarge;
-		activeFont->maxHeight = activeFont->maxHeightLarge;
-		activeFont->maxWidth = activeFont->maxWidthLarge;
-	}
+
+	useFont = sheet;
+	activeFont->maxHeight = maxHeight;
+	activeFont->maxWidth = maxWidth;
 }
 
 int idDeviceContext::DrawText(float x, float y, float scale, idVec4 color, const char *text, float adjust, int limit, int style, int cursor) {
