@@ -70,6 +70,7 @@ private:
 	virtual void			InternalSetBool( const bool newValue );
 	virtual void			InternalSetInteger( const int newValue );
 	virtual void			InternalSetFloat( const float newValue );
+	virtual const char *	InternalGetResetString( void ) const { return resetString.c_str(); }
 };
 
 /*

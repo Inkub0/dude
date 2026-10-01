@@ -61,6 +61,15 @@ static void AddTooltip( const char* text )
 	}
 }
 
+// DUDE: reset a cvar we only have by name (no idCVar& in scope) to its registered default.
+static void ResetNamedCvar( const char *name )
+{
+	idCVar *c = cvarSystem->Find( name );
+	if ( c ) {
+		c->Reset();
+	}
+}
+
 static void AddDescrTooltip( const char* description )
 {
 	if ( description != nullptr ) {
@@ -4750,7 +4759,7 @@ static void DrawDbgGroup_DepthOfField()
 			r_dofBlurRadius.SetFloat( radius );
 		}
 		ImGui::SameLine();
-		if ( ImGui::SmallButton( "reset##dofradius" ) ) { r_dofBlurRadius.SetFloat( 6.0f ); }
+		if ( ImGui::SmallButton( "reset##dofradius" ) ) { r_dofBlurRadius.Reset(); }
 		AddTooltip( "r_dofBlurRadius: maximum world blur radius in pixels at full focus. "
 			"Higher = stronger, dreamier blur; ~6 is a subtle default." );
 
@@ -4759,7 +4768,7 @@ static void DrawDbgGroup_DepthOfField()
 			r_dofFocusStart.SetFloat( focusStart );
 		}
 		ImGui::SameLine();
-		if ( ImGui::SmallButton( "reset##dofstart" ) ) { r_dofFocusStart.SetFloat( 0.35f ); }
+		if ( ImGui::SmallButton( "reset##dofstart" ) ) { r_dofFocusStart.Reset(); }
 		AddTooltip( "r_dofFocusStart: scene depth (0..1, hyperbolic) where the blur starts ramping. "
 			"The weapon sits below this and stays sharp - raise it if the gun itself softens." );
 
@@ -4768,7 +4777,7 @@ static void DrawDbgGroup_DepthOfField()
 			r_dofFocusEnd.SetFloat( focusEnd );
 		}
 		ImGui::SameLine();
-		if ( ImGui::SmallButton( "reset##dofend" ) ) { r_dofFocusEnd.SetFloat( 0.72f ); }
+		if ( ImGui::SmallButton( "reset##dofend" ) ) { r_dofFocusEnd.Reset(); }
 		AddTooltip( "r_dofFocusEnd: scene depth where the blur reaches full strength. "
 			"Lower it if the near world stays too sharp." );
 
@@ -4802,14 +4811,14 @@ static void DrawDbgGroup_EyeAdaptation()
 		if ( ImGui::SliderFloat( "Adapt Speed", &aspeed, 0.1f, 10.0f, "%.2f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrAdaptSpeed", aspeed );
 		}
-		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaSpeed" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptSpeed", 2.5f ); }
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaSpeed" ) ) { ResetNamedCvar( "r_hdrAdaptSpeed" ); }
 		AddTooltip( "r_hdrAdaptSpeed: adaptation rate; higher = faster (time constant ~1/speed seconds)." );
 
 		float ebri = cvarSystem->GetCVarFloat( "r_hdrAdaptBrighten" );
 		if ( ImGui::SliderFloat( "Brighten in Dark", &ebri, 0.0f, 4.0f, "%.2f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrAdaptBrighten", ebri );
 		}
-		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaBri" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptBrighten", 1.22f ); }
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaBri" ) ) { ResetNamedCvar( "r_hdrAdaptBrighten" ); }
 		AddTooltip( "r_hdrAdaptBrighten: exposure ADDED to the base Exposure as the scene darkens (dark\n"
 			"areas open up). Eases smoothly to this cap, never pins." );
 
@@ -4817,7 +4826,7 @@ static void DrawDbgGroup_EyeAdaptation()
 		if ( ImGui::SliderFloat( "Darken in Light", &edar, 0.0f, 4.0f, "%.2f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrAdaptDarken", edar );
 		}
-		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaDar" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptDarken", 0.85f ); }
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaDar" ) ) { ResetNamedCvar( "r_hdrAdaptDarken" ); }
 		AddTooltip( "r_hdrAdaptDarken: exposure REMOVED from the base Exposure as the scene brightens\n"
 			"(bright scenes dim). Keep small for a mild pull-down." );
 
@@ -4825,7 +4834,7 @@ static void DrawDbgGroup_EyeAdaptation()
 		if ( ImGui::SliderFloat( "Reference Luminance", &ekey, 0.005f, 0.08f, "%.3f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrAdaptKey", ekey );
 		}
-		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaKey" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptKey", 0.03f ); }
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaKey" ) ) { ResetNamedCvar( "r_hdrAdaptKey" ); }
 		AddTooltip( "r_hdrAdaptKey: the scene luminance treated as neutral (mapped to the base Exposure).\n"
 			"Sit it in the middle of the scene's range so both directions engage; too high and every\n"
 			"scene reads as 'dark' so it only ever brightens." );
@@ -4834,7 +4843,7 @@ static void DrawDbgGroup_EyeAdaptation()
 		if ( ImGui::SliderFloat( "Metering Region", &ecen, 0.15f, 1.0f, "%.2f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrAdaptCenter", ecen );
 		}
-		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaCen" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptCenter", 0.5f ); }
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaCen" ) ) { ResetNamedCvar( "r_hdrAdaptCenter" ); }
 		AddTooltip( "r_hdrAdaptCenter: central fraction of the view measured. 1 = whole screen (the dark\n"
 			"periphery washes out what you look at); lower = center-weighted, so aiming at a light or a\n"
 			"dark corner actually moves the exposure." );
@@ -4843,7 +4852,7 @@ static void DrawDbgGroup_EyeAdaptation()
 		if ( ImGui::SliderFloat( "Low-light Grain Boost", &egrain, 0.0f, 5.0f, "%.2f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrAdaptGrain", egrain );
 		}
-		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaGrain" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptGrain", 3.0f ); }
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaGrain" ) ) { ResetNamedCvar( "r_hdrAdaptGrain" ); }
 		AddTooltip( "r_hdrAdaptGrain: raise film grain as the dark-scene brightening ramps up (high-gain\n"
 			"sensor/eye noise). 1 = grain ~doubles at full brightening; 0 = off. Needs Film Grain > 0." );
 
@@ -4851,7 +4860,7 @@ static void DrawDbgGroup_EyeAdaptation()
 		if ( ImGui::SliderFloat( "Low-light Desaturation", &edesat, 0.0f, 1.0f, "%.2f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrAdaptDesat", edesat );
 		}
-		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaDesat" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptDesat", 0.33f ); }
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaDesat" ) ) { ResetNamedCvar( "r_hdrAdaptDesat" ); }
 		AddTooltip( "r_hdrAdaptDesat: wash colours toward gray as the dark-scene brightening ramps up\n"
 			"(scotopic vision — rods take over in the dark). 0.33 = colours drop to ~67% at full\n"
 			"brightening; 0 = off." );
@@ -4860,7 +4869,7 @@ static void DrawDbgGroup_EyeAdaptation()
 		if ( ImGui::SliderFloat( "DUDE Adaptive White Point (exp.)", &ewp, 0.0f, 1.0f, "%.2f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrAdaptWhitePoint", ewp );
 		}
-		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaWP" ) ) { cvarSystem->SetCVarFloat( "r_hdrAdaptWhitePoint", 0.0f ); }
+		ImGui::SameLine(); if ( ImGui::SmallButton( "reset##eaWP" ) ) { ResetNamedCvar( "r_hdrAdaptWhitePoint" ); }
 		AddTooltip( "r_hdrAdaptWhitePoint (EXPERIMENTAL, DUDE tonemap only): the DUDE shoulder's white point\n"
 			"tracks the scene's smoothed brightest metered spot, so a bright lamp/fire core keeps its\n"
 			"internal gradient instead of flattening to a white disc when auto-exposure ramps up in the\n"
@@ -4982,7 +4991,7 @@ static void DrawDbgGroup_FSR()
 	AddTooltip( "Amplifies the debug overlay only — per-frame screen velocities are tiny, so crank this "
 		"up to see slow motion. Does not affect the velocity fed to the consumers." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##mvscale" ) ) { r_mvDebugScale.SetFloat( 1.0f ); }
+	if ( ImGui::SmallButton( "reset##mvscale" ) ) { r_mvDebugScale.Reset(); }
 
 	ImGui::EndDisabled();	// !r_motionVectors
 
@@ -5043,7 +5052,7 @@ static void DrawDbgGroup_ShadowMaps()
 	AddTooltip( "Bias for world/BSP and perforated receivers (flat surfaces)." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##bias" ) ) {
-		r_shadowMapBias.SetFloat( 0.0025f );
+		r_shadowMapBias.Reset();
 	}
 
 	float modelBias = r_shadowMapModelBias.GetFloat();
@@ -5054,7 +5063,7 @@ static void DrawDbgGroup_ShadowMaps()
 		"self-shadows more, so it usually needs a larger bias than world surfaces." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##modelbias" ) ) {
-		r_shadowMapModelBias.SetFloat( 0.005f );
+		r_shadowMapModelBias.Reset();
 	}
 
 	int cull = r_shadowMapCull.GetInteger();
@@ -5083,7 +5092,7 @@ static void DrawDbgGroup_ShadowMaps()
 		"perforated casters; solid-geometry shadows stay fully dark." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##perfstrength" ) ) {
-		r_shadowMapPerforatedStrength.SetFloat( 0.5f );
+		r_shadowMapPerforatedStrength.Reset();
 	}
 	ImGui::EndDisabled();
 
@@ -5108,7 +5117,7 @@ static void DrawDbgGroup_ShadowMaps()
 		"higher-resolution tiers." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##refradius" ) ) {
-		r_shadowMapSizeScaleRadius.SetFloat( 380.0f );
+		r_shadowMapSizeScaleRadius.Reset();
 	}
 	ImGui::EndDisabled();
 
@@ -5130,7 +5139,7 @@ static void DrawDbgGroup_ShadowMaps()
 		"only)." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##cubepcf" ) ) {
-		r_shadowMapCubePcf.SetInteger( 6 );
+		r_shadowMapCubePcf.Reset();
 	}
 
 	bool faceCull = r_shadowMapFaceCull.GetBool();
@@ -5150,7 +5159,7 @@ static void DrawDbgGroup_ShadowMaps()
 		"light's own radius." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##range" ) ) {
-		r_shadowMapPointRangeScale.SetFloat( 1.0f );
+		r_shadowMapPointRangeScale.Reset();
 	}
 
 	ImGui::SeparatorText( "Large lights (sun replacements) -> stencil" );
@@ -5167,7 +5176,7 @@ static void DrawDbgGroup_ShadowMaps()
 		"stencil-big count. (Console can set values above the slider max if you ever need them.)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##stencilradius" ) ) {
-		r_shadowMapStencilRadius.SetFloat( 250.0f );
+		r_shadowMapStencilRadius.Reset();
 	}
 
 	ImGui::SeparatorText( "Static cache (skip regenerating unchanged lights)" );
@@ -5247,7 +5256,7 @@ static void DrawDbgGroup_Emissive()
 	}
 	AddTooltip( "Brightness of the fill light a glowing screen casts. 0 = off, 0.50 = default, higher = a strong glow." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##emscale" ) ) { r_emissiveLightScale.SetFloat( 0.50f ); }
+	if ( ImGui::SmallButton( "reset##emscale" ) ) { r_emissiveLightScale.Reset(); }
 
 	float emRadius = r_emissiveLightRadius.GetFloat();
 	if ( ImGui::SliderFloat( "Reach (distance)", &emRadius, 0.25f, 16.0f, "%.2f" ) ) {
@@ -5256,7 +5265,7 @@ static void DrawDbgGroup_Emissive()
 	AddTooltip( "How far the fill light reaches, as a multiple of the screen's own size. Small/medium screens "
 		"scale linearly; large ones roll off toward the Max Reach cap below. Default 1.80." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##emradius" ) ) { r_emissiveLightRadius.SetFloat( 1.80f ); }
+	if ( ImGui::SmallButton( "reset##emradius" ) ) { r_emissiveLightRadius.Reset(); }
 
 	float emMaxReach = r_emissiveLightMaxReach.GetFloat();
 	if ( ImGui::SliderFloat( "Max Reach (big signs)", &emMaxReach, 32.0f, 512.0f, "%.0f" ) ) {
@@ -5265,7 +5274,7 @@ static void DrawDbgGroup_Emissive()
 	AddTooltip( "Soft cap (world units) that reach saturates toward, so a big hanging sign doesn't cast across "
 		"the whole room. Lower = big signs reined in harder; raise toward 512 for near-linear scaling. Default 120." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##emmaxreach" ) ) { r_emissiveLightMaxReach.SetFloat( 120.0f ); }
+	if ( ImGui::SmallButton( "reset##emmaxreach" ) ) { r_emissiveLightMaxReach.Reset(); }
 
 	float emFalloff = r_emissiveLightFalloff.GetFloat();
 	if ( ImGui::SliderFloat( "Fade-off", &emFalloff, 0.0f, 1.0f, "%.2f" ) ) {
@@ -5274,7 +5283,7 @@ static void DrawDbgGroup_Emissive()
 	AddTooltip( "How far the glow reaches and how gently it fades. 0 = a tight, bright pool with a sharp edge; "
 		"1 = a soft glow that reaches further out. Default 0.5." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##emfalloff" ) ) { r_emissiveLightFalloff.SetFloat( 0.5f ); }
+	if ( ImGui::SmallButton( "reset##emfalloff" ) ) { r_emissiveLightFalloff.Reset(); }
 
 	float emSpread = r_emissiveLightSpread.GetFloat();
 	if ( ImGui::SliderFloat( "Beam Spread", &emSpread, 0.5f, 3.5f, "%.2f" ) ) {
@@ -5283,7 +5292,7 @@ static void DrawDbgGroup_Emissive()
 	AddTooltip( "Width of the fill cone. 0.5 = a tight beam, 1.60 = default, 3.5 = a wide near-hemisphere "
 		"that wraps around the screen (but still clipped behind the mount)." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##emspread" ) ) { r_emissiveLightSpread.SetFloat( 1.60f ); }
+	if ( ImGui::SmallButton( "reset##emspread" ) ) { r_emissiveLightSpread.Reset(); }
 
 	float emSat = r_emissiveLightSaturation.GetFloat();
 	if ( ImGui::SliderFloat( "Colour saturation", &emSat, 0.0f, 1.0f, "%.2f" ) ) {
@@ -5292,7 +5301,7 @@ static void DrawDbgGroup_Emissive()
 	AddTooltip( "How much of the screen's own colour the bleed keeps. 0 = white, 0.75 = default tint, "
 		"1 = full screen hue (a coloured spotlight)." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##emsat" ) ) { r_emissiveLightSaturation.SetFloat( 0.75f ); }
+	if ( ImGui::SmallButton( "reset##emsat" ) ) { r_emissiveLightSaturation.Reset(); }
 
 	ImGui::Spacing();
 
@@ -5326,7 +5335,7 @@ static void DrawDbgGroup_Glass()
 	AddTooltip( "Brightness of the environment-map reflection on glass. 1.00 = the untouched cube; "
 		"0.70 = default, dampened 30% so the sheen matches legacy against the brighter enhanced scene." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##reflscale" ) ) { r_gl3ReflectionScale.SetFloat( 0.7f ); }
+	if ( ImGui::SmallButton( "reset##reflscale" ) ) { r_gl3ReflectionScale.Reset(); }
 
 	ImGui::Spacing();
 	ImGui::TextDisabled( "Decal sheen: texture mod packs make blood and dirt decals shiny. No effect on the stock assets." );
@@ -5338,7 +5347,7 @@ static void DrawDbgGroup_Glass()
 	AddTooltip( "Specular highlight + cube reflection on blood splats, smears and pools. "
 		"0.00 = matte, 1.00 = as authored by the mod pack; 0.35 = default." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##bloodsheen" ) ) { r_decalBloodSheen.SetFloat( 0.35f ); }
+	if ( ImGui::SmallButton( "reset##bloodsheen" ) ) { r_decalBloodSheen.Reset(); }
 
 	bool decalMatte = r_decalMatte.GetBool();
 	if ( ImGui::Checkbox( "Matte dirt decals", &decalMatte ) ) {
@@ -5355,7 +5364,7 @@ static void DrawDbgGroup_Glass()
 		"coverage, so stains read matte against the clean plate around them. Stock and mod decals alike. "
 		"0.00 = off, 1.00 = default. Needs PBR materials (High preset and up)." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##decalmetal" ) ) { r_decalMetalMask.SetFloat( 1.0f ); }
+	if ( ImGui::SmallButton( "reset##decalmetal" ) ) { r_decalMetalMask.Reset(); }
 
 	float decalRough = r_decalRoughen.GetFloat();
 	if ( ImGui::SliderFloat( "Decals roughen surfaces", &decalRough, 0.0f, 1.0f, "%.2f" ) ) {
@@ -5365,7 +5374,7 @@ static void DrawDbgGroup_Glass()
 		"reflections break up across stains - on metal and on glossy non-metals alike. "
 		"0.00 = off, 1.00 = default. Needs PBR materials (High preset and up)." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##decalrough" ) ) { r_decalRoughen.SetFloat( 1.0f ); }
+	if ( ImGui::SmallButton( "reset##decalrough" ) ) { r_decalRoughen.Reset(); }
 
 	float wetBlood = r_decalWetBlood.GetFloat();
 	if ( ImGui::SliderFloat( "Wet blood", &wetBlood, 0.0f, 0.5f, "%.3f" ) ) {
@@ -5377,7 +5386,7 @@ static void DrawDbgGroup_Glass()
 		"With a texture pack, it replaces the pack's own blood highlight "
 		"(the pack's environment sheen still follows Blood decal sheen). Needs PBR materials." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##wetblood" ) ) { r_decalWetBlood.SetFloat( 0.057f ); }
+	if ( ImGui::SmallButton( "reset##wetblood" ) ) { r_decalWetBlood.Reset(); }
 
 	ImGui::BeginDisabled( r_decalWetBlood.GetFloat() <= 0.0f );
 	float bloodRelief = r_decalWetBloodRelief.GetFloat();
@@ -5388,7 +5397,7 @@ static void DrawDbgGroup_Glass()
 		"breaks into more sparkles, visible from more angles; 0.00 = a flat film that only glints at a light's exact "
 		"mirror angle. 0.17 = default." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##bloodrelief" ) ) { r_decalWetBloodRelief.SetFloat( 0.17f ); }
+	if ( ImGui::SmallButton( "reset##bloodrelief" ) ) { r_decalWetBloodRelief.Reset(); }
 
 	float bloodFloor = r_decalWetBloodThreshold.GetFloat();
 	if ( ImGui::SliderFloat( "Wet blood threshold", &bloodFloor, 0.0f, 0.95f, "%.2f" ) ) {
@@ -5398,7 +5407,7 @@ static void DrawDbgGroup_Glass()
 		"to see; raise this until the bare floor around a splat stops looking wet. The film feathers in just above "
 		"the threshold. 0.30 = default." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##bloodfloor" ) ) { r_decalWetBloodThreshold.SetFloat( 0.3f ); }
+	if ( ImGui::SmallButton( "reset##bloodfloor" ) ) { r_decalWetBloodThreshold.Reset(); }
 
 	float bloodRough = r_decalWetBloodRough.GetFloat();
 	if ( ImGui::SliderFloat( "Wet blood roughness", &bloodRough, 0.05f, 0.8f, "%.2f" ) ) {
@@ -5406,7 +5415,7 @@ static void DrawDbgGroup_Glass()
 	}
 	AddTooltip( "Lower = tight, sharp glints (fresh blood); higher = a broad soft sheen (drying blood). 0.18 = default." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##bloodrough" ) ) { r_decalWetBloodRough.SetFloat( 0.18f ); }
+	if ( ImGui::SmallButton( "reset##bloodrough" ) ) { r_decalWetBloodRough.Reset(); }
 	ImGui::EndDisabled();
 
 	ImGui::EndDisabled();	// glass reflections (backend supported)
@@ -5448,7 +5457,7 @@ static void DrawDbgGroup_SSAO()
 	}
 	AddTooltip( "Strength of the darkening. 0 = none, 1.2 = default, higher pushes the occlusion deeper." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaoint" ) ) { r_ssaoIntensity.SetFloat( 1.2f ); }
+	if ( ImGui::SmallButton( "reset##ssaoint" ) ) { r_ssaoIntensity.Reset(); }
 
 	float ssaoDirect = r_ssaoDirectLight.GetFloat();
 	if ( ImGui::SliderFloat( "Direct Light AO", &ssaoDirect, 0.0f, 1.0f, "%.2f" ) ) {
@@ -5459,7 +5468,7 @@ static void DrawDbgGroup_SSAO()
 		"ambient-only (most faithful, but usually invisible here). Lower it if AO looks baked-in "
 		"when lights move." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaodirect" ) ) { r_ssaoDirectLight.SetFloat( 0.75f ); }
+	if ( ImGui::SmallButton( "reset##ssaodirect" ) ) { r_ssaoDirectLight.Reset(); }
 
 	float ssaoFloor = r_ssaoFloor.GetFloat();
 	if ( ImGui::SliderFloat( "Floor (min visibility)", &ssaoFloor, 0.0f, 1.0f, "%.2f" ) ) {
@@ -5468,7 +5477,7 @@ static void DrawDbgGroup_SSAO()
 	AddTooltip( "Anti-crush floor: how dark a fully-occluded spot may get. 0 = can reach black, "
 		"0.03 = default, 1 = no darkening. Raise it if AO makes dark areas too murky to read." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaofloor" ) ) { r_ssaoFloor.SetFloat( 0.03f ); }
+	if ( ImGui::SmallButton( "reset##ssaofloor" ) ) { r_ssaoFloor.Reset(); }
 
 	float ssaoRad = r_ssaoRadius.GetFloat();
 	if ( ImGui::SliderFloat( "Radius (world units)", &ssaoRad, 1.0f, 256.0f, "%.0f" ) ) {
@@ -5477,7 +5486,7 @@ static void DrawDbgGroup_SSAO()
 	AddTooltip( "How far the occlusion samples reach, in world units. Small = tight contact creases "
 		"only; large = broad, softer occlusion (and more expensive). Default 48." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaorad" ) ) { r_ssaoRadius.SetFloat( 48.0f ); }
+	if ( ImGui::SmallButton( "reset##ssaorad" ) ) { r_ssaoRadius.Reset(); }
 
 	int ssaoSlices = r_ssaoSlices.GetInteger();
 	if ( ImGui::SliderInt( "Directions (slices)", &ssaoSlices, 1, 8 ) ) {
@@ -5486,7 +5495,7 @@ static void DrawDbgGroup_SSAO()
 	AddTooltip( "How many horizon-search directions per pixel. More = smoother, less directional "
 		"noise. This is the bigger cost knob. Default 3. Check the cost with r_gl3GpuTime 1." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaoslices" ) ) { r_ssaoSlices.SetInteger( 3 ); }
+	if ( ImGui::SmallButton( "reset##ssaoslices" ) ) { r_ssaoSlices.Reset(); }
 
 	int ssaoSteps = r_ssaoSteps.GetInteger();
 	if ( ImGui::SliderInt( "Steps per direction", &ssaoSteps, 1, 12 ) ) {
@@ -5495,7 +5504,7 @@ static void DrawDbgGroup_SSAO()
 	AddTooltip( "How many samples are marched along each direction (how finely each horizon is "
 		"found). More = more accurate occlusion at range. Default 3." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaosteps" ) ) { r_ssaoSteps.SetInteger( 3 ); }
+	if ( ImGui::SmallButton( "reset##ssaosteps" ) ) { r_ssaoSteps.Reset(); }
 
 	// Depth-mip acceleration + its two quality/speed knobs (docs/ssao-perf-optimization.md).
 	// The master toggle is mirrored from Enhancements; the bias/cap sliders live only here.
@@ -5516,7 +5525,7 @@ static void DrawDbgGroup_SSAO()
 		"coarser sooner (faster, but coarse depth smears occlusion across silhouettes into halos); "
 		"lower = stays on finer mips (sharper, keeps most of the speedup). Default 0.1." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaomipbias" ) ) { r_ssaoDepthMipBias.SetFloat( 0.1f ); }
+	if ( ImGui::SmallButton( "reset##ssaomipbias" ) ) { r_ssaoDepthMipBias.Reset(); }
 
 	int ssaoMipCap = r_ssaoDepthMipMaxLod.GetInteger();
 	if ( ImGui::SliderInt( "Mip Coarseness Cap", &ssaoMipCap, 1, 5 ) ) {
@@ -5526,7 +5535,7 @@ static void DrawDbgGroup_SSAO()
 		"where occlusion smears across silhouettes into halos, so a lower cap kills halos at a small "
 		"speed cost; 5 = uncapped (old behaviour). Default 2." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaomipcap" ) ) { r_ssaoDepthMipMaxLod.SetInteger( 2 ); }
+	if ( ImGui::SmallButton( "reset##ssaomipcap" ) ) { r_ssaoDepthMipMaxLod.Reset(); }
 	ImGui::EndDisabled();
 
 	bool ssaoTemporalDev = r_ssaoTemporal.GetBool();
@@ -5547,7 +5556,7 @@ static void DrawDbgGroup_SSAO()
 		"and steadier (and effectively cheaper) but more latency/ghosting; 0 = no accumulation. "
 		"Default 0.90." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaofeedback" ) ) { r_ssaoTemporalFeedback.SetFloat( 0.9f ); }
+	if ( ImGui::SmallButton( "reset##ssaofeedback" ) ) { r_ssaoTemporalFeedback.Reset(); }
 	ImGui::EndDisabled();
 
 	// Resolution is exposed in Graphics > Ambient Occlusion (as a slider).
@@ -5577,7 +5586,7 @@ static void DrawDbgGroup_SSAO()
 	AddTooltip( "How far the ambient lookup bends from the surface normal toward the bent normal. "
 		"0 = surface normal (no effect), 1 = fully bent. Default 0.5." );
 	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaobentstr" ) ) { r_ssaoBentStrength.SetFloat( 0.5f ); }
+	if ( ImGui::SmallButton( "reset##ssaobentstr" ) ) { r_ssaoBentStrength.Reset(); }
 	ImGui::EndDisabled();
 
 	bool ssaoSpec = r_ssaoSpecular.GetBool();
@@ -5617,7 +5626,7 @@ static void DrawDbgGroup_OcclusionMaps()
 		AddTooltip( "How strongly the occlusion map darkens the ambient term. 0 = off, 1 = the map "
 			"at full darkening. Default 1.0." );
 		ImGui::SameLine();
-		if ( ImGui::SmallButton( "reset##oclscale" ) ) { r_occlusionMapScale.SetFloat( 1.0f ); }
+		if ( ImGui::SmallButton( "reset##oclscale" ) ) { r_occlusionMapScale.Reset(); }
 
 		float oclDirect = r_occlusionMapDirect.GetFloat();
 		if ( ImGui::SliderFloat( "Direct Light AO (map)", &oclDirect, 0.0f, 1.0f, "%.2f" ) ) {
@@ -5627,7 +5636,7 @@ static void DrawDbgGroup_OcclusionMaps()
 			"fraction of AO Map Strength. Doom 3 is mostly dynamic light, so this is what makes the "
 			"map visible; lower it if AO looks baked-in under moving lights. 0 = ambient-only. Default 0.9." );
 		ImGui::SameLine();
-		if ( ImGui::SmallButton( "reset##ocldirect" ) ) { r_occlusionMapDirect.SetFloat( 0.9f ); }
+		if ( ImGui::SmallButton( "reset##ocldirect" ) ) { r_occlusionMapDirect.Reset(); }
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();	// backend supported
 		EndSettingsGroup();

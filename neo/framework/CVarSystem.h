@@ -147,10 +147,20 @@ public:
 	int						GetInteger( void ) const { return internalVar->integerValue; }
 	float					GetFloat( void ) const { return internalVar->floatValue; }
 
+	// DUDE: the value "reset <cvar>" / a fresh launch restores — the registered default. Lets UI
+	// reset buttons read the single source of truth instead of hard-coding (and drifting from) it.
+	const char *			GetResetString( void ) const { return internalVar->InternalGetResetString(); }
+	float					GetResetFloat( void ) const { return atof( internalVar->InternalGetResetString() ); }
+	int						GetResetInteger( void ) const { return atoi( internalVar->InternalGetResetString() ); }
+
 	void					SetString( const char *value ) { internalVar->InternalSetString( value ); }
 	void					SetBool( const bool value ) { internalVar->InternalSetBool( value ); }
 	void					SetInteger( const int value ) { internalVar->InternalSetInteger( value ); }
 	void					SetFloat( const float value ) { internalVar->InternalSetFloat( value ); }
+
+	// DUDE: restore the registered default (what a fresh launch / "reset <cvar>" gives). One source
+	// of truth for UI reset buttons, which otherwise hard-code the default and drift from it.
+	void					Reset( void ) { internalVar->InternalSetString( internalVar->InternalGetResetString() ); }
 
 	void					SetInternalVar( idCVar *cvar ) { internalVar = cvar; }
 
@@ -178,6 +188,9 @@ private:
 	virtual void			InternalSetBool( const bool newValue ) {}
 	virtual void			InternalSetInteger( const int newValue ) {}
 	virtual void			InternalSetFloat( const float newValue ) {}
+	// DUDE: statically-declared cvars only ever hold their registered value, so the base returns it;
+	// idInternalCVar overrides to return its separate resetString (see GetResetString above)
+	virtual const char *	InternalGetResetString( void ) const { return value; }
 
 	static idCVar *			staticVars;
 };
