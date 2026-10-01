@@ -3134,6 +3134,7 @@ static int DetectEnhancementPreset()
 			r_rtAllLights.GetBool()            == p.rtAllLights &&
 			r_rtShadowBlurStagger.GetBool()    == p.rtBlurStagger &&
 			r_volumetrics.GetBool()            == p.volumetrics &&
+			cvarSystem->GetCVarInteger( "image_anisotropy" ) == p.anisotropy &&
 			idMath::Fabs( r_skinShading.GetFloat() - p.skinShading ) < 0.01f;
 		if ( match ) {
 			return i;
