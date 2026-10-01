@@ -9924,8 +9924,16 @@ void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
 
 // free every imageTable slot a target lent out (depth sample + color samples)
 void VulkanBackend::ReleaseTargetSampleSlots( RenderTarget &t ) {
-	ImageHandle handles[4] = { t.sampleImage, t.colorSampleImage[0], t.colorSampleImage[1], t.colorSampleImage[2] };
-	for ( int i = 0; i < 4; i++ ) {
+	// depth sample + ALL 4 color sample slots (incl. colorSampleImage[3], the RTGI albedo
+	// on a 4-MRT — docs/rtx-rtgi.md H6c). This array was [0..2] before the 4th attachment
+	// was added and was never widened, so the albedo's borrowed imageTable slot was never
+	// released. With FreeTargetObjects now owning+freeing colorImage[3]/colorView[3] (c<4),
+	// a stale live slot aliasing them made the DestroyM2Resources imageTable sweep destroy
+	// that same image+view a SECOND time -> driver heap double-free ("corrupted size vs
+	// prev_size" / "Couldn't find object") on teardown. Freed once by FreeTargetObjects now.
+	ImageHandle handles[5] = { t.sampleImage, t.colorSampleImage[0], t.colorSampleImage[1],
+	                           t.colorSampleImage[2], t.colorSampleImage[3] };
+	for ( int i = 0; i < 5; i++ ) {
 		ImageHandle h = handles[i];
 		if ( h >= 1 && h <= (ImageHandle)imageTable.size() ) {
 			imageTable[h - 1] = ImageRec();
@@ -9942,7 +9950,7 @@ void VulkanBackend::ReleaseTargetSampleSlots( RenderTarget &t ) {
 		t.colorLevelInput[L] = 0;
 	}
 	t.sampleImage = 0;
-	t.colorSampleImage[0] = t.colorSampleImage[1] = t.colorSampleImage[2] = 0;
+	t.colorSampleImage[0] = t.colorSampleImage[1] = t.colorSampleImage[2] = t.colorSampleImage[3] = 0;
 }
 
 void VulkanBackend::DestroyRenderTarget( RenderTargetHandle rt ) {
