@@ -759,14 +759,26 @@ static const char *GPUCULL_SRC =
 	"    }\n"
 	"}\n";
 
+// File-scope (not function-local) so R_ResetGpuCullShader can re-arm it after a full backend
+// teardown — a mod switch (ReloadEngine) or full vid_restart frees the backend shader table,
+// leaving this once-cached handle dangling. Without the reset r_gpuCullLive / the validator
+// would dispatch against a destroyed pipeline on the rebuilt backend.
+static rhi::ShaderHandle s_gpuCullShader = 0;
+static bool s_gpuCullTried = false;
+
 static rhi::ShaderHandle R_GpuCullShader( rhi::RHI *r ) {
-	static rhi::ShaderHandle handle = 0;
-	static bool tried = false;
-	if ( !tried ) {
-		tried = true;
-		handle = r->CreateComputeShader( "cs_gpucull", GPUCULL_SRC );
+	if ( !s_gpuCullTried ) {
+		s_gpuCullTried = true;
+		s_gpuCullShader = r->CreateComputeShader( "cs_gpucull", GPUCULL_SRC );
 	}
-	return handle;
+	return s_gpuCullShader;
+}
+
+// Drop the cached cull compute shader so it recompiles against a fresh backend (see above and
+// R_MD5_ResetGpuShaders). The backend already freed the module; just re-arm the once-guard.
+void R_ResetGpuCullShader( void ) {
+	s_gpuCullShader = 0;
+	s_gpuCullTried = false;
 }
 
 /*

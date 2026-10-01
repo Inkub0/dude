@@ -3083,6 +3083,8 @@ void R_VidRestart_f( const idCmdArgs &args ) {
 	// the rebuilt backend — otherwise they'd dangle and MD5 models would draw at bind pose.
 	extern void R_MD5_ResetGpuShaders( void );
 	R_MD5_ResetGpuShaders();
+	extern void R_ResetGpuCullShader( void );
+	R_ResetGpuCullShader();
 
 	// free any current world interaction surfaces and vertex caches
 	R_FreeDerivedData();
@@ -3359,6 +3361,8 @@ void idRenderSystemLocal::Shutdown( void ) {
 	// destroyed pipelines so every MD5 model draws at bind pose (T-pose). See Model_md5.cpp.
 	extern void R_MD5_ResetGpuShaders( void );
 	R_MD5_ResetGpuShaders();
+	extern void R_ResetGpuCullShader( void );
+	R_ResetGpuCullShader();
 
 	common->SetRefreshOnPrint( false ); // without a renderer there's nothing to refresh
 
