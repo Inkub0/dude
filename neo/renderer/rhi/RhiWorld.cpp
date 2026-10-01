@@ -8916,6 +8916,292 @@ static void RB_RHI_LogShadowCacheSummary() {
 
 /*
 ===================
+lightShadowClass_t
+
+Per-light shadow classification: cheap read-only queries of the viewLight,
+computed once per light in RB_RHI_DrawWorld and shared by the technique
+selection, the per-light debug readout, and the stencil-vs-map draw decision.
+===================
+*/
+struct lightShadowClass_t {
+	bool	castsShadows;		// stencil shadow volumes present (global||local shadows)
+	bool	hasInteractions;	// local||global interaction geometry to light
+	bool	lightMayShadow;		// light-level flags permit shadow casting
+	bool	isPoint;
+	bool	isParallel;
+	bool	smEnabled;			// r_shadowMapping
+	bool	oversize;			// giant "sun replacement" omni routed away from a single map
+	bool	rtServesAll;		// r_rtAllLights serves this light with an inline ray
+};
+
+/*
+===================
+RB_RHI_ClassifyLightShadow
+
+Sets ictx.lightIsFlashlight and returns this light's shadow classification:
+pure read-only frontend queries (lightDef->parms, light shader) plus the
+r_rtAllLights / r_shadowMapStencilRadius policy gates. Lifted verbatim from
+RB_RHI_DrawWorld.
+===================
+*/
+static lightShadowClass_t RB_RHI_ClassifyLightShadow( rhi::RHI *r, viewLight_t *vLight ) {
+	// Flag the player flashlight so its interactions get the dedicated small
+	// shadow bias (see r_shadowMapFlashlightBias). Keyed on the light shader
+	// name: base Doom 3 uses "lights/flashlight5"; a substring match also
+	// covers D3XP/mod flashlight variants without hardcoding one path.
+	ictx.lightIsFlashlight = vLight->lightShader
+	    && idStr::FindText( vLight->lightShader->GetName(), "flashlight", false ) != -1;
+
+	// stencil shadow volumes present for this light (built only for opaque,
+	// non-noShadows casters)
+	const bool castsShadows = ( vLight->globalShadows || vLight->localShadows );
+
+	// Perforated grates/fences are flagged noShadows, so they build NO stencil
+	// shadow volumes — gating the shadow-map pass on castsShadows would skip a
+	// light that only illuminates a grate, defeating the whole perforated
+	// feature. Instead run the map whenever the light is permitted to cast
+	// shadows (light-level flags) and has interaction geometry to render into
+	// it; the per-surface caster rules still apply inside the pass.
+	const bool hasInteractions = ( vLight->localInteractions || vLight->globalInteractions );
+	const bool lightMayShadow = vLight->lightDef && !vLight->lightDef->parms.noShadows
+	    && vLight->lightShader->LightCastsShadows();
+	const bool isPoint = vLight->lightDef && vLight->lightDef->parms.pointLight;
+	const bool isParallel = vLight->lightDef && vLight->lightDef->parms.parallel;
+	// M7: shadow maps run on Vulkan now (the RHI depth render-target family
+	// is live) — projected/spot lights get a 2D depth map, budgeted point
+	// lights a cube depth map, everything else still falls back to stencil.
+	const bool smEnabled = r_shadowMapping.GetBool();
+
+	// DUDE Phase 3.5: giant "sun replacement" lights (Phobos fakes its sky
+	// with omni lights up to radius 5000) look poor as a single shadow map —
+	// one cube can't resolve a shadow thrown thousands of units, so its edges
+	// pixelate, and the map wastes VRAM. Above r_shadowMapStencilRadius (largest
+	// light_radius axis, world units) we skip the map and let Carmack's stencil
+	// volumes handle it: pixel-exact and distance-independent. 0 disables.
+	const float smStencilRadius = r_shadowMapStencilRadius.GetFloat();
+	float lightMaxAxis = 0.0f;
+	if ( vLight->lightDef ) {
+		const idVec3 &lr = vLight->lightDef->parms.lightRadius;
+		lightMaxAxis = Max( lr.x, Max( lr.y, lr.z ) );
+	}
+	// The player flashlight is a narrow projected spot with flashRadius 400
+	// (weapon_flashlight.def), which trips the 255 default cutoff even though a
+	// single 2D map resolves a bounded cone perfectly — a false positive of a rule
+	// meant for giant omni suns. Exempt it so it takes the (tessellatable) 2D-map
+	// path like every other projected light instead of a low-poly stencil shadow.
+	const bool oversize = smEnabled && smStencilRadius > 0.0f
+	    && lightMaxAxis > smStencilRadius && !ictx.lightIsFlashlight;
+
+	// r_rtAllLights: EVERY shadow-casting light takes the ray route - checked ahead of all
+	// the map routes and independent of r_shadowMapping. Mode 4 traces one ray from the lit
+	// fragment toward u_localLightOrigin, which is right for every species: a point light's
+	// position, a projected light's apex, and for a parallel light the far-away parallel
+	// point (the normalized difference IS its direction) - the same code the sun and
+	// moving-light routes already run. No map of any kind is rendered, and no stencil
+	// volumes are drawn. Without the RT variant / a live TLAS the light falls through to
+	// its usual route.
+	const bool rtServesAll = r_rtAllLights.GetBool() && lightMayShadow && hasInteractions
+		&& ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0;
+	lightShadowClass_t cls;
+	cls.castsShadows    = castsShadows;
+	cls.hasInteractions = hasInteractions;
+	cls.lightMayShadow  = lightMayShadow;
+	cls.isPoint         = isPoint;
+	cls.isParallel      = isParallel;
+	cls.smEnabled       = smEnabled;
+	cls.oversize        = oversize;
+	cls.rtServesAll     = rtServesAll;
+	return cls;
+}
+
+/*
+===================
+RB_RHI_SelectLightShadowTechnique
+
+Runs the shadow-technique ladder for one light and fills ictx: the
+r_rtAllLights inline ray, then (shadow mapping on) the sun/2D/cube routes with
+their r_rtSunShadows / r_rtMovingLights ray shortcuts, then the r_rtShadowBlur
+screen-space mask. Bumps dbgShadowMapped and the global cube tallies. Lifted
+verbatim from RB_RHI_DrawWorld.
+===================
+*/
+static void RB_RHI_SelectLightShadowTechnique( rhi::RHI *r, const viewDef_t *viewDef,
+        viewLight_t *vLight, const lightShadowClass_t &cls, rhi::ShaderHandle shadowMapProg,
+        rhi::ShaderHandle shadowCubeProg, int &dbgShadowMapped ) {
+	const bool hasInteractions = cls.hasInteractions;
+	const bool lightMayShadow  = cls.lightMayShadow;
+	const bool isPoint         = cls.isPoint;
+	const bool isParallel      = cls.isParallel;
+	const bool smEnabled       = cls.smEnabled;
+	const bool oversize        = cls.oversize;
+	const bool rtServesAll     = cls.rtServesAll;
+
+	ictx.lightShadowMapped = false;
+	ictx.lightSunShadow = false;
+	ictx.lightRtOnly = false;
+	ictx.lightRtPoint = false;
+	ictx.lightRtBlur = false;
+	ictx.shadowMaskImage = 0;
+	ictx.shadowMaskStale = false;
+	ictx.shadowImage = 0;
+	ictx.lightShadowCube = false;
+	ictx.shadowCubeImage = 0;
+	ictx.lightHasDynamicLayer = false;
+	ictx.shadowCubeDynImage = 0;
+	ictx.shadowCubeDynScale = 1.0f;
+
+	if ( rtServesAll ) {
+		ictx.lightRtPoint = true;
+		ictx.lightRange = isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
+		dbgShadowMapped++;
+	}
+
+	if ( !rtServesAll && smEnabled && lightMayShadow && hasInteractions ) {
+		if ( ( oversize || isParallel ) && r_shadowMapSun.GetBool() ) {
+			// DUDE sun shadow maps (docs/shadow-research.md item 1): oversize
+			// "sun replacement" omnis and parallel lights render a per-view
+			// fitted virtual 2D map instead of the stencil fallback. The fit
+			// requires the light to sit OUTSIDE the fitted view sphere (a
+			// projection from the light toward the view) — a distant sky sun
+			// qualifies; a big omni you stand next to does not, and declines.
+			//
+			// RT sun shadows (R3): when the ray path is live it serves ANY sun
+			// with a single ray toward the light origin — no fitted map needed —
+			// so SKIP the sun-map render entirely (checked first). That map would
+			// only ever be sampled by the non-RT fallback. This is the perf win
+			// for fit-PASSING suns (parallel skies, mars_city1) that used to
+			// render a full 2048² depth pass and then ignore it in favour of rays;
+			// fit-DECLINED low omnis (commoutside) already took this route on
+			// decline. lightRtOnly marks "sun route, no map rendered": mode 4
+			// samples no map (unit 7 is a 0 handle, identical to unshadowed
+			// lights), and the receiver fill downgrades to unshadowed if the TLAS
+			// dies mid-frame. rhiSunPlanes stay stale-but-unread under mode 4.
+			const bool rtServesSun = r_rtSunShadows.GetBool()
+				&& ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0;
+			if ( rtServesSun ) {
+				ictx.lightShadowMapped = true;
+				ictx.lightSunShadow = true;
+				ictx.lightRtOnly = true;
+				ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );	// 0 when no map rendered; unread by mode 4
+				dbgShadowMapped++;
+			} else if ( RB_RHI_ShadowMapPassSun( r, vLight, shadowMapProg ) ) {
+				ictx.lightShadowMapped = true;
+				ictx.lightSunShadow = true;
+				ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
+				dbgShadowMapped++;
+			}
+		}
+		if ( !ictx.lightShadowMapped && !oversize && !isPoint && !isParallel ) {
+			// projected / spot light: single 2D depth map
+			if ( RB_RHI_ShadowMapPass( r, vLight, shadowMapProg ) ) {
+				ictx.lightShadowMapped = true;
+				ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
+				dbgShadowMapped++;
+			}
+		} else if ( !ictx.lightShadowMapped && isPoint && !isParallel
+		            // an oversize point light reaches the cube path only when the sun
+		            // fit declined it (light inside the fitted region = a big indoor
+		            // omni, not a distant sun): the adaptive tiers give it a usable
+		            // cube, and stencil stays the last resort. With r_shadowMapSun
+		            // off, oversize keeps the old direct-to-stencil routing for A/B.
+		            && ( !oversize || r_shadowMapSun.GetBool() ) ) {
+			// RT moving lights (Option A, docs/shadow-research.md 2026-08): a point
+			// light whose pose changed recently can never cache-hit — the map path
+			// re-renders its whole cube every frame — so serve it with one ray
+			// toward the light instead (mode 4, no cube at all). Checked BEFORE the
+			// budget so ray-served lights don't consume cube slots. Costs nothing
+			// when still: the tracker's hysteresis re-caches paused lights.
+			const bool rtServesMoving = r_rtMovingLights.GetBool()
+				&& ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0
+				&& RB_RHI_LightIsMoving( vLight );
+			if ( rtServesMoving ) {
+				ictx.lightRtPoint = true;
+				ictx.lightRange = RB_RHI_PointLightRange( vLight );
+				rhiCubeCacheRtMoving++;
+				dbgShadowMapped++;
+			} else if ( RB_RHI_PointLightInBudget( viewDef, vLight ) ) {
+				// point / omni light: 6-face cube map, budgeted by on-screen
+				// importance (r_shadowMapPointLimit) so a busy room stays bounded
+				const float range = RB_RHI_PointLightRange( vLight );
+				if ( RB_RHI_ShadowMapPassCube( r, vLight, shadowCubeProg, range ) ) {
+					ictx.lightShadowCube = true;
+					ictx.shadowCubeImage = r->GetRenderTargetImage( rhiShadowCube );
+					// static/dynamic split: a second (movers) cube to min() with the static one
+					if ( rhiShadowCubeDyn != 0 ) {
+						ictx.lightHasDynamicLayer = true;
+						ictx.shadowCubeDynImage = r->GetRenderTargetImage( rhiShadowCubeDyn );
+						ictx.shadowCubeDynScale = rhiShadowCubeDynScale;
+					}
+					ictx.lightRange = range;
+					rhiShadowCubeLights++;
+				}
+			}
+		}
+	}
+
+	// either shadow-map technique (or the ray route) replaces the stencil test
+	// r_rtShadowBlur: a light one of the ray routes above just claimed gets its hard ray
+	// traced per screen pixel + blurred NOW (the scene pass is suspended exactly as for a
+	// shadow-map render); its interactions then look the mask up instead of tracing inline.
+	// Any failure leaves the light on its inline hard ray, unchanged.
+	if ( rhiRtBlurThisView && ( ictx.lightRtOnly || ictx.lightRtPoint ) ) {
+		ictx.shadowMaskImage = RB_RHI_RtShadowBlurLight( r, viewDef, vLight );
+		ictx.lightRtBlur = ictx.shadowMaskImage != 0;
+		ictx.shadowMaskStale = ictx.lightRtBlur && rhiRtBlurLastStale;
+		if ( ictx.shadowMaskStale ) {
+			memcpy( ictx.shadowMaskViewProj, rhiRtBlurLastViewProj, sizeof( ictx.shadowMaskViewProj ) );
+		}
+	}
+}
+
+/*
+===================
+RB_RHI_LogLightShadowClass
+
+r_shadowMapDebug 2: per-light readout (species, chosen technique, adaptive
+resolution, receiver/caster counts, distance/radius/range). Lifted verbatim
+from RB_RHI_DrawWorld.
+===================
+*/
+static void RB_RHI_LogLightShadowClass( const viewDef_t *viewDef, viewLight_t *vLight, const lightShadowClass_t &cls ) {
+	const bool isPoint        = cls.isPoint;
+	const bool isParallel     = cls.isParallel;
+	const bool lightMayShadow = cls.lightMayShadow;
+	const bool oversize       = cls.oversize;
+	const bool rtServesAll    = cls.rtServesAll;
+	// r_shadowMapDebug 2: per-light readout so we can see, when a shadow blinks
+	// out, exactly what changed — is the light even here, did it get a map, and
+	// how many occluders reached it (interactions + off-screen casters)?
+	if ( r_shadowMapDebug.GetInteger() >= 2 && vLight->lightDef ) {
+		const idVec3 lorg = vLight->globalLightOrigin;
+		const idVec3 dv = lorg - viewDef->renderView.vieworg;
+		const float dist = dv.Length();
+		const float radius = vLight->lightDef->parms.lightRadius.Length();
+		// litG/litL = lit (receiver) surface counts; casters = occluders drawn
+		// into the shadow map. range = cube depth normalizer / far plane.
+		const float effRange = isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
+		// adaptive resolution this light would/did use, so the tier picks show up
+		const int dbgLo = isPoint ? 128 : 256;
+		const int dbgHi = isPoint ? idMath::ClampInt( 128, 4096, glConfig.maxCubeMapSize )
+		                          : idMath::ClampInt( 256, 4096, glConfig.maxTextureSize );
+		const int dbgBase = idMath::ClampInt( dbgLo, dbgHi,
+		    isPoint ? r_shadowMapPointSize.GetInteger() : r_shadowMapSize.GetInteger() );
+		const int dbgRes = RB_RHI_TierSize( dbgBase, RB_RHI_ShadowTier( radius ), dbgLo, dbgHi );
+		common->Printf( "  light %d: %s%s map=%s res=%d litG=%d litL=%d casters=%d dist=%.0f radius=%.0f range=%.0f\n",
+		                vLight->lightDef->index,
+		                isPoint ? "point" : ( isParallel ? "parallel" : "projected" ),
+		                lightMayShadow ? "" : " (noShadow)",
+		                ictx.lightRtPoint ? ( rtServesAll ? "rtAll" : "rtMove" ) : ( ictx.lightShadowCube ? "cube" : ( ictx.lightSunShadow ? "sun" : ( ictx.lightShadowMapped ? "2D" : ( oversize ? "stencil" : "none" ) ) ) ),
+		                dbgRes,
+		                RB_RHI_CountLightChain( vLight->globalInteractions ),
+		                RB_RHI_CountLightChain( vLight->localInteractions ),
+		                RB_RHI_CountLightChain( vLight->shadowMapCasters ),
+		                dist, radius, effRange );
+	}
+}
+
+/*
+===================
 RB_RHI_DrawWorld
 
 Depth prepass + stencil shadows + per-light interactions, following the
@@ -8996,211 +9282,18 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			// (cube); everything else — parallel lights, out-of-budget point lights —
 			// falls back to stencil. That mix is exactly the free per-light selection.
 			// Reading lightDef->parms here is a read-only frontend query.
-			ictx.lightShadowMapped = false;
-			ictx.lightSunShadow = false;
-			ictx.lightRtOnly = false;
-			ictx.lightRtPoint = false;
-			ictx.lightRtBlur = false;
-			ictx.shadowMaskImage = 0;
-			ictx.shadowMaskStale = false;
-			ictx.shadowImage = 0;
-			ictx.lightShadowCube = false;
-			ictx.shadowCubeImage = 0;
-			ictx.lightHasDynamicLayer = false;
-			ictx.shadowCubeDynImage = 0;
-			ictx.shadowCubeDynScale = 1.0f;
-
-			// Flag the player flashlight so its interactions get the dedicated small
-			// shadow bias (see r_shadowMapFlashlightBias). Keyed on the light shader
-			// name: base Doom 3 uses "lights/flashlight5"; a substring match also
-			// covers D3XP/mod flashlight variants without hardcoding one path.
-			ictx.lightIsFlashlight = vLight->lightShader
-			    && idStr::FindText( vLight->lightShader->GetName(), "flashlight", false ) != -1;
-
-			// stencil shadow volumes present for this light (built only for opaque,
-			// non-noShadows casters)
-			const bool castsShadows = ( vLight->globalShadows || vLight->localShadows );
-
-			// Perforated grates/fences are flagged noShadows, so they build NO stencil
-			// shadow volumes — gating the shadow-map pass on castsShadows would skip a
-			// light that only illuminates a grate, defeating the whole perforated
-			// feature. Instead run the map whenever the light is permitted to cast
-			// shadows (light-level flags) and has interaction geometry to render into
-			// it; the per-surface caster rules still apply inside the pass.
-			const bool hasInteractions = ( vLight->localInteractions || vLight->globalInteractions );
-			const bool lightMayShadow = vLight->lightDef && !vLight->lightDef->parms.noShadows
-			    && vLight->lightShader->LightCastsShadows();
-			const bool isPoint = vLight->lightDef && vLight->lightDef->parms.pointLight;
-			const bool isParallel = vLight->lightDef && vLight->lightDef->parms.parallel;
-			// M7: shadow maps run on Vulkan now (the RHI depth render-target family
-			// is live) — projected/spot lights get a 2D depth map, budgeted point
-			// lights a cube depth map, everything else still falls back to stencil.
-			const bool smEnabled = r_shadowMapping.GetBool();
-
-			// DUDE Phase 3.5: giant "sun replacement" lights (Phobos fakes its sky
-			// with omni lights up to radius 5000) look poor as a single shadow map —
-			// one cube can't resolve a shadow thrown thousands of units, so its edges
-			// pixelate, and the map wastes VRAM. Above r_shadowMapStencilRadius (largest
-			// light_radius axis, world units) we skip the map and let Carmack's stencil
-			// volumes handle it: pixel-exact and distance-independent. 0 disables.
-			const float smStencilRadius = r_shadowMapStencilRadius.GetFloat();
-			float lightMaxAxis = 0.0f;
-			if ( vLight->lightDef ) {
-				const idVec3 &lr = vLight->lightDef->parms.lightRadius;
-				lightMaxAxis = Max( lr.x, Max( lr.y, lr.z ) );
-			}
-			// The player flashlight is a narrow projected spot with flashRadius 400
-			// (weapon_flashlight.def), which trips the 255 default cutoff even though a
-			// single 2D map resolves a bounded cone perfectly — a false positive of a rule
-			// meant for giant omni suns. Exempt it so it takes the (tessellatable) 2D-map
-			// path like every other projected light instead of a low-poly stencil shadow.
-			const bool oversize = smEnabled && smStencilRadius > 0.0f
-			    && lightMaxAxis > smStencilRadius && !ictx.lightIsFlashlight;
-
-			// r_rtAllLights: EVERY shadow-casting light takes the ray route - checked ahead of all
-			// the map routes and independent of r_shadowMapping. Mode 4 traces one ray from the lit
-			// fragment toward u_localLightOrigin, which is right for every species: a point light's
-			// position, a projected light's apex, and for a parallel light the far-away parallel
-			// point (the normalized difference IS its direction) - the same code the sun and
-			// moving-light routes already run. No map of any kind is rendered, and no stencil
-			// volumes are drawn. Without the RT variant / a live TLAS the light falls through to
-			// its usual route.
-			const bool rtServesAll = r_rtAllLights.GetBool() && lightMayShadow && hasInteractions
-				&& ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0;
-			if ( rtServesAll ) {
-				ictx.lightRtPoint = true;
-				ictx.lightRange = isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
-				dbgShadowMapped++;
-			}
-
-			if ( !rtServesAll && smEnabled && lightMayShadow && hasInteractions ) {
-				if ( ( oversize || isParallel ) && r_shadowMapSun.GetBool() ) {
-					// DUDE sun shadow maps (docs/shadow-research.md item 1): oversize
-					// "sun replacement" omnis and parallel lights render a per-view
-					// fitted virtual 2D map instead of the stencil fallback. The fit
-					// requires the light to sit OUTSIDE the fitted view sphere (a
-					// projection from the light toward the view) — a distant sky sun
-					// qualifies; a big omni you stand next to does not, and declines.
-					//
-					// RT sun shadows (R3): when the ray path is live it serves ANY sun
-					// with a single ray toward the light origin — no fitted map needed —
-					// so SKIP the sun-map render entirely (checked first). That map would
-					// only ever be sampled by the non-RT fallback. This is the perf win
-					// for fit-PASSING suns (parallel skies, mars_city1) that used to
-					// render a full 2048² depth pass and then ignore it in favour of rays;
-					// fit-DECLINED low omnis (commoutside) already took this route on
-					// decline. lightRtOnly marks "sun route, no map rendered": mode 4
-					// samples no map (unit 7 is a 0 handle, identical to unshadowed
-					// lights), and the receiver fill downgrades to unshadowed if the TLAS
-					// dies mid-frame. rhiSunPlanes stay stale-but-unread under mode 4.
-					const bool rtServesSun = r_rtSunShadows.GetBool()
-						&& ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0;
-					if ( rtServesSun ) {
-						ictx.lightShadowMapped = true;
-						ictx.lightSunShadow = true;
-						ictx.lightRtOnly = true;
-						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );	// 0 when no map rendered; unread by mode 4
-						dbgShadowMapped++;
-					} else if ( RB_RHI_ShadowMapPassSun( r, vLight, shadowMapProg ) ) {
-						ictx.lightShadowMapped = true;
-						ictx.lightSunShadow = true;
-						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
-						dbgShadowMapped++;
-					}
-				}
-				if ( !ictx.lightShadowMapped && !oversize && !isPoint && !isParallel ) {
-					// projected / spot light: single 2D depth map
-					if ( RB_RHI_ShadowMapPass( r, vLight, shadowMapProg ) ) {
-						ictx.lightShadowMapped = true;
-						ictx.shadowImage = r->GetRenderTargetImage( rhiShadowMap );
-						dbgShadowMapped++;
-					}
-				} else if ( !ictx.lightShadowMapped && isPoint && !isParallel
-				            // an oversize point light reaches the cube path only when the sun
-				            // fit declined it (light inside the fitted region = a big indoor
-				            // omni, not a distant sun): the adaptive tiers give it a usable
-				            // cube, and stencil stays the last resort. With r_shadowMapSun
-				            // off, oversize keeps the old direct-to-stencil routing for A/B.
-				            && ( !oversize || r_shadowMapSun.GetBool() ) ) {
-					// RT moving lights (Option A, docs/shadow-research.md 2026-08): a point
-					// light whose pose changed recently can never cache-hit — the map path
-					// re-renders its whole cube every frame — so serve it with one ray
-					// toward the light instead (mode 4, no cube at all). Checked BEFORE the
-					// budget so ray-served lights don't consume cube slots. Costs nothing
-					// when still: the tracker's hysteresis re-caches paused lights.
-					const bool rtServesMoving = r_rtMovingLights.GetBool()
-						&& ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0
-						&& RB_RHI_LightIsMoving( vLight );
-					if ( rtServesMoving ) {
-						ictx.lightRtPoint = true;
-						ictx.lightRange = RB_RHI_PointLightRange( vLight );
-						rhiCubeCacheRtMoving++;
-						dbgShadowMapped++;
-					} else if ( RB_RHI_PointLightInBudget( viewDef, vLight ) ) {
-						// point / omni light: 6-face cube map, budgeted by on-screen
-						// importance (r_shadowMapPointLimit) so a busy room stays bounded
-						const float range = RB_RHI_PointLightRange( vLight );
-						if ( RB_RHI_ShadowMapPassCube( r, vLight, shadowCubeProg, range ) ) {
-							ictx.lightShadowCube = true;
-							ictx.shadowCubeImage = r->GetRenderTargetImage( rhiShadowCube );
-							// static/dynamic split: a second (movers) cube to min() with the static one
-							if ( rhiShadowCubeDyn != 0 ) {
-								ictx.lightHasDynamicLayer = true;
-								ictx.shadowCubeDynImage = r->GetRenderTargetImage( rhiShadowCubeDyn );
-								ictx.shadowCubeDynScale = rhiShadowCubeDynScale;
-							}
-							ictx.lightRange = range;
-							rhiShadowCubeLights++;
-						}
-					}
-				}
-			}
-
-			// either shadow-map technique (or the ray route) replaces the stencil test
-			// r_rtShadowBlur: a light one of the ray routes above just claimed gets its hard ray
-			// traced per screen pixel + blurred NOW (the scene pass is suspended exactly as for a
-			// shadow-map render); its interactions then look the mask up instead of tracing inline.
-			// Any failure leaves the light on its inline hard ray, unchanged.
-			if ( rhiRtBlurThisView && ( ictx.lightRtOnly || ictx.lightRtPoint ) ) {
-				ictx.shadowMaskImage = RB_RHI_RtShadowBlurLight( r, viewDef, vLight );
-				ictx.lightRtBlur = ictx.shadowMaskImage != 0;
-				ictx.shadowMaskStale = ictx.lightRtBlur && rhiRtBlurLastStale;
-				if ( ictx.shadowMaskStale ) {
-					memcpy( ictx.shadowMaskViewProj, rhiRtBlurLastViewProj, sizeof( ictx.shadowMaskViewProj ) );
-				}
-			}
+			const lightShadowClass_t cls = RB_RHI_ClassifyLightShadow( r, vLight );
+			RB_RHI_SelectLightShadowTechnique( r, viewDef, vLight, cls, shadowMapProg,
+			                                   shadowCubeProg, dbgShadowMapped );
 
 			const bool shadowMapped = ictx.lightShadowMapped || ictx.lightShadowCube || ictx.lightRtPoint;
 
-			// r_shadowMapDebug 2: per-light readout so we can see, when a shadow blinks
-			// out, exactly what changed — is the light even here, did it get a map, and
-			// how many occluders reached it (interactions + off-screen casters)?
-			if ( r_shadowMapDebug.GetInteger() >= 2 && vLight->lightDef ) {
-				const idVec3 lorg = vLight->globalLightOrigin;
-				const idVec3 dv = lorg - viewDef->renderView.vieworg;
-				const float dist = dv.Length();
-				const float radius = vLight->lightDef->parms.lightRadius.Length();
-				// litG/litL = lit (receiver) surface counts; casters = occluders drawn
-				// into the shadow map. range = cube depth normalizer / far plane.
-				const float effRange = isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
-				// adaptive resolution this light would/did use, so the tier picks show up
-				const int dbgLo = isPoint ? 128 : 256;
-				const int dbgHi = isPoint ? idMath::ClampInt( 128, 4096, glConfig.maxCubeMapSize )
-				                          : idMath::ClampInt( 256, 4096, glConfig.maxTextureSize );
-				const int dbgBase = idMath::ClampInt( dbgLo, dbgHi,
-				    isPoint ? r_shadowMapPointSize.GetInteger() : r_shadowMapSize.GetInteger() );
-				const int dbgRes = RB_RHI_TierSize( dbgBase, RB_RHI_ShadowTier( radius ), dbgLo, dbgHi );
-				common->Printf( "  light %d: %s%s map=%s res=%d litG=%d litL=%d casters=%d dist=%.0f radius=%.0f range=%.0f\n",
-				                vLight->lightDef->index,
-				                isPoint ? "point" : ( isParallel ? "parallel" : "projected" ),
-				                lightMayShadow ? "" : " (noShadow)",
-				                ictx.lightRtPoint ? ( rtServesAll ? "rtAll" : "rtMove" ) : ( ictx.lightShadowCube ? "cube" : ( ictx.lightSunShadow ? "sun" : ( ictx.lightShadowMapped ? "2D" : ( oversize ? "stencil" : "none" ) ) ) ),
-				                dbgRes,
-				                RB_RHI_CountLightChain( vLight->globalInteractions ),
-				                RB_RHI_CountLightChain( vLight->localInteractions ),
-				                RB_RHI_CountLightChain( vLight->shadowMapCasters ),
-				                dist, radius, effRange );
-			}
+			RB_RHI_LogLightShadowClass( viewDef, vLight, cls );
+
+			// castsShadows / smEnabled / oversize drive the stencil-vs-map draw decision below
+			const bool castsShadows = cls.castsShadows;
+			const bool smEnabled    = cls.smEnabled;
+			const bool oversize     = cls.oversize;
 
 			// A light draws stencil shadow volumes when shadow mapping is fully off
 			// (the vanilla path), OR when shadow mapping is on but this particular
