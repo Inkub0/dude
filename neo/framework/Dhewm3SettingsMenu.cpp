@@ -1565,6 +1565,44 @@ static void AddCVarOptionTooltips( const idCVar& cvar, const char* desc = nullpt
 	AddDescrTooltip( desc ? desc : cvar.GetDescription() );
 }
 
+// DUDE: cvar-bound widget helpers. The hand-drawn tuning groups repeated the same
+// read / widget / write-on-change / tooltip boilerplate ~180 times; these collapse it to one
+// call each. Behaviour is byte-for-byte the longhand: the widget writes the cvar only when it
+// reports a change (ImGui's return value), and the tooltip is the same AddTooltip. Reset buttons
+// stay as their own lines next to the call (see idCVar::Reset / ResetNamedCvar). Sliders that
+// need a value clamp, non-default flags, or discrete stops keep their longhand form.
+// each returns the cvar's post-edit value, so a caller that gates a following BeginDisabled /
+// conditional on the control can capture it (e.g. `bool on = CvarCheckbox( ... );`).
+static bool CvarCheckbox( const char* label, idCVar& cv, const char* tip = nullptr )
+{
+	bool b = cv.GetBool();
+	if ( ImGui::Checkbox( label, &b ) ) {
+		cv.SetBool( b );
+	}
+	if ( tip ) { AddTooltip( tip ); }
+	return b;
+}
+
+static float CvarSliderF( const char* label, idCVar& cv, float mn, float mx, const char* fmt, const char* tip = nullptr )
+{
+	float f = cv.GetFloat();
+	if ( ImGui::SliderFloat( label, &f, mn, mx, fmt ) ) {
+		cv.SetFloat( f );
+	}
+	if ( tip ) { AddTooltip( tip ); }
+	return f;
+}
+
+static int CvarSliderI( const char* label, idCVar& cv, int mn, int mx, const char* tip = nullptr )
+{
+	int i = cv.GetInteger();
+	if ( ImGui::SliderInt( label, &i, mn, mx ) ) {
+		cv.SetInteger( i );
+	}
+	if ( tip ) { AddTooltip( tip ); }
+	return i;
+}
+
 enum OptionType {
 	OT_NONE,
 	OT_HEADING, // not an option, just a heading on the page
@@ -2603,11 +2641,7 @@ static void DrawDisplaySettings()
 	                       "divisor of it (e.g. 72 on a 144 Hz panel)." );
 
 	// Fullscreen Desktop
-	bool fullscreenDesktop = r_fullscreenDesktop.GetBool();
-	if ( ImGui::Checkbox( "Fullscreen Desktop (borderless at desktop resolution)", &fullscreenDesktop ) ) {
-		r_fullscreenDesktop.SetBool( fullscreenDesktop );
-	}
-	AddTooltip( "r_fullscreenDesktop" );
+	CvarCheckbox( "Fullscreen Desktop (borderless at desktop resolution)", r_fullscreenDesktop, "r_fullscreenDesktop" );
 	AddDescrTooltip( "Borderless window at the desktop resolution instead of a real mode switch; avoids desktop icons being rearranged." );
 
 	// Make window resizable — only meaningful in windowed mode, so grey it out in fullscreen.
@@ -3161,11 +3195,7 @@ static void DrawEnhGroup_Lighting()
 			ImGui::SeparatorText( rtCapable ? "Ray Tracing (RTX)" : "Ray Tracing (RTX) - needs Vulkan + RT GPU" );
 			ImGui::BeginDisabled( !rtCapable );
 
-			bool vol = r_volumetrics.GetBool();
-			if ( ImGui::Checkbox( "Volumetric Lighting", &vol ) ) {
-				r_volumetrics.SetBool( vol );
-			}
-			AddTooltip( "The air scatters the scene's real lights toward you: visible cones under spot lights, "
+			bool vol = CvarCheckbox( "Volumetric Lighting", r_volumetrics, "The air scatters the scene's real lights toward you: visible cones under spot lights, "
 				"shafts through grates, monsters and railings cutting dark wedges out of the lit haze, a "
 				"flashlight beam you can see. Changes the look of the game - the stock game has no lit air, and "
 				"haze lifts the blacks inside lit volumes; only the Ultra Nightmare preset turns it on. Costs about "
@@ -3188,39 +3218,19 @@ static void DrawEnhGroup_Lighting()
 				"them. All lights: point lights too, as a fainter ambience (Point Light Haze below) - far more "
 				"presence, about twice the cost." );
 
-			float volDensity = r_volDensity.GetFloat();
-			if ( ImGui::SliderFloat( "Haze Density", &volDensity, 0.0f, 4.0f, "%.2f" ) ) {
-				r_volDensity.SetFloat( volDensity );
-			}
-			AddTooltip( "How much haze is in the air. Low = a hint of light in the cones; high = a smoke machine." );
+			CvarSliderF( "Haze Density", r_volDensity, 0.0f, 4.0f, "%.2f", "How much haze is in the air. Low = a hint of light in the cones; high = a smoke machine." );
 
 			ImGui::BeginDisabled( r_volLights.GetInteger() < 2 );
-			float volPoint = r_volPointLightScale.GetFloat();
-			if ( ImGui::SliderFloat( "Point Light Haze", &volPoint, 0.0f, 1.0f, "%.2f" ) ) {
-				r_volPointLightScale.SetFloat( volPoint );
-			}
-			AddTooltip( "Brightness of point lights in the haze relative to spot lights. Rooms hold many large "
+			CvarSliderF( "Point Light Haze", r_volPointLightScale, 0.0f, 1.0f, "%.2f", "Brightness of point lights in the haze relative to spot lights. Rooms hold many large "
 				"fill lights; kept low they are a faint ambience under the spot-light cones instead of drowning them." );
-			float volFogPoint = r_volFogPointLightScale.GetFloat();
-			if ( ImGui::SliderFloat( "Point Light Haze In Fog", &volFogPoint, 0.0f, 1.0f, "%.2f" ) ) {
-				r_volFogPointLightScale.SetFloat( volFogPoint );
-			}
-			AddTooltip( "What Point Light Haze rises to inside the game's own fog volumes: foggy rooms hold more "
+			CvarSliderF( "Point Light Haze In Fog", r_volFogPointLightScale, 0.0f, 1.0f, "%.2f", "What Point Light Haze rises to inside the game's own fog volumes: foggy rooms hold more "
 				"haze, so their lights glow more in the air. Follows each fog's thickness and fades in at its edges." );
 			ImGui::EndDisabled();
 
-			float volFlash = r_volFlashlightScale.GetFloat();
-			if ( ImGui::SliderFloat( "Flashlight Beam", &volFlash, 0.0f, 2.0f, "%.2f" ) ) {
-				r_volFlashlightScale.SetFloat( volFlash );
-			}
-			AddTooltip( "Brightness of your own flashlight beam (and muzzle flashes) in the haze. The beam starts "
+			CvarSliderF( "Flashlight Beam", r_volFlashlightScale, 0.0f, 2.0f, "%.2f", "Brightness of your own flashlight beam (and muzzle flashes) in the haze. The beam starts "
 				"at your eyes, so it fogs the view more than any other light; 0 = the flashlight lights surfaces "
 				"but never the air." );
-			float volAo = r_volAoIntensity.GetFloat();
-			if ( ImGui::SliderFloat( "AO Intensity With Haze", &volAo, 0.0f, 3.0f, "%.2f" ) ) {
-				r_volAoIntensity.SetFloat( volAo );
-			}
-			AddTooltip( "Ambient-occlusion intensity used while Volumetric Lighting is on (when higher than the "
+			CvarSliderF( "AO Intensity With Haze", r_volAoIntensity, 0.0f, 3.0f, "%.2f", "Ambient-occlusion intensity used while Volumetric Lighting is on (when higher than the "
 				"Ambient Occlusion group's own intensity). The haze adds light inside lit volumes and flattens "
 				"contact shading; stronger AO puts the grounding back. Your AO settings are not changed - turn "
 				"the haze off and they apply again. 0 = leave AO alone." );
@@ -3362,11 +3372,7 @@ static void DrawGroup_Antialiasing()
 			}
 			AddTooltip( "FSR2's built-in sharpening pass, countering the slight softening of any "
 				"temporal accumulation. 0 disables the pass. (r_fsrSharpness)" );
-			bool reactive = r_fsrReactive.GetBool();
-			if ( ImGui::Checkbox( "Reactive Mask", &reactive ) ) {
-				r_fsrReactive.SetBool( reactive );
-			}
-			AddTooltip( "Deghosts additive/translucent content (particles, muzzle flashes, GUI "
+			CvarCheckbox( "Reactive Mask", r_fsrReactive, "Deghosts additive/translucent content (particles, muzzle flashes, GUI "
 				"screens): an opaque-only snapshot is compared against the final frame, and where "
 				"they diverge FSR2 trusts its history less. Leave on. (r_fsrReactive)" );
 			{
@@ -3392,11 +3398,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 	// Ambient Occlusion (DUDE Phase 3.5). Master toggle + the quality/perf stops; the fine
 	// tuning sliders live in the Debugging tab. Read live by the renderer (no restart).
 	if ( BeginSettingsGroup( "Ambient Occlusion" ) ) {
-		bool ssao = r_ssao.GetBool();
-		if ( ImGui::Checkbox( "SSAO (GTAO ambient occlusion)", &ssao ) ) {
-			r_ssao.SetBool( ssao );
-		}
-		AddTooltip( "Screen-space ambient occlusion (GTAO): darkens creases, corners and contact "
+		CvarCheckbox( "SSAO (GTAO ambient occlusion)", r_ssao, "Screen-space ambient occlusion (GTAO): darkens creases, corners and contact "
 			"points in the ambient light only, so models look grounded instead of flat/plastic. It "
 			"never touches direct/dynamic lights, so it stays correct as lighting changes. Tuning "
 			"sliders are in the Developer tab. Non-vanilla; opengl3 only." );
@@ -3427,11 +3429,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 
 		// Temporal accumulation: reuse the previous frame's AO (reprojected by camera
 		// motion) so the horizon-search noise settles and slices/steps can run lower.
-		bool ssaoTemporal = r_ssaoTemporal.GetBool();
-		if ( ImGui::Checkbox( "Temporal Accumulation", &ssaoTemporal ) ) {
-			r_ssaoTemporal.SetBool( ssaoTemporal );
-		}
-		AddTooltip( "Blend AO across frames (reprojected as the camera moves) instead of recomputing "
+		CvarCheckbox( "Temporal Accumulation", r_ssaoTemporal, "Blend AO across frames (reprojected as the camera moves) instead of recomputing "
 			"it fresh each frame. Smooths the AO and lets the Directions/Steps run lower for the same "
 			"look, so it's cheaper on weaker GPUs. Ghosting on fast motion is clamped automatically; "
 			"the Feedback strength lives in the Developer tab. Non-vanilla; opengl3 only." );
@@ -3441,11 +3439,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 		// across full-res depth. ~40% cheaper AO at a wide radius (measured r_ssaoDepthMip
 		// 0 vs 1 = 74 -> 104 fps). Trade-off: a faint silhouette halo. Standalone preference,
 		// not preset-driven — a preset change shouldn't override the fidelity choice.
-		bool ssaoDepthMip = r_ssaoDepthMip.GetBool();
-		if ( ImGui::Checkbox( "Depth-Mip Acceleration", &ssaoDepthMip ) ) {
-			r_ssaoDepthMip.SetBool( ssaoDepthMip );
-		}
-		AddTooltip( "Speed up the AO horizon search by reading a prefiltered depth mip chain: far "
+		CvarCheckbox( "Depth-Mip Acceleration", r_ssaoDepthMip, "Speed up the AO horizon search by reading a prefiltered depth mip chain: far "
 			"samples read a coarser, cache-friendly copy of the depth buffer instead of scattering "
 			"across full-resolution depth. Big win at a wide radius (~40% cheaper AO here). "
 			"Trade-off: a faint dark halo can appear around object silhouettes, since one coarse "
@@ -3465,11 +3459,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 			// RT GI supersedes RT AO (below): one denoiser, and GI grounds the scene itself. Grey RTAO out
 			// while GI is on so it is clear only one runs.
 			ImGui::BeginDisabled( r_rtgi.GetBool() );
-			bool rtao = r_rtao.GetBool();
-			if ( ImGui::Checkbox( "RT Ambient Occlusion", &rtao ) ) {
-				r_rtao.SetBool( rtao );
-			}
-			AddTooltip( "Replace the screen-space occlusion above with one traced hemisphere ray per "
+			CvarCheckbox( "RT Ambient Occlusion", r_rtao, "Replace the screen-space occlusion above with one traced hemisphere ray per "
 				"pixel against the real scene, denoised across frames: contact shading from geometry "
 				"that is off-screen or behind the camera, no screen-edge artifacts, and cheaper than "
 				"the full-resolution march at the top tiers. Has its OWN Intensity below (neutral "
@@ -3478,20 +3468,12 @@ static void DrawEnhGroup_AmbientOcclusion()
 				"Needs Motion Vectors or FSR on for the denoiser; enabling it builds the ray-tracing "
 				"scene for the map. Vulkan + RT hardware only." );
 
-			float rtRad = r_rtaoRadius.GetFloat();
-			if ( ImGui::SliderFloat( "Ray Length##rtao", &rtRad, 8.0f, 256.0f, "%.0f units" ) ) {
-				r_rtaoRadius.SetFloat( rtRad );
-			}
-			AddTooltip( "How far each occlusion ray reaches, in world units. Longer rays gather "
+			CvarSliderF( "Ray Length##rtao", r_rtaoRadius, 8.0f, 256.0f, "%.0f units", "How far each occlusion ray reaches, in world units. Longer rays gather "
 				"broader, more grounded darkening from distant geometry; shorter keeps the effect "
 				"to tight contact shadows. The default (80) reaches further than the screen-space "
 				"radius ever could." );
 
-			float rtInt = r_rtaoIntensity.GetFloat();
-			if ( ImGui::SliderFloat( "Intensity##rtao", &rtInt, 0.0f, 4.0f, "%.2f" ) ) {
-				r_rtaoIntensity.SetFloat( rtInt );
-			}
-			AddTooltip( "RTAO strength. The traced occlusion is already physically grounded, so the "
+			CvarSliderF( "Intensity##rtao", r_rtaoIntensity, 0.0f, 4.0f, "%.2f", "RTAO strength. The traced occlusion is already physically grounded, so the "
 				"neutral 1.00 default shows it as-is — unlike the screen-space Intensity (1.2), "
 				"which compensates for the march and applies only when RTAO is off. Raise for "
 				"deeper creases, lower to soften." );
@@ -3526,11 +3508,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 			// the SAME NRD instance as RTAO - so enabling it makes GI REPLACE RTAO (and the screen-space GTAO):
 			// GI grounds the scene with real one-bounce occlusion + bounce light, so no AO pass runs alongside.
 			ImGui::Spacing();
-			bool rtgi = r_rtgi.GetBool();
-			if ( ImGui::Checkbox( "RT Global Illumination", &rtgi ) ) {
-				r_rtgi.SetBool( rtgi );
-			}
-			AddTooltip( "One traced bounce of indirect light, denoised: surfaces are lit by the colour "
+			CvarCheckbox( "RT Global Illumination", r_rtgi, "One traced bounce of indirect light, denoised: surfaces are lit by the colour "
 				"bouncing off everything around them (a red panel tints the nearby grey wall), and dark "
 				"corners fill in softly the way real light does - which Doom 3 never computed. REPLACES both "
 				"RT Ambient Occlusion AND screen-space SSAO while on - it grounds the scene with real "
@@ -3538,36 +3516,20 @@ static void DrawEnhGroup_AmbientOcclusion()
 				"FSR on for the denoiser, and builds the ray-tracing scene. NON-VANILLA look - lifts blacks "
 				"in lit rooms. Vulkan + RT only." );
 
-			float giInt = r_rtgiIntensity.GetFloat();
-			if ( ImGui::SliderFloat( "Intensity##rtgi", &giInt, 0.0f, 4.0f, "%.2f" ) ) {
-				r_rtgiIntensity.SetFloat( giInt );
-			}
-			AddTooltip( "Strength of the bounced light added to the scene. 1.00 is the physical one-bounce "
+			CvarSliderF( "Intensity##rtgi", r_rtgiIntensity, 0.0f, 4.0f, "%.2f", "Strength of the bounced light added to the scene. 1.00 is the physical one-bounce "
 				"result; raise for punchier colour bleed, lower for a subtle fill." );
 
-			float giKeep = r_rtgiAmbientKeep.GetFloat();
-			if ( ImGui::SliderFloat( "Fake-Ambient Keep##rtgi", &giKeep, 0.0f, 1.0f, "%.2f" ) ) {
-				r_rtgiAmbientKeep.SetFloat( giKeep );
-			}
-			AddTooltip( "How much of Doom 3's original FAKE cube-map ambient to keep once real GI is added, "
+			CvarSliderF( "Fake-Ambient Keep##rtgi", r_rtgiAmbientKeep, 0.0f, 1.0f, "%.2f", "How much of Doom 3's original FAKE cube-map ambient to keep once real GI is added, "
 				"so the two don't double-count. 1.00 stacks GI on top of the full fake ambient (brightest); "
 				"0.00 lets GI fully replace it (most physical, but a corner GI can't reach goes darker). "
 				"Lower it if lit rooms look washed out." );
 
-			float giFog = r_rtgiFogAttenuate.GetFloat();
-			if ( ImGui::SliderFloat( "Fog Awareness##rtgi", &giFog, 0.0f, 4.0f, "%.2f" ) ) {
-				r_rtgiFogAttenuate.SetFloat( giFog );
-			}
-			AddTooltip( "Fades the bounced light out with distance through fog, so GI stops washing out "
+			CvarSliderF( "Fog Awareness##rtgi", r_rtgiFogAttenuate, 0.0f, 4.0f, "%.2f", "Fades the bounced light out with distance through fog, so GI stops washing out "
 				"Doom 3's distance fog (the far haze reads thin without it). 1.00 is the physical amount; "
 				"raise toward 4 for a stronger foggy look (needed where a map's fog distance is huge and "
 				"1.00 is too subtle); 0.00 lets GI ignore fog (the old look). Only matters in foggy areas." );
 
-			float giRad = r_rtgiRadius.GetFloat();
-			if ( ImGui::SliderFloat( "Ray Length##rtgi", &giRad, 64.0f, 2048.0f, "%.0f units" ) ) {
-				r_rtgiRadius.SetFloat( giRad );
-			}
-			AddTooltip( "How far a bounce ray looks for the surface whose light it gathers. Longer = broader "
+			CvarSliderF( "Ray Length##rtgi", r_rtgiRadius, 64.0f, 2048.0f, "%.0f units", "How far a bounce ray looks for the surface whose light it gathers. Longer = broader "
 				"colour bleed and more distant bounce (room-scale); shorter concentrates GI on nearby "
 				"surfaces and is a little cheaper. Default 512." );
 
@@ -3592,11 +3554,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 				"low-frequency, so Half is the sweet spot; Quarter is cheaper still but starts to smear fine "
 				"contact bleed. Default Half." );
 
-			bool giShadow = r_rtgiShadow.GetBool();
-			if ( ImGui::Checkbox( "GI Shadows", &giShadow ) ) {
-				r_rtgiShadow.SetBool( giShadow );
-			}
-			AddTooltip( "Trace one shadow ray at each bounce point toward the brightest light reaching it, so a "
+			CvarCheckbox( "GI Shadows", r_rtgiShadow, "Trace one shadow ray at each bounce point toward the brightest light reaching it, so a "
 				"light behind a thin wall stops leaking bounced light through it. One extra ray per pixel; off "
 				"is a little cheaper but lets light bleed through walls." );
 
@@ -3616,11 +3574,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 		// Baked occlusion maps: independent of SSAO (works with it off). Inert unless a
 		// material ships an occlusionmap stage, which no stock Doom 3 asset does. Strength
 		// sliders live in the Developer tab, like the SSAO tuning.
-		bool oclMaps = r_occlusionMaps.GetBool();
-		if ( ImGui::Checkbox( "Baked Occlusion Maps", &oclMaps ) ) {
-			r_occlusionMaps.SetBool( oclMaps );
-		}
-		AddTooltip( "Use per-material baked ambient-occlusion textures (the `occlusionmap` material "
+		CvarCheckbox( "Baked Occlusion Maps", r_occlusionMaps, "Use per-material baked ambient-occlusion textures (the `occlusionmap` material "
 			"stage) to darken creases in the ambient and direct-light diffuse, the same way SSAO "
 			"does but from art-authored maps. Only affects materials that ship an occlusion map "
 			"(no stock Doom 3 asset does, so this is inert on the base game and aimed at mods / "
@@ -3638,11 +3592,7 @@ static void DrawEnhGroup_Reflections()
 	// fine tuning lives in the Developer tab next to the PBR knobs.
 	if ( BeginSettingsGroup( "Reflections" ) ) {
 		// Screen-space SSR on/off (was the group-header master); its sub-controls below gray out with it.
-		bool ssrOn = r_ssr.GetBool();
-		if ( ImGui::Checkbox( "Screen Space Reflections", &ssrOn ) ) {
-			r_ssr.SetBool( ssrOn );
-		}
-		AddTooltip( "Glossy and metallic surfaces (polished floors, bare metal - per the PBR material table) "
+		CvarCheckbox( "Screen Space Reflections", r_ssr, "Glossy and metallic surfaces (polished floors, bare metal - per the PBR material table) "
 			"mirror the on-screen scene: fixtures, screens, characters. Being screen-space, off-screen objects "
 			"can't appear and rays fade at the screen edges. Superseded by Ray-Traced Reflections below when "
 			"that is on - it owns every reflective pixel and this march is skipped. Works with PBR shading on "
@@ -3673,11 +3623,7 @@ static void DrawEnhGroup_Reflections()
 
 		// Temporal accumulation: rotate the march jitter per frame and average the
 		// results (reprojected by camera motion) so the grain resolves.
-		bool ssrTemporal = r_ssrTemporal.GetBool();
-		if ( ImGui::Checkbox( "Temporal Accumulation##ssr", &ssrTemporal ) ) {
-			r_ssrTemporal.SetBool( ssrTemporal );
-		}
-		AddTooltip( "Blend reflections across frames (reprojected as the camera moves) instead of "
+		CvarCheckbox( "Temporal Accumulation##ssr", r_ssrTemporal, "Blend reflections across frames (reprojected as the camera moves) instead of "
 			"recomputing them fresh each frame. The march's grainy sparkle settles into a clean "
 			"image; ghosting on fast motion is clamped automatically. The Feedback strength lives "
 			"in the Developer tab. Non-vanilla; opengl3 only." );
@@ -3686,22 +3632,14 @@ static void DrawEnhGroup_Reflections()
 		// lets the march leap provably-empty span instead of stepping it. Pure perf option —
 		// reflections are pixel-identical. Marginal + scene-dependent, so default-off + opt-in;
 		// leap aggressiveness is the dev cvar r_ssrHiZLevel.
-		bool ssrHiZ = r_ssrHiZ.GetBool();
-		if ( ImGui::Checkbox( "Hi-Z Acceleration##ssr", &ssrHiZ ) ) {
-			r_ssrHiZ.SetBool( ssrHiZ );
-		}
-		AddTooltip( "Speed up the reflection ray-march by leaping over empty space with a depth "
+		CvarCheckbox( "Hi-Z Acceleration##ssr", r_ssrHiZ, "Speed up the reflection ray-march by leaping over empty space with a depth "
 			"pyramid instead of stepping through it. Reflections look identical — this is a pure "
 			"performance option, no visual change. The gain is scene-dependent: a few percent on "
 			"open / distant reflections, and essentially nothing on grazing reflective floors "
 			"(where the rays hug the surface). Best left off on older GPUs. Non-vanilla; opengl3/Vulkan." );
 
 		// Glass: baked room probes replace the generic env/gen* cubemap (docs/ssr.md).
-		bool ssrProbes = r_ssrGlassProbes.GetBool();
-		if ( ImGui::Checkbox( "Glass Reflections##ssr", &ssrProbes ) ) {
-			r_ssrGlassProbes.SetBool( ssrProbes );
-		}
-		AddTooltip( "Glass reflects a snapshot of the actual room (captured automatically the "
+		CvarCheckbox( "Glass Reflections##ssr", r_ssrGlassProbes, "Glass reflects a snapshot of the actual room (captured automatically the "
 			"first time you enter an area, cached to disk) instead of Doom 3's generic blurry "
 			"cubemap - panes mirror the real room at any viewing angle. Re-capture an area with "
 			"the bakeGlassProbe console command; brightness slider in the Developer tab. "
@@ -3719,11 +3657,7 @@ static void DrawEnhGroup_Reflections()
 		const bool rtIsVulkan = rtCapable && glConfig.rhiBackend && !glConfig.coreProfile;
 		const bool rtSceneOn  = r_rtSunShadows.GetBool();
 		ImGui::BeginDisabled( !rtIsVulkan || !rtSceneOn );
-		bool rtRefl = r_rtReflections.GetBool();
-		if ( ImGui::Checkbox( "Ray-Traced Reflections", &rtRefl ) ) {
-			r_rtReflections.SetBool( rtRefl );
-		}
-		AddTooltip( "Trace the scene to reflect the real room + monsters, including geometry off-screen "
+		CvarCheckbox( "Ray-Traced Reflections", r_rtReflections, "Trace the scene to reflect the real room + monsters, including geometry off-screen "
 			"or hidden from the camera that screen-space reflections can't show, and replace the glass "
 			"cube reflections with the same. When on it OWNS every reflective pixel and the screen-space "
 			"Reflections above are skipped entirely - no need to keep them on (Ultra Nightmare turns them off). "
@@ -3774,40 +3708,24 @@ static void DrawEnhGroup_Shadows()
 			"a shadow map (parallel, or out-of-budget point) render unshadowed. This isolates "
 			"shadow-map cost for profiling. Off = vanilla stencil shadows everywhere." ) ) {
 
-		int res = r_shadowMapSize.GetInteger();
-		if ( ImGui::SliderInt( "Spot / Projected Map Resolution", &res, 256, 4096 ) ) {
-			r_shadowMapSize.SetInteger( res );
-		}
-		AddTooltip( "Resolution of the 2D depth map used only by projected / spot lights. "
+		CvarSliderI( "Spot / Projected Map Resolution", r_shadowMapSize, 256, 4096, "Resolution of the 2D depth map used only by projected / spot lights. "
 			"Point (omni) lights are the bulk of Doom 3's shadows and use the separate Point / "
 			"Cube Map Resolution slider below instead — so on maps with no shadow-casting "
 			"spotlight this has no visible effect (r_shadowMapDebug 1 shows the '2D-mapped' "
 			"count). Higher = sharper spot-shadow edges, more memory." );
 
-		int pres = r_shadowMapPointSize.GetInteger();
-		if ( ImGui::SliderInt( "Point / Cube Map Resolution", &pres, 128, 4096 ) ) {
-			r_shadowMapPointSize.SetInteger( pres );
-		}
-		AddTooltip( "Per-face resolution of the point-light cube map — this is the one that "
+		CvarSliderI( "Point / Cube Map Resolution", r_shadowMapPointSize, 128, 4096, "Per-face resolution of the point-light cube map — this is the one that "
 			"affects most Doom 3 shadows. Six faces cover the whole sphere, so it can be lower "
 			"than the spot/projected map for similar quality. Higher = sharper, more memory and "
 			"fill (6 faces). Pair with Cube Edge Softness (Developer tab) to smooth edges without "
 			"raising resolution." );
 
-		bool perf = r_shadowMapPerforated.GetBool();
-		if ( ImGui::Checkbox( "Perforated Casters (grates/fences)", &perf ) ) {
-			r_shadowMapPerforated.SetBool( perf );
-		}
-		AddTooltip( "Let alpha-tested grates, fences and foliage cast real punched-out "
+		CvarCheckbox( "Perforated Casters (grates/fences)", r_shadowMapPerforated, "Let alpha-tested grates, fences and foliage cast real punched-out "
 			"shadows. In vanilla these are flagged noShadows because stencil volumes can't "
 			"perforate, so they cast nothing (or a hand-faked shadow). Shadow maps can cut "
 			"the holes, so this enables their true shadow. Turn off to keep vanilla behaviour." );
 
-		bool viewWeapon = r_shadowMapViewWeapon.GetBool();
-		if ( ImGui::Checkbox( "View Weapon Casts Shadows", &viewWeapon ) ) {
-			r_shadowMapViewWeapon.SetBool( viewWeapon );
-		}
-		AddTooltip( "Let the first-person weapon (and the player's arms) cast shadow-map "
+		CvarCheckbox( "View Weapon Casts Shadows", r_shadowMapViewWeapon, "Let the first-person weapon (and the player's arms) cast shadow-map "
 			"shadows. Off (default) keeps the weapon out of the map, so it never throws a "
 			"gun-shaped shadow onto nearby floors/walls (a few weapons — chainsaw chain, "
 			"plasmagun canister — would otherwise cast because id didn't flag them noShadows). "
@@ -3819,11 +3737,7 @@ static void DrawEnhGroup_Shadows()
 		// keep their vanilla stencil shadows, so there is no fidelity loss.
 		ImGui::SeparatorText( "Point Lights" );
 
-		int limit = r_shadowMapPointLimit.GetInteger();
-		if ( ImGui::SliderInt( "Point Light Budget", &limit, 0, 128 ) ) {
-			r_shadowMapPointLimit.SetInteger( limit );
-		}
-		AddTooltip( "How many point lights get a soft cube shadow map per view, chosen by "
+		CvarSliderI( "Point Light Budget", r_shadowMapPointLimit, 0, 128, "How many point lights get a soft cube shadow map per view, chosen by "
 			"on-screen importance. While shadow mapping is on, out-of-budget point lights "
 			"render unshadowed (stencil shadows are fully off). Lower = faster in crowded "
 			"scenes. 0 = all point lights (default; most consistent, slowest)." );
@@ -3835,32 +3749,20 @@ static void DrawEnhGroup_Shadows()
 		ImGui::SeparatorText( rtCapable ? "Ray Tracing (RTX)" : "Ray Tracing (RTX) - needs Vulkan + RT GPU" );
 		ImGui::BeginDisabled( !rtCapable );
 
-		bool rtSun = r_rtSunShadows.GetBool();
-		if ( ImGui::Checkbox( "RT Sun Shadows", &rtSun ) ) {
-			r_rtSunShadows.SetBool( rtSun );
-		}
-		AddTooltip( "Trace the sun's shadow with one ray per pixel instead of sampling the "
+		CvarCheckbox( "RT Sun Shadows", r_rtSunShadows, "Trace the sun's shadow with one ray per pixel instead of sampling the "
 			"fitted sun shadow map: pixel-exact at any distance, with no range cap and no "
 			"map-resolution aliasing. Serves parallel suns and the big oversize omnis the "
 			"sun-map fit declines. Vulkan + RT hardware only. Enabling it builds the persistent "
 			"ray-tracing scene for the map." );
 
-		bool rtMoving = r_rtMovingLights.GetBool();
-		if ( ImGui::Checkbox( "RT Moving-Light Shadows", &rtMoving ) ) {
-			r_rtMovingLights.SetBool( rtMoving );
-		}
-		AddTooltip( "Trace shadows for point lights that are moving (muzzle flashes, projectiles, "
+		CvarCheckbox( "RT Moving-Light Shadows", r_rtMovingLights, "Trace shadows for point lights that are moving (muzzle flashes, projectiles, "
 			"monster-carried lights) instead of re-rendering their 6-face cube map every frame - "
 			"the one case the shadow cache can never help, since a moving light must re-render "
 			"each frame. Still lights keep the cached cube map; a light that stops re-caches after "
 			"a moment. Vulkan + RT hardware only." );
 
 		// r_rtAllLights: preset-owned (on at Ultra Nightmare), so flipping it by hand reads "Custom"
-		bool rtAll = r_rtAllLights.GetBool();
-		if ( ImGui::Checkbox( "RT Shadows for All Lights", &rtAll ) ) {
-			r_rtAllLights.SetBool( rtAll );
-		}
-		AddTooltip( "Every shadow-casting light gets ray-traced shadows - one hard ray per lit pixel "
+		CvarCheckbox( "RT Shadows for All Lights", r_rtAllLights, "Every shadow-casting light gets ray-traced shadows - one hard ray per lit pixel "
 			"toward the light, like the two options above - and no shadow maps are rendered at all. "
 			"Pixel-exact shadows from every light, no map resolution or bias artefacts. Heavier in "
 			"rooms with many lights: a still light's cached shadow map is nearly free, a ray is paid "
@@ -3883,11 +3785,7 @@ static void DrawEnhGroup_Shadows()
 		// r_rtShadowBlur (docs/rtx-shadow-blur.md): a toggle ON TOP of the two ray-traced shadow
 		// routes above; preset-owned (on at Ultra Nightmare), so flipping it by hand reads "Custom"
 		ImGui::BeginDisabled( !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtAllLights.GetBool() ) );
-		bool rtBlur = r_rtShadowBlur.GetBool();
-		if ( ImGui::Checkbox( "Soften RT Shadows", &rtBlur ) ) {
-			r_rtShadowBlur.SetBool( rtBlur );
-		}
-		AddTooltip( "Blurs the ray-traced shadows above (RT Sun / RT Moving-Light / All Lights) in screen space: "
+		CvarCheckbox( "Soften RT Shadows", r_rtShadowBlur, "Blurs the ray-traced shadows above (RT Sun / RT Moving-Light / All Lights) in screen space: "
 			"the edge stays sharp where an object touches the surface it shadows and softens as "
 			"the gap grows, by up to 24 pixels. Same rays, no noise and nothing accumulated over "
 			"frames - off gives back exactly the hard ray-traced shadows. Changes the look of "
@@ -3897,11 +3795,7 @@ static void DrawEnhGroup_Shadows()
 
 		// r_rtShadowBlurStagger: preset-owned (on at Ultra Nightmare), so flipping it by hand reads "Custom"
 		ImGui::BeginDisabled( !r_rtShadowBlur.GetBool() );
-		bool rtBlurStagger = r_rtShadowBlurStagger.GetBool();
-		if ( ImGui::Checkbox( "Refresh Distant Soft Shadows Less Often", &rtBlurStagger ) ) {
-			r_rtShadowBlurStagger.SetBool( rtBlurStagger );
-		}
-		AddTooltip( "Performance option for Soften RT Shadows: lights close to you still refresh their "
+		CvarCheckbox( "Refresh Distant Soft Shadows Less Often", r_rtShadowBlurStagger, "Performance option for Soften RT Shadows: lights close to you still refresh their "
 			"soft shadows every frame, farther ones every 2nd frame, the farthest every 3rd - set "
 			"the two distances in Debugging -> RT Shadows. Reused shadows are re-projected to the current camera, and "
 			"pixels they cannot cover get a hard-edged ray for that frame - so watch for brief hard "
@@ -4252,11 +4146,7 @@ static void DrawDbgGroup_RenderDebugging()
 	            "light + material colour and forces metalness 0, so only the SSAO + POM occlusion/relief "
 	            "shows, in grey." );
 
-	int showTris = r_showTris.GetInteger();
-	if ( ImGui::SliderInt( "Wireframe", &showTris, 0, 3 ) ) {
-		r_showTris.SetInteger( showTris );
-	}
-	AddTooltip( "r_showTris: 0 = off, 1 = visible triangles, 2 = all front-facing, 3 = all." );
+	CvarSliderI( "Wireframe", r_showTris, 0, 3, "r_showTris: 0 = off, 1 = visible triangles, 2 = all front-facing, 3 = all." );
 
 	bool lights = !r_skipInteractions.GetBool();
 	if ( ImGui::Checkbox( "Lights (dynamic lighting)", &lights ) ) {
@@ -4265,11 +4155,7 @@ static void DrawDbgGroup_RenderDebugging()
 	AddTooltip( "Off skips all light/surface interaction drawing (r_skipInteractions); the scene keeps "
 		"only its ambient/emissive passes." );
 
-	bool shadows = r_shadows.GetBool();
-	if ( ImGui::Checkbox( "Stencil Shadows", &shadows ) ) {
-		r_shadows.SetBool( shadows );
-	}
-	AddTooltip( "Toggles stencil shadow volumes (the vanilla technique) and self-shadowing (r_shadows). "
+	CvarCheckbox( "Stencil Shadows", r_shadows, "Toggles stencil shadow volumes (the vanilla technique) and self-shadowing (r_shadows). "
 		"On opengl3/Vulkan with Shadow Mapping enabled, shadows come from the shadow maps below instead, "
 		"so this only affects the stencil path." );
 
@@ -4308,19 +4194,11 @@ static void DrawDbgGroup_Tessellation()
 		ImGui::TextDisabled( "Tessellation is off — enable \"Mesh Tessellation\" in the Graphics tab first." );
 	}
 	ImGui::BeginDisabled( !r_tessellation.GetBool() );
-	float tessMinEdge = r_tessMinEdge.GetFloat();
-	if ( ImGui::SliderFloat( "Tessellation Min Triangle Size", &tessMinEdge, 0.0f, 8.0f, "%.2f", 0 ) ) {
-		r_tessMinEdge.SetFloat( tessMinEdge );
-	}
-	AddTooltip( "r_tessMinEdge: triangles with edges finer than this (world units) stay flat, so dense "
+	CvarSliderF( "Tessellation Min Triangle Size", r_tessMinEdge, 0.0f, 8.0f, "%.2f", "r_tessMinEdge: triangles with edges finer than this (world units) stay flat, so dense "
 		"detail (eye-sockets, faces) doesn't over-inflate under PN while larger silhouette triangles still "
 		"smooth. Raise if faces/fine features distort; lower to smooth more aggressively. Vulkan only." );
 
-	bool tessDebug = r_tessDebug.GetBool();
-	if ( ImGui::Checkbox( "Log Tessellated Materials", &tessDebug ) ) {
-		r_tessDebug.SetBool( tessDebug );
-	}
-	AddTooltip( "r_tessDebug: print each material name accepted for tessellation once (with model type and "
+	CvarCheckbox( "Log Tessellated Materials", r_tessDebug, "r_tessDebug: print each material name accepted for tessellation once (with model type and "
 		"entity index) to the console, so a mis-tessellated surface can be identified. Vulkan only." );
 
 	ImGui::EndDisabled();
@@ -4375,52 +4253,28 @@ static void DrawDbgGroup_PBR()
 	}
 	ImGui::BeginDisabled( !r_pbr.GetBool() );
 
-	float pbrRough = r_pbrRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Fallback Roughness", &pbrRough, 0.03f, 1.0f, "%.2f" ) ) {
-		r_pbrRoughness.SetFloat( pbrRough );
-	}
-	AddTooltip( "r_pbrRoughness: roughness for materials without a pbr-table entry (0.03 = mirror, 1 = matte). "
+	CvarSliderF( "Fallback Roughness", r_pbrRoughness, 0.03f, 1.0f, "%.2f", "r_pbrRoughness: roughness for materials without a pbr-table entry (0.03 = mirror, 1 = matte). "
 		"0.58 matches the Blinn-Phong exponent-16 highlight width. Per-material values come from "
 		"pbr/pbr_materials.cfg and override this." );
 
-	float pbrSpec = r_pbrSpecScale.GetFloat();
-	if ( ImGui::SliderFloat( "Specular Energy (dielectrics)", &pbrSpec, 0.0f, 8.0f, "%.2f" ) ) {
-		r_pbrSpecScale.SetFloat( pbrSpec );
-	}
-	AddTooltip( "r_pbrSpecScale: artistic boost on the GGX lobe for dielectrics/painted surfaces (fades to 1 "
+	CvarSliderF( "Specular Energy (dielectrics)", r_pbrSpecScale, 0.0f, 8.0f, "%.2f", "r_pbrSpecScale: artistic boost on the GGX lobe for dielectrics/painted surfaces (fades to 1 "
 		"on bare metal, whose albedo-derived reflectance is already bright). The physical 4% dielectric "
 		"reflectance reads dim in Doom 3's display-space shading; this compensates." );
 
-	float pbrToksvig = r_pbrToksvigBase.GetFloat();
-	if ( ImGui::SliderFloat( "Highlight Tightness (Toksvig base)", &pbrToksvig, 0.0f, 0.6f, "%.2f" ) ) {
-		r_pbrToksvigBase.SetFloat( pbrToksvig );
-	}
-	AddTooltip( "r_pbrToksvigBase: how much normal-map variance is ignored before it widens (softens) the "
+	CvarSliderF( "Highlight Tightness (Toksvig base)", r_pbrToksvigBase, 0.0f, 0.6f, "%.2f", "r_pbrToksvigBase: how much normal-map variance is ignored before it widens (softens) the "
 		"highlight. LOWER = softer highlights but strong anti-firefly filtering; HIGHER = tighter, punchier "
 		"highlights but white pixel spikes creep back on panel seams. 0.2 = calibrated split." );
 
-	float pbrClamp = r_pbrFireflyClamp.GetFloat();
-	if ( ImGui::SliderFloat( "Highlight Ceiling (firefly clamp)", &pbrClamp, 1.0f, 16.0f, "%.1f" ) ) {
-		r_pbrFireflyClamp.SetFloat( pbrClamp );
-	}
-	AddTooltip( "r_pbrFireflyClamp: upper bound on the specular lobe. Stops isolated texels clipping to pure "
+	CvarSliderF( "Highlight Ceiling (firefly clamp)", r_pbrFireflyClamp, 1.0f, 16.0f, "%.1f", "r_pbrFireflyClamp: upper bound on the specular lobe. Stops isolated texels clipping to pure "
 		"white; also the ceiling that skin/tight highlights ride at. Raise for hotter cores (pairs well "
 		"with HDR), lower to flatten everything." );
 
-	float metalDiffuse = r_pbrMetalDiffuse.GetFloat();
-	if ( ImGui::SliderFloat( "Metal Color Retention", &metalDiffuse, 0.0f, 1.0f, "%.2f" ) ) {
-		r_pbrMetalDiffuse.SetFloat( metalDiffuse );
-	}
-	AddTooltip( "r_pbrMetalDiffuse: how much of a metal's painted albedo color survives. Physical PBR kills "
+	CvarSliderF( "Metal Color Retention", r_pbrMetalDiffuse, 0.0f, 1.0f, "%.2f", "r_pbrMetalDiffuse: how much of a metal's painted albedo color survives. Physical PBR kills "
 		"diffuse on metals (0) and pushes the color into reflections Doom 3 can't supply, so metals read dark "
 		"and off-color; raise this to keep the asset look while the metallic specular still rides on top "
 		"(1 = keep all, 0 = physical). Weighted by metalness, so it mainly affects bare metal." );
 
-	float envScale = r_pbrEnvScale.GetFloat();
-	if ( ImGui::SliderFloat( "Metal Environment Glow", &envScale, 0.0f, 2.0f, "%.2f" ) ) {
-		r_pbrEnvScale.SetFloat( envScale );
-	}
-	AddTooltip( "r_pbrEnvScale: metals reflect their surroundings, but Doom 3 has no environment probes — "
+	CvarSliderF( "Metal Environment Glow", r_pbrEnvScale, 0.0f, 2.0f, "%.2f", "r_pbrEnvScale: metals reflect their surroundings, but Doom 3 has no environment probes — "
 		"this stands in by letting metal reflect a tinted share of each light's own energy, so it stops "
 		"going black where the highlight misses. Scales with light and shadow (metals stay dark in "
 		"darkness). With this up, the Metalness Cap can rise toward 1." );
@@ -4464,67 +4318,35 @@ static void DrawDbgGroup_SSR()
 
 	ImGui::BeginDisabled( !r_ssr.GetBool() );
 
-	float ssrIntensity = r_ssrIntensity.GetFloat();
-	if ( ImGui::SliderFloat( "Reflection Intensity", &ssrIntensity, 0.0f, 4.0f, "%.2f" ) ) {
-		r_ssrIntensity.SetFloat( ssrIntensity );
-	}
-	AddTooltip( "r_ssrIntensity: overall reflection strength on top of the physical Fresnel weight. "
+	CvarSliderF( "Reflection Intensity", r_ssrIntensity, 0.0f, 4.0f, "%.2f", "r_ssrIntensity: overall reflection strength on top of the physical Fresnel weight. "
 		"1 = physical; below dampens, above exaggerates the mirror look." );
 
-	float ssrMaxRough = r_ssrMaxRoughness.GetFloat();
-	if ( ImGui::SliderFloat( "Roughness Cutoff", &ssrMaxRough, 0.02f, 1.0f, "%.2f" ) ) {
-		r_ssrMaxRoughness.SetFloat( ssrMaxRough );
-	}
-	AddTooltip( "r_ssrMaxRoughness: surfaces rougher than this reflect nothing (fade starts at 70% of it). "
+	CvarSliderF( "Roughness Cutoff", r_ssrMaxRoughness, 0.02f, 1.0f, "%.2f", "r_ssrMaxRoughness: surfaces rougher than this reflect nothing (fade starts at 70% of it). "
 		"Reflections are currently sharp-only, so keep this low — rough painted walls showing crisp mirror "
 		"images reads wrong. Raise it to let more of the world reflect." );
 
 	// RR14: shared by SSR + RT reflections (like Intensity / Roughness Cutoff above), so it lives in this
 	// group rather than duplicated in the RT group. Needs an AO buffer this view or it's inert.
-	float specOcc = r_specOcclusion.GetFloat();
-	if ( ImGui::SliderFloat( "Specular Occlusion", &specOcc, 0.0f, 1.0f, "%.2f" ) ) {
-		r_specOcclusion.SetFloat( specOcc );
-	}
-	AddTooltip( "r_specOcclusion: dim reflections by ambient occlusion, roughness-aware — a polished floor "
+	CvarSliderF( "Specular Occlusion", r_specOcclusion, 0.0f, 1.0f, "%.2f", "r_specOcclusion: dim reflections by ambient occlusion, roughness-aware — a polished floor "
 		"or metal stops glowing in creases and under props/at contact, while a near-mirror is barely "
 		"touched. Applies to both SSR and RT reflections. Needs Ambient Occlusion on (Graphics tab, or RTAO "
 		"at Ultra Nightmare); does nothing without it. Direct specular from lights is never occluded. "
 		"0 = off, 0.7 = default." );
 
-	int ssrSteps = r_ssrSteps.GetInteger();
-	if ( ImGui::SliderInt( "March Steps", &ssrSteps, 4, 64 ) ) {
-		r_ssrSteps.SetInteger( ssrSteps );
-	}
-	AddTooltip( "r_ssrSteps: ray-march samples per pixel. More = longer, more complete reflections at "
+	CvarSliderI( "March Steps", r_ssrSteps, 4, 64, "r_ssrSteps: ray-march samples per pixel. More = longer, more complete reflections at "
 		"higher GPU cost (watch r_gl3GpuTime). Fewer = cheaper, reflections cut off sooner." );
 
-	float ssrDist = r_ssrMaxDistance.GetFloat();
-	if ( ImGui::SliderFloat( "Max Distance", &ssrDist, 64.0f, 4096.0f, "%.0f" ) ) {
-		r_ssrMaxDistance.SetFloat( ssrDist );
-	}
-	AddTooltip( "r_ssrMaxDistance: how far (world units) a reflection ray reaches. Rooms are ~256 units; "
+	CvarSliderF( "Max Distance", r_ssrMaxDistance, 64.0f, 4096.0f, "%.0f", "r_ssrMaxDistance: how far (world units) a reflection ray reaches. Rooms are ~256 units; "
 		"1000 covers a large hall. Longer rays spread the same March Steps thinner." );
 
-	float ssrThick = r_ssrThickness.GetFloat();
-	if ( ImGui::SliderFloat( "Hit Thickness", &ssrThick, 1.0f, 128.0f, "%.0f" ) ) {
-		r_ssrThickness.SetFloat( ssrThick );
-	}
-	AddTooltip( "r_ssrThickness: assumed depth of surfaces when testing ray hits. Too low leaves gaps "
+	CvarSliderF( "Hit Thickness", r_ssrThickness, 1.0f, 128.0f, "%.0f", "r_ssrThickness: assumed depth of surfaces when testing ray hits. Too low leaves gaps "
 		"in reflections (rays slip behind geometry); too high smears streaks under railings and edges." );
 
-	float ssrFeedback = r_ssrTemporalFeedback.GetFloat();
-	if ( ImGui::SliderFloat( "Temporal Feedback##ssr", &ssrFeedback, 0.0f, 0.97f, "%.2f" ) ) {
-		r_ssrTemporalFeedback.SetFloat( ssrFeedback );
-	}
-	AddTooltip( "r_ssrTemporalFeedback: fraction of reflection history kept per frame while Temporal "
+	CvarSliderF( "Temporal Feedback##ssr", r_ssrTemporalFeedback, 0.0f, 0.97f, "%.2f", "r_ssrTemporalFeedback: fraction of reflection history kept per frame while Temporal "
 		"Accumulation is on (Graphics tab). Higher = smoother, converges slower and can trail "
 		"on fast motion; lower = grainier but snappier." );
 
-	float glassProbeScale = r_ssrGlassProbeScale.GetFloat();
-	if ( ImGui::SliderFloat( "Glass Probe Intensity", &glassProbeScale, 0.0f, 4.0f, "%.2f" ) ) {
-		r_ssrGlassProbeScale.SetFloat( glassProbeScale );
-	}
-	AddTooltip( "r_ssrGlassProbeScale: brightness of the baked room cubemap on glass only "
+	CvarSliderF( "Glass Probe Intensity", r_ssrGlassProbeScale, 0.0f, 4.0f, "%.2f", "r_ssrGlassProbeScale: brightness of the baked room cubemap on glass only "
 		"(Graphics > Glass Reflections). Applied on top of the material's own reflection "
 		"colour and the global Reflection Brightness; other reflective surfaces are unaffected." );
 
@@ -4568,35 +4390,19 @@ static void DrawDbgGroup_RTReflections()
 	// (Trace resolution lives in the Graphics tab's Reflections group, Ray Tracing (RTX) section, with the
 	// RT toggle - the user-facing quality control. This group is the fine tuning.)
 
-	bool rtTemporal = r_rtReflTemporal.GetBool();
-	if ( ImGui::Checkbox( "Temporal Upscale (r_rtReflTemporal)", &rtTemporal ) ) {
-		r_rtReflTemporal.SetBool( rtTemporal );
-	}
-	AddTooltip( "r_rtReflTemporal: accumulate the reflection across frames and reconstruct it at full "
+	CvarCheckbox( "Temporal Upscale (r_rtReflTemporal)", r_rtReflTemporal, "r_rtReflTemporal: accumulate the reflection across frames and reconstruct it at full "
 		"resolution (the ray-query trace itself stays at the SSR resolution for speed). Resolves the "
 		"single-ray grain and the fractional-resolution shimmer. Leave on." );
 
-	float bump = r_rtReflBump.GetFloat();
-	if ( ImGui::SliderFloat( "Normal-Map Warp (r_rtReflBump)", &bump, 0.0f, 1.0f, "%.2f" ) ) {
-		r_rtReflBump.SetFloat( bump );
-	}
-	AddTooltip( "r_rtReflBump: how much the reflection follows the surface normal map. 1 = full bump, "
+	CvarSliderF( "Normal-Map Warp (r_rtReflBump)", r_rtReflBump, 0.0f, 1.0f, "%.2f", "r_rtReflBump: how much the reflection follows the surface normal map. 1 = full bump, "
 		"warping over tile/grout relief exactly like SSR; 0 = a flat, glassy mirror. Lower it if a rougher "
 		"surface sparkles." );
 
-	float jitter = r_rtReflJitter.GetFloat();
-	if ( ImGui::SliderFloat( "Ray Jitter (r_rtReflJitter)", &jitter, 0.0f, 4.0f, "%.2f" ) ) {
-		r_rtReflJitter.SetFloat( jitter );
-	}
-	AddTooltip( "r_rtReflJitter: per-frame sub-pixel jitter of the reflection sample grid so the temporal "
+	CvarSliderF( "Ray Jitter (r_rtReflJitter)", r_rtReflJitter, 0.0f, 4.0f, "%.2f", "r_rtReflJitter: per-frame sub-pixel jitter of the reflection sample grid so the temporal "
 		"upscale can reconstruct detail and the fractional-resolution beat averages out. Needs Temporal "
 		"Upscale. 1 = one sample cell; higher = softer, lower = sharper but more residual shimmer." );
 
-	float blur = r_rtReflBlur.GetFloat();
-	if ( ImGui::SliderFloat( "Blur (r_rtReflBlur)", &blur, 0.0f, 1.0f, "%.2f" ) ) {
-		r_rtReflBlur.SetFloat( blur );
-	}
-	AddTooltip( "r_rtReflBlur: a small box blur of the reflection before compositing, to soften any "
+	CvarSliderF( "Blur (r_rtReflBlur)", r_rtReflBlur, 0.0f, 1.0f, "%.2f", "r_rtReflBlur: a small box blur of the reflection before compositing, to soften any "
 		"residual single-pixel speckle. 0 = sharp." );
 
 	bool animBlas = cvarSystem->GetCVarBool( "r_rtAnimBlas" );
@@ -4607,11 +4413,7 @@ static void DrawDbgGroup_RTReflections()
 		"appear in reflections (and RT shadows). On by default - without it a monster shows as a black "
 		"silhouette in reflections. Turning it off saves the per-frame monster BLAS build." );
 
-	float rtGlass = r_rtReflGlassScale.GetFloat();
-	if ( ImGui::SliderFloat( "Glass Intensity (r_rtReflGlassScale)", &rtGlass, 0.0f, 4.0f, "%.2f" ) ) {
-		r_rtReflGlassScale.SetFloat( rtGlass );
-	}
-	AddTooltip( "r_rtReflGlassScale: brightness of the RT reflection on GLASS panes only - goggles/visors, "
+	CvarSliderF( "Glass Intensity (r_rtReflGlassScale)", r_rtReflGlassScale, 0.0f, 4.0f, "%.2f", "r_rtReflGlassScale: brightness of the RT reflection on GLASS panes only - goggles/visors, "
 		"the dropship cockpit. Those reflect a nearly-black cube in vanilla (that darkness is their authored "
 		"glass reflectivity), scaled by its perceptual brightness so the pane reads as subtle glass rather than "
 		"a mirror (windows stay shinier than goggles). Default 2 = the calibrated glass look, 1 = subtler, "
@@ -4639,20 +4441,12 @@ static void DrawDbgGroup_RTShadows()
 	}
 	ImGui::BeginDisabled( !r_rtShadowBlur.GetBool() );
 
-	float rtBlurAmt = r_rtShadowBlurIntensity.GetFloat();
-	if ( ImGui::SliderFloat( "Blur Intensity", &rtBlurAmt, 0.0f, 4.0f, "%.2f" ) ) {
-		r_rtShadowBlurIntensity.SetFloat( rtBlurAmt );
-	}
-	AddTooltip( "How strongly the ray-traced shadows are blurred. The blur still follows the "
+	CvarSliderF( "Blur Intensity", r_rtShadowBlurIntensity, 0.0f, 4.0f, "%.2f", "How strongly the ray-traced shadows are blurred. The blur still follows the "
 		"scene - none where an object touches the surface, more as the gap grows - this scales "
 		"all of it. It tops out at 24 pixels, so high values mostly soften the edges near "
 		"contact further. 0 = hard shadows. Default 1.5." );
 
-	float rtBlurCurve = r_rtShadowBlurCurve.GetFloat();
-	if ( ImGui::SliderFloat( "Blur Falloff Curve", &rtBlurCurve, 0.25f, 4.0f, "%.2f" ) ) {
-		r_rtShadowBlurCurve.SetFloat( rtBlurCurve );
-	}
-	AddTooltip( "How quickly a shadow softens as it gets further from the object casting it. "
+	CvarSliderF( "Blur Falloff Curve", r_rtShadowBlurCurve, 0.25f, 4.0f, "%.2f", "How quickly a shadow softens as it gets further from the object casting it. "
 		"1 = the natural growth of a real light. Lower = soft almost straight away, then "
 		"levelling off (a more even blur). Higher = crisp for longer near the object, then "
 		"widening fast. Blur Intensity sets how much; this sets where. Default 1.45." );
@@ -4661,18 +4455,10 @@ static void DrawDbgGroup_RTShadows()
 	if ( !r_rtShadowBlurStagger.GetBool() ) {
 		ImGui::TextDisabled( "Refresh Distant Soft Shadows Less Often is off (Graphics -> Shadows -> Ray Tracing)." );
 	}
-	float rtStagNear = r_rtShadowBlurStaggerNear.GetFloat();
-	if ( ImGui::SliderFloat( "Half Rate Beyond", &rtStagNear, 0.0f, 2048.0f, "%.0f units" ) ) {
-		r_rtShadowBlurStaggerNear.SetFloat( rtStagNear );
-	}
-	AddTooltip( "Lights whose centre is farther from you than this refresh their soft shadows every "
+	CvarSliderF( "Half Rate Beyond", r_rtShadowBlurStaggerNear, 0.0f, 2048.0f, "%.0f units", "Lights whose centre is farther from you than this refresh their soft shadows every "
 		"2nd frame (nearer ones every frame). For scale: the player is ~74 units tall, a typical "
 		"room 300-600 across. 0 = every light at half rate or less. Default 192." );
-	float rtStagFar = r_rtShadowBlurStaggerFar.GetFloat();
-	if ( ImGui::SliderFloat( "Third Rate Beyond", &rtStagFar, 0.0f, 4096.0f, "%.0f units" ) ) {
-		r_rtShadowBlurStaggerFar.SetFloat( rtStagFar );
-	}
-	AddTooltip( "Lights whose centre is farther from you than this refresh every 3rd frame. "
+	CvarSliderF( "Third Rate Beyond", r_rtShadowBlurStaggerFar, 0.0f, 4096.0f, "%.0f units", "Lights whose centre is farther from you than this refresh every 3rd frame. "
 		"0 = every light at a third of the rate. Default 380." );
 	ImGui::EndDisabled();	// r_rtShadowBlurStagger
 
@@ -4703,34 +4489,18 @@ static void DrawDbgGroup_ContactShadows()
 		}
 		ImGui::BeginDisabled( !backendOk || rtAll );
 
-		float strength = r_contactShadowStrength.GetFloat();
-		if ( ImGui::SliderFloat( "Strength", &strength, 0.0f, 1.0f, "%.2f" ) ) {
-			r_contactShadowStrength.SetFloat( strength );
-		}
-		AddTooltip( "r_contactShadowStrength: how much a found occluder dims the light (0 = none, 1 = full black "
+		CvarSliderF( "Strength", r_contactShadowStrength, 0.0f, 1.0f, "%.2f", "r_contactShadowStrength: how much a found occluder dims the light (0 = none, 1 = full black "
 			"at the contact). Faded by march distance so a nearer occluder darkens more. Default 0.8." );
 
-		float length = r_contactShadowLength.GetFloat();
-		if ( ImGui::SliderFloat( "March Length", &length, 1.0f, 128.0f, "%.0f" ) ) {
-			r_contactShadowLength.SetFloat( length );
-		}
-		AddTooltip( "r_contactShadowLength: how far toward the light the depth march reaches, world units. Short "
+		CvarSliderF( "March Length", r_contactShadowLength, 1.0f, 128.0f, "%.0f", "r_contactShadowLength: how far toward the light the depth march reaches, world units. Short "
 			"= tight contact grounding; long = broader but coarser and dearer. Clamped to the distance to the "
 			"light. Default 12." );
 
-		float thickness = r_contactShadowThickness.GetFloat();
-		if ( ImGui::SliderFloat( "Occluder Thickness", &thickness, 0.5f, 128.0f, "%.0f" ) ) {
-			r_contactShadowThickness.SetFloat( thickness );
-		}
-		AddTooltip( "r_contactShadowThickness: a depth sample nearer than the ray by more than this is treated as "
+		CvarSliderF( "Occluder Thickness", r_contactShadowThickness, 0.5f, 128.0f, "%.0f", "r_contactShadowThickness: a depth sample nearer than the ray by more than this is treated as "
 			"background, not an occluder. Too low = shadows drop out behind thin geometry; too high = haloing / "
 			"over-occlusion. Default 8." );
 
-		int steps = r_contactShadowSteps.GetInteger();
-		if ( ImGui::SliderInt( "March Steps", &steps, 2, 32 ) ) {
-			r_contactShadowSteps.SetInteger( steps );
-		}
-		AddTooltip( "r_contactShadowSteps: depth-march samples per lit pixel. More = smoother/further-reaching, "
+		CvarSliderI( "March Steps", r_contactShadowSteps, 2, 32, "r_contactShadowSteps: depth-march samples per lit pixel. More = smoother/further-reaching, "
 			"dearer. Runs per light, so keep it low (watch r_gl3GpuTime / r_vkGpuTime). Default 8." );
 
 		ImGui::EndDisabled();	// backendOk
@@ -4903,11 +4673,7 @@ static void DrawDbgGroup_GpuOffload()
 		}
 		ImGui::BeginDisabled( !vk );
 
-		bool gpuSkin = r_gpuSkinning.GetBool();
-		if ( ImGui::Checkbox( "GPU skinning", &gpuSkin ) ) {
-			r_gpuSkinning.SetBool( gpuSkin );
-		}
-		AddTooltip( "r_gpuSkinning: skin animated meshes on the GPU. ON by default on Vulkan (and from the "
+		CvarCheckbox( "GPU skinning", r_gpuSkinning, "r_gpuSkinning: skin animated meshes on the GPU. ON by default on Vulkan (and from the "
 			"Medium preset up); Potato/Low keep the exact CPU skin as the faithful floor (option-B TBN is a small "
 			"divergence from Doom 3's per-frame re-derive). Offloads the DRAW; the CPU position skin still runs (it "
 			"is the monster hit surface). Prerequisite for ray-tracing animated geometry later. Next map load." );
@@ -4966,11 +4732,7 @@ static void DrawDbgGroup_FSR()
 
 	// The user-facing FSR2 switch (+ sharpness/reactive) lives in Graphics -> Antialiasing;
 	// this group keeps the motion-vector infrastructure + debug views only.
-	bool mv = r_motionVectors.GetBool();
-	if ( ImGui::Checkbox( "Motion Vectors (r_motionVectors)", &mv ) ) {
-		r_motionVectors.SetBool( mv );
-	}
-	AddTooltip( "Per-object screen-space motion vectors written into the normal G-buffer's 3rd MRT "
+	CvarCheckbox( "Motion Vectors (r_motionVectors)", r_motionVectors, "Per-object screen-space motion vectors written into the normal G-buffer's 3rd MRT "
 		"(R1/A2). Forces the normal prepass on (an extra opaque pass). Feeds the temporal SSAO/SSR "
 		"reprojection so moving objects stop dragging a ghost, and — eventually — FSR2." );
 
@@ -4985,11 +4747,7 @@ static void DrawDbgGroup_FSR()
 		"tint flips with motion); 2 = magnitude (black = no motion). Strafe / walk to see the geometry "
 		"light up by depth; a camera pan concentrates velocity at the screen edges. 0 to feed the consumers." );
 
-	float mvScale = r_mvDebugScale.GetFloat();
-	if ( ImGui::SliderFloat( "Debug Gain (r_mvDebugScale)", &mvScale, 1.0f, 40.0f, "%.0f" ) ) {
-		r_mvDebugScale.SetFloat( mvScale );
-	}
-	AddTooltip( "Amplifies the debug overlay only — per-frame screen velocities are tiny, so crank this "
+	CvarSliderF( "Debug Gain (r_mvDebugScale)", r_mvDebugScale, 1.0f, 40.0f, "%.0f", "Amplifies the debug overlay only — per-frame screen velocities are tiny, so crank this "
 		"up to see slow motion. Does not affect the velocity fed to the consumers." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##mvscale" ) ) { r_mvDebugScale.Reset(); }
@@ -5017,11 +4775,7 @@ static void DrawDbgGroup_ShadowMaps()
 
 	ImGui::BeginDisabled( !supported );
 
-	bool sm = r_shadowMapping.GetBool();
-	if ( ImGui::Checkbox( "Shadow Mapping (master)", &sm ) ) {
-		r_shadowMapping.SetBool( sm );
-	}
-	AddTooltip( "Master toggle. On = shadow maps (stencil fully off); Off = vanilla stencil." );
+	CvarCheckbox( "Shadow Mapping (master)", r_shadowMapping, "Master toggle. On = shadow maps (stencil fully off); Off = vanilla stencil." );
 
 	// isolate a single light by index to study its shadow in isolation; -1 = all
 	int single = r_singleLight.GetInteger();
@@ -5032,11 +4786,7 @@ static void DrawDbgGroup_ShadowMaps()
 	AddTooltip( "Render only this light index (everything else black), to study one light's "
 		"shadow. -1 shows all lights. Use r_shadowMapDebug 2 to read light indices in the console." );
 
-	int dbg = r_shadowMapDebug.GetInteger();
-	if ( ImGui::SliderInt( "Debug Print (r_shadowMapDebug)", &dbg, 0, 2 ) ) {
-		r_shadowMapDebug.SetInteger( dbg );
-	}
-	AddTooltip( "0 = off, 1 = per-view summary, 2 = per-light readout (technique, occluder "
+	CvarSliderI( "Debug Print (r_shadowMapDebug)", r_shadowMapDebug, 0, 2, "0 = off, 1 = per-view summary, 2 = per-light readout (technique, occluder "
 		"counts, dist/radius/range) printed to the console each frame." );
 
 	ImGui::BeginDisabled( !r_shadowMapping.GetBool() );
@@ -5076,18 +4826,10 @@ static void DrawDbgGroup_ShadowMaps()
 		"usually reduces acne; front (0) or two-sided (2) can fix light-leaks or thin-wall "
 		"artifacts. Try these if shadows are missing/leaking on certain geometry." );
 
-	bool perf = r_shadowMapPerforated.GetBool();
-	if ( ImGui::Checkbox( "Perforated Casters (grates/fences)", &perf ) ) {
-		r_shadowMapPerforated.SetBool( perf );
-	}
-	AddTooltip( "Alpha-tested grates/fences/foliage cast punched-out shadows." );
+	bool perf = CvarCheckbox( "Perforated Casters (grates/fences)", r_shadowMapPerforated, "Alpha-tested grates/fences/foliage cast punched-out shadows." );
 
 	ImGui::BeginDisabled( !perf );
-	float perfStrength = r_shadowMapPerforatedStrength.GetFloat();
-	if ( ImGui::SliderFloat( "Perforated Shadow Strength", &perfStrength, 0.0f, 1.0f, "%.2f" ) ) {
-		r_shadowMapPerforatedStrength.SetFloat( perfStrength );
-	}
-	AddTooltip( "How dark grate/fence shadows get. 1 = fully dark like solid geometry; "
+	CvarSliderF( "Perforated Shadow Strength", r_shadowMapPerforatedStrength, 0.0f, 1.0f, "%.2f", "How dark grate/fence shadows get. 1 = fully dark like solid geometry; "
 		"lower lets some light through, so a fence dims a room instead of blacking it "
 		"out — closer to how vanilla faked these with soft light textures. Only affects "
 		"perforated casters; solid-geometry shadows stay fully dark." );
@@ -5099,21 +4841,13 @@ static void DrawDbgGroup_ShadowMaps()
 
 	ImGui::SeparatorText( "Adaptive resolution (radius-scaled)" );
 
-	bool sizeScale = r_shadowMapSizeScale.GetBool();
-	if ( ImGui::Checkbox( "Scale Resolution With Light Size", &sizeScale ) ) {
-		r_shadowMapSizeScale.SetBool( sizeScale );
-	}
-	AddTooltip( "Give bigger lights more shadow resolution and smaller lights less, so a "
+	bool sizeScale = CvarCheckbox( "Scale Resolution With Light Size", r_shadowMapSizeScale, "Give bigger lights more shadow resolution and smaller lights less, so a "
 		"shadow texel maps to roughly the same world distance for every light. Cuts jagged "
 		"edges on large/far lights. Tiers step in powers of two around the base resolutions "
 		"on the main Shadows page (-1x to +4x), clamped to each map's own range." );
 
 	ImGui::BeginDisabled( !sizeScale );
-	float refRadius = r_shadowMapSizeScaleRadius.GetFloat();
-	if ( ImGui::SliderFloat( "Reference Radius", &refRadius, 16.0f, 2048.0f, "%.0f" ) ) {
-		r_shadowMapSizeScaleRadius.SetFloat( refRadius );
-	}
-	AddTooltip( "The light radius that maps to the base resolution. Lights larger than this "
+	CvarSliderF( "Reference Radius", r_shadowMapSizeScaleRadius, 16.0f, 2048.0f, "%.0f", "The light radius that maps to the base resolution. Lights larger than this "
 		"get more resolution; smaller ones get less. Lower it to push more lights into the "
 		"higher-resolution tiers." );
 	ImGui::SameLine();
@@ -5129,11 +4863,7 @@ static void DrawDbgGroup_ShadowMaps()
 	ImGui::TextDisabled( "Map resolutions and the point-light budget are on the main Shadows page." );
 	ImGui::Spacing();
 
-	int cubePcf = r_shadowMapCubePcf.GetInteger();
-	if ( ImGui::SliderInt( "Cube Edge Softness (PCF taps)", &cubePcf, 1, 16 ) ) {
-		r_shadowMapCubePcf.SetInteger( cubePcf );
-	}
-	AddTooltip( "Point-light cube shadows soften their edge by averaging this many disc-offset "
+	CvarSliderI( "Cube Edge Softness (PCF taps)", r_shadowMapCubePcf, 1, 16, "Point-light cube shadows soften their edge by averaging this many disc-offset "
 		"depth taps. 1 = a single hardware tap (hardest, blockiest, cheapest); 4 matches the "
 		"2D/spot path; 6 (default) is a soft, well-filtered edge; higher smooths stair-stepping "
 		"at low resolution but costs more per lit point-light fragment. Free on VRAM (filtering "
@@ -5143,19 +4873,11 @@ static void DrawDbgGroup_ShadowMaps()
 		r_shadowMapCubePcf.Reset();
 	}
 
-	bool faceCull = r_shadowMapFaceCull.GetBool();
-	if ( ImGui::Checkbox( "Cull Off-Screen Faces", &faceCull ) ) {
-		r_shadowMapFaceCull.SetBool( faceCull );
-	}
-	AddTooltip( "Skip rasterizing occluders into cube faces whose 90-degree cone can't reach "
+	CvarCheckbox( "Cull Off-Screen Faces", r_shadowMapFaceCull, "Skip rasterizing occluders into cube faces whose 90-degree cone can't reach "
 		"the view frustum — those faces are never sampled by anything on screen. Big win at high "
 		"resolution when a light is partly behind you. r_shadowMapDebug 1 shows faces drawn/culled." );
 
-	float rscale = r_shadowMapPointRangeScale.GetFloat();
-	if ( ImGui::SliderFloat( "Cube Range Scale", &rscale, 0.1f, 32.0f, "%.2fx" ) ) {
-		r_shadowMapPointRangeScale.SetFloat( rscale );
-	}
-	AddTooltip( "Scales the cube shadow's far plane + depth normalizer. If distant/floor "
+	CvarSliderF( "Cube Range Scale", r_shadowMapPointRangeScale, 0.1f, 32.0f, "%.2fx", "Scales the cube shadow's far plane + depth normalizer. If distant/floor "
 		"shadows under a light are missing, this controls how far the map reaches. 1.0 = the "
 		"light's own radius." );
 	ImGui::SameLine();
@@ -5182,11 +4904,7 @@ static void DrawDbgGroup_ShadowMaps()
 
 	ImGui::SeparatorText( "Static cache (skip regenerating unchanged lights)" );
 
-	bool cache = r_shadowMapCache.GetBool();
-	if ( ImGui::Checkbox( "Cache Static Point Lights", &cache ) ) {
-		r_shadowMapCache.SetBool( cache );
-	}
-	AddTooltip( "Keep each point light's cube map across frames and only re-render it when the "
+	bool cache = CvarCheckbox( "Cache Static Point Lights", r_shadowMapCache, "Keep each point light's cube map across frames and only re-render it when the "
 		"light or one of its shadow casters moves. In mostly-static scenes this is the single "
 		"biggest shadow-map speedup. r_shadowMapDebug 1 shows cache hit/rendered and MB used." );
 
@@ -5251,66 +4969,38 @@ static void DrawDbgGroup_Emissive()
 	ImGui::BeginDisabled( !supported );
 	ImGui::BeginDisabled( !r_emissiveSurfaces.GetBool() );
 
-	float emScale = r_emissiveLightScale.GetFloat();
-	if ( ImGui::SliderFloat( "Intensity", &emScale, 0.0f, 4.0f, "%.2f" ) ) {
-		r_emissiveLightScale.SetFloat( emScale );
-	}
-	AddTooltip( "Brightness of the fill light a glowing screen casts. 0 = off, 0.50 = default, higher = a strong glow." );
+	CvarSliderF( "Intensity", r_emissiveLightScale, 0.0f, 4.0f, "%.2f", "Brightness of the fill light a glowing screen casts. 0 = off, 0.50 = default, higher = a strong glow." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##emscale" ) ) { r_emissiveLightScale.Reset(); }
 
-	float emRadius = r_emissiveLightRadius.GetFloat();
-	if ( ImGui::SliderFloat( "Reach (distance)", &emRadius, 0.25f, 16.0f, "%.2f" ) ) {
-		r_emissiveLightRadius.SetFloat( emRadius );
-	}
-	AddTooltip( "How far the fill light reaches, as a multiple of the screen's own size. Small/medium screens "
+	CvarSliderF( "Reach (distance)", r_emissiveLightRadius, 0.25f, 16.0f, "%.2f", "How far the fill light reaches, as a multiple of the screen's own size. Small/medium screens "
 		"scale linearly; large ones roll off toward the Max Reach cap below. Default 1.80." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##emradius" ) ) { r_emissiveLightRadius.Reset(); }
 
-	float emMaxReach = r_emissiveLightMaxReach.GetFloat();
-	if ( ImGui::SliderFloat( "Max Reach (big signs)", &emMaxReach, 32.0f, 512.0f, "%.0f" ) ) {
-		r_emissiveLightMaxReach.SetFloat( emMaxReach );
-	}
-	AddTooltip( "Soft cap (world units) that reach saturates toward, so a big hanging sign doesn't cast across "
+	CvarSliderF( "Max Reach (big signs)", r_emissiveLightMaxReach, 32.0f, 512.0f, "%.0f", "Soft cap (world units) that reach saturates toward, so a big hanging sign doesn't cast across "
 		"the whole room. Lower = big signs reined in harder; raise toward 512 for near-linear scaling. Default 120." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##emmaxreach" ) ) { r_emissiveLightMaxReach.Reset(); }
 
-	float emFalloff = r_emissiveLightFalloff.GetFloat();
-	if ( ImGui::SliderFloat( "Fade-off", &emFalloff, 0.0f, 1.0f, "%.2f" ) ) {
-		r_emissiveLightFalloff.SetFloat( emFalloff );
-	}
-	AddTooltip( "How far the glow reaches and how gently it fades. 0 = a tight, bright pool with a sharp edge; "
+	CvarSliderF( "Fade-off", r_emissiveLightFalloff, 0.0f, 1.0f, "%.2f", "How far the glow reaches and how gently it fades. 0 = a tight, bright pool with a sharp edge; "
 		"1 = a soft glow that reaches further out. Default 0.5." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##emfalloff" ) ) { r_emissiveLightFalloff.Reset(); }
 
-	float emSpread = r_emissiveLightSpread.GetFloat();
-	if ( ImGui::SliderFloat( "Beam Spread", &emSpread, 0.5f, 3.5f, "%.2f" ) ) {
-		r_emissiveLightSpread.SetFloat( emSpread );
-	}
-	AddTooltip( "Width of the fill cone. 0.5 = a tight beam, 1.60 = default, 3.5 = a wide near-hemisphere "
+	CvarSliderF( "Beam Spread", r_emissiveLightSpread, 0.5f, 3.5f, "%.2f", "Width of the fill cone. 0.5 = a tight beam, 1.60 = default, 3.5 = a wide near-hemisphere "
 		"that wraps around the screen (but still clipped behind the mount)." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##emspread" ) ) { r_emissiveLightSpread.Reset(); }
 
-	float emSat = r_emissiveLightSaturation.GetFloat();
-	if ( ImGui::SliderFloat( "Colour saturation", &emSat, 0.0f, 1.0f, "%.2f" ) ) {
-		r_emissiveLightSaturation.SetFloat( emSat );
-	}
-	AddTooltip( "How much of the screen's own colour the bleed keeps. 0 = white, 0.75 = default tint, "
+	CvarSliderF( "Colour saturation", r_emissiveLightSaturation, 0.0f, 1.0f, "%.2f", "How much of the screen's own colour the bleed keeps. 0 = white, 0.75 = default tint, "
 		"1 = full screen hue (a coloured spotlight)." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##emsat" ) ) { r_emissiveLightSaturation.Reset(); }
 
 	ImGui::Spacing();
 
-	bool emSpecular = r_emissiveLightSpecular.GetBool();
-	if ( ImGui::Checkbox( "Specular Highlights", &emSpecular ) ) {
-		r_emissiveLightSpecular.SetBool( emSpecular );
-	}
-	AddTooltip( "On: fill lights add a specular glint (more visible on your weapon). "
+	CvarCheckbox( "Specular Highlights", r_emissiveLightSpecular, "On: fill lights add a specular glint (more visible on your weapon). "
 		"Off: diffuse-only, a calmer soft fill." );
 
 	ImGui::EndDisabled();	// emissive surfaces on
@@ -5329,11 +5019,7 @@ static void DrawDbgGroup_Glass()
 
 	ImGui::BeginDisabled( !supported );
 
-	float reflScale = r_gl3ReflectionScale.GetFloat();
-	if ( ImGui::SliderFloat( "Reflection brightness", &reflScale, 0.0f, 1.5f, "%.2f" ) ) {
-		r_gl3ReflectionScale.SetFloat( reflScale );
-	}
-	AddTooltip( "Brightness of the environment-map reflection on glass. 1.00 = the untouched cube; "
+	CvarSliderF( "Reflection brightness", r_gl3ReflectionScale, 0.0f, 1.5f, "%.2f", "Brightness of the environment-map reflection on glass. 1.00 = the untouched cube; "
 		"0.70 = default, dampened 30% so the sheen matches legacy against the brighter enhanced scene." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##reflscale" ) ) { r_gl3ReflectionScale.Reset(); }
@@ -5341,47 +5027,27 @@ static void DrawDbgGroup_Glass()
 	ImGui::Spacing();
 	ImGui::TextDisabled( "Decal sheen: texture mod packs make blood and dirt decals shiny. No effect on the stock assets." );
 
-	float bloodSheen = r_decalBloodSheen.GetFloat();
-	if ( ImGui::SliderFloat( "Blood decal sheen", &bloodSheen, 0.0f, 1.0f, "%.2f" ) ) {
-		r_decalBloodSheen.SetFloat( bloodSheen );
-	}
-	AddTooltip( "Specular highlight + cube reflection on blood splats, smears and pools. "
+	CvarSliderF( "Blood decal sheen", r_decalBloodSheen, 0.0f, 1.0f, "%.2f", "Specular highlight + cube reflection on blood splats, smears and pools. "
 		"0.00 = matte, 1.00 = as authored by the mod pack; 0.35 = default." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##bloodsheen" ) ) { r_decalBloodSheen.Reset(); }
 
-	bool decalMatte = r_decalMatte.GetBool();
-	if ( ImGui::Checkbox( "Matte dirt decals", &decalMatte ) ) {
-		r_decalMatte.SetBool( decalMatte );
-	}
-	AddTooltip( "Dirt, stain and drip decals get no specular highlight and no cube reflection. "
+	CvarCheckbox( "Matte dirt decals", r_decalMatte, "Dirt, stain and drip decals get no specular highlight and no cube reflection. "
 		"Off = as authored by the mod pack." );
 
-	float decalMetal = r_decalMetalMask.GetFloat();
-	if ( ImGui::SliderFloat( "Decals dull metal", &decalMetal, 0.0f, 1.0f, "%.2f" ) ) {
-		r_decalMetalMask.SetFloat( decalMetal );
-	}
-	AddTooltip( "Dirt on metal is not metal: a decal removes the metalness of the surface under it by its "
+	CvarSliderF( "Decals dull metal", r_decalMetalMask, 0.0f, 1.0f, "%.2f", "Dirt on metal is not metal: a decal removes the metalness of the surface under it by its "
 		"coverage, so stains read matte against the clean plate around them. Stock and mod decals alike. "
 		"0.00 = off, 1.00 = default. Needs PBR materials (High preset and up)." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##decalmetal" ) ) { r_decalMetalMask.Reset(); }
 
-	float decalRough = r_decalRoughen.GetFloat();
-	if ( ImGui::SliderFloat( "Decals roughen surfaces", &decalRough, 0.0f, 1.0f, "%.2f" ) ) {
-		r_decalRoughen.SetFloat( decalRough );
-	}
-	AddTooltip( "Dirt scatters light: a decal roughens the surface under it by its coverage, so highlights and "
+	CvarSliderF( "Decals roughen surfaces", r_decalRoughen, 0.0f, 1.0f, "%.2f", "Dirt scatters light: a decal roughens the surface under it by its coverage, so highlights and "
 		"reflections break up across stains - on metal and on glossy non-metals alike. "
 		"0.00 = off, 1.00 = default. Needs PBR materials (High preset and up)." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##decalrough" ) ) { r_decalRoughen.Reset(); }
 
-	float wetBlood = r_decalWetBlood.GetFloat();
-	if ( ImGui::SliderFloat( "Wet blood", &wetBlood, 0.0f, 0.5f, "%.3f" ) ) {
-		r_decalWetBlood.SetFloat( wetBlood );
-	}
-	AddTooltip( "Blood decals glint off the lights around them as a wet film with its own relief - every blood decal, "
+	CvarSliderF( "Wet blood", r_decalWetBlood, 0.0f, 0.5f, "%.3f", "Blood decals glint off the lights around them as a wet film with its own relief - every blood decal, "
 		"stock or mod, map-placed or splattered during play. Strength of the highlight; 0 = off (matte, "
 		"stock-faithful blood), 0.057 = default. "
 		"With a texture pack, it replaces the pack's own blood highlight "
@@ -5390,31 +5056,19 @@ static void DrawDbgGroup_Glass()
 	if ( ImGui::SmallButton( "reset##wetblood" ) ) { r_decalWetBlood.Reset(); }
 
 	ImGui::BeginDisabled( r_decalWetBlood.GetFloat() <= 0.0f );
-	float bloodRelief = r_decalWetBloodRelief.GetFloat();
-	if ( ImGui::SliderFloat( "Wet blood relief", &bloodRelief, 0.0f, 1.0f, "%.2f" ) ) {
-		r_decalWetBloodRelief.SetFloat( bloodRelief );
-	}
-	AddTooltip( "How strongly the film follows the blood's own height - bulging edges, ripples inside. Higher = the glint "
+	CvarSliderF( "Wet blood relief", r_decalWetBloodRelief, 0.0f, 1.0f, "%.2f", "How strongly the film follows the blood's own height - bulging edges, ripples inside. Higher = the glint "
 		"breaks into more sparkles, visible from more angles; 0.00 = a flat film that only glints at a light's exact "
 		"mirror angle. 0.17 = default." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##bloodrelief" ) ) { r_decalWetBloodRelief.Reset(); }
 
-	float bloodFloor = r_decalWetBloodThreshold.GetFloat();
-	if ( ImGui::SliderFloat( "Wet blood threshold", &bloodFloor, 0.0f, 0.95f, "%.2f" ) ) {
-		r_decalWetBloodThreshold.SetFloat( bloodFloor );
-	}
-	AddTooltip( "How much blood there must be before it glints at all. Splat textures trail off into a mist too faint "
+	CvarSliderF( "Wet blood threshold", r_decalWetBloodThreshold, 0.0f, 0.95f, "%.2f", "How much blood there must be before it glints at all. Splat textures trail off into a mist too faint "
 		"to see; raise this until the bare floor around a splat stops looking wet. The film feathers in just above "
 		"the threshold. 0.30 = default." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##bloodfloor" ) ) { r_decalWetBloodThreshold.Reset(); }
 
-	float bloodRough = r_decalWetBloodRough.GetFloat();
-	if ( ImGui::SliderFloat( "Wet blood roughness", &bloodRough, 0.05f, 0.8f, "%.2f" ) ) {
-		r_decalWetBloodRough.SetFloat( bloodRough );
-	}
-	AddTooltip( "Lower = tight, sharp glints (fresh blood); higher = a broad soft sheen (drying blood). 0.18 = default." );
+	CvarSliderF( "Wet blood roughness", r_decalWetBloodRough, 0.05f, 0.8f, "%.2f", "Lower = tight, sharp glints (fresh blood); higher = a broad soft sheen (drying blood). 0.18 = default." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##bloodrough" ) ) { r_decalWetBloodRough.Reset(); }
 	ImGui::EndDisabled();
@@ -5434,11 +5088,7 @@ static void DrawDbgGroup_SSAO()
 
 	ImGui::BeginDisabled( !supported );
 
-	bool ssao = r_ssao.GetBool();
-	if ( ImGui::Checkbox( "SSAO (master)", &ssao ) ) {
-		r_ssao.SetBool( ssao );
-	}
-	AddTooltip( "Master toggle (same cvar as Graphics > Ambient Occlusion). On = occlude the "
+	CvarCheckbox( "SSAO (master)", r_ssao, "Master toggle (same cvar as Graphics > Ambient Occlusion). On = occlude the "
 		"ambient term in creases/contacts; Off = vanilla flat ambient." );
 
 	int ssaoDbg = r_ssaoDebug.GetInteger();
@@ -5452,108 +5102,64 @@ static void DrawDbgGroup_SSAO()
 
 	ImGui::BeginDisabled( !r_ssao.GetBool() );
 
-	float ssaoInt = r_ssaoIntensity.GetFloat();
-	if ( ImGui::SliderFloat( "AO Intensity", &ssaoInt, 0.0f, 4.0f, "%.2f" ) ) {
-		r_ssaoIntensity.SetFloat( ssaoInt );
-	}
-	AddTooltip( "Strength of the darkening. 0 = none, 1.2 = default, higher pushes the occlusion deeper." );
+	CvarSliderF( "AO Intensity", r_ssaoIntensity, 0.0f, 4.0f, "%.2f", "Strength of the darkening. 0 = none, 1.2 = default, higher pushes the occlusion deeper." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaoint" ) ) { r_ssaoIntensity.Reset(); }
 
-	float ssaoDirect = r_ssaoDirectLight.GetFloat();
-	if ( ImGui::SliderFloat( "Direct Light AO", &ssaoDirect, 0.0f, 1.0f, "%.2f" ) ) {
-		r_ssaoDirectLight.SetFloat( ssaoDirect );
-	}
-	AddTooltip( "How strongly AO darkens direct (dynamic) light's diffuse. Doom 3 has almost no "
+	CvarSliderF( "Direct Light AO", r_ssaoDirectLight, 0.0f, 1.0f, "%.2f", "How strongly AO darkens direct (dynamic) light's diffuse. Doom 3 has almost no "
 		"ambient, so THIS is what makes AO visible in normal gameplay. 1 = full, 0.75 = default, 0 = "
 		"ambient-only (most faithful, but usually invisible here). Lower it if AO looks baked-in "
 		"when lights move." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaodirect" ) ) { r_ssaoDirectLight.Reset(); }
 
-	float ssaoFloor = r_ssaoFloor.GetFloat();
-	if ( ImGui::SliderFloat( "Floor (min visibility)", &ssaoFloor, 0.0f, 1.0f, "%.2f" ) ) {
-		r_ssaoFloor.SetFloat( ssaoFloor );
-	}
-	AddTooltip( "Anti-crush floor: how dark a fully-occluded spot may get. 0 = can reach black, "
+	CvarSliderF( "Floor (min visibility)", r_ssaoFloor, 0.0f, 1.0f, "%.2f", "Anti-crush floor: how dark a fully-occluded spot may get. 0 = can reach black, "
 		"0.03 = default, 1 = no darkening. Raise it if AO makes dark areas too murky to read." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaofloor" ) ) { r_ssaoFloor.Reset(); }
 
-	float ssaoRad = r_ssaoRadius.GetFloat();
-	if ( ImGui::SliderFloat( "Radius (world units)", &ssaoRad, 1.0f, 256.0f, "%.0f" ) ) {
-		r_ssaoRadius.SetFloat( ssaoRad );
-	}
-	AddTooltip( "How far the occlusion samples reach, in world units. Small = tight contact creases "
+	CvarSliderF( "Radius (world units)", r_ssaoRadius, 1.0f, 256.0f, "%.0f", "How far the occlusion samples reach, in world units. Small = tight contact creases "
 		"only; large = broad, softer occlusion (and more expensive). Default 48." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaorad" ) ) { r_ssaoRadius.Reset(); }
 
-	int ssaoSlices = r_ssaoSlices.GetInteger();
-	if ( ImGui::SliderInt( "Directions (slices)", &ssaoSlices, 1, 8 ) ) {
-		r_ssaoSlices.SetInteger( ssaoSlices );
-	}
-	AddTooltip( "How many horizon-search directions per pixel. More = smoother, less directional "
+	CvarSliderI( "Directions (slices)", r_ssaoSlices, 1, 8, "How many horizon-search directions per pixel. More = smoother, less directional "
 		"noise. This is the bigger cost knob. Default 3. Check the cost with r_gl3GpuTime 1." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaoslices" ) ) { r_ssaoSlices.Reset(); }
 
-	int ssaoSteps = r_ssaoSteps.GetInteger();
-	if ( ImGui::SliderInt( "Steps per direction", &ssaoSteps, 1, 12 ) ) {
-		r_ssaoSteps.SetInteger( ssaoSteps );
-	}
-	AddTooltip( "How many samples are marched along each direction (how finely each horizon is "
+	CvarSliderI( "Steps per direction", r_ssaoSteps, 1, 12, "How many samples are marched along each direction (how finely each horizon is "
 		"found). More = more accurate occlusion at range. Default 3." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaosteps" ) ) { r_ssaoSteps.Reset(); }
 
 	// Depth-mip acceleration + its two quality/speed knobs (docs/ssao-perf-optimization.md).
 	// The master toggle is mirrored from Enhancements; the bias/cap sliders live only here.
-	bool ssaoDepthMipDev = r_ssaoDepthMip.GetBool();
-	if ( ImGui::Checkbox( "Depth-Mip Acceleration##dev", &ssaoDepthMipDev ) ) {
-		r_ssaoDepthMip.SetBool( ssaoDepthMipDev );
-	}
-	AddTooltip( "March the horizon search over a prefiltered linear-depth mip chain (far taps read "
+	CvarCheckbox( "Depth-Mip Acceleration##dev", r_ssaoDepthMip, "March the horizon search over a prefiltered linear-depth mip chain (far taps read "
 		"coarse mips) instead of full-res depth every tap — cheaper at a wide radius. Same toggle as "
 		"Graphics > Depth-Mip Acceleration." );
 
 	ImGui::BeginDisabled( !r_ssaoDepthMip.GetBool() );
-	float ssaoMipBias = r_ssaoDepthMipBias.GetFloat();
-	if ( ImGui::SliderFloat( "Mip Bias", &ssaoMipBias, 0.05f, 1.0f, "%.2f" ) ) {
-		r_ssaoDepthMipBias.SetFloat( ssaoMipBias );
-	}
-	AddTooltip( "How eagerly the march drops to coarser mips: LOD = log2(stepPixels * this). Higher = "
+	CvarSliderF( "Mip Bias", r_ssaoDepthMipBias, 0.05f, 1.0f, "%.2f", "How eagerly the march drops to coarser mips: LOD = log2(stepPixels * this). Higher = "
 		"coarser sooner (faster, but coarse depth smears occlusion across silhouettes into halos); "
 		"lower = stays on finer mips (sharper, keeps most of the speedup). Default 0.1." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaomipbias" ) ) { r_ssaoDepthMipBias.Reset(); }
 
-	int ssaoMipCap = r_ssaoDepthMipMaxLod.GetInteger();
-	if ( ImGui::SliderInt( "Mip Coarseness Cap", &ssaoMipCap, 1, 5 ) ) {
-		r_ssaoDepthMipMaxLod.SetInteger( ssaoMipCap );
-	}
-	AddTooltip( "Caps how coarse the march may ever go. The coarsest mips (box-averaged depth) are "
+	CvarSliderI( "Mip Coarseness Cap", r_ssaoDepthMipMaxLod, 1, 5, "Caps how coarse the march may ever go. The coarsest mips (box-averaged depth) are "
 		"where occlusion smears across silhouettes into halos, so a lower cap kills halos at a small "
 		"speed cost; 5 = uncapped (old behaviour). Default 2." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaomipcap" ) ) { r_ssaoDepthMipMaxLod.Reset(); }
 	ImGui::EndDisabled();
 
-	bool ssaoTemporalDev = r_ssaoTemporal.GetBool();
-	if ( ImGui::Checkbox( "Temporal Accumulation", &ssaoTemporalDev ) ) {
-		r_ssaoTemporal.SetBool( ssaoTemporalDev );
-	}
-	AddTooltip( "Reuse the previous frame's AO (reprojected by camera motion) to amortize the "
+	CvarCheckbox( "Temporal Accumulation", r_ssaoTemporal, "Reuse the previous frame's AO (reprojected by camera motion) to amortize the "
 		"horizon search across frames: smooths the per-pixel noise and lets Directions/Steps run "
 		"lower for the same look. Ghosting on fast motion / disocclusion is bounded by a "
 		"neighbourhood clamp. Same toggle as Graphics > Ambient Occlusion." );
 
 	ImGui::BeginDisabled( !r_ssaoTemporal.GetBool() );
-	float ssaoFeedback = r_ssaoTemporalFeedback.GetFloat();
-	if ( ImGui::SliderFloat( "Temporal Feedback", &ssaoFeedback, 0.0f, 0.97f, "%.2f" ) ) {
-		r_ssaoTemporalFeedback.SetFloat( ssaoFeedback );
-	}
-	AddTooltip( "Fraction of the reprojected previous-frame AO kept each frame. Higher = smoother "
+	CvarSliderF( "Temporal Feedback", r_ssaoTemporalFeedback, 0.0f, 0.97f, "%.2f", "Fraction of the reprojected previous-frame AO kept each frame. Higher = smoother "
 		"and steadier (and effectively cheaper) but more latency/ghosting; 0 = no accumulation. "
 		"Default 0.90." );
 	ImGui::SameLine();
@@ -5562,39 +5168,23 @@ static void DrawDbgGroup_SSAO()
 
 	// Resolution is exposed in Graphics > Ambient Occlusion (as a slider).
 
-	bool ssaoNormalBuf = r_ssaoNormalBuffer.GetBool();
-	if ( ImGui::Checkbox( "Normal Buffer (bump-mapped)", &ssaoNormalBuf ) ) {
-		r_ssaoNormalBuffer.SetBool( ssaoNormalBuf );
-	}
-	AddTooltip( "Feed SSAO from a real bump-mapped normal G-buffer (an extra opaque geometry pass) "
+	CvarCheckbox( "Normal Buffer (bump-mapped)", r_ssaoNormalBuffer, "Feed SSAO from a real bump-mapped normal G-buffer (an extra opaque geometry pass) "
 		"instead of normals reconstructed from depth. Picks up normal-map surface detail and removes "
 		"faceting (see Debug View 3), at the cost of one geometry pass. Off = reconstruct from depth "
 		"(cheaper). Foundation for parallax-occlusion / displacement later." );
 
-	bool ssaoBent = r_ssaoBentNormal.GetBool();
-	if ( ImGui::Checkbox( "Bent Normals", &ssaoBent ) ) {
-		r_ssaoBentNormal.SetBool( ssaoBent );
-	}
-	AddTooltip( "Shade the AMBIENT light along the bent normal (average unoccluded direction) so it "
+	CvarCheckbox( "Bent Normals", r_ssaoBentNormal, "Shade the AMBIENT light along the bent normal (average unoccluded direction) so it "
 		"responds to macro occlusion, not just the surface normal. Visible in Debug View 2. Note: "
 		"only bites where there IS ambient light, which is sparse in Doom 3, so the effect is subtle." );
 
 	ImGui::BeginDisabled( !r_ssaoBentNormal.GetBool() );
-	float ssaoBentStr = r_ssaoBentStrength.GetFloat();
-	if ( ImGui::SliderFloat( "Bent Strength", &ssaoBentStr, 0.0f, 1.0f, "%.2f" ) ) {
-		r_ssaoBentStrength.SetFloat( ssaoBentStr );
-	}
-	AddTooltip( "How far the ambient lookup bends from the surface normal toward the bent normal. "
+	CvarSliderF( "Bent Strength", r_ssaoBentStrength, 0.0f, 1.0f, "%.2f", "How far the ambient lookup bends from the surface normal toward the bent normal. "
 		"0 = surface normal (no effect), 1 = fully bent. Default 0.5." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaobentstr" ) ) { r_ssaoBentStrength.Reset(); }
 	ImGui::EndDisabled();
 
-	bool ssaoSpec = r_ssaoSpecular.GetBool();
-	if ( ImGui::Checkbox( "Specular Occlusion", &ssaoSpec ) ) {
-		r_ssaoSpecular.SetBool( ssaoSpec );
-	}
-	AddTooltip( "Also dim specular highlights in occluded areas on direct lights (stronger "
+	CvarCheckbox( "Specular Occlusion", r_ssaoSpecular, "Also dim specular highlights in occluded areas on direct lights (stronger "
 		"anti-plastic look; a mild deviation from vanilla). Scaled by Direct Light AO. Off by default." );
 
 	ImGui::EndDisabled();	// ssao on
@@ -5611,29 +5201,17 @@ static void DrawDbgGroup_OcclusionMaps()
 	// strength sliders.
 	if ( BeginSettingsGroup( "Occlusion Maps" ) ) {
 		ImGui::BeginDisabled( !supported );
-		bool oclMaps = r_occlusionMaps.GetBool();
-		if ( ImGui::Checkbox( "Baked Occlusion Maps (r_occlusionMaps)", &oclMaps ) ) {
-			r_occlusionMaps.SetBool( oclMaps );
-		}
-		AddTooltip( "Per-material baked ambient-occlusion textures (the `occlusionmap` material "
+		CvarCheckbox( "Baked Occlusion Maps (r_occlusionMaps)", r_occlusionMaps, "Per-material baked ambient-occlusion textures (the `occlusionmap` material "
 			"stage), applied to the ambient and direct-light diffuse like SSAO. Inert unless a "
 			"material ships an occlusion map; no stock Doom 3 asset does, so this targets mods." );
 
 		ImGui::BeginDisabled( !r_occlusionMaps.GetBool() );
-		float oclScale = r_occlusionMapScale.GetFloat();
-		if ( ImGui::SliderFloat( "AO Map Strength", &oclScale, 0.0f, 1.0f, "%.2f" ) ) {
-			r_occlusionMapScale.SetFloat( oclScale );
-		}
-		AddTooltip( "How strongly the occlusion map darkens the ambient term. 0 = off, 1 = the map "
+		CvarSliderF( "AO Map Strength", r_occlusionMapScale, 0.0f, 1.0f, "%.2f", "How strongly the occlusion map darkens the ambient term. 0 = off, 1 = the map "
 			"at full darkening. Default 1.0." );
 		ImGui::SameLine();
 		if ( ImGui::SmallButton( "reset##oclscale" ) ) { r_occlusionMapScale.Reset(); }
 
-		float oclDirect = r_occlusionMapDirect.GetFloat();
-		if ( ImGui::SliderFloat( "Direct Light AO (map)", &oclDirect, 0.0f, 1.0f, "%.2f" ) ) {
-			r_occlusionMapDirect.SetFloat( oclDirect );
-		}
-		AddTooltip( "How strongly the occlusion map darkens direct (dynamic) light's diffuse, as a "
+		CvarSliderF( "Direct Light AO (map)", r_occlusionMapDirect, 0.0f, 1.0f, "%.2f", "How strongly the occlusion map darkens direct (dynamic) light's diffuse, as a "
 			"fraction of AO Map Strength. Doom 3 is mostly dynamic light, so this is what makes the "
 			"map visible; lower it if AO looks baked-in under moving lights. 0 = ambient-only. Default 0.9." );
 		ImGui::SameLine();
