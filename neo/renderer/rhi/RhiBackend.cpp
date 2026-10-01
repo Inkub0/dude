@@ -2925,6 +2925,229 @@ void RB_RHI_StagePolyOffsetEnd( rhi::RHI *r, const shaderStage_t *pStage, const 
 
 /*
 =============
+RB_RHI_FillStageParms
+
+Fills the per-stage RenderParams for a generic ambient stage: texture matrix,
+the berserk / hell-time display overrides, vertex-color mode, stage color, the
+C-lite HDR additive overbright, and the fixed-function alpha-test translation.
+Lifted verbatim from RB_RHI_RenderShaderPasses; parms is owned by the caller so
+the later tess fill + AllocUniforms still see it.
+=============
+*/
+static void RB_RHI_FillStageParms( rhi::RenderParams &parms, const float mvp[16],
+        const shaderStage_t *pStage, const float *regs, const float color[4],
+        bool isBerserkBlit, rhi::ImageHandle berserkTrail,
+        bool isHelltimeDraw, rhi::ImageHandle helltimeTrail, float helltimeSsX, float helltimeSsY ) {
+	memset( &parms, 0, sizeof( parms ) );
+	memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
+
+	// texture matrix (same reg evaluation as R_SetDrawInteraction)
+	if ( pStage->texture.hasMatrix ) {
+		parms.diffuseMatrixS[0] = regs[pStage->texture.matrix[0][0]];
+		parms.diffuseMatrixS[1] = regs[pStage->texture.matrix[0][1]];
+		parms.diffuseMatrixS[2] = 0.0f;
+		parms.diffuseMatrixS[3] = regs[pStage->texture.matrix[0][2]];
+		parms.diffuseMatrixT[0] = regs[pStage->texture.matrix[1][0]];
+		parms.diffuseMatrixT[1] = regs[pStage->texture.matrix[1][1]];
+		parms.diffuseMatrixT[2] = 0.0f;
+		parms.diffuseMatrixT[3] = regs[pStage->texture.matrix[1][2]];
+		// keep scroll offsets from growing unbounded
+		if ( parms.diffuseMatrixS[3] < -40.0f || parms.diffuseMatrixS[3] > 40.0f ) {
+			parms.diffuseMatrixS[3] -= (int)parms.diffuseMatrixS[3];
+		}
+		if ( parms.diffuseMatrixT[3] < -40.0f || parms.diffuseMatrixT[3] > 40.0f ) {
+			parms.diffuseMatrixT[3] -= (int)parms.diffuseMatrixT[3];
+		}
+	} else {
+		parms.diffuseMatrixS[0] = 1.0f;
+		parms.diffuseMatrixT[1] = 1.0f;
+	}
+
+	// berserk vision display (berserk.frag): show the accumulated feedback buffer when
+	// present (hasTrail → .z), else the plain captured scene. The stage's texture matrix
+	// (the _scratch V-flip) still drives var_TexCoord for both.
+	if ( isBerserkBlit ) {
+		parms.localParam0[2] = berserkTrail ? 1.0f : 0.0f;
+	}
+	// hell-time display: same `berserk` display shader — show the accumulated trail (which
+	// already folds the sharp centre + the edge zoom-trail) when present, else the plain scene.
+	if ( isHelltimeDraw ) {
+		parms.localParam0[2] = helltimeTrail ? 1.0f : 0.0f;
+		if ( helltimeTrail ) {
+			// map cr_draw's [0..shiftScale] stretchpic texcoords onto the full 0..1 trail RT
+			// (see the shiftScale computation above). Only when a trail exists; the no-trail
+			// fallback keeps cr_draw's own texcoords so it samples _currentRender correctly.
+			parms.diffuseMatrixS[0] = ( helltimeSsX > 0.0f ) ? 1.0f / helltimeSsX : 1.0f;
+			parms.diffuseMatrixS[1] = 0.0f;
+			parms.diffuseMatrixS[3] = 0.0f;
+			parms.diffuseMatrixT[0] = 0.0f;
+			parms.diffuseMatrixT[1] = ( helltimeSsY > 0.0f ) ? 1.0f / helltimeSsY : 1.0f;
+			parms.diffuseMatrixT[3] = 0.0f;
+		}
+	}
+
+	// vertex color mode: var_Color = (attr_Color*modulate + add) * u_color
+	switch ( pStage->vertexColor ) {
+	case SVC_IGNORE:
+		parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
+		break;
+	case SVC_MODULATE:
+		parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = 1.0f;
+		break;
+	case SVC_INVERSE_MODULATE:
+		parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = -1.0f;
+		parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
+		break;
+	}
+	parms.color[0] = color[0];
+	parms.color[1] = color[1];
+	parms.color[2] = color[2];
+	parms.color[3] = color[3];
+
+	// DUDE C-lite HDR overbright (docs/hdr-pipeline.md Phase C): scale additive
+	// self-illum stages (blend add — lamps, monitor screens, fire, glares) so they
+	// exceed 1.0 in the float scene buffer, giving the tonemap curve real highlight
+	// range and eye-adaptation bright anchors to measure. Only while the HDR float
+	// target is bound (on the 8-bit path >1 would just clip to white) AND a tonemap
+	// curve is active (r_hdrTonemap>=1, like r_hdrExposure — so the faithful mode-0
+	// look is never touched), RGB only (alpha untouched), and only for the ONE|ONE
+	// additive blend. The >1 guard makes r_hdrOverbright 1 skip entirely, so it stays
+	// bit-identical whenever it is off. Boosts the old-style generic stages here; soft
+	// particles, custom-ARB and texgen stages took an earlier branch and stay unboosted.
+	if ( rbHdrActiveThisFrame && r_hdrTonemap.GetInteger() >= 1 && r_hdrOverbright.GetFloat() > 1.0f
+	     && ( pStage->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) == ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE ) ) {
+		const float ob = r_hdrOverbright.GetFloat();
+		parms.color[0] *= ob;
+		parms.color[1] *= ob;
+		parms.color[2] *= ob;
+		// pre-saturate so the tonemap doesn't wash coloured emissive (fire/lava) to white;
+		// generic.frag reads localParam0.x (>1 = boost, white is unaffected).
+		parms.localParam0[0] = r_hdrOverbrightSat.GetFloat();
+	}
+
+	// fixed-function alpha test bits -> in-shader test (fail if a < ref)
+	switch ( pStage->drawStateBits & GLS_ATEST_BITS ) {
+	case GLS_ATEST_GE_128:
+		parms.alphaTest[0] = 0.5f;
+		parms.alphaTest[1] = 1.0f;
+		break;
+	case GLS_ATEST_EQ_255:
+		parms.alphaTest[0] = 1.0f;
+		parms.alphaTest[1] = 1.0f;
+		break;
+	case GLS_ATEST_LT_128:
+		RB_RHI_LogOnce( "GLS_ATEST_LT_128 stages" );
+		break;
+	default:
+		break;
+	}
+}
+
+/*
+=============
+RB_RHI_BuildStagePipeline
+
+Translates a generic stage's draw-state bits into a PipelineDesc and binds it:
+the 2D-view depth-always override, the hell-time opaque-replace override, the
+berserk / hell-time `berserk` display shader, cull, and the tessellate flag.
+Lifted verbatim from RB_RHI_RenderShaderPasses.
+=============
+*/
+static void RB_RHI_BuildStagePipeline( rhi::RHI *r, const viewDef_t *viewDef,
+        const idMaterial *shader, const shaderStage_t *pStage, const rhi::StageIR &si,
+        bool tess, bool isBerserkBlit, bool isHelltimeDraw ) {
+	// 2D views: legacy disables depth test entirely; equivalent here is
+	// depth-always + no depth writes
+	rhi::PipelineDesc pd;
+	pd.stateBits = ( pStage->drawStateBits & ~GLS_ATEST_BITS );
+	if ( !viewDef->viewEntitys ) {
+		// 2D views (menu/console/HUD/loading): force depth-always. Clear any
+		// authored depth-func first -- a stage that carries GLS_DEPTHFUNC_EQUAL
+		// (e.g. the menu idlogo cinematic) would otherwise be left with BOTH
+		// the EQUAL and ALWAYS bits set, and the compare-op translation picks
+		// EQUAL (checked first), discarding every fragment against the 2D depth
+		// buffer -> the surface renders black. (In 3D the EQUAL is legit: the
+		// depth prepass gives it something to match, which is why the same
+		// videoMap materials play fine in-game.)
+		pd.stateBits = ( pd.stateBits & ~( GLS_DEPTHFUNC_EQUAL | GLS_DEPTHFUNC_ALWAYS ) )
+			| GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	}
+	// hell-time display: cr_draw's stock blend is gl_dst_alpha, but the trail already folds
+	// the sharp centre + edge zoom-trail, so draw it as an opaque replace of the clean-scene
+	// framebuffer — the game's Blendback then cross-fades it in/out by the fader alpha.
+	if ( isHelltimeDraw ) {
+		pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
+	}
+	// berserk / hell-time vision: blit the accumulated feedback buffer through the `berserk`
+	// display shader instead of a plain stretch — the zoom-trail lives in that buffer.
+	pd.shader = ( isBerserkBlit || isHelltimeDraw ) ? r->LoadShader( "berserk" ) : si.program;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = RB_RHI_CullFor( viewDef, shader->GetCullType() );
+	pd.tessellate = tess;
+	r->BindPipeline( pd );
+}
+
+/*
+=============
+RB_RHI_EmitStageDraw
+
+Builds the DrawArgs for a generic stage (deform-once vs streamed geometry,
+uniform binding, unit-0 stage image, tess bump/height on units 1/15, and the
+berserk / hell-time trail on unit 1), issues the draw, and bumps the element/
+index/vertex counters. Lifted verbatim from RB_RHI_RenderShaderPasses.
+=============
+*/
+static void RB_RHI_EmitStageDraw( rhi::RHI *r, const srfTriangles_t *tri, const drawSurf_t *surf,
+        const rhi::RenderParams &parms, rhi::BufferHandle ub, int uniOfs,
+        rhi::BufferHandle vb, int vertOfs, rhi::BufferHandle ib, int idxOfs,
+        rhi::ImageHandle stageImage, bool tess, idImage *tessBump, bool useDeform,
+        bool isBerserkBlit, rhi::ImageHandle berserkTrail, bool isHelltimeDraw, rhi::ImageHandle helltimeTrail ) {
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
+	da.vertexOffset = useDeform ? 0 : vertOfs;
+	da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
+	da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
+	da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	da.textures[0] = stageImage;	// Vulkan path; 0 on GL3 (binds went via idImage)
+	if ( tess ) {
+		// unit 1 = displacement bump for generic.tese (Vulkan-only; GL3 never
+		// tessellates). tessBump is flatNormalMap when the material has no bump.
+		idImage *bumpImg = tessBump ? tessBump : globalImages->flatNormalMap;
+		bumpImg->Bind();		// upload trigger under Vulkan
+		da.textures[1] = bumpImg->rhiHandle ? bumpImg->rhiHandle
+		                                    : globalImages->flatNormalMap->rhiHandle;
+		// DUDE: unit 15 = the SIGNED displacement height generic.tese actually pushes
+		// with. Set straight on DrawArgs (this pass never went through RB_RHI_BindUnit),
+		// and with the SAME image the zfill prepass used for this surface, or the blend
+		// stage displaces to a different depth and fails depth-EQUAL against the seal.
+		idImage *heightImg = RB_RHI_TessHeightImage( surf, true );
+		heightImg->Bind();		// upload trigger under Vulkan
+		da.tessHeight = heightImg->rhiHandle;
+	}
+	if ( isBerserkBlit ) {
+		// unit 1 = the ghost trail (Vulkan needs it in DrawArgs; GL already bound it
+		// in RB_RHI_BerserkAccum). Without a trail, bind _scratch as a placeholder so
+		// the u_trail sampler is valid on Vulkan — the shader ignores it (hasTrail=0).
+		da.textures[1] = berserkTrail ? berserkTrail : stageImage;
+	}
+	if ( isHelltimeDraw ) {
+		// unit 1 = the hell-time trail (VK via DrawArgs; GL bound in RB_RHI_HelltimeAccum).
+		// Placeholder = the stage's _currentRender when there's no trail (hasTrail=0).
+		da.textures[1] = helltimeTrail ? helltimeTrail : stageImage;
+	}
+	r->Draw( da );
+
+	backEnd.pc.c_drawElements++;
+	backEnd.pc.c_drawIndexes += tri->numIndexes;
+	backEnd.pc.c_drawVertexes += tri->numVerts;
+}
+
+/*
+=============
 RB_RHI_RenderShaderPasses
 
 Ambient stages of one surface, driven by the Material IR: old-style stages
@@ -3151,109 +3374,8 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		}
 
 		rhi::RenderParams parms;
-		memset( &parms, 0, sizeof( parms ) );
-		memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
-
-		// texture matrix (same reg evaluation as R_SetDrawInteraction)
-		if ( pStage->texture.hasMatrix ) {
-			parms.diffuseMatrixS[0] = regs[pStage->texture.matrix[0][0]];
-			parms.diffuseMatrixS[1] = regs[pStage->texture.matrix[0][1]];
-			parms.diffuseMatrixS[2] = 0.0f;
-			parms.diffuseMatrixS[3] = regs[pStage->texture.matrix[0][2]];
-			parms.diffuseMatrixT[0] = regs[pStage->texture.matrix[1][0]];
-			parms.diffuseMatrixT[1] = regs[pStage->texture.matrix[1][1]];
-			parms.diffuseMatrixT[2] = 0.0f;
-			parms.diffuseMatrixT[3] = regs[pStage->texture.matrix[1][2]];
-			// keep scroll offsets from growing unbounded
-			if ( parms.diffuseMatrixS[3] < -40.0f || parms.diffuseMatrixS[3] > 40.0f ) {
-				parms.diffuseMatrixS[3] -= (int)parms.diffuseMatrixS[3];
-			}
-			if ( parms.diffuseMatrixT[3] < -40.0f || parms.diffuseMatrixT[3] > 40.0f ) {
-				parms.diffuseMatrixT[3] -= (int)parms.diffuseMatrixT[3];
-			}
-		} else {
-			parms.diffuseMatrixS[0] = 1.0f;
-			parms.diffuseMatrixT[1] = 1.0f;
-		}
-
-		// berserk vision display (berserk.frag): show the accumulated feedback buffer when
-		// present (hasTrail → .z), else the plain captured scene. The stage's texture matrix
-		// (the _scratch V-flip) still drives var_TexCoord for both.
-		if ( isBerserkBlit ) {
-			parms.localParam0[2] = berserkTrail ? 1.0f : 0.0f;
-		}
-		// hell-time display: same `berserk` display shader — show the accumulated trail (which
-		// already folds the sharp centre + the edge zoom-trail) when present, else the plain scene.
-		if ( isHelltimeDraw ) {
-			parms.localParam0[2] = helltimeTrail ? 1.0f : 0.0f;
-			if ( helltimeTrail ) {
-				// map cr_draw's [0..shiftScale] stretchpic texcoords onto the full 0..1 trail RT
-				// (see the shiftScale computation above). Only when a trail exists; the no-trail
-				// fallback keeps cr_draw's own texcoords so it samples _currentRender correctly.
-				parms.diffuseMatrixS[0] = ( helltimeSsX > 0.0f ) ? 1.0f / helltimeSsX : 1.0f;
-				parms.diffuseMatrixS[1] = 0.0f;
-				parms.diffuseMatrixS[3] = 0.0f;
-				parms.diffuseMatrixT[0] = 0.0f;
-				parms.diffuseMatrixT[1] = ( helltimeSsY > 0.0f ) ? 1.0f / helltimeSsY : 1.0f;
-				parms.diffuseMatrixT[3] = 0.0f;
-			}
-		}
-
-		// vertex color mode: var_Color = (attr_Color*modulate + add) * u_color
-		switch ( pStage->vertexColor ) {
-		case SVC_IGNORE:
-			parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
-			break;
-		case SVC_MODULATE:
-			parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = 1.0f;
-			break;
-		case SVC_INVERSE_MODULATE:
-			parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = -1.0f;
-			parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
-			break;
-		}
-		parms.color[0] = color[0];
-		parms.color[1] = color[1];
-		parms.color[2] = color[2];
-		parms.color[3] = color[3];
-
-		// DUDE C-lite HDR overbright (docs/hdr-pipeline.md Phase C): scale additive
-		// self-illum stages (blend add — lamps, monitor screens, fire, glares) so they
-		// exceed 1.0 in the float scene buffer, giving the tonemap curve real highlight
-		// range and eye-adaptation bright anchors to measure. Only while the HDR float
-		// target is bound (on the 8-bit path >1 would just clip to white) AND a tonemap
-		// curve is active (r_hdrTonemap>=1, like r_hdrExposure — so the faithful mode-0
-		// look is never touched), RGB only (alpha untouched), and only for the ONE|ONE
-		// additive blend. The >1 guard makes r_hdrOverbright 1 skip entirely, so it stays
-		// bit-identical whenever it is off. Boosts the old-style generic stages here; soft
-		// particles, custom-ARB and texgen stages took an earlier branch and stay unboosted.
-		if ( rbHdrActiveThisFrame && r_hdrTonemap.GetInteger() >= 1 && r_hdrOverbright.GetFloat() > 1.0f
-		     && ( pStage->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) == ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE ) ) {
-			const float ob = r_hdrOverbright.GetFloat();
-			parms.color[0] *= ob;
-			parms.color[1] *= ob;
-			parms.color[2] *= ob;
-			// pre-saturate so the tonemap doesn't wash coloured emissive (fire/lava) to white;
-			// generic.frag reads localParam0.x (>1 = boost, white is unaffected).
-			parms.localParam0[0] = r_hdrOverbrightSat.GetFloat();
-		}
-
-		// fixed-function alpha test bits -> in-shader test (fail if a < ref)
-		switch ( pStage->drawStateBits & GLS_ATEST_BITS ) {
-		case GLS_ATEST_GE_128:
-			parms.alphaTest[0] = 0.5f;
-			parms.alphaTest[1] = 1.0f;
-			break;
-		case GLS_ATEST_EQ_255:
-			parms.alphaTest[0] = 1.0f;
-			parms.alphaTest[1] = 1.0f;
-			break;
-		case GLS_ATEST_LT_128:
-			RB_RHI_LogOnce( "GLS_ATEST_LT_128 stages" );
-			break;
-		default:
-			break;
-		}
+		RB_RHI_FillStageParms( parms, mvp, pStage, regs, color, isBerserkBlit, berserkTrail,
+		                       isHelltimeDraw, helltimeTrail, helltimeSsX, helltimeSsY );
 
 		// DUDE tessellation (docs/tessellation.md): this pass draws a material's ambient/emissive
 		// stages. Two cases:
@@ -3303,78 +3425,11 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			continue;
 		}
 
-		// 2D views: legacy disables depth test entirely; equivalent here is
-		// depth-always + no depth writes
-		rhi::PipelineDesc pd;
-		pd.stateBits = ( pStage->drawStateBits & ~GLS_ATEST_BITS );
-		if ( !viewDef->viewEntitys ) {
-			// 2D views (menu/console/HUD/loading): force depth-always. Clear any
-			// authored depth-func first -- a stage that carries GLS_DEPTHFUNC_EQUAL
-			// (e.g. the menu idlogo cinematic) would otherwise be left with BOTH
-			// the EQUAL and ALWAYS bits set, and the compare-op translation picks
-			// EQUAL (checked first), discarding every fragment against the 2D depth
-			// buffer -> the surface renders black. (In 3D the EQUAL is legit: the
-			// depth prepass gives it something to match, which is why the same
-			// videoMap materials play fine in-game.)
-			pd.stateBits = ( pd.stateBits & ~( GLS_DEPTHFUNC_EQUAL | GLS_DEPTHFUNC_ALWAYS ) )
-				| GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
-		}
-		// hell-time display: cr_draw's stock blend is gl_dst_alpha, but the trail already folds
-		// the sharp centre + edge zoom-trail, so draw it as an opaque replace of the clean-scene
-		// framebuffer — the game's Blendback then cross-fades it in/out by the fader alpha.
-		if ( isHelltimeDraw ) {
-			pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;
-		}
-		// berserk / hell-time vision: blit the accumulated feedback buffer through the `berserk`
-		// display shader instead of a plain stretch — the zoom-trail lives in that buffer.
-		pd.shader = ( isBerserkBlit || isHelltimeDraw ) ? r->LoadShader( "berserk" ) : si.program;
-		pd.vertexLayout = rhi::VL_DRAWVERT;
-		pd.cullType = RB_RHI_CullFor( viewDef, shader->GetCullType() );
-		pd.tessellate = tess;
-		r->BindPipeline( pd );
+		RB_RHI_BuildStagePipeline( r, viewDef, shader, pStage, si, tess, isBerserkBlit, isHelltimeDraw );
 
-		rhi::DrawArgs da;
-		memset( &da, 0, sizeof( da ) );
-		da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
-		da.vertexOffset = useDeform ? 0 : vertOfs;
-		da.indexBuffer = useDeform ? tri->tessDeformIB : ib;
-		da.firstIndex = useDeform ? 0 : ( idxOfs / (int)sizeof( glIndex_t ) );
-		da.indexCount = useDeform ? tri->tessDeformIndexes : tri->numIndexes;
-		da.uniformBuffer = ub;
-		da.uniformOffset = uniOfs;
-		da.uniformSize = sizeof( parms );
-		da.textures[0] = stageImage;	// Vulkan path; 0 on GL3 (binds went via idImage)
-		if ( tess ) {
-			// unit 1 = displacement bump for generic.tese (Vulkan-only; GL3 never
-			// tessellates). tessBump is flatNormalMap when the material has no bump.
-			idImage *bumpImg = tessBump ? tessBump : globalImages->flatNormalMap;
-			bumpImg->Bind();		// upload trigger under Vulkan
-			da.textures[1] = bumpImg->rhiHandle ? bumpImg->rhiHandle
-			                                    : globalImages->flatNormalMap->rhiHandle;
-			// DUDE: unit 15 = the SIGNED displacement height generic.tese actually pushes
-			// with. Set straight on DrawArgs (this pass never went through RB_RHI_BindUnit),
-			// and with the SAME image the zfill prepass used for this surface, or the blend
-			// stage displaces to a different depth and fails depth-EQUAL against the seal.
-			idImage *heightImg = RB_RHI_TessHeightImage( surf, true );
-			heightImg->Bind();		// upload trigger under Vulkan
-			da.tessHeight = heightImg->rhiHandle;
-		}
-		if ( isBerserkBlit ) {
-			// unit 1 = the ghost trail (Vulkan needs it in DrawArgs; GL already bound it
-			// in RB_RHI_BerserkAccum). Without a trail, bind _scratch as a placeholder so
-			// the u_trail sampler is valid on Vulkan — the shader ignores it (hasTrail=0).
-			da.textures[1] = berserkTrail ? berserkTrail : stageImage;
-		}
-		if ( isHelltimeDraw ) {
-			// unit 1 = the hell-time trail (VK via DrawArgs; GL bound in RB_RHI_HelltimeAccum).
-			// Placeholder = the stage's _currentRender when there's no trail (hasTrail=0).
-			da.textures[1] = helltimeTrail ? helltimeTrail : stageImage;
-		}
-		r->Draw( da );
-
-		backEnd.pc.c_drawElements++;
-		backEnd.pc.c_drawIndexes += tri->numIndexes;
-		backEnd.pc.c_drawVertexes += tri->numVerts;
+		RB_RHI_EmitStageDraw( r, tri, surf, parms, ub, uniOfs, vb, vertOfs, ib, idxOfs,
+		                      stageImage, tess, tessBump, useDeform,
+		                      isBerserkBlit, berserkTrail, isHelltimeDraw, helltimeTrail );
 
 		RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 	}
