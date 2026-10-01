@@ -65,7 +65,7 @@ idCVar r_useLightPortalFlow( "r_useLightPortalFlow", "1", CVAR_RENDERER | CVAR_B
 // (1.1 baseline) and "vulkan-rt" (modern profile + ray tracing) are in development
 // (see docs/vulkan-port.md) and require a DHEWM3_VULKAN build. Switching backends
 // needs a vid_restart (window recreate); the settings-menu selector comes later.
-idCVar r_graphicsAPI( "r_graphicsAPI", "opengl", CVAR_RENDERER | CVAR_ARCHIVE, "rendering backend: opengl (legacy, default), opengl3 (GL 3.3 core, in development), vulkan, vulkan-rt (in development)" );
+idCVar r_graphicsAPI( "r_graphicsAPI", "opengl", CVAR_RENDERER | CVAR_ARCHIVE, "rendering backend: opengl (legacy, default), opengl3 (GL 3.3 core), vulkan, vulkan-rt (Vulkan + ray tracing)" );
 idCVar r_rhiActive( "r_rhiActive", "0", CVAR_RENDERER | CVAR_BOOL, "1 when the active backend routes through the RHI executor (opengl3 / vulkan); set by the renderer at init, don't change" );
 idCVar r_multiSamples( "r_multiSamples", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "number of antialiasing samples" );
 idCVar r_mode( "r_mode", "5", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_INTEGER, "video mode number" );
@@ -1266,7 +1266,7 @@ void R_InitOpenGL( void ) {
 	}
 
 	// Backend selection (docs/vulkan-port.md Phase 3 / Phase 4). "opengl3" runs
-	// the GL 3.3 core backend; "vulkan" runs the Vulkan backend (M1 bring-up)
+	// the GL 3.3 core backend; "vulkan"/"vulkan-rt" run the Vulkan backend
 	// when the build has it AND the SDL probe passes — the cvar is archived, so
 	// an unsupported system falls back to GL instead of wedging the boot.
 	// coreProfile = "a GL core context is live"; rhiBackend = "the frontend
@@ -1287,7 +1287,7 @@ void R_InitOpenGL( void ) {
 			vulkanMode = true;
 			glConfig.rhiBackend = true;
 			rhi::SetActiveBackend( rhi::BT_VULKAN );
-			common->Printf( "r_graphicsAPI %s: Vulkan backend (M1 bring-up: clear + present only)\n", r_graphicsAPI.GetString() );
+			common->Printf( "r_graphicsAPI %s: Vulkan backend\n", r_graphicsAPI.GetString() );
 		} else {
 			common->Warning( "r_graphicsAPI \"%s\": this system can't do SDL+Vulkan (see probe warnings); using OpenGL", r_graphicsAPI.GetString() );
 		}

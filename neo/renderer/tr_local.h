@@ -1914,7 +1914,6 @@ srfTriangles_t *	R_MergeTriangles( const srfTriangles_t *tri1, const srfTriangle
 // if the deformed verts have significant enough texture coordinate changes to reverse the texture
 // polarity of a triangle, the tangents will be incorrect
 void				R_DeriveTangents( srfTriangles_t *tri, bool allocFacePlanes = true );
-// DUDE tessellation: average coincident-vertex normals (near-parallel only) so a
 
 // deformable meshes precalculate as much as possible from a base frame, then generate
 // complete srfTriangles_t from just a new set of vertexes
