@@ -154,6 +154,15 @@ namespace ModCompat {
 void Init( void ) {
 	shim.Clear();
 
+	// Register the reload command once, before any early return — otherwise it wouldn't exist
+	// until a cfg was already present, which is exactly when you'd want to author + reload one.
+	static bool cmdRegistered = false;
+	if ( !cmdRegistered ) {
+		cmdSystem->AddCommand( "mods_translation_reload", Reload_f, CMD_FL_SYSTEM,
+			"reload base/mods-cvar-translation.cfg" );
+		cmdRegistered = true;
+	}
+
 	// Active mod = fs_game if set, else base. base itself doesn't need aliases,
 	// so we only parse when a mod is active (keeps hot-path free of lookups
 	// for stock DOOM3/RoE).
@@ -178,15 +187,6 @@ void Init( void ) {
 		common->Printf( "mod-cvar-translation: '%s' → %d aliases%s\n",
 			activeMod, shim.aliasFrom.Num(),
 			shim.autoCustomRes ? ", autoCustomRes" : "" );
-	}
-
-	// Command is idempotent — Init may be called multiple times (startup +
-	// reload). Guarded by the cmd system's own dup-name behavior.
-	static bool cmdRegistered = false;
-	if ( !cmdRegistered ) {
-		cmdSystem->AddCommand( "mods_translation_reload", Reload_f, CMD_FL_SYSTEM,
-			"reload base/mods-cvar-translation.cfg" );
-		cmdRegistered = true;
 	}
 }
 
