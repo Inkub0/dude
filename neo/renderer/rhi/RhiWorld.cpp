@@ -7121,6 +7121,23 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// screenCorrection/depthTexRecip below are the same resScale mapping). MUST use the same frameIndex NRD gets.
 	parms.localParam1[2] = cbActive ? (float)( 1 + ( (int)tr.frameCount & 1 ) ) : 0.0f;
 	parms.localParam1[3] = 0.004f;					// ray origin pulled toward the eye per unit depth (crease-leak fix)
+	// H6g golden-angle IGN reorientation, hoisted out of the shader: the per-frame lattice rotation (cos/sin)
+	// and the hashed per-frame offset depend only on the frame index, so computing them once here beats a
+	// per-pixel cos+sin+3-round-PCG-hash in every traced fragment (rtgi_ray.frag). Bit-for-bit the same inputs
+	// the shader used (uint(giFrameIndex), the same PCG constants, the golden-ratio sequence masked to 255).
+	// Delivered in u_particleRadius (.xy = cos/sin, .zw = offset); the shader applies the mat2 rotate + add.
+	{
+		const unsigned int fi = (unsigned int)giFrameIndex;			// == tr.frameCount & 0xFFFF, matching uint(u_localParam1.x)
+		unsigned int fh = fi * 747796405u + 2891336453u;			// PCG hash (same rounds as the old shader)
+		fh = ( ( fh >> ( ( fh >> 28u ) + 4u ) ) ^ fh ) * 277803737u;
+		fh = ( fh >> 22u ) ^ fh;
+		float gAng = (float)( fi & 255u ) * 0.61803399f;			// golden-ratio sequence -> low-discrepancy angle
+		gAng = ( gAng - idMath::Floor( gAng ) ) * 6.28318531f;		// fract() then *2pi, as the shader did
+		parms.particleRadius[0] = idMath::Cos( gAng );
+		parms.particleRadius[1] = idMath::Sin( gAng );
+		parms.particleRadius[2] = (float)( ( fh >> 3u ) & 1023u );
+		parms.particleRadius[3] = (float)( ( fh >> 13u ) & 1023u );
+	}
 	// the gather runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, and -> the full-res depth tc carries
 	// the (w/rw) stretch (mirrors RB_RHI_RtaoPass / RB_RHI_SSAOPass's scaled march). At scale 1: 1/w, 1/uploadW.
 	parms.screenCorrection[0] = 1.0f / rw;
@@ -7141,12 +7158,14 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.diffuseModifier[2] = 1.0f;				// confine each light to its Doom projection volume (RR16c-style)
 	parms.diffuseModifier[3] = ( giNumLights > 0 ) ? 1.0f : 0.0f;	// real-lights enable
 
+	r->GpuScopeBegin( "rtgi.ray" );					// r_vkGpuTime 2: the one-bounce ray trace + hit shading
 	r->BeginTargetPass( rhiRtgiRayRT, NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
 	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );		// set 2 (bindless materials) is auto-bound by the backend
 	r->EndPass();
+	r->GpuScopeEnd();
 	rhiRtgiRanThisView = true;
 	rhiRtgiDenoisedThisView = false;
 
@@ -7170,12 +7189,14 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			memcpy( gp.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world (normal encode)
 			gp.screenCorrection[0] = 1.0f / rw;	gp.screenCorrection[1] = 1.0f / rh;
 			gp.depthTexRecip[0] = ( (float)w / rw ) / uploadW;	gp.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
+			r->GpuScopeBegin( "rtgi.guides" );		// r_vkGpuTime 2: full-res NRD guide fill (checkerboard only)
 			r->BeginTargetPass( rhiRtgiGuideRT, NULL );
 			RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 			RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
 			backEnd.glState.tmu[1].current2DMap = -1;
 			RB_RHI_DrawFullscreen( r, guideProg, gp, 0 );
 			r->EndPass();
+			r->GpuScopeEnd();
 			giGuideRT = rhiRtgiGuideRT;
 		}
 	}
@@ -7200,9 +7221,11 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				memset( &cp, 0, sizeof( cp ) );
 				cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
 				cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
+				r->GpuScopeBegin( "rtgi.vel" );		// r_vkGpuTime 2: velocity downsample to GI res (resScale only)
 				r->BeginTargetPass( rhiRtgiVelRT, NULL );
 				RB_RHI_DrawFullscreen( r, copyProg, cp, giVelImg );
 				r->EndPass();
+				r->GpuScopeEnd();
 				nrdVel = r->GetRenderTargetImage( rhiRtgiVelRT );
 			}
 		}
@@ -7237,11 +7260,13 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				confParms.localParam0[2] = 0.35f;					// noise deadzone: ignore sub-noise relative diffs so stable surfaces keep full history
 				confParms.localParam0[3] = cbActive ? (float)( 1 + ( (int)tr.frameCount & 1 ) ) : 0.0f;	// H6g: checkerboard parity (0 = off, packed-read for traced cells)
 				confParms.windowCoord[2] = -1.0f;					// VK top-down: flip the velocity row (ssr_temporal convention)
+				r->GpuScopeBegin( "rtgi.conf" );		// r_vkGpuTime 2: H6f history-confidence pass
 				r->BeginTargetPass( rhiRtgiConfRT, NULL );
 				RB_RHI_BindRTImage( r, 1, giPrevDenoised );			// unit 1 = last frame's denoised GI (YCoCg)
 				RB_RHI_BindRTImage( r, 2, nrdVel );					// unit 2 = motion vectors at GI res
 				RB_RHI_DrawFullscreen( r, confProg, confParms, r->GetRenderTargetImage( rhiRtgiRayRT ) );	// unit 0 = this frame's raw gather
 				r->EndPass();
+				r->GpuScopeEnd();
 				giConfImg = r->GetRenderTargetImage( rhiRtgiConfRT );
 			}
 		}
@@ -7274,7 +7299,9 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.denoisingRange = 20000.0f;
 		da.frameIndex = (unsigned int)tr.frameCount;
 		da.reset = !rhiRtgiPrevValid;
+		r->GpuScopeBegin( "rtgi.denoise" );						// r_vkGpuTime 2: NRD REBLUR_DIFFUSE denoise dispatches
 		rhiRtgiDenoisedThisView = r->RtaoDenoise( da );			// giMode -> GI diffuse denoise into GetRtgiOutputImage
+		r->GpuScopeEnd();
 	}
 	// stage this frame's camera for next frame's GI reprojection (un-jittered, as passed)
 	memcpy( rhiRtgiPrevProj, viewDef->unjitteredProjectionMatrix, sizeof( rhiRtgiPrevProj ) );
@@ -8791,10 +8818,10 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 	RB_RHI_SSAOPass( r, viewDef );
 	r->GpuScopeEnd();
 	// H6a RT GI (docs/rtx-rtgi.md): the radiance-gather pass (behind r_rtgi, default off). Runs after the
-	// AO passes since it reuses the same sealed depth + normal G-buffer; own scope for r_vkGpuTime 2.
-	r->GpuScopeBegin( "rtgi" );
+	// AO passes since it reuses the same sealed depth + normal G-buffer. The pass opens its OWN sub-scopes
+	// (rtgi.ray / rtgi.guides / rtgi.conf / rtgi.denoise) for r_vkGpuTime 2, so the ray trace and the NRD
+	// denoise are timed separately — scopes do not nest, so there is no outer "rtgi" scope here.
 	RB_RHI_RtgiPass( r, viewDef );
-	r->GpuScopeEnd();
 	// r_rtShadowBlur: validate the view + size the shared targets; the light loop builds each
 	// ray-served light's mask on demand (RB_RHI_RtShadowBlurLight)
 	RB_RHI_RtShadowBlurBegin( r, viewDef );
