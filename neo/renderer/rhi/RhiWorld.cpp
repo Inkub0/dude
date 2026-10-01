@@ -1538,79 +1538,12 @@ static void RB_RHI_FillSkinSSS( rhi::RenderParams &parms, const drawInteraction_
 	}
 }
 
-static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
-	rhi::RenderParams parms;
-	memset( &parms, 0, sizeof( parms ) );
-	memcpy( parms.mvpMatrix, ictx.mvp, sizeof( parms.mvpMatrix ) );
-	bool rtSun = false;			// mode-4 draw -> bind the ray-query interaction variant
-	bool blurMask = false;		// mode-5 draw -> this light's blurred ray mask on unit 13
-
-	memcpy( parms.localLightOrigin, din->localLightOrigin.ToFloatPtr(), 16 );
-	memcpy( parms.localViewOrigin, din->localViewOrigin.ToFloatPtr(), 16 );
-	memcpy( parms.lightProjectionS, din->lightProjection[0].ToFloatPtr(), 16 );
-	memcpy( parms.lightProjectionT, din->lightProjection[1].ToFloatPtr(), 16 );
-	memcpy( parms.lightProjectionQ, din->lightProjection[2].ToFloatPtr(), 16 );
-	memcpy( parms.lightFalloffS, din->lightProjection[3].ToFloatPtr(), 16 );
-	memcpy( parms.bumpMatrixS, din->bumpMatrix[0].ToFloatPtr(), 16 );
-	memcpy( parms.bumpMatrixT, din->bumpMatrix[1].ToFloatPtr(), 16 );
-	memcpy( parms.diffuseMatrixS, din->diffuseMatrix[0].ToFloatPtr(), 16 );
-	memcpy( parms.diffuseMatrixT, din->diffuseMatrix[1].ToFloatPtr(), 16 );
-	memcpy( parms.specularMatrixS, din->specularMatrix[0].ToFloatPtr(), 16 );
-	memcpy( parms.specularMatrixT, din->specularMatrix[1].ToFloatPtr(), 16 );
-
-	switch ( din->vertexColor ) {
-	case SVC_IGNORE:
-		parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
-		break;
-	case SVC_MODULATE:
-		parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = 1.0f;
-		break;
-	case SVC_INVERSE_MODULATE:
-		parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = -1.0f;
-		parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
-		break;
-	}
-
-	// r_whiteWorld 2 (clay): the light+material colour is baked into din->diffuseColor, so
-	// force the modifier white to strip both — the surface then reads only occlusion/relief
-	// (SSAO + POM self-shadow) in grey, with no coloured-light tint. Metalness is zeroed below.
-	const bool clayWorld = r_whiteWorld.GetInteger() >= 2;
-	if ( clayWorld ) {
-		parms.diffuseModifier[0] = parms.diffuseModifier[1] = parms.diffuseModifier[2] = parms.diffuseModifier[3] = 1.0f;
-		parms.specularModifier[0] = parms.specularModifier[1] = parms.specularModifier[2] = parms.specularModifier[3] = 1.0f;
-	} else {
-		memcpy( parms.diffuseModifier, din->diffuseColor.ToFloatPtr(), 16 );
-		memcpy( parms.specularModifier, din->specularColor.ToFloatPtr(), 16 );
-	}
-	// DUDE: decal sheen control — both the vanilla and the GGX lobe multiply by this modifier
-	float decalSheen = rhiFilmDraw ? 1.0f : R_DecalSheenScale( din->surf->material );
-	if ( !rhiFilmDraw && rhiFilmSurfs.Num() > 0 && din->surf->material->GetSort() == SS_DECAL
-		&& RB_RHI_SurfHasFilm( din->surf ) ) {
-		decalSheen = 0.0f;		// wet blood film on: it IS this decal's highlight
-	}
-	if ( decalSheen != 1.0f ) {
-		parms.specularModifier[0] *= decalSheen;
-		parms.specularModifier[1] *= decalSheen;
-		parms.specularModifier[2] *= decalSheen;
-	}
-
-	// DUDE Phase 3.5 specular tuning (interaction.frag). Defaults reproduce
-	// vanilla: scale 1, shading model 0 (the N.H lookup table). Only consumed by
-	// the regular interaction shader; the ambientLight shader ignores it.
-	parms.specularParms[0] = r_specularScale.GetFloat();
-	parms.specularParms[1] = r_specularExp.GetFloat();
-	parms.specularParms[2] = (float)r_shading.GetInteger();
-	// w carries the point-light cube PCF tap count (the interaction shader's cube
-	// branch reads it; the free specularParms slot avoids growing u_shadowParms past 4).
-	parms.specularParms[3] = (float)r_shadowMapCubePcf.GetInteger();
-
-	// PBR (GGX) interaction path + wet-blood film — extracted to RB_RHI_FillPbrAndFilm.
-	bool pbrOrganicSpecFallback = false;
-	RB_RHI_FillPbrAndFilm( parms, din, clayWorld, pbrOrganicSpecFallback );
-
-	// skin / flesh subsurface scattering — extracted to RB_RHI_FillSkinSSS.
-	RB_RHI_FillSkinSSS( parms, din );
-
+// Shadow-map / RT-shadow interaction params (DUDE Phase 3.5): the 4-way sun / RT-point /
+// 2D-spot / cube ladder plus the r_rtShadowBlur mask path. Writes parms and the two draw-mode
+// flags rtSun (bind the ray-query interaction variant) and blurMask (this light's blur mask on
+// unit 13). Extracted verbatim from RB_RHI_DrawInteraction.
+static void RB_RHI_FillShadowParms( rhi::RenderParams &parms, const drawInteraction_t *din,
+                                    bool &rtSun, bool &blurMask ) {
 	// shadow mapping (DUDE Phase 3.5): only the regular interaction shader samples
 	// the depth map — the ambientLight pass has no shadow term. The 2D lookup uses a
 	// SEPARATE, unbaked projection texgen (shadowProjection[], filled below), NOT the
@@ -1758,17 +1691,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			parms.pbrParms2[3] = r_shadowMapNormalOffset.GetFloat();
 		}
 	}
+}
 
-	// ambientlight.vert rebuilds a tangent-to-global rotation from these
-	const float *mm = din->surf->space->modelMatrix;
-	for ( int row = 0; row < 3; row++ ) {
-		float *dst = row == 0 ? parms.modelMatrixRow0 : ( row == 1 ? parms.modelMatrixRow1 : parms.modelMatrixRow2 );
-		dst[0] = mm[row];
-		dst[1] = mm[row + 4];
-		dst[2] = mm[row + 8];
-		dst[3] = mm[row + 12];
-	}
-
+static void RB_RHI_FillSsaoParms( rhi::RenderParams &parms, const drawInteraction_t *din ) {
 	// DUDE SSAO (docs/ssao-gtao.md Phase C). Occlude the ambient term always, and the
 	// direct-light diffuse by r_ssaoDirectLight -- Doom 3 has ~no ambient, so darkening
 	// only the ambient pass is invisible in normal scenes; the direct-light term is what
@@ -1798,7 +1723,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			}
 		}
 	}
+}
 
+static bool RB_RHI_FillContactShadowParms( rhi::RenderParams &parms, const drawInteraction_t *din ) {
 	// DUDE screen-space contact shadows (docs/contact-shadows.md). interaction.frag's
 	// contactShadowTerm marches the captured scene depth (_currentDepth, unit 16 - already
 	// sampleable, SSAO consumed it earlier this frame) from the fragment toward the light and
@@ -1836,7 +1763,10 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			parms.windowCoord[2] = vkModeCS ? -1.0f : 1.0f;	// view-Y sign for the top-down VK depth buffer (deviceRow)
 		}
 	}
+	return contactShadows;
+}
 
+static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawInteraction_t *din ) {
 	// DUDE material AO map (docs/occlusion-maps.md). A per-surface baked occlusion texture
 	// (the material's `occlusionmap` stage) darkens the ambient term, and -- scaled by
 	// r_occlusionMapDirect -- the direct-light diffuse, reusing the SSAO application path in
@@ -1879,15 +1809,10 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		parms.occlusionParms[2] = din->ambientLight ? 0.0f
 			: scale * idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapDirect.GetFloat() );
 	}
+	return occlusionImage;
+}
 
-	// RTGI reconcile (docs/rtx-rtgi.md H6c): on an AMBIENT draw with r_rtgi on, the fullscreen GI apply
-	// (RB_RHI_RtgiApply) adds real bounce light on top of this fake cube-map ambient. Hand ambientlight.frag
-	// r_rtgiAmbientKeep in the otherwise-unused u_color.x, encoded +1 so 0 = "GI off, keep 1 (no dim)", and
-	// it scales the fake ambient down so the two do not double-count.
-	if ( din->ambientLight && r_rtgi.GetBool() ) {
-		parms.color[0] = idMath::ClampFloat( 0.0f, 1.0f, r_rtgiAmbientKeep.GetFloat() ) + 1.0f;
-	}
-
+static idImage *RB_RHI_FillParallaxParms( rhi::RenderParams &parms, const drawInteraction_t *din ) {
 	// DUDE parallax occlusion mapping (docs/parallax.md). The interaction pass marches the
 	// bump stage's captured height map to offset the surface UVs, faking per-pixel relief on
 	// flat world geometry. Fragment-only (no geometry moved), so the flat depth prepass and
@@ -1924,6 +1849,110 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 			parms.parallaxParms2[0] = idMath::ClampFloat( 0.0f, 1.0f, r_parallaxShadow.GetFloat() );
 		}
 	}
+	return parallaxImage;
+}
+
+static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	memcpy( parms.mvpMatrix, ictx.mvp, sizeof( parms.mvpMatrix ) );
+	bool rtSun = false;			// mode-4 draw -> bind the ray-query interaction variant
+	bool blurMask = false;		// mode-5 draw -> this light's blurred ray mask on unit 13
+
+	memcpy( parms.localLightOrigin, din->localLightOrigin.ToFloatPtr(), 16 );
+	memcpy( parms.localViewOrigin, din->localViewOrigin.ToFloatPtr(), 16 );
+	memcpy( parms.lightProjectionS, din->lightProjection[0].ToFloatPtr(), 16 );
+	memcpy( parms.lightProjectionT, din->lightProjection[1].ToFloatPtr(), 16 );
+	memcpy( parms.lightProjectionQ, din->lightProjection[2].ToFloatPtr(), 16 );
+	memcpy( parms.lightFalloffS, din->lightProjection[3].ToFloatPtr(), 16 );
+	memcpy( parms.bumpMatrixS, din->bumpMatrix[0].ToFloatPtr(), 16 );
+	memcpy( parms.bumpMatrixT, din->bumpMatrix[1].ToFloatPtr(), 16 );
+	memcpy( parms.diffuseMatrixS, din->diffuseMatrix[0].ToFloatPtr(), 16 );
+	memcpy( parms.diffuseMatrixT, din->diffuseMatrix[1].ToFloatPtr(), 16 );
+	memcpy( parms.specularMatrixS, din->specularMatrix[0].ToFloatPtr(), 16 );
+	memcpy( parms.specularMatrixT, din->specularMatrix[1].ToFloatPtr(), 16 );
+
+	switch ( din->vertexColor ) {
+	case SVC_IGNORE:
+		parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
+		break;
+	case SVC_MODULATE:
+		parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = 1.0f;
+		break;
+	case SVC_INVERSE_MODULATE:
+		parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = -1.0f;
+		parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
+		break;
+	}
+
+	// r_whiteWorld 2 (clay): the light+material colour is baked into din->diffuseColor, so
+	// force the modifier white to strip both — the surface then reads only occlusion/relief
+	// (SSAO + POM self-shadow) in grey, with no coloured-light tint. Metalness is zeroed below.
+	const bool clayWorld = r_whiteWorld.GetInteger() >= 2;
+	if ( clayWorld ) {
+		parms.diffuseModifier[0] = parms.diffuseModifier[1] = parms.diffuseModifier[2] = parms.diffuseModifier[3] = 1.0f;
+		parms.specularModifier[0] = parms.specularModifier[1] = parms.specularModifier[2] = parms.specularModifier[3] = 1.0f;
+	} else {
+		memcpy( parms.diffuseModifier, din->diffuseColor.ToFloatPtr(), 16 );
+		memcpy( parms.specularModifier, din->specularColor.ToFloatPtr(), 16 );
+	}
+	// DUDE: decal sheen control — both the vanilla and the GGX lobe multiply by this modifier
+	float decalSheen = rhiFilmDraw ? 1.0f : R_DecalSheenScale( din->surf->material );
+	if ( !rhiFilmDraw && rhiFilmSurfs.Num() > 0 && din->surf->material->GetSort() == SS_DECAL
+		&& RB_RHI_SurfHasFilm( din->surf ) ) {
+		decalSheen = 0.0f;		// wet blood film on: it IS this decal's highlight
+	}
+	if ( decalSheen != 1.0f ) {
+		parms.specularModifier[0] *= decalSheen;
+		parms.specularModifier[1] *= decalSheen;
+		parms.specularModifier[2] *= decalSheen;
+	}
+
+	// DUDE Phase 3.5 specular tuning (interaction.frag). Defaults reproduce
+	// vanilla: scale 1, shading model 0 (the N.H lookup table). Only consumed by
+	// the regular interaction shader; the ambientLight shader ignores it.
+	parms.specularParms[0] = r_specularScale.GetFloat();
+	parms.specularParms[1] = r_specularExp.GetFloat();
+	parms.specularParms[2] = (float)r_shading.GetInteger();
+	// w carries the point-light cube PCF tap count (the interaction shader's cube
+	// branch reads it; the free specularParms slot avoids growing u_shadowParms past 4).
+	parms.specularParms[3] = (float)r_shadowMapCubePcf.GetInteger();
+
+	// PBR (GGX) interaction path + wet-blood film — extracted to RB_RHI_FillPbrAndFilm.
+	bool pbrOrganicSpecFallback = false;
+	RB_RHI_FillPbrAndFilm( parms, din, clayWorld, pbrOrganicSpecFallback );
+
+	// skin / flesh subsurface scattering — extracted to RB_RHI_FillSkinSSS.
+	RB_RHI_FillSkinSSS( parms, din );
+
+	// shadow-map / RT-shadow params (the 4-way ladder) -> RB_RHI_FillShadowParms.
+	RB_RHI_FillShadowParms( parms, din, rtSun, blurMask );
+
+	// ambientlight.vert rebuilds a tangent-to-global rotation from these
+	const float *mm = din->surf->space->modelMatrix;
+	for ( int row = 0; row < 3; row++ ) {
+		float *dst = row == 0 ? parms.modelMatrixRow0 : ( row == 1 ? parms.modelMatrixRow1 : parms.modelMatrixRow2 );
+		dst[0] = mm[row];
+		dst[1] = mm[row + 4];
+		dst[2] = mm[row + 8];
+		dst[3] = mm[row + 12];
+	}
+
+	RB_RHI_FillSsaoParms( parms, din );
+
+	bool contactShadows = RB_RHI_FillContactShadowParms( parms, din );
+
+	idImage *occlusionImage = RB_RHI_FillOcclusionParms( parms, din );
+
+	// RTGI reconcile (docs/rtx-rtgi.md H6c): on an AMBIENT draw with r_rtgi on, the fullscreen GI apply
+	// (RB_RHI_RtgiApply) adds real bounce light on top of this fake cube-map ambient. Hand ambientlight.frag
+	// r_rtgiAmbientKeep in the otherwise-unused u_color.x, encoded +1 so 0 = "GI off, keep 1 (no dim)", and
+	// it scales the fake ambient down so the two do not double-count.
+	if ( din->ambientLight && r_rtgi.GetBool() ) {
+		parms.color[0] = idMath::ClampFloat( 0.0f, 1.0f, r_rtgiAmbientKeep.GetFloat() ) + 1.0f;
+	}
+
+	idImage *parallaxImage = RB_RHI_FillParallaxParms( parms, din );
 
 	// texture units exactly as RB_ARB2_DrawInteraction / the README table
 	RB_RHI_BindUnit( 0, din->ambientLight ? globalImages->ambientNormalMap : globalImages->normalCubeMapImage );
