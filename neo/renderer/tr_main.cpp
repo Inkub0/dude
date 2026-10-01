@@ -2164,7 +2164,6 @@ static void R_RtBuildPerforatedBlas( rhi::RHI *r, const idRenderWorldLocal *worl
 	for ( int a = 0; a < world->NumAreas(); a++ ) {
 		gather( renderModelManager->FindModel( va( "_area%i", a ) ), NULL );
 	}
-	const int numWorldDescs = descs.Num();
 	idList<const idRenderModel *> unique;
 	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
 		// NOT gated on parms.noShadow: the perforated override ignores it, like the shadow-map path
@@ -2262,7 +2261,6 @@ static void R_RtBuildPerforatedBlas( rhi::RHI *r, const idRenderWorldLocal *worl
 		i += cnt;
 		while ( owner != NULL && i < descs.Num() && descs[i].model == owner ) { i++; }	// overflow of one model
 	}
-	(void)numWorldDescs;
 }
 
 // RR5: build the static worldspawn (_areaN) as PER-SURFACE multi-geometry BLASes fed from device-

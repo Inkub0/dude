@@ -190,10 +190,6 @@ void Init( void ) {
 	}
 }
 
-void Shutdown( void ) {
-	shim.Clear();
-}
-
 const char *ResolveAlias( const char *name ) {
 	if ( !name || !shim.loaded || !fs_modCompatShim.GetBool() ) return name;
 	if ( shim.aliasFrom.Num() == 0 ) return name;

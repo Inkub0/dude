@@ -22,7 +22,6 @@ namespace ModCompat {
 // again to reload after the user edits the cfg (also exposed as the
 // `mods_translation_reload` console command).
 void Init( void );
-void Shutdown( void );
 
 // Return the DUDE-side cvar name for the currently active mod, or `name`
 // itself if there's no alias (or if fs_modCompatShim is off). Never returns
