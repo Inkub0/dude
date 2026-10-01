@@ -2627,17 +2627,11 @@ static bool RB_RHI_ParticleLooksLikeSmoke( const idMaterial *mat ) {
 	if ( !mat ) {
 		return false;
 	}
-	idStr name = mat->GetName();
-	static const char * const kw[] = {
-		"smoke", "steam", "dust", "fog", "mist", "vapor", "vapour",
-		"haze", "smog", "cloud", "fume", "exhaust"
-	};
-	for ( int i = 0; i < (int)( sizeof( kw ) / sizeof( kw[0] ) ); i++ ) {
-		if ( name.Find( kw[i], false ) != -1 ) {
-			return true;
-		}
-	}
-	return false;
+	// The name-keyword classification is done once at IR build and cached (MaterialIR::
+	// particleSmoke), instead of copying the name + running ~12 substring searches per
+	// additive particle per frame. IR_Get is a hashed lookup, rebuilt on reloadShaders.
+	const rhi::MaterialIR *ir = rhi::IR_Get( mat );
+	return ir != NULL && ir->particleSmoke;
 }
 
 /*
@@ -3014,7 +3008,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 	// trail (berserk_accum ping-pong) composited under the live scene: skip the broken
 	// overlay here (note berserk is active this frame), then drive the trail + composite
 	// when the fullscreen _scratch is blitted back. Legacy keeps its original feedback path.
-	if ( idStr::Icmp( shader->GetName(), "textures/decals/berserk" ) == 0 ) {
+	if ( ir->berserkMaterial ) {		// classified once at IR build (was an Icmp per surface/frame)
 		rbBerserkFrame = true;
 		return;	// _scratch stays the clean scene; the effect happens at the blit
 	}
@@ -3047,15 +3041,12 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 	// and, at the final cr_draw blit, drive a ping-pong trail (RB_RHI_HelltimeAccum) + composite.
 	// The material name carries the level (bloodorb1/2/3). The game's FxFader + Blendback fade the
 	// effect in/out automatically, so no bridge cvar is needed. Legacy keeps its own _accum path.
-	const char *hlName = shader->GetName();
+	// hell-time level/pass classified once at IR build (was a Cmpn + char tests per surface/frame)
 	bool isHelltimeDraw = false;
-	if ( !viewDef->viewEntitys && idStr::Cmpn( hlName, "textures/smf/bloodorb", 21 ) == 0
-	     && hlName[21] >= '1' && hlName[21] <= '3' && hlName[22] == '/' ) {
-		const int lvl = hlName[21] - '1';			// '1'/'2'/'3' -> 0/1/2
-		const char *suffix = hlName + 22;			// "/ac_capture", "/cr_draw", ...
+	if ( !viewDef->viewEntitys && ir->helltimeLevel >= 0 ) {
 		rbHelltimeFrame = true;
-		rbHelltimeLevel = lvl;
-		if ( idStr::Icmp( suffix, "/cr_draw" ) == 0 ) {
+		rbHelltimeLevel = ir->helltimeLevel;
+		if ( ir->helltimeDraw ) {
 			isHelltimeDraw = true;					// the display: composite the trail here
 		} else {
 			return;	// ac_init / ac_capture / cr_capture / ac_draw: kill the broken recursion

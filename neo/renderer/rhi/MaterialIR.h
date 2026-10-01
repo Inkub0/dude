@@ -52,6 +52,16 @@ struct StageIR {
 struct MaterialIR {
 	const idMaterial *	material;
 	idList<StageIR>		surfaceStages;	// SL_AMBIENT stages, in material order
+	// r_smokeDarkBlend heuristic, computed once from the material name (smoke/steam/dust/…)
+	// instead of re-scanning the name per additive particle per frame. See RhiBackend.cpp.
+	bool				particleSmoke = false;
+	// Special-effect material classification by name, cached so RenderShaderPasses doesn't
+	// strcmp every surface every frame: the berserk-vision overlay and the D3XP hell-time
+	// bloodorb{1,2,3} materials (helltimeLevel 0/1/2, -1 = not hell-time; helltimeDraw = the
+	// /cr_draw display pass vs the broken-recursion passes that are skipped).
+	bool				berserkMaterial = false;
+	signed char			helltimeLevel = -1;
+	bool				helltimeDraw = false;
 };
 
 // lazy build + cache; pointers stay valid until IR_Purge

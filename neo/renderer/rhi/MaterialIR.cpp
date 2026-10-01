@@ -153,9 +153,38 @@ static const char *IR_VkBuiltinForArb( const char *vpFile, const char *fpFile ) 
 IR_Build
 =============
 */
+// r_smokeDarkBlend: does this particle material read as smoke/steam/dust (dimmable)
+// rather than a self-lit effect (fire/sparks/glares)? Doom 3 draws both additive, so only
+// the material name tells them apart. Classified once here (cached on the IR) instead of
+// re-scanning the name per additive particle per frame.
+static bool IR_ParticleNameLooksLikeSmoke( const idMaterial *material ) {
+	static const char * const kw[] = {
+		"smoke", "steam", "dust", "fog", "mist", "vapor", "vapour",
+		"haze", "smog", "cloud", "fume", "exhaust"
+	};
+	const char *name = material->GetName();
+	for ( int i = 0; i < (int)( sizeof( kw ) / sizeof( kw[0] ) ); i++ ) {
+		if ( idStr::FindText( name, kw[i], false ) != -1 ) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static MaterialIR *IR_Build( const idMaterial *material ) {
 	MaterialIR *ir = new MaterialIR;
 	ir->material = material;
+	ir->particleSmoke = IR_ParticleNameLooksLikeSmoke( material );
+
+	// Special-effect material names (berserk / D3XP hell-time), classified once instead of
+	// strcmp'd per surface per frame in RenderShaderPasses.
+	const char *nm = material->GetName();
+	ir->berserkMaterial = ( idStr::Icmp( nm, "textures/decals/berserk" ) == 0 );
+	if ( idStr::Cmpn( nm, "textures/smf/bloodorb", 21 ) == 0
+	     && nm[21] >= '1' && nm[21] <= '3' && nm[22] == '/' ) {
+		ir->helltimeLevel = (signed char)( nm[21] - '1' );			// '1'/'2'/'3' -> 0/1/2
+		ir->helltimeDraw = ( idStr::Icmp( nm + 22, "/cr_draw" ) == 0 );	// the display pass
+	}
 
 	// backend-neutral (Phase 4 M2): LoadShader is GL3_FindProgram on the GL3
 	// backend and the SPIR-V module cache on Vulkan
