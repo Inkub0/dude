@@ -8725,47 +8725,16 @@ static void RB_RHI_DecalMaskPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 /*
 ===================
-RB_RHI_DrawWorld
+RB_RHI_PrepareViewLighting
 
-Depth prepass + stencil shadows + per-light interactions, following the
-RB_STD_DrawView / RB_ARB2_DrawInteractions pass order.
+Builds this view's lighting inputs before the per-light loop and binds the
+ones the loop samples on fixed units: the depth+normal G-buffer (or the
+standalone zfill), RTAO/GTAO, RT GI, the RT-shadow-blur targets, and the
+decal metal mask. Sets the per-view rhiNormal* / rhiSsaoAppliedThisView
+flags the loop reads. Lifted verbatim from RB_RHI_DrawWorld.
 ===================
 */
-void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
-	rhi::ShaderHandle shadowProg = r->LoadShader( "shadow" );
-	rhi::ShaderHandle shadowMapProg = r->LoadShader( "shadow_sm" );
-	rhi::ShaderHandle shadowCubeProg = r->LoadShader( "shadow_sm_cube" );
-
-	ictx.r = r;
-	ictx.viewDef = viewDef;
-	ictx.interactionProg = r->LoadShader( "interaction" );
-	// RT sun shadows (R3, docs/rtx-shadow-roadmap.md): the ray-query variant's SPIR-V
-	// capability only pipeline-creates on RT hardware, so it loads gated; 0 elsewhere
-	// and the mode-4 override in RB_RHI_DrawInteraction stays off.
-	ictx.interactionRtProg = r->SupportsRayQuery() ? r->LoadShader( "interaction_rt" ) : 0;
-	ictx.ambientProg = r->LoadShader( "ambientlight" );
-	ictx.stencilState = rhi::SS_ALWAYS;
-
-	// sets backEnd.lightScale/overBright, read by the reused
-	// RB_CreateSingleDrawInteractions
-	RB_DetermineLightScale();
-
-	// depth prepass with stencil test enabled for invariance with the
-	// shadowed passes (matches RB_STD_FillDepthBuffer)
-	if ( qglEnable != NULL ) {
-		qglEnable( GL_STENCIL_TEST );
-	}
-	backEnd.currentScissor = viewDef->scissor;
-
-	// Phase 4 M4 (docs/vulkan-backend.md): the light loop now runs under
-	// Vulkan — stencil shadow volumes + interactions. The render-target
-	// enhancement passes (normal prepass, SSAO, SSR, shadow maps) need the
-	// VK render-target family and arrive together at M7.
-	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
-	if ( vkMode ) {
-		RB_RHI_LogOnce( "VK: world = depth + stencil + shadow maps + interactions + HDR + SSAO (SSR composites later, in the view pass)" );
-	}
-
+static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, bool vkMode ) {
 	// normal G-buffer (Option B): bump-mapped view normals for SSAO to sample instead of
 	// reconstructing from depth. docs/ssao-normal-merge.md: with r_ssaoMergeNormal the
 	// gbuffer pass ALSO seals the scene depth, folding the standalone zfill prepass away
@@ -8837,11 +8806,19 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 		rhi::gl3ActiveTexture( GL_TEXTURE0 );
 		backEnd.glState.currenttmu = 0;
 	}
+}
 
-	// per-light shadowing and adding (matches RB_ARB2_DrawInteractions)
-	// r_shadowMapDebug counts how each lit light was classified this view
-	int dbgLit = 0, dbgProjected = 0, dbgShadowMapped = 0, dbgPoint = 0,
-	    dbgParallel = 0, dbgNoShadow = 0, dbgNoLightDef = 0, dbgStencilBig = 0;
+/*
+===================
+RB_RHI_ResetShadowTallies
+
+Zeroes this view's shadow-map / cube-cache performance counters, advances the
+cube-cache frame number, freezes the light-budget hysteresis for a stable
+ranking, and frees the whole cache when r_shadowMapCache is off. Lifted
+verbatim from RB_RHI_DrawWorld.
+===================
+*/
+static void RB_RHI_ResetShadowTallies( rhi::RHI *r ) {
 	rhiShadowPerfCasters = 0;
 	rhiShadowCubeLights = 0;
 	rhiShadowCubeCasters = 0;
@@ -8870,6 +8847,125 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 		}
 		RB_RHI_Reset2DCache( r );		// 2D maps are tiny; a no-op once already empty
 	}
+}
+
+/*
+===================
+RB_RHI_LogShadowMapSummary
+
+r_shadowMapDebug: one line summarizing how this view's lights were classified
+and how the cube cache performed. Lifted verbatim from RB_RHI_DrawWorld.
+===================
+*/
+static void RB_RHI_LogShadowMapSummary( int dbgLit, int dbgProjected, int dbgShadowMapped,
+                                        int dbgNoShadow, int dbgPoint, int dbgParallel,
+                                        int dbgNoLightDef, int dbgStencilBig ) {
+	if ( r_shadowMapDebug.GetBool() ) {
+		common->Printf( "shadowMap: %d lit | projected %d (2D-mapped %d [%d hit/%d rendered], no-shadow %d) | point %d (cube-mapped %d, cube-casters %d, faces %d drawn/%d culled) | cache %d hit/%d rendered/%d scratch, %d dynamic, %d deferred (%zu MB) | stencil-big %d | parallel %d | no-lightDef %d | perforated-casters %d | r_shadowMapping %d\n",
+		                dbgLit, dbgProjected, dbgShadowMapped, rhiMapCacheHits, rhiMapCacheRendered, dbgNoShadow,
+		                dbgPoint, rhiShadowCubeLights, rhiShadowCubeCasters,
+		                rhiShadowCubeFaces, rhiShadowCubeFacesCulled,
+		                rhiCubeCacheHits, rhiCubeCacheMiss, rhiCubeCacheScratch, rhiCubeCacheDynamic, rhiCubeCacheDeferred,
+		                rhiCubeCacheBytes / ( 1024 * 1024 ),
+		                dbgStencilBig, dbgParallel, dbgNoLightDef,
+		                rhiShadowPerfCasters, r_shadowMapping.GetInteger() );
+	}
+}
+
+/*
+===================
+RB_RHI_LogShadowCacheSummary
+
+r_shadowMapCacheDebug: accumulates the per-view cube-cache tallies over ~1s
+and prints a single sustained line. Lifted verbatim from RB_RHI_DrawWorld.
+===================
+*/
+static void RB_RHI_LogShadowCacheSummary() {
+	// r_shadowMapCacheDebug: accumulate the per-view cube-cache tallies over ~1 second and
+	// print a single sustained line, so the dominant re-render cause is legible instead of
+	// per-frame spam. Hit% is over cached lookups (excludes scratch/dynamic lights, which
+	// never enter the cache). This is what says which caching lever is worth building.
+	if ( r_shadowMapCacheDebug.GetBool() ) {
+		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accFaces, accSplit, accRtMoving, accFrames, accStartMs;
+		const int nowMs = Sys_Milliseconds();
+		if ( accStartMs == 0 ) { accStartMs = nowMs; }
+		accHits       += rhiCubeCacheHits;
+		accCold       += rhiCubeMissCold;
+		accWarmCaster += rhiCubeMissWarmCaster;
+		accWarmLight  += rhiCubeMissWarmLight;
+		accScratch    += rhiCubeCacheScratch;
+		accDynamic    += rhiCubeCacheDynamic;
+		accDeferred   += rhiCubeCacheDeferred;
+		accEvict      += rhiCubeEvictions;
+		accFaces      += rhiShadowCubeFaces;		// actual cube FACES rasterized -> the GPU cost per-face invalidation cuts
+		accSplit      += rhiCubeCacheSplit;			// moving-caster lights kept cached via the static/dynamic split
+		accRtMoving   += rhiCubeCacheRtMoving;		// moving lights served by a ray, no cube at all (r_rtMovingLights)
+		accFrames++;
+		if ( nowMs - accStartMs >= 1000 ) {
+			const int rendered = accCold + accWarmCaster + accWarmLight;
+			const int lookups  = accHits + rendered;
+			const int hitPct   = lookups > 0 ? ( 100 * accHits ) / lookups : 0;
+			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | faces %d | split %d, rtMoving %d, scratch %d, dynamic %d, deferred %d, evict %d | %d frames\n",
+			                accHits, hitPct, rendered, accCold, accWarmCaster, accWarmLight, accFaces,
+			                accSplit, accRtMoving, accScratch, accDynamic, accDeferred, accEvict, accFrames );
+			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accFaces = accSplit = accRtMoving = accFrames = 0;
+			accStartMs = nowMs;
+		}
+	}
+}
+
+/*
+===================
+RB_RHI_DrawWorld
+
+Depth prepass + stencil shadows + per-light interactions, following the
+RB_STD_DrawView / RB_ARB2_DrawInteractions pass order.
+===================
+*/
+void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
+	rhi::ShaderHandle shadowProg = r->LoadShader( "shadow" );
+	rhi::ShaderHandle shadowMapProg = r->LoadShader( "shadow_sm" );
+	rhi::ShaderHandle shadowCubeProg = r->LoadShader( "shadow_sm_cube" );
+
+	ictx.r = r;
+	ictx.viewDef = viewDef;
+	ictx.interactionProg = r->LoadShader( "interaction" );
+	// RT sun shadows (R3, docs/rtx-shadow-roadmap.md): the ray-query variant's SPIR-V
+	// capability only pipeline-creates on RT hardware, so it loads gated; 0 elsewhere
+	// and the mode-4 override in RB_RHI_DrawInteraction stays off.
+	ictx.interactionRtProg = r->SupportsRayQuery() ? r->LoadShader( "interaction_rt" ) : 0;
+	ictx.ambientProg = r->LoadShader( "ambientlight" );
+	ictx.stencilState = rhi::SS_ALWAYS;
+
+	// sets backEnd.lightScale/overBright, read by the reused
+	// RB_CreateSingleDrawInteractions
+	RB_DetermineLightScale();
+
+	// depth prepass with stencil test enabled for invariance with the
+	// shadowed passes (matches RB_STD_FillDepthBuffer)
+	if ( qglEnable != NULL ) {
+		qglEnable( GL_STENCIL_TEST );
+	}
+	backEnd.currentScissor = viewDef->scissor;
+
+	// Phase 4 M4 (docs/vulkan-backend.md): the light loop now runs under
+	// Vulkan — stencil shadow volumes + interactions. The render-target
+	// enhancement passes (normal prepass, SSAO, SSR, shadow maps) need the
+	// VK render-target family and arrive together at M7.
+	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	if ( vkMode ) {
+		RB_RHI_LogOnce( "VK: world = depth + stencil + shadow maps + interactions + HDR + SSAO (SSR composites later, in the view pass)" );
+	}
+
+	// Build + bind this view's lighting inputs (G-buffer/depth, AO, GI, decal mask)
+	// for the per-light loop.
+	RB_RHI_PrepareViewLighting( r, viewDef, vkMode );
+
+	// per-light shadowing and adding (matches RB_ARB2_DrawInteractions)
+	// r_shadowMapDebug counts how each lit light was classified this view
+	int dbgLit = 0, dbgProjected = 0, dbgShadowMapped = 0, dbgPoint = 0,
+	    dbgParallel = 0, dbgNoShadow = 0, dbgNoLightDef = 0, dbgStencilBig = 0;
+	RB_RHI_ResetShadowTallies( r );
 	if ( !r_skipInteractions.GetBool() ) {
 		for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
 			backEnd.vLight = vLight;
@@ -9175,48 +9271,9 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	}
 	backEnd.vLight = NULL;
 
-	if ( r_shadowMapDebug.GetBool() ) {
-		common->Printf( "shadowMap: %d lit | projected %d (2D-mapped %d [%d hit/%d rendered], no-shadow %d) | point %d (cube-mapped %d, cube-casters %d, faces %d drawn/%d culled) | cache %d hit/%d rendered/%d scratch, %d dynamic, %d deferred (%zu MB) | stencil-big %d | parallel %d | no-lightDef %d | perforated-casters %d | r_shadowMapping %d\n",
-		                dbgLit, dbgProjected, dbgShadowMapped, rhiMapCacheHits, rhiMapCacheRendered, dbgNoShadow,
-		                dbgPoint, rhiShadowCubeLights, rhiShadowCubeCasters,
-		                rhiShadowCubeFaces, rhiShadowCubeFacesCulled,
-		                rhiCubeCacheHits, rhiCubeCacheMiss, rhiCubeCacheScratch, rhiCubeCacheDynamic, rhiCubeCacheDeferred,
-		                rhiCubeCacheBytes / ( 1024 * 1024 ),
-		                dbgStencilBig, dbgParallel, dbgNoLightDef,
-		                rhiShadowPerfCasters, r_shadowMapping.GetInteger() );
-	}
-
-	// r_shadowMapCacheDebug: accumulate the per-view cube-cache tallies over ~1 second and
-	// print a single sustained line, so the dominant re-render cause is legible instead of
-	// per-frame spam. Hit% is over cached lookups (excludes scratch/dynamic lights, which
-	// never enter the cache). This is what says which caching lever is worth building.
-	if ( r_shadowMapCacheDebug.GetBool() ) {
-		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accFaces, accSplit, accRtMoving, accFrames, accStartMs;
-		const int nowMs = Sys_Milliseconds();
-		if ( accStartMs == 0 ) { accStartMs = nowMs; }
-		accHits       += rhiCubeCacheHits;
-		accCold       += rhiCubeMissCold;
-		accWarmCaster += rhiCubeMissWarmCaster;
-		accWarmLight  += rhiCubeMissWarmLight;
-		accScratch    += rhiCubeCacheScratch;
-		accDynamic    += rhiCubeCacheDynamic;
-		accDeferred   += rhiCubeCacheDeferred;
-		accEvict      += rhiCubeEvictions;
-		accFaces      += rhiShadowCubeFaces;		// actual cube FACES rasterized -> the GPU cost per-face invalidation cuts
-		accSplit      += rhiCubeCacheSplit;			// moving-caster lights kept cached via the static/dynamic split
-		accRtMoving   += rhiCubeCacheRtMoving;		// moving lights served by a ray, no cube at all (r_rtMovingLights)
-		accFrames++;
-		if ( nowMs - accStartMs >= 1000 ) {
-			const int rendered = accCold + accWarmCaster + accWarmLight;
-			const int lookups  = accHits + rendered;
-			const int hitPct   = lookups > 0 ? ( 100 * accHits ) / lookups : 0;
-			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | faces %d | split %d, rtMoving %d, scratch %d, dynamic %d, deferred %d, evict %d | %d frames\n",
-			                accHits, hitPct, rendered, accCold, accWarmCaster, accWarmLight, accFaces,
-			                accSplit, accRtMoving, accScratch, accDynamic, accDeferred, accEvict, accFrames );
-			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accFaces = accSplit = accRtMoving = accFrames = 0;
-			accStartMs = nowMs;
-		}
-	}
+	RB_RHI_LogShadowMapSummary( dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,
+	                            dbgPoint, dbgParallel, dbgNoLightDef, dbgStencilBig );
+	RB_RHI_LogShadowCacheSummary();
 
 	// shader passes run with stencil satisfied everywhere
 	if ( qglStencilFunc != NULL ) {
