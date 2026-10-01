@@ -318,21 +318,6 @@ static srfTriangles_t *R_CreateLightTris( const idRenderEntityLocal *ent,
 	newTri->numVerts = tri->numVerts;
 	R_ReferenceStaticTriSurfVerts( newTri, tri );
 
-	// Milestone D (docs/gpu-offload-plan.md): a CPU-skin-stripped surface has no valid tri->verts.xyz,
-	// so the per-triangle light cull (R_CalcInteractionCullBits / R_ClipTriangleToLight) and the MinMax
-	// bounds cannot read positions. That cull is a PURE optimization -- it never clips geometry, only
-	// drops whole triangles fully outside the light frustum (see the r_usePreciseTriangleInteractions
-	// note below) -- so referencing ALL indexes is pixel-identical: one-sided materials still GPU-cull
-	// backfaces at raster, and frustum-exterior tris shade to nothing / fall outside the light scissor.
-	// Bounds come from the conservative joint-reach CalcBoundsFast already on tri->bounds. cullInfo is
-	// left cleared (the caller's R_FreeInteractionCullInfo no-ops on the NULL arrays). Routes pin #1.
-	if ( tri->cpuSkinStripped ) {
-		R_ReferenceStaticTriSurfIndexes( newTri, tri );
-		newTri->numIndexes = tri->numIndexes;
-		newTri->bounds = tri->bounds;
-		return newTri;
-	}
-
 	// calculate cull information
 	if ( !includeBackFaces ) {
 		R_CalcInteractionFacing( ent, tri, light, cullInfo );

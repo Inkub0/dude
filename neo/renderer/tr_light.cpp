@@ -60,8 +60,6 @@ static double s_skinDeriveMs = 0.0;		// summed R_DeriveTangents time on deformed
 static double s_skinUploadMs = 0.0;		// summed vertexCache.Alloc time on gpuSkinVB surfaces
 static int    s_skinDeriveSurfs = 0;	// # surfaces derived
 static int    s_skinUploadVerts = 0;	// # verts uploaded
-static int    s_skinStripSurfs = 0;		// Milestone D: # surfaces that stripped the CPU position skin
-static int    s_skinStripVerts = 0;		// Milestone D: # verts of CPU TransformVerts removed
 static int    s_skinProfFrames = 0;		// frames accumulated since last print
 static int    s_skinProfFrame = -1;		// last tr.frameCount seen (frame-edge detect)
 static double s_skinProfLastMs = 0.0;	// wall-clock of last print
@@ -72,15 +70,6 @@ static double s_skinProfLastMs = 0.0;	// wall-clock of last print
 void R_GpuSkinProfileAddDerive( double ms ) {
 	s_skinDeriveMs += ms;
 	s_skinDeriveSurfs++;
-}
-
-// Milestone D (docs/gpu-offload-plan.md): called from idMD5Mesh::UpdateSurface each time a surface
-// strips its CPU position skin. When strip is active, derive + upload go to ~0 (both skipped), so this
-// counter is the direct evidence the CPU skin work was removed: N surf/frame, V verts/frame of
-// TransformVerts eliminated. Pair with com_speeds "rf" (front-end ms) A/B to see the reclaimed CPU time.
-void R_GpuSkinProfileAddStrip( int verts ) {
-	s_skinStripSurfs++;
-	s_skinStripVerts += verts;
 }
 
 // Milestone C (docs/gpu-offload-plan.md): when a surface is drawn from its compute-skinned
@@ -155,13 +144,11 @@ bool R_CreateAmbientCache( srfTriangles_t *tri, bool needsLighting ) {
 		s_skinProfFrame = tr.frameCount;
 		const double now = Sys_MillisecondsPrecise();
 		if ( now - s_skinProfLastMs >= 1000.0 && s_skinProfFrames > 0 ) {
-			common->Printf( "gpuSkinProfile: %d skinned surf/frame -- derive %.3f ms/frame, ambient upload %.3f ms/frame (%d verts/frame) | STRIP %d surf/frame, %d CPU-skin verts/frame removed [avg over %d frames]\n",
+			common->Printf( "gpuSkinProfile: %d skinned surf/frame -- derive %.3f ms/frame, ambient upload %.3f ms/frame (%d verts/frame) [avg over %d frames]\n",
 			                s_skinDeriveSurfs / s_skinProfFrames, s_skinDeriveMs / s_skinProfFrames,
-			                s_skinUploadMs / s_skinProfFrames, s_skinUploadVerts / s_skinProfFrames,
-			                s_skinStripSurfs / s_skinProfFrames, s_skinStripVerts / s_skinProfFrames, s_skinProfFrames );
+			                s_skinUploadMs / s_skinProfFrames, s_skinUploadVerts / s_skinProfFrames, s_skinProfFrames );
 			s_skinDeriveMs = s_skinUploadMs = 0.0;
 			s_skinDeriveSurfs = s_skinUploadVerts = 0;
-			s_skinStripSurfs = s_skinStripVerts = 0;
 			s_skinProfFrames = 0;
 			s_skinProfLastMs = now;
 		}
@@ -169,14 +156,6 @@ bool R_CreateAmbientCache( srfTriangles_t *tri, bool needsLighting ) {
 	}
 
 	if ( tri->ambientCache ) {
-		return true;
-	}
-
-	// Milestone D (docs/gpu-offload-plan.md): a CPU-skin-stripped surface has NO valid tri->verts.xyz
-	// (TransformVerts was skipped this frame) and rasterizes solely from gpuSkinVB. Skip both the
-	// tangent derive (it would read invalid positions) and the upload, leaving ambientCache NULL --
-	// the exact no-upload contract the draw gates already honour for gpuSkinVB surfaces.
-	if ( tri->gpuSkinVB && tri->cpuSkinStripped ) {
 		return true;
 	}
 

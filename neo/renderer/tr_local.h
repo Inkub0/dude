@@ -1115,7 +1115,6 @@ extern idCVar r_tessDeform;				// deform tessellated meshes once/frame in a comp
 extern idCVar r_gpuSkinning;			// skin animated meshes on the GPU (option-B TBN; on by default on Vulkan, off = faithful CPU skin)
 extern idCVar r_gpuSkinProfile;			// dev: size the Milestone-C prize (skinned-surface derive + ambient upload)
 void R_GpuSkinProfileAddDerive( double ms );	// accumulate one skinned-surface tangent-derive time (impl tr_light.cpp)
-void R_GpuSkinProfileAddStrip( int verts );		// Milestone D: count one CPU-skin-stripped surface (impl tr_light.cpp)
 
 // Shared stencil-build routing (Interaction.cpp CreateInteraction + the view-flag loop): true when the
 // light will be shadow-MAPPED, so its CPU stencil volume is never drawn and the build can be skipped.
