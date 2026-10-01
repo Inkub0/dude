@@ -2164,11 +2164,17 @@ bool VulkanBackend::CreateSceneTargets() {
 		return true;	// minimized; created on first real frame
 	}
 
-	// depth-stencil format: D24S8 where supported (NVIDIA), else D32S8 (AMD)
+	// depth-stencil format: D24S8 where supported (NVIDIA), else D32S8 (AMD).
+	// Must also support SAMPLED: FSR2 and depth-based effects sample the scene /
+	// render-target depth attachment directly through a depth-aspect view (the
+	// VK_IMAGE_USAGE_SAMPLED_BIT added to both depth images below), which is only
+	// legal for a format advertising VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT.
+	const VkFormatFeatureFlags dsNeed = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+	                                  | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
 	sceneDepthFormat = VK_FORMAT_D24_UNORM_S8_UINT;
 	VkFormatProperties fp;
 	vkGetPhysicalDeviceFormatProperties( physical, sceneDepthFormat, &fp );
-	if ( ( fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT ) == 0 ) {
+	if ( ( fp.optimalTilingFeatures & dsNeed ) != dsNeed ) {
 		sceneDepthFormat = VK_FORMAT_D32_SFLOAT_S8_UINT;
 	}
 
@@ -2205,9 +2211,11 @@ bool VulkanBackend::CreateSceneTargets() {
 		return false;
 	}
 
-	// depth-stencil image (TRANSFER_SRC: the M5 _currentDepth capture copy)
+	// depth-stencil image (TRANSFER_SRC: the M5 _currentDepth capture copy;
+	// SAMPLED: FSR2 / depth-based effects sample it through a depth-aspect view)
 	ici.format = sceneDepthFormat;
-	ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+	          | VK_IMAGE_USAGE_SAMPLED_BIT;
 	if ( !vkCheck( vmaCreateImage( vma, &ici, &vci, &sceneDepth, &sceneDepthAlloc, NULL ), "vmaCreateImage(scene depth)" ) ) {
 		return false;
 	}
@@ -6954,13 +6962,25 @@ void VulkanBackend::RtaoDestroyOutput() {
 	if ( rtaoOutImage == VK_NULL_HANDLE && rtaoOutView == VK_NULL_HANDLE ) {
 		return;
 	}
-	// an in-flight frame may still sample the image (resolve/debug passes); resize is
-	// rare, so a full drain is the simple safe teardown
-	if ( device != VK_NULL_HANDLE ) {
-		vkDeviceWaitIdle( device );
+	// A recording frame may still have this image bound to its command buffer (resolve/debug
+	// passes sample it through rtaoOutSampleImage earlier in the frame). vkDeviceWaitIdle
+	// drains submitted work but NOT the still-recording command buffer, so a mid-frame
+	// resize/scale change must defer the destroy to this slot's retire list (freed after its
+	// fence in BeginFrame) rather than invalidate the live command buffer — same contract as
+	// DestroyImage/RetireImage. Between frames (shutdown/vid_restart) the waitIdle path frees
+	// immediately.
+	if ( frameOpen ) {
+		retiredImages[frameIndex].push_back( { rtaoOutImage, rtaoOutAlloc, rtaoOutView } );
+		rtaoOutView = VK_NULL_HANDLE;
+		rtaoOutImage = VK_NULL_HANDLE;
+		rtaoOutAlloc = NULL;
+	} else {
+		if ( device != VK_NULL_HANDLE ) {
+			vkDeviceWaitIdle( device );
+		}
+		if ( rtaoOutView )  { vkDestroyImageView( device, rtaoOutView, NULL ); rtaoOutView = VK_NULL_HANDLE; }
+		if ( rtaoOutImage ) { vmaDestroyImage( vma, rtaoOutImage, rtaoOutAlloc ); rtaoOutImage = VK_NULL_HANDLE; rtaoOutAlloc = NULL; }
 	}
-	if ( rtaoOutView )  { vkDestroyImageView( device, rtaoOutView, NULL ); rtaoOutView = VK_NULL_HANDLE; }
-	if ( rtaoOutImage ) { vmaDestroyImage( vma, rtaoOutImage, rtaoOutAlloc ); rtaoOutImage = VK_NULL_HANDLE; rtaoOutAlloc = NULL; }
 	if ( rtaoOutSampleImage >= 1 && rtaoOutSampleImage <= (ImageHandle)imageTable.size() ) {
 		imageTable[rtaoOutSampleImage - 1].live = false;
 	}
@@ -7018,11 +7038,25 @@ void VulkanBackend::RtgiDestroyOutput() {
 	if ( rtgiOutImage == VK_NULL_HANDLE && rtgiOutView == VK_NULL_HANDLE ) {
 		return;
 	}
-	if ( device != VK_NULL_HANDLE ) {
-		vkDeviceWaitIdle( device );
+	// A frame may be recording when a resize/scale change triggers this (RtgiEnsureOutput
+	// runs mid-view): the previous output is still bound to this slot's command buffer — the
+	// H6f history-confidence pass sampled it this frame through rtgiOutSampleImage.
+	// vkDeviceWaitIdle does NOT drain the still-recording command buffer, so destroying the
+	// image now invalidates it (the "VkImage was destroyed" validation cascade). Defer to
+	// this slot's retire list instead, freed after its fence in BeginFrame — the same
+	// contract DestroyImage/RetireImage use for mid-frame image destruction.
+	if ( frameOpen ) {
+		retiredImages[frameIndex].push_back( { rtgiOutImage, rtgiOutAlloc, rtgiOutView } );
+		rtgiOutView = VK_NULL_HANDLE;
+		rtgiOutImage = VK_NULL_HANDLE;
+		rtgiOutAlloc = NULL;
+	} else {
+		if ( device != VK_NULL_HANDLE ) {
+			vkDeviceWaitIdle( device );
+		}
+		if ( rtgiOutView )  { vkDestroyImageView( device, rtgiOutView, NULL ); rtgiOutView = VK_NULL_HANDLE; }
+		if ( rtgiOutImage ) { vmaDestroyImage( vma, rtgiOutImage, rtgiOutAlloc ); rtgiOutImage = VK_NULL_HANDLE; rtgiOutAlloc = NULL; }
 	}
-	if ( rtgiOutView )  { vkDestroyImageView( device, rtgiOutView, NULL ); rtgiOutView = VK_NULL_HANDLE; }
-	if ( rtgiOutImage ) { vmaDestroyImage( vma, rtgiOutImage, rtgiOutAlloc ); rtgiOutImage = VK_NULL_HANDLE; rtgiOutAlloc = NULL; }
 	if ( rtgiOutSampleImage >= 1 && rtgiOutSampleImage <= (ImageHandle)imageTable.size() ) {
 		imageTable[rtgiOutSampleImage - 1].live = false;
 	}
@@ -7709,13 +7743,31 @@ void VulkanBackend::Fsr2DestroyContext( bool deviceIdle ) {
 		free( fsr2Scratch );
 		fsr2Scratch = NULL;
 	}
-	if ( fsr2OutView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2OutView, NULL ); fsr2OutView = VK_NULL_HANDLE; }
-	if ( fsr2Out != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Out, fsr2OutAlloc ); fsr2Out = VK_NULL_HANDLE; fsr2OutAlloc = NULL; }
-	if ( fsr2DepthView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2DepthView, NULL ); fsr2DepthView = VK_NULL_HANDLE; }
-	if ( fsr2OpaqueView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2OpaqueView, NULL ); fsr2OpaqueView = VK_NULL_HANDLE; }
-	if ( fsr2Opaque != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Opaque, fsr2OpaqueAlloc ); fsr2Opaque = VK_NULL_HANDLE; fsr2OpaqueAlloc = NULL; }
-	if ( fsr2ReactiveView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2ReactiveView, NULL ); fsr2ReactiveView = VK_NULL_HANDLE; }
-	if ( fsr2Reactive != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Reactive, fsr2ReactiveAlloc ); fsr2Reactive = VK_NULL_HANDLE; fsr2ReactiveAlloc = NULL; }
+	// On a mid-frame resize (Fsr2EnsureContext runs inside RunFsr2), fsr2Opaque was already
+	// written THIS frame by Fsr2CaptureOpaque and is bound to this slot's command buffer;
+	// vkDeviceWaitIdle above drains submitted work but NOT the recording command buffer, so
+	// destroying these images inline would invalidate it. Defer to this slot's retire list
+	// (freed after its fence in BeginFrame), the same contract as DestroyImage/RetireImage.
+	// Between frames (error paths, vid_restart, shutdown) frameOpen is false and the waitIdle
+	// path above makes immediate destruction safe.
+	if ( frameOpen ) {
+		if ( fsr2Out || fsr2OutView )           { retiredImages[frameIndex].push_back( { fsr2Out, fsr2OutAlloc, fsr2OutView } ); }
+		if ( fsr2Opaque || fsr2OpaqueView )     { retiredImages[frameIndex].push_back( { fsr2Opaque, fsr2OpaqueAlloc, fsr2OpaqueView } ); }
+		if ( fsr2Reactive || fsr2ReactiveView ) { retiredImages[frameIndex].push_back( { fsr2Reactive, fsr2ReactiveAlloc, fsr2ReactiveView } ); }
+		if ( fsr2DepthView )                    { retiredImages[frameIndex].push_back( { VK_NULL_HANDLE, NULL, fsr2DepthView } ); }
+		fsr2OutView = VK_NULL_HANDLE; fsr2Out = VK_NULL_HANDLE; fsr2OutAlloc = NULL;
+		fsr2DepthView = VK_NULL_HANDLE;
+		fsr2OpaqueView = VK_NULL_HANDLE; fsr2Opaque = VK_NULL_HANDLE; fsr2OpaqueAlloc = NULL;
+		fsr2ReactiveView = VK_NULL_HANDLE; fsr2Reactive = VK_NULL_HANDLE; fsr2ReactiveAlloc = NULL;
+	} else {
+		if ( fsr2OutView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2OutView, NULL ); fsr2OutView = VK_NULL_HANDLE; }
+		if ( fsr2Out != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Out, fsr2OutAlloc ); fsr2Out = VK_NULL_HANDLE; fsr2OutAlloc = NULL; }
+		if ( fsr2DepthView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2DepthView, NULL ); fsr2DepthView = VK_NULL_HANDLE; }
+		if ( fsr2OpaqueView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2OpaqueView, NULL ); fsr2OpaqueView = VK_NULL_HANDLE; }
+		if ( fsr2Opaque != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Opaque, fsr2OpaqueAlloc ); fsr2Opaque = VK_NULL_HANDLE; fsr2OpaqueAlloc = NULL; }
+		if ( fsr2ReactiveView != VK_NULL_HANDLE ) { vkDestroyImageView( device, fsr2ReactiveView, NULL ); fsr2ReactiveView = VK_NULL_HANDLE; }
+		if ( fsr2Reactive != VK_NULL_HANDLE )     { vmaDestroyImage( vma, fsr2Reactive, fsr2ReactiveAlloc ); fsr2Reactive = VK_NULL_HANDLE; fsr2ReactiveAlloc = NULL; }
+	}
 	fsr2DepthSrc = VK_NULL_HANDLE;
 	fsr2W = fsr2H = 0;
 	fsr2DispW = fsr2DispH = 0;
@@ -10351,7 +10403,10 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		ici.arrayLayers = 1;
 		ici.samples = VK_SAMPLE_COUNT_1_BIT;
 		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-		ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		// SAMPLED: FSR2 / depth-based effects sample this target's depth through a
+		// depth-aspect view (FrameDepthView), same as the scene depth above
+		ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+		          | VK_IMAGE_USAGE_SAMPLED_BIT;
 		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &t.dsImage, &t.dsAlloc, NULL ), "vmaCreateImage(target ds)" ) ) {
 			FreeTargetObjects( t );
