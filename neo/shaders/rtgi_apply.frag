@@ -77,6 +77,15 @@ void main() {
 	} else {
 		gi = nrdYCoCgToLinear( texture( u_gi, uv ).rgb );			// plain bilinear (baseline)
 	}
+	// Fog-aware GI (r_rtgiFogAttenuate): this additive apply runs BEFORE the fog blend, so without this a
+	// far surface keeps its full bounce and the distance fog reads washed out. Fade GI by the same ramp the
+	// fog image uses (transmittance = 0.982^(255 * 0.5*dist/fogDist) = exp(dist*coef)). u_localParam1.z =
+	// strength, u_localParam1.w = coef (both 0 when off or the view has no fog, leaving GI untouched).
+	if ( u_localParam1.z > 0.0 ) {
+		float fogT = exp( linDepth( raw ) * u_localParam1.w );	// 1 near the eye -> ~0.1 at the fog distance
+		gi *= mix( 1.0, fogT, u_localParam1.z );
+	}
+
 	vec3 albedo = texture( u_albedo, uv ).rgb;
 
 	// indirect diffuse = receiver albedo * incoming irradiance, scaled by r_rtgiIntensity. Additive.

@@ -3544,6 +3544,14 @@ static void DrawEnhGroup_AmbientOcclusion()
 				"0.00 lets GI fully replace it (most physical, but a corner GI can't reach goes darker). "
 				"Lower it if lit rooms look washed out." );
 
+			float giFog = r_rtgiFogAttenuate.GetFloat();
+			if ( ImGui::SliderFloat( "Fog Awareness##rtgi", &giFog, 0.0f, 1.0f, "%.2f" ) ) {
+				r_rtgiFogAttenuate.SetFloat( giFog );
+			}
+			AddTooltip( "Fades the bounced light out with distance through fog, so GI stops washing out "
+				"Doom 3's distance fog (the far haze reads thin without it). 1.00 fully removes GI where "
+				"the fog turns opaque; 0.00 lets GI ignore fog (the old look). Only matters in foggy areas." );
+
 			float giRad = r_rtgiRadius.GetFloat();
 			if ( ImGui::SliderFloat( "Ray Length##rtgi", &giRad, 64.0f, 2048.0f, "%.0f units" ) ) {
 				r_rtgiRadius.SetFloat( giRad );

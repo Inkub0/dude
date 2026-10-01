@@ -7794,6 +7794,30 @@ void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[0] = 24.0f;							// depth sensitivity: ~4% relative depth diff halves the weight
 	parms.localParam1[1] = 8.0f;							// normal power: sharply rejects across creases
 
+	// Fog-aware GI (r_rtgiFogAttenuate): this apply is additive and runs BEFORE the fog blend, so a far
+	// surface buried in fog keeps its full bounce and the distance fog washes out. Fade the GI with the same
+	// ramp Doom 3's fog image uses (alpha = 1 - 0.982^(255*d), d = 0.5*dist/fogDist), driven by the view's
+	// primary fog light, so where the fog goes opaque the bounce goes with it. localParam1.z = strength,
+	// localParam1.w = the exp() coef; both 0 (no attenuation) when attenuation is off or the view has no fog.
+	parms.localParam1[2] = 0.0f;
+	parms.localParam1[3] = 0.0f;
+	const float fogAtten = idMath::ClampFloat( 0.0f, 1.0f, r_rtgiFogAttenuate.GetFloat() );
+	if ( fogAtten > 0.0f ) {
+		for ( const viewLight_t *vL = viewDef->viewLights; vL; vL = vL->next ) {
+			if ( !vL->lightShader->IsFogLight() ) {
+				continue;
+			}
+			const shaderStage_t *fs = vL->lightShader->GetStage( 0 );
+			const float fogDensity = vL->shaderRegisters[fs->color.registers[3]];
+			const float fogDist = ( fogDensity <= 1.0f ) ? DEFAULT_FOG_DISTANCE : fogDensity;
+			// transmittance T = exp( dist * coef ); coef = 127.5 * ln(0.982) / fogDist reproduces the fog
+			// image's ~90%-opaque-at-fogDist curve (0.982^(255 * 0.5*dist/fogDist)).
+			parms.localParam1[2] = fogAtten;
+			parms.localParam1[3] = -2.31587f / fogDist;
+			break;		// first fog light; layered / localized fog is approximated by this primary volume
+		}
+	}
+
 	RB_RHI_BindRTImage( r, 1, albedoImg );					// unit 1 = receiver albedo (prepass att3)
 	RB_RHI_BindUnit( 2, globalImages->currentDepthImage );	// unit 2 = depth (sky skip + bilateral)
 	// unit 3 = full-res view normal (bilateral weight). Bound even when bilat is off (the shader just doesn't
