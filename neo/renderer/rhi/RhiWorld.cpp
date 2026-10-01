@@ -4710,6 +4710,92 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	return didMerge;
 }
 
+// --- Render-target lifecycle helpers ---------------------------------------
+// The Ensure* passes below share three exact recipes: (re)allocate a target when it is
+// missing, lost (a vid_restart drops the texture but leaves the handle set), or sized to
+// a stale resolution, rolling everything back to 0/unsized on a failed create. Each
+// per-feature wrapper keeps its name (and all its call sites) but delegates its body here
+// so the recipe lives in one place.
+
+// Single plain color target tracked by (handle, curW, curH).
+static bool RB_RHI_EnsureRT( rhi::RHI *r, rhi::RenderTargetHandle &rt, int &curW, int &curH,
+		rhi::ImageFormat fmt, int w, int h ) {
+	if ( rt && r->GetRenderTargetImage( rt ) == 0 ) {	// lost context (vid_restart)
+		rt = 0;
+		curW = curH = 0;
+	}
+	if ( rt && curW == w && curH == h ) {
+		return true;
+	}
+	if ( rt ) { r->DestroyRenderTarget( rt ); rt = 0; }
+	rt = r->CreateRenderTarget( fmt, w, h );
+	if ( !rt ) {
+		curW = curH = 0;
+		return false;
+	}
+	curW = w;
+	curH = h;
+	return true;
+}
+
+// Temporal history ping-pong (two slots) tracked by (pair[2], curW, curH, valid). Any
+// (re)allocation clears 'valid' so the first resolve reprojects nothing and passes the
+// current frame through rather than blending stale or mis-sized data.
+static bool RB_RHI_EnsureHistoryPair( rhi::RHI *r, rhi::RenderTargetHandle pair[2],
+		int &curW, int &curH, bool &valid, rhi::ImageFormat fmt, int w, int h ) {
+	if ( pair[0] && r->GetRenderTargetImage( pair[0] ) == 0 ) {	// lost context (vid_restart)
+		pair[0] = pair[1] = 0;
+		curW = curH = 0;
+	}
+	if ( pair[0] && pair[1] && curW == w && curH == h ) {
+		return true;
+	}
+	for ( int i = 0; i < 2; i++ ) {
+		if ( pair[i] ) { r->DestroyRenderTarget( pair[i] ); pair[i] = 0; }
+	}
+	pair[0] = r->CreateRenderTarget( fmt, w, h );
+	pair[1] = r->CreateRenderTarget( fmt, w, h );
+	valid = false;	// freshly (re)allocated: nothing to reproject yet
+	if ( !pair[0] || !pair[1] ) {
+		for ( int i = 0; i < 2; i++ ) {
+			if ( pair[i] ) { r->DestroyRenderTarget( pair[i] ); pair[i] = 0; }
+		}
+		curW = curH = 0;
+		return false;
+	}
+	curW = w;
+	curH = h;
+	return true;
+}
+
+// Mipped target tracked by (handle, curW, curH, curLevels). The level count is derived
+// from the larger dimension, capped at maxLevels (<= 6); because it is a pure function of
+// (w,h,maxLevels) the level check in the early-out never trips spuriously. Returns false
+// when the backend has no mipped-target capability (CreateRenderTargetMipped -> 0) so the
+// caller falls back to its full-res path.
+static bool RB_RHI_EnsureMippedRT( rhi::RHI *r, rhi::RenderTargetHandle &rt, int &curW, int &curH,
+		int &curLevels, rhi::ImageFormat fmt, int w, int h, int maxLevels ) {
+	if ( rt && r->GetRenderTargetImage( rt ) == 0 ) {	// lost context (vid_restart)
+		rt = 0;
+		curW = curH = curLevels = 0;
+	}
+	int levels = 1;
+	for ( int d = ( w > h ? w : h ); d > 1 && levels < maxLevels; d >>= 1 ) { levels++; }
+	if ( rt && curW == w && curH == h && curLevels == levels ) {
+		return true;
+	}
+	if ( rt ) { r->DestroyRenderTarget( rt ); rt = 0; }
+	rt = r->CreateRenderTargetMipped( fmt, w, h, levels );
+	if ( !rt ) {
+		curW = curH = curLevels = 0;
+		return false;
+	}
+	curW = w;
+	curH = h;
+	curLevels = levels;
+	return true;
+}
+
 static bool RB_RHI_EnsureSsaoTargets( rhi::RHI *r, int w, int h ) {
 	// a lost context (vid_restart) leaves the handle set but its texture gone
 	if ( rhiSsaoRT && r->GetRenderTargetImage( rhiSsaoRT ) == 0 ) {
@@ -4738,36 +4824,14 @@ static bool RB_RHI_EnsureSsaoTargets( rhi::RHI *r, int w, int h ) {
 // Returns false when the backend has no mipped-target capability (CreateRenderTargetMipped
 // returns 0), so the caller silently falls back to the full-res raw-depth march.
 static bool RB_RHI_EnsureSsaoDepthMip( rhi::RHI *r, int w, int h ) {
-	// a lost context (vid_restart) leaves the handle set but its texture gone
-	if ( rhiSsaoDepthMipRT && r->GetRenderTargetImage( rhiSsaoDepthMipRT ) == 0 ) {
-		rhiSsaoDepthMipRT = 0;
-		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
-	}
 	// enough levels to cover the horizon radius in coarse mips, but no more than the march
 	// can ever read: r_ssaoDepthMipMaxLod clamps its LOD, so levels past the cap would be
 	// rendered every frame and never sampled. 6 levels (1/32 footprint) stays the ceiling.
 	const int maxLevels = idMath::ClampInt( 2, 6, r_ssaoDepthMipMaxLod.GetInteger() + 1 );
-	int levels = 1;
-	for ( int d = ( w > h ? w : h ); d > 1 && levels < maxLevels; d >>= 1 ) { levels++; }
-
-	if ( rhiSsaoDepthMipRT && rhiSsaoDepthMipW == w && rhiSsaoDepthMipH == h
-			&& rhiSsaoDepthMipLevels == levels ) {
-		return true;
-	}
-	if ( rhiSsaoDepthMipRT ) { r->DestroyRenderTarget( rhiSsaoDepthMipRT ); rhiSsaoDepthMipRT = 0; }
-
-	// R16F (Phase 2): only .r is ever written/read (linear eye depth), so single-channel
-	// half-float is bit-identical to the RGBA16F first cut at a quarter the bandwidth —
-	// which directly compounds Phase 1's cache-locality win on the horizon march.
-	rhiSsaoDepthMipRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, levels );
-	if ( !rhiSsaoDepthMipRT ) {
-		rhiSsaoDepthMipW = rhiSsaoDepthMipH = rhiSsaoDepthMipLevels = 0;
-		return false;
-	}
-	rhiSsaoDepthMipW = w;
-	rhiSsaoDepthMipH = h;
-	rhiSsaoDepthMipLevels = levels;
-	return true;
+	// R16F: only .r is ever written/read (linear eye depth), so single-channel half-float
+	// is bit-identical to RGBA16F at a quarter the bandwidth.
+	return RB_RHI_EnsureMippedRT( r, rhiSsaoDepthMipRT, rhiSsaoDepthMipW, rhiSsaoDepthMipH,
+			rhiSsaoDepthMipLevels, rhi::IF_R16F, w, h, maxLevels );
 }
 
 // Ensure the two ping-ponged temporal-history buffers exist at the AO size. Any
@@ -4775,29 +4839,8 @@ static bool RB_RHI_EnsureSsaoDepthMip( rhi::RHI *r, int w, int h ) {
 // history so the resolve falls back to the current frame rather than blending stale
 // or garbage data. Only called while r_ssaoTemporal is on.
 static bool RB_RHI_EnsureSsaoHistory( rhi::RHI *r, int w, int h ) {
-	if ( rhiSsaoHistRT[0] && r->GetRenderTargetImage( rhiSsaoHistRT[0] ) == 0 ) {
-		rhiSsaoHistRT[0] = rhiSsaoHistRT[1] = 0;	// lost context (vid_restart)
-		rhiSsaoHistW = rhiSsaoHistH = 0;
-	}
-	if ( rhiSsaoHistRT[0] && rhiSsaoHistRT[1] && rhiSsaoHistW == w && rhiSsaoHistH == h ) {
-		return true;
-	}
-	for ( int i = 0; i < 2; ++i ) {
-		if ( rhiSsaoHistRT[i] ) { r->DestroyRenderTarget( rhiSsaoHistRT[i] ); rhiSsaoHistRT[i] = 0; }
-	}
-	rhiSsaoHistRT[0] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
-	rhiSsaoHistRT[1] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
-	rhiSsaoHistValid = false;	// freshly (re)allocated: nothing to reproject yet
-	if ( !rhiSsaoHistRT[0] || !rhiSsaoHistRT[1] ) {
-		for ( int i = 0; i < 2; ++i ) {
-			if ( rhiSsaoHistRT[i] ) { r->DestroyRenderTarget( rhiSsaoHistRT[i] ); rhiSsaoHistRT[i] = 0; }
-		}
-		rhiSsaoHistW = rhiSsaoHistH = 0;
-		return false;
-	}
-	rhiSsaoHistW = w;
-	rhiSsaoHistH = h;
-	return true;
+	return RB_RHI_EnsureHistoryPair( r, rhiSsaoHistRT, rhiSsaoHistW, rhiSsaoHistH,
+			rhiSsaoHistValid, rhi::IF_RGBA8, w, h );
 }
 
 // Invert a GL column-major 4x4 (float[16]) into out (also GL column-major). idMat4 is
@@ -5229,101 +5272,29 @@ rhi::ImageHandle RB_RHI_HelltimeAccum( rhi::RHI *r, const viewDef_t *viewDef, in
 }
 
 static bool RB_RHI_EnsureSsrTarget( rhi::RHI *r, int w, int h ) {
-	if ( rhiSsrRT && r->GetRenderTargetImage( rhiSsrRT ) == 0 ) {
-		rhiSsrRT = 0;						// lost context (vid_restart)
-		rhiSsrW = rhiSsrH = 0;
-	}
-	if ( rhiSsrRT && rhiSsrW == w && rhiSsrH == h ) {
-		return true;
-	}
-	if ( rhiSsrRT ) { r->DestroyRenderTarget( rhiSsrRT ); rhiSsrRT = 0; }
-	rhiSsrRT = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
-	if ( !rhiSsrRT ) {
-		rhiSsrW = rhiSsrH = 0;
-		return false;
-	}
-	rhiSsrW = w;
-	rhiSsrH = h;
-	return true;
+	return RB_RHI_EnsureRT( r, rhiSsrRT, rhiSsrW, rhiSsrH, rhi::IF_RGBA16F, w, h );
 }
 
 // SSR temporal history ping-pong; resolution changes invalidate the history so a
 // re-enable / res switch starts clean instead of blending stale or mis-sized data.
 static bool RB_RHI_EnsureSsrHistory( rhi::RHI *r, int w, int h ) {
-	if ( rhiSsrHistRT[0] && r->GetRenderTargetImage( rhiSsrHistRT[0] ) == 0 ) {
-		rhiSsrHistRT[0] = rhiSsrHistRT[1] = 0;	// lost context (vid_restart)
-		rhiSsrHistW = rhiSsrHistH = 0;
-	}
-	if ( rhiSsrHistRT[0] && rhiSsrHistRT[1] && rhiSsrHistW == w && rhiSsrHistH == h ) {
-		return true;
-	}
-	for ( int i = 0; i < 2; i++ ) {
-		if ( rhiSsrHistRT[i] ) { r->DestroyRenderTarget( rhiSsrHistRT[i] ); rhiSsrHistRT[i] = 0; }
-	}
-	rhiSsrHistRT[0] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
-	rhiSsrHistRT[1] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
-	rhiSsrHistValid = false;	// freshly (re)allocated: nothing to reproject yet
-	if ( !rhiSsrHistRT[0] || !rhiSsrHistRT[1] ) {
-		for ( int i = 0; i < 2; i++ ) {
-			if ( rhiSsrHistRT[i] ) { r->DestroyRenderTarget( rhiSsrHistRT[i] ); rhiSsrHistRT[i] = 0; }
-		}
-		rhiSsrHistW = rhiSsrHistH = 0;
-		return false;
-	}
-	rhiSsrHistW = w;
-	rhiSsrHistH = h;
-	return true;
+	return RB_RHI_EnsureHistoryPair( r, rhiSsrHistRT, rhiSsrHistW, rhiSsrHistH,
+			rhiSsrHistValid, rhi::IF_RGBA16F, w, h );
 }
 
 // RR6: (re)allocate the RT-reflection contribution target (this frame's ssr_rt output before temporal).
 // RGBA16F to carry HDR reflected radiance; alpha holds the hit mask ssr_temporal's hit-aware feedback
 // reads. Sized to the SSR march resolution so RT and SSR share a grain. Mirrors RB_RHI_EnsureSsrTarget.
 static bool RB_RHI_EnsureRtReflTarget( rhi::RHI *r, int w, int h ) {
-	if ( rhiRtReflRT && r->GetRenderTargetImage( rhiRtReflRT ) == 0 ) {
-		rhiRtReflRT = 0;					// lost context (vid_restart)
-		rhiRtReflW = rhiRtReflH = 0;
-	}
-	if ( rhiRtReflRT && rhiRtReflW == w && rhiRtReflH == h ) {
-		return true;
-	}
-	if ( rhiRtReflRT ) { r->DestroyRenderTarget( rhiRtReflRT ); rhiRtReflRT = 0; }
-	rhiRtReflRT = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
-	if ( !rhiRtReflRT ) {
-		rhiRtReflW = rhiRtReflH = 0;
-		return false;
-	}
-	rhiRtReflW = w;
-	rhiRtReflH = h;
-	return true;
+	return RB_RHI_EnsureRT( r, rhiRtReflRT, rhiRtReflW, rhiRtReflH, rhi::IF_RGBA16F, w, h );
 }
 
 // RR6: (re)allocate the RT-reflection temporal history ping-pong. Mirrors RB_RHI_EnsureSsrHistory —
 // two RGBA16F slots, invalidated (rhiRtReflHistValid=false) on realloc so the first blend reprojects
 // nothing and just passes the current frame through.
 static bool RB_RHI_EnsureRtReflHistory( rhi::RHI *r, int w, int h ) {
-	if ( rhiRtReflHistRT[0] && r->GetRenderTargetImage( rhiRtReflHistRT[0] ) == 0 ) {
-		rhiRtReflHistRT[0] = rhiRtReflHistRT[1] = 0;	// lost context (vid_restart)
-		rhiRtReflHistW = rhiRtReflHistH = 0;
-	}
-	if ( rhiRtReflHistRT[0] && rhiRtReflHistRT[1] && rhiRtReflHistW == w && rhiRtReflHistH == h ) {
-		return true;
-	}
-	for ( int i = 0; i < 2; i++ ) {
-		if ( rhiRtReflHistRT[i] ) { r->DestroyRenderTarget( rhiRtReflHistRT[i] ); rhiRtReflHistRT[i] = 0; }
-	}
-	rhiRtReflHistRT[0] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
-	rhiRtReflHistRT[1] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
-	rhiRtReflHistValid = false;	// freshly (re)allocated: nothing to reproject yet
-	if ( !rhiRtReflHistRT[0] || !rhiRtReflHistRT[1] ) {
-		for ( int i = 0; i < 2; i++ ) {
-			if ( rhiRtReflHistRT[i] ) { r->DestroyRenderTarget( rhiRtReflHistRT[i] ); rhiRtReflHistRT[i] = 0; }
-		}
-		rhiRtReflHistW = rhiRtReflHistH = 0;
-		return false;
-	}
-	rhiRtReflHistW = w;
-	rhiRtReflHistH = h;
-	return true;
+	return RB_RHI_EnsureHistoryPair( r, rhiRtReflHistRT, rhiRtReflHistW, rhiRtReflHistH,
+			rhiRtReflHistValid, rhi::IF_RGBA16F, w, h );
 }
 
 // SSR Hi-Z (docs/ssao-perf-optimization.md, r_ssrHiZ): (re)allocate the min-Z depth pyramid
@@ -5331,30 +5302,10 @@ static bool RB_RHI_EnsureRtReflHistory( rhi::RHI *r, int w, int h ) {
 // the backend has no mipped-target capability (CreateRenderTargetMipped -> 0), so the caller
 // silently falls back to the exact full-res march.
 static bool RB_RHI_EnsureSsrDepthMin( rhi::RHI *r, int w, int h ) {
-	// a lost context (vid_restart) leaves the handle set but its texture gone
-	if ( rhiSsrDepthMinRT && r->GetRenderTargetImage( rhiSsrDepthMinRT ) == 0 ) {
-		rhiSsrDepthMinRT = 0;
-		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
-	}
-	if ( rhiSsrDepthMinRT && rhiSsrDepthMinW == w && rhiSsrDepthMinH == h ) {
-		return true;
-	}
-	if ( rhiSsrDepthMinRT ) { r->DestroyRenderTarget( rhiSsrDepthMinRT ); rhiSsrDepthMinRT = 0; }
-
-	// enough levels to leap across the march radius in coarse blocks, capped so the chain
-	// (and its per-level fills) stays short — 6 levels reaches a 1/32 footprint.
-	int levels = 1;
-	for ( int d = ( w > h ? w : h ); d > 1 && levels < 6; d >>= 1 ) { levels++; }
-
-	rhiSsrDepthMinRT = r->CreateRenderTargetMipped( rhi::IF_R16F, w, h, levels );
-	if ( !rhiSsrDepthMinRT ) {
-		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
-		return false;
-	}
-	rhiSsrDepthMinW = w;
-	rhiSsrDepthMinH = h;
-	rhiSsrDepthMinLevels = levels;
-	return true;
+	// 6 levels leaps across the march radius in coarse blocks (1/32 footprint) without an
+	// over-long chain.
+	return RB_RHI_EnsureMippedRT( r, rhiSsrDepthMinRT, rhiSsrDepthMinW, rhiSsrDepthMinH,
+			rhiSsrDepthMinLevels, rhi::IF_R16F, w, h, 6 );
 }
 
 // r_ssrGlossy: (re)create the reflection colour mip pyramid at the SSR march resolution.
@@ -5362,29 +5313,10 @@ static bool RB_RHI_EnsureSsrDepthMin( rhi::RHI *r, int w, int h ) {
 // backend has no mipped-target capability (CreateRenderTargetMipped -> 0), so the caller
 // falls back to the exact sharp composite. Mirrors RB_RHI_EnsureSsrDepthMin.
 static bool RB_RHI_EnsureSsrColorMip( rhi::RHI *r, int w, int h ) {
-	if ( rhiSsrColorMipRT && r->GetRenderTargetImage( rhiSsrColorMipRT ) == 0 ) {
-		rhiSsrColorMipRT = 0;
-		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
-	}
-	if ( rhiSsrColorMipRT && rhiSsrColorMipW == w && rhiSsrColorMipH == h ) {
-		return true;
-	}
-	if ( rhiSsrColorMipRT ) { r->DestroyRenderTarget( rhiSsrColorMipRT ); rhiSsrColorMipRT = 0; }
-
-	// enough levels for a broad glossy blur without an over-long chain; 6 reaches a 1/32
-	// footprint (≈ a mirror -> fully diffuse spread across the roughness cutoff).
-	int levels = 1;
-	for ( int d = ( w > h ? w : h ); d > 1 && levels < 6; d >>= 1 ) { levels++; }
-
-	rhiSsrColorMipRT = r->CreateRenderTargetMipped( rhi::IF_RGBA16F, w, h, levels );
-	if ( !rhiSsrColorMipRT ) {
-		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
-		return false;
-	}
-	rhiSsrColorMipW = w;
-	rhiSsrColorMipH = h;
-	rhiSsrColorMipLevels = levels;
-	return true;
+	// 6 levels give a broad glossy blur (1/32 footprint ≈ mirror -> fully diffuse across
+	// the roughness cutoff) without an over-long chain.
+	return RB_RHI_EnsureMippedRT( r, rhiSsrColorMipRT, rhiSsrColorMipW, rhiSsrColorMipH,
+			rhiSsrColorMipLevels, rhi::IF_RGBA16F, w, h, 6 );
 }
 
 // RR16: gather the lights that can illuminate the reflection into the ring buffer's current slot; return
