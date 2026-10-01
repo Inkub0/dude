@@ -1409,6 +1409,7 @@ void		RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds );
 // this returns false.
 bool		R_BackendSupportsEnhancements();
 bool		R_SupportsRayTracing();		// active backend is Vulkan with ray-query hardware (RT-shadow gate)
+bool		R_HdrOverbrightEnabled();	// HDR tonemap curve on AND r_hdrOverbright > 1 (impl RenderSystem_init.cpp)
 
 bool		GLimp_Init( glimpParms_t parms );
 #ifdef DHEWM3_VULKAN

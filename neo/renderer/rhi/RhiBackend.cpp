@@ -3014,7 +3014,7 @@ static void RB_RHI_FillStageParms( rhi::RenderParams &parms, const float mvp[16]
 	// additive blend. The >1 guard makes r_hdrOverbright 1 skip entirely, so it stays
 	// bit-identical whenever it is off. Boosts the old-style generic stages here; soft
 	// particles, custom-ARB and texgen stages took an earlier branch and stay unboosted.
-	if ( rbHdrActiveThisFrame && r_hdrTonemap.GetInteger() >= 1 && r_hdrOverbright.GetFloat() > 1.0f
+	if ( rbHdrActiveThisFrame && R_HdrOverbrightEnabled()
 	     && ( pStage->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) == ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE ) ) {
 		const float ob = r_hdrOverbright.GetFloat();
 		parms.color[0] *= ob;

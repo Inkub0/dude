@@ -524,8 +524,6 @@ static void R_FlareDeform( drawSurf_t *surf ) {
 }
 */
 
-extern idCVar r_hdrTonemap;		// DUDE HDR tonemap curve select (RenderSystem_init.cpp)
-extern idCVar r_hdrOverbright;	// DUDE HDR emissive overbright (RenderSystem_init.cpp)
 
 static void R_FlareDeform( drawSurf_t *surf ) {
 	const srfTriangles_t *tri;
@@ -597,8 +595,7 @@ static void R_FlareDeform( drawSurf_t *surf ) {
 	// to 0 (the engine's own "off" value for r_flareSize) whenever overbright is active;
 	// unchanged otherwise. Mirrors the backend overbright gate (HDR + tonemap>=1).
 	float	flareScale = r_flareSize.GetFloat();
-	if ( R_BackendSupportsEnhancements() && r_hdr.GetBool()
-	     && r_hdrTonemap.GetInteger() >= 1 && r_hdrOverbright.GetFloat() > 1.0f ) {
+	if ( R_BackendSupportsEnhancements() && r_hdr.GetBool() && R_HdrOverbrightEnabled() ) {
 		flareScale = 0.0f;
 	}
 	float	spread = surf->shaderRegisters[ surf->material->GetDeformRegister(0) ] * flareScale;

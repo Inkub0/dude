@@ -310,6 +310,12 @@ idCVar r_hdrDudeTint( "r_hdrDudeTint", "0.4", CVAR_RENDERER | CVAR_ARCHIVE | CVA
 // giving the tonemap curve real highlight range and eye-adaptation bright anchors. Only active
 // with r_hdrTonemap>=1 (like r_hdrExposure), so it never touches the faithful mode-0 look. 1=off.
 idCVar r_hdrOverbright( "r_hdrOverbright", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "HDR overbright multiplier for additive self-illum stages (needs r_hdr + r_hdrTonemap>=1): pushes lamps/screens/fire above 1.0 for tonemap+adaptation range; 1=off. When active it auto-disables the legacy r_flareSize light haze", 1.0f, 8.0f );
+// DUDE: the common "emissive overbright is live" sub-gate (tonemap curve on AND overbright > 1),
+// shared by the backend additive pass and the tr_deform flare-haze suppression so they can't drift.
+// Callers still AND their own HDR-active test (r_hdr cvar vs the per-frame capture state).
+bool R_HdrOverbrightEnabled( void ) {
+	return r_hdrTonemap.GetInteger() >= 1 && r_hdrOverbright.GetFloat() > 1.0f;
+}
 // Overbright saturation: the tonemap desaturates the very bright colours overbright pushes into
 // (coloured fire/lava go white while white lights are fine). Pre-saturate the boosted additive
 // stages so the hue survives the curve. 1 = off; white is unaffected (no saturation to boost).
@@ -3009,6 +3015,27 @@ static void GfxInfo_f( const idCmdArgs &args ) {
 
 /*
 =================
+R_ResetBackendGpuCaches
+
+Re-arm every once-cached backend GPU shader/scene handle so it recompiles against a rebuilt (or
+not-yet-built) backend. A full vid_restart destroys the VK device + its shader table, and a mod
+switch (ReloadEngine) runs Shutdown then re-init; without this the stale handles dangle and MD5
+models draw at bind pose (T-pose). One place to add the next cache so the two callers can't drift.
+=================
+*/
+static void R_ResetBackendGpuCaches( void ) {
+	extern void R_MD5_ResetGpuShaders( void );
+	extern void R_ResetGpuCullShader( void );
+	extern void R_RtResetSceneState( void );
+	extern void R_RHI_ResetEnvShaders( void );
+	R_MD5_ResetGpuShaders();
+	R_ResetGpuCullShader();
+	R_RtResetSceneState();
+	R_RHI_ResetEnvShaders();
+}
+
+/*
+=================
 R_VidRestart_f
 =================
 */
@@ -3080,16 +3107,8 @@ void R_VidRestart_f( const idCmdArgs &args ) {
 	renderModelManager->FreeModelVertexCaches();
 
 	// a full vid_restart destroys the backend (VK device + its shader table), so re-arm the
-	// once-cached MD5 GPU compute shaders (skin / motion-vector / tess) to recompile against
-	// the rebuilt backend — otherwise they'd dangle and MD5 models would draw at bind pose.
-	extern void R_MD5_ResetGpuShaders( void );
-	R_MD5_ResetGpuShaders();
-	extern void R_ResetGpuCullShader( void );
-	R_ResetGpuCullShader();
-	extern void R_RtResetSceneState( void );
-	R_RtResetSceneState();
-	extern void R_RHI_ResetEnvShaders( void );
-	R_RHI_ResetEnvShaders();
+	// once-cached backend GPU shaders/scene to recompile against the rebuilt backend.
+	R_ResetBackendGpuCaches();
 
 	// free any current world interaction surfaces and vertex caches
 	R_FreeDerivedData();
@@ -3360,18 +3379,11 @@ idRenderSystemLocal::Shutdown
 void idRenderSystemLocal::Shutdown( void ) {
 	common->Printf( "idRenderSystem::Shutdown()\n" );
 
-	// Re-arm the once-cached MD5 GPU compute shaders (skin / motion-vector / tess) before the
-	// backend teardown below frees their modules: a mod switch (ReloadEngine) runs this full
-	// Shutdown then re-inits, and without the reset the stale handles would dispatch against
-	// destroyed pipelines so every MD5 model draws at bind pose (T-pose). See Model_md5.cpp.
-	extern void R_MD5_ResetGpuShaders( void );
-	R_MD5_ResetGpuShaders();
-	extern void R_ResetGpuCullShader( void );
-	R_ResetGpuCullShader();
-	extern void R_RtResetSceneState( void );
-	R_RtResetSceneState();
-	extern void R_RHI_ResetEnvShaders( void );
-	R_RHI_ResetEnvShaders();
+	// Re-arm the once-cached backend GPU shaders/scene before the backend teardown below frees
+	// their modules: a mod switch (ReloadEngine) runs this full Shutdown then re-inits, and without
+	// the reset the stale handles would dispatch against destroyed pipelines so every MD5 model
+	// draws at bind pose (T-pose). See Model_md5.cpp.
+	R_ResetBackendGpuCaches();
 
 	common->SetRefreshOnPrint( false ); // without a renderer there's nothing to refresh
 
