@@ -702,7 +702,7 @@ reference; a wrong kernel can only FAIL because the reference IS the shipping cu
    hands back a different buffer per surface, so it needs a unified geometry buffer first — see
    docs/gpu-offload-plan.md Phase 3.2b/3.3.)
 
-Vulkan only (GL3 has no compute lane); mirrors r_gpuSkinTest / r_tessDeformTest. The model matrix
+Vulkan only (GL3 has no compute lane); a once/sec headless GPU-vs-CPU validator. The model matrix
 is id column-major (basis vectors as columns, translation in [12..14]), which is exactly GLSL's
 mat4 convention, so `m * vec4(p,1)` reproduces R_LocalPointToGlobal with NO transpose. idPlane
 test dot(pl.xyz,w)+pl.w == idPlane::Distance; positive side is OUT.

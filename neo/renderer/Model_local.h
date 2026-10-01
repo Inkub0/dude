@@ -198,7 +198,6 @@ private:
 	void						BuildGpuSkinData( const idJointMat *bindJoints );
 	void						FreeGpuSkinData( void );
 	bool						EnsureSkinBuffersUploaded( void );
-	void						GpuSkinValidate( const idJointMat *entJoints, const struct srfTriangles_s *cpuRef );
 
 	// --- Roadmap B: compute "deform once, draw everywhere" tessellation (docs/tessellation.md,
 	// docs/gpu-offload-plan.md; Vulkan only, opt-in r_tessDeform). Instead of re-running PN +
@@ -219,7 +218,7 @@ private:
 	glIndex_t *					tessExpandIndexes;	// [numTessOutTris*3] expanded 32-bit index list (B-2 draw)
 
 	// per-mesh static SSBOs (rhi::BufferHandle; 0 = not uploaded), shared by all entities using this
-	// model; the per-frame source-vert + output buffers live per-surface / in the validate harness.
+	// model; the per-frame source-vert + output buffers live per-surface.
 	unsigned int				tessGpuBarySeam;
 	unsigned int				tessGpuSrcTri;
 	unsigned int				tessGpuHeight;
@@ -227,7 +226,6 @@ private:
 	void						BuildTessTopology( const idJointMat *bindJoints );
 	void						FreeTessData( void );
 	bool						EnsureTessBuffersUploaded( void );
-	void						TessDeformValidate( const struct srfTriangles_s *cpuRef );
 
 	void						TransformVerts( idDrawVert *verts, const idJointMat *joints );
 	void						TransformScaledVerts( idDrawVert *verts, const idJointMat *joints, float scale );

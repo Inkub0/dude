@@ -34,13 +34,6 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/Model_local.h"
 #include "framework/LoadTiming.h"		// DUDE: md5 load sub-split timers
 
-// Phase 2 (docs/gpu-offload-plan.md): validate GPU MD5 skinning against the CPU. Once/sec
-// (r_gpuSkinTest) a mesh being skinned is ALSO skinned on the GPU via the compute lane and
-// the positions are compared bit-close to idMD5Mesh::TransformVerts — proving the kernel +
-// data layout before any of it touches the render path. Vulkan only (GL3 has no compute).
-static idCVar r_gpuSkinTest( "r_gpuSkinTest", "0", CVAR_RENDERER | CVAR_BOOL,
-	"validate GPU MD5 skinning vs the CPU once/sec, printing the max position error (Vulkan; docs/gpu-offload-plan.md Phase 2)" );
-
 // FIDELITY NOTE: GPU skinning uses option B (blended-LBS of a stored bind-pose TBN), which
 // diverges from stock's per-frame re-derive by a few degrees of surface normal on heavily
 // deforming meshes (imperceptible under normal maps in motion; see docs/gpu-offload-plan.md).
@@ -72,13 +65,6 @@ idCVar r_gpuSkinning( "r_gpuSkinning", "1", CVAR_RENDERER | CVAR_BOOL,
 // r_tessMinEdge change (they alter the baked topology). NOT enabled per-frame for the validator.
 idCVar r_tessDeform( "r_tessDeform", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE,
 	"deform tessellated meshes once/frame in a compute pass instead of per-pass fixed-function tess (Vulkan only; docs/tessellation.md)" );
-
-// Dev/validation gate (mirrors r_gpuSkinTest): once/sec run the B-1 headless validator -- DispatchSync
-// the deform kernel, ReadBuffer, and diff GPU-vs-CPU-reference and BU_STORAGE-vs-BU_SKIN, with NO draw.
-// Kernel-correctness only (GPU vs a CPU port of the SAME PN+displacement math at the SAME baked bary
-// coords), not fidelity vs the hardware tessellator. Stalls the GPU, so never enable per-frame in ship.
-static idCVar r_tessDeformTest( "r_tessDeformTest", "0", CVAR_RENDERER | CVAR_BOOL,
-	"validate the compute deform (Roadmap B) vs a CPU reference once/sec, no draw (Vulkan; docs/tessellation.md)" );
 
 // GPU MD5 skinning kernel (option B, blended-LBS): one invocation per OUTPUT vertex, walking
 // that vertex's run in the EXPANDED weight stream (per-vertex start from wstart, terminator from
@@ -434,9 +420,9 @@ void idMD5Mesh::ParseMesh( idLexer &parser, int numJoints, const idJointMat *joi
 			idLoadTimingScope skinScope( loadTiming.md5GpuSkinMs, loadTiming.md5GpuSkinCount );	// DUDE: md5 split
 			BuildGpuSkinData( joints );
 		}
-		// Roadmap B: bake the uniform-level deform topology when the feature (or its validator) is on.
-		// Needs the bind pose here (BuildTessTopology is pose-invariant but reads bind-pose st/seam).
-		if ( r_tessDeform.GetBool() || r_tessDeformTest.GetBool() ) {
+		// Roadmap B: bake the uniform-level deform topology when the feature is on. Needs the bind
+		// pose here (BuildTessTopology is pose-invariant but reads bind-pose st/seam).
+		if ( r_tessDeform.GetBool() ) {
 			idLoadTimingScope tessScope( loadTiming.md5TessMs, loadTiming.md5TessCount );	// DUDE: md5 split
 			BuildTessTopology( joints );
 		}
@@ -768,270 +754,6 @@ void idMD5Mesh::TransformScaledVerts( idDrawVert *verts, const idJointMat *entJo
 }
 
 /*
-====================
-R_MD5_DeriveUnsmoothedRef
-
-CPU reference derive: the math of idSIMD_SSE41::DeriveUnsmoothedTangents run over an arbitrary
-vert array, in place. The harness needs its own copy because it cannot trust the normals sitting
-in the CPU surface — r_useDeferredTangents (default 1) defers R_DeriveTangents to
-R_CreateAmbientCache, which runs AFTER the validate hook, so those normals belong to the PREVIOUS
-pose. Comparing against them measures a frame of animation, not skinning error.
-
-Writing normal/tangents while reading only xyz/st makes the in-place pass order-independent,
-exactly as it is in the GPU kernel.
-====================
-*/
-static void R_MD5_DeriveUnsmoothedRef( idDrawVert *verts, const dominantTri_t *dom, int numVerts ) {
-	for ( int i = 0; i < numVerts; i++ ) {
-		const dominantTri_t &dt = dom[i];
-		idDrawVert *a = verts + i;
-		const idDrawVert *b = verts + dt.v2;
-		const idDrawVert *c = verts + dt.v3;
-		const idVec3 db = b->xyz - a->xyz;
-		const idVec3 dc = c->xyz - a->xyz;
-		const float d4 = b->st[1] - a->st[1];
-		const float d9 = c->st[1] - a->st[1];
-		const idVec3 n = dt.normalizationScale[2] * dc.Cross( db );
-		const idVec3 t = dt.normalizationScale[0] * ( d9 * db - d4 * dc );
-		const idVec3 bt = dt.normalizationScale[1] * t.Cross( n );
-		a->normal = n;
-		a->tangents[0] = t;
-		a->tangents[1] = bt;
-	}
-}
-
-/*
-====================
-R_MD5_GpuSkinRunOnce
-
-Dispatches the blended-LBS skin kernel into a fresh output buffer of `outUsage`, reads it back
-on the host, and prints its divergence vs the CPU reference. GpuSkinValidate runs it twice — once
-into a BU_STORAGE control buffer, once into a BU_SKIN buffer (the exact memory type the render
-path uses) — with NO draw, so the write-combined device-read that caused the device-lost hang is
-probed at ZERO risk. Returns the read-back verts (caller Mem_Free16s) or NULL. The five read-only
-input buffers are owned + shared by the caller. Vulkan only.
-====================
-*/
-static idDrawVert *R_MD5_GpuSkinRunOnce(
-		rhi::RHI *r, const char *label, rhi::BufferUsage outUsage, rhi::ShaderHandle shader,
-		int numOut, int numJoints, const idDrawVert *seed, const struct srfTriangles_s *cpuRef,
-		rhi::BufferHandle bJoints, rhi::BufferHandle bWeights, rhi::BufferHandle bWDesc,
-		rhi::BufferHandle bWStart, rhi::BufferHandle bTBN ) {
-	rhi::BufferHandle bOut = r->CreateBuffer( outUsage, numOut * (int)sizeof( idDrawVert ), seed );
-	if ( bOut == 0 ) {
-		common->Printf( "gpuSkin[%s]: out-buffer alloc failed\n", label );
-		return NULL;
-	}
-
-	struct { unsigned int numVerts; float skinScale; } pc = { (unsigned int)numOut, 1.0f };
-	rhi::ComputeArgs ca = {};
-	ca.shader = shader;
-	ca.storage[0] = bJoints; ca.storage[1] = bWeights; ca.storage[2] = bWDesc;
-	ca.storage[3] = bWStart; ca.storage[4] = bOut; ca.storage[5] = bTBN;
-	ca.pushConstants = &pc;
-	ca.pushConstantSize = (int)sizeof( pc );
-	ca.groupsX = ( numOut + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
-	r->DispatchSync( ca );
-
-	idDrawVert *out = (idDrawVert *)Mem_Alloc16( numOut * sizeof( idDrawVert ) );
-	const bool ok = r->ReadBuffer( bOut, out, numOut * (int)sizeof( idDrawVert ) );
-	r->DestroyBuffer( bOut );
-	if ( !ok ) {
-		common->Printf( "gpuSkin[%s]: readback failed\n", label );
-		Mem_Free16( out );
-		return NULL;
-	}
-
-	float maxPos = 0.0f;
-	int worst = -1;
-	double nSum = 0.0, nMax = 0.0, tSum = 0.0, tMax = 0.0;
-	double nSumClean = 0.0; int nClean = 0, nOutliers = 0;	// >30 deg = a pathological vert
-	for ( int i = 0; i < numOut; i++ ) {
-		const float e = ( out[i].xyz - cpuRef->verts[i].xyz ).Length();
-		if ( e > maxPos ) { maxPos = e; worst = i; }
-
-		float nd = out[i].normal * cpuRef->verts[i].normal;
-		nd = nd < -1.0f ? -1.0f : ( nd > 1.0f ? 1.0f : nd );
-		const double na = RAD2DEG( idMath::ACos( nd ) );
-		nSum += na; if ( na > nMax ) { nMax = na; }
-		if ( na > 30.0 ) { nOutliers++; } else { nSumClean += na; nClean++; }
-
-		float td = out[i].tangents[0] * cpuRef->verts[i].tangents[0];
-		td = td < -1.0f ? -1.0f : ( td > 1.0f ? 1.0f : td );
-		const double ta = RAD2DEG( idMath::ACos( td ) );
-		tSum += ta; if ( ta > tMax ) { tMax = ta; }
-	}
-	common->Printf( "gpuSkin[%s]: %d out-verts, %d joints -- pos err %.6f (worst %d) | normal avg %.2f (clean %.2f, %d>30deg) max %.2f | tangent avg %.2f max %.2f\n",
-	                label, numOut, numJoints, maxPos, worst, nSum / numOut, nClean ? nSumClean / nClean : 0.0, nOutliers, nMax, tSum / numOut, tMax );
-	return out;
-}
-
-/*
-====================
-idMD5Mesh::GpuSkinValidate
-
-Dev harness (r_gpuSkinTest): skin this mesh on the GPU with the blended-LBS kernel using the
-retained expanded-stream data + this frame's joints, then compare the read-back result against the
-CPU reference. The reference's TBN is re-derived here from cpuRef's own current-pose positions
-rather than read out of cpuRef — see R_MD5_DeriveUnsmoothedRef for why the stored one is a frame
-stale. Prints the max position error (should be ~1e-5 units) AND the normal/tangent angular
-divergence in degrees, which should now also be ~0 since the GPU runs stock's per-frame re-derive.
-
-Runs the skin TWICE: into a BU_STORAGE control buffer (the proven Phase-1 readback path) and
-into a BU_SKIN buffer (the exact STORAGE|VERTEX write-combined memory the render path uses), then
-diffs the two read-backs. This isolates the device-lost hang WITHOUT a draw: if the two match, the
-compute correctly writes BU_SKIN memory and the bug is in the vertex-fetch/draw path; if they
-diverge, the BU_SKIN buffer itself is the culprit.
-
-Rate-limited once/sec by the caller because DispatchSync stalls the GPU. Vulkan only.
-====================
-*/
-void idMD5Mesh::GpuSkinValidate( const idJointMat *entJoints, const struct srfTriangles_s *cpuRef ) {
-	rhi::RHI *r = rhi::GetRHI();
-	if ( !r || !skinExpandLocalTBN || numOutputVerts <= 0 || skinExpandCount <= 0 ) {
-		return;
-	}
-	if ( !cpuRef || cpuRef->numVerts != numOutputVerts || cpuRef->verts == NULL ) {
-		return;
-	}
-	if ( R_MD5_SkinShader( r ) == 0 ) {
-		return;
-	}
-
-	const int numOut = numOutputVerts;
-	const int E = skinExpandCount;
-	int maxJoint = 0;
-	for ( int j = 0; j < E; j++ ) {
-		const int ji = skinExpandWDesc[j * 2] / 12;
-		if ( ji > maxJoint ) { maxJoint = ji; }
-	}
-	const int numJoints = maxJoint + 1;
-
-	// Rebuild the CPU reference's TBN from ITS OWN current-pose positions before comparing anything.
-	// cpuRef->verts carries last frame's derive (see R_MD5_DeriveUnsmoothedRef), which made every
-	// GPU-vs-CPU number below read as ~15 deg of "error" that was really one frame of animation.
-	// This stays an independent check: the positions are the CPU's, not the GPU's.
-	idDrawVert *refVerts = NULL;
-	srfTriangles_t refTri;
-	const srfTriangles_t *ref = cpuRef;
-	if ( deformInfo && deformInfo->dominantTris ) {
-		refVerts = (idDrawVert *)Mem_Alloc16( numOut * sizeof( idDrawVert ) );
-		memcpy( refVerts, cpuRef->verts, numOut * sizeof( idDrawVert ) );
-		R_MD5_DeriveUnsmoothedRef( refVerts, deformInfo->dominantTris, numOut );
-		refTri = *cpuRef;
-		refTri.verts = refVerts;
-		ref = &refTri;
-	}
-
-	rhi::BufferHandle bJoints  = r->CreateBuffer( rhi::BU_STORAGE, numJoints * (int)sizeof( idJointMat ), entJoints );
-	rhi::BufferHandle bWeights = r->CreateBuffer( rhi::BU_STORAGE, E * (int)sizeof( idVec4 ), skinExpandWeights );
-	rhi::BufferHandle bWDesc   = r->CreateBuffer( rhi::BU_STORAGE, E * 2 * (int)sizeof( int ), skinExpandWDesc );
-	rhi::BufferHandle bWStart  = r->CreateBuffer( rhi::BU_STORAGE, numOut * (int)sizeof( unsigned int ), skinWeightStart );
-	rhi::BufferHandle bTBN     = r->CreateBuffer( rhi::BU_STORAGE, E * 3 * (int)sizeof( idVec4 ), skinExpandLocalTBN );
-
-	if ( bJoints && bWeights && bWDesc && bWStart && bTBN ) {
-		// Control: skin into a BU_STORAGE buffer (the proven Phase-1 readback path).
-		idDrawVert *outStorage = R_MD5_GpuSkinRunOnce( r, "storage", rhi::BU_STORAGE, r_md5SkinShader,
-			numOut, numJoints, skinTemplate, ref, bJoints, bWeights, bWDesc, bWStart, bTBN );
-
-		// SAFE ISOLATION TEST: skin into a BU_SKIN buffer — the exact memory type the render path
-		// uses (STORAGE|VERTEX, host-visible write-combined). Compute writes it, we read it back on
-		// the host. There is NO draw, so the giant-triangle rasterization hang cannot occur here.
-		// If this matches the BU_STORAGE control, the compute correctly writes BU_SKIN memory and
-		// the device-lost bug lives in the DRAW/vertex-fetch path (barrier / cross-frame / async).
-		// If it diverges, the BU_SKIN buffer's memory or usage is itself the culprit.
-		idDrawVert *outSkin = R_MD5_GpuSkinRunOnce( r, "skin", rhi::BU_SKIN, r_md5SkinShader,
-			numOut, numJoints, skinTemplate, ref, bJoints, bWeights, bWDesc, bWStart, bTBN );
-
-		if ( outStorage && outSkin ) {
-			float maxDelta = 0.0f;
-			int nDiff = 0;
-			for ( int i = 0; i < numOut; i++ ) {
-				const float d = ( outSkin[i].xyz - outStorage[i].xyz ).Length();
-				if ( d > maxDelta ) { maxDelta = d; }
-				if ( d > 0.001f ) { nDiff++; }
-			}
-			common->Printf( "gpuSkin[compare]: BU_SKIN vs BU_STORAGE -- max pos delta %.6f, %d/%d verts differ => %s\n",
-			                maxDelta, nDiff, numOut,
-			                nDiff == 0 ? "IDENTICAL (BU_SKIN compute-write CORRECT; device-lost bug is in the DRAW path)"
-			                           : "DIVERGENT (BU_SKIN memory/usage is the bug)" );
-		}
-
-		// SEAM-SPLIT DIAGNOSTIC (the tessellation crack question). PN tessellation tears wherever
-		// two COINCIDENT vertices disagree with each other, so what matters is not GPU-vs-CPU
-		// divergence (measured above) but the split WITHIN each result. dupVerts holds exactly the
-		// UV-split coincident pairs and mirroredVerts the mirror-seam ones; a nonzero GPU split
-		// against a ~0 CPU split is the crack, and whether it shows in pos or normal says which.
-		if ( outStorage && deformInfo ) {
-			float gpuPosMax = 0.0f, cpuPosMax = 0.0f;
-			double gpuNrmMax = 0.0, cpuNrmMax = 0.0, brokenMax = 0.0;
-			int pairs = 0, gpuSplit = 0;
-
-			struct measure_t {
-				static void Pair( int a, int b, const idDrawVert *g, const idDrawVert *c,
-				                  float &gp, float &cp, double &gn, double &cn, int &split, double &bmax ) {
-					const float gd = ( g[a].xyz - g[b].xyz ).Length();
-					const float cd = ( c[a].xyz - c[b].xyz ).Length();
-					if ( gd > gp ) { gp = gd; }
-					if ( cd > cp ) { cp = cd; }
-					float gdot = g[a].normal * g[b].normal;
-					gdot = gdot < -1.0f ? -1.0f : ( gdot > 1.0f ? 1.0f : gdot );
-					const double ga = RAD2DEG( idMath::ACos( gdot ) );
-					float cdot = c[a].normal * c[b].normal;
-					cdot = cdot < -1.0f ? -1.0f : ( cdot > 1.0f ? 1.0f : cdot );
-					const double ca = RAD2DEG( idMath::ACos( cdot ) );
-					if ( ga > gn ) { gn = ga; }
-					if ( ca > cn ) { cn = ca; }
-					// The signal: a pair the CPU holds together (agrees to within a degree) but the
-					// GPU pulls apart. Pairs that are legitimately opposite on BOTH paths (coincident
-					// back-to-back sheets read 180 deg on the CPU too) are not cracks and must not
-					// count, which a bare max/threshold over all pairs would wrongly flag.
-					// bmax records HOW FAR the flagged pairs actually split: a count alone cannot
-					// distinguish a mesh torn open from one sitting a degree or two above threshold.
-					if ( ca <= 1.0 && ( gd > 0.001f || ga > 1.0 ) ) {
-						split++;
-						if ( ga > bmax ) { bmax = ga; }
-					}
-				}
-			};
-
-			for ( int i = 0; i < deformInfo->numDupVerts; i++ ) {
-				const int a = deformInfo->dupVerts[i * 2 + 0];
-				const int b = deformInfo->dupVerts[i * 2 + 1];
-				if ( a < numOut && b < numOut ) {
-					measure_t::Pair( a, b, outStorage, ref->verts, gpuPosMax, cpuPosMax, gpuNrmMax, cpuNrmMax, gpuSplit, brokenMax );
-					pairs++;
-				}
-			}
-			const int mirBase = numOut - deformInfo->numMirroredVerts;
-			for ( int i = 0; i < deformInfo->numMirroredVerts; i++ ) {
-				const int a = mirBase + i;
-				const int b = deformInfo->mirroredVerts[i];
-				if ( a < numOut && b < numOut ) {
-					measure_t::Pair( a, b, outStorage, ref->verts, gpuPosMax, cpuPosMax, gpuNrmMax, cpuNrmMax, gpuSplit, brokenMax );
-					pairs++;
-				}
-			}
-
-			common->Printf( "gpuSkin[seams]: %d coincident pairs (%d dup, %d mirrored) -- GPU split: pos %.6f, normal %.2f deg (%d CPU-agreed pairs BROKEN by GPU, worst %.2f deg) | CPU split: pos %.6f, normal %.2f deg\n",
-			                pairs, deformInfo->numDupVerts, deformInfo->numMirroredVerts,
-			                gpuPosMax, gpuNrmMax, gpuSplit, brokenMax, cpuPosMax, cpuNrmMax );
-		}
-
-		if ( outStorage ) { Mem_Free16( outStorage ); }
-		if ( outSkin )    { Mem_Free16( outSkin ); }
-	}
-
-	if ( refVerts ) { Mem_Free16( refVerts ); }
-
-	if ( bJoints )  { r->DestroyBuffer( bJoints ); }
-	if ( bWeights ) { r->DestroyBuffer( bWeights ); }
-	if ( bWDesc )   { r->DestroyBuffer( bWDesc ); }
-	if ( bWStart )  { r->DestroyBuffer( bWStart ); }
-	if ( bTBN )     { r->DestroyBuffer( bTBN ); }
-}
-
-/*
 ===============================================================================
 
 	Roadmap B: compute "deform once, draw everywhere" tessellation
@@ -1160,42 +882,6 @@ void R_MD5_ResetGpuShaders( void ) {
 	r_md5TessShader = 0;		r_md5TessShaderTried = false;
 }
 
-// Full-precision normalize for the CPU reference. idVec3::Normalize() uses idMath::InvSqrt (an
-// 8-bit-seed Newton-Raphson, ~1e-7 relative error) which, propagated through the PN edge control
-// points on model-space corners tens of units apart, inflates the validator's printed position
-// delta to ~1e-5..1e-4 -- reading as kernel drift when the kernel is correct. GLSL normalize() is
-// near-full IEEE, so match it with 1/sqrtf to keep the diagnostic number honest.
-static ID_INLINE idVec3 R_TessNormalizeFP( const idVec3 &v ) {
-	const float lsq = v.x * v.x + v.y * v.y + v.z * v.z;
-	if ( lsq <= 0.0f ) {
-		return idVec3( 0.0f, 0.0f, 0.0f );
-	}
-	const float inv = 1.0f / sqrtf( lsq );
-	return idVec3( v.x * inv, v.y * inv, v.z * inv );
-}
-
-// C++ port of dudeTessPN (tess.glsl:47) in the identical op order, for the validator's reference.
-static idVec3 R_TessPN_CpuRef( const idVec3 &p0, const idVec3 &p1, const idVec3 &p2,
-                               const idVec3 &n0, const idVec3 &n1, const idVec3 &n2, const idVec3 &tc ) {
-	idVec3 b300 = p0, b030 = p1, b003 = p2;
-	idVec3 b210 = ( 2.0f * p0 + p1 - ( ( p1 - p0 ) * n0 ) * n0 ) / 3.0f;
-	idVec3 b120 = ( 2.0f * p1 + p0 - ( ( p0 - p1 ) * n1 ) * n1 ) / 3.0f;
-	idVec3 b021 = ( 2.0f * p1 + p2 - ( ( p2 - p1 ) * n1 ) * n1 ) / 3.0f;
-	idVec3 b012 = ( 2.0f * p2 + p1 - ( ( p1 - p2 ) * n2 ) * n2 ) / 3.0f;
-	idVec3 b102 = ( 2.0f * p2 + p0 - ( ( p0 - p2 ) * n2 ) * n2 ) / 3.0f;
-	idVec3 b201 = ( 2.0f * p0 + p2 - ( ( p2 - p0 ) * n0 ) * n0 ) / 3.0f;
-	idVec3 e = ( b210 + b120 + b021 + b012 + b102 + b201 ) / 6.0f;
-	idVec3 vmid = ( p0 + p1 + p2 ) / 3.0f;
-	idVec3 b111 = e + ( e - vmid ) * 0.5f;
-	const float a = tc.x, b = tc.y, c = tc.z;
-	const float a2 = a * a, b2 = b * b, c2 = c * c;
-	return b300 * ( a2 * a ) + b030 * ( b2 * b ) + b003 * ( c2 * c )
-	     + b210 * ( 3.0f * a2 * b ) + b120 * ( 3.0f * a * b2 )
-	     + b021 * ( 3.0f * b2 * c ) + b012 * ( 3.0f * b * c2 )
-	     + b102 * ( 3.0f * a * c2 ) + b201 * ( 3.0f * a2 * c )
-	     + b111 * ( 6.0f * a * b * c );
-}
-
 // Bilinear sample of the SIGNED tess height map (mirrors tess.glsl dudeTessDisplace).
 // uv wraps (repeat) to match the material sampler; returns (h - 0.5) with h the red channel,
 // BEFORE the seam scale (applied by the caller). pic is RGBA8, row-major.
@@ -1254,7 +940,7 @@ void idMD5Mesh::FreeTessData( void ) {
 ====================
 idMD5Mesh::BuildTessTopology
 
-Bake the static uniform-level subdivision once at load (Vulkan, r_tessDeform/r_tessDeformTest on).
+Bake the static uniform-level subdivision once at load (Vulkan, r_tessDeform on).
 Every source triangle is subdivided at level L into a regular barycentric grid (crack-free by
 construction). Per generated vertex: the barycentric coord, the interpolated UV-seam mask, the 3
 source-corner OUTPUT-vert indices its PN control net reads at runtime, and a CPU-sampled displacement
@@ -1427,143 +1113,6 @@ bool idMD5Mesh::EnsureTessBuffersUploaded( void ) {
 
 /*
 ====================
-R_TessDeform_RunOnce
-
-Dispatch the deform kernel into a fresh output buffer of `outUsage`, read it back, and print its
-divergence vs a CPU reference that evaluates the SAME PN + displacement math at the SAME baked bary
-coords (NOT the hardware tessellator). Mirrors R_MD5_GpuSkinRunOnce. `srcVB` is the current-pose
-source-vert SSBO (owned by the caller); the three static topology SSBOs are the mesh's. Returns the
-read-back verts (caller Mem_Free16s) or NULL. Vulkan only.
-====================
-*/
-static idDrawVert *R_TessDeform_RunOnce(
-		rhi::RHI *r, const char *label, rhi::BufferUsage outUsage, rhi::ShaderHandle shader,
-		int numTessVerts, float dispStrength, const idDrawVert *seedTemplate,
-		const idVec4 *barySeam, const int *srcTri, const idDrawVert *srcVerts, int numSrcVerts,
-		rhi::BufferHandle srcVB, rhi::BufferHandle bBary, rhi::BufferHandle bSrcTri, rhi::BufferHandle bHeight,
-		const float *height ) {
-	rhi::BufferHandle bOut = r->CreateBuffer( outUsage, numTessVerts * (int)sizeof( idDrawVert ), seedTemplate );
-	if ( bOut == 0 ) {
-		common->Printf( "tessDeform[%s]: out-buffer alloc failed\n", label );
-		return NULL;
-	}
-	struct { unsigned int numVerts; float dispStrength; } pc = { (unsigned int)numTessVerts, dispStrength };
-	rhi::ComputeArgs ca = {};
-	ca.shader = shader;
-	ca.storage[0] = srcVB; ca.storage[1] = bBary; ca.storage[2] = bSrcTri; ca.storage[3] = bHeight; ca.storage[4] = bOut;
-	ca.pushConstants = &pc;
-	ca.pushConstantSize = (int)sizeof( pc );
-	ca.groupsX = ( numTessVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
-	r->DispatchSync( ca );
-
-	idDrawVert *out = (idDrawVert *)Mem_Alloc16( numTessVerts * sizeof( idDrawVert ) );
-	const bool ok = r->ReadBuffer( bOut, out, numTessVerts * (int)sizeof( idDrawVert ) );
-	r->DestroyBuffer( bOut );
-	if ( !ok ) {
-		common->Printf( "tessDeform[%s]: readback failed\n", label );
-		Mem_Free16( out );
-		return NULL;
-	}
-
-	// CPU reference at the same baked bary coords, same op order.
-	float maxPos = 0.0f;   int worst = -1;
-	double nSum = 0.0, nMax = 0.0;  int nOutliers = 0, nNaN = 0;
-	for ( int i = 0; i < numTessVerts; i++ ) {
-		const int c0 = srcTri[i * 3 + 0], c1 = srcTri[i * 3 + 1], c2 = srcTri[i * 3 + 2];
-		if ( c0 < 0 || c0 >= numSrcVerts || c1 < 0 || c1 >= numSrcVerts || c2 < 0 || c2 >= numSrcVerts ) {
-			continue;
-		}
-		const idVec3 p0 = srcVerts[c0].xyz, p1 = srcVerts[c1].xyz, p2 = srcVerts[c2].xyz;
-		// full-precision normalize to mirror GLSL normalize() (see R_TessNormalizeFP) -- NOT
-		// idVec3::Normalize(), whose approximate InvSqrt would inflate the printed parity delta
-		const idVec3 n0 = R_TessNormalizeFP( srcVerts[c0].normal );
-		const idVec3 n1 = R_TessNormalizeFP( srcVerts[c1].normal );
-		const idVec3 n2 = R_TessNormalizeFP( srcVerts[c2].normal );
-		const idVec3 bary( barySeam[i].x, barySeam[i].y, barySeam[i].z );
-		idVec3 pos = R_TessPN_CpuRef( p0, p1, p2, n0, n1, n2, bary );
-		idVec3 geoN = R_TessNormalizeFP( n0 * bary.x + n1 * bary.y + n2 * bary.z );
-		pos += geoN * ( height[i] * dispStrength );
-
-		const idVec3 &g = out[i].xyz;
-		if ( g.x != g.x || g.y != g.y || g.z != g.z ) { nNaN++; continue; }		// NaN bucket (zero source normal etc.)
-		const float e = ( g - pos ).Length();
-		if ( e > maxPos ) { maxPos = e; worst = i; }
-
-		idVec3 gn = out[i].normal;
-		float nd = gn * geoN;
-		nd = nd < -1.0f ? -1.0f : ( nd > 1.0f ? 1.0f : nd );
-		const double na = RAD2DEG( idMath::ACos( nd ) );
-		nSum += na; if ( na > nMax ) { nMax = na; }
-		if ( na > 30.0 ) { nOutliers++; }
-	}
-	common->Printf( "tessDeform[%s]: %d out-verts -- pos err %.6f (worst %d) | normal avg %.3f max %.3f (%d>30deg) | %d NaN\n",
-	                label, numTessVerts, maxPos, worst,
-	                ( numTessVerts - nNaN ) ? nSum / ( numTessVerts - nNaN ) : 0.0, nMax, nOutliers, nNaN );
-	return out;
-}
-
-/*
-====================
-idMD5Mesh::TessDeformValidate
-
-Dev harness (r_tessDeformTest): run the deform kernel over this frame's CPU-deformed verts and compare
-the read-back against a CPU reference of the same PN + displacement math. Runs it into a BU_STORAGE
-control buffer and a BU_SKIN buffer (the exact render memory type) and diffs the two, isolating any
-device-lost/vertex-fetch bug class WITHOUT a draw. Kernel-correctness only. Rate-limited once/sec by
-the caller (DispatchSync stalls). Vulkan only.
-====================
-*/
-void idMD5Mesh::TessDeformValidate( const struct srfTriangles_s *cpuRef ) {
-	rhi::RHI *r = rhi::GetRHI();
-	if ( !r || !tessBarySeam || numTessOutVerts <= 0 ) {
-		return;
-	}
-	if ( !cpuRef || cpuRef->verts == NULL || cpuRef->numVerts != deformInfo->numOutputVerts ) {
-		return;
-	}
-	if ( R_MD5_TessShader( r ) == 0 || !EnsureTessBuffersUploaded() ) {
-		return;
-	}
-	const int numOut = deformInfo->numOutputVerts;
-	const float dispStrength = r_tessDisplace.GetFloat();
-
-	// current-pose source verts as an SSBO (raw idDrawVert stream)
-	rhi::BufferHandle srcVB = r->CreateBuffer( rhi::BU_STORAGE, numOut * (int)sizeof( idDrawVert ), cpuRef->verts );
-	if ( !srcVB ) {
-		return;
-	}
-
-	// seed the output with anything (kernel overwrites xyz/st/normal/tangents; color stays)
-	idDrawVert *seed = (idDrawVert *)Mem_Alloc16( numTessOutVerts * sizeof( idDrawVert ) );
-	for ( int i = 0; i < numTessOutVerts; i++ ) { seed[i].Clear(); }
-
-	idDrawVert *outStorage = R_TessDeform_RunOnce( r, "storage", rhi::BU_STORAGE, r_md5TessShader,
-		numTessOutVerts, dispStrength, seed, tessBarySeam, tessSrcTri, cpuRef->verts, numOut,
-		srcVB, tessGpuBarySeam, tessGpuSrcTri, tessGpuHeight, tessHeight );
-	idDrawVert *outSkin = R_TessDeform_RunOnce( r, "skin", rhi::BU_SKIN, r_md5TessShader,
-		numTessOutVerts, dispStrength, seed, tessBarySeam, tessSrcTri, cpuRef->verts, numOut,
-		srcVB, tessGpuBarySeam, tessGpuSrcTri, tessGpuHeight, tessHeight );
-
-	if ( outStorage && outSkin ) {
-		float maxDelta = 0.0f;  int nDiff = 0;
-		for ( int i = 0; i < numTessOutVerts; i++ ) {
-			const float d = ( outSkin[i].xyz - outStorage[i].xyz ).Length();
-			if ( d > maxDelta ) { maxDelta = d; }
-			if ( d > 0.001f ) { nDiff++; }
-		}
-		common->Printf( "tessDeform[compare]: BU_SKIN vs BU_STORAGE -- max pos delta %.6f, %d/%d verts differ => %s\n",
-		                maxDelta, nDiff, numTessOutVerts,
-		                nDiff == 0 ? "IDENTICAL (BU_SKIN compute-write correct)" : "DIVERGENT (BU_SKIN memory/usage suspect)" );
-	}
-
-	if ( outStorage ) { Mem_Free16( outStorage ); }
-	if ( outSkin )    { Mem_Free16( outSkin ); }
-	Mem_Free16( seed );
-	r->DestroyBuffer( srcVB );
-}
-
-/*
-====================
 idMD5Mesh::UpdateSurface
 ====================
 */
@@ -1708,9 +1257,9 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			// LBS normal makes the decal ride the exact body surface (the union-find weld below only killed
 			// the coincident-seam-split share; this closes the residual method mismatch). No-op on the drawn
 			// body (it rasterizes gpuSkinVB, not tri->verts) and on the always-on CPU consumers (culling/
-			// shadow/bounds read xyz only); only the decal copy + the unused ambient cache change. Mirrors
-			// GpuSkinValidate's walk; skinExpandLocalTBN is already welded, so this yields welded normals for
-			// free. NORMAL ONLY: PN ignores tangents and the body's gpuSkinVB tangents are unwelded.
+			// shadow/bounds read xyz only); only the decal copy + the unused ambient cache change.
+			// skinExpandLocalTBN is already welded, so this yields welded normals for free. NORMAL ONLY:
+			// PN ignores tangents and the body's gpuSkinVB tangents are unwelded.
 			const int numOut = numOutputVerts;
 			for ( int i = 0; i < numOut; i++ ) {
 				idVec3 nrm( 0.0f, 0.0f, 0.0f );
@@ -1928,38 +1477,6 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		}
 	}
 
-	// Phase 2 validation (r_gpuSkinTest): once/sec, skin this mesh on the GPU with the full
-	// option-B kernel and compare against this CPU result (positions bit-exact, TBN divergence
-	// reported in degrees). Needs derived tangents on the reference, and stalls the GPU, so it
-	// is rate-limited and dev-only. Vulkan only (skin data only built there).
-	if ( r_gpuSkinTest.GetBool() && skinExpandLocalTBN ) {
-		static int s_lastMs = 0;
-		const int now = Sys_Milliseconds();
-		if ( now - s_lastMs >= 1000 ) {
-			s_lastMs = now;
-			if ( !tri->tangentsCalculated ) {
-				R_DeriveTangents( tri );
-			}
-			GpuSkinValidate( entJoints, tri );
-		}
-	}
-
-	// Roadmap B validation (r_tessDeformTest): once/sec, deform this mesh on the GPU and compare the
-	// read-back against a CPU reference of the same PN + displacement math. Kernel-correctness only,
-	// no draw. Needs the reference's current-pose tangents. The bake is load-time (needs bind pose),
-	// so r_tessDeformTest must be set BEFORE the map/model loads; a change to r_tessLevel needs a
-	// reload too (the baked topology is level-keyed). Vulkan only.
-	if ( r_tessDeformTest.GetBool() && tessBarySeam ) {
-		static int s_lastTessMs = 0;
-		const int now = Sys_Milliseconds();
-		if ( now - s_lastTessMs >= 1000 ) {
-			s_lastTessMs = now;
-			if ( !tri->tangentsCalculated ) {
-				R_DeriveTangents( tri );
-			}
-			TessDeformValidate( tri );
-		}
-	}
 }
 
 /*
