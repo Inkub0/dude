@@ -2538,19 +2538,6 @@ void VulkanBackend::Shutdown() {
 		vkDestroyPipelineCache( device, diskPipelineCache, NULL );
 		diskPipelineCache = VK_NULL_HANDLE;
 	}
-	// DIAG (temporary, ReloadEngine VMA-leak hunt): dump any allocation still live right before
-	// the allocator is destroyed, so a mod-switch leak prints its size/name to stderr instead of
-	// a bare VmaDeviceMemoryBlock assert. Removed once the leak is identified and fixed.
-	if ( vma ) {
-		VmaTotalStatistics vmaStats;
-		vmaCalculateStatistics( vma, &vmaStats );
-		if ( vmaStats.total.statistics.allocationCount > 0 ) {
-			fprintf( stderr, "\n=== VMA LEAK at teardown: %u allocation(s), %llu bytes still live ===\n",
-			         (unsigned)vmaStats.total.statistics.allocationCount,
-			         (unsigned long long)vmaStats.total.statistics.allocationBytes );
-			fflush( stderr );
-		}
-	}
 	if ( vma )     { vmaDestroyAllocator( vma ); vma = NULL; }
 	if ( device )  { vkDestroyDevice( device, NULL ); device = VK_NULL_HANDLE; }
 	if ( messenger ) {
