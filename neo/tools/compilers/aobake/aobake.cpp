@@ -58,6 +58,7 @@ idCVar r_occlusionMapBakeThreads( "r_occlusionMapBakeThreads", "0", CVAR_RENDERE
 
 struct aoTri_t {
 	idVec3	v[3];
+	idVec3	edge1, edge2;	// v[1]-v[0], v[2]-v[0], precomputed for the Moller-Trumbore ray test
 	idVec3	normal;		// geometric (for the tiny backface/self bias)
 };
 
@@ -137,12 +138,13 @@ static void AO_BuildGrid( const idRenderModel *model, aoGrid_t &g ) {
 		if ( !surf->shader || !surf->shader->IsDrawn() ) {
 			continue;
 		}
-		for ( int i = 0; i + 2 < tri->numIndexes + 0; i += 3 ) {
-			if ( i + 2 >= tri->numIndexes ) break;
+		for ( int i = 0; i + 2 < tri->numIndexes; i += 3 ) {
 			aoTri_t at;
 			at.v[0] = tri->verts[ tri->indexes[i + 0] ].xyz;
 			at.v[1] = tri->verts[ tri->indexes[i + 1] ].xyz;
 			at.v[2] = tri->verts[ tri->indexes[i + 2] ].xyz;
+			at.edge1 = at.v[1] - at.v[0];
+			at.edge2 = at.v[2] - at.v[0];
 			// Geometric normal in the ENGINE's winding: R_DeriveFacePlanes builds a face plane
 			// as (v2 - v0) x (v1 - v0) (tr_trisurf.cpp), and the vertex normals it accumulates
 			// from those planes point OUTWARD on every shipped model. The backface cull below
@@ -171,8 +173,8 @@ static void AO_BuildGrid( const idRenderModel *model, aoGrid_t &g ) {
 // Moller-Trumbore. Returns the hit distance along dir (>0) or -1 for no hit.
 static float AO_RayTri( const idVec3 &orig, const idVec3 &dir, const aoTri_t &t, float maxDist ) {
 	const float EPS = 1e-6f;
-	idVec3 e1 = t.v[1] - t.v[0];
-	idVec3 e2 = t.v[2] - t.v[0];
+	const idVec3 &e1 = t.edge1;
+	const idVec3 &e2 = t.edge2;
 	idVec3 p = dir.Cross( e2 );
 	float det = e1 * p;
 	if ( det > -EPS && det < EPS ) {
@@ -308,7 +310,7 @@ static void AO_Basis( const idVec3 &n, idVec3 &t, idVec3 &b ) {
 // dark blotches onto the visible skin next to them through bilinear/mip filtering. Real creases
 // keep their contact darkening: their near hits come from one side, not the whole hemisphere.
 static float AO_SampleVisibility( const aoGrid_t &g, aoTraceCtx_t &ctx, const idVec3 &point, const idVec3 &normal,
-                                  int rays, float maxDist, float bias, float contact, bool *buried ) {
+                                  const idVec3 *hemi, int rays, float maxDist, float bias, float contact, bool *buried ) {
 	idVec3 n = normal;
 	n.Normalize();
 	idVec3 t, b;
@@ -318,7 +320,10 @@ static float AO_SampleVisibility( const aoGrid_t &g, aoTraceCtx_t &ctx, const id
 	float occ = 0.0f;
 	int nearHits = 0;
 	for ( int i = 0; i < rays; i++ ) {
-		idVec3 local = AO_CosineHemisphere( i, rays );
+		// hemi[] is the cosine-weighted tangent-space direction set, precomputed once per bake
+		// (AO_CosineHemisphere depends only on i and rays, not the texel) -- was ~2 billion
+		// redundant Sqrt/Cos/Sin on a 4K/128-ray bake. Still rotated into world space per texel.
+		const idVec3 &local = hemi[i];
 		idVec3 dir = t * local.x + b * local.y + n * local.z;
 		float d = AO_TraceNearest( g, ctx, orig, dir, maxDist );
 		if ( d > 0.0f ) {
@@ -510,11 +515,24 @@ static idVec3 AO_BumpNormalAt( const aoBump_t &b, float u, float v ) {
 // Cavity at UV from the bump map: neighbours whose normals lean back toward the centre
 // (concave crease) occlude it. 1 = open, <1 = in a groove. radiusUV in [0,1] texture space.
 static float AO_DetailCavity( const aoBump_t &b, float u, float v, float radiusUV, float strength ) {
-	const int N = 8;
+	static const int N = 8;
+	// the N tap directions are fixed, so compute them once (via the same idMath calls, so the
+	// result is bit-for-bit what the old per-texel code produced). Thread-safe local-static init.
+	struct TapDirs {
+		float dx[N], dy[N];
+		TapDirs() {
+			for ( int i = 0; i < N; i++ ) {
+				const float ang = ( 2.0f * idMath::PI * i ) / (float)N;
+				dx[i] = idMath::Cos( ang );
+				dy[i] = idMath::Sin( ang );
+			}
+		}
+	};
+	static const TapDirs taps;
+
 	float occ = 0.0f;
 	for ( int i = 0; i < N; i++ ) {
-		float ang = ( 2.0f * idMath::PI * i ) / (float)N;
-		float dx = idMath::Cos( ang ), dy = idMath::Sin( ang );
+		const float dx = taps.dx[i], dy = taps.dy[i];
 		idVec3 nj = AO_BumpNormalAt( b, u + dx * radiusUV, v + dy * radiusUV );
 		float t = -( nj.x * dx + nj.y * dy );	// >0 when the neighbour faces back toward centre
 		if ( t > 0.0f ) {
@@ -541,9 +559,9 @@ struct aoTriSetup_t {
 // scratch. The overlap rule (keep the darker value) is order-independent, so the result is
 // byte-identical to a serial bake regardless of how rows are scheduled.
 static void AO_BakeRow( int y, const aoGrid_t &g, const idList<aoTriSetup_t> &setups,
-                        byte *ao, byte *covered, int size, int rays, float maxDist, float bias,
-                        float contrast, const aoBump_t *bump, float detail, float contact,
-                        aoTraceCtx_t &ctx, bool &wroteAny ) {
+                        byte *ao, byte *covered, int size, const idVec3 *hemi, int rays,
+                        float maxDist, float bias, float contrast, const aoBump_t *bump,
+                        float detail, float contact, aoTraceCtx_t &ctx, bool &wroteAny ) {
 	const float py = y + 0.5f;
 	for ( int ti = 0; ti < setups.Num(); ti++ ) {
 		const aoTriSetup_t &s = setups[ti];
@@ -563,7 +581,7 @@ static void AO_BakeRow( int y, const aoGrid_t &g, const idList<aoTriSetup_t> &se
 			idVec3 normal = s.n0 * w0 + s.n1 * w1 + s.n2 * w2;
 
 			bool buried = false;
-			float vis = AO_SampleVisibility( g, ctx, point, normal, rays, maxDist, bias, contact, &buried );
+			float vis = AO_SampleVisibility( g, ctx, point, normal, hemi, rays, maxDist, bias, contact, &buried );
 			if ( buried ) {
 				// hidden under a co-located sub-mesh (see AO_SampleVisibility): leave the texel
 				// unwritten so the seam dilation pads it from its visible neighbours instead of
@@ -647,6 +665,15 @@ static bool AO_BakeSurface( const aoGrid_t &g, const srfTriangles_t *tri, const 
 		return false;
 	}
 
+	// Cosine-weighted hemisphere directions, computed once and shared by every texel/worker (they
+	// are read-only and depend only on the ray count). Hoists the per-ray trig out of the hot loop.
+	idList<idVec3> hemi;
+	hemi.SetNum( rays );
+	for ( int i = 0; i < rays; i++ ) {
+		hemi[i] = AO_CosineHemisphere( i, rays );
+	}
+	const idVec3 *hemiPtr = hemi.Ptr();
+
 	byte *aoPtr  = ao.Ptr();
 	byte *covPtr = covered.Ptr();
 
@@ -664,7 +691,7 @@ static bool AO_BakeSurface( const aoGrid_t &g, const srfTriangles_t *tri, const 
 	if ( nThreads <= 1 ) {
 		aoTraceCtx_t ctx;
 		for ( int y = 0; y < size; y++ ) {
-			AO_BakeRow( y, g, setups, aoPtr, covPtr, size, rays, maxDist, bias, contrast,
+			AO_BakeRow( y, g, setups, aoPtr, covPtr, size, hemiPtr, rays, maxDist, bias, contrast,
 			            bump, detail, contact, ctx, wroteAny );
 		}
 	} else {
@@ -684,7 +711,7 @@ static bool AO_BakeSurface( const aoGrid_t &g, const srfTriangles_t *tri, const 
 					if ( y >= size ) {
 						break;
 					}
-					AO_BakeRow( y, g, setups, aoPtr, covPtr, size, rays, maxDist, bias, contrast,
+					AO_BakeRow( y, g, setups, aoPtr, covPtr, size, hemiPtr, rays, maxDist, bias, contrast,
 					            bump, detail, contact, ctx, wrote );
 				}
 				wroteFlags[t] = wrote ? 1 : 0;
