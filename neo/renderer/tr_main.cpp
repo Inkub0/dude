@@ -2580,21 +2580,36 @@ void R_RtResetSceneState( void ) {
 	s_rtWorldMap = "";
 }
 
+// DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit
+// toggle; r_rtSunShadows (R3) / r_rtMovingLights (Option A) / r_rtAllLights / r_rtao (H4) /
+// r_rtgi (H6) each auto-build it as a prerequisite. Kept in one place so every "is the scene
+// wanted / clear its modified flags" check agrees — a membership mismatch tore the live scene
+// down when only RTAO or RTGI was driving it.
+static bool R_RtSceneWanted( void ) {
+	return r_rtWorld.GetBool() || r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool()
+		|| r_rtAllLights.GetBool() || r_rtao.GetBool() || r_rtgi.GetBool();
+}
+static bool R_RtSceneCvarModified( void ) {
+	return r_rtWorld.IsModified() || r_rtSunShadows.IsModified() || r_rtMovingLights.IsModified()
+		|| r_rtAllLights.IsModified() || r_rtao.IsModified() || r_rtgi.IsModified();
+}
+static void R_RtClearSceneCvarModified( void ) {
+	r_rtWorld.ClearModified();
+	r_rtSunShadows.ClearModified();
+	r_rtMovingLights.ClearModified();
+	r_rtAllLights.ClearModified();
+	r_rtao.ClearModified();
+	r_rtgi.ClearModified();
+}
+
 static void R_RtWorldUpdate( void ) {
 	rhi::RHI *r = rhi::GetRHI();
 	if ( r == NULL ) {
 		return;
 	}
-	// r_rtSunShadows (R3) / r_rtMovingLights (Option A) / r_rtAllLights / r_rtao (H4) imply the scene:
-	// the consumers auto-build their prerequisite
-	if ( !r_rtWorld.GetBool() && !r_rtSunShadows.GetBool() && !r_rtMovingLights.GetBool() && !r_rtAllLights.GetBool() && !r_rtao.GetBool() && !r_rtgi.GetBool() ) {
-		if ( r_rtWorld.IsModified() || r_rtSunShadows.IsModified() || r_rtMovingLights.IsModified() || r_rtAllLights.IsModified() || r_rtao.IsModified() || r_rtgi.IsModified() ) {
-			r_rtWorld.ClearModified();
-			r_rtSunShadows.ClearModified();
-			r_rtMovingLights.ClearModified();
-			r_rtAllLights.ClearModified();
-			r_rtao.ClearModified();
-			r_rtgi.ClearModified();
+	if ( !R_RtSceneWanted() ) {
+		if ( R_RtSceneCvarModified() ) {
+			R_RtClearSceneCvarModified();
 			r->DestroyRtScene();		// switched off: free the scene (no-op when never built)
 			s_rtWorldMap.Clear();
 			s_rtAreaBlas.Clear();
@@ -2617,10 +2632,7 @@ static void R_RtWorldUpdate( void ) {
 		R_RtRefreshInstances( world, r );
 		return;
 	}
-	r_rtWorld.ClearModified();
-	r_rtSunShadows.ClearModified();
-	r_rtMovingLights.ClearModified();
-	r_rtAllLights.ClearModified();
+	R_RtClearSceneCvarModified();
 	r->DestroyRtScene();
 
 	// RR5: build the static worldspawn as PER-SURFACE multi-geometry BLASes (device buffers), so a
@@ -2800,7 +2812,9 @@ static void R_RtWorldValidate( void ) {
 	// STATIC scene, not the per-frame TLAS: the CPU reference below is the static soup, so tracing
 	// the per-frame slot (which also carries animated monster casters) would false-positive every
 	// monster hit as a "genuine" mismatch.
-	const bool persistent = ( r_rtWorld.GetBool() || r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtAllLights.GetBool() ) && r->GetStaticTlasAddress() != 0;
+	// a live static TLAS is the persistent scene regardless of which cvar built it — never tear it
+	// down here (the earlier membership check omitted r_rtao/r_rtgi and hitched those tiers)
+	const bool persistent = r->GetStaticTlasAddress() != 0;
 	int blasFail = 0, msBuild = 0;
 	unsigned long long tlasAddr;
 	if ( persistent ) {
