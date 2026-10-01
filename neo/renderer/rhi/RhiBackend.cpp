@@ -2272,6 +2272,25 @@ the texcoord generation the old path fed glTexGen / a dynamic vertex stream is
 reproduced in the shaders from these uniforms and the standard vertex layout.
 =============
 */
+// RR5c / SSR environment-reflection shaders (used by RB_RHI_RenderTexgenStage below), loaded
+// once and shared. File-scope (not function-local) so R_RHI_ResetEnvShaders can re-arm them
+// after a full backend teardown: a mod switch (ReloadEngine) or full vid_restart clears the
+// backend shader table, leaving these once-cached handles dangling -> reflective ("glass")
+// surfaces would dispatch a dead pipeline (stale/wrong reflection, or a crash). Same
+// stale-after-teardown class as R_MD5_ResetGpuShaders / R_ResetGpuCullShader.
+static rhi::ShaderHandle s_envRtProg = 0;
+static bool s_envRtTried = false;
+static rhi::ShaderHandle s_envRtBumpProg = 0;
+static bool s_envRtBumpTried = false;
+static rhi::ShaderHandle s_envSsrProg = 0;
+static bool s_envSsrTried = false;
+
+void R_RHI_ResetEnvShaders( void ) {
+	s_envRtProg = 0;		s_envRtTried = false;
+	s_envRtBumpProg = 0;	s_envRtBumpTried = false;
+	s_envSsrProg = 0;		s_envSsrTried = false;
+}
+
 static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, const drawSurf_t *surf,
                                       const shaderStage_t *pStage, const rhi::StageIR &si, const float mvp[16],
                                       rhi::BufferHandle vb, int vertOfs, rhi::BufferHandle ib, int idxOfs ) {
@@ -2426,8 +2445,6 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		// fall through to the vanilla cube path below. The model rows above give environment_rt.vert the
 		// world position/normal for the ray; u_rtParms carries the TLAS + geo-table device addresses.
 		if ( !sheenDecal && vkMode && r_rtReflections.GetBool() && r->SupportsRayQuery() && !surf->material->GetBumpStage() ) {
-			static rhi::ShaderHandle s_envRtProg = 0;
-			static bool s_envRtTried = false;
 			if ( !s_envRtTried ) { s_envRtTried = true; s_envRtProg = r->LoadShader( "environment_rt" ); }
 			const unsigned long long tlas = r->GetTlasAddress();
 			const unsigned long long geo  = r->GetRtGeoTableAddress();
@@ -2445,8 +2462,6 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		// sampling the baked cube. Same RT gating; the bump map binds on unit 0 (the cube is skipped, so unit
 		// 0 is free — avoids a novel unit-1-without-0 descriptor). VK + RT only.
 		if ( !sheenDecal && !rtGlass && vkMode && r_rtReflections.GetBool() && r->SupportsRayQuery() && surf->material->GetBumpStage() ) {
-			static rhi::ShaderHandle s_envRtBumpProg = 0;
-			static bool s_envRtBumpTried = false;
 			if ( !s_envRtBumpTried ) { s_envRtBumpTried = true; s_envRtBumpProg = r->LoadShader( "bumpyenvironment_rt" ); }
 			const unsigned long long tlas = r->GetTlasAddress();
 			const unsigned long long geo  = r->GetRtGeoTableAddress();
@@ -2490,8 +2505,6 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		// this view). VK for now; GL3 keeps the cube until the flip path is validated there.
 		if ( !sheenDecal && !rtGlass && vkMode && r_ssr.GetBool() && !surf->material->GetBumpStage()
 		     && globalImages->currentDepthImage->rhiCaptured && globalImages->currentRenderImage->rhiCaptured ) {
-			static rhi::ShaderHandle s_envSsrProg = 0;
-			static bool s_envSsrTried = false;
 			if ( !s_envSsrTried ) { s_envSsrTried = true; s_envSsrProg = r->LoadShader( "environment_ssr" ); }
 			if ( s_envSsrProg != 0 ) {
 				ssrGlass = true;

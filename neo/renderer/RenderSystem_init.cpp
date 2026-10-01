@@ -3085,6 +3085,10 @@ void R_VidRestart_f( const idCmdArgs &args ) {
 	R_MD5_ResetGpuShaders();
 	extern void R_ResetGpuCullShader( void );
 	R_ResetGpuCullShader();
+	extern void R_RtResetSceneState( void );
+	R_RtResetSceneState();
+	extern void R_RHI_ResetEnvShaders( void );
+	R_RHI_ResetEnvShaders();
 
 	// free any current world interaction surfaces and vertex caches
 	R_FreeDerivedData();
@@ -3363,6 +3367,10 @@ void idRenderSystemLocal::Shutdown( void ) {
 	R_MD5_ResetGpuShaders();
 	extern void R_ResetGpuCullShader( void );
 	R_ResetGpuCullShader();
+	extern void R_RtResetSceneState( void );
+	R_RtResetSceneState();
+	extern void R_RHI_ResetEnvShaders( void );
+	R_RHI_ResetEnvShaders();
 
 	common->SetRefreshOnPrint( false ); // without a renderer there's nothing to refresh
 

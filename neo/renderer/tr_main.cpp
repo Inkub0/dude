@@ -2545,6 +2545,41 @@ static rhi::BlasHandle R_RtBuildOneEntityModelBlas( rhi::RHI *r, const idRenderM
 }
 
 static idStr s_rtWorldMap;
+
+/*
+====================
+R_RtResetSceneState
+
+Drop the RT scene's cached device handles after a FULL backend teardown (a mod switch via
+ReloadEngine, or a full vid_restart) WITHOUT destroying them. VulkanBackend::Shutdown already
+freed every buffer/BLAS (DestroyRtScene + the resource-table clears) and the rebuilt backend
+reissues handles from 1. If these file-static handles survive stale, the next RT frame's
+rebuild path (R_RtFreeWorldGeo) calls DestroyBuffer on a stale handle that now aliases a LIVE
+resource on the new backend -> it frees someone else's geometry: garbled vertices, missing
+surfaces, and a device-lost crash (the mod-switch-to-RoE symptom). Just drop the cached
+handles here; the scene rebuilds fresh on the next RT frame. Must NOT call Destroy* — the old
+device (and its VMA) is already gone.
+====================
+*/
+void R_RtResetSceneState( void ) {
+	s_rtWorldVB = s_rtWorldIB = 0;
+	s_rtEntityVB = s_rtEntityIB = 0;
+	s_rtPerfVB = s_rtPerfIB = 0;
+	s_rtEntityExtraBufs.Clear();
+	s_rtAreaBlas.Clear();
+	s_rtModelBlas.Clear();
+	s_rtDroppedBlas.Clear();
+	s_rtPerfAreaBlas.Clear();
+	s_rtPerfModelBlas.Clear();
+	s_rtPerfWorldBounds.Clear();
+	s_rtPerfModelBounds.Clear();
+	s_rtPerfFrameBounds.Clear();
+	s_rtLastTlasSig = 0;
+	s_rtTlasEverBuilt = false;
+	s_rtLastHadDyn = false;
+	s_rtWorldMap = "";
+}
+
 static void R_RtWorldUpdate( void ) {
 	rhi::RHI *r = rhi::GetRHI();
 	if ( r == NULL ) {
