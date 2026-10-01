@@ -7159,6 +7159,15 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.diffuseModifier[3] = ( giNumLights > 0 ) ? 1.0f : 0.0f;	// real-lights enable
 
 	r->GpuScopeBegin( "rtgi.ray" );					// r_vkGpuTime 2: the one-bounce ray trace + hit shading
+	// Checkerboard packs every traced sample into the LEFT HALF of the buffer; NRD (BLACK mode, x>>1) and
+	// the confidence pass read only that half, so the right half is written and immediately thrown away —
+	// its fragments sample depth+normal and early-out (rtgi_ray.frag) for nothing. Restrict the draw to the
+	// left half: mathematically identical (the right half is unread), skipping ~half the ray-pass fragments.
+	// The shader keeps its own right-half early-out as the correctness guarantee if a backend ignores this.
+	// Skipped under r_rtgiDebug (the overlay blits the whole gather buffer, so the right half must stay valid).
+	if ( cbActive && r_rtgiDebug.GetInteger() == 0 ) {
+		r->SetNextTargetPassArea( 0, 0, rw / 2, rh );
+	}
 	r->BeginTargetPass( rhiRtgiRayRT, NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
