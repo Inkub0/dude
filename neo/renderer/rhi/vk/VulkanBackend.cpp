@@ -718,9 +718,30 @@ private:
 	// caches, RhiWorld.cpp), so target destruction is deferred to this slot's next
 	// fence wait — same lifetime rule as retiredImages/retiredRings.
 	std::vector<RenderTarget>	retiredTargets[FRAMES_IN_FLIGHT];
+	// RenderTargetHandle generation stamp (ReloadEngine teardown hardening). On a full backend
+	// teardown DestroyAllTargets clears targetTable and the slots are reissued from 1, so a handle
+	// minted by a PREVIOUS backend lifetime would alias a new, unrelated target and silently defeat
+	// the GetRenderTargetImage()==0 lost-context guard the frontend caches rely on -> the shadow-map
+	// and render-target caches thrash (recreate every frame) and leak after a mod switch. Encoding
+	// rtGen in the handle's high bits makes a stale-generation handle resolve to invalid, so every
+	// cache rebuilds cleanly. rtGen stays 0 for the first backend lifetime (handle == slot+1, i.e.
+	// unchanged) and bumps on each teardown; it is static so it survives backend-object recreation
+	// across a ReloadEngine. Capped to 1..126 after the first bump so it never forms the
+	// MERGE_NORMAL_HANDLE (0x7FFF0001) gen field (0x7F).
+	static const unsigned int	RT_GEN_SHIFT = 24;
+	static const unsigned int	RT_IDX_MASK = ( 1u << RT_GEN_SHIFT ) - 1u;	// 0x00FFFFFF
+	static unsigned int			rtGen;
+	RenderTargetHandle	EncodeTargetHandle( int slot ) const {
+		return (RenderTargetHandle)( ( rtGen << RT_GEN_SHIFT ) | ( (unsigned int)( slot + 1 ) & RT_IDX_MASK ) );
+	}
+	int					TargetSlotIndex( RenderTargetHandle h ) const {	// 0-based slot, or -1 if stale/invalid
+		if ( h == 0 || ( h >> RT_GEN_SHIFT ) != rtGen ) { return -1; }
+		unsigned int idx = h & RT_IDX_MASK;
+		return ( idx >= 1 && idx <= (unsigned int)targetTable.size() ) ? (int)( idx - 1 ) : -1;
+	}
 	RenderTarget *				LookupTarget( RenderTargetHandle h ) {
-		return ( h >= 1 && h <= (RenderTargetHandle)targetTable.size() && targetTable[h - 1].live )
-			? &targetTable[h - 1] : NULL;
+		int idx = TargetSlotIndex( h );
+		return ( idx >= 0 && targetTable[idx].live ) ? &targetTable[idx] : NULL;
 	}
 	int				AllocTargetSlot();			// index of a free targetTable slot (grows the table if needed)
 	int			ClampTargetSize( int size, const char *kind, bool cube = false ) const;
@@ -2516,6 +2537,19 @@ void VulkanBackend::Shutdown() {
 	if ( diskPipelineCache != VK_NULL_HANDLE ) {
 		vkDestroyPipelineCache( device, diskPipelineCache, NULL );
 		diskPipelineCache = VK_NULL_HANDLE;
+	}
+	// DIAG (temporary, ReloadEngine VMA-leak hunt): dump any allocation still live right before
+	// the allocator is destroyed, so a mod-switch leak prints its size/name to stderr instead of
+	// a bare VmaDeviceMemoryBlock assert. Removed once the leak is identified and fixed.
+	if ( vma ) {
+		VmaTotalStatistics vmaStats;
+		vmaCalculateStatistics( vma, &vmaStats );
+		if ( vmaStats.total.statistics.allocationCount > 0 ) {
+			fprintf( stderr, "\n=== VMA LEAK at teardown: %u allocation(s), %llu bytes still live ===\n",
+			         (unsigned)vmaStats.total.statistics.allocationCount,
+			         (unsigned long long)vmaStats.total.statistics.allocationBytes );
+			fflush( stderr );
+		}
 	}
 	if ( vma )     { vmaDestroyAllocator( vma ); vma = NULL; }
 	if ( device )  { vkDestroyDevice( device, NULL ); device = VK_NULL_HANDLE; }
@@ -9574,7 +9608,7 @@ RenderTargetHandle VulkanBackend::CreateRenderTarget( ImageFormat fmt, int w, in
 			targetTable[slot] = RenderTarget();
 			return 0;
 		}
-		return (RenderTargetHandle)( slot + 1 );
+		return EncodeTargetHandle( slot );
 	}
 	VkFormat cf = ( fmt == IF_RGBA16F ) ? VK_FORMAT_R16G16B16A16_SFLOAT
 	            : ( fmt == IF_R16F ) ? VK_FORMAT_R16_SFLOAT
@@ -9588,7 +9622,7 @@ RenderTargetHandle VulkanBackend::CreateRenderTarget( ImageFormat fmt, int w, in
 		targetTable[slot] = RenderTarget();
 		return 0;
 	}
-	return (RenderTargetHandle)( slot + 1 );
+	return EncodeTargetHandle( slot );
 }
 
 // SSAO Phase 1: a color target carrying a render-generated mip chain. Level 0 is a
@@ -9618,7 +9652,7 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetMipped( ImageFormat fmt, int
 		targetTable[slot] = RenderTarget();
 		return 0;
 	}
-	return (RenderTargetHandle)( slot + 1 );
+	return EncodeTargetHandle( slot );
 }
 
 // RTAO ray + NRD guide MRT: R16F hit distance, R16F view z, RGBA16F packed normal; color-only.
@@ -9633,7 +9667,7 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetBlurRay( int w, int h ) {
 		targetTable[slot] = RenderTarget();
 		return 0;
 	}
-	return (RenderTargetHandle)( slot + 1 );
+	return EncodeTargetHandle( slot );
 }
 
 RenderTargetHandle VulkanBackend::CreateRenderTargetRtaoMrt( int w, int h ) {
@@ -9646,7 +9680,7 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetRtaoMrt( int w, int h ) {
 		targetTable[slot] = RenderTarget();
 		return 0;
 	}
-	return (RenderTargetHandle)( slot + 1 );
+	return EncodeTargetHandle( slot );
 }
 
 // RT GI radiance MRT (docs/rtx-rtgi.md H6): attachment 0 = RGBA16F radiance (vs the RTAO MRT's R16F
@@ -9662,7 +9696,7 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetRtgiMrt( int w, int h ) {
 		targetTable[slot] = RenderTarget();
 		return 0;
 	}
-	return (RenderTargetHandle)( slot + 1 );
+	return EncodeTargetHandle( slot );
 }
 
 // Begin a fullscreen pass rendering into mip LEVEL of a mipped color target (level >= 1;
@@ -9731,7 +9765,7 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetCube( ImageFormat fmt, int s
 	if ( !CreateDepthTarget( targetTable[slot], size, size, true ) ) {
 		return 0;
 	}
-	return (RenderTargetHandle)( slot + 1 );
+	return EncodeTargetHandle( slot );
 }
 
 ImageHandle VulkanBackend::GetRenderTargetImage( RenderTargetHandle rt ) {
@@ -9999,6 +10033,12 @@ void VulkanBackend::DestroyAllTargets() {
 		t = RenderTarget();
 	}
 	targetTable.clear();
+	// Bump the handle generation: slots are now reissued from 1, so any RenderTargetHandle minted
+	// by this (now dead) backend lifetime must resolve to invalid via LookupTarget/TargetSlotIndex
+	// after reinit, forcing the frontend caches to rebuild cleanly instead of aliasing a new target.
+	// Cycle 1..126 (never 0 so a stale gen-0 first-lifetime handle is rejected; never 0x7F so it
+	// can't equal the MERGE_NORMAL_HANDLE gen field).
+	rtGen = ( rtGen % 126 ) + 1;
 	if ( shadowPass )           { vkDestroyRenderPass( device, shadowPass, NULL ); shadowPass = VK_NULL_HANDLE; }
 	if ( shadowCompareSampler ) { vkDestroySampler( device, shadowCompareSampler, NULL ); shadowCompareSampler = VK_NULL_HANDLE; }
 }
@@ -10342,6 +10382,10 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 }
 
 // slot allocation shared by every Create* entry point
+// RenderTargetHandle generation (see the class declaration). 0 for the first backend lifetime so
+// handles are unchanged (slot+1); bumped to 1..126 on each teardown in DestroyAllTargets.
+unsigned int VulkanBackend::rtGen = 0;
+
 int VulkanBackend::AllocTargetSlot() {
 	for ( size_t i = 0; i < targetTable.size(); i++ ) {
 		if ( !targetTable[i].live ) { return (int)i; }
@@ -10367,7 +10411,7 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetColorDepthStencil( ImageForm
 	}
 	common->DPrintf( "VK: created %dx%d %s color+depth-stencil frame target (handle %d)\n",
 		w, h, fmt == IF_RGBA16F ? "RGBA16F" : "RGBA8", slot + 1 );
-	return (RenderTargetHandle)( slot + 1 );
+	return EncodeTargetHandle( slot );
 }
 
 // color + depth(-stencil) target for a depth-tested offscreen geometry pass (the
@@ -10399,7 +10443,7 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetColorDepth( ImageFormat fmt,
 	}
 	common->DPrintf( "VK: created %dx%d RGBA8 color+depth render target (handle %d, %d color)\n",
 		w, h, slot + 1, colorCount );
-	return (RenderTargetHandle)( slot + 1 );
+	return EncodeTargetHandle( slot );
 }
 
 ImageHandle VulkanBackend::GetRenderTargetImage2( RenderTargetHandle rt ) {
@@ -10430,7 +10474,7 @@ ImageHandle VulkanBackend::GetRenderTargetImage4( RenderTargetHandle rt ) {
 // the color/depth image the current frame target resolves to (for M5 captures)
 VkImage VulkanBackend::FrameColorImage() const {
 	if ( frameTarget != 0 ) {
-		const RenderTarget &t = targetTable[frameTarget - 1];
+		const RenderTarget &t = targetTable[( frameTarget & RT_IDX_MASK ) - 1];
 		if ( t.live && t.colorTarget ) { return t.colorImage[0]; }
 	}
 	return sceneColor;
@@ -10439,21 +10483,21 @@ VkImageLayout VulkanBackend::FrameColorBetweenLayout() const {
 	// a sampled color target rests in SHADER_READ_ONLY between passes; the
 	// swapchain sceneColor rests in TRANSFER_SRC (its render passes' finalLayout)
 	if ( frameTarget != 0 ) {
-		const RenderTarget &t = targetTable[frameTarget - 1];
+		const RenderTarget &t = targetTable[( frameTarget & RT_IDX_MASK ) - 1];
 		if ( t.live && t.colorTarget ) { return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; }
 	}
 	return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 }
 VkImage VulkanBackend::FrameDepthImage() const {
 	if ( frameTarget != 0 ) {
-		const RenderTarget &t = targetTable[frameTarget - 1];
+		const RenderTarget &t = targetTable[( frameTarget & RT_IDX_MASK ) - 1];
 		if ( t.live && t.hasDepth ) { return t.dsImage; }
 	}
 	return sceneDepth;
 }
 VkImageView VulkanBackend::FrameDepthView() const {
 	if ( frameTarget != 0 ) {
-		const RenderTarget &t = targetTable[frameTarget - 1];
+		const RenderTarget &t = targetTable[( frameTarget & RT_IDX_MASK ) - 1];
 		if ( t.live && t.hasDepth ) { return t.dsView; }
 	}
 	return sceneDepthView;
@@ -10764,7 +10808,7 @@ void VulkanBackend::SetFrameTarget( RenderTargetHandle rt ) {
 	frameTarget = rt;
 	// the resume viewport/extent tracks the new destination
 	if ( rt != 0 ) {
-		RenderTarget *t = &targetTable[rt - 1];
+		RenderTarget *t = &targetTable[( rt & RT_IDX_MASK ) - 1];
 		curRenderH = t->h;
 		curPipelinePass = t->colorClearPass;
 		curPassClass = t->passClass;
