@@ -1603,6 +1603,25 @@ static int CvarSliderI( const char* label, idCVar& cv, int mn, int mx, const cha
 	return i;
 }
 
+// DUDE: a float cvar presented as a discrete "stops" slider (the resolution-scale controls).
+// Snaps the current value to the nearest stop for display, and writes the chosen stop on change.
+// `labels` is parallel to `stops` (shown as the slider's value text; NoInput so only the stops pick).
+static void CvarStopsSliderF( const char* label, idCVar& cv, const float* stops, const char* const* labels, int numStops, const char* tip = nullptr )
+{
+	const float cur = cv.GetFloat();
+	int idx = 0;
+	float best = 1e9f;
+	for ( int i = 0; i < numStops; i++ ) {
+		const float d = idMath::Fabs( cur - stops[i] );
+		if ( d < best ) { best = d; idx = i; }
+	}
+	if ( ImGui::SliderInt( label, &idx, 0, numStops - 1, labels[idx], ImGuiSliderFlags_NoInput ) ) {
+		idx = idx < 0 ? 0 : ( idx >= numStops ? numStops - 1 : idx );
+		cv.SetFloat( stops[idx] );
+	}
+	if ( tip ) { AddTooltip( tip ); }
+}
+
 enum OptionType {
 	OT_NONE,
 	OT_HEADING, // not an option, just a heading on the page
@@ -3410,19 +3429,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 		ImGui::BeginDisabled( r_rtao.GetBool() || r_rtgi.GetBool() );
 		const float ssaoResStops[]  = { 0.5f, 0.667f, 0.75f, 0.8f, 1.0f };
 		const char *ssaoResLabels[] = { "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Four-fifths (4/5)", "Full" };
-		const int ssaoNumStops = IM_ARRAYSIZE( ssaoResStops );
-		const float curScale = r_ssaoResScale.GetFloat();
-		int ssaoResIdx = 0;
-		float ssaoResBest = 1e9f;
-		for ( int i = 0; i < ssaoNumStops; i++ ) {
-			const float d = idMath::Fabs( curScale - ssaoResStops[i] );
-			if ( d < ssaoResBest ) { ssaoResBest = d; ssaoResIdx = i; }
-		}
-		if ( ImGui::SliderInt( "Resolution", &ssaoResIdx, 0, ssaoNumStops - 1,
-				ssaoResLabels[ssaoResIdx], ImGuiSliderFlags_NoInput ) ) {
-			ssaoResIdx = ssaoResIdx < 0 ? 0 : ( ssaoResIdx >= ssaoNumStops ? ssaoNumStops - 1 : ssaoResIdx );
-			r_ssaoResScale.SetFloat( ssaoResStops[ssaoResIdx] );
-		}
+		CvarStopsSliderF( "Resolution", r_ssaoResScale, ssaoResStops, ssaoResLabels, IM_ARRAYSIZE( ssaoResStops ) );
 		AddTooltip( "Resolution the AO buffer is computed at, as a fraction of the screen. Half is "
 			"~4x cheaper and a little softer; Full is sharpest and most expensive; 3/4 and 4/5 sit "
 			"between. Lower this first if SSAO costs too much." );
@@ -3483,19 +3490,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 			// without the strobing that forces reflections to integer divisors.
 			const float rtaoResStops[]  = { 0.5f, 0.667f, 0.75f, 0.8f, 1.0f };
 			const char *rtaoResLabels[] = { "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Four-fifths (4/5)", "Full" };
-			const int rtaoNumStops = IM_ARRAYSIZE( rtaoResStops );
-			const float curRtaoScale = r_rtaoResScale.GetFloat();
-			int rtaoResIdx = 0;
-			float rtaoResBest = 1e9f;
-			for ( int i = 0; i < rtaoNumStops; i++ ) {
-				const float d = idMath::Fabs( curRtaoScale - rtaoResStops[i] );
-				if ( d < rtaoResBest ) { rtaoResBest = d; rtaoResIdx = i; }
-			}
-			if ( ImGui::SliderInt( "Resolution##rtao", &rtaoResIdx, 0, rtaoNumStops - 1,
-					rtaoResLabels[rtaoResIdx], ImGuiSliderFlags_NoInput ) ) {
-				rtaoResIdx = rtaoResIdx < 0 ? 0 : ( rtaoResIdx >= rtaoNumStops ? rtaoNumStops - 1 : rtaoResIdx );
-				r_rtaoResScale.SetFloat( rtaoResStops[rtaoResIdx] );
-			}
+			CvarStopsSliderF( "Resolution##rtao", r_rtaoResScale, rtaoResStops, rtaoResLabels, IM_ARRAYSIZE( rtaoResStops ) );
 			AddTooltip( "Resolution RTAO runs its rays AND the NRD denoiser at, as a fraction of the "
 				"screen; the occlusion is upscaled to full res. The denoiser is the bulk of RTAO's "
 				"cost, so Three-quarter is ~a third cheaper and Half ~two-thirds cheaper for little "
@@ -3537,19 +3532,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 			// single sample is ~4x its cost; 0.25 starts to smear fine contact bleed).
 			const float rtgiResStops[]  = { 0.25f, 0.5f, 0.667f, 0.75f, 1.0f };
 			const char *rtgiResLabels[] = { "Quarter (1/4)", "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Full" };
-			const int rtgiNumStops = IM_ARRAYSIZE( rtgiResStops );
-			const float curRtgiScale = r_rtgiResScale.GetFloat();
-			int rtgiResIdx = 1;
-			float rtgiResBest = 1e9f;
-			for ( int i = 0; i < rtgiNumStops; i++ ) {
-				const float d = idMath::Fabs( curRtgiScale - rtgiResStops[i] );
-				if ( d < rtgiResBest ) { rtgiResBest = d; rtgiResIdx = i; }
-			}
-			if ( ImGui::SliderInt( "Resolution##rtgi", &rtgiResIdx, 0, rtgiNumStops - 1,
-					rtgiResLabels[rtgiResIdx], ImGuiSliderFlags_NoInput ) ) {
-				rtgiResIdx = rtgiResIdx < 0 ? 0 : ( rtgiResIdx >= rtgiNumStops ? rtgiNumStops - 1 : rtgiResIdx );
-				r_rtgiResScale.SetFloat( rtgiResStops[rtgiResIdx] );
-			}
+			CvarStopsSliderF( "Resolution##rtgi", r_rtgiResScale, rtgiResStops, rtgiResLabels, IM_ARRAYSIZE( rtgiResStops ) );
 			AddTooltip( "Resolution the GI gather AND its denoiser run at, upscaled to full res. GI is very "
 				"low-frequency, so Half is the sweet spot; Quarter is cheaper still but starts to smear fine "
 				"contact bleed. Default Half." );
@@ -3603,19 +3586,7 @@ static void DrawEnhGroup_Reflections()
 		// renderer snaps to these divisors regardless, docs/rtx-reflections.md RR7).
 		const float ssrResStops[]  = { 0.25f, 0.5f, 1.0f };
 		const char *ssrResLabels[] = { "Quarter (1/4)", "Half (1/2)", "Full" };
-		const int ssrNumStops = IM_ARRAYSIZE( ssrResStops );
-		const float ssrCurScale = r_ssrResScale.GetFloat();
-		int ssrResIdx = 0;
-		float ssrResBest = 1e9f;
-		for ( int i = 0; i < ssrNumStops; i++ ) {
-			const float d = idMath::Fabs( ssrCurScale - ssrResStops[i] );
-			if ( d < ssrResBest ) { ssrResBest = d; ssrResIdx = i; }
-		}
-		if ( ImGui::SliderInt( "Resolution##ssr", &ssrResIdx, 0, ssrNumStops - 1,
-				ssrResLabels[ssrResIdx], ImGuiSliderFlags_NoInput ) ) {
-			ssrResIdx = ssrResIdx < 0 ? 0 : ( ssrResIdx >= ssrNumStops ? ssrNumStops - 1 : ssrResIdx );
-			r_ssrResScale.SetFloat( ssrResStops[ssrResIdx] );
-		}
+		CvarStopsSliderF( "Resolution##ssr", r_ssrResScale, ssrResStops, ssrResLabels, IM_ARRAYSIZE( ssrResStops ) );
 		AddTooltip( "Resolution the reflection rays are marched at, as a fraction of the screen. "
 			"The material response (Fresnel, gloss) always applies at full resolution, so lower "
 			"stops only soften the reflected image — Half is ~4x cheaper and pairs well with "
@@ -3675,20 +3646,8 @@ static void DrawEnhGroup_Reflections()
 		// reflection pass.
 		const float rtResStops[]  = { 0.25f, 0.5f, 1.0f };
 		const char *rtResLabels[] = { "Quarter (1/4)", "Half (1/2)", "Full" };
-		const int rtNumStops = IM_ARRAYSIZE( rtResStops );
-		const float rtCurScale = r_rtReflResScale.GetFloat();
-		int rtResIdx = 0;
-		float rtResBest = 1e9f;
-		for ( int i = 0; i < rtNumStops; i++ ) {
-			const float d = idMath::Fabs( rtCurScale - rtResStops[i] );
-			if ( d < rtResBest ) { rtResBest = d; rtResIdx = i; }
-		}
 		ImGui::BeginDisabled( !rtIsVulkan || !rtSceneOn || !r_rtReflections.GetBool() );
-		if ( ImGui::SliderInt( "RT Reflection Resolution", &rtResIdx, 0, rtNumStops - 1,
-				rtResLabels[rtResIdx], ImGuiSliderFlags_NoInput ) ) {
-			rtResIdx = rtResIdx < 0 ? 0 : ( rtResIdx >= rtNumStops ? rtNumStops - 1 : rtResIdx );
-			r_rtReflResScale.SetFloat( rtResStops[rtResIdx] );
-		}
+		CvarStopsSliderF( "RT Reflection Resolution", r_rtReflResScale, rtResStops, rtResLabels, IM_ARRAYSIZE( rtResStops ) );
 		AddTooltip( "Resolution the ray-traced reflection is traced at, then temporally upscaled to full. "
 			"Half is ~4x cheaper on the reflection pass with a modest softening; Quarter cheaper still. "
 			"The biggest single lever on RT reflection cost." );
