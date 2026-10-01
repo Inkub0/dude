@@ -262,10 +262,12 @@ static bool RB_RHI_EnsureSmaaTargets( rhi::RHI *r, int w, int h, bool needScene 
 	return rhiSmaaAreaTex != 0 && rhiSmaaSearchTex != 0;
 }
 
-// one fullscreen NDC quad through a SMAA program; tex0..tex2 are GL texture
-// names — render-target images or the raw LUTs (0 = leave the unit alone)
-static void RB_RHI_SmaaDraw( rhi::RHI *r, rhi::ShaderHandle prog, const rhi::RenderParams &parms,
-                             rhi::ImageHandle tex0, rhi::ImageHandle tex1, rhi::ImageHandle tex2 = 0 ) {
+// The fullscreen NDC quad (two triangles, st 0..1, GL bottom-left origin, identity mvp)
+// that every post pass draws. Streams it through the per-frame vertex/index ring and hands
+// back the buffer handles + offsets; each caller supplies its own program, parms, scissor
+// and texture binds.
+static void RB_RHI_AllocFullscreenQuad( rhi::RHI *r, rhi::BufferHandle *vb, int *vertOfs,
+                                        rhi::BufferHandle *ib, int *idxOfs ) {
 	idDrawVert quad[4];
 	memset( quad, 0, sizeof( quad ) );
 	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
@@ -273,10 +275,17 @@ static void RB_RHI_SmaaDraw( rhi::RHI *r, rhi::ShaderHandle prog, const rhi::Ren
 	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
 	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
 	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
+	*vertOfs = r->AllocVertices( quad, sizeof( quad ), vb );
+	*idxOfs = r->AllocIndices( idx, sizeof( idx ), ib );
+}
 
+// one fullscreen NDC quad through a SMAA program; tex0..tex2 are GL texture
+// names — render-target images or the raw LUTs (0 = leave the unit alone)
+static void RB_RHI_SmaaDraw( rhi::RHI *r, rhi::ShaderHandle prog, const rhi::RenderParams &parms,
+                             rhi::ImageHandle tex0, rhi::ImageHandle tex1, rhi::ImageHandle tex2 = 0 ) {
 	rhi::BufferHandle vb, ib, ub;
-	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
-	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int vertOfs, idxOfs;
+	RB_RHI_AllocFullscreenQuad( r, &vb, &vertOfs, &ib, &idxOfs );
 	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 	rhi::PipelineDesc pd;
@@ -511,17 +520,9 @@ static void RB_RHI_AAPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	// fullscreen NDC quad (identity mvp), st 0..1 with GL bottom-left origin
 	// matching the framebuffer copy
-	idDrawVert quad[4];
-	memset( quad, 0, sizeof( quad ) );
-	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
-	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
-	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
-	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
-	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
-
 	rhi::BufferHandle vb, ib, ub;
-	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
-	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int vertOfs, idxOfs;
+	RB_RHI_AllocFullscreenQuad( r, &vb, &vertOfs, &ib, &idxOfs );
 	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 	// the last surface may have left a cropped scissor; cover the whole view
@@ -599,17 +600,9 @@ static void RB_RHI_PostProcess( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	// fullscreen NDC quad (identity mvp), st 0..1 with GL bottom-left origin
 	// matching the framebuffer copy
-	idDrawVert quad[4];
-	memset( quad, 0, sizeof( quad ) );
-	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
-	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
-	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
-	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
-	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
-
 	rhi::BufferHandle vb, ib, ub;
-	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
-	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int vertOfs, idxOfs;
+	RB_RHI_AllocFullscreenQuad( r, &vb, &vertOfs, &ib, &idxOfs );
 	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 	// the last surface may have left a cropped scissor; cover the whole view
@@ -705,17 +698,9 @@ static void RB_RHI_GammaBrightness( rhi::RHI *r ) {
 
 	// fullscreen NDC quad (identity mvp), st 0..1 with GL bottom-left origin
 	// matching the framebuffer copy
-	idDrawVert quad[4];
-	memset( quad, 0, sizeof( quad ) );
-	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
-	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
-	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
-	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
-	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
-
 	rhi::BufferHandle vb, ib, ub;
-	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
-	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int vertOfs, idxOfs;
+	RB_RHI_AllocFullscreenQuad( r, &vb, &vertOfs, &ib, &idxOfs );
 	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 	// the last view left its own viewport/scissor; cover the whole framebuffer
@@ -1007,17 +992,9 @@ static void RB_RHI_HdrFxaa( rhi::RHI *r ) {
 	parms.localParam1[1] = 1.0f / h;
 	parms.localParam0[0] = r_fxaaStrength.GetFloat();
 
-	idDrawVert quad[4];
-	memset( quad, 0, sizeof( quad ) );
-	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
-	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
-	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
-	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
-	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
-
 	rhi::BufferHandle vb, ib, ub;
-	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
-	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int vertOfs, idxOfs;
+	RB_RHI_AllocFullscreenQuad( r, &vb, &vertOfs, &ib, &idxOfs );
 	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 	r->BeginTargetPass( rhiHdrAaRT, NULL );		// bind the float ping, viewport = its size
@@ -1143,17 +1120,9 @@ static bool RB_RHI_HdrResolveSmaaFused( rhi::RHI *r, int w, int h ) {
 		parms.localParam1[2] = ( r_gamma.GetFloat() > 0.0f ) ? 1.0f / r_gamma.GetFloat() : 1.0f;
 	}
 
-	idDrawVert quad[4];
-	memset( quad, 0, sizeof( quad ) );
-	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
-	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
-	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
-	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
-	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
-
 	rhi::BufferHandle vb, ib, ub;
-	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
-	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int vertOfs, idxOfs;
+	RB_RHI_AllocFullscreenQuad( r, &vb, &vertOfs, &ib, &idxOfs );
 	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 	rhi::PipelineDesc pd;
@@ -1283,17 +1252,9 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	}
 
 	// fullscreen NDC quad, st 0..1 (the HDR target is exact screen size, so no NPOT correction)
-	idDrawVert quad[4];
-	memset( quad, 0, sizeof( quad ) );
-	quad[0].xyz.Set( -1.0f, -1.0f, 0.0f ); quad[0].st[0] = 0.0f; quad[0].st[1] = 0.0f;
-	quad[1].xyz.Set(  1.0f, -1.0f, 0.0f ); quad[1].st[0] = 1.0f; quad[1].st[1] = 0.0f;
-	quad[2].xyz.Set(  1.0f,  1.0f, 0.0f ); quad[2].st[0] = 1.0f; quad[2].st[1] = 1.0f;
-	quad[3].xyz.Set( -1.0f,  1.0f, 0.0f ); quad[3].st[0] = 0.0f; quad[3].st[1] = 1.0f;
-	glIndex_t idx[6] = { 0, 1, 2, 0, 2, 3 };
-
 	rhi::BufferHandle vb, ib, ub;
-	int vertOfs = r->AllocVertices( quad, sizeof( quad ), &vb );
-	int idxOfs = r->AllocIndices( idx, sizeof( idx ), &ib );
+	int vertOfs, idxOfs;
+	RB_RHI_AllocFullscreenQuad( r, &vb, &vertOfs, &ib, &idxOfs );
 	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 	rhi::PipelineDesc pd;
@@ -1764,7 +1725,7 @@ Binds the stage image (or current cinematic frame) on texture unit 0.
 // render the double-vision/berserk overlays as solid white/checker)
 static const rhi::ImageHandle RHI_SKIP_STAGE_IMAGE = (rhi::ImageHandle)0xffffffffu;
 
-static rhi::ImageHandle RB_RHI_BindStageImage( const shaderStage_t *pStage, const float *regs, const viewDef_t *viewDef ) {
+static rhi::ImageHandle RB_RHI_BindStageImage( const shaderStage_t *pStage, const viewDef_t *viewDef ) {
 	const textureStage_t *texture = &pStage->texture;
 
 	// Vulkan backend (Phase 4 M2): no GL binds — demand-load through Bind()
@@ -3344,7 +3305,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		rhi::BufferHandle ub;
 		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
-		rhi::ImageHandle stageImage = RB_RHI_BindStageImage( pStage, regs, viewDef );
+		rhi::ImageHandle stageImage = RB_RHI_BindStageImage( pStage, viewDef );
 		if ( stageImage == RHI_SKIP_STAGE_IMAGE ) {
 			RB_RHI_LogOnce( "VK: stage sampling a never-captured _currentRender/_scratch skipped" );
 			RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
