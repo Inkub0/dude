@@ -1034,6 +1034,17 @@ private:
 	// the caller points these at its IN_*/OUT_* images (GENERAL layout) before recording
 	VkImageView					nrdUserViews[(uint32_t)nrd::ResourceType::MAX_NUM] = {};
 
+	// REBLUR_DIFFUSE (RTGI) writes IN_MV in its temporal-stabilization pass, so NRD needs a
+	// WRITABLE motion-vector image. The game's velocity buffer is read-only here and FSR2
+	// samples it later in the frame, so we can't let NRD clobber it: give NRD a storage
+	// scratch, copy velocity into it each denoise, and let NRD read + overwrite the copy.
+	// RG16F to match the velocity attachment; sized to the velocity (guide) resolution.
+	VkImage						nrdMvScratch = VK_NULL_HANDLE;
+	VmaAllocation				nrdMvScratchAlloc = NULL;
+	VkImageView					nrdMvScratchView = VK_NULL_HANDLE;
+	int							nrdMvScratchW = 0, nrdMvScratchH = 0;
+	bool						NrdEnsureMvScratch( int w, int h );
+
 	// H4 RTAO (docs/rtx-rtao.md): denoised-occlusion output — an R16F STORAGE image NRD's
 	// last dispatch writes; lives in GENERAL for its whole life and is sampled by the
 	// resolve/debug passes via rtaoOutSampleImage. Recreated on resize.
@@ -6650,6 +6661,9 @@ void VulkanBackend::NrdDestroy( bool deviceIdle ) {
 		if ( nrdDescPools[f] ) { vkDestroyDescriptorPool( device, nrdDescPools[f], NULL ); nrdDescPools[f] = VK_NULL_HANDLE; }
 	}
 	if ( nrdCb )       { vmaDestroyBuffer( vma, nrdCb, nrdCbAlloc ); nrdCb = VK_NULL_HANDLE; nrdCbAlloc = VK_NULL_HANDLE; }
+	if ( nrdMvScratchView ) { vkDestroyImageView( device, nrdMvScratchView, NULL ); nrdMvScratchView = VK_NULL_HANDLE; }
+	if ( nrdMvScratch )     { vmaDestroyImage( vma, nrdMvScratch, nrdMvScratchAlloc ); nrdMvScratch = VK_NULL_HANDLE; nrdMvScratchAlloc = NULL; }
+	nrdMvScratchW = nrdMvScratchH = 0;
 	nrdCbMapped = NULL;
 	nrdCbStride = nrdCbSets = 0;
 	if ( nrdInstance ) {
@@ -6846,6 +6860,51 @@ around the denoiser (NRD's descriptors are written with GENERAL) and back after,
 other consumer keeps its layout assumptions.
 ====================
 */
+// RTGI only: a storage RG16F scratch that NRD's REBLUR_DIFFUSE uses as IN_MV (it reads the
+// motion vectors AND overwrites them in the temporal-stabilization pass). Copied from the
+// game's read-only velocity buffer each denoise, so NRD never touches the velocity FSR2 reads.
+bool VulkanBackend::NrdEnsureMvScratch( int w, int h ) {
+	if ( nrdMvScratch != VK_NULL_HANDLE && nrdMvScratchW == w && nrdMvScratchH == h ) {
+		return true;
+	}
+	if ( nrdMvScratchView )  { vkDestroyImageView( device, nrdMvScratchView, NULL ); nrdMvScratchView = VK_NULL_HANDLE; }
+	if ( nrdMvScratch )      { vmaDestroyImage( vma, nrdMvScratch, nrdMvScratchAlloc ); nrdMvScratch = VK_NULL_HANDLE; nrdMvScratchAlloc = NULL; }
+
+	VkImageCreateInfo ici = {};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_R16G16_SFLOAT;		// matches the RG16F velocity attachment (copy source)
+	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &nrdMvScratch, &nrdMvScratchAlloc, NULL ), "vmaCreateImage(NRD mv scratch)" ) ) {
+		nrdMvScratch = VK_NULL_HANDLE; nrdMvScratchAlloc = NULL;
+		return false;
+	}
+	VkImageViewCreateInfo vwi = {};
+	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vwi.image = nrdMvScratch;
+	vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vwi.format = VK_FORMAT_R16G16_SFLOAT;
+	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	vwi.subresourceRange.levelCount = 1;
+	vwi.subresourceRange.layerCount = 1;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &nrdMvScratchView ), "vkCreateImageView(NRD mv scratch)" ) ) {
+		vmaDestroyImage( vma, nrdMvScratch, nrdMvScratchAlloc );
+		nrdMvScratch = VK_NULL_HANDLE; nrdMvScratchAlloc = NULL;
+		return false;
+	}
+	nrdMvScratchW = w;
+	nrdMvScratchH = h;
+	return true;
+}
+
 bool VulkanBackend::RtaoEnsureOutput( int w, int h ) {
 	if ( rtaoOutImage != VK_NULL_HANDLE && rtaoOutW == w && rtaoOutH == h ) {
 		return true;
@@ -7072,7 +7131,12 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	}
 
 	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
-	nrdUserViews[(uint32_t)nrd::ResourceType::IN_MV]               = vel.view;
+	// RTGI's REBLUR_DIFFUSE overwrites IN_MV (temporal-stabilization pass), so it needs a
+	// WRITABLE copy — feed a storage scratch (filled from velocity below). RTAO never writes
+	// IN_MV, so it binds the read-only velocity view directly. Fall back to that view too if
+	// the scratch can't be allocated (keeps RTGI working, with the storage-usage validation warning).
+	const bool mvScratch = a.giMode && NrdEnsureMvScratch( vel.width, vel.height );
+	nrdUserViews[(uint32_t)nrd::ResourceType::IN_MV]               = mvScratch ? nrdMvScratchView : vel.view;
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_NORMAL_ROUGHNESS] = targetView( norm, nmAtt );
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_VIEWZ]            = targetView( vz, vzAtt );
 	if ( haveConf ) {
@@ -7098,6 +7162,60 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		RTAO_FAIL( 8, "called inside a target pass — recorded nothing" );
 	}
 
+	// RTGI: stage the read-only velocity into the writable NRD scratch (NRD reads it, then its
+	// temporal-stabilization pass overwrites it). The copy rewrites every texel, so the scratch's
+	// prior contents are discarded (UNDEFINED); it ends in GENERAL for NRD, velocity back in
+	// SHADER_READ_ONLY so FSR2 still samples the untouched motion vectors later in the frame.
+	if ( mvScratch ) {
+		VkImageMemoryBarrier cpre[2] = {};
+		cpre[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		cpre[0].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		cpre[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		cpre[0].srcQueueFamilyIndex = cpre[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		cpre[0].image = vel.image;
+		cpre[0].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		cpre[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		cpre[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		cpre[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		cpre[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;			// whole image overwritten by the copy
+		cpre[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		cpre[1].srcQueueFamilyIndex = cpre[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		cpre[1].image = nrdMvScratch;
+		cpre[1].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		cpre[1].srcAccessMask = 0;
+		cpre[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, cpre );
+
+		VkImageCopy cp = {};
+		cp.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+		cp.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+		cp.extent = { (uint32_t)vel.width, (uint32_t)vel.height, 1 };
+		vkCmdCopyImage( cb, vel.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			nrdMvScratch, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp );
+
+		VkImageMemoryBarrier cpost[2] = {};
+		cpost[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		cpost[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		cpost[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		cpost[0].srcQueueFamilyIndex = cpost[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		cpost[0].image = vel.image;
+		cpost[0].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		cpost[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		cpost[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		cpost[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		cpost[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		cpost[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;			// NRD reads + writes it in GENERAL
+		cpost[1].srcQueueFamilyIndex = cpost[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		cpost[1].image = nrdMvScratch;
+		cpost[1].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		cpost[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		cpost[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			0, 0, NULL, 0, NULL, 2, cpost );
+	}
+
 	// inputs: SHADER_READ_ONLY -> GENERAL (NRD's descriptors are written with GENERAL);
 	// output: first use UNDEFINED -> GENERAL, then a WAR barrier vs last frame's sampling
 	VkImageMemoryBarrier pre[6] = {};
@@ -7118,7 +7236,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	addPre( ray->colorImage[0],  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPre( vz->colorImage[vzAtt],   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPre( norm->colorImage[nmAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-	addPre( vel.image,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	if ( !mvScratch ) { addPre( vel.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// scratch path handled velocity via the copy above
 	if ( haveConf ) { addPre( conf->image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// H6f
 	addPre( outImg,              outReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
 	vkCmdPipelineBarrier( cb,
@@ -7156,7 +7274,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	addPost( ray->colorImage[0],  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPost( vz->colorImage[vzAtt],   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	addPost( norm->colorImage[nmAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-	addPost( vel.image,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	if ( !mvScratch ) { addPost( vel.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// scratch path left velocity in SHADER_READ_ONLY
 	addPost( outImg,              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	// dst includes COMPUTE: FSR2 consumes the velocity image (and could consume others)
 	// from compute later in the frame
