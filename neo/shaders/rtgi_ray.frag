@@ -14,7 +14,8 @@
 //   u_rtParms.zw          = geo-table device address (bit-cast lo/hi)   [vs rtao_ray: NEW]
 //   u_modelViewMatrix     = inverse view (view -> world)
 //   u_localParam0         = ( 1/proj00, 1/proj11, gatherRadius, emissive peak clamp )
-//   u_localParam1         = ( frameIndex (hashed for the IGN reorientation), 0, 0, eye-pullback per unit depth )
+//   u_localParam1         = ( frameIndex (unused in-shader since the IGN rotation is CPU-hoisted), shadow-ray gate, checkerboard parity, eye-pullback per unit depth )
+//   u_particleRadius      = ( cos(goldenAngle), sin(goldenAngle), hashed per-frame IGN offset x, y )  [CPU-hoisted, frame-constant]
 //   u_color               = ( scene-light buffer addr lo/hi bit-cast, light count, ambient floor at the hit )
 //   u_diffuseModifier     = ( emissive glow scale, light brightness scale, frustum gate, real-lights enable )
 //   u_screenCorrection.xy = 1 / raySize   (gl_FragCoord -> [0,1] uv)
@@ -123,7 +124,7 @@ void main() {
 	// view-space position (ssao.frag reconstruction, incl. the VK view-Y sign) + normal. A degenerate
 	// G-buffer normal would normalize() to NaN and a NaN ray direction can hang RT traversal (device lost),
 	// so any such pixel returns zero radiance instead of tracing.
-	float vz  = 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y );   // negative
+	float vz  = outViewZ.x;		// identical to the expression written into outViewZ above (negative view z)
 	vec2  ndc = sfrag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
 	float d   = -vz;
 	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
@@ -144,12 +145,11 @@ void main() {
 	// out; checkerboard traces each pixel only every OTHER frame, so that was ~16 frames (the "45-degree
 	// checkered halo" at short history). A continuous low-discrepancy rotation points the diagonal a fresh way
 	// every frame, so the residue averages in a handful of frames — helping the resScale path too.
-	uint  fh = uint( u_localParam1.x ) * 747796405u + 2891336453u;
-	fh = ( ( fh >> ( ( fh >> 28u ) + 4u ) ) ^ fh ) * 277803737u;
-	fh = ( fh >> 22u ) ^ fh;
-	float gAng = fract( float( uint( u_localParam1.x ) & 255u ) * 0.61803399 ) * 6.28318531;	// golden-ratio sequence -> low-discrepancy angle
-	float gcs = cos( gAng ), gsn = sin( gAng );
-	vec2  jc = mat2( gcs, -gsn, gsn, gcs ) * sfrag + vec2( float( ( fh >> 3u ) & 1023u ), float( ( fh >> 13u ) & 1023u ) );
+	// The golden-angle rotation (cos/sin) and the per-frame hashed offset are FRAME-CONSTANT (functions of the
+	// frame index only), so they are precomputed on the CPU (RB_RHI_RtgiPass) and delivered in u_particleRadius
+	// (.xy = cos/sin of the angle, .zw = the offset) instead of a per-pixel cos+sin+PCG-hash. Mathematically the
+	// same lattice; just not recomputed identically for every traced fragment.
+	vec2  jc = mat2( u_particleRadius.x, -u_particleRadius.y, u_particleRadius.y, u_particleRadius.x ) * sfrag + u_particleRadius.zw;
 	float r1 = ign( jc );
 	float r2 = ign( jc.yx + vec2( 37.0, 17.0 ) );
 	float phi  = 6.28318530718 * r1;
@@ -163,7 +163,7 @@ void main() {
 	dir *= inversesqrt( dl2 );
 
 	// ray origin pulled toward the eye (rtao_ray.frag crease-leak fix) + a tiny normal lift
-	vec3  eyeW   = ( u_modelViewMatrix * vec4( 0.0, 0.0, 0.0, 1.0 ) ).xyz;
+	vec3  eyeW   = u_modelViewMatrix[3].xyz;		// = inverse-view * (0,0,0,1): the translation column
 	vec3  rayOrg = Pw + normalize( eyeW - Pw ) * ( 0.25 + d * u_localParam1.w ) + Nw * 0.05;
 	float radius = u_localParam0.z;
 	rayQueryEXT rq;
