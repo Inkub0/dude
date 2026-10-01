@@ -7801,7 +7801,7 @@ void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// localParam1.w = the exp() coef; both 0 (no attenuation) when attenuation is off or the view has no fog.
 	parms.localParam1[2] = 0.0f;
 	parms.localParam1[3] = 0.0f;
-	const float fogAtten = idMath::ClampFloat( 0.0f, 1.0f, r_rtgiFogAttenuate.GetFloat() );
+	const float fogAtten = idMath::ClampFloat( 0.0f, 4.0f, r_rtgiFogAttenuate.GetFloat() );
 	if ( fogAtten > 0.0f ) {
 		for ( const viewLight_t *vL = viewDef->viewLights; vL; vL = vL->next ) {
 			if ( !vL->lightShader->IsFogLight() ) {
@@ -7811,7 +7811,8 @@ void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 			const float fogDensity = vL->shaderRegisters[fs->color.registers[3]];
 			const float fogDist = ( fogDensity <= 1.0f ) ? DEFAULT_FOG_DISTANCE : fogDensity;
 			// transmittance T = exp( dist * coef ); coef = 127.5 * ln(0.982) / fogDist reproduces the fog
-			// image's ~90%-opaque-at-fogDist curve (0.982^(255 * 0.5*dist/fogDist)).
+			// image's ~90%-opaque-at-fogDist curve (0.982^(255 * 0.5*dist/fogDist)). The shader raises T to
+			// the strength power, so strength > 1 overdrives the falloff (GI dies sooner than the fog is thick).
 			parms.localParam1[2] = fogAtten;
 			parms.localParam1[3] = -2.31587f / fogDist;
 			break;		// first fog light; layered / localized fog is approximated by this primary volume
