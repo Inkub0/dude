@@ -322,6 +322,10 @@ public:
 		// GL3 non-.dds: worker can't replicate the GL decode path → main runs the serial load
 		bool			needsSerial;
 		bool			failed;							// decode failed → MakeDefault on main
+		// DUDE: mean source RGB, sampled on the worker (GenerateImage's GL path does this inline;
+		// the Vulkan paths return early, so we carry it here and copy it to averageColor on main)
+		float			averageColor[3];
+		bool			hasAverageColor;
 	};
 	parallelLoad_t *	parallelData;
 };

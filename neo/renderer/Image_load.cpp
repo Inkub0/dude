@@ -619,6 +619,10 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 				rhi::GetRHI()->DestroyImage( rhiHandle );
 				rhiHandle = 0;
 			}
+			// DUDE: capture a mean RGB of the source pixels for emissive GUI fill-light tinting,
+			// before the RXGB swizzle below — the GL path samples it at line ~667, but the Vulkan
+			// branch returns before reaching it, so sample here or averageColor stays white
+			R_ImageAverageColorRGBA( pic, width * height, averageColor );
 			// normal maps: the shaders decode the RXGB layout unconditionally
 			// (interaction.frag does bump.x = bump.a), and the GL upload path
 			// swaps red into alpha "even on tga normal maps so we only have to
@@ -1953,6 +1957,12 @@ bool idImage::LoadImageCpu() {
 	// NOTE: the MD4 imageHash the serial path computes here is deliberately skipped —
 	// it feeds only a dev-only duplicate-image report and costs ~10% of load time.
 
+	// DUDE: mean source RGB for emissive GUI fill-light tinting, sampled before the RXGB
+	// swizzle. Stashed in parallelData and copied to averageColor on the main thread.
+	parallelData->averageColor[0] = parallelData->averageColor[1] = parallelData->averageColor[2] = 1.0f;
+	R_ImageAverageColorRGBA( pic, width * height, parallelData->averageColor );
+	parallelData->hasAverageColor = true;
+
 	// swap red into alpha for RXGB normal maps, matching GenerateImage's Vulkan branch
 	// (interaction.frag decodes bump.x from the alpha channel). Done in place — pic is
 	// this worker's private buffer.
@@ -2035,6 +2045,14 @@ void idImage::UploadImageCpu() {
 		uploadWidth = parallelData->width;
 		uploadHeight = parallelData->height;
 		precompressedFile = false;
+	}
+
+	// DUDE: carry the worker-sampled mean RGB across to the live image (serial GenerateImage
+	// writes averageColor directly; the parallel worker can't touch the member safely)
+	if ( parallelData->hasAverageColor ) {
+		averageColor[0] = parallelData->averageColor[0];
+		averageColor[1] = parallelData->averageColor[1];
+		averageColor[2] = parallelData->averageColor[2];
 	}
 
 	// free worker-allocated buffers
