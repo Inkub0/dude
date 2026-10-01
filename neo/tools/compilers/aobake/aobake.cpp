@@ -203,16 +203,21 @@ static float AO_RayTri( const idVec3 &orig, const idVec3 &dir, const aoTri_t &t,
 // is what lets the bake run many texels in parallel. The grid itself is read-only during tracing
 // and stays shared -- only this visited-stamp state must be private to each thread.
 struct aoTraceCtx_t {
-	int			rayStamp;
-	idList<int>	cellStamp;		// parallel to grid cells
+	unsigned		rayStamp;		// unsigned: wraps cleanly (a signed overflow here is UB, and
+	idList<unsigned>	cellStamp;	// a 4K/128-ray bake can exceed INT_MAX rays per worker)
 	aoTraceCtx_t() : rayStamp( 0 ) {}
 };
 
 static float AO_TraceNearest( const aoGrid_t &g, aoTraceCtx_t &ctx, const idVec3 &orig, const idVec3 &dir, float maxDist ) {
-	ctx.rayStamp++;
 	if ( ctx.cellStamp.Num() != g.cells.Num() ) {
 		ctx.cellStamp.SetNum( g.cells.Num() );
 		for ( int i = 0; i < ctx.cellStamp.Num(); i++ ) ctx.cellStamp[i] = 0;
+		ctx.rayStamp = 0;
+	}
+	ctx.rayStamp++;
+	if ( ctx.rayStamp == 0 ) {		// wrapped: old stamps are now ambiguous, clear and restart at 1
+		for ( int i = 0; i < ctx.cellStamp.Num(); i++ ) ctx.cellStamp[i] = 0;
+		ctx.rayStamp = 1;
 	}
 
 	float best = -1.0f;
