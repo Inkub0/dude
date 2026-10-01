@@ -1177,6 +1177,27 @@ static rhi::ShaderHandle R_MD5_TessShader( rhi::RHI *r ) {
 	return r_md5TessShader;
 }
 
+/*
+====================
+R_MD5_ResetGpuShaders
+
+Drop the once-compiled GPU compute shaders (skin, the PREVPOS skinned-motion-vector
+variant, and tess-deform) so they are recompiled against a fresh RHI backend. A full
+backend teardown (full vid_restart, or a mod switch via ReloadEngine) destroys the
+backend's shader table, leaving these once-cached frontend handles dangling; without
+resetting the *Tried guards the gates keep returning dead handles, the skin/tess compute
+dispatches against destroyed pipelines, gpuSkinVB is never written, and every MD5 model
+draws at bind pose (T-pose) — with skinned motion vectors and GPU tessellation likewise
+dead. The backend already freed the modules, so just drop the cached handles; they
+recompile lazily on next use against the new backend.
+====================
+*/
+void R_MD5_ResetGpuShaders( void ) {
+	r_md5SkinShader = 0;		r_md5SkinShaderTried = false;
+	r_md5SkinPrevShader = 0;	r_md5SkinPrevShaderTried = false;
+	r_md5TessShader = 0;		r_md5TessShaderTried = false;
+}
+
 // Full-precision normalize for the CPU reference. idVec3::Normalize() uses idMath::InvSqrt (an
 // 8-bit-seed Newton-Raphson, ~1e-7 relative error) which, propagated through the PN edge control
 // points on model-space corners tens of units apart, inflates the validator's printed position

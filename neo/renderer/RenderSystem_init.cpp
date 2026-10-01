@@ -3078,6 +3078,12 @@ void R_VidRestart_f( const idCmdArgs &args ) {
 	// dump ambient caches
 	renderModelManager->FreeModelVertexCaches();
 
+	// a full vid_restart destroys the backend (VK device + its shader table), so re-arm the
+	// once-cached MD5 GPU compute shaders (skin / motion-vector / tess) to recompile against
+	// the rebuilt backend — otherwise they'd dangle and MD5 models would draw at bind pose.
+	extern void R_MD5_ResetGpuShaders( void );
+	R_MD5_ResetGpuShaders();
+
 	// free any current world interaction surfaces and vertex caches
 	R_FreeDerivedData();
 
@@ -3346,6 +3352,13 @@ idRenderSystemLocal::Shutdown
 */
 void idRenderSystemLocal::Shutdown( void ) {
 	common->Printf( "idRenderSystem::Shutdown()\n" );
+
+	// Re-arm the once-cached MD5 GPU compute shaders (skin / motion-vector / tess) before the
+	// backend teardown below frees their modules: a mod switch (ReloadEngine) runs this full
+	// Shutdown then re-inits, and without the reset the stale handles would dispatch against
+	// destroyed pipelines so every MD5 model draws at bind pose (T-pose). See Model_md5.cpp.
+	extern void R_MD5_ResetGpuShaders( void );
+	R_MD5_ResetGpuShaders();
 
 	common->SetRefreshOnPrint( false ); // without a renderer there's nothing to refresh
 
