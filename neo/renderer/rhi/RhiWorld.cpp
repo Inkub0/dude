@@ -1442,6 +1442,102 @@ Callback for RB_CreateSingleDrawInteractions; the RenderParams mapping is
 documented member by member in shaders/renderparms.glsl.
 ===================
 */
+// DUDE PBR (docs/pbr-materials.md): opt-in GGX interaction path + wet-blood film, filled on the
+// non-ambient interaction draw (ambient keeps the vanilla path, left zero by the memset). Sets
+// pbrOrganicSpecFallback for the later specular-image swap. Extracted verbatim from
+// RB_RHI_DrawInteraction to cut its length; reads din + globals + cvars, writes only parms (+ the
+// fallback flag). clayWorld forces dielectric for the r_whiteWorld clay render.
+static void RB_RHI_FillPbrAndFilm( rhi::RenderParams &parms, const drawInteraction_t *din,
+                                   bool clayWorld, bool &pbrOrganicSpecFallback ) {
+	if ( r_pbr.GetBool() && !din->ambientLight ) {
+		const idMaterial *mat = din->surf->material;
+		float metal, rough, wetMul, envMul;
+		const int pbrCat = RB_RHI_ResolvePbrMaterial( mat, metal, rough, wetMul, envMul );
+		// wetness = a specular-energy multiplier (the water/sweat/slime film) —
+		// deliberately not metalness, which would tint and darken like bronze. Comes from
+		// the material's per-category defaults row (or a per-material override column),
+		// resolved above; neutral 1 leaves the specular unchanged.
+		float specScale = r_pbrSpecScale.GetFloat() * wetMul;
+		// clay world: force dielectric so metals don't kill the white diffuse / tint the
+		// specular — the clay render should read metal and non-metal surfaces the same
+		parms.pbrParms[0] = clayWorld ? 0.0f : metal;
+		parms.pbrParms[1] = rough;
+		// 1 = PBR; 2 = PBR + the decal metal mask is bound on unit 14 (r_decalMetalMask)
+		parms.pbrParms[2] = rhiDecalMaskImage ? 2.0f : 1.0f;
+		parms.pbrParms[3] = specScale;
+		// metal diffuse-kill strength kd: 1 = physical (metals lose all diffuse
+		// colour), <1 keeps that share of the asset albedo so metals aren't dark
+		// and off-colour where stock D3 has no environment to reflect (sec. 5).
+		parms.pbrParms2[0] = 1.0f - r_pbrMetalDiffuse.GetFloat();
+		// PBR tuning knobs (Developer tab) ride localParam1.zw — the SSAO block
+		// below only writes .xy on this (non-ambient) path, so no clash.
+		parms.localParam1[2] = r_pbrToksvigBase.GetFloat();
+		parms.localParam1[3] = r_pbrFireflyClamp.GetFloat();
+		// Phase C.1 metal environment floor rides the occlusionParms spare slot
+		// (the occlusion block below only writes .xyz). The per-category env default
+		// (or a per-material override column) scales the global r_pbrEnvScale; resolved
+		// above as envMul, neutral 1 keeps the global value.
+		parms.occlusionParms[3] = r_pbrEnvScale.GetFloat() * envMul;
+
+		// organic materials authored without a specular stage (most blood decals
+		// — bloodpool01 — and the gibs) would zero the GGX lobe through the
+		// black spec mask, leaving the wetness sliders inert on exactly the
+		// surfaces they exist for. Substitute the material's own diffuse as the
+		// mask (the gleam then follows the blood shape and density, tinting
+		// dark red like real blood) with a neutral white modifier; the actual
+		// image swap happens at the bind below.
+		if ( ( pbrCat == PBR_CAT_FLESH || pbrCat == PBR_CAT_SKIN || pbrCat == PBR_CAT_EYES )
+		     && din->specularImage == globalImages->blackImage ) {
+			pbrOrganicSpecFallback = true;
+			parms.specularModifier[0] = parms.specularModifier[1] =
+			parms.specularModifier[2] = parms.specularModifier[3] = 1.0f;
+		}
+
+		// DUDE wet blood film: this draw is a blood decal lit as its own surface, not the material
+		// it nominally belongs to - a smooth dielectric film, no category, no dielectric dimming.
+		// u_channelMask (free in the interaction shaders) switches interaction.frag to film mode.
+		if ( rhiFilmDraw ) {
+			pbrOrganicSpecFallback = false;
+			parms.pbrParms[0] = 0.0f;
+			parms.pbrParms[1] = idMath::ClampFloat( 0.05f, 1.0f, r_decalWetBloodRough.GetFloat() );
+			parms.pbrParms[3] = 1.0f;
+			parms.occlusionParms[3] = 0.0f;
+			parms.channelMask[0] = rhiFilmDraw->mode;
+			parms.channelMask[1] = idMath::ClampFloat( 0.0f, 1.0f, r_decalWetBloodRelief.GetFloat() );
+			// zw: the coverage window the film feathers in over. The floor keeps the film off the
+			// faint mist splat textures trail off into - blood too thin to see should not glint.
+			const float filmFloor = idMath::ClampFloat( 0.0f, 0.95f, r_decalWetBloodThreshold.GetFloat() );
+			parms.channelMask[2] = filmFloor;
+			parms.channelMask[3] = Min( filmFloor + 0.25f, 1.0f );
+		}
+	}
+}
+
+// Skin / flesh subsurface-scattering interaction params (docs/skin-shading.md): a wrapped-diffuse
+// terminator warmth on the skin/flesh categories (all tiers, direct-light only). Writes only
+// parms.skinParms — a strict no-op (memset zero) everywhere else. Extracted from DrawInteraction.
+static void RB_RHI_FillSkinSSS( rhi::RenderParams &parms, const drawInteraction_t *din ) {
+	if ( r_skinShading.GetFloat() > 0.0f && !din->ambientLight && !rhiFilmDraw ) {
+		const int skinCat = din->surf->material->GetPbrCategory();
+		if ( skinCat == PBR_CAT_SKIN || skinCat == PBR_CAT_FLESH ) {
+			parms.skinParms[0] = idMath::ClampFloat( 0.0f, 1.0f, r_skinShading.GetFloat() );
+			// The RGB wrap-width ratio IS the terminator's warm colour: red light penetrates the
+			// dermis deepest, green less, blue least (the classic skin diffusion profile). Hell
+			// flesh (gibs, raw meat, imp hide) scatters deeper and redder than face skin.
+			const float rad = r_skinScatter.GetFloat();		// red-channel scatter reach
+			if ( skinCat == PBR_CAT_FLESH ) {
+				parms.skinParms[1] = rad * 1.30f;
+				parms.skinParms[2] = rad * 0.30f;
+				parms.skinParms[3] = rad * 0.15f;
+			} else {
+				parms.skinParms[1] = rad * 1.00f;
+				parms.skinParms[2] = rad * 0.35f;
+				parms.skinParms[3] = rad * 0.20f;
+			}
+		}
+	}
+}
+
 static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
@@ -1508,102 +1604,12 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// branch reads it; the free specularParms slot avoids growing u_shadowParms past 4).
 	parms.specularParms[3] = (float)r_shadowMapCubePcf.GetInteger();
 
-	// DUDE PBR (docs/pbr-materials.md): opt-in GGX interaction path. z gates the
-	// shader branch; x/y come from the shared resolve (per-category cvars > baked
-	// table > globals, metalness sanity-clamped to [0,1] — see
-	// RB_RHI_ResolvePbrMaterial). Ambient interactions keep the vanilla fill path
-	// (left zero by the memset).
+	// PBR (GGX) interaction path + wet-blood film — extracted to RB_RHI_FillPbrAndFilm.
 	bool pbrOrganicSpecFallback = false;
-	if ( r_pbr.GetBool() && !din->ambientLight ) {
-		const idMaterial *mat = din->surf->material;
-		float metal, rough, wetMul, envMul;
-		const int pbrCat = RB_RHI_ResolvePbrMaterial( mat, metal, rough, wetMul, envMul );
-		// wetness = a specular-energy multiplier (the water/sweat/slime film) —
-		// deliberately not metalness, which would tint and darken like bronze. Comes from
-		// the material's per-category defaults row (or a per-material override column),
-		// resolved above; neutral 1 leaves the specular unchanged.
-		float specScale = r_pbrSpecScale.GetFloat() * wetMul;
-		// clay world: force dielectric so metals don't kill the white diffuse / tint the
-		// specular — the clay render should read metal and non-metal surfaces the same
-		parms.pbrParms[0] = clayWorld ? 0.0f : metal;
-		parms.pbrParms[1] = rough;
-		// 1 = PBR; 2 = PBR + the decal metal mask is bound on unit 14 (r_decalMetalMask)
-		parms.pbrParms[2] = rhiDecalMaskImage ? 2.0f : 1.0f;
-		parms.pbrParms[3] = specScale;
-		// metal diffuse-kill strength kd: 1 = physical (metals lose all diffuse
-		// colour), <1 keeps that share of the asset albedo so metals aren't dark
-		// and off-colour where stock D3 has no environment to reflect (sec. 5).
-		parms.pbrParms2[0] = 1.0f - r_pbrMetalDiffuse.GetFloat();
-		// PBR tuning knobs (Developer tab) ride localParam1.zw — the SSAO block
-		// below only writes .xy on this (non-ambient) path, so no clash.
-		parms.localParam1[2] = r_pbrToksvigBase.GetFloat();
-		parms.localParam1[3] = r_pbrFireflyClamp.GetFloat();
-		// Phase C.1 metal environment floor rides the occlusionParms spare slot
-		// (the occlusion block below only writes .xyz). The per-category env default
-		// (or a per-material override column) scales the global r_pbrEnvScale; resolved
-		// above as envMul, neutral 1 keeps the global value.
-		parms.occlusionParms[3] = r_pbrEnvScale.GetFloat() * envMul;
+	RB_RHI_FillPbrAndFilm( parms, din, clayWorld, pbrOrganicSpecFallback );
 
-		// organic materials authored without a specular stage (most blood decals
-		// — bloodpool01 — and the gibs) would zero the GGX lobe through the
-		// black spec mask, leaving the wetness sliders inert on exactly the
-		// surfaces they exist for. Substitute the material's own diffuse as the
-		// mask (the gleam then follows the blood shape and density, tinting
-		// dark red like real blood) with a neutral white modifier; the actual
-		// image swap happens at the bind below.
-		if ( ( pbrCat == PBR_CAT_FLESH || pbrCat == PBR_CAT_SKIN || pbrCat == PBR_CAT_EYES )
-		     && din->specularImage == globalImages->blackImage ) {
-			pbrOrganicSpecFallback = true;
-			parms.specularModifier[0] = parms.specularModifier[1] =
-			parms.specularModifier[2] = parms.specularModifier[3] = 1.0f;
-		}
-
-		// DUDE wet blood film: this draw is a blood decal lit as its own surface, not the material
-		// it nominally belongs to - a smooth dielectric film, no category, no dielectric dimming.
-		// u_channelMask (free in the interaction shaders) switches interaction.frag to film mode.
-		if ( rhiFilmDraw ) {
-			pbrOrganicSpecFallback = false;
-			parms.pbrParms[0] = 0.0f;
-			parms.pbrParms[1] = idMath::ClampFloat( 0.05f, 1.0f, r_decalWetBloodRough.GetFloat() );
-			parms.pbrParms[3] = 1.0f;
-			parms.occlusionParms[3] = 0.0f;
-			parms.channelMask[0] = rhiFilmDraw->mode;
-			parms.channelMask[1] = idMath::ClampFloat( 0.0f, 1.0f, r_decalWetBloodRelief.GetFloat() );
-			// zw: the coverage window the film feathers in over. The floor keeps the film off the
-			// faint mist splat textures trail off into - blood too thin to see should not glint.
-			const float filmFloor = idMath::ClampFloat( 0.0f, 0.95f, r_decalWetBloodThreshold.GetFloat() );
-			parms.channelMask[2] = filmFloor;
-			parms.channelMask[3] = Min( filmFloor + 0.25f, 1.0f );
-		}
-	}
-
-	// DUDE skin / flesh subsurface scattering (docs/skin-shading.md): a per-channel wrapped
-	// diffuse that warms and softens the lighting terminator on faces and Hell flesh so they
-	// stop reading as plastic under the GGX lobe. Deliberately OUTSIDE the r_pbr block above —
-	// it only softens the DIFFUSE cosine (never the specular), so it rides every shading model
-	// and works on the Blinn tiers too (all tiers). Keyed off the same classifier categories the
-	// PBR table already tags, so it needs no new assets. Skipped on the ambient fill pass (a
-	// direct-light effect: interaction.frag, not ambientlight.frag, carries the term) and on the
-	// wet-blood film draw (which zeroes diffuse). 0 (memset) everywhere else = a strict no-op.
-	if ( r_skinShading.GetFloat() > 0.0f && !din->ambientLight && !rhiFilmDraw ) {
-		const int skinCat = din->surf->material->GetPbrCategory();
-		if ( skinCat == PBR_CAT_SKIN || skinCat == PBR_CAT_FLESH ) {
-			parms.skinParms[0] = idMath::ClampFloat( 0.0f, 1.0f, r_skinShading.GetFloat() );
-			// The RGB wrap-width ratio IS the terminator's warm colour: red light penetrates the
-			// dermis deepest, green less, blue least (the classic skin diffusion profile). Hell
-			// flesh (gibs, raw meat, imp hide) scatters deeper and redder than face skin.
-			const float rad = r_skinScatter.GetFloat();		// red-channel scatter reach
-			if ( skinCat == PBR_CAT_FLESH ) {
-				parms.skinParms[1] = rad * 1.30f;
-				parms.skinParms[2] = rad * 0.30f;
-				parms.skinParms[3] = rad * 0.15f;
-			} else {
-				parms.skinParms[1] = rad * 1.00f;
-				parms.skinParms[2] = rad * 0.35f;
-				parms.skinParms[3] = rad * 0.20f;
-			}
-		}
-	}
+	// skin / flesh subsurface scattering — extracted to RB_RHI_FillSkinSSS.
+	RB_RHI_FillSkinSSS( parms, din );
 
 	// shadow mapping (DUDE Phase 3.5): only the regular interaction shader samples
 	// the depth map — the ambientLight pass has no shadow term. The 2D lookup uses a
