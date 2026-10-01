@@ -705,7 +705,9 @@ void idPlayerView::RenderPlayerView( idUserInterface *hud ) {
 	const int RELOAD_FOCUS_OUT_MS  = 200;
 	const int RELOAD_FOCUS_HOLD_MS = 80;	// bridge the ~1-frame per-shell WP_READY blips (min that stays safe to ~16fps render)
 	float reloadFocus = 0.0f;
-	if ( cvarSystem->GetCVarBool( "r_rhiActive" ) ) {
+	// r_rhiActive: only the RHI backends have the DoF pass. Also off when view effects are
+	// skipped, matching the base-game tree (otherwise the blur ran under g_skipViewEffects here).
+	if ( cvarSystem->GetCVarBool( "r_rhiActive" ) && !g_skipViewEffects.GetBool() ) {
 		idWeapon *reloadWeapon = player->weapon.GetEntity();
 		if ( reloadWeapon && reloadWeapon->IsReloading() ) {
 			reloadFocusHoldUntil = gameLocal.time + RELOAD_FOCUS_HOLD_MS;
