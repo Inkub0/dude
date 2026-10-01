@@ -7340,7 +7340,6 @@ void VulkanBackend::NrdSelfTest() {
 		common->Printf( "NRD self-test: FAIL - NrdCreate (see warnings above)\n" );
 		return;
 	}
-	const nrd::InstanceDesc &inst = *nrd::GetInstanceDesc( *nrdInstance );
 	common->Printf( "NRD self-test: context %ux%u - %u pipelines, %u+%u pool textures, CB %u B x %u\n",
 		W, H, (uint32_t)nrdPipes.size(), (uint32_t)nrdPermTex.size(), (uint32_t)nrdTransTex.size(),
 		nrdCbStride, nrdCbSets );

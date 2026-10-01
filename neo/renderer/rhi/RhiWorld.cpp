@@ -965,7 +965,7 @@ void RB_RHI_PrecacheOcclusionMapsForModel( const idRenderModel *model ) {
 ===================
 R_PrecacheDecalImages
 
-DUDE (docs/benchmark.md): decal materials (textures/decals/*, e.g. the blood splats) carry
+DUDE (docs/benchmark.md): decal materials (textures/decals, e.g. the blood splats) carry
 generated bump images -- smoothnormals(heightmap(...)) -- computed on the CPU the first time the
 decal is projected and bound, which stalled the render thread ~8-12 ms per new splat type. Walk the
 already-parsed materials this level pulled in and force-load any unloaded decal-texture image up
