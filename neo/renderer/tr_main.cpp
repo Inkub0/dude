@@ -1633,7 +1633,17 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 	s_rtPerfFrameBounds.SetNum( 0, false );
 	const int maxInst = s_rtAreaBlas.Num() + world->entityDefs.Num()
 		+ ( wantPerf ? s_rtPerfAreaBlas.Num() + world->entityDefs.Num() : 0 );
-	rhi::RHI::RtInstance *inst = (rhi::RHI::RtInstance *)Mem_Alloc16( ( maxInst > 0 ? maxInst : 1 ) * (int)sizeof( rhi::RHI::RtInstance ) );
+	// Reused per-frame scratch (grow-on-demand, like s_liveObj above): this runs every frame on
+	// every RT tier, so a Mem_Alloc16/Free16 of entityDefs*2 instances per frame was pure churn.
+	static rhi::RHI::RtInstance *s_rtInst = NULL;
+	static int s_rtInstCap = 0;
+	const int needInst = ( maxInst > 0 ? maxInst : 1 );
+	if ( needInst > s_rtInstCap ) {
+		if ( s_rtInst ) { Mem_Free16( s_rtInst ); }
+		s_rtInst = (rhi::RHI::RtInstance *)Mem_Alloc16( needInst * (int)sizeof( rhi::RHI::RtInstance ) );
+		s_rtInstCap = needInst;
+	}
+	rhi::RHI::RtInstance *inst = s_rtInst;
 	int n = 0;
 	for ( int i = 0; i < s_rtAreaBlas.Num(); i++ ) {
 		rhi::RHI::RtInstance &in = inst[n++];
@@ -1811,7 +1821,7 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 			}
 		}
 	}
-	Mem_Free16( inst );
+	// inst is the reused static scratch (freed only on growth / at exit); nothing to free here
 }
 
 // RR3: pack a surface material's diffuse average colour (idImage::averageColor, already computed per
