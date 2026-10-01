@@ -9908,7 +9908,12 @@ void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
 		if ( t.colorLevelFb[L] )   { vkDestroyFramebuffer( device, t.colorLevelFb[L], NULL ); t.colorLevelFb[L] = VK_NULL_HANDLE; }
 		if ( t.colorLevelView[L] ) { vkDestroyImageView( device, t.colorLevelView[L], NULL ); t.colorLevelView[L] = VK_NULL_HANDLE; }
 	}
-	for ( int c = 0; c < 3; c++ ) {		// R1/A0: incl. the 3rd (RG16F velocity) attachment on a 3-MRT; unused slots are null-guarded
+	// all 4 color attachments: normal/mat (RGBA8), velocity (RG16F, 3-MRT) and the RTGI
+	// albedo (RGBA8, 4-MRT — docs/rtx-rtgi.md H6c). The bound was 3 before the albedo
+	// attachment was added, which leaked colorImage[3] on every free (unfreed VMA dedicated
+	// allocation → vid_restart / in-game quit abort at Ultra Nightmare). Unused slots are
+	// null-guarded, so iterating the full array is safe for the smaller layouts.
+	for ( int c = 0; c < 4; c++ ) {
 		if ( t.colorSampleView[c] ) { vkDestroyImageView( device, t.colorSampleView[c], NULL ); t.colorSampleView[c] = VK_NULL_HANDLE; }
 		if ( t.colorView[c] )  { vkDestroyImageView( device, t.colorView[c], NULL ); t.colorView[c] = VK_NULL_HANDLE; }
 		if ( t.colorImage[c] ) { vmaDestroyImage( vma, t.colorImage[c], t.colorAlloc[c] ); t.colorImage[c] = VK_NULL_HANDLE; t.colorAlloc[c] = NULL; }
