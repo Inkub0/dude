@@ -6093,6 +6093,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			rhi::ClearArgs rtClear;
 			memset( &rtClear, 0, sizeof( rtClear ) );
 			rtClear.color = true;
+			r->GpuScopeBegin( "ssr.trace" );		// RT reflection ray trace + hit shading (ssrRes)
 			r->BeginTargetPass( rhiRtReflRT, &rtClear );
 			RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 			RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
@@ -6105,6 +6106,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			}
 			RB_RHI_DrawFullscreen( r, rtProg, rp, r->GetRenderTargetImage( rhiNormalResultRT ) );
 			r->EndPass();
+			r->GpuScopeEnd();
 
 			rhi::RenderTargetHandle rtResultRT = rhiRtReflRT;
 			int rtResW = ssrW, rtResH = ssrH;		// resolution of rtResultRT (ssrRes until the upscale runs)
@@ -6155,6 +6157,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 					// unit 0 = current RT contribution (via DrawFullscreen), 1 = history read slot,
 					// 2 = depth, 3 = velocity
+					r->GpuScopeBegin( "ssr.temporal" );		// temporal accumulate + upscale to full res
 					r->BeginTargetPass( rhiRtReflHistRT[writeIdx], NULL );
 					RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
 					// first frame after (re)alloc the read slot was never written (VK layout UNDEFINED);
@@ -6166,6 +6169,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 					else          { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
 					RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiRtReflRT ) );
 					r->EndPass();
+					r->GpuScopeEnd();
 
 					rtResultRT = rhiRtReflHistRT[writeIdx];
 					rtResW = fullW; rtResH = fullH;		// the result is now the full-res upscaled history
@@ -6198,8 +6202,10 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			cp.screenCorrection[0] = 1.0f / rtResW;
 			cp.screenCorrection[1] = 1.0f / rtResH;
 			RB_RHI_BindRTImage( r, 1, matImg );		// full-res roughness/metalness for the silhouette mask
+			r->GpuScopeBegin( "ssr.composite" );	// RR6b blur + additive composite onto the scene
 			RB_RHI_DrawFullscreen( r, copyProg, cp, r->GetRenderTargetImage( rtResultRT ),
 			                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
+			r->GpuScopeEnd();
 		}
 	}
 	RB_RHI_ForgetTexBinds();
