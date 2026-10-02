@@ -5831,6 +5831,23 @@ int Com_DetectDudePreset( void )
 	return DetectEnhancementPreset();
 }
 
+// DUDE: the live ray-tracing axis state (RtMode: 0 = off, 1 = on), for the classic menu's
+// Ray Tracing selector highlight (Session*.cpp pushes it into dude_rtx). Detected from the live
+// RT cvars, same as the preset above.
+int Com_DetectDudeRtx( void )
+{
+	int rtMode = RTX_OFF;
+	DetectEnhancementPreset( &rtMode );
+	return rtMode;
+}
+
+// DUDE: whether this device can run the ray-tracing axis at all (Vulkan + ray-query). The
+// classic menu shows / hides its Ray Tracing row on this (gui::rtCapable).
+bool Com_RtCapable( void )
+{
+	return R_SupportsRayTracing();
+}
+
 // DUDE: the in-game AA selector (mainmenu.gui) on the RHI backends. Three backend
 // variants of the row are visibility-switched on "gui::dudeBackend" (0 = legacy ARB,
 // keeps the MSAA r_multisamples row; 1 = opengl3, None/FXAA/SMAA; 2 = Vulkan, adds
@@ -6275,6 +6292,16 @@ void Com_DudePreset_f( const idCmdArgs &args )
 int Com_DetectDudePreset( void )
 {
 	return -1;
+}
+
+int Com_DetectDudeRtx( void )
+{
+	return 0;
+}
+
+bool Com_RtCapable( void )
+{
+	return false;
 }
 
 #endif

@@ -296,6 +296,10 @@ void idSessionLocal::SetPbMenuGuiVars( void ) {
 // DUDE: current enhancement-preset index (-1 = Custom), implemented in
 // Dhewm3SettingsMenu.cpp. Used to keep the quality selector's dude_preset cvar honest.
 extern int Com_DetectDudePreset( void );
+// DUDE: live ray-tracing axis state (0 = off, 1 = on) and whether the device can run it, for
+// the classic menu's Ray Tracing selector (binds dude_rtx) and its visibility (gui::rtCapable).
+extern int Com_DetectDudeRtx( void );
+extern bool Com_RtCapable( void );
 // DUDE AA selector (Dhewm3SettingsMenu.cpp): which backend variant of the AA row to show
 // (0 = legacy MSAA, 1 = opengl3, 2 = Vulkan) and what the selector should currently read.
 extern int Com_DudeAABackend( void );
@@ -321,6 +325,11 @@ void idSessionLocal::SetMainMenuGuiVars( void ) {
 			dude_preset.SetInteger( det );
 		}
 	}
+	// DUDE: the ray-tracing axis is a separate selector (dude_rtx). Sync it to the live state so
+	// the classic Ray Tracing row shows reality, and expose whether the device can run RT at all
+	// so the row hides on legacy/GL3/non-RT GPUs.
+	dude_rtx.SetInteger( Com_DetectDudeRtx() );
+	guiMainMenu->SetStateInt( "rtCapable", Com_RtCapable() ? 1 : 0 );
 	// DUDE: backend-aware AA row. The GUI shows one of three AA selectors by this state
 	// (legacy = MSAA / opengl3 = FXAA+SMAA / Vulkan = +FSR2); sync the bridge cvar so the
 	// visible selector reads the live r_rhiAA / r_fsr reality.
