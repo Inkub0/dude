@@ -1300,7 +1300,16 @@ static void WriteVulkanCrashDumpBody( const char *what, VkResult res, const char
 	fprintf( f, "  r_shadows = %d\n", r_shadows.GetInteger() );
 	fprintf( f, "  r_ssr = %d\n", cvarSystem->GetCVarInteger( "r_ssr" ) );
 	fprintf( f, "  r_ssao = %d\n", cvarSystem->GetCVarInteger( "r_ssao" ) );
-	fprintf( f, "  r_fsr2 = %d\n", cvarSystem->GetCVarInteger( "r_fsr2" ) );
+	// FSR2 state: r_fsr is the master toggle, r_fsrScale the sub-native render scale. (The old
+	// "r_fsr2" line read a cvar that doesn't exist -> always 0.) The scale matters for resize /
+	// device-lost reproductions, so record it and the live render-vs-display size.
+	fprintf( f, "  r_fsr = %d\n", cvarSystem->GetCVarInteger( "r_fsr" ) );
+	fprintf( f, "  r_fsrScale = %.3f\n", cvarSystem->GetCVarFloat( "r_fsrScale" ) );
+	{
+		int fw = 0, fh = 0;
+		R_FsrWorldSize( fw, fh );
+		fprintf( f, "  FSR render size: %dx%d  (display %dx%d)\n", fw, fh, glConfig.vidWidth, glConfig.vidHeight );
+	}
 	fprintf( f, "\n" );
 
 	fprintf( f, "Validation errors this session: %d\n\n", vkValidationErrors );
