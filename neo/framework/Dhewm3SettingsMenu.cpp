@@ -3022,7 +3022,8 @@ struct RtAugment {
 	bool  rtAllLights;
 	bool  rtBlurStagger;
 	bool  volumetrics;
-	bool  needVelocity;		// force r_motionVectors on so the NRD denoiser has motion vectors
+	bool  needVelocity;		// force FSR2 on: the NRD denoiser (RTAO/RTGI) needs motion vectors AND the
+							// temporal accumulation FSR2 adds -- 1-ray/px RTAO is noisy on NRD alone
 	float parallaxShadow;	// RT-driven override of the raster value (-1 = keep raster)
 	float hdrGamma;			// RT-driven override of the raster value (-1 = keep raster)
 };
@@ -3194,9 +3195,14 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		r_ssrIntensity.SetFloat( ( p.ssr && !a.rtReflections ) ? 0.8f : 0.5f );
 		r_rtReflResScale.SetFloat( a.rtReflections ? 0.5f : 1.0f );
 
-		// The NRD denoiser (RTAO / RTGI) needs motion vectors; force the velocity producer on
-		// where the raster tier didn't already fund it (e.g. Ultra, which carries mv/fsr off).
+		// The NRD denoiser (RTAO / RTGI) needs both the motion-vector buffer AND a temporal pass
+		// over its 1-ray/px output; FSR2 provides both. Nightmare already runs FSR2 (its raster row
+		// carries fsr), so this bites on Ultra, whose raster row has fsr/mv off -> RTAO there was
+		// noisy on NRD alone. Force FSR2 (and the velocity producer) on so Ultra+RTX denoises under
+		// the same conditions RTAO was tuned for. r_fsr defaults to Native-AA scale; the user still
+		// picks the FSR2 render scale freely in the Upscaling group.
 		if ( a.needVelocity ) {
+			r_fsr.SetBool( true );
 			r_motionVectors.SetBool( true );
 		}
 
@@ -3274,7 +3280,6 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 			idMath::Fabs( r_tessDisplace.GetFloat() - p.tessDisplace ) < 0.01f &&
 			r_parallax.GetBool()               == p.parallax &&
 			r_gpuSkinning.GetBool()            == p.gpuSkin &&
-			r_fsr.GetBool()                    == p.fsr &&
 			r_shadowMapSplitDynDrop.GetInteger() == p.splitDynDrop &&
 			r_ssaoTemporalTrade.GetBool()      == p.ssaoTemporalTrade &&
 			com_interpolate.GetBool()          == p.interpolate &&
@@ -3298,6 +3303,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				idMath::Fabs( r_ssrIntensity.GetFloat() - ( p.ssr ? 0.8f : 0.5f ) ) < 0.01f &&
 				idMath::Fabs( r_rtReflResScale.GetFloat() - 1.0f ) < 0.01f &&
 				r_motionVectors.GetBool()          == p.motionVectors &&
+				r_fsr.GetBool()                    == p.fsr &&
 				idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - p.hdrGamma ) < 0.01f &&
 				idMath::Fabs( r_parallaxShadow.GetFloat() - p.parallaxShadow ) < 0.01f;
 		} else {
@@ -3306,6 +3312,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 			const RtAugment& a = rtAugment[i];
 			const bool  expSsr   = p.ssr && !a.rtReflections;
 			const bool  expMv    = a.needVelocity ? true : p.motionVectors;
+			const bool  expFsr   = a.needVelocity ? true : p.fsr;
 			const float expParlx = ( a.parallaxShadow >= 0.0f ) ? a.parallaxShadow : p.parallaxShadow;
 			const float expGamma = ( a.hdrGamma      >= 0.0f ) ? a.hdrGamma      : p.hdrGamma;
 			overlayMatch =
@@ -3323,6 +3330,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				r_ssr.GetBool()                    == expSsr &&
 				idMath::Fabs( r_ssrIntensity.GetFloat() - ( expSsr ? 0.8f : 0.5f ) ) < 0.01f &&
 				r_motionVectors.GetBool()          == expMv &&
+				r_fsr.GetBool()                    == expFsr &&
 				idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - expGamma ) < 0.01f &&
 				idMath::Fabs( r_parallaxShadow.GetFloat() - expParlx ) < 0.01f;
 		}
