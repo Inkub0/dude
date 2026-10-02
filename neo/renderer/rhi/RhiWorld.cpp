@@ -682,11 +682,12 @@ static float rhiSsrJitterPhase = 0.0f;				// per-frame march jitter rotation
 static rhi::RenderTargetHandle rhiVolRT = 0;			// volumetric lighting march result (rgb in-scatter, a transmittance)
 static int   rhiVolW = 0, rhiVolH = 0;
 static rhi::RenderTargetHandle rhiVolBlurRT = 0;			// low-res depth-aware blur of the march (resolves the per-pixel dither)
-static rhi::RenderTargetHandle rhiVolUpRT = 0;			// depth-aware upsample of the march (full res) = the temporal pass's "current"
-static rhi::RenderTargetHandle rhiVolHistRT[2] = { 0, 0 };	// full-res temporal history ping-pong
+static rhi::RenderTargetHandle rhiVolUpRT = 0;			// depth-aware upsample of the march (full res) = the temporal pass's "current" (OLD resolve path only)
+static rhi::RenderTargetHandle rhiVolHistRT[2] = { 0, 0 };	// temporal history ping-pong (full res OLD path, LOW res fast path)
 static int   rhiVolHistIdx = 0;
-static int   rhiVolFullW = 0, rhiVolFullH = 0;
+static int   rhiVolFullW = 0, rhiVolFullH = 0;			// allocated size of the history group (full OLD, low fast)
 static bool  rhiVolHistValid = false;
+static bool  rhiVolFastPrev = false;					// r_volFastResolve the history group was last sized for (toggling recreates)
 static float rhiVolJitterPhase = 0.0f;
 
 // Volumetric lighting lifts light everywhere inside lit volumes, which flattens contact shading, so while it
@@ -6268,29 +6269,40 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiVolW = volW;	rhiVolH = volH;
 	}
 
-	// V3 full-res targets: the depth-aware upsample + the temporal history pair (r_volTemporal)
+	// Temporal history + (OLD path) the full-res upsample target. r_volFastResolve accumulates the history
+	// in the LOW-res march grid and upsamples ONCE at composite (Wronski/Hillaire froxel pattern); the old
+	// path upsamples to full res first, then runs temporal + composite at full res. The history group is
+	// sized per path (histW/histH) and torn down when the size OR the path changes.
 	const bool wantTemporal = r_volTemporal.GetBool();
-	if ( rhiVolUpRT && r->GetRenderTargetImage( rhiVolUpRT ) == 0 ) {
+	const bool fastResolve  = r_volFastResolve.GetBool();
+	const int  histW = fastResolve ? volW : fullW;
+	const int  histH = fastResolve ? volH : fullH;
+	if ( ( rhiVolUpRT && r->GetRenderTargetImage( rhiVolUpRT ) == 0 )
+			|| ( rhiVolHistRT[0] && r->GetRenderTargetImage( rhiVolHistRT[0] ) == 0 ) ) {
 		rhiVolUpRT = 0;	rhiVolHistRT[0] = rhiVolHistRT[1] = 0;	rhiVolFullW = rhiVolFullH = 0;	// lost context
 	}
-	if ( rhiVolUpRT && ( rhiVolFullW != fullW || rhiVolFullH != fullH ) ) {
-		r->DestroyRenderTarget( rhiVolUpRT );	rhiVolUpRT = 0;
+	if ( ( rhiVolUpRT || rhiVolHistRT[0] || rhiVolHistRT[1] )
+			&& ( rhiVolFullW != histW || rhiVolFullH != histH || rhiVolFastPrev != fastResolve ) ) {
+		if ( rhiVolUpRT ) { r->DestroyRenderTarget( rhiVolUpRT ); rhiVolUpRT = 0; }
 		for ( int i = 0; i < 2; i++ ) {
 			if ( rhiVolHistRT[i] ) { r->DestroyRenderTarget( rhiVolHistRT[i] ); rhiVolHistRT[i] = 0; }
 		}
+		rhiVolHistValid = false;
 	}
-	if ( !rhiVolUpRT ) {
+	rhiVolFastPrev = fastResolve;
+	rhiVolFullW = histW;	rhiVolFullH = histH;
+	// OLD path only: the full-res upsample target that feeds the full-res temporal pass as its "current".
+	if ( !fastResolve && !rhiVolUpRT ) {
 		rhiVolUpRT = r->CreateRenderTarget( rhi::IF_RGBA16F, fullW, fullH );
 		rhiVolHistValid = false;
 		if ( !rhiVolUpRT ) {
 			rhiVolFullW = rhiVolFullH = 0;
 			return;
 		}
-		rhiVolFullW = fullW;	rhiVolFullH = fullH;
 	}
 	if ( wantTemporal && ( !rhiVolHistRT[0] || !rhiVolHistRT[1] ) ) {
 		for ( int i = 0; i < 2; i++ ) {
-			if ( !rhiVolHistRT[i] ) { rhiVolHistRT[i] = r->CreateRenderTarget( rhi::IF_RGBA16F, fullW, fullH ); }
+			if ( !rhiVolHistRT[i] ) { rhiVolHistRT[i] = r->CreateRenderTarget( rhi::IF_RGBA16F, histW, histH ); }
 		}
 		rhiVolHistValid = false;
 	}
@@ -6381,7 +6393,8 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 	}
 
-	// ---- 2. depth-aware upsample to full res (vol_upsample.frag): no shaft bleed across silhouettes
+	// ---- 2. depth-aware upsample (vol_upsample.frag): no shaft bleed across silhouettes. These params serve
+	// both the OLD standalone full-res pass AND the fast path's fused upsample-at-composite below.
 	rhi::RenderParams up;
 	memset( &up, 0, sizeof( up ) );
 	up.mvpMatrix[0] = up.mvpMatrix[5] = up.mvpMatrix[10] = up.mvpMatrix[15] = 1.0f;
@@ -6391,11 +6404,17 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	up.depthTexRecip[0] = 1.0f / uploadW;
 	up.depthTexRecip[1] = 1.0f / uploadH;
 	rhi::FillDepthParms( up, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
-	r->BeginTargetPass( rhiVolUpRT, NULL );
-	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
-	RB_RHI_DrawFullscreen( r, upProg, up, r->GetRenderTargetImage( volLowRT ) );
-	r->EndPass();
-	rhi::RenderTargetHandle volResultRT = rhiVolUpRT;
+	// the signal the temporal pass accumulates: fast path keeps it in the LOW-res grid (upsample deferred to
+	// composite); old path upsamples to full res first.
+	rhi::RenderTargetHandle volResultRT = volLowRT;
+	if ( !fastResolve ) {
+		r->BeginTargetPass( rhiVolUpRT, NULL );
+		RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+		RB_RHI_DrawFullscreen( r, upProg, up, r->GetRenderTargetImage( volLowRT ) );
+		r->EndPass();
+		volResultRT = rhiVolUpRT;
+	}
+	const rhi::RenderTargetHandle volCurRT = fastResolve ? volLowRT : rhiVolUpRT;	// temporal's "current" input
 
 	// ---- 3. temporal accumulation (the shared ssr_temporal): resolves the per-frame-jittered march grain.
 	// Reprojected by the OPAQUE surface behind the fog - the wrong depth for the medium itself, harmless for
@@ -6422,21 +6441,24 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
 			? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
 		tp.localParam1[0] = velImg ? 1.0f : 0.0f;
-		tp.localParam1[1] = (float)resDiv;
+		// fast path: temporal runs in the native LOW-res grid, so neighbours are distinct marched samples
+		// (tap step 1) and the depth fetch carries the march's low->full stretch; old path upscales a full-res
+		// buffer that still only holds resDiv-distinct samples, so taps step by resDiv.
+		tp.localParam1[1] = fastResolve ? 1.0f : (float)resDiv;
 		tp.particleRadius[0] = 1.0f;									// volumetric buffer: accumulate sky pixels too (lit air in front of the sky)
 		tp.windowCoord[2] = -1.0f;
-		tp.screenCorrection[0] = 1.0f / fullW;
-		tp.screenCorrection[1] = 1.0f / fullH;
-		tp.depthTexRecip[0] = 1.0f / uploadW;
-		tp.depthTexRecip[1] = 1.0f / uploadH;
+		tp.screenCorrection[0] = 1.0f / ( fastResolve ? volW : fullW );
+		tp.screenCorrection[1] = 1.0f / ( fastResolve ? volH : fullH );
+		tp.depthTexRecip[0] = ( fastResolve ? ( (float)fullW / volW ) : 1.0f ) / uploadW;
+		tp.depthTexRecip[1] = ( fastResolve ? ( (float)fullH / volH ) : 1.0f ) / uploadH;
 		rhi::FillDepthParms( tp, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
 
 		r->BeginTargetPass( rhiVolHistRT[writeIdx], NULL );
 		RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
-		RB_RHI_BindRTUnit( r, 1, historyUsable ? rhiVolHistRT[readIdx] : rhiVolUpRT );	// never an unwritten slot
+		RB_RHI_BindRTUnit( r, 1, historyUsable ? rhiVolHistRT[readIdx] : volCurRT );	// never an unwritten slot
 		if ( velImg ) { RB_RHI_BindRTImage( r, 3, velImg ); }
 		else          { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
-		RB_RHI_DrawFullscreen( r, tempProg, tp, r->GetRenderTargetImage( rhiVolUpRT ) );
+		RB_RHI_DrawFullscreen( r, tempProg, tp, r->GetRenderTargetImage( volCurRT ) );
 		r->EndPass();
 
 		volResultRT = rhiVolHistRT[writeIdx];
@@ -6445,15 +6467,23 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiVolHistValid = true;
 	}
 
-	// ---- 4. composite onto the scene: dst * transmittance + in-scatter
+	// ---- 4. composite onto the scene: dst * transmittance + in-scatter.
+	// Fast path: the result is still LOW-res, so the composite IS the depth-aware upsample (vol_upsample with
+	// the composite blend) - one full-res pass instead of a separate upsample + a full-res composite.
 	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
 	               tr.viewportOffset[1] + viewDef->viewport.y1, fullW, fullH );
 	backEnd.currentScissor = viewDef->scissor;
-	rhi::RenderParams cp;
-	memset( &cp, 0, sizeof( cp ) );
-	cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
-	RB_RHI_DrawFullscreen( r, compProg, cp, r->GetRenderTargetImage( volResultRT ),
-	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_SRC_ALPHA );
+	if ( fastResolve ) {
+		RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+		RB_RHI_DrawFullscreen( r, upProg, up, r->GetRenderTargetImage( volResultRT ),
+		                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_SRC_ALPHA );
+	} else {
+		rhi::RenderParams cp;
+		memset( &cp, 0, sizeof( cp ) );
+		cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+		RB_RHI_DrawFullscreen( r, compProg, cp, r->GetRenderTargetImage( volResultRT ),
+		                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_SRC_ALPHA );
+	}
 	RB_RHI_ForgetTexBinds();
 }
 
