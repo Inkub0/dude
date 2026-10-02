@@ -2769,8 +2769,23 @@ enum {
 	PRESET_HIGH,
 	PRESET_ULTRA,
 	PRESET_NIGHTMARE,
-	PRESET_ULTRA_NIGHTMARE,		// VK + RT-hardware tier: Nightmare + ray-traced shadows (inert on GL3/non-RT)
 	PRESET_COUNT
+};
+
+// Ray tracing is an ORTHOGONAL axis to the raster quality tier above, not the top rung of it.
+// Every raster tier (Potato..Nightmare) runs on any GL3.3 card with RTX off; on a Vulkan +
+// ray-query GPU the player can switch RTX on, which layers a tier-scaled RT feature set on top
+// via rtAugment[] below (High = RT shadows, Ultra = + RTAO, Nightmare = the full ex-"Ultra
+// Nightmare" RT set). "Nightmare + RTX On" carries the whole RT feature set the old
+// PRESET_ULTRA_NIGHTMARE had, and the status line still shows that name; the two purely-raster
+// knobs that tier used to also bump (anisotropy 4->6, SSAO res 0.8->1.0) now stay at Nightmare's
+// values, since RTX is orthogonal and must not change the raster look. PATHTRACED is reserved
+// for H7 ("The Dark Lord Cometh").
+enum RtMode {
+	RTX_OFF = 0,
+	RTX_ON,				// hybrid: RT augments the chosen raster tier
+	RTX_PATHTRACED,		// reserved: H7 full path tracing (Nightmare only)
+	RTX_COUNT
 };
 
 struct EnhancementPreset {
@@ -2989,10 +3004,41 @@ static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2 },
 	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4 },
 	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4 },
-	{ "Ultra Nightmare", true, true, true, true, true,  1.0f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 0.5f, true, true,  true,  true,  0,     true,  true,  true,  false, true , false, true, true, true, true, 0.75f, 0.6f, true, 1.0f, 6 },
 };
 
-static void ApplyEnhancementPreset( int idx )
+// Ray-tracing augmentation layered on top of a raster tier when RTX is on and the device is
+// RT-capable (Vulkan + ray-query). Indexed by raster tier. Everything here is VK + RT only;
+// with RTX off, or on GL3 / a non-RT GPU, none of it is applied and the raster tier stands as
+// the full picture. parallaxShadow / hdrGamma use -1 = "leave the raster tier's value". The
+// Nightmare row carries the retired "Ultra Nightmare" RT feature set.
+struct RtAugment {
+	bool  rtSunShadows;
+	bool  rtMovingLights;
+	bool  rtReflections;
+	bool  rtao;
+	float rtaoResScale;
+	bool  rtgi;				// when true, replaces rtao (AO = GI with radiance 0)
+	bool  rtShadowBlur;
+	bool  rtAllLights;
+	bool  rtBlurStagger;
+	bool  volumetrics;
+	bool  needVelocity;		// force r_motionVectors on so the NRD denoiser has motion vectors
+	float parallaxShadow;	// RT-driven override of the raster value (-1 = keep raster)
+	float hdrGamma;			// RT-driven override of the raster value (-1 = keep raster)
+};
+
+static const RtAugment rtAugment[PRESET_COUNT] = {
+//                  sun    mov    refl   rtao   aoRes  rtgi   blur   all    stag   vol    vel    parlxSh hdrGam
+/* Potato    */   { false, false, false, false, 1.0f,  false, false, false, false, false, false, -1.0f, -1.0f },
+/* Low       */   { false, false, false, false, 1.0f,  false, false, false, false, false, false, -1.0f, -1.0f },
+/* Medium    */   { false, false, false, false, 1.0f,  false, false, false, false, false, false, -1.0f, -1.0f },
+/* High      */   { true,  true,  false, false, 1.0f,  false, false, false, false, false, false, -1.0f, -1.0f },
+/* Ultra     */   { true,  true,  true,  true,  0.75f, false, false, false, false, false, true,  0.5f,  -1.0f },
+/* Nightmare */   { true,  true,  true,  false, 0.75f, true,  true,  true,  true,  true,  true,  0.5f,  1.0f  },
+};
+
+
+static void ApplyEnhancementPreset( int idx, int rtMode )
 {
 	if ( idx < 0 || idx >= PRESET_COUNT ) {
 		return;
@@ -3121,16 +3167,76 @@ static void ApplyEnhancementPreset( int idx )
 	// and on VK BeginFrame's live poll rebuilds the samplers, so the preset takes effect without a
 	// vid_restart. Potato/Low 1 (the faithful, no-AF floor); Medium/High 2; Ultra/Nightmare 4; Ultra Nightmare 6.
 	cvarSystem->SetCVarInteger( "image_anisotropy", p.anisotropy );
+
+	// --- Ray-tracing axis (orthogonal to the raster tier above) ---
+	// The raster block left every RT cvar at its OFF baseline (the rows carry rt* = false). If RTX
+	// is requested AND the device is RT-capable (VK + ray-query), overlay the tier-scaled RT set.
+	// Everything here is inert on GL3 / non-RT GPUs, so a non-capable machine always sees the pure
+	// raster tier even if dude_rtx was somehow left on.
+	const bool rtOn = ( rtMode != RTX_OFF ) && R_SupportsRayTracing();
+	if ( rtOn ) {
+		const RtAugment& a = rtAugment[idx];
+		r_rtSunShadows.SetBool( a.rtSunShadows );
+		r_rtMovingLights.SetBool( a.rtMovingLights );
+		r_rtReflections.SetBool( a.rtReflections );
+		r_rtao.SetBool( a.rtao );
+		r_rtaoResScale.SetFloat( a.rtaoResScale );
+		r_rtgi.SetBool( a.rtgi );
+		r_rtShadowBlur.SetBool( a.rtShadowBlur );
+		r_rtAllLights.SetBool( a.rtAllLights );
+		r_rtShadowBlurStagger.SetBool( a.rtBlurStagger );
+		r_volumetrics.SetBool( a.volumetrics );
+
+		// RT reflections own every reflective pixel, so SSR is turned off under them and the
+		// RT-vs-SSR luminance match + half-res reflection trace follow (mirrors the raster
+		// derivation above, but against the augment's rtReflections instead of the row's).
+		r_ssr.SetBool( p.ssr && !a.rtReflections );
+		r_ssrIntensity.SetFloat( ( p.ssr && !a.rtReflections ) ? 0.8f : 0.5f );
+		r_rtReflResScale.SetFloat( a.rtReflections ? 0.5f : 1.0f );
+
+		// The NRD denoiser (RTAO / RTGI) needs motion vectors; force the velocity producer on
+		// where the raster tier didn't already fund it (e.g. Ultra, which carries mv/fsr off).
+		if ( a.needVelocity ) {
+			r_motionVectors.SetBool( true );
+		}
+
+		// RT-driven overrides of raster look cvars (-1 = keep the tier's value): ease POM
+		// self-shadow where RTAO/GI already occludes crevices, and neutralize HDR display gamma
+		// where the GI bounce lifts overall radiance.
+		if ( a.parallaxShadow >= 0.0f ) {
+			r_parallaxShadow.SetFloat( a.parallaxShadow );
+		}
+		if ( a.hdrGamma >= 0.0f ) {
+			cvarSystem->SetCVarFloat( "r_hdrGamma", a.hdrGamma );
+		}
+	}
 }
 
-// Return the preset whose full cvar vector the live cvars currently match, or -1
-// for "Custom" (any hand-tweak since a preset was last applied). Every row is a
-// unique vector, so a match is unambiguous.
-static int DetectEnhancementPreset()
+// Return the raster tier whose cvar vector the live cvars currently match, or -1 for "Custom"
+// (any hand-tweak since a preset was last applied), and, through outRtMode, the detected RT axis
+// state (RTX_OFF / RTX_ON). The two axes are detected independently: the raster columns are
+// compared against the tier row, and the RT-overlay columns against either their OFF baseline or
+// the tier's rtAugment row, depending on whether any RT feature is live. Every (tier, mode)
+// combination is a unique vector, so a match is unambiguous.
+static int DetectEnhancementPreset( int* outRtMode = NULL )
 {
+	// Classify the live RT axis first. Any augment-driven RT cvar being on means RTX is on
+	// (PATHTRACED / H7 is not built yet, so today the axis is only OFF or ON). On a non-RT device
+	// none of these can be on, so this reads OFF there.
+	const bool rtLive =
+		r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtReflections.GetBool() ||
+		r_rtao.GetBool() || r_rtgi.GetBool() || r_rtShadowBlur.GetBool() ||
+		r_rtAllLights.GetBool() || r_volumetrics.GetBool();
+	const int rtMode = rtLive ? RTX_ON : RTX_OFF;
+	if ( outRtMode ) {
+		*outRtMode = rtMode;
+	}
+
 	for ( int i = 0; i < PRESET_COUNT; i++ ) {
 		const EnhancementPreset& p = enhancementPresets[i];
-		const bool match =
+
+		// Pure raster columns - everything the RT overlay never touches.
+		const bool rasterMatch =
 			r_useSoftParticles.GetBool()       == p.softParticles &&
 			r_smokeDarkBlend.GetBool()         == p.smokeDarkBlend &&
 			r_emissiveSurfaces.GetBool()       == p.emissiveSurfaces &&
@@ -3162,35 +3268,66 @@ static int DetectEnhancementPreset()
 			idMath::Fabs( r_specularExp.GetFloat() - p.specularExp ) < 0.5f &&
 			r_hdr.GetBool()                    == p.hdr &&
 			cvarSystem->GetCVarInteger( "r_hdrTonemap" ) == ( p.hdr ? 5 : 0 ) &&
-			idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - p.hdrGamma ) < 0.01f &&
 			r_pbr.GetBool()                    == p.pbr &&
-			r_ssr.GetBool()                    == ( p.ssr && !p.rtReflections ) &&
 			idMath::Fabs( r_ssrResScale.GetFloat() - p.ssrResScale ) < 0.01f &&
-			idMath::Fabs( r_ssrIntensity.GetFloat() - ( ( p.ssr && !p.rtReflections ) ? 0.8f : 0.5f ) ) < 0.01f &&
 			r_tessellation.GetBool()           == p.tessellation &&
 			idMath::Fabs( r_tessDisplace.GetFloat() - p.tessDisplace ) < 0.01f &&
 			r_parallax.GetBool()               == p.parallax &&
-			idMath::Fabs( r_parallaxShadow.GetFloat() - p.parallaxShadow ) < 0.01f &&
 			r_gpuSkinning.GetBool()            == p.gpuSkin &&
-			r_motionVectors.GetBool()          == p.motionVectors &&
 			r_fsr.GetBool()                    == p.fsr &&
 			r_shadowMapSplitDynDrop.GetInteger() == p.splitDynDrop &&
-			r_rtSunShadows.GetBool()           == p.rtSunShadows &&
-			r_rtMovingLights.GetBool()         == p.rtMovingLights &&
-			r_rtReflections.GetBool()          == p.rtReflections &&
-			( !p.rtReflections || idMath::Fabs( r_rtReflResScale.GetFloat() - 0.5f ) < 0.01f ) &&
 			r_ssaoTemporalTrade.GetBool()      == p.ssaoTemporalTrade &&
 			com_interpolate.GetBool()          == p.interpolate &&
-			r_rtao.GetBool()                   == p.rtao &&
-			( !p.rtao || idMath::Fabs( r_rtaoResScale.GetFloat() - p.rtaoResScale ) < 0.01f ) &&
-			r_rtgi.GetBool()                   == p.rtgi &&
-			r_rtShadowBlur.GetBool()           == p.rtShadowBlur &&
-			r_rtAllLights.GetBool()            == p.rtAllLights &&
-			r_rtShadowBlurStagger.GetBool()    == p.rtBlurStagger &&
-			r_volumetrics.GetBool()            == p.volumetrics &&
 			cvarSystem->GetCVarInteger( "image_anisotropy" ) == p.anisotropy &&
 			idMath::Fabs( r_skinShading.GetFloat() - p.skinShading ) < 0.01f;
-		if ( match ) {
+		if ( !rasterMatch ) {
+			continue;
+		}
+
+		// RT-overlay columns - expected values depend on the RT axis state.
+		bool overlayMatch;
+		if ( rtMode == RTX_OFF ) {
+			// Pure raster tier: every RT cvar off, and the overlay-driven look cvars at their
+			// raster-row values.
+			overlayMatch =
+				!r_rtSunShadows.GetBool() && !r_rtMovingLights.GetBool() &&
+				!r_rtReflections.GetBool() && !r_rtao.GetBool() && !r_rtgi.GetBool() &&
+				!r_rtShadowBlur.GetBool() && !r_rtAllLights.GetBool() &&
+				!r_rtShadowBlurStagger.GetBool() && !r_volumetrics.GetBool() &&
+				r_ssr.GetBool()                    == p.ssr &&
+				idMath::Fabs( r_ssrIntensity.GetFloat() - ( p.ssr ? 0.8f : 0.5f ) ) < 0.01f &&
+				idMath::Fabs( r_rtReflResScale.GetFloat() - 1.0f ) < 0.01f &&
+				r_motionVectors.GetBool()          == p.motionVectors &&
+				idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - p.hdrGamma ) < 0.01f &&
+				idMath::Fabs( r_parallaxShadow.GetFloat() - p.parallaxShadow ) < 0.01f;
+		} else {
+			// RTX on: the RT cvars must match this tier's augment, and the overridden look cvars
+			// the augment value where it sets one (>= 0), else the raster-row value.
+			const RtAugment& a = rtAugment[i];
+			const bool  expSsr   = p.ssr && !a.rtReflections;
+			const bool  expMv    = a.needVelocity ? true : p.motionVectors;
+			const float expParlx = ( a.parallaxShadow >= 0.0f ) ? a.parallaxShadow : p.parallaxShadow;
+			const float expGamma = ( a.hdrGamma      >= 0.0f ) ? a.hdrGamma      : p.hdrGamma;
+			overlayMatch =
+				r_rtSunShadows.GetBool()           == a.rtSunShadows &&
+				r_rtMovingLights.GetBool()         == a.rtMovingLights &&
+				r_rtReflections.GetBool()          == a.rtReflections &&
+				idMath::Fabs( r_rtReflResScale.GetFloat() - ( a.rtReflections ? 0.5f : 1.0f ) ) < 0.01f &&
+				r_rtao.GetBool()                   == a.rtao &&
+				( !a.rtao || idMath::Fabs( r_rtaoResScale.GetFloat() - a.rtaoResScale ) < 0.01f ) &&
+				r_rtgi.GetBool()                   == a.rtgi &&
+				r_rtShadowBlur.GetBool()           == a.rtShadowBlur &&
+				r_rtAllLights.GetBool()            == a.rtAllLights &&
+				r_rtShadowBlurStagger.GetBool()    == a.rtBlurStagger &&
+				r_volumetrics.GetBool()            == a.volumetrics &&
+				r_ssr.GetBool()                    == expSsr &&
+				idMath::Fabs( r_ssrIntensity.GetFloat() - ( expSsr ? 0.8f : 0.5f ) ) < 0.01f &&
+				r_motionVectors.GetBool()          == expMv &&
+				idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - expGamma ) < 0.01f &&
+				idMath::Fabs( r_parallaxShadow.GetFloat() - expParlx ) < 0.01f;
+		}
+
+		if ( overlayMatch ) {
 			return i;
 		}
 	}
@@ -3968,24 +4105,56 @@ static void DrawGraphicsMenu()
 	ImGui::SeparatorText( "Quality Preset" );
 	{
 		static int selPreset = -1;
+		static int selRtx    = -1;    // pending RTX axis (RtMode); synced from detection
 		static int lastDetected = -2; // -2 = "not seen yet" -> forces a first-frame sync
 
-		const int detected = DetectEnhancementPreset();
+		int detectedRt = RTX_OFF;
+		const int detected = DetectEnhancementPreset( &detectedRt );
 		if ( selPreset < 0 ) {
 			selPreset = ( detected >= 0 ) ? detected : PRESET_HIGH;
 		}
+		if ( selRtx < 0 ) {
+			selRtx = detectedRt;
+		}
 		if ( detected >= 0 && detected != lastDetected ) {
 			selPreset = detected;
+			selRtx    = detectedRt;
 		}
 		lastDetected = detected;
 
+		// Axis 1: the raster quality tier (every GL3.3 card).
 		ImGui::SetNextItemWidth( 220.0f );
 		ImGui::Combo( "##enhPreset", &selPreset,
-			"Potato\0Low\0Medium\0High\0Ultra\0Nightmare\0Ultra Nightmare\0" );
+			"Potato\0Low\0Medium\0High\0Ultra\0Nightmare\0" );
+
+		// Axis 2: ray tracing, orthogonal to the tier. The tickbox sits immediately to the right of
+		// the dropdown; it is greyed (and forced off) unless the device is RT-capable (VK + ray-query)
+		// and the chosen tier actually gains RT features (High and up - see rtAugment[]).
+		const bool rtCapable = R_SupportsRayTracing();
+		const bool rtTierHasRT = ( selPreset >= PRESET_HIGH );
+		ImGui::SameLine();
+		ImGui::BeginDisabled( !rtCapable || !rtTierHasRT );
+		bool rtxOn = ( selRtx != RTX_OFF );
+		if ( ImGui::Checkbox( "RTX", &rtxOn ) ) {
+			selRtx = rtxOn ? RTX_ON : RTX_OFF;
+		}
+		ImGui::EndDisabled();
+		AddTooltip( rtCapable
+			? "Ray tracing, layered on top of the quality tier at left: High adds ray-traced shadows, "
+			  "Ultra adds ray-traced ambient occlusion, Nightmare adds one-bounce ray-traced global "
+			  "illumination, soft RT shadows on every light and volumetric lighting (the old 'Ultra "
+			  "Nightmare'). Independent of the tier, so it never changes the raster look. Needs the "
+			  "Vulkan backend and ray-query (RTX) hardware."
+			: "Ray tracing needs the Vulkan backend and ray-query (RTX) hardware - unavailable on this "
+			  "GPU / backend, so the quality tiers run raster-only." );
+
 		ImGui::SameLine();
 		if ( ImGui::Button( "Apply Preset" ) ) {
-			ApplyEnhancementPreset( selPreset );
+			const int applyRtx = ( rtCapable && rtTierHasRT ) ? selRtx : RTX_OFF;
+			ApplyEnhancementPreset( selPreset, applyRtx );
 			dude_preset.SetInteger( selPreset );
+			dude_rtx.SetInteger( applyRtx );
+			selRtx       = applyRtx;
 			lastDetected = selPreset;
 		}
 		AddTooltip( "One-click tiers for the whole enhancement suite (SSAO, shadow maps, emissive "
@@ -3997,8 +4166,11 @@ static void DrawGraphicsMenu()
 			"reach/tint, shadow biases, PBR category sliders) is left alone. Tweaking any slider "
 			"afterwards shows 'Custom'." );
 
+		// Status line: raster tier + whether RTX is live. "Nightmare + RTX" is the old Ultra Nightmare.
 		if ( detected < 0 ) {
 			ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ), "Current: Custom (hand-tuned)" );
+		} else if ( detectedRt != RTX_OFF ) {
+			ImGui::TextDisabled( "Current: %s + RTX", enhancementPresets[detected].name );
 		} else {
 			ImGui::TextDisabled( "Current: %s", enhancementPresets[detected].name );
 		}
@@ -5614,14 +5786,16 @@ static void DrawOtherOptionsMenu()
 // namespace above so it has external linkage (Common.cpp registers the command);
 // ApplyEnhancementPreset stays visible from here.
 //
-//   dudePreset <n>   set the dude_preset cvar to tier n and apply it
+//   dudePreset <n>   set the dude_preset cvar to raster tier n and apply it
 //   dudePreset       apply whatever tier dude_preset currently holds
 //
-// The no-arg form is what the in-game selector uses: its choiceDef writes dude_preset
-// live, then fires "exec dudePreset" so we apply the just-written value. Applying pins
-// com_machineSpec to Ultra (3) - the legacy image-quality classification is no longer
-// user-selectable (every GPU we support handles Ultra), so base texture/image quality
-// stays maxed rather than leaving a stale low value behind.
+// The no-arg form is what the in-game selectors use: a choiceDef writes dude_preset (or dude_rtx)
+// live, then fires "exec dudePreset" so we apply the just-written values. The ray-tracing axis is
+// always read from dude_rtx (its own classic-menu selector / the ImGui tickbox write it); it is
+// forced off when the device is not RT-capable, so a stale dude_rtx can never enable RT on a
+// non-RT machine. Applying pins com_machineSpec to Ultra (3) - the legacy image-quality
+// classification is no longer user-selectable (every GPU we support handles Ultra), so base
+// texture/image quality stays maxed rather than leaving a stale low value behind.
 void Com_DudePreset_f( const idCmdArgs &args )
 {
 	int idx;
@@ -5639,7 +5813,12 @@ void Com_DudePreset_f( const idCmdArgs &args )
 			return;
 		}
 	}
-	ApplyEnhancementPreset( idx );
+	// Ray-tracing axis: dude_rtx, clamped off on a non-RT-capable device (Apply re-checks too).
+	int rtMode = dude_rtx.GetInteger();
+	if ( rtMode != RTX_OFF && !R_SupportsRayTracing() ) {
+		rtMode = RTX_OFF;
+	}
+	ApplyEnhancementPreset( idx, rtMode );
 	// decision A: keep the base image-quality classification pinned at Ultra.
 	com_machineSpec.SetInteger( 3 );
 }

@@ -62,7 +62,8 @@ extern idCVar		com_version;
 extern idCVar		com_skipRenderer;
 extern idCVar		com_asyncSound;
 extern idCVar		com_machineSpec;
-extern idCVar		dude_preset;		// DUDE: chosen enhancement quality tier (see Common.cpp)
+extern idCVar		dude_preset;		// DUDE: chosen enhancement quality tier, raster (see Common.cpp)
+extern idCVar		dude_rtx;			// DUDE: ray-tracing axis, orthogonal to dude_preset (see Common.cpp)
 extern idCVar		dude_aa;			// DUDE: menu bridge for the antialiasing selector (see Common.cpp)
 extern idCVar		com_purgeAll;
 extern idCVar		com_developer;

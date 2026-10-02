@@ -102,7 +102,12 @@ idCVar com_machineSpec( "com_machineSpec", "-1", CVAR_INTEGER | CVAR_ARCHIVE | C
 // DUDE: chosen enhancement quality tier for the in-game quality selector (choiceDef in
 // mainmenu.gui binds to this). -1 = Custom/unset, 0 = Potato .. 6 = Ultra Nightmare. The
 // "dudePreset" command applies it; see Dhewm3SettingsMenu.cpp.
-idCVar dude_preset( "dude_preset", "-1", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "DUDE enhancement quality tier: -1 = custom, 0 = Potato, 1 = Low, 2 = Medium, 3 = High, 4 = Ultra, 5 = Nightmare, 6 = Ultra Nightmare (VK + RT hardware)", -1, 6 );
+idCVar dude_preset( "dude_preset", "-1", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "DUDE enhancement quality tier (raster): -1 = custom, 0 = Potato, 1 = Low, 2 = Medium, 3 = High, 4 = Ultra, 5 = Nightmare. Ray tracing is the separate dude_rtx axis", -1, 5 );
+// DUDE: the ray-tracing axis, orthogonal to dude_preset. 0 = off (any card), 1 = on (hybrid RT
+// layered on the chosen raster tier; Vulkan + ray-query hardware only), 2 = reserved for H7 full
+// path tracing. "dude_preset 5 + dude_rtx 1" reproduces the retired Ultra Nightmare tier. Applied
+// together with the raster tier by the "dudePreset" command / the Graphics menu's Apply button.
+idCVar dude_rtx( "dude_rtx", "0", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "DUDE ray-tracing axis: 0 = off, 1 = on (hybrid RT, Vulkan + RT hardware), layered on top of the dude_preset raster tier", 0, 2 );
 // DUDE: the config-schema version the saved settings were last written against. Compared to
 // DUDE_CONFIG_SCHEMA (Licensee.h) at launch; a lower value triggers a one-time reset of the
 // graphics/enhancement cvars to their defaults (see idCommonLocal::CheckConfigSchema). Never
@@ -1354,6 +1359,7 @@ void idCommonLocal::CheckConfigSchema( void ) {
 
 	// preset selectors / interpolation live outside CVAR_RENDERER (CVAR_SYSTEM) - reset them too
 	dude_preset.SetInteger( -1 );
+	dude_rtx.SetInteger( 0 );
 	com_interpolate.SetBool( false );
 
 	dude_cfgSchema.SetInteger( DUDE_CONFIG_SCHEMA );
