@@ -76,6 +76,14 @@ void main() {
 	fragColor = vec4( 1.0, 0.0, 0.0, 0.0 );		// every early-out = lit
 	out_summary = vec2( 1.0, 1.0 );				// until proven traced: lit, G = untraced sentinel
 	vec2  frag = gl_FragCoord.xy;
+	// r_rtShadowBlurCheckerboard (u_color.x): trace a STATIC screen checkerboard - skip half the pixels,
+	// the reconstruct pass (rtshadow_fill) fills them from their traced neighbours (always the opposite
+	// parity). Static (no per-frame flip) so the deterministic "same camera -> same mask" holds. A skipped
+	// pixel is tagged with a negative distance; tiles/blur only ever see the reconstructed buffer.
+	if ( u_color.x > 0.5 && ( ( int( frag.x ) ^ int( frag.y ) ) & 1 ) == 1 ) {
+		fragColor.b = -1.0;						// "skipped, reconstruct me"
+		return;
+	}
 	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
 	if ( raw >= 0.9994 ) {						// sky / no geometry
 		return;
