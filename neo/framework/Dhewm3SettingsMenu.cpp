@@ -4107,6 +4107,7 @@ static void DrawGraphicsMenu()
 		static int selPreset = -1;
 		static int selRtx    = -1;    // pending RTX axis (RtMode); synced from detection
 		static int lastDetected = -2; // -2 = "not seen yet" -> forces a first-frame sync
+		static int lastDetectedRt = -2;
 
 		int detectedRt = RTX_OFF;
 		const int detected = DetectEnhancementPreset( &detectedRt );
@@ -4116,11 +4117,15 @@ static void DrawGraphicsMenu()
 		if ( selRtx < 0 ) {
 			selRtx = detectedRt;
 		}
-		if ( detected >= 0 && detected != lastDetected ) {
+		// Re-sync the pending selectors to the live state whenever detection moves on either axis
+		// (a preset Apply, or a hand-toggle of a tier/RT cvar), so the combo + RTX tickbox keep
+		// showing reality. A hand-tweak to Custom (detected -1) leaves the last choice in place.
+		if ( detected >= 0 && ( detected != lastDetected || detectedRt != lastDetectedRt ) ) {
 			selPreset = detected;
 			selRtx    = detectedRt;
 		}
-		lastDetected = detected;
+		lastDetected   = detected;
+		lastDetectedRt = detectedRt;
 
 		// Axis 1: the raster quality tier (every GL3.3 card).
 		ImGui::SetNextItemWidth( 220.0f );
