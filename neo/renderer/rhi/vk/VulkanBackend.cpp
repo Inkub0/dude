@@ -105,7 +105,7 @@ static idCVar r_vkDumpNextFrame( "r_vkDumpNextFrame", "0", CVAR_RENDERER | CVAR_
 	"Vulkan: write the next frame's scene image to vkdump.tga (dev)" );
 
 static idCVar r_vkGpuTime( "r_vkGpuTime", "0", CVAR_RENDERER | CVAR_INTEGER,
-	"Vulkan backend: 1 = print GPU frame time (ms), averaged once per second; 2 = also the named GPU scopes (per-pass breakdown: ms per frame and calls per frame)" );
+	"Vulkan backend GPU timing: 1 = print GPU frame time (ms), averaged once per second; 2 = also the named per-pass scopes (nested/indented: a coarse stage like 'world' or 'post' contains its sub-passes; ms and calls per frame); 3 = like 2 but averaged over a 5-second window (steadier numbers)" );
 
 // Enable writing on-disk crash logs when a fatal Vulkan event (eg. VK_ERROR_DEVICE_LOST)
 // is observed. Default OFF; opt-in dev tool that writes a dudelog-crash-YYYYMMDD-HHMMSS.txt
@@ -407,13 +407,21 @@ private:
 		serial = gpuLastSerial;
 		return true;
 	}
-	// named scopes (r_vkGpuTime 2): begin/end stamp pairs after the per-slot frame pairs in the same pool
+	// named scopes (r_vkGpuTime >= 2): begin/end stamp pairs after the per-slot frame pairs in the same pool.
+	// Scopes NEST (a coarse stage scope like "world" contains the fine ones like "rtblur.ray"): each Begin
+	// allocates its own pair and pushes it on a per-frame stack; End pops and stamps the matching pair, so
+	// overlapping timestamp spans are fine. gpuScopeDepthOf records each pair's nesting depth for the indented
+	// print. (GPU_SCOPE_MAX_PAIRS/_DEPTH are far above the ~25 scopes / depth ~3 actually used, so the
+	// allocate-fails-mid-nest desync is only theoretical — matched to the old code's pragmatism.)
 	static const int			GPU_SCOPE_MAX_PAIRS = 256;
+	static const int			GPU_SCOPE_MAX_DEPTH = 16;
 	const char *				gpuScopeName[FRAMES_IN_FLIGHT][GPU_SCOPE_MAX_PAIRS] = {};
+	uint8_t						gpuScopeDepthOf[FRAMES_IN_FLIGHT][GPU_SCOPE_MAX_PAIRS] = {};
+	int							gpuScopeStack[FRAMES_IN_FLIGHT][GPU_SCOPE_MAX_DEPTH] = {};	// pair indices of the currently-open scopes
+	int							gpuScopeDepth[FRAMES_IN_FLIGHT] = {};		// how many scopes are open right now
 	int							gpuScopeCount[FRAMES_IN_FLIGHT] = {};
 	bool						gpuScopesActive = false;	// this frame records scopes
-	bool						gpuScopeOpen = false;
-	struct GpuScopeAccum { const char *name; double ms; int calls; };
+	struct GpuScopeAccum { const char *name; double ms; int calls; int depth; };
 	std::vector<GpuScopeAccum>	gpuScopeAccum;
 	uint32_t					GpuScopeQuery( int slot, int pair ) const { return (uint32_t)( 2 * FRAMES_IN_FLIGHT + ( slot * GPU_SCOPE_MAX_PAIRS + pair ) * 2 ); }
 	void						GpuScopeBegin( const char *name ) override;
@@ -2593,23 +2601,24 @@ converts the tick delta to ms, and prints a running average once per second.
 ====================
 */
 void VulkanBackend::GpuScopeBegin( const char *name ) {
-	if ( !gpuScopesActive || gpuScopeOpen || !frameOpen || skipFrame || gpuScopeCount[frameIndex] >= GPU_SCOPE_MAX_PAIRS ) {
+	if ( !gpuScopesActive || !frameOpen || skipFrame
+			|| gpuScopeCount[frameIndex] >= GPU_SCOPE_MAX_PAIRS
+			|| gpuScopeDepth[frameIndex] >= GPU_SCOPE_MAX_DEPTH ) {
 		return;
 	}
-	const int pair = gpuScopeCount[frameIndex];
+	const int pair = gpuScopeCount[frameIndex]++;
 	gpuScopeName[frameIndex][pair] = name;
+	gpuScopeDepthOf[frameIndex][pair] = (uint8_t)gpuScopeDepth[frameIndex];
+	gpuScopeStack[frameIndex][gpuScopeDepth[frameIndex]++] = pair;	// push, so a nested End stamps the right pair
 	vkCmdWriteTimestamp( frames[frameIndex].cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuTimerPool, GpuScopeQuery( frameIndex, pair ) );
-	gpuScopeOpen = true;
 }
 
 void VulkanBackend::GpuScopeEnd() {
-	if ( !gpuScopeOpen ) {
+	if ( gpuScopeDepth[frameIndex] <= 0 ) {
 		return;
 	}
-	const int pair = gpuScopeCount[frameIndex];
+	const int pair = gpuScopeStack[frameIndex][--gpuScopeDepth[frameIndex]];	// pop the innermost open scope
 	vkCmdWriteTimestamp( frames[frameIndex].cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuTimerPool, GpuScopeQuery( frameIndex, pair ) + 1 );
-	gpuScopeCount[frameIndex] = pair + 1;
-	gpuScopeOpen = false;
 }
 
 void VulkanBackend::GpuTimerReadback( int slot ) {
@@ -2633,7 +2642,7 @@ void VulkanBackend::GpuTimerReadback( int slot ) {
 					}
 				}
 				if ( k == gpuScopeAccum.size() ) {
-					GpuScopeAccum a = { gpuScopeName[slot][i], 0.0, 0 };
+					GpuScopeAccum a = { gpuScopeName[slot][i], 0.0, 0, (int)gpuScopeDepthOf[slot][i] };
 					gpuScopeAccum.push_back( a );
 				}
 				gpuScopeAccum[k].ms += ms;
@@ -2661,11 +2670,15 @@ void VulkanBackend::GpuTimerReadback( int slot ) {
 	gpuTimeAccumMs += frameMs;
 	gpuTimeSamples++;
 	unsigned int now = Sys_Milliseconds();
-	if ( now - gpuTimeLastPrint >= 1000 ) {
+	// r_vkGpuTime 3 averages over a 5-second window instead of 1 second (steadier numbers).
+	const unsigned int printInterval = ( r_vkGpuTime.GetInteger() >= 3 ) ? 5000u : 1000u;
+	if ( now - gpuTimeLastPrint >= printInterval ) {
 		common->Printf( "VK GPU: %.2f ms (%d samples)\n",
 		                gpuTimeAccumMs / gpuTimeSamples, gpuTimeSamples );
 		for ( size_t k = 0; k < gpuScopeAccum.size(); k++ ) {
-			common->Printf( "   %-22s %6.3f ms  (%.1f calls/frame)\n", gpuScopeAccum[k].name,
+			// indent by nesting depth so a coarse stage (e.g. "world") visibly contains its children
+			const int indent = 3 + gpuScopeAccum[k].depth * 2;
+			common->Printf( "%*s%-22s %6.3f ms  (%.1f calls/frame)\n", indent, "", gpuScopeAccum[k].name,
 				gpuScopeAccum[k].ms / gpuTimeSamples, (double)gpuScopeAccum[k].calls / gpuTimeSamples );
 		}
 		gpuScopeAccum.clear();
@@ -2841,7 +2854,7 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	if ( gpuTimerSupported ) {
 		GpuTimerReadback( frameIndex );
 		gpuScopesActive = false;
-		gpuScopeOpen = false;
+		gpuScopeDepth[frameIndex] = 0;
 		gpuScopeCount[frameIndex] = 0;
 		if ( r_vkGpuTime.GetInteger() >= 2 ) {
 			vkCmdResetQueryPool( f.cb, gpuTimerPool, GpuScopeQuery( frameIndex, 0 ), 2 * GPU_SCOPE_MAX_PAIRS );
