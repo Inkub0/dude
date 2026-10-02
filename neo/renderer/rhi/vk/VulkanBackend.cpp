@@ -1083,6 +1083,10 @@ private:
 	void *						fsr2Scratch = NULL;
 	int							fsr2W = 0, fsr2H = 0;			// the context's RENDER size (the scene target)
 	int							fsr2DispW = 0, fsr2DispH = 0;	// its DISPLAY size (the output image); == render at Native-AA
+	// The FSR render size the last frame committed to. BeginFrame drains the GPU and tears the
+	// FSR2 context down at the frame boundary when this changes (an r_fsrScale switch), so the
+	// transition frame's many render-target resizes never race in-flight work. 0 = first frame.
+	int							fsrAppliedW = 0, fsrAppliedH = 0;
 	VkImage						fsr2Out = VK_NULL_HANDLE;
 	VmaAllocation				fsr2OutAlloc = NULL;
 	VkImageView					fsr2OutView = VK_NULL_HANDLE;
@@ -1300,7 +1304,16 @@ static void WriteVulkanCrashDumpBody( const char *what, VkResult res, const char
 	fprintf( f, "  r_shadows = %d\n", r_shadows.GetInteger() );
 	fprintf( f, "  r_ssr = %d\n", cvarSystem->GetCVarInteger( "r_ssr" ) );
 	fprintf( f, "  r_ssao = %d\n", cvarSystem->GetCVarInteger( "r_ssao" ) );
-	fprintf( f, "  r_fsr2 = %d\n", cvarSystem->GetCVarInteger( "r_fsr2" ) );
+	// FSR2 state: r_fsr is the master toggle, r_fsrScale the sub-native render scale. (The old
+	// "r_fsr2" line read a cvar that doesn't exist -> always 0.) The scale matters for resize /
+	// device-lost reproductions, so record it and the live render-vs-display size.
+	fprintf( f, "  r_fsr = %d\n", cvarSystem->GetCVarInteger( "r_fsr" ) );
+	fprintf( f, "  r_fsrScale = %.3f\n", cvarSystem->GetCVarFloat( "r_fsrScale" ) );
+	{
+		int fw = 0, fh = 0;
+		R_FsrWorldSize( fw, fh );
+		fprintf( f, "  FSR render size: %dx%d  (display %dx%d)\n", fw, fh, glConfig.vidWidth, glConfig.vidHeight );
+	}
 	fprintf( f, "\n" );
 
 	fprintf( f, "Validation errors this session: %d\n\n", vkValidationErrors );
@@ -2714,6 +2727,28 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	}
 	FrameSlot &f = frames[frameIndex];
 	vkWaitForFences( device, 1, &f.fence, VK_TRUE, UINT64_MAX );
+
+	// --- FSR2 render-scale transition: idle-rebuild at the frame boundary ---
+	// Changing r_fsrScale (e.g. 100% -> 67%) resizes the whole render-size resource set -- the HDR
+	// scene buffer, FSR2's context + history, NRD, SSR and its temporal history, the RT-shadow-blur
+	// targets, the velocity prepass. Each resize is individually fence-safe, but doing them all
+	// scattered through the transition frame's passes (some rebuilds even wait the device idle
+	// mid-recording) raced in-flight work and lost the device almost every time. Here, at the frame
+	// boundary before anything records, drain the GPU ONCE so no in-flight frame holds an old-size
+	// resource, and tear the FSR2 context down cleanly so its own mid-frame rebuild (and internal
+	// wait-idle) is skipped. frameOpen is still false, so this is a true between-frames teardown.
+	// Only fires on an actual size change; r_fsr off keeps render == display, so toggling scale with
+	// FSR disabled is a no-op here. The one-time hitch on apply is acceptable for a rare settings change.
+	{
+		int fsrW = 0, fsrH = 0;
+		R_FsrWorldSize( fsrW, fsrH );
+		if ( ( fsrW != fsrAppliedW || fsrH != fsrAppliedH ) && fsrAppliedW != 0 ) {
+			vkDeviceWaitIdle( device );		// frame boundary: all submitted work done, nothing in flight
+			Fsr2DestroyContext( true );		// deviceIdle = true: immediate, clean teardown (rebuilt this frame)
+		}
+		fsrAppliedW = fsrW;
+		fsrAppliedH = fsrH;
+	}
 
 	// FSR2 auto-reactive (R1/D): the opaque snapshot is one-frame data — a new frame
 	// invalidates it until Fsr2CaptureOpaque runs again at this frame's translucent split
