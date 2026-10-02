@@ -7655,6 +7655,13 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		}
 	}
 
+	// r_rtShadowBlurCheckerboard: trace a static screen checkerboard (half the rays, u_color.x). The skipped
+	// pixels (ray target b < 0) are reconstructed INSIDE the horizontal blur pass from their two traced
+	// horizontal neighbours (always the opposite parity in a (x^y) checkerboard), so there is no separate
+	// fill pass; the tile classification already ignores holes (they read as "never traced").
+	const bool cbActive = r_rtShadowBlurCheckerboard.GetBool();
+	parms.color[0] = cbActive ? 1.0f : 0.0f;					// u_color.x = checkerboard enable (rtshadow_ray.frag)
+
 	r->GpuScopeBegin( "rtblur.ray" );
 	r->SetNextTargetPassArea( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );
 	r->BeginTargetPass( rhiRtBlurRayRT, &clearLit );
@@ -7666,6 +7673,8 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	RB_RHI_DrawFullscreen( r, rhiRtBlur.rayProg, parms, 0 );
 	r->EndPass();
 	r->GpuScopeEnd();
+
+	const rhi::RenderTargetHandle srcRT = rhiRtBlurRayRT;		// tiles + the horizontal blur read the (checkerboard) ray target directly
 
 	rhi::RenderParams tp;
 	memset( &tp, 0, sizeof( tp ) );
@@ -7679,14 +7688,14 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		tp.localParam0[0] = (float)pass;
 		// pass 0 reads the ray pass's compact RG8 summary (attachment 1, 2 B/texel) instead of the
 		// 8-byte RGBA16F, when the MRT target carried it and r_rtShadowBlurFastTiles is on
-		const rhi::ImageHandle summaryImg = r->GetRenderTargetImage2( rhiRtBlurRayRT );
+		const rhi::ImageHandle summaryImg = r->GetRenderTargetImage2( srcRT );
 		const bool fastTiles = ( pass == 0 ) && r_rtShadowBlurFastTiles.GetBool() && summaryImg != 0;
 		tp.localParam0[1] = fastTiles ? 1.0f : 0.0f;
 		r->GpuScopeBegin( "rtblur.tiles" );
 		r->BeginTargetPass( rhiRtBlurTileRT[pass], &clearZero );
 		r->SetScissor( rx1 / 8, th - 1 - tyBot, rx2 / 8 - rx1 / 8 + 1, tyBot - tyTop + 1 );
 		RB_RHI_DrawFullscreen( r, rhiRtBlur.tileProg, tp,
-			( pass == 0 ) ? ( fastTiles ? summaryImg : r->GetRenderTargetImage( rhiRtBlurRayRT ) )
+			( pass == 0 ) ? ( fastTiles ? summaryImg : r->GetRenderTargetImage( srcRT ) )
 			              : r->GetRenderTargetImage( rhiRtBlurTileRT[0] ) );
 		r->EndPass();
 		r->GpuScopeEnd();
@@ -7699,6 +7708,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		const int py1 = ( pass == 0 ) ? hy1 : vy1, py2 = ( pass == 0 ) ? hy2 : vy2;
 		bp.localParam0[0] = ( pass == 0 ) ? 1.0f : 0.0f;		// axis
 		bp.localParam0[1] = ( pass == 0 ) ? 0.0f : 1.0f;
+		bp.localParam0[3] = cbActive ? 1.0f : 0.0f;			// checkerboard: the horizontal pass reconstructs skipped pixels
 		// a staggered light's final pass goes into ITS mask, cleared WHOLE (no area): outside this
 		// frame's rect it must read "lit, view distance 1" = no valid data, never an older frame's
 		// leftovers - a later frame may reproject anywhere onto it
@@ -7712,7 +7722,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		r->SetScissor( vx1, py1, vx2 - vx1 + 1, py2 - py1 + 1 );
 		RB_RHI_BindRTUnit( r, 1, rhiRtBlurTileRT[1] );
 		RB_RHI_DrawFullscreen( r, rhiRtBlur.blurProg, bp,
-			r->GetRenderTargetImage( ( pass == 0 ) ? rhiRtBlurRayRT : rhiRtBlurPingRT ) );
+			r->GetRenderTargetImage( ( pass == 0 ) ? srcRT : rhiRtBlurPingRT ) );
 		r->EndPass();
 		r->GpuScopeEnd();
 	}

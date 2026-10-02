@@ -369,8 +369,24 @@ larger backend build.
 - A blur of a centre-ray shadow cannot show an emitter partly visible around a thin occluder.
 - Only ray-served lights soften; shadow-mapped lights keep their PCF edge.
 
+## Checkerboard ray (r_rtShadowBlurCheckerboard, default on)
+
+The ray pass is the dominant cost (it IS the shadow ray — the blur just moved it off the interaction
+draws). `r_rtShadowBlurCheckerboard` traces it at a STATIC screen checkerboard — half the pixels,
+`(x^y)&1==0` — and reconstructs the skipped pixels inside the HORIZONTAL blur pass: in a `(x^y)`
+checkerboard every skipped pixel has both its horizontal neighbours traced, so the blur that already
+runs averages them in, with no extra pass. The depth-slope guide steps from the `±1` hole to the
+traced `±2` tap. The parity is fixed (never per-frame), so the "same camera -> same mask" determinism
+holds — no shimmer on a still camera. The tile pass needs nothing: a hole reads as "never traced" and
+its ~32 traced siblings in the 8x8 tile classify it. Cost scales with light count: measured
+rtblur.ray ~4.0 -> ~2.5 ms (~1.3 ms off the whole rtblur stack) in a ~14-light scene, USER-VERIFIED
+lossless ("looks fine"). The only theoretical cost is a ~1-pixel softening at the very hardest contact
+edges. Off = one ray per pixel (the pre-checkerboard look). The non-checkerboard path is byte-identical
+(every change is gated on the blur's `u_localParam0.w`).
+
 ## Status
 
 **USER-VERIFIED 2026-09-18** ("the blurring seems great"); cost accepted at +1.74 ms worst case
 measured. Fidelity: changes the look of shadows, so it is on only in the **Ultra Nightmare** preset
 (with the RT shadow routes it builds on) and a menu toggle everywhere else; docs/todo.md row added.
+Checkerboard ray added + verified 2026-10-02.

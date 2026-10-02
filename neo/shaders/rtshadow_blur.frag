@@ -24,6 +24,11 @@
 //
 //   u_localParam0.xy = pass axis, (1,0) or (0,1)
 //   u_localParam0.z  = 1: final pass into a reusable RGBA8 mask (see main)
+//   u_localParam0.w  = 1: r_rtShadowBlurCheckerboard. The HORIZONTAL pass (axis x) reads the half-traced
+//                      ray target directly; a skipped pixel (b < 0) is reconstructed from its two
+//                      horizontal neighbours (always traced in a (x^y) checkerboard), and the depth-slope
+//                      steps past the hole at ±1 to the traced tap at ±2. The vertical pass reads this
+//                      hole-free output, so it is untouched. 0 = full-density trace (byte-identical path).
 #include "renderparms.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_src;
@@ -48,6 +53,19 @@ vec4 fetchTap( ivec2 q, ivec2 hi ) {
 void blurMain() {
 	ivec2 ip = ivec2( gl_FragCoord.xy );
 	vec4  c  = texelFetch( u_src, ip, 0 );
+	bool  cb = u_localParam0.w > 0.5 && u_localParam0.x > 0.5;	// checkerboard, horizontal pass only
+	// checkerboard: this pixel was skipped by the ray pass (b < 0). Reconstruct it from its two horizontal
+	// neighbours, which are the opposite parity and so always traced. The output is then hole-free for the
+	// vertical pass and for every tap below (which still skips any remaining holes via the b > 0 test).
+	if ( cb && c.b < 0.0 ) {
+		ivec2 hiC = textureSize( u_src, 0 ) - 1;
+		vec4  nA  = texelFetch( u_src, clamp( ip + ivec2( 1, 0 ), ivec2( 0 ), hiC ), 0 );
+		vec4  nB  = texelFetch( u_src, clamp( ip - ivec2( 1, 0 ), ivec2( 0 ), hiC ), 0 );
+		float nN  = 0.0; vec4 acc = vec4( 0.0 );
+		if ( nA.b > 0.0 ) { acc += nA; nN += 1.0; }
+		if ( nB.b > 0.0 ) { acc += nB; nN += 1.0; }
+		c = ( nN > 0.0 ) ? acc / nN : vec4( 1.0, 0.0, 0.0, 0.0 );	// no traced neighbour: lit (sky region)
+	}
 	// pass-through: visibility as is, the other axis' half-width moves into G for pass 2
 	fragColor = vec4( c.r, c.a, c.b, 0.0 );
 	if ( !( c.b > 0.0 ) ) {
@@ -67,10 +85,18 @@ void blurMain() {
 	float izc  = 1.0 / c.b;
 
 	// local 1/d slope along the axis: the flatter of the two one-sided differences, so a
-	// silhouette on one side doesn't tilt the plane
-	float dA = fetchTap( ip + axis, hi ).b, dB = fetchTap( ip - axis, hi ).b;
-	float sA = ( dA > 0.0 ) ? ( 1.0 / dA - izc ) : 1e9;
-	float sB = ( dB > 0.0 ) ? ( izc - 1.0 / dB ) : 1e9;
+	// silhouette on one side doesn't tilt the plane. In checkerboard mode the ±1 tap is a hole, so step
+	// to the traced ±2 tap and normalise the difference by the 2-pixel distance (identical slope units).
+	float sA, sB;
+	if ( cb ) {
+		float dA = fetchTap( ip + axis * 2, hi ).b, dB = fetchTap( ip - axis * 2, hi ).b;
+		sA = ( dA > 0.0 ) ? ( 1.0 / dA - izc ) * 0.5 : 1e9;
+		sB = ( dB > 0.0 ) ? ( izc - 1.0 / dB ) * 0.5 : 1e9;
+	} else {
+		float dA = fetchTap( ip + axis, hi ).b, dB = fetchTap( ip - axis, hi ).b;
+		sA = ( dA > 0.0 ) ? ( 1.0 / dA - izc ) : 1e9;
+		sB = ( dB > 0.0 ) ? ( izc - 1.0 / dB ) : 1e9;
+	}
 	float slope = ( abs( sA ) < abs( sB ) ) ? sA : sB;
 	if ( abs( slope ) > 0.5 * izc ) { slope = 0.0; }		// silhouettes on both sides
 
