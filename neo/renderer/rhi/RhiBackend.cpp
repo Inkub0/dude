@@ -3517,7 +3517,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		clear.stencilValue = (unsigned char)( 1 << ( glConfig.stencilBits - 1 ) );
 		r->BeginPass( &clear );
 
+		r->GpuScopeBegin( "world" );		// shadow maps + light loop + interactions (prepass/ao/rtgi/rtblur nest under this)
 		RB_RHI_DrawWorld( r, viewDef );
+		r->GpuScopeEnd();
 	} else {
 		// 2D view (menu/console/HUD/loading): draw over existing contents
 		r->BeginPass( NULL );
@@ -3528,6 +3530,10 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	if ( !viewDef->viewEntitys ) {
 		backEnd.currentScissor = viewDef->scissor;
 	}
+	// forward shading stage: ambient/emissive/decal + SSR + fog + volumetrics + translucent + deferred
+	// post-sort surfaces. For a 2D view (no world) this is the GUI/HUD/menu draw, named apart.
+	const char *fwdScope = viewDef->viewEntitys ? "scene.fwd" : "gui/2d";
+	r->GpuScopeBegin( fwdScope );
 	const viewEntity_t *currentSpace = NULL;
 	float mvp[16];
 	backEnd.currentRenderCopied = false;
@@ -3557,7 +3563,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		}
 		if ( !ssrDone && drawSurfs[i]->material->GetSort() > SS_DECAL ) {
 			ssrDone = true;
+			r->GpuScopeBegin( "ssr" );		// screen-space / RT reflections composite
 			RB_RHI_ScreenSpaceReflections( r, viewDef );
+			r->GpuScopeEnd();
 			// H6c RT GI apply, HERE (before the snapshot) rather than after post: the bounce is additive
 			// opaque-surface lighting, so it must be part of FSR2's opaque snapshot — added afterwards it
 			// looked like flash/particle content to the auto-reactive mask and got de-ghosted into a
@@ -3573,7 +3581,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, mvp );
 	}
 	if ( !ssrDone ) {
+		r->GpuScopeBegin( "ssr" );
 		RB_RHI_ScreenSpaceReflections( r, viewDef );	// view had no translucent surfaces
+		r->GpuScopeEnd();
 		r->GpuScopeBegin( "rtgi apply" );				// GI into the opaque snapshot (see the split above)
 		RB_RHI_RtgiApply( r, viewDef );
 		r->GpuScopeEnd();
@@ -3582,16 +3592,21 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 
 	// fog and blend lights
 	if ( viewDef->viewEntitys ) {
+		r->GpuScopeBegin( "fog" );
 		RB_RHI_FogAllLights( r, viewDef );
+		r->GpuScopeEnd();
 		// DUDE volumetric lighting (r_volumetrics): after the stock fog, BEFORE the post-process-sort
 		// surfaces so heat haze distorts the shafts with the scene and no 2D/HUD is ever touched; FSR2,
 		// eye adaptation and bloom downstream all see the shafts as part of the scene.
+		r->GpuScopeBegin( "volumetrics" );
 		RB_RHI_VolumetricLighting( r, viewDef );
+		r->GpuScopeEnd();
 	}
 
 	// post-process-sort surfaces, now that fog is down; copy _currentRender
 	// first (only in a 3D view) so the SS_POST_PROCESS stages can sample it
 	if ( i < viewDef->numDrawSurfs && !r_skipPostProcess.GetBool() ) {
+		r->GpuScopeBegin( "fwd.postsurf" );		// SS_POST_PROCESS surfaces (glass/particles that sample _currentRender) + the copy
 		if ( viewDef->viewEntitys ) {
 			RB_RHI_CopyCurrentRender( viewDef );
 			backEnd.currentRenderCopied = true;
@@ -3603,7 +3618,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 			}
 			RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, mvp );
 		}
+		r->GpuScopeEnd();	// end fwd.postsurf
 	}
+	r->GpuScopeEnd();	// end fwdScope
 
 	// DUDE film grain / chromatic aberration over the finished 3D view, before
 	// any 2D/GUI (improvements menu, default off). Fullscreen primary view only:
@@ -3612,6 +3629,7 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	// scene — same fullscreen-and-not-subview test RhiWorld uses.
 	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
 	if ( viewDef->viewEntitys && !viewDef->isSubview && fullscreenView ) {
+		r->GpuScopeBegin( "post" );		// DoF + FSR2 + eye-adapt + bloom + chroma/tonemap resolve (fsr2 nests here)
 		// The GL per-view post chain (AA / film grain / chromatic aberration) is GL-only
 		// here; Vulkan folds grain/chroma into the scene resolve instead (RB_RHI_HdrResolve,
 		// over the HDR float buffer or the RGBA8 off-HDR post target — see RB_RHI_HdrBeginFrame).
@@ -3714,6 +3732,7 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		}
 		// r_mvDebug: overlay the per-object velocity buffer (R1/A2; VK-only, no-op otherwise)
 		RB_RHI_MotionVectorDebugOverlay( r, viewDef );
+		r->GpuScopeEnd();	// end "post"
 	}
 
 	// debug visualization (r_showTris, r_showNormals, debug lines/polygons, …)
@@ -3848,7 +3867,9 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 				// film grain + chroma + r_gammaInShader gamma/brightness (the VK backend
 				// has no separate LDR gamma tail), and must run before EndFrame blits the
 				// scene image to the swapchain.
+				r->GpuScopeBegin( "resolve" );	// scene resolve + tonemap + grain/chroma/gamma (+ FXAA/SMAA)
 				RB_RHI_HdrResolve( r );
+				r->GpuScopeEnd();
 				// present happens in the backend's EndFrame below (swap capture is
 				// serviced after EndFrame). ImGui renders through the backend:
 				// EndFrame here runs ImGui::Render and hands the draw data over,
