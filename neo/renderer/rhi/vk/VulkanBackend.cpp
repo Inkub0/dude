@@ -3269,7 +3269,10 @@ void VulkanBackend::EndFrame() {
 	toDst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	toDst.subresourceRange.levelCount = 1;
 	toDst.subresourceRange.layerCount = 1;
-	vkCmdPipelineBarrier( f.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+	// srcStage must be the stage the submit waits the acquire semaphore at (TRANSFER, see
+	// waitStage below): that chains this layout transition AFTER the image is really acquired.
+	// TOP_OF_PIPE would leave the transition unordered against the semaphore wait.
+	vkCmdPipelineBarrier( f.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 		0, 0, NULL, 0, NULL, 1, &toDst );
 
 	VkImageBlit blit = {};
@@ -8388,6 +8391,12 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 	vkCmdCopyImage( cb, fsr2Out, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		dstImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
 	fsr2OutWritten = true;		// next frame's pre-barrier: TRANSFER_SRC -> GENERAL
+	// The copy just defined the composite. Mark it written so the next BeginPass LOADs it:
+	// a freshly (re)created composite otherwise reads as never-written and the first HUD pass
+	// clears the upscaled scene away (one black world frame per composite creation).
+	if ( out != NULL ) {
+		out->everWritten = true;
+	}
 
 	VkImageMemoryBarrier post[3] = {};
 	post[0] = toCopy[1];
@@ -10802,6 +10811,12 @@ void VulkanBackend::DestroyMergeNormal() {
 	}
 	if ( mergeVelSampleImage >= 1 && mergeVelSampleImage <= (ImageHandle)imageTable.size() ) {
 		imageTable[mergeVelSampleImage - 1].live = false;
+	}
+	// A released sample slot is free for reuse (RegisterMergeSampleImage takes the first free
+	// slot, normally the same one), so a cached texture set keyed on that handle would now bind
+	// a destroyed view. Drop the cache, like every other path that frees a sample slot.
+	if ( mergeNormalSampleImage != 0 || mergeMatSampleImage != 0 || mergeVelSampleImage != 0 ) {
+		InvalidateTextureSets();
 	}
 	mergeNormalSampleImage = 0;
 	mergeMatSampleImage = 0;
