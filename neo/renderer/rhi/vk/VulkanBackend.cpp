@@ -8452,12 +8452,13 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 	vkCmdCopyImage( cb, fsr2Out, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		dstImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
 	fsr2OutWritten = true;		// next frame's pre-barrier: TRANSFER_SRC -> GENERAL
-	// The copy just defined the composite. Mark it written so the next BeginPass LOADs it:
-	// a freshly (re)created composite otherwise reads as never-written and the first HUD pass
-	// clears the upscaled scene away (one black world frame per composite creation).
-	if ( out != NULL ) {
-		out->everWritten = true;
-	}
+	// NOTE: do NOT mark out->everWritten here. It looks right (the copy defines the composite, so
+	// the next BeginPass could LOAD instead of clear and avoid a one-frame black flash when the
+	// composite is first created), but under a portal-sky map two full-screen views run through this
+	// same FSR2/composite path in one frame, and forcing a LOAD there leaves the sky view standing in
+	// for the world ("only sky, geometry gone" with r_fsr on). The flash it would have fixed is a
+	// single frame on composite (re)creation (everWritten persists across frames otherwise), which is
+	// not worth the portal-sky regression. Leave the clear/load decision to BeginPass as before.
 
 	VkImageMemoryBarrier post[3] = {};
 	post[0] = toCopy[1];
