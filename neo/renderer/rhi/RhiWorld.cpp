@@ -6987,6 +6987,9 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.denoisingRange = 20000.0f;			// < the ~30000 sky depth: sky excluded
 		da.frameIndex = (unsigned int)tr.frameCount;
 		da.reset = !rhiRtaoPrevValid;
+		// RTAO ReBLUR accumulation window (r_rtaoHistory): 0 keeps NRD's default (~30), >0 overrides
+		// it so the 1-spp occlusion can accumulate longer (smoother, less noise) or shorter (snappier).
+		da.maxAccumFrames = r_rtaoHistory.GetInteger();
 		rhiRtaoDenoisedThisView = r->RtaoDenoise( da );
 
 		// ---- H4d: composite into the STANDARD AO buffer and hand it to the lighting ----

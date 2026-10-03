@@ -7196,8 +7196,9 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	// (~this many frames). Aggressive antilag / fast-history clamping was tried to also kill motion trails, but
 	// on this 1-spp half-res signal it just made the GI DIM/flicker while strafing (it rejects history on any
 	// luminance change, including the natural variation under motion), which is worse than the mild residual
-	// smear — so the clamp/antilag stay at NRD defaults. RTAO leaves everything default (maxAccumFrames 0).
-	if ( a.giMode && a.maxAccumFrames > 0 ) {
+	// smear — so the clamp/antilag stay at NRD defaults. maxAccumFrames applies to BOTH paths now: GI exposes
+	// it as r_rtgiHistory, RTAO as r_rtaoHistory (0 from either -> NRD's own default is kept).
+	if ( a.maxAccumFrames > 0 ) {
 		uint32_t hist = (uint32_t)a.maxAccumFrames;
 		if ( hist > 63 ) { hist = 63; }
 		rs.maxAccumulatedFrameNum = hist;

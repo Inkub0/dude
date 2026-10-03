@@ -999,6 +999,7 @@ extern idCVar r_rtao;						// H4 RTAO: ray-traced AO producer replacing GTAO at 
 extern idCVar r_rtaoRadius;					// RTAO ray length (world units)
 extern idCVar r_rtaoResScale;			// RTAO render/denoise resolution fraction (bilinear upscale in the resolve)
 extern idCVar r_rtaoIntensity;				// RTAO strength (1.0 neutral; r_ssaoIntensity stays GTAO-only)
+extern idCVar r_rtaoHistory;				// RTAO denoiser (ReBLUR) max accumulated history frames; 0 = NRD default (~30)
 extern idCVar r_skinnedMotionVectors;		// GPU-skinned characters write per-bone motion into the velocity buffer
 extern idCVar r_rtaoDebug;					// RTAO debug view (1 raw rays, 2 denoised)
 extern idCVar r_rtgi;						// H6 RT GI: one-bounce ray-traced global illumination (gathers radiance at the hemisphere hit)
