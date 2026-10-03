@@ -5488,6 +5488,10 @@ static const int ANIM_RETIRE_GRACE = 60;
 
 void VulkanBackend::RefreshAnimBlas() {
 	if ( !SupportsRayQuery() || !frameOpen || skipFrame || insideScenePass || insideTargetPass ) {
+		// staging is one-shot (see the clear at the end): a skipped frame presents nothing, so
+		// drop its staged casters rather than let a later frame consume them
+		animStaged.clear();
+		animStagedGeoms.clear();
 		return;
 	}
 	if ( animStaged.empty() && animBlasCache.empty() ) {
@@ -5621,6 +5625,13 @@ void VulkanBackend::RefreshAnimBlas() {
 		}
 		rtAnimTlasDeferredSlot = -1;
 	}
+
+	// Staging is one-shot: it was consumed above. Clear it so a frame that renders no world view
+	// (menu / loading screen / PDA, where the frontend's R_RtStageAnimCasters never runs to re-stage
+	// or clear it) cannot re-refit these casters next frame against gpuSkinVB / index buffers a map
+	// unload has since DestroyBuffer'd. The animBlasCache itself ages out via the retire loop above.
+	animStaged.clear();
+	animStagedGeoms.clear();
 }
 
 void VulkanBackend::AnimBlasStats( int &builds, int &refits, int &retires, int &live ) {
