@@ -629,7 +629,24 @@ private:
 	// is retired; the sets themselves are deferred-freed a frame slot later (they
 	// may still be bound in in-flight command buffers, same lifetime rule as
 	// retiredImages/retiredTargets), so no live command buffer ever loses its set.
-	std::unordered_map<uint64_t, VkDescriptorSet> textureSetCache;
+	// Identity of a per-draw set-1 binding: the 17 image handles in binding order (units 0-7,
+	// shadowCube, ssao, occlusion, parallax, shadowCubeDyn, shadowMask, decalMask, tessHeight,
+	// contactDepth). The cache is keyed on this EXACT identity, not a hash of it: a 64-bit hash
+	// key silently collided (adjacent-unit handle pairs cancelled in the old mixer), binding one
+	// material's textures for another. Equal handles => identical descriptor writes below, so this
+	// is a correct cache key and the correct last-bound fast-path key.
+	struct TexSetKey {
+		ImageHandle h[VK_TEX_BINDINGS] = {};
+		bool operator==( const TexSetKey &o ) const { return memcmp( h, o.h, sizeof( h ) ) == 0; }
+	};
+	struct TexSetKeyHash {
+		size_t operator()( const TexSetKey &k ) const {
+			size_t seed = 0xcbf29ce484222325ull;		// FNV-1a over the 17 handles
+			for ( int i = 0; i < VK_TEX_BINDINGS; i++ ) { seed = ( seed ^ k.h[i] ) * 0x100000001b3ull; }
+			return seed;
+		}
+	};
+	std::unordered_map<TexSetKey, VkDescriptorSet, TexSetKeyHash> textureSetCache;
 	std::vector<VkDescriptorSet> retiredTexSets[FRAMES_IN_FLIGHT];
 	void						InvalidateTextureSets();
 	bool						framePoolWarned = false;
@@ -1148,7 +1165,7 @@ private:
 	VkPipelineCache				diskPipelineCache = VK_NULL_HANDLE;
 	PipelineDesc				currentDesc;
 	VkPipeline					boundPipeline = VK_NULL_HANDLE;
-	uint64_t					boundTexKey = 0;
+	TexSetKey					boundTexKey;		// identity of the set currently bound at set 1 (all-zero = none/dummy)
 	VkDescriptorSet				boundTexSet = VK_NULL_HANDLE;
 	VkBuffer					boundIb = VK_NULL_HANDLE;	// DUDE: last-bound index buffer; the sole vkCmdBindIndexBuffer site skips a repeat
 	bool						bindlessBoundThisCb = false;	// RR4: set 2 (bindless array) bound once per frame cb
@@ -3047,7 +3064,7 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	}
 
 	boundPipeline = VK_NULL_HANDLE;
-	boundTexKey = 0;
+	boundTexKey = TexSetKey{};
 	boundTexSet = VK_NULL_HANDLE;
 	boundIb = VK_NULL_HANDLE;		// DUDE: the cb was re-begun, its index binding is gone
 	bindlessBoundThisCb = false;	// RR4: rebind the bindless set at the first draw of this frame's cb
@@ -8968,7 +8985,7 @@ void VulkanBackend::InvalidateTextureSets() {
 	}
 	textureSetCache.clear();
 	// a retired set may be the one the last-bound fast path is holding; drop it
-	boundTexKey = 0;
+	boundTexKey = TexSetKey{};
 	boundTexSet = VK_NULL_HANDLE;
 }
 
@@ -11917,22 +11934,19 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 	// set 1: per-draw texture set from the frame pool (dummy in empty slots)
 	{
 		VkDescriptorSet texSet = VK_NULL_HANDLE;
-		uint64_t key = 0xcbf29ce484222325ull;
-		auto mixKey = []( uint64_t &seed, uint32_t value ) {
-			seed ^= (uint64_t)value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
-		};
-		for ( int i = 0; i < 8; i++ ) {
-			mixKey( key, (uint32_t)args.textures[i] );
-		}
-		mixKey( key, (uint32_t)args.shadowCube );
-		mixKey( key, (uint32_t)args.ssao );
-		mixKey( key, (uint32_t)args.occlusion );
-		mixKey( key, (uint32_t)args.parallax );
-		mixKey( key, (uint32_t)args.shadowCubeDyn );
-		mixKey( key, (uint32_t)args.shadowMask );
-		mixKey( key, (uint32_t)args.decalMask );
-		mixKey( key, (uint32_t)args.tessHeight );
-		mixKey( key, (uint32_t)args.contactDepth );
+		// exact identity of this draw's 17 handles in binding order (not a hash — see TexSetKey);
+		// index i here must match binding i in the descriptor-write loop below
+		TexSetKey key;
+		for ( int i = 0; i < 8; i++ ) { key.h[i] = args.textures[i]; }
+		key.h[8]  = args.shadowCube;
+		key.h[9]  = args.ssao;
+		key.h[10] = args.occlusion;
+		key.h[11] = args.parallax;
+		key.h[12] = args.shadowCubeDyn;
+		key.h[13] = args.shadowMask;
+		key.h[14] = args.decalMask;
+		key.h[15] = args.tessHeight;
+		key.h[16] = args.contactDepth;
 		bool needsTexBind = true;
 		if ( boundTexSet != VK_NULL_HANDLE && boundTexKey == key ) {
 			texSet = boundTexSet;
@@ -12189,7 +12203,7 @@ void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int
 	// untextured; a white texel yields pure vertex color through generic.frag
 	{
 		VkDescriptorSet texSet = VK_NULL_HANDLE;
-		const uint64_t key = 0;
+		const TexSetKey key = {};		// all-dummy set: same identity BindForDraw produces for all-zero args
 		auto it = textureSetCache.find( key );
 		if ( it != textureSetCache.end() ) {
 			texSet = it->second;
@@ -12228,6 +12242,10 @@ void VulkanBackend::DrawImmediate( const void *verts, int numVerts, unsigned int
 			textureSetCache[key] = texSet;
 		}
 		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout, 1, 1, &texSet, 0, NULL );
+		// reflect what is actually bound at set 1 so a following Draw rebinds correctly instead of
+		// trusting the pre-immediate set (its key no longer matches this all-dummy set)
+		boundTexSet = texSet;
+		boundTexKey = key;
 	}
 
 	VkDeviceSize vbOfs = (VkDeviceSize)vertOfs;
