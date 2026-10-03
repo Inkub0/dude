@@ -7973,7 +7973,16 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( mode <= 0 || !r_ssao.GetBool() || !R_BackendSupportsEnhancements() ) {
 		return;
 	}
-	// mode 3 shows the raw normal G-buffer; 1/2 show the AO result
+	// Modes 1/2 show the AO result; mode 3 the raw normal G-buffer. When no AO producer ran this
+	// view, rhiSsaoResultRT still points at a buffer from an earlier frame (its handle is never
+	// cleared), so blitting it shows a stale, frozen image. That happens whenever RTGI is on:
+	// it supersedes screen-space AO, so RB_RHI_SSAOPass (GTAO) and RB_RHI_RtaoPass both stand down
+	// and rhiSsaoAppliedThisView stays false. Gate modes 1/2 on that flag so the AO channel shows
+	// nothing rather than a stale frame (use r_rtgiDebug to inspect the GI). Mode 3 is unaffected —
+	// the normal prepass still runs under RTGI (it feeds the GI receiver albedo).
+	if ( mode < 3 && !rhiSsaoAppliedThisView ) {
+		return;
+	}
 	rhi::RenderTargetHandle srcRT = ( mode >= 3 ) ? rhiNormalResultRT : rhiSsaoResultRT;
 	if ( !srcRT || r->GetRenderTargetImage( srcRT ) == 0 ) {
 		return;
