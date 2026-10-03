@@ -5172,20 +5172,18 @@ static void DrawDbgGroup_ShadowMaps()
 	const int vram = glConfig.vidMemMB;					// 0 if the vendor query failed
 	const int cacheCvar = r_shadowMapCacheMB.GetInteger();
 	bool autoBudget = ( cacheCvar < 0 );
-	const int autoMB = ( vram > 0 ? vram / 2 : 1024 );
+	const int manualSeed = ( vram > 0 ? vram / 2 : 1024 );	// starting value when switching auto -> manual
 	const int sliderMax = ( vram > 0 ? vram : 16384 );
 
-	if ( ImGui::Checkbox( "Auto Budget (half of VRAM)", &autoBudget ) ) {
-		r_shadowMapCacheMB.SetInteger( autoBudget ? -1 : ( cacheCvar < 0 ? autoMB : cacheCvar ) );
+	if ( ImGui::Checkbox( "Auto Budget (free VRAM - reserve)", &autoBudget ) ) {
+		r_shadowMapCacheMB.SetInteger( autoBudget ? -1 : ( cacheCvar < 0 ? manualSeed : cacheCvar ) );
 	}
-	if ( vram > 0 ) {
-		AddTooltip( "Auto uses half of the detected video memory as the cache budget." );
-	} else {
-		AddTooltip( "Video-memory size couldn't be detected on this driver; auto falls back to 1024 MB." );
-	}
+	AddTooltip( "Auto sizes the cache to the VRAM actually free right now (measured) minus a safety "
+		"reserve for other growth - as large as safely possible, so static cubes rarely evict and "
+		"re-render (the frame-time cost). Scales to the card. Uncheck to cap it manually." );
 
 	ImGui::BeginDisabled( autoBudget );
-	int budget = ( cacheCvar < 0 ) ? autoMB : cacheCvar;
+	int budget = ( cacheCvar < 0 ) ? manualSeed : cacheCvar;
 	if ( ImGui::SliderInt( "Cache Budget", &budget, 0, sliderMax, budget == 0 ? "unlimited" : "%d MB" ) ) {
 		r_shadowMapCacheMB.SetInteger( budget );
 	}
@@ -5196,7 +5194,7 @@ static void DrawDbgGroup_ShadowMaps()
 
 	if ( vram > 0 ) {
 		ImGui::TextDisabled( "Detected VRAM: %d MB   (effective budget: %s)",
-			vram, autoBudget ? va( "%d MB (auto)", autoMB )
+			vram, autoBudget ? "adaptive (free VRAM - reserve; see the VRAM HUD, r_vkDebugHud)"
 			                 : ( budget == 0 ? "unlimited" : va( "%d MB", budget ) ) );
 	}
 

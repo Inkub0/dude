@@ -936,6 +936,7 @@ private:
 	void			UpdateAnimCasters( const AnimCaster *casters, int count ) override;
 	void			RefreshAnimBlas() override;
 	void			AnimBlasStats( int &builds, int &refits, int &retires, int &live ) override;
+	bool			GetDeviceLocalMemory( uint64_t &usageBytes, uint64_t &budgetBytes ) override;
 	void			RtReflStats( int &geoRows, int &geoMonsterRows ) override;
 	unsigned long long	GetRtGeoTableAddress() override { return (unsigned long long)rtCurrentGeoAddr; }
 
@@ -5610,6 +5611,30 @@ void VulkanBackend::AnimBlasStats( int &builds, int &refits, int &retires, int &
 	for ( size_t i = 0; i < animBlasCache.size(); i++ ) {
 		if ( animBlasCache[i].as != VK_NULL_HANDLE ) { live++; }
 	}
+}
+
+// Sum the device-local heaps' VMA usage + budget (same source as the debug HUD VRAM line).
+bool VulkanBackend::GetDeviceLocalMemory( uint64_t &usageBytes, uint64_t &budgetBytes ) {
+	if ( vma == NULL || physical == VK_NULL_HANDLE ) {
+		return false;
+	}
+	VkPhysicalDeviceMemoryProperties mp;
+	vkGetPhysicalDeviceMemoryProperties( physical, &mp );
+	VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+	vmaGetHeapBudgets( vma, budgets );
+	uint64_t used = 0, budget = 0;
+	for ( uint32_t i = 0; i < mp.memoryHeapCount; ++i ) {
+		if ( mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ) {
+			used   += budgets[i].usage;
+			budget += budgets[i].budget;
+		}
+	}
+	if ( budget == 0 ) {
+		return false;
+	}
+	usageBytes = used;
+	budgetBytes = budget;
+	return true;
 }
 
 unsigned long long VulkanBackend::BuildTlas( const RtInstance *instances, int count ) {
