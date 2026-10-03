@@ -3000,10 +3000,10 @@ static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger  volum  rtaoRes  skin   rtgi  hdrGam aniso
 	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f, false, 1.20f, 1 },
 	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.12f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 1 },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.12f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2 },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 6,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2 },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2048, 2048, 8,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4 },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  2048, 2048, 10, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4 },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  8,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.12f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2 },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 10,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2 },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2400, 2400, 11,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4 },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  3600, 3600, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4 },
 };
 
 // Ray-tracing augmentation layered on top of a raster tier when RTX is on and the device is
@@ -3023,9 +3023,12 @@ struct RtAugment {
 	bool  rtAllLights;
 	bool  rtBlurStagger;
 	bool  volumetrics;
+	int   volLights;		// r_volLights when volumetrics on (0 = leave the cvar): 2 = all lights (point lights too)
 	bool  needVelocity;		// force r_motionVectors on so the NRD denoiser has motion vectors
 	float parallaxShadow;	// RT-driven override of the raster value (-1 = keep raster)
 	float hdrGamma;			// RT-driven override of the raster value (-1 = keep raster)
+	float fsrScale;			// r_fsrScale when RTX on (the tier's default upscaling; 1 = Native-AA). A free
+							// override - the Upscaling menu can still change it without reading "Custom"
 };
 
 // RTAO rides the lower RT tiers at diminishing resolution (it auto-builds the RT scene on its own,
@@ -3034,13 +3037,13 @@ struct RtAugment {
 // reflections; Nightmare adds the heavy set (soft RT shadows on all lights, volumetrics). needVelocity
 // is on wherever a denoised RT effect runs (RTAO or RTGI) so NRD gets motion vectors.
 static const RtAugment rtAugment[PRESET_COUNT] = {
-//                  sun    mov    refl   rtao   aoRes  rtgi   giRes  blur   all    stag   vol    vel    parlxSh hdrGam
-/* Potato    */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, false, -1.0f, -1.0f },
-/* Low       */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, false, -1.0f, -1.0f },
-/* Medium    */   { false, false, false, true,  0.75f, false, 0.75f, false, false, false, false, true,  -1.0f, -1.0f },
-/* High      */   { true,  true,  false, true,  0.8f,  false, 0.75f, false, false, false, false, true,  -1.0f, -1.0f },
-/* Ultra     */   { true,  true,  true,  false, 1.0f,  true,  0.667f,false, false, false, false, true,  0.5f,  -1.0f },
-/* Nightmare */   { true,  true,  true,  false, 0.75f, true,  0.75f, true,  true,  true,  true,  true,  0.5f,  1.0f  },
+//                  sun    mov    refl   rtao   aoRes  rtgi   giRes  blur   all    stag   vol    volL  vel    parlxSh hdrGam fsrScale
+/* Potato    */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, 1.0f  },
+/* Low       */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, 1.0f  },
+/* Medium    */   { false, false, false, true,  0.75f, false, 0.75f, false, false, false, false, 0,    true,  -1.0f, -1.0f, 1.0f  },
+/* High      */   { true,  true,  false, true,  0.8f,  false, 0.75f, false, false, false, false, 0,    true,  -1.0f, -1.0f, 1.0f  },
+/* Ultra     */   { true,  true,  true,  false, 1.0f,  true,  0.667f,false, false, false, false, 0,    true,  0.5f,  -1.0f, 1.0f  },
+/* Nightmare */   { true,  true,  true,  false, 0.75f, true,  0.75f, true,  true,  true,  true,  2,    true,  0.5f,  1.0f,  0.75f },
 };
 
 
@@ -3197,6 +3200,11 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		r_rtAllLights.SetBool( a.rtAllLights );
 		r_rtShadowBlurStagger.SetBool( a.rtBlurStagger );
 		r_volumetrics.SetBool( a.volumetrics );
+		// which lights scatter in the haze: a free tuning knob, but the top tier defaults it to
+		// "all lights" (point lights too). 0 = leave the user's value. Only meaningful with volumetrics on.
+		if ( a.volLights > 0 ) {
+			cvarSystem->SetCVarInteger( "r_volLights", a.volLights );
+		}
 
 		// RT reflections own every reflective pixel, so SSR is turned off under them and the
 		// RT-vs-SSR luminance match + half-res reflection trace follow (mirrors the raster
@@ -3220,6 +3228,10 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		if ( a.hdrGamma >= 0.0f ) {
 			cvarSystem->SetCVarFloat( "r_hdrGamma", a.hdrGamma );
 		}
+		// The tier's default FSR2 upscaling (Nightmare+RTX = 75%). Inert where the tier's r_fsr is off
+		// (Medium/High/Ultra+RTX). Not in Detect, so the Upscaling menu can still override it freely
+		// without the preset reading "Custom".
+		r_fsrScale.SetFloat( a.fsrScale );
 	}
 }
 
