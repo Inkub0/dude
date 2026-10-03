@@ -3662,7 +3662,15 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		// over rhiHdrRT (copy-back, Native-AA-exact), so the eye-adapt/bloom measurement
 		// below and everything after — HUD composite, tonemap, grain — consume the
 		// stabilised scene. VK-only; inert when the velocity MRT wasn't produced.
-		if ( r_fsr.GetBool() && rbHdrActiveThisFrame && rhiHdrRT
+		// Only the TRUE primary view runs FSR2, not a portal-sky background view. A portal-sky map
+		// (D3XP/LM) issues two full-screen, non-subview RenderScene calls per frame -- the sky view,
+		// then the main view -- and BOTH pass isWindowView. The per-frame FSR/composite state (one
+		// FfxFsr2Context, rbFsrRanThisFrame, rbHdrCompositeActive, the SetFrameTarget(composite)
+		// reroute) is built for ONE primary view, so running FSR2 on the sky view too corrupted what
+		// the main view resolves ("only sky, geometry gone" with r_fsr on). RenderScene sets
+		// tr.primaryView before each top-level view, so by backend time it names the LAST one = the
+		// main view; the sky view fails this test and renders plainly for its _currentRender capture.
+		if ( r_fsr.GetBool() && rbHdrActiveThisFrame && rhiHdrRT && viewDef == tr.primaryView
 		     && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
 			const rhi::RenderTargetHandle velRT = RB_RHI_VelocityTargetThisView();
 			if ( velRT != 0 ) {
