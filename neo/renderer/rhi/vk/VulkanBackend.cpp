@@ -9124,7 +9124,24 @@ self-consistent one (and depth blits can't flip anyway).
 */
 void VulkanBackend::CopyFramebufferToImage( ImageHandle dst, int dstX, int dstY,
                                             int srcX, int srcY, int w, int h, bool depth ) {
-	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame || !sceneEverWritten ) {
+	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame ) {
+		return;
+	}
+	// "has the source been written this frame?" The source is the active frame target (the HDR scene
+	// buffer) when one is set, else the swapchain sceneColor -- gate on THAT image's flag, exactly as
+	// BeginPass picks everWritten. Testing sceneEverWritten unconditionally skipped every capture on the
+	// first frame after a resize / vid_restart while an HDR frame target was active (sceneColor is only
+	// written at the swap-time resolve), leaving the freshly (re)created capture image in UNDEFINED --
+	// a later draw then sampled it as SHADER_READ_ONLY (validation error + one frame of garbled
+	// _currentRender / _currentDepth feeding haze / glass / RT origins).
+	bool srcWritten = sceneEverWritten;
+	if ( frameTarget != 0 ) {
+		const RenderTarget *ft = LookupTarget( frameTarget );
+		if ( ft != NULL && ft->colorTarget ) {
+			srcWritten = ft->everWritten;
+		}
+	}
+	if ( !srcWritten ) {
 		return;
 	}
 	if ( dst < 1 || dst > (ImageHandle)imageTable.size() || !imageTable[dst - 1].live ) {
