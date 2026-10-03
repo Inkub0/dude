@@ -3409,6 +3409,8 @@ static size_t RB_RHI_CubeBytes( int size ) {
 //                             reserve on top for transient growth (streaming, RT scene). This scales
 //                             to the card (a 24 GB GPU gets a far bigger cache than a 8 GB one) instead
 //                             of a blind half-of-VRAM. Falls back to the old half-VRAM on GL3 / no query.
+// Note: under r_rtAllLights (with a live TLAS) no shadow maps render, so the cache is force-flushed in
+// RB_RHI_ResetShadowTallies and this budget never actually governs anything - it's moot, by design.
 static size_t RB_RHI_CacheBudgetBytes() {
 	const int mb = r_shadowMapCacheMB.GetInteger();
 	if ( mb > 0 ) {
@@ -8999,8 +9001,16 @@ static void RB_RHI_ResetShadowTallies( rhi::RHI *r ) {
 	rhiMapCacheRendered = 0;
 	rhiCubeCacheFrameNo++;			// bump before the light loop so lastFrame == "this view"
 	RB_RHI_SnapshotLightBudgetHyst();	// freeze incumbency for this view (order-stable ranking)
-	// free the whole cache when it's switched off, so its VRAM doesn't linger
-	if ( !r_shadowMapCache.GetBool() ) {
+	// Free the whole cache when it can't be used, so its VRAM doesn't linger - and so the
+	// cache budget stops applying the moment it's redundant:
+	//   - r_shadowMapCache off (explicit), or
+	//   - r_rtAllLights with a live TLAS: every shadow-casting light takes the inline RT ray and
+	//     NO shadow maps are rendered at all, so any cached cubes/2D maps are dead weight. Hand
+	//     that VRAM straight back to the RT scene instead of holding a whole budget's worth of
+	//     shadows nothing will ever sample. (Without a TLAS - RT off/unsupported - lights fall
+	//     back to maps, so the normal cache + budget still apply.)
+	const bool rtAllLightsServes = r_rtAllLights.GetBool() && r != NULL && r->GetTlasAddress() != 0;
+	if ( !r_shadowMapCache.GetBool() || rtAllLightsServes ) {
 		if ( rhiCubeCacheBytes > 0 ) {
 			RB_RHI_ResetCubeCache( r );
 		}
