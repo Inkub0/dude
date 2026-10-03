@@ -7566,6 +7566,48 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	if ( lr.x2 < lr.x1 || lr.y2 < lr.y1 ) {
 		return 0;		// no opaque surface of this light on screen: nothing would sample a mask
 	}
+
+	// How wide the blur gets. The width follows the geometry - 0 where the caster touches the
+	// receiver, growing with the gap: halfWidth = blurScale * dOccluder / ( dLight - dOccluder ) -
+	// and r_rtShadowBlurIntensity scales it. blurScale is a length in world units (it is the radius
+	// a physical light would need to cast that penumbra, but it is only a blur amount here): 3 at
+	// intensity 1 for ordinary fixtures, growing with the light's own volume so a 5000-unit "sun
+	// replacement" omni doesn't get a bulb-sized blur. Parallel suns sit 100000 units out along
+	// their direction: 1 degree of angular radius at intensity 1.
+	const renderLight_t &lp = vLight->lightDef->parms;
+	const idVec3 &lorg = vLight->globalLightOrigin;
+	float lightRadius = 3.0f * r_rtShadowBlurIntensity.GetFloat();
+	if ( lp.parallel ) {
+		lightRadius = ( lorg - viewDef->renderView.vieworg ).Length() * idMath::Tan( DEG2RAD( 1.0f ) ) * r_rtShadowBlurIntensity.GetFloat();
+	} else if ( lp.pointLight ) {
+		const float maxAxis = Max( lp.lightRadius.x, Max( lp.lightRadius.y, lp.lightRadius.z ) );
+		lightRadius *= Max( 1.0f, maxAxis / 256.0f );
+	}
+
+	// r_rtShadowBlurMinPenumbra: skip the blur entirely for a light whose penumbra is sub-pixel. A
+	// distant and/or small light casts a shadow edge finer than one screen pixel, so softening it is
+	// invisible yet still pays the full per-light ray + tiles + separable blur. Leave such a light on
+	// its crisp inline hard ray instead (the caller falls back to it when this returns 0, and any
+	// stagger slot it held ages out and frees itself in RB_RHI_RtShadowBlurBegin). The estimate
+	// mirrors the shader's own width - penumbra(px) ~= 2 * lightRadius(world) * (proj[0]*0.5*w) /
+	// receiverDepth - with a unit occluder/receiver gap ratio as the representative case, and takes the
+	// nearest the lit geometry can sit (origin minus the light's own radius) as the receiver depth so a
+	// large nearby light is never wrongly skipped. Parallel suns keep a fixed ~1deg angular penumbra
+	// everywhere, so they are never skipped.
+	const float minPenumbra = r_rtShadowBlurMinPenumbra.GetFloat();
+	if ( minPenumbra > 0.0f && !lp.parallel ) {
+		float depth = ( lorg - viewDef->renderView.vieworg ).Length();
+		if ( lp.pointLight ) {
+			depth -= Max( lp.lightRadius.x, Max( lp.lightRadius.y, lp.lightRadius.z ) );
+		}
+		if ( depth < 1.0f ) { depth = 1.0f; }
+		const float pxPerUnit = viewDef->projectionMatrix[0] * 0.5f * (float)w;	// at view depth 1
+		const float penumbraPx = 2.0f * lightRadius * pxPerUnit / depth;			// full width, gap ratio ~1
+		if ( penumbraPx < minPenumbra ) {
+			return 0;		// sub-pixel penumbra: the hard inline shadow is visually identical
+		}
+	}
+
 	rhiRtBlurLastStale = false;
 
 	// ---- r_rtShadowBlurStagger: how often does this light's mask refresh? By the distance from the
@@ -7630,23 +7672,8 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	}
 	const int blurTaps = 24;		// = K in rtshadow_blur.frag = HW_MAX in rtshadow_tiles.frag: the widest half-width, pixels
 
-	// How wide the blur gets. The width follows the geometry - 0 where the caster touches the
-	// receiver, growing with the gap: halfWidth = blurScale * dOccluder / ( dLight - dOccluder ) -
-	// and r_rtShadowBlurIntensity scales it. blurScale is a length in world units (it is the radius
-	// a physical light would need to cast that penumbra, but it is only a blur amount here): 3 at
-	// intensity 1 for ordinary fixtures, growing with the light's own volume so a 5000-unit "sun
-	// replacement" omni doesn't get a bulb-sized blur. Parallel suns sit 100000 units out along
-	// their direction: 1 degree of angular radius at intensity 1.
-	const renderLight_t &lp = vLight->lightDef->parms;
-	const idVec3 &lorg = vLight->globalLightOrigin;
-	float lightRadius = 3.0f * r_rtShadowBlurIntensity.GetFloat();
-	if ( lp.parallel ) {
-		lightRadius = ( lorg - viewDef->renderView.vieworg ).Length() * idMath::Tan( DEG2RAD( 1.0f ) ) * r_rtShadowBlurIntensity.GetFloat();
-	} else if ( lp.pointLight ) {
-		const float maxAxis = Max( lp.lightRadius.x, Max( lp.lightRadius.y, lp.lightRadius.z ) );
-		lightRadius *= Max( 1.0f, maxAxis / 256.0f );
-	}
-
+	// lp / lorg / lightRadius (the world-space blur scale) were computed above, before the stagger
+	// and sub-pixel-penumbra early-outs.
 	const float *proj = viewDef->projectionMatrix;
 	const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFull );
 	const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
