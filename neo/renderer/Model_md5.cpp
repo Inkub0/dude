@@ -127,6 +127,13 @@ static const char *MD5_SKIN_SRC =
 	"    v[o+11u]=t1.x; v[o+12u]=t1.y; v[o+13u]=t1.z;\n"	// color = v[o+14] (seeded, untouched)
 	"}\n";
 
+// Backend generation for the per-mesh GPU skin/tess buffers. Bumped on every full backend teardown
+// (R_MD5_ResetGpuShaders). A mesh stamps this at upload; when it no longer matches, that mesh's cached
+// buffer handles belong to a destroyed backend (their table slots have been reissued to other
+// resources), so they must be dropped WITHOUT DestroyBuffer -- freeing a reused slot would clobber a
+// live buffer -- and re-uploaded. Starts at 1 so a mesh's default 0 never coincides with a live gen.
+static unsigned int r_md5GpuGen = 1;
+
 static rhi::ShaderHandle r_md5SkinShader = 0;		// compiled once, shared by all meshes
 static bool r_md5SkinShaderTried = false;
 static rhi::ShaderHandle r_md5SkinPrevShader = 0;	// PREVPOS variant (skinned motion vectors): binding 6 must be bound
@@ -211,6 +218,7 @@ idMD5Mesh::idMD5Mesh() {
 	skinGpuWDesc		= 0;
 	skinGpuWStart		= 0;
 	skinGpuLocalTBN		= 0;
+	skinGpuGen			= 0;
 	numTessOutVerts		= 0;
 	numTessOutTris		= 0;
 	tessBakeLevel		= 0;
@@ -222,6 +230,7 @@ idMD5Mesh::idMD5Mesh() {
 	tessGpuBarySeam		= 0;
 	tessGpuSrcTri		= 0;
 	tessGpuHeight		= 0;
+	tessGpuGen			= 0;
 }
 
 /*
@@ -674,7 +683,10 @@ void idMD5Mesh::FreeGpuSkinData( void ) {
 	Mem_Free16( skinExpandLocalTBN );	skinExpandLocalTBN = NULL;
 	Mem_Free16( skinTemplate );			skinTemplate = NULL;
 	rhi::RHI *r = rhi::GetRHI();
-	if ( r ) {
+	// only destroy buffers that belong to the CURRENT backend; a full teardown already freed (and
+	// reissued) a previous generation's slots, so destroying those stale handles would hit a
+	// reused slot and clobber a live buffer.
+	if ( r && skinGpuGen == r_md5GpuGen ) {
 		if ( skinGpuWeights )   { r->DestroyBuffer( skinGpuWeights ); }
 		if ( skinGpuWDesc )     { r->DestroyBuffer( skinGpuWDesc ); }
 		if ( skinGpuWStart )    { r->DestroyBuffer( skinGpuWStart ); }
@@ -695,8 +707,13 @@ data isn't built or a buffer couldn't be created (caller falls back to the CPU s
 ====================
 */
 bool idMD5Mesh::EnsureSkinBuffersUploaded( void ) {
+	// stale handles from a destroyed backend (full vid_restart / mod switch): drop them WITHOUT
+	// DestroyBuffer -- their table slots were reissued to other resources -- and re-upload below.
+	if ( skinGpuWeights && skinGpuGen != r_md5GpuGen ) {
+		skinGpuWeights = skinGpuWDesc = skinGpuWStart = skinGpuLocalTBN = 0;
+	}
 	if ( skinGpuWeights ) {
-		return true;						// already uploaded
+		return true;						// already uploaded (current backend)
 	}
 	if ( !skinExpandLocalTBN || skinExpandCount <= 0 || numOutputVerts <= 0 ) {
 		return false;
@@ -718,6 +735,7 @@ bool idMD5Mesh::EnsureSkinBuffersUploaded( void ) {
 		skinGpuWeights = skinGpuWDesc = skinGpuWStart = skinGpuLocalTBN = 0;
 		return false;
 	}
+	skinGpuGen = r_md5GpuGen;				// these handles belong to the current backend
 	return true;
 }
 
@@ -880,6 +898,10 @@ void R_MD5_ResetGpuShaders( void ) {
 	r_md5SkinShader = 0;		r_md5SkinShaderTried = false;
 	r_md5SkinPrevShader = 0;	r_md5SkinPrevShaderTried = false;
 	r_md5TessShader = 0;		r_md5TessShaderTried = false;
+	// the backend is gone: every per-mesh skin/tess buffer handle cached across all MD5 meshes now
+	// names a reissued table slot. Bump the generation so EnsureSkin/TessBuffersUploaded re-uploads
+	// them lazily and FreeGpuSkinData/FreeTessData skip the (now dangling) DestroyBuffer.
+	r_md5GpuGen++;
 }
 
 // Bilinear sample of the SIGNED tess height map (mirrors tess.glsl dudeTessDisplace).
@@ -924,7 +946,8 @@ void idMD5Mesh::FreeTessData( void ) {
 	Mem_Free16( tessHeight );		tessHeight = NULL;
 	Mem_Free16( tessExpandIndexes );	tessExpandIndexes = NULL;
 	rhi::RHI *r = rhi::GetRHI();
-	if ( r ) {
+	// only our own (current-backend) buffers are ours to destroy (see FreeGpuSkinData)
+	if ( r && tessGpuGen == r_md5GpuGen ) {
 		if ( tessGpuBarySeam ) { r->DestroyBuffer( tessGpuBarySeam ); }
 		if ( tessGpuSrcTri )   { r->DestroyBuffer( tessGpuSrcTri ); }
 		if ( tessGpuHeight )   { r->DestroyBuffer( tessGpuHeight ); }
@@ -1088,6 +1111,10 @@ all entities using this model. false if not built or a buffer failed (caller fal
 ====================
 */
 bool idMD5Mesh::EnsureTessBuffersUploaded( void ) {
+	// stale handles from a destroyed backend: drop without DestroyBuffer and re-upload (see skinGpuGen)
+	if ( tessGpuBarySeam && tessGpuGen != r_md5GpuGen ) {
+		tessGpuBarySeam = tessGpuSrcTri = tessGpuHeight = 0;
+	}
 	if ( tessGpuBarySeam ) {
 		return true;
 	}
@@ -1108,6 +1135,7 @@ bool idMD5Mesh::EnsureTessBuffersUploaded( void ) {
 		tessGpuBarySeam = tessGpuSrcTri = tessGpuHeight = 0;
 		return false;
 	}
+	tessGpuGen = r_md5GpuGen;				// these handles belong to the current backend
 	return true;
 }
 

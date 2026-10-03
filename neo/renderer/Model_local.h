@@ -194,6 +194,7 @@ private:
 	unsigned int				skinGpuWDesc;
 	unsigned int				skinGpuWStart;
 	unsigned int				skinGpuLocalTBN;
+	unsigned int				skinGpuGen;			// backend generation these handles were uploaded at (0 = none); a full teardown bumps it, invalidating them without a double-free
 
 	void						BuildGpuSkinData( const idJointMat *bindJoints );
 	void						FreeGpuSkinData( void );
@@ -222,6 +223,7 @@ private:
 	unsigned int				tessGpuBarySeam;
 	unsigned int				tessGpuSrcTri;
 	unsigned int				tessGpuHeight;
+	unsigned int				tessGpuGen;			// backend generation these handles were uploaded at (see skinGpuGen)
 
 	void						BuildTessTopology( const idJointMat *bindJoints );
 	void						FreeTessData( void );
