@@ -2987,7 +2987,8 @@ struct EnhancementPreset {
 	// Max texture anisotropy (appended, see note above; image_anisotropy). Works on every backend —
 	// GL/GL3 set it per texture object, VK bakes it into the sampler (RefreshAnisotropySamplers). The
 	// requested level is clamped to the device max at apply time, so e.g. 6 on a 4x card becomes 4.
-	// Potato/Low 1 (the faithful, stock-Doom3 floor); Medium/High 2; Ultra/Nightmare 4; Ultra Nightmare 6.
+	// Potato/Low 1 (the faithful, stock-Doom3 floor); Medium 2; High 4; Ultra 8; Nightmare 16. Clamped
+	// to the device max at apply time, so a level above the card's cap quietly becomes the cap.
 	int   anisotropy;               // image_anisotropy
 };
 
@@ -3001,9 +3002,9 @@ static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f, false, 1.20f, 1 },
 	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.12f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 1 },
 	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  8,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.12f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2 },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 10,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2 },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2400, 2400, 11,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4 },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  3600, 3600, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4 },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 10,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4 },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2400, 2400, 11,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 8 },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  3600, 3600, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 16 },
 };
 
 // Ray-tracing augmentation layered on top of a raster tier when RTX is on and the device is
@@ -3177,7 +3178,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	// Max texture anisotropy (image_anisotropy; every backend). Set by name — it is a renderer cvar,
 	// not one of the r_* handles this file holds. ChangeTextureFilter reclamps it to the device max,
 	// and on VK BeginFrame's live poll rebuilds the samplers, so the preset takes effect without a
-	// vid_restart. Potato/Low 1 (the faithful, no-AF floor); Medium/High 2; Ultra/Nightmare 4; Ultra Nightmare 6.
+	// vid_restart. Potato/Low 1 (the faithful, no-AF floor); Medium 2; High 4; Ultra 8; Nightmare 16.
 	cvarSystem->SetCVarInteger( "image_anisotropy", p.anisotropy );
 
 	// --- Ray-tracing axis (orthogonal to the raster tier above) ---
