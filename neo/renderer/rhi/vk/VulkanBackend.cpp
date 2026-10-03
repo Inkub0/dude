@@ -1087,6 +1087,14 @@ private:
 	// FSR2 context down at the frame boundary when this changes (an r_fsrScale switch), so the
 	// transition frame's many render-target resizes never race in-flight work. 0 = first frame.
 	int							fsrAppliedW = 0, fsrAppliedH = 0;
+	// Belt-and-suspenders: a signature of the resource-reconfiguring graphics cvars (feature toggles,
+	// resolution scales, shadow sizes). BeginFrame drains the GPU once whenever it changes, so a preset
+	// flip or a single toggle never reconfigures targets / the RT scene / NRD / FSR2 while the previous
+	// frame is still in flight (the "VK device dead" on a settings change). Continuous uniform sliders are
+	// deliberately NOT in the signature, so dragging them never hitches.
+	uint64_t					gfxCfgSig = 0;
+	bool						gfxCfgSigValid = false;
+	uint64_t					ComputeGfxCfgSignature() const;
 	VkImage						fsr2Out = VK_NULL_HANDLE;
 	VmaAllocation				fsr2OutAlloc = NULL;
 	VkImageView					fsr2OutView = VK_NULL_HANDLE;
@@ -2703,6 +2711,34 @@ void VulkanBackend::GpuTimerReadback( int slot ) {
 
 /*
 ====================
+VulkanBackend::ComputeGfxCfgSignature
+
+A hash of the graphics cvars whose change RECONFIGURES GPU resources (resizes targets, toggles a
+pass's buffers, builds/tears the RT scene or the FSR2/NRD contexts). BeginFrame drains the device
+when this changes so the reconfiguration never races in-flight work. Deliberately excludes purely
+uniform knobs (intensities, radii, biases, colours) so dragging those sliders never forces an idle.
+====================
+*/
+uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
+	uint64_t h = 1469598103934665603ull;		// FNV-1a basis
+	auto mix = [&]( uint32_t v ) { h = ( h ^ v ) * 1099511628211ull; };
+	auto mixB = [&]( const idCVar &c ) { mix( c.GetBool() ? 1u : 0u ); };
+	auto mixI = [&]( const idCVar &c ) { mix( (uint32_t)c.GetInteger() ); };
+	auto mixF = [&]( const idCVar &c ) { mix( (uint32_t)( c.GetFloat() * 1000.0f + 0.5f ) ); };
+	// pipeline / pass toggles (each resizes or (de)allocates its targets)
+	mixB( r_hdr ); mixB( r_fsr ); mixB( r_ssao ); mixB( r_ssr ); mixB( r_shadowMapping );
+	mixB( r_volumetrics ); mixB( r_motionVectors ); mixB( r_gpuSkinning );
+	mixI( r_rhiAA ); mixI( r_shadowMapSize ); mixI( r_shadowMapPointSize );
+	// RT scene / RT passes (toggling any builds or tears the TLAS + NRD / RT targets)
+	mixB( r_rtgi ); mixB( r_rtao ); mixB( r_rtSunShadows ); mixB( r_rtMovingLights );
+	mixB( r_rtAllLights ); mixB( r_rtReflections ); mixB( r_rtgiCheckerboard );
+	// resolution scales (resize the gather / denoise / reflection / FSR targets)
+	mixF( r_fsrScale ); mixF( r_rtgiResScale ); mixF( r_rtaoResScale ); mixF( r_ssrResScale ); mixF( r_rtReflResScale );
+	return h;
+}
+
+/*
+====================
 VulkanBackend::BeginFrame
 ====================
 */
@@ -2728,26 +2764,33 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	FrameSlot &f = frames[frameIndex];
 	vkWaitForFences( device, 1, &f.fence, VK_TRUE, UINT64_MAX );
 
-	// --- FSR2 render-scale transition: idle-rebuild at the frame boundary ---
-	// Changing r_fsrScale (e.g. 100% -> 67%) resizes the whole render-size resource set -- the HDR
-	// scene buffer, FSR2's context + history, NRD, SSR and its temporal history, the RT-shadow-blur
-	// targets, the velocity prepass. Each resize is individually fence-safe, but doing them all
-	// scattered through the transition frame's passes (some rebuilds even wait the device idle
-	// mid-recording) raced in-flight work and lost the device almost every time. Here, at the frame
-	// boundary before anything records, drain the GPU ONCE so no in-flight frame holds an old-size
-	// resource, and tear the FSR2 context down cleanly so its own mid-frame rebuild (and internal
-	// wait-idle) is skipped. frameOpen is still false, so this is a true between-frames teardown.
-	// Only fires on an actual size change; r_fsr off keeps render == display, so toggling scale with
-	// FSR disabled is a no-op here. The one-time hitch on apply is acceptable for a rare settings change.
+	// --- Graphics-reconfiguration idle-rebuild at the frame boundary (belt-and-suspenders) ---
+	// Changing a resource-reconfiguring setting (an FSR render scale, or any feature toggle / resolution
+	// scale / shadow size - a preset flip changes a whole batch at once) makes the NEXT frame resize the
+	// HDR scene buffer, FSR2's context, NRD, SSR + its history, the RT-shadow-blur targets, the velocity
+	// prepass, and build/tear the RT scene. Each step is individually fence-safe, but doing them scattered
+	// through the transition frame's passes (some even wait the device idle mid-recording) raced the other
+	// frame-in-flight and lost the device "from time to time when changing settings". Here, at the frame
+	// boundary before anything records (frameOpen still false), drain the GPU ONCE whenever either the FSR
+	// size or the graphics-config signature changed, so none of that reconfiguration races in-flight work.
+	// The signature excludes continuous uniform sliders, so dragging an intensity never triggers this; the
+	// one-time hitch on a toggle / preset apply is invisible during menu interaction.
 	{
 		int fsrW = 0, fsrH = 0;
 		R_FsrWorldSize( fsrW, fsrH );
-		if ( ( fsrW != fsrAppliedW || fsrH != fsrAppliedH ) && fsrAppliedW != 0 ) {
+		const bool fsrSizeChanged = ( fsrW != fsrAppliedW || fsrH != fsrAppliedH ) && fsrAppliedW != 0;
+		const uint64_t sig = ComputeGfxCfgSignature();
+		const bool cfgChanged = gfxCfgSigValid && ( sig != gfxCfgSig );
+		if ( fsrSizeChanged || cfgChanged ) {
 			vkDeviceWaitIdle( device );		// frame boundary: all submitted work done, nothing in flight
-			Fsr2DestroyContext( true );		// deviceIdle = true: immediate, clean teardown (rebuilt this frame)
+		}
+		if ( fsrSizeChanged ) {
+			Fsr2DestroyContext( true );		// FSR size changed: clean teardown so the mid-frame rebuild + its internal wait-idle are skipped
 		}
 		fsrAppliedW = fsrW;
 		fsrAppliedH = fsrH;
+		gfxCfgSig = sig;
+		gfxCfgSigValid = true;
 	}
 
 	// FSR2 auto-reactive (R1/D): the opaque snapshot is one-frame data — a new frame
