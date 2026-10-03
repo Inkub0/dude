@@ -1053,7 +1053,14 @@ private:
 	VmaAllocation				nrdCbAlloc = VK_NULL_HANDLE;
 	void *						nrdCbMapped = NULL;
 	uint32_t					nrdCbStride = 0;	// constantBufferMaxDataSize, UBO-aligned
-	uint32_t					nrdCbSets = 0;		// ring capacity per frame slot (= setsMaxNum)
+	uint32_t					nrdCbSets = 0;		// ring capacity per frame slot (= setsMaxNum * NRD_FRAME_PASSES)
+	// NRD can record more than once onto the same frame cb/slot — a portal-sky map issues two
+	// full-window views (D3XP/LM), each denoising. The slot's pool is reset and its CB ring cursor
+	// restarted only ONCE per frame (keyed on streamGen), not per call, so the second call never frees
+	// the first's still-recorded sets or overwrites its constants. nrdCbSets is sized for all passes.
+	static const int			NRD_FRAME_PASSES = 2;
+	int							nrdSlotGen[FRAMES_IN_FLIGHT] = { -1, -1 };	// streamGen this slot's pool was last reset at
+	uint32_t					nrdSlotCursor[FRAMES_IN_FLIGHT] = {};		// running CB/descriptor cursor within the frame
 	int							nrdW = 0, nrdH = 0;
 	bool						nrdPoolsReady = false;	// pool images transitioned to GENERAL
 	// user (non-pool) resources for NrdRecordDispatches, indexed by nrd::ResourceType —
@@ -6739,7 +6746,8 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 
 	// per-dispatch constant ring: one UBO-aligned slice per descriptor set, per frame slot
 	// (a recorded frame's constants must survive until its fence is waited)
-	nrdCbSets = inst.descriptorPoolDesc.setsMaxNum > 0 ? inst.descriptorPoolDesc.setsMaxNum : 64;
+	// sized for NRD_FRAME_PASSES denoise passes on one frame cb (portal-sky + main view)
+	nrdCbSets = ( inst.descriptorPoolDesc.setsMaxNum > 0 ? inst.descriptorPoolDesc.setsMaxNum : 64 ) * NRD_FRAME_PASSES;
 	const VkDeviceSize uboAlign = physProps.limits.minUniformBufferOffsetAlignment > 0
 		? physProps.limits.minUniformBufferOffsetAlignment : 256;
 	nrdCbStride = (uint32_t)( ( inst.constantBufferMaxDataSize + uboAlign - 1 ) & ~( uboAlign - 1 ) );
@@ -6767,8 +6775,9 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 		uint32_t sizeCount = 0;
 		sizes[sizeCount++] = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nrdCbSets };
 		sizes[sizeCount++] = { VK_DESCRIPTOR_TYPE_SAMPLER, nrdCbSets * ( nrdSamplerCount > 0 ? nrdSamplerCount : 1 ) };
-		sizes[sizeCount++] = { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, inst.descriptorPoolDesc.totalTexturesNum > 0 ? inst.descriptorPoolDesc.totalTexturesNum : 1 };
-		sizes[sizeCount++] = { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, inst.descriptorPoolDesc.totalStorageTexturesNum > 0 ? inst.descriptorPoolDesc.totalStorageTexturesNum : 1 };
+		// image counts are per-pass totals; scale by NRD_FRAME_PASSES to cover two passes on one slot
+		sizes[sizeCount++] = { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, ( inst.descriptorPoolDesc.totalTexturesNum > 0 ? inst.descriptorPoolDesc.totalTexturesNum : 1 ) * NRD_FRAME_PASSES };
+		sizes[sizeCount++] = { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, ( inst.descriptorPoolDesc.totalStorageTexturesNum > 0 ? inst.descriptorPoolDesc.totalStorageTexturesNum : 1 ) * NRD_FRAME_PASSES };
 		VkDescriptorPoolCreateInfo dpci = {};
 		dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		dpci.maxSets = nrdCbSets * 2;		// each dispatch: one resources set + one CB/samplers set
@@ -6783,6 +6792,7 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 	nrdW = w;
 	nrdH = h;
 	nrdPoolsReady = false;		// fresh images: first record transitions them to GENERAL
+	for ( int f = 0; f < FRAMES_IN_FLIGHT; f++ ) { nrdSlotGen[f] = -1; nrdSlotCursor[f] = 0; }	// fresh pools: force a reset on first record
 	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
 	return true;
 }
@@ -6838,6 +6848,7 @@ void VulkanBackend::NrdDestroy( bool deviceIdle ) {
 	}
 	nrdW = nrdH = 0;
 	nrdPoolsReady = false;
+	for ( int f = 0; f < FRAMES_IN_FLIGHT; f++ ) { nrdSlotGen[f] = -1; nrdSlotCursor[f] = 0; }
 	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
 }
 
@@ -6875,10 +6886,6 @@ bool VulkanBackend::NrdRecordDispatches( VkCommandBuffer cb, const nrd::Identifi
 	if ( dispatchCount == 0 ) {
 		return true;
 	}
-	if ( dispatchCount > nrdCbSets ) {
-		common->Warning( "NRD: %u dispatches exceed the %u-slot CB/descriptor ring", dispatchCount, nrdCbSets );
-		return false;
-	}
 
 	// first record after a (re)create: move every pool image to GENERAL for good
 	if ( !nrdPoolsReady ) {
@@ -6907,13 +6914,25 @@ bool VulkanBackend::NrdRecordDispatches( VkCommandBuffer cb, const nrd::Identifi
 		nrdPoolsReady = true;
 	}
 
-	// one recorded frame per SLOT at a time: this slot's fence was waited when the frame
-	// began, so its pool/CB slice are no longer referenced by the GPU and can be reused
+	// Reset this slot's pool + CB ring ONCE per frame, not per call: the slot's fence was waited in
+	// BeginFrame, so the previous frame's sets/constants are free, but a SECOND call this frame (a
+	// portal-sky view + the main view) must keep the first call's sets and constants intact and append
+	// after them. Keyed on streamGen (bumped once per BeginFrame); the self-test forces a reset each
+	// iteration by zeroing nrdSlotGen before the call (it submit-and-waits between iterations).
 	VkDescriptorPool descPool = nrdDescPools[frameIndex];
 	const uint32_t cbBase = (uint32_t)frameIndex * nrdCbSets * nrdCbStride;
-	vkResetDescriptorPool( device, descPool, 0 );
+	if ( nrdSlotGen[frameIndex] != streamGen ) {
+		vkResetDescriptorPool( device, descPool, 0 );
+		nrdSlotCursor[frameIndex] = 0;
+		nrdSlotGen[frameIndex] = streamGen;
+	}
+	if ( nrdSlotCursor[frameIndex] + dispatchCount > nrdCbSets ) {
+		common->Warning( "NRD: %u dispatches would overflow this slot's %u-set ring (cursor %u) - denoise skipped",
+			dispatchCount, nrdCbSets, nrdSlotCursor[frameIndex] );
+		return false;
+	}
 
-	uint32_t cbCursor = 0;
+	uint32_t cbCursor = nrdSlotCursor[frameIndex];
 	for ( uint32_t d = 0; d < dispatchCount; d++ ) {
 		const nrd::DispatchDesc &dd = dispatches[d];
 		const NrdPipe &pipe = nrdPipes[dd.pipelineIndex];
@@ -7010,6 +7029,7 @@ bool VulkanBackend::NrdRecordDispatches( VkCommandBuffer cb, const nrd::Identifi
 		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 			0, 1, &mb, 0, NULL, 0, NULL );
 	}
+	nrdSlotCursor[frameIndex] = cbCursor;		// a later call this frame appends after these dispatches
 	return true;
 }
 
@@ -7744,6 +7764,9 @@ void VulkanBackend::NrdSelfTest() {
 		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 			0, 1, &mb, 0, NULL, 0, NULL );
 
+		// each self-test iteration is its own submit-and-wait, so force the once-per-frame pool/ring
+		// reset (streamGen does not advance here — no BeginFrame between iterations)
+		nrdSlotGen[frameIndex] = -1;
 		if ( !NrdRecordDispatches( uploadCb, &reblurId, 1 ) ) {
 			common->Printf( "NRD self-test: FAIL - NrdRecordDispatches (frame %d)\n", f );
 			vkEndCommandBuffer( uploadCb );
