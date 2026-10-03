@@ -3398,18 +3398,60 @@ static size_t RB_RHI_CubeBytes( int size ) {
 	return (size_t)6 * (size_t)size * (size_t)size * 4;
 }
 
-// resolved VRAM budget in bytes: -1 = half of detected video memory (2 GB fallback
-// when the vendor query is unavailable), 0 = unlimited.
+// resolved shadow-cache VRAM budget in bytes.
+//   r_shadowMapCacheMB > 0 : that many MB (explicit).
+//   r_shadowMapCacheMB == 0 : unlimited.
+//   r_shadowMapCacheMB  < 0 : AUTO -- give the cache all the VRAM actually free, minus a safety
+//                             reserve, so static cubes almost never evict (eviction + re-render is
+//                             the frame-time cost we want to avoid). "Free" is measured live via VMA
+//                             (VK_EXT_memory_budget): budget - (usage - ourCacheBytes) is the space
+//                             left after everything NON-shadow the app has allocated, and we keep a
+//                             reserve on top for transient growth (streaming, RT scene). This scales
+//                             to the card (a 24 GB GPU gets a far bigger cache than a 8 GB one) instead
+//                             of a blind half-of-VRAM. Falls back to the old half-VRAM on GL3 / no query.
+// Note: under r_rtAllLights (with a live TLAS) no shadow maps render, so the cache is force-flushed in
+// RB_RHI_ResetShadowTallies and this budget never actually governs anything - it's moot, by design.
 static size_t RB_RHI_CacheBudgetBytes() {
-	int mb = r_shadowMapCacheMB.GetInteger();
-	if ( mb < 0 ) {
-		const int vram = glConfig.vidMemMB > 0 ? glConfig.vidMemMB : 2048;
-		mb = vram / 2;
+	const int mb = r_shadowMapCacheMB.GetInteger();
+	if ( mb > 0 ) {
+		return (size_t)mb * 1024 * 1024;	// explicit cap
 	}
-	if ( mb <= 0 ) {
+	if ( mb == 0 ) {
 		return (size_t)-1;					// unlimited
 	}
-	return (size_t)mb * 1024 * 1024;
+	// --- AUTO (-1) ---
+	// Recompute at most once per view (rhiCubeCacheFrameNo), with hysteresis, so the budget is
+	// stable within a view and doesn't flap frame-to-frame (a flapping budget would itself cause
+	// the evict/re-cache churn we're trying to kill).
+	static size_t autoBudget = 0;
+	static int    autoFrame  = -1;
+	if ( autoFrame != rhiCubeCacheFrameNo ) {
+		autoFrame = rhiCubeCacheFrameNo;
+		rhi::RHI *r = rhi::GetRHI();
+		uint64_t usage = 0, budget = 0;
+		if ( r != NULL && r->GetDeviceLocalMemory( usage, budget ) && budget > 0 ) {
+			// what everything NON-shadow currently holds (our cache's own bytes don't count against it)
+			const uint64_t nonShadow = ( usage > rhiCubeCacheBytes ) ? ( usage - rhiCubeCacheBytes ) : 0;
+			// safety reserve for transient growth: ~8% of VRAM, at least 768 MB
+			uint64_t reserve = budget / 12;
+			const uint64_t minReserve = (uint64_t)768 * 1024 * 1024;
+			if ( reserve < minReserve ) { reserve = minReserve; }
+			int64_t target = (int64_t)budget - (int64_t)nonShadow - (int64_t)reserve;
+			const int64_t floorBytes = (int64_t)256 * 1024 * 1024;	// always allow a little cache
+			if ( target < floorBytes ) { target = floorBytes; }
+			// hysteresis: only move the committed budget when the target shifts by > ~5% of VRAM,
+			// so a transient usage blip doesn't trigger an eviction wave.
+			const uint64_t band = budget / 20;
+			if ( autoBudget == 0 || (uint64_t)llabs( target - (int64_t)autoBudget ) > band ) {
+				autoBudget = (size_t)target;
+			}
+		} else if ( autoBudget == 0 ) {
+			// GL3 / query failed: the old half-of-VRAM heuristic (2 GB fallback).
+			const int vram = glConfig.vidMemMB > 0 ? glConfig.vidMemMB : 2048;
+			autoBudget = (size_t)( vram / 2 ) * 1024 * 1024;
+		}
+	}
+	return autoBudget;
 }
 
 // FNV-1a over a byte range, folded into an accumulator.
@@ -8959,8 +9001,16 @@ static void RB_RHI_ResetShadowTallies( rhi::RHI *r ) {
 	rhiMapCacheRendered = 0;
 	rhiCubeCacheFrameNo++;			// bump before the light loop so lastFrame == "this view"
 	RB_RHI_SnapshotLightBudgetHyst();	// freeze incumbency for this view (order-stable ranking)
-	// free the whole cache when it's switched off, so its VRAM doesn't linger
-	if ( !r_shadowMapCache.GetBool() ) {
+	// Free the whole cache when it can't be used, so its VRAM doesn't linger - and so the
+	// cache budget stops applying the moment it's redundant:
+	//   - r_shadowMapCache off (explicit), or
+	//   - r_rtAllLights with a live TLAS: every shadow-casting light takes the inline RT ray and
+	//     NO shadow maps are rendered at all, so any cached cubes/2D maps are dead weight. Hand
+	//     that VRAM straight back to the RT scene instead of holding a whole budget's worth of
+	//     shadows nothing will ever sample. (Without a TLAS - RT off/unsupported - lights fall
+	//     back to maps, so the normal cache + budget still apply.)
+	const bool rtAllLightsServes = r_rtAllLights.GetBool() && r != NULL && r->GetTlasAddress() != 0;
+	if ( !r_shadowMapCache.GetBool() || rtAllLightsServes ) {
 		if ( rhiCubeCacheBytes > 0 ) {
 			RB_RHI_ResetCubeCache( r );
 		}

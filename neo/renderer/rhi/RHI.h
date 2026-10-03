@@ -606,6 +606,11 @@ public:
 	// Cumulative animated-BLAS lifecycle counters + current live BLAS count (r_shadowMapCacheDebug
 	// readout). VK + RT only; leaves the outputs at 0 otherwise.
 	virtual void	AnimBlasStats( int &builds, int &refits, int &retires, int &live ) { builds = refits = retires = live = 0; }
+	// Device-local (VRAM) usage + budget in bytes, summed over device-local heaps (VK_EXT_memory_budget
+	// via VMA): usage = everything this app has allocated, budget = what the driver says we can use
+	// (total minus other processes' reservation). Returns false where it can't be queried (GL3), leaving
+	// the outputs untouched. Used to size the shadow-map cache against real free VRAM, not a fixed fraction.
+	virtual bool	GetDeviceLocalMemory( uint64_t &usageBytes, uint64_t &budgetBytes ) { return false; }
 	// RT reflections RR0 (docs/rtx-reflections.md): the per-instance geometry table's populated row
 	// count last frame + how many carry monster attributes (readout to confirm it tracks the TLAS
 	// instances before anything consumes it). VK + RT only; 0 otherwise.
