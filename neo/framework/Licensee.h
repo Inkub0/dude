@@ -44,6 +44,14 @@ If you have questions concerning this license or the applicable additional terms
 // DUDE - Doom3 Unified Development Engine (fork of dhewm3 1.5.5)
 #define ENGINE_VERSION					"DUDE 0.9.4"	// printed in console, used for window title
 
+// DUDE config-schema version. Bump this ONLY when a change makes the saved graphics /
+// enhancement settings incompatible (e.g. a preset-table restructure, a renamed/retyped
+// quality cvar) so that a stale value can no longer silently persist across an update. On
+// launch, a saved config written against a lower schema has its graphics/enhancement group
+// reset to defaults (keybinds, audio and resolution are preserved). Do NOT bump for routine
+// releases - only when the settings schema itself changes. See idCommonLocal::CheckConfigSchema.
+#define DUDE_CONFIG_SCHEMA				1
+
 #ifdef ID_REPRODUCIBLE_BUILD
 	// for reproducible builds we hardcode values that would otherwise come from __DATE__ and __TIME__
 	// NOTE: remember to update esp. the date for (pre-) releases and RCs and the like

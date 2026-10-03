@@ -3563,7 +3563,7 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		}
 		if ( !ssrDone && drawSurfs[i]->material->GetSort() > SS_DECAL ) {
 			ssrDone = true;
-			r->GpuScopeBegin( "ssr" );		// screen-space / RT reflections composite
+			r->GpuScopeBegin( "reflections" );	// screen-space SSR or RT reflections (whichever ran; see rtrefl.* vs no children)
 			RB_RHI_ScreenSpaceReflections( r, viewDef );
 			r->GpuScopeEnd();
 			// H6c RT GI apply, HERE (before the snapshot) rather than after post: the bounce is additive
@@ -3581,7 +3581,7 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, mvp );
 	}
 	if ( !ssrDone ) {
-		r->GpuScopeBegin( "ssr" );
+		r->GpuScopeBegin( "reflections" );
 		RB_RHI_ScreenSpaceReflections( r, viewDef );	// view had no translucent surfaces
 		r->GpuScopeEnd();
 		r->GpuScopeBegin( "rtgi apply" );				// GI into the opaque snapshot (see the split above)

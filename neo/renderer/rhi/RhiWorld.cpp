@@ -6093,7 +6093,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			rhi::ClearArgs rtClear;
 			memset( &rtClear, 0, sizeof( rtClear ) );
 			rtClear.color = true;
-			r->GpuScopeBegin( "ssr.trace" );		// RT reflection ray trace + hit shading (ssrRes)
+			r->GpuScopeBegin( "rtrefl.trace" );		// RT reflection ray trace + hit shading (ssrRes)
 			r->BeginTargetPass( rhiRtReflRT, &rtClear );
 			RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 			RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
@@ -6157,7 +6157,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 					// unit 0 = current RT contribution (via DrawFullscreen), 1 = history read slot,
 					// 2 = depth, 3 = velocity
-					r->GpuScopeBegin( "ssr.temporal" );		// temporal accumulate + upscale to full res
+					r->GpuScopeBegin( "rtrefl.temporal" );		// temporal accumulate + upscale to full res
 					r->BeginTargetPass( rhiRtReflHistRT[writeIdx], NULL );
 					RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
 					// first frame after (re)alloc the read slot was never written (VK layout UNDEFINED);
@@ -6202,7 +6202,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			cp.screenCorrection[0] = 1.0f / rtResW;
 			cp.screenCorrection[1] = 1.0f / rtResH;
 			RB_RHI_BindRTImage( r, 1, matImg );		// full-res roughness/metalness for the silhouette mask
-			r->GpuScopeBegin( "ssr.composite" );	// RR6b blur + additive composite onto the scene
+			r->GpuScopeBegin( "rtrefl.composite" );	// RR6b blur + additive composite onto the scene
 			RB_RHI_DrawFullscreen( r, copyProg, cp, r->GetRenderTargetImage( rtResultRT ),
 			                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 			r->GpuScopeEnd();
@@ -6987,6 +6987,9 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.denoisingRange = 20000.0f;			// < the ~30000 sky depth: sky excluded
 		da.frameIndex = (unsigned int)tr.frameCount;
 		da.reset = !rhiRtaoPrevValid;
+		// RTAO ReBLUR accumulation window (r_rtaoHistory): 0 keeps NRD's default (~30), >0 overrides
+		// it so the 1-spp occlusion can accumulate longer (smoother, less noise) or shorter (snappier).
+		da.maxAccumFrames = r_rtaoHistory.GetInteger();
 		rhiRtaoDenoisedThisView = r->RtaoDenoise( da );
 
 		// ---- H4d: composite into the STANDARD AO buffer and hand it to the lighting ----
@@ -7973,7 +7976,16 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( mode <= 0 || !r_ssao.GetBool() || !R_BackendSupportsEnhancements() ) {
 		return;
 	}
-	// mode 3 shows the raw normal G-buffer; 1/2 show the AO result
+	// Modes 1/2 show the AO result; mode 3 the raw normal G-buffer. When no AO producer ran this
+	// view, rhiSsaoResultRT still points at a buffer from an earlier frame (its handle is never
+	// cleared), so blitting it shows a stale, frozen image. That happens whenever RTGI is on:
+	// it supersedes screen-space AO, so RB_RHI_SSAOPass (GTAO) and RB_RHI_RtaoPass both stand down
+	// and rhiSsaoAppliedThisView stays false. Gate modes 1/2 on that flag so the AO channel shows
+	// nothing rather than a stale frame (use r_rtgiDebug to inspect the GI). Mode 3 is unaffected —
+	// the normal prepass still runs under RTGI (it feeds the GI receiver albedo).
+	if ( mode < 3 && !rhiSsaoAppliedThisView ) {
+		return;
+	}
 	rhi::RenderTargetHandle srcRT = ( mode >= 3 ) ? rhiNormalResultRT : rhiSsaoResultRT;
 	if ( !srcRT || r->GetRenderTargetImage( srcRT ) == 0 ) {
 		return;

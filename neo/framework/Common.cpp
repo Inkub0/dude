@@ -102,7 +102,17 @@ idCVar com_machineSpec( "com_machineSpec", "-1", CVAR_INTEGER | CVAR_ARCHIVE | C
 // DUDE: chosen enhancement quality tier for the in-game quality selector (choiceDef in
 // mainmenu.gui binds to this). -1 = Custom/unset, 0 = Potato .. 6 = Ultra Nightmare. The
 // "dudePreset" command applies it; see Dhewm3SettingsMenu.cpp.
-idCVar dude_preset( "dude_preset", "-1", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "DUDE enhancement quality tier: -1 = custom, 0 = Potato, 1 = Low, 2 = Medium, 3 = High, 4 = Ultra, 5 = Nightmare, 6 = Ultra Nightmare (VK + RT hardware)", -1, 6 );
+idCVar dude_preset( "dude_preset", "-1", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "DUDE enhancement quality tier (raster): -1 = custom, 0 = Potato, 1 = Low, 2 = Medium, 3 = High, 4 = Ultra, 5 = Nightmare. Ray tracing is the separate dude_rtx axis", -1, 5 );
+// DUDE: the ray-tracing axis, orthogonal to dude_preset. 0 = off (any card), 1 = on (hybrid RT
+// layered on the chosen raster tier; Vulkan + ray-query hardware only), 2 = reserved for H7 full
+// path tracing. "dude_preset 5 + dude_rtx 1" reproduces the retired Ultra Nightmare tier. Applied
+// together with the raster tier by the "dudePreset" command / the Graphics menu's Apply button.
+idCVar dude_rtx( "dude_rtx", "0", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "DUDE ray-tracing axis: 0 = off, 1 = on (hybrid RT, Vulkan + RT hardware), layered on top of the dude_preset raster tier", 0, 2 );
+// DUDE: the config-schema version the saved settings were last written against. Compared to
+// DUDE_CONFIG_SCHEMA (Licensee.h) at launch; a lower value triggers a one-time reset of the
+// graphics/enhancement cvars to their defaults (see idCommonLocal::CheckConfigSchema). Never
+// edit by hand - it is stamped automatically once the reset has run.
+idCVar dude_cfgSchema( "dude_cfgSchema", "0", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "internal: config-schema version the saved DUDE settings were written against", 0, 1000000 );
 // DUDE: menu bridge for the RHI antialiasing selector (choiceDef in mainmenu.gui binds to
 // this on the opengl3/Vulkan backends; legacy keeps the MSAA r_multisamples row). NOT
 // archived — the truth lives in r_rhiAA + r_fsr (both archived); this is synced from them
@@ -260,6 +270,7 @@ private:
 	void						ClearCommandLine( void );
 	bool						SafeMode( void );
 	void						CheckToolMode( void );
+	void						CheckConfigSchema( void );
 	void						WriteConfiguration( void );
 	void						DumpWarnings( void );
 	void						LoadGameDLL( void );
@@ -1294,6 +1305,67 @@ void idCommonLocal::WriteConfigToFile( const char *filename ) {
 	idKeyInput::WriteBindings( f );
 	cvarSystem->WriteFlaggedVariables( CVAR_ARCHIVE, "seta", f );
 	fileSystem->CloseFile( f );
+}
+
+/*
+===============
+idCommonLocal::CheckConfigSchema
+
+One-time reset of the graphics / enhancement settings when the saved config was written
+against an older DUDE_CONFIG_SCHEMA. DUDE adds a lot of archived quality cvars (the preset
+table, the RT tier, FSR2, GPU skinning, ...) and restructures them between releases; a value
+left over from a previous schema can silently mis-drive the renderer (a preset index that no
+longer exists, a tier cvar that moved). Rather than carry a migration shim per change, we
+stamp the schema and reset the whole graphics group to defaults when it is out of date.
+
+Preserved across the wipe: keybinds (handled by the bind system, not cvars), audio
+(CVAR_SOUND), and the display/output cvars listed below (resolution, fullscreen, gamma,
+vsync, MSAA, monitor choice) - these are not part of the enhancement schema and resetting
+them would only confuse the user at launch. Everything else flagged CVAR_RENDERER, plus the
+non-renderer preset selectors, goes back to its registered default.
+
+Runs after the config exec AND after the init-time ClearModifiedFlags, so the reset leaves the
+CVAR_ARCHIVE modified flag set and WriteConfiguration persists the new schema + defaults on
+shutdown (otherwise the stamp would never reach disk and the wipe would re-fire every launch).
+===============
+*/
+void idCommonLocal::CheckConfigSchema( void ) {
+	if ( dude_cfgSchema.GetInteger() >= DUDE_CONFIG_SCHEMA ) {
+		return;		// settings already match the current schema
+	}
+
+	const int from = dude_cfgSchema.GetInteger();
+
+	// Display / output cvars are CVAR_RENDERER too but are NOT part of the enhancement
+	// schema - snapshot them, reset the renderer group, then restore them.
+	static const char * const keep[] = {
+		"r_mode", "r_fullscreen", "r_fullscreenDesktop", "r_fullscreenDisplay",
+		"r_customWidth", "r_customHeight", "r_swapInterval", "r_multiSamples",
+		"r_gamma", "r_brightness", "r_gammaInShader",
+	};
+	const int keepCount = sizeof( keep ) / sizeof( keep[0] );
+	idStr saved[ sizeof( keep ) / sizeof( keep[0] ) ];
+	for ( int i = 0; i < keepCount; i++ ) {
+		saved[i] = cvarSystem->GetCVarString( keep[i] );
+	}
+
+	// reset the whole graphics/enhancement group to defaults
+	cvarSystem->ResetFlaggedVariables( CVAR_RENDERER );
+
+	// restore the preserved display settings
+	for ( int i = 0; i < keepCount; i++ ) {
+		cvarSystem->SetCVarString( keep[i], saved[i] );
+	}
+
+	// preset selectors / interpolation live outside CVAR_RENDERER (CVAR_SYSTEM) - reset them too
+	dude_preset.SetInteger( -1 );
+	dude_rtx.SetInteger( 0 );
+	com_interpolate.SetBool( false );
+
+	dude_cfgSchema.SetInteger( DUDE_CONFIG_SCHEMA );
+
+	common->Printf( "DUDE: config schema %d -> %d - graphics/enhancement settings reset to "
+		"defaults (keybinds, audio and resolution kept).\n", from, DUDE_CONFIG_SCHEMA );
 }
 
 /*
@@ -3577,6 +3649,12 @@ void idCommonLocal::InitGame( void ) {
 
 	// if any archived cvars are modified after this, we will trigger a writing of the config file
 	cvarSystem->ClearModifiedFlags( CVAR_ARCHIVE );
+
+	// DUDE: if the saved settings predate the current config schema, reset the graphics /
+	// enhancement group to defaults. Deliberately AFTER the ClearModifiedFlags above so the
+	// reset marks the archived cvars modified again and WriteConfiguration persists the new
+	// schema stamp on shutdown (otherwise it would re-fire every launch).
+	CheckConfigSchema();
 
 	// init the user command input code
 	usercmdGen->Init();

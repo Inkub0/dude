@@ -4648,13 +4648,15 @@ windowDef OptionsMenuParent {
 				textaligny	-6
 				forecolor	1, 1, 1, 1
 			}
-			// DUDE: quality is now a single cycling field (like Screen Size). It binds to the
-			// dude_preset cvar; onAction runs "exec dudePreset" which reads that cvar (written
-			// live by the choiceDef during HandleEvent) and applies the whole enhancement tier.
+			// DUDE: quality is a single cycling field (like Screen Size), binding the dude_preset
+			// RASTER tier; onAction runs "exec dudePreset" which reads that cvar (written live by
+			// the choiceDef during HandleEvent) and applies the tier. Ray tracing is the separate
+			// dude_rtx axis - currently surfaced in the ImGui settings menu (Graphics tab); the old
+			// "Ultra Nightmare" entry here is gone, being "Nightmare" + Ray Tracing On.
 			choiceDef OS1Primary {
 				rect		210, 1, 100, 14
-				choices		"Potato;Low;Medium;High;Ultra;Nightmare;Ultra Nightmare"
-				values		"0;1;2;3;4;5;6"
+				choices		"Potato;Low;Medium;High;Ultra;Nightmare"
+				values		"0;1;2;3;4;5"
 				cvar		"dude_preset"
 				updateGroup	render
 				choiceType	1
@@ -5059,6 +5061,60 @@ windowDef OptionsMenuParent {
 			}
 		}
 	//GAMMA (DUDE: live like brightness — applied in-shader, no restart)
+		// DUDE: ray-tracing axis (dude_rtx), orthogonal to the Quality tier above. Shown only on an
+		// RT-capable device (Vulkan + ray-query -> gui::rtCapable == 1, set in SetMainMenuGuiVars);
+		// hidden on legacy/GL3/non-RT GPUs, where it would do nothing. Fills the existing gap between
+		// the Antialiasing row (y=200) and Gamma (y=242), so no other row moves. onAction fires the
+		// same "exec dudePreset" as Quality - it re-applies the current tier plus this RT axis.
+		windowDef OSRtx {
+			rect		34, 221, 320, 16
+			visible		("gui::rtCapable" == 1)
+			windowDef OSRtxL {
+				rect		0, 0, 8, 16
+				background	"gui/mainmenu/select_edge"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OSRtxM {
+				rect		8, 0, 304, 16
+				background	"gui/mainmenu/select_border"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OSRtxR {
+				rect		312, 0, 8, 16
+				background	"gui/mainmenu/select_angle"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OSRtxTitle {
+				rect		1, 1, 180, 14
+				text		"Ray Tracing"
+				font		"fonts/bank"
+				textscale	0.25
+				textalign	2
+				textaligny	-6
+				forecolor	1, 1, 1, 1
+			}
+			choiceDef OSRtxPrimary {
+				rect		210, 1, 100, 14
+				choices		"Off;On"
+				values		"0;1"
+				cvar		"dude_rtx"
+				updateGroup	render
+				choiceType	1
+				font		"fonts/bank"
+				textscale	0.25
+				textalign	1
+				textaligny	-6
+				forecolor	0.6, 0.8, 0.8, 1
+
+				onAction {
+					set	"cmd"	"exec dudePreset" ;
+				}
+			}
+		}
+
 		windowDef OSGamma {
 			rect		34, 242, 320, 16
 			windowDef OSGammaL {
