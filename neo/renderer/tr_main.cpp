@@ -1579,9 +1579,14 @@ static bool R_RtGatherMonstersWorld( float *&pos, int *&idx, int &numVerts, int 
 static unsigned long long	s_rtLastTlasSig = 0;
 static bool					s_rtTlasEverBuilt = false;
 static bool					s_rtLastHadDyn = false;
+// set by R_RtStageAnimCasters (which runs earlier in the frame than R_RtRefreshInstances): true when
+// any GPU-skinned animated caster was staged this frame. Those casters change geometry every frame and
+// are appended to the per-frame TLAS by RefreshAnimBlas, so their presence must force the TLAS rebuild.
+static bool					s_rtStagedAnimCasters = false;
 static void R_RtDirtyReset( void ) {
 	s_rtTlasEverBuilt = false;
 	s_rtLastHadDyn = false;
+	s_rtStagedAnimCasters = false;
 	s_rtLastTlasSig = 0;
 }
 static unsigned long long R_RtHashBytes( unsigned long long h, const void *data, size_t n ) {
@@ -1797,6 +1802,15 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 		// freshly-built slot (disjoint, fence-safe), sidestepping the whole class including the
 		// host-write races a GPU barrier can't order. RTAO traces every pixel every frame, so
 		// the "RT free at rest" idle-skip premise doesn't apply here anyway — no real cost.
+		// animated per-entity BLAS casters count as dynamic: they are refit in place and appended to
+		// the per-frame TLAS by RefreshAnimBlas every frame, so an idle static signature (with RTAO and
+		// RTGI both off, which otherwise force the rebuild) must NOT pin the TLAS — that would freeze
+		// their transforms, leave this frame's refits unordered against the pinned TLAS's ray reads, and
+		// let a retired caster's BLAS be destroyed while the TLAS still instances it. OR-ing into dyn
+		// also makes s_rtLastHadDyn force one more rebuild the frame after they leave, dropping them.
+		if ( s_rtStagedAnimCasters ) {
+			dyn = true;
+		}
 		const bool dirty = !s_rtTlasEverBuilt || dyn || s_rtLastHadDyn || sig != s_rtLastTlasSig;
 		static int accBuilt = 0, accSkipped = 0, accStartMs = 0;
 		if ( !r_rtTlasDirty.GetBool() || dirty || r_rtao.GetBool() || r_rtgi.GetBool() ) {
@@ -1947,6 +1961,7 @@ static void R_RtStageAnimCasters( void ) {
 
 	if ( !r_rtAnimBlas.GetBool() || R_RtSceneWorld() == NULL || tr.viewDef == NULL ) {
 		r->UpdateAnimCasters( NULL, 0 );	// off / not a world view: clear staged, let the cache retire
+		s_rtStagedAnimCasters = false;
 		return;
 	}
 
@@ -1972,6 +1987,7 @@ static void R_RtStageAnimCasters( void ) {
 	}
 	if ( nCaster == 0 ) {
 		r->UpdateAnimCasters( NULL, 0 );
+		s_rtStagedAnimCasters = false;
 		return;
 	}
 
@@ -2038,6 +2054,7 @@ static void R_RtStageAnimCasters( void ) {
 		c.mask = 0xFF;
 	}
 	r->UpdateAnimCasters( casters, ci );
+	s_rtStagedAnimCasters = ( ci > 0 );		// forces the TLAS rebuild in R_RtRefreshInstances
 	Mem_Free16( casters );
 	Mem_Free16( geoms );
 }
@@ -2585,6 +2602,7 @@ void R_RtResetSceneState( void ) {
 	s_rtLastTlasSig = 0;
 	s_rtTlasEverBuilt = false;
 	s_rtLastHadDyn = false;
+	s_rtStagedAnimCasters = false;
 	s_rtWorldMap = "";
 }
 

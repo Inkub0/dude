@@ -2372,6 +2372,12 @@ void VulkanBackend::DestroySceneTargets() {
 	if ( sceneColorView )  { vkDestroyImageView( device, sceneColorView, NULL ); sceneColorView = VK_NULL_HANDLE; }
 	if ( sceneDepthView )  { vkDestroyImageView( device, sceneDepthView, NULL ); sceneDepthView = VK_NULL_HANDLE; }
 	if ( sceneColor )      { vmaDestroyImage( vma, sceneColor, sceneColorAlloc ); sceneColor = VK_NULL_HANDLE; sceneColorAlloc = NULL; }
+	// the merged-normal framebuffer binds sceneDepthView when HDR is off; forget the cached depth
+	// identity so the next BeginNormalPrepass rebuilds it rather than matching a reused handle value
+	// and keeping a framebuffer bound to the destroyed depth view (device is idle at every caller).
+	if ( sceneDepth != VK_NULL_HANDLE && sceneDepth == mergeNormalFbDepth ) {
+		mergeNormalFbDepth = VK_NULL_HANDLE;
+	}
 	if ( sceneDepth )      { vmaDestroyImage( vma, sceneDepth, sceneDepthAlloc ); sceneDepth = VK_NULL_HANDLE; sceneDepthAlloc = NULL; }
 	sceneExtent.width = sceneExtent.height = 0;
 }
@@ -5570,8 +5576,12 @@ void VulkanBackend::RefreshAnimBlas() {
 		mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 		mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
 		mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+		// dst also FRAGMENT_SHADER: harden the in-place-refit-without-TLAS-rebuild path (should no
+		// longer occur now that staged casters force the rebuild, but a refit this frame must never be
+		// unordered against a fragment ray read of a BLAS it rewrote)
 		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-			VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &mb, 0, NULL, 0, NULL );
+			VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			0, 1, &mb, 0, NULL, 0, NULL );
 	}
 	// retire entries not seen this frame beyond the grace window (fence-safe deferred destroy)
 	for ( size_t i = 0; i < animBlasCache.size(); i++ ) {
@@ -10234,6 +10244,13 @@ void VulkanBackend::FreeTargetObjects( RenderTarget &t ) {
 		}
 		fsr2DepthSrc = VK_NULL_HANDLE;
 	}
+	// Same ABA hazard for the merged-normal framebuffer, which binds this target's depth when it is
+	// the active frame target (HDR). Forget the cached depth-image identity so the next
+	// BeginNormalPrepass rebuilds the framebuffer (and retires the stale one) instead of matching a
+	// reused handle value and keeping a framebuffer bound to a destroyed depth view.
+	if ( t.dsImage != VK_NULL_HANDLE && t.dsImage == mergeNormalFbDepth ) {
+		mergeNormalFbDepth = VK_NULL_HANDLE;
+	}
 	for ( int f = 0; f < 6; f++ ) {
 		if ( t.fb[f] )       { vkDestroyFramebuffer( device, t.fb[f], NULL ); t.fb[f] = VK_NULL_HANDLE; }
 	}
@@ -11041,7 +11058,16 @@ RenderTargetHandle VulkanBackend::BeginNormalPrepass( int w, int h, const ClearA
 	// (re)build the framebuffer when the scene depth image changes (HDR toggle / resize)
 	VkImage depthImg = FrameDepthImage();
 	if ( mergeNormalFb == VK_NULL_HANDLE || mergeNormalFbDepth != depthImg ) {
-		if ( mergeNormalFb ) { vkDestroyFramebuffer( device, mergeNormalFb, NULL ); mergeNormalFb = VK_NULL_HANDLE; }
+		if ( mergeNormalFb ) {
+			// the previous frame (other slot) may still be executing against this framebuffer, so
+			// retire it fence-safely instead of destroying it now. A throwaway RenderTarget carrying
+			// only colorFb routes through FreeTargetObjects, which frees exactly that field. Reached
+			// only with a frame open (early-out above), so frameIndex names this frame's slot.
+			RenderTarget old;
+			old.colorFb = mergeNormalFb;
+			retiredTargets[frameIndex].push_back( old );
+			mergeNormalFb = VK_NULL_HANDLE;
+		}
 		VkImageView views[4];
 		views[0] = mergeNormalView;
 		if ( wantMrt || wantVel ) { views[1] = mergeMatView; }
