@@ -6093,7 +6093,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			rhi::ClearArgs rtClear;
 			memset( &rtClear, 0, sizeof( rtClear ) );
 			rtClear.color = true;
-			r->GpuScopeBegin( "ssr.trace" );		// RT reflection ray trace + hit shading (ssrRes)
+			r->GpuScopeBegin( "rtrefl.trace" );		// RT reflection ray trace + hit shading (ssrRes)
 			r->BeginTargetPass( rhiRtReflRT, &rtClear );
 			RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 			RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
@@ -6157,7 +6157,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 					// unit 0 = current RT contribution (via DrawFullscreen), 1 = history read slot,
 					// 2 = depth, 3 = velocity
-					r->GpuScopeBegin( "ssr.temporal" );		// temporal accumulate + upscale to full res
+					r->GpuScopeBegin( "rtrefl.temporal" );		// temporal accumulate + upscale to full res
 					r->BeginTargetPass( rhiRtReflHistRT[writeIdx], NULL );
 					RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
 					// first frame after (re)alloc the read slot was never written (VK layout UNDEFINED);
@@ -6202,7 +6202,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			cp.screenCorrection[0] = 1.0f / rtResW;
 			cp.screenCorrection[1] = 1.0f / rtResH;
 			RB_RHI_BindRTImage( r, 1, matImg );		// full-res roughness/metalness for the silhouette mask
-			r->GpuScopeBegin( "ssr.composite" );	// RR6b blur + additive composite onto the scene
+			r->GpuScopeBegin( "rtrefl.composite" );	// RR6b blur + additive composite onto the scene
 			RB_RHI_DrawFullscreen( r, copyProg, cp, r->GetRenderTargetImage( rtResultRT ),
 			                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 			r->GpuScopeEnd();
