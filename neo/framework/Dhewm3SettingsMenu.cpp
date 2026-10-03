@@ -2987,7 +2987,8 @@ struct EnhancementPreset {
 	// Max texture anisotropy (appended, see note above; image_anisotropy). Works on every backend —
 	// GL/GL3 set it per texture object, VK bakes it into the sampler (RefreshAnisotropySamplers). The
 	// requested level is clamped to the device max at apply time, so e.g. 6 on a 4x card becomes 4.
-	// Potato/Low 1 (the faithful, stock-Doom3 floor); Medium/High 2; Ultra/Nightmare 4; Ultra Nightmare 6.
+	// Potato/Low 1 (the faithful, stock-Doom3 floor); Medium 2; High 4; Ultra 8; Nightmare 16. Clamped
+	// to the device max at apply time, so a level above the card's cap quietly becomes the cap.
 	int   anisotropy;               // image_anisotropy
 };
 
@@ -3001,9 +3002,9 @@ static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f, false, 1.20f, 1 },
 	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.12f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 1 },
 	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  8,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.12f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2 },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 10,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2 },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2400, 2400, 11,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4 },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  3600, 3600, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4 },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 10,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4 },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2400, 2400, 11,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 8 },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  3600, 3600, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 16 },
 };
 
 // Ray-tracing augmentation layered on top of a raster tier when RTX is on and the device is
@@ -3029,6 +3030,9 @@ struct RtAugment {
 	float hdrGamma;			// RT-driven override of the raster value (-1 = keep raster)
 	float fsrScale;			// r_fsrScale when RTX on (the tier's default upscaling; 1 = Native-AA). A free
 							// override - the Upscaling menu can still change it without reading "Custom"
+	float blurMinPenumbra;	// r_rtShadowBlurMinPenumbra when rtShadowBlur on: skip the blur for lights whose
+							// screen penumbra is finer than this (px). Free knob - the debug slider tweaks it
+							// without reading "Custom" (not matched in Detect). Inert where rtShadowBlur is off
 };
 
 // RTAO rides the lower RT tiers at diminishing resolution (it auto-builds the RT scene on its own,
@@ -3037,13 +3041,13 @@ struct RtAugment {
 // reflections; Nightmare adds the heavy set (soft RT shadows on all lights, volumetrics). needVelocity
 // is on wherever a denoised RT effect runs (RTAO or RTGI) so NRD gets motion vectors.
 static const RtAugment rtAugment[PRESET_COUNT] = {
-//                  sun    mov    refl   rtao   aoRes  rtgi   giRes  blur   all    stag   vol    volL  vel    parlxSh hdrGam fsrScale
-/* Potato    */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, 1.0f  },
-/* Low       */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, 1.0f  },
-/* Medium    */   { false, false, false, true,  0.75f, false, 0.75f, false, false, false, false, 0,    true,  -1.0f, -1.0f, 1.0f  },
-/* High      */   { true,  true,  false, true,  0.8f,  false, 0.75f, false, false, false, false, 0,    true,  -1.0f, -1.0f, 1.0f  },
-/* Ultra     */   { true,  true,  true,  false, 1.0f,  true,  0.667f,false, false, false, false, 0,    true,  0.5f,  -1.0f, 1.0f  },
-/* Nightmare */   { true,  true,  true,  false, 0.75f, true,  0.75f, true,  true,  true,  true,  2,    true,  0.5f,  1.0f,  0.75f },
+//                  sun    mov    refl   rtao   aoRes  rtgi   giRes  blur   all    stag   vol    volL  vel    parlxSh hdrGam fsrScale penumbra
+/* Potato    */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, 1.0f,  1.0f },
+/* Low       */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, 1.0f,  1.0f },
+/* Medium    */   { false, false, false, true,  0.75f, false, 0.75f, false, false, false, false, 0,    true,  -1.0f, -1.0f, 1.0f,  1.0f },
+/* High      */   { true,  true,  false, true,  0.8f,  false, 0.75f, false, false, false, false, 0,    true,  -1.0f, -1.0f, 1.0f,  1.0f },
+/* Ultra     */   { true,  true,  true,  false, 1.0f,  true,  0.667f,true,  false, false, false, 0,    true,  0.5f,  -1.0f, 1.0f,  4.0f },
+/* Nightmare */   { true,  true,  true,  false, 0.75f, true,  0.75f, true,  true,  true,  true,  2,    true,  0.5f,  1.0f,  0.75f, 2.0f },
 };
 
 
@@ -3174,7 +3178,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	// Max texture anisotropy (image_anisotropy; every backend). Set by name — it is a renderer cvar,
 	// not one of the r_* handles this file holds. ChangeTextureFilter reclamps it to the device max,
 	// and on VK BeginFrame's live poll rebuilds the samplers, so the preset takes effect without a
-	// vid_restart. Potato/Low 1 (the faithful, no-AF floor); Medium/High 2; Ultra/Nightmare 4; Ultra Nightmare 6.
+	// vid_restart. Potato/Low 1 (the faithful, no-AF floor); Medium 2; High 4; Ultra 8; Nightmare 16.
 	cvarSystem->SetCVarInteger( "image_anisotropy", p.anisotropy );
 
 	// --- Ray-tracing axis (orthogonal to the raster tier above) ---
@@ -3197,6 +3201,13 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 			r_rtgiResScale.SetFloat( a.rtgiResScale );
 		}
 		r_rtShadowBlur.SetBool( a.rtShadowBlur );
+		// sub-pixel-penumbra skip threshold: a per-tier default (Ultra skips harder at 4 px for a
+		// cheaper blur, Nightmare softens more lights at 2 px) owned only where the blur runs. It
+		// stays a free knob (the debug slider changes it without reading "Custom", and it is not
+		// matched in Detect), so leave it untouched on tiers that don't blur.
+		if ( a.rtShadowBlur ) {
+			r_rtShadowBlurMinPenumbra.SetFloat( a.blurMinPenumbra );
+		}
 		r_rtAllLights.SetBool( a.rtAllLights );
 		r_rtShadowBlurStagger.SetBool( a.rtBlurStagger );
 		r_volumetrics.SetBool( a.volumetrics );
@@ -4612,6 +4623,12 @@ static void DrawDbgGroup_RTShadows()
 		"1 = the natural growth of a real light. Lower = soft almost straight away, then "
 		"levelling off (a more even blur). Higher = crisp for longer near the object, then "
 		"widening fast. Blur Intensity sets how much; this sets where. Default 1.45." );
+
+	CvarSliderF( "Skip Below Penumbra", r_rtShadowBlurMinPenumbra, 0.0f, 8.0f, "%.1f px", "Performance: a distant or small light casts a shadow edge finer than this many "
+		"screen pixels, so softening it would be invisible - skip its blur entirely and keep the "
+		"crisp hard ray (the whole per-light ray + blur chain is saved). Higher skips more lights "
+		"for more FPS; parallel suns are never skipped. 0 = blur every ray-served light. "
+		"Preset defaults: 4 at Ultra(RTX), 2 at Nightmare(RTX). Watch rtblur.ray's calls/frame in r_vkGpuTime 2." );
 
 	ImGui::BeginDisabled( !r_rtShadowBlurStagger.GetBool() );
 	if ( !r_rtShadowBlurStagger.GetBool() ) {

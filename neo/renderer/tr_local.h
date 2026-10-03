@@ -1059,6 +1059,7 @@ extern idCVar r_rtShadowBlurFastTiles;		// tile pass reads the compact RG8 summa
 extern idCVar r_rtShadowBlurCheckerboard;	// r_rtShadowBlur perf: trace the shadow ray at a static checkerboard, reconstruct skipped pixels in the horizontal blur
 extern idCVar r_volFastResolve;				// volumetric perf: low-res temporal + single depth-aware upsample at composite (vs upsample-then-full-res-temporal)
 extern idCVar r_rtShadowBlurCurve;			// exponent on the gap ratio: how the blur grows with distance from the caster (1 = geometric)
+extern idCVar r_rtShadowBlurMinPenumbra;	// skip the per-light blur when its estimated screen penumbra is below this many pixels (distant/small lights)
 extern idCVar r_rtTlasDirty;				// skip the per-frame TLAS rebuild when no mover/monster changed this frame
 extern idCVar r_rtSunShadowOffset;			// RT sun shadows: ray-origin normal offset (world units)
 extern idCVar r_rtMonsterShadows;			// RT sun shadows: include animated characters as per-frame casters
