@@ -3027,13 +3027,18 @@ struct RtAugment {
 	float hdrGamma;			// RT-driven override of the raster value (-1 = keep raster)
 };
 
+// RTAO rides the lower RT tiers at diminishing resolution (it auto-builds the RT scene on its own,
+// R_RtSceneWanted, so Medium can run it without RT shadows): Medium = AO-only @ 3/4, High adds RT
+// shadows + AO @ 4/5. Ultra drops RTAO for one-bounce RTGI (GI supersedes AO) and keeps shadows +
+// reflections; Nightmare adds the heavy set (soft RT shadows on all lights, volumetrics). needVelocity
+// is on wherever a denoised RT effect runs (RTAO or RTGI) so NRD gets motion vectors.
 static const RtAugment rtAugment[PRESET_COUNT] = {
 //                  sun    mov    refl   rtao   aoRes  rtgi   blur   all    stag   vol    vel    parlxSh hdrGam
 /* Potato    */   { false, false, false, false, 1.0f,  false, false, false, false, false, false, -1.0f, -1.0f },
 /* Low       */   { false, false, false, false, 1.0f,  false, false, false, false, false, false, -1.0f, -1.0f },
-/* Medium    */   { false, false, false, false, 1.0f,  false, false, false, false, false, false, -1.0f, -1.0f },
-/* High      */   { true,  true,  false, false, 1.0f,  false, false, false, false, false, false, -1.0f, -1.0f },
-/* Ultra     */   { true,  true,  true,  true,  0.75f, false, false, false, false, false, true,  0.5f,  -1.0f },
+/* Medium    */   { false, false, false, true,  0.75f, false, false, false, false, false, true,  -1.0f, -1.0f },
+/* High      */   { true,  true,  false, true,  0.8f,  false, false, false, false, false, true,  -1.0f, -1.0f },
+/* Ultra     */   { true,  true,  true,  false, 1.0f,  true,  false, false, false, false, true,  0.5f,  -1.0f },
 /* Nightmare */   { true,  true,  true,  false, 0.75f, true,  true,  true,  true,  true,  true,  0.5f,  1.0f  },
 };
 
@@ -4134,9 +4139,9 @@ static void DrawGraphicsMenu()
 
 		// Axis 2: ray tracing, orthogonal to the tier. The tickbox sits immediately to the right of
 		// the dropdown; it is greyed (and forced off) unless the device is RT-capable (VK + ray-query)
-		// and the chosen tier actually gains RT features (High and up - see rtAugment[]).
+		// and the chosen tier actually gains RT features (Medium and up - see rtAugment[]).
 		const bool rtCapable = R_SupportsRayTracing();
-		const bool rtTierHasRT = ( selPreset >= PRESET_HIGH );
+		const bool rtTierHasRT = ( selPreset >= PRESET_MEDIUM );
 		ImGui::SameLine();
 		ImGui::BeginDisabled( !rtCapable || !rtTierHasRT );
 		bool rtxOn = ( selRtx != RTX_OFF );
@@ -4145,11 +4150,12 @@ static void DrawGraphicsMenu()
 		}
 		ImGui::EndDisabled();
 		AddTooltip( rtCapable
-			? "Ray tracing, layered on top of the quality tier at left: High adds ray-traced shadows, "
-			  "Ultra adds ray-traced ambient occlusion, Nightmare adds one-bounce ray-traced global "
-			  "illumination, soft RT shadows on every light and volumetric lighting (the old 'Ultra "
-			  "Nightmare'). Independent of the tier, so it never changes the raster look. Needs the "
-			  "Vulkan backend and ray-query (RTX) hardware."
+			? "Ray tracing, layered on top of the quality tier at left: Medium and High add ray-traced "
+			  "ambient occlusion (at rising resolution; High also adds ray-traced shadows), Ultra swaps "
+			  "the AO for one-bounce ray-traced global illumination plus RT reflections, and Nightmare "
+			  "adds soft RT shadows on every light and volumetric lighting (the old 'Ultra Nightmare'). "
+			  "Independent of the tier, so it never changes the raster look. Needs the Vulkan backend "
+			  "and ray-query (RTX) hardware."
 			: "Ray tracing needs the Vulkan backend and ray-query (RTX) hardware - unavailable on this "
 			  "GPU / backend, so the quality tiers run raster-only." );
 
