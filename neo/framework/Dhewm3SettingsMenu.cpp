@@ -4611,6 +4611,104 @@ static void DrawDbgGroup_RTShadows()
 	}
 }
 
+static void DrawDbgGroup_RTGI()
+{
+	// Live tuning + debug view for ray-traced one-bounce GI (docs/rtx-rtgi.md). The on/off toggle is
+	// preset-driven (Graphics -> Ambient Occlusion -> Ray Tracing); every r_rtgi* knob is gathered here
+	// for A/B. Several also appear in the Graphics tab RTGI section - same live cvars, edited either place.
+	const bool rtCapable = R_SupportsRayTracing();
+	if ( BeginSettingsGroup( "RT Global Illumination" ) ) {
+
+	if ( !rtCapable ) {
+		ImGui::TextDisabled( "Requires the Vulkan backend + ray-query (RT) hardware." );
+	}
+	ImGui::BeginDisabled( !rtCapable );
+	if ( !r_rtgi.GetBool() ) {
+		ImGui::TextDisabled( "RT Global Illumination is off - enable it in Graphics -> Ambient Occlusion -> Ray Tracing (RTX)." );
+	}
+	ImGui::BeginDisabled( !r_rtgi.GetBool() );
+
+	// --- Debug view (the RTGI buffer blitted over the scene) ---
+	ImGui::SeparatorText( "Debug View" );
+	{
+		int dbg = idMath::ClampInt( 0, 2, r_rtgiDebug.GetInteger() );
+		ImGui::SetNextItemWidth( 240.0f );
+		if ( ImGui::Combo( "Buffer##rtgiDebug", &dbg, "Off (composited into scene)\0Raw radiance gather\0NRD-denoised\0" ) ) {
+			r_rtgiDebug.SetInteger( dbg );
+		}
+		AddTooltip( "Blit the RTGI buffer over the finished frame instead of compositing it into the scene "
+			"(the composite is suppressed while this is on). 'Raw radiance gather' = the noisy 1-ray/px "
+			"input before denoising; 'NRD-denoised' = what actually lights the scene (falls back to raw if "
+			"the denoise did not run). YCoCg-decoded; HDR above 1 clips on the overlay, so read structure "
+			"and noise, not absolute brightness. (r_rtgiDebug)" );
+	}
+
+	// --- Resolution ---
+	ImGui::SeparatorText( "Resolution" );
+	{
+		const float rtgiResStops[]  = { 0.25f, 0.5f, 0.667f, 0.75f, 1.0f };
+		const char *rtgiResLabels[] = { "Quarter (1/4)", "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Full" };
+		CvarStopsSliderF( "Gather Resolution", r_rtgiResScale, rtgiResStops, rtgiResLabels, IM_ARRAYSIZE( rtgiResStops ),
+			"Fraction of the screen the GI gather (and its NRD denoise) runs at, bilinearly upscaled. Bounce "
+			"light is very low-frequency so this is nearly free of visible quality but the single biggest cost "
+			"lever (~1/scale^2). Default 3/4. (r_rtgiResScale)" );
+		CvarCheckbox( "Checkerboard Gather", r_rtgiCheckerboard, "Trace a full-res horizontal checkerboard (half the pixels, "
+			"alternating each frame) and let NRD reconstruct the rest, instead of a uniform downscale - keeps silhouette edges "
+			"sharper at ~half the rays. Composes with Gather Resolution (traces half of those pixels); sharpest at Full. "
+			"(r_rtgiCheckerboard)" );
+		CvarCheckbox( "Bilateral Upscale", r_rtgiBilateralUpscale, "Upscale the reduced-res GI with a depth+normal-aware filter "
+			"instead of plain bilinear, so bounce light stops bleeding across silhouettes and creases - sharper GI at edges for "
+			"a few extra taps. Off = the old bilinear look. (r_rtgiBilateralUpscale)" );
+	}
+
+	// --- Noise suppression ---
+	ImGui::SeparatorText( "Noise Suppression" );
+	{
+		CvarSliderI( "History Length", r_rtgiHistory, 2, 63, "Max frames NRD's ReBLUR accumulates for the GI radiance. The "
+			"1-spp gather needs temporal accumulation to look smooth: too short and single pixels 'fry' (noise/flicker), too "
+			"long and a switched-off light or stale bounce lingers. ~6-12 is the balance; higher = smoother but laggier. "
+			"NRD's own default is 30. (r_rtgiHistory)" );
+		CvarSliderF( "History Confidence", r_rtgiConfidence, 0.0f, 16.0f, "%.1f", "Per-pixel history rejection where this frame's "
+			"bounce disagrees with last frame's reprojected result (a lit edge moving, a light toggling) - kills edge ghosting/"
+			"trailing without the flat-area dimming a global antilag causes. Higher = more aggressive (sharper edges, more noise "
+			"on them); 0 = off (NRD's built-in antilag only). (r_rtgiConfidence)" );
+		CvarSliderF( "Emissive Clamp", r_rtgiEmissiveClamp, 0.0f, 16.0f, "%.2f", "Ceiling on a single bounce ray's emissive "
+			"contribution before denoising. Small bright emitters are the worst 1-spp input (hit = big spike, miss = zero), and "
+			"that variance denoises into grain/colour blotches; clamping the peak cuts it. Lower = cleaner/dimmer glow bleed, "
+			"higher = brighter/noisier; ~16 effectively disables it. Default 0.25. (r_rtgiEmissiveClamp)" );
+	}
+
+	// --- Appearance / strength ---
+	ImGui::SeparatorText( "Appearance" );
+	{
+		CvarSliderF( "Intensity", r_rtgiIntensity, 0.0f, 8.0f, "%.2f", "Apply strength: multiplier on the bounced radiance added "
+			"into the scene. 1 = the one-bounce irradiance as-is; raise for punchier colour bleed, lower for a subtle fill. "
+			"Default 1.35. (r_rtgiIntensity)" );
+		CvarSliderF( "Light Scale", r_rtgiLightScale, 0.0f, 8.0f, "%.2f", "Brightness of the diffuse lighting evaluated at a bounce "
+			"hit. Raise for stronger colour bleed, lower if bounced light overpowers the direct lighting. (r_rtgiLightScale)" );
+		CvarSliderF( "Emissive", r_rtgiEmissive, 0.0f, 16.0f, "%.2f", "How brightly a self-illuminated surface (neon, light tile) "
+			"contributes when a bounce ray hits it, so glowing sources bleed their colour into the room. 0 = emitters bounce "
+			"nothing. (r_rtgiEmissive)" );
+		CvarSliderF( "Ray Length", r_rtgiRadius, 8.0f, 4096.0f, "%.0f units", "How far a bounce ray looks for the surface whose "
+			"light it gathers. Longer = broader colour bleed and more distant bounce; shorter concentrates GI nearby and is "
+			"cheaper on traversal. Default 1024. (r_rtgiRadius)" );
+		CvarSliderF( "Fake-Ambient Keep", r_rtgiAmbientKeep, 0.0f, 1.0f, "%.2f", "How much of Doom 3's fake cube-map ambient to "
+			"keep once real GI is added (so they do not double-count). 1 = keep it in full and stack GI on top (brightest); "
+			"0 = let GI fully replace it (most physical, but a spot GI cannot reach goes black). (r_rtgiAmbientKeep)" );
+		CvarSliderF( "Fog Awareness", r_rtgiFogAttenuate, 0.0f, 4.0f, "%.2f", "Fade the added bounce light out through the view's "
+			"fog so GI stops washing out distance fog. 0 = off (old look), 1 = physical, >1 overdrives the falloff. Only in "
+			"views with a fog light. Default 3.0. (r_rtgiFogAttenuate)" );
+		CvarCheckbox( "GI Shadows", r_rtgiShadow, "Trace one shadow ray at each bounce hit toward the brightest reaching light, so "
+			"a light behind a thin wall stops leaking indirect light through it. One extra ray per gather ray. 0 = unshadowed "
+			"bounce (a little cheaper, lights leak through walls). (r_rtgiShadow)" );
+	}
+
+	ImGui::EndDisabled();	// r_rtgi
+	ImGui::EndDisabled();	// rtCapable
+	EndSettingsGroup();
+	}
+}
+
 static void DrawDbgGroup_ContactShadows()
 {
 	// Screen-space contact shadows (docs/contact-shadows.md): a short per-light depth march that
@@ -5378,6 +5476,7 @@ static void DrawShadowDebugMenu()
 	DrawDbgGroup_ContactShadows();
 	DrawDbgGroup_RTShadows();
 	DrawDbgGroup_SSAO();
+	DrawDbgGroup_RTGI();
 	DrawDbgGroup_OcclusionMaps();
 	DrawDbgGroup_Tessellation();
 	DrawDbgGroup_PBR();
