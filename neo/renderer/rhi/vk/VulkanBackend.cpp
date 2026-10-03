@@ -2729,6 +2729,7 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	mixB( r_hdr ); mixB( r_fsr ); mixB( r_ssao ); mixB( r_ssr ); mixB( r_shadowMapping );
 	mixB( r_volumetrics ); mixB( r_motionVectors ); mixB( r_gpuSkinning );
 	mixI( r_rhiAA ); mixI( r_shadowMapSize ); mixI( r_shadowMapPointSize );
+	mixI( r_shadowMapPointLimit ); mixI( r_shadowMapCacheMB );	// change the cube set / cache budget -> evict + (re)alloc cubes
 	// RT scene / RT passes (toggling any builds or tears the TLAS + NRD / RT targets)
 	mixB( r_rtgi ); mixB( r_rtao ); mixB( r_rtSunShadows ); mixB( r_rtMovingLights );
 	mixB( r_rtAllLights ); mixB( r_rtReflections ); mixB( r_rtgiCheckerboard );
