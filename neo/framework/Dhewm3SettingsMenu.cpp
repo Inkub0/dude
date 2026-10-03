@@ -4675,7 +4675,7 @@ static void DrawDbgGroup_RTGI()
 		CvarSliderF( "Emissive Clamp", r_rtgiEmissiveClamp, 0.0f, 16.0f, "%.2f", "Ceiling on a single bounce ray's emissive "
 			"contribution before denoising. Small bright emitters are the worst 1-spp input (hit = big spike, miss = zero), and "
 			"that variance denoises into grain/colour blotches; clamping the peak cuts it. Lower = cleaner/dimmer glow bleed, "
-			"higher = brighter/noisier; ~16 effectively disables it. Default 0.25. (r_rtgiEmissiveClamp)" );
+			"higher = brighter/noisier; ~16 effectively disables it. Default 0.38. (r_rtgiEmissiveClamp)" );
 	}
 
 	// --- Appearance / strength ---
@@ -4683,7 +4683,7 @@ static void DrawDbgGroup_RTGI()
 	{
 		CvarSliderF( "Intensity", r_rtgiIntensity, 0.0f, 8.0f, "%.2f", "Apply strength: multiplier on the bounced radiance added "
 			"into the scene. 1 = the one-bounce irradiance as-is; raise for punchier colour bleed, lower for a subtle fill. "
-			"Default 1.35. (r_rtgiIntensity)" );
+			"Default 1.33. (r_rtgiIntensity)" );
 		CvarSliderF( "Light Scale", r_rtgiLightScale, 0.0f, 8.0f, "%.2f", "Brightness of the diffuse lighting evaluated at a bounce "
 			"hit. Raise for stronger colour bleed, lower if bounced light overpowers the direct lighting. (r_rtgiLightScale)" );
 		CvarSliderF( "Emissive", r_rtgiEmissive, 0.0f, 16.0f, "%.2f", "How brightly a self-illuminated surface (neon, light tile) "
@@ -4691,7 +4691,7 @@ static void DrawDbgGroup_RTGI()
 			"nothing. (r_rtgiEmissive)" );
 		CvarSliderF( "Ray Length", r_rtgiRadius, 8.0f, 4096.0f, "%.0f units", "How far a bounce ray looks for the surface whose "
 			"light it gathers. Longer = broader colour bleed and more distant bounce; shorter concentrates GI nearby and is "
-			"cheaper on traversal. Default 1024. (r_rtgiRadius)" );
+			"cheaper on traversal. Default 720. (r_rtgiRadius)" );
 		CvarSliderF( "Fake-Ambient Keep", r_rtgiAmbientKeep, 0.0f, 1.0f, "%.2f", "How much of Doom 3's fake cube-map ambient to "
 			"keep once real GI is added (so they do not double-count). 1 = keep it in full and stack GI on top (brightest); "
 			"0 = let GI fully replace it (most physical, but a spot GI cannot reach goes black). (r_rtgiAmbientKeep)" );
