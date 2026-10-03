@@ -3018,6 +3018,7 @@ struct RtAugment {
 	bool  rtao;
 	float rtaoResScale;
 	bool  rtgi;				// when true, replaces rtao (AO = GI with radiance 0)
+	float rtgiResScale;		// r_rtgiResScale when rtgi on (inert otherwise): the GI gather/denoise resolution
 	bool  rtShadowBlur;
 	bool  rtAllLights;
 	bool  rtBlurStagger;
@@ -3033,13 +3034,13 @@ struct RtAugment {
 // reflections; Nightmare adds the heavy set (soft RT shadows on all lights, volumetrics). needVelocity
 // is on wherever a denoised RT effect runs (RTAO or RTGI) so NRD gets motion vectors.
 static const RtAugment rtAugment[PRESET_COUNT] = {
-//                  sun    mov    refl   rtao   aoRes  rtgi   blur   all    stag   vol    vel    parlxSh hdrGam
-/* Potato    */   { false, false, false, false, 1.0f,  false, false, false, false, false, false, -1.0f, -1.0f },
-/* Low       */   { false, false, false, false, 1.0f,  false, false, false, false, false, false, -1.0f, -1.0f },
-/* Medium    */   { false, false, false, true,  0.75f, false, false, false, false, false, true,  -1.0f, -1.0f },
-/* High      */   { true,  true,  false, true,  0.8f,  false, false, false, false, false, true,  -1.0f, -1.0f },
-/* Ultra     */   { true,  true,  true,  false, 1.0f,  true,  false, false, false, false, true,  0.5f,  -1.0f },
-/* Nightmare */   { true,  true,  true,  false, 0.75f, true,  true,  true,  true,  true,  true,  0.5f,  1.0f  },
+//                  sun    mov    refl   rtao   aoRes  rtgi   giRes  blur   all    stag   vol    vel    parlxSh hdrGam
+/* Potato    */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, false, -1.0f, -1.0f },
+/* Low       */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, false, -1.0f, -1.0f },
+/* Medium    */   { false, false, false, true,  0.75f, false, 0.75f, false, false, false, false, true,  -1.0f, -1.0f },
+/* High      */   { true,  true,  false, true,  0.8f,  false, 0.75f, false, false, false, false, true,  -1.0f, -1.0f },
+/* Ultra     */   { true,  true,  true,  false, 1.0f,  true,  0.667f,false, false, false, false, true,  0.5f,  -1.0f },
+/* Nightmare */   { true,  true,  true,  false, 0.75f, true,  0.75f, true,  true,  true,  true,  true,  0.5f,  1.0f  },
 };
 
 
@@ -3187,6 +3188,11 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		r_rtao.SetBool( a.rtao );
 		r_rtaoResScale.SetFloat( a.rtaoResScale );
 		r_rtgi.SetBool( a.rtgi );
+		// GI gather/denoise resolution is a per-tier cost lever (Ultra 2/3, Nightmare 3/4), so the
+		// preset owns it where GI runs; where GI is off it stays a free knob (left untouched).
+		if ( a.rtgi ) {
+			r_rtgiResScale.SetFloat( a.rtgiResScale );
+		}
 		r_rtShadowBlur.SetBool( a.rtShadowBlur );
 		r_rtAllLights.SetBool( a.rtAllLights );
 		r_rtShadowBlurStagger.SetBool( a.rtBlurStagger );
@@ -3321,6 +3327,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				r_rtao.GetBool()                   == a.rtao &&
 				( !a.rtao || idMath::Fabs( r_rtaoResScale.GetFloat() - a.rtaoResScale ) < 0.01f ) &&
 				r_rtgi.GetBool()                   == a.rtgi &&
+				( !a.rtgi || idMath::Fabs( r_rtgiResScale.GetFloat() - a.rtgiResScale ) < 0.01f ) &&
 				r_rtShadowBlur.GetBool()           == a.rtShadowBlur &&
 				r_rtAllLights.GetBool()            == a.rtAllLights &&
 				r_rtShadowBlurStagger.GetBool()    == a.rtBlurStagger &&
