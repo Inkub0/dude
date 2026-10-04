@@ -1074,6 +1074,12 @@ private:
 	uint32_t					nrdSlotCursor[FRAMES_IN_FLIGHT] = {};		// running CB/descriptor cursor within the frame
 	int							nrdW = 0, nrdH = 0;
 	bool						nrdPoolsReady = false;	// pool images transitioned to GENERAL
+	// per-denoiser history-primed flag, indexed by NRD_ID_* (REBLUR_AO 0 / SIGMA 1 / REBLUR_GI 2). A
+	// denoiser's temporal history lives in the shared permanent pool, which NrdCreate allocates but
+	// never clears; until a denoiser has run once with CLEAR_AND_RESTART its history is garbage, so
+	// running CONTINUE over it ghosts. Cleared on (re)create, set once the denoiser records -- so
+	// switching RTAO<->RTGI at an unchanged NRD size still clears the newly-selected denoiser's history.
+	bool						nrdPrimed[3] = {};
 	// user (non-pool) resources for NrdRecordDispatches, indexed by nrd::ResourceType —
 	// the caller points these at its IN_*/OUT_* images (GENERAL layout) before recording
 	VkImageView					nrdUserViews[(uint32_t)nrd::ResourceType::MAX_NUM] = {};
@@ -6827,6 +6833,7 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 	nrdH = h;
 	nrdPoolsReady = false;		// fresh images: first record transitions them to GENERAL
 	for ( int f = 0; f < FRAMES_IN_FLIGHT; f++ ) { nrdSlotGen[f] = -1; nrdSlotCursor[f] = 0; }	// fresh pools: force a reset on first record
+	nrdPrimed[0] = nrdPrimed[1] = nrdPrimed[2] = false;		// fresh (uninitialised) history for every denoiser
 	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
 	return true;
 }
@@ -6883,6 +6890,7 @@ void VulkanBackend::NrdDestroy( bool deviceIdle ) {
 	nrdW = nrdH = 0;
 	nrdPoolsReady = false;
 	for ( int f = 0; f < FRAMES_IN_FLIGHT; f++ ) { nrdSlotGen[f] = -1; nrdSlotCursor[f] = 0; }
+	nrdPrimed[0] = nrdPrimed[1] = nrdPrimed[2] = false;
 	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
 }
 
@@ -7345,7 +7353,9 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	cs.resourceSize[1] = cs.resourceSizePrev[1] = cs.rectSize[1] = cs.rectSizePrev[1] = (uint16_t)a.h;
 	cs.denoisingRange = a.denoisingRange;
 	cs.frameIndex = a.frameIndex;
-	cs.accumulationMode = a.reset ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
+	// force a history clear on an explicit reset OR the first run of this denoiser since (re)create --
+	// its pool history is uninitialised until then (2.6)
+	cs.accumulationMode = ( a.reset || !nrdPrimed[denId] ) ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
 	cs.isMotionVectorInWorldSpace = false;
 	cs.isHistoryConfidenceAvailable = haveConf;			// H6f: feed IN_DIFF_CONFIDENCE (GI edge-ghosting antilag)
 	if ( nrd::SetCommonSettings( *nrdInstance, cs ) != nrd::Result::SUCCESS ) {
@@ -7493,6 +7503,9 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	outReady = true;
 
 	const bool recorded = NrdRecordDispatches( cb, &denId, 1 );
+	if ( recorded ) {
+		nrdPrimed[denId] = true;		// this denoiser's history is now initialised
+	}
 	if ( recorded && !( warned & ( 1 << 7 ) ) ) {
 		warned |= 1 << 7;
 		common->Printf( "%s: NRD ReBLUR denoise active (%dx%d)\n", a.giMode ? "RTGI" : "RTAO", a.w, a.h );
@@ -8403,6 +8416,10 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 			dd.reactive = ffxGetTextureResourceVK( fsr2Ctx, fsr2Reactive, fsr2ReactiveView,
 				w, h, VK_FORMAT_R8_UNORM, L"FSR2_Reactive", FFX_RESOURCE_STATE_UNORDERED_ACCESS );
 			fsr2ReactiveWritten = true;		// FSR2 leaves it SHADER_READ_ONLY after the SRV barrier
+		} else {
+			// mask generation failed: the rb barrier already moved fsr2Reactive to GENERAL, so the
+			// written-flag must not claim SHADER_READ_ONLY next frame (the mask is regenerated anyway)
+			fsr2ReactiveWritten = false;
 		}
 	}
 
@@ -8448,6 +8465,11 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 			VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
 			0, 0, NULL, 0, NULL, 1, &depthBack );
 		common->Warning( "FSR2: dispatch failed (code %d)", (int)err );
+		// fsr2Out is in GENERAL (its pre-barrier ran) and the reactive mask's layout is now
+		// indeterminate; both are fully overwritten each frame, so clear the written-flags and let next
+		// frame's pre-barriers start from UNDEFINED rather than a layout that no longer matches.
+		fsr2OutWritten = false;
+		fsr2ReactiveWritten = false;
 		return false;
 	}
 
