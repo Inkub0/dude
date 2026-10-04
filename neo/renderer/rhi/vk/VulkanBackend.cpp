@@ -1431,13 +1431,16 @@ static void WriteVulkanCrashDumpForced( const char *what, VkResult res ) {
 
 static bool vkCheck( VkResult res, const char *what ) {
 	if ( vkDeviceDead ) {
-		// once the device is considered dead, avoid further Vulkan API usage and warn once
+		// once the device is considered dead, warn once. The call already executed (it is this
+		// function's argument), so report its ACTUAL result rather than a blanket false: a create that
+		// still succeeded must not be treated as failed, or the caller drops a live handle and the
+		// recovery vid_restart trips VMA's unfreed-allocation assert on teardown.
 		static bool warned = false;
 		if ( !warned ) {
 			common->Warning( "VK: device is dead, skipping Vulkan call check for %s", what );
 			warned = true;
 		}
-		return false;
+		return res == VK_SUCCESS;
 	}
 	if ( res == VK_SUCCESS ) {
 		return true;
@@ -2128,6 +2131,10 @@ bool VulkanBackend::CreateSwapchain() {
 	vkGetPhysicalDeviceSurfaceFormatsKHR( physical, surface, &fmtCount, NULL );
 	std::vector<VkSurfaceFormatKHR> formats( fmtCount );
 	vkGetPhysicalDeviceSurfaceFormatsKHR( physical, surface, &fmtCount, formats.data() );
+	if ( fmtCount == 0 ) {
+		common->Warning( "VK: surface reports no formats" );
+		return false;			// nothing to pick; formats[0] would be an out-of-bounds read
+	}
 	VkSurfaceFormatKHR pick = formats[0];
 	for ( uint32_t i = 0; i < fmtCount; i++ ) {
 		if ( ( formats[i].format == VK_FORMAT_B8G8R8A8_UNORM || formats[i].format == VK_FORMAT_R8G8B8A8_UNORM )
@@ -2719,7 +2726,7 @@ void VulkanBackend::GpuTimerReadback( int slot ) {
 		if ( vkGetQueryPoolResults( device, gpuTimerPool, GpuScopeQuery( slot, 0 ), (uint32_t)( 2 * n ),
 		         sizeof( uint64_t ) * 2 * n, scopeStamps, sizeof( uint64_t ), VK_QUERY_RESULT_64_BIT ) == VK_SUCCESS ) {
 			for ( int i = 0; i < n; i++ ) {
-				const uint64_t d = ( scopeStamps[2 * i + 1] & gpuTimerMask ) - ( scopeStamps[2 * i] & gpuTimerMask );
+				const uint64_t d = ( scopeStamps[2 * i + 1] - scopeStamps[2 * i] ) & gpuTimerMask;	// mask the delta, not each stamp, so a counter wrap stays a small positive value
 				const double ms = ( (double)d * gpuTimerPeriodNs ) / 1000000.0;
 				size_t k = 0;
 				for ( ; k < gpuScopeAccum.size(); k++ ) {
@@ -2742,7 +2749,7 @@ void VulkanBackend::GpuTimerReadback( int slot ) {
 	         sizeof( stamps ), stamps, sizeof( uint64_t ), VK_QUERY_RESULT_64_BIT ) != VK_SUCCESS ) {
 		return;		// VK_NOT_READY not expected post-fence; skip this sample
 	}
-	uint64_t delta = ( stamps[1] & gpuTimerMask ) - ( stamps[0] & gpuTimerMask );
+	uint64_t delta = ( stamps[1] - stamps[0] ) & gpuTimerMask;	// mask the delta, not each stamp (wrap-safe)
 	const double frameMs = ( (double)delta * gpuTimerPeriodNs ) / 1000000.0;
 	gpuLastFrameMs = frameMs;
 	gpuLastSerial++;
@@ -3156,8 +3163,8 @@ void VulkanBackend::BeginPass( const ClearArgs *clear ) {
 		common->Warning( "VK: device is dead; skipping BeginPass" );
 		return;
 	}
-	if ( !frameOpen || skipFrame || insideScenePass ) {
-		return;
+	if ( !frameOpen || skipFrame || insideScenePass || insideTargetPass ) {
+		return;		// never open the scene render pass nested inside an offscreen target pass
 	}
 	// the scene renders into the swapchain sceneColor by default, or into the
 	// active frame target (the HDR RGBA16F buffer) when SetFrameTarget set one.
@@ -4833,8 +4840,10 @@ void VulkanBackend::DispatchSync( const ComputeArgs &args ) {
 	si.commandBufferCount = 1;
 	si.pCommandBuffers = &uploadCb;
 	vkResetFences( device, 1, &uploadFence );
-	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+	if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	}
 	if ( set != VK_NULL_HANDLE ) {
 		vkFreeDescriptorSets( device, computePool, 1, &set );		// cb done -> safe
 	}
@@ -5118,8 +5127,10 @@ bool VulkanBackend::BuildAsSync( VkAccelerationStructureTypeKHR type, const VkAc
 	si.commandBufferCount = 1;
 	si.pCommandBuffers = &uploadCb;
 	vkResetFences( device, 1, &uploadFence );
-	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+	if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	}
 	DestroyRtBuffer( scratch );
 	return true;
 }
@@ -5282,8 +5293,10 @@ BlasHandle VulkanBackend::CreateBlasFromBuffers( const BlasGeometry *geoms, int 
 	si.commandBufferCount = 1;
 	si.pCommandBuffers = &uploadCb;
 	vkResetFences( device, 1, &uploadFence );
-	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+	if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	}
 	DestroyRtBuffer( scratch );
 
 	VkAccelerationStructureDeviceAddressInfoKHR dai = {};
@@ -5358,8 +5371,10 @@ void VulkanBackend::RefitBlas( BlasHandle blas, const BlasGeometry *geoms, int c
 	si.commandBufferCount = 1;
 	si.pCommandBuffers = &uploadCb;
 	vkResetFences( device, 1, &uploadFence );
-	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+	if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	}
 }
 
 void VulkanBackend::DestroyBlas( BlasHandle blas ) {
@@ -5593,6 +5608,11 @@ void VulkanBackend::RefreshAnimBlas() {
 				e->topoSig = s.topoSig;
 				animStatBuilds++;
 				anyWrite = true;
+			} else {
+				// build failed (e.as stays NULL): free the slot so it is reclaimable, else neither
+				// FindOrAllocAnimBlas loop matches it (key!=0 && as==NULL) and a new slot is appended
+				// for this entity every frame while the failure persists -> unbounded cache growth
+				e->key = 0;
 			}
 		} else {
 			RecordAnimBlasRefit( *e, geoms, s.geomCount, cb );
@@ -5969,8 +5989,10 @@ void VulkanBackend::UpdateDynamicGeometry( const float *worldPositions, int numV
 		si.commandBufferCount = 1;
 		si.pCommandBuffers = &uploadCb;
 		vkResetFences( device, 1, &uploadFence );
-		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+		if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+			vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		}
 		rtFrameDynBuilt[slot] = true;
 		rtDynPendingSlot = -1;			// fresh slot already holds this frame's geometry
 	} else {
@@ -6070,6 +6092,13 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 	// Growth stalls the queue - rare (entity counts are near-constant within a map).
 	if ( rtFrameTlas[slot] == VK_NULL_HANDLE || nCap > rtFrameCapacity[slot] ) {
 		vkQueueWaitIdle( gfxQueue );
+		// if this slot's TLAS is the one the current frame points at, forget that address now: any
+		// CreateRtBuffer/pfnCreateAs below can fail and return early, and GetTlasAddress must not keep
+		// handing out the address of the TLAS we are about to destroy.
+		if ( rtFrameTlas[slot] != VK_NULL_HANDLE && rtCurrentAddr == rtFrameAddr[slot] ) {
+			rtCurrentAddr = 0;
+			rtCurrentGeoAddr = 0;
+		}
 		if ( rtFrameTlas[slot] != VK_NULL_HANDLE ) {
 			pfnDestroyAs( device, rtFrameTlas[slot], NULL );
 			rtFrameTlas[slot] = VK_NULL_HANDLE;
@@ -6191,8 +6220,10 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		si.commandBufferCount = 1;
 		si.pCommandBuffers = &uploadCb;
 		vkResetFences( device, 1, &uploadFence );
-		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+		if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+			vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		}
 		rtFrameBuilt[slot] = true;
 		rtPendingSlot = -1;					// the slot already holds this frame's poses
 	} else {
@@ -6297,7 +6328,19 @@ void VulkanBackend::DestroyRtScene() {
 	if ( device == VK_NULL_HANDLE ) {
 		return;
 	}
-	if ( rtTlas != VK_NULL_HANDLE || !rtBlases.empty() ) {
+	// Drain the queue before destroying anything an in-flight frame may still trace. The original
+	// condition only covered the static TLAS/BLASes, but this also immediately destroys the animated
+	// BLAS cache, the retired-AS list and the per-frame TLAS/dyn-BLAS slots -- so wait whenever ANY of
+	// those is live too. Still conditional (not an unconditional wait): R_RtWorldUpdate can call this
+	// every frame on a map with nothing to trace, where all of these are empty and no stall is paid.
+	bool anyRtLive = rtTlas != VK_NULL_HANDLE || !rtBlases.empty()
+		|| !animBlasCache.empty() || !retiredAnimAs.empty();
+	for ( int s = 0; s < FRAMES_IN_FLIGHT && !anyRtLive; s++ ) {
+		if ( rtFrameTlas[s] != VK_NULL_HANDLE || rtFrameDynBlas[s] != VK_NULL_HANDLE ) {
+			anyRtLive = true;
+		}
+	}
+	if ( anyRtLive ) {
 		vkQueueWaitIdle( gfxQueue );
 	}
 	if ( rtTlas != VK_NULL_HANDLE ) {
@@ -7189,7 +7232,7 @@ void VulkanBackend::RtaoDestroyOutput() {
 	// fence in BeginFrame) rather than invalidate the live command buffer — same contract as
 	// DestroyImage/RetireImage. Between frames (shutdown/vid_restart) the waitIdle path frees
 	// immediately.
-	if ( frameOpen ) {
+	if ( frameOpen && !skipFrame ) {
 		retiredImages[frameIndex].push_back( { rtaoOutImage, rtaoOutAlloc, rtaoOutView } );
 		rtaoOutView = VK_NULL_HANDLE;
 		rtaoOutImage = VK_NULL_HANDLE;
@@ -7265,7 +7308,7 @@ void VulkanBackend::RtgiDestroyOutput() {
 	// image now invalidates it (the "VkImage was destroyed" validation cascade). Defer to
 	// this slot's retire list instead, freed after its fence in BeginFrame — the same
 	// contract DestroyImage/RetireImage use for mid-frame image destruction.
-	if ( frameOpen ) {
+	if ( frameOpen && !skipFrame ) {
 		retiredImages[frameIndex].push_back( { rtgiOutImage, rtgiOutAlloc, rtgiOutView } );
 		rtgiOutView = VK_NULL_HANDLE;
 		rtgiOutImage = VK_NULL_HANDLE;
@@ -7747,8 +7790,10 @@ void VulkanBackend::NrdSelfTest() {
 		si.commandBufferCount = 1;
 		si.pCommandBuffers = &uploadCb;
 		vkResetFences( device, 1, &uploadFence );
-		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+		if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+			vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		}
 	}
 
 	// camera for a plausible frame: RH infinite-far perspective (fov 90, near 0.1),
@@ -7840,8 +7885,10 @@ void VulkanBackend::NrdSelfTest() {
 		si.commandBufferCount = 1;
 		si.pCommandBuffers = &uploadCb;
 		vkResetFences( device, 1, &uploadFence );
-		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+		if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+			vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		}
 	}
 
 	if ( !ok ) {
@@ -7979,7 +8026,7 @@ void VulkanBackend::Fsr2DestroyContext( bool deviceIdle ) {
 	// (freed after its fence in BeginFrame), the same contract as DestroyImage/RetireImage.
 	// Between frames (error paths, vid_restart, shutdown) frameOpen is false and the waitIdle
 	// path above makes immediate destruction safe.
-	if ( frameOpen ) {
+	if ( frameOpen && !skipFrame ) {
 		if ( fsr2Out || fsr2OutView )           { retiredImages[frameIndex].push_back( { fsr2Out, fsr2OutAlloc, fsr2OutView } ); }
 		if ( fsr2Opaque || fsr2OpaqueView )     { retiredImages[frameIndex].push_back( { fsr2Opaque, fsr2OpaqueAlloc, fsr2OpaqueView } ); }
 		if ( fsr2Reactive || fsr2ReactiveView ) { retiredImages[frameIndex].push_back( { fsr2Reactive, fsr2ReactiveAlloc, fsr2ReactiveView } ); }
@@ -8021,6 +8068,10 @@ bool VulkanBackend::Fsr2EnsureContext( int rw, int rh, int dw, int dh ) {
 	fsr2Scratch = malloc( scratchSize );
 	fsr2Ctx = (FfxFsr2Context *)malloc( sizeof( FfxFsr2Context ) );
 	if ( fsr2Scratch == NULL || fsr2Ctx == NULL ) {
+		// fsr2Ctx is raw malloc here (ffxFsr2ContextCreate hasn't run), so Fsr2DestroyContext must NOT
+		// ffxFsr2ContextDestroy it -- free + null it first so that call is skipped; it then frees scratch
+		free( fsr2Ctx );
+		fsr2Ctx = NULL;
 		Fsr2DestroyContext( true );
 		return false;
 	}
@@ -8029,6 +8080,10 @@ bool VulkanBackend::Fsr2EnsureContext( int rw, int rh, int dw, int dh ) {
 	FfxErrorCode err = ffxFsr2GetInterfaceVK( &desc.callbacks, fsr2Scratch, scratchSize, physical, vkGetDeviceProcAddr );
 	if ( err != FFX_OK ) {
 		common->Warning( "FSR2: ffxFsr2GetInterfaceVK failed (code %d)", (int)err );
+		// still a raw malloc (context not created yet): free + null so Fsr2DestroyContext skips the
+		// ffxFsr2ContextDestroy on an uninitialised context and just releases scratch
+		free( fsr2Ctx );
+		fsr2Ctx = NULL;
 		Fsr2DestroyContext( true );
 		return false;
 	}
@@ -8913,8 +8968,10 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 		si.commandBufferCount = 1;
 		si.pCommandBuffers = &uploadCb;
 		vkResetFences( device, 1, &uploadFence );
-		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+		if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+			vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		}
 	}
 	vmaDestroyBuffer( vma, staging, stagingAlloc );
 
@@ -9019,7 +9076,10 @@ void VulkanBackend::DestroyImage( ImageHandle h ) {
 	// advanced frameIndex, so the retire list would drain on the wrong slot's
 	// fence, before the just-submitted frame that used the view has completed.)
 	ImageRec &rec = imageTable[h - 1];
-	if ( frameOpen ) {
+	// defer only when a command buffer is actually recording (frameOpen && !skipFrame). A skipped
+	// frame never began a cb, and frameIndex will not advance, so deferring to this slot's retire list
+	// would drain on the wrong fence; the waitIdle path below is always safe instead.
+	if ( frameOpen && !skipFrame ) {
 		retiredImages[frameIndex].push_back( { rec.image, rec.alloc, rec.view } );
 	} else {
 		vkDeviceWaitIdle( device );
@@ -9043,14 +9103,11 @@ descriptor sets recorded earlier this frame still reference the old view.
 ====================
 */
 void VulkanBackend::RetireImage( ImageHandle h ) {
-	if ( device == VK_NULL_HANDLE || h < 1 || h > (ImageHandle)imageTable.size() || !imageTable[h - 1].live ) {
-		return;
-	}
-	ImageRec &rec = imageTable[h - 1];
-	retiredImages[frameIndex].push_back( { rec.image, rec.alloc, rec.view } );
-	rec = ImageRec();
-	SyncBindlessSlot( h );		// RR4: the freed slot shows the dummy until reused
-	InvalidateTextureSets();	// handle h is now free for reuse; cached sets referencing it are stale
+	// Historically this was an "always defer" variant, but unconditional deferral is wrong between
+	// frames and on a skipped frame (it drains on the wrong fence). DestroyImage now defers exactly
+	// when a command buffer is recording (frameOpen && !skipFrame) and waitIdle-frees otherwise, which
+	// is correct for every caller, so RetireImage is just that — matching the RHI base-class default.
+	DestroyImage( h );
 }
 
 void VulkanBackend::DrainRetiredImages( int slot ) {
@@ -9511,8 +9568,10 @@ bool VulkanBackend::ReadPixelsRGB( unsigned char *dest, int x, int y, int w, int
 	si.commandBufferCount = 1;
 	si.pCommandBuffers = &uploadCb;
 	vkResetFences( device, 1, &uploadFence );
-	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+	if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	}
 
 	// RGBA top-down -> RGB bottom-up with 4-byte row padding (the GL contract)
 	const int dstRow = ( w * 3 + 3 ) & ~3;
@@ -9679,8 +9738,10 @@ ImageHandle VulkanBackend::CreateTextureCube( int size, const void * const pics[
 		si.commandBufferCount = 1;
 		si.pCommandBuffers = &uploadCb;
 		vkResetFences( device, 1, &uploadFence );
-		vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+		if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+			vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+		}
 	}
 	vmaDestroyBuffer( vma, staging, stagingAlloc );
 
@@ -9769,8 +9830,10 @@ bool VulkanBackend::CreateShadowDummy( ShadowDummy &d, bool cube ) {
 	si.commandBufferCount = 1;
 	si.pCommandBuffers = &uploadCb;
 	vkResetFences( device, 1, &uploadFence );
-	vkQueueSubmit( gfxQueue, 1, &si, uploadFence );
-	vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+	if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+		vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX );
+	}
 
 	VkImageViewCreateInfo vi = {};
 	vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -10425,10 +10488,10 @@ void VulkanBackend::DestroyRenderTarget( RenderTargetHandle rt ) {
 	// the wrong fence — waitIdle + free immediately instead (same reasoning as
 	// DestroyImage).
 	ReleaseTargetSampleSlots( *t );
-	if ( frameOpen ) {
+	if ( frameOpen && !skipFrame ) {
 		retiredTargets[frameIndex].push_back( *t );
 	} else {
-		vkDeviceWaitIdle( device );
+		vkDeviceWaitIdle( device );		// a skipped frame has no recording cb and won't advance frameIndex; drain + free now
 		FreeTargetObjects( *t );
 	}
 	*t = RenderTarget();		// free the target-table slot
@@ -10765,6 +10828,7 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 				lvi.subresourceRange.levelCount = 1;
 				lvi.subresourceRange.layerCount = 1;
 				if ( !vkCheck( vkCreateImageView( device, &lvi, NULL, &t.colorLevelView[L] ), "vkCreateImageView(mip level)" ) ) {
+					ReleaseTargetSampleSlots( t );	// the color sample slots are already registered; free them so the teardown sweep can't double-destroy them
 					FreeTargetObjects( t );
 					return false;
 				}
@@ -10778,6 +10842,7 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 				lfb.height = (uint32_t)lh;
 				lfb.layers = 1;
 				if ( !vkCheck( vkCreateFramebuffer( device, &lfb, NULL, &t.colorLevelFb[L] ), "vkCreateFramebuffer(mip level)" ) ) {
+					ReleaseTargetSampleSlots( t );	// as above: release the registered sample slots before freeing the VK objects
 					FreeTargetObjects( t );
 					return false;
 				}
