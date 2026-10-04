@@ -4716,7 +4716,7 @@ windowDef OptionsMenuParent {
 				forecolor	0.6, 0.8, 0.8, 1
 			}
 		}
-		// DUDE: VSync (r_swapInterval) - live single-cvar cycler, no restart.
+		// DUDE: VSync (dude_vsync bridge -> r_swapInterval + r_vrr) - live cycler, no restart.
 		windowDef OSVsync {
 			rect		34, 137, 320, 16
 			windowDef OSVsyncL {
@@ -4748,9 +4748,9 @@ windowDef OptionsMenuParent {
 			}
 			choiceDef OSVsyncPrimary {
 				rect		210, 1, 100, 14
-				choices		"Disabled;Enabled;Adaptive"
-				values		"0;1;-1"
-				cvar		"r_swapInterval"
+				choices		"Disabled;Enabled;Adaptive;VRR"
+				values		"0;1;2;3"
+				cvar		"dude_vsync"
 				updateGroup	render
 				choiceType	1
 				font		"fonts/bank"

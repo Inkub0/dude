@@ -102,6 +102,11 @@ idCVar r_ignoreGLErrors( "r_ignoreGLErrors", "1", CVAR_RENDERER | CVAR_BOOL, "ig
 idCVar r_finish( "r_finish", "0", CVAR_RENDERER | CVAR_BOOL, "force a call to glFinish() every frame" );
 idCVar r_swapInterval( "r_swapInterval", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "changes the GL swap interval" );
 idCVar r_vrr( "r_vrr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "variable refresh rate mode (G-SYNC / FreeSync / VESA Adaptive-Sync): keeps VSync on (FIFO) and auto-paces the render rate just below the display's refresh so frames stay inside the VRR window. Needs VRR enabled in the GPU driver/compositor and a VRR-capable display." );
+// Bridge cvar for the native System menu's VSync cycler (a choiceDef can only drive one cvar, but VRR
+// needs r_swapInterval + r_vrr). The menu writes 0..3; R_CheckCvars translates that into the real cvars
+// and mirrors their live state back here. Not archived -- it's derived from r_swapInterval/r_vrr each
+// frame (default -1 = uninitialized, so it can never clobber saved settings on first boot).
+idCVar dude_vsync( "dude_vsync", "-1", CVAR_RENDERER | CVAR_INTEGER, "VSync mode for the in-game menu: 0 = off, 1 = on, 2 = adaptive, 3 = VRR", -1, 3 );
 
 idCVar r_gamma( "r_gamma", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "changes gamma tables", 0.5f, 3.0f );
 idCVar r_brightness( "r_brightness", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "changes gamma tables", 0.5f, 2.0f );

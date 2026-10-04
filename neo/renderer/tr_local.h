@@ -873,6 +873,7 @@ extern idCVar r_finish;					// force a call to glFinish() every frame
 extern idCVar r_frontBuffer;			// draw to front buffer for debugging
 extern idCVar r_swapInterval;			// changes the GL swap interval
 extern idCVar r_vrr;					// variable refresh rate (G-SYNC/FreeSync/Adaptive-Sync) present+pacing mode
+extern idCVar dude_vsync;				// native-menu VSync bridge: 0 off, 1 on, 2 adaptive, 3 VRR (mirrors r_swapInterval+r_vrr)
 extern idCVar r_offsetFactor;			// polygon offset parameter
 extern idCVar r_offsetUnits;			// polygon offset parameter
 extern idCVar r_singleTriangle;			// only draw a single triangle per primitive

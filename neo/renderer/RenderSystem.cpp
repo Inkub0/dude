@@ -281,9 +281,38 @@ static void R_CheckCvars( void ) {
 		}
 	}
 
+	// VSync / VRR reconciliation. The native System menu cycles one bridge cvar
+	// (dude_vsync: 0 Disabled, 1 Enabled, 2 Adaptive, 3 VRR) because a GUI choiceDef
+	// can only drive a single cvar; the ImGui menu and console set r_swapInterval +
+	// r_vrr directly. Keep all three in agreement and apply the present mode on change.
+	if ( dude_vsync.IsModified() && dude_vsync.GetInteger() >= 0 ) {
+		const int m = idMath::ClampInt( 0, 3, dude_vsync.GetInteger() );
+		const bool wantVrr = ( m == 3 );
+		r_swapInterval.SetInteger( wantVrr ? 1 : ( m == 2 ? -1 : m ) );	// VRR rides on FIFO vsync-on
+		r_vrr.SetBool( wantVrr );
+	}
+	dude_vsync.ClearModified();
+	// A bare "r_vrr 1" from the console must not sit on top of a disabled present mode.
+	if ( r_vrr.IsModified() ) {
+		if ( r_vrr.GetBool() && r_swapInterval.GetInteger() <= 0 ) {
+			r_swapInterval.SetInteger( 1 );
+		}
+		r_swapInterval.SetModified();	// force the present mode to be (re)applied below
+		r_vrr.ClearModified();
+	}
 	if ( r_swapInterval.IsModified() ) {
 		GLimp_SetSwapInterval( r_swapInterval.GetInteger() );
 		r_swapInterval.ClearModified();
+	}
+	// Mirror the live state back into the bridge cvar so the native menu shows the
+	// right selection regardless of how VSync was last changed.
+	{
+		const int swap = r_swapInterval.GetInteger();
+		const int canonMode = r_vrr.GetBool() ? 3 : ( swap == 0 ? 0 : ( swap < 0 ? 2 : 1 ) );
+		if ( dude_vsync.GetInteger() != canonMode ) {
+			dude_vsync.SetInteger( canonMode );
+			dude_vsync.ClearModified();
+		}
 	}
 
 	if ( r_windowResizable.IsModified() ) {
