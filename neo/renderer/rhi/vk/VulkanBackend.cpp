@@ -142,6 +142,13 @@ static idCVar r_vkBdaZfill( "r_vkBdaZfill", "0", CVAR_RENDERER | CVAR_INTEGER,
 static idCVar r_vkBdaVerbose( "r_vkBdaVerbose", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: print the r_vkBdaZfill firing counter once/sec (per-draw / batched / fell-back) to confirm the BDA z-fill path is live. Diagnostic only, off by default so enabling the offload doesn't chatter to the console." );
 
+// TEMP A/B toggle (remove after benchmarking): 1 = acceleration-structure storage + build scratch in
+// device-local VRAM (default, the perf change); 0 = the old host-visible placement. AS memory is chosen
+// at buffer creation, so a change only takes effect after the AS are recreated: vid_restart, or toggle an
+// RT feature off/on to rebuild the scene. Compare the rt* scopes under r_vkGpuTime 2.
+static idCVar r_rtDeviceLocalAS( "r_rtDeviceLocalAS", "1", CVAR_RENDERER | CVAR_BOOL,
+	"RT acceleration structures in device-local VRAM (1, default) vs host-visible (0). Needs vid_restart to take effect; A/B aid." );
+
 namespace rhi {
 
 // Forward declarations for the crash-dump helpers implemented later in this TU.
@@ -5065,7 +5072,7 @@ bool VulkanBackend::CreateRtBuffer( VkBufferUsageFlags usage, VkDeviceSize size,
 	bci.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;	// BDA works on device-local too
 	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	VmaAllocationCreateInfo aci = {};
-	if ( deviceLocal ) {
+	if ( deviceLocal && r_rtDeviceLocalAS.GetBool() ) {		// cvar is a TEMP A/B toggle; remove after benchmarking
 		// GPU-only (AS storage / build scratch): device-local VRAM, no host mapping. data must be NULL.
 		aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 	} else {
