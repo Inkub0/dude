@@ -2177,9 +2177,9 @@ void idImageManager::EndLevelLoad() {
 //			common->Printf( "Purging %s\n", image->imgName.c_str() );
 			purgeCount++;
 			image->PurgeImage();
-		} else if ( image->texnum != idImage::TEXTURE_NOT_LOADED ) {
+		} else if ( image->texnum != idImage::TEXTURE_NOT_LOADED || image->rhiHandle != 0 ) {
 //			common->Printf( "Keeping %s\n", image->imgName.c_str() );
-			keepCount++;
+			keepCount++;		// rhiHandle: on the RHI backends (GL3 + VK) a resident image has no GL texnum, only this
 		}
 	}
 
@@ -2201,7 +2201,7 @@ void idImageManager::EndLevelLoad() {
 			if ( image->IsPermanentGenerator() ) {
 				continue;
 			}
-			if ( image->levelLoadReferenced && image->texnum == idImage::TEXTURE_NOT_LOADED && !image->partialImage ) {
+			if ( image->levelLoadReferenced && image->texnum == idImage::TEXTURE_NOT_LOADED && image->rhiHandle == 0 && !image->partialImage ) {
 				if ( image->generatorCpu ) {
 					genCount++;
 				}
@@ -2283,7 +2283,7 @@ void idImageManager::EndLevelLoad() {
 				continue;
 			}
 
-			if ( image->levelLoadReferenced && image->texnum == idImage::TEXTURE_NOT_LOADED && !image->partialImage ) {
+			if ( image->levelLoadReferenced && image->texnum == idImage::TEXTURE_NOT_LOADED && image->rhiHandle == 0 && !image->partialImage ) {
 	//			common->Printf( "Loading %s\n", image->imgName.c_str() );
 				if ( image->generatorCpu ) {
 					genCount++;		// serial path: ActuallyLoadImage runs the classic generator
