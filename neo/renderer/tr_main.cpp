@@ -1927,10 +1927,10 @@ static unsigned int R_RtMaterialTexIndex( const idMaterial *mat ) {
 }
 
 // R3.5 S3: stage this frame's GPU-skinned shadow casters for the backend's per-entity animated BLAS
-// cache. Runs once/frame regardless of the persistent-scene state (so the cache retires stale entries
-// when the feature or the view goes away). The backend copies the descriptors and builds/refits each
-// caster's BLAS from its gpuSkinVB after the skin flush (RefreshAnimBlas). Inert until S4 puts these
-// BLASes into the TLAS; for now it is a lifecycle soak (watch r_shadowMapCacheDebug).
+// cache. Runs once/frame; clears the staging (letting the cache retire) whenever the feature, the
+// view, or the RT scene itself is absent. The backend copies the descriptors and builds/refits each
+// caster's BLAS from its gpuSkinVB after the skin flush (RefreshAnimBlas).
+static bool R_RtSceneWanted( void );		// defined below; the anim BLASes have no consumer without it
 static void R_RtStageAnimCasters( void ) {
 	rhi::RHI *r = rhi::GetRHI();
 	if ( r == NULL || !r->SupportsRayQuery() ) {
@@ -1959,7 +1959,11 @@ static void R_RtStageAnimCasters( void ) {
 		}
 	}
 
-	if ( !r_rtAnimBlas.GetBool() || R_RtSceneWorld() == NULL || tr.viewDef == NULL ) {
+	// Only stage when the persistent RT scene is actually wanted: without it (every RT feature off)
+	// the per-entity BLASes have no consumer, so building and refitting one per visible GPU-skinned
+	// monster every frame on RT-capable hardware was pure waste (the help text already claims the
+	// feature is inert then). R_RtWorldUpdate uses the same predicate to build/tear the scene.
+	if ( !r_rtAnimBlas.GetBool() || !R_RtSceneWanted() || R_RtSceneWorld() == NULL || tr.viewDef == NULL ) {
 		r->UpdateAnimCasters( NULL, 0 );	// off / not a world view: clear staged, let the cache retire
 		s_rtStagedAnimCasters = false;
 		return;
