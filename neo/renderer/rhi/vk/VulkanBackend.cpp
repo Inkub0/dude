@@ -952,6 +952,10 @@ private:
 	std::vector<VkAccelerationStructureInstanceKHR>	animPendInst;	// S4: this frame's animated TLAS instances (appended in RefreshAnimBlas)
 	std::vector<uint32_t>		animPendGeoFirst;	// RR0: parallel to animPendInst — geomFirst into animStagedGeoms
 	std::vector<uint32_t>		animPendGeoCount;	// RR0: parallel to animPendInst — geometry (surface) count
+	// UpdateTlas per-frame scratch: reused (clear() keeps capacity) so the per-frame TLAS refresh
+	// doesn't malloc/free two vectors every frame.
+	std::vector<VkAccelerationStructureInstanceKHR>	rtInstScratch;
+	std::vector<BlasHandle>		rtInstBlasScratch;	// parallel to rtInstScratch — the BLAS behind each instance (0 = none)
 	struct RetiredAs { VkAccelerationStructureKHR as; RtBuf buf; RtBuf scratch; int ttl; };
 	std::vector<RetiredAs>		retiredAnimAs;			// fence-safe deferred AS destroys (TTL = FRAMES_IN_FLIGHT)
 	int							animBlasFrameCounter = 0;
@@ -1080,6 +1084,10 @@ private:
 	// running CONTINUE over it ghosts. Cleared on (re)create, set once the denoiser records -- so
 	// switching RTAO<->RTGI at an unchanged NRD size still clears the newly-selected denoiser's history.
 	bool						nrdPrimed[3] = {};
+	// NrdRecordDispatches per-dispatch scratch: reused (clear() keeps capacity) so each dispatch's
+	// descriptor writes don't malloc/free two vectors.
+	std::vector<VkWriteDescriptorSet>		nrdWriteScratch;
+	std::vector<VkDescriptorImageInfo>		nrdImageInfoScratch;
 	// user (non-pool) resources for NrdRecordDispatches, indexed by nrd::ResourceType —
 	// the caller points these at its IN_*/OUT_* images (GENERAL layout) before recording
 	VkImageView					nrdUserViews[(uint32_t)nrd::ResourceType::MAX_NUM] = {};
@@ -6024,9 +6032,12 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 	const bool appendDyn = ( rtDynArmedSlot == slot );
 	rtDynArmedSlot = -1;
 
-	// translate to VK instances (same rules as BuildTlas: dead BLAS handles drop out)
-	std::vector<VkAccelerationStructureInstanceKHR> vkInst;
-	std::vector<BlasHandle> instBlas;					// RR5: parallel to vkInst — the BLAS behind each instance (0 = none)
+	// translate to VK instances (same rules as BuildTlas: dead BLAS handles drop out). Reuse the
+	// per-frame member scratch — clear() keeps the capacity, so steady-state frames don't malloc/free.
+	std::vector<VkAccelerationStructureInstanceKHR> &vkInst = rtInstScratch;
+	std::vector<BlasHandle> &instBlas = rtInstBlasScratch;	// RR5: parallel to vkInst — the BLAS behind each instance (0 = none)
+	vkInst.clear();
+	instBlas.clear();
 	vkInst.reserve( (size_t)count + 1 );
 	instBlas.reserve( (size_t)count + 1 );
 	uint32_t geoBase = 0;								// RR5: running geometry-table row (per-geometry, not per-instance)
@@ -7052,9 +7063,13 @@ bool VulkanBackend::NrdRecordDispatches( VkCommandBuffer cb, const nrd::Identifi
 		}
 
 		// resources, in range order (textures then storage as declared); each range's
-		// bindings restart at its own register offset
-		std::vector<VkWriteDescriptorSet> writes;
-		std::vector<VkDescriptorImageInfo> imageInfos;
+		// bindings restart at its own register offset. Reuse member scratch (clear keeps capacity) so
+		// each dispatch doesn't malloc/free two vectors; reserve still covers this dispatch, so the
+		// &imageInfos.back() pointers taken below stay valid (no reallocation before the write).
+		std::vector<VkWriteDescriptorSet> &writes = nrdWriteScratch;
+		std::vector<VkDescriptorImageInfo> &imageInfos = nrdImageInfoScratch;
+		writes.clear();
+		imageInfos.clear();
 		imageInfos.reserve( dd.resourcesNum );
 		writes.reserve( dd.resourcesNum + 1 );
 		uint32_t texIdx = 0, storIdx = 0;
