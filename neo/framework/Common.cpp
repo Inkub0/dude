@@ -2866,9 +2866,37 @@ void idCommonLocal::Frame( void ) {
 		// per-frame "sleep N ms") so frames land at even intervals regardless of how long
 		// this frame's work took — that even cadence is what actually looks smooth. Most
 		// useful with vsync off, where nothing else bounds the rate.
-		if ( com_maxFPS.GetInteger() > 0 ) {
+		// VRR mode: VSync stays on (FIFO), but we pace a few fps below the panel's
+		// refresh so frames land inside the variable-refresh window and never hit the
+		// vsync ceiling (which would re-add a frame of latency). Re-query the live
+		// refresh at most once a second (GLimp_GetDisplayRefresh() hits SDL).
+		int effMaxFPS = com_maxFPS.GetInteger();
+		if ( r_vrr.GetBool() ) {
+			static double vrrNextProbe = 0.0;
+			static int vrrCap = 0;
+			const double nowProbe = Sys_MillisecondsPrecise();
+			if ( vrrCap == 0 || nowProbe >= vrrNextProbe ) {
+				vrrNextProbe = nowProbe + 1000.0;
+				const int hz = idMath::Ftoi( GLimp_GetDisplayRefresh() );
+				if ( hz > 0 ) {
+					const int margin = hz >= 200 ? 5 : 3;
+					const int newCap = ( hz - margin < 30 ) ? 30 : ( hz - margin );
+					if ( newCap != vrrCap ) {
+						common->Printf( "VRR: pacing render at %d fps (display %d Hz)\n", newCap, hz );
+					}
+					vrrCap = newCap;
+				} else {
+					vrrCap = 0;		// unknown refresh: fall back to the manual cap
+				}
+			}
+			if ( vrrCap > 0 ) {
+				// honor a lower manual cap, but never let the rate climb to the ceiling
+				effMaxFPS = ( effMaxFPS > 0 && effMaxFPS < vrrCap ) ? effMaxFPS : vrrCap;
+			}
+		}
+		if ( effMaxFPS > 0 ) {
 			static double nextFrameStart = 0.0;
-			const double interval = 1000.0 / com_maxFPS.GetFloat();
+			const double interval = 1000.0 / (double)effMaxFPS;
 			const double now = Sys_MillisecondsPrecise();
 			nextFrameStart += interval;
 			if ( now < nextFrameStart ) {

@@ -2657,7 +2657,8 @@ static void DrawDisplaySettings()
 	AddCVarOptionTooltips( com_maxFPS, "0 = uncapped. Paces frames evenly without relying on VSync. "
 	                       "Pair it with VSync disabled — especially on a multi-monitor setup where VSync "
 	                       "locks to the wrong refresh rate. Set it to your monitor's refresh, or a clean "
-	                       "divisor of it (e.g. 72 on a 144 Hz panel)." );
+	                       "divisor of it (e.g. 72 on a 144 Hz panel). In VRR mode this is managed for you "
+	                       "(paced just below refresh); a lower value here still wins." );
 
 	// Fullscreen Desktop
 	CvarCheckbox( "Fullscreen Desktop (borderless at desktop resolution)", r_fullscreenDesktop, "r_fullscreenDesktop" );
@@ -2673,25 +2674,35 @@ static void DrawDisplaySettings()
 	ImGui::EndDisabled();
 
 	// Vertical Sync (live; applied immediately via GLimp_SetSwapInterval)
-	int curVsync = idMath::ClampInt( -1, 1, r_swapInterval.GetInteger() );
-	if ( curVsync == -1 ) {
-		curVsync = 2;
-	}
-	if ( ImGui::Combo( "Vertical Sync", &curVsync, "Disable VSync\0Enable VSync\0Adaptive VSync\0" ) ) {
-		if ( curVsync == 2 ) {
-			curVsync = -1;
+	// Combo indices: 0 Disable, 1 Enable, 2 Adaptive, 3 VRR (variable refresh rate).
+	// VRR rides on vsync-on (FIFO) plus the frame limiter pacing just below refresh,
+	// so selecting it forces r_swapInterval 1 and flips r_vrr on.
+	int curVsync;
+	if ( r_vrr.GetBool() ) {
+		curVsync = 3;
+	} else {
+		curVsync = idMath::ClampInt( -1, 1, r_swapInterval.GetInteger() );
+		if ( curVsync == -1 ) {
+			curVsync = 2;
 		}
-		if ( GLimp_SetSwapInterval( curVsync ) ) {
-			r_swapInterval.SetInteger( curVsync );
+	}
+	if ( ImGui::Combo( "Vertical Sync", &curVsync, "Disable VSync\0Enable VSync\0Adaptive VSync\0VRR (G-SYNC / FreeSync)\0" ) ) {
+		const bool wantVrr = ( curVsync == 3 );
+		const int interval = wantVrr ? 1 : ( curVsync == 2 ? -1 : curVsync );
+		if ( GLimp_SetSwapInterval( interval ) ) {
+			r_swapInterval.SetInteger( interval );
 			// this was just set with GLimp_SetSwapInterval(), no reason to set it again in R_CheckCvars()
 			r_swapInterval.ClearModified();
+			r_vrr.SetBool( wantVrr );
 		} else {
 			D3::ImGuiHooks::ShowWarningOverlay( "Setting VSync (GL SwapInterval) failed, maybe try another mode" );
 		}
 	} else {
 		AddTooltip( "r_swapInterval" );
 	}
-	AddDescrTooltip( "Note: Not all GPUs/drivers support Adaptive VSync" );
+	AddDescrTooltip( "VRR keeps VSync on and auto-paces the frame rate just below your refresh so it stays "
+	                 "inside the G-SYNC / FreeSync / Adaptive-Sync window. Enable VRR in your GPU driver or "
+	                 "compositor first. Note: Adaptive VSync isn't supported on all GPUs/drivers." );
 }
 
 // Texture memory/quality trade-offs. Kept rather than

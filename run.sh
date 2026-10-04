@@ -26,6 +26,13 @@ fi
 export __GL_SYNC_DISPLAY_DEVICE="${__GL_SYNC_DISPLAY_DEVICE:-DP-0}"
 export __GL_SYNC_TO_VBLANK="${__GL_SYNC_TO_VBLANK:-1}"
 
+# NVIDIA on X11: permit VRR (G-SYNC / G-SYNC Compatible / Adaptive-Sync) so the
+# in-engine "VRR" VSync mode can actually drive the panel's variable refresh.
+# You still need "Allow G-SYNC/G-SYNC Compatible" enabled in nvidia-settings and
+# Force Composition Pipeline off. Harmless on other drivers; override to 0 to opt out.
+export __GL_GSYNC_ALLOWED="${__GL_GSYNC_ALLOWED:-1}"
+export __GL_VRR_ALLOWED="${__GL_VRR_ALLOWED:-1}"
+
 exec "$BIN" \
 	+set fs_basepath "$DIR" \
 	+set fs_savepath "$DIR" \
