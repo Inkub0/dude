@@ -851,6 +851,11 @@ private:
 	// device features actually enabled (queried before device creation)
 	bool						haveAnisotropy = false;
 	bool						haveFillModeNonSolid = false;
+	// VK_EXT_memory_budget: makes vmaGetHeapBudgets report the OS-level free VRAM (total minus other
+	// processes, and usage including non-VMA allocations like the swapchain + FSR2) instead of VMA's
+	// 80%-of-heap / VMA-blocks-only fallback. The auto shadow-cache budget (r_shadowMapCacheMB -1,
+	// GetDeviceLocalMemory) depends on this being accurate. BeginFrame refreshes it per frame.
+	bool						haveMemoryBudget = false;
 	// tessellationShader (optional; universal on desktop). Gates the whole DUDE
 	// tessellation feature: without it no tess pipeline is ever built and the
 	// tess shader modules are skipped. maxTessGenLevel bounds the slider.
@@ -1743,7 +1748,7 @@ bool VulkanBackend::CreateDeviceAndVma() {
 		queueCount++;
 	}
 
-	const char *devExts[6] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+	const char *devExts[8] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 	uint32_t devExtCount = 1;
 
 	// R2 ray-query foundation: probe for the RT extension trio. deferred_host_operations is a
@@ -1753,6 +1758,7 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	// with quad intrinsics (libs/nrd/README-DUDE.md) and needs the quads feature bit.
 	bool haveAccelExt = false, haveRayQueryExt = false, haveDeferredOpsExt = false;
 	bool haveComputeDerivExt = false;
+	bool haveMemoryBudgetExt = false;
 	{
 		uint32_t extCount = 0;
 		vkEnumerateDeviceExtensionProperties( physical, NULL, &extCount, NULL );
@@ -1769,6 +1775,8 @@ bool VulkanBackend::CreateDeviceAndVma() {
 				haveDeferredOpsExt = true;
 			} else if ( !strcmp( extProps[i].extensionName, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME ) ) {
 				haveComputeDerivExt = true;
+			} else if ( !strcmp( extProps[i].extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME ) ) {
+				haveMemoryBudgetExt = true;
 			}
 		}
 	}
@@ -1947,6 +1955,12 @@ bool VulkanBackend::CreateDeviceAndVma() {
 		devExts[devExtCount++] = VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME;
 	}
 
+	// VK_EXT_memory_budget: no feature struct, just the extension; VMA reads the OS budget through it.
+	haveMemoryBudget = haveMemoryBudgetExt;
+	if ( haveMemoryBudget ) {
+		devExts[devExtCount++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
+	}
+
 	VkDeviceCreateInfo dci = {};
 	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 	dci.pNext = &enabled13;
@@ -2005,9 +2019,16 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	if ( haveBufferDeviceAddress ) {
 		aci.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 	}
+	// let VMA read the OS-level VRAM budget (VkPhysicalDeviceMemoryBudgetPropertiesEXT) instead of its
+	// 80%-of-heap fallback; BeginFrame calls vmaSetCurrentFrameIndex each frame to refresh it
+	if ( haveMemoryBudget ) {
+		aci.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+	}
 	if ( !vkCheck( vmaCreateAllocator( &aci, &vma ), "vmaCreateAllocator" ) ) {
 		return false;
 	}
+	common->Printf( "VK: VRAM budget source: %s\n",
+		haveMemoryBudget ? "VK_EXT_memory_budget (OS-level free VRAM)" : "VMA heuristic (80%% of heap)" );
 	return true;
 }
 
@@ -3032,6 +3053,12 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	stagingRing[frameIndex].offset = 0;
 	indirectRing[frameIndex].offset = 0;
 	streamGen++;
+	// refresh VMA's OS-level VRAM budget once per frame (only does work with the EXT budget bit set),
+	// so GetDeviceLocalMemory / the auto shadow-cache budget see current free VRAM rather than a value
+	// that VMA only re-fetches every ~30 allocations
+	if ( haveMemoryBudget ) {
+		vmaSetCurrentFrameIndex( vma, (uint32_t)streamGen );
+	}
 	if ( framePool[frameIndex] ) {
 		vkResetDescriptorPool( device, framePool[frameIndex], 0 );
 	}
