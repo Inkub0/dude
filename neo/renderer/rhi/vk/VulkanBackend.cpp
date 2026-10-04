@@ -1033,7 +1033,11 @@ private:
 	int							rtDynArmedSlot = -1;						// slot whose dyn-BLAS UpdateTlas must append (one-shot)
 	int							rtDynPendingSlot = -1;						// slot whose dyn-BLAS BeginFrame must rebuild (steady state)
 	void	RecordFrameDynBlasBuild( VkCommandBuffer cb, int slot );		// rebuild + AS-write -> AS-read barrier
-	bool	CreateRtBuffer( VkBufferUsageFlags usage, VkDeviceSize size, const void *data, RtBuf &rb );
+	// deviceLocal = true for GPU-only buffers (AS storage + build scratch): places them in device-local
+	// VRAM, unmapped, so ray traversal / AS builds read BVH nodes from VRAM instead of across PCIe.
+	// Those callers always pass data == NULL (the host never seeds them). The default (false) keeps the
+	// buffer host-visible + mapped for the build-input / instance / geometry-table buffers the host writes.
+	bool	CreateRtBuffer( VkBufferUsageFlags usage, VkDeviceSize size, const void *data, RtBuf &rb, bool deviceLocal = false );
 	void	DestroyRtBuffer( RtBuf &rb );
 	// size + create + build one AS on the upload cb, synchronously (scratch is transient)
 	bool	BuildAsSync( VkAccelerationStructureTypeKHR type, const VkAccelerationStructureGeometryKHR &geom,
@@ -5054,26 +5058,32 @@ bool VulkanBackend::SupportsRayQuery() {
 	return haveRayQuery && device != VK_NULL_HANDLE && uploadCb != VK_NULL_HANDLE;
 }
 
-bool VulkanBackend::CreateRtBuffer( VkBufferUsageFlags usage, VkDeviceSize size, const void *data, RtBuf &rb ) {
+bool VulkanBackend::CreateRtBuffer( VkBufferUsageFlags usage, VkDeviceSize size, const void *data, RtBuf &rb, bool deviceLocal ) {
 	VkBufferCreateInfo bci = {};
 	bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	bci.size = size;
-	bci.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+	bci.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;	// BDA works on device-local too
 	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	VmaAllocationCreateInfo aci = {};
-	aci.usage = VMA_MEMORY_USAGE_AUTO;
-	aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-	aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	if ( deviceLocal ) {
+		// GPU-only (AS storage / build scratch): device-local VRAM, no host mapping. data must be NULL.
+		aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+	} else {
+		// host-written (build inputs / instance / geometry table): host-visible + persistently mapped
+		aci.usage = VMA_MEMORY_USAGE_AUTO;
+		aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	}
 	VmaAllocationInfo info = {};
 	if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &rb.buf, &rb.alloc, &info ), "vmaCreateBuffer(rt)" ) ) {
 		rb.buf = VK_NULL_HANDLE;
 		rb.alloc = NULL;
 		return false;
 	}
-	if ( data ) {
+	if ( data ) {					// only ever set on host-visible buffers; device-local pMappedData is NULL
 		memcpy( info.pMappedData, data, (size_t)size );
 	}
-	rb.map = info.pMappedData;
+	rb.map = info.pMappedData;		// NULL for device-local buffers (not host-mapped)
 	VkBufferDeviceAddressInfo bai = {};
 	bai.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
 	bai.buffer = rb.buf;
@@ -5105,11 +5115,11 @@ bool VulkanBackend::BuildAsSync( VkAccelerationStructureTypeKHR type, const VkAc
 	VkAccelerationStructureBuildSizesInfoKHR sizes = {};
 	sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
 	pfnGetAsBuildSizes( device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, &primCount, &sizes );
-	if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, asBuf ) ) {
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, asBuf, /*deviceLocal*/true ) ) {
 		return false;
 	}
 	RtBuf scratch;
-	if ( !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, scratch ) ) {
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, scratch, /*deviceLocal*/true ) ) {
 		DestroyRtBuffer( asBuf );
 		return false;
 	}
@@ -5263,17 +5273,17 @@ BlasHandle VulkanBackend::CreateBlasFromBuffers( const BlasGeometry *geoms, int 
 	pfnGetAsBuildSizes( device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, primCounts, &sizes );
 
 	RtBlas blas;
-	if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, blas.buf ) ) {
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, blas.buf, /*deviceLocal*/true ) ) {
 		return 0;
 	}
 	RtBuf scratch;
-	if ( !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, scratch ) ) {
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, scratch, /*deviceLocal*/true ) ) {
 		DestroyRtBuffer( blas.buf );
 		return 0;
 	}
 	if ( allowUpdate ) {
 		// persistent scratch sized for future in-place UPDATE builds (smaller than the build scratch)
-		if ( !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.updateScratchSize + asScratchAlignment, NULL, blas.updateScratch ) ) {
+		if ( !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.updateScratchSize + asScratchAlignment, NULL, blas.updateScratch, /*deviceLocal*/true ) ) {
 			DestroyRtBuffer( blas.buf );
 			DestroyRtBuffer( scratch );
 			return 0;
@@ -5450,12 +5460,12 @@ bool VulkanBackend::RecordAnimBlasBuild( AnimBlas &e, const BlasGeometry *geoms,
 	sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
 	pfnGetAsBuildSizes( device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, primCounts, &sizes );
 
-	if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, e.buf ) ) {
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, e.buf, /*deviceLocal*/true ) ) {
 		return false;
 	}
 	VkDeviceSize scratchSz = ( sizes.buildScratchSize > sizes.updateScratchSize ? sizes.buildScratchSize : sizes.updateScratchSize )
 		+ asScratchAlignment;
-	if ( !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, scratchSz, NULL, e.scratch ) ) {
+	if ( !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, scratchSz, NULL, e.scratch, /*deviceLocal*/true ) ) {
 		DestroyRtBuffer( e.buf );
 		return false;
 	}
@@ -5954,8 +5964,8 @@ void VulkanBackend::UpdateDynamicGeometry( const float *worldPositions, int numV
 		VkAccelerationStructureBuildSizesInfoKHR sizes = {};
 		sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
 		pfnGetAsBuildSizes( device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &sbgi, &tcap, &sizes );
-		if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, rtFrameDynBlasBuf[slot] )
-			|| !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, rtFrameDynScratch[slot] ) ) {
+		if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, rtFrameDynBlasBuf[slot], /*deviceLocal*/true )
+			|| !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, rtFrameDynScratch[slot], /*deviceLocal*/true ) ) {
 			DestroyRtBuffer( rtFrameDynBlasBuf[slot] );
 			DestroyRtBuffer( rtFrameDynVb[slot] );
 			DestroyRtBuffer( rtFrameDynIb[slot] );
@@ -6148,8 +6158,8 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		VkAccelerationStructureBuildSizesInfoKHR sizes = {};
 		sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
 		pfnGetAsBuildSizes( device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bgi, &cap, &sizes );
-		if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, rtFrameTlasBuf[slot] )
-			|| !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, rtFrameScratch[slot] ) ) {
+		if ( !CreateRtBuffer( VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, sizes.accelerationStructureSize, NULL, rtFrameTlasBuf[slot], /*deviceLocal*/true )
+			|| !CreateRtBuffer( VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sizes.buildScratchSize + asScratchAlignment, NULL, rtFrameScratch[slot], /*deviceLocal*/true ) ) {
 			DestroyRtBuffer( rtFrameTlasBuf[slot] );
 			DestroyRtBuffer( rtFrameInstBuf[slot] );
 			DestroyRtBuffer( rtFrameScratch[slot] );
