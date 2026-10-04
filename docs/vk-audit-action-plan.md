@@ -219,3 +219,28 @@ Vertex-cache free/alloc (no double destroy), ownership of `gpuSkinVB` and tess b
 5. 2.4 alone, with an A/B of the shadow-cache budget.
 6. Remaining Phase 2 items, 3.2, F2 and F6.
 7. F4, F5 and F7 only after measuring.
+
+---
+
+## Final status — audit wrapped 2026-10-04
+
+All landed on `review/vk-correctness-lifetime-perf` (not pushed). Build-green, validation-clean
+(validation layer on, 0 errors), and stability-tested across ~110k+ frames with no crash / device-loss.
+
+**Done:**
+- Phase 1: 1.1 (texture-set cache identity), 1.2 (NRD two-pass recording), 1.3 (anim-BLAS staging one-shot), 1.4 (TLAS rebuild for skinned casters), 1.5 (merge-prepass fb lifetime).
+- Phase 2: 2.1 (anim-BLAS staging gated on RT wanted), 2.2 (live r_swapInterval), 2.3 (capture gate under frame target), 2.4 (VK_EXT_memory_budget — user-A/B'd, eviction-clean), 2.5 (FSR2 failure-path layouts), 2.6 (NRD per-denoiser history prime).
+- Phase 3: 3.1 (acceleration structures device-local — benchmarked a wash on a ReBAR 3080 Ti, kept for correctness + non-ReBAR robustness), 3.2 (scratch-vector reuse).
+- Phase 4: the error-path/edge-case hardening batch + swapchain-recreate robustness.
+- Frontend: F1 (MD5 skin/tess buffer teardown), F3 (level-load image re-upload), F6 (RT scene build retry latch).
+- Also fixed in passing: the pre-existing portal-sky + FSR2 "only sky" regression (FSR2 gated to the true primary view), user-verified.
+
+**Deliberately skipped:**
+- F2 (skin-once-per-frame guard): hottest path, scenario unconfirmed, and the proposed fix wouldn't address it. Revisit only with a real in-game stale-pose repro.
+
+**Nice-to-have backlog (CPU-side perf; measure first — the UN profile is GPU-bound, so gate on `com_speeds` CPU time before refactoring these hot paths):**
+- **F4** — joint palette `CreateBuffer`+`DestroyBuffer` per skinned entity per frame (`RB_RHI_FlushSkinJobs`). Fix needs offset-packed palettes (shader change) or a per-frame-slot palette-buffer pool.
+- **F5** — every non-temp `vertexCache.Alloc` on Vulkan makes a dedicated `VkBuffer`, including per-frame dynamic-model caches. Count per frame first; route dynamic blocks to the ring.
+- **F7** — `R_RtRefreshInstances` per-entity linear model-pointer search + a per-frame topology hash for known non-casters, plus two `Mem_Alloc16`/`Free16` per frame in the monster gather / caster staging. Cache the resolved BLAS (or "non-caster") per model; reuse grow-only scratch.
+
+**Cosmetic (optional):** the `Vertex attribute at location N not consumed by vertex shader` validation *warnings* (gbuffer/zfill vertex layout vs shader variant — the `out_Albedo` family). Silence with a per-variant vertex layout / shader `#define`, or leave as benign log noise.
