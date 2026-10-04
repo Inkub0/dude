@@ -2574,6 +2574,10 @@ static rhi::BlasHandle R_RtBuildOneEntityModelBlas( rhi::RHI *r, const idRenderM
 }
 
 static idStr s_rtWorldMap;
+// map whose RT scene build failed or had nothing to trace: don't retry the (expensive, warning-spewing)
+// build every frame while an RT cvar stays on. Cleared on a successful build, when RT is switched off,
+// and on teardown; a scene-cvar toggle re-arms the attempt (the guard checks R_RtSceneCvarModified).
+static idStr s_rtWorldFailedMap;
 
 /*
 ====================
@@ -2608,6 +2612,7 @@ void R_RtResetSceneState( void ) {
 	s_rtLastHadDyn = false;
 	s_rtStagedAnimCasters = false;
 	s_rtWorldMap = "";
+	s_rtWorldFailedMap = "";
 }
 
 // DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit
@@ -2642,6 +2647,7 @@ static void R_RtWorldUpdate( void ) {
 			R_RtClearSceneCvarModified();
 			r->DestroyRtScene();		// switched off: free the scene (no-op when never built)
 			s_rtWorldMap.Clear();
+			s_rtWorldFailedMap.Clear();	// re-arm a build attempt if RT is turned back on
 			s_rtAreaBlas.Clear();
 			s_rtModelBlas.Clear();
 			R_RtFreeWorldGeo();			// RR5: drop the dedicated world geometry buffers
@@ -2660,6 +2666,13 @@ static void R_RtWorldUpdate( void ) {
 		// poses + animated-monster casters (GetStaticTlasAddress is the persistent-scene anchor;
 		// GetTlasAddress would return the per-frame slot address once the lane is running)
 		R_RtRefreshInstances( world, r );
+		return;
+	}
+	// this map's build already failed (or had nothing to trace) and nothing changed: don't retry it
+	// every frame (full re-gather + BLAS builds + a warning each time). A scene-cvar toggle or a map
+	// change clears the latch and lets it try again.
+	if ( s_rtWorldFailedMap.Length() > 0 && s_rtWorldFailedMap.Icmp( world->mapName ) == 0
+			&& !R_RtSceneCvarModified() ) {
 		return;
 	}
 	R_RtClearSceneCvarModified();
@@ -2682,6 +2695,7 @@ static void R_RtWorldUpdate( void ) {
 	if ( !areasOk && numMInsts == 0 ) {
 		R_RtFreeWorldGeo();
 		s_rtModelBlas.Clear();
+		s_rtWorldFailedMap = world->mapName;	// nothing to trace on this map: don't re-gather every frame
 		return;
 	}
 
@@ -2697,11 +2711,13 @@ static void R_RtWorldUpdate( void ) {
 		s_rtAreaBlas.Clear();
 		s_rtModelBlas.Clear();
 		R_RtFreeWorldGeo();
+		s_rtWorldFailedMap = world->mapName;	// don't retry the failed build every frame (other RT cvars may keep the scene wanted)
 		r_rtWorld.SetBool( false );
 		r_rtSunShadows.SetBool( false );
 		return;
 	}
 	s_rtWorldMap = world->mapName;
+	s_rtWorldFailedMap.Clear();	// built OK: clear any prior failure latch for this map
 	R_RtDirtyReset();		// fresh scene: force the first per-frame TLAS build, drop any stale signature
 	// the alpha-tested perforated casters (grates/fences) ride the per-frame TLAS lane only -
 	// the static anchor TLAS above stays solid-only (it is what the CPU-reference validators trace)
