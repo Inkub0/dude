@@ -2492,10 +2492,12 @@ here: this is a rare event and M-milestone code favors obviously-correct.
 bool VulkanBackend::RecreateSwapchain() {
 	vkDeviceWaitIdle( device );
 	if ( !CreateSwapchain() ) {
+		swapchainDirty = true;		// stay dirty so the next frame retries (the acquire path doesn't otherwise)
 		return false;
 	}
 	if ( swapExtent.width != sceneExtent.width || swapExtent.height != sceneExtent.height ) {
 		if ( !CreateSceneTargets() ) {
+			swapchainDirty = true;
 			return false;
 		}
 	}
@@ -2976,6 +2978,11 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 		if ( ar == VK_ERROR_OUT_OF_DATE_KHR ) {
 			if ( !RecreateSwapchain() ) {
 				skipFrame = true;
+				frameOpen = true;
+				return;
+			}
+			if ( swapExtent.width == 0 || swapExtent.height == 0 || swapchain == VK_NULL_HANDLE ) {
+				skipFrame = true;		// minimized during the rebuild: nothing to acquire this frame
 				frameOpen = true;
 				return;
 			}
