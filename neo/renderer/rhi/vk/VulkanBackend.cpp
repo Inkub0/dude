@@ -344,6 +344,12 @@ private:
 	std::vector<VkImage>		swapImages;
 	std::vector<VkSemaphore>	releaseSems;	// per swapchain image
 	bool						swapchainDirty = false;
+	// r_swapInterval the current present mode was built for. The shared cvar modified-flag can't be
+	// the trigger here: core R_CheckCvars (and the settings menu) clear it earlier in the same frame,
+	// before BeginFrame sees it, so a live vsync change never reached the swapchain. BeginFrame instead
+	// compares the live value against this. We store the REQUESTED interval, not the resulting present
+	// mode, so a requested mode the device lacks can't spin an every-frame rebuild loop.
+	int							appliedSwapInterval = 0;
 
 	// offscreen scene target (color + depth/stencil) + its passes
 	VkImage						sceneColor = VK_NULL_HANDLE;
@@ -2115,6 +2121,7 @@ bool VulkanBackend::CreateSwapchain() {
 	}
 
 	VkPresentModeKHR presentMode = PickPresentMode();
+	appliedSwapInterval = r_swapInterval.GetInteger();		// the value this present mode was chosen for
 
 	VkSwapchainCreateInfoKHR sci = {};
 	sci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -2905,9 +2912,9 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 		}
 	}
 
-	// vsync toggle → new present mode; window size change → new extent
-	if ( r_swapInterval.IsModified() ) {
-		r_swapInterval.ClearModified();
+	// vsync toggle → new present mode; window size change → new extent. Compare the live cvar against
+	// the value the swapchain was built for (not the modified-flag, which core already cleared).
+	if ( r_swapInterval.GetInteger() != appliedSwapInterval ) {
 		swapchainDirty = true;
 	}
 	int dw, dh;
