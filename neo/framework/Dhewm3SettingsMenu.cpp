@@ -3931,8 +3931,9 @@ static void DrawEnhGroup_Shadows()
 			"soft shadows every frame, farther ones every 2nd frame, the farthest every 3rd - set "
 			"the two distances in Debugging -> RT Shadows. Reused shadows are re-projected to the current camera, and "
 			"pixels they cannot cover get a hard-edged ray for that frame - so watch for brief hard "
-			"edges or slightly late shadows from moving things. Uses ~15 MB of VRAM per staggered "
-			"light at 1440p." );
+			"edges or slightly late shadows from moving things. Stands down automatically during "
+			"scripted cutscenes (every light refreshes each frame), where camera cuts would otherwise "
+			"make reused shadows flicker. Uses ~15 MB of VRAM per staggered light at 1440p." );
 		ImGui::EndDisabled();	// blur off
 		ImGui::EndDisabled();
 

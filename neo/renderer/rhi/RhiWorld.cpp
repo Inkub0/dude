@@ -7619,8 +7619,25 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	// on is offset by its index, so the refreshes spread evenly instead of all landing on the same
 	// frame. A mask is NEVER reused when the light itself moved or changed size, or when it is
 	// older than its interval allows.
+	//
+	// A reused mask is a screen-space image reprojected through the camera it was made with, so it
+	// only answers for points that were on screen then. When the CAMERA is discontinuous the
+	// reprojection misses across most of the view and those pixels fall back to the hard ray
+	// (interaction.frag mode 6) - the shadow flips soft<->hard at the stagger cadence, which reads
+	// as flicker. That bites hardest in scripted cutscenes, where the director cuts between shots
+	// (and the stagger is preset-on at Ultra Nightmare). So stand staggering down whenever the
+	// camera cut this view, exactly as the HDR eye-adaptation pass does: every light then renders a
+	// fresh, non-stale mask this frame (no reprojection). The perf saving is only forgone while a
+	// cinematic camera / a jump is the main view, which is never frame-rate-critical.
+	//   - RB_RHI_CinematicView(): a cinematic camera is the main view (covers shot cuts, including
+	//     rotation-only cuts near the same origin that an origin-jump test can't see). Reliably
+	//     latched at the top of RB_RHI_DrawView, before this lighting pass.
+	//   - rhiTemporalCam.historyReset: a gameplay teleport this frame (origin jump > r_temporalResetDist).
+	//     Best-effort bonus - its per-frame classify may trail this pass by a frame - so it only
+	//     ever sharpens the teleport case, never the (reliably timed) cutscene one.
+	const bool camDiscontinuity = RB_RHI_CinematicView() || rhiTemporalCam.historyReset;
 	rtBlurSlot_t *slot = NULL;
-	if ( r_rtShadowBlurStagger.GetBool() && ictx.interactionRtProg != 0 ) {
+	if ( r_rtShadowBlurStagger.GetBool() && ictx.interactionRtProg != 0 && !camDiscontinuity ) {
 		const float dist = vLight->lightDef->parms.parallel ? 0.0f
 			: ( vLight->globalLightOrigin - viewDef->renderView.vieworg ).Length();
 		const int interval = ( dist < r_rtShadowBlurStaggerNear.GetFloat() ) ? 1
