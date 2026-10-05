@@ -33,7 +33,13 @@
 /base/xpkey
 /base/DoomConfig.cfg
 /base/*.dat
-/d3xp/
+# d3xp (RoE) game data is ignored, EXCEPT the DUDE-ported RoE main-menu gui
+# text, tracked by choice like base/guis/mainmenu.gui (same id/CstDoom3-
+# derivative provenance caveat). Binary gui assets still ship via the pk4s.
+/d3xp/*
+!/d3xp/guis/
+/d3xp/guis/*
+!/d3xp/guis/mainmenu.gui
 /d3le/
 savegames/
 /base/generated/
