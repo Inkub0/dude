@@ -38,6 +38,9 @@ If you have questions concerning this license or the applicable additional terms
 #ifndef GL_RGBA16F
 #define GL_RGBA16F  0x881A
 #endif
+#ifndef GL_TEXTURE_SWIZZLE_A
+#define GL_TEXTURE_SWIZZLE_A  0x8E45
+#endif
 #ifndef GL_HALF_FLOAT
 #define GL_HALF_FLOAT  0x140B
 #endif
@@ -2404,6 +2407,14 @@ void idImage::CopyFramebuffer( int x, int y, int imageWidth, int imageHeight, bo
 
 	qglTexParameterf( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
 	qglTexParameterf( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+
+	// DUDE: the float capture carries the scene buffer's alpha (unbounded there: additive light
+	// passes accumulate it past 1), where the vanilla GL_RGB8 capture samples as opaque. Read it
+	// back as 1 so materials that draw a capture alpha-blended (double vision's _scratch, the D3XP
+	// _currentRender blend-backs) blend instead of extrapolating. Core-profile RHI frames only.
+	if ( captureFormat == GL_RGBA16F ) {
+		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ONE );
+	}
 
 	backEnd.c_copyFrameBuffer++;
 }

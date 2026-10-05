@@ -9227,6 +9227,16 @@ ImageHandle VulkanBackend::CreateCaptureImage( int w, int h, bool depth, bool hd
 		vi.image = image;
 		vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
 		vi.format = ici.format;
+		// A colour capture samples as opaque, like the GL_RGB texture the stock renderer copies
+		// into. The blit carries the scene target's alpha along, which is whatever the last blend
+		// left there - and in the float scene buffer the additive light passes push it far above
+		// 1. Stock materials that draw a capture back alpha-blended (the implicit _scratch
+		// material of the double vision, the D3XP _currentRender blend-backs, a camera monitor)
+		// then extrapolated src*a + dst*(1-a) instead of blending: negative, complement-coloured
+		// output wherever a bright light was on screen.
+		if ( !depth ) {
+			vi.components.a = VK_COMPONENT_SWIZZLE_ONE;
+		}
 		vi.subresourceRange.aspectMask = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
 		vi.subresourceRange.levelCount = 1;
 		vi.subresourceRange.layerCount = 1;
