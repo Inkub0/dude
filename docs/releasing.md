@@ -41,6 +41,7 @@ Staging layout (`dist/release-X.Y/`), one folder per platform, then zip/tar it:
 | runtime DLLs (SDL2, OpenAL32, libstdc++, libgcc, libwinpthread, libssp) | ✓ | — (distro packages) |
 | `lib/libvulkan.so.1` — CURRENT loader from the sandbox's Vulkan-Loader build (≥ the engine's VK baseline; an old loader here hard-fails VK init) | — | ✓ |
 | **`base/zz_dude_menu.pk4`** — see below | ✓ | ✓ |
+| **`d3xp/zz_dude_roe_menu.pk4`** — the RoE menu, see below | ✓ | ✓ |
 | `base/gamepad.cfg`, `base/gamepad-d3xp.cfg`, `base/mods-cvar-translation.cfg` | ✓ | ✓ |
 | `base/pbr/pbr_materials.cfg`, `base/pbr/pbr_overrides.cfg` (else PBR classifies nothing) | ✓ | ✓ |
 | `COPYING.txt`, `README.md` | ✓ | ✓ |
@@ -77,6 +78,28 @@ this pk4, fresh `fs_savepath`) before shipping.
 
 Note on `dude_logo.tga`: copyright-protected id/Bethesda logo artwork, shipped as a
 deliberate exception — see the "Known exception" paragraph in docs/publishing.md.
+
+### zz_dude_roe_menu.pk4 — the RoE menu (since 0.9.5)
+
+The Resurrection of Evil port of the DUDE System options menu. Ships in `d3xp/`, so
+RoE players get the same modern options screen. Built from the git-tracked
+`d3xp/guis/mainmenu.gui` plus a clean anchor:
+
+```
+# stage: the RoE menu + a clean copy of DUDE's own anchor under the name the
+# .gui #includes (guis/_cst_anchor.pd) — so the .gui is untouched and no
+# CstDoom3/fva-derivative content ships.
+mkdir -p /tmp/roemenu/guis
+cp d3xp/guis/mainmenu.gui   /tmp/roemenu/guis/mainmenu.gui
+cp base/guis/_dude_anchor.pd /tmp/roemenu/guis/_cst_anchor.pd
+cd /tmp/roemenu && zip -q <repo>/dist/release-X.Y/zz_dude_roe_menu.pk4 \
+  guis/mainmenu.gui guis/_cst_anchor.pd
+```
+
+The RoE `.gui` also `#include`s `guis/test/grid2b.pd` + `grid3b.pd`; those are stock id
+files resolved from `base/pak000.pk4` via the d3xp→base search fallback, so they need not
+ship. `zz_` sorts after `zWideGuis_RoE.pk4` (lowercase `z` > uppercase `W`) so it wins the
+search-path priority. Test on a clean-sandbox launch that the RoE Options screen loads.
 
 ## 4. Release notes + publish (user action, never the agent)
 
