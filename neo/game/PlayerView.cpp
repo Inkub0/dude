@@ -37,6 +37,13 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "PlayerView.h"
 
+static int MakePowerOfTwo( int num ) {
+	int		pot;
+	for (pot = 1 ; pot < num ; pot<<=1) {
+	}
+	return pot;
+}
+
 const int IMPULSE_DELAY = 150;
 /*
 ==============
@@ -563,10 +570,31 @@ void idPlayerView::DoubleVision( idUserInterface *hud, const renderView_t *view,
 	shift = fabs( shift );
 
 	// if double vision, render to a texture
-	renderSystem->CropRenderSize( 512, 256, true );
+	// RHI (opengl3/vulkan): capture the scene at FULL resolution (no crop), like BerserkVision
+	// below. A cropped render is not the frame's primary world view there, so the whole frame
+	// dropped off the HDR / tonemap / FSR2 / RT path for as long as the effect lasted and the
+	// sub-window came back split, mis-scaled or missing. Uncropped, _scratch holds the whole
+	// window in the corner of a POT-padded image, so the blits below scale their texcoords by
+	// window/POT (the same shiftScale the D3XP double vision uses). Legacy keeps its crop.
+	const bool rhiDv = cvarSystem->GetCVarBool( "r_rhiActive" );
+	float scaleS = 1.0f, scaleT = 1.0f;
+	if ( rhiDv ) {
+		int vidWidth, vidHeight;
+		renderSystem->GetGLSettings( vidWidth, vidHeight );
+		// (not while berserk is up or winding down: the renderer then swaps these blits for its
+		// berserk feedback buffer, a window-sized target addressed 0..1)
+		if ( vidWidth > 0 && vidHeight > 0 && cvarSystem->GetCVarFloat( "r_berserkFade" ) <= 0.0f ) {
+			scaleS = (float)vidWidth / MakePowerOfTwo( vidWidth );
+			scaleT = (float)vidHeight / MakePowerOfTwo( vidHeight );
+		}
+	} else {
+		renderSystem->CropRenderSize( 512, 256, true );
+	}
 	SingleView( hud, view );
 	renderSystem->CaptureRenderToImage( "_scratch" );
-	renderSystem->UnCrop();
+	if ( !rhiDv ) {
+		renderSystem->UnCrop();
+	}
 
 	// carry red tint if in berserk mode
 	idVec4 color(1, 1, 1, 1);
@@ -576,9 +604,9 @@ void idPlayerView::DoubleVision( idUserInterface *hud, const renderView_t *view,
 	}
 
 	renderSystem->SetColor4( color.x, color.y, color.z, 1.0f );
-	renderSystem->DrawStretchPic( 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, shift, 1, 1, 0, dvMaterial );
+	renderSystem->DrawStretchPic( 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, shift * scaleS, scaleT, scaleS, 0, dvMaterial );
 	renderSystem->SetColor4( color.x, color.y, color.z, 0.5f );
-	renderSystem->DrawStretchPic( 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 1, 1-shift, 0, dvMaterial );
+	renderSystem->DrawStretchPic( 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, scaleT, ( 1-shift ) * scaleS, 0, dvMaterial );
 }
 
 /*
