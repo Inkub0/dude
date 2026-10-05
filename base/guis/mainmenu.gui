@@ -4263,7 +4263,7 @@ windowDef OptionsMenuParent {
 
 	//section Options System
 	windowDef OptionsSystem {
-		rect		165, 30, 390, 370
+		rect		165, 50, 450, 350
 		visible		0
 
 		//Title
@@ -4276,14 +4276,34 @@ windowDef OptionsMenuParent {
 		}
 		//Title bar
 		windowDef OSTitleBar {
-			rect		5, 23, 375, 2
+			rect		5, 23, 448, 2
 			backcolor	0.6 ,0.8 ,1 ,0.2
+			noevents	1
+		}
+
+		//Column headers (mirror the Controls menu's ACTION / KEY ASSIGNMENT row)
+		windowDef OSSettingText {
+			rect		130, 34, 110, 10
+			text		"SETTING"
+			font		"fonts/bank"
+			textscale	0.25
+			textaligny	-9
+			forecolor	0.8, 1, 1, 1
+			noevents	1
+		}
+		windowDef OSValueText {
+			rect		343, 34, 100, 10
+			text		"VALUE"
+			font		"fonts/bank"
+			textscale	0.25
+			textaligny	-9
+			forecolor	0.6, 0.8, 0.8, 1
 			noevents	1
 		}
 
 	//Reset game defaults Text
 	windowDef ResetSystemBtnText {
-		rect		100, 347, 180, 20
+		rect		130, 327, 180, 20
 		text		"#str_04062"
 		textscale	0.26
 		textalign	1
@@ -4375,202 +4395,163 @@ windowDef OptionsMenuParent {
 		}
 	}
 
-		// DUDE: top tab row — VIDEO (this page, inert), SOUND and ADVANCED
-		// (each opens its popup). Three 114-wide tabs replace the old wide
-		// ADVANCED OPTIONS button + Video Settings header strip.
+		// DUDE: left-hand category column (VIDEO / SOUND / ADVANCED / POST-PROCESS),
+		// mirroring the Controls menu's Movement/Weapons/Attack buttons. Each button
+		// toggles one of the inline panels (SystemVideo / SystemSound / SystemAdvanced /
+		// SystemPostProcess) on the right; the active button is locked (noevents 1) and bright.
 
-		//VIDEO tab (label for the page itself; brighter glow = active)
-		windowDef OSBtnVideoTab {
-			rect		20, 30, 114, 28
-			text		"VIDEO"
-			textscale	0.25
-			textalign	1
-			textaligny	4
-			forecolor	1, 1, 1, 1
-			noevents	1
-
-			windowDef OSBtnVideoTabEdgeG {
-				rect		0, 0, 16, 32
-				background	"gui/mainmenu/buttong_cornersquare2"
-				matcolor	0.6 ,0.8 ,0.9 ,0.9
+			//VIDEO button Text (active by default)
+			windowDef OSVideoBtnText {
+				rect		0, 50, 110, 14
+				text		"VIDEO"
+				textscale	0.24
+				textalign	2
+				textaligny	-3
+				forecolor	1, 1, 1, 1
 				noevents	1
-			}
-			windowDef OSBtnVideoTabBorderG {
-				rect		16, 0, 82, 32
-				background	"gui/mainmenu/buttong_middlesm2"
-				matcolor	0.6 ,0.8 ,0.9 ,0.9
-				noevents	1
-			}
-			windowDef OSBtnVideoTabCornerG {
-				rect		98, 0, 16, 32
-				background	"gui/mainmenu/buttong_cornerangle2"
-				matcolor	0.6 ,0.8 ,0.9 ,0.9
-				noevents	1
-			}
-		}
 
-		//SOUND tab (opens the sound options popup)
-		windowDef OSBtnSnd {
-			rect		146, 30, 114, 28
-			text		"SOUND"
-			textscale	0.25
-			textalign	1
-			textaligny	4
-			forecolor	0.6, 1, 1, 1
-			float "exitanim" 0
-
-			onMouseEnter {
-				transition "forecolor" "0.6 1 1 1" "1 1 1 1" "250" ;
-				transition "OSBtnSndEdgeG::matcolor" "0.8 0.9 1 1" "0.6 0.8 0.9 1" "250" ;
-				transition "OSBtnSndBorderG::matcolor" "0.8 0.9 1 1" "0.6 0.8 0.9 1" "250" ;
-				transition "OSBtnSndCornerG::matcolor" "0.8 0.9 1 1" "0.6 0.8 0.9 1" "250" ;
-
-				resetTime "ToolTip1" "0" ;
-				set "ToolTip1::text" "Open sound option settings" ;
-				set "ToolTip2::text" "Open sound option settings" ;
-				set "exitanim" "1" ;
-			}
-			onMouseExit {
-				if ("exitanim" == 1) {
-					transition "forecolor" "1 1 1 1" "0.6 1 1 1" "250" ;
-					transition "OSBtnSndEdgeG::matcolor" "0.6 0.8 0.9 1" "0.5 0.7 0.8 0.5" "400" ;
-					transition "OSBtnSndBorderG::matcolor" "0.6 0.8 0.9 1" "0.5 0.7 0.8 0.5" "400" ;
-					transition "OSBtnSndCornerG::matcolor" "0.6 0.8 0.9 1" "0.5 0.7 0.8 0.5" "400" ;
-					set "exitanim" "0" ;
-					resetTime "ToolTip2" "0" ;
+				onMouseEnter {
+					transition "forecolor" "0.6 1 1 1" "1 1 1 1" "200" ;
+					transition "backcolor" "0.45 0.55 0.7 0" "0.55 0.65 0.75 0.3" "200" ;
+				}
+				onMouseExit {
+					transition "forecolor" "1 1 1 1" "0.6 1 1 1" "200" ;
+					transition "backcolor" "0.55 0.65 0.75 0.3" "0.45 0.55 0.7 0" "400" ;
+				}
+				onAction {
+					set	"cmd"	"play guisounds_menuclickup" ;
+					transition "backcolor" "0.55 0.65 0.75 0.2" "0.45 0.55 0.7 0" "400" ;
+					set "OSVideoBtnText::noevents" "1" ;
+					set "OSSoundBtnText::noevents" "0" ;
+					set "OSAdvancedBtnText::noevents" "0" ;
+					set "OSPostBtnText::noevents" "0" ;
+					transition "OSVideoBtnText::forecolor" "1 1 1 1" "1 1 1 1" "200" ;
+					transition "OSSoundBtnText::forecolor" "0.6 1 1 1" "0.6 1 1 1" "200" ;
+					transition "OSAdvancedBtnText::forecolor" "0.6 1 1 1" "0.6 1 1 1" "200" ;
+					transition "OSPostBtnText::forecolor" "0.6 1 1 1" "0.6 1 1 1" "200" ;
+					set "SystemVideo::visible" "1" ;
+					set "SystemSound::visible" "0" ;
+					set "SystemAdvanced::visible" "0" ;
+					set "SystemPostProcess::visible" "0" ;
 				}
 			}
 
-			onAction {
-				set	"cmd"	"play guisounds_menuclickup" ;
-				resetTime "AnimSNDUp" "0" ;
+			//SOUND button Text
+			windowDef OSSoundBtnText {
+				rect		0, 70, 110, 14
+				text		"SOUND"
+				textscale	0.24
+				textalign	2
+				textaligny	-3
+				forecolor	0.6, 1, 1, 1
 
-				transition "forecolor" "1 1 1 1" "0.6 1 1 1" "250" ;
-				transition "OSBtnSndEdgeG::matcolor" "1 1 1 1" "0.5 0.7 0.8 0.5" "400" ;
-				transition "OSBtnSndBorderG::matcolor" "1 1 1 1" "0.5 0.7 0.8 0.5" "400" ;
-				transition "OSBtnSndCornerG::matcolor" "1 1 1 1" "0.5 0.7 0.8 0.5" "400" ;
-				set "exitanim" "0" ;
-				resetTime "ToolTip2" "0" ;
-			}
-
-			windowDef OSBtnSndEdgeG {
-				rect		0, 0, 16, 32
-				background	"gui/mainmenu/buttong_cornersquare2"
-				matcolor	0.5 ,0.7 ,0.8 ,0.5
-				noevents	1
-			}
-			windowDef OSBtnSndBorderG {
-				rect		16, 0, 82, 32
-				background	"gui/mainmenu/buttong_middlesm2"
-				matcolor	0.5 ,0.7 ,0.8 ,0.5
-				noevents	1
-			}
-			windowDef OSBtnSndCornerG {
-				rect		98, 0, 16, 32
-				background	"gui/mainmenu/buttong_cornerangle2"
-				matcolor	0.5 ,0.7 ,0.8 ,0.5
-				noevents	1
-			}
-		}
-
-		//ADVANCED tab (opens the advanced options popup)
-		windowDef OSBtn1 {
-			rect		272, 30, 114, 28
-			text		"ADVANCED"
-			textscale	0.25
-			textalign	1
-			textaligny	4
-			forecolor	0.6, 1, 1, 1
-			float "exitanim" 0
-
-			onMouseEnter {
-				transition "forecolor" "0.6 1 1 1" "1 1 1 1" "250" ;
-				transition "OSBtn1EdgeG::matcolor" "0.8 0.9 1 1" "0.6 0.8 0.9 1" "250" ;
-				transition "OSBtn1BorderG::matcolor" "0.8 0.9 1 1" "0.6 0.8 0.9 1" "250" ;
-				transition "OSBtn1CornerG::matcolor" "0.8 0.9 1 1" "0.6 0.8 0.9 1" "250" ;
-
-				resetTime "ToolTip1" "0" ;
-				set "ToolTip1::text" "#str_04077" ;
-				set "ToolTip2::text" "#str_04077" ;
-				set "exitanim" "1" ;
-			}
-			onMouseExit {
-				if ("exitanim" == 1) {
-					transition "forecolor" "1 1 1 1" "0.6 1 1 1" "250" ;
-					transition "OSBtn1EdgeG::matcolor" "0.6 0.8 0.9 1" "0.5 0.7 0.8 0.5" "400" ;
-					transition "OSBtn1BorderG::matcolor" "0.6 0.8 0.9 1" "0.5 0.7 0.8 0.5" "400" ;
-					transition "OSBtn1CornerG::matcolor" "0.6 0.8 0.9 1" "0.5 0.7 0.8 0.5" "400" ;
-					set "exitanim" "0" ;
-					resetTime "ToolTip2" "0" ;
+				onMouseEnter {
+					transition "forecolor" "0.6 1 1 1" "1 1 1 1" "200" ;
+					transition "backcolor" "0.45 0.55 0.7 0" "0.55 0.65 0.75 0.3" "200" ;
+				}
+				onMouseExit {
+					transition "forecolor" "1 1 1 1" "0.6 1 1 1" "200" ;
+					transition "backcolor" "0.55 0.65 0.75 0.3" "0.45 0.55 0.7 0" "400" ;
+				}
+				onAction {
+					set	"cmd"	"play guisounds_menuclickup" ;
+					transition "backcolor" "0.55 0.65 0.75 0.2" "0.45 0.55 0.7 0" "400" ;
+					set "OSVideoBtnText::noevents" "0" ;
+					set "OSSoundBtnText::noevents" "1" ;
+					set "OSAdvancedBtnText::noevents" "0" ;
+					set "OSPostBtnText::noevents" "0" ;
+					transition "OSVideoBtnText::forecolor" "0.6 1 1 1" "0.6 1 1 1" "200" ;
+					transition "OSSoundBtnText::forecolor" "1 1 1 1" "1 1 1 1" "200" ;
+					transition "OSAdvancedBtnText::forecolor" "0.6 1 1 1" "0.6 1 1 1" "200" ;
+					transition "OSPostBtnText::forecolor" "0.6 1 1 1" "0.6 1 1 1" "200" ;
+					set "SystemVideo::visible" "0" ;
+					set "SystemSound::visible" "1" ;
+					set "SystemAdvanced::visible" "0" ;
+					set "SystemPostProcess::visible" "0" ;
 				}
 			}
 
-			onAction {
-				set	"cmd"	"play guisounds_menuclickup" ;
-				resetTime "AnimRDCUp" "0" ;
+			//ADVANCED button Text
+			windowDef OSAdvancedBtnText {
+				rect		0, 90, 110, 14
+				text		"ADVANCED"
+				textscale	0.24
+				textalign	2
+				textaligny	-3
+				forecolor	0.6, 1, 1, 1
 
-				transition "forecolor" "1 1 1 1" "0.6 1 1 1" "250" ;
-				transition "OSBtn1EdgeG::matcolor" "1 1 1 1" "0.5 0.7 0.8 0.5" "400" ;
-				transition "OSBtn1BorderG::matcolor" "1 1 1 1" "0.5 0.7 0.8 0.5" "400" ;
-				transition "OSBtn1CornerG::matcolor" "1 1 1 1" "0.5 0.7 0.8 0.5" "400" ;
-				set "exitanim" "0" ;
-				resetTime "ToolTip2" "0" ;
+				onMouseEnter {
+					transition "forecolor" "0.6 1 1 1" "1 1 1 1" "200" ;
+					transition "backcolor" "0.45 0.55 0.7 0" "0.55 0.65 0.75 0.3" "200" ;
+				}
+				onMouseExit {
+					transition "forecolor" "1 1 1 1" "0.6 1 1 1" "200" ;
+					transition "backcolor" "0.55 0.65 0.75 0.3" "0.45 0.55 0.7 0" "400" ;
+				}
+				onAction {
+					set	"cmd"	"play guisounds_menuclickup" ;
+					transition "backcolor" "0.55 0.65 0.75 0.2" "0.45 0.55 0.7 0" "400" ;
+					set "OSVideoBtnText::noevents" "0" ;
+					set "OSSoundBtnText::noevents" "0" ;
+					set "OSAdvancedBtnText::noevents" "1" ;
+					set "OSPostBtnText::noevents" "0" ;
+					transition "OSVideoBtnText::forecolor" "0.6 1 1 1" "0.6 1 1 1" "200" ;
+					transition "OSSoundBtnText::forecolor" "0.6 1 1 1" "0.6 1 1 1" "200" ;
+					transition "OSAdvancedBtnText::forecolor" "1 1 1 1" "1 1 1 1" "200" ;
+					transition "OSPostBtnText::forecolor" "0.6 1 1 1" "0.6 1 1 1" "200" ;
+					set "SystemVideo::visible" "0" ;
+					set "SystemSound::visible" "0" ;
+					set "SystemAdvanced::visible" "1" ;
+					set "SystemPostProcess::visible" "0" ;
+				}
 			}
 
-			//button edge 1 GLOW
-			windowDef OSBtn1EdgeG {
-				rect		0, 0, 16, 32
-				background	"gui/mainmenu/buttong_cornersquare2"
-				matcolor	0.5 ,0.7 ,0.8 ,0.5
-				noevents	1
+			//POST-PROCESS button Text
+			windowDef OSPostBtnText {
+				rect		0, 110, 110, 14
+				text		"POST-PROCESS"
+				textscale	0.24
+				textalign	2
+				textaligny	-3
+				forecolor	0.6, 1, 1, 1
+
+				onMouseEnter {
+					transition "forecolor" "0.6 1 1 1" "1 1 1 1" "200" ;
+					transition "backcolor" "0.45 0.55 0.7 0" "0.55 0.65 0.75 0.3" "200" ;
+				}
+				onMouseExit {
+					transition "forecolor" "1 1 1 1" "0.6 1 1 1" "200" ;
+					transition "backcolor" "0.55 0.65 0.75 0.3" "0.45 0.55 0.7 0" "400" ;
+				}
+				onAction {
+					set	"cmd"	"play guisounds_menuclickup" ;
+					transition "backcolor" "0.55 0.65 0.75 0.2" "0.45 0.55 0.7 0" "400" ;
+					set "OSVideoBtnText::noevents" "0" ;
+					set "OSSoundBtnText::noevents" "0" ;
+					set "OSAdvancedBtnText::noevents" "0" ;
+					set "OSPostBtnText::noevents" "1" ;
+					transition "OSVideoBtnText::forecolor" "0.6 1 1 1" "0.6 1 1 1" "200" ;
+					transition "OSSoundBtnText::forecolor" "0.6 1 1 1" "0.6 1 1 1" "200" ;
+					transition "OSAdvancedBtnText::forecolor" "0.6 1 1 1" "0.6 1 1 1" "200" ;
+					transition "OSPostBtnText::forecolor" "1 1 1 1" "1 1 1 1" "200" ;
+					set "SystemVideo::visible" "0" ;
+					set "SystemSound::visible" "0" ;
+					set "SystemAdvanced::visible" "0" ;
+					set "SystemPostProcess::visible" "1" ;
+				}
 			}
-			//button side 1 GLOW
-			windowDef OSBtn1BorderG {
-				rect		16, 0, 82, 32
-				background	"gui/mainmenu/buttong_middlesm2"
-				matcolor	0.5 ,0.7 ,0.8 ,0.5
-				noevents	1
-			}
-			//button corner 1 GLOW
-			windowDef OSBtn1CornerG {
-				rect		98, 0, 16, 32
-				background	"gui/mainmenu/buttong_cornerangle2"
-				matcolor	0.5 ,0.7 ,0.8 ,0.5
-				noevents	1
-			}
-		}
 
 	
-	//VIDEO SETTINGS
-
-		// DUDE: the old "Video Settings" header strip became the VIDEO tab up
-		// top (OSBtnVideoTab); the audio section moved to the SOUND popup, so
-		// the video boxes now stretch into the freed space for future rows.
-		windowDef OSBox1_1 {
-			rect		20, 60, 166, 268
-			backcolor	0.6, 0.8, 1, 0.1
-			noevents	1
-		}
-		windowDef OSBox1_3 {
-			rect		186, 60, 174, 268
-			backcolor	0.6, 0.8, 1, 0.1
-			noevents	1
-		}
-		windowDef OSBox1_4 {
-			rect		360, 60, 10, 249
-			backcolor	0.6, 0.8, 1, 0.1
-			noevents	1
-		}
-		windowDef OSBox1_5 {
-			rect		360, 302, 16, -32
-			background	"gui/mainmenu/button_cornerangle"
-			matcolor	0.6, 0.8, 1, 0.1
-			noevents	1
-		}
+	//VIDEO panel — inline, toggled by the VIDEO button in the left column. Panel
+	// origin x=130 puts every row's left edge at the content column (clear of the
+	// buttons at x=0..122); rows keep their own y so the title area above stays free.
+		windowDef SystemVideo {
+			rect		130, 48, 320, 268
+			visible		1
 
 	//RENDERER (DUDE: backend selector; takes effect on restart like Screen Size)
 		windowDef OSRenderer {
-			rect		34, 74, 320, 16
+			rect		0, 0, 320, 16
 			windowDef OSRendererL {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4590,16 +4571,16 @@ windowDef OptionsMenuParent {
 				noevents	1
 			}
 			windowDef OSRendererTitle {
-				rect		1, 1, 180, 14
+				rect		1, 1, 205, 14
 				text		"Renderer"
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	2
+				textalign	0
 				textaligny	-6
 				forecolor	1, 1, 1, 1
 			}
 			choiceDef OSRendererPrimary {
-				rect		210, 1, 100, 14
+				rect		213, 1, 99, 14
 				choices		"Legacy;OpenGL 3;Vulkan"
 				values		"opengl;opengl3;vulkan"
 				cvar		"r_graphicsAPI"
@@ -4607,7 +4588,7 @@ windowDef OptionsMenuParent {
 				choiceType	1
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	1
+				textalign	0
 				textaligny	-6
 				forecolor	0.6, 0.8, 0.8, 1
 
@@ -4620,7 +4601,7 @@ windowDef OptionsMenuParent {
 
 	//VIDEO QUALITY
 		windowDef OS1 {
-			rect		34, 95, 320, 16
+			rect		0, 23, 320, 16
 			windowDef OS1L {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4640,11 +4621,11 @@ windowDef OptionsMenuParent {
 				noevents	1
 			}
 			windowDef OS1Title {
-				rect		1, 1, 180, 14
+				rect		1, 1, 205, 14
 				text		"Quality"
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	2
+				textalign	0
 				textaligny	-6
 				forecolor	1, 1, 1, 1
 			}
@@ -4654,7 +4635,7 @@ windowDef OptionsMenuParent {
 			// dude_rtx axis - currently surfaced in the ImGui settings menu (Graphics tab); the old
 			// "Ultra Nightmare" entry here is gone, being "Nightmare" + Ray Tracing On.
 			choiceDef OS1Primary {
-				rect		210, 1, 100, 14
+				rect		213, 1, 99, 14
 				choices		"Potato;Low;Medium;High;Ultra;Nightmare"
 				values		"0;1;2;3;4;5"
 				cvar		"dude_preset"
@@ -4662,7 +4643,7 @@ windowDef OptionsMenuParent {
 				choiceType	1
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	1
+				textalign	0
 				textaligny	-6
 				forecolor	0.6, 0.8, 0.8, 1
 
@@ -4674,7 +4655,7 @@ windowDef OptionsMenuParent {
 
 		// DUDE: FPS limiter (com_maxFPS) - live single-cvar cycler, no restart.
 		windowDef OSMaxFps {
-			rect		34, 116, 320, 16
+			rect		0, 46, 320, 16
 			windowDef OSMaxFpsL {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4694,16 +4675,16 @@ windowDef OptionsMenuParent {
 				noevents	1
 			}
 			windowDef OSMaxFpsTitle {
-				rect		1, 1, 180, 14
+				rect		1, 1, 205, 14
 				text		"FPS Limit"
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	2
+				textalign	0
 				textaligny	-6
 				forecolor	1, 1, 1, 1
 			}
 			choiceDef OSMaxFpsPrimary {
-				rect		210, 1, 100, 14
+				rect		213, 1, 99, 14
 				choices		"Uncapped;50;60;72;120;144;165;240"
 				values		"0;50;60;72;120;144;165;240"
 				cvar		"com_maxFPS"
@@ -4711,14 +4692,14 @@ windowDef OptionsMenuParent {
 				choiceType	1
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	1
+				textalign	0
 				textaligny	-6
 				forecolor	0.6, 0.8, 0.8, 1
 			}
 		}
 		// DUDE: VSync (dude_vsync bridge -> r_swapInterval + r_vrr) - live cycler, no restart.
 		windowDef OSVsync {
-			rect		34, 137, 320, 16
+			rect		0, 69, 320, 16
 			windowDef OSVsyncL {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4738,16 +4719,16 @@ windowDef OptionsMenuParent {
 				noevents	1
 			}
 			windowDef OSVsyncTitle {
-				rect		1, 1, 180, 14
+				rect		1, 1, 205, 14
 				text		"VSync"
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	2
+				textalign	0
 				textaligny	-6
 				forecolor	1, 1, 1, 1
 			}
 			choiceDef OSVsyncPrimary {
-				rect		210, 1, 100, 14
+				rect		213, 1, 99, 14
 				choices		"Disabled;Enabled;Adaptive;VRR"
 				values		"0;1;2;3"
 				cvar		"dude_vsync"
@@ -4755,7 +4736,7 @@ windowDef OptionsMenuParent {
 				choiceType	1
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	1
+				textalign	0
 				textaligny	-6
 				forecolor	0.6, 0.8, 0.8, 1
 			}
@@ -4763,7 +4744,7 @@ windowDef OptionsMenuParent {
 
 	//SCREEN SIZE
 		windowDef OS2 {
-			rect		34, 158, 320, 16
+			rect		0, 92, 320, 16
 			windowDef OS2L {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4783,16 +4764,16 @@ windowDef OptionsMenuParent {
 				noevents	1
 			}
 			windowDef OS2Title {
-				rect		1, 1, 180, 14
+				rect		1, 1, 205, 14
 				text		"#str_02153"
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	2
+				textalign	0
 				textaligny	-6
 				forecolor	1, 1, 1, 1
 			}
 			choiceDef OS2Primary {
-				rect		210, 1, 100, 14
+				rect		213, 1, 99, 14
 				choices		"#str_04222"//320x240;400x300;512x384;
 				values		"3;4;5;6;7;8"//0;1;2;
 				cvar		"r_mode"
@@ -4800,7 +4781,7 @@ windowDef OptionsMenuParent {
 				choiceType	1
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	1
+				textalign	0
 				textaligny	-6
 				forecolor	0.6, 0.8, 0.8, 1
 
@@ -4813,7 +4794,7 @@ windowDef OptionsMenuParent {
 
 	//FULLSCREEN
 		windowDef OS3 {
-			rect		34, 179, 320, 16
+			rect		0, 115, 320, 16
 			windowDef OS3L {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4833,23 +4814,23 @@ windowDef OptionsMenuParent {
 				noevents	1
 			}
 			windowDef OS3Title {
-				rect		1, 1, 180, 14
+				rect		1, 1, 205, 14
 				text		"#str_02154"
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	2
+				textalign	0
 				textaligny	-6
 				forecolor	1, 1, 1, 1
 			}
 			choiceDef OS3Primary {
-				rect		210, 1, 90, 14
+				rect		213, 1, 99, 14
 				choices		"#str_04221"
 				cvar		"r_fullscreen"
 				updateGroup	render
 				choiceType	0
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	1
+				textalign	0
 				textaligny	-6
 				forecolor	0.6, 0.8, 0.8, 1
 
@@ -4867,7 +4848,7 @@ windowDef OptionsMenuParent {
 	// adds FSR2. The RHI rows bind the dude_aa bridge cvar; "exec dudeAA" applies it to
 	// r_rhiAA / r_fsr live (no restart). MSAA only exists on the legacy backend.
 		windowDef OSAntialias {
-			rect		34, 200, 320, 16
+			rect		0, 138, 320, 16
 			visible		("gui::dudeBackend" == 0)
 			windowDef OSAntialiasL {
 				rect		0, 0, 8, 16
@@ -4888,16 +4869,16 @@ windowDef OptionsMenuParent {
 				noevents	1
 			}
 			windowDef OSAntialiasTitle {
-				rect		1, 1, 180, 14
+				rect		1, 1, 205, 14
 				text		"#str_04128"
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	2
+				textalign	0
 				textaligny	-6
 				forecolor	1, 1, 1, 1
 			}
 			choiceDef OSAntialiasPrimary {
-				rect		210, 1, 100, 14
+				rect		213, 1, 99, 14
 				choices		"#str_04231"
 				values		"0;2;4;8;16"
 				cvar		"r_multisamples"
@@ -4905,7 +4886,7 @@ windowDef OptionsMenuParent {
 				choiceType	1
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	1
+				textalign	0
 				textaligny	-6
 				forecolor	0.6, 0.8, 0.8, 1
 
@@ -4917,7 +4898,7 @@ windowDef OptionsMenuParent {
 		}
 	//ANTIALIASING - opengl3 variant (live post AA, no restart)
 		windowDef OSAntialiasGl3 {
-			rect		34, 200, 320, 16
+			rect		0, 138, 320, 16
 			visible		("gui::dudeBackend" == 1)
 			windowDef OSAntialiasGl3L {
 				rect		0, 0, 8, 16
@@ -4938,16 +4919,16 @@ windowDef OptionsMenuParent {
 				noevents	1
 			}
 			windowDef OSAntialiasGl3Title {
-				rect		1, 1, 180, 14
+				rect		1, 1, 205, 14
 				text		"#str_04128"
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	2
+				textalign	0
 				textaligny	-6
 				forecolor	1, 1, 1, 1
 			}
 			choiceDef OSAntialiasGl3Primary {
-				rect		210, 1, 100, 14
+				rect		213, 1, 99, 14
 				choices		"None;FXAA;SMAA"
 				values		"0;1;2"
 				cvar		"dude_aa"
@@ -4955,7 +4936,7 @@ windowDef OptionsMenuParent {
 				choiceType	1
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	1
+				textalign	0
 				textaligny	-6
 				forecolor	0.6, 0.8, 0.8, 1
 
@@ -4966,7 +4947,7 @@ windowDef OptionsMenuParent {
 		}
 	//ANTIALIASING - Vulkan variant (adds FSR2 temporal AA)
 		windowDef OSAntialiasVk {
-			rect		34, 200, 320, 16
+			rect		0, 138, 320, 16
 			visible		("gui::dudeBackend" == 2)
 			windowDef OSAntialiasVkL {
 				rect		0, 0, 8, 16
@@ -4987,16 +4968,16 @@ windowDef OptionsMenuParent {
 				noevents	1
 			}
 			windowDef OSAntialiasVkTitle {
-				rect		1, 1, 180, 14
+				rect		1, 1, 205, 14
 				text		"#str_04128"
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	2
+				textalign	0
 				textaligny	-6
 				forecolor	1, 1, 1, 1
 			}
 			choiceDef OSAntialiasVkPrimary {
-				rect		210, 1, 100, 14
+				rect		213, 1, 99, 14
 				choices		"None;FXAA;SMAA;FSR2"
 				values		"0;1;2;3"
 				cvar		"dude_aa"
@@ -5004,7 +4985,7 @@ windowDef OptionsMenuParent {
 				choiceType	1
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	1
+				textalign	0
 				textaligny	-6
 				forecolor	0.6, 0.8, 0.8, 1
 
@@ -5015,7 +4996,7 @@ windowDef OptionsMenuParent {
 		}
 	//BRIGHTNESS
 		windowDef OS4 {
-			rect		34, 221, 320, 16
+			rect		0, 161, 320, 16
 			windowDef OS4L {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -5035,22 +5016,22 @@ windowDef OptionsMenuParent {
 				noevents	1
 			}
 			windowDef OS4Title {
-				rect		1, 1, 180, 14
+				rect		1, 1, 205, 14
 				text		"#str_02155"
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	2
+				textalign	0
 				textaligny	-6
 				forecolor	1, 1, 1, 1
 			}
 			windowDef OS4SliderBG {
-				rect		220, 4, 128, 16
+				rect		213, 4, 95, 16
 				background	"guis/assets/mainmenu/slider_bg"
 				matcolor	0.6, 0.8, 0.8, 0.5
 				noevents	1
 			}
 			sliderDef OS4Primary {
-				rect		220, 5, 71, 8
+				rect		213, 5, 71, 8
 				forecolor	0.8, 1, 1, 1
 				matcolor	1, 1, 1, 1
 				low		0.5
@@ -5063,11 +5044,13 @@ windowDef OptionsMenuParent {
 	//GAMMA (DUDE: live like brightness — applied in-shader, no restart)
 		// DUDE: ray-tracing axis (dude_rtx), orthogonal to the Quality tier above. Shown only on an
 		// RT-capable device (Vulkan + ray-query -> gui::rtCapable == 1, set in SetMainMenuGuiVars);
-		// hidden on legacy/GL3/non-RT GPUs, where it would do nothing. Fills the existing gap between
-		// the Antialiasing row (y=200) and Gamma (y=242), so no other row moves. onAction fires the
+		// hidden on legacy/GL3/non-RT GPUs, where it would do nothing. Placed as the last control
+		// row (y=263, below Gamma at y=242) so it never overlaps the Brightness row (which also sits
+		// at y=221); when hidden it leaves only trailing blank space above the warning line, not a
+		// gap between rows. onAction fires the
 		// same "exec dudePreset" as Quality - it re-applies the current tier plus this RT axis.
 		windowDef OSRtx {
-			rect		34, 221, 320, 16
+			rect		0, 207, 320, 16
 			visible		("gui::rtCapable" == 1)
 			windowDef OSRtxL {
 				rect		0, 0, 8, 16
@@ -5088,16 +5071,16 @@ windowDef OptionsMenuParent {
 				noevents	1
 			}
 			windowDef OSRtxTitle {
-				rect		1, 1, 180, 14
+				rect		1, 1, 205, 14
 				text		"Ray Tracing"
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	2
+				textalign	0
 				textaligny	-6
 				forecolor	1, 1, 1, 1
 			}
 			choiceDef OSRtxPrimary {
-				rect		210, 1, 100, 14
+				rect		213, 1, 99, 14
 				choices		"Off;On"
 				values		"0;1"
 				cvar		"dude_rtx"
@@ -5105,7 +5088,7 @@ windowDef OptionsMenuParent {
 				choiceType	1
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	1
+				textalign	0
 				textaligny	-6
 				forecolor	0.6, 0.8, 0.8, 1
 
@@ -5116,7 +5099,7 @@ windowDef OptionsMenuParent {
 		}
 
 		windowDef OSGamma {
-			rect		34, 242, 320, 16
+			rect		0, 184, 320, 16
 			windowDef OSGammaL {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -5136,22 +5119,22 @@ windowDef OptionsMenuParent {
 				noevents	1
 			}
 			windowDef OSGammaTitle {
-				rect		1, 1, 180, 14
+				rect		1, 1, 205, 14
 				text		"Gamma"
 				font		"fonts/bank"
 				textscale	0.25
-				textalign	2
+				textalign	0
 				textaligny	-6
 				forecolor	1, 1, 1, 1
 			}
 			windowDef OSGammaSliderBG {
-				rect		220, 4, 128, 16
+				rect		213, 4, 95, 16
 				background	"guis/assets/mainmenu/slider_bg"
 				matcolor	0.6, 0.8, 0.8, 0.5
 				noevents	1
 			}
 			sliderDef OSGammaPrimary {
-				rect		220, 5, 71, 8
+				rect		213, 5, 71, 8
 				forecolor	0.8, 1, 1, 1
 				matcolor	1, 1, 1, 1
 				low		0.5
@@ -5162,7 +5145,7 @@ windowDef OptionsMenuParent {
 			}
 		}
 		windowDef OSWarning {
-			rect		15, 266, 300, 14
+			rect		0, 230, 300, 14
 			text		"#str_04084"
 			font		"fonts/bank"
 			textscale	0.25
@@ -5170,77 +5153,816 @@ windowDef OptionsMenuParent {
 			textaligny	-6
 			forecolor	1, 1, 1, 0
 		}
-/*
-		//button 2
-		windowDef OSBtn2 {
-			rect		184, 195, 190, 28
-			text		"#str_02156"
-			textscale	0.25
-			textaligny	4
-			forecolor	1, 1, 1, 0.5
-			noevents	1
-			float activebtn 0
-	
-			onMouseEnter {
-				transition "forecolor" "0.6 1 1 1" "1 1 1 1" "250" ;
-				transition "OSBtn2EdgeG::matcolor" "0.8 0.9 1 1" "0.6 0.8 0.9 1" "250" ;
-				transition "OSBtn2BorderG::matcolor" "0.8 0.9 1 1" "0.6 0.8 0.9 1" "250" ;
-				transition "OSBtn2CornerG::matcolor" "0.8 0.9 1 1" "0.6 0.8 0.9 1" "250" ;
+		}
+		// --- end SystemVideo panel ---
 
-				resetTime "ToolTip1" "0" ;
-				set "ToolTip1::text" "#str_02157" ;
-				set "ToolTip2::text" "#str_02157" ;
-			}
-			onMouseExit {
-				transition "forecolor" "1 1 1 1" "0.6 1 1 1" "250" ;
-				transition "OSBtn2EdgeG::matcolor" "0.6 0.8 0.9 1" "0.5 0.7 0.8 0.5" "400" ;
-				transition "OSBtn2BorderG::matcolor" "0.6 0.8 0.9 1" "0.5 0.7 0.8 0.5" "400" ;
-				transition "OSBtn2CornerG::matcolor" "0.6 0.8 0.9 1" "0.5 0.7 0.8 0.5" "400" ;
+	//SOUND panel — audio rows, moved inline from the old SOUND pop-up. Same control
+	// column (x=210 choices / x=220 sliders) as the VIDEO panel so the knobs line up.
+		windowDef SystemSound {
+			rect		130, 48, 320, 268
+			visible		0
 
-				resetTime "ToolTip2" "0" ;
-			}
-	
-			onAction {
-				set	"cmd"	"play guisounds_chirpconnect" ; 
-				set	"cmd"	"sound restart" ;
-				set	"noevents" "1" ;
-				set	"activebtn" "0" ;
+			//Number of speakers
+			windowDef SND1 {
+				rect		0, 0, 320, 16
+				windowDef SND1L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef SND1M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef SND1R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef SND1Title {
+					rect		1, 1, 205, 14
+					text		"#str_04085"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef SND1Primary {
+					rect		213, 1, 99, 14
+					choices		"#str_04221"
+					values		"2;6"
+					cvar		"s_numberOfSpeakers"
+					updateGroup	sound
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
 
-				transition "forecolor" "1 1 1 1" "1 1 1 0.5" "250" ;
-				transition "OSBtn2EdgeG::matcolor" "1 1 1 1" "0.5 0.7 0.8 0.5" "400" ;
-				transition "OSBtn2BorderG::matcolor" "1 1 1 1" "0.5 0.7 0.8 0.5" "400" ;
-				transition "OSBtn2CornerG::matcolor" "1 1 1 1" "0.5 0.7 0.8 0.5" "400" ;
-
-				resetTime "ToolTip2" "0" ;
+					onAction {
+						set "cmd" "sound" ;
+					}
+				}
 			}
-
-			//button edge 2 GLOW
-			windowDef OSBtn2EdgeG {
-				rect		0, 0, 16, 32
-				background	"gui/mainmenu/buttong_cornersquare2"
-				matcolor	0.5 ,0.7 ,0.8 ,0.5
-				noevents	1
+			//Reverse Channels
+			windowDef SND2 {
+				rect		0, 23, 320, 16
+				windowDef SND2L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef SND2M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef SND2R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef SND2Title {
+					rect		1, 1, 205, 14
+					text		"#str_02161"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef SND2Primary {
+					rect		213, 1, 99, 14
+					choices		"#str_04221"
+					cvar		"s_reverse"
+					updateGroup	sound
+					choiceType	0
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
 			}
-			//button side 2 GLOW
-			windowDef OSBtn2BorderG {
-				rect		16, 0, 160, 32
-				background	"gui/mainmenu/buttong_middlesm2"
-				matcolor	0.5 ,0.7 ,0.8 ,0.5
-				noevents	1
+			//Volume
+			windowDef SND3 {
+				rect		0, 46, 320, 16
+				windowDef SND3L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef SND3M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef SND3R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef SND3Title {
+					rect		1, 1, 205, 14
+					text		"#str_02163"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				windowDef SND3SliderBG {
+					rect		213, 4, 95, 16
+					background	"guis/assets/mainmenu/slider_bg"
+					matcolor	0.6, 0.8, 0.8, 0.5
+					noevents	1
+				}
+				sliderDef SND3Primary {
+					rect		213, 5, 71, 8
+					forecolor	0.8, 1, 1, 1
+					matcolor	1, 1, 1, 1
+					low			-40
+					high		0
+					step		1
+					thumbShader	"guis/assets/mainmenu/slider_bar"
+					cvar		"s_volume_dB"
+				}
 			}
-			//button corner 2 GLOW
-			windowDef OSBtn2CornerG {
-				rect		176, 0, 16, 32
-				background	"gui/mainmenu/buttong_cornerangle2"
-				matcolor	0.5 ,0.7 ,0.8 ,0.5
-				noevents	1
+			//Sound Diversity
+			windowDef SND4 {
+				rect		0, 69, 320, 16
+				windowDef SND4L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef SND4M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef SND4R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef SND4Title {
+					rect		1, 1, 205, 14
+					text		"Sound diversity"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				windowDef SND4SliderBG {
+					rect		213, 4, 95, 16
+					background	"guis/assets/mainmenu/slider_bg"
+					matcolor	0.6, 0.8, 0.8, 0.5
+					noevents	1
+				}
+				sliderDef SND4Primary {
+					rect		213, 5, 71, 8
+					forecolor	0.8, 1, 1, 1
+					matcolor	1, 1, 1, 1
+					low		1
+					high		10
+					step		1
+					thumbShader	"guis/assets/mainmenu/slider_bar"
+					cvar		"s_maxSoundsPerShader"
+				}
 			}
 		}
-*/
-	
-	// DUDE: the on-page AUDIO SETTINGS section moved into the SOUND popup
-	// (SoundOptionsWin, opened by the SOUND tab above) to free page space.
+		// --- end SystemSound panel ---
 
+	//ADVANCED panel — render feature toggles, moved inline from the old ADVANCED
+	// pop-up. Live render cvars (no restart); inert on the legacy ARB backend.
+		windowDef SystemAdvanced {
+			rect		130, 48, 320, 268
+			visible		0
+
+			windowDef ADV1 {
+				rect		0, 0, 320, 16
+				windowDef ADV1L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV1M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV1R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV1Title {
+					rect		1, 1, 205, 14
+					text		"Ambient Occlusion"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef ADV1Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_ssao"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
+			}
+			windowDef ADV2 {
+				rect		0, 23, 320, 16
+				windowDef ADV2L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV2M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV2R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV2Title {
+					rect		1, 1, 205, 14
+					text		"AO Baked Maps"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef ADV2Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_occlusionMaps"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
+			}
+			windowDef ADV3 {
+				rect		0, 46, 320, 16
+				windowDef ADV3L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV3M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV3R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV3Title {
+					rect		1, 1, 205, 14
+					text		"Tessellation"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef ADV3Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_tessellation"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
+			}
+			windowDef ADV4 {
+				rect		0, 69, 320, 16
+				windowDef ADV4L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV4M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV4R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV4Title {
+					rect		1, 1, 205, 14
+					text		"PBR Materials"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef ADV4Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_pbr"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
+			}
+			windowDef ADV5 {
+				rect		0, 92, 320, 16
+				windowDef ADV5L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV5M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV5R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV5Title {
+					rect		1, 1, 205, 14
+					text		"Screen Reflections"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef ADV5Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_ssr"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
+			}
+			windowDef ADV6 {
+				rect		0, 115, 320, 16
+				windowDef ADV6L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV6M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV6R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV6Title {
+					rect		1, 1, 205, 14
+					text		"Emissive Surfaces"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef ADV6Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_emissiveSurfaces"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
+			}
+			windowDef ADV7 {
+				rect		0, 138, 320, 16
+				windowDef ADV7L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV7M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV7R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV7Title {
+					rect		1, 1, 205, 14
+					text		"Soft Particles"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef ADV7Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_useSoftParticles"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
+			}
+			windowDef ADV8 {
+				rect		0, 161, 320, 16
+				windowDef ADV8L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV8M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV8R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV8Title {
+					rect		1, 1, 205, 14
+					text		"HDR"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef ADV8Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_hdr"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
+			}
+			windowDef ADV10 {
+				rect		0, 184, 320, 16
+				windowDef ADV10L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV10M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV10R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV10Title {
+					rect		1, 1, 205, 14
+					text		"Volumetrics"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef ADV10Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_volumetrics"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
+			}
+			windowDef ADV11 {
+				rect		0, 207, 320, 16
+				windowDef ADV11L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV11M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV11R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV11Title {
+					rect		1, 1, 205, 14
+					text		"Parallax Mapping"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef ADV11Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_parallax"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
+			}
+			windowDef ADV12 {
+				rect		0, 230, 320, 16
+				windowDef ADV12L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV12M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV12R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV12Title {
+					rect		1, 1, 205, 14
+					text		"Contact Shadows"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef ADV12Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_contactShadows"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
+			}
+		}
+		// --- end SystemAdvanced panel ---
+
+	//POST-PROCESS panel — tonemap/post effects. Eye Adaptation is a toggle;
+	// Film Grain and Chromatic Aberration are intensity sliders (float cvars).
+		windowDef SystemPostProcess {
+			rect		130, 48, 320, 268
+			visible		0
+
+			windowDef PP1 {
+				rect		0, 0, 320, 16
+				windowDef PP1L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef PP1M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef PP1R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef PP1Title {
+					rect		1, 1, 205, 14
+					text		"Eye Adaptation"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef PP1Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_hdrEyeAdaptation"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
+			}
+			windowDef PP2 {
+				rect		0, 23, 320, 16
+				windowDef PP2L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef PP2M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef PP2R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef PP2Title {
+					rect		1, 1, 205, 14
+					text		"Film Grain"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				windowDef PP2SliderBG {
+					rect		213, 4, 95, 16
+					background	"guis/assets/mainmenu/slider_bg"
+					matcolor	0.6, 0.8, 0.8, 0.5
+					noevents	1
+				}
+				sliderDef PP2Primary {
+					rect		213, 5, 71, 8
+					forecolor	0.8, 1, 1, 1
+					matcolor	1, 1, 1, 1
+					low		0
+					high		0.25
+					step		0.01
+					thumbShader	"guis/assets/mainmenu/slider_bar"
+					cvar		"r_postFilmGrain"
+				}
+			}
+			windowDef PP3 {
+				rect		0, 46, 320, 16
+				windowDef PP3L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef PP3M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef PP3R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef PP3Title {
+					rect		1, 1, 205, 14
+					text		"Chromatic Aberration"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				windowDef PP3SliderBG {
+					rect		213, 4, 95, 16
+					background	"guis/assets/mainmenu/slider_bg"
+					matcolor	0.6, 0.8, 0.8, 0.5
+					noevents	1
+				}
+				sliderDef PP3Primary {
+					rect		213, 5, 71, 8
+					forecolor	0.8, 1, 1, 1
+					matcolor	1, 1, 1, 1
+					low		0
+					high		0.5
+					step		0.01
+					thumbShader	"guis/assets/mainmenu/slider_bar"
+					cvar		"r_postChromaticAberration"
+				}
+			}
+		}
+		// --- end SystemPostProcess panel ---
 
 	}
 
@@ -14466,759 +15188,6 @@ windowDef MultiplayerLANParent {
 		}
 	}
 
-	//THIS IS REALLY ADVANCED OPTIONS...leaving old RDC windowdef names to avoid anim issues
-	windowDef AdvancedOptionsWin {
-		rect		0, 0, 640, 0
-		//Arl; start
-		cstAnchor	CST_ANCHOR_CENTER_CENTER
-		//Arl; end
-		backcolor 	0, 0, 0, 0.5
-		modal		1
-
-		windowDef RDCBgMain1 {
-			rect		136, 40, -32, -32
-			background	"gui/mainmenu/content_smallcorner"
-			matcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef RDCBgMain2 {
-			rect		168, 40, 380, 32
-			backcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef RDCBgMain3 {
-			rect		548, 40, 32, -32
-			background	"gui/mainmenu/content_smallcorner"
-			matcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef RDCBgMain4 {
-			rect		136, 72, 444, 170
-			backcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef RDCBgMain5 {
-			rect		136, 242, -32, 32
-			background	"gui/mainmenu/content_smallcorner"
-			matcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef RDCBgMain6 {
-			rect		168, 242, 380, 32
-			backcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef RDCBgMain7 {
-			rect		548, 242, 32, 32
-			background	"gui/mainmenu/content_smallcorner"
-			matcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef RDCBgMain8 {
-			rect		139, 43, 340, 279
-			background	"gui/mainmenu/content_glow2"
-			matcolor	1, 1, 1, 0.18
-			noevents	1
-		}
-
-		windowDef RDC {
-			rect		138, 42, 440, 320
-			visible		0
-
-			windowDef RDCTitleText {
-				rect		20, 5, 320, 20
-				text		"#str_04121"
-				textscale	0.32
-				textaligny	-3
-				forecolor	1, 1, 1, 1
-			}
-			windowDef RDCTitleBar {
-				rect		5, 23, 325, 2
-				backcolor	0.6 ,0.8 ,1 ,0.2
-				noevents	1
-			}
-	// DUDE: advanced page = DUDE enhancement toggles. Antialiasing (MSAA) moved to
-	// the System/Video page next to Fullscreen; sound diversity lives in the SOUND
-	// popup. These are live render cvars (no restart) and are inert on the legacy
-	// ARB backend - choose OpenGL 3.3 / Vulkan for them to take effect.
-		windowDef ADV1 {
-			rect		20, 38, 400, 16
-			windowDef ADV1L {
-				rect		0, 0, 8, 16
-				background	"gui/mainmenu/select_edge"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV1M {
-				rect		8, 0, 384, 16
-				background	"gui/mainmenu/select_border"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV1R {
-				rect		392, 0, 8, 16
-				background	"gui/mainmenu/select_angle"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV1Title {
-				rect		1, 1, 280, 14
-				text		"Ambient Occlusion"
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	2
-				textaligny	-6
-				forecolor	1, 1, 1, 1
-			}
-			choiceDef ADV1Primary {
-				rect		300, 1, 80, 14
-				choices		"Off;On"
-				values		"0;1"
-				cvar		"r_ssao"
-				choiceType	1
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	1
-				textaligny	-6
-				forecolor	0.6, 0.8, 0.8, 1
-			}
-		}
-		windowDef ADV2 {
-			rect		20, 59, 400, 16
-			windowDef ADV2L {
-				rect		0, 0, 8, 16
-				background	"gui/mainmenu/select_edge"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV2M {
-				rect		8, 0, 384, 16
-				background	"gui/mainmenu/select_border"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV2R {
-				rect		392, 0, 8, 16
-				background	"gui/mainmenu/select_angle"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV2Title {
-				rect		1, 1, 280, 14
-				text		"AO Baked Maps"
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	2
-				textaligny	-6
-				forecolor	1, 1, 1, 1
-			}
-			choiceDef ADV2Primary {
-				rect		300, 1, 80, 14
-				choices		"Off;On"
-				values		"0;1"
-				cvar		"r_occlusionMaps"
-				choiceType	1
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	1
-				textaligny	-6
-				forecolor	0.6, 0.8, 0.8, 1
-			}
-		}
-		windowDef ADV3 {
-			rect		20, 80, 400, 16
-			windowDef ADV3L {
-				rect		0, 0, 8, 16
-				background	"gui/mainmenu/select_edge"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV3M {
-				rect		8, 0, 384, 16
-				background	"gui/mainmenu/select_border"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV3R {
-				rect		392, 0, 8, 16
-				background	"gui/mainmenu/select_angle"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV3Title {
-				rect		1, 1, 280, 14
-				text		"Tessellation"
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	2
-				textaligny	-6
-				forecolor	1, 1, 1, 1
-			}
-			choiceDef ADV3Primary {
-				rect		300, 1, 80, 14
-				choices		"Off;On"
-				values		"0;1"
-				cvar		"r_tessellation"
-				choiceType	1
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	1
-				textaligny	-6
-				forecolor	0.6, 0.8, 0.8, 1
-			}
-		}
-		windowDef ADV4 {
-			rect		20, 101, 400, 16
-			windowDef ADV4L {
-				rect		0, 0, 8, 16
-				background	"gui/mainmenu/select_edge"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV4M {
-				rect		8, 0, 384, 16
-				background	"gui/mainmenu/select_border"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV4R {
-				rect		392, 0, 8, 16
-				background	"gui/mainmenu/select_angle"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV4Title {
-				rect		1, 1, 280, 14
-				text		"PBR Materials"
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	2
-				textaligny	-6
-				forecolor	1, 1, 1, 1
-			}
-			choiceDef ADV4Primary {
-				rect		300, 1, 80, 14
-				choices		"Off;On"
-				values		"0;1"
-				cvar		"r_pbr"
-				choiceType	1
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	1
-				textaligny	-6
-				forecolor	0.6, 0.8, 0.8, 1
-			}
-		}
-		windowDef ADV5 {
-			rect		20, 122, 400, 16
-			windowDef ADV5L {
-				rect		0, 0, 8, 16
-				background	"gui/mainmenu/select_edge"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV5M {
-				rect		8, 0, 384, 16
-				background	"gui/mainmenu/select_border"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV5R {
-				rect		392, 0, 8, 16
-				background	"gui/mainmenu/select_angle"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV5Title {
-				rect		1, 1, 280, 14
-				text		"Screen-Space Reflections"
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	2
-				textaligny	-6
-				forecolor	1, 1, 1, 1
-			}
-			choiceDef ADV5Primary {
-				rect		300, 1, 80, 14
-				choices		"Off;On"
-				values		"0;1"
-				cvar		"r_ssr"
-				choiceType	1
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	1
-				textaligny	-6
-				forecolor	0.6, 0.8, 0.8, 1
-			}
-		}
-		windowDef ADV6 {
-			rect		20, 143, 400, 16
-			windowDef ADV6L {
-				rect		0, 0, 8, 16
-				background	"gui/mainmenu/select_edge"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV6M {
-				rect		8, 0, 384, 16
-				background	"gui/mainmenu/select_border"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV6R {
-				rect		392, 0, 8, 16
-				background	"gui/mainmenu/select_angle"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef ADV6Title {
-				rect		1, 1, 280, 14
-				text		"Emissive Surfaces"
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	2
-				textaligny	-6
-				forecolor	1, 1, 1, 1
-			}
-			choiceDef ADV6Primary {
-				rect		300, 1, 80, 14
-				choices		"Off;On"
-				values		"0;1"
-				cvar		"r_emissiveSurfaces"
-				choiceType	1
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	1
-				textaligny	-6
-				forecolor	0.6, 0.8, 0.8, 1
-			}
-		}
-			//select button 1
-			windowDef RDCBtn1 {
-				rect		150, 192, 300, 32
-
-				windowDef RDCBtn1Border {
-					rect		4, 6, 236, 19
-					backcolor	0.45 ,0.55 ,0.7 ,0.3
-					noevents	1
-				}
-				windowDef RDCBtn1Corner {
-					rect		240, 0, 16, 32
-					background	"gui/mainmenu/button_cornerangle"
-					matcolor	0.45 ,0.55 ,0.7 ,0.3
-					noevents	1
-				}
-				windowDef RDCBtn1EdgeG {
-					rect		0, 0, 16, 32
-					background	"gui/mainmenu/buttong_cornersquare"
-					matcolor	0.55 ,0.65 ,0.75 ,0.5
-					noevents	1
-				}
-				windowDef RDCBtn1BorderG {
-					rect		16, 0, 224, 32
-					background	"gui/mainmenu/buttong_middlesm"
-					matcolor	0.55 ,0.65 ,0.75 ,0.5
-					noevents	1
-				}
-				windowDef RDCBtn1CornerG {
-					rect		240, 0, 16, 32
-					background	"gui/mainmenu/buttong_cornerangle"
-					matcolor	0.55 ,0.65 ,0.75 ,0.5
-					noevents	1
-				}
-			}
-
-			windowDef RDCYesBtnText {
-				rect		155, 198, 240, 19
-				text		"#str_04129"
-				textscale	0.25
-				textalign	1
-				textaligny	-1
-				forecolor	0.6, 1, 1, 1
-				visible 	1
-				wantenter	1
-
-				onMouseEnter {
-					transition "forecolor" "0.6 1 1 1" "1 1 1 1" "250" ;
-					transition "RDCBtn1EdgeG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
-					transition "RDCBtn1BorderG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
-					transition "RDCBtn1CornerG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
-					transition "RDCBtn1Border::backcolor" "0.45 0.55 0.7 0.3" "0.55 0.65 0.75 0.5" "200" ;
-					transition "RDCBtn1Corner::matcolor" "0.45 0.55 0.7 0.3" "0.55 0.65 0.75 0.5" "200" ;
-
-					resetTime "ToolTip1" "0" ;
-					set "ToolTip1::text" "#str_02323" ;
-					set "ToolTip2::text" "#str_02323" ;
-				}
-				onMouseExit {
-					transition "forecolor" "1 1 1 1" "0.6 1 1 1" "250" ;
-					transition "RDCBtn1EdgeG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
-					transition "RDCBtn1BorderG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
-					transition "RDCBtn1CornerG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
-					transition "RDCBtn1Border::backcolor" "0.55 0.65 0.75 0.5" "0.45 0.55 0.7 0.3" "400" ;
-					transition "RDCBtn1Corner::matcolor" "0.55 0.65 0.75 0.5" "0.45 0.55 0.7 0.3" "400" ;
-
-					resetTime "ToolTip2" "0" ;
-				}
-
-				onAction {
-					set	"cmd"	"play guisounds_menuclickdown" ; 
-					resetTime "AnimRDCDown" "0" ;
-					transition "forecolor" "1 1 1 1" "0.6 1 1 1" "250" ;
-					transition "RDCBtn1EdgeG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
-					transition "RDCBtn1BorderG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
-					transition "RDCBtn1CornerG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
-					transition "RDCBtn1Border::backcolor" "0.55 0.65 0.75 0.5" "0.45 0.55 0.7 0.3" "400" ;
-					transition "RDCBtn1Corner::matcolor" "0.55 0.65 0.75 0.5" "0.45 0.55 0.7 0.3" "400" ;
-
-					resetTime "ToolTip1" "0" ;
-					set "ToolTip1::text" "#str_02324" ;
-					set "ToolTip2::text" "#str_02324" ;
-				}
-			}
-		}
-	}
-// DUDE: sound options popup — audio rows moved off the System page (plus the
-// sound-diversity slider from the Advanced popup). Same chrome/behaviour as
-// AdvancedOptionsWin; opened by the SOUND tab via AnimSNDUp.
-	windowDef SoundOptionsWin {
-		rect		0, 0, 640, 0
-		cstAnchor	CST_ANCHOR_CENTER_CENTER
-		backcolor 	0, 0, 0, 0.5
-		modal		1
-
-		windowDef SNDBgMain1 {
-			rect		136, 40, -32, -32
-			background	"gui/mainmenu/content_smallcorner"
-			matcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef SNDBgMain2 {
-			rect		168, 40, 380, 32
-			backcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef SNDBgMain3 {
-			rect		548, 40, 32, -32
-			background	"gui/mainmenu/content_smallcorner"
-			matcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef SNDBgMain4 {
-			rect		136, 72, 444, 170
-			backcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef SNDBgMain5 {
-			rect		136, 242, -32, 32
-			background	"gui/mainmenu/content_smallcorner"
-			matcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef SNDBgMain6 {
-			rect		168, 242, 380, 32
-			backcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef SNDBgMain7 {
-			rect		548, 242, 32, 32
-			background	"gui/mainmenu/content_smallcorner"
-			matcolor	0.18 ,0.25 ,0.3 ,1
-			noevents	1
-		}
-		windowDef SNDBgMain8 {
-			rect		139, 43, 340, 279
-			background	"gui/mainmenu/content_glow2"
-			matcolor	1, 1, 1, 0.18
-			noevents	1
-		}
-
-		windowDef SND {
-			rect		138, 42, 440, 320
-			visible		0
-
-			windowDef SNDTitleText {
-				rect		20, 5, 320, 20
-				text		"SOUND OPTIONS"
-				textscale	0.32
-				textaligny	-3
-				forecolor	1, 1, 1, 1
-			}
-			windowDef SNDTitleBar {
-				rect		5, 23, 325, 2
-				backcolor	0.6 ,0.8 ,1 ,0.2
-				noevents	1
-			}
-	// Surround Speakers
-		windowDef SND1 {
-			rect		20, 38, 400, 16
-			windowDef SND1L {
-				rect		0, 0, 8, 16
-				background	"gui/mainmenu/select_edge"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef SND1M {
-				rect		8, 0, 384, 16
-				background	"gui/mainmenu/select_border"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef SND1R {
-				rect		392, 0, 8, 16
-				background	"gui/mainmenu/select_angle"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef SND1Title {
-				rect		1, 1, 280, 14
-				text		"#str_04085"
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	2
-				textaligny	-6
-				forecolor	1, 1, 1, 1
-			}
-			choiceDef SND1Primary {
-				rect		320, 1, 50, 14
-				choices		"#str_04221"
-				values		"2;6"
-				cvar		"s_numberOfSpeakers"
-				updateGroup	sound
-				choiceType	1
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	1
-				textaligny	-6
-				forecolor	0.6, 0.8, 0.8, 1
-
-				onAction {
-					set "cmd" "sound" ;
-				}
-			}
-		}
-	// Reverse Channels
-		windowDef SND2 {
-			rect		20, 64, 400, 16
-			windowDef SND2L {
-				rect		0, 0, 8, 16
-				background	"gui/mainmenu/select_edge"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef SND2M {
-				rect		8, 0, 384, 16
-				background	"gui/mainmenu/select_border"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef SND2R {
-				rect		392, 0, 8, 16
-				background	"gui/mainmenu/select_angle"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef SND2Title {
-				rect		1, 1, 280, 14
-				text		"#str_02161"
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	2
-				textaligny	-6
-				forecolor	1, 1, 1, 1
-			}
-			choiceDef SND2Primary {
-				rect		320, 1, 50, 14
-				choices		"#str_04221"
-				cvar		"s_reverse"
-				updateGroup	sound
-				choiceType	0
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	1
-				textaligny	-6
-				forecolor	0.6, 0.8, 0.8, 1
-			}
-		}
-	// Volume
-		windowDef SND3 {
-			rect		20, 90, 400, 16
-			windowDef SND3L {
-				rect		0, 0, 8, 16
-				background	"gui/mainmenu/select_edge"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef SND3M {
-				rect		8, 0, 384, 16
-				background	"gui/mainmenu/select_border"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef SND3R {
-				rect		392, 0, 8, 16
-				background	"gui/mainmenu/select_angle"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef SND3Title {
-				rect		1, 1, 280, 14
-				text		"#str_02163"
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	2
-				textaligny	-6
-				forecolor	1, 1, 1, 1
-			}
-			windowDef SND3SliderBG {
-				rect		310, 4, 128, 16
-				background	"guis/assets/mainmenu/slider_bg"
-				matcolor	0.6, 0.8, 0.8, 0.5
-				noevents	1
-			}
-			sliderDef SND3Primary {
-				rect		310, 5, 71, 8
-				forecolor	0.8, 1, 1, 1
-				matcolor	1, 1, 1, 1
-				low			-40
-				high		0
-				step		1
-				thumbShader	"guis/assets/mainmenu/slider_bar"
-				cvar		"s_volume_dB"
-			}
-		}
-	// Sound Diversity
-		windowDef SND4 {
-			rect		20, 116, 400, 16
-			windowDef SND4L {
-				rect		0, 0, 8, 16
-				background	"gui/mainmenu/select_edge"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef SND4M {
-				rect		8, 0, 384, 16
-				background	"gui/mainmenu/select_border"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef SND4R {
-				rect		392, 0, 8, 16
-				background	"gui/mainmenu/select_angle"
-				matcolor	0, 0, 0, 1
-				noevents	1
-			}
-			windowDef SND4Title {
-				rect		1, 1, 280, 14
-				text		"Sound diversity"
-				font		"fonts/bank"
-				textscale	0.25
-				textalign	2
-				textaligny	-6
-				forecolor	1, 1, 1, 1
-			}
-			windowDef SND4SliderBG {
-				rect		310, 4, 128, 16
-				background	"guis/assets/mainmenu/slider_bg"
-				matcolor	0.6, 0.8, 0.8, 0.5
-				noevents	1
-			}
-			sliderDef SND4Primary {
-				rect		310, 5, 71, 8
-				forecolor	0.8, 1, 1, 1
-				matcolor	1, 1, 1, 1
-				low		1
-				high		10
-				step		1
-				thumbShader	"guis/assets/mainmenu/slider_bar"
-				cvar		"s_maxSoundsPerShader"
-			}
-		}
-			//close button
-			windowDef SNDBtn1 {
-				rect		150, 192, 300, 32
-
-				windowDef SNDBtn1Border {
-					rect		4, 6, 236, 19
-					backcolor	0.45 ,0.55 ,0.7 ,0.3
-					noevents	1
-				}
-				windowDef SNDBtn1Corner {
-					rect		240, 0, 16, 32
-					background	"gui/mainmenu/button_cornerangle"
-					matcolor	0.45 ,0.55 ,0.7 ,0.3
-					noevents	1
-				}
-				windowDef SNDBtn1EdgeG {
-					rect		0, 0, 16, 32
-					background	"gui/mainmenu/buttong_cornersquare"
-					matcolor	0.55 ,0.65 ,0.75 ,0.5
-					noevents	1
-				}
-				windowDef SNDBtn1BorderG {
-					rect		16, 0, 224, 32
-					background	"gui/mainmenu/buttong_middlesm"
-					matcolor	0.55 ,0.65 ,0.75 ,0.5
-					noevents	1
-				}
-				windowDef SNDBtn1CornerG {
-					rect		240, 0, 16, 32
-					background	"gui/mainmenu/buttong_cornerangle"
-					matcolor	0.55 ,0.65 ,0.75 ,0.5
-					noevents	1
-				}
-			}
-
-			windowDef SNDYesBtnText {
-				rect		155, 198, 240, 19
-				text		"CLOSE SOUND OPTIONS"
-				textscale	0.25
-				textalign	1
-				textaligny	-1
-				forecolor	0.6, 1, 1, 1
-				visible 	1
-				wantenter	1
-
-				onMouseEnter {
-					transition "forecolor" "0.6 1 1 1" "1 1 1 1" "250" ;
-					transition "SNDBtn1EdgeG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
-					transition "SNDBtn1BorderG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
-					transition "SNDBtn1CornerG::matcolor" "0.8 0.9 1 1" "0.55 0.65 0.75 1" "250" ;
-					transition "SNDBtn1Border::backcolor" "0.45 0.55 0.7 0.3" "0.55 0.65 0.75 0.5" "200" ;
-					transition "SNDBtn1Corner::matcolor" "0.45 0.55 0.7 0.3" "0.55 0.65 0.75 0.5" "200" ;
-
-					resetTime "ToolTip1" "0" ;
-					set "ToolTip1::text" "#str_02323" ;
-					set "ToolTip2::text" "#str_02323" ;
-				}
-				onMouseExit {
-					transition "forecolor" "1 1 1 1" "0.6 1 1 1" "250" ;
-					transition "SNDBtn1EdgeG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
-					transition "SNDBtn1BorderG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
-					transition "SNDBtn1CornerG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
-					transition "SNDBtn1Border::backcolor" "0.55 0.65 0.75 0.5" "0.45 0.55 0.7 0.3" "400" ;
-					transition "SNDBtn1Corner::matcolor" "0.55 0.65 0.75 0.5" "0.45 0.55 0.7 0.3" "400" ;
-
-					resetTime "ToolTip2" "0" ;
-				}
-
-				onAction {
-					set	"cmd"	"play guisounds_menuclickdown" ;
-					resetTime "AnimSNDDown" "0" ;
-					transition "forecolor" "1 1 1 1" "0.6 1 1 1" "250" ;
-					transition "SNDBtn1EdgeG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
-					transition "SNDBtn1BorderG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
-					transition "SNDBtn1CornerG::matcolor" "0.55 0.65 0.75 1" "0.55 0.65 0.75 0.5" "400" ;
-					transition "SNDBtn1Border::backcolor" "0.55 0.65 0.75 0.5" "0.45 0.55 0.7 0.3" "400" ;
-					transition "SNDBtn1Corner::matcolor" "0.55 0.65 0.75 0.5" "0.45 0.55 0.7 0.3" "400" ;
-
-					resetTime "ToolTip1" "0" ;
-					set "ToolTip1::text" "#str_02324" ;
-					set "ToolTip2::text" "#str_02324" ;
-				}
-			}
-		}
-	}
 
 //RESET ALL SETTINGS
 	windowDef ResetDefaultGame {
@@ -17963,30 +17932,30 @@ windowDef MultiplayerLANParent {
 			resetTime "LogoDown" "0" ;
 			resetTime "TopBarSlideOut" "0" ;
 
-			transition "OptionsBgBridge3::rect" "202 389 0 16" "202 389 12 16" "400" "0.2" "0.8" ;
-			transition "OptionsBgBridge4::rect" "202 389 16 16" "214 389 16 16" "400" "0.2" "0.8" ;
+			transition "OptionsBgBridge3::rect" "202 389 0 16" "202 389 42 16" "400" "0.2" "0.8" ;
+			transition "OptionsBgBridge4::rect" "202 389 16 16" "244 389 16 16" "400" "0.2" "0.8" ;
 
 			transition "OptionsBgFlair1::rect" "152 264 7 7" "152 208 7 7" "400" "0.2" "0.8" ;
 			transition "OptionsBgFlair2::rect" "152 271 7 0" "152 215 7 56" "400" "0.2" "0.8" ;
-			transition "OptionsBgFlair3::rect" "215 389 -7 -7" "227 389 -7 -7" "400" "0.2" "0.8" ;
-			transition "OptionsBgFlair4::rect" "222 389 0 7" "234 389 5 7" "400" "0.2" "0.8" ;
-			transition "OptionsBgFlair5::rect" "222 389 7 7" "239 389 7 7" "400" "0.2" "0.8" ;
+			transition "OptionsBgFlair3::rect" "215 389 -7 -7" "257 389 -7 -7" "400" "0.2" "0.8" ;
+			transition "OptionsBgFlair4::rect" "222 389 0 7" "264 389 5 7" "400" "0.2" "0.8" ;
+			transition "OptionsBgFlair5::rect" "222 389 7 7" "269 389 7 7" "400" "0.2" "0.8" ;
 
-			transition "OptionsBgMain1::rect" "161 185 -32 -32" "161 26 -32 -32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain2::rect" "193 185 194 32" "193 26 332 32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain3::rect" "387 185 -32 -32" "525 26 -32 -32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain4::rect" "161 217 258 138" "161 58 396 297" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain8::rect" "185 355 37 32" "185 355 55 32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain9::rect" "222 355 32 32" "240 355 32 32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain10::rect" "254 355 64 17" "272 355 165 17" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain11::rect" "318 355 -32 32" "437 355 -32 32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain12::rect" "350 355 37 32" "469 355 56 32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain13::rect" "387 355 32 32" "525 355 32 32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain14::rect" "164 187 340 279" "164 29 340 279" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain1::rect" "161 185 -32 -32" "161 46 -32 -32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain2::rect" "193 185 194 32" "193 46 403 32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain3::rect" "387 185 -32 -32" "596 46 -32 -32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain4::rect" "161 217 258 138" "161 78 467 277" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain8::rect" "185 355 37 32" "185 355 84 32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain9::rect" "222 355 32 32" "269 355 32 32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain10::rect" "254 355 64 17" "301 355 165 17" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain11::rect" "318 355 -32 32" "466 355 -32 32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain12::rect" "350 355 37 32" "498 355 98 32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain13::rect" "387 355 32 32" "596 355 32 32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain14::rect" "164 187 340 279" "164 49 340 279" "400" "0.2" "0.8" ;
 
-			transition "OptionsResetCorner::rect" "220 369 32 32" "238 369 32 32" "400" "0.2" "0.8" ;
-			transition "OptionsResetMiddle::rect" "252 370 68 32" "270 370 169 32" "400" "0.2" "0.8" ;
-			transition "OptionsResetRCorner::rect" "320 369 32 32" "439 369 32 32" "400" "0.2" "0.8" ;
+			transition "OptionsResetCorner::rect" "220 369 32 32" "267 369 32 32" "400" "0.2" "0.8" ;
+			transition "OptionsResetMiddle::rect" "252 370 68 32" "299 370 169 32" "400" "0.2" "0.8" ;
+			transition "OptionsResetRCorner::rect" "320 369 32 32" "468 369 32 32" "400" "0.2" "0.8" ;
 
 			transition "OptionsBgMain14::matcolor" "1 1 1 0" "1 1 1 0.18" "400" ;
 
@@ -18083,30 +18052,30 @@ windowDef MultiplayerLANParent {
 			resetTime "LogoUp" "0" ;
 			resetTime "TopBarSlideIn" "0" ;
 
-			transition "OptionsBgBridge3::rect" "202 389 12 16" "202 389 0 16" "400" "0.2" "0.8" ;
-			transition "OptionsBgBridge4::rect" "214 389 16 16" "202 389 16 16" "400" "0.2" "0.8" ;
+			transition "OptionsBgBridge3::rect" "202 389 42 16" "202 389 0 16" "400" "0.2" "0.8" ;
+			transition "OptionsBgBridge4::rect" "244 389 16 16" "202 389 16 16" "400" "0.2" "0.8" ;
 
 			transition "OptionsBgFlair1::rect" "152 208 7 7" "152 264 7 7" "400" "0.2" "0.8" ;
 			transition "OptionsBgFlair2::rect" "152 215 7 56" "152 271 7 0" "400" "0.2" "0.8" ;
-			transition "OptionsBgFlair3::rect" "227 389 -7 -7" "215 389 -7 -7" "400" "0.2" "0.8" ;
-			transition "OptionsBgFlair4::rect" "234 389 5 7" "222 389 0 7" "400" "0.2" "0.8" ;
-			transition "OptionsBgFlair5::rect" "239 389 7 7" "222 389 7 7" "400" "0.2" "0.8" ;
+			transition "OptionsBgFlair3::rect" "257 389 -7 -7" "215 389 -7 -7" "400" "0.2" "0.8" ;
+			transition "OptionsBgFlair4::rect" "264 389 5 7" "222 389 0 7" "400" "0.2" "0.8" ;
+			transition "OptionsBgFlair5::rect" "269 389 7 7" "222 389 7 7" "400" "0.2" "0.8" ;
 
-			transition "OptionsBgMain1::rect" "161 26 -32 -32" "161 185 -32 -32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain2::rect" "193 26 332 32" "193 185 194 32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain3::rect" "525 26 -32 -32" "387 185 -32 -32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain4::rect" "161 58 396 297" "161 217 258 138" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain8::rect" "185 355 55 32" "185 355 37 32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain9::rect" "240 355 32 32" "222 355 32 32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain10::rect" "272 355 165 17" "254 355 64 17" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain11::rect" "437 355 -32 32" "318 355 -32 32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain12::rect" "469 355 56 32" "350 355 37 32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain13::rect" "525 355 32 32" "387 355 32 32" "400" "0.2" "0.8" ;
-			transition "OptionsBgMain14::rect" "164 29 340 279" "164 187 340 279" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain1::rect" "161 46 -32 -32" "161 185 -32 -32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain2::rect" "193 46 403 32" "193 185 194 32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain3::rect" "596 46 -32 -32" "387 185 -32 -32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain4::rect" "161 78 467 277" "161 217 258 138" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain8::rect" "185 355 84 32" "185 355 37 32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain9::rect" "269 355 32 32" "222 355 32 32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain10::rect" "301 355 165 17" "254 355 64 17" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain11::rect" "466 355 -32 32" "318 355 -32 32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain12::rect" "498 355 98 32" "350 355 37 32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain13::rect" "596 355 32 32" "387 355 32 32" "400" "0.2" "0.8" ;
+			transition "OptionsBgMain14::rect" "164 49 340 279" "164 187 340 279" "400" "0.2" "0.8" ;
 
-			transition "OptionsResetCorner::rect" "238 369 32 32" "220 369 32 32" "400" "0.2" "0.8" ;
-			transition "OptionsResetMiddle::rect"  "270 370 169 32" "252 370 68 32" "400" "0.2" "0.8" ;
-			transition "OptionsResetRCorner::rect" "439 369 32 32" "320 369 32 32" "400" "0.2" "0.8" ;
+			transition "OptionsResetCorner::rect" "267 369 32 32" "220 369 32 32" "400" "0.2" "0.8" ;
+			transition "OptionsResetMiddle::rect"  "299 370 169 32" "252 370 68 32" "400" "0.2" "0.8" ;
+			transition "OptionsResetRCorner::rect" "468 369 32 32" "320 369 32 32" "400" "0.2" "0.8" ;
 
 			transition "OptionsBgMain14::matcolor" "1 1 1 0.18" "1 1 1 0" "400" ;
 
@@ -18193,28 +18162,28 @@ windowDef MultiplayerLANParent {
 			set "ToolTip2::text" "#str_02169" ;
 			set "OptionsControls::visible" "0" ;
 
-			transition "OptionsBgBridge3::rect" "202 389 42 16" "202 389 12 16" "300" "0.2" "0.8" ;
-			transition "OptionsBgBridge4::rect" "244 389 16 16" "214 389 16 16" "300" "0.2" "0.8" ;
+			transition "OptionsBgBridge3::rect" "202 389 42 16" "202 389 42 16" "300" "0.2" "0.8" ;
+			transition "OptionsBgBridge4::rect" "244 389 16 16" "244 389 16 16" "300" "0.2" "0.8" ;
 
-			transition "OptionsBgFlair3::rect" "257 389 -7 -7" "227 389 -7 -7" "300" "0.2" "0.8" ;
-			transition "OptionsBgFlair4::rect" "264 389 5 7" "234 389 5 7" "300" "0.2" "0.8" ;
-			transition "OptionsBgFlair5::rect" "269 389 7 7" "239 389 7 7" "300" "0.2" "0.8" ;
+			transition "OptionsBgFlair3::rect" "257 389 -7 -7" "257 389 -7 -7" "300" "0.2" "0.8" ;
+			transition "OptionsBgFlair4::rect" "264 389 5 7" "264 389 5 7" "300" "0.2" "0.8" ;
+			transition "OptionsBgFlair5::rect" "269 389 7 7" "269 389 7 7" "300" "0.2" "0.8" ;
 
-			transition "OptionsBgMain1::rect" "161 46 -32 -32" "161 26 -32 -32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain2::rect" "193 46 403 32" "193 26 332 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain3::rect" "596 46 -32 -32" "525 26 -32 -32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain4::rect" "161 78 467 277" "161 58 396 297" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain8::rect" "185 355 84 32" "185 355 55 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain9::rect" "269 355 32 32" "240 355 32 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain10::rect" "301 355 165 17" "272 355 165 17" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain11::rect" "466 355 -32 32" "437 355 -32 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain12::rect" "498 355 98 32" "469 355 56 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain13::rect" "596 355 32 32" "525 355 32 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain14::rect" "164 49 340 279" "164 29 340 279" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain1::rect" "161 46 -32 -32" "161 46 -32 -32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain2::rect" "193 46 403 32" "193 46 403 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain3::rect" "596 46 -32 -32" "596 46 -32 -32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain4::rect" "161 78 467 277" "161 78 467 277" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain8::rect" "185 355 84 32" "185 355 84 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain9::rect" "269 355 32 32" "269 355 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain10::rect" "301 355 165 17" "301 355 165 17" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain11::rect" "466 355 -32 32" "466 355 -32 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain12::rect" "498 355 98 32" "498 355 98 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain13::rect" "596 355 32 32" "596 355 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain14::rect" "164 49 340 279" "164 49 340 279" "300" "0.2" "0.8" ;
 
-			transition "OptionsResetCorner::rect" "267 369 32 32" "238 369 32 32" "300" "0.2" "0.8" ;
-			transition "OptionsResetMiddle::rect" "299 370 169 32" "270 370 169 32" "300" "0.2" "0.8" ;
-			transition "OptionsResetRCorner::rect" "468 369 32 32" "439 369 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsResetCorner::rect" "267 369 32 32" "267 369 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsResetMiddle::rect" "299 370 169 32" "299 370 169 32" "300" "0.2" "0.8" ;
+			transition "OptionsResetRCorner::rect" "468 369 32 32" "468 369 32 32" "300" "0.2" "0.8" ;
 
 			transition "OptionsBgMain1::matcolor" "1 1 1 0.4" "0.18 0.25 0.32 0.8" "50" ;
 			transition "OptionsBgMain2::backcolor" "1 1 1 0.4" "0.18 0.25 0.32 0.8" "50" ;
@@ -18285,28 +18254,28 @@ windowDef MultiplayerLANParent {
 			set "ToolTip2::text" "#str_02167" ;
 			set "OptionsSystem::visible" "0" ;
 
-			transition "OptionsBgBridge3::rect" "202 389 12 16" "202 389 42 16" "300" "0.2" "0.8" ;
-			transition "OptionsBgBridge4::rect" "214 389 16 16" "244 389 16 16" "300" "0.2" "0.8" ;
+			transition "OptionsBgBridge3::rect" "202 389 42 16" "202 389 42 16" "300" "0.2" "0.8" ;
+			transition "OptionsBgBridge4::rect" "244 389 16 16" "244 389 16 16" "300" "0.2" "0.8" ;
 
-			transition "OptionsBgFlair3::rect" "227 389 -7 -7" "257 389 -7 -7" "300" "0.2" "0.8" ;
-			transition "OptionsBgFlair4::rect" "234 389 5 7" "264 389 5 7" "300" "0.2" "0.8" ;
-			transition "OptionsBgFlair5::rect" "239 389 7 7" "269 389 7 7" "300" "0.2" "0.8" ;
+			transition "OptionsBgFlair3::rect" "257 389 -7 -7" "257 389 -7 -7" "300" "0.2" "0.8" ;
+			transition "OptionsBgFlair4::rect" "264 389 5 7" "264 389 5 7" "300" "0.2" "0.8" ;
+			transition "OptionsBgFlair5::rect" "269 389 7 7" "269 389 7 7" "300" "0.2" "0.8" ;
 
-			transition "OptionsBgMain1::rect" "161 26 -32 -32" "161 46 -32 -32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain2::rect" "193 26 332 32" "193 46 403 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain3::rect" "525 26 -32 -32" "596 46 -32 -32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain4::rect" "161 58 396 297" "161 78 467 277" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain8::rect" "185 355 55 32" "185 355 84 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain9::rect" "240 355 32 32" "269 355 32 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain10::rect" "272 355 165 17" "301 355 165 17" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain11::rect" "437 355 -32 32" "466 355 -32 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain12::rect" "469 355 56 32" "498 355 98 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain13::rect" "525 355 32 32" "596 355 32 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain14::rect" "164 29 340 279" "164 49 340 279" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain1::rect" "161 46 -32 -32" "161 46 -32 -32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain2::rect" "193 46 403 32" "193 46 403 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain3::rect" "596 46 -32 -32" "596 46 -32 -32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain4::rect" "161 78 467 277" "161 78 467 277" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain8::rect" "185 355 84 32" "185 355 84 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain9::rect" "269 355 32 32" "269 355 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain10::rect" "301 355 165 17" "301 355 165 17" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain11::rect" "466 355 -32 32" "466 355 -32 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain12::rect" "498 355 98 32" "498 355 98 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain13::rect" "596 355 32 32" "596 355 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain14::rect" "164 49 340 279" "164 49 340 279" "300" "0.2" "0.8" ;
 
-			transition "OptionsResetCorner::rect" "238 369 32 32" "267 369 32 32" "300" "0.2" "0.8" ;
-			transition "OptionsResetMiddle::rect" "270 370 169 32" "299 370 169 32" "300" "0.2" "0.8" ;
-			transition "OptionsResetRCorner::rect" "439 369 32 32" "468 369 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsResetCorner::rect" "267 369 32 32" "267 369 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsResetMiddle::rect" "299 370 169 32" "299 370 169 32" "300" "0.2" "0.8" ;
+			transition "OptionsResetRCorner::rect" "468 369 32 32" "468 369 32 32" "300" "0.2" "0.8" ;
 
 			transition "OptionsBgMain1::matcolor" "1 1 1 0.4" "0.18 0.25 0.32 0.8" "50" ;
 			transition "OptionsBgMain2::backcolor" "1 1 1 0.4" "0.18 0.25 0.32 0.8" "50" ;
@@ -18561,28 +18530,28 @@ windowDef MultiplayerLANParent {
 			set "ToolTip2::text" "#str_02167" ;
 			set "OptionsSystem::visible" "0" ;
 
-			transition "OptionsBgBridge3::rect" "202 389 12 16" "202 389 0 16" "300" "0.2" "0.8" ;
-			transition "OptionsBgBridge4::rect" "214 389 16 16" "202 389 16 16" "300" "0.2" "0.8" ;
+			transition "OptionsBgBridge3::rect" "202 389 42 16" "202 389 0 16" "300" "0.2" "0.8" ;
+			transition "OptionsBgBridge4::rect" "244 389 16 16" "202 389 16 16" "300" "0.2" "0.8" ;
 
-			transition "OptionsBgFlair3::rect" "227 389 -7 -7" "215 389 -7 -7" "300" "0.2" "0.8" ;
-			transition "OptionsBgFlair4::rect" "234 389 5 7" "222 389 5 7" "300" "0.2" "0.8" ;
-			transition "OptionsBgFlair5::rect" "239 389 7 7" "227 389 7 7" "300" "0.2" "0.8" ;
+			transition "OptionsBgFlair3::rect" "257 389 -7 -7" "215 389 -7 -7" "300" "0.2" "0.8" ;
+			transition "OptionsBgFlair4::rect" "264 389 5 7" "222 389 5 7" "300" "0.2" "0.8" ;
+			transition "OptionsBgFlair5::rect" "269 389 7 7" "227 389 7 7" "300" "0.2" "0.8" ;
 
-			transition "OptionsBgMain1::rect" "161 26 -32 -32" "161 66 -32 -32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain2::rect" "193 26 332 32" "193 66 282 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain3::rect" "525 26 -32 -32" "475 66 -32 -32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain4::rect" "161 58 396 297" "161 98 346 257" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain8::rect" "185 355 55 32" "185 355 42 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain9::rect" "240 355 32 32" "227 355 32 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain10::rect" "272 355 165 17" "259 355 165 17" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain11::rect" "437 355 -32 32" "424 355 -32 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain12::rect" "469 355 56 32" "456 355 19 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain13::rect" "525 355 32 32" "475 355 32 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain14::rect" "164 29 340 279" "164 69 340 279" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain1::rect" "161 46 -32 -32" "161 66 -32 -32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain2::rect" "193 46 403 32" "193 66 282 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain3::rect" "596 46 -32 -32" "475 66 -32 -32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain4::rect" "161 78 467 277" "161 98 346 257" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain8::rect" "185 355 84 32" "185 355 42 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain9::rect" "269 355 32 32" "227 355 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain10::rect" "301 355 165 17" "259 355 165 17" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain11::rect" "466 355 -32 32" "424 355 -32 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain12::rect" "498 355 98 32" "456 355 19 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain13::rect" "596 355 32 32" "475 355 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain14::rect" "164 49 340 279" "164 69 340 279" "300" "0.2" "0.8" ;
 
-			transition "OptionsResetCorner::rect" "238 369 32 32" "225 369 32 32" "300" "0.2" "0.8" ;
-			transition "OptionsResetMiddle::rect" "270 370 169 32" "257 370 169 32" "300" "0.2" "0.8" ;
-			transition "OptionsResetRCorner::rect" "439 369 32 32" "426 369 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsResetCorner::rect" "267 369 32 32" "225 369 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsResetMiddle::rect" "299 370 169 32" "257 370 169 32" "300" "0.2" "0.8" ;
+			transition "OptionsResetRCorner::rect" "468 369 32 32" "426 369 32 32" "300" "0.2" "0.8" ;
 
 			transition "OptionsBgMain1::matcolor" "1 1 1 0.4" "0.18 0.25 0.32 0.8" "50" ;
 			transition "OptionsBgMain2::backcolor" "1 1 1 0.4" "0.18 0.25 0.32 0.8" "50" ;
@@ -18653,28 +18622,28 @@ windowDef MultiplayerLANParent {
 			set "ToolTip2::text" "#str_02169" ;
 			set "OptionsGame::visible" "0" ;
 
-			transition "OptionsBgBridge3::rect" "202 389 0 16" "202 389 12 16" "300" "0.2" "0.8" ;
-			transition "OptionsBgBridge4::rect" "202 389 16 16" "214 389 16 16" "300" "0.2" "0.8" ;
+			transition "OptionsBgBridge3::rect" "202 389 0 16" "202 389 42 16" "300" "0.2" "0.8" ;
+			transition "OptionsBgBridge4::rect" "202 389 16 16" "244 389 16 16" "300" "0.2" "0.8" ;
 
-			transition "OptionsBgFlair3::rect" "215 389 -7 -7" "227 389 -7 -7" "300" "0.2" "0.8" ;
-			transition "OptionsBgFlair4::rect" "222 389 5 7" "234 389 5 7" "300" "0.2" "0.8" ;
-			transition "OptionsBgFlair5::rect" "227 389 7 7" "239 389 7 7" "300" "0.2" "0.8" ;
+			transition "OptionsBgFlair3::rect" "215 389 -7 -7" "257 389 -7 -7" "300" "0.2" "0.8" ;
+			transition "OptionsBgFlair4::rect" "222 389 5 7" "264 389 5 7" "300" "0.2" "0.8" ;
+			transition "OptionsBgFlair5::rect" "227 389 7 7" "269 389 7 7" "300" "0.2" "0.8" ;
 
-			transition "OptionsBgMain1::rect" "161 66 -32 -32" "161 26 -32 -32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain2::rect" "193 66 282 32" "193 26 332 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain3::rect" "475 66 -32 -32" "525 26 -32 -32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain4::rect" "161 98 346 257" "161 58 396 297" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain8::rect" "185 355 42 32" "185 355 55 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain9::rect" "227 355 32 32" "240 355 32 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain10::rect" "259 355 165 17" "272 355 165 17" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain11::rect" "424 355 -32 32" "437 355 -32 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain12::rect" "456 355 19 32" "469 355 56 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain13::rect" "475 355 32 32" "525 355 32 32" "300" "0.2" "0.8" ;
-			transition "OptionsBgMain14::rect" "164 69 340 279" "164 29 340 279" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain1::rect" "161 66 -32 -32" "161 46 -32 -32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain2::rect" "193 66 282 32" "193 46 403 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain3::rect" "475 66 -32 -32" "596 46 -32 -32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain4::rect" "161 98 346 257" "161 78 467 277" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain8::rect" "185 355 42 32" "185 355 84 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain9::rect" "227 355 32 32" "269 355 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain10::rect" "259 355 165 17" "301 355 165 17" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain11::rect" "424 355 -32 32" "466 355 -32 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain12::rect" "456 355 19 32" "498 355 98 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain13::rect" "475 355 32 32" "596 355 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsBgMain14::rect" "164 69 340 279" "164 49 340 279" "300" "0.2" "0.8" ;
 
-			transition "OptionsResetCorner::rect" "225 369 32 32" "238 369 32 32" "300" "0.2" "0.8" ;
-			transition "OptionsResetMiddle::rect" "257 370 169 32" "270 370 169 32" "300" "0.2" "0.8" ;
-			transition "OptionsResetRCorner::rect" "426 369 32 32" "439 369 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsResetCorner::rect" "225 369 32 32" "267 369 32 32" "300" "0.2" "0.8" ;
+			transition "OptionsResetMiddle::rect" "257 370 169 32" "299 370 169 32" "300" "0.2" "0.8" ;
+			transition "OptionsResetRCorner::rect" "426 369 32 32" "468 369 32 32" "300" "0.2" "0.8" ;
 
 			transition "OptionsBgMain1::matcolor" "1 1 1 0.4" "0.18 0.25 0.32 0.8" "50" ;
 			transition "OptionsBgMain2::backcolor" "1 1 1 0.4" "0.18 0.25 0.32 0.8" "50" ;
@@ -19007,121 +18976,6 @@ windowDef MultiplayerLANParent {
 		}
 	}
 
-	//advanced options up
-	windowDef AnimRDCUp {
-		rect		0, 0, 0, 0
-		visible		0
-		notime		1
-
-		onTime 0 {
-			set "AdvancedOptionsWin::rect" "0 0 640 480" ;
-			resetTime "ToolTip2" "0" ;
-			transition "AdvancedOptionsWin::backcolor" "0 0 0 0" "0 0 0 0.5" "200" ;
-		}
-		onTime 200 {
-			transition "RDCBgMain1::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "RDCBgMain2::backcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "RDCBgMain3::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "RDCBgMain4::backcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "RDCBgMain5::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "RDCBgMain6::backcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "RDCBgMain7::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "RDCBgMain8::matcolor" "1 1 1 0" "1 1 1 0.18" "50" ;
-		}
-		onTime 260 {
-			transition "RDCBgMain1::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "RDCBgMain2::backcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "RDCBgMain3::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "RDCBgMain4::backcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "RDCBgMain5::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "RDCBgMain6::backcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "RDCBgMain7::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "RDCBgMain8::matcolor" "1 1 1 0" "1 1 1 0.18" "200" ;
-			set "RDC::visible" "1" ;
-			setFocus "RDCYesBtnText" ;
-		}
-	}
-
-	//advanced options down animation
-	windowDef AnimRDCDown {
-		rect		0, 0, 0, 0
-		visible		0
-		notime		1
-
-		onTime 0 {
-			transition "AdvancedOptionsWin::backcolor" "0 0 0 0.5" "0 0 0 0" "200" ;
-			transition "RDCBgMain1::matcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "RDCBgMain2::backcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "RDCBgMain3::matcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "RDCBgMain4::backcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "RDCBgMain5::matcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "RDCBgMain6::backcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "RDCBgMain7::matcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "RDCBgMain8::matcolor" "1 1 1 0.18" "1 1 1 0" "200" ;
-			set "RDC::visible" "0" ;
-		}
-		onTime 200 {
-			set "AdvancedOptionsWin::rect" "0 0 640 0" ;
-		}
-	}
-
-	// DUDE: sound options popup up/down (mirrors AnimRDCUp/Down)
-	windowDef AnimSNDUp {
-		rect		0, 0, 0, 0
-		visible		0
-		notime		1
-
-		onTime 0 {
-			set "SoundOptionsWin::rect" "0 0 640 480" ;
-			resetTime "ToolTip2" "0" ;
-			transition "SoundOptionsWin::backcolor" "0 0 0 0" "0 0 0 0.5" "200" ;
-		}
-		onTime 200 {
-			transition "SNDBgMain1::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "SNDBgMain2::backcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "SNDBgMain3::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "SNDBgMain4::backcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "SNDBgMain5::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "SNDBgMain6::backcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "SNDBgMain7::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "50" ;
-			transition "SNDBgMain8::matcolor" "1 1 1 0" "1 1 1 0.18" "50" ;
-		}
-		onTime 260 {
-			transition "SNDBgMain1::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "SNDBgMain2::backcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "SNDBgMain3::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "SNDBgMain4::backcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "SNDBgMain5::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "SNDBgMain6::backcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "SNDBgMain7::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
-			transition "SNDBgMain8::matcolor" "1 1 1 0" "1 1 1 0.18" "200" ;
-			set "SND::visible" "1" ;
-			setFocus "SNDYesBtnText" ;
-		}
-	}
-
-	//sound options down animation
-	windowDef AnimSNDDown {
-		rect		0, 0, 0, 0
-		visible		0
-		notime		1
-
-		onTime 0 {
-			transition "SoundOptionsWin::backcolor" "0 0 0 0.5" "0 0 0 0" "200" ;
-			transition "SNDBgMain1::matcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "SNDBgMain2::backcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "SNDBgMain3::matcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "SNDBgMain4::backcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "SNDBgMain5::matcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "SNDBgMain6::backcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "SNDBgMain7::matcolor" "0.18 0.25 0.3 1" "0.18 0.25 0.3 0" "200" ;
-			transition "SNDBgMain8::matcolor" "1 1 1 0.18" "1 1 1 0" "200" ;
-			set "SND::visible" "0" ;
-		}
-		onTime 200 {
-			set "SoundOptionsWin::rect" "0 0 640 0" ;
-		}
-	}
 
 	//advanced server options up
 	windowDef AnimADVNetUp {
@@ -19154,7 +19008,7 @@ windowDef MultiplayerLANParent {
 			transition "AdvNETBgMain7::matcolor" "1 1 1 0.4" "0.18 0.25 0.3 1" "200" ;
 			transition "AdvNETBgMain8::matcolor" "1 1 1 0" "1 1 1 0.18" "200" ;
 			set "AdvNET::visible" "1" ;
-			setFocus "RDCYesBtnText" ;
+			setFocus "ADVNetBtnText" ;
 		}
 	}
 
