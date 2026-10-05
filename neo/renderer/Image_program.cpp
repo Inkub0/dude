@@ -840,7 +840,7 @@ static void R_ParallaxHeightImage( idImage *image ) {
 	int w = 0, hgt = 0;
 
 	R_ParallaxHeightCpu( image, &pic, &w, &hgt );
-	image->GenerateImage( pic, w, hgt, TF_DEFAULT, true, TR_REPEAT, TD_HIGH_QUALITY );
+	image->GenerateImage( pic, w, hgt, TF_DEFAULT, true, TR_REPEAT, TD_MONO );
 	R_StaticFree( pic );
 }
 
@@ -1089,7 +1089,7 @@ static void R_TessHeightImage( idImage *image ) {
 	int w = 0, hgt = 0;
 
 	R_TessHeightCpu( image, &pic, &w, &hgt );
-	image->GenerateImage( pic, w, hgt, TF_DEFAULT, true, TR_REPEAT, TD_HIGH_QUALITY );
+	image->GenerateImage( pic, w, hgt, TF_DEFAULT, true, TR_REPEAT, TD_MONO );
 	R_StaticFree( pic );
 }
 
@@ -1135,7 +1135,7 @@ whatever happened to be left in the descriptor slot.
 */
 static void R_TessFlatHeightGen( idImage *image ) {
 	byte flat[4] = { 128, 128, 128, 255 };
-	image->GenerateImage( flat, 1, 1, TF_DEFAULT, true, TR_REPEAT, TD_HIGH_QUALITY );
+	image->GenerateImage( flat, 1, 1, TF_DEFAULT, true, TR_REPEAT, TD_MONO );
 }
 
 static idImage *r_tessFlatHeight = NULL;

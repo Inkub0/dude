@@ -206,13 +206,14 @@ public:
 	virtual ImageHandle		CreateImage( ImageFormat, int, int, const void * ) { return 0; }	// render-target era API; M7
 	virtual void			DestroyImage( ImageHandle h );
 	virtual ImageHandle		CreateTexture2D( int w, int h, const void *pixels,
-	                                         int textureFilter, int textureRepeat, bool allowMips );
+	                                         int textureFilter, int textureRepeat, bool allowMips,
+	                                         bool singleChannel = false );
 	virtual ImageHandle		CreateTexture2DPrebuilt( int w, int h, const PrebuiltMip *levels,
 	                                                 int numLevels, int textureFilter,
-	                                                 int textureRepeat );
+	                                                 int textureRepeat, bool singleChannel = false );
 	ImageHandle				UploadTexture2DLevels( int w, int h, const PrebuiltMip *levels,
 	                                               int numLevels, int textureFilter,
-	                                               int textureRepeat );	// shared by the two above
+	                                               int textureRepeat, bool singleChannel );	// shared by the two above
 	virtual ImageHandle		CreateTextureCube( int size, const void * const pics[6],
 	                                           int textureFilter, bool allowMips );
 	virtual ShaderHandle	LoadShader( const char *name );
@@ -8824,7 +8825,8 @@ happen at init/level load, not mid-frame.
 ====================
 */
 ImageHandle VulkanBackend::CreateTexture2D( int w, int h, const void *pixels,
-                                            int textureFilter, int textureRepeat, bool allowMips ) {
+                                            int textureFilter, int textureRepeat, bool allowMips,
+                                            bool singleChannel ) {
 	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 || pixels == NULL || uploadCb == VK_NULL_HANDLE ) {
 		return 0;
 	}
@@ -8849,7 +8851,7 @@ ImageHandle VulkanBackend::CreateTexture2D( int w, int h, const void *pixels,
 	}
 
 	ImageHandle handle = UploadTexture2DLevels( w, h, levels.data(), (int)levels.size(),
-		textureFilter, textureRepeat );
+		textureFilter, textureRepeat, singleChannel );
 
 	for ( size_t i = 0; i < owned.size(); i++ ) { R_StaticFree( owned[i] ); }
 	return handle;
@@ -8866,8 +8868,8 @@ uploadCb/uploadFence). The worker owns and frees the level buffers.
 */
 ImageHandle VulkanBackend::CreateTexture2DPrebuilt( int w, int h, const PrebuiltMip *levels,
                                                     int numLevels, int textureFilter,
-                                                    int textureRepeat ) {
-	return UploadTexture2DLevels( w, h, levels, numLevels, textureFilter, textureRepeat );
+                                                    int textureRepeat, bool singleChannel ) {
+	return UploadTexture2DLevels( w, h, levels, numLevels, textureFilter, textureRepeat, singleChannel );
 }
 
 /*
@@ -8876,12 +8878,13 @@ VulkanBackend::UploadTexture2DLevels
 
 Shared GPU upload for CreateTexture2D / CreateTexture2DPrebuilt: stage the supplied
 RGBA8 mip levels and copy them into a new sampled image with a blocking submit. Does
-not own the level buffers (the caller frees them once this returns).
+not own the level buffers (the caller frees them once this returns). singleChannel
+keeps only each texel's red byte, in an R8 image (TD_MONO: baked AO maps).
 ====================
 */
 ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMip *inLevels,
                                                   int numLevels, int textureFilter,
-                                                  int textureRepeat ) {
+                                                  int textureRepeat, bool singleChannel ) {
 	if ( device == VK_NULL_HANDLE || w <= 0 || h <= 0 || numLevels < 1 || inLevels == NULL
 			|| inLevels[0].data == NULL || uploadCb == VK_NULL_HANDLE ) {
 		return 0;
@@ -8897,9 +8900,12 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 	}
 	std::vector<byte *> owned;
 
+	const VkFormat format = singleChannel ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+	const int texelBytes = singleChannel ? 1 : 4;
+
 	VkDeviceSize total = 0;
 	for ( size_t i = 0; i < levels.size(); i++ ) {
-		total += (VkDeviceSize)levels[i].w * levels[i].h * 4;
+		total += (VkDeviceSize)levels[i].w * levels[i].h * texelBytes;
 	}
 
 	// staging buffer
@@ -8921,9 +8927,16 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 		}
 		byte *dst = (byte *)info.pMappedData;
 		for ( size_t i = 0; i < levels.size(); i++ ) {
-			const size_t bytes = (size_t)levels[i].w * levels[i].h * 4;
-			memcpy( dst, levels[i].data, bytes );
-			dst += bytes;
+			const size_t texels = (size_t)levels[i].w * levels[i].h;
+			if ( singleChannel ) {
+				const byte *src = levels[i].data;
+				for ( size_t t = 0; t < texels; t++ ) {
+					dst[t] = src[t * 4];
+				}
+			} else {
+				memcpy( dst, levels[i].data, texels * 4 );
+			}
+			dst += texels * texelBytes;
 		}
 	}
 	for ( size_t i = 0; i < owned.size(); i++ ) { R_StaticFree( owned[i] ); }
@@ -8935,7 +8948,7 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 		VkImageCreateInfo ici = {};
 		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 		ici.imageType = VK_IMAGE_TYPE_2D;
-		ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+		ici.format = format;
 		ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
 		ici.mipLevels = (uint32_t)levels.size();
 		ici.arrayLayers = 1;
@@ -8983,7 +8996,7 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 			c.imageSubresource.layerCount = 1;
 			c.imageExtent = { (uint32_t)levels[i].w, (uint32_t)levels[i].h, 1 };
 			vkCmdCopyBufferToImage( uploadCb, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c );
-			bufOfs += (VkDeviceSize)levels[i].w * levels[i].h * 4;
+			bufOfs += (VkDeviceSize)levels[i].w * levels[i].h * texelBytes;
 		}
 
 		VkImageMemoryBarrier toRead = toDst;
@@ -9015,7 +9028,7 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 		vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 		vi.image = image;
 		vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		vi.format = VK_FORMAT_R8G8B8A8_UNORM;
+		vi.format = format;
 		vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		vi.subresourceRange.levelCount = (uint32_t)levels.size();
 		vi.subresourceRange.layerCount = 1;

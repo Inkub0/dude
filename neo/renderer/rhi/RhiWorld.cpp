@@ -803,8 +803,9 @@ static bool RB_RHI_AoFileExists( const char *path ) {
 }
 
 // Load a resolved (extensionless) AO image name, treating the default checkerboard as "none".
+// TD_MONO: the shaders only read .r, so the map is stored as R8 (lossless, 1/4 the memory).
 static idImage *RB_RHI_LoadAo( const char *name ) {
-	idImage *img = globalImages->ImageFromFile( name, TF_DEFAULT, true, TR_CLAMP, TD_HIGH_QUALITY );
+	idImage *img = globalImages->ImageFromFile( name, TF_DEFAULT, true, TR_CLAMP, TD_MONO );
 	return ( img == globalImages->defaultImage ) ? NULL : img;
 }
 
@@ -958,7 +959,7 @@ void RB_RHI_PrecacheOcclusionMapsForModel( const idRenderModel *model ) {
 		}
 		misses = 0;
 		// identical params to RB_RHI_LoadAo -> the resolve path finds this same image, already resident
-		globalImages->ImageFromFile( path.c_str(), TF_DEFAULT, true, TR_CLAMP, TD_HIGH_QUALITY );
+		globalImages->ImageFromFile( path.c_str(), TF_DEFAULT, true, TR_CLAMP, TD_MONO );
 	}
 }
 

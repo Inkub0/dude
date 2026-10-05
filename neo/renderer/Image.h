@@ -145,6 +145,7 @@ typedef struct
 
 // increasing numeric values imply more information is stored
 typedef enum {
+	TD_MONO,				// DUDE: only the red channel is kept, stored uncompressed as R8 (baked AO maps); samples as (r,0,0,1)
 	TD_SPECULAR,			// may be compressed, and always zeros the alpha channel
 	TD_DIFFUSE,				// may be compressed
 	TD_DEFAULT,				// will use compressed formats when possible
