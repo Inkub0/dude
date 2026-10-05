@@ -302,19 +302,22 @@ public:
 	// builds a full CPU mip chain. Backends without an image path return 0
 	// (the GL3 backend keeps binding through idImage; the default below keeps
 	// it source-compatible).
+	// DUDE: singleChannel (TD_MONO images) stores only the red channel, as R8 --
+	// a quarter of the memory; pixels is still RGBA8 and the texture samples as (r,0,0,1).
 	virtual ImageHandle		CreateTexture2D( int w, int h, const void *pixels,
 	                                         int textureFilter, int textureRepeat,
-	                                         bool allowMips ) { return 0; }
+	                                         bool allowMips, bool singleChannel = false ) { return 0; }
 
 	// DUDE: parallel image load. Like CreateTexture2D, but the caller supplies the
 	// full RGBA8 mip chain already built on a worker thread (levels[0] = base level
 	// w×h, each following level half-size down to 1×1), so the CPU-heavy R_MipMap
 	// work happens off the main thread. Only the GPU staging + submit runs here.
 	// numLevels >= 1; if 1, the texture has no mips. Same default-0 contract.
+	// singleChannel: as CreateTexture2D (the levels stay RGBA8).
 	struct PrebuiltMip { const void *data; int w, h; };
 	virtual ImageHandle		CreateTexture2DPrebuilt( int w, int h, const PrebuiltMip *levels,
 	                                                 int numLevels, int textureFilter,
-	                                                 int textureRepeat ) { return 0; }
+	                                                 int textureRepeat, bool singleChannel = false ) { return 0; }
 
 	// Phase 4 M4: cube-map upload (normalization/ambient cube maps, env maps).
 	// pics are six size×size RGBA8 faces in GL_TEXTURE_CUBE_MAP_POSITIVE_X..

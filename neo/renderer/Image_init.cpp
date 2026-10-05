@@ -1573,7 +1573,7 @@ idImage *idImageManager::ImageFromLevelGenerator( const char *_name, void (*gene
 	image->filter = TF_DEFAULT;
 	image->allowDownSize = true;
 	image->repeat = TR_REPEAT;
-	image->depth = TD_HIGH_QUALITY;
+	image->depth = TD_MONO;		// height fields: only .r is sampled, stored as R8
 	image->cubeFiles = CF_2D;
 	image->levelLoadReferenced = true;
 

@@ -44,6 +44,9 @@ If you have questions concerning this license or the applicable additional terms
 #ifndef GL_HALF_FLOAT
 #define GL_HALF_FLOAT  0x140B
 #endif
+#ifndef GL_R8
+#define GL_R8  0x8229
+#endif
 #ifndef GL_COLOR_ATTACHMENT0
 #define GL_COLOR_ATTACHMENT0  0x8CE0
 #endif
@@ -91,6 +94,8 @@ int idImage::BitsForInternalFormat( int internalFormat ) const {
 		return 8;
 	case GL_ALPHA8:
 		return 8;
+	case GL_R8:
+		return 8;		// DUDE: TD_MONO (baked AO maps)
 	case GL_RGBA8:
 		return 32;
 	case GL_RGB8:
@@ -258,6 +263,16 @@ GLenum idImage::SelectInternalFormat( const byte **dataPtrs, int numDataPtrs, in
 	const byte	*scan;
 	int		rgbOr, rgbAnd, aOr, aAnd;
 	int		rgbDiffer, rgbaDiffer;
+
+	// DUDE: single-channel images (baked AO maps, only .r is sampled) keep just the red
+	// channel. GL converts the RGBA upload data itself; R8 is core-only here, so the legacy
+	// context falls back to the lossless 32 bit formats.
+	if ( minimumDepth == TD_MONO ) {
+		if ( glConfig.coreProfile ) {
+			return GL_R8;
+		}
+		minimumDepth = TD_HIGH_QUALITY;
+	}
 
 	// TODO: or always use BC7 if available? do textures take longer to load then?
 	//       would look better at least...
@@ -644,7 +659,7 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 				upload = swizzled;
 			}
 			rhiHandle = rhi::GetRHI()->CreateTexture2D( width, height, upload,
-				(int)filter, (int)repeat, filter == TF_DEFAULT );
+				(int)filter, (int)repeat, filter == TF_DEFAULT, depth == TD_MONO );
 			if ( swizzled ) {
 				R_StaticFree( swizzled );
 			}
@@ -2043,7 +2058,7 @@ void idImage::UploadImageCpu() {
 		}
 
 		rhiHandle = rhi::GetRHI()->CreateTexture2DPrebuilt( parallelData->width, parallelData->height,
-			mips, parallelData->numLevels, (int)filter, (int)repeat );
+			mips, parallelData->numLevels, (int)filter, (int)repeat, depth == TD_MONO );
 		type = TT_2D;
 		uploadWidth = parallelData->width;
 		uploadHeight = parallelData->height;
@@ -2720,6 +2735,9 @@ void idImage::Print() const {
 		break;
 	case GL_RGB8:
 		common->Printf( "RGB8  " );
+		break;
+	case GL_R8:
+		common->Printf( "R8    " );
 		break;
 	case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
 		common->Printf( "DXT1  " );

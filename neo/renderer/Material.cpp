@@ -2111,7 +2111,7 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 
 	// DUDE: parallax occlusion mapping height source (non-vanilla; opengl3/Vulkan). Only resolved
 	// when r_parallax is enabled at parse time, so "off" stays bit-for-bit vanilla with no
-	// extra resident textures. The height texture is loaded uncompressed (TD_HIGH_QUALITY)
+	// extra resident textures. The height texture is loaded uncompressed (TD_MONO, single-channel R8)
 	// to avoid the stepping a DXT'd height field would produce under the POM march. Toggling
 	// r_parallax takes effect on the next reloadDecls/map load. See docs/parallax.md.
 	if ( r_parallax.GetBool() && ss->lighting == SL_BUMP ) {
@@ -2137,14 +2137,14 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 		idImage *height = NULL;
 		if ( parallaxName[0] ) {
 			// explicit `parallaxmap` override: author-supplied height, loaded as a file
-			height = globalImages->ImageFromFile( parallaxName, TF_DEFAULT, allowPicmip, trp, TD_HIGH_QUALITY, CF_2D );
+			height = globalImages->ImageFromFile( parallaxName, TF_DEFAULT, allowPicmip, trp, TD_MONO, CF_2D );
 			if ( height == globalImages->defaultImage ) {
 				height = NULL;
 			}
 		} else if ( generatedNormal && authoredHeight[0] ) {
 			// normal came from _h alone: march the authored height map itself, not a field
 			// re-derived from a normal that was made from it.
-			height = globalImages->ImageFromFile( authoredHeight, TF_DEFAULT, allowPicmip, trp, TD_HIGH_QUALITY, CF_2D );
+			height = globalImages->ImageFromFile( authoredHeight, TF_DEFAULT, allowPicmip, trp, TD_MONO, CF_2D );
 			if ( height == globalImages->defaultImage ) {
 				height = NULL;			// _h referenced but not shipped
 			}
