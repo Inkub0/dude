@@ -121,6 +121,13 @@ Renderer selection: `+set r_graphicsAPI opengl|opengl3|vulkan` or the in-game me
 For the full RT tier pick the **Vulkan** renderer and the **Ultra Nightmare** preset.
 Configs/saves live in `~/.local/share/dude` (Linux) / `Documents/My Games/dude` (Windows).
 
+If the **Vulkan renderer won't start** (the OpenGL renderers are unaffected), update or
+reinstall your GPU driver — the Vulkan driver (the ICD the loader dispatches to) ships with it,
+and no bundled loader can substitute for a missing or Vulkan-incapable driver. On Windows,
+`vulkan-1.dll` is installed by your GPU driver; DUDE deliberately does not ship one, so a
+missing loader there means a driver update, not a missing file. On Linux a current loader is
+bundled in `lib/` as a fallback for old distro loaders, but it still needs your driver's ICD.
+
 ## Optional download: baked ambient-occlusion pack
 
 `dude-0.9.5-baked-ao.zip` (~161 MB): precomputed per-material AO maps for subtle contact
