@@ -4458,9 +4458,14 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// buffer before the lights add onto it. The merged pass never touches the scene colour, so the
 	// reflection stayed on the walls around an obliquely-seen mirror (mars_city1 restroom). Such a
 	// view takes the standalone target + zfill, exactly as with r_ssaoMergeNormal 0.
+	// Same for a remote-camera monitor (remoteRenderMap) or an xray surface: those are not sorted
+	// SS_SUBVIEW, but their subview is likewise rendered into the scene colour first, through a
+	// crop in the window's bottom-left corner, and only the zfill's black write removes it - the
+	// camera's view stayed there as a lit-over square. HasSubview() covers all of them.
 	bool viewHasSubviewSurf = false;
 	for ( int i = 0; i < viewDef->numDrawSurfs; i++ ) {
-		if ( viewDef->drawSurfs[i]->material->GetSort() == SS_SUBVIEW ) {
+		const idMaterial *surfMaterial = viewDef->drawSurfs[i]->material;
+		if ( surfMaterial->GetSort() == SS_SUBVIEW || surfMaterial->HasSubview() ) {
 			viewHasSubviewSurf = true;
 			break;
 		}
