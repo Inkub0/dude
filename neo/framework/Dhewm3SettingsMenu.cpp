@@ -2791,7 +2791,7 @@ enum {
 // PRESET_ULTRA_NIGHTMARE had, and the status line still shows that name; the two purely-raster
 // knobs that tier used to also bump (anisotropy 4->6, SSAO res 0.8->1.0) now stay at Nightmare's
 // values, since RTX is orthogonal and must not change the raster look. PATHTRACED is reserved
-// for H7 ("The Dark Lord Cometh").
+// for H7 ("Ultra Nightmare", dude_rtx 2; docs/rtx-restir-di.md).
 enum RtMode {
 	RTX_OFF = 0,
 	RTX_ON,				// hybrid: RT augments the chosen raster tier

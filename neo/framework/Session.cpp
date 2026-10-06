@@ -1158,9 +1158,10 @@ idStr idSessionLocal::TimeDemoReport( const char *demoName, float demoSeconds ) 
 	// ---- environment ----
 	renderFrameStats_t fs;
 	renderSystem->GetFrameStats( fs );
-	static const char *presetNames[] = { "Potato", "Low", "Medium", "High", "Ultra", "Nightmare", "Ultra Nightmare" };
+	static const char *presetNames[] = { "Potato", "Low", "Medium", "High", "Ultra", "Nightmare" };
 	const int preset = cvarSystem->GetCVarInteger( "dude_preset" );
-	const char *presetName = ( preset >= 0 && preset < 7 ) ? presetNames[preset] : "custom";
+	const int presetCount = sizeof( presetNames ) / sizeof( presetNames[0] );
+	const char *presetName = ( preset >= 0 && preset < presetCount ) ? presetNames[preset] : "custom";
 	const int vsync = cvarSystem->GetCVarInteger( "r_swapInterval" );
 	const int maxFps = cvarSystem->GetCVarInteger( "com_maxFPS" );
 
