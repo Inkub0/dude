@@ -800,7 +800,7 @@ void Sys_Init( void ) {
 	{
 		idStr savepath;
 		Sys_GetPath( PATH_SAVE, savepath );
-		common->Printf( "Logging console output to %s/dhewm3log.txt\n", savepath.c_str() );
+		common->Printf( "Logging console output to %s/dudelog.txt\n", savepath.c_str() );
 	}
 
 	//
@@ -1179,7 +1179,7 @@ void Sys_SleepUntilPrecise( double targetTimeMS ) {
 // stdout/stderr redirection, originally from SDL_win32_main.c
 
 /* The standard output files */
-#define STDOUT_FILE	TEXT("dhewm3log.txt") /* DG: renamed this */
+#define STDOUT_FILE	TEXT("dudelog.txt") /* DG: renamed this; DUDE: dhewm3log.txt -> dudelog.txt */
 #define STDERR_FILE	TEXT("stderr.txt")
 
 /* Set a variable to tell if the stdio redirect has been enabled. */
@@ -1260,7 +1260,7 @@ static void redirect_output(void)
 			char msg[2048];
 			D3_snprintfC99( msg, sizeof(msg), "Failed to create '%s'\n(for savegames, configs and logs),\n error number is %d (%s)\nIs Documents/My Games/ write protected?",
 			                path, errno, strerror(errno) );
-			MessageBox( NULL, msg, "Can't create 'My Games/dhewm3' directory!", MB_OK | MB_ICONERROR );
+			MessageBox( NULL, msg, "Can't create 'My Games/dude' directory!", MB_OK | MB_ICONERROR );
 			exit(1);
 		}
 	}
@@ -1282,7 +1282,7 @@ static void redirect_output(void)
 	{ /* DG: rename old stdout log */
 		char stdoutPathBK[MAX_PATH];
 		SDL_strlcpy( stdoutPathBK, path, SDL_arraysize(stdoutPath) );
-		SDL_strlcat( stdoutPathBK, DIR_SEPERATOR TEXT("dhewm3log-old.txt"), SDL_arraysize(stdoutPath) );
+		SDL_strlcat( stdoutPathBK, DIR_SEPERATOR TEXT("dudelog-old.txt"), SDL_arraysize(stdoutPath) );
 		rename( stdoutPath, stdoutPathBK );
 	} /* DG end */
 
@@ -1298,9 +1298,9 @@ static void redirect_output(void)
 			*stdout = *newfp;
 		} else {
 			char msg[2048];
-			D3_snprintfC99( msg, sizeof(msg), "Failed to create '%s',\n error number is %d (%s)\nIs Documents/My Games/dhewm3/\n or dhewm3log.txt write protected?",
+			D3_snprintfC99( msg, sizeof(msg), "Failed to create '%s',\n error number is %d (%s)\nIs Documents/My Games/dude/\n or dudelog.txt write protected?",
 			                stdoutPath, errno, strerror(errno) );
-			MessageBox( NULL, msg, "Can't create dhewm3log.txt!", MB_OK | MB_ICONERROR );
+			MessageBox( NULL, msg, "Can't create dudelog.txt!", MB_OK | MB_ICONERROR );
 			exit(1);
 		}
 #endif
@@ -1319,7 +1319,7 @@ static void redirect_output(void)
 			*stderr = *newfp;
 		} else {
 			char msg[2048];
-			D3_snprintfC99( msg, sizeof(msg), "Failed to create '%s',\n error number is %d (%s)\nIs Documents/My Games/dhewm3/ write protected?",
+			D3_snprintfC99( msg, sizeof(msg), "Failed to create '%s',\n error number is %d (%s)\nIs Documents/My Games/dude/ write protected?",
 			                stderrPath, errno, strerror(errno) );
 			MessageBox( NULL, msg, "Can't create stderr.txt!", MB_OK | MB_ICONERROR );
 			exit(1);
@@ -1341,12 +1341,12 @@ NOTE: Currently argv[] are ANSI strings, not UTF-8 strings as usual in SDL2 and 
 ==================
 */
 int SDL_main(int argc, char *argv[]) {
-	// as the very first thing, redirect stdout to dhewm3log.txt (and stderr to stderr.txt)
+	// as the very first thing, redirect stdout to dudelog.txt (and stderr to stderr.txt)
 	// so we can log
 	redirect_output();
 	atexit(cleanup_output);
 
-	// now that stdout is redirected to dhewm3log.txt,
+	// now that stdout is redirected to dudelog.txt,
 	// log its (approx.) creation time before anything else is logged:
 	{
 		time_t tt = time(NULL);
