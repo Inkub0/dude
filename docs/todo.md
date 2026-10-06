@@ -430,11 +430,32 @@ gain per effort; every one is an opt-in toggle, preset-wired only after a visual
 
 ---
 
-## Codebase independence  **[planned]**
+## Codebase independence  **[partly done]**
 
 A small phase to break free from third-party content and stale identity so a clean
-DUDE build stands on its own — engine-side settings-menu entry point (no community
-GUI mod), DUDE-authored widescreen GUIs (the anchor system is already in-engine),
-unified `dude` config/save dirs, and a renamed `dudeSettings` command (aliased).
+DUDE build stands on its own.
+
+**Done:**
+- Unified `dude` config/save dirs on all three platforms with one-time legacy-`dhewm3`
+  migration, and renamed the settings command `dhewm3Settings` → `dudeSettings` (legacy
+  alias kept). Commit 060f1ade, shipped in 0.9.5.
+- Windows log file `dhewm3log.txt` → `dudelog.txt` (matches POSIX `dudelog.txt`).
+
+**Menu independence — DEFERRED until after H7 ("The Dark Lord Cometh") lands.**
+The DUDE Settings button already works, but it rides a `base/guis/mainmenu.gui` that is
+*derived* from id's Doom 3 menu via the CstDoom3/WideGuis rework (deliberately untracked,
+pak-only). Making it IP-clean = finishing the from-scratch re-author in
+[base/guis/dude/mainmenu.gui](../base/guis/dude/mainmenu.gui) (screens 1–2 done). Four
+points remain:
+1. Author the remaining screens from scratch (Options/System pages, New Game/difficulty,
+   Load, Multiplayer, Mods/Updates/Credits), referencing id assets at runtime only;
+   verify each visually against the current menu via `testGUI guis/dude/mainmenu.gui`.
+2. Use the canonical `exec "dudeSettings"` in the clean file (not the legacy alias).
+3. Promote & swap: rename `guis/dude/mainmenu.gui` → `guis/mainmenu.gui` (git-tracked),
+   drop the untracked derivative, rebuild `zz_dude_menu.pk4` from the tracked source.
+4. Repeat the clean re-author + swap for RoE (`d3xp`), rebuilding `zz_dude_roe_menu.pk4`.
+
+Also still open from the original plan: ship a DUDE-authored widescreen GUI set (the
+anchor system is already in-engine; only the `.gui` text is third-party/id-derivative).
 
 Full plan: **[codebase-independence.md](codebase-independence.md)**.
