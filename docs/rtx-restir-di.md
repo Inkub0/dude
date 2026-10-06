@@ -97,8 +97,10 @@ p̂ = luminance( BRDF(n, v, ldir) * RtLight[li].color * dudeLightAtten(li, p) )
 `w_i = p̂(cand) / pdf(cand)` via weighted reservoir sampling. Final unbiased weight
 `W = (1/p̂(y)) · (wSum / M)`. Shaded radiance = `p̂(y) · W · visibility(y)`.
 
-Source pdf: **Stage 1 uniform over in-range lights** (simplest, correct); upgrade to
-power/solid-angle importance once the pipeline is proven.
+Source pdf: a **flat power·BRDF·1/d² alias/CDF table over the 256 lights**, ~**8 candidates**
+(the RTXDI `numLocalLightSamples` default — candidates are relevant enough that 8 beats Bitterli's
+original 32 once importance-sampled). Uniform sampling is kept only as a validator cross-check. See
+**Performance** below — at 256 lights this flat table *is* the light-tile; no ReGIR/BVH/tiling.
 
 ## Staging — each shippable, validator-gated, own branch
 
@@ -119,19 +121,30 @@ histogram + mean `W` against the GPU, and against the brute `r_rtAllLights` *uns
 must match within noise). Note `r_rtAllLights` lights via **per-light interaction draws**, not the
 SSBO — so ReSTIR DI is a *different* lighting model (SSBO + reservoir) that will eventually replace it.
 
-**Stage 2 — One visibility ray.** Trace a single shadow ray to `y` reusing the inline any-occluder
-pattern (`interaction.frag:228-234` / `rtshadow_ray.frag`): origin `p + wn·offset`,
-`tMax = min(dist−1, u_rtParms.w)`, `TerminateOnFirstHit`; multiply resolve by visibility. Honour the
-`NOSHADOWS` flag (skip the ray); projected-light frustum gating already lives in `dudeLightAtten`;
-perforated grates via `rt_perforated.glsl`. This is the H3 ray — now once/pixel regardless of light count.
+**Stage 2 — One visibility ray.** The initial RIS target is **unshadowed** (shadowing every
+candidate is the cost we're avoiding); trace a single shadow ray only for the *chosen* sample `y`,
+reusing the inline any-occluder pattern (`interaction.frag:228-234` / `rtshadow_ray.frag`): origin
+`p + wn·offset`, `tMax = min(dist−1, u_rtParms.w)`, `TerminateOnFirstHit`. **Fold that visibility
+into the stored reservoir** (RTXDI's `StoreVisibility`) so Stages 3–4 reuse is shadow-correct and
+the shading pass can reuse it (see Performance). Honour `NOSHADOWS` (skip the ray); projected-light
+frustum gating already lives in `dudeLightAtten`; perforated grates via `rt_perforated.glsl`. This
+is the H3 ray — now once/pixel regardless of light count.
 
-**Stage 3 — Temporal reuse.** Reproject last frame's reservoir through the FSR2 MVs, combine with
-the current reservoir by WRS, **clamp temporal `M`** (≈20× current) to bound stale bias — this is
-what cures the H3 stagger. Reuse the existing disocclusion / normal-depth history rejection.
+**Stage 3 — Temporal reuse.** Reproject last frame's reservoir through the FSR2 MVs, combine by WRS,
+**cap confidence/`M` at ≈20** (RTXDI `maxHistoryLength`; range 5–30) — this bounds correlation/boiling
+*and* cures the H3 stagger (it's the same lever as a low vs high cap: low reacts fast to lighting
+changes, high is smoother). Reset confidence to 0 on disocclusion **from G-buffer tests only** (never
+from sample contents — that biases). Turn on the **temporal visibility shortcut** (skip the
+bias-correction ray when the sample carried over from last frame — RTXDI reports **>90% fewer rays**,
+near-free) and the **boiling filter** (strength ≈0.2) feeding NRD. Prefer bias mode **Basic**, not
+`Raytraced` (which would re-add rays).
 
-**Stage 4 — Spatial reuse.** k neighbour taps in a shrinking radius, combined with normal/depth
-rejection (and the bias-correcting Jacobian), 1–2 passes. This is what lets one sample/pixel
-effectively cover hundreds of lights.
+**Stage 4 — Spatial reuse (OPTIONAL — only if NRD+FSR2 output is still noisy).** The literature is
+clear this is diminishing returns at 256 lights. If needed: **1 tap at ~32 px** radius (+8
+disocclusion-boost taps only on disocclusion, RTXDI defaults), normal/depth rejection, **defensive
+pairwise / contribution MIS — O(M), never the O(M²) balance heuristic** — and keep bias mode
+`Basic`/`Pairwise`, not `Raytraced`, to hold the one-ray/pixel budget. Can fuse with Stage 3
+(spatiotemporal) rather than a separate pass.
 
 **Stage 5 — Denoise + unify.** Feed the 1-spp result to NRD, reusing the H2 guides (packed
 normal-roughness, viewZ, engine→NRD motion). ⚠ **New plumbing required:** SIGMA_SHADOW exists in the
@@ -145,21 +158,86 @@ the direct-lighting path at `dude_rtx 2`.**
 reservoir if the single reservoir gets noisy); handle VIEWWEAPON / muzzle lights; perf pass with
 `r_vkGpuTime 2` scopes; set the `dude_rtx 2` "Ultra Nightmare" preset defaults.
 
+## Performance (literature-calibrated, 2026-10-06)
+
+Two independent scans of the ReSTIR literature + the NVIDIA RTXDI SDK source converge on one verdict:
+
+> **At ≤256 analytic lights on a 3080 Ti, build ReSTIR's cheap core — not full production ReSTIR.**
+> The famous 100× / "millions of lights" wins come from machinery (world-space ReGIR grids, 128×1024
+> light tiles, light BVHs) that exists to tame light *counts we don't have*. The SIGGRAPH 2023 course
+> says tiling doesn't pay off below ~128k lights; RTXDI's own tile budget is "≤256 unique lights per
+> 16×16 screen tile" — our **entire** light set is one tile. At 256 lights, "which light?" is trivial:
+> a flat power·BRDF·1/d² alias table *is* the light-tile. The only thing worth keeping from ReSTIR is
+> **resampling to one shadow ray/pixel with a good, temporally-stabilised distribution.**
+
+**The GPU-affordability answer (this is what makes it cheap enough).** Our one cost is the visibility
+ray. Two near-free, low-bias tricks cut even that below one ray/pixel amortised:
+- **Temporal visibility shortcut** — when the chosen sample carried over from last frame, its
+  visibility was already established, so skip the temporal bias-correction ray. RTXDI: **>90% fewer
+  rays.** Biggest single win; bake into Stage 3.
+- **Final-shading visibility reuse** — store the shadow result in the reservoir and reuse it while
+  fresh (`maxAge≈4`, `maxDistance≈16`) instead of re-tracing. Its shadow-edge brightening bias
+  partially cancels reuse's darkening bias. Stage 3/5.
+- DUDE-specific angle: the related "ReSTIR-sampled shadow maps" work resolves visibility from an
+  existing **shadow-map cache** — which DUDE already maintains. A candidate for a *cheaper* visibility
+  source on a lower RT rung later; note, don't build now.
+
+**Starting knobs (RTXDI/course defaults — calibrate with `r_vkGpuTime 2`):**
+
+| Knob | Start | Note |
+|------|-------|------|
+| Initial candidates `M` | **8** | from the flat power·BRDF·1/d² alias table; +1 BRDF sample |
+| Confidence / `M` cap | **20** | range 5–30; the boiling + stagger lever |
+| Spatial taps | **0–1** | 1 tap @ ~32 px only if still noisy; +8 on disocclusion |
+| Bias correction | **Basic** | or Pairwise; **never Raytraced** (re-adds rays) |
+| Temporal visibility shortcut | **on** | >90% ray cut |
+| Final-shading visibility reuse | **on** | age 4 / dist 16 |
+| Boiling filter | **on**, ~0.2 | cheap firefly guard feeding NRD |
+| Reservoir row | **16 B** | `{ uint y+valid; float W, wSum; uint M+vis+age }`; analytic lights need no triangle-UV field (RTXDI's 24 B does) |
+
+**Consciously skip at 256 lights:** ReGIR / world-space or spatial-hash grids (add build cost *and*
+bias; "ray count only vital on very low-end RT hardware"); 128×1024 light tiles + per-light-type
+presampling (build overhead > benefit below ~128k lights); light BVH / Stochastic Lightcuts; MCMC
+decorrelation (MSE-neutral, glossy/PT-oriented); Area ReSTIR (AA/DoF/PT — owned by the raster
+G-buffer + FSR2); checkerboard + custom reservoir bit-packing beyond the 16 B row (bandwidth isn't the
+limiter here); Tokuyoshi statistical visibility reuse + stochastic large-kernel pairwise MIS (for
+massive emissive geometry / large reuse kernels).
+
+**Honest caveat on numbers:** there is **no published per-pass Ampere ms for ReSTIR DI**. Datapoints
+are a path-tracing prototype (San Miguel 10M tris, sun/sky, <8 ms, GPU unstated) and the
+candidate-generation pathology tiling fixes (25 ms — which doesn't apply to us). So the budget is set
+by **our own measurement**, not a paper. Expectation: the core (initial RIS + temporal + the two
+visibility cuts) should be cheaper than today's `r_rtAllLights` per-light-ray loop in light-dense
+scenes, which is the whole point.
+
+**Key sources:** SIGGRAPH 2023 course *A Gentle Introduction to ReSTIR*
+(https://intro-to-restir.cwyman.org/); Wyman & Panteleev, *Rearchitecting Spatiotemporal Resampling
+for Production*, HPG 2021 (https://doi.org/10.2312/hpg.20211281); NVIDIA RTXDI SDK + docs
+(https://github.com/NVIDIA-RTX/RTXDI — see `Doc/Confidence.md` for the visibility shortcut); GRIS,
+Lin et al. SIGGRAPH 2022 (https://doi.org/10.1145/3528223.3530158); Bitterli et al. 2020
+(original ReSTIR DI). Deferred/paywalled, confirm numbers before quoting: Tokuyoshi, *Efficient
+Visibility Reuse*, HPG/I3D 2024 (https://doi.org/10.1145/3641233.3664320).
+
 ## Non-negotiables (carried from every prior RT phase)
 - `SupportsRayQuery()` + cvar gate; default off; raster/GL3/non-RT paths bit-for-bit unchanged.
 - Validator-first: `r_rtReStirDI_test` diffs GPU vs a CPU reference before the effect renders.
 - Runs at internal (FSR2) resolution like the other RT effects; FSR2 is the perf backstop.
 - New shaders: re-run CMake configure so the glob picks them up ([cmake-glob gotcha]).
 
-## Resolved
+## Resolved (incl. by the perf scan)
+- **Scope = "ReSTIR-lite":** initial RIS + temporal + the two visibility cuts; spatial reuse is
+  optional, the heavy many-light machinery is skipped (see Performance).
 - **Reservoir storage = `buffer_reference` SSBO** (ping/pong), device address passed in
   `RenderParams` — matches how the TLAS + `RtLight[]` are already reached (no new descriptor set,
-  respects the ≤2-set / no-push-constant baseline). Row = `{ uint y; float wSum, M, W; }` (16 B).
+  respects the ≤2-set / no-push-constant baseline). Row ≈ **16 B**
+  `{ uint y+validbit; float W; float wSum; uint M+visibility+age }` — analytic lights need no
+  triangle-UV field, so we stay under RTXDI's 24 B.
+- **Initial candidates = 8** from a flat power·BRDF·1/d² alias table (no ReGIR/BVH/tiling at 256 lights).
 - **DI runs at internal (FSR2) resolution** like the other RT effects.
 
 ## Open questions (settle during Stage 0–1)
-- Candidate count `M` (start 8–16) and when to move off the uniform source pdf (→ power/solid-angle).
+- Exact candidate `M` (8 is the start) and whether a BRDF sample (`numBrdfSamples=1`) is worth it for spots.
 - One combined reservoir vs split diffuse/specular (defer; Stage 6).
-- Whether spatial reuse (Stage 4) stays a fragment pass or is the one place compute earns its keep.
-- Whether to extend `RtLight[]`'s 256 cap for pathological light counts, or rely on reservoir reuse
-  to cover overflow (prefer the latter — that's the whole point).
+- If Stage 4 is ever needed: fuse spatiotemporal vs a separate spatial pass; fragment vs compute.
+- Whether a later lower RT rung should source visibility from the existing shadow-map cache
+  ("ReSTIR-sampled shadow maps") instead of a ray — deferred lever, measure first.
