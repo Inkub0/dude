@@ -7430,7 +7430,9 @@ with RTAO). Mirrors RB_RHI_RtaoPass's setup; it needs the light buffer, not the 
 */
 static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiReStirDIRanThisView = false;
-	if ( !r_rtReStirDI.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+	// ray_query in restir_di.frag (Stage 2 visibility) pipelines only on RT hardware, so gate on it here
+	// (the shader won't even load otherwise). The TLAS itself may still be absent this frame -> unshadowed.
+	if ( !r_rtReStirDI.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN || !r->SupportsRayQuery() ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view
@@ -7484,6 +7486,17 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );		// u_modelViewMatrix = view->world
 	memcpy( &parms.color[0], &lightAddr, sizeof( lightAddr ) );			// color.xy = light-buffer device address
 	parms.color[2] = (float)numLights;									// color.z = light count
+	// Stage 2 visibility ray: scene TLAS into rtParms.xy (bit-cast, rtao/interaction idiom), .z = normal
+	// offset, .w = max length. 0 (no RT scene this frame) leaves rtParms.xy = 0 -> the shader skips the ray.
+	const unsigned long long tlas = r->GetTlasAddress();
+	if ( tlas != 0 ) {
+		const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFull );
+		const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
+		memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );
+		memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+		parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();				// ray-origin normal offset (shared with mode 4)
+		parms.rtParms[3] = 100000.0f;									// max shadow-ray length
+	}
 	parms.localParam0[0] = invP00;
 	parms.localParam0[1] = invP11;
 	parms.localParam0[2] = (float)idMath::ClampInt( 1, 32, r_rtReStirDICandidates.GetInteger() );	// M

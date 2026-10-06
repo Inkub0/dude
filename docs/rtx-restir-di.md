@@ -135,19 +135,25 @@ is a per-pixel local; the ping-pong buffer lands with temporal reuse (Stage 3). 
 internal-res scaling is a later perf lever. `r_rtAllLights` lights via **per-light interaction draws**,
 not the SSBO, so ReSTIR DI is a *different* model that will replace it.
 
-**Stage 1b — validator `r_rtReStirDITest` (NEXT).** The `r_rtWorldTest` shape (build a known case, diff
-GPU vs a CPU reference, bucket FP flips, print PASS/FAIL, self-clear): a CPU weighted-reservoir reference
-with a fixed seed over N pixels, checking the selected-light histogram + mean `W` against the GPU and
-against the brute `r_rtAllLights` *unshadowed* sum (means must match within noise).
+**Stage 1b — validator `r_rtReStirDITest` → folded into Stage 3.** Mode-2 (brute ground truth, GPU) is
+already the correctness anchor and USER-CONFIRMED correct 2026-10-06, so the target function is right. A
+*rigorous* RIS validator checks that the estimator's **mean** converges to the brute — which needs the
+temporal-accumulation buffer from Stage 3. So the formal `r_rtReStirDITest` (accumulate N frames, diff the
+converged mean against the brute within tolerance) lands with Stage 3 rather than before Stage 2.
 
-**Stage 2 — One visibility ray.** The initial RIS target is **unshadowed** (shadowing every
-candidate is the cost we're avoiding); trace a single shadow ray only for the *chosen* sample `y`,
-reusing the inline any-occluder pattern (`interaction.frag:228-234` / `rtshadow_ray.frag`): origin
-`p + wn·offset`, `tMax = min(dist−1, u_rtParms.w)`, `TerminateOnFirstHit`. **Fold that visibility
-into the stored reservoir** (RTXDI's `StoreVisibility`) so Stages 3–4 reuse is shadow-correct and
-the shading pass can reuse it (see Performance). Honour `NOSHADOWS` (skip the ray); projected-light
-frustum gating already lives in `dudeLightAtten`; perforated grates via `rt_perforated.glsl`. This
-is the H3 ray — now once/pixel regardless of light count.
+**Stage 2 — One visibility ray. ✅ DONE 2026-10-06.** The initial RIS target stays **unshadowed**
+(shadowing every candidate is the cost we're avoiding); `traceVisibility()` casts a single any-occluder
+ray only for the *chosen* sample `y` — the inline fast-opaque pattern from `interaction.frag:228-234`
+(`gl_RayFlagsOpaqueEXT | TerminateOnFirstHit`, mask `0xFD`, origin `Pw + Nw·r_rtSunShadowOffset`,
+`tMax = min(dl−1, u_rtParms.w)`, lit iff `CommittedIntersectionNoneEXT`). The resolve is
+`rad(y)·W·vis(y)` — still unbiased for the *shadowed* sum since `pHat` is used consistently for the
+resampling. `NOSHADOWS` lights skip the ray; no TLAS this frame → unshadowed (never trace a null AS).
+Adding `ray_query` means the pass now gates on `SupportsRayQuery()` (the shader only pipelines on RT
+hardware); the TLAS rides `rtParms.xy`. Perforated-grate shadows deferred (opaque fast path first, like
+`r_rtAllLights`). Visibility is *not* stored in a reservoir yet — that (and `StoreVisibility` reuse) comes
+with the reservoir SSBO in Stage 3. Builds clean. **USER TEST:** `r_rtReStirDI 1` + `r_rtReStirDIDebug 1`
+on an RT scene → shadows now appear (light no longer passes through walls), still grainy; mode 2 stays the
+unshadowed reference.
 
 **Stage 3 — Temporal reuse.** Reproject last frame's reservoir through the FSR2 MVs, combine by WRS,
 **cap confidence/`M` at ≈20** (RTXDI `maxHistoryLength`; range 5–30) — this bounds correlation/boiling
