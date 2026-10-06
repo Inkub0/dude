@@ -118,14 +118,24 @@ read off the `RB_RHI_RtaoPass` template. Interim landing decision stands: ReSTIR
 **alternative to the `r_rtAllLights` brute loop inside `dude_rtx 1`** (measurable on real maps via
 `r_vkGpuTime 2`), then is promoted to own direct lighting at `dude_rtx 2`.
 
-**Stage 1 — RIS, no reuse, no visibility.** Fullscreen fragment pass: read depth→world-pos +
-view normal + material, build candidates from `RtLight[]` (cull with `dudeLightInRange`), WRS-pick
-one, write the reservoir SSBO; resolve `p̂(y)·W` (unshadowed). **Validator `r_rtReStirDI_test`**
-(the `r_rtWorldTest` shape — build/trace a known case, diff vs CPU, bucket FP flips, print PASS/FAIL,
-self-clear): CPU reference runs the same fixed-seed WRS over N pixels and diffs the selected-light
-histogram + mean `W` against the GPU, and against the brute `r_rtAllLights` *unshadowed* sum (means
-must match within noise). Note `r_rtAllLights` lights via **per-light interaction draws**, not the
-SSBO — so ReSTIR DI is a *different* lighting model (SSBO + reservoir) that will eventually replace it.
+**Stage 1a — RIS, no reuse, no visibility. ✅ DONE 2026-10-06.** Fullscreen fragment pass
+`restir_di.frag` (+ `.vert`): read depth→world-pos + view normal (shared RTAO prepass), draw
+`M = r_rtReStirDICandidates` (8) candidates **uniformly** from `RtLight[]`, WRS-pick one, resolve the
+unbiased **unshadowed** irradiance `rad(y)·W` (diffuse, albedo = 1, Doom light model via
+`dudeLightDir`/`dudeLightAtten`, frustum-gated) into a full-res RGBA16F target. `RB_RHI_ReStirDIPass`
+mirrors `RB_RHI_RtaoPass`; wired after the RTGI pass under the `restir.di` GPU scope; gated on
+`r_rtReStirDI` + VK + primary view + the depth/normal prepass (same dependency as `r_rtShadowBlur`:
+SSAO/RTAO/motion-vectors/FSR2 on). `r_rtReStirDIDebug 1` blits the (grainy, 1-spp, expected) result
+over the scene via `restir_di_debug.frag` for eyeballing against `r_rtAllLights`. Builds clean; off by
+default so the scene is byte-identical. **No persistent reservoir SSBO** — with no reuse the reservoir
+is a per-pixel local; the ping-pong buffer lands with temporal reuse (Stage 3). Full-res for bring-up;
+internal-res scaling is a later perf lever. `r_rtAllLights` lights via **per-light interaction draws**,
+not the SSBO, so ReSTIR DI is a *different* model that will replace it.
+
+**Stage 1b — validator `r_rtReStirDITest` (NEXT).** The `r_rtWorldTest` shape (build a known case, diff
+GPU vs a CPU reference, bucket FP flips, print PASS/FAIL, self-clear): a CPU weighted-reservoir reference
+with a fixed seed over N pixels, checking the selected-light histogram + mean `W` against the GPU and
+against the brute `r_rtAllLights` *unshadowed* sum (means must match within noise).
 
 **Stage 2 — One visibility ray.** The initial RIS target is **unshadowed** (shadowing every
 candidate is the cost we're avoiding); trace a single shadow ray only for the *chosen* sample `y`,

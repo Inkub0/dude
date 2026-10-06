@@ -1004,6 +1004,9 @@ extern idCVar r_rtaoIntensity;				// RTAO strength (1.0 neutral; r_ssaoIntensity
 extern idCVar r_rtaoHistory;				// RTAO denoiser (ReBLUR) max accumulated history frames; 0 = NRD default (~30)
 extern idCVar r_skinnedMotionVectors;		// GPU-skinned characters write per-bone motion into the velocity buffer
 extern idCVar r_rtaoDebug;					// RTAO debug view (1 raw rays, 2 denoised)
+extern idCVar r_rtReStirDI;					// H7 ReSTIR DI: reservoir resampling of the scene lights (docs/rtx-restir-di.md); Stage 1 = unshadowed RIS pass
+extern idCVar r_rtReStirDICandidates;		// ReSTIR DI: light candidates M per pixel before the reservoir pick (RTXDI default 8)
+extern idCVar r_rtReStirDIDebug;			// ReSTIR DI debug view (1 = blit the raw unshadowed irradiance over the scene)
 extern idCVar r_rtgi;						// H6 RT GI: one-bounce ray-traced global illumination (gathers radiance at the hemisphere hit)
 extern idCVar r_rtgiRadius;					// RT GI gather ray length (world units)
 extern idCVar r_rtgiResScale;				// RT GI gather/denoise resolution fraction (biggest cost lever)
