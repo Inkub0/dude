@@ -470,6 +470,7 @@ static bool  rhiRtaoRanThisView = false;			// ray output produced this view (ove
 static rhi::RenderTargetHandle rhiReStirDIRT = 0;
 static rhi::RenderTargetHandle rhiReStirDIResRT[2] = { 0, 0 };	// reservoir ping-pong
 static int   rhiReStirDIResIdx = 0;					// slot holding THIS frame's reservoir (prev = ^1)
+static bool  rhiReStirDIHistValid = false;			// the prev slot holds a valid reservoir to reproject (Stage 3b)
 static int   rhiReStirDIW = 0, rhiReStirDIH = 0;
 static bool  rhiReStirDIRanThisView = false;		// DI resolve produced this view (debug-overlay gate)
 // H4b guide inputs + H4c denoise state: NRD's IN_VIEWZ (signed linear Z, R16F) and
@@ -3883,7 +3884,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
 	rhiReStirDIRT = 0;			rhiReStirDIW = rhiReStirDIH = 0;	// ReSTIR DI targets stale after a lost context
-	rhiReStirDIResRT[0] = rhiReStirDIResRT[1] = 0;	rhiReStirDIResIdx = 0;
+	rhiReStirDIResRT[0] = rhiReStirDIResRT[1] = 0;	rhiReStirDIResIdx = 0;	rhiReStirDIHistValid = false;
 	rhiRtaoVelRT = 0;			rhiRtaoVelW = rhiRtaoVelH = 0;
 	rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurMaskRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;
 	rhiRtBlurW = rhiRtBlurH = 0;	rhiRtBlurThisView = false;
@@ -7470,6 +7471,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( rhiReStirDIResRT[1] ) { r->DestroyRenderTarget( rhiReStirDIResRT[1] ); }
 		rhiReStirDIRT = rhiReStirDIResRT[0] = rhiReStirDIResRT[1] = 0;
 		rhiReStirDIW = rhiReStirDIH = 0;
+		rhiReStirDIHistValid = false;		// new reservoirs: no history to reproject
 	}
 	if ( !rhiReStirDIRT ) {
 		rhiReStirDIRT       = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
@@ -7516,8 +7518,16 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[0] = invP00;
 	parms.localParam0[1] = invP11;
 	parms.localParam0[2] = (float)idMath::ClampInt( 1, 32, r_rtReStirDICandidates.GetInteger() );	// M
+	parms.localParam0[3] = idMath::ClampFloat( 1.0f, 60.0f, r_rtReStirDIMCap.GetFloat() );	// temporal confidence cap
 	parms.localParam1[0] = (float)( tr.frameCount & 0xFFFF );			// RNG decorrelation per frame
 	parms.localParam1[1] = ( r_rtReStirDIDebug.GetInteger() == 2 ) ? 1.0f : 0.0f;	// debug 2: brute ground truth
+	// Stage 3b temporal reuse: needs the velocity buffer (FSR2 / motion vectors) + a valid previous
+	// reservoir. localParam1.z gates the reprojected merge in the shader; the samplers still get a valid
+	// dummy bind below when it's off.
+	const rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
+		? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
+	const bool temporalOn = r_rtReStirDITemporal.GetBool() && rhiReStirDIHistValid && ( velImg != 0 );
+	parms.localParam1[2] = temporalOn ? 1.0f : 0.0f;
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / uploadW;
@@ -7527,11 +7537,19 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	const int cur = rhiReStirDIResIdx;
 
-	// Pass A: resample -> reservoir[cur]
+	// Pass A: resample (+ Stage 3b temporal reuse) -> reservoir[cur]
 	r->BeginTargetPass( rhiReStirDIResRT[cur], NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
+	// unit 2 = previous reservoir (reprojected read), unit 3 = velocity; dummies when temporal is off so
+	// the statically-used samplers still have a valid bind (VK). The shader gates the reads on localParam1.z.
+	if ( temporalOn ) { RB_RHI_BindRTUnit( r, 2, rhiReStirDIResRT[cur ^ 1] ); }
+	else              { RB_RHI_BindUnit( 2, globalImages->currentDepthImage ); }
+	if ( temporalOn ) { RB_RHI_BindRTImage( r, 3, velImg ); }
+	else              { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
+	backEnd.glState.tmu[1].current2DMap = -1;		// direct binds bypassed the tmu cache
+	backEnd.glState.tmu[2].current2DMap = -1;
+	backEnd.glState.tmu[3].current2DMap = -1;
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
 	r->EndPass();
 
@@ -7546,6 +7564,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->EndPass();
 
 	rhiReStirDIResIdx ^= 1;		// next frame -> other slot; [cur] becomes the previous reservoir (Stage 3b)
+	rhiReStirDIHistValid = true;	// [cur] now holds a valid reservoir to reproject next frame
 	rhiReStirDIRanThisView = true;
 }
 

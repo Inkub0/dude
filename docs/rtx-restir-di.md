@@ -166,14 +166,22 @@ reads only the current reservoir (no reuse), so the resolved image **equals Stag
 refactor that proves the encode/decode, `texelFetch` alignment, and two-pass dispatch before the
 reprojection math goes in. Builds clean.
 
-**Stage 3b — temporal combine (NEXT).** Reproject last frame's reservoir (`rhiReStirDIResRT[idx^1]`)
-through the FSR2 velocity buffer (the `ssr_temporal.frag` reproject: `prevUV = uv − vel`, VK row-flip,
-off-screen/disocclusion reject), combine with the current reservoir by WRS at the current pixel's target,
-**cap confidence/`M` at ≈20** (RTXDI `maxHistoryLength`; range 5–30) — bounds correlation/boiling *and*
-cures the H3 stagger. Reset confidence to 0 on disocclusion **from G-buffer tests only**. Add the
-**temporal visibility shortcut** (skip the ray when the sample carried over — RTXDI **>90% fewer rays**)
-and the **boiling filter** (≈0.2) feeding NRD. Bias mode **Basic**, never `Raytraced`. Behind
-`r_rtReStirDITemporal` (default on) so it can fall back to 3a. The convergence validator lands here.
+**Stage 3b — temporal combine. ✅ DONE 2026-10-06.** `restir_di.frag` now reprojects last frame's
+reservoir (`rhiReStirDIResRT[idx^1]`) through the FSR2 velocity buffer (`ssr_temporal.frag` recipe:
+`prevUV = uv − vel`, VK row-flip) and merges it with the current reservoir by **WRS** at the current
+pixel's target — the reused light re-evaluated at this surface via `lightPHat()`, combined weight
+`W = ΣwSum / (ΣM · pHat(y))`. History confidence capped at `r_rtReStirDIMCap` (default 20); off-screen
+reprojections rejected; `texelFetch` (nearest) so the light index never interpolates; one visibility ray
+for the *final* chosen sample. Behind `r_rtReStirDITemporal` (default on) with a `rhiReStirDIHistValid`
+guard (no reproject on the first frame / after resize). When still (zero velocity) `prevUV` = current uv,
+so accumulation is robust regardless of the row-flip; motion relies on the velocity reproject. **USER
+TEST:** standing still, the grain should collapse to a much cleaner image over a few frames; `…Temporal 0`
+reverts to noisy 3a; `…MCap` tunes history length.
+
+Deferred refinements (land with Stage 4/5): the **temporal visibility shortcut** (RTXDI >90% fewer rays —
+skip the ray when the sample carried over), **G-buffer disocclusion rejection** (normal/depth, to cut
+motion ghosting), the **boiling filter**, and the **convergence validator** (`r_rtReStirDITest`, now that
+accumulation exists). NRD (the "Both" path the user picked) is the next step, layered on this.
 
 **Stage 4 — Spatial reuse (OPTIONAL — only if NRD+FSR2 output is still noisy).** The literature is
 clear this is diminishing returns at 256 lights. If needed: **1 tap at ~32 px** radius (+8
