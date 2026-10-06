@@ -462,9 +462,14 @@ static int   rhiRtaoW = 0, rhiRtaoH = 0;			// the RESOLUTION the ray pass + NRD 
 static rhi::RenderTargetHandle rhiRtaoVelRT = 0;	// r_rtaoResScale < 1: full-res velocity downsampled to the ray/NRD resolution for NRD's IN_MV
 static int   rhiRtaoVelW = 0, rhiRtaoVelH = 0;
 static bool  rhiRtaoRanThisView = false;			// ray output produced this view (overlay gate)
-// ReSTIR DI (docs/rtx-restir-di.md) Stage 1: the unshadowed RIS resolve target (RGBA16F, full view res).
-// No persistent reservoir SSBO yet - with no temporal reuse the reservoir is a per-pixel local (Stage 3).
+// ReSTIR DI (docs/rtx-restir-di.md): the resolved radiance target (RGBA16F, full view res) + the
+// reservoir ping-pong (RGBA16F = chosen light index, weight W, confidence M, visibility). fragmentStores
+// is NOT enabled, so the reservoir is a render target (color attachment), read back next frame via
+// texelFetch (nearest - the light index must not be interpolated). Two passes: restir_di writes the
+// reservoir, restir_di_resolve shades it. Stage 3a writes the current reservoir only (no reuse yet).
 static rhi::RenderTargetHandle rhiReStirDIRT = 0;
+static rhi::RenderTargetHandle rhiReStirDIResRT[2] = { 0, 0 };	// reservoir ping-pong
+static int   rhiReStirDIResIdx = 0;					// slot holding THIS frame's reservoir (prev = ^1)
 static int   rhiReStirDIW = 0, rhiReStirDIH = 0;
 static bool  rhiReStirDIRanThisView = false;		// DI resolve produced this view (debug-overlay gate)
 // H4b guide inputs + H4c denoise state: NRD's IN_VIEWZ (signed linear Z, R16F) and
@@ -3877,7 +3882,8 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistIdx = 0;			rhiSsaoHistW = rhiSsaoHistH = 0;
 	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
-	rhiReStirDIRT = 0;			rhiReStirDIW = rhiReStirDIH = 0;	// ReSTIR DI target stale after a lost context
+	rhiReStirDIRT = 0;			rhiReStirDIW = rhiReStirDIH = 0;	// ReSTIR DI targets stale after a lost context
+	rhiReStirDIResRT[0] = rhiReStirDIResRT[1] = 0;	rhiReStirDIResIdx = 0;
 	rhiRtaoVelRT = 0;			rhiRtaoVelW = rhiRtaoVelH = 0;
 	rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurMaskRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;
 	rhiRtBlurW = rhiRtBlurH = 0;	rhiRtBlurThisView = false;
@@ -7448,23 +7454,33 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( lightAddr == 0 || numLights <= 0 ) {
 		return;		// no scene lights -> nothing to resample
 	}
-	rhi::ShaderHandle prog = r->LoadShader( "restir_di" );
-	if ( !prog ) {
+	rhi::ShaderHandle prog        = r->LoadShader( "restir_di" );			// resample -> reservoir
+	rhi::ShaderHandle progResolve = r->LoadShader( "restir_di_resolve" );	// reservoir -> radiance
+	if ( !prog || !progResolve ) {
 		return;
 	}
 
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-	// (re)create the RGBA16F resolve target on first use / resize / lost context
-	if ( rhiReStirDIRT && r->GetRenderTargetImage( rhiReStirDIRT ) == 0 ) {
-		rhiReStirDIRT = 0;	rhiReStirDIW = rhiReStirDIH = 0;
-	}
-	if ( rhiReStirDIRT && ( rhiReStirDIW != w || rhiReStirDIH != h ) ) {
-		r->DestroyRenderTarget( rhiReStirDIRT );	rhiReStirDIRT = 0;	rhiReStirDIW = rhiReStirDIH = 0;
+	// (re)create the radiance target + the reservoir ping-pong (all RGBA16F, view res) together on first
+	// use / resize / lost context.
+	if ( rhiReStirDIRT && ( r->GetRenderTargetImage( rhiReStirDIRT ) == 0 || rhiReStirDIW != w || rhiReStirDIH != h ) ) {
+		r->DestroyRenderTarget( rhiReStirDIRT );
+		if ( rhiReStirDIResRT[0] ) { r->DestroyRenderTarget( rhiReStirDIResRT[0] ); }
+		if ( rhiReStirDIResRT[1] ) { r->DestroyRenderTarget( rhiReStirDIResRT[1] ); }
+		rhiReStirDIRT = rhiReStirDIResRT[0] = rhiReStirDIResRT[1] = 0;
+		rhiReStirDIW = rhiReStirDIH = 0;
 	}
 	if ( !rhiReStirDIRT ) {
-		rhiReStirDIRT = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
-		if ( !rhiReStirDIRT ) {
+		rhiReStirDIRT       = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+		rhiReStirDIResRT[0] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+		rhiReStirDIResRT[1] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+		if ( !rhiReStirDIRT || !rhiReStirDIResRT[0] || !rhiReStirDIResRT[1] ) {
+			if ( rhiReStirDIRT ) { r->DestroyRenderTarget( rhiReStirDIRT ); }
+			if ( rhiReStirDIResRT[0] ) { r->DestroyRenderTarget( rhiReStirDIResRT[0] ); }
+			if ( rhiReStirDIResRT[1] ) { r->DestroyRenderTarget( rhiReStirDIResRT[1] ); }
+			rhiReStirDIRT = rhiReStirDIResRT[0] = rhiReStirDIResRT[1] = 0;
+			rhiReStirDIW = rhiReStirDIH = 0;
 			return;
 		}
 		rhiReStirDIW = w;	rhiReStirDIH = h;
@@ -7509,12 +7525,27 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
 	parms.windowCoord[2] = -1.0f;										// VK-only pass: top-down view-Y sign
 
-	r->BeginTargetPass( rhiReStirDIRT, NULL );
+	const int cur = rhiReStirDIResIdx;
+
+	// Pass A: resample -> reservoir[cur]
+	r->BeginTargetPass( rhiReStirDIResRT[cur], NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
 	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
 	r->EndPass();
+
+	// Pass B: resolve reservoir[cur] -> radiance (the debug overlay + later apply read this)
+	r->BeginTargetPass( rhiReStirDIRT, NULL );
+	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+	RB_RHI_BindRTUnit( r, 2, rhiReStirDIResRT[cur] );
+	backEnd.glState.tmu[1].current2DMap = -1;
+	backEnd.glState.tmu[2].current2DMap = -1;
+	RB_RHI_DrawFullscreen( r, progResolve, parms, 0 );
+	r->EndPass();
+
+	rhiReStirDIResIdx ^= 1;		// next frame -> other slot; [cur] becomes the previous reservoir (Stage 3b)
 	rhiReStirDIRanThisView = true;
 }
 

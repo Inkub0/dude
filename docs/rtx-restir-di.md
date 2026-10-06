@@ -155,14 +155,25 @@ with the reservoir SSBO in Stage 3. Builds clean. **USER TEST:** `r_rtReStirDI 1
 on an RT scene → shadows now appear (light no longer passes through walls), still grainy; mode 2 stays the
 unshadowed reference.
 
-**Stage 3 — Temporal reuse.** Reproject last frame's reservoir through the FSR2 MVs, combine by WRS,
-**cap confidence/`M` at ≈20** (RTXDI `maxHistoryLength`; range 5–30) — this bounds correlation/boiling
-*and* cures the H3 stagger (it's the same lever as a low vs high cap: low reacts fast to lighting
-changes, high is smoother). Reset confidence to 0 on disocclusion **from G-buffer tests only** (never
-from sample contents — that biases). Turn on the **temporal visibility shortcut** (skip the
-bias-correction ray when the sample carried over from last frame — RTXDI reports **>90% fewer rays**,
-near-free) and the **boiling filter** (strength ≈0.2) feeding NRD. Prefer bias mode **Basic**, not
-`Raytraced` (which would re-add rays).
+**Stage 3a — reservoir plumbing (two-pass). ✅ DONE 2026-10-06.** `fragmentStoresAndAtomics` is NOT
+enabled on this VK device, so reservoirs can't be written to an SSBO from a fragment shader — they live
+in a **render target** (RGBA16F: `chosen light index | −1`, `W`, `M`, `vis`), read back via `texelFetch`
+(nearest — the index must not be interpolated). Split into two passes: `restir_di.frag` resamples →
+writes the reservoir; `restir_di_resolve.frag` reads it and shades `rad(y)·W·vis` (re-evaluating the
+light at this pixel, so a reused sample shades correctly — and the brute debug mode 2 moved here). A
+reservoir **ping-pong** (`rhiReStirDIResRT[2]`) is allocated and the index advances each frame, but 3a
+reads only the current reservoir (no reuse), so the resolved image **equals Stage 2** — a de-risking
+refactor that proves the encode/decode, `texelFetch` alignment, and two-pass dispatch before the
+reprojection math goes in. Builds clean.
+
+**Stage 3b — temporal combine (NEXT).** Reproject last frame's reservoir (`rhiReStirDIResRT[idx^1]`)
+through the FSR2 velocity buffer (the `ssr_temporal.frag` reproject: `prevUV = uv − vel`, VK row-flip,
+off-screen/disocclusion reject), combine with the current reservoir by WRS at the current pixel's target,
+**cap confidence/`M` at ≈20** (RTXDI `maxHistoryLength`; range 5–30) — bounds correlation/boiling *and*
+cures the H3 stagger. Reset confidence to 0 on disocclusion **from G-buffer tests only**. Add the
+**temporal visibility shortcut** (skip the ray when the sample carried over — RTXDI **>90% fewer rays**)
+and the **boiling filter** (≈0.2) feeding NRD. Bias mode **Basic**, never `Raytraced`. Behind
+`r_rtReStirDITemporal` (default on) so it can fall back to 3a. The convergence validator lands here.
 
 **Stage 4 — Spatial reuse (OPTIONAL — only if NRD+FSR2 output is still noisy).** The literature is
 clear this is diminishing returns at 256 lights. If needed: **1 tap at ~32 px** radius (+8
