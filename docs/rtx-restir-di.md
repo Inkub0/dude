@@ -125,8 +125,11 @@ unbiased **unshadowed** irradiance `rad(y)·W` (diffuse, albedo = 1, Doom light 
 `dudeLightDir`/`dudeLightAtten`, frustum-gated) into a full-res RGBA16F target. `RB_RHI_ReStirDIPass`
 mirrors `RB_RHI_RtaoPass`; wired after the RTGI pass under the `restir.di` GPU scope; gated on
 `r_rtReStirDI` + VK + primary view + the depth/normal prepass (same dependency as `r_rtShadowBlur`:
-SSAO/RTAO/motion-vectors/FSR2 on). `r_rtReStirDIDebug 1` blits the (grainy, 1-spp, expected) result
-over the scene via `restir_di_debug.frag` for eyeballing against `r_rtAllLights`. Builds clean; off by
+SSAO/RTAO/motion-vectors/FSR2 on). `r_rtReStirDIDebug` blits the result over the scene (LINEAR,
+so the HDR pipeline exposes it — not tonemapped in the overlay, which would double-tonemap): `1` = the
+raw 1-spp RIS (grainy + FSR2-ghosted by design), `2` = the brute **unshadowed ground truth** the RIS
+converges to (clean, low-variance — the real correctness/colour check, and the Stage 1b validator's
+reference). Builds clean; off by
 default so the scene is byte-identical. **No persistent reservoir SSBO** — with no reuse the reservoir
 is a per-pixel local; the ping-pong buffer lands with temporal reuse (Stage 3). Full-res for bring-up;
 internal-res scaling is a later perf lever. `r_rtAllLights` lights via **per-light interaction draws**,
