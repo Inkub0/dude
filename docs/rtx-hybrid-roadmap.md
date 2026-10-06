@@ -119,14 +119,21 @@ Full-RT down-payment.
 reflections incl. the world), on the RR4 materials + NRD denoiser, gated to Ultra Nightmare. H6 (GI) is
 the optional headliner if it lands in time.
 
-## Full RT end-state (what changes, what carries)
+## Full RT end-state — H7, the `dude_rtx 2` tier (now named "Ultra Nightmare")
 
-When Full RT is built (a separate future phase), it *reuses* H1/H2/H3/H4/H6 wholesale and adds:
+> **Naming/home (2026-10-06):** RT is the orthogonal `dude_rtx` axis, not a preset index. Full RT =
+> **`dude_rtx 2`**, reserved in the cvar comment (`Common.cpp:110`), and reclaims the freed name
+> **"Ultra Nightmare"** (the old "preset index 7 / The Dark Lord Cometh" framing is retired, since the
+> UN *raster* preset was removed). **This phase is now being started, DI first** — see
+> **[rtx-restir-di.md](rtx-restir-di.md)**.
+
+Full RT *reuses* H1/H2/H3/H4/H6 wholesale and adds:
 
 - **Primary-ray path tracing** (or keep the raster G-buffer as primary hits — "hybrid deferred PT" — to
   save the primary trace; a common shortcut that keeps the raster rasteriser earning its keep).
 - **ReSTIR DI** — reservoir importance-sampling so hundreds of Doom 3 point/projected lights can be
   direct-lit in one sample/pixel. The H3 shadow ray *is* the visibility term it needs.
+  **Foundation plan: [rtx-restir-di.md](rtx-restir-di.md).**
 - **ReSTIR GI / multi-bounce** — H6's single bounce extended to a path, spatiotemporally reused.
 - Lighting and shadowing **unify**: there is no shadow pass; a light is lit iff the sampled ray reaches
   it. Doom 3's lights become emitters/analytic lights the sampler queries. (This is the
