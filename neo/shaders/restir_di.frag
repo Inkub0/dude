@@ -16,6 +16,9 @@
 //   u_modelViewMatrix     = inverse view (view -> world)
 //   u_color.xy            = scene-light buffer device address (bit-cast lo/hi)
 //   u_color.z             = light count
+//   u_rtParms.xy          = scene TLAS device address (bit-cast lo/hi; 0 = no RT scene -> unshadowed)
+//   u_rtParms.z           = shadow-ray origin offset along the surface normal (world units)
+//   u_rtParms.w           = max shadow-ray length
 //   u_localParam0         = ( 1/proj00, 1/proj11, candidate count M, unused )
 //   u_localParam1.x       = frame index (RNG decorrelation)
 //   u_localParam1.y       = ground-truth flag (>0.5 = brute unshadowed sum over ALL lights; debug mode 2)
@@ -23,6 +26,7 @@
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 //   u_windowCoord.z       = view-Y sign (-1 Vulkan top-down)
 #extension GL_EXT_buffer_reference_uvec2 : require	// build the light-buffer pointer from u_color.xy (uvec2)
+#extension GL_EXT_ray_query : require				// Stage 2: one visibility ray for the chosen light
 
 #include "renderparms.glsl"
 #include "rt_light_eval.glsl"
@@ -43,6 +47,22 @@ float rnd( inout uint rng ) {
 	uint w = ( ( rng >> ( ( rng >> 28u ) + 4u ) ) ^ rng ) * 277803737u;
 	w = ( w >> 22u ) ^ w;
 	return float( w ) * ( 1.0 / 4294967296.0 );
+}
+
+// Stage 2: one hard any-occluder shadow ray from the surface toward the chosen light (the inline
+// pattern r_rtAllLights / r_rtSunShadows use - interaction.frag's fast opaque path). 1 = lit, 0 =
+// occluded. No TLAS (no RT scene) -> unshadowed (1): never trace against a null acceleration structure.
+float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl ) {
+	if ( u_rtParms.x == 0.0 && u_rtParms.y == 0.0 ) { return 1.0; }		// no RT scene
+	float tMax = min( dl - 1.0, u_rtParms.w );
+	if ( !( tMax > 0.0 ) ) { return 1.0; }
+	rayQueryEXT rq;
+	rayQueryInitializeEXT( rq,
+		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+		gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu /* skip perforated-caster instances */,
+		Pw + Nw * u_rtParms.z, 0.0, ldir, tMax );
+	while ( rayQueryProceedEXT( rq ) ) { }
+	return ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? 1.0 : 0.0;
 }
 
 void main() {
@@ -100,6 +120,9 @@ void main() {
 	float wSum       = 0.0;
 	float pHatChosen = 0.0;
 	vec3  radChosen  = vec3( 0.0 );
+	vec3  ldirChosen = vec3( 0.0 );
+	float dlChosen   = 0.0;
+	uint  flagsChosen = 0u;
 	for ( uint i = 0u; i < M; i++ ) {
 		uint li = uint( rnd( rng ) * float( nLights ) );
 		if ( li >= nLights ) { li = nLights - 1u; }		// guard the rare rnd()==1.0
@@ -116,16 +139,23 @@ void main() {
 		float w    = pHat * float( nLights );
 		wSum += w;
 		if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
-			pHatChosen = pHat;
-			radChosen  = rad;
+			pHatChosen  = pHat;
+			radChosen   = rad;
+			ldirChosen  = ldir;
+			dlChosen    = dl;
+			flagsChosen = lights.l[ li ].flags;
 		}
 	}
 
-	// unbiased contribution weight W = (1/pHat(y)) * (wSum / M); the single-sample estimate of the
-	// full sum is rad(y) * W (E[.] == sum over all lights of the unshadowed contribution).
+	// unbiased contribution weight W = (1/pHat(y)) * (wSum / M). The resampling target pHat is
+	// UNSHADOWED (cheap candidate eval); visibility enters only on the chosen sample, so the estimate
+	// rad(y) * W * vis(y) is still unbiased for the SHADOWED sum (higher variance than a shadowed
+	// target - a known trade; Stage 6 may fold vis into the target). Lights flagged NOSHADOWS skip it.
 	vec3 outRad = vec3( 0.0 );
 	if ( pHatChosen > 0.0 ) {
-		outRad = radChosen * ( ( wSum / float( M ) ) / pHatChosen );
+		float vis = ( ( flagsChosen & DUDE_LIGHT_NOSHADOWS ) != 0u )
+			? 1.0 : traceVisibility( Pw, Nw, ldirChosen, dlChosen );
+		outRad = radChosen * ( ( wSum / float( M ) ) / pHatChosen ) * vis;
 	}
 	fragColor = vec4( outRad, 1.0 );
 }
