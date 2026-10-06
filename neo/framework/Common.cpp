@@ -2630,7 +2630,7 @@ void idCommonLocal::InitCommands( void ) {
 
 	cmdSystem->AddCommand( "editPbrMaterial", Com_EditPbrMaterial_f, CMD_FL_SYSTEM, "opens the in-game PBR material editor for the surface under the crosshair (docs/pbr-materials.md); bind it to a key" );
 
-	cmdSystem->AddCommand( "dudePreset", Com_DudePreset_f, CMD_FL_SYSTEM, "applies a DUDE enhancement quality preset by index (0 = Potato .. 6 = Ultra Nightmare); drives the in-game quality selector" );
+	cmdSystem->AddCommand( "dudePreset", Com_DudePreset_f, CMD_FL_SYSTEM, "applies a DUDE enhancement quality raster preset by index (0 = Potato .. 5 = Nightmare); ray tracing is the separate dude_rtx axis; drives the in-game quality selector" );
 
 	cmdSystem->AddCommand( "dudeAA", Com_DudeAA_f, CMD_FL_SYSTEM, "applies the dude_aa menu antialiasing selection to r_rhiAA / r_fsr; drives the in-game AA selector on the opengl3/Vulkan backends" );
 
