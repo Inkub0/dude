@@ -18,6 +18,7 @@
 //   u_color.z             = light count
 //   u_localParam0         = ( 1/proj00, 1/proj11, candidate count M, unused )
 //   u_localParam1.x       = frame index (RNG decorrelation)
+//   u_localParam1.y       = ground-truth flag (>0.5 = brute unshadowed sum over ALL lights; debug mode 2)
 //   u_screenCorrection.xy = 1 / viewSize        (gl_FragCoord -> [0,1] uv; normal buffer)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 //   u_windowCoord.z       = view-Y sign (-1 Vulkan top-down)
@@ -68,6 +69,23 @@ void main() {
 	RtLights lights = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
 	uint nLights = uint( u_color.z );
 	if ( nLights == 0u ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
+
+	// debug mode 2 (r_rtReStirDIDebug 2): brute UNSHADOWED sum over every light - the clean ground truth
+	// the 1-spp RIS below is an unbiased estimate of. No noise, no RIS; use it to confirm the lighting
+	// model + colours are right (and that "dark" is the scene, not a bug).
+	if ( u_localParam1.y > 0.5 ) {
+		vec3 sum = vec3( 0.0 );
+		for ( uint li = 0u; li < nLights; li++ ) {
+			vec3 ldir; float dl;
+			dudeLightDir( lights, li, Pw, ldir, dl );
+			float ndl = max( dot( Nw, ldir ), 0.0 );
+			if ( ndl <= 0.0 ) { continue; }
+			float atten = dudeLightAtten( lights, li, Pw, dl, lights.l[ li ].flags, true, false );
+			sum += lights.l[ li ].color * ( atten * ndl );
+		}
+		fragColor = vec4( sum, 1.0 );
+		return;
+	}
 
 	uint M = uint( max( u_localParam0.z, 1.0 ) );
 	if ( M > nLights ) { M = nLights; }			// no point drawing more candidates than lights
