@@ -462,6 +462,11 @@ static int   rhiRtaoW = 0, rhiRtaoH = 0;			// the RESOLUTION the ray pass + NRD 
 static rhi::RenderTargetHandle rhiRtaoVelRT = 0;	// r_rtaoResScale < 1: full-res velocity downsampled to the ray/NRD resolution for NRD's IN_MV
 static int   rhiRtaoVelW = 0, rhiRtaoVelH = 0;
 static bool  rhiRtaoRanThisView = false;			// ray output produced this view (overlay gate)
+// ReSTIR DI (docs/rtx-restir-di.md) Stage 1: the unshadowed RIS resolve target (RGBA16F, full view res).
+// No persistent reservoir SSBO yet - with no temporal reuse the reservoir is a per-pixel local (Stage 3).
+static rhi::RenderTargetHandle rhiReStirDIRT = 0;
+static int   rhiReStirDIW = 0, rhiReStirDIH = 0;
+static bool  rhiReStirDIRanThisView = false;		// DI resolve produced this view (debug-overlay gate)
 // H4b guide inputs + H4c denoise state: NRD's IN_VIEWZ (signed linear Z, R16F) and
 // IN_NORMAL_ROUGHNESS (world-space encoding-2 pack, RGBA16F) targets, plus the previous
 // frame's camera for the denoiser's reprojection (its own staging — the shared temporal
@@ -3872,6 +3877,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistIdx = 0;			rhiSsaoHistW = rhiSsaoHistH = 0;
 	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
+	rhiReStirDIRT = 0;			rhiReStirDIW = rhiReStirDIH = 0;	// ReSTIR DI target stale after a lost context
 	rhiRtaoVelRT = 0;			rhiRtaoVelW = rhiRtaoVelH = 0;
 	rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurMaskRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;
 	rhiRtBlurW = rhiRtBlurH = 0;	rhiRtBlurThisView = false;
@@ -7412,6 +7418,94 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 /*
 ===================
+RB_RHI_ReStirDIPass
+
+ReSTIR DI (docs/rtx-restir-di.md) Stage 1: one fullscreen pass that, per pixel, draws M candidate
+lights from the scene-light buffer, picks one by weighted reservoir sampling, and writes the unbiased
+UNSHADOWED direct irradiance to its own RGBA16F target. No reuse, no visibility ray yet (Stages 2-4),
+so nothing in the lit scene consumes it - the scene is byte-identical unless r_rtReStirDIDebug shows
+the buffer. Gated behind r_rtReStirDI; VK only; needs the sealed depth + bump-normal G-buffer (shared
+with RTAO). Mirrors RB_RHI_RtaoPass's setup; it needs the light buffer, not the TLAS.
+===================
+*/
+static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
+	rhiReStirDIRanThisView = false;
+	if ( !r_rtReStirDI.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		return;
+	}
+	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view
+	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
+		return;
+	}
+	if ( globalImages->currentDepthImage->uploadWidth <= 0
+			|| !rhiNormalReadyThisView || rhiNormalResultRT == 0 ) {
+		return;		// needs the sealed depth + the bump-mapped normal G-buffer
+	}
+	unsigned long long lightAddr = 0;
+	const int numLights = RB_RHI_GatherSceneLights( r, viewDef, &lightAddr );
+	if ( lightAddr == 0 || numLights <= 0 ) {
+		return;		// no scene lights -> nothing to resample
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "restir_di" );
+	if ( !prog ) {
+		return;
+	}
+
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	// (re)create the RGBA16F resolve target on first use / resize / lost context
+	if ( rhiReStirDIRT && r->GetRenderTargetImage( rhiReStirDIRT ) == 0 ) {
+		rhiReStirDIRT = 0;	rhiReStirDIW = rhiReStirDIH = 0;
+	}
+	if ( rhiReStirDIRT && ( rhiReStirDIW != w || rhiReStirDIH != h ) ) {
+		r->DestroyRenderTarget( rhiReStirDIRT );	rhiReStirDIRT = 0;	rhiReStirDIW = rhiReStirDIH = 0;
+	}
+	if ( !rhiReStirDIRT ) {
+		rhiReStirDIRT = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+		if ( !rhiReStirDIRT ) {
+			return;
+		}
+		rhiReStirDIW = w;	rhiReStirDIH = h;
+	}
+
+	float invView[16];
+	if ( !RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
+		return;
+	}
+	const float *proj  = viewDef->projectionMatrix;
+	const float invP00 = ( proj[0] != 0.0f ) ? 1.0f / proj[0] : 1.0f;
+	const float invP11 = ( proj[5] != 0.0f ) ? 1.0f / proj[5] : 1.0f;
+	const int uploadW = globalImages->currentDepthImage->uploadWidth;
+	const int uploadH = globalImages->currentDepthImage->uploadHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );		// u_modelViewMatrix = view->world
+	memcpy( &parms.color[0], &lightAddr, sizeof( lightAddr ) );			// color.xy = light-buffer device address
+	parms.color[2] = (float)numLights;									// color.z = light count
+	parms.localParam0[0] = invP00;
+	parms.localParam0[1] = invP11;
+	parms.localParam0[2] = (float)idMath::ClampInt( 1, 32, r_rtReStirDICandidates.GetInteger() );	// M
+	parms.localParam1[0] = (float)( tr.frameCount & 0xFFFF );			// RNG decorrelation per frame
+	parms.screenCorrection[0] = 1.0f / w;
+	parms.screenCorrection[1] = 1.0f / h;
+	parms.depthTexRecip[0] = 1.0f / uploadW;
+	parms.depthTexRecip[1] = 1.0f / uploadH;
+	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
+	parms.windowCoord[2] = -1.0f;										// VK-only pass: top-down view-Y sign
+
+	r->BeginTargetPass( rhiReStirDIRT, NULL );
+	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
+	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
+	r->EndPass();
+	rhiReStirDIRanThisView = true;
+}
+
+/*
+===================
 RB_RHI_RtShadowBlurBegin / RB_RHI_RtShadowBlurLight
 
 r_rtShadowBlur (docs/rtx-shadow-blur.md): a screen-space blur ON TOP of the hard ray-traced
@@ -8043,6 +8137,45 @@ void RB_RHI_RtgiDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
 	parms.screenCorrection[0] = 1.0f;				// rtgi_debug samples at var_TexCoord (0..1); screenCorrection unused
 	parms.screenCorrection[1] = 1.0f;
+
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
+	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	RB_RHI_DrawFullscreen( r, prog, parms, srcImg );
+	RB_RHI_ForgetTexBinds();
+}
+
+/*
+===================
+RB_RHI_ReStirDIDebugOverlay
+
+r_rtReStirDIDebug: blit the Stage-1 unshadowed DI irradiance buffer over the finished view,
+Reinhard-tonemapped (restir_di_debug.frag). Grainy by design - the 1-spp estimate before reuse +
+NRD. Called at the end of the 3D view alongside the other RT debug overlays. No-op unless the DI
+pass ran this view and the cvar is on.
+===================
+*/
+void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !r_rtReStirDIDebug.GetBool() || !rhiReStirDIRanThisView || rhiReStirDIRT == 0 ) {
+		return;
+	}
+	rhi::ImageHandle srcImg = r->GetRenderTargetImage( rhiReStirDIRT );
+	if ( srcImg == 0 ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "restir_di_debug" );
+	if ( !prog ) {
+		return;
+	}
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
 
 	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
 	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
@@ -8981,6 +9114,13 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 	// (rtgi.ray / rtgi.guides / rtgi.conf / rtgi.denoise) for r_vkGpuTime 2, so the ray trace and the NRD
 	// denoise are timed separately — scopes do not nest, so there is no outer "rtgi" scope here.
 	RB_RHI_RtgiPass( r, viewDef );
+	// H7 ReSTIR DI Stage 1 (docs/rtx-restir-di.md): reservoir resampling of the scene lights into its
+	// own buffer (behind r_rtReStirDI, default off). Reuses the same sealed depth + normal G-buffer;
+	// nothing consumes its output in the lit scene yet (r_rtReStirDIDebug shows it), so it is measurable
+	// via r_vkGpuTime without changing the image.
+	r->GpuScopeBegin( "restir.di" );
+	RB_RHI_ReStirDIPass( r, viewDef );
+	r->GpuScopeEnd();
 	// r_rtShadowBlur: validate the view + size the shared targets; the light loop builds each
 	// ray-served light's mask on demand (RB_RHI_RtShadowBlurLight)
 	RB_RHI_RtShadowBlurBegin( r, viewDef );
