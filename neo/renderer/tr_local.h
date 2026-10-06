@@ -1006,6 +1006,8 @@ extern idCVar r_skinnedMotionVectors;		// GPU-skinned characters write per-bone 
 extern idCVar r_rtaoDebug;					// RTAO debug view (1 raw rays, 2 denoised)
 extern idCVar r_rtReStirDI;					// H7 ReSTIR DI: reservoir resampling of the scene lights (docs/rtx-restir-di.md); Stage 1 = unshadowed RIS pass
 extern idCVar r_rtReStirDICandidates;		// ReSTIR DI: light candidates M per pixel before the reservoir pick (RTXDI default 8)
+extern idCVar r_rtReStirDITemporal;			// ReSTIR DI: temporal reservoir reuse (reproject + merge last frame's reservoir)
+extern idCVar r_rtReStirDIMCap;				// ReSTIR DI: temporal confidence cap (history sample count; RTXDI maxHistoryLength)
 extern idCVar r_rtReStirDIDebug;			// ReSTIR DI debug view (1 = blit the raw unshadowed irradiance over the scene)
 extern idCVar r_rtgi;						// H6 RT GI: one-bounce ray-traced global illumination (gathers radiance at the hemisphere hit)
 extern idCVar r_rtgiRadius;					// RT GI gather ray length (world units)

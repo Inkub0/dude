@@ -21,8 +21,9 @@
 //   u_rtParms.xy          = scene TLAS device address (bit-cast lo/hi; 0 = no RT scene -> unshadowed)
 //   u_rtParms.z           = shadow-ray origin offset along the surface normal (world units)
 //   u_rtParms.w           = max shadow-ray length
-//   u_localParam0         = ( 1/proj00, 1/proj11, candidate count M, unused )
+//   u_localParam0         = ( 1/proj00, 1/proj11, candidate count M, temporal confidence cap )
 //   u_localParam1.x       = frame index (RNG decorrelation)
+//   u_localParam1.z       = temporal reuse enabled + history valid this frame (Stage 3b; 0 = current only)
 //   u_screenCorrection.xy = 1 / viewSize        (gl_FragCoord -> [0,1] uv; normal buffer)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 //   u_windowCoord.z       = view-Y sign (-1 Vulkan top-down)
@@ -36,6 +37,8 @@
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;	// xyz = view-space normal, a = weapon/AO mask
+SAMPLER_BINDING(2) uniform sampler2D u_prevReservoir;	// Stage 3b: last frame's reservoir (reprojected read)
+SAMPLER_BINDING(3) uniform sampler2D u_velocity;		// Stage 3b: per-object screen velocity (reprojection)
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -71,6 +74,18 @@ float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl ) {
 	return ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? 1.0 : 0.0;
 }
 
+// resampling target pHat(li) at world point Pw/Nw: luminance of light li's UNSHADOWED diffuse
+// contribution (Doom model, frustum-gated). Shared by the initial RIS and the re-evaluation of a
+// reused (reprojected) sample at the current pixel - a reused light must be shaded for ITS surface.
+float lightPHat( RtLights lights, uint li, vec3 Pw, vec3 Nw ) {
+	vec3 ldir; float dl;
+	dudeLightDir( lights, li, Pw, ldir, dl );
+	float ndl = max( dot( Nw, ldir ), 0.0 );
+	if ( ndl <= 0.0 ) { return 0.0; }
+	float atten = dudeLightAtten( lights, li, Pw, dl, lights.l[ li ].flags, true, false );
+	return dot( lights.l[ li ].color * ( atten * ndl ), vec3( 0.2126, 0.7152, 0.0722 ) );
+}
+
 void main() {
 	vec2  frag = gl_FragCoord.xy;
 	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
@@ -103,47 +118,70 @@ void main() {
 	uint rng = ( ( uint( frag.x ) * 1973u + uint( frag.y ) * 9277u )
 	             ^ ( uint( u_localParam1.x ) * 26699u ) ) | 1u;
 
-	// weighted reservoir sampling over M candidates. Source pdf = uniform = 1/nLights, so the RIS
-	// weight of a candidate is pHat / pdf = pHat * nLights. pHat = luminance of the unshadowed
-	// contribution (the resampling target function; diffuse-only for now).
-	float wSum        = 0.0;
-	float pHatChosen  = 0.0;
-	uint  liChosen    = 0u;
-	vec3  ldirChosen  = vec3( 0.0 );
-	float dlChosen    = 0.0;
-	uint  flagsChosen = 0u;
+	// --- initial candidates: weighted reservoir sampling over M uniform picks ---
+	// Source pdf = 1/nLights, so a candidate's RIS weight is pHat/pdf = pHat*nLights.
+	float wSum       = 0.0;
+	float pHatChosen = 0.0;
+	uint  liChosen   = 0u;
 	for ( uint i = 0u; i < M; i++ ) {
 		uint li = uint( rnd( rng ) * float( nLights ) );
 		if ( li >= nLights ) { li = nLights - 1u; }		// guard the rare rnd()==1.0
-
-		vec3 ldir; float dl;
-		dudeLightDir( lights, li, Pw, ldir, dl );
-		float ndl = max( dot( Nw, ldir ), 0.0 );
-		vec3  rad = vec3( 0.0 );
-		if ( ndl > 0.0 ) {
-			float atten = dudeLightAtten( lights, li, Pw, dl, lights.l[ li ].flags, true, false );
-			rad = lights.l[ li ].color * ( atten * ndl );		// Doom lighting model: no 1/pi
-		}
-		float pHat = dot( rad, vec3( 0.2126, 0.7152, 0.0722 ) );	// luminance target
+		float pHat = lightPHat( lights, li, Pw, Nw );
 		float w    = pHat * float( nLights );
 		wSum += w;
 		if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
-			pHatChosen  = pHat;
-			liChosen    = li;
-			ldirChosen  = ldir;
-			dlChosen    = dl;
-			flagsChosen = lights.l[ li ].flags;
+			pHatChosen = pHat;
+			liChosen   = li;
 		}
 	}
 
-	if ( !( pHatChosen > 0.0 ) ) { fragColor = RESERVOIR_EMPTY; return; }
+	// the current reservoir as a mergeable sample: its merge weight is pHat_c * W_c * M_c, and with
+	// W_c = (wSum/M)/pHat_c that is exactly wSum; M_c = M candidates seen.
+	float combWSum  = ( pHatChosen > 0.0 ) ? wSum : 0.0;
+	float combM     = float( M );
+	uint  combY     = liChosen;
+	float combPHat  = pHatChosen;
+	bool  combValid = ( pHatChosen > 0.0 );
 
-	// unbiased contribution weight W = (1/pHat(y)) * (wSum / M). The resampling target pHat is
-	// UNSHADOWED (cheap candidate eval); visibility enters only on the chosen sample, so the shaded
-	// estimate rad(y)*W*vis(y) is still unbiased for the SHADOWED sum. NOSHADOWS lights skip the ray.
-	float vis = ( ( flagsChosen & DUDE_LIGHT_NOSHADOWS ) != 0u )
-		? 1.0 : traceVisibility( Pw, Nw, ldirChosen, dlChosen );
-	float W = ( wSum / float( M ) ) / pHatChosen;
+	// --- Stage 3b: temporal reuse. Merge the previous frame's reservoir, reprojected through the motion
+	// vectors, by WRS. A reused light is re-evaluated at THIS surface (lightPHat). The history confidence
+	// M_p is capped (u_localParam0.w) to bound correlation and set the history<->current blend.
+	if ( u_localParam1.z > 0.5 ) {
+		vec2 vel = texture( u_velocity, var_TexCoord ).rg;
+		vel.y = ( u_windowCoord.z < 0.0 ) ? -vel.y : vel.y;			// VK top-down row flip
+		vec2 prevUV = var_TexCoord - vel;
+		if ( all( greaterThanEqual( prevUV, vec2( 0.0 ) ) ) && all( lessThanEqual( prevUV, vec2( 1.0 ) ) ) ) {
+			ivec2 res = textureSize( u_prevReservoir, 0 );
+			ivec2 pp  = clamp( ivec2( prevUV / u_screenCorrection.xy ), ivec2( 0 ), res - 1 );
+			vec4 pr = texelFetch( u_prevReservoir, pp, 0 );			// nearest: the light index must not interpolate
+			if ( pr.x >= 0.0 ) {
+				uint y_p = uint( pr.x + 0.5 );
+				if ( y_p < nLights ) {
+					float M_p    = min( pr.z, u_localParam0.w );	// confidence cap
+					float pHat_p = lightPHat( lights, y_p, Pw, Nw );
+					float wp = pHat_p * pr.y * M_p;					// pHat_p * W_p * M_p
+					combM += M_p;
+					if ( wp > 0.0 ) {
+						combWSum += wp;
+						if ( combWSum > 0.0 && rnd( rng ) < ( wp / combWSum ) ) {
+							combY = y_p; combPHat = pHat_p; combValid = true;
+						}
+					}
+				}
+			}
+		}
+	}
 
-	fragColor = vec4( float( liChosen ), W, float( M ), vis );
+	if ( !( combValid && combPHat > 0.0 && combM > 0.0 ) ) { fragColor = RESERVOIR_EMPTY; return; }
+
+	// unbiased combined weight W = combWSum / (combM * pHat(combY)); trace ONE visibility ray for the
+	// FINAL chosen light (re-derive its direction - a reused sample came from a different pixel). pHat
+	// stays UNSHADOWED, so rad(combY)*W*vis is still unbiased for the shadowed sum.
+	float W = combWSum / ( combM * combPHat );
+	vec3 ldirF; float dlF;
+	dudeLightDir( lights, combY, Pw, ldirF, dlF );
+	float vis = ( ( lights.l[ combY ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
+		? 1.0 : traceVisibility( Pw, Nw, ldirF, dlF );
+
+	fragColor = vec4( float( combY ), W, combM, vis );
 }
