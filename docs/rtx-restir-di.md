@@ -20,13 +20,13 @@ decoupled from the raster preset ladder into an orthogonal axis:
 So **ReSTIR DI targets `dude_rtx 2`**, and that tier reclaims the now-free name **"Ultra
 Nightmare"** (not "The Dark Lord Cometh"). Hybrid stays `dude_rtx 1`.
 
-**Cleanup owed by the rename** (stale since the UN-preset removal, fix alongside Stage 0):
-- `presetNames[]` still has a dead `"Ultra Nightmare"` at index 6 with a `preset < 7` guard
-  ([Session.cpp:1161](../neo/framework/Session.cpp#L1161)) — unreachable now that `dude_preset`
-  clamps to 5.
-- The `dudePreset` command help still says "0 = Potato .. 6 = Ultra Nightmare"
-  ([Common.cpp:2633](../neo/framework/Common.cpp#L2633)) — should read 0..5.
-- Decide the `dude_rtx 2` display label in both menus (classic `mainmenu.gui` RT selector +
+**Cleanup owed by the rename** (stale since the UN-preset removal) — ✅ done in Stage 0:
+- ~~`presetNames[]` dead `"Ultra Nightmare"` at index 6 + `preset < 7` guard~~ → trimmed, `sizeof`-driven
+  ([Session.cpp:1161](../neo/framework/Session.cpp#L1161)).
+- ~~`dudePreset` help "0 = Potato .. 6 = Ultra Nightmare"~~ → "0 = Potato .. 5 = Nightmare"
+  ([Common.cpp:2633](../neo/framework/Common.cpp#L2633)).
+- ~~`PATHTRACED`/"The Dark Lord Cometh" comment~~ → "Ultra Nightmare" ([Dhewm3SettingsMenu.cpp:2794](../neo/framework/Dhewm3SettingsMenu.cpp#L2794)).
+- Still TODO (deferred until the tier works): the `dude_rtx 2` display label in both menus (classic `mainmenu.gui` RT selector +
   the ImGui Graphics tab): "Ultra Nightmare" as the RT-axis top rung. Note it coexists with the
   **g_skill 4 "Ultra Nightmare" difficulty** (a different axis — gameplay permadeath, see
   [Session.cpp:1545](../neo/framework/Session.cpp#L1545)); the two are unrelated and that's fine.
@@ -106,11 +106,17 @@ original 32 once importance-sampled). Uniform sampling is kept only as a validat
 
 Everything gates on `SupportsRayQuery()` + the feature cvar; raster/GL3 paths untouched.
 
-**Stage 0 — Scaffold & decision.** This doc; `r_rtReStirDI` cvar (0 default, RT-capable only);
-reservoir SSBO (ping/pong) + output image registered off the rtgi/rtao template; confirm exact
-bindings; do the naming cleanup above. Interim landing decision: ReSTIR DI first ships as an
-**alternative to the `r_rtAllLights` brute loop inside `dude_rtx 1`** (so it's measurable on real
-maps via `r_vkGpuTime 2`), then is promoted to own the direct lighting at `dude_rtx 2`.
+**Stage 0 — Scaffold & decision. ✅ DONE 2026-10-06.** Landed: this doc; the gated bring-up cvar
+`r_rtReStirDI` (0 default, `CVAR_ARCHIVE|BOOL`, in `RenderSystem_init.cpp` by `r_rtAllLights`, help
+notes "nothing consumes it yet → 0 leaves play byte-identical", the same way `r_rtgi` first landed);
+and the UN-preset-removal naming cleanup — dead `presetNames[]` "Ultra Nightmare" + magic `< 7` guard
+→ `sizeof`-driven (`Session.cpp`), `dudePreset` help "0..6" → "0..5 = Nightmare" (`Common.cpp`), and
+the stale `PATHTRACED`/"The Dark Lord Cometh" comment → "Ultra Nightmare" (`Dhewm3SettingsMenu.cpp`).
+Builds clean. **Deferred to the front of Stage 1:** the reservoir SSBO (ping/pong) + output target and
+their exact bindings — allocated *with* the pass that consumes them (no dead GPU resources; verifiable),
+read off the `RB_RHI_RtaoPass` template. Interim landing decision stands: ReSTIR DI first ships as an
+**alternative to the `r_rtAllLights` brute loop inside `dude_rtx 1`** (measurable on real maps via
+`r_vkGpuTime 2`), then is promoted to own direct lighting at `dude_rtx 2`.
 
 **Stage 1 — RIS, no reuse, no visibility.** Fullscreen fragment pass: read depth→world-pos +
 view normal + material, build candidates from `RtLight[]` (cull with `dudeLightInRange`), WRS-pick
