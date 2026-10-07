@@ -462,17 +462,12 @@ static int   rhiRtaoW = 0, rhiRtaoH = 0;			// the RESOLUTION the ray pass + NRD 
 static rhi::RenderTargetHandle rhiRtaoVelRT = 0;	// r_rtaoResScale < 1: full-res velocity downsampled to the ray/NRD resolution for NRD's IN_MV
 static int   rhiRtaoVelW = 0, rhiRtaoVelH = 0;
 static bool  rhiRtaoRanThisView = false;			// ray output produced this view (overlay gate)
-// ReSTIR DI (docs/rtx-restir-di.md): the resolved radiance target (RGBA16F, full view res) + the
-// reservoir ping-pong (RGBA16F = chosen light index, weight W, confidence M, visibility). fragmentStores
-// is NOT enabled, so the reservoir is a render target (color attachment), read back next frame via
-// texelFetch (nearest - the light index must not be interpolated). Two passes: restir_di writes the
-// reservoir, restir_di_resolve shades it. Stage 3a writes the current reservoir only (no reuse yet).
+// ReSTIR DI (docs/rtx-restir-di.md): the gather radiance target (RGBA16F, full view res). RTGI
+// architecture - a single FRESH 1-spp gather each frame (no persistent reservoir, no hand-rolled temporal);
+// NRD does the temporal accumulation downstream (+ the DI confidence pass for moving-light antilag).
 static rhi::RenderTargetHandle rhiReStirDIRT = 0;
-static rhi::RenderTargetHandle rhiReStirDIResRT[2] = { 0, 0 };	// reservoir ping-pong
-static int   rhiReStirDIResIdx = 0;					// slot holding THIS frame's reservoir (prev = ^1)
-static bool  rhiReStirDIHistValid = false;			// the prev slot holds a valid reservoir to reproject (Stage 3b)
 static int   rhiReStirDIW = 0, rhiReStirDIH = 0;
-static bool  rhiReStirDIRanThisView = false;		// DI resolve produced this view (debug-overlay gate)
+static bool  rhiReStirDIRanThisView = false;		// DI gather produced this view (debug-overlay gate)
 // H4b guide inputs + H4c denoise state: NRD's IN_VIEWZ (signed linear Z, R16F) and
 // IN_NORMAL_ROUGHNESS (world-space encoding-2 pack, RGBA16F) targets, plus the previous
 // frame's camera for the denoiser's reprojection (its own staging — the shared temporal
@@ -3883,8 +3878,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistIdx = 0;			rhiSsaoHistW = rhiSsaoHistH = 0;
 	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
-	rhiReStirDIRT = 0;			rhiReStirDIW = rhiReStirDIH = 0;	// ReSTIR DI targets stale after a lost context
-	rhiReStirDIResRT[0] = rhiReStirDIResRT[1] = 0;	rhiReStirDIResIdx = 0;	rhiReStirDIHistValid = false;
+	rhiReStirDIRT = 0;			rhiReStirDIW = rhiReStirDIH = 0;	// ReSTIR DI target stale after a lost context
 	rhiRtaoVelRT = 0;			rhiRtaoVelW = rhiRtaoVelH = 0;
 	rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurMaskRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;
 	rhiRtBlurW = rhiRtBlurH = 0;	rhiRtBlurThisView = false;
@@ -7460,34 +7454,20 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( lightAddr == 0 || numLights <= 0 ) {
 		return;		// no scene lights -> nothing to resample
 	}
-	rhi::ShaderHandle prog        = r->LoadShader( "restir_di" );			// resample -> reservoir
-	rhi::ShaderHandle progResolve = r->LoadShader( "restir_di_resolve" );	// reservoir -> radiance
-	if ( !prog || !progResolve ) {
+	rhi::ShaderHandle prog = r->LoadShader( "restir_di" );	// fresh 1-spp gather -> radiance
+	if ( !prog ) {
 		return;
 	}
 
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-	// (re)create the radiance target + the reservoir ping-pong (all RGBA16F, view res) together on first
-	// use / resize / lost context.
+	// (re)create the RGBA16F gather target on first use / resize / lost context
 	if ( rhiReStirDIRT && ( r->GetRenderTargetImage( rhiReStirDIRT ) == 0 || rhiReStirDIW != w || rhiReStirDIH != h ) ) {
-		r->DestroyRenderTarget( rhiReStirDIRT );
-		if ( rhiReStirDIResRT[0] ) { r->DestroyRenderTarget( rhiReStirDIResRT[0] ); }
-		if ( rhiReStirDIResRT[1] ) { r->DestroyRenderTarget( rhiReStirDIResRT[1] ); }
-		rhiReStirDIRT = rhiReStirDIResRT[0] = rhiReStirDIResRT[1] = 0;
-		rhiReStirDIW = rhiReStirDIH = 0;
-		rhiReStirDIHistValid = false;		// new reservoirs: no history to reproject
+		r->DestroyRenderTarget( rhiReStirDIRT );	rhiReStirDIRT = 0;	rhiReStirDIW = rhiReStirDIH = 0;
 	}
 	if ( !rhiReStirDIRT ) {
-		rhiReStirDIRT       = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
-		rhiReStirDIResRT[0] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
-		rhiReStirDIResRT[1] = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
-		if ( !rhiReStirDIRT || !rhiReStirDIResRT[0] || !rhiReStirDIResRT[1] ) {
-			if ( rhiReStirDIRT ) { r->DestroyRenderTarget( rhiReStirDIRT ); }
-			if ( rhiReStirDIResRT[0] ) { r->DestroyRenderTarget( rhiReStirDIResRT[0] ); }
-			if ( rhiReStirDIResRT[1] ) { r->DestroyRenderTarget( rhiReStirDIResRT[1] ); }
-			rhiReStirDIRT = rhiReStirDIResRT[0] = rhiReStirDIResRT[1] = 0;
-			rhiReStirDIW = rhiReStirDIH = 0;
+		rhiReStirDIRT = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+		if ( !rhiReStirDIRT ) {
 			return;
 		}
 		rhiReStirDIW = w;	rhiReStirDIH = h;
@@ -7509,8 +7489,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );		// u_modelViewMatrix = view->world
 	memcpy( &parms.color[0], &lightAddr, sizeof( lightAddr ) );			// color.xy = light-buffer device address
 	parms.color[2] = (float)numLights;									// color.z = light count
-	// Stage 2 visibility ray: scene TLAS into rtParms.xy (bit-cast, rtao/interaction idiom), .z = normal
-	// offset, .w = max length. 0 (no RT scene this frame) leaves rtParms.xy = 0 -> the shader skips the ray.
+	// visibility ray: scene TLAS into rtParms.xy (bit-cast, rtao/interaction idiom), .z = normal offset,
+	// .w = max length. 0 (no RT scene this frame) leaves rtParms.xy = 0 -> the shader skips the ray (unshadowed).
 	const unsigned long long tlas = r->GetTlasAddress();
 	if ( tlas != 0 ) {
 		const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFull );
@@ -7522,18 +7502,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	parms.localParam0[0] = invP00;
 	parms.localParam0[1] = invP11;
-	parms.localParam0[2] = (float)idMath::ClampInt( 1, 32, r_rtReStirDICandidates.GetInteger() );	// M
-	parms.localParam0[3] = idMath::ClampFloat( 1.0f, 60.0f, r_rtReStirDIMCap.GetFloat() );	// temporal confidence cap
+	parms.localParam0[2] = (float)idMath::ClampInt( 1, 32, r_rtReStirDICandidates.GetInteger() );	// M candidates
 	parms.localParam1[0] = (float)( tr.frameCount & 0xFFFF );			// RNG decorrelation per frame
-	parms.localParam1[1] = ( r_rtReStirDIDebug.GetInteger() == 2 ) ? 1.0f : 0.0f;	// debug 2: brute ground truth
-	// Stage 3b temporal reuse: needs the velocity buffer (FSR2 / motion vectors) + a valid previous
-	// reservoir. localParam1.z gates the reprojected merge in the shader; the samplers still get a valid
-	// dummy bind below when it's off.
-	const rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
-		? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
-	const bool temporalOn = r_rtReStirDITemporal.GetBool() && rhiReStirDIHistValid && ( velImg != 0 );
-	parms.localParam1[2] = temporalOn ? 1.0f : 0.0f;
-	parms.localParam1[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtReStirDIDisocclusion.GetFloat() );	// disocclusion reject threshold
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / uploadW;
@@ -7541,36 +7511,14 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
 	parms.windowCoord[2] = -1.0f;										// VK-only pass: top-down view-Y sign
 
-	const int cur = rhiReStirDIResIdx;
-
-	// Pass A: resample (+ Stage 3b temporal reuse) -> reservoir[cur]
-	r->BeginTargetPass( rhiReStirDIResRT[cur], NULL );
-	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
-	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-	// unit 2 = previous reservoir (reprojected read), unit 3 = velocity; dummies when temporal is off so
-	// the statically-used samplers still have a valid bind (VK). The shader gates the reads on localParam1.z.
-	if ( temporalOn ) { RB_RHI_BindRTUnit( r, 2, rhiReStirDIResRT[cur ^ 1] ); }
-	else              { RB_RHI_BindUnit( 2, globalImages->currentDepthImage ); }
-	if ( temporalOn ) { RB_RHI_BindRTImage( r, 3, velImg ); }
-	else              { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
-	backEnd.glState.tmu[1].current2DMap = -1;		// direct binds bypassed the tmu cache
-	backEnd.glState.tmu[2].current2DMap = -1;
-	backEnd.glState.tmu[3].current2DMap = -1;
-	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
-	r->EndPass();
-
-	// Pass B: resolve reservoir[cur] -> radiance (the debug overlay + later apply read this)
+	// fresh 1-spp gather -> radiance (weapon masked inside the shader). NRD (next) does the temporal.
 	r->BeginTargetPass( rhiReStirDIRT, NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-	RB_RHI_BindRTUnit( r, 2, rhiReStirDIResRT[cur] );
-	backEnd.glState.tmu[1].current2DMap = -1;
-	backEnd.glState.tmu[2].current2DMap = -1;
-	RB_RHI_DrawFullscreen( r, progResolve, parms, 0 );
+	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
+	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
 	r->EndPass();
 
-	rhiReStirDIResIdx ^= 1;		// next frame -> other slot; [cur] becomes the previous reservoir (Stage 3b)
-	rhiReStirDIHistValid = true;	// [cur] now holds a valid reservoir to reproject next frame
 	rhiReStirDIRanThisView = true;
 }
 
@@ -8253,13 +8201,7 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
 	backEnd.currentScissor = viewDef->scissor;
 
-	// u_src = DI radiance (unit 0); u_normalBuffer = weapon mask (unit 1). The overlay discards weapon
-	// pixels so the finished scene's real lit weapon shows through (superimpose the mask).
-	RB_RHI_BindRTUnit( r, 0, rhiReStirDIRT );
-	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT != 0 ? rhiNormalResultRT : rhiReStirDIRT );
-	backEnd.glState.tmu[0].current2DMap = -1;
-	backEnd.glState.tmu[1].current2DMap = -1;
-	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
+	RB_RHI_DrawFullscreen( r, prog, parms, srcImg );	// u_src = DI radiance (weapon reads as no-DI, like rtgi_debug)
 	RB_RHI_ForgetTexBinds();
 }
 
