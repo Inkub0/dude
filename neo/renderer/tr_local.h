@@ -1006,7 +1006,13 @@ extern idCVar r_skinnedMotionVectors;		// GPU-skinned characters write per-bone 
 extern idCVar r_rtaoDebug;					// RTAO debug view (1 raw rays, 2 denoised)
 extern idCVar r_rtReStirDI;					// H7 ReSTIR DI: reservoir resampling of the scene lights (docs/rtx-restir-di.md); Stage 1 = unshadowed RIS pass
 extern idCVar r_rtReStirDICandidates;		// ReSTIR DI: light candidates M per pixel before the reservoir pick (RTXDI default 8)
-extern idCVar r_rtReStirDIDebug;			// ReSTIR DI debug view (1 = blit the raw unshadowed irradiance over the scene)
+extern idCVar r_rtReStirDIDebug;			// ReSTIR DI debug view (1 = blit the DI irradiance - denoised when it ran, else raw - over the scene)
+extern idCVar r_rtReStirDIConfidence;		// ReSTIR DI NRD history-confidence sensitivity; 0 = off (default: it fries DI's noisier 1-spp signal; NRD antilag + weapon mask carry temporal)
+extern idCVar r_rtReStirDIPrepassBlur;		// ReSTIR DI NRD diffusePrepassBlurRadius (px): pre-accumulation spatial pre-blur for the 1-spp signal; main noise lever
+extern idCVar r_rtReStirDIHistoryFix;		// ReSTIR DI NRD historyFixFrameNum: spatial reconstruction frames where history is thin (moving parts)
+extern idCVar r_rtReStirDIBlurRadius;		// ReSTIR DI NRD maxBlurRadius (px): base spatial denoise radius
+extern idCVar r_rtReStirDIEdgeStop;			// ReSTIR DI NRD edge-stopping scale (lobeAngle + planeDistance); >1 blurs across detail edges (grates), costs detail
+extern idCVar r_rtReStirDIHistory;			// ReSTIR DI NRD ReBLUR history length (maxAccumFrames); DI's own, mirrors RTGI's r_rtgiHistory (2..63)
 extern idCVar r_rtgi;						// H6 RT GI: one-bounce ray-traced global illumination (gathers radiance at the hemisphere hit)
 extern idCVar r_rtgiRadius;					// RT GI gather ray length (world units)
 extern idCVar r_rtgiResScale;				// RT GI gather/denoise resolution fraction (biggest cost lever)

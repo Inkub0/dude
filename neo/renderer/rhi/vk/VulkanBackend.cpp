@@ -7454,6 +7454,23 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		rs.maxAccumulatedFrameNum = hist;
 		if ( rs.maxFastAccumulatedFrameNum > hist ) { rs.maxFastAccumulatedFrameNum = hist; }	// fast history must be <= main
 	}
+	// ReSTIR DI (docs/rtx-restir-di.md): spatial-cleanup overrides to fight the 1-spp noise NRD leaves on fine
+	// detail (edge-stopped) + moving silhouettes (thin history). Only applied when the caller sets them (>0);
+	// RTGI/RTAO pass 0 and keep NRD's own defaults, so those paths are untouched.
+	if ( a.giMode ) {
+		if ( a.prepassBlurRadius > 0.0f ) { rs.diffusePrepassBlurRadius = a.prepassBlurRadius; }
+		if ( a.maxBlurRadius     > 0.0f ) { rs.maxBlurRadius = a.maxBlurRadius; }
+		if ( a.historyFixFrameNum > 0 ) {
+			uint32_t hf = (uint32_t)a.historyFixFrameNum;
+			const uint32_t fastCap = ( rs.maxFastAccumulatedFrameNum > 0 ) ? rs.maxFastAccumulatedFrameNum - 1 : 0;
+			if ( hf > fastCap ) { hf = fastCap; }		// NRD: historyFixFrameNum must be < maxFastAccumulatedFrameNum
+			rs.historyFixFrameNum = hf;
+		}
+		if ( a.edgeStopScale > 0.0f ) {					// relax normal/plane rejection so detail edges blur more (grate-noise lever)
+			rs.lobeAngleFraction *= a.edgeStopScale;
+			rs.planeDistanceSensitivity *= a.edgeStopScale;
+		}
+	}
 	if ( a.giMode && a.checkerboard > 0 ) {
 		// H6g: NRD reconstructs the full-res diffuse from the horizontal checkerboard packed in rayRT's left
 		// half. Mode = orientation of even frames; the caller alternates BLACK/WHITE by frame parity.

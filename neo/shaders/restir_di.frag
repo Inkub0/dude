@@ -9,6 +9,14 @@
 // that must not receive world DI, and masking it here means it can never ghost. NRD owns the temporal, so
 // the background the weapon uncovers is handled by NRD's disocclusion, not left as a hole.
 //
+// Output is the 3-attachment NRD guide MRT (CreateRenderTargetRtgiMrt), exactly like rtgi_ray.frag so the
+// shared REBLUR_DIFFUSE denoise (RtaoDenoise giMode) drops in unchanged:
+//   loc 0 = NRD-YCoCg direct irradiance (rgb) + normalized hit distance (a)   [IN_DIFF_RADIANCE_HITDIST]
+//   loc 1 = signed linear view z (negative)                                   [IN_VIEWZ]
+//   loc 2 = world normal, NRD encoding 2 (signed octahedron)                  [IN_NORMAL_ROUGHNESS]
+// The guides are written for EVERY pixel (incl. sky / weapon), the radiance is zeroed there - mirroring
+// rtgi_ray.frag so NRD sees a valid guide field everywhere.
+//
 // Uniform packing (RB_RHI_ReStirDIPass):
 //   u_modelViewMatrix     = inverse view (view -> world)
 //   u_color.xy            = scene-light buffer device address (bit-cast lo/hi)
@@ -16,7 +24,7 @@
 //   u_rtParms.xy          = scene TLAS device address (bit-cast lo/hi; 0 = no RT scene -> unshadowed)
 //   u_rtParms.z           = shadow-ray origin offset along the surface normal (world units)
 //   u_rtParms.w           = max shadow-ray length
-//   u_localParam0         = ( 1/proj00, 1/proj11, candidate count M, unused )
+//   u_localParam0         = ( 1/proj00, 1/proj11, candidate count M, hit-distance scale (NRD A = 0.5*this) )
 //   u_localParam1.x       = frame index (RNG decorrelation)
 //   u_screenCorrection.xy = 1 / viewSize        (gl_FragCoord -> [0,1] uv; normal buffer)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
@@ -32,7 +40,9 @@ SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;	// xyz = view-space normal,
 
 VARY(0) in vec2 var_TexCoord;
 
-layout(location = 0) out vec4 fragColor;	// RGBA16F: linear direct irradiance (rgb), 1 (a)
+layout(location = 0) out vec4 fragColor;	// IN_DIFF_RADIANCE_HITDIST: NRD-YCoCg direct irradiance (rgb) + normHitDist (a)
+layout(location = 1) out vec4 outViewZ;		// IN_VIEWZ: signed linear view z (negative), R16F
+layout(location = 2) out vec4 outNormal;	// IN_NORMAL_ROUGHNESS: world normal, NRD encoding 2 (signed octahedron), RGBA16F
 
 // depth -> view z pair for THIS view (cinematics lower the near plane; renderparms.glsl u_depthParms)
 #define depth_consts DUDE_DEPTH_CONSTS()
@@ -43,6 +53,33 @@ float rnd( inout uint rng ) {
 	uint w = ( ( rng >> ( ( rng >> 28u ) + 4u ) ) ^ rng ) * 277803737u;
 	w = ( w >> 22u ) ^ w;
 	return float( w ) * ( 1.0 / 4294967296.0 );
+}
+
+// NRD REBLUR radiance encoding (REBLUR_FrontEnd_PackRadianceAndNormHitDist -> _NRD_LinearToYCoCg): the
+// REBLUR_DIFFUSE filter works and OUTPUTS in YCoCg, so IN_DIFF_RADIANCE_HITDIST must be YCoCg too. The
+// debug/apply decodes with the exact inverse (restir_di_debug.frag). Same as rtgi_ray.frag.
+vec3 nrdLinearToYCoCg( vec3 c ) {
+	return vec3( dot( c, vec3( 0.25, 0.5, 0.25 ) ), dot( c, vec3( 0.5, 0.0, -0.5 ) ), dot( c, vec3( -0.25, 0.5, -0.25 ) ) );
+}
+
+// world normal -> NRD normal/roughness encoding 2 (signed octahedron, z sign in roughness). Same as rtgi_ray.frag.
+vec4 packNrdNormal( vec3 Nraw ) {
+	float nl2 = dot( Nraw, Nraw );
+	vec3  n;
+	if ( !( nl2 > 1e-4 ) ) {
+		n = vec3( 0.0, 0.0, 1.0 );
+	} else {
+		n = normalize( mat3( u_modelViewMatrix ) * ( Nraw * inversesqrt( nl2 ) ) );	// world-space
+	}
+	n /= abs( n.x ) + abs( n.y ) + abs( n.z );
+	vec3 r;
+	r.y = n.y * 0.5 + 0.5;
+	r.x = n.x * 0.5 + r.y;
+	r.y -= n.x * 0.5;
+	float roughness = 1.0;										// can't be 0: z carries n.z's sign
+	float s = n.z < 0.0 ? -roughness : roughness;
+	r.z = s * 0.5 + 0.5;
+	return vec4( r, 0.0 );										// w = materialID/3 = 0
 }
 
 // one hard any-occluder shadow ray from the surface toward the chosen light (interaction.frag's fast opaque
@@ -63,12 +100,18 @@ float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl ) {
 void main() {
 	vec2  frag = gl_FragCoord.xy;
 	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
+
+	// NRD guides first, for EVERY pixel (mirrors rtgi_ray.frag) so the shared REBLUR_DIFFUSE denoise sees a
+	// valid guide field even on sky / weapon / degenerate pixels (the radiance is zeroed there below).
+	float vz = 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y );	// negative view z
+	vec4  nt = texture( u_normalBuffer, frag * u_screenCorrection.xy );
+	outViewZ  = vec4( vz, 0.0, 0.0, 1.0 );
+	outNormal = packNrdNormal( nt.xyz * 2.0 - 1.0 );
+
 	if ( raw >= 0.9994 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// sky / no geometry
-	vec4 nt = texture( u_normalBuffer, frag * u_screenCorrection.xy );
-	if ( nt.a < 0.5 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// view weapon: no world DI (masked, like RTGI)
+	if ( nt.a < 0.5 )    { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// view weapon: no world DI (masked, like RTGI)
 
 	// view-space position + normal (ssao/rtao reconstruction incl. the VK view-Y sign)
-	float vz  = 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y );	// negative
 	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
 	float d   = -vz;
 	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
@@ -135,5 +178,10 @@ void main() {
 	float vis = ( ( flagsChosen & DUDE_LIGHT_NOSHADOWS ) != 0u )
 		? 1.0 : traceVisibility( Pw, Nw, ldirChosen, dlChosen );
 
-	fragColor = vec4( radChosen * ( W * vis ), 1.0 );
+	// NRD IN_DIFF_RADIANCE_HITDIST: the "hit distance" for direct lighting is the distance to the chosen
+	// light - it drives ReBLUR's world-space blur radius (near light -> tight penumbra, far light -> wider),
+	// the direct-lighting analogue of the gather-ray distance RTGI feeds. Normalized saturate( dl / (A + d*B) )
+	// with A = 0.5 * u_localParam0.w, B = 0.1, MUST match the ReblurHitDistanceParameters in RB_RHI_ReStirDIPass.
+	float nhd = clamp( dlChosen / ( 0.5 * u_localParam0.w + d * 0.1 ), 0.0, 1.0 );
+	fragColor = vec4( nrdLinearToYCoCg( max( radChosen * ( W * vis ), vec3( 0.0 ) ) ), nhd );
 }
