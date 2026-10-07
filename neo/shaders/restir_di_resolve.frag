@@ -85,7 +85,7 @@ void main() {
 	uint li = findLightBuf( lights, nLights, uint( res.x + 0.5 ) );				// stable id -> current slot
 	if ( li == LIGHT_NONE ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// light gone this frame
 	float W   = res.y;
-	float vis = res.w;
+	float vis = ( res.z >= 0.0 ) ? 1.0 : 0.0;									// visibility is the sign of the M channel
 
 	// re-evaluate the chosen light's unshadowed contribution at THIS surface point
 	vec3 ldir; float dl;

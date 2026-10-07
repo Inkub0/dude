@@ -7533,6 +7533,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
 	const bool temporalOn = r_rtReStirDITemporal.GetBool() && rhiReStirDIHistValid && ( velImg != 0 );
 	parms.localParam1[2] = temporalOn ? 1.0f : 0.0f;
+	parms.localParam1[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtReStirDIDisocclusion.GetFloat() );	// disocclusion reject threshold
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
 	parms.depthTexRecip[0] = 1.0f / uploadW;

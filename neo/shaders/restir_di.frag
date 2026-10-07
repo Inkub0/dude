@@ -24,6 +24,7 @@
 //   u_localParam0         = ( 1/proj00, 1/proj11, candidate count M, temporal confidence cap )
 //   u_localParam1.x       = frame index (RNG decorrelation)
 //   u_localParam1.z       = temporal reuse enabled + history valid this frame (Stage 3b; 0 = current only)
+//   u_localParam1.w       = temporal disocclusion reject threshold (relative view-z; cures motion ghosting)
 //   u_screenCorrection.xy = 1 / viewSize        (gl_FragCoord -> [0,1] uv; normal buffer)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 //   u_windowCoord.z       = view-Y sign (-1 Vulkan top-down)
@@ -167,11 +168,14 @@ void main() {
 		if ( prevFrag.x >= 0.0 && prevFrag.y >= 0.0
 		     && prevFrag.x < float( res.x ) && prevFrag.y < float( res.y ) ) {
 			vec4 pr = texelFetch( u_prevReservoir, ivec2( prevFrag ), 0 );	// nearest: id must not interpolate
-			if ( pr.x >= 0.0 ) {
+			// disocclusion reject: the reprojected surface's stored view z (pr.w) must match this pixel's.
+			// A newly-revealed surface - or the near weapon sweeping over the far world - stores a very
+			// different z, so dropping it here is the cure for motion / weapon-edge ghosting.
+			if ( pr.x >= 0.0 && abs( vz - pr.w ) <= u_localParam1.w * abs( vz ) ) {
 				uint idP = uint( pr.x + 0.5 );						// prev sample's STABLE light id
 				uint liP = findLightBuf( lights, nLights, idP );	// its slot THIS frame (or NONE if culled)
 				if ( liP != LIGHT_NONE ) {
-					float M_p    = min( pr.z, u_localParam0.w );		// confidence cap
+					float M_p    = min( abs( pr.z ), u_localParam0.w );	// |.z| = M (visibility is its sign)
 					float pHat_p = lightPHat( lights, liP, Pw, Nw );
 					float wp = pHat_p * pr.y * M_p;					// pHat_p * W_p * M_p
 					combM += M_p;
@@ -196,5 +200,6 @@ void main() {
 	float vis = ( ( lights.l[ combBuf ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
 		? 1.0 : traceVisibility( Pw, Nw, ldirF, dlF );
 
-	fragColor = vec4( float( combStable ), W, combM, vis );		// reservoir stores the STABLE light id
+	// reservoir: ( STABLE light id, W, M*sign(visibility), this pixel's view z for disocclusion reject )
+	fragColor = vec4( float( combStable ), W, ( vis > 0.5 ? combM : -combM ), vz );
 }
