@@ -8253,7 +8253,13 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
 	backEnd.currentScissor = viewDef->scissor;
 
-	RB_RHI_DrawFullscreen( r, prog, parms, srcImg );
+	// u_src = DI radiance (unit 0); u_normalBuffer = weapon mask (unit 1). The overlay discards weapon
+	// pixels so the finished scene's real lit weapon shows through (superimpose the mask).
+	RB_RHI_BindRTUnit( r, 0, rhiReStirDIRT );
+	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT != 0 ? rhiNormalResultRT : rhiReStirDIRT );
+	backEnd.glState.tmu[0].current2DMap = -1;
+	backEnd.glState.tmu[1].current2DMap = -1;
+	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
 	RB_RHI_ForgetTexBinds();
 }
 

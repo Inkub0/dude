@@ -46,7 +46,8 @@ void main() {
 	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
 	if ( raw >= 0.9994 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
 	vec4 nt = texture( u_normalBuffer, frag * u_screenCorrection.xy );
-	if ( nt.a < 0.5 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
+	// view weapon not skipped (see restir_di.frag): it resolves like any surface; the debug overlay
+	// superimposes the real weapon over its (unused) DI.
 
 	float vz  = 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y );
 	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;

@@ -103,7 +103,10 @@ void main() {
 	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
 	if ( raw >= 0.9994 ) { fragColor = RESERVOIR_EMPTY; return; }	// sky / no geometry
 	vec4 nt = texture( u_normalBuffer, frag * u_screenCorrection.xy );
-	if ( nt.a < 0.5 ) { fragColor = RESERVOIR_EMPTY; return; }		// view weapon: skip
+	// The view weapon is NOT skipped: masking it punched a MOVING hole in the reservoir, so the background
+	// it uncovered as it swayed reset to fresh noise every frame (a noisy trailing edge). It participates
+	// like any surface (its real near depth is stored, so a world pixel it later reveals is dropped by the
+	// depth disocclusion test); the debug overlay superimposes the real weapon, so its own DI is never shown.
 
 	// view-space position + normal (ssao/rtao reconstruction incl. the VK view-Y sign)
 	float vz  = 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y );	// negative
