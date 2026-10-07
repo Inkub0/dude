@@ -1,287 +1,196 @@
-# ReSTIR DI — reservoir direct lighting (the first H7 / `dude_rtx 2` piece)
+# ReSTIR DI — direct lighting (the first H7 / `dude_rtx 2` piece)
 
-> Status: **PLAN** (authored 2026-10-06). No code yet. This is the foundation plan;
-> each stage below is implemented, validated, and merged on its own branch before the
-> next. Part of the Full-RT end-state in [rtx-hybrid-roadmap.md](rtx-hybrid-roadmap.md);
-> the direct-lighting half of H7. Build **DI first, then GI**.
+> Status: **SHIPPED to local master** (not pushed), 2026-10-07 — the **RTGI/NRD architecture**
+> (`feat/rtx-restir-di-nrd-denoise`, merge `fc5df0d1`). Bring-up / debug-only: nothing in the lit
+> scene consumes the DI yet, so with `r_rtReStirDI 0` (default) play is byte-identical; `r_rtReStirDIDebug`
+> blits the buffer over the scene. Part of the Full-RT end-state in
+> [rtx-hybrid-roadmap.md](rtx-hybrid-roadmap.md); the direct-lighting half of H7.
+>
+> ⚠ **The original reservoir plan was RETIRED.** This doc used to describe a hand-rolled spatiotemporal
+> **reservoir** (ping-pong SSBO, temporal reproject, Stages 0–6). That reuse left moving-object trails that
+> no disocclusion/weapon special-casing could fix — see **The pivot** below. The shipped design hands ALL
+> temporal accumulation to NRD instead, exactly like RTGI.
 
-## Where it lives (naming corrected 2026-10-06)
+## Where it lives
 
-The old framing — "preset index 7, tier *The Dark Lord Cometh*" — is **obsolete**. RTX was
-decoupled from the raster preset ladder into an orthogonal axis:
+RTX is an orthogonal axis, not a raster preset rung:
 
-- `dude_preset` ([Common.cpp:105](../neo/framework/Common.cpp#L105)) is raster only, **0..5**
-  (Potato … Nightmare). The old raster "Ultra Nightmare" preset (idx 6) is retired.
-- `dude_rtx` ([Common.cpp:110](../neo/framework/Common.cpp#L110)) is the RT axis, **0..2**:
-  `0` off, `1` hybrid RT (today's "Solid Hybrid RT"; `dude_preset 5 + dude_rtx 1` reproduces
-  the retired Ultra Nightmare look), **`2` = full path tracing — H7**, already reserved in the
-  cvar's own comment ([Common.cpp:107](../neo/framework/Common.cpp#L107)).
+- `dude_preset` ([Common.cpp](../neo/framework/Common.cpp)) is raster only, **0..5** (Potato … Nightmare).
+- `dude_rtx` is the RT axis, **0..2**: `0` off, `1` hybrid RT ("Solid Hybrid RT"), **`2` = full RT — H7**.
 
-So **ReSTIR DI targets `dude_rtx 2`**, and that tier reclaims the now-free name **"Ultra
-Nightmare"** (not "The Dark Lord Cometh"). Hybrid stays `dude_rtx 1`.
+**ReSTIR DI targets `dude_rtx 2`**, the tier that reclaims the name **"Ultra Nightmare"** (unrelated to the
+`g_skill 4` "Ultra Nightmare" *difficulty* — a different axis). It is not preset-wired yet (bring-up); you
+enable it directly with `r_rtReStirDI 1`.
 
-**Cleanup owed by the rename** (stale since the UN-preset removal) — ✅ done in Stage 0:
-- ~~`presetNames[]` dead `"Ultra Nightmare"` at index 6 + `preset < 7` guard~~ → trimmed, `sizeof`-driven
-  ([Session.cpp:1161](../neo/framework/Session.cpp#L1161)).
-- ~~`dudePreset` help "0 = Potato .. 6 = Ultra Nightmare"~~ → "0 = Potato .. 5 = Nightmare"
-  ([Common.cpp:2633](../neo/framework/Common.cpp#L2633)).
-- ~~`PATHTRACED`/"The Dark Lord Cometh" comment~~ → "Ultra Nightmare" ([Dhewm3SettingsMenu.cpp:2794](../neo/framework/Dhewm3SettingsMenu.cpp#L2794)).
-- Still TODO (deferred until the tier works): the `dude_rtx 2` display label in both menus (classic `mainmenu.gui` RT selector +
-  the ImGui Graphics tab): "Ultra Nightmare" as the RT-axis top rung. Note it coexists with the
-  **g_skill 4 "Ultra Nightmare" difficulty** (a different axis — gameplay permadeath, see
-  [Session.cpp:1545](../neo/framework/Session.cpp#L1545)); the two are unrelated and that's fine.
+## Why ReSTIR DI
 
-## Why ReSTIR DI is the right first H7 piece
+Doom 3 scenes routinely have dozens–hundreds of point/projected lights in view. The hybrid tier
+(`r_rtAllLights`) traces **one visibility ray per light per pixel** — the exact cost + stagger that killed
+H3 soft shadows ([rtx-soft-shadows-h3.md](rtx-soft-shadows-h3.md)). ReSTIR DI (Bitterli et al. 2020)
+importance-samples the light set to **one chosen light + one visibility ray per pixel**, regardless of light
+count. The single visibility ray *is* the abandoned H3 shadow ray — reused, not rebuilt. It is the
+direct-lighting stage of the path tracer, so most of it carries into full ReSTIR GI later.
 
-Doom 3 scenes routinely have dozens–hundreds of point/projected lights in view. Today's hybrid
-tier (`r_rtAllLights`) traces **one visibility ray per light per pixel** — the exact cost +
-stagger that killed H3 soft shadows (see [rtx-soft-shadows-h3.md](rtx-soft-shadows-h3.md)).
+## The pivot — reservoir → NRD architecture
 
-ReSTIR DI (Bitterli et al. 2020) importance-samples the light set into **one chosen light +
-one visibility ray per pixel**, regardless of light count, and spatiotemporally reuses
-neighbours' and last frame's samples to drive variance down. The single visibility ray *is* the
-abandoned H3 shadow ray — reused, not rebuilt. It is the direct-lighting stage of the path
-tracer, so ~100% of it carries into full ReSTIR GI afterwards.
+The first implementation was textbook ReSTIR: a per-pixel reservoir, temporal reuse (reproject last
+frame's reservoir through the velocity buffer), optional spatial reuse. It converged beautifully when
+**still**, but any motion — an NPC walking, the view weapon swaying, strafing past a lit surface — left
+**trails**: the reprojected reservoir carried stale light/visibility onto moving silhouettes, and every
+disocclusion/weapon special-case we tried only moved the artifact around.
+
+RTGI (H6) had already hit and solved the *same* problem for indirect light: it does **zero hand-rolled
+temporal**. A fresh 1-spp gather every frame, all accumulation handed to NRD ReBLUR, a confidence guide for
+moving-light antilag, and the view weapon simply **masked out**. So DI adopted RTGI's architecture wholesale
+— the reservoir ping-pong, temporal merge, stable-light-id remap, and reproject were **deleted**. What
+survives from ReSTIR is the cheap, correct core the perf scan endorsed (see **Performance**): resampled
+importance sampling to **one light + one shadow ray**, with a good distribution; the denoiser owns stability.
+
+## Architecture as shipped
+
+Fullscreen fragment passes (no compute), gated on `SupportsRayQuery()` + `r_rtReStirDI`, primary view only,
+needing the sealed depth + bump-normal G-buffer and the velocity MRT (`r_fsr` / `r_motionVectors`). Wired in
+`RB_RHI_DrawWorld` after `RB_RHI_RtgiPass`; opens its own `restir.di.gather` / `.conf` / `.denoise` GPU
+scopes (`r_vkGpuTime 2`).
+
+### 1. The gather — `restir_di.frag` (fresh, 1-spp, no history)
+Per pixel: reconstruct world pos+normal from depth, **mask the view weapon** (`nt.a < 0.5` → zero, like
+RTAO/SSR/RTGI), draw `M` candidate lights uniformly from the shared `RtLight[]` set (`dudeLightInRange`
+cull), weighted-reservoir-pick **one**, trace **one** any-occluder visibility ray for it, and output the
+unbiased direct irradiance `rad(y)·W·vis`. The reservoir is a per-pixel local that lives and dies in this
+one `main()` — there is no reservoir buffer, no reprojection.
+
+Output is NRD's 3-attachment guide MRT (`CreateRenderTargetRtgiMrt`, the same target RTGI's gather writes),
+so `RtaoDenoise(giMode)` drops in unchanged:
+- **att0** (RGBA16F): NRD-**YCoCg** radiance + normalized **hit distance** in alpha. The "hit distance" for
+  direct lighting = distance to the chosen light, normalized `saturate(dl / (A + |viewZ|·B))`, `A =
+  0.5·1024`, `B = 0.1` (must match the `ReblurHitDistanceParameters` the pass sets). It drives ReBLUR's
+  world-space blur radius.
+- **att1** (R16F): signed linear view-Z.
+- **att2** (RGBA16F): world normal, NRD encoding 2 (signed octahedron).
+
+Guides are written for **every** pixel (sky/weapon included, radiance zeroed there) so NRD sees a valid
+field everywhere.
+
+### 2. The denoise — NRD REBLUR_DIFFUSE
+`RB_RHI_ReStirDIPass` feeds the per-object velocity MRT (`GetRenderTargetImage3`) as NRD `IN_MV`
+(`mvScale = (−1, +1)`, 2D screen-space) and calls `RtaoDenoise(giMode=true)`, which denoises into the
+shared GI output (`GetRtgiOutputImage`). NRD owns **all** temporal accumulation; the debug overlay shows
+that denoised output (YCoCg-decoded) when the denoise ran, else the raw gather. Previous-frame camera is
+tracked (`rhiReStirDIPrev*`) for the NRD reprojection; `reset` on the first DI frame / after an interruption.
+
+> **Shared NRD instance.** DI borrows the one `REBLUR_GI` denoiser + its output image — the same slot RTGI
+> uses. Only one `giMode` denoise can run per frame (one instance = one resolution + one history). See
+> **auto-claim** below.
+
+### 3. Confidence pass — present, DEFAULT OFF
+A history-confidence pass (reuses `rtgi_confidence.frag` verbatim — it is signal-agnostic) can feed NRD's
+`IN_DIFF_CONFIDENCE` to reject history where lighting moved over intact geometry (moving-light antilag). On
+RTGI's dim, low-variance bounce it kills edge ghosting cleanly. On DI it **fries**: the 1-spp direct signal
+is noisy enough that the luminance-confidence metric misreads *stable* lit surfaces as a lighting change,
+rejects history, and starves NRD. So `r_rtReStirDIConfidence` **defaults to 0 (off)** — NRD's built-in
+antilag + the weapon mask carry the temporal. The knob stays for A/B.
+
+### 4. NRD spatial cleanup — the tuning knobs
+NRD cleans flat, stable, temporally-rich surfaces well, but is **edge-stopped on high-frequency geometry**
+(grates) and **history-starved on moving silhouettes** (a swinging limb), so the 1-spp variance survives
+exactly there. Four `giMode`-only overrides on `RtaoDenoiseArgs` (applied in `VulkanBackend::RtaoDenoise`
+only when `>0`, so RTGI/RTAO keep NRD defaults) push the denoiser's spatial behaviour:
+
+- `prepassBlurRadius` — NRD `diffusePrepassBlurRadius`: a pre-accumulation spatial reuse blur, built for
+  "badly defined / probabilistic" 1-spp input. The main lever; too large on sparse bright samples can blob.
+- `historyFixFrameNum` — frames of strong spatial reconstruction where history is thin (moving parts);
+  clamped below the fast-history window.
+- `maxBlurRadius` — base spatial denoise radius.
+- `edgeStopScale` — scales `lobeAngleFraction` + `planeDistanceSensitivity`; `>1` blurs **across** depth/
+  normal edges, the only lever that reaches sub-pixel grate noise (costs that detail).
+
+Spatial **reuse** (the ReSTIR in-frame neighbour combine) is the textbook alternative to this NRD tuning and
+remains the fallback if the knobs can't clean the noise without over-softening — see **TODO**.
+
+### 5. Auto-claim — DI owns the shared NRD slot
+Because the NRD instance is shared, `RB_RHI_RtgiPass` and `RB_RHI_RtaoPass` **stand down entirely while
+`r_rtReStirDI` is on** (their early-out gates include `|| r_rtReStirDI.GetBool()`). So enabling DI reliably
+gives it the slot — no manual `r_rtgi 0` / `r_rtao 0` juggling. **Interim:** GI/RTAO and DI are mutually
+exclusive until DI gets its own NRD instance (fine while DI is debug-only).
+
+## cvars + committed defaults
+
+| cvar | default | what |
+|------|--------:|------|
+| `r_rtReStirDI` | 0 | master enable (bring-up; not preset-wired). VK + RT + velocity MRT. |
+| `r_rtReStirDIDebug` | 0 | 1 = blit the DI buffer (denoised when it ran, else raw) over the scene, LINEAR. |
+| `r_rtReStirDICandidates` | 16 | candidate lights `M` per pixel before the WRS pick. Clamp **1..128**. |
+| `r_rtReStirDIHistory` | 16 | NRD ReBLUR history length (its own; no longer borrows `r_rtgiHistory`). 2..63. |
+| `r_rtReStirDIConfidence` | 0 | confidence-pass sensitivity; **0 = off** (it fries DI — see above). |
+| `r_rtReStirDIPrepassBlur` | 64 | `diffusePrepassBlurRadius` px; main noise lever. 0 = NRD default (30). |
+| `r_rtReStirDIHistoryFix` | 0 | `historyFixFrameNum`; moving-part lever. 0 = NRD default (3). |
+| `r_rtReStirDIBlurRadius` | 32 | `maxBlurRadius` px. 0 = NRD default (30). |
+| `r_rtReStirDIEdgeStop` | 6 | edge-stopping scale; grate lever, costs detail. 0/1 = no scaling. |
+
+Defaults are the "good compromise" from in-game tuning (2026-10-07). All `CVAR_ARCHIVE`, so a user's own
+values persist in config regardless of these source defaults. `hitDist` scale (1024) is in-source only.
+
+## ImGui
+
+Debugging tab → **"ReSTIR Direct Lighting"** group (`DrawDbgGroup_ReStirDI` in `Dhewm3SettingsMenu.cpp`,
+mirrors `DrawDbgGroup_RTGI`). Its **Noise Suppression** leads with **History Length** + **History
+Confidence** — identical name/range to RTGI's — then the DI-specific NRD spatial levers under a subheading.
+(RTGI's third, *Emissive Clamp*, has no DI equivalent: DI gathers direct lights, not an emissive bounce.)
 
 ## Substrate it rides (reuse, do not reinvent)
 
-| Need | Where it already is |
-|------|---------------------|
-| **Candidate pool** (scene-light SSBO) | `RtLight[]` buffer_reference, **max 256 lights** (`RT_REFL_MAX_LIGHTS`, RhiWorld.cpp:709), struct + `dudeLightInRange`/`dudeLightDir`/`dudeLightAtten` in [rt_light_eval.glsl:15](../neo/shaders/rt_light_eval.glsl#L15); filled CPU-side by `RB_RHI_GatherSceneLights` ([RhiWorld.cpp:5424](../neo/renderer/rhi/RhiWorld.cpp#L5424)), triple-buffered + frame-cached, returns a device address. Today consumed only by RT reflections / volumetrics / RTGI-bounce — **no visibility consumer yet; ReSTIR DI is the first.** Keep it the one shared light model so DI/RTGI/volumetrics never drift. |
-| Visibility ray vs TLAS | Inline any-occluder test (shadow mode 4) `interaction.frag:228-234`; standalone NaN-guarded pattern [rtshadow_ray.frag](../neo/shaders/rtshadow_ray.frag) (origin = pos + `wn·u_rtParms.z`, `tMax = min(distLight−1, u_rtParms.w)`). TLAS = `r_rtWorld` (`GetTlasAddress()`), animated geo = `r_rtAnimBlas`. Perforated-grate helper `rt_perforated.glsl`. |
-| G-buffer at shade time | `RB_RHI_NormalPrepass` ([RhiWorld.cpp:4395](../neo/renderer/rhi/RhiWorld.cpp#L4395)) → MRT from `gbuffer.frag`: loc0 **view-space** normal (A = AO/weapon mask), loc1 (roughness, metalness), loc2 velocity, loc3 albedo (only on the 4-MRT RTGI prepass). **No world-position buffer** — reconstruct from `currentDepthImage` + `u_depthParms` (recipe in `rtshadow_ray.frag:98-109`). |
-| Denoiser | NVIDIA NRD v4.18, H2 plumbing ([rtx-nrd-h2.md](rtx-nrd-h2.md)). ⚠ **SIGMA_SHADOW is instantiated but has no dispatch path** — only ReBLUR is actually dispatched (`RtaoDenoise`). Shadow/signal denoising for ReSTIR = net-new CPU plumbing on the existing `NrdRecordDispatches` machinery (see Stage 5). |
-| Motion vectors + temporal history | MVs in `gbuffer.frag` loc2 (jitter-cancelled). Shared helper `RB_RHI_TemporalReproj` ([RhiWorld.cpp:540](../neo/renderer/rhi/RhiWorld.cpp#L540), `prevUsable` handles first-frame/teleport); variance-clip history in `ssr_temporal.frag`; NRD confidence via `rtgi_confidence.frag`. |
-| RT pass template | `RB_RHI_RtaoPass` ([RhiWorld.cpp:6848](../neo/renderer/rhi/RhiWorld.cpp#L6848)) / `RB_RHI_RtgiPass` — the full recipe: `SupportsRayQuery()` + cvar gate, `GetTlasAddress()==0` bail, `LoadShader`, MRT target, TLAS addr bit-cast into `rtParms`, `BeginTargetPass → DrawFullscreen → EndPass`. |
+| Need | Where |
+|------|-------|
+| Candidate pool | `RtLight[]` buffer_reference, **max 256** (`RT_REFL_MAX_LIGHTS`); `dudeLightInRange`/`dudeLightDir`/`dudeLightAtten` in [rt_light_eval.glsl](../neo/shaders/rt_light_eval.glsl); filled by `RB_RHI_GatherSceneLights`, device address passed in `RenderParams.color`. The one shared light model (DI/RTGI/volumetrics). |
+| Visibility ray | Inline any-occluder test (interaction.frag fast-opaque), TLAS via `GetTlasAddress()` bit-cast into `u_rtParms.xy`, mask `0xFD` (skip perforated casters), origin `Pw + Nw·r_rtSunShadowOffset`. |
+| G-buffer | `RB_RHI_NormalPrepass` → `gbuffer.frag` MRT (view normal + weapon/AO mask in alpha, velocity in att3). No world-pos buffer — reconstruct from `currentDepthImage` + `u_depthParms`. |
+| Denoiser | NVIDIA NRD v4.18, `RtaoDenoise(giMode)` → REBLUR_DIFFUSE ([rtx-nrd-h2.md](rtx-nrd-h2.md)). DI shares the single `REBLUR_GI` instance with RTGI. |
+| Motion vectors | `gbuffer.frag` velocity att (jitter-cancelled), incl. skinned (`r_skinnedMotionVectors`) + weapon (`r_weaponMotionVectors`) motion. |
+| Pass template | `RB_RHI_RtgiPass` — the recipe DI mirrors (gather MRT → velocity → confidence → `RtaoDenoise(giMode)`; prev-frame camera statics; checkerboard path for Step C). |
 
-### Infrastructure constraints (house rules — the pass must fit these)
-- **Fullscreen *fragment* passes, not compute.** `.frag` + the shared fullscreen `.vert`, dispatched
-  via `BeginTargetPass → RB_RHI_DrawFullscreen → EndPass`. (Compute exists — `r_vkComputeTest` — but
-  every shipped RT pass is fragment; follow that unless a reservoir pass forces compute.)
-- **≤2 descriptor sets, ≤16 samplers/stage, no push_constant blocks** ([shaders/README.md](../neo/shaders/README.md)).
-  All per-draw scalars go through the 1056-B `rhi::RenderParams` UBO (set 0, size `static_assert`-locked);
-  samplers are set 1. **The TLAS and every SSBO are reached by device address bit-cast into the
-  uniform** (`u_rtParms.xy` for the TLAS) — there is no AS/SSBO descriptor binding to extend. So the
-  reservoir buffers ride as `buffer_reference` SSBOs whose device addresses are passed in `RenderParams`.
-- **Shaders compile offline** (`compile_spv.py` → `embed_shaders.py` → `shaders_embedded.cpp`, target
-  vulkan1.4). New `restir_*.frag` files are **not built until CMake re-configures** — the `file(GLOB)`
-  gotcha ([cmake-glob]); touch `neo/CMakeLists.txt` after adding them.
-- New RT image targets: add `CreateRenderTarget*` in `RHI.h` + `VulkanBackend.cpp`, handle/size/ready
-  statics near RhiWorld.cpp:764, and reset the handle in the context-loss path.
+### House rules the pass obeys
+Fullscreen fragment passes (shared `.vert`); ≤2 descriptor sets, no push-constants (all scalars via the
+`rhi::RenderParams` UBO; TLAS + SSBOs via device-address bit-cast); shaders compile offline — **new**
+`restir_*` shaders need a CMake re-configure ([cmake-glob gotcha]) but editing existing ones does not; new
+RT targets add `CreateRenderTarget*` + handle/size/ready statics + a context-loss reset.
 
-## Algorithm (mapped to our light model)
+## What's shipped vs TODO
 
-A per-pixel **reservoir** holds one chosen light sample and the statistics to shade it unbiasedly:
+**Shipped (`fc5df0d1`):** fresh 1-spp gather, one visibility ray, weapon mask, NRD REBLUR_DIFFUSE denoise,
+confidence pass (off), the four NRD spatial-cleanup knobs, auto-claim, the ImGui group, candidates to 128.
+Debug-only — nothing lights the scene with DI yet.
 
-```
-struct Reservoir {
-    uint  y;      // chosen light index into RtLight[]  (0xffffffff = empty)
-    float wSum;   // running sum of RIS weights
-    float M;      // candidates seen (float: temporal/spatial M clamps aren't integers)
-    float W;      // unbiased contribution weight for y
-};
-```
-
-**Target function** `p̂(x)` for a candidate light `li` at shading point `p` (normal `n`, view `v`):
-
-```
-p̂ = luminance( BRDF(n, v, ldir) * RtLight[li].color * dudeLightAtten(li, p) )
-```
-
-- `ldir`, distance from `dudeLightDir`; `dudeLightAtten` already encodes radial + frustum/spot
-  falloff. BRDF = our interaction BRDF. **Stage 1 uses diffuse-only `p̂`** (Lambert) for
-  stability; specular is added to the target in Stage 6.
-- Candidates skipped early with `dudeLightInRange` (one 16-B cull read).
-
-**RIS** per pixel: draw `M` candidates from a source pdf, update the reservoir with
-`w_i = p̂(cand) / pdf(cand)` via weighted reservoir sampling. Final unbiased weight
-`W = (1/p̂(y)) · (wSum / M)`. Shaded radiance = `p̂(y) · W · visibility(y)`.
-
-Source pdf: a **flat power·BRDF·1/d² alias/CDF table over the 256 lights**, ~**8 candidates**
-(the RTXDI `numLocalLightSamples` default — candidates are relevant enough that 8 beats Bitterli's
-original 32 once importance-sampled). Uniform sampling is kept only as a validator cross-check. See
-**Performance** below — at 256 lights this flat table *is* the light-tile; no ReGIR/BVH/tiling.
-
-## Staging — each shippable, validator-gated, own branch
-
-Everything gates on `SupportsRayQuery()` + the feature cvar; raster/GL3 paths untouched.
-
-**Stage 0 — Scaffold & decision. ✅ DONE 2026-10-06.** Landed: this doc; the gated bring-up cvar
-`r_rtReStirDI` (0 default, `CVAR_ARCHIVE|BOOL`, in `RenderSystem_init.cpp` by `r_rtAllLights`, help
-notes "nothing consumes it yet → 0 leaves play byte-identical", the same way `r_rtgi` first landed);
-and the UN-preset-removal naming cleanup — dead `presetNames[]` "Ultra Nightmare" + magic `< 7` guard
-→ `sizeof`-driven (`Session.cpp`), `dudePreset` help "0..6" → "0..5 = Nightmare" (`Common.cpp`), and
-the stale `PATHTRACED`/"The Dark Lord Cometh" comment → "Ultra Nightmare" (`Dhewm3SettingsMenu.cpp`).
-Builds clean. **Deferred to the front of Stage 1:** the reservoir SSBO (ping/pong) + output target and
-their exact bindings — allocated *with* the pass that consumes them (no dead GPU resources; verifiable),
-read off the `RB_RHI_RtaoPass` template. Interim landing decision stands: ReSTIR DI first ships as an
-**alternative to the `r_rtAllLights` brute loop inside `dude_rtx 1`** (measurable on real maps via
-`r_vkGpuTime 2`), then is promoted to own direct lighting at `dude_rtx 2`.
-
-**Stage 1a — RIS, no reuse, no visibility. ✅ DONE 2026-10-06.** Fullscreen fragment pass
-`restir_di.frag` (+ `.vert`): read depth→world-pos + view normal (shared RTAO prepass), draw
-`M = r_rtReStirDICandidates` (8) candidates **uniformly** from `RtLight[]`, WRS-pick one, resolve the
-unbiased **unshadowed** irradiance `rad(y)·W` (diffuse, albedo = 1, Doom light model via
-`dudeLightDir`/`dudeLightAtten`, frustum-gated) into a full-res RGBA16F target. `RB_RHI_ReStirDIPass`
-mirrors `RB_RHI_RtaoPass`; wired after the RTGI pass under the `restir.di` GPU scope; gated on
-`r_rtReStirDI` + VK + primary view + the depth/normal prepass (same dependency as `r_rtShadowBlur`:
-SSAO/RTAO/motion-vectors/FSR2 on). `r_rtReStirDIDebug` blits the result over the scene (LINEAR,
-so the HDR pipeline exposes it — not tonemapped in the overlay, which would double-tonemap): `1` = the
-raw 1-spp RIS (grainy + FSR2-ghosted by design), `2` = the brute **unshadowed ground truth** the RIS
-converges to (clean, low-variance — the real correctness/colour check, and the Stage 1b validator's
-reference). Builds clean; off by
-default so the scene is byte-identical. **No persistent reservoir SSBO** — with no reuse the reservoir
-is a per-pixel local; the ping-pong buffer lands with temporal reuse (Stage 3). Full-res for bring-up;
-internal-res scaling is a later perf lever. `r_rtAllLights` lights via **per-light interaction draws**,
-not the SSBO, so ReSTIR DI is a *different* model that will replace it.
-
-**Stage 1b — validator `r_rtReStirDITest` → folded into Stage 3.** Mode-2 (brute ground truth, GPU) is
-already the correctness anchor and USER-CONFIRMED correct 2026-10-06, so the target function is right. A
-*rigorous* RIS validator checks that the estimator's **mean** converges to the brute — which needs the
-temporal-accumulation buffer from Stage 3. So the formal `r_rtReStirDITest` (accumulate N frames, diff the
-converged mean against the brute within tolerance) lands with Stage 3 rather than before Stage 2.
-
-**Stage 2 — One visibility ray. ✅ DONE 2026-10-06.** The initial RIS target stays **unshadowed**
-(shadowing every candidate is the cost we're avoiding); `traceVisibility()` casts a single any-occluder
-ray only for the *chosen* sample `y` — the inline fast-opaque pattern from `interaction.frag:228-234`
-(`gl_RayFlagsOpaqueEXT | TerminateOnFirstHit`, mask `0xFD`, origin `Pw + Nw·r_rtSunShadowOffset`,
-`tMax = min(dl−1, u_rtParms.w)`, lit iff `CommittedIntersectionNoneEXT`). The resolve is
-`rad(y)·W·vis(y)` — still unbiased for the *shadowed* sum since `pHat` is used consistently for the
-resampling. `NOSHADOWS` lights skip the ray; no TLAS this frame → unshadowed (never trace a null AS).
-Adding `ray_query` means the pass now gates on `SupportsRayQuery()` (the shader only pipelines on RT
-hardware); the TLAS rides `rtParms.xy`. Perforated-grate shadows deferred (opaque fast path first, like
-`r_rtAllLights`). Visibility is *not* stored in a reservoir yet — that (and `StoreVisibility` reuse) comes
-with the reservoir SSBO in Stage 3. Builds clean. **USER TEST:** `r_rtReStirDI 1` + `r_rtReStirDIDebug 1`
-on an RT scene → shadows now appear (light no longer passes through walls), still grainy; mode 2 stays the
-unshadowed reference.
-
-**Stage 3a — reservoir plumbing (two-pass). ✅ DONE 2026-10-06.** `fragmentStoresAndAtomics` is NOT
-enabled on this VK device, so reservoirs can't be written to an SSBO from a fragment shader — they live
-in a **render target** (RGBA16F: `chosen light index | −1`, `W`, `M`, `vis`), read back via `texelFetch`
-(nearest — the index must not be interpolated). Split into two passes: `restir_di.frag` resamples →
-writes the reservoir; `restir_di_resolve.frag` reads it and shades `rad(y)·W·vis` (re-evaluating the
-light at this pixel, so a reused sample shades correctly — and the brute debug mode 2 moved here). A
-reservoir **ping-pong** (`rhiReStirDIResRT[2]`) is allocated and the index advances each frame, but 3a
-reads only the current reservoir (no reuse), so the resolved image **equals Stage 2** — a de-risking
-refactor that proves the encode/decode, `texelFetch` alignment, and two-pass dispatch before the
-reprojection math goes in. Builds clean.
-
-**Stage 3b — temporal combine. ✅ DONE 2026-10-06.** `restir_di.frag` now reprojects last frame's
-reservoir (`rhiReStirDIResRT[idx^1]`) through the FSR2 velocity buffer (`ssr_temporal.frag` recipe:
-`prevUV = uv − vel`, VK row-flip) and merges it with the current reservoir by **WRS** at the current
-pixel's target — the reused light re-evaluated at this surface via `lightPHat()`, combined weight
-`W = ΣwSum / (ΣM · pHat(y))`. History confidence capped at `r_rtReStirDIMCap` (default 20); off-screen
-reprojections rejected; `texelFetch` (nearest) so the light index never interpolates; one visibility ray
-for the *final* chosen sample. Behind `r_rtReStirDITemporal` (default on) with a `rhiReStirDIHistValid`
-guard (no reproject on the first frame / after resize). When still (zero velocity) `prevUV` = current uv,
-so accumulation is robust regardless of the row-flip; motion relies on the velocity reproject. **USER
-TEST:** standing still, the grain should collapse to a much cleaner image over a few frames; `…Temporal 0`
-reverts to noisy 3a; `…MCap` tunes history length.
-
-Deferred refinements (land with Stage 4/5): the **temporal visibility shortcut** (RTXDI >90% fewer rays —
-skip the ray when the sample carried over), **G-buffer disocclusion rejection** (normal/depth, to cut
-motion ghosting), the **boiling filter**, and the **convergence validator** (`r_rtReStirDITest`, now that
-accumulation exists). NRD (the "Both" path the user picked) is the next step, layered on this.
-
-**Stage 4 — Spatial reuse (OPTIONAL — only if NRD+FSR2 output is still noisy).** The literature is
-clear this is diminishing returns at 256 lights. If needed: **1 tap at ~32 px** radius (+8
-disocclusion-boost taps only on disocclusion, RTXDI defaults), normal/depth rejection, **defensive
-pairwise / contribution MIS — O(M), never the O(M²) balance heuristic** — and keep bias mode
-`Basic`/`Pairwise`, not `Raytraced`, to hold the one-ray/pixel budget. Can fuse with Stage 3
-(spatiotemporal) rather than a separate pass.
-
-**Stage 5 — Denoise + unify.** Feed the 1-spp result to NRD, reusing the H2 guides (packed
-normal-roughness, viewZ, engine→NRD motion). ⚠ **New plumbing required:** SIGMA_SHADOW exists in the
-NRD instance (`VulkanBackend.cpp:6645`) but has **no dispatch path** — only ReBLUR is wired
-(`RtaoDenoise`). Add a shadow/diffuse dispatch on the existing `NrdRecordDispatches` machinery (model
-it on `RB_RHI_RtaoPass`'s NRD block, RhiWorld.cpp:6982+). Decide SIGMA (shadow signal) vs ReBLUR/ReLAX
-(full diffuse) by measurement. Then **ReSTIR DI replaces the `r_rtAllLights` per-light draw model as
-the direct-lighting path at `dude_rtx 2`.**
-
-**Stage 6 — Specular target + polish.** Add GGX specular to `p̂` (MIS or a separate specular
-reservoir if the single reservoir gets noisy); handle VIEWWEAPON / muzzle lights; perf pass with
-`r_vkGpuTime 2` scopes; set the `dude_rtx 2` "Ultra Nightmare" preset defaults.
+**TODO:**
+- **Step C — checkerboard** (`r_rtgiCheckerboard`-style): full-res, trace half the pixels packed left, NRD
+  reconstructs the rest + a full-res guide pass. The user's "half pixel from NRD" GPU save; sharp edges at
+  ~half the rays (better for DI's sharp signal than a low-res `resScale`).
+- **Spatial reuse** — if the NRD knobs can't clean the grate/limb noise without over-softening, add an
+  in-frame ReSTIR spatial pass (combine geometry-matched neighbours). No history/reproject → no trails;
+  distinct from the retired *temporal* reservoir.
+- **DI's own NRD instance** — so GI + DI can run together and the auto-claim mutual-exclusion can retire.
+- **Consume in the lit scene** — replace the `r_rtAllLights` per-light draw model as the `dude_rtx 2`
+  direct-lighting path; then specular target + VIEWWEAPON/muzzle handling; set the "Ultra Nightmare" preset.
 
 ## Performance (literature-calibrated, 2026-10-06)
 
-Two independent scans of the ReSTIR literature + the NVIDIA RTXDI SDK source converge on one verdict:
-
 > **At ≤256 analytic lights on a 3080 Ti, build ReSTIR's cheap core — not full production ReSTIR.**
-> The famous 100× / "millions of lights" wins come from machinery (world-space ReGIR grids, 128×1024
-> light tiles, light BVHs) that exists to tame light *counts we don't have*. The SIGGRAPH 2023 course
-> says tiling doesn't pay off below ~128k lights; RTXDI's own tile budget is "≤256 unique lights per
-> 16×16 screen tile" — our **entire** light set is one tile. At 256 lights, "which light?" is trivial:
-> a flat power·BRDF·1/d² alias table *is* the light-tile. The only thing worth keeping from ReSTIR is
-> **resampling to one shadow ray/pixel with a good, temporally-stabilised distribution.**
+> The 100× "millions of lights" wins come from machinery (ReGIR grids, 128×1024 light tiles, light BVHs)
+> that tames light *counts we don't have*; tiling doesn't pay below ~128k lights, and our entire light set
+> is smaller than RTXDI's single 16×16 tile budget. The only thing worth keeping is **resampling to one
+> shadow ray/pixel with a good, temporally-stabilised distribution** — which is exactly what shipped.
 
-**The GPU-affordability answer (this is what makes it cheap enough).** Our one cost is the visibility
-ray. Two near-free, low-bias tricks cut even that below one ray/pixel amortised:
-- **Temporal visibility shortcut** — when the chosen sample carried over from last frame, its
-  visibility was already established, so skip the temporal bias-correction ray. RTXDI: **>90% fewer
-  rays.** Biggest single win; bake into Stage 3.
-- **Final-shading visibility reuse** — store the shadow result in the reservoir and reuse it while
-  fresh (`maxAge≈4`, `maxDistance≈16`) instead of re-tracing. Its shadow-edge brightening bias
-  partially cancels reuse's darkening bias. Stage 3/5.
-- DUDE-specific angle: the related "ReSTIR-sampled shadow maps" work resolves visibility from an
-  existing **shadow-map cache** — which DUDE already maintains. A candidate for a *cheaper* visibility
-  source on a lower RT rung later; note, don't build now.
+**Consciously skipped at 256 lights:** ReGIR / spatial-hash grids, light tiles + presampling, light BVH /
+Stochastic Lightcuts, MCMC decorrelation, Area ReSTIR. There is **no published per-pass Ampere ms** for
+ReSTIR DI, so the budget is set by our own `r_vkGpuTime 2` measurement; the expectation is that the core is
+cheaper than today's `r_rtAllLights` per-light-ray loop in light-dense scenes.
 
-**Starting knobs (RTXDI/course defaults — calibrate with `r_vkGpuTime 2`):**
-
-| Knob | Start | Note |
-|------|-------|------|
-| Initial candidates `M` | **8** | from the flat power·BRDF·1/d² alias table; +1 BRDF sample |
-| Confidence / `M` cap | **20** | range 5–30; the boiling + stagger lever |
-| Spatial taps | **0–1** | 1 tap @ ~32 px only if still noisy; +8 on disocclusion |
-| Bias correction | **Basic** | or Pairwise; **never Raytraced** (re-adds rays) |
-| Temporal visibility shortcut | **on** | >90% ray cut |
-| Final-shading visibility reuse | **on** | age 4 / dist 16 |
-| Boiling filter | **on**, ~0.2 | cheap firefly guard feeding NRD |
-| Reservoir row | **16 B** | `{ uint y+valid; float W, wSum; uint M+vis+age }`; analytic lights need no triangle-UV field (RTXDI's 24 B does) |
-
-**Consciously skip at 256 lights:** ReGIR / world-space or spatial-hash grids (add build cost *and*
-bias; "ray count only vital on very low-end RT hardware"); 128×1024 light tiles + per-light-type
-presampling (build overhead > benefit below ~128k lights); light BVH / Stochastic Lightcuts; MCMC
-decorrelation (MSE-neutral, glossy/PT-oriented); Area ReSTIR (AA/DoF/PT — owned by the raster
-G-buffer + FSR2); checkerboard + custom reservoir bit-packing beyond the 16 B row (bandwidth isn't the
-limiter here); Tokuyoshi statistical visibility reuse + stochastic large-kernel pairwise MIS (for
-massive emissive geometry / large reuse kernels).
-
-**Honest caveat on numbers:** there is **no published per-pass Ampere ms for ReSTIR DI**. Datapoints
-are a path-tracing prototype (San Miguel 10M tris, sun/sky, <8 ms, GPU unstated) and the
-candidate-generation pathology tiling fixes (25 ms — which doesn't apply to us). So the budget is set
-by **our own measurement**, not a paper. Expectation: the core (initial RIS + temporal + the two
-visibility cuts) should be cheaper than today's `r_rtAllLights` per-light-ray loop in light-dense
-scenes, which is the whole point.
-
-**Key sources:** SIGGRAPH 2023 course *A Gentle Introduction to ReSTIR*
-(https://intro-to-restir.cwyman.org/); Wyman & Panteleev, *Rearchitecting Spatiotemporal Resampling
-for Production*, HPG 2021 (https://doi.org/10.2312/hpg.20211281); NVIDIA RTXDI SDK + docs
-(https://github.com/NVIDIA-RTX/RTXDI — see `Doc/Confidence.md` for the visibility shortcut); GRIS,
-Lin et al. SIGGRAPH 2022 (https://doi.org/10.1145/3528223.3530158); Bitterli et al. 2020
-(original ReSTIR DI). Deferred/paywalled, confirm numbers before quoting: Tokuyoshi, *Efficient
-Visibility Reuse*, HPG/I3D 2024 (https://doi.org/10.1145/3641233.3664320).
+**Key sources:** SIGGRAPH 2023 course *A Gentle Introduction to ReSTIR* (https://intro-to-restir.cwyman.org/);
+Wyman & Panteleev, *Rearchitecting Spatiotemporal Resampling for Production*, HPG 2021; NVIDIA RTXDI SDK
+(https://github.com/NVIDIA-RTX/RTXDI); Bitterli et al. 2020 (original ReSTIR DI); NVIDIA NRD
+(https://github.com/NVIDIA-RTX/NRD).
 
 ## Non-negotiables (carried from every prior RT phase)
 - `SupportsRayQuery()` + cvar gate; default off; raster/GL3/non-RT paths bit-for-bit unchanged.
-- Validator-first: `r_rtReStirDI_test` diffs GPU vs a CPU reference before the effect renders.
 - Runs at internal (FSR2) resolution like the other RT effects; FSR2 is the perf backstop.
 - New shaders: re-run CMake configure so the glob picks them up ([cmake-glob gotcha]).
-
-## Resolved (incl. by the perf scan)
-- **Scope = "ReSTIR-lite":** initial RIS + temporal + the two visibility cuts; spatial reuse is
-  optional, the heavy many-light machinery is skipped (see Performance).
-- **Reservoir storage = `buffer_reference` SSBO** (ping/pong), device address passed in
-  `RenderParams` — matches how the TLAS + `RtLight[]` are already reached (no new descriptor set,
-  respects the ≤2-set / no-push-constant baseline). Row ≈ **16 B**
-  `{ uint y+validbit; float W; float wSum; uint M+visibility+age }` — analytic lights need no
-  triangle-UV field, so we stay under RTXDI's 24 B.
-- **Initial candidates = 8** from a flat power·BRDF·1/d² alias table (no ReGIR/BVH/tiling at 256 lights).
-- **DI runs at internal (FSR2) resolution** like the other RT effects.
-
-## Open questions (settle during Stage 0–1)
-- Exact candidate `M` (8 is the start) and whether a BRDF sample (`numBrdfSamples=1`) is worth it for spots.
-- One combined reservoir vs split diffuse/specular (defer; Stage 6).
-- If Stage 4 is ever needed: fuse spatiotemporal vs a separate spatial pass; fragment vs compute.
-- Whether a later lower RT rung should source visibility from the existing shadow-map cache
-  ("ReSTIR-sampled shadow maps") instead of a ray — deferred lever, measure first.
