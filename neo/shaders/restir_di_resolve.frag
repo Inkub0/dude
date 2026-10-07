@@ -31,6 +31,16 @@ layout(location = 0) out vec4 fragColor;	// RGBA16F: linear direct irradiance (r
 
 #define depth_consts DUDE_DEPTH_CONSTS()
 
+// the reservoir stores the light's STABLE id (flags bits 16..31), not its volatile buffer slot; re-find
+// the slot in this frame's re-sorted buffer (or NONE if the light was culled this frame).
+const uint LIGHT_NONE = 0xFFFFFFFFu;
+uint findLightBuf( RtLights lights, uint nLights, uint stableId ) {
+	for ( uint k = 0u; k < nLights; k++ ) {
+		if ( ( lights.l[ k ].flags >> 16 ) == stableId ) { return k; }
+	}
+	return LIGHT_NONE;
+}
+
 void main() {
 	vec2  frag = gl_FragCoord.xy;
 	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
@@ -69,11 +79,11 @@ void main() {
 		return;
 	}
 
-	// resolve the reservoir: exact texel (nearest - the stored light index must NOT be interpolated)
+	// resolve the reservoir: exact texel (nearest - the stored light id must NOT be interpolated)
 	vec4 res = texelFetch( u_reservoir, ivec2( frag ), 0 );
 	if ( !( res.x >= 0.0 ) ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// empty reservoir
-	uint li  = uint( res.x + 0.5 );
-	if ( li >= nLights ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }		// stale index (light count shrank)
+	uint li = findLightBuf( lights, nLights, uint( res.x + 0.5 ) );				// stable id -> current slot
+	if ( li == LIGHT_NONE ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// light gone this frame
 	float W   = res.y;
 	float vis = res.w;
 

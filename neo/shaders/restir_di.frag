@@ -86,6 +86,17 @@ float lightPHat( RtLights lights, uint li, vec3 Pw, vec3 Nw ) {
 	return dot( lights.l[ li ].color * ( atten * ndl ), vec3( 0.2126, 0.7152, 0.0722 ) );
 }
 
+// find the current buffer slot of the light with STABLE id `stableId` (flags bits 16..31). The light
+// buffer is re-sorted + culled each frame, so a reused reservoir's light has moved; re-find it (or
+// return NONE if it was culled this frame - a flickered-off light). nLights is small (per-view).
+const uint LIGHT_NONE = 0xFFFFFFFFu;
+uint findLightBuf( RtLights lights, uint nLights, uint stableId ) {
+	for ( uint k = 0u; k < nLights; k++ ) {
+		if ( ( lights.l[ k ].flags >> 16 ) == stableId ) { return k; }
+	}
+	return LIGHT_NONE;
+}
+
 void main() {
 	vec2  frag = gl_FragCoord.xy;
 	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
@@ -135,36 +146,39 @@ void main() {
 		}
 	}
 
-	// the current reservoir as a mergeable sample: its merge weight is pHat_c * W_c * M_c, and with
-	// W_c = (wSum/M)/pHat_c that is exactly wSum; M_c = M candidates seen.
-	float combWSum  = ( pHatChosen > 0.0 ) ? wSum : 0.0;
-	float combM     = float( M );
-	uint  combY     = liChosen;
-	float combPHat  = pHatChosen;
-	bool  combValid = ( pHatChosen > 0.0 );
+	// the current reservoir as a mergeable sample. It is identified by the light's STABLE id (flags bits
+	// 16..31), not its volatile buffer slot, so temporal reuse survives the per-frame re-sort. combBuf
+	// tracks the chosen light's CURRENT slot (for shading). Merge weight = pHat_c * W_c * M_c = wSum.
+	float combWSum   = ( pHatChosen > 0.0 ) ? wSum : 0.0;
+	float combM      = float( M );
+	uint  combStable = ( pHatChosen > 0.0 ) ? ( lights.l[ liChosen ].flags >> 16 ) : 0u;
+	uint  combBuf    = liChosen;
+	float combPHat   = pHatChosen;
+	bool  combValid  = ( pHatChosen > 0.0 );
 
-	// --- Stage 3b: temporal reuse. Merge the previous frame's reservoir, reprojected through the motion
-	// vectors, by WRS. A reused light is re-evaluated at THIS surface (lightPHat). The history confidence
-	// M_p is capped (u_localParam0.w) to bound correlation and set the history<->current blend.
+	// --- Stage 3b: temporal reuse. Reproject in gl_FragCoord (DEVICE) space - the reservoir was written
+	// at gl_FragCoord, so a var_TexCoord-built UV reads it vertically flipped. The reused sample is
+	// identified by its stable light id and re-found in THIS frame's buffer (its slot moved / may be gone).
 	if ( u_localParam1.z > 0.5 ) {
-		vec2 vel = texture( u_velocity, var_TexCoord ).rg;
-		vel.y = ( u_windowCoord.z < 0.0 ) ? -vel.y : vel.y;			// VK top-down row flip
-		vec2 prevUV = var_TexCoord - vel;
-		if ( all( greaterThanEqual( prevUV, vec2( 0.0 ) ) ) && all( lessThanEqual( prevUV, vec2( 1.0 ) ) ) ) {
-			ivec2 res = textureSize( u_prevReservoir, 0 );
-			ivec2 pp  = clamp( ivec2( prevUV / u_screenCorrection.xy ), ivec2( 0 ), res - 1 );
-			vec4 pr = texelFetch( u_prevReservoir, pp, 0 );			// nearest: the light index must not interpolate
+		vec2 vel = texelFetch( u_velocity, ivec2( frag ), 0 ).rg;	// this pixel's velocity (currUV - prevUV, +Y-up)
+		vel.y = ( u_windowCoord.z < 0.0 ) ? -vel.y : vel.y;			// -> device (top-down) UV
+		vec2 prevFrag = frag - vel / u_screenCorrection.xy;			// step back to last frame's pixel (UV -> pixels)
+		ivec2 res = textureSize( u_prevReservoir, 0 );
+		if ( prevFrag.x >= 0.0 && prevFrag.y >= 0.0
+		     && prevFrag.x < float( res.x ) && prevFrag.y < float( res.y ) ) {
+			vec4 pr = texelFetch( u_prevReservoir, ivec2( prevFrag ), 0 );	// nearest: id must not interpolate
 			if ( pr.x >= 0.0 ) {
-				uint y_p = uint( pr.x + 0.5 );
-				if ( y_p < nLights ) {
-					float M_p    = min( pr.z, u_localParam0.w );	// confidence cap
-					float pHat_p = lightPHat( lights, y_p, Pw, Nw );
+				uint idP = uint( pr.x + 0.5 );						// prev sample's STABLE light id
+				uint liP = findLightBuf( lights, nLights, idP );	// its slot THIS frame (or NONE if culled)
+				if ( liP != LIGHT_NONE ) {
+					float M_p    = min( pr.z, u_localParam0.w );		// confidence cap
+					float pHat_p = lightPHat( lights, liP, Pw, Nw );
 					float wp = pHat_p * pr.y * M_p;					// pHat_p * W_p * M_p
 					combM += M_p;
 					if ( wp > 0.0 ) {
 						combWSum += wp;
 						if ( combWSum > 0.0 && rnd( rng ) < ( wp / combWSum ) ) {
-							combY = y_p; combPHat = pHat_p; combValid = true;
+							combStable = idP; combBuf = liP; combPHat = pHat_p; combValid = true;
 						}
 					}
 				}
@@ -174,14 +188,13 @@ void main() {
 
 	if ( !( combValid && combPHat > 0.0 && combM > 0.0 ) ) { fragColor = RESERVOIR_EMPTY; return; }
 
-	// unbiased combined weight W = combWSum / (combM * pHat(combY)); trace ONE visibility ray for the
-	// FINAL chosen light (re-derive its direction - a reused sample came from a different pixel). pHat
-	// stays UNSHADOWED, so rad(combY)*W*vis is still unbiased for the shadowed sum.
+	// unbiased combined weight W = combWSum / (combM * pHat(combBuf)); one visibility ray for the FINAL
+	// chosen light (by its CURRENT slot). pHat stays UNSHADOWED, so rad*W*vis is unbiased for the shadowed sum.
 	float W = combWSum / ( combM * combPHat );
 	vec3 ldirF; float dlF;
-	dudeLightDir( lights, combY, Pw, ldirF, dlF );
-	float vis = ( ( lights.l[ combY ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
+	dudeLightDir( lights, combBuf, Pw, ldirF, dlF );
+	float vis = ( ( lights.l[ combBuf ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
 		? 1.0 : traceVisibility( Pw, Nw, ldirF, dlF );
 
-	fragColor = vec4( float( combY ), W, combM, vis );
+	fragColor = vec4( float( combStable ), W, combM, vis );		// reservoir stores the STABLE light id
 }
