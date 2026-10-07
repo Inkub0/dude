@@ -471,6 +471,10 @@ static bool  rhiReStirDIRanThisView = false;		// DI gather produced this view (d
 static bool  rhiReStirDIDenoisedThisView = false;	// the shared REBLUR_DIFFUSE denoise ran for DI this view -> GetRtgiOutputImage is the denoised DI
 static rhi::RenderTargetHandle rhiReStirDIConfRT = 0;	// DI history-confidence (R16F), reusing rtgi_confidence.frag
 static int   rhiReStirDIConfW = 0, rhiReStirDIConfH = 0;
+static rhi::RenderTargetHandle rhiReStirDIGuideRT = 0;	// checkerboard full-res NRD guides (viewZ/normal), reusing rtgi_guides.frag
+static int   rhiReStirDIGuideW = 0, rhiReStirDIGuideH = 0;
+static rhi::RenderTargetHandle rhiReStirDIVelRT = 0;	// velocity downsampled to the gather res for NRD IN_MV (resScale < 1)
+static int   rhiReStirDIVelW = 0, rhiReStirDIVelH = 0;
 // previous-frame camera for the DI NRD reprojection (un-jittered, as the GI path keeps rhiRtgiPrev*)
 static float rhiReStirDIPrevProj[16];
 static float rhiReStirDIPrevView[16];
@@ -3888,6 +3892,8 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
 	rhiReStirDIRT = 0;			rhiReStirDIW = rhiReStirDIH = 0;	// ReSTIR DI target stale after a lost context
 	rhiReStirDIConfRT = 0;		rhiReStirDIConfW = rhiReStirDIConfH = 0;
+	rhiReStirDIGuideRT = 0;		rhiReStirDIGuideW = rhiReStirDIGuideH = 0;
+	rhiReStirDIVelRT = 0;		rhiReStirDIVelW = rhiReStirDIVelH = 0;
 	rhiReStirDIPrevValid = false;								// no valid reprojection history across a lost context
 	rhiRtaoVelRT = 0;			rhiRtaoVelW = rhiRtaoVelH = 0;
 	rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurMaskRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;
@@ -7481,18 +7487,29 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-	// (re)create the NRD guide MRT on first use / resize / lost context. att0 = NRD-YCoCg radiance + normHitDist
+
+	// Resolution: r_rtReStirDIResScale runs the gather + NRD at a fraction of the screen (upscaled for display);
+	// r_rtReStirDICheckerboard then traces half of THOSE pixels (packed left, NRD reconstructs the rest). Both
+	// compose, exactly like RB_RHI_RtgiPass. Checkerboard needs the velocity MRT + an even internal width.
+	const bool  cbActive = r_rtReStirDICheckerboard.GetBool() && rhiNormalVelThisView && rhiNormalReadyThisView;
+	const float resScale = idMath::ClampFloat( 0.25f, 1.0f, r_rtReStirDIResScale.GetFloat() );
+	int rw = (int)( w * resScale + 0.5f );	if ( rw < 1 ) rw = 1;
+	int rh = (int)( h * resScale + 0.5f );	if ( rh < 1 ) rh = 1;
+	if ( cbActive ) { rw &= ~1; if ( rw < 2 ) rw = 2; }		// even internal width so the 2x1 checkerboard packs cleanly
+	const float cbParity = cbActive ? (float)( 1 + ( (int)tr.frameCount & 1 ) ) : 0.0f;
+
+	// (re)create the NRD guide MRT at the INTERNAL res (rw x rh). att0 = NRD-YCoCg radiance + normHitDist
 	// (RGBA16F), att1 = viewZ (R16F), att2 = packed normal (RGBA16F) - the exact layout RtaoDenoise(giMode) reads,
 	// so the shared REBLUR_DIFFUSE denoise drops in unchanged (CreateRenderTargetRtgiMrt is the RTGI gather's MRT).
-	if ( rhiReStirDIRT && ( r->GetRenderTargetImage( rhiReStirDIRT ) == 0 || rhiReStirDIW != w || rhiReStirDIH != h ) ) {
+	if ( rhiReStirDIRT && ( r->GetRenderTargetImage( rhiReStirDIRT ) == 0 || rhiReStirDIW != rw || rhiReStirDIH != rh ) ) {
 		r->DestroyRenderTarget( rhiReStirDIRT );	rhiReStirDIRT = 0;	rhiReStirDIW = rhiReStirDIH = 0;
 	}
 	if ( !rhiReStirDIRT ) {
-		rhiReStirDIRT = r->CreateRenderTargetRtgiMrt( w, h );
+		rhiReStirDIRT = r->CreateRenderTargetRtgiMrt( rw, rh );
 		if ( !rhiReStirDIRT ) {
 			return;
 		}
-		rhiReStirDIW = w;	rhiReStirDIH = h;
+		rhiReStirDIW = rw;	rhiReStirDIH = rh;
 	}
 
 	float invView[16];
@@ -7532,15 +7549,22 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[2] = (float)idMath::ClampInt( 1, 128, r_rtReStirDICandidates.GetInteger() );	// M candidates
 	parms.localParam0[3] = diHitScale;									// NRD hit-distance A = 0.5 * this
 	parms.localParam1[0] = (float)( tr.frameCount & 0xFFFF );			// RNG decorrelation per frame
-	parms.screenCorrection[0] = 1.0f / w;
-	parms.screenCorrection[1] = 1.0f / h;
-	parms.depthTexRecip[0] = 1.0f / uploadW;
-	parms.depthTexRecip[1] = 1.0f / uploadH;
+	parms.localParam1[2] = cbParity;									// checkerboard parity (0 = off)
+	// gather runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, -> the full-res depth tc carries the (w/rw)
+	// stretch (mirrors RB_RHI_RtgiPass). At scale 1 + no checkerboard: 1/w, 1/uploadW (unchanged).
+	parms.screenCorrection[0] = 1.0f / rw;
+	parms.screenCorrection[1] = 1.0f / rh;
+	parms.depthTexRecip[0] = ( (float)w / rw ) / uploadW;
+	parms.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
 	parms.windowCoord[2] = -1.0f;										// VK-only pass: top-down view-Y sign
 
 	// fresh 1-spp gather -> NRD guide MRT (weapon masked inside the shader). NRD does the temporal below.
+	// Checkerboard packs every traced sample into the LEFT HALF, so restrict the draw there - the right half is
+	// written nothing and reconstructed by NRD, so ~half the gather fragments (and their visibility rays) run.
+	// The shader keeps its own right-half early-out as the correctness guarantee.
 	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray
+	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
 	r->BeginTargetPass( rhiReStirDIRT, NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
@@ -7559,6 +7583,31 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
 	const bool nrdFree = !rhiRtgiDenoisedThisView && !rhiRtaoDenoisedThisView;	// the shared NRD slot is ours this frame
 	if ( diVelImg != 0 && nrdFree ) {
+		// velocity for NRD IN_MV + the confidence reproject. At reduced res, downsample the full-res velocity to
+		// rw x rh (smaa_copy = texture(src, uv)); at full res (rw==w) it is used directly.
+		rhi::ImageHandle nrdVel = diVelImg;
+		if ( rw != w || rh != h ) {
+			if ( rhiReStirDIVelRT && r->GetRenderTargetImage( rhiReStirDIVelRT ) == 0 ) { rhiReStirDIVelRT = 0; rhiReStirDIVelW = rhiReStirDIVelH = 0; }
+			if ( rhiReStirDIVelRT && ( rhiReStirDIVelW != rw || rhiReStirDIVelH != rh ) ) { r->DestroyRenderTarget( rhiReStirDIVelRT ); rhiReStirDIVelRT = 0; rhiReStirDIVelW = rhiReStirDIVelH = 0; }
+			if ( !rhiReStirDIVelRT ) {
+				rhiReStirDIVelRT = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh );
+				if ( rhiReStirDIVelRT ) { rhiReStirDIVelW = rw; rhiReStirDIVelH = rh; }
+			}
+			rhi::ShaderHandle copyProg = rhiReStirDIVelRT ? r->LoadShader( "smaa_copy" ) : 0;
+			if ( copyProg != 0 ) {
+				rhi::RenderParams cp;
+				memset( &cp, 0, sizeof( cp ) );
+				cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+				cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
+				r->GpuScopeBegin( "restir.di.vel" );		// r_vkGpuTime 2: velocity downsample to the gather res
+				r->BeginTargetPass( rhiReStirDIVelRT, NULL );
+				RB_RHI_DrawFullscreen( r, copyProg, cp, diVelImg );
+				r->EndPass();
+				r->GpuScopeEnd();
+				nrdVel = r->GetRenderTargetImage( rhiReStirDIVelRT );
+			}
+		}
+
 		// history-confidence pass — reuse rtgi_confidence.frag verbatim (it is signal-agnostic: YCoCg current +
 		// prev-denoised + velocity). Reproject last frame's DENOISED DI by the motion vectors, compare luminance
 		// to this frame's raw gather, and drop confidence where the lighting moved over intact geometry
@@ -7567,27 +7616,27 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		const rhi::ImageHandle diPrevDenoised = r->GetRtgiOutputImage();
 		if ( r_rtReStirDIConfidence.GetFloat() > 0.0f && rhiReStirDIPrevValid && diPrevDenoised != 0 ) {
 			if ( rhiReStirDIConfRT && r->GetRenderTargetImage( rhiReStirDIConfRT ) == 0 ) { rhiReStirDIConfRT = 0; rhiReStirDIConfW = rhiReStirDIConfH = 0; }
-			if ( rhiReStirDIConfRT && ( rhiReStirDIConfW != w || rhiReStirDIConfH != h ) ) { r->DestroyRenderTarget( rhiReStirDIConfRT ); rhiReStirDIConfRT = 0; rhiReStirDIConfW = rhiReStirDIConfH = 0; }
+			if ( rhiReStirDIConfRT && ( rhiReStirDIConfW != rw || rhiReStirDIConfH != rh ) ) { r->DestroyRenderTarget( rhiReStirDIConfRT ); rhiReStirDIConfRT = 0; rhiReStirDIConfW = rhiReStirDIConfH = 0; }
 			if ( !rhiReStirDIConfRT ) {
-				rhiReStirDIConfRT = r->CreateRenderTarget( rhi::IF_R16F, w, h );
-				if ( rhiReStirDIConfRT ) { rhiReStirDIConfW = w; rhiReStirDIConfH = h; }
+				rhiReStirDIConfRT = r->CreateRenderTarget( rhi::IF_R16F, rw, rh );
+				if ( rhiReStirDIConfRT ) { rhiReStirDIConfW = rw; rhiReStirDIConfH = rh; }
 			}
 			rhi::ShaderHandle confProg = rhiReStirDIConfRT ? r->LoadShader( "rtgi_confidence" ) : 0;
 			if ( confProg != 0 ) {
 				rhi::RenderParams confParms;
 				memset( &confParms, 0, sizeof( confParms ) );
 				confParms.mvpMatrix[0] = confParms.mvpMatrix[5] = confParms.mvpMatrix[10] = confParms.mvpMatrix[15] = 1.0f;
-				confParms.screenCorrection[0] = 1.0f / w;			// texel size for the 3x3 tap of the noisy current signal
-				confParms.screenCorrection[1] = 1.0f / h;
+				confParms.screenCorrection[0] = 1.0f / rw;			// texel size for the 3x3 tap of the noisy current signal
+				confParms.screenCorrection[1] = 1.0f / rh;
 				confParms.localParam0[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtReStirDIConfidence.GetFloat() );	// sensitivity (off by default; it fries DI's noisier signal)
 				confParms.localParam0[1] = 0.2f;					// confidence floor (anti-frying backstop; DI value if re-enabled)
 				confParms.localParam0[2] = 0.5f;					// noise deadzone (wider than GI's 0.35; DI value if re-enabled)
-				confParms.localParam0[3] = 0.0f;					// checkerboard parity (Step C); 0 = off (full-res)
+				confParms.localParam0[3] = cbParity;				// checkerboard parity: confidence computed only for this frame's traced cells
 				confParms.windowCoord[2] = -1.0f;					// VK top-down: flip the velocity row (ssr_temporal convention)
 				r->GpuScopeBegin( "restir.di.conf" );		// r_vkGpuTime 2: history-confidence pass
 				r->BeginTargetPass( rhiReStirDIConfRT, NULL );
 				RB_RHI_BindRTImage( r, 1, diPrevDenoised );			// unit 1 = last frame's denoised DI (YCoCg)
-				RB_RHI_BindRTImage( r, 2, diVelImg );				// unit 2 = motion vectors (full res)
+				RB_RHI_BindRTImage( r, 2, nrdVel );					// unit 2 = motion vectors at the gather res
 				RB_RHI_DrawFullscreen( r, confProg, confParms, r->GetRenderTargetImage( rhiReStirDIRT ) );	// unit 0 = this frame's raw gather
 				r->EndPass();
 				r->GpuScopeEnd();
@@ -7595,23 +7644,55 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			}
 		}
 
+		// Checkerboard NRD guides: the half-packed gather can't carry per-reconstructed-cell guides, so a ray-free
+		// pass (reuse rtgi_guides.frag; signal-agnostic - depth+normal -> att1 viewZ / att2 normal) fills a full
+		// internal-res (rw x rh) MRT that NRD points its guides at. Non-cb keeps the gather's own att1/att2 guides.
+		rhi::RenderTargetHandle diGuideRT = 0;
+		if ( cbActive ) {
+			if ( rhiReStirDIGuideRT && r->GetRenderTargetImage( rhiReStirDIGuideRT ) == 0 ) { rhiReStirDIGuideRT = 0; rhiReStirDIGuideW = rhiReStirDIGuideH = 0; }
+			if ( rhiReStirDIGuideRT && ( rhiReStirDIGuideW != rw || rhiReStirDIGuideH != rh ) ) { r->DestroyRenderTarget( rhiReStirDIGuideRT ); rhiReStirDIGuideRT = 0; rhiReStirDIGuideW = rhiReStirDIGuideH = 0; }
+			if ( !rhiReStirDIGuideRT ) {
+				rhiReStirDIGuideRT = r->CreateRenderTargetRtgiMrt( rw, rh );
+				if ( rhiReStirDIGuideRT ) { rhiReStirDIGuideW = rw; rhiReStirDIGuideH = rh; }
+			}
+			rhi::ShaderHandle guideProg = rhiReStirDIGuideRT ? r->LoadShader( "rtgi_guides" ) : 0;
+			if ( guideProg != 0 ) {
+				rhi::RenderParams gp;
+				memset( &gp, 0, sizeof( gp ) );
+				gp.mvpMatrix[0] = gp.mvpMatrix[5] = gp.mvpMatrix[10] = gp.mvpMatrix[15] = 1.0f;
+				memcpy( gp.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world (normal encode)
+				gp.screenCorrection[0] = 1.0f / rw;	gp.screenCorrection[1] = 1.0f / rh;
+				gp.depthTexRecip[0] = ( (float)w / rw ) / uploadW;	gp.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
+				r->GpuScopeBegin( "restir.di.guides" );	// r_vkGpuTime 2: internal-res NRD guide fill (checkerboard only)
+				r->BeginTargetPass( rhiReStirDIGuideRT, NULL );
+				RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+				RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+				backEnd.glState.tmu[1].current2DMap = -1;
+				RB_RHI_DrawFullscreen( r, guideProg, gp, 0 );
+				r->EndPass();
+				r->GpuScopeEnd();
+				diGuideRT = rhiReStirDIGuideRT;
+			}
+		}
+
 		rhi::RtaoDenoiseArgs da;
 		memset( &da, 0, sizeof( da ) );
 		da.giMode = true;									// REBLUR_DIFFUSE into GetRtgiOutputImage (shared GI slot)
-		da.rayRT = rhiReStirDIRT;							// att0 = YCoCg radiance+hitdist; guides in att1/att2
-		da.viewzRT  = rhiReStirDIRT;	da.viewzAtt  = 1;
-		da.normalRT = rhiReStirDIRT;	da.normalAtt = 2;
-		da.checkerboard = 0;								// Step C (r_rtReStirDICheckerboard)
-		da.velImage = diVelImg;
-		da.w = w;	da.h = h;
+		da.rayRT = rhiReStirDIRT;							// att0 = YCoCg radiance+hitdist (half-packed when cb); guides in att1/att2
+		const bool cbDenoise = cbActive && diGuideRT != 0;	// guides ready -> NRD reconstructs the half-packed radiance
+		da.viewzRT  = cbDenoise ? diGuideRT : rhiReStirDIRT;	da.viewzAtt  = 1;
+		da.normalRT = cbDenoise ? diGuideRT : rhiReStirDIRT;	da.normalAtt = 2;
+		da.checkerboard = cbDenoise ? 1 : 0;				// 1 = BLACK (constant); NRD flips per frameIndex to read the packed parity
+		da.velImage = nrdVel;								// velocity at the gather res (downsampled when rw < w)
+		da.w = rw;	da.h = rh;
 		memcpy( da.viewToClip,  viewDef->unjitteredProjectionMatrix, sizeof( da.viewToClip ) );
 		memcpy( da.worldToView, viewDef->worldSpace.modelViewMatrix, sizeof( da.worldToView ) );
 		memcpy( da.viewToClipPrev,  rhiReStirDIPrevValid ? rhiReStirDIPrevProj : da.viewToClip,  sizeof( da.viewToClipPrev ) );
 		memcpy( da.worldToViewPrev, rhiReStirDIPrevValid ? rhiReStirDIPrevView : da.worldToView, sizeof( da.worldToViewPrev ) );
-		da.jitterX = -viewDef->jitter[0];
-		da.jitterY =  viewDef->jitter[1];
-		da.jitterPrevX = rhiReStirDIPrevValid ? -rhiReStirDIPrevJitter[0] : da.jitterX;
-		da.jitterPrevY = rhiReStirDIPrevValid ?  rhiReStirDIPrevJitter[1] : da.jitterY;
+		da.jitterX = -viewDef->jitter[0] * resScale;
+		da.jitterY =  viewDef->jitter[1] * resScale;
+		da.jitterPrevX = rhiReStirDIPrevValid ? -rhiReStirDIPrevJitter[0] * resScale : da.jitterX;
+		da.jitterPrevY = rhiReStirDIPrevValid ?  rhiReStirDIPrevJitter[1] * resScale : da.jitterY;
 		da.mvScaleX = -1.0f;	da.mvScaleY = 1.0f;			// engine (currUV-prevUV)*0.5 +Y-up -> NRD 2D screen-space
 		da.hitDistA = 0.5f * diHitScale;	da.hitDistB = 0.1f;	// MUST match restir_di.frag's nhd normalization
 		da.maxAccumFrames = r_rtReStirDIHistory.GetInteger();	// REBLUR history cap (DI's own; mirrors RTGI's History Length)
@@ -8314,10 +8395,27 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	const int uploadW = globalImages->currentDepthImage->uploadWidth;
+	const int uploadH = globalImages->currentDepthImage->uploadHeight;
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	// Upscale the (possibly reduced-res) DI buffer to the full view. Bilateral only when actually upscaling +
+	// enabled + the normal G-buffer is available for the weights; else plain bilinear (the sampler).
+	const bool diReduced = ( rhiReStirDIW < w || rhiReStirDIH < h );
+	const bool diBilateral = diReduced && r_rtReStirDIBilateralUpscale.GetBool()
+		&& rhiNormalReadyThisView && rhiNormalResultRT != 0 && uploadW > 0;
+	parms.localParam0[0] = diBilateral ? 1.0f : 0.0f;
+	parms.localParam0[1] = 32.0f;									// depth sensitivity (bigger = sharper depth cut)
+	parms.localParam0[2] = 8.0f;									// normal power
+	parms.screenCorrection[0] = ( rhiReStirDIW > 0 ) ? 1.0f / rhiReStirDIW : 1.0f;	// 1/(rw,rh) = reduced-res DI texel (uv)
+	parms.screenCorrection[1] = ( rhiReStirDIH > 0 ) ? 1.0f / rhiReStirDIH : 1.0f;
+	if ( uploadW > 0 && uploadH > 0 ) {
+		parms.depthTexRecip[0] = (float)w / uploadW;				// view uv -> depth tc (POT depth image)
+		parms.depthTexRecip[1] = (float)h / uploadH;
+	}
+	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
 
 	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
 	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
@@ -8325,6 +8423,11 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
 	backEnd.currentScissor = viewDef->scissor;
 
+	// depth (unit 1) + normal (unit 2) are needed on EVERY path (the shader's sky + weapon-mask early-outs),
+	// not only for the bilateral weights. The DI pass gated on the depth + normal prepass, so both are valid here.
+	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );					// full-res normal (a = weapon mask)
+	backEnd.glState.tmu[2].current2DMap = -1;						// direct bind bypassed the tmu cache
 	RB_RHI_DrawFullscreen( r, prog, parms, srcImg );	// u_src = DI radiance (weapon reads as no-DI, like rtgi_debug)
 	RB_RHI_ForgetTexBinds();
 }

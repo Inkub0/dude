@@ -1013,6 +1013,9 @@ extern idCVar r_rtReStirDIHistoryFix;		// ReSTIR DI NRD historyFixFrameNum: spat
 extern idCVar r_rtReStirDIBlurRadius;		// ReSTIR DI NRD maxBlurRadius (px): base spatial denoise radius
 extern idCVar r_rtReStirDIEdgeStop;			// ReSTIR DI NRD edge-stopping scale (lobeAngle + planeDistance); >1 blurs across detail edges (grates), costs detail
 extern idCVar r_rtReStirDIHistory;			// ReSTIR DI NRD ReBLUR history length (maxAccumFrames); DI's own, mirrors RTGI's r_rtgiHistory (2..63)
+extern idCVar r_rtReStirDICheckerboard;		// ReSTIR DI full-res checkerboard: trace half the pixels (packed left), NRD reconstructs; ~half the rays
+extern idCVar r_rtReStirDIResScale;			// ReSTIR DI gather/denoise resolution fraction (0.25..1); upscaled for display. Composes with checkerboard
+extern idCVar r_rtReStirDIBilateralUpscale;	// ReSTIR DI: depth+normal-aware upscale of a reduced-res gather (vs plain bilinear); inert at 100%
 extern idCVar r_rtgi;						// H6 RT GI: one-bounce ray-traced global illumination (gathers radiance at the hemisphere hit)
 extern idCVar r_rtgiRadius;					// RT GI gather ray length (world units)
 extern idCVar r_rtgiResScale;				// RT GI gather/denoise resolution fraction (biggest cost lever)

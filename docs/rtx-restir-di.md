@@ -121,8 +121,11 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDI` | 0 | master enable (bring-up; not preset-wired). VK + RT + velocity MRT. |
 | `r_rtReStirDIDebug` | 0 | 1 = blit the DI buffer (denoised when it ran, else raw) over the scene, LINEAR. |
 | `r_rtReStirDICandidates` | 16 | candidate lights `M` per pixel before the WRS pick. Clamp **1..128**. |
-| `r_rtReStirDIHistory` | 16 | NRD ReBLUR history length (its own; no longer borrows `r_rtgiHistory`). 2..63. |
-| `r_rtReStirDIConfidence` | 0 | confidence-pass sensitivity; **0 = off** (it fries DI — see above). |
+| `r_rtReStirDIResScale` | 1 | gather/denoise resolution fraction (0.25..1), upscaled for display. Composes with checkerboard. |
+| `r_rtReStirDICheckerboard` | 0 | trace a half-pixel checkerboard (packed left), NRD reconstructs via a full-res guide pass + IN_MV. |
+| `r_rtReStirDIBilateralUpscale` | 1 | depth+normal-aware upscale of a reduced-res gather (vs bilinear); inert at full res. |
+| `r_rtReStirDIHistory` | 8 | NRD ReBLUR history length (its own; no longer borrows `r_rtgiHistory`). 2..63. |
+| `r_rtReStirDIConfidence` | 2.4 | confidence-pass sensitivity; `0` = off. (Off on the raw signal — it fried — but ~2.4 once the NRD spatial cleanup + checkerboard tame the input.) |
 | `r_rtReStirDIPrepassBlur` | 64 | `diffusePrepassBlurRadius` px; main noise lever. 0 = NRD default (30). |
 | `r_rtReStirDIHistoryFix` | 0 | `historyFixFrameNum`; moving-part lever. 0 = NRD default (3). |
 | `r_rtReStirDIBlurRadius` | 32 | `maxBlurRadius` px. 0 = NRD default (30). |
@@ -157,14 +160,17 @@ RT targets add `CreateRenderTarget*` + handle/size/ready statics + a context-los
 
 ## What's shipped vs TODO
 
-**Shipped (`fc5df0d1`):** fresh 1-spp gather, one visibility ray, weapon mask, NRD REBLUR_DIFFUSE denoise,
-confidence pass (off), the four NRD spatial-cleanup knobs, auto-claim, the ImGui group, candidates to 128.
-Debug-only — nothing lights the scene with DI yet.
+**Shipped (Step B `fc5df0d1`):** fresh 1-spp gather, one visibility ray, weapon mask, NRD REBLUR_DIFFUSE
+denoise, confidence pass, the four NRD spatial-cleanup knobs, auto-claim, the ImGui group, candidates to 128.
+
+**Shipped (Step C):** the full resolution set, mirroring RTGI. `r_rtReStirDICheckerboard` traces a half-pixel
+checkerboard (packed left, draw restricted to the left half) and reconstructs via a ray-free `rtgi_guides`
+full-res guide pass + NRD constant-BLACK; `r_rtReStirDIResScale` runs the whole chain (gather/guides/
+confidence/NRD) at a fraction, with the velocity downsampled to that res; the debug overlay upscales the
+reduced-res output (`r_rtReStirDIBilateralUpscale` = the `rtgi_apply` joint-bilateral, else bilinear) and
+re-masks sky/weapon. Still debug-only — nothing lights the scene with DI yet.
 
 **TODO:**
-- **Step C — checkerboard** (`r_rtgiCheckerboard`-style): full-res, trace half the pixels packed left, NRD
-  reconstructs the rest + a full-res guide pass. The user's "half pixel from NRD" GPU save; sharp edges at
-  ~half the rays (better for DI's sharp signal than a low-res `resScale`).
 - **Spatial reuse** — if the NRD knobs can't clean the grate/limb noise without over-softening, add an
   in-frame ReSTIR spatial pass (combine geometry-matched neighbours). No history/reproject → no trails;
   distinct from the retired *temporal* reservoir.

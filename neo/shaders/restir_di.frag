@@ -26,6 +26,7 @@
 //   u_rtParms.w           = max shadow-ray length
 //   u_localParam0         = ( 1/proj00, 1/proj11, candidate count M, hit-distance scale (NRD A = 0.5*this) )
 //   u_localParam1.x       = frame index (RNG decorrelation)
+//   u_localParam1.z       = checkerboard parity (0 = off, 1 = even frame, 2 = odd; packs half the pixels left)
 //   u_screenCorrection.xy = 1 / viewSize        (gl_FragCoord -> [0,1] uv; normal buffer)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 //   u_windowCoord.z       = view-Y sign (-1 Vulkan top-down)
@@ -99,20 +100,35 @@ float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl ) {
 
 void main() {
 	vec2  frag = gl_FragCoord.xy;
-	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
+
+	// Checkerboard (r_rtReStirDICheckerboard, u_localParam1.z): trace only HALF the pixels at FULL res, packed
+	// into the LEFT half of the buffer; NRD reconstructs the rest from the full-res guide pass + IN_MV. sfrag is
+	// the SCREEN pixel this buffer cell stands for: 0 = off (sfrag == frag), 1 = even frame, 2 = odd (the traced
+	// parity alternates each frame so every pixel refreshes every other frame). Mirrors rtgi_ray.frag.
+	vec2  sfrag  = frag;
+	int   cbMode = int( u_localParam1.z + 0.5 );
+	if ( cbMode > 0 ) {
+		float gx = floor( frag.x ), gy = floor( frag.y );
+		float parity = mod( gy + float( cbMode - 1 ), 2.0 );
+		sfrag = vec2( gx * 2.0 + parity + 0.5, gy + 0.5 );
+	}
+	float raw  = texture( u_currentDepth, sfrag * u_depthTexRecip.xy ).x;
 
 	// NRD guides first, for EVERY pixel (mirrors rtgi_ray.frag) so the shared REBLUR_DIFFUSE denoise sees a
-	// valid guide field even on sky / weapon / degenerate pixels (the radiance is zeroed there below).
+	// valid guide field even on sky / weapon / degenerate pixels (the radiance is zeroed there below). In
+	// checkerboard mode these gather-written guides are ignored (NRD reads the full-res guide pass instead).
 	float vz = 1.0 / ( min( raw, 0.9994 ) * depth_consts.x + depth_consts.y );	// negative view z
-	vec4  nt = texture( u_normalBuffer, frag * u_screenCorrection.xy );
+	vec4  nt = texture( u_normalBuffer, sfrag * u_screenCorrection.xy );
 	outViewZ  = vec4( vz, 0.0, 0.0, 1.0 );
 	outNormal = packNrdNormal( nt.xyz * 2.0 - 1.0 );
 
+	// checkerboard packs traced samples into the LEFT HALF; the right half traces nothing (NRD reconstructs it)
+	if ( cbMode > 0 && frag.x * u_screenCorrection.x >= 0.5 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
 	if ( raw >= 0.9994 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// sky / no geometry
 	if ( nt.a < 0.5 )    { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// view weapon: no world DI (masked, like RTGI)
 
 	// view-space position + normal (ssao/rtao reconstruction incl. the VK view-Y sign)
-	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
+	vec2  ndc = sfrag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
 	float d   = -vz;
 	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, vz );
 	vec3  Nraw = nt.xyz * 2.0 - 1.0;
@@ -131,8 +147,9 @@ void main() {
 	uint M = uint( max( u_localParam0.z, 1.0 ) );
 	if ( M > nLights ) { M = nLights; }
 
-	// RNG seed: pixel + frame, forced odd so the first advance never degenerates
-	uint rng = ( ( uint( frag.x ) * 1973u + uint( frag.y ) * 9277u )
+	// RNG seed: SCREEN pixel (sfrag, so a checkerboard cell is seeded by the pixel it represents) + frame,
+	// forced odd so the first advance never degenerates
+	uint rng = ( ( uint( sfrag.x ) * 1973u + uint( sfrag.y ) * 9277u )
 	             ^ ( uint( u_localParam1.x ) * 26699u ) ) | 1u;
 
 	// weighted reservoir sampling over M random candidates. Source pdf = uniform = 1/nLights, so a
