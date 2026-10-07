@@ -5571,6 +5571,11 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			vs *= vs;
 			L.flags |= ( (unsigned int)idMath::ClampInt( 0, 255, (int)( vs * 255.0f + 0.5f ) ) ) << 8;
 		}
+		// bits 16..31 = the light's STABLE lightDef index. The buffer is re-sorted + culled every frame
+		// (flickering lights drop out), so the slot is not a stable identity; ReSTIR DI (restir_di.frag)
+		// reprojects its reservoir by this id, re-finding the light's current slot. Masked so the
+		// volumetric-haze byte (bits 8..15, read as (flags>>8)&255) is untouched.
+		L.flags |= ( (unsigned int)( i & 0xFFFF ) ) << 16;
 		for ( int p = 0; p < 4; p++ ) {							// RR16c: global-space S/T/Q/falloff planes
 			L.proj[p][0] = ld->lightProject[p][0];
 			L.proj[p][1] = ld->lightProject[p][1];
