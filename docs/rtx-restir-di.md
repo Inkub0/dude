@@ -175,8 +175,97 @@ re-masks sky/weapon. Still debug-only — nothing lights the scene with DI yet.
   in-frame ReSTIR spatial pass (combine geometry-matched neighbours). No history/reproject → no trails;
   distinct from the retired *temporal* reservoir.
 - **DI's own NRD instance** — so GI + DI can run together and the auto-claim mutual-exclusion can retire.
-- **Consume in the lit scene** — replace the `r_rtAllLights` per-light draw model as the `dude_rtx 2`
-  direct-lighting path; then specular target + VIEWWEAPON/muzzle handling; set the "Ultra Nightmare" preset.
+- **Consume in the lit scene** — the big one: replace the `r_rtAllLights` per-light draw model as the
+  `dude_rtx 2` direct-lighting path. Detailed plan in **"Next: DI lights the scene"** below.
+
+## Next: DI lights the scene (detailed plan, authored 2026-10-07 — execute in a later session)
+
+Goal: DI stops being debug-only and becomes the actual **direct-lighting path** at `dude_rtx 2`, replacing
+the `r_rtAllLights` per-light shadow-ray loop. **Decision taken (user, 2026-10-07): "add gobo sampling
+first"** — the full replacement including projected/cookie/spot lights, not a point-lights-only subset. So
+there are two stages: **G** (make DI able to shade shaped/colored lights) then **D** (apply it + stop the
+forward path double-counting). Everything rides a NEW cvar **`r_rtReStirDIApply`** (default 0), so with it off
+the forward path is bit-identical and default play never regresses; on, it is a clean A/B against forward.
+
+Why gobos block the clean replace: replacing a light's forward draw means DI must reproduce everything
+`interaction.frag` does for it. The `RtLight` buffer today carries only a **solid color + the frustum planes**
+(`rt_light_eval.glsl:15`, filled `RhiWorld.cpp:5447`); the forward path samples each light's **projection
+cookie** (`din->lightImage`) and **falloff ramp** (`din->lightFalloffImage`) — `RhiWorld.cpp:1980-1981`,
+`interaction.frag:531-532`. Doom leans heavily on these (spot cookies, colored lamps, flashlight), so DI must
+sample them too or shaped lights render as flat box beams.
+
+### Stage G — gobo/projection + falloff sampling in the RT light buffer
+Makes DI **and** the RTGI bounce (they share `RtLight`/`dudeLightAtten`) reproduce shaped/colored lights.
+
+- **G0 — CONFIRM FIRST (feasibility, read-only):** the bindless-residency API for light images, and the exact
+  `textureProj` recipe. Grep targets: the set-2 bindless array population (`u_rtTextures[]`) in
+  `VulkanBackend.cpp` + `RhiWorld.cpp` — look for `SyncBindlessSlot` / bindless / `texIndex`, i.e. how a
+  material's diffuse texture gets a resident slot (the RR4 geo-table path). Determine whether an **arbitrary
+  idImage** (a light's projection/falloff image, not a material texture) can be registered the same way and
+  when (residency timing vs when `GatherSceneLights` fills the buffer and the DI/RTGI passes run). Read
+  `interaction.frag:531-532` + `interaction.vert` for the exact projection/falloff coord math to replicate
+  from the `projS/T/Q/F` planes + the hit world position. Confirm nothing still reads `RtLight.flags` bits
+  16-31 (the retired reservoir stable-id) so they can be reclaimed for texture indices (grep shaders for
+  `>> 16` / `& 0xFFFF` on light flags; packing at `RhiWorld.cpp:~5571-5588`). *(An agent was mid-investigation
+  of exactly this when the session paused — re-run G0 before coding.)*
+- **G1 — bindless-register light images:** in `RB_RHI_GatherSceneLights` (`RhiWorld.cpp:5447`), make each
+  light's projection + falloff `idImage` resident in the set-2 bindless array and capture the slot indices.
+  Handle **animated/scrolling cookies** (light shader stage registers can move per frame → residency per
+  frame or a stable slot with updated contents; measure churn).
+- **G2 — extend `RtLight`:** add `projTexIndex` + `falloffTexIndex`. Prefer reclaiming `flags` bits 16-31
+  (free post-reservoir, confirm in G0); else grow the struct (GPU `rt_light_eval.glsl:15` **and** the C++
+  mirror `RtReflLightGPU` `RhiWorld.cpp:5443`, keep std430 size + the 112 B comment in sync).
+- **G3 — textured attenuation** in `rt_light_eval.glsl`: a `dudeLightAttenTextured()` (or extend
+  `dudeLightAtten`) that projects the hit world pos through `projS/T/Q` (the same planes the forward path
+  uses), `textureProj`-samples the cookie (set-2 bindless) × the falloff ramp, gated on the `PROJECTED` flag
+  + a valid index; plain point lights keep the analytic radial/frustum path. Replicate `interaction.frag:531-532`.
+- **G4 — use it:** `restir_di.frag` (DI gather) and `rtgi_ray.frag` (RTGI bounce) call the textured atten.
+- **G5 — validate:** DI debug overlay — a spot/cookie light shows its real shape + color (not a box beam);
+  RTGI bounce picks up colored light. Still no scene consumption yet.
+
+### Stage D — deferred DI apply + forward per-light suppression
+Mirrors `RB_RHI_RtgiApply` (`RhiWorld.cpp:8242`, additive `ONE|ONE` into `rhiHdrRT` at `:8319`).
+
+- **D1 — widen the albedo G-buffer gate:** `wantAlbedo` (`RhiWorld.cpp:4432`, currently `r_rtgi && VK`) must
+  also fire under `r_rtReStirDIApply`, so the standalone 4-MRT prepass produces **albedo (loc3)** + **rough/
+  metal (loc1)** + bump normal (loc0) for a deferred shade. (Albedo = `GetRenderTargetImage4(rhiNormalResultRT)`.)
+- **D2 — full-BRDF gather:** `restir_di.frag` shades with the G-buffer material instead of `albedo=1` diffuse:
+  diffuse = `albedo·irradiance`, specular = GGX(`roughness`, F0 from `albedo`+`metalness`). v1 may denoise
+  diffuse+spec **combined** as diffuse (specular slightly over-blurred); the split (REBLUR_DIFFUSE +
+  REBLUR_SPECULAR, a 2nd NRD dispatch) is a later refinement.
+- **D3 — DI apply pass:** additive `ONE|ONE` into `rhiHdrRT` at the opaque/translucent split
+  (`RhiBackend.cpp:3573`, the `RtgiApply` site) **inside** the FSR2 opaque snapshot (`RB_RHI_FsrCaptureOpaque`
+  `:3579`) or FSR2 de-ghosts it into blocky squares; order it alongside/just before `RtgiApply`. Reuse the
+  bilateral upscale when reduced-res. Behind `r_rtReStirDIApply`.
+- **D4 — forward suppression:** in the per-light loop (`RhiWorld.cpp:9859`), skip the **opaque** interaction
+  draws (`:9942-9951`) for the lights DI covers. The DI-covered set MUST **exactly** match
+  `GatherSceneLights` membership (view-ID gating `:5522-5524`, lights dropped for black/off-phase stages
+  `:5538-5559`) — drive both from one per-view membership, or a light is double-bright (both) or dark
+  (neither). Keep translucent (`:9963`) + film (`:9965`) forward.
+- **D5 — always stays forward:** view weapon (`weaponDepthHack`/`modelDepthHack` spaces — excluded from the
+  G-buffer, depth-hack makes screen-space unreliable), translucent interactions (no G-buffer coverage),
+  film/decal interactions, fog/blend lights (separate multiplicative path `RB_RHI_FogAllLights`), and
+  sub-views/mirrors (no G-buffer — primary fullscreen view only).
+- **D6 — validate:** `r_rtReStirDIApply 0` vs `1` ≈ identical look but cheaper in light-dense scenes
+  (`r_vkGpuTime 2`: forward interaction + shadow-ray cost drops, DI stays ~flat). Watch for double-bright
+  (membership mismatch) or dark patches (over-suppression); verify cookie/colored lights match forward.
+
+### Open risks / deferred decisions
+- **Legacy (non-PBR) specular:** the spec *map* isn't in the G-buffer (only rough/metal) — approximate from
+  roughness, or add a spec channel to the prepass. PBR-classified surfaces (`r_pbr`) are fine.
+- **Shadowing model:** DI casts **one** shadow ray for the *resampled* light per pixel; a pixel lit by several
+  comparable lights gets the chosen one shadowed and the rest folded in via the unbiased ReSTIR weight — not
+  the per-light hard shadows `r_rtAllLights` gives. Confirm this reads acceptably (it is the whole point of the
+  cost win, but shadow character changes).
+- **Residency churn** from many animated cookies — measure; cap or stable-slot if needed.
+- **Diffuse/spec denoise split** (2nd NRD instance) + **DI's own NRD instance** (so GI+DI coexist, retiring
+  the auto-claim) pair naturally with this work.
+- **Preset wiring:** once it holds up, wire `r_rtReStirDI` + `r_rtReStirDIApply` into the `dude_rtx 2` "Ultra
+  Nightmare" tier (currently bring-up only, not preset-driven) + the menu RT selector label.
+
+### Non-negotiables (same as every RT phase)
+`r_rtReStirDIApply` default off, forward path bit-identical when off; `SupportsRayQuery()` + VK; primary
+fullscreen view only; raster/GL3/non-RT untouched; new shaders → CMake re-configure.
 
 ## Performance (literature-calibrated, 2026-10-06)
 
