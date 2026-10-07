@@ -465,9 +465,17 @@ static bool  rhiRtaoRanThisView = false;			// ray output produced this view (ove
 // ReSTIR DI (docs/rtx-restir-di.md): the gather radiance target (RGBA16F, full view res). RTGI
 // architecture - a single FRESH 1-spp gather each frame (no persistent reservoir, no hand-rolled temporal);
 // NRD does the temporal accumulation downstream (+ the DI confidence pass for moving-light antilag).
-static rhi::RenderTargetHandle rhiReStirDIRT = 0;
+static rhi::RenderTargetHandle rhiReStirDIRT = 0;	// the fresh 1-spp gather: CreateRenderTargetRtgiMrt (NRD guide MRT)
 static int   rhiReStirDIW = 0, rhiReStirDIH = 0;
 static bool  rhiReStirDIRanThisView = false;		// DI gather produced this view (debug-overlay gate)
+static bool  rhiReStirDIDenoisedThisView = false;	// the shared REBLUR_DIFFUSE denoise ran for DI this view -> GetRtgiOutputImage is the denoised DI
+static rhi::RenderTargetHandle rhiReStirDIConfRT = 0;	// DI history-confidence (R16F), reusing rtgi_confidence.frag
+static int   rhiReStirDIConfW = 0, rhiReStirDIConfH = 0;
+// previous-frame camera for the DI NRD reprojection (un-jittered, as the GI path keeps rhiRtgiPrev*)
+static float rhiReStirDIPrevProj[16];
+static float rhiReStirDIPrevView[16];
+static float rhiReStirDIPrevJitter[2] = { 0.0f, 0.0f };
+static bool  rhiReStirDIPrevValid = false;
 // H4b guide inputs + H4c denoise state: NRD's IN_VIEWZ (signed linear Z, R16F) and
 // IN_NORMAL_ROUGHNESS (world-space encoding-2 pack, RGBA16F) targets, plus the previous
 // frame's camera for the denoiser's reprojection (its own staging — the shared temporal
@@ -3879,6 +3887,8 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
 	rhiReStirDIRT = 0;			rhiReStirDIW = rhiReStirDIH = 0;	// ReSTIR DI target stale after a lost context
+	rhiReStirDIConfRT = 0;		rhiReStirDIConfW = rhiReStirDIConfH = 0;
+	rhiReStirDIPrevValid = false;								// no valid reprojection history across a lost context
 	rhiRtaoVelRT = 0;			rhiRtaoVelW = rhiRtaoVelH = 0;
 	rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurMaskRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;
 	rhiRtBlurW = rhiRtBlurH = 0;	rhiRtBlurThisView = false;
@@ -6863,7 +6873,9 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// H6b (docs/rtx-rtgi.md): when r_rtgi is on, GI REPLACES RTAO — the single NRD instance denoises GI this
 	// frame (never both denoisers in one frame), and screen-space GTAO (RB_RHI_SSAOPass, which runs next)
 	// fills the scalar AO the ambient/reflections still consume. RTAO stands down whenever GI is active.
-	if ( !r_rtao.GetBool() || !r_ssao.GetBool() || r_rtgi.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+	// ReSTIR DI auto-claim (docs/rtx-restir-di.md): likewise stand down while DI is enabled - DI borrows the
+	// same single NRD instance, so RTAO yields the slot to it (interim; DI is debug-only for now).
+	if ( !r_rtao.GetBool() || !r_ssao.GetBool() || r_rtgi.GetBool() || r_rtReStirDI.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
@@ -7134,7 +7146,10 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiRtgiRanThisView = false;
 	rhiRtgiDenoisedThisView = false;	// reset on every early-out (the apply gates on it)
 	rhiRtgiAppliedThisView = false;		// re-armed each view: the apply fires once from whichever site is first
-	if ( !r_rtgi.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+	// ReSTIR DI auto-claim (docs/rtx-restir-di.md): DI borrows the single shared REBLUR_GI NRD instance, so GI
+	// stands down entirely while DI is enabled - DI then reliably owns the slot without the user juggling cvars.
+	// Interim: GI and DI are mutually exclusive until DI gets its own NRD instance (DI is debug-only for now).
+	if ( !r_rtgi.GetBool() || r_rtReStirDI.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
 		return;
 	}
 	const bool fullscreenView = viewDef->isWindowView;	// the primary scene view (set by RenderScene)
@@ -7426,16 +7441,21 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 ===================
 RB_RHI_ReStirDIPass
 
-ReSTIR DI (docs/rtx-restir-di.md) Stage 1: one fullscreen pass that, per pixel, draws M candidate
-lights from the scene-light buffer, picks one by weighted reservoir sampling, and writes the unbiased
-UNSHADOWED direct irradiance to its own RGBA16F target. No reuse, no visibility ray yet (Stages 2-4),
-so nothing in the lit scene consumes it - the scene is byte-identical unless r_rtReStirDIDebug shows
-the buffer. Gated behind r_rtReStirDI; VK only; needs the sealed depth + bump-normal G-buffer (shared
-with RTAO). Mirrors RB_RHI_RtaoPass's setup; it needs the light buffer, not the TLAS.
+ReSTIR DI (docs/rtx-restir-di.md), RTGI architecture: a FRESH 1-spp direct-lighting gather each frame
+(no persistent reservoir, no hand-rolled temporal), then the shared NRD REBLUR_DIFFUSE denoise + a
+history-confidence pass own ALL the temporal accumulation (that is what kills the moving-object trails).
+Per pixel the gather masks the view weapon, picks ONE light from the in-range set by weighted reservoir
+sampling over M candidates, traces ONE visibility ray, and writes the unbiased direct irradiance into an
+NRD guide MRT (YCoCg radiance+hitdist / viewZ / normal). The denoise borrows the GI slot (NRD_ID_REBLUR_GI
+-> GetRtgiOutputImage), so it stands down unless RTGI and RTAO both stood down this frame (one instance,
+shared history) and the velocity MRT is present (r_fsr / r_motionVectors). Nothing in the lit scene
+consumes the result yet - the scene is byte-identical unless r_rtReStirDIDebug shows the buffer. Gated
+behind r_rtReStirDI; VK + RT hardware only; needs the sealed depth + bump-normal G-buffer (shared with RTAO).
 ===================
 */
 static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiReStirDIRanThisView = false;
+	rhiReStirDIDenoisedThisView = false;	// reset on every early-out (the debug overlay gates on it)
 	// ray_query in restir_di.frag (Stage 2 visibility) pipelines only on RT hardware, so gate on it here
 	// (the shader won't even load otherwise). The TLAS itself may still be absent this frame -> unshadowed.
 	if ( !r_rtReStirDI.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN || !r->SupportsRayQuery() ) {
@@ -7461,12 +7481,14 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-	// (re)create the RGBA16F gather target on first use / resize / lost context
+	// (re)create the NRD guide MRT on first use / resize / lost context. att0 = NRD-YCoCg radiance + normHitDist
+	// (RGBA16F), att1 = viewZ (R16F), att2 = packed normal (RGBA16F) - the exact layout RtaoDenoise(giMode) reads,
+	// so the shared REBLUR_DIFFUSE denoise drops in unchanged (CreateRenderTargetRtgiMrt is the RTGI gather's MRT).
 	if ( rhiReStirDIRT && ( r->GetRenderTargetImage( rhiReStirDIRT ) == 0 || rhiReStirDIW != w || rhiReStirDIH != h ) ) {
 		r->DestroyRenderTarget( rhiReStirDIRT );	rhiReStirDIRT = 0;	rhiReStirDIW = rhiReStirDIH = 0;
 	}
 	if ( !rhiReStirDIRT ) {
-		rhiReStirDIRT = r->CreateRenderTarget( rhi::IF_RGBA16F, w, h );
+		rhiReStirDIRT = r->CreateRenderTargetRtgiMrt( w, h );
 		if ( !rhiReStirDIRT ) {
 			return;
 		}
@@ -7500,9 +7522,15 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();				// ray-origin normal offset (shared with mode 4)
 		parms.rtParms[3] = 100000.0f;									// max shadow-ray length
 	}
+	// NRD ReblurHitDistanceParameters for direct lighting: the "hit distance" is the distance to the chosen
+	// light, so A sets the world-space blur scale (ReBLUR divides by A+|viewZ|*B). Shader and denoise MUST use
+	// the same A/B. A = 0.5*diHitScale, B = 0.1 (as rtgi_ray.frag). diHitScale ~ a room so typical light
+	// distances don't saturate the normalized value.
+	const float diHitScale = 1024.0f;
 	parms.localParam0[0] = invP00;
 	parms.localParam0[1] = invP11;
-	parms.localParam0[2] = (float)idMath::ClampInt( 1, 32, r_rtReStirDICandidates.GetInteger() );	// M candidates
+	parms.localParam0[2] = (float)idMath::ClampInt( 1, 128, r_rtReStirDICandidates.GetInteger() );	// M candidates
+	parms.localParam0[3] = diHitScale;									// NRD hit-distance A = 0.5 * this
 	parms.localParam1[0] = (float)( tr.frameCount & 0xFFFF );			// RNG decorrelation per frame
 	parms.screenCorrection[0] = 1.0f / w;
 	parms.screenCorrection[1] = 1.0f / h;
@@ -7511,15 +7539,107 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
 	parms.windowCoord[2] = -1.0f;										// VK-only pass: top-down view-Y sign
 
-	// fresh 1-spp gather -> radiance (weapon masked inside the shader). NRD (next) does the temporal.
+	// fresh 1-spp gather -> NRD guide MRT (weapon masked inside the shader). NRD does the temporal below.
+	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray
 	r->BeginTargetPass( rhiReStirDIRT, NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
 	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
 	r->EndPass();
-
+	r->GpuScopeEnd();
 	rhiReStirDIRanThisView = true;
+
+	// ---- NRD REBLUR_DIFFUSE denoise (mirrors RB_RHI_RtgiPass's H6b) ----
+	// DI borrows the SHARED GI denoiser (NRD_ID_REBLUR_GI) and its output image (GetRtgiOutputImage), so it can
+	// run only when neither RTGI nor RTAO drove the single NRD instance this frame (one instance = one resolution
+	// + shared REBLUR_GI history). For bring-up that means r_rtgi 0 and r_rtao 0; otherwise the raw 1-spp gather
+	// is kept (grainy) and the debug overlay shows that. Also needs the velocity MRT for NRD IN_MV.
+	rhi::ImageHandle diVelImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
+		? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
+	const bool nrdFree = !rhiRtgiDenoisedThisView && !rhiRtaoDenoisedThisView;	// the shared NRD slot is ours this frame
+	if ( diVelImg != 0 && nrdFree ) {
+		// history-confidence pass — reuse rtgi_confidence.frag verbatim (it is signal-agnostic: YCoCg current +
+		// prev-denoised + velocity). Reproject last frame's DENOISED DI by the motion vectors, compare luminance
+		// to this frame's raw gather, and drop confidence where the lighting moved over intact geometry
+		// (moving-light antilag) — the trail killer. Needs a prior DI-denoised frame (rhiReStirDIPrevValid).
+		rhi::ImageHandle diConfImg = 0;
+		const rhi::ImageHandle diPrevDenoised = r->GetRtgiOutputImage();
+		if ( r_rtReStirDIConfidence.GetFloat() > 0.0f && rhiReStirDIPrevValid && diPrevDenoised != 0 ) {
+			if ( rhiReStirDIConfRT && r->GetRenderTargetImage( rhiReStirDIConfRT ) == 0 ) { rhiReStirDIConfRT = 0; rhiReStirDIConfW = rhiReStirDIConfH = 0; }
+			if ( rhiReStirDIConfRT && ( rhiReStirDIConfW != w || rhiReStirDIConfH != h ) ) { r->DestroyRenderTarget( rhiReStirDIConfRT ); rhiReStirDIConfRT = 0; rhiReStirDIConfW = rhiReStirDIConfH = 0; }
+			if ( !rhiReStirDIConfRT ) {
+				rhiReStirDIConfRT = r->CreateRenderTarget( rhi::IF_R16F, w, h );
+				if ( rhiReStirDIConfRT ) { rhiReStirDIConfW = w; rhiReStirDIConfH = h; }
+			}
+			rhi::ShaderHandle confProg = rhiReStirDIConfRT ? r->LoadShader( "rtgi_confidence" ) : 0;
+			if ( confProg != 0 ) {
+				rhi::RenderParams confParms;
+				memset( &confParms, 0, sizeof( confParms ) );
+				confParms.mvpMatrix[0] = confParms.mvpMatrix[5] = confParms.mvpMatrix[10] = confParms.mvpMatrix[15] = 1.0f;
+				confParms.screenCorrection[0] = 1.0f / w;			// texel size for the 3x3 tap of the noisy current signal
+				confParms.screenCorrection[1] = 1.0f / h;
+				confParms.localParam0[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtReStirDIConfidence.GetFloat() );	// sensitivity (off by default; it fries DI's noisier signal)
+				confParms.localParam0[1] = 0.2f;					// confidence floor (anti-frying backstop; DI value if re-enabled)
+				confParms.localParam0[2] = 0.5f;					// noise deadzone (wider than GI's 0.35; DI value if re-enabled)
+				confParms.localParam0[3] = 0.0f;					// checkerboard parity (Step C); 0 = off (full-res)
+				confParms.windowCoord[2] = -1.0f;					// VK top-down: flip the velocity row (ssr_temporal convention)
+				r->GpuScopeBegin( "restir.di.conf" );		// r_vkGpuTime 2: history-confidence pass
+				r->BeginTargetPass( rhiReStirDIConfRT, NULL );
+				RB_RHI_BindRTImage( r, 1, diPrevDenoised );			// unit 1 = last frame's denoised DI (YCoCg)
+				RB_RHI_BindRTImage( r, 2, diVelImg );				// unit 2 = motion vectors (full res)
+				RB_RHI_DrawFullscreen( r, confProg, confParms, r->GetRenderTargetImage( rhiReStirDIRT ) );	// unit 0 = this frame's raw gather
+				r->EndPass();
+				r->GpuScopeEnd();
+				diConfImg = r->GetRenderTargetImage( rhiReStirDIConfRT );
+			}
+		}
+
+		rhi::RtaoDenoiseArgs da;
+		memset( &da, 0, sizeof( da ) );
+		da.giMode = true;									// REBLUR_DIFFUSE into GetRtgiOutputImage (shared GI slot)
+		da.rayRT = rhiReStirDIRT;							// att0 = YCoCg radiance+hitdist; guides in att1/att2
+		da.viewzRT  = rhiReStirDIRT;	da.viewzAtt  = 1;
+		da.normalRT = rhiReStirDIRT;	da.normalAtt = 2;
+		da.checkerboard = 0;								// Step C (r_rtReStirDICheckerboard)
+		da.velImage = diVelImg;
+		da.w = w;	da.h = h;
+		memcpy( da.viewToClip,  viewDef->unjitteredProjectionMatrix, sizeof( da.viewToClip ) );
+		memcpy( da.worldToView, viewDef->worldSpace.modelViewMatrix, sizeof( da.worldToView ) );
+		memcpy( da.viewToClipPrev,  rhiReStirDIPrevValid ? rhiReStirDIPrevProj : da.viewToClip,  sizeof( da.viewToClipPrev ) );
+		memcpy( da.worldToViewPrev, rhiReStirDIPrevValid ? rhiReStirDIPrevView : da.worldToView, sizeof( da.worldToViewPrev ) );
+		da.jitterX = -viewDef->jitter[0];
+		da.jitterY =  viewDef->jitter[1];
+		da.jitterPrevX = rhiReStirDIPrevValid ? -rhiReStirDIPrevJitter[0] : da.jitterX;
+		da.jitterPrevY = rhiReStirDIPrevValid ?  rhiReStirDIPrevJitter[1] : da.jitterY;
+		da.mvScaleX = -1.0f;	da.mvScaleY = 1.0f;			// engine (currUV-prevUV)*0.5 +Y-up -> NRD 2D screen-space
+		da.hitDistA = 0.5f * diHitScale;	da.hitDistB = 0.1f;	// MUST match restir_di.frag's nhd normalization
+		da.maxAccumFrames = r_rtReStirDIHistory.GetInteger();	// REBLUR history cap (DI's own; mirrors RTGI's History Length)
+		// DI spatial-cleanup overrides (fight the 1-spp noise NRD leaves on fine detail + moving limbs). 0 = NRD default.
+		da.prepassBlurRadius  = r_rtReStirDIPrepassBlur.GetFloat();	// diffusePrepassBlurRadius: the main lever for probabilistic 1-spp input
+		da.historyFixFrameNum = r_rtReStirDIHistoryFix.GetInteger();	// spatial reconstruction on thin/disoccluded (moving) history
+		da.maxBlurRadius      = r_rtReStirDIBlurRadius.GetFloat();	// base spatial denoise radius
+		da.edgeStopScale      = r_rtReStirDIEdgeStop.GetFloat();		// >1 blurs across detail edges (grate-noise lever; costs detail)
+		da.confImage = diConfImg;							// IN_DIFF_CONFIDENCE (0 = not provided this frame)
+		da.denoisingRange = 20000.0f;
+		da.frameIndex = (unsigned int)tr.frameCount;
+		da.reset = !rhiReStirDIPrevValid;					// clear history on the first DI frame / after an interruption
+		r->GpuScopeBegin( "restir.di.denoise" );			// r_vkGpuTime 2: NRD REBLUR_DIFFUSE dispatches
+		rhiReStirDIDenoisedThisView = r->RtaoDenoise( da );	// -> GetRtgiOutputImage holds the denoised DI
+		r->GpuScopeEnd();
+	}
+
+	// stage this frame's camera for next frame's DI reprojection (un-jittered, as passed). PrevValid tracks
+	// whether DI specifically denoised this frame: if it did not (slot taken, or no velocity), next frame resets
+	// so we never reproject against another signal's (GI's) output left in the shared slot.
+	memcpy( rhiReStirDIPrevProj, viewDef->unjitteredProjectionMatrix, sizeof( rhiReStirDIPrevProj ) );
+	memcpy( rhiReStirDIPrevView, viewDef->worldSpace.modelViewMatrix, sizeof( rhiReStirDIPrevView ) );
+	rhiReStirDIPrevJitter[0] = viewDef->jitter[0];
+	rhiReStirDIPrevJitter[1] = viewDef->jitter[1];
+	rhiReStirDIPrevValid = rhiReStirDIDenoisedThisView;
+
+	RB_RHI_ForgetTexBinds();
+	backEnd.currentScissor = viewDef->scissor;
 }
 
 /*
@@ -8180,7 +8300,11 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !r_rtReStirDIDebug.GetBool() || !rhiReStirDIRanThisView || rhiReStirDIRT == 0 ) {
 		return;
 	}
-	rhi::ImageHandle srcImg = r->GetRenderTargetImage( rhiReStirDIRT );
+	// r_rtReStirDIDebug 1 = the NRD-DENOISED DI when the denoise ran this frame (GetRtgiOutputImage, shared GI
+	// slot), else the raw 1-spp gather att0. Both are NRD-YCoCg-packed, so restir_di_debug decodes to linear.
+	rhi::ImageHandle srcImg = ( rhiReStirDIDenoisedThisView && r->GetRtgiOutputImage() != 0 )
+		? r->GetRtgiOutputImage()
+		: r->GetRenderTargetImage( rhiReStirDIRT );
 	if ( srcImg == 0 ) {
 		return;
 	}
@@ -9132,13 +9256,12 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 	// (rtgi.ray / rtgi.guides / rtgi.conf / rtgi.denoise) for r_vkGpuTime 2, so the ray trace and the NRD
 	// denoise are timed separately — scopes do not nest, so there is no outer "rtgi" scope here.
 	RB_RHI_RtgiPass( r, viewDef );
-	// H7 ReSTIR DI Stage 1 (docs/rtx-restir-di.md): reservoir resampling of the scene lights into its
-	// own buffer (behind r_rtReStirDI, default off). Reuses the same sealed depth + normal G-buffer;
-	// nothing consumes its output in the lit scene yet (r_rtReStirDIDebug shows it), so it is measurable
-	// via r_vkGpuTime without changing the image.
-	r->GpuScopeBegin( "restir.di" );
+	// H7 ReSTIR DI (docs/rtx-restir-di.md): fresh 1-spp direct-lighting gather of the scene lights, then the
+	// shared NRD REBLUR_DIFFUSE denoise (+ history-confidence), RTGI-style. Behind r_rtReStirDI (default off).
+	// Reuses the same sealed depth + normal G-buffer; nothing consumes its output in the lit scene yet
+	// (r_rtReStirDIDebug shows it). Opens its OWN sub-scopes (restir.di.gather / .conf / .denoise) for
+	// r_vkGpuTime 2 — scopes do not nest, so there is no outer "restir.di" scope here.
 	RB_RHI_ReStirDIPass( r, viewDef );
-	r->GpuScopeEnd();
 	// r_rtShadowBlur: validate the view + size the shared targets; the light loop builds each
 	// ray-served light's mask on demand (RB_RHI_RtShadowBlurLight)
 	RB_RHI_RtShadowBlurBegin( r, viewDef );

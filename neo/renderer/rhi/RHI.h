@@ -209,6 +209,13 @@ struct RtaoDenoiseArgs {
 	int		maxAccumFrames;				// GI only (giMode): ReBLUR max accumulated history frames (r_rtgiHistory); shorter = less ghosting, more noise. 0 = NRD default (RTAO path)
 	ImageHandle	confImage;				// GI only (giMode): IN_DIFF_CONFIDENCE, per-pixel history confidence 0..1 (r_rtgiConfidence). 0 = not provided (NRD antilag only)
 	int		checkerboard;				// GI only (giMode): 0 = off; 1 = ReBLUR checkerboard BLACK (even frame); 2 = WHITE (odd frame). rayRT holds the packed half-res radiance, guides are full-res
+	// giMode ReBLUR spatial-cleanup overrides (0 = keep NRD default). ReSTIR DI sets these to fight the 1-spp
+	// noise the denoiser leaves on fine detail (edge-stopped) + moving silhouettes (thin history); RTGI/RTAO
+	// leave them 0. See docs/rtx-restir-di.md.
+	float	prepassBlurRadius;			// diffusePrepassBlurRadius (px): pre-accumulation spatial reuse pre-blur - the main lever for probabilistic/1-spp input
+	int		historyFixFrameNum;			// historyFixFrameNum: spatial-reconstruction frames after a (dis)occlusion (clamped < fast-history window)
+	float	maxBlurRadius;				// maxBlurRadius (px): base spatial denoise radius
+	float	edgeStopScale;				// scales lobeAngleFraction + planeDistanceSensitivity (>1 blurs across depth/normal edges more; grate-noise lever, costs detail)
 };
 
 class RHI {

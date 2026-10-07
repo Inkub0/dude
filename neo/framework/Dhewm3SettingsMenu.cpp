@@ -4757,6 +4757,79 @@ static void DrawDbgGroup_RTGI()
 	}
 }
 
+static void DrawDbgGroup_ReStirDI()
+{
+	// Live tuning + debug view for ReSTIR direct lighting (docs/rtx-restir-di.md, H7 'Ultra Nightmare'). A
+	// fresh 1-spp direct-lighting gather of the scene lights, denoised by the shared NRD REBLUR_DIFFUSE slot.
+	// Bring-up feature, enabled directly here (not preset-wired yet). These knobs tune the denoiser's spatial
+	// cleanup of the residual 1-spp noise NRD leaves on fine detail (edge-stopped) + moving parts (thin history).
+	const bool rtCapable = R_SupportsRayTracing();
+	if ( BeginSettingsGroup( "ReSTIR Direct Lighting" ) ) {
+
+	if ( !rtCapable ) {
+		ImGui::TextDisabled( "Requires the Vulkan backend + ray-query (RT) hardware." );
+	}
+	ImGui::BeginDisabled( !rtCapable );
+
+	CvarCheckbox( "Enable ReSTIR DI", r_rtReStirDI, "Reservoir direct lighting: ONE shaded sample + ONE shadow ray "
+		"per pixel for the scene's lights, NRD-denoised, instead of the ray-per-light loop - the per-pixel cost "
+		"stops scaling with light count. Bring-up feature (not wired into the quality presets yet). Needs the "
+		"velocity prepass (FSR2 or Motion Vectors) for the denoiser, and it borrows the shared GI NRD slot, so turn "
+		"RTGI and RTAO OFF for it to denoise. Nothing consumes the result in the lit scene yet - use the debug view "
+		"below. (r_rtReStirDI)" );
+
+	ImGui::BeginDisabled( !r_rtReStirDI.GetBool() );
+
+	// --- Debug view (the DI buffer blitted over the scene) ---
+	ImGui::SeparatorText( "Debug View" );
+	CvarCheckbox( "Show DI Buffer", r_rtReStirDIDebug, "Blit the DI irradiance over the finished frame (the "
+		"NRD-denoised result when the denoise ran this frame, else the raw 1-spp gather). The view weapon reads as "
+		"no-DI (masked), like the RTGI debug. YCoCg-decoded and LINEAR - the HDR pipeline exposes it, so read "
+		"structure and noise, not absolute brightness. (r_rtReStirDIDebug)" );
+
+	// --- Sampling ---
+	ImGui::SeparatorText( "Sampling" );
+	CvarSliderI( "Candidates", r_rtReStirDICandidates, 1, 128, "Light candidates M drawn (uniform, in-range-culled) "
+		"per pixel before the weighted-reservoir pick. More = a better pick / fewer missed lights at more per-pixel "
+		"cost; the NRD denoise (not raw M) is what cleans the remaining per-frame grain. (r_rtReStirDICandidates)" );
+
+	// --- Noise suppression ---
+	// The first two mirror RT Global Illumination -> Noise Suppression exactly (same names + ranges): History
+	// Length and History Confidence. RTGI's third knob (Emissive Clamp) has no DI equivalent - DI gathers direct
+	// lights, not an emissive bounce. Below them are the NRD spatial levers RTGI does not need (its low-frequency
+	// bounce leans on resScale/checkerboard instead); DI's sharp 1-spp signal needs them for fine detail + motion.
+	ImGui::SeparatorText( "Noise Suppression" );
+	CvarSliderI( "History Length", r_rtReStirDIHistory, 2, 63, "Max frames NRD's ReBLUR accumulates for the DI "
+		"radiance. The 1-spp gather needs temporal accumulation to look smooth: too short and single pixels 'fry' "
+		"(noise/flicker), too long and a switched-off/occluded light lingers. ~6-12 is the balance; higher = smoother "
+		"but laggier. NRD's own default is 30. (r_rtReStirDIHistory)" );
+	CvarSliderF( "History Confidence", r_rtReStirDIConfidence, 0.0f, 16.0f, "%.1f", "Per-pixel history rejection where "
+		"this frame's DI disagrees with last frame's reprojected result (moving-light antilag). Default 0 (OFF): on DI's "
+		"noisy 1-spp signal the luminance metric misreads stable lit surfaces and 'fries' them; NRD's own antilag + the "
+		"weapon mask carry the temporal instead. >0 re-enables it (sensitivity) to compare trail behaviour. "
+		"(r_rtReStirDIConfidence)" );
+	ImGui::Spacing();
+	ImGui::TextDisabled( "NRD spatial cleanup (DI-specific)" );
+	CvarSliderF( "Prepass Blur", r_rtReStirDIPrepassBlur, 0.0f, 200.0f, "%.0f px", "NRD's pre-accumulation spatial "
+		"reuse blur, built for probabilistic 1-spp input. THE main lever for the residual noise on fine detail + "
+		"moving parts. NRD default 30; higher = cleaner but softer DI; 0 = keep NRD default. (r_rtReStirDIPrepassBlur)" );
+	CvarSliderI( "History Fix", r_rtReStirDIHistoryFix, 0, 8, "Frames of strong SPATIAL reconstruction where temporal "
+		"history is thin - a fresh disocclusion or a moving limb - i.e. the lever for noise on MOVING parts. NRD "
+		"default 3, clamped below the fast-history window (~5). 0 = keep NRD default. (r_rtReStirDIHistoryFix)" );
+	CvarSliderF( "Blur Radius", r_rtReStirDIBlurRadius, 0.0f, 200.0f, "%.0f px", "NRD's base (max) spatial denoise "
+		"radius, reduced over time as history converges. NRD default 30; higher = cleaner but softer; 0 = keep NRD "
+		"default. (r_rtReStirDIBlurRadius)" );
+	CvarSliderF( "Edge-Stop Relax", r_rtReStirDIEdgeStop, 0.0f, 16.0f, "%.1f", "Scales NRD's normal/plane edge-stopping. "
+		">1 lets the spatial passes blur ACROSS depth/normal edges - the only lever that reaches sub-pixel GRATE noise "
+		"the others can't, at the cost of softening that fine detail. 1 = NRD default; 0 = keep NRD default. "
+		"(r_rtReStirDIEdgeStop)" );
+
+	ImGui::EndDisabled();	// r_rtReStirDI
+	ImGui::EndDisabled();	// rtCapable
+	EndSettingsGroup();
+	}
+}
+
 static void DrawDbgGroup_ContactShadows()
 {
 	// Screen-space contact shadows (docs/contact-shadows.md): a short per-light depth march that
@@ -5523,6 +5596,7 @@ static void DrawShadowDebugMenu()
 	DrawDbgGroup_RTShadows();
 	DrawDbgGroup_SSAO();
 	DrawDbgGroup_RTGI();
+	DrawDbgGroup_ReStirDI();
 	DrawDbgGroup_OcclusionMaps();
 	DrawDbgGroup_Tessellation();
 	DrawDbgGroup_PBR();
