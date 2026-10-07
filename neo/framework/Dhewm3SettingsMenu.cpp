@@ -4793,6 +4793,25 @@ static void DrawDbgGroup_ReStirDI()
 		"per pixel before the weighted-reservoir pick. More = a better pick / fewer missed lights at more per-pixel "
 		"cost; the NRD denoise (not raw M) is what cleans the remaining per-frame grain. (r_rtReStirDICandidates)" );
 
+	// --- Resolution (mirrors RT Global Illumination -> Resolution) ---
+	ImGui::SeparatorText( "Resolution" );
+	{
+		const float diResStops[]  = { 0.25f, 0.5f, 0.667f, 0.75f, 1.0f };
+		const char *diResLabels[] = { "Quarter (1/4)", "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Full" };
+		CvarStopsSliderF( "Gather Resolution", r_rtReStirDIResScale, diResStops, diResLabels, IM_ARRAYSIZE( diResStops ),
+			"Fraction of the screen the DI gather (and its NRD denoise) runs at, upscaled back to full res. Direct "
+			"lighting is higher-frequency than GI, so dropping below full softens shadow/contact detail more than it "
+			"does for RTGI - but it is the single biggest cost lever (~1/scale^2). Default Full. (r_rtReStirDIResScale)" );
+	}
+	CvarCheckbox( "Checkerboard Gather", r_rtReStirDICheckerboard, "Trace a horizontal checkerboard - half the pixels "
+		"(packed into the buffer's left half, the traced parity alternating each frame) - and let NRD reconstruct the "
+		"rest from a full-res guide pass + motion vectors, instead of shading every pixel. ~half the gather + "
+		"visibility rays, keeping edges sharp (unlike a reduced-res scale). Composes with Gather Resolution (traces "
+		"half of those pixels); sharpest at Full. Needs the velocity prepass. (r_rtReStirDICheckerboard)" );
+	CvarCheckbox( "Bilateral Upscale", r_rtReStirDIBilateralUpscale, "Upscale a reduced-res gather with a depth+normal-"
+		"aware filter instead of plain bilinear, so DI stops bleeding across silhouettes and creases - sharper at edges "
+		"for a few extra taps. Inert at Full resolution. Off = the old bilinear look. (r_rtReStirDIBilateralUpscale)" );
+
 	// --- Noise suppression ---
 	// The first two mirror RT Global Illumination -> Noise Suppression exactly (same names + ranges): History
 	// Length and History Confidence. RTGI's third knob (Emissive Clamp) has no DI equivalent - DI gathers direct
