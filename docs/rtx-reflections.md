@@ -604,7 +604,7 @@ RR16d parked as nice-to-have ([todo.md](todo.md)); RR16e deferred.**
   apex (`Q·p ≤ 0`) are rejected.
   **Perf lesson:** the first cut copied the whole 96 B row per light per reflective pixel and cost **+1.5 ms** —
   the loop is memory-bound, not ALU-bound. Fix: the row leads with the light volume's bounding sphere
-  (`frustumTris->bounds`; 112 B total), the shader rejects on those 16 B, reads the other fields individually
+  (`frustumTris->bounds`; 128 B total since Stage G of docs/rtx-restir-di.md added the cookie/falloff bindless slots), the shader rejects on those 16 B, reads the other fields individually
   and skips the plane reads for back-facing hits; the CPU gather culls by the same sphere. Verified: frustum
   on is now *cheaper* than the RR16b sphere (`r_rtReflLightFrustum 0`), and looks right.
 - **RR16d — shadow rays (r_rtReflShadows). PARKED 2026-09-20 — nice to have** (reflections judged excellent

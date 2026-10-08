@@ -5440,7 +5440,36 @@ static bool RB_RHI_EnsureSsrColorMip( rhi::RHI *r, int w, int h ) {
 // point light's BOX), which the origin+radius sphere over-reaches.
 // cull[] = bounding sphere of the light volume, first in the row so the shader rejects a light that cannot
 // reach the hit after reading 16 B (the full row per light per pixel cost ~1.5 ms).
-struct RtReflLightGPU { float cull[4]; float pos[3]; float radius; float color[3]; unsigned int flags; float proj[4][4]; };	// std430, 112 B
+// std430, 128 B. projTex / falloffTex = bindless slot+1 (rhiHandle) of the light stage's projection cookie and
+// the light's falloff ramp - the SAME two images the forward interaction draw samples (tr_render.cpp
+// inter.lightImage / lightFalloffImage), so a textured consumer (rt_light_tex.glsl) reproduces the shaped /
+// coloured light exactly. 0 = none (consumer falls back to the analytic frustum attenuation).
+struct RtReflLightGPU { float cull[4]; float pos[3]; float radius; float color[3]; unsigned int flags; float proj[4][4]; unsigned int projTex; unsigned int falloffTex; unsigned int pad0; unsigned int pad1; };
+
+// Bake a light stage's evaluated texture matrix into the light's world-space S/T projection planes - the
+// RB_BakeTextureMatrixIntoTexgen (draw_common.cpp) math on a local matrix instead of the backEnd global, so
+// the scene-light buffer carries a scrolling / rotating cookie (texgen) exactly as the forward draw does.
+static void RB_RHI_BakeLightTextureMatrix( float proj[4][4], const float textureMatrix[16] ) {
+	float genMatrix[16], fin[16];
+	genMatrix[0] = proj[0][0];	genMatrix[4] = proj[0][1];	genMatrix[8]  = proj[0][2];	genMatrix[12] = proj[0][3];
+	genMatrix[1] = proj[1][0];	genMatrix[5] = proj[1][1];	genMatrix[9]  = proj[1][2];	genMatrix[13] = proj[1][3];
+	genMatrix[2] = 0.0f;		genMatrix[6] = 0.0f;		genMatrix[10] = 0.0f;		genMatrix[14] = 0.0f;
+	genMatrix[3] = proj[2][0];	genMatrix[7] = proj[2][1];	genMatrix[11] = proj[2][2];	genMatrix[15] = proj[2][3];
+	myGlMultMatrix( genMatrix, textureMatrix, fin );
+	proj[0][0] = fin[0];	proj[0][1] = fin[4];	proj[0][2] = fin[8];	proj[0][3] = fin[12];
+	proj[1][0] = fin[1];	proj[1][1] = fin[5];	proj[1][2] = fin[9];	proj[1][3] = fin[13];
+}
+
+// Bindless slot+1 of a light image for the scene-light buffer (0 = none). Vulkan demand-loads on Bind()
+// (RB_RHI_BindUnit's idiom), and CreateTexture2D registers every image in the bindless array at its
+// handle-1 (VulkanBackend::SyncBindlessSlot), so the handle IS the index - no separate residency step.
+static unsigned int RB_RHI_LightImageIndex( idImage *img ) {
+	if ( img == NULL || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		return 0;
+	}
+	img->Bind();
+	return img->rhiHandle;
+}
 
 // Shared by RT reflections (RR16) and volumetric lighting (docs/volumetric-lighting.md): the first caller in
 // a view fills the slot, later callers in the same view get the cached address/count.
@@ -5581,16 +5610,36 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			vs *= vs;
 			L.flags |= ( (unsigned int)idMath::ClampInt( 0, 255, (int)( vs * 255.0f + 0.5f ) ) ) << 8;
 		}
-		// bits 16..31 = the light's STABLE lightDef index. The buffer is re-sorted + culled every frame
-		// (flickering lights drop out), so the slot is not a stable identity; ReSTIR DI (restir_di.frag)
-		// reprojects its reservoir by this id, re-finding the light's current slot. Masked so the
-		// volumetric-haze byte (bits 8..15, read as (flags>>8)&255) is untouched.
-		L.flags |= ( (unsigned int)( i & 0xFFFF ) ) << 16;
+		// (bits 16..31 are FREE: the retired ReSTIR reservoir's stable lightDef id lived there; no shader reads them)
 		for ( int p = 0; p < 4; p++ ) {							// RR16c: global-space S/T/Q/falloff planes
 			L.proj[p][0] = ld->lightProject[p][0];
 			L.proj[p][1] = ld->lightProject[p][1];
 			L.proj[p][2] = ld->lightProject[p][2];
 			L.proj[p][3] = ld->lightProject[p][3];
+		}
+		// The light's TEXTURES (r_rtLightTextures): the projection cookie of its first live stage + its falloff
+		// ramp, as bindless slots, with the stage's texture matrix (a scrolling / rotating cookie) baked into
+		// the S/T planes exactly as the forward draw does (tr_render.cpp). A multi-stage light (rare) sums all
+		// its stage colours above but carries the first live stage's cookie - the other stages' shapes are
+		// approximated by it. 0 = untextured -> the consumer's analytic frustum attenuation.
+		L.projTex = L.falloffTex = L.pad0 = L.pad1 = 0;
+		if ( r_rtLightTextures.GetBool() ) {
+			const shaderStage_t *liveStage = NULL;
+			for ( int s = 0; s < ls->GetNumStages(); s++ ) {
+				const shaderStage_t *st = ls->GetStage( s );
+				if ( st == NULL || ( cregs != NULL && cregs[ st->conditionRegister ] == 0.0f ) ) { continue; }
+				liveStage = st;
+				break;
+			}
+			if ( liveStage != NULL ) {
+				L.projTex = RB_RHI_LightImageIndex( liveStage->texture.image );
+				if ( L.projTex != 0 && liveStage->texture.hasMatrix && cregs != NULL ) {
+					float texMat[16];
+					RB_GetShaderTextureMatrix( cregs, &liveStage->texture, texMat );
+					RB_RHI_BakeLightTextureMatrix( L.proj, texMat );
+				}
+			}
+			L.falloffTex = RB_RHI_LightImageIndex( ld->falloffImage );
 		}
 	}
 	if ( n == 0 ) {
@@ -7266,6 +7315,7 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair
 	parms.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
 	parms.windowCoord[2] = -1.0f;					// VK-only pass: top-down view-Y sign
+	parms.windowCoord[3] = r_rtLightTextures.GetBool() ? 1.0f : 0.0f;	// Stage G: the bounce hit samples each light's cookie + falloff textures
 
 	// scene lights to shade the hit (shared buffer with RT reflections / volumetrics; cached per view)
 	unsigned long long giLightAddr = 0;
@@ -7558,6 +7608,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
 	parms.windowCoord[2] = -1.0f;										// VK-only pass: top-down view-Y sign
+	parms.windowCoord[3] = r_rtLightTextures.GetBool() ? 1.0f : 0.0f;	// Stage G: sample each light's cookie + falloff textures
 
 	// fresh 1-spp gather -> NRD guide MRT (weapon masked inside the shader). NRD does the temporal below.
 	// Checkerboard packs every traced sample into the LEFT HALF, so restrict the draw there - the right half is

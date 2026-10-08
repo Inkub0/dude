@@ -170,6 +170,10 @@ confidence/NRD) at a fraction, with the velocity downsampled to that res; the de
 reduced-res output (`r_rtReStirDIBilateralUpscale` = the `rtgi_apply` joint-bilateral, else bilinear) and
 re-masks sky/weapon. Still debug-only — nothing lights the scene with DI yet.
 
+**Shipped (Stage G, 2026-10-08):** the scene-light buffer carries each light's projection cookie + falloff
+ramp as bindless slots (`RtLight.projTex/falloffTex`, row 128 B) and DI + the RTGI bounce attenuate with
+them (`rt_light_tex.glsl`), behind `r_rtLightTextures` (default 1). Details under "Stage G" below.
+
 **TODO:**
 - **Spatial reuse** — if the NRD knobs can't clean the grate/limb noise without over-softening, add an
   in-frame ReSTIR spatial pass (combine geometry-matched neighbours). No history/reproject → no trails;
@@ -194,34 +198,49 @@ cookie** (`din->lightImage`) and **falloff ramp** (`din->lightFalloffImage`) —
 `interaction.frag:531-532`. Doom leans heavily on these (spot cookies, colored lamps, flashlight), so DI must
 sample them too or shaped lights render as flat box beams.
 
-### Stage G — gobo/projection + falloff sampling in the RT light buffer
-Makes DI **and** the RTGI bounce (they share `RtLight`/`dudeLightAtten`) reproduce shaped/colored lights.
+### Stage G — gobo/projection + falloff sampling in the RT light buffer — SHIPPED 2026-10-08
+Makes DI **and** the RTGI bounce (they share `RtLight`) reproduce shaped/colored lights. Branch
+`feat/rtx-restir-di-light-textures`. Behind **`r_rtLightTextures`** (default **1**; 0 = the old analytic
+frustum attenuation for A/B). Not behind `r_rtReStirDIApply` because nothing in the lit scene consumes DI
+yet; the only default-visible change is the RTGI bounce (opt-in `r_rtgi`) now picking up real cookie
+shapes/colours instead of uniform box beams.
 
-- **G0 — CONFIRM FIRST (feasibility, read-only):** the bindless-residency API for light images, and the exact
-  `textureProj` recipe. Grep targets: the set-2 bindless array population (`u_rtTextures[]`) in
-  `VulkanBackend.cpp` + `RhiWorld.cpp` — look for `SyncBindlessSlot` / bindless / `texIndex`, i.e. how a
-  material's diffuse texture gets a resident slot (the RR4 geo-table path). Determine whether an **arbitrary
-  idImage** (a light's projection/falloff image, not a material texture) can be registered the same way and
-  when (residency timing vs when `GatherSceneLights` fills the buffer and the DI/RTGI passes run). Read
-  `interaction.frag:531-532` + `interaction.vert` for the exact projection/falloff coord math to replicate
-  from the `projS/T/Q/F` planes + the hit world position. Confirm nothing still reads `RtLight.flags` bits
-  16-31 (the retired reservoir stable-id) so they can be reclaimed for texture indices (grep shaders for
-  `>> 16` / `& 0xFFFF` on light flags; packing at `RhiWorld.cpp:~5571-5588`). *(An agent was mid-investigation
-  of exactly this when the session paused — re-run G0 before coding.)*
-- **G1 — bindless-register light images:** in `RB_RHI_GatherSceneLights` (`RhiWorld.cpp:5447`), make each
-  light's projection + falloff `idImage` resident in the set-2 bindless array and capture the slot indices.
-  Handle **animated/scrolling cookies** (light shader stage registers can move per frame → residency per
-  frame or a stable slot with updated contents; measure churn).
-- **G2 — extend `RtLight`:** add `projTexIndex` + `falloffTexIndex`. Prefer reclaiming `flags` bits 16-31
-  (free post-reservoir, confirm in G0); else grow the struct (GPU `rt_light_eval.glsl:15` **and** the C++
-  mirror `RtReflLightGPU` `RhiWorld.cpp:5443`, keep std430 size + the 112 B comment in sync).
-- **G3 — textured attenuation** in `rt_light_eval.glsl`: a `dudeLightAttenTextured()` (or extend
-  `dudeLightAtten`) that projects the hit world pos through `projS/T/Q` (the same planes the forward path
-  uses), `textureProj`-samples the cookie (set-2 bindless) × the falloff ramp, gated on the `PROJECTED` flag
-  + a valid index; plain point lights keep the analytic radial/frustum path. Replicate `interaction.frag:531-532`.
-- **G4 — use it:** `restir_di.frag` (DI gather) and `rtgi_ray.frag` (RTGI bounce) call the textured atten.
-- **G5 — validate:** DI debug overlay — a spot/cookie light shows its real shape + color (not a box beam);
-  RTGI bounce picks up colored light. Still no scene consumption yet.
+**G0 findings (feasibility, verified in source):**
+- **No residency API needed.** `VulkanBackend::CreateTexture2D` calls `SyncBindlessSlot(handle)` on every
+  image it creates, slot = `rhiHandle - 1`, and the set-2 array is bound once per frame cb for every draw.
+  So a light image's bindless index is simply `idImage::rhiHandle` (0 = not bridged). Under VK images
+  demand-load on `Bind()` (`RB_RHI_BindUnit` idiom), so the gather calls `img->Bind()` before reading the
+  handle — otherwise a light whose forward draws are later suppressed (Stage D) would never load.
+- **Projection recipe** (`interaction.vert:47-53` + `interaction.frag:531`): cookie =
+  `textureProj(lightProjection, (S·p, T·p, 0, Q·p))` = sample at `(S·p/Q·p, T·p/Q·p)`; falloff =
+  `texture(lightFalloff, (F·p, 0.5))`; `lightAtten = cookie * falloff` (RGBA; rgb multiplies the colour).
+  Light images are `TR_CLAMP_TO_ZERO` → VK `CLAMP_TO_BORDER` black, so outside the frustum the textures
+  read black by themselves — no analytic gate when textured, exactly like forward. Behind the apex
+  (`Q·p <= 0`) is rejected explicitly.
+- **Texture matrix**: a light stage with `texture.hasMatrix` (scrolling/rotating cookie) has
+  `RB_GetShaderTextureMatrix(lightRegs)` baked into the S/T planes per draw (`tr_render.cpp:834-836`,
+  `RB_BakeTextureMatrixIntoTexgen`). The gather already evaluates the registers (`cregs`), so it bakes the
+  same matrix into the world-space planes (`RB_RHI_BakeLightTextureMatrix`, a global-free copy).
+- **Flags bits 16-31**: no shader read them (the `g.flags >> 16` sites are GEOMETRY rows); the C++ still
+  packed the retired reservoir's lightDef index there — removed. Two handles need ~13 bits each, so the
+  struct **grew 112 → 128 B** (`projTex, falloffTex, pad0, pad1`) instead of packing into 16 bits.
+- **`rt_light_eval.glsl` stays sampler-free** (its stage-agnostic contract for the future compute froxel
+  route). The textured path lives in a NEW include **`rt_light_tex.glsl`** that declares `u_rtTextures[]`
+  (set 2) under a guard and provides `vec3 dudeLightAttenTex(...)` (falls back to `dudeLightAtten` when
+  `projTex == 0`). `rtgi_ray.frag`'s own `u_rtTextures` declaration now comes from that include.
+
+**Shipped pieces (G1–G4):** `RB_RHI_GatherSceneLights` fills `projTex` from the first live stage's
+`texture.image` and `falloffTex` from `ld->falloffImage` (the fade-override-aware one); multi-stage lights
+sum all stage colours as before but carry the first live stage's cookie (approximation, rare). DI gather
+(`restir_di.frag`) and RTGI bounce (`rtgi_ray.frag`) take `u_windowCoord.w = r_rtLightTextures` and call
+`dudeLightAttenTex` → `rad = color * atten(rgb) * N·L`. Attenuation is now a **vec3** (coloured gobos).
+`ssr_rt.frag` / `vol_march.frag` keep the analytic path (unchanged, out of scope).
+
+**G5 — validate (USER TEST pending):** `r_rtReStirDI 1 r_rtReStirDIDebug 1` on VK: a spot/cookie light
+shows its real cone/blob + colour (not a square pyramid); toggle `r_rtLightTextures 0/1` to A/B;
+`r_rtgi 1 r_rtgiDebug 1`: the bounce picks up coloured/shaped light. Watch for: a light reading darker
+than before (expected — cookies are black outside the blob, that's the point), any light going fully
+black (a cookie that failed to bridge → `VK: no RHI image` warning), scrolling cookies drifting vs forward.
 
 ### Stage D — deferred DI apply + forward per-light suppression
 Mirrors `RB_RHI_RtgiApply` (`RhiWorld.cpp:8242`, additive `ONE|ONE` into `rhiHdrRT` at `:8319`).
