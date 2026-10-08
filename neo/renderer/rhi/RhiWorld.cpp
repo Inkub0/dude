@@ -8441,6 +8441,14 @@ void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 	}
 
+	// full-view scissor + viewport (same latent issue as RB_RHI_ReStirDIApply: the last surface draw's scissorRect
+	// is still set here whenever the SSR pass before this site early-outs, clipping the fullscreen apply to it)
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
+	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
 	RB_RHI_BindRTImage( r, 1, albedoImg );					// unit 1 = receiver albedo (prepass att3)
 	RB_RHI_BindUnit( 2, globalImages->currentDepthImage );	// unit 2 = depth (sky skip + bilateral)
 	// unit 3 = full-res view normal (bilateral weight). Bound even when bilat is off (the shader just doesn't
@@ -8557,6 +8565,18 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.depthTexRecip[1] = (float)h / uploadH;
 	}
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
+
+	// FULL-VIEW scissor + viewport: this runs mid-view, right after the last opaque surface draw, which left ITS
+	// scissorRect set (per-surface scissoring, RB_RHI_SetSurfScissor) - a fullscreen quad drawn under that rect
+	// lights only that patch of the screen, and since the covered lights' forward draws were skipped, everything
+	// outside it shows nothing but its self-lit stages ("the map is scissored away"). The SSR pass used to reset
+	// it before this site, but it early-outs with r_ssr / r_rtReflections off. Restoring currentScissor to the
+	// view's rect makes the next surface draw re-apply its own.
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
+	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
 
 	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );					// full-res normal (a = weapon mask)

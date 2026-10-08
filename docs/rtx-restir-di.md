@@ -290,6 +290,12 @@ disagree within a view (and a sub-view, where the DI pass early-outs, is never s
   both — membership mismatch), dark patches (over-suppression), brightness scale vs forward (lightScale), spec
   highlights (spec map luminance ≈ forward's rgb mask), and NRD softness on the now-textured signal.
 
+**Fixed after the first user test (2026-10-08):** "parts of the map scissored away, only self-lit stages visible"
+= the apply quad was drawn under the LAST surface draw's per-surface scissor rect (the SSR pass that used to
+reset it early-outs with `r_ssr`/`r_rtReflections` off), so DI only landed inside that patch while the covered
+lights' forward draws were already skipped. Both `RB_RHI_ReStirDIApply` and `RB_RHI_RtgiApply` (same latent
+issue) now set the full-view viewport + scissor and restore `backEnd.currentScissor` before drawing.
+
 **Known v1 approximations (deliberate, listed for the test):** diffuse/specular STAGE colours + vertex colour
 assumed 1 (not in the G-buffer); baked occlusion maps not applied to DI; the legacy non-PBR specular LUT not
 replicated (`r_pbr 0` = Lambert); no Toksvig widening (G-buffer normal is unit); the organic spec-fallback
