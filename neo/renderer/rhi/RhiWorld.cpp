@@ -8659,9 +8659,11 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !r_rtReStirDIDebug.GetBool() || !rhiReStirDIRanThisView || rhiReStirDIRT == 0 ) {
 		return;
 	}
-	// r_rtReStirDIDebug 1 = the NRD-DENOISED DI when the denoise ran this frame (GetRtgiOutputImage, shared GI
-	// slot), else the raw 1-spp gather att0. Both are NRD-YCoCg-packed, so restir_di_debug decodes to linear.
-	rhi::ImageHandle srcImg = ( rhiReStirDIDenoisedThisView && r->GetRtgiOutputImage() != 0 )
+	// r_rtReStirDIDebug 1 = the RAW 1-spp gather (att0; under checkerboard the traced half sits packed in the LEFT
+	// half of the buffer, which is exactly what this view is for); 2 = the NRD-DENOISED DI when the denoise ran
+	// this frame (GetRtgiOutputImage, shared GI slot), else raw. Both are NRD-YCoCg-packed, so restir_di_debug
+	// decodes to linear. Mirrors r_rtgiDebug 1/2.
+	rhi::ImageHandle srcImg = ( r_rtReStirDIDebug.GetInteger() >= 2 && rhiReStirDIDenoisedThisView && r->GetRtgiOutputImage() != 0 )
 		? r->GetRtgiOutputImage()
 		: r->GetRenderTargetImage( rhiReStirDIRT );
 	if ( srcImg == 0 ) {

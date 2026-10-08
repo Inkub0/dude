@@ -306,6 +306,12 @@ keeps the force-opaque 0xFD ray; one that can meet a grate traces 0xFF with cand
 coverage texture and dims to `1 - strength` behind a solid texel. `rt_perforated.glsl`'s `u_rtTextures[]` is now
 guarded by the same macro as `rt_light_tex.glsl` so both include together.
 
+**Debug views (2026-10-08):** `r_rtReStirDIDebug` is now the RTGI-style 0/1/2 (off / RAW 1-spp gather /
+NRD-denoised) with the matching ImGui dropdown. The raw view is also the checkerboard proof: with
+`r_rtReStirDICheckerboard` on, the traced half sits packed in the buffer's LEFT half. Note the checkerboard only
+halves the GATHER's fragments + rays (`restir.di.gather` in `r_vkGpuTime 2`); the NRD denoise, the guides pass,
+the confidence pass and the apply run at full cost regardless, so the frame-time saving is the gather's half.
+
 **Known v1 approximations (deliberate, listed for the test):** diffuse/specular STAGE colours + vertex colour
 assumed 1 (not in the G-buffer); baked occlusion maps not applied to DI; the legacy non-PBR specular LUT not
 replicated (`r_pbr 0` = Lambert); no Toksvig widening (G-buffer normal is unit); the organic spec-fallback
