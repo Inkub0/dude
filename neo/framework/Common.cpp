@@ -107,7 +107,7 @@ idCVar dude_preset( "dude_preset", "-1", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYST
 // layered on the chosen raster tier; Vulkan + ray-query hardware only), 2 = reserved for H7 full
 // path tracing. "dude_preset 5 + dude_rtx 1" reproduces the retired Ultra Nightmare tier. Applied
 // together with the raster tier by the "dudePreset" command / the Graphics menu's Apply button.
-idCVar dude_rtx( "dude_rtx", "0", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "DUDE ray-tracing axis: 0 = off, 1 = on (hybrid RT, Vulkan + RT hardware), layered on top of the dude_preset raster tier", 0, 2 );
+idCVar dude_rtx( "dude_rtx", "0", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "DUDE ray-tracing axis: 0 = off, 1 = on (hybrid RT, Vulkan + RT hardware), 2 = Ultra Nightmare (full RT: ReSTIR direct lighting lights the scene, GI bounce in the same denoise), layered on top of the dude_preset raster tier", 0, 2 );
 // DUDE: the config-schema version the saved settings were last written against. Compared to
 // DUDE_CONFIG_SCHEMA (Licensee.h) at launch; a lower value triggers a one-time reset of the
 // graphics/enhancement cvars to their defaults (see idCommonLocal::CheckConfigSchema). Never

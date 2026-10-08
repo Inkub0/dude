@@ -5081,8 +5081,8 @@ windowDef OptionsMenuParent {
 			}
 			choiceDef OSRtxPrimary {
 				rect		213, 1, 99, 14
-				choices		"Off;On"
-				values		"0;1"
+				choices		"Off;On;Ultra Nightmare"
+				values		"0;1;2"
 				cvar		"dude_rtx"
 				updateGroup	render
 				choiceType	1
