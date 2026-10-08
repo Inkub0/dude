@@ -3570,6 +3570,11 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 			// opaque-surface lighting, so it must be part of FSR2's opaque snapshot — added afterwards it
 			// looked like flash/particle content to the auto-reactive mask and got de-ghosted into a
 			// blocky "square" over strong-GI regions. No-op unless r_rtgi is on; idempotent per view.
+			// ReSTIR DI Stage D: the direct-lighting apply, same site + same reasons (opaque-surface lighting,
+			// must be inside FSR2's opaque snapshot). No-op unless r_rtReStirDIApply lit this view.
+			r->GpuScopeBegin( "restir.di.apply" );
+			RB_RHI_ReStirDIApply( r, viewDef );
+			r->GpuScopeEnd();
 			r->GpuScopeBegin( "rtgi apply" );
 			RB_RHI_RtgiApply( r, viewDef );
 			r->GpuScopeEnd();
@@ -3583,6 +3588,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	if ( !ssrDone ) {
 		r->GpuScopeBegin( "reflections" );
 		RB_RHI_ScreenSpaceReflections( r, viewDef );	// view had no translucent surfaces
+		r->GpuScopeEnd();
+		r->GpuScopeBegin( "restir.di.apply" );			// ReSTIR DI direct lighting into the opaque snapshot
+		RB_RHI_ReStirDIApply( r, viewDef );
 		r->GpuScopeEnd();
 		r->GpuScopeBegin( "rtgi apply" );				// GI into the opaque snapshot (see the split above)
 		RB_RHI_RtgiApply( r, viewDef );
@@ -3643,6 +3651,9 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		// (so it lands in FSR2's opaque snapshot). This covers the one path that has no split — r_ssr off,
 		// where no snapshot is taken anyway, so applying here before DoF/FSR2/bloom is fine. Idempotent:
 		// a no-op when the split already applied it. No-op unless r_rtgi is on.
+		r->GpuScopeBegin( "restir.di.apply" );			// ReSTIR DI fallback site (same idempotence as RtgiApply)
+		RB_RHI_ReStirDIApply( r, viewDef );
+		r->GpuScopeEnd();
 		r->GpuScopeBegin( "rtgi apply" );
 		RB_RHI_RtgiApply( r, viewDef );
 		r->GpuScopeEnd();

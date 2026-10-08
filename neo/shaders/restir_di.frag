@@ -26,7 +26,11 @@
 //   u_rtParms.w           = max shadow-ray length
 //   u_localParam0         = ( 1/proj00, 1/proj11, candidate count M, hit-distance scale (NRD A = 0.5*this) )
 //   u_localParam1.x       = frame index (RNG decorrelation)
+//   u_localParam1.y       = r_pbr (apply mode: 1 = GGX metalness workflow as interaction.frag, 0 = Lambert only)
 //   u_localParam1.z       = checkerboard parity (0 = off, 1 = even frame, 2 = odd; packs half the pixels left)
+//   u_localParam1.w       = APPLY MODE (Stage D, r_rtReStirDIApply): shade with the G-buffer material (units 2/3)
+//                           and write the DEMODULATED radiance (restir_di_common.glsl); 0 = irradiance, albedo 1
+//   u_diffuseModifier     = apply mode: ( kd = 1 - r_pbrMetalDiffuse, r_pbrSpecScale, r_pbrFireflyClamp, r_pbrEnvScale )
 //   u_screenCorrection.xy = 1 / viewSize        (gl_FragCoord -> [0,1] uv; normal buffer)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 //   u_windowCoord.z       = view-Y sign (-1 Vulkan top-down)
@@ -38,9 +42,12 @@
 #include "renderparms.glsl"
 #include "rt_light_eval.glsl"
 #include "rt_light_tex.glsl"
+#include "restir_di_common.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;	// xyz = view-space normal, a = weapon/AO mask (0 = weapon)
+SAMPLER_BINDING(2) uniform sampler2D u_albedoBuffer;	// apply mode: G-buffer att3 receiver albedo (white when absent)
+SAMPLER_BINDING(3) uniform sampler2D u_materialBuffer;	// apply mode: G-buffer att1 ( roughness, metalness, spec-map luminance )
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -150,6 +157,37 @@ void main() {
 	uint M = uint( max( u_localParam0.z, 1.0 ) );
 	if ( M > nLights ) { M = nLights; }
 
+	// Stage D apply mode: the full material response of THIS pixel, from the G-buffer, so the reservoir target
+	// and the shaded sample are the forward interaction.frag equation (PBR branch: GGX metalness workflow with
+	// the same conventions - no 1/pi, lobe clamp, dielectric-weighted spec scale, metal env floor, Fresnel-
+	// weighted diffuse with the kd relax; no Toksvig since the G-buffer normal is unit). What is NOT here (v1):
+	// the diffuse/specular stage colours + vertex colour (assumed 1), baked occlusion maps, the legacy non-PBR
+	// specular LUT (Lambert only when r_pbr is off). The output is DEMODULATED by diDemodFactor (the apply
+	// remultiplies), so NRD denoises a texture-free signal.
+	const bool applyMode = u_localParam1.w > 0.5;
+	const bool pbr       = u_localParam1.y > 0.5;
+	vec3  albedo = vec3( 1.0 );
+	vec3  B      = vec3( 1.0 );
+	vec3  F0     = vec3( 0.04 );
+	vec3  Vw     = vec3( 0.0 );
+	vec3  envFloor = vec3( 0.0 );
+	float metal = 0.0, kd = 0.0, alpha2 = 1.0, NdotV = 1.0, specGain = 0.0;
+	if ( applyMode ) {
+		albedo   = texture( u_albedoBuffer, sfrag * u_screenCorrection.xy ).rgb;
+		vec3 mt  = texture( u_materialBuffer, sfrag * u_screenCorrection.xy ).rgb;
+		float rough = clamp( mt.r, 0.03, 1.0 );
+		metal    = mt.g;
+		kd       = u_diffuseModifier.x;
+		B        = diDemodFactor( albedo, metal, mt.b, kd, u_diffuseModifier.y );
+		Vw       = normalize( u_modelViewMatrix[3].xyz - Pw );			// camera (inverse view translation) -> surface
+		NdotV    = max( dot( Nw, Vw ), 1e-4 );
+		float a  = rough * rough;
+		alpha2   = a * a;
+		F0       = mix( vec3( 0.04 ), albedo, metal );
+		specGain = mt.b * mix( u_diffuseModifier.y, 1.0, metal ) * 2.0;	// spec map * dielectric-weighted scale * vanilla 2x
+		envFloor = F0 * ( metal * u_diffuseModifier.w * ( 1.0 - 0.5 * rough ) ) * mt.b;	// Phase C.1 metal environment floor (rides the spec map)
+	}
+
 	// RNG seed: SCREEN pixel (sfrag, so a checkerboard cell is seeded by the pixel it represents) + frame,
 	// forced odd so the first advance never degenerates
 	uint rng = ( ( uint( sfrag.x ) * 1973u + uint( sfrag.y ) * 9277u )
@@ -174,15 +212,36 @@ void main() {
 		dudeLightDir( lights, li, Pw, ldir, dl );
 		float ndl = max( dot( Nw, ldir ), 0.0 );
 		vec3  rad = vec3( 0.0 );
+		float pHat = 0.0;
 		if ( ndl > 0.0 ) {
 			// the light's shape + colour: its real cookie * falloff textures (Stage G, u_windowCoord.w), else the
 			// analytic frustum attenuation. Doom lighting model: no 1/pi.
 			vec3 atten = ( u_windowCoord.w > 0.5 )
 				? dudeLightAttenTex( lights, li, Pw, dl, lights.l[ li ].flags, true, false )
 				: vec3( dudeLightAtten( lights, li, Pw, dl, lights.l[ li ].flags, true, false ) );
-			rad = lights.l[ li ].color * ( atten * ndl );
+			vec3 contrib = lights.l[ li ].color * ( atten * ndl );		// irradiance-like: colour * cookie/falloff * N.L
+			if ( applyMode ) {
+				// the material response for THIS light direction (interaction.frag's PBR combine, per unit light)
+				vec3 f;
+				if ( pbr ) {
+					vec3  H     = normalize( ldir + Vw );
+					float NdotH = max( dot( Nw, H ), 0.0 );
+					float VdotH = max( dot( Vw, H ), 0.0 );
+					vec3  F     = F0 + ( 1.0 - F0 ) * pow( 1.0 - VdotH, 5.0 );
+					float dd    = NdotH * NdotH * ( alpha2 - 1.0 ) + 1.0;
+					float D     = alpha2 / ( dd * dd );								// GGX NDF, pi folded out
+					float k     = 0.5 * sqrt( alpha2 );
+					float gvis  = 0.25 / ( ( ndl * ( 1.0 - k ) + k ) * ( NdotV * ( 1.0 - k ) + k ) );
+					float lobe  = min( D * gvis, u_diffuseModifier.z );				// firefly clamp
+					f = lobe * F * specGain + envFloor + albedo * ( ( 1.0 - F ) * ( 1.0 - metal * kd ) );
+				} else {
+					f = albedo;														// legacy: Lambert, no spec (v1)
+				}
+				contrib *= f;
+			}
+			pHat = dot( contrib, vec3( 0.2126, 0.7152, 0.0722 ) );		// luminance target on the SHADED contribution
+			rad  = contrib / B;											// demodulated (B = 1 outside apply mode)
 		}
-		float pHat = dot( rad, vec3( 0.2126, 0.7152, 0.0722 ) );	// luminance target
 		float w    = pHat * float( nLights );
 		wSum += w;
 		if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {

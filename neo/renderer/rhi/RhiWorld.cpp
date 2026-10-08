@@ -105,6 +105,10 @@ static struct {
 	// world/model depth bias — it needs a much smaller compare bias to avoid
 	// peter-panning and swimming shadow edges. Detected per-light by shader name.
 	bool				lightIsFlashlight;
+	// ReSTIR DI Stage D (r_rtReStirDIApply): this light is in the scene-light buffer DI shades from, so its OPAQUE
+	// world interactions are skipped (DI lights them, RB_RHI_ReStirDIApply) - RB_RHI_DrawInteraction keeps only the
+	// depth-hacked view weapon / models, translucents and blood films on the forward path for it.
+	bool				lightDiCovered;
 } ictx;
 
 // Persistent shadow-map render target, kept across frames and recreated only
@@ -469,6 +473,8 @@ static rhi::RenderTargetHandle rhiReStirDIRT = 0;	// the fresh 1-spp gather: Cre
 static int   rhiReStirDIW = 0, rhiReStirDIH = 0;
 static bool  rhiReStirDIRanThisView = false;		// DI gather produced this view (debug-overlay gate)
 static bool  rhiReStirDIDenoisedThisView = false;	// the shared REBLUR_DIFFUSE denoise ran for DI this view -> GetRtgiOutputImage is the denoised DI
+static bool  rhiReStirDIApplyThisView = false;		// Stage D (r_rtReStirDIApply): DI LIGHTS this view - the apply runs and the forward loop skips the covered lights' opaque draws
+static bool  rhiReStirDIAppliedThisView = false;	// the additive apply already ran this view (idempotent across the split / fallback call sites)
 static rhi::RenderTargetHandle rhiReStirDIConfRT = 0;	// DI history-confidence (R16F), reusing rtgi_confidence.frag
 static int   rhiReStirDIConfW = 0, rhiReStirDIConfH = 0;
 static rhi::RenderTargetHandle rhiReStirDIGuideRT = 0;	// checkerboard full-res NRD guides (viewZ/normal), reusing rtgi_guides.frag
@@ -1873,6 +1879,13 @@ static idImage *RB_RHI_FillParallaxParms( rhi::RenderParams &parms, const drawIn
 }
 
 static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
+	// ReSTIR DI Stage D: an opaque WORLD surface under a DI-covered light is lit by the deferred DI apply, not here.
+	// Everything the G-buffer cannot describe stays forward: the depth-hacked view weapon / models, translucent
+	// interactions (depth-LESS), the blood-film draws and ambient lights (never in the scene-light buffer).
+	if ( ictx.lightDiCovered && !din->ambientLight && rhiFilmDraw == NULL && ictx.depthFuncBits == GLS_DEPTHFUNC_EQUAL
+	     && !din->surf->space->weaponDepthHack && din->surf->space->modelDepthHack == 0.0f ) {
+		return;
+	}
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	memcpy( parms.mvpMatrix, ictx.mvp, sizeof( parms.mvpMatrix ) );
@@ -3902,6 +3915,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiRtaoRanThisView = false;
 	rhiRtaoResolveRT = 0;		rhiRtaoResolveW = rhiRtaoResolveH = 0;
 	rhiRtaoDenoisedThisView = false;	rhiRtaoPrevValid = false;
+	rhiReStirDIApplyThisView = false;	rhiReStirDIAppliedThisView = false;
 
 	rhiSsrRT = 0;				rhiSsrW = rhiSsrH = 0;
 	rhiSsrDepthMinRT = 0;		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
@@ -4429,7 +4443,10 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// albedo, produced as a 4th attachment on the normal prepass. It forces the SSR + velocity attachments
 	// (so the layout is fixed normal/mat/vel/albedo) and the STANDALONE path (the merged pass keeps its
 	// 3-attachment layout untouched). On the RT tier ssr + velocity are already on, so this only adds att3.
-	const bool wantAlbedo = r_rtgi.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	// ReSTIR DI Stage D (docs/rtx-restir-di.md): lighting the scene with DI needs the same albedo attachment (+ the
+	// rough/metal/spec material attachment it forces) for the deferred shade, so it widens this gate.
+	const bool wantAlbedo = ( r_rtgi.GetBool() || ( r_rtReStirDI.GetBool() && r_rtReStirDIApply.GetBool() ) )
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
 	// RT reflections read the normal + rough/metal MRT this pass fills. Since 2026-09-23 they run decoupled from
 	// r_ssr (RT owns the reflective pixels), so gate the prepass on them too — else RT-only mode (r_ssr off) has
 	// no G-buffer to reflect about.
@@ -4649,8 +4666,20 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// included; the perforated coverage draws below overwrite the matrix with their own, fine). The
 		// diffuse IMAGE binds on unit 2 below (whiteImage when GI is off; sampled only if u_localParam0.y>0.5).
 		idImage *rtgiDiffuseImg = globalImages->whiteImage;
+		// ReSTIR DI Stage D: the surface's SPECULAR map (luminance -> material att1 .b) so the deferred DI shade
+		// masks its GGX lobe exactly as the forward draw does (spec * specMap). blackImage = no spec stage = no
+		// specular, which is what the forward path draws too (din->specularImage = blackImage).
+		idImage *diSpecImg = globalImages->blackImage;
 		if ( wantAlbedo ) {
 			parms.localParam0[1] = 1.0f;
+			for ( int s = 0; s < shader->GetNumStages(); s++ ) {
+				const shaderStage_t *sst = shader->GetStage( s );
+				if ( sst->lighting != SL_SPECULAR || sst->texture.image == NULL || regs[sst->conditionRegister] == 0 ) {
+					continue;
+				}
+				diSpecImg = sst->texture.image;
+				break;
+			}
 			for ( int s = 0; s < shader->GetNumStages(); s++ ) {
 				const shaderStage_t *dst = shader->GetStage( s );
 				if ( dst->lighting != SL_DIFFUSE || dst->texture.image == NULL || regs[dst->conditionRegister] == 0 ) {
@@ -4730,6 +4759,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 		RB_RHI_BindUnit( 0, bumpImg );
 		RB_RHI_BindUnit( 2, rtgiDiffuseImg );	// RTGI H6c: receiver-albedo source (gbuffer.frag samples it only when u_localParam0.y>0.5)
+		RB_RHI_BindUnit( 3, diSpecImg );		// ReSTIR DI Stage D: specular map (gbuffer.frag samples it only when u_localParam0.y>0.5)
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
@@ -5471,19 +5501,33 @@ static unsigned int RB_RHI_LightImageIndex( idImage *img ) {
 	return img->rhiHandle;
 }
 
+// Per-view MEMBERSHIP of the scene-light buffer (ReSTIR DI Stage D): which lightDefs the fill below included,
+// so the forward light loop can skip exactly the lights DI covers (RB_RHI_SceneLightCovered) - any mismatch
+// is a light drawn twice (double-bright) or by neither (dark). Generation-stamped per lightDef index; valid
+// only for the view + frame the cache holds.
+static const viewDef_t *	s_sceneLightCacheView  = NULL;
+static int					s_sceneLightCacheFrame = -1;
+static unsigned int			s_sceneLightGen = 0;			// bumped on every refill
+static idList<unsigned int>	s_sceneLightCoveredGen;			// [lightDef index] = generation that included it
+
+static bool RB_RHI_SceneLightCovered( const viewDef_t *viewDef, int lightDefIndex ) {
+	return viewDef != NULL && s_sceneLightCacheView == viewDef && s_sceneLightCacheFrame == tr.frameCount
+		&& lightDefIndex >= 0 && lightDefIndex < s_sceneLightCoveredGen.Num()
+		&& s_sceneLightCoveredGen[ lightDefIndex ] == s_sceneLightGen;
+}
+
 // Shared by RT reflections (RR16) and volumetric lighting (docs/volumetric-lighting.md): the first caller in
 // a view fills the slot, later callers in the same view get the cached address/count.
 static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsigned long long *outAddr ) {
-	static const viewDef_t *   cacheView  = NULL;
-	static int                 cacheFrame = -1;
 	static int                 cacheCount = 0;
 	static unsigned long long  cacheAddr  = 0;
 	// (s_sceneFogCount is part of the cached state: it is only rewritten when the slot is refilled below)
-	if ( viewDef != NULL && cacheView == viewDef && cacheFrame == tr.frameCount && s_rtReflLightBuf != 0 ) {
+	if ( viewDef != NULL && s_sceneLightCacheView == viewDef && s_sceneLightCacheFrame == tr.frameCount && s_rtReflLightBuf != 0 ) {
 		*outAddr = cacheAddr;
 		return cacheCount;
 	}
-	cacheView = viewDef;	cacheFrame = tr.frameCount;	cacheCount = 0;	cacheAddr = 0;
+	s_sceneLightCacheView = viewDef;	s_sceneLightCacheFrame = tr.frameCount;	cacheCount = 0;	cacheAddr = 0;
+	s_sceneLightGen++;		// every lightDef's stamp is now stale until the fill below re-includes it
 	s_sceneFogCount = 0;
 	*outAddr = 0;
 	if ( viewDef == NULL || viewDef->renderWorld == NULL ) {
@@ -5508,6 +5552,11 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	// strobing / fading light does the same in the reflection and in its volumetric shaft. Off-view lights
 	// have no registers this frame and fall back to their static colour below.
 	const int numDefs = rw->lightDefs.Num();
+	if ( s_sceneLightCoveredGen.Num() < numDefs ) {
+		const int first = s_sceneLightCoveredGen.Num();
+		s_sceneLightCoveredGen.SetNum( numDefs );
+		for ( int k = first; k < numDefs; k++ ) { s_sceneLightCoveredGen[ k ] = 0; }	// 0 never equals a live generation
+	}
 	const viewLight_t **viewLightOf = (const viewLight_t **)_alloca( ( numDefs + 1 ) * sizeof( viewLight_t * ) );
 	memset( viewLightOf, 0, ( numDefs + 1 ) * sizeof( viewLight_t * ) );
 	for ( const viewLight_t *vl = viewDef->viewLights; vl != NULL; vl = vl->next ) {
@@ -5591,6 +5640,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		sortKey[ n ] = ( ( ld->parms.pointLight && !ld->parms.parallel ) ? 1.0e9f : 0.0f )
 		             + Max( ( cullOrg - viewOrg ).Length() - cullRad, 0.0f );
 		RtReflLightGPU &L = lights[ n++ ];
+		s_sceneLightCoveredGen[ i ] = s_sceneLightGen;			// Stage D membership: DI covers this lightDef in this view
 		L.cull[0] = cullOrg[0]; L.cull[1] = cullOrg[1]; L.cull[2] = cullOrg[2]; L.cull[3] = cullRad;
 		L.pos[0] = ld->globalLightOrigin[0];
 		L.pos[1] = ld->globalLightOrigin[1];
@@ -7512,6 +7562,8 @@ behind r_rtReStirDI; VK + RT hardware only; needs the sealed depth + bump-normal
 static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiReStirDIRanThisView = false;
 	rhiReStirDIDenoisedThisView = false;	// reset on every early-out (the debug overlay gates on it)
+	rhiReStirDIApplyThisView = false;		// Stage D: set below only when DI will light this view (the forward loop + apply key off it)
+	rhiReStirDIAppliedThisView = false;
 	// ray_query in restir_di.frag (Stage 2 visibility) pipelines only on RT hardware, so gate on it here
 	// (the shader won't even load otherwise). The TLAS itself may still be absent this frame -> unshadowed.
 	if ( !r_rtReStirDI.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN || !r->SupportsRayQuery() ) {
@@ -7610,6 +7662,23 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.windowCoord[2] = -1.0f;										// VK-only pass: top-down view-Y sign
 	parms.windowCoord[3] = r_rtLightTextures.GetBool() ? 1.0f : 0.0f;	// Stage G: sample each light's cookie + falloff textures
 
+	// Stage D apply mode (r_rtReStirDIApply): DI will LIGHT this view, so the gather shades with the G-buffer material
+	// (albedo att3 + rough/metal/spec att1) and writes the demodulated radiance; the apply (RB_RHI_ReStirDIApply)
+	// remultiplies and adds it at the opaque/translucent split, and RB_RHI_DrawWorld skips the forward draws of
+	// every light the scene-light buffer covers. Needs the albedo prepass (wantAlbedo widened for it) and the apply
+	// shader; the debug overlay owns the screen instead when it is on. Decided HERE (before the light loop) so the
+	// suppression and the apply can never disagree within a view.
+	const rhi::ImageHandle diAlbedoImg = rhiNormalAlbedoThisView ? r->GetRenderTargetImage4( rhiNormalResultRT ) : 0;
+	const rhi::ImageHandle diMatImg    = rhiNormalAlbedoThisView ? r->GetRenderTargetImage2( rhiNormalResultRT ) : 0;
+	const bool diApply = r_rtReStirDIApply.GetBool() && !r_rtReStirDIDebug.GetBool()
+		&& diAlbedoImg != 0 && diMatImg != 0 && r->LoadShader( "restir_di_apply" ) != 0;
+	parms.localParam1[1] = r_pbr.GetBool() ? 1.0f : 0.0f;				// GGX metalness workflow vs Lambert-only
+	parms.localParam1[3] = diApply ? 1.0f : 0.0f;						// apply mode
+	parms.diffuseModifier[0] = 1.0f - r_pbrMetalDiffuse.GetFloat();		// kd (interaction.frag u_pbrParms2.x)
+	parms.diffuseModifier[1] = r_pbrSpecScale.GetFloat();				// dielectric-weighted lobe scale (u_pbrParms.w)
+	parms.diffuseModifier[2] = r_pbrFireflyClamp.GetFloat();			// lobe ceiling (u_localParam1.w there)
+	parms.diffuseModifier[3] = r_pbrEnvScale.GetFloat();				// metal environment floor (u_occlusionParms.w there)
+
 	// fresh 1-spp gather -> NRD guide MRT (weapon masked inside the shader). NRD does the temporal below.
 	// Checkerboard packs every traced sample into the LEFT HALF, so restrict the draw there - the right half is
 	// written nothing and reconstructed by NRD, so ~half the gather fragments (and their visibility rays) run.
@@ -7620,10 +7689,22 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
 	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
+	// units 2/3 = the G-buffer albedo + material for apply mode; white placeholders otherwise so the descriptor
+	// set is always complete (the shader only samples them when u_localParam1.w > 0.5)
+	if ( diApply ) {
+		RB_RHI_BindRTImage( r, 2, diAlbedoImg );
+		RB_RHI_BindRTImage( r, 3, diMatImg );
+	} else {
+		RB_RHI_BindUnit( 2, globalImages->whiteImage );
+		RB_RHI_BindUnit( 3, globalImages->whiteImage );
+	}
+	backEnd.glState.tmu[2].current2DMap = -1;
+	backEnd.glState.tmu[3].current2DMap = -1;
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
 	r->EndPass();
 	r->GpuScopeEnd();
 	rhiReStirDIRanThisView = true;
+	rhiReStirDIApplyThisView = diApply;				// Stage D: from here on this view is DI-lit (forward loop + apply)
 
 	// ---- NRD REBLUR_DIFFUSE denoise (mirrors RB_RHI_RtgiPass's H6b) ----
 	// DI borrows the SHARED GI denoiser (NRD_ID_REBLUR_GI) and its output image (GetRtgiOutputImage), so it can
@@ -8416,6 +8497,80 @@ void RB_RHI_RtgiDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	RB_RHI_DrawFullscreen( r, prog, parms, srcImg );
 	RB_RHI_ForgetTexBinds();
+}
+
+/*
+===================
+RB_RHI_ReStirDIApply
+
+ReSTIR DI Stage D (docs/rtx-restir-di.md, r_rtReStirDIApply): add the denoised DI into the lit HDR scene as the
+direct lighting of every opaque world surface - the lights it covers had their forward interaction draws
+skipped in RB_RHI_DrawWorld. Mirrors RB_RHI_RtgiApply: additive ONE|ONE into rhiHdrRT at the opaque/translucent
+split, inside FSR2's opaque snapshot (added after it the de-ghosting squares it off), idempotent per view. The
+DI buffer is the gather's DEMODULATED shade; restir_di_apply.frag remultiplies by the G-buffer material factor,
+the forward light scale (backEnd.lightScale) and the AO-on-direct-light term, upscaling when reduced-res.
+No-op unless the DI pass decided this view is DI-lit (rhiReStirDIApplyThisView).
+===================
+*/
+void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !rhiReStirDIApplyThisView || rhiReStirDIAppliedThisView || !rhiReStirDIRanThisView || rhiReStirDIRT == 0 ) {
+		return;
+	}
+	const rhi::ImageHandle srcImg = ( rhiReStirDIDenoisedThisView && r->GetRtgiOutputImage() != 0 )
+		? r->GetRtgiOutputImage() : r->GetRenderTargetImage( rhiReStirDIRT );
+	const rhi::ImageHandle albedoImg = r->GetRenderTargetImage4( rhiNormalResultRT );
+	const rhi::ImageHandle matImg    = r->GetRenderTargetImage2( rhiNormalResultRT );
+	if ( srcImg == 0 || albedoImg == 0 || matImg == 0 ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "restir_di_apply" );
+	if ( !prog ) {
+		return;
+	}
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	const int uploadW = globalImages->currentDepthImage->uploadWidth;
+	const int uploadH = globalImages->currentDepthImage->uploadHeight;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	// upscale exactly as the debug overlay: bilateral only when actually reduced-res + enabled
+	const bool diReduced = ( rhiReStirDIW < w || rhiReStirDIH < h );
+	const bool diBilateral = diReduced && r_rtReStirDIBilateralUpscale.GetBool() && uploadW > 0;
+	parms.localParam0[0] = diBilateral ? 1.0f : 0.0f;
+	parms.localParam0[1] = 32.0f;									// depth sensitivity
+	parms.localParam0[2] = 8.0f;									// normal power
+	parms.localParam0[3] = backEnd.lightScale;						// forward lightColor = lightScale * stage colour; the gather used the raw stage colour
+	// AO on direct light, as RB_RHI_FillSsaoParms does for the forward interactions
+	const float aoDirect = idMath::ClampFloat( 0.0f, 1.0f, r_ssaoDirectLight.GetFloat() );
+	const bool  aoOn = rhiSsaoAppliedThisView && rhiSsaoResultRT != 0 && aoDirect > 0.0f;
+	parms.localParam1[0] = aoOn ? 1.0f : 0.0f;
+	parms.localParam1[1] = idMath::ClampFloat( 0.0f, 1.0f, r_ssaoFloor.GetFloat() );
+	parms.localParam1[2] = aoDirect;
+	parms.diffuseModifier[0] = 1.0f - r_pbrMetalDiffuse.GetFloat();	// diDemodFactor inputs: MUST match the gather's
+	parms.diffuseModifier[1] = r_pbrSpecScale.GetFloat();
+	parms.screenCorrection[0] = ( rhiReStirDIW > 0 ) ? 1.0f / rhiReStirDIW : 1.0f;	// reduced-res DI texel (uv)
+	parms.screenCorrection[1] = ( rhiReStirDIH > 0 ) ? 1.0f / rhiReStirDIH : 1.0f;
+	if ( uploadW > 0 && uploadH > 0 ) {
+		parms.depthTexRecip[0] = (float)w / uploadW;				// view uv -> depth tc (POT depth image)
+		parms.depthTexRecip[1] = (float)h / uploadH;
+	}
+	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
+
+	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );					// full-res normal (a = weapon mask)
+	RB_RHI_BindRTImage( r, 3, albedoImg );
+	RB_RHI_BindRTImage( r, 4, matImg );
+	if ( aoOn ) {
+		RB_RHI_BindRTUnit( r, 5, rhiSsaoResultRT );
+	} else {
+		RB_RHI_BindUnit( 5, globalImages->whiteImage );				// bound so the descriptor set is complete
+	}
+	for ( int u = 2; u <= 5; u++ ) { backEnd.glState.tmu[u].current2DMap = -1; }	// direct binds bypassed the tmu cache
+	RB_RHI_DrawFullscreen( r, prog, parms, srcImg, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
+	RB_RHI_ForgetTexBinds();
+	rhiReStirDIAppliedThisView = true;
 }
 
 /*
@@ -9679,17 +9834,8 @@ screen-space mask. Bumps dbgShadowMapped and the global cube tallies. Lifted
 verbatim from RB_RHI_DrawWorld.
 ===================
 */
-static void RB_RHI_SelectLightShadowTechnique( rhi::RHI *r, const viewDef_t *viewDef,
-        viewLight_t *vLight, const lightShadowClass_t &cls, rhi::ShaderHandle shadowMapProg,
-        rhi::ShaderHandle shadowCubeProg, int &dbgShadowMapped ) {
-	const bool hasInteractions = cls.hasInteractions;
-	const bool lightMayShadow  = cls.lightMayShadow;
-	const bool isPoint         = cls.isPoint;
-	const bool isParallel      = cls.isParallel;
-	const bool smEnabled       = cls.smEnabled;
-	const bool oversize        = cls.oversize;
-	const bool rtServesAll     = cls.rtServesAll;
-
+// the per-light shadow state the interaction draws read, cleared before a light picks its technique
+static void RB_RHI_ResetLightShadowState( void ) {
 	ictx.lightShadowMapped = false;
 	ictx.lightSunShadow = false;
 	ictx.lightRtOnly = false;
@@ -9703,6 +9849,20 @@ static void RB_RHI_SelectLightShadowTechnique( rhi::RHI *r, const viewDef_t *vie
 	ictx.lightHasDynamicLayer = false;
 	ictx.shadowCubeDynImage = 0;
 	ictx.shadowCubeDynScale = 1.0f;
+}
+
+static void RB_RHI_SelectLightShadowTechnique( rhi::RHI *r, const viewDef_t *viewDef,
+        viewLight_t *vLight, const lightShadowClass_t &cls, rhi::ShaderHandle shadowMapProg,
+        rhi::ShaderHandle shadowCubeProg, int &dbgShadowMapped ) {
+	const bool hasInteractions = cls.hasInteractions;
+	const bool lightMayShadow  = cls.lightMayShadow;
+	const bool isPoint         = cls.isPoint;
+	const bool isParallel      = cls.isParallel;
+	const bool smEnabled       = cls.smEnabled;
+	const bool oversize        = cls.oversize;
+	const bool rtServesAll     = cls.rtServesAll;
+
+	RB_RHI_ResetLightShadowState();
 
 	if ( rtServesAll ) {
 		ictx.lightRtPoint = true;
@@ -9876,6 +10036,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	ictx.interactionRtProg = r->SupportsRayQuery() ? r->LoadShader( "interaction_rt" ) : 0;
 	ictx.ambientProg = r->LoadShader( "ambientlight" );
 	ictx.stencilState = rhi::SS_ALWAYS;
+	ictx.lightDiCovered = false;
 
 	// sets backEnd.lightScale/overBright, read by the reused
 	// RB_CreateSingleDrawInteractions
@@ -9904,7 +10065,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// per-light shadowing and adding (matches RB_ARB2_DrawInteractions)
 	// r_shadowMapDebug counts how each lit light was classified this view
 	int dbgLit = 0, dbgProjected = 0, dbgShadowMapped = 0, dbgPoint = 0,
-	    dbgParallel = 0, dbgNoShadow = 0, dbgNoLightDef = 0, dbgStencilBig = 0;
+	    dbgParallel = 0, dbgNoShadow = 0, dbgNoLightDef = 0, dbgStencilBig = 0, dbgDiCovered = 0;
 	RB_RHI_ResetShadowTallies( r );
 	if ( !r_skipInteractions.GetBool() ) {
 		for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
@@ -9937,8 +10098,24 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			// falls back to stencil. That mix is exactly the free per-light selection.
 			// Reading lightDef->parms here is a read-only frontend query.
 			const lightShadowClass_t cls = RB_RHI_ClassifyLightShadow( r, vLight );
-			RB_RHI_SelectLightShadowTechnique( r, viewDef, vLight, cls, shadowMapProg,
-			                                   shadowCubeProg, dbgShadowMapped );
+			// ReSTIR DI Stage D (r_rtReStirDIApply): when DI lights this view, a light the scene-light buffer covers
+			// (the SAME membership the DI gather sampled - RB_RHI_SceneLightCovered) has its opaque world draws
+			// done by the deferred apply. Skip ALL its shadow work (maps / cubes / stencil volumes / the blurred
+			// ray mask) - only the view weapon + translucents still draw forward for it, and those take the
+			// inline ray (mode 4) when the RT scene is live, else unshadowed. Lights outside the buffer (ambient,
+			// no lightDef, beyond its capacity) take the normal path, so nothing is lit twice or by nobody.
+			ictx.lightDiCovered = rhiReStirDIApplyThisView && vLight->lightDef != NULL
+				&& !vLight->lightShader->IsAmbientLight()
+				&& RB_RHI_SceneLightCovered( viewDef, vLight->lightDef->index );
+			if ( ictx.lightDiCovered ) {
+				RB_RHI_ResetLightShadowState();
+				ictx.lightRtPoint = ( ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0 );
+				ictx.lightRange = cls.isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
+				dbgDiCovered++;
+			} else {
+				RB_RHI_SelectLightShadowTechnique( r, viewDef, vLight, cls, shadowMapProg,
+				                                   shadowCubeProg, dbgShadowMapped );
+			}
 
 			const bool shadowMapped = ictx.lightShadowMapped || ictx.lightShadowCube || ictx.lightRtPoint;
 
@@ -9955,7 +10132,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			// That per-light mix is the free selection the interaction loop allows.
 			// Everything else with a map draws unshadowed off the map; a light with
 			// neither (out-of-budget point, parallel) still renders unshadowed.
-			const bool useStencil = castsShadows && !shadowMapped && ( !smEnabled || oversize );
+			const bool useStencil = castsShadows && !shadowMapped && ( !smEnabled || oversize ) && !ictx.lightDiCovered;
 			if ( oversize && useStencil ) {
 				dbgStencilBig++;
 			}
@@ -10017,6 +10194,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 		}
 	}
 	backEnd.vLight = NULL;
+	ictx.lightDiCovered = false;
+	if ( r_shadowMapDebug.GetInteger() > 0 && dbgDiCovered > 0 ) {
+		common->Printf( "ReSTIR DI: %d of %d lit lights DI-covered this view (forward opaque draws + shadow work skipped)\n", dbgDiCovered, dbgLit );
+	}
 
 	RB_RHI_LogShadowMapSummary( dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,
 	                            dbgPoint, dbgParallel, dbgNoLightDef, dbgStencilBig );

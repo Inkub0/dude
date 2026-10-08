@@ -170,6 +170,10 @@ confidence/NRD) at a fraction, with the velocity downsampled to that res; the de
 reduced-res output (`r_rtReStirDIBilateralUpscale` = the `rtgi_apply` joint-bilateral, else bilinear) and
 re-masks sky/weapon. Still debug-only — nothing lights the scene with DI yet.
 
+**Shipped (Stage D, 2026-10-08, user test pending):** `r_rtReStirDIApply` — DI LIGHTS THE SCENE: full-BRDF
+G-buffer gather (demodulated), additive apply inside the FSR2 opaque snapshot, and the forward per-light draws +
+shadow work skipped for every light the scene-light buffer covers. Details under "Stage D" below.
+
 **Shipped (Stage G, 2026-10-08):** the scene-light buffer carries each light's projection cookie + falloff
 ramp as bindless slots (`RtLight.projTex/falloffTex`, row 128 B) and DI + the RTGI bounce attenuate with
 them (`rt_light_tex.glsl`), behind `r_rtLightTextures` (default 1). Details under "Stage G" below.
@@ -179,8 +183,9 @@ them (`rt_light_tex.glsl`), behind `r_rtLightTextures` (default 1). Details unde
   in-frame ReSTIR spatial pass (combine geometry-matched neighbours). No history/reproject → no trails;
   distinct from the retired *temporal* reservoir.
 - **DI's own NRD instance** — so GI + DI can run together and the auto-claim mutual-exclusion can retire.
-- **Consume in the lit scene** — the big one: replace the `r_rtAllLights` per-light draw model as the
-  `dude_rtx 2` direct-lighting path. Detailed plan in **"Next: DI lights the scene"** below.
+- **Preset wiring** — once Stage D holds up in testing, wire `r_rtReStirDI` + `r_rtReStirDIApply` (+ Stage G) into
+  the `dude_rtx 2` "Ultra Nightmare" tier and the menu RT selector; then the v1 approximations listed under
+  Stage D (stage/vertex colours, occlusion maps, diffuse/spec denoise split).
 
 ## Next: DI lights the scene (detailed plan, authored 2026-10-07 — execute in a later session)
 
@@ -242,32 +247,55 @@ shows its real cone/blob + colour (not a square pyramid); toggle `r_rtLightTextu
 than before (expected — cookies are black outside the blob, that's the point), any light going fully
 black (a cookie that failed to bridge → `VK: no RHI image` warning), scrolling cookies drifting vs forward.
 
-### Stage D — deferred DI apply + forward per-light suppression
-Mirrors `RB_RHI_RtgiApply` (`RhiWorld.cpp:8242`, additive `ONE|ONE` into `rhiHdrRT` at `:8319`).
+### Stage D — deferred DI apply + forward per-light suppression — SHIPPED 2026-10-08 (user test pending)
+Branch `feat/rtx-restir-di-apply`. Behind **`r_rtReStirDIApply`** (default 0; needs `r_rtReStirDI 1`; the debug
+overlay `r_rtReStirDIDebug` overrides it). ImGui: Debugging → ReSTIR Direct Lighting → "Light the Scene with DI".
 
-- **D1 — widen the albedo G-buffer gate:** `wantAlbedo` (`RhiWorld.cpp:4432`, currently `r_rtgi && VK`) must
-  also fire under `r_rtReStirDIApply`, so the standalone 4-MRT prepass produces **albedo (loc3)** + **rough/
-  metal (loc1)** + bump normal (loc0) for a deferred shade. (Albedo = `GetRenderTargetImage4(rhiNormalResultRT)`.)
-- **D2 — full-BRDF gather:** `restir_di.frag` shades with the G-buffer material instead of `albedo=1` diffuse:
-  diffuse = `albedo·irradiance`, specular = GGX(`roughness`, F0 from `albedo`+`metalness`). v1 may denoise
-  diffuse+spec **combined** as diffuse (specular slightly over-blurred); the split (REBLUR_DIFFUSE +
-  REBLUR_SPECULAR, a 2nd NRD dispatch) is a later refinement.
-- **D3 — DI apply pass:** additive `ONE|ONE` into `rhiHdrRT` at the opaque/translucent split
-  (`RhiBackend.cpp:3573`, the `RtgiApply` site) **inside** the FSR2 opaque snapshot (`RB_RHI_FsrCaptureOpaque`
-  `:3579`) or FSR2 de-ghosts it into blocky squares; order it alongside/just before `RtgiApply`. Reuse the
-  bilateral upscale when reduced-res. Behind `r_rtReStirDIApply`.
-- **D4 — forward suppression:** in the per-light loop (`RhiWorld.cpp:9859`), skip the **opaque** interaction
-  draws (`:9942-9951`) for the lights DI covers. The DI-covered set MUST **exactly** match
-  `GatherSceneLights` membership (view-ID gating `:5522-5524`, lights dropped for black/off-phase stages
-  `:5538-5559`) — drive both from one per-view membership, or a light is double-bright (both) or dark
-  (neither). Keep translucent (`:9963`) + film (`:9965`) forward.
-- **D5 — always stays forward:** view weapon (`weaponDepthHack`/`modelDepthHack` spaces — excluded from the
-  G-buffer, depth-hack makes screen-space unreliable), translucent interactions (no G-buffer coverage),
-  film/decal interactions, fog/blend lights (separate multiplicative path `RB_RHI_FogAllLights`), and
-  sub-views/mirrors (no G-buffer — primary fullscreen view only).
-- **D6 — validate:** `r_rtReStirDIApply 0` vs `1` ≈ identical look but cheaper in light-dense scenes
-  (`r_vkGpuTime 2`: forward interaction + shadow-ray cost drops, DI stays ~flat). Watch for double-bright
-  (membership mismatch) or dark patches (over-suppression); verify cookie/colored lights match forward.
+**Decision point (per view, before the light loop):** `RB_RHI_ReStirDIPass` computes `diApply` = cvar on + no
+debug overlay + albedo/material G-buffer present + apply shader loadable, and sets `rhiReStirDIApplyThisView`
+after the gather ran. The forward loop's suppression and the apply BOTH key off that one flag, so they cannot
+disagree within a view (and a sub-view, where the DI pass early-outs, is never suppressed).
+
+- **D1 — G-buffer:** `wantAlbedo` (`RB_RHI_NormalPrepass`) now also fires for `r_rtReStirDI && r_rtReStirDIApply`
+  (forces the standalone 4-MRT prepass: normal / material / velocity / albedo). NEW: the prepass binds the
+  surface's **specular map on unit 3** and `gbuffer.frag` writes its **luminance into material att1 `.b`**
+  (`out_Material = (rough, metal, specLum, 1)`; nothing else read `.b`; black = no spec stage, as forward).
+- **D2 — full-BRDF gather (`restir_di.frag` apply mode, `u_localParam1.w`):** binds albedo (unit 2) + material
+  (unit 3) and shades each candidate with interaction.frag's PBR combine: GGX NDF (pi folded out), Schlick-GGX
+  vis, `lobe = min(D·vis, r_pbrFireflyClamp)`, `spec = lobe·F·specMask·mix(r_pbrSpecScale,1,metal)·2`, the
+  metal env floor `F0·metal·r_pbrEnvScale·(1-0.5·rough)·specMask`, diffuse `albedo·(1-F)·(1-metal·kd)` with
+  `kd = 1 - r_pbrMetalDiffuse`; `r_pbr 0` → Lambert only. pHat = luminance of the SHADED contribution (so a
+  light that only grazes a metal specularly can still be picked). **Demodulation:** the output is divided by
+  `diDemodFactor(albedo, metal, specMask)` (`restir_di_common.glsl`, = the material's reflectance share, floored
+  0.02) so NRD denoises a texture-free signal; the apply multiplies the identical factor back (exact).
+- **D3 — apply pass `RB_RHI_ReStirDIApply` + `restir_di_apply.frag`:** additive ONE|ONE into `rhiHdrRT` at the
+  opaque/translucent split, right before `RtgiApply` at all three of its call sites (inside the FSR2 opaque
+  snapshot), idempotent per view. Upscales like the debug overlay (bilateral when reduced-res), remultiplies
+  by `diDemodFactor` from the full-res G-buffer, by **`backEnd.lightScale`** (forward `lightColor = lightScale ×
+  stage colour`; the gather carries raw stage colours) and by the AO-on-direct-light term (`mix(floor,1,ao)`
+  blended by `r_ssaoDirectLight`, when an AO buffer exists this view). Sky + weapon get nothing.
+- **D4 — forward suppression (`RB_RHI_DrawWorld`):** `RB_RHI_GatherSceneLights` now records per-view
+  MEMBERSHIP (generation-stamped per lightDef index, `RB_RHI_SceneLightCovered`). A lit light is DI-covered iff
+  the apply flag is set, it has a lightDef, is not ambient, and the gather included it this view+frame. For a
+  covered light: no `SelectLightShadowTechnique` (no shadow map / cube / sun map / blurred ray mask), no stencil
+  volumes; `lightRtPoint` is set when the TLAS is live so the surfaces that still draw forward take the inline
+  ray (mode 4), else unshadowed. `RB_RHI_DrawInteraction` early-returns for the light's **opaque world** surfaces
+  (depth-EQUAL, not weapon/model depth-hacked, not ambient, not a film draw).
+- **D5 — stays forward:** view weapon + depth-hacked models, translucent interactions (depth-LESS), blood films,
+  ambient lights (never in the buffer), fog/blend lights, sub-views, and any light beyond the buffer's capacity
+  (248) or without a lightDef — all by construction of the membership rule.
+- **D6 — validate (USER TEST pending):** `r_rtReStirDI 1` then toggle `r_rtReStirDIApply 0/1` → ≈ the same look;
+  `r_vkGpuTime 2`: the per-light interaction + shadow/blur-mask cost drops, `restir.di.*` + `restir.di.apply`
+  appear. `r_shadowMapDebug 1` prints "N of M lit lights DI-covered". Watch for double-bright (a light drawn by
+  both — membership mismatch), dark patches (over-suppression), brightness scale vs forward (lightScale), spec
+  highlights (spec map luminance ≈ forward's rgb mask), and NRD softness on the now-textured signal.
+
+**Known v1 approximations (deliberate, listed for the test):** diffuse/specular STAGE colours + vertex colour
+assumed 1 (not in the G-buffer); baked occlusion maps not applied to DI; the legacy non-PBR specular LUT not
+replicated (`r_pbr 0` = Lambert); no Toksvig widening (G-buffer normal is unit); the organic spec-fallback
+(flesh without a spec stage) not replicated; AO applies to diffuse+spec together; `noSpecular` light parm
+ignored; multi-stage light cookies (Stage G) take the first live stage. The RTGI/RTAO auto-claim still stands
+them down while DI is on (DI's own NRD instance remains the fix).
 
 ### Open risks / deferred decisions
 - **Legacy (non-PBR) specular:** the spec *map* isn't in the G-buffer (only rough/metal) — approximate from

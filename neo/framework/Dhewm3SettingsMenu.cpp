@@ -4780,6 +4780,15 @@ static void DrawDbgGroup_ReStirDI()
 
 	ImGui::BeginDisabled( !r_rtReStirDI.GetBool() );
 
+	// --- Stage D: DI lights the scene ---
+	ImGui::SeparatorText( "Scene Lighting" );
+	CvarCheckbox( "Light the Scene with DI", r_rtReStirDIApply, "The denoised DI, shaded with the G-buffer material "
+		"(albedo + GGX roughness/metalness + spec map), becomes the direct lighting of every opaque world surface, "
+		"and the forward per-light interaction draws + their shadow work are skipped for every light DI covers. "
+		"The view weapon, translucents, blood films, fog/blend + ambient lights and sub-views stay forward. "
+		"Off = DI is debug-only and the forward path is untouched. A/B: same look, cheaper in light-dense rooms. "
+		"The debug view below overrides this. (r_rtReStirDIApply)" );
+
 	// --- Debug view (the DI buffer blitted over the scene) ---
 	ImGui::SeparatorText( "Debug View" );
 	CvarCheckbox( "Show DI Buffer", r_rtReStirDIDebug, "Blit the DI irradiance over the finished frame (the "
