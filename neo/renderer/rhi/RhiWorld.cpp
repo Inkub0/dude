@@ -1799,20 +1799,16 @@ static bool RB_RHI_FillContactShadowParms( rhi::RenderParams &parms, const drawI
 	return contactShadows;
 }
 
-static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawInteraction_t *din ) {
-	// DUDE material AO map (docs/occlusion-maps.md). A per-surface baked occlusion texture
-	// (the material's `occlusionmap` stage) darkens the ambient term, and -- scaled by
-	// r_occlusionMapDirect -- the direct-light diffuse, reusing the SSAO application path in
-	// ambientlight.frag / interaction.frag. Independent of SSAO (works with it off). Bound on
-	// unit 10 below; u_occlusionParms = (enable, ambient strength, direct strength, unused).
-	// GetOcclusionStage() is NULL on every stock material, so this stays inert on the base game.
+// The baked occlusion map a draw surface carries, or NULL (docs/occlusion-maps.md). Shared by the forward
+// interaction fill below and the ReSTIR DI albedo prepass (which stores it in the material attachment).
+static idImage *RB_RHI_SurfaceOcclusionImage( const drawSurf_t *surf ) {
 	idImage *occlusionImage = NULL;
-	if ( r_occlusionMaps.GetBool() && R_BackendSupportsEnhancements() && din->surf->material ) {
-		const idMaterial *mat = din->surf->material;
+	if ( r_occlusionMaps.GetBool() && R_BackendSupportsEnhancements() && surf->material ) {
+		const idMaterial *mat = surf->material;
 		const shaderStage_t *ocl = mat->GetOcclusionStage();
 		if ( ocl && ocl->texture.image ) {
 			// explicit occlusionmap stage (modpack-authored) always wins
-			const float *regs = din->surf->shaderRegisters;
+			const float *regs = surf->shaderRegisters;
 			if ( !regs || regs[ocl->conditionRegister] != 0.0f ) {
 				occlusionImage = ocl->texture.image;
 			}
@@ -1821,7 +1817,7 @@ static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawI
 			// model-entity surfaces (props/NPCs) -- never the static world BSP, matching the
 			// "give kick to objects, not map geometry" intent (docs/occlusion-maps.md). This
 			// also contains the material-name keying's blast radius to non-world surfaces.
-			const idRenderEntityLocal *redef = din->surf->space ? din->surf->space->entityDef : NULL;
+			const idRenderEntityLocal *redef = surf->space ? surf->space->entityDef : NULL;
 			const bool worldSurf = redef && redef->parms.hModel
 			    && redef->parms.hModel->IsStaticWorldModel();
 			if ( redef && !worldSurf ) {
@@ -1834,6 +1830,17 @@ static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawI
 			}
 		}
 	}
+	return occlusionImage;
+}
+
+static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawInteraction_t *din ) {
+	// DUDE material AO map (docs/occlusion-maps.md). A per-surface baked occlusion texture
+	// (the material's `occlusionmap` stage) darkens the ambient term, and -- scaled by
+	// r_occlusionMapDirect -- the direct-light diffuse, reusing the SSAO application path in
+	// ambientlight.frag / interaction.frag. Independent of SSAO (works with it off). Bound on
+	// unit 10 below; u_occlusionParms = (enable, ambient strength, direct strength, unused).
+	// GetOcclusionStage() is NULL on every stock material, so this stays inert on the base game.
+	idImage *occlusionImage = RB_RHI_SurfaceOcclusionImage( din->surf );
 	if ( occlusionImage ) {
 		const float scale = idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapScale.GetFloat() );
 		parms.occlusionParms[0] = 1.0f;
@@ -4678,8 +4685,16 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// masks its GGX lobe exactly as the forward draw does (spec * specMap). blackImage = no spec stage = no
 		// specular, which is what the forward path draws too (din->specularImage = blackImage).
 		idImage *diSpecImg = globalImages->blackImage;
+		// ReSTIR DI material parity: the diffuse stage's colour registers + vertex-colour mode (the forward
+		// diffuse = map * stage colour * vertex colour) and the baked occlusion map (material att1 .a). Neutral
+		// defaults so the non-albedo prepass paths are unaffected (gbuffer.frag only reads them under localParam0.y).
+		parms.diffuseModifier[0] = parms.diffuseModifier[1] = parms.diffuseModifier[2] = parms.diffuseModifier[3] = 1.0f;
+		parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;	// SVC_IGNORE
+		idImage *diOcclImg = NULL;
 		if ( wantAlbedo ) {
 			parms.localParam0[1] = 1.0f;
+			diOcclImg = RB_RHI_SurfaceOcclusionImage( surf );
+			parms.occlusionParms[0] = diOcclImg ? 1.0f : 0.0f;
 			for ( int s = 0; s < shader->GetNumStages(); s++ ) {
 				const shaderStage_t *sst = shader->GetStage( s );
 				if ( sst->lighting != SL_SPECULAR || sst->texture.image == NULL || regs[sst->conditionRegister] == 0 ) {
@@ -4694,6 +4709,23 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 					continue;
 				}
 				rtgiDiffuseImg = dst->texture.image;
+				// the stage colour (R_SetDrawInteraction: the colour registers, floored at 0) and the vertex-colour
+				// mode, exactly as RB_RHI_DrawInteraction hands them to the interaction shaders
+				for ( int c = 0; c < 4; c++ ) {
+					parms.diffuseModifier[c] = Max( regs[dst->color.registers[c]], 0.0f );
+				}
+				switch ( dst->vertexColor ) {
+				case SVC_MODULATE:
+					parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = 1.0f;
+					parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 0.0f;
+					break;
+				case SVC_INVERSE_MODULATE:
+					parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = -1.0f;
+					parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
+					break;
+				default:		// SVC_IGNORE: add = 1 (set above)
+					break;
+				}
 				if ( dst->texture.hasMatrix ) {
 					parms.diffuseMatrixS[0] = regs[dst->texture.matrix[0][0]];
 					parms.diffuseMatrixS[1] = regs[dst->texture.matrix[0][1]];
@@ -4768,6 +4800,9 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		RB_RHI_BindUnit( 0, bumpImg );
 		RB_RHI_BindUnit( 2, rtgiDiffuseImg );	// RTGI H6c: receiver-albedo source (gbuffer.frag samples it only when u_localParam0.y>0.5)
 		RB_RHI_BindUnit( 3, diSpecImg );		// ReSTIR DI Stage D: specular map (gbuffer.frag samples it only when u_localParam0.y>0.5)
+		if ( diOcclImg ) {
+			RB_RHI_BindUnit( 10, diOcclImg );	// ReSTIR DI material parity: baked occlusion map -> material att1 .a (gated by u_occlusionParms.x)
+		}
 		r->BindPipeline( pd );
 
 		rhi::DrawArgs da;
@@ -8703,6 +8738,10 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[2] = aoDirect;
 	parms.diffuseModifier[0] = 1.0f - r_pbrMetalDiffuse.GetFloat();	// diDemodFactor inputs: MUST match the gather's
 	parms.diffuseModifier[1] = r_pbrSpecScale.GetFloat();
+	// baked occlusion maps on direct light (material att1 .a), the forward's r_occlusionMapScale * r_occlusionMapDirect
+	parms.occlusionParms[2] = ( r_occlusionMaps.GetBool() && R_BackendSupportsEnhancements() )
+		? idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapScale.GetFloat() ) * idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapDirect.GetFloat() )
+		: 0.0f;
 	parms.screenCorrection[0] = ( rhiReStirDIW > 0 ) ? 1.0f / rhiReStirDIW : 1.0f;	// reduced-res DI texel (uv)
 	parms.screenCorrection[1] = ( rhiReStirDIH > 0 ) ? 1.0f / rhiReStirDIH : 1.0f;
 	if ( uploadW > 0 && uploadH > 0 ) {

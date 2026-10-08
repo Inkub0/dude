@@ -13,6 +13,7 @@ SAMPLER_BINDING(0) uniform sampler2D u_bumpMap;
 SAMPLER_BINDING(1) uniform sampler2D u_coverageMap;   // diffuse alpha for perforated surfaces
 SAMPLER_BINDING(2) uniform sampler2D u_diffuseAlbedo; // RTGI (docs/rtx-rtgi.md H6c): surface diffuse, written to out_Albedo
 SAMPLER_BINDING(3) uniform sampler2D u_specularMask;  // ReSTIR DI (docs/rtx-restir-di.md Stage D): the surface's specular map, luminance -> out_Material.b
+SAMPLER_BINDING(10) uniform sampler2D u_occlusionMap; // ReSTIR DI material parity: the surface's baked occlusion map (R), -> out_Material.a; gated by u_occlusionParms.x
 
 VARY(0) in vec2 var_TexBump;
 VARY(1) in vec3 var_T;
@@ -24,9 +25,10 @@ VARY(4) in vec2 var_TexCoverage;
 // targets that carry no 3rd attachment.
 VARY(7) in vec4 var_CurClip;
 VARY(8) in vec4 var_PrevClip;
+VARY(10) in vec4 var_Color;			// vertex-colour term (interaction.vert's var_Color), albedo prepass only
 
 layout(location = 0) out vec4 fragColor;
-layout(location = 1) out vec4 out_Material;   // SSR: (roughness, metalness, spec-map luminance [DI apply only, else 0], 1)
+layout(location = 1) out vec4 out_Material;   // SSR: (roughness, metalness, spec-map luminance [DI apply only, else 0], baked occlusion [DI apply only, else 1])
 layout(location = 2) out vec2 out_Velocity;   // R1/A2 motion vector: currUV - prevUV, +Y-up
 layout(location = 3) out vec4 out_Albedo;     // RTGI H6c: receiver albedo; only attached on the 4-MRT RTGI prepass (else GL discards the write)
 
@@ -57,7 +59,10 @@ void main() {
 	// interaction.frag masks with spec * specMap). Sampled with the diffuse UV (var_TexCoverage), only on the
 	// 4-MRT albedo prepass (u_localParam0.y) - black otherwise, and nothing else reads .b.
 	float specLum = ( u_localParam0.y > 0.5 ) ? dot( texture( u_specularMask, var_TexCoverage ).rgb, vec3( 0.2126, 0.7152, 0.0722 ) ) : 0.0;
-	out_Material = vec4( u_pbrParms.y, u_pbrParms.x, specLum, 1.0 );
+	// .a = the baked occlusion map (docs/occlusion-maps.md), sampled with the diffuse UV as interaction.frag does; 1 =
+	// none. The DI apply scales its lighting by it exactly as the forward direct diffuse is (r_occlusionMapScale * Direct).
+	float occl = ( u_localParam0.y > 0.5 && u_occlusionParms.x > 0.5 ) ? texture( u_occlusionMap, var_TexCoverage ).r : 1.0;
+	out_Material = vec4( u_pbrParms.y, u_pbrParms.x, specLum, occl );
 
 	// per-pixel screen velocity (docs/fsr-temporal-pipeline.md R1/A2): divide each interpolated
 	// clip by its OWN w so large world triangles reproject correctly, take the NDC delta, scale
@@ -87,5 +92,9 @@ void main() {
 	// apply can shade albedo * gathered-irradiance per pixel. u_localParam0.y gates it (1 only on the
 	// 4-MRT RTGI prepass); var_TexCoverage is the diffuse-matrix UV (filled for every surface there).
 	// On the 1/2/3-attachment prepass targets there is no 4th attachment, so the write is discarded.
-	out_Albedo = ( u_localParam0.y > 0.5 ) ? vec4( texture( u_diffuseAlbedo, var_TexCoverage ).rgb, 1.0 ) : vec4( 0.0 );
+	// ReSTIR DI material parity: the forward diffuse term is diffuseMap * stage colour (u_diffuseModifier, the diffuse
+	// stage's colour registers) * vertex colour (var_Color), so the albedo carries all three - the deferred DI shade and
+	// the GI receiver albedo then match what interaction.frag multiplies the light by.
+	out_Albedo = ( u_localParam0.y > 0.5 )
+		? vec4( texture( u_diffuseAlbedo, var_TexCoverage ).rgb * u_diffuseModifier.rgb * var_Color.rgb, 1.0 ) : vec4( 0.0 );
 }
