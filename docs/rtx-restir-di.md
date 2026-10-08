@@ -160,6 +160,24 @@ RT targets add `CreateRenderTarget*` + handle/size/ready statics + a context-los
 
 ## What's shipped vs TODO
 
+**Status 2026-10-08 (end of day, all on local master, not pushed):** `dude_rtx 2` "Ultra Nightmare" is real.
+- Stage G: scene lights carry their cookie + falloff textures (`r_rtLightTextures`), 2D-only cookies.
+- Stage D: DI lights the scene (`r_rtReStirDIApply`): full-BRDF deferred gather (demodulated), additive apply at the
+  opaque split inside the FSR2 snapshot (full-view scissor), forward per-light suppression from the gather's own
+  membership, grate-aware visibility ray with a per-view box list, material parity (stage colour, vertex colour,
+  spec map, baked occlusion map).
+- Fast-changing lights stay forward (`r_rtReStirDIDynamicForward`): weapon lights, moved, recoloured (20 %) or
+  re-appeared, 16-frame hysteresis; DUDE's fill lights exempt; the combined bounce skips them too.
+- Combined DI + GI in one buffer, one NRD denoise (`r_rtReStirDICombineGI`, the "path 2" decision) via the shared
+  `rtgi_bounce.glsl`; RTGI's own pass stands down under DI.
+- Debug: `r_rtReStirDIDebug` 0/1/2 (off / raw / denoised) + ImGui dropdown; `r_shadowMapDebug 1` prints
+  "N of M lit lights DI-covered".
+- Preset: `dude_rtx 2` applies/detects it; both menus offer "Ultra Nightmare".
+- Tuned defaults (user, 2026-10-08): ResScale 0.75, Checkerboard on, Bilateral on, History 16, Confidence 0.1,
+  PrepassBlur 36, BlurRadius 24, HistoryFix 5, EdgeStop 0.1.
+- Device-loss tooling born of the (hardware) crash hunt: DI cvars in the idle-rebuild signature, NV diagnostic
+  checkpoints on every GPU scope + sync submission, named fence waits, per-light `light.*` scopes.
+
 **Shipped (Step B `fc5df0d1`):** fresh 1-spp gather, one visibility ray, weapon mask, NRD REBLUR_DIFFUSE
 denoise, confidence pass, the four NRD spatial-cleanup knobs, auto-claim, the ImGui group, candidates to 128.
 
@@ -168,24 +186,20 @@ checkerboard (packed left, draw restricted to the left half) and reconstructs vi
 full-res guide pass + NRD constant-BLACK; `r_rtReStirDIResScale` runs the whole chain (gather/guides/
 confidence/NRD) at a fraction, with the velocity downsampled to that res; the debug overlay upscales the
 reduced-res output (`r_rtReStirDIBilateralUpscale` = the `rtgi_apply` joint-bilateral, else bilinear) and
-re-masks sky/weapon. Still debug-only — nothing lights the scene with DI yet.
+re-masks sky/weapon.
 
-**Shipped (Stage D, 2026-10-08, user test pending):** `r_rtReStirDIApply` — DI LIGHTS THE SCENE: full-BRDF
-G-buffer gather (demodulated), additive apply inside the FSR2 opaque snapshot, and the forward per-light draws +
-shadow work skipped for every light the scene-light buffer covers. Details under "Stage D" below.
-
-**Shipped (Stage G, 2026-10-08):** the scene-light buffer carries each light's projection cookie + falloff
-ramp as bindless slots (`RtLight.projTex/falloffTex`, row 128 B) and DI + the RTGI bounce attenuate with
-them (`rt_light_tex.glsl`), behind `r_rtLightTextures` (default 1). Details under "Stage G" below.
-
-**TODO:**
-- **Spatial reuse** — if the NRD knobs can't clean the grate/limb noise without over-softening, add an
-  in-frame ReSTIR spatial pass (combine geometry-matched neighbours). No history/reproject → no trails;
-  distinct from the retired *temporal* reservoir.
-- **DI's own NRD instance** — so GI + DI can run together and the auto-claim mutual-exclusion can retire.
-- **Preset wiring** — once Stage D holds up in testing, wire `r_rtReStirDI` + `r_rtReStirDIApply` (+ Stage G) into
-  the `dude_rtx 2` "Ultra Nightmare" tier and the menu RT selector; then the v1 approximations listed under
-  Stage D (stage/vertex colours, occlusion maps, diffuse/spec denoise split).
+**TODO (in rough priority):**
+- **Play-test the whole tier** at `dude_rtx 2` with `r_vkGpuTime 2`: brightness/spec parity vs `r_rtReStirDIApply 0`,
+  grates, flashlight/flash lag, combined-GI look + cost (~2.2 ms expected), the handover dip when a light settles.
+- **Remaining v1 approximations:** specular stage colour; legacy non-PBR spec LUT; Toksvig; organic spec fallback;
+  AO + occlusion map on the combined diffuse+spec term (needs the diffuse/spec denoise split); `noSpecular`;
+  multi-stage cookies take the first live stage.
+- **Diffuse/specular denoise split** (REBLUR_DIFFUSE + REBLUR_SPECULAR), only if specular over-blur reads badly.
+- **Per-view grate box list** overflows at 64 (last box swallows the rest → most pixels take the slow ray in
+  grate-heavy areas): measure, then cull or raise.
+- **RTAO coexistence:** RTAO still stands down under DI (the GI replaces it at this tier anyway); revisit only if
+  AO is missed.
+- **Spatial reuse** — still available if NRD's knobs ever prove insufficient.
 
 ## Next: DI lights the scene (detailed plan, authored 2026-10-07 — execute in a later session)
 
