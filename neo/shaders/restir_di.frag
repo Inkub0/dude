@@ -5,9 +5,9 @@
 // temporal accumulation to NRD (+ the DI confidence pass for moving-light antilag). That is what kills the
 // moving-object trails a hand-rolled reproject leaves.
 //
-// The weapon is MASKED out (a < 0.5 -> zero), exactly as RTGI / RTAO / SSR do: it is a depth-hacked surface
-// that must not receive world DI, and masking it here means it can never ghost. NRD owns the temporal, so
-// the background the weapon uncovers is handled by NRD's disocclusion, not left as a hole.
+// The weapon is NOT masked out here (unlike RTGI / RTAO / SSR): a moving hole in NRD's input left the world its
+// silhouette uncovers each frame without history (a fried halo). Its pixels are shaded like any other and the
+// apply / debug overlay mask them at display, so it never receives world DI on screen and never ghosts.
 //
 // Output is the 3-attachment NRD guide MRT (CreateRenderTargetRtgiMrt), exactly like rtgi_ray.frag so the
 // shared REBLUR_DIFFUSE denoise (RtaoDenoise giMode) drops in unchanged:
@@ -117,7 +117,11 @@ vec4 packNrdNormal( vec3 Nraw ) {
 // inside the union of the scene lights' volumes (u_particleRadius.zw, u_windowCoord.x of them) and a segment
 // that passes through none of them keeps the force-opaque ray - the hardware's fastest traversal. Only a segment
 // that can meet a grate traces the grate-aware ray and alpha-tests its candidates against the coverage texture.
-float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl ) {
+// occDist (out) = distance to the occluder when the ray is blocked, else the distance to the light: the "hit
+// distance" NRD scales its blur radius by. Feeding the LIGHT distance for every pixel told ReBLUR that every
+// shadow came from a far source and widened the blur until grate / contact shadows vanished (user, 2026-10-08).
+float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, out float occDist ) {
+	occDist = dl;
 	if ( u_rtParms.x == 0.0 && u_rtParms.y == 0.0 ) { return 1.0; }		// no RT scene
 	float tMax = min( dl - 1.0, u_rtParms.w );
 	if ( !( tMax > 0.0 ) ) { return 1.0; }
@@ -136,7 +140,9 @@ float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl ) {
 			gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu /* skip perforated-caster instances */,
 			O, 0.0, ldir, tMax );
 		while ( rayQueryProceedEXT( rqo ) ) { }
-		return ( rayQueryGetIntersectionTypeEXT( rqo, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? 1.0 : 0.0;
+		if ( rayQueryGetIntersectionTypeEXT( rqo, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) { return 1.0; }
+		occDist = rayQueryGetIntersectionTEXT( rqo, true );
+		return 0.0;
 	}
 	// grate-aware: perforated instances (mask 0x02) arrive as candidates; a solid texel dims to 1 - strength and
 	// the ray carries on (min over grates, not a product - a candidate may be reported twice); opaque geometry
@@ -158,7 +164,9 @@ float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl ) {
 			perfVis = 1.0 - u_windowCoord.y;
 		}
 	}
-	return ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? perfVis : 0.0;
+	if ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) { return perfVis; }
+	occDist = rayQueryGetIntersectionTEXT( rq, true );
+	return 0.0;
 }
 
 void main() {
@@ -188,7 +196,9 @@ void main() {
 	// checkerboard packs traced samples into the LEFT HALF; the right half traces nothing (NRD reconstructs it)
 	if ( cbMode > 0 && frag.x * u_screenCorrection.x >= 0.5 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
 	if ( raw >= 0.9994 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// sky / no geometry
-	if ( nt.a < 0.5 )    { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// view weapon: no world DI (masked, like RTGI)
+	// The view weapon (nt.a < 0.5) is NOT masked here: a moving hole in the denoiser's input leaves the world its
+	// silhouette uncovers each frame with no history (fried halo). Its pixels get a DI of their own (depth-hacked,
+	// never displayed) so NRD sees a continuous field; the apply and the debug overlay mask it at DISPLAY.
 
 	// view-space position + normal (ssao/rtao reconstruction incl. the VK view-Y sign)
 	vec2  ndc = sfrag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
@@ -312,8 +322,9 @@ void main() {
 	// unbiased contribution weight W = (1/pHat(y))·(wSum/M); one visibility ray for the chosen light. pHat
 	// stays UNSHADOWED, so rad(y)·W·vis is still unbiased for the shadowed sum. NOSHADOWS lights skip the ray.
 	float W   = ( pHatChosen > 0.0 ) ? ( wSum / float( M ) ) / pHatChosen : 0.0;
+	float occDist = dlChosen;
 	float vis = ( !( pHatChosen > 0.0 ) || ( flagsChosen & DUDE_LIGHT_NOSHADOWS ) != 0u )
-		? 1.0 : traceVisibility( Pw, Nw, ldirChosen, dlChosen );
+		? 1.0 : traceVisibility( Pw, Nw, ldirChosen, dlChosen, occDist );
 
 	// the direct term, at the forward path's light scale (lightColor = lightScale * stage colour there)
 	vec3 outRad = max( radChosen * ( W * vis * u_shadowFalloffS.x ), vec3( 0.0 ) );
@@ -357,6 +368,7 @@ void main() {
 	// light - it drives ReBLUR's world-space blur radius (near light -> tight penumbra, far light -> wider),
 	// the direct-lighting analogue of the gather-ray distance RTGI feeds. Normalized saturate( dl / (A + d*B) )
 	// with A = 0.5 * u_localParam0.w, B = 0.1, MUST match the ReblurHitDistanceParameters in RB_RHI_ReStirDIPass.
-	float nhd = clamp( dlChosen / ( 0.5 * u_localParam0.w + d * 0.1 ), 0.0, 1.0 );
+	// occluder distance when shadowed (tight blur for near casters: grates, contact), light distance when lit
+	float nhd = clamp( occDist / ( 0.5 * u_localParam0.w + d * 0.1 ), 0.0, 1.0 );
 	fragColor = vec4( nrdLinearToYCoCg( outRad ), nhd );
 }
