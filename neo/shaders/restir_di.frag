@@ -41,7 +41,7 @@
 //   u_particleRadius.zw   = per-view perforated box list device address (bit-cast; rt_perforated.glsl)
 //   u_shadowFalloffS.x    = forward light scale (backEnd.lightScale): the DI term is scaled here, not at the apply
 //   --- r_rtReStirDICombineGI (RTGI bounce folded into THIS buffer, one NRD denoise; rtgi_bounce.glsl) ---
-//   u_specularParms       = ( combine on/off, fog strength, fog coef (exp), 0 )   [fog: rtgi_apply's r_rtgiFogAttenuate]
+//   u_specularParms       = ( combine on/off, fog strength, fog coef (exp), skip fast lights in the bounce )   [fog: rtgi_apply's r_rtgiFogAttenuate]
 //   u_pbrParms            = ( gather radius, r_rtgiEmissive, r_rtgiEmissiveClamp, r_rtgiLightScale )
 //   u_pbrParms2           = ( ambient floor, shadow-ray gate, eye pullback per unit depth, r_rtgiIntensity )
 //   u_occlusionParms      = ( IGN rotation cos, sin, IGN offset x, y )   [CPU-hoisted per frame, as RB_RHI_RtgiPass]
@@ -333,6 +333,7 @@ void main() {
 		bp.gate           = true;
 		bp.texturedLights = u_windowCoord.w > 0.5;
 		bp.shadowRay      = u_pbrParms2.y > 0.5;
+		bp.skipForwardLights = u_specularParms.w > 0.5;	// r_rtReStirDIDynamicForward: a fast light has NO bounce rather than a trailing one
 		bp.radius         = u_pbrParms.x;
 		bp.emissiveScale  = u_pbrParms.y;
 		bp.emissiveClamp  = u_pbrParms.z;
