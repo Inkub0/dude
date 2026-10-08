@@ -335,6 +335,13 @@ resolution / checkerboard / history / NRD knobs shape the bounce too; the direct
 the blur radius for both; AO-on-direct applies to the bounce as well; `r_rtgiDebug` shows nothing while DI is
 on (use the DI debug views, which now include the bounce). The GI's own pass still stands down under DI.
 
+**Fast-light rule refinements (2026-10-08, user saw FPS fall just from looking around a monitor-filled room):**
+DUDE's own fill lights (`r_emissiveSurfaces` screens, `r_itemGlow`) are exempt from the fast-light rules via the new
+`idRenderLightLocal::dudeFillLight` mark (stamped each frame in tr_light.cpp): their tint follows an animated screen
+and the per-view budget churns them, so the luminance / appeared rules pushed dozens onto the forward path. The
+luminance step is now 20 % (was 10 %) so subtle authored flicker tables stay in DI. `r_shadowMapDebug 1` prints
+"N of M lit lights DI-covered" per frame - the number to watch.
+
 **Known v1 approximations (deliberate, listed for the test):** diffuse/specular STAGE colours + vertex colour
 assumed 1 (not in the G-buffer); baked occlusion maps not applied to DI; the legacy non-PBR specular LUT not
 replicated (`r_pbr 0` = Lambert); no Toksvig widening (G-buffer normal is unit); the organic spec-fallback

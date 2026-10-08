@@ -216,6 +216,9 @@ public:
 
 	const idMaterial *		lightShader;			// guaranteed to be valid, even if parms.shader isn't
 	idImage *				falloffImage;
+	bool					dudeFillLight;			// DUDE-generated fill light (r_emissiveSurfaces screens / r_itemGlow): its tint
+													// follows an animated screen and the per-view budget churns it, so ReSTIR DI
+													// never classes it as fast-changing (stamped each frame in tr_light.cpp)
 
 	idVec3					globalLightOrigin;		// accounting for lightCenter and parallel
 

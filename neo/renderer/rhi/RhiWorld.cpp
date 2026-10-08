@@ -5666,14 +5666,17 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		             + Max( ( cullOrg - viewOrg ).Length() - cullRad, 0.0f );
 		// fast-changing? (see sceneLightTrack_t) - classified once per frame per lightDef (a later view in the same
 		// frame, e.g. the main view after a mirror, reuses the verdict rather than reading "changed" off itself)
+		// DUDE's own fill lights (emissive screens, item glow) are exempt: their tint follows an animated screen
+		// and the per-view budget drops/re-adds them, so the rules below would push dozens of them onto the
+		// forward path (each with its own draws + ray mask) just from looking around a room full of monitors.
 		bool diFast = false;
-		if ( r_rtReStirDIDynamicForward.GetBool() ) {
+		if ( r_rtReStirDIDynamicForward.GetBool() && !ld->dudeFillLight ) {
 			sceneLightTrack_t &t = s_sceneLightTrack[ i ];
 			const int now = tr.frameCount;
 			const float lum = 0.2126f * col[0] + 0.7152f * col[1] + 0.0722f * col[2];
 			if ( t.lastSeenFrame != now ) {
 				const bool appeared = ( t.lastSeenFrame != now - 1 );	// not in last frame's buffer: a flash, a light switched on
-				const bool recolored = idMath::Fabs( lum - t.lum ) > 0.1f * Max( lum, t.lum ) + 0.002f;	// strobe / flicker / fade
+				const bool recolored = idMath::Fabs( lum - t.lum ) > 0.2f * Max( lum, t.lum ) + 0.002f;	// strobe / flicker / fade (20%: subtle authored flicker stays in DI)
 				if ( appeared || recolored ) { t.lastChangeFrame = now; }
 				t.lastSeenFrame = now;
 				t.lum = lum;
