@@ -1912,10 +1912,13 @@ static void R_UpdateEmissiveLights( void ) {
 		// stamp the fading falloff onto the derived light (re-applied every frame because
 		// AddLightDef/UpdateLightDef re-derive it from the light's shader). The viewLight copies
 		// light->falloffImage each frame (see R_SetLightDefViewLight), so this takes effect next frame.
-		if ( fadeFalloff != NULL && handle >= 0 && handle < world->lightDefs.Num() ) {
+		if ( handle >= 0 && handle < world->lightDefs.Num() ) {
 			idRenderLightLocal *ldef = world->lightDefs[handle];
 			if ( ldef != NULL ) {
-				ldef->falloffImage = fadeFalloff;
+				ldef->dudeFillLight = true;		// mark it ours (ReSTIR DI keeps it on the DI path, docs/rtx-restir-di.md)
+				if ( fadeFalloff != NULL ) {
+					ldef->falloffImage = fadeFalloff;
+				}
 			}
 		}
 	}
