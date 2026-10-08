@@ -251,6 +251,10 @@ public:
 	// per-light screen-space mask): a full-target clear each time is pure bandwidth. One-shot;
 	// backends without the notion ignore it (the pass then clears the whole target as usual).
 	virtual void	SetNextTargetPassArea( int x, int y, int w, int h ) {}
+	// one-shot: the next BeginTargetPass LOADS the target's existing color + depth instead of clearing (a second
+	// draw phase into a target that already holds content, e.g. the ReSTIR DI prepass's deferred view weapon).
+	// Backends without the variant fall back to the clear.
+	virtual void	SetNextTargetPassLoad() {}
 	// Make the NEXT BeginTargetPass keep the active weapon/model depth-range hack (SetDepthRange)
 	// instead of forcing the full [0,1] range. Needed for a scene-depth-sealing normal prepass so
 	// the depth-hacked view weapon lands at the same depth as the main view (else close world
