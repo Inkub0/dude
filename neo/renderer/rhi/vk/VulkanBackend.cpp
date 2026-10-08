@@ -232,6 +232,7 @@ public:
 	virtual RenderTargetHandle	CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels );
 	virtual RenderTargetHandle	CreateRenderTargetRtaoMrt( int w, int h );
 	virtual RenderTargetHandle	CreateRenderTargetRtgiMrt( int w, int h );
+	virtual RenderTargetHandle	CreateRenderTargetRtgiShMrt( int w, int h );
 	virtual RenderTargetHandle	CreateRenderTargetBlurRay( int w, int h );
 	virtual void				BeginTargetMipPass( RenderTargetHandle rt, int mipLevel, const ClearArgs *clear );
 	virtual ImageHandle			GetRenderTargetMipImage( RenderTargetHandle rt, int mipLevel );
@@ -1107,7 +1108,7 @@ private:
 	// never clears; until a denoiser has run once with CLEAR_AND_RESTART its history is garbage, so
 	// running CONTINUE over it ghosts. Cleared on (re)create, set once the denoiser records -- so
 	// switching RTAO<->RTGI at an unchanged NRD size still clears the newly-selected denoiser's history.
-	bool						nrdPrimed[3] = {};
+	bool						nrdPrimed[4] = {};
 	// NrdRecordDispatches per-dispatch scratch: reused (clear() keeps capacity) so each dispatch's
 	// descriptor writes don't malloc/free two vectors.
 	std::vector<VkWriteDescriptorSet>		nrdWriteScratch;
@@ -1143,6 +1144,11 @@ private:
 	// H6b RT GI (docs/rtx-rtgi.md): denoised GI radiance — RGBA16F STORAGE (radiance .rgb, occlusion .w)
 	// that REBLUR_DIFFUSE writes via the RtaoDenoise giMode path; same lifecycle as the RTAO output.
 	virtual ImageHandle	GetRtgiOutputImage() { return rtgiOutSampleImage; }
+	virtual ImageHandle	GetRtgiOutputSh1Image() { return rtgiOutSh1SampleImage; }
+	VkImage				rtgiOutSh1Image = VK_NULL_HANDLE;		// SH mode: OUT_DIFF_SH1 (same size / lifecycle as rtgiOutImage)
+	VmaAllocation		rtgiOutSh1Alloc = NULL;
+	VkImageView			rtgiOutSh1View = VK_NULL_HANDLE;
+	ImageHandle			rtgiOutSh1SampleImage = 0;
 	bool				RtgiEnsureOutput( int w, int h );
 	void				RtgiDestroyOutput();
 	VkImage				rtgiOutImage = VK_NULL_HANDLE;
@@ -6703,6 +6709,7 @@ validator signal) and SIGMA_SHADOW (H3 soft shadows).
 static const nrd::Identifier NRD_ID_REBLUR_AO     = 0;
 static const nrd::Identifier NRD_ID_SIGMA_SHADOW  = 1;
 static const nrd::Identifier NRD_ID_REBLUR_GI     = 2;	// H6b RT GI: REBLUR_DIFFUSE (radiance+hitdist), docs/rtx-rtgi.md
+static const nrd::Identifier NRD_ID_REBLUR_GI_SH  = 3;	// ReSTIR DI SH mode: REBLUR_DIFFUSE_SH (SH0 + SH1), docs/rtx-restir-di.md
 
 // nrd::Format -> VkFormat, table-ordered exactly like the enum in NRDDescs.h
 static VkFormat NrdFormatToVk( nrd::Format f ) {
@@ -6759,6 +6766,7 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 		{ NRD_ID_REBLUR_AO,    nrd::Denoiser::REBLUR_DIFFUSE_OCCLUSION },
 		{ NRD_ID_SIGMA_SHADOW, nrd::Denoiser::SIGMA_SHADOW },
 		{ NRD_ID_REBLUR_GI,    nrd::Denoiser::REBLUR_DIFFUSE },
+		{ NRD_ID_REBLUR_GI_SH, nrd::Denoiser::REBLUR_DIFFUSE_SH },		// ReSTIR DI SH mode (one of GI / GI_SH per frame)
 	};
 	nrd::InstanceCreationDesc icd = {};		// null callbacks -> NRD's own aligned malloc
 	icd.denoisers = denoisers;
@@ -7020,7 +7028,7 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 	nrdH = h;
 	nrdPoolsReady = false;		// fresh images: first record transitions them to GENERAL
 	for ( int f = 0; f < FRAMES_IN_FLIGHT; f++ ) { nrdSlotGen[f] = -1; nrdSlotCursor[f] = 0; }	// fresh pools: force a reset on first record
-	nrdPrimed[0] = nrdPrimed[1] = nrdPrimed[2] = false;		// fresh (uninitialised) history for every denoiser
+	nrdPrimed[0] = nrdPrimed[1] = nrdPrimed[2] = nrdPrimed[3] = false;		// fresh (uninitialised) history for every denoiser
 	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
 	return true;
 }
@@ -7077,7 +7085,7 @@ void VulkanBackend::NrdDestroy( bool deviceIdle ) {
 	nrdW = nrdH = 0;
 	nrdPoolsReady = false;
 	for ( int f = 0; f < FRAMES_IN_FLIGHT; f++ ) { nrdSlotGen[f] = -1; nrdSlotCursor[f] = 0; }
-	nrdPrimed[0] = nrdPrimed[1] = nrdPrimed[2] = false;
+	nrdPrimed[0] = nrdPrimed[1] = nrdPrimed[2] = nrdPrimed[3] = false;
 	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
 }
 
@@ -7439,6 +7447,19 @@ bool VulkanBackend::RtgiEnsureOutput( int w, int h ) {
 		return false;
 	}
 	rtgiOutSampleImage = RegisterMergeSampleImage( rtgiOutImage, rtgiOutView, w, h );
+	// SH mode's second output (OUT_DIFF_SH1): same description, same lifecycle; always created so a
+	// GI / DI(SH) swap never resizes mid-view
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &rtgiOutSh1Image, &rtgiOutSh1Alloc, NULL ), "vmaCreateImage(RTGI out SH1)" ) ) {
+		rtgiOutSh1Image = VK_NULL_HANDLE;
+		RtgiDestroyOutput();
+		return false;
+	}
+	vwi.image = rtgiOutSh1Image;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &rtgiOutSh1View ), "vkCreateImageView(RTGI out SH1)" ) ) {
+		RtgiDestroyOutput();
+		return false;
+	}
+	rtgiOutSh1SampleImage = RegisterMergeSampleImage( rtgiOutSh1Image, rtgiOutSh1View, w, h );
 	rtgiOutW = w;
 	rtgiOutH = h;
 	rtgiOutReady = false;
@@ -7457,22 +7478,36 @@ void VulkanBackend::RtgiDestroyOutput() {
 	// this slot's retire list instead, freed after its fence in BeginFrame — the same
 	// contract DestroyImage/RetireImage use for mid-frame image destruction.
 	if ( frameOpen && !skipFrame ) {
-		retiredImages[frameIndex].push_back( { rtgiOutImage, rtgiOutAlloc, rtgiOutView } );
+		if ( rtgiOutImage != VK_NULL_HANDLE || rtgiOutView != VK_NULL_HANDLE ) {
+			retiredImages[frameIndex].push_back( { rtgiOutImage, rtgiOutAlloc, rtgiOutView } );
+		}
+		if ( rtgiOutSh1Image != VK_NULL_HANDLE || rtgiOutSh1View != VK_NULL_HANDLE ) {
+			retiredImages[frameIndex].push_back( { rtgiOutSh1Image, rtgiOutSh1Alloc, rtgiOutSh1View } );
+		}
 		rtgiOutView = VK_NULL_HANDLE;
 		rtgiOutImage = VK_NULL_HANDLE;
 		rtgiOutAlloc = NULL;
+		rtgiOutSh1View = VK_NULL_HANDLE;
+		rtgiOutSh1Image = VK_NULL_HANDLE;
+		rtgiOutSh1Alloc = NULL;
 	} else {
 		if ( device != VK_NULL_HANDLE ) {
 			vkDeviceWaitIdle( device );
 		}
 		if ( rtgiOutView )  { vkDestroyImageView( device, rtgiOutView, NULL ); rtgiOutView = VK_NULL_HANDLE; }
 		if ( rtgiOutImage ) { vmaDestroyImage( vma, rtgiOutImage, rtgiOutAlloc ); rtgiOutImage = VK_NULL_HANDLE; rtgiOutAlloc = NULL; }
+		if ( rtgiOutSh1View )  { vkDestroyImageView( device, rtgiOutSh1View, NULL ); rtgiOutSh1View = VK_NULL_HANDLE; }
+		if ( rtgiOutSh1Image ) { vmaDestroyImage( vma, rtgiOutSh1Image, rtgiOutSh1Alloc ); rtgiOutSh1Image = VK_NULL_HANDLE; rtgiOutSh1Alloc = NULL; }
 	}
 	if ( rtgiOutSampleImage >= 1 && rtgiOutSampleImage <= (ImageHandle)imageTable.size() ) {
 		imageTable[rtgiOutSampleImage - 1].live = false;
 	}
+	if ( rtgiOutSh1SampleImage >= 1 && rtgiOutSh1SampleImage <= (ImageHandle)imageTable.size() ) {
+		imageTable[rtgiOutSh1SampleImage - 1].live = false;
+	}
 	InvalidateTextureSets();
 	rtgiOutSampleImage = 0;
+	rtgiOutSh1SampleImage = 0;
 	rtgiOutW = rtgiOutH = 0;
 	rtgiOutReady = false;
 }
@@ -7525,7 +7560,8 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	VkImage      outImg   = a.giMode ? rtgiOutImage : rtaoOutImage;
 	VkImageView  outView  = a.giMode ? rtgiOutView  : rtaoOutView;
 	bool        &outReady = a.giMode ? rtgiOutReady : rtaoOutReady;
-	const nrd::Identifier denId = a.giMode ? NRD_ID_REBLUR_GI : NRD_ID_REBLUR_AO;
+	const bool shMode = a.giMode && a.shMode && rtgiOutSh1View != VK_NULL_HANDLE;
+	const nrd::Identifier denId = a.giMode ? ( shMode ? NRD_ID_REBLUR_GI_SH : NRD_ID_REBLUR_GI ) : NRD_ID_REBLUR_AO;
 
 	// frame settings
 	nrd::CommonSettings cs = {};
@@ -7607,7 +7643,12 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	if ( haveConf ) {
 		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_CONFIDENCE] = conf->view;	// H6f
 	}
-	if ( a.giMode ) {
+	if ( shMode ) {
+		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_SH0]  = targetView( ray, 0 );		// RGBA16F YCoCg radiance + hitdist
+		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_SH1]  = targetView( ray, a.shAtt );	// RGBA16F direction * luminance
+		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_SH0] = outView;
+		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_SH1] = rtgiOutSh1View;
+	} else if ( a.giMode ) {
 		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST]  = targetView( ray, 0 );	// RGBA16F radiance+hitdist
 		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST] = outView;
 	} else {
@@ -7683,7 +7724,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 
 	// inputs: SHADER_READ_ONLY -> GENERAL (NRD's descriptors are written with GENERAL);
 	// output: first use UNDEFINED -> GENERAL, then a WAR barrier vs last frame's sampling
-	VkImageMemoryBarrier pre[6] = {};
+	VkImageMemoryBarrier pre[8] = {};		// + SH1 input / output in SH mode
 	uint32_t preCount = 0;
 	auto addPre = [&]( VkImage img, VkImageLayout oldL ) {
 		VkImageMemoryBarrier &b = pre[preCount++];
@@ -7704,6 +7745,10 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	if ( !mvScratch ) { addPre( vel.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// scratch path handled velocity via the copy above
 	if ( haveConf ) { addPre( conf->image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// H6f
 	addPre( outImg,              outReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
+	if ( shMode ) {
+		addPre( ray->colorImage[a.shAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+		addPre( rtgiOutSh1Image,          outReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
+	}
 	vkCmdPipelineBarrier( cb,
 		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -7724,7 +7769,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	#undef RTAO_FAIL
 
 	// output -> fragment sampling; inputs back to SHADER_READ_ONLY for their other consumers
-	VkImageMemoryBarrier post[5] = {};
+	VkImageMemoryBarrier post[8] = {};		// + SH1 input / output in SH mode
 	uint32_t postCount = 0;
 	auto addPost = [&]( VkImage img, VkImageLayout newL ) {
 		VkImageMemoryBarrier &b = post[postCount++];
@@ -7744,6 +7789,10 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	addPost( norm->colorImage[nmAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	if ( !mvScratch ) { addPost( vel.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// scratch path left velocity in SHADER_READ_ONLY
 	addPost( outImg,              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	if ( shMode ) {
+		addPost( ray->colorImage[a.shAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+		addPost( rtgiOutSh1Image,          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	}
 	// dst includes COMPUTE: FSR2 consumes the velocity image (and could consume others)
 	// from compute later in the frame
 	vkCmdPipelineBarrier( cb,
@@ -10360,6 +10409,20 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetRtaoMrt( int w, int h ) {
 // RT GI radiance MRT (docs/rtx-rtgi.md H6): attachment 0 = RGBA16F radiance (vs the RTAO MRT's R16F
 // occlusion) so a bounce hit's colour fits; 1 = R16F signed view z, 2 = RGBA16F packed world normal -
 // the same NRD guides the RTAO ray writes, so the H6b DIFFUSE denoise drops in with the RTAO wiring. VK only.
+// ReSTIR DI SH gather MRT: the RTGI MRT plus a 4th RGBA16F attachment for SH1 (direction * luminance)
+RenderTargetHandle VulkanBackend::CreateRenderTargetRtgiShMrt( int w, int h ) {
+	if ( device == VK_NULL_HANDLE ) {
+		return 0;
+	}
+	static const VkFormat fmts[4] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT };
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R16G16B16A16_SFLOAT, 4, /*ds*/false, /*frameCapable*/false, /*mipLevels*/1, fmts ) ) {
+		targetTable[slot] = RenderTarget();
+		return 0;
+	}
+	return EncodeTargetHandle( slot );
+}
+
 RenderTargetHandle VulkanBackend::CreateRenderTargetRtgiMrt( int w, int h ) {
 	if ( device == VK_NULL_HANDLE ) {
 		return 0;

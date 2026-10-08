@@ -141,8 +141,8 @@ void main() {
 	bp.eyePullback    = u_localParam1.w;
 	bp.ignRot         = u_particleRadius.xy;
 	bp.ignOfs         = u_particleRadius.zw;
-	vec3  Li; float thit;
-	int   hit = rtgiTraceBounce( bp, Pw, Nw, u_modelViewMatrix[3].xyz, d, sfrag, Li, thit );
+	vec3  Li; float thit; vec3 bounceDir;
+	int   hit = rtgiTraceBounce( bp, Pw, Nw, u_modelViewMatrix[3].xyz, d, sfrag, Li, thit, bounceDir );
 	if ( hit == 0 ) { fragColor = vec4( 0.0 ); return; }
 	if ( hit == 2 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
 	float radius = bp.radius;

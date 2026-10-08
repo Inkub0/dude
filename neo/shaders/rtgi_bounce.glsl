@@ -50,9 +50,10 @@ void onb( vec3 n, out vec3 t, out vec3 b ) {
 // Trace + shade the bounce for the surface point Pw / normal Nw (world), seen from eyeW at view depth d, dithered
 // by the SCREEN pixel sfrag. Returns 0 = no bounce (miss / degenerate; Li = 0), 1 = shaded hit (Li = incoming
 // radiance, thit = hit distance), 2 = hit on an unshadeable row (Li = 0; rtgi_ray.frag keeps its alpha-1 output).
-int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, vec2 sfrag, out vec3 Li, out float thit ) {
+int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, vec2 sfrag, out vec3 Li, out float thit, out vec3 outDir ) {
 	Li = vec3( 0.0 );
 	thit = 0.0;
+	outDir = Nw;
 	// one cosine-weighted hemisphere direction, IGN re-oriented per frame (rtao_ray.frag: a value-phase
 	// slide leaves IGN's 45-degree diagonal in the residue and shows as lines under the res-scale upscale;
 	// re-orienting points each frame's residue a different way so the temporal accumulation averages it out).
@@ -77,6 +78,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 	float dl2 = dot( dir, dir );
 	if ( !( dl2 > 1e-6 ) ) { return 0; }
 	dir *= inversesqrt( dl2 );
+	outDir = dir;
 
 	// ray origin pulled toward the eye (rtao_ray.frag crease-leak fix) + a tiny normal lift
 		vec3  rayOrg = Pw + normalize( eyeW - Pw ) * ( 0.25 + d * bp.eyePullback ) + Nw * 0.05;

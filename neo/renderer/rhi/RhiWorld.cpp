@@ -469,7 +469,9 @@ static bool  rhiRtaoRanThisView = false;			// ray output produced this view (ove
 // ReSTIR DI (docs/rtx-restir-di.md): the gather radiance target (RGBA16F, full view res). RTGI
 // architecture - a single FRESH 1-spp gather each frame (no persistent reservoir, no hand-rolled temporal);
 // NRD does the temporal accumulation downstream (+ the DI confidence pass for moving-light antilag).
-static rhi::RenderTargetHandle rhiReStirDIRT = 0;	// the fresh 1-spp gather: CreateRenderTargetRtgiMrt (NRD guide MRT)
+static rhi::RenderTargetHandle rhiReStirDIRT = 0;	// the fresh 1-spp gather: CreateRenderTargetRtgiMrt (NRD guide MRT), or the 4-att SH variant
+static bool rhiReStirDIShRT = false;				// rhiReStirDIRT is the SH (4-attachment) variant
+static bool rhiReStirDIShThisView = false;			// the gather ran in SH mode this view (the apply resolves SH1)
 static int   rhiReStirDIW = 0, rhiReStirDIH = 0;
 static bool  rhiReStirDIRanThisView = false;		// DI gather produced this view (debug-overlay gate)
 static bool  rhiReStirDIDenoisedThisView = false;	// the shared REBLUR_DIFFUSE denoise ran for DI this view -> GetRtgiOutputImage is the denoised DI
@@ -7732,16 +7734,21 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// (re)create the NRD guide MRT at the INTERNAL res (rw x rh). att0 = NRD-YCoCg radiance + normHitDist
 	// (RGBA16F), att1 = viewZ (R16F), att2 = packed normal (RGBA16F) - the exact layout RtaoDenoise(giMode) reads,
 	// so the shared REBLUR_DIFFUSE denoise drops in unchanged (CreateRenderTargetRtgiMrt is the RTGI gather's MRT).
-	if ( rhiReStirDIRT && ( r->GetRenderTargetImage( rhiReStirDIRT ) == 0 || rhiReStirDIW != rw || rhiReStirDIH != rh ) ) {
+	// SH mode (r_rtReStirDISH): the 4-attachment gather target (+SH1) and REBLUR_DIFFUSE_SH; the apply re-resolves the
+	// cosine against the full-res normal so bump detail survives (docs/rtx-restir-di.md)
+	const bool shMode = r_rtReStirDISH.GetBool();
+	if ( rhiReStirDIRT && ( r->GetRenderTargetImage( rhiReStirDIRT ) == 0 || rhiReStirDIW != rw || rhiReStirDIH != rh
+			|| rhiReStirDIShRT != shMode ) ) {
 		r->DestroyRenderTarget( rhiReStirDIRT );	rhiReStirDIRT = 0;	rhiReStirDIW = rhiReStirDIH = 0;
 	}
 	if ( !rhiReStirDIRT ) {
-		rhiReStirDIRT = r->CreateRenderTargetRtgiMrt( rw, rh );
+		rhiReStirDIRT = shMode ? r->CreateRenderTargetRtgiShMrt( rw, rh ) : r->CreateRenderTargetRtgiMrt( rw, rh );
 		if ( !rhiReStirDIRT ) {
 			return;
 		}
-		rhiReStirDIW = rw;	rhiReStirDIH = rh;
+		rhiReStirDIW = rw;	rhiReStirDIH = rh;	rhiReStirDIShRT = shMode;
 	}
+	rhiReStirDIShThisView = shMode;
 
 	float invView[16];
 	if ( !RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
@@ -7842,6 +7849,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// gather lands on the same mip the forward draw's screen-derivative LOD picks (Doom's black-bordered
 	// cookies read dimmer on the blurred mips; mip 0 made DI brighter than forward on big floors)
 	parms.shadowFalloffS[1] = 2.0f * invP00 / (float)w;
+	parms.shadowFalloffS[2] = shMode ? 1.0f : 0.0f;						// SH mode: no cosine in the gather, SH1 on loc 3
 
 	// r_rtReStirDICombineGI: fold the RTGI one-bounce into this gather (rtgi_bounce.glsl) so ONE NRD denoise and
 	// ONE apply serve direct + indirect. RB_RHI_RtgiPass already stands down while DI is on (the shared NRD slot),
@@ -8025,6 +8033,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhi::RtaoDenoiseArgs da;
 		memset( &da, 0, sizeof( da ) );
 		da.giMode = true;									// REBLUR_DIFFUSE into GetRtgiOutputImage (shared GI slot)
+		da.shMode = shMode;									// REBLUR_DIFFUSE_SH: + att3 SH1 in, GetRtgiOutputSh1Image out
+		da.shAtt  = 3;
 		da.rayRT = rhiReStirDIRT;							// att0 = YCoCg radiance+hitdist (half-packed when cb); guides in att1/att2
 		const bool cbDenoise = cbActive && diGuideRT != 0;	// guides ready -> NRD reconstructs the half-packed radiance
 		da.viewzRT  = cbDenoise ? diGuideRT : rhiReStirDIRT;	da.viewzAtt  = 1;
@@ -8749,6 +8759,10 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	const rhi::ImageHandle srcImg = ( rhiReStirDIDenoisedThisView && r->GetRtgiOutputImage() != 0 )
 		? r->GetRtgiOutputImage() : r->GetRenderTargetImage( rhiReStirDIRT );
+	// SH mode: the matching SH1 (denoised OUT_DIFF_SH1 when the denoise ran, else the raw gather's att3)
+	const rhi::ImageHandle sh1Img = !rhiReStirDIShThisView ? 0
+		: ( ( rhiReStirDIDenoisedThisView && r->GetRtgiOutputSh1Image() != 0 ) ? r->GetRtgiOutputSh1Image() : r->GetRenderTargetImage4( rhiReStirDIRT ) );
+	const bool shResolve = rhiReStirDIShThisView && sh1Img != 0;
 	const rhi::ImageHandle albedoImg = r->GetRenderTargetImage4( rhiNormalResultRT );
 	const rhi::ImageHandle matImg    = r->GetRenderTargetImage2( rhiNormalResultRT );
 	if ( srcImg == 0 || albedoImg == 0 || matImg == 0 ) {
@@ -8779,6 +8793,15 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[0] = aoOn ? 1.0f : 0.0f;
 	parms.localParam1[1] = idMath::ClampFloat( 0.0f, 1.0f, r_ssaoFloor.GetFloat() );
 	parms.localParam1[2] = aoDirect;
+	parms.localParam1[3] = shResolve ? 1.0f : 0.0f;					// SH resolve (u_sh1 on unit 6, inverse view below)
+	if ( shResolve ) {
+		float invView[16];
+		if ( RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
+			memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );	// view-space normal -> world (the SH direction's space)
+		} else {
+			parms.localParam1[3] = 0.0f;
+		}
+	}
 	parms.diffuseModifier[0] = 1.0f - r_pbrMetalDiffuse.GetFloat();	// diDemodFactor inputs: MUST match the gather's
 	parms.diffuseModifier[1] = r_pbrSpecScale.GetFloat();
 	// baked occlusion maps on direct light (material att1 .a), the forward's r_occlusionMapScale * r_occlusionMapDirect
@@ -8814,7 +8837,12 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	} else {
 		RB_RHI_BindUnit( 5, globalImages->whiteImage );				// bound so the descriptor set is complete
 	}
-	for ( int u = 2; u <= 5; u++ ) { backEnd.glState.tmu[u].current2DMap = -1; }	// direct binds bypassed the tmu cache
+	if ( shResolve ) {
+		RB_RHI_BindRTImage( r, 6, sh1Img );							// SH1: direction * luminance
+	} else {
+		RB_RHI_BindUnit( 6, globalImages->blackImage );
+	}
+	for ( int u = 2; u <= 6; u++ ) { backEnd.glState.tmu[u].current2DMap = -1; }	// direct binds bypassed the tmu cache
 	RB_RHI_DrawFullscreen( r, prog, parms, srcImg, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 	RB_RHI_ForgetTexBinds();
 	rhiReStirDIAppliedThisView = true;

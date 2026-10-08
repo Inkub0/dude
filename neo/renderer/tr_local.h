@@ -1012,6 +1012,7 @@ extern idCVar r_rtLightTextures;			// RT scene-light buffer carries + samples ea
 extern idCVar r_rtReStirDIApply;			// ReSTIR DI lights the scene: deferred G-buffer shade + additive apply + forward per-light suppression (Stage D)
 extern idCVar r_rtReStirDIDynamicForward;	// ReSTIR DI: fast-changing lights (weapon, moving, colour-changing, new) stay forward instead of lagging in the DI history
 extern idCVar r_rtReStirDICombineGI;		// ReSTIR DI gathers the RTGI bounce into its own buffer: one NRD denoise + one apply for direct + indirect
+extern idCVar r_rtReStirDISH;				// ReSTIR DI: SH denoise (direction + full-res cosine resolve) so bump detail survives
 extern idCVar r_rtReStirDICandidates;		// ReSTIR DI: light candidates M per pixel before the reservoir pick (RTXDI default 8)
 extern idCVar r_rtReStirDIDebug;			// ReSTIR DI debug view (1 = blit the DI irradiance - denoised when it ran, else raw - over the scene)
 extern idCVar r_rtReStirDIConfidence;		// ReSTIR DI NRD history-confidence sensitivity; 0 = off (default: it fries DI's noisier 1-spp signal; NRD antilag + weapon mask carry temporal)

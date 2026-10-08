@@ -19,6 +19,9 @@
 //   u_localParam0         = ( bilateral on/off, depth sensitivity, normal power, light scale )
 //   u_localParam1         = ( AO enable, AO floor, AO direct-light strength, 0 )
 //   u_occlusionParms.z    = baked occlusion-map strength on direct light (r_occlusionMapScale * r_occlusionMapDirect); 0 = off
+//   u_localParam1.w       = SH MODE: u_sh1 (unit 6) holds the denoised SH1 (direction * luminance); the gather carried no
+//                           cosine, so the cosine of the FULL-res bump normal is re-applied here per pixel
+//   u_modelViewMatrix     = inverse view (view -> world) - the SH direction is world space, the normal buffer view space
 //   u_diffuseModifier.xy  = ( kd = 1 - r_pbrMetalDiffuse, r_pbrSpecScale )   [diDemodFactor inputs]
 //   u_screenCorrection.xy = 1 / (rw, rh)  - the reduced-res DI texel in view uv (the 2x2 footprint)
 //   u_depthTexRecip.xy    = (w/uploadW, h/uploadH)  - view uv -> depth tc (the POT depth image)
@@ -32,6 +35,7 @@ SAMPLER_BINDING(2) uniform sampler2D u_normalBuffer;
 SAMPLER_BINDING(3) uniform sampler2D u_albedoBuffer;
 SAMPLER_BINDING(4) uniform sampler2D u_materialBuffer;
 SAMPLER_BINDING(5) uniform sampler2D u_ssao;
+SAMPLER_BINDING(6) uniform sampler2D u_sh1;			// SH mode: direction * luminance (denoised OUT_DIFF_SH1, else the raw gather's)
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -54,7 +58,9 @@ void main() {
 	vec4 nt0 = texture( u_normalBuffer, uv );
 	if ( nt0.a < 0.5 ) { fragColor = vec4( 0.0 ); return; }		// view weapon: lit by its forward draws
 
+	const bool shMode = u_localParam1.w > 0.5;
 	vec3 di;
+	vec3 sh1 = vec3( 0.0 );
 	if ( u_localParam0.x > 0.5 ) {
 		// Joint-bilateral upscale (restir_di_debug.frag / rtgi_apply.frag): reweight the 2x2 reduced-res footprint by
 		// how well each texel's surface matches this pixel's, so the DI stays on the right surface.
@@ -76,11 +82,30 @@ void main() {
 			float nw  = pow( max( dot( n0, nk ), 0.0 ), u_localParam0.z );
 			float wk  = bw[k] * dw * nw;
 			sum  += nrdYCoCgToLinear( texture( u_src, gUV ).rgb ) * wk;
+			if ( shMode ) { sh1 += texture( u_sh1, gUV ).xyz * wk; }
 			wsum += wk;
 		}
 		di = ( wsum > 1.0e-4 ) ? sum / wsum : nrdYCoCgToLinear( texture( u_src, uv ).rgb );
+		if ( shMode ) { sh1 = ( wsum > 1.0e-4 ) ? sh1 / wsum : texture( u_sh1, uv ).xyz; }
 	} else {
 		di = nrdYCoCgToLinear( texture( u_src, uv ).rgb );
+		if ( shMode ) { sh1 = texture( u_sh1, uv ).xyz; }
+	}
+	if ( shMode ) {
+		// SH resolve: the denoised mean incoming direction (SH1 / luminance) and how concentrated it is (|SH1| / Y,
+		// 1 = a single light, 0 = light from everywhere). The gather removed its reduced-res normal's cosine, so the
+		// FULL-res bump normal's cosine goes back on here - this is where pores, wrinkles and weave come from - exact
+		// for a concentrated direction, easing to a wrapped half-cosine as the light spreads (a mean direction means
+		// little then).
+		float Y   = dot( di, vec3( 0.2126, 0.7152, 0.0722 ) );
+		float len = length( sh1 );
+		if ( Y > 1.0e-5 && len > 1.0e-6 ) {
+			vec3  L  = sh1 / len;
+			vec3  Nw = normalize( mat3( u_modelViewMatrix ) * ( nt0.xyz * 2.0 - 1.0 ) );
+			float k  = clamp( len / Y, 0.0, 1.0 );
+			float ndl = dot( Nw, L );
+			di *= mix( 0.5 + 0.5 * ndl, max( ndl, 0.0 ), k );
+		}
 	}
 
 	// remodulate by this pixel's material (the exact factor the gather divided by) and the forward light scale

@@ -371,6 +371,17 @@ now takes the pixel's world footprint and derives the LOD analytically from the 
 (`grad(s) = (S.xyz - s·Q.xyz)/q`, footprint in texels, log2), fed by `u_shadowFalloffS.y = 2/(proj00·viewW)` at
 full res; the GI bounce keeps mip 0 (a ray hit has no screen footprint). Isotropic like anisotropic filtering's LOD.
 
+**SH denoise mode (2026-10-08, user: bump detail vanished in dim DI light, blur knobs irrelevant → the reduced-res /
+checkerboard gather + the denoiser's spatial blur erase N·L detail):** `r_rtReStirDISH` (default 1) switches the DI
+denoise to NRD `REBLUR_DIFFUSE_SH`. The gather's att0 keeps the SH0 layout (YCoCg + hitdist); a 4th attachment carries
+SH1 = direction × luminance (the chosen light's direction, plus the bounce's sample direction in combined mode), and the
+gather leaves OUT its own normal's cosine (floored at 0.05 so the GGX 1/N·L term stays bounded; the cosine-sampled
+bounce is divided by its implicit cosine likewise). The backend gets a 4th denoiser id (`NRD_ID_REBLUR_GI_SH`), a second
+output image (`GetRtgiOutputSh1Image`) and `CreateRenderTargetRtgiShMrt`. The apply resolves per pixel against the
+FULL-res bump normal: `L = SH1/|SH1|`, concentration `k = |SH1|/Y`, factor `mix(0.5 + 0.5·N·L, max(N·L,0), k)` -
+exact cosine for a concentrated direction, wrapped half-cosine as the light spreads. The debug views show SH0 only
+(no cosine → flatter / brighter than the lit scene; use the lit scene for judgement).
+
 **Known v1 approximations (deliberate, listed for the test):** the SPECULAR stage colour assumed 1 (the diffuse
 stage colour is in the albedo now); the legacy non-PBR specular LUT not replicated (`r_pbr 0` = Lambert); no
 Toksvig widening (G-buffer normal is unit); the organic spec-fallback (flesh without a spec stage) not replicated;
