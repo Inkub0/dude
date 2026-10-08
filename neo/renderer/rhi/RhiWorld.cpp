@@ -5518,6 +5518,15 @@ static unsigned int			s_sceneLightGen = 0;			// bumped on every refill
 static idList<unsigned int>	s_sceneLightCoveredGen;			// [lightDef index] = generation that included it
 static idBounds				s_sceneLightBounds;				// union of the included lights' cull spheres (DI's per-view grate box gather)
 
+// ReSTIR DI fast-light classification (r_rtReStirDIDynamicForward): per lightDef, when it was last seen in the
+// buffer, when its colour last changed (or it (re)appeared), and its last luminance. A light that changed within
+// the hysteresis window, moved recently (RB_RHI_LightIsMoving) or is a first-person weapon light is flagged
+// DUDE_LIGHT_DIFORWARD: it stays in the buffer for volumetrics / GI / reflections, but the DI gather skips it and
+// the forward loop keeps lighting it - DI's NRD history would trail it by several frames (the flashlight lag).
+#define DI_FAST_HYST_FRAMES	16
+struct sceneLightTrack_t { int lastSeenFrame; int lastChangeFrame; float lum; };
+static idList<sceneLightTrack_t>	s_sceneLightTrack;
+
 static bool RB_RHI_SceneLightCovered( const viewDef_t *viewDef, int lightDefIndex ) {
 	return viewDef != NULL && s_sceneLightCacheView == viewDef && s_sceneLightCacheFrame == tr.frameCount
 		&& lightDefIndex >= 0 && lightDefIndex < s_sceneLightCoveredGen.Num()
@@ -5564,7 +5573,13 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	if ( s_sceneLightCoveredGen.Num() < numDefs ) {
 		const int first = s_sceneLightCoveredGen.Num();
 		s_sceneLightCoveredGen.SetNum( numDefs );
-		for ( int k = first; k < numDefs; k++ ) { s_sceneLightCoveredGen[ k ] = 0; }	// 0 never equals a live generation
+		s_sceneLightTrack.SetNum( numDefs );
+		for ( int k = first; k < numDefs; k++ ) {
+			s_sceneLightCoveredGen[ k ] = 0;		// 0 never equals a live generation
+			s_sceneLightTrack[ k ].lastSeenFrame = -1;
+			s_sceneLightTrack[ k ].lastChangeFrame = -( DI_FAST_HYST_FRAMES + 1 );
+			s_sceneLightTrack[ k ].lum = 0.0f;
+		}
 	}
 	const viewLight_t **viewLightOf = (const viewLight_t **)_alloca( ( numDefs + 1 ) * sizeof( viewLight_t * ) );
 	memset( viewLightOf, 0, ( numDefs + 1 ) * sizeof( viewLight_t * ) );
@@ -5648,8 +5663,26 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		// keep only a short candidate list per ray (volumetrics) must not lose a spot to a crowd of fill lights
 		sortKey[ n ] = ( ( ld->parms.pointLight && !ld->parms.parallel ) ? 1.0e9f : 0.0f )
 		             + Max( ( cullOrg - viewOrg ).Length() - cullRad, 0.0f );
+		// fast-changing? (see sceneLightTrack_t) - classified once per frame per lightDef (a later view in the same
+		// frame, e.g. the main view after a mirror, reuses the verdict rather than reading "changed" off itself)
+		bool diFast = false;
+		if ( r_rtReStirDIDynamicForward.GetBool() ) {
+			sceneLightTrack_t &t = s_sceneLightTrack[ i ];
+			const int now = tr.frameCount;
+			const float lum = 0.2126f * col[0] + 0.7152f * col[1] + 0.0722f * col[2];
+			if ( t.lastSeenFrame != now ) {
+				const bool appeared = ( t.lastSeenFrame != now - 1 );	// not in last frame's buffer: a flash, a light switched on
+				const bool recolored = idMath::Fabs( lum - t.lum ) > 0.1f * Max( lum, t.lum ) + 0.002f;	// strobe / flicker / fade
+				if ( appeared || recolored ) { t.lastChangeFrame = now; }
+				t.lastSeenFrame = now;
+				t.lum = lum;
+			}
+			diFast = ( ld->parms.allowLightInViewID != 0 )					// first-person flashlight / muzzle flash
+			      || ( now - t.lastChangeFrame ) <= DI_FAST_HYST_FRAMES		// (re)appeared or changed colour recently
+			      || ( vl != NULL && RB_RHI_LightIsMoving( vl ) );			// pose moved recently (projectiles, swinging / carried lights)
+		}
 		RtReflLightGPU &L = lights[ n++ ];
-		s_sceneLightCoveredGen[ i ] = s_sceneLightGen;			// Stage D membership: DI covers this lightDef in this view
+		s_sceneLightCoveredGen[ i ] = diFast ? 0u : s_sceneLightGen;	// Stage D membership: DI covers this lightDef in this view (a fast light stays forward)
 		s_sceneLightBounds.AddPoint( cullOrg - idVec3( cullRad, cullRad, cullRad ) );
 		s_sceneLightBounds.AddPoint( cullOrg + idVec3( cullRad, cullRad, cullRad ) );
 		L.cull[0] = cullOrg[0]; L.cull[1] = cullOrg[1]; L.cull[2] = cullOrg[2]; L.cull[3] = cullRad;
@@ -5661,7 +5694,8 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		L.flags = ( ld->parms.parallel ? 1u : 0u )				// bit0 = parallel/sun (no distance falloff)
 		        | ( ld->parms.pointLight ? 0u : 2u )			// bit1 = projected (spot) light: falloff runs along the frustum axis
 		        | ( ld->parms.noShadows ? 4u : 0u )				// bit2 = casts no shadows in stock: volumetrics skip its visibility ray
-		        | ( ld->parms.allowLightInViewID ? 8u : 0u );	// bit3 = first-person weapon light (flashlight, muzzle flash)
+		        | ( ld->parms.allowLightInViewID ? 8u : 0u )	// bit3 = first-person weapon light (flashlight, muzzle flash)
+		        | ( diFast ? 32u : 0u );						// bit5 = fast-changing: ReSTIR DI skips it, the forward path lights it
 		{
 			// bits 8..15 = volumetric haze scale (0..255). A HUGE light (a cave-wide "sky glow", an outdoor
 			// fill) is ambience, not a shaft: integrated over its whole volume it washes the view in its own

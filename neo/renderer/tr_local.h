@@ -1007,6 +1007,7 @@ extern idCVar r_rtaoDebug;					// RTAO debug view (1 raw rays, 2 denoised)
 extern idCVar r_rtReStirDI;					// H7 ReSTIR DI: reservoir resampling of the scene lights (docs/rtx-restir-di.md); Stage 1 = unshadowed RIS pass
 extern idCVar r_rtLightTextures;			// RT scene-light buffer carries + samples each light's projection cookie / falloff ramp (bindless); 0 = analytic frustum attenuation
 extern idCVar r_rtReStirDIApply;			// ReSTIR DI lights the scene: deferred G-buffer shade + additive apply + forward per-light suppression (Stage D)
+extern idCVar r_rtReStirDIDynamicForward;	// ReSTIR DI: fast-changing lights (weapon, moving, colour-changing, new) stay forward instead of lagging in the DI history
 extern idCVar r_rtReStirDICandidates;		// ReSTIR DI: light candidates M per pixel before the reservoir pick (RTXDI default 8)
 extern idCVar r_rtReStirDIDebug;			// ReSTIR DI debug view (1 = blit the DI irradiance - denoised when it ran, else raw - over the scene)
 extern idCVar r_rtReStirDIConfidence;		// ReSTIR DI NRD history-confidence sensitivity; 0 = off (default: it fries DI's noisier 1-spp signal; NRD antilag + weapon mask carry temporal)

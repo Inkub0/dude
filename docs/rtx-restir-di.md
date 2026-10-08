@@ -312,6 +312,18 @@ NRD-denoised) with the matching ImGui dropdown. The raw view is also the checker
 halves the GATHER's fragments + rays (`restir.di.gather` in `r_vkGpuTime 2`); the NRD denoise, the guides pass,
 the confidence pass and the apply run at full cost regardless, so the frame-time saving is the gather's half.
 
+**Fast-changing lights stay forward (2026-10-08, after the user hit flashlight / muzzle-flash lag):** DI is
+NRD-accumulated over `r_rtReStirDIHistory` frames, so a light that moves or switches every frame trails. Behind
+`r_rtReStirDIDynamicForward` (default 1) the gather classifies each lightDef per frame (`sceneLightTrack_t`): a
+first-person weapon light (`allowLightInViewID`), a pose that moved recently (`RB_RHI_LightIsMoving`, the
+r_rtMovingLights tracker, 30-view hysteresis), a luminance change > 10 % vs last frame, or a light absent from
+last frame's buffer (a flash, a light switched on) — the last two with a 16-frame hysteresis — is flagged
+`DUDE_LIGHT_DIFORWARD` (bit 5). It stays in the buffer for volumetrics / GI / reflections, but the DI candidate
+loop skips it and the membership stamp is withheld, so the forward loop keeps lighting it with the inline ray
+at zero lag. Known seam: a light that stops changing hands over to DI after the hysteresis and its DI history
+starts empty, so it ramps in over the NRD history length (the confidence pass shortens that); a light that
+never settles (a strobe) simply stays forward.
+
 **Known v1 approximations (deliberate, listed for the test):** diffuse/specular STAGE colours + vertex colour
 assumed 1 (not in the G-buffer); baked occlusion maps not applied to DI; the legacy non-PBR specular LUT not
 replicated (`r_pbr 0` = Lambert); no Toksvig widening (G-buffer normal is unit); the organic spec-fallback
