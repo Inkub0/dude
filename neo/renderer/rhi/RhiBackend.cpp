@@ -3520,6 +3520,14 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		r->GpuScopeBegin( "world" );		// shadow maps + light loop + interactions (prepass/ao/rtgi/rtblur nest under this)
 		RB_RHI_DrawWorld( r, viewDef );
 		r->GpuScopeEnd();
+		// ReSTIR DI (r_rtReStirDIApply): the direct light of every DI-covered surface goes in HERE, right after the
+		// light loop, exactly where the forward interactions left theirs - BEFORE the shader passes. Decal-sorted
+		// stages (an NPC's eyes are a 'blend filter' decal over the skin, blood and dirt likewise) multiply / blend
+		// over the LIT surface; applied at the opaque split instead, they drew over an unlit surface and the light
+		// then landed on top of them (eyes vanished under DI). The split-site and post-site calls stay as no-ops.
+		r->GpuScopeBegin( "restir.di.apply" );
+		RB_RHI_ReStirDIApply( r, viewDef );
+		r->GpuScopeEnd();
 	} else {
 		// 2D view (menu/console/HUD/loading): draw over existing contents
 		r->BeginPass( NULL );
