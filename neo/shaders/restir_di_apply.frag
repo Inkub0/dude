@@ -58,7 +58,7 @@ void main() {
 	vec4 nt0 = texture( u_normalBuffer, uv );
 	if ( nt0.a < 0.5 ) { fragColor = vec4( 0.0 ); return; }		// view weapon: lit by its forward draws
 
-	const bool shMode = u_localParam1.w > 0.5;
+	bool shMode = u_localParam1.w > 0.5;
 	vec3 di;
 	vec3 sh1 = vec3( 0.0 );
 	if ( u_localParam0.x > 0.5 ) {
