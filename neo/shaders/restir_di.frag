@@ -41,6 +41,9 @@
 //   u_particleRadius.zw   = per-view perforated box list device address (bit-cast; rt_perforated.glsl)
 //   u_shadowFalloffS.x    = forward light scale (backEnd.lightScale): the DI term is scaled here, not at the apply
 //   u_shadowFalloffS.y    = world size of one FULL-RES screen pixel per unit view depth (2/(proj00*viewW)): cookie LOD
+//   u_shadowFalloffS.z    = SH MODE (r_rtReStirDISH): the per-light cosine N.L is NOT applied here; loc 3 carries SH1 =
+//                           direction * luminance (NRD REBLUR_FrontEnd_PackSh) and the apply re-resolves the cosine
+//                           against the FULL-res bump normal - the shading detail survives the denoise + reduced res
 //   --- r_rtReStirDICombineGI (RTGI bounce folded into THIS buffer, one NRD denoise; rtgi_bounce.glsl) ---
 //   u_specularParms       = ( combine on/off, fog strength, fog coef (exp), skip fast lights in the bounce )   [fog: rtgi_apply's r_rtgiFogAttenuate]
 //   u_pbrParms            = ( gather radius, r_rtgiEmissive, r_rtgiEmissiveClamp, r_rtgiLightScale )
@@ -69,6 +72,7 @@ VARY(0) in vec2 var_TexCoord;
 layout(location = 0) out vec4 fragColor;	// IN_DIFF_RADIANCE_HITDIST: NRD-YCoCg direct irradiance (rgb) + normHitDist (a)
 layout(location = 1) out vec4 outViewZ;		// IN_VIEWZ: signed linear view z (negative), R16F
 layout(location = 2) out vec4 outNormal;	// IN_NORMAL_ROUGHNESS: world normal, NRD encoding 2 (signed octahedron), RGBA16F
+layout(location = 3) out vec4 outSh1;		// SH mode: IN_DIFF_SH1 = incoming direction * luminance (discarded on the 3-att target)
 
 // depth -> view z pair for THIS view (cinematics lower the near plane; renderparms.glsl u_depthParms)
 #define depth_consts DUDE_DEPTH_CONSTS()
@@ -171,6 +175,7 @@ float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, out float occDist 
 
 void main() {
 	vec2  frag = gl_FragCoord.xy;
+	outSh1 = vec4( 0.0 );							// SH mode: no light -> no direction (every early-out below leaves this)
 
 	// Checkerboard (r_rtReStirDICheckerboard, u_localParam1.z): trace only HALF the pixels at FULL res, packed
 	// into the LEFT half of the buffer; NRD reconstructs the rest from the full-res guide pass + IN_MV. sfrag is
@@ -260,6 +265,7 @@ void main() {
 	// candidate's RIS weight is pHat/pdf = pHat*nLights. pHat = luminance of the unshadowed contribution.
 	// A cheap bounding-sphere cull skips lights that cannot reach the point. The reservoir is TRANSIENT
 	// (this frame only) - NRD does the temporal accumulation downstream.
+	const bool shMode = u_shadowFalloffS.z > 0.5;
 	float wSum        = 0.0;
 	float pHatChosen  = 0.0;
 	vec3  radChosen   = vec3( 0.0 );
@@ -304,7 +310,9 @@ void main() {
 				contrib *= f;
 			}
 			pHat = dot( contrib, vec3( 0.2126, 0.7152, 0.0722 ) );		// luminance target on the SHADED contribution
-			rad  = contrib / B;											// demodulated (B = 1 outside apply mode)
+			// SH mode: carry the contribution WITHOUT this (reduced-res) normal's cosine; the apply re-applies the
+			// cosine of the full-res bump normal to the denoised direction (ndl floored so the GGX 1/ndl can't blow up)
+			rad  = ( shMode ? contrib / max( ndl, 0.05 ) : contrib ) / B;	// demodulated (B = 1 outside apply mode)
 		}
 		float w    = pHat * float( nLights );
 		wSum += w;
@@ -328,6 +336,7 @@ void main() {
 
 	// the direct term, at the forward path's light scale (lightColor = lightScale * stage colour there)
 	vec3 outRad = max( radChosen * ( W * vis * u_shadowFalloffS.x ), vec3( 0.0 ) );
+	vec3 shDir  = vec3( 0.0 );										// SH mode: accumulated direction * luminance
 
 	// r_rtReStirDICombineGI: the ONE-bounce indirect term from the same pixel, folded into the same buffer so ONE
 	// NRD denoise serves direct + indirect (the bounce's own pass stands down). Finished exactly as rtgi_apply.frag
@@ -354,14 +363,26 @@ void main() {
 		bp.eyePullback    = u_pbrParms2.z;
 		bp.ignRot         = u_occlusionParms.xy;
 		bp.ignOfs         = u_occlusionParms.zw;
-		vec3 Li; float thit;
-		if ( rtgiTraceBounce( bp, Pw, Nw, u_modelViewMatrix[3].xyz, d, sfrag, Li, thit ) == 1 ) {
+		vec3 Li; float thit; vec3 bounceDir;
+		if ( rtgiTraceBounce( bp, Pw, Nw, u_modelViewMatrix[3].xyz, d, sfrag, Li, thit, bounceDir ) == 1 ) {
 			vec3 gi = Li * u_pbrParms2.w;
 			if ( u_specularParms.y > 0.0 ) {
 				gi *= pow( exp( d * u_specularParms.z ), u_specularParms.y );		// rtgi_apply's fog transmittance
 			}
-			outRad += max( albedo * gi, vec3( 0.0 ) ) / B;
+			vec3 giRad = max( albedo * gi, vec3( 0.0 ) ) / B;
+			if ( shMode ) {
+				// the cosine-sampled bounce carries this normal's cosine implicitly: remove it (floored) so the apply's
+				// re-applied cosine of the full-res normal is not doubled; its direction is the sample direction
+				giRad /= max( dot( Nw, bounceDir ), 0.05 );
+				shDir += bounceDir * dot( giRad, vec3( 0.2126, 0.7152, 0.0722 ) );
+			}
+			outRad += giRad;
 		}
+	}
+	if ( shMode ) {
+		// NRD SH1 for the direct term: direction * luminance (REBLUR_FrontEnd_PackSh: c1 = direction * Y)
+		shDir += ldirChosen * dot( max( radChosen * ( W * vis * u_shadowFalloffS.x ), vec3( 0.0 ) ), vec3( 0.2126, 0.7152, 0.0722 ) );
+		outSh1 = vec4( shDir, 0.0 );
 	}
 
 	// NRD IN_DIFF_RADIANCE_HITDIST: the "hit distance" for direct lighting is the distance to the chosen

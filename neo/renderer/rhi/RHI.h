@@ -216,6 +216,12 @@ struct RtaoDenoiseArgs {
 	int		historyFixFrameNum;			// historyFixFrameNum: spatial-reconstruction frames after a (dis)occlusion (clamped < fast-history window)
 	float	maxBlurRadius;				// maxBlurRadius (px): base spatial denoise radius
 	float	edgeStopScale;				// scales lobeAngleFraction + planeDistanceSensitivity (>1 blurs across depth/normal edges more; grate-noise lever, costs detail)
+	// ReSTIR DI SH mode (docs/rtx-restir-di.md): REBLUR_DIFFUSE_SH instead of REBLUR_DIFFUSE - rayRT att0 = IN_DIFF_SH0
+	// (same layout as radiance+hitdist), att shAtt = IN_DIFF_SH1 (direction * luminance); outputs GetRtgiOutputImage (SH0)
+	// + GetRtgiOutputSh1Image (SH1). The apply re-resolves the cosine against the FULL-res normal, so bump-mapped
+	// shading detail survives the denoise + the reduced-res gather.
+	bool	shMode;
+	int		shAtt;
 };
 
 class RHI {
@@ -390,6 +396,9 @@ public:
 	// RT GI radiance MRT (docs/rtx-rtgi.md H6): like the RTAO MRT but attachment 0 is RGBA16F radiance
 	// (vs R16F occlusion) so a bounce hit's colour fits; 1/2 are the same NRD guides (viewZ R16F, normal RGBA16F). VK only.
 	virtual RenderTargetHandle	CreateRenderTargetRtgiMrt( int w, int h ) { return 0; }
+	// ReSTIR DI SH gather MRT: att0 RGBA16F SH0 (YCoCg radiance + hitdist), att1 R16F viewZ, att2 RGBA16F packed normal,
+	// att3 RGBA16F SH1 (direction * luminance)
+	virtual RenderTargetHandle	CreateRenderTargetRtgiShMrt( int w, int h ) { return 0; }
 	// RT shadow blur ray target (docs/rtx-shadow-blur.md, perf): attachment 0 = RGBA16F
 	// (vis / hwX / dist / hwY, the blur's working data), attachment 1 = RG8 per-pixel SUMMARY
 	// (R = visibility, G = penumbra half-width / HW_MAX, or 1.0 = untraced) so the tile
@@ -533,6 +542,7 @@ public:
 	// H6b RT GI (docs/rtx-rtgi.md): the RtaoDenoise giMode path writes the denoised GI radiance
 	// (RGBA16F: radiance .rgb, occlusion .w) here; 0 until the first successful GI denoise
 	virtual ImageHandle	GetRtgiOutputImage() { return 0; }
+	virtual ImageHandle	GetRtgiOutputSh1Image() { return 0; }	// SH mode: the denoised OUT_DIFF_SH1 (direction * luminance)
 	// R1/D: snapshot the scene color as the OPAQUE-ONLY input for FSR2's auto-reactive
 	// mask. Called at the opaque/translucent split of the primary view (after the SSR
 	// composite, before particles/blends draw); a straight same-orientation copy, unlike
