@@ -5730,7 +5730,11 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				liveStage = st;
 				break;
 			}
-			if ( liveStage != NULL ) {
+			// only a plain 2D texture can ride the sampler2D bindless array: a cube map or a video (cinematic)
+			// stage has no written slot there (RB_RHI_RtShadowBlurLight applies the same filter), so such a
+			// light keeps the analytic attenuation instead of sampling an unwritten descriptor
+			if ( liveStage != NULL && liveStage->texture.image != NULL && liveStage->texture.image->type == TT_2D
+					&& liveStage->texture.cinematic == NULL ) {
 				L.projTex = RB_RHI_LightImageIndex( liveStage->texture.image );
 				if ( L.projTex != 0 && liveStage->texture.hasMatrix && cregs != NULL ) {
 					float texMat[16];
@@ -5738,7 +5742,9 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 					RB_RHI_BakeLightTextureMatrix( L.proj, texMat );
 				}
 			}
-			L.falloffTex = RB_RHI_LightImageIndex( ld->falloffImage );
+			if ( ld->falloffImage != NULL && ld->falloffImage->type == TT_2D ) {
+				L.falloffTex = RB_RHI_LightImageIndex( ld->falloffImage );
+			}
 		}
 	}
 	if ( n == 0 ) {
