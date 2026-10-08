@@ -10268,8 +10268,12 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				ictx.lightRange = cls.isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
 				dbgDiCovered++;
 			} else {
+				// r_vkGpuTime 2 / crash checkpoints: the per-light shadow work (map / cube / sun renders, the
+				// blurred ray mask) - a device-loss dump names it instead of the gap between two lights
+				r->GpuScopeBegin( "light.shadow" );
 				RB_RHI_SelectLightShadowTechnique( r, viewDef, vLight, cls, shadowMapProg,
 				                                   shadowCubeProg, dbgShadowMapped );
+				r->GpuScopeEnd();
 			}
 
 			const bool shadowMapped = ictx.lightShadowMapped || ictx.lightShadowCube || ictx.lightRtPoint;
@@ -10318,6 +10322,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			}
 
 			ictx.depthFuncBits = GLS_DEPTHFUNC_EQUAL;
+			r->GpuScopeBegin( "light.interact" );		// opaque interactions (+ stencil volumes): named for r_vkGpuTime 2 / crash checkpoints
 			if ( !useStencil ) {
 				// shadow-mapped, or shadow mapping on but this light isn't mapped
 				// (out-of-budget point, parallel, failed pass): draw unshadowed
@@ -10333,6 +10338,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				RB_RHI_StencilShadowPass( r, viewDef, vLight->localShadows, shadowProg );
 				RB_RHI_CreateDrawInteractions( vLight->globalInteractions );
 			}
+			r->GpuScopeEnd();
 
 			// translucent surfaces never get stencil shadowed
 			if ( r_skipTranslucent.GetBool() ) {
@@ -10343,9 +10349,11 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			}
 			ictx.stencilState = rhi::SS_ALWAYS;
 			ictx.depthFuncBits = GLS_DEPTHFUNC_LESS;
+			r->GpuScopeBegin( "light.translucent" );	// translucent interactions + blood films
 			RB_RHI_CreateDrawInteractions( vLight->translucentInteractions );
 			// r_decalWetBlood: blood decals glint off this light as surfaces of their own
 			RB_RHI_DrawFilmInteractions( r, viewDef, vLight );
+			r->GpuScopeEnd();
 		}
 	}
 	backEnd.vLight = NULL;
