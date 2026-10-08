@@ -40,6 +40,7 @@
 //   u_particleRadius.xy   = geometry-table device address (bit-cast; grate candidates -> coverage texture)
 //   u_particleRadius.zw   = per-view perforated box list device address (bit-cast; rt_perforated.glsl)
 //   u_shadowFalloffS.x    = forward light scale (backEnd.lightScale): the DI term is scaled here, not at the apply
+//   u_shadowFalloffS.y    = world size of one FULL-RES screen pixel per unit view depth (2/(proj00*viewW)): cookie LOD
 //   --- r_rtReStirDICombineGI (RTGI bounce folded into THIS buffer, one NRD denoise; rtgi_bounce.glsl) ---
 //   u_specularParms       = ( combine on/off, fog strength, fog coef (exp), skip fast lights in the bounce )   [fog: rtgi_apply's r_rtgiFogAttenuate]
 //   u_pbrParms            = ( gather radius, r_rtgiEmissive, r_rtgiEmissiveClamp, r_rtgiLightScale )
@@ -270,7 +271,7 @@ void main() {
 			// the light's shape + colour: its real cookie * falloff textures (Stage G, u_windowCoord.w), else the
 			// analytic frustum attenuation. Doom lighting model: no 1/pi.
 			vec3 atten = ( u_windowCoord.w > 0.5 )
-				? dudeLightAttenTex( lights, li, Pw, dl, lights.l[ li ].flags, true, false )
+				? dudeLightAttenTex( lights, li, Pw, dl, lights.l[ li ].flags, true, false, d * u_shadowFalloffS.y )
 				: vec3( dudeLightAtten( lights, li, Pw, dl, lights.l[ li ].flags, true, false ) );
 			vec3 contrib = lights.l[ li ].color * ( atten * ndl );		// irradiance-like: colour * cookie/falloff * N.L
 			if ( applyMode ) {

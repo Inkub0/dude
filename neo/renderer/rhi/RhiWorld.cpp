@@ -7799,6 +7799,10 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// the direct term's light scale: the forward path's lightColor = lightScale * stage colour, the buffer carries
 	// the raw stage colour, so the gather scales (the apply then remultiplies material + AO only)
 	parms.shadowFalloffS[0] = backEnd.lightScale;
+	// cookie mip selection (rt_light_tex.glsl): world size of one FULL-RES screen pixel per unit depth, so the
+	// gather lands on the same mip the forward draw's screen-derivative LOD picks (Doom's black-bordered
+	// cookies read dimmer on the blurred mips; mip 0 made DI brighter than forward on big floors)
+	parms.shadowFalloffS[1] = 2.0f * invP00 / (float)w;
 
 	// r_rtReStirDICombineGI: fold the RTGI one-bounce into this gather (rtgi_bounce.glsl) so ONE NRD denoise and
 	// ONE apply serve direct + indirect. RB_RHI_RtgiPass already stands down while DI is on (the shared NRD slot),

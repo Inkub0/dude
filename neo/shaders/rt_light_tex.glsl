@@ -20,7 +20,15 @@ layout(set = 2, binding = 0) uniform sampler2D u_rtTextures[];
 // Attenuation of light li at p as the light's textures define it; the analytic dudeLightAtten when the row
 // carries no cookie (an untextured light, r_rtLightTextures 0, or an image that has not bridged yet).
 // Same signature contract as dudeLightAtten plus the colour: returns rgb, 0 = does not reach.
-vec3 dudeLightAttenTex( RtLights lights, uint li, vec3 p, float dl, uint flags, bool frustumGate, bool roundSpot ) {
+//
+// pixelWorld = the world-space size of ONE screen pixel at p (0 = sample mip 0). The forward draw samples the
+// cookie with textureProj and the hardware's screen-derivative LOD, and Doom's cookies fade to a black border,
+// so on a surface seen at a distance / grazing angle the blurred mips pull that border inward and the light
+// reads dimmer than mip 0 does (a white floor under DI was visibly brighter than forward, 2026-10-08). The
+// chain rule gives the same footprint without screen derivatives (which a candidate loop cannot take):
+// d(st)/d(pixel) = grad_p(st) * pixelWorld, grad_p(s) = (S.xyz - s*Q.xyz)/q, lod = log2(footprint in texels).
+// Isotropic (the minor axis), which is what anisotropic filtering keys its LOD on; the falloff ramp stays mip 0.
+vec3 dudeLightAttenTex( RtLights lights, uint li, vec3 p, float dl, uint flags, bool frustumGate, bool roundSpot, float pixelWorld ) {
 	uint projTex = lights.l[ li ].projTex;
 	if ( projTex == 0u ) {
 		return vec3( dudeLightAtten( lights, li, p, dl, flags, frustumGate, roundSpot ) );
@@ -29,7 +37,14 @@ vec3 dudeLightAttenTex( RtLights lights, uint li, vec3 p, float dl, uint flags, 
 	float q  = dot( hw, lights.l[ li ].projQ );
 	if ( q <= 1e-4 ) { return vec3( 0.0 ); }							// behind the projection apex
 	vec2  st = vec2( dot( hw, lights.l[ li ].projS ), dot( hw, lights.l[ li ].projT ) ) / q;
-	vec3  atten = textureLod( u_rtTextures[ nonuniformEXT( projTex - 1u ) ], st, 0.0 ).rgb;
+	float lod = 0.0;
+	if ( pixelWorld > 0.0 ) {
+		vec3  gs = ( lights.l[ li ].projS.xyz - st.x * lights.l[ li ].projQ.xyz ) / q;
+		vec3  gt = ( lights.l[ li ].projT.xyz - st.y * lights.l[ li ].projQ.xyz ) / q;
+		vec2  texels = vec2( textureSize( u_rtTextures[ nonuniformEXT( projTex - 1u ) ], 0 ) ) * vec2( length( gs ), length( gt ) ) * pixelWorld;
+		lod = log2( max( max( texels.x, texels.y ), 1e-6 ) );
+	}
+	vec3  atten = textureLod( u_rtTextures[ nonuniformEXT( projTex - 1u ) ], st, lod ).rgb;
 	uint  falloffTex = lights.l[ li ].falloffTex;
 	if ( falloffTex != 0u ) {
 		float f = dot( hw, lights.l[ li ].projF );
