@@ -12,6 +12,7 @@
 SAMPLER_BINDING(0) uniform sampler2D u_bumpMap;
 SAMPLER_BINDING(1) uniform sampler2D u_coverageMap;   // diffuse alpha for perforated surfaces
 SAMPLER_BINDING(2) uniform sampler2D u_diffuseAlbedo; // RTGI (docs/rtx-rtgi.md H6c): surface diffuse, written to out_Albedo
+SAMPLER_BINDING(3) uniform sampler2D u_specularMask;  // ReSTIR DI (docs/rtx-restir-di.md Stage D): the surface's specular map, luminance -> out_Material.b
 
 VARY(0) in vec2 var_TexBump;
 VARY(1) in vec3 var_T;
@@ -25,7 +26,7 @@ VARY(7) in vec4 var_CurClip;
 VARY(8) in vec4 var_PrevClip;
 
 layout(location = 0) out vec4 fragColor;
-layout(location = 1) out vec4 out_Material;   // SSR: (roughness, metalness, 0, 1)
+layout(location = 1) out vec4 out_Material;   // SSR: (roughness, metalness, spec-map luminance [DI apply only, else 0], 1)
 layout(location = 2) out vec2 out_Velocity;   // R1/A2 motion vector: currUV - prevUV, +Y-up
 layout(location = 3) out vec4 out_Albedo;     // RTGI H6c: receiver albedo; only attached on the 4-MRT RTGI prepass (else GL discards the write)
 
@@ -52,7 +53,11 @@ void main() {
 	vec3 N = normalize( var_T * tn.x + var_B * tn.y + var_N * tn.z );
 
 	fragColor = vec4( N * 0.5 + 0.5, u_localParam0.x );   // A = AO mask (0 = weapon, skip)
-	out_Material = vec4( u_pbrParms.y, u_pbrParms.x, 0.0, 1.0 );
+	// .b = the specular map's luminance (ReSTIR DI Stage D: the deferred DI shade masks its GGX lobe with it, as
+	// interaction.frag masks with spec * specMap). Sampled with the diffuse UV (var_TexCoverage), only on the
+	// 4-MRT albedo prepass (u_localParam0.y) - black otherwise, and nothing else reads .b.
+	float specLum = ( u_localParam0.y > 0.5 ) ? dot( texture( u_specularMask, var_TexCoverage ).rgb, vec3( 0.2126, 0.7152, 0.0722 ) ) : 0.0;
+	out_Material = vec4( u_pbrParms.y, u_pbrParms.x, specLum, 1.0 );
 
 	// per-pixel screen velocity (docs/fsr-temporal-pipeline.md R1/A2): divide each interpolated
 	// clip by its OWN w so large world triangles reproject correctly, take the NDC delta, scale
