@@ -46,11 +46,16 @@ VARY(8) out vec4 var_PrevClip;
 // The flat pipeline folds it into var_PrevClip below; the tessellation stages interpolate it across the
 // patch and add it to the displaced position (gbuffer.tese), so skinned + tessellated monsters work too.
 VARY(9) out vec3 var_PrevDelta;
+// ReSTIR DI material parity (docs/rtx-restir-di.md): the surface's vertex-colour term, composed exactly as
+// interaction.vert's var_Color (modulate / inverse-modulate / ignore via u_vertexColorModulate/Add), so the
+// albedo attachment carries what the forward diffuse term multiplies by. Only read on the 4-MRT albedo prepass.
+VARY(10) out vec4 var_Color;
 
 void main() {
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
 	var_TexBump = vec2( dot( st, u_bumpMatrixS ), dot( st, u_bumpMatrixT ) );
 	var_TexCoverage = vec2( dot( st, u_diffuseMatrixS ), dot( st, u_diffuseMatrixT ) );
+	var_Color = attr_Color * u_vertexColorModulate + u_vertexColorAdd;
 
 	// model -> view rotation (Doom 3 models carry no non-uniform scale, so the 3x3 is
 	// an orthonormal rotation and normals/tangents transform with it directly)

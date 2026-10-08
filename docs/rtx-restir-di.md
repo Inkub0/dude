@@ -342,11 +342,19 @@ and the per-view budget churns them, so the luminance / appeared rules pushed do
 luminance step is now 20 % (was 10 %) so subtle authored flicker tables stay in DI. `r_shadowMapDebug 1` prints
 "N of M lit lights DI-covered" per frame - the number to watch.
 
-**Known v1 approximations (deliberate, listed for the test):** diffuse/specular STAGE colours + vertex colour
-assumed 1 (not in the G-buffer); baked occlusion maps not applied to DI; the legacy non-PBR specular LUT not
-replicated (`r_pbr 0` = Lambert); no Toksvig widening (G-buffer normal is unit); the organic spec-fallback
-(flesh without a spec stage) not replicated; AO applies to diffuse+spec together; `noSpecular` light parm
-ignored; multi-stage light cookies (Stage G) take the first live stage. The RTGI/RTAO auto-claim still stands
+**Material parity (2026-10-08, closes two v1 approximations):** the albedo prepass now writes
+`diffuseMap × diffuse-stage colour × vertex-colour term` (the stage's colour registers in `u_diffuseModifier`, the
+`SVC_*` mode via `u_vertexColorModulate/Add` and a new `var_Color` varying threaded through gbuffer.vert/tesc/tese),
+so the DI shade and the GI receiver albedo match what interaction.frag multiplies the light by. The material
+attachment's spare `.a` carries the baked occlusion map (`RB_RHI_SurfaceOcclusionImage`, factored out of the
+forward fill, bound on unit 10 of the albedo prepass), and the DI apply scales by
+`mix(1, map, r_occlusionMapScale × r_occlusionMapDirect)` like the forward direct diffuse.
+
+**Known v1 approximations (deliberate, listed for the test):** the SPECULAR stage colour assumed 1 (the diffuse
+stage colour is in the albedo now); the legacy non-PBR specular LUT not replicated (`r_pbr 0` = Lambert); no
+Toksvig widening (G-buffer normal is unit); the organic spec-fallback (flesh without a spec stage) not replicated;
+AO and the baked occlusion map apply to diffuse+spec together; `noSpecular` light parm ignored; multi-stage light
+cookies (Stage G) take the first live stage. The RTGI/RTAO auto-claim still stands
 them down while DI is on (DI's own NRD instance remains the fix).
 
 ### Open risks / deferred decisions

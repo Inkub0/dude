@@ -18,6 +18,7 @@
 //   u_ssao (5)            = AO buffer (r = ambient visibility), sampled only when u_localParam1.x > 0.5
 //   u_localParam0         = ( bilateral on/off, depth sensitivity, normal power, light scale )
 //   u_localParam1         = ( AO enable, AO floor, AO direct-light strength, 0 )
+//   u_occlusionParms.z    = baked occlusion-map strength on direct light (r_occlusionMapScale * r_occlusionMapDirect); 0 = off
 //   u_diffuseModifier.xy  = ( kd = 1 - r_pbrMetalDiffuse, r_pbrSpecScale )   [diDemodFactor inputs]
 //   u_screenCorrection.xy = 1 / (rw, rh)  - the reduced-res DI texel in view uv (the 2x2 footprint)
 //   u_depthTexRecip.xy    = (w/uploadW, h/uploadH)  - view uv -> depth tc (the POT depth image)
@@ -84,7 +85,7 @@ void main() {
 
 	// remodulate by this pixel's material (the exact factor the gather divided by) and the forward light scale
 	vec3 albedo = texture( u_albedoBuffer, uv ).rgb;
-	vec3 mt     = texture( u_materialBuffer, uv ).rgb;
+	vec4 mt     = texture( u_materialBuffer, uv );
 	vec3 B      = diDemodFactor( albedo, mt.g, mt.b, u_diffuseModifier.x, u_diffuseModifier.y );
 	vec3 lit    = di * B * u_localParam0.w;
 
@@ -94,6 +95,11 @@ void main() {
 		float ao = texture( u_ssao, uv ).r;
 		ao = mix( u_localParam1.y, 1.0, ao );
 		lit *= mix( 1.0, ao, u_localParam1.z );
+	}
+	// baked occlusion map (material att1 .a, 1 = none): the forward path's direct-diffuse factor
+	// mix( 1, map, scale*direct ) - applied to the combined term here (v1: diffuse + spec denoised together)
+	if ( u_occlusionParms.z > 0.0 ) {
+		lit *= mix( 1.0, mt.a, u_occlusionParms.z );
 	}
 	fragColor = vec4( max( lit, vec3( 0.0 ) ), 0.0 );
 }

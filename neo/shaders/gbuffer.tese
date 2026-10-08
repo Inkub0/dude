@@ -26,6 +26,7 @@ VARY(4) in vec2 i_TexCoverage[];
 VARY(5) in vec3 i_ModelPos[];
 VARY(6) in vec4 i_ModelNormal[];
 VARY(9) in vec3 i_PrevDelta[];		// skinned motion vectors: previous - current model-space position per corner
+VARY(10) in vec4 i_Color[];			// vertex-colour term (ReSTIR DI albedo parity)
 
 VARY(0) out vec2 var_TexBump;
 VARY(1) out vec3 var_T;
@@ -37,6 +38,7 @@ VARY(4) out vec2 var_TexCoverage;
 // deforming vertices reuse the rigid prev matrix (documented v1 limitation).
 VARY(7) out vec4 var_CurClip;
 VARY(8) out vec4 var_PrevClip;
+VARY(10) out vec4 var_Color;
 
 void main() {
 	vec3 tc = gl_TessCoord;
@@ -50,6 +52,7 @@ void main() {
 
 	var_TexBump     = i_TexBump[0] * tc.x + i_TexBump[1] * tc.y + i_TexBump[2] * tc.z;
 	var_TexCoverage = i_TexCoverage[0] * tc.x + i_TexCoverage[1] * tc.y + i_TexCoverage[2] * tc.z;
+	var_Color       = i_Color[0] * tc.x + i_Color[1] * tc.y + i_Color[2] * tc.z;
 	var_T = i_T[0] * tc.x + i_T[1] * tc.y + i_T[2] * tc.z;
 	var_B = i_B[0] * tc.x + i_B[1] * tc.y + i_B[2] * tc.z;
 	var_N = i_N[0] * tc.x + i_N[1] * tc.y + i_N[2] * tc.z;
