@@ -498,6 +498,7 @@ public:
 
 
 	idImage *			currentDepthImage;			// #3877. Allow shaders to access scene depth
+	idImage *			worldDepthImage;			// DUDE ReSTIR DI: scene depth captured BEFORE the view weapon is drawn (world only)
 
 	//--------------------------------------------------------
 

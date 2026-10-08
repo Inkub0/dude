@@ -2089,6 +2089,7 @@ void idImageManager::Init() {
 	scratchCubeMapImage = ImageFromFunction("_scratchCubeMap", makeNormalizeVectorCubeMap );
 	currentRenderImage = ImageFromFunction("_currentRender", R_RGBA8Image );
 	currentDepthImage = ImageFromFunction( "_currentDepth", R_DepthImage ); // #3877. Allow shaders to access scene depth
+	worldDepthImage = ImageFromFunction( "_worldDepth", R_DepthImage );	// DUDE ReSTIR DI: world-only depth (weapon deferred)
 
 	cmdSystem->AddCommand( "reloadImages", R_ReloadImages_f, CMD_FL_RENDERER, "reloads images" );
 	cmdSystem->AddCommand( "listImages", R_ListImages_f, CMD_FL_RENDERER, "lists images" );

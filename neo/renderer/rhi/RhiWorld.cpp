@@ -480,6 +480,12 @@ static bool  rhiReStirDIDenoisedThisView = false;	// the shared REBLUR_DIFFUSE d
 static rhi::BufferHandle	s_diPerfBoxBuf = 0;
 static unsigned long long	s_diPerfBoxAddr = 0;
 static void RB_RHI_RtgiFogCoefs( const viewDef_t *viewDef, float &strength, float &coef );	// defined with RB_RHI_RtgiApply below
+// ReSTIR DI world-only G-buffer: when DI lights the scene, the normal + depth prepasses run in two phases - the
+// WORLD first, the DI chain on that (depth / normals / albedo / velocity without the weapon), then the view weapon
+// is drawn into the same targets for every other consumer. The world behind the weapon then keeps continuous
+// denoiser history and nothing is ever "uncovered" by its silhouette (the fried halo around a moving weapon).
+static bool  rhiPrepassWeaponDeferred = false;	// this view's phase-0 prepass skipped the weapon; phase 1 pending
+static bool  rhiWorldDepthThisView = false;		// globalImages->worldDepthImage holds this view's world-only depth
 static bool  rhiReStirDIApplyThisView = false;		// Stage D (r_rtReStirDIApply): DI LIGHTS this view - the apply runs and the forward loop skips the covered lights' opaque draws
 static bool  rhiReStirDIAppliedThisView = false;	// the additive apply already ran this view (idempotent across the split / fallback call sites)
 static rhi::RenderTargetHandle rhiReStirDIConfRT = 0;	// DI history-confidence (R16F), reusing rtgi_confidence.frag
@@ -2355,7 +2361,9 @@ static void RB_RHI_CaptureCurrentDepth( const viewDef_t *viewDef ) {
 	}
 }
 
-static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
+// phase: -1 = everything; 0 = world only, captured into globalImages->worldDepthImage (ReSTIR DI's world-only
+// depth); 1 = the deferred view weapon only, then the usual _currentDepth capture of the complete depth.
+static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef, int phase = -1 ) {
 	rhi::ShaderHandle zfill = r->LoadShader( "zfill" );
 
 	// subview near-clip plane (mirror / camera views): the legacy path forces
@@ -2399,6 +2407,9 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 		const drawSurf_t *surf = drawSurfs[i];
 		const srfTriangles_t *tri = surf->geo;
 		const idMaterial *shader = surf->material;
+		// ReSTIR DI world-only G-buffer: phase 0 skips the view weapon, phase 1 draws only it
+		if ( phase == 0 && surf->space->weaponDepthHack ) { continue; }
+		if ( phase == 1 && !surf->space->weaponDepthHack ) { continue; }
 
 		if ( !shader->IsDrawn() ) {
 			continue;
@@ -2695,7 +2706,16 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 
 	// make the early depth pass available to shaders (soft particles, SSAO, SSR, etc.)
-	RB_RHI_CaptureCurrentDepth( viewDef );
+	if ( phase == 0 ) {
+		// world-only depth for the DI chain (always, the chain needs it); _currentDepth follows after phase 1
+		if ( viewDef->renderView.viewID >= 0 && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+			globalImages->worldDepthImage->CopyDepthbuffer( viewDef->viewport.x1, viewDef->viewport.y1,
+				viewDef->viewport.x2 - viewDef->viewport.x1 + 1, viewDef->viewport.y2 - viewDef->viewport.y1 + 1, true );
+			rhiWorldDepthThisView = globalImages->worldDepthImage->rhiHandle != 0;
+		}
+	} else {
+		RB_RHI_CaptureCurrentDepth( viewDef );
+	}
 }
 
 // Static/dynamic split (r_shadowMapCacheSplit): which layer a cube-shadow caster belongs
@@ -4444,7 +4464,9 @@ the coverage the depth prepass seals.
 // standalone zfill depth prepass and capture _currentDepth from this pass instead. Returns
 // false for the standalone-normal-target path (or when it does nothing), where zfill still
 // seals depth as usual.
-static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
+// phase: -1 = everything (the normal path); 0 = world only (skip the view weapon; sets rhiPrepassWeaponDeferred);
+// 1 = the deferred weapon only, drawn into the existing target without clearing (after the DI chain ran).
+static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int phase = -1 ) {
 	if ( !R_BackendSupportsEnhancements() ) {
 		return false;
 	}
@@ -4527,9 +4549,19 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 	}
 	const bool wantMerge = r_ssaoMergeNormal.GetBool() && !viewHasSubviewSurf
-		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN && !wantAlbedo;	// RTGI albedo needs the standalone 4-attachment target
+		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN && !wantAlbedo	// RTGI albedo needs the standalone 4-attachment target
+		&& phase != 1;
 	rhi::RenderTargetHandle activeNormalRT = 0;
 	bool didMerge = false;
+	if ( phase == 1 ) {
+		// the deferred weapon: into the standalone target phase 0 filled, no clear, same depth-range handling
+		if ( rhiNormalRT == 0 ) {
+			return false;
+		}
+		r->SetNextTargetHonorsDepthRange();
+		r->BeginTargetPass( rhiNormalRT, NULL );
+		activeNormalRT = rhiNormalRT;
+	}
 	if ( wantMerge ) {
 		activeNormalRT = r->BeginNormalPrepass( w, h, &clear, ssrWants, velWants );
 		didMerge = ( activeNormalRT != 0 );	// non-zero → the gbuffer pass shares (seals) scene depth
@@ -4583,6 +4615,9 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
 	for ( int i = 0; i < viewDef->numDrawSurfs; i++ ) {
 		const drawSurf_t *surf = drawSurfs[i];
+		// ReSTIR DI world-only G-buffer: phase 0 skips the view weapon, phase 1 draws only it
+		if ( phase == 0 && surf->space->weaponDepthHack ) { rhiPrepassWeaponDeferred = true; continue; }
+		if ( phase == 1 && !surf->space->weaponDepthHack ) { continue; }
 		const srfTriangles_t *tri = surf->geo;
 		const idMaterial *shader = surf->material;
 
@@ -7650,6 +7685,9 @@ behind r_rtReStirDI; VK + RT hardware only; needs the sealed depth + bump-normal
 ===================
 */
 static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
+	// the world-only depth when the prepass deferred the weapon this view (same POT capture size), else _currentDepth
+	idImage *diDepthImg = ( rhiWorldDepthThisView && globalImages->worldDepthImage->rhiHandle != 0 )
+		? globalImages->worldDepthImage : globalImages->currentDepthImage;
 	rhiReStirDIRanThisView = false;
 	rhiReStirDIDenoisedThisView = false;	// reset on every early-out (the debug overlay gates on it)
 	rhiReStirDIApplyThisView = false;		// Stage D: set below only when DI will light this view (the forward loop + apply key off it)
@@ -7663,7 +7701,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return;
 	}
-	if ( globalImages->currentDepthImage->uploadWidth <= 0
+	if ( diDepthImg->uploadWidth <= 0
 			|| !rhiNormalReadyThisView || rhiNormalResultRT == 0 ) {
 		return;		// needs the sealed depth + the bump-mapped normal G-buffer
 	}
@@ -7711,8 +7749,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const float *proj  = viewDef->projectionMatrix;
 	const float invP00 = ( proj[0] != 0.0f ) ? 1.0f / proj[0] : 1.0f;
 	const float invP11 = ( proj[5] != 0.0f ) ? 1.0f / proj[5] : 1.0f;
-	const int uploadW = globalImages->currentDepthImage->uploadWidth;
-	const int uploadH = globalImages->currentDepthImage->uploadHeight;
+	const int uploadW = diDepthImg->uploadWidth;
+	const int uploadH = diDepthImg->uploadHeight;
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
@@ -7862,7 +7900,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray
 	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
 	r->BeginTargetPass( rhiReStirDIRT, NULL );
-	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	RB_RHI_BindUnit( 0, diDepthImg );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
 	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
 	// units 2/3 = the G-buffer albedo + material for apply mode; white placeholders otherwise so the descriptor
@@ -7973,7 +8011,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				gp.depthTexRecip[0] = ( (float)w / rw ) / uploadW;	gp.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
 				r->GpuScopeBegin( "restir.di.guides" );	// r_vkGpuTime 2: internal-res NRD guide fill (checkerboard only)
 				r->BeginTargetPass( rhiReStirDIGuideRT, NULL );
-				RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+				RB_RHI_BindUnit( 0, diDepthImg );
 				RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
 				backEnd.glState.tmu[1].current2DMap = -1;
 				RB_RHI_DrawFullscreen( r, guideProg, gp, 0 );
@@ -9750,14 +9788,36 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 	// per-view state only - the target CACHE keys (rhiNormalMrt/Vel) stay untouched, or the
 	// standalone velocity target would key-mismatch and recreate every frame (the DIAG spam)
 	rhiNormalReadyThisView = false;	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;	rhiNormalAlbedoThisView = false;
+	rhiPrepassWeaponDeferred = false;	rhiWorldDepthThisView = false;
+	// ReSTIR DI lighting the scene (docs/rtx-restir-di.md): run the prepasses WORLD-first, the DI chain on that
+	// world-only G-buffer, then draw the deferred view weapon into the same targets. The weapon's silhouette then
+	// never uncovers history-less pixels in the denoiser (the fried halo); every other consumer (AO, SSR, FSR2,
+	// the forward draws' mask) still sees the complete buffers afterwards. Primary window view only, VK + RT.
+	const bool diWorldOnly = vkMode && r_rtReStirDI.GetBool() && r_rtReStirDIApply.GetBool()
+		&& !r_rtReStirDIDebug.GetBool() && r->SupportsRayQuery()
+		&& viewDef->viewEntitys && !viewDef->isSubview && viewDef->isWindowView;
 	r->GpuScopeBegin( "prepass (depth+gbuffer)" );
-	const bool mergedDepth = RB_RHI_NormalPrepass( r, viewDef );
+	const bool mergedDepth = RB_RHI_NormalPrepass( r, viewDef, diWorldOnly ? 0 : -1 );
 	if ( mergedDepth ) {
 		RB_RHI_CaptureCurrentDepth( viewDef );
 	} else {
-		RB_RHI_FillDepthBuffer( r, viewDef );
+		RB_RHI_FillDepthBuffer( r, viewDef, diWorldOnly ? 0 : -1 );
 	}
 	r->GpuScopeEnd();
+	if ( diWorldOnly ) {
+		// the DI pass now runs BEFORE the RTGI / RTAO passes (which stand down under DI and reset these at their
+		// start): clear them here so the shared-NRD check in the DI pass never reads a stale frame's value
+		rhiRtgiDenoisedThisView = false;	rhiRtaoDenoisedThisView = false;
+		RB_RHI_ReStirDIPass( r, viewDef );			// on the world-only depth / normals / albedo / velocity
+		r->GpuScopeBegin( "prepass (weapon)" );
+		if ( !mergedDepth ) {
+			if ( rhiPrepassWeaponDeferred ) {
+				RB_RHI_NormalPrepass( r, viewDef, 1 );
+			}
+			RB_RHI_FillDepthBuffer( r, viewDef, 1 );	// + the complete _currentDepth capture
+		}
+		r->GpuScopeEnd();
+	}
 
 	// SSAO (GTAO) builds the AO buffer from the just-captured scene depth, before
 	// the ambient/interaction passes that consume it (docs/ssao-gtao.md). Each view
@@ -9780,7 +9840,9 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 	// Reuses the same sealed depth + normal G-buffer; nothing consumes its output in the lit scene yet
 	// (r_rtReStirDIDebug shows it). Opens its OWN sub-scopes (restir.di.gather / .conf / .denoise) for
 	// r_vkGpuTime 2 — scopes do not nest, so there is no outer "restir.di" scope here.
-	RB_RHI_ReStirDIPass( r, viewDef );
+	if ( !diWorldOnly ) {
+		RB_RHI_ReStirDIPass( r, viewDef );		// (debug-only DI, or no apply: the usual place, after AO / GI)
+	}
 	// r_rtShadowBlur: validate the view + size the shared targets; the light loop builds each
 	// ray-served light's mask on demand (RB_RHI_RtShadowBlurLight)
 	RB_RHI_RtShadowBlurBegin( r, viewDef );
