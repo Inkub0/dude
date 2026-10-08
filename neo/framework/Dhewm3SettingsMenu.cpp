@@ -2795,7 +2795,7 @@ enum {
 enum RtMode {
 	RTX_OFF = 0,
 	RTX_ON,				// hybrid: RT augments the chosen raster tier
-	RTX_PATHTRACED,		// reserved: H7 full path tracing (Nightmare only)
+	RTX_PATHTRACED,		// "Ultra Nightmare" (dude_rtx 2): the tier's RT augment + ReSTIR DI lighting the scene (docs/rtx-restir-di.md)
 	RTX_COUNT
 };
 
@@ -3177,6 +3177,8 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	r_rtgi.SetBool( p.rtgi );		// H6e: Ultra Nightmare enables GI (and carries rtao=false — GI replaces it)
 	r_rtShadowBlur.SetBool( p.rtShadowBlur );
 	r_rtAllLights.SetBool( p.rtAllLights );
+	r_rtReStirDI.SetBool( false );			// dude_rtx 2 only (set in the RT overlay below)
+	r_rtReStirDIApply.SetBool( false );
 	r_rtShadowBlurStagger.SetBool( p.rtBlurStagger );
 	r_volumetrics.SetBool( p.volumetrics );
 
@@ -3227,6 +3229,12 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		if ( a.volLights > 0 ) {
 			cvarSystem->SetCVarInteger( "r_volLights", a.volLights );
 		}
+		// dude_rtx 2 "Ultra Nightmare" (H7, docs/rtx-restir-di.md): ReSTIR direct lighting replaces the per-light
+		// forward draws (r_rtAllLights' ray-per-light loop stays for the fast-changing lights DI leaves forward),
+		// and where the tier runs RTGI the bounce rides the same gather + denoise (r_rtReStirDICombineGI).
+		const bool fullRt = ( rtMode == RTX_PATHTRACED );
+		r_rtReStirDI.SetBool( fullRt );
+		r_rtReStirDIApply.SetBool( fullRt );
 
 		// RT reflections own every reflective pixel, so SSR is turned off under them and the
 		// RT-vs-SSR luminance match + half-res reflection trace follow (mirrors the raster
@@ -3268,11 +3276,12 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 	// Classify the live RT axis first. Any augment-driven RT cvar being on means RTX is on
 	// (PATHTRACED / H7 is not built yet, so today the axis is only OFF or ON). On a non-RT device
 	// none of these can be on, so this reads OFF there.
+	const bool diLive = r_rtReStirDI.GetBool() && r_rtReStirDIApply.GetBool();	// dude_rtx 2: DI lights the scene
 	const bool rtLive =
 		r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtReflections.GetBool() ||
 		r_rtao.GetBool() || r_rtgi.GetBool() || r_rtShadowBlur.GetBool() ||
-		r_rtAllLights.GetBool() || r_volumetrics.GetBool();
-	const int rtMode = rtLive ? RTX_ON : RTX_OFF;
+		r_rtAllLights.GetBool() || r_volumetrics.GetBool() || r_rtReStirDI.GetBool();
+	const int rtMode = diLive ? RTX_PATHTRACED : ( rtLive ? RTX_ON : RTX_OFF );
 	if ( outRtMode ) {
 		*outRtMode = rtMode;
 	}
@@ -3339,6 +3348,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				!r_rtReflections.GetBool() && !r_rtao.GetBool() && !r_rtgi.GetBool() &&
 				!r_rtShadowBlur.GetBool() && !r_rtAllLights.GetBool() &&
 				!r_rtShadowBlurStagger.GetBool() && !r_volumetrics.GetBool() &&
+				!r_rtReStirDI.GetBool() && !r_rtReStirDIApply.GetBool() &&
 				r_ssr.GetBool()                    == p.ssr &&
 				idMath::Fabs( r_ssrIntensity.GetFloat() - ( p.ssr ? 0.8f : 0.5f ) ) < 0.01f &&
 				idMath::Fabs( r_rtReflResScale.GetFloat() - 1.0f ) < 0.01f &&
@@ -3366,6 +3376,8 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				r_rtAllLights.GetBool()            == a.rtAllLights &&
 				r_rtShadowBlurStagger.GetBool()    == a.rtBlurStagger &&
 				r_volumetrics.GetBool()            == a.volumetrics &&
+				r_rtReStirDI.GetBool()             == ( rtMode == RTX_PATHTRACED ) &&
+				r_rtReStirDIApply.GetBool()        == ( rtMode == RTX_PATHTRACED ) &&
 				r_ssr.GetBool()                    == expSsr &&
 				idMath::Fabs( r_ssrIntensity.GetFloat() - ( expSsr ? 0.8f : 0.5f ) ) < 0.01f &&
 				r_motionVectors.GetBool()          == expMv &&
@@ -4186,18 +4198,21 @@ static void DrawGraphicsMenu()
 		const bool rtTierHasRT = ( selPreset >= PRESET_MEDIUM );
 		ImGui::SameLine();
 		ImGui::BeginDisabled( !rtCapable || !rtTierHasRT );
-		bool rtxOn = ( selRtx != RTX_OFF );
-		if ( ImGui::Checkbox( "RTX", &rtxOn ) ) {
-			selRtx = rtxOn ? RTX_ON : RTX_OFF;
+		int rtSel = idMath::ClampInt( RTX_OFF, RTX_PATHTRACED, selRtx );
+		ImGui::SetNextItemWidth( 160.0f );
+		if ( ImGui::Combo( "##enhRtx", &rtSel, "RTX Off\0RTX On\0Ultra Nightmare\0" ) ) {
+			selRtx = rtSel;
 		}
 		ImGui::EndDisabled();
 		AddTooltip( rtCapable
 			? "Ray tracing, layered on top of the quality tier at left: Medium and High add ray-traced "
 			  "ambient occlusion (at rising resolution; High also adds ray-traced shadows), Ultra swaps "
 			  "the AO for one-bounce ray-traced global illumination plus RT reflections, and Nightmare "
-			  "adds soft RT shadows on every light and volumetric lighting (the old 'Ultra Nightmare'). "
-			  "Independent of the tier, so it never changes the raster look. Needs the Vulkan backend "
-			  "and ray-query (RTX) hardware."
+			  "adds soft RT shadows on every light and volumetric lighting. 'Ultra Nightmare' (dude_rtx 2) "
+			  "goes further: ReSTIR direct lighting lights the whole scene with one resampled light and one "
+			  "shadow ray per pixel (the per-light forward draws are skipped), with the GI bounce folded into "
+			  "the same denoise. Independent of the tier, so it never changes the raster look. Needs the "
+			  "Vulkan backend and ray-query (RTX) hardware."
 			: "Ray tracing needs the Vulkan backend and ray-query (RTX) hardware - unavailable on this "
 			  "GPU / backend, so the quality tiers run raster-only." );
 
