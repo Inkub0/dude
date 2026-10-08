@@ -296,6 +296,16 @@ reset it early-outs with `r_ssr`/`r_rtReflections` off), so DI only landed insid
 lights' forward draws were already skipped. Both `RB_RHI_ReStirDIApply` and `RB_RHI_RtgiApply` (same latent
 issue) now set the full-view viewport + scissor and restore `backEnd.currentScissor` before drawing.
 
+**Perforated casters (2026-10-08, after the user noticed grates stopped casting under the apply):** the DI
+visibility ray now takes the forward inline ray's grate-aware route (`rt_perforated.glsl`, `r_rtPerforatedShadows`
++ `r_shadowMapPerforated`). The forward path decides per LIGHT whether a grate sits in its volume; DI's pixel
+picks its own light, so `RB_RHI_GatherSceneLights` also tracks the union bounds of the included lights' cull
+spheres and the DI pass gathers every grate box inside it (up to 64, per-frame slot, `u_particleRadius.zw` +
+count in `u_windowCoord.x`, strength `.y`, geo table `u_particleRadius.xy`). A segment through none of the boxes
+keeps the force-opaque 0xFD ray; one that can meet a grate traces 0xFF with candidates alpha-tested against the
+coverage texture and dims to `1 - strength` behind a solid texel. `rt_perforated.glsl`'s `u_rtTextures[]` is now
+guarded by the same macro as `rt_light_tex.glsl` so both include together.
+
 **Known v1 approximations (deliberate, listed for the test):** diffuse/specular STAGE colours + vertex colour
 assumed 1 (not in the G-buffer); baked occlusion maps not applied to DI; the legacy non-PBR specular LUT not
 replicated (`r_pbr 0` = Lambert); no Toksvig widening (G-buffer normal is unit); the organic spec-fallback

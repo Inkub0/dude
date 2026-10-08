@@ -473,6 +473,12 @@ static rhi::RenderTargetHandle rhiReStirDIRT = 0;	// the fresh 1-spp gather: Cre
 static int   rhiReStirDIW = 0, rhiReStirDIH = 0;
 static bool  rhiReStirDIRanThisView = false;		// DI gather produced this view (debug-overlay gate)
 static bool  rhiReStirDIDenoisedThisView = false;	// the shared REBLUR_DIFFUSE denoise ran for DI this view -> GetRtgiOutputImage is the denoised DI
+// ReSTIR DI perforated casters (rt_perforated.glsl): a per-VIEW list of the grates inside the union of the scene
+// lights' volumes (every pixel picks its own light, so the forward path's per-light list does not apply). Frame
+// slots like the scene-light buffer; the last box swallows any overflow (R_RtGatherPerforatedBoxes).
+#define DI_PERF_MAX_BOXES	64
+static rhi::BufferHandle	s_diPerfBoxBuf = 0;
+static unsigned long long	s_diPerfBoxAddr = 0;
 static bool  rhiReStirDIApplyThisView = false;		// Stage D (r_rtReStirDIApply): DI LIGHTS this view - the apply runs and the forward loop skips the covered lights' opaque draws
 static bool  rhiReStirDIAppliedThisView = false;	// the additive apply already ran this view (idempotent across the split / fallback call sites)
 static rhi::RenderTargetHandle rhiReStirDIConfRT = 0;	// DI history-confidence (R16F), reusing rtgi_confidence.frag
@@ -3927,6 +3933,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiVolRT = 0;	rhiVolBlurRT = 0;	rhiVolW = rhiVolH = 0;
 	rhiVolUpRT = 0;	rhiVolHistRT[0] = rhiVolHistRT[1] = 0;	rhiVolFullW = rhiVolFullH = 0;	rhiVolHistValid = false;
 	s_rtPerfBoxBuf = 0;			s_rtPerfBoxAddr = 0;		// perforated-caster boxes: same
+	s_diPerfBoxBuf = 0;			s_diPerfBoxAddr = 0;		// ReSTIR DI's per-view grate boxes: same
 	s_rtReflLightBuf = 0;		s_rtReflLightAddr = 0;		// RR16: handle is stale after a lost context; recreated lazily
 	rhiRtReflHistRT[0] = rhiRtReflHistRT[1] = 0;
 	rhiRtReflHistIdx = 0;		rhiRtReflHistW = rhiRtReflHistH = 0;
@@ -5509,6 +5516,7 @@ static const viewDef_t *	s_sceneLightCacheView  = NULL;
 static int					s_sceneLightCacheFrame = -1;
 static unsigned int			s_sceneLightGen = 0;			// bumped on every refill
 static idList<unsigned int>	s_sceneLightCoveredGen;			// [lightDef index] = generation that included it
+static idBounds				s_sceneLightBounds;				// union of the included lights' cull spheres (DI's per-view grate box gather)
 
 static bool RB_RHI_SceneLightCovered( const viewDef_t *viewDef, int lightDefIndex ) {
 	return viewDef != NULL && s_sceneLightCacheView == viewDef && s_sceneLightCacheFrame == tr.frameCount
@@ -5528,6 +5536,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	}
 	s_sceneLightCacheView = viewDef;	s_sceneLightCacheFrame = tr.frameCount;	cacheCount = 0;	cacheAddr = 0;
 	s_sceneLightGen++;		// every lightDef's stamp is now stale until the fill below re-includes it
+	s_sceneLightBounds.Clear();
 	s_sceneFogCount = 0;
 	*outAddr = 0;
 	if ( viewDef == NULL || viewDef->renderWorld == NULL ) {
@@ -5641,6 +5650,8 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		             + Max( ( cullOrg - viewOrg ).Length() - cullRad, 0.0f );
 		RtReflLightGPU &L = lights[ n++ ];
 		s_sceneLightCoveredGen[ i ] = s_sceneLightGen;			// Stage D membership: DI covers this lightDef in this view
+		s_sceneLightBounds.AddPoint( cullOrg - idVec3( cullRad, cullRad, cullRad ) );
+		s_sceneLightBounds.AddPoint( cullOrg + idVec3( cullRad, cullRad, cullRad ) );
 		L.cull[0] = cullOrg[0]; L.cull[1] = cullOrg[1]; L.cull[2] = cullOrg[2]; L.cull[3] = cullRad;
 		L.pos[0] = ld->globalLightOrigin[0];
 		L.pos[1] = ld->globalLightOrigin[1];
@@ -7661,6 +7672,47 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
 	parms.windowCoord[2] = -1.0f;										// VK-only pass: top-down view-Y sign
 	parms.windowCoord[3] = r_rtLightTextures.GetBool() ? 1.0f : 0.0f;	// Stage G: sample each light's cookie + falloff textures
+
+	// Perforated casters (r_rtPerforatedShadows): the grates inside the union of this view's scene-light volumes,
+	// as padded boxes in a per-frame slot, so the visibility ray takes the grate-aware route only where its segment
+	// can meet one (restir_di.frag traceVisibility, the interaction.frag recipe). windowCoord.x = box count (0 =
+	// off), .y = strength; particleRadius.xy = geo table, .zw = box list (bit-cast addresses).
+	{
+		const unsigned long long geoTable = r->GetRtGeoTableAddress();
+		if ( tlas != 0 && geoTable != 0 && r_rtPerforatedShadows.GetBool() && r_shadowMapPerforated.GetBool()
+				&& !s_sceneLightBounds.IsCleared() ) {
+			idBounds boxes[ DI_PERF_MAX_BOXES ];
+			const int total = R_RtGatherPerforatedBoxes( s_sceneLightBounds, boxes, DI_PERF_MAX_BOXES );
+			if ( total > 0 ) {
+				if ( s_diPerfBoxBuf == 0 ) {
+					s_diPerfBoxBuf = r->CreateBuffer( rhi::BU_STORAGE,
+						RT_REFL_LIGHT_SLOTS * DI_PERF_MAX_BOXES * 8 * (int)sizeof( float ), NULL );
+					s_diPerfBoxAddr = ( s_diPerfBoxBuf != 0 ) ? r->GetBufferDeviceAddress( s_diPerfBoxBuf ) : 0;
+				}
+				if ( s_diPerfBoxAddr != 0 ) {
+					const int n = Min( total, DI_PERF_MAX_BOXES );
+					static float data[ DI_PERF_MAX_BOXES * 8 ];
+					for ( int i = 0; i < n; i++ ) {
+						// padded: the ray starts a little off the surface, and a flat grate is a zero-thickness box
+						data[i * 8 + 0] = boxes[i][0].x - 2.0f; data[i * 8 + 1] = boxes[i][0].y - 2.0f; data[i * 8 + 2] = boxes[i][0].z - 2.0f; data[i * 8 + 3] = 0.0f;
+						data[i * 8 + 4] = boxes[i][1].x + 2.0f; data[i * 8 + 5] = boxes[i][1].y + 2.0f; data[i * 8 + 6] = boxes[i][1].z + 2.0f; data[i * 8 + 7] = 0.0f;
+					}
+					const int slot = (int)( tr.frameCount % RT_REFL_LIGHT_SLOTS );
+					const int ofs  = slot * DI_PERF_MAX_BOXES * 8 * (int)sizeof( float );
+					r->UpdateBuffer( s_diPerfBoxBuf, ofs, n * 8 * (int)sizeof( float ), data );
+					const unsigned long long boxAddr = s_diPerfBoxAddr + (unsigned long long)ofs;
+					const unsigned int geoLo = (unsigned int)( geoTable & 0xFFFFFFFFull ), geoHi = (unsigned int)( geoTable >> 32 );
+					const unsigned int boxLo = (unsigned int)( boxAddr & 0xFFFFFFFFull ),  boxHi = (unsigned int)( boxAddr >> 32 );
+					memcpy( &parms.particleRadius[0], &geoLo, sizeof( geoLo ) );		// bit-cast, NOT a value cast
+					memcpy( &parms.particleRadius[1], &geoHi, sizeof( geoHi ) );
+					memcpy( &parms.particleRadius[2], &boxLo, sizeof( boxLo ) );
+					memcpy( &parms.particleRadius[3], &boxHi, sizeof( boxHi ) );
+					parms.windowCoord[0] = (float)n;
+					parms.windowCoord[1] = idMath::ClampFloat( 0.0f, 1.0f, r_shadowMapPerforatedStrength.GetFloat() );
+				}
+			}
+		}
+	}
 
 	// Stage D apply mode (r_rtReStirDIApply): DI will LIGHT this view, so the gather shades with the G-buffer material
 	// (albedo att3 + rough/metal/spec att1) and writes the demodulated radiance; the apply (RB_RHI_ReStirDIApply)
