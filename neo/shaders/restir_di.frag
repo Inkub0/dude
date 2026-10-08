@@ -33,8 +33,12 @@
 //   u_diffuseModifier     = apply mode: ( kd = 1 - r_pbrMetalDiffuse, r_pbrSpecScale, r_pbrFireflyClamp, r_pbrEnvScale )
 //   u_screenCorrection.xy = 1 / viewSize        (gl_FragCoord -> [0,1] uv; normal buffer)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
+//   u_windowCoord.x       = perforated casters: number of per-VIEW grate boxes at u_particleRadius.zw (0 = off)
+//   u_windowCoord.y       = perforated casters: their shadow strength (r_shadowMapPerforatedStrength)
 //   u_windowCoord.z       = view-Y sign (-1 Vulkan top-down)
 //   u_windowCoord.w       = r_rtLightTextures: 1 = attenuate with each light's real cookie + falloff textures
+//   u_particleRadius.xy   = geometry-table device address (bit-cast; grate candidates -> coverage texture)
+//   u_particleRadius.zw   = per-view perforated box list device address (bit-cast; rt_perforated.glsl)
 #extension GL_EXT_buffer_reference_uvec2 : require	// build the light-buffer pointer from u_color.xy (uvec2)
 #extension GL_EXT_ray_query : require				// one visibility ray for the chosen light
 #extension GL_EXT_nonuniform_qualifier : require		// bindless light textures (rt_light_tex.glsl)
@@ -42,6 +46,8 @@
 #include "renderparms.glsl"
 #include "rt_light_eval.glsl"
 #include "rt_light_tex.glsl"
+// grates / fences as shadow casters (same recipe as interaction.frag's inline ray)
+#include "rt_perforated.glsl"
 #include "restir_di_common.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
@@ -93,19 +99,57 @@ vec4 packNrdNormal( vec3 Nraw ) {
 	return vec4( r, 0.0 );										// w = materialID/3 = 0
 }
 
-// one hard any-occluder shadow ray from the surface toward the chosen light (interaction.frag's fast opaque
-// path). 1 = lit, 0 = occluded. No TLAS (no RT scene) -> unshadowed: never trace a null acceleration structure.
+// one hard any-occluder shadow ray from the surface toward the chosen light (interaction.frag's inline ray).
+// 1 = lit, 0 = occluded, 1 - strength behind a solid grate texel. No TLAS (no RT scene) -> unshadowed: never
+// trace a null acceleration structure.
+//
+// Perforated casters (r_rtPerforatedShadows, rt_perforated.glsl): the forward path decides per LIGHT whether a
+// grate sits in its volume; here every pixel picks its own light, so the CPU hands over the boxes of every grate
+// inside the union of the scene lights' volumes (u_particleRadius.zw, u_windowCoord.x of them) and a segment
+// that passes through none of them keeps the force-opaque ray - the hardware's fastest traversal. Only a segment
+// that can meet a grate traces the grate-aware ray and alpha-tests its candidates against the coverage texture.
 float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl ) {
 	if ( u_rtParms.x == 0.0 && u_rtParms.y == 0.0 ) { return 1.0; }		// no RT scene
 	float tMax = min( dl - 1.0, u_rtParms.w );
 	if ( !( tMax > 0.0 ) ) { return 1.0; }
+	vec3  O = Pw + Nw * u_rtParms.z;
+	uvec2 geoAddr = uvec2( floatBitsToUint( u_particleRadius.x ), floatBitsToUint( u_particleRadius.y ) );
+	bool  perfOn  = u_windowCoord.x > 0.5 && u_windowCoord.y > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
+	if ( perfOn ) {
+		perfOn = dudeSegmentMeetsPerforated(
+			uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ),
+			int( u_windowCoord.x + 0.5 ), O, ldir, tMax );
+	}
+	if ( !perfOn ) {
+		rayQueryEXT rqo;
+		rayQueryInitializeEXT( rqo,
+			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+			gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu /* skip perforated-caster instances */,
+			O, 0.0, ldir, tMax );
+		while ( rayQueryProceedEXT( rqo ) ) { }
+		return ( rayQueryGetIntersectionTypeEXT( rqo, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? 1.0 : 0.0;
+	}
+	// grate-aware: perforated instances (mask 0x02) arrive as candidates; a solid texel dims to 1 - strength and
+	// the ray carries on (min over grates, not a product - a candidate may be reported twice); opaque geometry
+	// commits and terminates as before
 	rayQueryEXT rq;
 	rayQueryInitializeEXT( rq,
 		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-		gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu /* skip perforated-caster instances */,
-		Pw + Nw * u_rtParms.z, 0.0, ldir, tMax );
-	while ( rayQueryProceedEXT( rq ) ) { }
-	return ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? 1.0 : 0.0;
+		gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu, O, 0.0, ldir, tMax );
+	float perfVis = 1.0;
+	while ( rayQueryProceedEXT( rq ) ) {
+		if ( perfVis == 1.0
+				&& rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
+				&& rayQueryGetIntersectionTEXT( rq, false ) < dl - 8.0
+				&& dudePerforatedSolid( geoAddr,
+					uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),
+					uint( rayQueryGetIntersectionGeometryIndexEXT( rq, false ) ),
+					uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) ),
+					rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) ) {
+			perfVis = 1.0 - u_windowCoord.y;
+		}
+	}
+	return ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? perfVis : 0.0;
 }
 
 void main() {

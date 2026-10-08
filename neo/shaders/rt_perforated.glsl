@@ -17,7 +17,10 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Per
 struct PerfGeoDesc { PerfVertRef vb; PerfIdxRef ib; uint stride; uint flags; uint baseColor; uint texIndex; };
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer PerfGeoTable { PerfGeoDesc d[]; };
 
+#ifndef DUDE_RT_TEXTURES_DECLARED		// shared with rt_light_tex.glsl (restir_di.frag includes both)
+#define DUDE_RT_TEXTURES_DECLARED
 layout(set = 2, binding = 0) uniform sampler2D u_rtTextures[];
+#endif
 
 // Per-pixel gate: the boxes of the grates inside this light's volume ( min.xyz, max.xyz pairs, padded
 // on the CPU ). Only a shadow segment that passes through one of them can meet a grate, so only it
