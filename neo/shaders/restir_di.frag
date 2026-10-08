@@ -39,6 +39,12 @@
 //   u_windowCoord.w       = r_rtLightTextures: 1 = attenuate with each light's real cookie + falloff textures
 //   u_particleRadius.xy   = geometry-table device address (bit-cast; grate candidates -> coverage texture)
 //   u_particleRadius.zw   = per-view perforated box list device address (bit-cast; rt_perforated.glsl)
+//   u_shadowFalloffS.x    = forward light scale (backEnd.lightScale): the DI term is scaled here, not at the apply
+//   --- r_rtReStirDICombineGI (RTGI bounce folded into THIS buffer, one NRD denoise; rtgi_bounce.glsl) ---
+//   u_specularParms       = ( combine on/off, fog strength, fog coef (exp), 0 )   [fog: rtgi_apply's r_rtgiFogAttenuate]
+//   u_pbrParms            = ( gather radius, r_rtgiEmissive, r_rtgiEmissiveClamp, r_rtgiLightScale )
+//   u_pbrParms2           = ( ambient floor, shadow-ray gate, eye pullback per unit depth, r_rtgiIntensity )
+//   u_occlusionParms      = ( IGN rotation cos, sin, IGN offset x, y )   [CPU-hoisted per frame, as RB_RHI_RtgiPass]
 #extension GL_EXT_buffer_reference_uvec2 : require	// build the light-buffer pointer from u_color.xy (uvec2)
 #extension GL_EXT_ray_query : require				// one visibility ray for the chosen light
 #extension GL_EXT_nonuniform_qualifier : require		// bindless light textures (rt_light_tex.glsl)
@@ -49,6 +55,8 @@
 // grates / fences as shadow casters (same recipe as interaction.frag's inline ray)
 #include "rt_perforated.glsl"
 #include "restir_di_common.glsl"
+// the RTGI bounce (trace + hit shading), shared with rtgi_ray.frag, for the combined DI+GI buffer
+#include "rtgi_bounce.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;	// xyz = view-space normal, a = weapon/AO mask (0 = weapon)
@@ -298,18 +306,55 @@ void main() {
 		}
 	}
 
-	if ( !( pHatChosen > 0.0 ) ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// no reaching light
+	if ( !( pHatChosen > 0.0 ) && u_specularParms.x < 0.5 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// no reaching light (and no bounce to add)
 
 	// unbiased contribution weight W = (1/pHat(y))·(wSum/M); one visibility ray for the chosen light. pHat
 	// stays UNSHADOWED, so rad(y)·W·vis is still unbiased for the shadowed sum. NOSHADOWS lights skip the ray.
-	float W   = ( wSum / float( M ) ) / pHatChosen;
-	float vis = ( ( flagsChosen & DUDE_LIGHT_NOSHADOWS ) != 0u )
+	float W   = ( pHatChosen > 0.0 ) ? ( wSum / float( M ) ) / pHatChosen : 0.0;
+	float vis = ( !( pHatChosen > 0.0 ) || ( flagsChosen & DUDE_LIGHT_NOSHADOWS ) != 0u )
 		? 1.0 : traceVisibility( Pw, Nw, ldirChosen, dlChosen );
+
+	// the direct term, at the forward path's light scale (lightColor = lightScale * stage colour there)
+	vec3 outRad = max( radChosen * ( W * vis * u_shadowFalloffS.x ), vec3( 0.0 ) );
+
+	// r_rtReStirDICombineGI: the ONE-bounce indirect term from the same pixel, folded into the same buffer so ONE
+	// NRD denoise serves direct + indirect (the bounce's own pass stands down). Finished exactly as rtgi_apply.frag
+	// would: albedo (the receiver's, 1 outside apply mode) * Li * r_rtgiIntensity, faded through the view's fog
+	// (pow( exp( depth * coef ), strength )), then demodulated by the same B as the direct term so the apply's
+	// remultiply is exact for both. Its own hit distance is NOT fed to NRD (the direct term's light distance
+	// drives the blur radius for both - the shared-denoise compromise).
+	if ( u_specularParms.x > 0.5 ) {
+		RtgiBounceParms bp;
+		bp.tlas           = uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) );
+		bp.geoTable       = uvec2( floatBitsToUint( u_particleRadius.x ), floatBitsToUint( u_particleRadius.y ) );
+		bp.lightAddr      = uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) );
+		bp.nLights        = nLights;
+		bp.realLights     = nLights > 0u;
+		bp.gate           = true;
+		bp.texturedLights = u_windowCoord.w > 0.5;
+		bp.shadowRay      = u_pbrParms2.y > 0.5;
+		bp.radius         = u_pbrParms.x;
+		bp.emissiveScale  = u_pbrParms.y;
+		bp.emissiveClamp  = u_pbrParms.z;
+		bp.lightScale     = u_pbrParms.w;
+		bp.ambientFloor   = u_pbrParms2.x;
+		bp.eyePullback    = u_pbrParms2.z;
+		bp.ignRot         = u_occlusionParms.xy;
+		bp.ignOfs         = u_occlusionParms.zw;
+		vec3 Li; float thit;
+		if ( rtgiTraceBounce( bp, Pw, Nw, u_modelViewMatrix[3].xyz, d, sfrag, Li, thit ) == 1 ) {
+			vec3 gi = Li * u_pbrParms2.w;
+			if ( u_specularParms.y > 0.0 ) {
+				gi *= pow( exp( d * u_specularParms.z ), u_specularParms.y );		// rtgi_apply's fog transmittance
+			}
+			outRad += max( albedo * gi, vec3( 0.0 ) ) / B;
+		}
+	}
 
 	// NRD IN_DIFF_RADIANCE_HITDIST: the "hit distance" for direct lighting is the distance to the chosen
 	// light - it drives ReBLUR's world-space blur radius (near light -> tight penumbra, far light -> wider),
 	// the direct-lighting analogue of the gather-ray distance RTGI feeds. Normalized saturate( dl / (A + d*B) )
 	// with A = 0.5 * u_localParam0.w, B = 0.1, MUST match the ReblurHitDistanceParameters in RB_RHI_ReStirDIPass.
 	float nhd = clamp( dlChosen / ( 0.5 * u_localParam0.w + d * 0.1 ), 0.0, 1.0 );
-	fragColor = vec4( nrdLinearToYCoCg( max( radChosen * ( W * vis ), vec3( 0.0 ) ) ), nhd );
+	fragColor = vec4( nrdLinearToYCoCg( outRad ), nhd );
 }

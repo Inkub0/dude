@@ -479,6 +479,7 @@ static bool  rhiReStirDIDenoisedThisView = false;	// the shared REBLUR_DIFFUSE d
 #define DI_PERF_MAX_BOXES	64
 static rhi::BufferHandle	s_diPerfBoxBuf = 0;
 static unsigned long long	s_diPerfBoxAddr = 0;
+static void RB_RHI_RtgiFogCoefs( const viewDef_t *viewDef, float &strength, float &coef );	// defined with RB_RHI_RtgiApply below
 static bool  rhiReStirDIApplyThisView = false;		// Stage D (r_rtReStirDIApply): DI LIGHTS this view - the apply runs and the forward loop skips the covered lights' opaque draws
 static bool  rhiReStirDIAppliedThisView = false;	// the additive apply already ran this view (idempotent across the split / fallback call sites)
 static rhi::RenderTargetHandle rhiReStirDIConfRT = 0;	// DI history-confidence (R16F), reusing rtgi_confidence.frag
@@ -7711,8 +7712,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// as padded boxes in a per-frame slot, so the visibility ray takes the grate-aware route only where its segment
 	// can meet one (restir_di.frag traceVisibility, the interaction.frag recipe). windowCoord.x = box count (0 =
 	// off), .y = strength; particleRadius.xy = geo table, .zw = box list (bit-cast addresses).
+	const unsigned long long geoTable = r->GetRtGeoTableAddress();
 	{
-		const unsigned long long geoTable = r->GetRtGeoTableAddress();
 		if ( tlas != 0 && geoTable != 0 && r_rtPerforatedShadows.GetBool() && r_shadowMapPerforated.GetBool()
 				&& !s_sceneLightBounds.IsCleared() ) {
 			idBounds boxes[ DI_PERF_MAX_BOXES ];
@@ -7737,8 +7738,6 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 					const unsigned long long boxAddr = s_diPerfBoxAddr + (unsigned long long)ofs;
 					const unsigned int geoLo = (unsigned int)( geoTable & 0xFFFFFFFFull ), geoHi = (unsigned int)( geoTable >> 32 );
 					const unsigned int boxLo = (unsigned int)( boxAddr & 0xFFFFFFFFull ),  boxHi = (unsigned int)( boxAddr >> 32 );
-					memcpy( &parms.particleRadius[0], &geoLo, sizeof( geoLo ) );		// bit-cast, NOT a value cast
-					memcpy( &parms.particleRadius[1], &geoHi, sizeof( geoHi ) );
 					memcpy( &parms.particleRadius[2], &boxLo, sizeof( boxLo ) );
 					memcpy( &parms.particleRadius[3], &boxHi, sizeof( boxHi ) );
 					parms.windowCoord[0] = (float)n;
@@ -7746,6 +7745,46 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				}
 			}
 		}
+		// the geo table rides particleRadius.xy for BOTH the grate candidates and the combined-GI bounce hits
+		if ( geoTable != 0 ) {
+			const unsigned int geoLo = (unsigned int)( geoTable & 0xFFFFFFFFull ), geoHi = (unsigned int)( geoTable >> 32 );
+			memcpy( &parms.particleRadius[0], &geoLo, sizeof( geoLo ) );		// bit-cast, NOT a value cast
+			memcpy( &parms.particleRadius[1], &geoHi, sizeof( geoHi ) );
+		}
+	}
+	// the direct term's light scale: the forward path's lightColor = lightScale * stage colour, the buffer carries
+	// the raw stage colour, so the gather scales (the apply then remultiplies material + AO only)
+	parms.shadowFalloffS[0] = backEnd.lightScale;
+
+	// r_rtReStirDICombineGI: fold the RTGI one-bounce into this gather (rtgi_bounce.glsl) so ONE NRD denoise and
+	// ONE apply serve direct + indirect. RB_RHI_RtgiPass already stands down while DI is on (the shared NRD slot),
+	// so with r_rtgi on this is the ONLY place the bounce is produced. Uniforms mirror RB_RHI_RtgiPass's packing
+	// (radius / emissive / clamp / light scale / shadow ray / eye pullback / the CPU-hoisted IGN rotation) plus
+	// rtgi_apply's intensity and fog fade, so the bounce comes out as RTGI's own pass + apply would have made it.
+	const bool combineGI = r_rtgi.GetBool() && r_rtReStirDICombineGI.GetBool() && tlas != 0 && geoTable != 0;
+	parms.specularParms[0] = combineGI ? 1.0f : 0.0f;
+	if ( combineGI ) {
+		RB_RHI_RtgiFogCoefs( viewDef, parms.specularParms[1], parms.specularParms[2] );
+		parms.pbrParms[0] = r_rtgiRadius.GetFloat();
+		parms.pbrParms[1] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissive.GetFloat() );
+		parms.pbrParms[2] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissiveClamp.GetFloat() );
+		parms.pbrParms[3] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiLightScale.GetFloat() );
+		parms.pbrParms2[0] = 0.0f;											// ambient floor: a pure bounce (as RB_RHI_RtgiPass)
+		parms.pbrParms2[1] = r_rtgiShadow.GetBool() ? 1.0f : 0.0f;			// H6d dominant-light shadow ray at the hit
+		parms.pbrParms2[2] = 0.004f;										// eye pullback per unit depth (crease-leak fix)
+		parms.pbrParms2[3] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiIntensity.GetFloat() );
+		// per-frame golden-angle IGN reorientation, hoisted exactly as RB_RHI_RtgiPass does it (same hash, same
+		// frame index the shader's RNG uses)
+		const unsigned int fi = (unsigned int)( tr.frameCount & 0xFFFF );
+		unsigned int fh = fi * 747796405u + 2891336453u;
+		fh = ( ( fh >> ( ( fh >> 28u ) + 4u ) ) ^ fh ) * 277803737u;
+		fh = ( fh >> 22u ) ^ fh;
+		float gAng = (float)( fi & 255u ) * 0.61803399f;
+		gAng = ( gAng - idMath::Floor( gAng ) ) * 6.28318531f;
+		parms.occlusionParms[0] = idMath::Cos( gAng );
+		parms.occlusionParms[1] = idMath::Sin( gAng );
+		parms.occlusionParms[2] = (float)( ( fh >> 3u ) & 1023u );
+		parms.occlusionParms[3] = (float)( ( fh >> 13u ) & 1023u );
 	}
 
 	// Stage D apply mode (r_rtReStirDIApply): DI will LIGHT this view, so the gather shades with the G-buffer material
@@ -8446,6 +8485,32 @@ void RB_RHI_RtaoDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_ForgetTexBinds();
 }
 
+// Fog-aware GI (r_rtgiFogAttenuate): the strength + exp() coefficient the GI fade uses, from the view's primary
+// fog light; both 0 when attenuation is off or the view has no fog. Shared by RB_RHI_RtgiApply (rtgi_apply.frag)
+// and the ReSTIR DI combined gather (restir_di.frag, r_rtReStirDICombineGI).
+static void RB_RHI_RtgiFogCoefs( const viewDef_t *viewDef, float &strength, float &coef ) {
+	strength = 0.0f;
+	coef = 0.0f;
+	const float fogAtten = idMath::ClampFloat( 0.0f, 4.0f, r_rtgiFogAttenuate.GetFloat() );
+	if ( fogAtten <= 0.0f ) {
+		return;
+	}
+	for ( const viewLight_t *vL = viewDef->viewLights; vL; vL = vL->next ) {
+		if ( !vL->lightShader->IsFogLight() ) {
+			continue;
+		}
+		const shaderStage_t *fs = vL->lightShader->GetStage( 0 );
+		const float fogDensity = vL->shaderRegisters[fs->color.registers[3]];
+		const float fogDist = ( fogDensity <= 1.0f ) ? DEFAULT_FOG_DISTANCE : fogDensity;
+		// transmittance T = exp( dist * coef ); coef = 127.5 * ln(0.982) / fogDist reproduces the fog
+		// image's ~90%-opaque-at-fogDist curve (0.982^(255 * 0.5*dist/fogDist)). The shader raises T to
+		// the strength power, so strength > 1 overdrives the falloff (GI dies sooner than the fog is thick).
+		strength = fogAtten;
+		coef = -2.31587f / fogDist;
+		break;		// first fog light; layered / localized fog is approximated by this primary volume
+	}
+}
+
 /*
 ===================
 RB_RHI_RtgiApply
@@ -8507,25 +8572,7 @@ void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// ramp Doom 3's fog image uses (alpha = 1 - 0.982^(255*d), d = 0.5*dist/fogDist), driven by the view's
 	// primary fog light, so where the fog goes opaque the bounce goes with it. localParam1.z = strength,
 	// localParam1.w = the exp() coef; both 0 (no attenuation) when attenuation is off or the view has no fog.
-	parms.localParam1[2] = 0.0f;
-	parms.localParam1[3] = 0.0f;
-	const float fogAtten = idMath::ClampFloat( 0.0f, 4.0f, r_rtgiFogAttenuate.GetFloat() );
-	if ( fogAtten > 0.0f ) {
-		for ( const viewLight_t *vL = viewDef->viewLights; vL; vL = vL->next ) {
-			if ( !vL->lightShader->IsFogLight() ) {
-				continue;
-			}
-			const shaderStage_t *fs = vL->lightShader->GetStage( 0 );
-			const float fogDensity = vL->shaderRegisters[fs->color.registers[3]];
-			const float fogDist = ( fogDensity <= 1.0f ) ? DEFAULT_FOG_DISTANCE : fogDensity;
-			// transmittance T = exp( dist * coef ); coef = 127.5 * ln(0.982) / fogDist reproduces the fog
-			// image's ~90%-opaque-at-fogDist curve (0.982^(255 * 0.5*dist/fogDist)). The shader raises T to
-			// the strength power, so strength > 1 overdrives the falloff (GI dies sooner than the fog is thick).
-			parms.localParam1[2] = fogAtten;
-			parms.localParam1[3] = -2.31587f / fogDist;
-			break;		// first fog light; layered / localized fog is approximated by this primary volume
-		}
-	}
+	RB_RHI_RtgiFogCoefs( viewDef, parms.localParam1[2], parms.localParam1[3] );
 
 	// full-view scissor + viewport (same latent issue as RB_RHI_ReStirDIApply: the last surface draw's scissorRect
 	// is still set here whenever the SSR pass before this site early-outs, clipping the fullscreen apply to it)
@@ -8635,7 +8682,7 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[0] = diBilateral ? 1.0f : 0.0f;
 	parms.localParam0[1] = 32.0f;									// depth sensitivity
 	parms.localParam0[2] = 8.0f;									// normal power
-	parms.localParam0[3] = backEnd.lightScale;						// forward lightColor = lightScale * stage colour; the gather used the raw stage colour
+	parms.localParam0[3] = 1.0f;									// the forward light scale is applied in the gather (u_shadowFalloffS.x), so the buffer is already at scene scale
 	// AO on direct light, as RB_RHI_FillSsaoParms does for the forward interactions
 	const float aoDirect = idMath::ClampFloat( 0.0f, 1.0f, r_ssaoDirectLight.GetFloat() );
 	const bool  aoOn = rhiSsaoAppliedThisView && rhiSsaoResultRT != 0 && aoDirect > 0.0f;

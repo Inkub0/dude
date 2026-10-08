@@ -324,6 +324,17 @@ at zero lag. Known seam: a light that stops changing hands over to DI after the 
 starts empty, so it ramps in over the NRD history length (the confidence pass shortens that); a light that
 never settles (a strobe) simply stays forward.
 
+**Combined DI + GI in one buffer (2026-10-08, user chose "path 2"):** with `r_rtgi` on, `r_rtReStirDICombineGI`
+(default 1) has the DI gather also trace the one-bounce GI ray at the same pixel through the new shared include
+`rtgi_bounce.glsl` (the bounce lifted verbatim out of `rtgi_ray.frag`, which now calls the same function - its
+output is unchanged). The bounce is finished as `rtgi_apply.frag` would (receiver albedo × `r_rtgiIntensity` ×
+the fog fade from the shared `RB_RHI_RtgiFogCoefs`), demodulated by the same material factor as the direct term
+and summed into the DI radiance, so ONE NRD denoise and ONE apply serve direct + indirect at about the cost of
+DI alone. The forward light scale now rides the gather (`u_shadowFalloffS.x`), not the apply. Compromises: DI's
+resolution / checkerboard / history / NRD knobs shape the bounce too; the direct term's light distance drives
+the blur radius for both; AO-on-direct applies to the bounce as well; `r_rtgiDebug` shows nothing while DI is
+on (use the DI debug views, which now include the bounce). The GI's own pass still stands down under DI.
+
 **Known v1 approximations (deliberate, listed for the test):** diffuse/specular STAGE colours + vertex colour
 assumed 1 (not in the G-buffer); baked occlusion maps not applied to DI; the legacy non-PBR specular LUT not
 replicated (`r_pbr 0` = Lambert); no Toksvig widening (G-buffer normal is unit); the organic spec-fallback
