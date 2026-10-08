@@ -150,7 +150,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 			// the light's shape + colour at the hit: its real cookie * falloff textures (Stage G, u_windowCoord.w),
 			// else the analytic frustum attenuation
 			vec3 atten = bp.texturedLights
-				? dudeLightAttenTex( lights, li, hitWorld, dl, lights.l[ li ].flags, gate, false )
+				? dudeLightAttenTex( lights, li, hitWorld, dl, lights.l[ li ].flags, gate, false, 0.0 )	// a ray hit has no screen footprint: mip 0 (as before)
 				: vec3( dudeLightAtten( lights, li, hitWorld, dl, lights.l[ li ].flags, gate, false ) );
 			if ( atten.r + atten.g + atten.b <= 0.0 ) { continue; }
 			vec3 contrib = albedo * lights.l[ li ].color * ( atten * ndl * bp.lightScale );

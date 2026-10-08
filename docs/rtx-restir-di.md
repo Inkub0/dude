@@ -364,6 +364,13 @@ attachment's spare `.a` carries the baked occlusion map (`RB_RHI_SurfaceOcclusio
 forward fill, bound on unit 10 of the albedo prepass), and the DI apply scales by
 `mix(1, map, r_occlusionMapScale × r_occlusionMapDirect)` like the forward direct diffuse.
 
+**Cookie mip level (2026-10-08, user A/B: DI brighter than forward on a white ceramic floor, closed by
+`r_rtLightTextures 0`):** the forward draw's `textureProj` picks mips from screen derivatives and Doom's cookies
+fade to a black border, so blurred mips read dimmer at distance / grazing angles; DI sampled mip 0. `dudeLightAttenTex`
+now takes the pixel's world footprint and derives the LOD analytically from the projection planes
+(`grad(s) = (S.xyz - s·Q.xyz)/q`, footprint in texels, log2), fed by `u_shadowFalloffS.y = 2/(proj00·viewW)` at
+full res; the GI bounce keeps mip 0 (a ray hit has no screen footprint). Isotropic like anisotropic filtering's LOD.
+
 **Known v1 approximations (deliberate, listed for the test):** the SPECULAR stage colour assumed 1 (the diffuse
 stage colour is in the albedo now); the legacy non-PBR specular LUT not replicated (`r_pbr 0` = Lambert); no
 Toksvig widening (G-buffer normal is unit); the organic spec-fallback (flesh without a spec stage) not replicated;
