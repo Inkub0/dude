@@ -189,6 +189,7 @@ public:
 	virtual void	SetViewport( int x, int y, int w, int h );
 	virtual void	SetScissor( int x, int y, int w, int h );
 	virtual void	SetNextTargetPassArea( int x, int y, int w, int h );
+	virtual void	SetNextTargetPassLoad();
 	virtual void	SetNextTargetHonorsDepthRange();
 	virtual void	SetDepthRange( float minDepth, float maxDepth );
 	virtual void	SetPolygonOffset( bool enable, float factor, float units );
@@ -1242,6 +1243,7 @@ private:
 	int							curRenderH = 0;			// viewport/scissor height of the active pass
 	bool						curFlipY = true;		// scene = flipped; offscreen target = not
 	int							nextPassArea[4] = { 0, 0, 0, 0 };	// SetNextTargetPassArea (GL rect); w <= 0 = none pending
+	bool						nextPassLoad = false;				// SetNextTargetPassLoad: next BeginTargetPass keeps the target's content
 	bool						nextTargetHonorsDepthRange = false;	// SetNextTargetHonorsDepthRange: the NEXT BeginTargetPass
 																	// keeps the weapon/model depth-range hack (scene-depth-sealing
 																	// prepasses), instead of the shadow-map default of full [0,1]
@@ -10486,6 +10488,8 @@ void VulkanBackend::BeginTargetPass( RenderTargetHandle rt, const ClearArgs *cle
 	// skipped pass can never leak its area onto some later, unrelated target pass
 	const int passArea[4] = { nextPassArea[0], nextPassArea[1], nextPassArea[2], nextPassArea[3] };
 	nextPassArea[2] = nextPassArea[3] = 0;
+	const bool loadContent = nextPassLoad;	// SetNextTargetPassLoad: one-shot, consumed here like the area
+	nextPassLoad = false;
 	if ( !frameOpen || skipFrame ) {
 		return;
 	}
@@ -10533,12 +10537,24 @@ void VulkanBackend::BeginTargetPass( RenderTargetHandle rt, const ClearArgs *cle
 			}
 		}
 		if ( t->hasDepth ) { cv[t->colorCount].depthStencil.depth = 1.0f; }
-		rbi.renderPass = t->colorClearPass;
+		// SetNextTargetPassLoad: keep color + depth (the load variant, built lazily for a one-shot target; its
+		// initial layouts are exactly what the previous pass on this target left: shader-read color, attachment
+		// depth). A target never written yet has nothing to load -> clear as usual.
+		VkRenderPass pass = t->colorClearPass;
+		if ( loadContent && t->everWritten ) {
+			if ( t->colorLoadPass == VK_NULL_HANDLE ) {
+				BuildColorPasses( *t, /*frameCapable*/true );
+			}
+			if ( t->colorLoadPass != VK_NULL_HANDLE ) {
+				pass = t->colorLoadPass;
+			}
+		}
+		rbi.renderPass = pass;
 		rbi.framebuffer = t->colorFb;
 		rbi.clearValueCount = (uint32_t)( t->colorCount + ( t->hasDepth ? 1 : 0 ) );
 		rbi.pClearValues = cv;
 		vkCmdBeginRenderPass( cb, &rbi, VK_SUBPASS_CONTENTS_INLINE );
-		EnterTargetPass( t->w, t->h, /*flipY*/true, t->colorClearPass, t->passClass, t->colorCount );
+		EnterTargetPass( t->w, t->h, /*flipY*/true, pass, t->passClass, t->colorCount );
 		t->everWritten = true;
 	} else {
 		VkClearValue cv = {};
@@ -10768,6 +10784,10 @@ bool VulkanBackend::BuildColorPasses( RenderTarget &t, bool frameCapable ) {
 	const int nColor = t.colorCount;
 	const int variants = frameCapable ? 3 : 1;		// 0=clear, 1=load, 2=clearDS
 	for ( int v = 0; v < variants; v++ ) {
+		VkRenderPass *dst = ( v == 0 ) ? &t.colorClearPass : ( v == 1 ? &t.colorLoadPass : &t.colorClearDSPass );
+		if ( *dst != VK_NULL_HANDLE ) {
+			continue;		// already built (a lazy later call adds only the missing variants)
+		}
 		const bool clearColor = ( v == 0 );			// clear resets color; load/clearDS keep it
 		const bool clearDS    = ( v == 0 || v == 2 );
 
@@ -10832,7 +10852,6 @@ bool VulkanBackend::BuildColorPasses( RenderTarget &t, bool frameCapable ) {
 		rpi.dependencyCount = 2;
 		rpi.pDependencies = deps;
 
-		VkRenderPass *dst = ( v == 0 ) ? &t.colorClearPass : ( v == 1 ? &t.colorLoadPass : &t.colorClearDSPass );
 		if ( !vkCheck( vkCreateRenderPass( device, &rpi, NULL, dst ), "vkCreateRenderPass(color target)" ) ) {
 			return false;
 		}
@@ -11891,6 +11910,10 @@ void VulkanBackend::SetScissor( int x, int y, int w, int h ) {
 
 void VulkanBackend::SetNextTargetHonorsDepthRange() {
 	nextTargetHonorsDepthRange = true;	// consumed by the next EnterTargetPass (weapon depth hack in the normal prepass)
+}
+
+void VulkanBackend::SetNextTargetPassLoad() {
+	nextPassLoad = true;
 }
 
 void VulkanBackend::SetNextTargetPassArea( int x, int y, int w, int h ) {

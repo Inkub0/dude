@@ -4559,6 +4559,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 			return false;
 		}
 		r->SetNextTargetHonorsDepthRange();
+		r->SetNextTargetPassLoad();				// keep phase 0's world content (a NULL clear alone still clears)
 		r->BeginTargetPass( rhiNormalRT, NULL );
 		activeNormalRT = rhiNormalRT;
 	}
