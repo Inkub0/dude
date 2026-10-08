@@ -7,12 +7,13 @@
 // reference + a world position in, numbers out. A compute kernel (the Route B froxel inject) includes this
 // file unchanged. Needs buffer_reference (the VK prelude enables it).
 //
-// Row layout (std430, 112 B). cull = bounding sphere (centre, radius) of the light VOLUME, first in the row
+// Row layout (std430, 128 B). cull = bounding sphere (centre, radius) of the light VOLUME, first in the row
 // so a light that cannot reach the point costs one 16 B read (a whole-row copy per light per pixel measured
 // +1.5 ms - always read fields individually). projS/T/Q/F = the light's world-space lightProject planes:
 // s = S.p/Q.p, t = T.p/Q.p, falloff f = F.p, all in [0,1] inside the volume (a spot's pyramid, a point
-// light's BOX).
-struct RtLight { vec4 cull; vec3 pos; float radius; vec3 color; uint flags; vec4 projS; vec4 projT; vec4 projQ; vec4 projF; };
+// light's BOX). projTex / falloffTex = bindless slot+1 of the light's projection cookie / falloff ramp
+// (0 = none); sampled by rt_light_tex.glsl (needs set 2) - this file stays sampler-free.
+struct RtLight { vec4 cull; vec3 pos; float radius; vec3 color; uint flags; vec4 projS; vec4 projT; vec4 projQ; vec4 projF; uint projTex; uint falloffTex; uint pad0; uint pad1; };
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer RtLights { RtLight l[]; };
 
 const uint DUDE_LIGHT_PARALLEL  = 1u;	// sun-style: no distance falloff

@@ -30,11 +30,14 @@
 //   u_screenCorrection.xy = 1 / viewSize        (gl_FragCoord -> [0,1] uv; normal buffer)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 //   u_windowCoord.z       = view-Y sign (-1 Vulkan top-down)
+//   u_windowCoord.w       = r_rtLightTextures: 1 = attenuate with each light's real cookie + falloff textures
 #extension GL_EXT_buffer_reference_uvec2 : require	// build the light-buffer pointer from u_color.xy (uvec2)
 #extension GL_EXT_ray_query : require				// one visibility ray for the chosen light
+#extension GL_EXT_nonuniform_qualifier : require		// bindless light textures (rt_light_tex.glsl)
 
 #include "renderparms.glsl"
 #include "rt_light_eval.glsl"
+#include "rt_light_tex.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;	// xyz = view-space normal, a = weapon/AO mask (0 = weapon)
@@ -172,8 +175,12 @@ void main() {
 		float ndl = max( dot( Nw, ldir ), 0.0 );
 		vec3  rad = vec3( 0.0 );
 		if ( ndl > 0.0 ) {
-			float atten = dudeLightAtten( lights, li, Pw, dl, lights.l[ li ].flags, true, false );
-			rad = lights.l[ li ].color * ( atten * ndl );		// Doom lighting model: no 1/pi
+			// the light's shape + colour: its real cookie * falloff textures (Stage G, u_windowCoord.w), else the
+			// analytic frustum attenuation. Doom lighting model: no 1/pi.
+			vec3 atten = ( u_windowCoord.w > 0.5 )
+				? dudeLightAttenTex( lights, li, Pw, dl, lights.l[ li ].flags, true, false )
+				: vec3( dudeLightAtten( lights, li, Pw, dl, lights.l[ li ].flags, true, false ) );
+			rad = lights.l[ li ].color * ( atten * ndl );
 		}
 		float pHat = dot( rad, vec3( 0.2126, 0.7152, 0.0722 ) );	// luminance target
 		float w    = pHat * float( nLights );

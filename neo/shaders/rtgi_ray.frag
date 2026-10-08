@@ -21,6 +21,7 @@
 //   u_screenCorrection.xy = 1 / raySize   (gl_FragCoord -> [0,1] uv)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 //   u_windowCoord.z       = view-Y sign (-1 Vulkan top-down)
+//   u_windowCoord.w       = r_rtLightTextures: 1 = attenuate the hit with each light's real cookie + falloff textures
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_buffer_reference_uvec2 : require	// construct the geo-table pointer from u_rtParms.zw (uvec2)
 #extension GL_EXT_nonuniform_qualifier : require		// RR4: nonuniformEXT index into the bindless texture array
@@ -45,8 +46,9 @@ struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; uint baseColor;
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer GeoTable { GeoDesc d[]; };
 // RR4 bindless materials: the resident texture set as one array, indexed by (texIndex - 1). Set 2 is
 // bound once per frame by the backend and populated by SyncBindlessSlot. nonuniformEXT because each
-// gather ray can hit a different surface.
-layout(set = 2, binding = 0) uniform sampler2D u_rtTextures[];
+// gather ray can hit a different surface. Declared by rt_light_tex.glsl (which also samples the scene
+// lights' cookie / falloff textures from it, Stage G).
+#include "rt_light_tex.glsl"
 
 // Doom 3's fixed near / near-infinite far projection in GL clip depth -> linear eye z (negative).
 #define depth_consts DUDE_DEPTH_CONSTS()
@@ -232,8 +234,12 @@ void main() {
 			dudeLightDir( lights, li, hitWorld, ldir, dl );
 			float ndl = max( dot( hitN, ldir ), 0.0 );
 			if ( ndl <= 0.0 ) { continue; }
-			float atten = dudeLightAtten( lights, li, hitWorld, dl, lights.l[ li ].flags, gate, false );
-			if ( atten <= 0.0 ) { continue; }
+			// the light's shape + colour at the hit: its real cookie * falloff textures (Stage G, u_windowCoord.w),
+			// else the analytic frustum attenuation
+			vec3 atten = ( u_windowCoord.w > 0.5 )
+				? dudeLightAttenTex( lights, li, hitWorld, dl, lights.l[ li ].flags, gate, false )
+				: vec3( dudeLightAtten( lights, li, hitWorld, dl, lights.l[ li ].flags, gate, false ) );
+			if ( atten.r + atten.g + atten.b <= 0.0 ) { continue; }
 			vec3 contrib = albedo * lights.l[ li ].color * ( atten * ndl * u_diffuseModifier.y );
 			Li += contrib;
 			// track the DOMINANT (brightest) reaching light at this hit for the H6d shadow ray
