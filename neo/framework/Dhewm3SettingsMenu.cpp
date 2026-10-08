@@ -4789,12 +4789,21 @@ static void DrawDbgGroup_ReStirDI()
 		"Off = DI is debug-only and the forward path is untouched. A/B: same look, cheaper in light-dense rooms. "
 		"The debug view below overrides this. (r_rtReStirDIApply)" );
 
-	// --- Debug view (the DI buffer blitted over the scene) ---
+	// --- Debug view (the DI buffer blitted over the scene), the RTGI dropdown ---
 	ImGui::SeparatorText( "Debug View" );
-	CvarCheckbox( "Show DI Buffer", r_rtReStirDIDebug, "Blit the DI irradiance over the finished frame (the "
-		"NRD-denoised result when the denoise ran this frame, else the raw 1-spp gather). The view weapon reads as "
-		"no-DI (masked), like the RTGI debug. YCoCg-decoded and LINEAR - the HDR pipeline exposes it, so read "
-		"structure and noise, not absolute brightness. (r_rtReStirDIDebug)" );
+	{
+		int dbg = idMath::ClampInt( 0, 2, r_rtReStirDIDebug.GetInteger() );
+		ImGui::SetNextItemWidth( 240.0f );
+		if ( ImGui::Combo( "Buffer##restirDiDebug", &dbg, "Off (lights the scene / hidden)\0Raw 1-spp gather\0NRD-denoised\0" ) ) {
+			r_rtReStirDIDebug.SetInteger( dbg );
+		}
+		AddTooltip( "Blit the DI buffer over the finished frame ('Light the Scene with DI' is suppressed while this "
+			"is on). 'Raw 1-spp gather' = the noisy input before denoising - with Checkerboard Gather on, the traced "
+			"half is visibly packed into the LEFT half of the buffer (that is how to confirm the checkerboard is "
+			"live); 'NRD-denoised' = the denoised result (falls back to raw if the denoise did not run). The view "
+			"weapon reads as no-DI (masked). YCoCg-decoded and LINEAR - the HDR pipeline exposes it, so read "
+			"structure and noise, not absolute brightness. (r_rtReStirDIDebug)" );
+	}
 
 	// --- Sampling ---
 	ImGui::SeparatorText( "Sampling" );
