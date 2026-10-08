@@ -251,6 +251,7 @@ void main() {
 		uint li = uint( rnd( rng ) * float( nLights ) );
 		if ( li >= nLights ) { li = nLights - 1u; }		// guard the rare rnd()==1.0
 		if ( !dudeLightInRange( lights, li, Pw ) ) { continue; }	// cheap volume-sphere cull
+		if ( ( lights.l[ li ].flags & DUDE_LIGHT_DIFORWARD ) != 0u ) { continue; }	// fast-changing light: the forward path lights it (no history lag)
 
 		vec3 ldir; float dl;
 		dudeLightDir( lights, li, Pw, ldir, dl );
