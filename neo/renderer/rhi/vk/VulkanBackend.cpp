@@ -2820,8 +2820,14 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	// RT scene / RT passes (toggling any builds or tears the TLAS + NRD / RT targets)
 	mixB( r_rtgi ); mixB( r_rtao ); mixB( r_rtSunShadows ); mixB( r_rtMovingLights );
 	mixB( r_rtAllLights ); mixB( r_rtReflections ); mixB( r_rtgiCheckerboard );
+	// ReSTIR DI (docs/rtx-restir-di.md): the pass + its NRD guide MRT, the apply (flips the prepass to the
+	// 4-attachment albedo layout), its checkerboard / resolution (resize the gather + NRD), the combined-GI
+	// mode and the debug view (which stands the apply down). dude_rtx 2 flips these through the preset.
+	mixB( r_rtReStirDI ); mixB( r_rtReStirDIApply ); mixB( r_rtReStirDICheckerboard );
+	mixB( r_rtReStirDICombineGI ); mixI( r_rtReStirDIDebug );
 	// resolution scales (resize the gather / denoise / reflection / FSR targets)
 	mixF( r_fsrScale ); mixF( r_rtgiResScale ); mixF( r_rtaoResScale ); mixF( r_ssrResScale ); mixF( r_rtReflResScale );
+	mixF( r_rtReStirDIResScale );
 	return h;
 }
 
