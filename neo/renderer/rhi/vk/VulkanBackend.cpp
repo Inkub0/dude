@@ -615,6 +615,23 @@ private:
 	VkDescriptorSet				bindlessSet = VK_NULL_HANDLE;
 	uint32_t					bindlessCapacity = 0;
 	void						SyncBindlessSlot( ImageHandle h );	// RR4: point slot h-1 at the image's view+sampler (or dummy)
+
+	// VK_NV_device_diagnostic_checkpoints (r_vkCrashLogging): every GPU scope begin/end also stamps a checkpoint
+	// marker into the command buffer; after a device loss vkGetQueueCheckpointDataNV returns the LAST markers the
+	// GPU reached (top / bottom of pipe), naming the pass that hung. Markers are pointers the driver hands back,
+	// so the names live in a fixed ring that outlives the frame.
+	bool						haveCheckpoints = false;
+	PFN_vkCmdSetCheckpointNV			pfnCmdSetCheckpointNV = NULL;
+	PFN_vkGetQueueCheckpointDataNV		pfnGetQueueCheckpointDataNV = NULL;
+	enum { CKPT_RING = 512, CKPT_NAME = 40, CKPT_STACK = 16 };
+	char						ckptRing[CKPT_RING][CKPT_NAME];
+	int							ckptRingHead = 0;
+	const char *				ckptStack[CKPT_STACK];
+	int							ckptDepth = 0;
+	void						CheckpointMark( const char *name, bool end );
+public:
+	void						DumpQueueCheckpoints( FILE *f );		// called by the crash-dump writer (file-scope static)
+private:
 	// compute lane (docs/gpu-offload-plan.md Phase 1): one set of 8 storage-buffer
 	// bindings + a 128-byte push-constant range, its own pipeline layout, a pool for
 	// per-dispatch sets, and a shader-handle-keyed compute pipeline cache. Kept fully
@@ -1314,6 +1331,8 @@ device may be lost) and uses a portable save-path lookup (no Posix_* — this TU
 compiled for the Windows cross-build). `suffix` distinguishes the forced dump's filename.
 ====================
 */
+class VulkanBackend;
+static VulkanBackend *s_vkCheckpointBackend = NULL;	// set once the device is up; NULL = no checkpoint support
 static void WriteVulkanCrashDumpBody( const char *what, VkResult res, const char *suffix ) {
 	const char *savePath = cvarSystem->GetCVarString( "fs_savepath" );
 	if ( savePath == NULL || savePath[0] == '\0' ) {
@@ -1417,6 +1436,12 @@ static void WriteVulkanCrashDumpBody( const char *what, VkResult res, const char
 		}
 	}
 	fprintf( f, "\n" );
+
+	// GPU checkpoints (VK_NV_device_diagnostic_checkpoints): the one Vulkan query that IS meant for a lost
+	// device - it names the last pass marker the queue reached.
+	if ( s_vkCheckpointBackend != NULL ) {
+		s_vkCheckpointBackend->DumpQueueCheckpoints( f );
+	}
 
 	fprintf( f, "Notes:\n" );
 	fprintf( f, "  - This is a CPU-only best-effort dump. Vulkan objects are not queried because the device may be lost.\n" );
@@ -1799,6 +1824,8 @@ bool VulkanBackend::CreateDeviceAndVma() {
 				haveComputeDerivExt = true;
 			} else if ( !strcmp( extProps[i].extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME ) ) {
 				haveMemoryBudgetExt = true;
+			} else if ( !strcmp( extProps[i].extensionName, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME ) ) {
+				haveCheckpoints = true;		// NVIDIA: hang localisation markers (see CheckpointMark)
 			}
 		}
 	}
@@ -1982,6 +2009,11 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	if ( haveMemoryBudget ) {
 		devExts[devExtCount++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
 	}
+	// VK_NV_device_diagnostic_checkpoints: no feature struct; the markers cost ~nothing and only stamp while
+	// r_vkCrashLogging is on, so enable it whenever the driver offers it.
+	if ( haveCheckpoints ) {
+		devExts[devExtCount++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
+	}
 
 	VkDeviceCreateInfo dci = {};
 	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -2001,6 +2033,14 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	// R2: resolve the acceleration-structure entry points and the scratch-alignment limit.
 	// If any entry point fails to resolve (broken loader/driver), drop the capability whole -
 	// partial RT support is worse than none.
+	if ( haveCheckpoints ) {
+		pfnCmdSetCheckpointNV = (PFN_vkCmdSetCheckpointNV)vkGetDeviceProcAddr( device, "vkCmdSetCheckpointNV" );
+		pfnGetQueueCheckpointDataNV = (PFN_vkGetQueueCheckpointDataNV)vkGetDeviceProcAddr( device, "vkGetQueueCheckpointDataNV" );
+		haveCheckpoints = ( pfnCmdSetCheckpointNV != NULL && pfnGetQueueCheckpointDataNV != NULL );
+		s_vkCheckpointBackend = haveCheckpoints ? this : NULL;
+		common->Printf( "VK: diagnostic checkpoints %s (pass markers in the crash dump when r_vkCrashLogging is on)\n",
+			haveCheckpoints ? "available" : "unavailable" );
+	}
 	if ( haveRayQuery ) {
 		pfnGetAsBuildSizes = (PFN_vkGetAccelerationStructureBuildSizesKHR)
 			vkGetDeviceProcAddr( device, "vkGetAccelerationStructureBuildSizesKHR" );
@@ -2708,7 +2748,56 @@ now guaranteed done by BeginFrame's fence wait — so no WAIT bit, no stall),
 converts the tick delta to ms, and prints a running average once per second.
 ====================
 */
+// VK_NV_device_diagnostic_checkpoints: stamp a marker (name on begin, "/name" on end) so a device loss can name
+// the pass the GPU was in. Only while r_vkCrashLogging is on and a frame cb is recording.
+void VulkanBackend::CheckpointMark( const char *name, bool end ) {
+	if ( !haveCheckpoints || !frameOpen || skipFrame || !r_vkCrashLogging.GetBool() ) {
+		if ( end && ckptDepth > 0 ) { ckptDepth--; }
+		return;
+	}
+	if ( end ) {
+		if ( ckptDepth <= 0 ) { return; }
+		name = ckptStack[--ckptDepth];
+	}
+	char *slot = ckptRing[ckptRingHead];
+	ckptRingHead = ( ckptRingHead + 1 ) % CKPT_RING;
+	idStr::snPrintf( slot, CKPT_NAME, "%s%s", end ? "/" : "", name ? name : "?" );
+	if ( !end && ckptDepth < CKPT_STACK ) { ckptStack[ckptDepth++] = slot + 0; }
+	pfnCmdSetCheckpointNV( frames[frameIndex].cb, slot );
+}
+
+// device-lost path: the last checkpoint markers the graphics queue reached (one per pipeline stage the
+// driver reports, typically TOP_OF_PIPE = last begun, BOTTOM_OF_PIPE = last completed). Printed to the
+// console too, so a run without the dump file still shows the culprit pass.
+void VulkanBackend::DumpQueueCheckpoints( FILE *f ) {
+	if ( !haveCheckpoints || gfxQueue == VK_NULL_HANDLE ) {
+		if ( f ) { fprintf( f, "GPU checkpoints: (VK_NV_device_diagnostic_checkpoints unavailable)\n\n" ); }
+		return;
+	}
+	uint32_t count = 0;
+	pfnGetQueueCheckpointDataNV( gfxQueue, &count, NULL );
+	if ( count > 16 ) { count = 16; }
+	VkCheckpointDataNV data[16];
+	for ( uint32_t i = 0; i < count; i++ ) { data[i] = {}; data[i].sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV; }
+	pfnGetQueueCheckpointDataNV( gfxQueue, &count, data );
+	if ( f ) { fprintf( f, "GPU checkpoints (last pass markers the queue reached; '/x' = end of scope x):\n" ); }
+	common->Printf( "VK: GPU checkpoints at device loss (%u):\n", count );
+	if ( count == 0 ) {
+		if ( f ) { fprintf( f, "  (none recorded - was r_vkCrashLogging on before the frame?)\n" ); }
+		common->Printf( "  (none recorded - r_vkCrashLogging must be on BEFORE the frame)\n" );
+	}
+	for ( uint32_t i = 0; i < count; i++ ) {
+		const char *marker = (const char *)data[i].pCheckpointMarker;
+		const char *stage = ( data[i].stage == VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT ) ? "TOP_OF_PIPE (last begun)"
+			: ( data[i].stage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT ) ? "BOTTOM_OF_PIPE (last completed)" : "other stage";
+		if ( f ) { fprintf( f, "  %-32s  %s\n", marker ? marker : "(null)", stage ); }
+		common->Printf( "  %-32s  %s\n", marker ? marker : "(null)", stage );
+	}
+	if ( f ) { fprintf( f, "\n" ); }
+}
+
 void VulkanBackend::GpuScopeBegin( const char *name ) {
+	CheckpointMark( name, false );
 	if ( !gpuScopesActive || !frameOpen || skipFrame
 			|| gpuScopeCount[frameIndex] >= GPU_SCOPE_MAX_PAIRS
 			|| gpuScopeDepth[frameIndex] >= GPU_SCOPE_MAX_DEPTH ) {
@@ -2722,6 +2811,7 @@ void VulkanBackend::GpuScopeBegin( const char *name ) {
 }
 
 void VulkanBackend::GpuScopeEnd() {
+	CheckpointMark( NULL, true );
 	if ( gpuScopeDepth[frameIndex] <= 0 ) {
 		return;
 	}
