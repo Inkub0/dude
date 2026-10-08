@@ -7765,6 +7765,9 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.specularParms[0] = combineGI ? 1.0f : 0.0f;
 	if ( combineGI ) {
 		RB_RHI_RtgiFogCoefs( viewDef, parms.specularParms[1], parms.specularParms[2] );
+		// fast-changing lights stay forward for the DIRECT term (no lag); their one-bounce would still trail in the
+		// shared NRD history, so the bounce skips them too - the forward path never had a bounce for them anyway
+		parms.specularParms[3] = r_rtReStirDIDynamicForward.GetBool() ? 1.0f : 0.0f;
 		parms.pbrParms[0] = r_rtgiRadius.GetFloat();
 		parms.pbrParms[1] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissive.GetFloat() );
 		parms.pbrParms[2] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissiveClamp.GetFloat() );

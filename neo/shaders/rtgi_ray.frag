@@ -132,6 +132,7 @@ void main() {
 	bp.gate           = u_diffuseModifier.z > 0.5;
 	bp.texturedLights = u_windowCoord.w > 0.5;
 	bp.shadowRay      = u_localParam1.y > 0.5;
+	bp.skipForwardLights = false;			// RTGI's own pass bounces every light (no forward/DI split here)
 	bp.radius         = u_localParam0.z;
 	bp.emissiveScale  = u_diffuseModifier.x;
 	bp.emissiveClamp  = u_localParam0.w;

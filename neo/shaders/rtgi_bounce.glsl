@@ -22,6 +22,7 @@ struct RtgiBounceParms {
 	bool  gate;				// confine each light to its projection volume
 	bool  texturedLights;	// r_rtLightTextures: cookie * falloff attenuation
 	bool  shadowRay;		// H6d: one shadow ray toward the dominant light at the hit
+	bool  skipForwardLights;	// skip DUDE_LIGHT_DIFORWARD lights (fast-changing: flashlight, flashes, projectiles) - their bounce would trail in the history
 	float radius;			// gather ray length
 	float emissiveScale;	// r_rtgiEmissive
 	float emissiveClamp;	// r_rtgiEmissiveClamp (peak channel)
@@ -141,6 +142,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		bool gate = bp.gate;
 		for ( uint li = 0u; li < nLights; li++ ) {
 			if ( gate && !dudeLightInRange( lights, li, hitWorld ) ) { continue; }
+			if ( bp.skipForwardLights && ( lights.l[ li ].flags & DUDE_LIGHT_DIFORWARD ) != 0u ) { continue; }
 			vec3  ldir; float dl;
 			dudeLightDir( lights, li, hitWorld, ldir, dl );
 			float ndl = max( dot( hitN, ldir ), 0.0 );
