@@ -1,6 +1,8 @@
-// DUDE ReSTIR DI gather — fresh 1-spp (RTGI architecture, docs/rtx-restir-di.md). Per pixel: mask the view
-// weapon, importance-sample ONE light from the in-range set by weighted reservoir sampling over M random
-// candidates, trace ONE visibility ray, and shade the unbiased direct irradiance rad(y)·W·vis. NO history,
+// DUDE ReSTIR DI gather — fresh 1-spp (RTGI architecture, docs/rtx-restir-di.md). Per pixel: importance-sample
+// ONE light from the in-range set by weighted reservoir sampling - over EVERY light in the buffer by default
+// (exhaustive RIS: the pick's only randomness is the choice among the lights that really reach the pixel) or
+// over M random candidates (r_rtReStirDICandidates > 0) - trace ONE visibility ray, and shade the unbiased
+// direct irradiance rad(y)·W·vis. NO history,
 // NO persistent reservoir, NO reprojection - like rtgi_ray.frag this traces fresh every frame and hands ALL
 // temporal accumulation to NRD (+ the DI confidence pass for moving-light antilag). That is what kills the
 // moving-object trails a hand-rolled reproject leaves.
@@ -24,7 +26,7 @@
 //   u_rtParms.xy          = scene TLAS device address (bit-cast lo/hi; 0 = no RT scene -> unshadowed)
 //   u_rtParms.z           = shadow-ray origin offset along the surface normal (world units)
 //   u_rtParms.w           = max shadow-ray length
-//   u_localParam0         = ( 1/proj00, 1/proj11, candidate count M, hit-distance scale (NRD A = 0.5*this) )
+//   u_localParam0         = ( 1/proj00, 1/proj11, candidate count M (0 = EVERY light: exhaustive RIS), hit-distance scale (NRD A = 0.5*this) )
 //   u_localParam1.x       = frame index (RNG decorrelation)
 //   u_localParam1.y       = r_pbr (apply mode: 1 = GGX metalness workflow as interaction.frag, 0 = Lambert only)
 //   u_localParam1.z       = checkerboard parity (0 = off, 1 = even frame, 2 = odd; packs half the pixels left)
@@ -222,8 +224,17 @@ void main() {
 	uint nLights = uint( u_color.z );
 	if ( nLights == 0u ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
 
-	uint M = uint( max( u_localParam0.z, 1.0 ) );
-	if ( M > nLights ) { M = nLights; }
+	// Candidate set (u_localParam0.z = r_rtReStirDICandidates): 0 (default) = EXHAUSTIVE - enumerate every light in
+	// the buffer once (candidate pdf 1, RIS weight = pHat); M > 0 = draw M candidates uniformly WITH replacement
+	// (pdf 1/nLights, weight pHat*nLights), the textbook RTXDI recipe for thousands of lights. With <= 256 lights,
+	// the 16 B sphere cull and the exact box pre-reject in dudeLightAttenTex, enumeration costs about what the
+	// bounce's light loop costs (rtgi_bounce.glsl) and removes the candidate variance entirely: 32 uniform draws
+	// from a ~200-light buffer (a lit corridor) reached the dominant light at only ~15% of the pixels, as a ~6x
+	// spike that NRD's anti-firefly then clipped - the skyway "sun" through the windows read noticeably dimmer
+	// than forward (user, 2026-10-09). M >= nLights enumerates too (a draw with replacement never beats it).
+	uint M = uint( max( u_localParam0.z, 0.0 ) + 0.5 );
+	bool exhaustive = ( M == 0u ) || ( M >= nLights );
+	uint draws = exhaustive ? nLights : M;
 
 	// Stage D apply mode: the full material response of THIS pixel, from the G-buffer, so the reservoir target
 	// and the shaded sample are the forward interaction.frag equation (PBR branch: GGX metalness workflow with
@@ -261,8 +272,8 @@ void main() {
 	uint rng = ( ( uint( sfrag.x ) * 1973u + uint( sfrag.y ) * 9277u )
 	             ^ ( uint( u_localParam1.x ) * 26699u ) ) | 1u;
 
-	// weighted reservoir sampling over M random candidates. Source pdf = uniform = 1/nLights, so a
-	// candidate's RIS weight is pHat/pdf = pHat*nLights. pHat = luminance of the unshadowed contribution.
+	// weighted reservoir sampling over the candidates: every light once (exhaustive, pdf 1 -> RIS weight pHat)
+	// or M uniform draws (pdf 1/nLights -> weight pHat*nLights). pHat = luminance of the unshadowed contribution.
 	// A cheap bounding-sphere cull skips lights that cannot reach the point. The reservoir is TRANSIENT
 	// (this frame only) - NRD does the temporal accumulation downstream.
 	const bool shMode = u_shadowFalloffS.z > 0.5;
@@ -272,9 +283,12 @@ void main() {
 	vec3  ldirChosen  = vec3( 0.0 );
 	float dlChosen    = 0.0;
 	uint  flagsChosen = 0u;
-	for ( uint i = 0u; i < M; i++ ) {
-		uint li = uint( rnd( rng ) * float( nLights ) );
-		if ( li >= nLights ) { li = nLights - 1u; }		// guard the rare rnd()==1.0
+	for ( uint i = 0u; i < draws; i++ ) {
+		uint li = i;
+		if ( !exhaustive ) {
+			li = uint( rnd( rng ) * float( nLights ) );
+			if ( li >= nLights ) { li = nLights - 1u; }	// guard the rare rnd()==1.0
+		}
 		if ( !dudeLightInRange( lights, li, Pw ) ) { continue; }	// cheap volume-sphere cull
 		if ( ( lights.l[ li ].flags & DUDE_LIGHT_DIFORWARD ) != 0u ) { continue; }	// fast-changing light: the forward path lights it (no history lag)
 
@@ -314,7 +328,7 @@ void main() {
 			// cosine of the full-res bump normal to the denoised direction (ndl floored so the GGX 1/ndl can't blow up)
 			rad  = ( shMode ? contrib / max( ndl, 0.05 ) : contrib ) / B;	// demodulated (B = 1 outside apply mode)
 		}
-		float w    = pHat * float( nLights );
+		float w    = exhaustive ? pHat : pHat * float( nLights );	// pHat / candidate pdf
 		wSum += w;
 		if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
 			pHatChosen  = pHat;
@@ -327,9 +341,10 @@ void main() {
 
 	if ( !( pHatChosen > 0.0 ) && u_specularParms.x < 0.5 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// no reaching light (and no bounce to add)
 
-	// unbiased contribution weight W = (1/pHat(y))·(wSum/M); one visibility ray for the chosen light. pHat
-	// stays UNSHADOWED, so rad(y)·W·vis is still unbiased for the shadowed sum. NOSHADOWS lights skip the ray.
-	float W   = ( pHatChosen > 0.0 ) ? ( wSum / float( M ) ) / pHatChosen : 0.0;
+	// unbiased contribution weight W = (1/pHat(y))·(wSum/M) (wSum/1 when every light was weighed once); one
+	// visibility ray for the chosen light. pHat stays UNSHADOWED, so rad(y)·W·vis is still unbiased for the
+	// shadowed sum. NOSHADOWS lights skip the ray.
+	float W   = ( pHatChosen > 0.0 ) ? ( wSum / ( exhaustive ? 1.0 : float( draws ) ) ) / pHatChosen : 0.0;
 	float occDist = dlChosen;
 	float vis = ( !( pHatChosen > 0.0 ) || ( flagsChosen & DUDE_LIGHT_NOSHADOWS ) != 0u )
 		? 1.0 : traceVisibility( Pw, Nw, ldirChosen, dlChosen, occDist );
