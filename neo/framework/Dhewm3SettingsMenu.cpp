@@ -4822,9 +4822,10 @@ static void DrawDbgGroup_ReStirDI()
 
 	// --- Sampling ---
 	ImGui::SeparatorText( "Sampling" );
-	CvarSliderI( "Candidates", r_rtReStirDICandidates, 1, 128, "Light candidates M drawn (uniform, in-range-culled) "
-		"per pixel before the weighted-reservoir pick. More = a better pick / fewer missed lights at more per-pixel "
-		"cost; the NRD denoise (not raw M) is what cleans the remaining per-frame grain. (r_rtReStirDICandidates)" );
+	CvarSliderI( "Candidates", r_rtReStirDICandidates, 0, 128, "Light candidates per pixel before the weighted-reservoir "
+		"pick. 0 = every light in the buffer is weighed (exhaustive: no candidate noise, a far dominant light stays at full "
+		"strength). N > 0 = N uniform random draws: cheaper in light-dense views, but a rarely-drawn light arrives as "
+		"sparse spikes the denoiser clips and reads dimmer. (r_rtReStirDICandidates)" );
 
 	// --- Resolution (mirrors RT Global Illumination -> Resolution) ---
 	ImGui::SeparatorText( "Resolution" );

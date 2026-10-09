@@ -7841,7 +7841,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const float diHitScale = 1024.0f;
 	parms.localParam0[0] = invP00;
 	parms.localParam0[1] = invP11;
-	parms.localParam0[2] = (float)idMath::ClampInt( 1, 128, r_rtReStirDICandidates.GetInteger() );	// M candidates
+	parms.localParam0[2] = (float)idMath::ClampInt( 0, 128, r_rtReStirDICandidates.GetInteger() );	// M candidates (0 = every light, exhaustive RIS)
 	parms.localParam0[3] = diHitScale;									// NRD hit-distance A = 0.5 * this
 	parms.localParam1[0] = (float)( tr.frameCount & 0xFFFF );			// RNG decorrelation per frame
 	parms.localParam1[2] = cbParity;									// checkerboard parity (0 = off)

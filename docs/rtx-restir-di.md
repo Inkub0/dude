@@ -55,10 +55,12 @@ scopes (`r_vkGpuTime 2`).
 
 ### 1. The gather — `restir_di.frag` (fresh, 1-spp, no history)
 Per pixel: reconstruct world pos+normal from depth, **mask the view weapon** (`nt.a < 0.5` → zero, like
-RTAO/SSR/RTGI), draw `M` candidate lights uniformly from the shared `RtLight[]` set (`dudeLightInRange`
-cull), weighted-reservoir-pick **one**, trace **one** any-occluder visibility ray for it, and output the
-unbiased direct irradiance `rad(y)·W·vis`. The reservoir is a per-pixel local that lives and dies in this
-one `main()` — there is no reservoir buffer, no reprojection.
+RTAO/SSR/RTGI), weigh the candidate lights from the shared `RtLight[]` set — **every** light in the buffer
+once by default (exhaustive RIS, `r_rtReStirDICandidates 0`; `dudeLightInRange` sphere cull + the exact box
+pre-reject keep it cheap), or `M` uniform random draws (`M > 0`) — weighted-reservoir-pick **one**, trace
+**one** any-occluder visibility ray for it, and output the unbiased direct irradiance `rad(y)·W·vis`. The
+reservoir is a per-pixel local that lives and dies in this one `main()` — there is no reservoir buffer, no
+reprojection.
 
 Output is NRD's 3-attachment guide MRT (`CreateRenderTargetRtgiMrt`, the same target RTGI's gather writes),
 so `RtaoDenoise(giMode)` drops in unchanged:
@@ -120,7 +122,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 |------|--------:|------|
 | `r_rtReStirDI` | 0 | master enable (bring-up; not preset-wired). VK + RT + velocity MRT. |
 | `r_rtReStirDIDebug` | 0 | 1 = blit the DI buffer (denoised when it ran, else raw) over the scene, LINEAR. |
-| `r_rtReStirDICandidates` | 16 | candidate lights `M` per pixel before the WRS pick. Clamp **1..128**. |
+| `r_rtReStirDICandidates` | 0 | candidate lights per pixel before the WRS pick: **0 = every light** (exhaustive RIS, no candidate noise), `M > 0` = M uniform random draws (a rarely-drawn light reads dimmer: sparse spikes the denoiser clips). Clamp **0..128**. |
 | `r_rtReStirDIResScale` | 1 | gather/denoise resolution fraction (0.25..1), upscaled for display. Composes with checkerboard. |
 | `r_rtReStirDICheckerboard` | 0 | trace a half-pixel checkerboard (packed left), NRD reconstructs via a full-res guide pass + IN_MV. |
 | `r_rtReStirDIBilateralUpscale` | 1 | depth+normal-aware upscale of a reduced-res gather (vs bilinear); inert at full res. |
@@ -391,6 +393,20 @@ keeps a weighted FORWARD draw of the light's opaque world surfaces during the wi
 forward→DI flip, `1 - exp(-t/history)` after DI→forward, ~3 time constants long, applied to the diffuse/specular
 modifiers in `RB_RHI_DrawInteraction` (weapon, depth-hacked models and translucents unaffected). The sum of the fading
 forward draw and the ramping DI stays at full brightness, and the noisy early DI frames sit under a clean draw.
+
+**Exhaustive RIS (2026-10-09, user: the skyway "sun" through the windows reads noticeably dimmer than forward):**
+the gather drew `M = 32` candidates uniformly (with replacement) from the per-view light buffer, which in a lit
+corridor holds ~200 lights (comm1 Skyway: 120 lights within 1400 units, the orange `lights/xray02` outdoor light
+of radius 1600×1750×1250 among them). The dominant light was then a candidate at only `1-(1-1/200)^32 ≈ 15 %` of the
+pixels, where RIS's `W = wSum/(M·pHat)` made it a ~6× spike; the expectation is right, but NRD's anti-firefly and
+history clamping clip sparse spikes, so the sun lost energy and read dim (a few-light room, where 32 draws cover
+every light several times, was "extremely close"). `r_rtReStirDICandidates` now defaults to **0 = exhaustive**:
+the loop enumerates every light in the buffer once (RIS weight `pHat`, `W = wSum/pHat(y)`), so the only remaining
+randomness is the pick among the lights that really reach the pixel; the 16 B sphere cull and the exact box
+pre-reject in `dudeLightAttenTex` keep it near the cost of the bounce's light loop (`rtgi_bounce.glsl`, which has
+always enumerated). `M > 0` keeps the stochastic draw for scenes beyond the 256-light buffer. Note: the cvar is
+archived, so a config saved with the old `32` must be reset once (`r_rtReStirDICandidates 0`). Also note the
+xray02 light is table-driven (0.7..1.0 over a 10 s cycle), so two screenshots can differ by phase alone.
 
 **Known v1 approximations (deliberate, listed for the test):** the SPECULAR stage colour assumed 1 (the diffuse
 stage colour is in the albedo now); the legacy non-PBR specular LUT not replicated (`r_pbr 0` = Lambert); no
