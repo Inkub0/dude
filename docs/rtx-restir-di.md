@@ -382,6 +382,16 @@ FULL-res bump normal: `L = SH1/|SH1|`, concentration `k = |SH1|/Y`, factor `mix(
 exact cosine for a concentrated direction, wrapped half-cosine as the light spreads. The debug views show SH0 only
 (no cosine → flatter / brighter than the lit scene; use the lit scene for judgement).
 
+**Handover crossfade (2026-10-09, user: lights "blink in and out", revealing fried pixels until history catches up):**
+a light flipping between the forward path and DI used to cut over instantly, but DI's denoiser has no history for a
+light that was forward (it ramps in over the accumulation) and still holds one that just went forward (it decays
+out) - so the light dipped / doubled and the ramp-in showed under-accumulated noise. The gather now records each
+flip (`sceneLightTrack_t::transitionFrame/toDI`, classified once per frame) and `RB_RHI_SceneLightForwardWeight`
+keeps a weighted FORWARD draw of the light's opaque world surfaces during the window: `exp(-t/history)` after a
+forward→DI flip, `1 - exp(-t/history)` after DI→forward, ~3 time constants long, applied to the diffuse/specular
+modifiers in `RB_RHI_DrawInteraction` (weapon, depth-hacked models and translucents unaffected). The sum of the fading
+forward draw and the ramping DI stays at full brightness, and the noisy early DI frames sit under a clean draw.
+
 **Known v1 approximations (deliberate, listed for the test):** the SPECULAR stage colour assumed 1 (the diffuse
 stage colour is in the albedo now); the legacy non-PBR specular LUT not replicated (`r_pbr 0` = Lambert); no
 Toksvig widening (G-buffer normal is unit); the organic spec-fallback (flesh without a spec stage) not replicated;

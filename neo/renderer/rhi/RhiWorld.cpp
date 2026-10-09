@@ -109,6 +109,7 @@ static struct {
 	// world interactions are skipped (DI lights them, RB_RHI_ReStirDIApply) - RB_RHI_DrawInteraction keeps only the
 	// depth-hacked view weapon / models, translucents and blood films on the forward path for it.
 	bool				lightDiCovered;
+	float				lightForwardWeight;	// handover crossfade (RB_RHI_SceneLightForwardWeight): scales this light's opaque world draws; 1 = normal
 } ictx;
 
 // Persistent shadow-map render target, kept across frames and recreated only
@@ -1950,6 +1951,15 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	} else {
 		memcpy( parms.diffuseModifier, din->diffuseColor.ToFloatPtr(), 16 );
 		memcpy( parms.specularModifier, din->specularColor.ToFloatPtr(), 16 );
+		// ReSTIR DI handover crossfade: this light's opaque WORLD surfaces (the ones DI takes over / hands back) are
+		// drawn at the crossfade weight; the weapon, depth-hacked models and translucents stay at full (always forward)
+		if ( ictx.lightForwardWeight < 1.0f && !din->ambientLight && rhiFilmDraw == NULL && ictx.depthFuncBits == GLS_DEPTHFUNC_EQUAL
+		     && !din->surf->space->weaponDepthHack && din->surf->space->modelDepthHack == 0.0f ) {
+			for ( int c = 0; c < 3; c++ ) {
+				parms.diffuseModifier[c]  *= ictx.lightForwardWeight;
+				parms.specularModifier[c] *= ictx.lightForwardWeight;
+			}
+		}
 	}
 	// DUDE: decal sheen control — both the vanilla and the GGX lobe multiply by this modifier
 	float decalSheen = rhiFilmDraw ? 1.0f : R_DecalSheenScale( din->surf->material );
@@ -5598,13 +5608,44 @@ static idBounds				s_sceneLightBounds;				// union of the included lights' cull 
 // DUDE_LIGHT_DIFORWARD: it stays in the buffer for volumetrics / GI / reflections, but the DI gather skips it and
 // the forward loop keeps lighting it - DI's NRD history would trail it by several frames (the flashlight lag).
 #define DI_FAST_HYST_FRAMES	16
-struct sceneLightTrack_t { int lastSeenFrame; int lastChangeFrame; float lum; };
+struct sceneLightTrack_t {
+	int		lastSeenFrame;
+	int		lastChangeFrame;
+	float	lum;
+	bool	fast;				// last frame's verdict (classified once per frame; later views reuse it)
+	int		transitionFrame;	// frame the light last flipped path while continuously present (handover crossfade)
+	bool	toDI;				// that flip went forward -> DI (else DI -> forward)
+};
 static idList<sceneLightTrack_t>	s_sceneLightTrack;
 
 static bool RB_RHI_SceneLightCovered( const viewDef_t *viewDef, int lightDefIndex ) {
 	return viewDef != NULL && s_sceneLightCacheView == viewDef && s_sceneLightCacheFrame == tr.frameCount
 		&& lightDefIndex >= 0 && lightDefIndex < s_sceneLightCoveredGen.Num()
 		&& s_sceneLightCoveredGen[ lightDefIndex ] == s_sceneLightGen;
+}
+
+// The FORWARD draw weight of a light's opaque world surfaces: 1 = a normal forward light, 0 = a DI-covered light
+// (nothing drawn forward), in between = a handover crossfade. ReBLUR accumulates a step change roughly as
+// 1 - exp( -t / history ), so a light that just went forward -> DI keeps a forward draw of exp( -t / history )
+// while DI ramps in, and one that just went DI -> forward ramps its forward draw as 1 - exp( -t / history ) while
+// its DI ghost decays. Over ~3 time constants the light is purely on its new path.
+static float RB_RHI_SceneLightForwardWeight( const viewDef_t *viewDef, int lightDefIndex, bool covered ) {
+	const float steady = covered ? 0.0f : 1.0f;
+	if ( viewDef == NULL || s_sceneLightCacheView != viewDef || s_sceneLightCacheFrame != tr.frameCount
+			|| lightDefIndex < 0 || lightDefIndex >= s_sceneLightTrack.Num() ) {
+		return steady;
+	}
+	const sceneLightTrack_t &t = s_sceneLightTrack[ lightDefIndex ];
+	const float tau = (float)Max( 4, r_rtReStirDIHistory.GetInteger() );
+	const int   age = tr.frameCount - t.transitionFrame;
+	if ( age < 0 || (float)age > 3.0f * tau ) {
+		return steady;
+	}
+	const float decay = idMath::Exp( -(float)age / tau );
+	if ( covered ) {
+		return t.toDI ? decay : 0.0f;				// forward fades out as DI accumulates the light
+	}
+	return t.toDI ? 1.0f : ( 1.0f - decay );		// forward fades in as DI's ghost of the light decays
 }
 
 // Shared by RT reflections (RR16) and volumetric lighting (docs/volumetric-lighting.md): the first caller in
@@ -5653,6 +5694,9 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			s_sceneLightTrack[ k ].lastSeenFrame = -1;
 			s_sceneLightTrack[ k ].lastChangeFrame = -( DI_FAST_HYST_FRAMES + 1 );
 			s_sceneLightTrack[ k ].lum = 0.0f;
+			s_sceneLightTrack[ k ].fast = false;
+			s_sceneLightTrack[ k ].transitionFrame = -100000;
+			s_sceneLightTrack[ k ].toDI = false;
 		}
 	}
 	const viewLight_t **viewLightOf = (const viewLight_t **)_alloca( ( numDefs + 1 ) * sizeof( viewLight_t * ) );
@@ -5747,16 +5791,29 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			sceneLightTrack_t &t = s_sceneLightTrack[ i ];
 			const int now = tr.frameCount;
 			const float lum = 0.2126f * col[0] + 0.7152f * col[1] + 0.0722f * col[2];
-			if ( t.lastSeenFrame != now ) {
-				const bool appeared = ( t.lastSeenFrame != now - 1 );	// not in last frame's buffer: a flash, a light switched on
+			if ( t.lastSeenFrame == now ) {
+				diFast = t.fast;		// another view this frame (a mirror before the main view): reuse the verdict
+			} else {
+				const bool seenLastFrame = ( t.lastSeenFrame == now - 1 );
+				const bool appeared = !seenLastFrame;						// not in last frame's buffer: a flash, a light switched on
 				const bool recolored = idMath::Fabs( lum - t.lum ) > 0.2f * Max( lum, t.lum ) + 0.002f;	// strobe / flicker / fade (20%: subtle authored flicker stays in DI)
 				if ( appeared || recolored ) { t.lastChangeFrame = now; }
 				t.lastSeenFrame = now;
 				t.lum = lum;
+				diFast = ( ld->parms.allowLightInViewID != 0 )				// first-person flashlight / muzzle flash
+				      || ( now - t.lastChangeFrame ) <= DI_FAST_HYST_FRAMES	// (re)appeared or changed colour recently
+				      || ( vl != NULL && RB_RHI_LightIsMoving( vl ) );		// pose moved recently (projectiles, swinging / carried lights)
+				// Handover crossfade (RB_RHI_SceneLightForwardWeight): a light that flips path while continuously present
+				// cannot just switch - DI's denoiser has no history for a light that was forward (it ramps in over the
+				// accumulation), and still holds one that just went forward (it decays out). Record the flip; the forward
+				// draw then fades in step with that ramp so the sum stays at full brightness and the noisy early DI frames
+				// sit under a clean forward draw (the "blinking lights" the user saw).
+				if ( seenLastFrame && diFast != t.fast ) {
+					t.transitionFrame = now;
+					t.toDI = !diFast;
+				}
+				t.fast = diFast;
 			}
-			diFast = ( ld->parms.allowLightInViewID != 0 )					// first-person flashlight / muzzle flash
-			      || ( now - t.lastChangeFrame ) <= DI_FAST_HYST_FRAMES		// (re)appeared or changed colour recently
-			      || ( vl != NULL && RB_RHI_LightIsMoving( vl ) );			// pose moved recently (projectiles, swinging / carried lights)
 		}
 		RtReflLightGPU &L = lights[ n++ ];
 		s_sceneLightCoveredGen[ i ] = diFast ? 0u : s_sceneLightGen;	// Stage D membership: DI covers this lightDef in this view (a fast light stays forward)
@@ -10338,6 +10395,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	ictx.ambientProg = r->LoadShader( "ambientlight" );
 	ictx.stencilState = rhi::SS_ALWAYS;
 	ictx.lightDiCovered = false;
+	ictx.lightForwardWeight = 1.0f;
 
 	// sets backEnd.lightScale/overBright, read by the reused
 	// RB_CreateSingleDrawInteractions
@@ -10405,9 +10463,13 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			// ray mask) - only the view weapon + translucents still draw forward for it, and those take the
 			// inline ray (mode 4) when the RT scene is live, else unshadowed. Lights outside the buffer (ambient,
 			// no lightDef, beyond its capacity) take the normal path, so nothing is lit twice or by nobody.
-			ictx.lightDiCovered = rhiReStirDIApplyThisView && vLight->lightDef != NULL
+			const bool diCovered = rhiReStirDIApplyThisView && vLight->lightDef != NULL
 				&& !vLight->lightShader->IsAmbientLight()
 				&& RB_RHI_SceneLightCovered( viewDef, vLight->lightDef->index );
+			// handover crossfade: a light that just flipped path keeps / gains a weighted forward draw for a while
+			ictx.lightForwardWeight = ( rhiReStirDIApplyThisView && vLight->lightDef != NULL && !vLight->lightShader->IsAmbientLight() )
+				? RB_RHI_SceneLightForwardWeight( viewDef, vLight->lightDef->index, diCovered ) : 1.0f;
+			ictx.lightDiCovered = diCovered && ictx.lightForwardWeight <= 0.001f;	// purely DI: skip all forward work
 			if ( ictx.lightDiCovered ) {
 				RB_RHI_ResetLightShadowState();
 				ictx.lightRtPoint = ( ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0 );
@@ -10504,6 +10566,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	}
 	backEnd.vLight = NULL;
 	ictx.lightDiCovered = false;
+	ictx.lightForwardWeight = 1.0f;
 	if ( r_shadowMapDebug.GetInteger() > 0 && dbgDiCovered > 0 ) {
 		common->Printf( "ReSTIR DI: %d of %d lit lights DI-covered this view (forward opaque draws + shadow work skipped)\n", dbgDiCovered, dbgLit );
 	}
