@@ -7621,6 +7621,22 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 			rs.lobeAngleFraction *= a.edgeStopScale;
 			rs.planeDistanceSensitivity *= a.edgeStopScale;
 		}
+		// Direct-light shadows across a history reset (ReSTIR DI; docs/rtx-restir-di.md "look-away fade"): the DI hit
+		// distance is CLEAN (light distance when lit, occluder distance when shadowed), so the spatial passes can key
+		// hard on it - NRD's own advice for ReSTIR signals is a low minHitDistanceWeight - and the thin-history
+		// reconstruction / post-reset blur boost that suit a dirty 1-spp bounce need not erase a hard shadow edge.
+		if ( a.minHitDistWeight > 0.0f ) {
+			rs.minHitDistanceWeight = ( a.minHitDistWeight > 0.2f ) ? 0.2f : a.minHitDistWeight;
+		}
+		if ( a.historyFixStride > 0 ) {
+			rs.historyFixBasePixelStride = rs.historyFixAlternatePixelStride = (uint32_t)a.historyFixStride;
+		}
+		if ( a.convergeShortB > 0.0f ) {
+			rs.convergenceSettings.b = ( a.convergeShortB > 1.0f ) ? 1.0f : a.convergeShortB;
+		}
+		if ( a.convergeSpeedS > 0.0f ) {
+			rs.convergenceSettings.s = a.convergeSpeedS;
+		}
 	}
 	if ( a.giMode && a.checkerboard > 0 ) {
 		// H6g: NRD reconstructs the full-res diffuse from the horizontal checkerboard packed in rayRT's left

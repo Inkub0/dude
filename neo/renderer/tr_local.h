@@ -1020,6 +1020,10 @@ extern idCVar r_rtReStirDIPrepassBlur;		// ReSTIR DI NRD diffusePrepassBlurRadiu
 extern idCVar r_rtReStirDIHistoryFix;		// ReSTIR DI NRD historyFixFrameNum: spatial reconstruction frames where history is thin (moving parts)
 extern idCVar r_rtReStirDIBlurRadius;		// ReSTIR DI NRD maxBlurRadius (px): base spatial denoise radius
 extern idCVar r_rtReStirDIEdgeStop;			// ReSTIR DI NRD edge-stopping scale (lobeAngle + planeDistance); >1 blurs across detail edges (grates), costs detail
+extern idCVar r_rtReStirDIHitDistWeight;	// ReSTIR DI NRD minHitDistanceWeight: low keeps lit/shadowed texels apart in the spatial passes (hard shadow edges survive a reset)
+extern idCVar r_rtReStirDIHistoryFixStride;	// ReSTIR DI NRD historyFixBasePixelStride (px): smear width of the thin-history reconstruction
+extern idCVar r_rtReStirDIResetBlur;		// ReSTIR DI NRD convergenceSettings.b: extra post-reset denoising (0.2 NRD .. 1 none)
+extern idCVar r_rtReStirDIConvergeSpeed;	// ReSTIR DI NRD convergenceSettings.s: blur-radius shrink speed vs accumulated frames (1 NRD)
 extern idCVar r_rtReStirDIHistory;			// ReSTIR DI NRD ReBLUR history length (maxAccumFrames); DI's own, mirrors RTGI's r_rtgiHistory (2..63)
 extern idCVar r_rtReStirDICheckerboard;		// ReSTIR DI full-res checkerboard: trace half the pixels (packed left), NRD reconstructs; ~half the rays
 extern idCVar r_rtReStirDIResScale;			// ReSTIR DI gather/denoise resolution fraction (0.25..1); upscaled for display. Composes with checkerboard
