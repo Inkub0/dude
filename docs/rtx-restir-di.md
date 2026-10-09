@@ -126,15 +126,15 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIResScale` | 1 | gather/denoise resolution fraction (0.25..1), upscaled for display. Composes with checkerboard. |
 | `r_rtReStirDICheckerboard` | 0 | trace a half-pixel checkerboard (packed left), NRD reconstructs via a full-res guide pass + IN_MV. |
 | `r_rtReStirDIBilateralUpscale` | 1 | depth+normal-aware upscale of a reduced-res gather (vs bilinear); inert at full res. |
-| `r_rtReStirDIHistory` | 8 | NRD ReBLUR history length (its own; no longer borrows `r_rtgiHistory`). 2..63. |
-| `r_rtReStirDIConfidence` | 2.4 | confidence-pass sensitivity; `0` = off. (Off on the raw signal — it fried — but ~2.4 once the NRD spatial cleanup + checkerboard tame the input.) |
-| `r_rtReStirDIPrepassBlur` | 64 | `diffusePrepassBlurRadius` px; main noise lever. 0 = NRD default (30). |
-| `r_rtReStirDIHistoryFix` | 0 | `historyFixFrameNum`; moving-part lever. 0 = NRD default (3). |
-| `r_rtReStirDIBlurRadius` | 32 | `maxBlurRadius` px. 0 = NRD default (30). |
-| `r_rtReStirDIEdgeStop` | 6 | edge-stopping scale; grate lever, costs detail. 0/1 = no scaling. |
+| `r_rtReStirDIHistory` | 16 | NRD ReBLUR history length (its own; no longer borrows `r_rtgiHistory`). 2..63. |
+| `r_rtReStirDIConfidence` | 0 | confidence-pass sensitivity; `0` = off (user-tuned 2026-10-08: on, it darkened/fried; NRD antilag + the weapon mask carry temporal). |
+| `r_rtReStirDIPrepassBlur` | 36 | `diffusePrepassBlurRadius` px; main noise lever. 0 = NRD default (30). |
+| `r_rtReStirDIHistoryFix` | 5 | `historyFixFrameNum`; moving-part lever. 0 = NRD default (3). |
+| `r_rtReStirDIBlurRadius` | 24 | `maxBlurRadius` px. 0 = NRD default (30). |
+| `r_rtReStirDIEdgeStop` | 0.1 | edge-stopping scale; grate lever, costs detail. 0/1 = no scaling. |
 
-Defaults are the "good compromise" from in-game tuning (2026-10-07). All `CVAR_ARCHIVE`, so a user's own
-values persist in config regardless of these source defaults. `hitDist` scale (1024) is in-source only.
+Defaults are the user-tuned compromise (2026-10-07/08). All `CVAR_ARCHIVE`, so a user's own values persist in
+config regardless of these source defaults. `hitDist` scale (1024) is in-source only.
 
 ## ImGui
 
@@ -407,6 +407,15 @@ pre-reject in `dudeLightAttenTex` keep it near the cost of the bounce's light lo
 always enumerated). `M > 0` keeps the stochastic draw for scenes beyond the 256-light buffer. Note: the cvar is
 archived, so a config saved with the old `32` must be reset once (`r_rtReStirDICandidates 0`). Also note the
 xray02 light is table-driven (0.7..1.0 over a 10 s cycle), so two screenshots can differ by phase alone.
+
+**Look-away fade — ACCEPTED LIMITATION (2026-10-09):** after looking away from the sun's window-frame shadows and
+back, they wash out and fade back in over the history length: the returning pixels have no NRD history and
+ReBLUR treats a fresh pixel as dirty (5-frame history fix at a 14 px stride, the v4.17 post-reset convergence boost,
+the lit side blurring at full radius since its hit distance is the light distance). Four DI-only ReBLUR overrides
+(`minHitDistanceWeight`, history-fix stride, convergence b/s) were built, tested and REVERTED by the user's decision
+("it won't get better"): the one-buffer direct+bounce denoise cannot favour the clean direct term without
+grainying the bounce. Not to be re-chased with knobs; the structural options remain a raw-direct blend in the
+apply keyed on NRD's history length, or a separate direct denoise.
 
 **Known v1 approximations (deliberate, listed for the test):** the SPECULAR stage colour assumed 1 (the diffuse
 stage colour is in the albedo now); the legacy non-PBR specular LUT not replicated (`r_pbr 0` = Lambert); no
