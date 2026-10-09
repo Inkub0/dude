@@ -216,12 +216,6 @@ struct RtaoDenoiseArgs {
 	int		historyFixFrameNum;			// historyFixFrameNum: spatial-reconstruction frames after a (dis)occlusion (clamped < fast-history window)
 	float	maxBlurRadius;				// maxBlurRadius (px): base spatial denoise radius
 	float	edgeStopScale;				// scales lobeAngleFraction + planeDistanceSensitivity (>1 blurs across depth/normal edges more; grate-noise lever, costs detail)
-	// Direct-light shadow keeping across a history reset (look away / look back): 0 = NRD default each.
-	float	minHitDistWeight;			// minHitDistanceWeight (0..0.2]: the weight floor a spatial tap keeps when its hit distance differs from the centre's -
-										// lower = lit (light-distance) and shadowed (occluder-distance) texels stop blurring into each other; NRD recommends low for ReSTIR
-	int		historyFixStride;			// historyFixBasePixelStride (px): the 5x5 reconstruction kernel's stride while history is thin (14 = NRD) - its smear width
-	float	convergeShortB;				// convergenceSettings.b [0..1]: extra denoising right after a reset (0.2 = NRD "blurry beats dirty"; 1 = none)
-	float	convergeSpeedS;				// convergenceSettings.s (>0): how fast the blur radius shrinks as frames accumulate (1 = NRD; >1 faster, for clean signals)
 	// ReSTIR DI SH mode (docs/rtx-restir-di.md): REBLUR_DIFFUSE_SH instead of REBLUR_DIFFUSE - rayRT att0 = IN_DIFF_SH0
 	// (same layout as radiance+hitdist), att shAtt = IN_DIFF_SH1 (direction * luminance); outputs GetRtgiOutputImage (SH0)
 	// + GetRtgiOutputSh1Image (SH1). The apply re-resolves the cosine against the FULL-res normal, so bump-mapped

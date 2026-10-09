@@ -8115,11 +8115,6 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.historyFixFrameNum = r_rtReStirDIHistoryFix.GetInteger();	// spatial reconstruction on thin/disoccluded (moving) history
 		da.maxBlurRadius      = r_rtReStirDIBlurRadius.GetFloat();	// base spatial denoise radius
 		da.edgeStopScale      = r_rtReStirDIEdgeStop.GetFloat();		// >1 blurs across detail edges (grate-noise lever; costs detail)
-		// hard shadow edges across a history reset (look away / look back): see the cvars' help; 0 = NRD default each
-		da.minHitDistWeight   = r_rtReStirDIHitDistWeight.GetFloat();
-		da.historyFixStride   = r_rtReStirDIHistoryFixStride.GetInteger();
-		da.convergeShortB     = r_rtReStirDIResetBlur.GetFloat();
-		da.convergeSpeedS     = r_rtReStirDIConvergeSpeed.GetFloat();
 		da.confImage = diConfImg;							// IN_DIFF_CONFIDENCE (0 = not provided this frame)
 		da.denoisingRange = 20000.0f;
 		da.frameIndex = (unsigned int)tr.frameCount;

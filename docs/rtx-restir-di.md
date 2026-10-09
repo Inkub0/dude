@@ -132,14 +132,9 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIHistoryFix` | 5 | `historyFixFrameNum`; moving-part lever. 0 = NRD default (3). |
 | `r_rtReStirDIBlurRadius` | 24 | `maxBlurRadius` px. 0 = NRD default (30). |
 | `r_rtReStirDIEdgeStop` | 0.1 | edge-stopping scale; grate lever, costs detail. 0/1 = no scaling. |
-| `r_rtReStirDIHitDistWeight` | 0.02 | `minHitDistanceWeight`: weight floor for taps whose hit distance differs from the centre's; LOW keeps lit (light distance) and shadowed (occluder distance) texels apart, so hard shadow edges survive the spatial passes + a reset. 0 = NRD default (0.1). |
-| `r_rtReStirDIHistoryFixStride` | 8 | `historyFixBasePixelStride` px: smear width (±2 strides) of the thin-history reconstruction. 0 = NRD default (14). |
-| `r_rtReStirDIResetBlur` | 0.5 | `convergenceSettings.b`: extra denoising right after a reset (NRD 0.2 "blurry beats dirty"; 1 = none). 0 = NRD default. |
-| `r_rtReStirDIConvergeSpeed` | 1 | `convergenceSettings.s`: blur-radius shrink speed vs accumulated frames (>1 faster, clean signals). 0 = NRD default. |
 
-Defaults are the user-tuned compromise (2026-10-07/08) plus the shadow-reset knobs (2026-10-09, awaiting tuning).
-All `CVAR_ARCHIVE`, so a user's own values persist in config regardless of these source defaults. `hitDist`
-scale (1024) is in-source only.
+Defaults are the user-tuned compromise (2026-10-07/08). All `CVAR_ARCHIVE`, so a user's own values persist in
+config regardless of these source defaults. `hitDist` scale (1024) is in-source only.
 
 ## ImGui
 
@@ -413,19 +408,14 @@ always enumerated). `M > 0` keeps the stochastic draw for scenes beyond the 256-
 archived, so a config saved with the old `32` must be reset once (`r_rtReStirDICandidates 0`). Also note the
 xray02 light is table-driven (0.7..1.0 over a 10 s cycle), so two screenshots can differ by phase alone.
 
-**Look-away fade (2026-10-09, user: the sun's window-frame shadows "disappear and reappear gradually" after looking
-away and back):** pixels that come back on screen have no NRD history, and ReBLUR treats a fresh pixel as a dirty
-one: the 5-frame history fix reconstructs it from a 5x5 kernel at a 14 px stride (±28 gather px), the convergence
-boost (`convergenceSettings.b = 0.2`, v4.17+) blurs extra for the first frames, and the lit side of a shadow edge
-blurs at the full radius (its hit distance is the light distance → factor 1) while a shadowed texel only kept its
-10 % `minHitDistanceWeight` apart. The direct term is now near-deterministic (exhaustive RIS: the output luminance
-equals the sum of the reaching lights' unshadowed luminance whichever light is picked; only the visibility of the
-picked light is random) and its hit distance is clean, so four DI-only ReBLUR overrides (table above) let the
-spatial passes key on the hit distance and tone down the post-reset treatment: `r_rtReStirDIHitDistWeight` 0.02,
-`r_rtReStirDIHistoryFixStride` 8, `r_rtReStirDIResetBlur` 0.5, `r_rtReStirDIConvergeSpeed` 1 (all live; 0 =
-NRD default). The shared bounce pays for a tighter post-reset treatment with a grainier first few frames - the
-one-buffer compromise again; if the fade must go entirely, the next step is a raw-direct blend in the apply keyed on
-NRD's history length (`returnHistoryLengthInsteadOfOcclusion`) or a separate direct denoise.
+**Look-away fade — ACCEPTED LIMITATION (2026-10-09):** after looking away from the sun's window-frame shadows and
+back, they wash out and fade back in over the history length: the returning pixels have no NRD history and
+ReBLUR treats a fresh pixel as dirty (5-frame history fix at a 14 px stride, the v4.17 post-reset convergence boost,
+the lit side blurring at full radius since its hit distance is the light distance). Four DI-only ReBLUR overrides
+(`minHitDistanceWeight`, history-fix stride, convergence b/s) were built, tested and REVERTED by the user's decision
+("it won't get better"): the one-buffer direct+bounce denoise cannot favour the clean direct term without
+grainying the bounce. Not to be re-chased with knobs; the structural options remain a raw-direct blend in the
+apply keyed on NRD's history length, or a separate direct denoise.
 
 **Known v1 approximations (deliberate, listed for the test):** the SPECULAR stage colour assumed 1 (the diffuse
 stage colour is in the albedo now); the legacy non-PBR specular LUT not replicated (`r_pbr 0` = Lambert); no
