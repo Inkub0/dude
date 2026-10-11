@@ -6,6 +6,11 @@
 > blits the buffer over the scene. Part of the Full-RT end-state in
 > [rtx-hybrid-roadmap.md](rtx-hybrid-roadmap.md); the direct-lighting half of H7.
 >
+> **2026-10-11 REVIEW + PLAN:** the shipped design was compared against public ReSTIR DI (RTXDI, RTX Remix, Q2RTX, NRD,
+> the papers) with the goal of minimal ghosting/lag + preserved detail. Verdict: it is exhaustive RIS + a radiance-
+> accumulating denoiser, and the lag symptoms follow from that; the fixes are a reservoir-gradient confidence pass,
+> ReLAX, and spatial reuse with decoupled visibility. See **Review against public ReSTIR** and **Plan R0-R6** below.
+>
 > ⚠ **The original reservoir plan was RETIRED.** This doc used to describe a hand-rolled spatiotemporal
 > **reservoir** (ping-pong SSBO, temporal reproject, Stages 0–6). That reuse left moving-object trails that
 > no disocclusion/weapon special-casing could fix — see **The pivot** below. The shipped design hands ALL
@@ -190,7 +195,8 @@ confidence/NRD) at a fraction, with the velocity downsampled to that res; the de
 reduced-res output (`r_rtReStirDIBilateralUpscale` = the `rtgi_apply` joint-bilateral, else bilinear) and
 re-masks sky/weapon.
 
-**TODO (in rough priority):**
+**TODO (in rough priority):** - SUPERSEDED 2026-10-11 by **Plan R0-R6** below (the lag / ghosting / detail work);
+the items here stay as the material-parity backlog.
 - **Play-test the whole tier** at `dude_rtx 2` with `r_vkGpuTime 2`: brightness/spec parity vs `r_rtReStirDIApply 0`,
   grates, flashlight/flash lag, combined-GI look + cost (~2.2 ms expected), the handover dip when a light settles.
 - **Remaining v1 approximations:** specular stage colour; legacy non-PBR spec LUT; Toksvig; organic spec fallback;
@@ -441,6 +447,273 @@ them down while DI is on (DI's own NRD instance remains the fix).
 `r_rtReStirDIApply` default off, forward path bit-identical when off; `SupportsRayQuery()` + VK; primary
 fullscreen view only; raster/GL3/non-RT untouched; new shaders → CMake re-configure.
 
+## Review against public ReSTIR (2026-10-11)
+
+Scope: the shipped gather / apply / confidence / NRD wiring above, read against the public sources that describe
+ReSTIR DI as actually shipped in first-person games - the RTXDI SDK + runtime library, the RTX Remix runtime
+(Portal RTX / Half-Life 2 RTX, `dxvk-remix`), Quake II RTX (A-SVGF), NVIDIA NRD v4.18 (README, headers, UPDATE.md),
+Bitterli 2020, Wyman & Panteleev HPG 2021, the SIGGRAPH 2023 ReSTIR course (incl. the Cyberpunk 2077 chapter),
+ReSTIR GI 2021, GRIS 2022, Area ReSTIR 2024, Kettunen 2023. Goal of the review: **minimise ghosting and lag while
+keeping fine detail** (hard contact shadows, grates, bump N·L). Sources are listed at the end of the section.
+
+### Verdict
+
+The shipped design is **not ReSTIR in the published sense**: it is exhaustive RIS (one light + one shadow ray) feeding a
+radiance-accumulating denoiser. Every lag symptom fought so far - the flashlight trail, the handover blink, the
+look-away fade - is the predictable result of that split, not of the sampling. Published ReSTIR carries only the
+light **selection** across frames: the reservoir stores a light index + weight, never radiance; each frame the stored
+light is re-scored with the CURRENT light parameters at the CURRENT pixel and the winner gets a fresh shadow ray
+(Bitterli §3.2; RTXDI `TemporalResampling.hlsli`: `weightAtCurrent = RAB_GetLightSampleTargetPdfForSurface(...)`; Remix
+fork identical). A light that moves, dims or switches off loses its weight the same frame, so selection reuse is
+lag-free by construction, and the denoiser only smooths a signal whose mean is already right.
+
+The pivot removed selection reuse and kept radiance accumulation (ReBLUR). The fast-light forward path, the 16-frame
+hysteresis, the handover crossfade and the ramp-in seam are all compensations for denoiser lag. **No public engine
+special-cases player lights this way**: RTXDI and Remix have no view-model / muzzle-flash handling at all (grep of both
+repos); Quake II RTX only damps the weapon's *specular* gradient (`flt_grad_weapon 0.25`).
+
+The trails the retired reservoir showed match the textbook failure modes, each with a public fix:
+
+| Failure mode we hit | Public handling |
+|---|---|
+| stale visibility reused with the reservoir (shadow trails) | Wyman 2021 §7: only the CANDIDATE's visibility feeds resampling, the winner is traced fresh; RTXDI bounds reused visibility to `finalVisibilityMaxAge 4` frames / `finalVisibilityMaxDistance 16` px |
+| a light that vanished kept its reservoir | RTXDI/Remix: unmapped light -> `weightSum = 0`, M kept (`RAB_TranslateLightIndex < 0`), per-frame light-index mapping buffer |
+| unbounded / absolute history | cap previous M at `maxHistoryLength * curSample.M`: RTXDI 20, **Remix ships 4 for DI**, course notes 5-30 |
+| reuse across silhouettes | normal dot >= 0.5 + 10 % relative depth (RTXDI); Remix 0.8 + view-angle-scaled depth; 9-try jittered search, else spatial boost |
+| everything sourced from the previous frame | fused reuse "delays convergence by one frame" (HPG 2021); RTXDI: also more biased |
+
+What IS right and stays: exhaustive RIS at <= 256 lights (strictly less variance than RTXDI's tiled initial sampling;
+the weight derivation `W = wSum / pHat(y)` is correct), material demodulation (matches NRD's `NRD_MaterialFactors`
+guidance), hit distance = occluder distance when shadowed / light distance when lit (NRD README: "For direct lighting a
+distance to an occluder or a light source is needed", "hitT must approach 0 at contact points"), SH mode for the
+reduced-res output (NRD: "a must-have when NRD produces a lower-resolution output").
+
+### Findings, ranked by effect on lag + detail
+
+**F1 - the confidence pass measures noise, not lighting change.** `rtgi_confidence.frag` compares a 3x3 mean of the
+noisy 1-spp gather with last frame's DENOISED output, so a stable surface reads as "changed" and history starves -
+that is why it fries on DI. Every public system computes a temporal **gradient** instead: re-shade the SAME sample in
+the other frame so the only difference is the lighting change. Q2RTX replays the previous RNG seed
+(`asvgf_gradient_reproject.comp`, picks the BRIGHTEST pixel per 3x3 stratum: "helps prevent bright trails when the light
+has moved"). RTXDI (`ComputeGradients.hlsl`, `Doc/Confidence.md`) and Remix (`rtxdi_compute_gradients.comp.slang`) store
+the previous pixel's CHOSEN LIGHT and re-shade it at the reprojected surface under current lights, one pixel per 3x3
+stratum ("we can reuse the reservoirs instead of random numbers"), filter with a 4-pass 3x3 A-trous, convert to
+confidence as `saturate(1 - g / (|L| + darknessBias))^sensitivity` (sensitivity 8), smooth temporally in a non-linear
+space (RTXDI `pow 0.25`) or ONLY while confidence rises (Remix: "eliminate the ghost issue cause by temporal
+confidence"), and floor it (`minimumConfidence 0.1`, hitT-scaled). An unmapped light counts as a 100 % change - this
+replaces our "appeared" rule. NRD README: confidence inputs are "the best way to mitigate temporal lags", "less than 5%
+of the frame time", "An application should not rely solely on the anti-lag provided by REBLUR/RELAX"; v4.17+: the
+confidence texture may be provided at lower resolution. Our gather makes this cheap: the seed is pixel + frame, the
+light ring (`RT_REFL_LIGHT_SLOTS`) keeps previous-frame rows, the only missing piece is a stable light identity across
+the per-frame distance sort (`RtLight.pad0` is free; RTXDI's `lightIndexMappingBuffer` is the recipe).
+
+**F2 - ReBLUR is the denoiser NRD does not recommend for this signal.** NRD README: "RELAX - A-trous based denoiser, has
+been designed for RTXDI", "The Sweet Home of RELAX is RTXDI sample". Remix ships `RELAX_DIFFUSE_SPECULAR` for direct light
+with `diffuseMaxAccumulatedFrameNum 26`, **`diffuseMaxFastAccumulatedFrameNum 1`** ("to reduce specular trail"),
+`diffusePrepassBlurRadius 0`, `confidenceDrivenRelaxationMultiplier 0.7 / LuminanceEdgeStoppingRelaxation 1.4 /
+NormalEdgeStoppingRelaxation 0.6`; the RTXDI sample sets `diffusePhiLuminance 1.0`,
+`spatialVarianceEstimationHistoryThreshold 1`, `enableAntiFirefly true`. RELAX "uses hit distances only in the Pre-Pass
+and for specular tracking", so the hit-distance-driven blur radius that widened our grate shadows does not apply; its
+A-trous luminance/normal/depth edge-stopping is what keeps hard shadow edges. The ReLAX SPIR-V is already vendored
+(`neo/libs/nrd/Shaders/RELAX_*.cs.spirv.h`); adding `RELAX_DIFFUSE` / `RELAX_DIFFUSE_SH` to the instance is wiring. Input
+differences (verified in `NRD.hlsli`): RELAX takes LINEAR radiance + RAW hit distance (`RELAX_FrontEnd_PackRadianceAndHitDist
+= float4(radiance, hitDist)`), REBLUR takes YCoCg + normalized; RELAX output `.w` is the diffuse history length (v4.16).
+Cost per NRD's table (1440p, RTX 4080): RELAX_DIFFUSE_SPECULAR 3.25 ms vs REBLUR 2.55 ms; anti-firefly +7-10 % on RELAX.
+
+**F3 - no spatial reuse, so a disoccluded pixel is ONE sample for many frames.** This is the accepted "look-away fade".
+Wyman 2021 (60 Hz strafe): temporal-only disocclusion noise "persist[s] for over 20 frames"; +1 spatial tap -> "3 or 4
+frames"; +5 spatial -> "2 frames"; one tap also "stochastically dithers out temporal correlations". RTXDI:
+`numDisocclusionBoostSamples 8` (normal `numSamples 1`, radius 32); Remix: 4 taps for the first `disocclusionFrames 8`.
+Kettunen 2023 names it "variance lag around disocclusions". ReBLUR's history fix cannot substitute: it has no new
+samples to reconstruct from (the knobs tried and reverted on 2026-10-09 confirm this). The literature fix is a
+1-tap spatial RIS, boosted only where the denoiser reports short history, so the extra cost lands on disoccluded pixels.
+
+**F4 - ReBLUR settings left at defaults that add lag or blur** (see the table in Plan R0/R4): fast history 6 (Remix
+direct: 1), `fastHistoryClampingSigmaScale` 2.0 (NRD sample: 1.5, "works well even for dirty signals"),
+`maxStabilizedFrameNum` default 63 (clamped to history; the Cyberpunk chapter: with ReSTIR as the pre-blur make the
+denoiser "more conservative: Shorter history length; Smaller radius of the final blur", "skipping Pre-Blur"), prepass 36 px
+(Remix direct 0), history in frames (NRD: accumulate in seconds via `GetMaxAccumulatedFrameNum` with a 0.2 s low-pass
+FPS - "minimizes lag at low FPS and maximizes IQ at high FPS"), 2D motion vectors (NRD README: 2.5D recommended, "2D MVs
+can lead to massive history reset on moving objects" - directly relevant to NPCs and the weapon), ReBLUR antilag at
+defaults (NRD: "Initial integration should be done with disabled antilag"; validate with the `OUT_VALIDATION` overlay
+so "diff frames" stays "in the violet zone").
+
+**F5 - the residual noise that forces the heavy blur.** pHat is the UNSHADOWED luminance. Where the brightest reaching
+light is occluded, most frames pick it and output 0; the occasional pick of a dimmer visible light arrives as a spike
+with `W = wSum / pHat` that anti-firefly then clips - the same clipping that dimmed the skyway sun, now acting inside
+every multi-light shadow (a darkening bias plus noise). Course notes §9: "Consider always using visibility in your
+target functions and MIS weights until you have validated your code". Spatial reuse with Wyman's decoupled visibility
+(F3) is the standard answer; it is the same pass.
+
+**F6 - smaller gaps.**
+- NRD's normal encoding we use (`R10_G10_B10_A2_UNORM`, materialID in `.w`) is written as 0 everywhere; NRD documents
+  `historyFixAlternatePixelStrideMaterialID` for "moving objects (like protagonist's weapon) constantly getting a history
+  reset", and `minMaterialForDiffuse` keeps the denoiser from mixing tagged pixels with the world. We shade the weapon
+  pixels into the field (unmasked) but never tag them.
+- Neither DI nor RTGI resets NRD on the camera-cut flag the temporal camera already tracks
+  (`rhiTemporalCam.historyReset`); `da.reset` fires only on the first DI frame. Indiana Jones (REAC 2025): "a full reset
+  of temporal buffers and then present the last frame a few extra times".
+- The SH resolve in `restir_di_apply.frag` is a custom cosine mix; NRD ships `NRD_SG_ResolveDiffuse` + `NRD_SG_ReJitter`
+  (the Jacobian from the 4-neighbour normals, clamped `[1/2; 2]`) for exactly the micro-detail recovery wanted, and notes
+  the re-jitter "can also be used with RESTIR produced sampling without involving SH denoisers" given the light direction.
+- Combined DI+GI hitT: NRD README recipe lerps direct/indirect hit distance by the direct contribution (`maxContribution
+  0.5`) "to get sharper shadows"; we always pass the direct term's, which is the sharper choice already. NRD also says
+  "always ignore 0 hitT produced by RESTIR in disocclusions" - a pixel with no reaching light but a bounce writes 0.
+- Checkerboard: NRD marks `CheckerboardMode::OFF // RECOMMENDED` in favour of probabilistic sampling; Area ReSTIR 2024
+  shows integer backprojection itself invalidates reuse on high-frequency normals. Not urgent; noted for R5.
+
+### Sources
+RTXDI SDK + library (`NVIDIA-RTX/RTXDI`, `NVIDIA-RTX/RTXDI-Library`: `Include/Rtxdi/DI/TemporalResampling.hlsli`,
+`Source/ReSTIRDI.cpp`, `Doc/Confidence.md`, `Doc/NoiseAndBias.md`, sample `ComputeGradients.hlsl` /
+`FilterGradientsPass.hlsl` / `ConfidencePass.hlsl`); RTX Remix (`NVIDIAGameWorks/dxvk-remix`: `RtxOptions.md`,
+`rtx_rtxdi_rayquery.h`, `rtx_nrd_settings.h`, `rtxdi_compute_gradients.comp.slang`, `ConfidenceFunctions.slangh`);
+Quake II RTX (`asvgf_gradient_*.comp`, `asvgf_temporal.comp`, `global_ubo.h`); NRD v4.18 (`README.md`, `Include/NRDSettings.h`,
+`Shaders/NRD.hlsli`, `UPDATE.md`); NRD-Sample; Bitterli et al. 2020; Wyman & Panteleev HPG 2021; SIGGRAPH 2023 course
+notes + Cyberpunk 2077 chapter (https://intro-to-restir.cwyman.org/); Ouyang et al. 2021 (ReSTIR GI); Lin et al. 2022
+(GRIS); Zhang et al. 2024 (Area ReSTIR); Kettunen et al. 2023; MachineGames REAC 2025 slides. Production talks for
+Cyberpunk / Alan Wake 2 / Doom: The Dark Ages / Portal RTX are account-walled; only their public abstracts were used.
+
+## Plan: lag + ghosting reduction (R0-R6) - authored 2026-10-11, NOT started
+
+Each stage = its own branch (`feat/rtx-restir-di-r<N>-<slug>`), its own default-off cvar(s), the forward path and
+`r_rtReStirDI 0` bit-identical, VK + `SupportsRayQuery()` only, new shaders need the CMake re-configure. Measure every
+stage with `r_vkGpuTime 2` (its own `restir.di.*` scope) and A/B with the DI debug views. A stage's knobs that lose
+the A/B are removed at R6 (trim-debug-cvars rule). Order: R0 -> R1 -> R2 -> R3 -> R4 -> R5 -> R6; R2 is independent of
+R1 and may run in parallel; R3 needs R1 (its disocclusion boost reads the history length R1's plumbing exposes).
+
+### R0 - diagnostics + zero-risk fixes (F4, F6) - small
+Files: `RhiWorld.cpp` (`RB_RHI_ReStirDIPass`, `RB_RHI_RtgiPass`), `VulkanBackend.cpp` (`RtaoDenoise`, `RtaoDenoiseArgs`),
+`Dhewm3SettingsMenu.cpp` (ReSTIR group), `restir_di_debug.frag`.
+1. **Camera-cut reset**: `da.reset |= rhiTemporalCam.historyReset` for DI AND RTGI (the FSR2 / eye-adaptation passes
+   already key off it). Optional follow-up: hold the apply's previous output for 2 frames after a cut (Indiana recipe).
+2. **NRD validation view**: `r_rtReStirDIDebug 3` = NRD `OUT_VALIDATION` (set `cs.enableValidation`, bind the output,
+   blit). Lets us SEE accumulated frames / history resets / antilag per pixel instead of guessing.
+3. **History-length view**: ReBLUR `returnHistoryLengthInsteadOfOcclusion = true` (we never consume the `.w` AO) -
+   `r_rtReStirDIDebug 4` shows it; R3 consumes it.
+4. **Expose the lag knobs as cvars** (defaults = today's behaviour, so no visual change until tuned):
+   `r_rtReStirDIFastHistory` (6), `r_rtReStirDIFastClamp` (2.0, `fastHistoryClampingSigmaScale`),
+   `r_rtReStirDIStabilize` (63, `maxStabilizedFrameNum`; 0 = off), `r_rtReStirDIAntilag` (1; 0 = push both
+   `ReblurAntilagSettings` to inert for the A/B NRD asks for).
+5. **Seconds-based history**: `r_rtReStirDIHistory` stays the user knob but gains a companion
+   `r_rtReStirDIHistoryMs` (0 = frames as today; >0 = `nrd::GetMaxAccumulatedFrameNum(ms, lpfFps)` with a 0.2 s
+   low-pass on the frame time, applied to main / fast / stabilized together).
+Acceptance: byte-identical output at defaults except after a cut (no ghost of the previous shot); the validation view
+renders; `r_vkGpuTime 2` unchanged.
+
+### R1 - gradient confidence (F1) - the linchpin, medium
+Files: NEW `restir_di_gradient.frag` + `restir_di_gradient_filter.frag` + `restir_di_confidence.frag`, `restir_di.frag`
+(two extra outputs), `rt_light_eval.glsl` (`pad0` -> `lightDef`), `RhiWorld.cpp` (`RB_RHI_GatherSceneLights` mapping table,
+`RB_RHI_ReStirDIPass` new passes), `VulkanBackend.cpp` (confidence at reduced res, v4.17+ allows it).
+1. **Stable light identity**: `RtLight.pad0 = lightDef index + 1`; `RB_RHI_GatherSceneLights` also fills a per-frame
+   `lightDef -> row` table (uint per lightDef, 0 = absent this frame; `numDefs` entries, same ring slot idiom). This is
+   RTXDI's `lightIndexMappingBuffer`.
+2. **Gather side-outputs** (new attachment, RG32UI or RGBA16F, ping-pong prev/curr at gather res): `(chosen lightDef+1,
+   luminance of the SHADED visible contribution rad·W·vis, packed viewZ, packed normal)`. RTXDI (`u_RestirLuminance`)
+   stores exactly this; the viewZ/normal are for the gradient's own geometric validity test since the gather MRT is
+   overwritten each frame.
+3. **Gradient pass** at `ceil(rw/3) x ceil(rh/3)`: for the 3x3 stratum, backproject each current pixel through the
+   velocity, read prev `(light, lum, viewZ, N)`, accept on the RTXDI test (normal dot >= 0.5, relative depth <= 10 %),
+   pick the BRIGHTEST accepted candidate (Q2RTX/RTXDI). Map its lightDef through the table: absent -> gradient = 100 %;
+   else re-shade THAT light at the current surface with the gather's own per-light code path (textured attenuation,
+   BRDF, demod, cosine) and ONE visibility ray against the current TLAS (NRD recipe: previous TLAS not needed),
+   `L_now`; round both through f16 (RTXDI) and store `(|L_prev - L_now|, max(L_prev, L_now))`.
+4. **Filter**: 4 A-trous passes, 3x3 triangular kernel, strides 1/2/4/8, differences and maxima filtered separately
+   (RTXDI: "a small local change in a bright region is unlikely to result in history invalidation"). Optional Remix
+   hit-distance bilateral weight.
+5. **Confidence** (stratum res, fed to `IN_DIFF_CONFIDENCE` directly): `c = saturate(1 - g.x / (g.y + bias))^s`, `s =
+   r_rtReStirDIGradientPower` (8), `bias = 2^-12 * scene scale`; temporal blend `1/(1+h)` with `h =
+   r_rtReStirDIGradientHistory` (8) applied ONLY while `c` rises (Remix anti-ghost rule); floor
+   `r_rtReStirDIGradientFloor` (0.1). Master `r_rtReStirDIGradient` (1 once validated).
+6. **Retire** the luminance confidence (`r_rtReStirDIConfidence`, the `rtgi_confidence` reuse) for DI once R1 wins the
+   A/B; RTGI keeps its own.
+7. **R1b - narrow the fast-light rule**: with gradients live, set `r_rtReStirDIDynamicForward` to cover ONLY
+   `allowLightInViewID` weapon lights (new value 2), keep 1 as the fallback. Re-test the handover crossfade
+   (`RB_RHI_SceneLightForwardWeight`) and the 16-frame hysteresis; the expectation from RTXDI/Remix is that both become
+   unnecessary and are removed at R6 (a gradient reset is per-pixel and per-frame, a path flip is per-light and 3 tau).
+Cost estimate: 1/9 of the gather's pixels x (one light shade + one ray) + 4 tiny A-trous passes + 1 confidence pass:
+< 0.2 ms at 1440p x 0.75 (RTXDI: "< 5 % of the frame"). Acceptance: (a) flashlight / muzzle flash with
+`r_rtReStirDIDynamicForward 0`: no trail beyond ~2 frames, (b) a light switching off: footprint goes dark within the
+fast history, no "black dip" halo (the rise-only smoothing), (c) STATIC scene: validation view shows accumulated frames
+unaffected (no frying / dimming - the failure of the old pass), (d) NPC walking under a static light: no gradient
+fires (geometry change is NRD's job; the normal/depth test rejects it).
+
+### R2 - ReLAX A/B (F2) - medium, independent of R1
+Files: `VulkanBackend.cpp` (`NrdCreate` denoiser table: `NRD_ID_RELAX_DI = RELAX_DIFFUSE`, `NRD_ID_RELAX_DI_SH =
+RELAX_DIFFUSE_SH`; `RtaoDenoise`: a `denoiser` arg, `nrd::RelaxSettings` path), `restir_di.frag` + `restir_di_apply.frag` +
+`restir_di_debug.frag` (encoding switch), `RhiWorld.cpp` (the arg + cvar), ImGui dropdown.
+1. `r_rtReStirDIDenoiser` 0 = ReBLUR (today), 1 = ReLAX. Both instances live in the one NRD instance (one runs per frame,
+   as GI/GI_SH today).
+2. **Encoding switch in the gather / apply / debug**: ReLAX mode writes LINEAR radiance + RAW hit distance (world units)
+   and SH1 via the `RELAX_FrontEnd_PackSh` layout (check `NRD.hlsli:936` at implementation); the apply decodes
+   linearly and reads history length from `.w` (R3 uses it instead of R0's ReBLUR flag).
+3. **Starting settings = Remix direct-light preset**: `diffuseMaxAccumulatedFrameNum` from `r_rtReStirDIHistory` (26-ish
+   by seconds), `diffuseMaxFastAccumulatedFrameNum 1`, `diffusePrepassBlurRadius 0` (our 36 is a ReBLUR compensation),
+   `diffusePhiLuminance 1.0`, `spatialVarianceEstimationHistoryThreshold 1`, `atrousIterationNum 5`, `enableAntiFirefly
+   true`, `confidenceDrivenRelaxationMultiplier 0.7 / LuminanceEdgeStoppingRelaxation 1.4 / NormalEdgeStoppingRelaxation
+   0.6` (active once R1 feeds confidence), `historyFixFrameNum 3`. Expose `phiLuminance`, `atrous`, `prepass`, `fast` as
+   `r_rtReStirDIRelax*` cvars for the tune.
+4. Keep radiance in `[0; 250]` (NRD: RELAX tracks x^2 in FP16) - clamp in the gather (the firefly clamp already bounds the
+   lobe; check the light scale).
+Acceptance (A/B vs ReBLUR at the same history): grate / contact shadows sharper or equal in the lit scene; flashlight
+trail shorter (fast history 1); no new flicker on flat lit floors (ReLAX fast-history clamp); GPU cost delta recorded
+(expect +0.3-0.7 ms for diffuse-only). Decide the default; the loser's cvars are trimmed at R6.
+
+### R3 - spatial reuse with decoupled visibility + disocclusion boost (F3, F5) - large
+Files: NEW `restir_di_spatial.frag`, `restir_di.frag` (reservoir attachment), `RhiWorld.cpp` (the pass between gather and
+denoise), `rt_light_eval.glsl` (none), optional NEW compute `restir_di_boiling.comp`.
+1. **Gather writes its reservoir** (new attachment at gather res): `(row index of y, wSum, pHat(y), vis)` - the SH1
+   attachment already carries `ldir·lum`, so no second direction needed.
+2. **Spatial pass** replaces the radiance NRD sees: per pixel `N` neighbours in a 32 px radius (RTXDI), `N = 1`
+   normally, `N = r_rtReStirDIDisoccTaps` (8) where the denoiser's history length (R0 item 3 / ReLAX `.w`, reprojected
+   from last frame) is below `r_rtReStirDIDisoccFrames` (8); neighbours rejected on normal dot < 0.5 or relative depth >
+   10 %; each neighbour's light is RE-SCORED at the centre pixel (shade it unshadowed with the gather's per-light code:
+   that is `pHat_c(y_n)`), combined by weighted reservoir sampling with weights `pHat_c(y_n) · W_n · M_n`, biased 1/M
+   normalisation first (`r_rtReStirDISpatialMis 0`), pairwise MIS as the follow-up (`1`); `M` capped at 20x (course).
+3. **Decoupled visibility (Wyman §7)**: a neighbour's `vis` NEVER enters the combine weight; if the winner is the centre's
+   own candidate reuse its traced `vis`, otherwise trace ONE fresh ray for the winner (RTXDI's reuse-within-16-px is the
+   optional saving, off first). This is what removes the F5 darkening: the occluded dominant light now competes with
+   the neighbours' visible picks at the right weight.
+4. **Boiling / outlier filter**: per-pixel 3x3 clamp against the neighbourhood mean `wSum` at `r_rtReStirDIBoiling` (5x,
+   the Remix direct-light threshold) in the fragment pass; the RTXDI 16x16 group-average variant (41x at strength 0.2)
+   only if a compute pass is warranted.
+5. Once R3 holds, re-tune `r_rtReStirDIPrepassBlur` toward 0 and `r_rtReStirDIBlurRadius` down (Cyberpunk: ReSTIR IS the
+   pre-blur) and re-measure F5's skyway-sun parity.
+Cost estimate: 1 (8 on disocclusion) light shades + <= 1 extra ray per pixel; expect +0.3-0.6 ms at 1440p x 0.75 in a
+lit corridor, measured per-pass. Acceptance: look-away fade returns within <= 4 frames (Wyman's 1-tap number);
+multi-light shadow regions brighter and quieter than the 1-spp gather in the RAW debug view; sun parity vs forward
+held; no new blotching in motion (the course's correlation warning - the 1 tap dithers it).
+
+### R4 - denoiser inputs (F4, F6) - small/medium
+Files: `gbuffer.frag` (`out_Velocity`), `RhiWorld.cpp` (velocity target format + NRD `mvScale.z`), `restir_di.frag`
+(material ID, hitT), `VulkanBackend.cpp` (`minMaterialForDiffuse`, `historyFixAlternatePixelStrideMaterialID`).
+1. **2.5D motion vectors**: add `viewZprev - viewZ` to the velocity (RGBA16F attachment or a third channel) and feed NRD
+   `motionVectorScale.z = 1` - for DI, RTGI and RTAO alike (NRD: fixes "massive history reset on moving objects").
+   `r_rtMotionVectors25D` (1 once validated); FSR2 keeps reading `.xy`.
+2. **Weapon material ID**: the gather writes materialID 1 in the NRD normal `.w` for `nt.a < 0.5` pixels, sets
+   `minMaterialForDiffuse = 0` and `historyFixAlternatePixelStrideMaterialID = 1` with a shorter alternate stride (7):
+   the weapon's constantly-reset pixels stop mixing into the world's blur and reconstruct from a tighter kernel.
+   Cvar `r_rtReStirDIWeaponId`.
+3. **hitT hygiene**: ignore-0 rule (a pixel with no reaching light but a bounce passes the bounce's `thit`, not 0);
+   combined DI+GI blend per the NRD README (`directHitDistContribution`, `maxContribution 0.5`) as `r_rtReStirDIHitMix`
+   (0 = today's direct-only).
+Acceptance: NPC walking under a static light - validation view shows no history reset on its body; weapon sway leaves
+no halo in the lit scene; grate shadows unchanged.
+
+### R5 - detail recovery (F6) - medium
+Files: `restir_di_apply.frag` (SG resolve), NEW GLSL port of `NRD_SG_ResolveDiffuse` / `NRD_SG_ReJitter` from `NRD.hlsli`.
+1. Replace the custom cosine mix with NRD's SG resolve (`light.sharpness 2`, `ndf.sharpness 2`, the `max(Y, c0/pi)`
+   floor) and the re-jitter Jacobian from the 4-neighbour full-res normals (clamped `[1/2; 2]`), `r_rtReStirDISHResolve`
+   0 = today / 1 = NRD. NRD: with SG resolve `lobeAngleFraction` may be RELAXED (sample: x1.333) - retest
+   `r_rtReStirDIEdgeStop`.
+2. Re-evaluate `r_rtReStirDIResScale 1` + checkerboard off once R2/R3 have lowered the blur: the detail lost at 0.75 +
+   checkerboard (user, 2026-10-08) may now be affordable at the same frame time.
+Acceptance: bump N·L detail in dim DI light at least equal to today's SH mode; no new ringing at normal edges.
+
+### R6 - consolidate
+Remove the losers' cvars (trim-debug-cvars rule), the `rtgi_confidence` reuse for DI, and - if R1b holds - the handover
+crossfade and the luminance/appeared hysteresis; update this doc's "Architecture as shipped", the cvar table, the ImGui
+group and the status header; wire the winning defaults into the `dude_rtx 2` tier.
+
 ## Performance (literature-calibrated, 2026-10-06)
 
 > **At ≤256 analytic lights on a 3080 Ti, build ReSTIR's cheap core — not full production ReSTIR.**
@@ -454,7 +727,7 @@ Stochastic Lightcuts, MCMC decorrelation, Area ReSTIR. There is **no published p
 ReSTIR DI, so the budget is set by our own `r_vkGpuTime 2` measurement; the expectation is that the core is
 cheaper than today's `r_rtAllLights` per-light-ray loop in light-dense scenes.
 
-**Key sources:** SIGGRAPH 2023 course *A Gentle Introduction to ReSTIR* (https://intro-to-restir.cwyman.org/);
+**Key sources:** (see also the per-section source list under *Review against public ReSTIR*) SIGGRAPH 2023 course *A Gentle Introduction to ReSTIR* (https://intro-to-restir.cwyman.org/);
 Wyman & Panteleev, *Rearchitecting Spatiotemporal Resampling for Production*, HPG 2021; NVIDIA RTXDI SDK
 (https://github.com/NVIDIA-RTX/RTXDI); Bitterli et al. 2020 (original ReSTIR DI); NVIDIA NRD
 (https://github.com/NVIDIA-RTX/NRD).
