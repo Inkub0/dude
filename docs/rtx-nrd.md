@@ -124,3 +124,60 @@ the other RT validators.
   next Windows release (build-win.sh).
 - **Fallback:** if NRD integration stalls, the roadmap's fallback is a hand-rolled
   SVGF-style denoiser on the existing ssr/ssao temporal machinery. Keep NRD.
+
+## NRD improvements across consumers (investigation, 2026-10-11)
+
+The ReSTIR DI review ([rtx-restir-di.md](rtx-restir-di.md), *Review against public ReSTIR* + *Plan R0-R6*) produced a set
+of NRD-side improvements. This section asks which of them carry to the OTHER NRD consumers, and how. Read against
+`VulkanBackend::RtaoDenoise` (the one shared dispatch path), `RB_RHI_RtaoPass`, `RB_RHI_RtgiPass`, the ray shaders and
+NRD v4.18's headers/README.
+
+### Who uses NRD today
+
+| Consumer | Denoiser | Cvar / history | Res | Notes |
+|---|---|---|---|---|
+| RTAO (H4) | `REBLUR_DIFFUSE_OCCLUSION` | `r_rtao`, `r_rtaoHistory` **45** frames | `r_rtaoResScale` | 1 cosine ray; weapon masked to 0 (`rtao_ray.frag:88`); no confidence |
+| RTGI (H6) | `REBLUR_DIFFUSE` | `r_rtgi`, `r_rtgiHistory` **14**, `r_rtgiConfidence` 1.8 | 0.75 + checkerboard | 1 bounce; weapon masked to 0 (`rtgi_ray.frag:107`); luminance confidence (`rtgi_confidence.frag`); stands down under DI |
+| ReSTIR DI (H7) | `REBLUR_DIFFUSE` / `_SH` | `r_rtReStirDI`, history 16 | 0.75 + checkerboard | covered by Plan R0-R6; in combined mode (`r_rtReStirDICombineGI`, the `dude_rtx 2` default) the GI bounce rides DI's denoise, so R0-R6 reach it automatically |
+| SIGMA_SHADOW | `SIGMA_SHADOW` | - | - | **in the instance (`NrdCreate` table) but never dispatched** since H3 was abandoned; NRD still allocates its share of the permanent + transient pools |
+
+Not NRD (own temporal, out of scope here): SSR / RT reflections (`ssr_temporal`), volumetrics, the RT shadow blur, FSR2.
+
+All three live consumers share one code path (`RtaoDenoise`), one velocity source (the gbuffer `R1/A2` RG16F attachment,
+9 read sites in RhiWorld.cpp), one normal encoding (`R10_G10_B10_A2_UNORM`, materialID in `.w`, always 0) and the same
+reset rule (`da.reset = !prevValid`, i.e. first frame / interruption only). That is the lever: most of the items below
+are ONE change in the shared path, not three.
+
+### Applicability matrix
+
+| Improvement (from R0-R6) | RTAO | RTGI (standalone, hybrid tier) | DI (+ combined GI) | How |
+|---|---|---|---|---|
+| Camera-cut NRD reset (`rhiTemporalCam.historyReset`) | **yes - missing** | **yes - missing** | yes (R0) | one line in `RtaoDenoise`: `a.reset \|\| historyReset` -> all three |
+| NRD validation overlay + history-length view | yes | yes | yes (R0) | shared hook (`cs.enableValidation`, bind `OUT_VALIDATION`); a debug value per feature |
+| History in seconds (`GetMaxAccumulatedFrameNum` + 0.2 s low-pass FPS) | **yes** - 45 frames = 0.31 s @144 Hz but 0.75 s @60 Hz | **yes** | yes (R0) | shared helper; each `*History` cvar keeps its number, a companion `*HistoryMs` (0 = frames) switches the unit. Matters more since VRR / `com_maxFPS` caps vary the frame rate |
+| Fast history / clamp sigma / stabilization exposed | **yes - NRD: `fastHistoryClampingSigmaScale` "1.1 is a safe value for occlusion denoising"**, NRD-Sample occlusion mode uses `historyFixFrameNum 2`; RTAO sits at 2.0 / 3 | yes (NRD-Sample: 1.5 "works well even for dirty signals") | yes (R0) | make the giMode-only overrides in `RtaoDenoiseArgs` generic (`fastFrames`, `fastClampSigma`, `stabilizedFrames`); RTAO gets a `r_rtaoFastClamp` defaulting to today's 2.0 for the A/B - the expected win is snappier AO under moving occluders (NPCs, doors) at no cost |
+| 2.5D motion vectors (`.z = viewZprev - viewZ`) | **yes** | **yes** | yes (R4) | one gbuffer change (`out_Velocity` gains a channel, or a companion R16F attachment only when an NRD consumer is on) + `motionVectorScale[2] = 1` in the shared path; FSR2 keeps reading `.xy`. NRD: "2D MVs can lead to massive history reset on moving objects" - the NPC AO/GI trail |
+| Weapon material ID + alternate history-fix stride | **yes** | **yes** | yes (R4) | RTAO/RTGI write a ZERO hole under the weapon (`nt.a < 0.5`) with valid guides, so NRD blurs the hole into the world at the silhouette and the world the weapon uncovers has no history - the "fried halo" DI hit and solved by shading the weapon unmasked. Tagging the hole `materialID 1` + `minMaterialForDiffuse 0` stops the spatial mixing; `historyFixAlternatePixelStrideMaterialID` is NRD's documented knob for "protagonist's weapon". Both ray shaders + `rtgi_guides.frag` pack `.w` |
+| Gradient confidence (reservoir / RNG replay) | **no** - AO has no lighting to change; geometry disocclusion is NRD's own test | **partly** | yes (R1) | RTGI's `rtgi_confidence` has the same noise-vs-change weakness as DI's (hence its deadzone 0.35 + floor 0.1); it survives because the bounce is low-variance. Combined mode: R1 covers it for free. Standalone RTGI: a Q2RTX-style RNG replay is feasible (the bounce direction is IGN + a CPU-hoisted per-frame rotation/offset - pass last frame's, re-trace 1/9 of the pixels at the reprojected surface, compare to last frame's RAW bounce) but only worth it if hybrid-tier GI trails are reported; Remix's cheaper route (invalidate GI history from DI gradients) needs DI, which the hybrid tier lacks |
+| ReLAX | **no** - NRD-Sample: "RELAX doesn't support AO / SO denoising" | optional, low | yes (R2) | Remix does use ReLAX for indirect (250 ms history), but NRD positions ReBLUR for dirty 1-spp input, which the 0.75-res checkerboard bounce is. Once R2 adds the `denoiser` arg the RTGI A/B costs nothing to try |
+| SH / SG resolve | no (scalar occlusion) | **yes** | yes (R5) | RTGI at 0.75 + checkerboard loses bump N·L exactly as DI did before its SH mode; NRD: SH is "a must-have when NRD produces a lower-resolution output". `rtgi_bounce.glsl` already returns `bounceDir`; `rtgi_apply.frag` gets the SG resolve. Cost ~+0.4-0.8 ms (NRD table: REBLUR 2.55 -> 3.40 ms for DIFFUSE_SPECULAR). Hybrid tier only (under DI the combined buffer is already SH) |
+| hitT hygiene | ok (miss -> 1.0 = unoccluded, correct) | ok (`thit` normalized, miss -> 1) | R4 | nothing to do |
+| Spatial reuse / disocclusion boost | n/a | n/a (no light selection to reuse) | R3 | RTGI's disocclusion answer stays NRD's history fix; ReSTIR GI-style reuse is a separate phase (roadmap) |
+| SIGMA | - | - | - | **dead weight**: drop it from the `NrdCreate` table (fewer pipelines, smaller pools, faster `NrdCreate`), or keep it for the one experiment it is good at: per-light penumbra from occluder distance, lag-free (5-frame stabilization, 0.40 ms/light per NRD's table) as an alternative to the screen-space `r_rtShadowBlur` on the hybrid tier's hard RT shadows (5 lights/frame, +2.27 ms today). H3 was abandoned over ray cost + stagger, not SIGMA's quality, so this is unproven either way. Low priority |
+
+### Plan N0-N3 (folded into the R stages where they share code; NOT started)
+
+- **N0 - with R0 (shared path, zero-risk):** cut reset, validation / history-length views, seconds-based history, the
+  generic fast/clamp/stabilize fields with per-feature cvars at today's values; RTAO A/B `r_rtaoFastClamp 1.1` +
+  `r_rtaoHistoryFix 2` (the NRD occlusion preset) for AO trails under moving occluders. Measure with `r_vkGpuTime 2`;
+  acceptance = byte-identical at defaults, no AO/GI ghost after a cinematic cut or teleport.
+- **N1 - with R4:** 2.5D velocity for all consumers (one gbuffer + one shared-path change), weapon material ID in
+  `rtao_ray.frag` / `rtgi_ray.frag` / `rtgi_guides.frag`. Acceptance = NPC under a static light shows no history reset on
+  its body in the validation view (RTAO + RTGI), no dark halo at the weapon silhouette in AO / GI debug views.
+- **N2 - after R1/R2 (hybrid-tier RTGI only, on report):** RNG-replay gradient for standalone RTGI; RTGI ReLAX A/B via
+  R2's `denoiser` arg. Both opt-in cvars, both trimmed if they lose.
+- **N3 - optional:** RTGI SH mode + SG resolve for the hybrid tier (R5's resolve code reused); SIGMA removal, or the
+  per-light SIGMA penumbra experiment against `r_rtShadowBlur`.
+
+Non-negotiables as everywhere: VK + `SupportsRayQuery()`, default-off / default-today cvars, GL3 and non-RT untouched,
+new shaders need the CMake re-configure.
