@@ -1051,6 +1051,7 @@ extern idCVar r_rtReStirDIRelaxAtrous;		// R2: ReLAX A-trous iterations
 extern idCVar r_rtReStirDIRelaxVarianceHist;	// R2: ReLAX spatial variance history threshold (RTXDI 1)
 extern idCVar r_rtReStirDIRelaxConfRelax;	// R2: ReLAX confidence-driven relaxation multiplier (Remix 0.7)
 extern idCVar r_rtReStirDIRelaxFirefly;		// R2: ReLAX anti-firefly
+extern idCVar r_rtReStirDIForwardRay;		// DI: covered lights' leftover forward draws take the inline ray (1) or stay unshadowed (0)
 extern idCVar r_nrdSigma;					// R0: keep SIGMA_SHADOW in the NRD instance (never dispatched since H3)
 extern idCVar r_rtReStirDICheckerboard;		// ReSTIR DI full-res checkerboard: trace half the pixels (packed left), NRD reconstructs; ~half the rays
 extern idCVar r_rtReStirDIResScale;			// ReSTIR DI gather/denoise resolution fraction (0.25..1); upscaled for display. Composes with checkerboard

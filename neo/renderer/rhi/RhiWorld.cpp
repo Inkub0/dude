@@ -10847,7 +10847,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			ictx.lightDiCovered = diCovered && ictx.lightForwardWeight <= 0.001f;	// purely DI: skip all forward work
 			if ( ictx.lightDiCovered ) {
 				RB_RHI_ResetLightShadowState();
-				ictx.lightRtPoint = ( ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0 );
+				// the surfaces that still draw forward under a DI-covered light (the view weapon, depth-hacked models,
+				// translucents) take the inline ray (mode 4); r_rtReStirDIForwardRay 0 leaves them UNSHADOWED instead - the
+				// diagnostic for "the weapon goes dark under DI" (2026-10-12): if it lights up, the ray self-occludes
+				ictx.lightRtPoint = r_rtReStirDIForwardRay.GetBool() && ( ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0 );
 				ictx.lightRange = cls.isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
 				dbgDiCovered++;
 			} else {
