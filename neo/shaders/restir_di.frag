@@ -335,7 +335,10 @@ void main() {
 #endif
 	}
 
-	if ( !( pHatChosen > 0.0 ) && u_specularParms.x < 0.5 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// no reaching light (and no bounce to add)
+	if ( !( pHatChosen > 0.0 ) && u_specularParms.x < 0.5 ) {
+		outSh1.w = 0.25 * float( boostWhy );											// view 7: an unlit young pixel still ran the loop
+		fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return;									// no reaching light (and no bounce to add)
+	}
 
 	// unbiased contribution weight W = (1/pHat(y))·(wSum/M) (wSum/1 when every light was weighed once); one
 	// visibility ray for the chosen light. pHat stays UNSHADOWED, so rad(y)·W·vis is still unbiased for the
@@ -379,8 +382,9 @@ void main() {
 	// id's fraction (+0.25 x reason, exact in fp16 below 512 rows); readers floor it off.
 	if ( pHatChosen > 0.0 ) {
 		outViewZ.y = diGradientLuminance( contribChosen, B, vis );
-		outSh1.w   = float( rowChosen ) + 0.25 * float( boostWhy );		// fraction = the boost reason (0 = not boosted)
 	}
+	outSh1.w = float( rowChosen ) + 0.25 * float( boostWhy );			// fraction = the boost reason (0 = not boosted), row 0 = no light:
+																		// recorded for UNLIT young pixels too (they ran the loop; view 7 must show them)
 	vec3 shDir  = vec3( 0.0 );										// SH mode: accumulated direction * luminance
 
 	// r_rtReStirDICombineGI: the ONE-bounce indirect term from the same pixel, folded into the same buffer so ONE
