@@ -39,8 +39,11 @@
 //   u_parallaxParms2.xy = LAST frame's lightDef -> row table device address (bit-cast): the CURRENT frame's brightest light
 //                       looked up in last frame's buffer (the second gradient direction, below)
 //   u_tessParms.x     = last frame's checkerboard parity (0 = off, 1 = even, 2 = odd): where a screen pixel's data sits
-//   u_tessParms.yz    = gradient resolution ( gw, gh )
-//   u_parallaxParms   = ( stratum size, internal rw, internal rh, 0 )
+//   u_tessParms.z     = gradient height (unused by the shader)
+//   u_parallaxParms   = ( stratum size, internal rw, internal rh, static threshold px )
+//   u_parallaxParms2.w = LAST frame's light count (bounds for the stored rows: a stale slot after a map change must not be
+//                       dereferenced - an out-of-bounds buffer_reference read is a GPU page fault = VK device lost)
+//   u_tessParms.y     = lightDef -> row table capacity (bounds for the stored lightDef indices)
 //   u_prevMvpMatrix   = LAST frame's world -> view matrix (the expected previous view z of a current surface point)
 //   u_projectionMatrix= LAST frame's INVERSE view (view -> world): the stored previous pixel's world position + camera
 //   u_parallaxParms.w = static threshold in FULL-RES pixels: a surface point that moved less than this many pixels'
@@ -180,6 +183,11 @@ void main() {
 	if ( ( tableAddr.x | tableAddr.y ) == 0u || ( prevAddr.x | prevAddr.y ) == 0u ) { return; }
 	RtLights lights     = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
 	RtLights prevLights = RtLights( prevAddr );
+	const uint nLights    = uint( u_color.z );
+	const uint nPrevLights = uint( max( u_parallaxParms2.w, 0.0 ) + 0.5 );
+	const uint tableCap   = uint( max( u_tessParms.y, 0.0 ) + 0.5 );
+	if ( bestPrevRow != 0u && bestPrevRow > nPrevLights ) { return; }		// stale / corrupt side data: no evidence
+	if ( bestCurRow  != 0u && bestCurRow  > nLights )     { return; }
 
 	// the same light in both frames? (slot AND creation serial: a freed slot is reused at once)
 	bool sameLight = false;
@@ -210,10 +218,10 @@ void main() {
 			// Absent last frame (switched on, entered DI) -> 0 -> a 100% change.
 			Lprev = 0.0;
 			uint defPlus1 = ( bestCurRow != 0u ) ? lights.l[ bestCurRow - 1u ].pad0 : 0u;
-			if ( defPlus1 != 0u && ( prevTableAddr.x | prevTableAddr.y ) != 0u ) {
+			if ( defPlus1 != 0u && defPlus1 <= tableCap && ( prevTableAddr.x | prevTableAddr.y ) != 0u ) {
 				DiLightMap prevTable = DiLightMap( prevTableAddr );
 				uint prevRowPlus1 = prevTable.row[ defPlus1 - 1u ];
-				if ( prevRowPlus1 != 0u && prevLights.l[ prevRowPlus1 - 1u ].pad1 == lights.l[ bestCurRow - 1u ].pad1 ) {
+				if ( prevRowPlus1 != 0u && prevRowPlus1 <= nPrevLights && prevLights.l[ prevRowPlus1 - 1u ].pad1 == lights.l[ bestCurRow - 1u ].pad1 ) {
 					vec3 c, ld; float dl, ndl;
 					if ( diShadeLight( prevLights, prevRowPlus1 - 1u, Sp, c, ld, dl, ndl ) ) {
 						float vis = ( ( prevLights.l[ prevRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
@@ -227,10 +235,10 @@ void main() {
 			// off, culled, moved to the forward path) -> 0 -> a 100% change.
 			Lnow = 0.0;
 			uint defPlus1 = ( bestPrevRow != 0u ) ? prevLights.l[ bestPrevRow - 1u ].pad0 : 0u;
-			if ( defPlus1 != 0u ) {
+			if ( defPlus1 != 0u && defPlus1 <= tableCap ) {
 				DiLightMap table = DiLightMap( tableAddr );
 				uint curRowPlus1 = table.row[ defPlus1 - 1u ];
-				if ( curRowPlus1 != 0u && lights.l[ curRowPlus1 - 1u ].pad1 == prevLights.l[ bestPrevRow - 1u ].pad1 ) {
+				if ( curRowPlus1 != 0u && curRowPlus1 <= nLights && lights.l[ curRowPlus1 - 1u ].pad1 == prevLights.l[ bestPrevRow - 1u ].pad1 ) {
 					vec3 c, ld; float dl, ndl;
 					if ( diShadeLight( lights, curRowPlus1 - 1u, Sp, c, ld, dl, ndl ) ) {
 						float vis = ( ( lights.l[ curRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )

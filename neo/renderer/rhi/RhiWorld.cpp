@@ -826,6 +826,7 @@ static rhi::RenderTargetHandle rhiRtReflRT = 0;		// this frame's RT reflection c
 static unsigned long long	s_sceneLightSlotAddr[ RT_REFL_LIGHT_SLOTS ];
 static unsigned long long	s_diLightMapSlotAddr[ RT_REFL_LIGHT_SLOTS ];
 static int					s_sceneLightSlotFrame[ RT_REFL_LIGHT_SLOTS ] = { -1, -1, -1 };
+static int					s_sceneLightSlotCount[ RT_REFL_LIGHT_SLOTS ] = { 0, 0, 0 };	// light rows in each slot (bounds for the gradient's stored rows)
 static rhi::BufferHandle    s_rtReflLightBuf  = 0;
 static unsigned long long   s_rtReflLightAddr = 0;
 static int                  s_sceneFogCount   = 0;	// stock fog-light volumes appended AFTER the lights in the current slot (volumetrics only)
@@ -5990,6 +5991,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	// light buffer; the slot's addresses + frame stamp are kept so the DI pass can name LAST frame's pair.
 	s_sceneLightSlotAddr[ slot ]  = *outAddr;
 	s_sceneLightSlotFrame[ slot ] = tr.frameCount;
+	s_sceneLightSlotCount[ slot ] = n;
 	s_diLightMapSlotAddr[ slot ]  = 0;
 	if ( numDefs <= DI_LIGHTMAP_MAX ) {
 		if ( s_diLightMapBuf == 0 ) {
@@ -8243,12 +8245,13 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				memcpy( &gp.shadowParms[2], &prvLo, sizeof( prvLo ) );	memcpy( &gp.shadowParms[3], &prvHi, sizeof( prvHi ) );
 				gp.tessParms[0] = diPrevCb;
 				gp.tessParms[3] = cbParity;				// this frame's parity (where this frame's picks sit)
+				gp.tessParms[1] = (float)DI_LIGHTMAP_MAX;	// table capacity: bounds for stored lightDef indices
+				gp.parallaxParms2[3] = (float)s_sceneLightSlotCount[ prevSlot ];	// last frame's light count: bounds for stored rows
 				{	// last frame's lightDef -> row table (the second gradient direction looks the current light up in it)
 					const unsigned long long prevMap = s_diLightMapSlotAddr[ prevSlot ];
 					const unsigned int pmLo = (unsigned int)( prevMap & 0xFFFFFFFFull ), pmHi = (unsigned int)( prevMap >> 32 );
 					memcpy( &gp.parallaxParms2[0], &pmLo, sizeof( pmLo ) );	memcpy( &gp.parallaxParms2[1], &pmHi, sizeof( pmHi ) );
 				}
-				gp.tessParms[1] = (float)gw;	gp.tessParms[2] = (float)gh;
 				gp.parallaxParms[0] = (float)stratum;	gp.parallaxParms[1] = (float)rw;	gp.parallaxParms[2] = (float)rh;
 				gp.parallaxParms[3] = r_rtReStirDIGradientStatic.GetFloat();		// static threshold, full-res pixels
 				memcpy( gp.prevMvpMatrix, rhiReStirDIPrevView, sizeof( gp.prevMvpMatrix ) );	// last frame's world -> view

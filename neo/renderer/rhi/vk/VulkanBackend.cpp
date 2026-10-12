@@ -2952,6 +2952,7 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	mixB( r_rtReStirDICombineGI ); mixI( r_rtReStirDIDebug );
 	mixB( r_nrdSigma );							// R0: changes the NRD instance's denoiser table (NrdCreate rebuild)
 	mixI( r_rtReStirDIDenoiser );				// R2: ReLAX pair in / out of the instance
+	mixB( r_rtReStirDIGradient ); mixI( r_rtReStirDIGradientStratum ); mixB( r_rtReStirDISH );	// R1: gradient / confidence / side-copy targets + the SH attachments
 	// resolution scales (resize the gather / denoise / reflection / FSR targets)
 	mixF( r_fsrScale ); mixF( r_rtgiResScale ); mixF( r_rtaoResScale ); mixF( r_ssrResScale ); mixF( r_rtReflResScale );
 	mixF( r_rtReStirDIResScale );
