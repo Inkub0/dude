@@ -264,16 +264,20 @@ void main() {
 	const bool shMode = u_shadowFalloffS.z > 0.5;
 	// R3a: how many independent picks (and visibility rays) this pixel gets - K where it is young, else 1 (diBoostWanted)
 #if DI_BOOST
+	// SECOND PASS over the gather's targets (restir.di.boost): this program runs after the plain gather and only the
+	// YOUNG pixels survive the discard below - everyone else keeps the plain gather's output. The plain program carries
+	// none of this code: with the boost compiled into the one gather the whole pass cost ~2.5 ms more on EVERY pixel,
+	// boosted or not (2026-10-12), so the boost lives in its own program and its own (mostly discarded) pass.
 	#define DI_BOOST_MAX 4
 	// never the view weapon (nt.a < 0.5): its DI is shaded for the denoiser's continuity but never displayed, and its sway
 	// keeps its history short - K rays there would be pure waste (view 7 showed it solid red)
-	const int kMax = clamp( int( u_tessParms.x + 0.5 ), 0, DI_BOOST_MAX );
-	const int boostWhy = ( kMax > 1 && nt.a >= 0.5 ) ? diBoostWanted( sfrag, S ) : 0;
-	const bool boostedNow = boostWhy != 0;
-	const int K = boostedNow ? kMax : 1;
-	// the extra picks keep only their light INDEX (+1; 0 = none): a full per-pick record (radiance, direction, distance)
-	// stayed live through the whole light loop and cost the gather ~1.5-2 ms of occupancy on EVERY pixel (2026-10-12);
-	// the picked lights are re-shaded after the loop instead (deterministic, so pHat matches the loop's)
+	const int kMax = clamp( int( u_tessParms.x + 0.5 ), 2, DI_BOOST_MAX );
+	const int boostWhy = ( nt.a >= 0.5 ) ? diBoostWanted( sfrag, S ) : 0;
+	if ( boostWhy == 0 ) { discard; }										// not young: the plain gather's result stands
+	const bool boostedNow = true;
+	const int K = kMax;
+	// the extra picks keep only their light INDEX (+1; 0 = none); the picked lights are re-shaded after the loop
+	// (deterministic, so pHat matches the loop's)
 	uint pickB[DI_BOOST_MAX];
 	for ( int k = 0; k < DI_BOOST_MAX; k++ ) { pickB[k] = 0u; }
 #else

@@ -954,6 +954,14 @@ distance, flags = 9 floats x 8) stayed live through the light loop on EVERY pixe
 INDEX (4 uints) and re-shade their lights after the loop (deterministic: pHat matches the loop's); K max 4. Re-measure still /
 turning before deciding the default. The entry band while turning is the stage's real cost and is by design.
 
+**R3a cost, fourth finding (user: still 5.0-5.3 ms plain vs 7.5-8.0 ms with the boost program, slim picks made no difference):**
+the variant PROGRAM is the tax - the shade / ray functions inlined twice make a slower gather for every pixel. The boost is now a
+SECOND PASS (`restir.di.boost`, `r_vkGpuTime 2`) over the gather's targets with the boost program: it re-runs the young test and
+DISCARDS every pixel that is not young, so only the young ones re-run the light loop with K picks and overwrite their attachments
+(identical guides). The plain gather is the untouched plain program. Cost model: the young test on every pixel (a dozen fetches)
++ K rays on the young set. **Retest:** still, `restir.di.gather` boost 4 == boost 0, `restir.di.boost` small; looking around,
+`restir.di.boost` = the entry band's price.
+
 **R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
 on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:
 1. **Three ways to be young, tested in the gather (`diBoostWanted`)**: the pixel reprojects off screen; NRD's history length

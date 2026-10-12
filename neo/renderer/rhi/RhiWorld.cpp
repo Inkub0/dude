@@ -8250,9 +8250,21 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		backEnd.glState.tmu[4].current2DMap = -1;	backEnd.glState.tmu[5].current2DMap = -1;	backEnd.glState.tmu[6].current2DMap = -1;
 		backEnd.glState.tmu[9].current2DMap = -1;	backEnd.glState.tmu[10].current2DMap = -1;
 	}
-	RB_RHI_DrawFullscreen( r, boostWant ? boostProg : prog, parms, 0 );
+	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
 	r->EndPass();
 	r->GpuScopeEnd();
+	if ( boostWant ) {
+		// R3a: a second pass over the same targets with the boost program - only the young pixels survive its discard and
+		// overwrite their attachments with the K-pick average (identical guides); the plain gather above carries no boost
+		// code, so its cost is the same with the boost on or off. Same units (still bound), same uniforms, same area.
+		r->GpuScopeBegin( "restir.di.boost" );		// r_vkGpuTime 2: K picks + rays on the young pixels only
+		if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
+		r->SetNextTargetPassLoad();
+		r->BeginTargetPass( rhiReStirDIRT, NULL );
+		RB_RHI_DrawFullscreen( r, boostProg, parms, 0 );
+		r->EndPass();
+		r->GpuScopeEnd();
+	}
 	rhiReStirDIRanThisView = true;
 	rhiReStirDIApplyThisView = diApply;				// Stage D: from here on this view is DI-lit (forward loop + apply)
 	rhiReStirDIGatherPrevValid = true;				// R1: the MRT now holds this frame's side data for next frame's gradient
