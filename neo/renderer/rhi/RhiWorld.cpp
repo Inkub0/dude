@@ -10254,7 +10254,7 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 	// world-only G-buffer, then draw the deferred view weapon into the same targets. The weapon's silhouette then
 	// never uncovers history-less pixels in the denoiser (the fried halo); every other consumer (AO, SSR, FSR2,
 	// the forward draws' mask) still sees the complete buffers afterwards. Primary window view only, VK + RT.
-	const bool diWorldOnly = vkMode && r_rtReStirDI.GetBool() && r_rtReStirDIApply.GetBool()
+	const bool diWorldOnly = vkMode && r_rtReStirDI.GetBool() && r_rtReStirDIApply.GetBool() && r_rtReStirDIWorldOnlyPrepass.GetBool()
 		&& !r_rtReStirDIDebug.GetBool() && r->SupportsRayQuery()
 		&& viewDef->viewEntitys && !viewDef->isSubview && viewDef->isWindowView;
 	r->GpuScopeBegin( "prepass (depth+gbuffer)" );
