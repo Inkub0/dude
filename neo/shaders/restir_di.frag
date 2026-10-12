@@ -14,7 +14,8 @@
 // Output is the 3-attachment NRD guide MRT (CreateRenderTargetRtgiMrt), exactly like rtgi_ray.frag so the
 // shared REBLUR_DIFFUSE denoise (RtaoDenoise giMode) drops in unchanged:
 //   loc 0 = NRD-YCoCg direct irradiance (rgb) + normalized hit distance (a)   [IN_DIFF_RADIANCE_HITDIST]
-//   loc 1 = signed linear view z (negative) (.x)                              [IN_VIEWZ]   + R1: .y = gradient luminance
+//   loc 1 = signed linear view z (negative) (.x), RG32F                       [IN_VIEWZ]   + R1: .y = gradient luminance
+//           (full float: the gradient rebuilds last frame's sample point from it and must land on the shaded point exactly)
 //   loc 2 = world normal, NRD encoding 2 (signed octahedron)                  [IN_NORMAL_ROUGHNESS]
 //   loc 3 = SH mode: SH1 = direction * luminance (.xyz)                       [IN_DIFF_SH1] + R1: .w = chosen light ROW + 1
 // R1 (Plan R1, restir_di_gradient.frag): the side data in loc 1.y / loc 3.w is what NEXT frame's gradient pass
@@ -97,7 +98,7 @@ SAMPLER_BINDING(10) uniform sampler2D u_velocity;		// R3a: velocity at the gathe
 VARY(0) in vec2 var_TexCoord;
 
 layout(location = 0) out vec4 fragColor;	// IN_DIFF_RADIANCE_HITDIST: NRD-YCoCg direct irradiance (rgb) + normHitDist (a)
-layout(location = 1) out vec4 outViewZ;		// IN_VIEWZ: signed linear view z (negative) in .x; R1: .y = gradient luminance (RG16F)
+layout(location = 1) out vec4 outViewZ;		// IN_VIEWZ: signed linear view z (negative) in .x; R1: .y = gradient luminance (RG32F)
 layout(location = 2) out vec4 outNormal;	// IN_NORMAL_ROUGHNESS: world normal, NRD encoding 2 (signed octahedron), RGBA16F
 layout(location = 3) out vec4 outSh1;		// SH mode: IN_DIFF_SH1 = incoming direction * luminance (.xyz); R1: .w = chosen light row + 1
 

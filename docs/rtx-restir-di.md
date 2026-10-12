@@ -887,8 +887,13 @@ edge pixels would have been permanently young (K rays). The 2a direction had the
 sample vs a re-shade at the previous point). FIXED on the R3a branch: exactly one stored value is the truth and the other frame is
 re-shaded AT THAT POINT with one ray - the winning light is last frame's pick (or the same light on a static surface): Lprev stored,
 Lnow = its current row at the stored previous point; the winning light is this frame's pick (or the same light on a mover): Lnow
-stored, Lprev = its previous row at the current point. Costs one ray per stratum again (rev. 1 measured 0.35 ms). **Test:** view 5
-white in a static scene (the R1 acceptance), view 3 calm, flashlight circle still shows, NPC trailing edge still resets.
+stored, Lprev = its previous row at the current point. Costs one ray per stratum again (rev. 1 measured 0.35 ms).
+**Second finding (user: FSR2 off calms view 5, any FSR2 mode flickers it):** the re-shade lands on the stored previous point
+reconstructed from a HALF-FLOAT view z (att1 RG16F): up to d/2048 along the view ray, which slides the point along a grazing
+floor by a sub-pixel amount that CHANGES with the jitter every frame - enough to flip a hard-shadow ray. Without jitter the
+error is constant (calm, if not exact). Fixed: att1 + its side copy are RG32F (`IF_RG32F`), so the gradient's point is the very
+point the gather shaded. **Test:** view 5 white in a static scene WITH FSR2 (the R1 acceptance), view 3 calm, flashlight circle
+still shows, NPC trailing edge still resets.
 
 **R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
 on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:

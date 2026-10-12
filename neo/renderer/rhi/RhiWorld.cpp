@@ -8159,7 +8159,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			for ( int k = 0; k < 3; k++ ) { if ( rhiReStirDIPrevSideRT[k] ) { r->DestroyRenderTarget( rhiReStirDIPrevSideRT[k] ); rhiReStirDIPrevSideRT[k] = 0; } }
 			rhiReStirDIPrevSideW = rhiReStirDIPrevSideH = 0;
 		}
-		if ( !rhiReStirDIPrevSideRT[0] ) { rhiReStirDIPrevSideRT[0] = r->CreateRenderTarget( rhi::IF_RG16F,   rw, rh ); }
+		if ( !rhiReStirDIPrevSideRT[0] ) { rhiReStirDIPrevSideRT[0] = r->CreateRenderTarget( rhi::IF_RG32F,   rw, rh ); }	// full-float view z (as att1)
 		if ( !rhiReStirDIPrevSideRT[1] ) { rhiReStirDIPrevSideRT[1] = r->CreateRenderTarget( rhi::IF_RGBA16F, rw, rh ); }
 		if ( !rhiReStirDIPrevSideRT[2] ) { rhiReStirDIPrevSideRT[2] = r->CreateRenderTarget( rhi::IF_RGBA16F, rw, rh ); }
 		rhi::ShaderHandle copyProg = ( rhiReStirDIPrevSideRT[0] && rhiReStirDIPrevSideRT[1] && rhiReStirDIPrevSideRT[2] ) ? r->LoadShader( "smaa_copy" ) : 0;

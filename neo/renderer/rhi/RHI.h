@@ -50,7 +50,11 @@ enum ImageFormat {
 	IF_RGBA16F,				// Tier-3 HDR target (post stack)
 	IF_DEPTH24,				// depth-only; shadow-map target, sampler2DShadow-ready
 	IF_R16F,				// single-channel half-float; SSAO linear-depth mip (Phase 2)
-	IF_RG16F				// two-channel half-float; motion-vector / velocity MRT (R1/A0)
+	IF_RG16F,				// two-channel half-float; motion-vector / velocity MRT (R1/A0)
+	IF_RG32F				// two-channel float; ReSTIR DI gather side data ( view z, gradient luminance ): the gradient re-shades last
+							// frame's sample at the EXACT stored point, and a half-float view z moves it by up to d/2048 along the
+							// view ray - under the FSR2 jitter that error changes every frame and flips the one-ray visibility at
+							// every hard shadow edge (view 5 flicker, 2026-10-12)
 };
 
 enum VertexLayout {
