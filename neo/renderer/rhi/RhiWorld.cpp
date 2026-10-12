@@ -8190,6 +8190,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.fastClampSigma   = r_rtReStirDIFastClamp.GetFloat();
 		da.stabilizedFrames = ( r_rtReStirDIStabilize.GetInteger() > 0 ) ? r_rtReStirDIStabilize.GetInteger() : -1;	// 0 = pass off
 		da.antilagOff       = !r_rtReStirDIAntilag.GetBool();
+		da.disocclusionThreshold = r_rtReStirDIDisocclusion.GetFloat();	// 0.01 = NRD default
 		da.returnHistoryLength = true;							// .w = accumulated frames (debug view 4; R3's disocclusion boost)
 		da.validation       = ( r_rtReStirDIDebug.GetInteger() == 3 );	// NRD's validation overlay for debug view 3
 		// DI spatial-cleanup overrides (fight the 1-spp noise NRD leaves on fine detail + moving limbs). 0 = NRD default.

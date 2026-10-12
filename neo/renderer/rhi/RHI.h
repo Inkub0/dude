@@ -229,6 +229,7 @@ struct RtaoDenoiseArgs {
 	int		stabilizedFrames;			// maxStabilizedFrameNum: 0 = NRD default (63, clamped to main), >0 = frames, <0 = stabilization pass OFF
 	bool	antilagOff;					// push ReblurAntilagSettings inert (the A/B NRD recommends for an initial integration)
 	bool	returnHistoryLength;		// giMode: output .w = accumulated frames instead of AO (nothing consumes the GI/DI .w AO); R3 reads it
+	float	disocclusionThreshold;		// CommonSettings::disocclusionThreshold [0.01;0.02] (0 = NRD default 0.01); looser = fewer false resets on moving objects
 	bool	validation;					// run NRD's validation pass into GetNrdValidationImage() (RGBA8 overlay: accumulated frames / resets / antilag)
 };
 

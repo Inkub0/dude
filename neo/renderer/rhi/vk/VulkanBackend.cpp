@@ -7682,6 +7682,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	// its pool history is uninitialised until then (2.6)
 	cs.accumulationMode = ( a.reset || !nrdPrimed[denId] ) ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
 	cs.isMotionVectorInWorldSpace = false;
+	if ( a.disocclusionThreshold > 0.0f ) { cs.disocclusionThreshold = a.disocclusionThreshold; }	// R0 diagnostic knob
 	cs.isHistoryConfidenceAvailable = haveConf;			// H6f: feed IN_DIFF_CONFIDENCE (GI edge-ghosting antilag)
 	// R0: NRD's own validation overlay (OUT_VALIDATION) on request - the debug view that shows accumulated frames /
 	// history resets / antilag per pixel, so a lag problem is SEEN instead of inferred from the lit result

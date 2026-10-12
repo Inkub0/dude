@@ -602,6 +602,11 @@ is set for DI only (RTGI byte-identical). ImGui untouched (house rule). Cvars ad
 `r_rtReStirDIHistoryMs` 0, `r_rtReStirDIFastHistory` 6, `r_rtReStirDIFastClamp` 2.0, `r_rtReStirDIStabilize` 63,
 `r_rtReStirDIAntilag` 1, `r_rtaoHistoryMs` 0, `r_rtaoFastClamp` 2.0, `r_rtaoHistoryFix` 3, `r_rtgiHistoryMs` 0,
 `r_rtgiFastClamp` 2.0, `r_nrdSigma` 0 (in the gfx-config signature: it rebuilds the NRD instance).
+**First user test (2026-10-12):** cut reset verified (one black frame in view 4). View 3: every guide viewport healthy, only
+"diff frames" shows trails - i.e. the inputs are right and the trails are history RESETS: the wake behind movers / the weapon
+(true disocclusion -> F3 / R3) and, if the mover's own body stays dark, false resets (-> R4's 2.5D MVs + weapon material ID).
+Added `r_rtReStirDIDisocclusion` (0.01 = NRD default, range 0.005..0.05) to separate the two: trails that shrink at 0.02 are
+false resets.
 **Test:** (a) `r_rtReStirDI 1` defaults -> lit scene unchanged vs master; (b) teleport (`noclip` + a long jump, or a map's
 teleporter) with `r_rtReStirDIDebug 4` -> the ramp goes black for one frame everywhere, then refills; (c) `r_rtReStirDIDebug 3`
 -> NRD's overlay renders (coloured accumulated-frames field; NRD: keep it "in the violet zone" under stable lighting);
