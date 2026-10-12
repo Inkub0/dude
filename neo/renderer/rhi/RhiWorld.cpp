@@ -493,6 +493,7 @@ static bool  rhiPrepassWeaponDeferred = false;	// this view's phase-0 prepass sk
 static bool  rhiWorldDepthThisView = false;		// globalImages->worldDepthImage holds this view's world-only depth
 static bool  rhiReStirDIApplyThisView = false;		// Stage D (r_rtReStirDIApply): DI LIGHTS this view - the apply runs and the forward loop skips the covered lights' opaque draws
 static bool  rhiReStirDIAppliedThisView = false;	// the additive apply already ran this view (idempotent across the split / fallback call sites)
+static int   rhiDbgWeaponDrawsCovered = 0;			// diagnostic: view-weapon interaction draws under DI-covered lights (r_shadowMapDebug line)
 static rhi::RenderTargetHandle rhiReStirDIConfRT = 0;	// DI history-confidence (R16F), reusing rtgi_confidence.frag
 static int   rhiReStirDIConfW = 0, rhiReStirDIConfH = 0;
 static rhi::RenderTargetHandle rhiReStirDIGuideRT = 0;	// checkerboard full-res NRD guides (viewZ/normal), reusing rtgi_guides.frag
@@ -1988,6 +1989,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	     && !din->surf->space->weaponDepthHack && din->surf->space->modelDepthHack == 0.0f ) {
 		return;
 	}
+	if ( ictx.lightDiCovered && din->surf->space->weaponDepthHack ) { rhiDbgWeaponDrawsCovered++; }	// weapon-dark hunt diagnostic
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	memcpy( parms.mvpMatrix, ictx.mvp, sizeof( parms.mvpMatrix ) );
@@ -10800,6 +10802,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	    dbgParallel = 0, dbgNoShadow = 0, dbgNoLightDef = 0, dbgStencilBig = 0, dbgDiCovered = 0;
 	// R1b diagnostics: WHY a lit light is not DI-covered (r_shadowMapDebug 1 breakdown)
 	int dbgUncAmbient = 0, dbgUncFog = 0, dbgUncBlend = 0, dbgUncNoDef = 0, dbgUncWeapon = 0, dbgUncFast = 0, dbgUncCrossfade = 0, dbgUncNotInBuffer = 0;
+	rhiDbgWeaponDrawsCovered = 0;		// weapon interaction draws issued under DI-covered lights this view
 	RB_RHI_ResetShadowTallies( r );
 	if ( !r_skipInteractions.GetBool() ) {
 		for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
@@ -10846,12 +10849,21 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				? RB_RHI_SceneLightForwardWeight( viewDef, vLight->lightDef->index, diCovered ) : 1.0f;
 			ictx.lightDiCovered = diCovered && ictx.lightForwardWeight <= 0.001f;	// purely DI: skip all forward work
 			if ( ictx.lightDiCovered ) {
-				RB_RHI_ResetLightShadowState();
-				// the surfaces that still draw forward under a DI-covered light (the view weapon, depth-hacked models,
-				// translucents) take the inline ray (mode 4); r_rtReStirDIForwardRay 0 leaves them UNSHADOWED instead - the
-				// diagnostic for "the weapon goes dark under DI" (2026-10-12): if it lights up, the ray self-occludes
-				ictx.lightRtPoint = r_rtReStirDIForwardRay.GetBool() && ( ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0 );
-				ictx.lightRange = cls.isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
+				if ( r_rtReStirDIForwardShadowWork.GetBool() ) {
+					// diagnostic (weapon-dark hunt, 2026-10-12): run the light's NORMAL shadow-technique selection (maps / cubes /
+					// blur mask) although only the weapon + translucents will draw forward - isolates whether anything that
+					// selection prepares is what the leftover draws are missing
+					r->GpuScopeBegin( "light.shadow" );
+					RB_RHI_SelectLightShadowTechnique( r, viewDef, vLight, cls, shadowMapProg, shadowCubeProg, dbgShadowMapped );
+					r->GpuScopeEnd();
+				} else {
+					RB_RHI_ResetLightShadowState();
+					// the surfaces that still draw forward under a DI-covered light (the view weapon, depth-hacked models,
+					// translucents) take the inline ray (mode 4); r_rtReStirDIForwardRay 0 leaves them UNSHADOWED instead - the
+					// diagnostic for "the weapon goes dark under DI" (2026-10-12): if it lights up, the ray self-occludes
+					ictx.lightRtPoint = r_rtReStirDIForwardRay.GetBool() && ( ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0 );
+					ictx.lightRange = cls.isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
+				}
 				dbgDiCovered++;
 			} else {
 				if ( rhiReStirDIApplyThisView ) {		// R1b diagnostics: why is this lit light still forward?
@@ -10963,8 +10975,8 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	ictx.lightForwardWeight = 1.0f;
 	if ( r_shadowMapDebug.GetInteger() > 0 && dbgDiCovered > 0 ) {
 		common->Printf( "ReSTIR DI: %d of %d lit lights DI-covered this view (forward opaque draws + shadow work skipped)"
-			" | still forward: ambient %d, fog %d, blend %d, no-lightDef %d, weapon %d, fast %d, crossfade %d, not-in-buffer %d\n",
-			dbgDiCovered, dbgLit, dbgUncAmbient, dbgUncFog, dbgUncBlend, dbgUncNoDef, dbgUncWeapon, dbgUncFast, dbgUncCrossfade, dbgUncNotInBuffer );
+			" | still forward: ambient %d, fog %d, blend %d, no-lightDef %d, weapon %d, fast %d, crossfade %d, not-in-buffer %d | weapon draws under covered lights: %d\n",
+			dbgDiCovered, dbgLit, dbgUncAmbient, dbgUncFog, dbgUncBlend, dbgUncNoDef, dbgUncWeapon, dbgUncFast, dbgUncCrossfade, dbgUncNotInBuffer, rhiDbgWeaponDrawsCovered );
 	}
 
 	RB_RHI_LogShadowMapSummary( dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,
