@@ -453,6 +453,14 @@ them down while DI is on (DI's own NRD instance remains the fix).
 History 8, HistoryFix 6, GradientPower 4, GradientHistory 0, GradientDeadzone 0.25, Confidence 0.5 (the dormant luminance
 fallback), RelaxAtrous 3, RelaxPrepass 8. `r_rtReStirDI` / `r_rtReStirDIApply` stay preset-driven (`dude_rtx 2`).
 
+### Moving volumetric lights "20 % FPS" (2026-10-12) - resolved to coverage, not fog
+`r_vkGpuTime 3` with moving volumetric lights in view: `volumetrics` 2.35 ms, in line with still scenes elsewhere - the fog was
+never the cost. `r_shadowMapDebug 1` showed **7 of 21 lit lights DI-covered: fast 4, not-in-buffer 10**; the 14 forward lights
+carried ray shadows + the RT blur (`light.shadow` 0.7-0.9 ms, `light.interact` 0.6 ms). Two causes: (1) the scene-light gather's
+2048-unit REACH cull (written for reflections / haze) dropped far lights that the frontend still lists as lit - fixed: a light in
+the view's lit list always enters the buffer, the reach cull applies to off-screen lights only; (2) "fast 4" with weapon 0 is
+only possible in `r_rtReStirDIDynamicForward 1` (moving lights forward) - the user's console had it at 1 from the weapon hunt.
+
 ### Bugs found and fixed 2026-10-12 (branch `fix/rtx-restir-di-gradient-bounds-weapon-mask`)
 - **VK device loss with DI on (new):** the R1 gradient dereferenced last frame's light rows and the lightDef -> row table
   through indices stored a frame earlier; after a map change the ring slot still holds the OLD map's rows, so a stale index

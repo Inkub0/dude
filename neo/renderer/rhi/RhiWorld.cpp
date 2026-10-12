@@ -5850,9 +5850,13 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			cullRad = ld->frustumTris->bounds.GetRadius( cullOrg );
 		}
 		const float reach = cullRad + REACH;					// the light's own reach can bring it into play
-		if ( ( cullOrg - viewOrg ).LengthSqr() > reach * reach ) { continue; }	// too far to matter
+		const viewLight_t *vl = viewLightOf[ i ];				// non-NULL: the frontend lit this light in this view
+		// A light the frontend lists as LIT in this view (it has interactions on screen) always enters the buffer: under the
+		// ReSTIR DI apply the buffer IS the lit set, and a far light dropped here fell back to the forward path with its ray
+		// shadows and blur - "not-in-buffer 10 of 21" down a long sight line (2026-10-12). The reach cull is for OFF-SCREEN
+		// lights only (reflections, volumetric haze), where a far one truly cannot matter.
+		if ( vl == NULL && ( cullOrg - viewOrg ).LengthSqr() > reach * reach ) { continue; }	// off screen and too far to matter
 		idVec3 col;
-		const viewLight_t *vl = viewLightOf[ i ];
 		const float *cregs = ( vl != NULL && vl->shaderRegisters != NULL ) ? vl->shaderRegisters : ls->ConstantRegisters();
 		const int SCENE_LIGHT_MAX_REGS = 4096;		// == MAX_EXPRESSION_REGISTERS (ui/Window.h), not visible here
 		if ( cregs == NULL && ls->GetNumRegisters() <= SCENE_LIGHT_MAX_REGS ) {
