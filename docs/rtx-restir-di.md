@@ -941,6 +941,13 @@ surface whose weight shifts with the jitter every frame, so no stored tap ever m
 texel for depth and normal (the gather, the gradient and the boost all go through it): every point sits on a real surface, the
 shadow-ray origins too. **Retest:** view 7 black when still (weapon / screen edges aside), gather boost 4 == 0 still.
 
+**R3a cost, second finding (user, still: 6.8 ms boost 4 vs 6.1 ms boost 0 with view 7 black bar specks):** not rays -
+occupancy. The K-pick arrays stay live for every pixel, boosted or not, and the compiler keeps the registers. The boost is now
+a COMPILED VARIANT (`restir_di_boost.frag` = `restir_di.frag` with `DI_BOOST 1`, picked on the CPU while `r_rtReStirDIBoost`
+> 1); the plain gather carries none of it. Also: the boost never touches the view weapon (its DI is never displayed); the
+reason code in the row fraction (0.25 history / 0.5 surface / 0.75 hysteresis) is what view 7 colours, and the gradient floors
+it off with a 0.1 guard (a 0.25 guard misread 0.75 as the next row: a false light change, pinned history, red trails forever).
+
 **R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
 on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:
 1. **Three ways to be young, tested in the gather (`diBoostWanted`)**: the pixel reprojects off screen; NRD's history length

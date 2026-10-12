@@ -8158,7 +8158,10 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// last frame's denoised output (still in the shared slot until this frame's denoise), the velocity at the gather res and,
 	// for the same-surface test + the hysteresis bit, last frame's side copies (made below, as for the gradient) ----
 	const int  boostK    = ( r_rtReStirDIBoost.GetInteger() > 1 ) ? idMath::ClampInt( 2, 8, r_rtReStirDIBoost.GetInteger() ) : 0;
-	const bool boostWant = boostK > 0 && nrdVel != 0 && nrdFree;
+	// the boost is a compiled VARIANT of the gather (restir_di_boost.frag): its K-pick arrays cost the plain gather ~0.7 ms
+	// of occupancy even with nothing boosted, so the plain program carries none of it
+	const rhi::ShaderHandle boostProg = ( boostK > 0 ) ? r->LoadShader( "restir_di_boost" ) : 0;
+	const bool boostWant = boostK > 0 && boostProg != 0 && nrdVel != 0 && nrdFree;
 
 	// ---- R1 rev.2: keep last frame's side data (att1 viewZ+lum / att2 normal / att3 SH1+row) across the gather, so the
 	// gradient pass can run AFTER it and see BOTH frames' picks (RTXDI: the brightest sample of either frame). Three
@@ -8247,7 +8250,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		backEnd.glState.tmu[4].current2DMap = -1;	backEnd.glState.tmu[5].current2DMap = -1;	backEnd.glState.tmu[6].current2DMap = -1;
 		backEnd.glState.tmu[9].current2DMap = -1;	backEnd.glState.tmu[10].current2DMap = -1;
 	}
-	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
+	RB_RHI_DrawFullscreen( r, boostWant ? boostProg : prog, parms, 0 );
 	r->EndPass();
 	r->GpuScopeEnd();
 	rhiReStirDIRanThisView = true;
