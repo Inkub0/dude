@@ -253,7 +253,9 @@ void main() {
 	// R3a: how many independent picks (and visibility rays) this pixel gets - K where it is young, else 1 (diBoostWanted)
 	#define DI_BOOST_MAX 8
 	const int kMax = clamp( int( u_tessParms.x + 0.5 ), 0, DI_BOOST_MAX );
-	const int boostWhy = ( kMax > 1 ) ? diBoostWanted( sfrag, S ) : 0;
+	// never the view weapon (nt.a < 0.5): its DI is shaded for the denoiser's continuity but never displayed, and its sway
+	// keeps its history short - K rays there would be pure waste (view 7 showed it solid red)
+	const int boostWhy = ( kMax > 1 && nt.a >= 0.5 ) ? diBoostWanted( sfrag, S ) : 0;
 	const bool boostedNow = boostWhy != 0;
 	const int K = boostedNow ? kMax : 1;
 	float pHatB[DI_BOOST_MAX];
