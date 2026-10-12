@@ -83,6 +83,10 @@
 #extension GL_EXT_buffer_reference_uvec2 : require	// build the light-buffer pointer from u_color.xy (uvec2)
 #extension GL_EXT_ray_query : require				// one visibility ray for the chosen light
 #extension GL_EXT_nonuniform_qualifier : require		// bindless light textures (rt_light_tex.glsl)
+#if DI_BOOST
+#extension GL_EXT_terminate_invocation : require		// terminateInvocation: a plain discard compiled to a DEMOTE here, and a demoted
+														// invocation keeps running the light loop + rays as a helper (3.5 ms of nothing)
+#endif
 
 #include "renderparms.glsl"
 #include "rt_light_eval.glsl"
@@ -273,7 +277,7 @@ void main() {
 	// keeps its history short - K rays there would be pure waste (view 7 showed it solid red)
 	const int kMax = clamp( int( u_tessParms.x + 0.5 ), 2, DI_BOOST_MAX );
 	const int boostWhy = ( nt.a >= 0.5 ) ? diBoostWanted( sfrag, S ) : 0;
-	if ( boostWhy == 0 ) { discard; }										// not young: the plain gather's result stands
+	if ( boostWhy == 0 ) { terminateInvocation; }							// not young: the plain gather's result stands (ENDS the invocation)
 	const bool boostedNow = true;
 	const int K = kMax;
 	// the extra picks keep only their light INDEX (+1; 0 = none); the picked lights are re-shaded after the loop

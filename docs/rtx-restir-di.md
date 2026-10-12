@@ -962,6 +962,13 @@ DISCARDS every pixel that is not young, so only the young ones re-run the light 
 + K rays on the young set. **Retest:** still, `restir.di.gather` boost 4 == boost 0, `restir.di.boost` small; looking around,
 `restir.di.boost` = the entry band's price.
 
+**R3a cost, fifth finding (user: still, gather 4.4 + `restir.di.boost` 3.6 ms with view 7 black):** the boost pass's `discard`
+compiled to `OpDemoteToHelperInvocation` (glslang, vulkan1.4 target) - a demoted invocation keeps executing the light loop and
+the ray queries as a helper, only its stores are dropped, so every pixel paid the full boost shader. `terminateInvocation`
+(GL_EXT_terminate_invocation, SPIR-V 1.6 core) ends it for real. GOTCHA for every heavy shader with an early `discard`
+(rtshadow_ray / rtao / rtgi early-outs): check the SPIR-V for OpDemote. **Retest:** still, `restir.di.boost` should be a few
+tenths at most; looking around = the entry band.
+
 **R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
 on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:
 1. **Three ways to be young, tested in the gather (`diBoostWanted`)**: the pixel reprojects off screen; NRD's history length
