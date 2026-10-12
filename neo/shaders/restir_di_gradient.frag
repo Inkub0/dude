@@ -87,6 +87,7 @@ void main() {
 	const ivec2 res     = ivec2( int( u_parallaxParms.y + 0.5 ), int( u_parallaxParms.z + 0.5 ) );
 	const int   prevCb  = int( u_tessParms.x + 0.5 );
 	const int   curCb   = int( u_tessParms.w + 0.5 );
+	const vec2  fullRes = vec2( 2.0 * u_localParam0.x / u_shadowFalloffS.y ) * vec2( 1.0, float( res.y ) / float( res.x ) );	// full-res viewport (px)
 	const bool  applyMode = u_localParam1.w > 0.5;
 	const bool  pbr       = u_localParam1.y > 0.5;
 	const float staticPx  = u_parallaxParms.w;
@@ -165,7 +166,12 @@ void main() {
 				bestPrevP   = Pprev;
 				bestPrevN   = pN;
 				bestPrevVz  = pvz.x;
-				bestStatic  = length( S.Pw - Pprev ) <= staticPx * S.d * u_shadowFalloffS.y;	// moved less than N pixels' worth
+				// STATIC = the surface under this pixel moved less than N full-res pixels on screen - the velocity says exactly
+				// that (a static point's velocity is only the jitter delta, under a pixel). NOT a world-distance test against
+				// the stored point: the jitter-corrected reprojection often lands on the NEIGHBOURING pixel, and on a floor or
+				// wall at a grazing angle one pixel apart is many "pixel sizes" of surface, which flagged most static floors as
+				// movers whenever FSR2 was on (and the mover path compares two different points - view 5 flicker, 2026-10-12)
+				bestStatic  = length( vel * fullRes ) <= staticPx;
 			}
 		}
 	}

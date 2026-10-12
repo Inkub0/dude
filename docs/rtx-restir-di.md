@@ -892,8 +892,13 @@ stored, Lprev = its previous row at the current point. Costs one ray per stratum
 reconstructed from a HALF-FLOAT view z (att1 RG16F): up to d/2048 along the view ray, which slides the point along a grazing
 floor by a sub-pixel amount that CHANGES with the jitter every frame - enough to flip a hard-shadow ray. Without jitter the
 error is constant (calm, if not exact). Fixed: att1 + its side copy are RG32F (`IF_RG32F`), so the gradient's point is the very
-point the gather shaded. **Test:** view 5 white in a static scene WITH FSR2 (the R1 acceptance), view 3 calm, flashlight circle
-still shows, NPC trailing edge still resets.
+point the gather shaded. **Third finding (user: still flickers; "could it be a threshold?"):** yes - `r_rtReStirDIGradientStatic` (2 px) decided
+static-vs-mover by the WORLD distance between the current point and the stored previous point against two pixels' lateral size
+at that depth. With FSR2 the jitter-corrected reprojection often lands on the neighbouring pixel, and on a floor / wall at a
+grazing angle one pixel apart is many "pixel sizes" of surface, so most static floors were classed as movers and took the
+mover path (two different points). Fixed: static = the velocity's on-screen length <= N full-res pixels (a static point's
+velocity is only the jitter delta). **Test:** view 5 white in a static scene WITH FSR2 (the R1 acceptance), view 3 calm,
+flashlight circle still shows, NPC trailing edge still resets.
 
 **R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
 on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:
