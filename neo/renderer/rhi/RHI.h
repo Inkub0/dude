@@ -408,6 +408,10 @@ public:
 	// ReSTIR DI SH gather MRT: att0 RGBA16F SH0 (YCoCg radiance + hitdist), att1 R16F viewZ, att2 RGBA16F packed normal,
 	// att3 RGBA16F SH1 (direction * luminance)
 	virtual RenderTargetHandle	CreateRenderTargetRtgiShMrt( int w, int h ) { return 0; }
+	// ReSTIR DI gather MRT (R1, docs/rtx-restir-di.md Plan R1): the SH layout with att1 widened to RG16F ( viewZ, gradient
+	// luminance ) and att3.w carrying the chosen light's row - the side data next frame's gradient pass re-shades. NRD reads
+	// att1.x as IN_VIEWZ unchanged. Always 4 attachments (att3 = SH1 in SH mode, else just the row id).
+	virtual RenderTargetHandle	CreateRenderTargetReStirDIMrt( int w, int h ) { return 0; }
 	// RT shadow blur ray target (docs/rtx-shadow-blur.md, perf): attachment 0 = RGBA16F
 	// (vis / hwX / dist / hwY, the blur's working data), attachment 1 = RG8 per-pixel SUMMARY
 	// (R = visibility, G = penumbra half-width / HW_MAX, or 1.0 = untraced) so the tile

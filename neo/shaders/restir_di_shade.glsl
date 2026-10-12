@@ -1,0 +1,174 @@
+// DUDE ReSTIR DI shared shading (docs/rtx-restir-di.md Plan R1). The gather (restir_di.frag) and the gradient pass
+// (restir_di_gradient.frag) must shade a light at a surface BIT-FOR-BIT the same way - the gradient is "the same
+// light, re-shaded at the reprojected surface under this frame's lights", and any drift between the two would read
+// as a lighting change and reset history. So the surface reconstruction, the material response, the light
+// evaluation and the visibility ray live here, once. Both shaders bind the same units 0-3 and share the gather's
+// uniform packing (restir_di.frag header); the gradient adds its own units / uniforms on top.
+//
+// Needs (before this include): renderparms.glsl, rt_light_eval.glsl, rt_light_tex.glsl, rt_perforated.glsl,
+// restir_di_common.glsl; GL_EXT_ray_query, GL_EXT_buffer_reference_uvec2, GL_EXT_nonuniform_qualifier.
+
+SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
+SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;	// xyz = view-space normal, a = weapon/AO mask (0 = weapon)
+SAMPLER_BINDING(2) uniform sampler2D u_albedoBuffer;	// apply mode: G-buffer att3 receiver albedo (white when absent)
+SAMPLER_BINDING(3) uniform sampler2D u_materialBuffer;	// apply mode: G-buffer att1 ( roughness, metalness, spec-map luminance )
+
+#define depth_consts DUDE_DEPTH_CONSTS()
+
+const vec3 DI_LUM = vec3( 0.2126, 0.7152, 0.0722 );
+
+// Everything the per-light shade needs about the receiving surface. Built by diSurfaceAt() from the G-buffer.
+struct DiSurface {
+	vec3  Pw, Nw, Vw;			// world position / unit normal / unit direction to the camera (Vw only in apply mode)
+	float d;					// positive linear view depth (cookie LOD)
+	float vz;					// signed linear view z (negative)
+	bool  applyMode, pbr;		// shade with the G-buffer material (Stage D) / GGX vs Lambert
+	vec3  albedo, B, F0, envFloor;
+	float metal, kd, alpha2, NdotV, specGain;
+};
+
+// Reconstruct the surface under SCREEN pixel sfrag (internal-res pixel centre, 0.5 offsets). Returns false for sky /
+// a degenerate normal (the caller zeroes its output). Mirrors the gather's original reconstruction exactly.
+bool diSurfaceAt( vec2 sfrag, bool applyMode, bool pbr, out DiSurface s, out float rawDepth, out vec4 nt ) {
+	rawDepth = texture( u_currentDepth, sfrag * u_depthTexRecip.xy ).x;
+	nt = texture( u_normalBuffer, sfrag * u_screenCorrection.xy );
+	s.vz = 1.0 / ( min( rawDepth, 0.9994 ) * depth_consts.x + depth_consts.y );	// negative view z
+	s.applyMode = applyMode;
+	s.pbr = pbr;
+	s.albedo = vec3( 1.0 );	s.B = vec3( 1.0 );	s.F0 = vec3( 0.04 );	s.envFloor = vec3( 0.0 );	s.Vw = vec3( 0.0 );
+	s.metal = 0.0;	s.kd = 0.0;	s.alpha2 = 1.0;	s.NdotV = 1.0;	s.specGain = 0.0;
+	s.Pw = vec3( 0.0 );	s.Nw = vec3( 0.0, 0.0, 1.0 );	s.d = 1.0;
+	if ( rawDepth >= 0.9994 ) { return false; }									// sky / no geometry
+	vec2  ndc = sfrag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
+	s.d = -s.vz;
+	vec3  P   = vec3( ndc.x * s.d * u_localParam0.x, ndc.y * u_windowCoord.z * s.d * u_localParam0.y, s.vz );
+	vec3  Nraw = nt.xyz * 2.0 - 1.0;
+	float nl2  = dot( Nraw, Nraw );
+	if ( !( nl2 > 1e-4 ) ) { return false; }									// also catches NaN
+	vec3  N   = Nraw * inversesqrt( nl2 );
+	s.Pw = ( u_modelViewMatrix * vec4( P, 1.0 ) ).xyz;							// u_modelViewMatrix = inverse view
+	s.Nw = normalize( mat3( u_modelViewMatrix ) * N );
+	if ( applyMode ) {
+		s.albedo = texture( u_albedoBuffer, sfrag * u_screenCorrection.xy ).rgb;
+		vec3 mt  = texture( u_materialBuffer, sfrag * u_screenCorrection.xy ).rgb;
+		float rough = clamp( mt.r, 0.03, 1.0 );
+		s.metal  = mt.g;
+		s.kd     = u_diffuseModifier.x;
+		s.B      = diDemodFactor( s.albedo, s.metal, mt.b, s.kd, u_diffuseModifier.y );
+		s.Vw     = normalize( u_modelViewMatrix[3].xyz - s.Pw );				// camera (inverse view translation) -> surface
+		s.NdotV  = max( dot( s.Nw, s.Vw ), 1e-4 );
+		float a  = rough * rough;
+		s.alpha2 = a * a;
+		s.F0     = mix( vec3( 0.04 ), s.albedo, s.metal );
+		s.specGain = mt.b * mix( u_diffuseModifier.y, 1.0, s.metal ) * 2.0;	// spec map * dielectric-weighted scale * vanilla 2x
+		s.envFloor = s.F0 * ( s.metal * u_diffuseModifier.w * ( 1.0 - 0.5 * rough ) ) * mt.b;	// Phase C.1 metal environment floor
+	}
+	return true;
+}
+
+// The UNSHADOWED, NOT-demodulated contribution of light li at surface s: colour * cookie/falloff * N.L, times the
+// material response in apply mode (interaction.frag's PBR combine, per unit light). false = the light cannot reach
+// (out of range / fast light on the forward path / N.L <= 0 / zero attenuation); contrib is 0 then.
+bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
+	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
+	if ( !dudeLightInRange( lights, li, s.Pw ) ) { return false; }				// cheap volume-sphere cull
+	if ( ( lights.l[ li ].flags & DUDE_LIGHT_DIFORWARD ) != 0u ) { return false; }	// fast-changing light: the forward path lights it
+	dudeLightDir( lights, li, s.Pw, ldir, dl );
+	ndl = max( dot( s.Nw, ldir ), 0.0 );
+	if ( !( ndl > 0.0 ) ) { return false; }
+	// the light's shape + colour: its real cookie * falloff textures (Stage G, u_windowCoord.w), else the analytic
+	// frustum attenuation. Doom lighting model: no 1/pi.
+	vec3 atten = ( u_windowCoord.w > 0.5 )
+		? dudeLightAttenTex( lights, li, s.Pw, dl, lights.l[ li ].flags, true, false, s.d * u_shadowFalloffS.y )
+		: vec3( dudeLightAtten( lights, li, s.Pw, dl, lights.l[ li ].flags, true, false ) );
+	contrib = lights.l[ li ].color * ( atten * ndl );							// irradiance-like: colour * cookie/falloff * N.L
+	if ( s.applyMode ) {
+		vec3 f;
+		if ( s.pbr ) {
+			vec3  H     = normalize( ldir + s.Vw );
+			float NdotH = max( dot( s.Nw, H ), 0.0 );
+			float VdotH = max( dot( s.Vw, H ), 0.0 );
+			vec3  F     = s.F0 + ( 1.0 - s.F0 ) * pow( 1.0 - VdotH, 5.0 );
+			float dd    = NdotH * NdotH * ( s.alpha2 - 1.0 ) + 1.0;
+			float D     = s.alpha2 / ( dd * dd );									// GGX NDF, pi folded out
+			float k     = 0.5 * sqrt( s.alpha2 );
+			float gvis  = 0.25 / ( ( ndl * ( 1.0 - k ) + k ) * ( s.NdotV * ( 1.0 - k ) + k ) );
+			float lobe  = min( D * gvis, u_diffuseModifier.z );					// firefly clamp
+			f = lobe * F * s.specGain + s.envFloor + s.albedo * ( ( 1.0 - F ) * ( 1.0 - s.metal * s.kd ) );
+		} else {
+			f = s.albedo;															// legacy: Lambert, no spec (v1)
+		}
+		contrib *= f;
+	}
+	return true;
+}
+
+// one hard any-occluder shadow ray from the surface toward the chosen light (interaction.frag's inline ray).
+// 1 = lit, 0 = occluded, 1 - strength behind a solid grate texel. No TLAS (no RT scene) -> unshadowed: never
+// trace a null acceleration structure.
+//
+// Perforated casters (r_rtPerforatedShadows, rt_perforated.glsl): the forward path decides per LIGHT whether a
+// grate sits in its volume; here every pixel picks its own light, so the CPU hands over the boxes of every grate
+// inside the union of the scene lights' volumes (u_particleRadius.zw, u_windowCoord.x of them) and a segment
+// that passes through none of them keeps the force-opaque ray - the hardware's fastest traversal. Only a segment
+// that can meet a grate traces the grate-aware ray and alpha-tests its candidates against the coverage texture.
+// occDist (out) = distance to the occluder when the ray is blocked, else the distance to the light: the "hit
+// distance" NRD scales its blur radius by. Feeding the LIGHT distance for every pixel told ReBLUR that every
+// shadow came from a far source and widened the blur until grate / contact shadows vanished (user, 2026-10-08).
+float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, out float occDist ) {
+	occDist = dl;
+	if ( u_rtParms.x == 0.0 && u_rtParms.y == 0.0 ) { return 1.0; }		// no RT scene
+	float tMax = min( dl - 1.0, u_rtParms.w );
+	if ( !( tMax > 0.0 ) ) { return 1.0; }
+	vec3  O = Pw + Nw * u_rtParms.z;
+	uvec2 geoAddr = uvec2( floatBitsToUint( u_particleRadius.x ), floatBitsToUint( u_particleRadius.y ) );
+	bool  perfOn  = u_windowCoord.x > 0.5 && u_windowCoord.y > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
+	if ( perfOn ) {
+		perfOn = dudeSegmentMeetsPerforated(
+			uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ),
+			int( u_windowCoord.x + 0.5 ), O, ldir, tMax );
+	}
+	if ( !perfOn ) {
+		rayQueryEXT rqo;
+		rayQueryInitializeEXT( rqo,
+			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+			gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu /* skip perforated-caster instances */,
+			O, 0.0, ldir, tMax );
+		while ( rayQueryProceedEXT( rqo ) ) { }
+		if ( rayQueryGetIntersectionTypeEXT( rqo, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) { return 1.0; }
+		occDist = rayQueryGetIntersectionTEXT( rqo, true );
+		return 0.0;
+	}
+	// grate-aware: perforated instances (mask 0x02) arrive as candidates; a solid texel dims to 1 - strength and
+	// the ray carries on (min over grates, not a product - a candidate may be reported twice); opaque geometry
+	// commits and terminates as before
+	rayQueryEXT rq;
+	rayQueryInitializeEXT( rq,
+		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+		gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu, O, 0.0, ldir, tMax );
+	float perfVis = 1.0;
+	while ( rayQueryProceedEXT( rq ) ) {
+		if ( perfVis == 1.0
+				&& rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
+				&& rayQueryGetIntersectionTEXT( rq, false ) < dl - 8.0
+				&& dudePerforatedSolid( geoAddr,
+					uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),
+					uint( rayQueryGetIntersectionGeometryIndexEXT( rq, false ) ),
+					uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) ),
+					rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) ) {
+			perfVis = 1.0 - u_windowCoord.y;
+		}
+	}
+	if ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) { return perfVis; }
+	occDist = rayQueryGetIntersectionTEXT( rq, true );
+	return 0.0;
+}
+
+// The per-pixel value the gradient compares across frames: the chosen light's shaded, DEMODULATED, visible
+// contribution at the forward light scale - what the direct term feeds NRD, before the RIS weight (which is a
+// common factor of both frames and cancels in the normalized gradient). Rounded through fp16 on BOTH sides
+// (RTXDI: avoids precision false positives), which is also the storage format.
+float diGradientLuminance( vec3 contrib, vec3 B, float vis ) {
+	float l = dot( contrib / B, DI_LUM ) * vis * u_shadowFalloffS.x;
+	return unpackHalf2x16( packHalf2x16( vec2( l, 0.0 ) ) ).x;
+}

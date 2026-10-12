@@ -126,7 +126,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | cvar | default | what |
 |------|--------:|------|
 | `r_rtReStirDI` | 0 | master enable (bring-up; not preset-wired). VK + RT + velocity MRT. |
-| `r_rtReStirDIDebug` | 0 | 1 = raw gather, 2 = denoised, **R0:** 3 = NRD validation overlay, 4 = accumulated history length ramp. |
+| `r_rtReStirDIDebug` | 0 | 1 = raw gather, 2 = denoised, **R0:** 3 = NRD validation overlay, 4 = history length ramp, **R1:** 5 = gradient confidence, 6 = filtered gradient. |
 | `r_rtReStirDICandidates` | 0 | candidate lights per pixel before the WRS pick: **0 = every light** (exhaustive RIS, no candidate noise), `M > 0` = M uniform random draws (a rarely-drawn light reads dimmer: sparse spikes the denoiser clips). Clamp **0..128**. |
 | `r_rtReStirDIResScale` | 1 | gather/denoise resolution fraction (0.25..1), upscaled for display. Composes with checkerboard. |
 | `r_rtReStirDICheckerboard` | 0 | trace a half-pixel checkerboard (packed left), NRD reconstructs via a full-res guide pass + IN_MV. |
@@ -143,6 +143,11 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIStabilize` | 63 | **R0** ReBLUR `maxStabilizedFrameNum` (clamped to history); 0 = stabilization pass off. |
 | `r_rtReStirDIAntilag` | 1 | **R0** ReBLUR built-in antilag; 0 = inert (NRD's recommended initial-integration baseline). |
 | `r_nrdSigma` | 0 | **R0** keep `SIGMA_SHADOW` in the NRD instance (never dispatched since H3); rebuilds NRD. |
+| `r_rtReStirDIGradient` | 0 | **R1** temporal gradient confidence -> NRD IN_DIFF_CONFIDENCE (re-shade last frame's light; RTXDI / Q2RTX recipe). |
+| `r_rtReStirDIGradientPower` | 8 | **R1** confidence sharpening power. |
+| `r_rtReStirDIGradientHistory` | 8 | **R1** rise-only temporal smoothing (frames). |
+| `r_rtReStirDIGradientFloor` | 0.1 | **R1** minimum confidence; ReBLUR raises it to historyFix / history. |
+| `r_rtReStirDIGradientBias` | 0.001 | **R1** darkness bias in the change's denominator. |
 
 Defaults are the user-tuned compromise (2026-10-07/08). All `CVAR_ARCHIVE`, so a user's own values persist in
 config regardless of these source defaults. `hitDist` scale (1024) is in-source only.
@@ -644,7 +649,31 @@ Files: `RhiWorld.cpp` (`RB_RHI_ReStirDIPass`, `RB_RHI_RtgiPass`), `VulkanBackend
 Acceptance: byte-identical output at defaults except after a cut (no ghost of the previous shot); the validation view
 renders; `r_vkGpuTime 2` unchanged.
 
-### R1 - gradient confidence (F1) - the linchpin, medium
+### R1 - gradient confidence (F1) - the linchpin, medium - **IMPLEMENTED 2026-10-12** (branch `feat/rtx-restir-di-r1-gradient-confidence`, USER TEST PENDING)
+Shipped as planned, with these notes. **Light identity:** `RtLight.pad0 = lightDef + 1` and a per-frame `lightDef -> row + 1`
+table (`s_diLightMapBuf`, 4096 defs, ring slot per frame) built after the sort; the ring also records each slot's light-buffer
+address + frame so the DI pass can name LAST frame's buffer. **Side data without a ping-pong:** the gather MRT is now the
+4-attachment `CreateRenderTargetReStirDIMrt` in both SH modes, att1 widened to RG16F ( viewZ, fp16 gradient luminance ) and
+att3.w = the chosen light's row + 1; the gradient pass runs BEFORE this frame's gather, so last frame's side data is still
+in the MRT (the RT target limit is 4 attachments, hence the packing). The stored luminance is the chosen light's shaded,
+demodulated, VISIBLE contribution at the light scale (`diGradientLuminance`), without the RIS weight W: W multiplies both
+frames alike and cancels in the normalized gradient, so it need not be stored. **One shading implementation:** the surface
+reconstruction, material response, per-light shade and visibility ray moved verbatim into `restir_di_shade.glsl`, used by
+both the gather and the gradient pass (any drift would read as a lighting change). **Validity test:** normal dot >= 0.5
+and the current point's expected previous view z (through last frame's world->view, `u_prevMvpMatrix`) within 10 % of the
+stored one. **Checkerboard:** the stratum only considers cells last frame traced (parity + packed column). **A light that
+left DI** (switched off, culled, moved to the forward path) maps to no row -> `L_now = 0` -> a 100 % change. **Confidence**
+runs at the gather res (bilinear from the stratum res), rise-only smoothing, floor `max(cvar, historyFix / history)`,
+dither 0.5 / history. **Not done:** the optional combined-mode bounce gradient (`r_rtReStirDIGradientBounce`), R1b.
+Cvars: `r_rtReStirDIGradient` 0 (the A/B switch), `r_rtReStirDIGradientPower` 8, `r_rtReStirDIGradientHistory` 8,
+`r_rtReStirDIGradientFloor` 0.1, `r_rtReStirDIGradientBias` 0.001. Debug: `r_rtReStirDIDebug 5` = the confidence (grey),
+`6` = the filtered gradient (red |change|, green magnitude). New GPU scopes `restir.di.grad / gradfilter / gradconf`.
+**Test:** `r_rtReStirDI 1 r_rtReStirDIGradient 1`: (a) static scene, view 5 stays white (no false resets - the failure of
+the old pass), view 6 black; (b) `r_rtReStirDIDynamicForward 0`, sweep the flashlight / fire: view 6 lights up exactly in
+the beam's old + new footprint, view 5 darkens there for a few frames, and the lit scene trails by <= 2 frames (vs the
+16-frame smear with the gradient off); (c) a light switching off (a door light, a destroyed lamp): its footprint goes dark
+within the fast history, no black dip halo; (d) an NPC walking under a static light: view 6 stays black on its body
+(geometry is NRD's job); (e) `r_vkGpuTime 2`: the three new scopes together well under 0.2 ms.
 Files: NEW `restir_di_gradient.frag` + `restir_di_gradient_filter.frag` + `restir_di_confidence.frag`, `restir_di.frag`
 (two extra outputs), `rt_light_eval.glsl` (`pad0` -> `lightDef`), `RhiWorld.cpp` (`RB_RHI_GatherSceneLights` mapping table,
 `RB_RHI_ReStirDIPass` new passes), `VulkanBackend.cpp` (confidence at reduced res, v4.17+ allows it).

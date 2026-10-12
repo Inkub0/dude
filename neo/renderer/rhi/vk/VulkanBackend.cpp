@@ -232,6 +232,7 @@ public:
 	virtual RenderTargetHandle	CreateRenderTargetMipped( ImageFormat fmt, int w, int h, int mipLevels );
 	virtual RenderTargetHandle	CreateRenderTargetRtaoMrt( int w, int h );
 	virtual RenderTargetHandle	CreateRenderTargetRtgiMrt( int w, int h );
+	virtual RenderTargetHandle	CreateRenderTargetReStirDIMrt( int w, int h );	// R1: att1 RG16F ( viewZ, gradient lum ), att3.w = light row
 	virtual RenderTargetHandle	CreateRenderTargetRtgiShMrt( int w, int h );
 	virtual RenderTargetHandle	CreateRenderTargetBlurRay( int w, int h );
 	virtual void				BeginTargetMipPass( RenderTargetHandle rt, int mipLevel, const ClearArgs *clear );
@@ -10538,6 +10539,19 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetRtgiShMrt( int w, int h ) {
 		return 0;
 	}
 	static const VkFormat fmts[4] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT };
+	int slot = AllocTargetSlot();
+	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R16G16B16A16_SFLOAT, 4, /*ds*/false, /*frameCapable*/false, /*mipLevels*/1, fmts ) ) {
+		targetTable[slot] = RenderTarget();
+		return 0;
+	}
+	return EncodeTargetHandle( slot );
+}
+
+RenderTargetHandle VulkanBackend::CreateRenderTargetReStirDIMrt( int w, int h ) {
+	if ( device == VK_NULL_HANDLE ) {
+		return 0;
+	}
+	static const VkFormat fmts[4] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT };
 	int slot = AllocTargetSlot();
 	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R16G16B16A16_SFLOAT, 4, /*ds*/false, /*frameCapable*/false, /*mipLevels*/1, fmts ) ) {
 		targetTable[slot] = RenderTarget();

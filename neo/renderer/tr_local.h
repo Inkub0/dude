@@ -1030,6 +1030,11 @@ extern idCVar r_rtReStirDIFastClamp;		// R0: DI NRD fastHistoryClampingSigmaScal
 extern idCVar r_rtReStirDIStabilize;		// R0: DI NRD maxStabilizedFrameNum (63 = default, clamped to history; 0 = off)
 extern idCVar r_rtReStirDIAntilag;			// R0: DI NRD built-in antilag on/off (A/B baseline)
 extern idCVar r_rtReStirDIDisocclusion;	// R0: DI NRD disocclusionThreshold (0.01 = NRD default)
+extern idCVar r_rtReStirDIGradient;		// R1: temporal gradient confidence (re-shade last frame's light) -> NRD IN_DIFF_CONFIDENCE
+extern idCVar r_rtReStirDIGradientPower;	// R1: confidence sharpening power
+extern idCVar r_rtReStirDIGradientHistory;	// R1: rise-only temporal smoothing length (frames)
+extern idCVar r_rtReStirDIGradientFloor;	// R1: minimum confidence (ReBLUR raises it to historyFix / history)
+extern idCVar r_rtReStirDIGradientBias;		// R1: darkness bias in the change denominator
 extern idCVar r_nrdSigma;					// R0: keep SIGMA_SHADOW in the NRD instance (never dispatched since H3)
 extern idCVar r_rtReStirDICheckerboard;		// ReSTIR DI full-res checkerboard: trace half the pixels (packed left), NRD reconstructs; ~half the rays
 extern idCVar r_rtReStirDIResScale;			// ReSTIR DI gather/denoise resolution fraction (0.25..1); upscaled for display. Composes with checkerboard

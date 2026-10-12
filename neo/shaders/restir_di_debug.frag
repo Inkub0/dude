@@ -17,7 +17,8 @@
 //   u_localParam0.w       = R0 view mode: 0 = DI radiance (YCoCg decode, upscale as above); 1 = PASSTHROUGH of an RGBA8
 //                           overlay (NRD OUT_VALIDATION, r_rtReStirDIDebug 3); 2 = HISTORY LENGTH: the denoised output's
 //                           .w (accumulated frames, ReBLUR returnHistoryLengthInsteadOfOcclusion) over u_localParam1.x
-//                           (the max history) as a grey ramp (r_rtReStirDIDebug 4). Modes 1/2 skip the weapon re-mask
+//                           (the max history) as a grey ramp (r_rtReStirDIDebug 4); 3 = a scalar .x as grey (R1 confidence,
+//                           r_rtReStirDIDebug 5). Modes 1/2/3 skip the weapon re-mask
 //                           (the overlay is about the denoiser's field, weapon pixels included).
 //   u_screenCorrection.xy = 1 / (rw, rh)  - the reduced-res DI texel in the view's 0..1 uv (the 2x2 footprint)
 //   u_depthTexRecip.xy    = (w/uploadW, h/uploadH)  - view uv -> depth tc (the POT depth image)
@@ -47,6 +48,10 @@ void main() {
 	int   mode = int( u_localParam0.w + 0.5 );
 	if ( mode == 1 ) {												// NRD validation overlay: as rendered
 		fragColor = vec4( texture( u_src, uv ).rgb, 1.0 );
+		return;
+	}
+	if ( mode == 3 ) {												// R1: a scalar (the confidence) as grey
+		fragColor = vec4( vec3( texture( u_src, uv ).x ), 1.0 );
 		return;
 	}
 	if ( mode == 2 ) {												// accumulated history frames -> grey ramp
