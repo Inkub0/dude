@@ -222,6 +222,14 @@ struct RtaoDenoiseArgs {
 	// shading detail survives the denoise + the reduced-res gather.
 	bool	shMode;
 	int		shAtt;
+	// R0 (docs/rtx-restir-di.md Plan R0 / rtx-nrd.md N0): the lag knobs, GENERIC for every consumer (RTAO / RTGI / DI).
+	// 0 = keep NRD's default for each; the caller's cvars default to today's effective values so nothing moves until tuned.
+	int		fastFrames;					// maxFastAccumulatedFrameNum (clamped <= main history; NRD default 6)
+	float	fastClampSigma;				// fastHistoryClampingSigmaScale [1;3] (NRD default 2.0; 1.5 dirty signals, 1.1 occlusion)
+	int		stabilizedFrames;			// maxStabilizedFrameNum: 0 = NRD default (63, clamped to main), >0 = frames, <0 = stabilization pass OFF
+	bool	antilagOff;					// push ReblurAntilagSettings inert (the A/B NRD recommends for an initial integration)
+	bool	returnHistoryLength;		// giMode: output .w = accumulated frames instead of AO (nothing consumes the GI/DI .w AO); R3 reads it
+	bool	validation;					// run NRD's validation pass into GetNrdValidationImage() (RGBA8 overlay: accumulated frames / resets / antilag)
 };
 
 class RHI {
@@ -543,6 +551,7 @@ public:
 	// (RGBA16F: radiance .rgb, occlusion .w) here; 0 until the first successful GI denoise
 	virtual ImageHandle	GetRtgiOutputImage() { return 0; }
 	virtual ImageHandle	GetRtgiOutputSh1Image() { return 0; }	// SH mode: the denoised OUT_DIFF_SH1 (direction * luminance)
+	virtual ImageHandle	GetNrdValidationImage() { return 0; }	// R0: NRD OUT_VALIDATION of the last denoise that asked for it (RtaoDenoiseArgs::validation)
 	// R1/D: snapshot the scene color as the OPAQUE-ONLY input for FSR2's auto-reactive
 	// mask. Called at the opaque/translucent split of the primary view (after the SSR
 	// composite, before particles/blends draw); a straight same-orientation copy, unlike

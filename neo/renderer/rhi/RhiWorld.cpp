@@ -476,6 +476,7 @@ static bool rhiReStirDIShThisView = false;			// the gather ran in SH mode this v
 static int   rhiReStirDIW = 0, rhiReStirDIH = 0;
 static bool  rhiReStirDIRanThisView = false;		// DI gather produced this view (debug-overlay gate)
 static bool  rhiReStirDIDenoisedThisView = false;	// the shared REBLUR_DIFFUSE denoise ran for DI this view -> GetRtgiOutputImage is the denoised DI
+static int  rhiReStirDIHistFrames = 0;					// R0: the ReBLUR history length handed to NRD this view (debug view 4's ramp)
 // ReSTIR DI perforated casters (rt_perforated.glsl): a per-VIEW list of the grates inside the union of the scene
 // lights' volumes (every pixel picks its own light, so the forward path's per-light list does not apply). Frame
 // slots like the scene-light buffer; the last box swallows any overflow (R_RtGatherPerforatedBoxes).
@@ -577,9 +578,12 @@ static bool R_InvertGLMatrix( const float in[16], float out[16] );
 // frame's reprojection (current view space -> previous frame's clip). Returns whether the
 // current view matrix inverted (reproj is valid); *prevUsable is true when a usable
 // previous frame exists AND this frame is not a cut.
-static bool RB_RHI_TemporalReproj( const viewDef_t *viewDef, float reproj[16], bool *prevUsable ) {
+// The once-per-frame prev<-staged advance + discontinuity classify, idempotent (frame-count guarded). Factored out
+// of RB_RHI_TemporalReproj (R0) so a consumer that only needs the CUT verdict - the NRD denoises, which run before
+// the SSR / FSR2 temporal consumers that used to be the first callers - classifies THIS frame instead of reading
+// last frame's verdict a frame late.
+static void RB_RHI_TemporalClassify( const viewDef_t *viewDef ) {
 	rhiTemporalCam_t &tc = rhiTemporalCam;
-
 	if ( tc.stagedFrame != tr.frameCount ) {			// first temporal consumer of a new frame
 		if ( tc.haveStaged ) {
 			memcpy( tc.prevViewProj, tc.stagedViewProj, sizeof( tc.prevViewProj ) );
@@ -592,6 +596,56 @@ static bool RB_RHI_TemporalReproj( const viewDef_t *viewDef, float reproj[16], b
 		tc.haveStaged  = false;
 		tc.stagedFrame = tr.frameCount;
 	}
+}
+
+// R0 (docs/rtx-restir-di.md Plan R0 / rtx-nrd.md N0): should the NRD denoises drop their history THIS frame? A camera
+// cut / teleport (origin jump > r_temporalResetDist) reprojects the whole history onto the wrong surfaces; NRD's
+// disocclusion test catches most of it but the survivors ghost the previous shot into the new one. Shared by RTAO,
+// RTGI and DI (none reset on a cut before R0). Cinematic shot cuts that keep the origin (rotation-only) are NOT
+// detected here - RB_RHI_CinematicView() is "a cinematic camera is the main view", not a cut - see the doc's follow-up.
+static bool RB_RHI_NrdHistoryReset( const viewDef_t *viewDef ) {
+	RB_RHI_TemporalClassify( viewDef );
+	return rhiTemporalCam.historyReset;
+}
+
+// R0: the NRD history window for one consumer, in frames. frames = the consumer's *History cvar; ms = its *HistoryMs
+// companion (0 = frames as before, >0 = seconds-based: NRD's "Always accumulate in seconds not in frames" recipe,
+// GetMaxAccumulatedFrameNum over a 0.2 s low-passed frame rate, so the window is the same TIME at 60 or 144 Hz).
+// fastFrames = the fast history base (NRD default 6, or the consumer's cvar); in ms mode it scales with the main
+// window so the 5-7x ratio NRD recommends is preserved. Both outputs clamped to ReBLUR's 63.
+static void RB_RHI_NrdHistoryFrames( int frames, float ms, int fastFrames, int &outMain, int &outFast ) {
+	static int   lastTick  = -1;
+	static int   lastFrame = -1;
+	static float smoothedFrameMs = 16.7f;				// "must be initialized to a positive value" (NRD)
+	if ( tr.frameCount != lastFrame ) {					// once per rendered frame, however many consumers ask
+		const int now = Sys_Milliseconds();
+		if ( lastTick >= 0 ) {
+			const float dt = idMath::ClampFloat( 1.0f, 500.0f, (float)( now - lastTick ) );
+			const float n  = ( 1000.0f / smoothedFrameMs ) * 0.2f;			// NRD's 0.2 s time constant
+			smoothedFrameMs += ( dt - smoothedFrameMs ) / ( 1.0f + n );
+		}
+		lastTick  = now;
+		lastFrame = tr.frameCount;
+	}
+	outMain = frames;
+	outFast = fastFrames;
+	if ( ms > 0.0f ) {
+		const float fps = 1000.0f / Max( smoothedFrameMs, 1.0f );
+		outMain = (int)( ms * 0.001f * fps + 0.5f );		// == nrd::GetMaxAccumulatedFrameNum( seconds, smoothedFPS ) (no NRD include here)
+		if ( outMain < 2 ) { outMain = 2; }
+		if ( frames > 0 && fastFrames > 0 ) {
+			outFast = (int)( (float)fastFrames * ( (float)outMain / (float)frames ) + 0.5f );	// keep the main:fast ratio
+			if ( outFast < 1 ) { outFast = 1; }
+		}
+	}
+	if ( outMain > 63 ) { outMain = 63; }
+	if ( outFast > 63 ) { outFast = 63; }
+	if ( outMain > 0 && outFast >= outMain ) { outFast = Max( 1, outMain - 1 ); }
+}
+
+static bool RB_RHI_TemporalReproj( const viewDef_t *viewDef, float reproj[16], bool *prevUsable ) {
+	rhiTemporalCam_t &tc = rhiTemporalCam;
+	RB_RHI_TemporalClassify( viewDef );
 
 	float invViewCur[16];
 	const bool haveInv = R_InvertGLMatrix( viewDef->worldSpace.modelViewMatrix, invViewCur );
@@ -7348,10 +7402,18 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.hitDistB = 0.1f;
 		da.denoisingRange = 20000.0f;			// < the ~30000 sky depth: sky excluded
 		da.frameIndex = (unsigned int)tr.frameCount;
-		da.reset = !rhiRtaoPrevValid;
+		da.reset = !rhiRtaoPrevValid || RB_RHI_NrdHistoryReset( viewDef );	// R0: + camera cut / teleport
 		// RTAO ReBLUR accumulation window (r_rtaoHistory): 0 keeps NRD's default (~30), >0 overrides
 		// it so the 1-spp occlusion can accumulate longer (smoother, less noise) or shorter (snappier).
-		da.maxAccumFrames = r_rtaoHistory.GetInteger();
+		// R0: r_rtaoHistoryMs converts a time window to frames; the lag knobs default to today's values.
+		{
+			int mainF = 0, fastF = 0;
+			RB_RHI_NrdHistoryFrames( r_rtaoHistory.GetInteger(), r_rtaoHistoryMs.GetFloat(), 6, mainF, fastF );
+			da.maxAccumFrames = mainF;
+			da.fastFrames = ( r_rtaoHistoryMs.GetFloat() > 0.0f ) ? fastF : 0;		// frames mode: NRD default (6), as before
+		}
+		da.fastClampSigma     = r_rtaoFastClamp.GetFloat();
+		da.historyFixFrameNum = r_rtaoHistoryFix.GetInteger();
 		rhiRtaoDenoisedThisView = r->RtaoDenoise( da );
 
 		// ---- H4d: composite into the STANDARD AO buffer and hand it to the lighting ----
@@ -7708,11 +7770,17 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.jitterPrevY = rhiRtgiPrevValid ?  rhiRtgiPrevJitter[1] * resScale : da.jitterY;
 		da.mvScaleX = -1.0f;	da.mvScaleY = 1.0f;
 		da.hitDistA = 0.5f * radius;	da.hitDistB = 0.1f;		// MUST match rtgi_ray.frag's normHitDist
-		da.maxAccumFrames = r_rtgiHistory.GetInteger();			// GI-only ReBLUR history cap (ghosting vs noise lever)
+		{	// GI ReBLUR history cap (ghosting vs noise lever); R0: r_rtgiHistoryMs = the same window in time
+			int mainF = 0, fastF = 0;
+			RB_RHI_NrdHistoryFrames( r_rtgiHistory.GetInteger(), r_rtgiHistoryMs.GetFloat(), 6, mainF, fastF );
+			da.maxAccumFrames = mainF;
+			da.fastFrames = ( r_rtgiHistoryMs.GetFloat() > 0.0f ) ? fastF : 0;
+		}
+		da.fastClampSigma = r_rtgiFastClamp.GetFloat();			// R0: 2.0 = NRD default (today)
 		da.confImage = giConfImg;								// H6f: IN_DIFF_CONFIDENCE (0 = not provided this frame)
 		da.denoisingRange = 20000.0f;
 		da.frameIndex = (unsigned int)tr.frameCount;
-		da.reset = !rhiRtgiPrevValid;
+		da.reset = !rhiRtgiPrevValid || RB_RHI_NrdHistoryReset( viewDef );	// R0: + camera cut / teleport
 		r->GpuScopeBegin( "rtgi.denoise" );						// r_vkGpuTime 2: NRD REBLUR_DIFFUSE denoise dispatches
 		rhiRtgiDenoisedThisView = r->RtaoDenoise( da );			// giMode -> GI diffuse denoise into GetRtgiOutputImage
 		r->GpuScopeEnd();
@@ -8109,7 +8177,21 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.jitterPrevY = rhiReStirDIPrevValid ?  rhiReStirDIPrevJitter[1] * resScale : da.jitterY;
 		da.mvScaleX = -1.0f;	da.mvScaleY = 1.0f;			// engine (currUV-prevUV)*0.5 +Y-up -> NRD 2D screen-space
 		da.hitDistA = 0.5f * diHitScale;	da.hitDistB = 0.1f;	// MUST match restir_di.frag's nhd normalization
-		da.maxAccumFrames = r_rtReStirDIHistory.GetInteger();	// REBLUR history cap (DI's own; mirrors RTGI's History Length)
+		{	// REBLUR history cap (DI's own; mirrors RTGI's History Length); R0: r_rtReStirDIHistoryMs = the window in time,
+			// the fast history (r_rtReStirDIFastHistory) scaling with it
+			int mainF = 0, fastF = 0;
+			RB_RHI_NrdHistoryFrames( r_rtReStirDIHistory.GetInteger(), r_rtReStirDIHistoryMs.GetFloat(),
+				r_rtReStirDIFastHistory.GetInteger(), mainF, fastF );
+			da.maxAccumFrames = mainF;
+			da.fastFrames     = fastF;
+			rhiReStirDIHistFrames = mainF;						// the debug overlay's history-length ramp divides by this
+		}
+		// R0 lag knobs (docs/rtx-restir-di.md Plan R0): all default to today's effective values
+		da.fastClampSigma   = r_rtReStirDIFastClamp.GetFloat();
+		da.stabilizedFrames = ( r_rtReStirDIStabilize.GetInteger() > 0 ) ? r_rtReStirDIStabilize.GetInteger() : -1;	// 0 = pass off
+		da.antilagOff       = !r_rtReStirDIAntilag.GetBool();
+		da.returnHistoryLength = true;							// .w = accumulated frames (debug view 4; R3's disocclusion boost)
+		da.validation       = ( r_rtReStirDIDebug.GetInteger() == 3 );	// NRD's validation overlay for debug view 3
 		// DI spatial-cleanup overrides (fight the 1-spp noise NRD leaves on fine detail + moving limbs). 0 = NRD default.
 		da.prepassBlurRadius  = r_rtReStirDIPrepassBlur.GetFloat();	// diffusePrepassBlurRadius: the main lever for probabilistic 1-spp input
 		da.historyFixFrameNum = r_rtReStirDIHistoryFix.GetInteger();	// spatial reconstruction on thin/disoccluded (moving) history
@@ -8118,7 +8200,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.confImage = diConfImg;							// IN_DIFF_CONFIDENCE (0 = not provided this frame)
 		da.denoisingRange = 20000.0f;
 		da.frameIndex = (unsigned int)tr.frameCount;
-		da.reset = !rhiReStirDIPrevValid;					// clear history on the first DI frame / after an interruption
+		da.reset = !rhiReStirDIPrevValid || RB_RHI_NrdHistoryReset( viewDef );	// first DI frame / interruption / R0: camera cut
 		r->GpuScopeBegin( "restir.di.denoise" );			// r_vkGpuTime 2: NRD REBLUR_DIFFUSE dispatches
 		rhiReStirDIDenoisedThisView = r->RtaoDenoise( da );	// -> GetRtgiOutputImage holds the denoised DI
 		r->GpuScopeEnd();
@@ -8923,9 +9005,21 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// half of the buffer, which is exactly what this view is for); 2 = the NRD-DENOISED DI when the denoise ran
 	// this frame (GetRtgiOutputImage, shared GI slot), else raw. Both are NRD-YCoCg-packed, so restir_di_debug
 	// decodes to linear. Mirrors r_rtgiDebug 1/2.
-	rhi::ImageHandle srcImg = ( r_rtReStirDIDebug.GetInteger() >= 2 && rhiReStirDIDenoisedThisView && r->GetRtgiOutputImage() != 0 )
-		? r->GetRtgiOutputImage()
-		: r->GetRenderTargetImage( rhiReStirDIRT );
+	// R0: 3 = NRD's validation overlay (OUT_VALIDATION, rendered this frame on request), 4 = the denoised output's .w =
+	// accumulated history frames (ReBLUR returnHistoryLengthInsteadOfOcclusion). Both need the denoise to have run.
+	const int  dbgMode  = r_rtReStirDIDebug.GetInteger();
+	const bool denoised = rhiReStirDIDenoisedThisView && r->GetRtgiOutputImage() != 0;
+	int viewMode = 0;												// restir_di_debug.frag u_localParam0.w
+	rhi::ImageHandle srcImg = 0;
+	if ( dbgMode == 3 ) {
+		srcImg = denoised ? r->GetNrdValidationImage() : 0;
+		viewMode = 1;
+	} else if ( dbgMode == 4 ) {
+		srcImg = denoised ? r->GetRtgiOutputImage() : 0;
+		viewMode = 2;
+	} else {
+		srcImg = ( dbgMode >= 2 && denoised ) ? r->GetRtgiOutputImage() : r->GetRenderTargetImage( rhiReStirDIRT );
+	}
 	if ( srcImg == 0 ) {
 		return;
 	}
@@ -8946,9 +9040,11 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const bool diReduced = ( rhiReStirDIW < w || rhiReStirDIH < h );
 	const bool diBilateral = diReduced && r_rtReStirDIBilateralUpscale.GetBool()
 		&& rhiNormalReadyThisView && rhiNormalResultRT != 0 && uploadW > 0;
-	parms.localParam0[0] = diBilateral ? 1.0f : 0.0f;
+	parms.localParam0[0] = ( diBilateral && viewMode == 0 ) ? 1.0f : 0.0f;	// the overlays are plain blits
 	parms.localParam0[1] = 32.0f;									// depth sensitivity (bigger = sharper depth cut)
 	parms.localParam0[2] = 8.0f;									// normal power
+	parms.localParam0[3] = (float)viewMode;							// R0: 0 DI radiance / 1 validation passthrough / 2 history ramp
+	parms.localParam1[0] = (float)Max( 1, rhiReStirDIHistFrames );	// history ramp denominator
 	parms.screenCorrection[0] = ( rhiReStirDIW > 0 ) ? 1.0f / rhiReStirDIW : 1.0f;	// 1/(rw,rh) = reduced-res DI texel (uv)
 	parms.screenCorrection[1] = ( rhiReStirDIH > 0 ) ? 1.0f / rhiReStirDIH : 1.0f;
 	if ( uploadW > 0 && uploadH > 0 ) {

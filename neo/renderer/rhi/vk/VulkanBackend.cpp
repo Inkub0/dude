@@ -123,7 +123,7 @@ static idCVar r_vkComputeTest( "r_vkComputeTest", "0", CVAR_RENDERER | CVAR_BOOL
 static idCVar r_fsr2Test( "r_fsr2Test", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: FSR2 bring-up self-test - size the scratch, build the FSR2 VK interface, create a Native-AA FSR2 context (no dispatch), destroy it, and print PASS/FAIL. Set to 1 to trigger (docs/fsr-temporal-pipeline.md, R1/C0)" );
 static idCVar r_nrdTest( "r_nrdTest", "0", CVAR_RENDERER | CVAR_BOOL,
-	"Vulkan backend: NRD bring-up self-test (H2b, docs/rtx-nrd.md) - create an NRD instance (REBLUR_DIFFUSE_OCCLUSION + SIGMA_SHADOW), build every compute pipeline from the embedded SPIR-V, allocate the texture pools + constant-buffer ring, enumerate a frame's dispatches CPU-side, tear it all down, and print PASS/FAIL. No rendering effect. Set to 1 to trigger" );
+	"Vulkan backend: NRD bring-up self-test (H2b, docs/rtx-nrd.md) - create an NRD instance (REBLUR_DIFFUSE_OCCLUSION + REBLUR_DIFFUSE[_SH], + SIGMA_SHADOW when r_nrdSigma), build every compute pipeline from the embedded SPIR-V, allocate the texture pools + constant-buffer ring, enumerate a frame's dispatches CPU-side, tear it all down, and print PASS/FAIL. No rendering effect. Set to 1 to trigger" );
 static idCVar r_mrt3Test( "r_mrt3Test", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: MRT plumbing self-test - create + destroy a 3-attachment velocity gbuffer (RGBA8 normal + RGBA8 SSR + RG16F velocity + depth, a distinct pass class) and print PASS/FAIL. Proves RG16F color attachments work on this driver. Set to 1 to trigger (docs/fsr-temporal-pipeline.md, R1/A0)" );
 
@@ -1102,6 +1102,7 @@ private:
 	int							nrdSlotGen[FRAMES_IN_FLIGHT] = { -1, -1 };	// streamGen this slot's pool was last reset at
 	uint32_t					nrdSlotCursor[FRAMES_IN_FLIGHT] = {};		// running CB/descriptor cursor within the frame
 	int							nrdW = 0, nrdH = 0;
+	bool						nrdSigma = false;		// R0: SIGMA_SHADOW is in the instance only when r_nrdSigma was set at create time
 	bool						nrdPoolsReady = false;	// pool images transitioned to GENERAL
 	// per-denoiser history-primed flag, indexed by NRD_ID_* (REBLUR_AO 0 / SIGMA 1 / REBLUR_GI 2). A
 	// denoiser's temporal history lives in the shared permanent pool, which NrdCreate allocates but
@@ -1145,6 +1146,18 @@ private:
 	// that REBLUR_DIFFUSE writes via the RtaoDenoise giMode path; same lifecycle as the RTAO output.
 	virtual ImageHandle	GetRtgiOutputImage() { return rtgiOutSampleImage; }
 	virtual ImageHandle	GetRtgiOutputSh1Image() { return rtgiOutSh1SampleImage; }
+	// R0 (docs/rtx-restir-di.md Plan R0): NRD OUT_VALIDATION, an RGBA8 overlay NRD renders when CommonSettings::enableValidation
+	// is set (accumulated frames, history resets, antilag firing per pixel). Sized to the denoise that asked for it; shared
+	// by every consumer (one asks per frame). Same mid-frame destroy contract as the RTGI output.
+	virtual ImageHandle	GetNrdValidationImage() { return nrdValidSampleImage; }
+	bool				NrdEnsureValidation( int w, int h );
+	void				NrdDestroyValidation();
+	VkImage				nrdValidImage = VK_NULL_HANDLE;
+	VmaAllocation		nrdValidAlloc = NULL;
+	VkImageView			nrdValidView = VK_NULL_HANDLE;
+	ImageHandle			nrdValidSampleImage = 0;
+	int					nrdValidW = 0, nrdValidH = 0;
+	bool				nrdValidReady = false;
 	VkImage				rtgiOutSh1Image = VK_NULL_HANDLE;		// SH mode: OUT_DIFF_SH1 (same size / lifecycle as rtgiOutImage)
 	VmaAllocation		rtgiOutSh1Alloc = NULL;
 	VkImageView			rtgiOutSh1View = VK_NULL_HANDLE;
@@ -2691,6 +2704,7 @@ void VulkanBackend::Shutdown() {
 	NrdDestroy( true );
 	RtaoDestroyOutput();		// the H4 RTAO output image rides the same lifetime
 	RtgiDestroyOutput();		// H6b: the RT GI denoised-radiance output rides the same lifetime
+	NrdDestroyValidation();		// R0: the NRD validation overlay image too
 
 	// R2: acceleration structures + their backing buffers must die before VMA/device
 	DestroyRtScene();
@@ -2934,6 +2948,7 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	// mode and the debug view (which stands the apply down). dude_rtx 2 flips these through the preset.
 	mixB( r_rtReStirDI ); mixB( r_rtReStirDIApply ); mixB( r_rtReStirDICheckerboard );
 	mixB( r_rtReStirDICombineGI ); mixI( r_rtReStirDIDebug );
+	mixB( r_nrdSigma );							// R0: changes the NRD instance's denoiser table (NrdCreate rebuild)
 	// resolution scales (resize the gather / denoise / reflection / FSR targets)
 	mixF( r_fsrScale ); mixF( r_rtgiResScale ); mixF( r_rtaoResScale ); mixF( r_ssrResScale ); mixF( r_rtReflResScale );
 	mixF( r_rtReStirDIResScale );
@@ -6749,7 +6764,8 @@ recording here.
 ====================
 */
 bool VulkanBackend::NrdCreate( int w, int h ) {
-	if ( nrdInstance != NULL && nrdW == w && nrdH == h ) {
+	const bool wantSigma = r_nrdSigma.GetBool();
+	if ( nrdInstance != NULL && nrdW == w && nrdH == h && nrdSigma == wantSigma ) {
 		return true;
 	}
 	NrdDestroy( false );
@@ -6762,15 +6778,21 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 	// One instance hosts every denoiser; a given frame dispatches exactly ONE ReBLUR variant
 	// (RTAO occlusion OR GI diffuse, never both — the r_rtgi swap), so there is no two-denoiser
 	// resolution thrash or descriptor-pool conflict. REBLUR_DIFFUSE is the H6b GI denoiser.
-	const nrd::DenoiserDesc denoisers[] = {
-		{ NRD_ID_REBLUR_AO,    nrd::Denoiser::REBLUR_DIFFUSE_OCCLUSION },
-		{ NRD_ID_SIGMA_SHADOW, nrd::Denoiser::SIGMA_SHADOW },
-		{ NRD_ID_REBLUR_GI,    nrd::Denoiser::REBLUR_DIFFUSE },
-		{ NRD_ID_REBLUR_GI_SH, nrd::Denoiser::REBLUR_DIFFUSE_SH },		// ReSTIR DI SH mode (one of GI / GI_SH per frame)
-	};
+	// R0 (docs/rtx-nrd.md N0): SIGMA_SHADOW has had no dispatcher since H3 was abandoned, yet it cost its pipelines + a
+	// share of both pools on every (re)create (incl. the idle-rebuild on a settings change). It joins the table only
+	// behind r_nrdSigma (the per-light penumbra experiment); its identifier stays reserved.
+	nrd::DenoiserDesc denoisers[4];
+	uint32_t denoiserCount = 0;
+	denoisers[denoiserCount++] = { NRD_ID_REBLUR_AO,    nrd::Denoiser::REBLUR_DIFFUSE_OCCLUSION };
+	if ( wantSigma ) {
+		denoisers[denoiserCount++] = { NRD_ID_SIGMA_SHADOW, nrd::Denoiser::SIGMA_SHADOW };
+	}
+	denoisers[denoiserCount++] = { NRD_ID_REBLUR_GI,    nrd::Denoiser::REBLUR_DIFFUSE };
+	denoisers[denoiserCount++] = { NRD_ID_REBLUR_GI_SH, nrd::Denoiser::REBLUR_DIFFUSE_SH };		// ReSTIR DI SH mode (one of GI / GI_SH per frame)
+	nrdSigma = wantSigma;
 	nrd::InstanceCreationDesc icd = {};		// null callbacks -> NRD's own aligned malloc
 	icd.denoisers = denoisers;
-	icd.denoisersNum = sizeof( denoisers ) / sizeof( denoisers[0] );
+	icd.denoisersNum = denoiserCount;
 	if ( nrd::CreateInstance( icd, nrdInstance ) != nrd::Result::SUCCESS ) {
 		common->Warning( "NRD: CreateInstance failed" );
 		nrdInstance = NULL;
@@ -7512,6 +7534,82 @@ void VulkanBackend::RtgiDestroyOutput() {
 	rtgiOutReady = false;
 }
 
+/*
+====================
+VulkanBackend::NrdEnsureValidation / NrdDestroyValidation
+
+R0 (docs/rtx-restir-di.md Plan R0): the RGBA8 image NRD's validation pass renders into (OUT_VALIDATION,
+"RGBA8 or higher") when CommonSettings::enableValidation is set. Created on demand at the asking denoise's
+resolution and re-created on a size change; sampled by the debug overlay through the merge image table.
+Same mid-frame destroy contract as the RTGI output (retire list while a frame records).
+====================
+*/
+bool VulkanBackend::NrdEnsureValidation( int w, int h ) {
+	if ( nrdValidImage != VK_NULL_HANDLE && nrdValidW == w && nrdValidH == h ) {
+		return true;
+	}
+	NrdDestroyValidation();
+	VkImageCreateInfo ici = {};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &nrdValidImage, &nrdValidAlloc, NULL ), "vmaCreateImage(NRD validation)" ) ) {
+		nrdValidImage = VK_NULL_HANDLE;
+		return false;
+	}
+	VkImageViewCreateInfo vwi = {};
+	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vwi.image = nrdValidImage;
+	vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vwi.format = VK_FORMAT_R8G8B8A8_UNORM;
+	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	vwi.subresourceRange.levelCount = 1;
+	vwi.subresourceRange.layerCount = 1;
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &nrdValidView ), "vkCreateImageView(NRD validation)" ) ) {
+		NrdDestroyValidation();
+		return false;
+	}
+	nrdValidSampleImage = RegisterMergeSampleImage( nrdValidImage, nrdValidView, w, h );
+	nrdValidW = w;
+	nrdValidH = h;
+	nrdValidReady = false;
+	return true;
+}
+
+void VulkanBackend::NrdDestroyValidation() {
+	if ( nrdValidImage == VK_NULL_HANDLE && nrdValidView == VK_NULL_HANDLE ) {
+		return;
+	}
+	if ( frameOpen && !skipFrame ) {
+		retiredImages[frameIndex].push_back( { nrdValidImage, nrdValidAlloc, nrdValidView } );	// freed after this slot's fence
+		nrdValidView = VK_NULL_HANDLE;
+		nrdValidImage = VK_NULL_HANDLE;
+		nrdValidAlloc = NULL;
+	} else {
+		if ( device != VK_NULL_HANDLE ) {
+			vkDeviceWaitIdle( device );
+		}
+		if ( nrdValidView )  { vkDestroyImageView( device, nrdValidView, NULL ); nrdValidView = VK_NULL_HANDLE; }
+		if ( nrdValidImage ) { vmaDestroyImage( vma, nrdValidImage, nrdValidAlloc ); nrdValidImage = VK_NULL_HANDLE; nrdValidAlloc = NULL; }
+	}
+	if ( nrdValidSampleImage >= 1 && nrdValidSampleImage <= (ImageHandle)imageTable.size() ) {
+		imageTable[nrdValidSampleImage - 1].live = false;
+	}
+	InvalidateTextureSets();
+	nrdValidSampleImage = 0;
+	nrdValidW = nrdValidH = 0;
+	nrdValidReady = false;
+}
+
 bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	// bring-up observability: every failure branch says WHY once (the caller's debug
 	// overlay silently falls back to the raw rays, which masks a dead denoiser)
@@ -7585,6 +7683,10 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	cs.accumulationMode = ( a.reset || !nrdPrimed[denId] ) ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
 	cs.isMotionVectorInWorldSpace = false;
 	cs.isHistoryConfidenceAvailable = haveConf;			// H6f: feed IN_DIFF_CONFIDENCE (GI edge-ghosting antilag)
+	// R0: NRD's own validation overlay (OUT_VALIDATION) on request - the debug view that shows accumulated frames /
+	// history resets / antilag per pixel, so a lag problem is SEEN instead of inferred from the lit result
+	const bool validation = a.validation && NrdEnsureValidation( a.w, a.h );
+	cs.enableValidation = validation;
 	if ( nrd::SetCommonSettings( *nrdInstance, cs ) != nrd::Result::SUCCESS ) {
 		RTAO_FAIL( 4, "nrd::SetCommonSettings rejected the frame settings" );
 	}
@@ -7592,35 +7694,47 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	rs.hitDistanceParameters.A = a.hitDistA;		// MUST mirror rtao_ray.frag's normalization
 	rs.hitDistanceParameters.B = a.hitDistB;
 	rs.enableAntiFirefly = true;
-	// GI only (r_rtgiHistory): cap ReBLUR's accumulation window. This is the ONE lever we expose — it trades
-	// noise ("frying pixels" at short history) against how long a switched-off light or a stale bounce lingers
-	// (~this many frames). Aggressive antilag / fast-history clamping was tried to also kill motion trails, but
-	// on this 1-spp half-res signal it just made the GI DIM/flicker while strafing (it rejects history on any
-	// luminance change, including the natural variation under motion), which is worse than the mild residual
-	// smear — so the clamp/antilag stay at NRD defaults. maxAccumFrames applies to BOTH paths now: GI exposes
-	// it as r_rtgiHistory, RTAO as r_rtaoHistory (0 from either -> NRD's own default is kept).
+	// History length (r_rtaoHistory / r_rtgiHistory / r_rtReStirDIHistory, or their *Ms companions converted by the
+	// caller): cap ReBLUR's accumulation window. The ONE lever that trades noise ("frying pixels" at short history)
+	// against how long a switched-off light / a stale bounce / a moved occluder lingers (~this many frames).
+	// 0 = NRD's own default is kept.
 	if ( a.maxAccumFrames > 0 ) {
 		uint32_t hist = (uint32_t)a.maxAccumFrames;
 		if ( hist > 63 ) { hist = 63; }
 		rs.maxAccumulatedFrameNum = hist;
-		if ( rs.maxFastAccumulatedFrameNum > hist ) { rs.maxFastAccumulatedFrameNum = hist; }	// fast history must be <= main
 	}
-	// ReSTIR DI (docs/rtx-restir-di.md): spatial-cleanup overrides to fight the 1-spp noise NRD leaves on fine
-	// detail (edge-stopped) + moving silhouettes (thin history). Only applied when the caller sets them (>0);
-	// RTGI/RTAO pass 0 and keep NRD's own defaults, so those paths are untouched.
-	if ( a.giMode ) {
-		if ( a.prepassBlurRadius > 0.0f ) { rs.diffusePrepassBlurRadius = a.prepassBlurRadius; }
-		if ( a.maxBlurRadius     > 0.0f ) { rs.maxBlurRadius = a.maxBlurRadius; }
-		if ( a.historyFixFrameNum > 0 ) {
-			uint32_t hf = (uint32_t)a.historyFixFrameNum;
-			const uint32_t fastCap = ( rs.maxFastAccumulatedFrameNum > 0 ) ? rs.maxFastAccumulatedFrameNum - 1 : 0;
-			if ( hf > fastCap ) { hf = fastCap; }		// NRD: historyFixFrameNum must be < maxFastAccumulatedFrameNum
-			rs.historyFixFrameNum = hf;
-		}
-		if ( a.edgeStopScale > 0.0f ) {					// relax normal/plane rejection so detail edges blur more (grate-noise lever)
-			rs.lobeAngleFraction *= a.edgeStopScale;
-			rs.planeDistanceSensitivity *= a.edgeStopScale;
-		}
+	// R0 (docs/rtx-restir-di.md Plan R0 / rtx-nrd.md N0): the lag knobs, generic for RTAO / RTGI / DI. Each caller's
+	// cvar defaults to today's effective value (fast 6, clamp 2.0, stabilized = history, antilag on), so at defaults
+	// this block is byte-identical to the pre-R0 behaviour; the knobs exist for the measured A/Bs the plan lists.
+	// Aggressive antilag / fast-history clamping was once tried on RTGI's 1-spp half-res signal and made it DIM /
+	// flicker while strafing - that is why these are knobs with today's values, not new defaults.
+	if ( a.fastFrames > 0 ) { rs.maxFastAccumulatedFrameNum = (uint32_t)a.fastFrames; }
+	if ( rs.maxFastAccumulatedFrameNum > rs.maxAccumulatedFrameNum ) { rs.maxFastAccumulatedFrameNum = rs.maxAccumulatedFrameNum; }	// fast history must be <= main
+	if ( a.fastClampSigma > 0.0f ) { rs.fastHistoryClampingSigmaScale = a.fastClampSigma; }
+	if ( a.stabilizedFrames > 0 )      { rs.maxStabilizedFrameNum = (uint32_t)a.stabilizedFrames; }	// NRD clamps to main itself
+	else if ( a.stabilizedFrames < 0 ) { rs.maxStabilizedFrameNum = 0; }								// stabilization pass off
+	if ( a.antilagOff ) {
+		// "smaller values increase sensitivity": huge sigma scale + sensitivity = the luminance delta is swamped by the
+		// local variance and never fires. NRD: "Initial integration should be done with disabled antilag".
+		rs.antilagSettings.luminanceSigmaScale  = 1000.0f;
+		rs.antilagSettings.luminanceSensitivity = 1000.0f;
+	}
+	if ( a.giMode && a.returnHistoryLength ) {
+		rs.returnHistoryLengthInsteadOfOcclusion = true;	// .w = accumulated frames (RTGI / DI never read the AO there)
+	}
+	// Spatial-cleanup overrides (ReSTIR DI sets them to fight the 1-spp noise NRD leaves on fine detail + moving
+	// silhouettes; RTGI / RTAO pass 0 = NRD default). Generic since R0 so any consumer may tune them.
+	if ( a.prepassBlurRadius > 0.0f ) { rs.diffusePrepassBlurRadius = a.prepassBlurRadius; }
+	if ( a.maxBlurRadius     > 0.0f ) { rs.maxBlurRadius = a.maxBlurRadius; }
+	if ( a.historyFixFrameNum > 0 ) {
+		uint32_t hf = (uint32_t)a.historyFixFrameNum;
+		const uint32_t fastCap = ( rs.maxFastAccumulatedFrameNum > 0 ) ? rs.maxFastAccumulatedFrameNum - 1 : 0;
+		if ( hf > fastCap ) { hf = fastCap; }		// NRD: historyFixFrameNum must be < maxFastAccumulatedFrameNum
+		rs.historyFixFrameNum = hf;
+	}
+	if ( a.edgeStopScale > 0.0f ) {					// relax normal/plane rejection so detail edges blur more (grate-noise lever)
+		rs.lobeAngleFraction *= a.edgeStopScale;
+		rs.planeDistanceSensitivity *= a.edgeStopScale;
 	}
 	if ( a.giMode && a.checkerboard > 0 ) {
 		// H6g: NRD reconstructs the full-res diffuse from the horizontal checkerboard packed in rayRT's left
@@ -7642,6 +7756,9 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_VIEWZ]            = targetView( vz, vzAtt );
 	if ( haveConf ) {
 		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_CONFIDENCE] = conf->view;	// H6f
+	}
+	if ( validation ) {
+		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_VALIDATION] = nrdValidView;		// R0 debug overlay
 	}
 	if ( shMode ) {
 		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_SH0]  = targetView( ray, 0 );		// RGBA16F YCoCg radiance + hitdist
@@ -7724,7 +7841,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 
 	// inputs: SHADER_READ_ONLY -> GENERAL (NRD's descriptors are written with GENERAL);
 	// output: first use UNDEFINED -> GENERAL, then a WAR barrier vs last frame's sampling
-	VkImageMemoryBarrier pre[8] = {};		// + SH1 input / output in SH mode
+	VkImageMemoryBarrier pre[10] = {};		// + SH1 input / output in SH mode, + the validation overlay
 	uint32_t preCount = 0;
 	auto addPre = [&]( VkImage img, VkImageLayout oldL ) {
 		VkImageMemoryBarrier &b = pre[preCount++];
@@ -7749,6 +7866,10 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		addPre( ray->colorImage[a.shAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 		addPre( rtgiOutSh1Image,          outReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
 	}
+	if ( validation ) {
+		addPre( nrdValidImage, nrdValidReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
+		nrdValidReady = true;
+	}
 	vkCmdPipelineBarrier( cb,
 		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -7769,7 +7890,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	#undef RTAO_FAIL
 
 	// output -> fragment sampling; inputs back to SHADER_READ_ONLY for their other consumers
-	VkImageMemoryBarrier post[8] = {};		// + SH1 input / output in SH mode
+	VkImageMemoryBarrier post[10] = {};		// + SH1 input / output in SH mode, + the validation overlay
 	uint32_t postCount = 0;
 	auto addPost = [&]( VkImage img, VkImageLayout newL ) {
 		VkImageMemoryBarrier &b = post[postCount++];
@@ -7793,6 +7914,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		addPost( ray->colorImage[a.shAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 		addPost( rtgiOutSh1Image,          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	}
+	if ( validation ) { addPost( nrdValidImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }
 	// dst includes COMPUTE: FSR2 consumes the velocity image (and could consume others)
 	// from compute later in the frame
 	vkCmdPipelineBarrier( cb,

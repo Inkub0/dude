@@ -126,7 +126,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | cvar | default | what |
 |------|--------:|------|
 | `r_rtReStirDI` | 0 | master enable (bring-up; not preset-wired). VK + RT + velocity MRT. |
-| `r_rtReStirDIDebug` | 0 | 1 = blit the DI buffer (denoised when it ran, else raw) over the scene, LINEAR. |
+| `r_rtReStirDIDebug` | 0 | 1 = raw gather, 2 = denoised, **R0:** 3 = NRD validation overlay, 4 = accumulated history length ramp. |
 | `r_rtReStirDICandidates` | 0 | candidate lights per pixel before the WRS pick: **0 = every light** (exhaustive RIS, no candidate noise), `M > 0` = M uniform random draws (a rarely-drawn light reads dimmer: sparse spikes the denoiser clips). Clamp **0..128**. |
 | `r_rtReStirDIResScale` | 1 | gather/denoise resolution fraction (0.25..1), upscaled for display. Composes with checkerboard. |
 | `r_rtReStirDICheckerboard` | 0 | trace a half-pixel checkerboard (packed left), NRD reconstructs via a full-res guide pass + IN_MV. |
@@ -137,6 +137,12 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIHistoryFix` | 5 | `historyFixFrameNum`; moving-part lever. 0 = NRD default (3). |
 | `r_rtReStirDIBlurRadius` | 24 | `maxBlurRadius` px. 0 = NRD default (30). |
 | `r_rtReStirDIEdgeStop` | 0.1 | edge-stopping scale; grate lever, costs detail. 0/1 = no scaling. |
+| `r_rtReStirDIHistoryMs` | 0 | **R0** history window in ms (0 = `r_rtReStirDIHistory` frames); converted per frame from a 0.2 s low-passed FPS; fast history scales along. |
+| `r_rtReStirDIFastHistory` | 6 | **R0** ReBLUR `maxFastAccumulatedFrameNum` (Remix direct: 1). |
+| `r_rtReStirDIFastClamp` | 2.0 | **R0** ReBLUR `fastHistoryClampingSigmaScale` [1;3] (NRD sample: 1.5). |
+| `r_rtReStirDIStabilize` | 63 | **R0** ReBLUR `maxStabilizedFrameNum` (clamped to history); 0 = stabilization pass off. |
+| `r_rtReStirDIAntilag` | 1 | **R0** ReBLUR built-in antilag; 0 = inert (NRD's recommended initial-integration baseline). |
+| `r_nrdSigma` | 0 | **R0** keep `SIGMA_SHADOW` in the NRD instance (never dispatched since H3); rebuilds NRD. |
 
 Defaults are the user-tuned compromise (2026-10-07/08). All `CVAR_ARCHIVE`, so a user's own values persist in
 config regardless of these source defaults. `hitDist` scale (1024) is in-source only.
@@ -584,7 +590,23 @@ R1 and may run in parallel; R3 needs R1 (its disocclusion boost reads the histor
 that lives in the shared `RtaoDenoise` path is built ONCE for RTAO / RTGI / DI (N0 with R0, N1 with R4); the DI-named
 cvars below get RTAO / RTGI siblings at today's values. Amendments are marked **[A]**.
 
-### R0 - diagnostics + zero-risk fixes (F4, F6) - small
+### R0 - diagnostics + zero-risk fixes (F4, F6) - small - **IMPLEMENTED 2026-10-12** (branch `feat/rtx-restir-di-r0-diagnostics`, USER TEST PENDING)
+Shipped as planned with these notes: the cut reset is a RhiWorld helper (`RB_RHI_NrdHistoryReset`, the backend cannot see the
+temporal camera) that runs the once-per-frame discontinuity classify ITSELF (factored into `RB_RHI_TemporalClassify`) so the
+NRD passes - which run before the SSR / FSR2 consumers that used to classify first - see THIS frame's cut, not last frame's;
+`RB_RHI_CinematicView()` is "a cinematic camera is the main view", not a cut, so rotation-only shot cuts are a follow-up
+(an angle test next to `r_temporalResetDist`). The seconds-based history scales the FAST history with the main window
+(keeps NRD's 5-7x ratio) and clamps stabilized to main. The validation / history-length views are DI-only for now
+(`r_rtReStirDIDebug 3 / 4`); the args are generic, so RTGI / RTAO views are one line each when wanted. `returnHistoryLength`
+is set for DI only (RTGI byte-identical). ImGui untouched (house rule). Cvars added - all at today's effective values:
+`r_rtReStirDIHistoryMs` 0, `r_rtReStirDIFastHistory` 6, `r_rtReStirDIFastClamp` 2.0, `r_rtReStirDIStabilize` 63,
+`r_rtReStirDIAntilag` 1, `r_rtaoHistoryMs` 0, `r_rtaoFastClamp` 2.0, `r_rtaoHistoryFix` 3, `r_rtgiHistoryMs` 0,
+`r_rtgiFastClamp` 2.0, `r_nrdSigma` 0 (in the gfx-config signature: it rebuilds the NRD instance).
+**Test:** (a) `r_rtReStirDI 1` defaults -> lit scene unchanged vs master; (b) teleport (`noclip` + a long jump, or a map's
+teleporter) with `r_rtReStirDIDebug 4` -> the ramp goes black for one frame everywhere, then refills; (c) `r_rtReStirDIDebug 3`
+-> NRD's overlay renders (coloured accumulated-frames field; NRD: keep it "in the violet zone" under stable lighting);
+(d) RTAO A/B `r_rtaoFastClamp 1.1` + `r_rtaoHistoryFix 2` on an NPC walking past a wall: AO trail shorter, no new sparkle;
+(e) `r_rtReStirDIHistoryMs 266` at a 60 Hz cap then uncapped: the same look at both rates; (f) `r_vkGpuTime 2` unchanged.
 Files: `RhiWorld.cpp` (`RB_RHI_ReStirDIPass`, `RB_RHI_RtgiPass`), `VulkanBackend.cpp` (`RtaoDenoise`, `RtaoDenoiseArgs`),
 `Dhewm3SettingsMenu.cpp` (ReSTIR group), `restir_di_debug.frag`.
 1. **Camera-cut reset** **[A: shared]**: `a.reset || rhiTemporalCam.historyReset` INSIDE `RtaoDenoise`, so RTAO, RTGI and

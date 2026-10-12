@@ -167,7 +167,7 @@ are ONE change in the shared path, not three.
 
 ### Plan N0-N3 (folded into the R stages where they share code; NOT started)
 
-- **N0 - with R0 (shared path, zero-risk):** cut reset, validation / history-length views, seconds-based history, the
+- **N0 - with R0 (shared path, zero-risk) - IMPLEMENTED 2026-10-12 with R0 (branch `feat/rtx-restir-di-r0-diagnostics`, user test pending):** cut reset reaches RTAO / RTGI / DI through `RB_RHI_NrdHistoryReset`; `RtaoDenoiseArgs` gained generic `fastFrames / fastClampSigma / stabilizedFrames / antilagOff / returnHistoryLength / validation`; cvars `r_rtaoHistoryMs / r_rtaoFastClamp / r_rtaoHistoryFix / r_rtgiHistoryMs / r_rtgiFastClamp / r_nrdSigma` (SIGMA now OUT of the instance by default). Validation / history views are DI-only so far. Original scope: cut reset, validation / history-length views, seconds-based history, the
   generic fast/clamp/stabilize fields with per-feature cvars at today's values; RTAO A/B `r_rtaoFastClamp 1.1` +
   `r_rtaoHistoryFix 2` (the NRD occlusion preset) for AO trails under moving occluders. Measure with `r_vkGpuTime 2`;
   acceptance = byte-identical at defaults, no AO/GI ghost after a cinematic cut or teleport.

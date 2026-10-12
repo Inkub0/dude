@@ -1005,6 +1005,9 @@ extern idCVar r_rtaoRadius;					// RTAO ray length (world units)
 extern idCVar r_rtaoResScale;			// RTAO render/denoise resolution fraction (bilinear upscale in the resolve)
 extern idCVar r_rtaoIntensity;				// RTAO strength (1.0 neutral; r_ssaoIntensity stays GTAO-only)
 extern idCVar r_rtaoHistory;				// RTAO denoiser (ReBLUR) max accumulated history frames; 0 = NRD default (~30)
+extern idCVar r_rtaoHistoryMs;				// R0: RTAO history in ms (0 = frames)
+extern idCVar r_rtaoFastClamp;				// R0: RTAO NRD fastHistoryClampingSigmaScale (2.0 = NRD default; 1.1 = NRD's occlusion value)
+extern idCVar r_rtaoHistoryFix;				// R0: RTAO NRD historyFixFrameNum (3 = NRD default)
 extern idCVar r_skinnedMotionVectors;		// GPU-skinned characters write per-bone motion into the velocity buffer
 extern idCVar r_rtaoDebug;					// RTAO debug view (1 raw rays, 2 denoised)
 extern idCVar r_rtReStirDI;					// H7 ReSTIR DI: reservoir resampling of the scene lights (docs/rtx-restir-di.md); Stage 1 = unshadowed RIS pass
@@ -1021,6 +1024,12 @@ extern idCVar r_rtReStirDIHistoryFix;		// ReSTIR DI NRD historyFixFrameNum: spat
 extern idCVar r_rtReStirDIBlurRadius;		// ReSTIR DI NRD maxBlurRadius (px): base spatial denoise radius
 extern idCVar r_rtReStirDIEdgeStop;			// ReSTIR DI NRD edge-stopping scale (lobeAngle + planeDistance); >1 blurs across detail edges (grates), costs detail
 extern idCVar r_rtReStirDIHistory;			// ReSTIR DI NRD ReBLUR history length (maxAccumFrames); DI's own, mirrors RTGI's r_rtgiHistory (2..63)
+extern idCVar r_rtReStirDIHistoryMs;		// R0: DI history in ms (0 = frames)
+extern idCVar r_rtReStirDIFastHistory;		// R0: DI NRD maxFastAccumulatedFrameNum (6 = NRD default)
+extern idCVar r_rtReStirDIFastClamp;		// R0: DI NRD fastHistoryClampingSigmaScale (2.0 = NRD default)
+extern idCVar r_rtReStirDIStabilize;		// R0: DI NRD maxStabilizedFrameNum (63 = default, clamped to history; 0 = off)
+extern idCVar r_rtReStirDIAntilag;			// R0: DI NRD built-in antilag on/off (A/B baseline)
+extern idCVar r_nrdSigma;					// R0: keep SIGMA_SHADOW in the NRD instance (never dispatched since H3)
 extern idCVar r_rtReStirDICheckerboard;		// ReSTIR DI full-res checkerboard: trace half the pixels (packed left), NRD reconstructs; ~half the rays
 extern idCVar r_rtReStirDIResScale;			// ReSTIR DI gather/denoise resolution fraction (0.25..1); upscaled for display. Composes with checkerboard
 extern idCVar r_rtReStirDIBilateralUpscale;	// ReSTIR DI: depth+normal-aware upscale of a reduced-res gather (vs plain bilinear); inert at 100%
@@ -1029,6 +1038,8 @@ extern idCVar r_rtgiRadius;					// RT GI gather ray length (world units)
 extern idCVar r_rtgiResScale;				// RT GI gather/denoise resolution fraction (biggest cost lever)
 extern idCVar r_rtgiCheckerboard;			// RT GI: full-res horizontal checkerboard gather + NRD reconstruct (sharp edges vs resScale blur)
 extern idCVar r_rtgiHistory;				// RT GI denoiser (ReBLUR) max accumulated history frames; lower = less ghosting, more noise
+extern idCVar r_rtgiHistoryMs;				// R0: RTGI history in ms (0 = frames)
+extern idCVar r_rtgiFastClamp;				// R0: RTGI NRD fastHistoryClampingSigmaScale (2.0 = NRD default)
 extern idCVar r_rtgiConfidence;				// RT GI denoiser history-confidence sensitivity (IN_DIFF_CONFIDENCE); kills edge ghosting without flat dimming; 0 = off
 extern idCVar r_rtgiLightScale;				// RT GI: brightness of the diffuse lighting at a bounce hit
 extern idCVar r_rtgiEmissive;				// RT GI: self-illuminated surface contribution at a bounce hit
