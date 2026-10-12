@@ -5750,6 +5750,10 @@ static float RB_RHI_SceneLightForwardWeight( const viewDef_t *viewDef, int light
 
 // Shared by RT reflections (RR16) and volumetric lighting (docs/volumetric-lighting.md): the first caller in
 // a view fills the slot, later callers in the same view get the cached address/count.
+// Why an IN-VIEW light (one the frontend lit) did not reach the scene-light buffer this view - the coverage line
+// (r_shadowMapDebug) prints them next to "not-in-buffer" so a forward residue under the DI apply can be read off.
+static int s_diSkipDark = 0, s_diSkipSuppressed = 0, s_diSkipCapacity = 0, s_diSkipNoShader = 0, s_diSkipFogBlendAmb = 0;
+
 static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsigned long long *outAddr ) {
 	static int                 cacheCount = 0;
 	static unsigned long long  cacheAddr  = 0;
@@ -5763,6 +5767,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	s_sceneLightBounds.Clear();
 	s_sceneFogCount = 0;
 	*outAddr = 0;
+	s_diSkipDark = s_diSkipSuppressed = s_diSkipCapacity = s_diSkipNoShader = s_diSkipFogBlendAmb = 0;
 	if ( viewDef == NULL || viewDef->renderWorld == NULL ) {
 		return 0;
 	}
@@ -5808,7 +5813,11 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	}
 	static RtReflLightGPU fogs[ SCENE_FOG_MAX ];
 	int nFog = 0;
-	for ( int i = 0; i < rw->lightDefs.Num() && n < RT_REFL_MAX_LIGHTS - SCENE_FOG_MAX; i++ ) {
+	for ( int i = 0; i < rw->lightDefs.Num(); i++ ) {
+		if ( n >= RT_REFL_MAX_LIGHTS - SCENE_FOG_MAX ) {
+			if ( viewLightOf[ i ] != NULL ) { s_diSkipCapacity++; }		// in view, no room left
+			continue;
+		}
 		const idRenderLightLocal *ld = rw->lightDefs[ i ];
 		if ( ld == NULL ) { continue; }
 		const idMaterial *ls = ld->lightShader;
@@ -5835,13 +5844,14 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			}
 			continue;
 		}
-		if ( ls == NULL || ls->IsBlendLight() || ls->IsAmbientLight() ) { continue; }
+		if ( ls == NULL ) { if ( viewLightOf[ i ] != NULL ) { s_diSkipNoShader++; } continue; }
+		if ( ls->IsBlendLight() || ls->IsAmbientLight() ) { if ( viewLightOf[ i ] != NULL ) { s_diSkipFogBlendAmb++; } continue; }
 		// honour the per-view light gating exactly like the frontend (tr_light.cpp): the player's THIRD-person
 		// flashlight / muzzle flash is suppressed in their own view, first-person weapon lights exist only in
 		// it. Skipping this put the body-attached world flashlight (it bobs with the walk cycle) in the buffer.
 		const int viewID = viewDef->renderView.viewID;
-		if ( ld->parms.suppressLightInViewID && ld->parms.suppressLightInViewID == viewID ) { continue; }
-		if ( ld->parms.allowLightInViewID && ld->parms.allowLightInViewID != viewID ) { continue; }
+		if ( ld->parms.suppressLightInViewID && ld->parms.suppressLightInViewID == viewID ) { if ( viewLightOf[ i ] != NULL ) { s_diSkipSuppressed++; } continue; }
+		if ( ld->parms.allowLightInViewID && ld->parms.allowLightInViewID != viewID ) { if ( viewLightOf[ i ] != NULL ) { s_diSkipSuppressed++; } continue; }
 		const float lr = ld->parms.lightRadius.Length();
 		idVec3 cullOrg = ld->globalLightOrigin;					// bounding sphere of the real light volume (frustum
 		float  cullRad = ( lr > 1.0f ) ? lr : 320.0f;			// hull when built: a spot does not use lightRadius)
@@ -5880,7 +5890,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		} else {									// parametric (the usual case): the light's base RGB shader parms
 			col.Set( ld->parms.shaderParms[SHADERPARM_RED], ld->parms.shaderParms[SHADERPARM_GREEN], ld->parms.shaderParms[SHADERPARM_BLUE] );
 		}
-		if ( col[0] < 0.001f && col[1] < 0.001f && col[2] < 0.001f ) { continue; }	// dark / off (the frontend's own threshold)
+		if ( col[0] < 0.001f && col[1] < 0.001f && col[2] < 0.001f ) { if ( vl != NULL ) { s_diSkipDark++; } continue; }	// dark / off (the frontend's own threshold)
 		// order: projected/parallel (the authored feature lights) first, then nearest first - consumers that
 		// keep only a short candidate list per ray (volumetrics) must not lose a spot to a crowd of fill lights
 		sortKey[ n ] = ( ( ld->parms.pointLight && !ld->parms.parallel ) ? 1.0e9f : 0.0f )
@@ -11081,8 +11091,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	ictx.lightForwardWeight = 1.0f;
 	if ( r_shadowMapDebug.GetInteger() > 0 && dbgDiCovered > 0 ) {
 		common->Printf( "ReSTIR DI: %d of %d lit lights DI-covered this view (forward opaque draws + shadow work skipped)"
-			" | still forward: ambient %d, fog %d, blend %d, no-lightDef %d, weapon %d, fast %d, crossfade %d, not-in-buffer %d\n",
-			dbgDiCovered, dbgLit, dbgUncAmbient, dbgUncFog, dbgUncBlend, dbgUncNoDef, dbgUncWeapon, dbgUncFast, dbgUncCrossfade, dbgUncNotInBuffer );
+			" | still forward: ambient %d, fog %d, blend %d, no-lightDef %d, weapon %d, fast %d, crossfade %d, not-in-buffer %d"
+			" (in-view lights the gather skipped: dark %d, suppressed %d, capacity %d, no-shader %d, fog/blend/ambient %d)\n",
+			dbgDiCovered, dbgLit, dbgUncAmbient, dbgUncFog, dbgUncBlend, dbgUncNoDef, dbgUncWeapon, dbgUncFast, dbgUncCrossfade, dbgUncNotInBuffer,
+			s_diSkipDark, s_diSkipSuppressed, s_diSkipCapacity, s_diSkipNoShader, s_diSkipFogBlendAmb );
 	}
 
 	RB_RHI_LogShadowMapSummary( dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,
