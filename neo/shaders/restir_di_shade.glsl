@@ -30,8 +30,15 @@ struct DiSurface {
 // Reconstruct the surface under SCREEN pixel sfrag (internal-res pixel centre, 0.5 offsets). Returns false for sky /
 // a degenerate normal (the caller zeroes its output). Mirrors the gather's original reconstruction exactly.
 bool diSurfaceAt( vec2 sfrag, bool applyMode, bool pbr, out DiSurface s, out float rawDepth, out vec4 nt ) {
-	rawDepth = texture( u_currentDepth, sfrag * u_depthTexRecip.xy ).x;
-	nt = texture( u_normalBuffer, sfrag * u_screenCorrection.xy );
+	// NEAREST texel for the depth and the normal, never a filtered blend: at a silhouette a linear sample mixes the near
+	// and far surface into a point floating between them, and the mix shifts with the jitter every frame - so the stored
+	// previous point and the current one never agree there, and the R3a boost read every static edge as disoccluded
+	// (white edge bands in debug view 7, +1.5 ms of rays standing still, 2026-10-12). Nearest puts every point on a real
+	// surface, which the shadow ray origins want anyway; the R1 gradient's same-surface test is exact at edges too.
+	ivec2 dsz = textureSize( u_currentDepth, 0 );
+	ivec2 nsz = textureSize( u_normalBuffer, 0 );
+	rawDepth = texelFetch( u_currentDepth, clamp( ivec2( floor( sfrag * u_depthTexRecip.xy * vec2( dsz ) ) ), ivec2( 0 ), dsz - 1 ), 0 ).x;
+	nt = texelFetch( u_normalBuffer, clamp( ivec2( floor( sfrag * u_screenCorrection.xy * vec2( nsz ) ) ), ivec2( 0 ), nsz - 1 ), 0 );
 	s.vz = 1.0 / ( min( rawDepth, 0.9994 ) * depth_consts.x + depth_consts.y );	// negative view z
 	s.applyMode = applyMode;
 	s.pbr = pbr;

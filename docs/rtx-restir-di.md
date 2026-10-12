@@ -935,6 +935,12 @@ young only when NO tap is this surface; the hysteresis bit comes from the matchi
 in a still view it must be black except the weapon and the screen edges. **Retest:** gather still, boost 4 vs 0 (expect equal),
 then the wake test.
 
+**R3a, the edge bands (user: view 7 white around ALL geometry, still):** the 2x2 footprint was not enough because the gather's
+surface reconstruction sampled the depth / normal buffers LINEARLY - at a silhouette the point is a blend of the near and far
+surface whose weight shifts with the jitter every frame, so no stored tap ever matched. `diSurfaceAt` now takes the nearest
+texel for depth and normal (the gather, the gradient and the boost all go through it): every point sits on a real surface, the
+shadow-ray origins too. **Retest:** view 7 black when still (weapon / screen edges aside), gather boost 4 == 0 still.
+
 **R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
 on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:
 1. **Three ways to be young, tested in the gather (`diBoostWanted`)**: the pixel reprojects off screen; NRD's history length
