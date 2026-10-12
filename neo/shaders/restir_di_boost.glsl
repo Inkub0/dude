@@ -33,14 +33,18 @@ int diBoostWanted( vec2 sfrag, in DiSurface S, out float ageOut ) {
 		if ( !( h >= hOn ) ) { return 1; }									// young by NRD's own count (NaN / garbage counts as young)
 	}
 	if ( prevCb < 0 ) { return 0; }											// no side data: nothing to compare against
-	// the same-surface test over the 2x2 previous pixels the reprojection straddles (NRD's bilinear footprint; a tap not
-	// traced last frame under checkerboard holds nothing and is skipped)
+	// the same-surface test over the previous pixels around the reprojection (a tap not traced last frame under
+	// checkerboard holds nothing and is skipped)
 	float expectedPrevVz = ( u_prevMvpMatrix * vec4( S.Pw, 1.0 ) ).z;
 	float tol  = 0.1 * max( abs( expectedPrevVz ), 1.0 );
-	ivec2 base = clamp( ivec2( floor( prevUV * vec2( res ) - 0.5 ) ), ivec2( 0 ), res - 2 );
+	// 3x3 around the reprojected pixel, not the bilinear 2x2: under checkerboard only half the taps hold anything, and a
+	// background pixel right behind a nearer object had both its traced taps ON that object - "revealed" every frame as the
+	// jitter shifted, a 2-px band along every silhouette that passed the cluster rule and was then held (1.5 ms standing
+	// still, 2026-10-12). With 9 taps the far side of an edge always has a traced tap of its own surface.
+	ivec2 base = clamp( prevPix - 1, ivec2( 0 ), res - 3 );
 	bool  anyMatch = false, anyNearer = false;
-	for ( int t = 0; t < 4; t++ ) {
-		ivec2 pp = base + ivec2( t & 1, t >> 1 );
+	for ( int t = 0; t < 9; t++ ) {
+		ivec2 pp = base + ivec2( t % 3, t / 3 );
 		ivec2 rp = pp;
 		if ( prevCb > 0 ) {
 			if ( ( pp.x & 1 ) != ( ( pp.y + prevCb - 1 ) & 1 ) ) { continue; }	// not traced last frame
