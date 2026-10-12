@@ -751,7 +751,7 @@ Files: NEW `restir_di_gradient.frag` + `restir_di_gradient_filter.frag` + `resti
    confidence for RELAX (`gradient *= gradient`). Both rules live in the shared path keyed on the active denoiser.
 6. **Retire** the luminance confidence (`r_rtReStirDIConfidence`, the `rtgi_confidence` reuse) for DI once R1 wins the
    A/B; RTGI keeps its own.
-7. **R1b - narrow the fast-light rule**: with gradients live, set `r_rtReStirDIDynamicForward` to cover ONLY
+7. **R1b - narrow the fast-light rule** - **IMPLEMENTED 2026-10-12** (branch `feat/rtx-restir-di-r1b-fast-light-narrow`, USER TEST PENDING): `r_rtReStirDIDynamicForward` is now an integer, **2** (default) = weapon lights only, 1 = the old full rule set for the A/B, 0 = none. The luminance / appeared tracking and the crossfade bookkeeping still run (a flip can only come from `allowLightInViewID` changing now, so the crossfade is effectively idle - R6 decides its removal). **Test:** fire the plasma gun / rocket launcher down a corridor: the projectile's light sweeps the walls through DI with no trail and no blink; a swinging / carried light and a strobe (> 20 % flicker) stay in DI without the 16-frame forward handover; `r_shadowMapDebug 1` "N of M lit lights DI-covered" should now be M minus the weapon light; A/B with `1`. Original plan: with gradients live, set `r_rtReStirDIDynamicForward` to cover ONLY
    `allowLightInViewID` weapon lights (new value 2), keep 1 as the fallback. Re-test the handover crossfade
    (`RB_RHI_SceneLightForwardWeight`) and the 16-frame hysteresis; the expectation from RTXDI/Remix is that both become
    unnecessary and are removed at R6 (a gradient reset is per-pixel and per-frame, a path flip is per-light and 3 tau).

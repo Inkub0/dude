@@ -5880,9 +5880,13 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				if ( appeared || recolored ) { t.lastChangeFrame = now; }
 				t.lastSeenFrame = now;
 				t.lum = lum;
+				// R1b (docs/rtx-restir-di.md Plan R1): mode 2 keeps ONLY the first-person weapon lights forward - with the R1 gradient
+				// confidence resetting history exactly where a light moved / switched / appeared, the other rules (and the path
+				// flips + crossfade they cause) are no longer needed. Mode 1 = the full pre-gradient rule set, kept for the A/B.
+				const bool weaponOnly = r_rtReStirDIDynamicForward.GetInteger() == 2;
 				diFast = ( ld->parms.allowLightInViewID != 0 )				// first-person flashlight / muzzle flash
-				      || ( now - t.lastChangeFrame ) <= DI_FAST_HYST_FRAMES	// (re)appeared or changed colour recently
-				      || ( vl != NULL && RB_RHI_LightIsMoving( vl ) );		// pose moved recently (projectiles, swinging / carried lights)
+				      || ( !weaponOnly && ( now - t.lastChangeFrame ) <= DI_FAST_HYST_FRAMES )	// (re)appeared or changed colour recently
+				      || ( !weaponOnly && vl != NULL && RB_RHI_LightIsMoving( vl ) );		// pose moved recently (projectiles, swinging / carried lights)
 				// Handover crossfade (RB_RHI_SceneLightForwardWeight): a light that flips path while continuously present
 				// cannot just switch - DI's denoiser has no history for a light that was forward (it ramps in over the
 				// accumulation), and still holds one that just went forward (it decays out). Record the flip; the forward
