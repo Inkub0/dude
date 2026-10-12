@@ -123,7 +123,7 @@ void main() {
 				if ( traced ) {
 					vec4 side = texelFetch( u_curSide, rp, 0 );
 					curLum = texelFetch( u_curViewZ, rp, 0 ).y;				// 0 when no light was chosen (side.w = 0)
-					curRowPlus1 = uint( floor( side.w + 0.25 ) );			// R3a keeps its boost bit in the fraction (+0.5)
+					curRowPlus1 = uint( floor( side.w + 0.1 ) );			// R3a keeps its boost reason in the fraction (0.25 / 0.5 / 0.75): floor it off
 				}
 			}
 
@@ -145,7 +145,8 @@ void main() {
 			float expectedPrevVz = ( u_prevMvpMatrix * vec4( S.Pw, 1.0 ) ).z;
 			if ( abs( expectedPrevVz - pvz.x ) > 0.1 * max( abs( expectedPrevVz ), 1.0 ) ) { continue; }
 			vec4  pside = texelFetch( u_prevSide, readPix, 0 );
-			uint  prevRowPlus1 = uint( floor( pside.w + 0.25 ) );		// R3a boost bit in the fraction: floor it off
+			uint  prevRowPlus1 = uint( floor( pside.w + 0.1 ) );		// R3a boost reason in the fraction: floor it off (a +0.25 guard misread 0.75 as the NEXT row -
+																		// a false light change, confidence 0, NRD history pinned, the pixel boosted forever: red trails)
 			float prevLum = ( prevRowPlus1 != 0u ) ? pvz.y : 0.0;			// a valid surface with no light last frame counts as dark
 
 			float score = max( prevLum, max( curLum, 0.0 ) );
