@@ -10885,7 +10885,11 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 			ictx.lightDiCovered = diCovered && ictx.lightForwardWeight <= 0.001f;	// purely DI: skip all forward work
 			if ( ictx.lightDiCovered ) {
 				RB_RHI_ResetLightShadowState();
-				ictx.lightRtPoint = ( ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0 );
+				// the weapon's inline ray ONLY for a light that may shadow at all (noShadows parm / a shader that casts
+				// none): the gather skips the ray for DUDE_LIGHT_NOSHADOWS lights and the normal path never shadows them,
+				// but this branch traced for every covered light - a noShadows room light then blacked the weapon
+				// wherever a wall or the player's own body sat between the gun and the light (2026-10-12)
+				ictx.lightRtPoint = ( cls.lightMayShadow && ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0 );
 				ictx.lightRange = cls.isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
 				dbgDiCovered++;
 			} else {

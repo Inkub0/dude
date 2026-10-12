@@ -900,6 +900,16 @@ mover path (two different points). Fixed: static = the velocity's on-screen leng
 velocity is only the jitter delta). **Test:** view 5 white in a static scene WITH FSR2 (the R1 acceptance), view 3 calm,
 flashlight circle still shows, NPC trailing edge still resets.
 
+**Weapon dark under the DI apply - the REAL cause (2026-10-12, found with `r_vkValidation 1` + the user's "it depends on where the
+weapon is, sometimes cut as if by a scissor"):** the covered-light branch gave the weapon's forward draw the inline shadow ray
+for EVERY covered light, including `noShadows` lights (parm or shader) that the normal path never shadows and the gather skips
+the ray for (`DUDE_LIGHT_NOSHADOWS`). A noShadows room light then blacked the gun wherever a wall or the player's own body sat
+between it and the light - position dependent, straight "scissor" cuts along wall planes. Fixed: `lightRtPoint` only when
+`cls.lightMayShadow`. The earlier unit-7/8 story was a coincidence (the DI pass zeroes every unit when it ends). Two validation
+errors fixed on the way: the RG32F side copy reused the RG16F `smaa_copy` pipeline (colour-only RG16F / RG32F and the RGBA16F-led
+MRTs now have their own pass classes), and NRD left `IN_DIFF_CONFIDENCE` in GENERAL (no post-barrier) so next frame's confidence
+pass sampled it in the wrong layout.
+
 **R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
 on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:
 1. **Three ways to be young, tested in the gather (`diBoostWanted`)**: the pixel reprojects off screen; NRD's history length

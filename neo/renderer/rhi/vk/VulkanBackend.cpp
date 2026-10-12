@@ -7966,6 +7966,8 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	addPost( norm->colorImage[nmAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	if ( !mvScratch ) { addPost( vel.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// scratch path left velocity in SHADER_READ_ONLY
 	addPost( outImg,              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	if ( haveConf ) { addPost( conf->image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// else it stays GENERAL and next frame's
+																						// confidence pass samples / targets it wrongly (validation 09600)
 	if ( shMode ) {
 		addPost( ray->colorImage[a.shAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 		addPost( rtgiOutSh1Image,          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
@@ -11021,8 +11023,14 @@ void VulkanBackend::DestroyAllTargets() {
 // pass-incompatible (different color format), so they must be distinct cache keys.
 uint8_t VulkanBackend::PassClassFor( VkFormat colorFmt, bool hasDepth, int colorCount ) const {
 	if ( colorFmt == VK_FORMAT_R16G16B16A16_SFLOAT ) {
-		return hasDepth ? 2 : 3;			// HDR scene buffer / RGBA16F color-only (AA ping, SSR)
+		if ( hasDepth ) { return 2; }		// HDR scene buffer
+		// RGBA16F-led MRTs (RTGI ray+guides: RGBA16F+R16F+RGBA16F; ReSTIR DI gather: RGBA16F+RG32F+RGBA16F+RGBA16F) are
+		// distinct attachment layouts from the single RGBA16F target: their own classes, never aliased with 3
+		return colorCount >= 4 ? 14 : ( colorCount >= 2 ? 13 : 3 );	// 3 = RGBA16F color-only (AA ping, SSR)
 	}
+	if ( colorFmt == VK_FORMAT_R16G16_SFLOAT ) { return 11; }		// RG16F color-only (velocity copies): its own class, not RGBA8's 4
+	if ( colorFmt == VK_FORMAT_R32G32_SFLOAT ) { return 12; }		// RG32F color-only (ReSTIR DI side copy): a pipeline built for RG16F is
+																	// render-pass-incompatible here (validation VUID 02684, 2026-10-12)
 	if ( colorFmt == VK_FORMAT_R16_SFLOAT ) {
 		// 9 = the RTAO ray + guide MRT (R16F + R16F + RGBA16F): a different attachment layout, so its
 		// pipelines MUST NOT share a cache key with the single R16F class
