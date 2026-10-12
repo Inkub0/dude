@@ -493,10 +493,6 @@ static bool  rhiPrepassWeaponDeferred = false;	// this view's phase-0 prepass sk
 static bool  rhiWorldDepthThisView = false;		// globalImages->worldDepthImage holds this view's world-only depth
 static bool  rhiReStirDIApplyThisView = false;		// Stage D (r_rtReStirDIApply): DI LIGHTS this view - the apply runs and the forward loop skips the covered lights' opaque draws
 static bool  rhiReStirDIAppliedThisView = false;	// the additive apply already ran this view (idempotent across the split / fallback call sites)
-static int   rhiDbgWeaponDrawsCovered = 0;			// diagnostic: view-weapon interaction draws under DI-covered lights (r_shadowMapDebug line)
-static int   rhiDbgWeaponZfillPhase1 = 0;			// diagnostic: weapon surfaces the deferred depth fill (phase 1) drew this view
-static int   rhiDbgWeaponGbufPhase1 = 0;			// diagnostic: weapon surfaces the deferred normal prepass (phase 1) drew this view
-static bool  rhiDbgMergedDepth = false;
 static rhi::RenderTargetHandle rhiReStirDIConfRT = 0;	// DI history-confidence (R16F), reusing rtgi_confidence.frag
 static int   rhiReStirDIConfW = 0, rhiReStirDIConfH = 0;
 static rhi::RenderTargetHandle rhiReStirDIGuideRT = 0;	// checkerboard full-res NRD guides (viewZ/normal), reusing rtgi_guides.frag
@@ -1992,7 +1988,6 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	     && !din->surf->space->weaponDepthHack && din->surf->space->modelDepthHack == 0.0f ) {
 		return;
 	}
-	if ( ictx.lightDiCovered && din->surf->space->weaponDepthHack ) { rhiDbgWeaponDrawsCovered++; }	// weapon-dark hunt diagnostic
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	memcpy( parms.mvpMatrix, ictx.mvp, sizeof( parms.mvpMatrix ) );
@@ -2506,7 +2501,6 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef, int p
 		// ReSTIR DI world-only G-buffer: phase 0 skips the view weapon, phase 1 draws only it
 		if ( phase == 0 && surf->space->weaponDepthHack ) { continue; }
 		if ( phase == 1 && !surf->space->weaponDepthHack ) { continue; }
-		if ( phase == 1 ) { rhiDbgWeaponZfillPhase1++; }		// counted before the coverage / texgen filters below (diagnostic)
 
 		if ( !shader->IsDrawn() ) {
 			continue;
@@ -4733,7 +4727,6 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		// ReSTIR DI world-only G-buffer: phase 0 skips the view weapon, phase 1 draws only it
 		if ( phase == 0 && surf->space->weaponDepthHack ) { rhiPrepassWeaponDeferred = true; continue; }
 		if ( phase == 1 && !surf->space->weaponDepthHack ) { continue; }
-		if ( phase == 1 ) { rhiDbgWeaponGbufPhase1++; }
 		const srfTriangles_t *tri = surf->geo;
 		const idMaterial *shader = surf->material;
 
@@ -10261,12 +10254,11 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 	// world-only G-buffer, then draw the deferred view weapon into the same targets. The weapon's silhouette then
 	// never uncovers history-less pixels in the denoiser (the fried halo); every other consumer (AO, SSR, FSR2,
 	// the forward draws' mask) still sees the complete buffers afterwards. Primary window view only, VK + RT.
-	const bool diWorldOnly = vkMode && r_rtReStirDI.GetBool() && r_rtReStirDIApply.GetBool() && r_rtReStirDIWorldOnlyPrepass.GetBool()
+	const bool diWorldOnly = vkMode && r_rtReStirDI.GetBool() && r_rtReStirDIApply.GetBool()
 		&& !r_rtReStirDIDebug.GetBool() && r->SupportsRayQuery()
 		&& viewDef->viewEntitys && !viewDef->isSubview && viewDef->isWindowView;
 	r->GpuScopeBegin( "prepass (depth+gbuffer)" );
 	const bool mergedDepth = RB_RHI_NormalPrepass( r, viewDef, diWorldOnly ? 0 : -1 );
-	rhiDbgMergedDepth = mergedDepth;
 	if ( mergedDepth ) {
 		RB_RHI_CaptureCurrentDepth( viewDef );
 	} else {
@@ -10278,19 +10270,6 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 		// start): clear them here so the shared-NRD check in the DI pass never reads a stale frame's value
 		rhiRtgiDenoisedThisView = false;	rhiRtaoDenoisedThisView = false;
 		RB_RHI_ReStirDIPass( r, viewDef );			// on the world-only depth / normals / albedo / velocity
-		// State hygiene after the DI chain (weapon-dark hunt, 2026-10-12): the chain's target passes + compute
-		// dispatches ran in the middle of the view's prepasses, which the single-phase order never does. Forget every
-		// cached texture-unit bind (a direct bind the cache did not see makes a later cached bind skip - the unit then
-		// holds a DI target), re-apply the view's viewport + scissor and drop the RhiWorld scissor cache, so the deferred
-		// weapon phase and the light loop start from known state.
-		RB_RHI_ForgetTexBinds();
-		{
-			const int vw = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
-			const int vh = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-			r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1, tr.viewportOffset[1] + viewDef->viewport.y1, vw, vh );
-			r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1, tr.viewportOffset[1] + viewDef->viewport.y1, vw, vh );
-			backEnd.currentScissor = viewDef->scissor;
-		}
 		r->GpuScopeBegin( "prepass (weapon)" );
 		if ( !mergedDepth ) {
 			if ( rhiPrepassWeaponDeferred ) {
@@ -10823,7 +10802,6 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	    dbgParallel = 0, dbgNoShadow = 0, dbgNoLightDef = 0, dbgStencilBig = 0, dbgDiCovered = 0;
 	// R1b diagnostics: WHY a lit light is not DI-covered (r_shadowMapDebug 1 breakdown)
 	int dbgUncAmbient = 0, dbgUncFog = 0, dbgUncBlend = 0, dbgUncNoDef = 0, dbgUncWeapon = 0, dbgUncFast = 0, dbgUncCrossfade = 0, dbgUncNotInBuffer = 0;
-	rhiDbgWeaponDrawsCovered = 0;		// weapon interaction draws issued under DI-covered lights this view
 	RB_RHI_ResetShadowTallies( r );
 	if ( !r_skipInteractions.GetBool() ) {
 		for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
@@ -10870,21 +10848,9 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				? RB_RHI_SceneLightForwardWeight( viewDef, vLight->lightDef->index, diCovered ) : 1.0f;
 			ictx.lightDiCovered = diCovered && ictx.lightForwardWeight <= 0.001f;	// purely DI: skip all forward work
 			if ( ictx.lightDiCovered ) {
-				if ( r_rtReStirDIForwardShadowWork.GetBool() ) {
-					// diagnostic (weapon-dark hunt, 2026-10-12): run the light's NORMAL shadow-technique selection (maps / cubes /
-					// blur mask) although only the weapon + translucents will draw forward - isolates whether anything that
-					// selection prepares is what the leftover draws are missing
-					r->GpuScopeBegin( "light.shadow" );
-					RB_RHI_SelectLightShadowTechnique( r, viewDef, vLight, cls, shadowMapProg, shadowCubeProg, dbgShadowMapped );
-					r->GpuScopeEnd();
-				} else {
-					RB_RHI_ResetLightShadowState();
-					// the surfaces that still draw forward under a DI-covered light (the view weapon, depth-hacked models,
-					// translucents) take the inline ray (mode 4); r_rtReStirDIForwardRay 0 leaves them UNSHADOWED instead - the
-					// diagnostic for "the weapon goes dark under DI" (2026-10-12): if it lights up, the ray self-occludes
-					ictx.lightRtPoint = r_rtReStirDIForwardRay.GetBool() && ( ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0 );
-					ictx.lightRange = cls.isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
-				}
+				RB_RHI_ResetLightShadowState();
+				ictx.lightRtPoint = ( ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0 );
+				ictx.lightRange = cls.isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
 				dbgDiCovered++;
 			} else {
 				if ( rhiReStirDIApplyThisView ) {		// R1b diagnostics: why is this lit light still forward?
@@ -10996,10 +10962,8 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	ictx.lightForwardWeight = 1.0f;
 	if ( r_shadowMapDebug.GetInteger() > 0 && dbgDiCovered > 0 ) {
 		common->Printf( "ReSTIR DI: %d of %d lit lights DI-covered this view (forward opaque draws + shadow work skipped)"
-			" | still forward: ambient %d, fog %d, blend %d, no-lightDef %d, weapon %d, fast %d, crossfade %d, not-in-buffer %d | weapon draws under covered lights: %d | deferred weapon surfaces: zfill %d, gbuffer %d, deferred %d, mergedDepth %d\n",
-			dbgDiCovered, dbgLit, dbgUncAmbient, dbgUncFog, dbgUncBlend, dbgUncNoDef, dbgUncWeapon, dbgUncFast, dbgUncCrossfade, dbgUncNotInBuffer, rhiDbgWeaponDrawsCovered,
-			rhiDbgWeaponZfillPhase1, rhiDbgWeaponGbufPhase1, rhiPrepassWeaponDeferred ? 1 : 0, rhiDbgMergedDepth ? 1 : 0 );
-		rhiDbgWeaponZfillPhase1 = rhiDbgWeaponGbufPhase1 = 0;
+			" | still forward: ambient %d, fog %d, blend %d, no-lightDef %d, weapon %d, fast %d, crossfade %d, not-in-buffer %d\n",
+			dbgDiCovered, dbgLit, dbgUncAmbient, dbgUncFog, dbgUncBlend, dbgUncNoDef, dbgUncWeapon, dbgUncFast, dbgUncCrossfade, dbgUncNotInBuffer );
 	}
 
 	RB_RHI_LogShadowMapSummary( dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,

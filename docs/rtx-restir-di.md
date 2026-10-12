@@ -447,6 +447,29 @@ AO and the baked occlusion map apply to diffuse+spec together; `noSpecular` ligh
 cookies (Stage G) take the first live stage. The RTGI/RTAO auto-claim still stands
 them down while DI is on (DI's own NRD instance remains the fix).
 
+### Bugs found and fixed 2026-10-12 (branch `fix/rtx-restir-di-gradient-bounds-weapon-mask`)
+- **VK device loss with DI on (new):** the R1 gradient dereferenced last frame's light rows and the lightDef -> row table
+  through indices stored a frame earlier; after a map change the ring slot still holds the OLD map's rows, so a stale index
+  read past the written table and the light buffer (a GPU page fault = device lost). Every stored index is now bounded by
+  the slot's light count + the table capacity; `r_rtReStirDIGradient` / `GradientStratum` / `r_rtReStirDISH` joined the
+  gfx-config signature (they (re)create targets).
+- **Weapon dark under `r_rtReStirDIApply` (only self-lit stages visible, lit only inside some lights' rects):** the
+  interaction draws take their shadow map / shadow cube (depth-compare samplers) from units 7 / 8 of the shared unit table
+  (`RB_RHI_VkTextures`), and an UNSHADOWED light never rebinds them - safe for years because only shadow passes ever wrote
+  those units. The R1 gradient bound a colour velocity image on 7 and a colour side copy on 8; every DI-covered light is
+  unshadowed, so its weapon draws carried colour images on depth-compare samplers = an invalid descriptor that NVIDIA
+  renders as nothing (the lit stages go through the interaction shader, the self-lit stages do not). The "lit rectangles"
+  were lights that followed a shadowed light and inherited valid images. Gradient inputs now ride units 10 / 11, which every
+  interaction draw rebinds. Hunt lessons kept: the counters showed the draws WERE issued and the deferred depth WAS written,
+  which ruled out the prepass split; `r_rtReStirDIWorldOnlyPrepass 0` "fixing" it was coincidence of unit state, not a cure.
+  **RULE:** no fullscreen pass may bind a colour image on units 7 / 8 / 12 (the shadow samplers); use 0-6, 9-11.
+- **Prepass jitter correction** (found on the way, real): with the two-phase prepass the motion-vector jitter correction
+  was recomputed per CALL, so the deferred weapon phase got zero and FSR2 saw a jitter-sized error on the weapon's
+  velocity; now computed once per frame. Any per-frame state in `RB_RHI_NormalPrepass` must be frame-guarded.
+- Diagnostics added during the hunt (`r_rtReStirDIForwardRay`, `ForwardShadowWork`, `WorldOnlyPrepass`, draw counters, a
+  state-hygiene barrier) were removed once the fix was confirmed. The per-reason coverage breakdown on the
+  `r_shadowMapDebug 1` line stays (R1b's "N of M covered" diagnostic).
+
 ### Open risks / deferred decisions
 - **Legacy (non-PBR) specular:** the spec *map* isn't in the G-buffer (only rough/metal) — approximate from
   roughness, or add a spec channel to the prepass. PBR-classified surfaces (`r_pbr`) are fine.
