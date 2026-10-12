@@ -900,6 +900,12 @@ mover path (two different points). Fixed: static = the velocity's on-screen leng
 velocity is only the jitter delta). **Test:** view 5 white in a static scene WITH FSR2 (the R1 acceptance), view 3 calm,
 flashlight circle still shows, NPC trailing edge still resets.
 
+**Validation after the weapon fix (2026-10-12):** one remaining first-frame error was ours - the confidence pass bound its
+never-written ping-pong partner as "last frame's confidence" on the first frame after (re)creation (fixed: white until valid).
+The other, `gOut_DiffSh ... OpImageWrite Texel operand only contains 3 components` on every NRD SH dispatch, is NRD's own
+REBLUR / RELAX SH shader writing a float3 into the RGBA16F SH1 output - vendored SPIR-V, harmless on NVIDIA, not ours to fix
+(a newer VUID than NRD 4.18 targets); silence it with the duplicate limit or ignore.
+
 **Weapon dark under the DI apply - THE cause (2026-10-12, after the noShadows gate and the player-body TLAS exclusion
 both failed to cure it; the user's old "`r_rtReStirDIWorldOnlyPrepass 0` fixed it" was the real clue):** the DI pass ended
 with a bare `backEnd.currentScissor = viewDef->scissor` - a cache update only. The backend saves / restores the live scissor

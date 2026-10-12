@@ -8380,7 +8380,10 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				const int ci = rhiReStirDIGradConfIdx;
 				r->GpuScopeBegin( "restir.di.gradconf" );
 				r->BeginTargetPass( rhiReStirDIGradConfRT[ ci ], NULL );
-				RB_RHI_BindRTImage( r, 1, r->GetRenderTargetImage( rhiReStirDIGradConfRT[ ci ^ 1 ] ) );	// last frame's confidence
+				// last frame's confidence - only once it exists: the first frame after the targets are (re)created the partner was
+				// never written (UNDEFINED layout at submit, validation 09600); the shader skips it then anyway (localParam1.y = 0)
+				if ( rhiReStirDIGradConfValid ) { RB_RHI_BindRTImage( r, 1, r->GetRenderTargetImage( rhiReStirDIGradConfRT[ ci ^ 1 ] ) ); }
+				else { RB_RHI_BindUnit( 1, globalImages->whiteImage ); backEnd.glState.tmu[1].current2DMap = -1; }
 				RB_RHI_BindRTImage( r, 2, nrdVel );
 				RB_RHI_DrawFullscreen( r, confProg, cp, rhiReStirDIGradThisView );
 				r->EndPass();
