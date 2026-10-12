@@ -56,7 +56,9 @@ void main() {
 		return;
 	}
 	if ( mode == 4 ) {												// R3a: the gather's boost bit (att3.w fraction) as white; packed left under checkerboard
-		fragColor = vec4( vec3( fract( texture( u_src, uv ).w ) > 0.25 ? 1.0 : 0.0 ), 1.0 );
+		float f = fract( texture( u_src, uv ).w );							// 0.25 = NRD history short, 0.5 = no matching previous pixel, 0.75 = hysteresis / entered the screen
+		vec3 c = ( f < 0.2 ) ? vec3( 0.0 ) : ( f < 0.4 ) ? vec3( 1.0, 0.0, 0.0 ) : ( f < 0.6 ) ? vec3( 0.0, 1.0, 0.0 ) : vec3( 0.0, 0.0, 1.0 );
+		fragColor = vec4( c, 1.0 );
 		return;
 	}
 	if ( mode == 2 ) {												// accumulated history frames -> grey ramp

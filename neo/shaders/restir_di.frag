@@ -138,7 +138,9 @@ vec4 packNrdNormal( vec3 Nraw ) {
 }
 
 // R3a: is this pixel YOUNG - does it get the boosted picks this frame? (header: u_tessParms, u_prevMvpMatrix, units 4/5/6/9/10)
-bool diBoostWanted( vec2 sfrag, in DiSurface S ) {
+// returns the reason the pixel is young: 0 = not young, 1 = NRD's history short, 2 = no previous pixel is this surface
+// (just revealed), 3 = held by the hysteresis / entered the screen. Stored in the row id's fraction (x 0.25) for debug view 7.
+int diBoostWanted( vec2 sfrag, in DiSurface S ) {
 	const float hOn    = u_tessParms.y;
 	const float hOff   = u_tessParms.z;
 	const int   prevCb = int( floor( u_tessParms.w + 0.5 ) );				// -1 = no side data
@@ -146,13 +148,13 @@ bool diBoostWanted( vec2 sfrag, in DiSurface S ) {
 	vec2 vel = texture( u_velocity, uvc ).rg;
 	vel.y = ( u_windowCoord.z < 0.0 ) ? -vel.y : vel.y;
 	vec2 prevUV = uvc - vel;
-	if ( any( lessThan( prevUV, vec2( 0.0 ) ) ) || any( greaterThanEqual( prevUV, vec2( 1.0 ) ) ) ) { return true; }	// just entered the screen: no history at all
+	if ( any( lessThan( prevUV, vec2( 0.0 ) ) ) || any( greaterThanEqual( prevUV, vec2( 1.0 ) ) ) ) { return 3; }	// just entered the screen: no history at all
 	ivec2 res     = ivec2( floor( 1.0 / u_screenCorrection.xy + 0.5 ) );
 	ivec2 prevPix = clamp( ivec2( floor( prevUV * vec2( res ) ) ), ivec2( 0 ), res - 1 );
 	// NRD's history length where this pixel was - the nearest texel, never bilinear (a frame count must not blend across an edge)
 	float h = texelFetch( u_prevDenoised, prevPix, 0 ).a;
-	if ( !( h >= hOn ) ) { return true; }									// young by NRD's own count (NaN / garbage counts as young)
-	if ( prevCb < 0 ) { return false; }										// no side data: NRD's count is all there is
+	if ( !( h >= hOn ) ) { return 1; }										// young by NRD's own count (NaN / garbage counts as young)
+	if ( prevCb < 0 ) { return 0; }											// no side data: NRD's count is all there is
 	// a DIFFERENT surface was here last frame (the RTXDI same-surface test, as the gradient): disoccluded THIS frame.
 	// NRD resets this pixel below anyway; boosting now rather than a frame late keeps the first wake sample clean too.
 	// Tested against the 2x2 previous pixels the reprojection straddles, like NRD's bilinear reprojection: the jitter
@@ -176,10 +178,10 @@ bool diBoostWanted( vec2 sfrag, in DiSurface S ) {
 		if ( dot( S.Nw, pN ) < 0.5 ) { continue; }
 		anyMatch = true;
 		// hysteresis: this same-surface tap was boosted last frame (the +0.5 in its stored row id)
-		if ( fract( texelFetch( u_prevSide, rp, 0 ).w ) > 0.25 ) { anyBoosted = true; }
+		if ( fract( texelFetch( u_prevSide, rp, 0 ).w ) >= 0.2 ) { anyBoosted = true; }
 	}
-	if ( !anyMatch ) { return true; }										// nothing of this surface in the footprint: just revealed
-	return anyBoosted && !( h >= hOff );									// stays boosted until the history reaches the OFF threshold
+	if ( !anyMatch ) { return 2; }											// nothing of this surface in the footprint: just revealed
+	return ( anyBoosted && !( h >= hOff ) ) ? 3 : 0;						// stays boosted until the history reaches the OFF threshold
 }
 
 void main() {
@@ -251,7 +253,8 @@ void main() {
 	// R3a: how many independent picks (and visibility rays) this pixel gets - K where it is young, else 1 (diBoostWanted)
 	#define DI_BOOST_MAX 8
 	const int kMax = clamp( int( u_tessParms.x + 0.5 ), 0, DI_BOOST_MAX );
-	bool boostedNow = ( kMax > 1 ) ? diBoostWanted( sfrag, S ) : false;
+	const int boostWhy = ( kMax > 1 ) ? diBoostWanted( sfrag, S ) : 0;
+	const bool boostedNow = boostWhy != 0;
 	const int K = boostedNow ? kMax : 1;
 	float pHatB[DI_BOOST_MAX];
 	vec3  radB[DI_BOOST_MAX], ldirB[DI_BOOST_MAX];
@@ -337,10 +340,10 @@ void main() {
 	// R1 side outputs for next frame's gradient pass: which light this pixel shaded (row + 1 in THIS frame's light
 	// buffer) and how bright its visible contribution was (fp16, restir_di_shade.glsl). The RIS weight W is left out:
 	// it multiplies both frames alike and cancels in the normalized gradient. R3a keeps its "boosted" bit in the row
-	// id's fraction (+0.5, exact in fp16 below 1024 rows); readers floor it off.
+	// id's fraction (+0.25 x reason, exact in fp16 below 512 rows); readers floor it off.
 	if ( pHatChosen > 0.0 ) {
 		outViewZ.y = diGradientLuminance( contribChosen, B, vis );
-		outSh1.w   = float( rowChosen ) + ( boostedNow ? 0.5 : 0.0 );
+		outSh1.w   = float( rowChosen ) + 0.25 * float( boostWhy );		// fraction = the boost reason (0 = not boosted)
 	}
 	vec3 shDir  = vec3( 0.0 );										// SH mode: accumulated direction * luminance
 
