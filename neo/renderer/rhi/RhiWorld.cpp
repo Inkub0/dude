@@ -516,6 +516,8 @@ static bool  rhiReStirDIGradConfValid = false;		// rhiReStirDIGradConfRT[idx ^ 1
 static rhi::ImageHandle rhiReStirDIGradConfThisView = 0;	// the confidence fed to NRD this view (debug view 5)
 static rhi::ImageHandle rhiReStirDIGradThisView = 0;		// the filtered gradient this view (debug view 6)
 static bool  rhiReStirDIGatherPrevValid = false;	// the gather MRT holds last frame's side data at the current rw x rh
+static rhi::RenderTargetHandle rhiReStirDIPrevSideRT[3] = { 0, 0, 0 };	// R1 rev.2: copies of last frame's gather att1 (RG16F) / att2 / att3 (RGBA16F), made before the gather
+static int   rhiReStirDIPrevSideW = 0, rhiReStirDIPrevSideH = 0;
 static float rhiReStirDIPrevCb = 0.0f;				// last frame's checkerboard parity (0 off / 1 / 2): where a pixel's data sits
 #define DI_LIGHTMAP_MAX		4096					// lightDef -> row table capacity (uints per ring slot)
 static rhi::BufferHandle	s_diLightMapBuf = 0;
@@ -4033,6 +4035,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiReStirDIGradRT[0] = rhiReStirDIGradRT[1] = 0;	rhiReStirDIGradW = rhiReStirDIGradH = 0;	// R1
 	rhiReStirDIGradConfRT[0] = rhiReStirDIGradConfRT[1] = 0;	rhiReStirDIGradConfW = rhiReStirDIGradConfH = 0;
 	rhiReStirDIGradConfValid = false;	rhiReStirDIGatherPrevValid = false;
+	rhiReStirDIPrevSideRT[0] = rhiReStirDIPrevSideRT[1] = rhiReStirDIPrevSideRT[2] = 0;	rhiReStirDIPrevSideW = rhiReStirDIPrevSideH = 0;
 	s_diLightMapBuf = 0;	s_diLightMapAddr = 0;
 	s_sceneLightSlotFrame[0] = s_sceneLightSlotFrame[1] = s_sceneLightSlotFrame[2] = -1;
 	rhiRtaoVelRT = 0;			rhiRtaoVelW = rhiRtaoVelH = 0;
@@ -8124,8 +8127,73 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		r_rtReStirDIFastHistory.GetInteger(), diMainF, diFastF );
 	const bool diCut = RB_RHI_NrdHistoryReset( viewDef );
 
+
+	// ---- R1 rev.2: keep last frame's side data (att1 viewZ+lum / att2 normal / att3 SH1+row) across the gather, so the
+	// gradient pass can run AFTER it and see BOTH frames' picks (RTXDI: the brightest sample of either frame). Three
+	// plain copies at the gather res; only when the gradient will run. ----
+	const float diPrevCb = rhiReStirDIPrevCb;
+	bool diPrevSideValid = false;
+	if ( r_rtReStirDIGradient.GetBool() && rhiReStirDIGatherPrevValid && nrdVel != 0 && nrdFree && !diCut ) {
+		for ( int k = 0; k < 3; k++ ) {
+			if ( rhiReStirDIPrevSideRT[k] && r->GetRenderTargetImage( rhiReStirDIPrevSideRT[k] ) == 0 ) { rhiReStirDIPrevSideRT[k] = 0; }
+		}
+		if ( rhiReStirDIPrevSideW != rw || rhiReStirDIPrevSideH != rh ) {
+			for ( int k = 0; k < 3; k++ ) { if ( rhiReStirDIPrevSideRT[k] ) { r->DestroyRenderTarget( rhiReStirDIPrevSideRT[k] ); rhiReStirDIPrevSideRT[k] = 0; } }
+			rhiReStirDIPrevSideW = rhiReStirDIPrevSideH = 0;
+		}
+		if ( !rhiReStirDIPrevSideRT[0] ) { rhiReStirDIPrevSideRT[0] = r->CreateRenderTarget( rhi::IF_RG16F,   rw, rh ); }
+		if ( !rhiReStirDIPrevSideRT[1] ) { rhiReStirDIPrevSideRT[1] = r->CreateRenderTarget( rhi::IF_RGBA16F, rw, rh ); }
+		if ( !rhiReStirDIPrevSideRT[2] ) { rhiReStirDIPrevSideRT[2] = r->CreateRenderTarget( rhi::IF_RGBA16F, rw, rh ); }
+		rhi::ShaderHandle copyProg = ( rhiReStirDIPrevSideRT[0] && rhiReStirDIPrevSideRT[1] && rhiReStirDIPrevSideRT[2] ) ? r->LoadShader( "smaa_copy" ) : 0;
+		if ( copyProg != 0 ) {
+			rhiReStirDIPrevSideW = rw;	rhiReStirDIPrevSideH = rh;
+			rhi::RenderParams cp;
+			memset( &cp, 0, sizeof( cp ) );
+			cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+			cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
+			const rhi::ImageHandle srcs[3] = { r->GetRenderTargetImage2( rhiReStirDIRT ), r->GetRenderTargetImage3( rhiReStirDIRT ), r->GetRenderTargetImage4( rhiReStirDIRT ) };
+			r->GpuScopeBegin( "restir.di.sidecopy" );	// r_vkGpuTime 2: last frame's side data kept for the gradient
+			for ( int k = 0; k < 3; k++ ) {
+				r->BeginTargetPass( rhiReStirDIPrevSideRT[k], NULL );
+				RB_RHI_DrawFullscreen( r, copyProg, cp, srcs[k] );
+				r->EndPass();
+			}
+			r->GpuScopeEnd();
+			diPrevSideValid = true;
+		}
+	}
+
+	// fresh 1-spp gather -> NRD guide MRT (weapon masked inside the shader). NRD does the temporal below.
+	// Checkerboard packs every traced sample into the LEFT HALF, so restrict the draw there - the right half is
+	// written nothing and reconstructed by NRD, so ~half the gather fragments (and their visibility rays) run.
+	// The shader keeps its own right-half early-out as the correctness guarantee.
+	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray
+	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
+	r->BeginTargetPass( rhiReStirDIRT, NULL );
+	RB_RHI_BindUnit( 0, diDepthImg );
+	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
+	// units 2/3 = the G-buffer albedo + material for apply mode; white placeholders otherwise so the descriptor
+	// set is always complete (the shader only samples them when u_localParam1.w > 0.5)
+	if ( diApply ) {
+		RB_RHI_BindRTImage( r, 2, diAlbedoImg );
+		RB_RHI_BindRTImage( r, 3, diMatImg );
+	} else {
+		RB_RHI_BindUnit( 2, globalImages->whiteImage );
+		RB_RHI_BindUnit( 3, globalImages->whiteImage );
+	}
+	backEnd.glState.tmu[2].current2DMap = -1;
+	backEnd.glState.tmu[3].current2DMap = -1;
+	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
+	r->EndPass();
+	r->GpuScopeEnd();
+	rhiReStirDIRanThisView = true;
+	rhiReStirDIApplyThisView = diApply;				// Stage D: from here on this view is DI-lit (forward loop + apply)
+	rhiReStirDIGatherPrevValid = true;				// R1: the MRT now holds this frame's side data for next frame's gradient
+	rhiReStirDIPrevCb = cbParity;
+
 	// ---- R1 gradient confidence (docs/rtx-restir-di.md Plan R1) ----
-	// BEFORE the gather overwrites the MRT: re-shade last frame's chosen light per 3x3 stratum at the reprojected
+	// Rev.2: AFTER the gather, with last frame's side data in the copies above (both frames' picks at hand): re-shade last frame's chosen light per 3x3 stratum at the reprojected
 	// surface under this frame's lights (restir_di_gradient.frag), A-trous the change 4x (restir_di_gradient_filter),
 	// and turn it into NRD IN_DIFF_CONFIDENCE at the gather res (restir_di_gradient_conf). Needs last frame's gather
 	// side data at this rw x rh, last frame's light buffer + this frame's lightDef -> row table, the velocity, and the
@@ -8138,8 +8206,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		const bool prevLightsValid = s_sceneLightSlotFrame[ prevSlot ] == tr.frameCount - 1 && s_sceneLightSlotAddr[ prevSlot ] != 0;
 		const int curSlot = (int)( tr.frameCount % RT_REFL_LIGHT_SLOTS );
 		const unsigned long long mapAddr = ( s_sceneLightSlotFrame[ curSlot ] == tr.frameCount ) ? s_diLightMapSlotAddr[ curSlot ] : 0;
-		const bool gradOn = r_rtReStirDIGradient.GetBool() && nrdVel != 0 && nrdFree && rhiReStirDIGatherPrevValid
-			&& rhiReStirDIPrevValid && !diCut && prevLightsValid && mapAddr != 0;
+		const bool gradOn = diPrevSideValid && rhiReStirDIPrevValid && prevLightsValid && mapAddr != 0;
 		const int stratum = idMath::ClampInt( 2, 6, r_rtReStirDIGradientStratum.GetInteger() );
 		const int gw = ( rw + stratum - 1 ) / stratum, gh = ( rh + stratum - 1 ) / stratum;
 		if ( gradOn ) {
@@ -8174,7 +8241,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				const unsigned int prvLo = (unsigned int)( prevAddr & 0xFFFFFFFFull ), prvHi = (unsigned int)( prevAddr >> 32 );
 				memcpy( &gp.shadowParms[0], &mapLo, sizeof( mapLo ) );	memcpy( &gp.shadowParms[1], &mapHi, sizeof( mapHi ) );
 				memcpy( &gp.shadowParms[2], &prvLo, sizeof( prvLo ) );	memcpy( &gp.shadowParms[3], &prvHi, sizeof( prvHi ) );
-				gp.tessParms[0] = rhiReStirDIPrevCb;
+				gp.tessParms[0] = diPrevCb;
+				gp.tessParms[3] = cbParity;				// this frame's parity (where this frame's picks sit)
 				{	// last frame's lightDef -> row table (the second gradient direction looks the current light up in it)
 					const unsigned long long prevMap = s_diLightMapSlotAddr[ prevSlot ];
 					const unsigned int pmLo = (unsigned int)( prevMap & 0xFFFFFFFFull ), pmHi = (unsigned int)( prevMap >> 32 );
@@ -8195,10 +8263,12 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				if ( diApply ) { RB_RHI_BindRTImage( r, 2, diAlbedoImg ); RB_RHI_BindRTImage( r, 3, diMatImg ); }
 				else { RB_RHI_BindUnit( 2, globalImages->whiteImage ); RB_RHI_BindUnit( 3, globalImages->whiteImage ); }
 				backEnd.glState.tmu[2].current2DMap = -1;	backEnd.glState.tmu[3].current2DMap = -1;
-				RB_RHI_BindRTImage( r, 4, r->GetRenderTargetImage2( rhiReStirDIRT ) );	// last frame's ( viewZ, lum )
-				RB_RHI_BindRTImage( r, 5, r->GetRenderTargetImage3( rhiReStirDIRT ) );	// last frame's packed normal
-				RB_RHI_BindRTImage( r, 6, r->GetRenderTargetImage4( rhiReStirDIRT ) );	// last frame's ( SH1, row + 1 )
+				RB_RHI_BindRTImage( r, 4, r->GetRenderTargetImage2( rhiReStirDIRT ) );		// THIS frame's ( viewZ, lum )
+				RB_RHI_BindRTImage( r, 5, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[0] ) );	// last frame's ( viewZ, lum )
+				RB_RHI_BindRTImage( r, 6, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[1] ) );	// last frame's packed normal
 				RB_RHI_BindRTImage( r, 7, nrdVel );
+				RB_RHI_BindRTImage( r, 8, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[2] ) );	// last frame's ( SH1, row + 1 )
+				RB_RHI_BindRTImage( r, 9, r->GetRenderTargetImage4( rhiReStirDIRT ) );		// THIS frame's ( SH1, row + 1 )
 				RB_RHI_DrawFullscreen( r, gradProg, gp, 0 );
 				r->EndPass();
 				r->GpuScopeEnd();
@@ -8259,34 +8329,6 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( diGradConfImg == 0 ) { rhiReStirDIGradConfValid = false; }		// no continuous confidence history to smooth from
 	}
 
-	// fresh 1-spp gather -> NRD guide MRT (weapon masked inside the shader). NRD does the temporal below.
-	// Checkerboard packs every traced sample into the LEFT HALF, so restrict the draw there - the right half is
-	// written nothing and reconstructed by NRD, so ~half the gather fragments (and their visibility rays) run.
-	// The shader keeps its own right-half early-out as the correctness guarantee.
-	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray
-	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
-	r->BeginTargetPass( rhiReStirDIRT, NULL );
-	RB_RHI_BindUnit( 0, diDepthImg );
-	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
-	// units 2/3 = the G-buffer albedo + material for apply mode; white placeholders otherwise so the descriptor
-	// set is always complete (the shader only samples them when u_localParam1.w > 0.5)
-	if ( diApply ) {
-		RB_RHI_BindRTImage( r, 2, diAlbedoImg );
-		RB_RHI_BindRTImage( r, 3, diMatImg );
-	} else {
-		RB_RHI_BindUnit( 2, globalImages->whiteImage );
-		RB_RHI_BindUnit( 3, globalImages->whiteImage );
-	}
-	backEnd.glState.tmu[2].current2DMap = -1;
-	backEnd.glState.tmu[3].current2DMap = -1;
-	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
-	r->EndPass();
-	r->GpuScopeEnd();
-	rhiReStirDIRanThisView = true;
-	rhiReStirDIApplyThisView = diApply;				// Stage D: from here on this view is DI-lit (forward loop + apply)
-	rhiReStirDIGatherPrevValid = true;				// R1: the MRT now holds this frame's side data for next frame's gradient
-	rhiReStirDIPrevCb = cbParity;
 
 	// ---- NRD REBLUR_DIFFUSE denoise (mirrors RB_RHI_RtgiPass's H6b) ----
 	// DI borrows the SHARED GI denoiser (NRD_ID_REBLUR_GI) and its output image (GetRtgiOutputImage), so it can

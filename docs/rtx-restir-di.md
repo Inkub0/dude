@@ -151,7 +151,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIGradientDeadzone` | 0.2 | **R1** relative per-light change below which nothing counts (authored flicker). |
 | `r_rtReStirDIGradientStatic` | 2.0 | **R1** static threshold (full-res px) for the exact previous-position re-shade. |
 | `r_rtReStirDIGradientStratum` | 3 | **R1** NxN stratum (3 = RTXDI 1/9; 5 = NRD's 1/5 res, ~1/3 the cost). |
-| `r_rtReStirDIGradientFilterPasses` | 4 | **R1** A-trous passes over the gradient; fewer = the reset region hugs a change tighter. |
+| `r_rtReStirDIGradientFilterPasses` | 2 | **R1** A-trous passes over the gradient (RTXDI 4); 2 hugs a change tighter (user-tuned). |
 | `r_rtReStirDIDenoiser` | 0 | **R2** 0 = ReBLUR, 1 = ReLAX (NRD's RTXDI denoiser); rebuilds NRD. |
 | `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 1 / 0 / 1.0 / 5 / 1 / 0.7 / 1 | **R2** ReLAX settings (Remix direct-light preset + RTXDI sample). |
 
@@ -788,6 +788,16 @@ gap on the TRAILING edge: the second direction re-traced last frame's visibility
 left, so "was lit, is lit" never reset the floor a shadow vacates. Fixed: when the current light IS the stored light (slot +
 serial), the stored value - which holds the true previous visibility - is used as L_prev (also saves the ray). Plus
 `r_rtReStirDIGradientFilterPasses` (4) to let the reset region hug a moving shadow more tightly.
+**Rev. 2 (2026-10-12, after the user still saw a dark trail):** the stored-visibility fix could not reach the trailing edge
+because the stratum picked its pixel by LAST frame's brightness, and a pixel a shadow just vacated was dark last frame - a lit
+neighbour always won. RTXDI picks the brightest of EITHER frame, and this frame the vacated pixel is the bright one. So the
+gradient now runs AFTER the gather: the DI pass first copies last frame's att1 / att2 / att3 aside (`restir.di.sidecopy`,
+three plain copies at the gather res), the gather runs, then the gradient reads THIS frame's picks from the gather MRT and
+last frame's from the copies, scores every stratum pixel by max(prevLum, curLum) and takes the winner. When the pixel shaded
+the SAME light (slot + serial) in both frames, both luminances are the gather's own stored, truly-visible values: no re-shade,
+no ray, exact in both directions. Only a changed identity re-shades the winning frame's light in the other frame (one ray).
+The per-stratum exhaustive light loop is gone. `r_rtReStirDIGradientFilterPasses` default 4 -> 2 (user: the NPC shadow edge
+improved). Remaining softness INSIDE a moving shadow = one sample per pixel after a correct reset -> R3.
 Files: `VulkanBackend.cpp` (`NrdCreate` denoiser table: `NRD_ID_RELAX_DI = RELAX_DIFFUSE`, `NRD_ID_RELAX_DI_SH =
 RELAX_DIFFUSE_SH`; `RtaoDenoise`: a `denoiser` arg, `nrd::RelaxSettings` path), `restir_di.frag` + `restir_di_apply.frag` +
 `restir_di_debug.frag` (encoding switch), `RhiWorld.cpp` (the arg + cvar), ImGui dropdown.
