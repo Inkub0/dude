@@ -58,15 +58,6 @@
 //   u_pbrParms            = ( gather radius, r_rtgiEmissive, r_rtgiEmissiveClamp, r_rtgiLightScale )
 //   u_pbrParms2           = ( ambient floor, shadow-ray gate, eye pullback per unit depth, r_rtgiIntensity )
 //   u_occlusionParms      = ( IGN rotation cos, sin, IGN offset x, y )   [CPU-hoisted per frame, as RB_RHI_RtgiPass]
-//   --- R3a disocclusion boost (docs/rtx-restir-di.md Plan R3, first form) ---
-//   u_tessParms           = ( boost on, K picks, history threshold (frames), force everywhere (camera cut / first frame) )
-//   unit 10               = LAST frame's denoised DI (its .w = NRD's accumulated history length in frames, reprojected here)
-//   unit 11               = velocity at the gather res
-//   Where the denoiser's history is YOUNG (a disocclusion wake, a screen edge just revealed, a reset) a single visibility
-//   ray leaves a high-variance pixel that the denoiser can only clean by widening its filter - which smears the adjacent
-//   shadow across the wake for as long as the history takes to refill (the "dark trail" behind a walking NPC, the look-away
-//   wash). The candidate weights are the same for every pick, so K independent reservoir picks cost one light loop and K
-//   rays; their average is K-times less noisy, and only the young pixels pay for it (RTXDI / Remix: numDisocclusionBoostSamples).
 #extension GL_EXT_buffer_reference_uvec2 : require	// build the light-buffer pointer from u_color.xy (uvec2)
 #extension GL_EXT_ray_query : require				// one visibility ray for the chosen light
 #extension GL_EXT_nonuniform_qualifier : require		// bindless light textures (rt_light_tex.glsl)
@@ -81,9 +72,6 @@
 #include "restir_di_shade.glsl"
 // the RTGI bounce (trace + hit shading), shared with rtgi_ray.frag, for the combined DI+GI buffer
 #include "rtgi_bounce.glsl"
-
-SAMPLER_BINDING(10) uniform sampler2D u_prevDenoised;	// R3a: last frame's denoised DI, .w = history length (frames)
-SAMPLER_BINDING(11) uniform sampler2D u_velocity;		// R3a: velocity at the gather res
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -193,31 +181,6 @@ void main() {
 	// A cheap bounding-sphere cull skips lights that cannot reach the point. The reservoir is TRANSIENT
 	// (this frame only) - NRD does the temporal accumulation downstream.
 	const bool shMode = u_shadowFalloffS.z > 0.5;
-	// R3a: how many independent picks (and rays) this pixel gets - K where last frame's history is young, else 1
-	#define DI_BOOST_MAX 8
-	int K = 1;
-	if ( u_tessParms.x > 0.5 ) {
-		int kMax = clamp( int( u_tessParms.y + 0.5 ), 1, DI_BOOST_MAX );
-		if ( u_tessParms.w > 0.5 ) {
-			K = kMax;														// camera cut / first frame: every pixel starts young
-		} else {
-			vec2 uvc = sfrag * u_screenCorrection.xy;
-			vec2 vel = texture( u_velocity, uvc ).rg;
-			vel.y = ( u_windowCoord.z < 0.0 ) ? -vel.y : vel.y;
-			vec2 prevUV = uvc - vel;
-			if ( any( lessThan( prevUV, vec2( 0.0 ) ) ) || any( greaterThan( prevUV, vec2( 1.0 ) ) ) ) {
-				K = kMax;													// entering the screen: no history at all
-			} else if ( texture( u_prevDenoised, prevUV ).a < u_tessParms.z ) {
-				K = kMax;													// NRD reports a young history here
-			}
-		}
-	}
-	float pHatB[DI_BOOST_MAX];
-	vec3  radB[DI_BOOST_MAX], ldirB[DI_BOOST_MAX];
-	float dlB[DI_BOOST_MAX];
-	uint  flagsB[DI_BOOST_MAX];
-	for ( int k = 0; k < DI_BOOST_MAX; k++ ) { pHatB[k] = 0.0; radB[k] = vec3( 0.0 ); ldirB[k] = vec3( 0.0, 0.0, 1.0 ); dlB[k] = 0.0; flagsB[k] = 0u; }
-
 	float wSum        = 0.0;
 	float pHatChosen  = 0.0;
 	vec3  radChosen   = vec3( 0.0 );
@@ -255,12 +218,6 @@ void main() {
 			flagsChosen = lights.l[ li ].flags;
 			rowChosen   = li + 1u;
 		}
-		// R3a: the extra independent picks share the candidate weights (same wSum), each with its own random draws
-		for ( int k = 1; k < K; k++ ) {
-			if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
-				pHatB[k] = pHat;	radB[k] = rad;	ldirB[k] = ldir;	dlB[k] = dl;	flagsB[k] = lights.l[ li ].flags;
-			}
-		}
 	}
 
 	if ( !( pHatChosen > 0.0 ) && u_specularParms.x < 0.5 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// no reaching light (and no bounce to add)
@@ -275,26 +232,6 @@ void main() {
 
 	// the direct term, at the forward path's light scale (lightColor = lightScale * stage colour there)
 	vec3 outRad = max( radChosen * ( W * vis * u_shadowFalloffS.x ), vec3( 0.0 ) );
-	// R3a: average the extra picks' unbiased estimates with the first (each rad_k * W_k * vis_k is unbiased on its own);
-	// shDirect = the averaged direct SH1 term (direction * luminance) the SH block below uses instead of the single pick's
-	bool boosted = false;
-	vec3 shDirect = vec3( 0.0 );
-	if ( K > 1 ) {
-		vec3 sumRad = outRad;
-		vec3 sumSh  = ldirChosen * dot( outRad, vec3( 0.2126, 0.7152, 0.0722 ) );
-		for ( int k = 1; k < K; k++ ) {
-			if ( !( pHatB[k] > 0.0 ) ) { continue; }
-			float Wk = ( wSum / ( exhaustive ? 1.0 : float( draws ) ) ) / pHatB[k];
-			float od;
-			float visK = ( ( flagsB[k] & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ldirB[k], dlB[k], od );
-			vec3  rk = max( radB[k] * ( Wk * visK * u_shadowFalloffS.x ), vec3( 0.0 ) );
-			sumRad += rk;
-			sumSh  += ldirB[k] * dot( rk, vec3( 0.2126, 0.7152, 0.0722 ) );
-		}
-		outRad   = sumRad / float( K );
-		shDirect = sumSh / float( K );
-		boosted  = true;
-	}
 	// R1 side outputs for next frame's gradient pass: which light this pixel shaded (row + 1 in THIS frame's light
 	// buffer) and how bright its visible contribution was (fp16, restir_di_shade.glsl). The RIS weight W is left out:
 	// it multiplies both frames alike and cancels in the normalized gradient.
@@ -347,7 +284,7 @@ void main() {
 	}
 	if ( shMode ) {
 		// NRD SH1 for the direct term: direction * luminance (REBLUR_FrontEnd_PackSh: c1 = direction * Y)
-		shDir += boosted ? shDirect : ldirChosen * dot( max( radChosen * ( W * vis * u_shadowFalloffS.x ), vec3( 0.0 ) ), vec3( 0.2126, 0.7152, 0.0722 ) );
+		shDir += ldirChosen * dot( max( radChosen * ( W * vis * u_shadowFalloffS.x ), vec3( 0.0 ) ), vec3( 0.2126, 0.7152, 0.0722 ) );
 		outSh1.xyz = shDir;										// .w keeps the R1 row id
 	}
 

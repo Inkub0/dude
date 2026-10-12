@@ -151,10 +151,9 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIGradientDeadzone` | 0.2 | **R1** relative per-light change below which nothing counts (authored flicker). |
 | `r_rtReStirDIGradientStatic` | 2.0 | **R1** static threshold (full-res px) for the exact previous-position re-shade. |
 | `r_rtReStirDIGradientStratum` | 3 | **R1** NxN stratum (3 = RTXDI 1/9; 5 = NRD's 1/5 res, ~1/3 the cost). |
-| `r_rtReStirDIGradientFilterPasses` | 2 | **R1** A-trous passes over the gradient (RTXDI 4); 2 hugs a change tighter (user-tuned). |
+| `r_rtReStirDIGradientFilterPasses` | 4 | **R1** A-trous passes over the gradient; fewer = the reset region hugs a change tighter. |
 | `r_rtReStirDIDenoiser` | 0 | **R2** 0 = ReBLUR, 1 = ReLAX (NRD's RTXDI denoiser); rebuilds NRD. |
 | `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 1 / 0 / 1.0 / 5 / 1 / 0.7 / 1 | **R2** ReLAX settings (Remix direct-light preset + RTXDI sample). |
-| `r_rtReStirDIBoostRays` / `BoostHistory` | 4 / 6 | **R3a** K picks + rays where last frame's history is below N frames (disocclusion boost; 1 = off). |
 
 Defaults are the user-tuned compromise (2026-10-07/08). All `CVAR_ARCHIVE`, so a user's own values persist in
 config regardless of these source defaults. `hitDist` scale (1024) is in-source only.
@@ -789,26 +788,6 @@ gap on the TRAILING edge: the second direction re-traced last frame's visibility
 left, so "was lit, is lit" never reset the floor a shadow vacates. Fixed: when the current light IS the stored light (slot +
 serial), the stored value - which holds the true previous visibility - is used as L_prev (also saves the ray). Plus
 `r_rtReStirDIGradientFilterPasses` (4) to let the reset region hug a moving shadow more tightly.
-**Rev. 2 (2026-10-12, after the user still saw a dark trail):** the stored-visibility fix could not reach the trailing edge
-because the stratum picked its pixel by LAST frame's brightness, and a pixel a shadow just vacated was dark last frame - a lit
-neighbour always won. RTXDI picks the brightest of EITHER frame, and this frame the vacated pixel is the bright one. So the
-gradient now runs AFTER the gather: the DI pass first copies last frame's att1 / att2 / att3 aside (`restir.di.sidecopy`,
-three plain copies at the gather res), the gather runs, then the gradient reads THIS frame's picks from the gather MRT and
-last frame's from the copies, scores every stratum pixel by max(prevLum, curLum) and takes the winner. When the pixel shaded
-the SAME light (slot + serial) in both frames, both luminances are the gather's own stored, truly-visible values: no re-shade,
-no ray, exact in both directions. Only a changed identity re-shades the winning frame's light in the other frame (one ray).
-The per-stratum exhaustive light loop is gone. `r_rtReStirDIGradientFilterPasses` default 4 -> 2 (user: the NPC shadow edge
-improved). Remaining softness INSIDE a moving shadow = one sample per pixel after a correct reset -> R3.
-**Rev. 3 (2026-10-12, user: trail unchanged, with checkerboard off too; view 4 shows the trail as SHORT history):** so the trail
-is a region that WAS reset (the body's disocclusion wake) whose first samples were taken in the NPC's shadow, then the shadow
-moved on and the brightening was never flagged, so the dark young history decayed over the full window. Two reasons rev.2 could
-not flag it: (1) TIES - a pixel lit in both frames scores the same brightness as one that just brightened and wins on loop
-order; now a pixel whose SAME light (slot + serial) changed by more than the dead zone is direct evidence and wins the stratum
-outright, brightness only ranks the rest. (2) CHECKERBOARD - a pixel is traced on alternate frames, so it never had both
-values; the gradient now compares it with its own last traced frame, TWO back: two side-data sets (half width under
-checkerboard, stamped with the frame they hold), the world->view of two frames ago, the light buffer / table of two frames ago
-(the 3-slot ring keeps them), velocity x2 as the reprojection (constant-velocity guess, guarded by the same-surface test).
-Without checkerboard the compare stays one frame back. The geometric wake's own refill length remains R3's job.
 Files: `VulkanBackend.cpp` (`NrdCreate` denoiser table: `NRD_ID_RELAX_DI = RELAX_DIFFUSE`, `NRD_ID_RELAX_DI_SH =
 RELAX_DIFFUSE_SH`; `RtaoDenoise`: a `denoiser` arg, `nrd::RelaxSettings` path), `restir_di.frag` + `restir_di_apply.frag` +
 `restir_di_debug.frag` (encoding switch), `RhiWorld.cpp` (the arg + cvar), ImGui dropdown.
@@ -832,22 +811,20 @@ trail shorter (fast history 1); no new flicker on flat lit floors (ReLAX fast-hi
 (expect +0.3-0.7 ms for diffuse-only). Decide the default; the loser's cvars are trimmed at R6.
 
 ### R3 - spatial reuse with decoupled visibility + disocclusion boost (F3, F5) - large
-**R3a - disocclusion boost, first form - IMPLEMENTED 2026-10-12** (on the R2 branch, USER TEST PENDING). The user's decisive
-finding: view 4 shows the NPC trail as SHORT history refilling over the whole window (history 3 shortened it, 24 showed all 24
-frames), i.e. the body's geometric disocclusion wake - the gradient has nothing to drop there. The trail is what a young pixel
-LOOKS like: one visibility ray, high variance, the denoiser widens its filter and smears the adjacent shadow across the wake until
-enough frames accumulate. Shortening the window fixes the trail but makes the outdoor sun (mars_city1 outside Kelly's HQ) flicker:
-one ray against distant window frames needs ~24 frames to average. So young history must be made CLEAN, not short: the gather
-reads last frame's denoised `.w` (NRD's history length, reprojected) and where it is below `r_rtReStirDIBoostHistory` (6) draws
-`r_rtReStirDIBoostRays` (4) INDEPENDENT reservoir picks from the same candidate weights (one light loop, K random streams) and
-traces K visibility rays, averaging the K unbiased estimates (variance / K); the SH1 direction term is averaged the same way.
-Everything starts young on a camera cut / first frame (boost everywhere for one frame). Cost = K-1 extra rays on young pixels
-only. This is RTXDI's `numDisocclusionBoostSamples` in spirit (8; Remix 4 for 8 frames) without neighbour reservoirs - the
-exhaustive loop makes the multi-pick free. The spatial reuse proper (R3b, neighbours' picks + decoupled visibility) is still the
-plan for the steady-state noise (F5) and the sun's convergence. **Test:** history 24, ReLAX, walking NPC: the trail behind the
-body should be gone or short while view 4 still shows the wake (that is now fine); screen edges while turning likewise; the
-sun stays stable; `restir.di.gather` cost up only while something is disoccluding. Try `r_rtReStirDIBoostRays 8` and
-`r_rtReStirDIBoostHistory 10` if a faint trail remains.
+**REVERTED 2026-10-12 (user: "everything else got worse, shadows flickering, NPCs flickering too").** Three changes made
+while chasing the NPC trail were backed out together: gradient rev.2 (run after the gather, brightest of either frame), rev.3
+(known-change-first selection + two-frame compare under checkerboard) and R3a (history-driven multi-pick boost, default 4).
+Likely culprits: rev.3's known-change path cannot tell a lighting change from a visibility flip caused by the sub-pixel jitter
+at a hard shadow edge (the stored values of two frames sit on slightly different points), so it reset history along every
+shadow edge every frame; and the boost toggles a pixel between 1 and K rays as its history crosses the threshold, changing
+the noise the denoiser sees frame to frame. Two of the three shipped WITHOUT an A/B switch and the third defaulted ON - a
+breach of the stage rule (every change behind a default-off cvar) that made the regression impossible to isolate by cvar.
+The branch is back to R2 (ReLAX) + the R1 gradient with the stored-visibility same-light fix, the state the user approved.
+**Lessons kept:** the NPC trail IS the geometric disocclusion wake refilling (view 4), so R3's boost is still the right idea,
+but it must (a) be default-off, (b) not toggle: once a pixel is boosted keep K for the whole refill (hysteresis on history
+length, or boost by a smooth weight), and (c) be tested alone. A known-change selection needs the exact-point comparison
+(same world point, same visibility ray) - stored values from two jittered frames are not that.
+
 Files: NEW `restir_di_spatial.frag`, `restir_di.frag` (reservoir attachment), `RhiWorld.cpp` (the pass between gather and
 denoise), `rt_light_eval.glsl` (none), optional NEW compute `restir_di_boiling.comp`.
 1. **Gather writes its reservoir** (new attachment at gather res): `(row index of y, wSum, pHat(y), vis)` - the SH1
