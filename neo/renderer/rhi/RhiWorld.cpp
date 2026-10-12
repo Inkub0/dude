@@ -5813,7 +5813,12 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	}
 	static RtReflLightGPU fogs[ SCENE_FOG_MAX ];
 	int nFog = 0;
+	// Two passes: the lights the frontend LIT in this view first - under the ReSTIR DI apply the buffer IS the lit set, and a
+	// 256-entry buffer filled in lightDef order from everything within reach was full before some on-screen lights got their
+	// turn ("not-in-buffer 6 of 18: capacity 7", 2026-10-12) - then the off-screen ones (reflections, haze) until it is full.
+	for ( int pass = 0; pass < 2; pass++ ) {
 	for ( int i = 0; i < rw->lightDefs.Num(); i++ ) {
+		if ( ( viewLightOf[ i ] != NULL ) != ( pass == 0 ) ) { continue; }	// pass 0 = in view, pass 1 = off screen
 		if ( n >= RT_REFL_MAX_LIGHTS - SCENE_FOG_MAX ) {
 			if ( viewLightOf[ i ] != NULL ) { s_diSkipCapacity++; }		// in view, no room left
 			continue;
@@ -5996,6 +6001,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				L.falloffTex = RB_RHI_LightImageIndex( ld->falloffImage );
 			}
 		}
+	}
 	}
 	if ( n == 0 ) {
 		return 0;

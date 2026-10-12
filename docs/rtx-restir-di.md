@@ -460,6 +460,9 @@ carried ray shadows + the RT blur (`light.shadow` 0.7-0.9 ms, `light.interact` 0
 2048-unit REACH cull (written for reflections / haze) dropped far lights that the frontend still lists as lit - fixed: a light in
 the view's lit list always enters the buffer, the reach cull applies to off-screen lights only; (2) "fast 4" with weapon 0 is
 only possible in `r_rtReStirDIDynamicForward 1` (moving lights forward) - the user's console had it at 1 from the weapon hunt.
+(3) The real exclusion, from the new per-reason breakdown on the coverage line: **capacity** - the 256-entry buffer was filled in
+lightDef order from every light within reach and was full before some on-screen lights got their turn ("capacity 7" of 18 lit).
+The gather now runs two passes: the lights lit in this view first, then the off-screen ones (reflections, haze) until full.
 
 ### Bugs found and fixed 2026-10-12 (branch `fix/rtx-restir-di-gradient-bounds-weapon-mask`)
 - **VK device loss with DI on (new):** the R1 gradient dereferenced last frame's light rows and the lightDef -> row table
