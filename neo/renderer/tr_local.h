@@ -219,6 +219,10 @@ public:
 	bool					dudeFillLight;			// DUDE-generated fill light (r_emissiveSurfaces screens / r_itemGlow): its tint
 													// follows an animated screen and the per-view budget churns it, so ReSTIR DI
 													// never classes it as fast-changing (stamped each frame in tr_light.cpp)
+	unsigned int			dudeSerial;				// DUDE: creation serial, unique for the life of the process (AddLightDef). The
+													// lightDef INDEX is reused as soon as a def is freed (a weapon switch frees the old
+													// weapon light and allocates the flashlight into the same slot), so the ReSTIR DI
+													// gradient compares THIS to know it is re-shading the same light (Plan R1)
 
 	idVec3					globalLightOrigin;		// accounting for lightCenter and parallel
 

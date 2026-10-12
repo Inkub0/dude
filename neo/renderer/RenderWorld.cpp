@@ -425,6 +425,10 @@ void idRenderWorldLocal::UpdateLightDef( qhandle_t lightHandle, const renderLigh
 		light->world = this;
 		light->index = lightHandle;
 	}
+	{	// DUDE: a fresh identity for every (re)allocation of a slot - the ReSTIR DI gradient keys "the same light" on it
+		static unsigned int s_dudeLightSerial = 0;
+		light->dudeSerial = ++s_dudeLightSerial;
+	}
 
 	light->parms = *rlight;
 	light->lastModifiedFrameNum = tr.frameCount;

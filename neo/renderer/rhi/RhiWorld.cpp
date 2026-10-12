@@ -5932,7 +5932,8 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		// its stage colours above but carries the first live stage's cookie - the other stages' shapes are
 		// approximated by it. 0 = untextured -> the consumer's analytic frustum attenuation.
 		L.projTex = L.falloffTex = L.pad0 = L.pad1 = 0;
-		L.pad0 = (unsigned int)i + 1u;				// R1: stable light identity across the per-frame sort (0 = not a light: fog rows)
+		L.pad0 = (unsigned int)i + 1u;				// R1: lightDef index + 1 (the table key; 0 = not a light: fog rows)
+		L.pad1 = ld->dudeSerial;					// R1: creation serial - the lightDef slot is reused on free, the serial never is
 		if ( r_rtLightTextures.GetBool() ) {
 			const shaderStage_t *liveStage = NULL;
 			for ( int s = 0; s < ls->GetNumStages(); s++ ) {

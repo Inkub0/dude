@@ -691,6 +691,13 @@ problem. Fixed the RTXDI way ("brightest of the current or previous sample"): th
 the stratum pixel NOW and shades it with its PREVIOUS-frame row (through last frame's table, `u_parallaxParms2.xy`) at the
 stored previous surface; the brighter of the two samples decides. Costs one exhaustive unshadowed light loop per stratum
 (~1/9 of the gather's), no extra ray.
+**Third user test (2026-10-12):** flashlight now right in both views and in the lit scene, but view 5 missed the circle about
+1 pull-out in 7. Cause: light identity was the lightDef INDEX, and `idRenderWorldLocal::AddLightDef` reuses a freed slot at
+once - a weapon switch frees the old weapon light and allocates the flashlight into the same index, so last frame's table
+mapped the new light onto the old light's row, the two shaded alike on the same wall, and the arrival read as "unchanged".
+Fix: `idRenderLightLocal::dudeSerial` (a process-unique creation serial, stamped in AddLightDef) rides `RtLight.pad1`, and both
+gradient directions require slot AND serial to match - otherwise the light is "absent" (100 % change). RTXDI keys its
+mapping on stable light identity for the same reason.
 Cvars: `r_rtReStirDIGradient` 0 (the A/B switch), `r_rtReStirDIGradientPower` 8, `r_rtReStirDIGradientHistory` 8,
 `r_rtReStirDIGradientFloor` 0.1, `r_rtReStirDIGradientBias` 0.001. Debug: `r_rtReStirDIDebug 5` = the confidence (grey),
 `6` = the filtered gradient (red |change|, green magnitude). New GPU scopes `restir.di.grad / gradfilter / gradconf`.

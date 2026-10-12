@@ -189,7 +189,9 @@ void main() {
 		if ( defPlus1 != 0u ) {
 			DiLightMap prevTable = DiLightMap( prevTableAddr );
 			uint prevRowPlus1 = prevTable.row[ defPlus1 - 1u ];
-			if ( prevRowPlus1 != 0u ) {
+			// same slot AND same creation serial (pad1): a freed lightDef slot is reused at once (a weapon switch lands the
+			// flashlight in the old weapon light's slot), and a different light there is "absent", not "unchanged"
+			if ( prevRowPlus1 != 0u && prevLights.l[ prevRowPlus1 - 1u ].pad1 == lights.l[ curRow ].pad1 ) {
 				vec3 c, ld; float dl, ndl;
 				if ( diShadeLight( prevLights, prevRowPlus1 - 1u, Sp, c, ld, dl, ndl ) ) {
 					float vis = ( ( prevLights.l[ prevRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
@@ -207,7 +209,7 @@ void main() {
 		uint lightDefPlus1 = prevLights.l[ bestRow ].pad0;
 		if ( lightDefPlus1 != 0u ) {
 			uint curRowPlus1 = table.row[ lightDefPlus1 - 1u ];
-			if ( curRowPlus1 != 0u ) {
+			if ( curRowPlus1 != 0u && lights.l[ curRowPlus1 - 1u ].pad1 == prevLights.l[ bestRow ].pad1 ) {	// same light, not a slot reuse
 				vec3 c, ld; float dl, ndl;
 				if ( diShadeLight( lights, curRowPlus1 - 1u, Sp, c, ld, dl, ndl ) ) {
 					float vis = ( ( lights.l[ curRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )

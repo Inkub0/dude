@@ -93,6 +93,7 @@ idRenderLightLocal::idRenderLightLocal() {
 	lightShader				= NULL;
 	falloffImage			= NULL;
 	dudeFillLight			= false;
+	dudeSerial				= 0;
 	globalLightOrigin		= vec3_zero;
 	frustumTris				= NULL;
 	numShadowFrustums		= 0;
