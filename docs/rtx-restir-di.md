@@ -609,6 +609,11 @@ Added `r_rtReStirDIDisocclusion` (0.01 = NRD default, range 0.005..0.05) to sepa
 false resets. **Result:** the wake behind a mover is unchanged at 0.02 / 0.04 -> TRUE disocclusion, exactly F3; the
 refill time is the problem, not the reset. R3 (spatial reuse + disocclusion boost) is confirmed as the structural fix; the
 knob stays at 0.01 (a diagnostic, candidate for the R6 trim).
+**R0 acceptance (user, 2026-10-12):** lit scene at defaults = same brightness, frame-to-frame variation only (a 1-spp
+temporally accumulated signal never repeats run-to-run); `r_vkGpuTime 2` unchanged; cut reset + views 3/4 work. **RTAO A/B
+`r_rtaoFastClamp 1.1` + `r_rtaoHistoryFix 2` LOST:** a little ghosting at a walking NPC's feet plus frying pixels around it
+(the tighter clamp + shorter fix starve the 45-frame history on the disoccluded ring) -> defaults stay 2.0 / 3; the knobs
+remain for the seconds-based-history retest (N0) and are R6 trim candidates. R0 MERGED to master.
 **Test:** (a) `r_rtReStirDI 1` defaults -> lit scene unchanged vs master; (b) teleport (`noclip` + a long jump, or a map's
 teleporter) with `r_rtReStirDIDebug 4` -> the ramp goes black for one frame everywhere, then refills; (c) `r_rtReStirDIDebug 3`
 -> NRD's overlay renders (coloured accumulated-frames field; NRD: keep it "in the violet zone" under stable lighting);
