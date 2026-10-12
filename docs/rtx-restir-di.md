@@ -151,6 +151,8 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIGradientDeadzone` | 0.2 | **R1** relative per-light change below which nothing counts (authored flicker). |
 | `r_rtReStirDIGradientStatic` | 2.0 | **R1** static threshold (full-res px) for the exact previous-position re-shade. |
 | `r_rtReStirDIGradientStratum` | 3 | **R1** NxN stratum (3 = RTXDI 1/9; 5 = NRD's 1/5 res, ~1/3 the cost). |
+| `r_rtReStirDIDenoiser` | 0 | **R2** 0 = ReBLUR, 1 = ReLAX (NRD's RTXDI denoiser); rebuilds NRD. |
+| `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 1 / 0 / 1.0 / 5 / 1 / 0.7 / 1 | **R2** ReLAX settings (Remix direct-light preset + RTXDI sample). |
 
 Defaults are the user-tuned compromise (2026-10-07/08). All `CVAR_ARCHIVE`, so a user's own values persist in
 config regardless of these source defaults. `hitDist` scale (1024) is in-source only.
@@ -762,7 +764,20 @@ fast history, no "black dip" halo (the rise-only smoothing), (c) STATIC scene: v
 unaffected (no frying / dimming - the failure of the old pass), (d) NPC walking under a static light: no gradient
 fires (geometry change is NRD's job; the normal/depth test rejects it).
 
-### R2 - ReLAX A/B (F2) - medium, independent of R1
+### R2 - ReLAX A/B (F2) - medium, independent of R1 - **IMPLEMENTED 2026-10-12** (branch `feat/rtx-restir-di-r2-relax`, USER TEST PENDING)
+Shipped as planned: `r_rtReStirDIDenoiser` 0 = ReBLUR (today) / 1 = ReLAX; the `RELAX_DIFFUSE` + `RELAX_DIFFUSE_SH` pair joins the
+NRD instance only on request (gfx-signature rebuild, like `r_nrdSigma`); `RtaoDenoiseArgs::denoiser` is generic (RTGI can A/B it
+later, N2). Encodings verified in `NRD.hlsli`: ReLAX takes LINEAR radiance + RAW hit distance (`RELAX_FrontEnd_PackRadianceAndHitDist`)
+and outputs linear, except SH mode whose SH0 comes back YCoCg (`RELAX_BackEnd_UnpackSh`: c0 / chroma); SH1 = direction * luminance in
+both families. The gather switches its loc-0 encoding on `u_shadowFalloffS.w`; the apply / debug decode take a "source is linear" flag
+computed per view. Under ReLAX the R1 confidence is squared (NRD sample) and the ReBLUR floor rule is skipped; `r_rtReStirDIEdgeStop`
+scales `lobeAngleFraction` only. Starting values (Remix direct-light preset + RTXDI sample): `r_rtReStirDIRelaxFast` 1, `RelaxPrepass` 0,
+`RelaxPhi` 1.0, `RelaxAtrous` 5, `RelaxVarianceHist` 1, `RelaxConfRelax` 0.7 (with 1.4 / 0.6), `RelaxFirefly` 1; the history is the shared
+`r_rtReStirDIHistory`. Debug views 2-6 work under both. **Test (A/B at the same history):** `r_rtReStirDIDenoiser 1`: (a) grate /
+contact shadows and the window-frame shadows sharper or equal vs 0; (b) flashlight trail shorter (fast history 1); (c) flat lit
+floors: no new flicker (raise `RelaxPrepass` to 5-10 if the 1-spp noise shows - ReLAX has no spatial reuse feeding it yet, R3);
+(d) `r_vkGpuTime 2 restir.di.denoise` delta (expect +0.3-0.7 ms); (e) look-away fade: ReLAX's history fix is 3 frames max - note
+whether the wash reads better or worse. Decide the default; the loser's cvars are trimmed at R6.
 Files: `VulkanBackend.cpp` (`NrdCreate` denoiser table: `NRD_ID_RELAX_DI = RELAX_DIFFUSE`, `NRD_ID_RELAX_DI_SH =
 RELAX_DIFFUSE_SH`; `RtaoDenoise`: a `denoiser` arg, `nrd::RelaxSettings` path), `restir_di.frag` + `restir_di_apply.frag` +
 `restir_di_debug.frag` (encoding switch), `RhiWorld.cpp` (the arg + cvar), ImGui dropdown.

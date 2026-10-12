@@ -1104,13 +1104,14 @@ private:
 	uint32_t					nrdSlotCursor[FRAMES_IN_FLIGHT] = {};		// running CB/descriptor cursor within the frame
 	int							nrdW = 0, nrdH = 0;
 	bool						nrdSigma = false;		// R0: SIGMA_SHADOW is in the instance only when r_nrdSigma was set at create time
+	bool						nrdRelax = false;		// R2: RELAX_DIFFUSE(_SH) are in the instance only when r_rtReStirDIDenoiser was 1 at create time
 	bool						nrdPoolsReady = false;	// pool images transitioned to GENERAL
 	// per-denoiser history-primed flag, indexed by NRD_ID_* (REBLUR_AO 0 / SIGMA 1 / REBLUR_GI 2). A
 	// denoiser's temporal history lives in the shared permanent pool, which NrdCreate allocates but
 	// never clears; until a denoiser has run once with CLEAR_AND_RESTART its history is garbage, so
 	// running CONTINUE over it ghosts. Cleared on (re)create, set once the denoiser records -- so
 	// switching RTAO<->RTGI at an unchanged NRD size still clears the newly-selected denoiser's history.
-	bool						nrdPrimed[4] = {};
+	bool						nrdPrimed[6] = {};
 	// NrdRecordDispatches per-dispatch scratch: reused (clear() keeps capacity) so each dispatch's
 	// descriptor writes don't malloc/free two vectors.
 	std::vector<VkWriteDescriptorSet>		nrdWriteScratch;
@@ -2950,6 +2951,7 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	mixB( r_rtReStirDI ); mixB( r_rtReStirDIApply ); mixB( r_rtReStirDICheckerboard );
 	mixB( r_rtReStirDICombineGI ); mixI( r_rtReStirDIDebug );
 	mixB( r_nrdSigma );							// R0: changes the NRD instance's denoiser table (NrdCreate rebuild)
+	mixI( r_rtReStirDIDenoiser );				// R2: ReLAX pair in / out of the instance
 	// resolution scales (resize the gather / denoise / reflection / FSR targets)
 	mixF( r_fsrScale ); mixF( r_rtgiResScale ); mixF( r_rtaoResScale ); mixF( r_ssrResScale ); mixF( r_rtReflResScale );
 	mixF( r_rtReStirDIResScale );
@@ -6726,6 +6728,8 @@ static const nrd::Identifier NRD_ID_REBLUR_AO     = 0;
 static const nrd::Identifier NRD_ID_SIGMA_SHADOW  = 1;
 static const nrd::Identifier NRD_ID_REBLUR_GI     = 2;	// H6b RT GI: REBLUR_DIFFUSE (radiance+hitdist), docs/rtx-rtgi.md
 static const nrd::Identifier NRD_ID_REBLUR_GI_SH  = 3;	// ReSTIR DI SH mode: REBLUR_DIFFUSE_SH (SH0 + SH1), docs/rtx-restir-di.md
+static const nrd::Identifier NRD_ID_RELAX_DI      = 4;	// R2: ReSTIR DI on RELAX_DIFFUSE (r_rtReStirDIDenoiser 1), docs/rtx-restir-di.md Plan R2
+static const nrd::Identifier NRD_ID_RELAX_DI_SH   = 5;	// R2: RELAX_DIFFUSE_SH
 
 // nrd::Format -> VkFormat, table-ordered exactly like the enum in NRDDescs.h
 static VkFormat NrdFormatToVk( nrd::Format f ) {
@@ -6766,7 +6770,8 @@ recording here.
 */
 bool VulkanBackend::NrdCreate( int w, int h ) {
 	const bool wantSigma = r_nrdSigma.GetBool();
-	if ( nrdInstance != NULL && nrdW == w && nrdH == h && nrdSigma == wantSigma ) {
+	const bool wantRelax = r_rtReStirDIDenoiser.GetInteger() == 1;		// R2: the ReLAX pair costs pipelines + pools, so only on request
+	if ( nrdInstance != NULL && nrdW == w && nrdH == h && nrdSigma == wantSigma && nrdRelax == wantRelax ) {
 		return true;
 	}
 	NrdDestroy( false );
@@ -6782,7 +6787,7 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 	// R0 (docs/rtx-nrd.md N0): SIGMA_SHADOW has had no dispatcher since H3 was abandoned, yet it cost its pipelines + a
 	// share of both pools on every (re)create (incl. the idle-rebuild on a settings change). It joins the table only
 	// behind r_nrdSigma (the per-light penumbra experiment); its identifier stays reserved.
-	nrd::DenoiserDesc denoisers[4];
+	nrd::DenoiserDesc denoisers[6];
 	uint32_t denoiserCount = 0;
 	denoisers[denoiserCount++] = { NRD_ID_REBLUR_AO,    nrd::Denoiser::REBLUR_DIFFUSE_OCCLUSION };
 	if ( wantSigma ) {
@@ -6790,7 +6795,12 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 	}
 	denoisers[denoiserCount++] = { NRD_ID_REBLUR_GI,    nrd::Denoiser::REBLUR_DIFFUSE };
 	denoisers[denoiserCount++] = { NRD_ID_REBLUR_GI_SH, nrd::Denoiser::REBLUR_DIFFUSE_SH };		// ReSTIR DI SH mode (one of GI / GI_SH per frame)
+	if ( wantRelax ) {
+		denoisers[denoiserCount++] = { NRD_ID_RELAX_DI,    nrd::Denoiser::RELAX_DIFFUSE };		// R2 A/B
+		denoisers[denoiserCount++] = { NRD_ID_RELAX_DI_SH, nrd::Denoiser::RELAX_DIFFUSE_SH };
+	}
 	nrdSigma = wantSigma;
+	nrdRelax = wantRelax;
 	nrd::InstanceCreationDesc icd = {};		// null callbacks -> NRD's own aligned malloc
 	icd.denoisers = denoisers;
 	icd.denoisersNum = denoiserCount;
@@ -7051,7 +7061,7 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 	nrdH = h;
 	nrdPoolsReady = false;		// fresh images: first record transitions them to GENERAL
 	for ( int f = 0; f < FRAMES_IN_FLIGHT; f++ ) { nrdSlotGen[f] = -1; nrdSlotCursor[f] = 0; }	// fresh pools: force a reset on first record
-	nrdPrimed[0] = nrdPrimed[1] = nrdPrimed[2] = nrdPrimed[3] = false;		// fresh (uninitialised) history for every denoiser
+	for ( int i = 0; i < 6; i++ ) { nrdPrimed[i] = false; }		// fresh (uninitialised) history for every denoiser
 	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
 	return true;
 }
@@ -7660,7 +7670,10 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	VkImageView  outView  = a.giMode ? rtgiOutView  : rtaoOutView;
 	bool        &outReady = a.giMode ? rtgiOutReady : rtaoOutReady;
 	const bool shMode = a.giMode && a.shMode && rtgiOutSh1View != VK_NULL_HANDLE;
-	const nrd::Identifier denId = a.giMode ? ( shMode ? NRD_ID_REBLUR_GI_SH : NRD_ID_REBLUR_GI ) : NRD_ID_REBLUR_AO;
+	// R2: the ReLAX family on request (and only if the instance was created with it - a flip rebuilds via the gfx signature)
+	const bool relax = a.giMode && a.denoiser == 1 && nrdRelax;
+	const nrd::Identifier denId = a.giMode ? ( relax ? ( shMode ? NRD_ID_RELAX_DI_SH : NRD_ID_RELAX_DI )
+	                                                : ( shMode ? NRD_ID_REBLUR_GI_SH : NRD_ID_REBLUR_GI ) ) : NRD_ID_REBLUR_AO;
 
 	// frame settings
 	nrd::CommonSettings cs = {};
@@ -7692,6 +7705,45 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	if ( nrd::SetCommonSettings( *nrdInstance, cs ) != nrd::Result::SUCCESS ) {
 		RTAO_FAIL( 4, "nrd::SetCommonSettings rejected the frame settings" );
 	}
+	if ( relax ) {
+		// R2 (docs/rtx-restir-di.md Plan R2): RELAX_DIFFUSE(_SH). Starting point = RTX Remix's direct-light preset + the RTXDI
+		// sample's edge stopping; the caller's cvars carry the values. Linear radiance + RAW hit distance in (the gather
+		// switches its encoding), output linear (SH0 YCoCg in SH mode - RELAX_BackEnd_UnpackSh). History length comes back in .w.
+		nrd::RelaxSettings xs = {};
+		if ( a.maxAccumFrames > 0 ) { xs.diffuseMaxAccumulatedFrameNum = (uint32_t)Min( a.maxAccumFrames, 63 ); }
+		if ( a.fastFrames > 0 )     { xs.diffuseMaxFastAccumulatedFrameNum = (uint32_t)a.fastFrames; }
+		if ( xs.diffuseMaxFastAccumulatedFrameNum >= xs.diffuseMaxAccumulatedFrameNum && xs.diffuseMaxAccumulatedFrameNum > 1 ) {
+			xs.diffuseMaxFastAccumulatedFrameNum = xs.diffuseMaxAccumulatedFrameNum - 1;
+		}
+		if ( a.fastClampSigma > 0.0f ) { xs.fastHistoryClampingSigmaScale = a.fastClampSigma; }
+		if ( a.historyFixFrameNum > 0 ) {
+			uint32_t hf = (uint32_t)Min( a.historyFixFrameNum, 3 );		// RELAX: [0; 3] and < fast history
+			const uint32_t fastCap = ( xs.diffuseMaxFastAccumulatedFrameNum > 0 ) ? xs.diffuseMaxFastAccumulatedFrameNum - 1 : 0;
+			if ( hf > fastCap ) { hf = fastCap; }
+			xs.historyFixFrameNum = hf;
+		}
+		xs.diffusePrepassBlurRadius = Max( a.relaxPrepass, 0.0f );
+		if ( a.relaxPhiLuminance > 0.0f ) { xs.diffusePhiLuminance = a.relaxPhiLuminance; }
+		if ( a.relaxAtrous >= 2 )        { xs.atrousIterationNum = (uint32_t)Min( a.relaxAtrous, 8 ); }
+		if ( a.relaxVarianceHistory >= 0 ) { xs.spatialVarianceEstimationHistoryThreshold = (uint32_t)a.relaxVarianceHistory; }
+		if ( haveConf && a.relaxConfRelax > 0.0f ) {
+			xs.confidenceDrivenRelaxationMultiplier          = a.relaxConfRelax;	// Remix direct: 0.7 / 1.4 / 0.6
+			xs.confidenceDrivenLuminanceEdgeStoppingRelaxation = 1.4f;
+			xs.confidenceDrivenNormalEdgeStoppingRelaxation    = 0.6f;
+		}
+		xs.enableAntiFirefly = a.relaxAntiFirefly;
+		if ( a.edgeStopScale > 0.0f ) { xs.lobeAngleFraction *= a.edgeStopScale; }
+		if ( a.antilagOff ) {
+			xs.antilagSettings.accelerationAmount = 0.0f;			// no history acceleration, no reset: inert
+			xs.antilagSettings.resetAmount = 0.0f;
+		}
+		if ( a.checkerboard > 0 ) {
+			xs.checkerboardMode = ( a.checkerboard == 1 ) ? nrd::CheckerboardMode::BLACK : nrd::CheckerboardMode::WHITE;
+		}
+		if ( nrd::SetDenoiserSettings( *nrdInstance, denId, &xs ) != nrd::Result::SUCCESS ) {
+			RTAO_FAIL( 5, "nrd::SetDenoiserSettings rejected the ReLAX settings" );
+		}
+	} else {
 	nrd::ReblurSettings rs = {};
 	rs.hitDistanceParameters.A = a.hitDistA;		// MUST mirror rtao_ray.frag's normalization
 	rs.hitDistanceParameters.B = a.hitDistB;
@@ -7746,6 +7798,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	if ( nrd::SetDenoiserSettings( *nrdInstance, denId, &rs ) != nrd::Result::SUCCESS ) {
 		RTAO_FAIL( 5, "nrd::SetDenoiserSettings rejected the ReBLUR settings" );
 	}
+	}	// !relax
 
 	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
 	// RTGI's REBLUR_DIFFUSE overwrites IN_MV (temporal-stabilization pass), so it needs a
@@ -7884,7 +7937,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	}
 	if ( recorded && !( warned & ( 1 << 7 ) ) ) {
 		warned |= 1 << 7;
-		common->Printf( "%s: NRD ReBLUR denoise active (%dx%d)\n", a.giMode ? "RTGI" : "RTAO", a.w, a.h );
+		common->Printf( "%s: NRD %s denoise active (%dx%d)\n", a.giMode ? "RTGI/DI" : "RTAO", relax ? "ReLAX" : "ReBLUR", a.w, a.h );
 	}
 	// on record failure we still fall through to the restore barriers below — the inputs
 	// were already transitioned to GENERAL and MUST go back to SHADER_READ_ONLY, or every

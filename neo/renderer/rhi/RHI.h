@@ -231,6 +231,16 @@ struct RtaoDenoiseArgs {
 	bool	returnHistoryLength;		// giMode: output .w = accumulated frames instead of AO (nothing consumes the GI/DI .w AO); R3 reads it
 	float	disocclusionThreshold;		// CommonSettings::disocclusionThreshold [0.01;0.02] (0 = NRD default 0.01); looser = fewer false resets on moving objects
 	bool	validation;					// run NRD's validation pass into GetNrdValidationImage() (RGBA8 overlay: accumulated frames / resets / antilag)
+	// R2 (docs/rtx-restir-di.md Plan R2): the denoiser family for giMode. 0 = ReBLUR (REBLUR_DIFFUSE / _SH, YCoCg + normalized
+	// hitDist in, YCoCg out), 1 = ReLAX (RELAX_DIFFUSE / _SH, LINEAR radiance + RAW hitDist in; linear out, or YCoCg SH0 in SH
+	// mode) - NRD: "RELAX ... has been designed for RTXDI". Needs the instance created with ReLAX (r_rtReStirDIDenoiser).
+	int		denoiser;
+	float	relaxPrepass;				// RELAX diffusePrepassBlurRadius (px); Remix direct: 0 (ours is a spatial-reuse-free gather, so this is the only pre-blur)
+	float	relaxPhiLuminance;			// RELAX diffusePhiLuminance (A-trous luminance edge stopping; NRD 2.0, RTXDI sample 1.0); 0 = default
+	int		relaxAtrous;				// RELAX atrousIterationNum [2;8]; 0 = default (5)
+	int		relaxVarianceHistory;		// RELAX spatialVarianceEstimationHistoryThreshold (NRD 3, RTXDI sample 1); <0 = default
+	float	relaxConfRelax;				// RELAX confidenceDrivenRelaxationMultiplier (Remix 0.7; its luminance 1.4 / normal 0.6 edge relaxations ride along); 0 = off
+	bool	relaxAntiFirefly;			// RELAX enableAntiFirefly (NRD default false; Remix/RTXDI true)
 };
 
 class RHI {

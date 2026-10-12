@@ -9,7 +9,9 @@
 //   unit 1 = last frame's confidence (R16F, rw x rh)
 //   unit 2 = velocity at the internal res
 //   u_localParam0 = ( power, rise blend 1/(1+h), floor, darkness bias )
-//   u_localParam1 = ( dither amplitude, prev confidence valid, dead zone, 0 )
+//   u_localParam1 = ( dither amplitude, prev confidence valid, dead zone, square for ReLAX )
+//                   R2: ReLAX applies confidence "here and now" (historyLength = min( historyLength, max * confidence )) and
+//                   "expects smaller values" - the NRD sample squares it for RELAX; the ReBLUR floor rule is skipped by the caller
 //                   dead zone: relative changes below this fraction count as no change - Doom's authored flicker tables
 //                   pulse many lights by 5-15 % every frame, and a per-light comparison is noise-free, so this is a real
 //                   threshold, not a noise guard. A light switching OFF is a 100 % change of ITS OWN value regardless.
@@ -43,6 +45,7 @@ void main() {
 			if ( c > p ) { c = mix( p, c, u_localParam0.y ); }		// rise-only smoothing (Remix)
 		}
 	}
+	if ( u_localParam1.w > 0.5 ) { c *= c; }
 	c = max( c, u_localParam0.z );
 	c += ( ign( gl_FragCoord.xy ) - 0.5 ) * u_localParam1.x;
 	fragColor = vec4( clamp( c, 0.0, 1.0 ) );

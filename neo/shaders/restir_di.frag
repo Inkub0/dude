@@ -48,6 +48,8 @@
 //   u_particleRadius.zw   = per-view perforated box list device address (bit-cast; rt_perforated.glsl)
 //   u_shadowFalloffS.x    = forward light scale (backEnd.lightScale): the DI term is scaled here, not at the apply
 //   u_shadowFalloffS.y    = world size of one FULL-RES screen pixel per unit view depth (2/(proj00*viewW)): cookie LOD
+//   u_shadowFalloffS.w    = R2 ReLAX MODE (r_rtReStirDIDenoiser 1): loc 0 = LINEAR radiance + RAW hit distance (world units,
+//                           RELAX_FrontEnd_PackRadianceAndHitDist) instead of YCoCg + normalized; SH1 is the same direction * luminance
 //   u_shadowFalloffS.z    = SH MODE (r_rtReStirDISH): the per-light cosine N.L is NOT applied here; loc 3 carries SH1 =
 //                           direction * luminance (NRD REBLUR_FrontEnd_PackSh) and the apply re-resolves the cosine
 //                           against the FULL-res bump normal - the shading detail survives the denoise + reduced res
@@ -292,5 +294,6 @@ void main() {
 	// with A = 0.5 * u_localParam0.w, B = 0.1, MUST match the ReblurHitDistanceParameters in RB_RHI_ReStirDIPass.
 	// occluder distance when shadowed (tight blur for near casters: grates, contact), light distance when lit
 	float nhd = clamp( occDist / ( 0.5 * u_localParam0.w + d * 0.1 ), 0.0, 1.0 );
-	fragColor = vec4( nrdLinearToYCoCg( outRad ), nhd );
+	// R2: ReLAX takes linear radiance + the raw hit distance (RELAX_FrontEnd_PackRadianceAndHitDist); ReBLUR YCoCg + normalized
+	fragColor = ( u_shadowFalloffS.w > 0.5 ) ? vec4( outRad, min( occDist, 65504.0 ) ) : vec4( nrdLinearToYCoCg( outRad ), nhd );
 }

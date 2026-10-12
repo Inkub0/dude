@@ -19,6 +19,7 @@
 //   u_localParam0         = ( bilateral on/off, depth sensitivity, normal power, light scale )
 //   u_localParam1         = ( AO enable, AO floor, AO direct-light strength, 0 )
 //   u_occlusionParms.z    = baked occlusion-map strength on direct light (r_occlusionMapScale * r_occlusionMapDirect); 0 = off
+//   u_occlusionParms.w    = R2: the source is LINEAR (ReLAX output / raw ReLAX-mode gather) instead of NRD-YCoCg
 //   u_localParam1.w       = SH MODE: u_sh1 (unit 6) holds the denoised SH1 (direction * luminance); the gather carried no
 //                           cosine, so the cosine of the FULL-res bump normal is re-applied here per pixel
 //   u_modelViewMatrix     = inverse view (view -> world) - the SH direction is world space, the normal buffer view space
@@ -45,6 +46,7 @@ layout(location = 0) out vec4 fragColor;
 
 // NRD REBLUR radiance decode (_NRD_YCoCgToLinear), the exact inverse of restir_di.frag's nrdLinearToYCoCg.
 vec3 nrdYCoCgToLinear( vec3 c ) {
+	if ( u_occlusionParms.w > 0.5 ) { return max( c, vec3( 0.0 ) ); }	// R2: already linear
 	float t = c.x - c.z;
 	return max( vec3( t + c.y, c.x + c.z, t - c.y ), vec3( 0.0 ) );
 }

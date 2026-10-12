@@ -1042,6 +1042,14 @@ extern idCVar r_rtReStirDIGradientBias;		// R1: darkness bias in the change deno
 extern idCVar r_rtReStirDIGradientDeadzone;	// R1: relative per-light change below which nothing counts (authored flicker)
 extern idCVar r_rtReStirDIGradientStatic;	// R1: static threshold (full-res px) for the exact previous-position re-shade
 extern idCVar r_rtReStirDIGradientStratum;	// R1: NxN stratum size (3 = RTXDI, 5 = NRD's 1/5 res)
+extern idCVar r_rtReStirDIDenoiser;		// R2: 0 ReBLUR / 1 ReLAX for the DI denoise
+extern idCVar r_rtReStirDIRelaxFast;		// R2: ReLAX fast history (Remix direct 1)
+extern idCVar r_rtReStirDIRelaxPrepass;		// R2: ReLAX prepass blur px (Remix direct 0)
+extern idCVar r_rtReStirDIRelaxPhi;			// R2: ReLAX diffusePhiLuminance (RTXDI 1.0)
+extern idCVar r_rtReStirDIRelaxAtrous;		// R2: ReLAX A-trous iterations
+extern idCVar r_rtReStirDIRelaxVarianceHist;	// R2: ReLAX spatial variance history threshold (RTXDI 1)
+extern idCVar r_rtReStirDIRelaxConfRelax;	// R2: ReLAX confidence-driven relaxation multiplier (Remix 0.7)
+extern idCVar r_rtReStirDIRelaxFirefly;		// R2: ReLAX anti-firefly
 extern idCVar r_nrdSigma;					// R0: keep SIGMA_SHADOW in the NRD instance (never dispatched since H3)
 extern idCVar r_rtReStirDICheckerboard;		// ReSTIR DI full-res checkerboard: trace half the pixels (packed left), NRD reconstructs; ~half the rays
 extern idCVar r_rtReStirDIResScale;			// ReSTIR DI gather/denoise resolution fraction (0.25..1); upscaled for display. Composes with checkerboard

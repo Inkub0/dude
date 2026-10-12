@@ -473,6 +473,7 @@ static bool  rhiRtaoRanThisView = false;			// ray output produced this view (ove
 static rhi::RenderTargetHandle rhiReStirDIRT = 0;	// the fresh 1-spp gather: CreateRenderTargetRtgiMrt (NRD guide MRT), or the 4-att SH variant
 static bool rhiReStirDIShRT = false;				// rhiReStirDIRT is the SH (4-attachment) variant
 static bool rhiReStirDIShThisView = false;			// the gather ran in SH mode this view (the apply resolves SH1)
+static bool rhiReStirDIRelaxThisView = false;		// R2: the gather wrote the ReLAX encoding this view (linear + raw hitDist)
 static int   rhiReStirDIW = 0, rhiReStirDIH = 0;
 static bool  rhiReStirDIRanThisView = false;		// DI gather produced this view (debug-overlay gate)
 static bool  rhiReStirDIDenoisedThisView = false;	// the shared REBLUR_DIFFUSE denoise ran for DI this view -> GetRtgiOutputImage is the denoised DI
@@ -7933,6 +7934,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiReStirDIGatherPrevValid = false;
 	}
 	rhiReStirDIShThisView = shMode;
+	const bool relaxMode = r_rtReStirDIDenoiser.GetInteger() == 1;		// R2: ReLAX encoding in the gather, ReLAX in the denoise
+	rhiReStirDIRelaxThisView = relaxMode;
 
 	float invView[16];
 	if ( !RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
@@ -8034,6 +8037,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// cookies read dimmer on the blurred mips; mip 0 made DI brighter than forward on big floors)
 	parms.shadowFalloffS[1] = 2.0f * invP00 / (float)w;
 	parms.shadowFalloffS[2] = shMode ? 1.0f : 0.0f;						// SH mode: no cosine in the gather, SH1 on loc 3
+	parms.shadowFalloffS[3] = relaxMode ? 1.0f : 0.0f;					// R2: linear + raw hitDist out (ReLAX input)
 
 	// r_rtReStirDICombineGI: fold the RTGI one-bounce into this gather (rtgi_bounce.glsl) so ONE NRD denoise and
 	// ONE apply serve direct + indirect. RB_RHI_RtgiPass already stands down while DI is on (the shared NRD slot),
@@ -8220,7 +8224,9 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				const int   fastF  = ( diFastF > 0 ) ? diFastF : 6;
 				const int   hfEff  = Min( ( hfCvar > 0 ) ? hfCvar : 3, Max( fastF - 1, 0 ) );
 				const float mainF  = (float)Max( 1, ( diMainF > 0 ) ? diMainF : 30 );
-				const float floorC = Max( r_rtReStirDIGradientFloor.GetFloat(), (float)hfEff / mainF );
+				// ReBLUR: never below historyFix / history (or history fix fires); ReLAX applies confidence directly and expects
+				// smaller values (the shader squares it): the raw cvar floor
+				const float floorC = relaxMode ? r_rtReStirDIGradientFloor.GetFloat() : Max( r_rtReStirDIGradientFloor.GetFloat(), (float)hfEff / mainF );
 				const float h      = r_rtReStirDIGradientHistory.GetFloat();
 				rhi::RenderParams cp;
 				memset( &cp, 0, sizeof( cp ) );
@@ -8232,6 +8238,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				cp.localParam1[0] = 0.5f / mainF;									// NRD: dither by 0.5 / maxAccumulatedFrameNum
 				cp.localParam1[1] = rhiReStirDIGradConfValid ? 1.0f : 0.0f;
 				cp.localParam1[2] = idMath::ClampFloat( 0.0f, 0.9f, r_rtReStirDIGradientDeadzone.GetFloat() );
+				cp.localParam1[3] = relaxMode ? 1.0f : 0.0f;						// R2: square the confidence for ReLAX (NRD sample)
 				cp.windowCoord[2] = -1.0f;
 				const int ci = rhiReStirDIGradConfIdx;
 				r->GpuScopeBegin( "restir.di.gradconf" );
@@ -8386,6 +8393,15 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.disocclusionThreshold = r_rtReStirDIDisocclusion.GetFloat();	// 0.01 = NRD default
 		da.returnHistoryLength = true;							// .w = accumulated frames (debug view 4; R3's disocclusion boost)
 		da.validation       = ( r_rtReStirDIDebug.GetInteger() == 3 );	// NRD's validation overlay for debug view 3
+		// R2 (Plan R2): ReLAX family + its settings (Remix direct-light preset / RTXDI sample as the starting values)
+		da.denoiser            = relaxMode ? 1 : 0;
+		if ( relaxMode ) { da.fastFrames = r_rtReStirDIRelaxFast.GetInteger(); }	// Remix direct: 1 ("to reduce trail"); ReBLUR keeps r_rtReStirDIFastHistory
+		da.relaxPrepass        = r_rtReStirDIRelaxPrepass.GetFloat();
+		da.relaxPhiLuminance   = r_rtReStirDIRelaxPhi.GetFloat();
+		da.relaxAtrous         = r_rtReStirDIRelaxAtrous.GetInteger();
+		da.relaxVarianceHistory = r_rtReStirDIRelaxVarianceHist.GetInteger();
+		da.relaxConfRelax      = r_rtReStirDIRelaxConfRelax.GetFloat();
+		da.relaxAntiFirefly    = r_rtReStirDIRelaxFirefly.GetBool();
 		// DI spatial-cleanup overrides (fight the 1-spp noise NRD leaves on fine detail + moving limbs). 0 = NRD default.
 		da.prepassBlurRadius  = r_rtReStirDIPrepassBlur.GetFloat();	// diffusePrepassBlurRadius: the main lever for probabilistic 1-spp input
 		da.historyFixFrameNum = r_rtReStirDIHistoryFix.GetInteger();	// spatial reconstruction on thin/disoccluded (moving) history
@@ -9127,6 +9143,8 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[1] = idMath::ClampFloat( 0.0f, 1.0f, r_ssaoFloor.GetFloat() );
 	parms.localParam1[2] = aoDirect;
 	parms.localParam1[3] = shResolve ? 1.0f : 0.0f;					// SH resolve (u_sh1 on unit 6, inverse view below)
+	// R2: ReLAX's non-SH output and the raw ReLAX-mode gather are LINEAR; ReBLUR's output and ReLAX's SH0 are YCoCg
+	parms.occlusionParms[3] = ( rhiReStirDIRelaxThisView && ( !rhiReStirDIDenoisedThisView || !shResolve ) ) ? 1.0f : 0.0f;
 	if ( shResolve ) {
 		float invView[16];
 		if ( RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
@@ -9245,6 +9263,8 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[2] = 8.0f;									// normal power
 	parms.localParam0[3] = (float)viewMode;							// R0: 0 DI radiance / 1 validation passthrough / 2 history ramp
 	parms.localParam1[0] = (float)Max( 1, rhiReStirDIHistFrames );	// history ramp denominator
+	// R2: the source is linear when the ReLAX-mode gather is shown raw, or ReLAX's non-SH denoised output; YCoCg otherwise
+	parms.localParam1[1] = ( rhiReStirDIRelaxThisView && ( dbgMode < 2 || !rhiReStirDIShThisView ) ) ? 1.0f : 0.0f;
 	parms.screenCorrection[0] = ( rhiReStirDIW > 0 ) ? 1.0f / rhiReStirDIW : 1.0f;	// 1/(rw,rh) = reduced-res DI texel (uv)
 	parms.screenCorrection[1] = ( rhiReStirDIH > 0 ) ? 1.0f / rhiReStirDIH : 1.0f;
 	if ( uploadW > 0 && uploadH > 0 ) {

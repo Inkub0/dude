@@ -37,6 +37,7 @@ layout(location = 0) out vec4 fragColor;
 
 // NRD REBLUR radiance decode (_NRD_YCoCgToLinear), the exact inverse of restir_di.frag's nrdLinearToYCoCg.
 vec3 nrdYCoCgToLinear( vec3 c ) {
+	if ( u_localParam1.y > 0.5 ) { return max( c, vec3( 0.0 ) ); }	// R2: the source is already linear (ReLAX)
 	float t = c.x - c.z;
 	return max( vec3( t + c.y, c.x + c.z, t - c.y ), vec3( 0.0 ) );
 }
