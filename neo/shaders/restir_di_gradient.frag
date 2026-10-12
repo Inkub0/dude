@@ -31,7 +31,7 @@
 //   unit 5 = LAST frame's gather att1 (copy)
 //   unit 6 = LAST frame's gather att2 ( NRD-packed world normal ) (copy)
 //   unit 10 = this frame's velocity at the internal res (currUV - prevUV, +Y-up)
-//   unit 11 = LAST frame's gather att3 ( SH1.xyz, chosen light row + 1 ) (copy)
+//   unit 11 = LAST frame's gather att3 ( SH1.xyz, chosen light row + 1 [+ 0.5 = R3a boosted] ) (copy)
 //   unit 9 = THIS frame's gather att3
 //   u_tessParms.w     = THIS frame's checkerboard parity (0 = off, 1 = even, 2 = odd)
 //   u_shadowParms.xy  = lightDef -> current row table device address (bit-cast; row + 1, 0 = absent this frame)
@@ -80,16 +80,6 @@ VARY(0) in vec2 var_TexCoord;
 
 layout(location = 0) out vec4 fragColor;	// ( |L_prev - L_now|, max( L_prev, L_now ), 0, 1 )
 
-// inverse of restir_di.frag's packNrdNormal (signed octahedron, z sign in .z)
-vec3 unpackNrdNormal( vec3 r ) {
-	float a = 2.0 * r.x - 1.0;					// n.x + n.y
-	float b = 2.0 * r.y - 1.0;					// n.y - n.x
-	vec3  n = vec3( 0.5 * ( a - b ), 0.5 * ( a + b ), 0.0 );
-	n.z = ( 1.0 - abs( n.x ) - abs( n.y ) ) * ( r.z < 0.5 ? -1.0 : 1.0 );
-	float l2 = dot( n, n );
-	return ( l2 > 1e-8 ) ? n * inversesqrt( l2 ) : vec3( 0.0, 0.0, 1.0 );
-}
-
 void main() {
 	fragColor = vec4( 0.0, 0.0, 0.0, 1.0 );
 	const int   stratum = int( u_parallaxParms.x + 0.5 );
@@ -131,7 +121,7 @@ void main() {
 				if ( traced ) {
 					vec4 side = texelFetch( u_curSide, rp, 0 );
 					curLum = texelFetch( u_curViewZ, rp, 0 ).y;				// 0 when no light was chosen (side.w = 0)
-					curRowPlus1 = uint( side.w + 0.5 );
+					curRowPlus1 = uint( floor( side.w + 0.25 ) );			// R3a keeps its boost bit in the fraction (+0.5)
 				}
 			}
 
@@ -153,7 +143,7 @@ void main() {
 			float expectedPrevVz = ( u_prevMvpMatrix * vec4( S.Pw, 1.0 ) ).z;
 			if ( abs( expectedPrevVz - pvz.x ) > 0.1 * max( abs( expectedPrevVz ), 1.0 ) ) { continue; }
 			vec4  pside = texelFetch( u_prevSide, readPix, 0 );
-			uint  prevRowPlus1 = uint( pside.w + 0.5 );
+			uint  prevRowPlus1 = uint( floor( pside.w + 0.25 ) );		// R3a boost bit in the fraction: floor it off
 			float prevLum = ( prevRowPlus1 != 0u ) ? pvz.y : 0.0;			// a valid surface with no light last frame counts as dark
 
 			float score = max( prevLum, max( curLum, 0.0 ) );

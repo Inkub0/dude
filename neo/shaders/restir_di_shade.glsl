@@ -172,3 +172,14 @@ float diGradientLuminance( vec3 contrib, vec3 B, float vis ) {
 	float l = dot( contrib / B, DI_LUM ) * vis * u_shadowFalloffS.x;
 	return unpackHalf2x16( packHalf2x16( vec2( l, 0.0 ) ) ).x;
 }
+
+// NRD normal encoding 2 (signed octahedron, z sign in .z) -> world normal: the exact inverse of the gather's packNrdNormal.
+// Used by the gradient (R1) and the boost (R3a) to read last frame's stored normal.
+vec3 unpackNrdNormal( vec3 r ) {
+	float a = 2.0 * r.x - 1.0;					// n.x + n.y
+	float b = 2.0 * r.y - 1.0;					// n.y - n.x
+	vec3  n = vec3( 0.5 * ( a - b ), 0.5 * ( a + b ), 0.0 );
+	n.z = ( 1.0 - abs( n.x ) - abs( n.y ) ) * ( r.z < 0.5 ? -1.0 : 1.0 );
+	float l2 = dot( n, n );
+	return ( l2 > 1e-8 ) ? n * inversesqrt( l2 ) : vec3( 0.0, 0.0, 1.0 );
+}

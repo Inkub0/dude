@@ -58,6 +58,21 @@
 //   u_pbrParms            = ( gather radius, r_rtgiEmissive, r_rtgiEmissiveClamp, r_rtgiLightScale )
 //   u_pbrParms2           = ( ambient floor, shadow-ray gate, eye pullback per unit depth, r_rtgiIntensity )
 //   u_occlusionParms      = ( IGN rotation cos, sin, IGN offset x, y )   [CPU-hoisted per frame, as RB_RHI_RtgiPass]
+//   --- R3a disocclusion boost (r_rtReStirDIBoost, docs/rtx-restir-di.md Plan R3) ---
+//   u_tessParms           = ( K picks (0 = off), boost-ON history (frames), boost-OFF history (frames),
+//                             LAST frame's checkerboard parity: 0 = off, 1 / 2 = parity, -1 = NO side data this frame )
+//   u_prevMvpMatrix       = LAST frame's world -> view (the expected previous view z of this surface point)
+//   unit 4  = LAST frame's denoised DI: .w = NRD's accumulated history length in frames (ReLAX always; ReBLUR with
+//             returnHistoryLengthInsteadOfOcclusion), reprojected here through unit 10
+//   unit 5  = LAST frame's gather att1 copy ( viewZ, lum )         unit 6 = LAST frame's att2 copy (NRD-packed normal)
+//   unit 9  = LAST frame's att3 copy ( SH1, row + 1 [+ 0.5 = that pixel was boosted last frame] )
+//   unit 10 = velocity at the gather res (currUV - prevUV, +Y-up)
+//   A YOUNG pixel - just revealed (a mover's wake, a screen edge while turning, a cut) or one whose history NRD still
+//   counts short - gets K independent reservoir picks from the same candidate weights (one light loop) and K visibility
+//   rays, averaged: 1/K the variance exactly where the denoiser would otherwise widen its filter and smear the adjacent
+//   shadow across the wake for the whole refill. Hysteresis (the stored bit): once boosted, a pixel stays boosted until
+//   its history reaches the OFF threshold, so the ray count never flips while the history hovers around the ON one
+//   (the confidence clamp makes it hover). RTXDI / Remix: numDisocclusionBoostSamples, without neighbour reservoirs.
 #extension GL_EXT_buffer_reference_uvec2 : require	// build the light-buffer pointer from u_color.xy (uvec2)
 #extension GL_EXT_ray_query : require				// one visibility ray for the chosen light
 #extension GL_EXT_nonuniform_qualifier : require		// bindless light textures (rt_light_tex.glsl)
@@ -72,6 +87,12 @@
 #include "restir_di_shade.glsl"
 // the RTGI bounce (trace + hit shading), shared with rtgi_ray.frag, for the combined DI+GI buffer
 #include "rtgi_bounce.glsl"
+
+SAMPLER_BINDING(4) uniform sampler2D u_prevDenoised;		// R3a: last frame's denoised DI, .w = NRD history length (frames)
+SAMPLER_BINDING(5) uniform sampler2D u_prevViewZ;		// R3a: last frame's gather att1 copy ( viewZ, lum )
+SAMPLER_BINDING(6) uniform sampler2D u_prevNormal;		// R3a: last frame's gather att2 copy (NRD-packed normal)
+SAMPLER_BINDING(9) uniform sampler2D u_prevSide;		// R3a: last frame's gather att3 copy ( SH1, row + 1 [+ 0.5 boosted] )
+SAMPLER_BINDING(10) uniform sampler2D u_velocity;		// R3a: velocity at the gather res
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -113,6 +134,39 @@ vec4 packNrdNormal( vec3 Nraw ) {
 	float s = n.z < 0.0 ? -roughness : roughness;
 	r.z = s * 0.5 + 0.5;
 	return vec4( r, 0.0 );										// w = materialID/3 = 0
+}
+
+// R3a: is this pixel YOUNG - does it get the boosted picks this frame? (header: u_tessParms, u_prevMvpMatrix, units 4/5/6/9/10)
+bool diBoostWanted( vec2 sfrag, in DiSurface S ) {
+	const float hOn    = u_tessParms.y;
+	const float hOff   = u_tessParms.z;
+	const int   prevCb = int( floor( u_tessParms.w + 0.5 ) );				// -1 = no side data
+	vec2 uvc = sfrag * u_screenCorrection.xy;
+	vec2 vel = texture( u_velocity, uvc ).rg;
+	vel.y = ( u_windowCoord.z < 0.0 ) ? -vel.y : vel.y;
+	vec2 prevUV = uvc - vel;
+	if ( any( lessThan( prevUV, vec2( 0.0 ) ) ) || any( greaterThanEqual( prevUV, vec2( 1.0 ) ) ) ) { return true; }	// just entered the screen: no history at all
+	ivec2 res     = ivec2( floor( 1.0 / u_screenCorrection.xy + 0.5 ) );
+	ivec2 prevPix = clamp( ivec2( floor( prevUV * vec2( res ) ) ), ivec2( 0 ), res - 1 );
+	// NRD's history length where this pixel was - the nearest texel, never bilinear (a frame count must not blend across an edge)
+	float h = texelFetch( u_prevDenoised, prevPix, 0 ).a;
+	if ( !( h >= hOn ) ) { return true; }									// young by NRD's own count (NaN / garbage counts as young)
+	if ( prevCb < 0 ) { return false; }										// no side data: NRD's count is all there is
+	// the pixel's own previous sample (under checkerboard: the nearest cell traced last frame, packed left)
+	ivec2 readPix = prevPix;
+	if ( prevCb > 0 ) {
+		if ( ( prevPix.x & 1 ) != ( ( prevPix.y + prevCb - 1 ) & 1 ) ) { readPix.x = ( prevPix.x ^ 1 ); }	// its traced neighbour
+		readPix.x = min( readPix.x, res.x - 1 ) >> 1;
+	}
+	// a DIFFERENT surface was here last frame (the RTXDI same-surface test, as the gradient): disoccluded THIS frame.
+	// NRD resets this pixel below anyway; boosting now rather than a frame late keeps the first wake sample clean too.
+	vec2  pvz = texelFetch( u_prevViewZ, readPix, 0 ).xy;
+	vec3  pN  = unpackNrdNormal( texelFetch( u_prevNormal, readPix, 0 ).xyz );
+	float expectedPrevVz = ( u_prevMvpMatrix * vec4( S.Pw, 1.0 ) ).z;
+	if ( dot( S.Nw, pN ) < 0.5 || abs( expectedPrevVz - pvz.x ) > 0.1 * max( abs( expectedPrevVz ), 1.0 ) ) { return true; }
+	// hysteresis: boosted last frame (the +0.5 in the stored row id) and the history has not reached the OFF threshold yet
+	float prevRow = texelFetch( u_prevSide, readPix, 0 ).w;
+	return ( fract( prevRow ) > 0.25 ) && !( h >= hOff );
 }
 
 void main() {
@@ -181,6 +235,17 @@ void main() {
 	// A cheap bounding-sphere cull skips lights that cannot reach the point. The reservoir is TRANSIENT
 	// (this frame only) - NRD does the temporal accumulation downstream.
 	const bool shMode = u_shadowFalloffS.z > 0.5;
+	// R3a: how many independent picks (and visibility rays) this pixel gets - K where it is young, else 1 (diBoostWanted)
+	#define DI_BOOST_MAX 8
+	const int kMax = clamp( int( u_tessParms.x + 0.5 ), 0, DI_BOOST_MAX );
+	bool boostedNow = ( kMax > 1 ) ? diBoostWanted( sfrag, S ) : false;
+	const int K = boostedNow ? kMax : 1;
+	float pHatB[DI_BOOST_MAX];
+	vec3  radB[DI_BOOST_MAX], ldirB[DI_BOOST_MAX];
+	float dlB[DI_BOOST_MAX];
+	uint  flagsB[DI_BOOST_MAX];
+	for ( int k = 0; k < DI_BOOST_MAX; k++ ) { pHatB[k] = 0.0; radB[k] = vec3( 0.0 ); ldirB[k] = vec3( 0.0, 0.0, 1.0 ); dlB[k] = 0.0; flagsB[k] = 0u; }
+
 	float wSum        = 0.0;
 	float pHatChosen  = 0.0;
 	vec3  radChosen   = vec3( 0.0 );
@@ -218,6 +283,12 @@ void main() {
 			flagsChosen = lights.l[ li ].flags;
 			rowChosen   = li + 1u;
 		}
+		// R3a: the extra independent picks share the candidate weights (same wSum), each with its own random draws
+		for ( int k = 1; k < K; k++ ) {
+			if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
+				pHatB[k] = pHat;	radB[k] = rad;	ldirB[k] = ldir;	dlB[k] = dl;	flagsB[k] = lights.l[ li ].flags;
+			}
+		}
 	}
 
 	if ( !( pHatChosen > 0.0 ) && u_specularParms.x < 0.5 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }	// no reaching light (and no bounce to add)
@@ -232,12 +303,31 @@ void main() {
 
 	// the direct term, at the forward path's light scale (lightColor = lightScale * stage colour there)
 	vec3 outRad = max( radChosen * ( W * vis * u_shadowFalloffS.x ), vec3( 0.0 ) );
+	// R3a: average the extra picks' unbiased estimates with the first (each rad_k * W_k * vis_k is unbiased on its own);
+	// shDirect = the averaged direct SH1 term (direction * luminance) the SH block below uses instead of the single pick's
+	vec3 shDirect = ldirChosen * dot( outRad, vec3( 0.2126, 0.7152, 0.0722 ) );
+	if ( K > 1 ) {
+		vec3 sumRad = outRad;
+		vec3 sumSh  = shDirect;
+		for ( int k = 1; k < K; k++ ) {
+			if ( !( pHatB[k] > 0.0 ) ) { continue; }
+			float Wk = ( wSum / ( exhaustive ? 1.0 : float( draws ) ) ) / pHatB[k];
+			float od;
+			float visK = ( ( flagsB[k] & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ldirB[k], dlB[k], od );
+			vec3  rk = max( radB[k] * ( Wk * visK * u_shadowFalloffS.x ), vec3( 0.0 ) );
+			sumRad += rk;
+			sumSh  += ldirB[k] * dot( rk, vec3( 0.2126, 0.7152, 0.0722 ) );
+		}
+		outRad   = sumRad / float( K );
+		shDirect = sumSh / float( K );
+	}
 	// R1 side outputs for next frame's gradient pass: which light this pixel shaded (row + 1 in THIS frame's light
 	// buffer) and how bright its visible contribution was (fp16, restir_di_shade.glsl). The RIS weight W is left out:
-	// it multiplies both frames alike and cancels in the normalized gradient.
+	// it multiplies both frames alike and cancels in the normalized gradient. R3a keeps its "boosted" bit in the row
+	// id's fraction (+0.5, exact in fp16 below 1024 rows); readers floor it off.
 	if ( pHatChosen > 0.0 ) {
 		outViewZ.y = diGradientLuminance( contribChosen, B, vis );
-		outSh1.w   = float( rowChosen );
+		outSh1.w   = float( rowChosen ) + ( boostedNow ? 0.5 : 0.0 );
 	}
 	vec3 shDir  = vec3( 0.0 );										// SH mode: accumulated direction * luminance
 
@@ -284,7 +374,7 @@ void main() {
 	}
 	if ( shMode ) {
 		// NRD SH1 for the direct term: direction * luminance (REBLUR_FrontEnd_PackSh: c1 = direction * Y)
-		shDir += ldirChosen * dot( max( radChosen * ( W * vis * u_shadowFalloffS.x ), vec3( 0.0 ) ), vec3( 0.2126, 0.7152, 0.0722 ) );
+		shDir += shDirect;										// (R3a: the K-averaged term when boosted)
 		outSh1.xyz = shDir;										// .w keeps the R1 row id
 	}
 

@@ -154,6 +154,8 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIGradientFilterPasses` | 2 | **R1** A-trous passes over the gradient (RTXDI 4); 2 hugs a change tighter (user-tuned). |
 | `r_rtReStirDIDenoiser` | 1 | **R2** 1 = ReLAX (NRD's RTXDI denoiser; DEFAULT since 2026-10-12), 0 = ReBLUR; rebuilds NRD. |
 | `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 1 / 8 / 1.0 / 3 / 1 / 0.7 / 1 | **R2** ReLAX settings (Remix direct-light preset + RTXDI sample). |
+| `r_rtReStirDIBoost` | 0 | **R3a** K picks + K rays on YOUNG pixels (just revealed / NRD history short); 0 or 1 = off, 2..8 = K. Default-off stage, under test. |
+| `r_rtReStirDIBoostHistory` | 4 | **R3a** history (frames) below which a pixel is boosted; it stays boosted until 2x this (capped at `r_rtReStirDIHistory`). |
 
 Defaults are the user-tuned compromise (2026-10-07/08). All `CVAR_ARCHIVE`, so a user's own values persist in
 config regardless of these source defaults. `hitDist` scale (1024) is in-source only.
@@ -876,6 +878,33 @@ under checkerboard, cheaper (no per-stratum light loop) and correct with checker
 but it must (a) be default-off, (b) not toggle: once a pixel is boosted keep K for the whole refill (hysteresis on history
 length, or boost by a smooth weight), and (c) be tested alone. A known-change selection needs the exact-point comparison
 (same world point, same visibility ray) - stored values from two jittered frames are not that.
+
+**R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
+on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:
+1. **Three ways to be young, tested in the gather (`diBoostWanted`)**: the pixel reprojects off screen; NRD's history length
+   where it was (last frame's denoised `.w`, nearest texel - never bilinear, a frame count must not blend across an edge) is
+   below H; or the RTXDI same-surface test against last frame's side copies fails (normal dot < 0.5 or > 10 % view-z mismatch
+   through last frame's world -> view) - a TRUE disocclusion is boosted THIS frame, not a frame late when NRD first reports
+   history 1 (the reverted form read the OCCLUDER's long history at the reprojected position and missed the wake's first frame).
+2. **Hysteresis, no toggling**: the gather stores a "boosted" bit in its row id (`att3.w = row + 1 + 0.5`, exact in fp16 below
+   1024 rows; the gradient floors it off) and a pixel that was boosted last frame STAYS boosted until its history reaches
+   `min( 2H, r_rtReStirDIHistory )` (never below H). Under ReLAX the history is clamped to `max * confidence^2`, so near a
+   moving light it hovers; without the band a pixel flipped between 1 and K rays every frame (the reverted form's flicker).
+   A region whose confidence keeps the history under the OFF threshold stays boosted - bounded cost, and those are the pixels
+   that need the rays.
+3. **Camera cut / first DI frame / slot not ours**: every pixel is young (thresholds 1e6, side data declared absent).
+4. **Side copies** (`restir.di.sidecopy`) are now made for the boost as well as the gradient (same gate), so the boost works
+   with `r_rtReStirDIGradient 0` too. Under checkerboard a pixel not traced last frame reads its traced neighbour's cell.
+5. Inputs on units 4 / 5 / 6 / 9 / 10 (white placeholders when off: the descriptor set stays complete; never 7 / 8 / 12).
+The K picks themselves are the reverted recipe: K independent reservoir draws from the SAME candidate weights (one light loop,
+K random streams), K visibility rays, the K unbiased estimates averaged (variance / K); the SH1 direction term averaged the
+same way; the hit distance and the gradient luminance stay the first pick's. **Test (one change at a time, ReLAX default,
+history 8):** (a) `r_rtReStirDIBoost 4`: a walking NPC's wake - the dark trail should shorten or vanish while view 4 still
+shows the geometric wake (that is correct); screen edges while turning likewise; (b) static scene + flickering lights: NO new
+flicker vs `r_rtReStirDIBoost 0` (the hysteresis claim); (c) `restir.di.gather` cost still vs walking NPC vs turning (expect
+up only while something is disoccluding; a full-screen turn at K 4 is the worst case); (d) `r_rtReStirDIBoostHistory` 2 / 8
+if a faint trail remains or the cost bites. Keep or revert on the user's word; the `[A]` neighbour-reservoir spatial reuse
+(R3b) is unchanged below.
 
 Files: NEW `restir_di_spatial.frag`, `restir_di.frag` (reservoir attachment), `RhiWorld.cpp` (the pass between gather and
 denoise), `rt_light_eval.glsl` (none), optional NEW compute `restir_di_boiling.comp`.

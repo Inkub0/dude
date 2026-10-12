@@ -8140,13 +8140,18 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		r_rtReStirDIFastHistory.GetInteger(), diMainF, diFastF );
 	const bool diCut = RB_RHI_NrdHistoryReset( viewDef );
 
+	// ---- R3a disocclusion boost (docs/rtx-restir-di.md Plan R3, r_rtReStirDIBoost): K picks + rays on YOUNG pixels. Needs
+	// last frame's denoised output (still in the shared slot until this frame's denoise), the velocity at the gather res and,
+	// for the same-surface test + the hysteresis bit, last frame's side copies (made below, as for the gradient) ----
+	const int  boostK    = ( r_rtReStirDIBoost.GetInteger() > 1 ) ? idMath::ClampInt( 2, 8, r_rtReStirDIBoost.GetInteger() ) : 0;
+	const bool boostWant = boostK > 0 && nrdVel != 0 && nrdFree;
 
 	// ---- R1 rev.2: keep last frame's side data (att1 viewZ+lum / att2 normal / att3 SH1+row) across the gather, so the
 	// gradient pass can run AFTER it and see BOTH frames' picks (RTXDI: the brightest sample of either frame). Three
 	// plain copies at the gather res; only when the gradient will run. ----
 	const float diPrevCb = rhiReStirDIPrevCb;
 	bool diPrevSideValid = false;
-	if ( r_rtReStirDIGradient.GetBool() && rhiReStirDIGatherPrevValid && nrdVel != 0 && nrdFree && !diCut ) {
+	if ( ( r_rtReStirDIGradient.GetBool() || boostWant ) && rhiReStirDIGatherPrevValid && nrdVel != 0 && nrdFree && !diCut ) {
 		for ( int k = 0; k < 3; k++ ) {
 			if ( rhiReStirDIPrevSideRT[k] && r->GetRenderTargetImage( rhiReStirDIPrevSideRT[k] ) == 0 ) { rhiReStirDIPrevSideRT[k] = 0; }
 		}
@@ -8180,7 +8185,21 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// Checkerboard packs every traced sample into the LEFT HALF, so restrict the draw there - the right half is
 	// written nothing and reconstructed by NRD, so ~half the gather fragments (and their visibility rays) run.
 	// The shader keeps its own right-half early-out as the correctness guarantee.
-	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray
+	// R3a boost uniforms: everything is young on a cut / first DI frame / when the slot holds someone else's output (the
+	// thresholds go to 1e6 and the side data is declared absent); otherwise ON below BoostHistory, OFF once past twice
+	// that (capped at the history length, never below ON) - the hysteresis band that keeps a pixel's ray count steady.
+	const bool boostAll = boostWant && ( !rhiReStirDIPrevValid || diCut || r->GetRtgiOutputImage() == 0 );
+	const bool boostSide = boostWant && !boostAll && diPrevSideValid;
+	{
+		const float hOn  = idMath::ClampFloat( 1.0f, 63.0f, r_rtReStirDIBoostHistory.GetFloat() );
+		const float hOff = idMath::ClampFloat( hOn, 63.0f, ( ( 2.0f * hOn < (float)diMainF ) ? 2.0f * hOn : (float)diMainF ) );
+		parms.tessParms[0] = boostWant ? (float)boostK : 0.0f;
+		parms.tessParms[1] = boostAll ? 1.0e6f : hOn;
+		parms.tessParms[2] = boostAll ? 1.0e6f : hOff;
+		parms.tessParms[3] = boostSide ? diPrevCb : -1.0f;
+		memcpy( parms.prevMvpMatrix, rhiReStirDIPrevValid ? rhiReStirDIPrevView : viewDef->worldSpace.modelViewMatrix, sizeof( parms.prevMvpMatrix ) );
+	}
+	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray (+ R3a's K rays on young pixels)
 	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
 	r->BeginTargetPass( rhiReStirDIRT, NULL );
 	RB_RHI_BindUnit( 0, diDepthImg );
@@ -8197,6 +8216,23 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	backEnd.glState.tmu[2].current2DMap = -1;
 	backEnd.glState.tmu[3].current2DMap = -1;
+	// R3a inputs on units 4 / 5 / 6 / 9 / 10 - never 7 / 8 / 12, the interaction draws' depth-compare shadow samplers that an
+	// unshadowed light inherits (the weapon-dark bug). White placeholders keep the descriptor set complete when the boost is
+	// off or has no side data; the shader samples them only when u_tessParms says so.
+	{
+		const rhi::ImageHandle prevDen = ( boostWant && !boostAll ) ? r->GetRtgiOutputImage() : 0;
+		if ( prevDen ) { RB_RHI_BindRTImage( r, 4, prevDen ); } else { RB_RHI_BindUnit( 4, globalImages->whiteImage ); }
+		if ( boostSide ) {
+			RB_RHI_BindRTImage( r, 5, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[0] ) );	// last frame's ( viewZ, lum )
+			RB_RHI_BindRTImage( r, 6, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[1] ) );	// last frame's packed normal
+			RB_RHI_BindRTImage( r, 9, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[2] ) );	// last frame's ( SH1, row + 1 [+ boost bit] )
+		} else {
+			RB_RHI_BindUnit( 5, globalImages->whiteImage );	RB_RHI_BindUnit( 6, globalImages->whiteImage );	RB_RHI_BindUnit( 9, globalImages->whiteImage );
+		}
+		if ( boostWant ) { RB_RHI_BindRTImage( r, 10, nrdVel ); } else { RB_RHI_BindUnit( 10, globalImages->whiteImage ); }
+		backEnd.glState.tmu[4].current2DMap = -1;	backEnd.glState.tmu[5].current2DMap = -1;	backEnd.glState.tmu[6].current2DMap = -1;
+		backEnd.glState.tmu[9].current2DMap = -1;	backEnd.glState.tmu[10].current2DMap = -1;
+	}
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
 	r->EndPass();
 	r->GpuScopeEnd();
