@@ -154,7 +154,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIGradientFilterPasses` | 2 | **R1** A-trous passes over the gradient (RTXDI 4); 2 hugs a change tighter (user-tuned). |
 | `r_rtReStirDIDenoiser` | 1 | **R2** 1 = ReLAX (NRD's RTXDI denoiser; DEFAULT since 2026-10-12), 0 = ReBLUR; rebuilds NRD. |
 | `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 1 / 8 / 1.0 / 3 / 1 / 0.7 / 1 | **R2** ReLAX settings (Remix direct-light preset + RTXDI sample). |
-| `r_rtReStirDIBoost` | 0 | **R3a** K picks + K rays on YOUNG pixels (just revealed / NRD history short); 0 or 1 = off, 2..8 = K. Default-off stage, under test. |
+| `r_rtReStirDIBoost` | 0 | **R3a** K picks + K rays on YOUNG pixels (just revealed / NRD history short); 0 or 1 = off, 2..4 = K. Default-off stage, under test. |
 | `r_rtReStirDIBoostHistory` | 4 | **R3a** history (frames) below which a pixel is boosted; it stays boosted until 2x this (capped at `r_rtReStirDIHistory`). |
 
 Defaults are the user-tuned compromise (2026-10-07/08). All `CVAR_ARCHIVE`, so a user's own values persist in
@@ -947,6 +947,12 @@ a COMPILED VARIANT (`restir_di_boost.frag` = `restir_di.frag` with `DI_BOOST 1`,
 > 1); the plain gather carries none of it. Also: the boost never touches the view weapon (its DI is never displayed); the
 reason code in the row fraction (0.25 history / 0.5 surface / 0.75 hysteresis) is what view 7 colours, and the gradient floors
 it off with a 0.1 guard (a 0.25 guard misread 0.75 as the next row: a false light change, pinned history, red trails forever).
+
+**R3a cost, third finding (user, 4 sets):** still, boost 0 = 5.3-5.9 ms gather, boost 4 (view 7 black bar specks) = 7.1-8.0 ms;
+looking around, boost 4 = 7.6-9.3 ms. The variant program itself was the tax: a full per-pick record (pHat, radiance, direction,
+distance, flags = 9 floats x 8) stayed live through the light loop on EVERY pixel. The extra picks now keep only the light
+INDEX (4 uints) and re-shade their lights after the loop (deterministic: pHat matches the loop's); K max 4. Re-measure still /
+turning before deciding the default. The entry band while turning is the stage's real cost and is by design.
 
 **R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
 on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:

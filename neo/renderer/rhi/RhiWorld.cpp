@@ -8157,7 +8157,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// ---- R3a disocclusion boost (docs/rtx-restir-di.md Plan R3, r_rtReStirDIBoost): K picks + rays on YOUNG pixels. Needs
 	// last frame's denoised output (still in the shared slot until this frame's denoise), the velocity at the gather res and,
 	// for the same-surface test + the hysteresis bit, last frame's side copies (made below, as for the gradient) ----
-	const int  boostK    = ( r_rtReStirDIBoost.GetInteger() > 1 ) ? idMath::ClampInt( 2, 8, r_rtReStirDIBoost.GetInteger() ) : 0;
+	const int  boostK    = ( r_rtReStirDIBoost.GetInteger() > 1 ) ? idMath::ClampInt( 2, 4, r_rtReStirDIBoost.GetInteger() ) : 0;
 	// the boost is a compiled VARIANT of the gather (restir_di_boost.frag): its K-pick arrays cost the plain gather ~0.7 ms
 	// of occupancy even with nothing boosted, so the plain program carries none of it
 	const rhi::ShaderHandle boostProg = ( boostK > 0 ) ? r->LoadShader( "restir_di_boost" ) : 0;

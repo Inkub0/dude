@@ -264,18 +264,18 @@ void main() {
 	const bool shMode = u_shadowFalloffS.z > 0.5;
 	// R3a: how many independent picks (and visibility rays) this pixel gets - K where it is young, else 1 (diBoostWanted)
 #if DI_BOOST
-	#define DI_BOOST_MAX 8
-	const int kMax = clamp( int( u_tessParms.x + 0.5 ), 0, DI_BOOST_MAX );
+	#define DI_BOOST_MAX 4
 	// never the view weapon (nt.a < 0.5): its DI is shaded for the denoiser's continuity but never displayed, and its sway
 	// keeps its history short - K rays there would be pure waste (view 7 showed it solid red)
+	const int kMax = clamp( int( u_tessParms.x + 0.5 ), 0, DI_BOOST_MAX );
 	const int boostWhy = ( kMax > 1 && nt.a >= 0.5 ) ? diBoostWanted( sfrag, S ) : 0;
 	const bool boostedNow = boostWhy != 0;
 	const int K = boostedNow ? kMax : 1;
-	float pHatB[DI_BOOST_MAX];
-	vec3  radB[DI_BOOST_MAX], ldirB[DI_BOOST_MAX];
-	float dlB[DI_BOOST_MAX];
-	uint  flagsB[DI_BOOST_MAX];
-	for ( int k = 0; k < DI_BOOST_MAX; k++ ) { pHatB[k] = 0.0; radB[k] = vec3( 0.0 ); ldirB[k] = vec3( 0.0, 0.0, 1.0 ); dlB[k] = 0.0; flagsB[k] = 0u; }
+	// the extra picks keep only their light INDEX (+1; 0 = none): a full per-pick record (radiance, direction, distance)
+	// stayed live through the whole light loop and cost the gather ~1.5-2 ms of occupancy on EVERY pixel (2026-10-12);
+	// the picked lights are re-shaded after the loop instead (deterministic, so pHat matches the loop's)
+	uint pickB[DI_BOOST_MAX];
+	for ( int k = 0; k < DI_BOOST_MAX; k++ ) { pickB[k] = 0u; }
 #else
 	const int  K = 1;
 	const bool boostedNow = false;
@@ -322,9 +322,7 @@ void main() {
 #if DI_BOOST
 		// R3a: the extra independent picks share the candidate weights (same wSum), each with its own random draws
 		for ( int k = 1; k < K; k++ ) {
-			if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
-				pHatB[k] = pHat;	radB[k] = rad;	ldirB[k] = ldir;	dlB[k] = dl;	flagsB[k] = lights.l[ li ].flags;
-			}
+			if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) { pickB[k] = li + 1u; }
 		}
 #endif
 	}
@@ -349,13 +347,19 @@ void main() {
 		vec3 sumRad = outRad;
 		vec3 sumSh  = shDirect;
 		for ( int k = 1; k < K; k++ ) {
-			if ( !( pHatB[k] > 0.0 ) ) { continue; }
-			float Wk = ( wSum / ( exhaustive ? 1.0 : float( draws ) ) ) / pHatB[k];
+			if ( pickB[k] == 0u ) { continue; }
+			uint lk = pickB[k] - 1u;
+			vec3 c, ld; float dl, ndl;
+			if ( !diShadeLight( lights, lk, S, c, ld, dl, ndl ) ) { continue; }
+			float pH = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
+			if ( !( pH > 0.0 ) ) { continue; }
+			vec3  rk = ( shMode ? c / max( ndl, 0.05 ) : c ) / B;
+			float Wk = ( wSum / ( exhaustive ? 1.0 : float( draws ) ) ) / pH;
 			float od;
-			float visK = ( ( flagsB[k] & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ldirB[k], dlB[k], od );
-			vec3  rk = max( radB[k] * ( Wk * visK * u_shadowFalloffS.x ), vec3( 0.0 ) );
+			float visK = ( ( lights.l[ lk ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ld, dl, od );
+			rk = max( rk * ( Wk * visK * u_shadowFalloffS.x ), vec3( 0.0 ) );
 			sumRad += rk;
-			sumSh  += ldirB[k] * dot( rk, vec3( 0.2126, 0.7152, 0.0722 ) );
+			sumSh  += ld * dot( rk, vec3( 0.2126, 0.7152, 0.0722 ) );
 		}
 		outRad   = sumRad / float( K );
 		shDirect = sumSh / float( K );
