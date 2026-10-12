@@ -580,12 +580,15 @@ Each stage = its own branch (`feat/rtx-restir-di-r<N>-<slug>`), its own default-
 stage with `r_vkGpuTime 2` (its own `restir.di.*` scope) and A/B with the DI debug views. A stage's knobs that lose
 the A/B are removed at R6 (trim-debug-cvars rule). Order: R0 -> R1 -> R2 -> R3 -> R4 -> R5 -> R6; R2 is independent of
 R1 and may run in parallel; R3 needs R1 (its disocclusion boost reads the history length R1's plumbing exposes).
+**Amended 2026-10-12** after the cross-consumer NRD investigation ([rtx-nrd.md](rtx-nrd.md), *Plan N0-N3*): every item
+that lives in the shared `RtaoDenoise` path is built ONCE for RTAO / RTGI / DI (N0 with R0, N1 with R4); the DI-named
+cvars below get RTAO / RTGI siblings at today's values. Amendments are marked **[A]**.
 
 ### R0 - diagnostics + zero-risk fixes (F4, F6) - small
 Files: `RhiWorld.cpp` (`RB_RHI_ReStirDIPass`, `RB_RHI_RtgiPass`), `VulkanBackend.cpp` (`RtaoDenoise`, `RtaoDenoiseArgs`),
 `Dhewm3SettingsMenu.cpp` (ReSTIR group), `restir_di_debug.frag`.
-1. **Camera-cut reset**: `da.reset |= rhiTemporalCam.historyReset` for DI AND RTGI (the FSR2 / eye-adaptation passes
-   already key off it). Optional follow-up: hold the apply's previous output for 2 frames after a cut (Indiana recipe).
+1. **Camera-cut reset** **[A: shared]**: `a.reset || rhiTemporalCam.historyReset` INSIDE `RtaoDenoise`, so RTAO, RTGI and
+   DI all get it (none has it today; the FSR2 / eye-adaptation passes already key off the flag). Optional follow-up: hold the apply's previous output for 2 frames after a cut (Indiana recipe).
 2. **NRD validation view**: `r_rtReStirDIDebug 3` = NRD `OUT_VALIDATION` (set `cs.enableValidation`, bind the output,
    blit). Lets us SEE accumulated frames / history resets / antilag per pixel instead of guessing.
 3. **History-length view**: ReBLUR `returnHistoryLengthInsteadOfOcclusion = true` (we never consume the `.w` AO) -
@@ -593,10 +596,17 @@ Files: `RhiWorld.cpp` (`RB_RHI_ReStirDIPass`, `RB_RHI_RtgiPass`), `VulkanBackend
 4. **Expose the lag knobs as cvars** (defaults = today's behaviour, so no visual change until tuned):
    `r_rtReStirDIFastHistory` (6), `r_rtReStirDIFastClamp` (2.0, `fastHistoryClampingSigmaScale`),
    `r_rtReStirDIStabilize` (63, `maxStabilizedFrameNum`; 0 = off), `r_rtReStirDIAntilag` (1; 0 = push both
-   `ReblurAntilagSettings` to inert for the A/B NRD asks for).
+   `ReblurAntilagSettings` to inert for the A/B NRD asks for). **[A]** The `giMode`-only overrides in `RtaoDenoiseArgs`
+   become generic fields (`fastFrames`, `fastClampSigma`, `stabilizedFrames`, `historyFixFrameNum`) so RTAO / RTGI set them
+   too: `r_rtaoFastClamp` (2.0; NRD header: "1.1 is a safe value for occlusion denoising") + `r_rtaoHistoryFix` (3; NRD-Sample
+   occlusion mode: 2) are the RTAO A/B for AO trails under moving occluders; `r_rtgiFastClamp` (2.0; NRD-Sample: 1.5).
+6. **[A] SIGMA_SHADOW out of the instance**: never dispatched since H3, yet `NrdCreate` builds its pipelines and the pools
+   carry its share on every (re)create (incl. the idle-rebuild on a settings change). Drop it from the table behind
+   `r_nrdSigma` (0); the per-light penumbra experiment in rtx-nrd.md N3 re-adds it if ever tried.
 5. **Seconds-based history**: `r_rtReStirDIHistory` stays the user knob but gains a companion
    `r_rtReStirDIHistoryMs` (0 = frames as today; >0 = `nrd::GetMaxAccumulatedFrameNum(ms, lpfFps)` with a 0.2 s
-   low-pass on the frame time, applied to main / fast / stabilized together).
+   low-pass on the frame time, applied to main / fast / stabilized together). **[A]** Same helper and `*HistoryMs`
+   companions for `r_rtaoHistory` (45 frames = 0.31 s @144 Hz but 0.75 s @60 Hz) and `r_rtgiHistory`.
 Acceptance: byte-identical output at defaults except after a cut (no ghost of the previous shot); the validation view
 renders; `r_vkGpuTime 2` unchanged.
 
@@ -616,14 +626,30 @@ Files: NEW `restir_di_gradient.frag` + `restir_di_gradient_filter.frag` + `resti
    pick the BRIGHTEST accepted candidate (Q2RTX/RTXDI). Map its lightDef through the table: absent -> gradient = 100 %;
    else re-shade THAT light at the current surface with the gather's own per-light code path (textured attenuation,
    BRDF, demod, cosine) and ONE visibility ray against the current TLAS (NRD recipe: previous TLAS not needed),
-   `L_now`; round both through f16 (RTXDI) and store `(|L_prev - L_now|, max(L_prev, L_now))`.
+   `L_now`; round both through f16 (RTXDI) and store `(|L_prev - L_now|, max(L_prev, L_now))`. **[A]** Checkerboard: the
+   stored `(light, lum)` exists only for last frame's TRACED cells, so the stratum picks among those (the re-shade itself
+   is independent of the gather). **[A] Combined mode gap**: the gradient re-shades the DIRECT term only, so a change
+   visible only through the bounce (a light round a corner lighting this wall indirectly) never fires it, and in
+   combined mode nothing else detects it (DI's old confidence is off, RTGI's pass stands down). Optional item
+   `r_rtReStirDIGradientBounce`: at the stratum pixel also re-trace the bounce with LAST frame's IGN rotation / offset
+   (CPU-hoisted per frame - store the previous pair; the Q2RTX replay) and fold `|B_prev - B_now|` into the gradient; costs
+   1/9 of a bounce ray. Remix's cheaper alternative (invalidate GI from the DI gradient at the bounce HIT point) needs the
+   hit position per pixel, which the combined gather does not keep.
 4. **Filter**: 4 A-trous passes, 3x3 triangular kernel, strides 1/2/4/8, differences and maxima filtered separately
    (RTXDI: "a small local change in a bright region is unlikely to result in history invalidation"). Optional Remix
    hit-distance bilateral weight.
 5. **Confidence** (stratum res, fed to `IN_DIFF_CONFIDENCE` directly): `c = saturate(1 - g.x / (g.y + bias))^s`, `s =
    r_rtReStirDIGradientPower` (8), `bias = 2^-12 * scene scale`; temporal blend `1/(1+h)` with `h =
    r_rtReStirDIGradientHistory` (8) applied ONLY while `c` rises (Remix anti-ghost rule); floor
-   `r_rtReStirDIGradientFloor` (0.1). Master `r_rtReStirDIGradient` (1 once validated).
+   `r_rtReStirDIGradientFloor` (0.1). Master `r_rtReStirDIGradient` (1 once validated). **[A] Floor rule (NRD README,
+   History Confidence):** under ReBLUR `historyLength *= lerp(confidence, 1, 1/(1+historyLength))` and the shortened
+   length "goes through all passes and the feedback loop", so repeated low confidence compounds, and a confidence below
+   `historyFixFrameNum / maxAccumulatedFrameNum` TRIGGERS the history-fix reconstruction (the 14 px-stride wash that
+   caused the look-away fade). NRD's tips: clamp confidence to at least that ratio (16-frame history, 5-frame fix ->
+   floor 0.31, not Remix's 0.1, which is a ReLAX number) and dither it by `0.5 / maxAccumulatedFrameNum`. So the
+   effective floor is `max(r_rtReStirDIGradientFloor, historyFix / history)` for ReBLUR; ReLAX applies confidence "here
+   and now" (`historyLength = min(historyLength, max * confidence)`) and "expects smaller values" - NRD-Sample squares the
+   confidence for RELAX (`gradient *= gradient`). Both rules live in the shared path keyed on the active denoiser.
 6. **Retire** the luminance confidence (`r_rtReStirDIConfidence`, the `rtgi_confidence` reuse) for DI once R1 wins the
    A/B; RTGI keeps its own.
 7. **R1b - narrow the fast-light rule**: with gradients live, set `r_rtReStirDIDynamicForward` to cover ONLY
@@ -642,7 +668,9 @@ Files: `VulkanBackend.cpp` (`NrdCreate` denoiser table: `NRD_ID_RELAX_DI = RELAX
 RELAX_DIFFUSE_SH`; `RtaoDenoise`: a `denoiser` arg, `nrd::RelaxSettings` path), `restir_di.frag` + `restir_di_apply.frag` +
 `restir_di_debug.frag` (encoding switch), `RhiWorld.cpp` (the arg + cvar), ImGui dropdown.
 1. `r_rtReStirDIDenoiser` 0 = ReBLUR (today), 1 = ReLAX. Both instances live in the one NRD instance (one runs per frame,
-   as GI/GI_SH today).
+   as GI/GI_SH today). **[A]** The `denoiser` arg is generic in `RtaoDenoiseArgs`, so standalone RTGI can A/B ReLAX too
+   (rtx-nrd.md N2; RTAO cannot - no RELAX occlusion variant). With ReLAX active, R1's confidence is squared and the floor
+   rule drops to the raw cvar (see R1 item 5).
 2. **Encoding switch in the gather / apply / debug**: ReLAX mode writes LINEAR radiance + RAW hit distance (world units)
    and SH1 via the `RELAX_FrontEnd_PackSh` layout (check `NRD.hlsli:936` at implementation); the apply decodes
    linearly and reads history length from `.w` (R3 uses it instead of R0's ReBLUR flag).
@@ -692,7 +720,10 @@ Files: `gbuffer.frag` (`out_Velocity`), `RhiWorld.cpp` (velocity target format +
 2. **Weapon material ID**: the gather writes materialID 1 in the NRD normal `.w` for `nt.a < 0.5` pixels, sets
    `minMaterialForDiffuse = 0` and `historyFixAlternatePixelStrideMaterialID = 1` with a shorter alternate stride (7):
    the weapon's constantly-reset pixels stop mixing into the world's blur and reconstruct from a tighter kernel.
-   Cvar `r_rtReStirDIWeaponId`.
+   Cvar `r_rtReStirDIWeaponId`. **[A]** In checkerboard mode NRD reads its guides from the `rtgi_guides.frag` pass, NOT the
+   gather's att2, so that shader must pack the same `.w` or the tag is lost on the default DI configuration. **[A]** The same
+   tag goes into `rtao_ray.frag` / `rtgi_ray.frag` (N1): both carve a ZERO hole under the weapon with valid guides - the
+   fried-halo mechanism DI hit - and the tag stops the world's blur pulling the hole in.
 3. **hitT hygiene**: ignore-0 rule (a pixel with no reaching light but a bounce passes the bounce's `thit`, not 0);
    combined DI+GI blend per the NRD README (`directHitDistContribution`, `maxContribution 0.5`) as `r_rtReStirDIHitMix`
    (0 = today's direct-only).
@@ -706,13 +737,17 @@ Files: `restir_di_apply.frag` (SG resolve), NEW GLSL port of `NRD_SG_ResolveDiff
    0 = today / 1 = NRD. NRD: with SG resolve `lobeAngleFraction` may be RELAXED (sample: x1.333) - retest
    `r_rtReStirDIEdgeStop`.
 2. Re-evaluate `r_rtReStirDIResScale 1` + checkerboard off once R2/R3 have lowered the blur: the detail lost at 0.75 +
-   checkerboard (user, 2026-10-08) may now be affordable at the same frame time.
+   checkerboard (user, 2026-10-08) may now be affordable at the same frame time. **[A]** If half the rays must stay, NRD's
+   recommended form is NOT checkerboard (`CheckerboardMode::OFF // RECOMMENDED`) but probabilistic per-pixel skipping with
+   `hitDistanceReconstructionMode = AREA_3X3` ("Probability at primary hit must be clamped to [1/4; 3/4]", Bayer
+   dithering, not white noise) - full-res guides for free, no packed layout, no `rtgi_guides` pass. Worth one A/B.
 Acceptance: bump N·L detail in dim DI light at least equal to today's SH mode; no new ringing at normal edges.
 
 ### R6 - consolidate
 Remove the losers' cvars (trim-debug-cvars rule), the `rtgi_confidence` reuse for DI, and - if R1b holds - the handover
 crossfade and the luminance/appeared hysteresis; update this doc's "Architecture as shipped", the cvar table, the ImGui
-group and the status header; wire the winning defaults into the `dude_rtx 2` tier.
+group and the status header; wire the winning defaults into the `dude_rtx 2` tier. **[A]** Close out the shared-path
+items in [rtx-nrd.md](rtx-nrd.md) (N0/N1 ride R0/R4; N2/N3 are independent follow-ups) and record the SIGMA decision there.
 
 ## Performance (literature-calibrated, 2026-10-06)
 
