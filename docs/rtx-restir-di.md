@@ -879,6 +879,17 @@ but it must (a) be default-off, (b) not toggle: once a pixel is boosted keep K f
 length, or boost by a smooth weight), and (c) be tested alone. A known-change selection needs the exact-point comparison
 (same world point, same visibility ray) - stored values from two jittered frames are not that.
 
+**Gradient rev. 2 bug found 2026-10-12 while testing R3a (user: NRD validation view 3 "crazy flickering", with boost 0 and under
+ReBLUR alike):** rev. 2's same-light shortcut compared the two frames' STORED luminances, which were shaded at two sub-pixel-
+different points (FSR2 jitter). At every hard shadow edge their one-ray visibilities flip, a 100 % change every frame, the
+confidence floor, a history reset along every shadow edge - view 3 painted it as flicker along edges, and under the boost those
+edge pixels would have been permanently young (K rays). The 2a direction had the same flaw on static surfaces (stored current
+sample vs a re-shade at the previous point). FIXED on the R3a branch: exactly one stored value is the truth and the other frame is
+re-shaded AT THAT POINT with one ray - the winning light is last frame's pick (or the same light on a static surface): Lprev stored,
+Lnow = its current row at the stored previous point; the winning light is this frame's pick (or the same light on a mover): Lnow
+stored, Lprev = its previous row at the current point. Costs one ray per stratum again (rev. 1 measured 0.35 ms). **Test:** view 5
+white in a static scene (the R1 acceptance), view 3 calm, flashlight circle still shows, NPC trailing edge still resets.
+
 **R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
 on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:
 1. **Three ways to be young, tested in the gather (`diBoostWanted`)**: the pixel reprojects off screen; NRD's history length

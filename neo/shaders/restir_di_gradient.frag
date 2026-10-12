@@ -24,7 +24,8 @@
 // Runs AFTER this frame's gather (R1 rev. 2): both frames' picks are then at hand - this frame's in the gather MRT, last
 // frame's in the side copies the DI pass made before the gather - so the stratum takes the brightest sample of EITHER
 // frame (RTXDI), and in the common case ("the pixel shaded the same light in both frames") both luminances are the
-// gather's own stored, truly-visible values: no re-shade, no ray. Only a light that changed identity is re-shaded.
+// gather's own stored, truly-visible values - but they were shaded at two sub-pixel-different (jittered) points, so
+// only ONE of them is the truth and the other frame is re-shaded at that point with one ray (see the comparison below).
 //
 // Shares the gather's uniform packing (restir_di.frag header) + units 0-3, plus:
 //   unit 4 = THIS frame's gather att1 ( viewZ, gradient luminance )           (RG16F, internal res, packed when cb)
@@ -189,56 +190,74 @@ void main() {
 		         && lights.l[ bestCurRow - 1u ].pad1 == prevLights.l[ bestPrevRow - 1u ].pad1;
 	}
 
-	float Lprev = bestPrevLum, Lnow = bestCurLum;
-	if ( !sameLight ) {
-		// a different light (or none) was picked in one of the frames: re-shade the WINNING frame's light in the other frame
-		// at this surface - the exact stored point when static, from last frame's camera - with one visibility ray
-		DiSurface S; float raw; vec4 nt;
-		if ( !diSurfaceAt( bestFrag, applyMode, pbr, S, raw, nt ) ) { return; }
-		DiSurface Sp = S;
-		if ( bestStatic ) {
-			Sp.Pw = bestPrevP;
-			Sp.Nw = bestPrevN;
-			Sp.d  = -bestPrevVz;
-			if ( applyMode ) {
-				Sp.Vw    = normalize( u_projectionMatrix[3].xyz - Sp.Pw );
-				Sp.NdotV = max( dot( Sp.Nw, Sp.Vw ), 1e-4 );
-			}
+	// Both luminances MUST come from the SAME world point and the same ray. The two frames' stored samples sit on
+	// sub-pixel-different points (the FSR2 jitter), and at a hard shadow edge their one-ray visibilities flip: a 100 %
+	// change every frame -> the confidence floor -> a history reset along every shadow edge (rev. 2's stored-vs-stored
+	// shortcut did exactly that; NRD's validation showed it as flicker along every edge). So exactly ONE stored value is
+	// the truth and the other frame is re-shaded AT THAT VALUE'S POINT with one ray:
+	//   - the winning light is LAST frame's pick (or the same light on a static surface): Lprev = stored; Lnow = the
+	//     light's CURRENT row shaded now at the stored previous point (exact reconstruction, a moved occluder shows);
+	//     a mover is valued at the current point instead (its old point is stale; the current TLAS approximates);
+	//   - the winning light is THIS frame's pick (or the same light on a mover): Lnow = stored; Lprev = the light's
+	//     PREVIOUS row shaded at the CURRENT point (the current TLAS approximates its previous visibility).
+	// A light absent from the other frame's buffer (switched on / off, entered / left DI) is 0 there: a 100 % change.
+	const bool wIsPrev     = sameLight ? bestStatic : !bestIsCur;		// which stored value is the truth
+	const bool atPrevPoint = wIsPrev && bestStatic;
+	DiSurface S; float raw; vec4 nt;
+	if ( !diSurfaceAt( bestFrag, applyMode, pbr, S, raw, nt ) ) { return; }
+	DiSurface Sp = S;
+	if ( atPrevPoint ) {
+		Sp.Pw = bestPrevP;
+		Sp.Nw = bestPrevN;
+		Sp.d  = -bestPrevVz;
+		if ( applyMode ) {
+			Sp.Vw    = normalize( u_projectionMatrix[3].xyz - Sp.Pw );
+			Sp.NdotV = max( dot( Sp.Nw, Sp.Vw ), 1e-4 );
 		}
-		float occDist;
-		if ( bestIsCur ) {
-			// 2a. THIS frame's light, valued in the previous frame (its previous-frame row through last frame's table).
-			// Absent last frame (switched on, entered DI) -> 0 -> a 100% change.
-			Lprev = 0.0;
-			uint defPlus1 = ( bestCurRow != 0u ) ? lights.l[ bestCurRow - 1u ].pad0 : 0u;
-			if ( defPlus1 != 0u && defPlus1 <= tableCap && ( prevTableAddr.x | prevTableAddr.y ) != 0u ) {
-				DiLightMap prevTable = DiLightMap( prevTableAddr );
-				uint prevRowPlus1 = prevTable.row[ defPlus1 - 1u ];
-				if ( prevRowPlus1 != 0u && prevRowPlus1 <= nPrevLights && prevLights.l[ prevRowPlus1 - 1u ].pad1 == lights.l[ bestCurRow - 1u ].pad1 ) {
-					vec3 c, ld; float dl, ndl;
-					if ( diShadeLight( prevLights, prevRowPlus1 - 1u, Sp, c, ld, dl, ndl ) ) {
-						float vis = ( ( prevLights.l[ prevRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
-							? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, occDist );		// current TLAS: an approximation for movers
-						Lprev = diGradientLuminance( c, Sp.B, vis );
-					}
-				}
-			}
+	}
+	float Lprev = 0.0, Lnow = 0.0, occDist;
+	if ( wIsPrev ) {
+		// last frame's light (its row this frame: the same pick, else through this frame's table), valued now
+		Lprev = bestPrevLum;
+		uint curRowPlus1 = 0u;
+		if ( sameLight ) {
+			curRowPlus1 = bestCurRow;
 		} else {
-			// 2b. LAST frame's light, valued now (its row this frame through this frame's table). Gone from DI (switched
-			// off, culled, moved to the forward path) -> 0 -> a 100% change.
-			Lnow = 0.0;
 			uint defPlus1 = ( bestPrevRow != 0u ) ? prevLights.l[ bestPrevRow - 1u ].pad0 : 0u;
 			if ( defPlus1 != 0u && defPlus1 <= tableCap ) {
 				DiLightMap table = DiLightMap( tableAddr );
-				uint curRowPlus1 = table.row[ defPlus1 - 1u ];
-				if ( curRowPlus1 != 0u && curRowPlus1 <= nLights && lights.l[ curRowPlus1 - 1u ].pad1 == prevLights.l[ bestPrevRow - 1u ].pad1 ) {
-					vec3 c, ld; float dl, ndl;
-					if ( diShadeLight( lights, curRowPlus1 - 1u, Sp, c, ld, dl, ndl ) ) {
-						float vis = ( ( lights.l[ curRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
-							? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, occDist );
-						Lnow = diGradientLuminance( c, Sp.B, vis );
-					}
-				}
+				uint rp1 = table.row[ defPlus1 - 1u ];
+				if ( rp1 != 0u && rp1 <= nLights && lights.l[ rp1 - 1u ].pad1 == prevLights.l[ bestPrevRow - 1u ].pad1 ) { curRowPlus1 = rp1; }
+			}
+		}
+		if ( curRowPlus1 != 0u ) {
+			vec3 c, ld; float dl, ndl;
+			if ( diShadeLight( lights, curRowPlus1 - 1u, Sp, c, ld, dl, ndl ) ) {
+				float vis = ( ( lights.l[ curRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
+					? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, occDist );
+				Lnow = diGradientLuminance( c, Sp.B, vis );
+			}
+		}
+	} else {
+		// this frame's light (its row last frame: the same pick, else through last frame's table), valued in the previous frame
+		Lnow = bestCurLum;
+		uint prevRowPlus1 = 0u;
+		if ( sameLight ) {
+			prevRowPlus1 = bestPrevRow;
+		} else {
+			uint defPlus1 = ( bestCurRow != 0u ) ? lights.l[ bestCurRow - 1u ].pad0 : 0u;
+			if ( defPlus1 != 0u && defPlus1 <= tableCap && ( prevTableAddr.x | prevTableAddr.y ) != 0u ) {
+				DiLightMap prevTable = DiLightMap( prevTableAddr );
+				uint rp1 = prevTable.row[ defPlus1 - 1u ];
+				if ( rp1 != 0u && rp1 <= nPrevLights && prevLights.l[ rp1 - 1u ].pad1 == lights.l[ bestCurRow - 1u ].pad1 ) { prevRowPlus1 = rp1; }
+			}
+		}
+		if ( prevRowPlus1 != 0u ) {
+			vec3 c, ld; float dl, ndl;
+			if ( diShadeLight( prevLights, prevRowPlus1 - 1u, Sp, c, ld, dl, ndl ) ) {
+				float vis = ( ( prevLights.l[ prevRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
+					? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, occDist );		// current TLAS: an approximation for movers
+				Lprev = diGradientLuminance( c, Sp.B, vis );
 			}
 		}
 	}
