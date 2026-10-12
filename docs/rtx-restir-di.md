@@ -606,7 +606,9 @@ is set for DI only (RTGI byte-identical). ImGui untouched (house rule). Cvars ad
 "diff frames" shows trails - i.e. the inputs are right and the trails are history RESETS: the wake behind movers / the weapon
 (true disocclusion -> F3 / R3) and, if the mover's own body stays dark, false resets (-> R4's 2.5D MVs + weapon material ID).
 Added `r_rtReStirDIDisocclusion` (0.01 = NRD default, range 0.005..0.05) to separate the two: trails that shrink at 0.02 are
-false resets.
+false resets. **Result:** the wake behind a mover is unchanged at 0.02 / 0.04 -> TRUE disocclusion, exactly F3; the
+refill time is the problem, not the reset. R3 (spatial reuse + disocclusion boost) is confirmed as the structural fix; the
+knob stays at 0.01 (a diagnostic, candidate for the R6 trim).
 **Test:** (a) `r_rtReStirDI 1` defaults -> lit scene unchanged vs master; (b) teleport (`noclip` + a long jump, or a map's
 teleporter) with `r_rtReStirDIDebug 4` -> the ramp goes black for one frame everywhere, then refills; (c) `r_rtReStirDIDebug 3`
 -> NRD's overlay renders (coloured accumulated-frames field; NRD: keep it "in the violet zone" under stable lighting);
