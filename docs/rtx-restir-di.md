@@ -984,8 +984,9 @@ young, and a hold lasts `hold` frames (4 with the trigger off, 2x the threshold 
 are all farther. **Retest:** still boost line (expect ~fixed cost only), looking around, NPC wake.
 
 **R3a DEFAULT DECISION (user, 2026-10-12): `r_rtReStirDIBoost 2`, `r_rtReStirDIBoostHistory 0`.** Measured (cave, 3080 Ti, 0.75 x
-1440p, checkerboard): standing still the boost pass cost 1.5 ms at K 4 before the 3x3 footprint (retest pending), looking around
-3.0 ms, an NPC walking past 1.0 ms; the young pass 0.05 ms. The user judged the tighter NPC wake and the cleaner look-away worth it
+1440p, checkerboard): standing still the boost pass costs 0.08 ms (K 2, 3x3 footprint; it was 1.5 ms before the footprint fix), the
+young pass 0.08 ms; looking around 3.0 ms and an NPC walking past 1.0 ms were measured at K 4 before the footprint fix (K 2
+halves the ray part, the footprint removed the false edge bands - expect well under those). The user judged the tighter NPC wake and the cleaner look-away worth it
 at K 2 (half the ray part). Final architecture: plain gather (no boost code) -> young pass (per-pixel reason + age, ping-pong
 R8G8) -> boost pass (young + >= 5 of 9 neighbours young; `terminateInvocation`, never `discard`) over the gather's targets.
 
