@@ -8287,8 +8287,10 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				RB_RHI_BindRTImage( r, 4, r->GetRenderTargetImage2( rhiReStirDIRT ) );		// THIS frame's ( viewZ, lum )
 				RB_RHI_BindRTImage( r, 5, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[0] ) );	// last frame's ( viewZ, lum )
 				RB_RHI_BindRTImage( r, 6, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[1] ) );	// last frame's packed normal
-				RB_RHI_BindRTImage( r, 7, nrdVel );
-				RB_RHI_BindRTImage( r, 8, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[2] ) );	// last frame's ( SH1, row + 1 )
+				// units 10 / 11, not 7 / 8: 7 / 8 are the interaction draws' shadow map / cube (depth-compare samplers) and an
+				// unshadowed (DI-covered) light inherits them unchanged - a colour image there blanked the weapon's lit draws
+				RB_RHI_BindRTImage( r, 10, nrdVel );
+				RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[2] ) );	// last frame's ( SH1, row + 1 )
 				RB_RHI_BindRTImage( r, 9, r->GetRenderTargetImage4( rhiReStirDIRT ) );		// THIS frame's ( SH1, row + 1 )
 				RB_RHI_DrawFullscreen( r, gradProg, gp, 0 );
 				r->EndPass();

@@ -30,8 +30,8 @@
 //   unit 4 = THIS frame's gather att1 ( viewZ, gradient luminance )           (RG16F, internal res, packed when cb)
 //   unit 5 = LAST frame's gather att1 (copy)
 //   unit 6 = LAST frame's gather att2 ( NRD-packed world normal ) (copy)
-//   unit 7 = this frame's velocity at the internal res (currUV - prevUV, +Y-up)
-//   unit 8 = LAST frame's gather att3 ( SH1.xyz, chosen light row + 1 ) (copy)
+//   unit 10 = this frame's velocity at the internal res (currUV - prevUV, +Y-up)
+//   unit 11 = LAST frame's gather att3 ( SH1.xyz, chosen light row + 1 ) (copy)
 //   unit 9 = THIS frame's gather att3
 //   u_tessParms.w     = THIS frame's checkerboard parity (0 = off, 1 = even, 2 = odd)
 //   u_shadowParms.xy  = lightDef -> current row table device address (bit-cast; row + 1, 0 = absent this frame)
@@ -67,8 +67,11 @@
 SAMPLER_BINDING(4) uniform sampler2D u_curViewZ;		// this frame: ( viewZ, gradient luminance )
 SAMPLER_BINDING(5) uniform sampler2D u_prevViewZ;		// last frame: ( viewZ, gradient luminance )
 SAMPLER_BINDING(6) uniform sampler2D u_prevNormal;	// last frame: NRD encoding 2
-SAMPLER_BINDING(7) uniform sampler2D u_velocity;
-SAMPLER_BINDING(8) uniform sampler2D u_prevSide;		// last frame: ( SH1.xyz, row + 1 )
+// units 10 / 11, NOT 7 / 8: the interaction draws take their shadow map / shadow cube (depth-compare samplers) from
+// whatever units 7 / 8 hold, and an unshadowed light never rebinds them - a colour image left there made every
+// DI-covered light's weapon draw an invalid descriptor (the "weapon goes dark under DI" bug, 2026-10-12)
+SAMPLER_BINDING(10) uniform sampler2D u_velocity;
+SAMPLER_BINDING(11) uniform sampler2D u_prevSide;		// last frame: ( SH1.xyz, row + 1 )
 SAMPLER_BINDING(9) uniform sampler2D u_curSide;		// this frame: ( SH1.xyz, row + 1 )
 
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DiLightMap { uint row[]; };
