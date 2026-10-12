@@ -143,7 +143,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIStabilize` | 63 | **R0** ReBLUR `maxStabilizedFrameNum` (clamped to history); 0 = stabilization pass off. |
 | `r_rtReStirDIAntilag` | 1 | **R0** ReBLUR built-in antilag; 0 = inert (NRD's recommended initial-integration baseline). |
 | `r_nrdSigma` | 0 | **R0** keep `SIGMA_SHADOW` in the NRD instance (never dispatched since H3); rebuilds NRD. |
-| `r_rtReStirDIGradient` | 0 | **R1** temporal gradient confidence -> NRD IN_DIFF_CONFIDENCE (re-shade last frame's light; RTXDI / Q2RTX recipe). |
+| `r_rtReStirDIGradient` | 1 | **R1** temporal gradient confidence -> NRD IN_DIFF_CONFIDENCE (re-shade last frame's light; RTXDI / Q2RTX recipe). |
 | `r_rtReStirDIGradientPower` | 8 | **R1** confidence sharpening power. |
 | `r_rtReStirDIGradientHistory` | 2 | **R1** rise-only temporal smoothing (frames); 8 is the reservoir-reuse value, not ours. |
 | `r_rtReStirDIGradientFloor` | 0.1 | **R1** minimum confidence; ReBLUR raises it to historyFix / history. |
@@ -652,7 +652,7 @@ Files: `RhiWorld.cpp` (`RB_RHI_ReStirDIPass`, `RB_RHI_RtgiPass`), `VulkanBackend
 Acceptance: byte-identical output at defaults except after a cut (no ghost of the previous shot); the validation view
 renders; `r_vkGpuTime 2` unchanged.
 
-### R1 - gradient confidence (F1) - the linchpin, medium - **IMPLEMENTED 2026-10-12** (branch `feat/rtx-restir-di-r1-gradient-confidence`, USER TEST PENDING)
+### R1 - gradient confidence (F1) - the linchpin, medium - **USER-VALIDATED + MERGED 2026-10-12** (`r_rtReStirDIGradient` default 1)
 Shipped as planned, with these notes. **Light identity:** `RtLight.pad0 = lightDef + 1` and a per-frame `lightDef -> row + 1`
 table (`s_diLightMapBuf`, 4096 defs, ring slot per frame) built after the sort; the ring also records each slot's light-buffer
 address + frame so the DI pass can name LAST frame's buffer. **Side data without a ping-pong:** the gather MRT is now the
@@ -698,6 +698,9 @@ mapped the new light onto the old light's row, the two shaded alike on the same 
 Fix: `idRenderLightLocal::dudeSerial` (a process-unique creation serial, stamped in AddLightDef) rides `RtLight.pad1`, and both
 gradient directions require slot AND serial to match - otherwise the light is "absent" (100 % change). RTXDI keys its
 mapping on stable light identity for the same reason.
+**Accepted (user, 2026-10-12):** the circle shows every time; the lit scene follows the flashlight; static scenes stay white in
+view 5 except under blinking lights (correct). Default flipped to 1. The old luminance confidence (`r_rtReStirDIConfidence`)
+stays as the dormant fallback until the R6 trim. Next: R1b.
 Cvars: `r_rtReStirDIGradient` 0 (the A/B switch), `r_rtReStirDIGradientPower` 8, `r_rtReStirDIGradientHistory` 8,
 `r_rtReStirDIGradientFloor` 0.1, `r_rtReStirDIGradientBias` 0.001. Debug: `r_rtReStirDIDebug 5` = the confidence (grey),
 `6` = the filtered gradient (red |change|, green magnitude). New GPU scopes `restir.di.grad / gradfilter / gradconf`.
