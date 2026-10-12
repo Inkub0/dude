@@ -765,7 +765,13 @@ fast history, no "black dip" halo (the rise-only smoothing), (c) STATIC scene: v
 unaffected (no frying / dimming - the failure of the old pass), (d) NPC walking under a static light: no gradient
 fires (geometry change is NRD's job; the normal/depth test rejects it).
 
-### R2 - ReLAX A/B (F2) - medium, independent of R1 - **IMPLEMENTED 2026-10-12** (branch `feat/rtx-restir-di-r2-relax`, USER TEST PENDING)
+### R2 - ReLAX A/B (F2) - medium, independent of R1 - **MERGED 2026-10-12 as an OPT-IN** (`r_rtReStirDIDenoiser` default 0)
+**Cost (user, 1440p x 0.75, 3080 Ti, SH mode, checkerboard):** `restir.di.denoise` ReBLUR 2.87 ms vs ReLAX 5.81 ms, +2.9 ms -
+four times NRD's table delta (RELAX_DIFFUSE_SPECULAR 3.25 vs REBLUR 2.55 at 1440p/4080; SH +50 % on RELAX). Quality won on
+every count, but +2.9 ms on a ~12.6 ms tier frame is not a default. Cost levers to measure before revisiting: `r_rtReStirDIRelaxAtrous`
+5 -> 3 (each A-trous pass is a full internal-res pass), `r_rtReStirDIRelaxFirefly 0` (NRD: +7-10 %), and whether the SH variant is
+needed under ReLAX at all (its luminance edge stopping may keep the bump N.L detail without the SG resolve - A/B `r_rtReStirDISH 0`
+with ReLAX). If a ~4 ms ReLAX keeps the quality, flip the default then.
 Shipped as planned: `r_rtReStirDIDenoiser` 0 = ReBLUR (today) / 1 = ReLAX; the `RELAX_DIFFUSE` + `RELAX_DIFFUSE_SH` pair joins the
 NRD instance only on request (gfx-signature rebuild, like `r_nrdSigma`); `RtaoDenoiseArgs::denoiser` is generic (RTGI can A/B it
 later, N2). Encodings verified in `NRD.hlsli`: ReLAX takes LINEAR radiance + RAW hit distance (`RELAX_FrontEnd_PackRadianceAndHitDist`)
