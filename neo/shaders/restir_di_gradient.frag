@@ -186,7 +186,12 @@ void main() {
 			( ( lights.l[ curRow ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( S.Pw, S.Nw, curLdir, curDl, occDist ) );
 		Lprev = 0.0;
 		uint defPlus1 = lights.l[ curRow ].pad0;
-		if ( defPlus1 != 0u ) {
+		if ( defPlus1 == prevLights.l[ bestRow ].pad0 && lights.l[ curRow ].pad1 == prevLights.l[ bestRow ].pad1 ) {
+			// the SAME light the pixel shaded last frame: its stored value already holds last frame's TRUE visibility, so use
+			// it instead of re-tracing in the current TLAS (where a mover has already left - that read "was lit, is lit" and
+			// never reset the floor a moving shadow vacates: a dark trail behind every walking NPC's shadow)
+			Lprev = bestLum;
+		} else if ( defPlus1 != 0u ) {
 			DiLightMap prevTable = DiLightMap( prevTableAddr );
 			uint prevRowPlus1 = prevTable.row[ defPlus1 - 1u ];
 			// same slot AND same creation serial (pad1): a freed lightDef slot is reused at once (a weapon switch lands the

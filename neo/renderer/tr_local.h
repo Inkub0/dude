@@ -1042,6 +1042,7 @@ extern idCVar r_rtReStirDIGradientBias;		// R1: darkness bias in the change deno
 extern idCVar r_rtReStirDIGradientDeadzone;	// R1: relative per-light change below which nothing counts (authored flicker)
 extern idCVar r_rtReStirDIGradientStatic;	// R1: static threshold (full-res px) for the exact previous-position re-shade
 extern idCVar r_rtReStirDIGradientStratum;	// R1: NxN stratum size (3 = RTXDI, 5 = NRD's 1/5 res)
+extern idCVar r_rtReStirDIGradientFilterPasses;	// R1: A-trous passes over the gradient (4 = RTXDI)
 extern idCVar r_rtReStirDIDenoiser;		// R2: 0 ReBLUR / 1 ReLAX for the DI denoise
 extern idCVar r_rtReStirDIRelaxFast;		// R2: ReLAX fast history (Remix direct 1)
 extern idCVar r_rtReStirDIRelaxPrepass;		// R2: ReLAX prepass blur px (Remix direct 0)

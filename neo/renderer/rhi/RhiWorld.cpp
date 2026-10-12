@@ -8205,7 +8205,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				// 2. four A-trous passes, strides 1 / 2 / 4 / 8, ping-pong ending back in [0]
 				r->GpuScopeBegin( "restir.di.gradfilter" );
 				int src = 0;
-				for ( int pass = 0; pass < 4; pass++ ) {
+				const int filterPasses = idMath::ClampInt( 0, 4, r_rtReStirDIGradientFilterPasses.GetInteger() );
+				for ( int pass = 0; pass < filterPasses; pass++ ) {
 					rhi::RenderParams fp;
 					memset( &fp, 0, sizeof( fp ) );
 					fp.mvpMatrix[0] = fp.mvpMatrix[5] = fp.mvpMatrix[10] = fp.mvpMatrix[15] = 1.0f;
