@@ -55,6 +55,10 @@ void main() {
 		fragColor = vec4( vec3( texture( u_src, uv ).x ), 1.0 );
 		return;
 	}
+	if ( mode == 4 ) {												// R3a: the gather's boost bit (att3.w fraction) as white; packed left under checkerboard
+		fragColor = vec4( vec3( fract( texture( u_src, uv ).w ) > 0.25 ? 1.0 : 0.0 ), 1.0 );
+		return;
+	}
 	if ( mode == 2 ) {												// accumulated history frames -> grey ramp
 		float frames = texture( u_src, uv ).a;
 		float ramp = clamp( frames / max( u_localParam1.x, 1.0 ), 0.0, 1.0 );

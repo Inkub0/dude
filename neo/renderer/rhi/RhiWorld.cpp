@@ -9347,6 +9347,9 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	} else if ( dbgMode == 6 ) {									// R1: the filtered gradient (red = |change|, green = magnitude)
 		srcImg = rhiReStirDIGradThisView;
 		viewMode = 1;
+	} else if ( dbgMode == 7 ) {									// R3a: which pixels the gather boosted this frame (white)
+		srcImg = r->GetRenderTargetImage4( rhiReStirDIRT );
+		viewMode = 4;
 	} else {
 		srcImg = ( dbgMode >= 2 && denoised ) ? r->GetRtgiOutputImage() : r->GetRenderTargetImage( rhiReStirDIRT );
 	}

@@ -153,21 +153,33 @@ bool diBoostWanted( vec2 sfrag, in DiSurface S ) {
 	float h = texelFetch( u_prevDenoised, prevPix, 0 ).a;
 	if ( !( h >= hOn ) ) { return true; }									// young by NRD's own count (NaN / garbage counts as young)
 	if ( prevCb < 0 ) { return false; }										// no side data: NRD's count is all there is
-	// the pixel's own previous sample (under checkerboard: the nearest cell traced last frame, packed left)
-	ivec2 readPix = prevPix;
-	if ( prevCb > 0 ) {
-		if ( ( prevPix.x & 1 ) != ( ( prevPix.y + prevCb - 1 ) & 1 ) ) { readPix.x = ( prevPix.x ^ 1 ); }	// its traced neighbour
-		readPix.x = min( readPix.x, res.x - 1 ) >> 1;
-	}
 	// a DIFFERENT surface was here last frame (the RTXDI same-surface test, as the gradient): disoccluded THIS frame.
 	// NRD resets this pixel below anyway; boosting now rather than a frame late keeps the first wake sample clean too.
-	vec2  pvz = texelFetch( u_prevViewZ, readPix, 0 ).xy;
-	vec3  pN  = unpackNrdNormal( texelFetch( u_prevNormal, readPix, 0 ).xyz );
+	// Tested against the 2x2 previous pixels the reprojection straddles, like NRD's bilinear reprojection: the jitter
+	// lands the reprojection on a NEIGHBOUR as often as not, and against a single pixel every depth / normal edge of a
+	// perfectly static view read as "disoccluded" every frame (boost 4 cost +1.5 ms standing still, 2026-10-12). It is
+	// a disocclusion only when NO traced tap of the footprint is this surface. Under checkerboard a tap not traced last
+	// frame holds nothing (its row sits in the other parity) and is skipped.
 	float expectedPrevVz = ( u_prevMvpMatrix * vec4( S.Pw, 1.0 ) ).z;
-	if ( dot( S.Nw, pN ) < 0.5 || abs( expectedPrevVz - pvz.x ) > 0.1 * max( abs( expectedPrevVz ), 1.0 ) ) { return true; }
-	// hysteresis: boosted last frame (the +0.5 in the stored row id) and the history has not reached the OFF threshold yet
-	float prevRow = texelFetch( u_prevSide, readPix, 0 ).w;
-	return ( fract( prevRow ) > 0.25 ) && !( h >= hOff );
+	ivec2 base = clamp( ivec2( floor( prevUV * vec2( res ) - 0.5 ) ), ivec2( 0 ), res - 2 );
+	bool  anyMatch = false, anyBoosted = false;
+	for ( int t = 0; t < 4; t++ ) {
+		ivec2 pp = base + ivec2( t & 1, t >> 1 );
+		ivec2 rp = pp;
+		if ( prevCb > 0 ) {
+			if ( ( pp.x & 1 ) != ( ( pp.y + prevCb - 1 ) & 1 ) ) { continue; }	// not traced last frame
+			rp.x = pp.x >> 1;
+		}
+		vec2 pvz = texelFetch( u_prevViewZ, rp, 0 ).xy;
+		if ( abs( expectedPrevVz - pvz.x ) > 0.1 * max( abs( expectedPrevVz ), 1.0 ) ) { continue; }
+		vec3 pN = unpackNrdNormal( texelFetch( u_prevNormal, rp, 0 ).xyz );
+		if ( dot( S.Nw, pN ) < 0.5 ) { continue; }
+		anyMatch = true;
+		// hysteresis: this same-surface tap was boosted last frame (the +0.5 in its stored row id)
+		if ( fract( texelFetch( u_prevSide, rp, 0 ).w ) > 0.25 ) { anyBoosted = true; }
+	}
+	if ( !anyMatch ) { return true; }										// nothing of this surface in the footprint: just revealed
+	return anyBoosted && !( h >= hOff );									// stays boosted until the history reaches the OFF threshold
 }
 
 void main() {

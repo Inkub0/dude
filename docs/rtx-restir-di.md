@@ -126,7 +126,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | cvar | default | what |
 |------|--------:|------|
 | `r_rtReStirDI` | 0 | master enable (bring-up; not preset-wired). VK + RT + velocity MRT. |
-| `r_rtReStirDIDebug` | 0 | 1 = raw gather, 2 = denoised, **R0:** 3 = NRD validation overlay, 4 = history length ramp, **R1:** 5 = gradient confidence, 6 = filtered gradient. |
+| `r_rtReStirDIDebug` | 0 | 1 = raw gather, 2 = denoised, **R0:** 3 = NRD validation overlay, 4 = history length ramp, **R1:** 5 = gradient confidence, 6 = filtered gradient, **R3a:** 7 = boosted pixels (white). |
 | `r_rtReStirDICandidates` | 0 | candidate lights per pixel before the WRS pick: **0 = every light** (exhaustive RIS, no candidate noise), `M > 0` = M uniform random draws (a rarely-drawn light reads dimmer: sparse spikes the denoiser clips). Clamp **0..128**. |
 | `r_rtReStirDIResScale` | 1 | gather/denoise resolution fraction (0.25..1), upscaled for display. Composes with checkerboard. |
 | `r_rtReStirDICheckerboard` | 0 | trace a half-pixel checkerboard (packed left), NRD reconstructs via a full-res guide pass + IN_MV. |
@@ -926,6 +926,14 @@ between it and the light - position dependent, straight "scissor" cuts along wal
 errors fixed on the way: the RG32F side copy reused the RG16F `smaa_copy` pipeline (colour-only RG16F / RG32F and the RGBA16F-led
 MRTs now have their own pass classes), and NRD left `IN_DIFF_CONFIDENCE` in GENERAL (no post-barrier) so next frame's confidence
 pass sampled it in the wrong layout.
+
+**R3a cost finding (user, cave area, still view):** gather 7.1 ms with boost 4 vs 5.6 ms with boost 0 - 1.5 ms of rays on
+pixels that were not young. Cause: the same-surface test ran against ONE reprojected previous pixel; under the FSR2 jitter that is
+a neighbour as often as not, so every depth / normal edge of a static view read as disoccluded every frame. Now the test runs over
+the 2x2 previous pixels the reprojection straddles (NRD's bilinear footprint, untraced checkerboard taps skipped) and a pixel is
+young only when NO tap is this surface; the hysteresis bit comes from the matching taps. Debug view 7 shows the boosted pixels:
+in a still view it must be black except the weapon and the screen edges. **Retest:** gather still, boost 4 vs 0 (expect equal),
+then the wake test.
 
 **R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
 on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:
