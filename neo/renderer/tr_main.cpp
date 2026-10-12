@@ -1189,6 +1189,20 @@ static bool R_RtSurfCasts( const modelSurface_t *surf ) {
 		&& surf->geometry->verts != NULL && surf->geometry->indexes != NULL;
 }
 
+// An entity whose surfaces or shadows are suppressed in the view being rendered (the player's own body in first
+// person: suppressSurfaceInViewID / suppressShadowInViewID = the player's view, Player.cpp) must not enter the ray
+// scene either - the shadow-map casters skip it (RhiWorld.cpp), but the TLAS gathers below only looked at noShadow /
+// weaponDepthHack, so the invisible body stood between the view weapon and every ray-served light and blacked the
+// gun wherever it overlapped (position-dependent, straight cuts along the body; 2026-10-12).
+static bool R_RtEntitySuppressedInView( const idRenderEntityLocal *def ) {
+	if ( tr.viewDef == NULL ) {
+		return false;
+	}
+	const int viewID = tr.viewDef->renderView.viewID;
+	return ( def->parms.suppressSurfaceInViewID != 0 && def->parms.suppressSurfaceInViewID == viewID )
+	    || ( def->parms.suppressShadowInViewID  != 0 && def->parms.suppressShadowInViewID  == viewID );
+}
+
 // R3.5 S4: a GPU-skinned casting surface the animated per-entity BLAS path owns (r_rtAnimBlas on,
 // device-addressable gpuSkinVB + static index buffer). The CPU-soup monster gather must SKIP these
 // (else a caster shows a duplicate shadow), and R_RtStageAnimCasters must gather exactly these — so
@@ -1291,7 +1305,7 @@ static void R_RtGatherEntities( const idRenderWorldLocal *world, float *&pos, in
 	const idRenderModel **unique = (const idRenderModel **)Mem_Alloc16( ( maxUnique > 0 ? maxUnique : 1 ) * (int)sizeof( void * ) );
 	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
 		const idRenderEntityLocal *def = world->entityDefs[i];
-		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow ) {
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || R_RtEntitySuppressedInView( def ) ) {
 			continue;
 		}
 		const idRenderModel *model = def->parms.hModel;
@@ -1362,7 +1376,7 @@ static void R_RtGatherEntities( const idRenderWorldLocal *world, float *&pos, in
 	}
 	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
 		const idRenderEntityLocal *def = world->entityDefs[i];
-		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow ) {
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || R_RtEntitySuppressedInView( def ) ) {
 			continue;
 		}
 		const idRenderModel *model = def->parms.hModel;
@@ -1514,7 +1528,7 @@ static bool R_RtGatherMonstersWorld( float *&pos, int *&idx, int &numVerts, int 
 
 	for ( const viewEntity_t *vEnt = tr.viewDef->viewEntitys; vEnt; vEnt = vEnt->next ) {
 		const idRenderEntityLocal *def = vEnt->entityDef;
-		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || def->parms.weaponDepthHack
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || R_RtEntitySuppressedInView( def ) || def->parms.weaponDepthHack
 			|| def->parms.hModel->IsDynamicModel() != DM_CACHED || def->dynamicModel == NULL ) {
 			continue;
 		}
@@ -1537,7 +1551,7 @@ static bool R_RtGatherMonstersWorld( float *&pos, int *&idx, int &numVerts, int 
 	int vbase = 0, ibase = 0;
 	for ( const viewEntity_t *vEnt = tr.viewDef->viewEntitys; vEnt; vEnt = vEnt->next ) {
 		const idRenderEntityLocal *def = vEnt->entityDef;
-		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || def->parms.weaponDepthHack
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || R_RtEntitySuppressedInView( def ) || def->parms.weaponDepthHack
 			|| def->parms.hModel->IsDynamicModel() != DM_CACHED || def->dynamicModel == NULL ) {
 			continue;
 		}
@@ -1659,7 +1673,7 @@ static void R_RtRefreshInstances( const idRenderWorldLocal *world, rhi::RHI *r )
 	}
 	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
 		const idRenderEntityLocal *def = world->entityDefs[i];
-		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow ) {
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || R_RtEntitySuppressedInView( def ) ) {
 			continue;
 		}
 		const idRenderModel *model = def->parms.hModel;
@@ -1973,7 +1987,7 @@ static void R_RtStageAnimCasters( void ) {
 	int nCaster = 0, nGeom = 0;
 	for ( const viewEntity_t *vEnt = tr.viewDef->viewEntitys; vEnt; vEnt = vEnt->next ) {
 		const idRenderEntityLocal *def = vEnt->entityDef;
-		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || def->parms.weaponDepthHack
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || R_RtEntitySuppressedInView( def ) || def->parms.weaponDepthHack
 			|| def->parms.hModel->IsDynamicModel() != DM_CACHED || def->dynamicModel == NULL ) {
 			continue;
 		}
@@ -2000,7 +2014,7 @@ static void R_RtStageAnimCasters( void ) {
 	int ci = 0, gi = 0;
 	for ( const viewEntity_t *vEnt = tr.viewDef->viewEntitys; vEnt; vEnt = vEnt->next ) {
 		const idRenderEntityLocal *def = vEnt->entityDef;
-		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || def->parms.weaponDepthHack
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || R_RtEntitySuppressedInView( def ) || def->parms.weaponDepthHack
 			|| def->parms.hModel->IsDynamicModel() != DM_CACHED || def->dynamicModel == NULL ) {
 			continue;
 		}
@@ -2399,7 +2413,7 @@ static bool R_RtBuildEntityModelBlas( rhi::RHI *r, const idRenderWorldLocal *wor
 	int uniqueCount = 0, numSurfs = 0, totVerts = 0, totIdx = 0;
 	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
 		const idRenderEntityLocal *def = world->entityDefs[i];
-		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow ) {
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || R_RtEntitySuppressedInView( def ) ) {
 			continue;
 		}
 		const idRenderModel *model = def->parms.hModel;
@@ -3022,7 +3036,7 @@ static const idRenderEntityLocal *R_RtFindSkinnedCaster( idList<const srfTriangl
 	}
 	for ( const viewEntity_t *vEnt = tr.viewDef->viewEntitys; vEnt; vEnt = vEnt->next ) {
 		const idRenderEntityLocal *def = vEnt->entityDef;
-		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || def->parms.weaponDepthHack
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || R_RtEntitySuppressedInView( def ) || def->parms.weaponDepthHack
 			|| def->parms.hModel->IsDynamicModel() != DM_CACHED || def->dynamicModel == NULL ) {
 			continue;
 		}
