@@ -155,7 +155,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIDenoiser` | 1 | **R2** 1 = ReLAX (NRD's RTXDI denoiser; DEFAULT since 2026-10-12), 0 = ReBLUR; rebuilds NRD. |
 | `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 1 / 8 / 1.0 / 3 / 1 / 0.7 / 1 | **R2** ReLAX settings (Remix direct-light preset + RTXDI sample). |
 | `r_rtReStirDIBoost` | 0 | **R3a** K picks + K rays on YOUNG pixels (just revealed / NRD history short); 0 or 1 = off, 2..4 = K. Default-off stage, under test. |
-| `r_rtReStirDIBoostHistory` | 4 | **R3a** history (frames) below which a pixel is boosted; it stays boosted until 2x this (capped at `r_rtReStirDIHistory`). |
+| `r_rtReStirDIBoostHistory` | 0 | **R3a** NRD-history trigger: frames below which a pixel is boosted (stays until 2x, capped at `r_rtReStirDIHistory`); 0 = off, only true disocclusion + screen entry (held 4 frames). |
 
 Defaults are the user-tuned compromise (2026-10-07/08). All `CVAR_ARCHIVE`, so a user's own values persist in
 config regardless of these source defaults. `hitDist` scale (1024) is in-source only.
@@ -968,6 +968,12 @@ the ray queries as a helper, only its stores are dropped, so every pixel paid th
 (GL_EXT_terminate_invocation, SPIR-V 1.6 core) ends it for real. GOTCHA for every heavy shader with an early `discard`
 (rtshadow_ray / rtao / rtgi early-outs): check the SPIR-V for OpDemote. **Retest:** still, `restir.di.boost` should be a few
 tenths at most; looking around = the entry band.
+
+**R3a cost, sixth finding (user, young + clustered boost):** still, young 0.06 ms, boost 1.4 ms; looking around, boost 2.6-2.9 ms.
+What survives the cluster rule standing still are AREAS with a short NRD history: the footprints of flickering / animated lights,
+which the gradient resets every frame on purpose. `r_rtReStirDIBoostHistory` 0 (new default) turns that trigger off - only a true
+disocclusion (reason 2) and screen entry (3) boost, held until the history reaches 4 frames; > 0 keeps the old behaviour for the
+flashlight-sweep case. **Retest:** still boost line at 0 vs 2; looking around at 0.
 
 **R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
 on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:

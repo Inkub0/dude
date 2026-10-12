@@ -8223,8 +8223,13 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const bool boostAll = boostWant && ( !rhiReStirDIPrevValid || diCut || r->GetRtgiOutputImage() == 0 );
 	const bool boostSide = boostWant && !boostAll && diPrevSideValid;
 	{
-		const float hOn  = idMath::ClampFloat( 1.0f, 63.0f, r_rtReStirDIBoostHistory.GetFloat() );
-		const float hOff = idMath::ClampFloat( hOn, 63.0f, ( ( 2.0f * hOn < (float)diMainF ) ? 2.0f * hOn : (float)diMainF ) );
+		// r_rtReStirDIBoostHistory <= 0: the NRD-history trigger is OFF (only true disocclusion + screen entry count; the history
+		// still ends the hysteresis) - a short NRD history over whole areas is what flickering / animated lights leave every
+		// frame on purpose (the gradient resets them), and boosting those footprints cost ~1.4 ms standing still in a cave
+		const bool  hTrig = r_rtReStirDIBoostHistory.GetFloat() > 0.0f;
+		const float hOn   = hTrig ? idMath::ClampFloat( 1.0f, 63.0f, r_rtReStirDIBoostHistory.GetFloat() ) : -1.0f;	// -1: no finite h is below it
+		const float hBase = hTrig ? 2.0f * hOn : 4.0f;
+		const float hOff  = idMath::ClampFloat( 1.0f, 63.0f, ( hBase < (float)diMainF ) ? hBase : (float)diMainF );
 		parms.tessParms[0] = boostWant ? (float)boostK : 0.0f;
 		parms.tessParms[1] = boostAll ? 1.0e6f : hOn;
 		parms.tessParms[2] = boostAll ? 1.0e6f : hOff;
