@@ -145,9 +145,12 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_nrdSigma` | 0 | **R0** keep `SIGMA_SHADOW` in the NRD instance (never dispatched since H3); rebuilds NRD. |
 | `r_rtReStirDIGradient` | 0 | **R1** temporal gradient confidence -> NRD IN_DIFF_CONFIDENCE (re-shade last frame's light; RTXDI / Q2RTX recipe). |
 | `r_rtReStirDIGradientPower` | 8 | **R1** confidence sharpening power. |
-| `r_rtReStirDIGradientHistory` | 8 | **R1** rise-only temporal smoothing (frames). |
+| `r_rtReStirDIGradientHistory` | 2 | **R1** rise-only temporal smoothing (frames); 8 is the reservoir-reuse value, not ours. |
 | `r_rtReStirDIGradientFloor` | 0.1 | **R1** minimum confidence; ReBLUR raises it to historyFix / history. |
 | `r_rtReStirDIGradientBias` | 0.001 | **R1** darkness bias in the change's denominator. |
+| `r_rtReStirDIGradientDeadzone` | 0.1 | **R1** relative per-light change below which nothing counts (authored flicker). |
+| `r_rtReStirDIGradientStatic` | 2.0 | **R1** static threshold (full-res px) for the exact previous-position re-shade. |
+| `r_rtReStirDIGradientStratum` | 3 | **R1** NxN stratum (3 = RTXDI 1/9; 5 = NRD's 1/5 res, ~1/3 the cost). |
 
 Defaults are the user-tuned compromise (2026-10-07/08). All `CVAR_ARCHIVE`, so a user's own values persist in
 config regardless of these source defaults. `hitDist` scale (1024) is in-source only.
@@ -665,6 +668,21 @@ stored one. **Checkerboard:** the stratum only considers cells last frame traced
 left DI** (switched off, culled, moved to the forward path) maps to no row -> `L_now = 0` -> a 100 % change. **Confidence**
 runs at the gather res (bilinear from the stratum res), rise-only smoothing, floor `max(cvar, historyFix / history)`,
 dither 0.5 / history. **Not done:** the optional combined-mode bounce gradient (`r_rtReStirDIGradientBounce`), R1b.
+**First user test (2026-10-12):** view 6 (the gradient) was right - black when static, the beam's footprint under the
+flashlight, nothing on a walking NPC - but view 5 (the confidence) fried as grey blobs even when static, held a half-second
+drop after a blink and trailed behind movers. Three causes, fixed the same day: (1) the re-shade landed on the CURRENT pixel
+centre, which under the FSR2 jitter + reprojection is a sub-pixel-different world point than the stored one (bump texel,
+cookie texel, shadow edge) - a few-percent mismatch that the power-8 confidence turns grey; now a point that moved less
+than `r_rtReStirDIGradientStatic` (2.0 full-res px) is re-shaded at its EXACT stored position / normal / previous camera
+(last frame's inverse view rides `u_projectionMatrix`), so static world + static light compares bit-identical (RTXDI
+shades the same world point too); movers keep the current surface (their old position would be self-shadowed in the
+current TLAS). (2) Doom's authored flicker tables pulse many lights 5-15 % per frame - a genuine per-light change that
+reset history every frame; `r_rtReStirDIGradientDeadzone` (0.1) ignores relative changes below 10 % (noise-free signal,
+so a real threshold; a light switching off is still 100 % of its own value). (3) the rise-only hold (RTXDI/Remix 8
+frames) exists so REUSED reservoirs can stabilize; our gather is fresh every frame, so `r_rtReStirDIGradientHistory`
+defaults to 2 - the half-second drop and the mover trail in view 5 were this hold. Cost measured 0.351 ms grad + 0.043
+filter (+ conf) at 1440p x 0.75, above the estimate because the 1/9-res visibility ray dominates; `r_rtReStirDIGradientStratum`
+(3) lets a 4 or 5 (NRD: 1/5 res suffices) cut it to ~0.2 / ~0.13 ms.
 Cvars: `r_rtReStirDIGradient` 0 (the A/B switch), `r_rtReStirDIGradientPower` 8, `r_rtReStirDIGradientHistory` 8,
 `r_rtReStirDIGradientFloor` 0.1, `r_rtReStirDIGradientBias` 0.001. Debug: `r_rtReStirDIDebug 5` = the confidence (grey),
 `6` = the filtered gradient (red |change|, green magnitude). New GPU scopes `restir.di.grad / gradfilter / gradconf`.

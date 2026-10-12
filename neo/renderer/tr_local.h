@@ -1035,6 +1035,9 @@ extern idCVar r_rtReStirDIGradientPower;	// R1: confidence sharpening power
 extern idCVar r_rtReStirDIGradientHistory;	// R1: rise-only temporal smoothing length (frames)
 extern idCVar r_rtReStirDIGradientFloor;	// R1: minimum confidence (ReBLUR raises it to historyFix / history)
 extern idCVar r_rtReStirDIGradientBias;		// R1: darkness bias in the change denominator
+extern idCVar r_rtReStirDIGradientDeadzone;	// R1: relative per-light change below which nothing counts (authored flicker)
+extern idCVar r_rtReStirDIGradientStatic;	// R1: static threshold (full-res px) for the exact previous-position re-shade
+extern idCVar r_rtReStirDIGradientStratum;	// R1: NxN stratum size (3 = RTXDI, 5 = NRD's 1/5 res)
 extern idCVar r_nrdSigma;					// R0: keep SIGMA_SHADOW in the NRD instance (never dispatched since H3)
 extern idCVar r_rtReStirDICheckerboard;		// ReSTIR DI full-res checkerboard: trace half the pixels (packed left), NRD reconstructs; ~half the rays
 extern idCVar r_rtReStirDIResScale;			// ReSTIR DI gather/denoise resolution fraction (0.25..1); upscaled for display. Composes with checkerboard

@@ -24,6 +24,14 @@
 //   u_tessParms.yz    = gradient resolution ( gw, gh )
 //   u_parallaxParms   = ( stratum size, internal rw, internal rh, 0 )
 //   u_prevMvpMatrix   = LAST frame's world -> view matrix (the expected previous view z of a current surface point)
+//   u_projectionMatrix= LAST frame's INVERSE view (view -> world): the stored previous pixel's world position + camera
+//   u_parallaxParms.w = static threshold in FULL-RES pixels: a surface point that moved less than this many pixels'
+//                       worth of world units between the frames is STATIC and is re-shaded at its stored previous
+//                       position / normal / camera, so a static world under a static light gives L_now == L_prev
+//                       exactly (the FSR2 jitter + reprojection otherwise land the two shades on sub-pixel-different
+//                       points - different bump texel, cookie texel, shadow edge - and the power-8 confidence turns
+//                       that few-percent mismatch into grey). A mover keeps the current surface (its old position
+//                       would be shadowed by its own old self in the current TLAS).
 #extension GL_EXT_buffer_reference_uvec2 : require
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_nonuniform_qualifier : require
@@ -69,6 +77,10 @@ void main() {
 	float bestLum = -1.0;
 	uint  bestRow = 0u;
 	vec2  bestFrag = vec2( 0.0 );
+	vec3  bestPrevP = vec3( 0.0 ), bestPrevN = vec3( 0.0, 0.0, 1.0 );
+	float bestPrevVz = -1.0;
+	bool  bestStatic = false;
+	const float staticPx = u_parallaxParms.w;
 	for ( int dy = 0; dy < stratum; dy++ ) {
 		for ( int dx = 0; dx < stratum; dx++ ) {
 			ivec2 cur = base + ivec2( dx, dy );
@@ -98,9 +110,19 @@ void main() {
 			float expectedPrevVz = ( u_prevMvpMatrix * vec4( S.Pw, 1.0 ) ).z;
 			if ( abs( expectedPrevVz - pvz.x ) > 0.1 * max( abs( expectedPrevVz ), 1.0 ) ) { continue; }
 			if ( pvz.y > bestLum ) {
+				// the stored sample's world position: last frame's SCREEN pixel centre at its stored view z through last
+				// frame's inverse view (the same reconstruction the gather used, so a static point lands exactly)
+				vec2  pndc = ( vec2( prevPix ) + 0.5 ) * ( u_screenCorrection.xy * 2.0 ) - 1.0;
+				float pd   = -pvz.x;
+				vec3  Pv   = vec3( pndc.x * pd * u_localParam0.x, pndc.y * u_windowCoord.z * pd * u_localParam0.y, pvz.x );
+				vec3  Pprev = ( u_projectionMatrix * vec4( Pv, 1.0 ) ).xyz;
 				bestLum  = pvz.y;
 				bestRow  = uint( side.w + 0.5 ) - 1u;
 				bestFrag = sfrag;
+				bestPrevP = Pprev;
+				bestPrevN = pN;
+				bestPrevVz = pvz.x;
+				bestStatic = length( S.Pw - Pprev ) <= staticPx * S.d * u_shadowFalloffS.y;	// moved less than N pixels' worth
 			}
 		}
 	}
@@ -124,6 +146,17 @@ void main() {
 			// 3. re-shade that light at the current surface, the gather's way (material included), + its visibility
 			DiSurface S; float raw; vec4 nt;
 			if ( diSurfaceAt( bestFrag, applyMode, pbr, S, raw, nt ) ) {
+				if ( bestStatic ) {
+					// static geometry: shade the EXACT stored point with its stored normal from last frame's camera position
+					// (the material comes from the current pixel = the same surface). Only the LIGHTS can differ now.
+					S.Pw = bestPrevP;
+					S.Nw = bestPrevN;
+					S.d  = -bestPrevVz;
+					if ( applyMode ) {
+						S.Vw    = normalize( u_projectionMatrix[3].xyz - S.Pw );
+						S.NdotV = max( dot( S.Nw, S.Vw ), 1e-4 );
+					}
+				}
 				vec3 contrib, ldir; float dl, ndl;
 				present = true;												// the light exists; it may simply not reach any more (L_now = 0)
 				if ( diShadeLight( lights, curRow, S, contrib, ldir, dl, ndl ) ) {

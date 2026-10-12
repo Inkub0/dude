@@ -8131,7 +8131,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		const unsigned long long mapAddr = ( s_sceneLightSlotFrame[ curSlot ] == tr.frameCount ) ? s_diLightMapSlotAddr[ curSlot ] : 0;
 		const bool gradOn = r_rtReStirDIGradient.GetBool() && nrdVel != 0 && nrdFree && rhiReStirDIGatherPrevValid
 			&& rhiReStirDIPrevValid && !diCut && prevLightsValid && mapAddr != 0;
-		const int gw = ( rw + 2 ) / 3, gh = ( rh + 2 ) / 3;
+		const int stratum = idMath::ClampInt( 2, 6, r_rtReStirDIGradientStratum.GetInteger() );
+		const int gw = ( rw + stratum - 1 ) / stratum, gh = ( rh + stratum - 1 ) / stratum;
 		if ( gradOn ) {
 			// targets: 2 x RG16F gradient (gw x gh, A-trous ping-pong), 2 x R16F confidence (rw x rh, temporal ping-pong)
 			for ( int k = 0; k < 2; k++ ) {
@@ -8166,8 +8167,12 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				memcpy( &gp.shadowParms[2], &prvLo, sizeof( prvLo ) );	memcpy( &gp.shadowParms[3], &prvHi, sizeof( prvHi ) );
 				gp.tessParms[0] = rhiReStirDIPrevCb;
 				gp.tessParms[1] = (float)gw;	gp.tessParms[2] = (float)gh;
-				gp.parallaxParms[0] = 3.0f;	gp.parallaxParms[1] = (float)rw;	gp.parallaxParms[2] = (float)rh;
+				gp.parallaxParms[0] = (float)stratum;	gp.parallaxParms[1] = (float)rw;	gp.parallaxParms[2] = (float)rh;
+				gp.parallaxParms[3] = r_rtReStirDIGradientStatic.GetFloat();		// static threshold, full-res pixels
 				memcpy( gp.prevMvpMatrix, rhiReStirDIPrevView, sizeof( gp.prevMvpMatrix ) );	// last frame's world -> view
+				float prevInvView[16];
+				if ( !RB_RHI_InvertMatrix( rhiReStirDIPrevView, prevInvView ) ) { memcpy( prevInvView, invView, sizeof( prevInvView ) ); }
+				memcpy( gp.projectionMatrix, prevInvView, sizeof( gp.projectionMatrix ) );	// last frame's view -> world (exact static re-shade)
 				r->GpuScopeBegin( "restir.di.grad" );		// r_vkGpuTime 2: 1/9-res re-shade of last frame's light + 1 ray
 				r->BeginTargetPass( rhiReStirDIGradRT[0], NULL );
 				RB_RHI_BindUnit( 0, diDepthImg );
@@ -8216,6 +8221,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				cp.localParam0[3] = r_rtReStirDIGradientBias.GetFloat();
 				cp.localParam1[0] = 0.5f / mainF;									// NRD: dither by 0.5 / maxAccumulatedFrameNum
 				cp.localParam1[1] = rhiReStirDIGradConfValid ? 1.0f : 0.0f;
+				cp.localParam1[2] = idMath::ClampFloat( 0.0f, 0.9f, r_rtReStirDIGradientDeadzone.GetFloat() );
 				cp.windowCoord[2] = -1.0f;
 				const int ci = rhiReStirDIGradConfIdx;
 				r->GpuScopeBegin( "restir.di.gradconf" );
