@@ -4,16 +4,22 @@
 SAMPLER_BINDING(4) uniform sampler2D u_prevDenoised;		// R3a: last frame's denoised DI, .w = NRD history length (frames)
 SAMPLER_BINDING(5) uniform sampler2D u_prevViewZ;		// R3a: last frame's gather att1 copy ( viewZ, lum )
 SAMPLER_BINDING(6) uniform sampler2D u_prevNormal;		// R3a: last frame's gather att2 copy (NRD-packed normal)
-SAMPLER_BINDING(9) uniform sampler2D u_prevSide;		// R3a: last frame's gather att3 copy ( SH1, row + 1 [+ 0.5 boosted] )
+SAMPLER_BINDING(9) uniform sampler2D u_prevSide;		// R3a: last frame's gather att3 copy ( SH1, row + 1 [+ reason / 4] ) - view 7 only now
 SAMPLER_BINDING(10) uniform sampler2D u_velocity;		// R3a: velocity at the gather res
 
 
-// returns the reason the pixel is young: 0 = not young, 1 = NRD's history short, 2 = no previous pixel is this surface
-// (just revealed), 3 = held by the hysteresis / entered the screen. Stored in the row id's fraction (x 0.25) for debug view 7.
-int diBoostWanted( vec2 sfrag, in DiSurface S ) {
+SAMPLER_BINDING(11) uniform sampler2D u_youngIn;		// young pass: LAST frame's young ( reason / 4, age / 64 ); boost pass: THIS frame's
+//   u_tessParms           = ( K picks, boost-ON NRD history (<= 0: trigger off), HOLD frames, last frame's checkerboard parity / -1 )
+// Returns the reason the pixel is young: 0 = not, 1 = NRD's history short at the previous position (only with a positive
+// threshold), 2 = REVEALED - no previous pixel of the footprint is this surface AND one of them was NEARER (an occluder stood
+// here: a mover's wake, floor behind a column while turning; a thin railing jittering over its background is NOT revealed -
+// its taps are all farther), 3 = held - it became young less than HOLD frames ago (its own age, from last frame's young
+// target: NRD's history cannot end a hold, a flickering light keeps that short forever) / entered the screen.
+int diBoostWanted( vec2 sfrag, in DiSurface S, out float ageOut ) {
 	const float hOn    = u_tessParms.y;
-	const float hOff   = u_tessParms.z;
+	const float hold   = u_tessParms.z;
 	const int   prevCb = int( floor( u_tessParms.w + 0.5 ) );				// -1 = no side data
+	ageOut = 0.0;
 	vec2 uvc = sfrag * u_screenCorrection.xy;
 	vec2 vel = texture( u_velocity, uvc ).rg;
 	vel.y = ( u_windowCoord.z < 0.0 ) ? -vel.y : vel.y;
@@ -21,20 +27,18 @@ int diBoostWanted( vec2 sfrag, in DiSurface S ) {
 	if ( any( lessThan( prevUV, vec2( 0.0 ) ) ) || any( greaterThanEqual( prevUV, vec2( 1.0 ) ) ) ) { return 3; }	// just entered the screen: no history at all
 	ivec2 res     = ivec2( floor( 1.0 / u_screenCorrection.xy + 0.5 ) );
 	ivec2 prevPix = clamp( ivec2( floor( prevUV * vec2( res ) ) ), ivec2( 0 ), res - 1 );
-	// NRD's history length where this pixel was - the nearest texel, never bilinear (a frame count must not blend across an edge)
-	float h = texelFetch( u_prevDenoised, prevPix, 0 ).a;
-	if ( !( h >= hOn ) ) { return 1; }										// young by NRD's own count (NaN / garbage counts as young)
-	if ( prevCb < 0 ) { return 0; }											// no side data: NRD's count is all there is
-	// a DIFFERENT surface was here last frame (the RTXDI same-surface test, as the gradient): disoccluded THIS frame.
-	// NRD resets this pixel below anyway; boosting now rather than a frame late keeps the first wake sample clean too.
-	// Tested against the 2x2 previous pixels the reprojection straddles, like NRD's bilinear reprojection: the jitter
-	// lands the reprojection on a NEIGHBOUR as often as not, and against a single pixel every depth / normal edge of a
-	// perfectly static view read as "disoccluded" every frame (boost 4 cost +1.5 ms standing still, 2026-10-12). It is
-	// a disocclusion only when NO traced tap of the footprint is this surface. Under checkerboard a tap not traced last
-	// frame holds nothing (its row sits in the other parity) and is skipped.
+	if ( hOn > 0.0 ) {
+		// NRD's history length where this pixel was - the nearest texel, never bilinear (a frame count must not blend across an edge)
+		float h = texelFetch( u_prevDenoised, prevPix, 0 ).a;
+		if ( !( h >= hOn ) ) { return 1; }									// young by NRD's own count (NaN / garbage counts as young)
+	}
+	if ( prevCb < 0 ) { return 0; }											// no side data: nothing to compare against
+	// the same-surface test over the 2x2 previous pixels the reprojection straddles (NRD's bilinear footprint; a tap not
+	// traced last frame under checkerboard holds nothing and is skipped)
 	float expectedPrevVz = ( u_prevMvpMatrix * vec4( S.Pw, 1.0 ) ).z;
+	float tol  = 0.1 * max( abs( expectedPrevVz ), 1.0 );
 	ivec2 base = clamp( ivec2( floor( prevUV * vec2( res ) - 0.5 ) ), ivec2( 0 ), res - 2 );
-	bool  anyMatch = false, anyBoosted = false;
+	bool  anyMatch = false, anyNearer = false;
 	for ( int t = 0; t < 4; t++ ) {
 		ivec2 pp = base + ivec2( t & 1, t >> 1 );
 		ivec2 rp = pp;
@@ -42,15 +46,25 @@ int diBoostWanted( vec2 sfrag, in DiSurface S ) {
 			if ( ( pp.x & 1 ) != ( ( pp.y + prevCb - 1 ) & 1 ) ) { continue; }	// not traced last frame
 			rp.x = pp.x >> 1;
 		}
-		vec2 pvz = texelFetch( u_prevViewZ, rp, 0 ).xy;
-		if ( abs( expectedPrevVz - pvz.x ) > 0.1 * max( abs( expectedPrevVz ), 1.0 ) ) { continue; }
+		float pvz = texelFetch( u_prevViewZ, rp, 0 ).x;
+		if ( abs( expectedPrevVz - pvz ) > tol ) {
+			if ( pvz > expectedPrevVz + tol ) { anyNearer = true; }		// view z is negative: larger = nearer the camera = an occluder was here
+			continue;
+		}
 		vec3 pN = unpackNrdNormal( texelFetch( u_prevNormal, rp, 0 ).xyz );
 		if ( dot( S.Nw, pN ) < 0.5 ) { continue; }
 		anyMatch = true;
-		// hysteresis: this same-surface tap was boosted last frame (the +0.5 in its stored row id)
-		if ( fract( texelFetch( u_prevSide, rp, 0 ).w ) >= 0.2 ) { anyBoosted = true; }
 	}
-	if ( !anyMatch ) { return 2; }											// nothing of this surface in the footprint: just revealed
-	return ( anyBoosted && !( h >= hOff ) ) ? 3 : 0;						// stays boosted until the history reaches the OFF threshold
+	if ( !anyMatch ) { return anyNearer ? 2 : 0; }						// revealed from behind an occluder - or a thin edge jittering over its background (not young)
+	// hold: this pixel's own age since it became young, from last frame's young target at its previous cell
+	ivec2 yp = prevPix;
+	if ( prevCb > 0 ) {
+		if ( ( yp.x & 1 ) != ( ( yp.y + prevCb - 1 ) & 1 ) ) { yp.x ^= 1; }	// its traced neighbour's cell
+		yp.x = min( yp.x, res.x - 1 ) >> 1;
+	}
+	vec2  py   = texelFetch( u_youngIn, yp, 0 ).xy;
+	int   pr   = int( floor( py.x * 4.0 + 0.5 ) );
+	float page = floor( py.y * 64.0 + 0.5 );
+	if ( pr != 0 && page + 1.0 < hold ) { ageOut = page + 1.0; return 3; }
+	return 0;
 }
-

@@ -1,7 +1,7 @@
 // DUDE ReSTIR DI R3a - the YOUNG pass (docs/rtx-restir-di.md Plan R3): per pixel of the gather layout (left-packed under
 // checkerboard), the reason this pixel counts as young - 0 = not, 1 = NRD's history short at the previous position,
-// 2 = no previous pixel is this surface (just revealed), 3 = held by the hysteresis / entered the screen - written as
-// reason / 4 into an R8 target. The boost pass (restir_di_boost.frag) reads it back CLUSTERED (3x3 majority), so isolated
+// 2 = revealed from behind an occluder, 3 = held (its age since it became young) / entered the screen - written as
+// ( reason / 4, age / 64 ) into a ping-pong target (unit 11 = LAST frame's). The boost pass (restir_di_boost.frag) reads it back CLUSTERED (3x3 majority), so isolated
 // specks never trigger the K-pick path. Shares the gather's uniform packing + units 0-3 and the boost inputs 4/5/6/9/10.
 #extension GL_EXT_buffer_reference_uvec2 : require
 #extension GL_EXT_ray_query : require
@@ -34,5 +34,7 @@ void main() {
 	DiSurface S; float raw; vec4 nt;
 	if ( !diSurfaceAt( sfrag, applyMode, pbr, S, raw, nt ) ) { return; }		// sky / no geometry
 	if ( nt.a < 0.5 ) { return; }												// the view weapon: never boosted
-	fragColor = vec4( float( diBoostWanted( sfrag, S ) ) * 0.25, 0.0, 0.0, 1.0 );
+	float age;
+	int   why = diBoostWanted( sfrag, S, age );
+	fragColor = vec4( float( why ) * 0.25, age / 64.0, 0.0, 1.0 );		// ( reason / 4, age / 64 )
 }

@@ -975,6 +975,14 @@ which the gradient resets every frame on purpose. `r_rtReStirDIBoostHistory` 0 (
 disocclusion (reason 2) and screen entry (3) boost, held until the history reaches 4 frames; > 0 keeps the old behaviour for the
 flashlight-sweep case. **Retest:** still boost line at 0 vs 2; looking around at 0.
 
+**R3a cost, seventh finding (user: still, boost 0.94 ms at threshold 0, 0.76 at 2):** the history trigger was not what survived
+standing still. Two things were: (1) a HOLD that could never end - a pixel stayed boosted while NRD's history was below the OFF
+threshold, and under a flickering light that history never gets there; (2) thin geometry (a 1-px railing jittering over its
+background) reading as "revealed" every frame. Now: the young pass is a ping-pong target carrying each pixel's AGE since it became
+young, and a hold lasts `hold` frames (4 with the trigger off, 2x the threshold with it on) regardless of NRD; and a pixel is
+"revealed" only when no footprint tap is its surface AND at least one tap was NEARER (an occluder stood there) - a thin edge's taps
+are all farther. **Retest:** still boost line (expect ~fixed cost only), looking around, NPC wake.
+
 **R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
 on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:
 1. **Three ways to be young, tested in the gather (`diBoostWanted`)**: the pixel reprojects off screen; NRD's history length

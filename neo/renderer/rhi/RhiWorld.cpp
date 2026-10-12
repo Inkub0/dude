@@ -512,8 +512,9 @@ static int   rhiReStirDIGradW = 0, rhiReStirDIGradH = 0;
 static rhi::RenderTargetHandle rhiReStirDIGradConfRT[2] = { 0, 0 };	// R16F confidence at rw x rh
 static int   rhiReStirDIGradConfW = 0, rhiReStirDIGradConfH = 0;
 static int   rhiReStirDIGradConfIdx = 0;
-static rhi::RenderTargetHandle rhiReStirDIYoungRT = 0;	// R3a: per-pixel young reason (R8, gather layout) for the clustered boost pass
-static int   rhiReStirDIYoungW = 0, rhiReStirDIYoungH = 0;
+static rhi::RenderTargetHandle rhiReStirDIYoungRT[2] = { 0, 0 };	// R3a: per-pixel young ( reason / 4, age / 64 ), gather layout, ping-pong (the age is last frame's + 1)
+static int   rhiReStirDIYoungW = 0, rhiReStirDIYoungH = 0, rhiReStirDIYoungIdx = 0;
+static bool  rhiReStirDIYoungValid = false;				// rhiReStirDIYoungRT[idx ^ 1] holds last frame's young
 static bool  rhiReStirDIGradConfValid = false;		// rhiReStirDIGradConfRT[idx ^ 1] holds last frame's confidence
 static rhi::ImageHandle rhiReStirDIGradConfThisView = 0;	// the confidence fed to NRD this view (debug view 5)
 static rhi::ImageHandle rhiReStirDIGradThisView = 0;		// the filtered gradient this view (debug view 6)
@@ -4039,7 +4040,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiReStirDIGradConfRT[0] = rhiReStirDIGradConfRT[1] = 0;	rhiReStirDIGradConfW = rhiReStirDIGradConfH = 0;
 	rhiReStirDIGradConfValid = false;	rhiReStirDIGatherPrevValid = false;
 	rhiReStirDIPrevSideRT[0] = rhiReStirDIPrevSideRT[1] = rhiReStirDIPrevSideRT[2] = 0;	rhiReStirDIPrevSideW = rhiReStirDIPrevSideH = 0;
-	rhiReStirDIYoungRT = 0;	rhiReStirDIYoungW = rhiReStirDIYoungH = 0;
+	rhiReStirDIYoungRT[0] = rhiReStirDIYoungRT[1] = 0;	rhiReStirDIYoungW = rhiReStirDIYoungH = 0;	rhiReStirDIYoungValid = false;
 	s_diLightMapBuf = 0;	s_diLightMapAddr = 0;
 	s_sceneLightSlotFrame[0] = s_sceneLightSlotFrame[1] = s_sceneLightSlotFrame[2] = -1;
 	rhiRtaoVelRT = 0;			rhiRtaoVelW = rhiRtaoVelH = 0;
@@ -8167,16 +8168,18 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const rhi::ShaderHandle youngProg = ( boostK > 0 ) ? r->LoadShader( "restir_di_young" ) : 0;
 	// the per-pixel young reason (R8, gather layout) the boost pass reads back clustered (3x3 majority)
 	if ( boostK > 0 && youngProg != 0 ) {
-		if ( rhiReStirDIYoungRT && ( r->GetRenderTargetImage( rhiReStirDIYoungRT ) == 0 || rhiReStirDIYoungW != rw || rhiReStirDIYoungH != rh ) ) {
-			if ( r->GetRenderTargetImage( rhiReStirDIYoungRT ) != 0 ) { r->DestroyRenderTarget( rhiReStirDIYoungRT ); }
-			rhiReStirDIYoungRT = 0;	rhiReStirDIYoungW = rhiReStirDIYoungH = 0;
+		for ( int k = 0; k < 2; k++ ) {
+			if ( rhiReStirDIYoungRT[k] && r->GetRenderTargetImage( rhiReStirDIYoungRT[k] ) == 0 ) { rhiReStirDIYoungRT[k] = 0; rhiReStirDIYoungValid = false; }
 		}
-		if ( !rhiReStirDIYoungRT ) {
-			rhiReStirDIYoungRT = r->CreateRenderTarget( rhi::IF_RGBA8, rw, rh );
-			if ( rhiReStirDIYoungRT ) { rhiReStirDIYoungW = rw;	rhiReStirDIYoungH = rh; }
+		if ( rhiReStirDIYoungW != rw || rhiReStirDIYoungH != rh ) {
+			for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIYoungRT[k] ) { r->DestroyRenderTarget( rhiReStirDIYoungRT[k] ); rhiReStirDIYoungRT[k] = 0; } }
+			rhiReStirDIYoungW = rhiReStirDIYoungH = 0;	rhiReStirDIYoungValid = false;
 		}
+		for ( int k = 0; k < 2; k++ ) { if ( !rhiReStirDIYoungRT[k] ) { rhiReStirDIYoungRT[k] = r->CreateRenderTarget( rhi::IF_RGBA8, rw, rh ); } }
+		if ( rhiReStirDIYoungRT[0] && rhiReStirDIYoungRT[1] ) { rhiReStirDIYoungW = rw;	rhiReStirDIYoungH = rh; }
 	}
-	const bool boostWant = boostK > 0 && boostProg != 0 && youngProg != 0 && rhiReStirDIYoungRT != 0 && nrdVel != 0 && nrdFree;
+	const bool boostWant = boostK > 0 && boostProg != 0 && youngProg != 0 && rhiReStirDIYoungRT[0] != 0 && rhiReStirDIYoungRT[1] != 0 && nrdVel != 0 && nrdFree;
+	if ( !boostWant ) { rhiReStirDIYoungValid = false; }		// a gap breaks the age chain: next run starts with no holds
 
 	// ---- R1 rev.2: keep last frame's side data (att1 viewZ+lum / att2 normal / att3 SH1+row) across the gather, so the
 	// gradient pass can run AFTER it and see BOTH frames' picks (RTXDI: the brightest sample of either frame). Three
@@ -8227,12 +8230,12 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// still ends the hysteresis) - a short NRD history over whole areas is what flickering / animated lights leave every
 		// frame on purpose (the gradient resets them), and boosting those footprints cost ~1.4 ms standing still in a cave
 		const bool  hTrig = r_rtReStirDIBoostHistory.GetFloat() > 0.0f;
-		const float hOn   = hTrig ? idMath::ClampFloat( 1.0f, 63.0f, r_rtReStirDIBoostHistory.GetFloat() ) : -1.0f;	// -1: no finite h is below it
-		const float hBase = hTrig ? 2.0f * hOn : 4.0f;
-		const float hOff  = idMath::ClampFloat( 1.0f, 63.0f, ( hBase < (float)diMainF ) ? hBase : (float)diMainF );
+		const float hOn   = hTrig ? idMath::ClampFloat( 1.0f, 63.0f, r_rtReStirDIBoostHistory.GetFloat() ) : 0.0f;	// 0: trigger off
+		const float hBase = hTrig ? 2.0f * hOn : 4.0f;		// HOLD: frames a young pixel stays boosted (its own age, young ping-pong)
+		const float hold  = idMath::ClampFloat( 1.0f, 63.0f, ( hBase < (float)diMainF ) ? hBase : (float)diMainF );
 		parms.tessParms[0] = boostWant ? (float)boostK : 0.0f;
 		parms.tessParms[1] = boostAll ? 1.0e6f : hOn;
-		parms.tessParms[2] = boostAll ? 1.0e6f : hOff;
+		parms.tessParms[2] = hold;
 		parms.tessParms[3] = boostSide ? diPrevCb : -1.0f;
 		memcpy( parms.prevMvpMatrix, rhiReStirDIPrevValid ? rhiReStirDIPrevView : viewDef->worldSpace.modelViewMatrix, sizeof( parms.prevMvpMatrix ) );
 	}
@@ -8279,17 +8282,23 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// 2. the BOOST pass reads it back CLUSTERED (young + >= 5 of 9 neighbours young) and only those pixels re-run the
 		//    light loop with K picks, overwriting their attachments (identical guides); isolated specks never trigger it,
 		//    which matters twice: they are not worth rays, and one surviving lane keeps a whole warp running.
-		r->GpuScopeBegin( "restir.di.young" );		// r_vkGpuTime 2: the per-pixel young test
+		const int yi = rhiReStirDIYoungIdx;
+		r->GpuScopeBegin( "restir.di.young" );		// r_vkGpuTime 2: the per-pixel young test (+ its age from last frame's)
 		if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
-		r->BeginTargetPass( rhiReStirDIYoungRT, NULL );
+		r->BeginTargetPass( rhiReStirDIYoungRT[ yi ], NULL );
+		if ( rhiReStirDIYoungValid && !boostAll ) { RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT[ yi ^ 1 ] ) ); }	// last frame's young
+		else { RB_RHI_BindUnit( 11, globalImages->blackImage ); }					// no history of holds: black = reason 0
+		backEnd.glState.tmu[11].current2DMap = -1;
 		RB_RHI_DrawFullscreen( r, youngProg, parms, 0 );
 		r->EndPass();
 		r->GpuScopeEnd();
+		rhiReStirDIYoungValid = true;
+		rhiReStirDIYoungIdx = yi ^ 1;
 		r->GpuScopeBegin( "restir.di.boost" );		// r_vkGpuTime 2: K picks + rays on the clustered young pixels only
 		if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
 		r->SetNextTargetPassLoad();
 		r->BeginTargetPass( rhiReStirDIRT, NULL );
-		RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT ) );
+		RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT[ yi ] ) );	// THIS frame's young
 		backEnd.glState.tmu[11].current2DMap = -1;
 		RB_RHI_DrawFullscreen( r, boostProg, parms, 0 );
 		r->EndPass();

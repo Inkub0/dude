@@ -60,7 +60,7 @@
 //   u_pbrParms2           = ( ambient floor, shadow-ray gate, eye pullback per unit depth, r_rtgiIntensity )
 //   u_occlusionParms      = ( IGN rotation cos, sin, IGN offset x, y )   [CPU-hoisted per frame, as RB_RHI_RtgiPass]
 //   --- R3a disocclusion boost (r_rtReStirDIBoost, docs/rtx-restir-di.md Plan R3) ---
-//   u_tessParms           = ( K picks (0 = off), boost-ON history (frames), boost-OFF history (frames),
+//   u_tessParms           = ( K picks (0 = off), boost-ON NRD history (<= 0: trigger off), HOLD frames,
 //                             LAST frame's checkerboard parity: 0 = off, 1 / 2 = parity, -1 = NO side data this frame )
 //   u_prevMvpMatrix       = LAST frame's world -> view (the expected previous view z of this surface point)
 //   unit 4  = LAST frame's denoised DI: .w = NRD's accumulated history length in frames (ReLAX always; ReBLUR with
@@ -102,7 +102,6 @@
 #if DI_BOOST
 // the young test + its inputs, shared with restir_di_young.frag
 #include "restir_di_boost.glsl"
-SAMPLER_BINDING(11) uniform sampler2D u_young;			// R3a: the young pass's per-pixel reason (R8: reason / 4), left-packed under checkerboard
 #endif
 
 VARY(0) in vec2 var_TexCoord;
@@ -231,15 +230,15 @@ void main() {
 	// (wakes, entry bands) keep whole warps alive together; speck-only warps terminate as one.
 	int boostWhy = 0;
 	{
-		ivec2 ysz = textureSize( u_young, 0 );
+		ivec2 ysz = textureSize( u_youngIn, 0 );							// the young pass's output for THIS frame ( reason / 4, age / 64 )
 		ivec2 yp  = clamp( ivec2( floor( frag ) ), ivec2( 0 ), ysz - 1 );			// the young pass is laid out exactly like this MRT
-		boostWhy = int( floor( texelFetch( u_young, yp, 0 ).x * 4.0 + 0.5 ) );
+		boostWhy = int( floor( texelFetch( u_youngIn, yp, 0 ).x * 4.0 + 0.5 ) );
 		if ( boostWhy != 0 ) {
 			int n = 0;
 			for ( int dy = -1; dy <= 1; dy++ ) {
 				for ( int dx = -1; dx <= 1; dx++ ) {
 					ivec2 q = clamp( yp + ivec2( dx, dy ), ivec2( 0 ), ysz - 1 );
-					if ( texelFetch( u_young, q, 0 ).x > 0.125 ) { n++; }
+					if ( texelFetch( u_youngIn, q, 0 ).x > 0.125 ) { n++; }
 				}
 			}
 			if ( n < 5 ) { boostWhy = 0; }
