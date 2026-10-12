@@ -10276,6 +10276,19 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 		// start): clear them here so the shared-NRD check in the DI pass never reads a stale frame's value
 		rhiRtgiDenoisedThisView = false;	rhiRtaoDenoisedThisView = false;
 		RB_RHI_ReStirDIPass( r, viewDef );			// on the world-only depth / normals / albedo / velocity
+		// State hygiene after the DI chain (weapon-dark hunt, 2026-10-12): the chain's target passes + compute
+		// dispatches ran in the middle of the view's prepasses, which the single-phase order never does. Forget every
+		// cached texture-unit bind (a direct bind the cache did not see makes a later cached bind skip - the unit then
+		// holds a DI target), re-apply the view's viewport + scissor and drop the RhiWorld scissor cache, so the deferred
+		// weapon phase and the light loop start from known state.
+		RB_RHI_ForgetTexBinds();
+		{
+			const int vw = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+			const int vh = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+			r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1, tr.viewportOffset[1] + viewDef->viewport.y1, vw, vh );
+			r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1, tr.viewportOffset[1] + viewDef->viewport.y1, vw, vh );
+			backEnd.currentScissor = viewDef->scissor;
+		}
 		r->GpuScopeBegin( "prepass (weapon)" );
 		if ( !mergedDepth ) {
 			if ( rhiPrepassWeaponDeferred ) {
