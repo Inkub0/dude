@@ -13,6 +13,14 @@
 // luminances is the lighting change. Output (RG16F): x = |L_prev - L_now|, y = max(L_prev, L_now), filtered by
 // restir_di_gradient_filter.frag and turned into IN_DIFF_CONFIDENCE by restir_di_gradient_conf.frag.
 //
+// TWO DIRECTIONS (RTXDI: "the brightest of the current or previous sample"): re-shading last frame's choice under this
+// frame's lights catches a light LEAVING a surface (its contribution drops to 0) but never a light ARRIVING (last
+// frame's choice there was some other, unchanged light) - the leading edge of a flashlight sweep, the lit footprint of a
+// light switching on, which is exactly where NRD's history is stale and bright-lags. So the pass also finds the
+// brightest light reaching the stratum's pixel NOW and shades it with its PREVIOUS-frame parameters (last frame's
+// buffer row, found through last frame's table) at the stored previous surface; whichever of the two samples is
+// brighter decides the stratum. Both directions use the current TLAS for visibility (no previous TLAS is kept).
+//
 // Shares the gather's uniform packing (restir_di.frag header) + units 0-3, plus:
 //   unit 4 = last frame's gather att1 ( viewZ, gradient luminance )           (RG16F, internal res, packed when cb)
 //   unit 5 = last frame's gather att2 ( NRD-packed world normal )
@@ -20,6 +28,8 @@
 //   unit 7 = this frame's velocity at the internal res (currUV - prevUV, +Y-up)
 //   u_shadowParms.xy  = lightDef -> current row table device address (bit-cast; row + 1, 0 = absent this frame)
 //   u_shadowParms.zw  = LAST frame's light-buffer slot device address (bit-cast; the ring keeps it alive)
+//   u_parallaxParms2.xy = LAST frame's lightDef -> row table device address (bit-cast): the CURRENT frame's brightest light
+//                       looked up in last frame's buffer (the second gradient direction, below)
 //   u_tessParms.x     = last frame's checkerboard parity (0 = off, 1 = even, 2 = odd): where a screen pixel's data sits
 //   u_tessParms.yz    = gradient resolution ( gw, gh )
 //   u_parallaxParms   = ( stratum size, internal rw, internal rh, 0 )
@@ -128,47 +138,84 @@ void main() {
 	}
 	if ( bestLum < 0.0 ) { return; }											// nothing reprojectable: no evidence either way
 
-	// 2. the same light in THIS frame's buffer: last frame's row -> lightDef -> this frame's row
 	uvec2 tableAddr = uvec2( floatBitsToUint( u_shadowParms.x ), floatBitsToUint( u_shadowParms.y ) );
 	uvec2 prevAddr  = uvec2( floatBitsToUint( u_shadowParms.z ), floatBitsToUint( u_shadowParms.w ) );
+	uvec2 prevTableAddr = uvec2( floatBitsToUint( u_parallaxParms2.x ), floatBitsToUint( u_parallaxParms2.y ) );
 	if ( ( tableAddr.x | tableAddr.y ) == 0u || ( prevAddr.x | prevAddr.y ) == 0u ) { return; }
+	RtLights lights     = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
 	RtLights prevLights = RtLights( prevAddr );
-	uint lightDefPlus1 = prevLights.l[ bestRow ].pad0;
-	float Lprev = bestLum;
-	float Lnow  = 0.0;
-	bool  present = false;
-	if ( lightDefPlus1 != 0u ) {
-		DiLightMap table = DiLightMap( tableAddr );
-		uint curRowPlus1 = table.row[ lightDefPlus1 - 1u ];
-		if ( curRowPlus1 != 0u ) {
-			uint curRow = curRowPlus1 - 1u;
-			RtLights lights = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
-			// 3. re-shade that light at the current surface, the gather's way (material included), + its visibility
-			DiSurface S; float raw; vec4 nt;
-			if ( diSurfaceAt( bestFrag, applyMode, pbr, S, raw, nt ) ) {
-				if ( bestStatic ) {
-					// static geometry: shade the EXACT stored point with its stored normal from last frame's camera position
-					// (the material comes from the current pixel = the same surface). Only the LIGHTS can differ now.
-					S.Pw = bestPrevP;
-					S.Nw = bestPrevN;
-					S.d  = -bestPrevVz;
-					if ( applyMode ) {
-						S.Vw    = normalize( u_projectionMatrix[3].xyz - S.Pw );
-						S.NdotV = max( dot( S.Nw, S.Vw ), 1e-4 );
-					}
+	DiLightMap table    = DiLightMap( tableAddr );
+	uint nLights = uint( u_color.z );
+
+	// the stratum's pixel, now (S) and as it was last frame (Sp: the exact stored point when static, else the same)
+	DiSurface S; float raw; vec4 nt;
+	if ( !diSurfaceAt( bestFrag, applyMode, pbr, S, raw, nt ) ) { return; }
+	DiSurface Sp = S;
+	if ( bestStatic ) {
+		// static geometry: the EXACT stored point with its stored normal from last frame's camera position (the material
+		// comes from the current pixel = the same surface). Only the LIGHTS can differ between the two shades.
+		Sp.Pw = bestPrevP;
+		Sp.Nw = bestPrevN;
+		Sp.d  = -bestPrevVz;
+		if ( applyMode ) {
+			Sp.Vw    = normalize( u_projectionMatrix[3].xyz - Sp.Pw );
+			Sp.NdotV = max( dot( Sp.Nw, Sp.Vw ), 1e-4 );
+		}
+	}
+
+	// 2. the second direction's candidate: the brightest light reaching this pixel NOW (unshadowed)
+	uint  curRow = 0u;
+	float curLum = -1.0;
+	vec3  curContrib = vec3( 0.0 ), curLdir = vec3( 0.0, 0.0, 1.0 );
+	float curDl = 0.0;
+	if ( ( prevTableAddr.x | prevTableAddr.y ) != 0u ) {
+		for ( uint li = 0u; li < nLights; li++ ) {
+			vec3 c, ld; float dl, ndl;
+			if ( !diShadeLight( lights, li, S, c, ld, dl, ndl ) ) { continue; }
+			float l = diGradientLuminance( c, S.B, 1.0 );
+			if ( l > curLum ) { curLum = l; curRow = li; curContrib = c; curLdir = ld; curDl = dl; }
+		}
+	}
+
+	float Lprev, Lnow;
+	float occDist;
+	if ( curLum > bestLum ) {
+		// 3a. CURRENT sample, shaded in the previous frame: this light's previous-frame row (position / colour / cookie
+		// planes as they were) at the previous surface. Absent last frame (switched on) -> 0 -> a 100% change.
+		Lnow = diGradientLuminance( curContrib, S.B,
+			( ( lights.l[ curRow ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( S.Pw, S.Nw, curLdir, curDl, occDist ) );
+		Lprev = 0.0;
+		uint defPlus1 = lights.l[ curRow ].pad0;
+		if ( defPlus1 != 0u ) {
+			DiLightMap prevTable = DiLightMap( prevTableAddr );
+			uint prevRowPlus1 = prevTable.row[ defPlus1 - 1u ];
+			if ( prevRowPlus1 != 0u ) {
+				vec3 c, ld; float dl, ndl;
+				if ( diShadeLight( prevLights, prevRowPlus1 - 1u, Sp, c, ld, dl, ndl ) ) {
+					float vis = ( ( prevLights.l[ prevRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
+						? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, occDist );
+					Lprev = diGradientLuminance( c, Sp.B, vis );
 				}
-				vec3 contrib, ldir; float dl, ndl;
-				present = true;												// the light exists; it may simply not reach any more (L_now = 0)
-				if ( diShadeLight( lights, curRow, S, contrib, ldir, dl, ndl ) ) {
-					float occDist;
-					float vis = ( ( lights.l[ curRow ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
-						? 1.0 : traceVisibility( S.Pw, S.Nw, ldir, dl, occDist );
-					Lnow = diGradientLuminance( contrib, S.B, vis );
+			}
+		}
+	} else {
+		// 3b. PREVIOUS sample, shaded now: last frame's row -> lightDef -> this frame's row, re-shaded at the (exact when
+		// static) previous surface under THIS frame's lights. Gone from DI (switched off, culled, moved to the forward
+		// path) -> 0 -> a 100% change.
+		Lprev = bestLum;
+		Lnow  = 0.0;
+		uint lightDefPlus1 = prevLights.l[ bestRow ].pad0;
+		if ( lightDefPlus1 != 0u ) {
+			uint curRowPlus1 = table.row[ lightDefPlus1 - 1u ];
+			if ( curRowPlus1 != 0u ) {
+				vec3 c, ld; float dl, ndl;
+				if ( diShadeLight( lights, curRowPlus1 - 1u, Sp, c, ld, dl, ndl ) ) {
+					float vis = ( ( lights.l[ curRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
+						? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, occDist );
+					Lnow = diGradientLuminance( c, Sp.B, vis );
 				}
 			}
 		}
 	}
-	// a light that vanished from DI (switched off, culled, moved to the forward path) is a 100% change (RTXDI)
-	if ( !present ) { Lnow = 0.0; }
 	fragColor = vec4( abs( Lprev - Lnow ), max( Lprev, Lnow ), 0.0, 1.0 );
 }

@@ -8166,6 +8166,11 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				memcpy( &gp.shadowParms[0], &mapLo, sizeof( mapLo ) );	memcpy( &gp.shadowParms[1], &mapHi, sizeof( mapHi ) );
 				memcpy( &gp.shadowParms[2], &prvLo, sizeof( prvLo ) );	memcpy( &gp.shadowParms[3], &prvHi, sizeof( prvHi ) );
 				gp.tessParms[0] = rhiReStirDIPrevCb;
+				{	// last frame's lightDef -> row table (the second gradient direction looks the current light up in it)
+					const unsigned long long prevMap = s_diLightMapSlotAddr[ prevSlot ];
+					const unsigned int pmLo = (unsigned int)( prevMap & 0xFFFFFFFFull ), pmHi = (unsigned int)( prevMap >> 32 );
+					memcpy( &gp.parallaxParms2[0], &pmLo, sizeof( pmLo ) );	memcpy( &gp.parallaxParms2[1], &pmHi, sizeof( pmHi ) );
+				}
 				gp.tessParms[1] = (float)gw;	gp.tessParms[2] = (float)gh;
 				gp.parallaxParms[0] = (float)stratum;	gp.parallaxParms[1] = (float)rw;	gp.parallaxParms[2] = (float)rh;
 				gp.parallaxParms[3] = r_rtReStirDIGradientStatic.GetFloat();		// static threshold, full-res pixels

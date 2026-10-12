@@ -148,7 +148,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIGradientHistory` | 2 | **R1** rise-only temporal smoothing (frames); 8 is the reservoir-reuse value, not ours. |
 | `r_rtReStirDIGradientFloor` | 0.1 | **R1** minimum confidence; ReBLUR raises it to historyFix / history. |
 | `r_rtReStirDIGradientBias` | 0.001 | **R1** darkness bias in the change's denominator. |
-| `r_rtReStirDIGradientDeadzone` | 0.1 | **R1** relative per-light change below which nothing counts (authored flicker). |
+| `r_rtReStirDIGradientDeadzone` | 0.2 | **R1** relative per-light change below which nothing counts (authored flicker). |
 | `r_rtReStirDIGradientStatic` | 2.0 | **R1** static threshold (full-res px) for the exact previous-position re-shade. |
 | `r_rtReStirDIGradientStratum` | 3 | **R1** NxN stratum (3 = RTXDI 1/9; 5 = NRD's 1/5 res, ~1/3 the cost). |
 
@@ -683,6 +683,14 @@ frames) exists so REUSED reservoirs can stabilize; our gather is fresh every fra
 defaults to 2 - the half-second drop and the mover trail in view 5 were this hold. Cost measured 0.351 ms grad + 0.043
 filter (+ conf) at 1440p x 0.75, above the estimate because the 1/9-res visibility ray dominates; `r_rtReStirDIGradientStratum`
 (3) lets a 4 or 5 (NRD: 1/5 res suffices) cut it to ~0.2 / ~0.13 ms.
+**Second user test (2026-10-12):** view 5 white when static except under blinking lights (correct: those are real changes);
+dead zone 0.2 is the sweet spot (default). But the flashlight sweep showed its circle in view 6 and NO blob in view 5 - and the
+circle was only the TRAILING edge: a gradient that re-shades last frame's choice detects a light LEAVING a surface, never one
+ARRIVING (last frame's choice there was another, unchanged light). The leading edge is the bright-lag half of the flashlight
+problem. Fixed the RTXDI way ("brightest of the current or previous sample"): the pass also finds the brightest light reaching
+the stratum pixel NOW and shades it with its PREVIOUS-frame row (through last frame's table, `u_parallaxParms2.xy`) at the
+stored previous surface; the brighter of the two samples decides. Costs one exhaustive unshadowed light loop per stratum
+(~1/9 of the gather's), no extra ray.
 Cvars: `r_rtReStirDIGradient` 0 (the A/B switch), `r_rtReStirDIGradientPower` 8, `r_rtReStirDIGradientHistory` 8,
 `r_rtReStirDIGradientFloor` 0.1, `r_rtReStirDIGradientBias` 0.001. Debug: `r_rtReStirDIDebug 5` = the confidence (grey),
 `6` = the filtered gradient (red |change|, green magnitude). New GPU scopes `restir.di.grad / gradfilter / gradconf`.
