@@ -798,6 +798,16 @@ the SAME light (slot + serial) in both frames, both luminances are the gather's 
 no ray, exact in both directions. Only a changed identity re-shades the winning frame's light in the other frame (one ray).
 The per-stratum exhaustive light loop is gone. `r_rtReStirDIGradientFilterPasses` default 4 -> 2 (user: the NPC shadow edge
 improved). Remaining softness INSIDE a moving shadow = one sample per pixel after a correct reset -> R3.
+**Rev. 3 (2026-10-12, user: trail unchanged, with checkerboard off too; view 4 shows the trail as SHORT history):** so the trail
+is a region that WAS reset (the body's disocclusion wake) whose first samples were taken in the NPC's shadow, then the shadow
+moved on and the brightening was never flagged, so the dark young history decayed over the full window. Two reasons rev.2 could
+not flag it: (1) TIES - a pixel lit in both frames scores the same brightness as one that just brightened and wins on loop
+order; now a pixel whose SAME light (slot + serial) changed by more than the dead zone is direct evidence and wins the stratum
+outright, brightness only ranks the rest. (2) CHECKERBOARD - a pixel is traced on alternate frames, so it never had both
+values; the gradient now compares it with its own last traced frame, TWO back: two side-data sets (half width under
+checkerboard, stamped with the frame they hold), the world->view of two frames ago, the light buffer / table of two frames ago
+(the 3-slot ring keeps them), velocity x2 as the reprojection (constant-velocity guess, guarded by the same-surface test).
+Without checkerboard the compare stays one frame back. The geometric wake's own refill length remains R3's job.
 Files: `VulkanBackend.cpp` (`NrdCreate` denoiser table: `NRD_ID_RELAX_DI = RELAX_DIFFUSE`, `NRD_ID_RELAX_DI_SH =
 RELAX_DIFFUSE_SH`; `RtaoDenoise`: a `denoiser` arg, `nrd::RelaxSettings` path), `restir_di.frag` + `restir_di_apply.frag` +
 `restir_di_debug.frag` (encoding switch), `RhiWorld.cpp` (the arg + cvar), ImGui dropdown.

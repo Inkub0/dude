@@ -516,8 +516,15 @@ static bool  rhiReStirDIGradConfValid = false;		// rhiReStirDIGradConfRT[idx ^ 1
 static rhi::ImageHandle rhiReStirDIGradConfThisView = 0;	// the confidence fed to NRD this view (debug view 5)
 static rhi::ImageHandle rhiReStirDIGradThisView = 0;		// the filtered gradient this view (debug view 6)
 static bool  rhiReStirDIGatherPrevValid = false;	// the gather MRT holds last frame's side data at the current rw x rh
-static rhi::RenderTargetHandle rhiReStirDIPrevSideRT[3] = { 0, 0, 0 };	// R1 rev.2: copies of last frame's gather att1 (RG16F) / att2 / att3 (RGBA16F), made before the gather
+// R1 rev.2/3: copies of a frame's gather side data (att1 RG16F viewZ+lum / att2 normal / att3 SH1+row), made before the
+// gather overwrites the MRT. Two sets: under checkerboard a pixel is traced on alternate frames, so the gradient compares
+// it with its own last traced frame, TWO back - set[(N-1)&1] receives frame N-1, set[N&1] still holds frame N-2. Half width
+// under checkerboard (only the packed left half carries data). Each set is stamped with the frame whose data it holds.
+static rhi::RenderTargetHandle rhiReStirDIPrevSideRT[2][3] = { { 0, 0, 0 }, { 0, 0, 0 } };
+static int   rhiReStirDIPrevSideFrame[2] = { -1, -1 };
 static int   rhiReStirDIPrevSideW = 0, rhiReStirDIPrevSideH = 0;
+static float rhiReStirDIPrev2View[16];				// world -> view TWO frames back (the checkerboard compare)
+static bool  rhiReStirDIPrev2Valid = false;
 static float rhiReStirDIPrevCb = 0.0f;				// last frame's checkerboard parity (0 off / 1 / 2): where a pixel's data sits
 #define DI_LIGHTMAP_MAX		4096					// lightDef -> row table capacity (uints per ring slot)
 static rhi::BufferHandle	s_diLightMapBuf = 0;
@@ -4035,7 +4042,9 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiReStirDIGradRT[0] = rhiReStirDIGradRT[1] = 0;	rhiReStirDIGradW = rhiReStirDIGradH = 0;	// R1
 	rhiReStirDIGradConfRT[0] = rhiReStirDIGradConfRT[1] = 0;	rhiReStirDIGradConfW = rhiReStirDIGradConfH = 0;
 	rhiReStirDIGradConfValid = false;	rhiReStirDIGatherPrevValid = false;
-	rhiReStirDIPrevSideRT[0] = rhiReStirDIPrevSideRT[1] = rhiReStirDIPrevSideRT[2] = 0;	rhiReStirDIPrevSideW = rhiReStirDIPrevSideH = 0;
+	for ( int k = 0; k < 3; k++ ) { rhiReStirDIPrevSideRT[0][k] = rhiReStirDIPrevSideRT[1][k] = 0; }
+	rhiReStirDIPrevSideFrame[0] = rhiReStirDIPrevSideFrame[1] = -1;	rhiReStirDIPrevSideW = rhiReStirDIPrevSideH = 0;
+	rhiReStirDIPrev2Valid = false;
 	s_diLightMapBuf = 0;	s_diLightMapAddr = 0;
 	s_sceneLightSlotFrame[0] = s_sceneLightSlotFrame[1] = s_sceneLightSlotFrame[2] = -1;
 	rhiRtaoVelRT = 0;			rhiRtaoVelW = rhiRtaoVelH = 0;
@@ -8128,38 +8137,52 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const bool diCut = RB_RHI_NrdHistoryReset( viewDef );
 
 
-	// ---- R1 rev.2: keep last frame's side data (att1 viewZ+lum / att2 normal / att3 SH1+row) across the gather, so the
-	// gradient pass can run AFTER it and see BOTH frames' picks (RTXDI: the brightest sample of either frame). Three
-	// plain copies at the gather res; only when the gradient will run. ----
+	// ---- R1 rev.2/3: keep the gather's side data (att1 viewZ+lum / att2 normal / att3 SH1+row) across the gather, so the
+	// gradient pass can run AFTER it and see BOTH frames' picks. The MRT holds frame N-1's data now: copy it into side set
+	// [(N-1)&1]; set [N&1] keeps frame N-2 - the frame a checkerboard pixel was last traced in (parity alternates per frame),
+	// which is the one the gradient compares against under checkerboard. Half-width copies under checkerboard (packed left). ----
 	const float diPrevCb = rhiReStirDIPrevCb;
+	const int   diCmpBack = cbActive ? 2 : 1;						// frames back to the compared frame
 	bool diPrevSideValid = false;
 	if ( r_rtReStirDIGradient.GetBool() && rhiReStirDIGatherPrevValid && nrdVel != 0 && nrdFree && !diCut ) {
-		for ( int k = 0; k < 3; k++ ) {
-			if ( rhiReStirDIPrevSideRT[k] && r->GetRenderTargetImage( rhiReStirDIPrevSideRT[k] ) == 0 ) { rhiReStirDIPrevSideRT[k] = 0; }
+		const int sideW = cbActive ? rw / 2 : rw;
+		for ( int j = 0; j < 2; j++ ) for ( int k = 0; k < 3; k++ ) {
+			if ( rhiReStirDIPrevSideRT[j][k] && r->GetRenderTargetImage( rhiReStirDIPrevSideRT[j][k] ) == 0 ) { rhiReStirDIPrevSideRT[j][k] = 0; rhiReStirDIPrevSideFrame[j] = -1; }
 		}
-		if ( rhiReStirDIPrevSideW != rw || rhiReStirDIPrevSideH != rh ) {
-			for ( int k = 0; k < 3; k++ ) { if ( rhiReStirDIPrevSideRT[k] ) { r->DestroyRenderTarget( rhiReStirDIPrevSideRT[k] ); rhiReStirDIPrevSideRT[k] = 0; } }
+		if ( rhiReStirDIPrevSideW != sideW || rhiReStirDIPrevSideH != rh ) {
+			for ( int j = 0; j < 2; j++ ) for ( int k = 0; k < 3; k++ ) { if ( rhiReStirDIPrevSideRT[j][k] ) { r->DestroyRenderTarget( rhiReStirDIPrevSideRT[j][k] ); rhiReStirDIPrevSideRT[j][k] = 0; } }
+			rhiReStirDIPrevSideFrame[0] = rhiReStirDIPrevSideFrame[1] = -1;
 			rhiReStirDIPrevSideW = rhiReStirDIPrevSideH = 0;
 		}
-		if ( !rhiReStirDIPrevSideRT[0] ) { rhiReStirDIPrevSideRT[0] = r->CreateRenderTarget( rhi::IF_RG16F,   rw, rh ); }
-		if ( !rhiReStirDIPrevSideRT[1] ) { rhiReStirDIPrevSideRT[1] = r->CreateRenderTarget( rhi::IF_RGBA16F, rw, rh ); }
-		if ( !rhiReStirDIPrevSideRT[2] ) { rhiReStirDIPrevSideRT[2] = r->CreateRenderTarget( rhi::IF_RGBA16F, rw, rh ); }
-		rhi::ShaderHandle copyProg = ( rhiReStirDIPrevSideRT[0] && rhiReStirDIPrevSideRT[1] && rhiReStirDIPrevSideRT[2] ) ? r->LoadShader( "smaa_copy" ) : 0;
+		bool ok = true;
+		for ( int j = 0; j < 2; j++ ) {
+			if ( !rhiReStirDIPrevSideRT[j][0] ) { rhiReStirDIPrevSideRT[j][0] = r->CreateRenderTarget( rhi::IF_RG16F,   sideW, rh ); }
+			if ( !rhiReStirDIPrevSideRT[j][1] ) { rhiReStirDIPrevSideRT[j][1] = r->CreateRenderTarget( rhi::IF_RGBA16F, sideW, rh ); }
+			if ( !rhiReStirDIPrevSideRT[j][2] ) { rhiReStirDIPrevSideRT[j][2] = r->CreateRenderTarget( rhi::IF_RGBA16F, sideW, rh ); }
+			ok = ok && rhiReStirDIPrevSideRT[j][0] && rhiReStirDIPrevSideRT[j][1] && rhiReStirDIPrevSideRT[j][2];
+		}
+		rhi::ShaderHandle copyProg = ok ? r->LoadShader( "smaa_copy" ) : 0;
 		if ( copyProg != 0 ) {
-			rhiReStirDIPrevSideW = rw;	rhiReStirDIPrevSideH = rh;
+			rhiReStirDIPrevSideW = sideW;	rhiReStirDIPrevSideH = rh;
+			const int wr = ( tr.frameCount - 1 ) & 1;						// this set receives frame N-1 (what the MRT holds now)
 			rhi::RenderParams cp;
 			memset( &cp, 0, sizeof( cp ) );
 			cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
-			cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
+			cp.screenCorrection[0] = cbActive ? 0.5f : 1.0f;				// half-width target <- the packed left half (texel-exact)
+			cp.screenCorrection[1] = 1.0f;
 			const rhi::ImageHandle srcs[3] = { r->GetRenderTargetImage2( rhiReStirDIRT ), r->GetRenderTargetImage3( rhiReStirDIRT ), r->GetRenderTargetImage4( rhiReStirDIRT ) };
 			r->GpuScopeBegin( "restir.di.sidecopy" );	// r_vkGpuTime 2: last frame's side data kept for the gradient
 			for ( int k = 0; k < 3; k++ ) {
-				r->BeginTargetPass( rhiReStirDIPrevSideRT[k], NULL );
+				r->BeginTargetPass( rhiReStirDIPrevSideRT[wr][k], NULL );
 				RB_RHI_DrawFullscreen( r, copyProg, cp, srcs[k] );
 				r->EndPass();
 			}
 			r->GpuScopeEnd();
-			diPrevSideValid = true;
+			rhiReStirDIPrevSideFrame[wr] = tr.frameCount - 1;
+			// the compared set must hold exactly frame N - cmpBack (a skipped frame, a resize, a layout flip invalidate it)
+			const int rd = ( tr.frameCount - diCmpBack ) & 1;
+			diPrevSideValid = rhiReStirDIPrevSideFrame[rd] == tr.frameCount - diCmpBack
+				&& ( diCmpBack == 1 ? rhiReStirDIPrevValid : rhiReStirDIPrev2Valid );
 		}
 	}
 
@@ -8202,8 +8225,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiReStirDIGradConfThisView = 0;
 	rhiReStirDIGradThisView = 0;
 	{
-		const int prevSlot = ( (int)( ( tr.frameCount + RT_REFL_LIGHT_SLOTS - 1 ) % RT_REFL_LIGHT_SLOTS ) );
-		const bool prevLightsValid = s_sceneLightSlotFrame[ prevSlot ] == tr.frameCount - 1 && s_sceneLightSlotAddr[ prevSlot ] != 0;
+		const int prevSlot = ( (int)( ( tr.frameCount + RT_REFL_LIGHT_SLOTS - diCmpBack ) % RT_REFL_LIGHT_SLOTS ) );	// the compared frame's light buffer (ring: still alive)
+		const bool prevLightsValid = s_sceneLightSlotFrame[ prevSlot ] == tr.frameCount - diCmpBack && s_sceneLightSlotAddr[ prevSlot ] != 0;
 		const int curSlot = (int)( tr.frameCount % RT_REFL_LIGHT_SLOTS );
 		const unsigned long long mapAddr = ( s_sceneLightSlotFrame[ curSlot ] == tr.frameCount ) ? s_diLightMapSlotAddr[ curSlot ] : 0;
 		const bool gradOn = diPrevSideValid && rhiReStirDIPrevValid && prevLightsValid && mapAddr != 0;
@@ -8241,8 +8264,11 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				const unsigned int prvLo = (unsigned int)( prevAddr & 0xFFFFFFFFull ), prvHi = (unsigned int)( prevAddr >> 32 );
 				memcpy( &gp.shadowParms[0], &mapLo, sizeof( mapLo ) );	memcpy( &gp.shadowParms[1], &mapHi, sizeof( mapHi ) );
 				memcpy( &gp.shadowParms[2], &prvLo, sizeof( prvLo ) );	memcpy( &gp.shadowParms[3], &prvHi, sizeof( prvHi ) );
-				gp.tessParms[0] = diPrevCb;
+				gp.tessParms[0] = ( diCmpBack == 2 ) ? cbParity : diPrevCb;	// the compared frame's parity (two back = this frame's)
+				gp.tessParms[1] = (float)diCmpBack;
+				gp.tessParms[2] = idMath::ClampFloat( 0.0f, 0.9f, r_rtReStirDIGradientDeadzone.GetFloat() );
 				gp.tessParms[3] = cbParity;				// this frame's parity (where this frame's picks sit)
+				gp.parallaxParms2[2] = r_rtReStirDIGradientBias.GetFloat();
 				{	// last frame's lightDef -> row table (the second gradient direction looks the current light up in it)
 					const unsigned long long prevMap = s_diLightMapSlotAddr[ prevSlot ];
 					const unsigned int pmLo = (unsigned int)( prevMap & 0xFFFFFFFFull ), pmHi = (unsigned int)( prevMap >> 32 );
@@ -8251,9 +8277,10 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				gp.tessParms[1] = (float)gw;	gp.tessParms[2] = (float)gh;
 				gp.parallaxParms[0] = (float)stratum;	gp.parallaxParms[1] = (float)rw;	gp.parallaxParms[2] = (float)rh;
 				gp.parallaxParms[3] = r_rtReStirDIGradientStatic.GetFloat();		// static threshold, full-res pixels
-				memcpy( gp.prevMvpMatrix, rhiReStirDIPrevView, sizeof( gp.prevMvpMatrix ) );	// last frame's world -> view
+				const float *cmpView = ( diCmpBack == 2 ) ? rhiReStirDIPrev2View : rhiReStirDIPrevView;	// the compared frame's world -> view
+				memcpy( gp.prevMvpMatrix, cmpView, sizeof( gp.prevMvpMatrix ) );
 				float prevInvView[16];
-				if ( !RB_RHI_InvertMatrix( rhiReStirDIPrevView, prevInvView ) ) { memcpy( prevInvView, invView, sizeof( prevInvView ) ); }
+				if ( !RB_RHI_InvertMatrix( cmpView, prevInvView ) ) { memcpy( prevInvView, invView, sizeof( prevInvView ) ); }
 				memcpy( gp.projectionMatrix, prevInvView, sizeof( gp.projectionMatrix ) );	// last frame's view -> world (exact static re-shade)
 				r->GpuScopeBegin( "restir.di.grad" );		// r_vkGpuTime 2: 1/9-res re-shade of last frame's light + 1 ray
 				r->BeginTargetPass( rhiReStirDIGradRT[0], NULL );
@@ -8264,10 +8291,11 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				else { RB_RHI_BindUnit( 2, globalImages->whiteImage ); RB_RHI_BindUnit( 3, globalImages->whiteImage ); }
 				backEnd.glState.tmu[2].current2DMap = -1;	backEnd.glState.tmu[3].current2DMap = -1;
 				RB_RHI_BindRTImage( r, 4, r->GetRenderTargetImage2( rhiReStirDIRT ) );		// THIS frame's ( viewZ, lum )
-				RB_RHI_BindRTImage( r, 5, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[0] ) );	// last frame's ( viewZ, lum )
-				RB_RHI_BindRTImage( r, 6, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[1] ) );	// last frame's packed normal
+				const int rd = ( tr.frameCount - diCmpBack ) & 1;				// the compared frame's side set
+				RB_RHI_BindRTImage( r, 5, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[rd][0] ) );	// compared frame's ( viewZ, lum )
+				RB_RHI_BindRTImage( r, 6, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[rd][1] ) );	// compared frame's packed normal
 				RB_RHI_BindRTImage( r, 7, nrdVel );
-				RB_RHI_BindRTImage( r, 8, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[2] ) );	// last frame's ( SH1, row + 1 )
+				RB_RHI_BindRTImage( r, 8, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[rd][2] ) );	// compared frame's ( SH1, row + 1 )
 				RB_RHI_BindRTImage( r, 9, r->GetRenderTargetImage4( rhiReStirDIRT ) );		// THIS frame's ( SH1, row + 1 )
 				RB_RHI_DrawFullscreen( r, gradProg, gp, 0 );
 				r->EndPass();
@@ -8462,6 +8490,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// stage this frame's camera for next frame's DI reprojection (un-jittered, as passed). PrevValid tracks
 	// whether DI specifically denoised this frame: if it did not (slot taken, or no velocity), next frame resets
 	// so we never reproject against another signal's (GI's) output left in the shared slot.
+	memcpy( rhiReStirDIPrev2View, rhiReStirDIPrevView, sizeof( rhiReStirDIPrev2View ) );	// R1 rev.3: two frames back (checkerboard compare)
+	rhiReStirDIPrev2Valid = rhiReStirDIPrevValid;
 	memcpy( rhiReStirDIPrevProj, viewDef->unjitteredProjectionMatrix, sizeof( rhiReStirDIPrevProj ) );
 	memcpy( rhiReStirDIPrevView, viewDef->worldSpace.modelViewMatrix, sizeof( rhiReStirDIPrevView ) );
 	rhiReStirDIPrevJitter[0] = viewDef->jitter[0];

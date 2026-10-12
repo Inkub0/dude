@@ -38,7 +38,13 @@
 //   u_shadowParms.zw  = LAST frame's light-buffer slot device address (bit-cast; the ring keeps it alive)
 //   u_parallaxParms2.xy = LAST frame's lightDef -> row table device address (bit-cast): the CURRENT frame's brightest light
 //                       looked up in last frame's buffer (the second gradient direction, below)
-//   u_tessParms.x     = last frame's checkerboard parity (0 = off, 1 = even, 2 = odd): where a screen pixel's data sits
+//   u_tessParms.x     = the COMPARED frame's checkerboard parity (0 = off, 1 = even, 2 = odd): where its pixels' data sits
+//   u_tessParms.y     = frames back to the compared frame: 1, or 2 under checkerboard (rev.3: a pixel is traced on alternate
+//                       frames, so its own last traced frame is two back - the one-frame compare never had both values)
+//   u_tessParms.z     = dead zone (selection): a pixel whose SAME light changed by more than this fraction is direct evidence
+//                       of a lighting change and wins the stratum outright (rev.3: brightness ranking let a pixel lit in both
+//                       frames tie with, and beat on loop order, the one that just brightened - the trailing edge was missed)
+//   u_parallaxParms2.z = darkness bias (the same the confidence pass uses)
 //   u_tessParms.yz    = gradient resolution ( gw, gh )
 //   u_parallaxParms   = ( stratum size, internal rw, internal rh, 0 )
 //   u_prevMvpMatrix   = LAST frame's world -> view matrix (the expected previous view z of a current surface point)
@@ -90,12 +96,24 @@ void main() {
 	const ivec2 res     = ivec2( int( u_parallaxParms.y + 0.5 ), int( u_parallaxParms.z + 0.5 ) );
 	const int   prevCb  = int( u_tessParms.x + 0.5 );
 	const int   curCb   = int( u_tessParms.w + 0.5 );
+	const float framesBack = max( u_tessParms.y, 1.0 );
+	const float selDz   = u_tessParms.z;
+	const float selBias = u_parallaxParms2.z;
 	const bool  applyMode = u_localParam1.w > 0.5;
 	const bool  pbr       = u_localParam1.y > 0.5;
 	const float staticPx  = u_parallaxParms.w;
 	ivec2 base = ivec2( gl_FragCoord.xy ) * stratum;
 
-	// 1. the brightest sample of EITHER frame among the stratum's pixels that have a valid temporal position
+	uvec2 tableAddr = uvec2( floatBitsToUint( u_shadowParms.x ), floatBitsToUint( u_shadowParms.y ) );
+	uvec2 prevAddr  = uvec2( floatBitsToUint( u_shadowParms.z ), floatBitsToUint( u_shadowParms.w ) );
+	uvec2 prevTableAddr = uvec2( floatBitsToUint( u_parallaxParms2.x ), floatBitsToUint( u_parallaxParms2.y ) );
+	if ( ( tableAddr.x | tableAddr.y ) == 0u || ( prevAddr.x | prevAddr.y ) == 0u ) { return; }
+	RtLights lights     = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
+	RtLights prevLights = RtLights( prevAddr );
+
+	// 1. the stratum's sample: a pixel whose SAME light visibly changed (direct evidence) beats everything; otherwise the
+	// brightest sample of EITHER frame (RTXDI). Only pixels with a valid temporal position (the compared frame's surface
+	// is the same surface) take part.
 	float bestScore = -1.0;
 	bool  bestIsCur = false;
 	float bestPrevLum = 0.0, bestCurLum = 0.0;
@@ -133,7 +151,7 @@ void main() {
 			vec2 uvc = sfrag * u_screenCorrection.xy;
 			vec2 vel = texture( u_velocity, uvc ).rg;
 			vel.y = ( u_windowCoord.z < 0.0 ) ? -vel.y : vel.y;
-			vec2 prevUV = uvc - vel;
+			vec2 prevUV = uvc - vel * framesBack;								// two frames back under checkerboard (constant-velocity guess)
 			if ( any( lessThan( prevUV, vec2( 0.0 ) ) ) || any( greaterThanEqual( prevUV, vec2( 1.0 ) ) ) ) { continue; }
 			ivec2 prevPix = ivec2( floor( prevUV * vec2( res ) ) );
 			ivec2 readPix = prevPix;
@@ -150,7 +168,15 @@ void main() {
 			uint  prevRowPlus1 = uint( pside.w + 0.5 );
 			float prevLum = ( prevRowPlus1 != 0u ) ? pvz.y : 0.0;			// a valid surface with no light last frame counts as dark
 
+			// direct evidence: the same light (slot + serial) picked in both frames, and its visible value changed
 			float score = max( prevLum, max( curLum, 0.0 ) );
+			if ( prevRowPlus1 != 0u && curRowPlus1 != 0u && curLum >= 0.0 ) {
+				if ( lights.l[ curRowPlus1 - 1u ].pad0 == prevLights.l[ prevRowPlus1 - 1u ].pad0
+						&& lights.l[ curRowPlus1 - 1u ].pad1 == prevLights.l[ prevRowPlus1 - 1u ].pad1 ) {
+					float rel = abs( curLum - prevLum ) / ( max( curLum, prevLum ) + selBias );
+					if ( rel > selDz ) { score = 1.0e6 + rel; }
+				}
+			}
 			if ( score > bestScore ) {
 				// the stored sample's world position: last frame's SCREEN pixel centre at its stored view z through last
 				// frame's inverse view (the same reconstruction the gather used, so a static point lands exactly)
@@ -173,13 +199,6 @@ void main() {
 		}
 	}
 	if ( bestScore < 0.0 ) { return; }											// nothing reprojectable: no evidence either way
-
-	uvec2 tableAddr = uvec2( floatBitsToUint( u_shadowParms.x ), floatBitsToUint( u_shadowParms.y ) );
-	uvec2 prevAddr  = uvec2( floatBitsToUint( u_shadowParms.z ), floatBitsToUint( u_shadowParms.w ) );
-	uvec2 prevTableAddr = uvec2( floatBitsToUint( u_parallaxParms2.x ), floatBitsToUint( u_parallaxParms2.y ) );
-	if ( ( tableAddr.x | tableAddr.y ) == 0u || ( prevAddr.x | prevAddr.y ) == 0u ) { return; }
-	RtLights lights     = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
-	RtLights prevLights = RtLights( prevAddr );
 
 	// the same light in both frames? (slot AND creation serial: a freed slot is reused at once)
 	bool sameLight = false;
