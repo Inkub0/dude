@@ -512,6 +512,8 @@ static int   rhiReStirDIGradW = 0, rhiReStirDIGradH = 0;
 static rhi::RenderTargetHandle rhiReStirDIGradConfRT[2] = { 0, 0 };	// R16F confidence at rw x rh
 static int   rhiReStirDIGradConfW = 0, rhiReStirDIGradConfH = 0;
 static int   rhiReStirDIGradConfIdx = 0;
+static rhi::RenderTargetHandle rhiReStirDIYoungRT = 0;	// R3a: per-pixel young reason (R8, gather layout) for the clustered boost pass
+static int   rhiReStirDIYoungW = 0, rhiReStirDIYoungH = 0;
 static bool  rhiReStirDIGradConfValid = false;		// rhiReStirDIGradConfRT[idx ^ 1] holds last frame's confidence
 static rhi::ImageHandle rhiReStirDIGradConfThisView = 0;	// the confidence fed to NRD this view (debug view 5)
 static rhi::ImageHandle rhiReStirDIGradThisView = 0;		// the filtered gradient this view (debug view 6)
@@ -4037,6 +4039,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiReStirDIGradConfRT[0] = rhiReStirDIGradConfRT[1] = 0;	rhiReStirDIGradConfW = rhiReStirDIGradConfH = 0;
 	rhiReStirDIGradConfValid = false;	rhiReStirDIGatherPrevValid = false;
 	rhiReStirDIPrevSideRT[0] = rhiReStirDIPrevSideRT[1] = rhiReStirDIPrevSideRT[2] = 0;	rhiReStirDIPrevSideW = rhiReStirDIPrevSideH = 0;
+	rhiReStirDIYoungRT = 0;	rhiReStirDIYoungW = rhiReStirDIYoungH = 0;
 	s_diLightMapBuf = 0;	s_diLightMapAddr = 0;
 	s_sceneLightSlotFrame[0] = s_sceneLightSlotFrame[1] = s_sceneLightSlotFrame[2] = -1;
 	rhiRtaoVelRT = 0;			rhiRtaoVelW = rhiRtaoVelH = 0;
@@ -8161,7 +8164,19 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// the boost is a compiled VARIANT of the gather (restir_di_boost.frag): its K-pick arrays cost the plain gather ~0.7 ms
 	// of occupancy even with nothing boosted, so the plain program carries none of it
 	const rhi::ShaderHandle boostProg = ( boostK > 0 ) ? r->LoadShader( "restir_di_boost" ) : 0;
-	const bool boostWant = boostK > 0 && boostProg != 0 && nrdVel != 0 && nrdFree;
+	const rhi::ShaderHandle youngProg = ( boostK > 0 ) ? r->LoadShader( "restir_di_young" ) : 0;
+	// the per-pixel young reason (R8, gather layout) the boost pass reads back clustered (3x3 majority)
+	if ( boostK > 0 && youngProg != 0 ) {
+		if ( rhiReStirDIYoungRT && ( r->GetRenderTargetImage( rhiReStirDIYoungRT ) == 0 || rhiReStirDIYoungW != rw || rhiReStirDIYoungH != rh ) ) {
+			if ( r->GetRenderTargetImage( rhiReStirDIYoungRT ) != 0 ) { r->DestroyRenderTarget( rhiReStirDIYoungRT ); }
+			rhiReStirDIYoungRT = 0;	rhiReStirDIYoungW = rhiReStirDIYoungH = 0;
+		}
+		if ( !rhiReStirDIYoungRT ) {
+			rhiReStirDIYoungRT = r->CreateRenderTarget( rhi::IF_RGBA8, rw, rh );
+			if ( rhiReStirDIYoungRT ) { rhiReStirDIYoungW = rw;	rhiReStirDIYoungH = rh; }
+		}
+	}
+	const bool boostWant = boostK > 0 && boostProg != 0 && youngProg != 0 && rhiReStirDIYoungRT != 0 && nrdVel != 0 && nrdFree;
 
 	// ---- R1 rev.2: keep last frame's side data (att1 viewZ+lum / att2 normal / att3 SH1+row) across the gather, so the
 	// gradient pass can run AFTER it and see BOTH frames' picks (RTXDI: the brightest sample of either frame). Three
@@ -8254,13 +8269,23 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->EndPass();
 	r->GpuScopeEnd();
 	if ( boostWant ) {
-		// R3a: a second pass over the same targets with the boost program - only the young pixels survive its discard and
-		// overwrite their attachments with the K-pick average (identical guides); the plain gather above carries no boost
-		// code, so its cost is the same with the boost on or off. Same units (still bound), same uniforms, same area.
-		r->GpuScopeBegin( "restir.di.boost" );		// r_vkGpuTime 2: K picks + rays on the young pixels only
+		// R3a, two passes after the plain gather (which carries no boost code, so its cost is the same boost on or off):
+		// 1. the YOUNG pass writes every pixel's reason (cheap, uniform, no rays) into an R8 target of the gather's layout;
+		// 2. the BOOST pass reads it back CLUSTERED (young + >= 5 of 9 neighbours young) and only those pixels re-run the
+		//    light loop with K picks, overwriting their attachments (identical guides); isolated specks never trigger it,
+		//    which matters twice: they are not worth rays, and one surviving lane keeps a whole warp running.
+		r->GpuScopeBegin( "restir.di.young" );		// r_vkGpuTime 2: the per-pixel young test
+		if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
+		r->BeginTargetPass( rhiReStirDIYoungRT, NULL );
+		RB_RHI_DrawFullscreen( r, youngProg, parms, 0 );
+		r->EndPass();
+		r->GpuScopeEnd();
+		r->GpuScopeBegin( "restir.di.boost" );		// r_vkGpuTime 2: K picks + rays on the clustered young pixels only
 		if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
 		r->SetNextTargetPassLoad();
 		r->BeginTargetPass( rhiReStirDIRT, NULL );
+		RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT ) );
+		backEnd.glState.tmu[11].current2DMap = -1;
 		RB_RHI_DrawFullscreen( r, boostProg, parms, 0 );
 		r->EndPass();
 		r->GpuScopeEnd();
