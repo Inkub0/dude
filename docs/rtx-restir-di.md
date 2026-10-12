@@ -151,6 +151,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIGradientDeadzone` | 0.2 | **R1** relative per-light change below which nothing counts (authored flicker). |
 | `r_rtReStirDIGradientStatic` | 2.0 | **R1** static threshold (full-res px) for the exact previous-position re-shade. |
 | `r_rtReStirDIGradientStratum` | 3 | **R1** NxN stratum (3 = RTXDI 1/9; 5 = NRD's 1/5 res, ~1/3 the cost). |
+| `r_rtReStirDIGradientFilterPasses` | 4 | **R1** A-trous passes over the gradient; fewer = the reset region hugs a change tighter. |
 | `r_rtReStirDIDenoiser` | 0 | **R2** 0 = ReBLUR, 1 = ReLAX (NRD's RTXDI denoiser); rebuilds NRD. |
 | `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 1 / 0 / 1.0 / 5 / 1 / 0.7 / 1 | **R2** ReLAX settings (Remix direct-light preset + RTXDI sample). |
 
@@ -778,6 +779,15 @@ contact shadows and the window-frame shadows sharper or equal vs 0; (b) flashlig
 floors: no new flicker (raise `RelaxPrepass` to 5-10 if the 1-spp noise shows - ReLAX has no spatial reuse feeding it yet, R3);
 (d) `r_vkGpuTime 2 restir.di.denoise` delta (expect +0.3-0.7 ms); (e) look-away fade: ReLAX's history fix is 3 frames max - note
 whether the wash reads better or worse. Decide the default; the loser's cvars are trimmed at R6.
+**First user A/B (2026-10-12):** ReLAX WINS on all three: sharper shadows, shorter flashlight trail, no floor flicker. The new
+sharpness exposed a moving-shadow softness: an NPC's shadow is soft and a little light while it walks and converges to sharp +
+darker when it stops. Two causes: (1) the region a moving shadow enters is correctly history-reset by the gradient and then
+rebuilt from ONE visibility ray per pixel - the denoiser's spatial filter widens where history is short and mixes lit neighbours
+in. That is F3 in its lighting form and R3's disocclusion boost is the fix (8 samples where history is short). (2) a gradient
+gap on the TRAILING edge: the second direction re-traced last frame's visibility in the CURRENT TLAS, where the mover had already
+left, so "was lit, is lit" never reset the floor a shadow vacates. Fixed: when the current light IS the stored light (slot +
+serial), the stored value - which holds the true previous visibility - is used as L_prev (also saves the ray). Plus
+`r_rtReStirDIGradientFilterPasses` (4) to let the reset region hug a moving shadow more tightly.
 Files: `VulkanBackend.cpp` (`NrdCreate` denoiser table: `NRD_ID_RELAX_DI = RELAX_DIFFUSE`, `NRD_ID_RELAX_DI_SH =
 RELAX_DIFFUSE_SH`; `RtaoDenoise`: a `denoiser` arg, `nrd::RelaxSettings` path), `restir_di.frag` + `restir_di_apply.frag` +
 `restir_di_debug.frag` (encoding switch), `RhiWorld.cpp` (the arg + cvar), ImGui dropdown.
