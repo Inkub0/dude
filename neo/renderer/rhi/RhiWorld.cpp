@@ -10721,6 +10721,8 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// r_shadowMapDebug counts how each lit light was classified this view
 	int dbgLit = 0, dbgProjected = 0, dbgShadowMapped = 0, dbgPoint = 0,
 	    dbgParallel = 0, dbgNoShadow = 0, dbgNoLightDef = 0, dbgStencilBig = 0, dbgDiCovered = 0;
+	// R1b diagnostics: WHY a lit light is not DI-covered (r_shadowMapDebug 1 breakdown)
+	int dbgUncAmbient = 0, dbgUncFog = 0, dbgUncBlend = 0, dbgUncNoDef = 0, dbgUncWeapon = 0, dbgUncFast = 0, dbgUncCrossfade = 0, dbgUncNotInBuffer = 0;
 	RB_RHI_ResetShadowTallies( r );
 	if ( !r_skipInteractions.GetBool() ) {
 		for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
@@ -10772,6 +10774,22 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				ictx.lightRange = cls.isPoint ? RB_RHI_PointLightRange( vLight ) : 0.0f;
 				dbgDiCovered++;
 			} else {
+				if ( rhiReStirDIApplyThisView ) {		// R1b diagnostics: why is this lit light still forward?
+					if ( vLight->lightDef == NULL )								{ dbgUncNoDef++; }
+					else if ( vLight->lightShader->IsAmbientLight() )				{ dbgUncAmbient++; }
+					else if ( vLight->lightShader->IsFogLight() )					{ dbgUncFog++; }
+					else if ( vLight->lightShader->IsBlendLight() )					{ dbgUncBlend++; }
+					else if ( diCovered )											{ dbgUncCrossfade++; }	// covered, but the handover crossfade still draws it
+					else {
+						const int li = vLight->lightDef->index;
+						const bool classified = li >= 0 && li < s_sceneLightTrack.Num() && s_sceneLightTrack[ li ].lastSeenFrame == tr.frameCount;
+						if ( classified && s_sceneLightTrack[ li ].fast ) {
+							if ( vLight->lightDef->parms.allowLightInViewID != 0 ) { dbgUncWeapon++; } else { dbgUncFast++; }
+						} else {
+							dbgUncNotInBuffer++;		// never reached the buffer: dark this frame, suppressed in this view, beyond reach / capacity
+						}
+					}
+				}
 				// r_vkGpuTime 2 / crash checkpoints: the per-light shadow work (map / cube / sun renders, the
 				// blurred ray mask) - a device-loss dump names it instead of the gap between two lights
 				r->GpuScopeBegin( "light.shadow" );
@@ -10864,7 +10882,9 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	ictx.lightDiCovered = false;
 	ictx.lightForwardWeight = 1.0f;
 	if ( r_shadowMapDebug.GetInteger() > 0 && dbgDiCovered > 0 ) {
-		common->Printf( "ReSTIR DI: %d of %d lit lights DI-covered this view (forward opaque draws + shadow work skipped)\n", dbgDiCovered, dbgLit );
+		common->Printf( "ReSTIR DI: %d of %d lit lights DI-covered this view (forward opaque draws + shadow work skipped)"
+			" | still forward: ambient %d, fog %d, blend %d, no-lightDef %d, weapon %d, fast %d, crossfade %d, not-in-buffer %d\n",
+			dbgDiCovered, dbgLit, dbgUncAmbient, dbgUncFog, dbgUncBlend, dbgUncNoDef, dbgUncWeapon, dbgUncFast, dbgUncCrossfade, dbgUncNotInBuffer );
 	}
 
 	RB_RHI_LogShadowMapSummary( dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,
