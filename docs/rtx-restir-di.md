@@ -154,7 +154,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIGradientFilterPasses` | 2 | **R1** A-trous passes over the gradient (RTXDI 4); 2 hugs a change tighter (user-tuned). |
 | `r_rtReStirDIDenoiser` | 1 | **R2** 1 = ReLAX (NRD's RTXDI denoiser; DEFAULT since 2026-10-12), 0 = ReBLUR; rebuilds NRD. |
 | `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 1 / 8 / 1.0 / 3 / 1 / 0.7 / 1 | **R2** ReLAX settings (Remix direct-light preset + RTXDI sample). |
-| `r_rtReStirDIBoost` | 0 | **R3a** K picks + K rays on YOUNG pixels (just revealed / NRD history short); 0 or 1 = off, 2..4 = K. Default-off stage, under test. |
+| `r_rtReStirDIBoost` | 2 | **R3a** K picks + K rays on clustered YOUNG pixels (revealed from behind an occluder / entered the screen / held a few frames); 0 or 1 = off, 2..4 = K. Default 2 since 2026-10-12 (user decision). |
 | `r_rtReStirDIBoostHistory` | 0 | **R3a** NRD-history trigger: frames below which a pixel is boosted (stays until 2x, capped at `r_rtReStirDIHistory`); 0 = off, only true disocclusion + screen entry (held 4 frames). |
 
 Defaults are the user-tuned compromise (2026-10-07/08). All `CVAR_ARCHIVE`, so a user's own values persist in
@@ -982,6 +982,12 @@ background) reading as "revealed" every frame. Now: the young pass is a ping-pon
 young, and a hold lasts `hold` frames (4 with the trigger off, 2x the threshold with it on) regardless of NRD; and a pixel is
 "revealed" only when no footprint tap is its surface AND at least one tap was NEARER (an occluder stood there) - a thin edge's taps
 are all farther. **Retest:** still boost line (expect ~fixed cost only), looking around, NPC wake.
+
+**R3a DEFAULT DECISION (user, 2026-10-12): `r_rtReStirDIBoost 2`, `r_rtReStirDIBoostHistory 0`.** Measured (cave, 3080 Ti, 0.75 x
+1440p, checkerboard): standing still the boost pass cost 1.5 ms at K 4 before the 3x3 footprint (retest pending), looking around
+3.0 ms, an NPC walking past 1.0 ms; the young pass 0.05 ms. The user judged the tighter NPC wake and the cleaner look-away worth it
+at K 2 (half the ray part). Final architecture: plain gather (no boost code) -> young pass (per-pixel reason + age, ping-pong
+R8G8) -> boost pass (young + >= 5 of 9 neighbours young; `terminateInvocation`, never `discard`) over the gather's targets.
 
 **R3a REDONE 2026-10-12 as its own default-off stage** (branch `feat/rtx-restir-di-r3a-disocclusion-boost`, USER TEST PENDING),
 on top of the ReLAX default. `r_rtReStirDIBoost` K (0 = off) / `r_rtReStirDIBoostHistory` H (4). What changed against the reverted form:
