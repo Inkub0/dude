@@ -4704,10 +4704,21 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 	// Advanced once per frame (this prepass runs only for the primary fullscreen view).
 	float jitterCorr[2] = { 0.0f, 0.0f };
 	if ( velWants ) {
-		jitterCorr[0] = ( viewDef->jitter[0] - rhiPrevJitter[0] ) / (float)w;
-		jitterCorr[1] = ( viewDef->jitter[1] - rhiPrevJitter[1] ) / (float)h;
-		rhiPrevJitter[0] = viewDef->jitter[0];
-		rhiPrevJitter[1] = viewDef->jitter[1];
+		// Computed ONCE per frame. With ReSTIR DI lighting the scene this prepass runs twice per frame (phase 0 world,
+		// phase 1 the deferred weapon); the second call used to see prevJitter == jitter and hand the weapon a ZERO
+		// correction, so its motion vectors carried a per-frame jitter-sized error and FSR2 rejected / blended its
+		// history over the swaying weapon - the "transparent weapon" (clean in screenshots, where DI does not run).
+		static float jitterCorrCache[2] = { 0.0f, 0.0f };
+		static int   jitterCorrFrame = -1;
+		if ( jitterCorrFrame != tr.frameCount ) {
+			jitterCorrCache[0] = ( viewDef->jitter[0] - rhiPrevJitter[0] ) / (float)w;
+			jitterCorrCache[1] = ( viewDef->jitter[1] - rhiPrevJitter[1] ) / (float)h;
+			rhiPrevJitter[0] = viewDef->jitter[0];
+			rhiPrevJitter[1] = viewDef->jitter[1];
+			jitterCorrFrame = tr.frameCount;
+		}
+		jitterCorr[0] = jitterCorrCache[0];
+		jitterCorr[1] = jitterCorrCache[1];
 	}
 
 	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
