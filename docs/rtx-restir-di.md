@@ -900,6 +900,17 @@ mover path (two different points). Fixed: static = the velocity's on-screen leng
 velocity is only the jitter delta). **Test:** view 5 white in a static scene WITH FSR2 (the R1 acceptance), view 3 calm,
 flashlight circle still shows, NPC trailing edge still resets.
 
+**Weapon dark under the DI apply - THE cause (2026-10-12, after the noShadows gate and the player-body TLAS exclusion
+both failed to cure it; the user's old "`r_rtReStirDIWorldOnlyPrepass 0` fixed it" was the real clue):** the DI pass ended
+with a bare `backEnd.currentScissor = viewDef->scissor` - a cache update only. The backend saves / restores the live scissor
+around every target pass, so after the DI chain the live scissor is still what the last scene draw before it set: the last
+world zfill surface's rect (phase 0). The deferred weapon depth fill (phase 1) then meets a surface whose rect EQUALS the
+cached full view, skips `SetScissor`, and writes the weapon's depth clipped to that prop's rect; every depth-EQUAL lit draw on
+the gun fails outside it - black, position-dependent (which prop was drawn last), straight "scissor" cuts. Fixed:
+`RB_RHI_ApplyViewScissor` (cache + hardware) at the DI pass end and before the weapon phase. The 17 other bare
+`currentScissor = viewDef->scissor` sites are the same latent pattern (they get away with it because the light loop
+re-applies per-light scissors) - sweep candidates for R6.
+
 **Weapon dark under the DI apply - the REAL cause (2026-10-12, found with `r_vkValidation 1` + the user's "it depends on where the
 weapon is, sometimes cut as if by a scissor"):** the covered-light branch gave the weapon's forward draw the inline shadow ray
 for EVERY covered light, including `noShadows` lights (parm or shader) that the normal path never shadows and the gather skips

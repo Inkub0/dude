@@ -7885,6 +7885,20 @@ consumes the result yet - the scene is byte-identical unless r_rtReStirDIDebug s
 behind r_rtReStirDI; VK + RT hardware only; needs the sealed depth + bump-normal G-buffer (shared with RTAO).
 ===================
 */
+// Re-apply the full view scissor FOR REAL (cache + hardware). A mid-scene pass chain that ends with a bare
+// `backEnd.currentScissor = viewDef->scissor` only updates the cache: the backend saves / restores the scissor around
+// each target pass, so after the chain the live scissor is whatever the last scene draw before it set - under the DI
+// apply that is the last world zfill surface's rect. The deferred weapon depth fill (phase 1) then draws a surface whose
+// rect EQUALS the cached full view, skips SetScissor, and lands clipped to that prop's rect: a black weapon except where
+// the rect happened to cover it, with straight "scissor" cuts (2026-10-12).
+static void RB_RHI_ApplyViewScissor( rhi::RHI *r, const viewDef_t *viewDef ) {
+	backEnd.currentScissor = viewDef->scissor;
+	r->SetScissor( viewDef->viewport.x1 + backEnd.currentScissor.x1,
+	               viewDef->viewport.y1 + backEnd.currentScissor.y1,
+	               backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
+	               backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
+}
+
 static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// the world-only depth when the prepass deferred the weapon this view (same POT capture size), else _currentDepth
 	idImage *diDepthImg = ( rhiWorldDepthThisView && globalImages->worldDepthImage->rhiHandle != 0 )
@@ -8521,7 +8535,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiReStirDIPrevValid = rhiReStirDIDenoisedThisView;
 
 	RB_RHI_ForgetTexBinds();
-	backEnd.currentScissor = viewDef->scissor;
+	RB_RHI_ApplyViewScissor( r, viewDef );		// the live scissor, not just the cache: phase 1 of the prepass draws next
 }
 
 /*
@@ -10307,6 +10321,7 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 		rhiRtgiDenoisedThisView = false;	rhiRtaoDenoisedThisView = false;
 		RB_RHI_ReStirDIPass( r, viewDef );			// on the world-only depth / normals / albedo / velocity
 		r->GpuScopeBegin( "prepass (weapon)" );
+		RB_RHI_ApplyViewScissor( r, viewDef );		// the DI chain restored the last world zfill surface's scissor (see the helper)
 		if ( !mergedDepth ) {
 			if ( rhiPrepassWeaponDeferred ) {
 				RB_RHI_NormalPrepass( r, viewDef, 1 );
