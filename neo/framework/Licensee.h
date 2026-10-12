@@ -50,7 +50,9 @@ If you have questions concerning this license or the applicable additional terms
 // launch, a saved config written against a lower schema has its graphics/enhancement group
 // reset to defaults (keybinds, audio and resolution are preserved). Do NOT bump for routine
 // releases - only when the settings schema itself changes. See idCommonLocal::CheckConfigSchema.
-#define DUDE_CONFIG_SCHEMA				1
+// 2 (2026-10-12): the ReSTIR DI defaults moved under the user (ReLAX denoiser, the R3a boost on at K 2 with the history
+// trigger off, weapon-only forward rule) and archived values from the tuning sessions kept overriding them.
+#define DUDE_CONFIG_SCHEMA				2
 
 #ifdef ID_REPRODUCIBLE_BUILD
 	// for reproducible builds we hardcode values that would otherwise come from __DATE__ and __TIME__
