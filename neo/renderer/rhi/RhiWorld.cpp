@@ -494,6 +494,9 @@ static bool  rhiWorldDepthThisView = false;		// globalImages->worldDepthImage ho
 static bool  rhiReStirDIApplyThisView = false;		// Stage D (r_rtReStirDIApply): DI LIGHTS this view - the apply runs and the forward loop skips the covered lights' opaque draws
 static bool  rhiReStirDIAppliedThisView = false;	// the additive apply already ran this view (idempotent across the split / fallback call sites)
 static int   rhiDbgWeaponDrawsCovered = 0;			// diagnostic: view-weapon interaction draws under DI-covered lights (r_shadowMapDebug line)
+static int   rhiDbgWeaponZfillPhase1 = 0;			// diagnostic: weapon surfaces the deferred depth fill (phase 1) drew this view
+static int   rhiDbgWeaponGbufPhase1 = 0;			// diagnostic: weapon surfaces the deferred normal prepass (phase 1) drew this view
+static bool  rhiDbgMergedDepth = false;
 static rhi::RenderTargetHandle rhiReStirDIConfRT = 0;	// DI history-confidence (R16F), reusing rtgi_confidence.frag
 static int   rhiReStirDIConfW = 0, rhiReStirDIConfH = 0;
 static rhi::RenderTargetHandle rhiReStirDIGuideRT = 0;	// checkerboard full-res NRD guides (viewZ/normal), reusing rtgi_guides.frag
@@ -2503,6 +2506,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef, int p
 		// ReSTIR DI world-only G-buffer: phase 0 skips the view weapon, phase 1 draws only it
 		if ( phase == 0 && surf->space->weaponDepthHack ) { continue; }
 		if ( phase == 1 && !surf->space->weaponDepthHack ) { continue; }
+		if ( phase == 1 ) { rhiDbgWeaponZfillPhase1++; }		// counted before the coverage / texgen filters below (diagnostic)
 
 		if ( !shader->IsDrawn() ) {
 			continue;
@@ -4729,6 +4733,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		// ReSTIR DI world-only G-buffer: phase 0 skips the view weapon, phase 1 draws only it
 		if ( phase == 0 && surf->space->weaponDepthHack ) { rhiPrepassWeaponDeferred = true; continue; }
 		if ( phase == 1 && !surf->space->weaponDepthHack ) { continue; }
+		if ( phase == 1 ) { rhiDbgWeaponGbufPhase1++; }
 		const srfTriangles_t *tri = surf->geo;
 		const idMaterial *shader = surf->material;
 
@@ -10259,6 +10264,7 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 		&& viewDef->viewEntitys && !viewDef->isSubview && viewDef->isWindowView;
 	r->GpuScopeBegin( "prepass (depth+gbuffer)" );
 	const bool mergedDepth = RB_RHI_NormalPrepass( r, viewDef, diWorldOnly ? 0 : -1 );
+	rhiDbgMergedDepth = mergedDepth;
 	if ( mergedDepth ) {
 		RB_RHI_CaptureCurrentDepth( viewDef );
 	} else {
@@ -10975,8 +10981,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	ictx.lightForwardWeight = 1.0f;
 	if ( r_shadowMapDebug.GetInteger() > 0 && dbgDiCovered > 0 ) {
 		common->Printf( "ReSTIR DI: %d of %d lit lights DI-covered this view (forward opaque draws + shadow work skipped)"
-			" | still forward: ambient %d, fog %d, blend %d, no-lightDef %d, weapon %d, fast %d, crossfade %d, not-in-buffer %d | weapon draws under covered lights: %d\n",
-			dbgDiCovered, dbgLit, dbgUncAmbient, dbgUncFog, dbgUncBlend, dbgUncNoDef, dbgUncWeapon, dbgUncFast, dbgUncCrossfade, dbgUncNotInBuffer, rhiDbgWeaponDrawsCovered );
+			" | still forward: ambient %d, fog %d, blend %d, no-lightDef %d, weapon %d, fast %d, crossfade %d, not-in-buffer %d | weapon draws under covered lights: %d | deferred weapon surfaces: zfill %d, gbuffer %d, deferred %d, mergedDepth %d\n",
+			dbgDiCovered, dbgLit, dbgUncAmbient, dbgUncFog, dbgUncBlend, dbgUncNoDef, dbgUncWeapon, dbgUncFast, dbgUncCrossfade, dbgUncNotInBuffer, rhiDbgWeaponDrawsCovered,
+			rhiDbgWeaponZfillPhase1, rhiDbgWeaponGbufPhase1, rhiPrepassWeaponDeferred ? 1 : 0, rhiDbgMergedDepth ? 1 : 0 );
+		rhiDbgWeaponZfillPhase1 = rhiDbgWeaponGbufPhase1 = 0;
 	}
 
 	RB_RHI_LogShadowMapSummary( dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,
