@@ -45,7 +45,7 @@ frame's reservoir through the velocity buffer), optional spatial reuse. It conve
 disocclusion/weapon special-case we tried only moved the artifact around.
 
 RTGI (H6) had already hit and solved the *same* problem for indirect light: it does **zero hand-rolled
-temporal**. A fresh 1-spp gather every frame, all accumulation handed to NRD ReBLUR, a confidence guide for
+temporal**. A fresh 1-spp gather every frame, all accumulation handed to NRD (ReLAX since R2; ReBLUR as the A/B), a confidence guide for
 moving-light antilag, and the view weapon simply **masked out**. So DI adopted RTGI's architecture wholesale
 — the reservoir ping-pong, temporal merge, stable-light-id remap, and reproject were **deleted**. What
 survives from ReSTIR is the cheap, correct core the perf scan endorsed (see **Performance**): resampled
@@ -152,7 +152,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIGradientStatic` | 2.0 | **R1** static threshold (full-res px) for the exact previous-position re-shade. |
 | `r_rtReStirDIGradientStratum` | 3 | **R1** NxN stratum (3 = RTXDI 1/9; 5 = NRD's 1/5 res, ~1/3 the cost). |
 | `r_rtReStirDIGradientFilterPasses` | 2 | **R1** A-trous passes over the gradient (RTXDI 4); 2 hugs a change tighter (user-tuned). |
-| `r_rtReStirDIDenoiser` | 0 | **R2** 0 = ReBLUR, 1 = ReLAX (NRD's RTXDI denoiser); rebuilds NRD. |
+| `r_rtReStirDIDenoiser` | 1 | **R2** 1 = ReLAX (NRD's RTXDI denoiser; DEFAULT since 2026-10-12), 0 = ReBLUR; rebuilds NRD. |
 | `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 1 / 8 / 1.0 / 3 / 1 / 0.7 / 1 | **R2** ReLAX settings (Remix direct-light preset + RTXDI sample). |
 
 Defaults are the user-tuned compromise (2026-10-07/08). All `CVAR_ARCHIVE`, so a user's own values persist in
@@ -792,7 +792,13 @@ fast history, no "black dip" halo (the rise-only smoothing), (c) STATIC scene: v
 unaffected (no frying / dimming - the failure of the old pass), (d) NPC walking under a static light: no gradient
 fires (geometry change is NRD's job; the normal/depth test rejects it).
 
-### R2 - ReLAX A/B (F2) - medium, independent of R1 - **MERGED 2026-10-12 as an OPT-IN** (`r_rtReStirDIDenoiser` default 0)
+### R2 - ReLAX A/B (F2) - medium, independent of R1 - **MERGED 2026-10-12; ReLAX is the DEFAULT since 2026-10-12** (`r_rtReStirDIDenoiser` 1)
+**Default decision (2026-10-12):** with `r_rtReStirDIRelaxAtrous` 3 (user: "roughly 3 ms") ReLAX lands within ~0.1 ms of ReBLUR's
+2.87 ms at the same settings, and it won every quality count of the A/B below, so `r_rtReStirDIDenoiser` defaults to 1 with the
+user's saved ReLAX values (`RelaxPrepass` 8, `RelaxAtrous` 3, the rest at the Remix / RTXDI starting values). ReBLUR stays as
+`r_rtReStirDIDenoiser 0` for the A/B until R6 trims the loser; the ReBLUR-only knobs (`FastHistory`, `FastClamp`, `Stabilize`,
+`Antilag`, `PrepassBlur`, `HistoryFix`, `BlurRadius`) are inert under ReLAX. NOTE for anyone with a saved config: every DI cvar is
+`CVAR_ARCHIVE`, so a `seta r_rtReStirDIDenoiser "0"` in `dude.cfg` keeps ReBLUR until it is set to 1 once.
 **Cost (user, 1440p x 0.75, 3080 Ti, SH mode, checkerboard):** `restir.di.denoise` ReBLUR 2.87 ms vs ReLAX 5.81 ms, +2.9 ms -
 four times NRD's table delta (RELAX_DIFFUSE_SPECULAR 3.25 vs REBLUR 2.55 at 1440p/4080; SH +50 % on RELAX). Quality won on
 every count, but +2.9 ms on a ~12.6 ms tier frame is not a default. Cost levers to measure before revisiting: `r_rtReStirDIRelaxAtrous`
