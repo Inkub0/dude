@@ -8190,6 +8190,23 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// Checkerboard packs every traced sample into the LEFT HALF, so restrict the draw there - the right half is
 	// written nothing and reconstructed by NRD, so ~half the gather fragments (and their visibility rays) run.
 	// The shader keeps its own right-half early-out as the correctness guarantee.
+	// R3a disocclusion boost (docs/rtx-restir-di.md Plan R3, first form): K picks + rays where last frame's denoised .w
+	// (NRD's accumulated history length - ReLAX returns it, ReBLUR with returnHistoryLength) is below the threshold.
+	// Needs last frame's denoised output (still valid until this frame's denoise) + the velocity at the gather res.
+	{
+		const int  boostK  = idMath::ClampInt( 1, 8, r_rtReStirDIBoostRays.GetInteger() );
+		const bool boostOn = boostK > 1 && nrdVel != 0 && nrdFree;
+		const bool boostAll = boostOn && ( !rhiReStirDIPrevValid || diCut || r->GetRtgiOutputImage() == 0 );
+		parms.tessParms[0] = boostOn ? 1.0f : 0.0f;
+		parms.tessParms[1] = (float)boostK;
+		parms.tessParms[2] = r_rtReStirDIBoostHistory.GetFloat();
+		parms.tessParms[3] = boostAll ? 1.0f : 0.0f;
+		if ( boostOn ) {
+			RB_RHI_BindRTImage( r, 10, boostAll ? nrdVel : r->GetRtgiOutputImage() );	// a valid image is bound either way
+			RB_RHI_BindRTImage( r, 11, nrdVel );
+			backEnd.glState.tmu[10].current2DMap = -1;	backEnd.glState.tmu[11].current2DMap = -1;
+		}
+	}
 	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray
 	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
 	r->BeginTargetPass( rhiReStirDIRT, NULL );

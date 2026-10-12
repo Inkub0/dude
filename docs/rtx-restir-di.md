@@ -154,6 +154,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIGradientFilterPasses` | 2 | **R1** A-trous passes over the gradient (RTXDI 4); 2 hugs a change tighter (user-tuned). |
 | `r_rtReStirDIDenoiser` | 0 | **R2** 0 = ReBLUR, 1 = ReLAX (NRD's RTXDI denoiser); rebuilds NRD. |
 | `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 1 / 0 / 1.0 / 5 / 1 / 0.7 / 1 | **R2** ReLAX settings (Remix direct-light preset + RTXDI sample). |
+| `r_rtReStirDIBoostRays` / `BoostHistory` | 4 / 6 | **R3a** K picks + rays where last frame's history is below N frames (disocclusion boost; 1 = off). |
 
 Defaults are the user-tuned compromise (2026-10-07/08). All `CVAR_ARCHIVE`, so a user's own values persist in
 config regardless of these source defaults. `hitDist` scale (1024) is in-source only.
@@ -831,6 +832,22 @@ trail shorter (fast history 1); no new flicker on flat lit floors (ReLAX fast-hi
 (expect +0.3-0.7 ms for diffuse-only). Decide the default; the loser's cvars are trimmed at R6.
 
 ### R3 - spatial reuse with decoupled visibility + disocclusion boost (F3, F5) - large
+**R3a - disocclusion boost, first form - IMPLEMENTED 2026-10-12** (on the R2 branch, USER TEST PENDING). The user's decisive
+finding: view 4 shows the NPC trail as SHORT history refilling over the whole window (history 3 shortened it, 24 showed all 24
+frames), i.e. the body's geometric disocclusion wake - the gradient has nothing to drop there. The trail is what a young pixel
+LOOKS like: one visibility ray, high variance, the denoiser widens its filter and smears the adjacent shadow across the wake until
+enough frames accumulate. Shortening the window fixes the trail but makes the outdoor sun (mars_city1 outside Kelly's HQ) flicker:
+one ray against distant window frames needs ~24 frames to average. So young history must be made CLEAN, not short: the gather
+reads last frame's denoised `.w` (NRD's history length, reprojected) and where it is below `r_rtReStirDIBoostHistory` (6) draws
+`r_rtReStirDIBoostRays` (4) INDEPENDENT reservoir picks from the same candidate weights (one light loop, K random streams) and
+traces K visibility rays, averaging the K unbiased estimates (variance / K); the SH1 direction term is averaged the same way.
+Everything starts young on a camera cut / first frame (boost everywhere for one frame). Cost = K-1 extra rays on young pixels
+only. This is RTXDI's `numDisocclusionBoostSamples` in spirit (8; Remix 4 for 8 frames) without neighbour reservoirs - the
+exhaustive loop makes the multi-pick free. The spatial reuse proper (R3b, neighbours' picks + decoupled visibility) is still the
+plan for the steady-state noise (F5) and the sun's convergence. **Test:** history 24, ReLAX, walking NPC: the trail behind the
+body should be gone or short while view 4 still shows the wake (that is now fine); screen edges while turning likewise; the
+sun stays stable; `restir.di.gather` cost up only while something is disoccluding. Try `r_rtReStirDIBoostRays 8` and
+`r_rtReStirDIBoostHistory 10` if a faint trail remains.
 Files: NEW `restir_di_spatial.frag`, `restir_di.frag` (reservoir attachment), `RhiWorld.cpp` (the pass between gather and
 denoise), `rt_light_eval.glsl` (none), optional NEW compute `restir_di_boiling.comp`.
 1. **Gather writes its reservoir** (new attachment at gather res): `(row index of y, wSum, pHat(y), vis)` - the SH1
