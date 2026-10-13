@@ -11,6 +11,12 @@
 > accumulating denoiser, and the lag symptoms follow from that; the fixes are a reservoir-gradient confidence pass,
 > ReLAX, and spatial reuse with decoupled visibility. See **Review against public ReSTIR** and **Plan R0-R6** below.
 >
+> **2026-10-13 R6 CONSOLIDATION (build-verified, user playtest pending):** DI is now **ReLAX-only** (the ReBLUR path +
+> its dead knobs removed for DI; ReBLUR still serves RTAO/RTGI), the forward path is **weapon-only** (mode-1 fast-light
+> rules + handover crossfade removed - the R1 gradient covers the rest), the dormant **luminance confidence** is gone,
+> and two RTAO/RTGI scissor chain-ender bugs are fixed. Still open: **R3b** spatial reuse (the structural 1-spp / 5 ms
+> gather answer) + the **[A]** NRD shared-path items - see **R6** in the plan.
+>
 > ⚠ **The original reservoir plan was RETIRED.** This doc used to describe a hand-rolled spatiotemporal
 > **reservoir** (ping-pong SSBO, temporal reproject, Stages 0–6). That reuse left moving-object trails that
 > no disocclusion/weapon special-casing could fix — see **The pivot** below. The shipped design hands ALL
@@ -45,7 +51,7 @@ frame's reservoir through the velocity buffer), optional spatial reuse. It conve
 disocclusion/weapon special-case we tried only moved the artifact around.
 
 RTGI (H6) had already hit and solved the *same* problem for indirect light: it does **zero hand-rolled
-temporal**. A fresh 1-spp gather every frame, all accumulation handed to NRD (ReLAX since R2; ReBLUR as the A/B), a confidence guide for
+temporal**. A fresh 1-spp gather every frame, all accumulation handed to NRD (ReLAX only, since R6), a confidence guide for
 moving-light antilag, and the view weapon simply **masked out**. So DI adopted RTGI's architecture wholesale
 — the reservoir ping-pong, temporal merge, stable-light-id remap, and reproject were **deleted**. What
 survives from ReSTIR is the cheap, correct core the perf scan endorsed (see **Performance**): resampled
@@ -79,38 +85,43 @@ so `RtaoDenoise(giMode)` drops in unchanged:
 Guides are written for **every** pixel (sky/weapon included, radiance zeroed there) so NRD sees a valid
 field everywhere.
 
-### 2. The denoise — NRD REBLUR_DIFFUSE
+### 2. The denoise — NRD RELAX_DIFFUSE (R6: ReLAX-only)
 `RB_RHI_ReStirDIPass` feeds the per-object velocity MRT (`GetRenderTargetImage3`) as NRD `IN_MV`
-(`mvScale = (−1, +1)`, 2D screen-space) and calls `RtaoDenoise(giMode=true)`, which denoises into the
-shared GI output (`GetRtgiOutputImage`). NRD owns **all** temporal accumulation; the debug overlay shows
-that denoised output (YCoCg-decoded) when the denoise ran, else the raw gather. Previous-frame camera is
-tracked (`rhiReStirDIPrev*`) for the NRD reprojection; `reset` on the first DI frame / after an interruption.
+(`mvScale = (−1, +1)`, 2D screen-space) and calls `RtaoDenoise(giMode=true)` with `denoiser = 1`, which
+denoises the DI radiance through `RELAX_DIFFUSE(_SH)` into the shared GI output (`GetRtgiOutputImage`).
+ReLAX won the R2 A/B (sharper shadows, shorter flashlight trail, no floor flicker) and is now the only DI
+denoiser — the ReBLUR path was removed for DI at R6 (ReBLUR still serves RTAO / RTGI). NRD owns **all**
+temporal accumulation; the debug overlay shows that denoised output (YCoCg-decoded) when the denoise ran,
+else the raw gather. Previous-frame camera is tracked (`rhiReStirDIPrev*`) for the NRD reprojection;
+`reset` on the first DI frame / after an interruption / on a camera cut.
 
 > **Shared NRD instance.** DI borrows the one `REBLUR_GI` denoiser + its output image — the same slot RTGI
 > uses. Only one `giMode` denoise can run per frame (one instance = one resolution + one history). See
 > **auto-claim** below.
 
-### 3. Confidence pass — present, DEFAULT OFF
-A history-confidence pass (reuses `rtgi_confidence.frag` verbatim — it is signal-agnostic) can feed NRD's
-`IN_DIFF_CONFIDENCE` to reject history where lighting moved over intact geometry (moving-light antilag). On
-RTGI's dim, low-variance bounce it kills edge ghosting cleanly. On DI it **fries**: the 1-spp direct signal
-is noisy enough that the luminance-confidence metric misreads *stable* lit surfaces as a lighting change,
-rejects history, and starves NRD. So `r_rtReStirDIConfidence` **defaults to 0 (off)** — NRD's built-in
-antilag + the weapon mask carry the temporal. The knob stays for A/B.
+### 3. Confidence pass — the R1 gradient (R6: luminance fallback removed)
+The DI history confidence fed to NRD's `IN_DIFF_CONFIDENCE` is the **R1 gradient** (`r_rtReStirDIGradient`,
+default on): re-shade last frame's chosen light at the reprojected surface under this frame's lights, A-trous
+filter the change, and drop history only where the lighting really changed — the RTXDI / Q2RTX recipe (see
+**R1** in the plan). The old luminance-confidence fallback (a `rtgi_confidence.frag` reuse pass behind
+`r_rtReStirDIConfidence`) was removed at R6: on DI's noisy 1-spp signal the luminance metric misread *stable*
+lit surfaces as a change and fried them — it measured noise, not lighting change, which is exactly what the
+gradient fixed.
 
 ### 4. NRD spatial cleanup — the tuning knobs
 NRD cleans flat, stable, temporally-rich surfaces well, but is **edge-stopped on high-frequency geometry**
 (grates) and **history-starved on moving silhouettes** (a swinging limb), so the 1-spp variance survives
-exactly there. Four `giMode`-only overrides on `RtaoDenoiseArgs` (applied in `VulkanBackend::RtaoDenoise`
-only when `>0`, so RTGI/RTAO keep NRD defaults) push the denoiser's spatial behaviour:
+exactly there. The DI-specific overrides on `RtaoDenoiseArgs` that ReLAX reads (applied in
+`VulkanBackend::RtaoDenoise` only when `>0`, so RTGI/RTAO keep NRD defaults) push the denoiser's spatial
+behaviour. R6 trimmed the two ReBLUR-only ones (`prepassBlurRadius`, `maxBlurRadius`) now DI is ReLAX-only;
+what remains:
 
-- `prepassBlurRadius` — NRD `diffusePrepassBlurRadius`: a pre-accumulation spatial reuse blur, built for
-  "badly defined / probabilistic" 1-spp input. The main lever; too large on sparse bright samples can blob.
 - `historyFixFrameNum` — frames of strong spatial reconstruction where history is thin (moving parts);
   clamped below the fast-history window.
-- `maxBlurRadius` — base spatial denoise radius.
-- `edgeStopScale` — scales `lobeAngleFraction` + `planeDistanceSensitivity`; `>1` blurs **across** depth/
-  normal edges, the only lever that reaches sub-pixel grate noise (costs that detail).
+- `edgeStopScale` — scales `lobeAngleFraction`; `>1` blurs **across** depth/normal edges, the only lever
+  that reaches sub-pixel grate noise (costs that detail).
+- the ReLAX A-trous settings (`r_rtReStirDIRelax*`) — Phi luminance, iteration count, variance history,
+  confidence-driven relaxation, anti-firefly — are the primary spatial levers under ReLAX.
 
 Spatial **reuse** (the ReSTIR in-frame neighbour combine) is the textbook alternative to this NRD tuning and
 remains the fallback if the knobs can't clean the noise without over-softening — see **TODO**.
@@ -131,29 +142,24 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIResScale` | 1 | gather/denoise resolution fraction (0.25..1), upscaled for display. Composes with checkerboard. |
 | `r_rtReStirDICheckerboard` | 0 | trace a half-pixel checkerboard (packed left), NRD reconstructs via a full-res guide pass + IN_MV. |
 | `r_rtReStirDIBilateralUpscale` | 1 | depth+normal-aware upscale of a reduced-res gather (vs bilinear); inert at full res. |
-| `r_rtReStirDIHistory` | 8 | NRD ReBLUR history length (its own; no longer borrows `r_rtgiHistory`). 2..63. |
-| `r_rtReStirDIConfidence` | 0.5 | confidence-pass sensitivity; `0` = off (user-tuned 2026-10-08: on, it darkened/fried; NRD antilag + the weapon mask carry temporal). |
-| `r_rtReStirDIPrepassBlur` | 36 | `diffusePrepassBlurRadius` px; main noise lever. 0 = NRD default (30). |
+| `r_rtReStirDIDynamicForward` | 1 | **R6 bool:** 1 = first-person weapon lights stay forward (masked out of DI anyway), 0 = none (every light through DI). The gradient handles all other lights; the old mode-1 fast-light rules + handover crossfade were removed. |
+| `r_rtReStirDIHistory` | 8 | NRD history length (its own; no longer borrows `r_rtgiHistory`). 2..63. |
 | `r_rtReStirDIHistoryFix` | 6 | `historyFixFrameNum`; moving-part lever. 0 = NRD default (3). |
-| `r_rtReStirDIBlurRadius` | 18 | `maxBlurRadius` px. 0 = NRD default (30). |
-| `r_rtReStirDIEdgeStop` | 6 | edge-stopping scale; grate lever, costs detail. 0/1 = no scaling. |
-| `r_rtReStirDIHistoryMs` | 0 | **R0** history window in ms (0 = `r_rtReStirDIHistory` frames); converted per frame from a 0.2 s low-passed FPS; fast history scales along. |
-| `r_rtReStirDIFastHistory` | 6 | **R0** ReBLUR `maxFastAccumulatedFrameNum` (Remix direct: 1). |
-| `r_rtReStirDIFastClamp` | 2.0 | **R0** ReBLUR `fastHistoryClampingSigmaScale` [1;3] (NRD sample: 1.5). |
-| `r_rtReStirDIStabilize` | 63 | **R0** ReBLUR `maxStabilizedFrameNum` (clamped to history); 0 = stabilization pass off. |
-| `r_rtReStirDIAntilag` | 1 | **R0** ReBLUR built-in antilag; 0 = inert (NRD's recommended initial-integration baseline). |
+| `r_rtReStirDIEdgeStop` | 6 | edge-stopping scale (ReLAX `lobeAngleFraction`); grate lever, costs detail. 0/1 = no scaling. |
+| `r_rtReStirDIHistoryMs` | 0 | **R0** history window in ms (0 = `r_rtReStirDIHistory` frames); converted per frame from a 0.2 s low-passed FPS. |
+| `r_rtReStirDIFastClamp` | 2.0 | **R0** NRD `fastHistoryClampingSigmaScale` [1;3] (also read by ReLAX). |
+| `r_rtReStirDIAntilag` | 1 | **R0** NRD built-in antilag; 0 = inert (NRD's recommended initial-integration baseline). |
 | `r_nrdSigma` | 0 | **R0** keep `SIGMA_SHADOW` in the NRD instance (never dispatched since H3); rebuilds NRD. |
 | `r_rtReStirDIGradient` | 1 | **R1** temporal gradient confidence -> NRD IN_DIFF_CONFIDENCE (re-shade last frame's light; RTXDI / Q2RTX recipe). |
 | `r_rtReStirDIGradientPower` | 4 | **R1** confidence sharpening power. |
 | `r_rtReStirDIGradientHistory` | 0 | **R1** rise-only temporal smoothing (frames); 8 is the reservoir-reuse value, not ours. |
-| `r_rtReStirDIGradientFloor` | 0.1 | **R1** minimum confidence; ReBLUR raises it to historyFix / history. |
+| `r_rtReStirDIGradientFloor` | 0.1 | **R1** minimum confidence (ReLAX applies it directly). |
 | `r_rtReStirDIGradientBias` | 0.001 | **R1** darkness bias in the change's denominator. |
 | `r_rtReStirDIGradientDeadzone` | 0.25 | **R1** relative per-light change below which nothing counts (authored flicker). |
 | `r_rtReStirDIGradientStatic` | 2.0 | **R1** static threshold (full-res px) for the exact previous-position re-shade. |
 | `r_rtReStirDIGradientStratum` | 3 | **R1** NxN stratum (3 = RTXDI 1/9; 5 = NRD's 1/5 res, ~1/3 the cost). |
 | `r_rtReStirDIGradientFilterPasses` | 2 | **R1** A-trous passes over the gradient (RTXDI 4); 2 hugs a change tighter (user-tuned). |
-| `r_rtReStirDIDenoiser` | 1 | **R2** 1 = ReLAX (NRD's RTXDI denoiser; DEFAULT since 2026-10-12), 0 = ReBLUR; rebuilds NRD. |
-| `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 1 / 8 / 1.0 / 3 / 1 / 0.7 / 1 | **R2** ReLAX settings (Remix direct-light preset + RTXDI sample). |
+| `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 1 / 8 / 1.0 / 3 / 1 / 0.7 / 1 | **R2** ReLAX settings (Remix direct-light preset + RTXDI sample). ReLAX is the only DI denoiser since R6. |
 | `r_rtReStirDIBoost` | 2 | **R3a** K picks + K rays on clustered YOUNG pixels (revealed from behind an occluder / entered the screen / held a few frames); 0 or 1 = off, 2..4 = K. Default 2 since 2026-10-12 (user decision). |
 | `r_rtReStirDIBoostHistory` | 0 | **R3a** NRD-history trigger: frames below which a pixel is boosted (stays until 2x, capped at `r_rtReStirDIHistory`); 0 = off, only true disocclusion + screen entry (held 4 frames). |
 
@@ -163,9 +169,10 @@ config regardless of these source defaults. `hitDist` scale (1024) is in-source 
 ## ImGui
 
 Debugging tab → **"ReSTIR Direct Lighting"** group (`DrawDbgGroup_ReStirDI` in `Dhewm3SettingsMenu.cpp`,
-mirrors `DrawDbgGroup_RTGI`). Its **Noise Suppression** leads with **History Length** + **History
-Confidence** — identical name/range to RTGI's — then the DI-specific NRD spatial levers under a subheading.
-(RTGI's third, *Emissive Clamp*, has no DI equivalent: DI gathers direct lights, not an emissive bounce.)
+mirrors `DrawDbgGroup_RTGI`). Its **Noise Suppression** leads with **History Length** — identical name/range
+to RTGI's — then the DI-specific ReLAX spatial levers (History Fix, Edge-Stop Relax) under a subheading. R6
+removed the now-unnecessary **History Confidence** (the R1 gradient replaced it) and the ReBLUR-only
+**Prepass Blur** / **Blur Radius** sliders.
 
 ## Substrate it rides (reuse, do not reinvent)
 
@@ -1084,11 +1091,30 @@ Files: `restir_di_apply.frag` (SG resolve), NEW GLSL port of `NRD_SG_ResolveDiff
    dithering, not white noise) - full-res guides for free, no packed layout, no `rtgi_guides` pass. Worth one A/B.
 Acceptance: bump N·L detail in dim DI light at least equal to today's SH mode; no new ringing at normal edges.
 
-### R6 - consolidate
-Remove the losers' cvars (trim-debug-cvars rule), the `rtgi_confidence` reuse for DI, and - if R1b holds - the handover
-crossfade and the luminance/appeared hysteresis; update this doc's "Architecture as shipped", the cvar table, the ImGui
-group and the status header; wire the winning defaults into the `dude_rtx 2` tier. **[A]** Close out the shared-path
-items in [rtx-nrd.md](rtx-nrd.md) (N0/N1 ride R0/R4; N2/N3 are independent follow-ups) and record the SIGMA decision there.
+### R6 - consolidate - **DONE 2026-10-13** (branch `feat/rtx-restir-di-r6-consolidate`, build-verified, user playtest pending)
+Done this pass:
+- **Scissor fix (two genuine chain-ender bugs):** `RB_RHI_RtaoPass` / `RB_RHI_RtgiPass` ended their target-pass chain
+  with a bare `backEnd.currentScissor = viewDef->scissor` (cache only) - the weapon-dark bug class - now call
+  `RB_RHI_ApplyViewScissor`. The other ~20 bare writes already `SetScissor` explicitly or are GL/2D entry paths; left
+  as-is (behaviour-equivalent, converting adds a viewport-offset risk for no gain).
+- **Discard sweep:** the RT / RTAO / RTGI / DI shaders were already demote-safe (every early-out is `return` or
+  `terminateInvocation`; `restir_di.frag` is the model). The only `discard`-before-heavy offender is `ssr.frag` (raster
+  SSR, out of DI scope) - flagged, not changed.
+- **DI is ReLAX-only:** `r_rtReStirDIDenoiser` removed (relaxMode always true for DI; ReBLUR still serves RTAO/RTGI).
+  Trimmed the dead ReBLUR-only DI knobs `FastHistory` / `Stabilize` / `PrepassBlur` / `BlurRadius`; the dual-use knobs
+  ReLAX also reads stay (`History`/`HistoryMs`, `FastClamp`, `HistoryFix`, `EdgeStop`, `Antilag`, `Disocclusion`).
+- **Luminance confidence removed:** `r_rtReStirDIConfidence` + its `rtgi_confidence.frag` reuse pass + `rhiReStirDIConfRT`.
+  The R1 gradient is the sole DI confidence now.
+- **Forward path is weapon-only:** `r_rtReStirDIDynamicForward` is now a bool (1 = weapon lights forward, 0 = none).
+  Removed mode 1's fast-light rule set, the handover crossfade (`RB_RHI_SceneLightForwardWeight` + `lightForwardWeight`),
+  and the per-light history (`sceneLightTrack_t`); `diFast` is now just `allowLightInViewID != 0`.
+- **ImGui dev menu:** removed the three now-unnecessary DI knobs (History Confidence, Prepass Blur, Blur Radius).
+- **Tier:** no change needed - `dude_rtx 2` turns DI on and inherits the winning knob defaults from the cvar declarations.
+- Doc "Architecture as shipped" + cvar table updated (this pass).
+
+Still open: **[A]** the shared-path items in [rtx-nrd.md](rtx-nrd.md) (N0/N1 ride R0/R4; N2/N3 are independent
+follow-ups) and the SIGMA decision there; **R3b** (spatial reuse with decoupled visibility) is still the structural
+answer to the 1-spp noise / the 5 ms gather - decide after a normal play session across maps.
 
 ## Performance (literature-calibrated, 2026-10-06)
 
