@@ -16,6 +16,17 @@
 //   u_depthTexRecip.xy    = ratio / depthUploadSize (gl_FragCoord -> depth tc)
 //   u_windowCoord.y       = per-frame jitter phase (temporal; 0 = static dither)
 
+// Kill the fragment for real. On Vulkan glslang compiles `discard` to OpDemoteToHelperInvocation (vulkan1.4 target),
+// which does NOT terminate - a demoted invocation keeps running the 64-step march + refine as a helper, only dropping its
+// stores. terminateInvocation (GL_EXT_terminate_invocation, SPIR-V 1.6 core) ends it, so the sky / weapon / non-reflective
+// / no-hit early-outs actually skip the march. On GL3 `discard` terminates as expected and the extension may be absent.
+#ifdef VULKAN
+#extension GL_EXT_terminate_invocation : require
+#define SSR_KILL terminateInvocation
+#else
+#define SSR_KILL discard
+#endif
+
 #include "renderparms.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentRender;   // lit opaque scene snapshot
@@ -102,13 +113,13 @@ void main() {
 	vec2  frag = gl_FragCoord.xy;
 	float raw  = rawDepth( frag );
 	if ( raw >= 0.9994 ) {
-		discard;                                   // sky / no geometry
+		SSR_KILL;                                  // sky / no geometry
 	}
 
 	vec2 uv = frag * u_screenCorrection.xy;
 	vec4 nt = texture( u_normalBuffer, uv );
 	if ( nt.a < 0.5 ) {
-		discard;                                   // view weapon: depth-hacked, don't reflect on it
+		SSR_KILL;                                  // view weapon: depth-hacked, don't reflect on it
 	}
 	vec4  mt    = texture( u_materialBuffer, uv );
 	float rough = mt.x;
@@ -118,7 +129,7 @@ void main() {
 	float maxRough = u_localParam1.z;
 	float gloss = 1.0 - smoothstep( maxRough * 0.7, maxRough, rough );
 	if ( gloss < 0.004 ) {
-		discard;
+		SSR_KILL;
 	}
 
 	vec3 P = viewPosFromRaw( frag, raw );
@@ -139,7 +150,7 @@ void main() {
 	// eye and the surface — the barrel-on-the-floor case — survive well below 0.9)
 	float facing = 1.0 - smoothstep( 0.9, 1.0, dot( R, V ) );
 	if ( F * gloss * facing < 0.002 ) {
-		discard;
+		SSR_KILL;
 	}
 
 	int   steps     = int( u_localParam1.x );
@@ -225,7 +236,7 @@ void main() {
 		t += adv;
 	}
 	if ( tHit < 0.0 ) {
-		discard;
+		SSR_KILL;
 	}
 
 	// binary refinement between the last miss and the hit
@@ -247,7 +258,7 @@ void main() {
 	// reject hits on surfaces facing away from the ray (marched through a backface)
 	vec3 hitN = normalize( texture( u_normalBuffer, hitUv ).xyz * 2.0 - 1.0 );
 	if ( dot( hitN, R ) > 0.0 ) {
-		discard;
+		SSR_KILL;
 	}
 
 	// screen-edge fade (reflection data ends at the viewport) + range fade
