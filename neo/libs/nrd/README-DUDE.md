@@ -1,7 +1,9 @@
 # Vendored NVIDIA NRD (Real-Time Denoisers) — DUDE notes
 
 NRD v4.18, vendored from https://github.com/NVIDIA-RTX/NRD at commit
-`6227e737e9c1f7ef1733cb59acb241f6f316778e` (MIT, see LICENSE.txt) for the RTX hybrid
+`e06852bd545973cb224eb28820b891205cfc1624` (the v4.18.0 tag re-pushed 9 Oct 2026, superseding the
+27 Aug build `6227e737e9c1f7ef1733cb59acb241f6f316778e`; same version number, same public API, mostly SIGMA
+improvements - checkerboard + penumbra - plus a g_Poisson12 table and a small NRD.hlsli roughness clamp) (MIT, see LICENSE.txt) for the RTX hybrid
 roadmap's H2 denoiser framework (docs/rtx-hybrid-roadmap.md, docs/rtx-nrd.md). Mirrors the
 FSR2 vendoring pattern (libs/fsr2): sources + PREBUILT embedded SPIR-V headers, so the
 engine build needs no HLSL toolchain (no DXC/ShaderMake at build time).
