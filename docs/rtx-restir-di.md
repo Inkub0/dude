@@ -169,10 +169,18 @@ config regardless of these source defaults. `hitDist` scale (1024) is in-source 
 ## ImGui
 
 Debugging tab → **"ReSTIR Direct Lighting"** group (`DrawDbgGroup_ReStirDI` in `Dhewm3SettingsMenu.cpp`,
-mirrors `DrawDbgGroup_RTGI`). Its **Noise Suppression** leads with **History Length** — identical name/range
-to RTGI's — then the DI-specific ReLAX spatial levers (History Fix, Edge-Stop Relax) under a subheading. R6
-removed the now-unnecessary **History Confidence** (the R1 gradient replaced it) and the ReBLUR-only
-**Prepass Blur** / **Blur Radius** sliders.
+mirrors `DrawDbgGroup_RTGI`). Its **Noise Suppression** section exposes the **full NRD ReLAX tuning surface**
+(2026-10-13), grouped under three subheadings:
+- **NRD temporal history:** History Length, History (ms), Fast History, Fast Clamp, Anti-lag, Disocclusion.
+- **NRD spatial (ReLAX A-trous):** History Fix, Prepass Blur, Phi Luminance, A-trous Iterations, Variance
+  History, Confidence Relax, Edge-Stop Relax, Anti-Firefly.
+- **History Confidence (R1 temporal gradient):** the Gradient Confidence toggle + its eight sub-knobs (Power,
+  Rise Smoothing, Floor, Darkness Bias, Deadzone, Static Threshold, Stratum, Filter Passes), disabled as a
+  group when the gradient is off.
+
+Each slider maps 1:1 to the `RtaoDenoiseArgs` field the DI denoise sets in `VulkanBackend::RtaoDenoise`; 0
+generally means "keep NRD's own default". (R6 removed the old luminance **History Confidence** and the
+ReBLUR-only **Prepass Blur** / **Blur Radius** - the Prepass Blur here is now ReLAX's.)
 
 ## Substrate it rides (reuse, do not reinvent)
 

@@ -4846,25 +4846,81 @@ static void DrawDbgGroup_ReStirDI()
 		"aware filter instead of plain bilinear, so DI stops bleeding across silhouettes and creases - sharper at edges "
 		"for a few extra taps. Inert at Full resolution. Off = the old bilinear look. (r_rtReStirDIBilateralUpscale)" );
 
-	// --- Noise suppression ---
-	// History Length mirrors RT Global Illumination -> Noise Suppression (same name + range). Below it are the NRD
-	// spatial levers RTGI does not need (its low-frequency bounce leans on resScale/checkerboard instead); DI's sharp
-	// 1-spp signal needs them for fine detail + motion. R6 trimmed the ReBLUR-only knobs (Prepass Blur, Blur Radius)
-	// and the dormant luminance History Confidence (the R1 gradient confidence replaced it) now DI is ReLAX-only.
+	// --- Noise suppression (the full NRD tuning surface) ---
+	// DI is ReLAX-only since R6. The knobs below map 1:1 to the NRD ReLAX settings the DI denoise sets
+	// (VulkanBackend::RtaoDenoise); they clean the sharp 1-spp signal that RTGI's low-frequency bounce does not need.
+	// 0 generally means "keep NRD's own default". History Confidence is the R1 temporal gradient (not the old luminance
+	// pass, removed at R6); it drives NRD's IN_DIFF_CONFIDENCE so history is dropped only where the lighting changed.
 	ImGui::SeparatorText( "Noise Suppression" );
-	CvarSliderI( "History Length", r_rtReStirDIHistory, 2, 63, "Max frames NRD accumulates for the DI "
-		"radiance. The 1-spp gather needs temporal accumulation to look smooth: too short and single pixels 'fry' "
-		"(noise/flicker), too long and a switched-off/occluded light lingers. ~6-12 is the balance; higher = smoother "
-		"but laggier. NRD's own default is 30. (r_rtReStirDIHistory)" );
+	ImGui::TextDisabled( "NRD temporal history" );
+	CvarSliderI( "History Length", r_rtReStirDIHistory, 2, 63, "Max frames NRD accumulates for the DI radiance "
+		"(ReLAX diffuseMaxAccumulatedFrameNum). The 1-spp gather needs accumulation to look smooth: too short and single "
+		"pixels 'fry', too long and a switched-off/occluded light lingers. ~6-12 is the balance; NRD default 30. (r_rtReStirDIHistory)" );
+	CvarSliderF( "History (ms)", r_rtReStirDIHistoryMs, 0.0f, 2000.0f, "%.0f ms", "History window in MILLISECONDS instead "
+		"of frames (converted per frame from a 0.2 s low-passed FPS), so the window is the same wall-clock time at 60 or "
+		"144 Hz. 0 = use History Length in frames. (r_rtReStirDIHistoryMs)" );
+	CvarSliderI( "Fast History", r_rtReStirDIRelaxFast, 1, 63, "ReLAX diffuseMaxFastAccumulatedFrameNum - the short 'fast' "
+		"history the long one is clamped to; the main built-in anti-lag. Remix direct light ships 1 ('to reduce trail'); NRD "
+		"default 6. (r_rtReStirDIRelaxFast)" );
+	CvarSliderF( "Fast Clamp", r_rtReStirDIFastClamp, 1.0f, 3.0f, "%.1f", "ReLAX fastHistoryClampingSigmaScale [1;3] - how "
+		"tightly the slow history is clamped to the fast one. Lower = less lag, more flicker. NRD default 2.0; the NRD sample "
+		"uses 1.5. (r_rtReStirDIFastClamp)" );
+	CvarCheckbox( "Anti-lag", r_rtReStirDIAntilag, "NRD's built-in luminance anti-lag. On = NRD defaults; off = inert (the "
+		"baseline NRD recommends for an initial integration and for the gradient confidence). (r_rtReStirDIAntilag)" );
+	CvarSliderF( "Disocclusion", r_rtReStirDIDisocclusion, 0.005f, 0.05f, "%.3f", "NRD disocclusionThreshold - relative "
+		"(slope-scaled) depth difference above which reprojected history is rejected as a different surface. Looser = fewer "
+		"FALSE resets on movers / the weapon, at some bleed across real depth edges. NRD range 0.01..0.02. (r_rtReStirDIDisocclusion)" );
 	ImGui::Spacing();
-	ImGui::TextDisabled( "NRD spatial cleanup (DI-specific)" );
-	CvarSliderI( "History Fix", r_rtReStirDIHistoryFix, 0, 8, "Frames of strong SPATIAL reconstruction where temporal "
-		"history is thin - a fresh disocclusion or a moving limb - i.e. the lever for noise on MOVING parts. NRD "
-		"default 3, clamped below the fast-history window (~5). 0 = keep NRD default. (r_rtReStirDIHistoryFix)" );
-	CvarSliderF( "Edge-Stop Relax", r_rtReStirDIEdgeStop, 0.0f, 16.0f, "%.1f", "Scales NRD's normal/plane edge-stopping. "
-		">1 lets the spatial passes blur ACROSS depth/normal edges - the only lever that reaches sub-pixel GRATE noise "
-		"the others can't, at the cost of softening that fine detail. 1 = NRD default; 0 = keep NRD default. "
-		"(r_rtReStirDIEdgeStop)" );
+	ImGui::TextDisabled( "NRD spatial (ReLAX A-trous)" );
+	CvarSliderI( "History Fix", r_rtReStirDIHistoryFix, 0, 8, "ReLAX historyFixFrameNum - frames of strong SPATIAL "
+		"reconstruction where temporal history is thin (a fresh disocclusion or a moving limb): the lever for noise on "
+		"MOVING parts. Clamped below the fast-history window. 0 = NRD default (3). (r_rtReStirDIHistoryFix)" );
+	CvarSliderF( "Prepass Blur", r_rtReStirDIRelaxPrepass, 0.0f, 100.0f, "%.0f px", "ReLAX diffusePrepassBlurRadius - a "
+		"pre-accumulation spatial blur for the 1-spp input. Remix direct light ships 0; NRD default 30. A few px can help "
+		"the no-spatial-reuse gather, but too large blobs sparse bright samples. (r_rtReStirDIRelaxPrepass)" );
+	CvarSliderF( "Phi Luminance", r_rtReStirDIRelaxPhi, 0.1f, 8.0f, "%.1f", "ReLAX diffusePhiLuminance - the A-trous "
+		"luminance edge-stopping sensitivity. Lower = sharper shadow edges, more residual noise. RTXDI sample 1.0, NRD "
+		"default 2.0. (r_rtReStirDIRelaxPhi)" );
+	CvarSliderI( "A-trous Iterations", r_rtReStirDIRelaxAtrous, 2, 8, "ReLAX atrousIterationNum [2;8] - the spatial filter "
+		"passes. More = cleaner but softer + costlier (this is the biggest ReLAX cost lever). NRD default 5; we ship 3. "
+		"(r_rtReStirDIRelaxAtrous)" );
+	CvarSliderI( "Variance History", r_rtReStirDIRelaxVarianceHist, 0, 10, "ReLAX spatialVarianceEstimationHistoryThreshold "
+		"- below this history length the variance is estimated spatially. RTXDI sample 1, NRD default 3. (r_rtReStirDIRelaxVarianceHist)" );
+	CvarSliderF( "Confidence Relax", r_rtReStirDIRelaxConfRelax, 0.0f, 2.0f, "%.2f", "ReLAX confidenceDrivenRelaxationMultiplier "
+		"- where the gradient confidence is low, relax the A-trous luminance / normal edge-stopping. Remix direct: 0.7. 0 = off. "
+		"(r_rtReStirDIRelaxConfRelax)" );
+	CvarSliderF( "Edge-Stop Relax", r_rtReStirDIEdgeStop, 0.0f, 16.0f, "%.1f", "Scales ReLAX's normal edge-stopping "
+		"(lobeAngleFraction). >1 lets the spatial passes blur ACROSS depth/normal edges - the only lever that reaches "
+		"sub-pixel GRATE noise the others can't, at the cost of softening that fine detail. 1 / 0 = no scaling. (r_rtReStirDIEdgeStop)" );
+	CvarCheckbox( "Anti-Firefly", r_rtReStirDIRelaxFirefly, "ReLAX enableAntiFirefly - clamps lone bright fireflies (+7-10% "
+		"ReLAX cost). NRD default off; Remix / the RTXDI sample ship it on. (r_rtReStirDIRelaxFirefly)" );
+	ImGui::Spacing();
+	ImGui::TextDisabled( "History Confidence (R1 temporal gradient)" );
+	CvarCheckbox( "Gradient Confidence", r_rtReStirDIGradient, "Re-shade last frame's chosen light at the reprojected "
+		"surface under this frame's lights, A-trous filter the change, and feed NRD IN_DIFF_CONFIDENCE so history is dropped "
+		"ONLY where the lighting really changed (RTXDI / Q2RTX recipe). The DI anti-lag; default on. (r_rtReStirDIGradient)" );
+	ImGui::BeginDisabled( !r_rtReStirDIGradient.GetBool() );
+	CvarSliderF( "  Power", r_rtReStirDIGradientPower, 1.0f, 32.0f, "%.0f", "Sharpening power of (1 - relative change) -> "
+		"confidence. Higher = a smaller change already rejects history. RTXDI / Remix 8. (r_rtReStirDIGradientPower)" );
+	CvarSliderF( "  Rise Smoothing", r_rtReStirDIGradientHistory, 0.0f, 32.0f, "%.0f", "Temporal smoothing (frames) applied "
+		"ONLY while confidence RISES after a change (drops apply at once). Our gather is fresh every frame, so 2 just bridges "
+		"gradient flicker; 0 = none. (r_rtReStirDIGradientHistory)" );
+	CvarSliderF( "  Floor", r_rtReStirDIGradientFloor, 0.0f, 1.0f, "%.2f", "Minimum confidence (ReLAX applies it directly). "
+		"Remix 0.1. (r_rtReStirDIGradientFloor)" );
+	CvarSliderF( "  Darkness Bias", r_rtReStirDIGradientBias, 0.0f, 1.0f, "%.3f", "Darkness bias added to the change's "
+		"denominator (RTXDI darknessBias) so dark-on-dark flicker does not read as a 100% change. (r_rtReStirDIGradientBias)" );
+	CvarSliderF( "  Deadzone", r_rtReStirDIGradientDeadzone, 0.0f, 0.9f, "%.2f", "Relative per-light change below which "
+		"nothing counts as a lighting change. 0.2 ignores Doom's authored 5-20% flicker; a light switching off is still a "
+		"100% change. (r_rtReStirDIGradientDeadzone)" );
+	CvarSliderF( "  Static Threshold", r_rtReStirDIGradientStatic, 0.0f, 16.0f, "%.1f", "Screen-space motion (full-res px) "
+		"below which a surface point is treated as static and re-shaded at its exact stored previous position, so a static "
+		"world under a static light compares bit-identical (no jitter frying). 0 = always current surface. (r_rtReStirDIGradientStatic)" );
+	CvarSliderI( "  Stratum", r_rtReStirDIGradientStratum, 2, 6, "One re-shade + one ray per NxN block of the gather res. "
+		"3 = RTXDI (1/9 of pixels); 5 = NRD's 1/5 res (~1/3 the cost). The A-trous reach scales with it. (r_rtReStirDIGradientStratum)" );
+	CvarSliderI( "  Filter Passes", r_rtReStirDIGradientFilterPasses, 0, 4, "A-trous passes over the gradient (strides "
+		"1/2/4/8). 4 = RTXDI (wide, smooth reset); 2 hugs a change tighter (a walking NPC's shadow edge); 0 = unfiltered. "
+		"(r_rtReStirDIGradientFilterPasses)" );
+	ImGui::EndDisabled();	// r_rtReStirDIGradient
 
 	ImGui::EndDisabled();	// r_rtReStirDI
 	ImGui::EndDisabled();	// rtCapable
