@@ -49,7 +49,7 @@
 //   u_particleRadius.zw   = per-view perforated box list device address (bit-cast; rt_perforated.glsl)
 //   u_shadowFalloffS.x    = forward light scale (backEnd.lightScale): the DI term is scaled here, not at the apply
 //   u_shadowFalloffS.y    = world size of one FULL-RES screen pixel per unit view depth (2/(proj00*viewW)): cookie LOD
-//   u_shadowFalloffS.w    = R2 ReLAX MODE (r_rtReStirDIDenoiser 1): loc 0 = LINEAR radiance + RAW hit distance (world units,
+//   u_shadowFalloffS.w    = R2 ReLAX MODE (DI is ReLAX-only since R6): loc 0 = LINEAR radiance + RAW hit distance (world units,
 //                           RELAX_FrontEnd_PackRadianceAndHitDist) instead of YCoCg + normalized; SH1 is the same direction * luminance
 //   u_shadowFalloffS.z    = SH MODE (r_rtReStirDISH): the per-light cosine N.L is NOT applied here; loc 3 carries SH1 =
 //                           direction * luminance (NRD REBLUR_FrontEnd_PackSh) and the apply re-resolves the cosine

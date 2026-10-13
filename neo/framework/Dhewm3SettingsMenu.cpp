@@ -4847,31 +4847,20 @@ static void DrawDbgGroup_ReStirDI()
 		"for a few extra taps. Inert at Full resolution. Off = the old bilinear look. (r_rtReStirDIBilateralUpscale)" );
 
 	// --- Noise suppression ---
-	// The first two mirror RT Global Illumination -> Noise Suppression exactly (same names + ranges): History
-	// Length and History Confidence. RTGI's third knob (Emissive Clamp) has no DI equivalent - DI gathers direct
-	// lights, not an emissive bounce. Below them are the NRD spatial levers RTGI does not need (its low-frequency
-	// bounce leans on resScale/checkerboard instead); DI's sharp 1-spp signal needs them for fine detail + motion.
+	// History Length mirrors RT Global Illumination -> Noise Suppression (same name + range). Below it are the NRD
+	// spatial levers RTGI does not need (its low-frequency bounce leans on resScale/checkerboard instead); DI's sharp
+	// 1-spp signal needs them for fine detail + motion. R6 trimmed the ReBLUR-only knobs (Prepass Blur, Blur Radius)
+	// and the dormant luminance History Confidence (the R1 gradient confidence replaced it) now DI is ReLAX-only.
 	ImGui::SeparatorText( "Noise Suppression" );
-	CvarSliderI( "History Length", r_rtReStirDIHistory, 2, 63, "Max frames NRD's ReBLUR accumulates for the DI "
+	CvarSliderI( "History Length", r_rtReStirDIHistory, 2, 63, "Max frames NRD accumulates for the DI "
 		"radiance. The 1-spp gather needs temporal accumulation to look smooth: too short and single pixels 'fry' "
 		"(noise/flicker), too long and a switched-off/occluded light lingers. ~6-12 is the balance; higher = smoother "
 		"but laggier. NRD's own default is 30. (r_rtReStirDIHistory)" );
-	CvarSliderF( "History Confidence", r_rtReStirDIConfidence, 0.0f, 16.0f, "%.1f", "Per-pixel history rejection where "
-		"this frame's DI disagrees with last frame's reprojected result (moving-light antilag). Default 0 (OFF): on DI's "
-		"noisy 1-spp signal the luminance metric misreads stable lit surfaces and 'fries' them; NRD's own antilag + the "
-		"weapon mask carry the temporal instead. >0 re-enables it (sensitivity) to compare trail behaviour. "
-		"(r_rtReStirDIConfidence)" );
 	ImGui::Spacing();
 	ImGui::TextDisabled( "NRD spatial cleanup (DI-specific)" );
-	CvarSliderF( "Prepass Blur", r_rtReStirDIPrepassBlur, 0.0f, 200.0f, "%.0f px", "NRD's pre-accumulation spatial "
-		"reuse blur, built for probabilistic 1-spp input. THE main lever for the residual noise on fine detail + "
-		"moving parts. NRD default 30; higher = cleaner but softer DI; 0 = keep NRD default. (r_rtReStirDIPrepassBlur)" );
 	CvarSliderI( "History Fix", r_rtReStirDIHistoryFix, 0, 8, "Frames of strong SPATIAL reconstruction where temporal "
 		"history is thin - a fresh disocclusion or a moving limb - i.e. the lever for noise on MOVING parts. NRD "
 		"default 3, clamped below the fast-history window (~5). 0 = keep NRD default. (r_rtReStirDIHistoryFix)" );
-	CvarSliderF( "Blur Radius", r_rtReStirDIBlurRadius, 0.0f, 200.0f, "%.0f px", "NRD's base (max) spatial denoise "
-		"radius, reduced over time as history converges. NRD default 30; higher = cleaner but softer; 0 = keep NRD "
-		"default. (r_rtReStirDIBlurRadius)" );
 	CvarSliderF( "Edge-Stop Relax", r_rtReStirDIEdgeStop, 0.0f, 16.0f, "%.1f", "Scales NRD's normal/plane edge-stopping. "
 		">1 lets the spatial passes blur ACROSS depth/normal edges - the only lever that reaches sub-pixel GRATE noise "
 		"the others can't, at the cost of softening that fine detail. 1 = NRD default; 0 = keep NRD default. "

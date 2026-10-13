@@ -1022,16 +1022,11 @@ extern idCVar r_rtReStirDICombineGI;		// ReSTIR DI gathers the RTGI bounce into 
 extern idCVar r_rtReStirDISH;				// ReSTIR DI: SH denoise (direction + full-res cosine resolve) so bump detail survives
 extern idCVar r_rtReStirDICandidates;		// ReSTIR DI: light candidates per pixel before the reservoir pick (0 = every light, exhaustive RIS)
 extern idCVar r_rtReStirDIDebug;			// ReSTIR DI debug view (1 = blit the DI irradiance - denoised when it ran, else raw - over the scene)
-extern idCVar r_rtReStirDIConfidence;		// ReSTIR DI NRD history-confidence sensitivity; 0 = off (default: it fries DI's noisier 1-spp signal; NRD antilag + weapon mask carry temporal)
-extern idCVar r_rtReStirDIPrepassBlur;		// ReSTIR DI NRD diffusePrepassBlurRadius (px): pre-accumulation spatial pre-blur for the 1-spp signal; main noise lever
 extern idCVar r_rtReStirDIHistoryFix;		// ReSTIR DI NRD historyFixFrameNum: spatial reconstruction frames where history is thin (moving parts)
-extern idCVar r_rtReStirDIBlurRadius;		// ReSTIR DI NRD maxBlurRadius (px): base spatial denoise radius
-extern idCVar r_rtReStirDIEdgeStop;			// ReSTIR DI NRD edge-stopping scale (lobeAngle + planeDistance); >1 blurs across detail edges (grates), costs detail
-extern idCVar r_rtReStirDIHistory;			// ReSTIR DI NRD ReBLUR history length (maxAccumFrames); DI's own, mirrors RTGI's r_rtgiHistory (2..63)
+extern idCVar r_rtReStirDIEdgeStop;			// ReSTIR DI NRD ReLAX edge-stopping scale (lobeAngle); >1 blurs across detail edges (grates), costs detail
+extern idCVar r_rtReStirDIHistory;			// ReSTIR DI NRD history length (maxAccumFrames); DI's own, mirrors RTGI's r_rtgiHistory (2..63)
 extern idCVar r_rtReStirDIHistoryMs;		// R0: DI history in ms (0 = frames)
-extern idCVar r_rtReStirDIFastHistory;		// R0: DI NRD maxFastAccumulatedFrameNum (6 = NRD default)
 extern idCVar r_rtReStirDIFastClamp;		// R0: DI NRD fastHistoryClampingSigmaScale (2.0 = NRD default)
-extern idCVar r_rtReStirDIStabilize;		// R0: DI NRD maxStabilizedFrameNum (63 = default, clamped to history; 0 = off)
 extern idCVar r_rtReStirDIAntilag;			// R0: DI NRD built-in antilag on/off (A/B baseline)
 extern idCVar r_rtReStirDIDisocclusion;	// R0: DI NRD disocclusionThreshold (0.01 = NRD default)
 extern idCVar r_rtReStirDIGradient;		// R1: temporal gradient confidence (re-shade last frame's light) -> NRD IN_DIFF_CONFIDENCE
@@ -1043,7 +1038,6 @@ extern idCVar r_rtReStirDIGradientDeadzone;	// R1: relative per-light change bel
 extern idCVar r_rtReStirDIGradientStatic;	// R1: static threshold (full-res px) for the exact previous-position re-shade
 extern idCVar r_rtReStirDIGradientStratum;	// R1: NxN stratum size (3 = RTXDI, 5 = NRD's 1/5 res)
 extern idCVar r_rtReStirDIGradientFilterPasses;	// R1: A-trous passes over the gradient (4 = RTXDI)
-extern idCVar r_rtReStirDIDenoiser;		// R2: 0 ReBLUR / 1 ReLAX for the DI denoise
 extern idCVar r_rtReStirDIRelaxFast;		// R2: ReLAX fast history (Remix direct 1)
 extern idCVar r_rtReStirDIRelaxPrepass;		// R2: ReLAX prepass blur px (Remix direct 0)
 extern idCVar r_rtReStirDIRelaxPhi;			// R2: ReLAX diffusePhiLuminance (RTXDI 1.0)

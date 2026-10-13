@@ -1104,7 +1104,7 @@ private:
 	uint32_t					nrdSlotCursor[FRAMES_IN_FLIGHT] = {};		// running CB/descriptor cursor within the frame
 	int							nrdW = 0, nrdH = 0;
 	bool						nrdSigma = false;		// R0: SIGMA_SHADOW is in the instance only when r_nrdSigma was set at create time
-	bool						nrdRelax = false;		// R2: RELAX_DIFFUSE(_SH) are in the instance only when r_rtReStirDIDenoiser was 1 at create time
+	bool						nrdRelax = false;		// R2: RELAX_DIFFUSE(_SH) are in the instance; R6: created whenever r_rtReStirDI was on at create time (DI is ReLAX-only)
 	bool						nrdPoolsReady = false;	// pool images transitioned to GENERAL
 	// per-denoiser history-primed flag, indexed by NRD_ID_* (REBLUR_AO 0 / SIGMA 1 / REBLUR_GI 2). A
 	// denoiser's temporal history lives in the shared permanent pool, which NrdCreate allocates but
@@ -2951,7 +2951,7 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	mixB( r_rtReStirDI ); mixB( r_rtReStirDIApply ); mixB( r_rtReStirDICheckerboard );
 	mixB( r_rtReStirDICombineGI ); mixI( r_rtReStirDIDebug );
 	mixB( r_nrdSigma );							// R0: changes the NRD instance's denoiser table (NrdCreate rebuild)
-	mixI( r_rtReStirDIDenoiser );				// R2: ReLAX pair in / out of the instance
+	// R6: DI is ReLAX-only; the ReLAX pair joins the instance whenever r_rtReStirDI is on (already mixed above)
 	mixB( r_rtReStirDIGradient ); mixI( r_rtReStirDIGradientStratum ); mixB( r_rtReStirDISH );	// R1: gradient / confidence / side-copy targets + the SH attachments
 	// resolution scales (resize the gather / denoise / reflection / FSR targets)
 	mixF( r_fsrScale ); mixF( r_rtgiResScale ); mixF( r_rtaoResScale ); mixF( r_ssrResScale ); mixF( r_rtReflResScale );
@@ -6729,7 +6729,7 @@ static const nrd::Identifier NRD_ID_REBLUR_AO     = 0;
 static const nrd::Identifier NRD_ID_SIGMA_SHADOW  = 1;
 static const nrd::Identifier NRD_ID_REBLUR_GI     = 2;	// H6b RT GI: REBLUR_DIFFUSE (radiance+hitdist), docs/rtx-rtgi.md
 static const nrd::Identifier NRD_ID_REBLUR_GI_SH  = 3;	// ReSTIR DI SH mode: REBLUR_DIFFUSE_SH (SH0 + SH1), docs/rtx-restir-di.md
-static const nrd::Identifier NRD_ID_RELAX_DI      = 4;	// R2: ReSTIR DI on RELAX_DIFFUSE (r_rtReStirDIDenoiser 1), docs/rtx-restir-di.md Plan R2
+static const nrd::Identifier NRD_ID_RELAX_DI      = 4;	// R2: ReSTIR DI on RELAX_DIFFUSE (DI is ReLAX-only since R6), docs/rtx-restir-di.md Plan R2
 static const nrd::Identifier NRD_ID_RELAX_DI_SH   = 5;	// R2: RELAX_DIFFUSE_SH
 
 // nrd::Format -> VkFormat, table-ordered exactly like the enum in NRDDescs.h
@@ -6771,7 +6771,7 @@ recording here.
 */
 bool VulkanBackend::NrdCreate( int w, int h ) {
 	const bool wantSigma = r_nrdSigma.GetBool();
-	const bool wantRelax = r_rtReStirDIDenoiser.GetInteger() == 1;		// R2: the ReLAX pair costs pipelines + pools, so only on request
+	const bool wantRelax = r_rtReStirDI.GetBool();		// R6: DI is ReLAX-only, so the ReLAX pair joins the instance whenever DI is on
 	if ( nrdInstance != NULL && nrdW == w && nrdH == h && nrdSigma == wantSigma && nrdRelax == wantRelax ) {
 		return true;
 	}

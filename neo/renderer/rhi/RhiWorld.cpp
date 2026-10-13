@@ -493,8 +493,6 @@ static bool  rhiPrepassWeaponDeferred = false;	// this view's phase-0 prepass sk
 static bool  rhiWorldDepthThisView = false;		// globalImages->worldDepthImage holds this view's world-only depth
 static bool  rhiReStirDIApplyThisView = false;		// Stage D (r_rtReStirDIApply): DI LIGHTS this view - the apply runs and the forward loop skips the covered lights' opaque draws
 static bool  rhiReStirDIAppliedThisView = false;	// the additive apply already ran this view (idempotent across the split / fallback call sites)
-static rhi::RenderTargetHandle rhiReStirDIConfRT = 0;	// DI history-confidence (R16F), reusing rtgi_confidence.frag
-static int   rhiReStirDIConfW = 0, rhiReStirDIConfH = 0;
 static rhi::RenderTargetHandle rhiReStirDIGuideRT = 0;	// checkerboard full-res NRD guides (viewZ/normal), reusing rtgi_guides.frag
 static int   rhiReStirDIGuideW = 0, rhiReStirDIGuideH = 0;
 static rhi::RenderTargetHandle rhiReStirDIVelRT = 0;	// velocity downsampled to the gather res for NRD IN_MV (resScale < 1)
@@ -4032,7 +4030,6 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
 	rhiReStirDIRT = 0;			rhiReStirDIW = rhiReStirDIH = 0;	// ReSTIR DI target stale after a lost context
-	rhiReStirDIConfRT = 0;		rhiReStirDIConfW = rhiReStirDIConfH = 0;
 	rhiReStirDIGuideRT = 0;		rhiReStirDIGuideW = rhiReStirDIGuideH = 0;
 	rhiReStirDIVelRT = 0;		rhiReStirDIVelW = rhiReStirDIVelH = 0;
 	rhiReStirDIPrevValid = false;								// no valid reprojection history across a lost context
@@ -7295,6 +7292,9 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	backEnd.currentScissor = viewDef->scissor;
 }
 
+// R6: fwd decl - RtaoPass / RtgiPass (below) end their target-pass chain with it, but it is defined later.
+static void RB_RHI_ApplyViewScissor( rhi::RHI *r, const viewDef_t *viewDef );
+
 /*
 ===================
 RB_RHI_RtaoPass
@@ -7575,8 +7575,8 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiRtaoPrevValid = true;
 
 	RB_RHI_ForgetTexBinds();
-	backEnd.currentScissor = viewDef->scissor;
-}
+	RB_RHI_ApplyViewScissor( r, viewDef );	// R6: re-apply the live scissor (cache + hw); a bare cache write leaves the
+}											// last zfill surface's rect live, clipping a later Equals-cache draw (the weapon-dark bug class)
 
 /*
 ===================
@@ -7890,7 +7890,7 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiRtgiPrevValid = true;
 
 	RB_RHI_ForgetTexBinds();
-	backEnd.currentScissor = viewDef->scissor;
+	RB_RHI_ApplyViewScissor( r, viewDef );	// R6: re-apply the live scissor (cache + hw), see RB_RHI_RtaoPass
 }
 
 /*
@@ -7988,7 +7988,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiReStirDIGatherPrevValid = false;
 	}
 	rhiReStirDIShThisView = shMode;
-	const bool relaxMode = r_rtReStirDIDenoiser.GetInteger() == 1;		// R2: ReLAX encoding in the gather, ReLAX in the denoise
+	const bool relaxMode = true;		// R6: DI is ReLAX-only (ReBLUR path removed for DI; ReBLUR still serves RTAO/RTGI). ReLAX = the gather's encoding + the denoise
 	rhiReStirDIRelaxThisView = relaxMode;
 
 	float invView[16];
@@ -8173,9 +8173,9 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			nrdVel = r->GetRenderTargetImage( rhiReStirDIVelRT );
 		}
 	}
-	int diMainF = 0, diFastF = 0;		// REBLUR history cap (DI's own; mirrors RTGI's History Length); R0: r_rtReStirDIHistoryMs
+	int diMainF = 0, diFastF = 0;		// NRD history cap (DI's own; mirrors RTGI's History Length); R0: r_rtReStirDIHistoryMs
 	RB_RHI_NrdHistoryFrames( r_rtReStirDIHistory.GetInteger(), r_rtReStirDIHistoryMs.GetFloat(),
-		r_rtReStirDIFastHistory.GetInteger(), diMainF, diFastF );
+		0, diMainF, diFastF );		// R6: DI is ReLAX-only; the fast history comes from r_rtReStirDIRelaxFast below (diFastF unused)
 	const bool diCut = RB_RHI_NrdHistoryReset( viewDef );
 
 	// ---- R3a disocclusion boost (docs/rtx-restir-di.md Plan R3, r_rtReStirDIBoost): K picks + rays on YOUNG pixels. Needs
@@ -8480,41 +8480,10 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// is kept (grainy) and the debug overlay shows that. Also needs the velocity MRT for NRD IN_MV (diVelImg /
 	// nrdVel / nrdFree were resolved above, before the gradient chain).
 	if ( diVelImg != 0 && nrdFree ) {
-		// history-confidence pass — reuse rtgi_confidence.frag verbatim (it is signal-agnostic: YCoCg current +
-		// prev-denoised + velocity). Reproject last frame's DENOISED DI by the motion vectors, compare luminance
-		// to this frame's raw gather, and drop confidence where the lighting moved over intact geometry
-		// (moving-light antilag) — the trail killer. Needs a prior DI-denoised frame (rhiReStirDIPrevValid).
-		rhi::ImageHandle diConfImg = diGradConfImg;					// R1: the gradient confidence when it ran
-		const rhi::ImageHandle diPrevDenoised = r->GetRtgiOutputImage();
-		if ( diConfImg == 0 && r_rtReStirDIConfidence.GetFloat() > 0.0f && rhiReStirDIPrevValid && diPrevDenoised != 0 ) {
-			if ( rhiReStirDIConfRT && r->GetRenderTargetImage( rhiReStirDIConfRT ) == 0 ) { rhiReStirDIConfRT = 0; rhiReStirDIConfW = rhiReStirDIConfH = 0; }
-			if ( rhiReStirDIConfRT && ( rhiReStirDIConfW != rw || rhiReStirDIConfH != rh ) ) { r->DestroyRenderTarget( rhiReStirDIConfRT ); rhiReStirDIConfRT = 0; rhiReStirDIConfW = rhiReStirDIConfH = 0; }
-			if ( !rhiReStirDIConfRT ) {
-				rhiReStirDIConfRT = r->CreateRenderTarget( rhi::IF_R16F, rw, rh );
-				if ( rhiReStirDIConfRT ) { rhiReStirDIConfW = rw; rhiReStirDIConfH = rh; }
-			}
-			rhi::ShaderHandle confProg = rhiReStirDIConfRT ? r->LoadShader( "rtgi_confidence" ) : 0;
-			if ( confProg != 0 ) {
-				rhi::RenderParams confParms;
-				memset( &confParms, 0, sizeof( confParms ) );
-				confParms.mvpMatrix[0] = confParms.mvpMatrix[5] = confParms.mvpMatrix[10] = confParms.mvpMatrix[15] = 1.0f;
-				confParms.screenCorrection[0] = 1.0f / rw;			// texel size for the 3x3 tap of the noisy current signal
-				confParms.screenCorrection[1] = 1.0f / rh;
-				confParms.localParam0[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtReStirDIConfidence.GetFloat() );	// sensitivity (off by default; it fries DI's noisier signal)
-				confParms.localParam0[1] = 0.2f;					// confidence floor (anti-frying backstop; DI value if re-enabled)
-				confParms.localParam0[2] = 0.5f;					// noise deadzone (wider than GI's 0.35; DI value if re-enabled)
-				confParms.localParam0[3] = cbParity;				// checkerboard parity: confidence computed only for this frame's traced cells
-				confParms.windowCoord[2] = -1.0f;					// VK top-down: flip the velocity row (ssr_temporal convention)
-				r->GpuScopeBegin( "restir.di.conf" );		// r_vkGpuTime 2: history-confidence pass
-				r->BeginTargetPass( rhiReStirDIConfRT, NULL );
-				RB_RHI_BindRTImage( r, 1, diPrevDenoised );			// unit 1 = last frame's denoised DI (YCoCg)
-				RB_RHI_BindRTImage( r, 2, nrdVel );					// unit 2 = motion vectors at the gather res
-				RB_RHI_DrawFullscreen( r, confProg, confParms, r->GetRenderTargetImage( rhiReStirDIRT ) );	// unit 0 = this frame's raw gather
-				r->EndPass();
-				r->GpuScopeEnd();
-				diConfImg = r->GetRenderTargetImage( rhiReStirDIConfRT );
-			}
-		}
+		// DI history confidence fed to NRD (IN_DIFF_CONFIDENCE) = the R1 gradient (r_rtReStirDIGradient) when it ran this
+		// frame, else none. The old luminance-confidence fallback (rtgi_confidence.frag reuse, r_rtReStirDIConfidence) was
+		// trimmed at R6 - it measured noise on the raw 1-spp signal; the gradient measures the actual lighting change.
+		rhi::ImageHandle diConfImg = diGradConfImg;					// R1: the gradient confidence (0 = none this frame)
 
 		// Checkerboard NRD guides: the half-packed gather can't carry per-reconstructed-cell guides, so a ray-free
 		// pass (reuse rtgi_guides.frag; signal-agnostic - depth+normal -> att1 viewZ / att2 normal) fills a full
@@ -8569,29 +8538,25 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.jitterPrevY = rhiReStirDIPrevValid ?  rhiReStirDIPrevJitter[1] * resScale : da.jitterY;
 		da.mvScaleX = -1.0f;	da.mvScaleY = 1.0f;			// engine (currUV-prevUV)*0.5 +Y-up -> NRD 2D screen-space
 		da.hitDistA = 0.5f * diHitScale;	da.hitDistB = 0.1f;	// MUST match restir_di.frag's nhd normalization
-		da.maxAccumFrames = diMainF;							// REBLUR history cap (hoisted above: R0 seconds-based, fast scales along)
-		da.fastFrames     = diFastF;
+		da.maxAccumFrames = diMainF;							// history cap (hoisted above: R0 seconds-based) - ReLAX diffuseMaxAccumulatedFrameNum
 		rhiReStirDIHistFrames = diMainF;						// the debug overlay's history-length ramp divides by this
-		// R0 lag knobs (docs/rtx-restir-di.md Plan R0): all default to today's effective values
-		da.fastClampSigma   = r_rtReStirDIFastClamp.GetFloat();
-		da.stabilizedFrames = ( r_rtReStirDIStabilize.GetInteger() > 0 ) ? r_rtReStirDIStabilize.GetInteger() : -1;	// 0 = pass off
+		// lag knobs still read by ReLAX (default to today's effective values); the ReBLUR-only ones were trimmed at R6
+		da.fastClampSigma   = r_rtReStirDIFastClamp.GetFloat();	// ReLAX fastHistoryClampingSigmaScale
 		da.antilagOff       = !r_rtReStirDIAntilag.GetBool();
 		da.disocclusionThreshold = r_rtReStirDIDisocclusion.GetFloat();	// 0.01 = NRD default
 		da.returnHistoryLength = true;							// .w = accumulated frames (debug view 4; R3's disocclusion boost)
 		da.validation       = ( r_rtReStirDIDebug.GetInteger() == 3 );	// NRD's validation overlay for debug view 3
 		// R2 (Plan R2): ReLAX family + its settings (Remix direct-light preset / RTXDI sample as the starting values)
-		da.denoiser            = relaxMode ? 1 : 0;
-		if ( relaxMode ) { da.fastFrames = r_rtReStirDIRelaxFast.GetInteger(); }	// Remix direct: 1 ("to reduce trail"); ReBLUR keeps r_rtReStirDIFastHistory
+		da.denoiser            = 1;								// R6: DI is ReLAX-only
+		da.fastFrames          = r_rtReStirDIRelaxFast.GetInteger();	// ReLAX diffuseMaxFastAccumulatedFrameNum (Remix direct: 1, "to reduce trail")
 		da.relaxPrepass        = r_rtReStirDIRelaxPrepass.GetFloat();
 		da.relaxPhiLuminance   = r_rtReStirDIRelaxPhi.GetFloat();
 		da.relaxAtrous         = r_rtReStirDIRelaxAtrous.GetInteger();
 		da.relaxVarianceHistory = r_rtReStirDIRelaxVarianceHist.GetInteger();
 		da.relaxConfRelax      = r_rtReStirDIRelaxConfRelax.GetFloat();
 		da.relaxAntiFirefly    = r_rtReStirDIRelaxFirefly.GetBool();
-		// DI spatial-cleanup overrides (fight the 1-spp noise NRD leaves on fine detail + moving limbs). 0 = NRD default.
-		da.prepassBlurRadius  = r_rtReStirDIPrepassBlur.GetFloat();	// diffusePrepassBlurRadius: the main lever for probabilistic 1-spp input
+		// DI spatial-cleanup overrides still read by ReLAX (the ReBLUR-only prepass/blur-radius were trimmed at R6). 0 = NRD default.
 		da.historyFixFrameNum = r_rtReStirDIHistoryFix.GetInteger();	// spatial reconstruction on thin/disoccluded (moving) history
-		da.maxBlurRadius      = r_rtReStirDIBlurRadius.GetFloat();	// base spatial denoise radius
 		da.edgeStopScale      = r_rtReStirDIEdgeStop.GetFloat();		// >1 blurs across detail edges (grate-noise lever; costs detail)
 		da.confImage = diConfImg;							// IN_DIFF_CONFIDENCE (0 = not provided this frame)
 		da.denoisingRange = 20000.0f;

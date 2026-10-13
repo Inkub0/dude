@@ -237,7 +237,7 @@ struct RtaoDenoiseArgs {
 	bool	validation;					// run NRD's validation pass into GetNrdValidationImage() (RGBA8 overlay: accumulated frames / resets / antilag)
 	// R2 (docs/rtx-restir-di.md Plan R2): the denoiser family for giMode. 0 = ReBLUR (REBLUR_DIFFUSE / _SH, YCoCg + normalized
 	// hitDist in, YCoCg out), 1 = ReLAX (RELAX_DIFFUSE / _SH, LINEAR radiance + RAW hitDist in; linear out, or YCoCg SH0 in SH
-	// mode) - NRD: "RELAX ... has been designed for RTXDI". Needs the instance created with ReLAX (r_rtReStirDIDenoiser).
+	// mode) - NRD: "RELAX ... has been designed for RTXDI". Needs the instance created with ReLAX (DI is ReLAX-only since R6).
 	int		denoiser;
 	float	relaxPrepass;				// RELAX diffusePrepassBlurRadius (px); Remix direct: 0 (ours is a spatial-reuse-free gather, so this is the only pre-blur)
 	float	relaxPhiLuminance;			// RELAX diffusePhiLuminance (A-trous luminance edge stopping; NRD 2.0, RTXDI sample 1.0); 0 = default
