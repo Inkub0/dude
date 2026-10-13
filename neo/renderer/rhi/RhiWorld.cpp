@@ -8052,7 +8052,9 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const bool diApply = r_rtReStirDIApply.GetBool() && !r_rtReStirDIDebug.GetBool()
 		&& diAlbedoImg != 0 && diMatImg != 0 && r->LoadShader( "restir_di_apply" ) != 0;
 	parms.localParam1[1] = r_pbr.GetBool() ? 1.0f : 0.0f;				// GGX metalness workflow vs Lambert-only
-	parms.localParam1[3] = diApply ? 1.0f : 0.0f;						// apply mode
+	// apply mode + the cheap-RIS-target flag packed in one slot: 0 = no apply, 1 = apply + cheap target, 2 = apply + full target.
+	// Existing applyMode readers key on > 0.5, so 1 and 2 both read as "apply"; only the gather's candidate loop splits 1 vs 2.
+	parms.localParam1[3] = diApply ? ( r_rtReStirDICheapTarget.GetBool() ? 1.0f : 2.0f ) : 0.0f;
 	parms.diffuseModifier[0] = 1.0f - r_pbrMetalDiffuse.GetFloat();		// kd (interaction.frag u_pbrParms2.x)
 	parms.diffuseModifier[1] = r_pbrSpecScale.GetFloat();				// dielectric-weighted lobe scale (u_pbrParms.w)
 	parms.diffuseModifier[2] = r_pbrFireflyClamp.GetFloat();			// lobe ceiling (u_localParam1.w there)

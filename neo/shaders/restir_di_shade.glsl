@@ -76,7 +76,12 @@ bool diSurfaceAt( vec2 sfrag, bool applyMode, bool pbr, out DiSurface s, out flo
 // The UNSHADOWED, NOT-demodulated contribution of light li at surface s: colour * cookie/falloff * N.L, times the
 // material response in apply mode (interaction.frag's PBR combine, per unit light). false = the light cannot reach
 // (out of range / fast light on the forward path / N.L <= 0 / zero attenuation); contrib is 0 then.
-bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
+// targetOnly = compute the RIS TARGET only: the unshadowed irradiance (colour * cookie/falloff * N.L), SKIPPING the
+// apply-mode GGX material response. The target function may be any cheap positive approximation (the material is a
+// per-pixel-constant-ish factor that barely changes the pick), so the gather weighs its ~38 candidates with this and
+// re-shades only the WINNER at full material - the big gather cost lever. false = the full shade (the chosen pixel, the
+// boost picks, the gradient), which stays exactly as before.
+bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, out vec3 ldir, out float dl, out float ndl, bool targetOnly ) {
 	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	if ( !dudeLightInRange( lights, li, s.Pw ) ) { return false; }				// cheap volume-sphere cull
 	if ( ( lights.l[ li ].flags & DUDE_LIGHT_DIFORWARD ) != 0u ) { return false; }	// fast-changing light: the forward path lights it
@@ -89,7 +94,7 @@ bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, o
 		? dudeLightAttenTex( lights, li, s.Pw, dl, lights.l[ li ].flags, true, false, s.d * u_shadowFalloffS.y )
 		: vec3( dudeLightAtten( lights, li, s.Pw, dl, lights.l[ li ].flags, true, false ) );
 	contrib = lights.l[ li ].color * ( atten * ndl );							// irradiance-like: colour * cookie/falloff * N.L
-	if ( s.applyMode ) {
+	if ( s.applyMode && !targetOnly ) {
 		vec3 f;
 		if ( s.pbr ) {
 			vec3  H     = normalize( ldir + s.Vw );

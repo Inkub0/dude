@@ -239,7 +239,7 @@ void main() {
 		}
 		if ( curRowPlus1 != 0u ) {
 			vec3 c, ld; float dl, ndl;
-			if ( diShadeLight( lights, curRowPlus1 - 1u, Sp, c, ld, dl, ndl ) ) {
+			if ( diShadeLight( lights, curRowPlus1 - 1u, Sp, c, ld, dl, ndl, false ) ) {
 				float vis = ( ( lights.l[ curRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
 					? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, occDist );
 				Lnow = diGradientLuminance( c, Sp.B, vis );
@@ -261,7 +261,7 @@ void main() {
 		}
 		if ( prevRowPlus1 != 0u ) {
 			vec3 c, ld; float dl, ndl;
-			if ( diShadeLight( prevLights, prevRowPlus1 - 1u, Sp, c, ld, dl, ndl ) ) {
+			if ( diShadeLight( prevLights, prevRowPlus1 - 1u, Sp, c, ld, dl, ndl, false ) ) {
 				float vis = ( ( prevLights.l[ prevRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
 					? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, occDist );		// current TLAS: an approximation for movers
 				Lprev = diGradientLuminance( c, Sp.B, vis );

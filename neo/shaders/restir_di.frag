@@ -168,6 +168,9 @@ void main() {
 	// checkerboard mode these gather-written guides are ignored (NRD reads the full-res guide pass instead).
 	const bool applyMode = u_localParam1.w > 0.5;
 	const bool pbr       = u_localParam1.y > 0.5;
+	// cheap RIS target (r_rtReStirDICheapTarget): weigh the ~38 candidates with the unshadowed irradiance (no GGX) and
+	// full-shade only the winner. u_localParam1.w encodes it: 0 = debug/no-apply, 1 = apply + cheap target, 2 = apply + full.
+	const bool cheapTarget = u_localParam1.w > 0.5 && u_localParam1.w < 1.5;
 	DiSurface S;
 	float raw;
 	vec4  nt;
@@ -258,12 +261,7 @@ void main() {
 #endif
 
 	float wSum        = 0.0;
-	float pHatChosen  = 0.0;
-	vec3  radChosen   = vec3( 0.0 );
-	vec3  contribChosen = vec3( 0.0 );			// R1: the chosen light's shaded contribution (with cosine), for the gradient luminance
-	vec3  ldirChosen  = vec3( 0.0 );
-	float dlChosen    = 0.0;
-	uint  flagsChosen = 0u;
+	float pHatChosen  = 0.0;					// the TARGET (cheap irradiance or full shade) of the chosen, for the RIS weight W
 	uint  rowChosen   = 0u;						// R1: chosen light's row + 1 (0 = none)
 	for ( uint i = 0u; i < draws; i++ ) {
 		uint li = i;
@@ -273,25 +271,17 @@ void main() {
 		}
 		vec3  ldir, contrib;
 		float dl, ndl;
-		vec3  rad = vec3( 0.0 );
 		float pHat = 0.0;
-		// the light's colour * cookie/falloff * N.L * (apply mode) the material response - restir_di_shade.glsl, the
-		// one implementation the gradient pass re-shades with. false = cannot reach (culled / forward-path / N.L <= 0)
-		if ( diShadeLight( lights, li, S, contrib, ldir, dl, ndl ) ) {
-			pHat = dot( contrib, vec3( 0.2126, 0.7152, 0.0722 ) );		// luminance target on the SHADED contribution
-			// SH mode: carry the contribution WITHOUT this (reduced-res) normal's cosine; the apply re-applies the
-			// cosine of the full-res bump normal to the denoised direction (ndl floored so the GGX 1/ndl can't blow up)
-			rad  = ( shMode ? contrib / max( ndl, 0.05 ) : contrib ) / B;	// demodulated (B = 1 outside apply mode)
+		// RIS TARGET only: the cheap unshadowed irradiance (no GGX material) when cheapTarget, else the full shade. The
+		// winner is re-shaded at full material once AFTER the loop, so a pixel pays ~38 cheap targets + 1 full GGX instead
+		// of ~38 full GGX evals. false = cannot reach (culled / forward-path / N.L <= 0).
+		if ( diShadeLight( lights, li, S, contrib, ldir, dl, ndl, cheapTarget ) ) {
+			pHat = dot( contrib, vec3( 0.2126, 0.7152, 0.0722 ) );		// luminance of the target
 		}
 		float w    = exhaustive ? pHat : pHat * float( nLights );	// pHat / candidate pdf
 		wSum += w;
 		if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
 			pHatChosen  = pHat;
-			radChosen   = rad;
-			contribChosen = contrib;
-			ldirChosen  = ldir;
-			dlChosen    = dl;
-			flagsChosen = lights.l[ li ].flags;
 			rowChosen   = li + 1u;
 		}
 #if DI_BOOST
@@ -307,9 +297,22 @@ void main() {
 		fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return;									// no reaching light (and no bounce to add)
 	}
 
-	// unbiased contribution weight W = (1/pHat(y))·(wSum/M) (wSum/1 when every light was weighed once); one
-	// visibility ray for the chosen light. pHat stays UNSHADOWED, so rad(y)·W·vis is still unbiased for the
-	// shadowed sum. NOSHADOWS lights skip the ray.
+	// full-shade the WINNER once (targetOnly = false): its real GGX contribution drives the radiance + the gradient
+	// luminance, and its ldir/dl the visibility ray. In full-target mode this reproduces the loop's shade exactly.
+	vec3  radChosen     = vec3( 0.0 );
+	vec3  contribChosen = vec3( 0.0 );			// R1: the chosen light's shaded contribution (with cosine), for the gradient luminance
+	vec3  ldirChosen    = vec3( 0.0 );
+	float dlChosen      = 0.0;
+	uint  flagsChosen   = 0u;
+	if ( pHatChosen > 0.0 ) {
+		float ndlC;
+		diShadeLight( lights, rowChosen - 1u, S, contribChosen, ldirChosen, dlChosen, ndlC, false );
+		radChosen   = ( shMode ? contribChosen / max( ndlC, 0.05 ) : contribChosen ) / B;	// demodulated (B = 1 outside apply mode)
+		flagsChosen = lights.l[ rowChosen - 1u ].flags;
+	}
+
+	// unbiased contribution weight W = (1/pHat(y))·(wSum/M): pHat is the TARGET (cheap or full), f(y) = the full shade
+	// above, so rad(y)·W·vis stays unbiased. One visibility ray for the chosen light; NOSHADOWS lights skip it.
 	float W   = ( pHatChosen > 0.0 ) ? ( wSum / ( exhaustive ? 1.0 : float( draws ) ) ) / pHatChosen : 0.0;
 	float occDist = dlChosen;
 	float vis = ( !( pHatChosen > 0.0 ) || ( flagsChosen & DUDE_LIGHT_NOSHADOWS ) != 0u )
@@ -328,10 +331,13 @@ void main() {
 			if ( pickB[k] == 0u ) { continue; }
 			uint lk = pickB[k] - 1u;
 			vec3 c, ld; float dl, ndl;
-			if ( !diShadeLight( lights, lk, S, c, ld, dl, ndl ) ) { continue; }
+			// the TARGET pHat (cheap or full, consistent with wSum) for Wk, then the full shade for the radiance
+			if ( !diShadeLight( lights, lk, S, c, ld, dl, ndl, cheapTarget ) ) { continue; }
 			float pH = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
 			if ( !( pH > 0.0 ) ) { continue; }
-			vec3  rk = ( shMode ? c / max( ndl, 0.05 ) : c ) / B;
+			vec3  cF = c;	float ndlF = ndl;
+			if ( cheapTarget ) { vec3 ldF; float dlF; diShadeLight( lights, lk, S, cF, ldF, dlF, ndlF, false ); }
+			vec3  rk = ( shMode ? cF / max( ndlF, 0.05 ) : cF ) / B;
 			float Wk = ( wSum / ( exhaustive ? 1.0 : float( draws ) ) ) / pH;
 			float od;
 			float visK = ( ( lights.l[ lk ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ld, dl, od );

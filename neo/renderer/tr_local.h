@@ -1021,6 +1021,7 @@ extern idCVar r_rtReStirDIDynamicForward;	// ReSTIR DI: keep first-person weapon
 extern idCVar r_rtReStirDICombineGI;		// ReSTIR DI gathers the RTGI bounce into its own buffer: one NRD denoise + one apply for direct + indirect
 extern idCVar r_rtReStirDISH;				// ReSTIR DI: SH denoise (direction + full-res cosine resolve) so bump detail survives
 extern idCVar r_rtReStirDICandidates;		// ReSTIR DI: light candidates per pixel before the reservoir pick (0 = every light, exhaustive RIS)
+extern idCVar r_rtReStirDICheapTarget;		// ReSTIR DI: cheap RIS target (irradiance, no GGX) for the candidate loop; full-shade only the winner
 extern idCVar r_rtReStirDIDebug;			// ReSTIR DI debug view (1 = blit the DI irradiance - denoised when it ran, else raw - over the scene)
 extern idCVar r_rtReStirDIHistoryFix;		// ReSTIR DI NRD historyFixFrameNum: spatial reconstruction frames where history is thin (moving parts)
 extern idCVar r_rtReStirDIEdgeStop;			// ReSTIR DI NRD ReLAX edge-stopping scale (lobeAngle); >1 blurs across detail edges (grates), costs detail
