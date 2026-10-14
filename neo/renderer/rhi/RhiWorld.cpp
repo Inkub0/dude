@@ -4848,11 +4848,24 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 				diSpecImg = sst->texture.image;
 				break;
 			}
+			// keep the BRIGHTEST live diffuse stage, not the first. A death / transformation CROSSFADE carries two
+			// diffuse stages whose colours sum to the visible face (female_npc/poppy: poppy.tga * (1-death_fade) +
+			// poppyfx1.tga * death_fade); the forward path draws both additively, but the deferred albedo can carry only
+			// ONE, and taking the first captured poppy.tga * (1-death_fade), which fades to BLACK as the second fades in
+			// - so the DI apply remodulated her transforming face to nothing (2026-10-14). The brightest live stage is
+			// the one actually on screen, so the deferred albedo follows the crossfade.
+			float bestDiffLum = -1.0f;
 			for ( int s = 0; s < shader->GetNumStages(); s++ ) {
 				const shaderStage_t *dst = shader->GetStage( s );
 				if ( dst->lighting != SL_DIFFUSE || dst->texture.image == NULL || regs[dst->conditionRegister] == 0 ) {
 					continue;
 				}
+				const float diffLum = Max( regs[dst->color.registers[0]], 0.0f ) + Max( regs[dst->color.registers[1]], 0.0f )
+				                    + Max( regs[dst->color.registers[2]], 0.0f );
+				if ( diffLum <= bestDiffLum ) {
+					continue;
+				}
+				bestDiffLum = diffLum;
 				rtgiDiffuseImg = dst->texture.image;
 				// the stage colour (R_SetDrawInteraction: the colour registers, floored at 0) and the vertex-colour
 				// mode, exactly as RB_RHI_DrawInteraction hands them to the interaction shaders
@@ -4882,7 +4895,6 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 					parms.diffuseMatrixS[0] = 1.0f; parms.diffuseMatrixS[1] = 0.0f; parms.diffuseMatrixS[3] = 0.0f;
 					parms.diffuseMatrixT[0] = 0.0f; parms.diffuseMatrixT[1] = 1.0f; parms.diffuseMatrixT[3] = 0.0f;
 				}
-				break;
 			}
 		}
 
@@ -9414,7 +9426,14 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	rhi::RenderTargetHandle srcRT = ( mode >= 3 ) ? rhiNormalResultRT : rhiSsaoResultRT;
-	if ( !srcRT || r->GetRenderTargetImage( srcRT ) == 0 ) {
+	if ( !srcRT ) {
+		return;
+	}
+	// mode 4: the receiver-albedo attachment (att4) the ReSTIR DI apply remodulates by - shown as raw rgb
+	// (reuse the mode-3 rgb path in ssao_debug.frag). If the face is black here but correct in mode 3 (normal),
+	// the surface's material never reached the deferred G-buffer (RhiWorld.cpp, 2026-10-14 head-entity hunt).
+	const rhi::ImageHandle srcImg = ( mode == 4 ) ? r->GetRenderTargetImage4( srcRT ) : r->GetRenderTargetImage( srcRT );
+	if ( srcImg == 0 ) {
 		return;
 	}
 	rhi::ShaderHandle prog = r->LoadShader( "ssao_debug" );
@@ -9428,7 +9447,7 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
-	parms.localParam0[0] = (float)mode;		// 1 = AO, 2 = bent normal, 3 = normal G-buffer
+	parms.localParam0[0] = ( mode == 4 ) ? 3.0f : (float)mode;	// 1 = AO, 2 = bent normal, 3 = normal G-buffer, 4 = albedo (rgb path)
 
 	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
 	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
@@ -9436,7 +9455,7 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
 	backEnd.currentScissor = viewDef->scissor;
 
-	RB_RHI_DrawFullscreen( r, prog, parms, r->GetRenderTargetImage( srcRT ) );
+	RB_RHI_DrawFullscreen( r, prog, parms, srcImg );
 
 	// direct bind above; forget the tmu cache so later 2D/GUI binds re-issue
 	RB_RHI_ForgetTexBinds();
