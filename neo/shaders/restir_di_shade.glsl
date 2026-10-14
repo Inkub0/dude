@@ -61,7 +61,11 @@ bool diSurfaceAt( vec2 sfrag, bool applyMode, bool pbr, out DiSurface s, out flo
 		float rough = clamp( mt.r, 0.03, 1.0 );
 		s.metal  = mt.g;
 		s.kd     = u_diffuseModifier.x;
-		s.B      = diDemodFactor( s.albedo, s.metal, mt.b, s.kd, u_diffuseModifier.y );
+		// specReshade (u_shadowFalloffS.z == 2): the buffer is DIFFUSE-ONLY, so demodulate by the diffuse share alone -
+		// the apply rebuilds the specular at full res. Else the combined diffuse+specular demod (the plain path).
+		s.B      = ( u_shadowFalloffS.z > 1.5 )
+		         ? max( s.albedo * ( 1.0 - s.metal * s.kd ), vec3( 0.02 ) )
+		         : diDemodFactor( s.albedo, s.metal, mt.b, s.kd, u_diffuseModifier.y );
 		s.Vw     = normalize( u_modelViewMatrix[3].xyz - s.Pw );				// camera (inverse view translation) -> surface
 		s.NdotV  = max( dot( s.Nw, s.Vw ), 1e-4 );
 		float a  = rough * rough;
@@ -96,7 +100,9 @@ bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, o
 	contrib = lights.l[ li ].color * ( atten * ndl );							// irradiance-like: colour * cookie/falloff * N.L
 	if ( s.applyMode && !targetOnly ) {
 		vec3 f;
-		if ( s.pbr ) {
+		if ( u_shadowFalloffS.z > 1.5 ) {
+			f = s.albedo * ( 1.0 - s.metal * s.kd );	// specReshade: DIFFUSE only; the apply rebuilds the GGX specular at full res
+		} else if ( s.pbr ) {
 			vec3  H     = normalize( ldir + s.Vw );
 			float NdotH = max( dot( s.Nw, H ), 0.0 );
 			float VdotH = max( dot( s.Vw, H ), 0.0 );

@@ -59,6 +59,7 @@ void main() {
 	if ( raw >= 0.9994 ) { fragColor = vec4( 0.0 ); return; }		// sky / no geometry
 	vec4 nt0 = texture( u_normalBuffer, uv );
 	if ( nt0.a < 0.5 ) { fragColor = vec4( 0.0 ); return; }		// view weapon: lit by its forward draws
+	vec4 alb = texture( u_albedoBuffer, uv );					// .rgb receiver albedo, .a = skin/flesh SSS flag (gbuffer.frag)
 
 	bool shMode = u_localParam1.w > 0.5;
 	vec3 di;
@@ -93,6 +94,11 @@ void main() {
 		di = nrdYCoCgToLinear( texture( u_src, uv ).rgb );
 		if ( shMode ) { sh1 = texture( u_sh1, uv ).xyz; }
 	}
+	// remodulate by this pixel's material (the exact factor the gather divided by) and the forward light scale
+	vec3 albedo = alb.rgb;
+	vec4 mt     = texture( u_materialBuffer, uv );
+	bool specReshade = u_localParam1.w > 1.5;		// SH + full-res specular re-shade (r_rtReStirDISpecReshade)
+	vec3 lit;
 	if ( shMode ) {
 		// SH resolve: the denoised mean incoming direction (SH1 / luminance) and how concentrated it is (|SH1| / Y,
 		// 1 = a single light, 0 = light from everywhere). The gather removed its reduced-res normal's cosine, so the
@@ -101,20 +107,79 @@ void main() {
 		// little then).
 		float Y   = dot( di, vec3( 0.2126, 0.7152, 0.0722 ) );
 		float len = length( sh1 );
-		if ( Y > 1.0e-5 && len > 1.0e-6 ) {
-			vec3  L  = sh1 / len;
-			vec3  Nw = normalize( mat3( u_modelViewMatrix ) * ( nt0.xyz * 2.0 - 1.0 ) );
-			float k  = clamp( len / Y, 0.0, 1.0 );
-			float ndl = dot( Nw, L );
-			di *= mix( 0.5 + 0.5 * ndl, max( ndl, 0.0 ), k );
+		vec3  cosTermV = vec3( 1.0 );				// the per-channel diffuse cosine (+ SSS) re-applied to the demodulated radiance
+		vec3  L = vec3( 0.0, 0.0, 1.0 ), Nw = vec3( 0.0, 0.0, 1.0 );
+		float k = 0.0, ndl = 1.0;
+		bool  haveDir = ( Y > 1.0e-5 && len > 1.0e-6 );
+		if ( haveDir ) {
+			L   = sh1 / len;
+			Nw  = normalize( mat3( u_modelViewMatrix ) * ( nt0.xyz * 2.0 - 1.0 ) );
+			k   = clamp( len / Y, 0.0, 1.0 );
+			ndl = dot( Nw, L );
+			float cosBase = mix( 0.5 + 0.5 * ndl, max( ndl, 0.0 ), k );
+			// DUDE skin/flesh SSS (docs/skin-shading.md): on skin/flesh pixels (alb.a flag) re-apply a warm per-CHANNEL
+			// WRAPPED cosine - red light wraps furthest past the terminator, so the shadow edge warms and softens instead
+			// of cutting off plastic-hard, exactly as interaction.frag's skinScatterExcess does forward. mix by the SSS
+			// strength reproduces forward's lambert + (wrapped - lambert) * strength; the wrap eases to the base
+			// half-cosine as the light spreads (k -> 0), where there is no sharp terminator to warm.
+			if ( u_skinParms.x > 0.0 && alb.a > 0.25 ) {
+				float rad = u_skinParms.y;
+				vec3  w   = ( alb.a > 0.75 ) ? vec3( rad * 1.30, rad * 0.30, rad * 0.15 )	// Hell flesh: deeper, redder
+				                             : vec3( rad * 1.00, rad * 0.35, rad * 0.20 );	// face skin
+				vec3 wrapped = clamp( ( vec3( ndl ) + w ) / ( vec3( 1.0 ) + w ), 0.0, 1.0 );
+				cosTermV = mix( vec3( cosBase ), mix( vec3( 0.5 + 0.5 * ndl ), wrapped, k ), u_skinParms.x );
+			} else {
+				cosTermV = vec3( cosBase );
+			}
 		}
+		if ( specReshade ) {
+			// The DI buffer is DIFFUSE-ONLY here (the gather shaded albedo-only and demodulated by the diffuse share),
+			// so di is the incoming radiance (light colour x falloff x visibility). Rebuild the specular at FULL res from
+			// the SH direction + the full-res bump normal + material - a GGX lobe exactly as interaction.frag's / the
+			// gather's, instead of the flat diffuse cosine the plain SH path applies to a baked, reduced-res, denoised
+			// highlight. This is what puts the sharp glint back on skin pores / wet surfaces / metal in the DI tier.
+			vec3 Bdiff   = max( albedo * ( 1.0 - mt.g * u_diffuseModifier.x ), vec3( 0.02 ) );	// diffuse share (matches the gather's demod)
+			vec3 diffuse = di * Bdiff * cosTermV;
+			vec3 spec    = vec3( 0.0 );
+			if ( haveDir && mt.b > 0.0 ) {								// mt.b = spec-map luminance: no spec stage -> no highlight
+				float dpos    = linDepth( raw );						// positive view depth
+				vec2  ndcp    = uv * 2.0 - 1.0;
+				vec3  viewPos = vec3( ndcp.x * dpos * u_occlusionParms.x, ndcp.y * dpos * u_occlusionParms.y, -dpos );
+				vec3  worldPos = ( u_modelViewMatrix * vec4( viewPos, 1.0 ) ).xyz;
+				vec3  Vv      = normalize( u_modelViewMatrix[3].xyz - worldPos );
+				vec3  H       = normalize( L + Vv );
+				float NdotH   = max( dot( Nw, H ), 0.0 );
+				float NdotV   = max( dot( Nw, Vv ), 1.0e-4 );
+				float NdotL   = max( ndl, 0.0 );
+				float rough   = clamp( mt.r, 0.03, 1.0 );
+				float a       = rough * rough;
+				float alpha2  = a * a;
+				vec3  F0      = mix( vec3( 0.04 ), albedo, mt.g );
+				float VdotH   = max( dot( Vv, H ), 0.0 );
+				vec3  F       = F0 + ( 1.0 - F0 ) * pow( 1.0 - VdotH, 5.0 );
+				float dd      = NdotH * NdotH * ( alpha2 - 1.0 ) + 1.0;
+				float D       = alpha2 / max( dd * dd, 1.0e-8 );
+				float kg      = 0.5 * sqrt( alpha2 );
+				float gvis    = 0.25 / ( ( NdotL * ( 1.0 - kg ) + kg ) * ( NdotV * ( 1.0 - kg ) + kg ) );
+				float lobe    = min( D * gvis, u_diffuseModifier.z );	// firefly clamp (r_pbrFireflyClamp), as the gather
+				float specGain = mt.b * mix( u_diffuseModifier.y, 1.0, mt.g ) * 2.0;	// spec map * dielectric-weighted scale * 2x
+				// roughness-aware concentration: a SMOOTH lobe needs the exact light direction, so fall off with k (a
+				// spread/aggregated direction would place a spurious glint); a ROUGH lobe (skin, cloth) integrates light
+				// over a wide cone and tolerates the aggregate direction, so it keeps its broad sheen even when k is low -
+				// otherwise a face lit by many fills (Betruger, 2026-10-14) loses the skin sheen the forward path sums.
+				float concen  = mix( k, 1.0, rough );
+				spec = di * ( lobe * specGain * NdotL * concen ) * F;
+			}
+			lit = ( diffuse + spec ) * u_localParam0.w;
+		} else {
+			di *= cosTermV;
+			vec3 B = diDemodFactor( albedo, mt.g, mt.b, u_diffuseModifier.x, u_diffuseModifier.y );
+			lit = di * B * u_localParam0.w;
+		}
+	} else {
+		vec3 B = diDemodFactor( albedo, mt.g, mt.b, u_diffuseModifier.x, u_diffuseModifier.y );
+		lit = di * B * u_localParam0.w;
 	}
-
-	// remodulate by this pixel's material (the exact factor the gather divided by) and the forward light scale
-	vec3 albedo = texture( u_albedoBuffer, uv ).rgb;
-	vec4 mt     = texture( u_materialBuffer, uv );
-	vec3 B      = diDemodFactor( albedo, mt.g, mt.b, u_diffuseModifier.x, u_diffuseModifier.y );
-	vec3 lit    = di * B * u_localParam0.w;
 
 	// AO on direct light, as interaction.frag: ao floored, blended in by r_ssaoDirectLight (diffuse AND the
 	// specular share here - the two are denoised together in v1)

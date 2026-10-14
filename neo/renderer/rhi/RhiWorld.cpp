@@ -4830,6 +4830,16 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 			parms.localParam0[1] = 1.0f;
 			diOcclImg = RB_RHI_SurfaceOcclusionImage( surf );
 			parms.occlusionParms[0] = diOcclImg ? 1.0f : 0.0f;
+			// ReSTIR DI skin/flesh SSS (docs/skin-shading.md): mark skin/flesh pixels in the albedo attachment's
+			// alpha (gbuffer.frag out_Albedo.a) so the deferred DI apply warms the terminator on them exactly as
+			// interaction.frag's skinScatterExcess does on the forward path. 0 = none, 0.5 = face skin, 1 = Hell
+			// flesh; the forward path keys SSS off the same PBR categories (RB_RHI_FillSkinSSS).
+			parms.localParam0[3] = 0.0f;
+			if ( r_skinShading.GetFloat() > 0.0f ) {
+				const int skinCat = shader->GetPbrCategory();
+				if ( skinCat == PBR_CAT_SKIN )       { parms.localParam0[3] = 0.5f; }
+				else if ( skinCat == PBR_CAT_FLESH ) { parms.localParam0[3] = 1.0f; }
+			}
 			for ( int s = 0; s < shader->GetNumStages(); s++ ) {
 				const shaderStage_t *sst = shader->GetStage( s );
 				if ( sst->lighting != SL_SPECULAR || sst->texture.image == NULL || regs[sst->conditionRegister] == 0 ) {
@@ -8004,7 +8014,11 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// gather lands on the same mip the forward draw's screen-derivative LOD picks (Doom's black-bordered
 	// cookies read dimmer on the blurred mips; mip 0 made DI brighter than forward on big floors)
 	parms.shadowFalloffS[1] = 2.0f * invP00 / (float)w;
-	parms.shadowFalloffS[2] = shMode ? 1.0f : 0.0f;						// SH mode: no cosine in the gather, SH1 on loc 3
+	// SH mode: no cosine in the gather, SH1 on loc 3. 2 = + full-res specular re-shade (r_rtReStirDISpecReshade): the
+	// gather shades DIFFUSE-ONLY and demodulates by the diffuse share, so the buffer is pure incoming irradiance and the
+	// apply can rebuild a sharp GGX highlight at full res. The gradient inherits this (gp = parms), so its re-shade matches.
+	const bool specReshade = shMode && r_rtReStirDISpecReshade.GetBool();
+	parms.shadowFalloffS[2] = specReshade ? 2.0f : ( shMode ? 1.0f : 0.0f );
 	parms.shadowFalloffS[3] = relaxMode ? 1.0f : 0.0f;					// R2: linear + raw hitDist out (ReLAX input)
 
 	// r_rtReStirDICombineGI: fold the RTGI one-bounce into this gather (rtgi_bounce.glsl) so ONE NRD denoise and
@@ -9209,7 +9223,10 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[0] = aoOn ? 1.0f : 0.0f;
 	parms.localParam1[1] = idMath::ClampFloat( 0.0f, 1.0f, r_ssaoFloor.GetFloat() );
 	parms.localParam1[2] = aoDirect;
-	parms.localParam1[3] = shResolve ? 1.0f : 0.0f;					// SH resolve (u_sh1 on unit 6, inverse view below)
+	// SH resolve (u_sh1 on unit 6, inverse view below). 2 = + full-res specular re-shade (r_rtReStirDISpecReshade): the
+	// buffer is diffuse-only, so the apply rebuilds a sharp GGX highlight from the SH direction + the full-res normal.
+	const bool diSpecReshade = shResolve && r_rtReStirDISpecReshade.GetBool();
+	parms.localParam1[3] = shResolve ? ( diSpecReshade ? 2.0f : 1.0f ) : 0.0f;
 	// R2: ReLAX's non-SH output and the raw ReLAX-mode gather are LINEAR; ReBLUR's output and ReLAX's SH0 are YCoCg
 	parms.occlusionParms[3] = ( rhiReStirDIRelaxThisView && ( !rhiReStirDIDenoisedThisView || !shResolve ) ) ? 1.0f : 0.0f;
 	if ( shResolve ) {
@@ -9222,6 +9239,20 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	parms.diffuseModifier[0] = 1.0f - r_pbrMetalDiffuse.GetFloat();	// diDemodFactor inputs: MUST match the gather's
 	parms.diffuseModifier[1] = r_pbrSpecScale.GetFloat();
+	// DUDE skin/flesh SSS (docs/skin-shading.md): the apply re-applies a warm wrapped cosine on skin/flesh pixels (the
+	// G-buffer albedo-alpha flag, SH mode only). x = strength, y = scatter reach; the per-channel widths + the skin/flesh
+	// split are derived in-shader from the flag (the forward path precomputes them per-draw in RB_RHI_FillSkinSSS).
+	parms.skinParms[0] = idMath::ClampFloat( 0.0f, 1.0f, r_skinShading.GetFloat() );
+	parms.skinParms[1] = r_skinScatter.GetFloat();
+	// specReshade: the projection inverse (+ the gather's VK top-down view-Y sign) so the apply reconstructs the world
+	// position -> view vector for the full-res GGX specular, exactly as the gather reconstructs its surface. The
+	// specular firefly clamp (r_pbrFireflyClamp) rides diffuseModifier.z, the gather's lobe ceiling.
+	if ( diSpecReshade ) {
+		const float *projA = viewDef->projectionMatrix;
+		parms.occlusionParms[0] = ( projA[0] != 0.0f ) ? 1.0f / projA[0] : 1.0f;
+		parms.occlusionParms[1] = ( ( projA[5] != 0.0f ) ? 1.0f / projA[5] : 1.0f ) * -1.0f;
+		parms.diffuseModifier[2] = r_pbrFireflyClamp.GetFloat();
+	}
 	// baked occlusion maps on direct light (material att1 .a), the forward's r_occlusionMapScale * r_occlusionMapDirect
 	parms.occlusionParms[2] = ( r_occlusionMaps.GetBool() && R_BackendSupportsEnhancements() )
 		? idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapScale.GetFloat() ) * idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapDirect.GetFloat() )

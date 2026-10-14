@@ -95,6 +95,10 @@ void main() {
 	// ReSTIR DI material parity: the forward diffuse term is diffuseMap * stage colour (u_diffuseModifier, the diffuse
 	// stage's colour registers) * vertex colour (var_Color), so the albedo carries all three - the deferred DI shade and
 	// the GI receiver albedo then match what interaction.frag multiplies the light by.
+	// .a = ReSTIR DI skin/flesh SSS flag (docs/skin-shading.md): 0 none, ~0.5 face skin, ~1 Hell flesh. The deferred DI
+	// apply re-applies a warm per-channel WRAPPED cosine instead of the hard one on these pixels, exactly the forward
+	// path's skinScatterExcess; u_localParam0.w carries it (RB_RHI_NormalPrepass), 0 on every non-skin draw. Every other
+	// consumer of this attachment (DI gather, DI apply, RTGI) reads .rgb only, so the flag is free to ride the alpha.
 	out_Albedo = ( u_localParam0.y > 0.5 )
-		? vec4( texture( u_diffuseAlbedo, var_TexCoverage ).rgb * u_diffuseModifier.rgb * var_Color.rgb, 1.0 ) : vec4( 0.0 );
+		? vec4( texture( u_diffuseAlbedo, var_TexCoverage ).rgb * u_diffuseModifier.rgb * var_Color.rgb, u_localParam0.w ) : vec4( 0.0 );
 }
