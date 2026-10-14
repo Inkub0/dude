@@ -1019,7 +1019,6 @@ extern idCVar r_rtLightTextures;			// RT scene-light buffer carries + samples ea
 extern idCVar r_rtReStirDIApply;			// ReSTIR DI lights the scene: deferred G-buffer shade + additive apply + forward per-light suppression (Stage D)
 extern idCVar r_rtReStirDIDynamicForward;	// ReSTIR DI: keep first-person weapon lights forward (R6: bool; the gradient confidence handles every other light in DI)
 extern idCVar r_rtReStirDICombineGI;		// ReSTIR DI gathers the RTGI bounce into its own buffer: one NRD denoise + one apply for direct + indirect
-extern idCVar r_rtReStirDIGiHalfRate;		// ReSTIR DI: trace the CombineGI bounce on ~half the pixels/frame (2x-weighted, temporal-averaged)
 extern idCVar r_rtReStirDISH;				// ReSTIR DI: SH denoise (direction + full-res cosine resolve) so bump detail survives
 extern idCVar r_rtReStirDICandidates;		// ReSTIR DI: light candidates per pixel before the reservoir pick (0 = every light, exhaustive RIS)
 extern idCVar r_rtReStirDICheapTarget;		// ReSTIR DI: cheap RIS target (irradiance, no GGX) for the candidate loop; full-shade only the winner

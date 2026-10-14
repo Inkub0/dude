@@ -8013,8 +8013,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// (radius / emissive / clamp / light scale / shadow ray / eye pullback / the CPU-hoisted IGN rotation) plus
 	// rtgi_apply's intensity and fog fade, so the bounce comes out as RTGI's own pass + apply would have made it.
 	const bool combineGI = r_rtgi.GetBool() && r_rtReStirDICombineGI.GetBool() && tlas != 0 && geoTable != 0;
-	// 0 = GI off, 1 = full-rate bounce, 2 = half-rate bounce (r_rtReStirDIGiHalfRate: ~half the GI rays, 2x-weighted, temporal-averaged)
-	parms.specularParms[0] = combineGI ? ( r_rtReStirDIGiHalfRate.GetBool() ? 2.0f : 1.0f ) : 0.0f;
+	parms.specularParms[0] = combineGI ? 1.0f : 0.0f;
 	if ( combineGI ) {
 		RB_RHI_RtgiFogCoefs( viewDef, parms.specularParms[1], parms.specularParms[2] );
 		// fast-changing lights stay forward for the DIRECT term (no lag); their one-bounce would still trail in the

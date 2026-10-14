@@ -366,16 +366,7 @@ void main() {
 	// (pow( exp( depth * coef ), strength )), then demodulated by the same B as the direct term so the apply's
 	// remultiply is exact for both. Its own hit distance is NOT fed to NRD (the direct term's light distance
 	// drives the blur radius for both - the shared-denoise compromise).
-	// r_rtReStirDIGiHalfRate (u_specularParms.x == 2): trace the one-bounce GI ray on only ~half the pixels each frame and
-	// weight it 2x; GI is low-frequency, so NRD's temporal accumulation averages it back - ~half the GI rays for a little
-	// extra variance on the (small) indirect term. A DETERMINISTIC per-screen-pixel checkerboard (not a random coin flip,
-	// whose chance clumping leaves a pixel several frames without GI = shimmer): each pixel alternates between its own
-	// SAMPLED frames, so it never waits more than one sample for fresh GI. Under the DI checkerboard a pixel is gathered
-	// every OTHER display frame, so advance the phase by frameIdx>>1 (full-res: every frame, so frameIdx).
-	const bool giHalfRate = u_specularParms.x > 1.5;
-	const uint giPhase = ( cbMode > 0 ) ? ( uint( u_localParam1.x ) >> 1 ) : uint( u_localParam1.x );
-	const bool traceGi = !giHalfRate || ( ( ( uint( sfrag.x ) + uint( sfrag.y ) + giPhase ) & 1u ) == 0u );
-	if ( u_specularParms.x > 0.5 && traceGi ) {
+	if ( u_specularParms.x > 0.5 ) {
 		RtgiBounceParms bp;
 		bp.tlas           = uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) );
 		bp.geoTable       = uvec2( floatBitsToUint( u_particleRadius.x ), floatBitsToUint( u_particleRadius.y ) );
@@ -400,7 +391,7 @@ void main() {
 			if ( u_specularParms.y > 0.0 ) {
 				gi *= pow( exp( d * u_specularParms.z ), u_specularParms.y );		// rtgi_apply's fog transmittance
 			}
-			vec3 giRad = max( albedo * gi, vec3( 0.0 ) ) / B * ( giHalfRate ? 2.0 : 1.0 );	// half-rate: 2x weight, the temporal denoise averages it back
+			vec3 giRad = max( albedo * gi, vec3( 0.0 ) ) / B;
 			if ( shMode ) {
 				// the cosine-sampled bounce carries this normal's cosine implicitly: remove it (floored) so the apply's
 				// re-applied cosine of the full-res normal is not doubled; its direction is the sample direction
