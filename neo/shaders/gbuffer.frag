@@ -12,6 +12,7 @@
 SAMPLER_BINDING(0) uniform sampler2D u_bumpMap;
 SAMPLER_BINDING(1) uniform sampler2D u_coverageMap;   // diffuse alpha for perforated surfaces
 SAMPLER_BINDING(2) uniform sampler2D u_diffuseAlbedo; // RTGI (docs/rtx-rtgi.md H6c): surface diffuse, written to out_Albedo
+SAMPLER_BINDING(4) uniform sampler2D u_diffuseAlbedo2;// ReSTIR DI: the SECOND live diffuse stage of a crossfade (its colour in u_specularParms.rgb); summed into out_Albedo so a death-fade blends as vanilla draws it
 SAMPLER_BINDING(3) uniform sampler2D u_specularMask;  // ReSTIR DI (docs/rtx-restir-di.md Stage D): the surface's specular map, luminance -> out_Material.b
 SAMPLER_BINDING(10) uniform sampler2D u_occlusionMap; // ReSTIR DI material parity: the surface's baked occlusion map (R), -> out_Material.a; gated by u_occlusionParms.x
 
@@ -99,6 +100,12 @@ void main() {
 	// apply re-applies a warm per-channel WRAPPED cosine instead of the hard one on these pixels, exactly the forward
 	// path's skinScatterExcess; u_localParam0.w carries it (RB_RHI_NormalPrepass), 0 on every non-skin draw. Every other
 	// consumer of this attachment (DI gather, DI apply, RTGI) reads .rgb only, so the flag is free to ride the alpha.
+	// .rgb = the SUM of up to TWO live diffuse stages (stage A: u_diffuseAlbedo * u_diffuseModifier; stage B:
+	// u_diffuseAlbedo2 * u_specularParms.rgb), * vertex colour - exactly the additive diffuse the forward path draws, so
+	// a death/transformation CROSSFADE (poppy.tga*(1-death_fade) + poppyfx1.tga*death_fade) blends smoothly instead of
+	// the deferred albedo carrying only the brighter stage. u_specularParms is 0 for a single-diffuse surface (stage B
+	// contributes nothing), so ordinary materials are unchanged.
 	out_Albedo = ( u_localParam0.y > 0.5 )
-		? vec4( texture( u_diffuseAlbedo, var_TexCoverage ).rgb * u_diffuseModifier.rgb * var_Color.rgb, u_localParam0.w ) : vec4( 0.0 );
+		? vec4( ( texture( u_diffuseAlbedo, var_TexCoverage ).rgb * u_diffuseModifier.rgb
+		        + texture( u_diffuseAlbedo2, var_TexCoverage ).rgb * u_specularParms.rgb ) * var_Color.rgb, u_localParam0.w ) : vec4( 0.0 );
 }

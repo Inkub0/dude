@@ -4816,6 +4816,9 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		// included; the perforated coverage draws below overwrite the matrix with their own, fine). The
 		// diffuse IMAGE binds on unit 2 below (whiteImage when GI is off; sampled only if u_localParam0.y>0.5).
 		idImage *rtgiDiffuseImg = globalImages->whiteImage;
+		// ReSTIR DI: the SECOND live diffuse stage of a crossfade (its colour in parms.specularParms); summed with the
+		// first in gbuffer.frag so a death-fade blends as vanilla. blackImage + specularParms 0 = no second stage.
+		idImage *rtgiDiffuseImg2 = globalImages->blackImage;
 		// ReSTIR DI Stage D: the surface's SPECULAR map (luminance -> material att1 .b) so the deferred DI shade
 		// masks its GGX lobe exactly as the forward draw does (spec * specMap). blackImage = no spec stage = no
 		// specular, which is what the forward path draws too (din->specularImage = blackImage).
@@ -4854,7 +4857,12 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 			// ONE, and taking the first captured poppy.tga * (1-death_fade), which fades to BLACK as the second fades in
 			// - so the DI apply remodulated her transforming face to nothing (2026-10-14). The brightest live stage is
 			// the one actually on screen, so the deferred albedo follows the crossfade.
-			float bestDiffLum = -1.0f;
+			// Sum the TWO brightest live diffuse stages - stage A (unit 2 * diffuseModifier) + stage B (unit 4 *
+			// specularParms) in gbuffer.frag - the additive diffuse the forward path draws, so a death/transformation
+			// CROSSFADE (female_npc/poppy: poppy.tga*(1-death_fade) + poppyfx1.tga*death_fade) blends smoothly instead of
+			// one stage fading to black and popping at the midpoint. A single-diffuse surface finds only A (B stays
+			// blackImage * 0), so ordinary materials are byte-identical.
+			float bestDiffLum = -1.0f, lumB = -1.0f;
 			for ( int s = 0; s < shader->GetNumStages(); s++ ) {
 				const shaderStage_t *dst = shader->GetStage( s );
 				if ( dst->lighting != SL_DIFFUSE || dst->texture.image == NULL || regs[dst->conditionRegister] == 0 ) {
@@ -4863,7 +4871,23 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 				const float diffLum = Max( regs[dst->color.registers[0]], 0.0f ) + Max( regs[dst->color.registers[1]], 0.0f )
 				                    + Max( regs[dst->color.registers[2]], 0.0f );
 				if ( diffLum <= bestDiffLum ) {
+					// a dimmer live diffuse is the 2nd crossfade layer (stage B) when it is the brightest of the rest
+					if ( diffLum > lumB ) {
+						lumB = diffLum;
+						rtgiDiffuseImg2 = dst->texture.image;
+						parms.specularParms[0] = Max( regs[dst->color.registers[0]], 0.0f );
+						parms.specularParms[1] = Max( regs[dst->color.registers[1]], 0.0f );
+						parms.specularParms[2] = Max( regs[dst->color.registers[2]], 0.0f );
+					}
 					continue;
+				}
+				// a brighter diffuse arrived: demote the previous stage A to stage B (keeps both crossfade layers)
+				if ( bestDiffLum >= 0.0f && bestDiffLum > lumB ) {
+					lumB = bestDiffLum;
+					rtgiDiffuseImg2 = rtgiDiffuseImg;
+					parms.specularParms[0] = parms.diffuseModifier[0];
+					parms.specularParms[1] = parms.diffuseModifier[1];
+					parms.specularParms[2] = parms.diffuseModifier[2];
 				}
 				bestDiffLum = diffLum;
 				rtgiDiffuseImg = dst->texture.image;
@@ -4956,6 +4980,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 
 		RB_RHI_BindUnit( 0, bumpImg );
 		RB_RHI_BindUnit( 2, rtgiDiffuseImg );	// RTGI H6c: receiver-albedo source (gbuffer.frag samples it only when u_localParam0.y>0.5)
+		RB_RHI_BindUnit( 4, rtgiDiffuseImg2 );	// ReSTIR DI: 2nd diffuse stage of a crossfade (summed via u_specularParms.rgb; black * 0 otherwise)
 		RB_RHI_BindUnit( 3, diSpecImg );		// ReSTIR DI Stage D: specular map (gbuffer.frag samples it only when u_localParam0.y>0.5)
 		if ( diOcclImg ) {
 			RB_RHI_BindUnit( 10, diOcclImg );	// ReSTIR DI material parity: baked occlusion map -> material att1 .a (gated by u_occlusionParms.x)
@@ -9426,14 +9451,7 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;
 	}
 	rhi::RenderTargetHandle srcRT = ( mode >= 3 ) ? rhiNormalResultRT : rhiSsaoResultRT;
-	if ( !srcRT ) {
-		return;
-	}
-	// mode 4: the receiver-albedo attachment (att4) the ReSTIR DI apply remodulates by - shown as raw rgb
-	// (reuse the mode-3 rgb path in ssao_debug.frag). If the face is black here but correct in mode 3 (normal),
-	// the surface's material never reached the deferred G-buffer (RhiWorld.cpp, 2026-10-14 head-entity hunt).
-	const rhi::ImageHandle srcImg = ( mode == 4 ) ? r->GetRenderTargetImage4( srcRT ) : r->GetRenderTargetImage( srcRT );
-	if ( srcImg == 0 ) {
+	if ( !srcRT || r->GetRenderTargetImage( srcRT ) == 0 ) {
 		return;
 	}
 	rhi::ShaderHandle prog = r->LoadShader( "ssao_debug" );
@@ -9447,7 +9465,7 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
-	parms.localParam0[0] = ( mode == 4 ) ? 3.0f : (float)mode;	// 1 = AO, 2 = bent normal, 3 = normal G-buffer, 4 = albedo (rgb path)
+	parms.localParam0[0] = (float)mode;		// 1 = AO, 2 = bent normal, 3 = normal G-buffer
 
 	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
 	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
@@ -9455,7 +9473,7 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
 	backEnd.currentScissor = viewDef->scissor;
 
-	RB_RHI_DrawFullscreen( r, prog, parms, srcImg );
+	RB_RHI_DrawFullscreen( r, prog, parms, r->GetRenderTargetImage( srcRT ) );
 
 	// direct bind above; forget the tmu cache so later 2D/GUI binds re-issue
 	RB_RHI_ForgetTexBinds();
