@@ -148,6 +148,11 @@ typedef struct srfTriangles_s {
 	unsigned int				gpuSkinVB;				// rhi::BufferHandle (0 = none)
 	int							gpuSkinVerts;			// vert count the buffer was sized for (realloc on change)
 	int							gpuSkinFrame;			// tr.frameCount it was last dispatched (skin once/frame)
+	// GPU-skin weld decoupling (r_gpuSkinWeld): true when this surface's gpuSkinVB normal was seam-WELDED
+	// by the derive kernel (crack-free PN tessellation). The lit passes then set u_tessParms2.x so their
+	// vertex shaders rebuild the UN-welded normal from the tangents for lighting (no hard-edge "cut").
+	// Derive path only (orthonormal TBN); false for static / option-B / non-welded. Copied with gpuSkinVB.
+	bool						gpuSkinWeldApplied;
 	// Skinned motion vectors (r_skinnedMotionVectors): the skin kernel saves each vertex's PREVIOUS-frame
 	// model-space position here (vec4 per vert) before overwriting gpuSkinVB, and gbuffer.vert reads it by
 	// device address - so the velocity buffer carries per-BONE animation motion, not just the entity's

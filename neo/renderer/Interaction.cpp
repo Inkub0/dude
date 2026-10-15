@@ -1159,6 +1159,9 @@ void idInteraction::AddActiveInteraction( void ) {
 					// Phase 2 GPU skinning: inherit the ambient surface's compute-skinned vertex
 					// buffer too, so lit interactions draw the same GPU pose as the ambient pass.
 					lightTris->gpuSkinVB = tri->gpuSkinVB;
+					// weld-decouple flag rides with it: the lit interaction must rebuild the un-welded lighting
+					// normal exactly when the inherited gpuSkinVB normal was welded (see idMD5Mesh::UpdateSurface).
+					lightTris->gpuSkinWeldApplied = tri->gpuSkinWeldApplied;
 
 					// Roadmap B: likewise inherit the deform-once expanded buffer + its index buffer/counts
 					// so lit interactions draw the same pre-deformed geometry (owner frees; see tr_trisurf).

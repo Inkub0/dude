@@ -59,10 +59,14 @@ void main() {
 
 	// model -> view rotation (Doom 3 models carry no non-uniform scale, so the 3x3 is
 	// an orthonormal rotation and normals/tangents transform with it directly)
+	// LIGHTING/SSAO normal uses the UN-welded normal rebuilt from the tangents (no hard-edge "cut"); the
+	// geometry normal (var_ModelNormal, PN tessellation) keeps the possibly-WELDED vertex normal (no seam
+	// tear). dudeUnweldedLightNormal is a no-op when this draw's normal was not seam-welded.
+	vec3 nLit = dudeUnweldedLightNormal( attr_Normal, attr_Tangent, attr_Bitangent );
 	mat3 mv = mat3( u_modelViewMatrix );
 	var_T = mv * attr_Tangent;
 	var_B = mv * attr_Bitangent;
-	var_N = mv * attr_Normal;
+	var_N = mv * nLit;
 
 	var_ModelPos = attr_Position.xyz;
 	var_ModelNormal = vec4( attr_Normal, attr_Color.a );

@@ -2000,6 +2000,11 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	memcpy( parms.mvpMatrix, ictx.mvp, sizeof( parms.mvpMatrix ) );
+	// GPU-skin weld decouple: this surface's gpuSkinVB normal is seam-welded (crack-free PN), so the lit
+	// vertex shader rebuilds the un-welded normal from the tangents for shading (no hard-edge cut). Set per
+	// surface regardless of whether THIS draw tessellates -- the normal is welded whenever tessellation is
+	// enabled globally, including on surfaces that end up flat.
+	parms.tessParms2[0] = ( din->surf->geo && din->surf->geo->gpuSkinWeldApplied ) ? 1.0f : 0.0f;
 	bool rtSun = false;			// mode-4 draw -> bind the ray-query interaction variant
 	bool blurMask = false;		// mode-5 draw -> this light's blurred ray mask on unit 13
 
@@ -4794,6 +4799,9 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		memset( &parms, 0, sizeof( parms ) );
 		memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
 		memcpy( parms.modelViewMatrix, surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
+		// GPU-skin weld decouple: rebuild the un-welded SSAO/lighting normal from the tangents when this
+		// surface's gpuSkinVB normal was seam-welded for crack-free PN (see RB_RHI_DrawInteraction).
+		parms.tessParms2[0] = ( surf->geo && surf->geo->gpuSkinWeldApplied ) ? 1.0f : 0.0f;
 		if ( velWants ) {
 			memcpy( parms.prevMvpMatrix, spacePrevMvp, sizeof( parms.prevMvpMatrix ) );	// R1/A2 motion vectors
 			parms.localParam1[0] = jitterCorr[0];		// R1/B: jitter cancellation (gbuffer.frag adds it)

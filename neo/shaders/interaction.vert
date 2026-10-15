@@ -29,14 +29,19 @@ VARY(12) out vec4 var_ShadowProjection; // UNBAKED projection for the 2D shadow 
 
 void main() {
 	var_ModelPos = attr_Position.xyz;
+	// var_ModelNormal keeps the (possibly seam-WELDED) vertex normal: it drives PN tessellation, where the
+	// weld is what stops the mesh tearing at UV/mirror seams. LIGHTING instead uses the UN-welded normal
+	// rebuilt from the tangents (dudeUnweldedLightNormal) so a welded hard edge does not round into a
+	// shading "cut". A no-op (== attr_Normal) when this draw's normal was not welded.
 	var_ModelNormal = vec4( attr_Normal, attr_Color.a );
+	vec3 nLit = dudeUnweldedLightNormal( attr_Normal, attr_Tangent, attr_Bitangent );
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
 
 	// vector to light in tangent space
 	vec3 toLight = u_localLightOrigin.xyz - attr_Position.xyz;
 	var_TexLightVec = vec3( dot( attr_Tangent, toLight ),
 	                        dot( attr_Bitangent, toLight ),
-	                        dot( attr_Normal, toLight ) );
+	                        dot( nLit, toLight ) );
 
 	// surface texcoords through the material texture matrices
 	var_TexBump     = vec2( dot( st, u_bumpMatrixS ),     dot( st, u_bumpMatrixT ) );
@@ -83,12 +88,12 @@ void main() {
 	vec3 halfV = normalize( toLight ) + toView;
 	var_TexHalfVec = vec3( dot( attr_Tangent, halfV ),
 	                       dot( attr_Bitangent, halfV ),
-	                       dot( attr_Normal, halfV ) );
+	                       dot( nLit, halfV ) );
 
 	// same view vector in tangent space, kept separate for the PBR N.V/Fresnel terms
 	var_TexViewVec = vec3( dot( attr_Tangent, toView ),
 	                       dot( attr_Bitangent, toView ),
-	                       dot( attr_Normal, toView ) );
+	                       dot( nLit, toView ) );
 
 	// world-oriented light->fragment vector for point-light cube shadow lookups:
 	// rotate the model-space (frag - light) vector by the model->world rotation.

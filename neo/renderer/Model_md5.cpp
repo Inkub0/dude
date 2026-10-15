@@ -70,16 +70,17 @@ idCVar r_gpuSkinning( "r_gpuSkinning", "1", CVAR_RENDERER | CVAR_BOOL,
 idCVar r_gpuSkinDerive( "r_gpuSkinDerive", "1", CVAR_RENDERER | CVAR_BOOL,
 	"GPU skin TBN: 1 = re-derive N/T from the posed mesh each frame (matches the CPU skinner; default), 0 = LBS-rotate the baked bind TBN (option B, drifts on deforming joints). Vulkan only" );
 
-// Weld the derived seam normals (coincident dupVert/mirror groups share one normal). Its ONLY purpose is to
-// stop PN-tessellation tearing animated meshes open at seams; but with no angle gate it also rounds a HARD
-// EDGE at a seam into a visible shading "cut" (user-observed on McNeil's arm, both tessellated and not).
-// DEFAULT 0 (dropped, pending reevaluation, user request 2026-10-15): with it off the GPU derive is
-// bit-identical to the CPU skinner (R_DeriveUnsmoothedTangents, which never welds) at EVERY tier, so the cut
-// is gone. Trade-off when ON: no seam cut under tessellation, but hard edges round; when OFF: faithful shading
-// but tessellated characters can reopen the seam slits the weld was added to close. Only gates the DERIVE path
-// (r_gpuSkinDerive 1, unsmoothed meshes); option B keeps its baked bind weld.
-idCVar r_gpuSkinWeld( "r_gpuSkinWeld", "0", CVAR_RENDERER | CVAR_BOOL,
-	"weld coincident seam normals on GPU-derived skins under tessellation (0 = off, faithful to the CPU skinner but tessellated seams can tear; 1 = weld, no tear but hard edges round into a shading seam). Vulkan + r_gpuSkinDerive" );
+// Weld the derived seam normals (coincident dupVert/mirror groups share one normal) so PN tessellation does
+// not tear animated meshes open at UV/mirror seams. DECOUPLED from lighting: when on, the kernel welds ONLY
+// gpuSkinVB's normal (the GEOMETRY normal PN tessellation reads), while the lit vertex shaders rebuild the
+// UN-welded per-vertex normal from the (un-welded) tangents for SHADING (dudeUnweldedLightNormal, exact for
+// the orthonormal derive frame). So no seam tear AND no hard-edge shading "cut" -- the two used to be in
+// tension (the no-angle-gate weld rounded hard edges). DEFAULT 1 (user-verified 2026-10-15: no cut, no tear,
+// static geometry untouched): strictly better than 0, which leaves the geometry normal un-welded so tessellated
+// seams can reopen (0 kept as the faithful floor / A-B). Only the DERIVE path (r_gpuSkinDerive 1, unsmoothed
+// meshes); option B keeps its baked bind weld.
+idCVar r_gpuSkinWeld( "r_gpuSkinWeld", "1", CVAR_RENDERER | CVAR_BOOL,
+	"weld GPU-derived seam normals for crack-free PN tessellation, decoupled from lighting (1 = weld the geometry normal only, lighting rebuilds the un-welded normal -> no tear and no shading cut, default; 0 = off/faithful, tessellated seams can tear). Vulkan + r_gpuSkinDerive" );
 
 // Roadmap B ("deform once, draw everywhere", docs/tessellation.md): evaluate PN + displacement once
 // per frame in a compute pass into a single expanded buffer every pass draws, instead of re-running
@@ -1562,6 +1563,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		tri->gpuSkinVB = 0;
 		tri->gpuSkinVerts = 0;
 		tri->gpuSkinFrame = -1;
+		tri->gpuSkinWeldApplied = false;
 		if ( tri->gpuSkinPrevVB ) { rhi::GetRHI()->DestroyBuffer( tri->gpuSkinPrevVB ); }
 		tri->gpuSkinPrevVB = 0;	tri->gpuSkinPrevAddr = 0;	tri->gpuSkinPrevValid = false;
 	}
@@ -1641,6 +1643,11 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			                   jointSnap, numJoints, skinScale,
 			                   ( jobShader != skinShader ) ? tri->gpuSkinPrevVB : 0, prevPoseInVB,
 			                   deriveShader, skinGpuDomIdx, skinGpuDomScale, skinGpuWeldInfo, skinGpuWeldMembers );
+			// weld-decouple flag: the derive kernel welds gpuSkinVB's normal exactly when deriveShader ran
+			// AND doWeld (= r_gpuSkinWeld && tessellation, matching RB_RHI_FlushSkinJobs). Tells the lit
+			// passes to rebuild the un-welded lighting normal from the tangents (no hard-edge cut).
+			tri->gpuSkinWeldApplied = ( deriveShader != 0 ) && r_gpuSkinWeld.GetBool()
+			                          && ( r_tessellation.GetBool() || r_tessDeform.GetBool() );
 		}
 	}
 

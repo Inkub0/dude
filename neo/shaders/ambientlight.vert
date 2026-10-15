@@ -41,8 +41,10 @@ void main() {
 	                          dot( attr_Position, u_lightProjectionQ ) );
 
 	// tangent-space normal -> global space transform rows
-	// (v * M == transpose(M) * v, so no explicit transpose is needed)
-	mat3 tbn = mat3( attr_Tangent, attr_Bitangent, attr_Normal );
+	// (v * M == transpose(M) * v, so no explicit transpose is needed). LIGHTING uses the UN-welded normal
+	// rebuilt from the tangents (no hard-edge "cut"); var_ModelNormal above keeps the welded one for PN.
+	mat3 tbn = mat3( attr_Tangent, attr_Bitangent,
+	                 dudeUnweldedLightNormal( attr_Normal, attr_Tangent, attr_Bitangent ) );
 	var_ToGlobalRow0 = u_modelMatrixRow0.xyz * tbn;
 	var_ToGlobalRow1 = u_modelMatrixRow1.xyz * tbn;
 	var_ToGlobalRow2 = u_modelMatrixRow2.xyz * tbn;

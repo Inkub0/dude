@@ -5138,12 +5138,12 @@ static void DrawDbgGroup_GpuOffload()
 			"position skin still runs (it is the monster hit surface). Prerequisite for ray-tracing animated geometry "
 			"later. Next map load." );
 
-		CvarCheckbox( "GPU skin seam weld", r_gpuSkinWeld, "r_gpuSkinWeld: weld coincident seam normals on GPU-derived "
-			"skins under tessellation. OFF by default -- the GPU skin is then bit-identical to the CPU skinner, so no "
-			"shading 'cut' appears where a hard edge meets a UV/mirror seam (tessellated or not), at the cost of "
-			"letting tessellated characters reopen the seam slits the weld was added to close. ON: welds under "
-			"tessellation (no tear, but hard edges round into a shading seam). Needs GPU skinning + r_gpuSkinDerive. "
-			"Live (refreshes NPCs on toggle)." );
+		CvarCheckbox( "GPU skin seam weld", r_gpuSkinWeld, "r_gpuSkinWeld: weld GPU-derived seam normals for "
+			"crack-free PN tessellation, DECOUPLED from lighting (default ON). The geometry normal is welded (seams "
+			"do not tear under tessellation) while the shading rebuilds the UN-welded normal from the tangents -- so "
+			"there is no hard-edge shading 'cut' either. OFF: bit-identical to the CPU skinner (faithful shading) but "
+			"tessellated characters can reopen the seam slits. Needs GPU skinning + r_gpuSkinDerive. Live (refreshes "
+			"NPCs on toggle)." );
 
 		ImGui::Separator();
 

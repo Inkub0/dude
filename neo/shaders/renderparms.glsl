@@ -138,7 +138,31 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // z = depth-compare thickness (world units), w = darkening strength
 	                            // (0..1). interaction.frag marches _currentDepth (unit 16) from the
 	                            // fragment toward the light; 0 on ambient/film/every non-enabled draw.
+
+	vec4 u_tessParms2;           // DUDE GPU-skin weld decoupling (docs/gpu-offload-plan.md): x = 1 when this
+	                            // draw's gpuSkinVB normal was seam-WELDED (PN tessellation stays crack-free);
+	                            // the lit vertex shaders then rebuild the UN-welded normal from the tangents
+	                            // for LIGHTING only (dudeUnweldedLightNormal), so the shading keeps no
+	                            // hard-edge "cut". 0 = use attr_Normal as-is. yzw spare.
 };
+
+// GPU-skin weld decoupling (u_tessParms2.x): when the skinned vertex normal was seam-welded for
+// crack-free PN tessellation, rebuild the un-welded per-vertex normal for LIGHTING from the
+// (un-welded) tangents. The derive frame is orthonormal, so cross(T,B) is +/- the face normal;
+// orient it to the welded normal (same hemisphere within the weld angle) to recover the exact
+// un-welded normal. A no-op (returns n) when the flag is off or the tangents are degenerate.
+vec3 dudeUnweldedLightNormal( vec3 n, vec3 t, vec3 b ) {
+	if ( u_tessParms2.x == 0.0 ) {
+		return n;
+	}
+	vec3 c = cross( t, b );
+	float l = length( c );
+	if ( l < 1e-8 ) {
+		return n;
+	}
+	c /= l;
+	return ( dot( c, n ) < 0.0 ) ? -c : c;
+}
 
 // the depth-linearisation pair for this draw (see u_depthParms)
 #define DUDE_DEPTH_CONSTS() ( ( u_depthParms.x != 0.0 ) ? u_depthParms.xy : vec2( 0.33333333, -0.33316667 ) )

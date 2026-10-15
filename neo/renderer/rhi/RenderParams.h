@@ -159,7 +159,15 @@ struct RenderParams {
 								// strength (0..1). Filled only on non-ambient interaction draws when
 								// r_contactShadows is on and the depth capture is ready; needs modelView/
 								// projection/depthParms/depthTexRecip/windowCoord.z, filled alongside.
-								// Raster tiers only (UN uses r_rtAllLights). 0 = off. Appended LAST.
+								// Raster tiers only (UN uses r_rtAllLights). 0 = off.
+	float	tessParms2[4];		// DUDE GPU-skin weld decoupling (docs/gpu-offload-plan.md): x = 1 when THIS
+								// draw is a GPU-derived skin whose gpuSkinVB normal was seam-WELDED (so PN
+								// tessellation stays crack-free). The lit vertex shaders then rebuild the
+								// UN-welded per-vertex normal from the (un-welded) tangents for LIGHTING only
+								// -- cross(T,B) oriented to the welded normal, exact for the orthonormal derive
+								// frame -- so the welded geometry gets no seam tear and the shading gets no
+								// hard-edge "cut". 0 = use attr_Normal as-is (static / option-B / non-welded).
+								// yzw spare. Appended LAST.
 };
 
 // window depth -> view z for a view, from its projection matrix (column-major GL layout):
@@ -173,8 +181,8 @@ inline void FillDepthParms( RenderParams &p, const float *proj ) {
 	}
 }
 
-// 4 mat4 (256) + 50 vec4 (800) = 1056 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 1056, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 4 mat4 (256) + 51 vec4 (816) = 1072 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 1072, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 
