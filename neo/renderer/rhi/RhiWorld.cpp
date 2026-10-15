@@ -1893,6 +1893,15 @@ static idImage *RB_RHI_SurfaceOcclusionImage( const drawSurf_t *surf ) {
 	idImage *occlusionImage = NULL;
 	if ( r_occlusionMaps.GetBool() && R_BackendSupportsEnhancements() && surf->material ) {
 		const idMaterial *mat = surf->material;
+		// Eyewear (glasses / goggles / visors / Swann's frame) is DISREGARDED by the AO system
+		// (docs/occlusion-maps.md): the bake neither occludes with it nor bakes a map for it, and
+		// here the renderer refuses to apply ANY occlusion map to it. This makes the fix immune to
+		// stale baked maps still sitting in z_baked_ao.pk4 / the savepath from an earlier bake -
+		// the opaque lens/frame reach the DI G-buffer, so without this an old dark map would keep
+		// darkening the glasses under the ReSTIR DI apply even after a corrected re-bake.
+		if ( AO_SurfaceIsEyewear( mat ) ) {
+			return NULL;
+		}
 		const shaderStage_t *ocl = mat->GetOcclusionStage();
 		if ( ocl && ocl->texture.image ) {
 			// explicit occlusionmap stage (modpack-authored) always wins

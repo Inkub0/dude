@@ -126,19 +126,31 @@ backface-culled (only an occluder's front face counts) to avoid self-occlusion o
 single-sided geometry.
 
 **Translucent surfaces are excluded as occluders too** (`Coverage() == MC_TRANSLUCENT`, in
-`AO_BuildGrid`). A character's glasses lens / `*_fx` overlay, the eye iris decals (`deform
-eyeBall`) and Swann's tinted lens are see-through blend stages sitting a hair in front of the
-opaque face/frame. Treated as solid occluders they bake a near-black patch onto that opaque
-surface behind them, which the deferred ReSTIR DI apply then multiplies the DI radiance by
-(G-buffer `out_Material.a`) — so the eyes/lenses read black at `dude_rtx 2` even though DI lit
-them (`r_rtReStirDIDebug 2` shows the radiance; the apply's occlusion term kills it). Their own
-baked maps are harmless (translucent surfaces are skipped from the normal/albedo prepass and
-carry no interaction, so nothing samples them), so dropping them as occluders is the whole fix.
-They are still baked as *targets* (dead maps), because a translucent surface that *does* carry a
-lighting interaction (hair, lit glass) legitimately applies its occlusion map in the forward
-pass. **Re-bake required:** shipped maps in `z_baked_ao.pk4` predate this change — regenerate
-every model that wears translucent-over-opaque geometry (all heads with eye decals, glasses
-wearers, Swann) before the fix shows.
+`AO_BuildGrid`). The eye iris decals (`deform eyeBall`, e.g. `leftpoppy`) and other see-through
+blend stages sit a hair in front of the opaque face; as solid occluders they bake a near-black
+patch onto it, which the deferred ReSTIR DI apply then multiplies the DI radiance by (G-buffer
+`out_Material.a`) — so the eyes read black at `dude_rtx 2` even though DI lit them
+(`r_rtReStirDIDebug 2` shows the radiance; the apply's occlusion term kills it). Non-eyewear
+translucents are still baked as *targets*, because one that carries a lighting interaction (hair,
+lit glass) legitimately applies its occlusion map in the forward pass.
+
+**Eyewear is disregarded entirely** (`AO_SurfaceIsEyewear`: material name contains `glasses` /
+`lense` / `visor` / `goggle`, or `/frame` under `models/characters/` = Swann's sunglasses rim).
+The translucent-only rule above is not enough, because the lens/frame of a pair of glasses is
+*opaque* (alphaTest — scientist `glasses`/`glasses2`, Swann `frame`): it both occludes the face
+behind it *and*, because it reaches the DI G-buffer, carries its own baked map that darkens the
+glasses themselves. So eyewear is skipped on all three fronts:
+- **occluder** (`AO_BuildGrid`) — it never darkens the face behind it;
+- **bake target** (`AO_BakeModelToCache`) — no map of its own is written;
+- **runtime apply** (`RB_RHI_SurfaceOcclusionImage` returns `NULL` for eyewear) — the renderer
+  refuses to bind *any* occlusion map to it, so a stale map still sitting in `z_baked_ao.pk4` /
+  the savepath from an earlier bake cannot darken it. This makes the glasses fix take effect on
+  rebuild alone, with no re-bake.
+
+**Re-bake still required for the faces:** the *face* maps baked before this change hold the dark
+patch the glasses cast as occluders; regenerate every model that wears eyewear / eye decals (all
+heads, glasses wearers, Swann — `./bake_ao.sh +bakeAOFolder models/md5`) to clear it. `'/frame'`
+is scoped to `models/characters/` so door and weapon frames keep their AO.
 
 Algorithm: rasterize each triangle into the diffuse-UV texture space (renderbump's approach),
 and for every covered texel integrate visibility over a **cosine-weighted Hammersley

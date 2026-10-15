@@ -12,6 +12,15 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 class idRenderModel;
 class idStr;
 class idDeclSkin;
+class idMaterial;
+
+// Eyewear (glasses / goggles / visors, and Swann's sunglasses frame) on a character head. The
+// AO bake disregards these entirely -- they are see-through / sit a hair in front of the face,
+// so they must neither cast baked AO onto the face behind them nor carry a darkening map of
+// their own. The renderer also skips applying any occlusion map to them at draw time, so stale
+// baked maps never darken the glasses under the ReSTIR DI apply. Matched by material name;
+// '/frame' only under models/characters/. (docs/occlusion-maps.md)
+bool AO_SurfaceIsEyewear( const idMaterial *shader );
 
 // generated/aomaps/<model sans ext>_s<surfaceIndex>.tga -- the convention the runtime
 // auto-load resolves against (RhiWorld.cpp). Keyed by model + surface index so it is

@@ -106,6 +106,42 @@ static void AO_InsertTri( aoGrid_t &g, int triIndex ) {
 	}
 }
 
+// Eyewear on a character/head: the lenses, frames and FX overlays of glasses/goggles/visors
+// that sit a hair in front of the eyes. The AO bake must DISREGARD them completely — as
+// occluders they bake a near-black patch onto the opaque face/frame behind them, and the
+// OPAQUE ones (scientist glasses / glasses2, Swann's frame — all alphaTest) do reach the DI
+// G-buffer, so their own baked map darkens the glasses themselves under the deferred ReSTIR
+// DI apply (it multiplies the DI radiance by the G-buffer occlusion). So they are skipped on
+// BOTH sides: never an occluder, never a bake target (no map -> the runtime applies 1.0, no
+// darkening). Matched by material-name token; '/frame' is gated to models/characters/ because
+// that is Swann's sunglasses rim and the only character '/frame' — door and weapon frames
+// (models/mapobjects, models/weapons) keep their AO. The translucent eye IRIS decals
+// (leftpoppy/rightswann, deform eyeBall) carry no eyewear token and are handled by the
+// MC_TRANSLUCENT occluder skip instead. (docs/occlusion-maps.md)
+// Declared in aobake.h -- the renderer calls it too (skips applying occlusion to eyewear).
+bool AO_SurfaceIsEyewear( const idMaterial *shader ) {
+	if ( !shader ) {
+		return false;
+	}
+	const char *n = shader->GetName();
+	if ( !n || !n[0] ) {
+		return false;
+	}
+	if ( idStr::FindText( n, "glasses", false ) >= 0
+	  || idStr::FindText( n, "lense",   false ) >= 0
+	  || idStr::FindText( n, "visor",   false ) >= 0
+	  || idStr::FindText( n, "goggle",  false ) >= 0 ) {
+		return true;
+	}
+	// Swann's sunglasses rim is 'models/characters/swann/frame' — scope the generic 'frame'
+	// token to character meshes so door / soul-cube frames are not stripped of AO.
+	if ( idStr::FindText( n, "/frame", false ) >= 0
+	  && idStr::Icmpn( n, "models/characters/", 18 ) == 0 ) {
+		return true;
+	}
+	return false;
+}
+
 // Build one grid over ALL surfaces of the model (whole-model self-occlusion).
 static void AO_BuildGrid( const idRenderModel *model, aoGrid_t &g ) {
 	g.bounds = model->Bounds( NULL );
@@ -138,16 +174,14 @@ static void AO_BuildGrid( const idRenderModel *model, aoGrid_t &g ) {
 		if ( !surf->shader || !surf->shader->IsDrawn() ) {
 			continue;
 		}
-		// Skip TRANSLUCENT surfaces as occluders. A character's glasses lens / "..._fx" overlay,
-		// the eye iris decals (deform eyeBall) and Swann's tinted lens are see-through blend
-		// stages that sit a hair in front of the opaque face/frame. As solid occluders they bake
-		// a near-black patch onto that opaque surface behind them; the deferred ReSTIR DI apply
-		// then multiplies the DI radiance by the G-buffer occlusion, so the eyes/lenses read black
-		// at dude_rtx 2 even though DI lit them (r_rtReStirDIDebug 2 shows the radiance, but the
-		// apply's occlusion term kills it). Their own baked maps are harmless (translucent surfaces
-		// are skipped from the normal/albedo prepass and never carry an interaction, so nothing
-		// samples them), so excluding them here as occluders is the whole fix. (docs/occlusion-maps.md)
-		if ( surf->shader->Coverage() == MC_TRANSLUCENT ) {
+		// Don't let a surface that is not a solid light-blocker cast baked AO onto the geometry
+		// behind it. TRANSLUCENT surfaces (the eye iris decals, see-through blend stages) and
+		// EYEWEAR (glasses/goggles/visors, incl. their OPAQUE alphaTest lens/frame) sit a hair in
+		// front of the face and otherwise bake a near-black patch onto it, which the deferred
+		// ReSTIR DI apply multiplies into the lit scene -> black eyes/lenses at dude_rtx 2 even
+		// though DI lit them (r_rtReStirDIDebug 2 shows the radiance; the apply's occlusion term
+		// kills it). Eyewear is also skipped as a bake TARGET below. (docs/occlusion-maps.md)
+		if ( surf->shader->Coverage() == MC_TRANSLUCENT || AO_SurfaceIsEyewear( surf->shader ) ) {
 			continue;
 		}
 		for ( int i = 0; i + 2 < tri->numIndexes; i += 3 ) {
@@ -888,6 +922,11 @@ static bool AO_BakeGeoModel( const idRenderModel *geoModel, const char *pathName
 		const modelSurface_t *surf = geoModel->Surface( s );
 		// skip collision/nodraw surfaces (also excluded from the occlusion grid above)
 		if ( !surf->shader || !surf->shader->IsDrawn() ) {
+			continue;
+		}
+		// Eyewear gets NO map of its own (the opaque glasses lens / frame otherwise bakes a dark
+		// self-AO that the DI apply darkens the glasses by); no map -> runtime applies occl 1.0.
+		if ( AO_SurfaceIsEyewear( surf->shader ) ) {
 			continue;
 		}
 		// The skin (if given) only selects which bump/diffuse feeds the size + detail cavity.
