@@ -8141,6 +8141,9 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// shader; the debug overlay owns the screen instead when it is on. Decided HERE (before the light loop) so the
 	// suppression and the apply can never disagree within a view.
 	const rhi::ImageHandle diAlbedoImg = rhiNormalAlbedoThisView ? r->GetRenderTargetImage4( rhiNormalResultRT ) : 0;
+	// NOTE: the gather runs BEFORE the decal-mask pass, so it cannot decal-resolve the material here. In the shipping
+	// SH + spec-reshade path the gather's radiance is material-INDEPENDENT (it demodulates the diffuse share and strips
+	// the cosine), so only the APPLY's material has to be decal-resolved -- done after the mask pass (RB_RHI_DrawView).
 	const rhi::ImageHandle diMatImg    = rhiNormalAlbedoThisView ? r->GetRenderTargetImage2( rhiNormalResultRT ) : 0;
 	const bool diApply = r_rtReStirDIApply.GetBool() && !r_rtReStirDIDebug.GetBool()
 		&& diAlbedoImg != 0 && diMatImg != 0 && r->LoadShader( "restir_di_apply" ) != 0;
@@ -9273,7 +9276,13 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 		: ( ( rhiReStirDIDenoisedThisView && r->GetRtgiOutputSh1Image() != 0 ) ? r->GetRtgiOutputSh1Image() : r->GetRenderTargetImage4( rhiReStirDIRT ) );
 	const bool shResolve = rhiReStirDIShThisView && sh1Img != 0;
 	const rhi::ImageHandle albedoImg = r->GetRenderTargetImage4( rhiNormalResultRT );
-	const rhi::ImageHandle matImg    = r->GetRenderTargetImage2( rhiNormalResultRT );
+	// decals strip the reflection/metal of what they cover (decalmat.frag): the gather (RB_RHI_ReStirDIPass) already
+	// decal-resolved the material into rhiDecalMatRT this view, so REUSE that here instead of re-running the resolve
+	// pass -- this apply draws inside the OPEN HDR scene pass, where a BeginTargetPass would illegally nest. When no
+	// decal drew (rhiDecalMaskImage 0), both the gather and this read the raw material, so they stay consistent.
+	const rhi::ImageHandle rawMat    = r->GetRenderTargetImage2( rhiNormalResultRT );
+	const rhi::ImageHandle matImg    = ( rhiDecalMaskImage != 0 && rhiDecalMatRT != 0 && r->GetRenderTargetImage( rhiDecalMatRT ) != 0 )
+		? r->GetRenderTargetImage( rhiDecalMatRT ) : rawMat;
 	if ( srcImg == 0 || albedoImg == 0 || matImg == 0 ) {
 		return;
 	}
@@ -10431,6 +10440,15 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 	RB_RHI_RtShadowBlurBegin( r, viewDef );
 	// r_decalMetalMask: decal coverage -> metal retention, consumed by the PBR interactions below
 	RB_RHI_DecalMaskPass( r, viewDef );
+	// ReSTIR DI: resolve the material through the decal mask NOW that the mask exists (the DI gather ran earlier,
+	// before this pass), so RB_RHI_ReStirDIApply remodulates its specular with the dulled stain -- a dirt/stain
+	// stops mirroring lights under DI exactly as it does without it. Populates rhiDecalMatRT (idempotent with the
+	// SSR resolve); the apply reads it. No-op when no decal drew the view. Not inside an open pass here.
+	if ( diWorldOnly && rhiDecalMaskImage != 0 && rhiNormalAlbedoThisView ) {
+		const int dmW = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+		const int dmH = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+		RB_RHI_DecalResolveMaterial( r, r->GetRenderTargetImage2( rhiNormalResultRT ), dmW, dmH );
+	}
 	if ( rhiDecalMaskImage && !vkMode ) {
 		// GL3: raw-bind on unit 14 for the whole light loop (nothing in it touches that unit);
 		// VK carries it per draw as DrawArgs::decalMask
