@@ -1,0 +1,98 @@
+fx fx/teleporter_96
+{
+
+	{										// sound
+		name "sound1"
+		delay 0
+		sound "teleport_full"	
+		duration 10
+	}
+	
+	{
+		delay 0
+		name "lightspectrum"
+		duration 1
+		restart 0
+		light "lights/spectrumlight", 0.2, 0.02, 0.01, 500
+		fadeIn 1
+	}
+	{
+		delay 1
+		name "lightspectrumoff"
+		duration 2
+		restart 0
+		uselight "lightspectrum"
+		fadeOut 1.5
+	}
+	
+	{										// upper explosion
+		delay 0	
+		name "particle2"
+		duration 2
+		restart 0
+		rotate 0.1
+		model "spawnSphere_3a_2.prt"
+		offset 0, 0, 128
+		fadeOut 2
+	}		   
+
+	{										// bolt model
+		delay 0.2
+		name "model1"
+		duration 0.75
+		restart 0
+		//rotate 0.1
+		model "telebolt.prt"
+		offset 0, 0, 0
+		fadeOut 0.75
+	}		   
+	{										// ground strike
+		delay 0.7
+		name "particle2"
+		duration 2.0
+		restart 0
+		rotate 0.1
+		model "spawnSphere_3_2.prt"
+		offset 0, 0, 1
+		fadeOut 2.0
+	}
+	{
+		delay 0.7
+		name "shockwave"
+		shockwave "teleport_shockwave"
+		duration 5
+		restart 0
+	}	
+	{
+		delay	0.7
+		name "warppyground"
+		model	"teleport_shockwave_warp.prt"
+		duration 5
+		restart 1
+		offset 0, 0, 1
+	}
+	{
+		delay 0.7
+		name "light5"
+		duration 0.05
+		restart 0
+		light "lights/squareblast", 0.2, 0.02, 0.01, 300
+	}
+	{										// crack in floor.. could be simulaneuous with strike
+		name "decal1"
+		delay 0.78
+		duration .5
+		size 80
+		restart 0
+		decal "textures/decals/spawndecal"
+	}		   
+	
+	{										// fade out the blast light
+		delay 0.8
+		name "light6"
+		duration 0.10
+		restart 0
+		useLight "light5"
+		fadeOut 0.005
+	}
+}

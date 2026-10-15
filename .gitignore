@@ -40,6 +40,10 @@
 !/d3xp/guis/
 /d3xp/guis/*
 !/d3xp/guis/mainmenu.gui
+# DUDE spawn-flash FX overrides (red + 10x-dimmer teleport-in lights), mirrors base/fx
+!/d3xp/fx/
+/d3xp/fx/*
+!/d3xp/fx/*.fx
 /d3le/
 savegames/
 /base/generated/
