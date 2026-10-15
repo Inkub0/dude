@@ -4568,6 +4568,16 @@ the coverage the depth prepass seals.
 // seals depth as usual.
 // phase: -1 = everything (the normal path); 0 = world only (skip the view weapon; sets rhiPrepassWeaponDeferred);
 // 1 = the deferred weapon only, drawn into the existing target without clearing (after the DI chain ran).
+
+// ReSTIR DI/RTGI albedo capture: a stage's vertex-colour mode as the (modulate, add) the shader applies
+// (var = rawVertexColour * modulate + add), filling all 4 channels. Mirrors RB_RHI_DrawInteraction's switch.
+static void RB_RHI_DiVertexColorMode( float mod[4], float add[4], int svc ) {
+	float m = 0.0f, a = 1.0f;		// SVC_IGNORE: var = 1
+	if ( svc == SVC_MODULATE )              { m =  1.0f; a = 0.0f; }
+	else if ( svc == SVC_INVERSE_MODULATE ) { m = -1.0f; a = 1.0f; }
+	for ( int c = 0; c < 4; c++ ) { mod[c] = m; add[c] = a; }
+}
+
 static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int phase = -1 ) {
 	if ( !R_BackendSupportsEnhancements() ) {
 		return false;
@@ -4845,6 +4855,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		// defaults so the non-albedo prepass paths are unaffected (gbuffer.frag only reads them under localParam0.y).
 		parms.diffuseModifier[0] = parms.diffuseModifier[1] = parms.diffuseModifier[2] = parms.diffuseModifier[3] = 1.0f;
 		parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;	// SVC_IGNORE
+		parms.vertexColorAdd2[0] = parms.vertexColorAdd2[1] = parms.vertexColorAdd2[2] = parms.vertexColorAdd2[3] = 1.0f;	// stage B SVC_IGNORE (modulate2 = 0 from memset)
 		idImage *diOcclImg = NULL;
 		if ( wantAlbedo ) {
 			parms.localParam0[1] = 1.0f;
@@ -4895,6 +4906,9 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 						parms.specularParms[0] = Max( regs[dst->color.registers[0]], 0.0f );
 						parms.specularParms[1] = Max( regs[dst->color.registers[1]], 0.0f );
 						parms.specularParms[2] = Max( regs[dst->color.registers[2]], 0.0f );
+						// stage B's OWN vertex-colour mode: a vertex blend (rock*inverseVertexColor) weights its
+						// second stage by the opposite term, captured here so gbuffer.frag matches the forward blend.
+						RB_RHI_DiVertexColorMode( parms.vertexColorModulate2, parms.vertexColorAdd2, dst->vertexColor );
 					}
 					continue;
 				}
@@ -4905,6 +4919,8 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 					parms.specularParms[0] = parms.diffuseModifier[0];
 					parms.specularParms[1] = parms.diffuseModifier[1];
 					parms.specularParms[2] = parms.diffuseModifier[2];
+					// the demoted stage A carries its vertex-colour mode with it to stage B
+					for ( int c = 0; c < 4; c++ ) { parms.vertexColorModulate2[c] = parms.vertexColorModulate[c]; parms.vertexColorAdd2[c] = parms.vertexColorAdd[c]; }
 				}
 				bestDiffLum = diffLum;
 				rtgiDiffuseImg = dst->texture.image;

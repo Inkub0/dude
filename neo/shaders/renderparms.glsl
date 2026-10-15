@@ -144,6 +144,11 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // the lit vertex shaders then rebuild the UN-welded normal from the tangents
 	                            // for LIGHTING only (dudeUnweldedLightNormal), so the shading keeps no
 	                            // hard-edge "cut". 0 = use attr_Normal as-is. yzw spare.
+
+	vec4 u_vertexColorModulate2; // ReSTIR DI/RTGI albedo capture: the SECOND diffuse stage's vertex-colour mode
+	vec4 u_vertexColorAdd2;      // (u_vertexColorModulate/Add is the FIRST stage's). gbuffer.frag weights each
+	                            // diffuse stage of a vertex-COLOUR BLEND by its OWN term, so sand*vertexColor +
+	                            // rock*inverseVertexColor is captured as the forward path blends it.
 };
 
 // GPU-skin weld decoupling (u_tessParms2.x): when the skinned vertex normal was seam-welded for

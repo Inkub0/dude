@@ -55,7 +55,11 @@ void main() {
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
 	var_TexBump = vec2( dot( st, u_bumpMatrixS ), dot( st, u_bumpMatrixT ) );
 	var_TexCoverage = vec2( dot( st, u_diffuseMatrixS ), dot( st, u_diffuseMatrixT ) );
-	var_Color = attr_Color * u_vertexColorModulate + u_vertexColorAdd;
+	// RAW vertex colour (NOT pre-weighted): gbuffer.frag derives EACH diffuse stage's vertex-colour term
+	// (vcA via u_vertexColorModulate/Add, vcB via u_vertexColorModulate2/Add2) so a vertex-COLOUR BLEND
+	// material weights its two stages by opposite terms, matching the forward blend. Interpolates linearly
+	// through the tess stages like any varying, so the tesc/tese need no change.
+	var_Color = attr_Color;
 
 	// model -> view rotation (Doom 3 models carry no non-uniform scale, so the 3x3 is
 	// an orthonormal rotation and normals/tangents transform with it directly)

@@ -167,7 +167,16 @@ struct RenderParams {
 								// -- cross(T,B) oriented to the welded normal, exact for the orthonormal derive
 								// frame -- so the welded geometry gets no seam tear and the shading gets no
 								// hard-edge "cut". 0 = use attr_Normal as-is (static / option-B / non-welded).
-								// yzw spare. Appended LAST.
+								// yzw spare.
+
+	float	vertexColorModulate2[4];	// ReSTIR DI/RTGI albedo capture, SECOND diffuse stage's vertex-colour mode
+	float	vertexColorAdd2[4];			// (vertexColorModulate/Add is the FIRST stage's). A vertex-COLOUR BLEND
+								// material (textures/rock/sandblend2: sand*vertexColor + rock*inverseVertexColor)
+								// has two diffuse stages with OPPOSITE modes; gbuffer.frag weights each stage by
+								// its OWN term (vcA on stage A, vcB on stage B) so the deferred albedo matches the
+								// forward blend instead of one weight on the sum (which collapsed the rock layer to
+								// black on sand-blended ground -> DI too dark). Default IGNORE (add2 = 1): a
+								// crossfade (same mode on both) stays byte-identical. Appended LAST.
 };
 
 // window depth -> view z for a view, from its projection matrix (column-major GL layout):
@@ -181,8 +190,8 @@ inline void FillDepthParms( RenderParams &p, const float *proj ) {
 	}
 }
 
-// 4 mat4 (256) + 51 vec4 (816) = 1072 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 1072, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 4 mat4 (256) + 53 vec4 (848) = 1104 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 1104, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

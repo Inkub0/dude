@@ -105,7 +105,13 @@ void main() {
 	// a death/transformation CROSSFADE (poppy.tga*(1-death_fade) + poppyfx1.tga*death_fade) blends smoothly instead of
 	// the deferred albedo carrying only the brighter stage. u_specularParms is 0 for a single-diffuse surface (stage B
 	// contributes nothing), so ordinary materials are unchanged.
+	// var_Color is the RAW vertex colour; weight EACH diffuse stage by its OWN vertex-colour term so a
+	// vertex-COLOUR BLEND (textures/rock/sandblend2: sand*vertexColor + rock*inverseVertexColor) captures the
+	// forward blend instead of one weight on the sum (which collapsed the rock layer to black on sand-blended
+	// ground -> DI too dark). A single-diffuse / crossfade surface (same mode on both) stays byte-identical.
+	vec3 vcA = var_Color.rgb * u_vertexColorModulate.rgb + u_vertexColorAdd.rgb;
+	vec3 vcB = var_Color.rgb * u_vertexColorModulate2.rgb + u_vertexColorAdd2.rgb;
 	out_Albedo = ( u_localParam0.y > 0.5 )
-		? vec4( ( texture( u_diffuseAlbedo, var_TexCoverage ).rgb * u_diffuseModifier.rgb
-		        + texture( u_diffuseAlbedo2, var_TexCoverage ).rgb * u_specularParms.rgb ) * var_Color.rgb, u_localParam0.w ) : vec4( 0.0 );
+		? vec4( texture( u_diffuseAlbedo, var_TexCoverage ).rgb * u_diffuseModifier.rgb * vcA
+		      + texture( u_diffuseAlbedo2, var_TexCoverage ).rgb * u_specularParms.rgb * vcB, u_localParam0.w ) : vec4( 0.0 );
 }
