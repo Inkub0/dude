@@ -5134,9 +5134,16 @@ static void DrawDbgGroup_GpuOffload()
 		ImGui::BeginDisabled( !vk );
 
 		CvarCheckbox( "GPU skinning", r_gpuSkinning, "r_gpuSkinning: skin animated meshes on the GPU. ON by default on Vulkan (and from the "
-			"Medium preset up); Potato/Low keep the exact CPU skin as the faithful floor (option-B TBN is a small "
-			"divergence from Doom 3's per-frame re-derive). Offloads the DRAW; the CPU position skin still runs (it "
-			"is the monster hit surface). Prerequisite for ray-tracing animated geometry later. Next map load." );
+			"Medium preset up); Potato/Low keep the exact CPU skin as the faithful floor. Offloads the DRAW; the CPU "
+			"position skin still runs (it is the monster hit surface). Prerequisite for ray-tracing animated geometry "
+			"later. Next map load." );
+
+		CvarCheckbox( "GPU skin seam weld", r_gpuSkinWeld, "r_gpuSkinWeld: weld coincident seam normals on GPU-derived "
+			"skins under tessellation. OFF by default -- the GPU skin is then bit-identical to the CPU skinner, so no "
+			"shading 'cut' appears where a hard edge meets a UV/mirror seam (tessellated or not), at the cost of "
+			"letting tessellated characters reopen the seam slits the weld was added to close. ON: welds under "
+			"tessellation (no tear, but hard edges round into a shading seam). Needs GPU skinning + r_gpuSkinDerive. "
+			"Live (refreshes NPCs on toggle)." );
 
 		ImGui::Separator();
 
