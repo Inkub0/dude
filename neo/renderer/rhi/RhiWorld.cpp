@@ -4929,6 +4929,15 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 					parms.diffuseMatrixT[0] = 0.0f; parms.diffuseMatrixT[1] = 1.0f; parms.diffuseMatrixT[3] = 0.0f;
 				}
 			}
+			// No SL_DIFFUSE stage at all (e.g. the security guard's 'gog' visor, chrome, blend-add /
+			// reflection-only surfaces): the whiteImage default above would make the DI/RTGI apply paint
+			// the whole surface solid WHITE, because a perforated / opaque surface IS captured and DI-lit
+			// (di * B(albedo)). Such a surface has no diffuse reflectance - its look comes from its forward
+			// additive / env-reflection stages, which still draw on top - so black albedo (zero diffuse DI)
+			// is correct and matches the non-RT forward result (white-visor fix, 2026-10-15).
+			if ( bestDiffLum < 0.0f ) {
+				rtgiDiffuseImg = globalImages->blackImage;
+			}
 		}
 
 		// DUDE tessellation: subdivide character/monster surfaces here identically to the
