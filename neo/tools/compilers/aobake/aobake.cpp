@@ -138,6 +138,18 @@ static void AO_BuildGrid( const idRenderModel *model, aoGrid_t &g ) {
 		if ( !surf->shader || !surf->shader->IsDrawn() ) {
 			continue;
 		}
+		// Skip TRANSLUCENT surfaces as occluders. A character's glasses lens / "..._fx" overlay,
+		// the eye iris decals (deform eyeBall) and Swann's tinted lens are see-through blend
+		// stages that sit a hair in front of the opaque face/frame. As solid occluders they bake
+		// a near-black patch onto that opaque surface behind them; the deferred ReSTIR DI apply
+		// then multiplies the DI radiance by the G-buffer occlusion, so the eyes/lenses read black
+		// at dude_rtx 2 even though DI lit them (r_rtReStirDIDebug 2 shows the radiance, but the
+		// apply's occlusion term kills it). Their own baked maps are harmless (translucent surfaces
+		// are skipped from the normal/albedo prepass and never carry an interaction, so nothing
+		// samples them), so excluding them here as occluders is the whole fix. (docs/occlusion-maps.md)
+		if ( surf->shader->Coverage() == MC_TRANSLUCENT ) {
+			continue;
+		}
 		for ( int i = 0; i + 2 < tri->numIndexes; i += 3 ) {
 			aoTri_t at;
 			at.v[0] = tri->verts[ tri->indexes[i + 0] ].xyz;
