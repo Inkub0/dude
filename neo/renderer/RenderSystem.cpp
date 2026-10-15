@@ -329,9 +329,14 @@ static void R_CheckCvars( void ) {
 	// dynamic model to regenerate next frame: R_ClearEntityDefDynamicModel drops the snapshot + its
 	// interaction surfaces (so UpdateSurface re-derives + welds normals and (re)creates/releases gpuSkinVB)
 	// while keeping the entity's area references, so nothing vanishes. One-shot, guarded by IsModified.
-	if ( r_tessellation.IsModified() || r_gpuSkinning.IsModified() ) {
+	// r_gpuSkinDerive joins them: it switches the GPU TBN between the posed re-derive+weld and the LBS
+	// bind blend (and the matching CPU decal-normal source in UpdateSurface), so a live A/B toggle must
+	// likewise regenerate settled NPCs rather than wait for them to re-animate.
+	if ( r_tessellation.IsModified() || r_gpuSkinning.IsModified() || r_gpuSkinDerive.IsModified() || r_gpuSkinWeld.IsModified() ) {
 		r_tessellation.ClearModified();
 		r_gpuSkinning.ClearModified();
+		r_gpuSkinDerive.ClearModified();
+		r_gpuSkinWeld.ClearModified();
 		for ( int w = 0; w < tr.worlds.Num(); w++ ) {
 			idRenderWorldLocal *rw = tr.worlds[w];
 			if ( rw == NULL ) {

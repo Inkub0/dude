@@ -1470,18 +1470,24 @@ struct rbSkinJob_t {
 	int					numJoints;
 	int					numOutVerts;
 	float				skinScale;
+	rhi::ShaderHandle	deriveShader;		// re-derive + weld second pass (r_gpuSkinDerive); 0 = keep the LBS bind TBN
+	rhi::BufferHandle	domIdx, domScale, weldInfo, weldMembers;
 };
 static idList<rbSkinJob_t>	rbSkinJobs;
 
 void RB_RHI_AddSkinJob( unsigned int shader, unsigned int outVB, int numOutVerts,
                         unsigned int weightsBuf, unsigned int wdescBuf, unsigned int wstartBuf, unsigned int localTbnBuf,
                         const void *jointData, int numJoints, float skinScale,
-                        unsigned int prevPosBuf, bool prevPoseInVB ) {
+                        unsigned int prevPosBuf, bool prevPoseInVB,
+                        unsigned int deriveShader, unsigned int domIdxBuf, unsigned int domScaleBuf,
+                        unsigned int weldInfoBuf, unsigned int weldMembersBuf ) {
 	rbSkinJob_t j;
 	j.prevPos = prevPosBuf; j.prevPoseInVB = prevPoseInVB;
 	j.shader = shader; j.outVB = outVB; j.numOutVerts = numOutVerts;
 	j.weights = weightsBuf; j.wdesc = wdescBuf; j.wstart = wstartBuf; j.localTbn = localTbnBuf;
 	j.jointData = jointData; j.numJoints = numJoints; j.skinScale = skinScale;
+	j.deriveShader = deriveShader; j.domIdx = domIdxBuf; j.domScale = domScaleBuf;
+	j.weldInfo = weldInfoBuf; j.weldMembers = weldMembersBuf;
 	rbSkinJobs.Append( j );
 }
 
@@ -1535,10 +1541,46 @@ void RB_RHI_FlushSkinJobs( void ) {
 		if ( jointsBuf ) {
 			r->DestroyBuffer( jointsBuf );		// last run's palette buffer (recorded; deferred destroy)
 		}
-		// single compute->vertex/compute barrier for the whole skin batch: the disjoint gpuSkinVB
-		// writes need no ordering between each other, only visibility before the draws read them
-		// (and before RB_RHI_FlushTessJobs' deform dispatches read a surface's gpuSkinVB).
+		// Barrier after the position pass. With no derive jobs this is the final compute->vertex/compute
+		// barrier (the disjoint gpuSkinVB writes need no ordering between each other, only visibility
+		// before the draws / RB_RHI_FlushTessJobs read them). With derive jobs it instead makes the posed
+		// positions visible to the derive pass's compute READS below.
 		r->PostComputeBarrier();
+
+		// Second pass (r_gpuSkinDerive): re-derive N/T from the posed positions the pass above wrote and
+		// weld the normal across each vertex's coincident group, overwriting the LBS bind TBN. Each job
+		// reads/writes only its own gpuSkinVB (disjoint), reading neighbour verts within the same surface,
+		// so they defer their barriers and share ONE trailing barrier making the derived TBN visible to the
+		// draws (and to RB_RHI_FlushTessJobs' deform, which then subdivides on the pose-exact normals).
+		// Weld the derived seam normals only when the user opts in (r_gpuSkinWeld, default OFF) AND PN
+		// tessellation is active (the only place the weld helps). OFF: the bare per-vertex derive is
+		// bit-identical to the CPU skinner at every tier, so the no-angle-gate weld's hard-edge rounding
+		// (the shading "cut") never happens -- at the cost of tessellated seams being free to tear again.
+		const unsigned int deriveWeld = ( r_gpuSkinWeld.GetBool() && ( r_tessellation.GetBool() || r_tessDeform.GetBool() ) ) ? 1u : 0u;
+		bool anyDerive = false;
+		for ( int i = 0; i < rbSkinJobs.Num(); i++ ) {
+			const rbSkinJob_t &j = rbSkinJobs[i];
+			if ( !j.deriveShader || !j.domIdx || !j.domScale || !j.weldInfo || !j.weldMembers ) {
+				continue;
+			}
+			struct { unsigned int numVerts; unsigned int doWeld; } dpc = { (unsigned int)j.numOutVerts, deriveWeld };
+			rhi::ComputeArgs da = {};
+			da.shader = j.deriveShader;
+			da.storage[0] = j.outVB;
+			da.storage[1] = j.domIdx;
+			da.storage[2] = j.domScale;
+			da.storage[3] = j.weldInfo;
+			da.storage[4] = j.weldMembers;
+			da.pushConstants = &dpc;
+			da.pushConstantSize = (int)sizeof( dpc );
+			da.groupsX = ( j.numOutVerts + 63 ) / 64; da.groupsY = 1; da.groupsZ = 1;
+			da.deferBarrier = true;				// one barrier for the whole derive batch, below
+			r->Dispatch( da );
+			anyDerive = true;
+		}
+		if ( anyDerive ) {
+			r->PostComputeBarrier();			// derived TBN -> draws / tess-deform reads
+		}
 	}
 	rbSkinJobs.SetNum( 0 );
 }

@@ -1169,7 +1169,9 @@ extern idCVar r_tessDebug;				// log each material name accepted for tessellatio
 extern idCVar r_tessDeform;				// deform tessellated meshes once/frame in a compute pass (vs per-pass .tesc/.tese)
 
 // DUDE: GPU MD5 skinning via the compute lane (Vulkan only; docs/gpu-offload-plan.md Phase 2)
-extern idCVar r_gpuSkinning;			// skin animated meshes on the GPU (option-B TBN; on by default on Vulkan, off = faithful CPU skin)
+extern idCVar r_gpuSkinning;			// skin animated meshes on the GPU (on by default on Vulkan, off = faithful CPU skin)
+extern idCVar r_gpuSkinDerive;			// GPU skin TBN: 1 = re-derive from the posed mesh (default), 0 = LBS-rotate the baked bind TBN (option B)
+extern idCVar r_gpuSkinWeld;			// weld GPU-derived seam normals under tessellation (0 = off/faithful default, 1 = weld/no-tear but hard edges round)
 extern idCVar r_gpuSkinProfile;			// dev: size the Milestone-C prize (skinned-surface derive + ambient upload)
 void R_GpuSkinProfileAddDerive( double ms );	// accumulate one skinned-surface tangent-derive time (impl tr_light.cpp)
 
@@ -2043,7 +2045,10 @@ void R_StaticFree( void *data );
 void RB_RHI_AddSkinJob( unsigned int shader, unsigned int outVB, int numOutVerts,
                         unsigned int weightsBuf, unsigned int wdescBuf, unsigned int wstartBuf, unsigned int localTbnBuf,
                         const void *jointData, int numJoints, float skinScale,
-                        unsigned int prevPosBuf = 0, bool prevPoseInVB = false );	// prevPosBuf: skinned motion vectors (kernel variant PREVPOS)
+                        unsigned int prevPosBuf = 0, bool prevPoseInVB = false,	// prevPosBuf: skinned motion vectors (kernel variant PREVPOS)
+                        // re-derive + weld second pass (r_gpuSkinDerive): 0 deriveShader = keep the position kernel's LBS bind TBN
+                        unsigned int deriveShader = 0, unsigned int domIdxBuf = 0, unsigned int domScaleBuf = 0,
+                        unsigned int weldInfoBuf = 0, unsigned int weldMembersBuf = 0 );
 void RB_RHI_FlushSkinJobs( void );		// dispatch + clear the recorded jobs (backend, pre-scene)
 
 // Roadmap B compute deform-once tessellation (docs/tessellation.md; Vulkan only, no-op on GL3). Records

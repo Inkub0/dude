@@ -187,6 +187,18 @@ private:
 	idVec4 *					skinExpandLocalTBN;	// [E*3] joint-local bind N,T0,T1 for the OWNING output vert
 	idDrawVert *				skinTemplate;		// [numOutputVerts] static st/color the kernel preserves
 
+	// GPU tangent re-derive pass (r_gpuSkinDerive): instead of LBS-rotating the baked bind TBN,
+	// re-derive each vertex's N/T from its dominant triangle on the POSED positions (the exact CPU
+	// R_DeriveUnsmoothedTangents), then WELD the normal across its coincident group so the pose-exact
+	// normals stay bit-identical at UV/mirror seams (what the LBS bind-weld gave for free; a bare
+	// derive would reopen them under PN tessellation). dominantTris is sized numOutputVerts and
+	// indexes 1:1 with the skin output. NULL for a mesh carrying no dominantTris (smoothed-tangent
+	// material) -> that mesh keeps the LBS bind TBN.
+	unsigned int *				skinDomIdx;			// [numOutputVerts*2] {v2, v3} dominant-tri neighbours
+	float *						skinDomScale;		// [numOutputVerts*4] {ns0, ns1, ns2, pad} normalizationScale
+	unsigned int *				skinWeldInfo;		// [numOutputVerts*2] {memberStart, memberCount} into skinWeldMembers
+	unsigned int *				skinWeldMembers;	// [numOutputVerts] coincident-group member lists (each vert in exactly one group)
+
 	// per-mesh static SSBOs (rhi::BufferHandle; 0 = not uploaded), shared by all entities using
 	// this model, uploaded once on the first GPU skin. The per-entity output + joints buffers
 	// live elsewhere (the srfTriangles_t / the per-frame skin job).
@@ -194,6 +206,10 @@ private:
 	unsigned int				skinGpuWDesc;
 	unsigned int				skinGpuWStart;
 	unsigned int				skinGpuLocalTBN;
+	unsigned int				skinGpuDomIdx;		// derive pass (0 = not uploaded / no dominantTris)
+	unsigned int				skinGpuDomScale;
+	unsigned int				skinGpuWeldInfo;
+	unsigned int				skinGpuWeldMembers;
 	unsigned int				skinGpuGen;			// backend generation these handles were uploaded at (0 = none); a full teardown bumps it, invalidating them without a double-free
 
 	void						BuildGpuSkinData( const idJointMat *bindJoints );
