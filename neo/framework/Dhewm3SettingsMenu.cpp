@@ -2791,11 +2791,11 @@ enum {
 // PRESET_ULTRA_NIGHTMARE had, and the status line still shows that name; the two purely-raster
 // knobs that tier used to also bump (anisotropy 4->6, SSAO res 0.8->1.0) now stay at Nightmare's
 // values, since RTX is orthogonal and must not change the raster look. PATHTRACED is reserved
-// for H7 ("Ultra Nightmare", dude_rtx 2; docs/rtx-restir-di.md).
+// for H7 ("Path Tracing", dude_rtx 2; docs/rtx-restir-di.md).
 enum RtMode {
 	RTX_OFF = 0,
 	RTX_ON,				// hybrid: RT augments the chosen raster tier
-	RTX_PATHTRACED,		// "Ultra Nightmare" (dude_rtx 2): the tier's RT augment + ReSTIR DI lighting the scene (docs/rtx-restir-di.md)
+	RTX_PATHTRACED,		// "Path Tracing" (dude_rtx 2): the tier's RT augment + ReSTIR DI lighting the scene (docs/rtx-restir-di.md)
 	RTX_COUNT
 };
 
@@ -2877,7 +2877,7 @@ struct EnhancementPreset {
 	float tessDisplace;             // r_tessDisplace
 	// DUDE parallax occlusion mapping (appended, see note above; GL3 + Vulkan): world-surface
 	// relief from Medium up. Self-shadowing (the second, half-step march) is the cost swing, so
-	// it's off on Medium and full from High up, EXCEPT Ultra Nightmare, which eases it to 0.5:
+	// it's off on Medium and full from High up, EXCEPT Path Tracing, which eases it to 0.5:
 	// there RTAO already occludes the relief's crevices, so full POM self-shadow double-darkens.
 	// parallaxShadow is inert where parallax is off.
 	bool  parallax;                 // r_parallax
@@ -2917,10 +2917,10 @@ struct EnhancementPreset {
 	// the no-compromise tier. Inert on Potato/Low (shadow maps off), carried at 1 there.
 	int   splitDynDrop;             // r_shadowMapSplitDynDrop
 	// Ray-traced shadows (appended, see note above; Vulkan + RT hardware only, INERT on GL3
-	// and on non-RT GPUs — the cvars gate on SupportsRayQuery). Ultra Nightmare only: RT sun
+	// and on non-RT GPUs — the cvars gate on SupportsRayQuery). Path Tracing only: RT sun
 	// shadows (exact at any distance, no map aliasing) + RT shadows for moving point lights
 	// (deletes the un-cacheable per-frame cube re-render). Every lower tier carries 0, so a
-	// non-RT machine sees Ultra Nightmare == Nightmare visually rather than a broken tier.
+	// non-RT machine sees Path Tracing == Nightmare visually rather than a broken tier.
 	bool  rtSunShadows;             // r_rtSunShadows
 	bool  rtMovingLights;           // r_rtMovingLights
 	// RT reflections (appended, see note above; VK + RT hardware only, inert on GL3/non-RT). Ultra
@@ -2935,7 +2935,7 @@ struct EnhancementPreset {
 	// runs a fixed 4 slices x 6 steps with temporal accumulation forced on (overriding the
 	// slice/step/temporal columns) — cheaper than brute-force sampling for a look the user
 	// judged only slightly softer (2026-09-16). ON for every SSAO tier except the top two:
-	// Nightmare / Ultra Nightmare stay brute-force (5x10, temporal off), the no-compromise
+	// Nightmare / Path Tracing stay brute-force (5x10, temporal off), the no-compromise
 	// look. Potato/Low carry ON per the cheap-sub-params convention (inert, SSAO off).
 	bool  ssaoTemporalTrade;        // r_ssaoTemporalTrade
 	// Render interpolation (appended, see note above). The engine's fixed 60Hz game sim
@@ -2944,37 +2944,37 @@ struct EnhancementPreset {
 	// stock 60Hz-locked behaviour — the faithful floor (user decision 2026-09-17).
 	bool  interpolate;              // com_interpolate
 	// Ray-traced AO (appended, see note above; VK + RT hardware only, inert elsewhere).
-	// Ultra Nightmare only: replaces the screen-space GTAO producer with one traced
+	// Path Tracing only: replaces the screen-space GTAO producer with one traced
 	// hemisphere ray per pixel + NRD ReBLUR — the tier's "drop screen-space AO for RT"
 	// step (docs/rtx-rtao.md). Needs r_ssao (master AO switch, on at this tier) + the
 	// velocity buffer for the denoiser (r_fsr, on here). Every lower tier carries 0, so a
 	// non-RT machine sees UN == Nightmare AO rather than a broken tier.
 	bool  rtao;                     // r_rtao
 	// RT shadow blur (appended; VK + RT hardware only, inert elsewhere): softens the two hard
-	// ray-traced shadow routes above in screen space (docs/rtx-shadow-blur.md). Ultra Nightmare
+	// ray-traced shadow routes above in screen space (docs/rtx-shadow-blur.md). Path Tracing
 	// only - it needs those routes (on at this tier only) and changes the look of shadows.
 	// Measured ~+0.9 ms per full-screen ray-served light at 1440p on a 3080 Ti.
 	bool  rtShadowBlur;             // r_rtShadowBlur
 	// RT shadows for every shadow-casting light (appended; VK + RT hardware only, inert
 	// elsewhere): all lights take the inline hard-ray route and no shadow map renders at all
-	// (docs/rtx-shadow-blur.md). Ultra Nightmare only. Measured +0.25 ms GPU in a busy Mars City
+	// (docs/rtx-shadow-blur.md). Path Tracing only. Measured +0.25 ms GPU in a busy Mars City
 	// scene on a 3080 Ti @1440p; with rtShadowBlur softening all of them, +5.2 ms (about half of
 	// that back with r_rtShadowBlurStagger, which stays a manual opt-in).
 	bool  rtAllLights;              // r_rtAllLights
 	// Distance-tiered refresh of the blurred shadow masks (appended; only meaningful with
 	// rtShadowBlur): lights beyond r_rtShadowBlurStaggerNear / Far refresh every 2nd / 3rd frame,
-	// reprojected in between. Ultra Nightmare only - it is what makes blurring EVERY light
+	// reprojected in between. Path Tracing only - it is what makes blurring EVERY light
 	// affordable there (user-measured 15.6 -> 12.8 ms, no visible change). The preset owns the
 	// on/off only; the two distances are free tuning knobs (Debugging -> RT Shadows).
 	bool  rtBlurStagger;            // r_rtShadowBlurStagger
 	// Volumetric lighting (appended; docs/volumetric-lighting.md): the air scatters the scene's real
-	// lights - cones, shafts, a visible flashlight beam. Ultra Nightmare only: it needs the RT scene that
+	// lights - cones, shafts, a visible flashlight beam. Path Tracing only: it needs the RT scene that
 	// tier already builds (visibility rays) and HDR. The preset owns the on/off only; which lights
 	// scatter, the haze density and the other r_vol* knobs are free tuning (Graphics -> Lighting).
 	bool  volumetrics;              // r_volumetrics
 	// RTAO resolution (appended; docs/rtx-rtao.md): the fraction of the screen RTAO runs its rays
 	// and the NRD denoiser at (the occlusion is upscaled). Only meaningful where rtao is on, so
-	// only the Ultra Nightmare tier carries < 1.0; every other tier is 1.0 (full res).
+	// only the Path Tracing tier carries < 1.0; every other tier is 1.0 (full res).
 	float rtaoResScale;            // r_rtaoResScale
 	// Skin / flesh subsurface scattering (appended, see note above; GL3 + Vulkan, all tiers). A
 	// wrapped diffuse that warms the lighting terminator on classifier-tagged skin/flesh so faces
@@ -2983,14 +2983,14 @@ struct EnhancementPreset {
 	// diffuse falloff, a deliberate deviation from stock Lambert). The reach knob stays the cvar
 	// default across tiers; only the strength is preset-owned.
 	float skinShading;             // r_skinShading
-	// RT Global Illumination (appended; docs/rtx-rtgi.md H6): Ultra Nightmare only - one traced bounce of
+	// RT Global Illumination (appended; docs/rtx-rtgi.md H6): Path Tracing only - one traced bounce of
 	// indirect diffuse, denoised, which REPLACES RTAO there (so the tier also carries rtao=false; the single
 	// NRD instance does GI instead, and screen-space GTAO fills the scalar AO reflections use). Needs the RT
 	// scene + velocity buffer (r_fsr, on here). Every lower tier carries false. Intensity / ambient-keep /
 	// resolution are free tuning knobs (Graphics -> the RT section), like volumetrics.
 	bool  rtgi;                     // r_rtgi
 	// HDR display gamma (appended, see note above; a live shader uniform, effective wherever the
-	// DUDE tonemap curve is on — Medium up). Ultra Nightmare eases it to 1.0 (neutral) because its
+	// DUDE tonemap curve is on — Medium up). Path Tracing eases it to 1.0 (neutral) because its
 	// one traced GI bounce lifts the scene's overall radiance; every other tier carries the cvar
 	// default (1.20). Exposure is deliberately NOT tiered — it is a plain cvar default (1.3) across
 	// every tier. Inert on Potato/Low (tonemap off), carried at the default there.
@@ -3022,7 +3022,7 @@ static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 // RT-capable (Vulkan + ray-query). Indexed by raster tier. Everything here is VK + RT only;
 // with RTX off, or on GL3 / a non-RT GPU, none of it is applied and the raster tier stands as
 // the full picture. parallaxShadow / hdrGamma use -1 = "leave the raster tier's value". The
-// Nightmare row carries the retired "Ultra Nightmare" RT feature set.
+// Nightmare row carries the retired "Path Tracing" RT feature set.
 struct RtAugment {
 	bool  rtSunShadows;
 	bool  rtMovingLights;
@@ -3116,18 +3116,18 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	// the faithful floor (Potato/Low, HDR off) stays on straight-resolve mode 0. Written
 	// explicitly so a hand-picked curve is reset to the tier's intent on preset switch.
 	cvarSystem->SetCVarInteger( "r_hdrTonemap", p.hdr ? 5 : 0 );
-	// HDR display gamma: preset-owned so Ultra Nightmare can neutralize it (1.0) for its brighter,
+	// HDR display gamma: preset-owned so Path Tracing can neutralize it (1.0) for its brighter,
 	// GI-lit scene while every other tier keeps 1.20. Live shader uniform, shows immediately; inert
 	// on Potato/Low (no curve). Exposure is a plain cvar default (1.3), not tiered.
 	cvarSystem->SetCVarFloat( "r_hdrGamma", p.hdrGamma );
 	r_pbr.SetBool( p.pbr );
-	// Screen-space SSR is turned OFF at any tier that enables RT reflections (only Ultra Nightmare): RT owns
+	// Screen-space SSR is turned OFF at any tier that enables RT reflections (only Path Tracing): RT owns
 	// every reflective pixel and the SSR march is skipped under it (2026-09-23), so leaving r_ssr on would be
 	// dead weight and a confusing "SSR on" readout. The RT reflection toggle lives in its own settings group,
 	// so this no longer hides it.
 	r_ssr.SetBool( p.ssr && !p.rtReflections );
 	r_ssrResScale.SetFloat( p.ssrResScale );
-	// SSR vs RT reflection luminance: the ray-traced reflection (Ultra Nightmare, rtReflections) reads
+	// SSR vs RT reflection luminance: the ray-traced reflection (Path Tracing, rtReflections) reads
 	// brighter than the screen-space one at the same intensity, so the SSR tiers use 0.8 and the RT tier
 	// 0.5 to match. Lower/SSR-off tiers carry 0.5 (the cvar default), inert until SSR is hand-enabled.
 	r_ssrIntensity.SetFloat( ( p.ssr && !p.rtReflections ) ? 0.8f : 0.5f );
@@ -3157,16 +3157,16 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	// split-cache movers' cube: half res everywhere, full res on Nightmare only.
 	r_shadowMapSplitDynDrop.SetInteger( p.splitDynDrop );
 
-	// ray-traced shadows (Ultra Nightmare only; VK + RT hardware, inert on GL3/non-RT):
+	// ray-traced shadows (Path Tracing only; VK + RT hardware, inert on GL3/non-RT):
 	// RT sun + RT moving point lights. The cvars auto-build the persistent world scene.
 	r_rtSunShadows.SetBool( p.rtSunShadows );
 	r_rtMovingLights.SetBool( p.rtMovingLights );
 
-	// RT reflections (Ultra Nightmare only; VK + RT hardware, inert on GL3/non-RT). rtSunShadows above
+	// RT reflections (Path Tracing only; VK + RT hardware, inert on GL3/non-RT). rtSunShadows above
 	// built the persistent world BLAS this traces; the monster BLAS (r_rtAnimBlas) is default-on and inert
 	// without a TLAS, so it is left alone here (never preset-forced off — see the struct note).
 	r_rtReflections.SetBool( p.rtReflections );
-	// RT reflection trace resolution: Half wherever the preset turns RT reflections on (Ultra Nightmare) - a
+	// RT reflection trace resolution: Half wherever the preset turns RT reflections on (Path Tracing) - a
 	// quarter of the rays, temporally upscaled to full res with no visible loss (docs/rtx-reflections.md RR6c).
 	// Inert on the other tiers, which get the Full default back.
 	r_rtReflResScale.SetFloat( p.rtReflections ? 0.5f : 1.0f );
@@ -3174,11 +3174,12 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	com_interpolate.SetBool( p.interpolate );
 	r_rtao.SetBool( p.rtao );
 	r_rtaoResScale.SetFloat( p.rtaoResScale );
-	r_rtgi.SetBool( p.rtgi );		// H6e: Ultra Nightmare enables GI (and carries rtao=false — GI replaces it)
+	r_rtgi.SetBool( p.rtgi );		// H6e: Path Tracing enables GI (and carries rtao=false — GI replaces it)
 	r_rtShadowBlur.SetBool( p.rtShadowBlur );
 	r_rtAllLights.SetBool( p.rtAllLights );
 	r_rtReStirDI.SetBool( false );			// dude_rtx 2 only (set in the RT overlay below)
 	r_rtReStirDIApply.SetBool( false );
+	r_rtgiCache.SetBool( false );			// C6 irradiance-cache path tail: Path Tracing (dude_rtx 2) only, set in the RT overlay below
 	r_rtShadowBlurStagger.SetBool( p.rtBlurStagger );
 	r_volumetrics.SetBool( p.volumetrics );
 
@@ -3229,12 +3230,17 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		if ( a.volLights > 0 ) {
 			cvarSystem->SetCVarInteger( "r_volLights", a.volLights );
 		}
-		// dude_rtx 2 "Ultra Nightmare" (H7, docs/rtx-restir-di.md): ReSTIR direct lighting replaces the per-light
+		// dude_rtx 2 "Path Tracing" (H7, docs/rtx-restir-di.md): ReSTIR direct lighting replaces the per-light
 		// forward draws (r_rtAllLights' ray-per-light loop stays for the fast-changing lights DI leaves forward),
 		// and where the tier runs RTGI the bounce rides the same gather + denoise (r_rtReStirDICombineGI).
 		const bool fullRt = ( rtMode == RTX_PATHTRACED );
 		r_rtReStirDI.SetBool( fullRt );
 		r_rtReStirDIApply.SetBool( fullRt );
+		// C6 irradiance-cache path tail (docs/rtx-irradiance-cache.md): a converged cell serves the bounce hit, skipping its
+		// light loop + shadow ray - a small average cost for steadier FRAME PACING (the spiky frames get capped). Tail mode
+		// needs DI, so it rides the Path Tracing tier only; forced on there (r_rtgiCacheTail) for the pacing benefit.
+		r_rtgiCache.SetBool( fullRt );
+		if ( fullRt ) { r_rtgiCacheTail.SetBool( true ); }
 
 		// RT reflections own every reflective pixel, so SSR is turned off under them and the
 		// RT-vs-SSR luminance match + half-res reflection trace follow (mirrors the raster
@@ -3348,7 +3354,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				!r_rtReflections.GetBool() && !r_rtao.GetBool() && !r_rtgi.GetBool() &&
 				!r_rtShadowBlur.GetBool() && !r_rtAllLights.GetBool() &&
 				!r_rtShadowBlurStagger.GetBool() && !r_volumetrics.GetBool() &&
-				!r_rtReStirDI.GetBool() && !r_rtReStirDIApply.GetBool() &&
+				!r_rtReStirDI.GetBool() && !r_rtReStirDIApply.GetBool() && !r_rtgiCache.GetBool() &&
 				r_ssr.GetBool()                    == p.ssr &&
 				idMath::Fabs( r_ssrIntensity.GetFloat() - ( p.ssr ? 0.8f : 0.5f ) ) < 0.01f &&
 				idMath::Fabs( r_rtReflResScale.GetFloat() - 1.0f ) < 0.01f &&
@@ -3378,6 +3384,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				r_volumetrics.GetBool()            == a.volumetrics &&
 				r_rtReStirDI.GetBool()             == ( rtMode == RTX_PATHTRACED ) &&
 				r_rtReStirDIApply.GetBool()        == ( rtMode == RTX_PATHTRACED ) &&
+				r_rtgiCache.GetBool()              == ( rtMode == RTX_PATHTRACED ) &&
 				r_ssr.GetBool()                    == expSsr &&
 				idMath::Fabs( r_ssrIntensity.GetFloat() - ( expSsr ? 0.8f : 0.5f ) ) < 0.01f &&
 				r_motionVectors.GetBool()          == expMv &&
@@ -3404,7 +3411,7 @@ static void DrawEnhGroup_Lighting()
 
 		// Volumetric lighting (docs/volumetric-lighting.md). Same idiom as the Shadows / Ambient Occlusion /
 		// Reflections groups' RT sections: greyed on the legacy/GL3 backend and non-RT GPUs, where the cvars
-		// are inert. Preset-owned on/off (on at Ultra Nightmare only), so flipping it by hand reads "Custom".
+		// are inert. Preset-owned on/off (on at Path Tracing only), so flipping it by hand reads "Custom".
 		{
 			const bool rtCapable = R_SupportsRayTracing();
 			ImGui::SeparatorText( rtCapable ? "Ray Tracing (RTX)" : "Ray Tracing (RTX) - needs Vulkan + RT GPU" );
@@ -3413,7 +3420,7 @@ static void DrawEnhGroup_Lighting()
 			bool vol = CvarCheckbox( "Volumetric Lighting", r_volumetrics, "The air scatters the scene's real lights toward you: visible cones under spot lights, "
 				"shafts through grates, monsters and railings cutting dark wedges out of the lit haze, a "
 				"flashlight beam you can see. Changes the look of the game - the stock game has no lit air, and "
-				"haze lifts the blacks inside lit volumes; only the Ultra Nightmare preset turns it on. Costs about "
+				"haze lifts the blacks inside lit volumes; only the Path Tracing preset turns it on. Costs about "
 				"0.5 ms with spot lights only, ~1.2 ms with all lights (1440p). Needs the Vulkan backend, "
 				"ray-query (RT) hardware and HDR; shadows in the haze need the RT scene (RT Sun Shadows on)." );
 			if ( rtCapable && vol && !r_rtSunShadows.GetBool() && !r_rtAllLights.GetBool() && !r_rtao.GetBool() ) {
@@ -3691,7 +3698,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 				"screen; the occlusion is upscaled to full res. The denoiser is the bulk of RTAO's "
 				"cost, so Three-quarter is ~a third cheaper and Half ~two-thirds cheaper for little "
 				"visible change (AO is low-frequency). Lower this first if RTAO costs too much. "
-				"Default Full; Ultra Nightmare uses Three-quarter." );
+				"Default Full; Path Tracing uses Three-quarter." );
 
 			ImGui::EndDisabled();	// RTAO greyed while RTGI on
 
@@ -3815,9 +3822,9 @@ static void DrawEnhGroup_Reflections()
 
 		// Ray Tracing (RTX): ray-traced reflections in the SAME group, their own switch. RT is decoupled from
 		// r_ssr (owns every reflective pixel; the SSR march is skipped when it renders), so its switch + knobs
-		// stay live even with Screen Space Reflections off - Ultra Nightmare runs RT with SSR off.
+		// stay live even with Screen Space Reflections off - Path Tracing runs RT with SSR off.
 		// Gray out unless the prerequisites are met: VK + ray-query hardware and a built RT scene / TLAS
-		// (r_rtSunShadows builds it; no longer needs r_ssr). Only Ultra Nightmare turns the RT scene on, so
+		// (r_rtSunShadows builds it; no longer needs r_ssr). Only Path Tracing turns the RT scene on, so
 		// lower tiers read as unavailable.
 		const bool rtCapable  = R_SupportsRayTracing();
 		ImGui::SeparatorText( rtCapable ? "Ray Tracing (RTX)" : "Ray Tracing (RTX) - needs Vulkan + RT GPU" );
@@ -3827,8 +3834,8 @@ static void DrawEnhGroup_Reflections()
 		CvarCheckbox( "Ray-Traced Reflections", r_rtReflections, "Trace the scene to reflect the real room + monsters, including geometry off-screen "
 			"or hidden from the camera that screen-space reflections can't show, and replace the glass "
 			"cube reflections with the same. When on it OWNS every reflective pixel and the screen-space "
-			"Reflections above are skipped entirely - no need to keep them on (Ultra Nightmare turns them off). "
-			"Needs the Vulkan backend + ray-query (RT) hardware. The Ultra Nightmare tier; detailed tuning "
+			"Reflections above are skipped entirely - no need to keep them on (Path Tracing turns them off). "
+			"Needs the Vulkan backend + ray-query (RT) hardware. The Path Tracing tier; detailed tuning "
 			"(temporal, jitter, blur, reflect monsters) is in the Debug tab's Ray-Traced Reflections group." );
 		ImGui::EndDisabled();
 		// explain the gray-out when the RT scene is the only thing missing (VK is already there)
@@ -3899,7 +3906,7 @@ static void DrawEnhGroup_Shadows()
 
 		// Ray-traced shadows (Vulkan + RT hardware). Greyed out on the legacy/GL3 backend
 		// and on non-RT GPUs, where the cvars are inert — a checkbox you can't toggle there
-		// reads clearer than one that silently does nothing. This is the Ultra Nightmare tier.
+		// reads clearer than one that silently does nothing. This is the Path Tracing tier.
 		const bool rtCapable = R_SupportsRayTracing();
 		ImGui::SeparatorText( rtCapable ? "Ray Tracing (RTX)" : "Ray Tracing (RTX) - needs Vulkan + RT GPU" );
 		ImGui::BeginDisabled( !rtCapable );
@@ -3916,7 +3923,7 @@ static void DrawEnhGroup_Shadows()
 			"each frame. Still lights keep the cached cube map; a light that stops re-caches after "
 			"a moment. Vulkan + RT hardware only." );
 
-		// r_rtAllLights: preset-owned (on at Ultra Nightmare), so flipping it by hand reads "Custom"
+		// r_rtAllLights: preset-owned (on at Path Tracing), so flipping it by hand reads "Custom"
 		CvarCheckbox( "RT Shadows for All Lights", r_rtAllLights, "Every shadow-casting light gets ray-traced shadows - one hard ray per lit pixel "
 			"toward the light, like the two options above - and no shadow maps are rendered at all. "
 			"Pixel-exact shadows from every light, no map resolution or bias artefacts. Heavier in "
@@ -3938,7 +3945,7 @@ static void DrawEnhGroup_Shadows()
 			"shadow maps. Off = grates cast nothing under ray-traced lights (slightly cheaper)." );
 
 		// r_rtShadowBlur (docs/rtx-shadow-blur.md): a toggle ON TOP of the two ray-traced shadow
-		// routes above; preset-owned (on at Ultra Nightmare), so flipping it by hand reads "Custom"
+		// routes above; preset-owned (on at Path Tracing), so flipping it by hand reads "Custom"
 		ImGui::BeginDisabled( !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtAllLights.GetBool() ) );
 		CvarCheckbox( "Soften RT Shadows", r_rtShadowBlur, "Blurs the ray-traced shadows above (RT Sun / RT Moving-Light / All Lights) in screen space: "
 			"the edge stays sharp where an object touches the surface it shadows and softens as "
@@ -3948,7 +3955,7 @@ static void DrawEnhGroup_Shadows()
 			"(their depth/normal prepass). Other lights are not affected. Blur Intensity and the "
 			"falloff curve are tuned in Debugging -> RT Shadows." );
 
-		// r_rtShadowBlurStagger: preset-owned (on at Ultra Nightmare), so flipping it by hand reads "Custom"
+		// r_rtShadowBlurStagger: preset-owned (on at Path Tracing), so flipping it by hand reads "Custom"
 		ImGui::BeginDisabled( !r_rtShadowBlur.GetBool() );
 		CvarCheckbox( "Refresh Distant Soft Shadows Less Often", r_rtShadowBlurStagger, "Performance option for Soften RT Shadows: lights close to you still refresh their "
 			"soft shadows every frame, farther ones every 2nd frame, the farthest every 3rd - set "
@@ -4067,7 +4074,7 @@ static void DrawGraphicsMenu()
 			"Ultra Quality 75%, Quality 67%, Balanced 59% and Performance 50% render fewer pixels - "
 			"at 67% roughly 45% of them - and every screen-space and ray-traced pass (reflections, "
 			"GI, ambient occlusion, volumetrics, soft shadows) gets cheaper by about that much, so "
-			"this is the biggest single frame-rate lever on the Ultra Nightmare tier. The HUD, "
+			"this is the biggest single frame-rate lever on the Path Tracing tier. The HUD, "
 			"menus, film grain and chromatic aberration always stay at full display resolution. "
 			"Custom keeps whatever scale is set and unlocks the slider below. (r_fsrScale)" );
 
@@ -4200,7 +4207,7 @@ static void DrawGraphicsMenu()
 		ImGui::BeginDisabled( !rtCapable || !rtTierHasRT );
 		int rtSel = idMath::ClampInt( RTX_OFF, RTX_PATHTRACED, selRtx );
 		ImGui::SetNextItemWidth( 160.0f );
-		if ( ImGui::Combo( "##enhRtx", &rtSel, "RTX Off\0RTX On\0Ultra Nightmare\0" ) ) {
+		if ( ImGui::Combo( "##enhRtx", &rtSel, "RTX Off\0RTX On\0Path Tracing\0" ) ) {
 			selRtx = rtSel;
 		}
 		ImGui::EndDisabled();
@@ -4208,10 +4215,11 @@ static void DrawGraphicsMenu()
 			? "Ray tracing, layered on top of the quality tier at left: Medium and High add ray-traced "
 			  "ambient occlusion (at rising resolution; High also adds ray-traced shadows), Ultra swaps "
 			  "the AO for one-bounce ray-traced global illumination plus RT reflections, and Nightmare "
-			  "adds soft RT shadows on every light and volumetric lighting. 'Ultra Nightmare' (dude_rtx 2) "
+			  "adds soft RT shadows on every light and volumetric lighting. 'Path Tracing' (dude_rtx 2) "
 			  "goes further: ReSTIR direct lighting lights the whole scene with one resampled light and one "
 			  "shadow ray per pixel (the per-light forward draws are skipped), with the GI bounce folded into "
-			  "the same denoise. Independent of the tier, so it never changes the raster look. Needs the "
+			  "the same denoise and a world-space irradiance cache serving the bounce for steadier frame pacing. "
+			  "Independent of the tier, so it never changes the raster look. Needs the "
 			  "Vulkan backend and ray-query (RTX) hardware."
 			: "Ray tracing needs the Vulkan backend and ray-query (RTX) hardware - unavailable on this "
 			  "GPU / backend, so the quality tiers run raster-only." );
@@ -4234,7 +4242,7 @@ static void DrawGraphicsMenu()
 			"reach/tint, shadow biases, PBR category sliders) is left alone. Tweaking any slider "
 			"afterwards shows 'Custom'." );
 
-		// Status line: raster tier + whether RTX is live. "Nightmare + RTX" is the old Ultra Nightmare.
+		// Status line: raster tier + whether RTX is live. "Nightmare + RTX" is the old Path Tracing.
 		if ( detected < 0 ) {
 			ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ), "Current: Custom (hand-tuned)" );
 		} else if ( detectedRt != RTX_OFF ) {
@@ -4530,7 +4538,7 @@ static void DrawDbgGroup_SSR()
 	CvarSliderF( "Specular Occlusion", r_specOcclusion, 0.0f, 1.0f, "%.2f", "r_specOcclusion: dim reflections by ambient occlusion, roughness-aware — a polished floor "
 		"or metal stops glowing in creases and under props/at contact, while a near-mirror is barely "
 		"touched. Applies to both SSR and RT reflections. Needs Ambient Occlusion on (Graphics tab, or RTAO "
-		"at Ultra Nightmare); does nothing without it. Direct specular from lights is never occluded. "
+		"at Path Tracing); does nothing without it. Direct specular from lights is never occluded. "
 		"0 = off, 0.7 = default." );
 
 	CvarSliderI( "March Steps", r_ssrSteps, 4, 64, "r_ssrSteps: ray-march samples per pixel. More = longer, more complete reflections at "
@@ -4828,7 +4836,7 @@ static void DrawDbgGroup_RTGI()
 
 static void DrawDbgGroup_ReStirDI()
 {
-	// Live tuning + debug view for ReSTIR direct lighting (docs/rtx-restir-di.md, H7 'Ultra Nightmare'). A
+	// Live tuning + debug view for ReSTIR direct lighting (docs/rtx-restir-di.md, H7 'Path Tracing'). A
 	// fresh 1-spp direct-lighting gather of the scene lights, denoised by the shared NRD REBLUR_DIFFUSE slot.
 	// Bring-up feature, enabled directly here (not preset-wired yet). These knobs tune the denoiser's spatial
 	// cleanup of the residual 1-spp noise NRD leaves on fine detail (edge-stopped) + moving parts (thin history).
@@ -4986,20 +4994,20 @@ static void DrawDbgGroup_ContactShadows()
 {
 	// Screen-space contact shadows (docs/contact-shadows.md): a short per-light depth march that
 	// grounds the small geometry shadow maps miss - dropped pickups, thin props, weapon detail,
-	// feet. Raster tiers (opengl3 + Vulkan); at Ultra Nightmare r_rtAllLights covers it, so leave
+	// feet. Raster tiers (opengl3 + Vulkan); at Path Tracing r_rtAllLights covers it, so leave
 	// this off there. Not preset-wired - a look change, tuned live here.
 	const bool backendOk = R_BackendSupportsEnhancements();
 	if ( BeginSettingsGroup( "Contact Shadows", &r_contactShadows,
 			"r_contactShadows: march the depth buffer from each lit pixel toward the light and darken where a "
 			"nearer occluder is found. Grounds small props/pickups/weapon detail/feet that shadow maps are too "
 			"coarse to catch. opengl3/Vulkan only. Automatically disabled while RT all-lights is on "
-			"(Ultra Nightmare's per-light RT rays supersede it)." ) ) {
+			"(Path Tracing's per-light RT rays supersede it)." ) ) {
 
 		const bool rtAll = r_rtAllLights.GetBool();
 		if ( !backendOk ) {
 			ImGui::TextDisabled( "Needs the opengl3 or Vulkan backend." );
 		} else if ( rtAll ) {
-			ImGui::TextDisabled( "Superseded by RT all-lights (Ultra Nightmare) - inactive while that is on." );
+			ImGui::TextDisabled( "Superseded by RT all-lights (Path Tracing) - inactive while that is on." );
 		}
 		ImGui::BeginDisabled( !backendOk || rtAll );
 
