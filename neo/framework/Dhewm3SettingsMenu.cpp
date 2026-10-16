@@ -4775,6 +4775,12 @@ static void DrawDbgGroup_RTGI()
 			"(corridor side walls, undersides and ceilings lit from below stop being black) and the bounce the denoiser sees is "
 			"smoother. Off = the one-bounce GI as before. (r_rtgiCache)" );
 		ImGui::BeginDisabled( !r_rtgiCache.GetBool() );
+		CvarCheckbox( "Path Tail (serve the bounce)", r_rtgiCacheTail, "Tail mode, only while DI lights the scene (dude_rtx 2): a "
+			"converged cell stores the surface's whole OUTGOING light and SERVES the bounce hit - the hit reads the cached value "
+			"(plus its own emissive) and skips its light loop and shadow ray, so the gather is cheaper and the bounce the denoiser "
+			"sees is cell + frame averaged (far less 1-spp noise) instead of a single direct shade. Off = indirect-only: the cell "
+			"holds only the second-and-later-bounce light added on top of the hit's full live shade (the original behaviour). A "
+			"change clears and re-learns the cache. (r_rtgiCacheTail)" );
 		CvarSliderF( "Cache Weight", r_rtgiCacheScale, 0.0f, 2.0f, "%.2f", "Weight of the cached (second and later bounce) light "
 			"added at a bounce hit. 1 = physical; lower for a subtler multi-bounce fill. (r_rtgiCacheScale)" );
 		CvarSliderF( "Cache History (ms)", r_rtgiCacheHistoryMs, 0.0f, 2000.0f, "%.0f ms", "How long a cell remembers, in "
@@ -4798,9 +4804,9 @@ static void DrawDbgGroup_RTGI()
 			"changed by more than 35% (a switched or swinging light), so the cached indirect term follows at the DI's own speed. "
 			"Diagnostic A/B: if the activity view keeps flashing red in a static scene, compare off and on. (r_rtgiCacheReset)" );
 		{
-			int dbg = idMath::ClampInt( 0, 5, r_rtgiCacheDebug.GetInteger() );
+			int dbg = idMath::ClampInt( 0, 6, r_rtgiCacheDebug.GetInteger() );
 			ImGui::SetNextItemWidth( 240.0f );
-			if ( ImGui::Combo( "Cache View##rtgiCacheDebug", &dbg, "Off\0Cell colouring\0Cached value\0Cell age\0Cell history (N)\0Cell activity (reset / fresh)\0" ) ) {
+			if ( ImGui::Combo( "Cache View##rtgiCacheDebug", &dbg, "Off\0Cell colouring\0Cached value\0Cell age\0Cell history (N)\0Cell activity (reset / fresh)\0Servable (tail mode)\0" ) ) {
 				r_rtgiCacheDebug.SetInteger( dbg );
 			}
 			AddTooltip( "Overlay the cache over the view: 'Cell colouring' tints every cell (dim = not in the cache yet) and "
@@ -4808,7 +4814,8 @@ static void DrawDbgGroup_RTGI()
 				"'Cached value' shows the learned indirect light per cell; 'Cell age' frames since a cell's last update (white "
 				"= evictable, dark red = absent); 'Cell history' N over Nmax (black = absent, 15% grey = just created, white = "
 				"converged); 'Cell activity' red = reset this frame, green = created / seeded this frame, grey = steady - a "
-				"static scene must settle to all grey. (r_rtgiCacheDebug)" );
+				"static scene must settle to all grey; 'Servable' (tail mode) white where a cell is converged + fresh enough "
+				"to serve the bounce hit, so a static view goes white in ~1 s. (r_rtgiCacheDebug)" );
 		}
 		ImGui::EndDisabled();	// r_rtgiCache
 	}

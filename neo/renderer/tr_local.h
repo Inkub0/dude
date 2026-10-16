@@ -1077,7 +1077,7 @@ extern idCVar r_rtgiCacheSlotsLog2;			// RT irradiance cache: log2 slot count (r
 extern idCVar r_rtgiCacheHistory;			// RT irradiance cache: Nmax frames of memory per cell (when the ms knob is 0)
 extern idCVar r_rtgiCacheHistoryMs;			// RT irradiance cache: the history in milliseconds through the low-passed frame rate (default 500; 0 = frames)
 extern idCVar r_rtgiCacheCellAngle;			// RT irradiance cache: tan(alpha/2), cell width per unit eye distance
-extern idCVar r_rtgiCacheDebug;				// RT irradiance cache debug overlay: 1 cell colour, 2 cached value, 3 age, 4 N, 5 activity (reset / fresh)
+extern idCVar r_rtgiCacheDebug;				// RT irradiance cache debug overlay: 1 cell colour, 2 cached value, 3 age, 4 N, 5 activity (reset / fresh), 6 servable (C6 tail)
 extern idCVar r_rtgiCacheReset;				// RT irradiance cache: the DI gradient restarts a cell whose direct light changed (diagnostic A/B)
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)

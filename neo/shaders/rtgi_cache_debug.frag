@@ -15,6 +15,9 @@
 //       finer level while moving, an eviction), yellow = cooling down after a restart / HELD (further reset requests
 //       inside the cooldown are a flickering light: the cell blends instead of restarting), grey ramp = steady (N over
 //       Nmax), black = absent. In a static scene this view must settle to grey, with yellow only under flickering lights.
+//   6 = SERVABLE (C6 tail mode): white where the cell is converged (N >= SEED_N) AND fresh (updated < evictAge ago), so a
+//       tail-mode bounce hitting here would read the cell instead of shading live; dim grey otherwise. A static view goes
+//       white in ~1 s as cells converge.
 // Opaque; written into the pre-tonemap HDR scene like restir_di_debug.frag, so values near 1 read as bright.
 //
 // Uniform packing (RB_RHI_RtgiCacheDebugOverlay):
@@ -85,7 +88,7 @@ void main() {
 	} else if ( mode == 4 ) {
 		float ramp = clamp( float( rtgiCacheN( s ) ) / max( u_localParam0.z, 1.0 ), 0.0, 1.0 );
 		fragColor = vec4( vec3( 0.15 + 0.85 * ramp ), 1.0 );
-	} else {
+	} else if ( mode == 5 ) {
 		uint  flags = rtgiCacheFlags( s );
 		float ramp  = clamp( float( rtgiCacheN( s ) ) / max( u_localParam0.z, 1.0 ), 0.0, 1.0 );
 		vec3  c     = vec3( 0.15 + 0.5 * ramp );
@@ -93,5 +96,10 @@ void main() {
 		else if ( ( flags & ( RTGI_CACHE_FRESH_BIT | RTGI_CACHE_SEEDED_BIT ) ) != 0u ) { c = vec3( 0.1, 1.0, 0.1 ); }
 		else if ( rtgiCacheCooldown( s ) > 0u ) { c = vec3( 0.9, 0.8, 0.1 ); }
 		fragColor = vec4( c, 1.0 );
+	} else {
+		// 6 = SERVABLE (C6): white where this surface's cell would serve a tail-mode bounce hit (converged N >= SEED_N AND
+		// fresh: last updated < evictAge ago), dim grey otherwise. Over a static view every lit surface's own cell converges
+		// within ~SEED_N resolves, so the view goes white in ~1 s; a cell that cannot serve (young, or stale off-screen) shades live.
+		fragColor = vec4( vec3( rtgiCacheServable( cp, hit ) ? 1.0 : 0.1 ), 1.0 );
 	}
 }
