@@ -36,12 +36,19 @@ enum BufferUsage {
 					// staged variant is a Phase-2 follow-up (docs/gpu-offload-plan.md).
 					// Also carries INDIRECT usage so a compute pass can write a
 					// VkDrawIndexedIndirectCommand[] here for DrawIndexedIndirect (Phase 3 seed).
-	BU_SKIN			// dual-usage STORAGE|VERTEX buffer: written by the skinning compute
+	BU_SKIN,		// dual-usage STORAGE|VERTEX buffer: written by the skinning compute
 					// kernel, then bound as a vertex buffer by the draw passes (Phase 2
 					// GPU MD5 skinning). VK only; the single hard prereq tessellation
 					// composition needs (the tesc/tese read it as ordinary vertex input).
 					// Host-visible+mapped for now (lets CreateBuffer pre-fill the static
 					// st/color fields the kernel leaves alone); device-local is a follow-up.
+	BU_STORAGE_DEVICE	// GPU-ONLY storage buffer (docs/rtx-irradiance-cache.md C0): device-local, never
+					// host-mapped, addressable (GetBufferDeviceAddress) and bindable as a compute
+					// storage binding. For buffers the GPU both writes and reads every frame (the RT
+					// irradiance cache: fragment-shader atomics into 32 MB) - BU_STORAGE's host-visible
+					// memory would put that traffic across the bus. Contents are UNDEFINED at creation
+					// (`data` is ignored; the owner clears it with a compute dispatch); UpdateBuffer /
+					// ReadBuffer are no-ops on it. VK only; the GL3 backend treats it as a plain buffer.
 };
 
 enum ImageFormat {
@@ -159,6 +166,16 @@ struct ComputeArgs {
 	// needs no barrier between them, only one before their results are read (MD5 skin/deform
 	// flush). Default false = self-barrier, the safe standalone behaviour.
 	bool			deferBarrier = false;
+	// Mid-scene dispatch (docs/rtx-irradiance-cache.md C0): record this dispatch BETWEEN the passes of
+	// an open scene (after a target pass's EndPass, inside the world view) instead of the pre-scene
+	// window. The backend ends the open scene render pass first (a dispatch is illegal inside one) and
+	// the next Draw resumes it with the load variant (EnsureScenePass) - the same contract the NRD
+	// denoise uses. Still refused inside an open TARGET pass. Default false = pre-scene only.
+	bool			midScene = false;
+	// This dispatch consumes storage-buffer writes made by FRAGMENT shaders earlier this frame (the
+	// RT irradiance cache's accumulation atomics from the gather): emit a fragment->compute memory
+	// barrier before it. The trailing compute->consumer barrier already covers the other direction.
+	bool			afterFragmentWrites = false;
 };
 
 // FSR2 Native-AA dispatch (docs/fsr-temporal-pipeline.md R1/C2). Vulkan only; the
@@ -382,6 +399,13 @@ public:
 	// as ComputeArgs::shader. Backends without a compute lane (GL 3.3) return 0.
 	// docs/gpu-offload-plan.md Phase 1.
 	virtual ShaderHandle	CreateComputeShader( const char *name, const char *glslSrc ) { return 0; }
+
+	// Load a BUILD-TIME compiled compute shader: shaders/<name>.comp -> shaders/spv/<name>.comp.spv
+	// through the same VFS -> dev source dir -> embedded lookup LoadShader uses for the graphics
+	// stages (docs/rtx-irradiance-cache.md C0). Unlike CreateComputeShader this needs no runtime
+	// shaderc and the GLSL is validated when the project builds (compile_spv.py handles .comp). The
+	// returned handle is a ComputeArgs::shader. Cached by name; 0 = missing / failed / no compute lane.
+	virtual ShaderHandle	LoadComputeShader( const char *name ) { return 0; }
 
 	// ---- offscreen render targets (Phase 3.5 shadow maps; Phase 11 post stack) ----
 	// Create an offscreen target and its backing texture. A depth format makes a

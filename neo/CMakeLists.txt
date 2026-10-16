@@ -322,6 +322,7 @@ if(DHEWM3_VULKAN)
 		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.frag
 		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.tesc
 		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.tese
+		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.comp
 		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.glsl)
 	add_custom_command(
 		OUTPUT ${spv_dir}/.stamp
@@ -378,6 +379,7 @@ file(GLOB embed_glsl_sources
 	${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.frag
 	${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.tesc
 	${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.tese
+	${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.comp
 	${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.glsl)
 if(DHEWM3_VULKAN)
 	set(embed_spv_args --spv ${spv_dir})

@@ -99,3 +99,60 @@ ImGui: a sub-block of the RT GI group (Debugging tab). The user named the ImGui 
 
 Default off; off = bit-identical; VK + `SupportsRayQuery()` only; primary fullscreen view only; raster / GL3 untouched;
 diagnostic cvars trimmed once tuned (memory `trim-debug-cvars`).
+
+## Implementation log (branch `feat/rtx-irradiance-cache`, 2026-10-16)
+
+### C0 feasibility - what was found and what had to be added
+
+- **Storage + device address + atomics in the gather: yes.** `BU_STORAGE` buffers carry `SHADER_DEVICE_ADDRESS`
+  (RhiWorld.cpp `RB_RHI_GatherSceneLights` / `s_diLightMapBuf` are the pattern) and glslang (vulkan1.4 target)
+  accepts `atomicAdd` / `atomicOr` / `atomicCompSwap` on members of a `buffer_reference` block, so the fragment
+  gather reaches the cache through two device addresses in the RenderParams UBO - no storage descriptor is added to
+  the graphics pipeline layout (which has none).
+- **`BU_STORAGE` is HOST-VISIBLE memory** (VMA `HOST_ACCESS_RANDOM | MAPPED`, `HOST_VISIBLE | HOST_COHERENT` required):
+  right for the per-frame CPU-written light buffer, wrong for 32 MB of fragment-shader atomics. Added
+  `rhi::BU_STORAGE_DEVICE`: device-local (`VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE`), never mapped, addressable,
+  compute-bindable; `UpdateBuffer` / `ReadBuffer` are no-ops on it, contents undefined until a clear dispatch.
+- **`rhi::RHI::Dispatch` refuses to record inside a render pass** (the compute lane was pre-scene only: MD5 skin /
+  deform / cull), and the DI chain runs INSIDE the open scene pass between its target passes. The NRD denoise and
+  FSR2 end the scene pass themselves and the next `Draw` resumes it (`EnsureScenePass`, load variant). Added
+  `ComputeArgs::midScene` (same contract) and `ComputeArgs::afterFragmentWrites` (an explicit
+  FRAGMENT_SHADER -> COMPUTE_SHADER `VkMemoryBarrier`: a render pass's implicit dependencies order attachments, not
+  the gather's storage atomics). Still refused inside an open TARGET pass.
+- **Compute shaders were runtime-compiled C++ string literals** (`CreateComputeShader` through shaderc: MD5 skin,
+  GPU cull, the RT world test). The resolve needs build-time validation (the game cannot be run from the session),
+  so `.comp` joined the build: `compile_spv.py` and `embed_shaders.py` accept the suffix, both CMake globs list
+  `shaders/*.comp` (a NEW file still needs a re-configure - memory `cmake-glob-new-shaders`), and
+  `rhi::RHI::LoadComputeShader( name )` loads `spv/<name>.comp.spv` through the same VFS -> build tree -> embedded
+  lookup as the graphics stages. The prelude (`#version 460` + `GL_EXT_buffer_reference`) is prepended as for every
+  stage, so a `.comp` can `#include` the shared helpers.
+- **Free RenderParams slots** in the gather family (restir_di.frag + its includes, restir_di_gradient.frag,
+  rtgi_ray.frag): `u_particleRadius.zw` (restir_di only - rtgi_ray carries the IGN rotation there), `u_channelMask`,
+  `u_skinParms`, `u_contactParms`, `u_alphaTest`, `u_tessParms2`, `u_texGen*`, `u_clipPlane`, `u_shadowProjection*`.
+  The cache packing (C1) uses `u_channelMask` / `u_skinParms` / `u_contactParms` identically in every consumer and
+  puts the slot-buffer address in `u_particleRadius.zw` (DI gather + gradient, which shares the gather's parms) or
+  `u_alphaTest.xy` (rtgi_ray.frag, the debug overlay).
+- **The R1 gradient runs AFTER the gather** (rev. 2), so "a pixel whose gradient fired resets its cell" cannot be
+  done in the gather. The gradient pass itself writes the reset (bit 31 of the accumulation entry's count, an
+  `atomicOr` on the cell of the stratum's winning sample) and the resolve honours it - C3.
+- **G0 register-headroom check of restir_di.frag.** No offline register tool is available here (`/usr/bin/rga` is
+  ripgrep-all, not Radeon GPU Analyzer; no amdllpc / spirv-stats), so two instruments were set up:
+  1. SPIR-V static metrics of the build (`spirv-dis build/shaders/spv/<s>.spv`: instructions, function-scope
+     `OpVariable`s), baseline at master 11db1c84, before any cache code:
+
+     | shader | instructions | function variables | bytes |
+     |---|---|---|---|
+     | restir_di.frag | 4473 | 306 | 75192 |
+     | restir_di_boost.frag | 4997 | 360 | 83012 |
+     | rtgi_ray.frag | 2582 | 162 | 44284 |
+     | restir_di_gradient.frag | 3650 | 249 | 61256 |
+
+     (A proxy only: the driver's register allocation is what matters, and SPIR-V "variables" are pre-SSA.)
+  2. **`r_vkPipelineStats <name>`** (VulkanBackend.cpp, VK_KHR_pipeline_executable_properties): pipelines created
+     while the filter matches their shader name are built with `CAPTURE_STATISTICS` and every statistic the driver
+     reports is printed (NVIDIA names registers / spills / binary size its own way; RADV reports VGPRs / SGPRs /
+     spilled VGPRs / code size). **Procedure:** in the console `r_vkPipelineStats restir_di` then `vid_restart`,
+     stand in a lit DI room so the gather pipeline is created, read the `r_vkPipelineStats restir_di [...]` block.
+     Repeat with the cache on (C2) and compare; G's 5 vMF states + scores (~30 live scalars) need the fragment stage
+     to stay clear of the spill line with the cache's lookup/update live. Baseline numbers: to be filled by the user
+     at C4 (not measurable from the session).

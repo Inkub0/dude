@@ -12,7 +12,7 @@ import argparse
 import os
 import sys
 
-GLSL_EXTS = {".vert", ".frag", ".tesc", ".tese", ".glsl"}
+GLSL_EXTS = {".vert", ".frag", ".tesc", ".tese", ".comp", ".glsl"}
 
 
 def emit_blob(out, sym, data):

@@ -120,6 +120,14 @@ static idCVar r_vkDebugHud( "r_vkDebugHud", "0", CVAR_RENDERER | CVAR_ARCHIVE | 
 
 static idCVar r_vkComputeTest( "r_vkComputeTest", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: run the compute-lane self-test (dispatch a kernel doubling a storage buffer, read back, verify) and print PASS/FAIL. Set to 1 to trigger (docs/gpu-offload-plan.md Phase 1)" );
+// G0 register-headroom readout (docs/rtx-irradiance-cache.md / docs/rtx-mcpg-guiding.md): the gather shaders are the
+// heaviest in the engine and the guiding work adds live state to them, so the question "how many registers does
+// restir_di.frag use, does it spill" must be answerable on the real driver. VK_KHR_pipeline_executable_properties
+// reports exactly that per pipeline stage (NVIDIA / RADV name the statistics differently; everything the driver
+// returns is printed). Pipelines are created once and cached, so set the filter BEFORE they exist: e.g.
+// `r_vkPipelineStats restir_di` then `vid_restart`, and read the console when the DI gather first draws.
+static idCVar r_vkPipelineStats( "r_vkPipelineStats", "", CVAR_RENDERER,
+	"Vulkan backend: print the driver's per-stage pipeline statistics (register count, spills, binary size, ...) for every pipeline created whose shader name contains this text; '*' = all pipelines, empty = off. Pipelines are cached, so set it and then vid_restart (or reloadShaders) to see the ones already built. Needs VK_KHR_pipeline_executable_properties (dev tool)" );
 static idCVar r_fsr2Test( "r_fsr2Test", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: FSR2 bring-up self-test - size the scratch, build the FSR2 VK interface, create a Native-AA FSR2 context (no dispatch), destroy it, and print PASS/FAIL. Set to 1 to trigger (docs/fsr-temporal-pipeline.md, R1/C0)" );
 static idCVar r_nrdTest( "r_nrdTest", "0", CVAR_RENDERER | CVAR_BOOL,
@@ -220,6 +228,7 @@ public:
 	virtual ShaderHandle	LoadShader( const char *name );
 	virtual ShaderHandle	CreateShaderFromGlsl( const char *name, const char *vertSrc, const char *fragSrc );
 	virtual ShaderHandle	CreateComputeShader( const char *name, const char *glslSrc );
+	virtual ShaderHandle	LoadComputeShader( const char *name );	// build-time .comp.spv (docs/rtx-irradiance-cache.md C0)
 
 	// M7 render-target family. Live: depth targets (2D + cube shadow maps),
 	// color-only + color+depth-stencil targets (the HDR RGBA16F scene buffer and
@@ -280,6 +289,7 @@ public:
 private:
 	// compute lane (docs/gpu-offload-plan.md Phase 1)
 	VkPipeline		GetComputePipeline( ShaderHandle shader );	// build/cache a VkPipeline for a compute shader
+	void			PrintPipelineStats( VkPipeline pipeline, const char *name );	// r_vkPipelineStats: the driver's per-stage statistics (registers / spills)
 	VkDescriptorSet	RecordDispatch( VkCommandBuffer cb, const ComputeArgs &args );	// bind+dispatch; returns the set to reclaim
 	void			ComputeSelfTest();							// r_vkComputeTest: dispatch a trivial kernel, read back, verify
 	void			BdaSelfTest();								// r_vkBdaTest: sum a buffer through its device-address pointer (Phase 3.2b BDA primitive)
@@ -625,6 +635,13 @@ private:
 	// so the names live in a fixed ring that outlives the frame.
 	bool						haveCheckpoints = false;
 	PFN_vkCmdSetCheckpointNV			pfnCmdSetCheckpointNV = NULL;
+	// VK_KHR_pipeline_executable_properties (r_vkPipelineStats, docs/rtx-irradiance-cache.md G0): the driver's
+	// per-stage pipeline statistics - register count, spills, binary size - the register-headroom readout the RT
+	// gather shader work keys on. Enabled whenever the driver offers it; inert until a pipeline is created while
+	// r_vkPipelineStats names it (the capture bit is only set then).
+	bool						havePipelineExecProps = false;
+	PFN_vkGetPipelineExecutablePropertiesKHR	pfnGetPipelineExecutablePropertiesKHR = NULL;
+	PFN_vkGetPipelineExecutableStatisticsKHR	pfnGetPipelineExecutableStatisticsKHR = NULL;
 	PFN_vkGetQueueCheckpointDataNV		pfnGetQueueCheckpointDataNV = NULL;
 	enum { CKPT_RING = 512, CKPT_NAME = 40, CKPT_STACK = 16 };
 	char						ckptRing[CKPT_RING][CKPT_NAME];
@@ -1819,7 +1836,7 @@ bool VulkanBackend::CreateDeviceAndVma() {
 		queueCount++;
 	}
 
-	const char *devExts[8] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+	const char *devExts[12] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 	uint32_t devExtCount = 1;
 
 	// R2 ray-query foundation: probe for the RT extension trio. deferred_host_operations is a
@@ -1830,6 +1847,7 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	bool haveAccelExt = false, haveRayQueryExt = false, haveDeferredOpsExt = false;
 	bool haveComputeDerivExt = false;
 	bool haveMemoryBudgetExt = false;
+	bool havePipelineExecPropsExt = false;
 	{
 		uint32_t extCount = 0;
 		vkEnumerateDeviceExtensionProperties( physical, NULL, &extCount, NULL );
@@ -1850,6 +1868,8 @@ bool VulkanBackend::CreateDeviceAndVma() {
 				haveMemoryBudgetExt = true;
 			} else if ( !strcmp( extProps[i].extensionName, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME ) ) {
 				haveCheckpoints = true;		// NVIDIA: hang localisation markers (see CheckpointMark)
+			} else if ( !strcmp( extProps[i].extensionName, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME ) ) {
+				havePipelineExecPropsExt = true;	// r_vkPipelineStats: per-stage register / spill readout (dev tool)
 			}
 		}
 	}
@@ -1933,6 +1953,13 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	if ( haveComputeDerivExt ) {
 		supportedCsd.pNext = supported11.pNext;
 		supported11.pNext = &supportedCsd;
+	}
+	// r_vkPipelineStats: pipeline-executable-properties feature query (chained only when the ext exists)
+	VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR supportedPep = {};
+	supportedPep.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR;
+	if ( havePipelineExecPropsExt ) {
+		supportedPep.pNext = supported11.pNext;
+		supported11.pNext = &supportedPep;
 	}
 	VkPhysicalDeviceFeatures2 supported2 = {};
 	supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -2038,6 +2065,18 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	if ( haveCheckpoints ) {
 		devExts[devExtCount++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
 	}
+	// VK_KHR_pipeline_executable_properties (r_vkPipelineStats, docs/rtx-irradiance-cache.md G0): a feature bit + the
+	// extension. No behaviour change until a pipeline is created with the capture-statistics bit, which only the
+	// pipelines the cvar names get - so enabling it whenever the driver offers it is free.
+	havePipelineExecProps = havePipelineExecPropsExt && supportedPep.pipelineExecutableInfo == VK_TRUE;
+	VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR enabledPep = {};
+	enabledPep.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR;
+	if ( havePipelineExecProps ) {
+		enabledPep.pipelineExecutableInfo = VK_TRUE;
+		enabledPep.pNext = enabled11.pNext;
+		enabled11.pNext = &enabledPep;
+		devExts[devExtCount++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
+	}
 
 	VkDeviceCreateInfo dci = {};
 	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -2064,6 +2103,13 @@ bool VulkanBackend::CreateDeviceAndVma() {
 		s_vkCheckpointBackend = haveCheckpoints ? this : NULL;
 		common->Printf( "VK: diagnostic checkpoints %s (pass markers in the crash dump when r_vkCrashLogging is on)\n",
 			haveCheckpoints ? "available" : "unavailable" );
+	}
+	if ( havePipelineExecProps ) {
+		pfnGetPipelineExecutablePropertiesKHR = (PFN_vkGetPipelineExecutablePropertiesKHR)vkGetDeviceProcAddr( device, "vkGetPipelineExecutablePropertiesKHR" );
+		pfnGetPipelineExecutableStatisticsKHR = (PFN_vkGetPipelineExecutableStatisticsKHR)vkGetDeviceProcAddr( device, "vkGetPipelineExecutableStatisticsKHR" );
+		havePipelineExecProps = ( pfnGetPipelineExecutablePropertiesKHR != NULL && pfnGetPipelineExecutableStatisticsKHR != NULL );
+		common->Printf( "VK: pipeline executable statistics %s (r_vkPipelineStats <shader name> + vid_restart prints registers / spills)\n",
+			havePipelineExecProps ? "available" : "unavailable" );
 	}
 	if ( haveRayQuery ) {
 		pfnGetAsBuildSizes = (PFN_vkGetAccelerationStructureBuildSizesKHR)
@@ -4348,6 +4394,11 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 		                           | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
 		                           | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
 		                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT; break;
+		// GPU-only storage (docs/rtx-irradiance-cache.md C0): compute binding + device address; the TRANSFER bits
+		// keep a later staged seed / readback possible. Device-local below, never mapped.
+		case BU_STORAGE_DEVICE: usageBits = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+		                           | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+		                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT; break;
 		default:         usageBits = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
 	}
 	// BDA (Phase 3.2b): storage buffers (compute) and persistent vertex/index buffers (the world-static
@@ -4356,7 +4407,7 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 	// legal when the allocator carries the BDA flag (else vmaCreateBuffer fails validation), so gate on
 	// the same capability. Ring buffers aren't created here, so they stay address-less and the BDA zfill
 	// path falls back for streamed/skinned surfaces.
-	if ( ( usage == BU_STORAGE || usage == BU_VERTEX || usage == BU_INDEX ) && haveBufferDeviceAddress ) {
+	if ( ( usage == BU_STORAGE || usage == BU_STORAGE_DEVICE || usage == BU_VERTEX || usage == BU_INDEX ) && haveBufferDeviceAddress ) {
 		usageBits |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 	}
 	// R3.5 animated BLAS: the GPU-skinned vertex output (BU_SKIN) and each surface's persistent
@@ -4379,21 +4430,30 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	VmaAllocationCreateInfo aci = {};
 	aci.usage = VMA_MEMORY_USAGE_AUTO;
-	// storage buffers are read back on the host (ReadBuffer), so hint RANDOM access to keep
-	// them in cached memory; everything else is write-only-from-CPU (SEQUENTIAL_WRITE lets the
-	// allocator pick write-combined). A wrong hint doesn't break correctness on coherent memory
-	// but would make storage read-back pathologically slow on a write-combined heap.
-	aci.flags = ( usage == BU_STORAGE ? VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
-	                                  : VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT )
-	          | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-	aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	if ( usage == BU_STORAGE_DEVICE ) {
+		// GPU-only storage (the RT irradiance cache, docs/rtx-irradiance-cache.md): DEVICE-LOCAL and never mapped.
+		// 32 MB of fragment-shader atomics + a per-frame compute resolve must not live in host memory across the
+		// bus (the host-visible path below lands there on a discrete GPU). No host-access flag, so VMA picks the
+		// device heap; the contents are undefined until the owner's clear dispatch; bufferMapped stays NULL, so
+		// UpdateBuffer / ReadBuffer are no-ops on it (`data` is ignored - there is no mapping to seed through).
+		aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+	} else {
+		// storage buffers are read back on the host (ReadBuffer), so hint RANDOM access to keep
+		// them in cached memory; everything else is write-only-from-CPU (SEQUENTIAL_WRITE lets the
+		// allocator pick write-combined). A wrong hint doesn't break correctness on coherent memory
+		// but would make storage read-back pathologically slow on a write-combined heap.
+		aci.flags = ( usage == BU_STORAGE ? VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+		                                  : VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT )
+		          | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	}
 	VkBuffer buf = VK_NULL_HANDLE;
 	VmaAllocation alloc = NULL;
 	VmaAllocationInfo info = {};
 	if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &buf, &alloc, &info ), "vmaCreateBuffer(static)" ) ) {
 		return 0;
 	}
-	if ( data ) {
+	if ( data && info.pMappedData ) {
 		memcpy( info.pMappedData, data, (size_t)size );
 	}
 
@@ -4826,6 +4886,52 @@ ShaderHandle VulkanBackend::CreateComputeShader( const char *name, const char *g
 #endif
 }
 
+// Build-time compiled compute shader (docs/rtx-irradiance-cache.md C0): shaders/<name>.comp -> spv/<name>.comp.spv
+// through VK_ReadSpv (VFS -> build tree -> embedded), exactly like the graphics stages, so the GLSL is validated
+// by compile_spv.py when the project builds and no runtime shaderc is involved. Same shaderTable / handle rules as
+// CreateComputeShader (a compute rec leaves vert/frag NULL; GetComputePipeline reads .comp).
+ShaderHandle VulkanBackend::LoadComputeShader( const char *name ) {
+	if ( device == VK_NULL_HANDLE || name == NULL || name[0] == '\0' ) {
+		return 0;
+	}
+	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
+		if ( shaderTable[i].name.Icmp( name ) == 0 ) {
+			return shaderTable[i].failed ? 0 : (ShaderHandle)( i + 1 );
+		}
+	}
+	ShaderRec rec;
+	rec.name = name;
+	std::vector<byte> compSpv;
+	if ( !VK_ReadSpv( va( "%s.comp.spv", name ), compSpv ) ) {
+		common->Warning( "VK shaders: missing SPIR-V for compute shader '%s' (shaders/spv/%s.comp.spv)", name, name );
+		rec.failed = true;
+		shaderTable.push_back( rec );
+		return 0;
+	}
+	VkShaderModuleCreateInfo mi = {};
+	mi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	mi.codeSize = compSpv.size();
+	mi.pCode = (const uint32_t *)compSpv.data();
+	if ( !vkCheck( vkCreateShaderModule( device, &mi, NULL, &rec.comp ), va( "vkCreateShaderModule(%s.comp)", name ) ) ) {
+		rec.comp = VK_NULL_HANDLE;
+		rec.failed = true;
+	}
+	shaderTable.push_back( rec );
+	return rec.failed ? 0 : (ShaderHandle)shaderTable.size();
+}
+
+// r_vkPipelineStats (docs/rtx-irradiance-cache.md G0): does this pipeline's shader name match the readout filter?
+static bool VK_PipelineStatsWanted( const char *name ) {
+	const char *f = r_vkPipelineStats.GetString();
+	if ( f == NULL || f[0] == '\0' || !strcmp( f, "0" ) ) {
+		return false;
+	}
+	if ( !strcmp( f, "*" ) || !strcmp( f, "1" ) ) {
+		return true;
+	}
+	return name != NULL && idStr::FindText( name, f, false ) >= 0;
+}
+
 // Build (or fetch from cache) a compute VkPipeline for a compute shader handle. Keyed by
 // ShaderHandle in a map separate from the graphics pipelineCache (whose key encodes graphics
 // state compute has none of). Caches VK_NULL_HANDLE for a missing/failed compute module so a
@@ -4847,12 +4953,73 @@ VkPipeline VulkanBackend::GetComputePipeline( ShaderHandle shader ) {
 		cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
 		cpci.stage = stage;
 		cpci.layout = computePipeLayout;
+		const bool statsWanted = havePipelineExecProps && VK_PipelineStatsWanted( shaderTable[shader - 1].name.c_str() );
+		cpci.flags = statsWanted ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR : 0;
 		if ( !vkCheck( vkCreateComputePipelines( device, diskPipelineCache, 1, &cpci, NULL, &pipeline ), "vkCreateComputePipelines" ) ) {
 			pipeline = VK_NULL_HANDLE;
+		}
+		if ( statsWanted && pipeline != VK_NULL_HANDLE ) {
+			PrintPipelineStats( pipeline, shaderTable[shader - 1].name.c_str() );
 		}
 	}
 	computePipelineCache[shader] = pipeline;		// cache success AND null (don't retry)
 	return pipeline;
+}
+
+// r_vkPipelineStats (docs/rtx-irradiance-cache.md G0 register-headroom check): print everything the driver reports
+// about a pipeline's executables (one per stage) - VK_KHR_pipeline_executable_properties statistics are driver-named
+// (NVIDIA: register count / binary size / ...; RADV: VGPRs, SGPRs, spilled VGPRs, code size, ...), so the names are
+// printed as given. Only called for pipelines created with the capture bit.
+void VulkanBackend::PrintPipelineStats( VkPipeline pipeline, const char *name ) {
+	if ( !havePipelineExecProps || pipeline == VK_NULL_HANDLE ) {
+		return;
+	}
+	VkPipelineInfoKHR pi = {};
+	pi.sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR;
+	pi.pipeline = pipeline;
+	uint32_t numExec = 0;
+	if ( pfnGetPipelineExecutablePropertiesKHR( device, &pi, &numExec, NULL ) != VK_SUCCESS || numExec == 0 ) {
+		common->Printf( "r_vkPipelineStats %s: no executable properties reported\n", name );
+		return;
+	}
+	std::vector<VkPipelineExecutablePropertiesKHR> props( numExec );
+	for ( uint32_t e = 0; e < numExec; e++ ) {
+		props[e] = {};
+		props[e].sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR;
+	}
+	pfnGetPipelineExecutablePropertiesKHR( device, &pi, &numExec, props.data() );
+	for ( uint32_t e = 0; e < numExec; e++ ) {
+		VkPipelineExecutableInfoKHR ei = {};
+		ei.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR;
+		ei.pipeline = pipeline;
+		ei.executableIndex = e;
+		uint32_t numStats = 0;
+		pfnGetPipelineExecutableStatisticsKHR( device, &ei, &numStats, NULL );
+		std::vector<VkPipelineExecutableStatisticKHR> stats( numStats );
+		for ( uint32_t s = 0; s < numStats; s++ ) {
+			stats[s] = {};
+			stats[s].sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR;
+		}
+		if ( numStats > 0 ) {
+			pfnGetPipelineExecutableStatisticsKHR( device, &ei, &numStats, stats.data() );
+		}
+		common->Printf( "r_vkPipelineStats %s [%s] (subgroup %u):\n", name, props[e].name, props[e].subgroupSize );
+		for ( uint32_t s = 0; s < numStats; s++ ) {
+			const VkPipelineExecutableStatisticKHR &st = stats[s];
+			switch ( st.format ) {
+				case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:
+					common->Printf( "    %-32s = %s\n", st.name, st.value.b32 ? "true" : "false" ); break;
+				case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
+					common->Printf( "    %-32s = %lld\n", st.name, (long long)st.value.i64 ); break;
+				case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
+					common->Printf( "    %-32s = %llu\n", st.name, (unsigned long long)st.value.u64 ); break;
+				case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR:
+					common->Printf( "    %-32s = %.3f\n", st.name, st.value.f64 ); break;
+				default:
+					common->Printf( "    %-32s = ?\n", st.name ); break;
+			}
+		}
+	}
 }
 
 // Record a compute dispatch onto cb: bind the pipeline, allocate + write + bind a storage
@@ -4914,13 +5081,31 @@ void VulkanBackend::Dispatch( const ComputeArgs &args ) {
 	}
 	// a vkCmdDispatch is illegal inside a render pass; the compute lane records in the
 	// pre-scene window on the frame cb. If a scene/target pass is already open, skip
-	// (Phase 2 sequences dispatches before the scene pass opens).
-	if ( insideScenePass || insideTargetPass ) {
+	// (Phase 2 sequences dispatches before the scene pass opens) - unless the caller asked for a
+	// MID-SCENE dispatch (ComputeArgs::midScene, the RT irradiance cache resolve between the DI
+	// chain's target passes): then the open scene pass is ended here and the next Draw resumes it
+	// through EnsureScenePass (load variant), the same contract RtaoDenoise / RunFsr2 use. A target
+	// pass mid-recording can never be resumed from here, so that case stays refused.
+	if ( insideTargetPass || ( insideScenePass && !args.midScene ) ) {
 		static bool warned = false;
 		if ( !warned ) { warned = true; common->Warning( "VK: Dispatch() inside a render pass — skipped (record it pre-scene)" ); }
 		return;
 	}
 	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );		// midScene: scene pass resumes on the next Draw (EnsureScenePass)
+		insideScenePass = false;
+	}
+	if ( args.afterFragmentWrites ) {
+		// the dispatch reads storage this frame's FRAGMENT shaders wrote (cache accumulation atomics): a
+		// render pass's implicit dependencies cover attachments only, so order the buffer writes explicitly
+		VkMemoryBarrier pre = {};
+		pre.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		pre.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		pre.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &pre, 0, NULL, 0, NULL );
+	}
 	VkDescriptorSet set = RecordDispatch( cb, args );
 	if ( set == VK_NULL_HANDLE ) {
 		return;
@@ -12130,11 +12315,17 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	// in the cache key keeps render-pass-incompatible destinations on separate keys.
 	pci.renderPass = curPipelinePass ? curPipelinePass : passClear;
 	pci.subpass = 0;
+	// r_vkPipelineStats (G0 register readout): capture the driver's statistics for the pipelines the filter names
+	const bool statsWanted = havePipelineExecProps && VK_PipelineStatsWanted( sh.name.c_str() );
+	pci.flags = statsWanted ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR : 0;
 
 	VkPipeline pipeline = VK_NULL_HANDLE;
 	if ( !vkCheck( vkCreateGraphicsPipelines( device, diskPipelineCache, 1, &pci, NULL, &pipeline ),
 	               va( "vkCreateGraphicsPipelines(%s)", sh.name.c_str() ) ) ) {
 		pipeline = VK_NULL_HANDLE;
+	}
+	if ( statsWanted && pipeline != VK_NULL_HANDLE ) {
+		PrintPipelineStats( pipeline, sh.name.c_str() );
 	}
 	pipelineCache[key] = pipeline;
 	return pipeline;

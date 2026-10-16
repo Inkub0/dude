@@ -77,7 +77,7 @@ def main():
     compiled = 0
     skipped = 0
     for f in sorted(SHADER_DIR.iterdir()):
-        if f.suffix not in (".vert", ".frag", ".tesc", ".tese"):
+        if f.suffix not in (".vert", ".frag", ".tesc", ".tese", ".comp"):
             continue
         spv = outdir / (f.name + ".spv")
         if spv.exists() and spv.stat().st_mtime >= max(f.stat().st_mtime, deps_mtime, include_mtime(f)):
