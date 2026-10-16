@@ -51,7 +51,10 @@ void main() {
 
 	for ( uint li = 0u; li < pc.nLights; li++ ) {
 		uint flags = lights.l[ li ].flags;
-		if ( ( flags & DUDE_LIGHT_FOGVOLUME ) != 0u ) { continue; }		// a fog row, not a light (guard; outside nLights anyway)
+		// skip fog rows (not lights) AND DIFORWARD lights (the fast first-person weapon lights / flashlight): the DI
+		// gather's diShadeLight skips DIFORWARD unconditionally (restir_di_shade.glsl - the forward path lights them),
+		// so the grid's candidate set must match it, and excluding the moving flashlight also stops it churning cells.
+		if ( ( flags & ( DUDE_LIGHT_FOGVOLUME | DUDE_LIGHT_DIFORWARD ) ) != 0u ) { continue; }
 		// in-range: the cell centre within the light's cull sphere, widened by the cell half-diagonal
 		vec4 cull = lights.l[ li ].cull;
 		vec3 cd   = cull.xyz - center;

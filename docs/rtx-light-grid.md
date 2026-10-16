@@ -41,18 +41,20 @@ and cost differ.
 
 ## Grid structure (camera-centred cascades)
 
-- **Cascades.** `numCascades` levels (default 3), each an `R^3` cell grid (default R = 32) centred on the camera,
-  cell size `cellBase * 2^c` (default `cellBase` 48 u -> cascade 0 spans +-768 u, cascade 2 +-3072 u). A world point
-  picks the smallest cascade whose box contains it (max-axis distance test), then quantizes to a cell. The camera
-  centre is SNAPPED to the cascade's cell size each frame so cells do not swim as the camera moves (clipmap rule).
-- **Cell index.** `cell = c*R^3 + (z*R + y)*R + x`, `x,y,z in [0,R)`. Total cells `numCascades * R^3` (3*32^3 =
-  98304 default). Decodable back to a cell CENTRE in the fill.
+- **Cascades.** `numCascades` levels (default 4), each an `R^3` cell grid (default R = 32) centred on the camera,
+  cell size `cellBase * 2^c` (default `cellBase` 16 u -> cascades reach about +-256 / 512 / 1024 / 2048 u). Sized so
+  the four cascades cover a whole Doom area (rarely over 2000 units across, user 2026-10-16) with fine near cells,
+  rather than one coarse cascade reaching far beyond any room. A world point picks the smallest cascade whose box
+  contains it (max-axis distance test), then quantizes to a cell. The camera centre is SNAPPED to the cascade's cell
+  size each frame so cells do not swim as the camera moves (clipmap rule); the finer cells re-centre in smaller steps.
+- **Cell index.** `cell = c*R^3 + (z*R + y)*R + x`, `x,y,z in [0,R)`. Total cells `numCascades * R^3` (4*32^3 =
+  131072 default). Decodable back to a cell CENTRE in the fill.
 - **No orientation bins in stage 1.** merian splits each cell into 7 face-normal bins so a light behind the shading
   surface is not a candidate. The consume's `diShadeLight` already rejects `N.L <= 0` (pHat 0 = a dead draw, not a
   wrong one), so bins are a slot-efficiency optimisation, deferred to L4. Without them a cell's list may hold a few
   lights that face away - tolerable with Doom's small light counts.
 - **Memory.** `slots` candidates/cell (default 16), each `{ uint lightIndex; float pdf; }` = 8 B, + one `float sumImp`
-  per cell. 98304 cells x (16*8 + 4) = ~13 MB, device-local. R, cascades, slots are the size knobs (ComputeGfxCfg
+  per cell. 131072 cells x (16*8 + 4) = ~18 MB, device-local. R, cascades, slots are the size knobs (ComputeGfxCfg
   signature). Orientation bins (L4) would x7 it, hence deferred.
 
 ## Importance metric (fill)
