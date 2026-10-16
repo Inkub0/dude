@@ -404,6 +404,19 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
   silhouette reconstruction, not in the lit image), 4 (grates / thin walls OK) pass; **item 3-6 reported as "looks
   exactly the same"** - open: the `r_rtgiCacheScale 4` flip on an indirectly lit side wall + a view-2 screenshot
   decide between "subtle at the physical weight" and "the lookup side is broken".
+- **Resolved (user, scale 4 vs 1 on a Marine Command side wall):** at scale 4 the upper wall and the ceiling panels
+  pick up a faint fill carrying the light's cyan tint; at scale 1 it is a quarter of that and disappears into the
+  texture. The pipeline is correct end to end; the second-order term is SMALL by physics in Doom's dark-albedo
+  world (0.2-0.4): the second bounce is ~a third of the first, which is itself a modest share of a corridor's
+  lighting. Consequences: (1) `r_rtgiCacheScale` is a taste knob - ~2 reads as a gentle fill, 4 as an obvious one;
+  (2) the plan's second promise, "the bounce signal NRD sees is smoother", does NOT follow from caching the indirect
+  term alone, because the noisy part of the bounce is the 1-spp DIRECT shading at the hit (one shadow ray, the
+  light loop) which the cache leaves untouched. The follow-up that would make the cache earn its keep is the
+  paper's fast mode proper: also accumulate the hit's shaded DIRECT term into the hit's cell and, where the cell is
+  converged, read `L_out(H)` from the cache INSTEAD of running the light loop + shadow ray at the hit - a smoother
+  bounce (cell + frame averaged) AND a cheaper gather (no light loop at most hits), at the price of the cached
+  direct term lagging light changes by the history (the reset / cooldown machinery already handles that). A design
+  change against the plan's "indirect-only" line: the user's call (C5 or a C6).
 
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 
