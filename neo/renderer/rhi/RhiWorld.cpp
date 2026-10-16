@@ -7762,7 +7762,12 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// RT irradiance cache (docs/rtx-irradiance-cache.md): the bounce's multi-bounce feedback; slot address in u_alphaTest.xy
 	// (u_particleRadius carries the IGN rotation here). Off (default) packs nothing and the shader never touches it.
 	const bool giCache = RB_RHI_RtgiCacheBegin( r, viewDef );
+	// movers never teach the cache: the gather tells them from the camera's own motion (last frame's view matrix + the
+	// full-res velocity MRT on unit 10, flag 8); without a velocity this view every pixel may teach (static scenes)
+	const rhi::ImageHandle giCacheVel = ( giCache && rhiNormalVelThisView ) ? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
 	if ( giCache ) {
+		memcpy( parms.prevMvpMatrix, rhiRtgiPrevValid ? rhiRtgiPrevView : viewDef->worldSpace.modelViewMatrix, sizeof( parms.prevMvpMatrix ) );
+		if ( giCacheVel != 0 ) { rhiRtgiCache.parms.flags |= 8u; }
 		RB_RHI_RtgiCachePack( parms, rhiRtgiCache.parms, false );
 	}
 
@@ -7780,6 +7785,9 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
 	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
+	// unit 10 = the velocity for the cache's mover test (white placeholder keeps the set complete; sampled only with flag 8)
+	if ( giCacheVel != 0 ) { RB_RHI_BindRTImage( r, 10, giCacheVel ); } else { RB_RHI_BindUnit( 10, globalImages->whiteImage ); }
+	backEnd.glState.tmu[10].current2DMap = -1;
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );		// set 2 (bindless materials) is auto-bound by the backend
 	r->EndPass();
 	r->GpuScopeEnd();
@@ -8147,13 +8155,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.occlusionParms[2] = (float)( ( fh >> 3u ) & 1023u );
 		parms.occlusionParms[3] = (float)( ( fh >> 13u ) & 1023u );
 	}
-	// RT irradiance cache (docs/rtx-irradiance-cache.md): the combined bounce learns the cache at every traced pixel and
-	// reads it at its hit (multi-bounce). Only with the bounce; slot address in u_particleRadius.zw (.xy = the geo table).
-	// The gradient pass inherits the packing (gp = parms) for its cell reset (C3). Off (default) packs nothing.
-	const bool diCache = combineGI && RB_RHI_RtgiCacheBegin( r, viewDef );
-	if ( diCache ) {
-		RB_RHI_RtgiCachePack( parms, rhiRtgiCache.parms, true );
-	}
+	// (the RT irradiance cache is packed just before the gather draw, once the velocity at the gather res is known)
 
 	// Stage D apply mode (r_rtReStirDIApply): DI will LIGHT this view, so the gather shades with the G-buffer material
 	// (albedo att3 + rough/metal/spec att1) and writes the demodulated radiance; the apply (RB_RHI_ReStirDIApply)
@@ -8292,6 +8294,16 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.tessParms[3] = boostSide ? diPrevCb : -1.0f;
 		memcpy( parms.prevMvpMatrix, rhiReStirDIPrevValid ? rhiReStirDIPrevView : viewDef->worldSpace.modelViewMatrix, sizeof( parms.prevMvpMatrix ) );
 	}
+	// RT irradiance cache (docs/rtx-irradiance-cache.md): the combined bounce learns the cache at every traced STATIC pixel
+	// and reads it at its hit (multi-bounce). Only with the bounce; slot address in u_particleRadius.zw (.xy = the geo
+	// table). Flag 8 = the velocity at the gather res rides unit 10 (bound below), so the gather tells movers from the
+	// camera's own motion (u_prevMvpMatrix = last frame's view, set above) and never lets them teach. The gradient pass
+	// inherits the packing (gp = parms) for its cell reset (C3). Off (default) packs nothing.
+	const bool diCache = combineGI && RB_RHI_RtgiCacheBegin( r, viewDef );
+	if ( diCache ) {
+		if ( nrdVel != 0 ) { rhiRtgiCache.parms.flags |= 8u; }
+		RB_RHI_RtgiCachePack( parms, rhiRtgiCache.parms, true );
+	}
 	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray (+ R3a's K rays on young pixels)
 	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
 	r->BeginTargetPass( rhiReStirDIRT, NULL );
@@ -8322,7 +8334,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		} else {
 			RB_RHI_BindUnit( 5, globalImages->whiteImage );	RB_RHI_BindUnit( 6, globalImages->whiteImage );	RB_RHI_BindUnit( 9, globalImages->whiteImage );
 		}
-		if ( boostWant ) { RB_RHI_BindRTImage( r, 10, nrdVel ); } else { RB_RHI_BindUnit( 10, globalImages->whiteImage ); }
+		// the velocity rides unit 10 whenever the view has one (the R3a boost AND the irradiance cache's mover test read it)
+		if ( nrdVel != 0 ) { RB_RHI_BindRTImage( r, 10, nrdVel ); } else { RB_RHI_BindUnit( 10, globalImages->whiteImage ); }
 		backEnd.glState.tmu[4].current2DMap = -1;	backEnd.glState.tmu[5].current2DMap = -1;	backEnd.glState.tmu[6].current2DMap = -1;
 		backEnd.glState.tmu[9].current2DMap = -1;	backEnd.glState.tmu[10].current2DMap = -1;
 	}

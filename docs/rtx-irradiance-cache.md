@@ -326,6 +326,29 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
   the next step is driving the reset from the FILTERED confidence in `restir_di_gradient_conf.frag` (per gather
   pixel, after the A-trous + rise-only smoothing) instead of the raw stratum - fuller coverage, and the filter
   dilutes sparse false positives.
+- **Third reading (user): looking around is now almost all grey; floor grates always show activity; a STATIC camera
+  watching a walking NPC shows resets + young cells over all the walls; while walking, the leading edge of the
+  swimming rings is red.** Three causes, three changes:
+  1. **Movers polluted the cache.** The gather taught a cell for every traced pixel - the walking marine and the
+     view weapon included. A moving mesh sweeps new world positions every frame and mints on the order of a thousand
+     garbage cells a frame: a 1M-slot cache fills in tens of seconds, after which every newly cut cell must EVICT an
+     old one (the red ring edges - an eviction painted the same red as a gradient reset). Now the view weapon
+     (`nt.a < 0.5`) and movers never teach (they still look up): `rtgiCacheIsMover` compares where the per-object
+     velocity says the pixel was last frame with where the camera's own motion alone would have put it (last frame's
+     view matrix + this view's projection) - a static surface agrees within the jitter, a mover disagrees by many
+     pixels (threshold 3). The velocity rides unit 10 in both gathers (flag 8 when bound).
+  2. **The reset fired on moving SHADOWS.** The NPC's shadow sweeping a wall flips the one-ray visibility of a region
+     every frame; the indirect term a moving shadow displaces is second-order, so resetting for it only injected
+     noise. The gradient tells the cases apart: a light that switched off LEFT the buffer (its row is absent in the
+     other frame), an occluded light is still present with zero visibility. The reset now fires when the light is
+     absent on either side (switch / entered / left DI), or when it is LIT on both sides and changed by the threshold
+     (dimming, brightening, a swinging cookie); a zero side with the light present is a shadow - no reset.
+  3. **Eviction is its own request** (`RTGI_CACHE_EVICT_BIT`): the resolve drops that frame's mixed sums and keeps
+     the payload the claimer left (now seeded from the coarser parent, like a fresh cell), flagged FRESH (green).
+     Red in view 5 is a gradient reset and nothing else.
+  Floor grates: perforated surfaces alternate between the grate plane and the floor beneath under the jitter, so
+  their strata compare two different surfaces that both pass the DI's same-surface test; expected residual,
+  localised to grates, and the cache value on a grate matters little (a thin surface mostly holes).
 
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 

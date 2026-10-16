@@ -27,8 +27,9 @@ layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtgiCacheSl
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtgiCacheAccums { HgAccum a[]; };
 
 const float RTGI_CACHE_FIXED      = 1024.0;			// accumulation fixed point (x1024: 4096 per channel per cell-frame of headroom)
-const uint  RTGI_CACHE_RESET_BIT  = 0x80000000u;	// HgAccum.count: restart this cell at the resolve
-const uint  RTGI_CACHE_COUNT_MASK = 0x7FFFFFFFu;
+const uint  RTGI_CACHE_RESET_BIT  = 0x80000000u;	// HgAccum.count: restart this cell at the resolve (the DI gradient saw its light change)
+const uint  RTGI_CACHE_EVICT_BIT  = 0x40000000u;	// HgAccum.count: the slot changed hands this frame - drop the (mixed) sums, keep the payload
+const uint  RTGI_CACHE_COUNT_MASK = 0x3FFFFFFFu;
 const uint  RTGI_CACHE_STRIDE     = 4u;				// uints per slot (HgWords view)
 const uint  RTGI_CACHE_STAMP_OFS  = 1u;				// HgSlot.stamp
 // HgSlot.irrBN: bits 0-15 irr.b (f16), 16-25 N (10 bits: Nmax <= 1023), then three flag bits the debug activity view
@@ -45,8 +46,8 @@ const uint  RTGI_CACHE_SEED_N     = 4u;				// frames of trust a cell seeded from
 
 // Per-pass constants, packed by the CPU (RhiWorld.cpp RB_RHI_RtgiCachePack) identically for every consumer:
 //   u_channelMask  = ( accum address lo, hi [bit-cast], slot mask [bit-cast uint], tanAlphaHalf )
-//   u_skinParms    = ( scale, frame stamp [bit-cast uint], flags [bit-cast uint: 1 update, 2 lookup, 4 gradient reset],
-//                      gradient reset threshold (relative luminance change) )
+//   u_skinParms    = ( scale, frame stamp [bit-cast uint], flags [bit-cast uint: 1 update, 2 lookup, 4 gradient reset,
+//                      8 velocity at unit 10 valid: movers never teach], gradient reset threshold (relative luminance change) )
 //   u_contactParms = ( evict age in frames (0 = never), per-sample peak clamp, albedo clamp at the hit, reset darkness bias )
 // The SLOT address differs per consumer (restir_di.frag + the gradient: u_particleRadius.zw; rtgi_ray.frag and the
 // debug overlay: u_alphaTest.xy), so it is passed in.
@@ -65,6 +66,7 @@ struct RtgiCacheParms {
 	bool  update;
 	bool  lookup;
 	bool  gradientReset;
+	bool  moverTest;		// the per-object velocity is bound (unit 10): a pixel moving beyond the camera's own motion is a mover
 };
 
 // (compute consumers bind the buffers directly and have no RenderParams block: they define RTGI_CACHE_NO_UNIFORMS)
@@ -81,6 +83,7 @@ RtgiCacheParms rtgiCacheParmsFromUniforms( uvec2 slotAddr ) {
 	p.update        = ( flags & 1u ) != 0u;
 	p.lookup        = ( flags & 2u ) != 0u;
 	p.gradientReset = ( flags & 4u ) != 0u;
+	p.moverTest     = ( flags & 8u ) != 0u;
 	p.resetThresh  = u_skinParms.w;
 	p.evictAge     = uint( max( u_contactParms.x, 0.0 ) + 0.5 );
 	p.sampleClamp  = u_contactParms.y;
@@ -130,9 +133,28 @@ vec3 rtgiCacheLookup( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye ) {
 	return vec3( 0.0 );
 }
 
+// SEED a just-claimed cell from its one-coarser parent when that has been learned. As the camera approaches a surface
+// its cells are re-cut at the finer level, and without this every ring of re-cut cells restarted from a single frame's
+// mean (the "swimming" bands in the history view while moving). The parent's value is the best estimate there is; it
+// enters with SEED_N frames of trust so the fine cell's own samples take over smoothly. One writer (the claim winner);
+// siblings that look the cell up before the write lands read N = 0, which is just a miss for that frame.
+void rtgiCacheSeed( RtgiCacheSlots slots, HgWords words, uint slotMask, int idx, vec3 P, vec3 N, int level ) {
+	HgKey kc = hgMakeKeyLevel( P, N, level + 1, slotMask );
+	int ic = hgFind( words, RTGI_CACHE_STRIDE, kc );
+	if ( ic < 0 ) { return; }
+	HgSlot sc = slots.s[ ic ];
+	if ( rtgiCacheN( sc ) == 0u ) { return; }
+	HgSlot sn = slots.s[ idx ];
+	rtgiCachePackIrr( sn, rtgiCacheUnpackIrr( sc ), min( rtgiCacheN( sc ), RTGI_CACHE_SEED_N ), RTGI_CACHE_SEEDED_BIT );
+	slots.s[ idx ].irrRG = sn.irrRG;
+	slots.s[ idx ].irrBN = sn.irrBN;
+}
+
 // UPDATE at a primary point (world P, normal N, eye E) with this pixel's bounce estimate Li (0 for a miss: open
 // directions ARE part of the cell's cosine-lobe average). Claims the cell's slot (first use / eviction), stamps it
 // and adds the clamped sample to the accumulation entry; the resolve folds it into the cell at the end of the pass.
+// The caller keeps MOVERS and the view weapon out (rtgiCacheIsMover): a moving mesh sweeps new world positions every
+// frame and would mint a thousand garbage cells a frame, filling the cache in seconds; movers still LOOK UP.
 void rtgiCacheUpdate( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye, vec3 Li ) {
 	int   level = hgLevel( distance( P, eye ), p.tanAlphaHalf );
 	HgKey k     = hgMakeKeyLevel( P, N, level, p.slotMask );
@@ -144,29 +166,15 @@ void rtgiCacheUpdate( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye, vec3 Li ) {
 	RtgiCacheAccums acc   = RtgiCacheAccums( p.accumAddr );
 	slots.s[ idx ].stamp = p.frame;										// every writer of a frame stores the same value
 	if ( evicted ) {
-		// the slot's value belongs to the cell that lived here before: zero it so a lookup this frame does not read
-		// the old cell as ours, and ask the resolve to restart the history from this frame's sums alone
+		// the slot's value belongs to the cell that lived here before: zero it so a lookup this frame does not read the
+		// old cell as ours, seed from our parent if it exists, and tell the resolve the slot changed hands - this frame's
+		// sums mix the old cell's samples with ours and are dropped; the cell starts from the payload left here
 		slots.s[ idx ].irrRG = 0u;
 		slots.s[ idx ].irrBN = 0u;
-		atomicOr( acc.a[ idx ].count, RTGI_CACHE_RESET_BIT );
+		rtgiCacheSeed( slots, words, p.slotMask, idx, P, N, level );
+		atomicOr( acc.a[ idx ].count, RTGI_CACHE_EVICT_BIT );
 	} else if ( fresh ) {
-		// SEED a brand-new cell from its one-coarser parent when that has been learned. As the camera approaches a
-		// surface its cells are re-cut at the finer level, and without this every ring of re-cut cells restarted from
-		// a single frame's mean (the "swimming" bands in the history view while moving). The parent's value is the
-		// best estimate there is; it enters with SEED_N frames of trust so the fine cell's own samples take over
-		// smoothly. Only the CAS winner seeds (one writer); siblings that look the cell up before the write lands
-		// read N = 0, which is just a miss for that frame.
-		HgKey kc = hgMakeKeyLevel( P, N, level + 1, p.slotMask );
-		int ic = hgFind( words, RTGI_CACHE_STRIDE, kc );
-		if ( ic >= 0 ) {
-			HgSlot sc = slots.s[ ic ];
-			if ( rtgiCacheN( sc ) > 0u ) {
-				HgSlot sn = slots.s[ idx ];
-				rtgiCachePackIrr( sn, rtgiCacheUnpackIrr( sc ), min( rtgiCacheN( sc ), RTGI_CACHE_SEED_N ), RTGI_CACHE_SEEDED_BIT );
-				slots.s[ idx ].irrRG = sn.irrRG;
-				slots.s[ idx ].irrBN = sn.irrBN;
-			}
-		}
+		rtgiCacheSeed( slots, words, p.slotMask, idx, P, N, level );
 	}
 	vec3  v  = max( Li, vec3( 0.0 ) );
 	float pk = max( max( v.r, v.g ), v.b );
@@ -176,6 +184,19 @@ void rtgiCacheUpdate( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye, vec3 Li ) {
 	atomicAdd( acc.a[ idx ].g, fx.y );
 	atomicAdd( acc.a[ idx ].b, fx.z );
 	atomicAdd( acc.a[ idx ].count, 1u );
+}
+
+// Is the primary pixel at uv (internal-res [0,1]) on a MOVER? Compare where the per-object velocity says the point
+// was last frame with where the CAMERA's own motion alone would have put it (last frame's view matrix, this view's
+// projection): a static surface agrees within the jitter, a walking NPC / door / platform disagrees by many pixels.
+// prevVel = the velocity texel (currUV - prevUV, +Y-up, view-Y sign already applied by the caller).
+bool rtgiCacheIsMover( vec2 uv, vec2 vel, vec3 P, mat4 prevWorldToView, vec2 invProj, float viewYSign, vec2 pixelSize ) {
+	vec3  pv    = ( prevWorldToView * vec4( P, 1.0 ) ).xyz;
+	float dprev = max( -pv.z, 1e-3 );
+	vec2  prevNdcCam = vec2( pv.x / ( dprev * invProj.x ), pv.y * viewYSign / ( dprev * invProj.y ) );
+	vec2  prevUvCam  = prevNdcCam * 0.5 + 0.5;
+	vec2  dpx = ( ( uv - vel ) - prevUvCam ) / pixelSize;				// disagreement in internal-res pixels
+	return dot( dpx, dpx ) > 9.0;										// > 3 px beyond the camera's motion (the jitter is < 1)
 }
 
 // RESET request (C3, the R1 gradient): the direct light at P changed this frame, so P's cell restarts its history at

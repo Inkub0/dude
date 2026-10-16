@@ -40,10 +40,18 @@ void main() {
 	HgAccum acc = accum.a[ i ];
 	uint cnt   = acc.count & RTGI_CACHE_COUNT_MASK;
 	bool reset = ( acc.count & RTGI_CACHE_RESET_BIT ) != 0u;
-	if ( cnt == 0u && !reset ) { return; }									// untouched this frame: nothing to do (the common case)
+	bool evict = ( acc.count & RTGI_CACHE_EVICT_BIT ) != 0u;
+	if ( cnt == 0u && !reset && !evict ) { return; }							// untouched this frame: nothing to do (the common case)
 	accum.a[ i ] = HgAccum( 0u, 0u, 0u, 0u );
 	HgSlot sl = slots.s[ i ];
-	if ( sl.key == 0u ) { return; }											// no cell owns the slot (a stale reset): drop the sums
+	if ( sl.key == 0u ) { return; }											// no cell owns the slot (a stale request): drop the sums
+	if ( evict ) {
+		// the slot changed hands this frame: the sums mix the old cell's samples with the new one's, so they are dropped;
+		// the new cell starts from what its claimer left (its coarser parent's seed, or zero = learn from the next sample)
+		rtgiCachePackIrr( sl, rtgiCacheUnpackIrr( sl ), rtgiCacheN( sl ), RTGI_CACHE_FRESH_BIT );
+		slots.s[ i ] = sl;
+		return;
+	}
 	vec3 irr   = rtgiCacheUnpackIrr( sl );
 	uint N     = reset ? 0u : rtgiCacheN( sl );
 	uint flags = RTGI_CACHE_RESET_FLAG;										// a reset request with no samples: restarts on its next sample

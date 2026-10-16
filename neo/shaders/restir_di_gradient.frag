@@ -230,6 +230,7 @@ void main() {
 		}
 	}
 	float Lprev = 0.0, Lnow = 0.0, occDist;
+	bool  cacheRowAbsent = false;		// RT irradiance cache: the light is absent from the OTHER frame's buffer (it switched, or entered / left DI)
 	if ( wIsPrev ) {
 		// last frame's light (its row this frame: the same pick, else through this frame's table), valued now
 		Lprev = bestPrevLum;
@@ -244,6 +245,7 @@ void main() {
 				if ( rp1 != 0u && rp1 <= nLights && lights.l[ rp1 - 1u ].pad1 == prevLights.l[ bestPrevRow - 1u ].pad1 ) { curRowPlus1 = rp1; }
 			}
 		}
+		cacheRowAbsent = ( curRowPlus1 == 0u );
 		if ( curRowPlus1 != 0u ) {
 			vec3 c, ld; float dl, ndl;
 			if ( diShadeLight( lights, curRowPlus1 - 1u, Sp, c, ld, dl, ndl, false ) ) {
@@ -266,6 +268,7 @@ void main() {
 				if ( rp1 != 0u && rp1 <= nPrevLights && prevLights.l[ rp1 - 1u ].pad1 == lights.l[ bestCurRow - 1u ].pad1 ) { prevRowPlus1 = rp1; }
 			}
 		}
+		cacheRowAbsent = ( prevRowPlus1 == 0u );
 		if ( prevRowPlus1 != 0u ) {
 			vec3 c, ld; float dl, ndl;
 			if ( diShadeLight( prevLights, prevRowPlus1 - 1u, Sp, c, ld, dl, ndl, false ) ) {
@@ -290,11 +293,20 @@ void main() {
 	// the r_rtgiCacheReset 0 A/B). The DI confidence absorbs that through its dead zone + filter; a cell reset must not.
 	// The other direction (THIS frame's pick wins) shades both frames at the same point and is exact even while
 	// moving, so a light switching ON still resets on the move; a switch-OFF while moving is left to the history blend.
+	// LIGHT changes only, never VISIBILITY changes: an NPC's shadow sweeping a wall flips the one-ray visibility of a
+	// whole region every frame (a static camera watching a walking marine showed resets over all the walls), but the
+	// indirect term a moving shadow displaces is second-order - resetting the cell for it only injects noise. The
+	// gradient can tell the two apart: a light that switched off LEFT the buffer (its row is absent in the other
+	// frame, 100 % change, reset), while an occluded light is still present with a zero visibility. So: reset when the
+	// light is absent on either side, or when it is LIT on both sides and its lit value changed by the threshold (a
+	// dimming, a brightening, a swinging cookie); a side that is zero with the light present is a shadow - no reset.
 	{
 		RtgiCacheParms cp = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ) );
-		float Lmax = max( Lprev, Lnow );
-		const bool exact = !( wIsPrev && !bestStatic );
-		if ( cp.gradientReset && rtgiCachePresent( cp ) && exact && abs( Lprev - Lnow ) > cp.resetThresh * ( Lmax + cp.resetBias ) ) {
+		const bool exact   = !( wIsPrev && !bestStatic );
+		const bool litBoth = Lprev > 0.0 && Lnow > 0.0;
+		const bool changed = cacheRowAbsent
+		                   || ( litBoth && abs( Lprev - Lnow ) > cp.resetThresh * ( max( Lprev, Lnow ) + cp.resetBias ) );
+		if ( cp.gradientReset && rtgiCachePresent( cp ) && exact && changed ) {
 			rtgiCacheRequestReset( cp, Sp.Pw, Sp.Nw, u_modelViewMatrix[3].xyz );
 		}
 	}

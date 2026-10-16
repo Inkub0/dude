@@ -107,8 +107,12 @@
 #include "rtgi_bounce.glsl"
 
 #if DI_BOOST
-// the young test + its inputs, shared with restir_di_young.frag
+// the young test + its inputs, shared with restir_di_young.glsl
 #include "restir_di_boost.glsl"
+#else
+// RT irradiance cache mover test (rtgi_cache.glsl rtgiCacheIsMover): the velocity at the gather res, bound whenever the
+// view has one (the boost include declares the same unit in the DI_BOOST variant); sampled only with cache flag 8
+SAMPLER_BINDING(10) uniform sampler2D u_velocity;
 #endif
 
 VARY(0) in vec2 var_TexCoord;
@@ -403,9 +407,20 @@ void main() {
 		// UPDATE at the primary point (docs/rtx-irradiance-cache.md): this pixel's bounce estimate joins P's cell; a miss
 		// contributes 0 (open directions are part of the cell's cosine-lobe average); a hit on an unshadeable row (2: a
 		// mover / prop without attributes) is UNKNOWN, not dark, and teaches nothing. The boost variant re-shades young
-		// pixels the plain gather already taught, so it does not teach them twice.
-		if ( cacheOn && bp.cache.update && hit != 2 ) {
-			rtgiCacheUpdate( bp.cache, Pw, Nw, eyeW, ( hit == 1 ) ? LiCache : vec3( 0.0 ) );
+		// pixels the plain gather already taught, so it does not teach them twice. The view WEAPON (nt.a < 0.5: shaded
+		// here only for the denoiser's continuity) and MOVERS (an NPC, a door, a platform: told from the camera's own
+		// motion through the velocity) never teach - a moving mesh mints a thousand garbage world cells a frame.
+		if ( cacheOn && bp.cache.update && hit != 2 && nt.a >= 0.5 ) {
+			bool mover = false;
+			if ( bp.cache.moverTest ) {
+				vec2 uvc = sfrag * u_screenCorrection.xy;
+				vec2 vel = texture( u_velocity, uvc ).rg;
+				vel.y = ( u_windowCoord.z < 0.0 ) ? -vel.y : vel.y;
+				mover = rtgiCacheIsMover( uvc, vel, Pw, u_prevMvpMatrix, u_localParam0.xy, u_windowCoord.z, u_screenCorrection.xy );
+			}
+			if ( !mover ) {
+				rtgiCacheUpdate( bp.cache, Pw, Nw, eyeW, ( hit == 1 ) ? LiCache : vec3( 0.0 ) );
+			}
 		}
 #endif
 		if ( hit == 1 ) {
