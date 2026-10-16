@@ -125,14 +125,22 @@ bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, o
 // 1 = lit, 0 = occluded, 1 - strength behind a solid grate texel. No TLAS (no RT scene) -> unshadowed: never
 // trace a null acceleration structure.
 //
-// Perforated casters (r_rtPerforatedShadows, rt_perforated.glsl): the forward path decides per LIGHT whether a
-// grate sits in its volume; here every pixel picks its own light, so the CPU hands over the boxes of every grate
-// inside the union of the scene lights' volumes (u_particleRadius.zw, u_windowCoord.x of them) and a segment
-// that passes through none of them keeps the force-opaque ray - the hardware's fastest traversal. Only a segment
-// that can meet a grate traces the grate-aware ray and alpha-tests its candidates against the coverage texture.
+// Perforated casters (r_rtPerforatedShadows, rt_perforated.glsl): the forward inline ray's grate-aware walk, taken
+// by EVERY pixel while grates are on - the perforated instances (mask 0x02) arrive as alpha-tested candidates and
+// opaque geometry commits as before. The forward path gates this per LIGHT on a CPU box list; that does not fit
+// DI, where every pixel picks its own light: a per-view list of every grate triangle in the lights' union ran to
+// 1199 boxes in a busy room (2026-10-16), no cap holds that, and a slab loop over it would cost more than the
+// walk it exists to avoid. The hardware BVH over the grate triangles IS the gate: a segment that meets no grate
+// never leaves the RT core (no candidates). Measured (A/B r_rtPerforatedShadows 0/1, 40-light room): this walk on
+// every pixel costs NOTHING within noise (gather 4.57 -> 4.55 ms), where the box list cost +0.36 ms (the overflow
+// box sat in the LAST slot, so every ray ran all 64 slab iterations - 128 buffer loads - in a low-occupancy
+// shader) and a separate force-opaque "gate" ray over the 0x02 subset cost +0.34 ms (a second dependent launch per
+// unblocked pixel, repeating the walk's own traversal). u_windowCoord.x = grates on (1/0), .y = strength,
+// u_particleRadius.xy = geo table.
 // occDist (out) = distance to the occluder when the ray is blocked, else the distance to the light: the "hit
 // distance" NRD scales its blur radius by. Feeding the LIGHT distance for every pixel told ReBLUR that every
 // shadow came from a far source and widened the blur until grate / contact shadows vanished (user, 2026-10-08).
+#define DI_TLAS accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) )
 float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, out float occDist ) {
 	occDist = dl;
 	if ( u_rtParms.x == 0.0 && u_rtParms.y == 0.0 ) { return 1.0; }		// no RT scene
@@ -141,29 +149,19 @@ float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, out float occDist 
 	vec3  O = Pw + Nw * u_rtParms.z;
 	uvec2 geoAddr = uvec2( floatBitsToUint( u_particleRadius.x ), floatBitsToUint( u_particleRadius.y ) );
 	bool  perfOn  = u_windowCoord.x > 0.5 && u_windowCoord.y > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
-	if ( perfOn ) {
-		perfOn = dudeSegmentMeetsPerforated(
-			uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ),
-			int( u_windowCoord.x + 0.5 ), O, ldir, tMax );
-	}
 	if ( !perfOn ) {
 		rayQueryEXT rqo;
-		rayQueryInitializeEXT( rqo,
-			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-			gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu /* skip perforated-caster instances */,
-			O, 0.0, ldir, tMax );
+		rayQueryInitializeEXT( rqo, DI_TLAS, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
+			0xFDu /* skip perforated-caster instances */, O, 0.0, ldir, tMax );
 		while ( rayQueryProceedEXT( rqo ) ) { }
 		if ( rayQueryGetIntersectionTypeEXT( rqo, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) { return 1.0; }
 		occDist = rayQueryGetIntersectionTEXT( rqo, true );
 		return 0.0;
 	}
-	// grate-aware: perforated instances (mask 0x02) arrive as candidates; a solid texel dims to 1 - strength and
-	// the ray carries on (min over grates, not a product - a candidate may be reported twice); opaque geometry
-	// commits and terminates as before
+	// grate-aware: a solid texel dims to 1 - strength and the ray carries on (min over grates, not a product - a
+	// candidate may be reported twice); opaque geometry commits and terminates as before
 	rayQueryEXT rq;
-	rayQueryInitializeEXT( rq,
-		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-		gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu, O, 0.0, ldir, tMax );
+	rayQueryInitializeEXT( rq, DI_TLAS, gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu, O, 0.0, ldir, tMax );
 	float perfVis = 1.0;
 	while ( rayQueryProceedEXT( rq ) ) {
 		if ( perfVis == 1.0
