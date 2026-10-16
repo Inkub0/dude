@@ -1,7 +1,14 @@
 # RT lighting project - kickoff (authored 2026-10-16; START HERE in a fresh session)
 
 One umbrella for three staged plans that build on each other. Read this file, then the sub-plan of the stage you
-are on. Everything below is PLANNED; no code exists yet for any of it.
+are on.
+
+**Status 2026-10-16 (evening):** C0-C3 of the irradiance cache are IMPLEMENTED on branch `feat/rtx-irradiance-cache`
+(4 commits, built, not merged, not pushed - the user tests first): shared hash-grid helper (`rt_hash_grid.glsl`,
+G0's grid), cache buffers + resolve compute + debug views, the update at P / lookup at H in both gathers, the
+history cap / DI-gradient reset / stamp eviction. `r_rtgiCache` default off = bit-identical. Next = **C4 user
+validation** (the checklist at the end of docs/rtx-irradiance-cache.md), then C5 preset wiring, then G1. The G0
+register-headroom instrument (`r_vkPipelineStats <shader>`) shipped with C0. G and E are still PLANNED only.
 
 | # | Plan | What it delivers | Doc |
 |---|---|---|---|

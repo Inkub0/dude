@@ -1,7 +1,9 @@
-# RT irradiance cache - multi-bounce GI at the bounce hit (plan, authored 2026-10-16, NOT started)
+# RT irradiance cache - multi-bounce GI at the bounce hit (plan authored 2026-10-16; C0-C3 implemented the same day)
 
-**Status:** plan only. Picked 2026-10-16 as the fidelity item from the merian / merian-quake review (see the
-memory note `merian-quake-ideas-review`); it is also the hard prerequisite of docs/rtx-experimental-lighting.md.
+**Status:** C0-C3 IMPLEMENTED on branch `feat/rtx-irradiance-cache` (built, not merged, not pushed; see the
+implementation log + the C4 checklist at the end). Picked 2026-10-16 as the fidelity item from the merian /
+merian-quake review (see the memory note `merian-quake-ideas-review`); it is also the hard prerequisite of
+docs/rtx-experimental-lighting.md. Next: C4 user validation, then C5 preset wiring.
 
 ## Why (fidelity)
 
@@ -269,3 +271,66 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
    dark (fresh) cells again within a few frames of looking at them, no magenta / black holes where a cell could
    not be claimed; `r_rtgiCacheDebug 1` must show every lit cell bright (claimed) - dim cells on a visible, lit
    surface after a second mean a full probe span (raise `r_rtgiCacheSlotsLog2`).
+
+### Post-C3 fixes (self-review, same branch)
+
+- The frame whose clear is pending packs flags 0 (no lookup / update / reset): the gathers run before the resolve
+  point that zeroes the buffers, so that frame would otherwise read undefined memory (one frame of random bounce
+  light into the NRD history). Learning starts the frame after a first use / level change / resize / re-enable.
+- A hit on an unshadeable geometry row (`rtgiTraceBounce` 2: mover / prop without attributes) teaches nothing
+  (unknown, not dark); a miss still teaches 0.
+
+## C4 - user validation checklist (the session cannot run the game; every item is yours)
+
+Setup for all items: Vulkan, RT hardware, `dude_rtx 2` (ReSTIR DI lighting the scene + combined GI) at your usual
+1440p-class settings; `r_rtgiCache 1`; defaults otherwise (`r_rtgiCacheScale 1`, `r_rtgiCacheHistory 32`,
+`r_rtgiCacheCellAngle 0.004`, `r_rtgiCacheSlotsLog2 20`). Toggle the cache with `r_rtgiCache 0 / 1` for every
+A/B - nothing else changes (0 is bit-identical to master). Console `r_vkGpuTime 2` for the timings (average over
+a few prints, ignore < 0.05 ms drift; standing still at the same spot for both states). Screenshots: one per
+item, cache 0 and 1, same spot (`screenshot` after `r_rtgiCacheDebug 0`).
+
+- [ ] **0. Bit-identical off.** `r_rtgiCache 0`: no `rtgi.cache` scope in `r_vkGpuTime 2`, frame time and look
+      unchanged vs master (spot check against the 0.9.5 build if in doubt).
+- [ ] **1. Keying (C1 check, debug 1).** `r_rtgiCacheDebug 1`: cells tile every surface, constant screen size
+      while walking toward / away from a wall (a whole-wall re-tint at a distance-level boundary is expected),
+      floor / wall / ceiling never share a tint across an edge, every LIT visible cell turns bright (claimed) within
+      a second. Dim cells on lit visible surfaces that stay dim = full probe spans -> try `r_rtgiCacheSlotsLog2 21`
+      and report.
+- [ ] **2. Convergence (debug 4 / 2).** Look at a lit room: `r_rtgiCacheDebug 4` ramps to white in ~32 frames and
+      stays; `2` shows a smooth low-frequency field, no single-cell fireflies, no cell drifting brighter forever.
+- [ ] **3. Fidelity case A - corridor side wall** whose fixture points at the floor (Mars City lower corridors /
+      Alphalabs service corridors): the wall brightens with the cache, stops at a plausible level, no pulsing.
+- [ ] **4. Fidelity case B - underside** of a counter / console lip / stair (Mars City reception desk, Admin).
+- [ ] **5. Fidelity case C - ceiling lit from below** (any room with floor-pointing fixtures or lit floor panels).
+- [ ] **6. Spill - the far end of a dark passage a bright room opens into**: the passage's walls near the opening
+      pick up the room's colour; the far end stays dark (no energy appears from nowhere).
+- [ ] **7. Thin-wall leak hunt.** Mars City corridors by the GLASS walls / thin partition walls: compare the dark
+      side of a thin wall whose other side is lit (same facing direction on both sides). With the default cell
+      angle a faint leak within ~1 cell of the wall is the accepted residual; a leak that reads as the lit room
+      "shining through" = report with a screenshot and try `r_rtgiCacheCellAngle 0.002` (half the cells).
+- [ ] **8. Switched light** (procedure C3.1): off/on, the indirect fill follows within the DI's own fade; debug 4
+      shows the room's cells reset to black the frame after the switch.
+- [ ] **9. Swinging light** (C3.2): no longer indirect trail than the direct light's own.
+- [ ] **10. Flashlight** (C3.3): the cached field (debug 2) never changes under the beam, in DI and in the
+      standalone RTGI path (dude_rtx 1 + `r_rtgi 1`).
+- [ ] **11. Eviction** (C3.4): three rooms and back, no holes / unclaimed lit cells.
+- [ ] **12. Cost.** `r_vkGpuTime 2`: `rtgi.cache` (expected 0.05-0.15 ms), `restir.di.gather` cache 0 vs 1
+      (expected +0.1-0.3 ms; > +0.4 ms = hoist the P key: one `hgMakeKey` shared by update + gradient),
+      `restir.di.grad` 0 vs 1 (expected < +0.05 ms), total frame delta. Also at dude_rtx 1 (`rtgi.ray` 0 vs 1).
+- [ ] **13. NRD detail at the same history.** Same spot, `r_rtReStirDIDebug 1` (raw gather) cache 0 vs 1: the
+      bounce part should look smoother with the cache (averaged cells) - if so, try `r_rtReStirDIHistory` one
+      step lower with the cache on and judge detail vs noise; report both.
+- [ ] **14. Register headroom (G0).** `r_vkPipelineStats restir_di`, `vid_restart`, read the `restir_di [...]`
+      block (fragment stage) twice: cache 0 and cache 1 (the pipeline is the same program; the stats are of the
+      compiled code, so ONE readout suffices unless the driver specializes). Paste the register / spill lines
+      into docs/rtx-irradiance-cache.md under C0's G0 item. Spills > 0 or registers at the device max = G's
+      N_mc must drop to 3 (plan fallback).
+- [ ] **15. Level change + settings.** Load another map with the cache on (debug 1: fresh dim cells, no stale
+      bright ones), change `r_rtgiCacheSlotsLog2` in-game (no device loss, cache re-learns), toggle
+      `r_rtgiCache` off/on (re-learns), `vid_restart` with it on.
+- [ ] **16. Tune and report:** final values for `r_rtgiCacheScale`, `r_rtgiCacheHistory`, `r_rtgiCacheCellAngle`
+      (and whether the 0.35 reset threshold / 0.9 albedo clamp / 64 sample clamp constants need to become cvars),
+      the GPU numbers, and the screenshots -> C5 wires the cache into Ultra Nightmare.
+
+Report format that lets the next session act without re-deriving anything: per item PASS / FAIL + one line, the
+`r_vkGpuTime 2` lines for item 12, the `r_vkPipelineStats` block for item 14, and the screenshots' file names.
