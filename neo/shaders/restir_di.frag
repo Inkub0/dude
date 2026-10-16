@@ -41,12 +41,11 @@
 //   u_diffuseModifier     = apply mode: ( kd = 1 - r_pbrMetalDiffuse, r_pbrSpecScale, r_pbrFireflyClamp, r_pbrEnvScale )
 //   u_screenCorrection.xy = 1 / viewSize        (gl_FragCoord -> [0,1] uv; normal buffer)
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
-//   u_windowCoord.x       = perforated casters: number of per-VIEW grate boxes at u_particleRadius.zw (0 = off)
+//   u_windowCoord.x       = perforated casters: 1 = every visibility ray takes the grate-aware 0xFF walk (restir_di_shade.glsl), 0 = off
 //   u_windowCoord.y       = perforated casters: their shadow strength (r_shadowMapPerforatedStrength)
 //   u_windowCoord.z       = view-Y sign (-1 Vulkan top-down)
 //   u_windowCoord.w       = r_rtLightTextures: 1 = attenuate with each light's real cookie + falloff textures
 //   u_particleRadius.xy   = geometry-table device address (bit-cast; grate candidates -> coverage texture)
-//   u_particleRadius.zw   = per-view perforated box list device address (bit-cast; rt_perforated.glsl)
 //   u_shadowFalloffS.x    = forward light scale (backEnd.lightScale): the DI term is scaled here, not at the apply
 //   u_shadowFalloffS.y    = world size of one FULL-RES screen pixel per unit view depth (2/(proj00*viewW)): cookie LOD
 //   u_shadowFalloffS.w    = R2 ReLAX MODE (DI is ReLAX-only since R6): loc 0 = LINEAR radiance + RAW hit distance (world units,

@@ -207,7 +207,7 @@ RT targets add `CreateRenderTarget*` + handle/size/ready statics + a context-los
 - Stage G: scene lights carry their cookie + falloff textures (`r_rtLightTextures`), 2D-only cookies.
 - Stage D: DI lights the scene (`r_rtReStirDIApply`): full-BRDF deferred gather (demodulated), additive apply at the
   opaque split inside the FSR2 snapshot (full-view scissor), forward per-light suppression from the gather's own
-  membership, grate-aware visibility ray with a per-view box list, material parity (stage colour, vertex colour,
+  membership, grate-aware visibility ray (every pixel, no box list since 2026-10-16), material parity (stage colour, vertex colour,
   spec map, baked occlusion map).
 - Fast-changing lights stay forward (`r_rtReStirDIDynamicForward`): weapon lights, moved, recoloured (20 %) or
   re-appeared, 16-frame hysteresis; DUDE's fill lights exempt; the combined bounce skips them too.
@@ -239,8 +239,8 @@ the items here stay as the material-parity backlog.
   AO + occlusion map on the combined diffuse+spec term (needs the diffuse/spec denoise split); `noSpecular`;
   multi-stage cookies take the first live stage.
 - **Diffuse/specular denoise split** (REBLUR_DIFFUSE + REBLUR_SPECULAR), only if specular over-blur reads badly.
-- **Per-view grate box list** overflows at 64 (last box swallows the rest → most pixels take the slow ray in
-  grate-heavy areas): measure, then cull or raise.
+- ~~**Per-view grate box list** overflows at 64~~ - DONE 2026-10-16: measured 1199 found / 64 listed in a busy
+  room (the bounds are per TRIANGLE); list removed, every ray takes the grate-aware walk (perforated-casters note below).
 - **RTAO coexistence:** RTAO still stands down under DI (the GI replaces it at this tier anyway); revisit only if
   AO is missed.
 - **Spatial reuse** — still available if NRD's knobs ever prove insufficient.
@@ -354,15 +354,27 @@ reset it early-outs with `r_ssr`/`r_rtReflections` off), so DI only landed insid
 lights' forward draws were already skipped. Both `RB_RHI_ReStirDIApply` and `RB_RHI_RtgiApply` (same latent
 issue) now set the full-view viewport + scissor and restore `backEnd.currentScissor` before drawing.
 
-**Perforated casters (2026-10-08, after the user noticed grates stopped casting under the apply):** the DI
-visibility ray now takes the forward inline ray's grate-aware route (`rt_perforated.glsl`, `r_rtPerforatedShadows`
-+ `r_shadowMapPerforated`). The forward path decides per LIGHT whether a grate sits in its volume; DI's pixel
-picks its own light, so `RB_RHI_GatherSceneLights` also tracks the union bounds of the included lights' cull
-spheres and the DI pass gathers every grate box inside it (up to 64, per-frame slot, `u_particleRadius.zw` +
-count in `u_windowCoord.x`, strength `.y`, geo table `u_particleRadius.xy`). A segment through none of the boxes
-keeps the force-opaque 0xFD ray; one that can meet a grate traces 0xFF with candidates alpha-tested against the
-coverage texture and dims to `1 - strength` behind a solid texel. `rt_perforated.glsl`'s `u_rtTextures[]` is now
-guarded by the same macro as `rt_light_tex.glsl` so both include together.
+**Perforated casters (2026-10-08, after the user noticed grates stopped casting under the apply; box list
+removed 2026-10-16):** the DI visibility ray takes the forward inline ray's grate-aware route (`rt_perforated.glsl`,
+`r_rtPerforatedShadows` + `r_shadowMapPerforated`): perforated instances (mask 0x02) arrive as candidates
+alpha-tested against the coverage texture, a solid texel dims to `1 - strength`, opaque geometry commits as before.
+The forward path gates that route per LIGHT with a CPU box list; DI's pixel picks its own light, so v1 gathered
+every grate box inside the union of the scene lights' cull spheres (cap 64, the last box swallowing the overflow).
+Measured 2026-10-16 in a 46-light room: **1199 found / 64 listed** - the perforated bounds are per TRIANGLE (a
+world surface spans its whole area), so no cap could hold the list. A/B at that spot (`r_rtPerforatedShadows`
+0/1): gather 4.31 -> 4.67 ms, gradient 0.31 -> 0.41 ms. Two replacements were measured in a 40-light room:
+a force-opaque GATE ray over the 0x02 subset alone (then the alpha-tested walk only where it hit) cost the same
+(+0.34 / +0.08 ms); the forward path's plain grate-aware walk on EVERY pixel cost **nothing within noise**
+(gather 4.57 -> 4.55 ms, gradient 0.34 -> 0.35 ms; grate shadows user-verified). So the walk itself is ~free (a
+segment that meets no grate never leaves the RT core; the grate-BLAS descent + the alpha test on real hits are
+small): the box list's cost was its 64-iteration slab loop (the overflow box sat in the LAST slot, so every ray
+ran all 64 iterations - 128 buffer loads - in a low-occupancy shader) and the gate's cost was a second dependent
+ray launch per unblocked pixel. **Now:** no box list, no gate - while grates are on EVERY ray takes the 0xFF walk
+(`restir_di_shade.glsl` `traceVisibility`, the hardware BVH over the grate triangles is the gate); `u_windowCoord.x`
+is the on/off flag, `u_particleRadius.zw` is free, `RB_RHI_GatherSceneLights` no longer tracks the lights' union
+bounds. (The final A/B view was not the 1199-box spot; the new code is strictly less work than the old in every
+view regardless.) `rt_perforated.glsl`'s `u_rtTextures[]` is guarded by the same macro as `rt_light_tex.glsl` so
+both include together.
 
 **Debug views (2026-10-08):** `r_rtReStirDIDebug` is now the RTGI-style 0/1/2 (off / RAW 1-spp gather /
 NRD-denoised) with the matching ImGui dropdown. The raw view is also the checkerboard proof: with
