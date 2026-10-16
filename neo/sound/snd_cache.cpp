@@ -28,8 +28,16 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sys/platform.h"
 #include "framework/FileSystem.h"
+#include "framework/Common.h"
+#include "framework/Session.h"
 
 #include "sound/snd_local.h"
+
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <mutex>
+#include <cstdlib>
 
 #define USE_SOUND_CACHE_ALLOCATOR
 
@@ -38,6 +46,13 @@ static idDynamicBlockAlloc<byte, 1<<20, 1<<10>	soundCacheAllocator;
 #else
 static idDynamicAlloc<byte, 1<<20, 1<<10>		soundCacheAllocator;
 #endif
+
+// DUDE: guards the shared block allocators (soundCacheAllocator above and the sample-decoder
+// pools behind idSampleDecoder::Alloc/Free) while LoadPendingParallel() runs worker threads.
+// Only the cheap alloc/free bookkeeping is serialized -- the WAV read and stb_vorbis OGG decode,
+// which dominate the time, run lock-free (stb_vorbis uses libc malloc). Uncontended off the
+// parallel path, so the serial Load()/Reload() callers pay effectively nothing.
+static std::mutex								soundCacheAllocMutex;
 
 /*
 ===================
@@ -98,7 +113,16 @@ idSoundSample *idSoundCache::FindSound( const idStr& filename, bool loadOnDemand
 		if ( def && def->name == fname ) {
 			def->levelLoadReferenced = true;
 			if ( def->purged && !loadOnDemandOnly ) {
-				def->Load();
+				// DUDE: during a level load, queue the decode for LoadPendingParallel() instead of
+				// decoding inline here (pendingDecode dedups repeat references); otherwise load now.
+				if ( insideLevelLoad ) {
+					if ( !def->pendingDecode ) {
+						def->pendingDecode = true;
+						samplesToLoad.Append( def );
+					}
+				} else {
+					def->Load();
+				}
 			}
 			return def;
 		}
@@ -120,8 +144,14 @@ idSoundSample *idSoundCache::FindSound( const idStr& filename, bool loadOnDemand
 	def->purged = true;
 
 	if ( !loadOnDemandOnly ) {
+		// DUDE: during a level load, queue for the parallel decode pass; otherwise load inline.
 		// this may make it a default sound if it can't be loaded
-		def->Load();
+		if ( insideLevelLoad ) {
+			def->pendingDecode = true;
+			samplesToLoad.Append( def );
+		} else {
+			def->Load();
+		}
 	}
 
 	return def;
@@ -158,6 +188,16 @@ loading the actual data.
 void idSoundCache::BeginLevelLoad() {
 	insideLevelLoad = true;
 
+	// DUDE: drop any queue left behind by a load that aborted (common->Error longjmp) before
+	// LoadPendingParallel() drained it -- those sample pointers may now be stale. Normal loads
+	// leave this empty. Also reset the per-sample queued flag so re-referenced samples re-queue.
+	for ( int i = 0 ; i < samplesToLoad.Num() ; i++ ) {
+		if ( samplesToLoad[i] ) {
+			samplesToLoad[i]->pendingDecode = false;
+		}
+	}
+	samplesToLoad.SetNum( 0, false );
+
 	for ( int i = 0 ; i < listCache.Num() ; i++ ) {
 		idSoundSample *sample = listCache[ i ];
 		if ( !sample ) {
@@ -176,6 +216,90 @@ void idSoundCache::BeginLevelLoad() {
 
 /*
 ====================
+LoadPendingParallel
+
+DUDE: decode the samples FindSound() queued during the level load across worker threads, then
+upload their OpenAL buffers serially on this (main) thread. Mirrors r_parallelImageLoad: the
+CPU-heavy WAV read / OGG (stb_vorbis) decode happens in parallel under a thread-safe heap /
+filesystem / print window, while the non-thread-safe OpenAL submits stay on the main thread.
+
+This replaces the old inline def->Load() inside FindSound(), which decoded every sound serially
+while parsing sound decls -- the fat "sound=" line in the load-phase report.
+====================
+*/
+void idSoundCache::LoadPendingParallel() {
+	if ( samplesToLoad.Num() == 0 ) {
+		return;
+	}
+
+	idSoundSample ** const	list = samplesToLoad.Ptr();
+	const int				count = samplesToLoad.Num();
+
+	int nThreads = (int)std::thread::hardware_concurrency();
+	if ( nThreads < 2 ) { nThreads = 2; }
+	if ( nThreads > 32 ) { nThreads = 32; }
+	if ( nThreads > count ) { nThreads = count; }
+
+	const double			t0 = Sys_MillisecondsPrecise();
+	std::atomic<int>	nextIndex( 0 );
+
+	// heap / filesystem / print become thread-safe only for this window (same helpers the
+	// parallel image loader uses). Snd_SetParallelDecode lets OpenOGG skip its CRITICAL_SECTION_ONE,
+	// now redundant under these windows and otherwise a per-open serialization point.
+	Mem_SetThreadSafe( true );
+	FS_SetThreadReadSafe( true );
+	Snd_SetParallelDecode( true );
+
+	// phase 1: worker threads open + decode each sample to PCM (no OpenAL)
+	std::vector<std::thread> pool;
+	pool.reserve( nThreads );
+	for ( int k = 0 ; k < nThreads ; k++ ) {
+		pool.push_back( std::thread( [&]() {
+			Com_BeginThreadCapture();
+			for ( ;; ) {
+				const int idx = nextIndex.fetch_add( 1, std::memory_order_relaxed );
+				if ( idx >= count ) {
+					break;
+				}
+				list[idx]->DecodeCpu();
+			}
+			Com_EndThreadCapture();
+		} ) );
+	}
+	for ( size_t k = 0 ; k < pool.size() ; k++ ) {
+		pool[k].join();
+	}
+
+	Snd_SetParallelDecode( false );
+	Mem_SetThreadSafe( false );
+	FS_SetThreadReadSafe( false );
+
+	// surface any prints/warnings the workers buffered (order-independent)
+	const bool hadErr = Com_ThreadCaptureHadError();
+	Com_FlushThreadCapture();
+	if ( hadErr ) {
+		common->Warning( "parallel sound load: a worker hit an error during decode (see above); affected sounds use the default beep" );
+	}
+
+	// phase 2: create + upload the OpenAL buffers on the main thread (OpenAL is not thread-safe)
+	for ( int i = 0 ; i < count ; i++ ) {
+		list[i]->UploadAL();
+		list[i]->pendingDecode = false;
+		if ( ( i & 31 ) == 0 ) {
+			session->PacifierUpdate();
+		}
+	}
+
+	samplesToLoad.SetNum( 0, false );
+
+	// the decl-parse timing no longer sees this work (the decode moved out of sound-decl parsing
+	// into here), so report it on its own line, like the image loader's "all images loaded in".
+	common->Printf( "  parallel sound decode: %d samples on %d threads in %.0f msec\n",
+					count, nThreads, Sys_MillisecondsPrecise() - t0 );
+}
+
+/*
+====================
 EndLevelLoad
 
 Free all samples marked as unused
@@ -186,6 +310,9 @@ void idSoundCache::EndLevelLoad() {
 	common->Printf( "----- idSoundCache::EndLevelLoad -----\n" );
 
 	insideLevelLoad = false;
+
+	// DUDE: decode everything FindSound() queued this level across worker threads before the purge
+	LoadPendingParallel();
 
 	// purge the ones we don't need
 	useCount = 0;
@@ -298,6 +425,12 @@ idSoundSample::idSoundSample() {
 	onDemand = false;
 	purged = false;
 	levelLoadReferenced = false;
+	pendingDecode = false;
+	decodeFailed = false;
+	nonCacheMalloced = false;
+	alUploadData = NULL;
+	alUploadBytes = 0;
+	alUploadFreeTemp = false;
 }
 
 /*
@@ -345,6 +478,7 @@ void idSoundSample::MakeDefault( void ) {
 	objectMemSize = objectSize * sizeof( short );
 
 	nonCacheData = (byte *)soundCacheAllocator.Alloc( objectMemSize );
+	nonCacheMalloced = false;		// DUDE: allocator-backed, unlike DecodeCpu's malloc path
 
 	short *ncd = (short *)nonCacheData;
 
@@ -386,7 +520,9 @@ void idSoundSample::CheckForDownSample( void ) {
 		return;
 	}
 	int shortSamples = objectSize >> 1;
-	short *converted = (short *)soundCacheAllocator.Alloc( shortSamples * sizeof( short ) );
+	// DUDE: lock-free like DecodeCpu's nonCacheData -- runs on worker threads under LoadPendingParallel().
+	// converted replaces nonCacheData, so it is malloc'd too and the sample stays nonCacheMalloced.
+	short *converted = (short *)malloc( shortSamples * sizeof( short ) );
 
 	if ( objectInfo.nChannels == 1 ) {
 		for ( int i = 0; i < shortSamples; i++ ) {
@@ -398,8 +534,15 @@ void idSoundSample::CheckForDownSample( void ) {
 			converted[i+1] = ((short *)nonCacheData)[i*2+1];
 		}
 	}
-	soundCacheAllocator.Free( nonCacheData );
+	if ( nonCacheMalloced ) {
+		free( nonCacheData );
+	} else {
+		soundCacheAllocMutex.lock();
+		soundCacheAllocator.Free( nonCacheData );
+		soundCacheAllocMutex.unlock();
+	}
 	nonCacheData = (byte *)converted;
+	nonCacheMalloced = true;
 	objectSize >>= 1;
 	objectMemSize >>= 1;
 	objectInfo.nAvgBytesPerSec >>= 1;
@@ -431,46 +574,62 @@ Loads based on name, possibly doing a MakeDefault if necessary
 ===================
 */
 void idSoundSample::Load( void ) {
+	// serial path (on-demand / reload): decode then upload on the same (main) thread.
+	DecodeCpu();
+	UploadAL();
+}
+
+/*
+===================
+idSoundSample::DecodeCpu
+
+DUDE: the worker-thread-safe half of Load() -- opens the file and decodes the WAV/OGG into PCM,
+touching no OpenAL state. Runs under LoadPendingParallel()'s thread-safe heap/filesystem/print
+window; the shared block allocators are guarded by soundCacheAllocMutex. On any failure it sets
+decodeFailed so the main-thread UploadAL() can MakeDefault() (which must create an OpenAL buffer).
+===================
+*/
+void idSoundSample::DecodeCpu( void ) {
 	defaultSound = false;
-	purged = false;
 	hardwareBuffer = false;
+	decodeFailed = false;
+	alUploadData = NULL;
+	alUploadBytes = 0;
+	alUploadFreeTemp = false;
 
-	timestamp = GetNewTimeStamp();
-
-	if ( timestamp == FILE_NOT_FOUND_TIMESTAMP ) {
-		common->Warning( "Couldn't load sound '%s' using default", name.c_str() );
-		MakeDefault();
-		return;
-	}
-
-	// load it
+	// DUDE: no separate GetNewTimeStamp() probe -- it cost two serialized file opens per sound
+	// (the original .wav name misses the whole search path, then the .ogg hits), on top of the
+	// two inside Open() itself. Open() resolves and opens the real file once; take its timestamp
+	// and let an Open() failure stand in for the old FILE_NOT_FOUND check.
 	idWaveFile	fh;
 	waveformatex_t info;
 
 	if ( fh.Open( name, &info ) == -1 ) {
 		common->Warning( "Couldn't load sound '%s' using default", name.c_str() );
-		MakeDefault();
+		decodeFailed = true;
 		return;
 	}
+
+	timestamp = fh.GetTimestamp();
 
 	if ( info.nChannels != 1 && info.nChannels != 2 ) {
 		common->Warning( "idSoundSample: %s has %i channels, using default", name.c_str(), info.nChannels );
 		fh.Close();
-		MakeDefault();
+		decodeFailed = true;
 		return;
 	}
 
 	if ( info.wBitsPerSample != 16 ) {
 		common->Warning( "idSoundSample: %s is %dbits, expected 16bits using default", name.c_str(), info.wBitsPerSample );
 		fh.Close();
-		MakeDefault();
+		decodeFailed = true;
 		return;
 	}
 
 	if ( info.nSamplesPerSec != 44100 && info.nSamplesPerSec != 22050 && info.nSamplesPerSec != 11025 ) {
 		common->Warning( "idSoundCache: %s is %dHz, expected 11025, 22050 or 44100 Hz. Using default", name.c_str(), info.nSamplesPerSec );
 		fh.Close();
-		MakeDefault();
+		decodeFailed = true;
 		return;
 	}
 
@@ -478,22 +637,99 @@ void idSoundSample::Load( void ) {
 	objectSize = fh.GetOutputSize();
 	objectMemSize = fh.GetMemorySize();
 
-	nonCacheData = (byte *)soundCacheAllocator.Alloc( objectMemSize );
+	// DUDE: nonCacheData persists as the sample's data, but allocate it lock-free here. The shared
+	// soundCacheAllocator funneled every worker through one mutex, which serialized the whole decode;
+	// libc malloc has per-thread arenas. PurgeSoundSample/CheckForDownSample free it per nonCacheMalloced.
+	nonCacheData = (byte *)malloc( objectMemSize );
+	nonCacheMalloced = true;
+
 	fh.Read( nonCacheData, objectMemSize, NULL );
 
 	// optionally convert it to 22kHz to save memory
 	CheckForDownSample();
 
-	// create hardware audio buffers
-	// PCM loads directly
+	// PCM uploads its samples directly
 	if ( objectInfo.wFormatTag == WAVE_FORMAT_TAG_PCM ) {
+		alUploadData = nonCacheData;
+		alUploadBytes = objectMemSize;
+		alUploadFreeTemp = false;
+	} else if ( objectInfo.wFormatTag == WAVE_FORMAT_TAG_OGG ) {
+		// OGG decompressed at load time (when smaller than s_decompressionLimit seconds, 6 seconds by
+		// default); larger ones stay compressed in nonCacheData and are streamed at playback.
+		if ( objectSize < ( (int) objectInfo.nSamplesPerSec * idSoundSystemLocal::s_decompressionLimit.GetInteger() ) ) {
+			// DUDE: destData is transient (freed right after the OpenAL upload) and allocated with
+			// libc malloc, not the shared soundCacheAllocator -- lock-free per worker.
+			float *destData = (float *)malloc( ( LengthIn44kHzSamples() + 1 ) * sizeof( float ) );
+
+			// Decode the whole sample to 44 kHz via a local stb_vorbis handle (lock-free: no shared
+			// decoder pool, no CRITICAL_SECTION_ONE), unlike the streaming idSampleDecoder path.
+			idSampleDecoder::DecodeFullOGG( this, destData );
+
+			// Downsample back to original frequency (save memory)
+			if ( objectInfo.nSamplesPerSec == 11025 ) {
+				for ( int i = 0; i < objectSize; i++ ) {
+					if ( destData[i*4] < -32768.0f )
+						((short *)destData)[i] = -32768;
+					else if ( destData[i*4] > 32767.0f )
+						((short *)destData)[i] = 32767;
+					else
+						((short *)destData)[i] = idMath::FtoiFast( destData[i*4] );
+				}
+			} else if ( objectInfo.nSamplesPerSec == 22050 ) {
+				for ( int i = 0; i < objectSize; i++ ) {
+					if ( destData[i*2] < -32768.0f )
+						((short *)destData)[i] = -32768;
+					else if ( destData[i*2] > 32767.0f )
+						((short *)destData)[i] = 32767;
+					else
+						((short *)destData)[i] = idMath::FtoiFast( destData[i*2] );
+				}
+			} else {
+				for ( int i = 0; i < objectSize; i++ ) {
+					if ( destData[i] < -32768.0f )
+						((short *)destData)[i] = -32768;
+					else if ( destData[i] > 32767.0f )
+						((short *)destData)[i] = 32767;
+					else
+						((short *)destData)[i] = idMath::FtoiFast( destData[i] );
+				}
+			}
+
+			// hand the decoded buffer to UploadAL(), which frees it after the OpenAL upload
+			alUploadData = (byte *)destData;
+			alUploadBytes = objectSize * sizeof( short );
+			alUploadFreeTemp = true;
+		}
+	}
+
+	fh.Close();
+}
+
+/*
+===================
+idSoundSample::UploadAL
+
+DUDE: the main-thread half of Load() -- creates the OpenAL buffer and uploads the PCM that
+DecodeCpu() produced (or MakeDefault()s if the decode failed). OpenAL calls are not thread-safe,
+so this never runs on a worker. Safe to call right after DecodeCpu() on the same thread too (the
+serial Load() path does exactly that).
+===================
+*/
+void idSoundSample::UploadAL( void ) {
+	if ( decodeFailed ) {
+		MakeDefault();
+		purged = false;
+		return;
+	}
+
+	if ( alUploadData != NULL ) {
 		alGetError();
 		alGenBuffers( 1, &openalBuffer );
 		if ( alGetError() != AL_NO_ERROR )
 			common->Error( "idSoundCache: error generating OpenAL hardware buffer" );
 		if ( alIsBuffer( openalBuffer ) ) {
 			alGetError();
-			alBufferData( openalBuffer, objectInfo.nChannels==1?AL_FORMAT_MONO16:AL_FORMAT_STEREO16, nonCacheData, objectMemSize, objectInfo.nSamplesPerSec );
+			alBufferData( openalBuffer, objectInfo.nChannels==1?AL_FORMAT_MONO16:AL_FORMAT_STEREO16, alUploadData, alUploadBytes, objectInfo.nSamplesPerSec );
 			if ( alGetError() != AL_NO_ERROR ) {
 				common->Warning( "idSoundCache: error loading data into OpenAL hardware buffer" );
 				hardwareBuffer = false;
@@ -501,70 +737,17 @@ void idSoundSample::Load( void ) {
 				hardwareBuffer = true;
 			}
 		}
-	}
 
-	{
-		// OGG decompressed at load time (when smaller than s_decompressionLimit seconds, 6 seconds by default)
-		if ( objectInfo.wFormatTag == WAVE_FORMAT_TAG_OGG ) {
-			if ( ( objectSize < ( ( int ) objectInfo.nSamplesPerSec * idSoundSystemLocal::s_decompressionLimit.GetInteger() ) ) ) {
-				alGetError();
-				alGenBuffers( 1, &openalBuffer );
-				if ( alGetError() != AL_NO_ERROR )
-					common->Error( "idSoundCache: error generating OpenAL hardware buffer" );
-				if ( alIsBuffer( openalBuffer ) ) {
-					idSampleDecoder *decoder = idSampleDecoder::Alloc();
-					float *destData = (float *)soundCacheAllocator.Alloc( ( LengthIn44kHzSamples() + 1 ) * sizeof( float ) );
-
-					// Decoder *always* outputs 44 kHz data
-					decoder->Decode( this, 0, LengthIn44kHzSamples(), destData );
-
-					// Downsample back to original frequency (save memory)
-					if ( objectInfo.nSamplesPerSec == 11025 ) {
-						for ( int i = 0; i < objectSize; i++ ) {
-							if ( destData[i*4] < -32768.0f )
-								((short *)destData)[i] = -32768;
-							else if ( destData[i*4] > 32767.0f )
-								((short *)destData)[i] = 32767;
-							else
-								((short *)destData)[i] = idMath::FtoiFast( destData[i*4] );
-						}
-					} else if ( objectInfo.nSamplesPerSec == 22050 ) {
-						for ( int i = 0; i < objectSize; i++ ) {
-							if ( destData[i*2] < -32768.0f )
-								((short *)destData)[i] = -32768;
-							else if ( destData[i*2] > 32767.0f )
-								((short *)destData)[i] = 32767;
-							else
-								((short *)destData)[i] = idMath::FtoiFast( destData[i*2] );
-						}
-					} else {
-						for ( int i = 0; i < objectSize; i++ ) {
-							if ( destData[i] < -32768.0f )
-								((short *)destData)[i] = -32768;
-							else if ( destData[i] > 32767.0f )
-								((short *)destData)[i] = 32767;
-							else
-								((short *)destData)[i] = idMath::FtoiFast( destData[i] );
-						}
-					}
-
-					alGetError();
-					alBufferData( openalBuffer, objectInfo.nChannels==1?AL_FORMAT_MONO16:AL_FORMAT_STEREO16, destData, objectSize * sizeof( short ), objectInfo.nSamplesPerSec );
-					if ( alGetError() != AL_NO_ERROR ) {
-						common->Warning( "idSoundCache: error loading data into OpenAL hardware buffer" );
-						hardwareBuffer = false;
-					} else {
-						hardwareBuffer = true;
-					}
-
-					soundCacheAllocator.Free( (byte *)destData );
-					idSampleDecoder::Free( decoder );
-				}
-			}
+		if ( alUploadFreeTemp ) {
+			// DUDE: destData was malloc'd in DecodeCpu (not the soundCacheAllocator), free it the same way
+			free( alUploadData );
 		}
 	}
 
-	fh.Close();
+	alUploadData = NULL;
+	alUploadBytes = 0;
+	alUploadFreeTemp = false;
+	purged = false;
 }
 
 /*
@@ -590,8 +773,14 @@ void idSoundSample::PurgeSoundSample() {
 	}
 
 	if ( nonCacheData ) {
-		soundCacheAllocator.Free( nonCacheData );
+		// DUDE: match the allocator DecodeCpu()/MakeDefault() used (see nonCacheMalloced)
+		if ( nonCacheMalloced ) {
+			free( nonCacheData );
+		} else {
+			soundCacheAllocator.Free( nonCacheData );
+		}
 		nonCacheData = NULL;
+		nonCacheMalloced = false;
 	}
 }
 

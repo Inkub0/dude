@@ -225,6 +225,7 @@ public:
 
 	int				GetOutputSize( void ) { return mdwSize; }
 	int				GetMemorySize( void ) { return mMemSize; }
+	ID_TIME_T		GetTimestamp( void ) const { return mfileTime; }	// DUDE: timestamp of the file Open() actually opened, so callers need no separate probe
 
 	waveformatextensible_t	mpwfx;        // Pointer to waveformatex structure
 
@@ -253,6 +254,11 @@ private:
 	int				ReadOGG( byte* pBuffer, int dwSizeToRead, int *pdwSizeRead );
 	int				CloseOGG( void );
 };
+
+// DUDE: toggled around idSoundCache::LoadPendingParallel()'s worker pool so OpenOGG can skip its
+// (then-redundant) CRITICAL_SECTION_ONE. See snd_decoder.cpp.
+void				Snd_SetParallelDecode( bool enable );
+bool				Snd_InParallelDecode( void );
 
 
 /*
@@ -903,10 +909,24 @@ public:
 	bool					purged;
 	bool					levelLoadReferenced;		// so we can tell which samples aren't needed any more
 
+	// DUDE: parallel level-load decode. FindSound() used to call Load() inline while parsing sound
+	// decls, so every WAV/OGG was opened and decoded serially on the main thread (the fat "sound="
+	// line in the load-phase report). During a level load FindSound() now just queues the sample
+	// (pendingDecode) and idSoundCache::LoadPendingParallel() decodes them across worker threads
+	// (DecodeCpu) then uploads the OpenAL buffers serially (UploadAL), mirroring r_parallelImageLoad.
+	bool					pendingDecode;				// queued for the parallel decode pass
+	bool					decodeFailed;				// DecodeCpu() couldn't load the file; UploadAL() must MakeDefault()
+	bool					nonCacheMalloced;			// nonCacheData came from libc malloc (lock-free parallel decode), not soundCacheAllocator -> free it with free()
+	byte *					alUploadData;				// PCM a worker decoded, waiting for the main-thread OpenAL upload
+	int						alUploadBytes;				// byte length of alUploadData
+	bool					alUploadFreeTemp;			// alUploadData is a temp OGG-decode buffer to free after upload
+
 	int						LengthIn44kHzSamples() const;
 	ID_TIME_T					GetNewTimeStamp( void ) const;
 	void					MakeDefault();				// turns it into a beep
-	void					Load();						// loads the current sound based on name
+	void					Load();						// loads the current sound based on name (serial: DecodeCpu + UploadAL)
+	void					DecodeCpu();				// DUDE: worker-safe half of Load() -- file read + WAV/OGG decode, no OpenAL
+	void					UploadAL();					// DUDE: main-thread half of Load() -- OpenAL create/upload, or MakeDefault on failure
 	void					Reload( bool force );		// reloads if timestamp has changed, or always if force
 	void					PurgeSoundSample();			// frees all data
 	void					CheckForDownSample();		// down sample if required
@@ -930,6 +950,12 @@ public:
 	static void				Free( idSampleDecoder *decoder );
 	static int				GetNumUsedBlocks( void );
 	static int				GetUsedBlockMemory( void );
+
+	// DUDE: lock-free full-sample OGG decode for the parallel level-load path. Uses a local
+	// stb_vorbis handle (libc malloc, per call) so worker threads touch neither the shared
+	// decoder pool (idSampleDecoder::Alloc/Free) nor CRITICAL_SECTION_ONE (ClearDecoder).
+	// Decodes the whole sample at 44 kHz into dest; returns 44 kHz samples written (0 on failure).
+	static int				DecodeFullOGG( idSoundSample *sample, float *dest );
 
 	virtual					~idSampleDecoder( void ) {}
 	virtual void			Decode( idSoundSample *sample, int sampleOffset44k, int sampleCount44k, float *dest ) = 0;
@@ -965,8 +991,13 @@ public:
 	void					PrintMemInfo( MemInfo_t *mi );
 
 private:
+	// DUDE: decode the samples FindSound() queued in samplesToLoad on worker threads, then upload
+	// their OpenAL buffers on the calling thread. Called from EndLevelLoad().
+	void					LoadPendingParallel();
+
 	bool					insideLevelLoad;
 	idList<idSoundSample*>	listCache;
+	idList<idSoundSample*>	samplesToLoad;		// DUDE: queued by FindSound() during a level load, drained by LoadPendingParallel()
 };
 
 #endif /* !__SND_LOCAL_H__ */

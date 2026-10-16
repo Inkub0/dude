@@ -39,6 +39,17 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sound/snd_local.h"
 
+#include <atomic>
+
+// DUDE: set true only while idSoundCache::LoadPendingParallel()'s worker threads run. OpenOGG's
+// CRITICAL_SECTION_ONE guards Mem_Alloc + file read + stb setup, all of which are already
+// serialized by the Mem_SetThreadSafe / FS_SetThreadReadSafe windows that LoadPendingParallel
+// turns on (and the rest is per-idWaveFile-instance state), so it is redundant -- and a hard
+// serialization point -- during that window. Left on for all other (streaming/on-demand) callers.
+static std::atomic<bool>		snd_parallelDecode( false );
+void Snd_SetParallelDecode( bool enable ) { snd_parallelDecode.store( enable, std::memory_order_release ); }
+bool Snd_InParallelDecode( void ) { return snd_parallelDecode.load( std::memory_order_acquire ); }
+
 /*
 ===================================================================================
 
@@ -154,7 +165,11 @@ int idWaveFile::OpenOGG( const char* strFileName, waveformatex_t *pwfx ) {
 		return -1;
 	}
 
-	Sys_EnterCriticalSection( CRITICAL_SECTION_ONE );
+	// DUDE: redundant during the parallel level-load window (see Snd_InParallelDecode) -- everything
+	// it guards is per-instance or already covered by the Mem/FS thread-safe windows -- and it would
+	// otherwise serialize every worker's open. Kept for all other callers.
+	const bool useCS = !Snd_InParallelDecode();
+	if ( useCS ) Sys_EnterCriticalSection( CRITICAL_SECTION_ONE );
 
 	int fileSize = mhmmio->Length();
 	byte* oggFileData = (byte*)Mem_Alloc( fileSize );
@@ -165,7 +180,7 @@ int idWaveFile::OpenOGG( const char* strFileName, waveformatex_t *pwfx ) {
 	stb_vorbis *ov = stb_vorbis_open_memory( oggFileData, fileSize, &stbverr, NULL );
 	if( ov == NULL ) {
 		Mem_Free( oggFileData );
-		Sys_LeaveCriticalSection( CRITICAL_SECTION_ONE );
+		if ( useCS ) Sys_LeaveCriticalSection( CRITICAL_SECTION_ONE );
 		common->Warning( "Opening OGG file '%s' with stb_vorbis failed: %s\n", strFileName, my_stbv_strerror(stbverr) );
 		fileSystem->CloseFile( mhmmio );
 		mhmmio = NULL;
@@ -210,7 +225,7 @@ int idWaveFile::OpenOGG( const char* strFileName, waveformatex_t *pwfx ) {
 
 	memcpy( pwfx, &mpwfx, sizeof( waveformatex_t ) );
 
-	Sys_LeaveCriticalSection( CRITICAL_SECTION_ONE );
+	if ( useCS ) Sys_LeaveCriticalSection( CRITICAL_SECTION_ONE );
 
 	isOgg = true;
 
@@ -630,6 +645,77 @@ int idSampleDecoderLocal::DecodeOGG( idSoundSample *sample, int sampleOffset44k,
 	} while( totalSamples > 0 );
 
 	lastSampleOffset += readSamples;
+
+	return ( readSamples << shift );
+}
+
+/*
+====================
+idSampleDecoder::DecodeFullOGG
+
+DUDE: see snd_local.h -- lock-free full-sample OGG decode for the parallel level-load path.
+A faithful copy of idSampleDecoderLocal::DecodeOGG's decode loop (offset 0, whole sample) but
+with its own local stb_vorbis handle instead of the shared decoder object, so it touches neither
+the decoder pool nor CRITICAL_SECTION_ONE and can run concurrently across worker threads.
+====================
+*/
+int idSampleDecoder::DecodeFullOGG( idSoundSample *sample, float *dest ) {
+	if ( sample->nonCacheData == NULL ) {
+		common->Warning( "idSampleDecoder::DecodeFullOGG() on '%s' without nonCacheData\n", sample->name.c_str() );
+		return 0;
+	}
+
+	int stbVorbErr = 0;
+	stb_vorbis *stbv = stb_vorbis_open_memory( sample->nonCacheData, sample->objectMemSize, &stbVorbErr, NULL );
+	if ( stbv == NULL ) {
+		common->Warning( "idSampleDecoder::DecodeFullOGG() stb_vorbis_open_memory() for %s failed: %s\n",
+						 sample->name.c_str(), my_stbv_strerror( stbVorbErr ) );
+		return 0;
+	}
+
+	const int nChannels = sample->objectInfo.nChannels;
+	if ( nChannels > 2 ) {
+		common->Warning( "Ogg Vorbis files with >2 channels are not supported!\n" );
+		stb_vorbis_close( stbv );
+		return 0;
+	}
+
+	const int shift = 22050 / sample->objectInfo.nSamplesPerSec;
+	int totalSamples = sample->LengthIn44kHzSamples() >> shift;
+	int readSamples = 0;
+
+	do {
+		float samplesBuf[2][MIXBUFFER_SAMPLES];
+		float* samples[2] = { samplesBuf[0], samplesBuf[1] };
+		int reqSamples = Min( MIXBUFFER_SAMPLES, totalSamples / nChannels );
+		int ret = stb_vorbis_get_samples_float( stbv, nChannels, samples, reqSamples );
+		if ( reqSamples == 0 ) {
+			readSamples += totalSamples;
+			totalSamples = 0;
+			break;
+		}
+		if ( ret == 0 ) {
+			int err = stb_vorbis_get_error( stbv );
+			if ( err == VORBIS__no_error && reqSamples < 5 ) {
+				ret = reqSamples;	// accept a few dropped samples, as DecodeOGG does
+			} else {
+				common->Warning( "idSampleDecoder::DecodeFullOGG() stb_vorbis_get_samples_float() %d (%d) for %s failed: %s\n",
+					reqSamples, totalSamples, sample->name.c_str(), my_stbv_strerror( err ) );
+				break;
+			}
+		}
+		if ( ret < 0 ) {
+			break;
+		}
+		ret *= nChannels;
+
+		SIMDProcessor->UpSampleOGGTo44kHz( dest + ( readSamples << shift ), samples, ret, sample->objectInfo.nSamplesPerSec, nChannels );
+
+		readSamples += ret;
+		totalSamples -= ret;
+	} while ( totalSamples > 0 );
+
+	stb_vorbis_close( stbv );
 
 	return ( readSamples << shift );
 }
