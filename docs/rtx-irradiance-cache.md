@@ -518,6 +518,42 @@ cells to converge before every reading.
    DIFORWARD lights, and the served hit runs no light loop at all).
 8. **vid_restart with the cache on**: no device loss (the reset drop is unchanged from C4), the cache re-learns.
 
+### C6 first timing (user, 2026-10-16) - the "cheaper than off" promise did NOT hold
+
+`dude_rtx 2`, 40-light corridor, `r_vkGpuTime 3`, averaged (226-241 samples), same spot. `restir.di.gather`:
+
+| state | gather | frame (world) | vs no-cache |
+|---|---|---|---|
+| `r_rtgiCache 0` (no cache, one bounce) | **7.69 ms** | 13.46 (world) | - |
+| C6 TAIL (`r_rtgiCacheTail 1`) | **8.79 ms** | 14.71 (world) | **+1.11 ms (+14 %)** |
+| C2 indirect-only (`r_rtgiCacheTail 0`) | **9.37 ms** | 14.86 (world) | +1.69 ms (+22 %) |
+
+`rtgi.cache` resolve 0.045-0.048 ms in both cache-on states (negligible, consistent). Frame totals (off 20.7 / tail
+22.1 / C2 21.7) are muddied by FSR2 / post run-to-run noise (+-0.2 ms); the clean signal is the gather and the world,
+both of which order off < tail < C2.
+
+**Verdict:** the serve WORKS - tail is 0.58 ms (-6 %) cheaper than C2, i.e. skipping the hit's light loop + shadow ray
+on served hits saves real time - but it does NOT cover the cache's per-pixel tax, so the tail gather is still +1.1 ms
+over the plain one-bounce. The design's central promise ("should make the gather CHEAPER than with the cache off")
+is WRONG on this hardware / scene. Why: the UPDATE at P (mover test + claim CAS + 4 atomics into 32 MB + the extra
+target-only shade) runs on EVERY traced pixel, and the tail LOOKUP (8-16 dependent 16 B loads) on every bounce hit;
+the serve only saves the hit SHADE (a light loop over the few lights that gate-reach the hit + one shadow ray) and
+only on servable hits. Per-pixel tax >= per-served-hit saving here. The DI resample (40 candidates + a visibility
+ray) dominates the gather in all three modes and is untouched, so the cache is a tax on top either way.
+
+So C6 is a strictly better operating point than C2 (cheaper + true multi-bounce + the smoother bounce C2 could not
+give), but it is NOT free. Whether it ships (and at which preset) now rests on FIDELITY, not cost. Open, for the user:
+- **The servable rate bounds the possible saving.** `r_rtgiCacheDebug 6` (servable) at the SAME spot: if it is mostly
+  white, the serve is already firing for most hits and the +1.1 ms is the irreducible update/lookup machinery - the
+  only lever left is cost-reducing the machinery (subgroup-aggregate the 4 update atomics per warp = the reserve lever
+  already named at C4 item 12; and/or load only the own-level span in the tail lookup, checking servable before the
+  coarser load - trading the fused one-round-trip for a dependent one, which must be measured, the fused version won
+  C2 by a lot). If view 6 is patchy, more cells converging (`r_rtgiCacheSlotsLog2 21`, a larger `r_rtgiCacheCellAngle`)
+  would serve more hits and could close the gap.
+- **The fidelity items were not run yet** (2 bounce noise, 4 tail-vs-indirect A/B): those decide if the multi-bounce +
+  the smoother NRD input earn the +1.1 ms. Recommended BEFORE any cost-chasing - if the look does not justify it, the
+  cost question is moot and the cache stays an opt-in extra, not a preset default.
+
 **Assumptions / left open (decide at test time):**
 - **No albedo clamp at the tail store.** The design's convergence argument is "albedo < 1 + the per-sample clamp 64",
   so `L_out(P)` stores the raw `S.albedo` (unlike C2's `albedoClamp 0.9` at the hit). Doom's dark albedos (0.2-0.4)
