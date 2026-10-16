@@ -388,6 +388,12 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
   loads (`rtgiCacheSpanFind` / `rtgiCacheClaim` / `rtgiCacheLookup` loads the own + fallback spans at once: one round
   trip, hit or miss). Next lever if the share stays high at high pixel counts: subgroup aggregation of the four
   accumulation atomics (sum the lanes that share a cell, one atomic per cell per wave).
+- **Third timing (user, Ultra Nightmare preset, the same 40-light corridor), after the fused probing:** cache 0 gather
+  9.60 ms / denoise 3.70 / frame 22.95 (the preset's DI internal resolution differs from the first run's custom
+  settings - volumetrics 1.91, reflections 1.47 and the prepass 0.60 match the first run, the two DI-resolution
+  passes do not; nothing on the branch touches the cache-off gather); cache 1 gather 9.91 (+0.31 ms = 3 %),
+  `rtgi.cache` 0.047, gradient 0.43 (noise), denoise 3.33 (noise), frame 22.13 (within the window noise).
+  **Item 12 PASS**: the cache share fell from 22 % to 3 %; the atomics aggregation stays a reserve.
 
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 
