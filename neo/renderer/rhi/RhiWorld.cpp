@@ -581,6 +581,7 @@ struct rtgiCacheState_t {
 	int					slotsLog2 = 0;			// what the buffers were sized for
 	bool				clearPending = false;	// zero both buffers before anything reads them (first use / level / resize / re-enable)
 	bool				wasEnabled = false;		// r_rtgiCache was on last time Begin ran (a re-enable clears)
+	bool				tailMode = false;		// C6: cells hold L_out (tail) vs E_ind (indirect-only) last time Begin ran; a flip clears (the cells mean something else)
 	idStr				mapName;				// the level the cells belong to
 	bool				readyThisView = false;	// Begin succeeded this view: the parms are valid, the resolve + overlay may run
 	bool				resolvedThisView = false;
@@ -594,7 +595,7 @@ static rtgiCacheState_t rhiRtgiCache;
 // (a flicker / strobe table, a swinging cookie), and that boundary is a frequency. Above ~5 Hz reads as flicker, below
 // ~2-3 Hz as separate events; 250 ms sits between, and holds at 60 and 144 Hz alike (7 frames did not).
 #define RTGI_CACHE_COOL_MS		250.0f
-static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef );										// defined with the GI apply / overlays below
+static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef, bool tail );							// defined with the GI apply / overlays below (tail = C6: diApply && r_rtgiCacheTail; the standalone RTGI pass passes false)
 static void RB_RHI_RtgiCachePack( rhi::RenderParams &parms, const rtgiCacheParms_t &cp, bool slotInParticleRadius );
 static void RB_RHI_RtgiCacheResolve( rhi::RHI *r );
 
@@ -7775,7 +7776,7 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.diffuseModifier[3] = ( giNumLights > 0 ) ? 1.0f : 0.0f;	// real-lights enable
 	// RT irradiance cache (docs/rtx-irradiance-cache.md): the bounce's multi-bounce feedback; slot address in u_alphaTest.xy
 	// (u_particleRadius carries the IGN rotation here). Off (default) packs nothing and the shader never touches it.
-	const bool giCache = RB_RHI_RtgiCacheBegin( r, viewDef );
+	const bool giCache = RB_RHI_RtgiCacheBegin( r, viewDef, false );	// the standalone RTGI pass has no DI direct estimate at P: indirect-only (C2)
 	// movers never teach the cache: the gather tells them from the camera's own motion (last frame's view matrix + the
 	// full-res velocity MRT on unit 10, flag 8); without a velocity this view every pixel may teach (static scenes)
 	const rhi::ImageHandle giCacheVel = ( giCache && rhiNormalVelThisView ) ? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
@@ -8313,7 +8314,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// table). Flag 8 = the velocity at the gather res rides unit 10 (bound below), so the gather tells movers from the
 	// camera's own motion (u_prevMvpMatrix = last frame's view, set above) and never lets them teach. The gradient pass
 	// inherits the packing (gp = parms) for its cell reset (C3). Off (default) packs nothing.
-	const bool diCache = combineGI && RB_RHI_RtgiCacheBegin( r, viewDef );
+	const bool diCache = combineGI && RB_RHI_RtgiCacheBegin( r, viewDef, diApply && r_rtgiCacheTail.GetBool() );	// C6 tail only when DI lights the scene
 	if ( diCache ) {
 		if ( nrdVel != 0 ) { rhiRtgiCache.parms.flags |= 8u; }
 		RB_RHI_RtgiCachePack( parms, rhiRtgiCache.parms, true );
@@ -9271,7 +9272,7 @@ frame's sums into the cells - recorded mid-scene with the fragment->compute barr
 r_rtgiCacheDebug draws the cells / values / age / history of the visible surfaces over the finished view.
 ===================
 */
-static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
+static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef, bool tail ) {
 	rtgiCacheState_t &c = rhiRtgiCache;
 	c.readyThisView = false;
 	c.resolvedThisView = false;
@@ -9319,6 +9320,13 @@ static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 		c.clearPending = true;
 	}
 	c.wasEnabled = true;
+	// C6: the cells mean something different in tail vs indirect-only mode (L_out vs E_ind), so a flip must clear and
+	// re-learn. tail is only ever true under DI-apply, where the standalone RTGI pass (which passes false) stands down,
+	// so the two Begin callers never disagree within a frame and this never thrashes.
+	if ( c.tailMode != tail ) {
+		c.tailMode = tail;
+		c.clearPending = true;
+	}
 	if ( c.resolveProg == 0 ) {
 		c.resolveProg = r->LoadComputeShader( "rtgi_cache_resolve" );	// warns once when the .comp.spv is missing; the cache then stays off
 		if ( c.resolveProg == 0 ) {
@@ -9346,11 +9354,12 @@ static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	c.nMaxFrames    = nMax;
 	c.coolFrames    = idMath::ClampInt( 2, 31, (int)( RTGI_CACHE_COOL_MS / frameMs + 0.5f ) );
 	cp.evictAge     = (unsigned int)idMath::ClampInt( 64, 4096, 4 * nMax );
-	// flags: 1 = update at the primary point, 2 = lookup at the bounce hit (C2), 4 = gradient reset (C3). On a frame whose
-	// clear is still pending the buffers hold undefined memory until the resolve point zeroes them (the gathers run BEFORE
-	// it), so that frame neither reads nor writes: a garbage lookup would flash one frame of random bounce light into the
-	// NRD history, and its updates would be wiped by the clear anyway. The cache starts learning the frame after.
-	cp.flags        = c.clearPending ? 0u : ( 1u | 2u | ( r_rtgiCacheReset.GetBool() ? 4u : 0u ) );
+	// flags: 1 = update at the primary point, 2 = lookup at the bounce hit (C2), 4 = gradient reset (C3), 16 = C6 TAIL mode
+	// (the hit reads the stored L_out and the update stores L_out at P). On a frame whose clear is still pending the buffers
+	// hold undefined memory until the resolve point zeroes them (the gathers run BEFORE it), so that frame neither reads nor
+	// writes: a garbage lookup would flash one frame of random bounce light into the NRD history, and its updates would be
+	// wiped by the clear anyway. The cache starts learning the frame after.
+	cp.flags        = c.clearPending ? 0u : ( 1u | 2u | ( r_rtgiCacheReset.GetBool() ? 4u : 0u ) | ( tail ? 16u : 0u ) );
 	cp.resetThresh  = 0.35f;
 	cp.resetBias    = 0.05f;		// 5x the DI confidence's darkness bias: only changes that can move the indirect term count
 	cp.sampleClamp  = 64.0f;		// a 1-spp firefly (peak channel) must not own a cell for Nmax frames
