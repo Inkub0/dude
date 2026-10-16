@@ -1072,11 +1072,12 @@ extern idCVar r_rtgiAmbientKeep;			// RT GI reconcile: fraction of the fake cube
 extern idCVar r_rtgiFogAttenuate;			// RT GI reconcile: fade bounce light out through the view's fog so GI stops washing out distance fog
 extern idCVar r_rtgiCache;					// RT irradiance cache (docs/rtx-irradiance-cache.md): the bounce hit reads a hashed world-space cache of indirect light (multi-bounce)
 extern idCVar r_rtgiCacheScale;				// RT irradiance cache: weight of the cached term at the bounce hit
+extern idCVar r_rtgiCacheTail;				// RT irradiance cache: C6 tail mode (cell = L_out, serves the bounce hit) vs C2 indirect-only; DI-apply only
 extern idCVar r_rtgiCacheSlotsLog2;			// RT irradiance cache: log2 slot count (reconfiguring: joins ComputeGfxCfgSignature)
 extern idCVar r_rtgiCacheHistory;			// RT irradiance cache: Nmax frames of memory per cell (when the ms knob is 0)
 extern idCVar r_rtgiCacheHistoryMs;			// RT irradiance cache: the history in milliseconds through the low-passed frame rate (default 500; 0 = frames)
 extern idCVar r_rtgiCacheCellAngle;			// RT irradiance cache: tan(alpha/2), cell width per unit eye distance
-extern idCVar r_rtgiCacheDebug;				// RT irradiance cache debug overlay: 1 cell colour, 2 cached value, 3 age, 4 N, 5 activity (reset / fresh)
+extern idCVar r_rtgiCacheDebug;				// RT irradiance cache debug overlay: 1 cell colour, 2 cached value, 3 age, 4 N, 5 activity (reset / fresh), 6 servable (C6 tail)
 extern idCVar r_rtgiCacheReset;				// RT irradiance cache: the DI gradient restarts a cell whose direct light changed (diagnostic A/B)
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)

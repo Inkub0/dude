@@ -3,12 +3,16 @@
 One umbrella for three staged plans that build on each other. Read this file, then the sub-plan of the stage you
 are on.
 
-**Status 2026-10-16 (evening):** C0-C3 of the irradiance cache are IMPLEMENTED on branch `feat/rtx-irradiance-cache`
-(4 commits, built, not merged, not pushed - the user tests first): shared hash-grid helper (`rt_hash_grid.glsl`,
-G0's grid), cache buffers + resolve compute + debug views, the update at P / lookup at H in both gathers, the
-history cap / DI-gradient reset / stamp eviction. `r_rtgiCache` default off = bit-identical. Next = **C4 user
-validation** (the checklist at the end of docs/rtx-irradiance-cache.md), then C5 preset wiring, then G1. The G0
-register-headroom instrument (`r_vkPipelineStats <shader>`) shipped with C0. G and E are still PLANNED only.
+**Status 2026-10-16 (evening):** C0-C4 of the irradiance cache are done (merged to local master as
+`feat/rtx-irradiance-cache`), and **C6 (the cache as the PATH TAIL) is IMPLEMENTED** on branch
+`feat/rtx-irradiance-cache-tail` off master (3 commits, built, not merged, not pushed - the user tests first):
+shared hash-grid helper (`rt_hash_grid.glsl`, G0's grid), cache buffers + resolve compute + debug views, the update
+at P / lookup at H in both gathers, the history cap / DI-gradient reset / stamp eviction, and now the tail mode -
+a converged + fresh cell stores the surface's outgoing radiance and SERVES the bounce hit (cheaper gather, smoother
+NRD input), behind `r_rtgiCacheTail` (default 1, DI-apply only); `r_rtgiCacheTail 0` is the C2 indirect-only A/B.
+`r_rtgiCache` default off = bit-identical. Next = **C6 user validation** (the test procedure at the end of the C6
+section of docs/rtx-irradiance-cache.md), then C5 preset wiring, then G1. The G0 register-headroom instrument
+(`r_vkPipelineStats <shader>`) shipped with C0. G and E are still PLANNED only.
 
 | # | Plan | What it delivers | Doc |
 |---|---|---|---|

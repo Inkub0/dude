@@ -156,6 +156,7 @@ void main() {
 	bp.cache          = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_alphaTest.x ), floatBitsToUint( u_alphaTest.y ) ) );
 	const bool cacheOn = rtgiCachePresent( bp.cache );
 	bp.cacheLookup    = cacheOn && bp.cache.lookup;
+	bp.cacheTail      = cacheOn && bp.cache.tail;	// C6: always false here (this pass packs tail off - no DI direct estimate at P)
 	const vec3 eyeW   = u_modelViewMatrix[3].xyz;
 	vec3  Li; float thit; vec3 bounceDir; vec3 LiCache;
 	int   hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );

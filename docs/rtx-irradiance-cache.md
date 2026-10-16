@@ -418,7 +418,7 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
   direct term lagging light changes by the history (the reset / cooldown machinery already handles that). A design
   change against the plan's "indirect-only" line: the user's call (C5 or a C6).
 
-## C6 - the cache as the PATH TAIL (DECIDED by the user 2026-10-16 after C4; NOT implemented - the next session's task)
+## C6 - the cache as the PATH TAIL (DECIDED by the user 2026-10-16 after C4; IMPLEMENTED 2026-10-16 on branch `feat/rtx-irradiance-cache-tail`, built, NOT merged, NOT pushed - the implementation log + the test procedure are at the end of this section)
 
 **Why.** C4 showed the indirect-only cache correct but nearly invisible (Doom's dark albedos make the second bounce
 a third of the first) and a net cost (+0.3 ms gather, ~+1 ms frame in the user's reading): the gather pays a 32 MB
@@ -450,6 +450,122 @@ averaged value (far less 1-spp noise into NRD) and should make the gather CHEAPE
 **Test.** Same spot, `r_vkGpuTime 3` cache 0 / 1 after standing a second: the gather must drop below the cache-off
 figure. `r_rtReStirDIDebug 1` cache 0 / 1: the bounce's noise must visibly drop. View 6 white over a static view.
 The switched / flickering light checks of C3 again.
+
+### Implementation (branch `feat/rtx-irradiance-cache-tail` off master 2991cccb, 2026-10-16)
+
+Three commits, built clean (`cmake --build build`, SPIR-V 0 failures), not merged, not pushed.
+
+**What exists (exactly the C6 design above):**
+- `rtgi_cache.glsl`: `RtgiCacheParms.tail` (flag **16** of the shared packing, read in `rtgiCacheParmsFromUniforms`);
+  `rtgiCacheServable( p, uvec4 )` = `N >= RTGI_CACHE_SEED_N (4)` AND (`evictAge == 0` OR `frame - stamp < evictAge`);
+  `rtgiCacheLookupTail( p, P, N, eye, out Lout )` = own level then the one-coarser fallback, both spans in ONE round
+  trip (as the indirect-only lookup), returns the stored `L_out` when a span slot is servable.
+- `rtgi_bounce.glsl`: `RtgiBounceParms.cacheTail`; `hitWorld` + the normal-facing hoisted ABOVE the albedo sample so a
+  served hit skips it. When `cacheTail` and the hit's cell is servable: `Li = L_out * scale + emissive(H)` (emissive
+  sampled live from the geo table - the cell excludes the surface's own self-illum) and the function RETURNS - no
+  albedo fetch, no light loop, no dominant shadow ray. The C2 indirect add is gated `cacheLookup && !cacheTail` (a
+  served hit already carries the full `L_out`; adding `E_ind` on top of an `L_out` cell would double-count).
+- `restir_di.frag`: the UPDATE at P stores, in tail mode, `L_out(P) = max( albedo(P) * ( E_dir(P) + E_ind(P) ), 0 )`,
+  emissive excluded. `E_dir(P)` = one extra `diShadeLight( chosen, targetOnly=true )` (colour * atten * N.L, no
+  albedo / material) * `W` * `vis` * `bp.lightScale` (the BOUNCE's light scale, the convention the served hit
+  shading replaces - NOT the DI forward scale `u_shadowFalloffS.x`), no ray; `E_dir = 0` when no light was chosen.
+  `E_ind(P)` = `LiCache` (the tail at H: the served `L_out(H)*scale + emissive(H)`, or the live one-bounce when H was
+  unservable). Indirect-only mode teaches `LiCache` unchanged. `restir_di_boost.frag` (DI_BOOST=1) SERVES the tail
+  (reads) but does not teach (the update block is `#if !DI_BOOST`), as before.
+- `rtgi_ray.frag`: `cacheTail` wired but always false (the standalone RTGI pass packs tail off - it has no DI direct
+  estimate at P, so it stays C2 indirect-only).
+- `RhiWorld.cpp`: `RB_RHI_RtgiCacheBegin( r, viewDef, tail )`; `tail` ORs flag 16 into the packed flags and is tracked
+  in `rtgiCacheState_t::tailMode` - a tail/indirect FLIP sets `clearPending` (the cells mean `L_out` vs `E_ind`).
+  Call sites: the DI gather passes `diApply && r_rtgiCacheTail`; the standalone RTGI pass passes `false`. `tail` is
+  only ever true under DI-apply, where the standalone pass stands down (`RB_RHI_RtgiPass` returns on `r_rtReStirDI`),
+  so the two Begin callers never disagree within a frame and the flip never thrashes. No new GPU handle (the cache's
+  `RB_RHI_ResetWorldTargets` drop already covers vid_restart).
+- `r_rtgiCacheTail` (new cvar, **default 1**, CVAR_ARCHIVE | BOOL): tail mode on. 0 = the C2 indirect-only A/B.
+- `rtgi_cache_debug.frag` + `r_rtgiCacheDebug` range **0..6**: view **6 = SERVABLE** (white where `rtgiCacheServable`,
+  dim grey where present-but-not-servable, black absent).
+- ImGui `DrawDbgGroup_RTGI` (Irradiance Cache sub-block, the user named this ImGui): a "Path Tail (serve the bounce)"
+  checkbox (`r_rtgiCacheTail`) and the "Servable (tail mode)" entry in the Cache View combo.
+
+**`r_rtgiCache 0` is still bit-identical** (Begin returns before any tail state; nothing packs the flag). The whole
+tail path is dead with `r_rtgiCache 0`; and with `r_rtgiCache 1, r_rtgiCacheTail 0` it is exactly C2.
+
+**Test procedure (the session cannot run the game; all yours).** `dude_rtx 2`, 1440p-class, `r_rtgiCache 1`,
+`r_rtgiCacheTail 1` (default), defaults otherwise. Stand still at a spot with a clearly INDIRECTLY lit region in
+view (a corridor side wall lit from the floor, an under-counter, a ceiling lit from below) and wait ~1 s for the
+cells to converge before every reading.
+1. **Cost - the headline claim.** `r_vkGpuTime 3`, same spot, averaged over several prints (ignore < 0.05 ms drift):
+   read `restir.di.gather` and the frame with `r_rtgiCache 0`, then `r_rtgiCache 1`. The gather with the cache ON
+   must DROP BELOW the cache-off figure (most bounce hits now skip their light loop + shadow ray). `rtgi.cache`
+   (the resolve) stays ~0.05 ms. If the gather is HIGHER with the cache on, the serve is not firing for enough hits:
+   check view 6 (below) is mostly white, and raise `r_rtgiCacheSlotsLog2` to 21 if lit cells show dim in view 1.
+2. **Bounce noise.** `r_rtReStirDIDebug 1` (the raw gather before NRD), `r_rtgiCacheDebug 0`: compare `r_rtgiCache 0`
+   vs 1 at the same spot. The indirect part of the bounce must look visibly SMOOTHER with the cache on (the tail is a
+   cell + frame average, not a 1-spp direct shade at the hit). If smoother, try `r_rtReStirDIHistory` one step lower
+   with the cache on and judge detail vs noise.
+3. **Servable view.** `r_rtgiCacheDebug 6`: standing still, the visible lit surfaces must go WHITE within ~1 s (cells
+   reaching N >= 4 and staying fresh). Dim-grey patches that never whiten on a lit, static surface = cells not
+   converging (full probe spans -> `r_rtgiCacheSlotsLog2 21`); black = absent (sky / unattributed props, expected).
+4. **Tail vs indirect-only A/B.** `r_rtgiCacheTail 0` then `1` (each flip clears + re-learns over ~1 s): tail (1)
+   should read as a fuller, smoother multi-bounce fill than indirect-only (0); and the cost in item 1 is the tail's,
+   not the indirect-only's (which was a small net COST at C4).
+5. **Switched light** (C3.1): a room with a wall switch; off/on. The indirect fill must follow within the DI's own
+   fade - the cached direct term now lives in the cell, so the gradient reset (`r_rtgiCacheReset 1`) must restart the
+   room's cells (view 5 red the frame after, view 4 cells drop) or the old lighting lingers for the history length.
+6. **Flickering light** (C3, 4th reading): stand under an authored flicker / strobe fixture. The cells must hold
+   (view 5 yellow, the cooldown) and their served bounce must settle to the light's AVERAGE, not strobe with it.
+7. **Flashlight** (C3.3): sweep the flashlight across a wall near a lit surface; the served bounce (view 2 / the lit
+   image) must NOT change with the beam (fast lights never enter the cell: `E_dir` is the DI pick, which excludes
+   DIFORWARD lights, and the served hit runs no light loop at all).
+8. **vid_restart with the cache on**: no device loss (the reset drop is unchanged from C4), the cache re-learns.
+
+### C6 first timing (user, 2026-10-16) - the "cheaper than off" promise did NOT hold
+
+`dude_rtx 2`, 40-light corridor, `r_vkGpuTime 3`, averaged (226-241 samples), same spot. `restir.di.gather`:
+
+| state | gather | frame (world) | vs no-cache |
+|---|---|---|---|
+| `r_rtgiCache 0` (no cache, one bounce) | **7.69 ms** | 13.46 (world) | - |
+| C6 TAIL (`r_rtgiCacheTail 1`) | **8.79 ms** | 14.71 (world) | **+1.11 ms (+14 %)** |
+| C2 indirect-only (`r_rtgiCacheTail 0`) | **9.37 ms** | 14.86 (world) | +1.69 ms (+22 %) |
+
+`rtgi.cache` resolve 0.045-0.048 ms in both cache-on states (negligible, consistent). Frame totals (off 20.7 / tail
+22.1 / C2 21.7) are muddied by FSR2 / post run-to-run noise (+-0.2 ms); the clean signal is the gather and the world,
+both of which order off < tail < C2.
+
+**Verdict:** the serve WORKS - tail is 0.58 ms (-6 %) cheaper than C2, i.e. skipping the hit's light loop + shadow ray
+on served hits saves real time - but it does NOT cover the cache's per-pixel tax, so the tail gather is still +1.1 ms
+over the plain one-bounce. The design's central promise ("should make the gather CHEAPER than with the cache off")
+is WRONG on this hardware / scene. Why: the UPDATE at P (mover test + claim CAS + 4 atomics into 32 MB + the extra
+target-only shade) runs on EVERY traced pixel, and the tail LOOKUP (8-16 dependent 16 B loads) on every bounce hit;
+the serve only saves the hit SHADE (a light loop over the few lights that gate-reach the hit + one shadow ray) and
+only on servable hits. Per-pixel tax >= per-served-hit saving here. The DI resample (40 candidates + a visibility
+ray) dominates the gather in all three modes and is untouched, so the cache is a tax on top either way.
+
+So C6 is a strictly better operating point than C2 (cheaper + true multi-bounce + the smoother bounce C2 could not
+give), but it is NOT free. Whether it ships (and at which preset) now rests on FIDELITY, not cost. Open, for the user:
+- **The servable rate bounds the possible saving.** `r_rtgiCacheDebug 6` (servable) at the SAME spot: if it is mostly
+  white, the serve is already firing for most hits and the +1.1 ms is the irreducible update/lookup machinery - the
+  only lever left is cost-reducing the machinery (subgroup-aggregate the 4 update atomics per warp = the reserve lever
+  already named at C4 item 12; and/or load only the own-level span in the tail lookup, checking servable before the
+  coarser load - trading the fused one-round-trip for a dependent one, which must be measured, the fused version won
+  C2 by a lot). If view 6 is patchy, more cells converging (`r_rtgiCacheSlotsLog2 21`, a larger `r_rtgiCacheCellAngle`)
+  would serve more hits and could close the gap.
+- **The fidelity items were not run yet** (2 bounce noise, 4 tail-vs-indirect A/B): those decide if the multi-bounce +
+  the smoother NRD input earn the +1.1 ms. Recommended BEFORE any cost-chasing - if the look does not justify it, the
+  cost question is moot and the cache stays an opt-in extra, not a preset default.
+
+**Assumptions / left open (decide at test time):**
+- **No albedo clamp at the tail store.** The design's convergence argument is "albedo < 1 + the per-sample clamp 64",
+  so `L_out(P)` stores the raw `S.albedo` (unlike C2's `albedoClamp 0.9` at the hit). Doom's dark albedos (0.2-0.4)
+  make the series sum to ~1.25-1.67x the first bounce; if a near-white enclosed area pumps cells bright, clamp
+  `S.albedo` to `albedoClamp` at the store (one line in restir_di.frag).
+- **`r_rtgiCacheScale` compounds across bounce orders** in tail mode (the serve applies it, and the served value feeds
+  the next level's store): exact at the default 1, and the higher orders are tiny in Doom, but scale 2-4 exaggerate
+  faster than in C2. Left as the taste knob the design calls it.
+- **Per-cell all-or-nothing transition at N = 4.** An unservable hit is the plain one bounce (direct only, no indirect
+  add); a servable one is the full `L_out`. Seeding from the coarser parent (SEED_N = 4 -> born servable) and the
+  resolve blend smooth the crossing, but a subtle pop as a cell crosses N = 4 is possible; the switched-light and
+  moving tests (5, 3) are where it would show.
 
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 
