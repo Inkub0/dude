@@ -372,6 +372,12 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
   eviction age (4 x Nmax) follows. The gradient's own comparison stays per frame by construction; its 35 % threshold
   is self-correcting across frame rates (an interpolated table changes less per frame at 144 Hz, fewer requests, the
   cell blends either way).
+- **Fifth reading (user): mostly YELLOW (held) over whole rooms, movers black with green flashes, ring edges green.**
+  The yellow was a bug in the "light absent from the other frame" rule: a stratum with NO pick on either side (a dark
+  corner, a surface facing away from every light, a locker's shadowed side) also comes back with an empty row, so
+  every dark stratum requested a reset every frame and sat in the cooldown forever. The absence now counts only when
+  the winning light actually lit the surface (its stored luminance above the darkness bias) and is gone on the other
+  side. Expected yellow stays: fixture housings under flicker tables, floor grates.
 
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 

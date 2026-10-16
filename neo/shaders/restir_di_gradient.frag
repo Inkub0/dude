@@ -230,7 +230,12 @@ void main() {
 		}
 	}
 	float Lprev = 0.0, Lnow = 0.0, occDist;
-	bool  cacheRowAbsent = false;		// RT irradiance cache: the light is absent from the OTHER frame's buffer (it switched, or entered / left DI)
+	// RT irradiance cache (C3), built here because both branches below record whether the winning light is ABSENT from
+	// the other frame's buffer (a switch, or it entered / left DI). That only counts when the light actually LIT the
+	// surface - its stored luminance above the darkness bias: a stratum with no pick on either side is dark, not changed
+	// (counting those reset every dark corner every frame and held the whole room yellow, 2026-10-16).
+	RtgiCacheParms cp = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ) );
+	bool  cacheRowAbsent = false;
 	if ( wIsPrev ) {
 		// last frame's light (its row this frame: the same pick, else through this frame's table), valued now
 		Lprev = bestPrevLum;
@@ -245,7 +250,7 @@ void main() {
 				if ( rp1 != 0u && rp1 <= nLights && lights.l[ rp1 - 1u ].pad1 == prevLights.l[ bestPrevRow - 1u ].pad1 ) { curRowPlus1 = rp1; }
 			}
 		}
-		cacheRowAbsent = ( curRowPlus1 == 0u );
+		cacheRowAbsent = ( bestPrevRow != 0u && curRowPlus1 == 0u && bestPrevLum > cp.resetBias );	// last frame's light is gone now
 		if ( curRowPlus1 != 0u ) {
 			vec3 c, ld; float dl, ndl;
 			if ( diShadeLight( lights, curRowPlus1 - 1u, Sp, c, ld, dl, ndl, false ) ) {
@@ -268,7 +273,7 @@ void main() {
 				if ( rp1 != 0u && rp1 <= nPrevLights && prevLights.l[ rp1 - 1u ].pad1 == lights.l[ bestCurRow - 1u ].pad1 ) { prevRowPlus1 = rp1; }
 			}
 		}
-		cacheRowAbsent = ( prevRowPlus1 == 0u );
+		cacheRowAbsent = ( bestCurRow != 0u && prevRowPlus1 == 0u && bestCurLum > cp.resetBias );	// this frame's light was not there last frame
 		if ( prevRowPlus1 != 0u ) {
 			vec3 c, ld; float dl, ndl;
 			if ( diShadeLight( prevLights, prevRowPlus1 - 1u, Sp, c, ld, dl, ndl, false ) ) {
@@ -301,7 +306,6 @@ void main() {
 	// light is absent on either side, or when it is LIT on both sides and its lit value changed by the threshold (a
 	// dimming, a brightening, a swinging cookie); a side that is zero with the light present is a shadow - no reset.
 	{
-		RtgiCacheParms cp = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ) );
 		const bool exact   = !( wIsPrev && !bestStatic );
 		const bool litBoth = Lprev > 0.0 && Lnow > 0.0;
 		const bool changed = cacheRowAbsent
