@@ -128,22 +128,88 @@ void rtgiCachePackIrr( inout HgSlot s, vec3 irr, uint N, uint flags ) {
 	s.irrBN = ( packHalf2x16( vec2( irr.b, 0.0 ) ) & 0xFFFFu ) | ( min( N, RTGI_CACHE_N_MAX ) << RTGI_CACHE_N_SHIFT ) | flags;
 }
 
+// ---- fused probing: a span's four slots in ONE memory round trip ---------------------------------------------------
+// The generic hgFind / hgClaim (rt_hash_grid.glsl, kept for the guiding grids) read one key word at a time: up to four
+// DEPENDENT loads per probe, each a full memory round trip, in the latency-bound gather - and the payload a fifth. The
+// cache's 16 B slots are one uvec4 each, so a whole span is four INDEPENDENT 16 B loads the compiler issues together:
+// the probe and the payload in one round trip (the DI gather's cache share measured 22 % with the chained version).
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtgiCacheSpan { uvec4 s[]; };
+
+uint rtgiCacheNv( uvec4 s )   { return ( s.w >> RTGI_CACHE_N_SHIFT ) & RTGI_CACHE_N_MASK; }
+vec3 rtgiCacheIrrv( uvec4 s ) { return vec3( unpackHalf2x16( s.z ), unpackHalf2x16( s.w ).x ); }
+
+// the slot of `key` among a span's four preloaded slots: 0..3, or -1 = absent (slots fill contiguously from the first
+// empty one and are never emptied short of a full clear, so an empty slot ends the search)
+int rtgiCacheSpanFind( uvec4 s0, uvec4 s1, uvec4 s2, uvec4 s3, uint key, out uvec4 hit ) {
+	hit = uvec4( 0u );
+	if ( s0.x == key ) { hit = s0; return 0; }
+	if ( s0.x == 0u ) { return -1; }
+	if ( s1.x == key ) { hit = s1; return 1; }
+	if ( s1.x == 0u ) { return -1; }
+	if ( s2.x == key ) { hit = s2; return 2; }
+	if ( s2.x == 0u ) { return -1; }
+	if ( s3.x == key ) { hit = s3; return 3; }
+	return -1;
+}
+
+// Claim P's slot for key k: the slot that already holds it, else the first empty slot of the span (atomicCompSwap: every
+// pixel of a new cell in a frame lands in one slot; `fresh` = this invocation created it), else - when evictAge > 0 - the
+// oldest foreign slot whose stamp is at least evictAge frames old (stamp 0 = claimed this frame, never evicted), taken
+// over with a CAS (`evicted` = the payload belongs to the old key). -1 = the span is full of live foreign cells: the
+// sample is dropped. The span is preloaded (one round trip); the CASes only follow when needed.
+int rtgiCacheClaim( RtgiCacheParms p, HgKey k, out bool evicted, out bool fresh ) {
+	evicted = false;
+	fresh = false;
+	RtgiCacheSpan span  = RtgiCacheSpan( p.slotAddr );
+	HgWords       words = HgWords( p.slotAddr );
+	uvec4 s[4];
+	s[0] = span.s[ k.base ];
+	s[1] = span.s[ k.base + 1u ];
+	s[2] = span.s[ k.base + 2u ];
+	s[3] = span.s[ k.base + 3u ];
+	for ( int i = 0; i < 4; i++ ) {										// existing (a key sits in a span at most once)
+		if ( s[i].x == k.key ) { return int( k.base ) + i; }
+	}
+	uint oldestIdx = 0xFFFFFFFFu;
+	uint oldestAge = 0u;
+	uint oldestKey = 0u;
+	for ( int i = 0; i < 4; i++ ) {
+		uint idx = k.base + uint( i );
+		uint sk  = s[i].x;
+		if ( sk == 0u ) {
+			uint prev = atomicCompSwap( words.w[ idx * RTGI_CACHE_STRIDE ], 0u, k.key );
+			if ( prev == 0u ) { fresh = true; return int( idx ); }
+			if ( prev == k.key ) { return int( idx ); }					// a sibling pixel created it a moment ago
+			sk = prev;													// lost the race to another cell, not stamped yet
+			s[i].y = 0u;
+		}
+		uint stamp = s[i].y;
+		uint age   = ( stamp == 0u ) ? 0u : ( p.frame - stamp );
+		if ( age > oldestAge ) { oldestAge = age; oldestIdx = idx; oldestKey = sk; }
+	}
+	if ( p.evictAge != 0u && oldestIdx != 0xFFFFFFFFu && oldestAge >= p.evictAge ) {
+		uint prev = atomicCompSwap( words.w[ oldestIdx * RTGI_CACHE_STRIDE ], oldestKey, k.key );
+		if ( prev == oldestKey ) { evicted = true; return int( oldestIdx ); }
+		if ( prev == k.key ) { return int( oldestIdx ); }				// a sibling pixel evicted it for us this frame
+	}
+	return -1;
+}
+
 // LOOKUP at a bounce hit (world point P, geometric normal N facing the ray, eye E): the cell's learned indirect term.
 // H's own level first; when that cell is absent or not yet resolved, the one-coarser level's cell (a hit lands at a
 // distance its surface may never have been a primary point at, and the coarser cell - twice the width - has had twice
-// the chance to be learned). One extra probe on a miss, none on a hit; 0 when neither exists.
+// the chance to be learned). BOTH spans are loaded together: eight independent 16 B loads, one round trip, whether the
+// own level hits or not (a miss is the common case at H). 0 when neither exists.
 vec3 rtgiCacheLookup( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye ) {
-	HgWords        words = HgWords( p.slotAddr );
-	RtgiCacheSlots slots = RtgiCacheSlots( p.slotAddr );
-	int level = hgLevel( distance( P, eye ), p.tanAlphaHalf );
-	for ( int step = 0; step < 2; step++ ) {
-		HgKey k = hgMakeKeyLevel( P, N, level + step, p.slotMask );
-		int idx = hgFind( words, RTGI_CACHE_STRIDE, k );
-		if ( idx >= 0 ) {
-			HgSlot s = slots.s[ idx ];
-			if ( rtgiCacheN( s ) > 0u ) { return rtgiCacheUnpackIrr( s ); }
-		}
-	}
+	int   level = hgLevel( distance( P, eye ), p.tanAlphaHalf );
+	HgKey k0 = hgMakeKeyLevel( P, N, level, p.slotMask );
+	HgKey k1 = hgMakeKeyLevel( P, N, level + 1, p.slotMask );
+	RtgiCacheSpan span = RtgiCacheSpan( p.slotAddr );
+	uvec4 a0 = span.s[ k0.base ], a1 = span.s[ k0.base + 1u ], a2 = span.s[ k0.base + 2u ], a3 = span.s[ k0.base + 3u ];
+	uvec4 b0 = span.s[ k1.base ], b1 = span.s[ k1.base + 1u ], b2 = span.s[ k1.base + 2u ], b3 = span.s[ k1.base + 3u ];
+	uvec4 hit;
+	if ( rtgiCacheSpanFind( a0, a1, a2, a3, k0.key, hit ) >= 0 && rtgiCacheNv( hit ) > 0u ) { return rtgiCacheIrrv( hit ); }
+	if ( rtgiCacheSpanFind( b0, b1, b2, b3, k1.key, hit ) >= 0 && rtgiCacheNv( hit ) > 0u ) { return rtgiCacheIrrv( hit ); }
 	return vec3( 0.0 );
 }
 
@@ -152,14 +218,15 @@ vec3 rtgiCacheLookup( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye ) {
 // mean (the "swimming" bands in the history view while moving). The parent's value is the best estimate there is; it
 // enters with SEED_N frames of trust so the fine cell's own samples take over smoothly. One writer (the claim winner);
 // siblings that look the cell up before the write lands read N = 0, which is just a miss for that frame.
-void rtgiCacheSeed( RtgiCacheSlots slots, HgWords words, uint slotMask, int idx, vec3 P, vec3 N, int level ) {
-	HgKey kc = hgMakeKeyLevel( P, N, level + 1, slotMask );
-	int ic = hgFind( words, RTGI_CACHE_STRIDE, kc );
-	if ( ic < 0 ) { return; }
-	HgSlot sc = slots.s[ ic ];
-	if ( rtgiCacheN( sc ) == 0u ) { return; }
-	HgSlot sn = slots.s[ idx ];
-	rtgiCachePackIrr( sn, rtgiCacheUnpackIrr( sc ), min( rtgiCacheN( sc ), RTGI_CACHE_SEED_N ), RTGI_CACHE_SEEDED_BIT );
+void rtgiCacheSeed( RtgiCacheParms p, int idx, vec3 P, vec3 N, int level ) {
+	HgKey kc = hgMakeKeyLevel( P, N, level + 1, p.slotMask );
+	RtgiCacheSpan span = RtgiCacheSpan( p.slotAddr );
+	uvec4 c0 = span.s[ kc.base ], c1 = span.s[ kc.base + 1u ], c2 = span.s[ kc.base + 2u ], c3 = span.s[ kc.base + 3u ];
+	uvec4 hit;
+	if ( rtgiCacheSpanFind( c0, c1, c2, c3, kc.key, hit ) < 0 || rtgiCacheNv( hit ) == 0u ) { return; }
+	HgSlot sn = HgSlot( 0u, 0u, 0u, 0u );
+	rtgiCachePackIrr( sn, rtgiCacheIrrv( hit ), min( rtgiCacheNv( hit ), RTGI_CACHE_SEED_N ), RTGI_CACHE_SEEDED_BIT );
+	RtgiCacheSlots slots = RtgiCacheSlots( p.slotAddr );
 	slots.s[ idx ].irrRG = sn.irrRG;
 	slots.s[ idx ].irrBN = sn.irrBN;
 }
@@ -172,9 +239,8 @@ void rtgiCacheSeed( RtgiCacheSlots slots, HgWords words, uint slotMask, int idx,
 void rtgiCacheUpdate( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye, vec3 Li ) {
 	int   level = hgLevel( distance( P, eye ), p.tanAlphaHalf );
 	HgKey k     = hgMakeKeyLevel( P, N, level, p.slotMask );
-	HgWords words = HgWords( p.slotAddr );
 	bool evicted, fresh;
-	int idx = hgClaim( words, RTGI_CACHE_STRIDE, RTGI_CACHE_STAMP_OFS, k, p.frame, p.evictAge, evicted, fresh );
+	int idx = rtgiCacheClaim( p, k, evicted, fresh );
 	if ( idx < 0 ) { return; }											// span full of live cells: drop this sample
 	RtgiCacheSlots  slots = RtgiCacheSlots( p.slotAddr );
 	RtgiCacheAccums acc   = RtgiCacheAccums( p.accumAddr );
@@ -185,10 +251,10 @@ void rtgiCacheUpdate( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye, vec3 Li ) {
 		// sums mix the old cell's samples with ours and are dropped; the cell starts from the payload left here
 		slots.s[ idx ].irrRG = 0u;
 		slots.s[ idx ].irrBN = 0u;
-		rtgiCacheSeed( slots, words, p.slotMask, idx, P, N, level );
+		rtgiCacheSeed( p, idx, P, N, level );
 		atomicOr( acc.a[ idx ].count, RTGI_CACHE_EVICT_BIT );
 	} else if ( fresh ) {
-		rtgiCacheSeed( slots, words, p.slotMask, idx, P, N, level );
+		rtgiCacheSeed( p, idx, P, N, level );
 	}
 	vec3  v  = max( Li, vec3( 0.0 ) );
 	float pk = max( max( v.r, v.g ), v.b );
@@ -218,7 +284,10 @@ bool rtgiCacheIsMover( vec2 uv, vec2 vel, vec3 P, mat4 prevWorldToView, vec2 inv
 // can be reset; an absent one has nothing stale to forget.
 void rtgiCacheRequestReset( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye ) {
 	HgKey k = hgMakeKey( P, N, eye, p.tanAlphaHalf, p.slotMask );
-	int idx = hgFind( HgWords( p.slotAddr ), RTGI_CACHE_STRIDE, k );
-	if ( idx < 0 ) { return; }
-	atomicOr( RtgiCacheAccums( p.accumAddr ).a[ idx ].count, RTGI_CACHE_RESET_BIT );
+	RtgiCacheSpan span = RtgiCacheSpan( p.slotAddr );
+	uvec4 s0 = span.s[ k.base ], s1 = span.s[ k.base + 1u ], s2 = span.s[ k.base + 2u ], s3 = span.s[ k.base + 3u ];
+	uvec4 hit;
+	int i = rtgiCacheSpanFind( s0, s1, s2, s3, k.key, hit );
+	if ( i < 0 ) { return; }
+	atomicOr( RtgiCacheAccums( p.accumAddr ).a[ int( k.base ) + i ].count, RTGI_CACHE_RESET_BIT );
 }

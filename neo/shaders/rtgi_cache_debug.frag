@@ -61,7 +61,10 @@ void main() {
 	RtgiCacheParms cp = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_alphaTest.x ), floatBitsToUint( u_alphaTest.y ) ) );
 	if ( !rtgiCachePresent( cp ) ) { fragColor = vec4( 0.2, 0.0, 0.2, 1.0 ); return; }	// no cache buffers: magenta
 	HgKey k  = hgMakeKey( Pw, Nw, eye, cp.tanAlphaHalf, cp.slotMask );
-	int  idx = hgFind( HgWords( cp.slotAddr ), RTGI_CACHE_STRIDE, k );
+	RtgiCacheSpan span = RtgiCacheSpan( cp.slotAddr );
+	uvec4 s0 = span.s[ k.base ], s1 = span.s[ k.base + 1u ], s2 = span.s[ k.base + 2u ], s3 = span.s[ k.base + 3u ];
+	uvec4 hit;
+	int  idx = rtgiCacheSpanFind( s0, s1, s2, s3, k.key, hit );
 	int  mode = int( u_localParam0.w + 0.5 );
 	if ( mode == 1 ) {
 		fragColor = vec4( hgKeyColor( k.key ) * ( idx >= 0 ? 1.0 : 0.3 ), 1.0 );
@@ -71,7 +74,7 @@ void main() {
 		fragColor = ( mode == 3 ) ? vec4( 0.25, 0.0, 0.0, 1.0 ) : vec4( 0.0, 0.0, 0.0, 1.0 );
 		return;
 	}
-	HgSlot s = RtgiCacheSlots( cp.slotAddr ).s[ idx ];
+	HgSlot s = HgSlot( hit.x, hit.y, hit.z, hit.w );
 	if ( mode == 2 ) {
 		vec3 e = rtgiCacheUnpackIrr( s );
 		fragColor = vec4( e / ( 1.0 + e ), 1.0 );

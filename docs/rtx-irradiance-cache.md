@@ -378,6 +378,16 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
   every dark stratum requested a reset every frame and sat in the cooldown forever. The absence now counts only when
   the winning light actually lit the surface (its stored luminance above the darkness bias) and is gone on the other
   side. Expected yellow stays: fixture housings under flicker tables, floor grates.
+- **Second timing (user, at a RAISED FSR setting):** cache 0 frame 34.45 ms, gather 14.57, denoise 6.68, volumetrics
+  3.42, FSR2 2.42 - every pass 1.7-3.6x the first baseline, the untouched ones included, so the setting, not the
+  branch (a retest at the original setting is the comparable one). Cache 1: gather 17.79 (+3.2 ms, 22 %),
+  `rtgi.cache` 0.049, gradient unchanged. The share doubled vs the first reading (11 %): with a fixed screen-size
+  cell, more render pixels = more pixels per cell per frame = more same-address atomics, and the chained probe
+  loads (up to four dependent key reads + the payload, twice with the fallback level) cost a round trip each in the
+  latency-bound gather. Done: **fused span probing** - a span's four 16 B slots are loaded together as independent
+  loads (`rtgiCacheSpanFind` / `rtgiCacheClaim` / `rtgiCacheLookup` loads the own + fallback spans at once: one round
+  trip, hit or miss). Next lever if the share stays high at high pixel counts: subgroup aggregation of the four
+  accumulation atomics (sum the lanes that share a cell, one atomic per cell per wave).
 
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 
