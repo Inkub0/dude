@@ -4789,6 +4789,12 @@ static void DrawDbgGroup_RTGI()
 			"sees is cell + frame averaged (far less 1-spp noise) instead of a single direct shade. Off = indirect-only: the cell "
 			"holds only the second-and-later-bounce light added on top of the hit's full live shade (the original behaviour). A "
 			"change clears and re-learns the cache. (r_rtgiCacheTail)" );
+		CvarSliderF( "Serve Error", r_rtgiCacheServeError, 0.0f, 1.0f, "%.2f", "Tail mode: how a cell decides it is converged "
+			"enough to serve a bounce hit. > 0 = by variance: serve only once the mean's relative standard error is within this "
+			"fraction, so a cell that has aged in but is still noisy keeps shading live until it settles - softens the pop as a "
+			"cell converges, for a few more live-shaded hits (~0.2 ms gather). 0.33 (default) is the tuned sweet spot; lower = "
+			"stricter / cleaner, higher = looser. 0 = by age instead (serve once the cell has >= 4 frames; the original C6 A/B). "
+			"The Servable cache view shows which cells pass. (r_rtgiCacheServeError)" );
 		CvarSliderF( "Cache Weight", r_rtgiCacheScale, 0.0f, 2.0f, "%.2f", "Weight of the cached (second and later bounce) light "
 			"added at a bounce hit. 1 = physical; lower for a subtler multi-bounce fill. (r_rtgiCacheScale)" );
 		CvarSliderF( "Cache History (ms)", r_rtgiCacheHistoryMs, 0.0f, 2000.0f, "%.0f ms", "How long a cell remembers, in "
@@ -4802,7 +4808,7 @@ static void DrawDbgGroup_RTGI()
 		{
 			int slotsIdx = idMath::ClampInt( 0, 3, r_rtgiCacheSlotsLog2.GetInteger() - 19 );
 			ImGui::SetNextItemWidth( 240.0f );
-			if ( ImGui::Combo( "Cells##rtgiCacheSlots", &slotsIdx, "512K cells (2 x 8 MB)\0" "1M cells (2 x 16 MB)\0" "2M cells (2 x 32 MB)\0" "4M cells (2 x 64 MB)\0" ) ) {
+			if ( ImGui::Combo( "Cells##rtgiCacheSlots", &slotsIdx, "512K cells (2 x 10 MB)\0" "1M cells (2 x 20 MB)\0" "2M cells (2 x 40 MB)\0" "4M cells (2 x 80 MB)\0" ) ) {
 				r_rtgiCacheSlotsLog2.SetInteger( 19 + slotsIdx );
 			}
 			AddTooltip( "Cache size. More cells = fewer collisions and dropped updates in large open areas; a change re-allocates "

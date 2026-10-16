@@ -9268,7 +9268,10 @@ static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef, bool t
 		c.slotAddr = c.accumAddr = 0;
 	}
 	if ( c.slotBuf == 0 ) {
-		const int bytes = ( 1 << log2 ) * 16;
+		// 16 B per cell for the slot / accumulation array + a 4 B variance sidecar appended to EACH (m2 in the slot buffer,
+		// sumL2 in the accum buffer: docs/rtx-irradiance-cache.md C6 variance serve). 20 B total; the slot array stays
+		// contiguous and byte-identical at the buffer start, the sidecar follows at slotCount * 16.
+		const int bytes = ( 1 << log2 ) * 20;
 		c.slotBuf   = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, bytes, NULL );
 		c.accumBuf  = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, bytes, NULL );
 		c.slotAddr  = ( c.slotBuf  != 0 ) ? r->GetBufferDeviceAddress( c.slotBuf )  : 0;
@@ -9336,7 +9339,11 @@ static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef, bool t
 	// hold undefined memory until the resolve point zeroes them (the gathers run BEFORE it), so that frame neither reads nor
 	// writes: a garbage lookup would flash one frame of random bounce light into the NRD history, and its updates would be
 	// wiped by the clear anyway. The cache starts learning the frame after.
-	cp.flags        = c.clearPending ? 0u : ( 1u | 2u | ( r_rtgiCacheReset.GetBool() ? 4u : 0u ) | ( tail ? 16u : 0u ) );
+	// C6 variance serve (r_rtgiCacheServeError, 0..1): quantized to 8 bits and bit-stolen into the flags word's free high
+	// bits (bits 8-15), so no spare uniform float is needed. 0 = serve by age (the shipped N >= SEED_N gate); the serve
+	// reads it back in rtgiCacheServable. The low bits (1 update, 2 lookup, 4 reset, 16 tail) are unaffected.
+	const unsigned int sErrBits = (unsigned int)( idMath::ClampFloat( 0.0f, 1.0f, r_rtgiCacheServeError.GetFloat() ) * 255.0f + 0.5f ) << 8;
+	cp.flags        = c.clearPending ? 0u : ( 1u | 2u | ( r_rtgiCacheReset.GetBool() ? 4u : 0u ) | ( tail ? 16u : 0u ) | sErrBits );
 	cp.resetThresh  = 0.35f;
 	cp.resetBias    = 0.05f;		// 5x the DI confidence's darkness bias: only changes that can move the indirect term count
 	cp.sampleClamp  = 64.0f;		// a 1-spp firefly (peak channel) must not own a cell for Nmax frames
@@ -9379,13 +9386,17 @@ static void RB_RHI_RtgiCacheResolve( rhi::RHI *r ) {
 	if ( !c.readyThisView || c.resolvedThisView || c.resolveProg == 0 ) {
 		return;
 	}
-	struct { unsigned int slotCount, mode, nMax, frame; float alphaMin; unsigned int coolFrames; } pc;		// rtgi_cache_resolve.comp PC
+	struct { unsigned int slotCount, mode, nMax, frame; float alphaMin; unsigned int coolFrames, slotLo, slotHi, accLo, accHi; } pc;		// rtgi_cache_resolve.comp PC
 	pc.slotCount  = 1u << c.slotsLog2;
 	pc.mode       = 0;
 	pc.nMax       = (unsigned int)c.nMaxFrames;		// 8-bit N in the slot (Begin clamped it)
 	pc.frame      = c.parms.frame;
 	pc.alphaMin   = 0.02f;
 	pc.coolFrames = (unsigned int)c.coolFrames;		// 5-bit cooldown in the slot (Begin clamped it)
+	pc.slotLo     = (unsigned int)( c.slotAddr  & 0xFFFFFFFFull );	// C6 variance sidecars live at <addr> + slotCount * 16
+	pc.slotHi     = (unsigned int)( c.slotAddr  >> 32 );
+	pc.accLo      = (unsigned int)( c.accumAddr & 0xFFFFFFFFull );
+	pc.accHi      = (unsigned int)( c.accumAddr >> 32 );
 	rhi::ComputeArgs ca = rhi::ComputeArgs();
 	ca.shader = c.resolveProg;
 	ca.storage[0] = c.slotBuf;

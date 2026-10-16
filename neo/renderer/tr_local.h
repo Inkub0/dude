@@ -1079,6 +1079,7 @@ extern idCVar r_rtgiCacheHistoryMs;			// RT irradiance cache: the history in mil
 extern idCVar r_rtgiCacheCellAngle;			// RT irradiance cache: tan(alpha/2), cell width per unit eye distance
 extern idCVar r_rtgiCacheDebug;				// RT irradiance cache debug overlay: 1 cell colour, 2 cached value, 3 age, 4 N, 5 activity (reset / fresh), 6 servable (C6 tail)
 extern idCVar r_rtgiCacheReset;				// RT irradiance cache: the DI gradient restarts a cell whose direct light changed (diagnostic A/B)
+extern idCVar r_rtgiCacheServeError;		// RT irradiance cache: C6 tail serve gate - default 0.33 = by the mean's relative standard error; 0 = by age (N >= SEED_N), the original C6 A/B
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
 extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compositing (dissolves the static firefly grid)

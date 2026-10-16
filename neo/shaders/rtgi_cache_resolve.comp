@@ -28,22 +28,31 @@ layout( push_constant ) uniform PC {
 	uint  frame;		// this frame's stamp (unused by the resolve itself; kept for symmetry with the fragment side)
 	float alphaMin;		// floor on the blend factor (responsiveness)
 	uint  coolFrames;	// the reset cooldown in frames (RTGI_CACHE_COOL_MS through the frame rate; <= 31)
+	uint  slotLo, slotHi;	// slot buffer device address (for the m2 variance sidecar at slotCount * 16)
+	uint  accLo, accHi;		// accum buffer device address (for the sumL2 variance sidecar at slotCount * 16)
 } pc;
 
 void main() {
 	uint i = gl_GlobalInvocationID.x;
 	if ( i >= pc.slotCount ) { return; }
+	// the C6 variance sidecars (rtgi_cache.glsl): m2 in the slot buffer, sumL2 in the accum buffer, each after the slot array
+	RtgiCacheM2 m2buf = RtgiCacheM2( rtgiAddr64( uvec2( pc.slotLo, pc.slotHi ), pc.slotCount * 16u ) );
+	RtgiCacheL2 l2buf = RtgiCacheL2( rtgiAddr64( uvec2( pc.accLo, pc.accHi ), pc.slotCount * 16u ) );
 	if ( pc.mode == 1u ) {
 		slots.s[ i ] = HgSlot( 0u, 0u, 0u, 0u );
 		accum.a[ i ] = HgAccum( 0u, 0u, 0u, 0u );
+		m2buf.m[ i ] = 0.0;
+		l2buf.v[ i ] = 0u;
 		return;
 	}
 	HgAccum acc = accum.a[ i ];
 	uint cnt   = acc.count & RTGI_CACHE_COUNT_MASK;
 	bool reset = ( acc.count & RTGI_CACHE_RESET_BIT ) != 0u;
 	bool evict = ( acc.count & RTGI_CACHE_EVICT_BIT ) != 0u;
-	if ( cnt == 0u && !reset && !evict ) { return; }							// untouched this frame: nothing to do (the common case)
+	if ( cnt == 0u && !reset && !evict ) { return; }							// untouched this frame: nothing to do (the common case) - sumL2 is 0 here too
 	accum.a[ i ] = HgAccum( 0u, 0u, 0u, 0u );
+	uint l2sum = l2buf.v[ i ];
+	l2buf.v[ i ] = 0u;
 	HgSlot sl = slots.s[ i ];
 	if ( sl.key == 0u ) { return; }											// no cell owns the slot (a stale request): drop the sums
 	if ( evict ) {
@@ -53,7 +62,8 @@ void main() {
 		slots.s[ i ] = sl;
 		return;
 	}
-	vec3 irr   = rtgiCacheUnpackIrr( sl );
+	vec3  irr  = rtgiCacheUnpackIrr( sl );
+	float m2v  = m2buf.m[ i ];								// C6: the cell's running mean of the stored value's luminance squared
 	uint N     = rtgiCacheN( sl );
 	uint cool  = rtgiCacheCooldown( sl );
 	uint flags = 0u;
@@ -74,6 +84,10 @@ void main() {
 		vec3  mean  = vec3( float( acc.r ), float( acc.g ), float( acc.b ) ) * ( 1.0 / ( RTGI_CACHE_FIXED * float( cnt ) ) );
 		float alpha = max( 1.0 / float( N + 1u ), pc.alphaMin );
 		irr = ( N == 0u ) ? mean : mix( irr, mean, alpha );
+		// fold this frame's mean luminance-squared into m2 with the SAME alpha / reset as irr (0 when the L2 sidecar got no
+		// samples - tail mode off; m2 then decays to 0 and the variance gate is unused in that mode anyway)
+		float m2frame = float( l2sum ) * ( 1.0 / ( RTGI_CACHE_L2_FIXED * float( cnt ) ) );
+		m2v = ( N == 0u ) ? m2frame : mix( m2v, m2frame, alpha );
 		// activity flags for the debug view (r_rtgiCacheDebug 5): RESET when the cell restarted on request, FRESH when it
 		// was created this frame (N 0 -> 1) or seeded from its coarser parent (the gather's SEEDED bit, consumed here)
 		if ( flags == 0u && ( N == 0u || ( sl.irrBN & RTGI_CACHE_SEEDED_BIT ) != 0u ) ) { flags = RTGI_CACHE_FRESH_BIT; }
@@ -81,4 +95,5 @@ void main() {
 	}
 	rtgiCachePackIrr( sl, irr, N, flags | ( cool << RTGI_CACHE_COOL_SHIFT ) );
 	slots.s[ i ] = sl;
+	m2buf.m[ i ] = m2v;
 }

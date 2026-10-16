@@ -26,7 +26,19 @@ struct HgAccum { uint r; uint g; uint b; uint count; };
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtgiCacheSlots  { HgSlot  s[]; };
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtgiCacheAccums { HgAccum a[]; };
 
+// C6 VARIANCE-GATED SERVE (docs/rtx-irradiance-cache.md): two tight SIDECAR arrays appended to the SAME two allocations,
+// so the 16 B slot / accum arrays and their fused probe stay byte-identical and no new uniform addresses are needed.
+//   m2    (slot buffer):  the resolved mean of the stored value's LUMINANCE squared - read at the serve to estimate variance.
+//   sumL2 (accum buffer): this frame's fixed-point sum of luminance squared - atomicAdd at the update, folded + cleared by
+//                         the resolve exactly as r/g/b are. Each sidecar starts where its buffer's slot array ends:
+//                         baseAddr + slotCount * 16 (slotCount = slotMask + 1), reached by a 64-bit pointer add.
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer RtgiCacheM2 { float m[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer RtgiCacheL2 { uint  v[]; };
+uvec2 rtgiAddr64( uvec2 base, uint byteOff ) { uint c; uint lo = uaddCarry( base.x, byteOff, c ); return uvec2( lo, base.y + c ); }
+float rtgiCacheLum( vec3 col ) { return dot( col, vec3( 0.2126, 0.7152, 0.0722 ) ); }
+
 const float RTGI_CACHE_FIXED      = 1024.0;			// accumulation fixed point (x1024: 4096 per channel per cell-frame of headroom)
+const float RTGI_CACHE_L2_FIXED   = 64.0;			// sum-of-luminance-squared fixed point: lum^2 <= clamp^2 = 4096, x64 = 262144/sample (camera-adaptive cells hold ~100 px/frame, no overflow)
 const uint  RTGI_CACHE_RESET_BIT  = 0x80000000u;	// HgAccum.count: restart this cell at the resolve (the DI gradient saw its light change)
 const uint  RTGI_CACHE_EVICT_BIT  = 0x40000000u;	// HgAccum.count: the slot changed hands this frame - drop the (mixed) sums, keep the payload
 const uint  RTGI_CACHE_COUNT_MASK = 0x3FFFFFFFu;
@@ -73,6 +85,7 @@ struct RtgiCacheParms {
 	float albedoClamp;
 	float resetThresh;
 	float resetBias;		// darkness bias in the reset test's denominator: changes of a near-black direct term never reset
+	float serveErr;			// C6 variance serve: 0 = serve by AGE (N >= SEED_N, the shipped gate); > 0 = serve only when the mean's relative standard error <= this
 	bool  update;
 	bool  lookup;
 	bool  gradientReset;
@@ -97,6 +110,7 @@ RtgiCacheParms rtgiCacheParmsFromUniforms( uvec2 slotAddr ) {
 	p.moverTest     = ( flags & 8u ) != 0u;
 	p.tail          = ( flags & 16u ) != 0u;
 	p.resetThresh  = u_skinParms.w;
+	p.serveErr     = float( ( flags >> 8 ) & 0xFFu ) * ( 1.0 / 255.0 );	// bit-stolen from the flags word's free high bits (no spare uniform float)
 	p.evictAge     = uint( max( u_contactParms.x, 0.0 ) + 0.5 );
 	p.sampleClamp  = u_contactParms.y;
 	p.albedoClamp  = u_contactParms.z;
@@ -142,11 +156,24 @@ uint rtgiCacheNv( uvec4 s )   { return ( s.w >> RTGI_CACHE_N_SHIFT ) & RTGI_CACH
 vec3 rtgiCacheIrrv( uvec4 s ) { return vec3( unpackHalf2x16( s.z ), unpackHalf2x16( s.w ).x ); }
 
 // C6 TAIL mode: a cell may SERVE the bounce hit (its stored L_out replaces the live shading) only once it is both
-// CONVERGED - N >= SEED_N, the trust a seeded cell is born with, so a cell cut this instant does not bounce one frame's
-// 1-spp mean - and FRESH: last updated less than evictAge frames ago, so a stale off-screen cell cannot keep bouncing
-// old light through a door it is no longer seen from (an unserved stale cell falls back to live shading, never wrong).
-bool rtgiCacheServable( RtgiCacheParms p, uvec4 s ) {
-	return rtgiCacheNv( s ) >= RTGI_CACHE_SEED_N && ( p.evictAge == 0u || ( p.frame - s.y ) < p.evictAge );
+// CONVERGED and FRESH (last updated less than evictAge frames ago, so a stale off-screen cell cannot keep bouncing old
+// light through a door it is no longer seen from; an unserved stale cell falls back to live shading, never wrong).
+// "Converged" is either of two gates, chosen by r_rtgiCacheServeError (p.serveErr):
+//   serveErr == 0 (default): by AGE - N >= SEED_N, the trust a seeded cell is born with (the shipped C6 behaviour, so the
+//                            default is bit-identical to what was tested). A cell cut this instant does not bounce 1 frame.
+//   serveErr  > 0:           by VARIANCE - the mean's RELATIVE standard error sqrt( (E[L^2]-E[L]^2)/N ) / mean <= serveErr,
+//                            so a technically-aged-in but still NOISY cell waits (softens the N=SEED_N pop) at the cost of a
+//                            few live-shaded hits. Needs N >= 2 for a variance; a tiny additive floor lets a converged
+//                            near-black cell (mean ~ 0) still serve. idx = the slot's absolute index (for the m2 sidecar).
+bool rtgiCacheServable( RtgiCacheParms p, uvec4 s, uint idx ) {
+	uint N = rtgiCacheNv( s );
+	if ( !( p.evictAge == 0u || ( p.frame - s.y ) < p.evictAge ) ) { return false; }
+	if ( p.serveErr <= 0.0 ) { return N >= RTGI_CACHE_SEED_N; }
+	if ( N < 2u ) { return false; }
+	float mean = rtgiCacheLum( rtgiCacheIrrv( s ) );
+	float m2   = RtgiCacheM2( rtgiAddr64( p.slotAddr, ( p.slotMask + 1u ) * 16u ) ).m[ idx ];
+	float var  = max( m2 - mean * mean, 0.0 );
+	return ( var / float( N ) ) <= ( p.serveErr * p.serveErr * mean * mean + 1e-4 );
 }
 
 // the slot of `key` among a span's four preloaded slots: 0..3, or -1 = absent (slots fill contiguously from the first
@@ -245,8 +272,10 @@ bool rtgiCacheLookupTail( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye, out vec3 L
 	uvec4 a0 = span.s[ k0.base ], a1 = span.s[ k0.base + 1u ], a2 = span.s[ k0.base + 2u ], a3 = span.s[ k0.base + 3u ];
 	uvec4 b0 = span.s[ k1.base ], b1 = span.s[ k1.base + 1u ], b2 = span.s[ k1.base + 2u ], b3 = span.s[ k1.base + 3u ];
 	uvec4 hit;
-	if ( rtgiCacheSpanFind( a0, a1, a2, a3, k0.key, hit ) >= 0 && rtgiCacheServable( p, hit ) ) { Lout = rtgiCacheIrrv( hit ); return true; }
-	if ( rtgiCacheSpanFind( b0, b1, b2, b3, k1.key, hit ) >= 0 && rtgiCacheServable( p, hit ) ) { Lout = rtgiCacheIrrv( hit ); return true; }
+	int la = rtgiCacheSpanFind( a0, a1, a2, a3, k0.key, hit );
+	if ( la >= 0 && rtgiCacheServable( p, hit, k0.base + uint( la ) ) ) { Lout = rtgiCacheIrrv( hit ); return true; }
+	int lb = rtgiCacheSpanFind( b0, b1, b2, b3, k1.key, hit );
+	if ( lb >= 0 && rtgiCacheServable( p, hit, k1.base + uint( lb ) ) ) { Lout = rtgiCacheIrrv( hit ); return true; }
 	return false;
 }
 
@@ -260,12 +289,17 @@ void rtgiCacheSeed( RtgiCacheParms p, int idx, vec3 P, vec3 N, int level ) {
 	RtgiCacheSpan span = RtgiCacheSpan( p.slotAddr );
 	uvec4 c0 = span.s[ kc.base ], c1 = span.s[ kc.base + 1u ], c2 = span.s[ kc.base + 2u ], c3 = span.s[ kc.base + 3u ];
 	uvec4 hit;
-	if ( rtgiCacheSpanFind( c0, c1, c2, c3, kc.key, hit ) < 0 || rtgiCacheNv( hit ) == 0u ) { return; }
+	int lp = rtgiCacheSpanFind( c0, c1, c2, c3, kc.key, hit );
+	if ( lp < 0 || rtgiCacheNv( hit ) == 0u ) { return; }
 	HgSlot sn = HgSlot( 0u, 0u, 0u, 0u );
 	rtgiCachePackIrr( sn, rtgiCacheIrrv( hit ), min( rtgiCacheNv( hit ), RTGI_CACHE_SEED_N ), RTGI_CACHE_SEEDED_BIT );
 	RtgiCacheSlots slots = RtgiCacheSlots( p.slotAddr );
 	slots.s[ idx ].irrRG = sn.irrRG;
 	slots.s[ idx ].irrBN = sn.irrBN;
+	// carry the parent's variance estimate too, so a freshly re-cut cell is not born with m2 = 0 (which reads as zero
+	// variance and would serve the instant it ages in): it inherits the parent's convergence until its own samples take over.
+	RtgiCacheM2 m2buf = RtgiCacheM2( rtgiAddr64( p.slotAddr, ( p.slotMask + 1u ) * 16u ) );
+	m2buf.m[ idx ] = m2buf.m[ kc.base + uint( lp ) ];
 }
 
 // UPDATE at a primary point (world P, normal N, eye E) with this pixel's bounce estimate Li (0 for a miss: open
@@ -288,6 +322,7 @@ void rtgiCacheUpdate( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye, vec3 Li ) {
 		// sums mix the old cell's samples with ours and are dropped; the cell starts from the payload left here
 		slots.s[ idx ].irrRG = 0u;
 		slots.s[ idx ].irrBN = 0u;
+		RtgiCacheM2( rtgiAddr64( p.slotAddr, ( p.slotMask + 1u ) * 16u ) ).m[ idx ] = 0.0;	// the m2 belonged to the old cell too
 		rtgiCacheSeed( p, idx, P, N, level );
 		atomicOr( acc.a[ idx ].count, RTGI_CACHE_EVICT_BIT );
 	} else if ( fresh ) {
@@ -301,6 +336,13 @@ void rtgiCacheUpdate( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye, vec3 Li ) {
 	atomicAdd( acc.a[ idx ].g, fx.y );
 	atomicAdd( acc.a[ idx ].b, fx.z );
 	atomicAdd( acc.a[ idx ].count, 1u );
+	// C6 variance serve: accumulate the sample's luminance squared into the L2 sidecar - tail mode (the only mode that serves)
+	// AND serveErr > 0 (the age gate never reads m2), so the default serveErr 0 adds no atomic to the hot update at all. The
+	// resolve folds it into the m2 slot and the serve gate reads it; the same clamped v the mean is built from.
+	if ( p.tail && p.serveErr > 0.0 ) {
+		float l = rtgiCacheLum( v );
+		atomicAdd( RtgiCacheL2( rtgiAddr64( p.accumAddr, ( p.slotMask + 1u ) * 16u ) ).v[ idx ], uint( l * l * RTGI_CACHE_L2_FIXED + 0.5 ) );
+	}
 }
 
 // Is the primary pixel at uv (internal-res [0,1]) on a MOVER? Compare where the per-object velocity says the point

@@ -571,6 +571,57 @@ give), but it is NOT free. Whether it ships (and at which preset) now rests on F
     is more principled than our fixed N >= 4 (serve a converged cell, skip a noisy one) and would soften this pop.
     Cost: the slot grows (16 -> 24/32 B) to carry `m2`. Best near-term C refinement if the pop or bad serves show.
 
+## C6a - variance-gated serve (IMPLEMENTED 2026-10-16, branch `feat/rtgi-cache-variance-serve` off master, built, NOT merged / pushed - the refinement above)
+
+The serve gate (`rtgiCacheServable`) now has two modes, chosen by `r_rtgiCacheServeError` (0..1):
+- **> 0 (default 0.33): serve by VARIANCE** - serve only once the cell's mean is estimated tightly: the relative standard
+  error of the mean, `sqrt( (E[L²] - E[L]²) / N ) / mean`, is `<= serveErr` (with `N >= 2` and the same freshness test,
+  plus a `1e-4` additive floor so a converged near-black cell still serves). A cell that has aged past `SEED_N` but is
+  still noisy keeps shading live until it settles, softening the N=4 pop at the cost of a few more live-shaded hits.
+- **0: serve by AGE** - `N >= SEED_N`, the original C6 gate (and bit-identical in OUTPUT to the state merged at ccb117ac);
+  it adds no atomic to the hot update (the L2 accumulate below is gated on `serveErr > 0`), so it is also the cheaper A/B.
+
+The DEFAULT is now the variance gate (0.33, user-tuned below), so the dude_rtx 2 tier serves by variance. The whole
+cache is still strictly opt-in: `r_rtgiCache 0` is bit-identical regardless, and `r_rtgiCacheServeError 0` reproduces the
+merged age-gate behaviour exactly.
+
+**Result (user A/B, 2026-10-16, 40-light corridor, dude_rtx 2, r_vkGpuTime 3, ~190 samples):** `restir.di.gather`
+10.02 ms (serveErr 0) -> 10.25 ms (0.33) = **+0.23 ms / +2.3 %**; `rtgi.cache` resolve unchanged (0.23 vs 0.22, noise);
+frame 25.65 -> 26.06 ms. 0.33 is the servable-rate sweet spot - adopted as the default. The look wash / frame-pacing
+verdict of C6 stands; this just cleans the serve-in. Cost lever if ever wanted: the L2 atomic can be subgroup-aggregated
+with the other four (the reserve lever named at C4 item 12).
+
+**Storage (no new uniform addresses, no new GPU handles, the fused probe byte-identical).** The 16 B slot and accum
+arrays are unchanged; a tight sidecar is appended to EACH existing allocation (so `RB_RHI_ResetWorldTargets` needs
+nothing new): a `float m2[]` after the slot array (the resolved mean of the stored value's luminance²) and a `uint
+sumL2[]` after the accum array (this frame's fixed-point sum of luminance², `RTGI_CACHE_L2_FIXED` 64). Each starts at
+`baseAddr + slotCount*16`, reached by a 64-bit pointer add (`rtgiAddr64`, `uaddCarry`). Buffers grew `*16 -> *20` B
+(1M cells = 2 x 20 MB). `sumL2` is `atomicAdd`ed in `rtgiCacheUpdate` (tail + serveErr>0 only), folded into `m2` by the
+resolve with the SAME alpha / reset as `irr`, and cleared alongside the accum. `rtgiCacheSeed` carries the parent's `m2`
+across a re-cut (else a freshly cut cell would read m2=0 = zero variance and serve instantly). `serveErr` is quantized to
+8 bits and bit-stolen into the free high bits (8-15) of the packed `flags` word - no spare uniform float was needed.
+Debug view 6 (Servable) honours the gate. ImGui: "Serve Error" slider under "Path Tail" in the RT GI group.
+
+**A/B test (how it was validated; DONE 2026-10-16 - see the Result above, default settled at 0.33).** `dude_rtx 2` (the
+cache + tail are auto-on there), 1440p-class. All comparisons `r_rtgiCacheServeError` 0 vs 0.33 at the SAME spot.
+- [x] **0 reproduces the merged build.** `r_rtgiCacheServeError 0`: the look and `restir.di.gather` match ccb117ac (the
+      age gate). This is the A/B baseline - the serve-by-variance default (0.33) is measured against it.
+- [ ] **The pop.** Find a spot where the N=4 pop shows (a surface just revealed by a turn, or a corner you walk up to so
+      its cells are re-cut at a finer level). `r_rtReStirDIDebug 1` (raw gather) at 0 vs 0.25: the indirect term should
+      ease in more gradually at 0.25 (noisy cells wait) rather than snap on. Report whether the pop is visibly softer.
+- [ ] **Servable rate.** `r_rtgiCacheDebug 6` at the same static spot, 0 vs 0.25: at 0.25 FEWER cells are white (only the
+      converged ones) and they fill in over a second or two rather than all at once. If almost nothing is ever white at
+      0.25, the threshold is too strict - try 0.5. If 0.25 looks identical to 0, the pop was not variance-limited here.
+- [ ] **Cost.** `r_vkGpuTime 3`, `restir.di.gather` at 0 vs 0.25, averaged, same spot: expect a small INCREASE at 0.25
+      (more live-shaded hits + the L2 atomic). Report the two numbers and `rtgi.cache` (the resolve; expect ~unchanged).
+- [ ] **Settle on a value.** If the pop is real and 0.25 helps, sweep 0.1 / 0.25 / 0.5 and report the one that reads
+      smooth without starving the serve (view 6 still mostly white at rest). That value becomes the C5 tier default, if any.
+- [ ] **Stability.** Toggle 0 <-> 0.25 a few times in-game (m2 re-learns, no device loss); `vid_restart` with 0.25 set;
+      change `r_rtgiCacheSlotsLog2` with 0.25 set (re-allocates the larger buffers, clears, re-learns).
+
+If a converged scene never serves at a sane serveErr, the `mean` luminance may be mis-scaled vs the stored units; check
+`rtgiCacheLum` matches what the tail store feeds. If dark cells serve too eagerly, raise the `1e-4` additive floor.
+
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 
 Setup for all items: Vulkan, RT hardware, `dude_rtx 2` (ReSTIR DI lighting the scene + combined GI) at your usual

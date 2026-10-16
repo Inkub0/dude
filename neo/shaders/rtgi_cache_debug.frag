@@ -100,6 +100,6 @@ void main() {
 		// 6 = SERVABLE (C6): white where this surface's cell would serve a tail-mode bounce hit (converged N >= SEED_N AND
 		// fresh: last updated < evictAge ago), dim grey otherwise. Over a static view every lit surface's own cell converges
 		// within ~SEED_N resolves, so the view goes white in ~1 s; a cell that cannot serve (young, or stale off-screen) shades live.
-		fragColor = vec4( vec3( rtgiCacheServable( cp, hit ) ? 1.0 : 0.1 ), 1.0 );
+		fragColor = vec4( vec3( rtgiCacheServable( cp, hit, k.base + uint( idx ) ) ? 1.0 : 0.1 ), 1.0 );
 	}
 }
