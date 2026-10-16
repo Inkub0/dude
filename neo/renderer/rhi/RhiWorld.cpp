@@ -8331,6 +8331,11 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( nrdVel != 0 ) { rhiRtgiCache.parms.flags |= 8u; }
 		RB_RHI_RtgiCachePack( parms, rhiRtgiCache.parms, true );
 	}
+	// RT light grid (docs/rtx-light-grid.md L2): the grid vec4 into u_occlusionParms (free here) so the gather draws
+	// candidates from each point's cell instead of every light. Begin + Fill ran above; readyThisView gates it off cleanly.
+	if ( rhiRtLightGrid.readyThisView ) {
+		RB_RHI_LightGridPack( parms, rhiRtLightGrid.parms );
+	}
 	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray (+ R3a's K rays on young pixels)
 	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
 	r->BeginTargetPass( rhiReStirDIRT, NULL );

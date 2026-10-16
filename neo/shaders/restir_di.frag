@@ -100,6 +100,8 @@
 #include "restir_di_common.glsl"
 // the surface reconstruction, per-light shade and visibility ray, shared with restir_di_gradient.frag (R1)
 #include "restir_di_shade.glsl"
+// rtgi_light_grid.glsl: L2 per-cell candidate list (docs/rtx-light-grid.md)
+#include "rtgi_light_grid.glsl"
 // the RT irradiance cache the bounce hit reads and the primary point feeds (docs/rtx-irradiance-cache.md)
 #include "rt_hash_grid.glsl"
 #include "rtgi_cache.glsl"
@@ -274,11 +276,32 @@ void main() {
 	float wSum        = 0.0;
 	float pHatChosen  = 0.0;					// the TARGET (cheap irradiance or full shade) of the chosen, for the RIS weight W
 	uint  rowChosen   = 0u;						// R1: chosen light's row + 1 (0 = none)
+	// RT light grid (docs/rtx-light-grid.md L2): when the grid is live and this point's cell holds candidates, enumerate
+	// the cell's short list (its top-N lights by importance) instead of EVERY scene light - the gather's biggest cost.
+	// Each stored light is a candidate with pdf 1, weight pHat: the exact exhaustive RIS, just a far shorter candidate set
+	// (a cell holding all its in-range lights, <= slots, is exhaustive-equivalent). An empty cell or a point beyond the
+	// grid leaves useGrid false and the exhaustive / uniform path runs unchanged (never wrong, only maybe slower).
+	LgParms lgp    = lgParmsFromVec4( u_occlusionParms, u_modelViewMatrix[3].xyz );
+	LgGrid  lgGrid = LgGrid( lgp.gridAddr );
+	int  lgBase = -1;
+	uint lgN    = 0u;
+	if ( lgPresent( lgp ) ) {
+		lgBase = lgCellBase( lgp, S.Pw );
+		if ( lgBase >= 0 ) { lgN = lgCount( lgGrid, lgBase ); }
+	}
+	bool useGrid = lgN > 0u;
+	if ( useGrid ) { draws = lgN; }
+	bool pdfOne = exhaustive || useGrid;		// candidate pdf 1 (enumeration) vs the uniform-M draw's 1/nLights
 	for ( uint i = 0u; i < draws; i++ ) {
-		uint li = i;
-		if ( !exhaustive ) {
-			li = uint( rnd( rng ) * float( nLights ) );
-			if ( li >= nLights ) { li = nLights - 1u; }	// guard the rare rnd()==1.0
+		uint li;
+		if ( useGrid ) {
+			li = lgSlotLight( lgGrid, lgBase, i );			// the cell's i-th stored candidate
+		} else {
+			li = i;
+			if ( !exhaustive ) {
+				li = uint( rnd( rng ) * float( nLights ) );
+				if ( li >= nLights ) { li = nLights - 1u; }	// guard the rare rnd()==1.0
+			}
 		}
 		vec3  ldir, contrib;
 		float dl, ndl;
@@ -289,7 +312,7 @@ void main() {
 		if ( diShadeLight( lights, li, S, contrib, ldir, dl, ndl, cheapTarget ) ) {
 			pHat = dot( contrib, vec3( 0.2126, 0.7152, 0.0722 ) );		// luminance of the target
 		}
-		float w    = exhaustive ? pHat : pHat * float( nLights );	// pHat / candidate pdf
+		float w    = pdfOne ? pHat : pHat * float( nLights );	// pHat / candidate pdf (grid + exhaustive: pdf 1; uniform-M: 1/nLights)
 		wSum += w;
 		if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
 			pHatChosen  = pHat;
@@ -324,7 +347,7 @@ void main() {
 
 	// unbiased contribution weight W = (1/pHat(y))·(wSum/M): pHat is the TARGET (cheap or full), f(y) = the full shade
 	// above, so rad(y)·W·vis stays unbiased. One visibility ray for the chosen light; NOSHADOWS lights skip it.
-	float W   = ( pHatChosen > 0.0 ) ? ( wSum / ( exhaustive ? 1.0 : float( draws ) ) ) / pHatChosen : 0.0;
+	float W   = ( pHatChosen > 0.0 ) ? ( wSum / ( pdfOne ? 1.0 : float( draws ) ) ) / pHatChosen : 0.0;
 	float occDist = dlChosen;
 	float vis = ( !( pHatChosen > 0.0 ) || ( flagsChosen & DUDE_LIGHT_NOSHADOWS ) != 0u )
 		? 1.0 : traceVisibility( Pw, Nw, ldirChosen, dlChosen, occDist );
@@ -349,7 +372,7 @@ void main() {
 			vec3  cF = c;	float ndlF = ndl;
 			if ( cheapTarget ) { vec3 ldF; float dlF; diShadeLight( lights, lk, S, cF, ldF, dlF, ndlF, false ); }
 			vec3  rk = ( shMode ? cF / max( ndlF, 0.05 ) : cF ) / B;
-			float Wk = ( wSum / ( exhaustive ? 1.0 : float( draws ) ) ) / pH;
+			float Wk = ( wSum / ( pdfOne ? 1.0 : float( draws ) ) ) / pH;
 			float od;
 			float visK = ( ( lights.l[ lk ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ld, dl, od );
 			rk = max( rk * ( Wk * visK * u_shadowFalloffS.x ), vec3( 0.0 ) );
