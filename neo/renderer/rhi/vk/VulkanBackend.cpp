@@ -127,7 +127,7 @@ static idCVar r_vkComputeTest( "r_vkComputeTest", "0", CVAR_RENDERER | CVAR_BOOL
 // returns is printed). Pipelines are created once and cached, so set the filter BEFORE they exist: e.g.
 // `r_vkPipelineStats restir_di` then `vid_restart`, and read the console when the DI gather first draws.
 static idCVar r_vkPipelineStats( "r_vkPipelineStats", "", CVAR_RENDERER,
-	"Vulkan backend: print the driver's per-stage pipeline statistics (register count, spills, binary size, ...) for every pipeline created whose shader name contains this text; '*' = all pipelines, empty = off. Pipelines are cached, so set it and then vid_restart (or reloadShaders) to see the ones already built. Needs VK_KHR_pipeline_executable_properties (dev tool)" );
+	"Vulkan backend: print the driver's per-stage pipeline statistics (register count, spills, binary size, ...) for every pipeline created whose shader name contains this text; '*' = all pipelines, empty = off. Pipelines are cached for the session, so set it and then vid_restart to see the ones already built. Needs VK_KHR_pipeline_executable_properties (dev tool)" );
 static idCVar r_fsr2Test( "r_fsr2Test", "0", CVAR_RENDERER | CVAR_BOOL,
 	"Vulkan backend: FSR2 bring-up self-test - size the scratch, build the FSR2 VK interface, create a Native-AA FSR2 context (no dispatch), destroy it, and print PASS/FAIL. Set to 1 to trigger (docs/fsr-temporal-pipeline.md, R1/C0)" );
 static idCVar r_nrdTest( "r_nrdTest", "0", CVAR_RENDERER | CVAR_BOOL,

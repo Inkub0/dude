@@ -279,6 +279,14 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
   light into the NRD history). Learning starts the frame after a first use / level change / resize / re-enable.
 - A hit on an unshadeable geometry row (`rtgiTraceBounce` 2: mover / prop without attributes) teaches nothing
   (unknown, not dark); a miss still teaches 0.
+- **`vid_restart` with the cache on lost the device (user, C4 item 14, 2026-10-16).** The backend restart reissues
+  every handle from 1 and frees every buffer, but `rhiRtgiCache` kept its buffer handles, device addresses and
+  resolve-program handle: the next gather wrote its atomics through the stale address (GPU page fault =
+  `VK_ERROR_DEVICE_LOST`), and the stale shader handle silently recorded no clear. Fixed by dropping the cache state
+  in `RB_RHI_ResetWorldTargets` (the `RB_RHI_Shutdown` hook every other RhiWorld buffer static uses - scene lights,
+  DI light table, perforated boxes), without `DestroyBuffer`, with the clear re-armed. RULE for the G buffers too:
+  every file-static GPU handle in RhiWorld must be zeroed there. (Vulkan has no `reloadShaders` pipeline rebuild;
+  the statistics readout needs `vid_restart`, which is now safe with the cache on.)
 
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 

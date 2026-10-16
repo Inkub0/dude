@@ -4092,6 +4092,17 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiVolUpRT = 0;	rhiVolHistRT[0] = rhiVolHistRT[1] = 0;	rhiVolFullW = rhiVolFullH = 0;	rhiVolHistValid = false;
 	s_rtPerfBoxBuf = 0;			s_rtPerfBoxAddr = 0;		// perforated-caster boxes: same
 	s_rtReflLightBuf = 0;		s_rtReflLightAddr = 0;		// RR16: handle is stale after a lost context; recreated lazily
+	// RT irradiance cache (docs/rtx-irradiance-cache.md): its two GPU-only buffers, their device addresses and the resolve
+	// program died with the context. Drop them WITHOUT DestroyBuffer (the old handles alias live resources of the new
+	// backend) and re-arm the clear; Begin re-allocates and zeroes on the next cache frame. Without this a vid_restart
+	// with the cache on made the gather write atomics through the stale device address = GPU page fault = device lost
+	// (user, 2026-10-16).
+	rhiRtgiCache.slotBuf = rhiRtgiCache.accumBuf = 0;
+	rhiRtgiCache.slotAddr = rhiRtgiCache.accumAddr = 0;
+	rhiRtgiCache.resolveProg = 0;
+	rhiRtgiCache.readyThisView = rhiRtgiCache.resolvedThisView = false;
+	rhiRtgiCache.wasEnabled = false;
+	rhiRtgiCache.clearPending = true;
 	rhiRtReflHistRT[0] = rhiRtReflHistRT[1] = 0;
 	rhiRtReflHistIdx = 0;		rhiRtReflHistW = rhiRtReflHistH = 0;
 	rhiRtReflHistValid = false;
