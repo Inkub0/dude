@@ -418,6 +418,39 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
   direct term lagging light changes by the history (the reset / cooldown machinery already handles that). A design
   change against the plan's "indirect-only" line: the user's call (C5 or a C6).
 
+## C6 - the cache as the PATH TAIL (DECIDED by the user 2026-10-16 after C4; NOT implemented - the next session's task)
+
+**Why.** C4 showed the indirect-only cache correct but nearly invisible (Doom's dark albedos make the second bounce
+a third of the first) and a net cost (+0.3 ms gather, ~+1 ms frame in the user's reading): the gather pays a 32 MB
+random read per bounce hit and still runs the full light loop (40 textured lights + the dominant shadow ray) at
+every hit. Alber et al.'s fast mode and SHARC do the opposite: the cell stores the surface's OUTGOING radiance and
+a converged cell IS the path tail - the hit reads it and skips its shading. That gives the bounce a cell-and-frame-
+averaged value (far less 1-spp noise into NRD) and should make the gather CHEAPER than with the cache off.
+
+**Design (start here).**
+- Cell value in tail mode: `L_out(X) = albedo(X) * ( E_dir(X) + E_ind(X) )`, emissive EXCLUDED (the hit adds its
+  own emissive live from the geo table). Accumulated at P in the DI gather in APPLY mode only (`S.albedo` = the
+  G-buffer albedo there): `E_dir(P)` = the DI pick's target-only `diShadeLight` (colour * atten * N.L) * W * vis at
+  the BOUNCE's light scale (`bp.lightScale`, the convention of the hit shading it replaces) - one extra shade of
+  the winner, no ray; `E_ind(P)` = `LiCache` (the tail at H, served or live). The recursion `L_out = albedo (E_dir
+  + mean L_out(H))` converges (albedo < 1; the per-sample clamp 64 bounds fireflies).
+- Lookup at H in `rtgiTraceBounce` BEFORE the light loop (`rtgiCacheLookupTail`): own level, else the coarser
+  fallback; served only when `N >= 4` (a seeded cell is born with 4) AND `frame - stamp < evictAge` (a stale
+  off-screen cell must not keep bouncing old light through a door; it shades live). Served: `Li = L_out * scale +
+  emissive(H)`, skip the albedo sample, the light loop and the shadow ray. Unserved: live shading, NO cached
+  addition (tail mode has no separate indirect term).
+- Modes: flag 16 of the packing = tail; `RB_RHI_RtgiCacheBegin( r, viewDef, tail )` with tail = `diApply &&
+  r_rtgiCacheTail` (new cvar, default 1; 0 = C2's indirect-only A/B); the standalone RTGI pass passes false (no
+  direct estimate at P without DI). The cells' meaning differs between the modes, so a flip clears the cache
+  (track `tailMode` in `rtgiCacheState_t`).
+- Debug view 6 = SERVABLE (N >= 4 and fresh): must go white over a static view in ~1 s.
+- Unchanged: the resolve, the reset / cooldown (the cached direct now follows light changes at the history speed;
+  a flicker light's cells hold yellow and their bounce follows the light's average), eviction, movers excluded.
+
+**Test.** Same spot, `r_vkGpuTime 3` cache 0 / 1 after standing a second: the gather must drop below the cache-off
+figure. `r_rtReStirDIDebug 1` cache 0 / 1: the bounce's noise must visibly drop. View 6 white over a static view.
+The switched / flickering light checks of C3 again.
+
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 
 Setup for all items: Vulkan, RT hardware, `dude_rtx 2` (ReSTIR DI lighting the scene + combined GI) at your usual
