@@ -566,6 +566,10 @@ give), but it is NOT free. Whether it ships (and at which preset) now rests on F
   add); a servable one is the full `L_out`. Seeding from the coarser parent (SEED_N = 4 -> born servable) and the
   resolve blend smooth the crossing, but a subtle pop as a cell crosses N = 4 is possible; the switched-light and
   moving tests (5, 3) are where it would show.
+  - *Refinement (merian re-audit 2026-10-16):* merian's hashed irradiance cache gates the serve on VARIANCE, not age -
+    it stores the 2nd moment `m2` and serves only when the squared standard error `(m2 - mean²)/N` is low enough. That
+    is more principled than our fixed N >= 4 (serve a converged cell, skip a noisy one) and would soften this pop.
+    Cost: the slot grows (16 -> 24/32 B) to carry `m2`. Best near-term C refinement if the pop or bad serves show.
 
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 

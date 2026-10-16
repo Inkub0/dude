@@ -99,6 +99,26 @@ ImGui: sub-block of the RT GI group, Debugging tab (user-named ImGui).
 
 Order overall: C -> G1-G4 (current tier benefits immediately) -> E1-E6 with G5.
 
+## Re-audit of the live merian code (2026-10-16, after the cache shipped)
+
+Corrections to the paper-derived numbers above, from the CURRENT merian Slang (not the legacy GLSL / the paper):
+- **N_max = 255**, not 1024 - the current `mc.slang` caps N in 8 bits (`ML_MAX_N`); keep our 8-bit N (matches the cache).
+- **Directional prior = a constant `dir_guide_prior = 0.2`** shrinking the resultant length `u + (1-u)·p/(n²+p)`
+  (uncertainty ∝ 1/n²), rather than the paper's `N_p = 1/dist²`. Start from 0.2; the 1/dist² lock-on is an option.
+- **`weight_exponent = 1.0`**: the per-state score is `sum_w^weight_exponent` (1.0 = linear; a knob).
+- **κ from the inverse-Langevin** `κ = r(3 − 2.6r + 0.7r²) / (u(1.1 − 0.1u))`, `r = 1 − u`, `u = 1 − |mean|` - the
+  exact closed form to use in Sample.
+- `p_guiding` is ONE share (BSDF vs guided); `p_adaptive` is separately the adaptive-vs-static GRID-load split. Our
+  `r_rtgiGuideBsdfProb` = 1 − p_guiding, `r_rtgiGuideAdaptiveProb` = p_adaptive.
+- merian's shared hash grid matches C1 (GRID_POWER 2, PROBE 4, coarser-level fallback, timestamp eviction,
+  previous-camera re-seed on a level crossing); its only extra is Morton `LOCALITY_BITS` for cache locality (a tiny
+  perf option we can add to rt_hash_grid.glsl later).
+
+**SSMM fork (evaluate before G1).** merian also ships **screen-space Markov mixture guiding** (`guiding/ssmm`, BSD-3):
+the same mixture-of-vMF guiding but keyed in SCREEN space instead of the world hash grid - no ~32M-state adaptive
+buffer, much less VRAM, at the cost of no off-screen memory. Worth a cost/quality A/B against the full hash-grid MCPG
+(G) before committing to the VRAM-heavy adaptive grid; if SSMM is close, it is the cheaper default and G stays opt-in.
+
 ## Non-negotiables
 
 Default off, off = bit-identical; VK + ray query only; primary view only; raster / GL3 untouched; diagnostics
