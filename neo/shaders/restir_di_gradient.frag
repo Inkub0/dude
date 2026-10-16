@@ -54,6 +54,10 @@
 //                       points - different bump texel, cookie texel, shadow edge - and the power-8 confidence turns
 //                       that few-percent mismatch into grey). A mover keeps the current surface (its old position
 //                       would be shadowed by its own old self in the current TLAS).
+//   RT irradiance cache (docs/rtx-irradiance-cache.md C3, inherited from the gather's packing: u_particleRadius.zw slot
+//   address, u_channelMask / u_skinParms / u_contactParms): when flag 4 is set and the stratum's direct light changed by
+//   more than the reset threshold, the shaded point's cache cell is asked to restart its history (its cached INDIRECT
+//   term is as stale as the direct term that changed).
 #extension GL_EXT_buffer_reference_uvec2 : require
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_nonuniform_qualifier : require
@@ -64,6 +68,9 @@
 #include "rt_perforated.glsl"
 #include "restir_di_common.glsl"
 #include "restir_di_shade.glsl"
+// the RT irradiance cache's cell reset (C3)
+#include "rt_hash_grid.glsl"
+#include "rtgi_cache.glsl"
 
 SAMPLER_BINDING(4) uniform sampler2D u_curViewZ;		// this frame: ( viewZ, gradient luminance )
 SAMPLER_BINDING(5) uniform sampler2D u_prevViewZ;		// last frame: ( viewZ, gradient luminance )
@@ -223,6 +230,12 @@ void main() {
 		}
 	}
 	float Lprev = 0.0, Lnow = 0.0, occDist;
+	// RT irradiance cache (C3), built here because both branches below record whether the winning light is ABSENT from
+	// the other frame's buffer (a switch, or it entered / left DI). That only counts when the light actually LIT the
+	// surface - its stored luminance above the darkness bias: a stratum with no pick on either side is dark, not changed
+	// (counting those reset every dark corner every frame and held the whole room yellow, 2026-10-16).
+	RtgiCacheParms cp = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ) );
+	bool  cacheRowAbsent = false;
 	if ( wIsPrev ) {
 		// last frame's light (its row this frame: the same pick, else through this frame's table), valued now
 		Lprev = bestPrevLum;
@@ -237,6 +250,7 @@ void main() {
 				if ( rp1 != 0u && rp1 <= nLights && lights.l[ rp1 - 1u ].pad1 == prevLights.l[ bestPrevRow - 1u ].pad1 ) { curRowPlus1 = rp1; }
 			}
 		}
+		cacheRowAbsent = ( bestPrevRow != 0u && curRowPlus1 == 0u && bestPrevLum > cp.resetBias );	// last frame's light is gone now
 		if ( curRowPlus1 != 0u ) {
 			vec3 c, ld; float dl, ndl;
 			if ( diShadeLight( lights, curRowPlus1 - 1u, Sp, c, ld, dl, ndl, false ) ) {
@@ -259,6 +273,7 @@ void main() {
 				if ( rp1 != 0u && rp1 <= nPrevLights && prevLights.l[ rp1 - 1u ].pad1 == lights.l[ bestCurRow - 1u ].pad1 ) { prevRowPlus1 = rp1; }
 			}
 		}
+		cacheRowAbsent = ( bestCurRow != 0u && prevRowPlus1 == 0u && bestCurLum > cp.resetBias );	// this frame's light was not there last frame
 		if ( prevRowPlus1 != 0u ) {
 			vec3 c, ld; float dl, ndl;
 			if ( diShadeLight( prevLights, prevRowPlus1 - 1u, Sp, c, ld, dl, ndl, false ) ) {
@@ -266,6 +281,37 @@ void main() {
 					? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, occDist );		// current TLAS: an approximation for movers
 				Lprev = diGradientLuminance( c, Sp.B, vis );
 			}
+		}
+	}
+	// RT irradiance cache (docs/rtx-irradiance-cache.md C3): the direct light at this stratum's surface CHANGED - a light
+	// switched, a swinging light's footprint moved on - so the INDIRECT term its cell has accumulated is stale too. Ask
+	// the resolve to restart the cell (N = 0: the next frame's samples replace the old mean instead of being 1/N of it).
+	// The threshold sits above the DI dead zone, so Doom's authored 5-15 % flicker tables never reset a cell every frame;
+	// a light switching off / on is a 100 % change of its own value regardless. The darkness bias in the denominator
+	// (as the confidence pass's, but larger) keeps a near-black direct term from resetting on its own noise: a change
+	// of a light that contributes almost nothing cannot have moved the indirect term either. One request per changed
+	// stratum (3x3 pixels) is plenty: a cell is ~10 pixels wide at the default cell angle.
+	// EXACT comparisons only: when LAST frame's light wins on a pixel that moved more than the static threshold on
+	// screen (any turn or walk), the two luminances come from two different points a pixel apart (the stored previous
+	// point vs the current one - the mover approximation above), and on bump-mapped, cookie-lit surfaces that differs
+	// by 35 % routinely: the whole view flashed red in the activity view while turning (user, 2026-10-16; confirmed by
+	// the r_rtgiCacheReset 0 A/B). The DI confidence absorbs that through its dead zone + filter; a cell reset must not.
+	// The other direction (THIS frame's pick wins) shades both frames at the same point and is exact even while
+	// moving, so a light switching ON still resets on the move; a switch-OFF while moving is left to the history blend.
+	// LIGHT changes only, never VISIBILITY changes: an NPC's shadow sweeping a wall flips the one-ray visibility of a
+	// whole region every frame (a static camera watching a walking marine showed resets over all the walls), but the
+	// indirect term a moving shadow displaces is second-order - resetting the cell for it only injects noise. The
+	// gradient can tell the two apart: a light that switched off LEFT the buffer (its row is absent in the other
+	// frame, 100 % change, reset), while an occluded light is still present with a zero visibility. So: reset when the
+	// light is absent on either side, or when it is LIT on both sides and its lit value changed by the threshold (a
+	// dimming, a brightening, a swinging cookie); a side that is zero with the light present is a shadow - no reset.
+	{
+		const bool exact   = !( wIsPrev && !bestStatic );
+		const bool litBoth = Lprev > 0.0 && Lnow > 0.0;
+		const bool changed = cacheRowAbsent
+		                   || ( litBoth && abs( Lprev - Lnow ) > cp.resetThresh * ( max( Lprev, Lnow ) + cp.resetBias ) );
+		if ( cp.gradientReset && rtgiCachePresent( cp ) && exact && changed ) {
+			rtgiCacheRequestReset( cp, Sp.Pw, Sp.Nw, u_modelViewMatrix[3].xyz );
 		}
 	}
 	fragColor = vec4( abs( Lprev - Lnow ), max( Lprev, Lnow ), 0.0, 1.0 );

@@ -557,6 +557,47 @@ static float rhiRtgiPrevView[16];
 static float rhiRtgiPrevJitter[2] = { 0.0f, 0.0f };
 static bool  rhiRtgiPrevValid = false;
 
+// ---- RT irradiance cache (docs/rtx-irradiance-cache.md): the hashed world-space cache of indirect light the GI bounce
+// learns at every traced pixel and reads back at its bounce hit (multi-bounce). Two GPU-only buffers of 2^log2 x 16 B
+// (rtgi_cache.glsl: cells, and their per-frame fixed-point accumulation), addressed by the gathers through the
+// RenderParams UBO and resolved by one compute dispatch per frame (rtgi_cache_resolve.comp). Allocated on first use,
+// re-allocated on a slot-count change, zeroed by a clear dispatch on first use / level change / re-enable.
+struct rtgiCacheParms_t {
+	unsigned long long	slotAddr, accumAddr;	// device addresses
+	unsigned int		slotMask;				// slots - 1
+	unsigned int		frame;					// this frame's stamp
+	unsigned int		evictAge;				// C3: frames since the last update after which a foreign cell may be evicted (0 = never)
+	unsigned int		flags;					// 1 = update at the primary point, 2 = lookup at the hit, 4 = gradient reset (C2 / C3)
+	float				tanAlphaHalf;			// r_rtgiCacheCellAngle
+	float				scale;					// r_rtgiCacheScale
+	float				resetThresh;			// C3: relative luminance change of the DI gradient that resets a cell
+	float				sampleClamp;			// per-sample peak clamp before accumulation
+	float				albedoClamp;			// ceiling on the hit albedo multiplying the cached term
+	float				resetBias;				// C3: darkness bias in the reset test's denominator (a near-black direct term never resets)
+};
+struct rtgiCacheState_t {
+	rhi::BufferHandle	slotBuf = 0, accumBuf = 0;
+	unsigned long long	slotAddr = 0, accumAddr = 0;
+	int					slotsLog2 = 0;			// what the buffers were sized for
+	bool				clearPending = false;	// zero both buffers before anything reads them (first use / level / resize / re-enable)
+	bool				wasEnabled = false;		// r_rtgiCache was on last time Begin ran (a re-enable clears)
+	idStr				mapName;				// the level the cells belong to
+	bool				readyThisView = false;	// Begin succeeded this view: the parms are valid, the resolve + overlay may run
+	bool				resolvedThisView = false;
+	rhi::ShaderHandle	resolveProg = 0;		// rtgi_cache_resolve.comp
+	int					nMaxFrames = 32;		// the history cap in FRAMES this view (r_rtgiCacheHistoryMs through the frame rate, else r_rtgiCacheHistory)
+	int					coolFrames = 7;			// the reset cooldown in frames this view (RTGI_CACHE_COOL_MS through the frame rate)
+	rtgiCacheParms_t	parms;
+};
+static rtgiCacheState_t rhiRtgiCache;
+// The reset cooldown is a DURATION: it separates a one-shot change to follow (a switch) from a periodic one to average
+// (a flicker / strobe table, a swinging cookie), and that boundary is a frequency. Above ~5 Hz reads as flicker, below
+// ~2-3 Hz as separate events; 250 ms sits between, and holds at 60 and 144 Hz alike (7 frames did not).
+#define RTGI_CACHE_COOL_MS		250.0f
+static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef );										// defined with the GI apply / overlays below
+static void RB_RHI_RtgiCachePack( rhi::RenderParams &parms, const rtgiCacheParms_t &cp, bool slotInParticleRadius );
+static void RB_RHI_RtgiCacheResolve( rhi::RHI *r );
+
 // ---- shared camera temporal state (docs/fsr-temporal-pipeline.md, increment A1) ----
 // The SSAO and SSR temporal resolves both reproject last frame's history by pure camera
 // motion, so both need the previous rendered frame's world->clip. They kept two private
@@ -626,7 +667,10 @@ static bool RB_RHI_NrdHistoryReset( const viewDef_t *viewDef ) {
 // GetMaxAccumulatedFrameNum over a 0.2 s low-passed frame rate, so the window is the same TIME at 60 or 144 Hz).
 // fastFrames = the fast history base (NRD default 6, or the consumer's cvar); in ms mode it scales with the main
 // window so the 5-7x ratio NRD recommends is preserved. Both outputs clamped to ReBLUR's 63.
-static void RB_RHI_NrdHistoryFrames( int frames, float ms, int fastFrames, int &outMain, int &outFast ) {
+// The 0.2 s low-passed frame time every seconds-based window converts through (NRD's "accumulate in seconds, not frames"
+// recipe). Advanced once per rendered frame however many consumers ask; shared by the NRD history windows and the RT
+// irradiance cache's history + reset cooldown (docs/rtx-irradiance-cache.md). Never below 1 ms.
+static float RB_RHI_SmoothedFrameMs( void ) {
 	static int   lastTick  = -1;
 	static int   lastFrame = -1;
 	static float smoothedFrameMs = 16.7f;				// "must be initialized to a positive value" (NRD)
@@ -640,10 +684,15 @@ static void RB_RHI_NrdHistoryFrames( int frames, float ms, int fastFrames, int &
 		lastTick  = now;
 		lastFrame = tr.frameCount;
 	}
+	return Max( smoothedFrameMs, 1.0f );
+}
+
+static void RB_RHI_NrdHistoryFrames( int frames, float ms, int fastFrames, int &outMain, int &outFast ) {
+	const float frameMs = RB_RHI_SmoothedFrameMs();		// advanced every frame, whether or not this consumer is in ms mode
 	outMain = frames;
 	outFast = fastFrames;
 	if ( ms > 0.0f ) {
-		const float fps = 1000.0f / Max( smoothedFrameMs, 1.0f );
+		const float fps = 1000.0f / frameMs;
 		outMain = (int)( ms * 0.001f * fps + 0.5f );		// == nrd::GetMaxAccumulatedFrameNum( seconds, smoothedFPS ) (no NRD include here)
 		if ( outMain < 2 ) { outMain = 2; }
 		if ( frames > 0 && fastFrames > 0 ) {
@@ -4058,6 +4107,17 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiVolUpRT = 0;	rhiVolHistRT[0] = rhiVolHistRT[1] = 0;	rhiVolFullW = rhiVolFullH = 0;	rhiVolHistValid = false;
 	s_rtPerfBoxBuf = 0;			s_rtPerfBoxAddr = 0;		// perforated-caster boxes: same
 	s_rtReflLightBuf = 0;		s_rtReflLightAddr = 0;		// RR16: handle is stale after a lost context; recreated lazily
+	// RT irradiance cache (docs/rtx-irradiance-cache.md): its two GPU-only buffers, their device addresses and the resolve
+	// program died with the context. Drop them WITHOUT DestroyBuffer (the old handles alias live resources of the new
+	// backend) and re-arm the clear; Begin re-allocates and zeroes on the next cache frame. Without this a vid_restart
+	// with the cache on made the gather write atomics through the stale device address = GPU page fault = device lost
+	// (user, 2026-10-16).
+	rhiRtgiCache.slotBuf = rhiRtgiCache.accumBuf = 0;
+	rhiRtgiCache.slotAddr = rhiRtgiCache.accumAddr = 0;
+	rhiRtgiCache.resolveProg = 0;
+	rhiRtgiCache.readyThisView = rhiRtgiCache.resolvedThisView = false;
+	rhiRtgiCache.wasEnabled = false;
+	rhiRtgiCache.clearPending = true;
 	rhiRtReflHistRT[0] = rhiRtReflHistRT[1] = 0;
 	rhiRtReflHistIdx = 0;		rhiRtReflHistW = rhiRtReflHistH = 0;
 	rhiRtReflHistValid = false;
@@ -7713,6 +7773,17 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.diffuseModifier[1] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiLightScale.GetFloat() );	// diffuse brightness at the hit
 	parms.diffuseModifier[2] = 1.0f;				// confine each light to its Doom projection volume (RR16c-style)
 	parms.diffuseModifier[3] = ( giNumLights > 0 ) ? 1.0f : 0.0f;	// real-lights enable
+	// RT irradiance cache (docs/rtx-irradiance-cache.md): the bounce's multi-bounce feedback; slot address in u_alphaTest.xy
+	// (u_particleRadius carries the IGN rotation here). Off (default) packs nothing and the shader never touches it.
+	const bool giCache = RB_RHI_RtgiCacheBegin( r, viewDef );
+	// movers never teach the cache: the gather tells them from the camera's own motion (last frame's view matrix + the
+	// full-res velocity MRT on unit 10, flag 8); without a velocity this view every pixel may teach (static scenes)
+	const rhi::ImageHandle giCacheVel = ( giCache && rhiNormalVelThisView ) ? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
+	if ( giCache ) {
+		memcpy( parms.prevMvpMatrix, rhiRtgiPrevValid ? rhiRtgiPrevView : viewDef->worldSpace.modelViewMatrix, sizeof( parms.prevMvpMatrix ) );
+		if ( giCacheVel != 0 ) { rhiRtgiCache.parms.flags |= 8u; }
+		RB_RHI_RtgiCachePack( parms, rhiRtgiCache.parms, false );
+	}
 
 	r->GpuScopeBegin( "rtgi.ray" );					// r_vkGpuTime 2: the one-bounce ray trace + hit shading
 	// Checkerboard packs every traced sample into the LEFT HALF of the buffer; NRD (BLACK mode, x>>1) and
@@ -7728,11 +7799,17 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
 	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
+	// unit 10 = the velocity for the cache's mover test (white placeholder keeps the set complete; sampled only with flag 8)
+	if ( giCacheVel != 0 ) { RB_RHI_BindRTImage( r, 10, giCacheVel ); } else { RB_RHI_BindUnit( 10, globalImages->whiteImage ); }
+	backEnd.glState.tmu[10].current2DMap = -1;
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );		// set 2 (bindless materials) is auto-bound by the backend
 	r->EndPass();
 	r->GpuScopeEnd();
 	rhiRtgiRanThisView = true;
 	rhiRtgiDenoisedThisView = false;
+	if ( giCache ) {
+		RB_RHI_RtgiCacheResolve( r );				// fold this frame's accumulated bounce estimates into the cells
+	}
 
 	// H6g: full-res NRD guides for checkerboard (the half-packed gather can't carry them). Ray-free pass over
 	// depth + normal into a full-res MRT (att1 viewZ, att2 normal), which the denoise points NRD's guides at.
@@ -8092,6 +8169,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.occlusionParms[2] = (float)( ( fh >> 3u ) & 1023u );
 		parms.occlusionParms[3] = (float)( ( fh >> 13u ) & 1023u );
 	}
+	// (the RT irradiance cache is packed just before the gather draw, once the velocity at the gather res is known)
 
 	// Stage D apply mode (r_rtReStirDIApply): DI will LIGHT this view, so the gather shades with the G-buffer material
 	// (albedo att3 + rough/metal/spec att1) and writes the demodulated radiance; the apply (RB_RHI_ReStirDIApply)
@@ -8230,6 +8308,16 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.tessParms[3] = boostSide ? diPrevCb : -1.0f;
 		memcpy( parms.prevMvpMatrix, rhiReStirDIPrevValid ? rhiReStirDIPrevView : viewDef->worldSpace.modelViewMatrix, sizeof( parms.prevMvpMatrix ) );
 	}
+	// RT irradiance cache (docs/rtx-irradiance-cache.md): the combined bounce learns the cache at every traced STATIC pixel
+	// and reads it at its hit (multi-bounce). Only with the bounce; slot address in u_particleRadius.zw (.xy = the geo
+	// table). Flag 8 = the velocity at the gather res rides unit 10 (bound below), so the gather tells movers from the
+	// camera's own motion (u_prevMvpMatrix = last frame's view, set above) and never lets them teach. The gradient pass
+	// inherits the packing (gp = parms) for its cell reset (C3). Off (default) packs nothing.
+	const bool diCache = combineGI && RB_RHI_RtgiCacheBegin( r, viewDef );
+	if ( diCache ) {
+		if ( nrdVel != 0 ) { rhiRtgiCache.parms.flags |= 8u; }
+		RB_RHI_RtgiCachePack( parms, rhiRtgiCache.parms, true );
+	}
 	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray (+ R3a's K rays on young pixels)
 	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
 	r->BeginTargetPass( rhiReStirDIRT, NULL );
@@ -8260,7 +8348,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		} else {
 			RB_RHI_BindUnit( 5, globalImages->whiteImage );	RB_RHI_BindUnit( 6, globalImages->whiteImage );	RB_RHI_BindUnit( 9, globalImages->whiteImage );
 		}
-		if ( boostWant ) { RB_RHI_BindRTImage( r, 10, nrdVel ); } else { RB_RHI_BindUnit( 10, globalImages->whiteImage ); }
+		// the velocity rides unit 10 whenever the view has one (the R3a boost AND the irradiance cache's mover test read it)
+		if ( nrdVel != 0 ) { RB_RHI_BindRTImage( r, 10, nrdVel ); } else { RB_RHI_BindUnit( 10, globalImages->whiteImage ); }
 		backEnd.glState.tmu[4].current2DMap = -1;	backEnd.glState.tmu[5].current2DMap = -1;	backEnd.glState.tmu[6].current2DMap = -1;
 		backEnd.glState.tmu[9].current2DMap = -1;	backEnd.glState.tmu[10].current2DMap = -1;
 	}
@@ -8443,6 +8532,11 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( diGradConfImg == 0 ) { rhiReStirDIGradConfValid = false; }		// no continuous confidence history to smooth from
 	}
 
+	// RT irradiance cache: resolve AFTER the gather (its accumulation atomics) and the gradient (its C3 cell resets),
+	// before the denoise - one compute dispatch mid-scene (docs/rtx-irradiance-cache.md)
+	if ( diCache ) {
+		RB_RHI_RtgiCacheResolve( r );
+	}
 
 	// ---- NRD REBLUR_DIFFUSE denoise (mirrors RB_RHI_RtgiPass's H6b) ----
 	// DI borrows the SHARED GI denoiser (NRD_ID_REBLUR_GI) and its output image (GetRtgiOutputImage), so it can
@@ -9163,6 +9257,220 @@ void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_DrawFullscreen( r, prog, parms, giImg, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 	RB_RHI_ForgetTexBinds();
 	rhiRtgiAppliedThisView = true;			// once per view: the other call site now no-ops
+}
+
+/*
+===================
+RB_RHI_RtgiCacheBegin / RB_RHI_RtgiCachePack / RB_RHI_RtgiCacheResolve / RB_RHI_RtgiCacheDebugOverlay
+
+RT irradiance cache (docs/rtx-irradiance-cache.md). Begin: per view, (re)allocate the two GPU-only buffers, detect a
+level change / re-enable (-> clear), load the resolve program and fill the parms every consumer packs identically
+(Pack: rtgi_cache.glsl's uniform layout; the slot address goes where the consumer has room). Resolve: after the
+pass(es) that fed the accumulation buffer, one compute dispatch (preceded by the clear when pending) folds this
+frame's sums into the cells - recorded mid-scene with the fragment->compute barrier (ComputeArgs). Overlay:
+r_rtgiCacheDebug draws the cells / values / age / history of the visible surfaces over the finished view.
+===================
+*/
+static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
+	rtgiCacheState_t &c = rhiRtgiCache;
+	c.readyThisView = false;
+	c.resolvedThisView = false;
+	memset( &c.parms, 0, sizeof( c.parms ) );
+	if ( !r_rtgiCache.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN || !r->SupportsRayQuery() ) {
+		c.wasEnabled = false;
+		return false;
+	}
+	const int log2 = idMath::ClampInt( 19, 22, r_rtgiCacheSlotsLog2.GetInteger() );
+	if ( c.slotBuf != 0 && c.slotsLog2 != log2 ) {
+		// slot count changed (r_rtgiCacheSlotsLog2 is in the gfx-config signature, so the device idled at this frame's
+		// start; DestroyBuffer defers the free behind the frames in flight regardless)
+		r->DestroyBuffer( c.slotBuf );
+		r->DestroyBuffer( c.accumBuf );
+		c.slotBuf = c.accumBuf = 0;
+		c.slotAddr = c.accumAddr = 0;
+	}
+	if ( c.slotBuf == 0 ) {
+		const int bytes = ( 1 << log2 ) * 16;
+		c.slotBuf   = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, bytes, NULL );
+		c.accumBuf  = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, bytes, NULL );
+		c.slotAddr  = ( c.slotBuf  != 0 ) ? r->GetBufferDeviceAddress( c.slotBuf )  : 0;
+		c.accumAddr = ( c.accumBuf != 0 ) ? r->GetBufferDeviceAddress( c.accumBuf ) : 0;
+		if ( c.slotAddr == 0 || c.accumAddr == 0 ) {
+			if ( c.slotBuf  != 0 ) { r->DestroyBuffer( c.slotBuf ); }
+			if ( c.accumBuf != 0 ) { r->DestroyBuffer( c.accumBuf ); }
+			c.slotBuf = c.accumBuf = 0;
+			c.slotAddr = c.accumAddr = 0;
+			static bool warned = false;
+			if ( !warned ) { warned = true; common->Warning( "r_rtgiCache: the cache buffers (2 x %d MB) could not be created - cache off", bytes >> 20 ); }
+			return false;
+		}
+		c.slotsLog2 = log2;
+		c.clearPending = true;
+		common->Printf( "r_rtgiCache: %d cells (2 x %d MB)\n", 1 << log2, bytes >> 20 );
+	}
+	// a new level: every learned cell is stale (world positions mean something else now). Same for a re-enable: what
+	// was learned before the toggle may be minutes old.
+	const char *map = ( viewDef->renderWorld != NULL ) ? viewDef->renderWorld->mapName.c_str() : "";
+	if ( c.mapName.Icmp( map ) != 0 ) {
+		c.mapName = map;
+		c.clearPending = true;
+	}
+	if ( !c.wasEnabled ) {
+		c.clearPending = true;
+	}
+	c.wasEnabled = true;
+	if ( c.resolveProg == 0 ) {
+		c.resolveProg = r->LoadComputeShader( "rtgi_cache_resolve" );	// warns once when the .comp.spv is missing; the cache then stays off
+		if ( c.resolveProg == 0 ) {
+			return false;
+		}
+	}
+	rtgiCacheParms_t &cp = c.parms;
+	cp.slotAddr     = c.slotAddr;
+	cp.accumAddr    = c.accumAddr;
+	cp.slotMask     = (unsigned int)( ( 1 << log2 ) - 1 );
+	cp.frame        = (unsigned int)tr.frameCount;
+	cp.tanAlphaHalf = idMath::ClampFloat( 0.0005f, 0.05f, r_rtgiCacheCellAngle.GetFloat() );
+	cp.scale        = idMath::ClampFloat( 0.0f, 4.0f, r_rtgiCacheScale.GetFloat() );
+	// C3 responsiveness. Eviction: a cell not updated for 4 x Nmax frames (>= 64) may be taken over when its probe span
+	// is full of newer cells - dead cells (a room left behind) stop pinning slots without the live ones churning.
+	// Gradient reset: the DI gradient restarts a cell whose direct light changed by more than 35 % (above the DI dead
+	// zone, r_rtReStirDIGradientDeadzone 0.25, so Doom's 5-15 % authored flicker never resets; a switch is 100 %).
+	// the history in TIME (r_rtgiCacheHistoryMs, default 500 ms) converted to frames through the 0.2 s low-passed frame
+	// rate, else the frame count (r_rtgiCacheHistory): the blend's time constant and the eviction age must not shrink at
+	// 144 Hz. The slot keeps N in 8 bits (<= 255 frames) and the cooldown in 5 (<= 31 frames: ~215 ms at 144 Hz, the cap).
+	const float frameMs = RB_RHI_SmoothedFrameMs();
+	const float histMs  = r_rtgiCacheHistoryMs.GetFloat();
+	const int nMax = ( histMs > 0.0f ) ? idMath::ClampInt( 1, 255, (int)( histMs / frameMs + 0.5f ) )
+	                                   : idMath::ClampInt( 1, 255, r_rtgiCacheHistory.GetInteger() );
+	c.nMaxFrames    = nMax;
+	c.coolFrames    = idMath::ClampInt( 2, 31, (int)( RTGI_CACHE_COOL_MS / frameMs + 0.5f ) );
+	cp.evictAge     = (unsigned int)idMath::ClampInt( 64, 4096, 4 * nMax );
+	// flags: 1 = update at the primary point, 2 = lookup at the bounce hit (C2), 4 = gradient reset (C3). On a frame whose
+	// clear is still pending the buffers hold undefined memory until the resolve point zeroes them (the gathers run BEFORE
+	// it), so that frame neither reads nor writes: a garbage lookup would flash one frame of random bounce light into the
+	// NRD history, and its updates would be wiped by the clear anyway. The cache starts learning the frame after.
+	cp.flags        = c.clearPending ? 0u : ( 1u | 2u | ( r_rtgiCacheReset.GetBool() ? 4u : 0u ) );
+	cp.resetThresh  = 0.35f;
+	cp.resetBias    = 0.05f;		// 5x the DI confidence's darkness bias: only changes that can move the indirect term count
+	cp.sampleClamp  = 64.0f;		// a 1-spp firefly (peak channel) must not own a cell for Nmax frames
+	cp.albedoClamp  = 0.9f;			// keeps the bounce recursion strictly convergent on white materials
+	c.readyThisView = true;
+	return true;
+}
+
+// The uniform layout rtgi_cache.glsl's rtgiCacheParmsFromUniforms reads: u_channelMask = ( accum addr lo, hi, slot mask,
+// tanAlphaHalf ), u_skinParms = ( scale, frame, flags, reset threshold ), u_contactParms = ( evict age, sample clamp,
+// albedo clamp, - ). The SLOT address rides u_particleRadius.zw where .xy is the geo table (the DI gather + gradient)
+// or u_alphaTest.xy where u_particleRadius is taken (rtgi_ray.frag's IGN rotation; the debug overlay). Addresses and
+// integers are BIT-CAST into the floats (memcpy), never value-converted.
+static void RB_RHI_RtgiCachePack( rhi::RenderParams &parms, const rtgiCacheParms_t &cp, bool slotInParticleRadius ) {
+	const unsigned int sLo = (unsigned int)( cp.slotAddr & 0xFFFFFFFFull ),  sHi = (unsigned int)( cp.slotAddr >> 32 );
+	const unsigned int aLo = (unsigned int)( cp.accumAddr & 0xFFFFFFFFull ), aHi = (unsigned int)( cp.accumAddr >> 32 );
+	if ( slotInParticleRadius ) {
+		memcpy( &parms.particleRadius[2], &sLo, sizeof( sLo ) );
+		memcpy( &parms.particleRadius[3], &sHi, sizeof( sHi ) );
+	} else {
+		memcpy( &parms.alphaTest[0], &sLo, sizeof( sLo ) );
+		memcpy( &parms.alphaTest[1], &sHi, sizeof( sHi ) );
+	}
+	memcpy( &parms.channelMask[0], &aLo, sizeof( aLo ) );
+	memcpy( &parms.channelMask[1], &aHi, sizeof( aHi ) );
+	memcpy( &parms.channelMask[2], &cp.slotMask, sizeof( cp.slotMask ) );
+	parms.channelMask[3] = cp.tanAlphaHalf;
+	parms.skinParms[0] = cp.scale;
+	memcpy( &parms.skinParms[1], &cp.frame, sizeof( cp.frame ) );
+	memcpy( &parms.skinParms[2], &cp.flags, sizeof( cp.flags ) );
+	parms.skinParms[3] = cp.resetThresh;
+	parms.contactParms[0] = (float)cp.evictAge;
+	parms.contactParms[1] = cp.sampleClamp;
+	parms.contactParms[2] = cp.albedoClamp;
+	parms.contactParms[3] = cp.resetBias;
+}
+
+static void RB_RHI_RtgiCacheResolve( rhi::RHI *r ) {
+	rtgiCacheState_t &c = rhiRtgiCache;
+	if ( !c.readyThisView || c.resolvedThisView || c.resolveProg == 0 ) {
+		return;
+	}
+	struct { unsigned int slotCount, mode, nMax, frame; float alphaMin; unsigned int coolFrames; } pc;		// rtgi_cache_resolve.comp PC
+	pc.slotCount  = 1u << c.slotsLog2;
+	pc.mode       = 0;
+	pc.nMax       = (unsigned int)c.nMaxFrames;		// 8-bit N in the slot (Begin clamped it)
+	pc.frame      = c.parms.frame;
+	pc.alphaMin   = 0.02f;
+	pc.coolFrames = (unsigned int)c.coolFrames;		// 5-bit cooldown in the slot (Begin clamped it)
+	rhi::ComputeArgs ca = rhi::ComputeArgs();
+	ca.shader = c.resolveProg;
+	ca.storage[0] = c.slotBuf;
+	ca.storage[1] = c.accumBuf;
+	ca.pushConstants = &pc;
+	ca.pushConstantSize = (int)sizeof( pc );
+	ca.groupsX = ( pc.slotCount + 255u ) / 256u;
+	ca.groupsY = 1;
+	ca.groupsZ = 1;
+	ca.midScene = true;				// between the DI chain's target passes, inside the open scene
+	ca.afterFragmentWrites = true;	// the gather's accumulation atomics precede this
+	r->GpuScopeBegin( "rtgi.cache" );	// r_vkGpuTime 2: the per-frame resolve (+ the clear when pending)
+	if ( c.clearPending ) {
+		pc.mode = 1;
+		r->Dispatch( ca );
+		c.clearPending = false;
+		pc.mode = 0;
+	}
+	r->Dispatch( ca );
+	r->GpuScopeEnd();
+	c.resolvedThisView = true;
+}
+
+void RB_RHI_RtgiCacheDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
+	const rtgiCacheState_t &c = rhiRtgiCache;
+	if ( r_rtgiCacheDebug.GetInteger() <= 0 || !c.readyThisView || !rhiNormalReadyThisView || rhiNormalResultRT == 0
+			|| globalImages->currentDepthImage->uploadWidth <= 0 ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "rtgi_cache_debug" );
+	if ( !prog ) {
+		return;
+	}
+	float invView[16];
+	if ( !RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
+		return;
+	}
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	const float *proj  = viewDef->projectionMatrix;
+	const float invP00 = ( proj[0] != 0.0f ) ? 1.0f / proj[0] : 1.0f;
+	const float invP11 = ( proj[5] != 0.0f ) ? 1.0f / proj[5] : 1.0f;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );		// u_modelViewMatrix = view->world
+	parms.localParam0[0] = invP00;
+	parms.localParam0[1] = invP11;
+	parms.localParam0[2] = (float)c.nMaxFrames;								// the history cap this view (ms-based or frames)
+	parms.localParam0[3] = (float)r_rtgiCacheDebug.GetInteger();
+	// full-res gl_FragCoord -> uv / depth tc (the gather's mapping at scale 1; the primary view fills the window from the origin)
+	parms.screenCorrection[0] = 1.0f / w;
+	parms.screenCorrection[1] = 1.0f / h;
+	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
+	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
+	rhi::FillDepthParms( parms, proj );
+	parms.windowCoord[2] = -1.0f;										// VK-only: top-down view-Y sign
+	RB_RHI_RtgiCachePack( parms, c.parms, false );						// slot address in u_alphaTest.xy
+
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
+	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+	backEnd.glState.tmu[1].current2DMap = -1;			// direct bind bypassed the tmu cache
+	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
+	RB_RHI_ForgetTexBinds();
 }
 
 /*
@@ -10339,6 +10647,7 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 	// standalone velocity target would key-mismatch and recreate every frame (the DIAG spam)
 	rhiNormalReadyThisView = false;	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;	rhiNormalAlbedoThisView = false;
 	rhiPrepassWeaponDeferred = false;	rhiWorldDepthThisView = false;
+	rhiRtgiCache.readyThisView = false;	// RT irradiance cache: set by RB_RHI_RtgiCacheBegin when a GI gather runs with it this view
 	// ReSTIR DI lighting the scene (docs/rtx-restir-di.md): run the prepasses WORLD-first, the DI chain on that
 	// world-only G-buffer, then draw the deferred view weapon into the same targets. The weapon's silhouette then
 	// never uncovers history-less pixels in the denoiser (the fried halo); every other consumer (AO, SSR, FSR2,

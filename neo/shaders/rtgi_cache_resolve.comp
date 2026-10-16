@@ -1,0 +1,84 @@
+// DUDE RT irradiance cache RESOLVE (docs/rtx-irradiance-cache.md C1): one thread per cache slot, once per frame
+// after the gather(s) that fed the accumulation buffer (RhiWorld.cpp RB_RHI_RtgiCacheResolve). For every slot whose
+// accumulation entry received samples this frame: fold their mean into the cell's running estimate with
+// alpha = max( 1 / N, alphaMin ) - a cell's first samples replace it outright, a converged cell keeps at least
+// alphaMin of the fresh frame so a lighting change never takes more than ~1/alphaMin frames to show - cap the
+// history at Nmax (r_rtgiCacheHistory), and clear the sums for the next frame. A RESET request (bit 31 of the count,
+// set by an evicting writer or by the DI gradient pass on a lighting change) restarts the cell: N = 0, the stale mean
+// is dropped. mode 1 = CLEAR: zero every slot and accumulation entry (first use, level change, slot-count change).
+//
+// Bound as compute storage bindings (ComputeArgs::storage[0] = slots, [1] = accumulation); the push constants carry
+// the slot count, the mode, Nmax, the frame and alphaMin. The layouts are rtgi_cache.glsl's (shared with the
+// fragment side, which addresses the same buffers by device address).
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+#define RTGI_CACHE_NO_UNIFORMS 1	// bound storage, no RenderParams block here
+#include "rt_hash_grid.glsl"
+#include "rtgi_cache.glsl"
+
+layout( local_size_x = 256 ) in;
+
+layout( std430, binding = 0 ) buffer CacheSlots  { HgSlot  s[]; } slots;
+layout( std430, binding = 1 ) buffer CacheAccums { HgAccum a[]; } accum;
+
+layout( push_constant ) uniform PC {
+	uint  slotCount;	// slots in the buffers (power of two)
+	uint  mode;			// 0 = resolve, 1 = clear
+	uint  nMax;			// history cap (frames of memory per cell; the CPU derives it from r_rtgiCacheHistoryMs / r_rtgiCacheHistory)
+	uint  frame;		// this frame's stamp (unused by the resolve itself; kept for symmetry with the fragment side)
+	float alphaMin;		// floor on the blend factor (responsiveness)
+	uint  coolFrames;	// the reset cooldown in frames (RTGI_CACHE_COOL_MS through the frame rate; <= 31)
+} pc;
+
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if ( i >= pc.slotCount ) { return; }
+	if ( pc.mode == 1u ) {
+		slots.s[ i ] = HgSlot( 0u, 0u, 0u, 0u );
+		accum.a[ i ] = HgAccum( 0u, 0u, 0u, 0u );
+		return;
+	}
+	HgAccum acc = accum.a[ i ];
+	uint cnt   = acc.count & RTGI_CACHE_COUNT_MASK;
+	bool reset = ( acc.count & RTGI_CACHE_RESET_BIT ) != 0u;
+	bool evict = ( acc.count & RTGI_CACHE_EVICT_BIT ) != 0u;
+	if ( cnt == 0u && !reset && !evict ) { return; }							// untouched this frame: nothing to do (the common case)
+	accum.a[ i ] = HgAccum( 0u, 0u, 0u, 0u );
+	HgSlot sl = slots.s[ i ];
+	if ( sl.key == 0u ) { return; }											// no cell owns the slot (a stale request): drop the sums
+	if ( evict ) {
+		// the slot changed hands this frame: the sums mix the old cell's samples with the new one's, so they are dropped;
+		// the new cell starts from what its claimer left (its coarser parent's seed, or zero = learn from the next sample)
+		rtgiCachePackIrr( sl, rtgiCacheUnpackIrr( sl ), rtgiCacheN( sl ), RTGI_CACHE_FRESH_BIT );
+		slots.s[ i ] = sl;
+		return;
+	}
+	vec3 irr   = rtgiCacheUnpackIrr( sl );
+	uint N     = rtgiCacheN( sl );
+	uint cool  = rtgiCacheCooldown( sl );
+	uint flags = 0u;
+	// A reset request RESTARTS the cell (N = 0: the next mean replaces the stale one) only when the cell is not cooling
+	// down from a previous restart. A light that changes every frame - an authored flicker / strobe table, a swinging
+	// cookie - requests every frame, and restarting every frame would pin N at 1: the cell would never hold more than one
+	// frame's mean (the flickering patches under Mars City's fluorescents, user 2026-10-16). Inside the cooldown a request
+	// only re-arms it, so such a cell is restarted once and then BLENDS (alpha >= 1 / Nmax) toward the light's average -
+	// what a cache of a flickering light should hold. A one-shot change (a switch) requests once, restarts at once, and
+	// the cooldown has run out long before the next.
+	if ( reset ) {
+		if ( cool == 0u ) { N = 0u; flags = RTGI_CACHE_RESET_FLAG; }
+		cool = min( pc.coolFrames, RTGI_CACHE_COOL_MASK );
+	} else if ( cool > 0u ) {
+		cool--;
+	}
+	if ( cnt > 0u ) {
+		vec3  mean  = vec3( float( acc.r ), float( acc.g ), float( acc.b ) ) * ( 1.0 / ( RTGI_CACHE_FIXED * float( cnt ) ) );
+		float alpha = max( 1.0 / float( N + 1u ), pc.alphaMin );
+		irr = ( N == 0u ) ? mean : mix( irr, mean, alpha );
+		// activity flags for the debug view (r_rtgiCacheDebug 5): RESET when the cell restarted on request, FRESH when it
+		// was created this frame (N 0 -> 1) or seeded from its coarser parent (the gather's SEEDED bit, consumed here)
+		if ( flags == 0u && ( N == 0u || ( sl.irrBN & RTGI_CACHE_SEEDED_BIT ) != 0u ) ) { flags = RTGI_CACHE_FRESH_BIT; }
+		N = min( N + 1u, clamp( pc.nMax, 1u, RTGI_CACHE_N_MAX ) );
+	}
+	rtgiCachePackIrr( sl, irr, N, flags | ( cool << RTGI_CACHE_COOL_SHIFT ) );
+	slots.s[ i ] = sl;
+}

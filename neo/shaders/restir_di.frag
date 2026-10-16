@@ -58,6 +58,11 @@
 //   u_pbrParms            = ( gather radius, r_rtgiEmissive, r_rtgiEmissiveClamp, r_rtgiLightScale )
 //   u_pbrParms2           = ( ambient floor, shadow-ray gate, eye pullback per unit depth, r_rtgiIntensity )
 //   u_occlusionParms      = ( IGN rotation cos, sin, IGN offset x, y )   [CPU-hoisted per frame, as RB_RHI_RtgiPass]
+//   --- r_rtgiCache (the RT irradiance cache, docs/rtx-irradiance-cache.md; rtgi_cache.glsl's shared packing) ---
+//   u_particleRadius.zw   = cache SLOT buffer device address (bit-cast; 0 = no cache)
+//   u_channelMask         = ( accumulation buffer address lo, hi, slot mask, tan( cell angle / 2 ) )
+//   u_skinParms           = ( cached-term scale, frame stamp, flags [1 update, 2 lookup, 4 gradient reset], reset threshold )
+//   u_contactParms        = ( evict age, per-sample clamp, albedo clamp, - )
 //   --- R3a disocclusion boost (r_rtReStirDIBoost, docs/rtx-restir-di.md Plan R3) ---
 //   u_tessParms           = ( K picks (0 = off), boost-ON NRD history (<= 0: trigger off), HOLD frames,
 //                             LAST frame's checkerboard parity: 0 = off, 1 / 2 = parity, -1 = NO side data this frame )
@@ -95,12 +100,19 @@
 #include "restir_di_common.glsl"
 // the surface reconstruction, per-light shade and visibility ray, shared with restir_di_gradient.frag (R1)
 #include "restir_di_shade.glsl"
+// the RT irradiance cache the bounce hit reads and the primary point feeds (docs/rtx-irradiance-cache.md)
+#include "rt_hash_grid.glsl"
+#include "rtgi_cache.glsl"
 // the RTGI bounce (trace + hit shading), shared with rtgi_ray.frag, for the combined DI+GI buffer
 #include "rtgi_bounce.glsl"
 
 #if DI_BOOST
-// the young test + its inputs, shared with restir_di_young.frag
+// the young test + its inputs, shared with restir_di_young.glsl
 #include "restir_di_boost.glsl"
+#else
+// RT irradiance cache mover test (rtgi_cache.glsl rtgiCacheIsMover): the velocity at the gather res, bound whenever the
+// view has one (the boost include declares the same unit in the DI_BOOST variant); sampled only with cache flag 8
+SAMPLER_BINDING(10) uniform sampler2D u_velocity;
 #endif
 
 VARY(0) in vec2 var_TexCoord;
@@ -384,8 +396,34 @@ void main() {
 		bp.eyePullback    = u_pbrParms2.z;
 		bp.ignRot         = u_occlusionParms.xy;
 		bp.ignOfs         = u_occlusionParms.zw;
-		vec3 Li; float thit; vec3 bounceDir;
-		if ( rtgiTraceBounce( bp, Pw, Nw, u_modelViewMatrix[3].xyz, d, sfrag, Li, thit, bounceDir ) == 1 ) {
+		// the irradiance cache (r_rtgiCache): the hit reads its cell, this pixel then teaches its own cell what it saw
+		bp.cache          = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ) );
+		const bool cacheOn = rtgiCachePresent( bp.cache );
+		bp.cacheLookup    = cacheOn && bp.cache.lookup;
+		const vec3 eyeW   = u_modelViewMatrix[3].xyz;
+		vec3 Li; float thit; vec3 bounceDir; vec3 LiCache;
+		const int hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );
+#if !DI_BOOST
+		// UPDATE at the primary point (docs/rtx-irradiance-cache.md): this pixel's bounce estimate joins P's cell; a miss
+		// contributes 0 (open directions are part of the cell's cosine-lobe average); a hit on an unshadeable row (2: a
+		// mover / prop without attributes) is UNKNOWN, not dark, and teaches nothing. The boost variant re-shades young
+		// pixels the plain gather already taught, so it does not teach them twice. The view WEAPON (nt.a < 0.5: shaded
+		// here only for the denoiser's continuity) and MOVERS (an NPC, a door, a platform: told from the camera's own
+		// motion through the velocity) never teach - a moving mesh mints a thousand garbage world cells a frame.
+		if ( cacheOn && bp.cache.update && hit != 2 && nt.a >= 0.5 ) {
+			bool mover = false;
+			if ( bp.cache.moverTest ) {
+				vec2 uvc = sfrag * u_screenCorrection.xy;
+				vec2 vel = texture( u_velocity, uvc ).rg;
+				vel.y = ( u_windowCoord.z < 0.0 ) ? -vel.y : vel.y;
+				mover = rtgiCacheIsMover( uvc, vel, Pw, u_prevMvpMatrix, u_localParam0.xy, u_windowCoord.z, u_screenCorrection.xy );
+			}
+			if ( !mover ) {
+				rtgiCacheUpdate( bp.cache, Pw, Nw, eyeW, ( hit == 1 ) ? LiCache : vec3( 0.0 ) );
+			}
+		}
+#endif
+		if ( hit == 1 ) {
 			vec3 gi = Li * u_pbrParms2.w;
 			if ( u_specularParms.y > 0.0 ) {
 				gi *= pow( exp( d * u_specularParms.z ), u_specularParms.y );		// rtgi_apply's fog transmittance

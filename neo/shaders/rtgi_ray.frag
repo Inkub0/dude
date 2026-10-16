@@ -22,6 +22,13 @@
 //   u_depthTexRecip.xy    = gl_FragCoord -> _currentDepth tc
 //   u_windowCoord.z       = view-Y sign (-1 Vulkan top-down)
 //   u_windowCoord.w       = r_rtLightTextures: 1 = attenuate the hit with each light's real cookie + falloff textures
+//   --- r_rtgiCache (the RT irradiance cache, docs/rtx-irradiance-cache.md; rtgi_cache.glsl's shared packing) ---
+//   u_alphaTest.xy        = cache SLOT buffer device address (bit-cast; 0 = no cache)   [u_particleRadius is the IGN here]
+//   u_channelMask         = ( accumulation buffer address lo, hi, slot mask, tan( cell angle / 2 ) )
+//   u_skinParms           = ( cached-term scale, frame stamp, flags [1 update, 2 lookup, 8 velocity valid], - )
+//   u_contactParms        = ( evict age, per-sample clamp, albedo clamp, - )
+//   u_prevMvpMatrix       = LAST frame's world -> view (the mover test's camera-only reprojection)
+//   unit 10               = per-object velocity (full res; currUV - prevUV, +Y-up): movers never teach the cache
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_buffer_reference_uvec2 : require	// construct the geo-table pointer from u_rtParms.zw (uvec2)
 #extension GL_EXT_nonuniform_qualifier : require		// RR4: nonuniformEXT index into the bindless texture array
@@ -32,6 +39,7 @@
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;   // xyz = view-space normal, a = weapon/AO mask
+SAMPLER_BINDING(10) uniform sampler2D u_velocity;      // RT irradiance cache mover test (sampled only with cache flag 8)
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -44,6 +52,9 @@ layout(location = 2) out vec4 outNormal;	// IN_NORMAL_ROUGHNESS: world normal, N
 // gather ray can hit a different surface. Declared by rt_light_tex.glsl (which also samples the scene
 // lights' cookie / falloff textures from it, Stage G).
 #include "rt_light_tex.glsl"
+// the RT irradiance cache the bounce hit reads and the primary point feeds (docs/rtx-irradiance-cache.md)
+#include "rt_hash_grid.glsl"
+#include "rtgi_cache.glsl"
 // the bounce itself (trace + hit shading), shared with the ReSTIR DI combined gather
 #include "rtgi_bounce.glsl"
 
@@ -141,8 +152,27 @@ void main() {
 	bp.eyePullback    = u_localParam1.w;
 	bp.ignRot         = u_particleRadius.xy;
 	bp.ignOfs         = u_particleRadius.zw;
-	vec3  Li; float thit; vec3 bounceDir;
-	int   hit = rtgiTraceBounce( bp, Pw, Nw, u_modelViewMatrix[3].xyz, d, sfrag, Li, thit, bounceDir );
+	// the irradiance cache (r_rtgiCache): the hit reads its cell, this pixel then teaches its own cell what it saw.
+	// This pass bounces the fast (DIFORWARD) lights too, so only LiCache - without them - is learned.
+	bp.cache          = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_alphaTest.x ), floatBitsToUint( u_alphaTest.y ) ) );
+	const bool cacheOn = rtgiCachePresent( bp.cache );
+	bp.cacheLookup    = cacheOn && bp.cache.lookup;
+	const vec3 eyeW   = u_modelViewMatrix[3].xyz;
+	vec3  Li; float thit; vec3 bounceDir; vec3 LiCache;
+	int   hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );
+	if ( cacheOn && bp.cache.update && hit != 2 ) {
+		// a miss teaches 0; an unshadeable row (2) teaches nothing; a MOVER (told from the camera's own motion) never teaches
+		bool mover = false;
+		if ( bp.cache.moverTest ) {
+			vec2 uvc = sfrag * u_screenCorrection.xy;
+			vec2 vel = texture( u_velocity, uvc ).rg;
+			vel.y = ( u_windowCoord.z < 0.0 ) ? -vel.y : vel.y;
+			mover = rtgiCacheIsMover( uvc, vel, Pw, u_prevMvpMatrix, u_localParam0.xy, u_windowCoord.z, u_screenCorrection.xy );
+		}
+		if ( !mover ) {
+			rtgiCacheUpdate( bp.cache, Pw, Nw, eyeW, ( hit == 1 ) ? LiCache : vec3( 0.0 ) );
+		}
+	}
 	if ( hit == 0 ) { fragColor = vec4( 0.0 ); return; }
 	if ( hit == 2 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
 	float radius = bp.radius;

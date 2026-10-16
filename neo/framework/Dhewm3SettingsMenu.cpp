@@ -4766,6 +4766,53 @@ static void DrawDbgGroup_RTGI()
 			"bounce (a little cheaper, lights leak through walls). (r_rtgiShadow)" );
 	}
 
+	// --- Irradiance cache: multi-bounce (docs/rtx-irradiance-cache.md) ---
+	ImGui::SeparatorText( "Irradiance Cache (multi-bounce)" );
+	{
+		CvarCheckbox( "Irradiance Cache", r_rtgiCache, "A world-space, camera-adaptive hashed cache of the INDIRECT light every "
+			"surface receives, learned from the GI bounce at each pixel and read back where a bounce ray lands - so a bounce hit "
+			"is lit by the light bouncing onto IT too. Over a few frames the one bounce becomes all orders of diffuse bounce "
+			"(corridor side walls, undersides and ceilings lit from below stop being black) and the bounce the denoiser sees is "
+			"smoother. Off = the one-bounce GI as before. (r_rtgiCache)" );
+		ImGui::BeginDisabled( !r_rtgiCache.GetBool() );
+		CvarSliderF( "Cache Weight", r_rtgiCacheScale, 0.0f, 2.0f, "%.2f", "Weight of the cached (second and later bounce) light "
+			"added at a bounce hit. 1 = physical; lower for a subtler multi-bounce fill. (r_rtgiCacheScale)" );
+		CvarSliderF( "Cache History (ms)", r_rtgiCacheHistoryMs, 0.0f, 2000.0f, "%.0f ms", "How long a cell remembers, in "
+			"milliseconds (the same TIME at 60 or 144 Hz): how long a switched or swinging light's OLD indirect contribution "
+			"can linger against how smooth the cached term is. Default 500. 0 = use the frame count below. (r_rtgiCacheHistoryMs)" );
+		CvarSliderI( "Cache History (frames)", r_rtgiCacheHistory, 1, 255, "Frames of memory per cell (Nmax) when the "
+			"millisecond knob is 0. Default 32. (r_rtgiCacheHistory)" );
+		CvarSliderF( "Cell Angle", r_rtgiCacheCellAngle, 0.001f, 0.02f, "%.4f", "Cache cell width per unit of eye distance "
+			"(tan of half the cell's screen angle; 0.004 is ~10 pixels at 1440p). Smaller = sharper indirect light, fewer "
+			"thin-wall leaks, slower convergence; larger = smoother, blurrier, leaks sooner. (r_rtgiCacheCellAngle)" );
+		{
+			int slotsIdx = idMath::ClampInt( 0, 3, r_rtgiCacheSlotsLog2.GetInteger() - 19 );
+			ImGui::SetNextItemWidth( 240.0f );
+			if ( ImGui::Combo( "Cells##rtgiCacheSlots", &slotsIdx, "512K cells (2 x 8 MB)\0" "1M cells (2 x 16 MB)\0" "2M cells (2 x 32 MB)\0" "4M cells (2 x 64 MB)\0" ) ) {
+				r_rtgiCacheSlotsLog2.SetInteger( 19 + slotsIdx );
+			}
+			AddTooltip( "Cache size. More cells = fewer collisions and dropped updates in large open areas; a change re-allocates "
+				"and clears the cache. Default 1M. (r_rtgiCacheSlotsLog2)" );
+		}
+		CvarCheckbox( "Gradient Reset", r_rtgiCacheReset, "Let the DI gradient restart a cell's history where the direct light "
+			"changed by more than 35% (a switched or swinging light), so the cached indirect term follows at the DI's own speed. "
+			"Diagnostic A/B: if the activity view keeps flashing red in a static scene, compare off and on. (r_rtgiCacheReset)" );
+		{
+			int dbg = idMath::ClampInt( 0, 5, r_rtgiCacheDebug.GetInteger() );
+			ImGui::SetNextItemWidth( 240.0f );
+			if ( ImGui::Combo( "Cache View##rtgiCacheDebug", &dbg, "Off\0Cell colouring\0Cached value\0Cell age\0Cell history (N)\0Cell activity (reset / fresh)\0" ) ) {
+				r_rtgiCacheDebug.SetInteger( dbg );
+			}
+			AddTooltip( "Overlay the cache over the view: 'Cell colouring' tints every cell (dim = not in the cache yet) and "
+				"proves the keying - cells must stay the same size on screen as you move and split at normal-bin faces; "
+				"'Cached value' shows the learned indirect light per cell; 'Cell age' frames since a cell's last update (white "
+				"= evictable, dark red = absent); 'Cell history' N over Nmax (black = absent, 15% grey = just created, white = "
+				"converged); 'Cell activity' red = reset this frame, green = created / seeded this frame, grey = steady - a "
+				"static scene must settle to all grey. (r_rtgiCacheDebug)" );
+		}
+		ImGui::EndDisabled();	// r_rtgiCache
+	}
+
 	ImGui::EndDisabled();	// r_rtgi
 	ImGui::EndDisabled();	// rtCapable
 	EndSettingsGroup();
