@@ -58,6 +58,11 @@
 //   u_pbrParms            = ( gather radius, r_rtgiEmissive, r_rtgiEmissiveClamp, r_rtgiLightScale )
 //   u_pbrParms2           = ( ambient floor, shadow-ray gate, eye pullback per unit depth, r_rtgiIntensity )
 //   u_occlusionParms      = ( IGN rotation cos, sin, IGN offset x, y )   [CPU-hoisted per frame, as RB_RHI_RtgiPass]
+//   --- r_rtgiCache (the RT irradiance cache, docs/rtx-irradiance-cache.md; rtgi_cache.glsl's shared packing) ---
+//   u_particleRadius.zw   = cache SLOT buffer device address (bit-cast; 0 = no cache)
+//   u_channelMask         = ( accumulation buffer address lo, hi, slot mask, tan( cell angle / 2 ) )
+//   u_skinParms           = ( cached-term scale, frame stamp, flags [1 update, 2 lookup, 4 gradient reset], reset threshold )
+//   u_contactParms        = ( evict age, per-sample clamp, albedo clamp, - )
 //   --- R3a disocclusion boost (r_rtReStirDIBoost, docs/rtx-restir-di.md Plan R3) ---
 //   u_tessParms           = ( K picks (0 = off), boost-ON NRD history (<= 0: trigger off), HOLD frames,
 //                             LAST frame's checkerboard parity: 0 = off, 1 / 2 = parity, -1 = NO side data this frame )
@@ -95,6 +100,9 @@
 #include "restir_di_common.glsl"
 // the surface reconstruction, per-light shade and visibility ray, shared with restir_di_gradient.frag (R1)
 #include "restir_di_shade.glsl"
+// the RT irradiance cache the bounce hit reads and the primary point feeds (docs/rtx-irradiance-cache.md)
+#include "rt_hash_grid.glsl"
+#include "rtgi_cache.glsl"
 // the RTGI bounce (trace + hit shading), shared with rtgi_ray.frag, for the combined DI+GI buffer
 #include "rtgi_bounce.glsl"
 
@@ -384,8 +392,22 @@ void main() {
 		bp.eyePullback    = u_pbrParms2.z;
 		bp.ignRot         = u_occlusionParms.xy;
 		bp.ignOfs         = u_occlusionParms.zw;
-		vec3 Li; float thit; vec3 bounceDir;
-		if ( rtgiTraceBounce( bp, Pw, Nw, u_modelViewMatrix[3].xyz, d, sfrag, Li, thit, bounceDir ) == 1 ) {
+		// the irradiance cache (r_rtgiCache): the hit reads its cell, this pixel then teaches its own cell what it saw
+		bp.cache          = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ) );
+		const bool cacheOn = rtgiCachePresent( bp.cache );
+		bp.cacheLookup    = cacheOn && bp.cache.lookup;
+		const vec3 eyeW   = u_modelViewMatrix[3].xyz;
+		vec3 Li; float thit; vec3 bounceDir; vec3 LiCache;
+		const int hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );
+#if !DI_BOOST
+		// UPDATE at the primary point (docs/rtx-irradiance-cache.md): this pixel's bounce estimate joins P's cell; a miss
+		// contributes 0 (open directions are part of the cell's cosine-lobe average). The boost variant re-shades young
+		// pixels the plain gather already taught, so it does not teach them twice.
+		if ( cacheOn && bp.cache.update ) {
+			rtgiCacheUpdate( bp.cache, Pw, Nw, eyeW, ( hit == 1 ) ? LiCache : vec3( 0.0 ) );
+		}
+#endif
+		if ( hit == 1 ) {
 			vec3 gi = Li * u_pbrParms2.w;
 			if ( u_specularParms.y > 0.0 ) {
 				gi *= pow( exp( d * u_specularParms.z ), u_specularParms.y );		// rtgi_apply's fog transmittance

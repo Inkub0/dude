@@ -5,8 +5,9 @@
 // gather (restir_di.frag, r_rtReStirDICombineGI: direct + indirect in ONE buffer, ONE NRD denoise) share one
 // implementation that cannot drift. The caller owns the uniform packing and fills RtgiBounceParms.
 //
-// Needs: renderparms.glsl, rt_light_eval.glsl, rt_light_tex.glsl, GL_EXT_ray_query,
-// GL_EXT_buffer_reference_uvec2, GL_EXT_nonuniform_qualifier.
+// Needs: renderparms.glsl, rt_light_eval.glsl, rt_light_tex.glsl, rt_hash_grid.glsl + rtgi_cache.glsl (the irradiance
+// cache the hit reads, docs/rtx-irradiance-cache.md), GL_EXT_ray_query, GL_EXT_buffer_reference_uvec2,
+// GL_EXT_nonuniform_qualifier.
 // idDrawVert as raw uints (stride 60 B = 15 uints): xyz @0, st @3, normal @5. Same view as ssr_rt.frag.
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertRef { uint w[]; };
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IdxRef  { uint i[]; };
@@ -31,6 +32,11 @@ struct RtgiBounceParms {
 	float eyePullback;		// ray origin pulled toward the eye per unit depth (crease-leak fix)
 	vec2  ignRot;			// per-frame golden-angle IGN lattice rotation (cos, sin), CPU-hoisted
 	vec2  ignOfs;			// per-frame hashed IGN offset, CPU-hoisted
+	// RT irradiance cache (docs/rtx-irradiance-cache.md C2): when cacheLookup, the hit also receives the INDIRECT light
+	// its cell has learned (albedo(H) * E_cache(H) * scale) - the recursion that makes the one bounce multi-bounce. The
+	// caller fills `cache` from the shared uniform packing (rtgi_cache.glsl) and does the UPDATE at its primary point.
+	bool  cacheLookup;
+	RtgiCacheParms cache;
 };
 
 // interleaved gradient noise (ssao.frag): per-pixel dither, denoiser-friendly 3x3 spread.
@@ -50,8 +56,12 @@ void onb( vec3 n, out vec3 t, out vec3 b ) {
 // Trace + shade the bounce for the surface point Pw / normal Nw (world), seen from eyeW at view depth d, dithered
 // by the SCREEN pixel sfrag. Returns 0 = no bounce (miss / degenerate; Li = 0), 1 = shaded hit (Li = incoming
 // radiance, thit = hit distance), 2 = hit on an unshadeable row (Li = 0; rtgi_ray.frag keeps its alpha-1 output).
-int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, vec2 sfrag, out vec3 Li, out float thit, out vec3 outDir ) {
+// LiCache = the part of Li the irradiance cache may LEARN at the caller's primary point: everything but the direct
+// contribution of DUDE_LIGHT_DIFORWARD lights (flashlight, muzzle flashes, projectiles - fast lights whose bounce
+// would otherwise lag in the cache for Nmax frames). Equals Li when bp.skipForwardLights (the DI gather).
+int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, vec2 sfrag, out vec3 Li, out float thit, out vec3 outDir, out vec3 LiCache ) {
 	Li = vec3( 0.0 );
+	LiCache = vec3( 0.0 );
 	thit = 0.0;
 	outDir = Nw;
 	// one cosine-weighted hemisphere direction, IGN re-oriented per frame (rtao_ray.frag: a value-phase
@@ -134,17 +144,20 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 	// and the 1/pi * pi (cosine-sampling) factors are applied at the H6c consume site, so here we return
 	// the hit's lit colour. bp.ambientFloor is a small ambient floor (0 keeps it a pure bounce).
 	Li = albedo * bp.ambientFloor;
+	LiCache = Li;
 	vec3  domContrib = vec3( 0.0 );			// H6d: the brightest reaching light's contribution, for one shadow ray
 	vec3  domDir = vec3( 0.0 );
 	float domDist = 0.0;
 	float domLum = -1.0;
+	bool  domFast = false;					// the dominant light is a DIFORWARD (fast) light: not part of LiCache
 	if ( bp.realLights ) {												// r_rtgi real scene lights
 		RtLights lights = RtLights( bp.lightAddr );
 		uint nLights = bp.nLights;
 		bool gate = bp.gate;
 		for ( uint li = 0u; li < nLights; li++ ) {
 			if ( gate && !dudeLightInRange( lights, li, hitWorld ) ) { continue; }
-			if ( bp.skipForwardLights && ( lights.l[ li ].flags & DUDE_LIGHT_DIFORWARD ) != 0u ) { continue; }
+			const bool fast = ( lights.l[ li ].flags & DUDE_LIGHT_DIFORWARD ) != 0u;
+			if ( bp.skipForwardLights && fast ) { continue; }
 			vec3  ldir; float dl;
 			dudeLightDir( lights, li, hitWorld, ldir, dl );
 			float ndl = max( dot( hitN, ldir ), 0.0 );
@@ -157,9 +170,10 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 			if ( atten.r + atten.g + atten.b <= 0.0 ) { continue; }
 			vec3 contrib = albedo * lights.l[ li ].color * ( atten * ndl * bp.lightScale );
 			Li += contrib;
+			if ( !fast ) { LiCache += contrib; }								// a fast light's bounce is never learned
 			// track the DOMINANT (brightest) reaching light at this hit for the H6d shadow ray
 			float lum = dot( contrib, vec3( 0.299, 0.587, 0.114 ) );
-			if ( lum > domLum ) { domLum = lum; domContrib = contrib; domDir = ldir; domDist = dl; }
+			if ( lum > domLum ) { domLum = lum; domContrib = contrib; domDir = ldir; domDist = dl; domFast = fast; }
 		}
 	}
 	// RR16g: self-illumination sampled PER-PIXEL from the additive glow stage (bindless slot in flags bits
@@ -176,6 +190,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		float ep = max( max( e.r, e.g ), e.b );
 		if ( ep > bp.emissiveClamp ) { e *= bp.emissiveClamp / ep; }
 		Li += e;
+		LiCache += e;
 	}
 
 	// H6d (docs/rtx-rtgi.md): one shadow ray at the bounce hit toward the DOMINANT reaching light, so a light
@@ -190,7 +205,18 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		while ( rayQueryProceedEXT( srq ) ) { }
 		if ( rayQueryGetIntersectionTypeEXT( srq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ) {
 			Li = max( Li - domContrib, vec3( 0.0 ) );				// dominant light occluded: drop its leaked contribution
+			if ( !domFast ) { LiCache = max( LiCache - domContrib, vec3( 0.0 ) ); }
 		}
+	}
+
+	// RT irradiance cache (docs/rtx-irradiance-cache.md C2): the INDIRECT light the hit's own cell has learned - what
+	// bounced onto H from everywhere else - lights H exactly as its direct term does (albedo * irradiance-like term,
+	// Doom's convention: no 1/pi). A miss / unresolved cell adds 0, so a cold cache is the plain one bounce. The albedo
+	// is clamped so the recursion E(P) = L(H) + albedo(H) E(H) stays strictly convergent on white materials.
+	if ( bp.cacheLookup ) {
+		vec3 cached = min( albedo, vec3( bp.cache.albedoClamp ) ) * rtgiCacheLookup( bp.cache, hitWorld, hitN, eyeW ) * bp.cache.scale;
+		Li += cached;
+		LiCache += cached;
 	}
 
 	return 1;

@@ -9294,7 +9294,7 @@ static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	cp.tanAlphaHalf = idMath::ClampFloat( 0.0005f, 0.05f, r_rtgiCacheCellAngle.GetFloat() );
 	cp.scale        = idMath::ClampFloat( 0.0f, 4.0f, r_rtgiCacheScale.GetFloat() );
 	cp.evictAge     = 0;			// C3: stamp-based eviction
-	cp.flags        = 0;			// C2: update + lookup; C3: gradient reset
+	cp.flags        = 1u | 2u;		// update at the primary point + lookup at the bounce hit (C2); C3 adds 4 = gradient reset
 	cp.resetThresh  = 0.0f;
 	cp.sampleClamp  = 64.0f;		// a 1-spp firefly (peak channel) must not own a cell for Nmax frames
 	cp.albedoClamp  = 0.9f;			// keeps the bounce recursion strictly convergent on white materials

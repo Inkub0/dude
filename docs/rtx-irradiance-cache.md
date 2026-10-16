@@ -188,3 +188,42 @@ wall when crossing a level boundary is expected, not a bug), (b) split along the
 wall never share a tint across their edge), (c) are all DIM at C1 (nothing claims cells yet). `r_vkGpuTime 2` must
 list `rtgi.cache` at ~0.05-0.1 ms (1M slots, almost all early-outs) and the first frame after enabling / a level
 load adds the clear once. With `r_rtgiCache 0` nothing changes and no `rtgi.cache` scope appears.
+
+### C2 - update at P, lookup at H (what exists)
+
+- `rtgi_bounce.glsl`: `RtgiBounceParms.cacheLookup / cache`; after the hit's direct light + emissive + dominant-light
+  shadow ray, `Li += min( albedo, albedoClamp ) * rtgiCacheLookup( H, hitN, eye ) * scale`. `rtgiTraceBounce` gained an
+  `out vec3 LiCache` = Li minus the DIFORWARD lights' direct contribution (tracked per light, the dominant-shadow
+  subtraction applied to it only when the dominant light is not fast) - so the flashlight / muzzle / projectile
+  bounce is never learned even in the standalone RTGI pass, which bounces them for display.
+- `restir_di.frag`: builds `bp.cache` from `u_particleRadius.zw` + the shared slots; after the trace, `#if !DI_BOOST`,
+  `rtgiCacheUpdate( P, N, eye, hit == 1 ? LiCache : 0 )` - a miss teaches 0 (open directions belong to the cell's
+  cosine-lobe average), the boost variant does not teach twice, checkerboard teaches only the traced pixels.
+  `rtgi_ray.frag`: the same with the slot address in `u_alphaTest.xy`.
+- RhiWorld.cpp `RB_RHI_RtgiCacheBegin`: flags = update | lookup whenever the cache is on. `r_rtgiCache 0` =
+  bit-identical: the cache branch is uniform and Li's arithmetic is untouched (LiCache is a separate accumulator).
+- SPIR-V after C2 (same instruments as the C0 baseline; `spirv-opt -O` counts added since they approximate what
+  the driver sees better than the raw emission):
+
+  | shader | instructions | function variables | atomics | bytes | `-O` instructions pre -> post |
+  |---|---|---|---|---|---|
+  | restir_di.frag | 4473 -> 5800 | 306 -> 401 | 7 | 75192 -> 96868 | 3078 -> 3764 (+22%) |
+  | restir_di_boost.frag | 4997 -> 5866 | 360 -> 419 | 0 (lookup only) | 83012 -> 97364 | - |
+  | rtgi_ray.frag | 2582 -> 3911 | 162 -> 256 | 7 | 44284 -> 66000 | 1379 -> 2082 |
+  | restir_di_gradient.frag | unchanged until C3 | | | | |
+
+  Two key derivations per traced pixel (the update at P, the lookup at H) are most of the growth; the live state
+  added across the bounce call is the parms struct (uniform-derived, rematerialisable) + `LiCache` (3 scalars) +
+  the claim loop's temporaries, which die before the DI shade resumes. The real register verdict is the
+  `r_vkPipelineStats restir_di` readout, cache off vs on (C4).
+
+**C2 A/B procedure (user).** Same spot, same settings, `r_rtgi 1` (dude_rtx 2 has it): toggle `r_rtgiCache 0 / 1`
+and look at (1) a corridor side wall whose light fixture points at the floor, (2) the underside of a counter /
+console lip, (3) a ceiling in a room lit from below, (4) the far end of a dark passage a bright room spills into.
+With the cache on each must brighten over ~1-2 s (the first frames show the one bounce; `r_rtgiCacheDebug 4` goes
+white as cells converge) and then hold steady - no pulsing, no creeping brighter indefinitely (the albedo clamp 0.9
++ scale 1 bound the series). `r_rtgiCacheDebug 2` shows what the cells hold: smooth, low-frequency, no single-cell
+fireflies (the per-sample clamp 64 and the resolve mean take care of those); `1` shows every lit cell bright (claimed)
+after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` (or `rtgi.ray`) with the cache
+0/1, averaged, plus `rtgi.cache`; expected <= 0.2 ms total at 1440p. If `restir.di.gather` grows by more than
+~0.3 ms the key derivation is worth hoisting (one `hgMakeKey` for P reused for the update + the gradient).
