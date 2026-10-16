@@ -1,0 +1,90 @@
+// DUDE RT light-grid FILL (docs/rtx-light-grid.md L1): one thread per grid cell, once per frame AFTER the scene-light
+// buffer is gathered and BEFORE the DI gather / bounce that consume it (RhiWorld.cpp RB_RHI_LightGridFill). For each
+// cell: stream every scene light, importance = flux x geometry at the cell centre, and keep `slots` light candidates by
+// `slots` parallel weighted reservoirs (each an i.i.d. importance draw), plus the cell's total importance (sumImp, the
+// consume pdf denominator). The grid is DENSE and rewritten whole every frame - no clear, no cross-frame history (the
+// feedback learning of L4 would add it). An out-of-range cell writes count 0 and the consumer falls back to its old path.
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+// rt_light_eval.glsl: RtLight / RtLights / DUDE_LIGHT_* / dudeLightInRange. rtgi_light_grid.glsl: LgGrid + mapping + layout.
+#include "rt_light_eval.glsl"
+#include "rtgi_light_grid.glsl"
+
+#define LG_MAX_SLOTS 16u			// fixed reservoir array size; r_rtLightGridSlots is clamped to this
+
+layout( local_size_x = 64 ) in;
+
+layout( push_constant ) uniform PC {
+	uint  gridLo, gridHi;			// grid buffer device address
+	uint  lightLo, lightHi;			// scene-light buffer device address
+	uint  nLights;					// lights in the buffer (fog rows excluded by the CPU count)
+	uint  cascades, res, slots;		// grid dimensions (slots <= LG_MAX_SLOTS)
+	float cellBase;					// cascade-0 cell size (units)
+	float camX, camY, camZ;			// camera position (cascade snapping)
+	uint  frame;					// rng seed
+	float parallelFlux;				// flux weight for parallel (sun) lights, which have no 1/d^2 term
+} pc;
+
+void main() {
+	uint cellIndex = gl_GlobalInvocationID.x;
+	uint total = pc.cascades * pc.res * pc.res * pc.res;
+	if ( cellIndex >= total ) { return; }
+
+	LgGrid   grid   = LgGrid( uvec2( pc.gridLo, pc.gridHi ) );
+	RtLights lights = RtLights( uvec2( pc.lightLo, pc.lightHi ) );
+	uint     slots  = min( pc.slots, LG_MAX_SLOTS );
+	int      base   = int( cellIndex * lgStride( slots ) );
+
+	vec3  camPos = vec3( pc.camX, pc.camY, pc.camZ );
+	int   c;
+	vec3  center = lgCellCenter( cellIndex, camPos, pc.cellBase, int( pc.res ), c );
+	float cs     = pc.cellBase * float( 1 << c );
+	float cellHalfDiag = cs * 0.8660254;	// sqrt(3)/2 * cell size: a light reaching any corner is a candidate
+
+	uint  chosen[ LG_MAX_SLOTS ];
+	float chosenImp[ LG_MAX_SLOTS ];
+	for ( uint k = 0u; k < LG_MAX_SLOTS; k++ ) { chosen[ k ] = 0u; chosenImp[ k ] = 0.0; }
+
+	float sumImp = 0.0;
+	uint  rng = lgPcg( cellIndex * 9781u + pc.frame * 6271u + 0x9E3779B9u );
+
+	for ( uint li = 0u; li < pc.nLights; li++ ) {
+		uint flags = lights.l[ li ].flags;
+		if ( ( flags & DUDE_LIGHT_FOGVOLUME ) != 0u ) { continue; }		// a fog row, not a light (guard; outside nLights anyway)
+		// in-range: the cell centre within the light's cull sphere, widened by the cell half-diagonal
+		vec4 cull = lights.l[ li ].cull;
+		vec3 cd   = cull.xyz - center;
+		float rr  = cull.w + cellHalfDiag;
+		if ( dot( cd, cd ) > rr * rr ) { continue; }
+		// importance = flux * geometry. flux = emitted power proxy (luminance x reach); geom = inverse-square (clamped
+		// to the cell extent). Parallel suns have no distance term - a fixed flux weight keeps them a candidate everywhere.
+		float lum = dot( lights.l[ li ].color, vec3( 0.2126, 0.7152, 0.0722 ) );
+		if ( lum <= 0.0 ) { continue; }
+		float imp;
+		if ( ( flags & DUDE_LIGHT_PARALLEL ) != 0u ) {
+			imp = lum * pc.parallelFlux;
+		} else {
+			float rad  = max( lights.l[ li ].radius, 1.0 );
+			vec3  pd   = center - lights.l[ li ].pos;
+			float d2   = max( dot( pd, pd ), cs * cs );
+			imp = lum * ( rad * rad ) / d2;
+		}
+		if ( imp <= 0.0 ) { continue; }
+		sumImp += imp;
+		float accept = imp / sumImp;									// A-Res reservoir probability (shared stream, per-slot draw)
+		for ( uint k = 0u; k < slots; k++ ) {
+			if ( lgRand( rng ) < accept ) { chosen[ k ] = li; chosenImp[ k ] = imp; }
+		}
+	}
+
+	if ( sumImp > 0.0 ) {
+		grid.g[ base ]     = slots;										// count
+		grid.g[ base + 1 ] = floatBitsToUint( sumImp );
+		for ( uint k = 0u; k < slots; k++ ) {
+			grid.g[ base + int( LG_HEADER + 2u * k ) ]      = chosen[ k ];
+			grid.g[ base + int( LG_HEADER + 2u * k + 1u ) ] = floatBitsToUint( chosenImp[ k ] );
+		}
+	} else {
+		grid.g[ base ] = 0u;											// no in-range light: empty, the consumer falls back
+	}
+}

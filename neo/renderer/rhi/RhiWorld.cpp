@@ -599,6 +599,32 @@ static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef, bool t
 static void RB_RHI_RtgiCachePack( rhi::RenderParams &parms, const rtgiCacheParms_t &cp, bool slotInParticleRadius );
 static void RB_RHI_RtgiCacheResolve( rhi::RHI *r );
 
+// ---- RT world-space light grid (docs/rtx-light-grid.md): a ReGIR candidate grid that replaces the DI/bounce exhaustive
+// per-pixel RIS over every light. Filled once per frame by light_grid_fill.comp; consumed by the DI gather (L2) and the
+// bounce (L3). A perf feature: default off = the exhaustive/uniform RIS, bit-identical.
+struct rtLightGridParms_t {
+	unsigned long long	gridAddr;			// device address
+	float				camPos[3];			// cascade snapping centre
+	float				cellBase;			// cascade-0 cell size (r_rtLightGridCellBase)
+	int					res;				// cells per cascade axis (r_rtLightGridRes)
+	int					cascades;			// camera-centred cascades (r_rtLightGridCascades)
+	int					slots;				// candidates per cell (r_rtLightGridSlots)
+};
+struct rtLightGridState_t {
+	rhi::BufferHandle	gridBuf = 0;
+	unsigned long long	gridAddr = 0;
+	int					sizeKey = 0;		// slots/res/cascades the buffer was sized for (a change re-allocates)
+	bool				wasEnabled = false;
+	bool				readyThisView = false;
+	bool				filledThisFrame = false;	// the fill ran this frame (once, even if several passes consume it)
+	rhi::ShaderHandle	fillProg = 0;		// light_grid_fill.comp
+	rtLightGridParms_t	parms;
+};
+static rtLightGridState_t rhiRtLightGrid;
+static bool RB_RHI_LightGridBegin( rhi::RHI *r, const viewDef_t *viewDef );									// alloc + parms; false = off / unsupported
+static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int numLights );				// the once-per-frame fill dispatch
+static void RB_RHI_LightGridPack( rhi::RenderParams &parms, const rtLightGridParms_t &gp );					// consume uniforms (L2/L3) + the debug overlay
+
 // ---- shared camera temporal state (docs/fsr-temporal-pipeline.md, increment A1) ----
 // The SSAO and SSR temporal resolves both reproject last frame's history by pure camera
 // motion, so both need the previous rendered frame's world->clip. They kept two private
@@ -4119,6 +4145,11 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiRtgiCache.readyThisView = rhiRtgiCache.resolvedThisView = false;
 	rhiRtgiCache.wasEnabled = false;
 	rhiRtgiCache.clearPending = true;
+	// RT light grid: same lesson - vid_restart frees every buffer and reissues handles; zero the grid handle (not
+	// destroy) so the next Begin re-allocates instead of the fill writing through a stale device address (page fault).
+	rhiRtLightGrid.gridBuf = 0;		rhiRtLightGrid.gridAddr = 0;	rhiRtLightGrid.fillProg = 0;
+	rhiRtLightGrid.sizeKey = 0;		rhiRtLightGrid.wasEnabled = false;
+	rhiRtLightGrid.readyThisView = rhiRtLightGrid.filledThisFrame = false;
 	rhiRtReflHistRT[0] = rhiRtReflHistRT[1] = 0;
 	rhiRtReflHistIdx = 0;		rhiRtReflHistW = rhiRtReflHistH = 0;
 	rhiRtReflHistValid = false;
@@ -8005,6 +8036,10 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( lightAddr == 0 || numLights <= 0 ) {
 		return;		// no scene lights -> nothing to resample
 	}
+	// RT light grid (docs/rtx-light-grid.md): fill the per-cell candidate grid once this frame, before the gather that
+	// consumes it (L2). Default off = no-op. The fill guards itself to once per frame across passes.
+	RB_RHI_LightGridBegin( r, viewDef );
+	RB_RHI_LightGridFill( r, lightAddr, numLights );
 	rhi::ShaderHandle prog = r->LoadShader( "restir_di" );	// fresh 1-spp gather -> radiance
 	if ( !prog ) {
 		return;
@@ -9470,6 +9505,163 @@ void RB_RHI_RtgiCacheDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_ForgetTexBinds();
 }
 
+// ====================================================================================================================
+// RT world-space light grid (docs/rtx-light-grid.md L0/L1): the grid buffer, the once-per-frame fill, the consume
+// pack and the debug overlay. The grid is DENSE and rewritten whole each frame, so there is no clear / history (unlike
+// the cache); a slot/res/cascade change (ComputeGfxCfgSignature) idles the device and re-allocates here.
+// ====================================================================================================================
+static bool RB_RHI_LightGridBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
+	rtLightGridState_t &g = rhiRtLightGrid;
+	g.readyThisView = false;
+	memset( &g.parms, 0, sizeof( g.parms ) );
+	if ( !r_rtLightGrid.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN || !r->SupportsRayQuery() ) {
+		g.wasEnabled = false;
+		return false;
+	}
+	const int slots    = idMath::ClampInt( 1, 16, r_rtLightGridSlots.GetInteger() );
+	const int res      = idMath::ClampInt( 8, 64, r_rtLightGridRes.GetInteger() );
+	const int cascades = idMath::ClampInt( 1, 4, r_rtLightGridCascades.GetInteger() );
+	const int sizeKey  = slots | ( res << 8 ) | ( cascades << 16 );		// identity of the buffer size (all three are in the gfx-cfg signature)
+	if ( g.gridBuf != 0 && g.sizeKey != sizeKey ) {
+		// a size cvar changed: it is in ComputeGfxCfgSignature, so the device idled at this frame's start; DestroyBuffer
+		// defers the free behind the frames in flight regardless
+		r->DestroyBuffer( g.gridBuf );
+		g.gridBuf = 0;
+		g.gridAddr = 0;
+	}
+	if ( g.gridBuf == 0 ) {
+		const long long cells       = (long long)cascades * res * res * res;
+		const long long strideWords = 2 + 2 * (long long)slots;			// header (count, sumImp) + slots * (light, imp)
+		const long long bytes       = cells * strideWords * 4;
+		g.gridBuf  = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, (int)bytes, NULL );
+		g.gridAddr = ( g.gridBuf != 0 ) ? r->GetBufferDeviceAddress( g.gridBuf ) : 0;
+		if ( g.gridBuf == 0 || g.gridAddr == 0 ) {
+			if ( g.gridBuf != 0 ) { r->DestroyBuffer( g.gridBuf ); }
+			g.gridBuf = 0;
+			g.gridAddr = 0;
+			static bool warned = false;
+			if ( !warned ) { warned = true; common->Warning( "r_rtLightGrid: the grid buffer (%lld MB) could not be created - light grid off", bytes >> 20 ); }
+			return false;
+		}
+		g.sizeKey = sizeKey;
+		common->Printf( "r_rtLightGrid: %lld cells (%lld MB)\n", cells, bytes >> 20 );
+	}
+	if ( g.fillProg == 0 ) {
+		g.fillProg = r->LoadComputeShader( "light_grid_fill" );			// warns once if the .comp.spv is missing; the grid then stays off
+		if ( g.fillProg == 0 ) {
+			return false;
+		}
+	}
+	g.wasEnabled = true;
+	rtLightGridParms_t &gp = g.parms;
+	gp.gridAddr   = g.gridAddr;
+	const idVec3 &eye = viewDef->renderView.vieworg;
+	gp.camPos[0]  = eye.x;
+	gp.camPos[1]  = eye.y;
+	gp.camPos[2]  = eye.z;
+	gp.cellBase   = idMath::ClampFloat( 8.0f, 512.0f, r_rtLightGridCellBase.GetFloat() );
+	gp.res        = res;
+	gp.cascades   = cascades;
+	gp.slots      = slots;
+	g.readyThisView = true;
+	return true;
+}
+
+static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int numLights ) {
+	rtLightGridState_t &g = rhiRtLightGrid;
+	if ( !g.readyThisView || g.filledThisFrame || g.fillProg == 0 || lightAddr == 0 || numLights <= 0 ) {
+		return;		// filled once per frame; the first consumer that has the light buffer triggers it
+	}
+	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; unsigned int frame; float parallelFlux; } pc;	// light_grid_fill.comp PC
+	pc.gridLo      = (unsigned int)( g.gridAddr & 0xFFFFFFFFull );
+	pc.gridHi      = (unsigned int)( g.gridAddr >> 32 );
+	pc.lightLo     = (unsigned int)( lightAddr & 0xFFFFFFFFull );
+	pc.lightHi     = (unsigned int)( lightAddr >> 32 );
+	pc.nLights     = (unsigned int)numLights;
+	pc.cascades    = (unsigned int)g.parms.cascades;
+	pc.res         = (unsigned int)g.parms.res;
+	pc.slots       = (unsigned int)g.parms.slots;
+	pc.cellBase    = g.parms.cellBase;
+	pc.camX        = g.parms.camPos[0];
+	pc.camY        = g.parms.camPos[1];
+	pc.camZ        = g.parms.camPos[2];
+	pc.frame       = (unsigned int)tr.frameCount;
+	pc.parallelFlux = 4.0f;		// flux weight for parallel (sun) lights (no 1/d^2): keeps a sun a candidate everywhere (L5 tuning)
+	rhi::ComputeArgs ca = rhi::ComputeArgs();
+	ca.shader = g.fillProg;
+	ca.pushConstants = &pc;
+	ca.pushConstantSize = (int)sizeof( pc );
+	const unsigned int cells = (unsigned int)g.parms.cascades * (unsigned int)g.parms.res * (unsigned int)g.parms.res * (unsigned int)g.parms.res;
+	ca.groupsX = ( cells + 63u ) / 64u;
+	ca.groupsY = 1;
+	ca.groupsZ = 1;
+	ca.midScene = true;				// inside the open scene, before the DI gather that reads the grid (L2)
+	r->GpuScopeBegin( "lightgrid.fill" );	// r_vkGpuTime 2
+	r->Dispatch( ca );
+	r->GpuScopeEnd();
+	g.filledThisFrame = true;
+}
+
+// The grid params for a consumer (DI gather L2, bounce L3, debug): gridAddr + cellBase + (res|cascades|slots) packed
+// into ONE spare uniform vec4 (u_occlusionParms). The camera position is NOT packed - the consumer derives it from
+// u_modelViewMatrix[3] (view->world), which every RT pass already has. rtgi_light_grid.glsl lgParmsFromVec4 unpacks it.
+static void RB_RHI_LightGridPack( rhi::RenderParams &parms, const rtLightGridParms_t &gp ) {
+	const unsigned int gridLo = (unsigned int)( gp.gridAddr & 0xFFFFFFFFull ), gridHi = (unsigned int)( gp.gridAddr >> 32 );
+	const unsigned int packed = (unsigned int)gp.res | ( (unsigned int)gp.cascades << 8 ) | ( (unsigned int)gp.slots << 16 );
+	memcpy( &parms.occlusionParms[0], &gridLo, sizeof( gridLo ) );
+	memcpy( &parms.occlusionParms[1], &gridHi, sizeof( gridHi ) );
+	parms.occlusionParms[2] = gp.cellBase;
+	memcpy( &parms.occlusionParms[3], &packed, sizeof( packed ) );
+}
+
+void RB_RHI_LightGridDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
+	const rtLightGridState_t &g = rhiRtLightGrid;
+	if ( r_rtLightGridDebug.GetInteger() <= 0 || !g.readyThisView || !rhiNormalReadyThisView || rhiNormalResultRT == 0
+			|| globalImages->currentDepthImage->uploadWidth <= 0 ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "light_grid_debug" );
+	if ( !prog ) {
+		return;
+	}
+	float invView[16];
+	if ( !RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
+		return;
+	}
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	const float *proj  = viewDef->projectionMatrix;
+	const float invP00 = ( proj[0] != 0.0f ) ? 1.0f / proj[0] : 1.0f;
+	const float invP11 = ( proj[5] != 0.0f ) ? 1.0f / proj[5] : 1.0f;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );		// u_modelViewMatrix = view->world (camPos = [3].xyz)
+	parms.localParam0[0] = invP00;
+	parms.localParam0[1] = invP11;
+	parms.localParam0[3] = (float)r_rtLightGridDebug.GetInteger();
+	parms.screenCorrection[0] = 1.0f / w;
+	parms.screenCorrection[1] = 1.0f / h;
+	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
+	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
+	rhi::FillDepthParms( parms, proj );
+	parms.windowCoord[2] = -1.0f;										// VK-only: top-down view-Y sign
+	RB_RHI_LightGridPack( parms, g.parms );								// grid vec4 in u_occlusionParms
+
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
+	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+	backEnd.glState.tmu[1].current2DMap = -1;
+	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
+	RB_RHI_ForgetTexBinds();
+}
+
 /*
 ===================
 RB_RHI_RtgiDebugOverlay
@@ -10645,6 +10837,7 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 	rhiNormalReadyThisView = false;	rhiNormalMrtThisView = false;	rhiNormalVelThisView = false;	rhiNormalAlbedoThisView = false;
 	rhiPrepassWeaponDeferred = false;	rhiWorldDepthThisView = false;
 	rhiRtgiCache.readyThisView = false;	// RT irradiance cache: set by RB_RHI_RtgiCacheBegin when a GI gather runs with it this view
+	rhiRtLightGrid.readyThisView = rhiRtLightGrid.filledThisFrame = false;	// RT light grid: Begin + the once-per-frame fill re-arm per view (only the primary view consumes it)
 	// ReSTIR DI lighting the scene (docs/rtx-restir-di.md): run the prepasses WORLD-first, the DI chain on that
 	// world-only G-buffer, then draw the deferred view weapon into the same targets. The weapon's silhouette then
 	// never uncovers history-less pixels in the denoiser (the fried halo); every other consumer (AO, SSR, FSR2,

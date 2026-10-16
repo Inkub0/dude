@@ -1080,6 +1080,12 @@ extern idCVar r_rtgiCacheCellAngle;			// RT irradiance cache: tan(alpha/2), cell
 extern idCVar r_rtgiCacheDebug;				// RT irradiance cache debug overlay: 1 cell colour, 2 cached value, 3 age, 4 N, 5 activity (reset / fresh), 6 servable (C6 tail)
 extern idCVar r_rtgiCacheReset;				// RT irradiance cache: the DI gradient restarts a cell whose direct light changed (diagnostic A/B)
 extern idCVar r_rtgiCacheServeError;		// RT irradiance cache: C6 tail serve gate - default 0.33 = by the mean's relative standard error; 0 = by age (N >= SEED_N), the original C6 A/B
+extern idCVar r_rtLightGrid;				// RT light grid (docs/rtx-light-grid.md): per-cell importance-sampled light candidates replace the DI/bounce exhaustive RIS (perf)
+extern idCVar r_rtLightGridSlots;			// RT light grid: candidates stored per cell (reconfiguring: joins ComputeGfxCfgSignature)
+extern idCVar r_rtLightGridRes;				// RT light grid: cells per cascade axis (reconfiguring)
+extern idCVar r_rtLightGridCascades;		// RT light grid: camera-centred cascades (reconfiguring)
+extern idCVar r_rtLightGridCellBase;		// RT light grid: cascade-0 cell size in units (per-frame, no realloc)
+extern idCVar r_rtLightGridDebug;			// RT light grid debug overlay: 1 cascade, 2 candidate count, 3 dominant light, 4 importance
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
 extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compositing (dissolves the static firefly grid)

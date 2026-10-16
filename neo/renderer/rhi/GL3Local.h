@@ -238,6 +238,7 @@ void RB_RHI_RtgiDebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
 void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_s *viewDef );		// Stage D: DI direct lighting added at the opaque/translucent split
 void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );
 void RB_RHI_RtgiCacheDebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );	// r_rtgiCacheDebug: the RT irradiance cache's cells / values / age / history over the view
+void RB_RHI_LightGridDebugOverlay( rhi::RHI *r, const viewDef_s *viewDef );	// r_rtLightGridDebug: the RT light grid's cascades / candidate counts / dominant light over the view
 void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_s *viewDef );
 // DUDE volumetric lighting (docs/volumetric-lighting.md): light shafts marched into the HDR scene, after fog
 void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_s *viewDef );

@@ -3004,6 +3004,8 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	mixF( r_rtReStirDIResScale );
 	// RT irradiance cache (docs/rtx-irradiance-cache.md): a slot-count change destroys + re-allocates the two cache buffers
 	mixI( r_rtgiCacheSlotsLog2 );
+	// RT light grid (docs/rtx-light-grid.md): slots / res / cascades change the grid buffer size -> re-allocate
+	mixI( r_rtLightGridSlots ); mixI( r_rtLightGridRes ); mixI( r_rtLightGridCascades );
 	return h;
 }
 

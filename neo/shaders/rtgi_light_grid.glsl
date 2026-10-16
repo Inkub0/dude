@@ -1,0 +1,115 @@
+// DUDE RT WORLD-SPACE LIGHT GRID (docs/rtx-light-grid.md): a ReGIR-style grid of camera-centred cascades. A once-per-
+// frame compute pass (light_grid_fill.comp) fills every cell with `slots` light candidates drawn in proportion to their
+// IMPORTANCE at that cell (flux x geometry), plus the cell's total importance; a shading pixel then RIS-samples over
+// its CELL's candidates instead of over EVERY scene light - O(slots) not O(nLights). This file is the shared cell<->world
+// mapping, the buffer layout and the consume helper, so the fill, the DI/bounce consume and the debug view never drift.
+//
+// Grid: `cascades` cascades, each `res^3` cells, cascade c cell size = cellBase * 2^c, centred on the camera (snapped to
+// the cell size so cells do not swim). A world point picks the smallest cascade whose box contains it, then a cell.
+//
+// Cell record (flat uint buffer `g[]`, stride LG_HEADER + 2*slots uints): [0] count (lights stored, 0 = empty), [1]
+// sumImp (float bits: the cell's total in-range importance, the consume pdf denominator), then per slot { uint light
+// index, float imp bits }. A cold / empty cell has count 0 -> the consumer falls back to its old path (never wrong).
+//
+// Needs buffer_reference (the VK prelude enables it) + GL_EXT_buffer_reference_uvec2 in the including shader.
+
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer LgGrid { uint g[]; };
+
+const uint LG_HEADER = 2u;		// uints before the slot pairs: count, sumImp
+
+// per-cell record stride in uints
+uint lgStride( uint slots ) { return LG_HEADER + 2u * slots; }
+
+// cheap PCG (self-contained: the fill seeds its reservoirs, the consume picks a slot)
+uint lgPcg( uint v ) { uint s = v * 747796405u + 2891336453u; uint w = ( ( s >> ( ( s >> 28u ) + 4u ) ) ^ s ) * 277803737u; return ( w >> 22u ) ^ w; }
+float lgRand( inout uint st ) { st = st * 747796405u + 2891336453u; uint w = ( ( st >> ( ( st >> 28u ) + 4u ) ) ^ st ) * 277803737u; return float( ( w >> 22u ) ^ w ) * ( 1.0 / 4294967296.0 ); }
+
+// --- cell <-> world --------------------------------------------------------------------------------------------------
+// The (0,0,0) corner of cascade c: the camera snapped to the cascade's cell size, minus half the grid, so the res^3
+// cells straddle the camera. Stable as the camera moves within a cell (snap), a half-cell wobble when it crosses one.
+vec3 lgCascadeOrigin( vec3 camPos, float cellBase, int res, int c ) {
+	float cs = cellBase * float( 1 << c );
+	return floor( camPos / cs ) * cs - cs * float( res / 2 );
+}
+
+// The smallest cascade whose box contains p, or -1 (beyond the last). Fills cell[0..res) coords when found.
+int lgPickCascade( vec3 p, vec3 camPos, float cellBase, int res, int cascades, out ivec3 cell ) {
+	cell = ivec3( 0 );
+	for ( int c = 0; c < cascades; c++ ) {
+		float cs  = cellBase * float( 1 << c );
+		vec3  rel = ( p - lgCascadeOrigin( camPos, cellBase, res, c ) ) / cs;
+		if ( all( greaterThanEqual( rel, vec3( 0.0 ) ) ) && all( lessThan( rel, vec3( float( res ) ) ) ) ) {
+			cell = ivec3( rel );
+			return c;
+		}
+	}
+	return -1;
+}
+
+uint lgCellIndex( int c, ivec3 cell, int res ) {
+	return uint( c ) * uint( res * res * res ) + ( uint( cell.z ) * uint( res ) + uint( cell.y ) ) * uint( res ) + uint( cell.x );
+}
+
+// The world centre of a decoded cell (the fill: cellIndex -> c, cell -> centre).
+vec3 lgCellCenter( uint cellIndex, vec3 camPos, float cellBase, int res, out int cOut ) {
+	uint per = uint( res * res * res );
+	int  c   = int( cellIndex / per );
+	uint r   = cellIndex - uint( c ) * per;
+	ivec3 cell = ivec3( int( r % uint( res ) ), int( ( r / uint( res ) ) % uint( res ) ), int( r / uint( res * res ) ) );
+	float cs = cellBase * float( 1 << c );
+	cOut = c;
+	return lgCascadeOrigin( camPos, cellBase, res, c ) + ( vec3( cell ) + 0.5 ) * cs;
+}
+
+// --- consume (L2/L3): the cell that lights world point p, and a candidate draw --------------------------------------
+// Parameters the DI gather / bounce need, packed by the CPU (RhiWorld.cpp RB_RHI_LightGridPack) into spare uniform
+// floats; addresses bit-cast. present() = the grid is live this frame.
+struct LgParms {
+	uvec2 gridAddr;
+	vec3  camPos;
+	float cellBase;
+	int   res;
+	int   cascades;
+	uint  slots;
+};
+
+bool lgPresent( LgParms p ) { return ( p.gridAddr.x | p.gridAddr.y ) != 0u && p.slots > 0u; }
+
+// Build LgParms from the packed uniform vec4 (RB_RHI_LightGridPack: gridAddr lo/hi, cellBase, res|cascades<<8|slots<<16)
+// plus the camera world position (every RT pass has it as u_modelViewMatrix[3].xyz, so it is not packed).
+LgParms lgParmsFromVec4( vec4 v, vec3 camPos ) {
+	LgParms p;
+	p.gridAddr  = uvec2( floatBitsToUint( v.x ), floatBitsToUint( v.y ) );
+	p.camPos    = camPos;
+	p.cellBase  = v.z;
+	uint packed = floatBitsToUint( v.w );
+	p.res       = int( packed & 0xFFu );
+	p.cascades  = int( ( packed >> 8 ) & 0xFu );
+	p.slots     = ( packed >> 16 ) & 0x3Fu;
+	return p;
+}
+
+// The cell record base (uint offset) for world point p, or -1 (beyond the grid / caller falls back).
+int lgCellBase( LgParms p, vec3 world ) {
+	ivec3 cell;
+	int c = lgPickCascade( world, p.camPos, p.cellBase, p.res, p.cascades, cell );
+	if ( c < 0 ) { return -1; }
+	return int( lgCellIndex( c, cell, p.res ) * lgStride( p.slots ) );
+}
+
+uint  lgCount( LgGrid grid, int base )            { return grid.g[ base ]; }
+float lgSumImp( LgGrid grid, int base )           { return uintBitsToFloat( grid.g[ base + 1 ] ); }
+uint  lgSlotLight( LgGrid grid, int base, uint s ){ return grid.g[ base + int( LG_HEADER + 2u * s ) ]; }
+float lgSlotImp( LgGrid grid, int base, uint s )  { return uintBitsToFloat( grid.g[ base + int( LG_HEADER + 2u * s + 1u ) ] ); }
+
+// One candidate from the cell: a uniformly-chosen stored slot. Its light index (out) and its selection pdf q =
+// imp/sumImp (the probability THIS light is a single importance draw) for the RIS weight pHat/q. false = empty cell.
+bool lgDrawCandidate( LgGrid grid, int base, inout uint rng, out uint lightIndex, out float q ) {
+	uint n = lgCount( grid, base );
+	if ( n == 0u ) { lightIndex = 0u; q = 0.0; return false; }
+	uint s = min( uint( lgRand( rng ) * float( n ) ), n - 1u );
+	lightIndex = lgSlotLight( grid, base, s );
+	float sum = lgSumImp( grid, base );
+	q = ( sum > 0.0 ) ? ( lgSlotImp( grid, base, s ) / sum ) : 0.0;
+	return q > 0.0;
+}
