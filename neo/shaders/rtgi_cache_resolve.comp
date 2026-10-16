@@ -53,18 +53,31 @@ void main() {
 		return;
 	}
 	vec3 irr   = rtgiCacheUnpackIrr( sl );
-	uint N     = reset ? 0u : rtgiCacheN( sl );
-	uint flags = RTGI_CACHE_RESET_FLAG;										// a reset request with no samples: restarts on its next sample
+	uint N     = rtgiCacheN( sl );
+	uint cool  = rtgiCacheCooldown( sl );
+	uint flags = 0u;
+	// A reset request RESTARTS the cell (N = 0: the next mean replaces the stale one) only when the cell is not cooling
+	// down from a previous restart. A light that changes every frame - an authored flicker / strobe table, a swinging
+	// cookie - requests every frame, and restarting every frame would pin N at 1: the cell would never hold more than one
+	// frame's mean (the flickering patches under Mars City's fluorescents, user 2026-10-16). Inside the cooldown a request
+	// only re-arms it, so such a cell is restarted once and then BLENDS (alpha >= 1 / Nmax) toward the light's average -
+	// what a cache of a flickering light should hold. A one-shot change (a switch) requests once, restarts at once, and
+	// the cooldown has run out long before the next.
+	if ( reset ) {
+		if ( cool == 0u ) { N = 0u; flags = RTGI_CACHE_RESET_FLAG; }
+		cool = RTGI_CACHE_COOL_FRAMES;
+	} else if ( cool > 0u ) {
+		cool--;
+	}
 	if ( cnt > 0u ) {
 		vec3  mean  = vec3( float( acc.r ), float( acc.g ), float( acc.b ) ) * ( 1.0 / ( RTGI_CACHE_FIXED * float( cnt ) ) );
 		float alpha = max( 1.0 / float( N + 1u ), pc.alphaMin );
 		irr = ( N == 0u ) ? mean : mix( irr, mean, alpha );
 		// activity flags for the debug view (r_rtgiCacheDebug 5): RESET when the cell restarted on request, FRESH when it
 		// was created this frame (N 0 -> 1) or seeded from its coarser parent (the gather's SEEDED bit, consumed here)
-		flags = reset ? RTGI_CACHE_RESET_FLAG
-		      : ( ( N == 0u || ( sl.irrBN & RTGI_CACHE_SEEDED_BIT ) != 0u ) ? RTGI_CACHE_FRESH_BIT : 0u );
+		if ( flags == 0u && ( N == 0u || ( sl.irrBN & RTGI_CACHE_SEEDED_BIT ) != 0u ) ) { flags = RTGI_CACHE_FRESH_BIT; }
 		N = min( N + 1u, clamp( pc.nMax, 1u, RTGI_CACHE_N_MAX ) );
 	}
-	rtgiCachePackIrr( sl, irr, N, flags );
+	rtgiCachePackIrr( sl, irr, N, flags | ( cool << RTGI_CACHE_COOL_SHIFT ) );
 	slots.s[ i ] = sl;
 }

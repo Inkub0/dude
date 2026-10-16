@@ -43,6 +43,13 @@ const uint  RTGI_CACHE_SEEDED_BIT = 0x20000000u;
 const uint  RTGI_CACHE_FRESH_BIT  = 0x40000000u;
 const uint  RTGI_CACHE_RESET_FLAG = 0x80000000u;
 const uint  RTGI_CACHE_SEED_N     = 4u;				// frames of trust a cell seeded from its coarser parent starts with
+// bits 26-28: the RESET COOLDOWN - resolves left since the cell last restarted. A reset request arriving inside it re-arms
+// it without restarting: a light that changes every frame (an authored flicker / strobe table, a swinging cookie) would
+// otherwise pin the cell at one frame's mean forever; held, the cell blends the changes and converges to the light's
+// average, which is what a cache of a flickering light should hold. A one-shot change (a switch) restarts at once.
+const uint  RTGI_CACHE_COOL_SHIFT  = 26u;
+const uint  RTGI_CACHE_COOL_MASK   = 0x7u;
+const uint  RTGI_CACHE_COOL_FRAMES = 7u;
 
 // Per-pass constants, packed by the CPU (RhiWorld.cpp RB_RHI_RtgiCachePack) identically for every consumer:
 //   u_channelMask  = ( accum address lo, hi [bit-cast], slot mask [bit-cast uint], tanAlphaHalf )
@@ -109,6 +116,11 @@ uint rtgiCacheFlags( HgSlot s ) {
 	return s.irrBN & ( RTGI_CACHE_SEEDED_BIT | RTGI_CACHE_FRESH_BIT | RTGI_CACHE_RESET_FLAG );
 }
 
+uint rtgiCacheCooldown( HgSlot s ) {
+	return ( s.irrBN >> RTGI_CACHE_COOL_SHIFT ) & RTGI_CACHE_COOL_MASK;
+}
+
+// flags = the activity bits OR the cooldown already shifted into place ( cool << RTGI_CACHE_COOL_SHIFT )
 void rtgiCachePackIrr( inout HgSlot s, vec3 irr, uint N, uint flags ) {
 	s.irrRG = packHalf2x16( irr.rg );
 	s.irrBN = ( packHalf2x16( vec2( irr.b, 0.0 ) ) & 0xFFFFu ) | ( min( N, RTGI_CACHE_N_MAX ) << RTGI_CACHE_N_SHIFT ) | flags;

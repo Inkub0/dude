@@ -10,10 +10,11 @@
 //   4 = N: the cell's history length over Nmax - black = NOT in the cache, 15 % grey = just created, white = converged
 //       (the floor keeps "young" and "absent" apart: a cell re-cut at a finer level as you approach is young, a hole is
 //       absent);
-//   5 = ACTIVITY: red = the cell was RESET at its last resolve (the DI gradient saw its direct light change, or an
-//       eviction), green = CREATED or seeded from its coarser parent at its last resolve (a newly visible surface, a
-//       ring of cells re-cut at a finer level while moving), grey ramp = steady (N over Nmax), black = absent. In a
-//       static scene this view must settle to grey: any red that keeps flashing is the reset firing on noise.
+//   5 = ACTIVITY: red = the cell was RESET at its last resolve (the DI gradient saw its light switch), green = CREATED
+//       or seeded from its coarser parent at its last resolve (a newly visible surface, a ring of cells re-cut at a
+//       finer level while moving, an eviction), yellow = cooling down after a restart / HELD (further reset requests
+//       inside the cooldown are a flickering light: the cell blends instead of restarting), grey ramp = steady (N over
+//       Nmax), black = absent. In a static scene this view must settle to grey, with yellow only under flickering lights.
 // Opaque; written into the pre-tonemap HDR scene like restir_di_debug.frag, so values near 1 read as bright.
 //
 // Uniform packing (RB_RHI_RtgiCacheDebugOverlay):
@@ -87,6 +88,7 @@ void main() {
 		vec3  c     = vec3( 0.15 + 0.5 * ramp );
 		if ( ( flags & RTGI_CACHE_RESET_FLAG ) != 0u ) { c = vec3( 1.0, 0.08, 0.08 ); }
 		else if ( ( flags & ( RTGI_CACHE_FRESH_BIT | RTGI_CACHE_SEEDED_BIT ) ) != 0u ) { c = vec3( 0.1, 1.0, 0.1 ); }
+		else if ( rtgiCacheCooldown( s ) > 0u ) { c = vec3( 0.9, 0.8, 0.1 ); }
 		fragColor = vec4( c, 1.0 );
 	}
 }

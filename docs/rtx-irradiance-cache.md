@@ -349,6 +349,17 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
   Floor grates: perforated surfaces alternate between the grate plane and the floor beneath under the jitter, so
   their strata compare two different surfaces that both pass the DI's same-surface test; expected residual,
   localised to grates, and the cache value on a grate matters little (a thin surface mostly holes).
+- **Fourth reading (user): movers black (a green flash when an NPC starts / stops - the velocity lags a frame; those
+  few cells are evicted later, left as is); whole surfaces solid red or green, and "most cells flicker".** The
+  coloured patches are the surfaces under Doom's authored FLICKER / STROBE lights (the fluorescent fixture housings,
+  the lit door sign, the wall screen's strip): a light that changes by > 35 % every frame requests a reset every
+  frame, and a cell restarted every frame never holds more than one frame's mean - the flicker. Green where such a
+  cell was sampled only every other frame (checkerboard): a request with no samples leaves N = 0, and the next
+  sampled frame reads as "created". Fix: a per-cell RESET COOLDOWN (3 bits in the slot, 7 resolves). A request on a
+  cooled-down cell restarts it as before; a request inside the cooldown only re-arms it, so a flickering light
+  restarts its cells ONCE and they then blend toward the light's average (alpha >= 1 / Nmax: the responsiveness
+  knob is `r_rtgiCacheHistory`, 32 = ~0.5 s), which is what a cache of a periodic light should hold; a switch is a
+  one-shot request and still restarts at once. View 5 shows held / cooling cells YELLOW.
 
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 
