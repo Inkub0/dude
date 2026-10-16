@@ -9299,7 +9299,11 @@ static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// zone, r_rtReStirDIGradientDeadzone 0.25, so Doom's 5-15 % authored flicker never resets; a switch is 100 %).
 	const int nMax = idMath::ClampInt( 1, 1024, r_rtgiCacheHistory.GetInteger() );
 	cp.evictAge     = (unsigned int)idMath::ClampInt( 64, 4096, 4 * nMax );
-	cp.flags        = 1u | 2u | 4u;	// update at the primary point + lookup at the bounce hit (C2) + gradient reset (C3)
+	// flags: 1 = update at the primary point, 2 = lookup at the bounce hit (C2), 4 = gradient reset (C3). On a frame whose
+	// clear is still pending the buffers hold undefined memory until the resolve point zeroes them (the gathers run BEFORE
+	// it), so that frame neither reads nor writes: a garbage lookup would flash one frame of random bounce light into the
+	// NRD history, and its updates would be wiped by the clear anyway. The cache starts learning the frame after.
+	cp.flags        = c.clearPending ? 0u : ( 1u | 2u | 4u );
 	cp.resetThresh  = 0.35f;
 	cp.sampleClamp  = 64.0f;		// a 1-spp firefly (peak channel) must not own a cell for Nmax frames
 	cp.albedoClamp  = 0.9f;			// keeps the bounce recursion strictly convergent on white materials

@@ -157,8 +157,8 @@ void main() {
 	const vec3 eyeW   = u_modelViewMatrix[3].xyz;
 	vec3  Li; float thit; vec3 bounceDir; vec3 LiCache;
 	int   hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );
-	if ( cacheOn && bp.cache.update ) {
-		rtgiCacheUpdate( bp.cache, Pw, Nw, eyeW, ( hit == 1 ) ? LiCache : vec3( 0.0 ) );		// a miss teaches 0
+	if ( cacheOn && bp.cache.update && hit != 2 ) {
+		rtgiCacheUpdate( bp.cache, Pw, Nw, eyeW, ( hit == 1 ) ? LiCache : vec3( 0.0 ) );		// a miss teaches 0; an unshadeable row (2) teaches nothing
 	}
 	if ( hit == 0 ) { fragColor = vec4( 0.0 ); return; }
 	if ( hit == 2 ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }

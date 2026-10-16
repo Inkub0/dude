@@ -401,9 +401,10 @@ void main() {
 		const int hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );
 #if !DI_BOOST
 		// UPDATE at the primary point (docs/rtx-irradiance-cache.md): this pixel's bounce estimate joins P's cell; a miss
-		// contributes 0 (open directions are part of the cell's cosine-lobe average). The boost variant re-shades young
+		// contributes 0 (open directions are part of the cell's cosine-lobe average); a hit on an unshadeable row (2: a
+		// mover / prop without attributes) is UNKNOWN, not dark, and teaches nothing. The boost variant re-shades young
 		// pixels the plain gather already taught, so it does not teach them twice.
-		if ( cacheOn && bp.cache.update ) {
+		if ( cacheOn && bp.cache.update && hit != 2 ) {
 			rtgiCacheUpdate( bp.cache, Pw, Nw, eyeW, ( hit == 1 ) ? LiCache : vec3( 0.0 ) );
 		}
 #endif
