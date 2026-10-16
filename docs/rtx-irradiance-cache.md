@@ -394,6 +394,16 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
   passes do not; nothing on the branch touches the cache-off gather); cache 1 gather 9.91 (+0.31 ms = 3 %),
   `rtgi.cache` 0.047, gradient 0.43 (noise), denoise 3.33 (noise), frame 22.13 (within the window noise).
   **Item 12 PASS**: the cache share fell from 22 % to 3 %; the atomics aggregation stays a reserve.
+- **Item 14 (G0 register readout, user, NVIDIA, subgroup 32, cache code compiled in):** `restir_di` FS 80 registers,
+  binary 69632 B, stack 0, 64 B of local memory (the claim's indexed `uvec4 s[4]` - unrolled into named slots after
+  this reading); `restir_di_boost` FS 126 registers (as before: the K-pick arrays); `restir_di_gradient` FS 64;
+  `restir_di_apply` 56; the young / filter / conf passes 16-28. The driver's "Local Memory Size" carries a 2^36
+  base in every line; only the difference matters. Verdict for G: 80 registers = 24 resident warps per SM on Ampere
+  / Ada; the guiding's ~30 extra live scalars land around 104-112 (18-20 warps) - workable, no spill expected, the
+  N_mc = 3 fallback stays in reserve. Items 1, 2 (a handful of flickering black cells = the overlay's jittered
+  silhouette reconstruction, not in the lit image), 4 (grates / thin walls OK) pass; **item 3-6 reported as "looks
+  exactly the same"** - open: the `r_rtgiCacheScale 4` flip on an indirectly lit side wall + a view-2 screenshot
+  decide between "subtle at the physical weight" and "the lookup side is broken".
 
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 

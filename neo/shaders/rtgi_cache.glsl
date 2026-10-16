@@ -162,31 +162,38 @@ int rtgiCacheClaim( RtgiCacheParms p, HgKey k, out bool evicted, out bool fresh 
 	fresh = false;
 	RtgiCacheSpan span  = RtgiCacheSpan( p.slotAddr );
 	HgWords       words = HgWords( p.slotAddr );
-	uvec4 s[4];
-	s[0] = span.s[ k.base ];
-	s[1] = span.s[ k.base + 1u ];
-	s[2] = span.s[ k.base + 2u ];
-	s[3] = span.s[ k.base + 3u ];
-	for ( int i = 0; i < 4; i++ ) {										// existing (a key sits in a span at most once)
-		if ( s[i].x == k.key ) { return int( k.base ) + i; }
-	}
+	// four named slots, fully unrolled: an indexed uvec4 s[4] array landed in LOCAL memory (the gather's pipeline
+	// statistics showed 64 B of it - r_vkPipelineStats, 2026-10-16); named registers do not
+	uvec4 s0 = span.s[ k.base ], s1 = span.s[ k.base + 1u ], s2 = span.s[ k.base + 2u ], s3 = span.s[ k.base + 3u ];
+	if ( s0.x == k.key ) { return int( k.base ); }						// existing (a key sits in a span at most once)
+	if ( s1.x == k.key ) { return int( k.base ) + 1; }
+	if ( s2.x == k.key ) { return int( k.base ) + 2; }
+	if ( s3.x == k.key ) { return int( k.base ) + 3; }
 	uint oldestIdx = 0xFFFFFFFFu;
 	uint oldestAge = 0u;
 	uint oldestKey = 0u;
-	for ( int i = 0; i < 4; i++ ) {
-		uint idx = k.base + uint( i );
-		uint sk  = s[i].x;
-		if ( sk == 0u ) {
-			uint prev = atomicCompSwap( words.w[ idx * RTGI_CACHE_STRIDE ], 0u, k.key );
-			if ( prev == 0u ) { fresh = true; return int( idx ); }
-			if ( prev == k.key ) { return int( idx ); }					// a sibling pixel created it a moment ago
-			sk = prev;													// lost the race to another cell, not stamped yet
-			s[i].y = 0u;
-		}
-		uint stamp = s[i].y;
-		uint age   = ( stamp == 0u ) ? 0u : ( p.frame - stamp );
-		if ( age > oldestAge ) { oldestAge = age; oldestIdx = idx; oldestKey = sk; }
+	// per slot: empty -> CAS (won = fresh; a sibling won = ours; another cell won = weigh it, unstamped); else weigh
+	// the foreign cell for eviction by its stamp
+#define RTGI_CACHE_CLAIM_SLOT( S, I ) \
+	{ \
+		uint idx = k.base + uint( I ); \
+		uint sk = S.x; \
+		uint stamp = S.y; \
+		if ( sk == 0u ) { \
+			uint prev = atomicCompSwap( words.w[ idx * RTGI_CACHE_STRIDE ], 0u, k.key ); \
+			if ( prev == 0u ) { fresh = true; return int( idx ); } \
+			if ( prev == k.key ) { return int( idx ); } \
+			sk = prev; \
+			stamp = 0u; \
+		} \
+		uint age = ( stamp == 0u ) ? 0u : ( p.frame - stamp ); \
+		if ( age > oldestAge ) { oldestAge = age; oldestIdx = idx; oldestKey = sk; } \
 	}
+	RTGI_CACHE_CLAIM_SLOT( s0, 0 )
+	RTGI_CACHE_CLAIM_SLOT( s1, 1 )
+	RTGI_CACHE_CLAIM_SLOT( s2, 2 )
+	RTGI_CACHE_CLAIM_SLOT( s3, 3 )
+#undef RTGI_CACHE_CLAIM_SLOT
 	if ( p.evictAge != 0u && oldestIdx != 0xFFFFFFFFu && oldestAge >= p.evictAge ) {
 		uint prev = atomicCompSwap( words.w[ oldestIdx * RTGI_CACHE_STRIDE ], oldestKey, k.key );
 		if ( prev == oldestKey ) { evicted = true; return int( oldestIdx ); }
