@@ -44,14 +44,19 @@ void main() {
 	accum.a[ i ] = HgAccum( 0u, 0u, 0u, 0u );
 	HgSlot sl = slots.s[ i ];
 	if ( sl.key == 0u ) { return; }											// no cell owns the slot (a stale reset): drop the sums
-	vec3 irr = rtgiCacheUnpackIrr( sl );
-	uint N   = reset ? 0u : rtgiCacheN( sl );
+	vec3 irr   = rtgiCacheUnpackIrr( sl );
+	uint N     = reset ? 0u : rtgiCacheN( sl );
+	uint flags = RTGI_CACHE_RESET_FLAG;										// a reset request with no samples: restarts on its next sample
 	if ( cnt > 0u ) {
 		vec3  mean  = vec3( float( acc.r ), float( acc.g ), float( acc.b ) ) * ( 1.0 / ( RTGI_CACHE_FIXED * float( cnt ) ) );
 		float alpha = max( 1.0 / float( N + 1u ), pc.alphaMin );
 		irr = ( N == 0u ) ? mean : mix( irr, mean, alpha );
-		N   = min( N + 1u, max( pc.nMax, 1u ) );
+		// activity flags for the debug view (r_rtgiCacheDebug 5): RESET when the cell restarted on request, FRESH when it
+		// was created this frame (N 0 -> 1) or seeded from its coarser parent (the gather's SEEDED bit, consumed here)
+		flags = reset ? RTGI_CACHE_RESET_FLAG
+		      : ( ( N == 0u || ( sl.irrBN & RTGI_CACHE_SEEDED_BIT ) != 0u ) ? RTGI_CACHE_FRESH_BIT : 0u );
+		N = min( N + 1u, clamp( pc.nMax, 1u, RTGI_CACHE_N_MAX ) );
 	}
-	rtgiCachePackIrr( sl, irr, N );
+	rtgiCachePackIrr( sl, irr, N, flags );
 	slots.s[ i ] = sl;
 }

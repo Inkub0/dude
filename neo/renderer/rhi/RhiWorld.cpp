@@ -573,6 +573,7 @@ struct rtgiCacheParms_t {
 	float				resetThresh;			// C3: relative luminance change of the DI gradient that resets a cell
 	float				sampleClamp;			// per-sample peak clamp before accumulation
 	float				albedoClamp;			// ceiling on the hit albedo multiplying the cached term
+	float				resetBias;				// C3: darkness bias in the reset test's denominator (a near-black direct term never resets)
 };
 struct rtgiCacheState_t {
 	rhi::BufferHandle	slotBuf = 0, accumBuf = 0;
@@ -9314,8 +9315,9 @@ static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// clear is still pending the buffers hold undefined memory until the resolve point zeroes them (the gathers run BEFORE
 	// it), so that frame neither reads nor writes: a garbage lookup would flash one frame of random bounce light into the
 	// NRD history, and its updates would be wiped by the clear anyway. The cache starts learning the frame after.
-	cp.flags        = c.clearPending ? 0u : ( 1u | 2u | 4u );
+	cp.flags        = c.clearPending ? 0u : ( 1u | 2u | ( r_rtgiCacheReset.GetBool() ? 4u : 0u ) );
 	cp.resetThresh  = 0.35f;
+	cp.resetBias    = 0.05f;		// 5x the DI confidence's darkness bias: only changes that can move the indirect term count
 	cp.sampleClamp  = 64.0f;		// a 1-spp firefly (peak channel) must not own a cell for Nmax frames
 	cp.albedoClamp  = 0.9f;			// keeps the bounce recursion strictly convergent on white materials
 	c.readyThisView = true;
@@ -9348,6 +9350,7 @@ static void RB_RHI_RtgiCachePack( rhi::RenderParams &parms, const rtgiCacheParms
 	parms.contactParms[0] = (float)cp.evictAge;
 	parms.contactParms[1] = cp.sampleClamp;
 	parms.contactParms[2] = cp.albedoClamp;
+	parms.contactParms[3] = cp.resetBias;
 }
 
 static void RB_RHI_RtgiCacheResolve( rhi::RHI *r ) {
@@ -9358,7 +9361,7 @@ static void RB_RHI_RtgiCacheResolve( rhi::RHI *r ) {
 	struct { unsigned int slotCount, mode, nMax, frame; float alphaMin; } pc;		// rtgi_cache_resolve.comp PC
 	pc.slotCount = 1u << c.slotsLog2;
 	pc.mode      = 0;
-	pc.nMax      = (unsigned int)idMath::ClampInt( 1, 1024, r_rtgiCacheHistory.GetInteger() );
+	pc.nMax      = (unsigned int)idMath::ClampInt( 1, 1023, r_rtgiCacheHistory.GetInteger() );	// 10-bit N in the slot
 	pc.frame     = c.parms.frame;
 	pc.alphaMin  = 0.02f;
 	rhi::ComputeArgs ca = rhi::ComputeArgs();
@@ -9410,7 +9413,7 @@ void RB_RHI_RtgiCacheDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );		// u_modelViewMatrix = view->world
 	parms.localParam0[0] = invP00;
 	parms.localParam0[1] = invP11;
-	parms.localParam0[2] = (float)idMath::ClampInt( 1, 1024, r_rtgiCacheHistory.GetInteger() );
+	parms.localParam0[2] = (float)idMath::ClampInt( 1, 1023, r_rtgiCacheHistory.GetInteger() );
 	parms.localParam0[3] = (float)r_rtgiCacheDebug.GetInteger();
 	// full-res gl_FragCoord -> uv / depth tc (the gather's mapping at scale 1; the primary view fills the window from the origin)
 	parms.screenCorrection[0] = 1.0f / w;

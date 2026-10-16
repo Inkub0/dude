@@ -31,12 +31,23 @@ const uint  RTGI_CACHE_RESET_BIT  = 0x80000000u;	// HgAccum.count: restart this 
 const uint  RTGI_CACHE_COUNT_MASK = 0x7FFFFFFFu;
 const uint  RTGI_CACHE_STRIDE     = 4u;				// uints per slot (HgWords view)
 const uint  RTGI_CACHE_STAMP_OFS  = 1u;				// HgSlot.stamp
+// HgSlot.irrBN: bits 0-15 irr.b (f16), 16-25 N (10 bits: Nmax <= 1023), then three flag bits the debug activity view
+// reads (r_rtgiCacheDebug 5): 29 SEEDED - set by the gather when it seeds a fresh cell from its coarser parent, consumed
+// by the next resolve; 30 FRESH - the last resolve created the cell (N 0 -> 1) or was a seeded cell's first; 31 RESET -
+// the last resolve restarted the cell on a reset request (the DI gradient, an eviction).
+const uint  RTGI_CACHE_N_SHIFT    = 16u;
+const uint  RTGI_CACHE_N_MASK     = 0x3FFu;
+const uint  RTGI_CACHE_N_MAX      = 1023u;
+const uint  RTGI_CACHE_SEEDED_BIT = 0x20000000u;
+const uint  RTGI_CACHE_FRESH_BIT  = 0x40000000u;
+const uint  RTGI_CACHE_RESET_FLAG = 0x80000000u;
+const uint  RTGI_CACHE_SEED_N     = 4u;				// frames of trust a cell seeded from its coarser parent starts with
 
 // Per-pass constants, packed by the CPU (RhiWorld.cpp RB_RHI_RtgiCachePack) identically for every consumer:
 //   u_channelMask  = ( accum address lo, hi [bit-cast], slot mask [bit-cast uint], tanAlphaHalf )
 //   u_skinParms    = ( scale, frame stamp [bit-cast uint], flags [bit-cast uint: 1 update, 2 lookup, 4 gradient reset],
 //                      gradient reset threshold (relative luminance change) )
-//   u_contactParms = ( evict age in frames (0 = never), per-sample peak clamp, albedo clamp at the hit, spare )
+//   u_contactParms = ( evict age in frames (0 = never), per-sample peak clamp, albedo clamp at the hit, reset darkness bias )
 // The SLOT address differs per consumer (restir_di.frag + the gradient: u_particleRadius.zw; rtgi_ray.frag and the
 // debug overlay: u_alphaTest.xy), so it is passed in.
 struct RtgiCacheParms {
@@ -50,6 +61,7 @@ struct RtgiCacheParms {
 	float sampleClamp;
 	float albedoClamp;
 	float resetThresh;
+	float resetBias;		// darkness bias in the reset test's denominator: changes of a near-black direct term never reset
 	bool  update;
 	bool  lookup;
 	bool  gradientReset;
@@ -73,6 +85,7 @@ RtgiCacheParms rtgiCacheParmsFromUniforms( uvec2 slotAddr ) {
 	p.evictAge     = uint( max( u_contactParms.x, 0.0 ) + 0.5 );
 	p.sampleClamp  = u_contactParms.y;
 	p.albedoClamp  = u_contactParms.z;
+	p.resetBias    = u_contactParms.w;
 	return p;
 }
 #endif
@@ -86,33 +99,46 @@ vec3 rtgiCacheUnpackIrr( HgSlot s ) {
 }
 
 uint rtgiCacheN( HgSlot s ) {
-	return s.irrBN >> 16u;
+	return ( s.irrBN >> RTGI_CACHE_N_SHIFT ) & RTGI_CACHE_N_MASK;
 }
 
-void rtgiCachePackIrr( inout HgSlot s, vec3 irr, uint N ) {
+uint rtgiCacheFlags( HgSlot s ) {
+	return s.irrBN & ( RTGI_CACHE_SEEDED_BIT | RTGI_CACHE_FRESH_BIT | RTGI_CACHE_RESET_FLAG );
+}
+
+void rtgiCachePackIrr( inout HgSlot s, vec3 irr, uint N, uint flags ) {
 	s.irrRG = packHalf2x16( irr.rg );
-	s.irrBN = ( packHalf2x16( vec2( irr.b, 0.0 ) ) & 0xFFFFu ) | ( min( N, 65535u ) << 16u );
+	s.irrBN = ( packHalf2x16( vec2( irr.b, 0.0 ) ) & 0xFFFFu ) | ( min( N, RTGI_CACHE_N_MAX ) << RTGI_CACHE_N_SHIFT ) | flags;
 }
 
-// LOOKUP at a bounce hit (world point P, geometric normal N facing the ray, eye E): the cell's learned indirect term,
-// 0 when the cell is absent or claimed but not yet resolved. 1-4 coalesced 16 B reads.
+// LOOKUP at a bounce hit (world point P, geometric normal N facing the ray, eye E): the cell's learned indirect term.
+// H's own level first; when that cell is absent or not yet resolved, the one-coarser level's cell (a hit lands at a
+// distance its surface may never have been a primary point at, and the coarser cell - twice the width - has had twice
+// the chance to be learned). One extra probe on a miss, none on a hit; 0 when neither exists.
 vec3 rtgiCacheLookup( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye ) {
-	HgKey k = hgMakeKey( P, N, eye, p.tanAlphaHalf, p.slotMask );
-	int idx = hgFind( HgWords( p.slotAddr ), RTGI_CACHE_STRIDE, k );
-	if ( idx < 0 ) { return vec3( 0.0 ); }
+	HgWords        words = HgWords( p.slotAddr );
 	RtgiCacheSlots slots = RtgiCacheSlots( p.slotAddr );
-	HgSlot s = slots.s[ idx ];
-	if ( rtgiCacheN( s ) == 0u ) { return vec3( 0.0 ); }
-	return rtgiCacheUnpackIrr( s );
+	int level = hgLevel( distance( P, eye ), p.tanAlphaHalf );
+	for ( int step = 0; step < 2; step++ ) {
+		HgKey k = hgMakeKeyLevel( P, N, level + step, p.slotMask );
+		int idx = hgFind( words, RTGI_CACHE_STRIDE, k );
+		if ( idx >= 0 ) {
+			HgSlot s = slots.s[ idx ];
+			if ( rtgiCacheN( s ) > 0u ) { return rtgiCacheUnpackIrr( s ); }
+		}
+	}
+	return vec3( 0.0 );
 }
 
 // UPDATE at a primary point (world P, normal N, eye E) with this pixel's bounce estimate Li (0 for a miss: open
 // directions ARE part of the cell's cosine-lobe average). Claims the cell's slot (first use / eviction), stamps it
 // and adds the clamped sample to the accumulation entry; the resolve folds it into the cell at the end of the pass.
 void rtgiCacheUpdate( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye, vec3 Li ) {
-	HgKey k = hgMakeKey( P, N, eye, p.tanAlphaHalf, p.slotMask );
-	bool evicted;
-	int idx = hgClaim( HgWords( p.slotAddr ), RTGI_CACHE_STRIDE, RTGI_CACHE_STAMP_OFS, k, p.frame, p.evictAge, evicted );
+	int   level = hgLevel( distance( P, eye ), p.tanAlphaHalf );
+	HgKey k     = hgMakeKeyLevel( P, N, level, p.slotMask );
+	HgWords words = HgWords( p.slotAddr );
+	bool evicted, fresh;
+	int idx = hgClaim( words, RTGI_CACHE_STRIDE, RTGI_CACHE_STAMP_OFS, k, p.frame, p.evictAge, evicted, fresh );
 	if ( idx < 0 ) { return; }											// span full of live cells: drop this sample
 	RtgiCacheSlots  slots = RtgiCacheSlots( p.slotAddr );
 	RtgiCacheAccums acc   = RtgiCacheAccums( p.accumAddr );
@@ -123,6 +149,24 @@ void rtgiCacheUpdate( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye, vec3 Li ) {
 		slots.s[ idx ].irrRG = 0u;
 		slots.s[ idx ].irrBN = 0u;
 		atomicOr( acc.a[ idx ].count, RTGI_CACHE_RESET_BIT );
+	} else if ( fresh ) {
+		// SEED a brand-new cell from its one-coarser parent when that has been learned. As the camera approaches a
+		// surface its cells are re-cut at the finer level, and without this every ring of re-cut cells restarted from
+		// a single frame's mean (the "swimming" bands in the history view while moving). The parent's value is the
+		// best estimate there is; it enters with SEED_N frames of trust so the fine cell's own samples take over
+		// smoothly. Only the CAS winner seeds (one writer); siblings that look the cell up before the write lands
+		// read N = 0, which is just a miss for that frame.
+		HgKey kc = hgMakeKeyLevel( P, N, level + 1, p.slotMask );
+		int ic = hgFind( words, RTGI_CACHE_STRIDE, kc );
+		if ( ic >= 0 ) {
+			HgSlot sc = slots.s[ ic ];
+			if ( rtgiCacheN( sc ) > 0u ) {
+				HgSlot sn = slots.s[ idx ];
+				rtgiCachePackIrr( sn, rtgiCacheUnpackIrr( sc ), min( rtgiCacheN( sc ), RTGI_CACHE_SEED_N ), RTGI_CACHE_SEEDED_BIT );
+				slots.s[ idx ].irrRG = sn.irrRG;
+				slots.s[ idx ].irrBN = sn.irrBN;
+			}
+		}
 	}
 	vec3  v  = max( Li, vec3( 0.0 ) );
 	float pk = max( max( v.r, v.g ), v.b );

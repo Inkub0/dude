@@ -45,13 +45,17 @@ ivec3 hgCell( vec3 p, int level, float width ) {
 }
 
 // Normal bin: the cube face the unit normal points at (0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z). On odd levels the cube
-// is rotated 45 degrees about Z and then about X, so bin boundaries (like cell boundaries) never coincide between
+// is rotated 22.5 degrees about Z and then about X, so bin boundaries (like cell boundaries) never coincide between
 // neighbouring levels - a normal that flickers between two faces at one level is centred in a face at the next.
+// 22.5 and NOT 45 degrees: Doom's world is axis-aligned, and a 45-degree turn lands every wall / floor normal EXACTLY
+// on a rotated face edge, where the bump-mapped texels of one cell fall 50/50 on either side at random (a salted
+// cell view, half the samples per cell). At 22.5 degrees every axis normal keeps ~20 degrees of margin to any face
+// edge at both parities.
 uint hgNormalBin( vec3 n, int level ) {
 	if ( ( level & 1 ) != 0 ) {
-		const float c = 0.70710678;
-		n = vec3( c * n.x - c * n.y, c * n.x + c * n.y, n.z );
-		n = vec3( n.x, c * n.y - c * n.z, c * n.y + c * n.z );
+		const float c = 0.92387953, s = 0.38268343;
+		n = vec3( c * n.x - s * n.y, s * n.x + c * n.y, n.z );
+		n = vec3( n.x, c * n.y - s * n.z, s * n.y + c * n.z );
 	}
 	vec3 a = abs( n );
 	if ( a.x >= a.y && a.x >= a.z ) { return n.x >= 0.0 ? 0u : 1u; }
@@ -86,15 +90,21 @@ struct HgKey {
 	int  level;
 };
 
-HgKey hgMakeKey( vec3 p, vec3 n, vec3 eye, float tanAlphaHalf, uint slotMask ) {
+// The key of p / n at an EXPLICIT level (callers that walk neighbouring levels: the coarser-level fallback of a lookup,
+// the seeding of a freshly cut cell from its coarser parent).
+HgKey hgMakeKeyLevel( vec3 p, vec3 n, int level, uint slotMask ) {
 	HgKey k;
-	k.level = hgLevel( distance( p, eye ), tanAlphaHalf );
-	float width = hgCellWidth( k.level );
-	uint  h = hgHash( hgCell( p, k.level, width ), k.level, hgNormalBin( n, k.level ) );
+	k.level = level;
+	float width = hgCellWidth( level );
+	uint  h = hgHash( hgCell( p, level, width ), level, hgNormalBin( n, level ) );
 	k.key  = hgPcg( h ^ 0x68E31DA4u );
 	if ( k.key == 0u ) { k.key = 1u; }
 	k.base = ( h & slotMask ) & ~( HG_PROBE_SLOTS - 1u );
 	return k;
+}
+
+HgKey hgMakeKey( vec3 p, vec3 n, vec3 eye, float tanAlphaHalf, uint slotMask ) {
+	return hgMakeKeyLevel( p, n, hgLevel( distance( p, eye ), tanAlphaHalf ), slotMask );
 }
 
 // A stable visualisation colour for a key (debug views: every cell its own tint), channels in [0.25, 1].
@@ -124,11 +134,13 @@ int hgFind( HgWords words, uint stride, HgKey k ) {
 // atomicCompSwap so every pixel of a new cell in the same frame lands in ONE slot (a lost race re-checks the winner's
 // key); else - when evictAge > 0 - the span's oldest FOREIGN slot provided its stamp is at least evictAge frames old
 // (stamp 0 = claimed this frame by a writer that has not stamped yet: never evicted), taken over with a CAS on its
-// key. `evicted` tells the caller the payload belongs to the old key and must be treated as fresh. -1 = the span is
-// full of live foreign cells: this update is dropped (the cache is a hint, a dropped sample is only a little slower
-// convergence).
-int hgClaim( HgWords words, uint stride, uint stampOfs, HgKey k, uint frame, uint evictAge, out bool evicted ) {
+// key. `evicted` tells the caller the payload belongs to the old key and must be treated as fresh; `fresh` that THIS
+// invocation created the slot (its CAS won on an empty slot - exactly one caller per new cell sees it, the one that may
+// seed the payload). -1 = the span is full of live foreign cells: this update is dropped (the cache is a hint, a dropped
+// sample is only a little slower convergence).
+int hgClaim( HgWords words, uint stride, uint stampOfs, HgKey k, uint frame, uint evictAge, out bool evicted, out bool fresh ) {
 	evicted = false;
+	fresh = false;
 	uint oldestIdx = 0xFFFFFFFFu;
 	uint oldestAge = 0u;
 	uint oldestKey = 0u;
@@ -138,7 +150,8 @@ int hgClaim( HgWords words, uint stride, uint stampOfs, HgKey k, uint frame, uin
 		if ( sk == k.key ) { return int( idx ); }
 		if ( sk == 0u ) {
 			uint prev = atomicCompSwap( words.w[ idx * stride ], 0u, k.key );
-			if ( prev == 0u || prev == k.key ) { return int( idx ); }
+			if ( prev == 0u ) { fresh = true; return int( idx ); }
+			if ( prev == k.key ) { return int( idx ); }					// a sibling pixel created it a moment ago
 			sk = prev;													// lost the race to another cell: weigh it for eviction
 		}
 		uint stamp = words.w[ idx * stride + stampOfs ];

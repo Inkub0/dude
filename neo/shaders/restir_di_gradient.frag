@@ -279,12 +279,14 @@ void main() {
 	// switched, a swinging light's footprint moved on - so the INDIRECT term its cell has accumulated is stale too. Ask
 	// the resolve to restart the cell (N = 0: the next frame's samples replace the old mean instead of being 1/N of it).
 	// The threshold sits above the DI dead zone, so Doom's authored 5-15 % flicker tables never reset a cell every frame;
-	// a light switching off / on is a 100 % change of its own value regardless. One request per changed stratum (3x3
-	// pixels) is plenty: a cell is ~10 pixels wide at the default cell angle.
+	// a light switching off / on is a 100 % change of its own value regardless. The darkness bias in the denominator
+	// (as the confidence pass's, but larger) keeps a near-black direct term from resetting on its own noise: a change
+	// of a light that contributes almost nothing cannot have moved the indirect term either. One request per changed
+	// stratum (3x3 pixels) is plenty: a cell is ~10 pixels wide at the default cell angle.
 	{
 		RtgiCacheParms cp = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ) );
 		float Lmax = max( Lprev, Lnow );
-		if ( cp.gradientReset && rtgiCachePresent( cp ) && Lmax > 1e-3 && abs( Lprev - Lnow ) > cp.resetThresh * Lmax ) {
+		if ( cp.gradientReset && rtgiCachePresent( cp ) && abs( Lprev - Lnow ) > cp.resetThresh * ( Lmax + cp.resetBias ) ) {
 			rtgiCacheRequestReset( cp, Sp.Pw, Sp.Nw, u_modelViewMatrix[3].xyz );
 		}
 	}

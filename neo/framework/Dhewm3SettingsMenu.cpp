@@ -4792,16 +4792,21 @@ static void DrawDbgGroup_RTGI()
 			AddTooltip( "Cache size. More cells = fewer collisions and dropped updates in large open areas; a change re-allocates "
 				"and clears the cache. Default 1M. (r_rtgiCacheSlotsLog2)" );
 		}
+		CvarCheckbox( "Gradient Reset", r_rtgiCacheReset, "Let the DI gradient restart a cell's history where the direct light "
+			"changed by more than 35% (a switched or swinging light), so the cached indirect term follows at the DI's own speed. "
+			"Diagnostic A/B: if the activity view keeps flashing red in a static scene, compare off and on. (r_rtgiCacheReset)" );
 		{
-			int dbg = idMath::ClampInt( 0, 4, r_rtgiCacheDebug.GetInteger() );
+			int dbg = idMath::ClampInt( 0, 5, r_rtgiCacheDebug.GetInteger() );
 			ImGui::SetNextItemWidth( 240.0f );
-			if ( ImGui::Combo( "Cache View##rtgiCacheDebug", &dbg, "Off\0Cell colouring\0Cached value\0Cell age\0Cell history (N)\0" ) ) {
+			if ( ImGui::Combo( "Cache View##rtgiCacheDebug", &dbg, "Off\0Cell colouring\0Cached value\0Cell age\0Cell history (N)\0Cell activity (reset / fresh)\0" ) ) {
 				r_rtgiCacheDebug.SetInteger( dbg );
 			}
 			AddTooltip( "Overlay the cache over the view: 'Cell colouring' tints every cell (dim = not in the cache yet) and "
 				"proves the keying - cells must stay the same size on screen as you move and split at normal-bin faces; "
 				"'Cached value' shows the learned indirect light per cell; 'Cell age' frames since a cell's last update (white "
-				"= evictable, dark red = absent); 'Cell history' N over Nmax (white = converged). (r_rtgiCacheDebug)" );
+				"= evictable, dark red = absent); 'Cell history' N over Nmax (black = absent, 15% grey = just created, white = "
+				"converged); 'Cell activity' red = reset this frame, green = created / seeded this frame, grey = steady - a "
+				"static scene must settle to all grey. (r_rtgiCacheDebug)" );
 		}
 		ImGui::EndDisabled();	// r_rtgiCache
 	}

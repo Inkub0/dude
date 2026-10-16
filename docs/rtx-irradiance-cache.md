@@ -288,6 +288,30 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
   every file-static GPU handle in RhiWorld must be zeroed there. (Vulkan has no `reloadShaders` pipeline rebuild;
   the statistics readout needs `vid_restart`, which is now safe with the cache on.)
 
+### C4 first readings (user, 2026-10-16) and what changed because of them
+
+- **Cost** (`r_vkGpuTime 3`, same spot, 1440p-class, dude_rtx 2): frame 14.85 -> 15.42 ms, `restir.di.gather`
+  4.43 -> 4.92 ms (+0.49, above the +0.1-0.3 estimate), `rtgi.cache` 0.046 ms, gradient and denoise unchanged.
+  Verdict pending the register readout (`r_vkPipelineStats restir_di` + `vid_restart`, which lost the device until
+  the restart fix above): a register tier jump would explain a uniform ~10 % gather slowdown; otherwise it is the
+  dependent probe loads in an occupancy-starved shader.
+- **History view 4 while moving forward: "swimming black radial areas".** Expected by construction and now softened:
+  the cell width follows the eye distance (two levels per doubling), so moving forward sweeps the level thresholds
+  across the world in rings and every cell on a ring is re-cut at the finer level. Before, a re-cut cell restarted
+  from one frame's mean (N = 1 = black in view 4); now a freshly claimed cell is SEEDED from its one-coarser parent
+  with 4 frames of trust (`RTGI_CACHE_SEED_N`), so the learned field is continuous while the fine cell's own samples
+  take over, and a lookup at a bounce hit falls back to the coarser level when the hit's own cell is absent. The
+  rings are still visible in view 4 (young cells) and in view 5 as GREEN; the lit image must not show them.
+- **Static view never fully white.** Two defects found and fixed while reasoning about it: (1) the 45-degree bin
+  rotation on odd levels put every axis-aligned normal exactly on a rotated face edge, so bump-mapped texels of one
+  cell fell 50/50 on either side at random (two half-cells per cell, a salted cell view) - now 22.5 degrees about Z
+  then X, ~20 degrees of margin for every axis normal; (2) the gradient reset had no darkness floor - now
+  `|dL| > 0.35 * ( max( Lprev, Lnow ) + 0.05 )`. The remaining suspect is the gradient reset firing on 1-spp /
+  flicker noise, which the next screenshot decides: **`r_rtgiCacheDebug 5`** (activity: red = reset this frame,
+  green = created / seeded, grey = steady, black = absent) in a static scene must settle to all grey; if red keeps
+  flashing, `r_rtgiCacheReset 0` is the A/B (and the 0.35 threshold / 0.05 bias move up). View 4 now floors present
+  cells at 15 % grey so a young cell and a hole are told apart.
+
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 
 Setup for all items: Vulkan, RT hardware, `dude_rtx 2` (ReSTIR DI lighting the scene + combined GI) at your usual
