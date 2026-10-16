@@ -61,7 +61,7 @@
 //   --- r_rtgiCache (the RT irradiance cache, docs/rtx-irradiance-cache.md; rtgi_cache.glsl's shared packing) ---
 //   u_particleRadius.zw   = cache SLOT buffer device address (bit-cast; 0 = no cache)
 //   u_channelMask         = ( accumulation buffer address lo, hi, slot mask, tan( cell angle / 2 ) )
-//   u_skinParms           = ( cached-term scale, frame stamp, flags [1 update, 2 lookup, 4 gradient reset], reset threshold )
+//   u_skinParms           = ( cached-term scale, frame stamp, flags [1 update, 2 lookup, 4 gradient reset, 8 mover test, 16 TAIL], reset threshold )
 //   u_contactParms        = ( evict age, per-sample clamp, albedo clamp, - )
 //   --- R3a disocclusion boost (r_rtReStirDIBoost, docs/rtx-restir-di.md Plan R3) ---
 //   u_tessParms           = ( K picks (0 = off), boost-ON NRD history (<= 0: trigger off), HOLD frames,
@@ -400,6 +400,7 @@ void main() {
 		bp.cache          = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ) );
 		const bool cacheOn = rtgiCachePresent( bp.cache );
 		bp.cacheLookup    = cacheOn && bp.cache.lookup;
+		bp.cacheTail      = cacheOn && bp.cache.tail;	// C6: the hit reads the stored L_out; the update below stores L_out at P
 		const vec3 eyeW   = u_modelViewMatrix[3].xyz;
 		vec3 Li; float thit; vec3 bounceDir; vec3 LiCache;
 		const int hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );
@@ -419,7 +420,26 @@ void main() {
 				mover = rtgiCacheIsMover( uvc, vel, Pw, u_prevMvpMatrix, u_localParam0.xy, u_windowCoord.z, u_screenCorrection.xy );
 			}
 			if ( !mover ) {
-				rtgiCacheUpdate( bp.cache, Pw, Nw, eyeW, ( hit == 1 ) ? LiCache : vec3( 0.0 ) );
+				// indirect-only (C2): teach E_ind(P) = LiCache. TAIL (C6): teach the surface's OUTGOING radiance
+				// L_out(P) = albedo(P) * ( E_dir(P) + E_ind(P) ), emissive EXCLUDED (a served hit re-adds the surface's own
+				// emissive live). E_dir(P) = the chosen light's TARGET-ONLY irradiance (colour * atten * N.L, no albedo /
+				// material) * W * vis at the BOUNCE's light scale - the convention of the hit shading the tail replaces, not
+				// the DI forward scale - one extra shade of the winner, no ray; E_ind(P) = LiCache (the tail at H, served or
+				// live). The recursion L_out = albedo (E_dir + mean L_out(H)) converges (albedo < 1; the per-sample clamp).
+				vec3 teach;
+				if ( bp.cache.tail ) {
+					vec3 Edir = vec3( 0.0 );
+					if ( pHatChosen > 0.0 ) {
+						vec3 cTO, ldTO; float dlTO, ndlTO;
+						diShadeLight( lights, rowChosen - 1u, S, cTO, ldTO, dlTO, ndlTO, true );
+						Edir = cTO * ( W * vis * bp.lightScale );
+					}
+					vec3 Eind = ( hit == 1 ) ? LiCache : vec3( 0.0 );
+					teach = max( S.albedo * ( Edir + Eind ), vec3( 0.0 ) );
+				} else {
+					teach = ( hit == 1 ) ? LiCache : vec3( 0.0 );
+				}
+				rtgiCacheUpdate( bp.cache, Pw, Nw, eyeW, teach );
 			}
 		}
 #endif

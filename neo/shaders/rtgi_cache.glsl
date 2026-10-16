@@ -56,7 +56,8 @@ const uint  RTGI_CACHE_COOL_MASK   = 0x1Fu;
 // Per-pass constants, packed by the CPU (RhiWorld.cpp RB_RHI_RtgiCachePack) identically for every consumer:
 //   u_channelMask  = ( accum address lo, hi [bit-cast], slot mask [bit-cast uint], tanAlphaHalf )
 //   u_skinParms    = ( scale, frame stamp [bit-cast uint], flags [bit-cast uint: 1 update, 2 lookup, 4 gradient reset,
-//                      8 velocity at unit 10 valid: movers never teach], gradient reset threshold (relative luminance change) )
+//                      8 velocity at unit 10 valid: movers never teach, 16 TAIL mode: the cell holds L_out and a converged
+//                      cell IS the bounce's path tail], gradient reset threshold (relative luminance change) )
 //   u_contactParms = ( evict age in frames (0 = never), per-sample peak clamp, albedo clamp at the hit, reset darkness bias )
 // The SLOT address differs per consumer (restir_di.frag + the gradient: u_particleRadius.zw; rtgi_ray.frag and the
 // debug overlay: u_alphaTest.xy), so it is passed in.
@@ -76,6 +77,7 @@ struct RtgiCacheParms {
 	bool  lookup;
 	bool  gradientReset;
 	bool  moverTest;		// the per-object velocity is bound (unit 10): a pixel moving beyond the camera's own motion is a mover
+	bool  tail;				// C6 TAIL mode: cells store L_out = albedo*(E_dir+E_ind); a converged+fresh cell serves the bounce hit
 };
 
 // (compute consumers bind the buffers directly and have no RenderParams block: they define RTGI_CACHE_NO_UNIFORMS)
@@ -93,6 +95,7 @@ RtgiCacheParms rtgiCacheParmsFromUniforms( uvec2 slotAddr ) {
 	p.lookup        = ( flags & 2u ) != 0u;
 	p.gradientReset = ( flags & 4u ) != 0u;
 	p.moverTest     = ( flags & 8u ) != 0u;
+	p.tail          = ( flags & 16u ) != 0u;
 	p.resetThresh  = u_skinParms.w;
 	p.evictAge     = uint( max( u_contactParms.x, 0.0 ) + 0.5 );
 	p.sampleClamp  = u_contactParms.y;
@@ -137,6 +140,14 @@ layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtgiCacheSp
 
 uint rtgiCacheNv( uvec4 s )   { return ( s.w >> RTGI_CACHE_N_SHIFT ) & RTGI_CACHE_N_MASK; }
 vec3 rtgiCacheIrrv( uvec4 s ) { return vec3( unpackHalf2x16( s.z ), unpackHalf2x16( s.w ).x ); }
+
+// C6 TAIL mode: a cell may SERVE the bounce hit (its stored L_out replaces the live shading) only once it is both
+// CONVERGED - N >= SEED_N, the trust a seeded cell is born with, so a cell cut this instant does not bounce one frame's
+// 1-spp mean - and FRESH: last updated less than evictAge frames ago, so a stale off-screen cell cannot keep bouncing
+// old light through a door it is no longer seen from (an unserved stale cell falls back to live shading, never wrong).
+bool rtgiCacheServable( RtgiCacheParms p, uvec4 s ) {
+	return rtgiCacheNv( s ) >= RTGI_CACHE_SEED_N && ( p.evictAge == 0u || ( p.frame - s.y ) < p.evictAge );
+}
 
 // the slot of `key` among a span's four preloaded slots: 0..3, or -1 = absent (slots fill contiguously from the first
 // empty one and are never emptied short of a full clear, so an empty slot ends the search)
@@ -218,6 +229,25 @@ vec3 rtgiCacheLookup( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye ) {
 	if ( rtgiCacheSpanFind( a0, a1, a2, a3, k0.key, hit ) >= 0 && rtgiCacheNv( hit ) > 0u ) { return rtgiCacheIrrv( hit ); }
 	if ( rtgiCacheSpanFind( b0, b1, b2, b3, k1.key, hit ) >= 0 && rtgiCacheNv( hit ) > 0u ) { return rtgiCacheIrrv( hit ); }
 	return vec3( 0.0 );
+}
+
+// LOOKUP in TAIL mode (C6): the cell's stored OUTGOING radiance L_out = albedo*(E_dir+E_ind), emissive excluded. Returns
+// true + L_out when H's cell (own level, else the one-coarser fallback) is SERVABLE (converged + fresh, rtgiCacheServable);
+// the bounce then takes L_out * scale + emissive(H) and skips the albedo sample, the light loop and the dominant shadow
+// ray. false = no servable cell either level: the caller shades the hit live (today's one bounce), no cached addition.
+// BOTH spans load together (eight independent 16 B loads, one round trip), as the indirect-only lookup above.
+bool rtgiCacheLookupTail( RtgiCacheParms p, vec3 P, vec3 N, vec3 eye, out vec3 Lout ) {
+	Lout = vec3( 0.0 );
+	int   level = hgLevel( distance( P, eye ), p.tanAlphaHalf );
+	HgKey k0 = hgMakeKeyLevel( P, N, level, p.slotMask );
+	HgKey k1 = hgMakeKeyLevel( P, N, level + 1, p.slotMask );
+	RtgiCacheSpan span = RtgiCacheSpan( p.slotAddr );
+	uvec4 a0 = span.s[ k0.base ], a1 = span.s[ k0.base + 1u ], a2 = span.s[ k0.base + 2u ], a3 = span.s[ k0.base + 3u ];
+	uvec4 b0 = span.s[ k1.base ], b1 = span.s[ k1.base + 1u ], b2 = span.s[ k1.base + 2u ], b3 = span.s[ k1.base + 3u ];
+	uvec4 hit;
+	if ( rtgiCacheSpanFind( a0, a1, a2, a3, k0.key, hit ) >= 0 && rtgiCacheServable( p, hit ) ) { Lout = rtgiCacheIrrv( hit ); return true; }
+	if ( rtgiCacheSpanFind( b0, b1, b2, b3, k1.key, hit ) >= 0 && rtgiCacheServable( p, hit ) ) { Lout = rtgiCacheIrrv( hit ); return true; }
+	return false;
 }
 
 // SEED a just-claimed cell from its one-coarser parent when that has been learned. As the camera approaches a surface

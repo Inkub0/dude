@@ -36,6 +36,12 @@ struct RtgiBounceParms {
 	// its cell has learned (albedo(H) * E_cache(H) * scale) - the recursion that makes the one bounce multi-bounce. The
 	// caller fills `cache` from the shared uniform packing (rtgi_cache.glsl) and does the UPDATE at its primary point.
 	bool  cacheLookup;
+	// C6 TAIL mode: when cacheTail, the cell stores the surface's OUTGOING radiance and a converged + fresh cell IS the
+	// bounce's path tail - the hit reads L_out * scale + emissive(H) and skips the albedo sample, the light loop and the
+	// dominant shadow ray (cheaper gather, and the bounce the denoiser sees is cell + frame averaged, not 1-spp direct).
+	// cacheTail and cacheLookup are mutually exclusive in effect: tail mode has no separate indirect add (the C2 block below
+	// stands down). Only ever set by the DI gather (diApply && r_rtgiCacheTail); the standalone RTGI pass keeps cacheLookup.
+	bool  cacheTail;
 	RtgiCacheParms cache;
 };
 
@@ -128,17 +134,40 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 	vec2 st2 = vec2( uintBitsToFloat( g.vb.w[ b2 + 3u ] ), uintBitsToFloat( g.vb.w[ b2 + 4u ] ) );
 	vec2 hitST = w0 * st0 + bc.x * st1 + bc.y * st2;
 
+	// world hit (rigid ray: hitWorld = rayOrg + dir*thit). Face the hit normal back toward the ray so a
+	// bounce off the inside of a single-sided wall still lights from the correct side. Hoisted above the albedo
+	// sample so the C6 tail serve can read the cache and, on a served hit, skip that sample entirely.
+	vec3  hitWorld = rayOrg + dir * thit;
+	if ( dot( hitN, dir ) > 0.0 ) { hitN = -hitN; }
+
+	// C6 TAIL mode (docs/rtx-irradiance-cache.md C6): if H's cell is SERVABLE (converged + fresh) its stored outgoing
+	// radiance L_out IS the bounce - Li = L_out * scale + emissive(H) sampled live - and the albedo fetch, the whole
+	// light loop and the dominant shadow ray are all skipped (the cheaper gather, and a cell + frame averaged bounce for
+	// NRD instead of a 1-spp direct shade). emissive stays live: the cell excludes the surface's own self-illum (the hit
+	// adds it here) so a converged cell of a flickering LED does not freeze its glow. A miss / unresolved cell falls
+	// through to the live shade below (today's one bounce), with no cached addition - tail mode has no separate indirect.
+	if ( bp.cacheTail ) {
+		vec3 Lout;
+		if ( rtgiCacheLookupTail( bp.cache, hitWorld, hitN, eyeW, Lout ) ) {
+			Li = Lout * bp.cache.scale;
+			uint emitT = ( g.flags >> 16 ) & 0xFFFFu;
+			if ( emitT != 0u ) {
+				vec3  e  = textureLod( u_rtTextures[ nonuniformEXT( emitT - 1u ) ], hitST, 0.0 ).rgb * bp.emissiveScale;
+				float ep = max( max( e.r, e.g ), e.b );
+				if ( ep > bp.emissiveClamp ) { e *= bp.emissiveClamp / ep; }
+				Li += e;
+			}
+			LiCache = Li;
+			return 1;
+		}
+	}
+
 	// RR4: albedo from the hit's real diffuse (bindless slot texIndex-1), else the RR3 material average.
 	// RR16g: baseColor.rgb is the diffuse average (fallback albedo only); self-illum is sampled per-pixel below.
 	vec4  bcol = unpackUnorm4x8( g.baseColor );
 	vec3  albedo = ( g.texIndex != 0u )
 		? texture( u_rtTextures[ nonuniformEXT( g.texIndex - 1u ) ], hitST ).rgb
 		: bcol.rgb;
-
-	// world hit (rigid ray: hitWorld = rayOrg + dir*thit). Face the hit normal back toward the ray so a
-	// bounce off the inside of a single-sided wall still lights from the correct side.
-	vec3  hitWorld = rayOrg + dir * thit;
-	if ( dot( hitN, dir ) > 0.0 ) { hitN = -hitN; }
 
 	// Li = outgoing radiance at the hit toward the shading pixel. Diffuse only; the receiver's own albedo
 	// and the 1/pi * pi (cosine-sampling) factors are applied at the H6c consume site, so here we return
@@ -209,11 +238,13 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		}
 	}
 
-	// RT irradiance cache (docs/rtx-irradiance-cache.md C2): the INDIRECT light the hit's own cell has learned - what
-	// bounced onto H from everywhere else - lights H exactly as its direct term does (albedo * irradiance-like term,
-	// Doom's convention: no 1/pi). A miss / unresolved cell adds 0, so a cold cache is the plain one bounce. The albedo
-	// is clamped so the recursion E(P) = L(H) + albedo(H) E(H) stays strictly convergent on white materials.
-	if ( bp.cacheLookup ) {
+	// RT irradiance cache (docs/rtx-irradiance-cache.md C2, indirect-only mode): the INDIRECT light the hit's own cell has
+	// learned - what bounced onto H from everywhere else - lights H exactly as its direct term does (albedo * irradiance-like
+	// term, Doom's convention: no 1/pi). A miss / unresolved cell adds 0, so a cold cache is the plain one bounce. The albedo
+	// is clamped so the recursion E(P) = L(H) + albedo(H) E(H) stays strictly convergent on white materials. SKIPPED in C6
+	// tail mode: a servable hit already returned above with the full L_out, and an unservable one must stay the plain one
+	// bounce (adding the indirect term on top of a tail-mode cell, whose value is L_out not E_ind, would double-count).
+	if ( bp.cacheLookup && !bp.cacheTail ) {
 		vec3 cached = min( albedo, vec3( bp.cache.albedoClamp ) ) * rtgiCacheLookup( bp.cache, hitWorld, hitN, eyeW ) * bp.cache.scale;
 		Li += cached;
 		LiCache += cached;
