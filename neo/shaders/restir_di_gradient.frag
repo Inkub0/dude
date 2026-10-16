@@ -283,10 +283,18 @@ void main() {
 	// (as the confidence pass's, but larger) keeps a near-black direct term from resetting on its own noise: a change
 	// of a light that contributes almost nothing cannot have moved the indirect term either. One request per changed
 	// stratum (3x3 pixels) is plenty: a cell is ~10 pixels wide at the default cell angle.
+	// EXACT comparisons only: when LAST frame's light wins on a pixel that moved more than the static threshold on
+	// screen (any turn or walk), the two luminances come from two different points a pixel apart (the stored previous
+	// point vs the current one - the mover approximation above), and on bump-mapped, cookie-lit surfaces that differs
+	// by 35 % routinely: the whole view flashed red in the activity view while turning (user, 2026-10-16; confirmed by
+	// the r_rtgiCacheReset 0 A/B). The DI confidence absorbs that through its dead zone + filter; a cell reset must not.
+	// The other direction (THIS frame's pick wins) shades both frames at the same point and is exact even while
+	// moving, so a light switching ON still resets on the move; a switch-OFF while moving is left to the history blend.
 	{
 		RtgiCacheParms cp = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ) );
 		float Lmax = max( Lprev, Lnow );
-		if ( cp.gradientReset && rtgiCachePresent( cp ) && abs( Lprev - Lnow ) > cp.resetThresh * ( Lmax + cp.resetBias ) ) {
+		const bool exact = !( wIsPrev && !bestStatic );
+		if ( cp.gradientReset && rtgiCachePresent( cp ) && exact && abs( Lprev - Lnow ) > cp.resetThresh * ( Lmax + cp.resetBias ) ) {
 			rtgiCacheRequestReset( cp, Sp.Pw, Sp.Nw, u_modelViewMatrix[3].xyz );
 		}
 	}

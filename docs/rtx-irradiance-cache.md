@@ -311,6 +311,21 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
   green = created / seeded, grey = steady, black = absent) in a static scene must settle to all grey; if red keeps
   flashing, `r_rtgiCacheReset 0` is the A/B (and the 0.35 threshold / 0.05 bias move up). View 4 now floors present
   cells at 15 % grey so a young cell and a hole are told apart.
+- **View 5, second reading (user):** a static scene IS all grey - the reset does not fire on noise standing still;
+  the sparse black specks are silhouette slivers (the overlay's own jittered reconstruction straddling an edge) and
+  a few cells whose every bounce ray hits an unattributed prop (teach nothing) - neither touches the lit image.
+  But LOOKING AROUND flashed most of the view red (resets) with green only at the leading screen edge (fresh cells,
+  as expected), and `r_rtgiCacheReset 0` removed almost all of it (A/B confirmed). Cause: the gradient's two
+  comparison directions. When LAST frame's light wins on a pixel that moved > 2 px on screen (any turn or walk),
+  the gradient's mover path compares the stored luminance at the previous point with a re-shade at the current
+  point, a pixel apart - on bump-mapped, cookie-lit surfaces that differs by 35 % routinely. The DI confidence
+  absorbs it (dead zone 0.25, power 8, A-trous); the cache cannot. Fixed by taking only the EXACT comparisons: a
+  static pixel (re-shaded at the stored point) or the direction where THIS frame's pick wins (both frames at the
+  same point). Consequence: a light switching ON resets its cells even while moving; a switch-OFF while moving is
+  left to the history blend (alpha >= 1/32: ~0.5 s) and resets the frame the player stops. If C4 shows that lag,
+  the next step is driving the reset from the FILTERED confidence in `restir_di_gradient_conf.frag` (per gather
+  pixel, after the A-trous + rise-only smoothing) instead of the raw stratum - fuller coverage, and the filter
+  dilutes sparse false positives.
 
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 
