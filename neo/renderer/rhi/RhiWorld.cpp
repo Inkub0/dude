@@ -9293,9 +9293,14 @@ static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	cp.frame        = (unsigned int)tr.frameCount;
 	cp.tanAlphaHalf = idMath::ClampFloat( 0.0005f, 0.05f, r_rtgiCacheCellAngle.GetFloat() );
 	cp.scale        = idMath::ClampFloat( 0.0f, 4.0f, r_rtgiCacheScale.GetFloat() );
-	cp.evictAge     = 0;			// C3: stamp-based eviction
-	cp.flags        = 1u | 2u;		// update at the primary point + lookup at the bounce hit (C2); C3 adds 4 = gradient reset
-	cp.resetThresh  = 0.0f;
+	// C3 responsiveness. Eviction: a cell not updated for 4 x Nmax frames (>= 64) may be taken over when its probe span
+	// is full of newer cells - dead cells (a room left behind) stop pinning slots without the live ones churning.
+	// Gradient reset: the DI gradient restarts a cell whose direct light changed by more than 35 % (above the DI dead
+	// zone, r_rtReStirDIGradientDeadzone 0.25, so Doom's 5-15 % authored flicker never resets; a switch is 100 %).
+	const int nMax = idMath::ClampInt( 1, 1024, r_rtgiCacheHistory.GetInteger() );
+	cp.evictAge     = (unsigned int)idMath::ClampInt( 64, 4096, 4 * nMax );
+	cp.flags        = 1u | 2u | 4u;	// update at the primary point + lookup at the bounce hit (C2) + gradient reset (C3)
+	cp.resetThresh  = 0.35f;
 	cp.sampleClamp  = 64.0f;		// a 1-spp firefly (peak channel) must not own a cell for Nmax frames
 	cp.albedoClamp  = 0.9f;			// keeps the bounce recursion strictly convergent on white materials
 	c.readyThisView = true;

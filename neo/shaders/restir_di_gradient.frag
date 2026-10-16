@@ -54,6 +54,10 @@
 //                       points - different bump texel, cookie texel, shadow edge - and the power-8 confidence turns
 //                       that few-percent mismatch into grey). A mover keeps the current surface (its old position
 //                       would be shadowed by its own old self in the current TLAS).
+//   RT irradiance cache (docs/rtx-irradiance-cache.md C3, inherited from the gather's packing: u_particleRadius.zw slot
+//   address, u_channelMask / u_skinParms / u_contactParms): when flag 4 is set and the stratum's direct light changed by
+//   more than the reset threshold, the shaded point's cache cell is asked to restart its history (its cached INDIRECT
+//   term is as stale as the direct term that changed).
 #extension GL_EXT_buffer_reference_uvec2 : require
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_nonuniform_qualifier : require
@@ -64,6 +68,9 @@
 #include "rt_perforated.glsl"
 #include "restir_di_common.glsl"
 #include "restir_di_shade.glsl"
+// the RT irradiance cache's cell reset (C3)
+#include "rt_hash_grid.glsl"
+#include "rtgi_cache.glsl"
 
 SAMPLER_BINDING(4) uniform sampler2D u_curViewZ;		// this frame: ( viewZ, gradient luminance )
 SAMPLER_BINDING(5) uniform sampler2D u_prevViewZ;		// last frame: ( viewZ, gradient luminance )
@@ -266,6 +273,19 @@ void main() {
 					? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, occDist );		// current TLAS: an approximation for movers
 				Lprev = diGradientLuminance( c, Sp.B, vis );
 			}
+		}
+	}
+	// RT irradiance cache (docs/rtx-irradiance-cache.md C3): the direct light at this stratum's surface CHANGED - a light
+	// switched, a swinging light's footprint moved on - so the INDIRECT term its cell has accumulated is stale too. Ask
+	// the resolve to restart the cell (N = 0: the next frame's samples replace the old mean instead of being 1/N of it).
+	// The threshold sits above the DI dead zone, so Doom's authored 5-15 % flicker tables never reset a cell every frame;
+	// a light switching off / on is a 100 % change of its own value regardless. One request per changed stratum (3x3
+	// pixels) is plenty: a cell is ~10 pixels wide at the default cell angle.
+	{
+		RtgiCacheParms cp = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ) );
+		float Lmax = max( Lprev, Lnow );
+		if ( cp.gradientReset && rtgiCachePresent( cp ) && Lmax > 1e-3 && abs( Lprev - Lnow ) > cp.resetThresh * Lmax ) {
+			rtgiCacheRequestReset( cp, Sp.Pw, Sp.Nw, u_modelViewMatrix[3].xyz );
 		}
 	}
 	fragColor = vec4( abs( Lprev - Lnow ), max( Lprev, Lnow ), 0.0, 1.0 );

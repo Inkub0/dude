@@ -227,3 +227,45 @@ fireflies (the per-sample clamp 64 and the resolve mean take care of those); `1`
 after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` (or `rtgi.ray`) with the cache
 0/1, averaged, plus `rtgi.cache`; expected <= 0.2 ms total at 1440p. If `restir.di.gather` grows by more than
 ~0.3 ms the key derivation is worth hoisting (one `hgMakeKey` for P reused for the update + the gradient).
+
+### C3 - responsiveness (what exists)
+
+- **Nmax** = `r_rtgiCacheHistory` (32): the resolve's `N = min( N + 1, Nmax )`, blend `alpha = max( 1 / N, 0.02 )`.
+  A converged cell takes 2 % of every frame, so even without a reset a change is 63 % absorbed in ~50 frames and
+  a cell under Nmax follows faster.
+- **R1-gradient reset:** `restir_di_gradient.frag` (runs AFTER the gather, rev. 2 - which is why the gather cannot
+  do this itself) computes `Lprev` / `Lnow` for its stratum's winning sample; when
+  `|Lprev - Lnow| > 0.35 * max( Lprev, Lnow )` (and the brighter one is not black) it calls
+  `rtgiCacheRequestReset( Sp.Pw, Sp.Nw, eye )`: `atomicOr` of bit 31 into the cell's accumulation count. The
+  resolve then restarts the cell (`N = 0`): next frame's samples REPLACE the stale mean. 0.35 is a constant in
+  `RB_RHI_RtgiCacheBegin` (`resetThresh`), chosen above the DI dead zone (`r_rtReStirDIGradientDeadzone` 0.25) so
+  Doom's 5-15 % authored flicker tables never reset a cell every frame; a switch is a 100 % change of the light's
+  own value. Flag 4 of `u_skinParms.z` gates it (always set with the cache on; the gradient runs only when the DI
+  gradient chain runs, i.e. `r_rtReStirDIGradient` + a previous frame).
+- **Stamp eviction:** `hgClaim` with `evictAge = clamp( 4 * Nmax, 64, 4096 )` frames: a span full of foreign cells
+  gives up its oldest one (last update >= evictAge frames ago) to the newcomer; the evictor zeroes the payload and
+  requests a reset so none of the old cell's value survives. A slot claimed this frame but not yet stamped (stamp
+  0) is never evicted. Dead cells (a room left behind) thus stop pinning slots without live cells churning.
+- **Fast lights never enter the cache** (plan: the flashlight must not lag): the DI bounce skips DIFORWARD lights
+  (`skipForwardLights`, LiCache == Li) and the standalone RTGI pass bounces them for display but learns `LiCache`
+  without them (C2).
+- SPIR-V: `restir_di_gradient.frag` 3650 -> 4408 instructions, 249 -> 298 function variables, 1 atomic, 61256 ->
+  73748 bytes.
+
+**C3 procedures (user).**
+1. *Switched light:* a room with a wall switch (Mars City lobby / Alphalabs offices). Cache on, `r_rtgiCacheDebug 0`:
+   switch the light off - the indirect fill on the OPPOSITE walls / ceiling must fade within the DI's own fade
+   (the NRD history of `r_rtReStirDIHistory`); it must not trail for the 32-frame Nmax (that would mean the
+   gradient reset is not reaching the cells - check with `r_rtgiCacheDebug 4`: cells in the room should drop to
+   black (N = 0) the frame after the switch and climb back). Switch it on again: same test in reverse.
+2. *Swinging light:* under a swinging lamp (Mars City underground / Alphalabs corridors). The indirect glow on
+   the walls must follow the lamp with no longer trail than the direct light's; `r_rtgiCacheDebug 4` should show
+   the cells along the swing path resetting (dark flicker) while the rest stay converged (white).
+3. *Flashlight:* in a dark room sweep the flashlight across a wall near a lit surface, cache on: the far-side
+   indirect light must NOT change with the beam (`r_rtgiCacheDebug 2` stays unchanged under the beam). Then the
+   same with `r_rtgi` on but DI off (standalone RTGI path, dude_rtx 1): the beam's own one-bounce shows (it
+   always did) but `r_rtgiCacheDebug 2` must still not change - the cache never learned it.
+4. *Eviction:* walk through three rooms and back; `r_rtgiCacheDebug 3` in the first room should show mostly
+   dark (fresh) cells again within a few frames of looking at them, no magenta / black holes where a cell could
+   not be claimed; `r_rtgiCacheDebug 1` must show every lit cell bright (claimed) - dim cells on a visible, lit
+   surface after a second mean a full probe span (raise `r_rtgiCacheSlotsLog2`).
