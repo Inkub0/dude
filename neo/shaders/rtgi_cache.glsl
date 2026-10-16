@@ -32,24 +32,26 @@ const uint  RTGI_CACHE_EVICT_BIT  = 0x40000000u;	// HgAccum.count: the slot chan
 const uint  RTGI_CACHE_COUNT_MASK = 0x3FFFFFFFu;
 const uint  RTGI_CACHE_STRIDE     = 4u;				// uints per slot (HgWords view)
 const uint  RTGI_CACHE_STAMP_OFS  = 1u;				// HgSlot.stamp
-// HgSlot.irrBN: bits 0-15 irr.b (f16), 16-25 N (10 bits: Nmax <= 1023), then three flag bits the debug activity view
-// reads (r_rtgiCacheDebug 5): 29 SEEDED - set by the gather when it seeds a fresh cell from its coarser parent, consumed
-// by the next resolve; 30 FRESH - the last resolve created the cell (N 0 -> 1) or was a seeded cell's first; 31 RESET -
-// the last resolve restarted the cell on a reset request (the DI gradient, an eviction).
+// HgSlot.irrBN: bits 0-15 irr.b (f16), 16-23 N (8 bits: Nmax <= 255 frames), 24-28 the reset cooldown (5 bits), then
+// three flag bits the debug activity view reads (r_rtgiCacheDebug 5): 29 SEEDED - set by the gather when it seeds a
+// fresh cell from its coarser parent, consumed by the next resolve; 30 FRESH - the last resolve created the cell (N
+// 0 -> 1) or was a seeded cell's first; 31 RESET - the last resolve restarted the cell on a reset request.
 const uint  RTGI_CACHE_N_SHIFT    = 16u;
-const uint  RTGI_CACHE_N_MASK     = 0x3FFu;
-const uint  RTGI_CACHE_N_MAX      = 1023u;
+const uint  RTGI_CACHE_N_MASK     = 0xFFu;
+const uint  RTGI_CACHE_N_MAX      = 255u;
 const uint  RTGI_CACHE_SEEDED_BIT = 0x20000000u;
 const uint  RTGI_CACHE_FRESH_BIT  = 0x40000000u;
 const uint  RTGI_CACHE_RESET_FLAG = 0x80000000u;
 const uint  RTGI_CACHE_SEED_N     = 4u;				// frames of trust a cell seeded from its coarser parent starts with
-// bits 26-28: the RESET COOLDOWN - resolves left since the cell last restarted. A reset request arriving inside it re-arms
-// it without restarting: a light that changes every frame (an authored flicker / strobe table, a swinging cookie) would
-// otherwise pin the cell at one frame's mean forever; held, the cell blends the changes and converges to the light's
-// average, which is what a cache of a flickering light should hold. A one-shot change (a switch) restarts at once.
-const uint  RTGI_CACHE_COOL_SHIFT  = 26u;
-const uint  RTGI_CACHE_COOL_MASK   = 0x7u;
-const uint  RTGI_CACHE_COOL_FRAMES = 7u;
+// The RESET COOLDOWN: resolves left since the cell last restarted, counted down by the resolve from the push-constant
+// value the CPU derives from a DURATION (RTGI_CACHE_COOL_MS, 250 ms, through the low-passed frame rate - the boundary
+// between a one-shot change to follow and a periodic one to average is a frequency, so it must not shrink at 144 Hz).
+// A reset request arriving inside it re-arms it without restarting: a light that changes every frame (an authored
+// flicker / strobe table, a swinging cookie) would otherwise pin the cell at one frame's mean forever; held, the cell
+// blends the changes and converges to the light's average, which is what a cache of a flickering light should hold. A
+// one-shot change (a switch) restarts at once.
+const uint  RTGI_CACHE_COOL_SHIFT  = 24u;
+const uint  RTGI_CACHE_COOL_MASK   = 0x1Fu;
 
 // Per-pass constants, packed by the CPU (RhiWorld.cpp RB_RHI_RtgiCachePack) identically for every consumer:
 //   u_channelMask  = ( accum address lo, hi [bit-cast], slot mask [bit-cast uint], tanAlphaHalf )

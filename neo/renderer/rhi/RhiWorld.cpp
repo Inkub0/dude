@@ -585,9 +585,15 @@ struct rtgiCacheState_t {
 	bool				readyThisView = false;	// Begin succeeded this view: the parms are valid, the resolve + overlay may run
 	bool				resolvedThisView = false;
 	rhi::ShaderHandle	resolveProg = 0;		// rtgi_cache_resolve.comp
+	int					nMaxFrames = 32;		// the history cap in FRAMES this view (r_rtgiCacheHistoryMs through the frame rate, else r_rtgiCacheHistory)
+	int					coolFrames = 7;			// the reset cooldown in frames this view (RTGI_CACHE_COOL_MS through the frame rate)
 	rtgiCacheParms_t	parms;
 };
 static rtgiCacheState_t rhiRtgiCache;
+// The reset cooldown is a DURATION: it separates a one-shot change to follow (a switch) from a periodic one to average
+// (a flicker / strobe table, a swinging cookie), and that boundary is a frequency. Above ~5 Hz reads as flicker, below
+// ~2-3 Hz as separate events; 250 ms sits between, and holds at 60 and 144 Hz alike (7 frames did not).
+#define RTGI_CACHE_COOL_MS		250.0f
 static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef );										// defined with the GI apply / overlays below
 static void RB_RHI_RtgiCachePack( rhi::RenderParams &parms, const rtgiCacheParms_t &cp, bool slotInParticleRadius );
 static void RB_RHI_RtgiCacheResolve( rhi::RHI *r );
@@ -661,7 +667,10 @@ static bool RB_RHI_NrdHistoryReset( const viewDef_t *viewDef ) {
 // GetMaxAccumulatedFrameNum over a 0.2 s low-passed frame rate, so the window is the same TIME at 60 or 144 Hz).
 // fastFrames = the fast history base (NRD default 6, or the consumer's cvar); in ms mode it scales with the main
 // window so the 5-7x ratio NRD recommends is preserved. Both outputs clamped to ReBLUR's 63.
-static void RB_RHI_NrdHistoryFrames( int frames, float ms, int fastFrames, int &outMain, int &outFast ) {
+// The 0.2 s low-passed frame time every seconds-based window converts through (NRD's "accumulate in seconds, not frames"
+// recipe). Advanced once per rendered frame however many consumers ask; shared by the NRD history windows and the RT
+// irradiance cache's history + reset cooldown (docs/rtx-irradiance-cache.md). Never below 1 ms.
+static float RB_RHI_SmoothedFrameMs( void ) {
 	static int   lastTick  = -1;
 	static int   lastFrame = -1;
 	static float smoothedFrameMs = 16.7f;				// "must be initialized to a positive value" (NRD)
@@ -675,10 +684,15 @@ static void RB_RHI_NrdHistoryFrames( int frames, float ms, int fastFrames, int &
 		lastTick  = now;
 		lastFrame = tr.frameCount;
 	}
+	return Max( smoothedFrameMs, 1.0f );
+}
+
+static void RB_RHI_NrdHistoryFrames( int frames, float ms, int fastFrames, int &outMain, int &outFast ) {
+	const float frameMs = RB_RHI_SmoothedFrameMs();		// advanced every frame, whether or not this consumer is in ms mode
 	outMain = frames;
 	outFast = fastFrames;
 	if ( ms > 0.0f ) {
-		const float fps = 1000.0f / Max( smoothedFrameMs, 1.0f );
+		const float fps = 1000.0f / frameMs;
 		outMain = (int)( ms * 0.001f * fps + 0.5f );		// == nrd::GetMaxAccumulatedFrameNum( seconds, smoothedFPS ) (no NRD include here)
 		if ( outMain < 2 ) { outMain = 2; }
 		if ( frames > 0 && fastFrames > 0 ) {
@@ -9322,7 +9336,15 @@ static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// is full of newer cells - dead cells (a room left behind) stop pinning slots without the live ones churning.
 	// Gradient reset: the DI gradient restarts a cell whose direct light changed by more than 35 % (above the DI dead
 	// zone, r_rtReStirDIGradientDeadzone 0.25, so Doom's 5-15 % authored flicker never resets; a switch is 100 %).
-	const int nMax = idMath::ClampInt( 1, 1024, r_rtgiCacheHistory.GetInteger() );
+	// the history in TIME (r_rtgiCacheHistoryMs, default 500 ms) converted to frames through the 0.2 s low-passed frame
+	// rate, else the frame count (r_rtgiCacheHistory): the blend's time constant and the eviction age must not shrink at
+	// 144 Hz. The slot keeps N in 8 bits (<= 255 frames) and the cooldown in 5 (<= 31 frames: ~215 ms at 144 Hz, the cap).
+	const float frameMs = RB_RHI_SmoothedFrameMs();
+	const float histMs  = r_rtgiCacheHistoryMs.GetFloat();
+	const int nMax = ( histMs > 0.0f ) ? idMath::ClampInt( 1, 255, (int)( histMs / frameMs + 0.5f ) )
+	                                   : idMath::ClampInt( 1, 255, r_rtgiCacheHistory.GetInteger() );
+	c.nMaxFrames    = nMax;
+	c.coolFrames    = idMath::ClampInt( 2, 31, (int)( RTGI_CACHE_COOL_MS / frameMs + 0.5f ) );
 	cp.evictAge     = (unsigned int)idMath::ClampInt( 64, 4096, 4 * nMax );
 	// flags: 1 = update at the primary point, 2 = lookup at the bounce hit (C2), 4 = gradient reset (C3). On a frame whose
 	// clear is still pending the buffers hold undefined memory until the resolve point zeroes them (the gathers run BEFORE
@@ -9371,12 +9393,13 @@ static void RB_RHI_RtgiCacheResolve( rhi::RHI *r ) {
 	if ( !c.readyThisView || c.resolvedThisView || c.resolveProg == 0 ) {
 		return;
 	}
-	struct { unsigned int slotCount, mode, nMax, frame; float alphaMin; } pc;		// rtgi_cache_resolve.comp PC
-	pc.slotCount = 1u << c.slotsLog2;
-	pc.mode      = 0;
-	pc.nMax      = (unsigned int)idMath::ClampInt( 1, 1023, r_rtgiCacheHistory.GetInteger() );	// 10-bit N in the slot
-	pc.frame     = c.parms.frame;
-	pc.alphaMin  = 0.02f;
+	struct { unsigned int slotCount, mode, nMax, frame; float alphaMin; unsigned int coolFrames; } pc;		// rtgi_cache_resolve.comp PC
+	pc.slotCount  = 1u << c.slotsLog2;
+	pc.mode       = 0;
+	pc.nMax       = (unsigned int)c.nMaxFrames;		// 8-bit N in the slot (Begin clamped it)
+	pc.frame      = c.parms.frame;
+	pc.alphaMin   = 0.02f;
+	pc.coolFrames = (unsigned int)c.coolFrames;		// 5-bit cooldown in the slot (Begin clamped it)
 	rhi::ComputeArgs ca = rhi::ComputeArgs();
 	ca.shader = c.resolveProg;
 	ca.storage[0] = c.slotBuf;
@@ -9426,7 +9449,7 @@ void RB_RHI_RtgiCacheDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );		// u_modelViewMatrix = view->world
 	parms.localParam0[0] = invP00;
 	parms.localParam0[1] = invP11;
-	parms.localParam0[2] = (float)idMath::ClampInt( 1, 1023, r_rtgiCacheHistory.GetInteger() );
+	parms.localParam0[2] = (float)c.nMaxFrames;								// the history cap this view (ms-based or frames)
 	parms.localParam0[3] = (float)r_rtgiCacheDebug.GetInteger();
 	// full-res gl_FragCoord -> uv / depth tc (the gather's mapping at scale 1; the primary view fills the window from the origin)
 	parms.screenCorrection[0] = 1.0f / w;

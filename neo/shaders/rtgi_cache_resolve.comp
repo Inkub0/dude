@@ -24,9 +24,10 @@ layout( std430, binding = 1 ) buffer CacheAccums { HgAccum a[]; } accum;
 layout( push_constant ) uniform PC {
 	uint  slotCount;	// slots in the buffers (power of two)
 	uint  mode;			// 0 = resolve, 1 = clear
-	uint  nMax;			// history cap (frames of memory per cell)
+	uint  nMax;			// history cap (frames of memory per cell; the CPU derives it from r_rtgiCacheHistoryMs / r_rtgiCacheHistory)
 	uint  frame;		// this frame's stamp (unused by the resolve itself; kept for symmetry with the fragment side)
 	float alphaMin;		// floor on the blend factor (responsiveness)
+	uint  coolFrames;	// the reset cooldown in frames (RTGI_CACHE_COOL_MS through the frame rate; <= 31)
 } pc;
 
 void main() {
@@ -65,7 +66,7 @@ void main() {
 	// the cooldown has run out long before the next.
 	if ( reset ) {
 		if ( cool == 0u ) { N = 0u; flags = RTGI_CACHE_RESET_FLAG; }
-		cool = RTGI_CACHE_COOL_FRAMES;
+		cool = min( pc.coolFrames, RTGI_CACHE_COOL_MASK );
 	} else if ( cool > 0u ) {
 		cool--;
 	}

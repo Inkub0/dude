@@ -1073,7 +1073,8 @@ extern idCVar r_rtgiFogAttenuate;			// RT GI reconcile: fade bounce light out th
 extern idCVar r_rtgiCache;					// RT irradiance cache (docs/rtx-irradiance-cache.md): the bounce hit reads a hashed world-space cache of indirect light (multi-bounce)
 extern idCVar r_rtgiCacheScale;				// RT irradiance cache: weight of the cached term at the bounce hit
 extern idCVar r_rtgiCacheSlotsLog2;			// RT irradiance cache: log2 slot count (reconfiguring: joins ComputeGfxCfgSignature)
-extern idCVar r_rtgiCacheHistory;			// RT irradiance cache: Nmax frames of memory per cell
+extern idCVar r_rtgiCacheHistory;			// RT irradiance cache: Nmax frames of memory per cell (when the ms knob is 0)
+extern idCVar r_rtgiCacheHistoryMs;			// RT irradiance cache: the history in milliseconds through the low-passed frame rate (default 500; 0 = frames)
 extern idCVar r_rtgiCacheCellAngle;			// RT irradiance cache: tan(alpha/2), cell width per unit eye distance
 extern idCVar r_rtgiCacheDebug;				// RT irradiance cache debug overlay: 1 cell colour, 2 cached value, 3 age, 4 N, 5 activity (reset / fresh)
 extern idCVar r_rtgiCacheReset;				// RT irradiance cache: the DI gradient restarts a cell whose direct light changed (diagnostic A/B)

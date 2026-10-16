@@ -4777,9 +4777,11 @@ static void DrawDbgGroup_RTGI()
 		ImGui::BeginDisabled( !r_rtgiCache.GetBool() );
 		CvarSliderF( "Cache Weight", r_rtgiCacheScale, 0.0f, 2.0f, "%.2f", "Weight of the cached (second and later bounce) light "
 			"added at a bounce hit. 1 = physical; lower for a subtler multi-bounce fill. (r_rtgiCacheScale)" );
-		CvarSliderI( "Cache History", r_rtgiCacheHistory, 1, 256, "Frames of memory per cell (Nmax): how long a switched or "
-			"swinging light's OLD indirect contribution can linger against how smooth the cached term is. Default 32. "
-			"(r_rtgiCacheHistory)" );
+		CvarSliderF( "Cache History (ms)", r_rtgiCacheHistoryMs, 0.0f, 2000.0f, "%.0f ms", "How long a cell remembers, in "
+			"milliseconds (the same TIME at 60 or 144 Hz): how long a switched or swinging light's OLD indirect contribution "
+			"can linger against how smooth the cached term is. Default 500. 0 = use the frame count below. (r_rtgiCacheHistoryMs)" );
+		CvarSliderI( "Cache History (frames)", r_rtgiCacheHistory, 1, 255, "Frames of memory per cell (Nmax) when the "
+			"millisecond knob is 0. Default 32. (r_rtgiCacheHistory)" );
 		CvarSliderF( "Cell Angle", r_rtgiCacheCellAngle, 0.001f, 0.02f, "%.4f", "Cache cell width per unit of eye distance "
 			"(tan of half the cell's screen angle; 0.004 is ~10 pixels at 1440p). Smaller = sharper indirect light, fewer "
 			"thin-wall leaks, slower convergence; larger = smoother, blurrier, leaks sooner. (r_rtgiCacheCellAngle)" );

@@ -75,7 +75,9 @@ our 2^20 x 16 B cache plus the accumulation buffer is in the same range.
 | `r_rtgiCache` | 0 | the cache feeds the bounce hit (multi-bounce) |
 | `r_rtgiCacheScale` | 1.0 | weight of the cached term at the hit |
 | `r_rtgiCacheSlotsLog2` | 20 | slot count (reconfiguring: joins ComputeGfxCfgSignature, see memory `fsr-scale-device-lost`) |
-| `r_rtgiCacheHistory` | 32 | Nmax (frames of memory per cell) |
+| `r_rtgiCacheHistory` | 32 | Nmax (frames of memory per cell) when `r_rtgiCacheHistoryMs` is 0 |
+| `r_rtgiCacheHistoryMs` | 500 | the history in milliseconds through the low-passed frame rate (added at C4: Doom's light tables are authored in time) |
+| `r_rtgiCacheReset` | 1 | the DI gradient restarts a cell whose light switched (diagnostic A/B, added at C4) |
 | `r_rtgiCacheCellAngle` | 0.004 | tan(alpha/2): cell width per unit eye distance |
 | `r_rtgiCacheDebug` | 0 | 1 cell colour, 2 cached value, 3 age, 4 N |
 
@@ -360,6 +362,16 @@ after a few frames of looking at it. Cost: `r_vkGpuTime 2` - `restir.di.gather` 
   restarts its cells ONCE and they then blend toward the light's average (alpha >= 1 / Nmax: the responsiveness
   knob is `r_rtgiCacheHistory`, 32 = ~0.5 s), which is what a cache of a periodic light should hold; a switch is a
   one-shot request and still restarts at once. View 5 shows held / cooling cells YELLOW.
+- **Time, not frames (user question, agreed):** Doom's light tables and swings are authored in game time, so the
+  cooldown's boundary between "follow" (a switch, a slow blink) and "average" (a flicker) is a frequency and must be
+  a duration - 7 frames were 117 ms at 60 Hz but 49 ms at 144 Hz. Now `RTGI_CACHE_COOL_MS` = 250 ms converted to
+  frames each view through the 0.2 s low-passed frame rate every seconds-based NRD window already uses
+  (`RB_RHI_SmoothedFrameMs`, factored out of `RB_RHI_NrdHistoryFrames`), a 5-bit cooldown in the slot (<= 31 frames:
+  ~215 ms at 144 Hz, the cap), the history field down to 8 bits (<= 255 frames). The history itself likewise:
+  **`r_rtgiCacheHistoryMs`** (default 500 ms, 0 = `r_rtgiCacheHistory` in frames) sets Nmax per view, and the
+  eviction age (4 x Nmax) follows. The gradient's own comparison stays per frame by construction; its 35 % threshold
+  is self-correcting across frame rates (an interpolated table changes less per frame at 144 Hz, fewer requests, the
+  cell blends either way).
 
 ## C4 - user validation checklist (the session cannot run the game; every item is yours)
 
