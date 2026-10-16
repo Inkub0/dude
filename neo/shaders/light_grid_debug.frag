@@ -53,7 +53,9 @@ void main() {
 	if ( c < 0 ) { fragColor = vec4( 0.03, 0.0, 0.06, 1.0 ); return; }				// beyond the grid: the consumer falls back (dim magenta)
 
 	if ( mode == 1 ) {
-		fragColor = vec4( lgTint( uint( c ) ), 1.0 );
+		// distinct hue per cascade so the nesting reads clearly: 0 red, 1 green, 2 blue, 3 yellow
+		vec3 casc[4] = vec3[4]( vec3( 0.9, 0.2, 0.2 ), vec3( 0.2, 0.9, 0.2 ), vec3( 0.2, 0.4, 0.95 ), vec3( 0.9, 0.9, 0.2 ) );
+		fragColor = vec4( casc[ clamp( c, 0, 3 ) ], 1.0 );
 		return;
 	}
 

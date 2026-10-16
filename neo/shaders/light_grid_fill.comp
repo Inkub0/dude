@@ -1,9 +1,12 @@
 // DUDE RT light-grid FILL (docs/rtx-light-grid.md L1): one thread per grid cell, once per frame AFTER the scene-light
 // buffer is gathered and BEFORE the DI gather / bounce that consume it (RhiWorld.cpp RB_RHI_LightGridFill). For each
-// cell: stream every scene light, importance = flux x geometry at the cell centre, and keep `slots` light candidates by
-// `slots` parallel weighted reservoirs (each an i.i.d. importance draw), plus the cell's total importance (sumImp, the
-// consume pdf denominator). The grid is DENSE and rewritten whole every frame - no clear, no cross-frame history (the
-// feedback learning of L4 would add it). An out-of-range cell writes count 0 and the consumer falls back to its old path.
+// cell: stream every scene light, importance = flux x geometry at the cell centre, and DETERMINISTICALLY keep the `slots`
+// HIGHEST-importance in-range lights (a streaming top-N), plus the sum of the kept importances (the consume pdf
+// denominator). Deterministic = no rng, so the grid is STABLE frame-to-frame for a static camera (no flicker); the
+// per-pixel CONSUME does the importance-proportional draw instead. When a cell has <= slots in-range lights it keeps them
+// ALL = the exact in-range set (lossless, exhaustive-equivalent at fixed cost); only a cell with MORE drops its dimmest.
+// The grid is DENSE and rewritten whole every frame (no clear, no history; L4's feedback would add temporal learning).
+// An out-of-range / lightless cell writes count 0 and the consumer falls back to its old path.
 #extension GL_EXT_buffer_reference_uvec2 : require
 
 // rt_light_eval.glsl: RtLight / RtLights / DUDE_LIGHT_* / dudeLightInRange. rtgi_light_grid.glsl: LgGrid + mapping + layout.
@@ -21,7 +24,6 @@ layout( push_constant ) uniform PC {
 	uint  cascades, res, slots;		// grid dimensions (slots <= LG_MAX_SLOTS)
 	float cellBase;					// cascade-0 cell size (units)
 	float camX, camY, camZ;			// camera position (cascade snapping)
-	uint  frame;					// rng seed
 	float parallelFlux;				// flux weight for parallel (sun) lights, which have no 1/d^2 term
 } pc;
 
@@ -43,10 +45,9 @@ void main() {
 
 	uint  chosen[ LG_MAX_SLOTS ];
 	float chosenImp[ LG_MAX_SLOTS ];
-	for ( uint k = 0u; k < LG_MAX_SLOTS; k++ ) { chosen[ k ] = 0u; chosenImp[ k ] = 0.0; }
-
-	float sumImp = 0.0;
-	uint  rng = lgPcg( cellIndex * 9781u + pc.frame * 6271u + 0x9E3779B9u );
+	uint  count   = 0u;				// kept so far (up to slots)
+	uint  minSlot = 0u;				// the weakest kept slot, for replacement once full
+	float minImp  = 1e30;
 
 	for ( uint li = 0u; li < pc.nLights; li++ ) {
 		uint flags = lights.l[ li ].flags;
@@ -70,17 +71,29 @@ void main() {
 			imp = lum * ( rad * rad ) / d2;
 		}
 		if ( imp <= 0.0 ) { continue; }
-		sumImp += imp;
-		float accept = imp / sumImp;									// A-Res reservoir probability (shared stream, per-slot draw)
-		for ( uint k = 0u; k < slots; k++ ) {
-			if ( lgRand( rng ) < accept ) { chosen[ k ] = li; chosenImp[ k ] = imp; }
+		// streaming TOP-N by importance (deterministic - no rng, so the grid is stable frame-to-frame)
+		if ( count < slots ) {
+			chosen[ count ] = li;
+			chosenImp[ count ] = imp;
+			count++;
+			if ( count == slots ) {										// just filled: locate the weakest kept slot
+				minImp = chosenImp[ 0 ]; minSlot = 0u;
+				for ( uint k = 1u; k < slots; k++ ) { if ( chosenImp[ k ] < minImp ) { minImp = chosenImp[ k ]; minSlot = k; } }
+			}
+		} else if ( imp > minImp ) {									// stronger than the weakest kept: replace it, re-find the weakest
+			chosen[ minSlot ] = li;
+			chosenImp[ minSlot ] = imp;
+			minImp = chosenImp[ 0 ]; minSlot = 0u;
+			for ( uint k = 1u; k < slots; k++ ) { if ( chosenImp[ k ] < minImp ) { minImp = chosenImp[ k ]; minSlot = k; } }
 		}
 	}
 
-	if ( sumImp > 0.0 ) {
-		grid.g[ base ]     = slots;										// count
-		grid.g[ base + 1 ] = floatBitsToUint( sumImp );
-		for ( uint k = 0u; k < slots; k++ ) {
+	if ( count > 0u ) {
+		float sumStored = 0.0;											// sum over the KEPT lights = the consume's pdf denominator
+		for ( uint k = 0u; k < count; k++ ) { sumStored += chosenImp[ k ]; }
+		grid.g[ base ]     = count;
+		grid.g[ base + 1 ] = floatBitsToUint( sumStored );
+		for ( uint k = 0u; k < count; k++ ) {
 			grid.g[ base + int( LG_HEADER + 2u * k ) ]      = chosen[ k ];
 			grid.g[ base + int( LG_HEADER + 2u * k + 1u ) ] = floatBitsToUint( chosenImp[ k ] );
 		}

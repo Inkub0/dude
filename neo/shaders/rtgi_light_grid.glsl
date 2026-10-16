@@ -102,14 +102,21 @@ float lgSumImp( LgGrid grid, int base )           { return uintBitsToFloat( grid
 uint  lgSlotLight( LgGrid grid, int base, uint s ){ return grid.g[ base + int( LG_HEADER + 2u * s ) ]; }
 float lgSlotImp( LgGrid grid, int base, uint s )  { return uintBitsToFloat( grid.g[ base + int( LG_HEADER + 2u * s + 1u ) ] ); }
 
-// One candidate from the cell: a uniformly-chosen stored slot. Its light index (out) and its selection pdf q =
-// imp/sumImp (the probability THIS light is a single importance draw) for the RIS weight pHat/q. false = empty cell.
+// One candidate from the cell, drawn IMPORTANCE-PROPORTIONALLY among its stored lights (the cell holds the top-N by
+// importance; the fill is deterministic, this draw provides the per-pixel variation the denoiser averages). Returns the
+// chosen light index and its selection pdf q = imp/sumStored, for the consume's RIS weight pHat/q. false = empty cell.
 bool lgDrawCandidate( LgGrid grid, int base, inout uint rng, out uint lightIndex, out float q ) {
+	lightIndex = 0u; q = 0.0;
 	uint n = lgCount( grid, base );
-	if ( n == 0u ) { lightIndex = 0u; q = 0.0; return false; }
-	uint s = min( uint( lgRand( rng ) * float( n ) ), n - 1u );
-	lightIndex = lgSlotLight( grid, base, s );
+	if ( n == 0u ) { return false; }
 	float sum = lgSumImp( grid, base );
-	q = ( sum > 0.0 ) ? ( lgSlotImp( grid, base, s ) / sum ) : 0.0;
-	return q > 0.0;
+	if ( !( sum > 0.0 ) ) { return false; }
+	float r   = lgRand( rng ) * sum;
+	float acc = 0.0;
+	for ( uint s = 0u; s < n; s++ ) {
+		float imp = lgSlotImp( grid, base, s );
+		acc += imp;
+		if ( r < acc || s + 1u == n ) { lightIndex = lgSlotLight( grid, base, s ); q = imp / sum; return q > 0.0; }
+	}
+	return false;
 }

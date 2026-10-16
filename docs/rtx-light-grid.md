@@ -72,11 +72,15 @@ already enough to kill the exhaustive loop.
 ## Fill pass (compute, once per frame, after GatherSceneLights, before the DI gather)
 
 One thread per cell (`numCascades*R^3` threads). Decode the cell centre; stream the `nLights` lights; for each
-in-range light compute `imp` and feed a weighted reservoir of `slots` picks (merian does `slots` independent
-reservoirs; we use reservoir sampling without replacement so a cell never stores the same light twice). Write the
-`slots` chosen light indices + their `pdf = imp/sumImp` and the cell's `sumImp`. A cell with no in-range light writes
-an empty list (count 0) - the consume falls back to... (see L2 fallback). Cost scales with `cells * nLights` on the
-GPU, independent of pixel count and bounded by the in-range cull; the per-pixel saving is `nLights -> slots`.
+in-range light compute `imp` and keep the `slots` HIGHEST-importance ones in a DETERMINISTIC streaming top-N (no rng).
+Write the kept light indices + their `imp` and the sum of the kept importances (`sumStored`). Deterministic matters:
+the grid is then STABLE frame-to-frame for a static camera (no flicker), and when a cell has `<= slots` in-range lights
+it keeps them ALL = the exact in-range set (lossless, exhaustive-equivalent at a fixed `slots` cost); only a cell with
+MORE than `slots` drops its dimmest. The per-pixel CONSUME (L2) does the importance-proportional draw among the kept
+lights (`q = imp/sumStored`), which gives the per-pixel variation the denoiser averages. A cell with no in-range light
+writes count 0 and the consumer falls back (L2). Cost scales with `cells * nLights` on the GPU, independent of pixel
+count and bounded by the in-range cull; the per-pixel saving is `nLights -> slots`. (merian re-samples per frame with
+temporal reuse; deterministic top-N suits Doom's small light counts and is flicker-free. L4's feedback adds learning.)
 
 Reuses the cache's proven plumbing: `rhi::BU_STORAGE_DEVICE` device-local buffers, device address via push constant +
 `RtLights`/grid buffer_reference (like `rtgi_cache_resolve.comp`), `rhi::RHI::Dispatch` with `midScene`. A NEW `.comp`

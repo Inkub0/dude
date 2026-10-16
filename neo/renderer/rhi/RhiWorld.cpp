@@ -9572,7 +9572,7 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	if ( !g.readyThisView || g.filledThisFrame || g.fillProg == 0 || lightAddr == 0 || numLights <= 0 ) {
 		return;		// filled once per frame; the first consumer that has the light buffer triggers it
 	}
-	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; unsigned int frame; float parallelFlux; } pc;	// light_grid_fill.comp PC
+	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; } pc;	// light_grid_fill.comp PC
 	pc.gridLo      = (unsigned int)( g.gridAddr & 0xFFFFFFFFull );
 	pc.gridHi      = (unsigned int)( g.gridAddr >> 32 );
 	pc.lightLo     = (unsigned int)( lightAddr & 0xFFFFFFFFull );
@@ -9585,7 +9585,6 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	pc.camX        = g.parms.camPos[0];
 	pc.camY        = g.parms.camPos[1];
 	pc.camZ        = g.parms.camPos[2];
-	pc.frame       = (unsigned int)tr.frameCount;
 	pc.parallelFlux = 4.0f;		// flux weight for parallel (sun) lights (no 1/d^2): keeps a sun a candidate everywhere (L5 tuning)
 	rhi::ComputeArgs ca = rhi::ComputeArgs();
 	ca.shader = g.fillProg;
