@@ -30,19 +30,13 @@ struct RtgiBounceParms {
 	float lightScale;		// r_rtgiLightScale
 	float ambientFloor;		// u_color.w in RB_RHI_RtgiPass (0 = pure bounce)
 	float eyePullback;		// ray origin pulled toward the eye per unit depth (crease-leak fix)
-	vec2  ignRot;			// per-frame golden-angle IGN lattice rotation (cos, sin), CPU-hoisted
-	vec2  ignOfs;			// per-frame hashed IGN offset, CPU-hoisted
+	float sampleFrame;		// frame index (tr.frameCount & 0xFFFF) advancing the R2 bounce-direction sequence
 	// RT irradiance cache (docs/rtx-irradiance-cache.md C2): when cacheLookup, the hit also receives the INDIRECT light
 	// its cell has learned (albedo(H) * E_cache(H) * scale) - the recursion that makes the one bounce multi-bounce. The
 	// caller fills `cache` from the shared uniform packing (rtgi_cache.glsl) and does the UPDATE at its primary point.
 	bool  cacheLookup;
 	RtgiCacheParms cache;
 };
-
-// interleaved gradient noise (ssao.frag): per-pixel dither, denoiser-friendly 3x3 spread.
-float ign( vec2 p ) {
-	return fract( 52.9829189 * fract( dot( p, vec2( 0.06711056, 0.00583715 ) ) ) );
-}
 
 // branchless orthonormal basis around n (Duff et al. / Frisvad)
 void onb( vec3 n, out vec3 t, out vec3 b ) {
@@ -64,21 +58,19 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 	LiCache = vec3( 0.0 );
 	thit = 0.0;
 	outDir = Nw;
-	// one cosine-weighted hemisphere direction, IGN re-oriented per frame (rtao_ray.frag: a value-phase
-	// slide leaves IGN's 45-degree diagonal in the residue and shows as lines under the res-scale upscale;
-	// re-orienting points each frame's residue a different way so the temporal accumulation averages it out).
-	// H6g: ROTATE the IGN sample lattice by a per-frame GOLDEN-ANGLE instead of the old discrete 8-way flip
-	// (swap + 2 negations). The flip has only 8 orientations, so ~8 traces are needed to average the diagonal
-	// out; checkerboard traces each pixel only every OTHER frame, so that was ~16 frames (the "45-degree
-	// checkered halo" at short history). A continuous low-discrepancy rotation points the diagonal a fresh way
-	// every frame, so the residue averages in a handful of frames — helping the resScale path too.
-	// The golden-angle rotation (cos/sin) and the per-frame hashed offset are FRAME-CONSTANT (functions of the
-	// frame index only), so they are precomputed on the CPU (RB_RHI_RtgiPass) and delivered in u_particleRadius
-	// (.xy = cos/sin of the angle, .zw = the offset) instead of a per-pixel cos+sin+PCG-hash. Mathematically the
-	// same lattice; just not recomputed identically for every traced fragment.
-	vec2  jc = mat2( bp.ignRot.x, -bp.ignRot.y, bp.ignRot.y, bp.ignRot.x ) * sfrag + bp.ignOfs;
-	float r1 = ign( jc );
-	float r2 = ign( jc.yx + vec2( 37.0, 17.0 ) );
+	// one cosine-weighted hemisphere direction. r1/r2 = a Cranley-Patterson-rotated plastic-constant (Roberts) R2
+	// low-discrepancy sequence: each pixel gets its OWN R2 pair advanced by the frame index (low-discrepancy -> fast
+	// temporal convergence under NRD) phase-shifted by a per-pixel white-noise offset, so neighbouring pixels are
+	// DECORRELATED - no coherent structure for the denoiser's spatial filter to preserve.
+	// This replaced interleaved gradient noise (IGN), whose intrinsic 45-degree diagonal survived NRD and whose
+	// per-frame golden-angle rotation had Fibonacci near-recurrences that periodically re-aligned it into oblique
+	// streaks (worst at full gather resolution, where the lattice sat at pixel frequency). Diagnosed by elimination:
+	// only r_rtgi removed the streaks, every other subsystem (checkerboard / FSR / res-scale upscale / DI direct) ruled out.
+	uvec2 ip = uvec2( sfrag );
+	uint  h  = hgPcg( ip.x + hgPcg( ip.y + 0x9E3779B9u ) );			// per-pixel white-noise phase (Cranley-Patterson rotation)
+	vec2  cp = vec2( float( h & 0xFFFFu ), float( ( h >> 16 ) & 0xFFFFu ) ) * ( 1.0 / 65536.0 );
+	float r1 = fract( cp.x + bp.sampleFrame * 0.7548776662466927 );	// + n / plastic
+	float r2 = fract( cp.y + bp.sampleFrame * 0.5698402909980532 );	// + n / plastic^2
 	float phi  = 6.28318530718 * r1;
 	float sinT = sqrt( r2 );
 	float cosT = sqrt( 1.0 - r2 );

@@ -57,7 +57,7 @@
 //   u_specularParms       = ( combine on/off, fog strength, fog coef (exp), skip fast lights in the bounce )   [fog: rtgi_apply's r_rtgiFogAttenuate]
 //   u_pbrParms            = ( gather radius, r_rtgiEmissive, r_rtgiEmissiveClamp, r_rtgiLightScale )
 //   u_pbrParms2           = ( ambient floor, shadow-ray gate, eye pullback per unit depth, r_rtgiIntensity )
-//   u_occlusionParms      = ( IGN rotation cos, sin, IGN offset x, y )   [CPU-hoisted per frame, as RB_RHI_RtgiPass]
+//   u_occlusionParms      = ( unused - was the IGN rotation, replaced by the per-fragment R2 sequence; the frame index for it rides u_localParam1.x )
 //   --- r_rtgiCache (the RT irradiance cache, docs/rtx-irradiance-cache.md; rtgi_cache.glsl's shared packing) ---
 //   u_particleRadius.zw   = cache SLOT buffer device address (bit-cast; 0 = no cache)
 //   u_channelMask         = ( accumulation buffer address lo, hi, slot mask, tan( cell angle / 2 ) )
@@ -394,8 +394,7 @@ void main() {
 		bp.lightScale     = u_pbrParms.w;
 		bp.ambientFloor   = u_pbrParms2.x;
 		bp.eyePullback    = u_pbrParms2.z;
-		bp.ignRot         = u_occlusionParms.xy;
-		bp.ignOfs         = u_occlusionParms.zw;
+		bp.sampleFrame    = u_localParam1.x;				// frame index: advances the R2 bounce-direction sequence
 		// the irradiance cache (r_rtgiCache): the hit reads its cell, this pixel then teaches its own cell what it saw
 		bp.cache          = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ) );
 		const bool cacheOn = rtgiCachePresent( bp.cache );

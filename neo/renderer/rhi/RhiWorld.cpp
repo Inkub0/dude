@@ -7736,23 +7736,9 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// screenCorrection/depthTexRecip below are the same resScale mapping). MUST use the same frameIndex NRD gets.
 	parms.localParam1[2] = cbActive ? (float)( 1 + ( (int)tr.frameCount & 1 ) ) : 0.0f;
 	parms.localParam1[3] = 0.004f;					// ray origin pulled toward the eye per unit depth (crease-leak fix)
-	// H6g golden-angle IGN reorientation, hoisted out of the shader: the per-frame lattice rotation (cos/sin)
-	// and the hashed per-frame offset depend only on the frame index, so computing them once here beats a
-	// per-pixel cos+sin+3-round-PCG-hash in every traced fragment (rtgi_ray.frag). Bit-for-bit the same inputs
-	// the shader used (uint(giFrameIndex), the same PCG constants, the golden-ratio sequence masked to 255).
-	// Delivered in u_particleRadius (.xy = cos/sin, .zw = offset); the shader applies the mat2 rotate + add.
-	{
-		const unsigned int fi = (unsigned int)giFrameIndex;			// == tr.frameCount & 0xFFFF, matching uint(u_localParam1.x)
-		unsigned int fh = fi * 747796405u + 2891336453u;			// PCG hash (same rounds as the old shader)
-		fh = ( ( fh >> ( ( fh >> 28u ) + 4u ) ) ^ fh ) * 277803737u;
-		fh = ( fh >> 22u ) ^ fh;
-		float gAng = (float)( fi & 255u ) * 0.61803399f;			// golden-ratio sequence -> low-discrepancy angle
-		gAng = ( gAng - idMath::Floor( gAng ) ) * 6.28318531f;		// fract() then *2pi, as the shader did
-		parms.particleRadius[0] = idMath::Cos( gAng );
-		parms.particleRadius[1] = idMath::Sin( gAng );
-		parms.particleRadius[2] = (float)( ( fh >> 3u ) & 1023u );
-		parms.particleRadius[3] = (float)( ( fh >> 13u ) & 1023u );
-	}
+	// the bounce direction uses an R2 low-discrepancy sequence advanced by the frame index (rtgi_bounce.glsl); the
+	// frame index already rides u_localParam1.x (set above), so nothing to hoist here. (Replaced the IGN golden-angle
+	// reorientation, whose diagonal streaked - see rtgi_bounce.glsl.)
 	// the gather runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, and -> the full-res depth tc carries
 	// the (w/rw) stretch (mirrors RB_RHI_RtaoPass / RB_RHI_SSAOPass's scaled march). At scale 1: 1/w, 1/uploadW.
 	parms.screenCorrection[0] = 1.0f / rw;
@@ -8156,18 +8142,9 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.pbrParms2[1] = r_rtgiShadow.GetBool() ? 1.0f : 0.0f;			// H6d dominant-light shadow ray at the hit
 		parms.pbrParms2[2] = 0.004f;										// eye pullback per unit depth (crease-leak fix)
 		parms.pbrParms2[3] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiIntensity.GetFloat() );
-		// per-frame golden-angle IGN reorientation, hoisted exactly as RB_RHI_RtgiPass does it (same hash, same
-		// frame index the shader's RNG uses)
-		const unsigned int fi = (unsigned int)( tr.frameCount & 0xFFFF );
-		unsigned int fh = fi * 747796405u + 2891336453u;
-		fh = ( ( fh >> ( ( fh >> 28u ) + 4u ) ) ^ fh ) * 277803737u;
-		fh = ( fh >> 22u ) ^ fh;
-		float gAng = (float)( fi & 255u ) * 0.61803399f;
-		gAng = ( gAng - idMath::Floor( gAng ) ) * 6.28318531f;
-		parms.occlusionParms[0] = idMath::Cos( gAng );
-		parms.occlusionParms[1] = idMath::Sin( gAng );
-		parms.occlusionParms[2] = (float)( ( fh >> 3u ) & 1023u );
-		parms.occlusionParms[3] = (float)( ( fh >> 13u ) & 1023u );
+		// the bounce direction uses an R2 low-discrepancy sequence advanced by the frame index (rtgi_bounce.glsl),
+		// which already rides u_localParam1.x (set above) - nothing to hoist. (Replaced the IGN golden-angle
+		// reorientation, whose diagonal streaked.)
 	}
 	// (the RT irradiance cache is packed just before the gather draw, once the velocity at the gather res is known)
 

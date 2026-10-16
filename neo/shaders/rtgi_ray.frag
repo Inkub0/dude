@@ -14,8 +14,8 @@
 //   u_rtParms.zw          = geo-table device address (bit-cast lo/hi)   [vs rtao_ray: NEW]
 //   u_modelViewMatrix     = inverse view (view -> world)
 //   u_localParam0         = ( 1/proj00, 1/proj11, gatherRadius, emissive peak clamp )
-//   u_localParam1         = ( frameIndex (unused in-shader since the IGN rotation is CPU-hoisted), shadow-ray gate, checkerboard parity, eye-pullback per unit depth )
-//   u_particleRadius      = ( cos(goldenAngle), sin(goldenAngle), hashed per-frame IGN offset x, y )  [CPU-hoisted, frame-constant]
+//   u_localParam1         = ( frameIndex (advances the R2 bounce-direction sequence, rtgi_bounce.glsl), shadow-ray gate, checkerboard parity, eye-pullback per unit depth )
+//   u_particleRadius      = ( unused - was the IGN rotation, replaced by the per-fragment R2 sequence )
 //   u_color               = ( scene-light buffer addr lo/hi bit-cast, light count, ambient floor at the hit )
 //   u_diffuseModifier     = ( emissive glow scale, light brightness scale, frustum gate, real-lights enable )
 //   u_screenCorrection.xy = 1 / raySize   (gl_FragCoord -> [0,1] uv)
@@ -150,8 +150,7 @@ void main() {
 	bp.lightScale     = u_diffuseModifier.y;
 	bp.ambientFloor   = u_color.w;
 	bp.eyePullback    = u_localParam1.w;
-	bp.ignRot         = u_particleRadius.xy;
-	bp.ignOfs         = u_particleRadius.zw;
+	bp.sampleFrame    = u_localParam1.x;			// frame index: advances the R2 bounce-direction sequence
 	// the irradiance cache (r_rtgiCache): the hit reads its cell, this pixel then teaches its own cell what it saw.
 	// This pass bounces the fast (DIFORWARD) lights too, so only LiCache - without them - is learned.
 	bp.cache          = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_alphaTest.x ), floatBitsToUint( u_alphaTest.y ) ) );
