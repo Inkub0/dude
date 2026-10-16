@@ -3002,6 +3002,8 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	// resolution scales (resize the gather / denoise / reflection / FSR targets)
 	mixF( r_fsrScale ); mixF( r_rtgiResScale ); mixF( r_rtaoResScale ); mixF( r_ssrResScale ); mixF( r_rtReflResScale );
 	mixF( r_rtReStirDIResScale );
+	// RT irradiance cache (docs/rtx-irradiance-cache.md): a slot-count change destroys + re-allocates the two cache buffers
+	mixI( r_rtgiCacheSlotsLog2 );
 	return h;
 }
 

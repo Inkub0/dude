@@ -3716,6 +3716,8 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		RB_RHI_RtgiDebugOverlay( r, viewDef );
 		// r_rtReStirDIDebug: overlay the raw ReSTIR DI unshadowed irradiance (Stage 1 bring-up)
 		RB_RHI_ReStirDIDebugOverlay( r, viewDef );
+		// r_rtgiCacheDebug: overlay the RT irradiance cache's cells / values / age / history (docs/rtx-irradiance-cache.md)
+		RB_RHI_RtgiCacheDebugOverlay( r, viewDef );
 		// DUDE weapon-reload depth-of-field (r_dof): after the full scene incl. the
 		// weapon, on both backends and under HDR. Zero cost unless a reload is easing
 		// r_weaponReloadFocus above 0 (idPlayerView writes it).

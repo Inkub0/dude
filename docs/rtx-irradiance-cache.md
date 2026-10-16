@@ -156,3 +156,35 @@ diagnostic cvars trimmed once tuned (memory `trim-debug-cvars`).
      Repeat with the cache on (C2) and compare; G's 5 vMF states + scores (~30 live scalars) need the fragment stage
      to stay clear of the spill line with the cache's lookup/update live. Baseline numbers: to be filled by the user
      at C4 (not measurable from the session).
+
+### C1 - helper, buffers, resolve, debug views (what exists)
+
+- `neo/shaders/rt_hash_grid.glsl` - the shared grid (G0 reuses it): `hgLevel` (`floor( log2( 2 tan dist ) * 2 )`,
+  two levels per octave, width recomputed from the level), `hgCell` (half-cell stagger on odd levels),
+  `hgNormalBin` (cube face; 45-degree Z-then-X rotation on odd levels), `hgHash` / `hgMakeKey` (PCG; 32-bit
+  collision key never 0; probe start aligned to the 4-slot span), `hgFind` / `hgClaim` over a flat `HgWords` view
+  (`stride` uints per slot, stamp at `stampOfs`) - claim = existing | first empty via `atomicCompSwap` | oldest
+  foreign slot older than `evictAge` (stamp 0 = claimed this frame, never evicted) | -1 drop.
+- `neo/shaders/rtgi_cache.glsl` - slot `{ key, stamp, irr.rg f16x2, irr.b f16 | N u16 }`, accumulation
+  `{ r, g, b x1024, count | reset bit 31 }`, `RtgiCacheParms` + `rtgiCacheParmsFromUniforms` (u_channelMask /
+  u_skinParms / u_contactParms + the per-consumer slot address), `rtgiCacheLookup`, `rtgiCacheUpdate` (claim,
+  stamp, evict-zeroing + reset request, peak clamp 64, 4 atomics), `rtgiCacheRequestReset`.
+- `neo/shaders/rtgi_cache_resolve.comp` - 256 threads/group, bindings 0/1 = slots/accum, push constants
+  `{ slotCount, mode, nMax, frame, alphaMin }`; mode 1 = clear. `alphaMin` 0.02 is a constant.
+- `RhiWorld.cpp` - `rtgiCacheState_t rhiRtgiCache` + `RB_RHI_RtgiCacheBegin` (allocate `BU_STORAGE_DEVICE` x2,
+  resize on `r_rtgiCacheSlotsLog2`, clear on first use / `renderWorld->mapName` change / re-enable, loads
+  `rtgi_cache_resolve`), `RB_RHI_RtgiCachePack`, `RB_RHI_RtgiCacheResolve` (`midScene` + `afterFragmentWrites`,
+  GPU scope `rtgi.cache`), `RB_RHI_RtgiCacheDebugOverlay` (called after the DI overlay in RhiBackend.cpp). Hooked
+  into `RB_RHI_RtgiPass` (Begin before the uniforms, resolve right after the ray pass) and `RB_RHI_ReStirDIPass`
+  (Begin with the combined-GI block, resolve after the gradient chain, before the denoise).
+- Debug overlay `rtgi_cache_debug.frag`: full-res G-buffer reconstruction (the gather's math at scale 1), then
+  `hgMakeKey` + `hgFind` per pixel. View 1 is meaningful from C1 on (keying needs no content; found cells are the
+  bright ones once C2 feeds them).
+
+**C1 visual check (user; the session cannot run the game).** `r_rtgi 1` (or dude_rtx 2), `r_rtgiCache 1`,
+`r_rtgiCacheDebug 1`: every surface must be tiled with same-tinted cells that (a) keep a roughly constant SCREEN
+size as you walk toward / away from a wall (they are re-cut at each distance level: a sudden re-tint across a whole
+wall when crossing a level boundary is expected, not a bug), (b) split along the normal-bin faces (a floor and a
+wall never share a tint across their edge), (c) are all DIM at C1 (nothing claims cells yet). `r_vkGpuTime 2` must
+list `rtgi.cache` at ~0.05-0.1 ms (1M slots, almost all early-outs) and the first frame after enabling / a level
+load adds the clear once. With `r_rtgiCache 0` nothing changes and no `rtgi.cache` scope appears.
