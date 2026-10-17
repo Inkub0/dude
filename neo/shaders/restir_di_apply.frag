@@ -64,7 +64,7 @@ void main() {
 	bool shMode = u_localParam1.w > 0.5;
 	vec3 di;
 	vec3 sh1 = vec3( 0.0 );
-	vec3 shGatherNv = vec3( 0.0, 0.0, 1.0 );	// view-space normal the gather effectively used (reduced-res footprint) - the bump RATIO's denominator
+	float shCosGath = 1.0;	// the reduced-res cosine baked into di, upscaled with the SAME blend as di so it cancels at ANY scale
 	if ( u_localParam0.x > 0.5 ) {
 		// Joint-bilateral upscale (restir_di_debug.frag / rtgi_apply.frag): reweight the 2x2 reduced-res footprint by
 		// how well each texel's surface matches this pixel's, so the DI stays on the right surface.
@@ -78,6 +78,7 @@ void main() {
 		vec2  offs[4] = vec2[4]( vec2( 0.5, 0.5 ), vec2( 1.5, 0.5 ), vec2( 0.5, 1.5 ), vec2( 1.5, 1.5 ) );
 		vec3  sum = vec3( 0.0 );
 		float wsum = 0.0;
+		float wkArr[4];
 		for ( int k = 0; k < 4; k++ ) {
 			vec2  gUV = ( b + offs[k] ) * texel;
 			float dk  = linDepth( texture( u_currentDepth, gUV * u_depthTexRecip.xy ).x );
@@ -85,25 +86,53 @@ void main() {
 			float dw  = exp( -abs( d0 - dk ) / max( d0, 1.0 ) * u_localParam0.y );
 			float nw  = pow( max( dot( n0, nk ), 0.0 ), u_localParam0.z );
 			float wk  = bw[k] * dw * nw;
+			wkArr[k]  = wk;
 			sum  += nrdYCoCgToLinear( texture( u_src, gUV ).rgb ) * wk;
 			if ( shMode ) { sh1 += texture( u_sh1, gUV ).xyz * wk; }
 			wsum += wk;
 		}
 		di = ( wsum > 1.0e-4 ) ? sum / wsum : nrdYCoCgToLinear( texture( u_src, uv ).rgb );
-		if ( shMode ) { sh1 = ( wsum > 1.0e-4 ) ? sh1 / wsum : texture( u_sh1, uv ).xyz; }
+		if ( shMode ) {
+			sh1 = ( wsum > 1.0e-4 ) ? sh1 / wsum : texture( u_sh1, uv ).xyz;
+			// cosGath = the reduced-res cosine baked into di, blended with the EXACT SAME 4-tap weights as di. The gather
+			// bakes di's cosine from ONE nearest full-res normal at each reduced texel centre (restir_di_shade.glsl
+			// diSurfaceAt); matching the blend here (not a single nearest block) makes di/cosGath cancel at ANY scale,
+			// including non-power-of-2 where a single block's edges drift off di's bilinear footprint = square artifacts.
+			float ll  = length( sh1 );
+			vec3  Lw  = ( ll > 1.0e-6 ) ? sh1 / ll : vec3( 0.0, 0.0, 1.0 );
+			ivec2 nsz = textureSize( u_normalBuffer, 0 );
+			float cg  = 0.0;
+			for ( int k = 0; k < 4; k++ ) {
+				vec2 gUV = ( b + offs[k] ) * texel;
+				vec3 nkn = normalize( mat3( u_modelViewMatrix )
+					* ( texelFetch( u_normalBuffer, clamp( ivec2( floor( gUV * vec2( nsz ) ) ), ivec2( 0 ), nsz - 1 ), 0 ).xyz * 2.0 - 1.0 ) );
+				cg += max( dot( nkn, Lw ), 0.0 ) * wkArr[k];	// per-texel UNIT cosine (as the gather baked), same weights as di
+			}
+			shCosGath = ( wsum > 1.0e-4 ) ? cg / wsum : 1.0;
+		}
 	} else {
 		di = nrdYCoCgToLinear( texture( u_src, uv ).rgb );
-		if ( shMode ) { sh1 = texture( u_sh1, uv ).xyz; }
-	}
-	if ( shMode ) {
-		// The gather bakes di's cosine from ONE nearest full-res normal at the reduced-res texel CENTRE
-		// (restir_di_shade.glsl diSurfaceAt), so di's cosine is blocky at the reduced-res scale. cosGath MUST be sampled
-		// at that SAME scale (one normal per reduced texel) to cancel it block-for-block - a bilateral footprint average
-		// smooths across the blocks (quilt) and shrinks unit normals (brightness bias). Nearest texel at the centre:
-		vec2  gtexel = u_screenCorrection.xy;		// 1 / reduced-res size
-		ivec2 nsz    = textureSize( u_normalBuffer, 0 );
-		vec2  gcuv   = ( floor( uv / gtexel ) + 0.5 ) * gtexel;
-		shGatherNv = texelFetch( u_normalBuffer, clamp( ivec2( floor( gcuv * vec2( nsz ) ) ), ivec2( 0 ), nsz - 1 ), 0 ).xyz * 2.0 - 1.0;
+		if ( shMode ) {
+			sh1 = texture( u_sh1, uv ).xyz;
+			// non-bilateral: di is hardware-bilinear of the reduced buffer, so match it with a pure bilinear 4-tap cosine
+			vec2  texel = u_screenCorrection.xy;
+			vec2  f  = uv / texel - 0.5;
+			vec2  b  = floor( f );
+			vec2  fr = f - b;
+			vec4  bw = vec4( ( 1.0 - fr.x ) * ( 1.0 - fr.y ), fr.x * ( 1.0 - fr.y ), ( 1.0 - fr.x ) * fr.y, fr.x * fr.y );
+			vec2  offs[4] = vec2[4]( vec2( 0.5, 0.5 ), vec2( 1.5, 0.5 ), vec2( 0.5, 1.5 ), vec2( 1.5, 1.5 ) );
+			float ll  = length( sh1 );
+			vec3  Lw  = ( ll > 1.0e-6 ) ? sh1 / ll : vec3( 0.0, 0.0, 1.0 );
+			ivec2 nsz = textureSize( u_normalBuffer, 0 );
+			float cg  = 0.0;
+			for ( int k = 0; k < 4; k++ ) {
+				vec2 gUV = ( b + offs[k] ) * texel;
+				vec3 nkn = normalize( mat3( u_modelViewMatrix )
+					* ( texelFetch( u_normalBuffer, clamp( ivec2( floor( gUV * vec2( nsz ) ) ), ivec2( 0 ), nsz - 1 ), 0 ).xyz * 2.0 - 1.0 ) );
+				cg += max( dot( nkn, Lw ), 0.0 ) * bw[k];
+			}
+			shCosGath = cg;
+		}
 	}
 	// remodulate by this pixel's material (the exact factor the gather divided by) and the forward light scale
 	vec3 albedo = alb.rgb;
@@ -116,7 +145,7 @@ void main() {
 		// removed the gather's cosine (di = radiance, which /N.L BLOWS UP and jumps as RIS repicks lights) then re-applied
 		// an absolute cosine from the denoised aggregate direction - the per-pixel vs aggregate mismatch, denoised in
 		// SEPARATE buffers, was the "watermelon". Instead modulate di by (N_full.L)/(N_gather.L): the gather's own cosine
-		// (N_gather.L, from the reduced-res footprint normal shGatherNv) divides out and the full-res bump normal's cosine
+		// (N_gather.L = shCosGath, the reduced-res cosine blended like di) divides out and the full-res bump normal's cosine
 		// multiplies in. On a smooth/native surface N_full == N_gather so the ratio is EXACTLY 1 (= non-SH, cannot band);
 		// detail appears only where the full-res normal diverges. A small floor eases the terminator (L1 DC-term spirit)
 		// and conditions the ratio as N_gather.L -> 0 (where di -> 0 anyway, so di*detail stays bounded).
@@ -129,11 +158,10 @@ void main() {
 		const float amb = 0.12;
 		if ( haveDir ) {
 			Nw  = normalize( mat3( u_modelViewMatrix ) * ( nt0.xyz * 2.0 - 1.0 ) );
-			vec3  Ngw = normalize( mat3( u_modelViewMatrix ) * shGatherNv );	// UNIT, exactly as the gather normalized this reduced-centre normal -> di/cosGath cancels cleanly
 			L   = sh1 / len;
 			k   = clamp( len / Y, 0.0, 1.0 );			// SH direction concentration, for the spec lobe
 			float cosFull = dot( Nw,  L );
-			float cosGath = dot( Ngw, L );
+			float cosGath = shCosGath;					// di's reduced-res cosine, blended like di (scale-independent) - cancels di cleanly
 			ndl = max( cosFull, 0.0 );
 			detail   = clamp( ( max( cosFull, 0.0 ) + amb ) / ( max( cosGath, 0.0 ) + amb ), 0.0, 3.0 );
 			cosTermV = vec3( detail );
