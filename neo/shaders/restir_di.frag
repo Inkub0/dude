@@ -423,6 +423,7 @@ void main() {
 		const bool cacheOn = rtgiCachePresent( bp.cache );
 		bp.cacheLookup    = cacheOn && bp.cache.lookup;
 		bp.cacheTail      = cacheOn && bp.cache.tail;	// C6: the hit reads the stored L_out; the update below stores L_out at P
+		bp.grid           = lgp;						// L3: the hit's light loop draws from its cell (lgp built above for the DI RIS)
 		const vec3 eyeW   = u_modelViewMatrix[3].xyz;
 		vec3 Li; float thit; vec3 bounceDir; vec3 LiCache;
 		const int hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );

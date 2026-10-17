@@ -55,6 +55,7 @@ layout(location = 2) out vec4 outNormal;	// IN_NORMAL_ROUGHNESS: world normal, N
 // the RT irradiance cache the bounce hit reads and the primary point feeds (docs/rtx-irradiance-cache.md)
 #include "rt_hash_grid.glsl"
 #include "rtgi_cache.glsl"
+#include "rtgi_light_grid.glsl"
 // the bounce itself (trace + hit shading), shared with the ReSTIR DI combined gather
 #include "rtgi_bounce.glsl"
 
@@ -144,6 +145,8 @@ void main() {
 	bp.texturedLights = u_windowCoord.w > 0.5;
 	bp.shadowRay      = u_localParam1.y > 0.5;
 	bp.skipForwardLights = false;			// RTGI's own pass bounces every light (no forward/DI split here)
+	bp.grid.gridAddr  = uvec2( 0u );		// L3: no light grid in the standalone RTGI pass (it bounces every light, incl. DIFORWARD; the grid excludes those)
+	bp.grid.slots     = 0u;
 	bp.radius         = u_localParam0.z;
 	bp.emissiveScale  = u_diffuseModifier.x;
 	bp.emissiveClamp  = u_localParam0.w;

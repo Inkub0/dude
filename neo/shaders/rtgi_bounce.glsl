@@ -42,6 +42,10 @@ struct RtgiBounceParms {
 	// stands down). Only ever set by the DI gather (diApply && r_rtgiCacheTail); the standalone RTGI pass keeps cacheLookup.
 	bool  cacheTail;
 	RtgiCacheParms cache;
+	// RT light grid (docs/rtx-light-grid.md L3): when present, the hit's light loop enumerates the HIT cell's candidates
+	// (its top-N lights by importance) instead of every scene light. The grid excludes DIFORWARD lights, matching the
+	// bounce's skipForwardLights set. gridAddr 0 (the standalone RTGI pass, or the grid off) = the full light loop.
+	LgParms grid;
 };
 
 // branchless orthonormal basis around n (Duff et al. / Frisvad)
@@ -173,9 +177,19 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 	bool  domFast = false;					// the dominant light is a DIFORWARD (fast) light: not part of LiCache
 	if ( bp.realLights ) {												// r_rtgi real scene lights
 		RtLights lights = RtLights( bp.lightAddr );
-		uint nLights = bp.nLights;
 		bool gate = bp.gate;
-		for ( uint li = 0u; li < nLights; li++ ) {
+		// RT light grid (docs/rtx-light-grid.md L3): enumerate the HIT cell's candidates (top-N lights by importance)
+		// instead of every scene light. The grid already excludes DIFORWARD lights, matching the bounce's
+		// skipForwardLights set (the DI gather). An empty / out-of-grid cell falls back to the full light loop below.
+		bool   lgUse  = lgPresent( bp.grid );
+		LgGrid lgG    = LgGrid( bp.grid.gridAddr );
+		int    lgBase = -1;
+		uint   lgN    = 0u;
+		if ( lgUse ) { lgBase = lgCellBase( bp.grid, hitWorld ); if ( lgBase >= 0 ) { lgN = lgCount( lgG, lgBase ); } }
+		lgUse = lgUse && lgBase >= 0 && lgN > 0u;
+		uint nIter = lgUse ? lgN : bp.nLights;
+		for ( uint ii = 0u; ii < nIter; ii++ ) {
+			uint li = lgUse ? lgSlotLight( lgG, lgBase, ii ) : ii;
 			if ( gate && !dudeLightInRange( lights, li, hitWorld ) ) { continue; }
 			const bool fast = ( lights.l[ li ].flags & DUDE_LIGHT_DIFORWARD ) != 0u;
 			if ( bp.skipForwardLights && fast ) { continue; }
