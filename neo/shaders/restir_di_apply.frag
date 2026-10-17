@@ -64,6 +64,7 @@ void main() {
 	bool shMode = u_localParam1.w > 0.5;
 	vec3 di;
 	vec3 sh1 = vec3( 0.0 );
+	vec3 shGatherNv = vec3( 0.0, 0.0, 1.0 );	// view-space normal the gather effectively used (reduced-res footprint) - the bump RATIO's denominator
 	if ( u_localParam0.x > 0.5 ) {
 		// Joint-bilateral upscale (restir_di_debug.frag / rtgi_apply.frag): reweight the 2x2 reduced-res footprint by
 		// how well each texel's surface matches this pixel's, so the DI stays on the right surface.
@@ -85,14 +86,21 @@ void main() {
 			float nw  = pow( max( dot( n0, nk ), 0.0 ), u_localParam0.z );
 			float wk  = bw[k] * dw * nw;
 			sum  += nrdYCoCgToLinear( texture( u_src, gUV ).rgb ) * wk;
-			if ( shMode ) { sh1 += texture( u_sh1, gUV ).xyz * wk; }
+			if ( shMode ) { sh1 += texture( u_sh1, gUV ).xyz * wk; shGatherNv += nk * wk; }	// footprint-averaged normal = the reduced-res normal
 			wsum += wk;
 		}
 		di = ( wsum > 1.0e-4 ) ? sum / wsum : nrdYCoCgToLinear( texture( u_src, uv ).rgb );
-		if ( shMode ) { sh1 = ( wsum > 1.0e-4 ) ? sh1 / wsum : texture( u_sh1, uv ).xyz; }
+		if ( shMode ) {
+			sh1 = ( wsum > 1.0e-4 ) ? sh1 / wsum : texture( u_sh1, uv ).xyz;
+			shGatherNv = ( wsum > 1.0e-4 && dot( shGatherNv, shGatherNv ) > 1.0e-6 ) ? normalize( shGatherNv ) : n0;
+		}
 	} else {
 		di = nrdYCoCgToLinear( texture( u_src, uv ).rgb );
-		if ( shMode ) { sh1 = texture( u_sh1, uv ).xyz; }
+		if ( shMode ) {
+			sh1 = texture( u_sh1, uv ).xyz;
+			vec2 texel = u_screenCorrection.xy;		// reduced-res texel centre = the normal the gather sampled
+			shGatherNv = texture( u_normalBuffer, ( floor( uv / texel ) + 0.5 ) * texel ).xyz * 2.0 - 1.0;
+		}
 	}
 	// remodulate by this pixel's material (the exact factor the gather divided by) and the forward light scale
 	vec3 albedo = alb.rgb;
@@ -100,47 +108,49 @@ void main() {
 	bool specReshade = u_localParam1.w > 1.5;		// SH + full-res specular re-shade (r_rtReStirDISpecReshade)
 	vec3 lit;
 	if ( shMode ) {
-		// SH resolve - RAMAMOORTHI L1 irradiance reconstruction. The gather removed the reduced-res normal's cosine
-		// (di = radiance) and stored sh1 = direction*luminance (REBLUR_FrontEnd_PackSh), so the FULL-res normal's cosine is
-		// rebuilt here (pores, wrinkles, weave). The previous home-grown resolve NORMALIZED sh1 (L = sh1/|sh1|) and used the
-		// ratio k = |sh1|/Y; both amplify the two SEPARATELY-denoised buffers' noise and oscillate across a curved normal =
-		// low-order-SH ringing (Ramamoorthi & Hanrahan 2001), the "watermelon" banding on heads. Use sh1 LINEARLY instead:
-		// the clamped-cosine lobe's L1 fit is (1 + 3*cos)/4, and (dir*lum).N / Y is the luminance-weighted mean of the
-		// (dir_i.N), so cosBase = max( 0.25 + 0.75 * (sh1.N / Y), 0 ) - LINEAR in the full-res N, hence smooth on curves, = 1
-		// at the pole (matches the old lambert peak) easing to a soft terminator. No normalize, no ratio => cannot ring.
+		// SH re-resolve as a BRIGHTNESS-NEUTRAL bump RATIO, not a cosine removal+reapply. The gather now stores di = the
+		// FULL irradiance (cosine IN, bit-identical to the non-SH buffer) and sh1 = direction*luminance. The OLD scheme
+		// removed the gather's cosine (di = radiance, which /N.L BLOWS UP and jumps as RIS repicks lights) then re-applied
+		// an absolute cosine from the denoised aggregate direction - the per-pixel vs aggregate mismatch, denoised in
+		// SEPARATE buffers, was the "watermelon". Instead modulate di by (N_full.L)/(N_gather.L): the gather's own cosine
+		// (N_gather.L, from the reduced-res footprint normal shGatherNv) divides out and the full-res bump normal's cosine
+		// multiplies in. On a smooth/native surface N_full == N_gather so the ratio is EXACTLY 1 (= non-SH, cannot band);
+		// detail appears only where the full-res normal diverges. A small floor eases the terminator (L1 DC-term spirit)
+		// and conditions the ratio as N_gather.L -> 0 (where di -> 0 anyway, so di*detail stays bounded).
 		float Y   = dot( di, vec3( 0.2126, 0.7152, 0.0722 ) );
 		float len = length( sh1 );
-		vec3  cosTermV = vec3( 1.0 );				// the per-channel diffuse cosine (+ SSS) re-applied to the demodulated radiance
+		vec3  cosTermV = vec3( 1.0 );				// the per-channel bump ratio (+ SSS warmth) applied to the irradiance
 		vec3  L = vec3( 0.0, 0.0, 1.0 ), Nw = vec3( 0.0, 0.0, 1.0 );
-		float k = 0.0, ndl = 0.0;
-		bool  haveDir = ( Y > 1.0e-5 );
+		float k = 0.0, ndl = 0.0, detail = 1.0;
+		bool  haveDir = ( Y > 1.0e-5 && len > 1.0e-6 );
+		const float amb = 0.12;
 		if ( haveDir ) {
 			Nw  = normalize( mat3( u_modelViewMatrix ) * ( nt0.xyz * 2.0 - 1.0 ) );
-			float d       = dot( sh1, Nw ) / Y;				// = k * (N.L): luminance-weighted mean directional, LINEAR
-			float cosBase = max( 0.25 + 0.75 * d, 0.0 );	// Ramamoorthi L1 clamped-cosine fit, peak-normalized; smooth on curves
-			// the direction + concentration the SPEC re-shade still needs (a specular lobe IS directional); only the diffuse
-			// is switched to the linear reconstruction - the diffuse was what rang. No coherent direction (len ~ 0) = no glint.
-			if ( len > 1.0e-6 ) { L = sh1 / len; k = clamp( len / Y, 0.0, 1.0 ); ndl = dot( Nw, L ); }
-			// DUDE skin/flesh SSS (docs/skin-shading.md): the red channel's directional reaches further past the terminator
-			// (a warm, soft shadow edge). Built on the SAME linear d so it de-rings too: per channel d_c = (d + w)/(1 + w)
-			// extends the reach, then the same 0.25 + 0.75 clamped-cosine fit; mix by the SSS strength as before.
+			vec3  Ngw = normalize( mat3( u_modelViewMatrix ) * shGatherNv );
+			L   = sh1 / len;
+			k   = clamp( len / Y, 0.0, 1.0 );			// SH direction concentration, for the spec lobe
+			float cosFull = dot( Nw,  L );
+			float cosGath = dot( Ngw, L );
+			ndl = max( cosFull, 0.0 );
+			detail   = clamp( ( max( cosFull, 0.0 ) + amb ) / ( max( cosGath, 0.0 ) + amb ), 0.0, 3.0 );
+			cosTermV = vec3( detail );
+			// DUDE skin/flesh SSS (docs/skin-shading.md): the red channel reaches further past the terminator (warm, soft
+			// shadow edge). Warm the RATIO's numerator per channel (wrap the full-res cosine) so it rides the same re-resolve.
 			if ( u_skinParms.x > 0.0 && alb.a > 0.25 ) {
 				float rad = u_skinParms.y;
 				vec3  w   = ( alb.a > 0.75 ) ? vec3( rad * 1.30, rad * 0.30, rad * 0.15 )	// Hell flesh: deeper, redder
 				                             : vec3( rad * 1.00, rad * 0.35, rad * 0.20 );	// face skin
-				vec3 dC      = ( vec3( d ) + w ) / ( vec3( 1.0 ) + w );
-				vec3 wrapped = max( vec3( 0.25 ) + vec3( 0.75 ) * dC, 0.0 );
-				cosTermV = mix( vec3( cosBase ), wrapped, u_skinParms.x );
-			} else {
-				cosTermV = vec3( cosBase );
+				vec3 cosFullC = ( vec3( cosFull ) + w ) / ( vec3( 1.0 ) + w );
+				vec3 detailC  = clamp( ( max( cosFullC, vec3( 0.0 ) ) + amb ) / ( max( cosGath, 0.0 ) + amb ), vec3( 0.0 ), vec3( 3.0 ) );
+				cosTermV = mix( vec3( detail ), detailC, u_skinParms.x );
 			}
 		}
 		if ( specReshade ) {
-			// The DI buffer is DIFFUSE-ONLY here (the gather shaded albedo-only and demodulated by the diffuse share),
-			// so di is the incoming radiance (light colour x falloff x visibility). Rebuild the specular at FULL res from
-			// the SH direction + the full-res bump normal + material - a GGX lobe exactly as interaction.frag's / the
-			// gather's, instead of the flat diffuse cosine the plain SH path applies to a baked, reduced-res, denoised
-			// highlight. This is what puts the sharp glint back on skin pores / wet surfaces / metal in the DI tier.
+			// The DI buffer is DIFFUSE-ONLY here (the gather shaded albedo-only, demodulated by the diffuse share), and now
+			// di = the full IRRADIANCE at the reduced-res normal. di*cosTermV (the bump ratio) re-resolves it to the full-res
+			// normal's irradiance. Rebuild the specular at FULL res from the SH direction + the full-res bump normal +
+			// material - a GGX lobe exactly as interaction.frag's / the gather's - instead of the flat diffuse term the plain
+			// SH path applies to a baked, reduced-res, denoised highlight. This is the sharp glint on pores / wet / metal.
 			vec3 Bdiff   = max( albedo * ( 1.0 - mt.g * u_diffuseModifier.x ), vec3( 0.02 ) );	// diffuse share (matches the gather's demod)
 			vec3 diffuse = di * Bdiff * cosTermV;
 			vec3 spec    = vec3( 0.0 );
@@ -171,7 +181,9 @@ void main() {
 				// over a wide cone and tolerates the aggregate direction, so it keeps its broad sheen even when k is low -
 				// otherwise a face lit by many fills (Betruger, 2026-10-14) loses the skin sheen the forward path sums.
 				float concen  = mix( k, 1.0, rough );
-				spec = di * ( lobe * specGain * NdotL * concen ) * F;
+				// di = irradiance (= radiance * N_gather.L); di*detail = radiance * N_full.L = the old radiance*NdotL factor,
+				// so the cosine stays consistent with the diffuse re-resolve. NdotL remains in gvis (geometric shadowing).
+				spec = ( di * detail ) * ( lobe * specGain * concen ) * F;
 			}
 			lit = ( diffuse + spec ) * u_localParam0.w;
 		} else {

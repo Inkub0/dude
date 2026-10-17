@@ -311,13 +311,6 @@ void main() {
 		// of ~38 full GGX evals. false = cannot reach (culled / forward-path / N.L <= 0).
 		if ( diShadeLight( lights, li, S, contrib, ldir, dl, ndl, cheapTarget ) ) {
 			pHat = dot( contrib, vec3( 0.2126, 0.7152, 0.0722 ) );		// luminance of the target
-			// SH mode estimates the incoming RADIANCE field (the resolve re-applies the receiver cosine at full res),
-			// so its RIS target is radiance, not irradiance: drop the N.L here too. contrib carries one N.L; radChosen
-			// below removes it (contrib/ndlC = radiance); if the target KEEPS it, pHatChosen = luminance(radiance)*N.L
-			// and outRad = radChosen*wSum/pHatChosen leaves a 1/(N.L) that JUMPS as RIS repicks lights and blows up at
-			// the terminator - the "watermelon" banding. Dropping it here makes the cosine cancel EXACTLY on both sides:
-			// outRad = chroma * wSum * vis (smooth), and cosBase in the apply supplies the one, full-res cosine.
-			if ( shMode ) { pHat /= max( ndl, 0.05 ); }
 		}
 		float w    = pdfOne ? pHat : pHat * float( nLights );	// pHat / candidate pdf (grid + exhaustive: pdf 1; uniform-M: 1/nLights)
 		wSum += w;
@@ -348,7 +341,7 @@ void main() {
 	if ( pHatChosen > 0.0 ) {
 		float ndlC;
 		diShadeLight( lights, rowChosen - 1u, S, contribChosen, ldirChosen, dlChosen, ndlC, false );
-		radChosen   = ( shMode ? contribChosen / max( ndlC, 0.05 ) : contribChosen ) / B;	// demodulated (B = 1 outside apply mode)
+		radChosen   = contribChosen / B;	// IRRADIANCE (cosine IN), identical to the non-SH buffer; SH re-resolve is a bump RATIO in the apply, not a cosine removal (B = 1 outside apply mode)
 		flagsChosen = lights.l[ rowChosen - 1u ].flags;
 	}
 
@@ -379,7 +372,7 @@ void main() {
 			if ( !( pH > 0.0 ) ) { continue; }
 			vec3  cF = c;	float ndlF = ndl;
 			if ( cheapTarget ) { vec3 ldF; float dlF; diShadeLight( lights, lk, S, cF, ldF, dlF, ndlF, false ); }
-			vec3  rk = ( shMode ? cF / max( ndlF, 0.05 ) : cF ) / B;
+			vec3  rk = cF / B;	// irradiance (cosine in), as radChosen above
 			float Wk = ( wSum / ( pdfOne ? 1.0 : float( draws ) ) ) / pH;
 			float od;
 			float visK = ( ( lights.l[ lk ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ld, dl, od );
@@ -481,9 +474,8 @@ void main() {
 			}
 			vec3 giRad = max( albedo * gi, vec3( 0.0 ) ) / B;
 			if ( shMode ) {
-				// the cosine-sampled bounce carries this normal's cosine implicitly: remove it (floored) so the apply's
-				// re-applied cosine of the full-res normal is not doubled; its direction is the sample direction
-				giRad /= max( dot( Nw, bounceDir ), 0.05 );
+				// the bounce keeps its cosine in the radiance (= the irradiance convention of the direct term); only its
+				// DIRECTION feeds SH1, so the apply's bump RATIO re-resolves the whole irradiance against the full-res normal
 				shDir += bounceDir * dot( giRad, vec3( 0.2126, 0.7152, 0.0722 ) );
 			}
 			outRad += giRad;
