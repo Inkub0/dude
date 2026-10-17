@@ -3180,6 +3180,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	r_rtReStirDI.SetBool( false );			// dude_rtx 2 only (set in the RT overlay below)
 	r_rtReStirDIApply.SetBool( false );
 	r_rtgiCache.SetBool( false );			// C6 irradiance-cache path tail: Path Tracing (dude_rtx 2) only, set in the RT overlay below
+	r_rtLightGrid.SetBool( false );			// RT light grid: Path Tracing (dude_rtx 2) only, set in the RT overlay below
 	r_rtShadowBlurStagger.SetBool( p.rtBlurStagger );
 	r_volumetrics.SetBool( p.volumetrics );
 
@@ -3241,6 +3242,10 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		// needs DI, so it rides the Path Tracing tier only; forced on there (r_rtgiCacheTail) for the pacing benefit.
 		r_rtgiCache.SetBool( fullRt );
 		if ( fullRt ) { r_rtgiCacheTail.SetBool( true ); }
+		// RT light grid (docs/rtx-light-grid.md): per-cell importance-sampled light candidates replace the DI gather's
+		// exhaustive per-pixel RIS over every light - a measured perf win (gather -29% at 40 lights, more with more
+		// lights) with no visible cost. Needs DI, so it rides the Path Tracing tier; on there, off below.
+		r_rtLightGrid.SetBool( fullRt );
 
 		// RT reflections own every reflective pixel, so SSR is turned off under them and the
 		// RT-vs-SSR luminance match + half-res reflection trace follow (mirrors the raster
@@ -3354,7 +3359,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				!r_rtReflections.GetBool() && !r_rtao.GetBool() && !r_rtgi.GetBool() &&
 				!r_rtShadowBlur.GetBool() && !r_rtAllLights.GetBool() &&
 				!r_rtShadowBlurStagger.GetBool() && !r_volumetrics.GetBool() &&
-				!r_rtReStirDI.GetBool() && !r_rtReStirDIApply.GetBool() && !r_rtgiCache.GetBool() &&
+				!r_rtReStirDI.GetBool() && !r_rtReStirDIApply.GetBool() && !r_rtgiCache.GetBool() && !r_rtLightGrid.GetBool() &&
 				r_ssr.GetBool()                    == p.ssr &&
 				idMath::Fabs( r_ssrIntensity.GetFloat() - ( p.ssr ? 0.8f : 0.5f ) ) < 0.01f &&
 				idMath::Fabs( r_rtReflResScale.GetFloat() - 1.0f ) < 0.01f &&
@@ -3385,6 +3390,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				r_rtReStirDI.GetBool()             == ( rtMode == RTX_PATHTRACED ) &&
 				r_rtReStirDIApply.GetBool()        == ( rtMode == RTX_PATHTRACED ) &&
 				r_rtgiCache.GetBool()              == ( rtMode == RTX_PATHTRACED ) &&
+				r_rtLightGrid.GetBool()            == ( rtMode == RTX_PATHTRACED ) &&
 				r_ssr.GetBool()                    == expSsr &&
 				idMath::Fabs( r_ssrIntensity.GetFloat() - ( expSsr ? 0.8f : 0.5f ) ) < 0.01f &&
 				r_motionVectors.GetBool()          == expMv &&
@@ -4894,6 +4900,39 @@ static void DrawDbgGroup_ReStirDI()
 		"pick. 0 = every light in the buffer is weighed (exhaustive: no candidate noise, a far dominant light stays at full "
 		"strength). N > 0 = N uniform random draws: cheaper in light-dense views, but a rarely-drawn light arrives as "
 		"sparse spikes the denoiser clips and reads dimmer. (r_rtReStirDICandidates)" );
+
+	// --- Light grid (docs/rtx-light-grid.md): a world-space ReGIR candidate grid - the gather (and the GI bounce) pick
+	// from each point's cell's short list of importance-sampled lights instead of weighing EVERY light. A perf win that
+	// grows with light count; on by default at the Path Tracing tier. ---
+	CvarCheckbox( "Light Grid", r_rtLightGrid, "Replace the gather's per-pixel scan over every light with a world-space "
+		"grid of camera-centred cells, each filled once per frame with a few importance-sampled light candidates; the "
+		"gather and the GI bounce then pick from their cell instead. A performance win that grows with the light count "
+		"(measured -29% of the gather at ~40 lights), unbiased - same brightness as exhaustive, the denoiser absorbs the "
+		"tiny extra candidate noise. On by default at the Path Tracing tier. (r_rtLightGrid)" );
+	if ( r_rtLightGrid.GetBool() ) {
+		ImGui::BeginDisabled( !rtCapable );
+		CvarSliderI( "  Candidates / Cell", r_rtLightGridSlots, 1, 16, "Lights stored per cell. More = less candidate "
+			"noise, closer to exhaustive, but a bigger grid buffer and a dearer fill. Default 16. A change re-allocates. (r_rtLightGridSlots)" );
+		CvarSliderF( "  Cell Size", r_rtLightGridCellBase, 8.0f, 128.0f, "%.0f u", "Cascade-0 cell size in world units "
+			"(each further cascade doubles it). Smaller = finer candidate sets near you but the grid re-centres in smaller "
+			"steps as you move. Default 16. (r_rtLightGridCellBase)" );
+		CvarSliderI( "  Resolution", r_rtLightGridRes, 8, 64, "Cells per axis in each cascade (the grid is res^3 x cascades). "
+			"Higher = finer candidate sets but more cells to fill and store. Default 32. A change re-allocates. (r_rtLightGridRes)" );
+		CvarSliderI( "  Cascades", r_rtLightGridCascades, 1, 4, "Camera-centred cascades (each twice the reach of the last). "
+			"At the default 16-unit cell size, 4 cascades reach ~+-256/512/1024/2048 u. Default 4. A change re-allocates. (r_rtLightGridCascades)" );
+		{
+			int gdbg = idMath::ClampInt( 0, 4, r_rtLightGridDebug.GetInteger() );
+			ImGui::SetNextItemWidth( 240.0f );
+			if ( ImGui::Combo( "  Grid View##rtLightGridDebug", &gdbg, "Off\0Cascade\0Candidate count\0Dominant light\0Importance\0" ) ) {
+				r_rtLightGridDebug.SetInteger( gdbg );
+			}
+			AddTooltip( "Debug overlay: 'Cascade' tints each cascade (red near, then green/blue/yellow out); 'Candidate "
+				"count' per cell (black = empty / fell back); 'Dominant light' a stable tint of the cell's strongest light "
+				"(flicker where two lights are near-equal is just the single-winner view, harmless); 'Importance' the cell's "
+				"summed importance. (r_rtLightGridDebug)" );
+		}
+		ImGui::EndDisabled();
+	}
 
 	// --- Resolution (mirrors RT Global Illumination -> Resolution) ---
 	ImGui::SeparatorText( "Resolution" );

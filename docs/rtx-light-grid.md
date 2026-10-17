@@ -1,5 +1,14 @@
 # RT world-space light grid - a PERFORMANCE feature (scope + plan, authored 2026-10-16)
 
+**STATUS 2026-10-16: L0-L6 BUILT on branch `feat/rt-light-grid` off master (tip 4eddc1d9, NOT merged/pushed).** L1
+user-validated (cascades nest, cells coherent; the only debug-view flicker is animated-light importance ties, harmless).
+**L2 A/B WIN (user, Marine HQ ~40 lights, dude_rtx 2): restir.di.gather 8.12 -> 5.75 ms (-29%), world 11.79 -> 10.46,
+fill 0.62 ms; scales with light count; brightness matches exhaustive, no edge darkening, no noise (user-confirmed).** L3
+points the GI bounce's hit light loop at the grid too. L5 = ImGui (ReSTIR DI group). L6 = on at the Path Tracing tier via
+ApplyEnhancementPreset (cvar default stays 0 = bit-identical off the tier). Deterministic top-N fill, DIFORWARD excluded.
+NEXT: user A/B of L3 (bounce) brightness/perf + L6 (tier auto-on) verification; then merge to local master; L4 (orientation
+bins + feedback learning) remains optional. `#include` lines MUST end with `"` or compile_spv.py leaves them literal.
+
 **Why this, why now (user, 2026-10-16): "we are suffering performance wise".** Of everything in the RT lighting
 project the light grid is the one perf lever (the merian review ranked it "perf, not fidelity"). It is pulled OUT of
 the emissive plan's E3 and scoped here as a standalone feature for the CURRENT Path Tracing tier (`dude_rtx 2`); the
