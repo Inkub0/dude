@@ -92,7 +92,10 @@ void main() {
 		di = ( wsum > 1.0e-4 ) ? sum / wsum : nrdYCoCgToLinear( texture( u_src, uv ).rgb );
 		if ( shMode ) {
 			sh1 = ( wsum > 1.0e-4 ) ? sh1 / wsum : texture( u_sh1, uv ).xyz;
-			shGatherNv = ( wsum > 1.0e-4 && dot( shGatherNv, shGatherNv ) > 1.0e-6 ) ? normalize( shGatherNv ) : n0;
+			// AVERAGE, do NOT normalize: dot(.,L) is linear, so dot(avg(Nk), L) = avg(Nk.L) = exactly the coarse cosine
+			// baked into di (which is the same linear bilateral mean of radiance*cos). Normalizing would inflate it and
+			// break the cancellation -> the quilt + brightness drift. The averaged normal is shorter than unit on curves.
+			shGatherNv = ( wsum > 1.0e-4 ) ? shGatherNv / wsum : n0;
 		}
 	} else {
 		di = nrdYCoCgToLinear( texture( u_src, uv ).rgb );
@@ -126,7 +129,7 @@ void main() {
 		const float amb = 0.12;
 		if ( haveDir ) {
 			Nw  = normalize( mat3( u_modelViewMatrix ) * ( nt0.xyz * 2.0 - 1.0 ) );
-			vec3  Ngw = normalize( mat3( u_modelViewMatrix ) * shGatherNv );
+			vec3  Ngw = mat3( u_modelViewMatrix ) * shGatherNv;	// NOT normalized: dot(Ngw,L) = avg(Nk.L) = di's baked coarse cosine
 			L   = sh1 / len;
 			k   = clamp( len / Y, 0.0, 1.0 );			// SH direction concentration, for the spec lobe
 			float cosFull = dot( Nw,  L );
