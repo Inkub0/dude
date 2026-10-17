@@ -311,6 +311,13 @@ void main() {
 		// of ~38 full GGX evals. false = cannot reach (culled / forward-path / N.L <= 0).
 		if ( diShadeLight( lights, li, S, contrib, ldir, dl, ndl, cheapTarget ) ) {
 			pHat = dot( contrib, vec3( 0.2126, 0.7152, 0.0722 ) );		// luminance of the target
+			// SH mode estimates the incoming RADIANCE field (the resolve re-applies the receiver cosine at full res),
+			// so its RIS target is radiance, not irradiance: drop the N.L here too. contrib carries one N.L; radChosen
+			// below removes it (contrib/ndlC = radiance); if the target KEEPS it, pHatChosen = luminance(radiance)*N.L
+			// and outRad = radChosen*wSum/pHatChosen leaves a 1/(N.L) that JUMPS as RIS repicks lights and blows up at
+			// the terminator - the "watermelon" banding. Dropping it here makes the cosine cancel EXACTLY on both sides:
+			// outRad = chroma * wSum * vis (smooth), and cosBase in the apply supplies the one, full-res cosine.
+			if ( shMode ) { pHat /= max( ndl, 0.05 ); }
 		}
 		float w    = pdfOne ? pHat : pHat * float( nLights );	// pHat / candidate pdf (grid + exhaustive: pdf 1; uniform-M: 1/nLights)
 		wSum += w;
@@ -368,6 +375,7 @@ void main() {
 			// the TARGET pHat (cheap or full, consistent with wSum) for Wk, then the full shade for the radiance
 			if ( !diShadeLight( lights, lk, S, c, ld, dl, ndl, cheapTarget ) ) { continue; }
 			float pH = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
+			if ( shMode ) { pH /= max( ndl, 0.05 ); }	// radiance target, same as the main loop (cosine out of the target)
 			if ( !( pH > 0.0 ) ) { continue; }
 			vec3  cF = c;	float ndlF = ndl;
 			if ( cheapTarget ) { vec3 ldF; float dlF; diShadeLight( lights, lk, S, cF, ldF, dlF, ndlF, false ); }
