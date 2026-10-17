@@ -100,34 +100,37 @@ void main() {
 	bool specReshade = u_localParam1.w > 1.5;		// SH + full-res specular re-shade (r_rtReStirDISpecReshade)
 	vec3 lit;
 	if ( shMode ) {
-		// SH resolve: the denoised mean incoming direction (SH1 / luminance) and how concentrated it is (|SH1| / Y,
-		// 1 = a single light, 0 = light from everywhere). The gather removed its reduced-res normal's cosine, so the
-		// FULL-res bump normal's cosine goes back on here - this is where pores, wrinkles and weave come from - exact
-		// for a concentrated direction, easing to a wrapped half-cosine as the light spreads (a mean direction means
-		// little then).
+		// SH resolve - RAMAMOORTHI L1 irradiance reconstruction. The gather removed the reduced-res normal's cosine
+		// (di = radiance) and stored sh1 = direction*luminance (REBLUR_FrontEnd_PackSh), so the FULL-res normal's cosine is
+		// rebuilt here (pores, wrinkles, weave). The previous home-grown resolve NORMALIZED sh1 (L = sh1/|sh1|) and used the
+		// ratio k = |sh1|/Y; both amplify the two SEPARATELY-denoised buffers' noise and oscillate across a curved normal =
+		// low-order-SH ringing (Ramamoorthi & Hanrahan 2001), the "watermelon" banding on heads. Use sh1 LINEARLY instead:
+		// the clamped-cosine lobe's L1 fit is (1 + 3*cos)/4, and (dir*lum).N / Y is the luminance-weighted mean of the
+		// (dir_i.N), so cosBase = max( 0.25 + 0.75 * (sh1.N / Y), 0 ) - LINEAR in the full-res N, hence smooth on curves, = 1
+		// at the pole (matches the old lambert peak) easing to a soft terminator. No normalize, no ratio => cannot ring.
 		float Y   = dot( di, vec3( 0.2126, 0.7152, 0.0722 ) );
 		float len = length( sh1 );
 		vec3  cosTermV = vec3( 1.0 );				// the per-channel diffuse cosine (+ SSS) re-applied to the demodulated radiance
 		vec3  L = vec3( 0.0, 0.0, 1.0 ), Nw = vec3( 0.0, 0.0, 1.0 );
-		float k = 0.0, ndl = 1.0;
-		bool  haveDir = ( Y > 1.0e-5 && len > 1.0e-6 );
+		float k = 0.0, ndl = 0.0;
+		bool  haveDir = ( Y > 1.0e-5 );
 		if ( haveDir ) {
-			L   = sh1 / len;
 			Nw  = normalize( mat3( u_modelViewMatrix ) * ( nt0.xyz * 2.0 - 1.0 ) );
-			k   = clamp( len / Y, 0.0, 1.0 );
-			ndl = dot( Nw, L );
-			float cosBase = mix( 0.5 + 0.5 * ndl, max( ndl, 0.0 ), k );
-			// DUDE skin/flesh SSS (docs/skin-shading.md): on skin/flesh pixels (alb.a flag) re-apply a warm per-CHANNEL
-			// WRAPPED cosine - red light wraps furthest past the terminator, so the shadow edge warms and softens instead
-			// of cutting off plastic-hard, exactly as interaction.frag's skinScatterExcess does forward. mix by the SSS
-			// strength reproduces forward's lambert + (wrapped - lambert) * strength; the wrap eases to the base
-			// half-cosine as the light spreads (k -> 0), where there is no sharp terminator to warm.
+			float d       = dot( sh1, Nw ) / Y;				// = k * (N.L): luminance-weighted mean directional, LINEAR
+			float cosBase = max( 0.25 + 0.75 * d, 0.0 );	// Ramamoorthi L1 clamped-cosine fit, peak-normalized; smooth on curves
+			// the direction + concentration the SPEC re-shade still needs (a specular lobe IS directional); only the diffuse
+			// is switched to the linear reconstruction - the diffuse was what rang. No coherent direction (len ~ 0) = no glint.
+			if ( len > 1.0e-6 ) { L = sh1 / len; k = clamp( len / Y, 0.0, 1.0 ); ndl = dot( Nw, L ); }
+			// DUDE skin/flesh SSS (docs/skin-shading.md): the red channel's directional reaches further past the terminator
+			// (a warm, soft shadow edge). Built on the SAME linear d so it de-rings too: per channel d_c = (d + w)/(1 + w)
+			// extends the reach, then the same 0.25 + 0.75 clamped-cosine fit; mix by the SSS strength as before.
 			if ( u_skinParms.x > 0.0 && alb.a > 0.25 ) {
 				float rad = u_skinParms.y;
 				vec3  w   = ( alb.a > 0.75 ) ? vec3( rad * 1.30, rad * 0.30, rad * 0.15 )	// Hell flesh: deeper, redder
 				                             : vec3( rad * 1.00, rad * 0.35, rad * 0.20 );	// face skin
-				vec3 wrapped = clamp( ( vec3( ndl ) + w ) / ( vec3( 1.0 ) + w ), 0.0, 1.0 );
-				cosTermV = mix( vec3( cosBase ), mix( vec3( 0.5 + 0.5 * ndl ), wrapped, k ), u_skinParms.x );
+				vec3 dC      = ( vec3( d ) + w ) / ( vec3( 1.0 ) + w );
+				vec3 wrapped = max( vec3( 0.25 ) + vec3( 0.75 ) * dC, 0.0 );
+				cosTermV = mix( vec3( cosBase ), wrapped, u_skinParms.x );
 			} else {
 				cosTermV = vec3( cosBase );
 			}
