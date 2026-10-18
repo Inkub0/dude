@@ -4744,7 +4744,15 @@ static void DrawDbgGroup_RTGI()
 		CvarSliderI( "History Length", r_rtgiHistory, 2, 63, "Max frames NRD's ReBLUR accumulates for the GI radiance. The "
 			"1-spp gather needs temporal accumulation to look smooth: too short and single pixels 'fry' (noise/flicker), too "
 			"long and a switched-off light or stale bounce lingers. ~6-12 is the balance; higher = smoother but laggier. "
-			"NRD's own default is 30. (r_rtgiHistory)" );
+			"NRD's own default is 30. Overridden by History (ms) when that is > 0. (r_rtgiHistory)" );
+		CvarSliderF( "History (ms)", r_rtgiHistoryMs, 0.0f, 2000.0f, "%.0f", "The GI history length in MILLISECONDS instead of "
+			"frames: > 0 converts to frames from a 0.2 s low-passed frame rate, so the accumulation window is the same TIME at "
+			"any frame rate (the fast history scales with it). Overrides History Length while > 0. 0 = use History Length in "
+			"frames. (r_rtgiHistoryMs)" );
+		CvarSliderF( "Fast-History Clamp", r_rtgiFastClamp, 1.0f, 3.0f, "%.1f", "NRD ReBLUR fastHistoryClampingSigmaScale - how "
+			"tightly the slow (smooth) history is clamped to the fast (responsive) one. 2.0 = NRD default; the NRD sample ships "
+			"1.5 ('works well even for dirty signals'). Lower = less ghosting / lag but more flicker on the 1-spp bounce, higher "
+			"= smoother but laggier on a change. (r_rtgiFastClamp)" );
 		CvarSliderF( "History Confidence", r_rtgiConfidence, 0.0f, 16.0f, "%.1f", "Per-pixel history rejection where this frame's "
 			"bounce disagrees with last frame's reprojected result (a lit edge moving, a light toggling) - kills edge ghosting/"
 			"trailing without the flat-area dimming a global antilag causes. Higher = more aggressive (sharper edges, more noise "
@@ -4752,7 +4760,8 @@ static void DrawDbgGroup_RTGI()
 		CvarSliderF( "Emissive Clamp", r_rtgiEmissiveClamp, 0.0f, 16.0f, "%.2f", "Ceiling on a single bounce ray's emissive "
 			"contribution before denoising. Small bright emitters are the worst 1-spp input (hit = big spike, miss = zero), and "
 			"that variance denoises into grain/colour blotches; clamping the peak cuts it. Lower = cleaner/dimmer glow bleed, "
-			"higher = brighter/noisier; ~16 effectively disables it. Default 0.38. (r_rtgiEmissiveClamp)" );
+			"higher = brighter/noisier; ~16 effectively disables it. Default 0.15 (lowered from 0.38 to tame strobing light "
+			"fixtures scattering the bounce into 'raindrops'). (r_rtgiEmissiveClamp)" );
 	}
 
 	// --- Appearance / strength ---
