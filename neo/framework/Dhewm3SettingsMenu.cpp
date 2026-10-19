@@ -4681,12 +4681,12 @@ static void DrawDbgGroup_RTShadows()
 	CvarSliderF( "Blur Intensity", r_rtShadowBlurIntensity, 0.0f, 4.0f, "%.2f", "How strongly the ray-traced shadows are blurred. The blur still follows the "
 		"scene - none where an object touches the surface, more as the gap grows - this scales "
 		"all of it. It tops out at 24 pixels, so high values mostly soften the edges near "
-		"contact further. 0 = hard shadows. Default 1.5." );
+		"contact further. 0 = hard shadows. Default 0.13." );
 
 	CvarSliderF( "Blur Falloff Curve", r_rtShadowBlurCurve, 0.25f, 4.0f, "%.2f", "How quickly a shadow softens as it gets further from the object casting it. "
 		"1 = the natural growth of a real light. Lower = soft almost straight away, then "
 		"levelling off (a more even blur). Higher = crisp for longer near the object, then "
-		"widening fast. Blur Intensity sets how much; this sets where. Default 1.45." );
+		"widening fast. Blur Intensity sets how much; this sets where. Default 0.5." );
 
 	CvarSliderF( "Skip Below Penumbra", r_rtShadowBlurMinPenumbra, 0.0f, 8.0f, "%.1f px", "Performance: a distant or small light casts a shadow edge finer than this many "
 		"screen pixels, so softening it would be invisible - skip its blur entirely and keep the "

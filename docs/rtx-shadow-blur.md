@@ -385,16 +385,17 @@ larger backend build.
   shadow-casting light (see above). `r_rtShadowBlurStagger` is on there too (the preset owns the on/off, not the two distances).
 - `r_rtShadowBlurStagger` (0) / `r_rtShadowBlurStaggerNear` (192) / `r_rtShadowBlurStaggerFar` (380): see above.
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
-- `r_rtShadowBlurIntensity` (0.65, 0..4; Debugging -> RT Shadows -> "Blur Intensity"): scales the blur width. Replaced
+- `r_rtShadowBlurIntensity` (0.13, 0..4; Debugging -> RT Shadows -> "Blur Intensity"): scales the blur width. Replaced
   the "Light Size" / sun-angle pair (user, 2026-09-18: with the emitter model gone a "light size"
   has no reason to exist - it is a blur amount). Internally the width is still
   `3 * intensity * dOcc / (dLight - dOcc)` world units (point lights x `max(1, largest radius axis
   / 256)`; parallel suns 1 degree x intensity), so contact hardening is unchanged.
-- `r_rtShadowBlurCurve` (0.9, 0.25..4; Debugging -> RT Shadows -> "Blur Falloff Curve"): the exponent on the gap ratio -
+- `r_rtShadowBlurCurve` (0.5, 0.25..4; Debugging -> RT Shadows -> "Blur Falloff Curve"): the exponent on the gap ratio -
   width = `blurScale * g^curve`, `g = dOcc / (dLight - dOcc)` (caster-to-surface over
   caster-to-light distance). 1 = geometric growth; < 1 softens sooner then levels off; > 1 stays
-  crisp longer near the caster. Defaults 0.65 / 0.9 are the user's tuned look (intensity/curve retuned
-  2026-10-02 from the original 1.5 / 1.45: tighter, softer-sooner penumbra); the
+  crisp longer near the caster. Defaults 0.13 / 0.5 are the user's tuned look (retuned 2026-10-19 from
+  0.65 / 0.9, themselves retuned 2026-10-02 from the original 1.5 / 1.45: tighter, softer-sooner penumbra;
+  the ReSTIR DI soft grate coverage shares both numbers); the
   Graphics tab keeps only the on/off toggle. g is usually < 1 indoors (casters sit nearer the surface than the
   light), which is the range those descriptions assume; for g > 1 the effect inverts.
 
