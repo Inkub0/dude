@@ -4988,8 +4988,17 @@ static void DrawDbgGroup_ReStirDI()
 	CvarSliderF( "Fast Clamp", r_rtReStirDIFastClamp, 1.0f, 3.0f, "%.1f", "ReLAX fastHistoryClampingSigmaScale [1;3] - how "
 		"tightly the slow history is clamped to the fast one. Lower = less lag, more flicker. NRD default 2.0; the NRD sample "
 		"uses 1.5. (r_rtReStirDIFastClamp)" );
+	// Interlock: Gradient Confidence (below) REPLACES NRD's built-in anti-lag - running both double-rejects
+	// history on every lighting change. So anti-lag is forced inert while the gradient is on (RhiWorld.cpp's
+	// da.antilagOff); grey it out here to match the engine.
+	ImGui::BeginDisabled( r_rtReStirDIGradient.GetBool() );
 	CvarCheckbox( "Anti-lag", r_rtReStirDIAntilag, "NRD's built-in luminance anti-lag. On = NRD defaults; off = inert (the "
-		"baseline NRD recommends for an initial integration and for the gradient confidence). (r_rtReStirDIAntilag)" );
+		"baseline NRD recommends for an initial integration and for the gradient confidence). Forced OFF while "
+		"Gradient Confidence is on - the gradient is its targeted replacement. (r_rtReStirDIAntilag)" );
+	if ( r_rtReStirDIGradient.GetBool() ) {
+		ImGui::TextDisabled( "  (off - Gradient Confidence replaces it)" );
+	}
+	ImGui::EndDisabled();
 	CvarSliderF( "Disocclusion", r_rtReStirDIDisocclusion, 0.005f, 0.05f, "%.3f", "NRD disocclusionThreshold - relative "
 		"(slope-scaled) depth difference above which reprojected history is rejected as a different surface. Looser = fewer "
 		"FALSE resets on movers / the weapon, at some bleed across real depth edges. NRD range 0.01..0.02. (r_rtReStirDIDisocclusion)" );

@@ -8626,7 +8626,11 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiReStirDIHistFrames = diMainF;						// the debug overlay's history-length ramp divides by this
 		// lag knobs still read by ReLAX (default to today's effective values); the ReBLUR-only ones were trimmed at R6
 		da.fastClampSigma   = r_rtReStirDIFastClamp.GetFloat();	// ReLAX fastHistoryClampingSigmaScale
-		da.antilagOff       = !r_rtReStirDIAntilag.GetBool();
+		// Interlock: the R1 gradient confidence is NRD's recommended replacement for the built-in antilag, not a
+		// supplement - running both double-rejects history on every lighting change (the flat-area dimming the
+		// gradient exists to avoid). So when the gradient is on it forces antilag off; antilag is the fallback only
+		// when the gradient is off.
+		da.antilagOff       = !r_rtReStirDIAntilag.GetBool() || r_rtReStirDIGradient.GetBool();
 		da.disocclusionThreshold = r_rtReStirDIDisocclusion.GetFloat();	// 0.01 = NRD default
 		da.returnHistoryLength = true;							// .w = accumulated frames (debug view 4; R3's disocclusion boost)
 		da.validation       = ( r_rtReStirDIDebug.GetInteger() == 3 );	// NRD's validation overlay for debug view 3
