@@ -633,8 +633,10 @@ public:
 		// surfaces it as a candidate); 1..255 = alpha-tested: the geometry is built NON-opaque and
 		// this is the material's alpha reference * 255. A ray that doesn't force gl_RayFlagsOpaque
 		// gets each triangle as a candidate and confirms it by sampling texIndex's alpha at the
-		// hit st (texIndex must then be the COVERAGE image). Instance such BLASes with
-		// RT_MASK_PERFORATED so the opaque-forcing consumers never see them as solid.
+		// hit st (texIndex must then be the COVERAGE image). A BLAS holding only noShadows grates is
+		// instanced with RT_MASK_PERFORATED so the opaque-forcing consumers never see it; a perforated
+		// surface that casts on its own (a see-through floor) stays a non-opaque geometry inside its
+		// solid 0xFF instance, which those consumers see solid - a forced-opaque ray never gets candidates.
 		unsigned int		alphaTest = 0;
 	};
 	// Ray visibility mask bits. Ordinary instances use 0xFF (every ray). Perforated-caster

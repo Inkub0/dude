@@ -376,6 +376,12 @@ bounds. (The final A/B view was not the 1199-box spot; the new code is strictly 
 view regardless.) `rt_perforated.glsl`'s `u_rtTextures[]` is guarded by the same macro as `rt_light_tex.glsl` so
 both include together.
 
+**Grate shadow shape (2026-10-19):** the walk's 8-unit "cage" exclusion around the light is now the shadow-map
+cube's 1-unit near plane (`DUDE_RT_PERF_NEAR`, shared with the forward rays - it carved a sphere out of flat grates
+near a bulb), perforated materials that cast on their own (the see-through floors) arrive as alpha-tested candidates
+from inside the solid instances instead of blocking the ray, and a pixel dimmed by a grate reports the GRATE's
+distance as `occDist` (NRD's hit distance), not the light's. See rtx-shadow-blur.md "Shape parity".
+
 **Debug views (2026-10-08):** `r_rtReStirDIDebug` is now the RTGI-style 0/1/2 (off / RAW 1-spp gather /
 NRD-denoised) with the matching ImGui dropdown. The raw view is also the checkerboard proof: with
 `r_rtReStirDICheckerboard` on, the traced half sits packed in the buffer's LEFT half. Note the checkerboard only

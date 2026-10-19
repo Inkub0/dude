@@ -163,19 +163,29 @@ float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, out float occDist 
 	rayQueryEXT rq;
 	rayQueryInitializeEXT( rq, DI_TLAS, gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu, O, 0.0, ldir, tMax );
 	float perfVis = 1.0;
+	float tPerf   = dl;
 	while ( rayQueryProceedEXT( rq ) ) {
 		if ( perfVis == 1.0
-				&& rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
-				&& rayQueryGetIntersectionTEXT( rq, false ) < dl - 8.0
-				&& dudePerforatedSolid( geoAddr,
-					uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),
-					uint( rayQueryGetIntersectionGeometryIndexEXT( rq, false ) ),
-					uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) ),
-					rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) ) {
-			perfVis = 1.0 - u_windowCoord.y;
+				&& rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT ) {
+			float tc = rayQueryGetIntersectionTEXT( rq, false );
+			if ( tc < dl - DUDE_RT_PERF_NEAR
+					&& dudePerforatedSolid( geoAddr,
+						uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),
+						uint( rayQueryGetIntersectionGeometryIndexEXT( rq, false ) ),
+						uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) ),
+						rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) ) {
+				perfVis = 1.0 - u_windowCoord.y;
+				tPerf   = tc;
+			}
 		}
 	}
-	if ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) { return perfVis; }
+	if ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) {
+		// dimmed by a grate and nothing solid behind it: the grate IS the occluder NRD sizes its blur by
+		// (rtshadow_ray.frag sizes its penumbra the same way). Handing it the light distance instead told
+		// ReBLUR every grate shadow came from a far source and smeared the pattern at full radius.
+		if ( perfVis < 1.0 ) { occDist = tPerf; }
+		return perfVis;
+	}
 	occDist = rayQueryGetIntersectionTEXT( rq, true );
 	return 0.0;
 }

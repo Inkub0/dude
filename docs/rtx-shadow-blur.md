@@ -316,6 +316,39 @@ caster is dropped, the image is unchanged.
 (was +0.7 / +0.55) - accepted ("I would say it's fine").** `r_rtPerforatedDebug` and the per-light
 touch helper are removed.
 
+**Shape parity with the shadow-map caster (2026-10-19, branch `fix/rt-perforated-shadow-parity`).** User: grate
+shadows under RT lights looked "cast off a spherical surface rather than a flat one" - the shadow-map path had
+cured exactly that in its cube caster (25c1fd0b: a flat grate card next to its bulb behaved as a bulged surface,
+a circular shadowless dead zone around the light). Three places where the ray path still diverged from what the
+caster pass does:
+
+- **The 8-unit "cage" sphere.** Every grate-aware ray ignored a grate hit closer than 8 units to the light
+  (`t < dL - 8.0`, all three consumers). A flat grate near a bulb lost whatever part of it lay inside that
+  SPHERE: the pattern had a round hole under the light and the caster read as a spherical shell. The shadow-map
+  cube clips at a **1-unit near plane** (`RB_RHI_CubeFaceViewProj`), so a fixture's own grille casts there. Now
+  `DUDE_RT_PERF_NEAR = 1.0` in `rt_perforated.glsl`, used by `interaction.frag`, `rtshadow_ray.frag` and
+  `restir_di_shade.glsl` alike.
+- **Perforated materials that CAST were solid slabs.** `R_RtBuildPerforatedBlas` only took `noShadows` grates;
+  a perforated material without the flag (the see-through floors: `sflooralpha`, `grill_floor2`,
+  `floorvent02trans`, `roundfloor1_trans`, `airlockfloorflat`, 12 stock) sat in the solid BLASes and blocked the
+  ray outright, while `RB_RHI_SetupCasterCoverage` alpha-tests EVERY `MC_PERFORATED` caster. The world-area,
+  entity-model and first-sight builders now mark such a surface non-opaque with its alpha reference
+  (`R_RtCastingPerforatedRef`: coverage image == diffuse image, no texture matrix) inside its 0xFF instance - the
+  opaque-forcing consumers (RTAO / reflections / GI / volumetrics) see it solid as before, a forced-opaque ray
+  never gets candidates - and its triangles' boxes join the per-light grate list (`s_rtPerfWorldBounds`,
+  `s_rtModelPerfBounds`) so the hybrid gate routes rays through them; DI's all-pixel walk needs no list.
+  `wantPerf` in `R_RtRefreshInstances` is true for these alone too. Scene print: "+N casting perforated surfaces
+  alpha-tested in place".
+- **Coverage texture matrix.** The caster shader samples `( S . st, T . st )` with the stage's matrix; the ray
+  sampled the raw vertex st. `R_RtBakeCoverageMatrix` bakes a CONSTANT matrix into the dedicated perforated VB's
+  st at build (stock: `wire_fence2` "scale 2, 2" cast its mesh at half frequency). Animated matrices (fanspin)
+  stay unbaked - no constant registers.
+
+Also, for the path-tracing tier: a DI pixel dimmed by a grate now hands NRD the **grate's** hit distance
+(`traceVisibility` `occDist`), not the light's, as `rtshadow_ray.frag` already sized its penumbra - the light
+distance told ReBLUR the shadow came from a far source and smeared the pattern (inert under ReLAX). All of it
+needs a scene rebuild (map load) to take effect; `r_rtPerforatedShadows 0` still forces every ray opaque.
+
 ## Perf: cheaper tile classification (2026-09-21, `r_rtShadowBlurFastTiles`, option 2)
 
 The tile pass 0 reduced the full-res RGBA16F ray target (8 bytes/texel, 64 fetches/tile) into the

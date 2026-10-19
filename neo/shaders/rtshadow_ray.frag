@@ -168,7 +168,7 @@ void main() {
 	// occluder nearest the receiver. Stops 1 unit short of the light, like mode 4.
 	// Perforated casters (grates / fences): their triangles arrive as candidates; a solid texel is
 	// never confirmed - it dims the light to 1 - strength, and the nearest one sizes the penumbra
-	// when no real occluder does. One within 8 units of the light is its own cage, not a caster.
+	// when no real occluder does. One closer to the light than DUDE_RT_PERF_NEAR is clipped, as the caster pass clips it.
 	uvec2 geoAddr = uvec2( floatBitsToUint( u_shadowFalloffS.x ), floatBitsToUint( u_shadowFalloffS.y ) );
 	bool  perfOn  = u_shadowFalloffS.z > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
 	float tPerf   = -1.0;
@@ -203,7 +203,7 @@ void main() {
 		while ( rayQueryProceedEXT( rq ) ) {
 			if ( rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT ) {
 				float tc = rayQueryGetIntersectionTEXT( rq, false );
-				if ( tc < dL - 8.0 && ( tPerf < 0.0 || tc < tPerf )
+				if ( tc < dL - DUDE_RT_PERF_NEAR && ( tPerf < 0.0 || tc < tPerf )
 						&& dudePerforatedSolid( geoAddr,
 							uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),
 							uint( rayQueryGetIntersectionGeometryIndexEXT( rq, false ) ),

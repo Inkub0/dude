@@ -1,8 +1,12 @@
-// DUDE perforated shadow casters for the RT shadow rays (docs/rtx-shadow-blur.md): the noShadows
-// alpha-tested grates / fences the shadow-map path lets cast through its perforated override. They
-// sit in the TLAS as NON-opaque geometry under instance mask 0x02, so a ray that doesn't force
-// gl_RayFlagsOpaque receives their triangles as CANDIDATES (ordinary geometry is built opaque and is
-// committed by traversal itself, never a candidate). A candidate is resolved here against the
+// DUDE perforated shadow casters for the RT shadow rays (docs/rtx-shadow-blur.md): the alpha-tested
+// grates / fences / see-through floors the shadow-map caster pass punches holes through
+// (RB_RHI_SetupCasterCoverage alpha-tests EVERY MC_PERFORATED caster). Two homes in the TLAS, one rule:
+// the noShadows grates the shadow-map path lets cast through its perforated override sit in their own
+// BLASes under instance mask 0x02; perforated materials that cast on their own (sflooralpha and the
+// other floor grates) stay in the solid 0xFF instances - RTAO / reflections / GI must keep seeing them -
+// as NON-opaque geometries. Either way a ray that doesn't force gl_RayFlagsOpaque receives their
+// triangles as CANDIDATES (opaque geometry is committed by traversal itself, never a candidate), and
+// a ray that does force it sees them solid. A candidate is resolved here against the
 // material's coverage texture: the hit st comes from the geometry table, the alpha from the bindless
 // texture array. Rays that cannot do this trace with cull mask 0xFD and never see a grate.
 //
@@ -21,6 +25,14 @@ layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Per
 #define DUDE_RT_TEXTURES_DECLARED
 layout(set = 2, binding = 0) uniform sampler2D u_rtTextures[];
 #endif
+
+// How close to the light a grate texel may still cast. The shadow-map caster clips at its cube faces'
+// 1-unit near plane (RB_RHI_CubeFaceViewProj), so a fixture's own grille casts its pattern there; this is
+// that plane. The 8-unit margin that used to live here carved a SPHERE out of every flat grate near a
+// bulb - whatever part of the card lay inside it stopped casting, so the shadow read as cast off a
+// spherical shell with a round hole under the light: the very dead zone 25c1fd0b cured in the cube
+// caster (2026-10-19).
+const float DUDE_RT_PERF_NEAR = 1.0;
 
 // Per-pixel gate: the boxes of the grates inside this light's volume ( min.xyz, max.xyz pairs, padded
 // on the CPU ). Only a shadow segment that passes through one of them can meet a grate, so only it

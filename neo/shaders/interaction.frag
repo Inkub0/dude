@@ -208,7 +208,7 @@ float shadowVisibility( bool canReceive ) {
 		// xy = the geometry-table address, z = their shadow strength; 0 = off, and the ray then forces
 		// everything opaque under the solid-only mask exactly as before. With them on, grate triangles
 		// arrive as candidates: a solid texel dims the light and the ray goes on looking for a real
-		// occluder. One within 8 units of the light is its own cage - fixture, not caster.
+		// occluder. One closer to the light than DUDE_RT_PERF_NEAR is clipped, as the caster pass clips it.
 		uvec2 geoAddr  = uvec2( floatBitsToUint( u_shadowFalloffS.x ), floatBitsToUint( u_shadowFalloffS.y ) );
 		bool  perfOn   = u_shadowFalloffS.z > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
 		float tMax     = min( distLight - 1.0, u_rtParms.w );
@@ -242,7 +242,7 @@ float shadowVisibility( bool canReceive ) {
 			// perfVis < 1: a solid grate texel was already found - further grates can't dim it more
 			if ( perfVis == 1.0
 					&& rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
-					&& rayQueryGetIntersectionTEXT( rq, false ) < distLight - 8.0
+					&& rayQueryGetIntersectionTEXT( rq, false ) < distLight - DUDE_RT_PERF_NEAR
 					&& dudePerforatedSolid( geoAddr,
 						uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),
 						uint( rayQueryGetIntersectionGeometryIndexEXT( rq, false ) ),
