@@ -24,6 +24,8 @@ const uint DUDE_LIGHT_NOSHADOWS = 4u;	// the light casts no shadows in stock eit
 const uint DUDE_LIGHT_FOGVOLUME  = 16u;	// not a light: a stock fog volume row (stored AFTER the lights, outside the light count)
 const uint DUDE_LIGHT_VIEWWEAPON = 8u;	// first-person weapon light: the player's flashlight, muzzle flashes
 const uint DUDE_LIGHT_DIFORWARD  = 32u;	// ReSTIR DI skips it (r_rtReStirDIDynamicForward): a fast-changing light the forward path lights at zero lag
+// flags bits 8-15 = volumetric haze scale * 255; bits 16-31 = the hybrid shadow blur's per-light blur scale as a half
+// float (ReSTIR DI soft grate coverage, restir_di_shade.glsl diLightBlurScale; 0 while r_rtShadowBlur is off)
 
 // Can light li reach world point p at all? (bounding sphere of its volume; reads 16 B)
 bool dudeLightInRange( RtLights lights, uint li, vec3 p ) {

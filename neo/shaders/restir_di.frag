@@ -46,6 +46,8 @@
 //   u_windowCoord.z       = view-Y sign (-1 Vulkan top-down)
 //   u_windowCoord.w       = r_rtLightTextures: 1 = attenuate with each light's real cookie + falloff textures
 //   u_particleRadius.xy   = geometry-table device address (bit-cast; grate candidates -> coverage texture)
+//   u_specularModifier.xy = soft grate shadows (r_rtShadowBlur parity, restir_di_shade.glsl traceVisibility): x = on, y =
+//                           r_rtShadowBlurCurve; the per-light blur scale rides the light buffer (flags bits 16-31)
 //   u_shadowFalloffS.x    = forward light scale (backEnd.lightScale): the DI term is scaled here, not at the apply
 //   u_shadowFalloffS.y    = world size of one FULL-RES screen pixel per unit view depth (2/(proj00*viewW)): cookie LOD
 //   u_shadowFalloffS.w    = R2 ReLAX MODE (DI is ReLAX-only since R6): loc 0 = LINEAR radiance + RAW hit distance (world units,
@@ -350,7 +352,7 @@ void main() {
 	float W   = ( pHatChosen > 0.0 ) ? ( wSum / ( pdfOne ? 1.0 : float( draws ) ) ) / pHatChosen : 0.0;
 	float occDist = dlChosen;
 	float vis = ( !( pHatChosen > 0.0 ) || ( flagsChosen & DUDE_LIGHT_NOSHADOWS ) != 0u )
-		? 1.0 : traceVisibility( Pw, Nw, ldirChosen, dlChosen, occDist );
+		? 1.0 : traceVisibility( Pw, Nw, ldirChosen, dlChosen, diLightBlurScale( flagsChosen ), occDist );
 
 	// the direct term, at the forward path's light scale (lightColor = lightScale * stage colour there)
 	vec3 outRad = max( radChosen * ( W * vis * u_shadowFalloffS.x ), vec3( 0.0 ) );
@@ -375,7 +377,7 @@ void main() {
 			vec3  rk = cF / B;	// irradiance (cosine in), as radChosen above
 			float Wk = ( wSum / ( pdfOne ? 1.0 : float( draws ) ) ) / pH;
 			float od;
-			float visK = ( ( lights.l[ lk ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ld, dl, od );
+			float visK = ( ( lights.l[ lk ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ld, dl, diLightBlurScale( lights.l[ lk ].flags ), od );
 			rk = max( rk * ( Wk * visK * u_shadowFalloffS.x ), vec3( 0.0 ) );
 			sumRad += rk;
 			sumSh  += ld * dot( rk, vec3( 0.2126, 0.7152, 0.0722 ) );

@@ -141,7 +141,13 @@ bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, o
 // distance" NRD scales its blur radius by. Feeding the LIGHT distance for every pixel told ReBLUR that every
 // shadow came from a far source and widened the blur until grate / contact shadows vanished (user, 2026-10-08).
 #define DI_TLAS accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) )
-float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, out float occDist ) {
+// The hybrid shadow blur's per-light blur scale (RB_RHI_RtShadowBlurLightRadius: 3 * r_rtShadowBlurIntensity for a fixture,
+// grown with a big omni's volume, one degree of arc for a parallel sun), packed by RB_RHI_GatherSceneLights as a half
+// float in the light's flags bits 16-31. 0 = the blur is off: hard grate texels, as before.
+float diLightBlurScale( uint flags ) {
+	return unpackHalf2x16( flags >> 16u ).x;
+}
+float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, float blurScale, out float occDist ) {
 	occDist = dl;
 	if ( u_rtParms.x == 0.0 && u_rtParms.y == 0.0 ) { return 1.0; }		// no RT scene
 	float tMax = min( dl - 1.0, u_rtParms.w );
@@ -159,23 +165,39 @@ float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, out float occDist 
 		return 0.0;
 	}
 	// grate-aware: a solid texel dims to 1 - strength and the ray carries on (min over grates, not a product - a
-	// candidate may be reported twice); opaque geometry commits and terminates as before
+	// candidate may be reported twice); opaque geometry commits and terminates as before.
+	//
+	// r_rtShadowBlur parity (u_specularModifier.x = on, .y = r_rtShadowBlurCurve): the hybrid tier spreads a grate's
+	// shadow over halfW = blurScale * g^curve, g = dOcc / ( dL - dOcc ), in screen space after its ray. DI has no
+	// per-light mask to blur, so the same width is applied at the CASTER: the receiver's penumbra disc, projected
+	// back along the light cone onto the grate plane, is a disc of radius halfW * ( 1 - dOcc / dL ) around the hit,
+	// and dudePerforatedCoverage averages the coverage over it through the texture's mips. Deterministic, so the
+	// gradient pass re-shades bit-identically, and noise-free for NRD. blurScale 0 = the hard texel test.
 	rayQueryEXT rq;
 	rayQueryInitializeEXT( rq, DI_TLAS, gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu, O, 0.0, ldir, tMax );
-	float perfVis = 1.0;
-	float tPerf   = dl;
+	float strength = u_windowCoord.y;
+	float floorVis = 1.0 - strength;
+	bool  soft     = u_specularModifier.x > 0.5 && blurScale > 0.0;
+	float perfVis  = 1.0;
+	float tPerf    = dl;
 	while ( rayQueryProceedEXT( rq ) ) {
-		if ( perfVis == 1.0
+		// fully dimmed already (a solid texel, or enough partial ones): further grates can't darken it more
+		if ( perfVis > floorVis + 1e-4
 				&& rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT ) {
 			float tc = rayQueryGetIntersectionTEXT( rq, false );
-			if ( tc < dl - DUDE_RT_PERF_NEAR
-					&& dudePerforatedSolid( geoAddr,
-						uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),
-						uint( rayQueryGetIntersectionGeometryIndexEXT( rq, false ) ),
-						uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) ),
-						rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) ) {
-				perfVis = 1.0 - u_windowCoord.y;
-				tPerf   = tc;
+			if ( tc < dl - DUDE_RT_PERF_NEAR ) {
+				float foot = 0.0;
+				if ( soft ) {
+					float g = tc / max( dl - tc, 1e-3 );
+					foot = blurScale * pow( g, max( u_specularModifier.y, 0.05 ) ) * ( 1.0 - tc / dl );
+				}
+				float f = dudePerforatedCoverage( geoAddr,
+					uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ) ),
+					uint( rayQueryGetIntersectionGeometryIndexEXT( rq, false ) ),
+					uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) ),
+					rayQueryGetIntersectionBarycentricsEXT( rq, false ), foot );
+				float v = 1.0 - strength * f;
+				if ( v < perfVis ) { perfVis = v; tPerf = tc; }
 			}
 		}
 	}

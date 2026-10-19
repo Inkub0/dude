@@ -255,7 +255,7 @@ void main() {
 			vec3 c, ld; float dl, ndl;
 			if ( diShadeLight( lights, curRowPlus1 - 1u, Sp, c, ld, dl, ndl, false ) ) {
 				float vis = ( ( lights.l[ curRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
-					? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, occDist );
+					? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, diLightBlurScale( lights.l[ curRowPlus1 - 1u ].flags ), occDist );
 				Lnow = diGradientLuminance( c, Sp.B, vis );
 			}
 		}
@@ -278,7 +278,7 @@ void main() {
 			vec3 c, ld; float dl, ndl;
 			if ( diShadeLight( prevLights, prevRowPlus1 - 1u, Sp, c, ld, dl, ndl, false ) ) {
 				float vis = ( ( prevLights.l[ prevRowPlus1 - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
-					? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, occDist );		// current TLAS: an approximation for movers
+					? 1.0 : traceVisibility( Sp.Pw, Sp.Nw, ld, dl, diLightBlurScale( prevLights.l[ prevRowPlus1 - 1u ].flags ), occDist );		// current TLAS: an approximation for movers
 				Lprev = diGradientLuminance( c, Sp.B, vis );
 			}
 		}

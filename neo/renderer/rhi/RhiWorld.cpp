@@ -5879,6 +5879,40 @@ static bool RB_RHI_SceneLightCovered( const viewDef_t *viewDef, int lightDefInde
 // (r_shadowMapDebug) prints them next to "not-in-buffer" so a forward residue under the DI apply can be read off.
 static int s_diSkipDark = 0, s_diSkipSuppressed = 0, s_diSkipCapacity = 0, s_diSkipNoShader = 0, s_diSkipFogBlendAmb = 0;
 
+// The hybrid RT shadow blur's per-light blur scale (docs/rtx-shadow-blur.md): a length in world units - the radius a
+// physical light would need to cast that penumbra, but only a blur amount here. 3 at r_rtShadowBlurIntensity 1 for an
+// ordinary fixture, growing with the light's own volume so a 5000-unit "sun replacement" omni doesn't get a bulb-sized
+// blur; a parallel sun sits 100000 units out along its direction, so one degree of angular radius at intensity 1.
+// Shared by RB_RHI_RtShadowBlurLight (the screen-space blur width) and RB_RHI_GatherSceneLights (packed into the light
+// buffer for ReSTIR DI's soft grate coverage, restir_di_shade.glsl), so a grate's shadow softens identically on both tiers.
+static float RB_RHI_RtShadowBlurLightRadius( const renderLight_t &lp, const idVec3 &lorg, const idVec3 &viewOrg ) {
+	float lightRadius = 3.0f * r_rtShadowBlurIntensity.GetFloat();
+	if ( lp.parallel ) {
+		lightRadius = ( lorg - viewOrg ).Length() * idMath::Tan( DEG2RAD( 1.0f ) ) * r_rtShadowBlurIntensity.GetFloat();
+	} else if ( lp.pointLight ) {
+		const float maxAxis = Max( lp.lightRadius.x, Max( lp.lightRadius.y, lp.lightRadius.z ) );
+		lightRadius *= Max( 1.0f, maxAxis / 256.0f );
+	}
+	return lightRadius;
+}
+
+// IEEE half-float bits of a finite non-negative float (GLSL unpackHalf2x16 reads it back); values below the half's
+// smallest normal (6e-5) and above its max (65504) go to 0 / inf, so callers clamp. Blur scales are 0.05..a few thousand.
+static unsigned int RB_RHI_FloatToHalfBits( float f ) {
+	unsigned int x;
+	memcpy( &x, &f, sizeof( x ) );
+	const unsigned int sign = ( x >> 16 ) & 0x8000u;
+	const int exp = (int)( ( x >> 23 ) & 0xFFu ) - 127 + 15;
+	if ( exp <= 0 ) {
+		return sign;								// underflow: zero
+	}
+	if ( exp >= 31 ) {
+		return sign | 0x7C00u;						// overflow: infinity
+	}
+	return sign | ( (unsigned int)exp << 10 ) | ( ( x & 0x7FFFFFu ) >> 13 );
+}
+
+
 static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsigned long long *outAddr ) {
 	static int                 cacheCount = 0;
 	static unsigned long long  cacheAddr  = 0;
@@ -6044,7 +6078,14 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			vs *= vs;
 			L.flags |= ( (unsigned int)idMath::ClampInt( 0, 255, (int)( vs * 255.0f + 0.5f ) ) ) << 8;
 		}
-		// (bits 16..31 are FREE: the retired ReSTIR reservoir's stable lightDef id lived there; no shader reads them)
+		// bits 16..31 = the hybrid shadow blur's per-light blur scale (world units) as a half float, for the ReSTIR DI
+		// visibility ray's soft grate coverage (restir_di_shade.glsl traceVisibility): the very number
+		// RB_RHI_RtShadowBlurLight derives for this light, so a grate's shadow softens identically on both tiers.
+		// 0 (hard texels) while r_rtShadowBlur is off. (The retired reservoir's stable lightDef id lived here before.)
+		if ( r_rtShadowBlur.GetBool() && r_rtShadowBlurIntensity.GetFloat() > 0.0f ) {
+			const float bs = RB_RHI_RtShadowBlurLightRadius( ld->parms, ld->globalLightOrigin, viewOrg );
+			L.flags |= RB_RHI_FloatToHalfBits( idMath::ClampFloat( 0.0f, 65000.0f, bs ) ) << 16;
+		}
 		for ( int p = 0; p < 4; p++ ) {							// RR16c: global-space S/T/Q/falloff planes
 			L.proj[p][0] = ld->lightProject[p][0];
 			L.proj[p][1] = ld->lightProject[p][1];
@@ -8139,6 +8180,13 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.windowCoord[0] = 1.0f;
 		parms.windowCoord[1] = idMath::ClampFloat( 0.0f, 1.0f, r_shadowMapPerforatedStrength.GetFloat() );
 	}
+	// Soft grate shadows (r_rtShadowBlur parity, restir_di_shade.glsl traceVisibility): the visibility ray averages a
+	// grate's coverage over the footprint the hybrid blur would spread its shadow across - same intensity (per light, in
+	// the light buffer's flags bits 16-31) and curve. .x = on, .y = r_rtShadowBlurCurve. Off -> the hard texel test.
+	if ( parms.windowCoord[0] > 0.5f && r_rtShadowBlur.GetBool() && r_rtShadowBlurIntensity.GetFloat() > 0.0f ) {
+		parms.specularModifier[0] = 1.0f;
+		parms.specularModifier[1] = r_rtShadowBlurCurve.GetFloat();
+	}
 	// the geo table rides particleRadius.xy for BOTH the grate candidates and the combined-GI bounce hits
 	if ( geoTable != 0 ) {
 		const unsigned int geoLo = (unsigned int)( geoTable & 0xFFFFFFFFull ), geoHi = (unsigned int)( geoTable >> 32 );
@@ -8840,13 +8888,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	// their direction: 1 degree of angular radius at intensity 1.
 	const renderLight_t &lp = vLight->lightDef->parms;
 	const idVec3 &lorg = vLight->globalLightOrigin;
-	float lightRadius = 3.0f * r_rtShadowBlurIntensity.GetFloat();
-	if ( lp.parallel ) {
-		lightRadius = ( lorg - viewDef->renderView.vieworg ).Length() * idMath::Tan( DEG2RAD( 1.0f ) ) * r_rtShadowBlurIntensity.GetFloat();
-	} else if ( lp.pointLight ) {
-		const float maxAxis = Max( lp.lightRadius.x, Max( lp.lightRadius.y, lp.lightRadius.z ) );
-		lightRadius *= Max( 1.0f, maxAxis / 256.0f );
-	}
+	const float lightRadius = RB_RHI_RtShadowBlurLightRadius( lp, lorg, viewDef->renderView.vieworg );	// shared with the light gather (DI soft grates)
 
 	// r_rtShadowBlurMinPenumbra: skip the blur entirely for a light whose penumbra is sub-pixel. A
 	// distant and/or small light casts a shadow edge finer than one screen pixel, so softening it is

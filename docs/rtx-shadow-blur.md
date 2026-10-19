@@ -349,6 +349,11 @@ Also, for the path-tracing tier: a DI pixel dimmed by a grate now hands NRD the 
 distance told ReBLUR the shadow came from a far source and smeared the pattern (inert under ReLAX). All of it
 needs a scene rebuild (map load) to take effect; `r_rtPerforatedShadows 0` still forces every ray opaque.
 
+**ReSTIR DI follows the blur (2026-10-19):** the Path Tracing tier's DI visibility ray now softens grate shadows with this
+pass's own law - per-light blur scale (`RB_RHI_RtShadowBlurLightRadius`, shared) and `r_rtShadowBlurCurve` - by averaging
+the grate's coverage over the penumbra disc projected onto the caster (`dudePerforatedCoverage`, mips), since DI has no
+per-light mask to blur. Details in rtx-restir-di.md "Soft grate shadows". Gated on `r_rtShadowBlur` like this pass.
+
 ## Perf: cheaper tile classification (2026-09-21, `r_rtShadowBlurFastTiles`, option 2)
 
 The tile pass 0 reduced the full-res RGBA16F ray target (8 bytes/texel, 64 fetches/tile) into the

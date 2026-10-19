@@ -76,3 +76,44 @@ bool dudePerforatedSolid( uvec2 geoAddr, uint ci, uint gi, uint prim, vec2 bc ) 
 	float alpha = textureLod( u_rtTextures[ nonuniformEXT( g.texIndex - 1u ) ], hitST, 0.0 ).a;
 	return alpha >= float( ( g.flags >> 8u ) & 0xFFu ) * ( 1.0 / 255.0 );
 }
+
+// The SOLID FRACTION of a perforated caster under a disc of radius `footprint` (world units) around the hit - the soft
+// counterpart of dudePerforatedSolid for the ReSTIR DI visibility ray (restir_di_shade.glsl), where the hybrid tier's
+// screen-space shadow blur has no per-light mask to work on. The disc is the receiver's penumbra projected back along
+// the light cone onto the grate plane; its size in texels comes from the triangle's own st-to-world density, and the
+// coverage texture's mip at that footprint IS the average alpha under it - for a grate's ~binary alpha, the fraction of
+// solid texels. footprint 0 (or a footprint under one texel) is exactly the caster shader's hard test, and the two blend
+// over the first mip level so nothing pops where a shadow goes from crisp to soft. Deterministic: no noise for NRD.
+float dudePerforatedCoverage( uvec2 geoAddr, uint ci, uint gi, uint prim, vec2 bc, float footprint ) {
+	PerfGeoDesc g = PerfGeoTable( geoAddr ).d[ ci + gi ];
+	if ( ( g.flags & 2u ) == 0u || g.texIndex == 0u ) {
+		return 0.0;
+	}
+	uint sw = g.stride >> 2u;
+	uint p3 = 3u * prim;
+	uint b0 = g.ib.i[ p3 + 0u ] * sw;				// idDrawVert as uints: xyz at words 0-2, st at words 3, 4
+	uint b1 = g.ib.i[ p3 + 1u ] * sw;
+	uint b2 = g.ib.i[ p3 + 2u ] * sw;
+	vec2 st0 = vec2( uintBitsToFloat( g.vb.w[ b0 + 3u ] ), uintBitsToFloat( g.vb.w[ b0 + 4u ] ) );
+	vec2 st1 = vec2( uintBitsToFloat( g.vb.w[ b1 + 3u ] ), uintBitsToFloat( g.vb.w[ b1 + 4u ] ) );
+	vec2 st2 = vec2( uintBitsToFloat( g.vb.w[ b2 + 3u ] ), uintBitsToFloat( g.vb.w[ b2 + 4u ] ) );
+	vec2 hitST = ( 1.0 - bc.x - bc.y ) * st0 + bc.x * st1 + bc.y * st2;
+	float ref = float( ( g.flags >> 8u ) & 0xFFu ) * ( 1.0 / 255.0 );
+	float lod = 0.0;
+	if ( footprint > 0.0 ) {
+		vec3 p0 = vec3( uintBitsToFloat( g.vb.w[ b0 ] ), uintBitsToFloat( g.vb.w[ b0 + 1u ] ), uintBitsToFloat( g.vb.w[ b0 + 2u ] ) );
+		vec3 p1 = vec3( uintBitsToFloat( g.vb.w[ b1 ] ), uintBitsToFloat( g.vb.w[ b1 + 1u ] ), uintBitsToFloat( g.vb.w[ b1 + 2u ] ) );
+		vec3 p2 = vec3( uintBitsToFloat( g.vb.w[ b2 ] ), uintBitsToFloat( g.vb.w[ b2 + 1u ] ), uintBitsToFloat( g.vb.w[ b2 + 2u ] ) );
+		// isotropic texel density: texels per world unit = sqrt( texel area / world area ) of this triangle
+		float areaW  = 0.5 * length( cross( p1 - p0, p2 - p0 ) );
+		vec2  d1 = st1 - st0, d2 = st2 - st0;
+		float areaST = 0.5 * abs( d1.x * d2.y - d1.y * d2.x );
+		vec2  sz = vec2( textureSize( u_rtTextures[ nonuniformEXT( g.texIndex - 1u ) ], 0 ) );
+		float texelsPerUnit = sqrt( max( areaST * sz.x * sz.y, 1e-12 ) / max( areaW, 1e-6 ) );
+		// mip whose texel spans the footprint's diameter (the hardware clamps past the chain's last level)
+		lod = clamp( log2( max( 2.0 * footprint * texelsPerUnit, 1.0 ) ), 0.0, 12.0 );
+	}
+	float a = textureLod( u_rtTextures[ nonuniformEXT( g.texIndex - 1u ) ], hitST, lod ).a;
+	float hard = ( a >= ref ) ? 1.0 : 0.0;
+	return mix( hard, clamp( a, 0.0, 1.0 ), clamp( lod, 0.0, 1.0 ) );
+}

@@ -382,6 +382,20 @@ near a bulb), perforated materials that cast on their own (the see-through floor
 from inside the solid instances instead of blocking the ray, and a pixel dimmed by a grate reports the GRATE's
 distance as `occDist` (NRD's hit distance), not the light's. See rtx-shadow-blur.md "Shape parity".
 
+**Soft grate shadows, r_rtShadowBlur parity (2026-10-19, user: "make the perforated casters' shadows blur in DI as they do
+under RTX On"):** the hybrid tier blurs a grate's shadow in screen space after its ray, halfW = blurScale * g^curve with
+g = dOcc / (dL - dOcc) (`rtshadow_ray.frag`). DI has no per-light mask to blur and a stochastic emitter would feed the R1
+gradient noise, so the same width is applied AT THE CASTER: `traceVisibility` projects the receiver's penumbra disc back
+along the light cone onto the grate plane - radius halfW * (1 - dOcc/dL) around the hit - and
+`dudePerforatedCoverage` (rt_perforated.glsl) averages the coverage over it through the coverage texture's mips (the
+triangle's own st-to-world density picks the level; lod 0 is the hard test, blended over the first level so nothing pops).
+Visibility = 1 - strength * solidFraction, min over grates. The per-light blur scale is the hybrid's own number
+(`RB_RHI_RtShadowBlurLightRadius`, shared with `RB_RHI_RtShadowBlurLight`), packed by `RB_RHI_GatherSceneLights` as a half
+float in the light's flags bits 16-31 (`diLightBlurScale`); `u_specularModifier.xy` = (on, r_rtShadowBlurCurve), set while
+`r_rtShadowBlur` is on with a non-zero intensity. Deterministic (the gradient re-shades bit-identically) and noise-free for
+NRD; the gradient's previous-frame row carries last frame's scale. Solid casters are untouched - their DI shadows stay the
+hard 1-spp ray NRD denoises.
+
 **Debug views (2026-10-08):** `r_rtReStirDIDebug` is now the RTGI-style 0/1/2 (off / RAW 1-spp gather /
 NRD-denoised) with the matching ImGui dropdown. The raw view is also the checkerboard proof: with
 `r_rtReStirDICheckerboard` on, the traced half sits packed in the buffer's LEFT half. Note the checkerboard only
