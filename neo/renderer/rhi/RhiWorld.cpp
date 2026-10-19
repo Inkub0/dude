@@ -2164,11 +2164,12 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	idImage *occlusionImage = RB_RHI_FillOcclusionParms( parms, din );
 
 	// RTGI reconcile (docs/rtx-rtgi.md H6c): on an AMBIENT draw with r_rtgi on, the fullscreen GI apply
-	// (RB_RHI_RtgiApply) adds real bounce light on top of this fake cube-map ambient. Hand ambientlight.frag
-	// r_rtgiAmbientKeep in the otherwise-unused u_color.x, encoded +1 so 0 = "GI off, keep 1 (no dim)", and
-	// it scales the fake ambient down so the two do not double-count.
+	// (RB_RHI_RtgiApply) adds real bounce light, so Doom 3's FAKE cube-map ambient is fully REPLACED (keeping
+	// any of it would double-count the indirect term). u_color.x (otherwise unused) signals this to
+	// ambientlight.frag: 0 = GI off, keep the fake ambient; 1 = GI on, drop it. (Was the r_rtgiAmbientKeep
+	// knob - removed; the fake ambient is now always fully replaced when GI is on.)
 	if ( din->ambientLight && r_rtgi.GetBool() ) {
-		parms.color[0] = idMath::ClampFloat( 0.0f, 1.0f, r_rtgiAmbientKeep.GetFloat() ) + 1.0f;
+		parms.color[0] = 1.0f;			// GI on -> fully replace the fake ambient (ambientlight.frag: *(x - 1) = *0)
 	}
 
 	idImage *parallaxImage = RB_RHI_FillParallaxParms( parms, din );
@@ -7099,7 +7100,7 @@ capture and screen mapping assume the whole framebuffer at the origin).
 */
 static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// RTGI supersedes screen-space AO: it grounds the scene with real one-bounce occlusion + bounce light, and
-	// the fake cube-map ambient GTAO used to darken is fully replaced by GI (r_rtgiAmbientKeep). So AO is one
+	// the fake cube-map ambient GTAO used to darken is fully replaced by GI. So AO is one
 	// technique at a time — RTAO already stands down for r_rtgi, and GTAO stands down here too (no wasted pass;
 	// consumers gate on rhiSsaoAppliedThisView so they simply apply no AO this view).
 	if ( !r_ssao.GetBool() || r_rtgi.GetBool() || !R_BackendSupportsEnhancements() ) {

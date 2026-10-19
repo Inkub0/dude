@@ -3740,11 +3740,6 @@ static void DrawEnhGroup_AmbientOcclusion()
 			CvarSliderF( "Intensity##rtgi", r_rtgiIntensity, 0.0f, 4.0f, "%.2f", "Strength of the bounced light added to the scene. 1.00 is the physical one-bounce "
 				"result; raise for punchier colour bleed, lower for a subtle fill." );
 
-			CvarSliderF( "Fake-Ambient Keep##rtgi", r_rtgiAmbientKeep, 0.0f, 1.0f, "%.2f", "How much of Doom 3's original FAKE cube-map ambient to keep once real GI is added, "
-				"so the two don't double-count. 1.00 stacks GI on top of the full fake ambient (brightest); "
-				"0.00 lets GI fully replace it (most physical, but a corner GI can't reach goes darker). "
-				"Lower it if lit rooms look washed out." );
-
 			CvarSliderF( "Fog Awareness##rtgi", r_rtgiFogAttenuate, 0.0f, 4.0f, "%.2f", "Fades the bounced light out with distance through fog, so GI stops washing out "
 				"Doom 3's distance fog (the far haze reads thin without it). 1.00 is the physical amount; "
 				"raise toward 4 for a stronger foggy look (needed where a map's fog distance is huge and "
@@ -4795,9 +4790,6 @@ static void DrawDbgGroup_RTGI()
 		CvarSliderF( "Ray Length", r_rtgiRadius, 8.0f, 4096.0f, "%.0f units", "How far a bounce ray looks for the surface whose "
 			"light it gathers. Longer = broader colour bleed and more distant bounce; shorter concentrates GI nearby and is "
 			"cheaper on traversal. Default 720. (r_rtgiRadius)" );
-		CvarSliderF( "Fake-Ambient Keep", r_rtgiAmbientKeep, 0.0f, 1.0f, "%.2f", "How much of Doom 3's fake cube-map ambient to "
-			"keep once real GI is added (so they do not double-count). 1 = keep it in full and stack GI on top (brightest); "
-			"0 = let GI fully replace it (most physical, but a spot GI cannot reach goes black). (r_rtgiAmbientKeep)" );
 		CvarSliderF( "Fog Awareness", r_rtgiFogAttenuate, 0.0f, 4.0f, "%.2f", "Fade the added bounce light out through the view's "
 			"fog so GI stops washing out distance fog. 0 = off (old look), 1 = physical, >1 overdrives the falloff. Only in "
 			"views with a fog light. Default 3.0. (r_rtgiFogAttenuate)" );
