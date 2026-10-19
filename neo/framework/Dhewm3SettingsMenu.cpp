@@ -3277,6 +3277,19 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		// lights) with no visible cost. Needs DI, so it rides the Path Tracing tier; on there, off below.
 		r_rtLightGrid.SetBool( fullRt );
 
+		// Path Tracing quality tiers: the DI gather (and the folded-in GI) resolution + checkerboard scale with
+		// the raster tier - Medium cheapest, Nightmare the quality cap (3/4 res, full-rate, no checkerboard). Only
+		// meaningful at the PT tier (DI is off below it). Free knobs: set here but NOT matched in Detect, so the
+		// Gather Resolution slider / Checkerboard toggle stay tunable without the preset reading "Custom".
+		if ( fullRt ) {
+			float diRes = 0.5f; bool diCb = true;                                  // Potato / Low / Medium: Half + checkerboard
+			if      ( idx == PRESET_HIGH )      { diRes = 0.667f; diCb = true; }    // High: Two-thirds + checkerboard
+			else if ( idx == PRESET_ULTRA )     { diRes = 0.75f;  diCb = true; }    // Ultra: Three-quarter + checkerboard
+			else if ( idx >= PRESET_NIGHTMARE ) { diRes = 0.75f;  diCb = false; }   // Nightmare: Three-quarter, full-rate (no checkerboard)
+			r_rtReStirDIResScale.SetFloat( diRes );
+			r_rtReStirDICheckerboard.SetBool( diCb );
+		}
+
 		// RT reflections own every reflective pixel, so SSR is turned off under them and the
 		// RT-vs-SSR luminance match + half-res reflection trace follow (mirrors the raster
 		// derivation above, but against the augment's rtReflections instead of the row's).
