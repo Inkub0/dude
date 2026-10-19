@@ -4865,9 +4865,9 @@ static void DrawDbgGroup_RTGI()
 static void DrawDbgGroup_ReStirDI()
 {
 	// Live tuning + debug view for ReSTIR direct lighting (docs/rtx-restir-di.md, H7 'Path Tracing'). A
-	// fresh 1-spp direct-lighting gather of the scene lights, denoised by the shared NRD REBLUR_DIFFUSE slot.
-	// Bring-up feature, enabled directly here (not preset-wired yet). These knobs tune the denoiser's spatial
-	// cleanup of the residual 1-spp noise NRD leaves on fine detail (edge-stopped) + moving parts (thin history).
+	// fresh 1-spp direct-lighting gather of the scene lights, denoised by the shared NRD RELAX_DIFFUSE slot.
+	// Organised into categories: Scene Lighting / Debug View / Sampling / Resolution / Spatial Denoise /
+	// Material Detail / Temporal History / Anti-lag & Gradient Confidence.
 	const bool rtCapable = R_SupportsRayTracing();
 	if ( BeginSettingsGroup( "ReSTIR Direct Lighting" ) ) {
 
@@ -4878,14 +4878,13 @@ static void DrawDbgGroup_ReStirDI()
 
 	CvarCheckbox( "Enable ReSTIR DI", r_rtReStirDI, "Reservoir direct lighting: ONE shaded sample + ONE shadow ray "
 		"per pixel for the scene's lights, NRD-denoised, instead of the ray-per-light loop - the per-pixel cost "
-		"stops scaling with light count. Bring-up feature (not wired into the quality presets yet). Needs the "
-		"velocity prepass (FSR2 or Motion Vectors) for the denoiser, and it borrows the shared GI NRD slot, so turn "
-		"RTGI and RTAO OFF for it to denoise. Nothing consumes the result in the lit scene yet - use the debug view "
-		"below. (r_rtReStirDI)" );
+		"stops scaling with light count. On by default at the Path Tracing tier. Needs the velocity prepass (FSR2 "
+		"or Motion Vectors) for the denoiser, and it borrows the shared GI NRD slot, so RTGI/RTAO stand down for "
+		"it. (r_rtReStirDI)" );
 
 	ImGui::BeginDisabled( !r_rtReStirDI.GetBool() );
 
-	// --- Stage D: DI lights the scene ---
+	// ===== Scene Lighting: how DI feeds / composes into the frame =====
 	ImGui::SeparatorText( "Scene Lighting" );
 	CvarCheckbox( "Light the Scene with DI", r_rtReStirDIApply, "The denoised DI, shaded with the G-buffer material "
 		"(albedo + GGX roughness/metalness + spec map), becomes the direct lighting of every opaque world surface, "
@@ -4893,8 +4892,18 @@ static void DrawDbgGroup_ReStirDI()
 		"The view weapon, translucents, blood films, fog/blend + ambient lights and sub-views stay forward. "
 		"Off = DI is debug-only and the forward path is untouched. A/B: same look, cheaper in light-dense rooms. "
 		"The debug view below overrides this. (r_rtReStirDIApply)" );
+	CvarCheckbox( "Combine GI (one buffer)", r_rtReStirDICombineGI, "With RTGI on, the DI gather also traces the "
+		"one-bounce GI ray at the same pixel and folds the bounce (albedo * intensity, fog-faded) into the DI "
+		"radiance, so ONE NRD denoise + ONE apply serve direct + indirect - about the cost of DI alone. RTGI's own "
+		"pass stands down; DI's resolution / checkerboard / history / NRD knobs then shape the bounce too. "
+		"0 = DI only (RTGI stays stood down while DI is on). (r_rtReStirDICombineGI)" );
+	CvarCheckbox( "Weapon Lights Forward", r_rtReStirDIDynamicForward, "Keep the first-person weapon lights "
+		"(flashlight, muzzle flash) on the forward per-light path instead of DI - they are masked out of DI's field "
+		"anyway. Every other light (including moving, flickering and (re)appearing lights) rides DI + the gradient "
+		"confidence, which resets NRD history exactly where the lighting changes. 0 = every light through DI "
+		"(laggy flashlight; A/B only). (r_rtReStirDIDynamicForward)" );
 
-	// --- Debug view (the DI buffer blitted over the scene), the RTGI dropdown ---
+	// ===== Debug View: the DI buffer blitted over the scene =====
 	ImGui::SeparatorText( "Debug View" );
 	{
 		int dbg = idMath::ClampInt( 0, 2, r_rtReStirDIDebug.GetInteger() );
@@ -4910,16 +4919,20 @@ static void DrawDbgGroup_ReStirDI()
 			"structure and noise, not absolute brightness. (r_rtReStirDIDebug)" );
 	}
 
-	// --- Sampling ---
+	// ===== Sampling: how the scene lights are picked =====
 	ImGui::SeparatorText( "Sampling" );
 	CvarSliderI( "Candidates", r_rtReStirDICandidates, 0, 128, "Light candidates per pixel before the weighted-reservoir "
 		"pick. 0 = every light in the buffer is weighed (exhaustive: no candidate noise, a far dominant light stays at full "
 		"strength). N > 0 = N uniform random draws: cheaper in light-dense views, but a rarely-drawn light arrives as "
 		"sparse spikes the denoiser clips and reads dimmer. (r_rtReStirDICandidates)" );
+	CvarCheckbox( "Cheap RIS Target", r_rtReStirDICheapTarget, "Weigh the gather's candidate lights with a CHEAP target "
+		"(unshadowed irradiance - colour x cookie/falloff x N.L - without the GGX material response) and compute the full "
+		"PBR shade only ONCE, for the winning light: ~38 cheap evals + 1 full instead of ~38 full, the gather's biggest "
+		"cost, at a tiny variance increase on glossy surfaces. Only meaningful with 'Light the Scene'. 0 = full GGX target "
+		"per candidate (the A/B). (r_rtReStirDICheapTarget)" );
 
-	// --- Light grid (docs/rtx-light-grid.md): a world-space ReGIR candidate grid - the gather (and the GI bounce) pick
-	// from each point's cell's short list of importance-sampled lights instead of weighing EVERY light. A perf win that
-	// grows with light count; on by default at the Path Tracing tier. ---
+	// Light grid (docs/rtx-light-grid.md): a world-space ReGIR candidate grid - the gather (and the GI bounce) pick
+	// from each point's cell's short list of importance-sampled lights instead of weighing EVERY light.
 	CvarCheckbox( "Light Grid", r_rtLightGrid, "Replace the gather's per-pixel scan over every light with a world-space "
 		"grid of camera-centred cells, each filled once per frame with a few importance-sampled light candidates; the "
 		"gather and the GI bounce then pick from their cell instead. A performance win that grows with the light count "
@@ -4950,7 +4963,7 @@ static void DrawDbgGroup_ReStirDI()
 		ImGui::EndDisabled();
 	}
 
-	// --- Resolution (mirrors RT Global Illumination -> Resolution) ---
+	// ===== Resolution =====
 	ImGui::SeparatorText( "Resolution" );
 	{
 		const float diResStops[]  = { 0.25f, 0.5f, 0.667f, 0.75f, 1.0f };
@@ -4969,41 +4982,10 @@ static void DrawDbgGroup_ReStirDI()
 		"aware filter instead of plain bilinear, so DI stops bleeding across silhouettes and creases - sharper at edges "
 		"for a few extra taps. Inert at Full resolution. Off = the old bilinear look. (r_rtReStirDIBilateralUpscale)" );
 
-	// --- Noise suppression (the full NRD tuning surface) ---
-	// DI is ReLAX-only since R6. The knobs below map 1:1 to the NRD ReLAX settings the DI denoise sets
-	// (VulkanBackend::RtaoDenoise); they clean the sharp 1-spp signal that RTGI's low-frequency bounce does not need.
-	// 0 generally means "keep NRD's own default". History Confidence is the R1 temporal gradient (not the old luminance
-	// pass, removed at R6); it drives NRD's IN_DIFF_CONFIDENCE so history is dropped only where the lighting changed.
-	ImGui::SeparatorText( "Noise Suppression" );
-	ImGui::TextDisabled( "NRD temporal history" );
-	CvarSliderI( "History Length", r_rtReStirDIHistory, 2, 63, "Max frames NRD accumulates for the DI radiance "
-		"(ReLAX diffuseMaxAccumulatedFrameNum). The 1-spp gather needs accumulation to look smooth: too short and single "
-		"pixels 'fry', too long and a switched-off/occluded light lingers. ~6-12 is the balance; NRD default 30. (r_rtReStirDIHistory)" );
-	CvarSliderF( "History (ms)", r_rtReStirDIHistoryMs, 0.0f, 2000.0f, "%.0f ms", "History window in MILLISECONDS instead "
-		"of frames (converted per frame from a 0.2 s low-passed FPS), so the window is the same wall-clock time at 60 or "
-		"144 Hz. 0 = use History Length in frames. (r_rtReStirDIHistoryMs)" );
-	CvarSliderI( "Fast History", r_rtReStirDIRelaxFast, 1, 63, "ReLAX diffuseMaxFastAccumulatedFrameNum - the short 'fast' "
-		"history the long one is clamped to; the main built-in anti-lag. Remix direct light ships 1 ('to reduce trail'); NRD "
-		"default 6. (r_rtReStirDIRelaxFast)" );
-	CvarSliderF( "Fast Clamp", r_rtReStirDIFastClamp, 1.0f, 3.0f, "%.1f", "ReLAX fastHistoryClampingSigmaScale [1;3] - how "
-		"tightly the slow history is clamped to the fast one. Lower = less lag, more flicker. NRD default 2.0; the NRD sample "
-		"uses 1.5. (r_rtReStirDIFastClamp)" );
-	// Interlock: Gradient Confidence (below) REPLACES NRD's built-in anti-lag - running both double-rejects
-	// history on every lighting change. So anti-lag is forced inert while the gradient is on (RhiWorld.cpp's
-	// da.antilagOff); grey it out here to match the engine.
-	ImGui::BeginDisabled( r_rtReStirDIGradient.GetBool() );
-	CvarCheckbox( "Anti-lag", r_rtReStirDIAntilag, "NRD's built-in luminance anti-lag. On = NRD defaults; off = inert (the "
-		"baseline NRD recommends for an initial integration and for the gradient confidence). Forced OFF while "
-		"Gradient Confidence is on - the gradient is its targeted replacement. (r_rtReStirDIAntilag)" );
-	if ( r_rtReStirDIGradient.GetBool() ) {
-		ImGui::TextDisabled( "  (off - Gradient Confidence replaces it)" );
-	}
-	ImGui::EndDisabled();
-	CvarSliderF( "Disocclusion", r_rtReStirDIDisocclusion, 0.005f, 0.05f, "%.3f", "NRD disocclusionThreshold - relative "
-		"(slope-scaled) depth difference above which reprojected history is rejected as a different surface. Looser = fewer "
-		"FALSE resets on movers / the weapon, at some bleed across real depth edges. NRD range 0.01..0.02. (r_rtReStirDIDisocclusion)" );
-	ImGui::Spacing();
-	ImGui::TextDisabled( "NRD spatial (ReLAX A-trous)" );
+	// ===== Spatial Denoise (ReLAX A-trous): the spatial cleanup of the 1-spp signal =====
+	// DI is ReLAX-only since R6. These map 1:1 to the NRD ReLAX A-trous settings the DI denoise sets
+	// (VulkanBackend::RtaoDenoise); 0 generally means "keep NRD's own default".
+	ImGui::SeparatorText( "Spatial Denoise (ReLAX A-trous)" );
 	CvarSliderI( "History Fix", r_rtReStirDIHistoryFix, 0, 8, "ReLAX historyFixFrameNum - frames of strong SPATIAL "
 		"reconstruction where temporal history is thin (a fresh disocclusion or a moving limb): the lever for noise on "
 		"MOVING parts. Clamped below the fast-history window. 0 = NRD default (3). (r_rtReStirDIHistoryFix)" );
@@ -5026,8 +5008,64 @@ static void DrawDbgGroup_ReStirDI()
 		"sub-pixel GRATE noise the others can't, at the cost of softening that fine detail. 1 / 0 = no scaling. (r_rtReStirDIEdgeStop)" );
 	CvarCheckbox( "Anti-Firefly", r_rtReStirDIRelaxFirefly, "ReLAX enableAntiFirefly - clamps lone bright fireflies (+7-10% "
 		"ReLAX cost). NRD default off; Remix / the RTXDI sample ship it on. (r_rtReStirDIRelaxFirefly)" );
+
+	// ===== Material Detail: bump + specular fidelity the denoiser would otherwise blur away =====
+	ImGui::SeparatorText( "Material Detail" );
+	CvarCheckbox( "SH Bump Detail", r_rtReStirDISH, "Denoise as spherical harmonics (RELAX_DIFFUSE_SH): the gather records "
+		"the incoming light DIRECTION and the apply re-resolves the FULL-resolution bump normal's cosine per pixel, so "
+		"bump-mapped detail (skin pores, wrinkles, cloth weave) survives the denoiser's spatial blur. Brightness-neutral - "
+		"a smooth / native surface reads identical to the plain path (the detail appears only where the bump diverges). "
+		"0 = plain radiance denoise (no bump detail). (r_rtReStirDISH)" );
+	ImGui::BeginDisabled( !r_rtReStirDISH.GetBool() );
+	CvarCheckbox( "Specular Reshade", r_rtReStirDISpecReshade, "Needs SH Bump Detail + Light the Scene. Denoise DIFFUSE-only, "
+		"then rebuild the specular highlight at FULL resolution in the apply from the SH light direction + the full-res bump "
+		"normal + material (a GGX lobe exactly as the forward path's), restoring the sharp glint on skin pores / wet surfaces "
+		"/ metal that the soft diffuse-denoised highlight loses. 0 = plain SH (specular folded into the diffuse denoise, "
+		"softer). (r_rtReStirDISpecReshade)" );
+	ImGui::EndDisabled();
+
+	// ===== Temporal History: how long the denoiser accumulates + disocclusion handling =====
+	ImGui::SeparatorText( "Temporal History" );
+	CvarSliderI( "History Length", r_rtReStirDIHistory, 2, 63, "Max frames NRD accumulates for the DI radiance "
+		"(ReLAX diffuseMaxAccumulatedFrameNum). The 1-spp gather needs accumulation to look smooth: too short and single "
+		"pixels 'fry', too long and a switched-off/occluded light lingers. ~6-12 is the balance; NRD default 30. (r_rtReStirDIHistory)" );
+	CvarSliderF( "History (ms)", r_rtReStirDIHistoryMs, 0.0f, 2000.0f, "%.0f ms", "History window in MILLISECONDS instead "
+		"of frames (converted per frame from a 0.2 s low-passed FPS), so the window is the same wall-clock time at 60 or "
+		"144 Hz. 0 = use History Length in frames. (r_rtReStirDIHistoryMs)" );
+	CvarSliderF( "Disocclusion", r_rtReStirDIDisocclusion, 0.005f, 0.05f, "%.3f", "NRD disocclusionThreshold - relative "
+		"(slope-scaled) depth difference above which reprojected history is rejected as a different surface. Looser = fewer "
+		"FALSE resets on movers / the weapon, at some bleed across real depth edges. NRD range 0.01..0.02. (r_rtReStirDIDisocclusion)" );
+	CvarSliderI( "Disocclusion Boost", r_rtReStirDIBoost, 0, 4, "R3a: K independent light picks + K visibility rays on YOUNG "
+		"pixels (just revealed - a mover's wake, a screen edge while turning, a camera cut), averaging to 1/K the variance so "
+		"the denoiser does not widen its filter and smear the neighbouring shadow across the refill (the dark trail behind a "
+		"walking NPC, the look-away wash). 0 / 1 = off, 2..4 = K (2 = default, ~1 ms while moving). (r_rtReStirDIBoost)" );
+	CvarSliderF( "Boost History", r_rtReStirDIBoostHistory, 0.0f, 63.0f, "%.0f", "NRD history length (frames) below which a "
+		"pixel ALSO gets the boosted picks; held until 2x this. 0 = history trigger OFF (only true disocclusions + pixels "
+		"entering the screen are boosted - boosting the short-history footprints of flickering lights cost ~1.4 ms standing "
+		"still). (r_rtReStirDIBoostHistory)" );
+
+	// ===== Anti-lag & Gradient Confidence: the two INTERLOCKED lag-mitigation mechanisms (one replaces the other) =====
+	ImGui::SeparatorText( "Anti-lag & Gradient Confidence" );
+	ImGui::TextDisabled( "NRD built-in fast-history anti-lag" );
+	CvarSliderI( "Fast History", r_rtReStirDIRelaxFast, 1, 63, "ReLAX diffuseMaxFastAccumulatedFrameNum - the short 'fast' "
+		"history the long one is clamped to; the main built-in anti-lag. Remix direct light ships 1 ('to reduce trail'); NRD "
+		"default 6. (r_rtReStirDIRelaxFast)" );
+	CvarSliderF( "Fast Clamp", r_rtReStirDIFastClamp, 1.0f, 3.0f, "%.1f", "ReLAX fastHistoryClampingSigmaScale [1;3] - how "
+		"tightly the slow history is clamped to the fast one. Lower = less lag, more flicker. NRD default 2.0; the NRD sample "
+		"uses 1.5. (r_rtReStirDIFastClamp)" );
+	// Interlock: Gradient Confidence (below) REPLACES NRD's built-in anti-lag - running both double-rejects
+	// history on every lighting change. So anti-lag is forced inert while the gradient is on (RhiWorld.cpp's
+	// da.antilagOff); grey it out here to match the engine.
+	ImGui::BeginDisabled( r_rtReStirDIGradient.GetBool() );
+	CvarCheckbox( "Anti-lag", r_rtReStirDIAntilag, "NRD's built-in luminance anti-lag. On = NRD defaults; off = inert (the "
+		"baseline NRD recommends for an initial integration and for the gradient confidence). Forced OFF while "
+		"Gradient Confidence is on - the gradient is its targeted replacement. (r_rtReStirDIAntilag)" );
+	if ( r_rtReStirDIGradient.GetBool() ) {
+		ImGui::TextDisabled( "  (off - Gradient Confidence replaces it)" );
+	}
+	ImGui::EndDisabled();
 	ImGui::Spacing();
-	ImGui::TextDisabled( "History Confidence (R1 temporal gradient)" );
+	ImGui::TextDisabled( "R1 temporal gradient (the anti-lag replacement)" );
 	CvarCheckbox( "Gradient Confidence", r_rtReStirDIGradient, "Re-shade last frame's chosen light at the reprojected "
 		"surface under this frame's lights, A-trous filter the change, and feed NRD IN_DIFF_CONFIDENCE so history is dropped "
 		"ONLY where the lighting really changed (RTXDI / Q2RTX recipe). The DI anti-lag; default on. (r_rtReStirDIGradient)" );
