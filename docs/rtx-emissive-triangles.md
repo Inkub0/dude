@@ -249,3 +249,21 @@ Census: 5349 triangles (879 world, 4470 from 226 static entities), 54 materials,
    unidentified yet (the user names it with `r_showSurfaceInfo` next round). Candidates: the glass (`chiglass1blue`,
    now excluded) or a glow stage with a texture matrix the sample ignores (the E2 read must honour the stage's
    constant texture matrix - OPEN for E2).
+
+## Second validation round (user, Mars City, 2026-10-19)
+
+Census after the fixes: 4986 triangles (682 world, 4304 from 211 static entities), 46 materials (2 time-driven), total
+flux 39864 (mean 8.0). Ranking: `striplight3` 32.8%, `stetile4sqlight` 20.1% (the ceiling tiles), `mcitya12_2` 11%,
+`mcitydoorframeglow` 10.5%, `striplight3_break` 8.8% - the fixtures that light Mars City, as expected. The overlay now
+respects walls; the black pillar panels of round 1 were the glass (excluded). Mode 1/2/3 agree on the ceiling tiles
+(white, 16x+ flux), the door strips (white with orange ends in mode 3) and the wall strips.
+
+OPEN: the Marine HQ comm terminal (the two big monitors + the console sides) IS in the table (blue + orange in mode
+1, low flux in mode 2) but samples BLACK in mode 3. Two changes to pin it down: (a) the census now prints each
+material's mode-1 tint (`view1 <hue> #RRGGBB`) so a painted surface can be matched to its material without
+r_showSurfaceInfo (which is unusable for the user); (b) a CONSTANT stage texture matrix (scale / translate / rotate on
+the glow stage) is now BAKED into the stored per-vertex st (t = 0 phase for a scrolled one; flagged "(texture matrix
+baked)" in the census), so a sample reads the texel the forward path draws - the likeliest cause of a black sample
+where the game shows a lit screen. If the terminal is still black after this, the remaining suspects are an entity
+`_color` of 0 on its parms (then the game would show it black too - it does not) or a glow texture that is genuinely
+black where the geometry's st lands (a mis-authored add map).

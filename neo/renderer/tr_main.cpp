@@ -2867,8 +2867,50 @@ static bool R_RtEmissiveStageColor( const idMaterial *mat, const shaderStage_t *
 	return !animated;
 }
 
+// The glow stage's texture matrix (scale / translate / rotate on the stage), evaluated at time 0 with the surface's
+// parms, so the table's per-vertex st can be BAKED through it: the sample at E2 (and the debug overlay) then reads
+// the texel the forward path draws. A time-scrolled matrix bakes its t=0 phase (the glow pattern is what matters
+// for the flux; the live colour is E2's). Returns false (identity) when the stage has no matrix.
+static bool R_RtEmissiveStageTexMatrix( const idMaterial *mat, const shaderStage_t *st, const float *entityParms, float m[6] ) {
+	m[0] = 1.0f; m[1] = 0.0f; m[2] = 0.0f; m[3] = 0.0f; m[4] = 1.0f; m[5] = 0.0f;
+	if ( !st->texture.hasMatrix || mat->GetNumRegisters() <= 0 ) {
+		return false;
+	}
+	static const float defaultParms[MAX_ENTITY_SHADER_PARMS] = { 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+	float *regs = (float *)_alloca16( mat->GetNumRegisters() * (int)sizeof( float ) );
+	viewDef_t probeView;
+	memset( &probeView, 0, sizeof( probeView ) );
+	mat->EvaluateRegisters( regs, entityParms != NULL ? entityParms : defaultParms, &probeView, NULL );
+	for ( int r = 0; r < 2; r++ ) {
+		for ( int c = 0; c < 3; c++ ) {
+			m[r * 3 + c] = regs[ st->texture.matrix[r][c] ];
+		}
+	}
+	return true;
+}
+
+// The debug overlay's mode-1 tint for a glow slot (rt_emissive_debug.frag dbgTint, same hash), for the census so a
+// painted surface can be matched to its material by colour.
+static void R_RtEmissiveDebugTint( unsigned int slot, int rgb[3], const char **name ) {
+	unsigned int sh = slot * 2654435761u + 1u;
+	unsigned int w = ( ( sh >> ( ( sh >> 28u ) + 4u ) ) ^ sh ) * 277803737u;
+	unsigned int h = ( w >> 22u ) ^ w;
+	float f[3] = { ( h & 255u ) * ( 0.75f / 255.0f ) + 0.25f, ( ( h >> 8u ) & 255u ) * ( 0.75f / 255.0f ) + 0.25f, ( ( h >> 16u ) & 255u ) * ( 0.75f / 255.0f ) + 0.25f };
+	for ( int k = 0; k < 3; k++ ) { rgb[k] = (int)( f[k] * 255.0f + 0.5f ); }
+	// a coarse hue word
+	const float mx = Max( f[0], Max( f[1], f[2] ) ), mn = Min( f[0], Min( f[1], f[2] ) );
+	if ( mx - mn < 0.12f ) { *name = ( mx > 0.7f ) ? "white/grey" : "grey"; return; }
+	float hue;
+	if ( mx == f[0] )      { hue = ( f[1] - f[2] ) / ( mx - mn ); }
+	else if ( mx == f[1] ) { hue = 2.0f + ( f[2] - f[0] ) / ( mx - mn ); }
+	else                   { hue = 4.0f + ( f[0] - f[1] ) / ( mx - mn ); }
+	hue *= 60.0f; if ( hue < 0.0f ) { hue += 360.0f; }
+	static const char *names[12] = { "red", "orange", "yellow", "lime", "green", "spring", "cyan", "azure", "blue", "violet", "magenta", "rose" };
+	*name = names[ ( (int)( hue / 30.0f ) ) % 12 ];
+}
+
 // per-material census row for the build report
-struct rtEmissiveCensus_t { const idMaterial *mat; int tris; float flux; bool animated; };
+struct rtEmissiveCensus_t { const idMaterial *mat; int tris; float flux; bool animated; bool texMatrix; unsigned int slot; };
 
 // Append every triangle of one emissive surface. modelMatrix NULL = the verts are already world space (an _areaN).
 static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial *mat, const shaderStage_t *stage,
@@ -2895,9 +2937,11 @@ static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial 
 	}
 	const unsigned int emit = ( (unsigned int)img->rhiHandle & 0xFFFFu ) | flags;
 	const unsigned int tint = R_RtPackRGBA8( tintRGB );
+	float tm[6];
+	const bool hasTexMatrix = R_RtEmissiveStageTexMatrix( mat, stage, entityParms, tm );
 	int ci = -1;
 	for ( int i = 0; i < census.Num(); i++ ) { if ( census[i].mat == mat ) { ci = i; break; } }
-	if ( ci < 0 ) { rtEmissiveCensus_t c; c.mat = mat; c.tris = 0; c.flux = 0.0f; c.animated = !constant; ci = census.Append( c ); }
+	if ( ci < 0 ) { rtEmissiveCensus_t c; c.mat = mat; c.tris = 0; c.flux = 0.0f; c.animated = !constant; c.texMatrix = hasTexMatrix; c.slot = (unsigned int)img->rhiHandle & 0xFFFFu; ci = census.Append( c ); }
 
 	for ( int n = 0; n + 2 < tri->numIndexes; n += 3 ) {
 		if ( s_rtEmissiveTris.Num() >= RT_EMISSIVE_MAX_TRIS ) {
@@ -2924,9 +2968,17 @@ static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial 
 		e.flux  = area * lumPerArea;
 		e.emit  = emit;
 		e.scale = scale;
-		e.st0 = R_RtPackHalf2( a.st[0], a.st[1] );
-		e.st1 = R_RtPackHalf2( b.st[0], b.st[1] );
-		e.st2 = R_RtPackHalf2( c.st[0], c.st[1] );
+		const idDrawVert *v3[3] = { &a, &b, &c };
+		unsigned int *stOut[3] = { &e.st0, &e.st1, &e.st2 };
+		for ( int k = 0; k < 3; k++ ) {
+			float s0 = v3[k]->st[0], t0 = v3[k]->st[1];
+			if ( hasTexMatrix ) {												// bake the stage's texture matrix (draw_common.cpp RB_PrepareStageTexturing)
+				const float s1 = tm[0] * s0 + tm[1] * t0 + tm[2];
+				const float t1 = tm[3] * s0 + tm[4] * t0 + tm[5];
+				s0 = s1; t0 = t1;
+			}
+			*stOut[k] = R_RtPackHalf2( s0, t0 );
+		}
 		e.tint = tint;
 		census[ci].tris++;
 		census[ci].flux += e.flux;
@@ -3056,8 +3108,10 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		Sys_Milliseconds() - msStart, overflow ? va( " - TABLE FULL: %d triangles dropped (raise RT_EMISSIVE_MAX_TRIS)", overflow ) : "" );
 	const int show = census.Num() < 12 ? census.Num() : 12;
 	for ( int i = 0; i < show; i++ ) {
-		common->Printf( "    %6.1f%%  %6d tris  %-48s%s\n", 100.0f * census[i].flux / s_rtEmissiveTotalFlux, census[i].tris,
-			census[i].mat->GetName(), census[i].animated ? "  (animated colour)" : "" );
+		int rgb[3]; const char *hue = "";
+		R_RtEmissiveDebugTint( census[i].slot, rgb, &hue );
+		common->Printf( "    %6.1f%%  %6d tris  %-46s view1 %-10s #%02X%02X%02X%s%s\n", 100.0f * census[i].flux / s_rtEmissiveTotalFlux, census[i].tris,
+			census[i].mat->GetName(), hue, rgb[0], rgb[1], rgb[2], census[i].animated ? "  (animated colour)" : "", census[i].texMatrix ? "  (texture matrix baked)" : "" );
 	}
 }
 
