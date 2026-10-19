@@ -4906,17 +4906,22 @@ static void DrawDbgGroup_ReStirDI()
 	// ===== Debug View: the DI buffer blitted over the scene =====
 	ImGui::SeparatorText( "Debug View" );
 	{
-		int dbg = idMath::ClampInt( 0, 2, r_rtReStirDIDebug.GetInteger() );
+		int dbg = idMath::ClampInt( 0, 7, r_rtReStirDIDebug.GetInteger() );
 		ImGui::SetNextItemWidth( 240.0f );
-		if ( ImGui::Combo( "Buffer##restirDiDebug", &dbg, "Off (lights the scene / hidden)\0Raw 1-spp gather\0NRD-denoised\0" ) ) {
+		if ( ImGui::Combo( "View##restirDiDebug", &dbg, "Off (lights the scene / hidden)\0Raw 1-spp gather\0NRD-denoised\0"
+				"NRD validation overlay\0History length\0Gradient confidence\0Raw gradient\0Disocclusion boost\0" ) ) {
 			r_rtReStirDIDebug.SetInteger( dbg );
 		}
-		AddTooltip( "Blit the DI buffer over the finished frame ('Light the Scene with DI' is suppressed while this "
-			"is on). 'Raw 1-spp gather' = the noisy input before denoising - with Checkerboard Gather on, the traced "
-			"half is visibly packed into the LEFT half of the buffer (that is how to confirm the checkerboard is "
-			"live); 'NRD-denoised' = the denoised result (falls back to raw if the denoise did not run). The view "
-			"weapon reads as no-DI (masked). YCoCg-decoded and LINEAR - the HDR pipeline exposes it, so read "
-			"structure and noise, not absolute brightness. (r_rtReStirDIDebug)" );
+		AddTooltip( "Blit the DI buffer / a diagnostic over the finished frame ('Light the Scene with DI' is suppressed "
+			"while this is on). 'Raw 1-spp gather' = the noisy input before denoising (with Checkerboard on, the traced "
+			"half is packed into the buffer's LEFT half - the proof it is live); 'NRD-denoised' = the denoised result "
+			"(falls back to raw if it did not run) - both YCoCg-decoded + LINEAR, so read structure/noise not absolute "
+			"brightness, and the weapon reads as no-DI. Diagnostics: 'NRD validation overlay' = accumulated frames / "
+			"history resets / anti-lag per pixel; 'History length' = accumulated frames (black = fresh, white = full); "
+			"'Gradient confidence' = what the gradient feeds NRD (white = trust history, dark = a lighting change here); "
+			"'Raw gradient' = red |change| / green magnitude; 'Disocclusion boost' = which pixels got the R3a boost and "
+			"why (red = short history at the previous position, green = no previous pixel is this surface, blue = "
+			"hysteresis / entered the screen). (r_rtReStirDIDebug)" );
 	}
 
 	// ===== Sampling: how the scene lights are picked =====
