@@ -3237,6 +3237,10 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		// preset owns it where GI runs; where GI is off it stays a free knob (left untouched).
 		if ( a.rtgi ) {
 			r_rtgiResScale.SetFloat( a.rtgiResScale );
+			// Eye adaptation (auto-exposure) defaults ON wherever RTGI runs (the top RT tiers): GI lifts the
+			// blacks in lit rooms, so the scene-driven exposure reads better there. A free knob - not matched
+			// in Detect, so the user can switch it off without the preset reading "Custom".
+			cvarSystem->SetCVarBool( "r_hdrEyeAdaptation", true );
 		}
 		r_rtShadowBlur.SetBool( a.rtShadowBlur );
 		// sub-pixel-penumbra skip threshold: a per-tier default (Ultra skips harder at 4 px for a
