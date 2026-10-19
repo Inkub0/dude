@@ -3745,19 +3745,8 @@ static void DrawEnhGroup_AmbientOcclusion()
 				"raise toward 4 for a stronger foggy look (needed where a map's fog distance is huge and "
 				"1.00 is too subtle); 0.00 lets GI ignore fog (the old look). Only matters in foggy areas." );
 
-			CvarSliderF( "Ray Length##rtgi", r_rtgiRadius, 64.0f, 2048.0f, "%.0f units", "How far a bounce ray looks for the surface whose light it gathers. Longer = broader "
-				"colour bleed and more distant bounce (room-scale); shorter concentrates GI on nearby "
-				"surfaces and is a little cheaper. Default 512." );
-
-			// GI resolution: same low-frequency reasoning as RTAO. 0.5 is the cost/quality knee (a full-res
-			// single sample is ~4x its cost; 0.25 starts to smear fine contact bleed).
-			const float rtgiResStops[]  = { 0.25f, 0.5f, 0.667f, 0.75f, 1.0f };
-			const char *rtgiResLabels[] = { "Quarter (1/4)", "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Full" };
-			CvarStopsSliderF( "Resolution##rtgi", r_rtgiResScale, rtgiResStops, rtgiResLabels, IM_ARRAYSIZE( rtgiResStops ) );
-			AddTooltip( "Resolution the GI gather AND its denoiser run at, upscaled to full res. GI is very "
-				"low-frequency, so Half is the sweet spot; Quarter is cheaper still but starts to smear fine "
-				"contact bleed. Default Half." );
-
+			// Ray Length (r_rtgiRadius) and Resolution (r_rtgiResScale) live in the Developer tab's RT GI
+			// section, not here - this user-facing tab keeps just the look knobs + GI Shadows.
 			CvarCheckbox( "GI Shadows", r_rtgiShadow, "Trace one shadow ray at each bounce point toward the brightest light reaching it, so a "
 				"light behind a thin wall stops leaking bounced light through it. One extra ray per pixel; off "
 				"is a little cheaper but lets light bleed through walls." );
