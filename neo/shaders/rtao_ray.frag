@@ -36,13 +36,6 @@ layout(location = 2) out vec4 outNormal;	// IN_NORMAL_ROUGHNESS: world normal, N
 // for cinematic cameras, so it is not the constant ( 0.33333333, -0.33316667 ) it used to be hard-coded as
 #define depth_consts DUDE_DEPTH_CONSTS()
 
-// interleaved gradient noise (ssao.frag): per-pixel dither whose 3x3 neighbourhood holds
-// well-spread values (denoiser-friendly). The per-frame variation is a reorientation at the
-// call site (see below), not a value phase here.
-float ign( vec2 p ) {
-	return fract( 52.9829189 * fract( dot( p, vec2( 0.06711056, 0.00583715 ) ) ) );
-}
-
 // branchless orthonormal basis around n (Duff et al. / Frisvad)
 void onb( vec3 n, out vec3 t, out vec3 b ) {
 	float s = n.z >= 0.0 ? 1.0 : -1.0;
@@ -111,21 +104,22 @@ void main() {
 	vec3 Pw = ( u_modelViewMatrix * vec4( P, 1.0 ) ).xyz;
 	vec3 Nw = normalize( mat3( u_modelViewMatrix ) * N );
 
-	// one cosine-weighted hemisphere direction; two decorrelated IGN streams. Per-frame decorrelation
-	// re-ORIENTS the IGN each frame (axes swapped / mirrored at a hashed offset - vol_march.frag), NOT
-	// a value-phase slide: a slide leaves IGN's fixed 45-degree diagonal in the per-frame residue, and
-	// when the denoised AO is upscaled from a reduced r_rtaoResScale that diagonal shows as thick lines
-	// on small far details. Re-orienting points each frame's residue a different way, so NRD's temporal
-	// accumulation averages it to isotropic grain. u_localParam1.x = frame index (hashed).
-	uint  fh = uint( u_localParam1.x ) * 747796405u + 2891336453u;
-	fh = ( ( fh >> ( ( fh >> 28u ) + 4u ) ) ^ fh ) * 277803737u;
-	fh = ( fh >> 22u ) ^ fh;
-	vec2  jc = frag + vec2( float( ( fh >> 3u ) & 1023u ), float( ( fh >> 13u ) & 1023u ) );
-	if ( ( fh & 1u ) != 0u ) { jc = jc.yx; }
-	if ( ( fh & 2u ) != 0u ) { jc.x = -jc.x; }
-	if ( ( fh & 4u ) != 0u ) { jc.y = -jc.y; }
-	float r1 = ign( jc );
-	float r2 = ign( jc.yx + vec2( 37.0, 17.0 ) );
+	// one cosine-weighted hemisphere direction. r1/r2 = a Cranley-Patterson-rotated plastic-constant (Roberts)
+	// R2 low-discrepancy sequence, identical to the PT GI bounce (rtgi_bounce.glsl): each pixel gets its OWN R2
+	// pair advanced by the frame index, phase-shifted by a per-pixel white-noise offset so neighbouring pixels
+	// are DECORRELATED - no coherent structure for NRD's spatial filter to keep. This REPLACED interleaved
+	// gradient noise (IGN), whose intrinsic 45-degree diagonal survived NRD and, once the denoised AO was
+	// upscaled from a reduced r_rtaoResScale, showed as thick oblique lines on small far details. The per-frame
+	// IGN REORIENTATION only pointed that residue a different way each frame rather than removing the lattice.
+	// u_localParam1.x = frame index (frameCount & 0xFFFF), the same bounded counter the GI bounce advances by.
+	uvec2 ip = uvec2( frag );
+	uint  h  = ( ip.x * 747796405u + 2891336453u );
+	h = ( ( h >> ( ( h >> 28u ) + 4u ) ) ^ h ) * 277803737u; h = ( h >> 22u ) ^ h;
+	h = ( ( h + ip.y ) * 747796405u + 2891336453u );
+	h = ( ( h >> ( ( h >> 28u ) + 4u ) ) ^ h ) * 277803737u; h = ( h >> 22u ) ^ h;
+	vec2  cp = vec2( float( h & 0xFFFFu ), float( ( h >> 16 ) & 0xFFFFu ) ) * ( 1.0 / 65536.0 );
+	float r1 = fract( cp.x + u_localParam1.x * 0.7548776662466927 );	// + n / plastic
+	float r2 = fract( cp.y + u_localParam1.x * 0.5698402909980532 );	// + n / plastic^2
 	float phi  = 6.28318530718 * r1;
 	float sinT = sqrt( r2 );
 	float cosT = sqrt( 1.0 - r2 );
