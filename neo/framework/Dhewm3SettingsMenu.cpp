@@ -3201,7 +3201,8 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	r_rtAllLights.SetBool( p.rtAllLights );
 	r_rtReStirDI.SetBool( false );			// dude_rtx 2 only (set in the RT overlay below)
 	r_rtReStirDIApply.SetBool( false );
-	r_rtgiCache.SetBool( false );			// C6 irradiance-cache path tail: Path Tracing (dude_rtx 2) only, set in the RT overlay below
+	r_rtgiCache.SetBool( false );			// irradiance cache: off at the raster/RTX-off baseline; follows RTGI in the RT overlay below
+	r_rtgiCacheTail.SetBool( false );		// cache path-tail mode: off except Path Tracing (dude_rtx 2), set in the RT overlay below
 	r_rtLightGrid.SetBool( false );			// RT light grid: Path Tracing (dude_rtx 2) only, set in the RT overlay below
 	r_rtShadowBlurStagger.SetBool( p.rtBlurStagger );
 	r_volumetrics.SetBool( p.volumetrics );
@@ -3259,11 +3260,14 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		const bool fullRt = ( rtMode == RTX_PATHTRACED );
 		r_rtReStirDI.SetBool( fullRt );
 		r_rtReStirDIApply.SetBool( fullRt );
-		// C6 irradiance-cache path tail (docs/rtx-irradiance-cache.md): a converged cell serves the bounce hit, skipping its
-		// light loop + shadow ray - a small average cost for steadier FRAME PACING (the spiky frames get capped). Tail mode
-		// needs DI, so it rides the Path Tracing tier only; forced on there (r_rtgiCacheTail) for the pacing benefit.
-		r_rtgiCache.SetBool( fullRt );
-		if ( fullRt ) { r_rtgiCacheTail.SetBool( true ); }
+		// Irradiance cache (docs/rtx-irradiance-cache.md): the multi-bounce GI fill + a smoother bounce signal.
+		// Enabled wherever RTGI runs (Ultra / Nightmare and the Path Tracing tier) - those high-end RT tiers can
+		// afford the cache's VRAM + fill cost, and it helps GI quality/stability. Off where GI is off (inert anyway).
+		r_rtgiCache.SetBool( a.rtgi );
+		// Path-tail mode: a converged cell SERVES the bounce hit (skips its light loop + shadow ray) for steadier
+		// frame pacing. It needs ReSTIR DI lighting the scene, so it is Path-Tracing-only - on at PT, off on every
+		// other tier (and inert without the cache / DI there anyway).
+		r_rtgiCacheTail.SetBool( fullRt );
 		// RT light grid (docs/rtx-light-grid.md): per-cell importance-sampled light candidates replace the DI gather's
 		// exhaustive per-pixel RIS over every light - a measured perf win (gather -29% at 40 lights, more with more
 		// lights) with no visible cost. Needs DI, so it rides the Path Tracing tier; on there, off below.
@@ -3411,7 +3415,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				r_volumetrics.GetBool()            == a.volumetrics &&
 				r_rtReStirDI.GetBool()             == ( rtMode == RTX_PATHTRACED ) &&
 				r_rtReStirDIApply.GetBool()        == ( rtMode == RTX_PATHTRACED ) &&
-				r_rtgiCache.GetBool()              == ( rtMode == RTX_PATHTRACED ) &&
+				r_rtgiCache.GetBool()              == a.rtgi &&
 				r_rtLightGrid.GetBool()            == ( rtMode == RTX_PATHTRACED ) &&
 				r_ssr.GetBool()                    == expSsr &&
 				idMath::Fabs( r_ssrIntensity.GetFloat() - ( expSsr ? 0.8f : 0.5f ) ) < 0.01f &&
