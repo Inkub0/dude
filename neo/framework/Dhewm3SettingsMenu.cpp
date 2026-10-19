@@ -4892,7 +4892,7 @@ static void DrawDbgGroup_ReStirDI()
 		"The view weapon, translucents, blood films, fog/blend + ambient lights and sub-views stay forward. "
 		"Off = DI is debug-only and the forward path is untouched. A/B: same look, cheaper in light-dense rooms. "
 		"The debug view below overrides this. (r_rtReStirDIApply)" );
-	CvarCheckbox( "Combine GI (one buffer)", r_rtReStirDICombineGI, "With RTGI on, the DI gather also traces the "
+	CvarCheckbox( "Fold GI light bounces", r_rtReStirDICombineGI, "With RTGI on, the DI gather also traces the "
 		"one-bounce GI ray at the same pixel and folds the bounce (albedo * intensity, fog-faded) into the DI "
 		"radiance, so ONE NRD denoise + ONE apply serve direct + indirect - about the cost of DI alone. RTGI's own "
 		"pass stands down; DI's resolution / checkerboard / history / NRD knobs then shape the bounce too. "
