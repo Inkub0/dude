@@ -2682,6 +2682,440 @@ static idStr s_rtWorldMap;
 static idStr s_rtWorldFailedMap;
 
 /*
+====================================================================================================
+RT emissive triangle table (docs/rtx-emissive-triangles.md E1)
+
+The data foundation of the experimental emissive-lighting mode (docs/rtx-experimental-lighting.md):
+a device table of every EMISSIVE triangle in the loaded map - a triangle of a surface whose material
+has an additive glow stage (neon tube, light tile, LED panel, lava) - with the flux and geometry an
+area-light sampler needs (E2 draws a triangle proportional to flux through the CDF, a point on it,
+reads the glow texture at that point's st, and traces one visibility ray against the existing TLAS).
+
+Why its own gather: the STRONGEST emitters are not in the RT scene. A pure light-source material
+(additive only) classifies MC_TRANSLUCENT -> noShadows (Material.cpp), so R_RtSurfCasts rejects it
+and it is in no BLAS and no geo-table row; only glow-on-opaque surfaces (console readouts) are
+captured there, and even those only as per-pixel glow at a ray hit, never as a light. An emitter
+needs no BLAS (the opaque world provides the occluders for E2's visibility ray), so this gather
+walks EVERY surface of the worldspawn areas and the DM_STATIC entity models, minus the caster gate,
+plus the emissive-stage test. Screens (GUI / cinematic / render-to-texture surfaces) are excluded:
+they keep the legacy fill lights (tr_light.cpp R_QueueEmissiveLight), and their image averages are
+the uncomputed white default. GPU-skinned monsters have no CPU positions - skipped (negligible).
+
+flux = world-space area x mean glow luminance (idImage::averageColor, gamma -> linear) x the stage's
+constant colour luminance x r_rtEmissiveScale (the D2 per-material table lands later). A register-
+driven (pulsing / flickering) stage colour is snapshotted at build (floored, so an OFF phase does not
+drop the emitter) and flagged ANIMATED: the flux only ranks the emitter, E2 reads the live colour.
+
+Lifecycle: built once per map (static world + static entities at their load pose; E1e refreshes
+movers), beside the persistent RT scene (R_RtWorldUpdate), rebuilt when the cvars change, freed with
+the scene. r_rtEmissiveTable 0 = nothing built. Nothing consumes the table until E2, so on or off the
+picture is identical; r_rtEmissiveTableDebug draws it (RhiWorld.cpp RB_RHI_RtEmissiveDebugOverlay).
+====================================================================================================
+*/
+// one table entry, 64 B, mirrors rt_emissive.glsl RtEmissiveTri
+struct rtEmissiveTriGPU_t {
+	float			p0[3];	float			flux;		// world-space vertices; flux = area x luminance x scale
+	float			p1[3];	unsigned int	emit;		// bits 0-15 the glow texture's bindless slot + 1 (idImage::rhiHandle), 16-31 RT_EMIT_* flags
+	float			p2[3];	float			scale;		// material intensity scale (r_rtEmissiveScale x the D2 table when it lands)
+	unsigned int	st0, st1, st2;						// per-vertex st as half2 (packHalf2x16 layout: s low, t high)
+	unsigned int	tint;								// the stage's constant colour as RGBA8 (R low byte); white when register-driven
+};
+static const int	RT_EMISSIVE_HEADER_BYTES = 16;		// uint count, float totalFlux, uint cdfOffsetBytes, float meanFlux
+static const int	RT_EMISSIVE_MAX_TRIS     = 1 << 18;	// 262144 x 64 B = 16 MB table ceiling (+1 MB CDF); a census overflow is reported
+#define RT_EMIT_FLAG_ANIMATED	( 1u << 16 )			// stage colour is register-driven: flux is a snapshot, read the live colour
+#define RT_EMIT_FLAG_ENTITY		( 1u << 17 )			// from a static entity model (else worldspawn)
+#define RT_EMIT_FLAG_TWOSIDED	( 1u << 18 )			// material creates back sides: its reversed twin is in the table too (both faces emit)
+
+static idList<rtEmissiveTriGPU_t>	s_rtEmissiveTris;			// CPU copy of the table (the debug geometry is built from it)
+static rhi::BufferHandle			s_rtEmissiveBuf = 0;		// header + tris + CDF
+static unsigned long long			s_rtEmissiveAddr = 0;
+static float						s_rtEmissiveTotalFlux = 0.0f;
+static idStr						s_rtEmissiveMap;			// the map the table was built for (the once-per-map latch; set even when empty)
+static rhi::BufferHandle			s_rtEmissiveDbgVB = 0, s_rtEmissiveDbgIB = 0;	// lazily built for the debug overlay
+static int							s_rtEmissiveDbgIndexes = 0;
+
+// IEEE half, round-toward-zero (the same conversion RhiWorld.cpp's light buffer uses); packHalf2x16 layout
+static unsigned int R_RtF32toF16( float f ) {
+	unsigned int x;
+	memcpy( &x, &f, sizeof( x ) );
+	const unsigned int sign = ( x >> 16 ) & 0x8000u;
+	const int exp = (int)( ( x >> 23 ) & 0xFFu ) - 127 + 15;
+	if ( exp <= 0 ) { return sign; }
+	if ( exp >= 31 ) { return sign | 0x7C00u; }
+	return sign | ( (unsigned int)exp << 10 ) | ( ( x & 0x7FFFFFu ) >> 13 );
+}
+static float R_RtF16toF32( unsigned int h ) {
+	const unsigned int sign = ( h & 0x8000u ) << 16;
+	const unsigned int exp  = ( h >> 10 ) & 0x1Fu;
+	const unsigned int man  = h & 0x3FFu;
+	unsigned int x;
+	if ( exp == 0 ) { x = sign; }									// zero / denormal -> zero
+	else if ( exp == 31 ) { x = sign | 0x7F800000u | ( man << 13 ); }
+	else { x = sign | ( ( exp - 15 + 127 ) << 23 ) | ( man << 13 ); }
+	float f;
+	memcpy( &f, &x, sizeof( f ) );
+	return f;
+}
+static unsigned int R_RtPackHalf2( float a, float b ) { return R_RtF32toF16( a ) | ( R_RtF32toF16( b ) << 16 ); }
+static unsigned int R_RtPackRGBA8( const float rgb[3] ) {
+	unsigned int c = 0xFF000000u;
+	for ( int k = 0; k < 3; k++ ) {
+		c |= (unsigned int)( idMath::ClampFloat( 0.0f, 1.0f, rgb[k] ) * 255.0f + 0.5f ) << ( k * 8 );
+	}
+	return c;
+}
+static float R_RtSrgbToLinear( float c ) {		// the image average is in the texture's gamma space
+	c = idMath::ClampFloat( 0.0f, 1.0f, c );
+	return ( c <= 0.04045f ) ? c / 12.92f : idMath::Pow( ( c + 0.055f ) / 1.055f, 2.4f );
+}
+static float R_RtLuminance( const float rgb[3] ) { return 0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2]; }
+
+// A "screen" the table leaves to the legacy fill lights: a GUI surface, or a video / render-to-texture stage (census only)
+static bool R_RtEmissiveIsScreen( const idMaterial *mat ) {
+	if ( mat == NULL ) {
+		return false;
+	}
+	if ( mat->HasGui() ) {
+		return true;
+	}
+	for ( int i = 0; i < mat->GetNumStages(); i++ ) {
+		if ( mat->GetStage( i )->texture.cinematic != NULL || mat->GetStage( i )->texture.dynamic != DI_STATIC ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// The additive stage that makes a material an emitter for the table, or NULL. Independent of R_RtSurfCasts
+// (coverage / shadow flags). The SAME additive test as R_RtMaterialEmitIndex (blend add: src ONE, dst ONE; the first
+// such stage is the dominant glow), plus the screen exclusions: a GUI material, a video (cinematic) stage, a
+// render-to-texture (dynamic) stage, a generated image (_scratch & co.) or a missing (defaulted) image is NOT a
+// table emitter - the GUI/video screens keep the legacy fill lights, and such images never went through the
+// averaging path (averageColor is the white default).
+static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat ) {
+	if ( mat == NULL || mat->HasGui() ) {
+		return NULL;
+	}
+	const int n = mat->GetNumStages();
+	for ( int i = 0; i < n; i++ ) {
+		const shaderStage_t *st = mat->GetStage( i );
+		const bool additive = ( st->drawStateBits & GLS_SRCBLEND_BITS ) == GLS_SRCBLEND_ONE
+		                   && ( st->drawStateBits & GLS_DSTBLEND_BITS ) == GLS_DSTBLEND_ONE;
+		if ( !additive ) {
+			continue;
+		}
+		if ( st->texture.cinematic != NULL || st->texture.dynamic != DI_STATIC ) {
+			return NULL;													// a screen: fill-light territory, not a table emitter
+		}
+		const idImage *img = st->texture.image;
+		if ( img == NULL || img->rhiHandle == 0 || img->generatorFunction != NULL || img->defaulted ) {
+			continue;
+		}
+		return st;
+	}
+	return NULL;
+}
+
+// The emissive stage's colour: its rgb/red/green/blue registers evaluated with the owning entity's shaderParms (a
+// fixture tinted via _color) at the build view. Returns false (ANIMATED) when the material's registers are not all
+// constant - a time / table-driven colour (pulsing, flickering): the value is this instant's phase, so the caller
+// floors it (an OFF phase must not drop the emitter from the table) and E2 reads the live colour instead.
+static bool R_RtEmissiveStageColor( const idMaterial *mat, const shaderStage_t *st, const float *entityParms, float rgb[3] ) {
+	rgb[0] = rgb[1] = rgb[2] = 1.0f;
+	const int numRegs = mat->GetNumRegisters();
+	if ( numRegs <= 0 ) {
+		return true;
+	}
+	const float *regs = mat->ConstantRegisters();
+	float *evalRegs = NULL;
+	if ( regs == NULL ) {
+		static float defaultParms[MAX_ENTITY_SHADER_PARMS] = { 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+		evalRegs = (float *)_alloca16( numRegs * (int)sizeof( float ) );
+		mat->EvaluateRegisters( evalRegs, entityParms != NULL ? entityParms : defaultParms, tr.viewDef, NULL );
+		regs = evalRegs;
+	}
+	for ( int k = 0; k < 3; k++ ) {
+		const int ri = st->color.registers[k];
+		if ( ri >= 0 && ri < numRegs ) {
+			rgb[k] = idMath::ClampFloat( 0.0f, 16.0f, regs[ri] );
+		}
+	}
+	return evalRegs == NULL;
+}
+
+// per-material census row for the build report
+struct rtEmissiveCensus_t { const idMaterial *mat; int tris; float flux; bool animated; };
+
+// Append every triangle of one emissive surface. modelMatrix NULL = the verts are already world space (an _areaN).
+static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial *mat, const shaderStage_t *stage,
+		const float *modelMatrix, const float *entityParms, unsigned int flags, float scale,
+		idList<rtEmissiveCensus_t> &census, int &overflow ) {
+	float tintRGB[3];
+	const bool constant = R_RtEmissiveStageColor( mat, stage, entityParms, tintRGB );
+	float tintLum = R_RtLuminance( tintRGB );
+	if ( !constant ) {
+		flags |= RT_EMIT_FLAG_ANIMATED;
+		if ( tintLum < 0.25f ) {											// an OFF / dim phase of a flicker: keep it a candidate
+			tintLum = 0.25f;
+			tintRGB[0] = tintRGB[1] = tintRGB[2] = 0.25f;
+		}
+	}
+	const idImage *img = stage->texture.image;
+	const float avgLin[3] = { R_RtSrgbToLinear( img->averageColor[0] ), R_RtSrgbToLinear( img->averageColor[1] ), R_RtSrgbToLinear( img->averageColor[2] ) };
+	const float lumPerArea = R_RtLuminance( avgLin ) * tintLum * scale;
+	if ( lumPerArea <= 0.0f ) {
+		return;																// a black glow stage (a switched-off fixture skin): no emitter
+	}
+	if ( mat->ShouldCreateBackSides() ) {
+		flags |= RT_EMIT_FLAG_TWOSIDED;
+	}
+	const unsigned int emit = ( (unsigned int)img->rhiHandle & 0xFFFFu ) | flags;
+	const unsigned int tint = R_RtPackRGBA8( tintRGB );
+	int ci = -1;
+	for ( int i = 0; i < census.Num(); i++ ) { if ( census[i].mat == mat ) { ci = i; break; } }
+	if ( ci < 0 ) { rtEmissiveCensus_t c; c.mat = mat; c.tris = 0; c.flux = 0.0f; c.animated = !constant; ci = census.Append( c ); }
+
+	for ( int n = 0; n + 2 < tri->numIndexes; n += 3 ) {
+		if ( s_rtEmissiveTris.Num() >= RT_EMISSIVE_MAX_TRIS ) {
+			overflow++;
+			continue;
+		}
+		const idDrawVert &a = tri->verts[ tri->indexes[n + 0] ];
+		const idDrawVert &b = tri->verts[ tri->indexes[n + 1] ];
+		const idDrawVert &c = tri->verts[ tri->indexes[n + 2] ];
+		idVec3 p0 = a.xyz, p1 = b.xyz, p2 = c.xyz;
+		if ( modelMatrix != NULL ) {
+			R_LocalPointToGlobal( modelMatrix, a.xyz, p0 );
+			R_LocalPointToGlobal( modelMatrix, b.xyz, p1 );
+			R_LocalPointToGlobal( modelMatrix, c.xyz, p2 );
+		}
+		const float area = 0.5f * ( ( p1 - p0 ).Cross( p2 - p0 ) ).Length();
+		if ( area < 1e-3f ) {
+			continue;														// degenerate
+		}
+		rtEmissiveTriGPU_t &e = s_rtEmissiveTris.Alloc();
+		e.p0[0] = p0.x; e.p0[1] = p0.y; e.p0[2] = p0.z;
+		e.p1[0] = p1.x; e.p1[1] = p1.y; e.p1[2] = p1.z;
+		e.p2[0] = p2.x; e.p2[1] = p2.y; e.p2[2] = p2.z;
+		e.flux  = area * lumPerArea;
+		e.emit  = emit;
+		e.scale = scale;
+		e.st0 = R_RtPackHalf2( a.st[0], a.st[1] );
+		e.st1 = R_RtPackHalf2( b.st[0], b.st[1] );
+		e.st2 = R_RtPackHalf2( c.st[0], c.st[1] );
+		e.tint = tint;
+		census[ci].tris++;
+		census[ci].flux += e.flux;
+	}
+}
+
+static void R_RtEmissiveFree( void ) {
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r != NULL ) {
+		if ( s_rtEmissiveBuf != 0 )   { r->DestroyBuffer( s_rtEmissiveBuf ); }
+		if ( s_rtEmissiveDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveDbgVB ); }
+		if ( s_rtEmissiveDbgIB != 0 ) { r->DestroyBuffer( s_rtEmissiveDbgIB ); }
+	}
+	s_rtEmissiveBuf = 0;	s_rtEmissiveAddr = 0;	s_rtEmissiveTotalFlux = 0.0f;
+	s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0;	s_rtEmissiveDbgIndexes = 0;
+	s_rtEmissiveTris.Clear();
+	s_rtEmissiveMap.Clear();
+}
+
+static int R_RtCmpEmissiveCensus( const void *pa, const void *pb ) {
+	const float a = ( (const rtEmissiveCensus_t *)pa )->flux, b = ( (const rtEmissiveCensus_t *)pb )->flux;
+	return ( a < b ) ? 1 : ( a > b ) ? -1 : 0;
+}
+
+// Gather + flux + CDF + device buffer for the current map; prints the census (E1a) once per build.
+static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
+	const int msStart = Sys_Milliseconds();
+	const float scale = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() );
+	idList<rtEmissiveCensus_t> census;
+	int overflow = 0, worldTris = 0, entityTris = 0, entities = 0, screens = 0;
+
+	// worldspawn: the _areaN models (verts already world space)
+	for ( int a = 0; a < world->NumAreas(); a++ ) {
+		const idRenderModel *model = renderModelManager->FindModel( va( "_area%i", a ) );
+		for ( int s = 0; model && s < model->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = model->Surface( s );
+			if ( surf->geometry == NULL || surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
+				continue;
+			}
+			if ( R_RtEmissiveIsScreen( surf->shader ) ) {
+				screens++;
+			}
+			const shaderStage_t *stage = R_RtEmissiveStage( surf->shader );
+			if ( stage == NULL ) {
+				continue;
+			}
+			const int before = s_rtEmissiveTris.Num();
+			R_RtEmissiveAddSurface( surf->geometry, surf->shader, stage, NULL, NULL, 0u, scale, census, overflow );
+			worldTris += s_rtEmissiveTris.Num() - before;
+		}
+	}
+	// static entities (func_statics, inline brush models, movers at their load pose): model space x the entity
+	// matrix, the SKIN-REMAPPED material (a fixture's on/off state is a skin), the entity's shaderParms (its _color)
+	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
+		const idRenderEntityLocal *def = world->entityDefs[i];
+		if ( def == NULL || def->parms.hModel == NULL ) {
+			continue;
+		}
+		const idRenderModel *model = def->parms.hModel;
+		if ( model->IsStaticWorldModel() || model->IsDynamicModel() != DM_STATIC ) {
+			continue;
+		}
+		float modelMatrix[16];
+		R_AxisToModelMatrix( def->parms.axis, def->parms.origin, modelMatrix );
+		bool any = false;
+		for ( int s = 0; s < model->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = model->Surface( s );
+			if ( surf->geometry == NULL || surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
+				continue;
+			}
+			const idMaterial *mat = R_RemapShaderBySkin( surf->shader, def->parms.customSkin, def->parms.customShader );
+			if ( R_RtEmissiveIsScreen( mat ) ) {
+				screens++;
+			}
+			const shaderStage_t *stage = R_RtEmissiveStage( mat );
+			if ( stage == NULL ) {
+				continue;
+			}
+			const int before = s_rtEmissiveTris.Num();
+			R_RtEmissiveAddSurface( surf->geometry, mat, stage, modelMatrix, def->parms.shaderParms, RT_EMIT_FLAG_ENTITY, scale, census, overflow );
+			entityTris += s_rtEmissiveTris.Num() - before;
+			any = any || ( s_rtEmissiveTris.Num() > before );
+		}
+		if ( any ) { entities++; }
+	}
+
+	const int n = s_rtEmissiveTris.Num();
+	if ( n == 0 ) {
+		common->Printf( "r_rtEmissiveTable: no emissive triangles on this map (%d screen surfaces excluded)\n", screens );
+		return;
+	}
+	// flux CDF (unnormalised running sum; E2 draws u * totalFlux and binary-searches) + the device buffer
+	const int triBytes = n * (int)sizeof( rtEmissiveTriGPU_t );
+	const int cdfBytes = n * (int)sizeof( float );
+	const int bytes    = RT_EMISSIVE_HEADER_BYTES + triBytes + cdfBytes;
+	byte *blob = (byte *)Mem_Alloc16( bytes );
+	float *cdf = (float *)( blob + RT_EMISSIVE_HEADER_BYTES + triBytes );
+	double run = 0.0;
+	for ( int i = 0; i < n; i++ ) {
+		run += s_rtEmissiveTris[i].flux;
+		cdf[i] = (float)run;
+	}
+	s_rtEmissiveTotalFlux = (float)run;
+	const float meanFlux = (float)( run / n );
+	unsigned int *hdr = (unsigned int *)blob;
+	hdr[0] = (unsigned int)n;
+	memcpy( &hdr[1], &s_rtEmissiveTotalFlux, sizeof( float ) );
+	hdr[2] = (unsigned int)( RT_EMISSIVE_HEADER_BYTES + triBytes );
+	memcpy( &hdr[3], &meanFlux, sizeof( float ) );
+	memcpy( blob + RT_EMISSIVE_HEADER_BYTES, s_rtEmissiveTris.Ptr(), triBytes );
+	s_rtEmissiveBuf  = r->CreateBuffer( rhi::BU_STORAGE, bytes, blob );
+	s_rtEmissiveAddr = ( s_rtEmissiveBuf != 0 ) ? r->GetBufferDeviceAddress( s_rtEmissiveBuf ) : 0;
+	Mem_Free16( blob );
+	if ( s_rtEmissiveBuf == 0 || s_rtEmissiveAddr == 0 ) {
+		common->Warning( "r_rtEmissiveTable: the table buffer (%d KB) could not be created", bytes >> 10 );
+		if ( s_rtEmissiveBuf != 0 ) { r->DestroyBuffer( s_rtEmissiveBuf ); s_rtEmissiveBuf = 0; }
+		s_rtEmissiveTris.Clear();
+		return;
+	}
+
+	// E1a census: totals + the strongest materials (what E2 would sample most)
+	int animatedMats = 0;
+	for ( int i = 0; i < census.Num(); i++ ) { if ( census[i].animated ) { animatedMats++; } }
+	qsort( census.Ptr(), census.Num(), sizeof( rtEmissiveCensus_t ), R_RtCmpEmissiveCensus );
+	common->Printf( "r_rtEmissiveTable: %d emissive triangles (%d world, %d from %d static entities), %d materials (%d register-driven), %d screen surfaces excluded, total flux %.1f (mean %.2f), %d KB, %d ms%s\n",
+		n, worldTris, entityTris, entities, census.Num(), animatedMats, screens, s_rtEmissiveTotalFlux, meanFlux, bytes >> 10,
+		Sys_Milliseconds() - msStart, overflow ? va( " - TABLE FULL: %d triangles dropped (raise RT_EMISSIVE_MAX_TRIS)", overflow ) : "" );
+	const int show = census.Num() < 12 ? census.Num() : 12;
+	for ( int i = 0; i < show; i++ ) {
+		common->Printf( "    %6.1f%%  %6d tris  %-48s%s\n", 100.0f * census[i].flux / s_rtEmissiveTotalFlux, census[i].tris,
+			census[i].mat->GetName(), census[i].animated ? "  (animated colour)" : "" );
+	}
+}
+
+// Keep the table in step with the live RT scene: build once per map (or when its cvars change), free when off.
+// Called from R_RtWorldUpdate while the persistent scene is live for `world`.
+static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
+	if ( !r_rtEmissiveTable.GetBool() ) {
+		if ( s_rtEmissiveMap.Length() > 0 || s_rtEmissiveBuf != 0 ) {
+			R_RtEmissiveFree();
+		}
+		r_rtEmissiveTable.ClearModified();
+		r_rtEmissiveScale.ClearModified();
+		return;
+	}
+	const bool stale = s_rtEmissiveMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified() || r_rtEmissiveScale.IsModified();
+	if ( !stale ) {
+		return;
+	}
+	r_rtEmissiveTable.ClearModified();
+	r_rtEmissiveScale.ClearModified();
+	R_RtEmissiveFree();
+	R_RtEmissiveBuild( world, r );
+	s_rtEmissiveMap = world->mapName;		// the latch: an empty map builds nothing but is not retried every frame
+}
+
+unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, float *meanFlux ) {
+	const int n = s_rtEmissiveTris.Num();
+	if ( numTris )   { *numTris = ( s_rtEmissiveBuf != 0 ) ? n : 0; }
+	if ( totalFlux ) { *totalFlux = s_rtEmissiveTotalFlux; }
+	if ( meanFlux )  { *meanFlux = ( n > 0 ) ? s_rtEmissiveTotalFlux / n : 0.0f; }
+	return ( s_rtEmissiveBuf != 0 ) ? s_rtEmissiveAddr : 0;
+}
+
+// The debug overlay's geometry: one idDrawVert per table vertex (xyz world, st, normal = (flux, scale, triangle
+// index), tangents[0] = (glow slot, flags, 0), color = the stage tint) + a plain index list. Built on first use.
+bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes ) {
+	const int n = s_rtEmissiveTris.Num();
+	rhi::RHI *r = rhi::GetRHI();
+	if ( n == 0 || s_rtEmissiveBuf == 0 || r == NULL ) {
+		return false;
+	}
+	if ( s_rtEmissiveDbgVB == 0 ) {
+		idDrawVert *verts = (idDrawVert *)Mem_Alloc16( n * 3 * (int)sizeof( idDrawVert ) );
+		glIndex_t  *idx   = (glIndex_t *)Mem_Alloc16( n * 3 * (int)sizeof( glIndex_t ) );
+		memset( verts, 0, n * 3 * (int)sizeof( idDrawVert ) );
+		for ( int i = 0; i < n; i++ ) {
+			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[i];
+			const float *p[3] = { e.p0, e.p1, e.p2 };
+			const unsigned int st[3] = { e.st0, e.st1, e.st2 };
+			for ( int k = 0; k < 3; k++ ) {
+				idDrawVert &v = verts[ i * 3 + k ];
+				v.xyz.Set( p[k][0], p[k][1], p[k][2] );
+				v.st[0] = R_RtF16toF32( st[k] & 0xFFFFu );
+				v.st[1] = R_RtF16toF32( st[k] >> 16 );
+				v.normal.Set( e.flux, e.scale, (float)i );
+				v.tangents[0].Set( (float)( e.emit & 0xFFFFu ), (float)( e.emit >> 16 ), 0.0f );
+				v.color[0] = (byte)( e.tint & 0xFFu );
+				v.color[1] = (byte)( ( e.tint >> 8 ) & 0xFFu );
+				v.color[2] = (byte)( ( e.tint >> 16 ) & 0xFFu );
+				v.color[3] = 255;
+				idx[ i * 3 + k ] = i * 3 + k;
+			}
+		}
+		s_rtEmissiveDbgVB = r->CreateBuffer( rhi::BU_VERTEX, n * 3 * (int)sizeof( idDrawVert ), verts );
+		s_rtEmissiveDbgIB = r->CreateBuffer( rhi::BU_INDEX, n * 3 * (int)sizeof( glIndex_t ), idx );
+		s_rtEmissiveDbgIndexes = n * 3;
+		Mem_Free16( verts );
+		Mem_Free16( idx );
+		if ( s_rtEmissiveDbgVB == 0 || s_rtEmissiveDbgIB == 0 ) {
+			if ( s_rtEmissiveDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveDbgVB ); }
+			if ( s_rtEmissiveDbgIB != 0 ) { r->DestroyBuffer( s_rtEmissiveDbgIB ); }
+			s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0;	s_rtEmissiveDbgIndexes = 0;
+			return false;
+		}
+	}
+	*vb = s_rtEmissiveDbgVB;
+	*ib = s_rtEmissiveDbgIB;
+	*numIndexes = s_rtEmissiveDbgIndexes;
+	return true;
+}
+
+/*
 ====================
 R_RtResetSceneState
 
@@ -2716,6 +3150,9 @@ void R_RtResetSceneState( void ) {
 	s_rtStagedAnimCasters = false;
 	s_rtWorldMap = "";
 	s_rtWorldFailedMap = "";
+	// E1 emissive table: handles are stale too; the CPU copy goes with them so the next RT frame rebuilds
+	s_rtEmissiveBuf = 0; s_rtEmissiveAddr = 0; s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0; s_rtEmissiveDbgIndexes = 0;
+	s_rtEmissiveTris.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
 }
 
 // DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit
@@ -2754,6 +3191,7 @@ static void R_RtWorldUpdate( void ) {
 			s_rtAreaBlas.Clear();
 			s_rtModelBlas.Clear(); s_rtModelPerfBounds.Clear();
 			R_RtFreeWorldGeo();			// RR5: drop the dedicated world geometry buffers
+			R_RtEmissiveFree();			// E1: the emissive table lives and dies with the scene
 		}
 		return;
 	}
@@ -2769,6 +3207,7 @@ static void R_RtWorldUpdate( void ) {
 		// poses + animated-monster casters (GetStaticTlasAddress is the persistent-scene anchor;
 		// GetTlasAddress would return the per-frame slot address once the lane is running)
 		R_RtRefreshInstances( world, r );
+		R_RtEmissiveUpdate( world, r );	// E1: emissive triangle table (built once per map / on cvar change, freed when off)
 		return;
 	}
 	// this map's build already failed (or had nothing to trace) and nothing changed: don't retry it
@@ -2826,6 +3265,7 @@ static void R_RtWorldUpdate( void ) {
 	// the static anchor TLAS above stays solid-only (it is what the CPU-reference validators trace)
 	int numPerfBlas = 0, perfTris = 0;
 	R_RtBuildPerforatedBlas( r, world, numPerfBlas, perfTris );
+	R_RtEmissiveUpdate( world, r );	// E1: build the emissive table beside the fresh scene
 	common->Printf( "r_rtWorld: %d area BLAS (%d tris, per-surface) + %d model BLAS (%d tris, %d instances, attributed) + %d perforated BLAS (%d tris, alpha-tested) + %d casting perforated surfaces alpha-tested in place, %d ms build%s\n",
 		numAreaBlas, worldTris, numModelBlas, entTris, numMInsts, numPerfBlas, perfTris, s_rtSolidPerfSurfs, msBuild,
 		blasFail ? va( " (%d BLAS failed)", blasFail ) : "" );

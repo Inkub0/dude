@@ -1,0 +1,225 @@
+# E1 - emissive triangle table (scope authored 2026-10-17; E1a-E1d IMPLEMENTED 2026-10-19, user validation pending)
+
+**Status 2026-10-19:** branch `feat/rtx-emissive-table` (off master 17907505). E1a (census), E1b (the table), E1c (flux
++ CDF) and E1d (debug overlay) are built in one pass behind `r_rtEmissiveTable` (default 0 = nothing built; 1 = the
+table exists but NOTHING consumes it, so the picture is unchanged either way). E1e (movers + the animated-intensity
+decision) is deferred until the census and the overlay are validated. What was built, where, and how to test it: the
+"Implementation" section at the end of this file.
+
+
+The data foundation of the experimental emissive-lighting mode (docs/rtx-experimental-lighting.md): a GPU table of the
+scene's emissive TRIANGLES, each with the flux and geometry needed to sample it as an area light. E1 builds the table
+only; E2 consumes it (as a second candidate stream, fed through the light grid). Nothing it builds changes a pixel until
+E2, so E1 is bit-identical behind its cvar.
+
+Prerequisites already shipped: the irradiance cache (multi-bounce) and the **light grid** (E3's many-lights handler, so
+thousands of emitters are tractable). E1 + E2 also pay off on the NORMAL tier: fixtures and screens that today only
+self-illuminate on a bounce would start LIGHTING their surroundings.
+
+## The finding that shapes E1 (recon 2026-10-17)
+
+**The strongest emitters are NOT in the current RT scene.** An additive-only material (a neon tube, a pure light
+texture) is classified `MC_TRANSLUCENT` -> `MF_NOSHADOWS` (Material.cpp:2796-2821), so `SurfaceCastsShadow()` is false
+and `R_RtSurfCasts` (tr_main.cpp:1185-1190) rejects it: it is in no BLAS and no geo-table row. Only "glow-on-opaque"
+surfaces (an `MC_OPAQUE`/`MC_PERFORATED` material that ALSO has an additive stage - console panels, lit readouts) are
+captured today, and their glow is sampled per-pixel at a ray hit (rtgi_bounce.glsl:149-224), never as a light.
+
+Consequence: **E1 needs its OWN emissive-surface gather**, independent of `R_RtSurfCasts` - iterate every surface whose
+material has an additive stage, regardless of coverage / shadow flags. This is fine because an emitter does not need to
+be a TLAS caster: E2 samples a point on the triangle and traces a visibility ray toward it against the EXISTING TLAS
+(the opaque world provides the occluders). The emitter table is a light-sampling structure, parallel to the scene-light
+buffer, not part of the caster set.
+
+## Hybrid lighting is the intended mode (user, 2026-10-17)
+
+The pure-emissive mode's weakness is Doom 3's fixture-LESS ambience lights (the red/blue/teal mood/fill washes, cheated
+bounce, Hell's coloured light) that have no emissive geometry - drop them and those areas go black. The decided
+direction is a **HYBRID**: emissive triangles light the glowing surfaces (fixtures, screens, lava) AND the ambience
+lights that carry no emissive proxy are KEPT. It needs no new lighting path - the light grid (done) already pools
+candidates, so hybrid is simply "feed the kept analytic lights + the emissive triangles into the same grid," sampled
+together by ReSTIR. The only real problem is DOUBLE-COUNTING: a fixture with both a placed light and an emissive tube
+would be lit twice, so a light WITH an emissive proxy is dropped (its surface is the light) and a light WITHOUT one (the
+ambience) is kept. Classification signals, best -> fallback: (1) Doom 3's ambient-light material flag (fill lights are
+often authored ambient); (2) a build-time geometric test - a light with an emissive surface inside its volume is
+"fixtured"; (3) a per-light override (the D2 table mechanism); (4) colour saturation (ambience is usually saturated) as a
+fallback only. **This refines D1 and is decided at E5; it does NOT change E1 or E2** - the emissive table + its consume
+are prerequisites of hybrid and pure-emissive alike. (`r_xlKeepGameplayLights` becomes the hybrid-vs-pure A/B.)
+
+## What E1 delivers
+
+A device buffer `emissive triangles[]` + a flux CDF, built at `R_RtWorldUpdate` (tr_main.cpp:2654-2743), its device
+address threaded into `RenderParams` exactly like the scene-light buffer (`s_rtReflLightBuf`, RhiWorld.cpp:5897-5901).
+Per entry, enough to importance-sample the emitter and shade a sampled point:
+- the triangle's 3 WORLD-space positions (sampling a point + its area + its normal),
+- the emissive texture's bindless slot (`R_RtMaterialEmitIndex`, tr_main.cpp:1912) + a representative `st` (per-vertex or
+  centroid) so E2 can read the emitted colour at the sampled point,
+- `flux` (for the CDF / importance) and the material intensity scale (D2).
+
+Plus a **flux CDF** (prefix sum over the table) so E2 can draw a triangle proportional to flux with a binary search;
+Morton-ordering the triangles first (merian `light-cdf.slang`) gives the CDF spatial locality for the light grid later -
+an optional refinement, not needed for a first correct E1.
+
+## Flux = area x mean glow luminance x material scale
+
+- **area**: world-space triangle area from the 3 transformed positions.
+- **mean glow luminance**: `idImage::averageColor[3]` of the additive stage's image (Image.h:302) - the alpha-weighted
+  mean RGB, already cached per image. **Caveats (recon D):** it is in GAMMA space (must be linearized for a sane flux),
+  it is alpha-weighted (an approximation of area-integrated radiance, good enough to rank emitters), and it DEFAULTS TO
+  WHITE for images that never went through the averaging path (dynamic / GUI / cinematic). Guard the white default: an
+  emissive whose stage image is a dynamic/GUI image is a SCREEN -> it already has the legacy emissive fill-light
+  (tr_light.cpp:1316-1460), so E1 skips it (consistent with D1 "GUI screens stay fill lights").
+- **material scale**: the D2 per-material intensity (emissive/emissive_materials.cfg + emissive_overrides.cfg). E1
+  bootstraps this to 1.0 (or a per-category default) and reads the table when D2 lands; the in-game editor is E6.
+
+## The gather (CPU, in / beside the BLAS builders)
+
+The per-triangle data - `tri->verts` (idDrawVert: xyz, st, normal), `tri->indexes`, and the surface's world transform -
+is already in hand in the gather loops the BLAS builders use. E1 adds an emissive pass over the same surface sets, minus
+the `R_RtSurfCasts` gate, plus the emissive-stage test:
+- **static worldspawn (`_areaN`)**: R_RtGatherWorld / R_RtBuildWorldAreaBlas (tr_main.cpp:1238-1289, 2340-2355) -
+  `tri->verts` are already WORLD space (identity). The cleanest, largest emitter source.
+- **static entities (`DM_STATIC`)**: R_RtGatherEntities / R_RtBuildEntityModelBlas (tr_main.cpp:1297-1398, 2458-2473) -
+  model-space verts x the entity matrix (`R_AxisToModelMatrix`, tr_main.cpp:1395).
+- **CPU-skinned monsters**: R_RtGatherMonstersWorld (tr_main.cpp:1523-1581) - posed verts x `vEnt->modelMatrix`. Rare for
+  emissives (and additive stages are translucent), low priority.
+- **GPU-skinned monsters (blocker B)**: verts live only in `gpuSkinVB` (GPU), not CPU-readable - SKIP in E1 (monster
+  glow as an area light is negligible; revisit with GPU extraction only if ever needed).
+
+## Rebuild lifecycle (recon E)
+
+- **Static** (world + static entities): built ONCE per map, cached by map name, at the same point the static BLASes are
+  (tr_main.cpp:2678-2743). The bulk of emitters, and they never move.
+- **Movers** (func_movers with emissive skins): their transform refreshes per frame in `R_RtRefreshInstances`
+  (tr_main.cpp:2682) - re-bake only their triangles' world positions each frame (small count), like the TLAS instances.
+- **Animated intensity caveat:** a build-time flux SNAPSHOT freezes glow that pulses / flickers (shader-register-driven
+  stage colour), which the per-pixel path samples live today. Decide at E1e: (a) accept frozen flux for the table's
+  IMPORTANCE (the ranking barely changes), and let E2 read the LIVE emitted colour at the sampled `st` for the actual
+  radiance (so a pulsing light still pulses - only its sampling PROBABILITY is stale); (b) refresh the per-material
+  scale each frame from the shader register. (a) is simpler and almost certainly enough.
+
+## Open decisions (for when we build)
+
+- **Per-triangle granularity + size.** One entry per triangle is finest and matches merian, but a finely-tessellated
+  emissive surface could mint many entries. Entry ~48-64 B (3 world verts + normal + st + slot + flux + scale); 10k
+  emitters = ~0.6 MB, fine; a pathological level could be larger - mitigations if needed: merge coplanar/same-material
+  triangles into quads, or cap by flux. Decide after measuring a real level's emissive-triangle count (E1a).
+- **Store world verts vs reference the geo VB.** Direct world verts (simple, E2-friendly, re-baked for movers) vs
+  storing (geo row, primitiveIndex) and fetching verts on the GPU (8 B, but indirection + the mover/skin position
+  problem). Start with direct world verts.
+- **Where E2 plugs in.** The emissive triangles become candidates in the light grid (E3, done): the grid's fill would
+  stream the emissive table alongside the analytic lights. That is where blocker-#A's "thousands of emitters" is handled
+  and where L4 (feedback + bins) earns its cost. E1 just has to produce a clean, CDF-ordered table.
+
+## Stages
+
+- **E1a feasibility + census.** The new emissive-surface gather (ignore `R_RtSurfCasts`, test for an additive stage with
+  a resident, non-dynamic image). Count emissive triangles per level (a `common->Printf`), confirm the pure-emissive
+  surfaces (neon) are now seen and the GUI screens are excluded. Confirm `averageColor` linearization + white-default
+  guard on a few known emitters. No buffer yet. Decides the size question.
+- **E1b the table (CPU + GPU).** Emit per-triangle entries (world verts, normal, st, emit slot) into a device buffer
+  built at `R_RtWorldUpdate`; address into `RenderParams`. Static once per map. `r_rtEmissiveTable` gates it; off =
+  nothing built, bit-identical.
+- **E1c flux + CDF.** Per-triangle flux (area x linearized mean glow luminance x scale); prefix-sum CDF. Optional
+  Morton pre-sort.
+- **E1d debug view.** Overlay the emissive triangles (e.g. tint by flux, or draw the table's triangles) so the gather +
+  flux are visibly correct - the L1-style validation that catches wrong surfaces / wrong flux before E2 consumes it.
+- **E1e movers + animated intensity.** Per-frame transform refresh for emissive movers; the animated-intensity decision
+  above.
+
+Then E2 (a separate plan) consumes the table.
+
+## cvars (RT tier, VK + ray query; default OFF = no table built, bit-identical)
+
+| cvar | default | meaning |
+|---|---|---|
+| `r_rtEmissiveTable` | 0 | build the emissive-triangle table at level load (does nothing until E2 consumes it) |
+| `r_rtEmissiveTableDebug` | 0 | overlay: 1 emitter triangles, 2 per-triangle flux (tonemapped), 3 emitter density |
+| `r_rtEmissiveScale` | 1 | global multiplier on emissive flux (until the D2 per-material table lands) |
+
+## Blockers / notes (recon 2026-10-17)
+
+- **A (shapes the design):** pure-emissive surfaces are excluded from `R_RtSurfCasts` -> E1 needs its own gather. Done.
+- **B:** GPU-skinned emissive triangles have no CPU positions -> skip (negligible).
+- **C:** no per-triangle structure exists anywhere (geo table is per-surface) -> E1 is net-new, built in the BLAS-builder
+  loops where verts/indexes/st/normal + transform are in hand.
+- **D:** `averageColor` is gamma-space, alpha-weighted, white-default -> linearize, guard, skip dynamic/GUI images.
+- **E:** static built once/map, movers refresh per frame; animated glow intensity frozen in the snapshot -> E2 reads live
+  colour at the sampled st (option a).
+- **F:** `RtLight` pad0/pad1 are taken (lightDef index+1, serial); bits 6-15 free. Use a SEPARATE emitter buffer (the
+  `s_rtReflLightBuf` pattern), keyed by lightDef index+serial if a link is ever needed.
+
+## Anchors (file:line)
+
+- Emissive classification: `R_RtMaterialEmitIndex` tr_main.cpp:1912-1925; packed to geo-table flags bits 16-31
+  (VulkanBackend.cpp:6541); consumed rtgi_bounce.glsl:149-224. GUI-screen fill lights: tr_light.cpp:1316-1460.
+- RT world update / gather: `R_RtWorldUpdate` tr_main.cpp:2654-2743; `R_RtSurfCasts` tr_main.cpp:1185-1190; builders
+  tr_main.cpp:2317-2390 (world), 2404-2521 (static entities), 1523-1581 (CPU-skinned monsters); `R_RtRefreshInstances`
+  tr_main.cpp:2682. Coverage/shadow classification Material.cpp:2796-2821.
+- idDrawVert layout on GPU: rtgi_bounce.glsl:11-15, 109-131 (stride 60 B = 15 uints; xyz@0, st@3, normal@5).
+- Texture average: `idImage::averageColor` Image.h:302, ctor default white Image.h:363; `R_ImageAverageColorRGBA`
+  Image_load.cpp:583-604.
+- Buffer pattern: scene-light buffer `s_rtReflLightBuf` RhiWorld.cpp:5897-5901, address -> RenderParams RhiWorld.cpp:
+  7785-7788; `BU_STORAGE` / `BU_STORAGE_DEVICE` RHI.h:31-48.
+- RtLight struct + free bits: rt_light_eval.glsl:18 + 21-26 (bits 6-15 free; pad0/pad1 taken).
+
+## References
+
+- merian `scene/nee.slang` LightGrid + `light-cdf.slang` (the emissive-triangle CDF + the grid that consumes it);
+  Quake II RTX polygon lights (the precedent this mode follows). docs/rtx-experimental-lighting.md (the E umbrella, D1-D4).
+
+## Implementation (2026-10-19, branch feat/rtx-emissive-table)
+
+**CPU (tr_main.cpp, the "RT emissive triangle table" block before `R_RtResetSceneState`).**
+- `R_RtEmissiveStage( mat )`: the material's first additive stage (blend add: src ONE / dst ONE - the same test as
+  `R_RtMaterialEmitIndex`) with a resident, non-generated, non-defaulted image; NULL for a GUI material or when that
+  stage is a cinematic / render-to-texture (a SCREEN - fill-light territory). Independent of `R_RtSurfCasts`, so the
+  pure light-source (additive-only, MC_TRANSLUCENT, noShadows) surfaces ARE gathered.
+- `R_RtEmissiveStageColor`: the stage's rgb registers evaluated with the owning entity's shaderParms (a fixture tinted
+  via `_color`) at the build view. Non-constant registers (time / table driven = pulsing, flickering) -> the colour is
+  this instant's phase, floored at 0.25 luminance so an OFF phase does not drop the emitter, and the entry is flagged
+  `RT_EMIT_FLAG_ANIMATED` (E2 reads the live colour at the sampled st; the snapshot only RANKS the emitter = option (a)).
+- `R_RtEmissiveBuild`: worldspawn `_areaN` surfaces (world verts) + every DM_STATIC entity model (model verts x
+  `R_AxisToModelMatrix`, material SKIN-REMAPPED via `R_RemapShaderBySkin` - a fixture's on/off state is a skin). Per
+  triangle: 3 world verts, flux = area x luminance(linearised `averageColor`) x luminance(stage colour) x
+  `r_rtEmissiveScale`, glow bindless slot (`idImage::rhiHandle`) + flags, per-vertex st as half2, stage tint RGBA8.
+  Degenerate (< 1e-3 area) and black (zero flux) triangles are skipped. Two-sided materials contribute both copies
+  (both faces emit; flagged TWOSIDED). Ceiling `RT_EMISSIVE_MAX_TRIS` = 262144 (16 MB); an overflow is reported.
+- Buffer: one `BU_STORAGE` (host-visible, uploaded once): header 16 B (uint count, float totalFlux, uint cdfOffset,
+  float meanFlux) + count x 64 B entries + count floats of unnormalised running-sum CDF. Address via
+  `R_RtEmissiveTableAddress( &n, &total, &mean )` (0 = none).
+- Lifecycle `R_RtEmissiveUpdate` (called from `R_RtWorldUpdate` on the live-scene path and after a fresh build): build
+  once per map, rebuild on `r_rtEmissiveTable` / `r_rtEmissiveScale` change, freed with the scene teardown and when the
+  cvar goes off; `R_RtResetSceneState` drops the handles after a backend teardown. The map-name latch is set even when a
+  map has no emitters (no per-frame retry).
+- Census (printed once per build): triangle totals (world / entity / entities), material count (register-driven count),
+  excluded screen surfaces, total + mean flux, size, ms, and the 12 strongest materials by flux share.
+
+**GPU.** `rt_emissive.glsl` = the shared layout (RtEmissiveTri, header, CDF) + the E2 helpers written ahead so the
+layout is locked: `rtEmissiveOpen` (header), `rtEmissiveFetch`, `rtEmissiveSample( u ) -> index + pdf` (CDF binary
+search), `rtEmissiveUniformPoint` (Osada), `rtEmissiveST`. `rt_emissive_debug.vert/.frag` = the overlay.
+
+**Debug overlay (E1d).** `RB_RHI_RtEmissiveDebugOverlay` (RhiWorld.cpp, called after the light-grid overlay in
+RhiBackend.cpp) draws the table's triangles as real world-space geometry (idDrawVert per table vertex, built lazily
+from the CPU copy by `R_RtEmissiveDebugGeometry`) through the view's world->clip matrix, depth-tested BY HAND in the
+fragment stage against the sealed scene depth (there is no depth attachment at overlay time; opaque fixtures sit at
+exactly the scene depth and pass, additive tubes never wrote depth and pass, walls in front hide). Modes
+(`r_rtEmissiveTableDebug`): 1 a stable tint per glow texture (striped where the stage colour is animated), 2 flux vs
+the table's mean on a log ramp (blue 1/16, green 1x, red 4x, white 16x+), 3 the EMITTED colour = glow texture at st x
+stage tint x scale (what an E2 sample returns; too-bright / wrong-hue emitters here are calibration findings).
+
+**ImGui.** Debugging tab, new group "Experimental Lighting" (the user-named group of E5, started here): the table
+toggle, the scale slider, the view combo.
+
+**Test procedure (user; the renderer cannot be launched from the session).** Vulkan, any RT tier (the scene must be
+live: `r_rtAllLights`, `r_rtgi`, `dude_rtx 2`...). `r_rtEmissiveTable 1`, then:
+1. Console: the `r_rtEmissiveTable:` census lines on load. Report the totals and the top materials for 2-3 maps
+   (Mars City, Alpha Labs, Hell) - this decides the granularity / size question (E1a).
+2. `r_rtEmissiveTableDebug 1`: every neon tube, light tile, LED panel, lava surface should be painted; no plain wall,
+   no GUI monitor / video screen. A pure light fixture that is NOT painted = a gather gap (note its material via
+   r_showSurfaceInfo). Striped surfaces = pulsing / flickering stage colours.
+3. `r_rtEmissiveTableDebug 2`: the big ceiling tiles / lava pools should be red-white, LEDs blue. Anything white that is
+   small and dim in the game = a flux error (probably the averageColor white default slipping through).
+4. `r_rtEmissiveTableDebug 3`: the emitted colour - plausibility of hue and the relative brightness across fixtures.
+5. `r_rtEmissiveTable 0` and back on: no visible change to the lit picture with the overlay off (bit-identical claim);
+   `r_vkGpuTime 2`: `emissive.debug` only appears with the overlay on.
+Then E1e (mover refresh) and E2.

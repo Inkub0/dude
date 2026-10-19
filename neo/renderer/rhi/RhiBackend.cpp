@@ -3720,6 +3720,8 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		RB_RHI_RtgiCacheDebugOverlay( r, viewDef );
 		// r_rtLightGridDebug: overlay the RT light grid's cascades / candidate counts / dominant light (docs/rtx-light-grid.md)
 		RB_RHI_LightGridDebugOverlay( r, viewDef );
+		// r_rtEmissiveTableDebug: draw the RT emissive triangle table over the view (docs/rtx-emissive-triangles.md E1d)
+		RB_RHI_RtEmissiveDebugOverlay( r, viewDef );
 		// DUDE weapon-reload depth-of-field (r_dof): after the full scene incl. the
 		// weapon, on both backends and under HDR. Zero cost unless a reload is easing
 		// r_weaponReloadFocus above 0 (idPlayerView writes it).

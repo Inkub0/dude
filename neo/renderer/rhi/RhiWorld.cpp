@@ -9713,6 +9713,77 @@ void RB_RHI_LightGridDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_ForgetTexBinds();
 }
 
+// r_rtEmissiveTableDebug (docs/rtx-emissive-triangles.md E1d): draw the emissive table's triangles over the finished
+// view as real world-space geometry (tr_main.cpp R_RtEmissiveDebugGeometry, built lazily from the table's CPU copy),
+// depth-tested in the fragment stage against the sealed scene depth. Validates the gather (which surfaces are
+// emitters, mode 1), the flux (mode 2) and the colour E2 would light with (mode 3) before anything consumes the table.
+void RB_RHI_RtEmissiveDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( r_rtEmissiveTableDebug.GetInteger() <= 0 || rhi::GetActiveBackendType() != rhi::BT_VULKAN
+			|| globalImages->currentDepthImage->uploadWidth <= 0 ) {
+		return;
+	}
+	int numTris = 0; float totalFlux = 0.0f, meanFlux = 0.0f;
+	if ( R_RtEmissiveTableAddress( &numTris, &totalFlux, &meanFlux ) == 0 || numTris <= 0 ) {
+		return;
+	}
+	rhi::BufferHandle vb = 0, ib = 0;
+	int numIndexes = 0;
+	if ( !R_RtEmissiveDebugGeometry( &vb, &ib, &numIndexes ) || numIndexes <= 0 ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "rt_emissive_debug" );
+	if ( !prog ) {
+		return;
+	}
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	myGlMultMatrix( viewDef->worldSpace.modelViewMatrix, viewDef->projectionMatrix, parms.mvpMatrix );	// world -> clip
+	parms.localParam0[0] = (float)r_rtEmissiveTableDebug.GetInteger();
+	parms.localParam0[1] = ( meanFlux > 0.0f ) ? 1.0f / meanFlux : 1.0f;
+	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
+	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
+	parms.screenCorrection[0] = 1.0f / w;
+	parms.screenCorrection[1] = 1.0f / h;
+	rhi::FillDepthParms( parms, viewDef->projectionMatrix );
+
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
+	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	rhi::BufferHandle ub;
+	const int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK;		// the fragment stage tests against the sealed depth itself
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = CT_TWO_SIDED;
+	r->BindPipeline( pd );
+
+	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.vertexBuffer = vb;
+	da.vertexOffset = 0;
+	da.indexBuffer = ib;
+	da.firstIndex = 0;
+	da.indexCount = numIndexes;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	RB_RHI_VkTextures( da );
+	r->GpuScopeBegin( "emissive.debug" );
+	r->Draw( da );
+	r->GpuScopeEnd();
+	backEnd.pc.c_drawElements++;
+	RB_RHI_ForgetTexBinds();
+}
+
 /*
 ===================
 RB_RHI_RtgiDebugOverlay

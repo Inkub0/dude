@@ -4875,6 +4875,54 @@ static void DrawDbgGroup_RTGI()
 	}
 }
 
+static void DrawDbgGroup_ExperimentalLighting()
+{
+	// Experimental lighting (docs/rtx-experimental-lighting.md): emissive surfaces light the scene. E1 = the emissive
+	// triangle table (docs/rtx-emissive-triangles.md) - built, inspectable, consumed by nothing yet (E2).
+	const bool rtCapable = R_SupportsRayTracing();
+	if ( BeginSettingsGroup( "Experimental Lighting" ) ) {
+
+	if ( !rtCapable ) {
+		ImGui::TextDisabled( "Requires the Vulkan backend + ray-query (RT) hardware." );
+	}
+	ImGui::TextDisabled( "Emissive surfaces as real area lights. Stage E1: the emissive triangle table (nothing is lit by it yet)." );
+	ImGui::Spacing();
+	ImGui::BeginDisabled( !rtCapable );
+
+	CvarCheckbox( "Emissive Triangle Table", r_rtEmissiveTable, "Gather every self-illuminated triangle of the map (additive "
+		"glow stages: neon tubes, light tiles, LED panels, lava - world and static props, including the pure light-source "
+		"surfaces that cast no shadow and are not in the ray-tracing scene) into a GPU table with its position, glow "
+		"texture and flux, plus a flux CDF for area-light sampling. Built once per level; the console prints a census "
+		"(triangle counts, the strongest materials). Nothing consumes it yet, so the picture is unchanged - use the "
+		"view below to inspect it. GUI / video screens are excluded (they keep the Emissive Surfaces fill lights). "
+		"(r_rtEmissiveTable)" );
+
+	ImGui::BeginDisabled( !r_rtEmissiveTable.GetBool() );
+	CvarSliderF( "Emissive Scale", r_rtEmissiveScale, 0.0f, 16.0f, "%.2f", "Global multiplier on every emitter's flux and "
+		"emitted colour - the stand-in for the per-material intensity table until it lands. A change rebuilds the table. "
+		"(r_rtEmissiveScale)" );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtEmissiveScale" ) ) { r_rtEmissiveScale.Reset(); }
+	{
+		int dbg = idMath::ClampInt( 0, 3, r_rtEmissiveTableDebug.GetInteger() );
+		ImGui::SetNextItemWidth( 240.0f );
+		if ( ImGui::Combo( "Table View##rtEmissiveTableDebug", &dbg, "Off\0Emitters by texture\0Flux (vs mean)\0Emitted colour\0" ) ) {
+			r_rtEmissiveTableDebug.SetInteger( dbg );
+		}
+		AddTooltip( "Draw the table's triangles over the view, depth-tested against the scene. 'Emitters by texture' tints "
+			"each glow texture its own colour (striped = a pulsing / flickering stage colour) - every neon tube, light tile "
+			"and LED panel should be painted, and no plain wall or screen; 'Flux' shows each triangle's power relative to "
+			"the table's mean (blue faint, green average, red 4x, white 16x+) - the big ceiling tiles should dominate; "
+			"'Emitted colour' is the glow texture x stage colour x scale, exactly what a sample of this emitter would light "
+			"the scene with - too-bright or wrong-hued emitters here are calibration findings. (r_rtEmissiveTableDebug)" );
+	}
+	ImGui::EndDisabled();	// r_rtEmissiveTable
+
+	ImGui::EndDisabled();	// rtCapable
+	EndSettingsGroup();
+	}
+}
+
 static void DrawDbgGroup_ReStirDI()
 {
 	// Live tuning + debug view for ReSTIR direct lighting (docs/rtx-restir-di.md, H7 'Path Tracing'). A
@@ -5989,6 +6037,7 @@ static void DrawShadowDebugMenu()
 	DrawDbgGroup_SSAO();
 	DrawDbgGroup_RTGI();
 	DrawDbgGroup_ReStirDI();
+	DrawDbgGroup_ExperimentalLighting();
 	DrawDbgGroup_OcclusionMaps();
 	DrawDbgGroup_Tessellation();
 	DrawDbgGroup_PBR();

@@ -14,6 +14,12 @@ NRD input), behind `r_rtgiCacheTail` (default 1, DI-apply only); `r_rtgiCacheTai
 section of docs/rtx-irradiance-cache.md), then C5 preset wiring, then G1. The G0 register-headroom instrument
 (`r_vkPipelineStats <shader>`) shipped with C0. G and E are still PLANNED only.
 
+**Status 2026-10-19:** C (incl. C6 tail) and the light grid are MERGED; G was built and shelved (no visual benefit).
+**E1 (the emissive triangle table) is IMPLEMENTED** on branch `feat/rtx-emissive-table`: E1a census + E1b table + E1c
+flux/CDF + E1d debug overlay behind `r_rtEmissiveTable` (default off; on = still bit-identical, nothing consumes it).
+Next = the user's census / overlay validation (test procedure at the end of docs/rtx-emissive-triangles.md), then E1e
+(movers), then E2 (the table as a second candidate stream through the light grid).
+
 | # | Plan | What it delivers | Doc |
 |---|---|---|---|
 | C | Irradiance cache | Multi-bounce GI: the RTGI bounce hit reads a hashed world-space cache of indirect irradiance; smoother bounce for NRD; prerequisite of G and E | docs/rtx-irradiance-cache.md |

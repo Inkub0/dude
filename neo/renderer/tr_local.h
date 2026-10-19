@@ -1085,6 +1085,9 @@ extern idCVar r_rtLightGridRes;				// RT light grid: cells per cascade axis (rec
 extern idCVar r_rtLightGridCascades;		// RT light grid: camera-centred cascades (reconfiguring)
 extern idCVar r_rtLightGridCellBase;		// RT light grid: cascade-0 cell size in units (per-frame, no realloc)
 extern idCVar r_rtLightGridDebug;			// RT light grid debug overlay: 1 cascade, 2 candidate count, 3 dominant light, 4 importance
+extern idCVar r_rtEmissiveTable;			// RT emissive triangle table (docs/rtx-emissive-triangles.md E1): every emissive triangle + flux CDF in a GPU table
+extern idCVar r_rtEmissiveTableDebug;		// RT emissive table debug overlay: 1 per-texture tint, 2 flux, 3 emitted colour
+extern idCVar r_rtEmissiveScale;			// RT emissive table: global flux / emitted-colour multiplier (rebuilds the table)
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
 extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compositing (dissolves the static firefly grid)
@@ -1116,6 +1119,11 @@ extern idCVar r_rtReflBump;					// RR10: how much the RT reflection follows the 
 extern idCVar r_rtReflGlassScale;			// RR5c: taste knob on the RT glass (goggles/visor/cockpit) reflection, on top of the replaced cube's energy normalization
 extern idCVar r_rtMovingLights;				// RT shadows for moving point lights: skip the un-cacheable cube re-render, trace instead
 int  R_RtGatherPerforatedBoxes( const idBounds &b, idBounds *out, int maxOut );	// tr_main.cpp: the perforated RT casters inside a box; returns the total found
+// RT emissive triangle table (tr_main.cpp, docs/rtx-emissive-triangles.md E1): device address of the table built for
+// the current map (0 = none / off), with its triangle count and total flux; and the lazily built debug geometry
+// (one idDrawVert per table vertex + an index list) for r_rtEmissiveTableDebug.
+unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, float *meanFlux );
+bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );
 extern idCVar r_rtPerforatedShadows;		// alpha-tested grate/fence casters in the RT shadow rays
 extern idCVar r_rtAllLights;				// RT shadows for EVERY shadow-casting light (mode 4 inline ray), no shadow maps at all
 extern idCVar r_rtShadowBlur;				// screen-space blur on top of the hard RT shadows (sun / moving lights), docs/rtx-shadow-blur.md
