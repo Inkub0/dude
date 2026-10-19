@@ -2254,8 +2254,29 @@ static CVarOption postProcessOptions[] = {
 
 		ImGui::EndDisabled();
 	} ),
-	CVarOption( "r_postFilmGrain", "Film Grain", OT_FLOAT, 0.0f, 0.25f ),
-	CVarOption( "r_postFilmGrainSize", "Film Grain Size", OT_FLOAT, 1.0f, 4.0f ),
+	// Film Grain: its own clearly-labelled block. It used to trail the Eye-Adaptation sliders
+	// (which live inside the HDR tonemap group just above) with no heading, so it read as part of
+	// Eye Adaptation. Now a switch + intensity + size, bound to r_postFilmGrain / r_postFilmGrainSize.
+	CVarOption( "r_postFilmGrain", []( idCVar& cvar ) {
+		ImGui::SeparatorText( "Film Grain" );
+		static float lastOn = 0.05f;					// remember the on-intensity so the switch can restore it
+		if ( cvar.GetFloat() > 0.0f ) { lastOn = cvar.GetFloat(); }
+		bool on = cvar.GetFloat() > 0.0f;
+		if ( ImGui::Checkbox( "Enable Film Grain##on", &on ) ) {
+			cvar.SetFloat( on ? ( lastOn > 0.0f ? lastOn : 0.05f ) : 0.0f );
+		}
+		AddCVarOptionTooltips( cvar, "Animated filmic grain over the finished image. Off = clean; on adds a\n"
+			"subtle sensor-like noise that masks colour banding and gives a filmic texture.\n"
+			"The switch remembers your last intensity; setting Intensity to 0 is also off." );
+		ImGui::BeginDisabled( cvar.GetFloat() <= 0.0f );
+		float inten = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Intensity##grain", &inten, 0.0f, 0.25f, "%.2f" ) ) { cvar.SetFloat( inten ); }
+		AddCVarOptionTooltips( cvar );
+		float gsz = r_postFilmGrainSize.GetFloat();
+		if ( ImGui::SliderFloat( "Size (px)##grain", &gsz, 1.0f, 4.0f, "%.2f" ) ) { r_postFilmGrainSize.SetFloat( gsz ); }
+		AddCVarOptionTooltips( r_postFilmGrainSize );
+		ImGui::EndDisabled();
+	} ),
 	CVarOption( "r_postChromaticAberration", "Chromatic Aberration", OT_FLOAT, 0.0f, 0.5f ),
 	// Weapon-reload depth of field: the on/off toggle (tuning sliders are in Debug -> Depth of Field).
 	CVarOption( "r_dof", "Weapon-Reload Depth of Field", OT_BOOL ),
