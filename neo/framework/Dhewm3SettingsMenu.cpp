@@ -3684,11 +3684,7 @@ static void DrawEnhGroup_AmbientOcclusion()
 				"Needs Motion Vectors or FSR on for the denoiser; enabling it builds the ray-tracing "
 				"scene for the map. Vulkan + RT hardware only." );
 
-			CvarSliderF( "Ray Length##rtao", r_rtaoRadius, 8.0f, 256.0f, "%.0f units", "How far each occlusion ray reaches, in world units. Longer rays gather "
-				"broader, more grounded darkening from distant geometry; shorter keeps the effect "
-				"to tight contact shadows. The default (80) reaches further than the screen-space "
-				"radius ever could." );
-
+			// Ray Length (r_rtaoRadius) lives in the Developer tab's RTAO section, not here.
 			CvarSliderF( "Intensity##rtao", r_rtaoIntensity, 0.0f, 4.0f, "%.2f", "RTAO strength. The traced occlusion is already physically grounded, so the "
 				"neutral 1.00 default shows it as-is — unlike the screen-space Intensity (1.2), "
 				"which compensates for the march and applies only when RTAO is off. Raise for "
@@ -5662,35 +5658,37 @@ static void DrawDbgGroup_Glass()
 static void DrawDbgGroup_SSAO()
 {
 	const bool supported = R_BackendSupportsEnhancements();
-	// --- Ambient Occlusion (SSAO/GTAO). Master toggle is in Enhancements; full tuning here. ---
-	if ( BeginSettingsGroup( "Ambient Occlusion (SSAO)" ) ) {
-	ImGui::TextDisabled( "GTAO horizon-based ambient occlusion on the ambient term. Enable in Graphics > Ambient Occlusion." );
+	// --- Ambient Occlusion. Master toggle is in Enhancements; the full tuning surface lives here,
+	// split into the shared composite knobs, the screen-space (GTAO) producer, and the ray-traced
+	// (RTAO) producer + its NRD denoiser. One producer runs at a time: RTAO (or RTGI) REPLACES GTAO. ---
+	if ( BeginSettingsGroup( "Ambient Occlusion (SSAO / RTAO)" ) ) {
+	ImGui::TextDisabled( "Occlude the ambient term in creases/contacts. Enable in Graphics > Ambient Occlusion." );
 	ImGui::Spacing();
 
 	ImGui::BeginDisabled( !supported );
 
-	CvarCheckbox( "SSAO (master)", r_ssao, "Master toggle (same cvar as Graphics > Ambient Occlusion). On = occlude the "
-		"ambient term in creases/contacts; Off = vanilla flat ambient." );
+	// ---- Common: the master switch + the composite knobs that apply to whichever producer runs. ----
+	ImGui::SeparatorText( "Common" );
+
+	CvarCheckbox( "AO (master)", r_ssao, "Master toggle (same cvar as Graphics > Ambient Occlusion). On = occlude the "
+		"ambient term in creases/contacts; Off = vanilla flat ambient. Gates BOTH the screen-space "
+		"and ray-traced producers below." );
 
 	int ssaoDbg = r_ssaoDebug.GetInteger();
 	const char *ssaoDbgItems[] = { "off (feed lighting)", "show AO buffer", "show bent normals", "show normal G-buffer" };
 	if ( ImGui::Combo( "Debug View (r_ssaoDebug)", &ssaoDbg, ssaoDbgItems, IM_ARRAYSIZE( ssaoDbgItems ) ) ) {
 		r_ssaoDebug.SetInteger( ssaoDbg );
 	}
-	AddTooltip( "Visualize an SSAO buffer over the scene. 1 = the occlusion buffer (white = lit, "
-		"dark = occluded); 2 = the bent normals as RGB; 3 = the raw normal G-buffer (needs Normal "
-		"Buffer on) — here you should see the surface bump detail. Set back to 0 to feed lighting." );
+	AddTooltip( "Visualize the FINAL composited AO (either producer) over the scene. 1 = the occlusion "
+		"buffer (white = lit, dark = occluded); 2 = the bent normals as RGB (GTAO); 3 = the raw normal "
+		"G-buffer (GTAO, needs Normal Buffer on). Set back to 0 to feed lighting. For the raw/denoised "
+		"RTAO stages use the RTAO Debug View below." );
 
 	ImGui::BeginDisabled( !r_ssao.GetBool() );
 
-	CvarSliderF( "AO Intensity", r_ssaoIntensity, 0.0f, 4.0f, "%.2f", "Strength of the darkening. 0 = none, 1.2 = default, higher pushes the occlusion deeper." );
-	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##ssaoint" ) ) { r_ssaoIntensity.Reset(); }
-
 	CvarSliderF( "Direct Light AO", r_ssaoDirectLight, 0.0f, 1.0f, "%.2f", "How strongly AO darkens direct (dynamic) light's diffuse. Doom 3 has almost no "
 		"ambient, so THIS is what makes AO visible in normal gameplay. 1 = full, 0.75 = default, 0 = "
-		"ambient-only (most faithful, but usually invisible here). Lower it if AO looks baked-in "
-		"when lights move." );
+		"ambient-only (most faithful, but usually invisible here). Applies to whichever producer runs." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaodirect" ) ) { r_ssaoDirectLight.Reset(); }
 
@@ -5699,13 +5697,38 @@ static void DrawDbgGroup_SSAO()
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaofloor" ) ) { r_ssaoFloor.Reset(); }
 
+	CvarCheckbox( "Specular Occlusion", r_ssaoSpecular, "Also dim specular highlights in occluded areas on direct lights (stronger "
+		"anti-plastic look; a mild deviation from vanilla). Scaled by Direct Light AO. Off by default." );
+
+	ImGui::EndDisabled();	// !ssao (common sub-knobs)
+
+	// ---- Screen-space GTAO: the horizon-march producer. Inert while RTAO or RTGI replaces it. ----
+	ImGui::SeparatorText( "Screen-space (GTAO)" );
+	if ( r_ssao.GetBool() && ( r_rtao.GetBool() || r_rtgi.GetBool() ) ) {
+		ImGui::TextDisabled( r_rtgi.GetBool() ? "  (replaced by RT Global Illumination)" : "  (replaced by RT Ambient Occlusion)" );
+	}
+	ImGui::BeginDisabled( !r_ssao.GetBool() || r_rtao.GetBool() || r_rtgi.GetBool() );
+
+	CvarSliderF( "Intensity (GTAO)", r_ssaoIntensity, 0.0f, 4.0f, "%.2f", "Strength of the screen-space darkening. 0 = none, 1.2 = default (compensates for the "
+		"march), higher pushes the occlusion deeper. GTAO only - RTAO has its own Intensity below." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##ssaoint" ) ) { r_ssaoIntensity.Reset(); }
+
 	CvarSliderF( "Radius (world units)", r_ssaoRadius, 1.0f, 256.0f, "%.0f", "How far the occlusion samples reach, in world units. Small = tight contact creases "
 		"only; large = broad, softer occlusion (and more expensive). Default 48." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaorad" ) ) { r_ssaoRadius.Reset(); }
 
+	// Same discrete stops as Graphics > Ambient Occlusion > Resolution (one cvar, one selector style).
+	const float ssaoResStops[]  = { 0.5f, 0.667f, 0.75f, 0.8f, 1.0f };
+	const char *ssaoResLabels[] = { "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Four-fifths (4/5)", "Full" };
+	CvarStopsSliderF( "Resolution Scale", r_ssaoResScale, ssaoResStops, ssaoResLabels, IM_ARRAYSIZE( ssaoResStops ),
+		"GTAO buffer resolution as a fraction of the screen, bilaterally upscaled. The single biggest "
+		"GTAO cost knob - AO is low-frequency, so Half reads nearly identical to Three-quarter. Lower "
+		"this first if GTAO costs too much. Default Three-quarter. Same stops as Graphics > Resolution." );
+
 	CvarSliderI( "Directions (slices)", r_ssaoSlices, 1, 8, "How many horizon-search directions per pixel. More = smoother, less directional "
-		"noise. This is the bigger cost knob. Default 3. Check the cost with r_gl3GpuTime 1." );
+		"noise. A big cost knob. Default 3. Check the cost with r_vkGpuTime 2 (the 'ao' scope)." );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaoslices" ) ) { r_ssaoSlices.Reset(); }
 
@@ -5714,10 +5737,13 @@ static void DrawDbgGroup_SSAO()
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##ssaosteps" ) ) { r_ssaoSteps.Reset(); }
 
+	CvarCheckbox( "Temporal-Funded Budget", r_ssaoTemporalTrade, "Preset lever: force 4 directions x 6 steps with Temporal Accumulation ON (overriding "
+		"the sliders above) - cheaper than brute-force sampling for the same look, slightly softer. "
+		"Preset-wired on for Medium/High/Ultra, off for Nightmare/Path Tracing (brute force)." );
+
 	// Depth-mip acceleration + its two quality/speed knobs (docs/ssao-perf-optimization.md).
-	// The master toggle is mirrored from Enhancements; the bias/cap sliders live only here.
 	CvarCheckbox( "Depth-Mip Acceleration##dev", r_ssaoDepthMip, "March the horizon search over a prefiltered linear-depth mip chain (far taps read "
-		"coarse mips) instead of full-res depth every tap — cheaper at a wide radius. Same toggle as "
+		"coarse mips) instead of full-res depth every tap - cheaper at a wide radius. Same toggle as "
 		"Graphics > Depth-Mip Acceleration." );
 
 	ImGui::BeginDisabled( !r_ssaoDepthMip.GetBool() );
@@ -5737,7 +5763,7 @@ static void DrawDbgGroup_SSAO()
 	CvarCheckbox( "Temporal Accumulation", r_ssaoTemporal, "Reuse the previous frame's AO (reprojected by camera motion) to amortize the "
 		"horizon search across frames: smooths the per-pixel noise and lets Directions/Steps run "
 		"lower for the same look. Ghosting on fast motion / disocclusion is bounded by a "
-		"neighbourhood clamp. Same toggle as Graphics > Ambient Occlusion." );
+		"neighbourhood clamp." );
 
 	ImGui::BeginDisabled( !r_ssaoTemporal.GetBool() );
 	CvarSliderF( "Temporal Feedback", r_ssaoTemporalFeedback, 0.0f, 0.97f, "%.2f", "Fraction of the reprojected previous-frame AO kept each frame. Higher = smoother "
@@ -5747,12 +5773,16 @@ static void DrawDbgGroup_SSAO()
 	if ( ImGui::SmallButton( "reset##ssaofeedback" ) ) { r_ssaoTemporalFeedback.Reset(); }
 	ImGui::EndDisabled();
 
-	// Resolution is exposed in Graphics > Ambient Occlusion (as a slider).
-
-	CvarCheckbox( "Normal Buffer (bump-mapped)", r_ssaoNormalBuffer, "Feed SSAO from a real bump-mapped normal G-buffer (an extra opaque geometry pass) "
+	CvarCheckbox( "Normal Buffer (bump-mapped)", r_ssaoNormalBuffer, "Feed GTAO from a real bump-mapped normal G-buffer (an extra opaque geometry pass) "
 		"instead of normals reconstructed from depth. Picks up normal-map surface detail and removes "
 		"faceting (see Debug View 3), at the cost of one geometry pass. Off = reconstruct from depth "
-		"(cheaper). Foundation for parallax-occlusion / displacement later." );
+		"(cheaper)." );
+
+	ImGui::BeginDisabled( !r_ssaoNormalBuffer.GetBool() );
+	CvarCheckbox( "Merge Normal into Prepass (VK)", r_ssaoMergeNormal, "Vulkan: produce the GTAO normal G-buffer (+ SSR rough/metal and velocity MRTs when "
+		"wanted) INSIDE the depth prepass - one opaque geometry pass instead of two. Default on; off = "
+		"the standalone normal prepass, kept as the A/B + the GL3 path. No visual change, pure cost." );
+	ImGui::EndDisabled();
 
 	CvarCheckbox( "Bent Normals", r_ssaoBentNormal, "Shade the AMBIENT light along the bent normal (average unoccluded direction) so it "
 		"responds to macro occlusion, not just the surface normal. Visible in Debug View 2. Note: "
@@ -5765,10 +5795,75 @@ static void DrawDbgGroup_SSAO()
 	if ( ImGui::SmallButton( "reset##ssaobentstr" ) ) { r_ssaoBentStrength.Reset(); }
 	ImGui::EndDisabled();
 
-	CvarCheckbox( "Specular Occlusion", r_ssaoSpecular, "Also dim specular highlights in occluded areas on direct lights (stronger "
-		"anti-plastic look; a mild deviation from vanilla). Scaled by Direct Light AO. Off by default." );
+	ImGui::EndDisabled();	// GTAO (ssao on && !rtao && !rtgi)
 
-	ImGui::EndDisabled();	// ssao on
+	// ---- Ray-traced RTAO: the traced producer + its NRD ReBLUR denoiser. VK + RT hardware only. ----
+	const bool rtCapable = R_SupportsRayTracing();
+	ImGui::SeparatorText( rtCapable ? "Ray-traced (RTAO)" : "Ray-traced (RTAO) - needs Vulkan + RT GPU" );
+	if ( rtCapable && r_ssao.GetBool() && r_rtgi.GetBool() ) {
+		ImGui::TextDisabled( "  (RT Global Illumination supersedes RTAO - GI grounds the scene itself)" );
+	}
+	ImGui::BeginDisabled( !rtCapable || !r_ssao.GetBool() || r_rtgi.GetBool() );
+
+	CvarCheckbox( "RT Ambient Occlusion##dbg", r_rtao, "Replace the screen-space GTAO with one traced hemisphere ray per pixel against the "
+		"real scene, denoised by NRD ReBLUR across frames: sees occluders GTAO can't (off-screen, "
+		"behind the camera), no screen-edge artifacts. Needs the AO master on + Motion Vectors or FSR "
+		"(for the denoiser); enabling it builds the ray-tracing scene. Vulkan + RT hardware only." );
+
+	ImGui::BeginDisabled( !r_rtao.GetBool() );
+
+	CvarSliderF( "Ray Length (RTAO)", r_rtaoRadius, 8.0f, 512.0f, "%.0f", "How far each occlusion ray reaches, in world units. Longer rays gather broader, more "
+		"grounded darkening from distant geometry than GTAO's screen-space radius can. Default 80." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtaorad" ) ) { r_rtaoRadius.Reset(); }
+
+	CvarSliderF( "Intensity (RTAO)", r_rtaoIntensity, 0.0f, 4.0f, "%.2f", "RTAO strength (power curve on the traced visibility). The traced occlusion is already "
+		"physically grounded, so the neutral 1.00 default shows it as-is. Raise for deeper creases." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtaoint" ) ) { r_rtaoIntensity.Reset(); }
+
+	// Same discrete stops as Graphics > Ambient Occlusion > Resolution (RTAO) - one cvar, one selector style.
+	const float rtaoResStops[]  = { 0.5f, 0.667f, 0.75f, 0.8f, 1.0f };
+	const char *rtaoResLabels[] = { "Half (1/2)", "Two-thirds (2/3)", "Three-quarter (3/4)", "Four-fifths (4/5)", "Full" };
+	CvarStopsSliderF( "Resolution Scale (RTAO)", r_rtaoResScale, rtaoResStops, rtaoResLabels, IM_ARRAYSIZE( rtaoResStops ),
+		"Resolution RTAO runs the rays AND the NRD denoiser at, upscaled to full res. The denoiser is "
+		"the bulk of RTAO's cost, so THIS is what saves time (unlike halving rays alone). AO is "
+		"low-frequency, so Three-quarter / Half read nearly identical. Default Full; Path Tracing uses "
+		"Three-quarter. Same stops as Graphics > Resolution." );
+
+	int rtaoDbg = r_rtaoDebug.GetInteger();
+	const char *rtaoDbgItems[] = { "off", "raw ray output", "denoised (pre-composite)" };
+	if ( ImGui::Combo( "Debug View (r_rtaoDebug)", &rtaoDbg, rtaoDbgItems, IM_ARRAYSIZE( rtaoDbgItems ) ) ) {
+		r_rtaoDebug.SetInteger( rtaoDbg );
+	}
+	AddTooltip( "Visualize the RTAO producer: 1 = the raw noisy 1-ray/px output (before NRD), 2 = the "
+		"NRD-denoised occlusion (pre-composite). The final composited AO still shows in the Common "
+		"Debug View above (1)." );
+
+	// NRD ReBLUR denoiser knobs - the bulk of RTAO's cost and its temporal behaviour.
+	ImGui::TextDisabled( "NRD ReBLUR denoiser" );
+
+	CvarSliderI( "History Length", r_rtaoHistory, 0, 63, "Max frames NRD's ReBLUR accumulates for the 1-ray/px occlusion. 45 = the tuned default "
+		"(clean with the least blur). 0 = NRD's own default (~30). Raise for smoother/less noise at "
+		"the cost of more lag/trailing on moving occluders; lower (12-20) for snappier-but-noisier." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtaohist" ) ) { r_rtaoHistory.Reset(); }
+
+	CvarSliderF( "Fast-History Clamp", r_rtaoFastClamp, 1.0f, 3.0f, "%.2f", "ReBLUR fastHistoryClampingSigmaScale: how tightly the slow main history is clamped to "
+		"the responsive fast history. 2.0 = NRD default; NRD notes '1.1 is a safe value for occlusion' "
+		"- the A/B for AO trailing behind moving occluders (NPCs, doors). Lower = snappier, noisier." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtaofastclamp" ) ) { r_rtaoFastClamp.Reset(); }
+
+	CvarSliderI( "History-Fix Frames", r_rtaoHistoryFix, 0, 5, "ReBLUR historyFixFrameNum: frames of strong spatial reconstruction after a history "
+		"reset (disocclusion). 3 = NRD default; the NRD sample uses 2 for occlusion. Must stay below "
+		"the fast-history window (6)." );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtaohistfix" ) ) { r_rtaoHistoryFix.Reset(); }
+
+	ImGui::EndDisabled();	// !rtao
+	ImGui::EndDisabled();	// RTAO section (rtCapable && ssao && !rtgi)
+
 	ImGui::EndDisabled();	// backend supported
 	EndSettingsGroup();
 	}
