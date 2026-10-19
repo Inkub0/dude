@@ -3067,19 +3067,20 @@ struct RtAugment {
 							// without reading "Custom" (not matched in Detect). Inert where rtShadowBlur is off
 };
 
-// RTAO rides the lower RT tiers at diminishing resolution (it auto-builds the RT scene on its own,
-// R_RtSceneWanted, so Medium can run it without RT shadows): Medium = AO-only @ 3/4, High adds RT
-// shadows + AO @ 4/5. Ultra drops RTAO for one-bounce RTGI (GI supersedes AO) and keeps shadows +
-// reflections; Nightmare adds the heavy set (soft RT shadows on all lights, volumetrics). needVelocity
-// is on wherever a denoised RT effect runs (RTAO or RTGI) so NRD gets motion vectors.
+// RT shadows + AO scale from Medium up (RTAO auto-builds the RT scene via R_RtSceneWanted; RT shadows
+// reuse it): Medium = RTAO @ 3/4 + HARD RT shadows on the sun + moving lights. High = + SOFT (blur)
+// shadows, AO @ 4/5. Ultra drops RTAO for one-bounce RTGI (GI supersedes AO), keeps reflections, and
+// extends RT shadows to ALL lights (staggered to stay affordable). Nightmare = all-light soft shadows
+// at FULL rate (no stagger) + volumetrics. needVelocity is on wherever a denoised RT effect runs
+// (RTAO or RTGI) so NRD gets motion vectors.
 static const RtAugment rtAugment[PRESET_COUNT] = {
 //                  sun    mov    refl   rtao   aoRes  rtgi   giRes  blur   all    stag   vol    volL  vel    parlxSh hdrGam fsrScale penumbra
 /* Potato    */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, 1.0f,  1.0f },
 /* Low       */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, 1.0f,  1.0f },
-/* Medium    */   { false, false, false, true,  0.75f, false, 0.75f, false, false, false, false, 0,    true,  -1.0f, -1.0f, 1.0f,  1.0f },
-/* High      */   { true,  true,  false, true,  0.8f,  false, 0.75f, false, false, false, false, 0,    true,  -1.0f, -1.0f, 1.0f,  1.0f },
-/* Ultra     */   { true,  true,  true,  false, 1.0f,  true,  0.667f,true,  false, false, false, 0,    true,  0.5f,  -1.0f, 1.0f,  4.0f },
-/* Nightmare */   { true,  true,  true,  false, 0.75f, true,  0.75f, true,  true,  true,  true,  2,    true,  0.5f,  1.0f,  0.75f, 2.0f },
+/* Medium    */   { true,  true,  false, true,  0.75f, false, 0.75f, false, false, false, false, 0,    true,  -1.0f, -1.0f, 1.0f,  1.0f },
+/* High      */   { true,  true,  false, true,  0.8f,  false, 0.75f, true,  false, false, false, 0,    true,  -1.0f, -1.0f, 1.0f,  1.0f },
+/* Ultra     */   { true,  true,  true,  false, 1.0f,  true,  0.667f,true,  true,  true,  false, 0,    true,  0.5f,  -1.0f, 1.0f,  4.0f },
+/* Nightmare */   { true,  true,  true,  false, 0.75f, true,  0.75f, true,  true,  false, true,  2,    true,  0.5f,  1.0f,  0.75f, 2.0f },
 };
 
 
