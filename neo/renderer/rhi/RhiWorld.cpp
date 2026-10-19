@@ -9740,7 +9740,7 @@ void RB_RHI_RtEmissiveDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	myGlMultMatrix( viewDef->worldSpace.modelViewMatrix, viewDef->projectionMatrix, parms.mvpMatrix );	// world -> clip
+	RB_RHI_SpaceMvp( viewDef, &viewDef->worldSpace, parms.mvpMatrix );	// world -> clip, WITH the VK 0..1 depth remap (so gl_FragCoord.z compares with the scene depth)
 	parms.localParam0[0] = (float)r_rtEmissiveTableDebug.GetInteger();
 	parms.localParam0[1] = ( meanFlux > 0.0f ) ? 1.0f / meanFlux : 1.0f;
 	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;

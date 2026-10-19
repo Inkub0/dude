@@ -223,3 +223,29 @@ live: `r_rtAllLights`, `r_rtgi`, `dude_rtx 2`...). `r_rtEmissiveTable 1`, then:
 5. `r_rtEmissiveTable 0` and back on: no visible change to the lit picture with the overlay off (bit-identical claim);
    `r_vkGpuTime 2`: `emissive.debug` only appears with the overlay on.
 Then E1e (mover refresh) and E2.
+
+## First validation round (user, Mars City, 2026-10-19) and the fixes
+
+Census: 5349 triangles (879 world, 4470 from 226 static entities), 54 materials, 150 screen surfaces excluded, 355 KB,
+3 ms. Granularity is a non-issue at this size (per-triangle stays).
+
+1. **The sky took 99.9% of the flux** (`textures/skies/commoutside`, 183 tris, 290M): its additive `cameraCubeMap`
+   stage with `texgen skybox` passed the emitter test, and its huge portal quads drew THROUGH the comm-room wall
+   (mode 3 showed the stars texture as black with white speckles). FIX: any material with a skybox / wobblesky texgen
+   stage is excluded (E4 owns the sky); an additive stage with a cube image or any non-explicit texgen (glass
+   `texgen reflect` environment stages: `textures/sfx/chiglass1blue`) is not emission; deformed materials (sprite
+   flares: `textures/sfx/defaultflare`) are decoration, excluded.
+2. **54/54 materials "register-driven"** - wrong. Doom 3 light materials take their colour from the ENTITY parms
+   (`red parm0 / green parm1 / blue parm2`, `colored`), which the engine's constant-register check counts as
+   non-constant, so `ConstantRegisters()` is NULL for all of them. FIX: entity parms are constant per surface; only a
+   TIME-driven colour is animated, detected by evaluating the colour registers at three times (0, 0.37, 1.71 s) with the
+   surface's own parms (world parm0-3 = 1) in a zeroed view.
+3. **The overlay drew through walls.** `myGlMultMatrix( modelView, projection )` yields GL -1..1 clip z while the scene
+   depth is Vulkan 0..1 (the backend remaps every MVP in `RB_RHI_SpaceMvp`), so `gl_FragCoord.z` was always smaller
+   than the stored depth and the hand depth test never discarded. FIX: the overlay takes its MVP from `RB_RHI_SpaceMvp`.
+   Note also: overlay triangles have no depth test among THEMSELVES (table order; world first, entities after), so two
+   passing emitters that overlap on screen resolve by order - acceptable for a debug view.
+4. Mode 3 showed two BLACK rectangles on the pillars at the Combat Prep doors where the game shows lit panels: material
+   unidentified yet (the user names it with `r_showSurfaceInfo` next round). Candidates: the glass (`chiglass1blue`,
+   now excluded) or a glow stage with a texture matrix the sample ignores (the E2 read must honour the stage's
+   constant texture matrix - OPEN for E2).

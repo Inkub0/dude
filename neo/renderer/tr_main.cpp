@@ -2793,10 +2793,19 @@ static bool R_RtEmissiveIsScreen( const idMaterial *mat ) {
 // table emitter - the GUI/video screens keep the legacy fill lights, and such images never went through the
 // averaging path (averageColor is the white default).
 static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat ) {
-	if ( mat == NULL || mat->HasGui() ) {
-		return NULL;
+	if ( mat == NULL || mat->HasGui() || mat->Deform() != DFRM_NONE ) {
+		return NULL;														// deformed (sprite flares, flares, tubes): decoration, not a light
 	}
 	const int n = mat->GetNumStages();
+	for ( int i = 0; i < n; i++ ) {
+		// the SKY (textures/skies/*: an additive cameraCubeMap stage with texgen skybox / wobblesky) is NOT a table
+		// emitter - it was 99.9% of Mars City's flux and drew through the walls (user, 2026-10-19). E4 handles the sky
+		// as its own emitter kind.
+		const texgen_t tg = mat->GetStage( i )->texture.texgen;
+		if ( tg == TG_SKYBOX_CUBE || tg == TG_WOBBLESKY_CUBE ) {
+			return NULL;
+		}
+	}
 	for ( int i = 0; i < n; i++ ) {
 		const shaderStage_t *st = mat->GetStage( i );
 		const bool additive = ( st->drawStateBits & GLS_SRCBLEND_BITS ) == GLS_SRCBLEND_ONE
@@ -2808,7 +2817,9 @@ static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat ) {
 			return NULL;													// a screen: fill-light territory, not a table emitter
 		}
 		const idImage *img = st->texture.image;
-		if ( img == NULL || img->rhiHandle == 0 || img->generatorFunction != NULL || img->defaulted ) {
+		// an environment reflection (glass: texgen reflect + cubeMap) or any other generated texgen is not emission
+		if ( img == NULL || img->rhiHandle == 0 || img->generatorFunction != NULL || img->defaulted
+				|| img->type == TT_CUBIC || st->texture.texgen != TG_EXPLICIT ) {
 			continue;
 		}
 		return st;
@@ -2826,21 +2837,34 @@ static bool R_RtEmissiveStageColor( const idMaterial *mat, const shaderStage_t *
 	if ( numRegs <= 0 ) {
 		return true;
 	}
-	const float *regs = mat->ConstantRegisters();
-	float *evalRegs = NULL;
-	if ( regs == NULL ) {
-		static float defaultParms[MAX_ENTITY_SHADER_PARMS] = { 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
-		evalRegs = (float *)_alloca16( numRegs * (int)sizeof( float ) );
-		mat->EvaluateRegisters( evalRegs, entityParms != NULL ? entityParms : defaultParms, tr.viewDef, NULL );
-		regs = evalRegs;
-	}
-	for ( int k = 0; k < 3; k++ ) {
-		const int ri = st->color.registers[k];
-		if ( ri >= 0 && ri < numRegs ) {
-			rgb[k] = idMath::ClampFloat( 0.0f, 16.0f, regs[ri] );
+	// Nearly every light material takes its colour from the ENTITY parms (`red parm0` / `colored`), which the engine's
+	// constant-register check already counts as non-constant - so ConstantRegisters() is NULL for all of them (the
+	// first census reported 54/54 materials "register-driven"). Entity parms ARE constant for a given surface; only a
+	// TIME-driven colour (tables, sin) is animated. Evaluate at three times with the surface's own parms (the world's
+	// parm0-3 = 1) and a zeroed view (no global parms, no sound), as the constant-register check itself does.
+	static const float defaultParms[MAX_ENTITY_SHADER_PARMS] = { 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+	static const float probeTimes[3] = { 0.0f, 0.37f, 1.71f };
+	const float *parms = ( entityParms != NULL ) ? entityParms : defaultParms;
+	float *regs = (float *)_alloca16( numRegs * (int)sizeof( float ) );
+	viewDef_t probeView;
+	memset( &probeView, 0, sizeof( probeView ) );
+	bool animated = false;
+	float first[3] = { 1.0f, 1.0f, 1.0f };
+	for ( int t = 0; t < 3; t++ ) {
+		probeView.floatTime = probeTimes[t];
+		mat->EvaluateRegisters( regs, parms, &probeView, NULL );
+		for ( int k = 0; k < 3; k++ ) {
+			const int ri = st->color.registers[k];
+			const float v = ( ri >= 0 && ri < numRegs ) ? idMath::ClampFloat( 0.0f, 16.0f, regs[ri] ) : 1.0f;
+			if ( t == 0 ) {
+				first[k] = v;
+				rgb[k] = v;
+			} else if ( idMath::Fabs( v - first[k] ) > 1e-4f ) {
+				animated = true;
+			}
 		}
 	}
-	return evalRegs == NULL;
+	return !animated;
 }
 
 // per-material census row for the build report
