@@ -21,6 +21,7 @@ struct RtEmissiveTri {
 const uint RT_EMIT_ANIMATED = 1u << 16;		// stage colour is register-driven: the flux is a snapshot, read the live colour
 const uint RT_EMIT_ENTITY   = 1u << 17;		// from a static entity model (else worldspawn)
 const uint RT_EMIT_TWOSIDED = 1u << 18;		// the material creates back sides: its reversed twin is in the table too
+const uint RT_EMIT_INLIGHT  = 1u << 19;		// sits inside a placed light's volume (E5 census: that light is "fixtured")
 
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtEmissiveHeader { uint count; float totalFlux; uint cdfOffset; float meanFlux; };
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtEmissiveTris   { RtEmissiveTri t[]; };

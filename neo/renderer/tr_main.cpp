@@ -2725,6 +2725,7 @@ static const int	RT_EMISSIVE_MAX_TRIS     = 1 << 18;	// 262144 x 64 B = 16 MB ta
 #define RT_EMIT_FLAG_ANIMATED	( 1u << 16 )			// stage colour is register-driven: flux is a snapshot, read the live colour
 #define RT_EMIT_FLAG_ENTITY		( 1u << 17 )			// from a static entity model (else worldspawn)
 #define RT_EMIT_FLAG_TWOSIDED	( 1u << 18 )			// material creates back sides: its reversed twin is in the table too (both faces emit)
+#define RT_EMIT_FLAG_INLIGHT	( 1u << 19 )			// E5 census: the triangle sits inside a placed light's volume (that light is "fixtured")
 
 static idList<rtEmissiveTriGPU_t>	s_rtEmissiveTris;			// CPU copy of the table (the debug geometry is built from it)
 static rhi::BufferHandle			s_rtEmissiveBuf = 0;		// header + tris + CDF
@@ -3220,9 +3221,10 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 // fill / mood washes with no emissive proxy: kept). Census only; the classification signals (geometry here, the
 // ambient-material flag alongside, the per-light override table later) are decided at E5. Point-in-frustum against
 // the light's six global planes (positive side out), with the frustum bounds as the cheap reject.
-static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world ) {
-	int total = 0, fixtured = 0, ambience = 0, parallel = 0, fogBlend = 0, fixturedAmbientMat = 0, ambienceAmbientMat = 0;
+static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *r ) {
+	int total = 0, fixtured = 0, ambience = 0, parallel = 0, fogBlend = 0, fixturedAmbientMat = 0, ambienceAmbientMat = 0, trisInLight = 0;
 	const int n = s_rtEmissiveTris.Num();
+	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[t].emit &= ~RT_EMIT_FLAG_INLIGHT; }
 	for ( int i = 0; i < world->lightDefs.Num(); i++ ) {
 		const idRenderLightLocal *ld = world->lightDefs[i];
 		if ( ld == NULL || ld->lightShader == NULL ) {
@@ -3233,8 +3235,8 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world ) {
 		if ( ld->lightShader->IsFogLight() || ld->lightShader->IsBlendLight() ) { fogBlend++; continue; }
 		const idBounds *lb = ( ld->frustumTris != NULL ) ? &ld->frustumTris->bounds : NULL;
 		bool hit = false;
-		for ( int t = 0; t < n && !hit; t++ ) {
-			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[t];
+		for ( int t = 0; t < n; t++ ) {										// every triangle: the per-triangle flag feeds overlay mode 4
+			rtEmissiveTriGPU_t &e = s_rtEmissiveTris[t];
 			const idVec3 c( ( e.p0[0] + e.p1[0] + e.p2[0] ) * ( 1.0f / 3.0f ), ( e.p0[1] + e.p1[1] + e.p2[1] ) * ( 1.0f / 3.0f ), ( e.p0[2] + e.p1[2] + e.p2[2] ) * ( 1.0f / 3.0f ) );
 			if ( lb != NULL && !lb->ContainsPoint( c ) ) {
 				continue;
@@ -3243,14 +3245,20 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world ) {
 			for ( int k = 0; k < 6 && inside; k++ ) {
 				inside = ld->frustum[k].Distance( c ) <= 1.0f;				// 1 unit of slack: a tube flush with its own light's face
 			}
-			hit = inside;
+			if ( inside ) {
+				hit = true;
+				e.emit |= RT_EMIT_FLAG_INLIGHT;
+			}
 		}
 		const bool ambMat = ld->lightShader->IsAmbientLight();
 		if ( hit ) { fixtured++; if ( ambMat ) { fixturedAmbientMat++; } }
 		else       { ambience++; if ( ambMat ) { ambienceAmbientMat++; } }
 	}
-	common->Printf( "r_rtEmissiveTable: placed lights %d: %d FIXTURED (an emitter inside the volume - dropped when emitters light the scene; %d ambient-material), %d AMBIENCE (no emitter - kept; %d ambient-material), %d parallel + %d fog/blend (kept)\n",
-		total, fixtured, fixturedAmbientMat, ambience, ambienceAmbientMat, parallel, fogBlend );
+	for ( int t = 0; t < n; t++ ) { if ( s_rtEmissiveTris[t].emit & RT_EMIT_FLAG_INLIGHT ) { trisInLight++; } }
+	// the flags changed after the upload: rewrite the triangle range (the debug geometry is built lazily, after this)
+	r->UpdateBuffer( s_rtEmissiveBuf, RT_EMISSIVE_HEADER_BYTES, n * (int)sizeof( rtEmissiveTriGPU_t ), s_rtEmissiveTris.Ptr() );
+	common->Printf( "r_rtEmissiveTable: placed lights %d: %d FIXTURED (an emitter inside the volume - dropped when emitters light the scene; %d ambient-material), %d AMBIENCE (no emitter - kept; %d ambient-material), %d parallel + %d fog/blend (kept); %d of %d emissive triangles sit inside a placed light, %d in none (overlay mode 4)\n",
+		total, fixtured, fixturedAmbientMat, ambience, ambienceAmbientMat, parallel, fogBlend, trisInLight, n, n - trisInLight );
 }
 
 // Keep the table in step with the live RT scene: build once per map (or when its cvars change), free when off.
@@ -3274,7 +3282,7 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	R_RtEmissiveFree();
 	R_RtEmissiveBuild( world, r );
 	if ( s_rtEmissiveBuf != 0 ) {
-		R_RtEmissiveLightCensus( world );	// E5 prep: fixtured vs ambience placed lights
+		R_RtEmissiveLightCensus( world, r );	// E5 prep: fixtured vs ambience placed lights
 	}
 	s_rtEmissiveMap = world->mapName;		// the latch: an empty map builds nothing but is not retried every frame
 }

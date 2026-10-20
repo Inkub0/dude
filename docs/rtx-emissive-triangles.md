@@ -319,3 +319,10 @@ mood washes with no proxy - kept). Point-in-frustum of every triangle centroid a
 blend lights are listed as kept. The ambient-material flag is counted alongside as the second signal. The per-light
 override (the D2 table mechanism) and the saturation fallback remain E5's; this census is what E5's drop list is
 built from.
+
+**Overlay mode 4 - light coverage (added 2026-10-20).** The census also flags every triangle whose centroid lies
+inside a placed light's frustum (`RT_EMIT_FLAG_INLIGHT`, bit 19; the table is re-uploaded after the census).
+`r_rtEmissiveTableDebug 4` paints an emitter GREEN when it sits inside a placed light's volume (that light is
+fixtured and would be dropped) and RED when no placed light covers it (this emitter would be the only light there).
+A level that reads mostly green has its fixtures backed by placed lights, as Doom 3 is authored; red emitters are
+the surfaces that would start lighting rooms no placed light lights today (decals, glow panels in dark corners).

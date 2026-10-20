@@ -4904,9 +4904,9 @@ static void DrawDbgGroup_ExperimentalLighting()
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveScale" ) ) { r_rtEmissiveScale.Reset(); }
 	{
-		int dbg = idMath::ClampInt( 0, 3, r_rtEmissiveTableDebug.GetInteger() );
+		int dbg = idMath::ClampInt( 0, 4, r_rtEmissiveTableDebug.GetInteger() );
 		ImGui::SetNextItemWidth( 240.0f );
-		if ( ImGui::Combo( "Table View##rtEmissiveTableDebug", &dbg, "Off\0Emitters by texture\0Flux (vs mean)\0Emitted colour\0" ) ) {
+		if ( ImGui::Combo( "Table View##rtEmissiveTableDebug", &dbg, "Off\0Emitters by texture\0Flux (vs mean)\0Emitted colour\0Light coverage (fixtured / alone)\0" ) ) {
 			r_rtEmissiveTableDebug.SetInteger( dbg );
 		}
 		AddTooltip( "Draw the table's triangles over the view, depth-tested against the scene. 'Emitters by texture' tints "
@@ -4914,7 +4914,9 @@ static void DrawDbgGroup_ExperimentalLighting()
 			"and LED panel should be painted, and no plain wall or screen; 'Flux' shows each triangle's power relative to "
 			"the table's mean (blue faint, green average, red 4x, white 16x+) - the big ceiling tiles should dominate; "
 			"'Emitted colour' is the glow texture x stage colour x scale, exactly what a sample of this emitter would light "
-			"the scene with - too-bright or wrong-hued emitters here are calibration findings. (r_rtEmissiveTableDebug)" );
+			"the scene with - too-bright or wrong-hued emitters here are calibration findings; 'Light coverage' green = the "
+			"emitter sits inside a placed light's volume (that light is fixtured and would be dropped once emitters light the "
+			"scene), red = no placed light covers it. (r_rtEmissiveTableDebug)" );
 	}
 	ImGui::EndDisabled();	// r_rtEmissiveTable
 

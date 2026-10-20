@@ -6,6 +6,9 @@
 //   2 = FLUX: the triangle's flux relative to the table's MEAN (u_localParam0.y = 1 / meanFlux), log ramp:
 //       blue = 1/16 of the mean or fainter, green = the mean, red = 4x, white = 16x and above;
 //   3 = EMITTED COLOUR: glow texture at the triangle's st x stage tint x material scale - what an E2 sample returns.
+//   4 = LIGHT COVERAGE (the E5 hybrid question): green = the triangle sits inside a placed light's volume (that light is
+//       "fixtured" and would be dropped when the emitters light the scene), red = no placed light covers it (this
+//       emitter would be the only light there).
 // Opaque, into the pre-tonemap HDR scene.
 //
 // Uniform packing (RB_RHI_RtEmissiveDebugOverlay): u_mvpMatrix = world -> clip (vertex stage); u_localParam0 =
@@ -52,6 +55,8 @@ void main() {
 		          : ( t < 0.75 ) ? mix( vec3( 0.0, 1.0, 0.0 ), vec3( 1.0, 0.0, 0.0 ), ( t - 0.5 ) * 4.0 )
 		          : mix( vec3( 1.0, 0.0, 0.0 ), vec3( 1.0 ), ( t - 0.75 ) * 4.0 );
 		fragColor = vec4( c, 1.0 );
+	} else if ( mode == 4 ) {
+		fragColor = ( ( flags & ( 1u << 19 ) ) != 0u ) ? vec4( 0.1, 0.9, 0.2, 1.0 ) : vec4( 0.95, 0.15, 0.1, 1.0 );
 	} else {
 		vec3 e = ( slot != 0u ) ? textureLod( u_rtTextures[ nonuniformEXT( slot - 1u ) ], var_TexCoord, 0.0 ).rgb : vec3( 1.0 );
 		fragColor = vec4( e * var_Tint.rgb * var_FluxScaleIndex.y, 1.0 );
