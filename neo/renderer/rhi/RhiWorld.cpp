@@ -9790,7 +9790,7 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	if ( lightAddr == 0 || numLights <= 0 ) {
 		return;		// no rows this view: the grid is not consumed (the DI pass returned before its gather)
 	}
-	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; unsigned int quotaB; } pc;	// light_grid_fill.comp PC
+	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; unsigned int quotaB; unsigned int rankLinear; } pc;	// light_grid_fill.comp PC
 	pc.gridLo      = (unsigned int)( g.gridAddr & 0xFFFFFFFFull );
 	pc.gridHi      = (unsigned int)( g.gridAddr >> 32 );
 	pc.lightLo     = (unsigned int)( lightAddr & 0xFFFFFFFFull );
@@ -9803,9 +9803,10 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	pc.camX        = g.parms.camPos[0];
 	pc.camY        = g.parms.camPos[1];
 	pc.camZ        = g.parms.camPos[2];
-	pc.parallelFlux = 4.0f;		// flux weight for parallel (sun) lights (no 1/d^2): keeps a sun a candidate everywhere (L5 tuning)
+	pc.parallelFlux = r_rtLightGridRankLinear.GetBool() ? 1.0f : 4.0f;	// a sun's rank: lum x this (no distance term); 1 = a full-strength light everywhere under the linear rank
 	// bounce-only emitter rows exist only in normal mode with r_rtEmissiveBounce: their 2-slot quota must not waste slots in emissive mode
 	pc.quotaB      = ( !r_rtEmissiveLighting.GetBool() && r_rtEmissiveBounce.GetBool() ) ? 2u : 0u;
+	pc.rankLinear  = r_rtLightGridRankLinear.GetBool() ? 1u : 0u;
 	rhi::ComputeArgs ca = rhi::ComputeArgs();
 	ca.shader = g.fillProg;
 	ca.pushConstants = &pc;

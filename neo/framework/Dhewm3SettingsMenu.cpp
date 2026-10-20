@@ -5092,6 +5092,10 @@ static void DrawDbgGroup_ReStirDI()
 		CvarSliderI( "  Candidates / Cell", r_rtLightGridSlots, 1, 16, "Lights stored per cell. More = less candidate "
 			"noise, closer to exhaustive (a cell with more lights that matter than slots drops the dimmest), but a bigger grid "
 			"buffer and a dearer gather. Default 9; emissive mode is happier at 16. A change re-allocates. (r_rtLightGridSlots)" );
+		CvarCheckbox( "  Rank by Light Falloff", r_rtLightGridRankLinear, "Rank a cell's candidates by what a light actually "
+			"delivers there (colour x (1 - distance / radius), a Doom light's own falloff) instead of the inverse-square proxy, "
+			"which overrates a light near its rim and lets big ambience lights crowd out a room's own fixtures. "
+			"(r_rtLightGridRankLinear)" );
 		CvarCheckbox( "  Jitter Cell Lookup", r_rtLightGridJitter, "Each pixel (and GI bounce hit) looks its candidates up at a "
 			"position jittered by up to half a cell, so neighbouring pixels read neighbouring cells: a light one cell keeps and "
 			"the next drops becomes per-pixel noise the denoiser averages instead of a cell-shaped step. (r_rtLightGridJitter)" );

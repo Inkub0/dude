@@ -26,6 +26,7 @@ layout( push_constant ) uniform PC {
 	float camX, camY, camZ;			// camera position (cascade snapping)
 	float parallelFlux;				// flux weight for parallel (sun) lights, which have no 1/d^2 term
 	uint  quotaB;					// slots reserved for BOUNCEONLY emitter rows (normal mode + r_rtEmissiveBounce), 0 in emissive mode
+	uint  rankLinear;				// r_rtLightGridRankLinear: importance = lum x (1 - d / radius), a Doom light's own falloff (else lum x radius^2 / d^2)
 } pc;
 
 void main() {
@@ -81,6 +82,16 @@ void main() {
 		float imp;
 		if ( ( flags & DUDE_LIGHT_PARALLEL ) != 0u ) {
 			imp = lum * pc.parallelFlux;
+		} else if ( pc.rankLinear != 0u ) {
+			// the light's OWN falloff as the rank (r_rtLightGridRankLinear): a Doom light delivers C x (1 - d / R) and nothing
+			// past R, so this is its expected contribution at the cell. The inverse-square proxy below overrates a light
+			// near its rim by an order of magnitude (at 0.9 R: 1.2 C against a true 0.1 C), so the big ambience lights
+			// hogged the slots of every cell near their edge and a room's own fixture rows were evicted (the alcoves that
+			// died as the reach grew, 2026-10-20). Floored at the cell's half-diagonal so a cell containing the light ranks
+			// it at full strength; a light whose volume only grazes the cell still ranks by the cell centre's distance.
+			float rad  = max( lights.l[ li ].radius, 1.0 );
+			float dd   = max( length( center - lights.l[ li ].pos ) - cellHalfDiag, 0.0 );
+			imp = lum * max( 1.0 - dd / rad, 0.0 );
 		} else {
 			float rad  = max( lights.l[ li ].radius, 1.0 );
 			vec3  pd   = center - lights.l[ li ].pos;

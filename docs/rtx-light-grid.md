@@ -160,3 +160,10 @@ lighting stepped at the cell border (visible once emissive mode put ~300 emitter
 (default 1): the DI gather and the GI bounce look up their cell at a position jittered by up to half the cell size per
 pixel (rtgi_light_grid.glsl lgCellBaseJittered), so a step becomes per-pixel noise the denoiser averages. The fill is
 unchanged (deterministic top-N); the grid stays stable frame to frame.
+
+## L4'' - rank by the light's own falloff (2026-10-20)
+r_rtLightGridRankLinear (default 1): importance = lum x max( 1 - (d - cellHalfDiag) / radius, 0 ) - a Doom light's expected
+contribution at the cell - instead of lum x radius^2 / d^2. The inverse-square proxy overrates a light near its rim by
+an order of magnitude (0.9 R: 1.2 C vs a true 0.1 C), so big ambience lights hogged the slots of every cell near their
+edge and, with 9 slots, a room's own fixtures were evicted (the alcoves that died as the emitter reach grew). A sun
+ranks lum x 1 under the linear rank (x 4 under the old one). 0 = the old proxy.
