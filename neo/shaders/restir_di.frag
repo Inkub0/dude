@@ -404,7 +404,7 @@ void main() {
 	// R1 side outputs for next frame's gradient pass: which light this pixel shaded (row + 1 in THIS frame's light
 	// buffer) and how bright its visible contribution was (fp16, restir_di_shade.glsl). The RIS weight W is left out:
 	// it multiplies both frames alike and cancels in the normalized gradient. R3a keeps its "boosted" bit in the row
-	// id's fraction (+0.25 x reason, exact in fp16 below 512 rows); readers floor it off.
+	// id's fraction (+0.25 x reason; att3 is RGBA32F since E2 v3, so thousands of rows stay exact); readers floor it off.
 	if ( pHatChosen > 0.0 ) {
 		outViewZ.y = diGradientLuminance( contribChosen, B, vis );
 	}

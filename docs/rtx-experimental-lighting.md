@@ -490,3 +490,6 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   ray - a tube behind its cover); rtEmissiveProbe now prints the nearest table triangle (emits toward the eye?), its ROW
   (area, effective area vs min/full, mean lum, centroid) and the pairing (reach, lum, origin + on the EMITTING side?,
   noShadows). Next probe on those tubes decides: back-facing winding vs blocked ray vs origin behind the emitter.
+- ROW CEILING 4096 (user, 2026-10-20 "widen more up to 4096"): the DI gather MRT's att3 (SH1 + chosen row id) and its
+  side copy are RGBA32F now (IF_RGBA32F, pass class 15 for the copy target); RT_EMIT_MAX_ROWS 4096, r_rtEmissiveMaxRows
+  default 4096; the per-view pick is a partial sort (std::nth_element) when over the cap. Cost: +8 B/px at gather res.

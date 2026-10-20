@@ -58,6 +58,8 @@ enum ImageFormat {
 	IF_DEPTH24,				// depth-only; shadow-map target, sampler2DShadow-ready
 	IF_R16F,				// single-channel half-float; SSAO linear-depth mip (Phase 2)
 	IF_RG16F,				// two-channel half-float; motion-vector / velocity MRT (R1/A0)
+	IF_RGBA32F,				// four-channel float; the ReSTIR DI gather's SH1 + chosen-row side channel (att3) and its copy: the row id is an
+							// integer the gather stores in .w - exact to 2048 in fp16, which capped the light buffer; fp32 takes 4096 rows + the reason fraction
 	IF_RG32F				// two-channel float; ReSTIR DI gather side data ( view z, gradient luminance ): the gradient re-shades last
 							// frame's sample at the EXACT stored point, and a half-float view z moves it by up to d/2048 along the
 							// view ray - under the FSR2 jitter that error changes every frame and flips the one-ray visibility at

@@ -18,6 +18,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 // volumes always use glStencilOpSeparate — core since GL 2.0.
 
 #include "sys/platform.h"
+#include <algorithm>		// std::nth_element: the per-view emitter-row pick over thousands of fixtures (E2 v3)
 #include "renderer/tr_local.h"
 #include "renderer/RenderWorld_local.h"			// RR16: iterate the render world's lightDefs (off-screen lights for reflections)
 #include "renderer/VertexCache.h"
@@ -510,7 +511,7 @@ static bool  rhiReStirDIGradConfValid = false;		// rhiReStirDIGradConfRT[idx ^ 1
 static rhi::ImageHandle rhiReStirDIGradConfThisView = 0;	// the confidence fed to NRD this view (debug view 5)
 static rhi::ImageHandle rhiReStirDIGradThisView = 0;		// the filtered gradient this view (debug view 6)
 static bool  rhiReStirDIGatherPrevValid = false;	// the gather MRT holds last frame's side data at the current rw x rh
-static rhi::RenderTargetHandle rhiReStirDIPrevSideRT[3] = { 0, 0, 0 };	// R1 rev.2: copies of last frame's gather att1 (RG16F) / att2 / att3 (RGBA16F), made before the gather
+static rhi::RenderTargetHandle rhiReStirDIPrevSideRT[3] = { 0, 0, 0 };	// R1 rev.2: copies of last frame's gather att1 (RG32F) / att2 (RGBA16F) / att3 (RGBA32F), made before the gather
 static int   rhiReStirDIPrevSideW = 0, rhiReStirDIPrevSideH = 0;
 static float rhiReStirDIPrevCb = 0.0f;				// last frame's checkerboard parity (0 off / 1 / 2): where a pixel's data sits
 #define DI_LIGHTMAP_MAX		4096					// lightDef -> row table capacity (uints per ring slot)
@@ -902,10 +903,10 @@ static unsigned long long   s_rtReflLightAddr = 0;
 static int                  s_sceneFogCount   = 0;	// stock fog-light volumes appended AFTER the lights in the current slot (volumetrics only)
 #define SCENE_FOG_MAX        8
 // E2 v3 (docs/rtx-experimental-lighting.md "E2 v3"): the scene-light buffer carries the placed lights (<= RT_REFL_MAX_LIGHTS
-// incl. the fog rows), then the EMITTER rows (DUDE_LIGHT_EMISSIVE, one per emissive surface: RT_EMIT_MAX_ROWS). The DI
-// gather's side channel stores row + 1 + 0.25 x boost reason in fp16, exact only below 512 rows - the hard ceiling.
-#define RT_SCENE_MAX_ROWS    512						// rows 0..510 addressable (row + 1 <= 511)
-#define RT_EMIT_MAX_ROWS     ( RT_SCENE_MAX_ROWS - 1 )		// the pick arrays; the per-view cap is 511 - placed - fog
+// incl. the fog rows), then the EMITTER rows (DUDE_LIGHT_EMISSIVE, one per emissive FIXTURE: RT_EMIT_MAX_ROWS). The DI
+// gather's side channel stores row + 1 + 0.25 x boost reason in an RGBA32F attachment (fp32: exact far beyond this).
+#define RT_EMIT_MAX_ROWS     4096
+#define RT_SCENE_MAX_ROWS    ( RT_REFL_MAX_LIGHTS + RT_EMIT_MAX_ROWS )	// placed lights + fog (<= 256) + emitter rows
 static int                  s_sceneRowCount   = 0;	// EVERY row of the current slot: lights + fog + emitters (what DI, the grid and the bounce iterate)
 static int  rhiRtReflW = 0, rhiRtReflH = 0;
 static rhi::RenderTargetHandle rhiRtReflHistRT[2] = { 0, 0 };	// temporal history ping-pong
@@ -6178,7 +6179,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			const float intensity = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveIntensity.GetFloat() );
 			const float reachMul  = idMath::ClampFloat( 0.0f, 8.0f, r_rtEmissiveReach.GetFloat() );
 			const float reachDef  = idMath::ClampFloat( 0.0f, 4096.0f, r_rtEmissiveReachDefault.GetFloat() );
-			const int   cap       = Min( idMath::ClampInt( 0, RT_EMIT_MAX_ROWS, r_rtEmissiveMaxRows.GetInteger() ), RT_SCENE_MAX_ROWS - 1 - n - nFog );	// every row + 1 must stay below 512 (fp16 side channel)
+			const int   cap       = Min( idMath::ClampInt( 0, RT_EMIT_MAX_ROWS, r_rtEmissiveMaxRows.GetInteger() ), RT_SCENE_MAX_ROWS - n - nFog );
 			const float minArea   = Max( 0.0f, r_rtEmissiveFixtureMinArea.GetFloat() );
 			const float fullArea  = Max( minArea + 1e-3f, r_rtEmissiveFixtureFullArea.GetFloat() );
 			const float maxL      = Max( 1.0f, r_rtEmissiveMaxRadiance.GetFloat() );
@@ -6207,13 +6208,19 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				const float imp = C * intensity * radius * radius / Max( dist * dist, 64.0f * 64.0f );
 				if ( !( imp > 0.0f ) ) { continue; }
 				nEmCandidates++;
-				if ( np < cap ) {
-					pick[ np ] = i; pickImp[ np ] = imp; np++;
-				} else {
-					int weakest = 0;
-					for ( int k = 1; k < np; k++ ) { if ( pickImp[k] < pickImp[weakest] ) { weakest = k; } }
-					if ( imp > pickImp[weakest] ) { pick[weakest] = i; pickImp[weakest] = imp; }
-				}
+				if ( np < RT_EMIT_MAX_ROWS ) { pick[ np ] = i; pickImp[ np ] = imp; np++; }
+			}
+			if ( np > cap ) {
+				// over the cap: keep the strongest at the eye - a partial sort of the candidates (thousands after the per-fixture
+				// split; the old linear weakest search was O(rows x cap) per frame)
+				static int ord[ RT_EMIT_MAX_ROWS ];
+				for ( int k = 0; k < np; k++ ) { ord[k] = k; }
+				std::nth_element( ord, ord + cap, ord + np, [&]( int a, int b ) { return pickImp[a] > pickImp[b]; } );
+				static int   pick2[ RT_EMIT_MAX_ROWS ];
+				static float pickImp2[ RT_EMIT_MAX_ROWS ];
+				for ( int k = 0; k < cap; k++ ) { pick2[k] = pick[ ord[k] ]; pickImp2[k] = pickImp[ ord[k] ]; }
+				for ( int k = 0; k < cap; k++ ) { pick[k] = pick2[k]; pickImp[k] = pickImp2[k]; }
+				np = cap;
 			}
 			const unsigned int tLo = (unsigned int)( tAddr & 0xFFFFFFFFull ), tHi = (unsigned int)( tAddr >> 32 );
 			for ( int k = 0; k < np; k++ ) {
@@ -6284,7 +6291,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		const unsigned long long table = mode ? R_RtEmissiveTableAddress( NULL, NULL, NULL ) : 0;
 		if ( mode && ( !lastMode || table != lastTable ) && table != 0 ) {
 			common->Printf( "emissive mode: %d fixtured placed lights dropped in this view, %d placed lights kept, %d emitter rows added (%d fixtures in reach of the view, %d indicators left out, %d emitting surfaces in the map; cap %d)%s\n",
-				s_diSkipEmissiveDrop, n, nEm, nEmCandidates, nEmIndicators, nEmTotal, RT_SCENE_MAX_ROWS - 1 - n - nFog,
+				s_diSkipEmissiveDrop, n, nEm, nEmCandidates, nEmIndicators, nEmTotal, Min( r_rtEmissiveMaxRows.GetInteger(), RT_SCENE_MAX_ROWS - n - nFog ),
 				( nEmCandidates > nEm ) ? " - CAP HIT: the weakest fixtures at the eye are missing" : "" );
 		}
 		lastMode = mode; lastTable = table;
@@ -8498,7 +8505,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 		if ( !rhiReStirDIPrevSideRT[0] ) { rhiReStirDIPrevSideRT[0] = r->CreateRenderTarget( rhi::IF_RG32F,   rw, rh ); }	// full-float view z (as att1)
 		if ( !rhiReStirDIPrevSideRT[1] ) { rhiReStirDIPrevSideRT[1] = r->CreateRenderTarget( rhi::IF_RGBA16F, rw, rh ); }
-		if ( !rhiReStirDIPrevSideRT[2] ) { rhiReStirDIPrevSideRT[2] = r->CreateRenderTarget( rhi::IF_RGBA16F, rw, rh ); }
+		if ( !rhiReStirDIPrevSideRT[2] ) { rhiReStirDIPrevSideRT[2] = r->CreateRenderTarget( rhi::IF_RGBA32F, rw, rh ); }	// full-float row id (as att3)
 		rhi::ShaderHandle copyProg = ( rhiReStirDIPrevSideRT[0] && rhiReStirDIPrevSideRT[1] && rhiReStirDIPrevSideRT[2] ) ? r->LoadShader( "smaa_copy" ) : 0;
 		if ( copyProg != 0 ) {
 			rhiReStirDIPrevSideW = rw;	rhiReStirDIPrevSideH = rh;

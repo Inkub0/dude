@@ -8008,7 +8008,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	}
 	if ( shMode ) {
 		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_SH0]  = targetView( ray, 0 );		// RGBA16F YCoCg radiance + hitdist
-		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_SH1]  = targetView( ray, a.shAtt );	// RGBA16F direction * luminance
+		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_SH1]  = targetView( ray, a.shAtt );	// RGBA32F direction * luminance (+ the row id in .w)
 		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_SH0] = outView;
 		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_SH1] = rtgiOutSh1View;
 	} else if ( a.giMode ) {
@@ -10704,6 +10704,7 @@ RenderTargetHandle VulkanBackend::CreateRenderTarget( ImageFormat fmt, int w, in
 		return EncodeTargetHandle( slot );
 	}
 	VkFormat cf = ( fmt == IF_RGBA16F ) ? VK_FORMAT_R16G16B16A16_SFLOAT
+	            : ( fmt == IF_RGBA32F ) ? VK_FORMAT_R32G32B32A32_SFLOAT
 	            : ( fmt == IF_R16F ) ? VK_FORMAT_R16_SFLOAT
 	            : ( fmt == IF_RG16F ) ? VK_FORMAT_R16G16_SFLOAT
 	            : ( fmt == IF_RG32F ) ? VK_FORMAT_R32G32_SFLOAT
@@ -10800,7 +10801,9 @@ RenderTargetHandle VulkanBackend::CreateRenderTargetReStirDIMrt( int w, int h ) 
 	}
 	// att1 = ( view z, gradient luminance ) at FULL float precision: the R1 gradient reconstructs last frame's sample point from
 	// the stored view z and must land on the very point the gather shaded (a half-float z wobbles it with the FSR2 jitter)
-	static const VkFormat fmts[4] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT };
+	// att3 = ( SH1.xyz, chosen light row + 1 + 0.25 x boost reason ) at FULL float precision: the row id is an integer, exact
+	// to 2048 in fp16, which capped the light buffer at 511 rows; emissive mode's one-row-per-fixture needs thousands (E2 v3)
+	static const VkFormat fmts[4] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT };
 	int slot = AllocTargetSlot();
 	if ( !CreateColorTarget( targetTable[slot], w, h, VK_FORMAT_R16G16B16A16_SFLOAT, 4, /*ds*/false, /*frameCapable*/false, /*mipLevels*/1, fmts ) ) {
 		targetTable[slot] = RenderTarget();
@@ -11214,13 +11217,14 @@ void VulkanBackend::DestroyAllTargets() {
 uint8_t VulkanBackend::PassClassFor( VkFormat colorFmt, bool hasDepth, int colorCount ) const {
 	if ( colorFmt == VK_FORMAT_R16G16B16A16_SFLOAT ) {
 		if ( hasDepth ) { return 2; }		// HDR scene buffer
-		// RGBA16F-led MRTs (RTGI ray+guides: RGBA16F+R16F+RGBA16F; ReSTIR DI gather: RGBA16F+RG32F+RGBA16F+RGBA16F) are
+		// RGBA16F-led MRTs (RTGI ray+guides: RGBA16F+R16F+RGBA16F; ReSTIR DI gather: RGBA16F+RG32F+RGBA16F+RGBA32F) are
 		// distinct attachment layouts from the single RGBA16F target: their own classes, never aliased with 3
 		return colorCount >= 4 ? 14 : ( colorCount >= 2 ? 13 : 3 );	// 3 = RGBA16F color-only (AA ping, SSR)
 	}
 	if ( colorFmt == VK_FORMAT_R16G16_SFLOAT ) { return 11; }		// RG16F color-only (velocity copies): its own class, not RGBA8's 4
 	if ( colorFmt == VK_FORMAT_R32G32_SFLOAT ) { return 12; }		// RG32F color-only (ReSTIR DI side copy): a pipeline built for RG16F is
 																	// render-pass-incompatible here (validation VUID 02684, 2026-10-12)
+	if ( colorFmt == VK_FORMAT_R32G32B32A32_SFLOAT ) { return 15; }	// RGBA32F color-only (the ReSTIR DI att3 side copy, E2 v3): its own class for the same reason
 	if ( colorFmt == VK_FORMAT_R16_SFLOAT ) {
 		// 9 = the RTAO ray + guide MRT (R16F + R16F + RGBA16F): a different attachment layout, so its
 		// pipelines MUST NOT share a cache key with the single R16F class

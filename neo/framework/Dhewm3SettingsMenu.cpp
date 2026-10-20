@@ -4955,15 +4955,15 @@ static void DrawDbgGroup_ExperimentalLighting()
 		"default reach - and a cell that cannot hold them drops the dimmest: a fixture's own room goes dark in cell-shaped "
 		"patches. More = dearer gather. A change re-allocates. (r_rtEmissiveGridSlots)" );
 	{
-		int rows = idMath::ClampInt( 0, 511, r_rtEmissiveMaxRows.GetInteger() );
+		int rows = idMath::ClampInt( 0, 4096, r_rtEmissiveMaxRows.GetInteger() );
 		ImGui::SetNextItemWidth( 240.0f );
-		if ( ImGui::SliderInt( "Emitter Rows / view##rtEmissiveMaxRows", &rows, 0, 511 ) ) {
+		if ( ImGui::SliderInt( "Emitter Rows / view##rtEmissiveMaxRows", &rows, 0, 4096 ) ) {
 			r_rtEmissiveMaxRows.SetInteger( rows );
 		}
 		AddTooltip( "How many emitting SURFACES a view's scene-light buffer may carry as light rows (the strongest at the eye "
 			"win; the light grid then ranks them per cell against the placed lights, so a row costs the same as a placed "
-			"light). The buffer holds 511 rows in all, placed lights included; the console line 'emissive mode: ...' says how "
-			"many entered. 0 = no emitter lights. (r_rtEmissiveMaxRows)" );
+			"light). The buffer holds 4096 fixture rows; the console line 'emissive mode: ...' says how many entered and whether the "
+			"cap bit. 0 = no emitter lights. (r_rtEmissiveMaxRows)" );
 	}
 	ImGui::EndDisabled();	// r_rtEmissiveLighting || r_rtEmissiveBounce
 
