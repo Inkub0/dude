@@ -316,3 +316,69 @@ emitters no light covers. Applied in diShadeEmitter and the bounce-hit sample (`
 The user also found that MORE CANDIDATES brighten the far field: the estimator is unbiased, but NRD's firefly /
 fast-history clamps suppress a sparse bright signal, so a far wall lit by rare hits reads darker than its mean -
 more samples densify the signal and the denoiser keeps it. Reach and samples are complementary levers.
+
+## E2 v3 - EMITTERS AS LIGHT ROWS (decided 2026-10-20, branch feat/rtx-emissive-rows, NOT started)
+
+User verdict on E2 v2 (the Q2RTX port: second RIS stream, per-cell triangle lists, group records, shared-memory
+tiling, bounce NEE, E6 reach boost): "I was under the assumption we would just add emitter triangles and reuse as much
+as possible of our optimised architecture. When I said to look at Quake2 RTX it was for the lights, not the whole
+machinery." Correct. Every v2 problem (flat glossy floor = no spec re-shade for row-0 winners, downlights dropped,
+radius mismatch, fill cost, frying) traces to emitters NOT being rows in the scene-light buffer, which is the one key
+the light grid, the reservoir, the SH side channel, the apply's specular re-shade, the gradient and the bounce all use.
+
+### Design
+- Each emitter GROUP (one surface run, tr_main.cpp s_rtEmissiveLabels / R_RtEmissiveUploadGroups) becomes ONE row in the
+  scene-light buffer (RtLight, 128 B, rt_light_eval.glsl) appended by RB_RHI_GatherSceneLights AFTER the placed lights,
+  BEFORE the fog rows, with a new flag DUDE_LIGHT_EMISSIVE (64u). pos = centroid; radius = the reach inherited from the
+  replaced placed light (census; default r_rtEmissiveReachDefault); cull = (centroid, boundRadius + reach); color = mean
+  radiance x r_rtEmissiveIntensity (flux proxy for the grid's importance = lum x rad^2 / d^2); the 64 B of projS/T/Q/F
+  (unused by an emitter) hold firstTri, numTris, the bounding box; pad0 = 0 is NOT usable (the gradient's lightDef->row
+  table): give emitter rows a key region pad0 = DI_LIGHTMAP_MAX/2 + group (DI_LIGHTMAP_MAX is 4096; cap groups to 2048)
+  so temporal reuse / the gradient find "the same emitter" across the per-frame sort; pad1 = table generation.
+- RB_RHI_GatherSceneLights returns TWO counts: n (placed lights, what reflections ssr_rt.frag / volumetrics
+  vol_scatter.glsl / rtgi_ray.frag iterate - bit-identical for them) and nRows = n + emitters, consumed by the DI gather
+  (u_color.z), the grid fill (pc.nLights) and the combined bounce (bp.nLights). RT_REFL_MAX_LIGHTS 256 -> raise the row
+  capacity (buffer + static arrays + DI_LIGHTMAP bounds) to 256 + 2048 emitter rows; CPU view-cull emitter rows like the
+  placed lights' off-screen pass (cull sphere within REACH of the view) and sort them by lum x rad^2 / d^2 to the eye
+  when over the cap.
+- diShadeLight (restir_di_shade.glsl) gets ONE branch for DUDE_LIGHT_EMISSIVE: xi from a hash of (row, pixel, frame),
+  pick a triangle inside [firstTri, firstTri + numTris) via rtEmissiveSampleInGroup, Arvo point (rtEmissiveSampleSolidAngle,
+  keep), contrib = meanRadiance x scale x intensity x sqrt(cos_e) x N.L / (pIn x pdfw) - i.e. the stochastic estimate of
+  the group's irradiance, so the RIS target and the reservoir treat the row exactly like a point light. ldir = the direction
+  to the SAMPLED point (visibility ray); the SH direction for an emitter row = the direction to the CENTROID (keeps the apply's
+  specular re-shade vector long; built 2026-10-20 as ldirSh in v2, same idea). The gradient (restir_di_gradient.frag) must
+  SKIP emissive rows (a fresh xi would read as a lighting change): sameLight = true, gradient 0 for DUDE_LIGHT_EMISSIVE.
+- rt_light_eval.glsl dudeLightAtten / dudeLightAttenTex: return 0 for DUDE_LIGHT_EMISSIVE (a consumer that gets an emitter
+  row by mistake lights nothing instead of reading the repurposed planes as a frustum).
+- The bounce (rtgi_bounce.glsl light loop) handles emitter rows through the same branch (a shared helper
+  rtEmissiveShadeRow in rt_emissive.glsl, included after rt_light_eval.glsl) - the bounce NEE block goes.
+- Bounce in BOTH modes (user ask): a flag DUDE_LIGHT_BOUNCEONLY (128u) on emitter rows while r_rtEmissiveLighting is 0
+  and r_rtEmissiveBounce is 1: diShadeLight returns false for it (the DI gather skips it), the grid fill and the bounce keep it.
+- The E5 census stays (fixtured = an emitter within max(64, 0.15 x radius) of the light ORIGIN - the 2026-10-20 fix);
+  R_RtEmissiveLightDropped stays. Reach: the inherited radius becomes the row's radius (linear Doom falloff via
+  dudeLightAtten's radial term is NOT used - the emitter has its own estimate; keep r_rtEmissiveReach as a multiplier on
+  the row's radius for the GRID importance / cull only, and drop rtEmissiveReachBoost).
+
+### Delete (v2 machinery)
+restir_di.frag: the whole emissive stream block (emTable/emDraws/emChosen/emXiChosen/emShDir, emMass/emM/emT lists,
+pickBE/pickBXi, the emitter branches in the winner shade / boost / cache teach, the r_rtEmissiveClamp cap, bp.em* fields);
+restir_di_shade.glsl: diShadeEmitter; light_grid_fill.comp: sGroupA/B, the slotsE block, PC fields groupLo..triMode;
+rtgi_light_grid.glsl: slotsE in lgStride/LgParms/lgParmsFromVec4, lgEBase, LG_E_TRIS, lgCountE/lgIsTriRecord/lgSlotGroup/
+lgSlotImpE/lgDrawGroup; light_grid_debug.frag + rtgi_ray.frag: the slotsE / bp.em* lines; rtgi_bounce.glsl: the em*
+parms + the NEE block; rt_emissive.glsl: RtEmissiveGroup buffer + rtEmissiveReachBoost (keep fetch/sample/Arvo/mean);
+RhiWorld.cpp: rtLightGridParms_t slotsE/groupAddr/numGroups, the grid Begin's emWanted block, Fill's pc tail, Pack's
+slotsE bits, the DI pack's texGen0S/T/Q block (keep intensity: it rides the row colour now), RB_RHI_RtgiPass's
+diffuseModifier[0] gate (keep: glow-at-hit off while emitters are rows); tr_main.cpp: R_RtEmissiveUploadGroups /
+s_rtEmissiveGroupBuf / R_RtEmissiveGroupsAddress become a CPU-side group list (centroid, radius, flux, mean radiance,
+firstTri, numTris, reach) the gather reads - no GPU group buffer; cvars r_rtEmissiveCandidates, r_rtEmissiveGridTris,
+r_rtEmissiveNearCascades, r_rtEmissiveClamp (and their ImGui rows + VulkanBackend signature mixes; r_rtEmissiveLighting,
+r_rtEmissiveBounce, r_rtEmissiveTable stay in ComputeGfxCfgSignature).
+
+### Keep in the ImGui "Emissive Lights" group (user: retain the necessary knobs, remove the useless ones)
+EMISSIVE MODE (r_rtEmissiveLighting), Emitter Intensity, Emitter Reach (now the row radius multiplier), Reach of uncovered
+emitters, Emitters at the GI Bounce, Emissive Triangle Table, Emissive Scale, Infer Fixtures from Flares, Hide Fixture
+Flares, the debug overlay mode. Add: "Emitter rows cap" (new r_rtEmissiveMaxRows, default 1024) once the capacity is in.
+
+### Guards (memory guard-vk-device-loss.md)
+Every emitter row's firstTri/numTris is bounds-checked against the table count in the shade branch; the row count the
+shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins ComputeGfxCfgSignature if it sizes a buffer.

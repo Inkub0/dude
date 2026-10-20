@@ -3890,8 +3890,13 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 				inside = ld->frustum[k].Distance( c ) <= 1.0f;				// 1 unit of slack: a tube flush with its own light's face
 			}
 			if ( inside ) {
-				hit = true;
 				e.emit |= RT_EMIT_FLAG_INLIGHT;
+				// FIXTURED = an emitter near the light's ORIGIN (a fixture's glow sits where its light is placed), not
+				// anywhere in its volume: a wide spot whose volume merely contained some other glow panel was dropped
+				// while its own glow-less housing had nothing to replace it (the Marine Command downlights, 2026-10-20)
+				const idVec3 a( e.p0[0], e.p0[1], e.p0[2] ), b( e.p1[0], e.p1[1], e.p1[2] ), cc( e.p2[0], e.p2[1], e.p2[2] );
+				const float originReach = Max( 64.0f, 0.15f * ld->parms.lightRadius.Length() );
+				if ( R_RtPointTriangleDistance( ld->globalLightOrigin, a, b, cc ) < originReach ) { hit = true; }
 				// the authored reach of the light this emitter replaces: a point light's radius, a spot's extent (the
 				// frustum bounds' half-diagonal); the LARGEST of the lights the triangle sits in
 				float radius = ld->parms.pointLight ? ld->parms.lightRadius.Length() : ( lb != NULL ? 0.5f * ( lb->operator[]( 1 ) - lb->operator[]( 0 ) ).Length() : 0.0f );

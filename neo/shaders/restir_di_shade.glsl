@@ -138,8 +138,12 @@ bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, o
 // material scale x the mode intensity; geometry = cos at the emitter (two-sided when the material is) x N.L at the
 // receiver / d^2 (d clamped at 2 units: a receiver flush with its tube). false = cannot reach / dark / behind.
 // Same material response as a placed light in apply mode. Needs rt_emissive.glsl + the bindless u_rtTextures.
-bool diShadeEmitter( RtEmissiveTable t, uint tri, vec2 xi, in DiSurface s, float intensity, out vec3 contrib, out vec3 ldir, out float dl, out float ndl, out float pdfw, bool targetOnly ) {
-	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;	pdfw = 0.0;
+// ldirSh = the direction to the emitter's CENTRE: what the SH side channel carries for an emitter winner. The sampled
+// point differs per pixel, NRD aggregates those directions into a short vector and the apply's specular re-shade
+// reads a short vector as "no concentrated highlight" - the glossy floor went flat under the tiles (user, 2026-10-20).
+// The centre keeps the vector long and puts the highlight at the tile's mirror point.
+bool diShadeEmitter( RtEmissiveTable t, uint tri, vec2 xi, in DiSurface s, float intensity, out vec3 contrib, out vec3 ldir, out float dl, out float ndl, out float pdfw, out vec3 ldirSh, bool targetOnly ) {
+	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;	pdfw = 0.0;	ldirSh = vec3( 0.0, 0.0, 1.0 );
 	RtEmissiveTri e = rtEmissiveFetch( t, tri );
 	if ( !( e.flux > 0.0 ) ) { return false; }									// dark (switched off / gone)
 	// the sample point UNIFORM IN SOLID ANGLE from the receiver (Arvo; Q2RTX): the contribution is then per unit solid
@@ -151,6 +155,7 @@ bool diShadeEmitter( RtEmissiveTable t, uint tri, vec2 xi, in DiSurface s, float
 	dl   = length( d );
 	if ( !( dl > 1e-3 ) ) { return false; }
 	ldir = d / dl;
+	ldirSh = normalize( ( e.p0 + e.p1 + e.p2 ) * ( 1.0 / 3.0 ) - s.Pw );
 	ndl  = max( dot( s.Nw, ldir ), 0.0 );
 	if ( !( ndl > 0.0 ) ) { return false; }
 	// nUnit points AT the receiver (the sampler re-winds): cos at the emitter = nUnit . (emitter -> receiver) = -nUnit . ldir.
