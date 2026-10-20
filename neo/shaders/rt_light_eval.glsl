@@ -24,6 +24,13 @@ const uint DUDE_LIGHT_NOSHADOWS = 4u;	// the light casts no shadows in stock eit
 const uint DUDE_LIGHT_FOGVOLUME  = 16u;	// not a light: a stock fog volume row (stored AFTER the lights, outside the light count)
 const uint DUDE_LIGHT_VIEWWEAPON = 8u;	// first-person weapon light: the player's flashlight, muzzle flashes
 const uint DUDE_LIGHT_DIFORWARD  = 32u;	// ReSTIR DI skips it (r_rtReStirDIDynamicForward): a fast-changing light the forward path lights at zero lag
+// E2 v3 (docs/rtx-experimental-lighting.md): an EMITTER row - an emissive surface of the RT emissive table standing in the
+// buffer as a light (rt_emissive.glsl rtEmissiveShadeRow samples it; RhiWorld.cpp RB_RHI_GatherSceneLights appends them
+// behind the fog rows). Its projection planes are NOT planes: projS.w = intensity, projT.xy = the table's address, projQ.xy
+// = first triangle / count (bits), projQ.z = the reach-boost knee. dudeLightAtten / dudeLightAttenTex return 0 for it, so a
+// consumer that has no emitter branch (reflections, volumetrics - they never receive these rows anyway) lights nothing.
+const uint DUDE_LIGHT_EMISSIVE   = 64u;
+const uint DUDE_LIGHT_BOUNCEONLY = 128u;	// emissive mode OFF, r_rtEmissiveBounce on: the DI gather skips the row, the GI bounce lights with it
 // flags bits 8-15 = volumetric haze scale * 255; bits 16-31 = the hybrid shadow blur's per-light blur scale as a half
 // float (ReSTIR DI soft grate coverage, restir_di_shade.glsl diLightBlurScale; 0 while r_rtShadowBlur is off)
 
@@ -49,6 +56,7 @@ void dudeLightDir( RtLights lights, uint li, vec3 p, out vec3 ldir, out float dl
 // textures are overwhelmingly round blobs on a black square; until the projection TEXTURE itself is sampled
 // the square pyramid is right for surface lighting (RR16c, verified) but reads as a box beam in the air.
 float dudeLightAtten( RtLights lights, uint li, vec3 p, float dl, uint flags, bool frustumGate, bool roundSpot ) {
+	if ( ( flags & DUDE_LIGHT_EMISSIVE ) != 0u ) { return 0.0; }				// an emitter row: not a frustum light (rtEmissiveShadeRow)
 	float atten = ( ( flags & DUDE_LIGHT_PARALLEL ) != 0u ) ? 1.0
 	            : max( 1.0 - dl / max( lights.l[ li ].radius, 1.0 ), 0.0 );
 	if ( frustumGate ) {

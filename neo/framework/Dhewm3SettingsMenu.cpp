@@ -4897,7 +4897,8 @@ static void DrawDbgGroup_ExperimentalLighting()
 	ImGui::BeginDisabled( !r_rtEmissiveLighting.GetBool() );
 	CvarSliderF( "Emitter Intensity", r_rtEmissiveIntensity, 0.0f, 32.0f, "%.2f", "How bright the emitters light the scene "
 		"relative to the placed lights (a multiplier on every emitter's radiance). Placed lights fall off linearly, emitters "
-		"with the inverse square, so there is no exact equivalence - tune by eye on a lit corridor. (r_rtEmissiveIntensity)" );
+		"with the inverse square (softened by the reach below), so there is no exact equivalence - tune by eye on a lit "
+		"corridor. (r_rtEmissiveIntensity)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveIntensity" ) ) { r_rtEmissiveIntensity.Reset(); }
 	ImGui::EndDisabled();	// r_rtEmissiveLighting (the bounce works in BOTH modes)
@@ -4913,43 +4914,25 @@ static void DrawDbgGroup_ExperimentalLighting()
 		"for those. (r_rtEmissiveReachDefault)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveReachDefault" ) ) { r_rtEmissiveReachDefault.Reset(); }
-	CvarCheckbox( "Emitters at the GI Bounce", r_rtEmissiveBounce, "The GI bounce hit draws one emitter sample from its grid cell "
-		"(one extra visibility ray per pixel) so the glowing surfaces add real bounce light. Works in BOTH modes: with "
-		"Emissive Mode off the placed lights keep the direct term and the emitters only add to the GI (needs the Emitter "
-		"Table on); with it on, walls lit only by emitters bounce. (r_rtEmissiveBounce)" );
-	ImGui::BeginDisabled( !r_rtEmissiveLighting.GetBool() );
+	CvarCheckbox( "Emitters at the GI Bounce", r_rtEmissiveBounce, "The glowing surfaces light the GI bounce's hit points like "
+		"any light (they are rows of the scene-light buffer the bounce already walks). Works in BOTH modes: with Emissive "
+		"Mode off the placed lights keep the direct term and the emitters only add to the GI (needs the Emitter Table on); "
+		"with it on, walls lit only by emitters bounce. (r_rtEmissiveBounce)" );
+	ImGui::BeginDisabled( !r_rtEmissiveLighting.GetBool() && !r_rtEmissiveBounce.GetBool() );
 
 	// ===== Sampling =====
 	ImGui::SeparatorText( "Sampling" );
 	{
-		int cand = idMath::ClampInt( 0, 16, r_rtEmissiveCandidates.GetInteger() );
+		int rows = idMath::ClampInt( 0, 255, r_rtEmissiveMaxRows.GetInteger() );
 		ImGui::SetNextItemWidth( 240.0f );
-		if ( ImGui::SliderInt( "Emitter Samples / pixel##rtEmissiveCandidates", &cand, 0, 16 ) ) {
-			r_rtEmissiveCandidates.SetInteger( cand );
+		if ( ImGui::SliderInt( "Emitter Rows / view##rtEmissiveMaxRows", &rows, 0, 255 ) ) {
+			r_rtEmissiveMaxRows.SetInteger( rows );
 		}
-		AddTooltip( "Emissive sample points drawn per pixel per frame and resampled next to the placed-light candidates. "
-			"More = less noise from many small emitters, dearer gather. 0 = emitters do not light (the mode's A/B). "
-			"(r_rtEmissiveCandidates)" );
+		AddTooltip( "How many emitting SURFACES a view's scene-light buffer may carry as light rows (the strongest at the eye "
+			"win; the light grid then ranks them per cell against the placed lights, so a row costs the same as a placed "
+			"light). The console census says how many the map has. 0 = no emitter lights. (r_rtEmissiveMaxRows)" );
 	}
-	CvarCheckbox( "Per-pixel Triangle Lists (near cells)", r_rtEmissiveGridTris, "Near light-grid cells store the 16 most "
-		"important emissive TRIANGLES and each pixel weighs them by their projected solid angle before picking - Q2RTX's "
-		"per-cluster light list. Off = cells store whole emitting surfaces and a triangle is picked inside by flux alone, "
-		"blind to the pixel (a long strip light's far end drawn as often as its near end: sparkle). (r_rtEmissiveGridTris)" );
-	{
-		int nc = idMath::ClampInt( 1, 4, r_rtEmissiveNearCascades.GetInteger() );
-		ImGui::SetNextItemWidth( 240.0f );
-		if ( ImGui::SliderInt( "Triangle-list Cascades##rtEmissiveNearCascades", &nc, 1, 4 ) ) {
-			r_rtEmissiveNearCascades.SetInteger( nc );
-		}
-		AddTooltip( "How many grid cascades (from the camera out) carry per-triangle lists; the farther ones carry surface "
-			"groups. More = the per-pixel weighing reaches farther, dearer grid fill. (r_rtEmissiveNearCascades)" );
-	}
-	CvarSliderF( "Sample Luminance Cap", r_rtEmissiveClamp, 0.0f, 16.0f, "%.2f", "Cap on the luminance one pixel's emitter "
-		"sample may add to the direct lighting before the denoiser. A firefly guard: biased (dims rare very bright samples), "
-		"but the denoiser cannot merge isolated spikes. 0 = off. (r_rtEmissiveClamp)" );
-	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##rtEmissiveClamp" ) ) { r_rtEmissiveClamp.Reset(); }
-	ImGui::EndDisabled();	// r_rtEmissiveLighting
+	ImGui::EndDisabled();	// r_rtEmissiveLighting || r_rtEmissiveBounce
 
 	// ===== Table =====
 	ImGui::SeparatorText( "Emitter Table" );

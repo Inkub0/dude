@@ -317,7 +317,7 @@ The user also found that MORE CANDIDATES brighten the far field: the estimator i
 fast-history clamps suppress a sparse bright signal, so a far wall lit by rare hits reads darker than its mean -
 more samples densify the signal and the denoiser keeps it. Reach and samples are complementary levers.
 
-## E2 v3 - EMITTERS AS LIGHT ROWS (decided 2026-10-20, branch feat/rtx-emissive-rows, NOT started)
+## E2 v3 - EMITTERS AS LIGHT ROWS (decided + BUILT 2026-10-20, branch feat/rtx-emissive-rows, user test pending)
 
 User verdict on E2 v2 (the Q2RTX port: second RIS stream, per-cell triangle lists, group records, shared-memory
 tiling, bounce NEE, E6 reach boost): "I was under the assumption we would just add emitter triangles and reuse as much
@@ -382,3 +382,29 @@ Flares, the debug overlay mode. Add: "Emitter rows cap" (new r_rtEmissiveMaxRows
 ### Guards (memory guard-vk-device-loss.md)
 Every emitter row's firstTri/numTris is bounds-checked against the table count in the shade branch; the row count the
 shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins ComputeGfxCfgSignature if it sizes a buffer.
+
+### Built (2026-10-20) - deviations from the plan above
+- Rows sit AFTER the fog rows ([placed n][fog][emitters]): the fog consumers index [n, n + nFog) unchanged; DI, the grid
+  fill and the bounce iterate every row and skip fog rows by flag (diShadeLight / the bounce loop test DUDE_LIGHT_FOGVOLUME).
+  RB_RHI_GatherSceneLights still RETURNS the placed count (reflections / volumetrics); RB_RHI_SceneRowCount() = every row.
+- Capacity: RT_SCENE_MAX_ROWS = 256 + 255 + 1; emitter rows <= r_rtEmissiveMaxRows (255) per view, the strongest at the eye
+  (mean lum x intensity x area / d^2) when over the cap. The 512 ceiling is the fp16 side channel (row + 1 + 0.25 x reason).
+- The row is SELF-DESCRIBING: projS.w = intensity, projT.xy = table address, projQ.x/y = first triangle / count (bits),
+  projQ.z = reach knee. rtEmissiveShadeRow (rt_emissive.glsl) needs nothing but the light buffer - any consumer can shade
+  it. dudeLightAtten / dudeLightAttenTex return 0 for DUDE_LIGHT_EMISSIVE rows (no accidental frustum read).
+- Reach boost KEPT (user-validated in v2): knee = radius / 4 with radius = inherited reach x r_rtEmissiveReach (0 = pure
+  inverse square), plus a soft fade 1.5R..2R to the row's cull sphere. Row colour = mean radiance x intensity x area / R^2
+  = the irradiance proxy at the reach, so the fill's lum x R^2 / d^2 ranks an emitter by what it delivers.
+- Sample seed = hash( row, receiving point, frame ): the RIS loop's target and the winner's re-shade draw the SAME point
+  (the reservoir weight must match the shade); a fresh point each frame for NRD. The gradient pass RETURNS (no evidence)
+  when either stored row is emissive; pad0 = 0 keeps emitter rows out of the lightDef -> row map.
+- Normal mode + r_rtEmissiveBounce: rows carry DUDE_LIGHT_BOUNCEONLY (128): diShadeLight skips them, the fill ranks them,
+  the bounce lights with them. They take grid slots from placed lights in that mode (accepted; a test convenience).
+- Deleted: the second RIS stream, diShadeEmitter, the grid's emissive record (slotsE / groups / triangle lists /
+  shared-memory tiling), the bounce NEE block, rtEmissiveReachBoost, the GPU group buffer, cvars r_rtEmissiveCandidates /
+  GridTris / NearCascades / Clamp (+ their ImGui rows). Added r_rtEmissiveMaxRows (ImGui "Emitter Rows / view").
+- Console line (once per mode toggle / table rebuild): "emissive mode: N fixtured placed lights dropped, M placed kept,
+  K emitter rows added (of T emitting surfaces; cap C)" - K < T beyond the cap or when a surface's reach cannot touch
+  the view.
+- Open: the within-run triangle pick is by flux (blind to the pixel: a long strip's far end as often as its near end).
+  If sparkle on long tubes returns, weigh the run's triangles by solid angle inside rtEmissiveShadeRow (small runs only).

@@ -8,7 +8,7 @@
 // Needs (before this include): renderparms.glsl, rt_light_eval.glsl, rt_light_tex.glsl, rt_perforated.glsl,
 // restir_di_common.glsl; GL_EXT_ray_query, GL_EXT_buffer_reference_uvec2, GL_EXT_nonuniform_qualifier.
 
-// EMISSIVE MODE (E2): the emissive triangle table the emitter shade below samples (guarded: the gather includes it too)
+// EMISSIVE MODE (E2 v3): the emitter ROWS of the light buffer (rtEmissiveShadeRow; guarded: the gather includes it too)
 #include "rt_emissive.glsl"
 
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
@@ -115,7 +115,18 @@ vec3 diMaterialResponse( in DiSurface s, vec3 ldir, float ndl ) {
 bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, out vec3 ldir, out float dl, out float ndl, bool targetOnly ) {
 	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	if ( !dudeLightInRange( lights, li, s.Pw ) ) { return false; }				// cheap volume-sphere cull
-	if ( ( lights.l[ li ].flags & DUDE_LIGHT_DIFORWARD ) != 0u ) { return false; }	// fast-changing light: the forward path lights it
+	uint lflags = lights.l[ li ].flags;
+	// fast-changing light: the forward path lights it; fog rows are not lights; a bounce-only emitter row is the bounce's
+	if ( ( lflags & ( DUDE_LIGHT_DIFORWARD | DUDE_LIGHT_FOGVOLUME | DUDE_LIGHT_BOUNCEONLY ) ) != 0u ) { return false; }
+	if ( ( lflags & DUDE_LIGHT_EMISSIVE ) != 0u ) {
+		// E2 v3: an EMITTER row - one sample point on its surface (rt_emissive.glsl), the same material response as any
+		// light. The seed is (row, point, frame): the loop's target and the winner's re-shade draw the same point.
+		if ( !rtEmissiveShadeRow( lights, li, s.Pw, s.Nw, rtEmissiveSeed( li, s.Pw, u_localParam1.x ), contrib, ldir, dl, ndl ) ) { return false; }
+		if ( s.applyMode && !targetOnly ) {
+			contrib *= diMaterialResponse( s, ldir, ndl );
+		}
+		return true;
+	}
 	dudeLightDir( lights, li, s.Pw, ldir, dl );
 	ndl = max( dot( s.Nw, ldir ), 0.0 );
 	if ( !( ndl > 0.0 ) ) { return false; }
@@ -125,45 +136,6 @@ bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, o
 		? dudeLightAttenTex( lights, li, s.Pw, dl, lights.l[ li ].flags, true, false, s.d * u_shadowFalloffS.y )
 		: vec3( dudeLightAtten( lights, li, s.Pw, dl, lights.l[ li ].flags, true, false ) );
 	contrib = lights.l[ li ].color * ( atten * ndl );							// irradiance-like: colour * cookie/falloff * N.L
-	if ( s.applyMode && !targetOnly ) {
-		contrib *= diMaterialResponse( s, ldir, ndl );
-	}
-	return true;
-}
-
-// EMISSIVE MODE (docs/rtx-experimental-lighting.md E2): the unshadowed contribution DENSITY of one sample point on
-// emissive triangle `tri` (xi = the uniform point's two randoms) at surface s - per unit EMITTER AREA, so the RIS
-// weight divides it by the sample's area-measure pdf (flux share / area). radiance = the glow texel at the point
-// (rtEmissiveTexelToRadiance: the stage tint, or the diffuse through its threshold for a flare-inferred patch) x the
-// material scale x the mode intensity; geometry = cos at the emitter (two-sided when the material is) x N.L at the
-// receiver / d^2 (d clamped at 2 units: a receiver flush with its tube). false = cannot reach / dark / behind.
-// Same material response as a placed light in apply mode. Needs rt_emissive.glsl + the bindless u_rtTextures.
-// ldirSh = the direction to the emitter's CENTRE: what the SH side channel carries for an emitter winner. The sampled
-// point differs per pixel, NRD aggregates those directions into a short vector and the apply's specular re-shade
-// reads a short vector as "no concentrated highlight" - the glossy floor went flat under the tiles (user, 2026-10-20).
-// The centre keeps the vector long and puts the highlight at the tile's mirror point.
-bool diShadeEmitter( RtEmissiveTable t, uint tri, vec2 xi, in DiSurface s, float intensity, out vec3 contrib, out vec3 ldir, out float dl, out float ndl, out float pdfw, out vec3 ldirSh, bool targetOnly ) {
-	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;	pdfw = 0.0;	ldirSh = vec3( 0.0, 0.0, 1.0 );
-	RtEmissiveTri e = rtEmissiveFetch( t, tri );
-	if ( !( e.flux > 0.0 ) ) { return false; }									// dark (switched off / gone)
-	// the sample point UNIFORM IN SOLID ANGLE from the receiver (Arvo; Q2RTX): the contribution is then per unit solid
-	// angle, L x N.L, bounded by the solid angle - no 1/d^2 term at all (it is inside pdfw)
-	vec3 Pe, nUnit; bool front;
-	if ( !rtEmissiveSampleSolidAngle( e, s.Pw, xi, Pe, nUnit, pdfw, front ) ) { return false; }
-	if ( !front && ( e.emit & RT_EMIT_TWOSIDED ) == 0u ) { return false; }	// a one-sided emitter seen from its back
-	vec3 d = Pe - s.Pw;
-	dl   = length( d );
-	if ( !( dl > 1e-3 ) ) { return false; }
-	ldir = d / dl;
-	ldirSh = normalize( ( e.p0 + e.p1 + e.p2 ) * ( 1.0 / 3.0 ) - s.Pw );
-	ndl  = max( dot( s.Nw, ldir ), 0.0 );
-	if ( !( ndl > 0.0 ) ) { return false; }
-	// nUnit points AT the receiver (the sampler re-winds): cos at the emitter = nUnit . (emitter -> receiver) = -nUnit . ldir.
-	// Emission profile sqrt( cos_e ) (Q2RTX's "spotlight"): a tube reads directional, a tile stays broad.
-	float cosL = max( -dot( nUnit, ldir ), 0.0 );
-	if ( !( cosL > 0.0 ) ) { return false; }
-	vec3 L = rtEmissiveMeanRadiance( e ) * ( e.scale * intensity * rtEmissiveReachBoost( e, dl, u_texGen0Q.z, u_texGen0Q.w ) );	// a uniform emitter: its mean radiance, the authored reach
-	contrib = L * ( sqrt( cosL ) * ndl );
 	if ( s.applyMode && !targetOnly ) {
 		contrib *= diMaterialResponse( s, ldir, ndl );
 	}

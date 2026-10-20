@@ -2843,14 +2843,12 @@ struct rtEmissiveLightDbg_t { idVec3 origin; int kind; };	// kind: 0 fixtured (d
 static idList<rtEmissiveLightDbg_t>	s_rtEmissiveLightDbg;
 static rhi::BufferHandle		s_rtEmissiveLightDbgVB = 0, s_rtEmissiveLightDbgIB = 0;
 static int						s_rtEmissiveLightDbgIndexes = 0;
-// E2 v2b: the emitter GROUPS the light grid streams (one per table surface run = label: centroid, bounding radius, flux,
-// the run's triangle range). The grid fill keeps the top groups per cell by flux / d^2 (Q2RTX's per-cluster light
-// list, with the grid as the cluster); a pixel draws a group from its cell, a triangle inside it by flux, a point by
-// solid angle. 32 B each; rebuilt whenever flux (state) or positions (movers) change.
-struct rtEmissiveGroupGPU_t { float c[3]; float radius; float flux; unsigned int firstTri, numTris, pad; };
-static rhi::BufferHandle		s_rtEmissiveGroupBuf = 0;
-static unsigned long long		s_rtEmissiveGroupAddr = 0;
-static int						s_rtEmissiveGroupCount = 0;
+// E2 v3 (docs/rtx-experimental-lighting.md "E2 v3"): the emitter ROWS - one per table surface run (= label) - the
+// scene-light gather (RhiWorld.cpp RB_RHI_GatherSceneLights) appends to the scene-light buffer as DUDE_LIGHT_EMISSIVE
+// rows, so the light grid, the ReSTIR reservoir, the SH side channel, the apply's specular re-shade and the GI bounce
+// treat an emitter exactly like a placed light. CPU only (no GPU group buffer): rebuilt whenever flux (a fixture's
+// state) or positions (movers) change. The row's triangles are sampled on the GPU straight from the table.
+static idList<rtEmissiveRow_t>	s_rtEmissiveRows;
 
 static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat, const char **why = NULL, const float *entityParms = NULL ) {
 	const char *reason = "";
@@ -3370,13 +3368,12 @@ static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float s
 static void R_RtEmissiveFree( void ) {
 	rhi::RHI *r = rhi::GetRHI();
 	if ( r != NULL ) {
-		if ( s_rtEmissiveGroupBuf != 0 ) { r->DestroyBuffer( s_rtEmissiveGroupBuf ); }
 		if ( s_rtEmissiveBuf != 0 )   { r->DestroyBuffer( s_rtEmissiveBuf ); }
 		if ( s_rtEmissiveDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveDbgVB ); }
 		if ( s_rtEmissiveDbgIB != 0 ) { r->DestroyBuffer( s_rtEmissiveDbgIB ); }
 	}
 	s_rtEmissiveBuf = 0;	s_rtEmissiveAddr = 0;	s_rtEmissiveTotalFlux = 0.0f;
-	s_rtEmissiveGroupBuf = 0;	s_rtEmissiveGroupAddr = 0;	s_rtEmissiveGroupCount = 0;
+	s_rtEmissiveRows.Clear();
 	s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0;	s_rtEmissiveDbgIndexes = 0;
 	s_rtEmissiveTris.Clear();
 	s_rtEmissiveGroups.Clear();
@@ -3594,59 +3591,63 @@ static void R_RtEmissiveFillDebugVerts( int firstTri, int numTris, idDrawVert *v
 	}
 }
 
-// E2 v2b: (re)build the emitter GROUPS from the labels (one per surface run) and upload them. Called after the build
-// and after any in-place change (state: flux; movers: positions). The buffer is created at the label count once.
-static void R_RtEmissiveUploadGroups( rhi::RHI *r ) {
+// E2 v3: (re)build the emitter ROWS from the labels (one per surface run). Called after the build and after any
+// in-place change (state: flux; movers: positions). A row is one WHOLE surface run: a cell's slots must hold DISTINCT
+// emitters (chunking a big tile into pieces let one tile fill every slot of the cells under it and starved every other
+// light there - the dark Marine HQ of 2026-10-20).
+static void R_RtEmissiveBuildRows( void ) {
+	s_rtEmissiveRows.SetNum( 0, false );
 	if ( s_rtEmissiveLabels.Num() == 0 || s_rtEmissiveBuf == 0 ) {
 		return;
 	}
-	// a group is one WHOLE surface run: a cell's 8 group slots must be 8 DISTINCT emitters (chunking a big tile into 16-
-	// triangle pieces let one tile fill every slot of the cells under it and starved every other light there - the dark
-	// Marine HQ of 2026-10-20). The near-cascade triangle walk strides through a long run instead (light_grid_fill.comp).
-	static idList<rtEmissiveGroupGPU_t> groups;
-	groups.SetNum( 0, false );
 	for ( int i = 0; i < s_rtEmissiveLabels.Num(); i++ ) {
 		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[i];
-		{
-			const int start = 0, cnt = l.numTris;
-			rtEmissiveGroupGPU_t &g = groups.Alloc();
-			idVec3 c( 0.0f, 0.0f, 0.0f );
-			float flux = 0.0f;
-			for ( int t = 0; t < cnt; t++ ) {
-				const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + start + t ];
-				c.x += e.p0[0] + e.p1[0] + e.p2[0]; c.y += e.p0[1] + e.p1[1] + e.p2[1]; c.z += e.p0[2] + e.p1[2] + e.p2[2];
+		if ( l.numTris <= 0 || l.firstTri < 0 || l.firstTri + l.numTris > s_rtEmissiveTris.Num() ) {
+			continue;
+		}
+		rtEmissiveRow_t row;
+		idVec3 c( 0.0f, 0.0f, 0.0f ), mean( 0.0f, 0.0f, 0.0f );
+		float flux = 0.0f, area = 0.0f, reach = 0.0f;
+		bool dark = true;
+		for ( int t = 0; t < l.numTris; t++ ) {
+			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
+			const idVec3 p0( e.p0[0], e.p0[1], e.p0[2] ), p1( e.p1[0], e.p1[1], e.p1[2] ), p2( e.p2[0], e.p2[1], e.p2[2] );
+			c += p0 + p1 + p2;
+			area += 0.5f * ( ( p1 - p0 ).Cross( p2 - p0 ) ).Length();
+			if ( e.flux > 0.0f ) {
+				dark = false;
+				// the mean linear radiance of this triangle x its material scale, weighted by its flux (the big bright
+				// triangles decide the row's colour)
+				const idVec3 m( R_RtF16toF32( e.meanRG & 0xFFFFu ), R_RtF16toF32( e.meanRG >> 16 ), R_RtF16toF32( e.meanB & 0xFFFFu ) );
+				mean += m * ( e.scale * e.flux );
 				flux += e.flux;
 			}
-			c *= 1.0f / ( 3.0f * cnt );
-			float r2 = 0.0f;
-			for ( int t = 0; t < cnt; t++ ) {
-				const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + start + t ];
-				const float *pp[3] = { e.p0, e.p1, e.p2 };
-				for ( int k = 0; k < 3; k++ ) { const float d2 = ( idVec3( pp[k][0], pp[k][1], pp[k][2] ) - c ).LengthSqr(); if ( d2 > r2 ) { r2 = d2; } }
-			}
-			g.c[0] = c.x; g.c[1] = c.y; g.c[2] = c.z;
-			g.radius = idMath::Sqrt( r2 );
-			g.flux = flux;
-			g.firstTri = (unsigned int)( l.firstTri + start );
-			g.numTris = (unsigned int)cnt;
-			g.pad = 0u;
+			float r; memcpy( &r, &e.reach, sizeof( r ) );
+			if ( r > reach ) { reach = r; }
 		}
-	}
-	const int n = groups.Num();
-	const int bytes = n * (int)sizeof( rtEmissiveGroupGPU_t );
-	if ( s_rtEmissiveGroupBuf == 0 || s_rtEmissiveGroupCount != n ) {
-		if ( s_rtEmissiveGroupBuf != 0 ) { r->DestroyBuffer( s_rtEmissiveGroupBuf ); }
-		s_rtEmissiveGroupBuf  = r->CreateBuffer( rhi::BU_STORAGE, bytes, groups.Ptr() );
-		s_rtEmissiveGroupAddr = ( s_rtEmissiveGroupBuf != 0 ) ? r->GetBufferDeviceAddress( s_rtEmissiveGroupBuf ) : 0;
-		s_rtEmissiveGroupCount = ( s_rtEmissiveGroupBuf != 0 ) ? n : 0;
-	} else {
-		r->UpdateBuffer( s_rtEmissiveGroupBuf, 0, bytes, groups.Ptr() );
+		c *= 1.0f / ( 3.0f * l.numTris );
+		float r2 = 0.0f;
+		for ( int t = 0; t < l.numTris; t++ ) {
+			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
+			const float *pp[3] = { e.p0, e.p1, e.p2 };
+			for ( int k = 0; k < 3; k++ ) { const float d2 = ( idVec3( pp[k][0], pp[k][1], pp[k][2] ) - c ).LengthSqr(); if ( d2 > r2 ) { r2 = d2; } }
+		}
+		row.centroid = c;
+		row.boundRadius = idMath::Sqrt( r2 );
+		row.flux = flux;
+		row.area = area;
+		row.meanRadiance = ( flux > 0.0f ) ? mean * ( 1.0f / flux ) : idVec3( 0.0f, 0.0f, 0.0f );
+		row.reach = reach;								// 0 = no placed light covers it (the gather applies r_rtEmissiveReachDefault)
+		row.firstTri = l.firstTri;
+		row.numTris = l.numTris;
+		row.dark = dark;
+		s_rtEmissiveRows.Append( row );
 	}
 }
 
-unsigned long long R_RtEmissiveGroupsAddress( int *count ) {
-	if ( count ) { *count = s_rtEmissiveGroupCount; }
-	return ( s_rtEmissiveGroupBuf != 0 && s_rtEmissiveBuf != 0 ) ? s_rtEmissiveGroupAddr : 0;
+int R_RtEmissiveRows( const rtEmissiveRow_t **rows ) {
+	if ( rows ) { *rows = s_rtEmissiveRows.Ptr(); }
+	return ( s_rtEmissiveBuf != 0 ) ? s_rtEmissiveRows.Num() : 0;
 }
 
 // Recompute the flux CDF + header over the CPU table and upload them (after an in-place flux change).
@@ -3843,7 +3844,7 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 		R_RtEmissiveUploadCdf( r );												// flux changed somewhere: the sampling CDF follows
 	}
 	if ( cdfDirty || movedThisFrame ) {
-		R_RtEmissiveUploadGroups( r );											// the grid's groups follow flux and position changes
+		R_RtEmissiveBuildRows();												// the emitter rows follow flux and position changes
 	}
 }
 
@@ -3992,7 +3993,7 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	R_RtEmissiveBuild( world, r );
 	if ( s_rtEmissiveBuf != 0 ) {
 		R_RtEmissiveLightCensus( world, r );	// E5 prep: fixtured vs ambience placed lights
-		R_RtEmissiveUploadGroups( r );			// E2 v2b: the emitter groups the light grid streams
+		R_RtEmissiveBuildRows();				// E2 v3: the emitter rows the scene-light gather appends
 	}
 	s_rtEmissiveMap = world->mapName;		// the latch: an empty map builds nothing but is not retried every frame
 }
@@ -4341,7 +4342,7 @@ void R_RtResetSceneState( void ) {
 	// E1 emissive table: handles are stale too; the CPU copy goes with them so the next RT frame rebuilds
 	s_rtEmissiveBuf = 0; s_rtEmissiveAddr = 0; s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0; s_rtEmissiveDbgIndexes = 0;
 	s_rtEmissiveTris.Clear(); s_rtEmissiveGroups.Clear(); s_rtEmissiveLocalVerts.Clear(); s_rtEmissiveLabels.Clear(); s_rtEmissiveScreenLabels.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
-	s_rtEmissiveGroupBuf = 0; s_rtEmissiveGroupAddr = 0; s_rtEmissiveGroupCount = 0; s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0; s_rtEmissiveLightFixturedSerial.Clear(); s_rtEmissiveLightDbg.Clear();
+	s_rtEmissiveRows.Clear(); s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0; s_rtEmissiveLightFixturedSerial.Clear(); s_rtEmissiveLightDbg.Clear();
 }
 
 // DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit

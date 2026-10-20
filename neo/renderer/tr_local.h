@@ -1090,11 +1090,8 @@ extern idCVar r_rtEmissiveTableDebug;		// RT emissive table debug overlay: 1 per
 extern idCVar r_rtEmissiveScale;
 extern idCVar r_rtEmissiveLighting;		// EMISSIVE MODE master switch (D6): emitters light the scene (E2); implies the table, hides flares
 extern idCVar r_rtEmissiveIntensity;		// emissive mode: radiance multiplier of every emitter
-extern idCVar r_rtEmissiveCandidates;		// emissive mode: emissive sample points per pixel in the DI gather
-extern idCVar r_rtEmissiveGridTris;		// emissive mode: near grid cells store triangles weighed per pixel by solid angle (Q2RTX lists)
-extern idCVar r_rtEmissiveNearCascades;	// emissive mode: cascades with per-triangle lists
-extern idCVar r_rtEmissiveBounce;			// emissive mode: emitter sample at the GI bounce hit
-extern idCVar r_rtEmissiveClamp;			// emissive mode: luminance cap on a pixel's emitter sample (0 = off)
+extern idCVar r_rtEmissiveMaxRows;		// emissive mode: emitter rows (surfaces) a view's scene-light buffer may carry
+extern idCVar r_rtEmissiveBounce;			// emitter rows ride the GI bounce in normal mode too (bounce-only rows)
 extern idCVar r_rtEmissiveReach;			// emissive mode: reach as a multiple of the replaced light's authored radius (0 = physical)
 extern idCVar r_rtEmissiveReachDefault;	// emissive mode: reach (units) of an emitter no placed light covers
 extern idCVar r_rtEmissiveHideFlares;		// emitter mode: hide the flare sprites of fixtures that are table emitters			// RT emissive table: global flux / emitted-colour multiplier (rebuilds the table)
@@ -1134,7 +1131,12 @@ int  R_RtGatherPerforatedBoxes( const idBounds &b, idBounds *out, int maxOut );	
 // the current map (0 = none / off), with its triangle count and total flux; and the lazily built debug geometry
 // (one idDrawVert per table vertex + an index list) for r_rtEmissiveTableDebug.
 unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, float *meanFlux );
-unsigned long long R_RtEmissiveGroupsAddress( int *count );	// E2 v2b: the emitter groups (one per surface run) the light grid streams; 0 = none
+// E2 v3: one emitter ROW per emissive surface run - what RB_RHI_GatherSceneLights turns into a DUDE_LIGHT_EMISSIVE row
+// of the scene-light buffer (centroid, bounding radius, flux, flux-weighted mean linear radiance x material scale, total
+// area, the inherited reach of the placed light it replaces (0 = none), its triangle range in the table). dark = every
+// triangle at zero flux (switched off / gone): never a row.
+struct rtEmissiveRow_t { idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; float reach; int firstTri, numTris; bool dark; };
+int R_RtEmissiveRows( const rtEmissiveRow_t **rows );		// the rows (0 = no table)
 bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );
 bool R_RtEmissiveLightDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );	// overlay mode 5: the placed lights as census-coloured spheres
 bool R_RtEmissiveLightDropped( int lightIndex, unsigned int serial );	// E5: a fixtured placed light is dropped while emissive mode is on

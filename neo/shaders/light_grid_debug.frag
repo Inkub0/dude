@@ -60,7 +60,7 @@ void main() {
 	}
 
 	LgGrid grid = LgGrid( p.gridAddr );
-	int    base = int( lgCellIndex( c, cell, p.res ) * lgStride( p.slots, p.slotsE ) );
+	int    base = int( lgCellIndex( c, cell, p.res ) * lgStride( p.slots ) );
 	uint   n    = lgCount( grid, base );
 	if ( n == 0u ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }				// empty cell (no in-range light): black
 

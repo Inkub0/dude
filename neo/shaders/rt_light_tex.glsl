@@ -29,6 +29,7 @@ layout(set = 2, binding = 0) uniform sampler2D u_rtTextures[];
 // d(st)/d(pixel) = grad_p(st) * pixelWorld, grad_p(s) = (S.xyz - s*Q.xyz)/q, lod = log2(footprint in texels).
 // Isotropic (the minor axis), which is what anisotropic filtering keys its LOD on; the falloff ramp stays mip 0.
 vec3 dudeLightAttenTex( RtLights lights, uint li, vec3 p, float dl, uint flags, bool frustumGate, bool roundSpot, float pixelWorld ) {
+	if ( ( flags & DUDE_LIGHT_EMISSIVE ) != 0u ) { return vec3( 0.0 ); }		// an emitter row: not a frustum light (rtEmissiveShadeRow)
 	uint projTex = lights.l[ li ].projTex;
 	if ( projTex == 0u ) {
 		return vec3( dudeLightAtten( lights, li, p, dl, flags, frustumGate, roundSpot ) );

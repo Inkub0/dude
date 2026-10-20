@@ -196,6 +196,11 @@ void main() {
 	const uint tableCap   = uint( max( u_tessParms.y, 0.0 ) + 0.5 );
 	if ( bestPrevRow != 0u && bestPrevRow > nPrevLights ) { return; }		// stale / corrupt side data: no evidence
 	if ( bestCurRow  != 0u && bestCurRow  > nLights )     { return; }
+	// E2 v3: an EMITTER row (DUDE_LIGHT_EMISSIVE) is never re-shaded here - its shade draws a fresh sample point every
+	// frame (rt_emissive.glsl), which would read as a lighting change and reset the history under every emitter. An
+	// emitter's state changes (a fixture switched off) reach the table, not the gradient: no evidence either way.
+	if ( ( bestCurRow != 0u && ( lights.l[ bestCurRow - 1u ].flags & DUDE_LIGHT_EMISSIVE ) != 0u )
+			|| ( bestPrevRow != 0u && ( prevLights.l[ bestPrevRow - 1u ].flags & DUDE_LIGHT_EMISSIVE ) != 0u ) ) { return; }
 
 	// the same light in both frames? (slot AND creation serial: a freed slot is reused at once)
 	bool sameLight = false;

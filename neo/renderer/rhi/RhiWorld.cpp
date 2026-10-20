@@ -609,9 +609,6 @@ struct rtLightGridParms_t {
 	int					res;				// cells per cascade axis (r_rtLightGridRes)
 	int					cascades;			// camera-centred cascades (r_rtLightGridCascades)
 	int					slots;				// candidates per cell (r_rtLightGridSlots)
-	int					slotsE;				// E2 v2b: emissive group slots per cell (8 while emissive mode is on, else 0)
-	unsigned long long	groupAddr;			// E2 v2b: the emitter group buffer (0 = none)
-	int					numGroups;
 };
 struct rtLightGridState_t {
 	rhi::BufferHandle	gridBuf = 0;
@@ -904,6 +901,12 @@ static rhi::BufferHandle    s_rtReflLightBuf  = 0;
 static unsigned long long   s_rtReflLightAddr = 0;
 static int                  s_sceneFogCount   = 0;	// stock fog-light volumes appended AFTER the lights in the current slot (volumetrics only)
 #define SCENE_FOG_MAX        8
+// E2 v3 (docs/rtx-experimental-lighting.md "E2 v3"): the scene-light buffer carries the placed lights (<= RT_REFL_MAX_LIGHTS
+// incl. the fog rows), then the EMITTER rows (DUDE_LIGHT_EMISSIVE, one per emissive surface: RT_EMIT_MAX_ROWS). The DI
+// gather's side channel stores row + 1 + 0.25 x boost reason in fp16, exact only below 512 rows - the hard ceiling.
+#define RT_EMIT_MAX_ROWS     255
+#define RT_SCENE_MAX_ROWS    ( RT_REFL_MAX_LIGHTS + RT_EMIT_MAX_ROWS + 1 )
+static int                  s_sceneRowCount   = 0;	// EVERY row of the current slot: lights + fog + emitters (what DI, the grid and the bounce iterate)
 static int  rhiRtReflW = 0, rhiRtReflH = 0;
 static rhi::RenderTargetHandle rhiRtReflHistRT[2] = { 0, 0 };	// temporal history ping-pong
 static int  rhiRtReflHistIdx = 0;					// slot that receives this frame's resolve
@@ -5925,7 +5928,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		*outAddr = cacheAddr;
 		return cacheCount;
 	}
-	s_sceneLightCacheView = viewDef;	s_sceneLightCacheFrame = tr.frameCount;	cacheCount = 0;	cacheAddr = 0;
+	s_sceneLightCacheView = viewDef;	s_sceneLightCacheFrame = tr.frameCount;	cacheCount = 0;	cacheAddr = 0;	s_sceneRowCount = 0;
 	s_sceneLightGen++;		// every lightDef's stamp is now stale until the fill below re-includes it
 	s_sceneFogCount = 0;
 	*outAddr = 0;
@@ -5936,7 +5939,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	}
 	if ( s_rtReflLightBuf == 0 ) {
 		s_rtReflLightBuf  = r->CreateBuffer( rhi::BU_STORAGE,
-			RT_REFL_LIGHT_SLOTS * RT_REFL_MAX_LIGHTS * (int)sizeof( RtReflLightGPU ), NULL );
+			RT_REFL_LIGHT_SLOTS * RT_SCENE_MAX_ROWS * (int)sizeof( RtReflLightGPU ), NULL );
 		s_rtReflLightAddr = ( s_rtReflLightBuf != 0 ) ? r->GetBufferDeviceAddress( s_rtReflLightBuf ) : 0;
 	}
 	if ( s_rtReflLightBuf == 0 || s_rtReflLightAddr == 0 ) {
@@ -5946,7 +5949,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	const idVec3 viewOrg = viewDef->renderView.vieworg;
 	const float  REACH   = 2048.0f;					// how far off-screen a light's reach may still touch the reflection
 	static RtReflLightGPU lights[ RT_REFL_MAX_LIGHTS ];
-	static RtReflLightGPU sorted[ RT_REFL_MAX_LIGHTS ];
+	static RtReflLightGPU sorted[ RT_SCENE_MAX_ROWS ];
 	static float          sortKey[ RT_REFL_MAX_LIGHTS ];
 	int n = 0;
 	// Lights that are ALSO in this view carry evaluated shader registers: use them so a flickering /
@@ -6139,22 +6142,6 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		}
 	}
 	}
-	// E5: say how many fixtured placed lights this view drops whenever that changes (the proof the drop is live)
-	{
-		// once when the mode comes on and once per table rebuild - not on every change of the in-view count (that
-		// spammed a line every time a light entered or left the view, 2026-10-20)
-		static bool lastMode = false;
-		static unsigned long long lastTable = 0;
-		const bool mode = r_rtEmissiveLighting.GetBool();
-		const unsigned long long table = mode ? R_RtEmissiveTableAddress( NULL, NULL, NULL ) : 0;
-		if ( mode && ( !lastMode || table != lastTable ) && table != 0 ) {
-			common->Printf( "emissive mode: %d fixtured placed lights dropped in this view, %d placed lights kept\n", s_diSkipEmissiveDrop, n );
-		}
-		lastMode = mode; lastTable = table;
-	}
-	if ( n == 0 ) {
-		return 0;
-	}
 	int order[ RT_REFL_MAX_LIGHTS ];
 	for ( int i = 0; i < n; i++ ) {					// insertion sort of indices by key (n <= 256, mostly a handful)
 		int j = i;
@@ -6164,18 +6151,109 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	for ( int i = 0; i < n; i++ ) { sorted[ i ] = lights[ order[ i ] ]; }
 	for ( int i = 0; i < nFog; i++ ) { sorted[ n + i ] = fogs[ i ]; }		// fog volumes ride behind the lights
 	s_sceneFogCount = nFog;
+	// E2 v3: the EMITTER rows, behind the fog rows (the fog consumers index [n, n + nFog) and never see them; DI, the
+	// grid fill and the bounce iterate every row and skip the fog rows by flag). One row per emissive surface run
+	// (tr_main.cpp R_RtEmissiveRows): a DUDE_LIGHT_EMISSIVE light whose "shade" draws a triangle of its run by flux
+	// and a point on it by solid angle (rt_emissive.glsl rtEmissiveShadeRow). radius = the REACH: the authored radius of
+	// the placed light the emitter replaced (E5 census) x r_rtEmissiveReach, else r_rtEmissiveReachDefault - the grid's
+	// importance (lum x radius^2 / d^2) and the shade's reach boost both read it. colour = the row's irradiance proxy at
+	// distance radius (mean radiance x intensity x area / radius^2), so the grid ranks it against the placed lights by
+	// what it actually delivers. The projection planes (unused by an emitter) carry: projS.w = intensity, projT.xy = the
+	// table's device address, projQ.x/y = first triangle / count (bits), projQ.z = the reach-boost knee (0 = off).
+	// pad0 = 0: not a lightDef (the gradient pass skips emissive rows outright); pad1 = row index + 1 (debugging).
+	// With emissive mode OFF and r_rtEmissiveBounce on, the rows are BOUNCEONLY: the DI gather skips them (the placed
+	// lights keep the direct term), the bounce lights its hits with them. Capped at r_rtEmissiveMaxRows per view by
+	// importance at the eye; a row whose reach cannot touch the view (centre farther than reach + REACH) is left out.
+	int nEm = 0, nEmTotal = 0;
+	if ( r_rtEmissiveLighting.GetBool() || r_rtEmissiveBounce.GetBool() ) {
+		const rtEmissiveRow_t *rows = NULL;
+		int emTris = 0; float emTotal = 0.0f, emMean = 0.0f;
+		const int nRows = R_RtEmissiveRows( &rows );
+		const unsigned long long tAddr = R_RtEmissiveTableAddress( &emTris, &emTotal, &emMean );
+		if ( nRows > 0 && rows != NULL && tAddr != 0 && emTris > 0 ) {
+			nEmTotal = nRows;
+			const float intensity = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveIntensity.GetFloat() );
+			const float reachMul  = idMath::ClampFloat( 0.0f, 8.0f, r_rtEmissiveReach.GetFloat() );
+			const float reachDef  = idMath::ClampFloat( 0.0f, 4096.0f, r_rtEmissiveReachDefault.GetFloat() );
+			const int   cap       = Min( Min( idMath::ClampInt( 0, RT_EMIT_MAX_ROWS, r_rtEmissiveMaxRows.GetInteger() ), RT_EMIT_MAX_ROWS ), RT_SCENE_MAX_ROWS - n - nFog );
+			static int   pick[ RT_EMIT_MAX_ROWS ];
+			static float pickImp[ RT_EMIT_MAX_ROWS ];
+			int np = 0;
+			for ( int i = 0; i < nRows && cap > 0; i++ ) {
+				const rtEmissiveRow_t &row = rows[i];
+				if ( row.dark || !( row.flux > 0.0f ) || row.numTris <= 0 || row.firstTri < 0 || row.firstTri + row.numTris > emTris ) { continue; }
+				float R = ( row.reach > 0.0f ) ? row.reach : reachDef;
+				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
+				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
+				const float dist   = Max( ( row.centroid - viewOrg ).Length() - row.boundRadius, 0.0f );
+				if ( dist > 2.0f * radius + REACH ) { continue; }						// cannot touch anything near the view
+				const float lum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
+				const float imp = lum * intensity * row.area / Max( dist * dist, 64.0f * 64.0f );	// the grid's own ranking at the eye
+				if ( !( imp > 0.0f ) ) { continue; }
+				if ( np < cap ) {
+					pick[ np ] = i; pickImp[ np ] = imp; np++;
+				} else {
+					int weakest = 0;
+					for ( int k = 1; k < np; k++ ) { if ( pickImp[k] < pickImp[weakest] ) { weakest = k; } }
+					if ( imp > pickImp[weakest] ) { pick[weakest] = i; pickImp[weakest] = imp; }
+				}
+			}
+			const unsigned int tLo = (unsigned int)( tAddr & 0xFFFFFFFFull ), tHi = (unsigned int)( tAddr >> 32 );
+			for ( int k = 0; k < np; k++ ) {
+				const rtEmissiveRow_t &row = rows[ pick[k] ];
+				float R = ( row.reach > 0.0f ) ? row.reach : reachDef;
+				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
+				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
+				RtReflLightGPU &L = sorted[ n + nFog + nEm ];
+				memset( &L, 0, sizeof( L ) );
+				L.cull[0] = row.centroid.x; L.cull[1] = row.centroid.y; L.cull[2] = row.centroid.z; L.cull[3] = row.boundRadius + 2.0f * radius;
+				L.pos[0] = row.centroid.x; L.pos[1] = row.centroid.y; L.pos[2] = row.centroid.z;
+				L.radius = radius;
+				const float k2 = intensity * row.area / ( radius * radius );
+				L.color[0] = row.meanRadiance.x * k2; L.color[1] = row.meanRadiance.y * k2; L.color[2] = row.meanRadiance.z * k2;
+				L.flags = 64u | ( r_rtEmissiveLighting.GetBool() ? 0u : 128u );		// bit6 = emissive row, bit7 = bounce-only (normal mode)
+				L.proj[0][3] = intensity;
+				memcpy( &L.proj[1][0], &tLo, sizeof( tLo ) );
+				memcpy( &L.proj[1][1], &tHi, sizeof( tHi ) );
+				const unsigned int first = (unsigned int)row.firstTri, num = (unsigned int)row.numTris;
+				memcpy( &L.proj[2][0], &first, sizeof( first ) );
+				memcpy( &L.proj[2][1], &num, sizeof( num ) );
+				L.proj[2][2] = ( reachMul > 0.0f ) ? 0.25f * radius : 0.0f;			// the reach-boost knee (rt_emissive.glsl)
+				L.pad0 = 0u;
+				L.pad1 = (unsigned int)pick[k] + 1u;
+				nEm++;
+			}
+		}
+	}
+	// E5: say how many fixtured placed lights this view drops whenever that changes (the proof the drop is live)
+	{
+		// once when the mode comes on and once per table rebuild - not on every change of the in-view count (that
+		// spammed a line every time a light entered or left the view, 2026-10-20)
+		static bool lastMode = false;
+		static unsigned long long lastTable = 0;
+		const bool mode = r_rtEmissiveLighting.GetBool();
+		const unsigned long long table = mode ? R_RtEmissiveTableAddress( NULL, NULL, NULL ) : 0;
+		if ( mode && ( !lastMode || table != lastTable ) && table != 0 ) {
+			common->Printf( "emissive mode: %d fixtured placed lights dropped in this view, %d placed lights kept, %d emitter rows added (of %d emitting surfaces; cap %d)\n", s_diSkipEmissiveDrop, n, nEm, nEmTotal, r_rtEmissiveMaxRows.GetInteger() );
+		}
+		lastMode = mode; lastTable = table;
+	}
+	if ( n + nFog + nEm == 0 ) {
+		return 0;
+	}
 	const int slot      = (int)( tr.frameCount % RT_REFL_LIGHT_SLOTS );
-	const int slotBytes = RT_REFL_MAX_LIGHTS * (int)sizeof( RtReflLightGPU );
-	r->UpdateBuffer( s_rtReflLightBuf, slot * slotBytes, ( n + nFog ) * (int)sizeof( RtReflLightGPU ), sorted );
+	const int slotBytes = RT_SCENE_MAX_ROWS * (int)sizeof( RtReflLightGPU );
+	r->UpdateBuffer( s_rtReflLightBuf, slot * slotBytes, ( n + nFog + nEm ) * (int)sizeof( RtReflLightGPU ), sorted );
 	*outAddr = s_rtReflLightAddr + (unsigned long long)( slot * slotBytes );
 	cacheCount = n;	cacheAddr = *outAddr;
+	s_sceneRowCount = n + nFog + nEm;
 	// R1 (docs/rtx-restir-di.md Plan R1): the lightDef -> row table for THIS frame's buffer (RTXDI's light index
 	// mapping buffer), so next frame's gradient pass can find "the same light" after the sort reshuffles the rows.
 	// row + 1 per lightDef, 0 = not in the buffer this frame (switched off / culled). Same ring slot idiom as the
 	// light buffer; the slot's addresses + frame stamp are kept so the DI pass can name LAST frame's pair.
 	s_sceneLightSlotAddr[ slot ]  = *outAddr;
 	s_sceneLightSlotFrame[ slot ] = tr.frameCount;
-	s_sceneLightSlotCount[ slot ] = n;
+	s_sceneLightSlotCount[ slot ] = n + nFog + nEm;		// EVERY row (the gradient's stored rows may be emitter rows)
 	s_diLightMapSlotAddr[ slot ]  = 0;
 	if ( numDefs <= DI_LIGHTMAP_MAX ) {
 		if ( s_diLightMapBuf == 0 ) {
@@ -6196,6 +6274,11 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	}
 	return n;
 }
+
+// E2 v3: every row of the scene-light buffer the last RB_RHI_GatherSceneLights wrote for this view (placed lights + fog
+// rows + emitter rows): the count the DI gather, the light-grid fill and the combined bounce iterate. The placed-light
+// count the gather RETURNS stays the reflections' / volumetrics' count (they never see an emitter row).
+static int RB_RHI_SceneRowCount( void ) { return s_sceneRowCount; }
 
 /*
 ===================
@@ -7856,7 +7939,7 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.color[2] = (float)giNumLights;
 	parms.color[3] = 0.0f;							// no ambient floor at the hit: a pure bounce (only lit surfaces contribute)
 	parms.diffuseModifier[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissive.GetFloat() );	// self-illum glow scale
-	if ( r_rtEmissiveLighting.GetBool() && r_rtEmissiveCandidates.GetInteger() > 0 && R_RtEmissiveTableAddress( NULL, NULL, NULL ) != 0 ) {
+	if ( r_rtEmissiveLighting.GetBool() && R_RtEmissiveTableAddress( NULL, NULL, NULL ) != 0 ) {
 		parms.diffuseModifier[0] = 0.0f;			// emissive mode: the emitters are sampled as lights; glow at a bounce hit would count them twice
 	}
 	parms.diffuseModifier[1] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiLightScale.GetFloat() );	// diffuse brightness at the hit
@@ -8103,7 +8186,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		return;		// needs the sealed depth + the bump-mapped normal G-buffer
 	}
 	unsigned long long lightAddr = 0;
-	const int numLights = RB_RHI_GatherSceneLights( r, viewDef, &lightAddr );
+	RB_RHI_GatherSceneLights( r, viewDef, &lightAddr );
+	const int numLights = RB_RHI_SceneRowCount();		// E2 v3: EVERY row - placed lights, fog rows (skipped by flag), emitter rows
 	if ( lightAddr == 0 || numLights <= 0 ) {
 		return;		// no scene lights -> nothing to resample
 	}
@@ -8250,34 +8334,12 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.specularParms[3] = r_rtReStirDIDynamicForward.GetBool() ? 1.0f : 0.0f;
 		parms.pbrParms[0] = r_rtgiRadius.GetFloat();
 		parms.pbrParms[1] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissive.GetFloat() );
-		// EMISSIVE MODE (docs/rtx-experimental-lighting.md E2): the emissive table as a second candidate stream of the RIS.
-		// u_texGen0S = ( table address lo, hi, intensity, candidates per pixel ). While the emitters are sampled as lights,
-		// the bounce's per-pixel "glow at the hit" term is OFF (pbrParms.y = 0): a bounce ray landing on an emitter is the
-		// same direct emitter->P path the DI stream now estimates properly, and would count it twice.
-		{
-			int emTris = 0; float emTotal = 0.0f, emMean = 0.0f;
-			const bool diStream = r_rtEmissiveLighting.GetBool() && r_rtEmissiveCandidates.GetInteger() > 0;
-			const unsigned long long emAddr = ( diStream || r_rtEmissiveBounce.GetBool() )		// the bounce sample works in both modes
-				? R_RtEmissiveTableAddress( &emTris, &emTotal, &emMean ) : 0;
-			const unsigned int emLo = (unsigned int)( emAddr & 0xFFFFFFFFull ), emHi = (unsigned int)( emAddr >> 32 );
-			memcpy( &parms.texGen0S[0], &emLo, sizeof( emLo ) );
-			memcpy( &parms.texGen0S[1], &emHi, sizeof( emHi ) );
-			parms.texGen0S[2] = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveIntensity.GetFloat() );
-			parms.texGen0S[3] = ( diStream && emAddr != 0 && emTris > 0 ) ? (float)idMath::ClampInt( 0, 16, r_rtEmissiveCandidates.GetInteger() ) : 0.0f;
-			int emGroups = 0;
-			const unsigned long long grpAddr = ( emAddr != 0 ) ? R_RtEmissiveGroupsAddress( &emGroups ) : 0;
-			const unsigned int grpLo = (unsigned int)( grpAddr & 0xFFFFFFFFull ), grpHi = (unsigned int)( grpAddr >> 32 );
-			memcpy( &parms.texGen0T[0], &grpLo, sizeof( grpLo ) );
-			memcpy( &parms.texGen0T[1], &grpHi, sizeof( grpHi ) );
-			parms.texGen0Q[0] = (float)emGroups;														// group count: every stored group index is checked against it
-			parms.texGen0Q[1] = (float)emTris;														// triangle count: every stored triangle index likewise
-			parms.texGen0Q[2] = idMath::ClampFloat( 0.0f, 8.0f, r_rtEmissiveReach.GetFloat() );			// E6 reach: multiple of the replaced light's radius
-			parms.texGen0Q[3] = idMath::ClampFloat( 0.0f, 4096.0f, r_rtEmissiveReachDefault.GetFloat() );
-			parms.texGen0T[2] = r_rtEmissiveBounce.GetBool() ? 1.0f : 0.0f;						// emitter sample at the bounce hit
-			parms.texGen0T[3] = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveClamp.GetFloat() );	// per-pixel emitter luminance cap (0 = off)
-			if ( diStream && emAddr != 0 && emTris > 0 ) {
-				parms.pbrParms[1] = 0.0f;			// the DI stream carries the direct emitter light: no glow at a bounce hit (twice)
-			}
+		// EMISSIVE MODE (docs/rtx-experimental-lighting.md E2 v3): the emitters are rows of the scene-light buffer (gathered
+		// above), nothing more to pack. While they light the scene the bounce's per-pixel "glow at the hit" term is OFF
+		// (pbrParms.y = 0): a bounce ray landing on an emitter is the same direct emitter->P path the DI now estimates
+		// properly, and would count it twice.
+		if ( r_rtEmissiveLighting.GetBool() && R_RtEmissiveTableAddress( NULL, NULL, NULL ) != 0 ) {
+			parms.pbrParms[1] = 0.0f;
 		}
 		parms.pbrParms[2] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissiveClamp.GetFloat() );
 		parms.pbrParms[3] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiLightScale.GetFloat() );
@@ -9631,15 +9693,7 @@ static bool RB_RHI_LightGridBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int slots    = idMath::ClampInt( 1, 16, r_rtLightGridSlots.GetInteger() );
 	const int res      = idMath::ClampInt( 8, 64, r_rtLightGridRes.GetInteger() );
 	const int cascades = idMath::ClampInt( 1, 4, r_rtLightGridCascades.GetInteger() );
-	// E2 v2b: emissive mode adds an emissive record (8 group slots) to every cell. r_rtEmissiveLighting is in the gfx-cfg
-	// signature, so the size change idles the device like the others.
-	// the emissive record is wanted by the DI stream (the mode) OR by the bounce-hit emitter sample alone (r_rtEmissiveBounce
-	// in normal mode: the glowing surfaces add real bounce light while the placed lights keep the direct term)
-	int emGroups = 0;
-	const bool emWanted = ( r_rtEmissiveLighting.GetBool() && r_rtEmissiveCandidates.GetInteger() > 0 ) || r_rtEmissiveBounce.GetBool();
-	const unsigned long long emGroupAddr = emWanted ? R_RtEmissiveGroupsAddress( &emGroups ) : 0;
-	const int slotsE   = ( emGroupAddr != 0 ) ? 16 : 0;				// 16: the per-pixel triangle lists (near cascades) need the room; groups use 8 of them
-	const int sizeKey  = slots | ( res << 8 ) | ( cascades << 16 ) | ( slotsE << 24 );		// identity of the buffer size (all in the gfx-cfg signature)
+	const int sizeKey  = slots | ( res << 8 ) | ( cascades << 16 );		// identity of the buffer size (all in the gfx-cfg signature)
 	if ( g.gridBuf != 0 && g.sizeKey != sizeKey ) {
 		// a size cvar changed: it is in ComputeGfxCfgSignature, so the device idled at this frame's start; DestroyBuffer
 		// defers the free behind the frames in flight regardless
@@ -9649,7 +9703,7 @@ static bool RB_RHI_LightGridBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	if ( g.gridBuf == 0 ) {
 		const long long cells       = (long long)cascades * res * res * res;
-		const long long strideWords = 2 + 2 * (long long)slots + ( slotsE > 0 ? 2 + 2 * (long long)slotsE : 0 );	// header (count, sumImp) + slots * (light, imp) [+ the emissive record]
+		const long long strideWords = 2 + 2 * (long long)slots;		// header (count, sumImp) + slots * (light, imp)
 		const long long bytes       = cells * strideWords * 4;
 		g.gridBuf  = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, (int)bytes, NULL );
 		g.gridAddr = ( g.gridBuf != 0 ) ? r->GetBufferDeviceAddress( g.gridBuf ) : 0;
@@ -9681,9 +9735,6 @@ static bool RB_RHI_LightGridBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	gp.res        = res;
 	gp.cascades   = cascades;
 	gp.slots      = slots;
-	gp.slotsE     = slotsE;
-	gp.groupAddr  = emGroupAddr;
-	gp.numGroups  = ( emGroupAddr != 0 ) ? emGroups : 0;
 	g.readyThisView = true;
 	return true;
 }
@@ -9694,15 +9745,9 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 		return;		// filled once per frame; the first consumer that has the light buffer triggers it
 	}
 	if ( lightAddr == 0 || numLights <= 0 ) {
-		// no lights this view: the grid must STILL be written (every cell count 0 / the emissive records) - a consumer
-		// that reads an unfilled (fresh or stale) grid walks garbage light / triangle indices off the end of their
-		// buffers (a device loss, 2026-10-20). With no emissive mode the grid is simply not consumed (see the pack gate).
-		if ( g.parms.slotsE <= 0 ) {
-			return;
-		}
-		lightAddr = 0; numLights = 0;
+		return;		// no rows this view: the grid is not consumed (the DI pass returned before its gather)
 	}
-	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; unsigned int groupLo, groupHi, nGroups, slotsE, tableLo, tableHi, nearCascades, triMode; } pc;	// light_grid_fill.comp PC
+	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; } pc;	// light_grid_fill.comp PC
 	pc.gridLo      = (unsigned int)( g.gridAddr & 0xFFFFFFFFull );
 	pc.gridHi      = (unsigned int)( g.gridAddr >> 32 );
 	pc.lightLo     = (unsigned int)( lightAddr & 0xFFFFFFFFull );
@@ -9716,18 +9761,6 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	pc.camY        = g.parms.camPos[1];
 	pc.camZ        = g.parms.camPos[2];
 	pc.parallelFlux = 4.0f;		// flux weight for parallel (sun) lights (no 1/d^2): keeps a sun a candidate everywhere (L5 tuning)
-	pc.groupLo     = (unsigned int)( g.parms.groupAddr & 0xFFFFFFFFull );	// E2 v2b: the emitter groups (0 = no emissive record)
-	pc.groupHi     = (unsigned int)( g.parms.groupAddr >> 32 );
-	pc.nGroups     = (unsigned int)g.parms.numGroups;
-	pc.slotsE      = (unsigned int)g.parms.slotsE;
-	{
-		int emTris = 0; float emT = 0.0f, emM = 0.0f;
-		const unsigned long long tAddr = ( g.parms.groupAddr != 0 ) ? R_RtEmissiveTableAddress( &emTris, &emT, &emM ) : 0;
-		pc.tableLo = (unsigned int)( tAddr & 0xFFFFFFFFull );
-		pc.tableHi = (unsigned int)( tAddr >> 32 );
-		pc.nearCascades = (unsigned int)idMath::ClampInt( 1, 4, r_rtEmissiveNearCascades.GetInteger() );
-		pc.triMode = ( r_rtEmissiveGridTris.GetBool() && tAddr != 0 ) ? 1u : 0u;
-	}
 	rhi::ComputeArgs ca = rhi::ComputeArgs();
 	ca.shader = g.fillProg;
 	ca.pushConstants = &pc;
@@ -9748,7 +9781,7 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 // u_modelViewMatrix[3] (view->world), which every RT pass already has. rtgi_light_grid.glsl lgParmsFromVec4 unpacks it.
 static void RB_RHI_LightGridPack( rhi::RenderParams &parms, const rtLightGridParms_t &gp ) {
 	const unsigned int gridLo = (unsigned int)( gp.gridAddr & 0xFFFFFFFFull ), gridHi = (unsigned int)( gp.gridAddr >> 32 );
-	const unsigned int packed = (unsigned int)gp.res | ( (unsigned int)gp.cascades << 8 ) | ( (unsigned int)gp.slots << 16 ) | ( (unsigned int)gp.slotsE << 24 );
+	const unsigned int packed = (unsigned int)gp.res | ( (unsigned int)gp.cascades << 8 ) | ( (unsigned int)gp.slots << 16 );
 	memcpy( &parms.occlusionParms[0], &gridLo, sizeof( gridLo ) );
 	memcpy( &parms.occlusionParms[1], &gridHi, sizeof( gridHi ) );
 	parms.occlusionParms[2] = gp.cellBase;

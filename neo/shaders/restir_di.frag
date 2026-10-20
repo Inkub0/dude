@@ -60,11 +60,9 @@
 //   u_pbrParms            = ( gather radius, r_rtgiEmissive, r_rtgiEmissiveClamp, r_rtgiLightScale )
 //   u_pbrParms2           = ( ambient floor, shadow-ray gate, eye pullback per unit depth, r_rtgiIntensity )
 //   u_occlusionParms      = ( unused - was the IGN rotation, replaced by the per-fragment R2 sequence; the frame index for it rides u_localParam1.x )
-//   --- EMISSIVE MODE (r_rtEmissiveLighting, docs/rtx-experimental-lighting.md E2) ---
-//   u_texGen0S            = ( emissive table device address lo, hi, r_rtEmissiveIntensity, candidates per pixel (0 = off) )
-//   u_texGen0T.xy         = emitter GROUP buffer device address (v2b: the light grid's emissive record indexes it)
-//   u_texGen0T.z          = emitter sample at the bounce hit (1 / 0);  u_texGen0T.w = per-pixel emitter luminance cap (0 = off)
-//   u_texGen0Q            = ( group count, triangle count, r_rtEmissiveReach, r_rtEmissiveReachDefault )
+//   --- EMISSIVE MODE (r_rtEmissiveLighting, docs/rtx-experimental-lighting.md E2 v3) ---
+//   nothing extra: the emitters are DUDE_LIGHT_EMISSIVE rows of the light buffer (u_color.z counts EVERY row: placed
+//   lights, fog rows - skipped by flag - and emitter rows), shaded by diShadeLight like any light (rtEmissiveShadeRow)
 //   --- r_rtgiCache (the RT irradiance cache, docs/rtx-irradiance-cache.md; rtgi_cache.glsl's shared packing) ---
 //   u_particleRadius.zw   = cache SLOT buffer device address (bit-cast; 0 = no cache)
 //   u_channelMask         = ( accumulation buffer address lo, hi, slot mask, tan( cell angle / 2 ) )
@@ -105,7 +103,7 @@
 // grates / fences as shadow casters (same recipe as interaction.frag's inline ray)
 #include "rt_perforated.glsl"
 #include "restir_di_common.glsl"
-// EMISSIVE MODE (E2): the emissive triangle table (rt_emissive.glsl) the gather draws area-light samples from
+// EMISSIVE MODE (E2 v3): the emitter rows' shade (rt_emissive.glsl rtEmissiveShadeRow)
 #include "rt_emissive.glsl"
 // the surface reconstruction, per-light shade and visibility ray, shared with restir_di_gradient.frag (R1)
 #include "restir_di_shade.glsl"
@@ -275,9 +273,7 @@ void main() {
 	// the extra picks keep only their light INDEX (+1; 0 = none); the picked lights are re-shaded after the loop
 	// (deterministic, so pHat matches the loop's)
 	uint pickB[DI_BOOST_MAX];
-	uint pickBE[DI_BOOST_MAX];					// E2: an extra pick that landed on an emissive sample (triangle + 1) + its point
-	vec2 pickBXi[DI_BOOST_MAX];
-	for ( int k = 0; k < DI_BOOST_MAX; k++ ) { pickB[k] = 0u; pickBE[k] = 0u; pickBXi[k] = vec2( 0.0 ); }
+	for ( int k = 0; k < DI_BOOST_MAX; k++ ) { pickB[k] = 0u; }
 #else
 	const int  K = 1;
 	const bool boostedNow = false;
@@ -307,6 +303,7 @@ void main() {
 		uint li;
 		if ( useGrid ) {
 			li = lgSlotLight( lgGrid, lgBase, i );			// the cell's i-th stored candidate
+			if ( li >= nLights ) { continue; }				// a stale slot never walks past the buffer
 		} else {
 			li = i;
 			if ( !exhaustive ) {
@@ -337,95 +334,6 @@ void main() {
 #endif
 	}
 
-	// EMISSIVE MODE (E2): the emissive table as a SECOND candidate stream. Me samples per pixel: a triangle in proportion
-	// to its flux (CDF), a uniform point on it; the candidate's area-measure pdf is p = (flux / total) / area, and its RIS
-	// weight pHat / ( Me * p ) - Me draws from one proposal, normalised so they sit beside the enumerated lights (pdf 1
-	// each) in the same reservoir. Only with the pdf-1 light streams (exhaustive / grid): the uniform-M light draw
-	// normalises by `draws`, which a mixed reservoir would have to share. The winner remembers its triangle + point.
-	RtEmissiveTable emTable = rtEmissiveOpen( uvec2( floatBitsToUint( u_texGen0S.x ), floatBitsToUint( u_texGen0S.y ) ) );
-	uint  emDraws    = ( pdfOne && rtEmissivePresent( emTable ) ) ? uint( u_texGen0S.w + 0.5 ) : 0u;
-	uint  emChosen   = 0u;						// triangle + 1 (0 = the winner is a placed light, or nothing)
-	vec2  emXiChosen = vec2( 0.0 );
-	vec3  emShDir    = vec3( 0.0 );				// the SH direction for an emitter winner: toward the emitter's centre
-	// v2b: with the light grid live and this cell holding emitter GROUPS, a candidate is a group drawn by the cell's
-	// stored importance (flux / d^2 at the cell: distance-aware), then a triangle inside it by flux (the CDF restricted
-	// to the run), then the solid-angle point - pdf = q_group x p_tri|group x pdfw. Else the global flux CDF (blind).
-	int  lgEB  = ( useGrid && lgp.slotsE > 0u ) ? lgEBase( lgBase, lgp.slots ) : -1;
-	uint lgNE  = ( lgEB >= 0 ) ? min( lgCountE( lgGrid, lgEB ), lgp.slotsE ) : 0u;
-	const uint emNumGroups = uint( u_texGen0Q.x + 0.5 );									// bounds for every stored index (a stale record)
-	bool emFromGrid = lgNE > 0u;
-	bool emTriList  = emFromGrid && lgIsTriRecord( lgGrid, lgEB );
-	RtEmissiveGroups emGroups = RtEmissiveGroups( uvec2( 0u ) );
-	if ( emFromGrid && !emTriList ) { emGroups = RtEmissiveGroups( uvec2( floatBitsToUint( u_texGen0T.x ), floatBitsToUint( u_texGen0T.y ) ) ); }
-	// Q2RTX light_lists.h sample_polygonal_lights: the cell's TRIANGLE list weighed PER PIXEL by projected solid angle x
-	// luminance (hemisphere + facing culled), at most 8 brute-forced (a random half of a 16-list, as Q2RTX partitions); the
-	// pick is proportional to that mass - the proposal matches the integrand, so the estimate is nearly constant.
-	float emMass = 0.0;
-	float emM[8];
-	uint  emT[8];
-	uint  emPart = 1u, emPartOff = 0u, emN = 0u;
-	if ( emTriList ) {
-		emPart = ( lgNE > 8u ) ? 2u : 1u;
-		emPartOff = ( emPart > 1u ) ? ( ( rnd( rng ) < 0.5 ) ? 0u : 1u ) : 0u;
-		for ( uint k = 0u; k < 8u; k++ ) {
-			uint s = emPartOff + k * emPart;
-			emM[k] = 0.0; emT[k] = 0u;
-			if ( s >= lgNE ) { continue; }
-			uint ti = lgSlotGroup( lgGrid, lgEB, s );									// a triangle index in a tri record
-			if ( ti >= emTable.count ) { continue; }
-			RtEmissiveTri e = rtEmissiveFetch( emTable, ti );
-			if ( !( e.flux > 0.0 ) ) { continue; }
-			float m = rtEmissiveSolidAngle( e, S.Pw, S.Nw, ( e.emit & RT_EMIT_TWOSIDED ) != 0u ) * dot( rtEmissiveMeanRadiance( e ), vec3( 0.2126, 0.7152, 0.0722 ) );
-			emM[k] = m; emT[k] = ti; emMass += m; emN = k + 1u;
-		}
-	}
-	for ( uint i = 0u; i < emDraws; i++ ) {
-		float pdfTri;
-		uint  ti;
-		if ( emTriList ) {
-			if ( !( emMass > 0.0 ) ) { break; }
-			float r = rnd( rng ) * emMass, acc = 0.0;
-			uint  pick = 0u;
-			for ( uint k = 0u; k < emN; k++ ) { acc += emM[k]; pick = k; if ( r < acc ) { break; } }
-			if ( !( emM[pick] > 0.0 ) ) { continue; }
-			ti = emT[pick];
-			pdfTri = ( emM[pick] / emMass ) / float( emPart );							// the pick's share x the partition's
-		} else if ( emFromGrid ) {
-			uint gIdx; float qG;
-			if ( !lgDrawGroup( lgGrid, lgEB, rng, gIdx, qG ) || gIdx >= emNumGroups ) { continue; }
-			uint gFirst = emGroups.g[ gIdx ].firstTri, gNum = emGroups.g[ gIdx ].numTris;
-			if ( gNum == 0u || gFirst >= emTable.count || gFirst + gNum > emTable.count ) { continue; }
-			float pIn;
-			ti = rtEmissiveSampleInGroup( emTable, gFirst, gNum, rnd( rng ), pIn );
-			pdfTri = qG * pIn;
-		} else {
-			ti = rtEmissiveSample( emTable, rnd( rng ), pdfTri );
-		}
-		if ( ti >= emTable.count ) { continue; }
-		vec2  xi = vec2( rnd( rng ), rnd( rng ) );
-		vec3  c, ld, ldSh; float dl, ndl, pdfw;
-		float pHat = 0.0;
-		if ( diShadeEmitter( emTable, ti, xi, S, u_texGen0S.z, c, ld, dl, ndl, pdfw, ldSh, cheapTarget ) ) {
-			pHat = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
-		}
-		if ( !( pHat > 0.0 ) || !( pdfw > 0.0 ) ) { continue; }
-		// the candidate's pdf in SOLID ANGLE measure: the triangle's flux share x the Arvo sample's 1 / solid angle
-		float p    = pdfTri * pdfw;
-		float w    = pHat / ( float( emDraws ) * p );
-		wSum += w;
-		if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
-			pHatChosen = pHat;
-			rowChosen  = 0u;
-			emChosen   = ti + 1u;
-			emXiChosen = xi;
-		}
-#if DI_BOOST
-		for ( int k = 1; k < K; k++ ) {
-			if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) { pickB[k] = 0u; pickBE[k] = ti + 1u; pickBXi[k] = xi; }
-		}
-#endif
-	}
-
 	if ( !( pHatChosen > 0.0 ) && u_specularParms.x < 0.5 ) {
 		outSh1.w = 0.25 * float( boostWhy );											// view 7: an unlit young pixel still ran the loop
 		fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return;									// no reaching light (and no bounce to add)
@@ -440,14 +348,8 @@ void main() {
 	uint  flagsChosen   = 0u;
 	if ( pHatChosen > 0.0 ) {
 		float ndlC;
-		if ( emChosen != 0u ) {
-			float pdfwC;
-			diShadeEmitter( emTable, emChosen - 1u, emXiChosen, S, u_texGen0S.z, contribChosen, ldirChosen, dlChosen, ndlC, pdfwC, emShDir, false );
-			flagsChosen = 0u;														// an emitter always traces its visibility
-		} else {
-			diShadeLight( lights, rowChosen - 1u, S, contribChosen, ldirChosen, dlChosen, ndlC, false );
-			flagsChosen = lights.l[ rowChosen - 1u ].flags;
-		}
+		diShadeLight( lights, rowChosen - 1u, S, contribChosen, ldirChosen, dlChosen, ndlC, false );
+		flagsChosen = lights.l[ rowChosen - 1u ].flags;
 		radChosen   = contribChosen / B;	// IRRADIANCE (cosine IN), identical to the non-SH buffer; SH re-resolve is a bump RATIO in the apply, not a cosine removal (B = 1 outside apply mode)
 	}
 
@@ -460,39 +362,38 @@ void main() {
 
 	// the direct term, at the forward path's light scale (lightColor = lightScale * stage colour there)
 	vec3 outRad = max( radChosen * ( W * vis * u_shadowFalloffS.x ), vec3( 0.0 ) );
-	if ( emChosen != 0u && u_texGen0T.w > 0.0 ) {										// r_rtEmissiveClamp: an emitter sample's luminance cap
-		float lumE = dot( outRad, vec3( 0.2126, 0.7152, 0.0722 ) );
-		if ( lumE > u_texGen0T.w ) { outRad *= u_texGen0T.w / lumE; }
-	}
 	// R3a: average the extra picks' unbiased estimates with the first (each rad_k * W_k * vis_k is unbiased on its own);
-	// shDirect = the averaged direct SH1 term (direction * luminance) the SH block below uses instead of the single pick's
-	vec3 shDirect = ( emChosen != 0u ? emShDir : ldirChosen ) * dot( outRad, vec3( 0.2126, 0.7152, 0.0722 ) );
+	// shDirect = the averaged direct SH1 term (direction * luminance) the SH block below uses instead of the single pick's.
+	// E2 v3: an EMITTER row's SH direction points at the emitter's CENTRE (the row's pos), not at the sampled point: the
+	// sampled point differs per pixel, NRD aggregates those directions into a short vector and the apply's specular
+	// re-shade reads a short vector as "no concentrated highlight" - the glossy floor went flat under the tiles
+	// (user, 2026-10-20). The centre keeps the vector long and puts the highlight at the tile's mirror point.
+	vec3 shDirChosen = ( ( flagsChosen & DUDE_LIGHT_EMISSIVE ) != 0u ) ? normalize( lights.l[ rowChosen - 1u ].pos - Pw ) : ldirChosen;
+	vec3 shDirect = shDirChosen * dot( outRad, vec3( 0.2126, 0.7152, 0.0722 ) );
 #if DI_BOOST
 	if ( K > 1 ) {
 		vec3 sumRad = outRad;
 		vec3 sumSh  = shDirect;
 		for ( int k = 1; k < K; k++ ) {
-			if ( pickB[k] == 0u && pickBE[k] == 0u ) { continue; }
-			const bool emK = pickBE[k] != 0u;
-			uint lk = emK ? pickBE[k] - 1u : pickB[k] - 1u;
+			if ( pickB[k] == 0u ) { continue; }
+			uint lk = pickB[k] - 1u;
 			vec3 c, ld; float dl, ndl;
 			// the TARGET pHat (cheap or full, consistent with wSum) for Wk, then the full shade for the radiance
-			float pdfwK; vec3 ldShK;
-			bool okK = emK ? diShadeEmitter( emTable, lk, pickBXi[k], S, u_texGen0S.z, c, ld, dl, ndl, pdfwK, ldShK, cheapTarget )
-			               : diShadeLight( lights, lk, S, c, ld, dl, ndl, cheapTarget );
-			if ( !okK ) { continue; }
+			if ( !diShadeLight( lights, lk, S, c, ld, dl, ndl, cheapTarget ) ) { continue; }
 			float pH = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
 			if ( shMode ) { pH /= max( ndl, 0.05 ); }	// radiance target, same as the main loop (cosine out of the target)
 			if ( !( pH > 0.0 ) ) { continue; }
 			vec3  cF = c;	float ndlF = ndl;
-			if ( cheapTarget ) { vec3 ldF, ldShF; float dlF, pwF; if ( emK ) { diShadeEmitter( emTable, lk, pickBXi[k], S, u_texGen0S.z, cF, ldF, dlF, ndlF, pwF, ldShF, false ); } else { diShadeLight( lights, lk, S, cF, ldF, dlF, ndlF, false ); } }
+			if ( cheapTarget ) { vec3 ldF; float dlF; diShadeLight( lights, lk, S, cF, ldF, dlF, ndlF, false ); }
 			vec3  rk = cF / B;	// irradiance (cosine in), as radChosen above
 			float Wk = ( wSum / ( pdfOne ? 1.0 : float( draws ) ) ) / pH;
 			float od;
-			float visK = ( !emK && ( lights.l[ lk ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ld, dl, emK ? 0.0 : diLightBlurScale( lights.l[ lk ].flags ), od );
+			uint  flagsK = lights.l[ lk ].flags;
+			float visK = ( ( flagsK & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ld, dl, diLightBlurScale( flagsK ), od );
 			rk = max( rk * ( Wk * visK * u_shadowFalloffS.x ), vec3( 0.0 ) );
 			sumRad += rk;
-			sumSh  += ld * dot( rk, vec3( 0.2126, 0.7152, 0.0722 ) );
+			vec3 shK = ( ( flagsK & DUDE_LIGHT_EMISSIVE ) != 0u ) ? normalize( lights.l[ lk ].pos - Pw ) : ld;	// an emitter: its centre (as above)
+			sumSh  += shK * dot( rk, vec3( 0.2126, 0.7152, 0.0722 ) );
 		}
 		outRad   = sumRad / float( K );
 		shDirect = sumSh / float( K );
@@ -539,12 +440,6 @@ void main() {
 		bp.cacheLookup    = cacheOn && bp.cache.lookup;
 		bp.cacheTail      = cacheOn && bp.cache.tail;	// C6: the hit reads the stored L_out; the update below stores L_out at P
 		bp.grid           = lgp;						// L3: the hit's light loop draws from its cell (lgp built above for the DI RIS)
-		bp.emTable        = emTable.addr;				// E2 v2b: one emitter sample at the hit from ITS cell's groups (the GI side of emissive mode)
-		bp.emGroups       = uvec2( floatBitsToUint( u_texGen0T.x ), floatBitsToUint( u_texGen0T.y ) );
-		bp.emIntensity    = ( u_texGen0T.z > 0.5 ) ? u_texGen0S.z : 0.0;	// r_rtEmissiveBounce
-		bp.emNumGroups    = emNumGroups;
-		bp.emReachScale   = u_texGen0Q.z;
-		bp.emReachDefault = u_texGen0Q.w;
 		const vec3 eyeW   = u_modelViewMatrix[3].xyz;
 		vec3 Li; float thit; vec3 bounceDir; vec3 LiCache;
 		const int hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );
@@ -575,8 +470,7 @@ void main() {
 					vec3 Edir = vec3( 0.0 );
 					if ( pHatChosen > 0.0 ) {
 						vec3 cTO, ldTO; float dlTO, ndlTO;
-						if ( emChosen != 0u ) { float pwTO; vec3 ldShTO; diShadeEmitter( emTable, emChosen - 1u, emXiChosen, S, u_texGen0S.z, cTO, ldTO, dlTO, ndlTO, pwTO, ldShTO, true ); }
-						else                  { diShadeLight( lights, rowChosen - 1u, S, cTO, ldTO, dlTO, ndlTO, true ); }
+						diShadeLight( lights, rowChosen - 1u, S, cTO, ldTO, dlTO, ndlTO, true );
 						Edir = cTO * ( W * vis * bp.lightScale );
 					}
 					vec3 Eind = ( hit == 1 ) ? LiCache : vec3( 0.0 );

@@ -8,7 +8,8 @@
 // Buffer layout (device address, std430): header (16 B: uint count, float totalFlux, uint cdfOffsetBytes, float
 // meanFlux), then count x RtEmissiveTri (80 B each), then count floats of CDF (unnormalised running flux sum).
 //
-// Needs buffer_reference (the VK prelude enables it) + GL_EXT_buffer_reference_uvec2 in the including shader.
+// Needs buffer_reference (the VK prelude enables it) + GL_EXT_buffer_reference_uvec2 in the including shader, and
+// rt_light_eval.glsl BEFORE it (rtEmissiveShadeRow reads an emitter ROW of the scene-light buffer).
 
 #ifndef RT_EMISSIVE_GLSL
 #define RT_EMISSIVE_GLSL
@@ -23,19 +24,6 @@ struct RtEmissiveTri {
 	uint  reach;					// float bits: the authored radius of the placed light this emitter replaces (0 = none)
 	uint  pad1;
 };
-
-// E6 reach (docs/rtx-experimental-lighting.md): the Doom 3 light this emitter replaced fell off LINEARLY to its
-// authored radius R; the emitter's solid-angle estimate falls off with the inverse square. Past R/4 the sample is
-// boosted by (d / (R/4)) so the far field goes ~1/d - the reach the mapper lit the hall for. scale = r_rtEmissiveReach
-// (0 = pure physics), def = the reach of an emitter no light covers.
-float rtEmissiveReachBoost( RtEmissiveTri e, float d, float scale, float def ) {
-	if ( !( scale > 0.0 ) ) { return 1.0; }
-	float R = uintBitsToFloat( e.reach );
-	if ( !( R > 0.0 ) ) { R = def; }
-	if ( !( R > 0.0 ) ) { return 1.0; }
-	float knee = 0.25 * R * scale;
-	return max( d / knee, 1.0 );
-}
 
 const uint RT_EMIT_ANIMATED = 1u << 16;		// stage colour is register-driven: the flux is a snapshot, read the live colour
 const uint RT_EMIT_ENTITY   = 1u << 17;		// from a static entity model (else worldspawn)
@@ -67,11 +55,6 @@ layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtEmissiveT
 layout(buffer_reference, std430, buffer_reference_align = 4)  buffer RtEmissiveCdf    { float c[]; };
 
 const uint RT_EMISSIVE_HEADER_BYTES = 16u;
-
-// E2 v2b: an emitter GROUP (one table surface run; tr_main.cpp R_RtEmissiveUploadGroups): centroid, bounding radius,
-// flux, the run's triangle range. The light grid's cells keep the top groups by flux / d^2.
-struct RtEmissiveGroup { vec3 c; float radius; float flux; uint firstTri; uint numTris; uint pad; };
-layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtEmissiveGroups { RtEmissiveGroup g[]; };
 
 // The table at device address `addr` (uvec2 lo/hi); present() = a table is bound this frame.
 struct RtEmissiveTable {
@@ -224,6 +207,67 @@ float rtEmissiveSolidAngle( RtEmissiveTri e, vec3 P, vec3 n, bool twoSided ) {
 
 vec2 rtEmissiveST( RtEmissiveTri e, vec3 bary ) {
 	return bary.x * unpackHalf2x16( e.st0 ) + bary.y * unpackHalf2x16( e.st1 ) + bary.z * unpackHalf2x16( e.st2 );
+}
+
+// --- E2 v3: an EMITTER ROW of the scene-light buffer (docs/rtx-experimental-lighting.md "E2 v3") -------------------------
+// RhiWorld.cpp RB_RHI_GatherSceneLights appends one DUDE_LIGHT_EMISSIVE row per emissive surface run: pos = centroid,
+// radius = REACH, cull = the bounding sphere + 2 x reach, colour = the irradiance proxy the light grid ranks by; the
+// projection planes carry projS.w = r_rtEmissiveIntensity, projT.xy = the table address, projQ.x/y = first triangle /
+// count (bits), projQ.z = the reach-boost knee (0 = pure inverse square). The row is self-describing: any consumer that
+// has the light buffer can shade it with this one function and no further uniforms.
+
+// PCG, self-contained (the fill / grid have their own copies)
+float rtEmissiveRand( inout uint st ) { st = st * 747796405u + 2891336453u; uint w = ( ( st >> ( ( st >> 28u ) + 4u ) ) ^ st ) * 277803737u; return float( ( w >> 22u ) ^ w ) * ( 1.0 / 4294967296.0 ); }
+// The sample's seed: the row, the receiving POINT and the frame - DETERMINISTIC for (row, point, frame), so the RIS loop's
+// target and the winner's re-shade after it draw the SAME sample point (the reservoir weights must match the shade), and
+// a new point every frame for NRD to average.
+uint rtEmissiveSeed( uint li, vec3 P, float frame ) {
+	uvec3 pb = floatBitsToUint( P );
+	return ( ( li + 1u ) * 2654435761u ) ^ ( pb.x * 73856093u ) ^ ( pb.y * 19349663u ) ^ ( pb.z * 83492791u ) ^ ( uint( frame ) * 26699u ) | 1u;
+}
+
+// The unshadowed irradiance ESTIMATE of emitter row li at surface point P (normal N): one triangle of the run drawn by
+// flux (the CDF restricted to the run), one point on it uniform in solid angle (Arvo), value f / p = radiance x emission
+// profile x N.L x (solid angle / flux share). Unbiased for the row's total, so the DI reservoir can hold an emitter row
+// next to a placed light with pdf 1 exactly like any other candidate. ldir / dl = the SAMPLED point (the visibility ray).
+// Reach (E6): the Doom 3 light this emitter replaced fell off LINEARLY to its radius; a solid-angle estimate falls with the
+// inverse square. Past the knee (radius / 4) the sample is boosted by d / knee so the far field goes ~1/d - the reach the
+// mapper lit the hall for - and fades out between 1.5 and 2 radii (the row's cull sphere) so the cut is soft.
+// false = cannot reach (culled / dark / behind / below the horizon). Every stored index is checked against the table's
+// count: a row of another table (a stale frame across a rebuild) shades nothing rather than reading off the end.
+bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
+	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
+	uvec2 tAddr     = uvec2( floatBitsToUint( lights.l[ li ].projT.x ), floatBitsToUint( lights.l[ li ].projT.y ) );
+	uint  first     = floatBitsToUint( lights.l[ li ].projQ.x );
+	uint  num       = floatBitsToUint( lights.l[ li ].projQ.y );
+	float knee      = lights.l[ li ].projQ.z;
+	float intensity = lights.l[ li ].projS.w;
+	float radius    = lights.l[ li ].radius;
+	RtEmissiveTable t = rtEmissiveOpen( tAddr );
+	if ( !rtEmissivePresent( t ) || num == 0u || first >= t.count || num > t.count - first ) { return false; }
+	uint  rng = seed;
+	float pIn;
+	uint  ti = rtEmissiveSampleInGroup( t, first, num, rtEmissiveRand( rng ), pIn );
+	if ( ti < first || ti >= first + num || !( pIn > 0.0 ) ) { return false; }
+	RtEmissiveTri e = rtEmissiveFetch( t, ti );
+	if ( !( e.flux > 0.0 ) ) { return false; }										// dark (switched off / gone)
+	vec3 Pe, nUnit; float pdfw; bool front;
+	vec2 xi = vec2( rtEmissiveRand( rng ), rtEmissiveRand( rng ) );
+	if ( !rtEmissiveSampleSolidAngle( e, P, xi, Pe, nUnit, pdfw, front ) ) { return false; }
+	if ( !front && ( e.emit & RT_EMIT_TWOSIDED ) == 0u ) { return false; }		// a one-sided emitter seen from its back
+	vec3 d = Pe - P;
+	dl   = length( d );
+	if ( !( dl > 1e-3 ) || !( pdfw > 0.0 ) ) { return false; }
+	ldir = d / dl;
+	ndl  = max( dot( N, ldir ), 0.0 );
+	if ( !( ndl > 0.0 ) ) { return false; }
+	float cosL = max( -dot( nUnit, ldir ), 0.0 );								// nUnit points AT P (the sampler re-winds)
+	if ( !( cosL > 0.0 ) ) { return false; }
+	float boost = ( knee > 0.0 ) ? max( dl / knee, 1.0 ) : 1.0;
+	float fade  = 1.0 - smoothstep( 1.5 * radius, 2.0 * radius, dl );
+	vec3  L = rtEmissiveMeanRadiance( e ) * ( e.scale * intensity * boost * fade );
+	contrib = L * ( sqrt( cosL ) * ndl / ( pIn * pdfw ) );						// f / p: the row's irradiance estimate
+	return !( any( isnan( contrib ) ) );
 }
 
 #endif // RT_EMISSIVE_GLSL

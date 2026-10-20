@@ -12,14 +12,10 @@
 // rt_light_eval.glsl: RtLight / RtLights / DUDE_LIGHT_* / dudeLightInRange. rtgi_light_grid.glsl: LgGrid + mapping + layout.
 #include "rt_light_eval.glsl"
 #include "rtgi_light_grid.glsl"
-#include "rt_emissive.glsl"
 
 #define LG_MAX_SLOTS 16u			// fixed reservoir array size; r_rtLightGridSlots is clamped to this
 
 layout( local_size_x = 64 ) in;
-
-shared vec4 sGroupA[ 64 ];		// E2 v2b: a tile of emitter groups ( centroid, radius )
-shared vec2 sGroupB[ 64 ];		// ( flux, - )
 
 layout( push_constant ) uniform PC {
 	uint  gridLo, gridHi;			// grid buffer device address
@@ -29,24 +25,18 @@ layout( push_constant ) uniform PC {
 	float cellBase;					// cascade-0 cell size (units)
 	float camX, camY, camZ;			// camera position (cascade snapping)
 	float parallelFlux;				// flux weight for parallel (sun) lights, which have no 1/d^2 term
-	uint  groupLo, groupHi;			// E2 v2b: emitter group buffer device address (0 = emissive mode off)
-	uint  nGroups, slotsE;			// groups in it; emissive slots per cell (0 = no emissive record)
-	uint  tableLo, tableHi;			// the emissive TABLE (triangle entries): per-triangle lists in the near cascades
-	uint  nearCascades, triMode;	// cascades 0..nearCascades-1 store triangles (triMode 1), the rest groups
 } pc;
 
 void main() {
 	uint cellIndex = gl_GlobalInvocationID.x;
 	uint total = pc.cascades * pc.res * pc.res * pc.res;
-	// no early return: the emissive stream below is tiled through shared memory with barriers, which every thread of
-	// the workgroup must reach; an out-of-range thread computes a dummy cell and writes nothing
-	const bool cellLive = cellIndex < total;
-	if ( !cellLive ) { cellIndex = total - 1u; }
+	if ( cellIndex >= total ) { return; }
+	const bool cellLive = true;
 
 	LgGrid   grid   = LgGrid( uvec2( pc.gridLo, pc.gridHi ) );
 	RtLights lights = RtLights( uvec2( pc.lightLo, pc.lightHi ) );
 	uint     slots  = min( pc.slots, LG_MAX_SLOTS );
-	int      base   = int( cellIndex * lgStride( slots, pc.slotsE ) );
+	int      base   = int( cellIndex * lgStride( slots ) );
 
 	vec3  camPos = vec3( pc.camX, pc.camY, pc.camZ );
 	int   c;
@@ -66,6 +56,8 @@ void main() {
 		// gather's diShadeLight skips DIFORWARD unconditionally (restir_di_shade.glsl - the forward path lights them),
 		// so the grid's candidate set must match it, and excluding the moving flashlight also stops it churning cells.
 		if ( ( flags & ( DUDE_LIGHT_FOGVOLUME | DUDE_LIGHT_DIFORWARD ) ) != 0u ) { continue; }
+		// (E2 v3: an EMITTER row ranks like any light - its colour is the irradiance proxy at its reach, its radius the
+		// reach - including the BOUNCEONLY rows of normal mode, which the DI shade skips and the bounce uses)
 		// in-range: the cell centre within the light's cull sphere, widened by the cell half-diagonal
 		vec4 cull = lights.l[ li ].cull;
 		vec3 cd   = cull.xyz - center;
@@ -113,106 +105,5 @@ void main() {
 		}
 	} else if ( cellLive ) {
 		grid.g[ base ] = 0u;											// no in-range light: empty, the consumer falls back
-	}
-
-	// E2 v2b: the cell's EMISSIVE record - the top-slotsE emitter GROUPS by importance = flux / max( d^2, cs^2, r^2 )
-	// (the group's own radius floors the distance: a cell inside a big tile's extent is lit by all of it). Streams every
-	// group (a few hundred: one per emissive surface) - Q2RTX's per-cluster light list with the cell as the cluster.
-	if ( pc.slotsE > 0u ) {
-		int   eBase  = lgEBase( base, slots );
-		uint  slotsE = min( pc.slotsE, LG_MAX_SLOTS );
-		uint  slotsG = min( slotsE, 8u );									// groups kept per cell (the triangle walk below expands them to slotsE)
-		uint  cntE = 0u, minSlotE = 0u;
-		float minImpE = 1e30;
-		uint  chosenE[ LG_MAX_SLOTS ];
-		float chosenImpE[ LG_MAX_SLOTS ];
-		if ( ( pc.groupLo | pc.groupHi ) != 0u ) {
-			RtEmissiveGroups groups = RtEmissiveGroups( uvec2( pc.groupLo, pc.groupHi ) );
-			// the group list (chunks of <= 16 triangles, a few hundred to a thousand) streamed through SHARED memory in
-			// tiles of 64: one global read per group per WORKGROUP instead of per cell (the 11 ms fill of 2026-10-20)
-			for ( uint tile = 0u; tile < pc.nGroups; tile += 64u ) {
-				uint li = gl_LocalInvocationID.x;
-				uint gl = tile + li;
-				if ( gl < pc.nGroups ) {
-					sGroupA[ li ] = vec4( groups.g[ gl ].c, groups.g[ gl ].radius );
-					sGroupB[ li ] = vec2( groups.g[ gl ].flux, 0.0 );
-				}
-				barrier();
-				uint n = min( 64u, pc.nGroups - tile );
-				for ( uint k = 0u; k < n; k++ ) {
-				uint  gi   = tile + k;
-				float flux = sGroupB[ k ].x;
-				if ( !( flux > 0.0 ) ) { continue; }							// dark (switched off / gone)
-				vec3  gd = sGroupA[ k ].xyz - center;
-				float rg = sGroupA[ k ].w;
-				float d2 = max( dot( gd, gd ), max( cs * cs, rg * rg ) );
-				float imp = flux / d2;
-				if ( cntE < slotsG ) {
-					chosenE[ cntE ] = gi; chosenImpE[ cntE ] = imp; cntE++;
-					if ( cntE == slotsG ) {
-						minImpE = chosenImpE[ 0 ]; minSlotE = 0u;
-						for ( uint j = 1u; j < slotsG; j++ ) { if ( chosenImpE[ j ] < minImpE ) { minImpE = chosenImpE[ j ]; minSlotE = j; } }
-					}
-				} else if ( imp > minImpE ) {
-					chosenE[ minSlotE ] = gi; chosenImpE[ minSlotE ] = imp;
-					minImpE = chosenImpE[ 0 ]; minSlotE = 0u;
-					for ( uint j = 1u; j < slotsG; j++ ) { if ( chosenImpE[ j ] < minImpE ) { minImpE = chosenImpE[ j ]; minSlotE = j; } }
-				}
-				}
-				barrier();
-			}
-		}
-		// near cascades (Q2RTX's per-cluster light list): the chosen groups' TRIANGLES, the top-slotsE by flux / d^2 at the
-		// cell centre, replace the group list - the pixel then weighs each by its projected solid angle (restir_di.frag)
-		bool triRecord = false;
-		if ( cellLive && pc.triMode != 0u && uint( c ) < pc.nearCascades && cntE > 0u && ( pc.tableLo | pc.tableHi ) != 0u ) {
-			RtEmissiveTable  et = rtEmissiveOpen( uvec2( pc.tableLo, pc.tableHi ) );
-			RtEmissiveGroups groups = RtEmissiveGroups( uvec2( pc.groupLo, pc.groupHi ) );
-			uint  chosenT[ LG_MAX_SLOTS ];
-			float chosenImpT[ LG_MAX_SLOTS ];
-			uint  cntT = 0u, minSlotT = 0u;
-			float minImpT = 1e30;
-			for ( uint k = 0u; k < cntE; k++ ) {
-				uint first = groups.g[ chosenE[ k ] ].firstTri, num = groups.g[ chosenE[ k ] ].numTris;
-				if ( first >= et.count || first + num > et.count ) { continue; }					// a group of another table (stale): never walk past the end
-				// a long run (a 900-triangle cylinder) is STRIDED: at most 32 of its triangles are examined, spread evenly
-				// along it, so every region stays reachable from this cell at a bounded cost (8 x 32 fetches per cell)
-				uint step = ( num > 32u ) ? ( num + 31u ) / 32u : 1u;
-				for ( uint t = first + ( cellIndex % step ); t < first + num; t += step ) {
-					RtEmissiveTri e = rtEmissiveFetch( et, t );
-					if ( !( e.flux > 0.0 ) ) { continue; }
-					vec3  tc = ( e.p0 + e.p1 + e.p2 ) * ( 1.0 / 3.0 ) - center;
-					float imp = e.flux / max( dot( tc, tc ), cs * cs );
-					if ( cntT < slotsE ) {
-						chosenT[ cntT ] = t; chosenImpT[ cntT ] = imp; cntT++;
-						if ( cntT == slotsE ) {
-							minImpT = chosenImpT[ 0 ]; minSlotT = 0u;
-							for ( uint j = 1u; j < slotsE; j++ ) { if ( chosenImpT[ j ] < minImpT ) { minImpT = chosenImpT[ j ]; minSlotT = j; } }
-						}
-					} else if ( imp > minImpT ) {
-						chosenT[ minSlotT ] = t; chosenImpT[ minSlotT ] = imp;
-						minImpT = chosenImpT[ 0 ]; minSlotT = 0u;
-						for ( uint j = 1u; j < slotsE; j++ ) { if ( chosenImpT[ j ] < minImpT ) { minImpT = chosenImpT[ j ]; minSlotT = j; } }
-					}
-				}
-			}
-			if ( cntT > 0u ) {
-				triRecord = true;
-				cntE = cntT;
-				for ( uint k = 0u; k < cntT; k++ ) { chosenE[ k ] = chosenT[ k ]; chosenImpE[ k ] = chosenImpT[ k ]; }
-			}
-		}
-		if ( cellLive && cntE > 0u ) {
-			float sumE = 0.0;
-			for ( uint k = 0u; k < cntE; k++ ) { sumE += chosenImpE[ k ]; }
-			grid.g[ eBase ]     = cntE | ( triRecord ? LG_E_TRIS : 0u );
-			grid.g[ eBase + 1 ] = floatBitsToUint( sumE );
-			for ( uint k = 0u; k < cntE; k++ ) {
-				grid.g[ eBase + int( LG_HEADER + 2u * k ) ]      = chosenE[ k ];
-				grid.g[ eBase + int( LG_HEADER + 2u * k + 1u ) ] = floatBitsToUint( chosenImpE[ k ] );
-			}
-		} else if ( cellLive ) {
-			grid.g[ eBase ] = 0u;
-		}
 	}
 }

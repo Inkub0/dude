@@ -14,7 +14,7 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Idx
 struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; uint baseColor; uint texIndex; };	// RR0/RR3/RR4 geometry table row
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer GeoTable { GeoDesc d[]; };
 
-// E2 v2b: the emissive table / groups the hit samples (guarded include: the DI gather includes it first)
+// E2 v3: the emitter ROWS of the light buffer (rtEmissiveShadeRow; guarded include: the DI gather includes it first)
 #include "rt_emissive.glsl"
 
 struct RtgiBounceParms {
@@ -45,14 +45,6 @@ struct RtgiBounceParms {
 	// stands down). Only ever set by the DI gather (diApply && r_rtgiCacheTail); the standalone RTGI pass keeps cacheLookup.
 	bool  cacheTail;
 	RtgiCacheParms cache;
-	// E2 v2b (emissive mode): the emissive table + its groups; one solid-angle emitter sample from the hit cell's emissive
-	// record lights the hit (its visibility ray against the solid scene), so a wall lit only by emitters bounces. The
-	// per-pixel "glow at the hit" term is OFF in that mode (emissiveScale 0: the same path counted twice).
-	uvec2 emTable;			// 0 = none
-	uvec2 emGroups;
-	float emIntensity;
-	uint  emNumGroups;		// bounds for a stored group index
-	float emReachScale, emReachDefault;	// E6 reach (rtEmissiveReachBoost)
 	// RT light grid (docs/rtx-light-grid.md L3): when present, the hit's light loop enumerates the HIT cell's candidates
 	// (its top-N lights by importance) instead of every scene light. The grid excludes DIFORWARD lights, matching the
 	// bounce's skipForwardLights set. gridAddr 0 (the standalone RTGI pass, or the grid off) = the full light loop.
@@ -201,20 +193,35 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		uint nIter = lgUse ? lgN : bp.nLights;
 		for ( uint ii = 0u; ii < nIter; ii++ ) {
 			uint li = lgUse ? lgSlotLight( lgG, lgBase, ii ) : ii;
+			if ( li >= bp.nLights ) { continue; }										// a stale grid slot: never past the buffer
 			if ( gate && !dudeLightInRange( lights, li, hitWorld ) ) { continue; }
-			const bool fast = ( lights.l[ li ].flags & DUDE_LIGHT_DIFORWARD ) != 0u;
+			const uint lflags = lights.l[ li ].flags;
+			if ( ( lflags & DUDE_LIGHT_FOGVOLUME ) != 0u ) { continue; }				// a fog row is not a light
+			const bool fast = ( lflags & DUDE_LIGHT_DIFORWARD ) != 0u;
 			if ( bp.skipForwardLights && fast ) { continue; }
 			vec3  ldir; float dl;
+			float ndl;
+			vec3  contrib;
+			if ( ( lflags & DUDE_LIGHT_EMISSIVE ) != 0u ) {
+				// E2 v3: an EMITTER row (also the BOUNCEONLY rows of normal mode) - one sample point on its surface, seeded by
+				// the pixel + frame; Lambert at H as the lights below (Doom: no 1/pi). Its visibility rides the dominant-light
+				// shadow ray like every other light here.
+				vec3 c;
+				uint seed = rtEmissiveSeed( li, hitWorld, bp.sampleFrame ) ^ ( uint( sfrag.x ) * 7919u + uint( sfrag.y ) * 104729u );
+				if ( !rtEmissiveShadeRow( lights, li, hitWorld, hitN, seed | 1u, c, ldir, dl, ndl ) ) { continue; }
+				contrib = albedo * c * bp.lightScale;
+			} else {
 			dudeLightDir( lights, li, hitWorld, ldir, dl );
-			float ndl = max( dot( hitN, ldir ), 0.0 );
+			ndl = max( dot( hitN, ldir ), 0.0 );
 			if ( ndl <= 0.0 ) { continue; }
 			// the light's shape + colour at the hit: its real cookie * falloff textures (Stage G, u_windowCoord.w),
 			// else the analytic frustum attenuation
 			vec3 atten = bp.texturedLights
-				? dudeLightAttenTex( lights, li, hitWorld, dl, lights.l[ li ].flags, gate, false, 0.0 )	// a ray hit has no screen footprint: mip 0 (as before)
-				: vec3( dudeLightAtten( lights, li, hitWorld, dl, lights.l[ li ].flags, gate, false ) );
+				? dudeLightAttenTex( lights, li, hitWorld, dl, lflags, gate, false, 0.0 )	// a ray hit has no screen footprint: mip 0 (as before)
+				: vec3( dudeLightAtten( lights, li, hitWorld, dl, lflags, gate, false ) );
 			if ( atten.r + atten.g + atten.b <= 0.0 ) { continue; }
-			vec3 contrib = albedo * lights.l[ li ].color * ( atten * ndl * bp.lightScale );
+			contrib = albedo * lights.l[ li ].color * ( atten * ndl * bp.lightScale );
+			}
 			Li += contrib;
 			if ( !fast ) { LiCache += contrib; }								// a fast light's bounce is never learned
 			// track the DOMINANT (brightest) reaching light at this hit for the H6d shadow ray
@@ -237,65 +244,6 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		if ( ep > bp.emissiveClamp ) { e *= bp.emissiveClamp / ep; }
 		Li += e;
 		LiCache += e;
-	}
-
-	// E2 v2b: EMITTER light at the hit - one group from H's cell by stored importance, one triangle in it by flux, one
-	// point by solid angle (rt_emissive.glsl), one visibility ray. Lambert at H as the light loop above (Doom: no 1/pi).
-	if ( ( bp.emTable.x | bp.emTable.y ) != 0u && bp.emIntensity > 0.0 && lgPresent( bp.grid ) && bp.grid.slotsE > 0u ) {
-		int hBase = lgCellBase( bp.grid, hitWorld );
-		if ( hBase >= 0 ) {
-			int  hE = lgEBase( hBase, bp.grid.slots );
-			LgGrid hG = LgGrid( bp.grid.gridAddr );
-			uint rngE = ( uint( sfrag.x ) * 7919u + uint( sfrag.y ) * 104729u + uint( bp.sampleFrame ) * 15485863u ) | 1u;
-			uint gIdx; float qG;
-			if ( lgDrawGroup( hG, hE, rngE, gIdx, qG ) ) {								// a GROUP (far cells) or a TRIANGLE (near cells) by stored importance
-				RtEmissiveTable  et = rtEmissiveOpen( bp.emTable );
-				float pIn = 1.0;
-				uint  ti  = gIdx;
-				bool  ok  = true;
-				if ( !lgIsTriRecord( hG, hE ) ) {
-					if ( gIdx >= bp.emNumGroups ) { ok = false; }
-					else {
-						RtEmissiveGroups eg = RtEmissiveGroups( bp.emGroups );
-						uint gFirst = eg.g[ gIdx ].firstTri, gNum = eg.g[ gIdx ].numTris;
-						if ( gNum == 0u || gFirst >= et.count || gFirst + gNum > et.count ) { ok = false; }
-						else { ti = rtEmissiveSampleInGroup( et, gFirst, gNum, lgRand( rngE ), pIn ); }
-					}
-				}
-				if ( ok && ti >= et.count ) { ok = false; }
-				RtEmissiveTri e;
-				if ( ok ) { e = rtEmissiveFetch( et, ti ); } else { e.flux = 0.0; e.emit = 0u; e.p0 = e.p1 = e.p2 = vec3( 0.0 ); e.scale = 0.0; e.meanRG = 0u; e.meanB = 0u; e.st0 = e.st1 = e.st2 = 0u; e.tint = 0u; e.reach = e.pad1 = 0u; }
-				vec3 Pe, nUnit; float pdfw; bool front;
-				if ( e.flux > 0.0 && rtEmissiveSampleSolidAngle( e, hitWorld, vec2( lgRand( rngE ), lgRand( rngE ) ), Pe, nUnit, pdfw, front )
-						&& ( front || ( e.emit & RT_EMIT_TWOSIDED ) != 0u ) ) {
-					vec3  ed = Pe - hitWorld;
-					float edl = length( ed );
-					vec3  edir = ed / max( edl, 1e-3 );
-					float endl = max( dot( hitN, edir ), 0.0 );
-					float ecos = max( -dot( nUnit, edir ), 0.0 );				// nUnit points at the hit (the sampler re-winds)
-					float p = qG * pIn * pdfw;
-					if ( endl > 0.0 && ecos > 0.0 && p > 0.0 ) {
-						vec3 Le = rtEmissiveMeanRadiance( e ) * ( e.scale * bp.emIntensity * rtEmissiveReachBoost( e, edl, bp.emReachScale, bp.emReachDefault ) );
-						vec3 ec = albedo * Le * ( sqrt( ecos ) * endl * bp.lightScale / p );
-						rayQueryEXT erq;
-						rayQueryInitializeEXT( erq, accelerationStructureEXT( bp.tlas ), gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu,
-							hitWorld + hitN * 0.2 + edir * 0.05, 0.0, edir, max( edl - 1.0, 0.1 ) );
-						while ( rayQueryProceedEXT( erq ) ) { }
-						if ( rayQueryGetIntersectionTypeEXT( erq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) {
-							// a soft cap on the single sample, SCALED by the emitter intensity: the glow-hit clamp (0.15, tuned for
-							// L ~ 1 strobe hits) applied as-is threw away the emitter bounce at intensity 10 (Mars City read
-							// dark away from the tiles, 2026-10-20). This sample is importance-sampled, not hit-or-miss, so it
-							// only needs a firefly guard: 8 x the clamp x the intensity.
-							float cap = bp.emissiveClamp * 8.0 * max( bp.emIntensity, 1.0 );
-							float ep = max( max( ec.r, ec.g ), ec.b );
-							if ( bp.emissiveClamp > 0.0 && ep > cap ) { ec *= cap / ep; }
-							Li += ec;
-							LiCache += ec;
-						}
-					}
-				}
-			}
-		}
 	}
 
 	// H6d (docs/rtx-rtgi.md): one shadow ray at the bounce hit toward the DOMINANT reaching light, so a light
