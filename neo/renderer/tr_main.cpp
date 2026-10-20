@@ -2805,19 +2805,44 @@ static bool R_RtEmissiveIsScreen( const idMaterial *mat ) {
 // render-to-texture (dynamic) stage, a generated image (_scratch & co.) or a missing (defaulted) image is NOT a
 // table emitter - the GUI/video screens keep the legacy fill lights, and such images never went through the
 // averaging path (averageColor is the white default).
-static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat ) {
-	if ( mat == NULL || mat->HasGui() || mat->Deform() != DFRM_NONE ) {
-		return NULL;														// deformed (sprite flares, flares, tubes): decoration, not a light
+static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat, const char **why = NULL ) {
+	const char *reason = "";
+	if ( why ) { *why = ""; }
+	if ( mat == NULL ) {
+		return NULL;
 	}
 	const int n = mat->GetNumStages();
+	bool anyAdditive = false;
 	for ( int i = 0; i < n; i++ ) {
+		const shaderStage_t *st = mat->GetStage( i );
+		if ( ( st->drawStateBits & GLS_SRCBLEND_BITS ) == GLS_SRCBLEND_ONE && ( st->drawStateBits & GLS_DSTBLEND_BITS ) == GLS_DSTBLEND_ONE ) {
+			anyAdditive = true;
+		}
+	}
+	if ( !anyAdditive ) {
+		return NULL;														// not self-illuminated at all: no reason to report
+	}
+	if ( mat->HasGui() ) {
+		reason = "gui screen";
+	} else if ( mat->Deform() != DFRM_NONE ) {
+		reason = "deformed (sprite / flare)";								// decoration, not a light
+	} else if ( (int)mat->GetSort() == SS_DECAL ) {
+		// a DECAL (textures/decals/*: alphabet signs, markings, dirt) puts its artwork on an additive stage so it stays
+		// readable in the dark - that is legibility, not light (user, 2026-10-20)
+		reason = "decal";
+	}
+	for ( int i = 0; i < n && reason[0] == '\0'; i++ ) {
 		// the SKY (textures/skies/*: an additive cameraCubeMap stage with texgen skybox / wobblesky) is NOT a table
 		// emitter - it was 99.9% of Mars City's flux and drew through the walls (user, 2026-10-19). E4 handles the sky
 		// as its own emitter kind.
 		const texgen_t tg = mat->GetStage( i )->texture.texgen;
 		if ( tg == TG_SKYBOX_CUBE || tg == TG_WOBBLESKY_CUBE ) {
-			return NULL;
+			reason = "sky";
 		}
+	}
+	if ( reason[0] != '\0' ) {
+		if ( why ) { *why = reason; }
+		return NULL;
 	}
 	for ( int i = 0; i < n; i++ ) {
 		const shaderStage_t *st = mat->GetStage( i );
@@ -2827,16 +2852,23 @@ static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat ) {
 			continue;
 		}
 		if ( st->texture.cinematic != NULL || st->texture.dynamic != DI_STATIC ) {
+			if ( why ) { *why = "video / render-to-texture screen"; }
 			return NULL;													// a screen: fill-light territory, not a table emitter
 		}
 		const idImage *img = st->texture.image;
 		// an environment reflection (glass: texgen reflect + cubeMap) or any other generated texgen is not emission
 		if ( img == NULL || img->rhiHandle == 0 || img->generatorFunction != NULL || img->defaulted
 				|| img->type == TT_CUBIC || st->texture.texgen != TG_EXPLICIT ) {
+			if ( img == NULL || img->defaulted )           { reason = "additive stage has no image"; }
+			else if ( img->rhiHandle == 0 )                { reason = "glow image not resident on the GPU"; }
+			else if ( img->generatorFunction != NULL )     { reason = "generated image"; }
+			else                                           { reason = "cube map / reflection texgen (glass)"; }
 			continue;
 		}
+		if ( why ) { *why = ""; }
 		return st;
 	}
+	if ( why ) { *why = reason; }
 	return NULL;
 }
 
@@ -3032,6 +3064,13 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	const float scale = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() );
 	idList<rtEmissiveCensus_t> census;
 	int overflow = 0, worldTris = 0, entityTris = 0, entities = 0, screens = 0;
+	struct excl_t { const idMaterial *mat; const char *why; };
+	idList<excl_t> excluded;													// self-illuminated materials the gather rejected, with the reason
+	auto noteExcluded = [&]( const idMaterial *m, const char *why ) {
+		if ( m == NULL || why == NULL || why[0] == '\0' ) { return; }
+		for ( int k = 0; k < excluded.Num(); k++ ) { if ( excluded[k].mat == m ) { return; } }
+		excl_t x; x.mat = m; x.why = why; excluded.Append( x );
+	};
 
 	// worldspawn: the _areaN models (verts already world space)
 	for ( int a = 0; a < world->NumAreas(); a++ ) {
@@ -3044,8 +3083,10 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			if ( R_RtEmissiveIsScreen( surf->shader ) ) {
 				screens++;
 			}
-			const shaderStage_t *stage = R_RtEmissiveStage( surf->shader );
+			const char *why = "";
+			const shaderStage_t *stage = R_RtEmissiveStage( surf->shader, &why );
 			if ( stage == NULL ) {
+				noteExcluded( surf->shader, why );
 				continue;
 			}
 			const int before = s_rtEmissiveTris.Num();
@@ -3078,8 +3119,10 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			if ( R_RtEmissiveIsScreen( mat ) ) {
 				screens++;
 			}
-			const shaderStage_t *stage = R_RtEmissiveStage( mat );
+			const char *why = "";
+			const shaderStage_t *stage = R_RtEmissiveStage( mat, &why );
 			if ( stage == NULL ) {
+				noteExcluded( mat, why );
 				continue;
 			}
 			const int before = s_rtEmissiveTris.Num();
@@ -3148,6 +3191,12 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		R_RtEmissiveDebugTint( census[i].slot, rgb, &hue );
 		common->Printf( "    %6.1f%%  %6d tris  %-46s view1 %-10s #%02X%02X%02X%s%s\n", 100.0f * census[i].flux / s_rtEmissiveTotalFlux, census[i].tris,
 			census[i].mat->GetName(), hue, rgb[0], rgb[1], rgb[2], census[i].animated ? "  (animated colour)" : "", census[i].texMatrix ? "  (texture matrix baked)" : "" );
+	}
+	if ( excluded.Num() > 0 ) {
+		common->Printf( "r_rtEmissiveTable: %d self-illuminated materials EXCLUDED:\n", excluded.Num() );
+		for ( int i = 0; i < excluded.Num(); i++ ) {
+			common->Printf( "    %-38s %s\n", excluded[i].why, excluded[i].mat->GetName() );
+		}
 	}
 }
 

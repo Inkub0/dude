@@ -342,3 +342,12 @@ to 2 units in front of the anchor, world + static props); nearest 48 kept, same-
 virtual px dropped. Console.cpp `SCR_DrawEmissiveLabels` draws them (debug TTF font, black halo + white) on the
 console's 2D pass - the FPS counter's path - because the ImGui layer composites AFTER the screenshot capture and
 its text never reached a screenshot. Prefixes "textures/" and "models/mapobjects/" stripped.
+
+**Decals excluded + the exclusion list (2026-10-20).** The alphabet / marking decals (`textures/decals/*`, the
+DECAL_MACRO: `sort decal`) put their artwork on an additive stage so it stays legible in the dark - legibility, not
+light - and were painted as emitters (user: the door's alphabet sign). Any `SS_DECAL`-sorted material is now
+excluded. `sterlightdecal` (the LED light decal) is NOT sort-decal and stays. The census now ends with every
+self-illuminated material the gather REJECTED and why (gui screen / deformed / decal / sky / video screen / cube map
+or reflection texgen / glow image not resident / no image), so a lit fixture that is not painted can be looked up by
+name - e.g. the tube over the Mars City entrance door, unpainted in the same screenshot, is the first case to read
+off that list.
