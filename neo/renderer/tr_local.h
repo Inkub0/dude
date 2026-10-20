@@ -1091,7 +1091,9 @@ extern idCVar r_rtEmissiveScale;
 extern idCVar r_rtEmissiveLighting;		// EMISSIVE MODE master switch (D6): emitters light the scene (E2); implies the table, hides flares
 extern idCVar r_rtEmissiveIntensity;		// emissive mode: radiance multiplier of every emitter
 extern idCVar r_rtEmissiveMaxRows;		// emissive mode: emitter rows (surfaces) a view's scene-light buffer may carry
-extern idCVar r_rtEmissivePowerMatch;	// emissive mode: an emitter inherits the POWER of the placed light it replaces (radiance from its radius / colour / area)
+extern idCVar r_rtEmissivePowerMatch;
+extern idCVar r_rtEmissiveFixtureMinArea;	// emissive mode: the emitting area (units^2) below which a surface is an indicator (LED), never a fixture
+extern idCVar r_rtEmissiveMaxRadiance;	// emissive mode: cap on the radiance the power match may give one emitter	// emissive mode: an emitter inherits the POWER of the placed light it replaces (radiance from its radius / colour / area)
 extern idCVar r_rtEmissiveBounce;			// emitter rows ride the GI bounce in normal mode too (bounce-only rows)
 extern idCVar r_rtEmissiveReach;			// emissive mode: reach as a multiple of the replaced light's authored radius (0 = physical)
 extern idCVar r_rtEmissiveReachDefault;	// emissive mode: reach (units) of an emitter no placed light covers

@@ -3872,6 +3872,25 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[t].emit &= ~RT_EMIT_FLAG_INLIGHT; s_rtEmissiveTris[t].reach = 0u; s_rtEmissiveTris[t].lightLum = 0u; }
 	s_rtEmissiveTriLightOrigin.SetNum( n, false );
 	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTriLightOrigin[t].Zero(); }
+	// the emitting AREA of each triangle's whole surface run: a FIXTURE has area (a tube, a tile, a sterlight patch), an
+	// INDICATOR (a 2 x 2 computer LED, an electric-box lamp) does not - it must neither drop the room light it happens to
+	// sit in nor inherit that light's power (LEDs as bright as neons, user 2026-10-20). r_rtEmissiveFixtureMinArea.
+	static idList<float> runArea;
+	runArea.SetNum( n, false );
+	for ( int t = 0; t < n; t++ ) { runArea[t] = 0.0f; }
+	for ( int li = 0; li < s_rtEmissiveLabels.Num(); li++ ) {
+		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[li];
+		if ( l.firstTri < 0 || l.numTris <= 0 || l.firstTri + l.numTris > n ) { continue; }
+		float a = 0.0f;
+		for ( int t = 0; t < l.numTris; t++ ) {
+			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
+			const idVec3 p0( e.p0[0], e.p0[1], e.p0[2] ), p1( e.p1[0], e.p1[1], e.p1[2] ), p2( e.p2[0], e.p2[1], e.p2[2] );
+			a += 0.5f * ( ( p1 - p0 ).Cross( p2 - p0 ) ).Length();
+		}
+		for ( int t = 0; t < l.numTris; t++ ) { runArea[ l.firstTri + t ] = a; }
+	}
+	const float fixtureMinArea = Max( 0.0f, r_rtEmissiveFixtureMinArea.GetFloat() );
+	int indicatorsInLight = 0;
 	s_rtEmissiveLightFixturedSerial.SetNum( world->lightDefs.Num(), false );
 	for ( int i = 0; i < world->lightDefs.Num(); i++ ) { s_rtEmissiveLightFixturedSerial[i] = 0u; }
 	s_rtEmissiveLightDbg.SetNum( 0, false );
@@ -3906,6 +3925,7 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 			}
 			if ( inside ) {
 				e.emit |= RT_EMIT_FLAG_INLIGHT;
+				if ( runArea[t] < fixtureMinArea ) { indicatorsInLight++; continue; }	// an indicator: lit BY this light, not its fixture
 				// FIXTURED = an emitter near the light's ORIGIN (a fixture's glow sits where its light is placed), not
 				// anywhere in its volume: a wide spot whose volume merely contained some other glow panel was dropped
 				// while its own glow-less housing had nothing to replace it (the Marine Command downlights, 2026-10-20)
@@ -3936,8 +3956,8 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 	for ( int t = 0; t < n; t++ ) { if ( s_rtEmissiveTris[t].emit & RT_EMIT_FLAG_INLIGHT ) { trisInLight++; } }
 	// the flags changed after the upload: rewrite the triangle range (the debug geometry is built lazily, after this)
 	r->UpdateBuffer( s_rtEmissiveBuf, RT_EMISSIVE_HEADER_BYTES, n * (int)sizeof( rtEmissiveTriGPU_t ), s_rtEmissiveTris.Ptr() );
-	common->Printf( "r_rtEmissiveTable: placed lights %d: %d FIXTURED (an emitter inside the volume - dropped when emitters light the scene; %d ambient-material), %d AMBIENCE (no emitter - kept; %d ambient-material), %d parallel + %d fog/blend (kept); %d of %d emissive triangles sit inside a placed light, %d in none (overlay mode 4)\n",
-		total, fixtured, fixturedAmbientMat, ambience, ambienceAmbientMat, parallel, fogBlend, trisInLight, n, n - trisInLight );
+	common->Printf( "r_rtEmissiveTable: placed lights %d: %d FIXTURED (an emitter of >= %.0f units^2 near the origin - dropped when emitters light the scene; %d ambient-material), %d AMBIENCE (no emitter - kept; %d ambient-material), %d parallel + %d fog/blend (kept); %d of %d emissive triangles sit inside a placed light (%d indicator triangles below the fixture area: never a fixture), %d in none (overlay mode 4)\n",
+		total, fixtured, fixtureMinArea, fixturedAmbientMat, ambience, ambienceAmbientMat, parallel, fogBlend, trisInLight, n, indicatorsInLight, n - trisInLight );
 }
 
 // True when an entity slot NO group tracks holds a static model with an emissive surface (it appeared after the
@@ -3978,9 +3998,11 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		r_rtEmissiveTable.ClearModified();
 		r_rtEmissiveLighting.ClearModified();
 		r_rtEmissiveScale.ClearModified();
+		r_rtEmissiveFixtureMinArea.ClearModified();
 		return;
 	}
-	const bool stale = s_rtEmissiveMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified() || r_rtEmissiveLighting.IsModified() || r_rtEmissiveScale.IsModified();
+	const bool stale = s_rtEmissiveMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified() || r_rtEmissiveLighting.IsModified() || r_rtEmissiveScale.IsModified()
+		|| r_rtEmissiveFixtureMinArea.IsModified();		// the census pairing changed: rebuild (cheap enough; the table is small)
 	if ( !stale ) {
 		R_RtEmissiveRefreshMovers( world, r );	// E1e: moved doors / lifts / platforms re-bake their slice
 		if ( r_rtEmissiveTableDebug.GetInteger() > 0 && r_rtEmissiveTableDebug.GetInteger() != 5 ) {
@@ -4011,6 +4033,7 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	r_rtEmissiveTable.ClearModified();
 	r_rtEmissiveLighting.ClearModified();
 	r_rtEmissiveScale.ClearModified();
+	r_rtEmissiveFixtureMinArea.ClearModified();
 	R_RtEmissiveFree();
 	s_rtEmissiveLastRebuildMs = Sys_Milliseconds();
 	R_RtEmissiveBuild( world, r );

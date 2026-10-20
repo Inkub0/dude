@@ -4901,6 +4901,16 @@ static void DrawDbgGroup_ExperimentalLighting()
 		"corridor. (r_rtEmissiveIntensity)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveIntensity" ) ) { r_rtEmissiveIntensity.Reset(); }
+	CvarSliderF( "Fixture Min Area", r_rtEmissiveFixtureMinArea, 0.0f, 512.0f, "%.0f", "The emitting area (units^2) a surface needs "
+		"to count as a light FIXTURE: a fixture drops the placed light it sits in and inherits its power; a smaller glow (a "
+		"computer LED, an electric-box lamp) is an indicator - it never drops a light and lights at its authored brightness "
+		"only. 64 = an 8 x 8 patch. Rebuilds the census (toggle the table). (r_rtEmissiveFixtureMinArea)" );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtEmissiveFixtureMinArea" ) ) { r_rtEmissiveFixtureMinArea.Reset(); }
+	CvarSliderF( "Max Matched Radiance", r_rtEmissiveMaxRadiance, 1.0f, 512.0f, "%.0f", "The brightest radiance the power match "
+		"may give one emitter (a small patch replacing a big light would otherwise blaze). (r_rtEmissiveMaxRadiance)" );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtEmissiveMaxRadiance" ) ) { r_rtEmissiveMaxRadiance.Reset(); }
 	CvarCheckbox( "Inherit the replaced light's power", r_rtEmissivePowerMatch, "Each emitter's radiance is set from the colour "
 		"and radius of the placed light it replaces and its own area, so a small fixture lights its room as its light did and "
 		"a big panel glows softly. An emitter in no placed light is matched to a light of its own colour at the default reach. "
@@ -4928,9 +4938,9 @@ static void DrawDbgGroup_ExperimentalLighting()
 	// ===== Sampling =====
 	ImGui::SeparatorText( "Sampling" );
 	{
-		int rows = idMath::ClampInt( 0, 255, r_rtEmissiveMaxRows.GetInteger() );
+		int rows = idMath::ClampInt( 0, 511, r_rtEmissiveMaxRows.GetInteger() );
 		ImGui::SetNextItemWidth( 240.0f );
-		if ( ImGui::SliderInt( "Emitter Rows / view##rtEmissiveMaxRows", &rows, 0, 255 ) ) {
+		if ( ImGui::SliderInt( "Emitter Rows / view##rtEmissiveMaxRows", &rows, 0, 511 ) ) {
 			r_rtEmissiveMaxRows.SetInteger( rows );
 		}
 		AddTooltip( "How many emitting SURFACES a view's scene-light buffer may carry as light rows (the strongest at the eye "

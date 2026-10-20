@@ -421,3 +421,11 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   (the forward path's geometry), while the sampled surface point still drives the energy, the solid angle and the
   visibility ray. Uncovered rows keep the sampled point for both (the "centre" direction of v3's first build was wrong
   for long tubes: in the wall's plane, it zeroed the apply's cosine re-resolve).
+- ROUND 2 of v3 (2026-10-20, Marine Command Access at intensity 1): the room reads like normal mode again. Console:
+  "267 fixtured dropped, 89 placed kept, 255 emitter rows added (of 306; cap 255)"; GPU 1080p: gather 7.85 ms, fill 1.05,
+  grad 1.1, denoise 2.9 (19.4 ms frame). Fixes: (1) the row cap is now dynamic, 511 - placed - fog (r_rtEmissiveMaxRows
+  default 511); (2) INDICATORS: a surface run under r_rtEmissiveFixtureMinArea (64 units^2) never drops a light and
+  never inherits power (computer LEDs / electric-box lamps were as bright as neons); (3) r_rtEmissiveMaxRadiance (64)
+  caps the matched radiance. Open: the gather's 7.85 ms (an emitter candidate costs a CDF search + Arvo + a 80 B fetch;
+  a cheap target for emitter rows, or fewer slots for them, is the lever if it matters); the orange wall lamp at the
+  right of the Access room reads dimmer than normal mode (ask which fixture / check its pairing).
