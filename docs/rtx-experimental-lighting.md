@@ -472,3 +472,9 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   bound + reach. r_rtReStirDIDebug 8 (chosen light per pixel) exists now for the next such question.
 - RULE (user, 2026-10-20): "the only thing that seems to help is disabling Rank by Light Falloff" in emissive mode ->
   r_rtLightGridRankLinear is forced OFF while r_rtEmissiveLighting is on (RB_RHI_LightGridFill), the checkbox greyed.
+- ROUND 2026-10-20 (late): all three alcoves lit (inverse-square rank, rule in place). Candidates/cell uninfluential 9..32
+  (+1 ms at 32) -> r_rtEmissiveGridSlots default 9 (= the grid's; "1" in the user's test was 9, the max of the two).
+  Electric box fine at r_rtEmissiveFixtureMinArea 32 (now the default); past the threshold the matched LED lights its own
+  housing at point-blank range (the near field of a radiance-64 patch) - indicators must stay below. OPEN: the ceramic
+  floor under the info terminal (a GUI fill light, i.e. a placed light): grooves brighter than tile tops - DI bump
+  handling, not emitters; needs the hybrid-tier comparison of the same spot before touching restir_di_apply.frag.
