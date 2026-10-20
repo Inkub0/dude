@@ -101,6 +101,10 @@ nee 0.1`). The cache (C) is the prerequisite of both, as the paper states.
 - **Cookies (2026-10-20):** the grille patterns under fixtures are the placed lights' projection textures, not
   shadows; a dropped fixtured light takes its cookie with it, and the emitter's visibility ray (E2) must be
   grate-aware (the perforated-caster walk of the RT shadow rays) so the real grille shadows instead.
+- **D6 - ONE master switch (user, 2026-10-20):** "Emissive Mode" is gated by a single archived cvar,
+  `r_rtEmissiveLighting` (default 0), for a simple opt-in / opt-out from the config or a future menu toggle. It
+  implies `r_rtEmissiveTable`, enables E2's consumption (emitters light the scene), folds in `r_rtEmissiveHideFlares`
+  and, at E5, the fixtured-light drop. The table / overlays stay usable without it (debug), and 0 = bit-identical.
 - **E5 the switch.** `r_xlLighting` (+ `r_xlKeepGameplayLights`, `r_xlEmissiveScale`, `r_xlSkyScale`):
   `RB_RHI_GatherSceneLights` drops the map lights (the Stage D membership already suppresses their forward draws);
   the kept lights are untouched (D3). ImGui group "Experimental Lighting" in the Debugging tab (user-named ImGui),
