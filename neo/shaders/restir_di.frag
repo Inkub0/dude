@@ -60,6 +60,8 @@
 //   u_pbrParms            = ( gather radius, r_rtgiEmissive, r_rtgiEmissiveClamp, r_rtgiLightScale )
 //   u_pbrParms2           = ( ambient floor, shadow-ray gate, eye pullback per unit depth, r_rtgiIntensity )
 //   u_occlusionParms      = ( unused - was the IGN rotation, replaced by the per-fragment R2 sequence; the frame index for it rides u_localParam1.x )
+//   --- EMISSIVE MODE (r_rtEmissiveLighting, docs/rtx-experimental-lighting.md E2) ---
+//   u_texGen0S            = ( emissive table device address lo, hi, r_rtEmissiveIntensity, candidates per pixel (0 = off) )
 //   --- r_rtgiCache (the RT irradiance cache, docs/rtx-irradiance-cache.md; rtgi_cache.glsl's shared packing) ---
 //   u_particleRadius.zw   = cache SLOT buffer device address (bit-cast; 0 = no cache)
 //   u_channelMask         = ( accumulation buffer address lo, hi, slot mask, tan( cell angle / 2 ) )
@@ -100,6 +102,8 @@
 // grates / fences as shadow casters (same recipe as interaction.frag's inline ray)
 #include "rt_perforated.glsl"
 #include "restir_di_common.glsl"
+// EMISSIVE MODE (E2): the emissive triangle table (rt_emissive.glsl) the gather draws area-light samples from
+#include "rt_emissive.glsl"
 // the surface reconstruction, per-light shade and visibility ray, shared with restir_di_gradient.frag (R1)
 #include "restir_di_shade.glsl"
 // rtgi_light_grid.glsl: L2 per-cell candidate list (docs/rtx-light-grid.md)
@@ -268,7 +272,9 @@ void main() {
 	// the extra picks keep only their light INDEX (+1; 0 = none); the picked lights are re-shaded after the loop
 	// (deterministic, so pHat matches the loop's)
 	uint pickB[DI_BOOST_MAX];
-	for ( int k = 0; k < DI_BOOST_MAX; k++ ) { pickB[k] = 0u; }
+	uint pickBE[DI_BOOST_MAX];					// E2: an extra pick that landed on an emissive sample (triangle + 1) + its point
+	vec2 pickBXi[DI_BOOST_MAX];
+	for ( int k = 0; k < DI_BOOST_MAX; k++ ) { pickB[k] = 0u; pickBE[k] = 0u; pickBXi[k] = vec2( 0.0 ); }
 #else
 	const int  K = 1;
 	const bool boostedNow = false;
@@ -328,6 +334,43 @@ void main() {
 #endif
 	}
 
+	// EMISSIVE MODE (E2): the emissive table as a SECOND candidate stream. Me samples per pixel: a triangle in proportion
+	// to its flux (CDF), a uniform point on it; the candidate's area-measure pdf is p = (flux / total) / area, and its RIS
+	// weight pHat / ( Me * p ) - Me draws from one proposal, normalised so they sit beside the enumerated lights (pdf 1
+	// each) in the same reservoir. Only with the pdf-1 light streams (exhaustive / grid): the uniform-M light draw
+	// normalises by `draws`, which a mixed reservoir would have to share. The winner remembers its triangle + point.
+	RtEmissiveTable emTable = rtEmissiveOpen( uvec2( floatBitsToUint( u_texGen0S.x ), floatBitsToUint( u_texGen0S.y ) ) );
+	uint  emDraws    = ( pdfOne && rtEmissivePresent( emTable ) ) ? uint( u_texGen0S.w + 0.5 ) : 0u;
+	uint  emChosen   = 0u;						// triangle + 1 (0 = the winner is a placed light, or nothing)
+	vec2  emXiChosen = vec2( 0.0 );
+	for ( uint i = 0u; i < emDraws; i++ ) {
+		float pdfTri;
+		uint  ti = rtEmissiveSample( emTable, rnd( rng ), pdfTri );
+		vec2  xi = vec2( rnd( rng ), rnd( rng ) );
+		vec3  c, ld; float dl, ndl;
+		float pHat = 0.0;
+		if ( diShadeEmitter( emTable, ti, xi, S, u_texGen0S.z, c, ld, dl, ndl, cheapTarget ) ) {
+			pHat = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
+		}
+		if ( !( pHat > 0.0 ) ) { continue; }
+		RtEmissiveTri e = rtEmissiveFetch( emTable, ti );
+		float area = 0.5 * length( cross( e.p1 - e.p0, e.p2 - e.p0 ) );
+		float p    = pdfTri / max( area, 1e-3 );
+		float w    = pHat / ( float( emDraws ) * p );
+		wSum += w;
+		if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
+			pHatChosen = pHat;
+			rowChosen  = 0u;
+			emChosen   = ti + 1u;
+			emXiChosen = xi;
+		}
+#if DI_BOOST
+		for ( int k = 1; k < K; k++ ) {
+			if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) { pickB[k] = 0u; pickBE[k] = ti + 1u; pickBXi[k] = xi; }
+		}
+#endif
+	}
+
 	if ( !( pHatChosen > 0.0 ) && u_specularParms.x < 0.5 ) {
 		outSh1.w = 0.25 * float( boostWhy );											// view 7: an unlit young pixel still ran the loop
 		fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return;									// no reaching light (and no bounce to add)
@@ -342,9 +385,14 @@ void main() {
 	uint  flagsChosen   = 0u;
 	if ( pHatChosen > 0.0 ) {
 		float ndlC;
-		diShadeLight( lights, rowChosen - 1u, S, contribChosen, ldirChosen, dlChosen, ndlC, false );
+		if ( emChosen != 0u ) {
+			diShadeEmitter( emTable, emChosen - 1u, emXiChosen, S, u_texGen0S.z, contribChosen, ldirChosen, dlChosen, ndlC, false );
+			flagsChosen = 0u;														// an emitter always traces its visibility
+		} else {
+			diShadeLight( lights, rowChosen - 1u, S, contribChosen, ldirChosen, dlChosen, ndlC, false );
+			flagsChosen = lights.l[ rowChosen - 1u ].flags;
+		}
 		radChosen   = contribChosen / B;	// IRRADIANCE (cosine IN), identical to the non-SH buffer; SH re-resolve is a bump RATIO in the apply, not a cosine removal (B = 1 outside apply mode)
-		flagsChosen = lights.l[ rowChosen - 1u ].flags;
 	}
 
 	// unbiased contribution weight W = (1/pHat(y))·(wSum/M): pHat is the TARGET (cheap or full), f(y) = the full shade
@@ -364,20 +412,23 @@ void main() {
 		vec3 sumRad = outRad;
 		vec3 sumSh  = shDirect;
 		for ( int k = 1; k < K; k++ ) {
-			if ( pickB[k] == 0u ) { continue; }
-			uint lk = pickB[k] - 1u;
+			if ( pickB[k] == 0u && pickBE[k] == 0u ) { continue; }
+			const bool emK = pickBE[k] != 0u;
+			uint lk = emK ? pickBE[k] - 1u : pickB[k] - 1u;
 			vec3 c, ld; float dl, ndl;
 			// the TARGET pHat (cheap or full, consistent with wSum) for Wk, then the full shade for the radiance
-			if ( !diShadeLight( lights, lk, S, c, ld, dl, ndl, cheapTarget ) ) { continue; }
+			bool okK = emK ? diShadeEmitter( emTable, lk, pickBXi[k], S, u_texGen0S.z, c, ld, dl, ndl, cheapTarget )
+			               : diShadeLight( lights, lk, S, c, ld, dl, ndl, cheapTarget );
+			if ( !okK ) { continue; }
 			float pH = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
 			if ( shMode ) { pH /= max( ndl, 0.05 ); }	// radiance target, same as the main loop (cosine out of the target)
 			if ( !( pH > 0.0 ) ) { continue; }
 			vec3  cF = c;	float ndlF = ndl;
-			if ( cheapTarget ) { vec3 ldF; float dlF; diShadeLight( lights, lk, S, cF, ldF, dlF, ndlF, false ); }
+			if ( cheapTarget ) { vec3 ldF; float dlF; if ( emK ) { diShadeEmitter( emTable, lk, pickBXi[k], S, u_texGen0S.z, cF, ldF, dlF, ndlF, false ); } else { diShadeLight( lights, lk, S, cF, ldF, dlF, ndlF, false ); } }
 			vec3  rk = cF / B;	// irradiance (cosine in), as radChosen above
 			float Wk = ( wSum / ( pdfOne ? 1.0 : float( draws ) ) ) / pH;
 			float od;
-			float visK = ( ( lights.l[ lk ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ld, dl, diLightBlurScale( lights.l[ lk ].flags ), od );
+			float visK = ( !emK && ( lights.l[ lk ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ld, dl, emK ? 0.0 : diLightBlurScale( lights.l[ lk ].flags ), od );
 			rk = max( rk * ( Wk * visK * u_shadowFalloffS.x ), vec3( 0.0 ) );
 			sumRad += rk;
 			sumSh  += ld * dot( rk, vec3( 0.2126, 0.7152, 0.0722 ) );
@@ -457,7 +508,8 @@ void main() {
 					vec3 Edir = vec3( 0.0 );
 					if ( pHatChosen > 0.0 ) {
 						vec3 cTO, ldTO; float dlTO, ndlTO;
-						diShadeLight( lights, rowChosen - 1u, S, cTO, ldTO, dlTO, ndlTO, true );
+						if ( emChosen != 0u ) { diShadeEmitter( emTable, emChosen - 1u, emXiChosen, S, u_texGen0S.z, cTO, ldTO, dlTO, ndlTO, true ); }
+						else                  { diShadeLight( lights, rowChosen - 1u, S, cTO, ldTO, dlTO, ndlTO, true ); }
 						Edir = cTO * ( W * vis * bp.lightScale );
 					}
 					vec3 Eind = ( hit == 1 ) ? LiCache : vec3( 0.0 );

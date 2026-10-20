@@ -10,6 +10,9 @@
 //
 // Needs buffer_reference (the VK prelude enables it) + GL_EXT_buffer_reference_uvec2 in the including shader.
 
+#ifndef RT_EMISSIVE_GLSL
+#define RT_EMISSIVE_GLSL
+
 struct RtEmissiveTri {
 	vec3  p0;	float flux;			// world-space vertices; flux = area x glow luminance x stage colour x scale
 	vec3  p1;	uint  emit;			// bits 0-15 the glow texture's bindless slot + 1 (0 = none), bits 16-31 RT_EMIT_* flags
@@ -105,3 +108,5 @@ vec3 rtEmissiveUniformPoint( RtEmissiveTri e, vec2 xi, out vec3 nUnnorm, out vec
 vec2 rtEmissiveST( RtEmissiveTri e, vec3 bary ) {
 	return bary.x * unpackHalf2x16( e.st0 ) + bary.y * unpackHalf2x16( e.st1 ) + bary.z * unpackHalf2x16( e.st2 );
 }
+
+#endif // RT_EMISSIVE_GLSL

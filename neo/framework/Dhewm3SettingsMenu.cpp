@@ -4889,6 +4889,29 @@ static void DrawDbgGroup_ExperimentalLighting()
 	ImGui::Spacing();
 	ImGui::BeginDisabled( !rtCapable );
 
+	CvarCheckbox( "EMISSIVE MODE", r_rtEmissiveLighting, "The master switch: the map's self-illuminated surfaces light the "
+		"scene as real area lights - the direct-lighting gather draws sample points on them next to the placed lights, "
+		"with physical falloff, the emitter's real shape and a visibility ray through the real geometry. Implies the "
+		"table below and hides the fixtures' flare sprites. Off = today's picture, bit-identical. (r_rtEmissiveLighting)" );
+	ImGui::BeginDisabled( !r_rtEmissiveLighting.GetBool() );
+	CvarSliderF( "Emitter Intensity", r_rtEmissiveIntensity, 0.0f, 32.0f, "%.2f", "How bright the emitters light the scene "
+		"relative to the placed lights (a multiplier on every emitter's radiance). Placed lights fall off linearly, emitters "
+		"with the inverse square, so there is no exact equivalence - tune by eye on a lit corridor. (r_rtEmissiveIntensity)" );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtEmissiveIntensity" ) ) { r_rtEmissiveIntensity.Reset(); }
+	{
+		int cand = idMath::ClampInt( 0, 16, r_rtEmissiveCandidates.GetInteger() );
+		ImGui::SetNextItemWidth( 240.0f );
+		if ( ImGui::SliderInt( "Emitter Samples / pixel##rtEmissiveCandidates", &cand, 0, 16 ) ) {
+			r_rtEmissiveCandidates.SetInteger( cand );
+		}
+		AddTooltip( "Emissive sample points drawn per pixel per frame and resampled next to the placed-light candidates. "
+			"More = less noise from many small emitters, dearer gather. 0 = emitters do not light (the mode's A/B). "
+			"(r_rtEmissiveCandidates)" );
+	}
+	ImGui::EndDisabled();	// r_rtEmissiveLighting
+	ImGui::Spacing();
+
 	CvarCheckbox( "Emissive Triangle Table", r_rtEmissiveTable, "Gather every self-illuminated triangle of the map (additive "
 		"glow stages: neon tubes, light tiles, LED panels, lava - world and static props, including the pure light-source "
 		"surfaces that cast no shadow and are not in the ray-tracing scene) into a GPU table with its position, glow "
@@ -4897,7 +4920,7 @@ static void DrawDbgGroup_ExperimentalLighting()
 		"view below to inspect it. GUI / video screens are excluded (they keep the Emissive Surfaces fill lights). "
 		"(r_rtEmissiveTable)" );
 
-	ImGui::BeginDisabled( !r_rtEmissiveTable.GetBool() );
+	ImGui::BeginDisabled( !r_rtEmissiveTable.GetBool() && !r_rtEmissiveLighting.GetBool() );
 	CvarSliderF( "Emissive Scale", r_rtEmissiveScale, 0.0f, 16.0f, "%.2f", "Global multiplier on every emitter's flux and "
 		"emitted colour - the stand-in for the per-material intensity table until it lands. A change rebuilds the table. "
 		"(r_rtEmissiveScale)" );

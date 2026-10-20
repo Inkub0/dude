@@ -3761,15 +3761,16 @@ static bool R_RtEmissiveNewEntityAppeared( const idRenderWorldLocal *world ) {
 // Keep the table in step with the live RT scene: build once per map (or when its cvars change), free when off.
 // Called from R_RtWorldUpdate while the persistent scene is live for `world`.
 static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
-	if ( !r_rtEmissiveTable.GetBool() ) {
+	if ( !r_rtEmissiveTable.GetBool() && !r_rtEmissiveLighting.GetBool() ) {		// D6: the mode implies the table
 		if ( s_rtEmissiveMap.Length() > 0 || s_rtEmissiveBuf != 0 ) {
 			R_RtEmissiveFree();
 		}
 		r_rtEmissiveTable.ClearModified();
+		r_rtEmissiveLighting.ClearModified();
 		r_rtEmissiveScale.ClearModified();
 		return;
 	}
-	const bool stale = s_rtEmissiveMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified() || r_rtEmissiveScale.IsModified();
+	const bool stale = s_rtEmissiveMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified() || r_rtEmissiveLighting.IsModified() || r_rtEmissiveScale.IsModified();
 	if ( !stale ) {
 		R_RtEmissiveRefreshMovers( world, r );	// E1e: moved doors / lifts / platforms re-bake their slice
 		if ( r_rtEmissiveTableDebug.GetInteger() > 0 ) {
@@ -3796,6 +3797,7 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		return;
 	}
 	r_rtEmissiveTable.ClearModified();
+	r_rtEmissiveLighting.ClearModified();
 	r_rtEmissiveScale.ClearModified();
 	R_RtEmissiveFree();
 	R_RtEmissiveBuild( world, r );
@@ -3955,7 +3957,7 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 }
 
 bool R_RtEmissiveHideEntity( int entityIndex ) {
-	return r_rtEmissiveHideFlares.GetBool() && s_rtEmissiveBuf != 0
+	return ( r_rtEmissiveHideFlares.GetBool() || r_rtEmissiveLighting.GetBool() ) && s_rtEmissiveBuf != 0
 		&& entityIndex >= 0 && entityIndex < s_rtEmissiveFlareHidden.Num() && s_rtEmissiveFlareHidden[entityIndex];
 }
 

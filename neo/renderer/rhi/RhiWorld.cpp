@@ -8221,6 +8221,23 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.specularParms[3] = r_rtReStirDIDynamicForward.GetBool() ? 1.0f : 0.0f;
 		parms.pbrParms[0] = r_rtgiRadius.GetFloat();
 		parms.pbrParms[1] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissive.GetFloat() );
+		// EMISSIVE MODE (docs/rtx-experimental-lighting.md E2): the emissive table as a second candidate stream of the RIS.
+		// u_texGen0S = ( table address lo, hi, intensity, candidates per pixel ). While the emitters are sampled as lights,
+		// the bounce's per-pixel "glow at the hit" term is OFF (pbrParms.y = 0): a bounce ray landing on an emitter is the
+		// same direct emitter->P path the DI stream now estimates properly, and would count it twice.
+		{
+			int emTris = 0; float emTotal = 0.0f, emMean = 0.0f;
+			const unsigned long long emAddr = ( r_rtEmissiveLighting.GetBool() && r_rtEmissiveCandidates.GetInteger() > 0 )
+				? R_RtEmissiveTableAddress( &emTris, &emTotal, &emMean ) : 0;
+			const unsigned int emLo = (unsigned int)( emAddr & 0xFFFFFFFFull ), emHi = (unsigned int)( emAddr >> 32 );
+			memcpy( &parms.texGen0S[0], &emLo, sizeof( emLo ) );
+			memcpy( &parms.texGen0S[1], &emHi, sizeof( emHi ) );
+			parms.texGen0S[2] = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveIntensity.GetFloat() );
+			parms.texGen0S[3] = ( emAddr != 0 && emTris > 0 ) ? (float)idMath::ClampInt( 0, 16, r_rtEmissiveCandidates.GetInteger() ) : 0.0f;
+			if ( emAddr != 0 && emTris > 0 ) {
+				parms.pbrParms[1] = 0.0f;
+			}
+		}
 		parms.pbrParms[2] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissiveClamp.GetFloat() );
 		parms.pbrParms[3] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiLightScale.GetFloat() );
 		parms.pbrParms2[0] = 0.0f;											// ambient floor: a pure bounce (as RB_RHI_RtgiPass)

@@ -1088,6 +1088,9 @@ extern idCVar r_rtLightGridDebug;			// RT light grid debug overlay: 1 cascade, 2
 extern idCVar r_rtEmissiveTable;			// RT emissive triangle table (docs/rtx-emissive-triangles.md E1): every emissive triangle + flux CDF in a GPU table
 extern idCVar r_rtEmissiveTableDebug;		// RT emissive table debug overlay: 1 per-texture tint, 2 flux, 3 emitted colour
 extern idCVar r_rtEmissiveScale;
+extern idCVar r_rtEmissiveLighting;		// EMISSIVE MODE master switch (D6): emitters light the scene (E2); implies the table, hides flares
+extern idCVar r_rtEmissiveIntensity;		// emissive mode: radiance multiplier of every emitter
+extern idCVar r_rtEmissiveCandidates;		// emissive mode: emissive sample points per pixel in the DI gather
 extern idCVar r_rtEmissiveHideFlares;		// emitter mode: hide the flare sprites of fixtures that are table emitters			// RT emissive table: global flux / emitted-colour multiplier (rebuilds the table)
 extern idCVar r_rtEmissiveFlareInfer;		// RT emissive table: promote the diffuse patch under a flare on a glow-less fixture to an emitter
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid

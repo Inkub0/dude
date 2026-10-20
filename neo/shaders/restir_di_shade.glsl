@@ -8,6 +8,9 @@
 // Needs (before this include): renderparms.glsl, rt_light_eval.glsl, rt_light_tex.glsl, rt_perforated.glsl,
 // restir_di_common.glsl; GL_EXT_ray_query, GL_EXT_buffer_reference_uvec2, GL_EXT_nonuniform_qualifier.
 
+// EMISSIVE MODE (E2): the emissive triangle table the emitter shade below samples (guarded: the gather includes it too)
+#include "rt_emissive.glsl"
+
 SAMPLER_BINDING(0) uniform sampler2D u_currentDepth;
 SAMPLER_BINDING(1) uniform sampler2D u_normalBuffer;	// xyz = view-space normal, a = weapon/AO mask (0 = weapon)
 SAMPLER_BINDING(2) uniform sampler2D u_albedoBuffer;	// apply mode: G-buffer att3 receiver albedo (white when absent)
@@ -85,6 +88,30 @@ bool diSurfaceAt( vec2 sfrag, bool applyMode, bool pbr, out DiSurface s, out flo
 // per-pixel-constant-ish factor that barely changes the pick), so the gather weighs its ~38 candidates with this and
 // re-shades only the WINNER at full material - the big gather cost lever. false = the full shade (the chosen pixel, the
 // boost picks, the gradient), which stays exactly as before.
+// The apply-mode material response per unit light (interaction.frag's PBR combine): GGX specular lobe * Fresnel * spec
+// gain + the metal environment floor + the Lambert diffuse share. Shared by the placed-light and the emitter shades so
+// the two agree bit-for-bit (diShadeLight's original expressions, moved here unchanged).
+vec3 diMaterialResponse( in DiSurface s, vec3 ldir, float ndl ) {
+	vec3 f;
+	if ( u_shadowFalloffS.z > 1.5 ) {
+		f = s.albedo * ( 1.0 - s.metal * s.kd );	// specReshade: DIFFUSE only; the apply rebuilds the GGX specular at full res
+	} else if ( s.pbr ) {
+		vec3  H     = normalize( ldir + s.Vw );
+		float NdotH = max( dot( s.Nw, H ), 0.0 );
+		float VdotH = max( dot( s.Vw, H ), 0.0 );
+		vec3  F     = s.F0 + ( 1.0 - s.F0 ) * pow( 1.0 - VdotH, 5.0 );
+		float dd    = NdotH * NdotH * ( s.alpha2 - 1.0 ) + 1.0;
+		float D     = s.alpha2 / ( dd * dd );									// GGX NDF, pi folded out
+		float k     = 0.5 * sqrt( s.alpha2 );
+		float gvis  = 0.25 / ( ( ndl * ( 1.0 - k ) + k ) * ( s.NdotV * ( 1.0 - k ) + k ) );
+		float lobe  = min( D * gvis, u_diffuseModifier.z );					// firefly clamp
+		f = lobe * F * s.specGain + s.envFloor + s.albedo * ( ( 1.0 - F ) * ( 1.0 - s.metal * s.kd ) );
+	} else {
+		f = s.albedo;															// legacy: Lambert, no spec (v1)
+	}
+	return f;
+}
+
 bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, out vec3 ldir, out float dl, out float ndl, bool targetOnly ) {
 	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	if ( !dudeLightInRange( lights, li, s.Pw ) ) { return false; }				// cheap volume-sphere cull
@@ -99,24 +126,43 @@ bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, o
 		: vec3( dudeLightAtten( lights, li, s.Pw, dl, lights.l[ li ].flags, true, false ) );
 	contrib = lights.l[ li ].color * ( atten * ndl );							// irradiance-like: colour * cookie/falloff * N.L
 	if ( s.applyMode && !targetOnly ) {
-		vec3 f;
-		if ( u_shadowFalloffS.z > 1.5 ) {
-			f = s.albedo * ( 1.0 - s.metal * s.kd );	// specReshade: DIFFUSE only; the apply rebuilds the GGX specular at full res
-		} else if ( s.pbr ) {
-			vec3  H     = normalize( ldir + s.Vw );
-			float NdotH = max( dot( s.Nw, H ), 0.0 );
-			float VdotH = max( dot( s.Vw, H ), 0.0 );
-			vec3  F     = s.F0 + ( 1.0 - s.F0 ) * pow( 1.0 - VdotH, 5.0 );
-			float dd    = NdotH * NdotH * ( s.alpha2 - 1.0 ) + 1.0;
-			float D     = s.alpha2 / ( dd * dd );									// GGX NDF, pi folded out
-			float k     = 0.5 * sqrt( s.alpha2 );
-			float gvis  = 0.25 / ( ( ndl * ( 1.0 - k ) + k ) * ( s.NdotV * ( 1.0 - k ) + k ) );
-			float lobe  = min( D * gvis, u_diffuseModifier.z );					// firefly clamp
-			f = lobe * F * s.specGain + s.envFloor + s.albedo * ( ( 1.0 - F ) * ( 1.0 - s.metal * s.kd ) );
-		} else {
-			f = s.albedo;															// legacy: Lambert, no spec (v1)
-		}
-		contrib *= f;
+		contrib *= diMaterialResponse( s, ldir, ndl );
+	}
+	return true;
+}
+
+// EMISSIVE MODE (docs/rtx-experimental-lighting.md E2): the unshadowed contribution DENSITY of one sample point on
+// emissive triangle `tri` (xi = the uniform point's two randoms) at surface s - per unit EMITTER AREA, so the RIS
+// weight divides it by the sample's area-measure pdf (flux share / area). radiance = the glow texel at the point
+// (rtEmissiveTexelToRadiance: the stage tint, or the diffuse through its threshold for a flare-inferred patch) x the
+// material scale x the mode intensity; geometry = cos at the emitter (two-sided when the material is) x N.L at the
+// receiver / d^2 (d clamped at 2 units: a receiver flush with its tube). false = cannot reach / dark / behind.
+// Same material response as a placed light in apply mode. Needs rt_emissive.glsl + the bindless u_rtTextures.
+bool diShadeEmitter( RtEmissiveTable t, uint tri, vec2 xi, in DiSurface s, float intensity, out vec3 contrib, out vec3 ldir, out float dl, out float ndl, bool targetOnly ) {
+	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
+	RtEmissiveTri e = rtEmissiveFetch( t, tri );
+	if ( !( e.flux > 0.0 ) ) { return false; }									// dark (switched off / gone)
+	vec3 nUn, bary;
+	vec3 Pe = rtEmissiveUniformPoint( e, xi, nUn, bary );
+	vec3 d  = Pe - s.Pw;
+	float d2 = max( dot( d, d ), 4.0 );
+	dl   = sqrt( d2 );
+	ldir = d / dl;
+	ndl  = max( dot( s.Nw, ldir ), 0.0 );
+	if ( !( ndl > 0.0 ) ) { return false; }
+	float nl = length( nUn );
+	if ( !( nl > 1e-6 ) ) { return false; }
+	// the engine's face normal is cross( p2 - p0, p1 - p0 ) = -nUn (R_DeriveFacePlanes); the emitter faces the receiver
+	// when that normal points at it
+	float cosL = dot( -nUn / nl, -ldir );
+	if ( ( e.emit & RT_EMIT_TWOSIDED ) != 0u ) { cosL = abs( cosL ); }
+	if ( !( cosL > 0.0 ) ) { return false; }
+	uint slot = e.emit & 0xFFFFu;
+	vec3 texel = ( slot != 0u ) ? textureLod( u_rtTextures[ nonuniformEXT( slot - 1u ) ], rtEmissiveST( e, bary ), 0.0 ).rgb : vec3( 1.0 );
+	vec3 L = rtEmissiveTexelToRadiance( e, texel ) * ( e.scale * intensity );
+	contrib = L * ( cosL * ndl / d2 );
+	if ( s.applyMode && !targetOnly ) {
+		contrib *= diMaterialResponse( s, ldir, ndl );
 	}
 	return true;
 }

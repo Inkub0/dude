@@ -121,3 +121,40 @@ Grid + cache memory (tens of MB each); flicker of a learned grid (feedback memor
 dynamic images (GUIs) excluded from the table; translucent / particle emitters outside the TLAS (hence D1);
 thin-wall leaks in the cache; exposure range; the look departs from the authored mood by design - the toggle is
 the safety net. Renderer-only: saves, mods and the game DLL are untouched.
+
+## E2 - emitters light the scene, direct-lighting side (built 2026-10-20, branch feat/rtx-emissive-e2, NOT merged)
+
+**What it is.** `r_rtEmissiveLighting 1` (D6, the master; implies the table, hides the fixtures' flares). In the
+ReSTIR DI gather (restir_di.frag) the emissive table is a SECOND candidate stream next to the placed lights:
+`r_rtEmissiveCandidates` (4) samples per pixel, each a triangle in proportion to its flux (CDF binary search) and a
+uniform point on it; the candidate's area-measure pdf is p = (flux / total) / area and its RIS weight pHat / (Me p),
+so the Me draws sit beside the enumerated (pdf 1) lights in the one reservoir (only with the exhaustive / grid light
+streams; the uniform-M light draw is not mixed). The winner, light or emitter, is full-shaded once and traces ONE
+visibility ray - `traceVisibility`, i.e. the grate-aware perforated walk when grates are on (the cookie requirement).
+`diShadeEmitter` (restir_di_shade.glsl): radiance = the glow texel at the point (`rtEmissiveTexelToRadiance`: stage
+tint, or the diffuse through its threshold for a flare-inferred patch) x material scale x `r_rtEmissiveIntensity`
+(4); geometry = cos at the emitter (two-sided when the material is) x N.L / d^2 (d >= 2); the same apply-mode
+material response as a placed light (`diMaterialResponse`, factored out of diShadeLight unchanged). The R3a boost's
+extra picks can land on emitters too. `u_texGen0S` carries (table address, intensity, candidates).
+
+**Double counting avoided.** While emitters are sampled, the bounce's per-pixel "glow at the hit" term is OFF
+(pbrParms.y = 0): a bounce ray landing on an emitter is the same direct emitter->P path the stream now estimates.
+Consequences for this first cut: (1) the bounce hit H receives NO emitter light yet (its light loop knows only the
+placed lights), so a wall lit purely by emitters bounces nothing until E2's GI side adds emitter NEE at H; (2) the
+irradiance cache learns E_dir at P from the emissive winner (teach path handles it), but at H only placed lights.
+(3) An emissive winner writes row 0 to the R1 gradient side data: no antilag re-shade for emitter-lit pixels
+(emitters are mostly static; fixture switches reach the cache through the state tracking's flux change).
+
+**Units.** Placed lights: colour x Doom's linear falloff (no 1/pi); emitters: L x cos x cos / d^2 per unit area.
+No exact equivalence: `r_rtEmissiveIntensity` is the calibration knob until the D2 per-material table.
+
+**Test (user).** dude_rtx 2 (ReSTIR DI + apply on), a lit corridor (Mars City). `r_rtEmissiveLighting 1`:
+1. Placed lights untouched (E5 is later), so the picture should only get BRIGHTER near fixtures: ceiling tiles and
+   strips now also light the surfaces around them with soft falloff and real shadows (grilles). `r_rtEmissiveCandidates
+   0` = the A/B (table on, no emitter light).
+2. `r_rtReStirDIDebug 1/2` (raw / denoised DI) to see the emitter light alone in the DI buffer; noise level vs 4/8/16
+   candidates; `r_vkGpuTime 2`: restir.di.gather cost delta (expect ~Me x a cheap shade + the same one ray).
+3. `r_rtEmissiveIntensity` by eye: a tile should light its surroundings about as much as its placed light did.
+4. Flares: gone on emitting fixtures (hidden), present on the rest.
+5. Fixture shot out / door light state change: the emitter light follows (console lines).
+Known for round 1: emitter-lit walls do not bounce yet; the glow at a bounce hit is off (slightly less "glow bleed").
