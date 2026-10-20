@@ -207,3 +207,21 @@ Q2RTX = polygon lights from emissive textures, no placed lights: the same mode. 
   triangle inside each group by flux (the global CDF restricted to the group's contiguous range), importance x
   solid angle x luminance over the K, pick, Arvo. Q2RTX's cluster list with the grid as the cluster.
 - v2c: learned visibility per cell x emitter x orientation (L4).
+
+**E2 v2a built (2026-10-20, branch feat/rtx-emissive-e2).** (1) `R_ImageEmissiveExtentsRGBA` at image load (beside
+averageColor, the parallel loader too): `glowExtents` (texels > 8% luminance) and `brightExtents` (> 60%), each the st
+rectangle of the bright texels, their mean LINEAR colour, their coverage, `entire`. (2) `R_RtEmissiveEmitTriangle`: an
+emissive triangle is clipped per texture repetition to its glow image's extents (Sutherland-Hodgman in st, vertices
+mapped back through the barycentrics), fan-triangulated; every entry is a UNIFORM emitter with the bright texels'
+mean. The flare-inferred fixtures use the diffuse's brightExtents the same way (a proper small light bar, no texel
+read; a diffuse with nothing above 60% is not inferred). Census rows say "(clipped to the glow's extents)". (3)
+`rtEmissiveSampleSolidAngle` (Arvo, Q2RTX's sample_projected_triangle) + `rtEmissiveSolidAngle`; `diShadeEmitter`
+samples in solid angle: contrib = L x sqrt(cos_e) x N.L per unit solid angle, candidate pdf = flux share x 1/Omega.
+No 1/d^2 anywhere. The near-field clamp went with it. Still a distance-blind proposal (v2b = the grid groups).
+
+**Hitching (user, 2026-10-20) - fixed:** `R_RtEmissiveStage` evaluated the material registers BEFORE testing for an
+additive stage, so the 90-frame scans ran a register evaluation per surface in the map; and the new-entity scan
+flagged any gatherable entity without a group - an entity the build examined and found dark - as "new" every 90
+frames, a full rebuild each time. Now: additive pre-check first; the build records the model it examined per entity
+slot (`s_rtEmissiveSeenModel`) and the scan only looks at slots whose model changed; scan rebuilds are throttled to
+one per 5 s, state-change rebuilds to one per 2 s.

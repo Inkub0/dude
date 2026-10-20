@@ -113,6 +113,63 @@ vec3 rtEmissiveUniformPoint( RtEmissiveTri e, vec2 xi, out vec3 nUnnorm, out vec
 	return bary.x * e.p0 + bary.y * e.p1 + bary.z * e.p2;
 }
 
+// Sample the triangle UNIFORMLY IN SOLID ANGLE as seen from P (Arvo 1995, Q2RTX light_lists.h sample_projected_triangle):
+// the pdf w.r.t. solid angle is 1 / (spherical area), so a sample's value L x N.L x (1/pdfw) is bounded by the solid
+// angle - no 1/d^2 blow-up for a receiver near the emitter. Returns false when the spherical triangle is degenerate
+// (P in the triangle's plane, or the triangle too small / far to resolve). nUnit = the triangle's unit normal
+// (cross( p1 - p0, p2 - p0 ) - the engine's face normal is the opposite sign).
+bool rtEmissiveSampleSolidAngle( RtEmissiveTri e, vec3 P, vec2 rnd, out vec3 Pe, out vec3 nUnit, out float pdfw ) {
+	vec3 n = cross( e.p1 - e.p0, e.p2 - e.p0 );
+	float nl = length( n );
+	Pe = e.p0; nUnit = vec3( 0.0, 0.0, 1.0 ); pdfw = 0.0;
+	if ( !( nl > 1e-8 ) ) { return false; }
+	nUnit = n / nl;
+	vec3 v0 = e.p0 - P, v1 = e.p1 - P, v2 = e.p2 - P;
+	float o = dot( nUnit, v0 );											// signed distance of the plane
+	if ( abs( o ) < 1e-3 ) { return false; }
+	vec3 A = normalize( v0 ), B = normalize( v1 ), C = normalize( v2 );
+	vec3 cross_BC = cross( B, C );
+	vec3 norm_AB = normalize( cross( A, B ) ), norm_BC = normalize( cross_BC ), norm_CA = normalize( cross( C, A ) );
+	float cos_c = dot( A, B );
+	float cos_alpha = dot( norm_AB, -norm_CA );
+	float area = 2.0 * atan( abs( dot( A, cross_BC ) ), 1.0 + cos_c + dot( B, C ) + dot( A, C ) );
+	if ( !( area > 1e-7 ) ) { return false; }
+	float new_area = rnd.x * area;
+	float sin_alpha = sqrt( max( 1.0 - cos_alpha * cos_alpha, 0.0 ) );
+	float sin_new_area = sin( new_area ), cos_new_area = cos( new_area );
+	float p = sin_new_area * cos_alpha - cos_new_area * sin_alpha;
+	float q = cos_new_area * cos_alpha + sin_new_area * sin_alpha;
+	float u = q - cos_alpha;
+	float v = p + sin_alpha * cos_c;
+	float denom = ( v * p + u * q ) * sin_alpha;
+	float cos_b = clamp( ( ( v * q - u * p ) * cos_alpha - v ) / ( abs( denom ) > 1e-8 ? denom : 1e-8 ), -1.0, 1.0 );
+	vec3 CA = C - dot( C, A ) * A;
+	float cal = length( CA );
+	if ( !( cal > 1e-8 ) ) { return false; }
+	vec3 new_C = cos_b * A + sqrt( max( 1.0 - cos_b * cos_b, 0.0 ) ) * ( CA / cal );
+	float z = 1.0 - rnd.y * ( 1.0 - dot( new_C, B ) );
+	vec3 CB = new_C - dot( new_C, B ) * B;
+	float cbl = length( CB );
+	if ( !( cbl > 1e-8 ) ) { return false; }
+	vec3 dir = z * B + sqrt( max( 1.0 - z * z, 0.0 ) ) * ( CB / cbl );
+	float dn = dot( nUnit, dir );
+	if ( !( abs( dn ) > 1e-6 ) ) { return false; }
+	Pe = P + dir * ( o / dn );
+	pdfw = 1.0 / area;
+	return !( any( isnan( Pe ) ) || isnan( pdfw ) );
+}
+
+// The solid angle of the triangle from P (its importance, Q2RTX spherical_tri_area without the Phong share): 0 when
+// entirely below the receiver's horizon (n = receiver normal) or facing away (one-sided).
+float rtEmissiveSolidAngle( RtEmissiveTri e, vec3 P, vec3 n, bool twoSided ) {
+	vec3 v0 = e.p0 - P, v1 = e.p1 - P, v2 = e.p2 - P;
+	if ( dot( n, v0 ) <= 0.0 && dot( n, v1 ) <= 0.0 && dot( n, v2 ) <= 0.0 ) { return 0.0; }
+	vec3 g = cross( e.p1 - e.p0, e.p2 - e.p0 );							// = -faceNormal: the emitter faces P when dot( g, v ) > 0
+	if ( !twoSided && dot( g, v0 ) <= 0.0 && dot( g, v1 ) <= 0.0 && dot( g, v2 ) <= 0.0 ) { return 0.0; }
+	vec3 A = normalize( v0 ), B = normalize( v1 ), C = normalize( v2 );
+	return max( 2.0 * atan( abs( dot( A, cross( B, C ) ) ), 1.0 + dot( A, B ) + dot( B, C ) + dot( A, C ) ) - 1e-5, 0.0 );
+}
+
 vec2 rtEmissiveST( RtEmissiveTri e, vec3 bary ) {
 	return bary.x * unpackHalf2x16( e.st0 ) + bary.y * unpackHalf2x16( e.st1 ) + bary.z * unpackHalf2x16( e.st2 );
 }

@@ -62,14 +62,6 @@ void main() {
 	} else if ( mode == 4 ) {
 		fragColor = ( ( flags & ( 1u << 19 ) ) != 0u ) ? vec4( 0.1, 0.9, 0.2, 1.0 ) : vec4( 0.95, 0.15, 0.1, 1.0 );
 	} else {
-		vec3 e = ( slot != 0u ) ? textureLod( u_rtTextures[ nonuniformEXT( slot - 1u ) ], var_TexCoord, 0.0 ).rgb : vec3( 1.0 );
-		if ( ( flags & ( 1u << 21 ) ) != 0u ) {										// flare-inferred: the diffuse through its threshold
-			float th  = var_Tint.a;
-			float lum = dot( e, vec3( 0.2126, 0.7152, 0.0722 ) );
-			e *= clamp( ( lum - th ) / max( 1.0 - th, 1e-3 ), 0.0, 1.0 );
-			fragColor = vec4( e * var_FluxScaleIndex.y, 1.0 );
-		} else {
-			fragColor = vec4( var_Tint.rgb * var_FluxScaleIndex.y, 1.0 );			// the MEAN radiance E2 lights with (flat; the vertex colour carries it)
-		}
+		fragColor = vec4( var_Tint.rgb * var_FluxScaleIndex.y, 1.0 );				// the MEAN radiance E2 lights with (flat; the vertex colour carries it; every entry is uniform now)
 	}
 }

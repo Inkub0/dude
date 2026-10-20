@@ -2828,6 +2828,11 @@ static bool R_RtEmissiveIsScreen( const idMaterial *mat ) {
 static idList<const idImage *>	s_rtEmissiveNotResident;
 static idList<bool>				s_rtEmissiveFlareHidden;	// per entity index: a flare sprite sitting on an emitter (r_rtEmissiveHideFlares skips its draw)
 static int						s_rtEmissiveFlareCount = 0;	// glow images that were not on the GPU at build time: a later residency rebuilds
+static idList<const idRenderModel *>	s_rtEmissiveSeenModel;	// per entity index: the model the build examined there (NULL = empty / not gatherable then);
+														// the periodic scan only looks at slots whose model CHANGED since - an entity the build
+														// examined and found dark must not read as "new" every 90 frames (a rebuild each time:
+														// the hitching of 2026-10-20)
+static int						s_rtEmissiveLastRebuildMs = -100000;	// Sys_Milliseconds of the last build: scan / state rebuilds are throttled
 
 static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat, const char **why = NULL, const float *entityParms = NULL ) {
 	const char *reason = "";
@@ -2836,6 +2841,16 @@ static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat, const char
 		return NULL;
 	}
 	const int n = mat->GetNumStages();
+	bool anyAdditive = false;
+	for ( int i = 0; i < n; i++ ) {
+		const shaderStage_t *st = mat->GetStage( i );
+		if ( ( st->drawStateBits & GLS_SRCBLEND_BITS ) == GLS_SRCBLEND_ONE && ( st->drawStateBits & GLS_DSTBLEND_BITS ) == GLS_DSTBLEND_ONE ) {
+			anyAdditive = true;
+		}
+	}
+	if ( !anyAdditive ) {
+		return NULL;														// not self-illuminated at all: no reason to report (and no register work:
+	}																		// this test runs over every surface in the periodic scans)
 	// stage CONDITIONS (`if ( parm7 == 0 )`: a door light's red / green state, a fixture's on / off) evaluated with the
 	// surface's own parms at time 0, so the stage that is actually drawn is the one gathered
 	static const float defaultParms[MAX_ENTITY_SHADER_PARMS] = { 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
@@ -2845,16 +2860,6 @@ static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat, const char
 		viewDef_t probeView;
 		memset( &probeView, 0, sizeof( probeView ) );
 		mat->EvaluateRegisters( regs, entityParms != NULL ? entityParms : defaultParms, &probeView, NULL );
-	}
-	bool anyAdditive = false;
-	for ( int i = 0; i < n; i++ ) {
-		const shaderStage_t *st = mat->GetStage( i );
-		if ( ( st->drawStateBits & GLS_SRCBLEND_BITS ) == GLS_SRCBLEND_ONE && ( st->drawStateBits & GLS_DSTBLEND_BITS ) == GLS_DSTBLEND_ONE ) {
-			anyAdditive = true;
-		}
-	}
-	if ( !anyAdditive ) {
-		return NULL;														// not self-illuminated at all: no reason to report
 	}
 	if ( mat->HasGui() ) {
 		reason = "gui screen";
@@ -3005,9 +3010,90 @@ static bool R_RtEmissiveEntityGatherable( const idRenderEntityLocal *def ) {
 }
 
 // per-material census row for the build report
-struct rtEmissiveCensus_t { const idMaterial *mat; int tris; float flux; bool animated; bool texMatrix; unsigned int slot; bool inferred; };
+struct rtEmissiveCensus_t { const idMaterial *mat; int tris; float flux; bool animated; bool texMatrix; unsigned int slot; bool inferred; bool clipped; };
 
 // Append every triangle of one emissive surface. modelMatrix NULL = the verts are already world space (an _areaN).
+static float R_RtPointTriangleDistance( const idVec3 &p, const idVec3 &a, const idVec3 &b, const idVec3 &c );	// defined with the flare inference below
+
+// Emit the LIGHT of one triangle (Q2RTX collect_one_light_poly): with valid, non-entire image extents the triangle is
+// clipped, per texture repetition, to the st rectangle of the bright texels (Sutherland-Hodgman in st; vertices mapped
+// back through the triangle's barycentrics), fan-triangulated, and each piece is an entry with the bright texels' MEAN
+// radiance - a wall panel with two LEDs becomes two small lights, so the flux proposal matches the real emission. No
+// extents / entire = the whole triangle. p[] are MODEL-space (or world, mm NULL) positions, st[] the baked st.
+// reachPoint / reach: keep only pieces within reach of the point (the flare-inferred fixtures). Returns entries added.
+static int R_RtEmissiveEmitTriangle( const idVec3 p[3], const float st[3][2], const float *mm, const imageEmissiveExtents_t *ext,
+		float lumPerArea, unsigned int emit, unsigned int tint, unsigned int meanRG, unsigned int meanB, float scale,
+		idList<rtEmissiveTriGPU_t> &out, idList<idVec3> *localOut, int &overflow, const idVec3 *reachPoint, float reach ) {
+	struct pv_t { float s, t; idVec3 p; };
+	pv_t poly[12], clipped[12];
+	int added = 0;
+	auto emitPiece = [&]( const pv_t &a, const pv_t &b, const pv_t &c ) {
+		if ( out.Num() >= RT_EMISSIVE_MAX_TRIS ) { overflow++; return; }
+		idVec3 w0 = a.p, w1 = b.p, w2 = c.p;
+		if ( mm != NULL ) { R_LocalPointToGlobal( mm, a.p, w0 ); R_LocalPointToGlobal( mm, b.p, w1 ); R_LocalPointToGlobal( mm, c.p, w2 ); }
+		const float area = 0.5f * ( ( w1 - w0 ).Cross( w2 - w0 ) ).Length();
+		if ( area < 1e-3f ) { return; }
+		if ( reachPoint != NULL && R_RtPointTriangleDistance( *reachPoint, w0, w1, w2 ) > reach ) { return; }
+		if ( mm != NULL && localOut != NULL ) { localOut->Append( a.p ); localOut->Append( b.p ); localOut->Append( c.p ); }
+		rtEmissiveTriGPU_t &e = out.Alloc();
+		e.p0[0] = w0.x; e.p0[1] = w0.y; e.p0[2] = w0.z;
+		e.p1[0] = w1.x; e.p1[1] = w1.y; e.p1[2] = w1.z;
+		e.p2[0] = w2.x; e.p2[1] = w2.y; e.p2[2] = w2.z;
+		e.flux = area * lumPerArea;
+		e.emit = emit;
+		e.scale = scale;
+		e.st0 = R_RtPackHalf2( a.s, a.t ); e.st1 = R_RtPackHalf2( b.s, b.t ); e.st2 = R_RtPackHalf2( c.s, c.t );
+		e.tint = tint;
+		e.meanRG = meanRG; e.meanB = meanB; e.pad0 = 0u; e.pad1 = 0u;
+		added++;
+	};
+	pv_t v[3];
+	for ( int k = 0; k < 3; k++ ) { v[k].s = st[k][0]; v[k].t = st[k][1]; v[k].p = p[k]; }
+	// the st -> barycentric map (a 2x2 inverse); degenerate st (all three on a line) = no clipping possible
+	const float ds1 = st[1][0] - st[0][0], dt1 = st[1][1] - st[0][1], ds2 = st[2][0] - st[0][0], dt2 = st[2][1] - st[0][1];
+	const float det = ds1 * dt2 - ds2 * dt1;
+	float minS = Min( st[0][0], Min( st[1][0], st[2][0] ) ), maxS = Max( st[0][0], Max( st[1][0], st[2][0] ) );
+	float minT = Min( st[0][1], Min( st[1][1], st[2][1] ) ), maxT = Max( st[0][1], Max( st[1][1], st[2][1] ) );
+	if ( ext == NULL || !ext->valid || ext->entire || idMath::Fabs( det ) < 1e-10f || ( maxS - minS ) > 64.0f || ( maxT - minT ) > 64.0f ) {
+		emitPiece( v[0], v[1], v[2] );										// whole triangle (also: a surface tiling the texture 64+ times)
+		return added;
+	}
+	const float invDet = 1.0f / det;
+	auto mapBack = [&]( float sv, float tv ) {
+		pv_t r; r.s = sv; r.t = tv;
+		const float es = sv - st[0][0], et = tv - st[0][1];
+		const float u = ( es * dt2 - ds2 * et ) * invDet, w = ( ds1 * et - es * dt1 ) * invDet;
+		r.p = p[0] + ( p[1] - p[0] ) * u + ( p[2] - p[0] ) * w;
+		return r;
+	};
+	for ( float ty = idMath::Floor( minT ); ty < maxT; ty += 1.0f ) {
+		for ( float tx = idMath::Floor( minS ); tx < maxS; tx += 1.0f ) {
+			// the rectangle of this repetition: 4 half-plane clips (Sutherland-Hodgman)
+			const float rect[4] = { tx + ext->minST[0], tx + ext->maxST[0], ty + ext->minST[1], ty + ext->maxST[1] };
+			int n = 3;
+			poly[0] = v[0]; poly[1] = v[1]; poly[2] = v[2];
+			for ( int side = 0; side < 4 && n >= 3; side++ ) {
+				int m = 0;
+				for ( int i = 0; i < n; i++ ) {
+					const pv_t &cur = poly[i], &nxt = poly[( i + 1 ) % n];
+					const float cv = ( side < 2 ) ? cur.s : cur.t, nv = ( side < 2 ) ? nxt.s : nxt.t, lim = rect[side];
+					const bool cin = ( side & 1 ) ? ( cv <= lim ) : ( cv >= lim ), nin = ( side & 1 ) ? ( nv <= lim ) : ( nv >= lim );
+					if ( cin ) { clipped[m++] = cur; }
+					if ( cin != nin ) {
+						const float f = ( lim - cv ) / ( nv - cv );
+						clipped[m++] = mapBack( cur.s + ( nxt.s - cur.s ) * f, cur.t + ( nxt.t - cur.t ) * f );
+					}
+					if ( m >= 11 ) { break; }
+				}
+				n = m;
+				for ( int i = 0; i < n; i++ ) { poly[i] = clipped[i]; }
+			}
+			for ( int i = 1; i + 1 < n; i++ ) { emitPiece( poly[0], poly[i], poly[i + 1] ); }
+		}
+	}
+	return added;
+}
+
 static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial *mat, const shaderStage_t *stage,
 		const float *modelMatrix, const float *entityParms, unsigned int flags, float scale,
 		idList<rtEmissiveCensus_t> &census, int &overflow,
@@ -3023,8 +3109,13 @@ static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial 
 		}
 	}
 	const idImage *img = stage->texture.image;
-	const float avgLin[3] = { R_RtSrgbToLinear( img->averageColor[0] ), R_RtSrgbToLinear( img->averageColor[1] ), R_RtSrgbToLinear( img->averageColor[2] ) };
-	const float lumPerArea = R_RtLuminance( avgLin ) * tintLum * scale;
+	// the light's colour: the mean of the BRIGHT texels when the image's glow extents are known (the light is clipped to
+	// them), else the whole-image average
+	const imageEmissiveExtents_t *ext = img->glowExtents.valid ? &img->glowExtents : NULL;
+	float meanLin[3];
+	if ( ext != NULL ) { meanLin[0] = ext->mean[0]; meanLin[1] = ext->mean[1]; meanLin[2] = ext->mean[2]; }
+	else { meanLin[0] = R_RtSrgbToLinear( img->averageColor[0] ); meanLin[1] = R_RtSrgbToLinear( img->averageColor[1] ); meanLin[2] = R_RtSrgbToLinear( img->averageColor[2] ); }
+	const float lumPerArea = R_RtLuminance( meanLin ) * tintLum * scale;
 	if ( lumPerArea <= 0.0f ) {
 		return;																// a black glow stage (a switched-off fixture skin): no emitter
 	}
@@ -3033,59 +3124,31 @@ static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial 
 	}
 	const unsigned int emit = ( (unsigned int)img->rhiHandle & 0xFFFFu ) | flags;
 	const unsigned int tint = R_RtPackRGBA8( tintRGB );
-	const unsigned int meanRG = R_RtPackHalf2( avgLin[0] * tintRGB[0], avgLin[1] * tintRGB[1] );
-	const unsigned int meanB  = R_RtPackHalf2( avgLin[2] * tintRGB[2], 0.0f );
+	const unsigned int meanRG = R_RtPackHalf2( meanLin[0] * tintRGB[0], meanLin[1] * tintRGB[1] );
+	const unsigned int meanB  = R_RtPackHalf2( meanLin[2] * tintRGB[2], 0.0f );
 	float tm[6];
 	const bool hasTexMatrix = R_RtEmissiveStageTexMatrix( mat, stage, entityParms, tm );
 	int ci = -1;
 	for ( int i = 0; i < census.Num(); i++ ) { if ( census[i].mat == mat ) { ci = i; break; } }
-	if ( ci < 0 ) { rtEmissiveCensus_t c; c.mat = mat; c.tris = 0; c.flux = 0.0f; c.animated = !constant; c.texMatrix = hasTexMatrix; c.slot = (unsigned int)img->rhiHandle & 0xFFFFu; c.inferred = false; ci = census.Append( c ); }
+	if ( ci < 0 ) { rtEmissiveCensus_t c; c.mat = mat; c.tris = 0; c.flux = 0.0f; c.animated = !constant; c.texMatrix = hasTexMatrix; c.slot = (unsigned int)img->rhiHandle & 0xFFFFu; c.inferred = false; c.clipped = ( ext != NULL && !ext->entire ); ci = census.Append( c ); }
 
 	for ( int n = 0; n + 2 < tri->numIndexes; n += 3 ) {
-		if ( out.Num() >= RT_EMISSIVE_MAX_TRIS ) {
-			overflow++;
-			continue;
-		}
-		const idDrawVert &a = tri->verts[ tri->indexes[n + 0] ];
-		const idDrawVert &b = tri->verts[ tri->indexes[n + 1] ];
-		const idDrawVert &c = tri->verts[ tri->indexes[n + 2] ];
-		idVec3 p0 = a.xyz, p1 = b.xyz, p2 = c.xyz;
-		if ( modelMatrix != NULL ) {
-			R_LocalPointToGlobal( modelMatrix, a.xyz, p0 );
-			R_LocalPointToGlobal( modelMatrix, b.xyz, p1 );
-			R_LocalPointToGlobal( modelMatrix, c.xyz, p2 );
-		}
-		const float area = 0.5f * ( ( p1 - p0 ).Cross( p2 - p0 ) ).Length();
-		if ( area < 1e-3f ) {
-			continue;														// degenerate
-		}
-		if ( modelMatrix != NULL && localOut != NULL ) {					// E1e: the model-space verts, for the mover re-bake
-			localOut->Append( a.xyz );
-			localOut->Append( b.xyz );
-			localOut->Append( c.xyz );
-		}
-		rtEmissiveTriGPU_t &e = out.Alloc();
-		e.p0[0] = p0.x; e.p0[1] = p0.y; e.p0[2] = p0.z;
-		e.p1[0] = p1.x; e.p1[1] = p1.y; e.p1[2] = p1.z;
-		e.p2[0] = p2.x; e.p2[1] = p2.y; e.p2[2] = p2.z;
-		e.flux  = area * lumPerArea;
-		e.emit  = emit;
-		e.scale = scale;
-		const idDrawVert *v3[3] = { &a, &b, &c };
-		unsigned int *stOut[3] = { &e.st0, &e.st1, &e.st2 };
+		const idDrawVert *vv[3] = { &tri->verts[ tri->indexes[n + 0] ], &tri->verts[ tri->indexes[n + 1] ], &tri->verts[ tri->indexes[n + 2] ] };
+		idVec3 pp[3];
+		float st[3][2];
 		for ( int k = 0; k < 3; k++ ) {
-			float s0 = v3[k]->st[0], t0 = v3[k]->st[1];
+			pp[k] = vv[k]->xyz;
+			float s0 = vv[k]->st[0], t0 = vv[k]->st[1];
 			if ( hasTexMatrix ) {												// bake the stage's texture matrix (draw_common.cpp RB_PrepareStageTexturing)
 				const float s1 = tm[0] * s0 + tm[1] * t0 + tm[2];
 				const float t1 = tm[3] * s0 + tm[4] * t0 + tm[5];
 				s0 = s1; t0 = t1;
 			}
-			*stOut[k] = R_RtPackHalf2( s0, t0 );
+			st[k][0] = s0; st[k][1] = t0;
 		}
-		e.tint = tint;
-		e.meanRG = meanRG; e.meanB = meanB; e.pad0 = 0u; e.pad1 = 0u;
-		census[ci].tris++;
-		census[ci].flux += e.flux;
+		const int before = out.Num();
+		R_RtEmissiveEmitTriangle( pp, st, modelMatrix, ext, lumPerArea, emit, tint, meanRG, meanB, scale, out, localOut, overflow, NULL, 0.0f );
+		for ( int t = before; t < out.Num(); t++ ) { census[ci].tris++; census[ci].flux += out[t].flux; }
 	}
 }
 
@@ -3238,42 +3301,33 @@ static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float s
 			continue;
 		}
 		common->Printf( "    flare entity %d at %.0f %.0f %.0f: INFERRED '%s' at %.0f units\n", fi, o.x, o.y, o.z, best.mat->GetName(), best.dist );
-		// the surface's triangles within reach of the flare become diffuse-glow entries
+		// the surface's triangles within reach of the flare become entries clipped to the DIFFUSE map's bright extents
+		// (the white light bar), lit with the bright texels' mean: a proper small light, no texel read (Q2RTX recipe)
 		const idImage *img = best.diffuse->texture.image;
-		// a NOMINAL flux: the diffuse average counts the whole grey frame, but only the bright patch under the threshold
-		// emits, so these entries are drawn rarely (their sampling share is what made the fireflies, 2026-10-20)
-		const float lumPerArea = 0.02f * scale;
+		if ( !img->brightExtents.valid ) {
+			common->Printf( "    flare entity %d: '%s' has no texels above %.0f%% - not inferred\n", fi, best.mat->GetName(), RT_EMISSIVE_DIFFUSE_GLOW_THRESHOLD * 100.0f );
+			continue;
+		}
+		const imageEmissiveExtents_t *ext = &img->brightExtents;
+		const float lumPerArea = R_RtLuminance( ext->mean ) * scale;
 		const unsigned int emit = ( (unsigned int)img->rhiHandle & 0xFFFFu ) | RT_EMIT_FLAG_DIFFUSEGLOW | ( best.entity ? RT_EMIT_FLAG_ENTITY : 0u );
+		const unsigned int meanRG = R_RtPackHalf2( ext->mean[0], ext->mean[1] ), meanB = R_RtPackHalf2( ext->mean[2], 0.0f );
 		float tm[6];
 		const bool hasTexMatrix = R_RtEmissiveStageTexMatrix( best.mat, best.diffuse, NULL, tm );
 		const int firstTri = s_rtEmissiveTris.Num();
-		for ( int n = 0; n + 2 < best.tri->numIndexes && s_rtEmissiveTris.Num() < RT_EMISSIVE_MAX_TRIS; n += 3 ) {
-			const idDrawVert &a = best.tri->verts[ best.tri->indexes[n] ], &bv = best.tri->verts[ best.tri->indexes[n + 1] ], &c = best.tri->verts[ best.tri->indexes[n + 2] ];
-			idVec3 p0, p1, p2;
-			R_LocalPointToGlobal( best.mm, a.xyz, p0 ); R_LocalPointToGlobal( best.mm, bv.xyz, p1 ); R_LocalPointToGlobal( best.mm, c.xyz, p2 );
-			if ( R_RtPointTriangleDistance( o, p0, p1, p2 ) > RT_EMISSIVE_FLARE_REACH ) {
-				continue;
-			}
-			const float area = 0.5f * ( ( p1 - p0 ).Cross( p2 - p0 ) ).Length();
-			if ( area < 1e-3f ) {
-				continue;
-			}
-			rtEmissiveTriGPU_t &e = s_rtEmissiveTris.Alloc();
-			e.p0[0] = p0.x; e.p0[1] = p0.y; e.p0[2] = p0.z;
-			e.p1[0] = p1.x; e.p1[1] = p1.y; e.p1[2] = p1.z;
-			e.p2[0] = p2.x; e.p2[1] = p2.y; e.p2[2] = p2.z;
-			e.flux = area * lumPerArea;
-			e.emit = emit;
-			e.scale = scale;
-			const idDrawVert *v3[3] = { &a, &bv, &c };
-			unsigned int *stOut[3] = { &e.st0, &e.st1, &e.st2 };
+		int overflowI = 0;
+		for ( int n = 0; n + 2 < best.tri->numIndexes; n += 3 ) {
+			const idDrawVert *vv[3] = { &best.tri->verts[ best.tri->indexes[n] ], &best.tri->verts[ best.tri->indexes[n + 1] ], &best.tri->verts[ best.tri->indexes[n + 2] ] };
+			idVec3 pp[3];
+			float st[3][2];
 			for ( int k = 0; k < 3; k++ ) {
-				float s0 = v3[k]->st[0], t0 = v3[k]->st[1];
+				pp[k] = vv[k]->xyz;
+				float s0 = vv[k]->st[0], t0 = vv[k]->st[1];
 				if ( hasTexMatrix ) { const float s1 = tm[0] * s0 + tm[1] * t0 + tm[2]; const float t1 = tm[3] * s0 + tm[4] * t0 + tm[5]; s0 = s1; t0 = t1; }
-				*stOut[k] = R_RtPackHalf2( s0, t0 );
+				st[k][0] = s0; st[k][1] = t0;
 			}
-			e.tint = 0x00FFFFFFu | ( thresholdByte << 24 );					// white tint, threshold in alpha
-			e.meanRG = 0u; e.meanB = 0u; e.pad0 = 0u; e.pad1 = 0u;			// no mean: the texel through its threshold
+			R_RtEmissiveEmitTriangle( pp, st, best.mm, ext->entire ? NULL : ext, lumPerArea, emit, 0x00FFFFFFu | ( thresholdByte << 24 ), meanRG, meanB, scale,
+				s_rtEmissiveTris, NULL, overflowI, &o, RT_EMISSIVE_FLARE_REACH );
 		}
 		const int numTris = s_rtEmissiveTris.Num() - firstTri;
 		if ( numTris == 0 ) {
@@ -3283,7 +3337,7 @@ static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float s
 		s_rtEmissiveLabels.Append( l );
 		int ci = -1;
 		for ( int i = 0; i < census.Num(); i++ ) { if ( census[i].mat == best.mat ) { ci = i; break; } }
-		if ( ci < 0 ) { rtEmissiveCensus_t cr; cr.mat = best.mat; cr.tris = 0; cr.flux = 0.0f; cr.animated = false; cr.texMatrix = hasTexMatrix; cr.slot = (unsigned int)img->rhiHandle & 0xFFFFu; cr.inferred = true; ci = census.Append( cr ); }
+		if ( ci < 0 ) { rtEmissiveCensus_t cr; cr.mat = best.mat; cr.tris = 0; cr.flux = 0.0f; cr.animated = false; cr.texMatrix = hasTexMatrix; cr.slot = (unsigned int)img->rhiHandle & 0xFFFFu; cr.inferred = true; cr.clipped = true; ci = census.Append( cr ); }
 		for ( int t = firstTri; t < s_rtEmissiveTris.Num(); t++ ) { census[ci].tris++; census[ci].flux += s_rtEmissiveTris[t].flux; }
 		inferred++;
 	}
@@ -3305,6 +3359,7 @@ static void R_RtEmissiveFree( void ) {
 	s_rtEmissiveLabels.Clear();
 	s_rtEmissiveScreenLabels.Clear();
 	s_rtEmissiveFlareHidden.Clear();
+	s_rtEmissiveSeenModel.Clear();
 	s_rtEmissiveFlareCount = 0;
 	s_rtEmissiveMovedGroups = 0;
 	s_rtEmissiveMap.Clear();
@@ -3355,8 +3410,10 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	}
 	// static entities (func_statics, inline brush models, movers at their load pose): model space x the entity
 	// matrix, the SKIN-REMAPPED material (a fixture's on/off state is a skin), the entity's shaderParms (its _color)
+	s_rtEmissiveSeenModel.SetNum( world->entityDefs.Num(), false );
 	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
 		const idRenderEntityLocal *def = world->entityDefs[i];
+		s_rtEmissiveSeenModel[i] = R_RtEmissiveEntityGatherable( def ) ? def->parms.hModel : NULL;
 		if ( !R_RtEmissiveEntityGatherable( def ) ) {
 			continue;
 		}
@@ -3452,7 +3509,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		R_RtEmissiveDebugTint( census[i].slot, rgb, &hue );
 		common->Printf( "    %6.1f%%  %6d tris  %-46s view1 %-10s #%02X%02X%02X%s%s%s\n", 100.0f * census[i].flux / s_rtEmissiveTotalFlux, census[i].tris,
 			census[i].mat->GetName(), hue, rgb[0], rgb[1], rgb[2], census[i].animated ? "  (animated colour)" : "", census[i].texMatrix ? "  (texture matrix baked)" : "",
-			census[i].inferred ? "  (FLARE-INFERRED: diffuse patch under a flare)" : "" );
+			census[i].inferred ? "  (FLARE-INFERRED: diffuse patch under a flare)" : census[i].clipped ? "  (clipped to the glow's extents)" : "" );
 	}
 	if ( excluded.Num() > 0 ) {
 		common->Printf( "r_rtEmissiveTable: %d self-illuminated materials EXCLUDED:\n", excluded.Num() );
@@ -3496,9 +3553,7 @@ static void R_RtEmissiveFillDebugVerts( int firstTri, int numTris, idDrawVert *v
 			v.st[1] = R_RtF16toF32( st[k] >> 16 );
 			v.normal.Set( e.flux, e.scale, (float)( firstTri + i ) );
 			v.tangents[0].Set( (float)( e.emit & 0xFFFFu ), (float)( e.emit >> 16 ), 0.0f );
-			if ( e.emit & RT_EMIT_FLAG_DIFFUSEGLOW ) {
-				v.color[0] = v.color[1] = v.color[2] = 255;				// the texel through its threshold (mode 3)
-			} else {
+			{
 				const float m[3] = { R_RtF16toF32( e.meanRG & 0xFFFFu ), R_RtF16toF32( e.meanRG >> 16 ), R_RtF16toF32( e.meanB & 0xFFFFu ) };
 				for ( int ch = 0; ch < 3; ch++ ) { v.color[ch] = (byte)( idMath::ClampFloat( 0.0f, 1.0f, m[ch] ) * 255.0f + 0.5f ); }	// the MEAN radiance E2 lights with (mode 3)
 			}
@@ -3580,8 +3635,10 @@ static bool R_RtEmissiveRegatherGroup( rtEmissiveGroup_t &g, const idRenderEntit
 		return false;
 	}
 	if ( scratch.Num() != g.numTris ) {
-		common->Printf( "r_rtEmissiveTable: entity %d '%s' changed which surfaces glow (%d -> %d tris) - rebuilding the table\n", g.entityIndex, model->Name(), g.numTris, scratch.Num() );
-		s_rtEmissiveMap.Clear();												// stale next frame: a full rebuild
+		if ( Sys_Milliseconds() - s_rtEmissiveLastRebuildMs > 2000 ) {
+			common->Printf( "r_rtEmissiveTable: entity %d '%s' changed which surfaces glow (%d -> %d tris) - rebuilding the table\n", g.entityIndex, model->Name(), g.numTris, scratch.Num() );
+			s_rtEmissiveMap.Clear();											// stale next frame: a full rebuild (throttled: a flipping entity must not rebuild every frame)
+		}
 		return false;
 	}
 	for ( int t = 0; t < g.numTris; t++ ) {
@@ -3747,19 +3804,13 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 // build). Tracked slots are skipped (their state compare handles them). A few hundred entities x their surfaces;
 // the stage test evaluates material registers, so this runs only every 90 frames.
 static bool R_RtEmissiveNewEntityAppeared( const idRenderWorldLocal *world ) {
-	static idList<bool> tracked;
-	tracked.SetNum( world->entityDefs.Num(), false );
-	for ( int i = 0; i < tracked.Num(); i++ ) { tracked[i] = false; }
-	for ( int gi = 0; gi < s_rtEmissiveGroups.Num(); gi++ ) {
-		const int ei = s_rtEmissiveGroups[gi].entityIndex;
-		if ( ei >= 0 && ei < tracked.Num() ) { tracked[ei] = true; }
-	}
 	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
-		if ( tracked[i] ) {
-			continue;
-		}
 		const idRenderEntityLocal *def = world->entityDefs[i];
 		if ( !R_RtEmissiveEntityGatherable( def ) ) {
+			continue;
+		}
+		// the build examined this slot with this very model: whatever it found (emitters, tracked; or nothing) stands
+		if ( i < s_rtEmissiveSeenModel.Num() && s_rtEmissiveSeenModel[i] == def->parms.hModel ) {
 			continue;
 		}
 		const idRenderModel *model = def->parms.hModel;
@@ -3797,7 +3848,7 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		}
 		// an emissive entity that APPEARED after the build (a dropped item, a respawned pickup, a spawned prop): every 90
 		// frames, scan the entity slots no group tracks for a static model with an emissive surface -> full rebuild
-		if ( ( tr.frameCount % 90 ) == 45 && R_RtEmissiveNewEntityAppeared( world ) ) {
+		if ( ( tr.frameCount % 90 ) == 45 && Sys_Milliseconds() - s_rtEmissiveLastRebuildMs > 5000 && R_RtEmissiveNewEntityAppeared( world ) ) {
 			common->Printf( "r_rtEmissiveTable: a new emissive entity appeared - rebuilding the table\n" );
 			s_rtEmissiveMap.Clear();
 			return;
@@ -3819,6 +3870,7 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	r_rtEmissiveLighting.ClearModified();
 	r_rtEmissiveScale.ClearModified();
 	R_RtEmissiveFree();
+	s_rtEmissiveLastRebuildMs = Sys_Milliseconds();
 	R_RtEmissiveBuild( world, r );
 	if ( s_rtEmissiveBuf != 0 ) {
 		R_RtEmissiveLightCensus( world, r );	// E5 prep: fixtured vs ambience placed lights

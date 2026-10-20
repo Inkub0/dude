@@ -603,6 +603,54 @@ static void R_ImageAverageColorRGBA( const byte *pic, int numTexels, float out[3
 	}
 }
 
+/*
+================
+R_ImageEmissiveExtentsRGBA
+
+DUDE RT emissive table (Q2RTX's recipe, textures.c): the st rectangle enclosing the texels whose gamma luminance
+exceeds `threshold`, their mean LINEAR colour and their share of the samples. Sampled on a grid of at most ~256 x 256
+texels (the extents are then exact to 1/256 of the image), so a 2K texture costs 65k reads at load.
+================
+*/
+static void R_ImageEmissiveExtentsRGBA( const byte *pic, int w, int h, float threshold, imageEmissiveExtents_t *out ) {
+	memset( out, 0, sizeof( *out ) );
+	if ( pic == NULL || w <= 0 || h <= 0 ) {
+		return;
+	}
+	const int sx = ( w > 256 ) ? w / 256 : 1, sy = ( h > 256 ) ? h / 256 : 1;
+	int minX = w, minY = h, maxX = -1, maxY = -1, bright = 0, samples = 0;
+	double sum[3] = { 0.0, 0.0, 0.0 };
+	for ( int y = 0; y < h; y += sy ) {
+		for ( int x = 0; x < w; x += sx ) {
+			const byte *px = pic + ( y * w + x ) * 4;
+			samples++;
+			const float lum = ( 0.2126f * px[0] + 0.7152f * px[1] + 0.0722f * px[2] ) * ( 1.0f / 255.0f );
+			if ( lum <= threshold ) {
+				continue;
+			}
+			bright++;
+			for ( int c = 0; c < 3; c++ ) {
+				const float g = px[c] * ( 1.0f / 255.0f );
+				sum[c] += ( g <= 0.04045f ) ? g / 12.92f : powf( ( g + 0.055f ) / 1.055f, 2.4f );		// sRGB -> linear
+			}
+			if ( x < minX ) { minX = x; }	if ( x > maxX ) { maxX = x; }
+			if ( y < minY ) { minY = y; }	if ( y > maxY ) { maxY = y; }
+		}
+	}
+	if ( bright == 0 ) {
+		return;
+	}
+	out->valid = true;
+	out->minST[0] = (float)minX / w;			out->minST[1] = (float)minY / h;
+	out->maxST[0] = (float)( maxX + sx ) / w;	out->maxST[1] = (float)( maxY + sy ) / h;
+	for ( int c = 0; c < 3; c++ ) { out->mean[c] = (float)( sum[c] / bright ); }
+	out->coverage = (float)bright / (float)samples;
+	out->entire = ( out->maxST[0] - out->minST[0] ) >= 0.9f && ( out->maxST[1] - out->minST[1] ) >= 0.9f;
+}
+
+static const float R_EMISSIVE_GLOW_THRESHOLD   = 0.08f;	// a glow map's lit texels (its black is not light)
+static const float R_EMISSIVE_BRIGHT_THRESHOLD = 0.6f;	// a diffuse map's white light bar (flare-inferred fixtures)
+
 void idImage::GenerateImage( const byte *pic, int width, int height,
 					   textureFilter_t filterParm, bool allowDownSizeParm,
 					   textureRepeat_t repeatParm, textureDepth_t depthParm ) {
@@ -641,6 +689,8 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 			// before the RXGB swizzle below — the GL path samples it at line ~667, but the Vulkan
 			// branch returns before reaching it, so sample here or averageColor stays white
 			R_ImageAverageColorRGBA( pic, width * height, averageColor );
+			R_ImageEmissiveExtentsRGBA( pic, width, height, R_EMISSIVE_GLOW_THRESHOLD, &glowExtents );
+			R_ImageEmissiveExtentsRGBA( pic, width, height, R_EMISSIVE_BRIGHT_THRESHOLD, &brightExtents );
 			// normal maps: the shaders decode the RXGB layout unconditionally
 			// (interaction.frag does bump.x = bump.a), and the GL upload path
 			// swaps red into alpha "even on tga normal maps so we only have to
@@ -687,6 +737,8 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 
 	// DUDE: capture a mean RGB of the source pixels for emissive GUI fill-light tinting
 	R_ImageAverageColorRGBA( pic, width * height, averageColor );
+	R_ImageEmissiveExtentsRGBA( pic, width, height, R_EMISSIVE_GLOW_THRESHOLD, &glowExtents );
+	R_ImageEmissiveExtentsRGBA( pic, width, height, R_EMISSIVE_BRIGHT_THRESHOLD, &brightExtents );
 
 	// Optionally modify our width/height based on options/hardware
 	GetDownsize( scaled_width, scaled_height );
@@ -1979,6 +2031,8 @@ bool idImage::LoadImageCpu() {
 	// swizzle. Stashed in parallelData and copied to averageColor on the main thread.
 	parallelData->averageColor[0] = parallelData->averageColor[1] = parallelData->averageColor[2] = 1.0f;
 	R_ImageAverageColorRGBA( pic, width * height, parallelData->averageColor );
+	R_ImageEmissiveExtentsRGBA( pic, width, height, R_EMISSIVE_GLOW_THRESHOLD, &parallelData->glowExtents );
+	R_ImageEmissiveExtentsRGBA( pic, width, height, R_EMISSIVE_BRIGHT_THRESHOLD, &parallelData->brightExtents );
 	parallelData->hasAverageColor = true;
 
 	// swap red into alpha for RXGB normal maps, matching GenerateImage's Vulkan branch
@@ -2071,6 +2125,8 @@ void idImage::UploadImageCpu() {
 		averageColor[0] = parallelData->averageColor[0];
 		averageColor[1] = parallelData->averageColor[1];
 		averageColor[2] = parallelData->averageColor[2];
+		glowExtents   = parallelData->glowExtents;
+		brightExtents = parallelData->brightExtents;
 	}
 
 	// free worker-allocated buffers

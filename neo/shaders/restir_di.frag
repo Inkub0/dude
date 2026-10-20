@@ -347,15 +347,14 @@ void main() {
 		float pdfTri;
 		uint  ti = rtEmissiveSample( emTable, rnd( rng ), pdfTri );
 		vec2  xi = vec2( rnd( rng ), rnd( rng ) );
-		vec3  c, ld; float dl, ndl;
+		vec3  c, ld; float dl, ndl, pdfw;
 		float pHat = 0.0;
-		if ( diShadeEmitter( emTable, ti, xi, S, u_texGen0S.z, c, ld, dl, ndl, cheapTarget ) ) {
+		if ( diShadeEmitter( emTable, ti, xi, S, u_texGen0S.z, c, ld, dl, ndl, pdfw, cheapTarget ) ) {
 			pHat = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
 		}
-		if ( !( pHat > 0.0 ) ) { continue; }
-		RtEmissiveTri e = rtEmissiveFetch( emTable, ti );
-		float area = 0.5 * length( cross( e.p1 - e.p0, e.p2 - e.p0 ) );
-		float p    = pdfTri / max( area, 1e-3 );
+		if ( !( pHat > 0.0 ) || !( pdfw > 0.0 ) ) { continue; }
+		// the candidate's pdf in SOLID ANGLE measure: the triangle's flux share x the Arvo sample's 1 / solid angle
+		float p    = pdfTri * pdfw;
 		float w    = pHat / ( float( emDraws ) * p );
 		wSum += w;
 		if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
@@ -386,7 +385,8 @@ void main() {
 	if ( pHatChosen > 0.0 ) {
 		float ndlC;
 		if ( emChosen != 0u ) {
-			diShadeEmitter( emTable, emChosen - 1u, emXiChosen, S, u_texGen0S.z, contribChosen, ldirChosen, dlChosen, ndlC, false );
+			float pdfwC;
+			diShadeEmitter( emTable, emChosen - 1u, emXiChosen, S, u_texGen0S.z, contribChosen, ldirChosen, dlChosen, ndlC, pdfwC, false );
 			flagsChosen = 0u;														// an emitter always traces its visibility
 		} else {
 			diShadeLight( lights, rowChosen - 1u, S, contribChosen, ldirChosen, dlChosen, ndlC, false );
@@ -417,14 +417,15 @@ void main() {
 			uint lk = emK ? pickBE[k] - 1u : pickB[k] - 1u;
 			vec3 c, ld; float dl, ndl;
 			// the TARGET pHat (cheap or full, consistent with wSum) for Wk, then the full shade for the radiance
-			bool okK = emK ? diShadeEmitter( emTable, lk, pickBXi[k], S, u_texGen0S.z, c, ld, dl, ndl, cheapTarget )
+			float pdfwK;
+			bool okK = emK ? diShadeEmitter( emTable, lk, pickBXi[k], S, u_texGen0S.z, c, ld, dl, ndl, pdfwK, cheapTarget )
 			               : diShadeLight( lights, lk, S, c, ld, dl, ndl, cheapTarget );
 			if ( !okK ) { continue; }
 			float pH = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
 			if ( shMode ) { pH /= max( ndl, 0.05 ); }	// radiance target, same as the main loop (cosine out of the target)
 			if ( !( pH > 0.0 ) ) { continue; }
 			vec3  cF = c;	float ndlF = ndl;
-			if ( cheapTarget ) { vec3 ldF; float dlF; if ( emK ) { diShadeEmitter( emTable, lk, pickBXi[k], S, u_texGen0S.z, cF, ldF, dlF, ndlF, false ); } else { diShadeLight( lights, lk, S, cF, ldF, dlF, ndlF, false ); } }
+			if ( cheapTarget ) { vec3 ldF; float dlF, pwF; if ( emK ) { diShadeEmitter( emTable, lk, pickBXi[k], S, u_texGen0S.z, cF, ldF, dlF, ndlF, pwF, false ); } else { diShadeLight( lights, lk, S, cF, ldF, dlF, ndlF, false ); } }
 			vec3  rk = cF / B;	// irradiance (cosine in), as radChosen above
 			float Wk = ( wSum / ( pdfOne ? 1.0 : float( draws ) ) ) / pH;
 			float od;
@@ -508,7 +509,7 @@ void main() {
 					vec3 Edir = vec3( 0.0 );
 					if ( pHatChosen > 0.0 ) {
 						vec3 cTO, ldTO; float dlTO, ndlTO;
-						if ( emChosen != 0u ) { diShadeEmitter( emTable, emChosen - 1u, emXiChosen, S, u_texGen0S.z, cTO, ldTO, dlTO, ndlTO, true ); }
+						if ( emChosen != 0u ) { float pwTO; diShadeEmitter( emTable, emChosen - 1u, emXiChosen, S, u_texGen0S.z, cTO, ldTO, dlTO, ndlTO, pwTO, true ); }
 						else                  { diShadeLight( lights, rowChosen - 1u, S, cTO, ldTO, dlTO, ndlTO, true ); }
 						Edir = cTO * ( W * vis * bp.lightScale );
 					}
