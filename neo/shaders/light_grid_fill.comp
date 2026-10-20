@@ -175,7 +175,10 @@ void main() {
 			for ( uint k = 0u; k < cntE; k++ ) {
 				uint first = groups.g[ chosenE[ k ] ].firstTri, num = groups.g[ chosenE[ k ] ].numTris;
 				if ( first >= et.count || first + num > et.count ) { continue; }					// a group of another table (stale): never walk past the end
-				for ( uint t = first; t < first + num; t++ ) {
+				// a long run (a 900-triangle cylinder) is STRIDED: at most 32 of its triangles are examined, spread evenly
+				// along it, so every region stays reachable from this cell at a bounded cost (8 x 32 fetches per cell)
+				uint step = ( num > 32u ) ? ( num + 31u ) / 32u : 1u;
+				for ( uint t = first + ( cellIndex % step ); t < first + num; t += step ) {
 					RtEmissiveTri e = rtEmissiveFetch( et, t );
 					if ( !( e.flux > 0.0 ) ) { continue; }
 					vec3  tc = ( e.p0 + e.p1 + e.p2 ) * ( 1.0 / 3.0 ) - center;

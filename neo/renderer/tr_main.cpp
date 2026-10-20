@@ -3599,15 +3599,15 @@ static void R_RtEmissiveUploadGroups( rhi::RHI *r ) {
 	if ( s_rtEmissiveLabels.Num() == 0 || s_rtEmissiveBuf == 0 ) {
 		return;
 	}
-	// a group is a CHUNK of at most 16 contiguous triangles of one surface run: a reactor cylinder of 900 triangles
-	// became one group whose triangle walk cost the near-cascade fill 11 ms (2026-10-20); chunks bound the walk to
-	// 8 x 16 per cell and give tighter centroids / radii for the importance
+	// a group is one WHOLE surface run: a cell's 8 group slots must be 8 DISTINCT emitters (chunking a big tile into 16-
+	// triangle pieces let one tile fill every slot of the cells under it and starved every other light there - the dark
+	// Marine HQ of 2026-10-20). The near-cascade triangle walk strides through a long run instead (light_grid_fill.comp).
 	static idList<rtEmissiveGroupGPU_t> groups;
 	groups.SetNum( 0, false );
 	for ( int i = 0; i < s_rtEmissiveLabels.Num(); i++ ) {
 		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[i];
-		for ( int start = 0; start < l.numTris; start += 16 ) {
-			const int cnt = Min( 16, l.numTris - start );
+		{
+			const int start = 0, cnt = l.numTris;
 			rtEmissiveGroupGPU_t &g = groups.Alloc();
 			idVec3 c( 0.0f, 0.0f, 0.0f );
 			float flux = 0.0f;

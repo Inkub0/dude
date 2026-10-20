@@ -6139,6 +6139,17 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		}
 	}
 	}
+	// E5: say how many fixtured placed lights this view drops whenever that changes (the proof the drop is live)
+	{
+		static int lastDropped = -1;
+		const int dropped = r_rtEmissiveLighting.GetBool() ? s_diSkipEmissiveDrop : 0;
+		if ( dropped != lastDropped ) {
+			lastDropped = dropped;
+			if ( r_rtEmissiveLighting.GetBool() ) {
+				common->Printf( "emissive mode: %d fixtured placed lights dropped in this view, %d placed lights kept\n", dropped, n );
+			}
+		}
+	}
 	if ( n == 0 ) {
 		return 0;
 	}
