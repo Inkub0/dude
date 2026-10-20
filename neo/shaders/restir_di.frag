@@ -349,7 +349,8 @@ void main() {
 	// stored importance (flux / d^2 at the cell: distance-aware), then a triangle inside it by flux (the CDF restricted
 	// to the run), then the solid-angle point - pdf = q_group x p_tri|group x pdfw. Else the global flux CDF (blind).
 	int  lgEB  = ( useGrid && lgp.slotsE > 0u ) ? lgEBase( lgBase, lgp.slots ) : -1;
-	uint lgNE  = ( lgEB >= 0 ) ? lgCountE( lgGrid, lgEB ) : 0u;
+	uint lgNE  = ( lgEB >= 0 ) ? min( lgCountE( lgGrid, lgEB ), lgp.slotsE ) : 0u;
+	const uint emNumGroups = uint( u_texGen0Q.x + 0.5 );									// bounds for every stored index (a stale record)
 	bool emFromGrid = lgNE > 0u;
 	bool emTriList  = emFromGrid && lgIsTriRecord( lgGrid, lgEB );
 	RtEmissiveGroups emGroups = RtEmissiveGroups( uvec2( 0u ) );
@@ -369,6 +370,7 @@ void main() {
 			emM[k] = 0.0; emT[k] = 0u;
 			if ( s >= lgNE ) { continue; }
 			uint ti = lgSlotGroup( lgGrid, lgEB, s );									// a triangle index in a tri record
+			if ( ti >= emTable.count ) { continue; }
 			RtEmissiveTri e = rtEmissiveFetch( emTable, ti );
 			if ( !( e.flux > 0.0 ) ) { continue; }
 			float m = rtEmissiveSolidAngle( e, S.Pw, S.Nw, ( e.emit & RT_EMIT_TWOSIDED ) != 0u ) * dot( rtEmissiveMeanRadiance( e ), vec3( 0.2126, 0.7152, 0.0722 ) );
@@ -388,13 +390,16 @@ void main() {
 			pdfTri = ( emM[pick] / emMass ) / float( emPart );							// the pick's share x the partition's
 		} else if ( emFromGrid ) {
 			uint gIdx; float qG;
-			if ( !lgDrawGroup( lgGrid, lgEB, rng, gIdx, qG ) ) { continue; }
+			if ( !lgDrawGroup( lgGrid, lgEB, rng, gIdx, qG ) || gIdx >= emNumGroups ) { continue; }
+			uint gFirst = emGroups.g[ gIdx ].firstTri, gNum = emGroups.g[ gIdx ].numTris;
+			if ( gNum == 0u || gFirst >= emTable.count || gFirst + gNum > emTable.count ) { continue; }
 			float pIn;
-			ti = rtEmissiveSampleInGroup( emTable, emGroups.g[ gIdx ].firstTri, emGroups.g[ gIdx ].numTris, rnd( rng ), pIn );
+			ti = rtEmissiveSampleInGroup( emTable, gFirst, gNum, rnd( rng ), pIn );
 			pdfTri = qG * pIn;
 		} else {
 			ti = rtEmissiveSample( emTable, rnd( rng ), pdfTri );
 		}
+		if ( ti >= emTable.count ) { continue; }
 		vec2  xi = vec2( rnd( rng ), rnd( rng ) );
 		vec3  c, ld; float dl, ndl, pdfw;
 		float pHat = 0.0;
@@ -535,6 +540,7 @@ void main() {
 		bp.emTable        = emTable.addr;				// E2 v2b: one emitter sample at the hit from ITS cell's groups (the GI side of emissive mode)
 		bp.emGroups       = uvec2( floatBitsToUint( u_texGen0T.x ), floatBitsToUint( u_texGen0T.y ) );
 		bp.emIntensity    = ( u_texGen0T.z > 0.5 ) ? u_texGen0S.z : 0.0;	// r_rtEmissiveBounce
+		bp.emNumGroups    = emNumGroups;
 		const vec3 eyeW   = u_modelViewMatrix[3].xyz;
 		vec3 Li; float thit; vec3 bounceDir; vec3 LiCache;
 		const int hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );

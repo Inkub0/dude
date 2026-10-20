@@ -153,6 +153,7 @@ void main() {
 			float minImpT = 1e30;
 			for ( uint k = 0u; k < cntE; k++ ) {
 				uint first = groups.g[ chosenE[ k ] ].firstTri, num = groups.g[ chosenE[ k ] ].numTris;
+				if ( first >= et.count || first + num > et.count ) { continue; }					// a group of another table (stale): never walk past the end
 				for ( uint t = first; t < first + num; t++ ) {
 					RtEmissiveTri e = rtEmissiveFetch( et, t );
 					if ( !( e.flux > 0.0 ) ) { continue; }

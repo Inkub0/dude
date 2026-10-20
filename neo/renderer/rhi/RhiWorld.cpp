@@ -8245,6 +8245,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			const unsigned int grpLo = (unsigned int)( grpAddr & 0xFFFFFFFFull ), grpHi = (unsigned int)( grpAddr >> 32 );
 			memcpy( &parms.texGen0T[0], &grpLo, sizeof( grpLo ) );
 			memcpy( &parms.texGen0T[1], &grpHi, sizeof( grpHi ) );
+			parms.texGen0Q[0] = (float)emGroups;														// group count: every stored group index is checked against it
+			parms.texGen0Q[1] = (float)emTris;														// triangle count: every stored triangle index likewise
 			parms.texGen0T[2] = r_rtEmissiveBounce.GetBool() ? 1.0f : 0.0f;						// emitter sample at the bounce hit
 			parms.texGen0T[3] = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveClamp.GetFloat() );	// per-pixel emitter luminance cap (0 = off)
 			if ( emAddr != 0 && emTris > 0 ) {
@@ -8412,7 +8414,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	// RT light grid (docs/rtx-light-grid.md L2): the grid vec4 into u_occlusionParms (free here) so the gather draws
 	// candidates from each point's cell instead of every light. Begin + Fill ran above; readyThisView gates it off cleanly.
-	if ( rhiRtLightGrid.readyThisView ) {
+	if ( rhiRtLightGrid.readyThisView && rhiRtLightGrid.filledThisFrame ) {	// never hand a consumer an UNFILLED grid (garbage indices)
 		RB_RHI_LightGridPack( parms, rhiRtLightGrid.parms );
 	}
 	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray (+ R3a's K rays on young pixels)
@@ -9659,8 +9661,17 @@ static bool RB_RHI_LightGridBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int numLights ) {
 	rtLightGridState_t &g = rhiRtLightGrid;
-	if ( !g.readyThisView || g.filledThisFrame || g.fillProg == 0 || lightAddr == 0 || numLights <= 0 ) {
+	if ( !g.readyThisView || g.filledThisFrame || g.fillProg == 0 ) {
 		return;		// filled once per frame; the first consumer that has the light buffer triggers it
+	}
+	if ( lightAddr == 0 || numLights <= 0 ) {
+		// no lights this view: the grid must STILL be written (every cell count 0 / the emissive records) - a consumer
+		// that reads an unfilled (fresh or stale) grid walks garbage light / triangle indices off the end of their
+		// buffers (a device loss, 2026-10-20). With no emissive mode the grid is simply not consumed (see the pack gate).
+		if ( g.parms.slotsE <= 0 ) {
+			return;
+		}
+		lightAddr = 0; numLights = 0;
 	}
 	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; unsigned int groupLo, groupHi, nGroups, slotsE, tableLo, tableHi, nearCascades, triMode; } pc;	// light_grid_fill.comp PC
 	pc.gridLo      = (unsigned int)( g.gridAddr & 0xFFFFFFFFull );

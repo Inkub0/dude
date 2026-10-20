@@ -51,6 +51,7 @@ struct RtgiBounceParms {
 	uvec2 emTable;			// 0 = none
 	uvec2 emGroups;
 	float emIntensity;
+	uint  emNumGroups;		// bounds for a stored group index
 	// RT light grid (docs/rtx-light-grid.md L3): when present, the hit's light loop enumerates the HIT cell's candidates
 	// (its top-N lights by importance) instead of every scene light. The grid excludes DIFORWARD lights, matching the
 	// bounce's skipForwardLights set. gridAddr 0 (the standalone RTGI pass, or the grid off) = the full light loop.
@@ -250,11 +251,19 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 				RtEmissiveTable  et = rtEmissiveOpen( bp.emTable );
 				float pIn = 1.0;
 				uint  ti  = gIdx;
+				bool  ok  = true;
 				if ( !lgIsTriRecord( hG, hE ) ) {
-					RtEmissiveGroups eg = RtEmissiveGroups( bp.emGroups );
-					ti = rtEmissiveSampleInGroup( et, eg.g[ gIdx ].firstTri, eg.g[ gIdx ].numTris, lgRand( rngE ), pIn );
+					if ( gIdx >= bp.emNumGroups ) { ok = false; }
+					else {
+						RtEmissiveGroups eg = RtEmissiveGroups( bp.emGroups );
+						uint gFirst = eg.g[ gIdx ].firstTri, gNum = eg.g[ gIdx ].numTris;
+						if ( gNum == 0u || gFirst >= et.count || gFirst + gNum > et.count ) { ok = false; }
+						else { ti = rtEmissiveSampleInGroup( et, gFirst, gNum, lgRand( rngE ), pIn ); }
+					}
 				}
-				RtEmissiveTri e = rtEmissiveFetch( et, ti );
+				if ( ok && ti >= et.count ) { ok = false; }
+				RtEmissiveTri e;
+				if ( ok ) { e = rtEmissiveFetch( et, ti ); } else { e.flux = 0.0; e.emit = 0u; e.p0 = e.p1 = e.p2 = vec3( 0.0 ); e.scale = 0.0; e.meanRG = 0u; e.meanB = 0u; e.st0 = e.st1 = e.st2 = 0u; e.tint = 0u; e.pad0 = e.pad1 = 0u; }
 				vec3 Pe, nUnit; float pdfw;
 				if ( e.flux > 0.0 && rtEmissiveSampleSolidAngle( e, hitWorld, vec2( lgRand( rngE ), lgRand( rngE ) ), Pe, nUnit, pdfw ) ) {
 					vec3  ed = Pe - hitWorld;

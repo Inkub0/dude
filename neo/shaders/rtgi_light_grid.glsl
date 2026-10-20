@@ -118,7 +118,7 @@ float lgSlotImpE( LgGrid grid, int eBase, uint s )  { return uintBitsToFloat( gr
 // draw one GROUP from the cell in proportion to its stored importance; q = its selection pdf. false = none stored.
 bool lgDrawGroup( LgGrid grid, int eBase, inout uint rng, out uint groupIndex, out float q ) {
 	groupIndex = 0u; q = 0.0;
-	uint n = lgCountE( grid, eBase );
+	uint n = min( lgCountE( grid, eBase ), 64u );										// a garbage count must not walk the buffer
 	if ( n == 0u ) { return false; }
 	float sum = lgSumImpE( grid, eBase );
 	if ( !( sum > 0.0 ) ) { return false; }
@@ -137,7 +137,7 @@ bool lgDrawGroup( LgGrid grid, int eBase, inout uint rng, out uint groupIndex, o
 // chosen light index and its selection pdf q = imp/sumStored, for the consume's RIS weight pHat/q. false = empty cell.
 bool lgDrawCandidate( LgGrid grid, int base, inout uint rng, out uint lightIndex, out float q ) {
 	lightIndex = 0u; q = 0.0;
-	uint n = lgCount( grid, base );
+	uint n = min( lgCount( grid, base ), 64u );
 	if ( n == 0u ) { return false; }
 	float sum = lgSumImp( grid, base );
 	if ( !( sum > 0.0 ) ) { return false; }

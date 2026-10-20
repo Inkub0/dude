@@ -151,6 +151,7 @@ void main() {
 	bp.emTable        = uvec2( 0u );		// E2 v2b: no emitter sample in the standalone pass (no grid here)
 	bp.emGroups       = uvec2( 0u );
 	bp.emIntensity    = 0.0;
+	bp.emNumGroups    = 0u;
 	bp.radius         = u_localParam0.z;
 	bp.emissiveScale  = u_diffuseModifier.x;
 	bp.emissiveClamp  = u_localParam0.w;
