@@ -413,3 +413,11 @@ inside the fixture box - hence it never lines up with the fixture's real grille 
   (rt_perforated.glsl: the RT_MASK_PERFORATED alpha-tested caster instances of r_rtPerforatedShadows), not the plain
   solid-only trace, or an emitter behind a noShadows grate lights straight through it and the real grille throws no
   shadow where the cookie used to fake one. Same for the GI bounce's emitter draw.
+
+**`rtEmissiveProbe` (2026-10-20).** r_showSurfaceInfo is dead on Vulkan, so this console command is how an unpainted
+fixture gets named: a trace from the primary view along its forward axis (world + static props + skinned models)
+prints the hit material (coverage, sort, GUI / deform / two-sided), every stage with its blend mode (ADD / opaque /
+blend / filter), image and flags (not resident / cube / texgen / cinematic / render-to-texture), the owning entity
+(index, model + its dynamic kind, callback, skin, custom material, parms 0-3 and parm7, gatherable yes/no), and the
+table's VERDICT: emitter (+ how many of its triangles are in the table), not an emitter with the exclusion reason, or
+"no additive stage" (what glows is lit diffuse, not self-illumination).

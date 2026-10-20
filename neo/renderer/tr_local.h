@@ -1132,6 +1132,7 @@ struct rtEmissiveScreenLabel_t { float x, y; char text[80]; };
 void R_RtEmissiveProjectLabels( const struct viewDef_s *viewDef );
 bool R_RtEmissiveLabelsWanted( void );
 int  R_RtEmissiveGetScreenLabels( const rtEmissiveScreenLabel_t **out );
+void R_RtEmissiveProbe_f( const idCmdArgs &args );		// console: name the surface under the crosshair + the table's verdict on it
 extern idCVar r_rtPerforatedShadows;		// alpha-tested grate/fence casters in the RT shadow rays
 extern idCVar r_rtAllLights;				// RT shadows for EVERY shadow-casting light (mode 4 inline ray), no shadow maps at all
 extern idCVar r_rtShadowBlur;				// screen-space blur on top of the hard RT shadows (sun / moving lights), docs/rtx-shadow-blur.md

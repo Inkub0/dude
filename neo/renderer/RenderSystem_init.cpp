@@ -3338,6 +3338,7 @@ R_InitCommands
 void R_InitCommands( void ) {
 	cmdSystem->AddCommand( "MakeMegaTexture", idMegaTexture::MakeMegaTexture_f, CMD_FL_RENDERER|CMD_FL_CHEAT, "processes giant images" );
 	cmdSystem->AddCommand( "sizeUp", R_SizeUp_f, CMD_FL_RENDERER, "makes the rendered view larger" );
+	cmdSystem->AddCommand( "rtEmissiveProbe", R_RtEmissiveProbe_f, CMD_FL_RENDERER, "names the surface under the crosshair (material, stages, entity) and reports whether / why the RT emissive table treats it as an emitter" );
 	cmdSystem->AddCommand( "sizeDown", R_SizeDown_f, CMD_FL_RENDERER, "makes the rendered view smaller" );
 	cmdSystem->AddCommand( "reloadGuis", R_ReloadGuis_f, CMD_FL_RENDERER, "reloads guis" );
 	cmdSystem->AddCommand( "listGuis", R_ListGuis_f, CMD_FL_RENDERER, "lists guis" );

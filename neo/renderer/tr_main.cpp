@@ -39,6 +39,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/RenderWorld_local.h"
 #include "renderer/ModelManager.h"
 #include "renderer/VertexCache.h"		// R3.5 r_rtAnimBlasTest: index-buffer handle from tri->indexCache
+#include "framework/DeclSkin.h"			// rtEmissiveProbe: the skin name
 
 #include "renderer/tr_local.h"
 #include "renderer/rhi/RHI.h"
@@ -3740,6 +3741,83 @@ bool R_RtEmissiveLabelsWanted( void ) {
 int R_RtEmissiveGetScreenLabels( const rtEmissiveScreenLabel_t **out ) {
 	*out = s_rtEmissiveScreenLabels.Ptr();
 	return s_rtEmissiveScreenLabels.Num();
+}
+
+// rtEmissiveProbe: what is under the crosshair, and what the emissive table makes of it. r_showSurfaceInfo is dead on
+// Vulkan, so this is the way to name a fixture that is not painted: a trace from the last primary view's origin along
+// its forward axis (world + static props + skinned models) -> the hit material's stages with their blend modes and
+// images, the owning entity's model / state, and R_RtEmissiveStage's verdict with its reason.
+static const char *R_RtBlendName( int bits ) {
+	const int src = bits & GLS_SRCBLEND_BITS, dst = bits & GLS_DSTBLEND_BITS;
+	if ( src == GLS_SRCBLEND_ONE && dst == GLS_DSTBLEND_ONE ) { return "ADD (one, one)"; }
+	if ( src == GLS_SRCBLEND_ONE && dst == GLS_DSTBLEND_ZERO ) { return "opaque (one, zero)"; }
+	if ( src == GLS_SRCBLEND_SRC_ALPHA && dst == GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA ) { return "blend (srcAlpha, 1-srcAlpha)"; }
+	if ( src == GLS_SRCBLEND_DST_COLOR && dst == GLS_DSTBLEND_ZERO ) { return "filter (dstColor, zero)"; }
+	if ( src == GLS_SRCBLEND_ZERO && dst == GLS_DSTBLEND_SRC_COLOR ) { return "filter (zero, srcColor)"; }
+	if ( src == GLS_SRCBLEND_SRC_ALPHA && dst == GLS_DSTBLEND_ONE ) { return "add-alpha (srcAlpha, one)"; }
+	return va( "custom (src 0x%x, dst 0x%x)", src, dst );
+}
+
+void R_RtEmissiveProbe_f( const idCmdArgs &args ) {
+	idRenderWorldLocal *world = tr.primaryWorld;
+	if ( world == NULL || world->mapName.Length() == 0 ) {
+		common->Printf( "rtEmissiveProbe: no map view\n" );
+		return;
+	}
+	const idVec3 start = tr.primaryRenderView.vieworg;
+	const idVec3 end   = start + tr.primaryRenderView.viewaxis[0] * 4096.0f;
+	modelTrace_t mt;
+	if ( !world->Trace( mt, start, end, 0.0f, false, true, false ) || mt.material == NULL ) {
+		common->Printf( "rtEmissiveProbe: nothing hit within 4096 units\n" );
+		return;
+	}
+	const idMaterial *mat = mt.material;
+	const float *entityParms = NULL;
+	int entityIndex = -1;
+	const idRenderEntityLocal *def = NULL;
+	if ( mt.entity != NULL ) {
+		for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
+			if ( world->entityDefs[i] != NULL && &world->entityDefs[i]->parms == mt.entity ) { entityIndex = i; def = world->entityDefs[i]; break; }
+		}
+	}
+	common->Printf( "rtEmissiveProbe: hit at %.0f %.0f %.0f (%.0f units)\n", mt.point.x, mt.point.y, mt.point.z, ( mt.point - start ).Length() );
+	if ( def != NULL ) {
+		const idRenderModel *model = def->parms.hModel;
+		entityParms = def->parms.shaderParms;
+		const char *dm = ( model == NULL ) ? "none" : ( model->IsDynamicModel() == DM_STATIC ? "static" : model->IsDynamicModel() == DM_CACHED ? "cached (skinned md5)" : "continuous (particle / beam / sprite)" );
+		common->Printf( "  entity %d: model '%s' (%s%s%s), skin '%s', customShader '%s', parms %.2f %.2f %.2f %.2f | parm7 %.1f\n",
+			entityIndex, model ? model->Name() : "-", dm, def->parms.callback ? ", CALLBACK-built" : "", model && model->IsStaticWorldModel() ? ", world" : "",
+			def->parms.customSkin ? def->parms.customSkin->GetName() : "-", def->parms.customShader ? def->parms.customShader->GetName() : "-",
+			def->parms.shaderParms[0], def->parms.shaderParms[1], def->parms.shaderParms[2], def->parms.shaderParms[3], def->parms.shaderParms[7] );
+		mat = R_RemapShaderBySkin( mat, def->parms.customSkin, def->parms.customShader );
+		common->Printf( "  gatherable as a static entity: %s\n", R_RtEmissiveEntityGatherable( def ) ? "yes" : "NO" );
+	} else {
+		common->Printf( "  worldspawn surface\n" );
+	}
+	common->Printf( "  material '%s': coverage %s, sort %.0f%s%s%s, %d stages\n", mat->GetName(),
+		mat->Coverage() == MC_OPAQUE ? "opaque" : mat->Coverage() == MC_PERFORATED ? "perforated" : "translucent", mat->GetSort(),
+		mat->HasGui() ? ", GUI" : "", mat->Deform() != DFRM_NONE ? ", deformed" : "", mat->ShouldCreateBackSides() ? ", two-sided" : "", mat->GetNumStages() );
+	for ( int i = 0; i < mat->GetNumStages(); i++ ) {
+		const shaderStage_t *st = mat->GetStage( i );
+		const idImage *img = st->texture.image;
+		const char *kind = st->lighting == SL_BUMP ? "bump" : st->lighting == SL_DIFFUSE ? "diffuse" : st->lighting == SL_SPECULAR ? "specular" : "ambient";
+		common->Printf( "    stage %d: %-8s %-28s image '%s'%s%s%s%s%s\n", i, kind, st->lighting == SL_AMBIENT ? R_RtBlendName( st->drawStateBits ) : "(interaction)",
+			img ? img->imgName.c_str() : "-",
+			img && img->rhiHandle == 0 ? " [NOT RESIDENT]" : "", img && img->type == TT_CUBIC ? " [cube]" : "",
+			st->texture.texgen != TG_EXPLICIT ? " [texgen]" : "", st->texture.cinematic ? " [cinematic]" : "", st->texture.dynamic != DI_STATIC ? " [render-to-texture]" : "" );
+	}
+	const char *why = "";
+	const shaderStage_t *stage = R_RtEmissiveStage( mat, &why, entityParms );
+	if ( stage != NULL ) {
+		int inTable = 0;
+		for ( int i = 0; i < s_rtEmissiveLabels.Num(); i++ ) { if ( s_rtEmissiveLabels[i].mat == mat ) { inTable += s_rtEmissiveLabels[i].numTris; } }
+		common->Printf( "  verdict: EMITTER (glow image '%s'); %d triangles of this material are in the table%s\n", stage->texture.image->imgName.c_str(), inTable,
+			inTable == 0 ? " - NONE: the surface's entity was not gathered (see 'gatherable' above) or the table predates it" : "" );
+	} else if ( why[0] != '\0' ) {
+		common->Printf( "  verdict: NOT an emitter - %s\n", why );
+	} else {
+		common->Printf( "  verdict: NOT an emitter - the material has no additive (blend add) stage: what glows is lit diffuse, not self-illumination\n" );
+	}
 }
 
 /*
