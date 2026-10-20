@@ -478,3 +478,10 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   housing at point-blank range (the near field of a radiance-64 patch) - indicators must stay below. OPEN: the ceramic
   floor under the info terminal (a GUI fill light, i.e. a placed light): grooves brighter than tile tops - DI bump
   handling, not emitters; needs the hybrid-tier comparison of the same spot before touching restir_di_apply.frag.
+- ONE ROW PER FIXTURE (2026-10-20, "those ceiling fixtures are still not shining anything on the floor"): the probe
+  showed the panel is WORLD material mcitya12_2 with 288 table triangles in one run = one row (centre mid-room, samples on
+  panels behind walls, matched power divided over all panels). R_RtEmissiveSplitWorldRuns: a world run is split into
+  spatially connected clusters (boxes touching within 2 units; 16-unit spatial hash + union-find), the run reordered so
+  each cluster is contiguous (the GPU samples a contiguous range), one label = one row per cluster. World runs only
+  (entity slices keep their gather order for the re-gather). Console: "N world material runs split into separate
+  fixtures: F emitters from R runs". Rows per view may now exceed the 511 - placed cap: the strongest at the eye win.

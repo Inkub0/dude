@@ -3402,6 +3402,97 @@ static int R_RtCmpEmissiveCensus( const void *pa, const void *pb ) {
 }
 
 // Gather + flux + CDF + device buffer for the current map; prints the census (E1a) once per build.
+// E2 v3 (user, 2026-10-20: "if many areas in the same surface are lit they should be computed as separate"): a WORLD
+// material run holds EVERY fixture of that material on the surface - a ceiling's light panels, clipped to their bright
+// rects by the gather, were ONE row: centre in the middle of the room, sample points on panels behind walls, the matched
+// power divided over all of them, the floor under any one panel got a sliver (mcitya12_2, 288 triangles). Split each
+// world run into spatially CONNECTED clusters of triangles (bounding boxes touching within 2 units, found through a
+// 16-unit spatial hash + union-find), reorder the run so every cluster is contiguous (the GPU samples a row by its
+// contiguous range) and give each cluster its own label = its own row, pairing and power. World runs only: an entity's
+// slice is rewritten in gather order by the mover / state re-gather, which a permutation would break (a prop is one
+// fixture anyway). Called right after the world gather, before the entities, the census and the upload.
+static int R_RtEmissiveSplitWorldRuns( int firstLabel ) {
+	struct key_t { unsigned long long key; int tri; };
+	struct cmp_t { static int Cmp( const key_t *a, const key_t *b ) { return ( a->key < b->key ) ? -1 : ( a->key > b->key ) ? 1 : 0; } };
+	static idList<key_t>  keys;
+	static idList<int>    parent, order;
+	static idList<idBounds> boxes;
+	static idList<rtEmissiveTriGPU_t> scratch;
+	const float cell = 16.0f, margin = 2.0f;
+	const int nOrig = s_rtEmissiveLabels.Num();
+	int fixtures = 0, runsSplit = 0;
+	auto find = [&]( int i ) { while ( parent[i] != i ) { parent[i] = parent[ parent[i] ]; i = parent[i]; } return i; };
+	auto cellKey = [&]( const idVec3 &c ) {
+		const long long ix = (long long)idMath::Floor( c.x / cell ) + 0x100000, iy = (long long)idMath::Floor( c.y / cell ) + 0x100000, iz = (long long)idMath::Floor( c.z / cell ) + 0x100000;
+		return ( (unsigned long long)ix << 42 ) | ( (unsigned long long)iy << 21 ) | (unsigned long long)iz;
+	};
+	for ( int li = firstLabel; li < nOrig; li++ ) {
+		rtEmissiveLabel_t &l = s_rtEmissiveLabels[li];
+		const int n = l.numTris, first = l.firstTri;
+		if ( n <= 1 ) { fixtures++; continue; }
+		boxes.SetNum( n, false ); parent.SetNum( n, false ); keys.SetNum( n, false );
+		for ( int t = 0; t < n; t++ ) {
+			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ first + t ];
+			idBounds &b = boxes[t];
+			b.Clear();
+			b.AddPoint( idVec3( e.p0[0], e.p0[1], e.p0[2] ) ); b.AddPoint( idVec3( e.p1[0], e.p1[1], e.p1[2] ) ); b.AddPoint( idVec3( e.p2[0], e.p2[1], e.p2[2] ) );
+			parent[t] = t;
+			keys[t].key = cellKey( b.GetCenter() ); keys[t].tri = t;
+		}
+		keys.Sort( cmp_t::Cmp );
+		// union every pair whose centroids share a hash cell or a neighbouring one and whose boxes touch (margin)
+		for ( int t = 0; t < n; t++ ) {
+			const idVec3 c = boxes[t].GetCenter();
+			idBounds bt = boxes[t]; bt.ExpandSelf( margin );
+			for ( int dz = -1; dz <= 1; dz++ ) for ( int dy = -1; dy <= 1; dy++ ) for ( int dx = -1; dx <= 1; dx++ ) {
+				const unsigned long long k = cellKey( c + idVec3( dx * cell, dy * cell, dz * cell ) );
+				// lower bound in the sorted keys
+				int lo = 0, hi = n;
+				while ( lo < hi ) { const int mid = ( lo + hi ) >> 1; if ( keys[mid].key < k ) { lo = mid + 1; } else { hi = mid; } }
+				for ( int j = lo; j < n && keys[j].key == k; j++ ) {
+					const int u = keys[j].tri;
+					if ( u == t ) { continue; }
+					if ( bt.IntersectsBounds( boxes[u] ) ) {
+						const int ra = find( t ), rb = find( u );
+						if ( ra != rb ) { parent[ra] = rb; }
+					}
+				}
+			}
+		}
+		// components -> contiguous order: label each root, then stable-group the triangles by root
+		order.SetNum( n, false );
+		int clusters = 0;
+		static idList<int> rootId, rootFirstSeen;
+		rootId.SetNum( n, false );
+		for ( int t = 0; t < n; t++ ) { rootId[t] = -1; }
+		for ( int t = 0; t < n; t++ ) { const int rt = find( t ); if ( rootId[rt] < 0 ) { rootId[rt] = clusters++; } }
+		if ( clusters <= 1 ) { fixtures++; continue; }
+		// counting sort by cluster id (deterministic, keeps the gather order inside a cluster)
+		static idList<int> start, fill;
+		start.SetNum( clusters + 1, false ); fill.SetNum( clusters, false );
+		for ( int k = 0; k <= clusters; k++ ) { start[k] = 0; }
+		for ( int t = 0; t < n; t++ ) { start[ rootId[ find( t ) ] + 1 ]++; }
+		for ( int k = 0; k < clusters; k++ ) { start[k + 1] += start[k]; fill[k] = start[k]; }
+		for ( int t = 0; t < n; t++ ) { order[ fill[ rootId[ find( t ) ] ]++ ] = t; }
+		scratch.SetNum( n, false );
+		for ( int t = 0; t < n; t++ ) { scratch[t] = s_rtEmissiveTris[ first + order[t] ]; }
+		for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[ first + t ] = scratch[t]; }
+		// the first cluster keeps this label, the others get their own (same material: the overlay name is unchanged)
+		const idMaterial *mat = l.mat;
+		l.numTris = start[1] - start[0];
+		for ( int k = 1; k < clusters; k++ ) {
+			rtEmissiveLabel_t nl; nl.mat = mat; nl.firstTri = first + start[k]; nl.numTris = start[k + 1] - start[k];
+			s_rtEmissiveLabels.Append( nl );
+		}
+		fixtures += clusters;
+		runsSplit++;
+	}
+	if ( runsSplit > 0 ) {
+		common->Printf( "r_rtEmissiveTable: %d world material runs split into separate fixtures: %d emitters from %d runs\n", runsSplit, fixtures, nOrig - firstLabel );
+	}
+	return fixtures;
+}
+
 static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	const int msStart = Sys_Milliseconds();
 	const float scale = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() );
@@ -3439,6 +3530,9 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			if ( s_rtEmissiveTris.Num() > before ) { rtEmissiveLabel_t l; l.mat = surf->shader; l.firstTri = before; l.numTris = s_rtEmissiveTris.Num() - before; s_rtEmissiveLabels.Append( l ); }
 		}
 	}
+	// E2 v3: one row per FIXTURE, not per material run - split the world runs into connected clusters (before the
+	// entities, whose slices must keep their gather order)
+	R_RtEmissiveSplitWorldRuns( 0 );
 	// static entities (func_statics, inline brush models, movers at their load pose): model space x the entity
 	// matrix, the SKIN-REMAPPED material (a fixture's on/off state is a skin), the entity's shaderParms (its _color)
 	s_rtEmissiveSeenModel.SetNum( world->entityDefs.Num(), false );
