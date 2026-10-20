@@ -9782,6 +9782,7 @@ void RB_RHI_RtEmissiveDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->GpuScopeEnd();
 	backEnd.pc.c_drawElements++;
 	RB_RHI_ForgetTexBinds();
+	R_RtEmissiveProjectLabels( viewDef );		// the material names the ImGui layer writes over the painted surfaces
 }
 
 /*

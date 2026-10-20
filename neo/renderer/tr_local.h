@@ -1124,6 +1124,12 @@ int  R_RtGatherPerforatedBoxes( const idBounds &b, idBounds *out, int maxOut );	
 // (one idDrawVert per table vertex + an index list) for r_rtEmissiveTableDebug.
 unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, float *meanFlux );
 bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );
+// E1d labels: the overlay pass projects one label per emissive SURFACE into window space (R_RtEmissiveProjectLabels,
+// RhiWorld.cpp calls it); sys_imgui.cpp draws them with ImGui every frame while the overlay is on.
+struct rtEmissiveScreenLabel_t { float x, y; char text[80]; };
+void R_RtEmissiveProjectLabels( const struct viewDef_s *viewDef );
+bool R_RtEmissiveLabelsWanted( void );
+int  R_RtEmissiveGetScreenLabels( const rtEmissiveScreenLabel_t **out );
 extern idCVar r_rtPerforatedShadows;		// alpha-tested grate/fence casters in the RT shadow rays
 extern idCVar r_rtAllLights;				// RT shadows for EVERY shadow-casting light (mode 4 inline ray), no shadow maps at all
 extern idCVar r_rtShadowBlur;				// screen-space blur on top of the hard RT shadows (sun / moving lights), docs/rtx-shadow-blur.md

@@ -2742,6 +2742,10 @@ struct rtEmissiveGroup_t { int entityIndex; const idRenderModel *model; int firs
 static idList<rtEmissiveGroup_t>	s_rtEmissiveGroups;
 static idList<idVec3>				s_rtEmissiveLocalVerts;		// 3 per entity-sourced triangle (model space)
 static int							s_rtEmissiveMovedGroups = 0;	// movers re-baked since the build (census / debugging)
+// E1d labels: one anchor per emissive SURFACE (a run of table triangles of one material), named in the overlay
+struct rtEmissiveLabel_t { const idMaterial *mat; int firstTri, numTris; };
+static idList<rtEmissiveLabel_t>		s_rtEmissiveLabels;
+static idList<rtEmissiveScreenLabel_t>	s_rtEmissiveScreenLabels;		// this frame's projected, culled labels
 
 // IEEE half, round-toward-zero (the same conversion RhiWorld.cpp's light buffer uses); packHalf2x16 layout
 static unsigned int R_RtF32toF16( float f ) {
@@ -3011,6 +3015,8 @@ static void R_RtEmissiveFree( void ) {
 	s_rtEmissiveTris.Clear();
 	s_rtEmissiveGroups.Clear();
 	s_rtEmissiveLocalVerts.Clear();
+	s_rtEmissiveLabels.Clear();
+	s_rtEmissiveScreenLabels.Clear();
 	s_rtEmissiveMovedGroups = 0;
 	s_rtEmissiveMap.Clear();
 }
@@ -3045,6 +3051,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			const int before = s_rtEmissiveTris.Num();
 			R_RtEmissiveAddSurface( surf->geometry, surf->shader, stage, NULL, NULL, 0u, scale, census, overflow );
 			worldTris += s_rtEmissiveTris.Num() - before;
+			if ( s_rtEmissiveTris.Num() > before ) { rtEmissiveLabel_t l; l.mat = surf->shader; l.firstTri = before; l.numTris = s_rtEmissiveTris.Num() - before; s_rtEmissiveLabels.Append( l ); }
 		}
 	}
 	// static entities (func_statics, inline brush models, movers at their load pose): model space x the entity
@@ -3078,6 +3085,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			const int before = s_rtEmissiveTris.Num();
 			R_RtEmissiveAddSurface( surf->geometry, mat, stage, modelMatrix, def->parms.shaderParms, RT_EMIT_FLAG_ENTITY, scale, census, overflow );
 			entityTris += s_rtEmissiveTris.Num() - before;
+			if ( s_rtEmissiveTris.Num() > before ) { rtEmissiveLabel_t l; l.mat = mat; l.firstTri = before; l.numTris = s_rtEmissiveTris.Num() - before; s_rtEmissiveLabels.Append( l ); }
 			any = any || ( s_rtEmissiveTris.Num() > before );
 		}
 		if ( any ) {
@@ -3334,6 +3342,97 @@ bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numInde
 	return true;
 }
 
+// E1d labels: project one label per emissive surface into WINDOW pixels for the ImGui layer (sys_imgui.cpp draws
+// them over the finished frame, outlined, while the overlay is on). Anchor = the mean of the surface's triangle
+// centroids read from the live table (so a mover's label follows it); culled when behind the camera, off screen,
+// back-facing (the first triangle's normal, unless the material is two-sided) or farther than 700 units; nearest 48
+// kept; a second label of the same material within 28 px is dropped. Runs once per frame from the overlay pass.
+void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
+	s_rtEmissiveScreenLabels.SetNum( 0, false );
+	if ( viewDef == NULL || s_rtEmissiveBuf == 0 || s_rtEmissiveLabels.Num() == 0 ) {
+		return;
+	}
+	struct cand_t { float x, y, dist; int label; };
+	static idList<cand_t> cands;
+	cands.SetNum( 0, false );
+	const idVec3 eye = viewDef->renderView.vieworg;
+	const float *mv = viewDef->worldSpace.modelViewMatrix, *pr = viewDef->projectionMatrix;
+	const float winW = (float)glConfig.winWidth, winH = (float)glConfig.winHeight;
+	for ( int i = 0; i < s_rtEmissiveLabels.Num(); i++ ) {
+		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[i];
+		idVec3 c( 0.0f, 0.0f, 0.0f );
+		for ( int t = 0; t < l.numTris; t++ ) {
+			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
+			c.x += e.p0[0] + e.p1[0] + e.p2[0];
+			c.y += e.p0[1] + e.p1[1] + e.p2[1];
+			c.z += e.p0[2] + e.p1[2] + e.p2[2];
+		}
+		c *= 1.0f / ( 3.0f * l.numTris );
+		const idVec3 toEye = eye - c;
+		const float dist = toEye.Length();
+		if ( dist > 700.0f ) {
+			continue;
+		}
+		const rtEmissiveTriGPU_t &e0 = s_rtEmissiveTris[ l.firstTri ];
+		const idVec3 p0( e0.p0[0], e0.p0[1], e0.p0[2] ), p1( e0.p1[0], e0.p1[1], e0.p1[2] ), p2( e0.p2[0], e0.p2[1], e0.p2[2] );
+		const idVec3 n = ( p1 - p0 ).Cross( p2 - p0 );
+		if ( !( e0.emit & RT_EMIT_FLAG_TWOSIDED ) && n * toEye < 0.0f ) {
+			continue;															// back-facing: the overlay cannot show it either
+		}
+		float view[4], clip[4];
+		for ( int k = 0; k < 4; k++ ) { view[k] = c[0] * mv[k] + c[1] * mv[k + 4] + c[2] * mv[k + 8] + mv[k + 12]; }
+		for ( int k = 0; k < 4; k++ ) { clip[k] = view[0] * pr[k] + view[1] * pr[k + 4] + view[2] * pr[k + 8] + view[3] * pr[k + 12]; }
+		if ( clip[3] <= 0.01f ) {
+			continue;															// behind the camera
+		}
+		const float nx = clip[0] / clip[3], ny = clip[1] / clip[3];
+		if ( nx < -1.0f || nx > 1.0f || ny < -1.0f || ny > 1.0f ) {
+			continue;
+		}
+		cand_t cd;
+		cd.x = ( nx * 0.5f + 0.5f ) * winW;
+		cd.y = ( 1.0f - ( ny * 0.5f + 0.5f ) ) * winH;
+		cd.dist = dist;
+		cd.label = i;
+		cands.Append( cd );
+	}
+	// nearest first (insertion sort; a view has tens of candidates)
+	for ( int i = 1; i < cands.Num(); i++ ) {
+		cand_t v = cands[i]; int j = i;
+		while ( j > 0 && cands[j - 1].dist > v.dist ) { cands[j] = cands[j - 1]; j--; }
+		cands[j] = v;
+	}
+	for ( int i = 0; i < cands.Num() && s_rtEmissiveScreenLabels.Num() < 48; i++ ) {
+		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[ cands[i].label ];
+		bool dup = false;
+		for ( int k = 0; k < i && !dup; k++ ) {
+			if ( s_rtEmissiveLabels[ cands[k].label ].mat == l.mat
+					&& idMath::Fabs( cands[k].x - cands[i].x ) < 28.0f && idMath::Fabs( cands[k].y - cands[i].y ) < 28.0f ) {
+				dup = true;
+			}
+		}
+		if ( dup ) {
+			continue;
+		}
+		rtEmissiveScreenLabel_t &sl = s_rtEmissiveScreenLabels.Alloc();
+		sl.x = cands[i].x;
+		sl.y = cands[i].y;
+		const char *name = l.mat->GetName();
+		if ( !idStr::Cmpn( name, "textures/", 9 ) ) { name += 9; }
+		else if ( !idStr::Cmpn( name, "models/mapobjects/", 18 ) ) { name += 18; }
+		idStr::Copynz( sl.text, name, sizeof( sl.text ) );
+	}
+}
+
+bool R_RtEmissiveLabelsWanted( void ) {
+	return r_rtEmissiveTableDebug.GetInteger() > 0 && s_rtEmissiveBuf != 0 && s_rtEmissiveLabels.Num() > 0;
+}
+
+int R_RtEmissiveGetScreenLabels( const rtEmissiveScreenLabel_t **out ) {
+	*out = s_rtEmissiveScreenLabels.Ptr();
+	return s_rtEmissiveScreenLabels.Num();
+}
+
 /*
 ====================
 R_RtResetSceneState
@@ -3371,7 +3470,7 @@ void R_RtResetSceneState( void ) {
 	s_rtWorldFailedMap = "";
 	// E1 emissive table: handles are stale too; the CPU copy goes with them so the next RT frame rebuilds
 	s_rtEmissiveBuf = 0; s_rtEmissiveAddr = 0; s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0; s_rtEmissiveDbgIndexes = 0;
-	s_rtEmissiveTris.Clear(); s_rtEmissiveGroups.Clear(); s_rtEmissiveLocalVerts.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
+	s_rtEmissiveTris.Clear(); s_rtEmissiveGroups.Clear(); s_rtEmissiveLocalVerts.Clear(); s_rtEmissiveLabels.Clear(); s_rtEmissiveScreenLabels.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
 }
 
 // DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit
