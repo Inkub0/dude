@@ -464,3 +464,9 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   dimmest, and a dropped light is a cell-shaped step - the L4 follow-up never landed. RTXDI's answer, now built:
   r_rtLightGridJitter (default 1) jitters every pixel's (and bounce hit's) lookup by up to half a cell, so the steps
   become per-pixel noise NRD averages. r_rtLightGridSlots 16 is the other lever for emissive mode.
+- SLOTS ARE THE LIMIT (2026-10-20, user: "Rank by Light Falloff makes those lights visible; lowering candidates/cell makes
+  them go away"): the earlier grey grid-debug shot misled me. r_rtLightGridRankLinear stays on. LG_MAX_SLOTS 16 -> 32;
+  new r_rtEmissiveGridSlots (16, 1..32) = the grid's slots while emissive mode is on (the larger of it and
+  r_rtLightGridSlots, which stays 9 for normal mode); in ComputeGfxCfgSignature. Why more candidates in emissive mode:
+  two rows per multi-surface fixture, uncovered emitters at r_rtEmissiveReachDefault (300), a row's cull = surface
+  bound + reach. r_rtReStirDIDebug 8 (chosen light per pixel) exists now for the next such question.

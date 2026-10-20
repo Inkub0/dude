@@ -9733,7 +9733,10 @@ static bool RB_RHI_LightGridBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 		g.wasEnabled = false;
 		return false;
 	}
-	const int slots    = idMath::ClampInt( 1, 16, r_rtLightGridSlots.GetInteger() );
+	// E2 v3: emissive mode needs more candidates per cell than the placed lights did (two rows per fixture, uncovered
+	// emitters at the default reach): the larger of the two cvars; both are in ComputeGfxCfgSignature (a re-allocation)
+	int slots = idMath::ClampInt( 1, 32, r_rtLightGridSlots.GetInteger() );
+	if ( r_rtEmissiveLighting.GetBool() ) { slots = Max( slots, idMath::ClampInt( 1, 32, r_rtEmissiveGridSlots.GetInteger() ) ); }
 	const int res      = idMath::ClampInt( 8, 64, r_rtLightGridRes.GetInteger() );
 	const int cascades = idMath::ClampInt( 1, 4, r_rtLightGridCascades.GetInteger() );
 	const int sizeKey  = slots | ( res << 8 ) | ( cascades << 16 );		// identity of the buffer size (all in the gfx-cfg signature)

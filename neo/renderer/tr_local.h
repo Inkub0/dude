@@ -1092,7 +1092,8 @@ extern idCVar r_rtEmissiveTableDebug;		// RT emissive table debug overlay: 1 per
 extern idCVar r_rtEmissiveScale;
 extern idCVar r_rtEmissiveLighting;		// EMISSIVE MODE master switch (D6): emitters light the scene (E2); implies the table, hides flares
 extern idCVar r_rtEmissiveIntensity;		// emissive mode: radiance multiplier of every emitter
-extern idCVar r_rtEmissiveMaxRows;		// emissive mode: emitter rows (surfaces) a view's scene-light buffer may carry
+extern idCVar r_rtEmissiveMaxRows;
+extern idCVar r_rtEmissiveGridSlots;		// emissive mode: light-grid candidates per cell (the larger of this and r_rtLightGridSlots)		// emissive mode: emitter rows (surfaces) a view's scene-light buffer may carry
 extern idCVar r_rtEmissivePowerMatch;
 extern idCVar r_rtEmissiveFixtureMinArea;	// emissive mode: the EFFECTIVE emitting area (lit area x brightness) below which a surface is an indicator (LED), never a fixture
 extern idCVar r_rtEmissiveFixtureFullArea;	// emissive mode: the effective emitting area at which an emitter inherits its light's FULL power (ramps from the min)

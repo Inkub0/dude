@@ -13,7 +13,7 @@
 #include "rt_light_eval.glsl"
 #include "rtgi_light_grid.glsl"
 
-#define LG_MAX_SLOTS 16u			// fixed reservoir array size; r_rtLightGridSlots is clamped to this
+#define LG_MAX_SLOTS 32u			// fixed reservoir array size; r_rtLightGridSlots / r_rtEmissiveGridSlots are clamped to this
 
 layout( local_size_x = 64 ) in;
 

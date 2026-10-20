@@ -3006,7 +3006,7 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	mixI( r_rtgiCacheSlotsLog2 );
 	// RT light grid (docs/rtx-light-grid.md): slots / res / cascades change the grid buffer size -> re-allocate
 	mixI( r_rtLightGridSlots ); mixI( r_rtLightGridRes ); mixI( r_rtLightGridCascades );
-	mixB( r_rtEmissiveLighting ); mixB( r_rtEmissiveBounce ); mixB( r_rtEmissiveTable );		// E2: the emitter rows enter / leave the scene-light buffer and the grid with these (idle the device on the flip)
+	mixB( r_rtEmissiveLighting ); mixB( r_rtEmissiveBounce ); mixB( r_rtEmissiveTable ); mixI( r_rtEmissiveGridSlots );		// E2: the emitter rows enter / leave the scene-light buffer and the grid with these (idle the device on the flip)
 	return h;
 }
 

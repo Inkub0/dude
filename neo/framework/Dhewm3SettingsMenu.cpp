@@ -4949,6 +4949,11 @@ static void DrawDbgGroup_ExperimentalLighting()
 
 	// ===== Sampling =====
 	ImGui::SeparatorText( "Sampling" );
+	CvarSliderI( "Grid Candidates / Cell (emissive)", r_rtEmissiveGridSlots, 1, 32, "Light-grid candidates per cell while the "
+		"emitters light the scene (the larger of this and the grid's own count). Emissive mode puts more lights in range of a "
+		"cell than the placed lights did - a fixture with two emitting surfaces is two rows, an uncovered emitter reaches the "
+		"default reach - and a cell that cannot hold them drops the dimmest: a fixture's own room goes dark in cell-shaped "
+		"patches. More = dearer gather. A change re-allocates. (r_rtEmissiveGridSlots)" );
 	{
 		int rows = idMath::ClampInt( 0, 511, r_rtEmissiveMaxRows.GetInteger() );
 		ImGui::SetNextItemWidth( 240.0f );
@@ -5090,9 +5095,10 @@ static void DrawDbgGroup_ReStirDI()
 		"tiny extra candidate noise. On by default at the Path Tracing tier. (r_rtLightGrid)" );
 	if ( r_rtLightGrid.GetBool() ) {
 		ImGui::BeginDisabled( !rtCapable );
-		CvarSliderI( "  Candidates / Cell", r_rtLightGridSlots, 1, 16, "Lights stored per cell. More = less candidate "
+		CvarSliderI( "  Candidates / Cell", r_rtLightGridSlots, 1, 32, "Lights stored per cell. More = less candidate "
 			"noise, closer to exhaustive (a cell with more lights that matter than slots drops the dimmest), but a bigger grid "
-			"buffer and a dearer gather. Default 9; emissive mode is happier at 16. A change re-allocates. (r_rtLightGridSlots)" );
+			"buffer and a dearer gather. Default 9; emissive mode uses its own count (Emissive Lights group). A change "
+			"re-allocates. (r_rtLightGridSlots)" );
 		CvarCheckbox( "  Rank by Light Falloff", r_rtLightGridRankLinear, "Rank a cell's candidates by what a light actually "
 			"delivers there (colour x (1 - distance / radius), a Doom light's own falloff) instead of the inverse-square proxy, "
 			"which overrates a light near its rim and lets big ambience lights crowd out a room's own fixtures. "
