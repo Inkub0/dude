@@ -454,3 +454,8 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   frame, so every pixel of a cell shared the same lucky pick with weight 1/q - bright cell-shaped blocks that changed
   every frame. Dead end; removed. The grid is back to deterministic top-N (per-slot float = imp). What stands against
   overflow: the cull at one reach. If blocks persist, read r_rtLightGridDebug 2 (white = full cells) before anything else.
+- ROW REACH = THE LIGHT'S CULL RADIUS (2026-10-20): the inherited reach was lightRadius.Length() = the box DIAGONAL
+  (173 for a 100-unit light) where the light itself culls on its frustum sphere (~87): a row claimed 8 x the volume of
+  its light, the cells overflowed and rows were evicted at random cells (three identical alcoves: lit / half / dark,
+  all three red in mode 5). Now reach = the frustum bounds' radius (a spot's extent, ~0.87 x a point light's half-extent).
+  The bounce-only quota is 0 in emissive mode (pc.quotaB). NEXT if blocks persist: r_rtLightGridDebug 2 (white = full).

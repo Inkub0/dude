@@ -25,6 +25,7 @@ layout( push_constant ) uniform PC {
 	float cellBase;					// cascade-0 cell size (units)
 	float camX, camY, camZ;			// camera position (cascade snapping)
 	float parallelFlux;				// flux weight for parallel (sun) lights, which have no 1/d^2 term
+	uint  quotaB;					// slots reserved for BOUNCEONLY emitter rows (normal mode + r_rtEmissiveBounce), 0 in emissive mode
 } pc;
 
 void main() {
@@ -53,7 +54,7 @@ void main() {
 	// shade skips it - so it must never DISPLACE a placed light: it gets its own small quota of the slots (2 of 16), ranked
 	// among its kind. Ranking the 300 emitter rows of a map against the placed lights for the same slots emptied whole
 	// cells of their placed lights and the DI changed from cell to cell: the blocky shadows of 2026-10-20.
-	uint  quotaB  = ( slots >= 8u ) ? 2u : ( ( slots >= 4u ) ? 1u : 0u );
+	uint  quotaB  = min( pc.quotaB, ( slots >= 8u ) ? 2u : ( ( slots >= 4u ) ? 1u : 0u ) );
 	uint  slotsL  = slots - quotaB;	// the placed lights' (and, in emissive mode, the emitter lights') share
 	uint  chosenB[ 2 ];
 	float chosenImpB[ 2 ];

@@ -3931,9 +3931,12 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 				const idVec3 a( e.p0[0], e.p0[1], e.p0[2] ), b( e.p1[0], e.p1[1], e.p1[2] ), cc( e.p2[0], e.p2[1], e.p2[2] );
 				const float originReach = Max( 64.0f, 0.15f * ld->parms.lightRadius.Length() );
 				if ( R_RtPointTriangleDistance( ld->globalLightOrigin, a, b, cc ) < originReach ) { hit = true; }
-				// the authored reach of the light this emitter replaces: a point light's radius, a spot's extent (the
-				// frustum bounds' half-diagonal); the LARGEST of the lights the triangle sits in
-				float radius = ld->parms.pointLight ? ld->parms.lightRadius.Length() : ( lb != NULL ? 0.5f * ( lb->operator[]( 1 ) - lb->operator[]( 0 ) ).Length() : 0.0f );
+				// the authored reach of the light this emitter replaces = the light's own CULL radius (its frustum bounding
+				// sphere: ~0.87 x the half-extent of a point light's box, a spot's extent), the LARGEST of the lights the
+				// triangle sits in. NOT lightRadius.Length() - that is the box DIAGONAL, twice the half-extent: a row claiming
+				// it flooded eight times the volume of its light with candidates and the grid cells overflowed - rows were
+				// evicted at random cells and alcoves lost their light (2026-10-20)
+				float radius = ( lb != NULL ) ? lb->GetRadius( lb->GetCenter() ) : ( ld->parms.pointLight ? Max( ld->parms.lightRadius.x, Max( ld->parms.lightRadius.y, ld->parms.lightRadius.z ) ) : 0.0f );
 				float cur; memcpy( &cur, &e.reach, sizeof( cur ) );
 				if ( radius > cur ) {
 					memcpy( &e.reach, &radius, sizeof( radius ) );
