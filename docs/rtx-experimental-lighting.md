@@ -98,6 +98,9 @@ nee 0.1`). The cache (C) is the prerequisite of both, as the paper states.
   (the normal tier's gather gets cheaper as a side effect).
 - **E4 sky / sun.** Sky surfaces into the TLAS under mask 0x04; hit = environment radiance; parallel lights
   unchanged.
+- **Cookies (2026-10-20):** the grille patterns under fixtures are the placed lights' projection textures, not
+  shadows; a dropped fixtured light takes its cookie with it, and the emitter's visibility ray (E2) must be
+  grate-aware (the perforated-caster walk of the RT shadow rays) so the real grille shadows instead.
 - **E5 the switch.** `r_xlLighting` (+ `r_xlKeepGameplayLights`, `r_xlEmissiveScale`, `r_xlSkyScale`):
   `RB_RHI_GatherSceneLights` drops the map lights (the Stage D membership already suppresses their forward draws);
   the kept lights are untouched (D3). ImGui group "Experimental Lighting" in the Debugging tab (user-named ImGui),

@@ -399,3 +399,17 @@ whose model is a plain static model rebuilt every frame by `renderEntity.callbac
 trail, a burning corpse's embers) were gathered as static emitters and, with no state or matrix change, never left.
 `R_RtEmissiveEntityGatherable`: resident DM_STATIC, not the world model, not the default model, and NO callback -
 shared by the build, the new-entity scan and the refresh (a tracked entity that acquires a callback counts as gone).
+
+## The "fake grate shadows" (user, Control 1, 2026-10-20) - two E2/E5 requirements
+
+The grille pattern on the floor under a door light is NOT a shadow: it is the placed light's PROJECTION TEXTURE
+(the light entity's `texture`, a painted grid stamped through the light's frustum from the light origin, which sits
+inside the fixture box - hence it never lines up with the fixture's real grille or with the emitter). Consequences:
+
+- **E5:** a FIXTURED light is dropped as a whole, cookie included - nothing to strip separately. A kept AMBIENCE
+  light keeps its cookie (D3: kept lights untouched). Where a cookie encoded a grille that has no real mesh, the
+  pattern is simply gone (content; accepted).
+- **E2 (requirement):** the emitter's visibility ray must take the GRATE-AWARE walk the RT shadow rays take
+  (rt_perforated.glsl: the RT_MASK_PERFORATED alpha-tested caster instances of r_rtPerforatedShadows), not the plain
+  solid-only trace, or an emitter behind a noShadows grate lights straight through it and the real grille throws no
+  shadow where the cookie used to fake one. Same for the GI bounce's emitter draw.
